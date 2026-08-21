@@ -1,0 +1,17 @@
+[package]
+name = "adamas-lsp"
+description = "Adamas language server (stub until phase 3)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "adamas-lsp"
+path = "src/main.rs"
+bench = false

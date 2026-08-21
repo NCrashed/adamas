@@ -1,0 +1,30 @@
+[package]
+name = "adamas-cli"
+description = "Adamas compiler driver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+# bench = false — по той же причине, что в adamas-core.
+[[bin]]
+name = "adamas"
+path = "src/main.rs"
+bench = false
+
+[[bench]]
+name = "startup"
+harness = false
+
+[dependencies]
+adamas-core.workspace = true
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+criterion = "0.7"

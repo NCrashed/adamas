@@ -1,0 +1,16 @@
+---
+source: crates/adamas-core/tests/source_location.rs
+expression: "render(&file, &spans)"
+---
+file: sample.adamas (74 bytes, 5 lines)
+[0..2] 1:1 -> 1:3 Some("id")
+[5..17] 1:6 -> 1:18 Some("(0 a : Type)")
+[28..36] 2:1 -> 2:9 Some("id x = x")
+[38..53] 4:1 -> 4:9 Some("λ-строка")
+[38..39] 4:1 -> ? None
+[74..74] 5:1 -> 5:1 Some("")
+line 1: Some("id : (0 a : Type) -> a -> a")
+line 2: Some("id x = x")
+line 3: Some("")
+line 4: Some("λ-строка с юникодом")
+line 5: Some("")

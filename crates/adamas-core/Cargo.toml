@@ -1,0 +1,21 @@
+[package]
+name = "adamas-core"
+description = "Adamas core language: type checker, elaborator, core terms"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+# Иначе `cargo bench` поднимает ещё и libtest-харнесс, который не понимает
+# criterion-флагов.
+[lib]
+bench = false
+
+[dev-dependencies]
+insta = "1"
+proptest = "1"

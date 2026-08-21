@@ -1,0 +1,5 @@
+[toolchain]
+# Единственный источник истины по версии Rust: его читают и flake.nix, и CI.
+channel = "1.98.0"
+profile = "minimal"
+components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]

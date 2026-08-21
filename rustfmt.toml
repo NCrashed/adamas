@@ -1,0 +1,4 @@
+# Только stable-опции: тулчейн зафиксирован на stable (rust-toolchain.toml),
+# unstable rustfmt-настройки там недоступны.
+max_width = 100
+newline_style = "Unix"

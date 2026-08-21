@@ -1,0 +1,17 @@
+# Rust
+/target
+**/*.rs.bk
+
+# cargo-insta: неподтверждённые снапшоты не коммитятся
+**/*.snap.new
+**/*.pending-snap
+
+# Nix
+/result
+/result-*
+.direnv/
+
+# Editors
+.idea/
+.vscode/
+*.swp

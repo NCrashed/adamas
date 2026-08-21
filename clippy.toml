@@ -1,0 +1,7 @@
+# Должен совпадать с workspace.package.rust-version в Cargo.toml.
+msrv = "1.85"
+
+# unwrap/expect/panic запрещены на путях компилятора, но в тестах это шум.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

@@ -1,0 +1,60 @@
+# Adamas
+
+Research-level прототип функционального языка программирования: dependent types
+и линейность в одной системе (Quantitative Type Theory), algebraic effects с
+handler'ами, Perceus reference counting с FBIP, регионы памяти и SIMD как
+first-class конструкции.
+
+Цель - показать, что systems-friendly семантика достижима без «уходов в C»:
+один язык для прикладного функционального кода, системного программирования и
+type-heavy research.
+
+**Стадия: Фаза 0.** Дизайн зафиксирован, инфраструктура собрана, компилятора
+ещё нет. См. [roadmap](adamas-design.md#9-roadmap) - 10 фаз, ~3-5 лет до
+research-grade прототипа.
+
+## Документы
+
+| Документ | Что внутри |
+|---|---|
+| [`adamas-design.md`](adamas-design.md) | Design document - единственный источник истины по дизайн-решениям, вместе со списком открытых вопросов и decision log. |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Как собрать, как прогнать проверки, какие правила у кода и коммитов. |
+| [`docs/reading-notes/`](docs/reading-notes/) | Конспекты ключевых статей (QTT, Perceus, effect handlers). |
+| [`docs/examples/`](docs/examples/) | Примеры кода на Adamas. |
+
+Быстрый вход в дизайн: §1-2 (видение и принципы) -> §3 (семантическое ядро) ->
+§4.1 (синтаксис). Спорные микровопросы - §10.
+
+## Что уже есть
+
+```
+crates/adamas-core     позиции в исходнике; QTT-ядро - Фаза 1
+crates/adamas-cli      драйвер `adamas`; работает только каркас `adamas check`
+crates/adamas-lsp      заглушка; language server - Фаза 3
+```
+
+## Сборка
+
+С Nix (тулчейн и dev-инструменты приезжают сами):
+
+```sh
+nix develop
+cargo test --workspace --all-targets
+```
+
+Без Nix понадобится rustup - версия и компоненты берутся из
+`rust-toolchain.toml` автоматически:
+
+```sh
+cargo test --workspace --all-targets
+```
+
+## Лицензия
+
+Двойная лицензия, на выбор:
+
+- MIT ([`LICENSE-MIT`](LICENSE-MIT))
+- Apache License 2.0 ([`LICENSE-APACHE`](LICENSE-APACHE))
+
+Если явно не указано иное, любой вклад, сознательно отправленный в проект,
+лицензируется на тех же условиях, без дополнительных ограничений.

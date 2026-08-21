@@ -28,10 +28,16 @@ research-grade прототипа.
 ## Что уже есть
 
 ```
-crates/adamas-core     позиции в исходнике; QTT-ядро - Фаза 1
-crates/adamas-cli      драйвер `adamas`; работает только каркас `adamas check`
-crates/adamas-lsp      заглушка; language server - Фаза 3
+crates/adamas-core        позиции в исходнике; QTT-ядро - Фаза 1
+crates/adamas-cli         драйвер `adamas`; работает только каркас `adamas check`
+crates/adamas-lsp         заглушка; language server - Фаза 3
+crates/adamas-warmup-stlc учебный STLC+HM Фазы 0: лексер, парсер,
+                          bidirectional-вывод типов, интерпретатор
 ```
+
+Warm-up - разминка перед Фазой 1, а не часть будущего компилятора: ядро от
+него не зависит. Что из него вынесено - в
+[`docs/warmup-retrospective.md`](docs/warmup-retrospective.md).
 
 ## Сборка
 

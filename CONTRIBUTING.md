@@ -47,10 +47,12 @@ adamas-design.md              source of truth по дизайну
 crates/adamas-core/           ядро: core language, elaborator, type checker
 crates/adamas-cli/            драйвер `adamas`
 crates/adamas-lsp/            LSP-сервер (заглушка до Фазы 3)
+crates/adamas-warmup-stlc/    учебный STLC+HM Фазы 0; ядро от него не зависит
 docs/reading-notes/           конспекты статей
 docs/examples/                примеры кода на Adamas
+docs/warmup-retrospective.md  что вынесено из warm-up'а
 tests/golden/                 языковые фикстуры, общие для нескольких крейтов
-.github/workflows/            CI
+.github/workflows/            CI и бенчмарки
 ```
 
 Rust-интеграционные тесты живут в `crates/<crate>/tests/`, бенчмарки — в
@@ -81,11 +83,12 @@ unit-тестам: последние легко начинают тестиро
 cargo bench --workspace
 ```
 
-CI проверяет только то, что бенчмарки собираются и проходят один прогон
-(`cargo bench -- --test`). Измерений на раннере нет: разброс GitHub Actions на
-микро-замерах перекрывает всё, что можно было бы поймать. Публикация истории
-поднимается вместе с первым бенчмарком, который меряет компилятор, а не
-fork/exec, — то есть с STLC-warm-up'ом (§9).
+CI проверяет только собираемость и один прогон (`cargo bench -- --test`).
+Измерений и публикации истории нет: единственные in-process замеры сегодня — в
+`adamas-warmup-stlc`, а он удаляется в конце Фазы 0, и накопленная по нему
+серия осиротеет вместе с ним. Публикация поднимается в Фазе 1, под первый
+бенчмарк ядра. Замеры warm-up'а зафиксированы в `docs/warmup-retrospective.md`
+как разовые числа.
 
 ## Стиль кода
 

@@ -1,0 +1,51 @@
+---
+source: crates/adamas-warmup-stlc/tests/diagnostics.rs
+expression: report
+---
+== лексер ==
+broken.stlc:1:3: error: неизвестный символ '@'
+  1 @ 2
+    ^
+
+== парсер: нет `in` ==
+broken.stlc:1:10: error: ожидалось: `in`; найдено: конец файла
+  let x = 1
+           ^
+
+== парсер: сравнение неассоциативно ==
+broken.stlc:1:7: error: ожидалось: конец файла; найдено: `<`
+  1 < 2 < 3
+        ^
+
+== несвязанная переменная ==
+broken.stlc:1:7: error: переменная `y` не определена
+  \x -> y
+        ^
+
+== условие не Bool ==
+broken.stlc:1:4: error: несовпадение типов: ожидался Bool, получен Int
+  if 1 then 2 else 3
+     ^
+
+== ветки расходятся ==
+broken.stlc:1:21: error: несовпадение типов: ожидался Int, получен Bool
+  if true then 1 else false
+                      ^^^^^
+
+== аргумент не того типа ==
+broken.stlc:1:26: error: несовпадение типов: ожидался Int, получен Bool
+  let f = \n -> n + 1 in f true
+                           ^^^^
+
+== occurs check ==
+broken.stlc:1:9: error: бесконечный тип: a встречается в a -> b
+  \x -> x x
+          ^
+
+== применение не-функции ==
+broken.stlc:1:1: error: несовпадение типов: ожидался a -> b, получен Int
+  1 2
+  ^
+
+== расходимость ==
+error: превышен лимит шагов вычисления (1000000)

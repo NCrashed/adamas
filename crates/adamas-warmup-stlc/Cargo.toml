@@ -1,0 +1,31 @@
+[package]
+name = "adamas-warmup-stlc"
+description = "Phase 0 warm-up: STLC + Hindley-Milner, bidirectional with metavariables"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Иначе `cargo bench` поднимает ещё и libtest-харнесс, который не понимает
+# criterion-флагов.
+[lib]
+bench = false
+
+[[bench]]
+name = "pipeline"
+harness = false
+
+[dependencies]
+adamas-core.workspace = true
+thiserror = "2"
+
+[dev-dependencies]
+criterion = "0.7"
+insta = "1"
+proptest = "1"

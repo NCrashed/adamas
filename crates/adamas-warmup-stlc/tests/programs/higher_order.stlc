@@ -1,0 +1,7 @@
+-- Функции высшего порядка. Ни одной аннотации: типы `compose` и `twice`
+-- выводятся целиком, включая то, что `twice` требует эндоморфизм.
+
+let compose = \f -> \g -> \x -> f (g x) in
+let twice = \f -> compose f f in
+let inc = \n -> n + 1 in
+twice (twice inc) 0

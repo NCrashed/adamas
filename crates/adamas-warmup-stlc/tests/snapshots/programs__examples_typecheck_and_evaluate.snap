@@ -1,0 +1,23 @@
+---
+source: crates/adamas-warmup-stlc/tests/programs.rs
+expression: report
+---
+annotations.stlc
+  тип:      Bool
+  значение: true
+
+church.stlc
+  тип:      (a -> a) -> a -> a
+  значение: <fun>
+
+factorial.stlc
+  тип:      Int
+  значение: 3628800
+
+higher_order.stlc
+  тип:      Int
+  значение: 4
+
+polymorphism.stlc
+  тип:      Int
+  значение: 1

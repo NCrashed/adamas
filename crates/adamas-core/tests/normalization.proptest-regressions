@@ -1,0 +1,14 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 8eeba53596e7499a6321758c5109457ca317c7868832eef0ca4e5d865c53a4c1 # shrinks to term = Lam(Zero, "x", Lam(Zero, "x", Universe(Max(Zero, Zero))))
+cc b5cbbd30ccc8f67dc554708ddb94a570acdd053b7a4b0062e23b3e6f97d9fabd # shrinks to a = Lam(One, "x", Var(Index(0))), b = Lam(Zero, "x", Var(Index(0)))
+cc fa64e1d96a8d09ed841bac70eaf01637474dcf108be220ff1f82bdcde9b06d56 # shrinks to a = Succ(Max(Succ(Succ(Zero)), Zero)), b = Max(Succ(Succ(Succ(Zero))), Var(LevelVar(0)))
+cc 669032a00a3e03d04ac4b37b49d0d326fe7dc740d86057476ffe2992da60bb4d # shrinks to a = IMax(Succ(Zero), Max(Max(Var(LevelVar(2)), Var(LevelVar(1))), Zero)), b = Max(Max(Var(LevelVar(1)), Var(LevelVar(2))), Max(Zero, Zero))
+cc 99ab95e61ff59d5657fbf9fdc8e62e840c28414f6ae91c950589e2032f965005 # shrinks to a = IMax(Max(Var(LevelVar(0)), Var(LevelVar(0))), Var(LevelVar(2))), b = IMax(Max(Zero, Max(Zero, Var(LevelVar(1)))), Max(Zero, Var(LevelVar(2))))
+cc 0fe92a366bfabbff16607c301808df708c98f51d49ee8e75a5c53ca10a4538f3 # shrinks to a = Max(Max(Succ(Succ(Zero)), IMax(Succ(Succ(Zero)), Var(LevelVar(0)))), IMax(Zero, Var(LevelVar(2)))), b = Max(Max(Succ(Succ(Zero)), Var(LevelVar(2))), Var(LevelVar(0)))
+cc b4e14e1784ffa38aa7c0ba061d831c5813283b6954f4584846e9d19e4a77fe25 # shrinks to a = IMax(Zero, Succ(Succ(Zero))), b = Max(Zero, IMax(Succ(Succ(Zero)), Var(LevelVar(2)))), c = Succ(IMax(Succ(Succ(Zero)), Var(LevelVar(2))))
+cc 65c80c95f91193ef290a7b3bf10633976edd5ace18fa7f16b5f754a54c9fbe6a # shrinks to a = Max(IMax(Var(LevelVar(0)), Var(LevelVar(2))), IMax(Var(LevelVar(2)), Max(Zero, Var(LevelVar(0))))), b = IMax(Zero, Max(Var(LevelVar(2)), Var(LevelVar(0))))

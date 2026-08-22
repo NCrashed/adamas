@@ -16,6 +16,11 @@ workspace = true
 [lib]
 bench = false
 
+[[bench]]
+name = "nbe"
+harness = false
+
 [dev-dependencies]
+criterion = "0.7"
 insta = "1"
 proptest = "1"

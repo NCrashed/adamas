@@ -16,6 +16,7 @@ dependencies = [
 name = "adamas-core"
 version = "0.0.0"
 dependencies = [
+ "criterion",
  "insta",
  "proptest",
 ]

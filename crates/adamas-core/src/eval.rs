@@ -23,7 +23,7 @@
 use std::rc::Rc;
 
 use crate::term::Term;
-use crate::value::{Closure, Env, Lvl, Value};
+use crate::value::{Closure, Env, Head, Lvl, Value};
 
 impl Closure {
     /// Применяет замыкание к аргументу.
@@ -73,6 +73,12 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
 
         Term::App(callee, argument) => apply(&eval(env, callee), eval(env, argument)),
 
+        // Определение не разворачивается здесь: оно остаётся застрявшим, а
+        // δ-редукцию делает проверка конвертируемости и только когда это
+        // действительно нужно (`crate::conv`). Иначе нормальные формы и
+        // сообщения об ошибках раздувались бы телами всех определений.
+        Term::Const(name, levels) => Value::constant(Rc::clone(name), levels),
+
         // Тип связывания при вычислении не нужен: он влияет на проверку, а не
         // на значение.
         Term::Let(_, _, _, value, body) => {
@@ -96,7 +102,7 @@ pub fn apply(callee: &Rc<Value>, argument: Rc<Value>) -> Rc<Value> {
         Value::Neutral(head, spine) => {
             let mut spine = spine.clone();
             spine.push(argument);
-            Rc::new(Value::Neutral(*head, spine))
+            Rc::new(Value::Neutral(head.clone(), spine))
         }
         other => unreachable!("применение не-функции: {other}"),
     }
@@ -118,11 +124,15 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
         // `max u 0` не отличался от `u`.
         Value::Universe(level) => Term::Universe(level.normalize()),
 
-        Value::Neutral(head, spine) => spine
-            .iter()
-            .fold(Term::Var(head.to_index(size)), |callee, argument| {
+        Value::Neutral(head, spine) => {
+            let base = match head {
+                Head::Local(level) => Term::Var(level.to_index(size)),
+                Head::Global(name, levels) => Term::Const(Rc::clone(name), Rc::clone(levels)),
+            };
+            spine.iter().fold(base, |callee, argument| {
                 Term::App(Rc::new(callee), Rc::new(quote(size, argument)))
-            }),
+            })
+        }
 
         Value::Lam(mult, name, closure) => Term::Lam(
             *mult,

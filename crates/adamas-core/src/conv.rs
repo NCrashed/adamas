@@ -4,11 +4,23 @@
 //! развернуло `let`, так что здесь остаётся сопоставление форм плюс η.
 //!
 //! Кумулятивности нет: `Type 0` и `Type 1` неконвертируемы (§10 вопрос 1).
+//!
+//! # δ-редукция откладывается до последнего
+//!
+//! Определения приходят сюда неразвёрнутыми ([`crate::eval`] их не трогает).
+//! Сначала сравнение как есть: совпали голова и аргументы уровня - достаточно
+//! сверить спайны. Только если не сошлось, определение разворачивается и
+//! сравнение повторяется.
+//!
+//! Неудача быстрого пути **не** означает неравенство: `f a` и `f b` равны,
+//! если `f` игнорирует аргумент. Поэтому откат к развороту обязателен, а не
+//! факультативен.
 
 use std::rc::Rc;
 
 use crate::eval::apply;
-use crate::value::{Lvl, Value};
+use crate::sig::Signature;
+use crate::value::{Head, Lvl, Value};
 
 /// Конвертируемы ли два значения в контексте размера `size`.
 ///
@@ -17,7 +29,41 @@ use crate::value::{Lvl, Value};
 /// паникует. Паника здесь была бы не защитой инварианта, а падением на входе,
 /// который ничего не нарушает.
 #[must_use]
-pub fn convertible(size: u32, left: &Rc<Value>, right: &Rc<Value>) -> bool {
+pub fn convertible(sig: &Signature, size: u32, left: &Rc<Value>, right: &Rc<Value>) -> bool {
+    if rigid(sig, size, left, right) {
+        return true;
+    }
+    // Быстрый путь не сошёлся - разворачиваем то, что разворачивается.
+    // Определения ацикличны (см. `crate::sig`), поэтому рекурсия конечна.
+    match (unfold(sig, left), unfold(sig, right)) {
+        (None, None) => false,
+        (unfolded_left, unfolded_right) => convertible(
+            sig,
+            size,
+            unfolded_left.as_ref().unwrap_or(left),
+            unfolded_right.as_ref().unwrap_or(right),
+        ),
+    }
+}
+
+/// Разворачивает определение в голове значения вместе со спайном.
+///
+/// `None`, если голова - локальная переменная или постулат: разворачивать
+/// нечего.
+fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
+    let Value::Neutral(Head::Global(name, levels), spine) = &**value else {
+        return None;
+    };
+    let body = sig.lookup(name)?.instantiate_body(levels)?;
+    Some(
+        spine
+            .iter()
+            .fold(body, |callee, argument| apply(&callee, Rc::clone(argument))),
+    )
+}
+
+/// Сравнение без разворота определений.
+fn rigid(sig: &Signature, size: u32, left: &Rc<Value>, right: &Rc<Value>) -> bool {
     match (&**left, &**right) {
         (Value::Universe(a), Value::Universe(b)) => a.equiv(b),
 
@@ -27,7 +73,7 @@ pub fn convertible(size: u32, left: &Rc<Value>, right: &Rc<Value>) -> bool {
                 && spine_a
                     .iter()
                     .zip(spine_b)
-                    .all(|(a, b)| convertible(size, a, b))
+                    .all(|(a, b)| convertible(sig, size, a, b))
         }
 
         // Кратность - часть типа функции, поэтому здесь она значима:
@@ -37,14 +83,14 @@ pub fn convertible(size: u32, left: &Rc<Value>, right: &Rc<Value>) -> bool {
             Value::Pi(mult_b, _, domain_b, codomain_b),
         ) => {
             mult_a == mult_b
-                && convertible(size, domain_a, domain_b)
-                && convertible_under(size, |v| codomain_a.apply(v), |v| codomain_b.apply(v))
+                && convertible(sig, size, domain_a, domain_b)
+                && convertible_under(sig, size, |v| codomain_a.apply(v), |v| codomain_b.apply(v))
         }
 
         // Кратность лямбды не сравнивается - иначе ломается транзитивность,
         // см. `comparing_lambda_multiplicities_would_break_transitivity`.
         (Value::Lam(_, _, body_a), Value::Lam(_, _, body_b)) => {
-            convertible_under(size, |v| body_a.apply(v), |v| body_b.apply(v))
+            convertible_under(sig, size, |v| body_a.apply(v), |v| body_b.apply(v))
         }
 
         // η: функция равна своему развёрнутому виду `\x -> f x`. Без этого
@@ -54,10 +100,10 @@ pub fn convertible(size: u32, left: &Rc<Value>, right: &Rc<Value>) -> bool {
         // `Universe` лямбда неконвертируема в любом случае, а применить их
         // нельзя - попытка была бы обращением к `apply` с не-функцией.
         (Value::Lam(_, _, body), Value::Neutral(..)) => {
-            convertible_under(size, |v| body.apply(v), |v| apply(right, v))
+            convertible_under(sig, size, |v| body.apply(v), |v| apply(right, v))
         }
         (Value::Neutral(..), Value::Lam(_, _, body)) => {
-            convertible_under(size, |v| apply(left, v), |v| body.apply(v))
+            convertible_under(sig, size, |v| apply(left, v), |v| body.apply(v))
         }
 
         _ => false,
@@ -66,12 +112,13 @@ pub fn convertible(size: u32, left: &Rc<Value>, right: &Rc<Value>) -> bool {
 
 /// Сравнивает под свежим связыванием.
 fn convertible_under(
+    sig: &Signature,
     size: u32,
     left: impl FnOnce(Rc<Value>) -> Rc<Value>,
     right: impl FnOnce(Rc<Value>) -> Rc<Value>,
 ) -> bool {
     let fresh = Value::var(Lvl(size));
-    convertible(size + 1, &left(Rc::clone(&fresh)), &right(fresh))
+    convertible(sig, size + 1, &left(Rc::clone(&fresh)), &right(fresh))
 }
 
 #[cfg(test)]
@@ -97,7 +144,8 @@ mod tests {
         let env = (0..free).fold(Env::default(), |env, level| {
             env.extend(Value::var(Lvl(level)))
         });
-        convertible(free, &eval(&env, left), &eval(&env, right))
+        let signature = crate::sig::Signature::default();
+        convertible(&signature, free, &eval(&env, left), &eval(&env, right))
     }
 
     fn conv(left: &Term, right: &Term) -> bool {

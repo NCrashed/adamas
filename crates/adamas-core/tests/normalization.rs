@@ -16,6 +16,7 @@ use adamas_core::conv::convertible;
 use adamas_core::eval::{eval, normalize};
 use adamas_core::level::{Level, LevelVar};
 use adamas_core::mult::Mult;
+use adamas_core::sig::Signature;
 use adamas_core::term::{Index, Term};
 use adamas_core::value::Env;
 use proptest::prelude::*;
@@ -94,7 +95,7 @@ fn any_term() -> BoxedStrategy<Term> {
 fn well_scoped(term: &Term, binders: u32) -> bool {
     match term {
         Term::Var(Index(index)) => *index < binders,
-        Term::Universe(_) => true,
+        Term::Const(..) | Term::Universe(_) => true,
         Term::Lam(_, _, body) => well_scoped(body, binders + 1),
         Term::App(callee, argument) => {
             well_scoped(callee, binders) && well_scoped(argument, binders)
@@ -117,7 +118,9 @@ fn well_scoped(term: &Term, binders: u32) -> bool {
 /// согласованность функции с самой собой.
 fn is_normal_form(term: &Term) -> bool {
     match term {
-        Term::Var(_) => true,
+        // Определение застревает так же, как переменная: обратное чтение его
+        // не разворачивает, значит это уже нормальная форма.
+        Term::Var(_) | Term::Const(..) => true,
         Term::Universe(level) => level.normalize() == *level,
         Term::Lam(_, _, body) => is_normal_form(body),
         Term::Pi(_, _, domain, codomain) => is_normal_form(domain) && is_normal_form(codomain),
@@ -133,7 +136,7 @@ fn is_normal_form(term: &Term) -> bool {
 /// Переименовывает все связывания - на семантику это влиять не должно.
 fn rename(term: &Term) -> Term {
     match term {
-        Term::Var(_) | Term::Universe(_) => term.clone(),
+        Term::Var(_) | Term::Universe(_) | Term::Const(..) => term.clone(),
         Term::Lam(mult, _, body) => Term::Lam(*mult, "renamed".into(), Rc::new(rename(body))),
         Term::App(callee, argument) => {
             Term::App(Rc::new(rename(callee)), Rc::new(rename(argument)))
@@ -175,7 +178,7 @@ fn wrap_in_redexes(term: &Term, budget: &mut u32) -> Term {
     };
 
     let rebuilt = match term {
-        Term::Var(_) | Term::Universe(_) => term.clone(),
+        Term::Var(_) | Term::Universe(_) | Term::Const(..) => term.clone(),
         Term::Lam(mult, name, body) => Term::Lam(
             *mult,
             Rc::clone(name),
@@ -363,7 +366,7 @@ proptest! {
     fn inserted_redexes_preserve_convertibility(term in any_term(), budget in 0u32..12) {
         let mut budget = budget;
         let wrapped = wrap_in_redexes(&term, &mut budget);
-        prop_assert!(convertible(0, &value_of(&term), &value_of(&wrapped)));
+        prop_assert!(convertible(&Signature::default(), 0, &value_of(&term), &value_of(&wrapped)));
     }
 
     /// Результат нормализации замкнут. Классическая ошибка `NbE` - перепутать
@@ -376,22 +379,22 @@ proptest! {
 
     #[test]
     fn convertibility_is_reflexive(term in any_term()) {
-        prop_assert!(convertible(0, &value_of(&term), &value_of(&term)));
+        prop_assert!(convertible(&Signature::default(), 0, &value_of(&term), &value_of(&term)));
     }
 
     /// Имена связываний на семантику не влияют.
     #[test]
     fn renaming_binders_preserves_convertibility(term in any_term()) {
         let renamed = rename(&term);
-        prop_assert!(convertible(0, &value_of(&term), &value_of(&renamed)));
+        prop_assert!(convertible(&Signature::default(), 0, &value_of(&term), &value_of(&renamed)));
     }
 
     #[test]
     fn convertibility_is_symmetric(a in any_term(), b in any_term()) {
         let (left, right) = (value_of(&a), value_of(&b));
         prop_assert_eq!(
-            convertible(0, &left, &right),
-            convertible(0, &right, &left)
+            convertible(&Signature::default(), 0, &left, &right),
+            convertible(&Signature::default(), 0, &right, &left)
         );
     }
 
@@ -403,7 +406,7 @@ proptest! {
     #[test]
     fn equal_normal_forms_are_convertible(a in any_term(), b in any_term()) {
         if normalize(&a) == normalize(&b) {
-            prop_assert!(convertible(0, &value_of(&a), &value_of(&b)));
+            prop_assert!(convertible(&Signature::default(), 0, &value_of(&a), &value_of(&b)));
         }
     }
 
@@ -412,8 +415,8 @@ proptest! {
     #[test]
     fn convertibility_is_transitive(a in any_term(), b in any_term(), c in any_term()) {
         let (a, b, c) = (value_of(&a), value_of(&b), value_of(&c));
-        if convertible(0, &a, &b) && convertible(0, &b, &c) {
-            prop_assert!(convertible(0, &a, &c));
+        if convertible(&Signature::default(), 0, &a, &b) && convertible(&Signature::default(), 0, &b, &c) {
+            prop_assert!(convertible(&Signature::default(), 0, &a, &c));
         }
     }
 }

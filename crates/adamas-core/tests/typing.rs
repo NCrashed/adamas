@@ -6,15 +6,43 @@
 
 use std::rc::Rc;
 
-use adamas_core::check::{TypeError, check_closed, infer, infer_closed};
+use adamas_core::check::{TypeError, infer};
 use adamas_core::ctx::{Ctx, Usage};
 use adamas_core::eval::normalize;
 use adamas_core::mult::Mult;
+use adamas_core::sig::Signature;
 use adamas_core::term::Term;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 
 // ------------------------------------------------------------- конструкторы
+
+/// Обёртки над проверяющим: сигнатура одна на весь файл, см. ниже.
+fn infer_closed(term: &Term) -> Result<Term, TypeError> {
+    adamas_core::check::infer_closed(&fixture_signature(), term)
+}
+
+fn check_closed(term: &Term, ty: &Term) -> Result<(), TypeError> {
+    adamas_core::check::check_closed(&fixture_signature(), term, ty)
+}
+
+/// Сигнатура для свойств: по одному определению каждого вида, которые
+/// проверяющий обязан различать.
+///
+/// Свойства ниже гоняют произвольные термы, и без непустой сигнатуры
+/// `Term::Const` в них не попадал бы вовсе - то есть целая конструкция ядра
+/// оставалась бы вне обстрела.
+fn fixture_signature() -> Signature {
+    let mut signature = Signature::default();
+    let add = |outcome: Result<(), TypeError>| assert!(outcome.is_ok(), "{outcome:?}");
+    // Определение с телом: разворачивается.
+    add(signature.define("alias", Mult::Many, 0, Term::universe(1), Some(ty0())));
+    // Постулат: застревает навсегда.
+    add(signature.postulate("opaque", Mult::Many, 0, Term::universe(1)));
+    // Стёртое определение: в рантайм-позиции обязано отвергаться.
+    add(signature.define("erased", Mult::Zero, 0, Term::universe(1), Some(ty0())));
+    signature
+}
 
 fn lam(mult: Mult, name: &str, body: Term) -> Term {
     Term::Lam(mult, name.into(), Rc::new(body))
@@ -390,6 +418,10 @@ fn any_small_term() -> BoxedStrategy<Term> {
     let leaf = prop_oneof![
         (0u32..4).prop_map(Term::var),
         (0u32..3).prop_map(Term::universe),
+        // Имена из fixture_signature плюс заведомо отсутствующее: проверяющий
+        // обязан ровно отвергать и его тоже.
+        proptest::sample::select(vec!["alias", "opaque", "erased", "missing"])
+            .prop_map(Term::constant),
     ];
     leaf.prop_recursive(3, 24, 4, |inner| {
         prop_oneof![
@@ -454,7 +486,8 @@ proptest! {
     /// ненулевым, расход внутри типа терялся бы молча.
     #[test]
     fn the_erased_fragment_consumes_nothing(term in any_small_term()) {
-        let ctx = Ctx::default();
+        let signature = fixture_signature();
+        let ctx = Ctx::new(&signature);
         if let Ok((_, usage)) = infer(&ctx, Mult::Zero, &term) {
             prop_assert_eq!(usage, Usage::zero(ctx.size()), "терм: {}", term);
         }
@@ -466,7 +499,8 @@ proptest! {
     /// - на этом и стоит стирание.
     #[test]
     fn typable_at_runtime_implies_typable_erased(term in any_small_term()) {
-        let ctx = Ctx::default();
+        let signature = fixture_signature();
+        let ctx = Ctx::new(&signature);
         if infer(&ctx, Mult::One, &term).is_ok() {
             prop_assert!(infer(&ctx, Mult::Zero, &term).is_ok(), "терм: {}", term);
         }

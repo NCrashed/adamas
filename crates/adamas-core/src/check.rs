@@ -36,6 +36,7 @@ use crate::conv::convertible;
 use crate::ctx::{Ctx, Usage};
 use crate::level::Level;
 use crate::mult::Mult;
+use crate::sig::{Definition, Signature};
 use crate::term::{Index, Name, Term};
 use crate::value::Value;
 
@@ -100,6 +101,56 @@ pub enum TypeError {
         /// Проблемный терм.
         term: String,
     },
+
+    /// Ссылка на определение, которого нет в сигнатуре.
+    #[error("определение `{name}` не найдено")]
+    UnknownConstant {
+        /// Имя.
+        name: Name,
+    },
+
+    /// Число аргументов уровня не совпало с арностью определения.
+    #[error("`{name}` принимает {expected} параметров уровня, передано {found}")]
+    LevelArity {
+        /// Имя определения.
+        name: Name,
+        /// Объявленная арность.
+        expected: u32,
+        /// Сколько аргументов передано.
+        found: u32,
+    },
+
+    /// Стёртое определение использовано в рантайм-позиции.
+    #[error("`{name}` объявлено с кратностью 0 и недоступно в рантайме")]
+    ErasedConstant {
+        /// Имя определения.
+        name: Name,
+    },
+
+    /// Имя уже занято.
+    #[error("определение `{name}` уже существует")]
+    DuplicateDefinition {
+        /// Имя.
+        name: Name,
+    },
+
+    /// Кратность `1` у определения верхнего уровня.
+    #[error("определение `{name}` не может быть линейным: учёта на всю программу нет")]
+    LinearDefinition {
+        /// Имя.
+        name: Name,
+    },
+
+    /// Определение ссылается на параметр уровня, которого у него нет.
+    #[error("`{name}` использует параметр уровня u{var} при арности {arity}")]
+    LevelVarOutOfScope {
+        /// Имя определения.
+        name: Name,
+        /// Индекс переменной.
+        var: u32,
+        /// Объявленная арность.
+        arity: u32,
+    },
 }
 
 /// Синтезирует тип терма и считает использования.
@@ -107,7 +158,7 @@ pub enum TypeError {
 /// # Errors
 ///
 /// Любое нарушение типизации или учёта кратностей.
-pub fn infer(ctx: &Ctx, sigma: Mult, term: &Term) -> Result<(Rc<Value>, Usage), TypeError> {
+pub fn infer(ctx: &Ctx<'_>, sigma: Mult, term: &Term) -> Result<(Rc<Value>, Usage), TypeError> {
     match term {
         Term::Var(index) => {
             let binding = ctx
@@ -167,6 +218,37 @@ pub fn infer(ctx: &Ctx, sigma: Mult, term: &Term) -> Result<(Rc<Value>, Usage), 
             })
         }
 
+        // Определение не занимает места в контексте, поэтому вектор
+        // использований нулевой. Ограничение на кратность при этом есть, но
+        // проверяется локально: `0`-определение (доказательство, тип) в
+        // рантайм-позиции - ошибка.
+        Term::Const(name, levels) => {
+            let definition =
+                ctx.signature()
+                    .lookup(name)
+                    .ok_or_else(|| TypeError::UnknownConstant {
+                        name: Rc::clone(name),
+                    })?;
+            // Насыщение здесь дало бы несовпадение арности, то есть ошибку, а
+            // не тихо неверный результат. Но правило одно на весь крейт:
+            // счётчик, не помещающийся в u32, - поломка, а не вход.
+            let found = u32::try_from(levels.len())
+                .unwrap_or_else(|_| unreachable!("аргументов уровня больше, чем помещается в u32"));
+            if found != definition.level_arity {
+                return Err(TypeError::LevelArity {
+                    name: Rc::clone(name),
+                    expected: definition.level_arity,
+                    found,
+                });
+            }
+            if !definition.mult.admits(sigma) {
+                return Err(TypeError::ErasedConstant {
+                    name: Rc::clone(name),
+                });
+            }
+            Ok((definition.instantiate_type(levels), Usage::zero(ctx.size())))
+        }
+
         // Домена у лямбды в терме нет, синтезировать не из чего.
         Term::Lam(..) => Err(TypeError::CannotInfer {
             term: term.to_string(),
@@ -180,7 +262,7 @@ pub fn infer(ctx: &Ctx, sigma: Mult, term: &Term) -> Result<(Rc<Value>, Usage), 
 ///
 /// Любое нарушение типизации или учёта кратностей.
 pub fn check(
-    ctx: &Ctx,
+    ctx: &Ctx<'_>,
     sigma: Mult,
     term: &Term,
     expected: &Rc<Value>,
@@ -218,7 +300,7 @@ pub fn check(
 
         _ => {
             let (found, usage) = infer(ctx, sigma, term)?;
-            if convertible(ctx.size(), expected, &found) {
+            if convertible(ctx.signature(), ctx.size(), expected, &found) {
                 Ok(usage)
             } else {
                 Err(TypeError::Mismatch {
@@ -235,7 +317,7 @@ pub fn check(
 /// # Errors
 ///
 /// Если терм не типизируется или его тип не универсум.
-pub fn is_type(ctx: &Ctx, term: &Term) -> Result<Level, TypeError> {
+pub fn is_type(ctx: &Ctx<'_>, term: &Term) -> Result<Level, TypeError> {
     // Стёртый фрагмент: внутри типа ничто не расходуется, поэтому вектор
     // использований заведомо нулевой и отбрасывается.
     let (ty, _) = infer(ctx, Mult::Zero, term)?;
@@ -256,8 +338,8 @@ pub fn is_type(ctx: &Ctx, term: &Term) -> Result<Level, TypeError> {
 /// # Errors
 ///
 /// Если тип не является типом или терм ему не соответствует.
-pub fn check_closed(term: &Term, ty: &Term) -> Result<(), TypeError> {
-    let ctx = Ctx::default();
+pub fn check_closed(signature: &Signature, term: &Term, ty: &Term) -> Result<(), TypeError> {
+    let ctx = Ctx::new(signature);
     is_type(&ctx, ty)?;
     let ty_value = ctx.eval(ty);
     check(&ctx, Mult::One, term, &ty_value)?;
@@ -269,22 +351,84 @@ pub fn check_closed(term: &Term, ty: &Term) -> Result<(), TypeError> {
 /// # Errors
 ///
 /// Если терм не типизируется.
-pub fn infer_closed(term: &Term) -> Result<Term, TypeError> {
-    let ctx = Ctx::default();
+pub fn infer_closed(signature: &Signature, term: &Term) -> Result<Term, TypeError> {
+    let ctx = Ctx::new(signature);
     let (ty, _) = infer(&ctx, Mult::One, term)?;
     Ok(ctx.quote(&ty))
+}
+
+/// Проверяет определение верхнего уровня перед добавлением в сигнатуру.
+///
+/// Тип проверяется в стёртом фрагменте (он и есть тип), тело - при кратности
+/// самого определения. Для `0`-определения это означает `σ = 0`: доказательство
+/// проверяется, но ничего не расходует.
+///
+/// # Errors
+///
+/// Линейная кратность; параметр уровня вне арности; тип не является типом;
+/// тело не соответствует типу.
+pub fn check_definition(
+    signature: &Signature,
+    name: &Name,
+    mult: Mult,
+    level_arity: u32,
+    ty: Term,
+    body: Option<Term>,
+) -> Result<Definition, TypeError> {
+    if mult == Mult::One {
+        return Err(TypeError::LinearDefinition {
+            name: Rc::clone(name),
+        });
+    }
+    check_level_scope(name, level_arity, &ty)?;
+    if let Some(body) = &body {
+        check_level_scope(name, level_arity, body)?;
+    }
+
+    let ctx = Ctx::new(signature);
+    is_type(&ctx, &ty)?;
+    if let Some(body) = &body {
+        let ty_value = ctx.eval(&ty);
+        // `0`-определение проверяется при σ = 0, `ω` - при σ = 1: тело
+        // присутствует в рантайме один раз, а сколько раз его позовут,
+        // определение не решает.
+        let sigma = if mult == Mult::Zero {
+            Mult::Zero
+        } else {
+            Mult::One
+        };
+        check(&ctx, sigma, body, &ty_value)?;
+    }
+
+    Ok(Definition {
+        mult,
+        level_arity,
+        ty,
+        body,
+    })
+}
+
+fn check_level_scope(name: &Name, arity: u32, term: &Term) -> Result<(), TypeError> {
+    match term.max_level_var() {
+        Some(var) if var >= arity => Err(TypeError::LevelVarOutOfScope {
+            name: Rc::clone(name),
+            var,
+            arity,
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// Общая часть `let` для обоих режимов: проверить аннотацию и значение, ввести
 /// связывание, обработать тело, снять и проверить использование.
 fn binding<T>(
-    ctx: &Ctx,
+    ctx: &Ctx<'_>,
     sigma: Mult,
     mult: Mult,
     name: &Name,
     ty: &Term,
     value: &Term,
-    body: impl FnOnce(&Ctx) -> Result<(T, Usage), TypeError>,
+    body: impl FnOnce(&Ctx<'_>) -> Result<(T, Usage), TypeError>,
 ) -> Result<(T, Usage), TypeError> {
     is_type(ctx, ty)?;
     let ty_value = ctx.eval(ty);

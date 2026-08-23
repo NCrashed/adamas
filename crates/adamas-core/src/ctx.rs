@@ -14,6 +14,7 @@ use std::rc::Rc;
 
 use crate::eval::{eval, quote};
 use crate::mult::Mult;
+use crate::sig::Signature;
 use crate::term::{Index, Name, Term};
 use crate::value::{Env, Lvl, Value};
 
@@ -29,8 +30,12 @@ pub struct Binding {
 }
 
 /// Контекст проверки.
-#[derive(Clone, Debug, Default)]
-pub struct Ctx {
+///
+/// Держит ссылку на сигнатуру, а не владеет ею: контекст пересоздаётся на
+/// каждом связывании, а сигнатура на время проверки одного терма неизменна.
+#[derive(Clone, Debug)]
+pub struct Ctx<'a> {
+    signature: &'a Signature,
     env: Env,
     bindings: Option<Rc<Cell>>,
 }
@@ -41,7 +46,23 @@ struct Cell {
     rest: Option<Rc<Cell>>,
 }
 
-impl Ctx {
+impl<'a> Ctx<'a> {
+    /// Пустой контекст над сигнатурой.
+    #[must_use]
+    pub fn new(signature: &'a Signature) -> Self {
+        Self {
+            signature,
+            env: Env::default(),
+            bindings: None,
+        }
+    }
+
+    /// Сигнатура, в которой проверяется терм.
+    #[must_use]
+    pub fn signature(&self) -> &'a Signature {
+        self.signature
+    }
+
     /// Число связываний. Оно же - уровень следующей свежей переменной.
     #[must_use]
     pub fn size(&self) -> u32 {
@@ -78,6 +99,7 @@ impl Ctx {
 
     fn push(&self, binding: Binding, value: Rc<Value>) -> Self {
         Self {
+            signature: self.signature,
             env: self.env.extend(value),
             bindings: Some(Rc::new(Cell {
                 binding,
@@ -229,7 +251,8 @@ mod tests {
 
     #[test]
     fn lookup_reads_indices_from_the_innermost_binding() {
-        let ctx = Ctx::default()
+        let signature = crate::sig::Signature::default();
+        let ctx = Ctx::new(&signature)
             .bind("outer".into(), Mult::Many, universe())
             .bind("inner".into(), Mult::One, universe());
 
@@ -240,10 +263,11 @@ mod tests {
 
     #[test]
     fn bind_introduces_a_neutral_but_define_introduces_a_value() {
-        let bound = Ctx::default().bind("x".into(), Mult::Many, universe());
+        let signature = crate::sig::Signature::default();
+        let bound = Ctx::new(&signature).bind("x".into(), Mult::Many, universe());
         assert!(matches!(*bound.eval(&Term::var(0)), Value::Neutral(..)));
 
-        let defined = Ctx::default().define("x".into(), Mult::Many, universe(), universe());
+        let defined = Ctx::new(&signature).define("x".into(), Mult::Many, universe(), universe());
         assert!(matches!(*defined.eval(&Term::var(0)), Value::Universe(_)));
     }
 

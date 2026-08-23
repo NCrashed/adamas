@@ -20,6 +20,7 @@ use std::rc::Rc;
 use adamas_core::conv::convertible;
 use adamas_core::eval::{eval, normalize};
 use adamas_core::mult::Mult;
+use adamas_core::sig::Signature;
 use adamas_core::term::Term;
 use adamas_core::value::Env;
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -65,7 +66,7 @@ fn nbe(c: &mut Criterion) {
     });
 
     c.bench_function("convertible_deep_pi_256", |b| {
-        b.iter(|| assert!(convertible(0, &pi_value, &pi_value)));
+        b.iter(|| assert!(convertible(&Signature::default(), 0, &pi_value, &pi_value)));
     });
 }
 

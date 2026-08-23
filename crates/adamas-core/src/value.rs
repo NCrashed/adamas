@@ -100,14 +100,33 @@ pub struct Closure {
     pub(crate) body: Rc<Term>,
 }
 
+/// Голова застрявшего вычисления.
+///
+/// Локальная переменная застревает всегда - её значение неизвестно по
+/// построению. Определение застревает, только пока его не развернули: у
+/// определения с телом разворот возможен (δ-редукция, [`crate::conv`]), у
+/// постулата - нет.
+///
+/// Равенство структурное, и для аргументов уровня это работает только потому,
+/// что [`Value::constant`] приводит их к нормальной форме. Нормальная форма
+/// уровня - полный инвариант (см. [`crate::level`]), так что структурное
+/// равенство нормализованных уровней и есть семантическое.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Head {
+    /// Переменная контекста.
+    Local(Lvl),
+    /// Определение с нормализованными аргументами уровня.
+    Global(Name, Rc<[Level]>),
+}
+
 /// Значение - терм, вычисленный до слабой головной нормальной формы.
 #[derive(Clone, Debug)]
 pub enum Value {
-    /// Застрявшее вычисление: переменная, применённая к аргументам.
+    /// Застрявшее вычисление: голова, применённая к аргументам.
     ///
     /// Спайн хранится в порядке применения, то есть `x a b` - это голова `x`
     /// и спайн `[a, b]`.
-    Neutral(Lvl, Vec<Rc<Value>>),
+    Neutral(Head, Vec<Rc<Value>>),
     /// Функция.
     Lam(Mult, Name, Closure),
     /// Тип функции.
@@ -120,7 +139,20 @@ impl Value {
     /// Свободная переменная - нейтральное значение с пустым спайном.
     #[must_use]
     pub fn var(level: Lvl) -> Rc<Self> {
-        Rc::new(Self::Neutral(level, Vec::new()))
+        Rc::new(Self::Neutral(Head::Local(level), Vec::new()))
+    }
+
+    /// Определение, ещё не развёрнутое.
+    ///
+    /// Аргументы уровня нормализуются здесь, и только здесь. Без этого
+    /// `Box{max 0 1}` и `Box{1}` - разные головы, то есть один и тот же тип,
+    /// записанный двумя способами, оказывается неконвертируемым сам с собой.
+    /// У определения с телом это спасал бы δ-разворот, у постулата
+    /// разворачивать нечего.
+    #[must_use]
+    pub fn constant(name: Name, levels: &[Level]) -> Rc<Self> {
+        let normalized: Rc<[Level]> = levels.iter().map(Level::normalize).collect();
+        Rc::new(Self::Neutral(Head::Global(name, normalized), Vec::new()))
     }
 }
 
@@ -129,7 +161,12 @@ impl fmt::Display for Value {
     /// обратным переводом в терм через [`crate::eval::quote`].
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Neutral(Lvl(level), spine) => write!(f, "@{level}·{}", spine.len()),
+            Self::Neutral(Head::Local(Lvl(level)), spine) => {
+                write!(f, "@{level}·{}", spine.len())
+            }
+            Self::Neutral(Head::Global(name, _), spine) => {
+                write!(f, "{name}·{}", spine.len())
+            }
             Self::Lam(mult, name, _) => write!(f, "\\({mult} {name}) -> …"),
             Self::Pi(mult, name, _, _) => write!(f, "({mult} {name} : …) -> …"),
             Self::Universe(level) => write!(f, "Type {level}"),
@@ -139,7 +176,7 @@ impl fmt::Display for Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{Env, Lvl, Value};
+    use super::{Env, Head, Lvl, Value};
     use crate::term::Index;
 
     #[test]
@@ -151,11 +188,11 @@ mod tests {
         // Index(0) - ближайшее связывание, то есть добавленное последним.
         assert!(matches!(
             *env.lookup(Index(0)).unwrap(),
-            Value::Neutral(Lvl(1), _)
+            Value::Neutral(Head::Local(Lvl(1)), _)
         ));
         assert!(matches!(
             *env.lookup(Index(1)).unwrap(),
-            Value::Neutral(Lvl(0), _)
+            Value::Neutral(Head::Local(Lvl(0)), _)
         ));
         assert!(env.lookup(Index(2)).is_none(), "за пределами окружения");
     }

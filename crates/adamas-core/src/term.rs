@@ -58,6 +58,13 @@ pub enum Term {
     /// Кратность здесь по той же причине, что и на `Pi`: связывание тратит
     /// значение, и без неё `let 1 h = openFile … in …` нечем выразить.
     Let(Mult, Name, Rc<Term>, Rc<Term>, Rc<Term>),
+    /// Ссылка на определение из [`crate::sig::Signature`] с явными
+    /// аргументами уровня.
+    ///
+    /// Universe polymorphism пока явная: аргументы пишутся руками. Вывод их
+    /// через level-метапеременные - следующий срез; представление от этого не
+    /// изменится, поменяется только то, кто заполняет список.
+    Const(Name, Rc<[Level]>),
 }
 
 impl Term {
@@ -80,6 +87,64 @@ impl Term {
             Self::App(Rc::new(callee), Rc::new(argument))
         })
     }
+
+    /// Ссылка на определение без параметров уровня.
+    #[must_use]
+    pub fn constant(name: &str) -> Self {
+        Self::Const(name.into(), Rc::from([]))
+    }
+
+    /// Подставляет аргументы вместо параметров уровня по всему терму.
+    ///
+    /// Так тип определения инстанцируется в месте использования.
+    #[must_use]
+    pub fn substitute_levels(&self, arguments: &[Level]) -> Self {
+        let recur = |term: &Rc<Self>| Rc::new(term.substitute_levels(arguments));
+        match self {
+            Self::Var(_) => self.clone(),
+            Self::Universe(level) => Self::Universe(level.substitute(arguments)),
+            Self::Lam(mult, name, body) => Self::Lam(*mult, Rc::clone(name), recur(body)),
+            Self::App(callee, argument) => Self::App(recur(callee), recur(argument)),
+            Self::Pi(mult, name, domain, codomain) => {
+                Self::Pi(*mult, Rc::clone(name), recur(domain), recur(codomain))
+            }
+            Self::Let(mult, name, ty, value, body) => {
+                Self::Let(*mult, Rc::clone(name), recur(ty), recur(value), recur(body))
+            }
+            Self::Const(name, levels) => Self::Const(
+                Rc::clone(name),
+                levels
+                    .iter()
+                    .map(|level| level.substitute(arguments))
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Наибольший индекс параметра уровня, встречающийся в терме.
+    #[must_use]
+    pub fn max_level_var(&self) -> Option<u32> {
+        let join = |a: Option<u32>, b: Option<u32>| match (a, b) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (found, None) | (None, found) => found,
+        };
+        match self {
+            Self::Var(_) => None,
+            Self::Universe(level) => level.max_var(),
+            Self::Lam(_, _, body) => body.max_level_var(),
+            Self::App(callee, argument) => join(callee.max_level_var(), argument.max_level_var()),
+            Self::Pi(_, _, domain, codomain) => {
+                join(domain.max_level_var(), codomain.max_level_var())
+            }
+            Self::Let(_, _, ty, value, body) => join(
+                ty.max_level_var(),
+                join(value.max_level_var(), body.max_level_var()),
+            ),
+            Self::Const(_, levels) => levels
+                .iter()
+                .fold(None, |found, level| join(found, level.max_var())),
+        }
+    }
 }
 
 impl fmt::Display for Term {
@@ -98,6 +163,11 @@ impl fmt::Display for Term {
             }
             Self::Let(mult, name, ty, value, body) => {
                 write!(f, "let {mult} {name} : {ty} = {value} in {body}")
+            }
+            Self::Const(name, levels) if levels.is_empty() => write!(f, "{name}"),
+            Self::Const(name, levels) => {
+                let printed: Vec<String> = levels.iter().map(ToString::to_string).collect();
+                write!(f, "{name}{{{}}}", printed.join(", "))
             }
         }
     }

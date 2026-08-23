@@ -61,6 +61,46 @@ impl Level {
         Self::Max(Rc::new(self), Rc::new(other))
     }
 
+    /// Подставляет аргументы вместо параметров уровня.
+    ///
+    /// Переменная с индексом за пределами `arguments` остаётся как есть: это
+    /// не ошибка подстановки, а незакрытый параметр, и ловить его должен
+    /// [`Level::max_var`] при добавлении определения.
+    #[must_use]
+    pub fn substitute(&self, arguments: &[Self]) -> Self {
+        match self {
+            Self::Zero => Self::Zero,
+            Self::Succ(inner) => inner.substitute(arguments).succ(),
+            Self::Max(left, right) => left.substitute(arguments).max(right.substitute(arguments)),
+            // Переменная вне списка остаётся собой: это обычная частичная
+            // подстановка, а не промах. Внутри определения такого не бывает -
+            // арность проверена (`check_level_scope`), - но операция сама по
+            // себе тотальна, и подменять это паникой было бы враньём про её
+            // область определения.
+            Self::Var(LevelVar(index)) => arguments
+                .get(*index as usize)
+                .cloned()
+                .unwrap_or_else(|| self.clone()),
+        }
+    }
+
+    /// Наибольший индекс переменной уровня, встречающейся в выражении.
+    ///
+    /// `None` - переменных нет. Нужна, чтобы проверить, что определение не
+    /// ссылается на параметр уровня, которого у него нет.
+    #[must_use]
+    pub fn max_var(&self) -> Option<u32> {
+        match self {
+            Self::Zero => None,
+            Self::Succ(inner) => inner.max_var(),
+            Self::Max(left, right) => match (left.max_var(), right.max_var()) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (found, None) | (None, found) => found,
+            },
+            Self::Var(LevelVar(index)) => Some(*index),
+        }
+    }
+
     /// Семантическое равенство: оба уровня приводятся к нормальной форме.
     #[must_use]
     pub fn equiv(&self, other: &Self) -> bool {

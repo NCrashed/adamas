@@ -20,6 +20,9 @@ bench = false
 name = "nbe"
 harness = false
 
+[dependencies]
+thiserror = "2"
+
 [dev-dependencies]
 criterion = "0.7"
 insta = "1"

@@ -19,6 +19,7 @@ dependencies = [
  "criterion",
  "insta",
  "proptest",
+ "thiserror",
 ]
 
 [[package]]

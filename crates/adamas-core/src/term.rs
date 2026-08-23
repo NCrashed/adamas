@@ -18,6 +18,21 @@ use crate::mult::Mult;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Index(pub u32);
 
+impl Index {
+    /// Уровень, на который указывает индекс в контексте размера `size`.
+    ///
+    /// Обратна [`crate::value::Lvl::to_index`]. `None`, если индекс за
+    /// пределами контекста, - в отличие от обратной операции, здесь это
+    /// нормальный исход: индекс приходит из терма, а терм может быть
+    /// незамкнутым, и отвечать на это должен проверяющий, а не паника.
+    #[must_use]
+    pub fn to_level(self, size: u32) -> Option<crate::value::Lvl> {
+        size.checked_sub(self.0)
+            .and_then(|distance| distance.checked_sub(1))
+            .map(crate::value::Lvl)
+    }
+}
+
 /// Имя для печати. На семантику не влияет.
 pub type Name = Rc<str>;
 
@@ -38,8 +53,11 @@ pub enum Term {
     Pi(Mult, Name, Rc<Term>, Rc<Term>),
     /// `Type level`.
     Universe(Level),
-    /// `let x : ty = value in body`.
-    Let(Name, Rc<Term>, Rc<Term>, Rc<Term>),
+    /// `let q x : ty = value in body`.
+    ///
+    /// Кратность здесь по той же причине, что и на `Pi`: связывание тратит
+    /// значение, и без неё `let 1 h = openFile … in …` нечем выразить.
+    Let(Mult, Name, Rc<Term>, Rc<Term>, Rc<Term>),
 }
 
 impl Term {
@@ -78,8 +96,8 @@ impl fmt::Display for Term {
             Self::Pi(mult, name, domain, codomain) => {
                 write!(f, "({mult} {name} : {domain}) -> {codomain}")
             }
-            Self::Let(name, ty, value, body) => {
-                write!(f, "let {name} : {ty} = {value} in {body}")
+            Self::Let(mult, name, ty, value, body) => {
+                write!(f, "let {mult} {name} : {ty} = {value} in {body}")
             }
         }
     }

@@ -118,7 +118,7 @@ fn well_scoped(term: &Term, binders: u32) -> bool {
         Term::Pi(_, _, domain, codomain) => {
             well_scoped(domain, binders) && well_scoped(codomain, binders + 1)
         }
-        Term::Let(_, ty, value, body) => {
+        Term::Let(_, _, ty, value, body) => {
             well_scoped(ty, binders)
                 && well_scoped(value, binders)
                 && well_scoped(body, binders + 1)
@@ -160,7 +160,8 @@ fn rename(term: &Term) -> Term {
             Rc::new(rename(domain)),
             Rc::new(rename(codomain)),
         ),
-        Term::Let(_, ty, value, body) => Term::Let(
+        Term::Let(mult, _, ty, value, body) => Term::Let(
+            *mult,
             "renamed".into(),
             Rc::new(rename(ty)),
             Rc::new(rename(value)),
@@ -206,7 +207,8 @@ fn wrap_in_redexes(term: &Term, budget: &mut u32) -> Term {
             Rc::new(wrap_in_redexes(domain, budget)),
             Rc::new(wrap_in_redexes(codomain, budget)),
         ),
-        Term::Let(name, ty, value, body) => Term::Let(
+        Term::Let(mult, name, ty, value, body) => Term::Let(
+            *mult,
             Rc::clone(name),
             Rc::new(wrap_in_redexes(ty, budget)),
             Rc::new(wrap_in_redexes(value, budget)),

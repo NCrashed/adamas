@@ -75,7 +75,7 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
 
         // Тип связывания при вычислении не нужен: он влияет на проверку, а не
         // на значение.
-        Term::Let(_, _, value, body) => {
+        Term::Let(_, _, _, value, body) => {
             let value = eval(env, value);
             eval(&env.extend(value), body)
         }
@@ -199,6 +199,7 @@ mod tests {
     fn let_is_eliminated_by_evaluation() {
         // let x : Type 1 = Type 0 in x  ==>  Type 0
         let term = Term::Let(
+            Mult::Many,
             "x".into(),
             Rc::new(Term::universe(1)),
             Rc::new(Term::universe(0)),

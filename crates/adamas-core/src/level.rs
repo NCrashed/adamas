@@ -1,23 +1,25 @@
-//! Уровни универсумов (§3.2): отдельный сорт с `zero`, `suc`, `max`, `imax`.
+//! Уровни универсумов (§3.2): отдельный сорт с `zero`, `suc`, `max`.
 //!
 //! Уровни - алгебраические выражения, а не числа: `Type (max u (suc v))`
 //! возникает сразу, как только сигнатура полиморфна по уровню.
 //!
-//! `imax u v` - уровень `Pi`-типа: он равен `0`, когда кодомен живёт в `Type 0`
-//! (иначе предложения не были бы замкнуты относительно импликации), и `max u v`
-//! в остальных случаях. Пока `v` неизвестна, выражение остаётся символьным.
+//! # Почему нет `imax`
+//!
+//! `imax u v` (правило Lean: `0` при `v = 0`, иначе `max u v`) отличается от
+//! `max` ровно в одном случае - и этот случай есть определение
+//! импредикативности нижнего универсума. С ним `(x : Type 0) -> Bool` попадает
+//! в `Type 0`, квантифицируя по коллекции, элементом которой сам является. У
+//! Lean это безопасно, потому что `Sort 0` - это `Prop` с иррелевантностью
+//! доказательств и урезанной элиминацией; §3.2 предикативен и такого сорта не
+//! вводит. Правило `Pi` использует `max` (см. [`crate::check`]).
 //!
 //! # Равенство
 //!
 //! Производный `Eq` - структурный, он нужен только чтобы класть уровни в
-//! `BTreeMap`. Семантическое равенство - [`Level::equiv`]: оно **корректно**
-//! (равными признаёт только те уровни, что совпадают при любой подстановке) и
-//! **неполно** на `imax`. Известный незакрытый случай: `max u (imax w v)` при
-//! `u >= w` равно `max u v`, но это правило контекстное - оно зависит от
-//! соседей по `max`, а применение его к промежуточным группировкам ломает
-//! ассоциативность нормальной формы. Неполнота отвергает корректную программу,
-//! неверность приняла бы некорректную, поэтому граница проведена здесь
-//! (§10 вопрос 2).
+//! `BTreeMap`. Семантическое равенство - [`Level::equiv`]: оно **корректно и
+//! полно** - равными признаёт ровно те уровни, что совпадают при любой
+//! подстановке. Полнота получена вместе с отказом от `imax`: незакрываемый
+//! случай был именно в нём (§10 вопрос 2 закрыт).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -36,8 +38,6 @@ pub enum Level {
     Succ(Rc<Level>),
     /// Верхняя грань.
     Max(Rc<Level>, Rc<Level>),
-    /// `imax u v`: `0`, если `v` равно `0`, иначе `max u v`.
-    IMax(Rc<Level>, Rc<Level>),
     /// Параметр, по которому определение полиморфно.
     Var(LevelVar),
 }
@@ -59,12 +59,6 @@ impl Level {
     #[must_use]
     pub fn max(self, other: Self) -> Self {
         Self::Max(Rc::new(self), Rc::new(other))
-    }
-
-    /// `imax self other` - уровень зависимой функции из `self` в `other`.
-    #[must_use]
-    pub fn imax(self, other: Self) -> Self {
-        Self::IMax(Rc::new(self), Rc::new(other))
     }
 
     /// Семантическое равенство: оба уровня приводятся к нормальной форме.
@@ -92,10 +86,6 @@ impl Level {
             Self::Succ(inner) => inner.evaluate(assignment) + 1,
             Self::Var(var) => assignment(*var),
             Self::Max(left, right) => left.evaluate(assignment).max(right.evaluate(assignment)),
-            Self::IMax(left, right) => match right.evaluate(assignment) {
-                0 => 0,
-                value => left.evaluate(assignment).max(value),
-            },
         }
     }
 }
@@ -108,8 +98,8 @@ impl Level {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Parts {
     constant: u32,
-    /// Атом - то, что не раскладывается дальше: переменная либо застрявший
-    /// `imax`. Значение - наибольшее смещение, с которым атом встречается.
+    /// Атом - то, что не раскладывается дальше, то есть переменная уровня.
+    /// Значение - наибольшее смещение, с которым атом встречается.
     atoms: BTreeMap<Level, u32>,
 }
 
@@ -123,53 +113,6 @@ impl Parts {
             Level::Succ(inner) => Self::of(inner).shift(),
             Level::Max(left, right) => Self::of(left).join(Self::of(right)),
             Level::Var(_) => Self::atom(level.clone()),
-            Level::IMax(left, right) => {
-                let right_parts = Self::of(right);
-                if right_parts.is_zero() {
-                    // imax u 0 = 0 - Pi в Type 0 остаётся в Type 0.
-                    return Self {
-                        constant: 0,
-                        atoms: BTreeMap::new(),
-                    };
-                }
-                if right_parts.constant > 0 {
-                    // Правая часть заведомо не ноль, значит imax = max.
-                    return Self::of(left).join(right_parts);
-                }
-
-                // Дальше правая часть символьная: ноль она или нет, станет
-                // известно только после подстановки. Но часть тождеств от её
-                // значения не зависит.
-                let left_parts = Self::of(left);
-
-                // imax u v = v, если u <= max 1 v при любой подстановке.
-                //
-                // При v = 0 обе стороны нули независимо от u. При v >= 1
-                // выражение равно max u v, а max 1 v = v, так что условие
-                // сводится к u <= v - ровно тому, при котором max u v = v.
-                //
-                // Через это одно неравенство проходят все ходовые случаи:
-                // u = 0 (уровень Pi, чей домен живёт в Type 0), u = 1 и
-                // u = v.
-                let bumped = Self::of(&right_parts.rebuild().max(Level::number(1)));
-                if left_parts.clone().join(bumped.clone()) == bumped {
-                    return right_parts;
-                }
-                // imax u (imax v w) = imax (max u v) w: при w = 0 обе стороны
-                // 0, иначе внутренний imax ненулевой и оба сводятся к
-                // max u (max v w). Правый аргумент убывает, рекурсия конечна.
-                if let Some(Level::IMax(inner_left, inner_right)) = right_parts.single_atom() {
-                    return Self::of(&Level::IMax(
-                        Rc::new(left_parts.rebuild().max((**inner_left).clone())),
-                        Rc::clone(inner_right),
-                    ));
-                }
-
-                Self::atom(Level::IMax(
-                    Rc::new(left_parts.rebuild()),
-                    Rc::new(right_parts.rebuild()),
-                ))
-            }
         }
     }
 
@@ -178,22 +121,6 @@ impl Parts {
             constant: 0,
             atoms: BTreeMap::from([(level, 0)]),
         }
-    }
-
-    fn is_zero(&self) -> bool {
-        self.constant == 0 && self.atoms.is_empty()
-    }
-
-    /// Единственный атом с нулевым смещением и без константы, если он такой
-    /// один. Именно в этой форме застревает `imax`.
-    fn single_atom(&self) -> Option<&Level> {
-        if self.constant > 0 || self.atoms.len() != 1 {
-            return None;
-        }
-        self.atoms
-            .iter()
-            .next()
-            .and_then(|(atom, offset)| (*offset == 0).then_some(atom))
     }
 
     fn shift(mut self) -> Self {
@@ -247,7 +174,6 @@ impl fmt::Display for Level {
                 }
             }
             Self::Max(left, right) => write!(f, "max {} {}", Paren(left), Paren(right)),
-            Self::IMax(left, right) => write!(f, "imax {} {}", Paren(left), Paren(right)),
         }
     }
 }
@@ -269,7 +195,7 @@ struct Paren<'a>(&'a Level);
 impl fmt::Display for Paren<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
-            Level::Max(..) | Level::IMax(..) => write!(f, "({})", self.0),
+            Level::Max(..) => write!(f, "({})", self.0),
             other => write!(f, "{other}"),
         }
     }
@@ -319,23 +245,32 @@ mod tests {
         assert!(u().max(v()).succ().equiv(&u().succ().max(v().succ())));
     }
 
+    /// Уровень `Pi` никогда не опускается ниже уровня домена.
+    ///
+    /// Это и есть предикативность, выраженная арифметикой: `max u v >= u` при
+    /// любых `u` и `v`. Правило Lean `imax` нарушало бы её ровно при `v = 0` -
+    /// см. заголовок модуля.
+    ///
+    /// Значения переменных обязаны быть **разными**, и `v = 0` при `u > 0`
+    /// обязан входить в перебор: при `u = v` неравенство выполняется и для
+    /// `imax`, то есть такой тест прошёл бы, ничего не проверив.
     #[test]
-    fn imax_collapses_when_the_codomain_level_is_known() {
-        // Pi в Type 0 остаётся в Type 0 - иначе предложения не были бы
-        // замкнуты относительно импликации.
-        assert!(u().imax(Level::Zero).equiv(&Level::Zero));
-        // Правая часть заведомо ненулевая, значит imax вырождается в max.
-        assert!(u().imax(Level::number(1)).equiv(&u().max(Level::number(1))));
-    }
-
-    #[test]
-    fn imax_stays_symbolic_while_the_codomain_level_is_a_variable() {
-        let stuck = u().imax(v());
-        assert!(
-            !stuck.equiv(&u().max(v())),
-            "схлопывать рано: v может быть 0"
+    fn max_never_drops_below_either_argument() {
+        for left in 0..4 {
+            for right in 0..4 {
+                let assignment = |LevelVar(index)| if index == 0 { left } else { right };
+                let level = u().max(v()).evaluate(&assignment);
+                assert!(level >= left, "max {left} {right} = {level}");
+                assert!(level >= right, "max {left} {right} = {level}");
+            }
+        }
+        // Именно тот случай, в котором imax отличается: квантификация по
+        // Type 0 поднимает результат, а не оставляет его в нуле.
+        assert_eq!(
+            u().max(Level::Zero).evaluate(&|_| 1),
+            1,
+            "imax дал бы здесь 0"
         );
-        assert!(stuck.equiv(&u().imax(v())), "но сам себе он равен");
     }
 
     #[test]
@@ -356,6 +291,6 @@ mod tests {
         assert_eq!(Level::number(3).to_string(), "3");
         assert_eq!(u().succ().to_string(), "u0+1");
         assert_eq!(u().max(v()).to_string(), "max u0 u1");
-        assert_eq!(u().imax(v().max(u())).to_string(), "imax u0 (max u1 u0)");
+        assert_eq!(u().max(v().max(u())).to_string(), "max u0 (max u1 u0)");
     }
 }

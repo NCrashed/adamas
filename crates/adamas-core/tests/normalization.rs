@@ -36,22 +36,6 @@ fn any_level() -> impl Strategy<Value = Level> {
     leaf.prop_recursive(4, 32, 3, |inner| {
         prop_oneof![
             inner.clone().prop_map(Level::succ),
-            (inner.clone(), inner.clone()).prop_map(|(a, b)| a.max(b)),
-            (inner.clone(), inner).prop_map(|(a, b)| a.imax(b)),
-        ]
-    })
-}
-
-/// Уровни без `imax` - класс, на котором нормальная форма полна.
-fn any_imax_free_level() -> impl Strategy<Value = Level> {
-    let leaf = prop_oneof![
-        Just(Level::Zero),
-        (0u32..3).prop_map(Level::number),
-        (0u32..3).prop_map(|index| Level::Var(LevelVar(index))),
-    ];
-    leaf.prop_recursive(4, 32, 3, |inner| {
-        prop_oneof![
-            inner.clone().prop_map(Level::succ),
             (inner.clone(), inner).prop_map(|(a, b)| a.max(b)),
         ]
     })
@@ -232,7 +216,7 @@ fn max_constant(level: &Level) -> u32 {
     match level {
         Level::Zero | Level::Var(_) => 0,
         Level::Succ(inner) => max_constant(inner) + 1,
-        Level::Max(a, b) | Level::IMax(a, b) => max_constant(a).max(max_constant(b)),
+        Level::Max(a, b) => max_constant(a).max(max_constant(b)),
     }
 }
 
@@ -242,12 +226,10 @@ const LEVEL_VARS: u32 = 3;
 /// Диапазон значений переменных, на котором различимы любые два неравных
 /// уровня из [`any_level`].
 ///
-/// Нуль обязателен: только на нём `imax` отличается от `max`. Верхняя граница
-/// обязана превышать константы - иначе `max 3 u` и `max 4 u` совпадут на всём
-/// диапазоне, - и обязана давать переменным достаточно различных значений:
-/// `imax u0 u2` и `imax u1 u2` совпадают на `{0, 1}`, а расходятся уже на
-/// `{0, 1, 2}`. Оба промаха видны только как ложные срывы полноты, поэтому
-/// граница взята с запасом.
+/// Верхняя граница обязана превышать константы, встречающиеся в выражениях:
+/// иначе `max 3 u` и `max 4 u` совпадут на всём диапазоне и полнота сорвётся
+/// ложно. Запас взят с избытком - перебор дешёвый, а промах виден только как
+/// загадочный отказ.
 fn bound_for(levels: [&Level; 2]) -> u32 {
     levels.into_iter().map(max_constant).max().unwrap_or(0) + LEVEL_VARS + 1
 }
@@ -299,16 +281,13 @@ proptest! {
         }
     }
 
-    /// **Полнота на уровнях без `imax`:** здесь нормальная форма - полный
-    /// инвариант, и совпадение на всех подстановках обязано давать `equiv`.
+    /// **Полнота:** нормальная форма - полный инвариант, и совпадение на всех
+    /// подстановках обязано давать `equiv`.
     ///
-    /// С `imax` полнота не достигнута и не заявляется - см. §10 вопрос 2.
-    /// Известный незакрытый случай: `max u (imax w v)` при `u >= w` равен
-    /// `max u v`, но правило контекстное (смотрит на соседей по `max`), а
-    /// применение его к промежуточным группировкам ломает ассоциативность
-    /// нормальной формы.
+    /// Безусловная - вместе с `imax` ушёл единственный случай, который её
+    /// ломал (§10 вопрос 2 закрыт).
     #[test]
-    fn equivalence_is_complete_without_imax(a in any_imax_free_level(), b in any_imax_free_level()) {
+    fn equivalence_is_complete(a in any_level(), b in any_level()) {
         let same_everywhere = assignments(bound_for([&a, &b]))
             .all(|assignment| a.evaluate(&assignment) == b.evaluate(&assignment));
         prop_assert_eq!(a.equiv(&b), same_everywhere, "{} против {}", a, b);
@@ -348,18 +327,6 @@ proptest! {
         prop_assert!(a.clone().max(b.clone()).succ().equiv(&a.succ().max(b.succ())));
     }
 
-    /// `imax u 0 = 0` - тип функции в `Type 0` остаётся в `Type 0`.
-    #[test]
-    fn imax_into_zero_collapses(level in any_level()) {
-        prop_assert!(level.imax(Level::Zero).equiv(&Level::Zero));
-    }
-
-    /// Когда правая часть заведомо ненулевая, `imax` вырождается в `max`.
-    #[test]
-    fn imax_over_a_successor_is_max(a in any_level(), b in any_level()) {
-        let right = b.succ();
-        prop_assert!(a.clone().imax(right.clone()).equiv(&a.max(right)));
-    }
 }
 
 // --------------------------------------------------------------------- термы

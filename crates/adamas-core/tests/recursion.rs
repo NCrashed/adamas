@@ -302,6 +302,79 @@ fn a_field_of_a_field_is_smaller_too() {
     assert!(define_unary(&mut signature, "half", body));
 }
 
+/// Разбор, применённый к соседнему аргументу: ветвь связывает лямбдой не
+/// только поля.
+///
+/// `g n m = (case n return (\(0 _) -> Nat -> Nat) of
+///             { zero   => \m'. zero
+///             ; succ k => \k. \m'. case m' of {zero => zero; succ j => g n j} }) m`
+///
+/// Так элаборация клауз уточняет тип соседа (convoy, §10 вопрос 44), и
+/// уменьшается здесь **только** второй аргумент - тот, что прошёл через лямбду
+/// сверх полей.
+fn convoyed(recursive: Term) -> Term {
+    let convoy = case(
+        "Nat",
+        Term::var(1),
+        constantly(arrow(c("Nat"), c("Nat"))),
+        vec![
+            ("zero", lam(Mult::Many, "m", c("zero"))),
+            (
+                "succ",
+                lam(Mult::Many, "k", lam(Mult::Many, "m", recursive)),
+            ),
+        ],
+    );
+    lam(
+        Mult::Many,
+        "n",
+        lam(Mult::Many, "m", convoy.apply([Term::var(0)])),
+    )
+}
+
+/// Определяет двухаргументную функцию над `Nat` и возвращает её вердикт.
+fn define_binary(signature: &mut Signature, name: &str, body: Term) -> bool {
+    let outcome = signature.define(
+        name,
+        Mult::Many,
+        0,
+        arrow(c("Nat"), arrow(c("Nat"), c("Nat"))),
+        Some(body),
+    );
+    assert!(outcome.is_ok(), "`{name}` типизируется: {outcome:?}");
+    verdict(signature, name)
+}
+
+#[test]
+fn an_argument_carried_through_a_convoy_keeps_its_size() {
+    // Внутри ветви разбирается уже переданный аргумент, и его поле обязано
+    // считаться меньшим - иначе convoy делал бы нетотальным всякое
+    // определение, рекурсия которого идёт по уточнённому аргументу.
+    let mut signature = base();
+    let inner = case(
+        "Nat",
+        Term::var(0),
+        constantly(c("Nat")),
+        vec![
+            ("zero", c("zero")),
+            (
+                "succ",
+                lam(Mult::Many, "j", c("g").apply([Term::var(4), Term::var(0)])),
+            ),
+        ],
+    );
+    assert!(define_binary(&mut signature, "g", convoyed(inner)));
+}
+
+#[test]
+fn a_convoy_does_not_invent_a_decrease() {
+    // Обратная сторона: сам по себе перенос через лямбду ничего не уменьшает.
+    // `g n m = g n m` в той же форме обязано остаться нетотальным.
+    let mut signature = base();
+    let recursive = c("g").apply([Term::var(3), Term::var(0)]);
+    assert!(!define_binary(&mut signature, "g", convoyed(recursive)));
+}
+
 #[test]
 fn several_calls_must_share_one_decreasing_position() {
     // Оба вызова уменьшаются по одному и тому же полю.

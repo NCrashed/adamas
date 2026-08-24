@@ -24,6 +24,15 @@
 //! вызовы. Позиция ищется перебором - объявлять её, как `{struct n}` в Coq,
 //! незачем.
 //!
+//! # Разбор под применением
+//!
+//! Ветвь связывает лямбдами не только поля: элаборация клауз выносит соседние
+//! аргументы в мотив и применяет разбор обратно к ним (convoy - иначе тип
+//! соседа не уточнить). Лямбды сверх полей связывают ровно эти аргументы, и
+//! размеры им раздаются от применения. Без раздачи убывание терялось бы на
+//! каждом аргументе, прошедшем через уточнение, - то есть ровно на тех, ради
+//! которых пишут индексированные семейства.
+//!
 //! # Что не покрыто
 //!
 //! Лексикографический порядок (`ack`), well-founded рекурсия с явной мерой,
@@ -34,7 +43,7 @@
 
 use crate::mult::Mult;
 use crate::sig::{Definition, Signature};
-use crate::term::{Index, Name, Term, spine};
+use crate::term::{Case, Index, Name, Term, spine};
 
 /// Размер связывания относительно параметров определения.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,15 +167,16 @@ impl Walk<'_> {
 
             Term::App(..) => {
                 let (head, arguments) = spine(term);
-                if matches!(head, Term::Const(other, _) if other == self.name) {
-                    self.calls.push(
-                        arguments
-                            .iter()
-                            .map(|argument| Self::size(sizes, argument))
-                            .collect(),
-                    );
-                } else {
-                    self.term(sizes, head);
+                let applied: Vec<Option<Size>> = arguments
+                    .iter()
+                    .map(|argument| Self::size(sizes, argument))
+                    .collect();
+                match head {
+                    Term::Const(other, _) if other == self.name => self.calls.push(applied),
+                    // Convoy: аргументы применения - те самые соседи, которые
+                    // ветвь связывает лямбдами сверх полей.
+                    Term::Case(case) => self.case(sizes, case, &applied),
+                    other => self.term(sizes, other),
                 }
                 for argument in arguments {
                     self.term(sizes, argument);
@@ -186,20 +196,24 @@ impl Walk<'_> {
                 self.under(sizes, None, body);
             }
 
-            Term::Case(case) => {
-                self.term(sizes, &case.scrutinee);
-                self.term(sizes, &case.motive);
-                // Поля строго меньше разобранного значения - здесь и только
-                // здесь размер растёт в глубину.
-                let smaller = Self::size(sizes, &case.scrutinee).map(|size| Size {
-                    argument: size.argument,
-                    depth: size.depth + 1,
-                });
-                for branch in &case.branches {
-                    let fields = self.fields(&branch.constructor, case.params);
-                    self.branch(sizes, fields, smaller, &branch.body);
-                }
-            }
+            Term::Case(case) => self.case(sizes, case, &[]),
+        }
+    }
+
+    /// Обходит разбор, раздавая ветвям размеры аргументов, к которым он
+    /// применён.
+    fn case(&mut self, sizes: &mut Vec<Option<Size>>, case: &Case, applied: &[Option<Size>]) {
+        self.term(sizes, &case.scrutinee);
+        self.term(sizes, &case.motive);
+        // Поля строго меньше разобранного значения - здесь и только здесь
+        // размер растёт в глубину.
+        let smaller = Self::size(sizes, &case.scrutinee).map(|size| Size {
+            argument: size.argument,
+            depth: size.depth + 1,
+        });
+        for branch in &case.branches {
+            let fields = self.fields(&branch.constructor, case.params);
+            self.branch(sizes, fields, smaller, applied, &branch.body);
         }
     }
 
@@ -227,13 +241,29 @@ impl Walk<'_> {
         sizes: &mut Vec<Option<Size>>,
         fields: usize,
         smaller: Option<Size>,
+        applied: &[Option<Size>],
         term: &Term,
     ) {
         match (fields, term) {
-            (0, other) => self.term(sizes, other),
+            (0, other) => self.convoyed(sizes, applied, other),
             (_, Term::Lam(_, _, body)) => {
                 sizes.push(smaller);
-                self.branch(sizes, fields - 1, smaller, body);
+                self.branch(sizes, fields - 1, smaller, applied, body);
+                sizes.pop();
+            }
+            // Поля кончились не лямбдами: до аргументов применения такая ветвь
+            // не добирается, и раздавать их размеры некому.
+            (_, other) => self.term(sizes, other),
+        }
+    }
+
+    /// Обходит то, что осталось от ветви после полей, раздавая лямбдам размеры
+    /// аргументов применения - каждой свой, слева направо.
+    fn convoyed(&mut self, sizes: &mut Vec<Option<Size>>, applied: &[Option<Size>], term: &Term) {
+        match (applied.split_first(), term) {
+            (Some((first, rest)), Term::Lam(_, _, body)) => {
+                sizes.push(*first);
+                self.convoyed(sizes, rest, body);
                 sizes.pop();
             }
             (_, other) => self.term(sizes, other),

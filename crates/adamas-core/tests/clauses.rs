@@ -440,6 +440,186 @@ fn a_variable_pattern_is_refined_by_the_split() {
     );
 }
 
+/// `If : Bool -> Type 0` - `If true = Nat`, `If false = Bool`.
+///
+/// Само определение пишется клаузами: большая элиминация ничем не отличается
+/// от обычной, кроме того, что тип результата - универсум.
+fn with_if(signature: &mut Signature) {
+    define(
+        signature,
+        "If",
+        arrow(c("Bool"), Term::universe(0)),
+        &[
+            clause(vec![ctor("true", Vec::new())], c("Nat")),
+            clause(vec![ctor("false", Vec::new())], c("Bool")),
+        ],
+    );
+}
+
+/// `(ω b : Bool) -> (ω x : If b) -> Nat`
+fn dependent_pair() -> Term {
+    pi(
+        Mult::Many,
+        "b",
+        c("Bool"),
+        arrow(c("If").apply([Term::var(0)]), c("Nat")),
+    )
+}
+
+#[test]
+fn a_neighbour_is_refined_by_the_split() {
+    // Индексов здесь нет ни одного, но тип второго аргумента зависит от
+    // первого: в ветви `true` он обязан стать `Nat`, в ветви `false` - `Bool`.
+    // Ядро связывает мотив с одним значением, поэтому сосед выносится в тот же
+    // мотив, а разбор применяется обратно к нему.
+    let mut signature = base();
+    with_if(&mut signature);
+    define(
+        &mut signature,
+        "g",
+        dependent_pair(),
+        &[
+            // `x : Nat` - только поэтому его и можно вернуть.
+            clause(vec![ctor("true", Vec::new()), var("x")], Term::var(0)),
+            // `x : Bool` - вернуть его нельзя, и клауза этого не делает.
+            clause(vec![ctor("false", Vec::new()), var("x")], c("zero")),
+        ],
+    );
+
+    for (flag, argument, result) in [("true", number(2), 2), ("false", c("true"), 0)] {
+        let outcome = check_closed(
+            &signature,
+            &c("anything").apply([number(result)]),
+            &family(c("g").apply([c(flag), argument])),
+        );
+        assert!(outcome.is_ok(), "g {flag} = {result}: {outcome:?}");
+    }
+}
+
+#[test]
+fn a_refinement_that_did_not_happen_is_rejected() {
+    // Обратная сторона: в ветви `false` сосед - `Bool`, и вернуть его вместо
+    // `Nat` нельзя. Уточнение обязано быть уточнением, а не размыванием.
+    let mut signature = base();
+    with_if(&mut signature);
+    let body = compile(
+        &signature,
+        &mut Metas::default(),
+        &dependent_pair(),
+        &[
+            clause(vec![ctor("true", Vec::new()), var("x")], Term::var(0)),
+            clause(vec![ctor("false", Vec::new()), var("x")], Term::var(0)),
+        ],
+    )
+    .expect("дерево собирается: неверен здесь тип тела, а не форма клауз");
+    assert!(
+        matches!(
+            signature.define("g", Mult::Many, 0, dependent_pair(), Some(body)),
+            Err(TypeError::Mismatch { .. })
+        ),
+        "`Bool` вместо `Nat`"
+    );
+}
+
+#[test]
+fn a_refined_neighbour_can_be_matched_in_turn() {
+    // Разбирать `x : If b` нельзя - до уточнения это застрявшее вычисление, а
+    // не семейство. В ветви `true` оно становится `Nat`, и вложенный разбор
+    // идёт уже по нему.
+    let mut signature = base();
+    with_if(&mut signature);
+    define(
+        &mut signature,
+        "h",
+        dependent_pair(),
+        &[
+            clause(
+                vec![ctor("true", Vec::new()), ctor("zero", Vec::new())],
+                c("zero"),
+            ),
+            clause(
+                vec![ctor("true", Vec::new()), ctor("succ", vec![var("k")])],
+                Term::var(0),
+            ),
+            clause(vec![ctor("false", Vec::new()), var("x")], c("zero")),
+        ],
+    );
+
+    for (flag, argument, result) in [
+        ("true", number(3), 2),
+        ("true", number(0), 0),
+        ("false", c("false"), 0),
+    ] {
+        let outcome = check_closed(
+            &signature,
+            &c("anything").apply([number(result)]),
+            &family(c("h").apply([c(flag), argument])),
+        );
+        assert!(outcome.is_ok(), "h {flag} = {result}: {outcome:?}");
+    }
+}
+
+#[test]
+fn recursion_on_a_refined_neighbour_is_still_structural() {
+    // Уточнённый аргумент приходит в ветвь лишней лямбдой, и убывание по нему
+    // обязано доживать до проверки тотальности - иначе convoy делал бы
+    // нетотальным всякое определение, рекурсия которого идёт по соседу.
+    let mut signature = base();
+    with_if(&mut signature);
+    define(
+        &mut signature,
+        "count",
+        dependent_pair(),
+        &[
+            clause(
+                vec![ctor("true", Vec::new()), ctor("zero", Vec::new())],
+                c("zero"),
+            ),
+            clause(
+                vec![ctor("true", Vec::new()), ctor("succ", vec![var("k")])],
+                c("succ").apply([c("count").apply([c("true"), Term::var(0)])]),
+            ),
+            clause(vec![ctor("false", Vec::new()), var("x")], c("zero")),
+        ],
+    );
+    assert!(
+        signature
+            .lookup("count")
+            .is_some_and(|definition| definition.total),
+        "рекурсия по вынесенному соседу структурная"
+    );
+    let outcome = check_closed(
+        &signature,
+        &c("anything").apply([number(3)]),
+        &family(c("count").apply([c("true"), number(3)])),
+    );
+    assert!(outcome.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn a_variable_pattern_is_refined_by_a_nested_split() {
+    // Та же связка на два разбора в глубину: третья клауза достаётся ветви
+    // `succ (succ k)`, и её `n` там - построенное значение, а не исходный
+    // аргумент. Иначе тело имеет тип `P n` там, где требуется `P (succ (succ k))`.
+    let mut signature = base();
+    define(
+        &mut signature,
+        "f",
+        pi(Mult::Many, "n", c("Nat"), family(Term::var(0))),
+        &[
+            clause(
+                vec![ctor("zero", Vec::new())],
+                c("anything").apply([c("zero")]),
+            ),
+            clause(
+                vec![ctor("succ", vec![ctor("zero", Vec::new())])],
+                c("anything").apply([number(1)]),
+            ),
+            clause(vec![var("n")], c("anything").apply([Term::var(0)])),
+        ],
+    );
+}
+
 #[test]
 fn a_linear_argument_survives_being_matched() {
     // `f zero = zero; f n = n` при линейном аргументе. Разбор тратит значение,

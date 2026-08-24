@@ -28,14 +28,20 @@
 //! обнаруживается тем же обходом. Пустое семейство разбирается и без клауз:
 //! ветвей ноль, и разбор сам доказывает, что вызвать функцию нечем.
 //!
-//! # Уточняется только разбираемый аргумент
+//! # Уточнение соседей
 //!
 //! Ветвь знает, что разбираемое значение построено конструктором, и это видят
-//! тип результата и тела клауз. Типы **остальных** аргументов не уточняются:
-//! ядро связывает мотив с одним значением, а чтобы уточнить соседей, их надо
-//! абстрагировать в тот же мотив и применить обратно (convoy-паттерн). Поэтому
-//! `g : (b : Bool) -> If b -> Nat` не пишется клаузами, хотя индексов здесь
-//! нет: в ветви `true` аргумент остаётся типа `If b`. См. §10 вопрос 44.
+//! тип результата, тела клауз и типы **соседних** аргументов. Последнее ядру
+//! напрямую не выразить: мотив связан с одним значением. Поэтому соседи, чьи
+//! типы зависят от разбираемого, выносятся в тот же мотив телескопом `Pi`, а
+//! разбор применяется обратно к ним - convoy-паттерн. Так пишется
+//! `g : (b : Bool) -> If b -> Nat`, где индексов нет ни одного: в ветви `true`
+//! второй аргумент получает тип `If true`.
+//!
+//! Цена - лишняя лямбда в ветви на каждого вынесенного соседа. Её знает
+//! проверка тотальности ([`crate::total`]): размеры аргументов применения
+//! доходят до этих лямбд, иначе рекурсия по уточнённому аргументу перестала бы
+//! засчитываться.
 //!
 //! # Индексированные семейства не поддержаны
 //!
@@ -50,7 +56,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::check::{TypeError, instantiate_telescope, is_type};
-use crate::ctx::Ctx;
+use crate::ctx::{Binding, Ctx};
 use crate::eval::quote;
 use crate::level::Level;
 use crate::meta::Metas;
@@ -420,7 +426,7 @@ impl Compiler<'_> {
         })
     }
 
-    /// Разбор по колонке `split`.
+    /// Разбор по колонке `at`.
     fn split(
         &mut self,
         ctx: &Ctx<'_>,
@@ -428,118 +434,115 @@ impl Compiler<'_> {
         rows: &[Row],
         target: &Term,
         example: &[Pattern],
-        split: usize,
+        at: usize,
     ) -> Result<Term, PatternError> {
-        let column = &columns[split];
-        let Family {
-            data,
-            levels,
-            params,
-            constructors,
-            parameters,
-        } = self.family(ctx, column, rows, split)?;
+        let family = self.family(ctx, &columns[at], rows, at)?;
+        // Соседи, чьи типы зависят от разбираемого значения: мотив связан с
+        // одним значением, поэтому уточнить их можно только вынеся в тот же
+        // мотив и применив разбор обратно к ним.
+        let plan = Split {
+            columns,
+            rows,
+            target,
+            example,
+            column: at,
+            carried: carried(ctx, columns, at),
+        };
 
         let size = ctx.size();
-        let mut branches = Vec::with_capacity(constructors.len());
-        for constructor in &constructors {
-            let fields = self.fields(ctx, constructor, &levels, &params);
-            let mut inner = ctx.clone();
-            for field in &fields {
-                inner = inner.bind(Rc::clone(&field.name), field.mult, Rc::clone(&field.ty));
-            }
-
-            let mut inner_columns = Vec::with_capacity(columns.len() + fields.len());
-            inner_columns.extend(shallow(&columns[..split]));
-            for (index, field) in fields.iter().enumerate() {
-                let mut path = column.path.clone();
-                path.push(index);
-                inner_columns.push(Column {
-                    level: field.level,
-                    path,
-                    ty: Rc::clone(&field.ty),
-                });
-            }
-            inner_columns.extend(shallow(&columns[split + 1..]));
-
-            // В этой ветви разбираемое значение - не переменная, а
-            // построенное конструктором, и увидеть это обязаны оба: и тип
-            // результата, и тело клаузы, связавшее аргумент переменной.
-            // Без подстановки вложенный разбор строил бы мотив по
-            // неуточнённому типу (`P n` против `P zero`), а тело ссылалось бы
-            // на исходный аргумент - и тратило бы его второй раз после
-            // разбора.
-            let inner_size = inner.size();
-            let built = fields.iter().fold(
-                params.iter().fold(
-                    Term::Const(Rc::clone(constructor), Rc::clone(&levels)),
-                    |applied, param| Term::App(Rc::new(applied), Rc::new(quote(inner_size, param))),
-                ),
-                |applied, field| {
-                    Term::App(
-                        Rc::new(applied),
-                        Rc::new(Term::Var(Lvl(field.level).to_index(inner_size))),
-                    )
-                },
-            );
-            let refined = inner.eval(&built);
-
-            let mut inner_rows = Vec::new();
-            for row in rows {
-                let Some(row) = specialise(row, split, constructor, fields.len(), &refined)? else {
-                    continue;
-                };
-                inner_rows.push(row);
-            }
-
-            let mut inner_example = example.to_vec();
-            place(
-                &mut inner_example,
-                &column.path,
-                Pattern::Constructor(
-                    Rc::clone(constructor),
-                    vec![Pattern::Var("_".into()); fields.len()],
-                ),
-            );
-
-            let inner_target = rewrite(target, 0, size, &|level| {
-                if level == column.level {
-                    built.clone()
-                } else {
-                    Term::Var(Lvl(level).to_index(inner_size))
-                }
-            });
-
-            let body = self.solve(
-                &inner,
-                &inner_columns,
-                &inner_rows,
-                &inner_target,
-                &inner_example,
-            )?;
-            branches.push(Branch {
-                constructor: Rc::clone(constructor),
-                body: Rc::new(fields.iter().rev().fold(body, |body, field| {
-                    Term::Lam(field.mult, Rc::clone(&field.name), Rc::new(body))
-                })),
-            });
+        let motive = motive(ctx, plan.scrutinee(), &plan.borrowed(), target);
+        let mut branches = Vec::with_capacity(family.constructors.len());
+        for constructor in &family.constructors {
+            branches.push(self.branch(ctx, &plan, &family, constructor)?);
         }
 
-        let motive = Term::Lam(
-            Mult::Zero,
-            "x".into(),
-            Rc::new(rewrite(target, 0, size, &|level| {
-                let redirected = if level == column.level { size } else { level };
-                Term::Var(Lvl(redirected).to_index(size + 1))
-            })),
-        );
-        Ok(Term::Case(Rc::new(Case {
-            data,
-            levels,
-            params: parameters,
-            scrutinee: Rc::new(Term::Var(Lvl(column.level).to_index(size))),
+        let discriminated = Term::Case(Rc::new(Case {
+            data: family.data,
+            levels: family.levels,
+            params: family.parameters,
+            scrutinee: Rc::new(Term::Var(Lvl(plan.scrutinee().level).to_index(size))),
             motive: Rc::new(motive),
             branches,
-        })))
+        }));
+        // Разбор применяется обратно к вынесенным соседям - к тем самым
+        // переменным, с которых начинали: их старые связывания расходуются
+        // здесь, а тела ветвей пользуются свежими.
+        Ok(discriminated.apply(
+            plan.borrowed()
+                .iter()
+                .map(|carried| Term::Var(Lvl(carried.level).to_index(size))),
+        ))
+    }
+
+    /// Ветвь одного конструктора.
+    fn branch(
+        &mut self,
+        ctx: &Ctx<'_>,
+        plan: &Split<'_>,
+        family: &Family,
+        constructor: &Name,
+    ) -> Result<Branch, PatternError> {
+        let size = ctx.size();
+        let fields = self.fields(ctx, constructor, &family.levels, &family.params);
+        let mut inner = ctx.clone();
+        for field in &fields {
+            inner = inner.bind(Rc::clone(&field.name), field.mult, Rc::clone(&field.ty));
+        }
+
+        // В этой ветви разбираемое значение - не переменная, а построенное
+        // конструктором, и увидеть это обязаны все: тип результата, типы
+        // вынесенных соседей и тела клауз, связавшие аргумент переменной. Без
+        // подстановки вложенный разбор строил бы мотив по неуточнённому типу
+        // (`P n` против `P zero`), а тело ссылалось бы на исходный аргумент -
+        // и тратило бы его второй раз после разбора.
+        let base = inner.size();
+        let built = fields.iter().fold(
+            family.params.iter().fold(
+                Term::Const(Rc::clone(constructor), Rc::clone(&family.levels)),
+                |applied, param| Term::App(Rc::new(applied), Rc::new(quote(base, param))),
+            ),
+            |applied, field| {
+                Term::App(
+                    Rc::new(applied),
+                    Rc::new(Term::Var(Lvl(field.level).to_index(base))),
+                )
+            },
+        );
+        let refined = inner.eval(&built);
+        let refinement = plan.refinement(Bound::Built(Rc::clone(&refined)), base);
+
+        // Свежие связывания соседей - уже с уточнёнными типами.
+        let mut copies = Vec::with_capacity(plan.carried.len());
+        for carried_column in plan.borrowed() {
+            let at = inner.size();
+            let binding = binding(ctx, carried_column.level);
+            let domain = rewrite(
+                &quote(size, &carried_column.ty),
+                0,
+                size,
+                &refinement.at(at),
+            );
+            let ty = inner.eval(&domain);
+            inner = inner.bind(Rc::clone(&binding.name), binding.mult, Rc::clone(&ty));
+            copies.push((binding.mult, Rc::clone(&binding.name), ty));
+        }
+
+        let at = inner.size();
+        let columns = plan.refined_columns(&fields, &copies, base);
+        let rows = plan.refined_rows(&inner, &refinement, constructor, fields.len(), &refined)?;
+        let example = plan.refined_example(constructor, fields.len());
+        let target = rewrite(plan.target, 0, size, &refinement.at(at));
+
+        let body = self.solve(&inner, &columns, &rows, &target, &example)?;
+        let body = copies.iter().rev().fold(body, |body, (mult, name, _)| {
+            Term::Lam(*mult, Rc::clone(name), Rc::new(body))
+        });
+        Ok(Branch {
+            constructor: Rc::clone(constructor),
+            body: Rc::new(fields.iter().rev().fold(body, |body, field| {
+                Term::Lam(field.mult, Rc::clone(&field.name), Rc::new(body))
+            })),
+        })
     }
 
     /// Индуктивное семейство колонки вместе с проверками, которые обязаны
@@ -697,13 +700,269 @@ fn specialise(
     }))
 }
 
-/// Копия колонок без глубокого копирования типов.
-fn shallow(columns: &[Column]) -> impl Iterator<Item = Column> + '_ {
-    columns.iter().map(|column| Column {
-        level: column.level,
-        path: column.path.clone(),
-        ty: Rc::clone(&column.ty),
-    })
+/// Разбор одной колонки: то, что общее для всех её ветвей.
+struct Split<'a> {
+    columns: &'a [Column],
+    rows: &'a [Row],
+    target: &'a Term,
+    example: &'a [Pattern],
+    /// Номер разбираемой колонки.
+    column: usize,
+    /// Номера вынесенных в мотив колонок, в порядке контекста.
+    carried: Vec<usize>,
+}
+
+impl Split<'_> {
+    /// Разбираемая колонка.
+    fn scrutinee(&self) -> &Column {
+        &self.columns[self.column]
+    }
+
+    /// Вынесенные колонки.
+    fn borrowed(&self) -> Vec<&Column> {
+        self.carried
+            .iter()
+            .map(|index| &self.columns[*index])
+            .collect()
+    }
+
+    /// Перенос в контекст ветви: копии соседей связываются подряд, начиная с
+    /// `base`.
+    fn refinement(&self, became: Bound, base: u32) -> Refinement {
+        Refinement {
+            scrutinee: self.scrutinee().level,
+            became,
+            carried: self
+                .carried
+                .iter()
+                .enumerate()
+                .map(|(position, index)| (self.columns[*index].level, base + arity_u32(position)))
+                .collect(),
+        }
+    }
+
+    /// Колонки ветви: разобранная заменяется своими полями, вынесенные -
+    /// свежими копиями, прочие остаются как были.
+    fn refined_columns(
+        &self,
+        fields: &[Field],
+        copies: &[(Mult, Name, Rc<Value>)],
+        base: u32,
+    ) -> Vec<Column> {
+        let mut refined = Vec::with_capacity(self.columns.len() + fields.len());
+        for (index, column) in self.columns.iter().enumerate() {
+            if index == self.column {
+                for (position, field) in fields.iter().enumerate() {
+                    let mut path = column.path.clone();
+                    path.push(position);
+                    refined.push(Column {
+                        level: field.level,
+                        path,
+                        ty: Rc::clone(&field.ty),
+                    });
+                }
+            } else if let Some(position) = self.carried.iter().position(|carried| *carried == index)
+            {
+                refined.push(Column {
+                    level: base + arity_u32(position),
+                    path: column.path.clone(),
+                    ty: Rc::clone(&copies[position].2),
+                });
+            } else {
+                refined.push(Column {
+                    level: column.level,
+                    path: column.path.clone(),
+                    ty: Rc::clone(&column.ty),
+                });
+            }
+        }
+        refined
+    }
+
+    /// Строки ветви: подходящие клаузы с переехавшими связываниями.
+    fn refined_rows(
+        &self,
+        inner: &Ctx<'_>,
+        refinement: &Refinement,
+        constructor: &Name,
+        fields: usize,
+        built: &Rc<Value>,
+    ) -> Result<Vec<Row>, PatternError> {
+        let at = inner.size();
+        let mut refined = Vec::new();
+        for row in self.rows {
+            let Some(mut row) = specialise(row, self.column, constructor, fields, built)? else {
+                continue;
+            };
+            // Связывания, сделанные разборами выше, переезжают вместе с
+            // соседями: переменная клаузы, указывавшая на уточнённый аргумент,
+            // обязана указать на его новую форму.
+            for value in row.assigned.iter_mut().flatten() {
+                *value = inner.eval(&rewrite(&quote(at, value), 0, at, &refinement.at(at)));
+            }
+            refined.push(row);
+        }
+        Ok(refined)
+    }
+
+    /// Пример непокрытого случая с подставленным конструктором.
+    fn refined_example(&self, constructor: &Name, fields: usize) -> Vec<Pattern> {
+        let mut example = self.example.to_vec();
+        place(
+            &mut example,
+            &self.scrutinee().path,
+            Pattern::Constructor(
+                Rc::clone(constructor),
+                vec![Pattern::Var("_".into()); fields],
+            ),
+        );
+        example
+    }
+}
+
+/// Чем стало разбираемое значение при переносе терма.
+enum Bound {
+    /// Переменной нового уровня - так его видит мотив.
+    Variable(u32),
+    /// Значением: в ветви оно уже построено конструктором.
+    Built(Rc<Value>),
+}
+
+/// Перенос терма из контекста разбора в контекст мотива или ветви.
+///
+/// Меняются двое: разбираемое значение и вынесенные соседи, получившие новые
+/// связывания. Всё прочее остаётся собой - меняется только пересчёт уровня в
+/// индекс.
+struct Refinement {
+    /// Уровень разбираемой колонки.
+    scrutinee: u32,
+    /// Чем она стала.
+    became: Bound,
+    /// Пары "уровень соседа, уровень его нового связывания".
+    carried: Vec<(u32, u32)>,
+}
+
+impl Refinement {
+    /// Отображение уровня в терм, записанный в контексте размера `at`.
+    fn at(&self, at: u32) -> impl Fn(u32) -> Term + '_ {
+        move |level| {
+            if level == self.scrutinee {
+                return match &self.became {
+                    Bound::Variable(bound) => Term::Var(Lvl(*bound).to_index(at)),
+                    Bound::Built(value) => quote(at, value),
+                };
+            }
+            match self.carried.iter().find(|(from, _)| *from == level) {
+                Some((_, to)) => Term::Var(Lvl(*to).to_index(at)),
+                None => Term::Var(Lvl(level).to_index(at)),
+            }
+        }
+    }
+}
+
+/// Колонки, чьи типы зависят от разбираемого значения, в порядке контекста.
+///
+/// Замыкание транзитивно: если тип соседа зависит от **вынесенного** соседа,
+/// он обязан переехать тоже, иначе останется указывать на старое, неуточнённое
+/// связывание.
+fn carried(ctx: &Ctx<'_>, columns: &[Column], split: usize) -> Vec<usize> {
+    let size = ctx.size();
+    let mut refined = vec![columns[split].level];
+    let mut chosen: Vec<usize> = Vec::new();
+    let mut grown = true;
+    while grown {
+        grown = false;
+        for (index, column) in columns.iter().enumerate() {
+            if index == split || chosen.contains(&index) {
+                continue;
+            }
+            if depends(size, &column.ty, &refined) {
+                chosen.push(index);
+                refined.push(column.level);
+                grown = true;
+            }
+        }
+    }
+    // Порядок колонок - порядок сопоставления, а связывания идут в порядке
+    // контекста: разбор колонки вставляет её поля в середину списка.
+    chosen.sort_by_key(|index| columns[*index].level);
+    chosen
+}
+
+/// Упоминает ли тип хоть один из уровней.
+///
+/// Считается по нормальной форме: `(\_ -> Nat) b` от `b` не зависит, и
+/// уточнять там нечего.
+fn depends(size: u32, ty: &Rc<Value>, levels: &[u32]) -> bool {
+    fn go(term: &Term, depth: u32, size: u32, levels: &[u32]) -> bool {
+        let recur = |inner: &Rc<Term>| go(inner, depth, size, levels);
+        let under = |inner: &Rc<Term>| go(inner, depth + 1, size, levels);
+        match term {
+            Term::Var(Index(index)) => {
+                *index >= depth && levels.contains(&(size + depth - 1 - index))
+            }
+            Term::Universe(_) | Term::Const(..) => false,
+            Term::Lam(_, _, body) => under(body),
+            Term::App(callee, argument) => recur(callee) || recur(argument),
+            Term::Pi(_, _, domain, codomain) => recur(domain) || under(codomain),
+            Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || under(body),
+            Term::Case(case) => {
+                recur(&case.scrutinee)
+                    || recur(&case.motive)
+                    || case.branches.iter().any(|branch| recur(&branch.body))
+            }
+        }
+    }
+    go(&quote(size, ty), 0, size, levels)
+}
+
+/// Мотив разбора: `\(0 x) -> Pi <вынесенные соседи>. <тип результата>`.
+///
+/// Соседи стоят телескопом внутри мотива, поэтому в каждой ветви их типы
+/// уточняются вместе с разбираемым значением. Разбор возвращает функцию от
+/// них, и вызывающий применяет её обратно - см. [`Compiler::split`].
+fn motive(ctx: &Ctx<'_>, column: &Column, carried: &[&Column], target: &Term) -> Term {
+    let size = ctx.size();
+    let refinement = Refinement {
+        scrutinee: column.level,
+        became: Bound::Variable(size),
+        carried: carried
+            .iter()
+            .enumerate()
+            .map(|(position, carried)| (carried.level, size + 1 + arity_u32(position)))
+            .collect(),
+    };
+
+    let mut inner = ctx.bind("x".into(), Mult::Zero, Rc::clone(&column.ty));
+    let mut domains = Vec::with_capacity(carried.len());
+    for carried_column in carried {
+        let at = inner.size();
+        let binding = binding(ctx, carried_column.level);
+        let domain = rewrite(
+            &quote(size, &carried_column.ty),
+            0,
+            size,
+            &refinement.at(at),
+        );
+        let ty = inner.eval(&domain);
+        inner = inner.bind(Rc::clone(&binding.name), binding.mult, ty);
+        domains.push((binding.mult, Rc::clone(&binding.name), domain));
+    }
+
+    let result = rewrite(target, 0, size, &refinement.at(inner.size()));
+    let body = domains
+        .into_iter()
+        .rev()
+        .fold(result, |codomain, (mult, name, domain)| {
+            Term::Pi(mult, name, Rc::new(domain), Rc::new(codomain))
+        });
+    Term::Lam(Mult::Zero, "x".into(), Rc::new(body))
+}
+
+/// Запись контекста по уровню.
+fn binding<'a>(ctx: &'a Ctx<'_>, level: u32) -> &'a Binding {
+    ctx.lookup(Lvl(level).to_index(ctx.size()))
+        .unwrap_or_else(|| unreachable!("уровень {level} вне контекста"))
 }
 
 /// Индуктивное семейство в голове типа: имя, аргументы уровня и параметры.

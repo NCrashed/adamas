@@ -1070,6 +1070,107 @@ fn stuck_cases_are_compared_branch_by_branch() {
     );
 }
 
+// ------------------------------------------------------------ запечатывание
+
+/// Пустое семейство остаётся пустым после того, как по нему разобрали.
+///
+/// `absurd : Void -> A` проверена с нулём ветвей, потому что у `Void` не было
+/// конструкторов. Если конструктор появится позже, полнота ветвей окажется
+/// проверенной по прежнему списку, а перепроверять принятые определения
+/// некому: `absurd boom` дала бы замкнутого обитателя произвольного типа,
+/// признанного тотальным.
+#[test]
+fn a_family_that_has_been_eliminated_takes_no_more_constructors() {
+    let mut signature = Signature::default();
+    let mut metas = adamas_core::meta::Metas::default();
+    signature
+        .postulate("A", Mult::Many, 0, Term::universe(0))
+        .expect("A корректен");
+    signature
+        .declare_data("Void", 0, &mut metas, Term::universe(0))
+        .expect("Void корректен");
+
+    signature
+        .define(
+            "absurd",
+            Mult::Many,
+            0,
+            arrow(c("Void"), c("A")),
+            Some(lam(
+                Mult::Many,
+                "v",
+                case(
+                    "Void",
+                    &[],
+                    0,
+                    Term::var(0),
+                    lam(Mult::Zero, "x", c("A")),
+                    Vec::new(),
+                ),
+            )),
+        )
+        .expect("разбор пустого семейства законен, пока оно пусто");
+
+    assert!(
+        matches!(
+            signature.declare_constructor("Void", "boom", &mut metas, c("Void")),
+            Err(TypeError::SealedFamily { .. })
+        ),
+        "список конструкторов закрыт разбором"
+    );
+    assert!(
+        signature.lookup("boom").is_none(),
+        "отказ не оставляет следов в сигнатуре"
+    );
+}
+
+/// Закрывается только разобранное семейство и только им.
+#[test]
+fn sealing_is_confined_to_the_family_that_was_eliminated() {
+    let mut signature = base();
+    let mut metas = adamas_core::meta::Metas::default();
+    signature
+        .declare_data("Colour", 0, &mut metas, Term::universe(0))
+        .expect("Colour корректен");
+    signature
+        .declare_constructor("Colour", "red", &mut metas, c("Colour"))
+        .expect("первый конструктор законен");
+
+    // Разбор по `Bool` не касается `Colour`.
+    signature
+        .define(
+            "negate",
+            Mult::Many,
+            0,
+            arrow(c("Bool"), c("Bool")),
+            Some(lam(
+                Mult::Many,
+                "b",
+                simple(
+                    "Bool",
+                    Term::var(0),
+                    constantly(c("Bool")),
+                    vec![("true", c("false")), ("false", c("true"))],
+                ),
+            )),
+        )
+        .expect("negate корректна");
+
+    assert!(
+        signature
+            .declare_constructor("Colour", "blue", &mut metas, c("Colour"))
+            .is_ok(),
+        "по `Colour` не разбирали - список ещё открыт"
+    );
+    assert!(
+        matches!(
+            signature.declare_constructor("Bool", "maybe", &mut metas, c("Bool")),
+            Err(TypeError::SealedFamily { .. })
+        ),
+        "а по `Bool` разбирали"
+    );
+}
+
 // ------------------------------------------------------------------ свойства
 
 /// Имена, из которых собираются списки ветвей: два конструктора `Bool` и

@@ -53,6 +53,15 @@ pub enum DefinitionKind {
         /// Универсум, в котором живёт тип. Поля конструкторов обязаны
         /// укладываться в него.
         sort: Level,
+        /// Список конструкторов закрыт: по типу уже разбирали.
+        ///
+        /// Полнота ветвей проверяется один раз, в момент проверки `case`
+        /// ([`crate::check`]), и перепроверять принятые определения некому.
+        /// Поэтому список, на который сослалось сохранённое определение, расти
+        /// больше не вправе: иначе `absurd : Void -> A`, принятая с нулём
+        /// ветвей, переживает появление у `Void` конструктора и становится
+        /// функцией из населённого типа в любой.
+        sealed: bool,
     },
     /// Конструктор индуктивного типа.
     Constructor {
@@ -197,6 +206,14 @@ impl Signature {
             return Err(error);
         }
 
+        // Определение уходит в сигнатуру насовсем, а вместе с ним - его
+        // разборы. Список конструкторов, полноту которого они уже прошли,
+        // закрывается здесь: перепроверить принятое определение потом некому.
+        self.seal_eliminated(&definition.ty);
+        if let Some(body) = &definition.body {
+            self.seal_eliminated(body);
+        }
+
         // Решённые по дороге дырки подставляются здесь: хранилище живёт ровно
         // одну проверку, а определение - всю программу, и `Meta(k)` в нём
         // ссылалась бы на чужой счётчик.
@@ -318,6 +335,7 @@ impl Signature {
             constructors: Vec::new(),
             params,
             sort,
+            sealed: false,
         };
         self.definitions.insert(name, draft);
         Ok(())
@@ -328,8 +346,8 @@ impl Signature {
     /// # Errors
     ///
     /// То же, что у [`Signature::define_inferred`], плюс: имя не индуктивный
-    /// тип; результат не тот тип; нарушена строгая позитивность; поле живёт
-    /// выше универсума типа.
+    /// тип; список конструкторов уже закрыт; результат не тот тип; нарушена
+    /// строгая позитивность; поле живёт выше универсума типа.
     pub fn declare_constructor(
         &mut self,
         data: &str,
@@ -339,6 +357,19 @@ impl Signature {
     ) -> Result<(), TypeError> {
         let data: Name = data.into();
         let name: Name = name.into();
+
+        // Раньше всего остального: по типу могли уже разобрать, и тогда список
+        // конструкторов зафиксирован сохранённым определением.
+        if matches!(
+            self.lookup(&data).map(|found| &found.kind),
+            Some(DefinitionKind::Data { sealed: true, .. })
+        ) {
+            return Err(TypeError::SealedFamily {
+                data,
+                constructor: name,
+            });
+        }
+
         let mut draft = self.checked_draft(&name, metas, ty)?;
 
         // Обычная машинерия проверила тип и вывела арность; сверх неё - только
@@ -381,6 +412,25 @@ impl Signature {
         match &self.lookup(data)?.kind {
             DefinitionKind::Data { constructors, .. } => Some(constructors),
             _ => None,
+        }
+    }
+
+    /// Закрывает списки конструкторов у всех семейств, разобранных в терме.
+    ///
+    /// Обход по терму, а не по значению: разбор виден синтаксически, а
+    /// вычисление могло бы его свернуть по ι и спрятать. Операция монотонна -
+    /// закрытое не открывается, - поэтому порядок обхода значения не имеет.
+    fn seal_eliminated(&mut self, term: &Term) {
+        let mut families = Vec::new();
+        collect_eliminated(term, &mut families);
+        for family in families {
+            if let Some(DefinitionKind::Data { sealed, .. }) = self
+                .definitions
+                .get_mut(&family)
+                .map(|entry| &mut entry.kind)
+            {
+                *sealed = true;
+            }
         }
     }
 
@@ -434,5 +484,34 @@ impl Signature {
         ty: Term,
     ) -> Result<(), TypeError> {
         self.define(name, mult, level_arity, ty, None)
+    }
+}
+
+/// Собирает имена семейств, по которым терм разбирает.
+fn collect_eliminated(term: &Term, found: &mut Vec<Name>) {
+    match term {
+        Term::Var(_) | Term::Universe(_) | Term::Const(..) => {}
+        Term::Lam(_, _, body) => collect_eliminated(body, found),
+        Term::App(callee, argument) => {
+            collect_eliminated(callee, found);
+            collect_eliminated(argument, found);
+        }
+        Term::Pi(_, _, domain, codomain) => {
+            collect_eliminated(domain, found);
+            collect_eliminated(codomain, found);
+        }
+        Term::Let(_, _, ty, value, body) => {
+            collect_eliminated(ty, found);
+            collect_eliminated(value, found);
+            collect_eliminated(body, found);
+        }
+        Term::Case(case) => {
+            found.push(Rc::clone(&case.data));
+            collect_eliminated(&case.scrutinee, found);
+            collect_eliminated(&case.motive, found);
+            for branch in &case.branches {
+                collect_eliminated(&branch.body, found);
+            }
+        }
     }
 }

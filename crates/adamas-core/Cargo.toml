@@ -20,6 +20,10 @@ bench = false
 name = "nbe"
 harness = false
 
+[[bench]]
+name = "check"
+harness = false
+
 [dependencies]
 thiserror = "2"
 

@@ -1017,10 +1017,24 @@ pub fn check_constructor(
     // Результат - тот самый тип, инстанцированный собственными параметрами
     // уровня и своими же параметрами-термами: конструктор принадлежит всему
     // семейству, а не одному его срезу.
+    //
+    // Уровни сравниваются семантически, а не производным `==`: последний
+    // структурен и годится только для `BTreeMap` (см. [`crate::level`]). До
+    // этой точки нормализации не происходит - путь идёт по термам, а `zonk` не
+    // нормализует, - поэтому обобщение штатно оставляет `max u0 u0` там, где
+    // ожидается `u0`, и структурное сравнение отвергло бы корректное
+    // объявление.
     let (head, arguments) = spine(result);
     let expected = identity_levels(arity);
     let addressed = match head {
-        Term::Const(head_name, levels) => head_name == data && **levels == *expected,
+        Term::Const(head_name, levels) => {
+            head_name == data
+                && levels.len() == expected.len()
+                && levels
+                    .iter()
+                    .zip(expected.iter())
+                    .all(|(found, wanted)| found.equiv(wanted))
+        }
         _ => false,
     };
     if !addressed || !uniform_parameters(params, ctx.size(), &arguments) {

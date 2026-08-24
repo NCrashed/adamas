@@ -798,6 +798,43 @@ fn a_chain_of_definitions_is_walked_once_per_name() {
     );
 }
 
+#[test]
+fn a_denormalised_level_in_the_result_is_still_the_family() {
+    // `max u u` и `u` - один уровень, и результат конструктора обязан
+    // сравниваться семантически. Запись эта возникает не вручную: дырка,
+    // решённая в `max ?a ?b`, после позднего `?a := ?b` зонкается в `max ?b ?b`
+    // и обобщается в `max u0 u0`.
+    let mut signature = Signature::default();
+    let mut metas = Metas::default();
+    let carrier = metas.fresh_level();
+    signature
+        .postulate_inferred("E", Mult::Many, &mut metas, Term::Universe(carrier))
+        .expect("E корректен");
+
+    let sort = metas.fresh_level();
+    signature
+        .declare_data("D", 0, &mut metas, Term::Universe(sort))
+        .expect("D корректен");
+
+    let field = metas.fresh_level();
+    let doubled = field.clone().max(field.clone());
+    let outcome = signature.declare_constructor(
+        "D",
+        "mk",
+        &mut metas,
+        pi(
+            Mult::Zero,
+            "_",
+            Term::Const("E".into(), Rc::from([field])),
+            Term::Const("D".into(), Rc::from([doubled])),
+        ),
+    );
+    assert!(
+        outcome.is_ok(),
+        "`D{{max u0 u0}}` - то же семейство, что `D{{u0}}`: {outcome:?}"
+    );
+}
+
 // ------------------------------------------------------------------ свойства
 
 /// Формы полей, из которых собираются конструкторы: часть законна, часть нет.

@@ -299,6 +299,19 @@ proptest! {
         prop_assert_eq!(a.equiv(&b), same_everywhere, "{} против {}", a, b);
     }
 
+    /// **Порядок:** `leq` совпадает со сравнением значений при любой
+    /// подстановке - и в одну сторону, и в другую.
+    ///
+    /// На этом держится универсумная проверка полей конструктора
+    /// (`crate::sig`): она не пускает импредикативность через data-декларацию,
+    /// и заявление о полноте `leq` там несущее, а не украшение.
+    #[test]
+    fn ordering_agrees_with_evaluation(a in any_level(), b in any_level()) {
+        let below_everywhere = assignments(bound_for([&a, &b]))
+            .all(|assignment| a.evaluate(&assignment) <= b.evaluate(&assignment));
+        prop_assert_eq!(a.leq(&b), below_everywhere, "{} <= {}", a, b);
+    }
+
     /// Нормальная форма уровня лежит в том же классе эквивалентности.
     #[test]
     fn level_normalization_preserves_meaning(level in any_level()) {

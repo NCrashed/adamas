@@ -15,13 +15,45 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::check::{TypeError, check_definition, unsolved_in_definition};
+use crate::check::{
+    TypeError, check_constructor, check_definition, data_sort, unsolved_in_definition,
+};
 use crate::eval::eval;
 use crate::level::Level;
 use crate::meta::{Generalization, Metas};
 use crate::mult::Mult;
 use crate::term::{Name, Term};
 use crate::value::{Env, Value};
+
+/// Чем определение является помимо "имя с типом и, может быть, телом".
+///
+/// Индуктивный тип и его конструкторы - это те же определения без тела, но
+/// проверяются они строже и связаны друг с другом, а элиминация (следующий
+/// срез) обязана уметь их различать: сводить `case` можно только по
+/// конструктору, а не по произвольному постулату.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DefinitionKind {
+    /// Обычное определение или постулат.
+    Regular,
+    /// Тип-формер индуктивного типа. Список конструкторов пополняется по мере
+    /// их объявления и задаёт порядок ветвей будущего `case`.
+    Data {
+        /// Конструкторы в порядке объявления.
+        constructors: Vec<Name>,
+        /// Сколько первых связываний тип-формера - параметры: одни и те же во
+        /// всех вхождениях типа внутри конструктора. Остальные - индексы, они
+        /// от конструктора к конструктору меняются.
+        params: u32,
+        /// Универсум, в котором живёт тип. Поля конструкторов обязаны
+        /// укладываться в него.
+        sort: Level,
+    },
+    /// Конструктор индуктивного типа.
+    Constructor {
+        /// Тип, которому конструктор принадлежит.
+        data: Name,
+    },
+}
 
 /// Определение верхнего уровня.
 #[derive(Clone, Debug)]
@@ -37,6 +69,8 @@ pub struct Definition {
     pub ty: Term,
     /// Тело. `None` - постулат: тип есть, вычислять нечего.
     pub body: Option<Term>,
+    /// Индуктивная роль, если она есть.
+    pub kind: DefinitionKind,
 }
 
 impl Definition {
@@ -105,6 +139,7 @@ impl Signature {
             level_arity,
             ty,
             body,
+            kind: DefinitionKind::Regular,
         };
         // Хранилище своё: арность объявлена, значит выводить нечего, а
         // метапеременные живут ровно на время одной проверки. Заимствование
@@ -155,6 +190,7 @@ impl Signature {
             level_arity: 0,
             ty,
             body,
+            kind: DefinitionKind::Regular,
         };
         check_definition(self, metas, &name, &draft)?;
 
@@ -176,6 +212,116 @@ impl Signature {
         let arity = self.lookup(name)?.level_arity;
         let levels: Rc<[Level]> = (0..arity).map(|_| metas.fresh_level()).collect();
         Some(Term::Const(name.into(), levels))
+    }
+
+    /// Объявляет индуктивный тип - тип-формер без конструкторов.
+    ///
+    /// Конструкторы добавляются потом, по одному
+    /// ([`Signature::declare_constructor`]): каждый проверяется против уже
+    /// объявленного типа, и до объявления самого типа проверять было бы не
+    /// против чего. Арность уровня выводится, как у
+    /// [`Signature::define_inferred`].
+    ///
+    /// Кратность у тип-формера `ω`: он живёт и в позиции типа (там `σ = 0`, и
+    /// `ω` это допускает), и как обычное значение - §3.2 разрешает `List Type`.
+    ///
+    /// `params` - сколько первых связываний считать параметрами. Разделение
+    /// нужно уже здесь, а не в элаборации: параметры выведены из-под
+    /// универсумной проверки конструкторов, иначе `List : Type u -> Type u` не
+    /// объявить - его параметр живёт в `Type (u+1)`, то есть заведомо выше
+    /// самого `List`.
+    ///
+    /// # Errors
+    ///
+    /// То же, что у [`Signature::define_inferred`], плюс: связываний меньше,
+    /// чем параметров; тип-формер не заканчивается универсумом.
+    pub fn declare_data(
+        &mut self,
+        name: &str,
+        params: u32,
+        metas: &mut Metas,
+        ty: Term,
+    ) -> Result<(), TypeError> {
+        let name: Name = name.into();
+        let mut draft = self.checked_draft(&name, metas, ty)?;
+        // Универсум берётся из уже обобщённого типа: до обобщения на его месте
+        // стоит дырка, а конструкторы будут сравниваться с параметром уровня.
+        let sort = data_sort(&name, params, &draft.ty)?;
+        draft.kind = DefinitionKind::Data {
+            constructors: Vec::new(),
+            params,
+            sort,
+        };
+        self.definitions.insert(name, draft);
+        Ok(())
+    }
+
+    /// Объявляет конструктор уже существующего индуктивного типа.
+    ///
+    /// # Errors
+    ///
+    /// То же, что у [`Signature::define_inferred`], плюс: имя не индуктивный
+    /// тип; результат не тот тип; нарушена строгая позитивность; поле живёт
+    /// выше универсума типа.
+    pub fn declare_constructor(
+        &mut self,
+        data: &str,
+        name: &str,
+        metas: &mut Metas,
+        ty: Term,
+    ) -> Result<(), TypeError> {
+        let data: Name = data.into();
+        let name: Name = name.into();
+        let mut draft = self.checked_draft(&name, metas, ty)?;
+
+        // Обычная машинерия проверила тип и вывела арность; сверх неё - только
+        // то, что отличает конструктор от постулата похожей формы.
+        let mut fresh = Metas::default();
+        check_constructor(self, &mut fresh, &name, &data, &draft.ty)?;
+
+        draft.kind = DefinitionKind::Constructor {
+            data: Rc::clone(&data),
+        };
+        self.definitions.insert(Rc::clone(&name), draft);
+
+        // Порядок объявления задаёт порядок ветвей будущего `case`.
+        if let Some(DefinitionKind::Data { constructors, .. }) =
+            self.definitions.get_mut(&data).map(|entry| &mut entry.kind)
+        {
+            constructors.push(name);
+        }
+        Ok(())
+    }
+
+    /// Конструкторы индуктивного типа в порядке объявления.
+    #[must_use]
+    pub fn constructors(&self, data: &str) -> Option<&[Name]> {
+        match &self.lookup(data)?.kind {
+            DefinitionKind::Data { constructors, .. } => Some(constructors),
+            _ => None,
+        }
+    }
+
+    /// Проверяет постулат и возвращает его, **не** добавляя в сигнатуру.
+    ///
+    /// Общая часть объявления типа и конструктора: и то и другое - постулат с
+    /// выведенной арностью, к которому потом приписывается роль.
+    fn checked_draft(
+        &mut self,
+        name: &Name,
+        metas: &mut Metas,
+        ty: Term,
+    ) -> Result<Definition, TypeError> {
+        if self.definitions.contains_key(name) {
+            return Err(TypeError::DuplicateDefinition {
+                name: Rc::clone(name),
+            });
+        }
+        self.postulate_inferred(name, Mult::Many, metas, ty)?;
+        Ok(self
+            .definitions
+            .remove(name)
+            .unwrap_or_else(|| unreachable!("постулат только что добавлен")))
     }
 
     /// Постулат с выведенной арностью - [`Signature::define_inferred`] без тела.
@@ -227,6 +373,7 @@ fn generalize(metas: &Metas, name: &Name, draft: &Definition) -> Result<Definiti
             .body
             .as_ref()
             .map(|body| generalization.apply_term(metas, body)),
+        kind: draft.kind.clone(),
     };
 
     match unsolved_in_definition(metas, &definition) {

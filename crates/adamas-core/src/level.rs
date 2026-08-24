@@ -129,6 +129,20 @@ impl Level {
         Parts::of(self).rebuild()
     }
 
+    /// Верно ли `self <= other` **при любой** подстановке параметров.
+    ///
+    /// Нужно индуктивным типам (`crate::sig`): поле конструктора обязано жить
+    /// не выше самого типа, иначе `data Bad : Type 0 where mk : (0 a : Type 0)
+    /// -> Bad` протащил бы импредикативность мимо правила `Pi`, а с ней и
+    /// парадокс, от которого §3.2 отгораживается.
+    ///
+    /// Корректно и полно на этой алгебре уровней: `max` монотонен, `suc`
+    /// инъективен, а нормальная форма - полный инвариант.
+    #[must_use]
+    pub fn leq(&self, other: &Self) -> bool {
+        Parts::of(self).leq(&Parts::of(other))
+    }
+
     /// Значение уровня при конкретных значениях переменных.
     ///
     /// Переменная, которой нет в `assignment`, считается нулём. Это
@@ -182,6 +196,26 @@ impl Parts {
             constant: 0,
             atoms: BTreeMap::from([(level, 0)]),
         }
+    }
+
+    /// Значение при нулевых атомах - минимум уровня по всем подстановкам.
+    fn at_zero(&self) -> u32 {
+        self.constant
+            .max(self.atoms.values().copied().max().unwrap_or(0))
+    }
+
+    /// Покомпонентное сравнение: каждая составляющая слева обязана
+    /// перекрываться справа при любой подстановке.
+    ///
+    /// Константа сравнивается с минимумом правой части. Атом со смещением `k`
+    /// требует того же атома справа со смещением не меньше `k`: устремив его
+    /// к бесконечности, всё остальное справа перестаёт иметь значение.
+    fn leq(&self, other: &Self) -> bool {
+        self.constant <= other.at_zero()
+            && self
+                .atoms
+                .iter()
+                .all(|(atom, offset)| other.atoms.get(atom).is_some_and(|theirs| theirs >= offset))
     }
 
     fn shift(mut self) -> Self {
@@ -356,6 +390,29 @@ mod tests {
             u().succ().max(Level::number(2)).normalize(),
             Level::number(2).max(u().succ())
         );
+    }
+
+    #[test]
+    fn ordering_holds_under_every_substitution() {
+        // Тривиальные границы.
+        assert!(Level::Zero.leq(&u()));
+        assert!(u().leq(&u()));
+        assert!(u().leq(&u().succ()));
+        assert!(!u().succ().leq(&u()));
+
+        // `max` только растёт.
+        assert!(u().leq(&u().max(v())));
+        assert!(!u().max(v()).leq(&u()), "при большом v не выполняется");
+
+        // Константа сравнивается с минимумом правой части, а он достигается
+        // на нулевых атомах.
+        assert!(!Level::number(5).leq(&u()), "при u = 0 слева больше");
+        assert!(Level::number(5).leq(&u().max(Level::number(5))));
+        assert!(Level::number(1).leq(&u().succ()), "u+1 >= 1 всегда");
+
+        // Разные переменные несравнимы ни в одну сторону.
+        assert!(!u().leq(&v()));
+        assert!(!v().leq(&u()));
     }
 
     #[test]

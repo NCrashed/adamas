@@ -34,10 +34,10 @@ use std::rc::Rc;
 
 use crate::conv::convertible;
 use crate::ctx::{Ctx, Usage};
-use crate::level::{Level, LevelMeta};
+use crate::level::{Level, LevelMeta, LevelVar};
 use crate::meta::{Metas, unsolved_level_meta};
 use crate::mult::Mult;
-use crate::sig::{Definition, Signature};
+use crate::sig::{Definition, DefinitionKind, Signature};
 use crate::term::{Index, Name, Term};
 use crate::value::Value;
 
@@ -156,6 +156,77 @@ pub enum TypeError {
         name: Name,
         /// Метапеременная, оставшаяся без решения.
         meta: crate::level::LevelMeta,
+    },
+
+    /// Тип-формер не заканчивается универсумом.
+    #[error("`{name}` объявлен как индуктивный тип, но заканчивается на `{found}`")]
+    NotADataSort {
+        /// Имя типа.
+        name: Name,
+        /// Что оказалось на месте универсума.
+        found: String,
+    },
+
+    /// Тип-формер объявлен с большим числом параметров, чем у него связываний.
+    #[error("`{name}` объявлен с {expected} параметрами, а связываний всего {found}")]
+    DataParameters {
+        /// Имя типа.
+        name: Name,
+        /// Сколько параметров объявлено.
+        expected: u32,
+        /// Сколько связываний есть на самом деле.
+        found: u32,
+    },
+
+    /// Конструктор объявлен для имени, которое не индуктивный тип.
+    #[error("`{name}` не является индуктивным типом")]
+    NotADataType {
+        /// Имя.
+        name: Name,
+    },
+
+    /// Конструктор не повторяет телескоп параметров своего типа.
+    #[error(
+        "конструктор `{name}` обязан начинаться с параметров `{data}`, но параметр #{index} не совпадает"
+    )]
+    ConstructorParameter {
+        /// Имя конструктора.
+        name: Name,
+        /// Имя типа.
+        data: Name,
+        /// Номер параметра, на котором разошлось.
+        index: u32,
+    },
+
+    /// Конструктор возвращает не тот тип, которому объявлен.
+    #[error("конструктор `{name}` обязан возвращать `{data}`, а возвращает `{found}`")]
+    ConstructorResult {
+        /// Имя конструктора.
+        name: Name,
+        /// Имя типа.
+        data: Name,
+        /// Что оказалось результатом.
+        found: String,
+    },
+
+    /// Нарушена строгая позитивность.
+    #[error("конструктор `{name}` использует `{data}` в отрицательной позиции")]
+    NotStrictlyPositive {
+        /// Имя конструктора.
+        name: Name,
+        /// Имя типа.
+        data: Name,
+    },
+
+    /// Поле конструктора живёт выше универсума самого типа.
+    #[error("поле конструктора `{name}` живёт в `Type {field}`, а тип - в `Type {sort}`")]
+    ConstructorUniverse {
+        /// Имя конструктора.
+        name: Name,
+        /// Универсум поля.
+        field: String,
+        /// Универсум типа.
+        sort: String,
     },
 
     /// Определение ссылается на параметр уровня, которого у него нет.
@@ -475,6 +546,7 @@ pub fn check_definition(
         level_arity,
         ty,
         body,
+        kind: _,
     } = definition;
     let (mult, level_arity) = (*mult, *level_arity);
 
@@ -568,4 +640,255 @@ fn spend(name: &Name, allowed: Mult, actual: Mult) -> Result<(), TypeError> {
             actual,
         })
     }
+}
+
+// ------------------------------------------------------------ индуктивные типы
+
+/// Одно связывание из телескопа `Pi`.
+struct Binder {
+    mult: Mult,
+    name: Name,
+    domain: Rc<Term>,
+}
+
+/// Снимает цепочку `Pi`, возвращая связывания и итоговый терм.
+fn peel_pis(term: &Term) -> (Vec<Binder>, &Term) {
+    let mut fields = Vec::new();
+    let mut current = term;
+    while let Term::Pi(mult, name, domain, codomain) = current {
+        fields.push(Binder {
+            mult: *mult,
+            name: Rc::clone(name),
+            domain: Rc::clone(domain),
+        });
+        current = codomain;
+    }
+    (fields, current)
+}
+
+/// Разбирает применение на голову и аргументы.
+fn spine(term: &Term) -> (&Term, Vec<&Term>) {
+    let mut arguments = Vec::new();
+    let mut current = term;
+    while let Term::App(callee, argument) = current {
+        arguments.push(argument.as_ref());
+        current = callee;
+    }
+    arguments.reverse();
+    (current, arguments)
+}
+
+/// Встречается ли имя в терме.
+fn mentions(signature: &Signature, name: &Name, term: &Term) -> bool {
+    let recur = |inner| mentions(signature, name, inner);
+    match term {
+        Term::Var(_) | Term::Universe(_) => false,
+        // Через тело определения - тоже упоминание. Без этого позитивность
+        // обходится в две строки: `def G : Type 0 = Bad -> Bad`, затем
+        // `mk : G -> Bad`. Прямая запись отвергается, а эта прошла бы, хотя
+        // после δ-разворота это тот же самый негативный конструктор.
+        //
+        // Определения ацикличны (см. `crate::sig`), поэтому обход конечен.
+        Term::Const(other, _) => {
+            other == name
+                || signature
+                    .lookup(other)
+                    .and_then(|definition| definition.body.as_ref())
+                    .is_some_and(|body| mentions(signature, name, body))
+        }
+        Term::Lam(_, _, body) => recur(body),
+        Term::App(callee, argument) => recur(callee) || recur(argument),
+        Term::Pi(_, _, domain, codomain) => recur(domain) || recur(codomain),
+        Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || recur(body),
+    }
+}
+
+/// Стоят ли на первых `params` местах спины ровно параметры телескопа.
+///
+/// Параметр `i` связан `i`-м снаружи, поэтому там, где в области видимости
+/// `depth` связываний, его индекс равен `depth - 1 - i`.
+fn uniform_parameters(params: u32, depth: u32, arguments: &[&Term]) -> bool {
+    u32::try_from(arguments.len()).is_ok_and(|given| given >= params)
+        && (0..params).all(|parameter| {
+            depth
+                .checked_sub(parameter + 1)
+                .is_some_and(|index| *arguments[parameter as usize] == Term::var(index))
+        })
+}
+
+/// Строгая позитивность плюс единообразие параметров.
+///
+/// Тип встречается только справа от стрелок, только с аргументами, его не
+/// упоминающими, и всегда применённый к своим параметрам в том же порядке.
+///
+/// Без позитивности объявляется `data Bad where mk : (Bad -> Bad) -> Bad`, из
+/// которого строится незавершающийся терм без единой рекурсии в термах, и
+/// вместе с ним - житель любого типа. Проверка синтаксическая и сознательно
+/// консервативная: отвергает часть корректных объявлений, но не пропускает
+/// некорректные.
+///
+/// Единообразие отделяет параметр от индекса: `List A` рекурсивно упоминает
+/// себя с тем же `A`, и только поэтому `A` можно не хранить в значении и не
+/// разбирать при элиминации. `data Nest A where n : Nest (Pair A A) -> Nest A`
+/// параметр меняет, и здесь он отвергается.
+fn positive_field(
+    signature: &Signature,
+    data: &Name,
+    params: u32,
+    depth: u32,
+    term: &Term,
+) -> bool {
+    match term {
+        // Слева от стрелки тип не должен встречаться вовсе; справа - рекурсия.
+        Term::Pi(_, _, domain, codomain) => {
+            !mentions(signature, data, domain)
+                && positive_field(signature, data, params, depth + 1, codomain)
+        }
+        other => {
+            let (head, arguments) = spine(other);
+            match head {
+                // Рекурсивное вхождение: аргументы обязаны быть свободны от
+                // самого типа, иначе `D (D x)` протащило бы его в позицию,
+                // которую проверка не контролирует.
+                Term::Const(name, _) if name == data => {
+                    uniform_parameters(params, depth, &arguments)
+                        && arguments
+                            .iter()
+                            .all(|argument| !mentions(signature, data, argument))
+                }
+                _ => !mentions(signature, data, other),
+            }
+        }
+    }
+}
+
+/// Тождественная инстанциация параметров уровня.
+fn identity_levels(arity: u32) -> Rc<[Level]> {
+    (0..arity)
+        .map(|index| Level::Var(LevelVar(index)))
+        .collect()
+}
+
+/// Проверяет тип-формер и возвращает универсум, в котором живёт тип.
+///
+/// # Errors
+///
+/// Связываний меньше, чем объявлено параметров; тип-формер не заканчивается
+/// универсумом.
+pub fn data_sort(name: &Name, params: u32, ty: &Term) -> Result<Level, TypeError> {
+    let (fields, result) = peel_pis(ty);
+    let found = u32::try_from(fields.len()).unwrap_or(u32::MAX);
+    if found < params {
+        return Err(TypeError::DataParameters {
+            name: Rc::clone(name),
+            expected: params,
+            found,
+        });
+    }
+    match result {
+        Term::Universe(sort) => Ok(sort.clone()),
+        other => Err(TypeError::NotADataSort {
+            name: Rc::clone(name),
+            found: other.to_string(),
+        }),
+    }
+}
+
+/// Проверяет конструктор: телескоп параметров, результат, позитивность,
+/// укладку в универсум.
+///
+/// Тип уже проверен обычной машинерией определений; здесь только то, что
+/// отличает конструктор от постулата с похожим типом.
+///
+/// # Errors
+///
+/// Имя не индуктивный тип; конструктор не повторяет параметры; результат не
+/// тот тип; нарушена строгая позитивность; поле живёт выше универсума самого
+/// типа.
+pub fn check_constructor(
+    signature: &Signature,
+    metas: &mut Metas,
+    name: &Name,
+    data: &Name,
+    ty: &Term,
+) -> Result<(), TypeError> {
+    let Some(declaration) = signature.lookup(data) else {
+        return Err(TypeError::UnknownConstant {
+            name: Rc::clone(data),
+        });
+    };
+    let DefinitionKind::Data { sort, params, .. } = &declaration.kind else {
+        return Err(TypeError::NotADataType {
+            name: Rc::clone(data),
+        });
+    };
+    let (params, sort, arity) = (*params, sort.clone(), declaration.level_arity);
+    let telescope = peel_pis(&declaration.ty).0;
+
+    let (fields, result) = peel_pis(ty);
+    let mismatched = |index: u32| TypeError::ConstructorParameter {
+        name: Rc::clone(name),
+        data: Rc::clone(data),
+        index,
+    };
+
+    let mut ctx = Ctx::new(signature);
+    for (index, field) in fields.iter().enumerate() {
+        let depth = u32::try_from(index).unwrap_or(u32::MAX);
+        if depth < params {
+            // Параметры конструктор обязан повторить: и по типу, и по
+            // кратности. Иначе `List` в результате и `List` в объявлении - два
+            // разных семейства, и элиминации не на что опереться.
+            let expected = &telescope[index];
+            if expected.mult != field.mult
+                || !convertible(
+                    signature,
+                    metas,
+                    ctx.size(),
+                    &ctx.eval(&expected.domain),
+                    &ctx.eval(&field.domain),
+                )
+            {
+                return Err(mismatched(depth));
+            }
+        } else {
+            if !positive_field(signature, data, params, depth, &field.domain) {
+                return Err(TypeError::NotStrictlyPositive {
+                    name: Rc::clone(name),
+                    data: Rc::clone(data),
+                });
+            }
+            // Поле не может жить выше самого типа: иначе `Type ℓ` содержал бы
+            // значение, построенное над `Type (ℓ+1)`, и предикативность (§3.2)
+            // обходилась бы через data-декларацию. Параметры это правило не
+            // ограничивает - они не хранятся в значении, а подставляются.
+            let field_level = is_type(&ctx, metas, &field.domain)?;
+            if !field_level.leq(&sort) {
+                return Err(TypeError::ConstructorUniverse {
+                    name: Rc::clone(name),
+                    field: field_level.to_string(),
+                    sort: sort.to_string(),
+                });
+            }
+        }
+        ctx = ctx.bind(Rc::clone(&field.name), field.mult, ctx.eval(&field.domain));
+    }
+
+    // Результат - тот самый тип, инстанцированный собственными параметрами
+    // уровня и своими же параметрами-термами: конструктор принадлежит всему
+    // семейству, а не одному его срезу.
+    let (head, arguments) = spine(result);
+    let expected = identity_levels(arity);
+    let addressed = match head {
+        Term::Const(head_name, levels) => head_name == data && **levels == *expected,
+        _ => false,
+    };
+    if !addressed || !uniform_parameters(params, ctx.size(), &arguments) {
+        return Err(TypeError::ConstructorResult {
+            name: Rc::clone(name),
+            data: Rc::clone(data),
+            found: result.to_string(),
+        });
+    }
+    Ok(())
 }

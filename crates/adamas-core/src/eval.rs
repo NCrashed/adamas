@@ -86,11 +86,41 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
             eval(&env.extend(value), body)
         }
 
+        // Вычисляется **одна** ветвь - та, что выбрана. Собрать застрявший
+        // разбор целиком значит вычислить мотив и все ветви, а у дерева
+        // разбора ветвь сама бывает разбором: цена растёт как `2^d` вместо
+        // `d`. Застрявший разбор собирается только когда он и правда застрял.
         Term::Case(case) => {
             let scrutinee = eval(env, &case.scrutinee);
-            eliminate_case(&Rc::new(stuck_case(env, case)), &scrutinee)
+            let selected = match &*scrutinee {
+                Value::Neutral(Head::Global(name, _), spine) => case
+                    .branches
+                    .iter()
+                    .find(|branch| branch.constructor == *name)
+                    .map(|branch| (Rc::clone(&branch.body), spine.clone())),
+                _ => None,
+            };
+            match selected {
+                Some((body, spine)) => apply_fields(eval(env, &body), &spine, case.params)
+                    .unwrap_or_else(|| unreachable!("конструктор под разбором: {scrutinee}")),
+                None => eliminate_case(&Rc::new(stuck_case(env, case)), &scrutinee),
+            }
         }
     }
+}
+
+/// Применяет тело ветви к полям конструктора.
+///
+/// Спайн конструктора - это параметры, потом поля; ветвь получает только
+/// вторые. `None` - в спайне оказался разбор, то есть значение не конструктор.
+fn apply_fields(body: Rc<Value>, spine: &[Elim], params: u32) -> Option<Rc<Value>> {
+    spine
+        .iter()
+        .skip(params as usize)
+        .try_fold(body, |body, elim| match elim {
+            Elim::App(argument) => try_apply(&body, Rc::clone(argument)),
+            Elim::Case(_) => None,
+        })
 }
 
 /// Переводит разбор из терма в значение, вычисляя мотив и ветви.
@@ -156,13 +186,7 @@ pub fn try_eliminate_case(case: &Rc<StuckCase>, scrutinee: &Rc<Value>) -> Option
             .iter()
             .find(|branch| branch.constructor == *name)
         {
-            return spine.iter().skip(case.params as usize).try_fold(
-                Rc::clone(&branch.body),
-                |body, elim| match elim {
-                    Elim::App(argument) => try_apply(&body, Rc::clone(argument)),
-                    Elim::Case(_) => None,
-                },
-            );
+            return apply_fields(Rc::clone(&branch.body), spine, case.params);
         }
     }
 

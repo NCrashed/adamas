@@ -18,6 +18,11 @@
     missing_docs,
     reason = "criterion_group! разворачивается в недокументированную pub fn"
 )]
+#![allow(
+    clippy::expect_used,
+    reason = "заготовка бенча - не пользовательский вход; отказ здесь означает \
+              сломанный бенч, и падать он должен громко"
+)]
 
 use std::rc::Rc;
 
@@ -81,8 +86,11 @@ fn lambda_chain(depth: u32) -> (Term, Term) {
     (term, ty)
 }
 
-/// `f : Bool -> … -> Bool -> Bool` из `2^depth` клауз, то есть полное дерево.
-fn case_tree(signature: &mut Signature, depth: u32) {
+/// Дерево разбора из `2^depth` клауз над `Bool`, **термом**, а не определением.
+///
+/// Именно термом: `eval` определений не разворачивает, поэтому применённое
+/// определение осталось бы застрявшим и дерево не вычислилось бы ни разу.
+fn case_tree(signature: &Signature, depth: u32) -> Term {
     let ty = (0..depth).fold(c("Bool"), |tail, _| arrow(c("Bool"), tail));
     let clauses: Vec<Clause> = (0..1u32 << depth)
         .map(|mask| Clause {
@@ -103,10 +111,7 @@ fn case_tree(signature: &mut Signature, depth: u32) {
             },
         })
         .collect();
-    let body = compile(signature, &mut Metas::default(), &ty, &clauses).expect("дерево собирается");
-    signature
-        .define("parity", Mult::Many, 0, ty, Some(body))
-        .expect("parity типизируется");
+    compile(signature, &mut Metas::default(), &ty, &clauses).expect("дерево собирается")
 }
 
 /// `plus` клаузами - рекурсивное определение, разворот которого стоит шаг на
@@ -151,13 +156,13 @@ fn checking(criterion: &mut Criterion) {
         });
     }
 
-    let mut with_tree = base();
-    case_tree(&mut with_tree, 6);
-    let applied =
-        c("parity").apply((0..6).map(|bit| if bit % 2 == 0 { c("true") } else { c("false") }));
-    criterion.bench_function("normalize_case_tree_6", |b| {
-        b.iter(|| normalize(&applied));
-    });
+    for depth in [4u32, 8] {
+        let applied = case_tree(&signature, depth)
+            .apply((0..depth).map(|bit| if bit % 2 == 0 { c("true") } else { c("false") }));
+        criterion.bench_function(&format!("normalize_case_tree_{depth}"), |b| {
+            b.iter(|| normalize(&applied));
+        });
+    }
 
     // Проверка `anything (plus 8 8)` против `anything 16`: конвертируемость
     // упирается в δ-разворот `plus` шестнадцать раз подряд.

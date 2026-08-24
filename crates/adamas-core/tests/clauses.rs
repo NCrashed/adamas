@@ -877,12 +877,10 @@ fn matching_a_non_inductive_value_is_rejected() {
     ));
 }
 
-#[test]
-fn an_indexed_family_is_refused_outright() {
-    // Разбор `Vect` требует унификации индексов, которой здесь нет. Честный
-    // отказ лучше, чем терм, отвергаемый потом проверкой типов.
+// -------------------------------------------------- индексированные семейства
 
-    let mut signature = base();
+/// `Vect : (0 A : Type 0) -> (0 n : Nat) -> Type 0` с `vnil` и `vcons`.
+fn with_vectors(signature: &mut Signature) {
     let mut metas = Metas::default();
     declared(
         "Vect",
@@ -912,17 +910,380 @@ fn an_indexed_family_is_refused_outright() {
             ),
         ),
     );
-
-    let vect = c("Vect").apply([c("Bool"), c("zero")]);
-    assert!(matches!(
-        compile(
-            &signature,
-            &mut Metas::default(),
-            &pi(Mult::Many, "xs", vect, c("Nat")),
-            &[clause(vec![ctor("vnil", Vec::new())], c("zero"))],
+    declared(
+        "vcons",
+        &signature.declare_constructor(
+            "Vect",
+            "vcons",
+            &mut metas,
+            pi(
+                Mult::Zero,
+                "A",
+                Term::universe(0),
+                pi(
+                    Mult::Zero,
+                    "k",
+                    c("Nat"),
+                    pi(
+                        Mult::Many,
+                        "x",
+                        Term::var(1),
+                        pi(
+                            Mult::Many,
+                            "xs",
+                            c("Vect").apply([Term::var(2), Term::var(1)]),
+                            c("Vect").apply([Term::var(3), c("succ").apply([Term::var(2)])]),
+                        ),
+                    ),
+                ),
+            ),
         ),
-        Err(PatternError::IndexedFamily { .. })
-    ));
+    );
+}
+
+/// `Q : Bool -> Type 0` и свидетель: так проверяется вычисленное булево.
+fn with_bool_family(signature: &mut Signature) {
+    declared(
+        "Q",
+        &signature.postulate(
+            "Q",
+            Mult::Many,
+            0,
+            pi(Mult::Zero, "b", c("Bool"), Term::universe(0)),
+        ),
+    );
+    declared(
+        "witness",
+        &signature.postulate(
+            "witness",
+            Mult::Many,
+            0,
+            pi(Mult::Zero, "b", c("Bool"), c("Q").apply([Term::var(0)])),
+        ),
+    );
+}
+
+/// `vcons Bool k x xs`
+fn vcons(head: Term, length: Term, tail: Term) -> Term {
+    c("vcons").apply([c("Bool"), length, head, tail])
+}
+
+/// Вектор булевых значений заданной длины.
+fn vector(values: &[&str]) -> Term {
+    values
+        .iter()
+        .rev()
+        .zip(0u32..)
+        .fold(c("vnil").apply([c("Bool")]), |tail, (value, length)| {
+            vcons(c(value), number(length), tail)
+        })
+}
+
+/// `(0 A : Type 0) -> (0 n : Nat) -> (ω v : Vect A (succ n)) -> <результат>`
+fn on_a_nonempty_vector(result: Term) -> Term {
+    pi(
+        Mult::Zero,
+        "A",
+        Term::universe(0),
+        pi(
+            Mult::Zero,
+            "n",
+            c("Nat"),
+            pi(
+                Mult::Many,
+                "v",
+                c("Vect").apply([Term::var(1), c("succ").apply([Term::var(0)])]),
+                result,
+            ),
+        ),
+    )
+}
+
+/// `head A n (vcons k x xs) = x` - клауза с полями `k`, `x`, `xs`.
+fn on_a_cons(body: Term) -> Clause {
+    clause(
+        vec![
+            var("A"),
+            var("n"),
+            ctor("vcons", vec![var("k"), var("x"), var("xs")]),
+        ],
+        body,
+    )
+}
+
+#[test]
+fn an_index_that_is_a_variable_is_refined_in_each_branch() {
+    // `vlength : (0 A) -> (0 n) -> Vect A n -> Nat`. Индекс - переменная, обе
+    // ветви достижимы, и уточнение нужно лишь для того, чтобы в ветви `vcons`
+    // сошёлся тип хвоста.
+    let mut signature = base();
+    with_vectors(&mut signature);
+    define(
+        &mut signature,
+        "vlength",
+        pi(
+            Mult::Zero,
+            "A",
+            Term::universe(0),
+            pi(
+                Mult::Zero,
+                "n",
+                c("Nat"),
+                pi(
+                    Mult::Many,
+                    "v",
+                    c("Vect").apply([Term::var(1), Term::var(0)]),
+                    c("Nat"),
+                ),
+            ),
+        ),
+        &[
+            clause(
+                vec![var("A"), var("n"), ctor("vnil", Vec::new())],
+                c("zero"),
+            ),
+            // Переменные клаузы: A, n, k, x, xs - то есть `A` это `#4`,
+            // `k` - `#2`, хвост - `#0`.
+            on_a_cons(c("succ").apply([c("vlength").apply([
+                Term::var(4),
+                Term::var(2),
+                Term::var(0),
+            ])])),
+        ],
+    );
+    assert!(
+        signature
+            .lookup("vlength")
+            .is_some_and(|definition| definition.total),
+        "рекурсия по хвосту структурная"
+    );
+
+    for length in 0..3u32 {
+        let values = vec!["true"; length as usize];
+        let outcome = check_closed(
+            &signature,
+            &c("anything").apply([number(length)]),
+            &family(c("vlength").apply([c("Bool"), number(length), vector(&values)])),
+        );
+        assert!(outcome.is_ok(), "длина {length}: {outcome:?}");
+    }
+}
+
+#[test]
+fn an_impossible_branch_is_not_written() {
+    // `head` и `tail` над непустым вектором: ветви `vnil` быть не должно, а
+    // писать её и нечем - `Vect A zero` не сходится с `Vect A (succ n)`.
+    // Ветвь всё равно существует в терме ядра, но мотив отдал ей заведомо
+    // обитаемый тип, и населяет его тождество.
+    let mut signature = base();
+    with_vectors(&mut signature);
+    with_bool_family(&mut signature);
+
+    define(
+        &mut signature,
+        "head",
+        on_a_nonempty_vector(Term::var(2)),
+        &[on_a_cons(Term::var(1))],
+    );
+    // Хвост требует и уточнения: тело имеет тип `Vect A k`, а требуется
+    // `Vect A n` - сходятся они только потому, что `n` уточнён до `k`.
+    define(
+        &mut signature,
+        "tail",
+        on_a_nonempty_vector(c("Vect").apply([Term::var(2), Term::var(1)])),
+        &[on_a_cons(Term::var(0))],
+    );
+
+    let outcome = check_closed(
+        &signature,
+        &c("witness").apply([c("false")]),
+        &c("Q").apply([c("head").apply([c("Bool"), number(1), vector(&["false", "true"])])]),
+    );
+    assert!(outcome.is_ok(), "head [false, true] = false: {outcome:?}");
+
+    let outcome = check_closed(
+        &signature,
+        &c("witness").apply([c("true")]),
+        &c("Q").apply([c("head").apply([
+            c("Bool"),
+            c("zero"),
+            c("tail").apply([c("Bool"), number(1), vector(&["false", "true"])]),
+        ])]),
+    );
+    assert!(
+        outcome.is_ok(),
+        "head (tail [false, true]) = true: {outcome:?}"
+    );
+}
+
+#[test]
+fn a_clause_for_an_impossible_case_is_rejected() {
+    // `head A n vnil = ...` - не недостижимая клауза, а невозможная: её нечему
+    // перекрывать, она не сработала бы и в одиночестве.
+    let mut signature = base();
+    with_vectors(&mut signature);
+    let outcome = compile(
+        &signature,
+        &mut Metas::default(),
+        &on_a_nonempty_vector(Term::var(2)),
+        &[
+            on_a_cons(Term::var(1)),
+            clause(
+                vec![var("A"), var("n"), ctor("vnil", Vec::new())],
+                Term::var(1),
+            ),
+        ],
+    );
+    assert_eq!(
+        outcome.map(|_| ()).unwrap_err().to_string(),
+        "клауза #1: `vnil` здесь невозможен - индекс требует `succ`, а конструктор даёт `zero`"
+    );
+}
+
+#[test]
+fn two_vectors_of_one_length_are_matched_together() {
+    // Обе ветви второго вектора решаются длиной: разобрав первый, элаборация
+    // знает `n`, и у второго остаётся ровно один возможный конструктор. Ради
+    // этого случая индексы и заводят.
+    let mut signature = base();
+    with_vectors(&mut signature);
+    let vect = |length: Term| c("Vect").apply([c("Bool"), length]);
+    define(
+        &mut signature,
+        "both",
+        pi(
+            Mult::Zero,
+            "n",
+            c("Nat"),
+            pi(
+                Mult::Many,
+                "xs",
+                vect(Term::var(0)),
+                pi(Mult::Many, "ys", vect(Term::var(1)), c("Nat")),
+            ),
+        ),
+        &[
+            clause(
+                vec![var("n"), ctor("vnil", Vec::new()), ctor("vnil", Vec::new())],
+                c("zero"),
+            ),
+            // Переменные: n, k, x, xs, j, y, ys - то есть `xs` это `#3`,
+            // `ys` - `#0`, а длина хвоста `k` - `#5`.
+            clause(
+                vec![
+                    var("n"),
+                    ctor("vcons", vec![var("k"), var("x"), var("xs")]),
+                    ctor("vcons", vec![var("j"), var("y"), var("ys")]),
+                ],
+                c("succ").apply([c("both").apply([Term::var(5), Term::var(3), Term::var(0)])]),
+            ),
+        ],
+    );
+    assert!(
+        signature
+            .lookup("both")
+            .is_some_and(|definition| definition.total),
+        "рекурсия по хвостам структурная и после уточнения"
+    );
+
+    for length in 0..3u32 {
+        let values = vec!["true"; length as usize];
+        let outcome = check_closed(
+            &signature,
+            &c("anything").apply([number(length)]),
+            &family(c("both").apply([number(length), vector(&values), vector(&values)])),
+        );
+        assert!(outcome.is_ok(), "длина {length}: {outcome:?}");
+    }
+}
+
+#[test]
+fn an_opaque_index_neither_refines_nor_rejects() {
+    // Индекс - застрявшее вычисление: различать по нему нечего, но и отвергать
+    // не за что. Мотив по такой позиции постоянен, обе ветви остаются, и терм
+    // проходит проверку. Отказ здесь означал бы, что элаборация требует
+    // индексов только конструкторной формы, а это отвергало бы программы зря.
+    let mut signature = base();
+    with_vectors(&mut signature);
+    declared(
+        "len",
+        &signature.postulate("len", Mult::Many, 0, arrow(c("Nat"), c("Nat"))),
+    );
+    define(
+        &mut signature,
+        "count",
+        pi(
+            Mult::Zero,
+            "n",
+            c("Nat"),
+            pi(
+                Mult::Many,
+                "v",
+                c("Vect").apply([c("Bool"), c("len").apply([Term::var(0)])]),
+                c("Nat"),
+            ),
+        ),
+        &[
+            clause(vec![var("n"), ctor("vnil", Vec::new())], c("zero")),
+            clause(
+                vec![var("n"), ctor("vcons", vec![var("k"), var("x"), var("xs")])],
+                number(1),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn an_index_that_does_not_reduce_is_reported() {
+    // `mk : (k : Nat) -> Foo k` при разборе `Foo (succ n)`: решением было бы
+    // `k := succ n`, то есть подстановка в поля ветви, а ветвь - функция от
+    // всех своих полей. Это граница фрагмента, и отказ здесь обязан называть
+    // причину, а не приходить из ядра ошибкой про чужой терм.
+    let mut signature = base();
+    let mut metas = Metas::default();
+    declared(
+        "Foo",
+        &signature.declare_data(
+            "Foo",
+            0,
+            &mut metas,
+            pi(Mult::Zero, "n", c("Nat"), Term::universe(0)),
+        ),
+    );
+    declared(
+        "mk",
+        &signature.declare_constructor(
+            "Foo",
+            "mk",
+            &mut metas,
+            pi(Mult::Many, "k", c("Nat"), c("Foo").apply([Term::var(0)])),
+        ),
+    );
+
+    // Цель зависит от `n`, поэтому уточнять придётся - и не выйдет.
+    let outcome = compile(
+        &signature,
+        &mut Metas::default(),
+        &pi(
+            Mult::Zero,
+            "n",
+            c("Nat"),
+            pi(
+                Mult::Many,
+                "f",
+                c("Foo").apply([c("succ").apply([Term::var(0)])]),
+                family(Term::var(1)),
+            ),
+        ),
+        &[clause(
+            vec![var("n"), ctor("mk", vec![var("k")])],
+            c("anything").apply([Term::var(1)]),
+        )],
+    );
+    assert!(
+        matches!(outcome, Err(PatternError::StuckIndex { .. })),
+        "{outcome:?}"
+    );
 }
 
 #[test]

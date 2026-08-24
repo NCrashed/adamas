@@ -56,4 +56,5 @@ pub mod sig;
 pub mod source;
 pub mod term;
 pub mod total;
+mod unify;
 pub mod value;

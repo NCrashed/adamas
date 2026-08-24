@@ -1261,7 +1261,7 @@ fn branch_type(
 ///
 /// Если аргументов больше, чем связываний. Internal invariant: число
 /// параметров проверено против объявления.
-fn instantiate_telescope(ty: Rc<Value>, arguments: &[Rc<Value>]) -> Rc<Value> {
+pub(crate) fn instantiate_telescope(ty: Rc<Value>, arguments: &[Rc<Value>]) -> Rc<Value> {
     arguments
         .iter()
         .fold(ty, |current, argument| match &*current {

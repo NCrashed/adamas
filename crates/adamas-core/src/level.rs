@@ -282,7 +282,10 @@ impl fmt::Display for Level {
 }
 
 /// Снимает цепочку `suc`, возвращая основание и её длину.
-fn peel(level: &Level) -> (&Level, u32) {
+///
+/// Живёт здесь, а не у пользователей: печать и снятие общего префикса при
+/// унификации ([`crate::meta`]) обязаны понимать «основание» одинаково.
+pub(crate) fn peel(level: &Level) -> (&Level, u32) {
     let mut current = level;
     let mut offset = 0;
     while let Level::Succ(inner) = current {

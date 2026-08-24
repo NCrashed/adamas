@@ -25,7 +25,7 @@
 
 use std::rc::Rc;
 
-use crate::level::{Level, LevelMeta, LevelVar};
+use crate::level::{Level, LevelMeta, LevelVar, peel};
 
 /// Хранилище метапеременных уровня.
 ///
@@ -141,17 +141,6 @@ impl Metas {
             _ => false,
         }
     }
-}
-
-/// Снимает цепочку `suc`, возвращая основание и её длину.
-fn peel(level: &Level) -> (&Level, u32) {
-    let mut current = level;
-    let mut offset = 0;
-    while let Level::Succ(inner) = current {
-        current = inner;
-        offset += 1;
-    }
-    (current, offset)
 }
 
 /// Обратная операция: надстраивает `offset` штук `suc`.

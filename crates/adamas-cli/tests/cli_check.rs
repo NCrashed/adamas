@@ -10,7 +10,7 @@ fn adamas() -> Command {
 }
 
 #[test]
-fn reports_source_stats() {
+fn reports_source_stats_and_refuses_to_report_success() {
     // CARGO_TARGET_TMPDIR уникален для пакета и чистится вместе с target/.
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("check-smoke");
     std::fs::create_dir_all(&dir).unwrap();
@@ -19,14 +19,17 @@ fn reports_source_stats() {
 
     let output = adamas().arg("check").arg(&path).output().unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
     assert!(stdout.contains("37 bytes"), "unexpected stdout: {stdout}");
     assert!(stdout.contains("3 lines"), "unexpected stdout: {stdout}");
+    assert!(!stderr.contains("panicked"), "driver panicked: {stderr}");
+    // Ничего не проверено, значит и успехом это называть нельзя: иначе
+    // `adamas check` зеленеет в CI на непроверенном файле.
+    assert!(
+        !output.status.success(),
+        "check без парсера обязан возвращать ненулевой код"
+    );
 }
 
 #[test]

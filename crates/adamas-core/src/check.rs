@@ -46,7 +46,7 @@ use crate::level::{Level, LevelMeta, LevelVar};
 use crate::meta::{Metas, unsolved_level_meta};
 use crate::mult::Mult;
 use crate::sig::{Definition, DefinitionKind, Signature};
-use crate::term::{Case, Index, Name, Term};
+use crate::term::{Case, Index, Name, Term, spine};
 use crate::value::{Elim, Head, Lvl, Value};
 
 /// Ошибка проверки типов.
@@ -830,18 +830,6 @@ fn peel_pis(term: &Term) -> (Vec<Binder>, &Term) {
         current = codomain;
     }
     (fields, current)
-}
-
-/// Разбирает применение на голову и аргументы.
-fn spine(term: &Term) -> (&Term, Vec<&Term>) {
-    let mut arguments = Vec::new();
-    let mut current = term;
-    while let Term::App(callee, argument) = current {
-        arguments.push(argument.as_ref());
-        current = callee;
-    }
-    arguments.reverse();
-    (current, arguments)
 }
 
 /// Встречается ли имя в терме.

@@ -34,7 +34,7 @@
 
 use crate::mult::Mult;
 use crate::sig::{Definition, Signature};
-use crate::term::{Index, Name, Term};
+use crate::term::{Index, Name, Term, spine};
 
 /// Размер связывания относительно параметров определения.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -246,18 +246,6 @@ impl Walk<'_> {
         self.term(sizes, term);
         sizes.pop();
     }
-}
-
-/// Разбирает применение на голову и аргументы.
-fn spine(term: &Term) -> (&Term, Vec<&Term>) {
-    let mut arguments = Vec::new();
-    let mut current = term;
-    while let Term::App(callee, argument) = current {
-        arguments.push(argument.as_ref());
-        current = callee;
-    }
-    arguments.reverse();
-    (current, arguments)
 }
 
 /// Допустимо ли определение в стёртом фрагменте (§4.7).

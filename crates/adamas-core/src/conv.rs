@@ -18,10 +18,10 @@
 
 use std::rc::Rc;
 
-use crate::eval::apply;
+use crate::eval::{apply, eliminate_case};
 use crate::meta::Metas;
 use crate::sig::Signature;
-use crate::value::{Head, Lvl, Value};
+use crate::value::{Elim, Head, Lvl, StuckCase, Value};
 
 /// Конвертируемы ли два значения в контексте размера `size`.
 ///
@@ -63,16 +63,20 @@ pub fn convertible(
 ///
 /// `None`, если голова - локальная переменная или постулат: разворачивать
 /// нечего.
-fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
+///
+/// Спайн переигрывается целиком, включая разбор: развернув `two` в
+/// `succ (succ zero)`, застрявший над ним `case` немедленно сводится по ι.
+/// Единственное место, где это происходит, - здесь, потому что [`crate::eval`]
+/// определений не трогает.
+pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
     let Value::Neutral(Head::Global(name, levels), spine) = &**value else {
         return None;
     };
     let body = sig.lookup(name)?.instantiate_body(levels)?;
-    Some(
-        spine
-            .iter()
-            .fold(body, |callee, argument| apply(&callee, Rc::clone(argument))),
-    )
+    Some(spine.iter().fold(body, |callee, elim| match elim {
+        Elim::App(argument) => apply(&callee, Rc::clone(argument)),
+        Elim::Case(case) => eliminate_case(case, &callee),
+    }))
 }
 
 /// Совпадают ли головы застрявших вычислений.
@@ -97,6 +101,45 @@ fn same_head(metas: &mut Metas, left: &Head, right: &Head) -> bool {
     }
 }
 
+/// Совпадают ли элиминаторы в одной позиции спайна.
+fn same_elim(sig: &Signature, metas: &mut Metas, size: u32, left: &Elim, right: &Elim) -> bool {
+    match (left, right) {
+        (Elim::App(a), Elim::App(b)) => convertible(sig, metas, size, a, b),
+        (Elim::Case(a), Elim::Case(b)) => same_case(sig, metas, size, a, b),
+        _ => false,
+    }
+}
+
+/// Совпадают ли два застрявших разбора.
+///
+/// Мотивы сравниваются, хотя на результат они не влияют: разбор застрял, а
+/// значит ни одна ветвь не выбрана, и при любом значении скрутинируемого два
+/// разбора с одинаковыми ветвями дадут одно и то же. Сравнение здесь
+/// **консервативно** - оно может отвергнуть конвертируемые термы. Отбросить
+/// мотив нельзя: он часть терма и виден в типе результата, и признав такие
+/// термы равными, конвертируемость перестала бы сохранять типизацию.
+fn same_case(
+    sig: &Signature,
+    metas: &mut Metas,
+    size: u32,
+    left: &Rc<StuckCase>,
+    right: &Rc<StuckCase>,
+) -> bool {
+    left.data == right.data
+        && left.params == right.params
+        && left.levels.len() == right.levels.len()
+        && left
+            .levels
+            .iter()
+            .zip(right.levels.iter())
+            .all(|(a, b)| metas.unify_levels(a, b))
+        && convertible(sig, metas, size, &left.motive, &right.motive)
+        && left.branches.len() == right.branches.len()
+        && left.branches.iter().zip(&right.branches).all(|(a, b)| {
+            a.constructor == b.constructor && convertible(sig, metas, size, &a.body, &b.body)
+        })
+}
+
 /// Сравнение без разворота определений.
 fn rigid(
     sig: &Signature,
@@ -114,7 +157,7 @@ fn rigid(
                 && spine_a
                     .iter()
                     .zip(spine_b)
-                    .all(|(a, b)| convertible(sig, metas, size, a, b))
+                    .all(|(a, b)| same_elim(sig, metas, size, a, b))
         }
 
         // Кратность - часть типа функции, поэтому здесь она значима:

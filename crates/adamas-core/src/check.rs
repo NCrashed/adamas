@@ -34,12 +34,13 @@ use std::rc::Rc;
 
 use crate::conv::convertible;
 use crate::ctx::{Ctx, Usage};
+use crate::eval::{apply, quote};
 use crate::level::{Level, LevelMeta, LevelVar};
 use crate::meta::{Metas, unsolved_level_meta};
 use crate::mult::Mult;
 use crate::sig::{Definition, DefinitionKind, Signature};
-use crate::term::{Index, Name, Term};
-use crate::value::Value;
+use crate::term::{Case, Index, Name, Term};
+use crate::value::{Elim, Head, Lvl, Value};
 
 /// Ошибка проверки типов.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -229,6 +230,57 @@ pub enum TypeError {
         sort: String,
     },
 
+    /// Разбирается значение, тип которого не то индуктивное семейство.
+    #[error("разбор `{data}`, но значение имеет тип `{ty}`")]
+    NotADataValue {
+        /// Имя типа из разбора.
+        data: Name,
+        /// Тип разбираемого значения.
+        ty: String,
+    },
+
+    /// Число параметров в разборе разошлось с объявлением типа.
+    #[error("разбор `{data}` объявляет {found} параметров, а у типа их {expected}")]
+    CaseParameters {
+        /// Имя типа.
+        data: Name,
+        /// Сколько параметров у типа.
+        expected: u32,
+        /// Сколько записано в разборе.
+        found: u32,
+    },
+
+    /// Конструктор остался без ветви.
+    #[error("разбор `{data}` не покрывает конструктор `{constructor}`")]
+    NonExhaustive {
+        /// Имя типа.
+        data: Name,
+        /// Непокрытый конструктор.
+        constructor: Name,
+    },
+
+    /// Ветвь для того, чего разбирать не требуется.
+    #[error("в разборе `{data}` лишняя ветвь `{constructor}`")]
+    RedundantBranch {
+        /// Имя типа.
+        data: Name,
+        /// Конструктор ветви.
+        constructor: Name,
+    },
+
+    /// Ветви идут не в порядке объявления конструкторов.
+    #[error(
+        "ветви `{data}` обязаны идти в порядке объявления: ожидался `{expected}`, встречен `{found}`"
+    )]
+    BranchOrder {
+        /// Имя типа.
+        data: Name,
+        /// Конструктор, ожидавшийся на этом месте.
+        expected: Name,
+        /// Конструктор, который там оказался.
+        found: Name,
+    },
+
     /// Определение ссылается на параметр уровня, которого у него нет.
     #[error("`{name}` использует параметр уровня u{var} при арности {arity}")]
     LevelVarOutOfScope {
@@ -347,6 +399,10 @@ pub fn infer(
             }
             Ok((definition.instantiate_type(levels), Usage::zero(ctx.size())))
         }
+
+        // Мотив записан в самом разборе, поэтому тип синтезируется, а не
+        // берётся из режима проверки.
+        Term::Case(case) => infer_case(ctx, metas, sigma, case),
 
         // Домена у лямбды в терме нет, синтезировать не из чего.
         Term::Lam(..) => Err(TypeError::CannotInfer {
@@ -700,6 +756,18 @@ fn mentions(signature: &Signature, name: &Name, term: &Term) -> bool {
         Term::App(callee, argument) => recur(callee) || recur(argument),
         Term::Pi(_, _, domain, codomain) => recur(domain) || recur(codomain),
         Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || recur(body),
+        // Имя типа стоит в самом узле, а имена конструкторов - в ветвях:
+        // упоминанием считается и то и другое, иначе разбор по `Bad` внутри
+        // поля прошёл бы мимо позитивности.
+        Term::Case(case) => {
+            case.data == *name
+                || recur(&case.scrutinee)
+                || recur(&case.motive)
+                || case
+                    .branches
+                    .iter()
+                    .any(|branch| branch.constructor == *name || recur(&branch.body))
+        }
     }
 }
 
@@ -891,4 +959,318 @@ pub fn check_constructor(
         });
     }
     Ok(())
+}
+
+// ------------------------------------------------------------------ элиминация
+
+/// Синтезирует тип разбора по конструктору.
+///
+/// Мотив записан в самом узле, поэтому тип получается, а не берётся из режима
+/// проверки: результат - `motive indices scrutinee`.
+///
+/// Кратности достаются правилу даром. Ветвь - функция от полей, поэтому её
+/// проверяет обычное правило лямбды: оно же сверяет объявленные кратности полей
+/// и расходует каждое поле при `q · σ`. Ветви между собой соединяются
+/// **объединением**, а не суммой: выполняется ровно одна.
+fn infer_case(
+    ctx: &Ctx<'_>,
+    metas: &mut Metas,
+    sigma: Mult,
+    case: &Case,
+) -> Result<(Rc<Value>, Usage), TypeError> {
+    let signature = ctx.signature();
+    let declaration = signature
+        .lookup(&case.data)
+        .ok_or_else(|| TypeError::UnknownConstant {
+            name: Rc::clone(&case.data),
+        })?;
+    let DefinitionKind::Data {
+        constructors,
+        params,
+        ..
+    } = &declaration.kind
+    else {
+        return Err(TypeError::NotADataType {
+            name: Rc::clone(&case.data),
+        });
+    };
+
+    // Число параметров и аргументы уровня терм несёт сам, чтобы вычислитель
+    // обходился без сигнатуры. Сверяются они здесь и только здесь.
+    let params = *params;
+    if params != case.params {
+        return Err(TypeError::CaseParameters {
+            data: Rc::clone(&case.data),
+            expected: params,
+            found: case.params,
+        });
+    }
+    let found = u32::try_from(case.levels.len())
+        .unwrap_or_else(|_| unreachable!("аргументов уровня больше, чем помещается в u32"));
+    if found != declaration.level_arity {
+        return Err(TypeError::LevelArity {
+            name: Rc::clone(&case.data),
+            expected: declaration.level_arity,
+            found,
+        });
+    }
+
+    let constructors = constructors.clone();
+    let binders = peel_pis(&declaration.ty).0.len();
+    let family = declaration.instantiate_type(&case.levels);
+
+    // Тип разбираемого значения обязан быть этим семейством, применённым
+    // полностью: параметры, потом индексы.
+    let (scrutinee_ty, scrutinee_usage) = infer(ctx, metas, sigma, &case.scrutinee)?;
+    let arguments = data_arguments(signature, metas, case, &scrutinee_ty)
+        .filter(|arguments| arguments.len() == binders)
+        .ok_or_else(|| TypeError::NotADataValue {
+            data: Rc::clone(&case.data),
+            ty: ctx.quote(&scrutinee_ty).to_string(),
+        })?;
+    let (data_params, data_indices) = arguments.split_at(params as usize);
+
+    let indexed = instantiate_telescope(family, data_params);
+    let motive_ty = motive_type(ctx, metas, case, &indexed, data_params);
+    let motive_usage = check(ctx, metas, Mult::Zero, &case.motive, &motive_ty)?;
+    let motive = ctx.eval(&case.motive);
+
+    branch_shape(case, &constructors)?;
+    let mut branches = Usage::zero(ctx.size());
+    for branch in &case.branches {
+        let expected = branch_type(ctx, case, &branch.constructor, data_params, &motive);
+        let usage = check(ctx, metas, sigma, &branch.body, &expected)?;
+        branches = branches.join(&usage);
+    }
+
+    let result = data_indices
+        .iter()
+        .fold(motive, |value, index| apply(&value, Rc::clone(index)));
+    let result = apply(&result, ctx.eval(&case.scrutinee));
+    Ok((result, scrutinee_usage + &motive_usage + &branches))
+}
+
+/// Аргументы, к которым применено индуктивное семейство в типе значения.
+///
+/// `None` - тип не то семейство. δ-разворот здесь обязателен: у
+/// определения-синонима голова своя, и без разворота разбор по нему не прошёл
+/// бы, хотя тип тот же самый.
+fn data_arguments(
+    signature: &Signature,
+    metas: &mut Metas,
+    case: &Case,
+    ty: &Rc<Value>,
+) -> Option<Vec<Rc<Value>>> {
+    let mut current = Rc::clone(ty);
+    loop {
+        let applied = match &*current {
+            Value::Neutral(Head::Global(name, levels), spine) if *name == case.data => {
+                Some((Rc::clone(levels), spine.clone()))
+            }
+            _ => None,
+        };
+        if let Some((levels, spine)) = applied {
+            if levels.len() != case.levels.len() {
+                return None;
+            }
+            if !levels
+                .iter()
+                .zip(case.levels.iter())
+                .all(|(actual, written)| metas.unify_levels(actual, written))
+            {
+                return None;
+            }
+            return spine
+                .iter()
+                .map(|elim| match elim {
+                    Elim::App(argument) => Some(Rc::clone(argument)),
+                    Elim::Case(_) => None,
+                })
+                .collect();
+        }
+        current = crate::conv::unfold(signature, &current)?;
+    }
+}
+
+/// Тип мотива: `(0 i⃗ : I) -> (0 x : D levels params i⃗) -> Type ?ℓ`.
+///
+/// Всё в стёртом фрагменте: мотив - функция на типах, в рантайме его нет.
+/// Универсум результата остаётся дыркой, которую решает проверка самого мотива:
+/// большая элиминация (`case b of true => Nat; false => Bool`) живёт в том же
+/// универсуме, что и её ветви, и заранее он неизвестен.
+fn motive_type(
+    ctx: &Ctx<'_>,
+    metas: &mut Metas,
+    case: &Case,
+    family: &Rc<Value>,
+    params: &[Rc<Value>],
+) -> Rc<Value> {
+    let (telescope, size) = telescope_of(ctx.size(), family);
+    let mut scrutinee_ty = Term::Const(Rc::clone(&case.data), Rc::clone(&case.levels));
+    for param in params {
+        scrutinee_ty = Term::App(Rc::new(scrutinee_ty), Rc::new(quote(size, param)));
+    }
+    for level in ctx.size()..size {
+        scrutinee_ty = Term::App(
+            Rc::new(scrutinee_ty),
+            Rc::new(Term::Var(Lvl(level).to_index(size))),
+        );
+    }
+
+    // Складывается изнутри наружу: сперва само разбираемое значение, потом
+    // индексы в обратном порядке, чтобы первым объявленным оказался внешний.
+    let result = std::iter::once((Mult::Zero, Name::from("x"), scrutinee_ty))
+        .chain(telescope.into_iter().rev())
+        .fold(
+            Term::Universe(metas.fresh_level()),
+            |codomain, (_, name, domain)| {
+                Term::Pi(Mult::Zero, name, Rc::new(domain), Rc::new(codomain))
+            },
+        );
+    ctx.eval(&result)
+}
+
+/// Тип ветви: тип конструктора без параметров, у которого результат заменён на
+/// `motive indices (c params fields)`.
+///
+/// Ветвь проверяется против него обычным правилом лямбды - оттуда берутся и
+/// совпадение кратностей полей, и их расход, и η.
+fn branch_type(
+    ctx: &Ctx<'_>,
+    case: &Case,
+    constructor: &Name,
+    params: &[Rc<Value>],
+    motive: &Rc<Value>,
+) -> Rc<Value> {
+    let declaration = ctx
+        .signature()
+        .lookup(constructor)
+        .unwrap_or_else(|| unreachable!("конструктор `{constructor}` пропал из сигнатуры"));
+    let applied = instantiate_telescope(declaration.instantiate_type(&case.levels), params);
+    let (telescope, size) = telescope_of(ctx.size(), &applied);
+
+    // Хвост телескопа - `D levels params indices`, оттуда и берутся индексы,
+    // выраженные через поля этой ветви.
+    let tail = telescope_tail(ctx.size(), &applied);
+    let Value::Neutral(_, spine) = &*tail else {
+        unreachable!("конструктор `{constructor}` возвращает не индуктивный тип")
+    };
+    let mut result = quote(size, motive);
+    for elim in spine.iter().skip(params.len()) {
+        let Elim::App(index) = elim else {
+            unreachable!("в результате конструктора `{constructor}` стоит разбор")
+        };
+        result = Term::App(Rc::new(result), Rc::new(quote(size, index)));
+    }
+
+    let mut built = Term::Const(Rc::clone(constructor), Rc::clone(&case.levels));
+    for param in params {
+        built = Term::App(Rc::new(built), Rc::new(quote(size, param)));
+    }
+    for level in ctx.size()..size {
+        built = Term::App(
+            Rc::new(built),
+            Rc::new(Term::Var(Lvl(level).to_index(size))),
+        );
+    }
+    result = Term::App(Rc::new(result), Rc::new(built));
+
+    let result = telescope
+        .into_iter()
+        .rev()
+        .fold(result, |codomain, (mult, name, domain)| {
+            Term::Pi(mult, name, Rc::new(domain), Rc::new(codomain))
+        });
+    ctx.eval(&result)
+}
+
+/// Подставляет аргументы в телескоп `Pi`, снимая по одному связыванию.
+///
+/// Не то же, что применение: здесь на входе **тип** семейства или конструктора,
+/// а не функция, и параметр подставляется в кодомен, а не в тело.
+///
+/// # Panics
+///
+/// Если аргументов больше, чем связываний. Internal invariant: число
+/// параметров проверено против объявления.
+fn instantiate_telescope(ty: Rc<Value>, arguments: &[Rc<Value>]) -> Rc<Value> {
+    arguments
+        .iter()
+        .fold(ty, |current, argument| match &*current {
+            Value::Pi(_, _, _, codomain) => codomain.apply(Rc::clone(argument)),
+            other => unreachable!("телескоп короче списка аргументов: {other}"),
+        })
+}
+
+/// Снимает цепочку `Pi` со значения, возвращая связывания в виде термов и
+/// размер контекста, в котором они записаны.
+///
+/// Домены читаются обратно по одному, каждый в своём контексте: `quote` до
+/// увеличения размера, потому что домен живёт снаружи собственного связывания.
+fn telescope_of(size: u32, value: &Rc<Value>) -> (Vec<(Mult, Name, Term)>, u32) {
+    let mut telescope = Vec::new();
+    let mut current = Rc::clone(value);
+    let mut size = size;
+    while let Value::Pi(mult, name, domain, codomain) = &*current {
+        telescope.push((*mult, Rc::clone(name), quote(size, domain)));
+        let next = codomain.apply(Value::var(Lvl(size)));
+        size += 1;
+        current = next;
+    }
+    (telescope, size)
+}
+
+/// То, что остаётся от значения после снятия всех `Pi`.
+fn telescope_tail(size: u32, value: &Rc<Value>) -> Rc<Value> {
+    let mut current = Rc::clone(value);
+    let mut size = size;
+    loop {
+        let Value::Pi(_, _, _, codomain) = &*current else {
+            return current;
+        };
+        let next = codomain.apply(Value::var(Lvl(size)));
+        size += 1;
+        current = next;
+    }
+}
+
+/// Ветви обязаны повторять конструкторы типа - все и в порядке объявления.
+///
+/// Порядок значим потому, что он объявлен значимым (§9): список конструкторов
+/// задаёт порядок ветвей. Требовать его дешевле, чем сопоставлять по имени, и
+/// инвариант "ветви параллельны конструкторам" держится сам.
+fn branch_shape(case: &Case, constructors: &[Name]) -> Result<(), TypeError> {
+    for branch in &case.branches {
+        if !constructors.contains(&branch.constructor) {
+            return Err(TypeError::RedundantBranch {
+                data: Rc::clone(&case.data),
+                constructor: Rc::clone(&branch.constructor),
+            });
+        }
+    }
+    for (index, constructor) in constructors.iter().enumerate() {
+        match case.branches.get(index) {
+            Some(branch) if branch.constructor == *constructor => {}
+            Some(branch) => {
+                return Err(TypeError::BranchOrder {
+                    data: Rc::clone(&case.data),
+                    expected: Rc::clone(constructor),
+                    found: Rc::clone(&branch.constructor),
+                });
+            }
+            None => {
+                return Err(TypeError::NonExhaustive {
+                    data: Rc::clone(&case.data),
+                    constructor: Rc::clone(constructor),
+                });
+            }
+        }
+    }
+    match case.branches.get(constructors.len()) {
+        Some(extra) => Err(TypeError::RedundantBranch {
+            data: Rc::clone(&case.data),
+            constructor: Rc::clone(&extra.constructor),
+        }),
+        None => Ok(()),
+    }
 }

@@ -823,6 +823,7 @@ fn has_negative_occurrence(term: &Term) -> bool {
             Term::Let(_, _, ty, value, body) => {
                 mentions_d(ty) || mentions_d(value) || mentions_d(body)
             }
+            Term::Case(_) => unreachable!("генератор полей не порождает разбор"),
             Term::Var(_) | Term::Universe(_) => false,
         }
     }

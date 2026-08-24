@@ -22,8 +22,8 @@
 
 use std::rc::Rc;
 
-use crate::term::Term;
-use crate::value::{Closure, Env, Head, Lvl, Value};
+use crate::term::{Branch, Case, Term};
+use crate::value::{Closure, Elim, Env, Head, Lvl, StuckBranch, StuckCase, Value};
 
 impl Closure {
     /// Применяет замыкание к аргументу.
@@ -85,7 +85,74 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
             let value = eval(env, value);
             eval(&env.extend(value), body)
         }
+
+        Term::Case(case) => {
+            let scrutinee = eval(env, &case.scrutinee);
+            eliminate_case(&Rc::new(stuck_case(env, case)), &scrutinee)
+        }
     }
+}
+
+/// Переводит разбор из терма в значение, вычисляя мотив и ветви.
+fn stuck_case(env: &Env, case: &Case) -> StuckCase {
+    StuckCase {
+        data: Rc::clone(&case.data),
+        levels: case
+            .levels
+            .iter()
+            .map(crate::level::Level::normalize)
+            .collect(),
+        params: case.params,
+        motive: eval(env, &case.motive),
+        branches: case
+            .branches
+            .iter()
+            .map(|branch| StuckBranch {
+                constructor: Rc::clone(&branch.constructor),
+                body: eval(env, &branch.body),
+            })
+            .collect(),
+    }
+}
+
+/// Выполняет разбор над значением - ι-редукция.
+///
+/// Сводится, когда голова разбираемого значения оказалась конструктором из
+/// ветвей: тогда спайн - это параметры, потом поля, и ветвь применяется к
+/// полям. Всё остальное застревает, включая **определение с телом**: [`eval`]
+/// его не разворачивает, и `case two of …` останется застрявшим до тех пор,
+/// пока разворота не потребует проверка конвертируемости ([`crate::conv`]).
+///
+/// # Panics
+///
+/// Паникует, если разбирается не застрявшее значение. Internal invariant:
+/// у значения индуктивного типа других форм не бывает, а типизацию обеспечивает
+/// вызывающий.
+#[must_use]
+pub fn eliminate_case(case: &Rc<StuckCase>, scrutinee: &Rc<Value>) -> Rc<Value> {
+    let Value::Neutral(head, spine) = &**scrutinee else {
+        unreachable!("разбор значения, не являющегося нейтралью: {scrutinee}")
+    };
+
+    if let Head::Global(name, _) = head {
+        if let Some(branch) = case
+            .branches
+            .iter()
+            .find(|branch| branch.constructor == *name)
+        {
+            return spine.iter().skip(case.params as usize).fold(
+                Rc::clone(&branch.body),
+                |body, elim| match elim {
+                    Elim::App(argument) => apply(&body, Rc::clone(argument)),
+                    Elim::Case(_) => unreachable!("конструктор под разбором"),
+                },
+            );
+        }
+    }
+
+    let mut spine = spine.clone();
+    spine.push(Elim::Case(Rc::clone(case)));
+    Rc::new(Value::Neutral(head.clone(), spine))
 }
 
 /// Применяет значение к аргументу.
@@ -101,7 +168,7 @@ pub fn apply(callee: &Rc<Value>, argument: Rc<Value>) -> Rc<Value> {
         // Применение застряло - аргумент дописывается в спайн.
         Value::Neutral(head, spine) => {
             let mut spine = spine.clone();
-            spine.push(argument);
+            spine.push(Elim::App(argument));
             Rc::new(Value::Neutral(head.clone(), spine))
         }
         other => unreachable!("применение не-функции: {other}"),
@@ -129,8 +196,24 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
                 Head::Local(level) => Term::Var(level.to_index(size)),
                 Head::Global(name, levels) => Term::Const(Rc::clone(name), Rc::clone(levels)),
             };
-            spine.iter().fold(base, |callee, argument| {
-                Term::App(Rc::new(callee), Rc::new(quote(size, argument)))
+            spine.iter().fold(base, |callee, elim| match elim {
+                Elim::App(argument) => Term::App(Rc::new(callee), Rc::new(quote(size, argument))),
+                // Накопленный терм и есть то, на чём разбор застрял.
+                Elim::Case(case) => Term::Case(Rc::new(Case {
+                    data: Rc::clone(&case.data),
+                    levels: Rc::clone(&case.levels),
+                    params: case.params,
+                    scrutinee: Rc::new(callee),
+                    motive: Rc::new(quote(size, &case.motive)),
+                    branches: case
+                        .branches
+                        .iter()
+                        .map(|branch| Branch {
+                            constructor: Rc::clone(&branch.constructor),
+                            body: Rc::new(quote(size, &branch.body)),
+                        })
+                        .collect(),
+                })),
             })
         }
 

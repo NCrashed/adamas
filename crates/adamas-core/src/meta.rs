@@ -230,6 +230,16 @@ impl Generalization {
                     self.collect_level(metas, level);
                 }
             }
+            Term::Case(case) => {
+                for level in case.levels.iter() {
+                    self.collect_level(metas, level);
+                }
+                self.collect_term(metas, &case.scrutinee);
+                self.collect_term(metas, &case.motive);
+                for branch in &case.branches {
+                    self.collect_term(metas, &branch.body);
+                }
+            }
         }
     }
 
@@ -287,6 +297,25 @@ impl Generalization {
                     .map(|level| self.apply_level(metas, level))
                     .collect(),
             ),
+            Term::Case(case) => Term::Case(Rc::new(crate::term::Case {
+                data: Rc::clone(&case.data),
+                levels: case
+                    .levels
+                    .iter()
+                    .map(|level| self.apply_level(metas, level))
+                    .collect(),
+                params: case.params,
+                scrutinee: recur(&case.scrutinee),
+                motive: recur(&case.motive),
+                branches: case
+                    .branches
+                    .iter()
+                    .map(|branch| crate::term::Branch {
+                        constructor: Rc::clone(&branch.constructor),
+                        body: recur(&branch.body),
+                    })
+                    .collect(),
+            })),
         }
     }
 }
@@ -323,6 +352,17 @@ pub fn unsolved_level_meta(metas: &Metas, term: &crate::term::Term) -> Option<Le
             .or_else(|| unsolved_level_meta(metas, value))
             .or_else(|| unsolved_level_meta(metas, body)),
         Term::Const(_, levels) => levels.iter().find_map(|level| in_level(metas, level)),
+        Term::Case(case) => case
+            .levels
+            .iter()
+            .find_map(|level| in_level(metas, level))
+            .or_else(|| unsolved_level_meta(metas, &case.scrutinee))
+            .or_else(|| unsolved_level_meta(metas, &case.motive))
+            .or_else(|| {
+                case.branches
+                    .iter()
+                    .find_map(|branch| unsolved_level_meta(metas, &branch.body))
+            }),
     }
 }
 
@@ -347,6 +387,21 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
             Rc::clone(name),
             levels.iter().map(|level| metas.zonk(level)).collect(),
         ),
+        Term::Case(case) => Term::Case(Rc::new(crate::term::Case {
+            data: Rc::clone(&case.data),
+            levels: case.levels.iter().map(|level| metas.zonk(level)).collect(),
+            params: case.params,
+            scrutinee: recur(&case.scrutinee),
+            motive: recur(&case.motive),
+            branches: case
+                .branches
+                .iter()
+                .map(|branch| crate::term::Branch {
+                    constructor: Rc::clone(&branch.constructor),
+                    body: recur(&branch.body),
+                })
+                .collect(),
+        })),
     }
 }
 

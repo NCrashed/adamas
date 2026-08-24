@@ -65,6 +65,49 @@ pub enum Term {
     /// через level-метапеременные - следующий срез; представление от этого не
     /// изменится, поменяется только то, кто заполняет список.
     Const(Name, Rc<[Level]>),
+    /// Разбор значения индуктивного типа по конструктору.
+    Case(Rc<Case>),
+}
+
+/// Разбор значения индуктивного типа по конструктору (§9 Фаза 1).
+///
+/// **Собственных связываний узел не вводит.** И мотив, и ветви - обычные термы
+/// функционального типа: мотив ждёт индексы и само разбираемое значение и
+/// выдаёт тип результата, ветвь ждёт поля своего конструктора. Из-за этого
+/// `case` не участвует в сдвигах индексов вовсе, а η-правило и проверка
+/// кратностей достаются ему от правила лямбды даром - ветвь проверяется
+/// ровно как функция от полей.
+///
+/// Мотив обязателен: без него `case` не может быть зависимым, а тип результата
+/// брался бы из режима проверки, и тогда `case` перестал бы синтезировать
+/// собственный тип.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Case {
+    /// Индуктивный тип, по которому идёт разбор.
+    pub data: Name,
+    /// Аргументы уровня этого типа.
+    pub levels: Rc<[Level]>,
+    /// Сколько первых аргументов конструктора - параметры.
+    ///
+    /// Ветвь их не получает: они определены типом разбираемого значения, а не
+    /// выбором конструктора. Число дублирует сигнатуру затем, чтобы
+    /// [`crate::eval`] обходился без неё; проверка типов сверяет.
+    pub params: u32,
+    /// Что разбирается.
+    pub scrutinee: Rc<Term>,
+    /// Мотив: `(0 i⃗ : I) -> (0 x : D levels params i⃗) -> Type ℓ`.
+    pub motive: Rc<Term>,
+    /// Ветви в порядке объявления конструкторов.
+    pub branches: Vec<Branch>,
+}
+
+/// Ветвь разбора - функция от полей конструктора.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Branch {
+    /// Конструктор, который она разбирает.
+    pub constructor: Name,
+    /// Тело: функция от полей, идущих после параметров.
+    pub body: Rc<Term>,
 }
 
 impl Term {
@@ -118,6 +161,25 @@ impl Term {
                     .map(|level| level.substitute(arguments))
                     .collect(),
             ),
+            Self::Case(case) => Self::Case(Rc::new(Case {
+                data: Rc::clone(&case.data),
+                levels: case
+                    .levels
+                    .iter()
+                    .map(|level| level.substitute(arguments))
+                    .collect(),
+                params: case.params,
+                scrutinee: recur(&case.scrutinee),
+                motive: recur(&case.motive),
+                branches: case
+                    .branches
+                    .iter()
+                    .map(|branch| Branch {
+                        constructor: Rc::clone(&branch.constructor),
+                        body: recur(&branch.body),
+                    })
+                    .collect(),
+            })),
         }
     }
 
@@ -143,6 +205,19 @@ impl Term {
             Self::Const(_, levels) => levels
                 .iter()
                 .fold(None, |found, level| join(found, level.max_var())),
+            Self::Case(case) => {
+                let levels = case
+                    .levels
+                    .iter()
+                    .fold(None, |found, level| join(found, level.max_var()));
+                let branches = case.branches.iter().fold(None, |found, branch| {
+                    join(found, branch.body.max_level_var())
+                });
+                join(
+                    join(levels, branches),
+                    join(case.scrutinee.max_level_var(), case.motive.max_level_var()),
+                )
+            }
         }
     }
 }
@@ -168,6 +243,22 @@ impl fmt::Display for Term {
             Self::Const(name, levels) => {
                 let printed: Vec<String> = levels.iter().map(ToString::to_string).collect();
                 write!(f, "{name}{{{}}}", printed.join(", "))
+            }
+            // Имя типа не печатается: оно восстанавливается по конструкторам
+            // ветвей, а сообщения об ошибках и без него длинные.
+            Self::Case(case) => {
+                let branches: Vec<String> = case
+                    .branches
+                    .iter()
+                    .map(|branch| format!("{} => {}", branch.constructor, branch.body))
+                    .collect();
+                write!(
+                    f,
+                    "case {} return {} of {{{}}}",
+                    Atom(&case.scrutinee),
+                    Atom(&case.motive),
+                    branches.join("; ")
+                )
             }
         }
     }

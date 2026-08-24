@@ -47,6 +47,22 @@ impl std::ops::Mul for Mult {
 }
 
 impl Mult {
+    /// Наибольшая из двух кратностей в порядке `0 < 1 < ω`.
+    ///
+    /// Не то же, что сложение, и разница принципиальна: `1 ∨ 1 = 1`, тогда как
+    /// `1 + 1 = ω`. Сложение отвечает на "оба использования происходят",
+    /// объединение - на "происходит ровно одно из двух". Так соединяются ветви
+    /// `case`: выполняется одна, поэтому фактическое использование не
+    /// превосходит максимума по ветвям.
+    #[must_use]
+    pub fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Many, _) | (_, Self::Many) => Self::Many,
+            (Self::One, _) | (_, Self::One) => Self::One,
+            (Self::Zero, Self::Zero) => Self::Zero,
+        }
+    }
+
     /// Допустимо ли фактическое использование `usage` при объявленной `self`.
     ///
     /// `One` допускает и ноль использований - следствие аффинности.
@@ -100,6 +116,30 @@ mod tests {
     #[test]
     fn one_plus_one_saturates() {
         assert_eq!(Mult::One + Mult::One, Mult::Many);
+    }
+
+    /// Ветви `case` соединяются объединением, и именно поэтому линейная
+    /// переменная, использованная в каждой из двух ветвей, остаётся линейной.
+    #[test]
+    fn joining_is_not_adding() {
+        assert_eq!(Mult::One.join(Mult::One), Mult::One);
+        assert_eq!(Mult::One + Mult::One, Mult::Many, "а сложение - наоборот");
+    }
+
+    #[test]
+    fn join_is_a_least_upper_bound() {
+        for a in ALL {
+            assert_eq!(a.join(a), a, "идемпотентно");
+            assert_eq!(a.join(Mult::Zero), a, "0 - нейтраль");
+            assert_eq!(a.join(Mult::Many), Mult::Many, "ω поглощает");
+            for b in ALL {
+                assert_eq!(a.join(b), b.join(a), "коммутативно");
+                assert!(a.join(b).admits(a), "не меньше каждой из сторон");
+                for c in ALL {
+                    assert_eq!(a.join(b).join(c), a.join(b.join(c)), "ассоциативно");
+                }
+            }
+        }
     }
 
     #[test]

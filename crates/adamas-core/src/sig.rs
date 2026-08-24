@@ -279,6 +279,21 @@ impl Signature {
         let mut fresh = Metas::default();
         check_constructor(self, &mut fresh, &name, &data, &draft.ty)?;
 
+        // Арность уровня обязана совпасть с арностью типа: элиминация
+        // инстанцирует конструктор теми же аргументами, что и само семейство,
+        // и лишний параметр заполнить было бы нечем. Проверку не заменяет
+        // сверка результата - тот фиксирует лишь первые `arity` параметров.
+        let arity = self
+            .lookup(&data)
+            .map_or(draft.level_arity, |declaration| declaration.level_arity);
+        if arity != draft.level_arity {
+            return Err(TypeError::LevelArity {
+                name,
+                expected: arity,
+                found: draft.level_arity,
+            });
+        }
+
         draft.kind = DefinitionKind::Constructor {
             data: Rc::clone(&data),
         };

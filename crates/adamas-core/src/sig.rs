@@ -15,10 +15,10 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::check::{TypeError, check_definition};
+use crate::check::{TypeError, check_definition, unsolved_in_definition};
 use crate::eval::eval;
 use crate::level::Level;
-use crate::meta::Metas;
+use crate::meta::{Generalization, Metas};
 use crate::mult::Mult;
 use crate::term::{Name, Term};
 use crate::value::{Env, Value};
@@ -100,8 +100,65 @@ impl Signature {
         if self.definitions.contains_key(&name) {
             return Err(TypeError::DuplicateDefinition { name });
         }
-        // Заимствование `&self` заканчивается здесь, до вставки.
-        let definition = check_definition(self, &name, mult, level_arity, ty, body)?;
+        let definition = Definition {
+            mult,
+            level_arity,
+            ty,
+            body,
+        };
+        // Хранилище своё: арность объявлена, значит выводить нечего, а
+        // метапеременные живут ровно на время одной проверки. Заимствование
+        // `&self` заканчивается до вставки.
+        let mut metas = Metas::default();
+        check_definition(self, &mut metas, &name, &definition)?;
+        if let Some(meta) = unsolved_in_definition(&metas, &definition) {
+            return Err(TypeError::UnsolvedDefinitionLevel { name, meta });
+        }
+        self.definitions.insert(name, definition);
+        Ok(())
+    }
+
+    /// Проверяет определение и добавляет его, **выводя арность** из того, что
+    /// осталось нерешённым.
+    ///
+    /// Тип и тело пишутся с дырками ([`Metas::fresh_level`]), а не с
+    /// параметрами: параметры - результат, а не вход. Дырки, решённые по ходу
+    /// проверки, исчезают; оставшиеся становятся параметрами уровня, и их число
+    /// и есть арность.
+    ///
+    /// Это вторая половина implicit universe polymorphism: первая - вывод
+    /// аргументов в местах использования ([`Signature::instantiate`]).
+    ///
+    /// # Errors
+    ///
+    /// То же, что у [`Signature::define`], плюс дырка, оставшаяся **только в
+    /// теле**: параметром она стать не может, потому что в месте использования
+    /// аргументы уровня подставляются по типу, и заполнить её нечем.
+    pub fn define_inferred(
+        &mut self,
+        name: &str,
+        mult: Mult,
+        metas: &mut Metas,
+        ty: Term,
+        body: Option<Term>,
+    ) -> Result<(), TypeError> {
+        let name: Name = name.into();
+        if self.definitions.contains_key(&name) {
+            return Err(TypeError::DuplicateDefinition { name });
+        }
+
+        // Арность нулевая: на входе параметров нет вовсе, только дырки.
+        // `check_level_scope` этим и пользуется - параметр уровня во входном
+        // типе означал бы, что вызывающий смешал две записи.
+        let draft = Definition {
+            mult,
+            level_arity: 0,
+            ty,
+            body,
+        };
+        check_definition(self, metas, &name, &draft)?;
+
+        let definition = generalize(metas, &name, &draft)?;
         self.definitions.insert(name, definition);
         Ok(())
     }
@@ -121,6 +178,21 @@ impl Signature {
         Some(Term::Const(name.into(), levels))
     }
 
+    /// Постулат с выведенной арностью - [`Signature::define_inferred`] без тела.
+    ///
+    /// # Errors
+    ///
+    /// То же, что у [`Signature::define_inferred`].
+    pub fn postulate_inferred(
+        &mut self,
+        name: &str,
+        mult: Mult,
+        metas: &mut Metas,
+        ty: Term,
+    ) -> Result<(), TypeError> {
+        self.define_inferred(name, mult, metas, ty, None)
+    }
+
     /// Постулат: тип без тела. Удобная обёртка над [`Signature::define`].
     ///
     /// # Errors
@@ -134,5 +206,34 @@ impl Signature {
         ty: Term,
     ) -> Result<(), TypeError> {
         self.define(name, mult, level_arity, ty, None)
+    }
+}
+
+/// Превращает нерешённые дырки определения в параметры уровня.
+///
+/// Собирает дырки **из типа** - именно он определяет, что подставится в месте
+/// использования. Тело перенумеровывается той же таблицей, и если в нём
+/// осталась дырка, которой в типе не было, это отказ: аргументы уровня
+/// подставляются по типу, и заполнить её было бы нечем.
+fn generalize(metas: &Metas, name: &Name, draft: &Definition) -> Result<Definition, TypeError> {
+    let mut generalization = Generalization::default();
+    generalization.collect_term(metas, &draft.ty);
+
+    let definition = Definition {
+        mult: draft.mult,
+        level_arity: generalization.arity(),
+        ty: generalization.apply_term(metas, &draft.ty),
+        body: draft
+            .body
+            .as_ref()
+            .map(|body| generalization.apply_term(metas, body)),
+    };
+
+    match unsolved_in_definition(metas, &definition) {
+        Some(meta) => Err(TypeError::UnsolvedDefinitionLevel {
+            name: Rc::clone(name),
+            meta,
+        }),
+        None => Ok(definition),
     }
 }

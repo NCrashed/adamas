@@ -176,6 +176,46 @@ fn definitions_may_not_contain_holes() {
     assert_eq!(signature.lookup("Id").unwrap().level_arity, 1);
 }
 
+#[test]
+fn a_level_shared_by_domain_and_codomain_is_solved() {
+    // Уровень такого `Pi` - `max (suc ?l) (suc ?l)`, снаружи `max`, и снимать
+    // общие `suc` там нечего. Но это не тот `max`, о котором §10 вопрос 39:
+    // решение единственно, и нормализация сводит выражение к `suc ?l`.
+    //
+    // Форма не редкая - это эндофункция на полиморфном типе, ровно то, ради
+    // чего universe polymorphism и нужен.
+    let signature = Signature::default();
+    let mut metas = Metas::default();
+    let level = metas.fresh_level();
+
+    let arrow = pi(
+        Mult::Many,
+        "x",
+        Term::Universe(level.clone()),
+        Term::Universe(level.clone()),
+    );
+    assert!(
+        check_closed_with(&signature, &mut metas, &arrow, &Term::universe(4)).is_ok(),
+        "уровень должен вывестись"
+    );
+    assert_eq!(metas.zonk(&level), Level::number(3));
+}
+
+#[test]
+fn two_distinct_levels_under_max_are_still_ambiguous() {
+    // Контроль к предыдущему тесту: нормализация не должна превращать
+    // неоднозначное в решаемое. `max ?a ?b ~ 3` имеет много решений.
+    let signature = Signature::default();
+    let mut metas = Metas::default();
+    let arrow = pi(
+        Mult::Many,
+        "x",
+        Term::Universe(metas.fresh_level()),
+        Term::Universe(metas.fresh_level()),
+    );
+    assert!(check_closed_with(&signature, &mut metas, &arrow, &Term::universe(4)).is_err());
+}
+
 // ---------------------------------------------------- границы решаемого класса
 
 #[test]

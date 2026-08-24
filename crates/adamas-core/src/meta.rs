@@ -1,26 +1,31 @@
 //! Метапеременные уровней и их решение.
 //!
 //! Implicit universe polymorphism (§3.2, §9 Фаза 1) устроен так же, как вывод
-//! типов в warm-up'е, только на уровнях: в месте использования параметры
-//! заменяются свежими метапеременными, а ограничения решаются по ходу
-//! проверки.
+//! типов в warm-up'е, только на уровнях, и теми же двумя половинами:
 //!
-//! **Обобщения ещё нет.** Арность определения объявляется, а не выводится, и
-//! дырка, оставшаяся нерешённой к концу проверки, - отказ
-//! ([`unsolved_level_meta`]), а не новый параметр. Обобщение - следующий срез.
+//! - **instantiate** - в месте использования параметры заменяются свежими
+//!   дырками ([`Metas::fresh_level`], [`crate::sig::Signature::instantiate`]),
+//!   а ограничения решаются по ходу проверки;
+//! - **generalize** - на границе определения то, что осталось нерешённым,
+//!   возвращается в параметры ([`Generalization`]), и их число и есть арность.
+//!
+//! Дырка, оставшаяся нерешённой там, где обобщать нельзя, - отказ
+//! ([`unsolved_level_meta`]), а не молча выбранный уровень.
 //!
 //! # Решение неполное, и это записано
 //!
-//! Решается **паттерн**: `?m ~ l`, где `?m` не встречается в `l`. Всё
-//! остальное - метапеременная под `max` или `suc` - сравнивается как есть и
-//! при расхождении даёт отказ. `max ?a u ~ max v w` не имеет единственного
+//! Решается **паттерн** `?m ~ l`, где `?m` не встречается в `l`, плюс снятие
+//! общих `suc` с обеих сторон: конструктор инъективен, поэтому `suc ?m ~ 3`
+//! однозначно даёт `?m ~ 2`.
+//!
+//! Не решается дырка под `max`: `max ?a u ~ max v w` не имеет единственного
 //! решения (`?a` может быть чем угодно, не превосходящим правую часть), и
-//! угадывать его нельзя: неверная догадка принимает некорректную программу.
-//! Отказ отвергает корректную - см. §10 вопрос 39.
+//! угадывать его нельзя - неверная догадка принимает некорректную программу.
+//! Отказ отвергает корректную, см. §10 вопрос 39.
 
 use std::rc::Rc;
 
-use crate::level::{Level, LevelMeta};
+use crate::level::{Level, LevelMeta, LevelVar};
 
 /// Хранилище метапеременных уровня.
 ///
@@ -81,14 +86,38 @@ impl Metas {
     /// (см. заголовок модуля). Различить эти два случая вызывающий не может и
     /// не должен: и то и другое - отказ типизации.
     pub fn unify_levels(&mut self, left: &Level, right: &Level) -> bool {
-        let left = self.zonk(left);
-        let right = self.zonk(right);
+        // Нормальная форма, а не просто зонканная: она канонична и полна
+        // (см. `crate::level`), и без неё снятие `suc` ниже не срабатывает там,
+        // где должно. Уровень `Pi`, домен и кодомен которого делят один
+        // параметр, - это `max (suc ?l) (suc ?l)`, снаружи `max`, снимать
+        // нечего; нормализация сводит его к `suc ?l`, и дальше всё обычно.
+        // На действительно неоднозначные случаи это не влияет: `max ?a ?b`
+        // остаётся `max`.
+        let left = self.zonk(left).normalize();
+        let right = self.zonk(right).normalize();
 
         // Уже равны как выражения - решать нечего. Проверка идёт первой,
         // потому что `?m ~ ?m` не должно превращаться в самоприсваивание.
         if left.equiv(&right) {
             return true;
         }
+
+        // Снимаем общие `suc`: конструктор инъективен, поэтому
+        // `suc a ~ suc b` равносильно `a ~ b`, а `suc ?m ~ 3` - это `?m ~ 2`.
+        // Единственность решения здесь есть, в отличие от `max`, и без этого
+        // шага не проходила бы самая обычная проверка `Type ?l` против
+        // `Type 3`: правило универсума даёт `suc ?l`, а дырка оказывалась бы
+        // под конструктором.
+        let (left_base, left_offset) = peel(&left);
+        let (right_base, right_offset) = peel(&right);
+        let common = left_offset.min(right_offset);
+        if common > 0 {
+            return self.unify_levels(
+                &raise(left_base, left_offset - common),
+                &raise(right_base, right_offset - common),
+            );
+        }
+
         match (&left, &right) {
             (Level::Meta(meta), other) | (other, Level::Meta(meta)) => self.solve(*meta, other),
             // Обе стороны жёсткие и неравны, либо метапеременная спрятана под
@@ -114,6 +143,22 @@ impl Metas {
     }
 }
 
+/// Снимает цепочку `suc`, возвращая основание и её длину.
+fn peel(level: &Level) -> (&Level, u32) {
+    let mut current = level;
+    let mut offset = 0;
+    while let Level::Succ(inner) = current {
+        current = inner;
+        offset += 1;
+    }
+    (current, offset)
+}
+
+/// Обратная операция: надстраивает `offset` штук `suc`.
+fn raise(base: &Level, offset: u32) -> Level {
+    (0..offset).fold(base.clone(), |level, _| level.succ())
+}
+
 /// Встречается ли метапеременная внутри уровня.
 ///
 /// Без этой проверки `?m ~ suc ?m` решилось бы бесконечным уровнем.
@@ -123,6 +168,126 @@ fn occurs(meta: LevelMeta, level: &Level) -> bool {
         Level::Succ(inner) => occurs(meta, inner),
         Level::Max(left, right) => occurs(meta, left) || occurs(meta, right),
         Level::Meta(other) => *other == meta,
+    }
+}
+
+/// Обобщение: нерешённые дырки становятся параметрами уровня.
+///
+/// Обратная операция к [`Metas::fresh_level`] на границе определения. В месте
+/// использования параметры заменяются дырками, здесь то, что осталось
+/// незаполненным, возвращается в параметры - та же пара instantiate/generalize,
+/// что у `let`-полиморфизма в warm-up'е, только на уровнях.
+///
+/// Нумерация плотная и задана порядком первого появления, поэтому одно и то же
+/// определение получает одни и те же параметры независимо от того, сколько
+/// дырок было заведено по дороге и в каком порядке.
+#[derive(Debug, Default)]
+pub struct Generalization {
+    bound: Vec<LevelMeta>,
+}
+
+impl Generalization {
+    /// Собирает нерешённые дырки уровня в порядке появления.
+    pub fn collect_level(&mut self, metas: &Metas, level: &Level) {
+        match metas.zonk(level) {
+            Level::Zero | Level::Var(_) => {}
+            Level::Succ(inner) => self.collect_level(metas, &inner),
+            Level::Max(left, right) => {
+                self.collect_level(metas, &left);
+                self.collect_level(metas, &right);
+            }
+            Level::Meta(meta) => {
+                if !self.bound.contains(&meta) {
+                    self.bound.push(meta);
+                }
+            }
+        }
+    }
+
+    /// То же по всем уровням терма.
+    pub fn collect_term(&mut self, metas: &Metas, term: &crate::term::Term) {
+        use crate::term::Term;
+
+        match term {
+            Term::Var(_) => {}
+            Term::Universe(level) => self.collect_level(metas, level),
+            Term::Lam(_, _, body) => self.collect_term(metas, body),
+            Term::App(callee, argument) => {
+                self.collect_term(metas, callee);
+                self.collect_term(metas, argument);
+            }
+            Term::Pi(_, _, domain, codomain) => {
+                self.collect_term(metas, domain);
+                self.collect_term(metas, codomain);
+            }
+            Term::Let(_, _, ty, value, body) => {
+                self.collect_term(metas, ty);
+                self.collect_term(metas, value);
+                self.collect_term(metas, body);
+            }
+            Term::Const(_, levels) => {
+                for level in levels.iter() {
+                    self.collect_level(metas, level);
+                }
+            }
+        }
+    }
+
+    /// Сколько параметров уровня получится.
+    #[must_use]
+    pub fn arity(&self) -> u32 {
+        u32::try_from(self.bound.len())
+            .unwrap_or_else(|_| unreachable!("параметров уровня не бывает столько"))
+    }
+
+    /// Заменяет собранные дырки параметрами.
+    ///
+    /// Дырка, которую не собирали, остаётся дыркой - так вызывающий видит, что
+    /// она осталась, вместо того чтобы получить молча подставленный параметр.
+    #[must_use]
+    pub fn apply_level(&self, metas: &Metas, level: &Level) -> Level {
+        match metas.zonk(level) {
+            Level::Succ(inner) => self.apply_level(metas, &inner).succ(),
+            Level::Max(left, right) => self
+                .apply_level(metas, &left)
+                .max(self.apply_level(metas, &right)),
+            Level::Meta(meta) => self.bound.iter().position(|bound| *bound == meta).map_or(
+                Level::Meta(meta),
+                |index| {
+                    Level::Var(LevelVar(
+                        u32::try_from(index).unwrap_or_else(|_| unreachable!("индекс параметра")),
+                    ))
+                },
+            ),
+            other => other,
+        }
+    }
+
+    /// То же по всем уровням терма.
+    #[must_use]
+    pub fn apply_term(&self, metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
+        use crate::term::Term;
+
+        let recur = |inner: &Rc<Term>| Rc::new(self.apply_term(metas, inner));
+        match term {
+            Term::Var(_) => term.clone(),
+            Term::Universe(level) => Term::Universe(self.apply_level(metas, level)),
+            Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), recur(body)),
+            Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
+            Term::Pi(mult, name, domain, codomain) => {
+                Term::Pi(*mult, Rc::clone(name), recur(domain), recur(codomain))
+            }
+            Term::Let(mult, name, ty, value, body) => {
+                Term::Let(*mult, Rc::clone(name), recur(ty), recur(value), recur(body))
+            }
+            Term::Const(name, levels) => Term::Const(
+                Rc::clone(name),
+                levels
+                    .iter()
+                    .map(|level| self.apply_level(metas, level))
+                    .collect(),
+            ),
+        }
     }
 }
 
@@ -241,6 +406,37 @@ mod tests {
         let mut metas = Metas::default();
         assert!(metas.unify_levels(&Level::number(2), &Level::number(2)));
         assert!(!metas.unify_levels(&Level::number(2), &Level::number(3)));
+    }
+
+    /// `suc` инъективен, поэтому дырка под ним решается однозначно.
+    ///
+    /// Без этого не проходила бы обычная проверка `Type ?l` против `Type 3`:
+    /// правило универсума даёт `suc ?l`, и дырка оказывается под конструктором.
+    #[test]
+    fn a_metavariable_under_succ_is_solved_by_peeling() {
+        let mut metas = Metas::default();
+        let meta = metas.fresh_level();
+        assert!(metas.unify_levels(&meta.clone().succ(), &Level::number(3)));
+        assert_eq!(metas.zonk(&meta), Level::number(2));
+    }
+
+    #[test]
+    fn peeling_respects_the_absence_of_a_predecessor() {
+        // `suc x ~ 0` неразрешимо: нуль не является преемником.
+        let mut metas = Metas::default();
+        let meta = metas.fresh_level();
+        assert!(!metas.unify_levels(&meta.succ(), &Level::Zero));
+    }
+
+    #[test]
+    fn peeling_works_under_a_common_prefix() {
+        let mut metas = Metas::default();
+        let meta = metas.fresh_level();
+        // `suc (suc ?m) ~ suc (suc u0)` сводится к `?m ~ u0`.
+        let left = meta.clone().succ().succ();
+        let right = Level::Var(LevelVar(0)).succ().succ();
+        assert!(metas.unify_levels(&left, &right));
+        assert_eq!(metas.zonk(&meta), Level::Var(LevelVar(0)));
     }
 
     /// Граница решаемого класса, зафиксированная тестом: метапеременная под

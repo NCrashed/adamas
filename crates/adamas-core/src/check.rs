@@ -34,7 +34,7 @@ use std::rc::Rc;
 
 use crate::conv::convertible;
 use crate::ctx::{Ctx, Usage};
-use crate::level::Level;
+use crate::level::{Level, LevelMeta};
 use crate::meta::{Metas, unsolved_level_meta};
 use crate::mult::Mult;
 use crate::sig::{Definition, Signature};
@@ -437,6 +437,23 @@ fn no_unsolved_levels(metas: &Metas, term: &Term) -> Result<(), TypeError> {
     }
 }
 
+/// Первая дырка, оставшаяся в определении после проверки.
+///
+/// Дырка в том, что сохраняется навсегда, - это тип, зависящий от хранилища,
+/// которого уже нет: определение подхватывало бы значение метапеременной из
+/// любой следующей проверки, то есть жило бы сразу во всех универсумах.
+/// `check_level_scope` этого не ловит - он смотрит параметры уровня, а
+/// метапеременная не параметр.
+#[must_use]
+pub fn unsolved_in_definition(metas: &Metas, definition: &Definition) -> Option<LevelMeta> {
+    unsolved_level_meta(metas, &definition.ty).or_else(|| {
+        definition
+            .body
+            .as_ref()
+            .and_then(|body| unsolved_level_meta(metas, body))
+    })
+}
+
 /// Проверяет определение верхнего уровня перед добавлением в сигнатуру.
 ///
 /// Тип проверяется в стёртом фрагменте (он и есть тип), тело - при кратности
@@ -449,32 +466,32 @@ fn no_unsolved_levels(metas: &Metas, term: &Term) -> Result<(), TypeError> {
 /// тело не соответствует типу.
 pub fn check_definition(
     signature: &Signature,
+    metas: &mut Metas,
     name: &Name,
-    mult: Mult,
-    level_arity: u32,
-    ty: Term,
-    body: Option<Term>,
-) -> Result<Definition, TypeError> {
+    definition: &Definition,
+) -> Result<(), TypeError> {
+    let Definition {
+        mult,
+        level_arity,
+        ty,
+        body,
+    } = definition;
+    let (mult, level_arity) = (*mult, *level_arity);
+
     if mult == Mult::One {
         return Err(TypeError::LinearDefinition {
             name: Rc::clone(name),
         });
     }
-    check_level_scope(name, level_arity, &ty)?;
-    if let Some(body) = &body {
+    check_level_scope(name, level_arity, ty)?;
+    if let Some(body) = body {
         check_level_scope(name, level_arity, body)?;
     }
 
-    // Хранилище своё: метапеременные живут ровно на время одной проверки, а
-    // определение уходит в сигнатуру навсегда. Отсюда же требование ниже -
-    // ни одной дырки в том, что сохраняется.
-    let mut metas = Metas::default();
-    let metas = &mut metas;
-
     let ctx = Ctx::new(signature);
-    is_type(&ctx, metas, &ty)?;
-    if let Some(body) = &body {
-        let ty_value = ctx.eval(&ty);
+    is_type(&ctx, metas, ty)?;
+    if let Some(body) = body {
+        let ty_value = ctx.eval(ty);
         // `0`-определение проверяется при σ = 0, `ω` - при σ = 1: тело
         // присутствует в рантайме один раз, а сколько раз его позовут,
         // определение не решает.
@@ -486,28 +503,10 @@ pub fn check_definition(
         check(&ctx, metas, sigma, body, &ty_value)?;
     }
 
-    // Дырка в том, что сохраняется навсегда, - это тип, зависящий от
-    // хранилища, которого уже нет. Такое определение подхватывало бы значение
-    // метапеременной из любой следующей сессии, то есть жило бы сразу во всех
-    // универсумах. `check_level_scope` этого не ловит: он смотрит параметры
-    // уровня, а метапеременная не параметр.
-    let unsolved = unsolved_level_meta(metas, &ty).or_else(|| {
-        body.as_ref()
-            .and_then(|body| unsolved_level_meta(metas, body))
-    });
-    if let Some(meta) = unsolved {
-        return Err(TypeError::UnsolvedDefinitionLevel {
-            name: Rc::clone(name),
-            meta,
-        });
-    }
-
-    Ok(Definition {
-        mult,
-        level_arity,
-        ty,
-        body,
-    })
+    // Остаточные дырки здесь не проверяются: что с ними делать, решает
+    // вызывающий. `Signature::define` их отвергает, `define_inferred`
+    // обобщает в параметры.
+    Ok(())
 }
 
 fn check_level_scope(name: &Name, arity: u32, term: &Term) -> Result<(), TypeError> {

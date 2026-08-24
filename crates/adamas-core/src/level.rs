@@ -206,9 +206,16 @@ impl Parts {
     /// Собирает уровень обратно. Порядок задан `BTreeMap`, поэтому результат
     /// зависит только от класса эквивалентности, а не от того, как выражение
     /// было записано.
+    ///
+    /// Константа выписывается, только если её не перекрывает смещение атома:
+    /// `atom + k >= k` при любом значении атома, поэтому `max 1 (u+1)` - это
+    /// просто `u+1`. Разница не косметическая: [`crate::meta`] снимает общие
+    /// `suc` с обеих сторон, и лишний `max` прятал бы от него решаемое
+    /// ограничение.
     fn rebuild(&self) -> Level {
-        let mut result =
-            (self.constant > 0 || self.atoms.is_empty()).then(|| Level::number(self.constant));
+        let covered = self.atoms.values().copied().max().unwrap_or(0);
+        let keep_constant = self.atoms.is_empty() || self.constant > covered;
+        let mut result = keep_constant.then(|| Level::number(self.constant));
 
         for (atom, offset) in &self.atoms {
             let shifted = (0..*offset).fold(atom.clone(), |level, _| level.succ());
@@ -332,6 +339,22 @@ mod tests {
             u().max(Level::Zero).evaluate(&|_| 1),
             1,
             "imax дал бы здесь 0"
+        );
+    }
+
+    /// Нормальная форма не выписывает константу, перекрытую смещением атома.
+    ///
+    /// `max 1 (u+1)` - это `u+1` при любом `u`, потому что уровни неотрицательны.
+    /// Лишний `max` не только шумит в сообщениях, но и прячет от унификатора
+    /// решаемое ограничение: снятие общих `suc` работает по структуре.
+    #[test]
+    fn a_constant_covered_by_an_atom_is_dropped() {
+        assert_eq!(u().succ().normalize(), u().succ());
+        assert_eq!(u().succ().succ().normalize(), u().succ().succ());
+        // А не перекрытую - выписывает: при `u = 0` слева 2, справа 1.
+        assert_eq!(
+            u().succ().max(Level::number(2)).normalize(),
+            Level::number(2).max(u().succ())
         );
     }
 

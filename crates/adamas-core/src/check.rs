@@ -30,6 +30,7 @@
 //! Ошибки спанов не несут: термы ядра их не хранят. "Где" знает элаборатор
 //! (Фаза 2) - он держит спан того, что элаборирует в момент отказа.
 
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::conv::convertible;
@@ -780,20 +781,26 @@ fn spine(term: &Term) -> (&Term, Vec<&Term>) {
 
 /// Встречается ли имя в терме.
 fn mentions(signature: &Signature, name: &Name, term: &Term) -> bool {
-    mentions_seen(signature, name, term, &mut Vec::new())
+    mentions_seen(signature, name, term, &mut HashSet::new())
 }
 
 /// То же, с памятью о уже развёрнутых телах.
 ///
 /// Память нужна из-за рекурсии: тело `f` упоминает `f`, и без неё обход
-/// разворачивал бы его бесконечно. Взаимной рекурсии в сигнатуре не бывает
-/// (ordered scoping, §4.8), так что список короткий - в нём копится цепочка
-/// разных имён плюс не более одного повторения.
+/// разворачивал бы его бесконечно.
+///
+/// Имя из памяти **не вынимается** после обхода, и это не оптимизация, а
+/// условие завершения за разумное время. Ответ на "упоминается ли `name`" от
+/// пути не зависит: имя, дошедшее до конца обхода, вернуло `false` и вернёт
+/// его при любом следующем вхождении, а `true` схлопывает весь обход
+/// немедленно и второй раз не спрашивается. Стек пути вместо множества давал
+/// бы `T(k) = 2·T(k-1)` на цепочке `def d_k = d_{k-1} -> d_{k-1}`: 25
+/// определений-синонимов занимали 17 секунд.
 fn mentions_seen<'a>(
     signature: &'a Signature,
     name: &Name,
     term: &'a Term,
-    seen: &mut Vec<&'a Name>,
+    seen: &mut HashSet<&'a Name>,
 ) -> bool {
     let mut recur = |inner| mentions_seen(signature, name, inner, seen);
     match term {
@@ -806,7 +813,7 @@ fn mentions_seen<'a>(
             if other == name {
                 return true;
             }
-            if seen.contains(&other) {
+            if !seen.insert(other) {
                 return false;
             }
             let Some(body) = signature
@@ -815,10 +822,7 @@ fn mentions_seen<'a>(
             else {
                 return false;
             };
-            seen.push(other);
-            let found = mentions_seen(signature, name, body, seen);
-            seen.pop();
-            found
+            mentions_seen(signature, name, body, seen)
         }
         Term::Lam(_, _, body) => recur(body),
         Term::App(callee, argument) => recur(callee) || recur(argument),

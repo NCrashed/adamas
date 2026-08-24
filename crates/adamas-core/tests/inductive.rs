@@ -741,6 +741,63 @@ fn a_definition_free_of_the_type_stays_usable_as_a_field() {
     );
 }
 
+#[test]
+fn a_chain_of_definitions_is_walked_once_per_name() {
+    // Проверка позитивности разворачивает тела определений, и память об уже
+    // развёрнутых обязана быть множеством посещённых, а не стеком текущего
+    // пути. Со стеком `d_k = d_{k-1} -> d_{k-1}` обходится за 2^k: цепочка из
+    // 25 занимала 17 секунд, из 32 - не заканчивается вовсе.
+    //
+    // Порог намеренно на три порядка выше фактического времени: тест ловит
+    // смену асимптотики, а не колебания машины.
+    let mut signature = Signature::default();
+    let mut metas = Metas::default();
+    signature
+        .define_inferred(
+            "Unit",
+            Mult::Many,
+            &mut metas,
+            Term::universe(1),
+            Some(Term::universe(0)),
+        )
+        .expect("Unit корректен");
+    signature
+        .define_inferred(
+            "d0",
+            Mult::Many,
+            &mut metas,
+            Term::universe(1),
+            Some(c("Unit")),
+        )
+        .expect("d0 корректен");
+    for step in 1..=32 {
+        let previous = format!("d{}", step - 1);
+        signature
+            .define_inferred(
+                &format!("d{step}"),
+                Mult::Many,
+                &mut metas,
+                Term::universe(1),
+                Some(arrow(c(&previous), c(&previous))),
+            )
+            .expect("звено цепочки корректно");
+    }
+    signature
+        .declare_data("Chain", 0, &mut metas, Term::universe(1))
+        .expect("тип-формер корректен");
+
+    let started = std::time::Instant::now();
+    let outcome =
+        signature.declare_constructor("Chain", "link", &mut metas, arrow(c("d32"), c("Chain")));
+    let elapsed = started.elapsed();
+
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "обход занял {elapsed:?} - память о развёрнутых телах перестала работать"
+    );
+}
+
 // ------------------------------------------------------------------ свойства
 
 /// Формы полей, из которых собираются конструкторы: часть законна, часть нет.

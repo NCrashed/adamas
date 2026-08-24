@@ -140,8 +140,17 @@ impl Term {
     /// Подставляет аргументы вместо параметров уровня по всему терму.
     ///
     /// Так тип определения инстанцируется в месте использования.
+    ///
+    /// Пустой список - тождество, и выход здесь ранний: подстановка стоит на
+    /// двух горячих путях (тип определения на каждом [`Self::Const`] в
+    /// [`crate::check::infer`], тело на каждом δ-развороте), а у подавляющего
+    /// большинства определений параметров уровня нет вовсе. Без выхода терм
+    /// пересобирался бы целиком, чтобы получиться прежним.
     #[must_use]
     pub fn substitute_levels(&self, arguments: &[Level]) -> Self {
+        if arguments.is_empty() {
+            return self.clone();
+        }
         let recur = |term: &Rc<Self>| Rc::new(term.substitute_levels(arguments));
         match self {
             Self::Var(_) => self.clone(),
@@ -308,6 +317,21 @@ mod tests {
         let identity = Term::Lam(Mult::Many, "x".into(), Rc::new(Term::var(0)));
         let term = Term::var(0).apply([identity]);
         assert_eq!(term.to_string(), "#0 (\\(ω x) -> #0)");
+    }
+
+    #[test]
+    fn substituting_nothing_changes_nothing() {
+        use crate::level::{Level, LevelVar};
+
+        // Ранний выход при пустом списке обязан совпадать с тем, что делает
+        // общий путь: переменная вне списка аргументов остаётся собой.
+        let term = Term::Pi(
+            Mult::Zero,
+            "a".into(),
+            Rc::new(Term::Universe(Level::Var(LevelVar(0)))),
+            Rc::new(Term::Universe(Level::Var(LevelVar(1)).succ())),
+        );
+        assert_eq!(term.substitute_levels(&[]), term);
     }
 
     #[test]

@@ -274,18 +274,25 @@ impl fmt::Display for Term {
                 let printed: Vec<String> = levels.iter().map(ToString::to_string).collect();
                 write!(f, "{name}{{{}}}", printed.join(", "))
             }
-            // Имя типа не печатается: оно восстанавливается по конструкторам
-            // ветвей, а сообщения об ошибках и без него длинные.
+            // Имя семейства и аргументы уровня печатаются: по конструкторам
+            // ветвей они восстанавливаются не всегда - у разбора пустого
+            // семейства ветвей нет вовсе, - а производное равенство их
+            // различает. Без них два разных разбора печатались одинаково, и
+            // `Mismatch` показывал две дословно совпадающие строки.
             Self::Case(case) => {
                 let branches: Vec<String> = case
                     .branches
                     .iter()
                     .map(|branch| format!("{} => {}", branch.constructor, branch.body))
                     .collect();
+                write!(f, "case {} : {}", Atom(&case.scrutinee), case.data)?;
+                if !case.levels.is_empty() {
+                    let levels: Vec<String> = case.levels.iter().map(ToString::to_string).collect();
+                    write!(f, "{{{}}}", levels.join(", "))?;
+                }
                 write!(
                     f,
-                    "case {} return {} of {{{}}}",
-                    Atom(&case.scrutinee),
+                    " return {} of {{{}}}",
                     Atom(&case.motive),
                     branches.join("; ")
                 )
@@ -338,6 +345,42 @@ mod tests {
         let identity = Term::Lam(Mult::Many, "x".into(), Rc::new(Term::var(0)));
         let term = Term::var(0).apply([identity]);
         assert_eq!(term.to_string(), "#0 (\\(ω x) -> #0)");
+    }
+
+    #[test]
+    fn a_case_prints_the_family_it_scrutinises() {
+        use crate::level::Level;
+
+        // Два разбора по разным пустым семействам: ветвей нет, восстановить имя
+        // не по чему, а производное равенство их различает. Печататься одинаково
+        // они не должны - иначе `Mismatch` показывает две совпадающие строки.
+        let empty = |data: &str, levels: &[Level]| {
+            Term::Case(Rc::new(super::Case {
+                data: data.into(),
+                levels: levels.iter().cloned().collect(),
+                params: 0,
+                scrutinee: Rc::new(Term::var(0)),
+                motive: Rc::new(Term::Lam(
+                    Mult::Zero,
+                    "x".into(),
+                    Rc::new(Term::universe(0)),
+                )),
+                branches: Vec::new(),
+            }))
+        };
+        assert_ne!(
+            empty("Void", &[]).to_string(),
+            empty("Empty", &[]).to_string()
+        );
+        assert_ne!(
+            empty("F", &[Level::Zero]).to_string(),
+            empty("F", &[Level::number(1)]).to_string(),
+            "аргументы уровня тоже различают разборы"
+        );
+        assert_eq!(
+            empty("Void", &[]).to_string(),
+            "case #0 : Void return (\\(0 x) -> Type 0) of {}"
+        );
     }
 
     #[test]

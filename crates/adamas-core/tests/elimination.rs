@@ -340,7 +340,7 @@ fn a_case_on_a_variable_stays_stuck() {
     // отложенное действие.
     assert_eq!(
         normalize(&negation()).to_string(),
-        "\\(ω b) -> case #0 return (\\(0 _) -> Bool) of {true => false; false => true}"
+        "\\(ω b) -> case #0 : Bool return (\\(0 _) -> Bool) of {true => false; false => true}"
     );
 }
 

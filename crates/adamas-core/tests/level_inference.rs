@@ -286,6 +286,51 @@ fn a_body_built_by_instantiation_cannot_be_stored_as_is() {
     );
 }
 
+#[test]
+fn a_solved_level_is_shown_solved_in_the_error() {
+    // Сообщение об ошибке печатается через обратное чтение, а оно уровни
+    // нормализует, но решений не подставляет. Решённая дырка выглядела как
+    // `?0`, то есть читалась как «уровень не выведен» — при том что выведен, а
+    // разошлись два конкретных уровня.
+    let mut signature = Signature::default();
+    signature
+        .postulate("Box", Mult::Many, 1, Term::Universe(u(0).succ()))
+        .expect("Box корректен");
+    signature
+        .postulate(
+            "mk",
+            Mult::Many,
+            1,
+            Term::Const("Box".into(), Rc::from([u(0)])),
+        )
+        .expect("mk корректен");
+
+    let mut metas = Metas::default();
+    let boxed = signature
+        .instantiate("Box", &mut metas)
+        .expect("Box объявлен");
+
+    // Первая проверка решает дырку в `2`.
+    let two = Term::Const("mk".into(), Rc::from([Level::number(2)]));
+    check_closed_with(&signature, &mut metas, &two, &boxed).expect("решает ?0 := 2");
+
+    // Вторая расходится с ней, и сообщение обязано назвать решение, а не дырку.
+    let three = Term::Const("mk".into(), Rc::from([Level::number(3)]));
+    let error = check_closed_with(&signature, &mut metas, &three, &boxed)
+        .expect_err("2 и 3 - разные уровни");
+    let TypeError::Mismatch { expected, found } = &error else {
+        panic!("ожидалось несовпадение типов, получено {error:?}");
+    };
+    assert!(
+        !expected.contains('?') && !found.contains('?'),
+        "решённая дырка напечатана как невыведенная: ожидался `{expected}`, получен `{found}`"
+    );
+    assert!(
+        expected.contains('2') && found.contains('3'),
+        "сообщение обязано назвать разошедшиеся уровни: `{expected}` против `{found}`"
+    );
+}
+
 // ------------------------------------------------------------------ свойства
 
 /// Уровень над переменными `u0..u{bound-1}`.

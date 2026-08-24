@@ -742,6 +742,64 @@ fn a_definition_free_of_the_type_stays_usable_as_a_field() {
 }
 
 #[test]
+fn a_positive_occurrence_behind_a_definition_is_accepted() {
+    // `def Cont = Bool -> Tree` и записанное буквально `(Bool -> Tree)` - один
+    // и тот же тип после δ, и позитивность обязана отвечать на них одинаково.
+    // Раньше синоним отвергался, причём сообщением про отрицательную позицию,
+    // которой в терме нет ни в какой форме.
+    let mut signature = booleans();
+    let mut metas = Metas::default();
+    signature
+        .declare_data("Tree", 0, &mut metas, Term::universe(0))
+        .expect("Tree корректен");
+    signature
+        .define_inferred(
+            "Cont",
+            Mult::Many,
+            &mut metas,
+            Term::universe(0),
+            Some(arrow(c("Bool"), c("Tree"))),
+        )
+        .expect("Cont корректен");
+
+    let literal = signature.declare_constructor(
+        "Tree",
+        "node",
+        &mut metas,
+        arrow(arrow(c("Bool"), c("Tree")), c("Tree")),
+    );
+    let behind =
+        signature.declare_constructor("Tree", "node2", &mut metas, arrow(c("Cont"), c("Tree")));
+    assert!(literal.is_ok(), "буквальная запись: {literal:?}");
+    assert!(behind.is_ok(), "та же форма за определением: {behind:?}");
+}
+
+#[test]
+fn a_self_referential_definition_does_not_loop_the_positivity_check() {
+    // Разворот головы поля обязан помнить уже развёрнутое: `def Loop = Loop`
+    // ссылается на себя, и без памяти обход не закончился бы.
+    let mut signature = Signature::default();
+    let mut metas = Metas::default();
+    signature
+        .declare_data("D", 0, &mut metas, Term::universe(0))
+        .expect("D корректен");
+    signature
+        .define_inferred(
+            "Loop",
+            Mult::Many,
+            &mut metas,
+            Term::universe(0),
+            Some(c("D")),
+        )
+        .expect("Loop корректен");
+
+    // Поле - синоним самого `D`: разворачивается один раз и признаётся
+    // рекурсивным вхождением.
+    let outcome = signature.declare_constructor("D", "mk", &mut metas, arrow(c("Loop"), c("D")));
+    assert!(outcome.is_ok(), "{outcome:?}");
+}
+
+#[test]
 fn a_chain_of_definitions_is_walked_once_per_name() {
     // Проверка позитивности разворачивает тела определений, и память об уже
     // развёрнутых обязана быть множеством посещённых, а не стеком текущего

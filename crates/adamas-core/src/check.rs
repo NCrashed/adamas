@@ -318,6 +318,22 @@ pub enum TypeError {
     },
 }
 
+/// Значение в виде текста для сообщения об ошибке.
+///
+/// Зонкает, а не просто читает обратно: [`quote`] уровни нормализует, но
+/// решений не подставляет, поэтому решённая метапеременная печаталась бы как
+/// `?0`. Читатель видел бы «уровень не выведен» там, где выведен, а разошлось
+/// совсем другое: `Id{?0}` против `Id{3}` при `?0 := 2` - это конфликт `2` и
+/// `3`, а не отсутствие вывода.
+fn shown(ctx: &Ctx<'_>, metas: &Metas, value: &Rc<Value>) -> String {
+    crate::meta::zonk_term(metas, &ctx.quote(value)).to_string()
+}
+
+/// То же для терма, который печатается как есть.
+fn shown_term(metas: &Metas, term: &Term) -> String {
+    crate::meta::zonk_term(metas, term).to_string()
+}
+
 /// Синтезирует тип терма и считает использования.
 ///
 /// # Errors
@@ -375,7 +391,7 @@ pub fn infer(
             let callee_ty = whnf(ctx.signature(), &callee_ty);
             let Value::Pi(mult, _, domain, codomain) = &*callee_ty else {
                 return Err(TypeError::NotAFunction {
-                    ty: ctx.quote(&callee_ty).to_string(),
+                    ty: shown(ctx, metas, &callee_ty),
                 });
             };
             // Правило Аткея `Γ + q · Δ`: аргумент проверяется при собственной
@@ -445,7 +461,7 @@ pub fn infer(
 
         // Домена у лямбды в терме нет, синтезировать не из чего.
         Term::Lam(..) => Err(TypeError::CannotInfer {
-            term: term.to_string(),
+            term: shown_term(metas, term),
         }),
     }
 }
@@ -490,8 +506,8 @@ pub fn check(
                 Ok(usage)
             } else {
                 Err(TypeError::Mismatch {
-                    expected: ctx.quote(expected).to_string(),
-                    found: ctx.quote(&found).to_string(),
+                    expected: shown(ctx, metas, expected),
+                    found: shown(ctx, metas, &found),
                 })
             }
         }
@@ -511,7 +527,7 @@ fn check_lambda(
     };
     let Value::Pi(pi_mult, _, domain, codomain) = &**expected else {
         return Err(TypeError::NotAFunction {
-            ty: ctx.quote(expected).to_string(),
+            ty: shown(ctx, metas, expected),
         });
     };
     // Кратность лямбды обязана совпасть с кратностью типа. Проверка
@@ -547,8 +563,8 @@ pub fn is_type(ctx: &Ctx<'_>, metas: &mut Metas, term: &Term) -> Result<Level, T
     match &*ty {
         Value::Universe(level) => Ok(level.clone()),
         _ => Err(TypeError::NotAType {
-            term: term.to_string(),
-            ty: ctx.quote(&ty).to_string(),
+            term: shown_term(metas, term),
+            ty: shown(ctx, metas, &ty),
         }),
     }
 }
@@ -568,6 +584,16 @@ pub fn check_closed(signature: &Signature, term: &Term, ty: &Term) -> Result<(),
 
 /// То же, но с внешним хранилищем метапеременных - когда терм построен через
 /// [`Signature::instantiate`] и содержит дырки в аргументах уровня.
+///
+/// **Область видимости параметров уровня здесь не проверяется**, в отличие от
+/// [`check_declaration`]. Это не забытая проверка: `LevelVar` принадлежит
+/// определению, а у отдельного терма нет ни имени, ни арности, относительно
+/// которых «вне области видимости» было бы определено. Терм с `Level::Var`
+/// проверяется как терм гипотетического определения достаточной арности, и
+/// ответ консервативен - [`Level::equiv`] и `leq` трактуют переменную как
+/// жёсткий атом при любой подстановке. Поэтому такой терм здесь проходит, а в
+/// [`Signature::define`] с арностью `0` - нет, и это разные вопросы, а не
+/// расхождение.
 ///
 /// # Errors
 ///
@@ -924,6 +950,16 @@ fn uniform_parameters(params: u32, depth: u32, arguments: &[&Term]) -> bool {
 /// себя с тем же `A`, и только поэтому `A` можно не хранить в значении и не
 /// разбирать при элиминации. `data Nest A where n : Nest (Pair A A) -> Nest A`
 /// параметр меняет, и здесь он отвергается.
+/// Голова поля разворачивается, если сама по себе не прошла: `mentions` идёт
+/// через тела определений, и без разворота проверка расходилась бы сама с
+/// собой. `def Cont = Bool -> Tree` в поле отвергалась, а записанное буквально
+/// `(Bool -> Tree)` принималось - при том что после δ это один и тот же тип, а
+/// сообщение говорило про отрицательную позицию, которой в терме нет.
+///
+/// Разворачивается только **голова без аргументов**: применённый синоним
+/// (`def F A = A -> Tree`, поле `F Bool`) потребовал бы β-редукции на термах, а
+/// её в ядре нет - подстановку заменяет `NbE`, работающий на значениях. Отказ
+/// в таком случае остаётся, и он в безопасную сторону.
 fn positive_field(
     signature: &Signature,
     data: &Name,
@@ -931,11 +967,22 @@ fn positive_field(
     depth: u32,
     term: &Term,
 ) -> bool {
+    positive_seen(signature, data, params, depth, term, &mut HashSet::new())
+}
+
+fn positive_seen<'a>(
+    signature: &'a Signature,
+    data: &Name,
+    params: u32,
+    depth: u32,
+    term: &'a Term,
+    seen: &mut HashSet<&'a Name>,
+) -> bool {
     match term {
         // Слева от стрелки тип не должен встречаться вовсе; справа - рекурсия.
         Term::Pi(_, _, domain, codomain) => {
             !mentions(signature, data, domain)
-                && positive_field(signature, data, params, depth + 1, codomain)
+                && positive_seen(signature, data, params, depth + 1, codomain, seen)
         }
         other => {
             let (head, arguments) = spine(other);
@@ -949,7 +996,21 @@ fn positive_field(
                             .iter()
                             .all(|argument| !mentions(signature, data, argument))
                 }
-                _ => !mentions(signature, data, other),
+                _ if !mentions(signature, data, other) => true,
+                // Тип упомянут, но позиция ещё не разобрана: если голова -
+                // определение, смотрим на то, чем она является.
+                Term::Const(name, _) if arguments.is_empty() => {
+                    let Some(body) = signature
+                        .lookup(name)
+                        .and_then(|definition| definition.body.as_ref())
+                    else {
+                        return false;
+                    };
+                    // Память о развёрнутых - против самоссылки в теле; та же
+                    // причина и та же форма, что у `mentions_seen`.
+                    seen.insert(name) && positive_seen(signature, data, params, depth, body, seen)
+                }
+                _ => false,
             }
         }
     }
@@ -1059,8 +1120,8 @@ pub fn check_constructor(
             if !field_level.leq(&sort) {
                 return Err(TypeError::ConstructorUniverse {
                     name: Rc::clone(name),
-                    field: field_level.to_string(),
-                    sort: sort.to_string(),
+                    field: metas.zonk(&field_level).to_string(),
+                    sort: metas.zonk(&sort).to_string(),
                 });
             }
         }
@@ -1094,7 +1155,7 @@ pub fn check_constructor(
         return Err(TypeError::ConstructorResult {
             name: Rc::clone(name),
             data: Rc::clone(data),
-            found: result.to_string(),
+            found: shown_term(metas, result),
         });
     }
     Ok(())
@@ -1165,7 +1226,7 @@ fn infer_case(
         .filter(|arguments| arguments.len() == binders)
         .ok_or_else(|| TypeError::NotADataValue {
             data: Rc::clone(&case.data),
-            ty: ctx.quote(&scrutinee_ty).to_string(),
+            ty: shown(ctx, metas, &scrutinee_ty),
         })?;
     let (data_params, data_indices) = arguments.split_at(params as usize);
 

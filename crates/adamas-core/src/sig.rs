@@ -18,6 +18,7 @@ use std::rc::Rc;
 use crate::check::{TypeError, check_definition};
 use crate::eval::eval;
 use crate::level::Level;
+use crate::meta::Metas;
 use crate::mult::Mult;
 use crate::term::{Name, Term};
 use crate::value::{Env, Value};
@@ -103,6 +104,21 @@ impl Signature {
         let definition = check_definition(self, &name, mult, level_arity, ty, body)?;
         self.definitions.insert(name, definition);
         Ok(())
+    }
+
+    /// Ссылка на определение с **выведенными** аргументами уровня.
+    ///
+    /// Это и есть implicit universe polymorphism со стороны места
+    /// использования: вместо аргументов подставляются свежие дырки, а решает их
+    /// проверка типов, столкнув полученный тип с ожидаемым. Пользователь
+    /// уровней не пишет - §3.2 требует именно этого.
+    ///
+    /// `None` - определения с таким именем нет.
+    #[must_use]
+    pub fn instantiate(&self, name: &str, metas: &mut Metas) -> Option<Term> {
+        let arity = self.lookup(name)?.level_arity;
+        let levels: Rc<[Level]> = (0..arity).map(|_| metas.fresh_level()).collect();
+        Some(Term::Const(name.into(), levels))
     }
 
     /// Постулат: тип без тела. Удобная обёртка над [`Signature::define`].

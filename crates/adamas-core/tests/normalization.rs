@@ -15,6 +15,7 @@ use std::rc::Rc;
 use adamas_core::conv::convertible;
 use adamas_core::eval::{eval, normalize};
 use adamas_core::level::{Level, LevelVar};
+use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::sig::Signature;
 use adamas_core::term::{Index, Term};
@@ -217,7 +218,9 @@ fn wrap_in_redexes(term: &Term, budget: &mut u32) -> Term {
 /// накопленными `suc`.
 fn max_constant(level: &Level) -> u32 {
     match level {
-        Level::Zero | Level::Var(_) => 0,
+        // Метапеременных генератор не порождает: свойства уровней проверяются
+        // на замкнутых выражениях, а дырки живут в `meta.rs`.
+        Level::Zero | Level::Var(_) | Level::Meta(_) => 0,
         Level::Succ(inner) => max_constant(inner) + 1,
         Level::Max(a, b) => max_constant(a).max(max_constant(b)),
     }
@@ -366,7 +369,7 @@ proptest! {
     fn inserted_redexes_preserve_convertibility(term in any_term(), budget in 0u32..12) {
         let mut budget = budget;
         let wrapped = wrap_in_redexes(&term, &mut budget);
-        prop_assert!(convertible(&Signature::default(), 0, &value_of(&term), &value_of(&wrapped)));
+        prop_assert!(convertible(&Signature::default(), &mut Metas::default(), 0, &value_of(&term), &value_of(&wrapped)));
     }
 
     /// Результат нормализации замкнут. Классическая ошибка `NbE` - перепутать
@@ -379,22 +382,22 @@ proptest! {
 
     #[test]
     fn convertibility_is_reflexive(term in any_term()) {
-        prop_assert!(convertible(&Signature::default(), 0, &value_of(&term), &value_of(&term)));
+        prop_assert!(convertible(&Signature::default(), &mut Metas::default(), 0, &value_of(&term), &value_of(&term)));
     }
 
     /// Имена связываний на семантику не влияют.
     #[test]
     fn renaming_binders_preserves_convertibility(term in any_term()) {
         let renamed = rename(&term);
-        prop_assert!(convertible(&Signature::default(), 0, &value_of(&term), &value_of(&renamed)));
+        prop_assert!(convertible(&Signature::default(), &mut Metas::default(), 0, &value_of(&term), &value_of(&renamed)));
     }
 
     #[test]
     fn convertibility_is_symmetric(a in any_term(), b in any_term()) {
         let (left, right) = (value_of(&a), value_of(&b));
         prop_assert_eq!(
-            convertible(&Signature::default(), 0, &left, &right),
-            convertible(&Signature::default(), 0, &right, &left)
+            convertible(&Signature::default(), &mut Metas::default(), 0, &left, &right),
+            convertible(&Signature::default(), &mut Metas::default(), 0, &right, &left)
         );
     }
 
@@ -406,7 +409,7 @@ proptest! {
     #[test]
     fn equal_normal_forms_are_convertible(a in any_term(), b in any_term()) {
         if normalize(&a) == normalize(&b) {
-            prop_assert!(convertible(&Signature::default(), 0, &value_of(&a), &value_of(&b)));
+            prop_assert!(convertible(&Signature::default(), &mut Metas::default(), 0, &value_of(&a), &value_of(&b)));
         }
     }
 
@@ -415,8 +418,8 @@ proptest! {
     #[test]
     fn convertibility_is_transitive(a in any_term(), b in any_term(), c in any_term()) {
         let (a, b, c) = (value_of(&a), value_of(&b), value_of(&c));
-        if convertible(&Signature::default(), 0, &a, &b) && convertible(&Signature::default(), 0, &b, &c) {
-            prop_assert!(convertible(&Signature::default(), 0, &a, &c));
+        if convertible(&Signature::default(), &mut Metas::default(), 0, &a, &b) && convertible(&Signature::default(), &mut Metas::default(), 0, &b, &c) {
+            prop_assert!(convertible(&Signature::default(), &mut Metas::default(), 0, &a, &c));
         }
     }
 }

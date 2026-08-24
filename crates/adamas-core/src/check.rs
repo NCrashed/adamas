@@ -35,6 +35,7 @@ use std::rc::Rc;
 use crate::conv::convertible;
 use crate::ctx::{Ctx, Usage};
 use crate::level::Level;
+use crate::meta::{Metas, unsolved_level_meta};
 use crate::mult::Mult;
 use crate::sig::{Definition, Signature};
 use crate::term::{Index, Name, Term};
@@ -141,6 +142,22 @@ pub enum TypeError {
         name: Name,
     },
 
+    /// После проверки остался неразрешённый уровень.
+    #[error("уровень ?{} не определён: добавьте аннотацию", meta.0)]
+    AmbiguousLevel {
+        /// Метапеременная, оставшаяся без решения.
+        meta: crate::level::LevelMeta,
+    },
+
+    /// В определении, уходящем в сигнатуру, осталась дырка уровня.
+    #[error("в определении `{name}` остался неразрешённый уровень ?{}", meta.0)]
+    UnsolvedDefinitionLevel {
+        /// Имя определения.
+        name: Name,
+        /// Метапеременная, оставшаяся без решения.
+        meta: crate::level::LevelMeta,
+    },
+
     /// Определение ссылается на параметр уровня, которого у него нет.
     #[error("`{name}` использует параметр уровня u{var} при арности {arity}")]
     LevelVarOutOfScope {
@@ -158,7 +175,12 @@ pub enum TypeError {
 /// # Errors
 ///
 /// Любое нарушение типизации или учёта кратностей.
-pub fn infer(ctx: &Ctx<'_>, sigma: Mult, term: &Term) -> Result<(Rc<Value>, Usage), TypeError> {
+pub fn infer(
+    ctx: &Ctx<'_>,
+    metas: &mut Metas,
+    sigma: Mult,
+    term: &Term,
+) -> Result<(Rc<Value>, Usage), TypeError> {
     match term {
         Term::Var(index) => {
             let binding = ctx
@@ -188,9 +210,9 @@ pub fn infer(ctx: &Ctx<'_>, sigma: Mult, term: &Term) -> Result<(Rc<Value>, Usag
         // бы нижний универсум импредикативным; см. заголовок
         // [`crate::level`], почему это несовместимо с §3.2.
         Term::Pi(mult, name, domain, codomain) => {
-            let domain_level = is_type(ctx, domain)?;
+            let domain_level = is_type(ctx, metas, domain)?;
             let inner = ctx.bind(Rc::clone(name), *mult, ctx.eval(domain));
-            let codomain_level = is_type(&inner, codomain)?;
+            let codomain_level = is_type(&inner, metas, codomain)?;
             Ok((
                 Rc::new(Value::Universe(domain_level.max(codomain_level))),
                 Usage::zero(ctx.size()),
@@ -198,7 +220,7 @@ pub fn infer(ctx: &Ctx<'_>, sigma: Mult, term: &Term) -> Result<(Rc<Value>, Usag
         }
 
         Term::App(callee, argument) => {
-            let (callee_ty, callee_usage) = infer(ctx, sigma, callee)?;
+            let (callee_ty, callee_usage) = infer(ctx, metas, sigma, callee)?;
             let Value::Pi(mult, _, domain, codomain) = &*callee_ty else {
                 return Err(TypeError::NotAFunction {
                     ty: ctx.quote(&callee_ty).to_string(),
@@ -207,14 +229,20 @@ pub fn infer(ctx: &Ctx<'_>, sigma: Mult, term: &Term) -> Result<(Rc<Value>, Usag
             // Аргумент используется столько раз, сколько требует связывание.
             // При `q = 0` внутри аргумента ничего не расходуется - это и есть
             // "доказательства ничего не стоят".
-            let argument_usage = check(ctx, *mult * sigma, argument, domain)?;
+            let argument_usage = check(ctx, metas, *mult * sigma, argument, domain)?;
             let result = codomain.apply(ctx.eval(argument));
             Ok((result, callee_usage + &argument_usage))
         }
 
         Term::Let(mult, name, ty, value, body) => {
-            binding(ctx, sigma, *mult, name, ty, value, |inner| {
-                infer(inner, sigma, body)
+            let described = LetBinding {
+                mult: *mult,
+                name,
+                ty,
+                value,
+            };
+            binding(ctx, metas, sigma, described, |inner, metas| {
+                infer(inner, metas, sigma, body)
             })
         }
 
@@ -263,6 +291,7 @@ pub fn infer(ctx: &Ctx<'_>, sigma: Mult, term: &Term) -> Result<(Rc<Value>, Usag
 /// Любое нарушение типизации или учёта кратностей.
 pub fn check(
     ctx: &Ctx<'_>,
+    metas: &mut Metas,
     sigma: Mult,
     term: &Term,
     expected: &Rc<Value>,
@@ -281,7 +310,7 @@ pub fn check(
             }
             let inner = ctx.bind(Rc::clone(name), *mult, Rc::clone(domain));
             let body_ty = codomain.apply(ctx.fresh());
-            let usage = check(&inner, sigma, body, &body_ty)?;
+            let usage = check(&inner, metas, sigma, body, &body_ty)?;
             let (used, rest) = usage.pop();
             spend(name, *mult * sigma, used)?;
             Ok(rest)
@@ -292,15 +321,21 @@ pub fn check(
         }),
 
         (Term::Let(mult, name, ty, value, body), _) => {
-            let ((), usage) = binding(ctx, sigma, *mult, name, ty, value, |inner| {
-                check(inner, sigma, body, expected).map(|usage| ((), usage))
+            let described = LetBinding {
+                mult: *mult,
+                name,
+                ty,
+                value,
+            };
+            let ((), usage) = binding(ctx, metas, sigma, described, |inner, metas| {
+                check(inner, metas, sigma, body, expected).map(|usage| ((), usage))
             })?;
             Ok(usage)
         }
 
         _ => {
-            let (found, usage) = infer(ctx, sigma, term)?;
-            if convertible(ctx.signature(), ctx.size(), expected, &found) {
+            let (found, usage) = infer(ctx, metas, sigma, term)?;
+            if convertible(ctx.signature(), metas, ctx.size(), expected, &found) {
                 Ok(usage)
             } else {
                 Err(TypeError::Mismatch {
@@ -317,10 +352,10 @@ pub fn check(
 /// # Errors
 ///
 /// Если терм не типизируется или его тип не универсум.
-pub fn is_type(ctx: &Ctx<'_>, term: &Term) -> Result<Level, TypeError> {
+pub fn is_type(ctx: &Ctx<'_>, metas: &mut Metas, term: &Term) -> Result<Level, TypeError> {
     // Стёртый фрагмент: внутри типа ничто не расходуется, поэтому вектор
     // использований заведомо нулевой и отбрасывается.
-    let (ty, _) = infer(ctx, Mult::Zero, term)?;
+    let (ty, _) = infer(ctx, metas, Mult::Zero, term)?;
     match &*ty {
         Value::Universe(level) => Ok(level.clone()),
         _ => Err(TypeError::NotAType {
@@ -339,11 +374,27 @@ pub fn is_type(ctx: &Ctx<'_>, term: &Term) -> Result<Level, TypeError> {
 ///
 /// Если тип не является типом или терм ему не соответствует.
 pub fn check_closed(signature: &Signature, term: &Term, ty: &Term) -> Result<(), TypeError> {
+    let mut metas = Metas::default();
+    check_closed_with(signature, &mut metas, term, ty)
+}
+
+/// То же, но с внешним хранилищем метапеременных - когда терм построен через
+/// [`Signature::instantiate`] и содержит дырки в аргументах уровня.
+///
+/// # Errors
+///
+/// То же, что у [`check_closed`], плюс нерешённая метапеременная уровня.
+pub fn check_closed_with(
+    signature: &Signature,
+    metas: &mut Metas,
+    term: &Term,
+    ty: &Term,
+) -> Result<(), TypeError> {
     let ctx = Ctx::new(signature);
-    is_type(&ctx, ty)?;
+    is_type(&ctx, metas, ty)?;
     let ty_value = ctx.eval(ty);
-    check(&ctx, Mult::One, term, &ty_value)?;
-    Ok(())
+    check(&ctx, metas, Mult::One, term, &ty_value)?;
+    no_unsolved_levels(metas, term)
 }
 
 /// Синтезирует тип замкнутого терма и читает его обратно в терм.
@@ -352,9 +403,38 @@ pub fn check_closed(signature: &Signature, term: &Term, ty: &Term) -> Result<(),
 ///
 /// Если терм не типизируется.
 pub fn infer_closed(signature: &Signature, term: &Term) -> Result<Term, TypeError> {
+    let mut metas = Metas::default();
+    infer_closed_with(signature, &mut metas, term)
+}
+
+/// То же, но с внешним хранилищем метапеременных. Результат зонкается: в
+/// возвращённом типе решённые дырки уже заменены решениями.
+///
+/// **Нерешённые дырки не отвергаются**, в отличие от [`check_closed_with`]. Это
+/// не послабление, а разные вопросы: проверка обязана закончиться без дырок,
+/// потому что её ответ - "терм годится", а синтез отвечает "вот тип", и у
+/// полиморфного терма этот тип законно содержит `?N`. Синтезировать тип
+/// `Id{?l}`, ничем её не ограничив, - осмысленный запрос, а не ошибка.
+///
+/// # Errors
+///
+/// То же, что у [`infer_closed`].
+pub fn infer_closed_with(
+    signature: &Signature,
+    metas: &mut Metas,
+    term: &Term,
+) -> Result<Term, TypeError> {
     let ctx = Ctx::new(signature);
-    let (ty, _) = infer(&ctx, Mult::One, term)?;
-    Ok(ctx.quote(&ty))
+    let (ty, _) = infer(&ctx, metas, Mult::One, term)?;
+    Ok(crate::meta::zonk_term(metas, &ctx.quote(&ty)))
+}
+
+/// Отвергает терм, в котором после проверки остались нерешённые уровни.
+fn no_unsolved_levels(metas: &Metas, term: &Term) -> Result<(), TypeError> {
+    match unsolved_level_meta(metas, term) {
+        Some(meta) => Err(TypeError::AmbiguousLevel { meta }),
+        None => Ok(()),
+    }
 }
 
 /// Проверяет определение верхнего уровня перед добавлением в сигнатуру.
@@ -385,8 +465,14 @@ pub fn check_definition(
         check_level_scope(name, level_arity, body)?;
     }
 
+    // Хранилище своё: метапеременные живут ровно на время одной проверки, а
+    // определение уходит в сигнатуру навсегда. Отсюда же требование ниже -
+    // ни одной дырки в том, что сохраняется.
+    let mut metas = Metas::default();
+    let metas = &mut metas;
+
     let ctx = Ctx::new(signature);
-    is_type(&ctx, &ty)?;
+    is_type(&ctx, metas, &ty)?;
     if let Some(body) = &body {
         let ty_value = ctx.eval(&ty);
         // `0`-определение проверяется при σ = 0, `ω` - при σ = 1: тело
@@ -397,7 +483,23 @@ pub fn check_definition(
         } else {
             Mult::One
         };
-        check(&ctx, sigma, body, &ty_value)?;
+        check(&ctx, metas, sigma, body, &ty_value)?;
+    }
+
+    // Дырка в том, что сохраняется навсегда, - это тип, зависящий от
+    // хранилища, которого уже нет. Такое определение подхватывало бы значение
+    // метапеременной из любой следующей сессии, то есть жило бы сразу во всех
+    // универсумах. `check_level_scope` этого не ловит: он смотрит параметры
+    // уровня, а метапеременная не параметр.
+    let unsolved = unsolved_level_meta(metas, &ty).or_else(|| {
+        body.as_ref()
+            .and_then(|body| unsolved_level_meta(metas, body))
+    });
+    if let Some(meta) = unsolved {
+        return Err(TypeError::UnsolvedDefinitionLevel {
+            name: Rc::clone(name),
+            meta,
+        });
     }
 
     Ok(Definition {
@@ -419,26 +521,37 @@ fn check_level_scope(name: &Name, arity: u32, term: &Term) -> Result<(), TypeErr
     }
 }
 
+/// Связывание `let` одним аргументом - иначе у [`binding`] их восемь.
+struct LetBinding<'a> {
+    mult: Mult,
+    name: &'a Name,
+    ty: &'a Term,
+    value: &'a Term,
+}
+
 /// Общая часть `let` для обоих режимов: проверить аннотацию и значение, ввести
 /// связывание, обработать тело, снять и проверить использование.
 fn binding<T>(
     ctx: &Ctx<'_>,
+    metas: &mut Metas,
     sigma: Mult,
-    mult: Mult,
-    name: &Name,
-    ty: &Term,
-    value: &Term,
-    body: impl FnOnce(&Ctx<'_>) -> Result<(T, Usage), TypeError>,
+    LetBinding {
+        mult,
+        name,
+        ty,
+        value,
+    }: LetBinding<'_>,
+    body: impl FnOnce(&Ctx<'_>, &mut Metas) -> Result<(T, Usage), TypeError>,
 ) -> Result<(T, Usage), TypeError> {
-    is_type(ctx, ty)?;
+    is_type(ctx, metas, ty)?;
     let ty_value = ctx.eval(ty);
     let allowed = mult * sigma;
-    let value_usage = check(ctx, allowed, value, &ty_value)?;
+    let value_usage = check(ctx, metas, allowed, value, &ty_value)?;
 
     // Именно `define`, а не `bind`: значение известно, и тип тела не должен
     // оказаться зависящим от связывания, которого снаружи уже нет.
     let inner = ctx.define(Rc::clone(name), mult, ty_value, ctx.eval(value));
-    let (result, body_usage) = body(&inner)?;
+    let (result, body_usage) = body(&inner, metas)?;
 
     let (used, rest) = body_usage.pop();
     spend(name, allowed, used)?;

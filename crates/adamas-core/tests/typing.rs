@@ -9,6 +9,7 @@ use std::rc::Rc;
 use adamas_core::check::{TypeError, infer};
 use adamas_core::ctx::{Ctx, Usage};
 use adamas_core::eval::normalize;
+use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::sig::Signature;
 use adamas_core::term::Term;
@@ -488,7 +489,7 @@ proptest! {
     fn the_erased_fragment_consumes_nothing(term in any_small_term()) {
         let signature = fixture_signature();
         let ctx = Ctx::new(&signature);
-        if let Ok((_, usage)) = infer(&ctx, Mult::Zero, &term) {
+        if let Ok((_, usage)) = infer(&ctx, &mut Metas::default(), Mult::Zero, &term) {
             prop_assert_eq!(usage, Usage::zero(ctx.size()), "терм: {}", term);
         }
     }
@@ -501,8 +502,8 @@ proptest! {
     fn typable_at_runtime_implies_typable_erased(term in any_small_term()) {
         let signature = fixture_signature();
         let ctx = Ctx::new(&signature);
-        if infer(&ctx, Mult::One, &term).is_ok() {
-            prop_assert!(infer(&ctx, Mult::Zero, &term).is_ok(), "терм: {}", term);
+        if infer(&ctx, &mut Metas::default(), Mult::One, &term).is_ok() {
+            prop_assert!(infer(&ctx, &mut Metas::default(), Mult::Zero, &term).is_ok(), "терм: {}", term);
         }
     }
 }

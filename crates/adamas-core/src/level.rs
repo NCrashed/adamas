@@ -29,6 +29,14 @@ use std::rc::Rc;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LevelVar(pub u32);
 
+/// Метапеременная уровня - дырка, которую заполняет вывод.
+///
+/// Живёт в [`crate::meta::Metas`] и только на время одной проверки. В том, что
+/// сохраняется надолго - в типах и телах определений, - не встречается:
+/// проверка определения отвергает остаточные дырки.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LevelMeta(pub u32);
+
 /// Выражение уровня.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
@@ -40,6 +48,9 @@ pub enum Level {
     Max(Rc<Level>, Rc<Level>),
     /// Параметр, по которому определение полиморфно.
     Var(LevelVar),
+    /// Нерешённая метапеременная. Для нормализации и сравнения ведёт себя как
+    /// переменная: пока решения нет, про неё известно ровно столько же.
+    Meta(LevelMeta),
 }
 
 impl Level {
@@ -81,6 +92,9 @@ impl Level {
                 .get(*index as usize)
                 .cloned()
                 .unwrap_or_else(|| self.clone()),
+            // Метапеременную инстанциация определения не затрагивает: её
+            // заполняет вывод, а не подстановка параметров.
+            Self::Meta(_) => self.clone(),
         }
     }
 
@@ -91,7 +105,9 @@ impl Level {
     #[must_use]
     pub fn max_var(&self) -> Option<u32> {
         match self {
-            Self::Zero => None,
+            // Метапеременная параметром не является: она дырка, а не аргумент,
+            // и к объявленной арности отношения не имеет.
+            Self::Zero | Self::Meta(_) => None,
             Self::Succ(inner) => inner.max_var(),
             Self::Max(left, right) => match (left.max_var(), right.max_var()) {
                 (Some(a), Some(b)) => Some(a.max(b)),
@@ -126,6 +142,9 @@ impl Level {
             Self::Succ(inner) => inner.evaluate(assignment) + 1,
             Self::Var(var) => assignment(*var),
             Self::Max(left, right) => left.evaluate(assignment).max(right.evaluate(assignment)),
+            // Оракул работает на уровнях без дырок: значение нерешённой
+            // метапеременной не определено ничем.
+            Self::Meta(meta) => unreachable!("evaluate на нерешённой {meta:?}"),
         }
     }
 }
@@ -152,7 +171,9 @@ impl Parts {
             },
             Level::Succ(inner) => Self::of(inner).shift(),
             Level::Max(left, right) => Self::of(left).join(Self::of(right)),
-            Level::Var(_) => Self::atom(level.clone()),
+            // Нерешённая метапеременная - такой же атом, как переменная:
+            // про неё известно ровно столько же.
+            Level::Var(_) | Level::Meta(_) => Self::atom(level.clone()),
         }
     }
 
@@ -214,6 +235,7 @@ impl fmt::Display for Level {
                 }
             }
             Self::Max(left, right) => write!(f, "max {} {}", Paren(left), Paren(right)),
+            Self::Meta(LevelMeta(index)) => write!(f, "?{index}"),
         }
     }
 }

@@ -19,6 +19,7 @@
 use std::rc::Rc;
 
 use crate::eval::apply;
+use crate::meta::Metas;
 use crate::sig::Signature;
 use crate::value::{Head, Lvl, Value};
 
@@ -28,9 +29,20 @@ use crate::value::{Head, Lvl, Value};
 /// не задаёт. Но функция тотальна и на разнотипных: возвращает `false`, а не
 /// паникует. Паника здесь была бы не защитой инварианта, а падением на входе,
 /// который ничего не нарушает.
-#[must_use]
-pub fn convertible(sig: &Signature, size: u32, left: &Rc<Value>, right: &Rc<Value>) -> bool {
-    if rigid(sig, size, left, right) {
+///
+/// Функция **не чистая**: сравнивая `Type ?l` с `Type 3`, она обязана решить
+/// `?l := 3`. Это архитектура, а не недосмотр - вывод уровней происходит
+/// именно там, где встречаются два типа. Решения не откатываются, поэтому
+/// неудачное сравнение может оставить решённые по дороге метапеременные; для
+/// проверки типов это безвредно, потому что неудача всё равно означает отказ.
+pub fn convertible(
+    sig: &Signature,
+    metas: &mut Metas,
+    size: u32,
+    left: &Rc<Value>,
+    right: &Rc<Value>,
+) -> bool {
+    if rigid(sig, metas, size, left, right) {
         return true;
     }
     // Быстрый путь не сошёлся - разворачиваем то, что разворачивается.
@@ -39,6 +51,7 @@ pub fn convertible(sig: &Signature, size: u32, left: &Rc<Value>, right: &Rc<Valu
         (None, None) => false,
         (unfolded_left, unfolded_right) => convertible(
             sig,
+            metas,
             size,
             unfolded_left.as_ref().unwrap_or(left),
             unfolded_right.as_ref().unwrap_or(right),
@@ -62,18 +75,46 @@ fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
     )
 }
 
+/// Совпадают ли головы застрявших вычислений.
+///
+/// У определения аргументы уровня не сравниваются структурно, а
+/// **унифицируются**: в них стоят метапеременные, и `Id{?l}` против `Id{2}` -
+/// это не расхождение, а ограничение `?l ~ 2`. Структурное сравнение здесь
+/// отвергло бы корректную программу, а у постулата - окончательно, потому что
+/// разворачивать нечего.
+fn same_head(metas: &mut Metas, left: &Head, right: &Head) -> bool {
+    match (left, right) {
+        (Head::Local(a), Head::Local(b)) => a == b,
+        (Head::Global(name_a, levels_a), Head::Global(name_b, levels_b)) => {
+            name_a == name_b
+                && levels_a.len() == levels_b.len()
+                && levels_a
+                    .iter()
+                    .zip(levels_b.iter())
+                    .all(|(a, b)| metas.unify_levels(a, b))
+        }
+        _ => false,
+    }
+}
+
 /// Сравнение без разворота определений.
-fn rigid(sig: &Signature, size: u32, left: &Rc<Value>, right: &Rc<Value>) -> bool {
+fn rigid(
+    sig: &Signature,
+    metas: &mut Metas,
+    size: u32,
+    left: &Rc<Value>,
+    right: &Rc<Value>,
+) -> bool {
     match (&**left, &**right) {
-        (Value::Universe(a), Value::Universe(b)) => a.equiv(b),
+        (Value::Universe(a), Value::Universe(b)) => metas.unify_levels(a, b),
 
         (Value::Neutral(head_a, spine_a), Value::Neutral(head_b, spine_b)) => {
-            head_a == head_b
+            same_head(metas, head_a, head_b)
                 && spine_a.len() == spine_b.len()
                 && spine_a
                     .iter()
                     .zip(spine_b)
-                    .all(|(a, b)| convertible(sig, size, a, b))
+                    .all(|(a, b)| convertible(sig, metas, size, a, b))
         }
 
         // Кратность - часть типа функции, поэтому здесь она значима:
@@ -83,14 +124,20 @@ fn rigid(sig: &Signature, size: u32, left: &Rc<Value>, right: &Rc<Value>) -> boo
             Value::Pi(mult_b, _, domain_b, codomain_b),
         ) => {
             mult_a == mult_b
-                && convertible(sig, size, domain_a, domain_b)
-                && convertible_under(sig, size, |v| codomain_a.apply(v), |v| codomain_b.apply(v))
+                && convertible(sig, metas, size, domain_a, domain_b)
+                && convertible_under(
+                    sig,
+                    metas,
+                    size,
+                    |v| codomain_a.apply(v),
+                    |v| codomain_b.apply(v),
+                )
         }
 
         // Кратность лямбды не сравнивается - иначе ломается транзитивность,
         // см. `comparing_lambda_multiplicities_would_break_transitivity`.
         (Value::Lam(_, _, body_a), Value::Lam(_, _, body_b)) => {
-            convertible_under(sig, size, |v| body_a.apply(v), |v| body_b.apply(v))
+            convertible_under(sig, metas, size, |v| body_a.apply(v), |v| body_b.apply(v))
         }
 
         // η: функция равна своему развёрнутому виду `\x -> f x`. Без этого
@@ -100,10 +147,10 @@ fn rigid(sig: &Signature, size: u32, left: &Rc<Value>, right: &Rc<Value>) -> boo
         // `Universe` лямбда неконвертируема в любом случае, а применить их
         // нельзя - попытка была бы обращением к `apply` с не-функцией.
         (Value::Lam(_, _, body), Value::Neutral(..)) => {
-            convertible_under(sig, size, |v| body.apply(v), |v| apply(right, v))
+            convertible_under(sig, metas, size, |v| body.apply(v), |v| apply(right, v))
         }
         (Value::Neutral(..), Value::Lam(_, _, body)) => {
-            convertible_under(sig, size, |v| apply(left, v), |v| body.apply(v))
+            convertible_under(sig, metas, size, |v| apply(left, v), |v| body.apply(v))
         }
 
         _ => false,
@@ -113,12 +160,19 @@ fn rigid(sig: &Signature, size: u32, left: &Rc<Value>, right: &Rc<Value>) -> boo
 /// Сравнивает под свежим связыванием.
 fn convertible_under(
     sig: &Signature,
+    metas: &mut Metas,
     size: u32,
     left: impl FnOnce(Rc<Value>) -> Rc<Value>,
     right: impl FnOnce(Rc<Value>) -> Rc<Value>,
 ) -> bool {
     let fresh = Value::var(Lvl(size));
-    convertible(sig, size + 1, &left(Rc::clone(&fresh)), &right(fresh))
+    convertible(
+        sig,
+        metas,
+        size + 1,
+        &left(Rc::clone(&fresh)),
+        &right(fresh),
+    )
 }
 
 #[cfg(test)]
@@ -145,7 +199,14 @@ mod tests {
             env.extend(Value::var(Lvl(level)))
         });
         let signature = crate::sig::Signature::default();
-        convertible(&signature, free, &eval(&env, left), &eval(&env, right))
+        let mut metas = crate::meta::Metas::default();
+        convertible(
+            &signature,
+            &mut metas,
+            free,
+            &eval(&env, left),
+            &eval(&env, right),
+        )
     }
 
     fn conv(left: &Term, right: &Term) -> bool {

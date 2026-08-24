@@ -49,10 +49,11 @@
 use std::fmt;
 use std::rc::Rc;
 
-use crate::check::instantiate_telescope;
+use crate::check::{TypeError, instantiate_telescope, is_type};
 use crate::ctx::Ctx;
 use crate::eval::quote;
 use crate::level::Level;
+use crate::meta::Metas;
 use crate::mult::Mult;
 use crate::sig::{DefinitionKind, Signature};
 use crate::term::{Branch, Case, Index, Name, Term};
@@ -121,9 +122,17 @@ pub enum PatternError {
         clause: usize,
     },
 
-    /// Тип определения ссылается на связывание, которого у него нет.
-    #[error("тип ссылается за пределы своих аргументов")]
-    UnboundInType,
+    /// Тип определения не проходит проверку типов.
+    ///
+    /// Элаборация работает до [`crate::check`], поэтому проверяет тип сама:
+    /// вычислять непроверенный терм нельзя. Сюда попадает и выход за пределы
+    /// собственных аргументов - у отдельной проверки замкнутости после этого не
+    /// осталось случая, в котором она могла бы сработать.
+    #[error("тип определения не является типом: {error}")]
+    IllTypedType {
+        /// Что именно не сошлось.
+        error: Box<TypeError>,
+    },
 
     /// Разбирается значение, тип которого не индуктивное семейство.
     #[error("разбирать нечего: значение имеет тип `{ty}`")]
@@ -186,27 +195,47 @@ pub enum PatternError {
 /// снимаются все `Pi`: разбирать тогда можно только пустое семейство, и колонки
 /// для этого нужны все.
 ///
+/// Тип проверяется здесь же, до всякого вычисления. Элаборация работает **до**
+/// [`crate::check`], а вычислять непроверенный терм нельзя: `eval` вправе
+/// паниковать на незамкнутом или нетипизированном входе, и `compile` уносила бы
+/// эту панику наружу как поведение публичной функции.
+///
 /// # Errors
 ///
-/// Несовпадение арности, чужой конструктор, семейство с индексами, непокрытый
-/// случай, недостижимая клауза.
-pub fn compile(signature: &Signature, ty: &Term, clauses: &[Clause]) -> Result<Term, PatternError> {
+/// Тип не является типом; несовпадение арности; чужой конструктор; семейство с
+/// индексами; непокрытый случай; недостижимая клауза.
+pub fn compile(
+    signature: &Signature,
+    metas: &mut Metas,
+    ty: &Term,
+    clauses: &[Clause],
+) -> Result<Term, PatternError> {
+    let ctx = Ctx::new(signature);
+    is_type(&ctx, metas, ty).map_err(|error| PatternError::IllTypedType {
+        error: Box::new(error),
+    })?;
+
     let wanted = clauses
         .first()
         .map_or(usize::MAX, |clause| clause.patterns.len());
 
     // Телескоп аргументов: кратности и имена пойдут в лямбды, типы - в колонки.
-    let mut ctx = Ctx::new(signature);
+    //
+    // Снимается по значению, а не по терму: `def Fn = Nat -> Nat` - такой же
+    // тип функции, как записанная стрелка, и синтаксическое снятие насчитало бы
+    // ему нулевую арность, отвергнув клаузы с выдуманным числом аргументов.
+    let mut ctx = ctx;
     let mut telescope = Vec::new();
-    let mut current = ty;
-    while let Term::Pi(mult, name, domain, codomain) = current {
-        if telescope.len() == wanted {
+    let mut current = ctx.eval(ty);
+    while telescope.len() != wanted {
+        let reduced = crate::conv::whnf(signature, &current);
+        let Value::Pi(mult, name, domain, codomain) = &*reduced else {
             break;
-        }
-        let domain = ctx.eval(domain);
-        ctx = ctx.bind(Rc::clone(name), *mult, Rc::clone(&domain));
-        telescope.push((*mult, Rc::clone(name), domain));
-        current = codomain;
+        };
+        let bound = Lvl(ctx.size());
+        telescope.push((*mult, Rc::clone(name), Rc::clone(domain)));
+        ctx = ctx.bind(Rc::clone(name), *mult, Rc::clone(domain));
+        current = codomain.apply(Value::var(bound));
     }
     let arity = telescope.len();
     if !clauses.is_empty() && arity != wanted {
@@ -216,10 +245,10 @@ pub fn compile(signature: &Signature, ty: &Term, clauses: &[Clause]) -> Result<T
             found: wanted,
         });
     }
-    let target = current.clone();
-    if !well_scoped(&target, arity_u32(arity)) {
-        return Err(PatternError::UnboundInType);
-    }
+    // Читается обратно в контексте снятых связываний, поэтому указать вне их
+    // уже некуда: отдельная проверка замкнутости здесь была бы недостижима, а
+    // выход за контекст ловит `is_type` выше.
+    let target = quote(ctx.size(), &current);
 
     let mut rows = Vec::with_capacity(clauses.len());
     for (index, clause) in clauses.iter().enumerate() {
@@ -682,33 +711,28 @@ type DataHead = (Name, Rc<[Level]>, Vec<Rc<Value>>);
 
 /// Индуктивное семейство в голове типа, вместе с аргументами.
 ///
-/// δ-разворот обязателен: у определения-синонима голова своя.
+/// δ-разворот обязателен: у определения-синонима голова своя. Разворотом
+/// заведует [`crate::conv::whnf`] - вместе с ним приходит предел, которого у
+/// собственного цикла здесь не было.
 fn data_head(signature: &Signature, ty: &Rc<Value>) -> Option<DataHead> {
-    let mut current = Rc::clone(ty);
-    loop {
-        let head = match &*current {
-            Value::Neutral(Head::Global(name, levels), spine) => {
-                Some((Rc::clone(name), Rc::clone(levels), spine.clone()))
-            }
-            _ => None,
-        };
-        if let Some((name, levels, spine)) = head {
-            if matches!(
-                signature.lookup(&name).map(|found| &found.kind),
-                Some(DefinitionKind::Data { .. })
-            ) {
-                let arguments = spine
-                    .iter()
-                    .map(|elim| match elim {
-                        Elim::App(argument) => Some(Rc::clone(argument)),
-                        Elim::Case(_) => None,
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                return Some((name, levels, arguments));
-            }
-        }
-        current = crate::conv::unfold(signature, &current)?;
+    let reduced = crate::conv::whnf(signature, ty);
+    let Value::Neutral(Head::Global(name, levels), spine) = &*reduced else {
+        return None;
+    };
+    if !matches!(
+        signature.lookup(name).map(|found| &found.kind),
+        Some(DefinitionKind::Data { .. })
+    ) {
+        return None;
     }
+    let arguments = spine
+        .iter()
+        .map(|elim| match elim {
+            Elim::App(argument) => Some(Rc::clone(argument)),
+            Elim::Case(_) => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((Rc::clone(name), Rc::clone(levels), arguments))
 }
 
 /// Сколько связываний у типа.

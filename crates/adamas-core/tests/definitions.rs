@@ -208,6 +208,80 @@ fn level_arguments_are_part_of_the_head() {
     ));
 }
 
+// -------------------------------------------------------- прозрачность формы
+
+/// Тип-синоним функции - такой же тип функции, как записанная стрелка.
+///
+/// Проверка спрашивает у типа его **форму** в трёх местах: применение - "это
+/// `Pi`?", правило лямбды - то же самое, позиция типа - "это универсум?".
+/// Определение имеет собственную голову, и без приведения к головной нормальной
+/// форме синоним не годился бы ни в одном из трёх.
+#[test]
+fn a_definition_is_transparent_where_the_shape_of_a_type_is_asked() {
+    let mut signature = Signature::default();
+    signature
+        .postulate("Nat", Mult::Many, 0, Term::universe(0))
+        .unwrap();
+    signature
+        .postulate("z", Mult::Many, 0, Term::constant("Nat"))
+        .unwrap();
+    signature
+        .define(
+            "Fn",
+            Mult::Many,
+            0,
+            Term::universe(0),
+            Some(pi(
+                Mult::Many,
+                "_",
+                Term::constant("Nat"),
+                Term::constant("Nat"),
+            )),
+        )
+        .unwrap();
+    signature
+        .postulate("f", Mult::Many, 0, Term::constant("Fn"))
+        .unwrap();
+
+    let applied = check_closed(
+        &signature,
+        &Term::constant("f").apply([Term::constant("z")]),
+        &Term::constant("Nat"),
+    );
+    assert!(applied.is_ok(), "применение через синоним: {applied:?}");
+
+    let identity = check_closed(
+        &signature,
+        &lam(Mult::Many, "x", Term::var(0)),
+        &Term::constant("Fn"),
+    );
+    assert!(identity.is_ok(), "лямбда против синонима: {identity:?}");
+}
+
+#[test]
+fn a_definition_is_transparent_in_the_position_of_a_type() {
+    // `Sort2 = Type 2`, поэтому `T : Sort2` обязана годиться как тип.
+    let mut signature = Signature::default();
+    signature
+        .define(
+            "Sort2",
+            Mult::Many,
+            0,
+            Term::universe(3),
+            Some(Term::universe(2)),
+        )
+        .unwrap();
+    signature
+        .postulate("T", Mult::Many, 0, Term::constant("Sort2"))
+        .unwrap();
+    signature
+        .postulate("t", Mult::Many, 0, Term::constant("T"))
+        .unwrap();
+
+    let outcome = check_closed(&signature, &Term::constant("t"), &Term::constant("T"));
+    assert!(outcome.is_ok(), "{outcome:?}");
+}
+
 // --------------------------------------------------------------- кратности
 
 #[test]

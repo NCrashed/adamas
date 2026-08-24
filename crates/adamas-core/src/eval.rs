@@ -127,11 +127,27 @@ fn stuck_case(env: &Env, case: &Case) -> StuckCase {
 ///
 /// Паникует, если разбирается не застрявшее значение. Internal invariant:
 /// у значения индуктивного типа других форм не бывает, а типизацию обеспечивает
-/// вызывающий.
+/// вызывающий. Там, где инвариант держать некому - δ-разворот переигрывает
+/// спайн, накопленный над значением **другого** типа, - берут
+/// [`try_eliminate_case`].
 #[must_use]
 pub fn eliminate_case(case: &Rc<StuckCase>, scrutinee: &Rc<Value>) -> Rc<Value> {
+    try_eliminate_case(case, scrutinee)
+        .unwrap_or_else(|| unreachable!("разбор неподходящего значения: {scrutinee}"))
+}
+
+/// [`eliminate_case`], возвращающая `None` вместо паники.
+///
+/// `None` - разбираемое значение не той формы: не нейтраль вовсе либо
+/// конструктор, над которым уже накоплен разбор. Из корректно типизированного
+/// терма ни то ни другое не получается, но δ-разворот ([`crate::conv`])
+/// переигрывает спайн над развёрнутым телом, а тело может оказаться чем угодно,
+/// если сравниваются значения разных типов - что проверка конвертируемости
+/// обязана переживать отказом, а не падением.
+#[must_use]
+pub fn try_eliminate_case(case: &Rc<StuckCase>, scrutinee: &Rc<Value>) -> Option<Rc<Value>> {
     let Value::Neutral(head, spine) = &**scrutinee else {
-        unreachable!("разбор значения, не являющегося нейтралью: {scrutinee}")
+        return None;
     };
 
     if let Head::Global(name, _) = head {
@@ -140,11 +156,11 @@ pub fn eliminate_case(case: &Rc<StuckCase>, scrutinee: &Rc<Value>) -> Rc<Value> 
             .iter()
             .find(|branch| branch.constructor == *name)
         {
-            return spine.iter().skip(case.params as usize).fold(
+            return spine.iter().skip(case.params as usize).try_fold(
                 Rc::clone(&branch.body),
                 |body, elim| match elim {
-                    Elim::App(argument) => apply(&body, Rc::clone(argument)),
-                    Elim::Case(_) => unreachable!("конструктор под разбором"),
+                    Elim::App(argument) => try_apply(&body, Rc::clone(argument)),
+                    Elim::Case(_) => None,
                 },
             );
         }
@@ -152,7 +168,7 @@ pub fn eliminate_case(case: &Rc<StuckCase>, scrutinee: &Rc<Value>) -> Rc<Value> 
 
     let mut spine = spine.clone();
     spine.push(Elim::Case(Rc::clone(case)));
-    Rc::new(Value::Neutral(head.clone(), spine))
+    Some(Rc::new(Value::Neutral(head.clone(), spine)))
 }
 
 /// Применяет значение к аргументу.
@@ -160,18 +176,24 @@ pub fn eliminate_case(case: &Rc<StuckCase>, scrutinee: &Rc<Value>) -> Rc<Value> 
 /// # Panics
 ///
 /// Паникует на применении не-функции. Internal invariant: такие термы
-/// отвергает проверяющий.
+/// отвергает проверяющий. Где инвариант не гарантирован - [`try_apply`].
 #[must_use]
 pub fn apply(callee: &Rc<Value>, argument: Rc<Value>) -> Rc<Value> {
+    try_apply(callee, argument).unwrap_or_else(|| unreachable!("применение не-функции: {callee}"))
+}
+
+/// [`apply`], возвращающая `None` вместо паники. См. [`try_eliminate_case`].
+#[must_use]
+pub fn try_apply(callee: &Rc<Value>, argument: Rc<Value>) -> Option<Rc<Value>> {
     match &**callee {
-        Value::Lam(_, _, closure) => closure.apply(argument),
+        Value::Lam(_, _, closure) => Some(closure.apply(argument)),
         // Применение застряло - аргумент дописывается в спайн.
         Value::Neutral(head, spine) => {
             let mut spine = spine.clone();
             spine.push(Elim::App(argument));
-            Rc::new(Value::Neutral(head.clone(), spine))
+            Some(Rc::new(Value::Neutral(head.clone(), spine)))
         }
-        other => unreachable!("применение не-функции: {other}"),
+        _ => None,
     }
 }
 

@@ -33,7 +33,7 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use crate::conv::convertible;
+use crate::conv::{convertible, whnf};
 use crate::ctx::{Ctx, Usage};
 use crate::eval::{apply, quote};
 use crate::level::{Level, LevelMeta, LevelVar};
@@ -352,6 +352,10 @@ pub fn infer(
 
         Term::App(callee, argument) => {
             let (callee_ty, callee_usage) = infer(ctx, metas, sigma, callee)?;
+            // Форму типа спрашивают у развёрнутой головы: `def Fn = Nat -> Nat`
+            // - такой же тип функции, как записанная стрелка, и `f : Fn`
+            // обязана применяться.
+            let callee_ty = whnf(ctx.signature(), &callee_ty);
             let Value::Pi(mult, _, domain, codomain) = &*callee_ty else {
                 return Err(TypeError::NotAFunction {
                     ty: ctx.quote(&callee_ty).to_string(),
@@ -440,28 +444,13 @@ pub fn check(
     expected: &Rc<Value>,
 ) -> Result<Usage, TypeError> {
     match (term, &**expected) {
-        (Term::Lam(mult, name, body), Value::Pi(pi_mult, _, domain, codomain)) => {
-            // Кратность лямбды обязана совпасть с кратностью типа. Проверка
-            // конвертируемости её сознательно игнорирует (иначе ломается
-            // транзитивность через η), поэтому единственное место, где
-            // аннотация на лямбде что-то значит, - здесь.
-            if mult != pi_mult {
-                return Err(TypeError::LambdaMultiplicity {
-                    expected: *pi_mult,
-                    found: *mult,
-                });
-            }
-            let inner = ctx.bind(Rc::clone(name), *mult, Rc::clone(domain));
-            let body_ty = codomain.apply(ctx.fresh());
-            let usage = check(&inner, metas, sigma, body, &body_ty)?;
-            let (used, rest) = usage.pop();
-            spend(name, *mult * sigma, used)?;
-            Ok(rest)
+        // Лямбду проверяют против **развёрнутого** типа: `def Fn = Nat -> Nat`
+        // - тип функции, и `\x -> x : Fn` обязано проходить. Разворот стоит
+        //   здесь, а не в начале `check`, чтобы не платить за него на каждом
+        //   терме: форма ожидаемого типа значима только для лямбды.
+        (Term::Lam(..), _) => {
+            check_lambda(ctx, metas, sigma, term, &whnf(ctx.signature(), expected))
         }
-
-        (Term::Lam(..), _) => Err(TypeError::NotAFunction {
-            ty: ctx.quote(expected).to_string(),
-        }),
 
         (Term::Let(mult, name, ty, value, body), _) => {
             let described = LetBinding {
@@ -490,6 +479,40 @@ pub fn check(
     }
 }
 
+/// Правило лямбды. Ожидаемый тип уже приведён к головной нормальной форме.
+fn check_lambda(
+    ctx: &Ctx<'_>,
+    metas: &mut Metas,
+    sigma: Mult,
+    term: &Term,
+    expected: &Rc<Value>,
+) -> Result<Usage, TypeError> {
+    let Term::Lam(mult, name, body) = term else {
+        unreachable!("правило лямбды вызвано не на лямбде: {term}")
+    };
+    let Value::Pi(pi_mult, _, domain, codomain) = &**expected else {
+        return Err(TypeError::NotAFunction {
+            ty: ctx.quote(expected).to_string(),
+        });
+    };
+    // Кратность лямбды обязана совпасть с кратностью типа. Проверка
+    // конвертируемости её сознательно игнорирует (иначе ломается
+    // транзитивность через η), поэтому единственное место, где аннотация на
+    // лямбде что-то значит, - здесь.
+    if mult != pi_mult {
+        return Err(TypeError::LambdaMultiplicity {
+            expected: *pi_mult,
+            found: *mult,
+        });
+    }
+    let inner = ctx.bind(Rc::clone(name), *mult, Rc::clone(domain));
+    let body_ty = codomain.apply(ctx.fresh());
+    let usage = check(&inner, metas, sigma, body, &body_ty)?;
+    let (used, rest) = usage.pop();
+    spend(name, *mult * sigma, used)?;
+    Ok(rest)
+}
+
 /// Проверяет, что терм - тип, и возвращает уровень его универсума.
 ///
 /// # Errors
@@ -499,6 +522,9 @@ pub fn is_type(ctx: &Ctx<'_>, metas: &mut Metas, term: &Term) -> Result<Level, T
     // Стёртый фрагмент: внутри типа ничто не расходуется, поэтому вектор
     // использований заведомо нулевой и отбрасывается.
     let (ty, _) = infer(ctx, metas, Mult::Zero, term)?;
+    // Универсум ищут в развёрнутой голове: у `def Sort2 = Type 2` голова своя,
+    // и без разворота `T : Sort2` не годилось бы как тип вовсе.
+    let ty = whnf(ctx.signature(), &ty);
     match &*ty {
         Value::Universe(level) => Ok(level.clone()),
         _ => Err(TypeError::NotAType {
@@ -1147,35 +1173,27 @@ fn data_arguments(
     case: &Case,
     ty: &Rc<Value>,
 ) -> Option<Vec<Rc<Value>>> {
-    let mut current = Rc::clone(ty);
-    loop {
-        let applied = match &*current {
-            Value::Neutral(Head::Global(name, levels), spine) if *name == case.data => {
-                Some((Rc::clone(levels), spine.clone()))
-            }
-            _ => None,
-        };
-        if let Some((levels, spine)) = applied {
-            if levels.len() != case.levels.len() {
-                return None;
-            }
-            if !levels
-                .iter()
-                .zip(case.levels.iter())
-                .all(|(actual, written)| metas.unify_levels(actual, written))
-            {
-                return None;
-            }
-            return spine
-                .iter()
-                .map(|elim| match elim {
-                    Elim::App(argument) => Some(Rc::clone(argument)),
-                    Elim::Case(_) => None,
-                })
-                .collect();
-        }
-        current = crate::conv::unfold(signature, &current)?;
+    let reduced = whnf(signature, ty);
+    let Value::Neutral(Head::Global(name, levels), spine) = &*reduced else {
+        return None;
+    };
+    if *name != case.data || levels.len() != case.levels.len() {
+        return None;
     }
+    if !levels
+        .iter()
+        .zip(case.levels.iter())
+        .all(|(actual, written)| metas.unify_levels(actual, written))
+    {
+        return None;
+    }
+    spine
+        .iter()
+        .map(|elim| match elim {
+            Elim::App(argument) => Some(Rc::clone(argument)),
+            Elim::Case(_) => None,
+        })
+        .collect()
 }
 
 /// Тип мотива: `(0 i⃗ : I) -> (0 x : D levels params i⃗) -> Type ?ℓ`.

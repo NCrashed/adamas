@@ -31,10 +31,19 @@
 //! отвергает корректную программу, тогда как обратная ошибка приняла бы
 //! некорректную. Так же устроены пределы в Coq, Agda и Lean; на тотальность
 //! здесь положиться нельзя ни в одной из них.
+//!
+//! Предел считается **вдоль пути**, а не на всё сравнение: топливо передаётся
+//! вниз копией, поэтому соседние элементы спайна друг у друга его не отнимают.
+//! Общий счётчик делал бы конвертируемость зависящей от ширины типа, а не от
+//! глубины разворота: два типа, различающихся одним редексом в каждой из `k`
+//! стрелок, признавались бы равными при `k = 128` и разными при `k = 129`, то
+//! есть отношение переставало быть композициональным - из `A ≡ A'` и `B ≡ B'`
+//! не следовало `(A -> B) ≡ (A' -> B')`. Завершаемость от этого не страдает:
+//! вдоль любого пути от корня к листу разворотов по-прежнему не больше предела.
 
 use std::rc::Rc;
 
-use crate::eval::{apply, eliminate_case};
+use crate::eval::{apply, try_apply, try_eliminate_case};
 use crate::meta::Metas;
 use crate::sig::Signature;
 use crate::value::{Elim, Head, Lvl, StuckCase, Value};
@@ -58,8 +67,33 @@ pub fn convertible(
     left: &Rc<Value>,
     right: &Rc<Value>,
 ) -> bool {
+    convertible_within(UNFOLD_LIMIT, sig, metas, size, left, right)
+}
+
+/// Приводит значение к слабой головной нормальной форме: разворачивает
+/// определение в голове, пока голова разворачивается.
+///
+/// Нужна везде, где проверка смотрит на **форму** типа, а не сравнивает его с
+/// другим: применение спрашивает "это `Pi`?", позиция типа - "это `Universe`?",
+/// разбор - "это то семейство?". [`crate::eval`] определений не разворачивает,
+/// поэтому без приведения `def Fn = Nat -> Nat` не был бы типом функции, а
+/// `def Sort2 = Type 2` - типом вовсе.
+///
+/// Предел тот же и по той же причине, что у [`convertible`]; исчерпание
+/// возвращает то, что успело развернуться, и вызывающий увидит неразвёрнутую
+/// голову - то есть отказ, а не зависание.
+#[must_use]
+pub fn whnf(sig: &Signature, value: &Rc<Value>) -> Rc<Value> {
+    let mut current = Rc::clone(value);
     let mut fuel = UNFOLD_LIMIT;
-    convertible_within(&mut fuel, sig, metas, size, left, right)
+    while let Some(next) = unfold(sig, &current) {
+        current = next;
+        let Some(remaining) = fuel.checked_sub(1) else {
+            break;
+        };
+        fuel = remaining;
+    }
+    current
 }
 
 /// Сколько δ-разворотов разрешено на одно сравнение.
@@ -76,7 +110,7 @@ pub fn convertible(
 const UNFOLD_LIMIT: u32 = 128;
 
 fn convertible_within(
-    fuel: &mut u32,
+    fuel: u32,
     sig: &Signature,
     metas: &mut Metas,
     size: u32,
@@ -94,9 +128,8 @@ fn convertible_within(
     let Some(remaining) = fuel.checked_sub(1) else {
         return false;
     };
-    *fuel = remaining;
     convertible_within(
-        fuel,
+        remaining,
         sig,
         metas,
         size,
@@ -114,6 +147,14 @@ fn convertible_within(
 /// `succ (succ zero)`, застрявший над ним `case` немедленно сводится по ι.
 /// Единственное место, где это происходит, - здесь, потому что [`crate::eval`]
 /// определений не трогает.
+///
+/// Переигрывание **может не получиться**, и тогда результат тоже `None`.
+/// Спайн накапливается над значением одного типа, а разворачивается голова
+/// другого: η-правило ниже дописывает `Elim::App` к любой нейтрали, поэтому
+/// сравнение `\x -> x` с `def c : Type 1 = Type 0` доходит сюда с попыткой
+/// применить `Type 0` к аргументу. Для сравнения разнотипных значений это
+/// штатный исход - `convertible` обязана отвечать `false`, - а не поломка
+/// инварианта, поэтому здесь стоят `try_`-варианты, а не паникующие.
 pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
     let Value::Neutral(Head::Global(name, levels), spine) = &**value else {
         return None;
@@ -129,10 +170,10 @@ pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
         return None;
     }
     let body = definition.instantiate_body(levels)?;
-    Some(spine.iter().fold(body, |callee, elim| match elim {
-        Elim::App(argument) => apply(&callee, Rc::clone(argument)),
-        Elim::Case(case) => eliminate_case(case, &callee),
-    }))
+    spine.iter().try_fold(body, |callee, elim| match elim {
+        Elim::App(argument) => try_apply(&callee, Rc::clone(argument)),
+        Elim::Case(case) => try_eliminate_case(case, &callee),
+    })
 }
 
 /// Совпадают ли головы застрявших вычислений.
@@ -159,7 +200,7 @@ fn same_head(metas: &mut Metas, left: &Head, right: &Head) -> bool {
 
 /// Совпадают ли элиминаторы в одной позиции спайна.
 fn same_elim(
-    fuel: &mut u32,
+    fuel: u32,
     sig: &Signature,
     metas: &mut Metas,
     size: u32,
@@ -182,7 +223,7 @@ fn same_elim(
 /// мотив нельзя: он часть терма и виден в типе результата, и признав такие
 /// термы равными, конвертируемость перестала бы сохранять типизацию.
 fn same_case(
-    fuel: &mut u32,
+    fuel: u32,
     sig: &Signature,
     metas: &mut Metas,
     size: u32,
@@ -207,7 +248,7 @@ fn same_case(
 
 /// Сравнение без разворота определений.
 fn rigid(
-    fuel: &mut u32,
+    fuel: u32,
     sig: &Signature,
     metas: &mut Metas,
     size: u32,
@@ -284,7 +325,7 @@ fn rigid(
 
 /// Сравнивает под свежим связыванием.
 fn convertible_under(
-    fuel: &mut u32,
+    fuel: u32,
     sig: &Signature,
     metas: &mut Metas,
     size: u32,
@@ -306,7 +347,7 @@ fn convertible_under(
 mod tests {
     use std::rc::Rc;
 
-    use super::convertible;
+    use super::{UNFOLD_LIMIT, convertible};
     use crate::eval::eval;
     use crate::mult::Mult;
     use crate::term::Term;
@@ -467,6 +508,95 @@ mod tests {
             quote(1, &eval(&env, &f)),
             quote(1, &eval(&env, &expanded)),
             "но нормальные формы различаются"
+        );
+    }
+
+    /// Разворот определения не обязан принимать накопленный спайн.
+    ///
+    /// η-правило дописывает `Elim::App` к любой нейтрали, поэтому сравнение
+    /// лямбды с `c : Type 1 = Type 0` доходит до попытки применить `Type 0` к
+    /// аргументу. Значения здесь разных типов, и контракт функции - ответить
+    /// `false`, а не упасть: раньше здесь была паника в `eval`.
+    #[test]
+    fn unfolding_a_non_function_is_a_refusal_not_a_panic() {
+        let mut signature = crate::sig::Signature::default();
+        signature
+            .define(
+                "c",
+                Mult::Many,
+                0,
+                Term::universe(1),
+                Some(Term::universe(0)),
+            )
+            .expect("определение корректно");
+        let mut metas = crate::meta::Metas::default();
+
+        let lambda = eval(&Env::default(), &lam(Term::var(0)));
+        let constant = eval(&Env::default(), &Term::constant("c"));
+        assert!(!convertible(&signature, &mut metas, 0, &lambda, &constant));
+        assert!(
+            !convertible(&signature, &mut metas, 0, &constant, &lambda),
+            "и в обратную сторону"
+        );
+    }
+
+    /// Топливо разворота тратится вдоль пути, а не на всё сравнение.
+    ///
+    /// Иначе конвертируемость зависела бы от ширины типа: `k` стрелок, каждая
+    /// с одним редексом, признавались бы равными при `k <= 128` и разными
+    /// дальше, то есть из `A ≡ A'` и `B ≡ B'` не следовало бы
+    /// `(A -> B) ≡ (A' -> B')`.
+    #[test]
+    fn fuel_is_spent_along_a_path_not_across_the_width() {
+        let mut signature = crate::sig::Signature::default();
+        signature
+            .postulate("Nat", Mult::Many, 0, Term::universe(0))
+            .expect("Nat корректен");
+        signature
+            .postulate("zero", Mult::Many, 0, Term::constant("Nat"))
+            .expect("zero корректен");
+        signature
+            .define(
+                "id",
+                Mult::Many,
+                0,
+                pi(Mult::Many, Term::constant("Nat"), Term::constant("Nat")),
+                Some(lam(Term::var(0))),
+            )
+            .expect("id корректна");
+        signature
+            .postulate(
+                "F",
+                Mult::Many,
+                0,
+                pi(Mult::Zero, Term::constant("Nat"), Term::universe(0)),
+            )
+            .expect("F корректна");
+
+        // `(0 _ : F n) -> … k раз … -> Type 0`, где слева `n` под редексом либо
+        // уже сведённое. Каждая стрелка стоит ровно один разворот.
+        let chain = |redex: bool| {
+            let index = if redex {
+                Term::constant("id").apply([Term::constant("zero")])
+            } else {
+                Term::constant("zero")
+            };
+            (0..UNFOLD_LIMIT + 8).fold(Term::universe(0), |tail, _| {
+                Term::Pi(
+                    Mult::Zero,
+                    "_".into(),
+                    Rc::new(Term::constant("F").apply([index.clone()])),
+                    Rc::new(tail),
+                )
+            })
+        };
+
+        let mut metas = crate::meta::Metas::default();
+        let left = eval(&Env::default(), &chain(true));
+        let right = eval(&Env::default(), &chain(false));
+        assert!(
+            convertible(&signature, &mut metas, 0, &left, &right),
+            "ширина типа не должна расходовать общий запас разворотов"
         );
     }
 

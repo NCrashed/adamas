@@ -10,6 +10,7 @@ use std::rc::Rc;
 use proptest::prelude::*;
 
 use adamas_core::check::{TypeError, check_closed};
+use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::pattern::{Clause, Pattern, PatternError, compile};
 use adamas_core::sig::Signature;
@@ -58,8 +59,6 @@ fn declared(what: &str, outcome: &Result<(), TypeError>) {
 
 /// `Bool`, `Nat`, семейство `P` и свидетель `anything`.
 fn base() -> Signature {
-    use adamas_core::meta::Metas;
-
     let mut signature = Signature::default();
     let mut metas = Metas::default();
     declared(
@@ -107,8 +106,6 @@ fn base() -> Signature {
 
 /// `List : (0 A : Type u) -> Type u` с `nil` и `cons`.
 fn with_lists(signature: &mut Signature) {
-    use adamas_core::meta::Metas;
-
     let mut metas = Metas::default();
     let level = metas.fresh_level();
     declared(
@@ -165,7 +162,7 @@ fn with_lists(signature: &mut Signature) {
 
 /// Собирает клаузы и определяет функцию, требуя успеха на обоих шагах.
 fn define(signature: &mut Signature, name: &str, ty: Term, clauses: &[Clause]) {
-    let body = compile(signature, &ty, clauses);
+    let body = compile(signature, &mut Metas::default(), &ty, clauses);
     let body = match body {
         Ok(body) => body,
         Err(error) => panic!("`{name}` не собирается: {error}"),
@@ -505,6 +502,7 @@ fn a_missing_case_is_reported_with_an_example() {
     let signature = base();
     let outcome = compile(
         &signature,
+        &mut Metas::default(),
         &arrow(c("Nat"), c("Bool")),
         &[clause(vec![ctor("zero", Vec::new())], c("true"))],
     );
@@ -516,6 +514,7 @@ fn a_missing_case_is_reported_with_an_example() {
     // Вложенный случай называется целиком, а не «где-то в succ».
     let outcome = compile(
         &signature,
+        &mut Metas::default(),
         &arrow(c("Nat"), c("Bool")),
         &[
             clause(vec![ctor("zero", Vec::new())], c("true")),
@@ -538,6 +537,7 @@ fn an_unreachable_clause_is_reported() {
         matches!(
             compile(
                 &signature,
+                &mut Metas::default(),
                 &arrow(c("Nat"), c("Bool")),
                 &[
                     clause(vec![var("n")], c("true")),
@@ -556,6 +556,7 @@ fn a_foreign_constructor_is_rejected() {
     assert!(matches!(
         compile(
             &signature,
+            &mut Metas::default(),
             &arrow(c("Nat"), c("Bool")),
             &[
                 clause(vec![ctor("true", Vec::new())], c("true")),
@@ -572,6 +573,7 @@ fn clauses_disagreeing_on_arity_are_rejected() {
     assert!(matches!(
         compile(
             &signature,
+            &mut Metas::default(),
             &arrow(c("Nat"), arrow(c("Nat"), c("Bool"))),
             &[
                 clause(vec![var("n"), var("m")], c("true")),
@@ -592,6 +594,7 @@ fn more_patterns_than_arguments_are_rejected() {
     assert!(matches!(
         compile(
             &signature,
+            &mut Metas::default(),
             &arrow(c("Nat"), c("Bool")),
             &[clause(vec![var("n"), var("m")], c("true"))],
         ),
@@ -640,7 +643,6 @@ fn a_definition_may_return_a_function() {
 fn an_empty_family_is_eliminated_without_clauses() {
     // Пустой тип населить нечем, поэтому `absurd` пишется без единой клаузы:
     // разбор с нулём ветвей и есть доказательство.
-    use adamas_core::meta::Metas;
 
     let mut signature = base();
     let mut metas = Metas::default();
@@ -666,6 +668,7 @@ fn a_wrong_field_count_is_rejected() {
     assert!(matches!(
         compile(
             &signature,
+            &mut Metas::default(),
             &arrow(c("Nat"), c("Bool")),
             &[
                 clause(vec![ctor("zero", Vec::new())], c("true")),
@@ -686,6 +689,7 @@ fn matching_a_non_inductive_value_is_rejected() {
     assert!(matches!(
         compile(
             &signature,
+            &mut Metas::default(),
             &arrow(arrow(c("Nat"), c("Nat")), c("Bool")),
             &[clause(vec![ctor("zero", Vec::new())], c("true"))],
         ),
@@ -697,7 +701,6 @@ fn matching_a_non_inductive_value_is_rejected() {
 fn an_indexed_family_is_refused_outright() {
     // Разбор `Vect` требует унификации индексов, которой здесь нет. Честный
     // отказ лучше, чем терм, отвергаемый потом проверкой типов.
-    use adamas_core::meta::Metas;
 
     let mut signature = base();
     let mut metas = Metas::default();
@@ -734,6 +737,7 @@ fn an_indexed_family_is_refused_outright() {
     assert!(matches!(
         compile(
             &signature,
+            &mut Metas::default(),
             &pi(Mult::Many, "xs", vect, c("Nat")),
             &[clause(vec![ctor("vnil", Vec::new())], c("zero"))],
         ),
@@ -747,6 +751,7 @@ fn a_body_reaching_outside_its_variables_is_rejected() {
     assert!(matches!(
         compile(
             &signature,
+            &mut Metas::default(),
             &arrow(c("Nat"), c("Nat")),
             // Паттерн связывает одну переменную, тело ссылается на вторую.
             &[clause(vec![var("n")], Term::var(1))],
@@ -761,26 +766,79 @@ fn a_type_reaching_outside_its_arguments_is_rejected() {
     assert!(matches!(
         compile(
             &signature,
+            &mut Metas::default(),
             &pi(Mult::Many, "n", c("Nat"), family(Term::var(5))),
             &[clause(vec![var("n")], c("zero"))],
         ),
-        Err(PatternError::UnboundInType)
+        Err(PatternError::IllTypedType { ref error })
+            if matches!(**error, TypeError::UnboundIndex { .. })
     ));
 }
 
 #[test]
-fn an_over_applied_family_is_rejected() {
-    // `Nat zero` - не тип значения, и элаборация обязана сказать это сама:
-    // до проверки типов, которая поймала бы то же самое, дело не доходит.
+fn an_ill_typed_type_is_rejected_before_anything_is_evaluated() {
+    // `Nat zero` - не тип, и элаборация обязана сказать это сама: она работает
+    // до `check`, а вычисление непроверенного терма - паника, а не отказ.
     let signature = base();
     assert!(matches!(
         compile(
             &signature,
+            &mut Metas::default(),
             &pi(Mult::Many, "x", c("Nat").apply([c("zero")]), c("Nat")),
             &[clause(vec![ctor("zero", Vec::new())], c("zero"))],
         ),
-        Err(PatternError::NotMatchable { .. })
+        Err(PatternError::IllTypedType { ref error })
+            if matches!(**error, TypeError::NotAFunction { .. })
     ));
+}
+
+#[test]
+fn an_unchecked_domain_is_never_evaluated() {
+    // Домен замкнут, но не типизирован: замкнутости мало, `eval` роняет процесс
+    // на применении не-функции. Регрессия на панику из `compile`.
+    let signature = Signature::default();
+    assert!(matches!(
+        compile(
+            &signature,
+            &mut Metas::default(),
+            &pi(
+                Mult::Many,
+                "_",
+                Term::universe(0).apply([Term::universe(0)]),
+                Term::universe(0),
+            ),
+            &[clause(vec![var("x")], Term::universe(0))],
+        ),
+        Err(PatternError::IllTypedType { .. })
+    ));
+}
+
+#[test]
+fn a_synonym_is_as_good_a_function_type_as_an_arrow() {
+    // `def Fn = Nat -> Bool` - тот же тип функции, что записанная стрелка.
+    // Телескоп снимается по значению, иначе арность вышла бы нулевой и клаузы
+    // отверглись бы с выдуманным числом аргументов.
+    let mut signature = base();
+    signature
+        .define(
+            "Fn",
+            Mult::Many,
+            0,
+            Term::universe(0),
+            Some(arrow(c("Nat"), c("Bool"))),
+        )
+        .expect("Fn корректен");
+    define(
+        &mut signature,
+        "isZero",
+        c("Fn"),
+        &[
+            clause(vec![ctor("zero", Vec::new())], c("true")),
+            clause(vec![ctor("succ", vec![var("k")])], c("false")),
+        ],
+    );
+    let outcome = check_closed(&signature, &c("isZero").apply([number(2)]), &c("Bool"));
+    assert!(outcome.is_ok(), "{outcome:?}");
 }
 
 // ------------------------------------------------------------------ свойства
@@ -988,7 +1046,7 @@ proptest! {
     #[test]
     fn a_compiled_clause_set_type_checks(programme in any_programme()) {
         let mut signature = base();
-        let body = compile(&signature, &binary(), &written(&programme));
+        let body = compile(&signature, &mut Metas::default(), &binary(), &written(&programme));
         prop_assert!(body.is_ok(), "{programme:?}: {body:?}");
         let outcome = signature.define("f", Mult::Many, 0, binary(), Some(body.unwrap()));
         prop_assert!(outcome.is_ok(), "{programme:?}: {outcome:?}");
@@ -1002,7 +1060,7 @@ proptest! {
     #[test]
     fn the_tree_agrees_with_first_match(programme in any_programme()) {
         let mut signature = base();
-        let body = compile(&signature, &binary(), &written(&programme))
+        let body = compile(&signature, &mut Metas::default(), &binary(), &written(&programme))
             .unwrap_or_else(|error| panic!("{programme:?}: {error}"));
         let outcome = signature.define("f", Mult::Many, 0, binary(), Some(body));
         prop_assert!(outcome.is_ok(), "{programme:?}: {outcome:?}");

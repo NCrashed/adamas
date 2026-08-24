@@ -339,20 +339,25 @@ fn a_name_cannot_be_defined_twice() {
 }
 
 #[test]
-fn a_definition_cannot_refer_to_itself() {
-    // Проверка идёт против сигнатуры без добавляемого имени, поэтому
-    // рекурсия невозможна - на этом держится завершаемость δ-разворота.
+fn a_definition_refers_to_itself_only_in_its_body() {
     let mut signature = Signature::default();
+    // Тип проверяется без собственного имени: `Loop : Loop` цикличен.
     assert!(matches!(
-        signature.define(
-            "Loop",
-            Mult::Many,
-            0,
-            Term::universe(1),
-            Some(Term::constant("Loop")),
-        ),
+        signature.define("Loop", Mult::Many, 0, Term::constant("Loop"), None),
         Err(TypeError::UnknownConstant { .. })
     ));
+
+    // Тело - уже с ним, и `Loop = Loop` принимается. Тотальным оно при этом не
+    // становится, и завершаемость δ-разворота держится именно на этом.
+    let outcome = signature.define(
+        "Loop",
+        Mult::Many,
+        0,
+        Term::universe(1),
+        Some(Term::constant("Loop")),
+    );
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert!(!signature.lookup("Loop").unwrap().total);
 }
 
 /// `Alias : Type (u0 + 1)` с телом `Type u0` - определение, вычисляющееся в тип.

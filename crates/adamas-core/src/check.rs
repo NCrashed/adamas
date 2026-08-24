@@ -129,6 +129,13 @@ pub enum TypeError {
         name: Name,
     },
 
+    /// Нетотальное определение использовано в стёртом фрагменте.
+    #[error("`{name}` не тотальна и не может стоять в типе или доказательстве")]
+    PartialConstant {
+        /// Имя определения.
+        name: Name,
+    },
+
     /// Имя уже занято.
     #[error("определение `{name}` уже существует")]
     DuplicateDefinition {
@@ -397,6 +404,14 @@ pub fn infer(
                     name: Rc::clone(name),
                 });
             }
+            // Зеркальное ограничение: стёртая функция доступна **только** при
+            // σ = 0, нетотальная - только при σ ≠ 0. §4.7: доказательством
+            // нетотальная функция быть не может, а тип - тот же фрагмент.
+            if !crate::total::admits(definition, sigma) {
+                return Err(TypeError::PartialConstant {
+                    name: Rc::clone(name),
+                });
+            }
             Ok((definition.instantiate_type(levels), Usage::zero(ctx.size())))
         }
 
@@ -581,59 +596,88 @@ pub fn unsolved_in_definition(metas: &Metas, definition: &Definition) -> Option<
     })
 }
 
-/// Проверяет определение верхнего уровня перед добавлением в сигнатуру.
+/// Проверяет объявление - всё, что можно проверить без тела.
 ///
-/// Тип проверяется в стёртом фрагменте (он и есть тип), тело - при кратности
-/// самого определения. Для `0`-определения это означает `σ = 0`: доказательство
-/// проверяется, но ничего не расходует.
+/// Идёт против сигнатуры **без** собственного имени: тип, ссылающийся на
+/// определяемое, цикличен (`f : f -> Nat`), и разрешать это незачем. Тело
+/// проверяется отдельно ([`check_body`]) и уже с именем в сигнатуре - оттуда и
+/// берётся рекурсия.
 ///
 /// # Errors
 ///
-/// Линейная кратность; параметр уровня вне арности; тип не является типом;
-/// тело не соответствует типу.
+/// Линейная кратность; параметр уровня вне арности; тип не является типом.
+pub fn check_declaration(
+    signature: &Signature,
+    metas: &mut Metas,
+    name: &Name,
+    definition: &Definition,
+) -> Result<(), TypeError> {
+    if definition.mult == Mult::One {
+        return Err(TypeError::LinearDefinition {
+            name: Rc::clone(name),
+        });
+    }
+    check_level_scope(name, definition.level_arity, &definition.ty)?;
+    is_type(&Ctx::new(signature), metas, &definition.ty)?;
+    Ok(())
+}
+
+/// Проверяет определение целиком - объявление и тело подряд.
+///
+/// Годится для **нерекурсивного** определения: тело проверяется против
+/// переданной сигнатуры, а собственного имени в ней нет.
+/// [`crate::sig::Signature::define`] этой обёрткой не пользуется - ему нужно
+/// вставить объявление между двумя шагами.
+///
+/// # Errors
+///
+/// То же, что у [`check_declaration`] и [`check_body`].
 pub fn check_definition(
     signature: &Signature,
     metas: &mut Metas,
     name: &Name,
     definition: &Definition,
 ) -> Result<(), TypeError> {
-    let Definition {
-        mult,
-        level_arity,
-        ty,
-        body,
-        kind: _,
-    } = definition;
-    let (mult, level_arity) = (*mult, *level_arity);
+    check_declaration(signature, metas, name, definition)?;
+    check_body(signature, metas, name, definition)
+}
 
-    if mult == Mult::One {
-        return Err(TypeError::LinearDefinition {
-            name: Rc::clone(name),
-        });
-    }
-    check_level_scope(name, level_arity, ty)?;
-    if let Some(body) = body {
-        check_level_scope(name, level_arity, body)?;
-    }
+/// Проверяет тело определения против его типа.
+///
+/// Тело проверяется при кратности самого определения: для `0`-определения это
+/// `σ = 0` - доказательство проверяется, но ничего не расходует.
+///
+/// Сигнатура здесь обязана **уже содержать** объявление, иначе рекурсивная
+/// ссылка не найдёт себя.
+///
+/// # Errors
+///
+/// Параметр уровня вне арности; тело не соответствует типу.
+pub fn check_body(
+    signature: &Signature,
+    metas: &mut Metas,
+    name: &Name,
+    definition: &Definition,
+) -> Result<(), TypeError> {
+    let Some(body) = &definition.body else {
+        return Ok(());
+    };
+    check_level_scope(name, definition.level_arity, body)?;
 
     let ctx = Ctx::new(signature);
-    is_type(&ctx, metas, ty)?;
-    if let Some(body) = body {
-        let ty_value = ctx.eval(ty);
-        // `0`-определение проверяется при σ = 0, `ω` - при σ = 1: тело
-        // присутствует в рантайме один раз, а сколько раз его позовут,
-        // определение не решает.
-        let sigma = if mult == Mult::Zero {
-            Mult::Zero
-        } else {
-            Mult::One
-        };
-        check(&ctx, metas, sigma, body, &ty_value)?;
-    }
+    let ty_value = ctx.eval(&definition.ty);
+    // `0`-определение проверяется при σ = 0, `ω` - при σ = 1: тело
+    // присутствует в рантайме один раз, а сколько раз его позовут, определение
+    // не решает.
+    let sigma = if definition.mult == Mult::Zero {
+        Mult::Zero
+    } else {
+        Mult::One
+    };
+    check(&ctx, metas, sigma, body, &ty_value)?;
 
     // Остаточные дырки здесь не проверяются: что с ними делать, решает
-    // вызывающий. `Signature::define` их отвергает, `define_inferred`
-    // обобщает в параметры.
+    // вызывающий.
     Ok(())
 }
 
@@ -736,21 +780,45 @@ fn spine(term: &Term) -> (&Term, Vec<&Term>) {
 
 /// Встречается ли имя в терме.
 fn mentions(signature: &Signature, name: &Name, term: &Term) -> bool {
-    let recur = |inner| mentions(signature, name, inner);
+    mentions_seen(signature, name, term, &mut Vec::new())
+}
+
+/// То же, с памятью о уже развёрнутых телах.
+///
+/// Память нужна из-за рекурсии: тело `f` упоминает `f`, и без неё обход
+/// разворачивал бы его бесконечно. Взаимной рекурсии в сигнатуре не бывает
+/// (ordered scoping, §4.8), так что список короткий - в нём копится цепочка
+/// разных имён плюс не более одного повторения.
+fn mentions_seen<'a>(
+    signature: &'a Signature,
+    name: &Name,
+    term: &'a Term,
+    seen: &mut Vec<&'a Name>,
+) -> bool {
+    let mut recur = |inner| mentions_seen(signature, name, inner, seen);
     match term {
         Term::Var(_) | Term::Universe(_) => false,
         // Через тело определения - тоже упоминание. Без этого позитивность
         // обходится в две строки: `def G : Type 0 = Bad -> Bad`, затем
         // `mk : G -> Bad`. Прямая запись отвергается, а эта прошла бы, хотя
         // после δ-разворота это тот же самый негативный конструктор.
-        //
-        // Определения ацикличны (см. `crate::sig`), поэтому обход конечен.
         Term::Const(other, _) => {
-            other == name
-                || signature
-                    .lookup(other)
-                    .and_then(|definition| definition.body.as_ref())
-                    .is_some_and(|body| mentions(signature, name, body))
+            if other == name {
+                return true;
+            }
+            if seen.contains(&other) {
+                return false;
+            }
+            let Some(body) = signature
+                .lookup(other)
+                .and_then(|definition| definition.body.as_ref())
+            else {
+                return false;
+            };
+            seen.push(other);
+            let found = mentions_seen(signature, name, body, seen);
+            seen.pop();
+            found
         }
         Term::Lam(_, _, body) => recur(body),
         Term::App(callee, argument) => recur(callee) || recur(argument),

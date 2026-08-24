@@ -5,22 +5,28 @@
 //! (параметры уровня принадлежат определению, а не терму) и место, куда лягут
 //! индуктивные типы - data-декларация тоже определение.
 //!
-//! # Ациклично по построению
+//! # Порядок объявления и рекурсия
 //!
-//! Определение может ссылаться только на уже добавленные. Рекурсии в ядре нет,
-//! и δ-разворот ([`crate::conv`]) поэтому заведомо завершается. Когда появится
-//! рекурсия, это ограничение придётся снимать вместе с проверкой тотальности
-//! (§9, `@total`).
+//! Определение видит только уже добавленные - **и себя самого**. Тип
+//! проверяется без собственного имени (`f : f -> Nat` циклично и бессмысленно),
+//! тело - уже с ним. Взаимная рекурсия отсюда невозможна по построению: `g`
+//! увидит `f` только если объявлена позже, а тогда `f` не увидит `g`. Это
+//! ordered scoping §4.8, и `mutual`-блоки - отдельная работа.
+//!
+//! Завершаемость δ-разворота ([`crate::conv`]) больше не следует из
+//! ацикличности. Её держат две вещи: проверка структурной рекурсии
+//! ([`crate::total`]) и то, что нетотальное определение не разворачивается
+//! вовсе.
 
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::check::{
-    TypeError, check_constructor, check_definition, data_sort, unsolved_in_definition,
+    TypeError, check_body, check_constructor, check_declaration, data_sort, unsolved_in_definition,
 };
 use crate::eval::eval;
 use crate::level::Level;
-use crate::meta::{Generalization, Metas};
+use crate::meta::{Generalization, Metas, zonk_term};
 use crate::mult::Mult;
 use crate::term::{Name, Term};
 use crate::value::{Env, Value};
@@ -71,6 +77,15 @@ pub struct Definition {
     pub body: Option<Term>,
     /// Индуктивная роль, если она есть.
     pub kind: DefinitionKind,
+    /// Завершается ли определение на всех входах ([`crate::total`]).
+    ///
+    /// Выводится, а не объявляется: `total` из §4.7 - атрибут поверхностного
+    /// языка, требующий от ядра ответа, а не сообщающий его. Ответ нужен ядру
+    /// в любом случае - от него зависят два правила, - поэтому вычисляется он
+    /// всегда, а атрибут превращается в требование "ответ обязан быть да".
+    ///
+    /// Постулат тотален: разворачивать нечего, значит и расходиться нечему.
+    pub total: bool,
 }
 
 impl Definition {
@@ -115,8 +130,9 @@ impl Signature {
 
     /// Проверяет определение и добавляет его.
     ///
-    /// Проверка идёт против сигнатуры **без** добавляемого имени, поэтому
-    /// ссылаться на себя определение не может - см. заголовок модуля.
+    /// Тип проверяется без собственного имени, тело - уже с ним, поэтому прямая
+    /// рекурсия разрешена (см. заголовок модуля). Тотальность выводится после
+    /// проверки тела.
     ///
     /// # Errors
     ///
@@ -134,21 +150,59 @@ impl Signature {
         if self.definitions.contains_key(&name) {
             return Err(TypeError::DuplicateDefinition { name });
         }
-        let definition = Definition {
+        let declaration = Definition {
             mult,
             level_arity,
             ty,
-            body,
+            body: None,
             kind: DefinitionKind::Regular,
+            total: true,
         };
         // Хранилище своё: арность объявлена, значит выводить нечего, а
-        // метапеременные живут ровно на время одной проверки. Заимствование
-        // `&self` заканчивается до вставки.
+        // метапеременные живут ровно на время одной проверки.
         let mut metas = Metas::default();
-        check_definition(self, &mut metas, &name, &definition)?;
-        if let Some(meta) = unsolved_in_definition(&metas, &definition) {
-            return Err(TypeError::UnsolvedDefinitionLevel { name, meta });
+        check_declaration(self, &mut metas, &name, &declaration)?;
+        self.with_declaration(name, &mut metas, declaration, body)
+    }
+
+    /// Общий хвост обоих способов определения: сделать имя видимым, проверить
+    /// тело, вывести тотальность.
+    ///
+    /// Объявление вносится в сигнатуру **до** проверки тела - иначе рекурсивная
+    /// ссылка не найдёт себя. При отказе оно снимается: наполовину проверенное
+    /// определение видимым остаться не должно.
+    fn with_declaration(
+        &mut self,
+        name: Name,
+        metas: &mut Metas,
+        declaration: Definition,
+        body: Option<Term>,
+    ) -> Result<(), TypeError> {
+        let mut definition = declaration.clone();
+        definition.body = body;
+        self.definitions.insert(Rc::clone(&name), declaration);
+
+        let checked =
+            check_body(self, metas, &name, &definition).and_then(
+                |()| match unsolved_in_definition(metas, &definition) {
+                    Some(meta) => Err(TypeError::UnsolvedDefinitionLevel {
+                        name: Rc::clone(&name),
+                        meta,
+                    }),
+                    None => Ok(()),
+                },
+            );
+        if let Err(error) = checked {
+            self.definitions.remove(&name);
+            return Err(error);
         }
+
+        // Решённые по дороге дырки подставляются здесь: хранилище живёт ровно
+        // одну проверку, а определение - всю программу, и `Meta(k)` в нём
+        // ссылалась бы на чужой счётчик.
+        definition.ty = zonk_term(metas, &definition.ty);
+        definition.body = definition.body.map(|body| zonk_term(metas, &body));
+        definition.total = crate::total::is_total(self, &name, &definition);
         self.definitions.insert(name, definition);
         Ok(())
     }
@@ -163,6 +217,12 @@ impl Signature {
     ///
     /// Это вторая половина implicit universe polymorphism: первая - вывод
     /// аргументов в местах использования ([`Signature::instantiate`]).
+    ///
+    /// **Обобщение идёт до проверки тела**, а не после: рекурсивная ссылка
+    /// обязана знать окончательную арность, иначе `f` в теле придётся писать с
+    /// числом аргументов уровня, которого у `f` ещё нет. Дырки тела, решённые
+    /// в параметры типа, обобщение подхватывает той же таблицей; дырка, которой
+    /// в типе не было, остаётся отказом.
     ///
     /// # Errors
     ///
@@ -189,14 +249,21 @@ impl Signature {
             mult,
             level_arity: 0,
             ty,
-            body,
+            body: None,
             kind: DefinitionKind::Regular,
+            total: true,
         };
-        check_definition(self, metas, &name, &draft)?;
+        check_declaration(self, metas, &name, &draft)?;
 
-        let definition = generalize(metas, &name, &draft)?;
-        self.definitions.insert(name, definition);
-        Ok(())
+        let mut generalization = Generalization::default();
+        generalization.collect_term(metas, &draft.ty);
+        let declaration = Definition {
+            level_arity: generalization.arity(),
+            ty: generalization.apply_term(metas, &draft.ty),
+            ..draft
+        };
+        let body = body.map(|body| generalization.apply_term(metas, &body));
+        self.with_declaration(name, metas, declaration, body)
     }
 
     /// Ссылка на определение с **выведенными** аргументами уровня.
@@ -367,35 +434,5 @@ impl Signature {
         ty: Term,
     ) -> Result<(), TypeError> {
         self.define(name, mult, level_arity, ty, None)
-    }
-}
-
-/// Превращает нерешённые дырки определения в параметры уровня.
-///
-/// Собирает дырки **из типа** - именно он определяет, что подставится в месте
-/// использования. Тело перенумеровывается той же таблицей, и если в нём
-/// осталась дырка, которой в типе не было, это отказ: аргументы уровня
-/// подставляются по типу, и заполнить её было бы нечем.
-fn generalize(metas: &Metas, name: &Name, draft: &Definition) -> Result<Definition, TypeError> {
-    let mut generalization = Generalization::default();
-    generalization.collect_term(metas, &draft.ty);
-
-    let definition = Definition {
-        mult: draft.mult,
-        level_arity: generalization.arity(),
-        ty: generalization.apply_term(metas, &draft.ty),
-        body: draft
-            .body
-            .as_ref()
-            .map(|body| generalization.apply_term(metas, body)),
-        kind: draft.kind.clone(),
-    };
-
-    match unsolved_in_definition(metas, &definition) {
-        Some(meta) => Err(TypeError::UnsolvedDefinitionLevel {
-            name: Rc::clone(name),
-            meta,
-        }),
-        None => Ok(definition),
     }
 }

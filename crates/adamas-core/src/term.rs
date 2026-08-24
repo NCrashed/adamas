@@ -270,7 +270,9 @@ struct Callee<'a>(&'a Term);
 impl fmt::Display for Callee<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
-            Term::Var(_) | Term::Universe(_) | Term::App(..) => write!(f, "{}", self.0),
+            Term::Var(_) | Term::Universe(_) | Term::Const(..) | Term::App(..) => {
+                write!(f, "{}", self.0)
+            }
             other => write!(f, "({other})"),
         }
     }
@@ -282,7 +284,7 @@ struct Atom<'a>(&'a Term);
 impl fmt::Display for Atom<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
-            Term::Var(_) | Term::Universe(_) => write!(f, "{}", self.0),
+            Term::Var(_) | Term::Universe(_) | Term::Const(..) => write!(f, "{}", self.0),
             other => write!(f, "({other})"),
         }
     }

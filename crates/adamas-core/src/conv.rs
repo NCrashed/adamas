@@ -15,6 +15,22 @@
 //! Неудача быстрого пути **не** означает неравенство: `f a` и `f b` равны,
 //! если `f` игнорирует аргумент. Поэтому откат к развороту обязателен, а не
 //! факультативен.
+//!
+//! # Разворот ограничен по глубине
+//!
+//! Нетотальное определение не разворачивается вовсе - иначе разворот заведомо
+//! мог бы не закончиться. Но одной тотальности мало: она гарантирует
+//! завершаемость вычисления на **замкнутых** аргументах, а сравниваются
+//! значения с открытыми, где ι не срабатывает никогда. Две разные тотальные
+//! рекурсивные функции над свободной переменной разворачиваются бесконечно -
+//! `F x` против `G x` даёт два застрявших `case`, спуск в ветви даёт `F k`
+//! против `G k`, и так без дна.
+//!
+//! Поэтому число разворотов ограничено [`UNFOLD_LIMIT`]. Исчерпание даёт
+//! `false`, то есть отказ, а не зависание: направление безопасное - неполнота
+//! отвергает корректную программу, тогда как обратная ошибка приняла бы
+//! некорректную. Так же устроены пределы в Coq, Agda и Lean; на тотальность
+//! здесь положиться нельзя ни в одной из них.
 
 use std::rc::Rc;
 
@@ -42,21 +58,51 @@ pub fn convertible(
     left: &Rc<Value>,
     right: &Rc<Value>,
 ) -> bool {
-    if rigid(sig, metas, size, left, right) {
+    let mut fuel = UNFOLD_LIMIT;
+    convertible_within(&mut fuel, sig, metas, size, left, right)
+}
+
+/// Сколько δ-разворотов разрешено на одно сравнение.
+///
+/// Снизу граница задана тем, что должно проходить: разворот `F n` на числе `n`
+/// стоит `n` шагов, поэтому предел определяет, до каких чисел арифметика
+/// сводится в типах.
+///
+/// Сверху - стеком: разворот рекурсивен, и предел обязан срабатывать раньше
+/// переполнения, иначе он ничего не спасает. Замер на потоке с 2 МБ (столько у
+/// тестовых) даёт срыв между 320 и 384 разворотами в debug и между 2400 и 2600
+/// в release - кадры debug-сборки на порядок толще, и связывает именно она,
+/// потому что тесты и CI гоняются в ней. Предел взят с запасом от меньшего.
+const UNFOLD_LIMIT: u32 = 128;
+
+fn convertible_within(
+    fuel: &mut u32,
+    sig: &Signature,
+    metas: &mut Metas,
+    size: u32,
+    left: &Rc<Value>,
+    right: &Rc<Value>,
+) -> bool {
+    if rigid(fuel, sig, metas, size, left, right) {
         return true;
     }
     // Быстрый путь не сошёлся - разворачиваем то, что разворачивается.
-    // Определения ацикличны (см. `crate::sig`), поэтому рекурсия конечна.
-    match (unfold(sig, left), unfold(sig, right)) {
-        (None, None) => false,
-        (unfolded_left, unfolded_right) => convertible(
-            sig,
-            metas,
-            size,
-            unfolded_left.as_ref().unwrap_or(left),
-            unfolded_right.as_ref().unwrap_or(right),
-        ),
+    let (unfolded_left, unfolded_right) = (unfold(sig, left), unfold(sig, right));
+    if unfolded_left.is_none() && unfolded_right.is_none() {
+        return false;
     }
+    let Some(remaining) = fuel.checked_sub(1) else {
+        return false;
+    };
+    *fuel = remaining;
+    convertible_within(
+        fuel,
+        sig,
+        metas,
+        size,
+        unfolded_left.as_ref().unwrap_or(left),
+        unfolded_right.as_ref().unwrap_or(right),
+    )
 }
 
 /// Разворачивает определение в голове значения вместе со спайном.
@@ -72,7 +118,17 @@ pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
     let Value::Neutral(Head::Global(name, levels), spine) = &**value else {
         return None;
     };
-    let body = sig.lookup(name)?.instantiate_body(levels)?;
+    let definition = sig.lookup(name)?;
+    // Нетотальное определение не разворачивается никогда: у него разворот мог
+    // бы не закончиться уже на замкнутых аргументах. По §4.7 в типах его и не
+    // встретишь - там стёртый фрагмент, - так что запрет ничего не стоит.
+    //
+    // Завершаемость сравнения он при этом **не** даёт: на открытых аргументах
+    // расходятся и тотальные определения. За это отвечает `UNFOLD_LIMIT`.
+    if !definition.total {
+        return None;
+    }
+    let body = definition.instantiate_body(levels)?;
     Some(spine.iter().fold(body, |callee, elim| match elim {
         Elim::App(argument) => apply(&callee, Rc::clone(argument)),
         Elim::Case(case) => eliminate_case(case, &callee),
@@ -102,10 +158,17 @@ fn same_head(metas: &mut Metas, left: &Head, right: &Head) -> bool {
 }
 
 /// Совпадают ли элиминаторы в одной позиции спайна.
-fn same_elim(sig: &Signature, metas: &mut Metas, size: u32, left: &Elim, right: &Elim) -> bool {
+fn same_elim(
+    fuel: &mut u32,
+    sig: &Signature,
+    metas: &mut Metas,
+    size: u32,
+    left: &Elim,
+    right: &Elim,
+) -> bool {
     match (left, right) {
-        (Elim::App(a), Elim::App(b)) => convertible(sig, metas, size, a, b),
-        (Elim::Case(a), Elim::Case(b)) => same_case(sig, metas, size, a, b),
+        (Elim::App(a), Elim::App(b)) => convertible_within(fuel, sig, metas, size, a, b),
+        (Elim::Case(a), Elim::Case(b)) => same_case(fuel, sig, metas, size, a, b),
         _ => false,
     }
 }
@@ -119,6 +182,7 @@ fn same_elim(sig: &Signature, metas: &mut Metas, size: u32, left: &Elim, right: 
 /// мотив нельзя: он часть терма и виден в типе результата, и признав такие
 /// термы равными, конвертируемость перестала бы сохранять типизацию.
 fn same_case(
+    fuel: &mut u32,
     sig: &Signature,
     metas: &mut Metas,
     size: u32,
@@ -133,15 +197,17 @@ fn same_case(
             .iter()
             .zip(right.levels.iter())
             .all(|(a, b)| metas.unify_levels(a, b))
-        && convertible(sig, metas, size, &left.motive, &right.motive)
+        && convertible_within(fuel, sig, metas, size, &left.motive, &right.motive)
         && left.branches.len() == right.branches.len()
         && left.branches.iter().zip(&right.branches).all(|(a, b)| {
-            a.constructor == b.constructor && convertible(sig, metas, size, &a.body, &b.body)
+            a.constructor == b.constructor
+                && convertible_within(fuel, sig, metas, size, &a.body, &b.body)
         })
 }
 
 /// Сравнение без разворота определений.
 fn rigid(
+    fuel: &mut u32,
     sig: &Signature,
     metas: &mut Metas,
     size: u32,
@@ -157,7 +223,7 @@ fn rigid(
                 && spine_a
                     .iter()
                     .zip(spine_b)
-                    .all(|(a, b)| same_elim(sig, metas, size, a, b))
+                    .all(|(a, b)| same_elim(fuel, sig, metas, size, a, b))
         }
 
         // Кратность - часть типа функции, поэтому здесь она значима:
@@ -167,8 +233,9 @@ fn rigid(
             Value::Pi(mult_b, _, domain_b, codomain_b),
         ) => {
             mult_a == mult_b
-                && convertible(sig, metas, size, domain_a, domain_b)
+                && convertible_within(fuel, sig, metas, size, domain_a, domain_b)
                 && convertible_under(
+                    fuel,
                     sig,
                     metas,
                     size,
@@ -179,9 +246,14 @@ fn rigid(
 
         // Кратность лямбды не сравнивается - иначе ломается транзитивность,
         // см. `comparing_lambda_multiplicities_would_break_transitivity`.
-        (Value::Lam(_, _, body_a), Value::Lam(_, _, body_b)) => {
-            convertible_under(sig, metas, size, |v| body_a.apply(v), |v| body_b.apply(v))
-        }
+        (Value::Lam(_, _, body_a), Value::Lam(_, _, body_b)) => convertible_under(
+            fuel,
+            sig,
+            metas,
+            size,
+            |v| body_a.apply(v),
+            |v| body_b.apply(v),
+        ),
 
         // η: функция равна своему развёрнутому виду `\x -> f x`. Без этого
         // правила `f` и `\x -> f x` были бы разными термами.
@@ -189,12 +261,22 @@ fn rigid(
         // Разворачивается только против застрявшего значения. Против `Pi` или
         // `Universe` лямбда неконвертируема в любом случае, а применить их
         // нельзя - попытка была бы обращением к `apply` с не-функцией.
-        (Value::Lam(_, _, body), Value::Neutral(..)) => {
-            convertible_under(sig, metas, size, |v| body.apply(v), |v| apply(right, v))
-        }
-        (Value::Neutral(..), Value::Lam(_, _, body)) => {
-            convertible_under(sig, metas, size, |v| apply(left, v), |v| body.apply(v))
-        }
+        (Value::Lam(_, _, body), Value::Neutral(..)) => convertible_under(
+            fuel,
+            sig,
+            metas,
+            size,
+            |v| body.apply(v),
+            |v| apply(right, v),
+        ),
+        (Value::Neutral(..), Value::Lam(_, _, body)) => convertible_under(
+            fuel,
+            sig,
+            metas,
+            size,
+            |v| apply(left, v),
+            |v| body.apply(v),
+        ),
 
         _ => false,
     }
@@ -202,6 +284,7 @@ fn rigid(
 
 /// Сравнивает под свежим связыванием.
 fn convertible_under(
+    fuel: &mut u32,
     sig: &Signature,
     metas: &mut Metas,
     size: u32,
@@ -209,7 +292,8 @@ fn convertible_under(
     right: impl FnOnce(Rc<Value>) -> Rc<Value>,
 ) -> bool {
     let fresh = Value::var(Lvl(size));
-    convertible(
+    convertible_within(
+        fuel,
         sig,
         metas,
         size + 1,

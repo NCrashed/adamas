@@ -356,6 +356,69 @@ fn lambda_multiplicity_must_match_its_type() {
     ));
 }
 
+#[test]
+fn a_linear_binding_is_checked_wherever_the_lambda_stands() {
+    // Тип `(1 x : A) -> A` не населяется нелинейной функцией - ни на верхнем
+    // уровне, ни в позиции аргумента.
+    //
+    // Раньше населялся: кратность суждения умножалась на кратность связывания,
+    // а параметр обычной функции имеет кратность `ω` (§4.1), и `1 · ω = ω`
+    // разрешало `spend` любое использование. Проверка линейности выключалась
+    // для всего, что стояло под ω-аргументом, то есть почти везде.
+    let mut signature = Signature::default();
+    signature
+        .postulate("A", Mult::Many, 0, Term::universe(0))
+        .expect("A корректен");
+    signature
+        .postulate(
+            "pair",
+            Mult::Many,
+            0,
+            pi(
+                Mult::Many,
+                "_",
+                Term::constant("A"),
+                pi(Mult::Many, "_", Term::constant("A"), Term::constant("A")),
+            ),
+        )
+        .expect("pair корректна");
+    let linear = pi(Mult::One, "x", Term::constant("A"), Term::constant("A"));
+    signature
+        .postulate(
+            "higher",
+            Mult::Many,
+            0,
+            pi(Mult::Many, "h", linear.clone(), Term::constant("A")),
+        )
+        .expect("higher корректна");
+
+    // `\(1 x) -> pair x x` - `x` потрачен дважды при кратности 1.
+    let nonlinear = lam(
+        Mult::One,
+        "x",
+        Term::constant("pair").apply([Term::var(0), Term::var(0)]),
+    );
+
+    assert!(
+        matches!(
+            adamas_core::check::check_closed(&signature, &nonlinear, &linear),
+            Err(TypeError::UsageViolation { .. })
+        ),
+        "напрямую"
+    );
+    assert!(
+        matches!(
+            adamas_core::check::check_closed(
+                &signature,
+                &Term::constant("higher").apply([nonlinear]),
+                &Term::constant("A"),
+            ),
+            Err(TypeError::UsageViolation { .. })
+        ),
+        "в позиции ω-аргумента - тот же терм и тот же отказ"
+    );
+}
+
 // --------------------------------------------------------------------- let
 
 #[test]

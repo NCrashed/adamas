@@ -943,11 +943,15 @@ fn a_field_is_spent_at_its_declared_multiplicity() {
 }
 
 #[test]
-fn a_field_multiplicity_scales_with_the_judgement() {
-    // Тот же разбор с двойным использованием линейного поля: под `σ = 1`
-    // отвергается, а в аргументе ω-функции проходит, потому что разрешено
-    // `1 · ω = ω`. Это то самое масштабирование, на котором держится дефолт
-    // кратности полей конструкторов (§4.1).
+fn a_linear_field_used_twice_is_rejected_in_every_position() {
+    // Кратность поля - часть типа, а не свойство места, где терм оказался.
+    // Позиция ω-аргумента ничего не разрешает: иначе тип `Pair`, чей `mk`
+    // берёт два линейных поля, потреблялся бы дважды всюду, кроме верхнего
+    // уровня.
+    //
+    // Раньше второй случай проходил: кратность суждения умножалась на `ω`, а
+    // `ω` допускает любое использование, и проверка линейности выключалась для
+    // всего терма разом.
     let signature = base();
     let ty = pi(Mult::Many, "p", c("Pair"), c("Bool"));
     let doubling = || {
@@ -966,18 +970,60 @@ fn a_field_multiplicity_scales_with_the_judgement() {
         )
     };
 
+    for (what, term) in [
+        ("напрямую", lam(Mult::Many, "p", doubling())),
+        (
+            "в аргументе ω-функции",
+            lam(Mult::Many, "p", c("use").apply([doubling()])),
+        ),
+    ] {
+        assert!(
+            matches!(
+                check_closed(&signature, &term, &ty),
+                Err(TypeError::UsageViolation { .. })
+            ),
+            "линейное поле дважды - нарушение и {what}"
+        );
+    }
+}
+
+#[test]
+fn an_argument_position_scales_the_usage_it_receives() {
+    // Масштабирование не исчезло - оно переехало с кратности суждения на
+    // вектор использований, и видно на кратности аргумента.
+    //
+    // Одно и то же одиночное использование линейного связывания законно в
+    // позиции `1`-аргумента и незаконно в позиции `ω`-аргумента: `ω`-функция
+    // вправе позвать переданное сколько угодно раз, а ресурс один.
+    let mut signature = base();
+    declared(
+        "consume",
+        &signature.postulate(
+            "consume",
+            Mult::Many,
+            0,
+            pi(Mult::One, "b", c("Bool"), c("Bool")),
+        ),
+    );
+    let linear = pi(Mult::One, "b", c("Bool"), c("Bool"));
+
+    let outcome = check_closed(
+        &signature,
+        &lam(Mult::One, "b", c("consume").apply([Term::var(0)])),
+        &linear,
+    );
+    assert!(outcome.is_ok(), "`1 · 1 = 1`: {outcome:?}");
+
     assert!(
         matches!(
-            check_closed(&signature, &lam(Mult::Many, "p", doubling()), &ty),
+            check_closed(
+                &signature,
+                &lam(Mult::One, "b", c("use").apply([Term::var(0)])),
+                &linear,
+            ),
             Err(TypeError::UsageViolation { .. })
         ),
-        "при σ = 1 разрешено 1 · 1 = 1"
-    );
-    let inside_omega = lam(Mult::Many, "p", c("use").apply([doubling()]));
-    let outcome = check_closed(&signature, &inside_omega, &ty);
-    assert!(
-        outcome.is_ok(),
-        "при σ = ω разрешено 1 · ω = ω: {outcome:?}"
+        "`ω · 1 = ω` - линейный ресурс в ω-позицию не проходит"
     );
 }
 

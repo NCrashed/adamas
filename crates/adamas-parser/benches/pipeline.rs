@@ -15,6 +15,9 @@
 //! - `parse_module` - только спуск, по готовому потоку. Полного пути «текст ->
 //!   дерево» отдельной точкой нет: он есть сумма этой и `tokenize_module`, и
 //!   мерить сумму дважды незачем.
+//! - `print_module` - обратная печать. Мерится не ради компилятора - там она не
+//!   на пути, - а ради `adamas fmt` (§7.1) и round-trip-тестов, где она стоит
+//!   на каждом прогоне свойства.
 
 #![allow(
     missing_docs,
@@ -28,7 +31,7 @@
 
 use std::fmt::Write as _;
 
-use adamas_parser::{layout::layout, lexer::lex, parser, tokenize};
+use adamas_parser::{layout::layout, lexer::lex, parser, print, tokenize};
 use criterion::{Criterion, criterion_group, criterion_main};
 
 /// Модуль из `copies` повторов примеров §4.1: ресурс с `where`, сигнатура с
@@ -110,5 +113,15 @@ fn parsing(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, tokenizing, parsing);
+fn printing(c: &mut Criterion) {
+    let text = phase_two_module(64);
+    let tokens = tokenize(&text).expect("фикстура токенизируется");
+    let module = parser::parse(&text, &tokens.tokens).expect("фикстура разбирается");
+
+    c.bench_function("print_module_64", |b| {
+        b.iter(|| print(&module));
+    });
+}
+
+criterion_group!(benches, tokenizing, parsing, printing);
 criterion_main!(benches);

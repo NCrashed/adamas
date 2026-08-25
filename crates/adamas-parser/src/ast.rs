@@ -408,6 +408,55 @@ pub struct Module {
     pub span: Span,
 }
 
+/// Содержит ли выражение форму, открывающую layout-блок.
+///
+/// Таких форм две - `case` и блок операторов, - и обе тянутся до строки,
+/// начатой левее: где форма кончилась, видно только по отступу. Отсюда два
+/// следствия, и спрашивают о них разные места. За такой формой на строке
+/// ничего не стоит - это проверяет [`crate::parser`], отвергая `g case … y`.
+/// В скобки её не взять - под скобкой layout выключен (§10 вопрос 55), -
+/// поэтому [`crate::printer`] их и не ставит, а вместо этого разрывает строку
+/// там, где иначе `else` уехал бы внутрь блока.
+///
+/// Обход циклом, а не спуском: спайн применения разбор набирает циклом,
+/// предел вложенности на него не тратится, и рекурсия упёрлась бы в стек.
+#[must_use]
+pub fn contains_block(expr: &Expr) -> bool {
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        match &expr.kind {
+            ExprKind::Case { .. } | ExprKind::Block(_) => return true,
+            ExprKind::Name(_) | ExprKind::Lit(_) | ExprKind::Hole => {}
+            ExprKind::App(left, right)
+            | ExprKind::TypeApp(left, right)
+            | ExprKind::Arrow(left, right) => {
+                pending.push(left);
+                pending.push(right);
+            }
+            ExprKind::Lam { body, .. } => pending.push(body),
+            ExprKind::Pi { binders, codomain } => {
+                pending.extend(binders.iter().filter_map(|binder| binder.ty.as_ref()));
+                pending.push(codomain);
+            }
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                pending.push(cond);
+                pending.push(then_branch);
+                pending.push(else_branch);
+            }
+            ExprKind::Tuple(items) | ExprKind::List(items) => pending.extend(items),
+            ExprKind::Chain(chain) => {
+                pending.push(&chain.head);
+                pending.extend(chain.tail.iter().map(|(_, operand)| operand));
+            }
+        }
+    }
+    false
+}
+
 /// Отладочная печать дерева s-выражениями.
 ///
 /// Не путать с обратной печатью, которая появится отдельно: та обязана выдать
@@ -645,13 +694,20 @@ fn dump_expr(out: &mut String, expr: &Expr) {
 }
 
 /// Разворачивает спайн применения слева направо.
+///
+/// Циклом, а не спуском: длина спайна ничем не ограничена - см.
+/// [`contains_block`].
 fn dump_spine(out: &mut String, expr: &Expr) {
-    if let ExprKind::App(callee, argument) = &expr.kind {
-        dump_spine(out, callee);
+    let mut arguments = Vec::new();
+    let mut head = expr;
+    while let ExprKind::App(callee, argument) = &head.kind {
+        arguments.push(argument);
+        head = callee;
+    }
+    dump_expr(out, head);
+    for argument in arguments.iter().rev() {
         out.push(' ');
         dump_expr(out, argument);
-    } else {
-        dump_expr(out, expr);
     }
 }
 

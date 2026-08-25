@@ -248,6 +248,33 @@ fn clauses_of_one_definition_must_not_be_split() {
 }
 
 #[test]
+fn a_form_with_a_block_must_be_last() {
+    // `case` тянется до строки, начатой левее, и в скобки не берётся: дерево,
+    // где за ним стоит ещё что-то, не записывается ничем (§4.1).
+    let cases = [
+        "f = g case x of\n    A -> 1\n  y\n",
+        "f = case x of\n    A -> 1\n  + b\n",
+        "f : case x of\n    A -> Type\n  -> a\n",
+        "f = case case x of\n         A -> 1\n     of\n  B -> 2\n",
+        "f = if case x of\n         A -> 1\n     then a else b\n",
+        "data D : case x of\n    A -> Type\n  where\n    C : D\n",
+        "f =\n  let w : case x of\n            A -> Type\n        = 1\n  w\n",
+    ];
+    for text in cases {
+        let error = parse_error(text);
+        assert!(
+            matches!(error, ParseError::BlockNotLast { .. }),
+            "для {text:?} получено {error:?}"
+        );
+    }
+    // Последней - можно, и это единственный способ передать `case` в функцию:
+    // скобки для него закрыты (§10 вопрос 55).
+    assert!(tree("f = g case x of\n  A -> 1\n").is_ok());
+    assert!(tree("f = a + case x of\n  A -> 1\n").is_ok());
+    assert!(tree("f = g \\y -> case y of\n  A -> 1\n").is_ok());
+}
+
+#[test]
 fn a_multiplicity_is_zero_one_or_omega() {
     // Полукольцо §3.2 - ровно три элемента, и ошибка указывает на само число.
     let error = parse_error("f : (2 n : Nat) -> Nat\n");

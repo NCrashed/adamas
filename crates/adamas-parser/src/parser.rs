@@ -19,6 +19,15 @@
 //! разбор. Диагностика от этого точнее, а LSP на неполном вводе потребует
 //! отдельного прохода - цена названа в decision log 2026-08-25.
 //!
+//! # Форма с блоком - последняя
+//!
+//! `case` и блок операторов тянутся до строки, начатой левее, и в скобки не
+//! берутся: под скобкой layout выключен (§10 вопрос 55). Поэтому за такой
+//! формой на строке ничего не стоит - ни аргумента, ни оператора, ни `of`, -
+//! и разбор отвергает `g case … y` с [`ParseError::BlockNotLast`]. Правило
+//! языковое (§4.1) и заведено ради печати: дерево, где форма с блоком стоит
+//! не последней, не записывается ничем.
+//!
 //! # Подмножество Фазы 2
 //!
 //! Разбирается то, что §9 относит к Фазе 2: сигнатуры, клаузы, `data`,
@@ -52,7 +61,7 @@ use adamas_core::source::Span;
 use crate::ast::{
     Alt, Binder, Binding, Block, Chain, Clause, Constructor, Data, Decl, DeclKind, Expr, ExprKind,
     LamParam, LamParamKind, Lit, LitKind, Module, Mult, MultAnn, Name, Pattern, PatternKind,
-    Resource, Stmt, StmtKind, Symbol, Visibility,
+    Resource, Stmt, StmtKind, Symbol, Visibility, contains_block,
 };
 use crate::token::{Token, TokenKind};
 
@@ -217,6 +226,23 @@ pub enum ParseError {
         span: Span,
     },
 
+    /// За формой с блоком на строке ещё что-то стоит.
+    ///
+    /// `case` и блок операторов тянутся до строки, начатой левее: где форма
+    /// кончилась, видно только по отступу ([`crate::ast::contains_block`]).
+    /// Взять её в скобки нельзя - под скобкой layout выключен (§10 вопрос
+    /// 55), - поэтому дерево, где за ней стоит аргумент, оператор или `of`,
+    /// не записывается ничем. Отвергает его разбор, а не печать позже и молча.
+    #[error(
+        "после формы с блоком на строке ничего не пишется: где она кончается, видно только по отступу"
+    )]
+    BlockNotLast {
+        /// Где форма с блоком.
+        form: Span,
+        /// Что стоит за ней.
+        next: Span,
+    },
+
     /// Вложенность глубже предела.
     ///
     /// Спуск рекурсивен, поэтому глубина исходника - это глубина стека, и без
@@ -240,6 +266,7 @@ impl ParseError {
             | Self::Multiplicity { span }
             | Self::SplitClauses { again: span, .. }
             | Self::Unsupported { span, .. }
+            | Self::BlockNotLast { next: span, .. }
             | Self::TooDeep { span, .. } => *span,
         }
     }
@@ -386,6 +413,14 @@ impl<'a> Parser<'a> {
             expected,
             found: found.kind,
             span: found.span,
+        }
+    }
+
+    /// Ошибка «за формой с блоком стоит ещё что-то» - на текущей лексеме.
+    fn block_not_last(&self, form: &Expr) -> ParseError {
+        ParseError::BlockNotLast {
+            form: form.span,
+            next: self.peek().span,
         }
     }
 
@@ -569,6 +604,12 @@ impl<'a> Parser<'a> {
             None
         };
 
+        if let Some(kind) = &kind {
+            if self.at(TokenKind::Where) && contains_block(kind) {
+                return Err(self.block_not_last(kind));
+            }
+        }
+
         let mut end = kind.as_ref().map_or(name.span, |kind| kind.span);
         let mut constructors = Vec::new();
         if self.eat(TokenKind::Where).is_some() {
@@ -721,6 +762,11 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        if let Some(ty) = &ty {
+            if contains_block(ty) {
+                return Err(self.block_not_last(ty));
+            }
+        }
         self.expect(TokenKind::Equals)?;
         let body = self.body()?;
         let span = start.merge(body.span);
@@ -774,9 +820,13 @@ impl<'a> Parser<'a> {
         }
 
         let left = self.chain()?;
-        if self.eat(TokenKind::Arrow).is_none() {
+        if !self.at(TokenKind::Arrow) {
             return Ok(left);
         }
+        if contains_block(&left) {
+            return Err(self.block_not_last(&left));
+        }
+        self.bump();
         // Стрелка правоассоциативна: `A -> B -> C` это `A -> (B -> C)`.
         let right = self.expr()?;
         let span = left.span.merge(right.span);
@@ -792,10 +842,16 @@ impl<'a> Parser<'a> {
         if !self.at(TokenKind::Operator) {
             return Ok(head);
         }
+        if contains_block(&head) {
+            return Err(self.block_not_last(&head));
+        }
         let mut span = head.span;
         let mut tail = Vec::new();
         while let Some(operator) = self.eat(TokenKind::Operator) {
             let operand = self.application()?;
+            if self.at(TokenKind::Operator) && contains_block(&operand) {
+                return Err(self.block_not_last(&operand));
+            }
             span = span.merge(operand.span);
             tail.push((self.name_of(operator), operand));
         }
@@ -810,24 +866,29 @@ impl<'a> Parser<'a> {
 
     fn application(&mut self) -> Result<Expr, ParseError> {
         let mut callee = self.atom()?;
+        // Флаг накапливается по частям, а не пересчитывается по всему спайну
+        // на каждом шаге: иначе длинный спайн стоил бы квадрата.
+        let mut blocked = contains_block(&callee);
         loop {
-            if self.eat(TokenKind::At).is_some() {
-                let argument = self.atom()?;
-                let span = callee.span.merge(argument.span);
-                callee = Expr {
-                    kind: ExprKind::TypeApp(Box::new(callee), Box::new(argument)),
-                    span,
-                };
-            } else if starts_atom(self.kind()) {
-                let argument = self.atom()?;
-                let span = callee.span.merge(argument.span);
-                callee = Expr {
-                    kind: ExprKind::App(Box::new(callee), Box::new(argument)),
-                    span,
-                };
-            } else {
+            let type_app = self.at(TokenKind::At);
+            if !type_app && !starts_atom(self.kind()) {
                 return Ok(callee);
             }
+            if blocked {
+                return Err(self.block_not_last(&callee));
+            }
+            if type_app {
+                self.bump();
+            }
+            let argument = self.atom()?;
+            blocked = contains_block(&argument);
+            let span = callee.span.merge(argument.span);
+            let kind = if type_app {
+                ExprKind::TypeApp(Box::new(callee), Box::new(argument))
+            } else {
+                ExprKind::App(Box::new(callee), Box::new(argument))
+            };
+            callee = Expr { kind, span };
         }
     }
 
@@ -944,6 +1005,9 @@ impl<'a> Parser<'a> {
     fn conditional(&mut self) -> Result<Expr, ParseError> {
         let start = self.bump().span;
         let cond = self.expr()?;
+        if contains_block(&cond) {
+            return Err(self.block_not_last(&cond));
+        }
         self.expect(TokenKind::Then)?;
         let then_branch = self.expr()?;
         self.expect(TokenKind::Else)?;
@@ -962,6 +1026,9 @@ impl<'a> Parser<'a> {
     fn case(&mut self) -> Result<Expr, ParseError> {
         let start = self.bump().span;
         let scrutinee = self.expr()?;
+        if contains_block(&scrutinee) {
+            return Err(self.block_not_last(&scrutinee));
+        }
         self.expect(TokenKind::Of)?;
         self.expect(TokenKind::Open)?;
         let mut alts = Vec::new();

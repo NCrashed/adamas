@@ -15,7 +15,7 @@ use adamas_core::check::{TypeError, check_closed, infer_closed};
 use adamas_core::level::{Level, LevelVar};
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
-use adamas_core::sig::Signature;
+use adamas_core::sig::{Group, Member, Signature};
 use adamas_core::term::Term;
 use proptest::prelude::*;
 
@@ -47,11 +47,13 @@ fn declared(what: &str, outcome: &Result<(), TypeError>) {
     assert!(outcome.is_ok(), "{what} корректен: {outcome:?}");
 }
 
-/// Ссылка на определение со свежими дырками вместо аргументов уровня.
-fn at(signature: &Signature, name: &str, metas: &mut Metas) -> Term {
-    signature
-        .instantiate(name, metas)
-        .unwrap_or_else(|| panic!("{name} объявлен"))
+/// Ссылка на член **объявляемой** группы: `arity` дырок уровня.
+///
+/// Спросить арность у сигнатуры нельзя - члена там ещё нет, - поэтому число
+/// дырок пишется. Разойдётся с выведенной арностью - будет `LevelArity`.
+fn ahead(name: &str, metas: &mut Metas, arity: u32) -> Term {
+    let levels: Vec<Level> = (0..arity).map(|_| metas.fresh_level()).collect();
+    Term::Const(name.into(), levels.into())
 }
 
 /// `Bool : Type 0` с двумя конструкторами - минимальный перечислимый тип.
@@ -60,14 +62,14 @@ fn booleans() -> Signature {
     let mut metas = Metas::default();
     declared(
         "Bool",
-        &signature.declare_data("Bool", 0, &mut metas, Term::universe(0)),
+        &signature.declare_data(
+            &mut metas,
+            "Bool",
+            0,
+            Term::universe(0),
+            &[("true", c("Bool")), ("false", c("Bool"))],
+        ),
     );
-    for name in ["true", "false"] {
-        declared(
-            name,
-            &signature.declare_constructor("Bool", name, &mut metas, c("Bool")),
-        );
-    }
     signature
 }
 
@@ -77,15 +79,13 @@ fn naturals() -> Signature {
     let mut metas = Metas::default();
     declared(
         "Nat",
-        &signature.declare_data("Nat", 0, &mut metas, Term::universe(0)),
-    );
-    declared(
-        "zero",
-        &signature.declare_constructor("Nat", "zero", &mut metas, c("Nat")),
-    );
-    declared(
-        "succ",
-        &signature.declare_constructor("Nat", "succ", &mut metas, arrow(c("Nat"), c("Nat"))),
+        &signature.declare_data(
+            &mut metas,
+            "Nat",
+            0,
+            Term::universe(0),
+            &[("zero", c("Nat")), ("succ", arrow(c("Nat"), c("Nat")))],
+        ),
     );
     signature
 }
@@ -100,36 +100,14 @@ fn lists() -> Signature {
     let mut metas = Metas::default();
 
     let level = metas.fresh_level();
-    declared(
-        "List",
-        &signature.declare_data(
-            "List",
-            1,
-            &mut metas,
-            pi(
-                Mult::Zero,
-                "A",
-                Term::Universe(level.clone()),
-                Term::Universe(level),
-            ),
-        ),
-    );
-
-    let list_of = |signature: &Signature, metas: &mut Metas, element: Term| {
-        at(signature, "List", metas).apply([element])
-    };
+    let list_of = |metas: &mut Metas, element: Term| ahead("List", metas, 1).apply([element]);
 
     let nil = pi(
         Mult::Zero,
         "A",
         Term::Universe(metas.fresh_level()),
-        list_of(&signature, &mut metas, Term::var(0)),
+        list_of(&mut metas, Term::var(0)),
     );
-    declared(
-        "nil",
-        &signature.declare_constructor("List", "nil", &mut metas, nil),
-    );
-
     let cons = pi(
         Mult::Zero,
         "A",
@@ -141,14 +119,25 @@ fn lists() -> Signature {
             pi(
                 Mult::One,
                 "xs",
-                list_of(&signature, &mut metas, Term::var(1)),
-                list_of(&signature, &mut metas, Term::var(2)),
+                list_of(&mut metas, Term::var(1)),
+                list_of(&mut metas, Term::var(2)),
             ),
         ),
     );
     declared(
-        "cons",
-        &signature.declare_constructor("List", "cons", &mut metas, cons),
+        "List",
+        &signature.declare_data(
+            &mut metas,
+            "List",
+            1,
+            pi(
+                Mult::Zero,
+                "A",
+                Term::Universe(level.clone()),
+                Term::Universe(level),
+            ),
+            &[("nil", nil), ("cons", cons)],
+        ),
     );
     signature
 }
@@ -159,36 +148,16 @@ fn vectors() -> Signature {
     let mut metas = Metas::default();
 
     let level = metas.fresh_level();
-    declared(
-        "Vect",
-        &signature.declare_data(
-            "Vect",
-            1,
-            &mut metas,
-            pi(
-                Mult::Zero,
-                "A",
-                Term::Universe(level.clone()),
-                pi(Mult::Zero, "n", c("Nat"), Term::Universe(level)),
-            ),
-        ),
-    );
-
-    let vect_of = |signature: &Signature, metas: &mut Metas, element: Term, length: Term| {
-        at(signature, "Vect", metas).apply([element, length])
+    let vect_of = |metas: &mut Metas, element: Term, length: Term| {
+        ahead("Vect", metas, 1).apply([element, length])
     };
 
     let vnil = pi(
         Mult::Zero,
         "A",
         Term::Universe(metas.fresh_level()),
-        vect_of(&signature, &mut metas, Term::var(0), c("zero")),
+        vect_of(&mut metas, Term::var(0), c("zero")),
     );
-    declared(
-        "vnil",
-        &signature.declare_constructor("Vect", "vnil", &mut metas, vnil),
-    );
-
     let vcons = pi(
         Mult::Zero,
         "A",
@@ -204,20 +173,26 @@ fn vectors() -> Signature {
                 pi(
                     Mult::One,
                     "xs",
-                    vect_of(&signature, &mut metas, Term::var(2), Term::var(1)),
-                    vect_of(
-                        &signature,
-                        &mut metas,
-                        Term::var(3),
-                        c("succ").apply([Term::var(2)]),
-                    ),
+                    vect_of(&mut metas, Term::var(2), Term::var(1)),
+                    vect_of(&mut metas, Term::var(3), c("succ").apply([Term::var(2)])),
                 ),
             ),
         ),
     );
     declared(
-        "vcons",
-        &signature.declare_constructor("Vect", "vcons", &mut metas, vcons),
+        "Vect",
+        &signature.declare_data(
+            &mut metas,
+            "Vect",
+            1,
+            pi(
+                Mult::Zero,
+                "A",
+                Term::Universe(level.clone()),
+                pi(Mult::Zero, "n", c("Nat"), Term::Universe(level)),
+            ),
+            &[("vnil", vnil), ("vcons", vcons)],
+        ),
     );
     signature
 }
@@ -258,8 +233,9 @@ fn constructors_are_recorded_in_declaration_order() {
 #[test]
 fn an_ordinary_definition_has_no_constructors() {
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     signature
-        .postulate("Opaque", Mult::Many, 0, Term::universe(0))
+        .postulate(&mut metas, "Opaque", Mult::Many, 0, Term::universe(0))
         .expect("постулат корректен");
     assert_eq!(
         signature.constructors("Opaque"),
@@ -331,20 +307,29 @@ fn a_parametric_constructor_applies_to_its_parameter() {
 fn a_parameter_must_be_repeated_verbatim() {
     // Кратность параметра - часть телескопа: `0` у типа и `ω` у конструктора
     // означали бы, что конструктор хранит то, чего в типе нет.
-    let mut signature = lists();
+    let mut signature = naturals();
     let mut metas = Metas::default();
+    let level = metas.fresh_level();
     let wrong = pi(
         Mult::Many,
         "A",
         Term::Universe(metas.fresh_level()),
-        signature
-            .instantiate("List", &mut metas)
-            .expect("List объявлен")
-            .apply([Term::var(0)]),
+        ahead("List", &mut metas, 1).apply([Term::var(0)]),
     );
     assert!(
         matches!(
-            signature.declare_constructor("List", "wrong", &mut metas, wrong),
+            signature.declare_data(
+                &mut metas,
+                "List",
+                1,
+                pi(
+                    Mult::Zero,
+                    "A",
+                    Term::Universe(level.clone()),
+                    Term::Universe(level),
+                ),
+                &[("wrong", wrong)],
+            ),
             Err(TypeError::ConstructorParameter { index: 0, .. })
         ),
         "телескоп параметров обязан совпасть"
@@ -357,14 +342,6 @@ fn a_parameter_must_stay_the_same_under_recursion() {
     // хранить его в значении уже нельзя. Это индекс, а не параметр.
     let mut signature = naturals();
     let mut metas = Metas::default();
-    signature
-        .declare_data(
-            "Nest",
-            1,
-            &mut metas,
-            pi(Mult::Zero, "A", Term::universe(0), Term::universe(0)),
-        )
-        .expect("Nest корректен");
     let nest = pi(
         Mult::Zero,
         "A",
@@ -376,7 +353,13 @@ fn a_parameter_must_stay_the_same_under_recursion() {
     );
     assert!(
         matches!(
-            signature.declare_constructor("Nest", "nest", &mut metas, nest),
+            signature.declare_data(
+                &mut metas,
+                "Nest",
+                1,
+                pi(Mult::Zero, "A", Term::universe(0), Term::universe(0)),
+                &[("nest", nest)],
+            ),
             Err(TypeError::NotStrictlyPositive { .. })
         ),
         "неединообразный параметр отвергается"
@@ -389,7 +372,7 @@ fn declaring_more_parameters_than_binders_is_rejected() {
     let mut metas = Metas::default();
     assert!(
         matches!(
-            signature.declare_data("Bool", 1, &mut metas, Term::universe(0)),
+            signature.declare_data(&mut metas, "Bool", 1, Term::universe(0), &[]),
             Err(TypeError::DataParameters {
                 expected: 1,
                 found: 0,
@@ -445,16 +428,14 @@ fn a_negative_occurrence_is_rejected() {
     // в термах, а с ним - жителя любого типа.
     let mut signature = Signature::default();
     let mut metas = Metas::default();
-    signature
-        .declare_data("Bad", 0, &mut metas, Term::universe(0))
-        .expect("тип-формер корректен");
     assert!(
         matches!(
-            signature.declare_constructor(
-                "Bad",
-                "mk",
+            signature.declare_data(
                 &mut metas,
-                arrow(arrow(c("Bad"), c("Bad")), c("Bad")),
+                "Bad",
+                0,
+                Term::universe(0),
+                &[("mk", arrow(arrow(c("Bad"), c("Bad")), c("Bad")))],
             ),
             Err(TypeError::NotStrictlyPositive { .. })
         ),
@@ -468,14 +449,12 @@ fn a_positive_occurrence_under_an_arrow_is_accepted() {
     // справа от стрелки, и это законно.
     let mut signature = booleans();
     let mut metas = Metas::default();
-    signature
-        .declare_data("Tree", 0, &mut metas, Term::universe(0))
-        .expect("Tree корректен");
-    let outcome = signature.declare_constructor(
-        "Tree",
-        "node",
+    let outcome = signature.declare_data(
         &mut metas,
-        arrow(arrow(c("Bool"), c("Tree")), c("Tree")),
+        "Tree",
+        0,
+        Term::universe(0),
+        &[("node", arrow(arrow(c("Bool"), c("Tree")), c("Tree")))],
     );
     assert!(outcome.is_ok(), "{outcome:?}");
 }
@@ -486,14 +465,6 @@ fn a_nested_occurrence_in_an_argument_is_rejected() {
     // синтаксическая проверка не контролирует. Консервативный отказ.
     let mut signature = booleans();
     let mut metas = Metas::default();
-    signature
-        .declare_data(
-            "Box",
-            1,
-            &mut metas,
-            pi(Mult::Zero, "A", Term::universe(0), Term::universe(0)),
-        )
-        .expect("Box корректен");
     let mk = pi(
         Mult::Zero,
         "A",
@@ -505,7 +476,13 @@ fn a_nested_occurrence_in_an_argument_is_rejected() {
     );
     assert!(
         matches!(
-            signature.declare_constructor("Box", "mk", &mut metas, mk),
+            signature.declare_data(
+                &mut metas,
+                "Box",
+                1,
+                pi(Mult::Zero, "A", Term::universe(0), Term::universe(0)),
+                &[("mk", mk)],
+            ),
             Err(TypeError::NotStrictlyPositive { .. })
         ),
         "рекурсивное вхождение под собственным аргументом отвергается"
@@ -521,16 +498,14 @@ fn a_field_above_the_type_is_rejected() {
     // `Type 1`. Дальше - парадокс Жирара.
     let mut signature = Signature::default();
     let mut metas = Metas::default();
-    signature
-        .declare_data("Small", 0, &mut metas, Term::universe(0))
-        .expect("Small корректен");
     assert!(
         matches!(
-            signature.declare_constructor(
-                "Small",
-                "pack",
+            signature.declare_data(
                 &mut metas,
-                pi(Mult::Zero, "A", Term::universe(0), c("Small")),
+                "Small",
+                0,
+                Term::universe(0),
+                &[("pack", pi(Mult::Zero, "A", Term::universe(0), c("Small")))],
             ),
             Err(TypeError::ConstructorUniverse { .. })
         ),
@@ -543,14 +518,12 @@ fn a_field_at_the_type_universe_is_accepted() {
     // Тот же `pack`, но тип объявлен в `Type 1` - и всё сходится.
     let mut signature = Signature::default();
     let mut metas = Metas::default();
-    signature
-        .declare_data("Large", 0, &mut metas, Term::universe(1))
-        .expect("Large корректен");
-    let outcome = signature.declare_constructor(
-        "Large",
-        "pack",
+    let outcome = signature.declare_data(
         &mut metas,
-        pi(Mult::Zero, "A", Term::universe(0), c("Large")),
+        "Large",
+        0,
+        Term::universe(1),
+        &[("pack", pi(Mult::Zero, "A", Term::universe(0), c("Large")))],
     );
     assert!(outcome.is_ok(), "{outcome:?}");
 }
@@ -563,19 +536,6 @@ fn a_concrete_field_fits_a_polymorphic_type() {
     let mut signature = naturals();
     let mut metas = Metas::default();
     let level = metas.fresh_level();
-    signature
-        .declare_data(
-            "Tagged",
-            1,
-            &mut metas,
-            pi(
-                Mult::Zero,
-                "A",
-                Term::Universe(level.clone()),
-                Term::Universe(level),
-            ),
-        )
-        .expect("Tagged корректен");
     let tag = pi(
         Mult::Zero,
         "A",
@@ -584,13 +544,21 @@ fn a_concrete_field_fits_a_polymorphic_type() {
             Mult::One,
             "n",
             c("Nat"),
-            signature
-                .instantiate("Tagged", &mut metas)
-                .expect("Tagged объявлен")
-                .apply([Term::var(1)]),
+            ahead("Tagged", &mut metas, 1).apply([Term::var(1)]),
         ),
     );
-    let outcome = signature.declare_constructor("Tagged", "tag", &mut metas, tag);
+    let outcome = signature.declare_data(
+        &mut metas,
+        "Tagged",
+        1,
+        pi(
+            Mult::Zero,
+            "A",
+            Term::Universe(level.clone()),
+            Term::Universe(level),
+        ),
+        &[("tag", tag)],
+    );
     assert!(outcome.is_ok(), "{outcome:?}");
 }
 
@@ -602,7 +570,7 @@ fn a_type_former_must_end_in_a_universe() {
     let mut metas = Metas::default();
     assert!(
         matches!(
-            signature.declare_data("Odd", 0, &mut metas, arrow(c("Nat"), c("Nat"))),
+            signature.declare_data(&mut metas, "Odd", 0, arrow(c("Nat"), c("Nat")), &[]),
             Err(TypeError::NotADataSort { .. })
         ),
         "тип-формер обязан заканчиваться универсумом"
@@ -615,7 +583,13 @@ fn a_constructor_must_return_its_own_type() {
     let mut metas = Metas::default();
     assert!(
         matches!(
-            signature.declare_constructor("Nat", "weird", &mut metas, c("Bool")),
+            signature.declare_data(
+                &mut metas,
+                "Odd",
+                0,
+                Term::universe(0),
+                &[("weird", c("Bool"))],
+            ),
             Err(TypeError::ConstructorResult { .. })
         ),
         "конструктор чужого типа не конструктор"
@@ -623,45 +597,86 @@ fn a_constructor_must_return_its_own_type() {
 }
 
 #[test]
-fn a_constructor_needs_an_inductive_type() {
-    let mut signature = Signature::default();
+fn a_rejected_group_leaves_no_trace() {
+    // Группа добавляется целиком или не добавляется вовсе: наблюдаемого
+    // промежуточного состояния у сигнатуры нет (§10 вопрос 50).
+    let mut signature = naturals();
     let mut metas = Metas::default();
-    signature
-        .postulate("Opaque", Mult::Many, 0, Term::universe(0))
-        .expect("постулат корректен");
+    let before = signature.len();
     assert!(
-        matches!(
-            signature.declare_constructor("Opaque", "mk", &mut metas, c("Opaque")),
-            Err(TypeError::NotADataType { .. })
-        ),
-        "у постулата конструкторов быть не может"
+        signature
+            .declare_data(
+                &mut metas,
+                "Odd",
+                0,
+                Term::universe(0),
+                &[("fine", c("Odd")), ("weird", c("Bool"))],
+            )
+            .is_err()
     );
+    assert_eq!(signature.len(), before, "сигнатура не изменилась");
+    assert!(signature.lookup("Odd").is_none(), "имя семейства свободно");
     assert!(
-        matches!(
-            signature.declare_constructor("Missing", "mk", &mut metas, Term::universe(0)),
-            Err(TypeError::UnknownConstant { .. })
-        ),
-        "и у несуществующего имени тоже"
+        signature.lookup("fine").is_none(),
+        "и проверенный конструктор не остался"
     );
 }
 
 #[test]
-fn a_rejected_constructor_leaves_no_trace() {
+fn a_group_colliding_with_an_existing_name_leaves_it_alone() {
+    // Откат снимает имена группы, поэтому занятость проверяется до фаз: иначе
+    // столкновение с `zero` снесло бы конструктор `Nat`, объявленный раньше.
     let mut signature = naturals();
-    let before = signature.len();
     let mut metas = Metas::default();
-    assert!(
-        signature
-            .declare_constructor("Nat", "weird", &mut metas, c("Bool"))
-            .is_err()
-    );
+    let before = signature.len();
+    let group = Group::of(Member::data("Odd", 0, Term::universe(0))).and(Member::definition(
+        "zero",
+        Mult::Many,
+        Term::universe(0),
+    ));
+    assert!(matches!(
+        signature.declare(&mut metas, &group),
+        Err(TypeError::DuplicateDefinition { .. })
+    ));
     assert_eq!(signature.len(), before, "сигнатура не изменилась");
-    assert!(signature.lookup("weird").is_none(), "имя свободно");
-    assert_eq!(
-        signature.constructors("Nat").expect("Nat индуктивен").len(),
-        2,
-        "список конструкторов не пополнился"
+    assert!(
+        signature.lookup("zero").is_some(),
+        "занятое имя осталось за прежним определением"
     );
+}
+
+#[test]
+fn a_family_with_a_declared_arity_takes_polymorphic_constructors() {
+    // Арность записана, значит параметры уровня уже стоят в типах как
+    // `LevelVar` и обобщать нечего. Обобщение конструктора свело бы его
+    // арность к нулю и отвергло бы всякий полиморфный конструктор объявленного
+    // семейства - расхождением с арностью самого семейства.
+    let mut signature = Signature::default();
+    let mut metas = Metas::default();
+    let former = pi(
+        Mult::Zero,
+        "A",
+        Term::Universe(u(0)),
+        Term::Universe(u(0).succ()),
+    );
+    let pack = pi(
+        Mult::Zero,
+        "A",
+        Term::Universe(u(0)),
+        pi(
+            Mult::Many,
+            "x",
+            Term::var(0),
+            Term::Const("Box".into(), Rc::from([u(0)])).apply([Term::var(1)]),
+        ),
+    );
+    let group = Group::of(
+        Member::data("Box", 1, former)
+            .with_arity(1)
+            .with_constructor("pack", pack),
+    );
+    let outcome = signature.declare(&mut metas, &group);
+    assert!(outcome.is_ok(), "{outcome:?}");
 }
 
 #[test]
@@ -670,14 +685,20 @@ fn a_data_name_cannot_be_reused() {
     let mut metas = Metas::default();
     assert!(
         matches!(
-            signature.declare_data("Nat", 0, &mut metas, Term::universe(0)),
+            signature.declare_data(&mut metas, "Nat", 0, Term::universe(0), &[]),
             Err(TypeError::DuplicateDefinition { .. })
         ),
         "имя типа занято"
     );
     assert!(
         matches!(
-            signature.declare_constructor("Nat", "zero", &mut metas, c("Nat")),
+            signature.declare_data(
+                &mut metas,
+                "Other",
+                0,
+                Term::universe(0),
+                &[("zero", c("Other"))],
+            ),
             Err(TypeError::DuplicateDefinition { .. })
         ),
         "имя конструктора тоже"
@@ -687,30 +708,29 @@ fn a_data_name_cannot_be_reused() {
 #[test]
 fn a_negative_occurrence_hidden_behind_a_definition_is_rejected() {
     // Позитивность синтаксическая, а определение - это ещё один синтаксис для
-    // того же типа. `def G : Type 0 = Bad -> Bad` и следом `mk : G -> Bad` -
-    // после δ-разворота ровно тот негативный конструктор, который отвергается
-    // в прямой записи, и обходить проверку он не должен.
+    // того же типа. `def G = Bad -> Bad` и следом `mk : G -> Bad` - после
+    // δ-разворота ровно тот негативный конструктор, который отвергается в
+    // прямой записи, и обходить проверку он не должен.
+    //
+    // Конфигурация выразима **только группой**: при ordered scoping (§4.8) `G`
+    // не может стоять ни до `Bad` (не видит его), ни после (семейство уже
+    // объявлено). Это и есть довод §10 вопроса 50 за разнородную группу.
     let mut signature = Signature::default();
     let mut metas = Metas::default();
-    signature
-        .declare_data("Bad", 0, &mut metas, Term::universe(0))
-        .expect("тип-формер корректен");
-    signature
-        .define_inferred(
-            "G",
-            Mult::Many,
-            &mut metas,
-            Term::universe(0),
-            Some(arrow(c("Bad"), c("Bad"))),
+    let outcome = signature.declare(
+        &mut metas,
+        &Group::of(
+            Member::data("Bad", 0, Term::universe(0))
+                .with_constructor("mk", arrow(c("G"), c("Bad"))),
         )
-        .expect("определение корректно само по себе");
-
-    assert!(
-        matches!(
-            signature.declare_constructor("Bad", "mk", &mut metas, arrow(c("G"), c("Bad"))),
-            Err(TypeError::NotStrictlyPositive { .. })
+        .and(
+            Member::definition("G", Mult::Many, Term::universe(0))
+                .with_body(arrow(c("Bad"), c("Bad"))),
         ),
-        "негативность за определением обязана отвергаться так же, как прямая"
+    );
+    assert!(
+        matches!(outcome, Err(TypeError::NotStrictlyPositive { .. })),
+        "негативность за определением обязана отвергаться так же, как прямая: {outcome:?}"
     );
 }
 
@@ -722,20 +742,22 @@ fn a_definition_free_of_the_type_stays_usable_as_a_field() {
     let mut metas = Metas::default();
     signature
         .define_inferred(
+            &mut metas,
             "Unit",
             Mult::Many,
-            &mut metas,
             Term::universe(1),
             Some(Term::universe(0)),
         )
         .expect("определение корректно");
-    signature
-        .declare_data("Wrap", 0, &mut metas, Term::universe(1))
-        .expect("тип-формер корректен");
-
     assert!(
         signature
-            .declare_constructor("Wrap", "wrap", &mut metas, arrow(c("Unit"), c("Wrap")))
+            .declare_data(
+                &mut metas,
+                "Wrap",
+                0,
+                Term::universe(1),
+                &[("wrap", arrow(c("Unit"), c("Wrap")))],
+            )
             .is_ok(),
         "поле-определение, не упоминающее тип, законно"
     );
@@ -745,57 +767,37 @@ fn a_definition_free_of_the_type_stays_usable_as_a_field() {
 fn a_positive_occurrence_behind_a_definition_is_accepted() {
     // `def Cont = Bool -> Tree` и записанное буквально `(Bool -> Tree)` - один
     // и тот же тип после δ, и позитивность обязана отвечать на них одинаково.
-    // Раньше синоним отвергался, причём сообщением про отрицательную позицию,
-    // которой в терме нет ни в какой форме.
     let mut signature = booleans();
     let mut metas = Metas::default();
-    signature
-        .declare_data("Tree", 0, &mut metas, Term::universe(0))
-        .expect("Tree корректен");
-    signature
-        .define_inferred(
-            "Cont",
-            Mult::Many,
-            &mut metas,
-            Term::universe(0),
-            Some(arrow(c("Bool"), c("Tree"))),
-        )
-        .expect("Cont корректен");
-
-    let literal = signature.declare_constructor(
-        "Tree",
-        "node",
+    let outcome = signature.declare(
         &mut metas,
-        arrow(arrow(c("Bool"), c("Tree")), c("Tree")),
+        &Group::of(
+            Member::data("Tree", 0, Term::universe(0))
+                .with_constructor("node", arrow(arrow(c("Bool"), c("Tree")), c("Tree")))
+                .with_constructor("node2", arrow(c("Cont"), c("Tree"))),
+        )
+        .and(
+            Member::definition("Cont", Mult::Many, Term::universe(0))
+                .with_body(arrow(c("Bool"), c("Tree"))),
+        ),
     );
-    let behind =
-        signature.declare_constructor("Tree", "node2", &mut metas, arrow(c("Cont"), c("Tree")));
-    assert!(literal.is_ok(), "буквальная запись: {literal:?}");
-    assert!(behind.is_ok(), "та же форма за определением: {behind:?}");
+    assert!(outcome.is_ok(), "{outcome:?}");
 }
 
 #[test]
 fn a_self_referential_definition_does_not_loop_the_positivity_check() {
-    // Разворот головы поля обязан помнить уже развёрнутое: `def Loop = Loop`
-    // ссылается на себя, и без памяти обход не закончился бы.
+    // Разворот головы поля обязан помнить уже развёрнутое: `def Loop = D`
+    // ссылается на разбираемое семейство, и без памяти обход не закончился бы.
     let mut signature = Signature::default();
     let mut metas = Metas::default();
-    signature
-        .declare_data("D", 0, &mut metas, Term::universe(0))
-        .expect("D корректен");
-    signature
-        .define_inferred(
-            "Loop",
-            Mult::Many,
-            &mut metas,
-            Term::universe(0),
-            Some(c("D")),
+    let outcome = signature.declare(
+        &mut metas,
+        &Group::of(
+            Member::data("D", 0, Term::universe(0))
+                .with_constructor("mk", arrow(c("Loop"), c("D"))),
         )
-        .expect("Loop корректен");
-
-    // Поле - синоним самого `D`: разворачивается один раз и признаётся
-    // рекурсивным вхождением.
-    let outcome = signature.declare_constructor("D", "mk", &mut metas, arrow(c("Loop"), c("D")));
+        .and(Member::definition("Loop", Mult::Many, Term::universe(0)).with_body(c("D"))),
+    );
     assert!(outcome.is_ok(), "{outcome:?}");
 }
 
@@ -812,18 +814,18 @@ fn a_chain_of_definitions_is_walked_once_per_name() {
     let mut metas = Metas::default();
     signature
         .define_inferred(
+            &mut metas,
             "Unit",
             Mult::Many,
-            &mut metas,
             Term::universe(1),
             Some(Term::universe(0)),
         )
         .expect("Unit корректен");
     signature
         .define_inferred(
+            &mut metas,
             "d0",
             Mult::Many,
-            &mut metas,
             Term::universe(1),
             Some(c("Unit")),
         )
@@ -832,21 +834,23 @@ fn a_chain_of_definitions_is_walked_once_per_name() {
         let previous = format!("d{}", step - 1);
         signature
             .define_inferred(
+                &mut metas,
                 &format!("d{step}"),
                 Mult::Many,
-                &mut metas,
                 Term::universe(1),
                 Some(arrow(c(&previous), c(&previous))),
             )
             .expect("звено цепочки корректно");
     }
-    signature
-        .declare_data("Chain", 0, &mut metas, Term::universe(1))
-        .expect("тип-формер корректен");
 
     let started = std::time::Instant::now();
-    let outcome =
-        signature.declare_constructor("Chain", "link", &mut metas, arrow(c("d32"), c("Chain")));
+    let outcome = signature.declare_data(
+        &mut metas,
+        "Chain",
+        0,
+        Term::universe(1),
+        &[("link", arrow(c("d32"), c("Chain")))],
+    );
     let elapsed = started.elapsed();
 
     assert!(outcome.is_ok(), "{outcome:?}");
@@ -866,26 +870,26 @@ fn a_denormalised_level_in_the_result_is_still_the_family() {
     let mut metas = Metas::default();
     let carrier = metas.fresh_level();
     signature
-        .postulate_inferred("E", Mult::Many, &mut metas, Term::Universe(carrier))
+        .postulate_inferred(&mut metas, "E", Mult::Many, Term::Universe(carrier))
         .expect("E корректен");
 
     let sort = metas.fresh_level();
-    signature
-        .declare_data("D", 0, &mut metas, Term::Universe(sort))
-        .expect("D корректен");
-
     let field = metas.fresh_level();
     let doubled = field.clone().max(field.clone());
-    let outcome = signature.declare_constructor(
-        "D",
-        "mk",
+    let outcome = signature.declare_data(
         &mut metas,
-        pi(
-            Mult::Zero,
-            "_",
-            Term::Const("E".into(), Rc::from([field])),
-            Term::Const("D".into(), Rc::from([doubled])),
-        ),
+        "D",
+        0,
+        Term::Universe(sort),
+        &[(
+            "mk",
+            pi(
+                Mult::Zero,
+                "_",
+                Term::Const("E".into(), Rc::from([field])),
+                Term::Const("D".into(), Rc::from([doubled])),
+            ),
+        )],
     );
     assert!(
         outcome.is_ok(),
@@ -933,26 +937,31 @@ fn field_term(field: &Field) -> Term {
     }
 }
 
-/// Сигнатура с `Unit`, `D` и `Alias = D -> D`.
+/// `Unit`, `Alias = D -> D` - всё, что нужно полям, кроме самого `D`.
+///
+/// Само `D` объявляется в тесте вместе с конструктором: список конструкторов
+/// принадлежит группе, и добавить его отдельно нечем.
 fn playground(metas: &mut Metas) -> Signature {
     let mut signature = Signature::default();
     let add = |outcome: Result<(), TypeError>| assert!(outcome.is_ok(), "{outcome:?}");
     add(signature.define_inferred(
+        metas,
         "Unit",
         Mult::Many,
-        metas,
         Term::universe(1),
         Some(Term::universe(0)),
     ));
-    add(signature.declare_data("D", 0, metas, Term::universe(0)));
-    add(signature.define_inferred(
-        "Alias",
-        Mult::Many,
-        metas,
-        Term::universe(0),
-        Some(arrow(c("D"), c("D"))),
-    ));
     signature
+}
+
+/// Группа `D` с единственным конструктором `mk` и синонимом `Alias = D -> D`.
+///
+/// Разнородная по необходимости: `Alias` упоминает `D`, поэтому вне группы он
+/// не пишется (§10 вопрос 50).
+fn with_carrier(field: Term) -> Group {
+    Group::of(Member::data("D", 0, Term::universe(0)).with_constructor("mk", field)).and(
+        Member::definition("Alias", Mult::Many, Term::universe(0)).with_body(arrow(c("D"), c("D"))),
+    )
 }
 
 /// Развернуть определения в поле - так видно, что проверка увидела бы, если бы
@@ -1002,7 +1011,7 @@ proptest! {
             .rev()
             .fold(c("D"), |acc, field| arrow(field_term(field), acc));
 
-        if signature.declare_constructor("D", "mk", &mut metas, ty).is_ok() {
+        if signature.declare(&mut metas, &with_carrier(ty)).is_ok() {
             for field in &fields {
                 prop_assert!(
                     !has_negative_occurrence(&unfolded(field)),
@@ -1012,11 +1021,11 @@ proptest! {
         }
     }
 
-    /// Отвергнутый конструктор не оставляет следа в сигнатуре.
+    /// Отвергнутая группа не оставляет следа в сигнатуре.
     ///
     /// Половинчатое объявление хуже отказа: имя занято, а типа за ним нет.
     #[test]
-    fn a_rejected_constructor_leaves_nothing_behind(fields in proptest::collection::vec(any_field(), 1..4)) {
+    fn a_rejected_group_leaves_nothing_behind(fields in proptest::collection::vec(any_field(), 1..4)) {
         let mut metas = Metas::default();
         let mut signature = playground(&mut metas);
 
@@ -1025,12 +1034,10 @@ proptest! {
             .rev()
             .fold(c("D"), |acc, field| arrow(field_term(field), acc));
 
-        if signature.declare_constructor("D", "mk", &mut metas, ty).is_err() {
+        if signature.declare(&mut metas, &with_carrier(ty)).is_err() {
             prop_assert!(signature.lookup("mk").is_none());
-            prop_assert!(
-                signature.constructors("D").is_some_and(<[_]>::is_empty),
-                "список конструкторов не должен пополняться"
-            );
+            prop_assert!(signature.lookup("D").is_none(), "и само семейство тоже");
+            prop_assert!(signature.lookup("Alias").is_none(), "и сосед по группе");
         }
     }
 }

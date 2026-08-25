@@ -15,6 +15,7 @@ use std::rc::Rc;
 
 use adamas_core::check::{TypeError, check_closed};
 use adamas_core::eval::normalize;
+use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::sig::Signature;
 use adamas_core::term::{Branch, Case, Term};
@@ -79,25 +80,22 @@ fn declared(what: &str, outcome: &Result<(), TypeError>) {
 
 /// `Nat`, семейство `P` над ним и свидетель `anything`.
 fn base() -> Signature {
-    use adamas_core::meta::Metas;
-
     let mut signature = Signature::default();
     let mut metas = Metas::default();
     declared(
         "Nat",
-        &signature.declare_data("Nat", 0, &mut metas, Term::universe(0)),
-    );
-    declared(
-        "zero",
-        &signature.declare_constructor("Nat", "zero", &mut metas, c("Nat")),
-    );
-    declared(
-        "succ",
-        &signature.declare_constructor("Nat", "succ", &mut metas, arrow(c("Nat"), c("Nat"))),
+        &signature.declare_data(
+            &mut metas,
+            "Nat",
+            0,
+            Term::universe(0),
+            &[("zero", c("Nat")), ("succ", arrow(c("Nat"), c("Nat")))],
+        ),
     );
     declared(
         "P",
         &signature.postulate(
+            &mut metas,
             "P",
             Mult::Many,
             0,
@@ -107,6 +105,7 @@ fn base() -> Signature {
     declared(
         "anything",
         &signature.postulate(
+            &mut metas,
             "anything",
             Mult::Many,
             0,
@@ -119,6 +118,7 @@ fn base() -> Signature {
 /// `plus n m = case n of {zero => m; succ k => succ (plus k m)}`.
 fn arithmetic() -> Signature {
     let mut signature = base();
+    let mut metas = Metas::default();
     let body = lam(
         Mult::Many,
         "n",
@@ -146,6 +146,7 @@ fn arithmetic() -> Signature {
     declared(
         "plus",
         &signature.define(
+            &mut metas,
             "plus",
             Mult::Many,
             0,
@@ -158,7 +159,15 @@ fn arithmetic() -> Signature {
 
 /// Определяет одноаргументную функцию над `Nat` и возвращает её вердикт.
 fn define_unary(signature: &mut Signature, name: &str, body: Term) -> bool {
-    let outcome = signature.define(name, Mult::Many, 0, arrow(c("Nat"), c("Nat")), Some(body));
+    let mut metas = Metas::default();
+    let outcome = signature.define(
+        &mut metas,
+        name,
+        Mult::Many,
+        0,
+        arrow(c("Nat"), c("Nat")),
+        Some(body),
+    );
     assert!(outcome.is_ok(), "`{name}` типизируется: {outcome:?}");
     verdict(signature, name)
 }
@@ -219,9 +228,10 @@ fn a_recursive_definition_stays_stuck_under_evaluation() {
 #[test]
 fn a_definition_sees_itself_only_in_its_body() {
     let mut signature = base();
+    let mut metas = Metas::default();
     assert!(
         matches!(
-            signature.define("Loop", Mult::Many, 0, c("Loop"), None),
+            signature.define(&mut metas, "Loop", Mult::Many, 0, c("Loop"), None),
             Err(TypeError::UnknownConstant { .. })
         ),
         "тип проверяется без собственного имени"
@@ -238,6 +248,7 @@ fn the_decreasing_position_is_found_by_search() {
     // Рекурсия по **второму** аргументу: объявлять позицию, как `{struct n}` в
     // Coq, не требуется.
     let mut signature = base();
+    let mut metas = Metas::default();
     let body = lam(
         Mult::Many,
         "acc",
@@ -263,6 +274,7 @@ fn the_decreasing_position_is_found_by_search() {
         ),
     );
     let outcome = signature.define(
+        &mut metas,
         "count",
         Mult::Many,
         0,
@@ -334,7 +346,9 @@ fn convoyed(recursive: Term) -> Term {
 
 /// Определяет двухаргументную функцию над `Nat` и возвращает её вердикт.
 fn define_binary(signature: &mut Signature, name: &str, body: Term) -> bool {
+    let mut metas = Metas::default();
     let outcome = signature.define(
+        &mut metas,
         name,
         Mult::Many,
         0,
@@ -379,6 +393,7 @@ fn a_convoy_does_not_invent_a_decrease() {
 fn several_calls_must_share_one_decreasing_position() {
     // Оба вызова уменьшаются по одному и тому же полю.
     let mut signature = base();
+    let mut metas = Metas::default();
     let body = lam(
         Mult::Many,
         "n",
@@ -407,6 +422,7 @@ fn several_calls_must_share_one_decreasing_position() {
         declared(
             "plus",
             &signature.define(
+                &mut metas,
                 "plus",
                 Mult::Many,
                 0,
@@ -451,7 +467,9 @@ fn a_bare_self_reference_does_not_decrease() {
     // Имя без аргументов - вызов без единой позиции, по которой можно было бы
     // уменьшаться.
     let mut signature = base();
+    let mut metas = Metas::default();
     let outcome = signature.define(
+        &mut metas,
         "Same",
         Mult::Many,
         0,
@@ -467,6 +485,7 @@ fn calls_decreasing_at_different_positions_are_rejected() {
     // Известное ограничение: лексикографический порядок не покрыт. Один вызов
     // убывает по первому аргументу, другой по второму, общей позиции нет.
     let mut signature = base();
+    let mut metas = Metas::default();
     let by_second = lam(
         Mult::Many,
         "j",
@@ -500,6 +519,7 @@ fn calls_decreasing_at_different_positions_are_rejected() {
         ),
     );
     let outcome = signature.define(
+        &mut metas,
         "ack",
         Mult::Many,
         0,
@@ -643,6 +663,7 @@ fn a_total_definition_still_unfolds() {
 /// аргументе, но на свободной переменной ι не срабатывает, и сравнение
 /// разворачивает их без дна.
 fn define_recursive_family(signature: &mut Signature, name: &str) {
+    let mut metas = Metas::default();
     let body = lam(
         Mult::Many,
         "n",
@@ -657,6 +678,7 @@ fn define_recursive_family(signature: &mut Signature, name: &str) {
         ),
     );
     let outcome = signature.define(
+        &mut metas,
         name,
         Mult::Many,
         0,

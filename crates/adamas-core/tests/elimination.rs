@@ -10,8 +10,9 @@ use std::rc::Rc;
 use adamas_core::check::{TypeError, check_closed, infer_closed};
 use adamas_core::eval::normalize;
 use adamas_core::level::Level;
+use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
-use adamas_core::sig::Signature;
+use adamas_core::sig::{Group, Member, Signature};
 use adamas_core::term::{Branch, Case, Term};
 use proptest::prelude::*;
 
@@ -88,55 +89,54 @@ fn base() -> Signature {
 
     declared(
         "Bool",
-        &signature.declare_data("Bool", 0, &mut metas, Term::universe(0)),
+        &signature.declare_data(
+            &mut metas,
+            "Bool",
+            0,
+            Term::universe(0),
+            &[("true", c("Bool")), ("false", c("Bool"))],
+        ),
     );
-    for name in ["true", "false"] {
-        declared(
-            name,
-            &signature.declare_constructor("Bool", name, &mut metas, c("Bool")),
-        );
-    }
 
     declared(
         "Nat",
-        &signature.declare_data("Nat", 0, &mut metas, Term::universe(0)),
-    );
-    declared(
-        "zero",
-        &signature.declare_constructor("Nat", "zero", &mut metas, c("Nat")),
-    );
-    declared(
-        "succ",
-        &signature.declare_constructor("Nat", "succ", &mut metas, arrow(c("Nat"), c("Nat"))),
+        &signature.declare_data(
+            &mut metas,
+            "Nat",
+            0,
+            Term::universe(0),
+            &[("zero", c("Nat")), ("succ", arrow(c("Nat"), c("Nat")))],
+        ),
     );
 
     declared(
         "Void",
-        &signature.declare_data("Void", 0, &mut metas, Term::universe(0)),
+        &signature.declare_data(&mut metas, "Void", 0, Term::universe(0), &[]),
     );
 
     declared(
         "Pair",
-        &signature.declare_data("Pair", 0, &mut metas, Term::universe(0)),
-    );
-    declared(
-        "mk",
-        &signature.declare_constructor(
-            "Pair",
-            "mk",
+        &signature.declare_data(
             &mut metas,
-            pi(
-                Mult::One,
-                "x",
-                c("Bool"),
-                pi(Mult::One, "y", c("Bool"), c("Pair")),
-            ),
+            "Pair",
+            0,
+            Term::universe(0),
+            &[(
+                "mk",
+                pi(
+                    Mult::One,
+                    "x",
+                    c("Bool"),
+                    pi(Mult::One, "y", c("Bool"), c("Pair")),
+                ),
+            )],
         ),
     );
 
     declared(
         "and",
         &signature.postulate(
+            &mut metas,
             "and",
             Mult::Many,
             0,
@@ -145,7 +145,13 @@ fn base() -> Signature {
     );
     declared(
         "use",
-        &signature.postulate("use", Mult::Many, 0, arrow(c("Bool"), c("Bool"))),
+        &signature.postulate(
+            &mut metas,
+            "use",
+            Mult::Many,
+            0,
+            arrow(c("Bool"), c("Bool")),
+        ),
     );
 
     signature
@@ -164,58 +170,51 @@ fn vectors() -> Signature {
     declared(
         "Vect",
         &signature.declare_data(
+            &mut metas,
             "Vect",
             1,
-            &mut metas,
             pi(
                 Mult::Zero,
                 "A",
                 Term::universe(0),
                 pi(Mult::Zero, "n", c("Nat"), Term::universe(0)),
             ),
-        ),
-    );
-    declared(
-        "vnil",
-        &signature.declare_constructor(
-            "Vect",
-            "vnil",
-            &mut metas,
-            pi(
-                Mult::Zero,
-                "A",
-                Term::universe(0),
-                c("Vect").apply([Term::var(0), c("zero")]),
-            ),
-        ),
-    );
-    declared(
-        "vcons",
-        &signature.declare_constructor(
-            "Vect",
-            "vcons",
-            &mut metas,
-            pi(
-                Mult::Zero,
-                "A",
-                Term::universe(0),
-                pi(
-                    Mult::Zero,
-                    "n",
-                    c("Nat"),
+            &[
+                (
+                    "vnil",
                     pi(
-                        Mult::One,
-                        "x",
-                        Term::var(1),
+                        Mult::Zero,
+                        "A",
+                        Term::universe(0),
+                        c("Vect").apply([Term::var(0), c("zero")]),
+                    ),
+                ),
+                (
+                    "vcons",
+                    pi(
+                        Mult::Zero,
+                        "A",
+                        Term::universe(0),
                         pi(
-                            Mult::One,
-                            "xs",
-                            c("Vect").apply([Term::var(2), Term::var(1)]),
-                            c("Vect").apply([Term::var(3), c("succ").apply([Term::var(2)])]),
+                            Mult::Zero,
+                            "n",
+                            c("Nat"),
+                            pi(
+                                Mult::One,
+                                "x",
+                                Term::var(1),
+                                pi(
+                                    Mult::One,
+                                    "xs",
+                                    c("Vect").apply([Term::var(2), Term::var(1)]),
+                                    c("Vect")
+                                        .apply([Term::var(3), c("succ").apply([Term::var(2)])]),
+                                ),
+                            ),
                         ),
                     ),
                 ),
-            ),
+            ],
         ),
     );
     signature
@@ -229,35 +228,16 @@ fn lists() -> Signature {
     let mut metas = Metas::default();
 
     let level = metas.fresh_level();
-    declared(
-        "List",
-        &signature.declare_data(
-            "List",
-            1,
-            &mut metas,
-            pi(
-                Mult::Zero,
-                "A",
-                Term::Universe(level.clone()),
-                Term::Universe(level),
-            ),
-        ),
-    );
-    let list_of = |signature: &Signature, metas: &mut Metas, element: Term| {
-        signature
-            .instantiate("List", metas)
-            .unwrap_or_else(|| panic!("List объявлен"))
-            .apply([element])
+    // Ссылка на член объявляемой группы: спросить арность у сигнатуры нечего -
+    // семейства там ещё нет, - поэтому дырка пишется.
+    let list_of = |metas: &mut Metas, element: Term| {
+        Term::Const("List".into(), Rc::from([metas.fresh_level()])).apply([element])
     };
     let nil = pi(
         Mult::Zero,
         "A",
         Term::Universe(metas.fresh_level()),
-        list_of(&signature, &mut metas, Term::var(0)),
-    );
-    declared(
-        "nil",
-        &signature.declare_constructor("List", "nil", &mut metas, nil),
+        list_of(&mut metas, Term::var(0)),
     );
     let cons = pi(
         Mult::Zero,
@@ -270,14 +250,25 @@ fn lists() -> Signature {
             pi(
                 Mult::One,
                 "xs",
-                list_of(&signature, &mut metas, Term::var(1)),
-                list_of(&signature, &mut metas, Term::var(2)),
+                list_of(&mut metas, Term::var(1)),
+                list_of(&mut metas, Term::var(2)),
             ),
         ),
     );
     declared(
-        "cons",
-        &signature.declare_constructor("List", "cons", &mut metas, cons),
+        "List",
+        &signature.declare_data(
+            &mut metas,
+            "List",
+            1,
+            pi(
+                Mult::Zero,
+                "A",
+                Term::Universe(level.clone()),
+                Term::Universe(level),
+            ),
+            &[("nil", nil), ("cons", cons)],
+        ),
     );
     signature
 }
@@ -372,10 +363,11 @@ fn a_definition_reduces_through_a_case_only_when_unfolded() {
     // `eval` определений не разворачивает, поэтому `case two of …` остаётся
     // застрявшим. Свести его обязана проверка конвертируемости - и сводит.
     let mut signature = base();
+    let mut metas = Metas::default();
     let two = c("succ").apply([c("succ").apply([c("zero")])]);
     declared(
         "two",
-        &signature.define("two", Mult::Many, 0, c("Nat"), Some(two)),
+        &signature.define(&mut metas, "two", Mult::Many, 0, c("Nat"), Some(two)),
     );
 
     let discriminated = simple(
@@ -996,9 +988,11 @@ fn an_argument_position_scales_the_usage_it_receives() {
     // позиции `1`-аргумента и незаконно в позиции `ω`-аргумента: `ω`-функция
     // вправе позвать переданное сколько угодно раз, а ресурс один.
     let mut signature = base();
+    let mut metas = Metas::default();
     declared(
         "consume",
         &signature.postulate(
+            &mut metas,
             "consume",
             Mult::Many,
             0,
@@ -1116,28 +1110,32 @@ fn stuck_cases_are_compared_branch_by_branch() {
     );
 }
 
-// ------------------------------------------------------------ запечатывание
+// ------------------------------------------------- полнота списка конструкторов
 
-/// Пустое семейство остаётся пустым после того, как по нему разобрали.
+/// Пустое семейство остаётся пустым: дописать конструктор нечем.
 ///
-/// `absurd : Void -> A` проверена с нулём ветвей, потому что у `Void` не было
-/// конструкторов. Если конструктор появится позже, полнота ветвей окажется
-/// проверенной по прежнему списку, а перепроверять принятые определения
-/// некому: `absurd boom` дала бы замкнутого обитателя произвольного типа,
-/// признанного тотальным.
+/// `absurd : Void -> A` проверена с нулём ветвей, потому что у `Void` их нет.
+/// Появись конструктор позже - полнота ветвей осталась бы проверенной по
+/// прежнему списку, а перепроверять принятые определения некому: `absurd boom`
+/// дала бы замкнутого обитателя произвольного типа, признанного тотальным.
+///
+/// Раньше от этого защищало запечатывание - проверка времени выполнения. Её
+/// место заняло свойство формы API: конструкторы объявляются вместе с
+/// семейством, одной группой (§10 вопрос 50), и второго вызова для них нет.
 #[test]
-fn a_family_that_has_been_eliminated_takes_no_more_constructors() {
+fn a_family_takes_its_constructors_once_and_for_all() {
     let mut signature = Signature::default();
     let mut metas = adamas_core::meta::Metas::default();
     signature
-        .postulate("A", Mult::Many, 0, Term::universe(0))
+        .postulate(&mut metas, "A", Mult::Many, 0, Term::universe(0))
         .expect("A корректен");
     signature
-        .declare_data("Void", 0, &mut metas, Term::universe(0))
+        .declare_data(&mut metas, "Void", 0, Term::universe(0), &[])
         .expect("Void корректен");
 
     signature
         .define(
+            &mut metas,
             "absurd",
             Mult::Many,
             0,
@@ -1155,14 +1153,22 @@ fn a_family_that_has_been_eliminated_takes_no_more_constructors() {
                 ),
             )),
         )
-        .expect("разбор пустого семейства законен, пока оно пусто");
+        .expect("разбор пустого семейства законен");
 
+    // Единственный способ «дописать» - объявить семейство заново, а это занятое
+    // имя.
     assert!(
         matches!(
-            signature.declare_constructor("Void", "boom", &mut metas, c("Void")),
-            Err(TypeError::SealedFamily { .. })
+            signature.declare_data(
+                &mut metas,
+                "Void",
+                0,
+                Term::universe(0),
+                &[("boom", c("Void"))],
+            ),
+            Err(TypeError::DuplicateDefinition { .. })
         ),
-        "список конструкторов закрыт разбором"
+        "семейство объявляется один раз и целиком"
     );
     assert!(
         signature.lookup("boom").is_none(),
@@ -1170,51 +1176,58 @@ fn a_family_that_has_been_eliminated_takes_no_more_constructors() {
     );
 }
 
-/// Закрывается только разобранное семейство и только им.
+/// Группа `[data B {tt, ff}, def h : Type 1 = let f : B -> B = … in Type 0]`.
+///
+/// Разбор живёт в **теле** `h`, а не в его типе: тип члена проверяется фазой A,
+/// против сигнатуры без группы, поэтому упомянуть в нём соседа нельзя (§10
+/// вопрос 64). Для полноты ветвей это безразлично - она считается в фазе B2,
+/// где семейство уже видно со своим списком конструкторов.
+fn matching_on_its_own_family(branches: Vec<(&str, Term)>) -> Group {
+    let matcher = lam(
+        Mult::Many,
+        "b",
+        simple("B", Term::var(0), constantly(c("B")), branches),
+    );
+    let body = Term::Let(
+        Mult::Many,
+        "f".into(),
+        Rc::new(arrow(c("B"), c("B"))),
+        Rc::new(matcher),
+        Rc::new(Term::universe(0)),
+    );
+    Group::of(
+        Member::data("B", 0, Term::universe(0))
+            .with_constructor("tt", c("B"))
+            .with_constructor("ff", c("B")),
+    )
+    .and(Member::definition("h", Mult::Many, Term::universe(1)).with_body(body))
+}
+
+/// Внутри группы полнота ветвей считается по её же списку конструкторов.
+///
+/// Список полон с появления семейства, поэтому разбор по соседу проверяется
+/// так же, как по объявленному раньше. Пустой список на этом месте означал бы
+/// «семейство необитаемо», и это не мелочь: ровно от такого разбора защищало
+/// снятое запечатывание.
 #[test]
-fn sealing_is_confined_to_the_family_that_was_eliminated() {
-    let mut signature = base();
-    let mut metas = adamas_core::meta::Metas::default();
-    signature
-        .declare_data("Colour", 0, &mut metas, Term::universe(0))
-        .expect("Colour корректен");
-    signature
-        .declare_constructor("Colour", "red", &mut metas, c("Colour"))
-        .expect("первый конструктор законен");
+fn a_case_inside_the_group_sees_the_whole_constructor_list() {
+    let mut signature = Signature::default();
+    let mut metas = Metas::default();
+    let group = matching_on_its_own_family(vec![("tt", c("ff")), ("ff", c("tt"))]);
+    let outcome = signature.declare(&mut metas, &group);
+    assert!(outcome.is_ok(), "точный список ветвей: {outcome:?}");
+}
 
-    // Разбор по `Bool` не касается `Colour`.
-    signature
-        .define(
-            "negate",
-            Mult::Many,
-            0,
-            arrow(c("Bool"), c("Bool")),
-            Some(lam(
-                Mult::Many,
-                "b",
-                simple(
-                    "Bool",
-                    Term::var(0),
-                    constantly(c("Bool")),
-                    vec![("true", c("false")), ("false", c("true"))],
-                ),
-            )),
-        )
-        .expect("negate корректна");
-
+#[test]
+fn a_case_inside_the_group_is_not_exhausted_by_zero_branches() {
+    let mut signature = Signature::default();
+    let mut metas = Metas::default();
+    let outcome = signature.declare(&mut metas, &matching_on_its_own_family(Vec::new()));
     assert!(
-        signature
-            .declare_constructor("Colour", "blue", &mut metas, c("Colour"))
-            .is_ok(),
-        "по `Colour` не разбирали - список ещё открыт"
+        matches!(outcome, Err(TypeError::NonExhaustive { .. })),
+        "{outcome:?}"
     );
-    assert!(
-        matches!(
-            signature.declare_constructor("Bool", "maybe", &mut metas, c("Bool")),
-            Err(TypeError::SealedFamily { .. })
-        ),
-        "а по `Bool` разбирали"
-    );
+    assert!(signature.is_empty(), "отвергнутая группа не оставила следа");
 }
 
 // ------------------------------------------------------------------ свойства

@@ -35,13 +35,28 @@ fn check_closed(term: &Term, ty: &Term) -> Result<(), TypeError> {
 /// оставалась бы вне обстрела.
 fn fixture_signature() -> Signature {
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     let add = |outcome: Result<(), TypeError>| assert!(outcome.is_ok(), "{outcome:?}");
     // Определение с телом: разворачивается.
-    add(signature.define("alias", Mult::Many, 0, Term::universe(1), Some(ty0())));
+    add(signature.define(
+        &mut metas,
+        "alias",
+        Mult::Many,
+        0,
+        Term::universe(1),
+        Some(ty0()),
+    ));
     // Постулат: застревает навсегда.
-    add(signature.postulate("opaque", Mult::Many, 0, Term::universe(1)));
+    add(signature.postulate(&mut metas, "opaque", Mult::Many, 0, Term::universe(1)));
     // Стёртое определение: в рантайм-позиции обязано отвергаться.
-    add(signature.define("erased", Mult::Zero, 0, Term::universe(1), Some(ty0())));
+    add(signature.define(
+        &mut metas,
+        "erased",
+        Mult::Zero,
+        0,
+        Term::universe(1),
+        Some(ty0()),
+    ));
     signature
 }
 
@@ -369,11 +384,13 @@ fn a_linear_binding_is_checked_wherever_the_lambda_stands() {
     // разрешало `spend` любое использование. Проверка линейности выключалась
     // для всего, что стояло под ω-аргументом, то есть почти везде.
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     signature
-        .postulate("A", Mult::Many, 0, Term::universe(0))
+        .postulate(&mut metas, "A", Mult::Many, 0, Term::universe(0))
         .expect("A корректен");
     signature
         .postulate(
+            &mut metas,
             "pair",
             Mult::Many,
             0,
@@ -388,6 +405,7 @@ fn a_linear_binding_is_checked_wherever_the_lambda_stands() {
     let linear = pi(Mult::One, "x", Term::constant("A"), Term::constant("A"));
     signature
         .postulate(
+            &mut metas,
             "higher",
             Mult::Many,
             0,

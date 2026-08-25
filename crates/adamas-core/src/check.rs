@@ -200,17 +200,6 @@ pub enum TypeError {
         name: Name,
     },
 
-    /// Конструктор добавляется к семейству, по которому уже разбирали.
-    #[error(
-        "`{data}` уже разбирали, конструктор `{constructor}` добавить нельзя: полнота ветвей проверена по прежнему списку"
-    )]
-    SealedFamily {
-        /// Имя типа.
-        data: Name,
-        /// Имя конструктора, который не удалось добавить.
-        constructor: Name,
-    },
-
     /// Конструктор не повторяет телескоп параметров своего типа.
     #[error(
         "конструктор `{name}` обязан начинаться с параметров `{data}`, но параметр #{index} не совпадает"
@@ -1048,8 +1037,16 @@ pub fn data_sort(name: &Name, params: u32, ty: &Term) -> Result<Level, TypeError
     }
 }
 
-/// Проверяет конструктор: телескоп параметров, результат, позитивность,
-/// укладку в универсум.
+/// Проверяет форму конструктора: телескоп параметров и результат.
+///
+/// Фаза B1 объявления группы (§10 вопрос 50). Здесь всё, для чего довольно
+/// **типов** членов группы: параметры конструктор обязан повторить дословно, а
+/// результатом обязан быть тот же тип, применённый к собственным параметрам.
+/// Позитивность и укладка в универсум сюда не входят - им нужна закрытая
+/// группа, см. [`check_constructor_content`].
+///
+/// `family` - объявление тип-формера. Оно передаётся, а не ищется по имени:
+/// вызывает эту проверку только объявление группы, и семейство у него в руках.
 ///
 /// Тип уже проверен обычной машинерией определений; здесь только то, что
 /// отличает конструктор от постулата с похожим типом.
@@ -1057,27 +1054,22 @@ pub fn data_sort(name: &Name, params: u32, ty: &Term) -> Result<Level, TypeError
 /// # Errors
 ///
 /// Имя не индуктивный тип; конструктор не повторяет параметры; результат не
-/// тот тип; нарушена строгая позитивность; поле живёт выше универсума самого
-/// типа.
-pub fn check_constructor(
+/// тот тип.
+pub(crate) fn check_constructor_shape(
     signature: &Signature,
     metas: &mut Metas,
     name: &Name,
     data: &Name,
+    family: &Definition,
     ty: &Term,
 ) -> Result<(), TypeError> {
-    let Some(declaration) = signature.lookup(data) else {
-        return Err(TypeError::UnknownConstant {
-            name: Rc::clone(data),
-        });
-    };
-    let DefinitionKind::Data { sort, params, .. } = &declaration.kind else {
+    let Some((params, _)) = family.data_shape() else {
         return Err(TypeError::NotADataType {
             name: Rc::clone(data),
         });
     };
-    let (params, sort, arity) = (*params, sort.clone(), declaration.level_arity);
-    let telescope = peel_pis(&declaration.ty).0;
+    let arity = family.level_arity;
+    let telescope = peel_pis(&family.ty).0;
 
     let (fields, result) = peel_pis(ty);
     let mismatched = |index: u32| TypeError::ConstructorParameter {
@@ -1104,25 +1096,6 @@ pub fn check_constructor(
                 )
             {
                 return Err(mismatched(depth));
-            }
-        } else {
-            if !positive_field(signature, data, params, depth, &field.domain) {
-                return Err(TypeError::NotStrictlyPositive {
-                    name: Rc::clone(name),
-                    data: Rc::clone(data),
-                });
-            }
-            // Поле не может жить выше самого типа: иначе `Type ℓ` содержал бы
-            // значение, построенное над `Type (ℓ+1)`, и предикативность (§3.2)
-            // обходилась бы через data-декларацию. Параметры это правило не
-            // ограничивает - они не хранятся в значении, а подставляются.
-            let field_level = is_type(&ctx, metas, &field.domain)?;
-            if !field_level.leq(&sort) {
-                return Err(TypeError::ConstructorUniverse {
-                    name: Rc::clone(name),
-                    field: metas.zonk(&field_level).to_string(),
-                    sort: metas.zonk(&sort).to_string(),
-                });
             }
         }
         ctx = ctx.bind(Rc::clone(&field.name), field.mult, ctx.eval(&field.domain));
@@ -1157,6 +1130,64 @@ pub fn check_constructor(
             data: Rc::clone(data),
             found: shown_term(metas, result),
         });
+    }
+    Ok(())
+}
+
+/// Проверяет содержимое конструктора: строгую позитивность и укладку полей в
+/// универсум типа.
+///
+/// Фаза C объявления группы (§10 вопрос 50) - то, для чего нужна **закрытая**
+/// группа. Позитивность живёт именно здесь, и это не косметика: она смотрит
+/// сквозь определения (`def G = Bad -> Bad`, затем `mk : G -> Bad`), а
+/// определение, тело которого ещё не проверено, она видит без тела - и тогда
+/// **принимает** негативный конструктор вместо того, чтобы отвергнуть. У всех
+/// прочих проверок ядра консервативность направлена в другую сторону, и ошибка
+/// здесь означала бы принятую некорректную программу.
+///
+/// `family` - объявление тип-формера, как и у [`check_constructor_shape`].
+///
+/// # Errors
+///
+/// Нарушена строгая позитивность; поле живёт выше универсума самого типа.
+pub(crate) fn check_constructor_content(
+    signature: &Signature,
+    metas: &mut Metas,
+    name: &Name,
+    data: &Name,
+    family: &Definition,
+    ty: &Term,
+) -> Result<(), TypeError> {
+    let Some((params, sort)) = family.data_shape() else {
+        return Err(TypeError::NotADataType {
+            name: Rc::clone(data),
+        });
+    };
+
+    let mut ctx = Ctx::new(signature);
+    for (index, field) in peel_pis(ty).0.iter().enumerate() {
+        let depth = u32::try_from(index).unwrap_or(u32::MAX);
+        if depth >= params {
+            if !positive_field(signature, data, params, depth, &field.domain) {
+                return Err(TypeError::NotStrictlyPositive {
+                    name: Rc::clone(name),
+                    data: Rc::clone(data),
+                });
+            }
+            // Поле не может жить выше самого типа: иначе `Type ℓ` содержал бы
+            // значение, построенное над `Type (ℓ+1)`, и предикативность (§3.2)
+            // обходилась бы через data-декларацию. Параметры это правило не
+            // ограничивает - они не хранятся в значении, а подставляются.
+            let field_level = is_type(&ctx, metas, &field.domain)?;
+            if !field_level.leq(sort) {
+                return Err(TypeError::ConstructorUniverse {
+                    name: Rc::clone(name),
+                    field: metas.zonk(&field_level).to_string(),
+                    sort: metas.zonk(sort).to_string(),
+                });
+            }
+        }
+        ctx = ctx.bind(Rc::clone(&field.name), field.mult, ctx.eval(&field.domain));
     }
     Ok(())
 }

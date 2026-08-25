@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 use adamas_core::check::{TypeError, check_closed, infer_closed};
 use adamas_core::level::{Level, LevelVar};
+use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::sig::Signature;
 use adamas_core::term::Term;
@@ -38,7 +39,9 @@ fn at(name: &str, levels: &[Level]) -> Term {
 /// тождественная функция со стёртым параметром типа.
 fn identity_signature() -> Signature {
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     let outcome = signature.define(
+        &mut metas,
         "Id",
         Mult::Many,
         1,
@@ -114,8 +117,10 @@ fn definitions_unfold_when_conversion_needs_them() {
     // `Alias` определён как `Type 0`, значит `Type 0` ему конвертируем -
     // но только после разворота.
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     signature
         .define(
+            &mut metas,
             "Alias",
             Mult::Many,
             0,
@@ -135,9 +140,11 @@ fn definitions_unfold_when_conversion_needs_them() {
 #[test]
 fn two_definitions_with_the_same_body_are_convertible() {
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     for name in ["First", "Second"] {
         signature
             .define(
+                &mut metas,
                 name,
                 Mult::Many,
                 0,
@@ -161,11 +168,12 @@ fn a_postulate_stays_stuck() {
     // У постулата тела нет, разворачивать нечего: два разных постулата
     // остаются разными типами.
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     signature
-        .postulate("A", Mult::Many, 0, Term::universe(1))
+        .postulate(&mut metas, "A", Mult::Many, 0, Term::universe(1))
         .unwrap();
     signature
-        .postulate("B", Mult::Many, 0, Term::universe(1))
+        .postulate(&mut metas, "B", Mult::Many, 0, Term::universe(1))
         .unwrap();
 
     let identity = lam(Mult::Many, "x", Term::var(0));
@@ -183,8 +191,15 @@ fn a_postulate_stays_stuck() {
 fn level_arguments_are_part_of_the_head() {
     // Постулат, применённый на разных уровнях, - разные типы.
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     signature
-        .postulate("Box", Mult::Many, 1, Term::Universe(u(0).succ()))
+        .postulate(
+            &mut metas,
+            "Box",
+            Mult::Many,
+            1,
+            Term::Universe(u(0).succ()),
+        )
         .unwrap();
 
     let identity = lam(Mult::Many, "x", Term::var(0));
@@ -219,14 +234,16 @@ fn level_arguments_are_part_of_the_head() {
 #[test]
 fn a_definition_is_transparent_where_the_shape_of_a_type_is_asked() {
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     signature
-        .postulate("Nat", Mult::Many, 0, Term::universe(0))
+        .postulate(&mut metas, "Nat", Mult::Many, 0, Term::universe(0))
         .unwrap();
     signature
-        .postulate("z", Mult::Many, 0, Term::constant("Nat"))
+        .postulate(&mut metas, "z", Mult::Many, 0, Term::constant("Nat"))
         .unwrap();
     signature
         .define(
+            &mut metas,
             "Fn",
             Mult::Many,
             0,
@@ -240,7 +257,7 @@ fn a_definition_is_transparent_where_the_shape_of_a_type_is_asked() {
         )
         .unwrap();
     signature
-        .postulate("f", Mult::Many, 0, Term::constant("Fn"))
+        .postulate(&mut metas, "f", Mult::Many, 0, Term::constant("Fn"))
         .unwrap();
 
     let applied = check_closed(
@@ -262,8 +279,10 @@ fn a_definition_is_transparent_where_the_shape_of_a_type_is_asked() {
 fn a_definition_is_transparent_in_the_position_of_a_type() {
     // `Sort2 = Type 2`, поэтому `T : Sort2` обязана годиться как тип.
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     signature
         .define(
+            &mut metas,
             "Sort2",
             Mult::Many,
             0,
@@ -272,10 +291,10 @@ fn a_definition_is_transparent_in_the_position_of_a_type() {
         )
         .unwrap();
     signature
-        .postulate("T", Mult::Many, 0, Term::constant("Sort2"))
+        .postulate(&mut metas, "T", Mult::Many, 0, Term::constant("Sort2"))
         .unwrap();
     signature
-        .postulate("t", Mult::Many, 0, Term::constant("T"))
+        .postulate(&mut metas, "t", Mult::Many, 0, Term::constant("T"))
         .unwrap();
 
     let outcome = check_closed(&signature, &Term::constant("t"), &Term::constant("T"));
@@ -287,8 +306,10 @@ fn a_definition_is_transparent_in_the_position_of_a_type() {
 #[test]
 fn an_erased_definition_cannot_be_used_at_runtime() {
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     signature
         .define(
+            &mut metas,
             "Proof",
             Mult::Zero,
             0,
@@ -309,8 +330,10 @@ fn an_erased_definition_is_fine_inside_a_type() {
     // Иначе стирание было бы бесполезно - доказательства нельзя было бы даже
     // упоминать в сигнатурах.
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     signature
         .define(
+            &mut metas,
             "Proof",
             Mult::Zero,
             0,
@@ -327,8 +350,10 @@ fn an_erased_definition_is_fine_inside_a_type() {
 #[test]
 fn a_linear_definition_is_rejected() {
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     assert!(matches!(
         signature.define(
+            &mut metas,
             "L",
             Mult::One,
             0,
@@ -375,8 +400,15 @@ fn the_number_of_level_arguments_must_match() {
 #[test]
 fn a_level_parameter_beyond_the_declared_arity_is_rejected() {
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     assert!(matches!(
-        signature.postulate("Bad", Mult::Many, 1, Term::Universe(u(3).succ())),
+        signature.postulate(
+            &mut metas,
+            "Bad",
+            Mult::Many,
+            1,
+            Term::Universe(u(3).succ())
+        ),
         Err(TypeError::LevelVarOutOfScope {
             var: 3,
             arity: 1,
@@ -388,8 +420,10 @@ fn a_level_parameter_beyond_the_declared_arity_is_rejected() {
 #[test]
 fn a_definition_body_must_match_its_type() {
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     assert!(matches!(
         signature.define(
+            &mut metas,
             "Wrong",
             Mult::Many,
             0,
@@ -403,27 +437,44 @@ fn a_definition_body_must_match_its_type() {
 #[test]
 fn a_name_cannot_be_defined_twice() {
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     signature
-        .postulate("A", Mult::Many, 0, Term::universe(1))
+        .postulate(&mut metas, "A", Mult::Many, 0, Term::universe(1))
         .unwrap();
     assert!(matches!(
-        signature.postulate("A", Mult::Many, 0, Term::universe(1)),
+        signature.postulate(&mut metas, "A", Mult::Many, 0, Term::universe(1)),
         Err(TypeError::DuplicateDefinition { .. })
     ));
+    // Отказ по занятому имени происходит до единой вставки, поэтому откату
+    // нечего снимать. Проверь имена позже - и откат снял бы `A`, то есть то
+    // самое определение, на которое жаловался.
+    assert!(
+        signature.lookup("A").is_some(),
+        "занятое имя осталось за прежним определением"
+    );
 }
 
 #[test]
 fn a_definition_refers_to_itself_only_in_its_body() {
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     // Тип проверяется без собственного имени: `Loop : Loop` цикличен.
     assert!(matches!(
-        signature.define("Loop", Mult::Many, 0, Term::constant("Loop"), None),
+        signature.define(
+            &mut metas,
+            "Loop",
+            Mult::Many,
+            0,
+            Term::constant("Loop"),
+            None
+        ),
         Err(TypeError::UnknownConstant { .. })
     ));
 
     // Тело - уже с ним, и `Loop = Loop` принимается. Тотальным оно при этом не
     // становится, и завершаемость δ-разворота держится именно на этом.
     let outcome = signature.define(
+        &mut metas,
         "Loop",
         Mult::Many,
         0,
@@ -437,7 +488,9 @@ fn a_definition_refers_to_itself_only_in_its_body() {
 /// `Alias : Type (u0 + 1)` с телом `Type u0` - определение, вычисляющееся в тип.
 fn alias_signature() -> Signature {
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     let outcome = signature.define(
+        &mut metas,
         "Alias",
         Mult::Many,
         1,
@@ -483,8 +536,9 @@ proptest! {
     #[test]
     fn respelling_a_level_argument_changes_nothing(level in any_level(), variant in 0u8..3) {
         let mut signature = Signature::default();
+        let mut metas = Metas::default();
         signature
-            .postulate("Box", Mult::Many, 2, Term::Universe(u(0).succ()))
+            .postulate(&mut metas, "Box", Mult::Many, 2, Term::Universe(u(0).succ()))
             .expect("постулат добавляется");
 
         let spelled = at("Box", &[respell(&level, variant), Level::Zero]);

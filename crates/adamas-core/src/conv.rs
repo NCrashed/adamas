@@ -528,8 +528,10 @@ mod tests {
     #[test]
     fn unfolding_a_non_function_is_a_refusal_not_a_panic() {
         let mut signature = crate::sig::Signature::default();
+        let mut metas = crate::meta::Metas::default();
         signature
             .define(
+                &mut metas,
                 "c",
                 Mult::Many,
                 0,
@@ -557,14 +559,16 @@ mod tests {
     #[test]
     fn fuel_is_spent_along_a_path_not_across_the_width() {
         let mut signature = crate::sig::Signature::default();
+        let mut metas = crate::meta::Metas::default();
         signature
-            .postulate("Nat", Mult::Many, 0, Term::universe(0))
+            .postulate(&mut metas, "Nat", Mult::Many, 0, Term::universe(0))
             .expect("Nat корректен");
         signature
-            .postulate("zero", Mult::Many, 0, Term::constant("Nat"))
+            .postulate(&mut metas, "zero", Mult::Many, 0, Term::constant("Nat"))
             .expect("zero корректен");
         signature
             .define(
+                &mut metas,
                 "id",
                 Mult::Many,
                 0,
@@ -574,6 +578,7 @@ mod tests {
             .expect("id корректна");
         signature
             .postulate(
+                &mut metas,
                 "F",
                 Mult::Many,
                 0,

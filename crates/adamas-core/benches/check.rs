@@ -52,26 +52,29 @@ fn c(name: &str) -> Term {
 }
 
 /// `Bool` с двумя конструкторами и `Nat` с `zero`/`succ`.
-fn base() -> Signature {
+///
+/// Хранилище принимается, а не заводится: оно одно на прогон (§10 вопрос 51), и
+/// заготовка бенча - такой же его пользователь, как элаборатор.
+fn base(metas: &mut Metas) -> Signature {
     let mut signature = Signature::default();
-    let mut metas = Metas::default();
     signature
-        .declare_data("Bool", 0, &mut metas, Term::universe(0))
+        .declare_data(
+            metas,
+            "Bool",
+            0,
+            Term::universe(0),
+            &[("true", c("Bool")), ("false", c("Bool"))],
+        )
         .expect("Bool");
-    for name in ["true", "false"] {
-        signature
-            .declare_constructor("Bool", name, &mut metas, c("Bool"))
-            .expect("конструктор Bool");
-    }
     signature
-        .declare_data("Nat", 0, &mut metas, Term::universe(0))
+        .declare_data(
+            metas,
+            "Nat",
+            0,
+            Term::universe(0),
+            &[("zero", c("Nat")), ("succ", arrow(c("Nat"), c("Nat")))],
+        )
         .expect("Nat");
-    signature
-        .declare_constructor("Nat", "zero", &mut metas, c("Nat"))
-        .expect("zero");
-    signature
-        .declare_constructor("Nat", "succ", &mut metas, arrow(c("Nat"), c("Nat")))
-        .expect("succ");
     signature
 }
 
@@ -90,7 +93,7 @@ fn lambda_chain(depth: u32) -> (Term, Term) {
 ///
 /// Именно термом: `eval` определений не разворачивает, поэтому применённое
 /// определение осталось бы застрявшим и дерево не вычислилось бы ни разу.
-fn case_tree(signature: &Signature, depth: u32) -> Term {
+fn case_tree(signature: &Signature, metas: &mut Metas, depth: u32) -> Term {
     let ty = (0..depth).fold(c("Bool"), |tail, _| arrow(c("Bool"), tail));
     let clauses: Vec<Clause> = (0..1u32 << depth)
         .map(|mask| Clause {
@@ -111,12 +114,12 @@ fn case_tree(signature: &Signature, depth: u32) -> Term {
             },
         })
         .collect();
-    compile(signature, &mut Metas::default(), &ty, &clauses).expect("дерево собирается")
+    compile(signature, metas, &ty, &clauses).expect("дерево собирается")
 }
 
 /// `plus` клаузами - рекурсивное определение, разворот которого стоит шаг на
 /// каждую единицу.
-fn plus(signature: &mut Signature) {
+fn plus(signature: &mut Signature, metas: &mut Metas) {
     let ty = arrow(c("Nat"), arrow(c("Nat"), c("Nat")));
     let clauses = [
         Clause {
@@ -134,9 +137,9 @@ fn plus(signature: &mut Signature) {
             body: c("succ").apply([c("plus").apply([Term::var(1), Term::var(0)])]),
         },
     ];
-    let body = compile(signature, &mut Metas::default(), &ty, &clauses).expect("plus собирается");
+    let body = compile(signature, metas, &ty, &clauses).expect("plus собирается");
     signature
-        .define("plus", Mult::Many, 0, ty, Some(body))
+        .define(metas, "plus", Mult::Many, 0, ty, Some(body))
         .expect("plus типизируется");
 }
 
@@ -145,7 +148,8 @@ fn number(value: u32) -> Term {
 }
 
 fn checking(criterion: &mut Criterion) {
-    let signature = base();
+    let mut metas = Metas::default();
+    let signature = base(&mut metas);
 
     for depth in [16u32, 64] {
         let (term, ty) = lambda_chain(depth);
@@ -157,7 +161,7 @@ fn checking(criterion: &mut Criterion) {
     }
 
     for depth in [4u32, 8] {
-        let applied = case_tree(&signature, depth)
+        let applied = case_tree(&signature, &mut metas, depth)
             .apply((0..depth).map(|bit| if bit % 2 == 0 { c("true") } else { c("false") }));
         criterion.bench_function(&format!("normalize_case_tree_{depth}"), |b| {
             b.iter(|| normalize(&applied));
@@ -166,10 +170,11 @@ fn checking(criterion: &mut Criterion) {
 
     // Проверка `anything (plus 8 8)` против `anything 16`: конвертируемость
     // упирается в δ-разворот `plus` шестнадцать раз подряд.
-    let mut with_plus = base();
-    plus(&mut with_plus);
+    let mut with_plus = base(&mut metas);
+    plus(&mut with_plus, &mut metas);
     with_plus
         .postulate(
+            &mut metas,
             "P",
             Mult::Many,
             0,
@@ -178,6 +183,7 @@ fn checking(criterion: &mut Criterion) {
         .expect("P");
     with_plus
         .postulate(
+            &mut metas,
             "anything",
             Mult::Many,
             0,

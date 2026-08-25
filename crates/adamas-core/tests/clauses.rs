@@ -63,29 +63,28 @@ fn base() -> Signature {
     let mut metas = Metas::default();
     declared(
         "Bool",
-        &signature.declare_data("Bool", 0, &mut metas, Term::universe(0)),
+        &signature.declare_data(
+            &mut metas,
+            "Bool",
+            0,
+            Term::universe(0),
+            &[("true", c("Bool")), ("false", c("Bool"))],
+        ),
     );
-    for name in ["true", "false"] {
-        declared(
-            name,
-            &signature.declare_constructor("Bool", name, &mut metas, c("Bool")),
-        );
-    }
     declared(
         "Nat",
-        &signature.declare_data("Nat", 0, &mut metas, Term::universe(0)),
-    );
-    declared(
-        "zero",
-        &signature.declare_constructor("Nat", "zero", &mut metas, c("Nat")),
-    );
-    declared(
-        "succ",
-        &signature.declare_constructor("Nat", "succ", &mut metas, arrow(c("Nat"), c("Nat"))),
+        &signature.declare_data(
+            &mut metas,
+            "Nat",
+            0,
+            Term::universe(0),
+            &[("zero", c("Nat")), ("succ", arrow(c("Nat"), c("Nat")))],
+        ),
     );
     declared(
         "P",
         &signature.postulate(
+            &mut metas,
             "P",
             Mult::Many,
             0,
@@ -95,6 +94,7 @@ fn base() -> Signature {
     declared(
         "anything",
         &signature.postulate(
+            &mut metas,
             "anything",
             Mult::Many,
             0,
@@ -108,35 +108,17 @@ fn base() -> Signature {
 fn with_lists(signature: &mut Signature) {
     let mut metas = Metas::default();
     let level = metas.fresh_level();
-    declared(
-        "List",
-        &signature.declare_data(
-            "List",
-            1,
-            &mut metas,
-            pi(
-                Mult::Zero,
-                "A",
-                Term::Universe(level.clone()),
-                Term::Universe(level),
-            ),
-        ),
-    );
-    let list_of = |signature: &Signature, metas: &mut Metas, element: Term| {
-        signature
-            .instantiate("List", metas)
-            .unwrap_or_else(|| panic!("List объявлен"))
-            .apply([element])
+    // Ссылка на член объявляемой группы пишется дырками: спросить у сигнатуры
+    // нечего - семейства там ещё нет. Число дырок обязано совпасть с арностью,
+    // и это проверяется (`LevelArity`).
+    let list_of = |metas: &mut Metas, element: Term| {
+        Term::Const("List".into(), Rc::from([metas.fresh_level()])).apply([element])
     };
     let nil = pi(
         Mult::Zero,
         "A",
         Term::Universe(metas.fresh_level()),
-        list_of(signature, &mut metas, Term::var(0)),
-    );
-    declared(
-        "nil",
-        &signature.declare_constructor("List", "nil", &mut metas, nil),
+        list_of(&mut metas, Term::var(0)),
     );
     let cons = pi(
         Mult::Zero,
@@ -149,25 +131,39 @@ fn with_lists(signature: &mut Signature) {
             pi(
                 Mult::Many,
                 "xs",
-                list_of(signature, &mut metas, Term::var(1)),
-                list_of(signature, &mut metas, Term::var(2)),
+                list_of(&mut metas, Term::var(1)),
+                list_of(&mut metas, Term::var(2)),
             ),
         ),
     );
     declared(
-        "cons",
-        &signature.declare_constructor("List", "cons", &mut metas, cons),
+        "List",
+        &signature.declare_data(
+            &mut metas,
+            "List",
+            1,
+            pi(
+                Mult::Zero,
+                "A",
+                Term::Universe(level.clone()),
+                Term::Universe(level),
+            ),
+            &[("nil", nil), ("cons", cons)],
+        ),
     );
 }
 
 /// Собирает клаузы и определяет функцию, требуя успеха на обоих шагах.
 fn define(signature: &mut Signature, name: &str, ty: Term, clauses: &[Clause]) {
-    let body = compile(signature, &mut Metas::default(), &ty, clauses);
+    // Одно хранилище на весь вызов: сборка клауз и проверка определения - это
+    // один прогон, и дырка из первого шага обязана дожить до второго.
+    let mut metas = Metas::default();
+    let body = compile(signature, &mut metas, &ty, clauses);
     let body = match body {
         Ok(body) => body,
         Err(error) => panic!("`{name}` не собирается: {error}"),
     };
-    let outcome = signature.define(name, Mult::Many, 0, ty, Some(body));
+    let outcome = signature.define(&mut metas, name, Mult::Many, 0, ty, Some(body));
     assert!(outcome.is_ok(), "`{name}` не типизируется: {outcome:?}");
 }
 
@@ -230,6 +226,7 @@ fn a_recursive_definition_is_written_as_clauses() {
 fn nested_patterns_are_compiled_into_a_chain() {
     // `even zero = true; even (succ zero) = false; even (succ (succ k)) = even k`
     let mut signature = base();
+    let mut metas = Metas::default();
     define(
         &mut signature,
         "even",
@@ -259,6 +256,7 @@ fn nested_patterns_are_compiled_into_a_chain() {
     declared(
         "Q",
         &probe.postulate(
+            &mut metas,
             "Q",
             Mult::Many,
             0,
@@ -268,6 +266,7 @@ fn nested_patterns_are_compiled_into_a_chain() {
     declared(
         "witness",
         &probe.postulate(
+            &mut metas,
             "witness",
             Mult::Many,
             0,
@@ -290,6 +289,7 @@ fn the_first_matching_clause_wins() {
     // Первая клауза перекрывает вторую при `true false`, и результат обязан
     // быть `true`, а не разбор второй.
     let mut signature = base();
+    let mut metas = Metas::default();
     define(
         &mut signature,
         "orb",
@@ -304,6 +304,7 @@ fn the_first_matching_clause_wins() {
     declared(
         "Q",
         &signature.postulate(
+            &mut metas,
             "Q",
             Mult::Many,
             0,
@@ -313,6 +314,7 @@ fn the_first_matching_clause_wins() {
     declared(
         "witness",
         &signature.postulate(
+            &mut metas,
             "witness",
             Mult::Many,
             0,
@@ -501,6 +503,7 @@ fn a_refinement_that_did_not_happen_is_rejected() {
     // Обратная сторона: в ветви `false` сосед - `Bool`, и вернуть его вместо
     // `Nat` нельзя. Уточнение обязано быть уточнением, а не размыванием.
     let mut signature = base();
+    let mut metas = Metas::default();
     with_if(&mut signature);
     let body = compile(
         &signature,
@@ -514,7 +517,7 @@ fn a_refinement_that_did_not_happen_is_rejected() {
     .expect("дерево собирается: неверен здесь тип тела, а не форма клауз");
     assert!(
         matches!(
-            signature.define("g", Mult::Many, 0, dependent_pair(), Some(body)),
+            signature.define(&mut metas, "g", Mult::Many, 0, dependent_pair(), Some(body)),
             Err(TypeError::Mismatch { .. })
         ),
         "`Bool` вместо `Nat`"
@@ -828,7 +831,7 @@ fn an_empty_family_is_eliminated_without_clauses() {
     let mut metas = Metas::default();
     declared(
         "Void",
-        &signature.declare_data("Void", 0, &mut metas, Term::universe(0)),
+        &signature.declare_data(&mut metas, "Void", 0, Term::universe(0), &[]),
     );
     define(&mut signature, "absurd", arrow(c("Void"), c("Nat")), &[]);
 
@@ -885,67 +888,62 @@ fn with_vectors(signature: &mut Signature) {
     declared(
         "Vect",
         &signature.declare_data(
+            &mut metas,
             "Vect",
             1,
-            &mut metas,
             pi(
                 Mult::Zero,
                 "A",
                 Term::universe(0),
                 pi(Mult::Zero, "n", c("Nat"), Term::universe(0)),
             ),
-        ),
-    );
-    declared(
-        "vnil",
-        &signature.declare_constructor(
-            "Vect",
-            "vnil",
-            &mut metas,
-            pi(
-                Mult::Zero,
-                "A",
-                Term::universe(0),
-                c("Vect").apply([Term::var(0), c("zero")]),
-            ),
-        ),
-    );
-    declared(
-        "vcons",
-        &signature.declare_constructor(
-            "Vect",
-            "vcons",
-            &mut metas,
-            pi(
-                Mult::Zero,
-                "A",
-                Term::universe(0),
-                pi(
-                    Mult::Zero,
-                    "k",
-                    c("Nat"),
+            &[
+                (
+                    "vnil",
                     pi(
-                        Mult::Many,
-                        "x",
-                        Term::var(1),
+                        Mult::Zero,
+                        "A",
+                        Term::universe(0),
+                        c("Vect").apply([Term::var(0), c("zero")]),
+                    ),
+                ),
+                (
+                    "vcons",
+                    pi(
+                        Mult::Zero,
+                        "A",
+                        Term::universe(0),
                         pi(
-                            Mult::Many,
-                            "xs",
-                            c("Vect").apply([Term::var(2), Term::var(1)]),
-                            c("Vect").apply([Term::var(3), c("succ").apply([Term::var(2)])]),
+                            Mult::Zero,
+                            "k",
+                            c("Nat"),
+                            pi(
+                                Mult::Many,
+                                "x",
+                                Term::var(1),
+                                pi(
+                                    Mult::Many,
+                                    "xs",
+                                    c("Vect").apply([Term::var(2), Term::var(1)]),
+                                    c("Vect")
+                                        .apply([Term::var(3), c("succ").apply([Term::var(2)])]),
+                                ),
+                            ),
                         ),
                     ),
                 ),
-            ),
+            ],
         ),
     );
 }
 
 /// `Q : Bool -> Type 0` и свидетель: так проверяется вычисленное булево.
 fn with_bool_family(signature: &mut Signature) {
+    let mut metas = Metas::default();
     declared(
         "Q",
         &signature.postulate(
+            &mut metas,
             "Q",
             Mult::Many,
             0,
@@ -955,6 +953,7 @@ fn with_bool_family(signature: &mut Signature) {
     declared(
         "witness",
         &signature.postulate(
+            &mut metas,
             "witness",
             Mult::Many,
             0,
@@ -1204,10 +1203,11 @@ fn an_opaque_index_neither_refines_nor_rejects() {
     // проходит проверку. Отказ здесь означал бы, что элаборация требует
     // индексов только конструкторной формы, а это отвергало бы программы зря.
     let mut signature = base();
+    let mut metas = Metas::default();
     with_vectors(&mut signature);
     declared(
         "len",
-        &signature.postulate("len", Mult::Many, 0, arrow(c("Nat"), c("Nat"))),
+        &signature.postulate(&mut metas, "len", Mult::Many, 0, arrow(c("Nat"), c("Nat"))),
     );
     define(
         &mut signature,
@@ -1244,19 +1244,14 @@ fn an_index_that_does_not_reduce_is_reported() {
     declared(
         "Foo",
         &signature.declare_data(
+            &mut metas,
             "Foo",
             0,
-            &mut metas,
             pi(Mult::Zero, "n", c("Nat"), Term::universe(0)),
-        ),
-    );
-    declared(
-        "mk",
-        &signature.declare_constructor(
-            "Foo",
-            "mk",
-            &mut metas,
-            pi(Mult::Many, "k", c("Nat"), c("Foo").apply([Term::var(0)])),
+            &[(
+                "mk",
+                pi(Mult::Many, "k", c("Nat"), c("Foo").apply([Term::var(0)])),
+            )],
         ),
     );
 
@@ -1360,8 +1355,10 @@ fn a_synonym_is_as_good_a_function_type_as_an_arrow() {
     // Телескоп снимается по значению, иначе арность вышла бы нулевой и клаузы
     // отверглись бы с выдуманным числом аргументов.
     let mut signature = base();
+    let mut metas = Metas::default();
     signature
         .define(
+            &mut metas,
             "Fn",
             Mult::Many,
             0,
@@ -1587,9 +1584,10 @@ proptest! {
     #[test]
     fn a_compiled_clause_set_type_checks(programme in any_programme()) {
         let mut signature = base();
+        let mut metas = Metas::default();
         let body = compile(&signature, &mut Metas::default(), &binary(), &written(&programme));
         prop_assert!(body.is_ok(), "{programme:?}: {body:?}");
-        let outcome = signature.define("f", Mult::Many, 0, binary(), Some(body.unwrap()));
+        let outcome = signature.define(&mut metas, "f", Mult::Many, 0, binary(), Some(body.unwrap()));
         prop_assert!(outcome.is_ok(), "{programme:?}: {outcome:?}");
     }
 
@@ -1601,9 +1599,10 @@ proptest! {
     #[test]
     fn the_tree_agrees_with_first_match(programme in any_programme()) {
         let mut signature = base();
+        let mut metas = Metas::default();
         let body = compile(&signature, &mut Metas::default(), &binary(), &written(&programme))
             .unwrap_or_else(|error| panic!("{programme:?}: {error}"));
-        let outcome = signature.define("f", Mult::Many, 0, binary(), Some(body));
+        let outcome = signature.define(&mut metas, "f", Mult::Many, 0, binary(), Some(body));
         prop_assert!(outcome.is_ok(), "{programme:?}: {outcome:?}");
 
         for left in 0..4 {

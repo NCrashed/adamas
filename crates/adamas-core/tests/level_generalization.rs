@@ -31,9 +31,9 @@ fn a_single_hole_becomes_one_parameter() {
 
     signature
         .define_inferred(
+            &mut metas,
             "Id",
             Mult::Many,
-            &mut metas,
             pi(
                 Mult::Zero,
                 "a",
@@ -62,9 +62,9 @@ fn the_generalized_definition_is_usable_polymorphically() {
     let level = metas.fresh_level();
     signature
         .define_inferred(
+            &mut metas,
             "Id",
             Mult::Many,
-            &mut metas,
             pi(
                 Mult::Zero,
                 "a",
@@ -103,9 +103,9 @@ fn parameters_are_numbered_by_first_appearance() {
     // В типе `second` встречается раньше `first`.
     signature
         .postulate_inferred(
+            &mut metas,
             "Both",
             Mult::Many,
-            &mut metas,
             pi(
                 Mult::Many,
                 "x",
@@ -128,9 +128,9 @@ fn a_hole_used_twice_becomes_one_parameter() {
 
     signature
         .postulate_inferred(
+            &mut metas,
             "Endo",
             Mult::Many,
-            &mut metas,
             pi(
                 Mult::Many,
                 "x",
@@ -154,9 +154,9 @@ fn a_solved_hole_does_not_become_a_parameter() {
     // `Type ?l` проверяется против `Type 3`, значит `?l := 2`.
     signature
         .define_inferred(
+            &mut metas,
             "Concrete",
             Mult::Many,
-            &mut metas,
             Term::universe(3),
             Some(Term::Universe(level)),
         )
@@ -177,9 +177,9 @@ fn a_definition_without_holes_gets_arity_zero() {
     let mut metas = Metas::default();
     signature
         .define_inferred(
+            &mut metas,
             "Simple",
             Mult::Many,
-            &mut metas,
             Term::universe(1),
             Some(Term::universe(0)),
         )
@@ -195,17 +195,18 @@ fn a_hole_living_only_in_the_body_is_rejected() {
     // Тип определяет, что подставится в месте использования. Дырка, которой в
     // типе нет, параметром стать не может: заполнить её было бы нечем.
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     signature
-        .postulate("Any", Mult::Many, 1, Term::universe(9))
+        .postulate(&mut metas, "Any", Mult::Many, 1, Term::universe(9))
         .unwrap();
 
     let mut metas = Metas::default();
     let hole = metas.fresh_level();
 
     let outcome = signature.define_inferred(
+        &mut metas,
         "BodyOnly",
         Mult::Many,
-        &mut metas,
         Term::universe(9),
         Some(Term::Const("Any".into(), Rc::from([hole]))),
     );
@@ -223,9 +224,9 @@ fn a_level_parameter_in_the_input_is_rejected() {
     let mut metas = Metas::default();
 
     let outcome = signature.postulate_inferred(
+        &mut metas,
         "Wrong",
         Mult::Many,
-        &mut metas,
         Term::Universe(Level::Var(LevelVar(0)).succ()),
     );
     assert!(
@@ -239,14 +240,16 @@ fn the_explicit_path_still_rejects_leftover_holes() {
     // `define` арность объявляет, значит выводить нечего, и остаточная дырка
     // остаётся отказом.
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     signature
-        .postulate("Any", Mult::Many, 1, Term::universe(9))
+        .postulate(&mut metas, "Any", Mult::Many, 1, Term::universe(9))
         .unwrap();
 
     let mut metas = Metas::default();
     let hole = metas.fresh_level();
 
     let outcome = signature.define(
+        &mut metas,
         "Leftover",
         Mult::Many,
         0,
@@ -273,9 +276,9 @@ fn generalization_preserves_checkability() {
 
     signature
         .define_inferred(
+            &mut metas,
             "Id",
             Mult::Many,
-            &mut metas,
             pi(
                 Mult::Zero,
                 "a",
@@ -377,7 +380,7 @@ proptest! {
 
         prop_assume!(
             signature
-                .define_inferred("D", Mult::Many, &mut metas, ty, None)
+                .define_inferred(&mut metas, "D", Mult::Many, ty, None)
                 .is_ok()
         );
 
@@ -402,7 +405,7 @@ proptest! {
 
         prop_assume!(
             signature
-                .define_inferred("D", Mult::Many, &mut metas, ty, None)
+                .define_inferred(&mut metas, "D", Mult::Many, ty, None)
                 .is_ok()
         );
 

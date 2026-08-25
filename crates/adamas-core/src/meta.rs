@@ -27,39 +27,94 @@ use std::rc::Rc;
 
 use crate::level::{Level, LevelMeta, LevelVar, peel};
 
-/// Хранилище метапеременных уровня.
+/// Хранилище метапеременных уровня - одно на прогон элаборации (§10 вопрос 51).
 ///
 /// Решения записываются один раз и не откатываются: backtracking'а в проверке
 /// нет, а откат потребовал бы журнала и точек сохранения.
-#[derive(Clone, Debug, Default)]
+///
+/// # Идентификатор - имя, а не номер слота
+///
+/// Счётчик монотонный и не перезапускается, поэтому [`LevelMeta`] осмыслен сам
+/// по себе: он называет дырку, а не место в векторе. Хранилище - вектор со
+/// смещением `base`: индексация остаётся O(1), а идентификатор ниже
+/// границы (дырка прошлого объявления, память под неё освобождена) или выше
+/// конца (дырка чужого хранилища) даёт **громкий отказ**, а не молча взятый
+/// чужой слот.
+///
+/// Отказ здесь - паника, и это не путь пользовательской ошибки: попасть сюда
+/// можно только смешав два хранилища или удержав дырку через границу
+/// объявления, а и то и другое - баг вызывающего в компиляторе.
+///
+/// [`Clone`] хранилище не выводит намеренно: копия раздавала бы те же
+/// идентификаторы от того же `base`, то есть ровно то смешение, ради запрета
+/// которого всё это и заведено.
+#[derive(Debug, Default)]
 pub struct Metas {
+    /// Живые дырки, начиная с `base`.
     levels: Vec<Option<Level>>,
+    /// Идентификатор первой живой дырки. Он же - граница обобщения: всё, что
+    /// живо, заведено текущим объявлением, потому что предыдущее закончилось
+    /// [`Metas::release`].
+    base: u32,
 }
 
 impl Metas {
     /// Свежая метапеременная уровня.
     pub fn fresh_level(&mut self) -> Level {
-        let meta = LevelMeta(
-            u32::try_from(self.levels.len())
-                .unwrap_or_else(|_| unreachable!("счётчик метапеременных не помещается в u32")),
-        );
+        let meta = LevelMeta(self.limit());
         self.levels.push(None);
         Level::Meta(meta)
     }
 
+    /// Отпускает все живые дырки и сдвигает границу.
+    ///
+    /// Зовётся на границе объявления - там, где все дырки либо решены, либо
+    /// обобщены в параметры, либо стали отказом. После этого их
+    /// идентификаторы остаются занятыми навсегда: обратиться по такому - не
+    /// «не найдено», а ошибка, и хранилище отвечает на неё паникой.
+    pub fn release(&mut self) {
+        self.base = self.limit();
+        self.levels.clear();
+    }
+
+    /// Идентификатор за последней живой дыркой.
+    fn limit(&self) -> u32 {
+        let live = u32::try_from(self.levels.len())
+            .unwrap_or_else(|_| unreachable!("живых дырок не бывает столько"));
+        self.base
+            .checked_add(live)
+            .unwrap_or_else(|| unreachable!("счётчик метапеременных не помещается в u32"))
+    }
+
+    /// Смещение дырки в живом диапазоне.
+    ///
+    /// Паникует вне диапазона - см. заголовок типа. Проверка одна на все
+    /// обращения и работает в любой сборке: делать её отладочной значило бы
+    /// оставить release без неё, а именно там дырка и берёт чужой слот молча.
+    fn offset(&self, LevelMeta(name): LevelMeta) -> usize {
+        name.checked_sub(self.base)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .filter(|offset| *offset < self.levels.len())
+            .unwrap_or_else(|| {
+                unreachable!(
+                    "дырка ?{name} вне живого диапазона [{}, {})",
+                    self.base,
+                    self.limit()
+                )
+            })
+    }
+
     /// Решение метапеременной, если оно есть.
+    ///
+    /// # Panics
+    ///
+    /// Если дырка не из этого хранилища или пережила границу объявления.
     #[must_use]
-    pub fn solution(&self, LevelMeta(index): LevelMeta) -> Option<&Level> {
-        self.levels.get(index as usize)?.as_ref()
+    pub fn solution(&self, meta: LevelMeta) -> Option<&Level> {
+        self.levels[self.offset(meta)].as_ref()
     }
 
-    /// Сколько метапеременных заведено.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.levels.len()
-    }
-
-    /// Заведена ли хоть одна.
+    /// Жива ли хоть одна дырка.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.levels.is_empty()
@@ -131,15 +186,14 @@ impl Metas {
         if occurs(meta, level) {
             return false;
         }
-        let LevelMeta(index) = meta;
-        match self.levels.get_mut(index as usize) {
-            // Решённая сюда не доходит: `zonk` раскрыл бы её раньше.
-            Some(slot) if slot.is_none() => {
-                *slot = Some(level.clone());
-                true
-            }
-            _ => false,
-        }
+        // Живость проверяет `offset`: дырка вне диапазона - баг вызывающего, а
+        // не повод отказать в типизации.
+        let offset = self.offset(meta);
+        let slot = &mut self.levels[offset];
+        // Решённая сюда не доходит: `zonk` раскрыл бы её раньше.
+        debug_assert!(slot.is_none(), "решённая дырка дошла до solve");
+        *slot = Some(level.clone());
+        true
     }
 }
 

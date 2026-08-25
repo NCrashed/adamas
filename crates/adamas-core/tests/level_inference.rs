@@ -28,7 +28,9 @@ fn u(index: u32) -> Level {
 /// тождественная функция со стёртым параметром типа.
 fn identity_signature() -> Signature {
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     let outcome = signature.define(
+        &mut metas,
         "Id",
         Mult::Many,
         1,
@@ -125,8 +127,10 @@ fn an_undetermined_level_is_rejected_rather_than_guessed() {
 fn conflicting_uses_of_one_metavariable_are_rejected() {
     // Одна дырка не может быть сразу двумя уровнями.
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     signature
         .postulate(
+            &mut metas,
             "Pair",
             Mult::Many,
             1,
@@ -155,11 +159,13 @@ fn a_leftover_metavariable_is_an_error_not_a_default() {
     // Постулат, уровень которого не проявляется в типе результата: решить
     // дырку неоткуда, и молча подставить ноль было бы враньём.
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     signature
-        .postulate("Opaque", Mult::Many, 1, Term::universe(1))
+        .postulate(&mut metas, "Opaque", Mult::Many, 1, Term::universe(1))
         .unwrap();
 
-    let mut metas = Metas::default();
+    // Хранилище то же: объявление отпустило свои дырки, но счётчик не
+    // перезапустился, и дырка `instantiate` получает следующий номер.
     let term = signature.instantiate("Opaque", &mut metas).unwrap();
 
     assert!(matches!(
@@ -224,11 +230,17 @@ fn a_metavariable_under_max_is_not_solved() {
     // угадывать. Отказ отвергает корректную программу - это цена, названная
     // в §10 вопросе 39.
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     signature
-        .postulate("Both", Mult::Many, 2, Term::Universe(u(0).max(u(1)).succ()))
+        .postulate(
+            &mut metas,
+            "Both",
+            Mult::Many,
+            2,
+            Term::Universe(u(0).max(u(1)).succ()),
+        )
         .unwrap();
 
-    let mut metas = Metas::default();
     let term = signature.instantiate("Both", &mut metas).unwrap();
 
     // Тип `Both{?a, ?b}` - это `Type (max ?a ?b + 1)`. Свести его к `Type 3`
@@ -245,16 +257,17 @@ fn instantiating_an_unknown_name_yields_nothing() {
 
 #[test]
 fn a_definition_with_a_hole_never_reaches_the_signature() {
-    // Определение живёт в сигнатуре дольше, чем хранилище метапеременных, и
-    // дырка в нём означала бы тип, зависящий от того, что уже уничтожено:
-    // следующая сессия подставила бы своё значение, и постулат оказался бы
-    // жителем сразу всех универсумов.
-    let mut outer = Metas::default();
-    let hole = outer.fresh_level();
-
+    // Определение живёт в сигнатуре дольше, чем живут дырки: граница
+    // объявления освобождает их (§10 вопрос 51). Дырка, дожившая до сигнатуры,
+    // означала бы тип, зависящий от того, чего уже нет, - и следующее
+    // объявление подставило бы туда своё.
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
+    let hole = metas.fresh_level();
+
+    // Арность объявлена, значит обобщать некуда, и дырка остаётся отказом.
     assert!(matches!(
-        signature.postulate("Weird", Mult::Many, 0, Term::Universe(hole)),
+        signature.postulate(&mut metas, "Weird", Mult::Many, 0, Term::Universe(hole)),
         Err(TypeError::UnsolvedDefinitionLevel { .. })
     ));
     assert!(
@@ -264,10 +277,11 @@ fn a_definition_with_a_hole_never_reaches_the_signature() {
 }
 
 #[test]
-fn a_body_built_by_instantiation_cannot_be_stored_as_is() {
-    // `instantiate` - штатный вход implicit UP, и он возвращает терм с
-    // дырками. Положить такой терм в сигнатуру нельзя: дырки принадлежат
-    // хранилищу вызывающего, а проверка определения заводит своё.
+fn a_body_built_by_instantiation_is_stored_without_holes() {
+    // `instantiate` - штатный вход implicit UP, и он возвращает терм с дырками.
+    // Хранилище одно на прогон, поэтому такой терм годится: к моменту, когда
+    // определение уходит в сигнатуру, дырка либо решена и подставлена, либо
+    // обобщена в параметр. Дожить до сигнатуры она не может.
     let mut signature = identity_signature();
     let mut metas = Metas::default();
     let body = signature.instantiate("Id", &mut metas).unwrap();
@@ -278,12 +292,42 @@ fn a_body_built_by_instantiation_cannot_be_stored_as_is() {
         Term::Universe(u(0)),
         pi(Mult::Many, "x", Term::var(0), Term::var(1)),
     );
-    assert!(
-        signature
-            .define("MyId", Mult::Many, 1, ty, Some(body))
-            .is_err(),
-        "терм с чужими дырками не должен приниматься"
+    let outcome = signature.define(&mut metas, "MyId", Mult::Many, 1, ty, Some(body));
+    assert!(outcome.is_ok(), "{outcome:?}");
+
+    let stored = signature.lookup("MyId").expect("определение сохранено");
+    let body = stored.body.as_ref().expect("тело есть");
+    assert_eq!(
+        body.to_string(),
+        "Id{u0}",
+        "дырка решена в параметр самого определения"
     );
+}
+
+#[test]
+#[should_panic(expected = "вне живого диапазона")]
+fn a_hole_that_outlived_its_declaration_is_refused_loudly() {
+    // Граница объявления освобождает дырки, и обращение к освобождённой - баг
+    // вызывающего, а не отказ типизации: счётчик монотонный, поэтому такой
+    // идентификатор ниже границы и не означает ничего. Отказ громкий намеренно,
+    // иначе дырка молча взяла бы слот следующего объявления.
+    //
+    // Чего проверка **не** ловит: два независимых хранилища, каждое из которых
+    // считает с нуля. От этого защищает не рантайм, а форма API - хранилище
+    // принимается, а не заводится (§10 вопрос 51).
+    let mut signature = Signature::default();
+    let mut metas = Metas::default();
+    let hole = metas.fresh_level();
+
+    signature
+        .postulate_inferred(
+            &mut metas,
+            "First",
+            Mult::Many,
+            Term::Universe(hole.clone()),
+        )
+        .expect("дырка обобщается в параметр");
+    let _ = signature.postulate(&mut metas, "Second", Mult::Many, 0, Term::Universe(hole));
 }
 
 #[test]
@@ -293,11 +337,19 @@ fn a_solved_level_is_shown_solved_in_the_error() {
     // `?0`, то есть читалась как «уровень не выведен» — при том что выведен, а
     // разошлись два конкретных уровня.
     let mut signature = Signature::default();
+    let mut metas = Metas::default();
     signature
-        .postulate("Box", Mult::Many, 1, Term::Universe(u(0).succ()))
+        .postulate(
+            &mut metas,
+            "Box",
+            Mult::Many,
+            1,
+            Term::Universe(u(0).succ()),
+        )
         .expect("Box корректен");
     signature
         .postulate(
+            &mut metas,
             "mk",
             Mult::Many,
             1,

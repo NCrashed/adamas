@@ -1,0 +1,5 @@
+---
+source: crates/adamas-parser/tests/layout.rs
+expression: shape(text)
+---
+{| resource File where {| drop h = closeFile h |} ; withFile path k = {| let {| h = openFile path |} ; k h |} |}

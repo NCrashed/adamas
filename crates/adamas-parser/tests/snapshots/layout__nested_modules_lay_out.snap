@@ -1,0 +1,5 @@
+---
+source: crates/adamas-parser/tests/layout.rs
+expression: "shape(text).expect(\"разбор удался\")"
+---
+{| module Collections where {| module OrderedMap ( Key : Ord ) where {| lookup = ( ) |} ; module HashMap ( Key : Hashable ) where {| lookup = ( ) |} |} |}

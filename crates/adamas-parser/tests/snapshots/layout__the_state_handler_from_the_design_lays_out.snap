@@ -1,0 +1,5 @@
+---
+source: crates/adamas-parser/tests/layout.rs
+expression: shape(text)
+---
+{| runState : s -> ( { State s } a ) -> ( s , a ) ; runState s0 prog = handle prog with {| get resume => resume s0 s0 ; put s' resume => runState s' ( resume ( ) ) ; return v => ( s0 , v ) |} |}

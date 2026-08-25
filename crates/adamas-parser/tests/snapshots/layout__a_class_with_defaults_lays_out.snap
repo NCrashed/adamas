@@ -1,0 +1,5 @@
+---
+source: crates/adamas-parser/tests/layout.rs
+expression: shape(text)
+---
+{| class Applicative f when Functor f where {| pure : a -> f a ; ap : f ( a -> b ) -> f a -> f b ; map f x = ap ( pure f ) x |} ; instance Functor Option where {| map f None = None ; map f ( Some x ) = Some ( f x ) |} |}

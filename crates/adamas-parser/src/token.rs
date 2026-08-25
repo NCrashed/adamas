@@ -116,6 +116,12 @@ pub enum TokenKind {
     /// `}`
     RBrace,
 
+    /// Начало блока. Ставит [`crate::layout`], в исходнике не пишется.
+    Open,
+    /// Граница между членами блока. Ставит [`crate::layout`].
+    Sep,
+    /// Конец блока. Ставит [`crate::layout`].
+    Close,
     /// Конец файла. Идёт последним всегда, чтобы парсеру не проверять край
     /// потока отдельно от края конструкции.
     Eof,
@@ -129,7 +135,7 @@ pub enum TokenKind {
 enum Face {
     /// Написание единственно и совпадает с текстом в исходнике.
     Spelled(&'static str),
-    /// Написаний много: имена, литералы, край файла.
+    /// Написаний много (имена, литералы) или нет вовсе (виртуальные границы).
     Class {
         /// Короткое имя для [`dump`].
         tag: &'static str,
@@ -147,6 +153,9 @@ impl TokenKind {
             Self::Nat => class("nat", "натуральный литерал"),
             Self::Float => class("float", "литерал с плавающей точкой"),
             Self::Str => class("str", "строковый литерал"),
+            Self::Open => class("open", "начало блока"),
+            Self::Sep => class("sep", "граница блока"),
+            Self::Close => class("close", "конец блока"),
             Self::Eof => class("eof", "конец файла"),
 
             Self::Data => Face::Spelled("data"),
@@ -194,7 +203,7 @@ impl TokenKind {
     }
 
     /// Как лексема пишется в исходнике. `None` у тех, чьё написание не одно:
-    /// имён, литералов, края файла.
+    /// имён, литералов и виртуальных границ блока.
     #[must_use]
     pub fn spelling(self) -> Option<&'static str> {
         match self.face() {
@@ -213,7 +222,8 @@ impl TokenKind {
         }
     }
 
-    /// Открывающая скобка? Внутри скобок layout приостановлен (§4.1).
+    /// Открывающая скобка? Внутри скобок layout приостановлен
+    /// ([`crate::layout`]).
     #[must_use]
     pub fn opens_bracket(self) -> bool {
         matches!(self, Self::LParen | Self::LBracket | Self::LBrace)
@@ -234,6 +244,12 @@ impl TokenKind {
     #[must_use]
     pub fn closes_bracket(self) -> bool {
         matches!(self, Self::RParen | Self::RBracket | Self::RBrace)
+    }
+
+    /// Виртуальная граница блока - то, что дописал [`crate::layout`].
+    #[must_use]
+    pub fn is_virtual(self) -> bool {
+        matches!(self, Self::Open | Self::Sep | Self::Close)
     }
 }
 
@@ -291,14 +307,14 @@ pub fn keyword(text: &str) -> Option<TokenKind> {
 /// Токен: что, где и в какой позиции строки.
 ///
 /// Строка и колонка хранятся, а не считаются по спану: их отдаёт лексер даром,
-/// а расстановке блоков колонка нужна у каждого токена. Пересчёт через
+/// а [`crate::layout`] спрашивает колонку у каждого токена. Пересчёт через
 /// [`adamas_core::source::SourceFile::location`] дал бы двоичный поиск на
 /// токен там, где достаточно счётчика.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Token {
     /// Что за токен.
     pub kind: TokenKind,
-    /// Диапазон в исходнике. У `Eof` пустой.
+    /// Диапазон в исходнике. У виртуальных токенов пустой.
     pub span: Span,
     /// Номер строки, с единицы.
     pub line: u32,
@@ -308,7 +324,7 @@ pub struct Token {
 }
 
 impl Token {
-    /// Текст токена из исходника. У `Eof` пустой.
+    /// Текст токена из исходника. У виртуальных токенов пустой.
     ///
     /// # Panics
     ///
@@ -348,9 +364,10 @@ pub struct Comment {
 
 /// Токены файла вместе с комментариями.
 ///
-/// Инвариант: [`Comment::token`] индексирует соседнее поле `tokens`, а не
-/// какой-то другой поток. Проходы, дописывающие в поток свои токены, обязаны
-/// привязку пересчитывать.
+/// Тип один на оба прохода: [`crate::lexer::lex`] отдаёт его без виртуальных
+/// границ, [`crate::tokenize`] - с ними и с пересчитанными индексами. Инвариант
+/// поэтому тоже один: [`Comment::token`] всегда индексирует соседнее поле
+/// `tokens`, а не какой-то другой поток.
 #[derive(Clone, Debug, Default)]
 pub struct Tokens {
     /// Поток; последний - [`TokenKind::Eof`].
@@ -368,7 +385,7 @@ const TAG_WIDTH: usize = 8;
 ///
 /// Нужна снапшотам и будущему `adamas check --dump-tokens`. Текст печатается
 /// только у тех, чьё написание не единственно: у ключевого слова он совпал бы
-/// с тегом.
+/// с тегом, а у виртуального токена его нет вовсе.
 #[must_use]
 pub fn dump(text: &str, tokens: &[Token]) -> String {
     let mut out = String::new();
@@ -385,6 +402,30 @@ pub fn dump(text: &str, tokens: &[Token]) -> String {
         );
         out.push_str(line.trim_end());
         out.push('\n');
+    }
+    out
+}
+
+/// Отладочная печать потока в одну строку: видно, где границы блоков.
+///
+/// Границы печатаются `{|`, `;`, `|}`, а не фигурными скобками: скобки в языке
+/// заняты записями и effect row, и в примере с записью настоящая скобка и
+/// граница блока выглядели бы одинаково.
+#[must_use]
+pub fn dump_inline(text: &str, tokens: &[Token]) -> String {
+    let mut out = String::new();
+    for token in tokens {
+        let piece = match token.kind {
+            TokenKind::Open => "{|",
+            TokenKind::Sep => ";",
+            TokenKind::Close => "|}",
+            TokenKind::Eof => continue,
+            _ => token.text(text),
+        };
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(piece);
     }
     out
 }

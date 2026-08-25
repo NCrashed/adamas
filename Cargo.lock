@@ -27,6 +27,16 @@ name = "adamas-lsp"
 version = "0.0.0"
 
 [[package]]
+name = "adamas-parser"
+version = "0.0.0"
+dependencies = [
+ "adamas-core",
+ "insta",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
 name = "adamas-warmup-stlc"
 version = "0.0.0"
 dependencies = [

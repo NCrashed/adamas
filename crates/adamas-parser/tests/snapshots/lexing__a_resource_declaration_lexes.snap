@@ -1,0 +1,55 @@
+---
+source: crates/adamas-parser/tests/lexing.rs
+expression: "dump(WITH_FILE, &lexed.tokens)"
+---
+2:1     resource
+2:10    ident   File
+2:15    where
+3:3     ident   drop
+3:8     ident   h
+3:10    =
+3:12    ident   closeFile
+3:22    ident   h
+5:1     ident   openFile
+5:10    :
+5:12    ident   String
+5:19    ->
+5:22    {
+5:23    ident   IO
+5:25    ,
+5:27    ident   Except
+5:34    ident   IOError
+5:41    }
+5:43    ident   File
+7:1     ident   withFile
+7:10    :
+7:12    ident   String
+7:19    ->
+7:22    (
+7:23    ident   File
+7:28    ->
+7:31    {
+7:32    ident   IO
+7:34    }
+7:36    ident   a
+7:37    )
+7:39    ->
+7:42    {
+7:43    ident   IO
+7:45    ,
+7:47    ident   Except
+7:54    ident   IOError
+7:61    }
+7:63    ident   a
+8:1     ident   withFile
+8:10    ident   path
+8:15    ident   k
+8:17    =
+9:3     let
+9:7     ident   h
+9:9     =
+9:11    ident   openFile
+9:20    ident   path
+10:3    ident   k
+10:5    ident   h
+11:1    eof

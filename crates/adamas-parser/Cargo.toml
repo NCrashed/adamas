@@ -1,0 +1,23 @@
+[package]
+name = "adamas-parser"
+description = "Adamas surface language: lexer, layout, parser, pretty printer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Только ради `source::Span`: позиции в исходнике одни на весь компилятор,
+# второй их копии быть не должно. Обратной зависимости нет - ядро о
+# поверхностном языке не знает.
+adamas-core.workspace = true
+thiserror = "2"
+
+[dev-dependencies]
+insta = "1"
+proptest = "1"

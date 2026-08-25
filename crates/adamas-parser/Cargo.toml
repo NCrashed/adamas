@@ -17,7 +17,7 @@ workspace = true
 bench = false
 
 [[bench]]
-name = "tokenizing"
+name = "pipeline"
 harness = false
 
 [dependencies]

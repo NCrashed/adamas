@@ -1,10 +1,10 @@
-//! Baseline для пути «текст -> токены с границами блоков».
+//! Baseline для пути «текст -> дерево».
 //!
-//! Лексер стоит первым на каждом запуске компилятора и на каждом нажатии
+//! Проход стоит первым на каждом запуске компилятора и на каждом нажатии
 //! клавиши в LSP (§7.2), поэтому его baseline заводится вместе с ним, а не
 //! тогда, когда станет заметно, что он медленный.
 //!
-//! Три точки, разделённые намеренно:
+//! Точки разделены намеренно:
 //!
 //! - `lex_module` - только лексика: посимвольный проход, ключевые слова,
 //!   строки и колонки.
@@ -12,6 +12,9 @@
 //!   стоит отдельный проход, ради которого парсер не знает про отступы.
 //! - `tokenize_module` - оба вместе плюс пересчёт привязки комментариев, то
 //!   есть то, что заплатит вызывающий.
+//! - `parse_module` - только спуск, по готовому потоку. Полного пути «текст ->
+//!   дерево» отдельной точкой нет: он есть сумма этой и `tokenize_module`, и
+//!   мерить сумму дважды незачем.
 
 #![allow(
     missing_docs,
@@ -25,7 +28,7 @@
 
 use std::fmt::Write as _;
 
-use adamas_parser::{layout::layout, lexer::lex, tokenize};
+use adamas_parser::{layout::layout, lexer::lex, parser, tokenize};
 use criterion::{Criterion, criterion_group, criterion_main};
 
 /// Модуль из `copies` повторов примеров §4.1: ресурс с `where`, сигнатура с
@@ -66,6 +69,16 @@ counter{index} =
     text
 }
 
+/// Тот же модуль без форм Фаз 3-4: effect row парсер Фазы 2 отвергает (§9), а
+/// бенчу спуска нужен вход, который разбирается целиком. Замена в тексте, а не
+/// вторая фикстура: две копии одного модуля разъехались бы.
+fn phase_two_module(copies: usize) -> String {
+    module(copies)
+        .replace("{IO, Except IOError} ", "")
+        .replace("{IO} ", "")
+        .replace("{State Int} ", "")
+}
+
 fn tokenizing(c: &mut Criterion) {
     let text = module(64);
     let lexed = lex(&text).expect("фикстура лексится");
@@ -84,5 +97,18 @@ fn tokenizing(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, tokenizing);
+fn parsing(c: &mut Criterion) {
+    let text = phase_two_module(64);
+    let tokens = tokenize(&text).expect("фикстура токенизируется");
+    assert!(
+        parser::parse(&text, &tokens.tokens).is_ok(),
+        "фикстура разбирается целиком"
+    );
+
+    c.bench_function("parse_module_64", |b| {
+        b.iter(|| parser::parse(&text, &tokens.tokens));
+    });
+}
+
+criterion_group!(benches, tokenizing, parsing);
 criterion_main!(benches);

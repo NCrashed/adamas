@@ -11,6 +11,15 @@ authors.workspace = true
 [lints]
 workspace = true
 
+# Иначе `cargo bench` поднимает ещё и libtest-харнесс, который не понимает
+# criterion-флагов.
+[lib]
+bench = false
+
+[[bench]]
+name = "tokenizing"
+harness = false
+
 [dependencies]
 # Только ради `source::Span`: позиции в исходнике одни на весь компилятор,
 # второй их копии быть не должно. Обратной зависимости нет - ядро о
@@ -19,5 +28,6 @@ adamas-core.workspace = true
 thiserror = "2"
 
 [dev-dependencies]
+criterion = "0.7"
 insta = "1"
 proptest = "1"

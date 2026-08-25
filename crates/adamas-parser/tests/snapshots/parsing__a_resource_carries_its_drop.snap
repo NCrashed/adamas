@@ -1,0 +1,7 @@
+---
+source: crates/adamas-parser/tests/parsing.rs
+expression: "tree(text).expect(\"разбор удался\")"
+---
+(resource File
+  (def drop
+    (clause (h) (closeFile h))))

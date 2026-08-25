@@ -3,8 +3,9 @@
 //! # Состояние (Фаза 2)
 //!
 //! Готово: [`lexer`] - текст в токены и комментарии; [`layout`] - значимые
-//! отступы в явные границы блоков. Дальше по плану Фазы 2: AST и recursive
-//! descent, обратная печать с round-trip, элаборация в ядро.
+//! отступы в явные границы блоков; [`ast`] и [`parser`] - рекурсивный спуск в
+//! дерево на подмножестве Фазы 2. Дальше по плану Фазы 2: обратная печать с
+//! round-trip, элаборация в ядро.
 //!
 //! # Что этот крейт не делает
 //!
@@ -12,19 +13,23 @@
 //! язык и core-язык связаны элаборацией, а она живёт в `adamas-core`. Обратной
 //! зависимости нет вовсе.
 //!
-//! Не разрешает фикситеты: `infixl 6 +` объявляется в prelude (§4.4), то есть
-//! в программе, а не в компиляторе, и до разбора модуля таблица неизвестна.
+//! Не решает ничего, для чего нужны сведения из других объявлений: фикситеты,
+//! имена в паттернах, умолчания кратностей. Что именно и почему - заголовок
+//! [`ast`].
 
+pub mod ast;
 pub mod layout;
 pub mod lexer;
+pub mod parser;
 pub mod token;
 
 pub use token::Tokens;
 
+use ast::Module;
 use token::{Comment, Token};
 
-/// Ошибка на пути от текста до потока токенов.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+/// Ошибка на пути от текста до дерева.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
     /// Лексическая.
     #[error(transparent)]
@@ -32,15 +37,19 @@ pub enum Error {
     /// Расстановки блоков.
     #[error(transparent)]
     Layout(#[from] layout::LayoutError),
+    /// Разбора.
+    #[error(transparent)]
+    Parse(#[from] parser::ParseError),
 }
 
 impl Error {
     /// Где ошибка.
     #[must_use]
-    pub fn span(self) -> adamas_core::source::Span {
+    pub fn span(&self) -> adamas_core::source::Span {
         match self {
             Self::Lex(error) => error.span(),
             Self::Layout(error) => error.span(),
+            Self::Parse(error) => error.span(),
         }
     }
 }
@@ -58,6 +67,16 @@ pub fn tokenize(text: &str) -> Result<Tokens, Error> {
         tokens,
         comments: lexed.comments,
     })
+}
+
+/// Текст -> дерево: [`tokenize`] и следом [`parser::parse`].
+///
+/// # Errors
+///
+/// Любая ошибка лексики, расстановки блоков или разбора.
+pub fn parse(text: &str) -> Result<Module, Error> {
+    let tokens = tokenize(text)?;
+    Ok(parser::parse(text, &tokens.tokens)?)
 }
 
 /// Переводит привязку комментариев из лексического потока в поток с границами.

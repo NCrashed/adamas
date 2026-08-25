@@ -1,0 +1,10 @@
+---
+source: crates/adamas-parser/tests/parsing.rs
+expression: "tree(text).expect(\"разбор удался\")"
+---
+(def f
+  (clause () (lam (x) x)))
+(def g
+  (clause () (lam ((0 a : Type) x) x)))
+(def h
+  (clause () (lam ((tuple)) get)))

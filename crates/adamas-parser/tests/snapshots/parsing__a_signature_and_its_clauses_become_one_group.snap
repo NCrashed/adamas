@@ -1,0 +1,8 @@
+---
+source: crates/adamas-parser/tests/parsing.rs
+expression: "tree(text).expect(\"разбор удался\")"
+---
+(sig map (-> (-> a b) (-> (Vect n a) (Vect n b))))
+(def map
+  (clause (f Nil) Nil)
+  (clause (f (Cons x xs)) (Cons (f x) (map f xs))))

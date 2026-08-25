@@ -1,0 +1,6 @@
+---
+source: crates/adamas-parser/tests/parsing.rs
+expression: "tree(text).expect(\"разбор удался\")"
+---
+(data Pair a b
+  (ctor MkPair (-> a (-> b (Pair a b)))))

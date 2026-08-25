@@ -1,0 +1,6 @@
+---
+source: crates/adamas-parser/tests/parsing.rs
+expression: "tree(text).expect(\"разбор удался\")"
+---
+(def counter
+  (clause () (block (let (n = get)) (put (chain n (+ 1))) n)))

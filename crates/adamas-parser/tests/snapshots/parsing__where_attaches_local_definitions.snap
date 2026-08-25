@@ -1,0 +1,8 @@
+---
+source: crates/adamas-parser/tests/parsing.rs
+expression: "tree(text).expect(\"разбор удался\")"
+---
+(def f
+  (clause (x) y
+    (where (def y
+      (clause () (g x))))))

@@ -14,7 +14,10 @@
 //! 2. **Офсайд.** Первая лексема строки с колонкой меньше колонки блока
 //!    закрывает его (и дальше, пока есть что закрывать); равная - даёт границу
 //!    между членами; большая - продолжение текущего члена. Границы не бывает
-//!    перед лексемой, которая член начать не может ([`starts_a_member`]).
+//!    перед лексемой, которая член начать не может (`starts_a_member`).
+//!    Строка, начатая `where`, вдобавок закрывает блоки от `=` и `let`
+//!    (`Members::Statements`): `where` присоединяется к объявлению, а члены
+//!    таких блоков - операторы и связывания, и присоединяться не к чему.
 //! 3. **Файл - блок**, открытый первым же токеном и закрытый только на `Eof`.
 //!    Лексема левее его колонки - отказ.
 //! 4. **Внутри скобок layout выключен.** Ни `Open`, ни `Sep`, ни `Close` там
@@ -128,6 +131,47 @@ enum Pending {
     Body(Token),
 }
 
+/// Что за члены у блока.
+///
+/// Различие нужно одному правилу - тому, которое решает судьбу `where` на
+/// колонке блока (правило 2). Больше layout про содержимое блока не знает и
+/// знать не должен: разбирает его парсер.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Members {
+    /// Объявления и ветки: файл, `where`, `of`, `with`, `mutual`.
+    Declarations,
+    /// Операторы и связывания: `=` и `let`.
+    Statements,
+}
+
+/// Открытый блок.
+#[derive(Clone, Copy, Debug)]
+struct Block {
+    /// Колонка первого токена тела - она же колонка каждого члена.
+    column: u32,
+    /// Что за члены.
+    members: Members,
+}
+
+impl Block {
+    /// Блок файла: члены - объявления, колонку задаёт первый токен файла.
+    fn file(column: u32) -> Self {
+        Self {
+            column,
+            members: Members::Declarations,
+        }
+    }
+
+    /// Блок, открытый ключевым словом (или `=`).
+    fn opened_by(keyword: TokenKind, column: u32) -> Self {
+        let members = match keyword {
+            TokenKind::Equals | TokenKind::Let => Members::Statements,
+            _ => Members::Declarations,
+        };
+        Self { column, members }
+    }
+}
+
 /// Расставляет границы блоков.
 ///
 /// На вход идёт то, что отдал [`crate::lexer::lex`], вместе с завершающим
@@ -150,8 +194,8 @@ pub fn layout(tokens: &[Token]) -> Result<Vec<Token>, LayoutError> {
     );
 
     let mut out = Vec::with_capacity(tokens.len() + tokens.len() / 4);
-    // Колонки открытых блоков, снаружи внутрь. Первая - блок файла.
-    let mut blocks: Vec<u32> = Vec::new();
+    // Открытые блоки, снаружи внутрь. Первый - блок файла.
+    let mut blocks: Vec<Block> = Vec::new();
     // Открытые скобки: внутри них layout выключен.
     let mut brackets: Vec<Token> = Vec::new();
     let mut pending = Some(Pending::TopLevel);
@@ -168,7 +212,7 @@ pub fn layout(tokens: &[Token]) -> Result<Vec<Token>, LayoutError> {
                 // не нужно отдельной ветки на файл без деклараций.
                 Some(Pending::TopLevel) => {
                     out.push(virtual_token(TokenKind::Open, token));
-                    blocks.push(token.column);
+                    blocks.push(Block::file(token.column));
                 }
                 Some(Pending::Body(keyword)) => {
                     return Err(LayoutError::EmptyBlock {
@@ -198,27 +242,46 @@ pub fn layout(tokens: &[Token]) -> Result<Vec<Token>, LayoutError> {
         }
 
         if let Some(opener) = pending.take() {
-            if let (Some(&enclosing), Pending::Body(keyword)) = (blocks.last(), opener) {
-                if token.column <= enclosing {
-                    return Err(LayoutError::ShallowBlock {
-                        keyword: keyword.span,
-                        body: token.span,
-                        column: token.column,
-                        enclosing,
-                    });
+            let block = match opener {
+                Pending::TopLevel => Block::file(token.column),
+                Pending::Body(keyword) => {
+                    if let Some(enclosing) = blocks.last() {
+                        if token.column <= enclosing.column {
+                            return Err(LayoutError::ShallowBlock {
+                                keyword: keyword.span,
+                                body: token.span,
+                                column: token.column,
+                                enclosing: enclosing.column,
+                            });
+                        }
+                    }
+                    Block::opened_by(keyword.kind, token.column)
                 }
-            }
+            };
             out.push(virtual_token(TokenKind::Open, token));
-            blocks.push(token.column);
+            blocks.push(block);
         } else if token.line != previous_line {
             // Блок файла переживает любой офсайд и закрывается только на Eof:
             // иначе всё, что левее первой декларации, оказалось бы вне всякого
             // блока, а парсер дочитал бы файл до края, ничего не заметив.
-            while blocks.len() > 1 && blocks.last().is_some_and(|&column| token.column < column) {
+            while blocks.len() > 1 && blocks.last().is_some_and(|last| token.column < last.column) {
                 blocks.pop();
                 out.push(virtual_token(TokenKind::Close, token));
             }
-            if let Some(&file) = blocks.first() {
+            // `where` присоединяется к объявлению; в блоке от `=` или `let`
+            // присоединяться не к чему, значит он закончился - на какой бы
+            // колонке `where` ни стоял. Блок файла этим не задеть: он
+            // `Declarations`, и цикл останавливается на нём.
+            if token.kind == TokenKind::Where {
+                while blocks
+                    .last()
+                    .is_some_and(|last| last.members == Members::Statements)
+                {
+                    blocks.pop();
+                    out.push(virtual_token(TokenKind::Close, token));
+                }
+            }
+            if let Some(file) = blocks.first().map(|first| first.column) {
                 if token.column < file {
                     return Err(LayoutError::LeftOfFile {
                         token: token.span,
@@ -227,7 +290,8 @@ pub fn layout(tokens: &[Token]) -> Result<Vec<Token>, LayoutError> {
                     });
                 }
             }
-            if blocks.last() == Some(&token.column) && starts_a_member(token.kind) {
+            let member_column = blocks.last().map(|last| last.column);
+            if member_column == Some(token.column) && starts_a_member(token.kind) {
                 out.push(virtual_token(TokenKind::Sep, token));
             }
         }
@@ -272,6 +336,10 @@ fn opens_block(tokens: &[Token], index: usize) -> bool {
 /// начатую конструкцию. Поэтому строка, начатая одним из них, продолжает член,
 /// а не открывает новый, - без этого правила многострочный `if` разваливался бы
 /// на три члена, а `where`, отбитый на колонку определения, - на два.
+///
+/// У `where` это верно там, где члены - объявления: тогда он продолжает
+/// предыдущее. Из блока операторов он выходит наружу раньше, чем дело дойдёт
+/// сюда, - см. [`Members`].
 fn starts_a_member(kind: TokenKind) -> bool {
     !matches!(
         kind,
@@ -394,10 +462,34 @@ mod tests {
             shape("f x = y\nwhere\n  y = 1"),
             "{| f x = y where {| y = 1 |} |}"
         );
+        // И на колонке члена в блоке объявлений - продолжение этого члена.
+        assert_eq!(
+            shape("f x = y\n  where\n    g z = w\n    where\n      h = 1"),
+            "{| f x = y where {| g z = w where {| h = 1 |} |} |}"
+        );
         // Закрывать блоки офсайд при этом не перестаёт.
         assert_eq!(
             shape("f x =\n    case x of\n      A -> 1\n  where\n    y = 1"),
             "{| f x = {| case x of {| A -> 1 |} |} where {| y = 1 |} |}"
+        );
+    }
+
+    #[test]
+    fn where_leaves_the_block_of_statements() {
+        // `where` присоединяется к клаузе, а не к оператору внутри её тела,
+        // поэтому тело закрывается - на любой колонке самого `where`.
+        assert_eq!(
+            shape("f x =\n  y\n  where\n    z = 1"),
+            "{| f x = {| y |} where {| z = 1 |} |}"
+        );
+        assert_eq!(
+            shape("f x =\n  y\n    where\n      z = 1"),
+            "{| f x = {| y |} where {| z = 1 |} |}"
+        );
+        // Блок `let` - тоже блок операторов, и выходить приходится через два.
+        assert_eq!(
+            shape("f x =\n  let y = 1\n  y\n  where\n    z = 1"),
+            "{| f x = {| let {| y = 1 |} ; y |} where {| z = 1 |} |}"
         );
     }
 

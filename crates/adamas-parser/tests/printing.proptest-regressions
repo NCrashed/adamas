@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d7c1a7f6390f36b14acab15bc970986031c466d36a4397d00899a18a6ef4b7f9 # shrinks to text = "f = ((if x then x else x) -> x)\n"
+cc a2b44d4e6c72018b55689a9e381e4820d5a18f3a6ebbd0ba7ce3fa856f082abc # shrinks to text = "f = (g @((\\z -> x)))\n"
+cc c0d4bdfea06ac6417c4dcd2b29b0e3cee865ed63f839ea00ed2bf8be024c5e66 # shrinks to text = "f z = case z of\n  A -> (x + (if x then (x (-1)) else 3.14))\nwhere\n  w = ((g @((-1))), [((-1) -> (\\z -> 0xff))])\n"

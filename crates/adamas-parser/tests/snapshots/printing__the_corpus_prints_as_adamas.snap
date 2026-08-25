@@ -1,0 +1,83 @@
+---
+source: crates/adamas-parser/tests/printing.rs
+expression: printed
+---
+=== signature_and_clauses
+map : (a -> b) -> Vect n a -> Vect n b
+map f Nil = Nil
+map f (Cons x xs) = Cons (f x) (map f xs)
+=== indexed_family
+data Vect : (0 n : Nat) -> Type -> Type where
+  Nil : Vect 0 a
+  Cons : a -> Vect n a -> Vect (n + 1) a
+=== family_with_parameters
+data Pair a b where
+  MkPair : a -> b -> Pair a b
+
+data Void : Type
+=== block_of_statements
+counter =
+  let n = get
+  put (n + 1)
+  n
+=== several_bindings_in_one_let
+sum =
+  let a = 1
+      b = 2
+  add a b
+=== blocks_nested_in_blocks
+counter =
+  let w = case x of
+        A -> 1
+  w
+
+f x = y
+  where
+    g z = case z of
+      A -> 1
+    h = g x
+=== blocks_in_tail_position
+f = g case x of
+  A -> 1
+
+h = k \y -> case y of
+  A -> 2
+
+m = a + case x of
+  A -> 3
+=== where_after_a_tall_body
+f x =
+  let y = 1
+  g y
+where
+  g z = z
+=== resource_with_drop
+resource File where
+  drop h = closeFile h
+=== local_definitions
+f x = y
+  where
+    y = g x
+    z : Nat
+    z = h y
+=== lambdas
+f = \x -> x
+g = \(0 a : Type) x -> x
+h = \() -> get
+=== case_and_conditional
+classify x = case x of
+  Cons y ys -> y
+  Nil -> zero
+
+choice x = if isZero x then none else some x
+=== operators_literals_and_holes
+f = a + b * c
+g = h (-42) 0xff "текст" 3.14 _
+items = [1, 2, 3]
+pair = (a, b)
+unit = ()
+(++) : List a -> List a -> List a
+=== binders_and_type_application
+groups : (a : Type) (b : Type) -> Type
+implicits : {0 a : Type} -> (1 h : File) -> a
+apply = runExcept @IOError prog

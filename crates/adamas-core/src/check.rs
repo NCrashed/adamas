@@ -33,8 +33,18 @@
 //! Ценой стала изменяемость вектора: `Γ + q · Δ` его масштабирует, тогда как
 //! вплавленная форма только складывала и снимала верхний слой.
 //!
-//! Ошибки спанов не несут: термы ядра их не хранят. "Где" знает элаборатор
-//! (Фаза 2) - он держит спан того, что элаборирует в момент отказа.
+//! # Что несёт ошибка
+//!
+//! Значения, а не готовую строку (§10 вопрос 49а): собственные [`Term`],
+//! полученные обратным чтением и зонканные **в точке возбуждения** ([`read_back`],
+//! [`zonked`]). Строка остаётся там, где данные и есть строка, - в именах
+//! определений. Рендеринг живёт вне ядра; здесь - аварийный принтер на индексах
+//! де Брёйна ([`Term`] реализует `Display`), нужный снапшотам уровня ядра.
+//!
+//! Спанов у ошибки нет и не будет: термы ядра их не хранят, а идентичность узла
+//! не переживает нормализацию. «Где» доносит **маршрут** - кадры, укладываемые
+//! на раскрутке; его ещё нет, и это оставшаяся половина вопроса 49а. Телескопа
+//! точки отказа по той же причине пока нет.
 
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -63,25 +73,25 @@ pub enum TypeError {
     #[error("ожидался тип, получено `{term}` типа `{ty}`")]
     NotAType {
         /// Терм в позиции типа.
-        term: String,
+        term: Term,
         /// Его тип.
-        ty: String,
+        ty: Term,
     },
 
     /// Применение чего-то, что не является функцией.
     #[error("ожидалась функция, получено значение типа `{ty}`")]
     NotAFunction {
         /// Тип того, что применяли.
-        ty: String,
+        ty: Term,
     },
 
     /// Тип не совпал с ожидаемым.
     #[error("несовпадение типов: ожидался `{expected}`, получен `{found}`")]
     Mismatch {
         /// Тип, которого требовал контекст.
-        expected: String,
+        expected: Term,
         /// Тип, который получился.
-        found: String,
+        found: Term,
     },
 
     /// Кратность лямбды разошлась с кратностью `Pi`, под который её проверяют.
@@ -108,7 +118,7 @@ pub enum TypeError {
     #[error("тип `{term}` невозможно синтезировать, нужна аннотация")]
     CannotInfer {
         /// Проблемный терм.
-        term: String,
+        term: Term,
     },
 
     /// Ссылка на определение, которого нет в сигнатуре.
@@ -179,7 +189,7 @@ pub enum TypeError {
         /// Имя типа.
         name: Name,
         /// Что оказалось на месте универсума.
-        found: String,
+        found: Term,
     },
 
     /// Тип-формер объявлен с большим числом параметров, чем у него связываний.
@@ -221,7 +231,7 @@ pub enum TypeError {
         /// Имя типа.
         data: Name,
         /// Что оказалось результатом.
-        found: String,
+        found: Term,
     },
 
     /// Нарушена строгая позитивность.
@@ -239,9 +249,9 @@ pub enum TypeError {
         /// Имя конструктора.
         name: Name,
         /// Универсум поля.
-        field: String,
+        field: Level,
         /// Универсум типа.
-        sort: String,
+        sort: Level,
     },
 
     /// Разбирается значение, тип которого не то индуктивное семейство.
@@ -250,7 +260,7 @@ pub enum TypeError {
         /// Имя типа из разбора.
         data: Name,
         /// Тип разбираемого значения.
-        ty: String,
+        ty: Term,
     },
 
     /// Число параметров в разборе разошлось с объявлением типа.
@@ -307,20 +317,29 @@ pub enum TypeError {
     },
 }
 
-/// Значение в виде текста для сообщения об ошибке.
+/// Значение, уложенное в ошибку: обратное чтение плюс зонканье.
 ///
-/// Зонкает, а не просто читает обратно: [`quote`] уровни нормализует, но
-/// решений не подставляет, поэтому решённая метапеременная печаталась бы как
-/// `?0`. Читатель видел бы «уровень не выведен» там, где выведен, а разошлось
-/// совсем другое: `Id{?0}` против `Id{3}` при `?0 := 2` - это конфликт `2` и
-/// `3`, а не отсутствие вывода.
-fn shown(ctx: &Ctx<'_>, metas: &Metas, value: &Rc<Value>) -> String {
-    crate::meta::zonk_term(metas, &ctx.quote(value)).to_string()
+/// **Терм, а не строка** (§10 вопрос 49а): готовое сообщение уничтожает
+/// структуру до того, как кто-либо решил, как её показывать, а рендеринг живёт
+/// вне ядра. **И не значение:** `Value` тащит замыкания с окружениями, не
+/// сравнивается и не переживает границу, тогда как `Term` - `'static`.
+///
+/// **Зонканье обязательно, а не желательно.** [`quote`] уровни нормализует, но
+/// решений не подставляет; под схемой хранилища §10 вопроса 51 незонкнутая
+/// дырка в сохранённой ошибке протухает вместе с `base`, и обращение к ней -
+/// паника. Плюс читаемость: решённая метапеременная выглядела бы как `?0`, то
+/// есть «уровень не выведен» там, где выведен, а разошлось совсем другое.
+///
+/// Цена обратного чтения на пути отказа не считается: отказ редок, и §10
+/// вопрос 52 записан ровно про ту границу, за которой это перестанет быть
+/// верным.
+fn read_back(ctx: &Ctx<'_>, metas: &Metas, value: &Rc<Value>) -> Term {
+    crate::meta::zonk_term(metas, &ctx.quote(value))
 }
 
-/// То же для терма, который печатается как есть.
-fn shown_term(metas: &Metas, term: &Term) -> String {
-    crate::meta::zonk_term(metas, term).to_string()
+/// То же для терма, который в ошибку кладётся как есть.
+fn zonked(metas: &Metas, term: &Term) -> Term {
+    crate::meta::zonk_term(metas, term)
 }
 
 /// Синтезирует тип терма и считает использования.
@@ -380,7 +399,7 @@ pub fn infer(
             let callee_ty = whnf(ctx.signature(), &callee_ty);
             let Value::Pi(mult, _, domain, codomain) = &*callee_ty else {
                 return Err(TypeError::NotAFunction {
-                    ty: shown(ctx, metas, &callee_ty),
+                    ty: read_back(ctx, metas, &callee_ty),
                 });
             };
             // Правило Аткея `Γ + q · Δ`: аргумент проверяется при собственной
@@ -450,7 +469,7 @@ pub fn infer(
 
         // Домена у лямбды в терме нет, синтезировать не из чего.
         Term::Lam(..) => Err(TypeError::CannotInfer {
-            term: shown_term(metas, term),
+            term: zonked(metas, term),
         }),
     }
 }
@@ -495,8 +514,8 @@ pub fn check(
                 Ok(usage)
             } else {
                 Err(TypeError::Mismatch {
-                    expected: shown(ctx, metas, expected),
-                    found: shown(ctx, metas, &found),
+                    expected: read_back(ctx, metas, expected),
+                    found: read_back(ctx, metas, &found),
                 })
             }
         }
@@ -516,7 +535,7 @@ fn check_lambda(
     };
     let Value::Pi(pi_mult, _, domain, codomain) = &**expected else {
         return Err(TypeError::NotAFunction {
-            ty: shown(ctx, metas, expected),
+            ty: read_back(ctx, metas, expected),
         });
     };
     // Кратность лямбды обязана совпасть с кратностью типа. Проверка
@@ -552,8 +571,8 @@ pub fn is_type(ctx: &Ctx<'_>, metas: &mut Metas, term: &Term) -> Result<Level, T
     match &*ty {
         Value::Universe(level) => Ok(level.clone()),
         _ => Err(TypeError::NotAType {
-            term: shown_term(metas, term),
-            ty: shown(ctx, metas, &ty),
+            term: zonked(metas, term),
+            ty: read_back(ctx, metas, &ty),
         }),
     }
 }
@@ -1032,7 +1051,7 @@ pub fn data_sort(name: &Name, params: u32, ty: &Term) -> Result<Level, TypeError
         Term::Universe(sort) => Ok(sort.clone()),
         other => Err(TypeError::NotADataSort {
             name: Rc::clone(name),
-            found: other.to_string(),
+            found: other.clone(),
         }),
     }
 }
@@ -1128,7 +1147,7 @@ pub(crate) fn check_constructor_shape(
         return Err(TypeError::ConstructorResult {
             name: Rc::clone(name),
             data: Rc::clone(data),
-            found: shown_term(metas, result),
+            found: zonked(metas, result),
         });
     }
     Ok(())
@@ -1182,8 +1201,8 @@ pub(crate) fn check_constructor_content(
             if !field_level.leq(sort) {
                 return Err(TypeError::ConstructorUniverse {
                     name: Rc::clone(name),
-                    field: metas.zonk(&field_level).to_string(),
-                    sort: metas.zonk(sort).to_string(),
+                    field: metas.zonk(&field_level),
+                    sort: metas.zonk(sort),
                 });
             }
         }
@@ -1257,7 +1276,7 @@ fn infer_case(
         .filter(|arguments| arguments.len() == binders)
         .ok_or_else(|| TypeError::NotADataValue {
             data: Rc::clone(&case.data),
-            ty: shown(ctx, metas, &scrutinee_ty),
+            ty: read_back(ctx, metas, &scrutinee_ty),
         })?;
     let (data_params, data_indices) = arguments.split_at(params as usize);
 

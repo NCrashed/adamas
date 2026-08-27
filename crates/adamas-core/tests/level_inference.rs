@@ -373,13 +373,17 @@ fn a_solved_level_is_shown_solved_in_the_error() {
     let TypeError::Mismatch { expected, found } = &error else {
         panic!("ожидалось несовпадение типов, получено {error:?}");
     };
-    assert!(
-        !expected.contains('?') && !found.contains('?'),
-        "решённая дырка напечатана как невыведенная: ожидался `{expected}`, получен `{found}`"
-    );
-    assert!(
-        expected.contains('2') && found.contains('3'),
-        "сообщение обязано назвать разошедшиеся уровни: `{expected}` против `{found}`"
+    // Ошибка несёт термы, а не текст (§10 вопрос 49а), поэтому уровни
+    // сверяются структурно: зонканье в точке возбуждения обязано было
+    // подставить решение, и `Level::Meta` здесь не остаётся.
+    let level_of = |term: &Term| match term {
+        Term::Const(_, levels) => levels.first().cloned(),
+        other => panic!("ожидалась ссылка на `Box`, получено `{other}`"),
+    };
+    assert_eq!(
+        (level_of(expected), level_of(found)),
+        (Some(Level::number(2)), Some(Level::number(3))),
+        "решённая дырка обязана быть подставлена, а не остаться `?0`"
     );
 }
 

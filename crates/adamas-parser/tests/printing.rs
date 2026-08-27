@@ -94,7 +94,16 @@ where
         "resource_with_drop",
         "\
 resource File where
+  Open : String -> File
+  drop : File -> Unit
   drop h = closeFile h
+",
+    ),
+    (
+        "unique_family",
+        "\
+unique data Array (0 n : Nat) a where
+  MkArray : Array n a
 ",
     ),
     (

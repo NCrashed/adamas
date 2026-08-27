@@ -542,7 +542,11 @@ impl<'a> Parser<'a> {
 
     fn decl_inner(&mut self) -> Result<Decl, ParseError> {
         match self.kind() {
-            TokenKind::Data => self.data(),
+            TokenKind::Data => self.data(false),
+            // `unique` стоит перед `data` и ничего больше не открывает:
+            // отдельной формы объявления он не заводит, а помечает уже
+            // существующую.
+            TokenKind::Unique => self.unique_data(),
             TokenKind::Resource => self.resource(),
             TokenKind::Ident | TokenKind::LParen => self.signature_or_clause(),
             _ => Err(self
@@ -622,7 +626,20 @@ impl<'a> Parser<'a> {
     /// иначе пустой тип был бы незаписываем - layout пустых блоков не делает, а
     /// ядру пустое семейство нужно (разбор с нулём ветвей и есть доказательство
     /// его необитаемости, §9 Фаза 1).
-    fn data(&mut self) -> Result<Decl, ParseError> {
+    /// `unique data …` - тот же разбор, что у `data`, с маркером.
+    fn unique_data(&mut self) -> Result<Decl, ParseError> {
+        let start = self.bump().span;
+        if !self.at(TokenKind::Data) {
+            return Err(self.expected(Expected::Token(TokenKind::Data)));
+        }
+        let decl = self.data(true)?;
+        Ok(Decl {
+            span: start.merge(decl.span),
+            ..decl
+        })
+    }
+
+    fn data(&mut self, unique: bool) -> Result<Decl, ParseError> {
         let start = self.bump().span;
         let name = self.ident()?;
         let params = self.params()?;
@@ -656,6 +673,7 @@ impl<'a> Parser<'a> {
 
         Ok(Decl {
             kind: DeclKind::Data(Data {
+                unique,
                 name,
                 params,
                 kind,

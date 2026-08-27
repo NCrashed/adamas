@@ -51,6 +51,8 @@ pub enum TokenKind {
     Else,
     /// `resource` (§3.3, §4.1)
     Resource,
+    /// `unique` - маркер уникальности на `data` (§3.3)
+    Unique,
     /// `effect` (§3.4)
     Effect,
     /// `handle` (§3.4)
@@ -167,6 +169,7 @@ impl TokenKind {
             Self::Then => Face::Spelled("then"),
             Self::Else => Face::Spelled("else"),
             Self::Resource => Face::Spelled("resource"),
+            Self::Unique => Face::Spelled("unique"),
             Self::Effect => Face::Spelled("effect"),
             Self::Handle => Face::Spelled("handle"),
             Self::HandleMulti => Face::Spelled("handleMulti"),
@@ -282,6 +285,7 @@ pub fn keyword(text: &str) -> Option<TokenKind> {
         "then" => TokenKind::Then,
         "else" => TokenKind::Else,
         "resource" => TokenKind::Resource,
+        "unique" => TokenKind::Unique,
         "effect" => TokenKind::Effect,
         "handle" => TokenKind::Handle,
         "handleMulti" => TokenKind::HandleMulti,
@@ -446,6 +450,7 @@ mod tests {
         TokenKind::Then,
         TokenKind::Else,
         TokenKind::Resource,
+        TokenKind::Unique,
         TokenKind::Effect,
         TokenKind::Handle,
         TokenKind::HandleMulti,

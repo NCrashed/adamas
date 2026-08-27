@@ -224,6 +224,9 @@ impl Printer {
     }
 
     fn data(&mut self, data: &Data) {
+        if data.unique {
+            self.push("unique ");
+        }
         self.push("data ");
         self.decl_name(&data.name);
         for param in &data.params {

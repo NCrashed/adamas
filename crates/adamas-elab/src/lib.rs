@@ -37,8 +37,10 @@
 mod decl;
 mod error;
 mod expr;
+mod render;
 mod route;
 
 pub use decl::{elaborate, elaborate_into};
 pub use error::{ElabError, Missing};
 pub use expr::is_reference;
+pub use render::{located, report};

@@ -39,7 +39,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::ctx::Ctx;
-use crate::level::Level;
+use crate::level::{Level, LevelMeta};
 use crate::meta::Metas;
 use crate::mult::Mult;
 use crate::term::{Index, Name, Term};
@@ -300,6 +300,53 @@ pub enum ErrorKind {
         /// Объявленная арность.
         arity: u32,
     },
+}
+
+impl ErrorKind {
+    /// Части, попадающие в текст сообщения: термы, уровни и дырки.
+    ///
+    /// Печать человеку живёт вне ядра (§9 Фаза 2): там переменные получают
+    /// имена телескопа, а дырки - локальные номера. Список мест, куда это
+    /// подставлять, стоит здесь, рядом с вариантами: разбор исчерпывающий,
+    /// поэтому новый вариант не пройдёт мимо молча, оставшись в сообщении с
+    /// индексами де Брёйна.
+    #[must_use]
+    pub fn parts_mut(&mut self) -> (Vec<&mut Term>, Vec<&mut Level>, Vec<&mut LevelMeta>) {
+        let (mut terms, mut levels, mut metas): (Vec<_>, Vec<_>, Vec<_>) =
+            (Vec::new(), Vec::new(), Vec::new());
+        match self {
+            Self::NotAType { term, ty } => terms.extend([term, ty]),
+            Self::Mismatch { expected, found } => terms.extend([expected, found]),
+            Self::NotAFunction { ty }
+            | Self::CannotInfer { term: ty }
+            | Self::NotADataSort { found: ty, .. }
+            | Self::ConstructorResult { found: ty, .. }
+            | Self::NotADataValue { ty, .. } => terms.push(ty),
+            Self::ConstructorUniverse { field, sort, .. } => levels.extend([field, sort]),
+            Self::AmbiguousLevel { meta } | Self::UnsolvedDefinitionLevel { meta, .. } => {
+                metas.push(meta);
+            }
+            Self::UnboundIndex { .. }
+            | Self::LambdaMultiplicity { .. }
+            | Self::UsageViolation { .. }
+            | Self::UnknownConstant { .. }
+            | Self::LevelArity { .. }
+            | Self::ErasedConstant { .. }
+            | Self::PartialConstant { .. }
+            | Self::DuplicateDefinition { .. }
+            | Self::LinearDefinition { .. }
+            | Self::DataParameters { .. }
+            | Self::NotADataType { .. }
+            | Self::ConstructorParameter { .. }
+            | Self::NotStrictlyPositive { .. }
+            | Self::CaseParameters { .. }
+            | Self::NonExhaustive { .. }
+            | Self::RedundantBranch { .. }
+            | Self::BranchOrder { .. }
+            | Self::LevelVarOutOfScope { .. } => {}
+        }
+        (terms, levels, metas)
+    }
 }
 
 /// Связывание в телескопе точки отказа.

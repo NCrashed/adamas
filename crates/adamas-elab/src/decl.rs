@@ -206,6 +206,15 @@ fn declare_data(
     data: &ast::Data,
     span: Span,
 ) -> Result<(), ElabError> {
+    // Параметры семейства - форма, которой элаборация не владеет, и половина
+    // её хуже отказа: телескоп, построенный по шапке, не связывает имена в
+    // типах конструкторов и не отражается в их телескопах.
+    if let (Some(first), Some(last)) = (data.params.first(), data.params.last()) {
+        return Err(ElabError::Missing {
+            what: Missing::FamilyParameters,
+            span: first.span.merge(last.span),
+        });
+    }
     let kind = match &data.kind {
         Some(kind) => Elaborator::new(signature, metas).expr(kind, Mult::Many)?,
         // Тип-формер не написан - семейство живёт в нулевом универсуме.
@@ -220,8 +229,6 @@ fn declare_data(
         // Полиморфное семейство пишется явно: `data D : Type where`.
         None => Term::universe(0),
     };
-    let kind = parameters(signature, metas, &data.params, kind)?;
-
     // Конструктор называет своё семейство, а в сигнатуре его ещё нет: группа
     // объявляется целиком. Арность берётся обобщением по тип-формеру - это та
     // же арность, которую выведет ядро, а не догадка (§10 вопрос 63).
@@ -254,9 +261,8 @@ fn declare_data(
         })
         .collect::<Result<Vec<_>, ElabError>>()?;
 
-    let params = u32::try_from(data.params.len()).unwrap_or(u32::MAX);
     signature
-        .declare_data(metas, &data.name.text, params, kind, &constructors)
+        .declare_data(metas, &data.name.text, 0, kind, &constructors)
         .map_err(|error| ElabError::Core {
             span: route::locate(&Declared::Data(data), &error, span),
             error: Box::new(error),
@@ -278,35 +284,4 @@ fn self_levels(metas: &mut Metas, ty: &Term) -> Rc<[Level]> {
     (0..generalization.arity())
         .map(|_| metas.fresh_level())
         .collect()
-}
-
-/// Параметры семейства, написанные до `where`, дописываются к тип-формеру.
-///
-/// Кратность у них `0`: параметр - это тип, а типы живут в стёртом фрагменте.
-fn parameters(
-    signature: &Signature,
-    metas: &mut Metas,
-    params: &[ast::Binder],
-    kind: Term,
-) -> Result<Term, ElabError> {
-    let mut result = kind;
-    for param in params.iter().rev() {
-        let Some(name) = param.names.first() else {
-            continue;
-        };
-        let ty = match &param.ty {
-            // `Mult::Many`, а не `Mult::Zero`: нулевая кратность у самого
-            // параметра, а его тип - обычный тип, и стрелки внутри него
-            // связывают параметры функции.
-            Some(ty) => Elaborator::new(signature, metas).expr(ty, Mult::Many)?,
-            None => Term::Universe(metas.fresh_level()),
-        };
-        result = Term::Pi(
-            Mult::Zero,
-            adamas_core::term::Name::from(&*name.text),
-            Rc::new(ty),
-            Rc::new(result),
-        );
-    }
-    Ok(result)
 }

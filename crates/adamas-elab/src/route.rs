@@ -92,20 +92,10 @@ pub(crate) fn locate(declared: &Declared<'_>, error: &TypeError, fallback: Span)
     }
 }
 
-/// Тип-формер семейства: параметры до `where` дописаны к нему `Pi`-узлами - по
-/// узлу на группу, а не на имя (см. `parameters` в [`crate::decl`]).
+/// Тип-формер семейства. Параметров у него нет - их отвергает элаборация, -
+/// поэтому маршрут идёт прямо по написанному; ненаписанный тип-формер это
+/// `Type 0`, и указывать в нём не на что.
 fn data_kind(data: &ast::Data, route: &[Frame], fallback: Span) -> Span {
-    let mut route = route;
-    for param in &data.params {
-        match route.split_first() {
-            Some((Frame::Domain, rest)) => {
-                return param.ty.as_ref().map_or(param.span, |ty| narrow(ty, rest));
-            }
-            Some((Frame::Codomain, rest)) => route = rest,
-            _ => return fallback,
-        }
-    }
-    // Ненаписанный тип-формер - `Type 0`, и указывать в нём не на что.
     data.kind
         .as_ref()
         .map_or(fallback, |kind| narrow(kind, route))

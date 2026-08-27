@@ -245,7 +245,7 @@ fn clause_span(
 fn declare_resource(
     signature: &mut Signature,
     metas: &mut Metas,
-    owned: &Owned,
+    owned: &mut Owned,
     resource: &ast::Resource,
     span: Span,
 ) -> Result<(), ElabError> {
@@ -323,13 +323,68 @@ fn declare_resource(
     // руками не нужно и не требуется §3.3.
     let elaborated =
         Elaborator::new(signature, metas, owned).typing(|it| it.expr(drop_ty, Mult::Many))?;
+    // Форма проверяется здесь, один раз, а не в каждой точке вставки: вызов
+    // `drop` подставляется компилятором, и тип его результата обязан быть
+    // написан в области видимости, где ресурса уже нет.
+    destructor_shape(&elaborated, &resource.name.text, drop_ty.span)?;
     let declared = Pending {
         name: Rc::from("drop"),
         ty: elaborated,
         source: drop_ty,
         span: drop_span,
     };
-    define(signature, metas, owned, &declared, clauses, drop_span)
+    define(signature, metas, owned, &declared, clauses, drop_span)?;
+    owned.destroys(&resource.name.text, &declared.name);
+    Ok(())
+}
+
+/// Деструктор берёт свой ресурс и отдаёт что-то, от него не зависящее.
+///
+/// Зависимость запрещена не из осторожности: вставка ставит `drop h` в
+/// `let`-связывание, тип которого пишется **рядом** с вызовом, а зависимый
+/// результат пришлось бы инстанцировать самим ресурсом - тем самым, которого
+/// после вызова уже нет.
+fn destructor_shape(ty: &Term, data: &Symbol, span: Span) -> Result<(), ElabError> {
+    let refuse = || ElabError::DestructorShape {
+        data: Rc::clone(data),
+        span,
+    };
+    let Term::Pi(_, _, domain, result) = ty else {
+        return Err(refuse());
+    };
+    let mut head = &**domain;
+    while let Term::App(callee, _) = head {
+        head = callee;
+    }
+    let Term::Const(name, _) = head else {
+        return Err(refuse());
+    };
+    if **name != **data || mentions_local(result) {
+        return Err(refuse());
+    }
+    Ok(())
+}
+
+/// Ссылается ли терм хоть на одно локальное связывание.
+fn mentions_local(term: &Term) -> bool {
+    match term {
+        Term::Var(_) => true,
+        Term::Universe(_) | Term::Const(..) => false,
+        Term::Lam(_, _, body) => mentions_local(body),
+        Term::App(callee, argument) => mentions_local(callee) || mentions_local(argument),
+        Term::Pi(_, _, domain, codomain) => mentions_local(domain) || mentions_local(codomain),
+        Term::Let(_, _, ty, value, body) => {
+            mentions_local(ty) || mentions_local(value) || mentions_local(body)
+        }
+        Term::Case(case) => {
+            mentions_local(&case.scrutinee)
+                || mentions_local(&case.motive)
+                || case
+                    .branches
+                    .iter()
+                    .any(|branch| mentions_local(&branch.body))
+        }
+    }
 }
 
 /// Индуктивное семейство вместе с конструкторами - одной группой.

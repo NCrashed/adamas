@@ -719,3 +719,99 @@ resource File where
         "получено {error:?}"
     );
 }
+
+/// Сколько вызовов `drop` в теле определения.
+fn drops(signature: &Signature, name: &str) -> usize {
+    let Some(body) = signature.lookup(name).and_then(|it| it.body.clone()) else {
+        panic!("у `{name}` есть тело")
+    };
+    body.to_string().matches("drop").count()
+}
+
+#[test]
+fn a_resource_nobody_mentions_is_closed_automatically() {
+    // §3.3: деструктор вызывается при выходе из scope. Правило решается на
+    // исходнике - имя не встречается в теле, значит ресурс жив (§10 вопрос 71).
+    let text = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+openIt : Bool -> File
+openIt b = Open b
+
+forgotten : Bool -> Bool
+forgotten b =
+  let h : File = openIt b
+  True
+
+closed : Bool -> Bool
+closed b =
+  let h : File = openIt b
+  drop h
+
+ignored : File -> Bool
+ignored h = True
+
+consumed : File -> Bool
+consumed h = drop h
+"
+    );
+    let signature = program(&text);
+    assert_eq!(drops(&signature, "forgotten"), 1, "`let` без упоминания");
+    assert_eq!(
+        drops(&signature, "closed"),
+        1,
+        "написанный `drop` не удваивается"
+    );
+    assert_eq!(drops(&signature, "ignored"), 1, "аргумент без упоминания");
+    assert_eq!(drops(&signature, "consumed"), 1, "аргумент израсходован");
+}
+
+#[test]
+fn a_resource_mentioned_only_in_an_erased_position_still_leaks() {
+    // Названная граница правила (§10 вопрос 71): имя стоит в позиции терма,
+    // поэтому упоминанием считается, - но попадает в `0`-параметр и ресурс не
+    // расходует. `drop` не вставляется, и ресурс утекает. Тест фиксирует
+    // именно это, чтобы граница не сдвинулась молча.
+    let text = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+describe : (0 h : File) -> Bool
+
+leaked : File -> Bool
+leaked h = describe h
+"
+    );
+    let signature = program(&text);
+    assert_eq!(
+        drops(&signature, "leaked"),
+        0,
+        "упоминание в позиции терма считается расходом, даже когда им не является"
+    );
+}
+
+#[test]
+fn a_shadowed_name_is_not_a_mention() {
+    // Внутреннее связывание закрывает внешнее, и внешний ресурс остаётся
+    // нетронутым - значит закрывается сам.
+    let text = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+same : (1 h : Bool) -> Bool
+same h = h
+
+shadowed : File -> Bool
+shadowed h = same True
+"
+    );
+    let signature = program(&text);
+    assert_eq!(drops(&signature, "shadowed"), 1);
+}

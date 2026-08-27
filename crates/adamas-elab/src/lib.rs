@@ -43,6 +43,7 @@
 mod decl;
 mod error;
 mod expr;
+mod live;
 mod own;
 mod render;
 mod route;

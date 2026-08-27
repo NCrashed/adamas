@@ -58,30 +58,51 @@ impl std::fmt::Display for Ownership {
 
 /// Таблица типов с владением.
 #[derive(Clone, Debug, Default)]
-pub struct Owned(HashMap<Symbol, Ownership>);
+pub struct Owned {
+    types: HashMap<Symbol, Ownership>,
+    /// Имя деструктора ресурсного типа. У `unique` его нет по определению.
+    drops: HashMap<Symbol, Symbol>,
+}
 
 impl Owned {
     /// Объявляет тип уникальным или ресурсным.
     pub fn declare(&mut self, name: &Symbol, how: Ownership) {
-        self.0.insert(name.clone(), how);
+        self.types.insert(name.clone(), how);
+    }
+
+    /// Называет деструктор ресурсного типа.
+    pub fn destroys(&mut self, name: &Symbol, drop: &Symbol) {
+        self.drops.insert(name.clone(), drop.clone());
     }
 
     /// Как объявлен тип, стоящий головой написанного.
     #[must_use]
     pub fn of(&self, ty: &Expr) -> Option<Ownership> {
-        self.0.get(head(ty)?).copied()
+        self.types.get(head(ty)?).copied()
+    }
+
+    /// Деструктор типа, стоящего головой написанного.
+    #[must_use]
+    pub fn destructor(&self, ty: &Expr) -> Option<&Symbol> {
+        self.drops.get(head(ty)?)
+    }
+
+    /// То же по имени типа - для домена, снятого с уже собранного терма.
+    #[must_use]
+    pub fn destructor_of(&self, data: &str) -> Option<&Symbol> {
+        self.drops.get(data)
     }
 
     /// Сколько типов с владением объявлено.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.types.len()
     }
 
     /// Пуста ли таблица.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.types.is_empty()
     }
 }
 

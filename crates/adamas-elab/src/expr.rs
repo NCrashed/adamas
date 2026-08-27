@@ -21,6 +21,7 @@ use adamas_parser::ast::{
 };
 
 use crate::error::{ElabError, Missing};
+use crate::live;
 use crate::own::Owned;
 
 /// Разбирает ли имя (заглавное) или связывает (строчное).
@@ -81,6 +82,12 @@ pub(crate) struct Elaborator<'a> {
     /// константа, разворачивающаяся в `Pi`) кратности кончаются, и лямбда
     /// снова берёт `ω`.
     declared: Vec<Mult>,
+    /// Деструкторы связываний написанного типа - по одному на `Pi` спайна.
+    ///
+    /// Считается вместе с кратностями и по той же причине: тип написан, и
+    /// голова каждого домена видна синтаксически. Аргумент клаузы, попавший в
+    /// ресурсную позицию и не упомянутый в теле, закрывается сам (§3.3).
+    destructors: Vec<Option<Symbol>>,
     /// Кратности, ожидающие ближайшую лямбду. Их выставляет тот, кто знает
     /// написанный тип: клауза - остатком спайна после своих паттернов, `let` -
     /// спайном своей аннотации.
@@ -123,6 +130,7 @@ impl<'a> Elaborator<'a> {
             scope: Vec::new(),
             group,
             declared: Vec::new(),
+            destructors: Vec::new(),
             expected: Vec::new(),
             types: false,
             instantiated: HashMap::new(),
@@ -132,6 +140,7 @@ impl<'a> Elaborator<'a> {
     /// Кратности написанного типа - те, что достанутся лямбдам тела.
     pub(crate) fn declaring(mut self, ty: &Term) -> Self {
         self.declared = pi_mults(ty);
+        self.destructors = pi_destructors(ty, self.owned);
         self
     }
 
@@ -500,12 +509,22 @@ impl<'a> Elaborator<'a> {
         };
         Self::binds(&binding.name)?;
         let mult = self.binder_mult(binding.mult, ty, Mult::Many, binding.span)?;
+        // Ресурс, имя которого дальше не встречается, закрывается сам (§3.3).
+        // Решается **до** элаборации тела: вставка заводит связывание, и тело
+        // обязано быть собрано уже под ним - иначе его индексы поедут.
+        let closing = self
+            .owned
+            .destructor(ty)
+            .filter(|_| !live::in_bindings_body(&binding.name.text, tail, rest))
+            .cloned();
         let ty = self.typing(|inner| inner.expr(ty, Mult::Many))?;
         // Аннотация `let` - тот же написанный тип, и лямбда значения берёт
         // кратности у него.
         self.expected = pi_mults(&ty);
         let value = self.expr(&binding.body, Mult::Many)?;
-        let body = self.under(&binding.name.text, |inner| inner.bindings(tail, rest))?;
+        let body = self.under(&binding.name.text, |inner| {
+            inner.closing(closing.as_ref(), 0, |it| it.bindings(tail, rest))
+        })?;
         Ok(Term::Let(
             mult,
             CoreName::from(&*binding.name.text),
@@ -513,6 +532,56 @@ impl<'a> Elaborator<'a> {
             Rc::new(value),
             Rc::new(body),
         ))
+    }
+
+    /// Собирает тело под вставленным `drop` и оборачивает его вызовом.
+    ///
+    /// `index` - индекс закрываемого связывания в области видимости **без**
+    /// вставки; связывание самого вызова добавляется здесь и учитывается уже
+    /// при сборке тела.
+    ///
+    /// Кратность вставки - `1`, а не `ω`: при `ω` вектор использований
+    /// значения масштабируется до `ω`, и ресурс, связанный при `1`, тут же
+    /// оказался бы израсходован сверх меры - отказ на программе, которую
+    /// вставка и должна была починить.
+    fn closing(
+        &mut self,
+        drop: Option<&Symbol>,
+        index: u32,
+        body: impl FnOnce(&mut Self) -> Result<Term, ElabError>,
+    ) -> Result<Term, ElabError> {
+        let Some(drop) = drop else {
+            return body(self);
+        };
+        let (call, result) = self.destructor(drop, index);
+        let anonymous: Symbol = Rc::from("_");
+        let inner = self.under(&anonymous, body)?;
+        Ok(Term::Let(
+            Mult::One,
+            CoreName::from("_"),
+            Rc::new(result),
+            Rc::new(call),
+            Rc::new(inner),
+        ))
+    }
+
+    /// Вызов деструктора и тип его результата.
+    ///
+    /// Аргументы уровня свежие на каждую вставку: два `drop` в одном
+    /// определении - два независимых вхождения, и общие дырки связали бы их
+    /// уровни между собой без причины.
+    fn destructor(&mut self, drop: &Symbol, index: u32) -> (Term, Term) {
+        let Some(definition) = self.signature.lookup(drop) else {
+            unreachable!("деструктор `{drop}` объявлен вместе с типом")
+        };
+        let levels: Rc<[Level]> = (0..definition.level_arity)
+            .map(|_| self.metas.fresh_level())
+            .collect();
+        let Term::Pi(_, _, _, result) = definition.ty.substitute_levels(&levels) else {
+            unreachable!("`{drop}` проверен на форму при объявлении")
+        };
+        let call = Term::Const(CoreName::from(&**drop), levels).apply([Term::var(index)]);
+        (call, (*result).clone())
     }
 
     /// Цепочка операторов. Скобки расставляются по фикситетам, а их ещё нет,
@@ -615,6 +684,7 @@ impl<'a> Elaborator<'a> {
         for pattern in &patterns {
             collect(pattern, &mut bound);
         }
+        let closing = self.closing_arguments(clause, &patterns, bound.len());
         let depth = self.scope.len();
         self.scope.extend(bound.iter().map(Bound::visible));
         // Паттерны сняли первые связывания написанного типа; остаток спайна -
@@ -624,13 +694,72 @@ impl<'a> Elaborator<'a> {
             .split_at(patterns.len().min(self.declared.len()))
             .1
             .to_vec();
-        let body = self.expr(&clause.body, Mult::Many);
+        let body = self.closing_all(&closing, |it| it.expr(&clause.body, Mult::Many));
         self.scope.truncate(depth);
 
         Ok(Clause {
             patterns,
             body: body?,
         })
+    }
+
+    /// Аргументы клаузы, которые она обязана закрыть сама.
+    ///
+    /// Только связывающий паттерн верхнего уровня: у него тип виден по спайну
+    /// написанного. Ресурс, добытый разбором конструктора, сюда не попадает -
+    /// его тип живёт в объявлении конструктора, и отвечает за него рекурсия
+    /// `drop` по полям (§3.3), которой ещё нет.
+    ///
+    /// Порядок - LIFO: последнее связывание закрывается первым, поэтому список
+    /// идёт от последнего аргумента к первому, а индексы дописываются на
+    /// глубину уже вставленного.
+    fn closing_arguments(
+        &self,
+        clause: &ast::Clause,
+        patterns: &[CorePattern],
+        bound: usize,
+    ) -> Vec<(u32, Symbol)> {
+        let mut found: Vec<(u32, Symbol)> = Vec::new();
+        let mut offset = 0usize;
+        for (position, (written, pattern)) in clause.patterns.iter().zip(patterns).enumerate() {
+            let mut variables = Vec::new();
+            collect(pattern, &mut variables);
+            let PatternKind::Name(name) = &written.kind else {
+                offset += variables.len();
+                continue;
+            };
+            let closes = !is_reference(&name.text)
+                && !live::mentions(&name.text, &clause.body)
+                && self.destructors.get(position).is_some_and(Option::is_some);
+            if closes {
+                let index = u32::try_from(bound - 1 - offset).unwrap_or(u32::MAX);
+                let drop = self.destructors[position]
+                    .clone()
+                    .unwrap_or_else(|| unreachable!("деструктор только что найден"));
+                found.push((index, drop));
+            }
+            offset += variables.len();
+        }
+        // LIFO плюс поправка на уже вставленное: каждая следующая вставка
+        // видит область видимости на одно связывание глубже.
+        found.reverse();
+        for (depth, entry) in found.iter_mut().enumerate() {
+            entry.0 += u32::try_from(depth).unwrap_or(0);
+        }
+        found
+    }
+
+    /// Оборачивает тело цепочкой вставленных `drop`.
+    fn closing_all(
+        &mut self,
+        drops: &[(u32, Symbol)],
+        body: impl FnOnce(&mut Self) -> Result<Term, ElabError>,
+    ) -> Result<Term, ElabError> {
+        let Some(((index, drop), rest)) = drops.split_first() else {
+            return body(self);
+        };
+        let drop = drop.clone();
+        self.closing(Some(&drop), *index, |it| it.closing_all(rest, body))
     }
 }
 
@@ -643,6 +772,24 @@ fn pi_mults(ty: &Term) -> Vec<Mult> {
         current = codomain;
     }
     mults
+}
+
+/// Деструкторы по спайну `Pi` - `None` там, где домен не ресурсен.
+fn pi_destructors(ty: &Term, owned: &Owned) -> Vec<Option<Symbol>> {
+    let mut found = Vec::new();
+    let mut current = ty;
+    while let Term::Pi(_, _, domain, codomain) = current {
+        let mut head = &**domain;
+        while let Term::App(callee, _) = head {
+            head = callee;
+        }
+        found.push(match head {
+            Term::Const(name, _) => owned.destructor_of(name).cloned(),
+            _ => None,
+        });
+        current = codomain;
+    }
+    found
 }
 
 /// Повторное имя переменной в клаузе.

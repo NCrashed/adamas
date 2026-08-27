@@ -210,6 +210,19 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Деструктор не той формы.
+    ///
+    /// Он берёт свой ресурс и отдаёт что-то, от него не зависящее: вызов
+    /// подставляет компилятор, и тип результата пишется рядом с вызовом - там,
+    /// где ресурса уже нет.
+    #[error("`drop` для `{data}` обязан брать `{data}` и отдавать тип, от него не зависящий")]
+    DestructorShape {
+        /// Имя типа.
+        data: Symbol,
+        /// Написанный тип `drop`.
+        span: Span,
+    },
+
     /// В теле `resource` определено что-то помимо `drop`.
     ///
     /// Тело держит конструкторы и деструктор; всё прочее определяется рядом,
@@ -313,6 +326,7 @@ impl ElabError {
             | Self::UnrestrictedOwned { span, .. }
             | Self::ResourceWithoutDrop { span, .. }
             | Self::ResourceMember { span, .. }
+            | Self::DestructorShape { span, .. }
             | Self::MissingSignature { span, .. }
             | Self::DetachedSignature { span, .. }
             | Self::Missing { span, .. }

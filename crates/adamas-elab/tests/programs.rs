@@ -140,7 +140,11 @@ constant _ = True
         let outcome = check_closed(&signature, &witness, &stated);
         assert!(outcome.is_ok(), "even {input} = {expected}: {outcome:?}");
     }
-    assert!(signature.lookup("constant").is_some());
+    // `_` связывает, ничего не называя: тело обязано считаться так же, как
+    // если бы аргумента не было вовсе.
+    let witness = at("q").apply([Term::constant("True")]);
+    let stated = at("Q").apply([Term::constant("constant").apply([Term::constant("Zero")])]);
+    assert!(check_closed(&signature, &witness, &stated).is_ok());
 }
 
 #[test]
@@ -184,7 +188,11 @@ use n = witness n
 "
     );
     let signature = program(&text);
-    assert!(signature.lookup("use").is_some());
+    // Зависимость дожила до тела: `use Zero` обязана иметь тип `P Zero`, а не
+    // `P n` при каком-нибудь другом `n`.
+    let stated = at("P").apply([Term::constant("Zero")]);
+    let witness = at("use").apply([Term::constant("Zero")]);
+    assert!(check_closed(&signature, &witness, &stated).is_ok());
 }
 
 #[test]
@@ -206,6 +214,122 @@ two =
         adamas_core::eval::normalize(&body).to_string(),
         "Succ (Succ Zero)",
         "`let` вычисляется"
+    );
+}
+
+#[test]
+fn a_lambda_takes_its_multiplicity_from_the_written_type() {
+    // Кратность лямбды обязана совпасть с кратностью `Pi`, а вывести её
+    // элаборация не может. Выводить и нечего: тип написан, спайн его виден.
+    let text = format!(
+        "{BASE}
+id : (1 n : Nat) -> Nat
+id = \\n -> n
+
+first : (1 x : Nat) -> (0 y : Nat) -> Nat
+first = \\x -> \\y -> x
+
+second : (0 x : Nat) -> (1 y : Nat) -> Nat
+second = \\x y -> y
+
+local : Nat
+local =
+  let same : (1 n : Nat) -> Nat = \\n -> n
+  same (Succ Zero)
+"
+    );
+    let signature = program(&text);
+    let body = signature
+        .lookup("local")
+        .and_then(|definition| definition.body.clone())
+        .expect("тело есть");
+    assert_eq!(
+        adamas_core::eval::normalize(&body).to_string(),
+        "Succ Zero",
+        "лямбда под `1`-связыванием не только объявляется, но и считает"
+    );
+}
+
+#[test]
+fn an_operator_chain_elaborates() {
+    // Один оператор в цепочке - это два применения; фикситетов ещё нет,
+    // поэтому длиннее цепочка не собирается (см. таблицу `Missing`).
+    let text = format!(
+        "{BASE}
+P : Nat -> Type
+anything : (0 n : Nat) -> P n
+
+(+) : Nat -> Nat -> Nat
+(+) Zero m = m
+(+) (Succ k) m = Succ (k + m)
+"
+    );
+    let signature = program(&text);
+    let number = |value: u32| {
+        (0..value).fold(Term::constant("Zero"), |term, _| {
+            Term::constant("Succ").apply([term])
+        })
+    };
+    let witness = at("anything").apply([number(3)]);
+    let stated = at("P").apply([Term::constant("+").apply([number(1), number(2)])]);
+    assert!(
+        check_closed(&signature, &witness, &stated).is_ok(),
+        "1 + 2 = 3"
+    );
+}
+
+#[test]
+fn a_binder_group_does_not_see_its_own_names() {
+    // `A` в `(x y : A)` написано раньше обоих имён: видеть их оно не может,
+    // хотя элаборируется под ними - индексы де Брёйна того требуют.
+    let text = format!(
+        "{BASE}
+f : (0 t : Type) -> (0 t x : t) -> Nat
+f a b c = Zero
+"
+    );
+    let signature = program(&text);
+    assert!(signature.lookup("f").is_some(), "группа не захватила себя");
+}
+
+#[test]
+fn a_recursive_definition_sees_its_own_level_arity() {
+    // Арность параметров уровня считается по проверенному типу: `is_type`
+    // решает часть дырок, и самоссылка обязана получить столько же аргументов,
+    // сколько у члена окажется параметров.
+    let text = format!(
+        "{BASE}
+Id : Type -> Type
+
+f : Id Nat -> Id Nat
+f x = f x
+"
+    );
+    let signature = program(&text);
+    assert!(signature.lookup("f").is_some());
+}
+
+#[test]
+fn one_name_gets_one_set_of_level_holes() {
+    // Полиморфное по уровню семейство: два вхождения в одной сигнатуре обязаны
+    // получить один параметр, иначе тождество над ним не пишется.
+    let text = "\
+data D : Type where
+  C : D
+
+f : D -> D
+f x = x
+";
+    let signature = program(text);
+    let body = signature
+        .lookup("f")
+        .and_then(|definition| definition.body.clone())
+        .expect("тело есть");
+    // Печать ядра - аварийная, на индексах: имя в ней не участвует.
+    assert_eq!(
+        adamas_core::eval::normalize(&body).to_string(),
+        "\\(ω x) -> #0",
+        "тождество собралось"
     );
 }
 
@@ -257,17 +381,41 @@ fn clauses_without_a_signature_are_refused() {
 fn what_the_core_cannot_carry_yet_names_itself() {
     // Каждая форма отвечает тем, чего ей недостаёт, а не «неизвестное имя»:
     // программа написана правильно, не хватает ядра.
+    // Таблица покрывает варианты целиком: непокрытый вариант - это форма,
+    // про которую никто не проверял, что она вообще досюда доходит.
     let missing = [
-        ("f : Nat -> Nat\nf x = 1\n", Missing::Literal),
-        ("f : Nat -> Nat\nf x = _\n", Missing::TermHole),
+        ("f : a -> a\n", Missing::Implicits),
         ("f : {a : Type} -> Nat\n", Missing::ImplicitBinder),
+        ("f : Nat -> Nat\nf x = x @Nat\n", Missing::TypeApplication),
+        ("f : Nat -> Nat\nf x = _\n", Missing::TermHole),
+        ("f : Nat -> Nat\nf x = 1\n", Missing::Literal),
         ("f : Nat\nf =\n  let x = Zero\n  x\n", Missing::UntypedLet),
+        (
+            "f : Nat -> Nat\nf = \\(0 x : Nat) -> x\n",
+            Missing::LambdaAnnotation,
+        ),
         (
             "f : Nat -> Nat\nf x = if x then x else x\n",
             Missing::Conditional,
         ),
+        (
+            "f : Nat -> Nat\nf x = case x of\n  Zero -> Zero\n",
+            Missing::CaseExpression,
+        ),
         ("f : Nat\nf = (Zero, Zero)\n", Missing::Tuple),
+        ("f : Nat\nf = ()\n", Missing::Unit),
+        ("f : Nat\nf = [Zero]\n", Missing::List),
+        ("f : Nat\nf = Zero + Zero + Zero\n", Missing::Fixities),
+        (
+            "data Pair a b where\n  MkPair : Nat\n",
+            Missing::FamilyParameters,
+        ),
         ("resource File where\n  drop h = h\n", Missing::Resource),
+        (
+            "f : Nat -> Nat\nf x = y\n  where\n    y : Nat\n    y = x\n",
+            Missing::LocalDefinitions,
+        ),
+        ("f : Nat\nf =\n  Zero\n  Zero\n", Missing::Sequencing),
     ];
     for (text, expected) in missing {
         let text = format!("{BASE}{text}");
@@ -277,6 +425,62 @@ fn what_the_core_cannot_carry_yet_names_itself() {
         };
         assert_eq!(what, expected, "для {text:?}");
     }
+}
+
+#[test]
+fn a_repeated_variable_in_a_clause_is_refused() {
+    // Равенство аргументов паттерном не выражается: терм собрался бы
+    // корректный, с правым вхождением, и ядро принимало бы опечатку.
+    let text = format!("{BASE}f : Nat -> Nat -> Nat\nf x x = x\n");
+    let error = refused(&text);
+    let ElabError::RepeatedBinding { name, .. } = &error else {
+        panic!("ожидалось `RepeatedBinding`, получено {error:?}");
+    };
+    assert_eq!(&**name, "x");
+    // `_` повтором не считается: он не называет.
+    let text = format!("{BASE}g : Nat -> Nat -> Nat\ng _ _ = Zero\n");
+    assert!(program(&text).lookup("g").is_some());
+}
+
+#[test]
+fn an_uppercase_name_does_not_bind() {
+    // §4.1: заглавное имя ссылается на объявленное. Связать им - заслонить
+    // то, на что оно ссылается, и `Zero` внутри блока перестал бы быть
+    // конструктором.
+    for text in [
+        "f : (Zero : Nat) -> Nat\nf n = n\n",
+        "f : Nat\nf =\n  let Zero : Nat = Succ Zero\n  Zero\n",
+    ] {
+        let text = format!("{BASE}{text}");
+        let error = refused(&text);
+        assert!(
+            matches!(error, ElabError::UppercaseBinding { .. }),
+            "для {text:?} получено {error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_signature_apart_from_its_clauses_is_refused_by_name() {
+    // Примыкание - требование реализации: сигнатура, за которой сразу не пошли
+    // клаузы, становится постулатом. Отказ обязан называть настоящую причину,
+    // а не «нет сигнатуры».
+    let text = format!("{BASE}f : Nat -> Nat\ng : Nat -> Nat\ng x = x\nf x = x\n");
+    let error = refused(&text);
+    assert!(
+        matches!(error, ElabError::DetachedSignature { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_block_must_end_with_a_value() {
+    let text = format!("{BASE}f : Nat\nf =\n  let x : Nat = Zero\n");
+    let error = refused(&text);
+    assert!(
+        matches!(error, ElabError::BlockWithoutValue { .. }),
+        "получено {error:?}"
+    );
 }
 
 #[test]

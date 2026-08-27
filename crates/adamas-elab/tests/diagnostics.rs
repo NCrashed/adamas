@@ -126,6 +126,56 @@ f Zero = False
 }
 
 #[test]
+fn the_route_goes_through_a_lambda_the_author_wrote() {
+    // Лямбда с двумя параметрами - две `Lam`, и кадров `Body` столько же.
+    let text = format!("{BASE}f : Nat -> Nat -> Bool\nf = \\x y -> y\n");
+    assert_eq!(underlined(&text), "y");
+}
+
+#[test]
+fn the_route_reaches_an_operand_of_a_chain() {
+    // Цепочка из одного оператора - это два применения, и разобрать их можно
+    // только зная, какое из них какое.
+    let text = format!(
+        "{BASE}(+) : Nat -> Nat -> Nat
+(+) Zero m = m
+(+) (Succ k) m = m
+
+bad : Nat
+bad = Zero + True
+"
+    );
+    assert_eq!(underlined(&text), "True");
+}
+
+#[test]
+fn a_group_of_two_names_is_walked_name_by_name() {
+    // Развороты «по `Pi` на имя» и «по `Pi` на группу» различимы только на
+    // группе длиннее одного имени: там второй домен стоит за двумя кадрами.
+    let text = format!("{BASE}f : (0 n m : Nat) (b : Nat Nat) -> Bool\n");
+    assert_eq!(underlined(&text), "Nat Nat");
+}
+
+#[test]
+fn the_route_reaches_the_second_binding_of_a_let() {
+    let text = format!(
+        "{BASE}two : Nat
+two =
+  let one : Nat = Succ Zero
+      other : Nat = True
+  Succ one
+"
+    );
+    assert_eq!(underlined(&text), "True");
+}
+
+#[test]
+fn a_refusal_in_the_kind_of_a_family_is_underlined_there() {
+    let text = format!("{BASE}data Odd : Nat Nat -> Type where\n  One : Odd\n");
+    assert_eq!(underlined(&text), "Nat Nat");
+}
+
+#[test]
 fn a_refusal_without_a_route_falls_back_to_the_declaration() {
     // Занятое имя - отказ про объявление целиком, а не про подтерм: маршрут
     // пуст, и выдумывать место не из чего.

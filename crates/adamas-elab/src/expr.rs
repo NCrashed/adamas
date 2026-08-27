@@ -40,6 +40,21 @@ pub fn is_reference(name: &str) -> bool {
     name.chars().next().is_some_and(char::is_uppercase)
 }
 
+/// Локальное связывание: имя и видно ли оно поиску (см. `hiding`).
+struct Bound {
+    name: Symbol,
+    visible: bool,
+}
+
+impl Bound {
+    fn visible(name: &Symbol) -> Self {
+        Self {
+            name: Rc::clone(name),
+            visible: true,
+        }
+    }
+}
+
 /// Состояние элаборации: сигнатура, хранилище дырок и локальные связывания.
 pub(crate) struct Elaborator<'a> {
     /// Уже объявленное. Элаборация её не меняет - объявляет вызывающий.
@@ -48,7 +63,7 @@ pub(crate) struct Elaborator<'a> {
     pub metas: &'a mut Metas,
     /// Локальные связывания снаружи внутрь; индекс де Брёйна - расстояние от
     /// конца.
-    scope: Vec<Symbol>,
+    scope: Vec<Bound>,
     /// Члены объявляемой группы вместе с арностью параметров уровня.
     ///
     /// В сигнатуре их ещё нет - она увидит группу целиком (§10 вопрос 50), - а
@@ -96,9 +111,27 @@ impl<'a> Elaborator<'a> {
 
     /// Выполняет `body` под связыванием `name`.
     fn under<T>(&mut self, name: &Symbol, body: impl FnOnce(&mut Self) -> T) -> T {
-        self.scope.push(Rc::clone(name));
+        self.scope.push(Bound::visible(name));
         let outcome = body(self);
         self.scope.pop();
+        outcome
+    }
+
+    /// Выполняет `body`, спрятав `count` последних связываний.
+    ///
+    /// Спрятанное связывание место в контексте занимает, а имени не имеет:
+    /// индексы де Брёйна остаются верными, а поиск по имени сквозь него
+    /// проходит наружу. Нужно это ровно группе `(x y : A)`, где `A` написано
+    /// раньше обоих имён и видеть их не может.
+    fn hiding<T>(&mut self, count: usize, body: impl FnOnce(&mut Self) -> T) -> T {
+        let from = self.scope.len() - count;
+        for bound in &mut self.scope[from..] {
+            bound.visible = false;
+        }
+        let outcome = body(self);
+        for bound in &mut self.scope[from..] {
+            bound.visible = true;
+        }
         outcome
     }
 
@@ -106,8 +139,23 @@ impl<'a> Elaborator<'a> {
     fn local(&self, name: &str) -> Option<u32> {
         self.scope
             .iter()
-            .rposition(|bound| &**bound == name)
+            .rposition(|bound| bound.visible && &*bound.name == name)
             .and_then(|position| u32::try_from(self.scope.len() - 1 - position).ok())
+    }
+
+    /// Имя, которое связывает, обязано быть строчным (§4.1).
+    ///
+    /// Заглавное ссылается на объявленное, и связывать им значило бы заслонить
+    /// то, на что оно ссылается: `let Zero : Nat = …` делал конструктор
+    /// недостижимым до конца блока.
+    fn binds(name: &ast::Name) -> Result<(), ElabError> {
+        if is_reference(&name.text) {
+            return Err(ElabError::UppercaseBinding {
+                name: Rc::clone(&name.text),
+                span: name.span,
+            });
+        }
+        Ok(())
     }
 
     /// Кратность связывания: написанная либо умолчание позиции (§4.1).
@@ -204,16 +252,21 @@ impl<'a> Elaborator<'a> {
     ///
     /// Группы разворачиваются в плоский список связываний: `(x y : A)` - это
     /// два `Pi`, и второй видит первое связывание, поэтому тип элаборируется
-    /// заново под каждым именем. Дырки уровня при этом у каждого свои: общий
-    /// `Type` в записи не значит общий универсум, а более общее прочтение
-    /// здесь безопасно.
+    /// заново под каждым именем. Заново - но не в другой области видимости:
+    /// `A` написано раньше обоих имён, и собственные имена группы для него
+    /// спрятаны (`hiding`), иначе `(0 t : Type) -> (0 t x : t) -> …` дало бы
+    /// `x` тип соседа по группе вместо написанного снаружи. Отсюда третье
+    /// поле плоского списка - сколько имён группы стоит перед этим.
+    ///
+    /// Дырки уровня у каждого имени свои: общий `Type` в записи не значит
+    /// общий универсум, а более общее прочтение здесь безопасно.
     fn pi(
         &mut self,
         binders: &[ast::Binder],
         codomain: &Expr,
         default: Mult,
     ) -> Result<Term, ElabError> {
-        let mut flat: Vec<(Mult, Symbol, &Expr)> = Vec::new();
+        let mut flat: Vec<(Mult, Symbol, &Expr, usize)> = Vec::new();
         for binder in binders {
             if binder.visibility == Visibility::Implicit {
                 return Err(ElabError::Missing {
@@ -230,8 +283,9 @@ impl<'a> Elaborator<'a> {
                 });
             };
             let mult = Self::multiplicity(binder.mult, default);
-            for name in &binder.names {
-                flat.push((mult, Rc::clone(&name.text), ty));
+            for (position, name) in binder.names.iter().enumerate() {
+                Self::binds(name)?;
+                flat.push((mult, Rc::clone(&name.text), ty, position));
             }
         }
         self.pi_flat(&flat, codomain, default)
@@ -239,14 +293,14 @@ impl<'a> Elaborator<'a> {
 
     fn pi_flat(
         &mut self,
-        binders: &[(Mult, Symbol, &Expr)],
+        binders: &[(Mult, Symbol, &Expr, usize)],
         codomain: &Expr,
         default: Mult,
     ) -> Result<Term, ElabError> {
-        let Some(((mult, name, ty), rest)) = binders.split_first() else {
+        let Some(((mult, name, ty, siblings), rest)) = binders.split_first() else {
             return self.expr(codomain, default);
         };
-        let domain = self.expr(ty, Mult::Many)?;
+        let domain = self.hiding(*siblings, |inner| inner.expr(ty, Mult::Many))?;
         let body = self.under(name, |inner| inner.pi_flat(rest, codomain, default))?;
         Ok(Term::Pi(
             *mult,
@@ -340,6 +394,7 @@ impl<'a> Elaborator<'a> {
                 span: binding.span,
             });
         };
+        Self::binds(&binding.name)?;
         let ty = self.expr(ty, Mult::Many)?;
         let value = self.expr(&binding.body, Mult::Many)?;
         let mult = Self::multiplicity(binding.mult, Mult::Many);
@@ -432,6 +487,10 @@ impl<'a> Elaborator<'a> {
                 span: clause.span,
             });
         }
+        let mut seen: Vec<&ast::Name> = Vec::new();
+        for pattern in &clause.patterns {
+            repeated(pattern, &mut seen)?;
+        }
         let patterns = clause
             .patterns
             .iter()
@@ -443,7 +502,7 @@ impl<'a> Elaborator<'a> {
             collect(pattern, &mut bound);
         }
         let depth = self.scope.len();
-        self.scope.extend(bound);
+        self.scope.extend(bound.iter().map(Bound::visible));
         let body = self.expr(&clause.body, Mult::Many);
         self.scope.truncate(depth);
 
@@ -452,6 +511,34 @@ impl<'a> Elaborator<'a> {
             body: body?,
         })
     }
+}
+
+/// Повторное имя переменной в клаузе.
+///
+/// Клауза `f x x = x` терму отвечает корректному - побеждает правое вхождение,
+/// потому что индекс ищется от ближайшего связывания, - и ядро её принимает.
+/// Значит поймать опечатку может только элаборация: написанное равенство
+/// аргументов языком не выражается, и разбор по нему сравнением не становится.
+fn repeated<'a>(pattern: &'a Pattern, seen: &mut Vec<&'a ast::Name>) -> Result<(), ElabError> {
+    match &pattern.kind {
+        PatternKind::Name(name) if !is_reference(&name.text) => {
+            if let Some(first) = seen.iter().find(|earlier| earlier.text == name.text) {
+                return Err(ElabError::RepeatedBinding {
+                    name: Rc::clone(&name.text),
+                    span: name.span,
+                    first: first.span,
+                });
+            }
+            seen.push(name);
+        }
+        PatternKind::App { fields, .. } => {
+            for field in fields {
+                repeated(field, seen)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Переменные паттерна слева направо в глубину.

@@ -160,6 +160,30 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Имя с заглавной буквы в позиции связывания.
+    ///
+    /// Обратная сторона [`ElabError::NotAConstructor`]: заглавное имя
+    /// ссылается на объявленное (§4.1), поэтому связать им - заслонить то, на
+    /// что оно ссылается.
+    #[error("`{name}` не связывает: заглавное имя ссылается на объявленное, строчное связывает")]
+    UppercaseBinding {
+        /// Имя.
+        name: Symbol,
+        /// Где написано.
+        span: Span,
+    },
+
+    /// Одно имя связано клаузой дважды.
+    #[error("`{name}` в клаузе дважды: равенство аргументов паттерном не выражается")]
+    RepeatedBinding {
+        /// Имя.
+        name: Symbol,
+        /// Второе вхождение - то, которое заслоняло первое.
+        span: Span,
+        /// Первое вхождение.
+        first: Span,
+    },
+
     /// Клаузы без сигнатуры.
     ///
     /// Тип нужен раньше тела: по нему снимается телескоп аргументов, а из него
@@ -225,6 +249,8 @@ impl ElabError {
         match self {
             Self::UnknownName { span, .. }
             | Self::NotAConstructor { span, .. }
+            | Self::UppercaseBinding { span, .. }
+            | Self::RepeatedBinding { span, .. }
             | Self::MissingSignature { span, .. }
             | Self::Missing { span, .. }
             | Self::Core { span, .. }

@@ -15,6 +15,7 @@
 //! 2026-08-25). Правило локально: чтобы прочитать клаузу, не нужно знать, что
 //! объявлено выше. Буква без регистра считается строчной, как в GHC.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use adamas_core::level::Level;
@@ -56,6 +57,20 @@ pub(crate) struct Elaborator<'a> {
     /// и её считает вызывающий обобщением по типу члена; это и есть §10
     /// вопрос 63.
     group: Vec<(Symbol, Rc<[Level]>)>,
+    /// Аргументы уровня, уже выданные имени в этом объявлении.
+    ///
+    /// Одно имя - один набор дырок, а не свежий на каждое вхождение. Иначе
+    /// `f : D -> D` над полиморфным по уровню `D` читается как `∀u v. D{u} ->
+    /// D{v}`: обобщение идёт до проверки тела, связать два параметра потом
+    /// нечем, и тождество над таким семейством не пишется. Тот же довод уже
+    /// стоял за общими дырками у члена группы (`self_levels` в
+    /// [`crate::decl`]), здесь он распространён на объявленное.
+    ///
+    /// Цена названа: два вхождения одного имени на разных уровнях в одной
+    /// сигнатуре теперь несовместимы. Написать их всё равно нечем - уровни в
+    /// поверхностном языке не именуются, - и появится это вместе с
+    /// имплиситами (§4.1).
+    instantiated: HashMap<Symbol, Term>,
 }
 
 impl<'a> Elaborator<'a> {
@@ -75,6 +90,7 @@ impl<'a> Elaborator<'a> {
             metas,
             scope: Vec::new(),
             group,
+            instantiated: HashMap::new(),
         }
     }
 
@@ -167,13 +183,21 @@ impl<'a> Elaborator<'a> {
             return Ok(Term::Const(CoreName::from(&*name.text), Rc::clone(levels)));
         }
         // Аргументы уровня подставляются дырками - это implicit UP со стороны
-        // места использования (§3.2).
-        self.signature
+        // места использования (§3.2), - и одному имени они выдаются один раз
+        // на объявление (см. `instantiated`).
+        if let Some(term) = self.instantiated.get(&name.text) {
+            return Ok(term.clone());
+        }
+        let term = self
+            .signature
             .instantiate(&name.text, self.metas)
             .ok_or_else(|| ElabError::UnknownName {
                 name: Rc::clone(&name.text),
                 span: name.span,
-            })
+            })?;
+        self.instantiated
+            .insert(Rc::clone(&name.text), term.clone());
+        Ok(term)
     }
 
     /// `(q x y : A) (r z : B) -> C`.

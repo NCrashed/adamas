@@ -102,18 +102,12 @@ two =
 }
 
 #[test]
-fn a_type_refused_by_the_clause_compiler_is_underlined_in_the_signature() {
-    // Тип проверяет сборка клауз, а написан он в сигнатуре - на две
-    // декларации выше того места, где сборка споткнулась.
+fn a_type_refused_before_the_clauses_is_underlined_in_the_signature() {
+    // Тип проверяется раньше клауз - его проверка и есть то, что даёт арность
+    // параметров уровня самоссылке. Клаузы при этом ни при чём, и подчёркнуто
+    // написанное в сигнатуре.
     let text = format!("{BASE}f : Nat Nat -> Bool\nf n = True\n");
-    let module = parse(&text).expect("разбирается");
-    let error = elaborate(&module).expect_err("ожидался отказ");
-    assert!(
-        matches!(error, ElabError::Clauses { .. }),
-        "получено {error:?}"
-    );
-    let span = error.span();
-    assert_eq!(&text[span.start()..span.end()], "Nat Nat");
+    assert_eq!(underlined(&text), "Nat Nat");
 }
 
 #[test]

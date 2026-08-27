@@ -16,6 +16,8 @@
 
 use std::rc::Rc;
 
+use adamas_core::check::{TypeError, is_type};
+use adamas_core::ctx::Ctx;
 use adamas_core::level::Level;
 use adamas_core::meta::{Generalization, Metas};
 use adamas_core::mult::Mult;
@@ -133,9 +135,12 @@ fn define(
     span: Span,
 ) -> Result<(), ElabError> {
     // Рекурсивная ссылка обязана найти себя: в сигнатуре определения ещё нет,
-    // а его арность уже известна - это арность обобщения по типу, ровно та,
-    // которую выведет ядро (§10 вопрос 63).
-    let group = vec![(Rc::clone(&declared.name), self_levels(metas, &declared.ty))];
+    // а его арность считает элаборация - §10 вопрос 63, вариант (а).
+    let levels = self_levels(signature, metas, &declared.ty).map_err(|error| ElabError::Core {
+        span: route::locate(&Declared::Bare(declared.source), &error, declared.span),
+        error: Box::new(error),
+    })?;
+    let group = vec![(Rc::clone(&declared.name), levels)];
     let compiled = {
         let mut elaborator = Elaborator::with_group(signature, metas, group);
         clauses
@@ -230,9 +235,13 @@ fn declare_data(
         None => Term::universe(0),
     };
     // Конструктор называет своё семейство, а в сигнатуре его ещё нет: группа
-    // объявляется целиком. Арность берётся обобщением по тип-формеру - это та
-    // же арность, которую выведет ядро, а не догадка (§10 вопрос 63).
-    let levels = self_levels(metas, &kind);
+    // объявляется целиком, и арность тип-формера считает элаборация.
+    let levels = self_levels(signature, metas, &kind).map_err(|error| ElabError::Core {
+        span: data.kind.as_ref().map_or(span, |kind| {
+            route::locate(&Declared::Bare(kind), &error, span)
+        }),
+        error: Box::new(error),
+    })?;
 
     // §4.1 назначает полю конструктора кратность `1` по умолчанию, и здесь
     // стоит `ω` - **сознательное расхождение с документом**, заведённое §10
@@ -272,16 +281,28 @@ fn declare_data(
 /// Аргументы уровня, с которыми член группы называет сам себя.
 ///
 /// Их число - арность, которую выведет ядро: обобщение считает нерешённые
-/// дырки, и ровно их `define_inferred` превращает в параметры. Не догадка;
-/// разойдись оно с ядром - ядро ответит `LevelArity`, а не примет неверное.
+/// дырки, и ровно их фаза A превращает в параметры. Разойдись счёт с ядром -
+/// ядро ответит `LevelArity`, а не примет неверное.
+///
+/// **Считать можно только по проверенному типу.** Фаза A обобщает после
+/// `check_declaration`, а тот решает часть дырок унификацией: в `f : Id Nat ->
+/// Id Nat` аргумент уровня у `Id` навязан её собственным объявлением. Поэтому
+/// здесь идёт тот же `is_type`, что и в ядре, - без него самоссылка получает
+/// больше аргументов уровня, чем у члена окажется параметров, и корректная
+/// рекурсия отвергается.
 ///
 /// Дырки **общие на весь тип**, а не свежие на каждое вхождение: `Succ : Nat
 /// -> Nat` называет одно и то же семейство дважды, и разные дырки сделали бы
 /// его полиморфным по двум независимым уровням (§10 вопрос 63).
-fn self_levels(metas: &mut Metas, ty: &Term) -> Rc<[Level]> {
+fn self_levels(
+    signature: &Signature,
+    metas: &mut Metas,
+    ty: &Term,
+) -> Result<Rc<[Level]>, TypeError> {
+    is_type(&Ctx::new(signature), metas, ty)?;
     let mut generalization = Generalization::default();
     generalization.collect_term(metas, ty);
-    (0..generalization.arity())
+    Ok((0..generalization.arity())
         .map(|_| metas.fresh_level())
-        .collect()
+        .collect())
 }

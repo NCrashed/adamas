@@ -284,6 +284,16 @@ fn a_free_type_variable_is_refused_for_now() {
     // Полиморфизм упирается в ядро, а не в элаборацию: подъём `a` в
     // implicit-параметр требует видимости у `Pi` и метапеременных на термах.
     let error = refused("f : a -> a\n");
+    let ElabError::Missing {
+        what: Missing::Implicits,
+        ..
+    } = error
+    else {
+        panic!("ожидались имплиситы, получено {error:?}");
+    };
+    // В теле то же имя - опечатка, а не свободная переменная: поднимать в
+    // implicit-параметр там нечего.
+    let error = refused(&format!("{BASE}f : Nat -> Nat\nf n = a\n"));
     assert!(
         matches!(error, ElabError::UnknownName { .. }),
         "получено {error:?}"

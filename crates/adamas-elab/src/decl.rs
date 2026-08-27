@@ -73,7 +73,8 @@ pub fn elaborate_into(
         match &decl.kind {
             DeclKind::Signature { name, ty } => {
                 postulate(signature, metas, pending.take())?;
-                let elaborated = Elaborator::new(signature, metas).expr(ty, Mult::Many)?;
+                let elaborated =
+                    Elaborator::new(signature, metas).typing(|it| it.expr(ty, Mult::Many))?;
                 pending = Some(Pending {
                     name: Rc::clone(&name.text),
                     ty: elaborated,
@@ -222,7 +223,7 @@ fn declare_data(
         });
     }
     let kind = match &data.kind {
-        Some(kind) => Elaborator::new(signature, metas).expr(kind, Mult::Many)?,
+        Some(kind) => Elaborator::new(signature, metas).typing(|it| it.expr(kind, Mult::Many))?,
         // Тип-формер не написан - семейство живёт в нулевом универсуме.
         //
         // **Не дырка.** Дырка здесь осталась бы нерешённой (её ограничивают
@@ -266,7 +267,7 @@ fn declare_data(
         .map(|constructor| {
             let group = vec![(Rc::clone(&data.name.text), Rc::clone(&levels))];
             let ty = Elaborator::with_group(signature, metas, group)
-                .expr(&constructor.ty, Mult::Many)?;
+                .typing(|it| it.expr(&constructor.ty, Mult::Many))?;
             Ok((&*constructor.name.text, ty))
         })
         .collect::<Result<Vec<_>, ElabError>>()?;

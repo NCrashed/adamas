@@ -23,6 +23,7 @@ use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::pattern::{Clause, Pattern as CorePattern};
 use adamas_core::sig::{DefinitionKind, Signature};
+use adamas_core::source::Span;
 use adamas_core::term::{Name as CoreName, Term};
 use adamas_parser::ast::{
     self, Binding, Block, Expr, ExprKind, LamParamKind, Pattern, PatternKind, Stmt, StmtKind,
@@ -85,6 +86,8 @@ pub(crate) struct Elaborator<'a> {
     /// написанный тип: клауза - остатком спайна после своих паттернов, `let` -
     /// спайном своей аннотации.
     expected: Vec<Mult>,
+    /// Идёт ли элаборация в позиции типа - см. `typing`.
+    types: bool,
     /// Аргументы уровня, уже выданные имени в этом объявлении.
     ///
     /// Одно имя - один набор дырок, а не свежий на каждое вхождение. Иначе
@@ -120,6 +123,7 @@ impl<'a> Elaborator<'a> {
             group,
             declared: Vec::new(),
             expected: Vec::new(),
+            types: false,
             instantiated: HashMap::new(),
         }
     }
@@ -128,6 +132,19 @@ impl<'a> Elaborator<'a> {
     pub(crate) fn declaring(mut self, ty: &Term) -> Self {
         self.declared = pi_mults(ty);
         self
+    }
+
+    /// Выполняет `body` в позиции типа.
+    ///
+    /// Несвязанное строчное имя означает здесь не опечатку, а свободную
+    /// переменную, которую §4.1 поднимает в implicit-параметр, - и отвечать
+    /// на неё «имя не найдено» значит отправить искать опечатку там, где её
+    /// нет.
+    pub(crate) fn typing<T>(&mut self, body: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = std::mem::replace(&mut self.types, true);
+        let outcome = body(self);
+        self.types = outer;
+        outcome
     }
 
     /// Выполняет `body` под связыванием `name`.
@@ -240,13 +257,14 @@ impl<'a> Elaborator<'a> {
             ExprKind::Pi { binders, codomain } => self.pi(binders, codomain, default),
             ExprKind::Lam { params, body } => self.lam(params, body, &expected),
             ExprKind::Block(block) => self.block(block),
-            ExprKind::Chain(chain) => self.chain(chain),
+            ExprKind::Chain(chain) => self.chain(chain, expr.span),
 
             ExprKind::Hole => missing(Missing::TermHole),
             ExprKind::Lit(_) => missing(Missing::Literal),
             ExprKind::TypeApp(..) => missing(Missing::TypeApplication),
             ExprKind::If { .. } => missing(Missing::Conditional),
             ExprKind::Case { .. } => missing(Missing::CaseExpression),
+            ExprKind::Tuple(items) if items.is_empty() => missing(Missing::Unit),
             ExprKind::Tuple(_) => missing(Missing::Tuple),
             ExprKind::List(_) => missing(Missing::List),
         }
@@ -276,9 +294,17 @@ impl<'a> Elaborator<'a> {
         let term = self
             .signature
             .instantiate(&name.text, self.metas)
-            .ok_or_else(|| ElabError::UnknownName {
-                name: Rc::clone(&name.text),
-                span: name.span,
+            .ok_or_else(|| {
+                if self.types && !is_reference(&name.text) {
+                    return ElabError::Missing {
+                        what: Missing::Implicits,
+                        span: name.span,
+                    };
+                }
+                ElabError::UnknownName {
+                    name: Rc::clone(&name.text),
+                    span: name.span,
+                }
             })?;
         self.instantiated
             .insert(Rc::clone(&name.text), term.clone());
@@ -376,7 +402,7 @@ impl<'a> Elaborator<'a> {
                 PatternKind::Wildcard => Rc::from("_"),
                 PatternKind::Tuple(items) if items.is_empty() => {
                     return Err(ElabError::Missing {
-                        what: Missing::Tuple,
+                        what: Missing::Unit,
                         span: pattern.span,
                     });
                 }
@@ -412,15 +438,12 @@ impl<'a> Elaborator<'a> {
                 what: Missing::Sequencing,
                 span: first.span,
             }),
-            StmtKind::Let(bindings) => {
-                if rest.is_empty() {
-                    return Err(ElabError::Missing {
-                        what: Missing::Sequencing,
-                        span: first.span,
-                    });
-                }
-                self.bindings(bindings, rest)
+            // Блок кончается связыванием: значения у него нет, и дело не в
+            // недостающем механизме - написана неполная форма.
+            StmtKind::Let(_) if rest.is_empty() => {
+                Err(ElabError::BlockWithoutValue { span: first.span })
             }
+            StmtKind::Let(bindings) => self.bindings(bindings, rest),
         }
     }
 
@@ -443,7 +466,7 @@ impl<'a> Elaborator<'a> {
             });
         };
         Self::binds(&binding.name)?;
-        let ty = self.expr(ty, Mult::Many)?;
+        let ty = self.typing(|inner| inner.expr(ty, Mult::Many))?;
         // Аннотация `let` - тот же написанный тип, и лямбда значения берёт
         // кратности у него.
         self.expected = pi_mults(&ty);
@@ -461,11 +484,14 @@ impl<'a> Elaborator<'a> {
 
     /// Цепочка операторов. Скобки расставляются по фикситетам, а их ещё нет,
     /// поэтому цепочка длиннее одного оператора - отказ.
-    fn chain(&mut self, chain: &ast::Chain) -> Result<Term, ElabError> {
+    fn chain(&mut self, chain: &ast::Chain, span: Span) -> Result<Term, ElabError> {
         let [(operator, operand)] = &chain.tail[..] else {
+            // Спан - цепочка целиком: отказ про то, как расставить в ней
+            // скобки, а не про первый операнд, к операторам отношения не
+            // имеющий.
             return Err(ElabError::Missing {
                 what: Missing::Fixities,
-                span: chain.head.span,
+                span,
             });
         };
         let callee = self.name(operator)?;
@@ -498,8 +524,12 @@ impl<'a> Elaborator<'a> {
                 what: Missing::Literal,
                 span: pattern.span,
             }),
-            PatternKind::Tuple(_) => Err(ElabError::Missing {
-                what: Missing::Tuple,
+            PatternKind::Tuple(items) => Err(ElabError::Missing {
+                what: if items.is_empty() {
+                    Missing::Unit
+                } else {
+                    Missing::Tuple
+                },
                 span: pattern.span,
             }),
         }

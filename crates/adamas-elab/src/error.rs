@@ -36,8 +36,10 @@ pub enum Missing {
     Conditional,
     /// `case … of` выражением.
     CaseExpression,
-    /// Кортеж, в том числе `()`.
+    /// Кортеж.
     Tuple,
+    /// Единица `()`.
+    Unit,
     /// Список `[…]`.
     List,
     /// Цепочка из нескольких операторов подряд.
@@ -97,6 +99,7 @@ impl Missing {
                  пишется и работает",
             ),
             Self::Tuple => ("кортеж", "зависимых пар в ядре нет"),
+            Self::Unit => ("единица `()`", "она появляется вместе с prelude"),
             Self::List => ("список", "`List` появляется вместе с prelude"),
             Self::Fixities => (
                 "цепочка из нескольких операторов",
@@ -184,6 +187,13 @@ pub enum ElabError {
         first: Span,
     },
 
+    /// Блок кончается связыванием, а не значением.
+    #[error("блок кончается связыванием: значения у него нет")]
+    BlockWithoutValue {
+        /// Последний оператор блока.
+        span: Span,
+    },
+
     /// Клаузы без сигнатуры.
     ///
     /// Тип нужен раньше тела: по нему снимается телескоп аргументов, а из него
@@ -251,6 +261,7 @@ impl ElabError {
             | Self::NotAConstructor { span, .. }
             | Self::UppercaseBinding { span, .. }
             | Self::RepeatedBinding { span, .. }
+            | Self::BlockWithoutValue { span }
             | Self::MissingSignature { span, .. }
             | Self::Missing { span, .. }
             | Self::Core { span, .. }

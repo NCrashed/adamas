@@ -13,7 +13,7 @@
 
 use std::rc::Rc;
 
-use adamas_core::check::{TypeError, check_closed};
+use adamas_core::check::{ErrorKind, TypeError, check_closed};
 use adamas_core::eval::normalize;
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
@@ -208,7 +208,10 @@ fn a_structurally_recursive_definition_computes() {
                 &witness,
                 &family(c("plus").apply([number(2), number(2)])),
             ),
-            Err(TypeError::Mismatch { .. })
+            Err(TypeError {
+                kind: ErrorKind::Mismatch { .. },
+                ..
+            })
         ),
         "и различает числа, а не сводит всё ко всему"
     );
@@ -232,7 +235,10 @@ fn a_definition_sees_itself_only_in_its_body() {
     assert!(
         matches!(
             signature.define(&mut metas, "Loop", Mult::Many, 0, c("Loop"), None),
-            Err(TypeError::UnknownConstant { .. })
+            Err(TypeError {
+                kind: ErrorKind::UnknownConstant { .. },
+                ..
+            })
         ),
         "тип проверяется без собственного имени"
     );
@@ -574,7 +580,10 @@ fn a_partial_definition_is_barred_from_types() {
                 &c("anything").apply([c("zero")]),
                 &family(c("loop").apply([c("zero")])),
             ),
-            Err(TypeError::PartialConstant { .. })
+            Err(TypeError {
+                kind: ErrorKind::PartialConstant { .. },
+                ..
+            })
         ),
         "нетотальная функция в типе"
     );
@@ -596,7 +605,10 @@ fn a_partial_definition_is_barred_from_erased_arguments() {
                 &c("anything").apply([c("loop").apply([c("zero")])]),
                 &family(c("loop").apply([c("zero")])),
             ),
-            Err(TypeError::PartialConstant { .. })
+            Err(TypeError {
+                kind: ErrorKind::PartialConstant { .. },
+                ..
+            })
         ),
         "стёртый аргумент нетотальной функцией не заполнить"
     );
@@ -716,7 +728,10 @@ fn comparing_two_recursive_families_refuses_instead_of_diverging() {
     assert!(
         matches!(
             check_closed(&signature, &identity, &coercion),
-            Err(TypeError::Mismatch { .. })
+            Err(TypeError {
+                kind: ErrorKind::Mismatch { .. },
+                ..
+            })
         ),
         "сравнение обязано закончиться отказом"
     );

@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use adamas_core::check::{TypeError, check_definition, infer_closed_with};
+use adamas_core::check::{ErrorKind, TypeError, check_definition, infer_closed_with};
 use adamas_core::level::{Level, LevelVar};
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
@@ -211,7 +211,13 @@ fn a_hole_living_only_in_the_body_is_rejected() {
         Some(Term::Const("Any".into(), Rc::from([hole]))),
     );
     assert!(
-        matches!(outcome, Err(TypeError::UnsolvedDefinitionLevel { .. })),
+        matches!(
+            outcome,
+            Err(TypeError {
+                kind: ErrorKind::UnsolvedDefinitionLevel { .. },
+                ..
+            })
+        ),
         "получено: {outcome:?}"
     );
 }
@@ -230,7 +236,13 @@ fn a_level_parameter_in_the_input_is_rejected() {
         Term::Universe(Level::Var(LevelVar(0)).succ()),
     );
     assert!(
-        matches!(outcome, Err(TypeError::LevelVarOutOfScope { arity: 0, .. })),
+        matches!(
+            outcome,
+            Err(TypeError {
+                kind: ErrorKind::LevelVarOutOfScope { arity: 0, .. },
+                ..
+            })
+        ),
         "получено: {outcome:?}"
     );
 }
@@ -257,7 +269,13 @@ fn the_explicit_path_still_rejects_leftover_holes() {
         Some(Term::Const("Any".into(), Rc::from([hole]))),
     );
     assert!(
-        matches!(outcome, Err(TypeError::UnsolvedDefinitionLevel { .. })),
+        matches!(
+            outcome,
+            Err(TypeError {
+                kind: ErrorKind::UnsolvedDefinitionLevel { .. },
+                ..
+            })
+        ),
         "получено: {outcome:?}"
     );
 }

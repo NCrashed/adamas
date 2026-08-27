@@ -49,6 +49,7 @@
 pub mod check;
 pub mod conv;
 pub mod ctx;
+pub mod error;
 pub mod eval;
 pub mod level;
 pub mod meta;

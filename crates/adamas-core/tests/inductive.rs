@@ -11,7 +11,7 @@
 
 use std::rc::Rc;
 
-use adamas_core::check::{TypeError, check_closed, infer_closed};
+use adamas_core::check::{ErrorKind, TypeError, check_closed, infer_closed};
 use adamas_core::level::{Level, LevelVar};
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
@@ -261,7 +261,10 @@ fn constructors_do_not_reduce() {
     assert!(
         matches!(
             check_closed(&signature, &c("zero"), &arrow(c("Nat"), c("Nat")),),
-            Err(TypeError::Mismatch { .. })
+            Err(TypeError {
+                kind: ErrorKind::Mismatch { .. },
+                ..
+            })
         ),
         "нулевой конструктор не функция"
     );
@@ -330,7 +333,10 @@ fn a_parameter_must_be_repeated_verbatim() {
                 ),
                 &[("wrong", wrong)],
             ),
-            Err(TypeError::ConstructorParameter { index: 0, .. })
+            Err(TypeError {
+                kind: ErrorKind::ConstructorParameter { index: 0, .. },
+                ..
+            })
         ),
         "телескоп параметров обязан совпасть"
     );
@@ -360,7 +366,10 @@ fn a_parameter_must_stay_the_same_under_recursion() {
                 pi(Mult::Zero, "A", Term::universe(0), Term::universe(0)),
                 &[("nest", nest)],
             ),
-            Err(TypeError::NotStrictlyPositive { .. })
+            Err(TypeError {
+                kind: ErrorKind::NotStrictlyPositive { .. },
+                ..
+            })
         ),
         "неединообразный параметр отвергается"
     );
@@ -373,9 +382,12 @@ fn declaring_more_parameters_than_binders_is_rejected() {
     assert!(
         matches!(
             signature.declare_data(&mut metas, "Bool", 1, Term::universe(0), &[]),
-            Err(TypeError::DataParameters {
-                expected: 1,
-                found: 0,
+            Err(TypeError {
+                kind: ErrorKind::DataParameters {
+                    expected: 1,
+                    found: 0,
+                    ..
+                },
                 ..
             })
         ),
@@ -414,7 +426,10 @@ fn an_index_is_checked_against_the_declared_length() {
     assert!(
         matches!(
             check_closed(&signature, &one, &wrong),
-            Err(TypeError::Mismatch { .. })
+            Err(TypeError {
+                kind: ErrorKind::Mismatch { .. },
+                ..
+            })
         ),
         "длина входит в тип"
     );
@@ -437,7 +452,10 @@ fn a_negative_occurrence_is_rejected() {
                 Term::universe(0),
                 &[("mk", arrow(arrow(c("Bad"), c("Bad")), c("Bad")))],
             ),
-            Err(TypeError::NotStrictlyPositive { .. })
+            Err(TypeError {
+                kind: ErrorKind::NotStrictlyPositive { .. },
+                ..
+            })
         ),
         "слева от стрелки тип встречаться не может"
     );
@@ -483,7 +501,10 @@ fn a_nested_occurrence_in_an_argument_is_rejected() {
                 pi(Mult::Zero, "A", Term::universe(0), Term::universe(0)),
                 &[("mk", mk)],
             ),
-            Err(TypeError::NotStrictlyPositive { .. })
+            Err(TypeError {
+                kind: ErrorKind::NotStrictlyPositive { .. },
+                ..
+            })
         ),
         "рекурсивное вхождение под собственным аргументом отвергается"
     );
@@ -507,7 +528,10 @@ fn a_field_above_the_type_is_rejected() {
                 Term::universe(0),
                 &[("pack", pi(Mult::Zero, "A", Term::universe(0), c("Small")))],
             ),
-            Err(TypeError::ConstructorUniverse { .. })
+            Err(TypeError {
+                kind: ErrorKind::ConstructorUniverse { .. },
+                ..
+            })
         ),
         "поле не может жить выше самого типа"
     );
@@ -571,7 +595,10 @@ fn a_type_former_must_end_in_a_universe() {
     assert!(
         matches!(
             signature.declare_data(&mut metas, "Odd", 0, arrow(c("Nat"), c("Nat")), &[]),
-            Err(TypeError::NotADataSort { .. })
+            Err(TypeError {
+                kind: ErrorKind::NotADataSort { .. },
+                ..
+            })
         ),
         "тип-формер обязан заканчиваться универсумом"
     );
@@ -590,7 +617,10 @@ fn a_constructor_must_return_its_own_type() {
                 Term::universe(0),
                 &[("weird", c("Bool"))],
             ),
-            Err(TypeError::ConstructorResult { .. })
+            Err(TypeError {
+                kind: ErrorKind::ConstructorResult { .. },
+                ..
+            })
         ),
         "конструктор чужого типа не конструктор"
     );
@@ -636,7 +666,10 @@ fn a_group_colliding_with_an_existing_name_leaves_it_alone() {
     ));
     assert!(matches!(
         signature.declare(&mut metas, &group),
-        Err(TypeError::DuplicateDefinition { .. })
+        Err(TypeError {
+            kind: ErrorKind::DuplicateDefinition { .. },
+            ..
+        })
     ));
     assert_eq!(signature.len(), before, "сигнатура не изменилась");
     assert!(
@@ -686,7 +719,10 @@ fn a_data_name_cannot_be_reused() {
     assert!(
         matches!(
             signature.declare_data(&mut metas, "Nat", 0, Term::universe(0), &[]),
-            Err(TypeError::DuplicateDefinition { .. })
+            Err(TypeError {
+                kind: ErrorKind::DuplicateDefinition { .. },
+                ..
+            })
         ),
         "имя типа занято"
     );
@@ -699,7 +735,10 @@ fn a_data_name_cannot_be_reused() {
                 Term::universe(0),
                 &[("zero", c("Other"))],
             ),
-            Err(TypeError::DuplicateDefinition { .. })
+            Err(TypeError {
+                kind: ErrorKind::DuplicateDefinition { .. },
+                ..
+            })
         ),
         "имя конструктора тоже"
     );
@@ -729,7 +768,13 @@ fn a_negative_occurrence_hidden_behind_a_definition_is_rejected() {
         ),
     );
     assert!(
-        matches!(outcome, Err(TypeError::NotStrictlyPositive { .. })),
+        matches!(
+            outcome,
+            Err(TypeError {
+                kind: ErrorKind::NotStrictlyPositive { .. },
+                ..
+            })
+        ),
         "негативность за определением обязана отвергаться так же, как прямая: {outcome:?}"
     );
 }

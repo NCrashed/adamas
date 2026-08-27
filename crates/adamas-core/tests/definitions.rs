@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use adamas_core::check::{TypeError, check_closed, infer_closed};
+use adamas_core::check::{ErrorKind, TypeError, check_closed, infer_closed};
 use adamas_core::level::{Level, LevelVar};
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
@@ -183,7 +183,10 @@ fn a_postulate_stays_stuck() {
     assert!(check_closed(&signature, &identity, &a_to_a).is_ok());
     assert!(matches!(
         check_closed(&signature, &identity, &a_to_b),
-        Err(TypeError::Mismatch { .. })
+        Err(TypeError {
+            kind: ErrorKind::Mismatch { .. },
+            ..
+        })
     ));
 }
 
@@ -219,7 +222,10 @@ fn level_arguments_are_part_of_the_head() {
     assert!(check_closed(&signature, &identity, &same).is_ok());
     assert!(matches!(
         check_closed(&signature, &identity, &different),
-        Err(TypeError::Mismatch { .. })
+        Err(TypeError {
+            kind: ErrorKind::Mismatch { .. },
+            ..
+        })
     ));
 }
 
@@ -320,7 +326,10 @@ fn an_erased_definition_cannot_be_used_at_runtime() {
 
     assert!(matches!(
         infer_closed(&signature, &Term::constant("Proof")),
-        Err(TypeError::ErasedConstant { .. })
+        Err(TypeError {
+            kind: ErrorKind::ErasedConstant { .. },
+            ..
+        })
     ));
 }
 
@@ -360,7 +369,10 @@ fn a_linear_definition_is_rejected() {
             Term::universe(1),
             Some(Term::universe(0))
         ),
-        Err(TypeError::LinearDefinition { .. })
+        Err(TypeError {
+            kind: ErrorKind::LinearDefinition { .. },
+            ..
+        })
     ));
 }
 
@@ -371,7 +383,10 @@ fn an_unknown_constant_is_rejected() {
     let signature = Signature::default();
     assert!(matches!(
         infer_closed(&signature, &Term::constant("Missing")),
-        Err(TypeError::UnknownConstant { .. })
+        Err(TypeError {
+            kind: ErrorKind::UnknownConstant { .. },
+            ..
+        })
     ));
 }
 
@@ -381,17 +396,23 @@ fn the_number_of_level_arguments_must_match() {
 
     assert!(matches!(
         infer_closed(&signature, &Term::constant("Id")),
-        Err(TypeError::LevelArity {
-            expected: 1,
-            found: 0,
+        Err(TypeError {
+            kind: ErrorKind::LevelArity {
+                expected: 1,
+                found: 0,
+                ..
+            },
             ..
         })
     ));
     assert!(matches!(
         infer_closed(&signature, &at("Id", &[Level::Zero, Level::Zero])),
-        Err(TypeError::LevelArity {
-            expected: 1,
-            found: 2,
+        Err(TypeError {
+            kind: ErrorKind::LevelArity {
+                expected: 1,
+                found: 2,
+                ..
+            },
             ..
         })
     ));
@@ -409,9 +430,12 @@ fn a_level_parameter_beyond_the_declared_arity_is_rejected() {
             1,
             Term::Universe(u(3).succ())
         ),
-        Err(TypeError::LevelVarOutOfScope {
-            var: 3,
-            arity: 1,
+        Err(TypeError {
+            kind: ErrorKind::LevelVarOutOfScope {
+                var: 3,
+                arity: 1,
+                ..
+            },
             ..
         })
     ));
@@ -430,7 +454,10 @@ fn a_definition_body_must_match_its_type() {
             Term::universe(0),
             Some(Term::universe(1)),
         ),
-        Err(TypeError::Mismatch { .. })
+        Err(TypeError {
+            kind: ErrorKind::Mismatch { .. },
+            ..
+        })
     ));
 }
 
@@ -443,7 +470,10 @@ fn a_name_cannot_be_defined_twice() {
         .unwrap();
     assert!(matches!(
         signature.postulate(&mut metas, "A", Mult::Many, 0, Term::universe(1)),
-        Err(TypeError::DuplicateDefinition { .. })
+        Err(TypeError {
+            kind: ErrorKind::DuplicateDefinition { .. },
+            ..
+        })
     ));
     // Отказ по занятому имени происходит до единой вставки, поэтому откату
     // нечего снимать. Проверь имена позже - и откат снял бы `A`, то есть то
@@ -468,7 +498,10 @@ fn a_definition_refers_to_itself_only_in_its_body() {
             Term::constant("Loop"),
             None
         ),
-        Err(TypeError::UnknownConstant { .. })
+        Err(TypeError {
+            kind: ErrorKind::UnknownConstant { .. },
+            ..
+        })
     ));
 
     // Тело - уже с ним, и `Loop = Loop` принимается. Тотальным оно при этом не

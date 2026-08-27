@@ -6,7 +6,7 @@
 
 use std::rc::Rc;
 
-use adamas_core::check::{TypeError, infer};
+use adamas_core::check::{ErrorKind, TypeError, infer};
 use adamas_core::ctx::{Ctx, Usage};
 use adamas_core::eval::normalize;
 use adamas_core::meta::Metas;
@@ -102,7 +102,10 @@ fn universes_are_predicative_and_not_cumulative() {
     // Без кумулятивности (§10 вопрос 1) `Type 0` не житель `Type 2`.
     assert!(matches!(
         check_closed(&ty0(), &Term::universe(2)),
-        Err(TypeError::Mismatch { .. })
+        Err(TypeError {
+            kind: ErrorKind::Mismatch { .. },
+            ..
+        })
     ));
 }
 
@@ -129,7 +132,10 @@ fn lambda_cannot_be_inferred_without_an_annotation() {
     let identity = lam(Mult::Many, "x", Term::var(0));
     assert!(matches!(
         infer_closed(&identity),
-        Err(TypeError::CannotInfer { .. })
+        Err(TypeError {
+            kind: ErrorKind::CannotInfer { .. },
+            ..
+        })
     ));
 }
 
@@ -138,7 +144,10 @@ fn applying_a_non_function_is_rejected() {
     let term = ty0().apply([ty0()]);
     assert!(matches!(
         infer_closed(&term),
-        Err(TypeError::NotAFunction { .. })
+        Err(TypeError {
+            kind: ErrorKind::NotAFunction { .. },
+            ..
+        })
     ));
 }
 
@@ -154,7 +163,10 @@ fn argument_type_is_checked() {
     );
     assert!(matches!(
         infer_closed(&applied),
-        Err(TypeError::Mismatch { .. })
+        Err(TypeError {
+            kind: ErrorKind::Mismatch { .. },
+            ..
+        })
     ));
 }
 
@@ -237,10 +249,14 @@ fn linear_variable_used_twice_is_rejected() {
     let ty = pi(Mult::One, "x", ty0(), ty0());
 
     match check_closed(&term, &ty) {
-        Err(TypeError::UsageViolation {
-            name,
-            declared,
-            actual,
+        Err(TypeError {
+            kind:
+                ErrorKind::UsageViolation {
+                    name,
+                    declared,
+                    actual,
+                },
+            ..
         }) => {
             assert_eq!(&*name, "x");
             assert_eq!(declared, Mult::One);
@@ -299,10 +315,14 @@ fn erased_variable_used_at_runtime_is_rejected() {
     let ty = pi(Mult::Zero, "a", ty0(), pi(Mult::Many, "x", ty0(), ty0()));
 
     match check_closed(&term, &ty) {
-        Err(TypeError::UsageViolation {
-            name,
-            declared,
-            actual,
+        Err(TypeError {
+            kind:
+                ErrorKind::UsageViolation {
+                    name,
+                    declared,
+                    actual,
+                },
+            ..
         }) => {
             assert_eq!(&*name, "a");
             assert_eq!(declared, Mult::Zero);
@@ -357,7 +377,10 @@ fn unrestricted_argument_does_consume_it() {
     let ty = pi(Mult::One, "x", ty0(), ty1());
     assert!(matches!(
         check_closed(&term, &ty),
-        Err(TypeError::UsageViolation { .. })
+        Err(TypeError {
+            kind: ErrorKind::UsageViolation { .. },
+            ..
+        })
     ));
 }
 
@@ -367,9 +390,12 @@ fn lambda_multiplicity_must_match_its_type() {
     let ty = pi(Mult::One, "x", ty0(), ty0());
     assert!(matches!(
         check_closed(&term, &ty),
-        Err(TypeError::LambdaMultiplicity {
-            expected: Mult::One,
-            found: Mult::Many
+        Err(TypeError {
+            kind: ErrorKind::LambdaMultiplicity {
+                expected: Mult::One,
+                found: Mult::Many
+            },
+            ..
         })
     ));
 }
@@ -423,7 +449,10 @@ fn a_linear_binding_is_checked_wherever_the_lambda_stands() {
     assert!(
         matches!(
             adamas_core::check::check_closed(&signature, &nonlinear, &linear),
-            Err(TypeError::UsageViolation { .. })
+            Err(TypeError {
+                kind: ErrorKind::UsageViolation { .. },
+                ..
+            })
         ),
         "напрямую"
     );
@@ -434,7 +463,10 @@ fn a_linear_binding_is_checked_wherever_the_lambda_stands() {
                 &Term::constant("higher").apply([nonlinear]),
                 &Term::constant("A"),
             ),
-            Err(TypeError::UsageViolation { .. })
+            Err(TypeError {
+                kind: ErrorKind::UsageViolation { .. },
+                ..
+            })
         ),
         "в позиции ω-аргумента - тот же терм и тот же отказ"
     );
@@ -455,7 +487,10 @@ fn erased_let_cannot_be_used_at_runtime() {
     let term = let_in(Mult::Zero, "a", Term::universe(1), ty0(), Term::var(0));
     assert!(matches!(
         infer_closed(&term),
-        Err(TypeError::UsageViolation { .. })
+        Err(TypeError {
+            kind: ErrorKind::UsageViolation { .. },
+            ..
+        })
     ));
 }
 
@@ -464,7 +499,10 @@ fn let_annotation_is_checked_against_the_value() {
     let term = let_in(Mult::Many, "a", ty0(), Term::universe(1), Term::var(0));
     assert!(matches!(
         infer_closed(&term),
-        Err(TypeError::Mismatch { .. })
+        Err(TypeError {
+            kind: ErrorKind::Mismatch { .. },
+            ..
+        })
     ));
 }
 
@@ -474,7 +512,10 @@ fn let_annotation_is_checked_against_the_value() {
 fn open_terms_are_rejected_rather_than_panicking() {
     assert!(matches!(
         infer_closed(&Term::var(0)),
-        Err(TypeError::UnboundIndex { .. })
+        Err(TypeError {
+            kind: ErrorKind::UnboundIndex { .. },
+            ..
+        })
     ));
 }
 
@@ -484,7 +525,10 @@ fn a_non_type_in_type_position_is_rejected() {
     let term = pi(Mult::Many, "x", lam(Mult::Many, "y", Term::var(0)), ty0());
     assert!(matches!(
         infer_closed(&term),
-        Err(TypeError::CannotInfer { .. })
+        Err(TypeError {
+            kind: ErrorKind::CannotInfer { .. },
+            ..
+        })
     ));
 }
 

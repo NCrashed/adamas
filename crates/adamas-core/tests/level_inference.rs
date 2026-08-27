@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use adamas_core::check::{TypeError, check_closed_with, infer_closed_with};
+use adamas_core::check::{ErrorKind, TypeError, check_closed_with, infer_closed_with};
 use adamas_core::level::{Level, LevelVar};
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
@@ -170,7 +170,10 @@ fn a_leftover_metavariable_is_an_error_not_a_default() {
 
     assert!(matches!(
         check_closed_with(&signature, &mut metas, &term, &Term::universe(1)),
-        Err(TypeError::AmbiguousLevel { .. })
+        Err(TypeError {
+            kind: ErrorKind::AmbiguousLevel { .. },
+            ..
+        })
     ));
 }
 
@@ -268,7 +271,10 @@ fn a_definition_with_a_hole_never_reaches_the_signature() {
     // Арность объявлена, значит обобщать некуда, и дырка остаётся отказом.
     assert!(matches!(
         signature.postulate(&mut metas, "Weird", Mult::Many, 0, Term::Universe(hole)),
-        Err(TypeError::UnsolvedDefinitionLevel { .. })
+        Err(TypeError {
+            kind: ErrorKind::UnsolvedDefinitionLevel { .. },
+            ..
+        })
     ));
     assert!(
         signature.lookup("Weird").is_none(),
@@ -370,7 +376,7 @@ fn a_solved_level_is_shown_solved_in_the_error() {
     let three = Term::Const("mk".into(), Rc::from([Level::number(3)]));
     let error = check_closed_with(&signature, &mut metas, &three, &boxed)
         .expect_err("2 и 3 - разные уровни");
-    let TypeError::Mismatch { expected, found } = &error else {
+    let ErrorKind::Mismatch { expected, found } = &error.kind else {
         panic!("ожидалось несовпадение типов, получено {error:?}");
     };
     // Ошибка несёт термы, а не текст (§10 вопрос 49а), поэтому уровни

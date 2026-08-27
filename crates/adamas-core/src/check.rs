@@ -51,271 +51,15 @@ use std::rc::Rc;
 
 use crate::conv::{convertible, whnf};
 use crate::ctx::{Ctx, Usage};
+use crate::error::refuse;
+pub use crate::error::{Binding, ErrorKind, Frame, TypeError};
 use crate::eval::{apply, quote};
 use crate::level::{Level, LevelMeta, LevelVar};
 use crate::meta::{Metas, unsolved_level_meta};
 use crate::mult::Mult;
 use crate::sig::{Definition, DefinitionKind, Signature};
-use crate::term::{Case, Index, Name, Term, spine};
+use crate::term::{Case, Name, Term, spine};
 use crate::value::{Elim, Head, Lvl, Value};
-
-/// Ошибка проверки типов.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum TypeError {
-    /// Индекс не адресует ни одно связывание - терм незамкнут.
-    #[error("переменная #{} вне контекста", index.0)]
-    UnboundIndex {
-        /// Сам индекс.
-        index: Index,
-    },
-
-    /// В позиции типа оказался терм, тип которого не универсум.
-    #[error("ожидался тип, получено `{term}` типа `{ty}`")]
-    NotAType {
-        /// Терм в позиции типа.
-        term: Term,
-        /// Его тип.
-        ty: Term,
-    },
-
-    /// Применение чего-то, что не является функцией.
-    #[error("ожидалась функция, получено значение типа `{ty}`")]
-    NotAFunction {
-        /// Тип того, что применяли.
-        ty: Term,
-    },
-
-    /// Тип не совпал с ожидаемым.
-    #[error("несовпадение типов: ожидался `{expected}`, получен `{found}`")]
-    Mismatch {
-        /// Тип, которого требовал контекст.
-        expected: Term,
-        /// Тип, который получился.
-        found: Term,
-    },
-
-    /// Кратность лямбды разошлась с кратностью `Pi`, под который её проверяют.
-    #[error("кратность лямбды {found}, а тип требует {expected}")]
-    LambdaMultiplicity {
-        /// Кратность из типа.
-        expected: Mult,
-        /// Кратность, написанная на лямбде.
-        found: Mult,
-    },
-
-    /// Переменная использована чаще, чем разрешает её кратность.
-    #[error("`{name}` объявлена с кратностью {declared}, а использована {actual}")]
-    UsageViolation {
-        /// Имя связывания.
-        name: Name,
-        /// Разрешённая кратность (уже с учётом кратности суждения).
-        declared: Mult,
-        /// Фактическое использование.
-        actual: Mult,
-    },
-
-    /// Тип терма нельзя синтезировать - нужна проверка против известного.
-    #[error("тип `{term}` невозможно синтезировать, нужна аннотация")]
-    CannotInfer {
-        /// Проблемный терм.
-        term: Term,
-    },
-
-    /// Ссылка на определение, которого нет в сигнатуре.
-    #[error("определение `{name}` не найдено")]
-    UnknownConstant {
-        /// Имя.
-        name: Name,
-    },
-
-    /// Число аргументов уровня не совпало с арностью определения.
-    #[error("`{name}` принимает {expected} параметров уровня, передано {found}")]
-    LevelArity {
-        /// Имя определения.
-        name: Name,
-        /// Объявленная арность.
-        expected: u32,
-        /// Сколько аргументов передано.
-        found: u32,
-    },
-
-    /// Стёртое определение использовано в рантайм-позиции.
-    #[error("`{name}` объявлено с кратностью 0 и недоступно в рантайме")]
-    ErasedConstant {
-        /// Имя определения.
-        name: Name,
-    },
-
-    /// Нетотальное определение использовано в стёртом фрагменте.
-    #[error("`{name}` не тотальна и не может стоять в типе или доказательстве")]
-    PartialConstant {
-        /// Имя определения.
-        name: Name,
-    },
-
-    /// Имя уже занято.
-    #[error("определение `{name}` уже существует")]
-    DuplicateDefinition {
-        /// Имя.
-        name: Name,
-    },
-
-    /// Кратность `1` у определения верхнего уровня.
-    #[error("определение `{name}` не может быть линейным: учёта на всю программу нет")]
-    LinearDefinition {
-        /// Имя.
-        name: Name,
-    },
-
-    /// После проверки остался неразрешённый уровень.
-    #[error("уровень ?{} не определён: добавьте аннотацию", meta.0)]
-    AmbiguousLevel {
-        /// Метапеременная, оставшаяся без решения.
-        meta: crate::level::LevelMeta,
-    },
-
-    /// В определении, уходящем в сигнатуру, осталась дырка уровня.
-    #[error("в определении `{name}` остался неразрешённый уровень ?{}", meta.0)]
-    UnsolvedDefinitionLevel {
-        /// Имя определения.
-        name: Name,
-        /// Метапеременная, оставшаяся без решения.
-        meta: crate::level::LevelMeta,
-    },
-
-    /// Тип-формер не заканчивается универсумом.
-    #[error("`{name}` объявлен как индуктивный тип, но заканчивается на `{found}`")]
-    NotADataSort {
-        /// Имя типа.
-        name: Name,
-        /// Что оказалось на месте универсума.
-        found: Term,
-    },
-
-    /// Тип-формер объявлен с большим числом параметров, чем у него связываний.
-    #[error("`{name}` объявлен с {expected} параметрами, а связываний всего {found}")]
-    DataParameters {
-        /// Имя типа.
-        name: Name,
-        /// Сколько параметров объявлено.
-        expected: u32,
-        /// Сколько связываний есть на самом деле.
-        found: u32,
-    },
-
-    /// Конструктор объявлен для имени, которое не индуктивный тип.
-    #[error("`{name}` не является индуктивным типом")]
-    NotADataType {
-        /// Имя.
-        name: Name,
-    },
-
-    /// Конструктор не повторяет телескоп параметров своего типа.
-    #[error(
-        "конструктор `{name}` обязан начинаться с параметров `{data}`, но параметр #{index} не совпадает"
-    )]
-    ConstructorParameter {
-        /// Имя конструктора.
-        name: Name,
-        /// Имя типа.
-        data: Name,
-        /// Номер параметра, на котором разошлось.
-        index: u32,
-    },
-
-    /// Конструктор возвращает не тот тип, которому объявлен.
-    #[error("конструктор `{name}` обязан возвращать `{data}`, а возвращает `{found}`")]
-    ConstructorResult {
-        /// Имя конструктора.
-        name: Name,
-        /// Имя типа.
-        data: Name,
-        /// Что оказалось результатом.
-        found: Term,
-    },
-
-    /// Нарушена строгая позитивность.
-    #[error("конструктор `{name}` использует `{data}` в отрицательной позиции")]
-    NotStrictlyPositive {
-        /// Имя конструктора.
-        name: Name,
-        /// Имя типа.
-        data: Name,
-    },
-
-    /// Поле конструктора живёт выше универсума самого типа.
-    #[error("поле конструктора `{name}` живёт в `Type {field}`, а тип - в `Type {sort}`")]
-    ConstructorUniverse {
-        /// Имя конструктора.
-        name: Name,
-        /// Универсум поля.
-        field: Level,
-        /// Универсум типа.
-        sort: Level,
-    },
-
-    /// Разбирается значение, тип которого не то индуктивное семейство.
-    #[error("разбор `{data}`, но значение имеет тип `{ty}`")]
-    NotADataValue {
-        /// Имя типа из разбора.
-        data: Name,
-        /// Тип разбираемого значения.
-        ty: Term,
-    },
-
-    /// Число параметров в разборе разошлось с объявлением типа.
-    #[error("разбор `{data}` объявляет {found} параметров, а у типа их {expected}")]
-    CaseParameters {
-        /// Имя типа.
-        data: Name,
-        /// Сколько параметров у типа.
-        expected: u32,
-        /// Сколько записано в разборе.
-        found: u32,
-    },
-
-    /// Конструктор остался без ветви.
-    #[error("разбор `{data}` не покрывает конструктор `{constructor}`")]
-    NonExhaustive {
-        /// Имя типа.
-        data: Name,
-        /// Непокрытый конструктор.
-        constructor: Name,
-    },
-
-    /// Ветвь для того, чего разбирать не требуется.
-    #[error("в разборе `{data}` лишняя ветвь `{constructor}`")]
-    RedundantBranch {
-        /// Имя типа.
-        data: Name,
-        /// Конструктор ветви.
-        constructor: Name,
-    },
-
-    /// Ветви идут не в порядке объявления конструкторов.
-    #[error(
-        "ветви `{data}` обязаны идти в порядке объявления: ожидался `{expected}`, встречен `{found}`"
-    )]
-    BranchOrder {
-        /// Имя типа.
-        data: Name,
-        /// Конструктор, ожидавшийся на этом месте.
-        expected: Name,
-        /// Конструктор, который там оказался.
-        found: Name,
-    },
-
-    /// Определение ссылается на параметр уровня, которого у него нет.
-    #[error("`{name}` использует параметр уровня u{var} при арности {arity}")]
-    LevelVarOutOfScope {
-        /// Имя определения.
-        name: Name,
-        /// Индекс переменной.
-        var: u32,
-        /// Объявленная арность.
-        arity: u32,
-    },
-}
 
 /// Значение, уложенное в ошибку: обратное чтение плюс зонканье.
 ///
@@ -357,10 +101,10 @@ pub fn infer(
         Term::Var(index) => {
             let binding = ctx
                 .lookup(*index)
-                .ok_or(TypeError::UnboundIndex { index: *index })?;
+                .ok_or(ErrorKind::UnboundIndex { index: *index })?;
             let level = index
                 .to_level(ctx.size())
-                .ok_or(TypeError::UnboundIndex { index: *index })?;
+                .ok_or(ErrorKind::UnboundIndex { index: *index })?;
             Ok((
                 Rc::clone(&binding.ty),
                 Usage::single(ctx.size(), level, sigma),
@@ -382,35 +126,16 @@ pub fn infer(
         // бы нижний универсум импредикативным; см. заголовок
         // [`crate::level`], почему это несовместимо с §3.2.
         Term::Pi(mult, name, domain, codomain) => {
-            let domain_level = is_type(ctx, metas, domain)?;
+            let domain_level = framed(is_type(ctx, metas, domain), Frame::Domain)?;
             let inner = ctx.bind(Rc::clone(name), *mult, ctx.eval(domain));
-            let codomain_level = is_type(&inner, metas, codomain)?;
+            let codomain_level = framed(is_type(&inner, metas, codomain), Frame::Codomain)?;
             Ok((
                 Rc::new(Value::Universe(domain_level.max(codomain_level))),
                 Usage::zero(ctx.size()),
             ))
         }
 
-        Term::App(callee, argument) => {
-            let (callee_ty, callee_usage) = infer(ctx, metas, sigma, callee)?;
-            // Форму типа спрашивают у развёрнутой головы: `def Fn = Nat -> Nat`
-            // - такой же тип функции, как записанная стрелка, и `f : Fn`
-            // обязана применяться.
-            let callee_ty = whnf(ctx.signature(), &callee_ty);
-            let Value::Pi(mult, _, domain, codomain) = &*callee_ty else {
-                return Err(TypeError::NotAFunction {
-                    ty: read_back(ctx, metas, &callee_ty),
-                });
-            };
-            // Правило Аткея `Γ + q · Δ`: аргумент проверяется при собственной
-            // кратности суждения, а на `q` умножается его **вектор
-            // использований**. При `q = 0` внутри аргумента ничего не
-            // расходуется - это и есть "доказательства ничего не стоят".
-            let argument_usage =
-                check(ctx, metas, judgement_under(*mult, sigma), argument, domain)?;
-            let result = codomain.apply(ctx.eval(argument));
-            Ok((result, callee_usage + &argument_usage.scale(*mult)))
-        }
+        Term::App(callee, argument) => infer_app(ctx, metas, sigma, callee, argument),
 
         Term::Let(mult, name, ty, value, body) => {
             let described = LetBinding {
@@ -432,7 +157,7 @@ pub fn infer(
             let definition =
                 ctx.signature()
                     .lookup(name)
-                    .ok_or_else(|| TypeError::UnknownConstant {
+                    .ok_or_else(|| ErrorKind::UnknownConstant {
                         name: Rc::clone(name),
                     })?;
             // Насыщение здесь дало бы несовпадение арности, то есть ошибку, а
@@ -441,24 +166,36 @@ pub fn infer(
             let found = u32::try_from(levels.len())
                 .unwrap_or_else(|_| unreachable!("аргументов уровня больше, чем помещается в u32"));
             if found != definition.level_arity {
-                return Err(TypeError::LevelArity {
-                    name: Rc::clone(name),
-                    expected: definition.level_arity,
-                    found,
-                });
+                return Err(refuse(
+                    ctx,
+                    metas,
+                    ErrorKind::LevelArity {
+                        name: Rc::clone(name),
+                        expected: definition.level_arity,
+                        found,
+                    },
+                ));
             }
             if !definition.mult.admits(sigma) {
-                return Err(TypeError::ErasedConstant {
-                    name: Rc::clone(name),
-                });
+                return Err(refuse(
+                    ctx,
+                    metas,
+                    ErrorKind::ErasedConstant {
+                        name: Rc::clone(name),
+                    },
+                ));
             }
             // Зеркальное ограничение: стёртая функция доступна **только** при
             // σ = 0, нетотальная - только при σ ≠ 0. §4.7: доказательством
             // нетотальная функция быть не может, а тип - тот же фрагмент.
             if !crate::total::admits(definition, sigma) {
-                return Err(TypeError::PartialConstant {
-                    name: Rc::clone(name),
-                });
+                return Err(refuse(
+                    ctx,
+                    metas,
+                    ErrorKind::PartialConstant {
+                        name: Rc::clone(name),
+                    },
+                ));
             }
             Ok((definition.instantiate_type(levels), Usage::zero(ctx.size())))
         }
@@ -468,9 +205,13 @@ pub fn infer(
         Term::Case(case) => infer_case(ctx, metas, sigma, case),
 
         // Домена у лямбды в терме нет, синтезировать не из чего.
-        Term::Lam(..) => Err(TypeError::CannotInfer {
-            term: zonked(metas, term),
-        }),
+        Term::Lam(..) => Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::CannotInfer {
+                term: zonked(metas, term),
+            },
+        )),
     }
 }
 
@@ -513,10 +254,14 @@ pub fn check(
             if convertible(ctx.signature(), metas, ctx.size(), expected, &found) {
                 Ok(usage)
             } else {
-                Err(TypeError::Mismatch {
-                    expected: read_back(ctx, metas, expected),
-                    found: read_back(ctx, metas, &found),
-                })
+                Err(refuse(
+                    ctx,
+                    metas,
+                    ErrorKind::Mismatch {
+                        expected: read_back(ctx, metas, expected),
+                        found: read_back(ctx, metas, &found),
+                    },
+                ))
             }
         }
     }
@@ -534,23 +279,31 @@ fn check_lambda(
         unreachable!("правило лямбды вызвано не на лямбде: {term}")
     };
     let Value::Pi(pi_mult, _, domain, codomain) = &**expected else {
-        return Err(TypeError::NotAFunction {
-            ty: read_back(ctx, metas, expected),
-        });
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::NotAFunction {
+                ty: read_back(ctx, metas, expected),
+            },
+        ));
     };
     // Кратность лямбды обязана совпасть с кратностью типа. Проверка
     // конвертируемости её сознательно игнорирует (иначе ломается
     // транзитивность через η), поэтому единственное место, где аннотация на
     // лямбде что-то значит, - здесь.
     if mult != pi_mult {
-        return Err(TypeError::LambdaMultiplicity {
-            expected: *pi_mult,
-            found: *mult,
-        });
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::LambdaMultiplicity {
+                expected: *pi_mult,
+                found: *mult,
+            },
+        ));
     }
     let inner = ctx.bind(Rc::clone(name), *mult, Rc::clone(domain));
     let body_ty = codomain.apply(ctx.fresh());
-    let usage = check(&inner, metas, sigma, body, &body_ty)?;
+    let usage = framed(check(&inner, metas, sigma, body, &body_ty), Frame::Body)?;
     let (used, rest) = usage.pop();
     spend(name, *mult * sigma, used)?;
     Ok(rest)
@@ -570,10 +323,14 @@ pub fn is_type(ctx: &Ctx<'_>, metas: &mut Metas, term: &Term) -> Result<Level, T
     let ty = whnf(ctx.signature(), &ty);
     match &*ty {
         Value::Universe(level) => Ok(level.clone()),
-        _ => Err(TypeError::NotAType {
-            term: zonked(metas, term),
-            ty: read_back(ctx, metas, &ty),
-        }),
+        _ => Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::NotAType {
+                term: zonked(metas, term),
+                ty: read_back(ctx, metas, &ty),
+            },
+        )),
     }
 }
 
@@ -613,7 +370,7 @@ pub fn check_closed_with(
     ty: &Term,
 ) -> Result<(), TypeError> {
     let ctx = Ctx::new(signature);
-    is_type(&ctx, metas, ty)?;
+    framed(is_type(&ctx, metas, ty), Frame::Stated)?;
     let ty_value = ctx.eval(ty);
     check(&ctx, metas, Mult::One, term, &ty_value)?;
     no_unsolved_levels(metas, term)
@@ -654,7 +411,7 @@ pub fn infer_closed_with(
 /// Отвергает терм, в котором после проверки остались нерешённые уровни.
 fn no_unsolved_levels(metas: &Metas, term: &Term) -> Result<(), TypeError> {
     match unsolved_level_meta(metas, term) {
-        Some(meta) => Err(TypeError::AmbiguousLevel { meta }),
+        Some(meta) => Err(ErrorKind::AmbiguousLevel { meta }.into()),
         None => Ok(()),
     }
 }
@@ -693,9 +450,10 @@ pub fn check_declaration(
     definition: &Definition,
 ) -> Result<(), TypeError> {
     if definition.mult == Mult::One {
-        return Err(TypeError::LinearDefinition {
+        return Err(ErrorKind::LinearDefinition {
             name: Rc::clone(name),
-        });
+        }
+        .into());
     }
     check_level_scope(name, definition.level_arity, &definition.ty)?;
     is_type(&Ctx::new(signature), metas, &definition.ty)?;
@@ -763,11 +521,12 @@ pub fn check_body(
 
 fn check_level_scope(name: &Name, arity: u32, term: &Term) -> Result<(), TypeError> {
     match term.max_level_var() {
-        Some(var) if var >= arity => Err(TypeError::LevelVarOutOfScope {
+        Some(var) if var >= arity => Err(ErrorKind::LevelVarOutOfScope {
             name: Rc::clone(name),
             var,
             arity,
-        }),
+        }
+        .into()),
         _ => Ok(()),
     }
 }
@@ -794,17 +553,20 @@ fn binding<T>(
     }: LetBinding<'_>,
     body: impl FnOnce(&Ctx<'_>, &mut Metas) -> Result<(T, Usage), TypeError>,
 ) -> Result<(T, Usage), TypeError> {
-    is_type(ctx, metas, ty)?;
+    framed(is_type(ctx, metas, ty), Frame::BindingType)?;
     let ty_value = ctx.eval(ty);
     let allowed = mult * sigma;
     // Как и у применения: значение проверяется при кратности суждения из
     // `{0, 1}`, а на `q` умножается вектор.
-    let value_usage = check(ctx, metas, judgement_under(mult, sigma), value, &ty_value)?;
+    let value_usage = framed(
+        check(ctx, metas, judgement_under(mult, sigma), value, &ty_value),
+        Frame::BindingValue,
+    )?;
 
     // Именно `define`, а не `bind`: значение известно, и тип тела не должен
     // оказаться зависящим от связывания, которого снаружи уже нет.
     let inner = ctx.define(Rc::clone(name), mult, ty_value, ctx.eval(value));
-    let (result, body_usage) = body(&inner, metas)?;
+    let (result, body_usage) = framed(body(&inner, metas), Frame::BindingBody)?;
 
     let (used, rest) = body_usage.pop();
     spend(name, allowed, used)?;
@@ -834,11 +596,12 @@ fn spend(name: &Name, allowed: Mult, actual: Mult) -> Result<(), TypeError> {
     if allowed.admits(actual) {
         Ok(())
     } else {
-        Err(TypeError::UsageViolation {
+        Err(ErrorKind::UsageViolation {
             name: Rc::clone(name),
             declared: allowed,
             actual,
-        })
+        }
+        .into())
     }
 }
 
@@ -1041,18 +804,20 @@ pub fn data_sort(name: &Name, params: u32, ty: &Term) -> Result<Level, TypeError
     let (fields, result) = peel_pis(ty);
     let found = u32::try_from(fields.len()).unwrap_or(u32::MAX);
     if found < params {
-        return Err(TypeError::DataParameters {
+        return Err(ErrorKind::DataParameters {
             name: Rc::clone(name),
             expected: params,
             found,
-        });
+        }
+        .into());
     }
     match result {
         Term::Universe(sort) => Ok(sort.clone()),
-        other => Err(TypeError::NotADataSort {
+        other => Err(ErrorKind::NotADataSort {
             name: Rc::clone(name),
             found: other.clone(),
-        }),
+        }
+        .into()),
     }
 }
 
@@ -1083,15 +848,16 @@ pub(crate) fn check_constructor_shape(
     ty: &Term,
 ) -> Result<(), TypeError> {
     let Some((params, _)) = family.data_shape() else {
-        return Err(TypeError::NotADataType {
+        return Err(ErrorKind::NotADataType {
             name: Rc::clone(data),
-        });
+        }
+        .into());
     };
     let arity = family.level_arity;
     let telescope = peel_pis(&family.ty).0;
 
     let (fields, result) = peel_pis(ty);
-    let mismatched = |index: u32| TypeError::ConstructorParameter {
+    let mismatched = |index: u32| ErrorKind::ConstructorParameter {
         name: Rc::clone(name),
         data: Rc::clone(data),
         index,
@@ -1114,7 +880,7 @@ pub(crate) fn check_constructor_shape(
                     &ctx.eval(&field.domain),
                 )
             {
-                return Err(mismatched(depth));
+                return Err(mismatched(depth).into());
             }
         }
         ctx = ctx.bind(Rc::clone(&field.name), field.mult, ctx.eval(&field.domain));
@@ -1144,11 +910,12 @@ pub(crate) fn check_constructor_shape(
         _ => false,
     };
     if !addressed || !uniform_parameters(params, ctx.size(), &arguments) {
-        return Err(TypeError::ConstructorResult {
+        return Err(ErrorKind::ConstructorResult {
             name: Rc::clone(name),
             data: Rc::clone(data),
             found: zonked(metas, result),
-        });
+        }
+        .into());
     }
     Ok(())
 }
@@ -1178,9 +945,10 @@ pub(crate) fn check_constructor_content(
     ty: &Term,
 ) -> Result<(), TypeError> {
     let Some((params, sort)) = family.data_shape() else {
-        return Err(TypeError::NotADataType {
+        return Err(ErrorKind::NotADataType {
             name: Rc::clone(data),
-        });
+        }
+        .into());
     };
 
     let mut ctx = Ctx::new(signature);
@@ -1188,10 +956,11 @@ pub(crate) fn check_constructor_content(
         let depth = u32::try_from(index).unwrap_or(u32::MAX);
         if depth >= params {
             if !positive_field(signature, data, params, depth, &field.domain) {
-                return Err(TypeError::NotStrictlyPositive {
+                return Err(ErrorKind::NotStrictlyPositive {
                     name: Rc::clone(name),
                     data: Rc::clone(data),
-                });
+                }
+                .into());
             }
             // Поле не может жить выше самого типа: иначе `Type ℓ` содержал бы
             // значение, построенное над `Type (ℓ+1)`, и предикативность (§3.2)
@@ -1199,11 +968,12 @@ pub(crate) fn check_constructor_content(
             // ограничивает - они не хранятся в значении, а подставляются.
             let field_level = is_type(&ctx, metas, &field.domain)?;
             if !field_level.leq(sort) {
-                return Err(TypeError::ConstructorUniverse {
+                return Err(ErrorKind::ConstructorUniverse {
                     name: Rc::clone(name),
                     field: metas.zonk(&field_level),
                     sort: metas.zonk(sort),
-                });
+                }
+                .into());
             }
         }
         ctx = ctx.bind(Rc::clone(&field.name), field.mult, ctx.eval(&field.domain));
@@ -1212,6 +982,40 @@ pub(crate) fn check_constructor_content(
 }
 
 // ------------------------------------------------------------------ элиминация
+
+/// Синтезирует тип применения.
+fn infer_app(
+    ctx: &Ctx<'_>,
+    metas: &mut Metas,
+    sigma: Mult,
+    callee: &Term,
+    argument: &Term,
+) -> Result<(Rc<Value>, Usage), TypeError> {
+    let (callee_ty, callee_usage) = framed(infer(ctx, metas, sigma, callee), Frame::Callee)?;
+    // Форму типа спрашивают у развёрнутой головы: `def Fn = Nat -> Nat` -
+    // такой же тип функции, как записанная стрелка, и `f : Fn` обязана
+    // применяться.
+    let callee_ty = whnf(ctx.signature(), &callee_ty);
+    let Value::Pi(mult, _, domain, codomain) = &*callee_ty else {
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::NotAFunction {
+                ty: read_back(ctx, metas, &callee_ty),
+            },
+        ));
+    };
+    // Правило Аткея `Γ + q · Δ`: аргумент проверяется при собственной кратности
+    // суждения, а на `q` умножается его **вектор использований**. При `q = 0`
+    // внутри аргумента ничего не расходуется - это и есть "доказательства
+    // ничего не стоят".
+    let argument_usage = framed(
+        check(ctx, metas, judgement_under(*mult, sigma), argument, domain),
+        Frame::Argument,
+    )?;
+    let result = codomain.apply(ctx.eval(argument));
+    Ok((result, callee_usage + &argument_usage.scale(*mult)))
+}
 
 /// Синтезирует тип разбора по конструктору.
 ///
@@ -1231,7 +1035,7 @@ fn infer_case(
     let signature = ctx.signature();
     let declaration = signature
         .lookup(&case.data)
-        .ok_or_else(|| TypeError::UnknownConstant {
+        .ok_or_else(|| ErrorKind::UnknownConstant {
             name: Rc::clone(&case.data),
         })?;
     let DefinitionKind::Data {
@@ -1240,29 +1044,41 @@ fn infer_case(
         ..
     } = &declaration.kind
     else {
-        return Err(TypeError::NotADataType {
-            name: Rc::clone(&case.data),
-        });
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::NotADataType {
+                name: Rc::clone(&case.data),
+            },
+        ));
     };
 
     // Число параметров и аргументы уровня терм несёт сам, чтобы вычислитель
     // обходился без сигнатуры. Сверяются они здесь и только здесь.
     let params = *params;
     if params != case.params {
-        return Err(TypeError::CaseParameters {
-            data: Rc::clone(&case.data),
-            expected: params,
-            found: case.params,
-        });
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::CaseParameters {
+                data: Rc::clone(&case.data),
+                expected: params,
+                found: case.params,
+            },
+        ));
     }
     let found = u32::try_from(case.levels.len())
         .unwrap_or_else(|_| unreachable!("аргументов уровня больше, чем помещается в u32"));
     if found != declaration.level_arity {
-        return Err(TypeError::LevelArity {
-            name: Rc::clone(&case.data),
-            expected: declaration.level_arity,
-            found,
-        });
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::LevelArity {
+                name: Rc::clone(&case.data),
+                expected: declaration.level_arity,
+                found,
+            },
+        ));
     }
 
     let constructors = constructors.clone();
@@ -1271,10 +1087,11 @@ fn infer_case(
 
     // Тип разбираемого значения обязан быть этим семейством, применённым
     // полностью: параметры, потом индексы.
-    let (scrutinee_ty, scrutinee_usage) = infer(ctx, metas, sigma, &case.scrutinee)?;
+    let (scrutinee_ty, scrutinee_usage) =
+        framed(infer(ctx, metas, sigma, &case.scrutinee), Frame::Scrutinee)?;
     let arguments = data_arguments(signature, metas, case, &scrutinee_ty)
         .filter(|arguments| arguments.len() == binders)
-        .ok_or_else(|| TypeError::NotADataValue {
+        .ok_or_else(|| ErrorKind::NotADataValue {
             data: Rc::clone(&case.data),
             ty: read_back(ctx, metas, &scrutinee_ty),
         })?;
@@ -1282,14 +1099,20 @@ fn infer_case(
 
     let indexed = instantiate_telescope(family, data_params);
     let motive_ty = motive_type(ctx, metas, case, &indexed, data_params);
-    let motive_usage = check(ctx, metas, Mult::Zero, &case.motive, &motive_ty)?;
+    let motive_usage = framed(
+        check(ctx, metas, Mult::Zero, &case.motive, &motive_ty),
+        Frame::Motive,
+    )?;
     let motive = ctx.eval(&case.motive);
 
     branch_shape(case, &constructors)?;
     let mut branches = Usage::zero(ctx.size());
-    for branch in &case.branches {
+    for (index, branch) in case.branches.iter().enumerate() {
         let expected = branch_type(ctx, case, &branch.constructor, data_params, &motive);
-        let usage = check(ctx, metas, sigma, &branch.body, &expected)?;
+        let usage = framed(
+            check(ctx, metas, sigma, &branch.body, &expected),
+            Frame::Branch(u32::try_from(index).unwrap_or(u32::MAX)),
+        )?;
         branches = branches.join(&usage);
     }
 
@@ -1484,35 +1307,49 @@ fn telescope_tail(size: u32, value: &Rc<Value>) -> Rc<Value> {
 fn branch_shape(case: &Case, constructors: &[Name]) -> Result<(), TypeError> {
     for branch in &case.branches {
         if !constructors.contains(&branch.constructor) {
-            return Err(TypeError::RedundantBranch {
+            return Err(ErrorKind::RedundantBranch {
                 data: Rc::clone(&case.data),
                 constructor: Rc::clone(&branch.constructor),
-            });
+            }
+            .into());
         }
     }
     for (index, constructor) in constructors.iter().enumerate() {
         match case.branches.get(index) {
             Some(branch) if branch.constructor == *constructor => {}
             Some(branch) => {
-                return Err(TypeError::BranchOrder {
+                return Err(ErrorKind::BranchOrder {
                     data: Rc::clone(&case.data),
                     expected: Rc::clone(constructor),
                     found: Rc::clone(&branch.constructor),
-                });
+                }
+                .into());
             }
             None => {
-                return Err(TypeError::NonExhaustive {
+                return Err(ErrorKind::NonExhaustive {
                     data: Rc::clone(&case.data),
                     constructor: Rc::clone(constructor),
-                });
+                }
+                .into());
             }
         }
     }
     match case.branches.get(constructors.len()) {
-        Some(extra) => Err(TypeError::RedundantBranch {
+        Some(extra) => Err(ErrorKind::RedundantBranch {
             data: Rc::clone(&case.data),
             constructor: Rc::clone(&extra.constructor),
-        }),
+        }
+        .into()),
         None => Ok(()),
     }
+}
+
+/// Дописывает кадр к отказу, пришедшему из подтерма.
+///
+/// Кадр укладывается **на раскрутке**, в самой точке вызова: свою роль знает
+/// только она, а на успешном пути это не стоит ничего. Пропуск здесь тихий -
+/// маршрут просто окажется короче, - поэтому его ловит свойство
+/// `a_route_leads_to_the_named_subterm`, а не глаз.
+fn framed<T>(outcome: Result<T, TypeError>, frame: Frame) -> Result<T, TypeError> {
+    outcome.map_err(|error| error.in_frame(frame))
 }

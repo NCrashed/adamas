@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use proptest::prelude::*;
 
-use adamas_core::check::{TypeError, check_closed};
+use adamas_core::check::{ErrorKind, TypeError, check_closed};
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::pattern::{Clause, Pattern, PatternError, compile};
@@ -518,7 +518,10 @@ fn a_refinement_that_did_not_happen_is_rejected() {
     assert!(
         matches!(
             signature.define(&mut metas, "g", Mult::Many, 0, dependent_pair(), Some(body)),
-            Err(TypeError::Mismatch { .. })
+            Err(TypeError {
+                kind: ErrorKind::Mismatch { .. },
+                ..
+            })
         ),
         "`Bool` вместо `Nat`"
     );
@@ -1307,7 +1310,7 @@ fn a_type_reaching_outside_its_arguments_is_rejected() {
             &[clause(vec![var("n")], c("zero"))],
         ),
         Err(PatternError::IllTypedType { ref error })
-            if matches!(**error, TypeError::UnboundIndex { .. })
+            if matches!(error.kind, ErrorKind::UnboundIndex { .. })
     ));
 }
 
@@ -1324,7 +1327,7 @@ fn an_ill_typed_type_is_rejected_before_anything_is_evaluated() {
             &[clause(vec![ctor("zero", Vec::new())], c("zero"))],
         ),
         Err(PatternError::IllTypedType { ref error })
-            if matches!(**error, TypeError::NotAFunction { .. })
+            if matches!(error.kind, ErrorKind::NotAFunction { .. })
     ));
 }
 

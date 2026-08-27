@@ -50,9 +50,10 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::check::{
-    TypeError, check_body, check_constructor_content, check_constructor_shape, check_declaration,
-    data_sort, unsolved_in_definition,
+    Frame, TypeError, check_body, check_constructor_content, check_constructor_shape,
+    check_declaration, data_sort, unsolved_in_definition,
 };
+use crate::error::ErrorKind;
 use crate::eval::eval;
 use crate::level::Level;
 use crate::meta::{Generalization, Metas, zonk_term};
@@ -411,7 +412,7 @@ impl Signature {
     /// есть ровно то, на что жаловался.
     fn declare_fresh(&mut self, metas: &mut Metas, group: &Group) -> Result<(), TypeError> {
         if let Some(name) = self.taken_name(group) {
-            return Err(TypeError::DuplicateDefinition { name });
+            return Err(ErrorKind::DuplicateDefinition { name }.into());
         }
         let outcome = self.declare_group(metas, group);
         if outcome.is_err() {
@@ -436,8 +437,11 @@ impl Signature {
 
         // (A) типы членов против сигнатуры без группы.
         let mut checked = Vec::with_capacity(members.len());
-        for member in members {
-            checked.push(self.check_member_type(metas, member)?);
+        for (index, member) in members.iter().enumerate() {
+            checked.push(
+                self.check_member_type(metas, member)
+                    .map_err(|error| error.in_frame(Frame::MemberType(at(index))))?,
+            );
         }
         for (member, checked) in members.iter().zip(&checked) {
             self.definitions
@@ -451,8 +455,11 @@ impl Signature {
         // же группы, упрётся в `UnknownConstant` - громкий отказ, а не молча
         // принятый неполный список.
         let mut constructors = Vec::with_capacity(members.len());
-        for (member, checked) in members.iter().zip(&checked) {
-            constructors.push(self.check_member_constructors(metas, member, checked)?);
+        for (index, (member, checked)) in members.iter().zip(&checked).enumerate() {
+            constructors.push(
+                self.check_member_constructors(metas, member, checked)
+                    .map_err(|error| error.in_frame(Frame::MemberType(at(index))))?,
+            );
         }
         for (member, declarations) in members.iter().zip(&constructors) {
             for (name, declaration) in constructor_names(member).zip(declarations) {
@@ -463,8 +470,11 @@ impl Signature {
 
         // (B2) тела определений - с полной таблицей конструкторов.
         let mut bodies = Vec::with_capacity(members.len());
-        for (member, checked) in members.iter().zip(&checked) {
-            bodies.push(self.check_member_body(metas, member, checked)?);
+        for (index, (member, checked)) in members.iter().zip(&checked).enumerate() {
+            bodies.push(
+                self.check_member_body(metas, member, checked)
+                    .map_err(|error| error.in_frame(Frame::MemberBody(at(index))))?,
+            );
         }
 
         // Тела - в сигнатуру до фазы C: позитивность смотрит сквозь
@@ -476,8 +486,12 @@ impl Signature {
         }
 
         // (C) группа закрыта: позитивность, укладка полей, вердикт тотальности.
-        for ((member, family), declarations) in members.iter().zip(&checked).zip(&constructors) {
-            for (declared, constructor) in constructor_decls(member).zip(declarations) {
+        for (index, ((member, family), declarations)) in
+            members.iter().zip(&checked).zip(&constructors).enumerate()
+        {
+            for (slot, (declared, constructor)) in
+                constructor_decls(member).zip(declarations).enumerate()
+            {
                 check_constructor_content(
                     self,
                     metas,
@@ -485,7 +499,12 @@ impl Signature {
                     member.name(),
                     &family.declaration,
                     &constructor.ty,
-                )?;
+                )
+                .map_err(|error| {
+                    error
+                        .in_frame(Frame::Constructor(at(slot)))
+                        .in_frame(Frame::MemberType(at(index)))
+                })?;
             }
         }
         self.settle_totality(group);
@@ -575,14 +594,11 @@ impl Signature {
             return Ok(Vec::new());
         };
         let mut declarations = Vec::with_capacity(constructors.len());
-        for constructor in constructors {
-            declarations.push(self.check_constructor_type(
-                metas,
-                name,
-                *arity,
-                &checked.declaration,
-                constructor,
-            )?);
+        for (slot, constructor) in constructors.iter().enumerate() {
+            declarations.push(
+                self.check_constructor_type(metas, name, *arity, &checked.declaration, constructor)
+                    .map_err(|error| error.in_frame(Frame::Constructor(at(slot))))?,
+            );
         }
         Ok(declarations)
     }
@@ -649,11 +665,12 @@ impl Signature {
         // и лишний параметр заполнить было бы нечем. Проверку не заменяет
         // сверка результата - тот фиксирует лишь первые `arity` параметров.
         if declaration.level_arity != family.level_arity {
-            return Err(TypeError::LevelArity {
+            return Err(ErrorKind::LevelArity {
                 name: Rc::clone(&constructor.name),
                 expected: family.level_arity,
                 found: declaration.level_arity,
-            });
+            }
+            .into());
         }
 
         check_constructor_shape(
@@ -684,10 +701,11 @@ impl Signature {
             .unwrap_or_else(|| unreachable!("объявление вставлено фазой A или B1"));
 
         if let Some(meta) = unsolved_in_definition(metas, &definition) {
-            return Err(TypeError::UnsolvedDefinitionLevel {
+            return Err(ErrorKind::UnsolvedDefinitionLevel {
                 name: Rc::clone(name),
                 meta,
-            });
+            }
+            .into());
         }
 
         // Решённые по дороге дырки подставляются здесь: хранилище живёт прогон
@@ -890,6 +908,14 @@ fn constructor_decls(member: &Member) -> impl Iterator<Item = &ConstructorDecl> 
         Member::Definition { .. } => &[],
     };
     constructors.iter()
+}
+
+/// Номер члена или конструктора в объявлении - для кадра маршрута.
+///
+/// Насыщение вместо паники: группа из 4 миллиардов членов - не тот случай,
+/// ради которого проверка типов падает, а маршрут в ней всё равно нечитаем.
+fn at(index: usize) -> u32 {
+    u32::try_from(index).unwrap_or(u32::MAX)
 }
 
 /// Имена конструкторов члена.

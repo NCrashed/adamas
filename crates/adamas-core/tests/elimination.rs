@@ -7,7 +7,7 @@
 
 use std::rc::Rc;
 
-use adamas_core::check::{TypeError, check_closed, infer_closed};
+use adamas_core::check::{ErrorKind, TypeError, check_closed, infer_closed};
 use adamas_core::eval::normalize;
 use adamas_core::level::Level;
 use adamas_core::meta::Metas;
@@ -388,7 +388,10 @@ fn a_definition_reduces_through_a_case_only_when_unfolded() {
     assert!(
         matches!(
             check_closed(&signature, &discriminated, &c("Nat")),
-            Err(TypeError::Mismatch { .. })
+            Err(TypeError {
+                kind: ErrorKind::Mismatch { .. },
+                ..
+            })
         ),
         "тип от разворота не меняется"
     );
@@ -416,7 +419,10 @@ fn a_dependent_motive_gives_each_branch_its_own_type() {
     assert!(
         matches!(
             check_closed(&signature, &c("true"), &chosen),
-            Err(TypeError::Mismatch { .. })
+            Err(TypeError {
+                kind: ErrorKind::Mismatch { .. },
+                ..
+            })
         ),
         "а `true` - нет"
     );
@@ -474,7 +480,10 @@ fn a_branch_is_checked_against_the_motive_at_its_own_constructor() {
     assert!(
         matches!(
             check_closed(&signature, &swapped, &ty),
-            Err(TypeError::Mismatch { .. })
+            Err(TypeError {
+                kind: ErrorKind::Mismatch { .. },
+                ..
+            })
         ),
         "в ветви `true` требуется `Nat`"
     );
@@ -495,7 +504,10 @@ fn a_motive_of_the_wrong_shape_is_rejected() {
     assert!(
         matches!(
             infer_closed(&signature, &broken),
-            Err(TypeError::Mismatch { .. })
+            Err(TypeError {
+                kind: ErrorKind::Mismatch { .. },
+                ..
+            })
         ),
         "мотив не функция"
     );
@@ -510,9 +522,12 @@ fn a_motive_of_the_wrong_shape_is_rejected() {
     assert!(
         matches!(
             infer_closed(&signature, &unerased),
-            Err(TypeError::LambdaMultiplicity {
-                expected: Mult::Zero,
-                found: Mult::Many
+            Err(TypeError {
+                kind: ErrorKind::LambdaMultiplicity {
+                    expected: Mult::Zero,
+                    found: Mult::Many
+                },
+                ..
             })
         ),
         "мотив связывает значение стёртым"
@@ -641,7 +656,10 @@ fn a_branch_cannot_ignore_its_index() {
     assert!(
         matches!(
             check_closed(&signature, &broken, &ty),
-            Err(TypeError::Mismatch { .. })
+            Err(TypeError {
+                kind: ErrorKind::Mismatch { .. },
+                ..
+            })
         ),
         "длина в типе не сходится"
     );
@@ -713,9 +731,12 @@ fn a_wrong_parameter_count_is_rejected() {
     assert!(
         matches!(
             check_closed(&signature, &broken, &ty),
-            Err(TypeError::CaseParameters {
-                expected: 1,
-                found: 0,
+            Err(TypeError {
+                kind: ErrorKind::CaseParameters {
+                    expected: 1,
+                    found: 0,
+                    ..
+                },
                 ..
             })
         ),
@@ -737,7 +758,10 @@ fn a_missing_branch_is_rejected() {
     assert!(
         matches!(
             infer_closed(&signature, &partial),
-            Err(TypeError::NonExhaustive { .. })
+            Err(TypeError {
+                kind: ErrorKind::NonExhaustive { .. },
+                ..
+            })
         ),
         "конструктор `false` не покрыт"
     );
@@ -755,7 +779,10 @@ fn branches_must_follow_the_declaration_order() {
     assert!(
         matches!(
             infer_closed(&signature, &swapped),
-            Err(TypeError::BranchOrder { .. })
+            Err(TypeError {
+                kind: ErrorKind::BranchOrder { .. },
+                ..
+            })
         ),
         "порядок ветвей задан порядком объявления"
     );
@@ -777,7 +804,10 @@ fn a_branch_for_a_foreign_constructor_is_rejected() {
     assert!(
         matches!(
             infer_closed(&signature, &alien),
-            Err(TypeError::RedundantBranch { .. })
+            Err(TypeError {
+                kind: ErrorKind::RedundantBranch { .. },
+                ..
+            })
         ),
         "`zero` не конструктор `Bool`"
     );
@@ -813,7 +843,10 @@ fn a_case_needs_a_value_of_that_type() {
     assert!(
         matches!(
             infer_closed(&signature, &confused),
-            Err(TypeError::NotADataValue { .. })
+            Err(TypeError {
+                kind: ErrorKind::NotADataValue { .. },
+                ..
+            })
         ),
         "`zero` не булево"
     );
@@ -827,7 +860,10 @@ fn a_case_needs_a_value_of_that_type() {
     assert!(
         matches!(
             infer_closed(&signature, &postulated),
-            Err(TypeError::NotADataType { .. })
+            Err(TypeError {
+                kind: ErrorKind::NotADataType { .. },
+                ..
+            })
         ),
         "по постулату разбирать нечего"
     );
@@ -885,7 +921,10 @@ fn branches_are_joined_not_added() {
     assert!(
         matches!(
             check_closed(&signature, &doubled, &ty),
-            Err(TypeError::UsageViolation { .. })
+            Err(TypeError {
+                kind: ErrorKind::UsageViolation { .. },
+                ..
+            })
         ),
         "внутри ветви использования складываются"
     );
@@ -928,7 +967,10 @@ fn a_field_is_spent_at_its_declared_multiplicity() {
     assert!(
         matches!(
             check_closed(&signature, &doubled, &ty),
-            Err(TypeError::UsageViolation { .. })
+            Err(TypeError {
+                kind: ErrorKind::UsageViolation { .. },
+                ..
+            })
         ),
         "поле кратности 1 нельзя использовать дважды"
     );
@@ -972,7 +1014,10 @@ fn a_linear_field_used_twice_is_rejected_in_every_position() {
         assert!(
             matches!(
                 check_closed(&signature, &term, &ty),
-                Err(TypeError::UsageViolation { .. })
+                Err(TypeError {
+                    kind: ErrorKind::UsageViolation { .. },
+                    ..
+                })
             ),
             "линейное поле дважды - нарушение и {what}"
         );
@@ -1015,7 +1060,10 @@ fn an_argument_position_scales_the_usage_it_receives() {
                 &lam(Mult::One, "b", c("use").apply([Term::var(0)])),
                 &linear,
             ),
-            Err(TypeError::UsageViolation { .. })
+            Err(TypeError {
+                kind: ErrorKind::UsageViolation { .. },
+                ..
+            })
         ),
         "`ω · 1 = ω` - линейный ресурс в ω-позицию не проходит"
     );
@@ -1040,7 +1088,10 @@ fn an_erased_value_may_be_scrutinised_only_in_the_erased_fragment() {
     assert!(
         matches!(
             check_closed(&signature, &inhabitant, &ty),
-            Err(TypeError::Mismatch { .. })
+            Err(TypeError {
+                kind: ErrorKind::Mismatch { .. },
+                ..
+            })
         ),
         "тип корректен, но `zero` не подходит под оба варианта"
     );
@@ -1063,7 +1114,10 @@ fn an_erased_value_may_be_scrutinised_only_in_the_erased_fragment() {
                 &runtime,
                 &pi(Mult::Zero, "b", c("Bool"), c("Bool"))
             ),
-            Err(TypeError::UsageViolation { .. })
+            Err(TypeError {
+                kind: ErrorKind::UsageViolation { .. },
+                ..
+            })
         ),
         "стёртое значение разобрать в рантайме нельзя"
     );
@@ -1166,7 +1220,10 @@ fn a_family_takes_its_constructors_once_and_for_all() {
                 Term::universe(0),
                 &[("boom", c("Void"))],
             ),
-            Err(TypeError::DuplicateDefinition { .. })
+            Err(TypeError {
+                kind: ErrorKind::DuplicateDefinition { .. },
+                ..
+            })
         ),
         "семейство объявляется один раз и целиком"
     );
@@ -1224,7 +1281,13 @@ fn a_case_inside_the_group_is_not_exhausted_by_zero_branches() {
     let mut metas = Metas::default();
     let outcome = signature.declare(&mut metas, &matching_on_its_own_family(Vec::new()));
     assert!(
-        matches!(outcome, Err(TypeError::NonExhaustive { .. })),
+        matches!(
+            outcome,
+            Err(TypeError {
+                kind: ErrorKind::NonExhaustive { .. },
+                ..
+            })
+        ),
         "{outcome:?}"
     );
     assert!(signature.is_empty(), "отвергнутая группа не оставила следа");

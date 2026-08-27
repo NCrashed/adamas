@@ -105,8 +105,13 @@ impl<'a> Elaborator<'a> {
 
     /// Выражение в терм.
     ///
-    /// `default` - кратность связываний, у которых она не написана: `ω` в
-    /// сигнатуре функции, `1` в типе конструктора (§4.1).
+    /// `default` - кратность связываний, у которых она не написана: `ω` у
+    /// параметра функции, `1` у поля конструктора (§4.1). Умолчание
+    /// **позиционное**: оно расходуется на связывание, к которому пришло, и
+    /// доходит только до кодомена - там стоит следующий параметр той же
+    /// сигнатуры. В домен и в любой другой подтерм элаборация уходит с `ω`:
+    /// `(Nat -> Nat) -> C` берёт поле типа «функция», а не поле с кратностью
+    /// поля.
     pub(crate) fn expr(&mut self, expr: &Expr, default: Mult) -> Result<Term, ElabError> {
         let missing = |what| {
             Err(ElabError::Missing {
@@ -117,11 +122,11 @@ impl<'a> Elaborator<'a> {
         match &expr.kind {
             ExprKind::Name(name) => self.name(name),
             ExprKind::App(callee, argument) => Ok(Term::App(
-                Rc::new(self.expr(callee, default)?),
-                Rc::new(self.expr(argument, default)?),
+                Rc::new(self.expr(callee, Mult::Many)?),
+                Rc::new(self.expr(argument, Mult::Many)?),
             )),
             ExprKind::Arrow(domain, codomain) => {
-                let domain = self.expr(domain, default)?;
+                let domain = self.expr(domain, Mult::Many)?;
                 let anonymous: Symbol = Rc::from("_");
                 let codomain = self.under(&anonymous, |inner| inner.expr(codomain, default))?;
                 Ok(Term::Pi(
@@ -132,9 +137,9 @@ impl<'a> Elaborator<'a> {
                 ))
             }
             ExprKind::Pi { binders, codomain } => self.pi(binders, codomain, default),
-            ExprKind::Lam { params, body } => self.lam(params, body, default),
-            ExprKind::Block(block) => self.block(block, default),
-            ExprKind::Chain(chain) => self.chain(chain, default),
+            ExprKind::Lam { params, body } => self.lam(params, body),
+            ExprKind::Block(block) => self.block(block),
+            ExprKind::Chain(chain) => self.chain(chain),
 
             ExprKind::Hole => missing(Missing::TermHole),
             ExprKind::Lit(_) => missing(Missing::Literal),
@@ -217,7 +222,7 @@ impl<'a> Elaborator<'a> {
         let Some(((mult, name, ty), rest)) = binders.split_first() else {
             return self.expr(codomain, default);
         };
-        let domain = self.expr(ty, default)?;
+        let domain = self.expr(ty, Mult::Many)?;
         let body = self.under(name, |inner| inner.pi_flat(rest, codomain, default))?;
         Ok(Term::Pi(
             *mult,
@@ -228,14 +233,9 @@ impl<'a> Elaborator<'a> {
     }
 
     /// `\x y -> body`.
-    fn lam(
-        &mut self,
-        params: &[ast::LamParam],
-        body: &Expr,
-        default: Mult,
-    ) -> Result<Term, ElabError> {
+    fn lam(&mut self, params: &[ast::LamParam], body: &Expr) -> Result<Term, ElabError> {
         let Some((param, rest)) = params.split_first() else {
-            return self.expr(body, default);
+            return self.expr(body, Mult::Many);
         };
         let name = match &param.kind {
             LamParamKind::Binder(_) => {
@@ -262,7 +262,7 @@ impl<'a> Elaborator<'a> {
                 }
             },
         };
-        let inner = self.under(&name, |inner| inner.lam(rest, body, default))?;
+        let inner = self.under(&name, |inner| inner.lam(rest, body))?;
         Ok(Term::Lam(
             Mult::Many,
             CoreName::from(&*name),
@@ -271,17 +271,17 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Блок операторов: цепочка `let` и значение последним.
-    fn block(&mut self, block: &Block, default: Mult) -> Result<Term, ElabError> {
-        self.statements(&block.stmts, default)
+    fn block(&mut self, block: &Block) -> Result<Term, ElabError> {
+        self.statements(&block.stmts)
     }
 
-    fn statements(&mut self, stmts: &[Stmt], default: Mult) -> Result<Term, ElabError> {
+    fn statements(&mut self, stmts: &[Stmt]) -> Result<Term, ElabError> {
         let Some((first, rest)) = stmts.split_first() else {
             // Пустых блоков layout не делает.
             unreachable!("блок без операторов")
         };
         match &first.kind {
-            StmtKind::Expr(expr) if rest.is_empty() => self.expr(expr, default),
+            StmtKind::Expr(expr) if rest.is_empty() => self.expr(expr, Mult::Many),
             StmtKind::Expr(_) => Err(ElabError::Missing {
                 what: Missing::Sequencing,
                 span: first.span,
@@ -293,21 +293,16 @@ impl<'a> Elaborator<'a> {
                         span: first.span,
                     });
                 }
-                self.bindings(bindings, rest, default)
+                self.bindings(bindings, rest)
             }
         }
     }
 
     /// `let` со своими связываниями: каждое даёт узел `Let`, вложенный в
     /// следующее.
-    fn bindings(
-        &mut self,
-        bindings: &[Binding],
-        rest: &[Stmt],
-        default: Mult,
-    ) -> Result<Term, ElabError> {
+    fn bindings(&mut self, bindings: &[Binding], rest: &[Stmt]) -> Result<Term, ElabError> {
         let Some((binding, tail)) = bindings.split_first() else {
-            return self.statements(rest, default);
+            return self.statements(rest);
         };
         if !binding.params.is_empty() {
             return Err(ElabError::Missing {
@@ -324,9 +319,7 @@ impl<'a> Elaborator<'a> {
         let ty = self.expr(ty, Mult::Many)?;
         let value = self.expr(&binding.body, Mult::Many)?;
         let mult = Self::multiplicity(binding.mult, Mult::Many);
-        let body = self.under(&binding.name.text, |inner| {
-            inner.bindings(tail, rest, default)
-        })?;
+        let body = self.under(&binding.name.text, |inner| inner.bindings(tail, rest))?;
         Ok(Term::Let(
             mult,
             CoreName::from(&*binding.name.text),
@@ -338,7 +331,7 @@ impl<'a> Elaborator<'a> {
 
     /// Цепочка операторов. Скобки расставляются по фикситетам, а их ещё нет,
     /// поэтому цепочка длиннее одного оператора - отказ.
-    fn chain(&mut self, chain: &ast::Chain, default: Mult) -> Result<Term, ElabError> {
+    fn chain(&mut self, chain: &ast::Chain) -> Result<Term, ElabError> {
         let [(operator, operand)] = &chain.tail[..] else {
             return Err(ElabError::Missing {
                 what: Missing::Fixities,
@@ -346,8 +339,8 @@ impl<'a> Elaborator<'a> {
             });
         };
         let callee = self.name(operator)?;
-        let left = self.expr(&chain.head, default)?;
-        let right = self.expr(operand, default)?;
+        let left = self.expr(&chain.head, Mult::Many)?;
+        let right = self.expr(operand, Mult::Many)?;
         Ok(callee.apply([left, right]))
     }
 

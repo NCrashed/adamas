@@ -295,7 +295,10 @@ fn parameters(
             continue;
         };
         let ty = match &param.ty {
-            Some(ty) => Elaborator::new(signature, metas).expr(ty, Mult::Zero)?,
+            // `Mult::Many`, а не `Mult::Zero`: нулевая кратность у самого
+            // параметра, а его тип - обычный тип, и стрелки внутри него
+            // связывают параметры функции.
+            Some(ty) => Elaborator::new(signature, metas).expr(ty, Mult::Many)?,
             None => Term::Universe(metas.fresh_level()),
         };
         result = Term::Pi(

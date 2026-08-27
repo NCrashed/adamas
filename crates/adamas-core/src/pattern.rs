@@ -66,7 +66,7 @@
 use std::fmt;
 use std::rc::Rc;
 
-use crate::check::{TypeError, instantiate_telescope, is_type};
+use crate::check::{Frame, TypeError, instantiate_telescope, is_type};
 use crate::ctx::{Binding, Ctx};
 use crate::eval::quote;
 use crate::level::Level;
@@ -253,6 +253,25 @@ pub fn compile(
     ty: &Term,
     clauses: &[Clause],
 ) -> Result<Term, PatternError> {
+    Ok(compile_traced(signature, metas, ty, clauses)?.term)
+}
+
+/// То же, но вместе с тем, куда в дереве попали клаузы.
+///
+/// Дерево - структура, которую элаборация порождает сама, и ошибка ядра
+/// приходит про терм, которого автор не писал (§10 вопрос 49б). Маршрут ядра
+/// проходит по дереву, а `clauses` переводит его пройденную часть обратно в
+/// номер клаузы - дальше маршрут продолжается уже по её телу.
+///
+/// # Errors
+///
+/// То же, что у [`compile`].
+pub fn compile_traced(
+    signature: &Signature,
+    metas: &mut Metas,
+    ty: &Term,
+    clauses: &[Clause],
+) -> Result<Compiled, PatternError> {
     let ctx = Ctx::new(signature);
     is_type(&ctx, metas, ty).map_err(|error| PatternError::IllTypedType {
         error: Box::new(error),
@@ -340,12 +359,124 @@ pub fn compile(
         return Err(PatternError::UnreachableClause { clause });
     }
 
-    Ok(telescope
+    // Лямбды аргументов - те же кадры `Body`, что и всякая другая лямбда.
+    let tree = telescope
         .into_iter()
         .rev()
-        .fold(tree, |body, (mult, name, _)| {
-            Term::Lam(mult, name, Rc::new(body))
-        }))
+        .fold(tree, |tree, (mult, name, _)| {
+            tree.map(|body| Term::Lam(mult, name, Rc::new(body)))
+                .under(Frame::Body)
+        });
+    Ok(Compiled {
+        term: tree.term,
+        clauses: tree.sites,
+    })
+}
+
+/// Клауза, разбирающая невозможный случай, - ошибка на месте, а не
+/// недостижимость: перекрывать её нечему, она попросту не сработала бы.
+fn impossible(
+    rows: &[Row],
+    at: usize,
+    family: &Family,
+    candidates: &[Candidate],
+) -> Result<(), PatternError> {
+    for row in rows {
+        let Pat::Ctor(name, _) = &row.patterns[at] else {
+            continue;
+        };
+        let Some(position) = family.constructors.iter().position(|found| found == name) else {
+            continue;
+        };
+        if let Match::Conflict {
+            expected, found, ..
+        } = &candidates[position].outcome
+        {
+            return Err(PatternError::ImpossiblePattern {
+                clause: row.clause,
+                constructor: Rc::clone(name),
+                expected: Rc::clone(expected),
+                found: Rc::clone(found),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Дерево разбора вместе с тем, куда в нём попали клаузы.
+#[derive(Clone, Debug)]
+pub struct Compiled {
+    /// Само дерево.
+    pub term: Term,
+    /// Места клауз в дереве. Одна клауза бывает здесь **несколько раз**:
+    /// переменная-паттерн подходит под каждый конструктор, и тело копируется
+    /// в каждую ветвь.
+    pub clauses: Vec<ClauseSite>,
+}
+
+impl Compiled {
+    /// Номер клаузы, в тело которой ведёт маршрут, и остаток маршрута внутри
+    /// неё.
+    ///
+    /// Выбирается **самый длинный** подходящий префикс: пути к разным копиям
+    /// одной клаузы различаются только хвостом, и короткий префикс поймал бы
+    /// чужую ветвь.
+    #[must_use]
+    pub fn locate<'a>(&self, route: &'a [Frame]) -> Option<(usize, &'a [Frame])> {
+        self.clauses
+            .iter()
+            .filter(|site| route.starts_with(&site.route))
+            .max_by_key(|site| site.route.len())
+            .map(|site| (site.clause, &route[site.route.len()..]))
+    }
+}
+
+/// Тело клаузы в собранном дереве.
+#[derive(Clone, Debug)]
+pub struct ClauseSite {
+    /// Номер клаузы в порядке написания.
+    pub clause: usize,
+    /// Маршрут от корня дерева **снаружи внутрь** - в том порядке, в каком
+    /// его отдаёт [`TypeError::path`](crate::check::TypeError::path).
+    pub route: Vec<Frame>,
+}
+
+/// Собираемое дерево вместе с местами клауз в нём.
+///
+/// Кадр дописывает тот, кто узел строит: обернул лямбдой - дописал `Body`,
+/// положил в ветвь - дописал `Branch`. Соответствие поэтому не может
+/// разъехаться с деревом - оно строится тем же кодом и в тот же момент.
+struct Tree {
+    term: Term,
+    sites: Vec<ClauseSite>,
+}
+
+impl Tree {
+    /// Тело клаузы целиком.
+    fn leaf(term: Term, clause: usize) -> Self {
+        Self {
+            term,
+            sites: vec![ClauseSite {
+                clause,
+                route: Vec::new(),
+            }],
+        }
+    }
+
+    /// Оборачивает дерево узлом, в котором оно стоит на месте `frame`.
+    fn under(mut self, frame: Frame) -> Self {
+        for site in &mut self.sites {
+            site.route.insert(0, frame);
+        }
+        self
+    }
+
+    /// Меняет терм, не трогая места клауз: узел добавлен снаружи и кадр
+    /// дописывается отдельным [`Tree::under`].
+    fn map(mut self, build: impl FnOnce(Term) -> Term) -> Self {
+        self.term = build(self.term);
+        self
+    }
 }
 
 /// Паттерн с пронумерованными переменными.
@@ -428,7 +559,7 @@ impl Compiler<'_> {
         rows: &[Row],
         target: &Term,
         example: &[Pattern],
-    ) -> Result<Term, PatternError> {
+    ) -> Result<Tree, PatternError> {
         // Клауз не осталось - но случай мог оказаться и невозможным: разбор
         // пустого семейства даёт ноль ветвей и служит доказательством, что
         // вызвать функцию на этом пути нечем.
@@ -473,7 +604,7 @@ impl Compiler<'_> {
     }
 
     /// Тело клаузы, переписанное в текущий контекст.
-    fn leaf(&mut self, ctx: &Ctx<'_>, columns: &[Column], row: &Row) -> Term {
+    fn leaf(&mut self, ctx: &Ctx<'_>, columns: &[Column], row: &Row) -> Tree {
         self.used[row.clause] = true;
         let mut assigned = row.assigned.clone();
         for (column, pattern) in columns.iter().zip(&row.patterns) {
@@ -483,12 +614,13 @@ impl Compiler<'_> {
         }
         let bound = arity_u32(assigned.len());
         let size = ctx.size();
-        rewrite(&row.body, 0, bound, &|variable| {
+        let body = rewrite(&row.body, 0, bound, &|variable| {
             let value = assigned[variable as usize]
                 .as_ref()
                 .unwrap_or_else(|| unreachable!("переменная клаузы осталась несвязанной"));
             quote(size, value)
-        })
+        });
+        Tree::leaf(body, row.clause)
     }
 
     /// Колонка, значение которой уже построено конструктором.
@@ -504,7 +636,7 @@ impl Compiler<'_> {
         target: &Term,
         example: &[Pattern],
         at: usize,
-    ) -> Result<Term, PatternError> {
+    ) -> Result<Tree, PatternError> {
         let column = &columns[at];
         let family = self.family(ctx, column, rows, at)?;
         let unmatchable = || PatternError::NotMatchable {
@@ -577,7 +709,7 @@ impl Compiler<'_> {
         target: &Term,
         example: &[Pattern],
         at: usize,
-    ) -> Result<Term, PatternError> {
+    ) -> Result<Tree, PatternError> {
         let family = self.family(ctx, &columns[at], rows, at)?;
         let Some(scrutinee) = columns[at].level() else {
             unreachable!("разбор идёт только по переменной")
@@ -626,27 +758,7 @@ impl Compiler<'_> {
             }
         }
 
-        // Клауза, разбирающая невозможный случай, - ошибка на месте, а не
-        // недостижимость: перекрывать её нечему, она попросту не сработала бы.
-        for row in rows {
-            let Pat::Ctor(name, _) = &row.patterns[at] else {
-                continue;
-            };
-            let Some(position) = family.constructors.iter().position(|found| found == name) else {
-                continue;
-            };
-            if let Match::Conflict {
-                expected, found, ..
-            } = &candidates[position].outcome
-            {
-                return Err(PatternError::ImpossiblePattern {
-                    clause: row.clause,
-                    constructor: Rc::clone(name),
-                    expected: Rc::clone(expected),
-                    found: Rc::clone(found),
-                });
-            }
-        }
+        impossible(rows, at, &family, &candidates)?;
 
         // Уровень цели нужен только различающему мотиву - он пишет `Type ℓ`
         // руками, - и спрашивается у проверки типов, а не выдумывается свежей
@@ -675,8 +787,17 @@ impl Compiler<'_> {
         };
         let motive = self.motive(ctx, &plan, &family, sort.as_ref());
         let mut branches = Vec::with_capacity(family.constructors.len());
-        for (constructor, candidate) in family.constructors.iter().zip(&candidates) {
-            branches.push(self.branch(ctx, &plan, &family, constructor, candidate)?);
+        let mut sites = Vec::new();
+        for (index, (constructor, candidate)) in
+            family.constructors.iter().zip(&candidates).enumerate()
+        {
+            let (branch, inner) = self.branch(ctx, &plan, &family, constructor, candidate)?;
+            branches.push(branch);
+            let slot = Frame::Branch(arity_u32(index));
+            sites.extend(inner.into_iter().map(|mut site| {
+                site.route.insert(0, slot);
+                site
+            }));
         }
 
         let discriminated = Term::Case(Rc::new(Case {
@@ -690,11 +811,18 @@ impl Compiler<'_> {
         // Разбор применяется обратно к вынесенным соседям - к тем самым
         // переменным, с которых начинали: их старые связывания расходуются
         // здесь, а тела ветвей пользуются свежими.
-        Ok(discriminated.apply(
-            plan.borrowed()
-                .iter()
-                .map(|carried| Term::Var(Lvl(carried.bound()).to_index(size))),
-        ))
+        //
+        // Узел разбора уезжает при этом внутрь применений, и маршрут к нему
+        // идёт через `Callee` - по кадру на вынесенного соседа.
+        let tree = Tree {
+            term: discriminated,
+            sites,
+        };
+        Ok(plan.borrowed().iter().fold(tree, |tree, carried| {
+            let argument = Term::Var(Lvl(carried.bound()).to_index(size));
+            tree.map(|callee| callee.apply([argument]))
+                .under(Frame::Callee)
+        }))
     }
 
     /// Ветвь одного конструктора.
@@ -705,7 +833,7 @@ impl Compiler<'_> {
         family: &Family,
         constructor: &Name,
         candidate: &Candidate,
-    ) -> Result<Branch, PatternError> {
+    ) -> Result<(Branch, Vec<ClauseSite>), PatternError> {
         let size = ctx.size();
         let fields = &candidate.fields;
         let mut inner = ctx.clone();
@@ -713,18 +841,25 @@ impl Compiler<'_> {
             inner = inner.bind(Rc::clone(&field.name), field.mult, Rc::clone(&field.ty));
         }
         let wrap = |body: Term| {
-            Rc::new(fields.iter().rev().fold(body, |body, field| {
+            fields.iter().rev().fold(body, |body, field| {
                 Term::Lam(field.mult, Rc::clone(&field.name), Rc::new(body))
-            }))
+            })
         };
 
         // Индексы разошлись - такой ветви не бывает. Мотив отдал ей заведомо
         // обитаемый `(1 _ : G) -> G`, и населяет его тождество.
         let Match::Solved(solved) = &candidate.outcome else {
-            return Ok(Branch {
-                constructor: Rc::clone(constructor),
-                body: wrap(Term::Lam(Mult::One, "z".into(), Rc::new(Term::var(0)))),
-            });
+            return Ok((
+                Branch {
+                    constructor: Rc::clone(constructor),
+                    body: Rc::new(wrap(Term::Lam(
+                        Mult::One,
+                        "z".into(),
+                        Rc::new(Term::var(0)),
+                    ))),
+                },
+                Vec::new(),
+            ));
         };
 
         // В этой ветви разбираемое значение - не переменная, а построенное
@@ -774,12 +909,21 @@ impl Compiler<'_> {
 
         let body = self.solve(&inner, &columns, &rows, &target, &example)?;
         let body = copies.iter().rev().fold(body, |body, (mult, name, _)| {
-            Term::Lam(*mult, Rc::clone(name), Rc::new(body))
+            body.map(|body| Term::Lam(*mult, Rc::clone(name), Rc::new(body)))
+                .under(Frame::Body)
         });
-        Ok(Branch {
-            constructor: Rc::clone(constructor),
-            body: wrap(body),
-        })
+        // `wrap` кладёт по лямбде на каждое поле - столько же кадров `Body`.
+        let body = fields
+            .iter()
+            .fold(body, |body, _| body.under(Frame::Body))
+            .map(wrap);
+        Ok((
+            Branch {
+                constructor: Rc::clone(constructor),
+                body: Rc::new(body.term),
+            },
+            body.sites,
+        ))
     }
 
     /// Мотив разбора: `\(0 i⃗) (0 x) -> <цель, уточнённая по индексам>`.

@@ -19,7 +19,7 @@ use std::rc::Rc;
 use adamas_core::level::Level;
 use adamas_core::meta::{Generalization, Metas};
 use adamas_core::mult::Mult;
-use adamas_core::pattern::compile;
+use adamas_core::pattern::{PatternError, compile_traced};
 use adamas_core::sig::Signature;
 use adamas_core::source::Span;
 use adamas_core::term::Term;
@@ -27,11 +27,16 @@ use adamas_parser::ast::{self, DeclKind, Module, Symbol};
 
 use crate::error::{ElabError, Missing};
 use crate::expr::Elaborator;
+use crate::route::{self, Declared};
 
 /// Сигнатура, ожидающая клауз.
-struct Pending {
+///
+/// Написанный тип хранится вместе с собранным: маршрут отказа пойдёт по нему
+/// обратно, чтобы стать спаном (§10 вопрос 49б).
+struct Pending<'a> {
     name: Symbol,
     ty: Term,
+    source: &'a ast::Expr,
     span: Span,
 }
 
@@ -61,15 +66,16 @@ pub fn elaborate_into(
     signature: &mut Signature,
     metas: &mut Metas,
 ) -> Result<(), ElabError> {
-    let mut pending: Option<Pending> = None;
+    let mut pending: Option<Pending<'_>> = None;
     for decl in &module.decls {
         match &decl.kind {
             DeclKind::Signature { name, ty } => {
                 postulate(signature, metas, pending.take())?;
-                let ty = Elaborator::new(signature, metas).expr(ty, Mult::Many)?;
+                let elaborated = Elaborator::new(signature, metas).expr(ty, Mult::Many)?;
                 pending = Some(Pending {
                     name: Rc::clone(&name.text),
-                    ty,
+                    ty: elaborated,
+                    source: ty,
                     span: decl.span,
                 });
             }
@@ -101,16 +107,20 @@ pub fn elaborate_into(
 fn postulate(
     signature: &mut Signature,
     metas: &mut Metas,
-    pending: Option<Pending>,
+    pending: Option<Pending<'_>>,
 ) -> Result<(), ElabError> {
     let Some(pending) = pending else {
         return Ok(());
     };
+    let source = pending.source;
     signature
         .postulate_inferred(metas, &pending.name, Mult::Many, pending.ty)
-        .map_err(|error| ElabError::Core {
-            error: Box::new(error),
-            span: pending.span,
+        .map_err(|error| {
+            let span = route::locate(&Declared::Postulate(source), &error, pending.span);
+            ElabError::Core {
+                error: Box::new(error),
+                span,
+            }
         })
 }
 
@@ -118,7 +128,7 @@ fn postulate(
 fn define(
     signature: &mut Signature,
     metas: &mut Metas,
-    declared: &Pending,
+    declared: &Pending<'_>,
     clauses: &[ast::Clause],
     span: Span,
 ) -> Result<(), ElabError> {
@@ -137,11 +147,12 @@ fn define(
     // Тип идёт в сборку тем же, каким пойдёт в сигнатуру, - с дырками уровня.
     // Одно хранилище на прогон это и позволяет: решение, найденное сборкой,
     // доживает до объявления.
-    let body =
-        compile(signature, metas, &declared.ty, &compiled).map_err(|error| ElabError::Clauses {
+    let tree = compile_traced(signature, metas, &declared.ty, &compiled).map_err(|error| {
+        ElabError::Clauses {
+            span: clause_span(&error, declared, clauses, span),
             error: Box::new(error),
-            span,
-        })?;
+        }
+    })?;
 
     signature
         .define_inferred(
@@ -149,12 +160,43 @@ fn define(
             &declared.name,
             Mult::Many,
             declared.ty.clone(),
-            Some(body),
+            Some(tree.term.clone()),
         )
-        .map_err(|error| ElabError::Core {
-            error: Box::new(error),
-            span,
+        .map_err(|error| {
+            let declared = Declared::Definition {
+                ty: declared.source,
+                clauses,
+                compiled: &tree,
+            };
+            ElabError::Core {
+                span: route::locate(&declared, &error, span),
+                error: Box::new(error),
+            }
         })
+}
+
+/// Где в исходнике то, на чём споткнулась сборка клауз.
+///
+/// Отказы сборки делятся на два вида, и указывают они в разные места: тип
+/// написан в сигнатуре, а всё остальное - в конкретной клаузе, номер которой
+/// сборка и носит.
+fn clause_span(
+    error: &PatternError,
+    declared: &Pending<'_>,
+    clauses: &[ast::Clause],
+    fallback: Span,
+) -> Span {
+    let clause = match error {
+        PatternError::IllTypedType { error } => {
+            return route::locate(&Declared::Bare(declared.source), error, declared.span);
+        }
+        PatternError::ClauseArity { clause, .. }
+        | PatternError::UnboundInBody { clause }
+        | PatternError::ImpossiblePattern { clause, .. }
+        | PatternError::UnreachableClause { clause } => *clause,
+        _ => return fallback,
+    };
+    clauses.get(clause).map_or(fallback, |clause| clause.span)
 }
 
 /// Индуктивное семейство вместе с конструкторами - одной группой.
@@ -216,8 +258,8 @@ fn declare_data(
     signature
         .declare_data(metas, &data.name.text, params, kind, &constructors)
         .map_err(|error| ElabError::Core {
+            span: route::locate(&Declared::Data(data), &error, span),
             error: Box::new(error),
-            span,
         })
 }
 

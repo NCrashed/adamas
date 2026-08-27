@@ -37,6 +37,7 @@
 mod decl;
 mod error;
 mod expr;
+mod route;
 
 pub use decl::{elaborate, elaborate_into};
 pub use error::{ElabError, Missing};

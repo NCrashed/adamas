@@ -206,6 +206,22 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Клаузы есть, сигнатура написана, но между ними чужое объявление.
+    ///
+    /// Примыкание - требование реализации, а не §4: сигнатура, за которой сразу
+    /// не пошли клаузы, объявляется постулатом, и к их приходу имя уже занято.
+    /// Снять его - это `mutual` (§4.8, Фаза 3): пока тела соседей проверяются
+    /// по одному, определение обязано идти следом за своим типом.
+    #[error("сигнатура `{name}` отделена от клауз: между ними другое объявление")]
+    DetachedSignature {
+        /// Имя определения.
+        name: Symbol,
+        /// Где написана сигнатура.
+        signature: Span,
+        /// Первая клауза.
+        span: Span,
+    },
+
     /// Форма, для которой в ядре ещё нет механизма.
     #[error("{what}")]
     Missing {
@@ -263,6 +279,7 @@ impl ElabError {
             | Self::RepeatedBinding { span, .. }
             | Self::BlockWithoutValue { span }
             | Self::MissingSignature { span, .. }
+            | Self::DetachedSignature { span, .. }
             | Self::Missing { span, .. }
             | Self::Core { span, .. }
             | Self::Clauses { span, .. } => *span,

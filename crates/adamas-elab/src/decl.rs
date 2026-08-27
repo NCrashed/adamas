@@ -14,6 +14,7 @@
 //! Механизм при этом тот же (§10 вопрос 50): группа из одного члена и есть
 //! обычное определение.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use adamas_core::check::{TypeError, is_type};
@@ -68,11 +69,14 @@ pub fn elaborate_into(
     signature: &mut Signature,
     metas: &mut Metas,
 ) -> Result<(), ElabError> {
+    // Сигнатуры, ставшие постулатами по ходу прогона: клаузы, пришедшие за
+    // ними, - не «нет сигнатуры», а сигнатура не рядом.
+    let mut postulated: HashMap<Symbol, Span> = HashMap::new();
     let mut pending: Option<Pending<'_>> = None;
     for decl in &module.decls {
         match &decl.kind {
             DeclKind::Signature { name, ty } => {
-                postulate(signature, metas, pending.take())?;
+                postulate(signature, metas, pending.take(), &mut postulated)?;
                 let elaborated =
                     Elaborator::new(signature, metas).typing(|it| it.expr(ty, Mult::Many))?;
                 pending = Some(Pending {
@@ -84,15 +88,22 @@ pub fn elaborate_into(
             }
             DeclKind::Clauses { name, clauses } => {
                 let Some(declared) = pending.take().filter(|it| it.name == name.text) else {
-                    return Err(ElabError::MissingSignature {
-                        name: Rc::clone(&name.text),
-                        span: decl.span,
+                    return Err(match postulated.get(&name.text) {
+                        Some(signature) => ElabError::DetachedSignature {
+                            name: Rc::clone(&name.text),
+                            signature: *signature,
+                            span: decl.span,
+                        },
+                        None => ElabError::MissingSignature {
+                            name: Rc::clone(&name.text),
+                            span: decl.span,
+                        },
                     });
                 };
                 define(signature, metas, &declared, clauses, decl.span)?;
             }
             DeclKind::Data(data) => {
-                postulate(signature, metas, pending.take())?;
+                postulate(signature, metas, pending.take(), &mut postulated)?;
                 declare_data(signature, metas, data, decl.span)?;
             }
             DeclKind::Resource(_) => {
@@ -103,7 +114,7 @@ pub fn elaborate_into(
             }
         }
     }
-    postulate(signature, metas, pending)
+    postulate(signature, metas, pending, &mut postulated)
 }
 
 /// Сигнатура, за которой не последовало клауз, - постулат.
@@ -111,10 +122,12 @@ fn postulate(
     signature: &mut Signature,
     metas: &mut Metas,
     pending: Option<Pending<'_>>,
+    postulated: &mut HashMap<Symbol, Span>,
 ) -> Result<(), ElabError> {
     let Some(pending) = pending else {
         return Ok(());
     };
+    postulated.insert(Rc::clone(&pending.name), pending.span);
     let source = pending.source;
     signature
         .postulate_inferred(metas, &pending.name, Mult::Many, pending.ty)

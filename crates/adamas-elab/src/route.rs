@@ -106,19 +106,30 @@ fn data_kind(data: &ast::Data, route: &[Frame], fallback: Span) -> Span {
 /// Маршрут идёт снаружи внутрь - в том порядке, в каком его отдаёт
 /// [`adamas_core::check::TypeError::path`].
 pub(crate) fn narrow(expr: &Expr, route: &[Frame]) -> Span {
-    let Some((frame, rest)) = route.split_first() else {
-        return expr.span;
-    };
-    match (&expr.kind, frame) {
-        (ExprKind::App(callee, _), Frame::Callee) => narrow(callee, rest),
-        (ExprKind::App(_, argument), Frame::Argument) => narrow(argument, rest),
-        (ExprKind::Arrow(domain, _), Frame::Domain) => narrow(domain, rest),
-        (ExprKind::Arrow(_, codomain), Frame::Codomain) => narrow(codomain, rest),
-        (ExprKind::Pi { binders, codomain }, _) => pi(binders, codomain, route, expr.span),
-        (ExprKind::Lam { params, body }, Frame::Body) => lam(params.len(), body, route, expr.span),
-        (ExprKind::Block(block), _) => statements(&block.stmts, route, expr.span),
-        (ExprKind::Chain(chain), _) => chain_at(chain, route, expr.span),
-        _ => expr.span,
+    // Спуск по узлам с одним кадром идёт циклом, а не рекурсией: спайн
+    // применения длиной в тысячи кадров - обычный вход (см. `expr` в
+    // [`crate::expr`]).
+    let mut expr = expr;
+    let mut route = route;
+    loop {
+        let Some((frame, rest)) = route.split_first() else {
+            return expr.span;
+        };
+        (expr, route) = match (&expr.kind, frame) {
+            (ExprKind::App(callee, _), Frame::Callee) => (&**callee, rest),
+            (ExprKind::App(_, argument), Frame::Argument) => (&**argument, rest),
+            (ExprKind::Arrow(domain, _), Frame::Domain) => (&**domain, rest),
+            (ExprKind::Arrow(_, codomain), Frame::Codomain) => (&**codomain, rest),
+            (ExprKind::Pi { binders, codomain }, _) => {
+                return pi(binders, codomain, route, expr.span);
+            }
+            (ExprKind::Lam { params, body }, Frame::Body) => {
+                return lam(params.len(), body, route, expr.span);
+            }
+            (ExprKind::Block(block), _) => return statements(&block.stmts, route, expr.span),
+            (ExprKind::Chain(chain), _) => return chain_at(chain, route, expr.span),
+            _ => return expr.span,
+        };
     }
 }
 

@@ -209,10 +209,23 @@ impl<'a> Elaborator<'a> {
         let expected = std::mem::take(&mut self.expected);
         match &expr.kind {
             ExprKind::Name(name) => self.name(name),
-            ExprKind::App(callee, argument) => Ok(Term::App(
-                Rc::new(self.expr(callee, Mult::Many)?),
-                Rc::new(self.expr(argument, Mult::Many)?),
-            )),
+            // Спайн собирается циклом. Рекурсия по `callee` уходила на глубину
+            // числа аргументов, а его ограничивает только длина файла: предел
+            // вложенности парсера на плоское `f a b c …` не тратится, и тысячи
+            // аргументов роняли процесс вместо отказа (§10 вопрос 62).
+            ExprKind::App(..) => {
+                let mut arguments = Vec::new();
+                let mut head = expr;
+                while let ExprKind::App(callee, argument) = &head.kind {
+                    arguments.push(&**argument);
+                    head = callee;
+                }
+                let mut term = self.expr(head, Mult::Many)?;
+                for argument in arguments.into_iter().rev() {
+                    term = Term::App(Rc::new(term), Rc::new(self.expr(argument, Mult::Many)?));
+                }
+                Ok(term)
+            }
             ExprKind::Arrow(domain, codomain) => {
                 let domain = self.expr(domain, Mult::Many)?;
                 let anonymous: Symbol = Rc::from("_");

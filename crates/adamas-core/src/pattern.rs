@@ -360,17 +360,38 @@ pub fn compile_traced(
     }
 
     // Лямбды аргументов - те же кадры `Body`, что и всякая другая лямбда.
-    let tree = telescope
-        .into_iter()
-        .rev()
-        .fold(tree, |tree, (mult, name, _)| {
-            tree.map(|body| Term::Lam(mult, name, Rc::new(body)))
-                .under(Frame::Body)
-        });
+    //
+    // Имя берётся у клауз, а из типа - только когда его там нет: связывание
+    // называет автор, и `f (Succ k) m = …` в диагностике должно говорить `m`,
+    // а не имя одноимённого `Pi`, которого в безымянной стрелке и нет вовсе.
+    let tree =
+        telescope
+            .into_iter()
+            .enumerate()
+            .rev()
+            .fold(tree, |tree, (index, (mult, name, _))| {
+                let name = written(clauses, index).unwrap_or(name);
+                tree.map(|body| Term::Lam(mult, name, Rc::new(body)))
+                    .under(Frame::Body)
+            });
     Ok(Compiled {
         term: tree.term,
         clauses: tree.sites,
     })
+}
+
+/// Как автор назвал `index`-й аргумент.
+///
+/// Первая клауза, где на этом месте стоит переменная: разбор имени не даёт, а
+/// `_` не называет. Клаузы, назвавшие один аргумент по-разному, - обычное
+/// дело, и берётся первое: имя нужно диагностике, а не проверке.
+fn written(clauses: &[Clause], index: usize) -> Option<Name> {
+    clauses
+        .iter()
+        .find_map(|clause| match clause.patterns.get(index) {
+            Some(Pattern::Var(name)) if &**name != "_" => Some(Rc::clone(name)),
+            _ => None,
+        })
 }
 
 /// Клауза, разбирающая невозможный случай, - ошибка на месте, а не

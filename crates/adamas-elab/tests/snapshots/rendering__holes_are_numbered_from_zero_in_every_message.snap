@@ -1,0 +1,8 @@
+---
+source: crates/adamas-elab/tests/rendering.rs
+expression: alone
+---
+проба.adamas:3:5: ожидался тип, получено `Q{?0, ?1}` типа `(ω _ : Type ?0) -> Type ?1`
+  f : Q -> Q
+      ^
+  путь: тип члена группы #0 -> домен

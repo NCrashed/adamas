@@ -1,0 +1,7 @@
+---
+source: crates/adamas-elab/tests/rendering.rs
+expression: refusal(&text)
+---
+проба.adamas:10:7: имя `nope` не найдено
+  big = nope Zero Zero Zero Zero Zero Zero Zero Zero Zero Zero Zero Zero Zero Zero Zero Zero Zero Zero...
+        ^^^^

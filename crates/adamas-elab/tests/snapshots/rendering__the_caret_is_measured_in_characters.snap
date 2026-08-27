@@ -1,0 +1,8 @@
+---
+source: crates/adamas-elab/tests/rendering.rs
+expression: "refusal(\"data Число where\\n  Ноль : Число\\n\\nf : Число Число\\n\")"
+---
+проба.adamas:4:5: ожидалась функция, получено значение типа `Type 0`
+  f : Число Число
+      ^^^^^^^^^^^
+  путь: тип члена группы #0

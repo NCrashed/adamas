@@ -1,0 +1,10 @@
+---
+source: crates/adamas-elab/tests/rendering.rs
+expression: refusal(&text)
+---
+проба.adamas:12:1: сигнатура `f` отделена от клауз: между ними другое объявление
+  f x = x
+  ^^^^^^^
+проба.adamas:9:1: сигнатура написана здесь
+  f : Nat -> Nat
+  ^^^^^^^^^^^^^^

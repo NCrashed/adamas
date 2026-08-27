@@ -345,6 +345,18 @@ fn deep_nesting_is_an_error_not_a_crash() {
         matches!(error, ParseError::TooDeep { .. }),
         "получено {error:?}"
     );
+    // Спайн вложенности не стоит, поэтому у него предел свой: рекурсивен не
+    // разбор, а всякий, кто пойдёт по получившемуся дереву (§10 вопрос 62).
+    let long = format!("f = g{}\n", " x".repeat(300));
+    let error = parse_error(&long);
+    assert!(
+        matches!(error, ParseError::TooLong { .. }),
+        "получено {error:?}"
+    );
+    assert!(
+        parse(&format!("f = g{}\n", " x".repeat(256))).is_ok(),
+        "предел не должен резать программу ровно на границе"
+    );
     // Предел не должен резать законные программы: сотня стрелок в сигнатуре
     // абсурдна, но глубже неё предел не опускается.
     let wide = format!("f : {}a\n", "a -> ".repeat(100));

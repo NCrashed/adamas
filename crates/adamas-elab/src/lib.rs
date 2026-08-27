@@ -21,6 +21,12 @@
 //! текст, дерево, термы ядра, проверка типов, - то есть чтобы milestone Фазы 2
 //! стал наблюдаемым.
 //!
+//! Сверх ядра QTT - владение (§3.3): `unique data` и `resource` объявляют тип,
+//! связывания которого линейны по построению ([`crate::own`]). Ядра это не
+//! касается вовсе, и так и задумано: правило назначает связыванию кратность,
+//! которую программист мог бы написать сам. **Вставки `drop` в exit-points
+//! ещё нет** - см. заголовок [`crate::own`].
+//!
 //! # Чего не хватает и почему
 //!
 //! Полиморфизма: `map : (a -> b) -> Vect n a -> Vect n b` требует подъёма
@@ -37,10 +43,12 @@
 mod decl;
 mod error;
 mod expr;
+mod own;
 mod render;
 mod route;
 
 pub use decl::{elaborate, elaborate_into};
 pub use error::{ElabError, Missing};
 pub use expr::is_reference;
+pub use own::{Owned, Ownership};
 pub use render::{located, report};

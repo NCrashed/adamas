@@ -30,6 +30,7 @@ use adamas_parser::ast::{self, DeclKind, Module, Symbol};
 
 use crate::error::{ElabError, Missing};
 use crate::expr::Elaborator;
+use crate::own::{Owned, Ownership};
 use crate::route::{self, Declared};
 
 /// Сигнатура, ожидающая клауз.
@@ -54,7 +55,8 @@ struct Pending<'a> {
 pub fn elaborate(module: &Module) -> Result<Signature, ElabError> {
     let mut signature = Signature::default();
     let mut metas = Metas::default();
-    elaborate_into(module, &mut signature, &mut metas)?;
+    let mut owned = Owned::default();
+    elaborate_into(module, &mut signature, &mut metas, &mut owned)?;
     Ok(signature)
 }
 
@@ -68,6 +70,7 @@ pub fn elaborate_into(
     module: &Module,
     signature: &mut Signature,
     metas: &mut Metas,
+    owned: &mut Owned,
 ) -> Result<(), ElabError> {
     // Сигнатуры, ставшие постулатами по ходу прогона: клаузы, пришедшие за
     // ними, - не «нет сигнатуры», а сигнатура не рядом.
@@ -77,8 +80,8 @@ pub fn elaborate_into(
         match &decl.kind {
             DeclKind::Signature { name, ty } => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
-                let elaborated =
-                    Elaborator::new(signature, metas).typing(|it| it.expr(ty, Mult::Many))?;
+                let elaborated = Elaborator::new(signature, metas, owned)
+                    .typing(|it| it.expr(ty, Mult::Many))?;
                 pending = Some(Pending {
                     name: Rc::clone(&name.text),
                     ty: elaborated,
@@ -100,17 +103,22 @@ pub fn elaborate_into(
                         },
                     });
                 };
-                define(signature, metas, &declared, clauses, decl.span)?;
+                define(signature, metas, owned, &declared, clauses, decl.span)?;
             }
             DeclKind::Data(data) => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
-                declare_data(signature, metas, data, decl.span)?;
+                // Маркер ставится **до** элаборации конструкторов: поле
+                // собственного типа получит `1` тем же правилом, что и всякое
+                // другое связывание, а не отдельным случаем.
+                if data.unique {
+                    owned.declare(&data.name.text, Ownership::Unique);
+                }
+                declare_data(signature, metas, owned, data, decl.span)?;
             }
-            DeclKind::Resource(_) => {
-                return Err(ElabError::Missing {
-                    what: Missing::Resource,
-                    span: decl.span,
-                });
+            DeclKind::Resource(resource) => {
+                postulate(signature, metas, pending.take(), &mut postulated)?;
+                owned.declare(&resource.name.text, Ownership::Resource);
+                declare_resource(signature, metas, owned, resource, decl.span)?;
             }
         }
     }
@@ -144,6 +152,7 @@ fn postulate(
 fn define(
     signature: &mut Signature,
     metas: &mut Metas,
+    owned: &Owned,
     declared: &Pending<'_>,
     clauses: &[ast::Clause],
     span: Span,
@@ -157,7 +166,7 @@ fn define(
     let group = vec![(Rc::clone(&declared.name), levels)];
     let compiled = {
         let mut elaborator =
-            Elaborator::with_group(signature, metas, group).declaring(&declared.ty);
+            Elaborator::with_group(signature, metas, owned, group).declaring(&declared.ty);
         clauses
             .iter()
             .map(|clause| elaborator.clause(clause))
@@ -219,10 +228,115 @@ fn clause_span(
     clauses.get(clause).map_or(fallback, |clause| clause.span)
 }
 
+/// Ресурсный тип: семейство плюс обязательный `drop` (§3.3).
+///
+/// **Тело держит два жанра объявлений**, и различаются они формой записи:
+/// голая сигнатура - конструктор (`Open : String -> File`), сигнатура с
+/// клаузами - определение. Определяется здесь только `drop`: пусти мы сюда
+/// произвольные определения, пришлось бы отвечать, видно ли снаружи имя,
+/// написанное внутри, - то есть заводить пространства имён, а они §4.8 и
+/// Фаза 3.
+///
+/// **Названное ограничение:** `drop` объявляется под своим написанным именем,
+/// поэтому двух ресурсных типов в одном модуле не бывает - второй `drop`
+/// столкнётся с первым. Имя менять нельзя, пока `drop` рекурсивен по
+/// написанному имени; развяжется это тогда же, когда компилятор начнёт искать
+/// `drop` сам, - вместе со вставкой в exit-points.
+fn declare_resource(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    owned: &Owned,
+    resource: &ast::Resource,
+    span: Span,
+) -> Result<(), ElabError> {
+    let mut constructors: Vec<ast::Constructor> = Vec::new();
+    let mut destructor: Option<(&ast::Expr, &[ast::Clause], Span)> = None;
+    // Сигнатура, о которой ещё не известно, конструктор она или заголовок
+    // определения: решают следующие за ней клаузы.
+    let mut pending: Option<(&ast::Name, &ast::Expr, Span)> = None;
+    let constructor = |(name, ty, span): (&ast::Name, &ast::Expr, Span)| ast::Constructor {
+        name: name.clone(),
+        ty: ty.clone(),
+        span,
+    };
+
+    for member in &resource.members {
+        match &member.kind {
+            ast::DeclKind::Signature { name, ty } => {
+                constructors.extend(pending.take().map(constructor));
+                pending = Some((name, ty, member.span));
+            }
+            ast::DeclKind::Clauses { name, clauses } => {
+                let Some((_, ty, _)) = pending.take().filter(|(it, ..)| it.text == name.text)
+                else {
+                    return Err(ElabError::MissingSignature {
+                        name: Rc::clone(&name.text),
+                        span: member.span,
+                    });
+                };
+                if &*name.text != "drop" {
+                    return Err(ElabError::ResourceMember {
+                        data: Rc::clone(&resource.name.text),
+                        name: Rc::clone(&name.text),
+                        span: member.span,
+                    });
+                }
+                destructor = Some((ty, clauses, member.span));
+            }
+            ast::DeclKind::Data(inner) => {
+                return Err(ElabError::ResourceMember {
+                    data: Rc::clone(&resource.name.text),
+                    name: Rc::clone(&inner.name.text),
+                    span: member.span,
+                });
+            }
+            ast::DeclKind::Resource(inner) => {
+                return Err(ElabError::ResourceMember {
+                    data: Rc::clone(&resource.name.text),
+                    name: Rc::clone(&inner.name.text),
+                    span: member.span,
+                });
+            }
+        }
+    }
+    constructors.extend(pending.take().map(constructor));
+
+    let Some((drop_ty, clauses, drop_span)) = destructor else {
+        return Err(ElabError::ResourceWithoutDrop {
+            name: Rc::clone(&resource.name.text),
+            span,
+        });
+    };
+
+    let data = ast::Data {
+        unique: true,
+        name: resource.name.clone(),
+        params: resource.params.clone(),
+        kind: None,
+        constructors,
+    };
+    declare_data(signature, metas, owned, &data, span)?;
+
+    // `drop` объявляется после семейства: его тип называет ресурс, а в
+    // сигнатуре тот появляется только сейчас. Домен получает `1` тем же
+    // правилом, что и всякое связывание ресурсного типа, - писать `(1 h : …)`
+    // руками не нужно и не требуется §3.3.
+    let elaborated =
+        Elaborator::new(signature, metas, owned).typing(|it| it.expr(drop_ty, Mult::Many))?;
+    let declared = Pending {
+        name: Rc::from("drop"),
+        ty: elaborated,
+        source: drop_ty,
+        span: drop_span,
+    };
+    define(signature, metas, owned, &declared, clauses, drop_span)
+}
+
 /// Индуктивное семейство вместе с конструкторами - одной группой.
 fn declare_data(
     signature: &mut Signature,
     metas: &mut Metas,
+    owned: &Owned,
     data: &ast::Data,
     span: Span,
 ) -> Result<(), ElabError> {
@@ -236,7 +350,9 @@ fn declare_data(
         });
     }
     let kind = match &data.kind {
-        Some(kind) => Elaborator::new(signature, metas).typing(|it| it.expr(kind, Mult::Many))?,
+        Some(kind) => {
+            Elaborator::new(signature, metas, owned).typing(|it| it.expr(kind, Mult::Many))?
+        }
         // Тип-формер не написан - семейство живёт в нулевом универсуме.
         //
         // **Не дырка.** Дырку здесь ограничивают только неравенства `leq` от
@@ -266,7 +382,7 @@ fn declare_data(
         .iter()
         .map(|constructor| {
             let group = vec![(Rc::clone(&data.name.text), Rc::clone(&levels))];
-            let ty = Elaborator::with_group(signature, metas, group)
+            let ty = Elaborator::with_group(signature, metas, owned, group)
                 .typing(|it| it.expr(&constructor.ty, Mult::One))?;
             Ok((&*constructor.name.text, ty))
         })

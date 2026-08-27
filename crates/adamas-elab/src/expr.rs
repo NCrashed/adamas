@@ -21,6 +21,7 @@ use adamas_parser::ast::{
 };
 
 use crate::error::{ElabError, Missing};
+use crate::own::Owned;
 
 /// Разбирает ли имя (заглавное) или связывает (строчное).
 ///
@@ -57,6 +58,9 @@ pub(crate) struct Elaborator<'a> {
     pub signature: &'a Signature,
     /// Хранилище дырок уровня: одно на прогон (§10 вопрос 51).
     pub metas: &'a mut Metas,
+    /// Типы, объявленные `unique` или `resource` (§3.3). Как и хранилище
+    /// дырок, приходит снаружи: прогон элаборации - модуль целиком.
+    pub owned: &'a Owned,
     /// Локальные связывания снаружи внутрь; индекс де Брёйна - расстояние от
     /// конца.
     scope: Vec<Bound>,
@@ -101,19 +105,21 @@ pub(crate) struct Elaborator<'a> {
 
 impl<'a> Elaborator<'a> {
     /// Элаборатор с пустым локальным контекстом.
-    pub(crate) fn new(signature: &'a Signature, metas: &'a mut Metas) -> Self {
-        Self::with_group(signature, metas, Vec::new())
+    pub(crate) fn new(signature: &'a Signature, metas: &'a mut Metas, owned: &'a Owned) -> Self {
+        Self::with_group(signature, metas, owned, Vec::new())
     }
 
     /// То же, но с членами объявляемой группы.
     pub(crate) fn with_group(
         signature: &'a Signature,
         metas: &'a mut Metas,
+        owned: &'a Owned,
         group: Vec<(Symbol, Rc<[Level]>)>,
     ) -> Self {
         Self {
             signature,
             metas,
+            owned,
             scope: Vec::new(),
             group,
             declared: Vec::new(),
@@ -200,6 +206,33 @@ impl<'a> Elaborator<'a> {
         })
     }
 
+    /// То же, с поправкой на владение (§3.3).
+    ///
+    /// Связывание unique- или resource-типа получает `1`, если не объявлено
+    /// `0`: стёртые упоминания в доказательствах законны, а вот явное `ω` -
+    /// ошибка **на самом связывании**. Так закрывается дыра ω→1: значений
+    /// такого типа при кратности `ω` не существует, потому что не существует
+    /// связывания, которое их удержало бы.
+    fn binder_mult(
+        &self,
+        written: Option<ast::MultAnn>,
+        ty: &Expr,
+        default: Mult,
+        span: Span,
+    ) -> Result<Mult, ElabError> {
+        let Some(owned) = self.owned.of(ty) else {
+            return Ok(Self::multiplicity(written, default));
+        };
+        match written.map(|ann| ann.mult) {
+            None | Some(ast::Mult::One) => Ok(Mult::One),
+            Some(ast::Mult::Zero) => Ok(Mult::Zero),
+            Some(ast::Mult::Many) => Err(ElabError::UnrestrictedOwned {
+                owned,
+                span: written.map_or(span, |ann| ann.span),
+            }),
+        }
+    }
+
     /// Выражение в терм.
     ///
     /// `default` - кратность связываний, у которых она не написана: `ω` у
@@ -239,11 +272,16 @@ impl<'a> Elaborator<'a> {
                 Ok(term)
             }
             ExprKind::Arrow(domain, codomain) => {
+                // Стрелка связывает так же, как `(x : A) ->`, только без
+                // имени, поэтому правило владения (§3.3) действует и здесь:
+                // `drop : File -> Unit` даёт `(1 _ : File) -> Unit`, и писать
+                // кратность руками не нужно.
+                let mult = self.binder_mult(None, domain, default, expr.span)?;
                 let domain = self.expr(domain, Mult::Many)?;
                 let anonymous: Symbol = Rc::from("_");
                 let codomain = self.under(&anonymous, |inner| inner.expr(codomain, default))?;
                 Ok(Term::Pi(
-                    default,
+                    mult,
                     CoreName::from("_"),
                     Rc::new(domain),
                     Rc::new(codomain),
@@ -340,7 +378,7 @@ impl<'a> Elaborator<'a> {
                     span: binder.span,
                 });
             };
-            let mult = Self::multiplicity(binder.mult, default);
+            let mult = self.binder_mult(binder.mult, ty, default, binder.span)?;
             for (position, name) in binder.names.iter().enumerate() {
                 Self::binds(name)?;
                 flat.push((mult, Rc::clone(&name.text), ty, position));
@@ -461,12 +499,12 @@ impl<'a> Elaborator<'a> {
             });
         };
         Self::binds(&binding.name)?;
+        let mult = self.binder_mult(binding.mult, ty, Mult::Many, binding.span)?;
         let ty = self.typing(|inner| inner.expr(ty, Mult::Many))?;
         // Аннотация `let` - тот же написанный тип, и лямбда значения берёт
         // кратности у него.
         self.expected = pi_mults(&ty);
         let value = self.expr(&binding.body, Mult::Many)?;
-        let mult = Self::multiplicity(binding.mult, Mult::Many);
         let body = self.under(&binding.name.text, |inner| inner.bindings(tail, rest))?;
         Ok(Term::Let(
             mult,

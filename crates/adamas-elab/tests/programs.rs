@@ -410,7 +410,6 @@ fn what_the_core_cannot_carry_yet_names_itself() {
             "data Pair a b where\n  MkPair : Nat\n",
             Missing::FamilyParameters,
         ),
-        ("resource File where\n  drop h = h\n", Missing::Resource),
         (
             "f : Nat -> Nat\nf x = y\n  where\n    y : Nat\n    y = x\n",
             Missing::LocalDefinitions,
@@ -549,6 +548,174 @@ fn an_ill_typed_program_is_refused_by_the_core() {
     let error = refused(&text);
     assert!(
         matches!(error, ElabError::Core { .. }),
+        "получено {error:?}"
+    );
+}
+
+// ------------------------------------------------------------------ владение
+
+/// `File` - ресурс с конструктором и деструктором, `closeFile` линейна.
+///
+/// Линейность `closeFile` не украшение: поле `Open` имеет кратность `1`
+/// (§4.1), разбор ресурсного связывания идёт при `r = 1`, и поле приходит в
+/// ветвь линейным - ω-функция его не примет.
+const RESOURCE: &str = "\
+resource File where
+  Open : Bool -> File
+  drop : File -> Bool
+  drop (Open b) = closeFile b
+";
+
+#[test]
+fn a_resource_declares_a_family_and_its_destructor() {
+    let text = format!("{BASE}\ncloseFile : (1 b : Bool) -> Bool\ncloseFile b = b\n\n{RESOURCE}");
+    let signature = program(&text);
+    assert_eq!(
+        signature
+            .constructors("File")
+            .expect("File индуктивен")
+            .iter()
+            .map(std::convert::AsRef::as_ref)
+            .collect::<Vec<&str>>(),
+        ["Open"],
+        "голая сигнатура в теле - конструктор"
+    );
+    assert!(
+        signature
+            .lookup("drop")
+            .is_some_and(|definition| definition.body.is_some()),
+        "сигнатура с клаузами в теле - определение"
+    );
+}
+
+#[test]
+fn a_binding_of_an_owned_type_is_linear_without_being_written() {
+    // Правило §3.3: связывание unique- или resource-типа получает `1` само.
+    // Видно это по тому, что ω-функция от ресурса не типизируется: аргумент
+    // объявлен `1`, а `use` требует ω.
+    let preamble = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+and : (1 x : Bool) -> (1 y : Bool) -> Bool
+and x y = x
+
+share : (ω f : Bool) -> Bool
+share f = f
+"
+    );
+
+    let signature = program(&format!(
+        "{preamble}\nclose : File -> Bool\nclose h = drop h\n"
+    ));
+    assert!(signature.lookup("close").is_some(), "один разбор законен");
+
+    // Два - нет: `h` связано при `1`, хотя писать `1` не пришлось.
+    // Позиция ω-аргумента - тоже нет, и это ровно та дыра, ради которой §3.3
+    // говорит «вредно только попадание значения в ω-позицию»: масштабирование
+    // доводит одно использование до ω.
+    for (what, text) in [
+        (
+            "дважды",
+            "twice : File -> Bool\ntwice h = and (drop h) (drop h)\n",
+        ),
+        (
+            "в ω-позиции",
+            "wide : File -> Bool\nwide h = share (drop h)\n",
+        ),
+    ] {
+        let error = refused(&format!("{preamble}\n{text}"));
+        let Some(core) = error.core() else {
+            panic!("{what}: ожидался отказ ядра, получено {error:?}");
+        };
+        assert!(
+            matches!(core.kind, ErrorKind::UsageViolation { .. }),
+            "{what}: получено {core:?}"
+        );
+    }
+}
+
+#[test]
+fn an_unrestricted_binding_of_an_owned_type_is_refused() {
+    // Дыра ω→1 закрыта не проверкой значения, а отсутствием её предмета:
+    // ω-связывания такого типа не бывает, и отказ стоит на самом связывании.
+    for (text, what) in [
+        (
+            format!(
+                "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+kept : (ω h : File) -> Bool
+kept h = True
+"
+            ),
+            "resource",
+        ),
+        (
+            format!(
+                "{BASE}
+unique data Buffer where
+  MkBuffer : Bool -> Buffer
+
+kept : (ω a : Buffer) -> Bool
+kept a = True
+"
+            ),
+            "unique",
+        ),
+    ] {
+        let error = refused(&text);
+        assert!(
+            matches!(error, ElabError::UnrestrictedOwned { .. }),
+            "{what}: получено {error:?}"
+        );
+    }
+}
+
+#[test]
+fn an_erased_binding_of_an_owned_type_is_allowed() {
+    // `0` законно: стёртое упоминание в доказательстве ничего не потребляет,
+    // и запрещать его значило бы запретить говорить о ресурсе в типах.
+    let text = format!(
+        "{BASE}
+unique data Buffer where
+  MkBuffer : Bool -> Buffer
+
+P : (0 a : Buffer) -> Type
+mention : (0 a : Buffer) -> P a
+"
+    );
+    assert!(program(&text).lookup("mention").is_some());
+}
+
+#[test]
+fn a_resource_without_a_destructor_is_refused() {
+    let text = format!("{BASE}\nresource File where\n  Open : Bool -> File\n");
+    let error = refused(&text);
+    assert!(
+        matches!(error, ElabError::ResourceWithoutDrop { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_resource_body_defines_only_its_destructor() {
+    // Тело держит конструкторы и `drop`; всё прочее определяется рядом.
+    let text = format!(
+        "{BASE}
+resource File where
+  Open : Bool -> File
+  helper : Bool -> Bool
+  helper b = b
+"
+    );
+    let error = refused(&text);
+    assert!(
+        matches!(error, ElabError::ResourceMember { .. }),
         "получено {error:?}"
     );
 }

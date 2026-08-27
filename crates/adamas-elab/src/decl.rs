@@ -142,7 +142,8 @@ fn define(
     })?;
     let group = vec![(Rc::clone(&declared.name), levels)];
     let compiled = {
-        let mut elaborator = Elaborator::with_group(signature, metas, group);
+        let mut elaborator =
+            Elaborator::with_group(signature, metas, group).declaring(&declared.ty);
         clauses
             .iter()
             .map(|clause| elaborator.clause(clause))

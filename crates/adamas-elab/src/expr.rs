@@ -72,6 +72,19 @@ pub(crate) struct Elaborator<'a> {
     /// и её считает вызывающий обобщением по типу члена; это и есть §10
     /// вопрос 63.
     group: Vec<(Symbol, Rc<[Level]>)>,
+    /// Кратности связываний написанного типа - по одной на `Pi` его спайна.
+    ///
+    /// Лямбда в ядре несёт кратность, и `check` требует, чтобы она совпадала с
+    /// кратностью `Pi`. Вывести её элаборация не может - она не
+    /// типонаправленная, - но здесь и выводить нечего: тип **написан**, и
+    /// спайн его виден синтаксически. Дальше видимого спайна (кодомен -
+    /// константа, разворачивающаяся в `Pi`) кратности кончаются, и лямбда
+    /// снова берёт `ω`.
+    declared: Vec<Mult>,
+    /// Кратности, ожидающие ближайшую лямбду. Их выставляет тот, кто знает
+    /// написанный тип: клауза - остатком спайна после своих паттернов, `let` -
+    /// спайном своей аннотации.
+    expected: Vec<Mult>,
     /// Аргументы уровня, уже выданные имени в этом объявлении.
     ///
     /// Одно имя - один набор дырок, а не свежий на каждое вхождение. Иначе
@@ -105,8 +118,16 @@ impl<'a> Elaborator<'a> {
             metas,
             scope: Vec::new(),
             group,
+            declared: Vec::new(),
+            expected: Vec::new(),
             instantiated: HashMap::new(),
         }
+    }
+
+    /// Кратности написанного типа - те, что достанутся лямбдам тела.
+    pub(crate) fn declaring(mut self, ty: &Term) -> Self {
+        self.declared = pi_mults(ty);
+        self
     }
 
     /// Выполняет `body` под связыванием `name`.
@@ -183,6 +204,9 @@ impl<'a> Elaborator<'a> {
                 span: expr.span,
             })
         };
+        // Кратности ждут ближайшую лямбду и только её: подтерм, до которого
+        // спустились иначе, написанным типом не накрыт.
+        let expected = std::mem::take(&mut self.expected);
         match &expr.kind {
             ExprKind::Name(name) => self.name(name),
             ExprKind::App(callee, argument) => Ok(Term::App(
@@ -201,7 +225,7 @@ impl<'a> Elaborator<'a> {
                 ))
             }
             ExprKind::Pi { binders, codomain } => self.pi(binders, codomain, default),
-            ExprKind::Lam { params, body } => self.lam(params, body),
+            ExprKind::Lam { params, body } => self.lam(params, body, &expected),
             ExprKind::Block(block) => self.block(block),
             ExprKind::Chain(chain) => self.chain(chain),
 
@@ -311,8 +335,20 @@ impl<'a> Elaborator<'a> {
     }
 
     /// `\x y -> body`.
-    fn lam(&mut self, params: &[ast::LamParam], body: &Expr) -> Result<Term, ElabError> {
+    ///
+    /// `expected` - кратности написанного типа, по одной на параметр. Кончились
+    /// (тип не написан, кодомен не виден насквозь) - берётся `ω`, и лямбда под
+    /// не-`ω` связыванием остаётся невыразимой.
+    fn lam(
+        &mut self,
+        params: &[ast::LamParam],
+        body: &Expr,
+        expected: &[Mult],
+    ) -> Result<Term, ElabError> {
         let Some((param, rest)) = params.split_first() else {
+            // Остаток спайна достаётся телу: `\x -> \y -> e` - две лямбды под
+            // теми же `Pi`, что и `\x y -> e`.
+            self.expected = expected.to_vec();
             return self.expr(body, Mult::Many);
         };
         let name = match &param.kind {
@@ -340,12 +376,11 @@ impl<'a> Elaborator<'a> {
                 }
             },
         };
-        let inner = self.under(&name, |inner| inner.lam(rest, body))?;
-        Ok(Term::Lam(
-            Mult::Many,
-            CoreName::from(&*name),
-            Rc::new(inner),
-        ))
+        let (mult, deeper) = expected
+            .split_first()
+            .map_or((Mult::Many, expected), |(mult, rest)| (*mult, rest));
+        let inner = self.under(&name, |inner| inner.lam(rest, body, deeper))?;
+        Ok(Term::Lam(mult, CoreName::from(&*name), Rc::new(inner)))
     }
 
     /// Блок операторов: цепочка `let` и значение последним.
@@ -396,6 +431,9 @@ impl<'a> Elaborator<'a> {
         };
         Self::binds(&binding.name)?;
         let ty = self.expr(ty, Mult::Many)?;
+        // Аннотация `let` - тот же написанный тип, и лямбда значения берёт
+        // кратности у него.
+        self.expected = pi_mults(&ty);
         let value = self.expr(&binding.body, Mult::Many)?;
         let mult = Self::multiplicity(binding.mult, Mult::Many);
         let body = self.under(&binding.name.text, |inner| inner.bindings(tail, rest))?;
@@ -503,6 +541,13 @@ impl<'a> Elaborator<'a> {
         }
         let depth = self.scope.len();
         self.scope.extend(bound.iter().map(Bound::visible));
+        // Паттерны сняли первые связывания написанного типа; остаток спайна -
+        // тем лямбдам, которыми клауза продолжается.
+        self.expected = self
+            .declared
+            .split_at(patterns.len().min(self.declared.len()))
+            .1
+            .to_vec();
         let body = self.expr(&clause.body, Mult::Many);
         self.scope.truncate(depth);
 
@@ -511,6 +556,17 @@ impl<'a> Elaborator<'a> {
             body: body?,
         })
     }
+}
+
+/// Кратности связываний по спайну `Pi` - столько, сколько видно синтаксически.
+fn pi_mults(ty: &Term) -> Vec<Mult> {
+    let mut mults = Vec::new();
+    let mut current = ty;
+    while let Term::Pi(mult, _, _, codomain) = current {
+        mults.push(*mult);
+        current = codomain;
+    }
+    mults
 }
 
 /// Повторное имя переменной в клаузе.

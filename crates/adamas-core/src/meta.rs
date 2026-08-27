@@ -348,6 +348,7 @@ impl Generalization {
                     .map(|level| self.apply_level(metas, level))
                     .collect(),
                 params: case.params,
+                consumed: case.consumed,
                 scrutinee: recur(&case.scrutinee),
                 motive: recur(&case.motive),
                 branches: case
@@ -434,6 +435,7 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
             data: Rc::clone(&case.data),
             levels: case.levels.iter().map(|level| metas.zonk(level)).collect(),
             params: case.params,
+            consumed: case.consumed,
             scrutinee: recur(&case.scrutinee),
             motive: recur(&case.motive),
             branches: case

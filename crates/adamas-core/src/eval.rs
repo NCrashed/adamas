@@ -133,6 +133,7 @@ fn stuck_case(env: &Env, case: &Case) -> StuckCase {
             .map(crate::level::Level::normalize)
             .collect(),
         params: case.params,
+        consumed: case.consumed,
         motive: eval(env, &case.motive),
         branches: case
             .branches
@@ -249,6 +250,7 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
                     data: Rc::clone(&case.data),
                     levels: Rc::clone(&case.levels),
                     params: case.params,
+                    consumed: case.consumed,
                     scrutinee: Rc::new(callee),
                     motive: Rc::new(quote(size, &case.motive)),
                     branches: case

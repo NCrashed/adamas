@@ -238,6 +238,7 @@ fn a_case_names_the_scrutinee_the_motive_and_the_branch() {
             data: "Bool".into(),
             levels: Rc::from([] as [Level; 0]),
             params: 0,
+            consumed: Mult::One,
             scrutinee: Rc::new(scrutinee),
             motive: Rc::new(motive),
             branches: vec![

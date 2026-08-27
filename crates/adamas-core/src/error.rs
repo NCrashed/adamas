@@ -248,6 +248,16 @@ pub enum ErrorKind {
         ty: Term,
     },
 
+    /// Разбор объявлен потребляющим разбираемое нуль раз.
+    ///
+    /// Кратность `0` означает «стёрто», а ветвь выбирается по разбираемому в
+    /// рантайме: `case⁰` сделал бы стирание не стиранием.
+    #[error("разбор `{data}` объявлен с кратностью 0, а ветвь выбирается по значению")]
+    ErasedScrutinee {
+        /// Имя типа.
+        data: Name,
+    },
+
     /// Число параметров в разборе разошлось с объявлением типа.
     #[error("разбор `{data}` объявляет {found} параметров, а у типа их {expected}")]
     CaseParameters {
@@ -339,6 +349,7 @@ impl ErrorKind {
             | Self::NotADataType { .. }
             | Self::ConstructorParameter { .. }
             | Self::NotStrictlyPositive { .. }
+            | Self::ErasedScrutinee { .. }
             | Self::CaseParameters { .. }
             | Self::NonExhaustive { .. }
             | Self::RedundantBranch { .. }

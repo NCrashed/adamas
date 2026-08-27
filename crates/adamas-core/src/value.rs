@@ -146,6 +146,8 @@ pub struct StuckCase {
     pub levels: Rc<[Level]>,
     /// Сколько первых аргументов конструктора - параметры.
     pub params: u32,
+    /// Кратность потребления разбираемого - см. [`crate::term::Case::consumed`].
+    pub consumed: Mult,
     /// Мотив как значение.
     pub motive: Rc<Value>,
     /// Ветви в порядке объявления конструкторов.

@@ -444,11 +444,37 @@ impl Compiled {
     /// чужую ветвь.
     #[must_use]
     pub fn locate<'a>(&self, route: &'a [Frame]) -> Option<(usize, &'a [Frame])> {
-        self.clauses
+        let reached = self
+            .clauses
             .iter()
             .filter(|site| route.starts_with(&site.route))
             .max_by_key(|site| site.route.len())
-            .map(|site| (site.clause, &route[site.route.len()..]))
+            .map(|site| (site.clause, &route[site.route.len()..]));
+        if reached.is_some() {
+            return reached;
+        }
+
+        // Маршрут **короче** записанного пути: отказ случился не внутри тела
+        // клаузы, а на узле, который его несёт, - так выходит `UsageViolation`,
+        // возбуждаемая при выходе из связывания, а не под ним. Клауза при этом
+        // может быть уже определена: если пройденный отрезок ведёт к одной, ею
+        // и отвечаем, показывая тело целиком.
+        //
+        // Несколько клауз за одним отрезком - не неудача, а честная
+        // неоднозначность: ветвь обслуживает их все, и выбрать одну не из чего.
+        let mut only = None;
+        for site in self
+            .clauses
+            .iter()
+            .filter(|site| site.route.starts_with(route))
+        {
+            match only {
+                None => only = Some(site.clause),
+                Some(clause) if clause == site.clause => {}
+                Some(_) => return None,
+            }
+        }
+        only.map(|clause| (clause, &route[route.len()..]))
     }
 }
 
@@ -736,6 +762,14 @@ impl Compiler<'_> {
             unreachable!("разбор идёт только по переменной")
         };
         let size = ctx.size();
+        // `r` берётся у связывания разбираемого (§3.3). `0` до узла не
+        // доходит: `case⁰` ядро отвергает, а линейное потребление стёртого
+        // связывания отвергает учёт использований - там же, но с сообщением
+        // про само связывание, которое и есть ошибка автора.
+        let consumed = match binding(ctx, scrutinee).mult {
+            Mult::Many => Mult::Many,
+            Mult::One | Mult::Zero => Mult::One,
+        };
 
         // Ветви до сборки: поля конструктора и вердикт унификации его индексов
         // с индексами разбираемого значения.
@@ -803,6 +837,7 @@ impl Compiler<'_> {
             example,
             column: at,
             scrutinee,
+            consumed,
             carried,
             shapes,
         };
@@ -825,6 +860,7 @@ impl Compiler<'_> {
             data: Rc::clone(&family.data),
             levels: Rc::clone(&family.levels),
             params: family.parameters,
+            consumed,
             scrutinee: Rc::new(Term::Var(Lvl(scrutinee).to_index(size))),
             motive: Rc::new(motive),
             branches,
@@ -857,13 +893,18 @@ impl Compiler<'_> {
     ) -> Result<(Branch, Vec<ClauseSite>), PatternError> {
         let size = ctx.size();
         let fields = &candidate.fields;
+        // Поле приходит в ветвь при `q · r` (§3.3), и так же его обязаны
+        // видеть все трое: связывание в контексте, лямбда в терме и тип
+        // ветви, который построит `check`. Разойдись они - `LambdaMultiplicity`
+        // на терме, который сборка же и собрала.
+        let taken = |field: &Field| field.mult * plan.consumed;
         let mut inner = ctx.clone();
         for field in fields {
-            inner = inner.bind(Rc::clone(&field.name), field.mult, Rc::clone(&field.ty));
+            inner = inner.bind(Rc::clone(&field.name), taken(field), Rc::clone(&field.ty));
         }
         let wrap = |body: Term| {
             fields.iter().rev().fold(body, |body, field| {
-                Term::Lam(field.mult, Rc::clone(&field.name), Rc::new(body))
+                Term::Lam(taken(field), Rc::clone(&field.name), Rc::new(body))
             })
         };
 
@@ -1093,6 +1134,10 @@ impl Compiler<'_> {
                     data,
                     levels,
                     params: *params,
+                    // Разбор внутри мотива живёт в стёртом фрагменте: мотив
+                    // проверяется при `σ = 0`, где весь вектор нулевой, и `r`
+                    // ни на что не влияет. `1` - наименьшая законная.
+                    consumed: Mult::One,
                     scrutinee: Rc::new(Term::Var(Lvl(*level).to_index(ctx.size()))),
                     motive: Rc::new(inner_motive),
                     branches,
@@ -1317,6 +1362,13 @@ struct Split<'a> {
     column: usize,
     /// Уровень её связывания.
     scrutinee: u32,
+    /// Кратность, с которой разбор потребляет разбираемое, - `r` из §3.3.
+    ///
+    /// Берётся у связывания: в поверхностном языке `r` не пишется и не
+    /// выводится анализом, потому что разбирается всегда переменная. Поля
+    /// ветви получают `q · r`, и вложенный разбор берёт `r` тем же правилом -
+    /// у связывания поля, которое уже отмасштабировано.
+    consumed: Mult,
     /// Номера вынесенных в мотив колонок, в порядке контекста.
     carried: Vec<usize>,
     /// Формы индексов после отбора: непрозрачная - позиция, по которой мотив
@@ -1777,6 +1829,7 @@ fn rewrite<F: Fn(u32) -> Term>(term: &Term, depth: u32, from: u32, map: &F) -> T
             data: Rc::clone(&case.data),
             levels: Rc::clone(&case.levels),
             params: case.params,
+            consumed: case.consumed,
             scrutinee: recur(&case.scrutinee),
             motive: recur(&case.motive),
             branches: case
@@ -1814,6 +1867,7 @@ fn shift(term: &Term, by: u32) -> Term {
                 data: Rc::clone(&case.data),
                 levels: Rc::clone(&case.levels),
                 params: case.params,
+                consumed: case.consumed,
                 scrutinee: recur(&case.scrutinee),
                 motive: recur(&case.motive),
                 branches: case

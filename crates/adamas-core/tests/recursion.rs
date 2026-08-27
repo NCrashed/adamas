@@ -45,6 +45,10 @@ fn case(data: &str, scrutinee: Term, motive: Term, branches: Vec<(&str, Term)>) 
         data: data.into(),
         levels: Rc::from([]),
         params: 0,
+        // Разбор здесь линеен: `q · 1 = q`, то есть кратности полей приходят в
+        // ветвь такими, какими объявлены, и тесты про рекурсию не смешиваются
+        // с масштабированием (§3.3).
+        consumed: Mult::One,
         scrutinee: Rc::new(scrutinee),
         motive: Rc::new(motive),
         branches: branches

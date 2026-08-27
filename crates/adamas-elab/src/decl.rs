@@ -257,19 +257,17 @@ fn declare_data(
         error: Box::new(error),
     })?;
 
-    // Поле конструктора получает `ω`, а §4.1 назначает ему `1`. Вопрос 65
-    // закрыт в пользу `1`: поле приходит в ветвь при `q · r`, где `r` -
-    // кратность потребления разбираемого, и обычный код изменения не
-    // замечает. Узла `case^r` в ядре, однако, ещё нет, а без него `1`
-    // отвергает `plus (Succ k) m = Succ (plus k m)`. Умолчание сменится здесь
-    // одной строкой, когда ядро понесёт `r`.
+    // Поле конструктора получает `1` (§4.1): конструктор кладёт аргумент
+    // однажды. Обычный код этого не замечает, потому что при разборе поле
+    // приходит в ветвь при `q · r`, а `r` - кратность потребления
+    // разбираемого; у ω-связывания `1 · ω = ω` (§3.3, вопрос 65).
     let constructors = data
         .constructors
         .iter()
         .map(|constructor| {
             let group = vec![(Rc::clone(&data.name.text), Rc::clone(&levels))];
             let ty = Elaborator::with_group(signature, metas, group)
-                .typing(|it| it.expr(&constructor.ty, Mult::Many))?;
+                .typing(|it| it.expr(&constructor.ty, Mult::One))?;
             Ok((&*constructor.name.text, ty))
         })
         .collect::<Result<Vec<_>, ElabError>>()?;

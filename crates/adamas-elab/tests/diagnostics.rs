@@ -176,6 +176,27 @@ fn a_refusal_in_the_kind_of_a_family_is_underlined_there() {
 }
 
 #[test]
+fn a_route_shorter_than_the_clause_still_names_it() {
+    // `UsageViolation` возбуждается при выходе из связывания, а не под ним,
+    // поэтому маршрут обрывается на ветви и до тела клаузы не доходит. Клауза
+    // при этом определена однозначно - ветвь обслуживает одну, - и
+    // подчёркивается её тело, а не объявление целиком.
+    let text = format!(
+        "{BASE}data Pair where
+  MkPair : Bool -> Bool -> Pair
+
+and : Bool -> Bool -> Bool
+and True b = b
+and False _ = False
+
+once : (1 p : Pair) -> Bool
+once (MkPair x y) = and x x
+"
+    );
+    assert_eq!(underlined(&text), "and x x");
+}
+
+#[test]
 fn a_refusal_without_a_route_falls_back_to_the_declaration() {
     // Занятое имя - отказ про объявление целиком, а не про подтерм: маршрут
     // пуст, и выдумывать место не из чего.

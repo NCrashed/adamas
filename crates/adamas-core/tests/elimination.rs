@@ -36,8 +36,36 @@ fn c(name: &str) -> Term {
     Term::constant(name)
 }
 
-/// Разбор по конструктору.
+/// Разбор по конструктору, потребляющий разбираемое ровно однажды.
+///
+/// `1` - умолчание этих тестов, а не ядра: при нём поле приходит в ветвь со
+/// своей объявленной кратностью (`q · 1 = q`), то есть проверяется правило
+/// конструктора, не смешанное с масштабированием. Разбор ω-значения пишется
+/// явно - [`consuming`].
 fn case(
+    data: &str,
+    levels: &[Level],
+    params: u32,
+    scrutinee: Term,
+    motive: Term,
+    branches: Vec<(&str, Term)>,
+) -> Term {
+    at(Mult::One, data, levels, params, scrutinee, motive, branches)
+}
+
+/// Разбор непараметризованного типа с написанной кратностью потребления.
+fn consuming(
+    consumed: Mult,
+    data: &str,
+    scrutinee: Term,
+    motive: Term,
+    branches: Vec<(&str, Term)>,
+) -> Term {
+    at(consumed, data, &[], 0, scrutinee, motive, branches)
+}
+
+fn at(
+    consumed: Mult,
     data: &str,
     levels: &[Level],
     params: u32,
@@ -49,6 +77,7 @@ fn case(
         data: data.into(),
         levels: levels.iter().cloned().collect(),
         params,
+        consumed,
         scrutinee: Rc::new(scrutinee),
         motive: Rc::new(motive),
         branches: branches
@@ -1022,6 +1051,195 @@ fn a_linear_field_used_twice_is_rejected_in_every_position() {
             "линейное поле дважды - нарушение и {what}"
         );
     }
+}
+
+#[test]
+fn a_linear_field_follows_how_the_scrutinee_is_consumed() {
+    // Цифра `1` у поля описывает **построение**: конструктор кладёт аргумент
+    // однажды. При разборе она масштабируется тем, сколько раз доступно само
+    // разбираемое (§3.3): ω-значение разбирается сколько угодно раз, и каждый
+    // разбор выдаёт свежие поля.
+    let signature = base();
+    let ty = pi(Mult::Many, "p", c("Pair"), c("Bool"));
+    let doubling = |mult: Mult| {
+        lam(
+            Mult::Many,
+            "p",
+            consuming(
+                mult,
+                "Pair",
+                Term::var(0),
+                constantly(c("Bool")),
+                vec![(
+                    "mk",
+                    lam(
+                        // Кратность лямбды обязана совпасть с телескопом
+                        // ветви, а тот построен при `q · r`.
+                        Mult::One * mult,
+                        "x",
+                        lam(
+                            Mult::One * mult,
+                            "y",
+                            c("and").apply([Term::var(1), Term::var(1)]),
+                        ),
+                    ),
+                )],
+            ),
+        )
+    };
+
+    let outcome = check_closed(&signature, &doubling(Mult::Many), &ty);
+    assert!(
+        outcome.is_ok(),
+        "`1 · ω = ω`: разбор ω-значения выдаёт неограниченные поля - {outcome:?}"
+    );
+    assert!(
+        matches!(
+            check_closed(&signature, &doubling(Mult::One), &ty),
+            Err(TypeError {
+                kind: ErrorKind::UsageViolation { .. },
+                ..
+            })
+        ),
+        "`1 · 1 = 1`: линейный разбор оставляет поле линейным"
+    );
+}
+
+#[test]
+fn an_unrestricted_field_stays_unrestricted_under_a_linear_scrutinee() {
+    // `ω · 1 = ω` - случай, на котором стоит `Ur` (§3.3): поле, объявленное
+    // неограниченным, остаётся таким и при линейном разборе.
+    let mut signature = base();
+    let mut metas = Metas::default();
+    declared(
+        "Box",
+        &signature.declare_data(
+            &mut metas,
+            "Box",
+            0,
+            Term::universe(0),
+            &[("box", pi(Mult::Many, "b", c("Bool"), c("Box")))],
+        ),
+    );
+
+    let term = lam(
+        Mult::One,
+        "p",
+        consuming(
+            Mult::One,
+            "Box",
+            Term::var(0),
+            constantly(c("Bool")),
+            vec![(
+                "box",
+                lam(
+                    Mult::Many,
+                    "b",
+                    c("and").apply([Term::var(0), Term::var(0)]),
+                ),
+            )],
+        ),
+    );
+    let ty = pi(Mult::One, "p", c("Box"), c("Bool"));
+    let outcome = check_closed(&signature, &term, &ty);
+    assert!(outcome.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn a_scrutinee_multiplicity_larger_than_the_binding_is_refused() {
+    // Выбор `r` - вопрос эргономики, а не корректности, и держится это на том,
+    // что слишком щедрая `r` не проходит молча: она масштабирует **вектор
+    // использований самого разбираемого**, и учёт ловит её на связывании.
+    let signature = base();
+    let term = lam(
+        Mult::One,
+        "p",
+        consuming(
+            Mult::Many,
+            "Pair",
+            Term::var(0),
+            constantly(c("Bool")),
+            vec![(
+                "mk",
+                lam(Mult::Many, "x", lam(Mult::Many, "y", Term::var(1))),
+            )],
+        ),
+    );
+    let ty = pi(Mult::One, "p", c("Pair"), c("Bool"));
+    assert!(
+        matches!(
+            check_closed(&signature, &term, &ty),
+            Err(TypeError {
+                kind: ErrorKind::UsageViolation { .. },
+                ..
+            })
+        ),
+        "`ω`-разбор линейного связывания расходует его ω раз"
+    );
+}
+
+#[test]
+fn a_case_consuming_nothing_is_refused() {
+    // `r = 0` означала бы, что разбираемое стёрто, - а ветвь выбирается по
+    // нему в рантайме. Стирание перестало бы быть стиранием.
+    let signature = base();
+    let term = lam(
+        Mult::Many,
+        "p",
+        consuming(
+            Mult::Zero,
+            "Pair",
+            Term::var(0),
+            constantly(c("Bool")),
+            vec![(
+                "mk",
+                lam(Mult::Zero, "x", lam(Mult::Zero, "y", Term::var(1))),
+            )],
+        ),
+    );
+    let ty = pi(Mult::Many, "p", c("Pair"), c("Bool"));
+    assert!(
+        matches!(
+            check_closed(&signature, &term, &ty),
+            Err(TypeError {
+                kind: ErrorKind::ErasedScrutinee { .. },
+                ..
+            })
+        ),
+        "разбор смотрит на значение, то есть тратит его хотя бы однажды"
+    );
+}
+
+#[test]
+fn the_branch_lambda_must_match_the_scaled_telescope() {
+    // Масштабирование видно и с другой стороны: тип ветви строится при `q · r`,
+    // и лямбда, написанная с исходной кратностью поля, ему не подходит.
+    let signature = base();
+    let term = lam(
+        Mult::Many,
+        "p",
+        consuming(
+            Mult::Many,
+            "Pair",
+            Term::var(0),
+            constantly(c("Bool")),
+            vec![("mk", lam(Mult::One, "x", lam(Mult::One, "y", Term::var(1))))],
+        ),
+    );
+    let ty = pi(Mult::Many, "p", c("Pair"), c("Bool"));
+    assert!(
+        matches!(
+            check_closed(&signature, &term, &ty),
+            Err(TypeError {
+                kind: ErrorKind::LambdaMultiplicity {
+                    expected: Mult::Many,
+                    found: Mult::One,
+                },
+                ..
+            })
+        ),
+        "поле кратности 1 при `r = ω` приходит в ветвь как ω"
+    );
 }
 
 #[test]

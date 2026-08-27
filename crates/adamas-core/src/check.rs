@@ -42,9 +42,10 @@
 //! де Брёйна ([`Term`] реализует `Display`), нужный снапшотам уровня ядра.
 //!
 //! Спанов у ошибки нет и не будет: термы ядра их не хранят, а идентичность узла
-//! не переживает нормализацию. «Где» доносит **маршрут** - кадры, укладываемые
-//! на раскрутке; его ещё нет, и это оставшаяся половина вопроса 49а. Телескопа
-//! точки отказа по той же причине пока нет.
+//! не переживает нормализацию. «Где» доносят **телескоп** точки отказа и
+//! **маршрут** кадрами, укладываемыми на раскрутке; форма их - в
+//! [`crate::error`], а перевод маршрута в спан - работа элаборации
+//! (§10 вопрос 49б).
 
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -1081,6 +1082,19 @@ fn infer_case(
         ));
     }
 
+    // Разбор смотрит на значение, то есть тратит его хотя бы однажды. `0`
+    // означала бы, что разбираемое стёрто, а ветвь при этом выбирается по
+    // нему в рантайме, - стирание перестало бы быть стиранием.
+    if case.consumed == Mult::Zero {
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::ErasedScrutinee {
+                data: Rc::clone(&case.data),
+            },
+        ));
+    }
+
     let constructors = constructors.clone();
     let binders = peel_pis(&declaration.ty).0.len();
     let family = declaration.instantiate_type(&case.levels);
@@ -1120,7 +1134,13 @@ fn infer_case(
         .iter()
         .fold(motive, |value, index| apply(&value, Rc::clone(index)));
     let result = apply(&result, ctx.eval(&case.scrutinee));
-    Ok((result, scrutinee_usage + &motive_usage + &branches))
+    // То же, что у применения: вектор разбираемого масштабируется кратностью,
+    // с которой его потребляют, а ветви соединяются **объединением** -
+    // выполняется ровно одна.
+    Ok((
+        result,
+        scrutinee_usage.scale(case.consumed) + &motive_usage + &branches,
+    ))
 }
 
 /// Аргументы, к которым применено индуктивное семейство в типе значения.
@@ -1240,11 +1260,21 @@ fn branch_type(
     }
     result = Term::App(Rc::new(result), Rc::new(built));
 
+    // Поле кратности `q` приходит в ветвь при `q · r` (§3.3): цифра
+    // конструктора описывает построение - положить аргумент однажды, - а при
+    // разборе она обязана следовать тому, сколько раз доступно само
+    // разбираемое. Умножение полукольца даёт три случая даром: `0 · r = 0`,
+    // `ω · 1 = ω` (на чём стоит `Ur`), `1 · 1 = 1`.
     let result = telescope
         .into_iter()
         .rev()
         .fold(result, |codomain, (mult, name, domain)| {
-            Term::Pi(mult, name, Rc::new(domain), Rc::new(codomain))
+            Term::Pi(
+                mult * case.consumed,
+                name,
+                Rc::new(domain),
+                Rc::new(codomain),
+            )
         });
     ctx.eval(&result)
 }

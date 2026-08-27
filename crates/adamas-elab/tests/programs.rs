@@ -7,7 +7,7 @@
 
 use std::rc::Rc;
 
-use adamas_core::check::check_closed;
+use adamas_core::check::{ErrorKind, check_closed};
 use adamas_core::level::Level;
 use adamas_core::sig::Signature;
 use adamas_core::term::Term;
@@ -501,6 +501,44 @@ fn a_free_type_variable_is_refused_for_now() {
     assert!(
         matches!(error, ElabError::UnknownName { .. }),
         "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_field_multiplicity_follows_how_the_scrutinee_is_bound() {
+    // §4.1 назначает полю конструктора кратность `1` и обещает, что обычный
+    // код изменения не замечает. Держится обещание на правиле разбора (§3.3):
+    // поле приходит в ветвь при `q · r`, где `r` - кратность связывания
+    // разбираемого. Оба случая написаны рядом, потому что порознь каждый
+    // читается как случайность.
+    let pair = format!(
+        "{BASE}
+data Pair where
+  MkPair : Bool -> Bool -> Pair
+
+and : Bool -> Bool -> Bool
+and True b = b
+and False _ = False
+"
+    );
+
+    // ω-связывание: `1 · ω = ω`, поле неограниченно.
+    let signature = program(&format!(
+        "{pair}\nboth : Pair -> Bool\nboth (MkPair x y) = and x x\n"
+    ));
+    assert!(signature.lookup("both").is_some());
+
+    // Явно линейное связывание: `1 · 1 = 1`. Это названная цена решения - `r`
+    // следует связыванию, а не содержимому.
+    let error = refused(&format!(
+        "{pair}\nonce : (1 p : Pair) -> Bool\nonce (MkPair x y) = and x x\n"
+    ));
+    let Some(core) = error.core() else {
+        panic!("ожидался отказ ядра, получено {error:?}");
+    };
+    assert!(
+        matches!(core.kind, ErrorKind::UsageViolation { .. }),
+        "получено {core:?}"
     );
 }
 

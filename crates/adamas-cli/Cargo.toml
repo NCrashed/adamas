@@ -23,6 +23,8 @@ harness = false
 
 [dependencies]
 adamas-core.workspace = true
+adamas-elab.workspace = true
+adamas-parser.workspace = true
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 

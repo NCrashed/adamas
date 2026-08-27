@@ -7,6 +7,8 @@ name = "adamas-cli"
 version = "0.0.0"
 dependencies = [
  "adamas-core",
+ "adamas-elab",
+ "adamas-parser",
  "anyhow",
  "clap",
  "criterion",
@@ -17,6 +19,17 @@ name = "adamas-core"
 version = "0.0.0"
 dependencies = [
  "criterion",
+ "insta",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
+name = "adamas-elab"
+version = "0.0.0"
+dependencies = [
+ "adamas-core",
+ "adamas-parser",
  "insta",
  "proptest",
  "thiserror",

@@ -45,11 +45,23 @@ struct Argument {
     mult: Mult,
     /// Объявлена ли голова домена `unique` или `resource`.
     owned: bool,
+    /// Функция ли это - домен сам `Pi`.
+    functional: bool,
     /// Деструктор, если голова домена - ресурсный тип.
     drop: Option<Symbol>,
 }
 
 impl Argument {
+    /// Привязано ли связывание к своему scope.
+    ///
+    /// §3.3: «параметр кратности `1` функционального типа наследует то же
+    /// ограничение внутри вызываемой функции». Без этого правила функция,
+    /// возвращающая свой аргумент, выносит наружу захваченное замыкание, и
+    /// запрет на позицию возврата обходится в одну строку.
+    fn scoped(&self) -> bool {
+        self.functional && self.mult == Mult::One
+    }
+
     /// Закрывается ли связывание автоматически, когда о нём забыли.
     ///
     /// Стёртое не закрывается: `drop` расходует ресурс, а стёртое связывание
@@ -60,12 +72,16 @@ impl Argument {
     }
 }
 
-/// Локальное связывание: имя, видно ли оно поиску (см. `hiding`) и владеет ли
-/// оно (§3.3) - последнее решает, вправе ли его захватить лямбда.
+/// Локальное связывание: имя, видно ли оно поиску (см. `hiding`), владеет ли
+/// оно (§3.3) и не привязано ли к своему scope.
 struct Bound {
     name: Symbol,
     visible: bool,
     owned: bool,
+    /// Значение, которое не вправе покинуть scope: замыкание над владеющим
+    /// связыванием, связывание, инициализированное таким замыканием, и
+    /// `1`-параметр функционального типа (§3.3).
+    scoped: bool,
 }
 
 impl Bound {
@@ -74,6 +90,7 @@ impl Bound {
             name: Rc::clone(name),
             visible: true,
             owned: false,
+            scoped: false,
         }
     }
 
@@ -81,6 +98,43 @@ impl Bound {
         Self {
             owned,
             ..Self::visible(name)
+        }
+    }
+
+    fn owning_scoping(name: &Symbol, owned: bool, scoped: bool) -> Self {
+        Self {
+            owned,
+            scoped,
+            ..Self::visible(name)
+        }
+    }
+}
+
+/// Где стоит элаборируемое выражение - для правила scope-bound (§3.3).
+///
+/// Значение, привязанное к scope, применяется и передаётся аргументом, но не
+/// возвращается и не кладётся в поле конструктора. Позиция синтаксическая, но
+/// проверять её на лямбда-литерале недостаточно: §3.3 прямо показывает обход
+/// через `let`, и есть ещё два - функция, возвращающая свой аргумент, и
+/// конструктор. Поэтому позиция здесь встречается со **свойством значения**,
+/// которое элаборация считает и распространяет.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Position {
+    /// Аргумент, голова применения, значение `let` - откуда значение не уедет.
+    Inner,
+    /// Возвращаемое значение функции: тело клаузы, тело лямбды, хвост блока.
+    Returned,
+    /// Аргумент конструктора: значение уедет внутри собранного.
+    Field,
+}
+
+impl Position {
+    /// Как это называется в сообщении; `None` - позиция, откуда не уедет.
+    fn face(self) -> Option<&'static str> {
+        match self {
+            Self::Inner => None,
+            Self::Returned => Some("возвращается"),
+            Self::Field => Some("кладётся в поле конструктора"),
         }
     }
 }
@@ -121,14 +175,18 @@ pub(crate) struct Elaborator<'a> {
     expected: Vec<Argument>,
     /// Идёт ли элаборация в позиции типа - см. `typing`.
     types: bool,
-    /// Стоит ли ближайший подтерм в позиции применения: головой или
-    /// аргументом.
+    /// Где стоит ближайший подтерм - см. [`Position`].
+    position: Position,
+    /// Привязано ли к scope значение, которое только что собрано, и каким
+    /// именем оно к нему привязано.
     ///
-    /// §3.3 разрешает замыканию над владеющим связыванием ровно эти две
-    /// позиции - «может применяться и передаваться аргументом», - и запрещает
-    /// позицию возвращаемого значения. Позиция синтаксическая, поэтому и
-    /// хранится рядом с прочим, что элаборация знает по написанному.
-    applied: bool,
+    /// Обратный канал правила scope-bound: свойство считается снизу вверх -
+    /// лямбда привязана захватом, имя привязано своим связыванием, блок
+    /// привязан своим хвостом, - а запрещает его позиция, известная сверху.
+    /// Применение свойство **не** передаёт: результат применения к scope не
+    /// привязан, а построить возвращающее замыкание нельзя - запрет на
+    /// позицию возврата не даёт собрать его вовсе.
+    produced: Option<Symbol>,
     /// Аргументы уровня, уже выданные имени в этом объявлении.
     ///
     /// Одно имя - один набор дырок, а не свежий на каждое вхождение. Иначе
@@ -167,7 +225,8 @@ impl<'a> Elaborator<'a> {
             declared: Vec::new(),
             expected: Vec::new(),
             types: false,
-            applied: false,
+            position: Position::Inner,
+            produced: None,
             instantiated: HashMap::new(),
         }
     }
@@ -193,34 +252,47 @@ impl<'a> Elaborator<'a> {
 
     /// Выполняет `body` под связыванием `name`.
     fn under<T>(&mut self, name: &Symbol, body: impl FnOnce(&mut Self) -> T) -> T {
-        self.owning(name, false, body)
+        self.binding(Bound::visible(name), body)
     }
 
-    /// То же, но связывание помечено владеющим (§3.3).
-    fn owning<T>(&mut self, name: &Symbol, owned: bool, body: impl FnOnce(&mut Self) -> T) -> T {
-        self.scope.push(Bound::owning(name, owned));
+    /// То же, но связывание несёт свойства владения и привязки к scope (§3.3).
+    fn binding<T>(&mut self, bound: Bound, body: impl FnOnce(&mut Self) -> T) -> T {
+        self.scope.push(bound);
         let outcome = body(self);
         self.scope.pop();
         outcome
     }
 
-    /// Владеющее связывание извне, упомянутое в теле лямбды.
+    /// Чем лямбда привязана к scope: захваченным владеющим связыванием либо
+    /// захваченным значением, которое само привязано.
     ///
-    /// Сам по себе захват законен: §3.3 разрешает применить такую лямбду и
-    /// передать её аргументом. Незаконен **побег** - позиция возвращаемого
-    /// значения, где вызывающий получает ω-замыкание, каждый вызов которого
-    /// расходует один и тот же ресурс (§3.3, `mkCloser`). Ядро этого не видит:
-    /// одноразовость применения в типе стрелки не записана.
-    ///
-    /// Аргументная позиция ядру, наоборот, видна: замыкание в ω-параметре
-    /// расходует захваченное ω раз, и отказ приходит на связывании. Поэтому
-    /// проверка здесь смотрит только на позицию.
+    /// Сам по себе захват законен - §3.3 разрешает применить такую лямбду и
+    /// передать её аргументом. Незаконен **побег**, и его ловит позиция.
     fn captured(&self, body: &Expr) -> Option<&Symbol> {
         self.scope
             .iter()
             .rev()
-            .find(|bound| bound.visible && bound.owned && live::mentions(&bound.name, body))
+            .find(|bound| {
+                bound.visible && (bound.owned || bound.scoped) && live::mentions(&bound.name, body)
+            })
             .map(|bound| &bound.name)
+    }
+
+    /// Привязано ли имя к scope своим связыванием.
+    fn scoped_name(&self, name: &str) -> Option<&Symbol> {
+        self.scope
+            .iter()
+            .rev()
+            .find(|bound| bound.visible && bound.scoped && &*bound.name == name)
+            .map(|bound| &bound.name)
+    }
+
+    /// Выполняет `body` в позиции `position`.
+    fn placed<T>(&mut self, position: Position, body: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = std::mem::replace(&mut self.position, position);
+        let outcome = body(self);
+        self.position = outer;
+        outcome
     }
 
     /// Выполняет `body`, спрятав `count` последних связываний.
@@ -310,20 +382,49 @@ impl<'a> Elaborator<'a> {
     /// `(Nat -> Nat) -> C` берёт поле типа «функция», а не поле с кратностью
     /// поля.
     pub(crate) fn expr(&mut self, expr: &Expr, default: Mult) -> Result<Term, ElabError> {
+        // Кратности ждут ближайшую лямбду и только её: подтерм, до которого
+        // спустились иначе, написанным типом не накрыт.
+        let expected = std::mem::take(&mut self.expected);
+        // То же с позицией: её выставляет тот, кто спускается, и достаётся она
+        // ближайшему подтерму, а не всему, что под ним.
+        let position = std::mem::replace(&mut self.position, Position::Inner);
+        // Свойство «привязано к scope» считается снизу вверх, и каждый разбор
+        // отвечает за своё: собранное здесь не наследует чужого.
+        self.produced = None;
+        let term = self.form(expr, default, &expected, position)?;
+        // Позиция встречается со свойством: привязанное к scope значение
+        // возвращать и класть в поле конструктора нельзя (§3.3).
+        if let (Some(face), Some(name)) = (position.face(), self.produced.as_ref()) {
+            return Err(ElabError::ScopeBound {
+                name: Rc::clone(name),
+                face,
+                span: expr.span,
+            });
+        }
+        Ok(term)
+    }
+
+    /// Форма выражения - без правила позиции, которое стоит вокруг неё.
+    fn form(
+        &mut self,
+        expr: &Expr,
+        default: Mult,
+        expected: &[Argument],
+        position: Position,
+    ) -> Result<Term, ElabError> {
         let missing = |what| {
             Err(ElabError::Missing {
                 what,
                 span: expr.span,
             })
         };
-        // Кратности ждут ближайшую лямбду и только её: подтерм, до которого
-        // спустились иначе, написанным типом не накрыт.
-        let expected = std::mem::take(&mut self.expected);
-        // То же с позицией: её выставляет применение, и достаётся она
-        // ближайшему подтерму, а не всему, что под ним.
-        let applied = std::mem::take(&mut self.applied);
         match &expr.kind {
-            ExprKind::Name(name) => self.name(name),
+            ExprKind::Name(name) => {
+                if let Some(scoped) = self.scoped_name(&name.text) {
+                    self.produced = Some(Rc::clone(scoped));
+                }
+                self.name(name)
+            }
             // Спайн собирается циклом. Рекурсия по `callee` уходила на глубину
             // числа аргументов, а его ограничивает только длина файла: предел
             // вложенности парсера на плоское `f a b c …` не тратится, и тысячи
@@ -335,14 +436,22 @@ impl<'a> Elaborator<'a> {
                     arguments.push(&**argument);
                     head = callee;
                 }
-                // Голова применяется, аргументы передаются - обе позиции
-                // §3.3 разрешает замыканию над владеющим связыванием.
-                self.applied = true;
-                let mut term = self.expr(head, Mult::Many)?;
+                // Аргумент конструктора уезжает внутри собранного значения, а
+                // аргумент функции - нет: §3.3 разрешает замыканию над
+                // владеющим связыванием применяться и передаваться.
+                let inside = if self.constructs(head) {
+                    Position::Field
+                } else {
+                    Position::Inner
+                };
+                let mut term = self.placed(Position::Inner, |it| it.expr(head, Mult::Many))?;
                 for argument in arguments.into_iter().rev() {
-                    self.applied = true;
-                    term = Term::App(Rc::new(term), Rc::new(self.expr(argument, Mult::Many)?));
+                    let argument = self.placed(inside, |it| it.expr(argument, Mult::Many))?;
+                    term = Term::App(Rc::new(term), Rc::new(argument));
                 }
+                // Результат применения к scope не привязан: собрать замыкание,
+                // которое его возвращает, не даёт правило позиции.
+                self.produced = None;
                 Ok(term)
             }
             ExprKind::Arrow(domain, codomain) => {
@@ -363,15 +472,16 @@ impl<'a> Elaborator<'a> {
             }
             ExprKind::Pi { binders, codomain } => self.pi(binders, codomain, default),
             ExprKind::Lam { params, body } => {
-                if let (false, Some(name)) = (applied, self.captured(body)) {
-                    return Err(ElabError::OwnedCapture {
-                        name: Rc::clone(name),
-                        span: expr.span,
-                    });
-                }
-                self.lam(params, body, &expected)
+                // Захват - то, чем лямбда привязывается к scope. Позиция
+                // решает снаружи; здесь только считается свойство, и ставится
+                // оно **после** сборки: тело - тоже выражение, и свой ответ
+                // оно затрёт своим.
+                let captured = self.captured(body).cloned();
+                let term = self.lam(params, body, expected)?;
+                self.produced = captured;
+                Ok(term)
             }
-            ExprKind::Block(block) => self.block(block),
+            ExprKind::Block(block) => self.block(block, position),
             ExprKind::Chain(chain) => self.chain(chain, expr.span),
 
             ExprKind::Hole => missing(Missing::TermHole),
@@ -383,6 +493,29 @@ impl<'a> Elaborator<'a> {
             ExprKind::Tuple(_) => missing(Missing::Tuple),
             ExprKind::List(_) => missing(Missing::List),
         }
+    }
+
+    /// Собирает ли применение с такой головой значение - то есть конструктор
+    /// ли она.
+    ///
+    /// Аргумент конструктора уезжает внутри собранного, и §3.3 запрещает
+    /// класть туда привязанное к scope; аргумент функции таким свойством не
+    /// обладает.
+    fn constructs(&self, head: &Expr) -> bool {
+        let ExprKind::Name(name) = &head.kind else {
+            return false;
+        };
+        self.builds(name)
+    }
+
+    /// То же по имени: у оператора головы-выражения нет, а конструктором он
+    /// быть может - `(::)` кладёт аргумент в ячейку списка так же, как `Cons`.
+    fn builds(&self, name: &ast::Name) -> bool {
+        self.local(&name.text).is_none()
+            && self
+                .signature
+                .lookup(&name.text)
+                .is_some_and(|it| matches!(it.kind, DefinitionKind::Constructor { .. }))
     }
 
     /// Имя: связывание, `Type` или ссылка на объявленное.
@@ -480,7 +613,9 @@ impl<'a> Elaborator<'a> {
         };
         let domain = self.hiding(*siblings, |inner| inner.expr(ty, Mult::Many))?;
         let owns = self.owned.of(ty).is_some();
-        let body = self.owning(name, owns, |inner| inner.pi_flat(rest, codomain, default))?;
+        let body = self.binding(Bound::owning(name, owns), |inner| {
+            inner.pi_flat(rest, codomain, default)
+        })?;
         Ok(Term::Pi(
             *mult,
             CoreName::from(&**name),
@@ -521,7 +656,11 @@ impl<'a> Elaborator<'a> {
             // Остаток спайна достаётся телу: `\x -> \y -> e` - две лямбды под
             // теми же `Pi`, что и `\x y -> e`.
             self.expected = expected.to_vec();
-            return self.closing_all(drops, |it| it.expr(body, Mult::Many));
+            // Тело лямбды - её возвращаемое значение, и правило §3.3 стоит
+            // здесь так же, как у тела клаузы.
+            return self.closing_all(drops, |it| {
+                it.placed(Position::Returned, |it| it.expr(body, Mult::Many))
+            });
         };
         let name = match &param.kind {
             LamParamKind::Binder(_) => {
@@ -553,10 +692,11 @@ impl<'a> Elaborator<'a> {
             .map_or((Mult::Many, expected), |(argument, rest)| {
                 (argument.mult, rest)
             });
-        let owns = expected.first().is_some_and(|argument| argument.owned);
-        let inner = self.owning(&name, owns, |inner| {
-            inner.lam_params(rest, body, deeper, drops)
-        })?;
+        let bound = expected.first().map_or_else(
+            || Bound::visible(&name),
+            |argument| Bound::owning_scoping(&name, argument.owned, argument.scoped()),
+        );
+        let inner = self.binding(bound, |inner| inner.lam_params(rest, body, deeper, drops))?;
         Ok(Term::Lam(mult, CoreName::from(&*name), Rc::new(inner)))
     }
 
@@ -597,18 +737,19 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Блок операторов: цепочка `let` и значение последним.
-    fn block(&mut self, block: &Block) -> Result<Term, ElabError> {
+    fn block(&mut self, block: &Block, position: Position) -> Result<Term, ElabError> {
         // Закрываемые копятся до конца блока: их область видимости кончается
         // там же, где блок, и закрыть их раньше значило бы закрыть не на
         // выходе из scope (§3.3).
         let mut closing = Vec::new();
-        self.statements(&block.stmts, &mut closing)
+        self.statements(&block.stmts, &mut closing, position)
     }
 
     fn statements(
         &mut self,
         stmts: &[Stmt],
         closing: &mut Vec<(u32, Symbol)>,
+        position: Position,
     ) -> Result<Term, ElabError> {
         let Some((first, rest)) = stmts.split_first() else {
             // Пустых блоков layout не делает.
@@ -627,7 +768,12 @@ impl<'a> Elaborator<'a> {
                     })
                     .collect();
                 lifo(&mut drops);
-                self.closing_all(&drops, |it| it.expr(expr, Mult::Many))
+                // Хвост блока стоит там же, где блок: возвращаемое значение
+                // остаётся возвращаемым (§3.3), и отказ придёт на нём, а не
+                // на блоке целиком.
+                self.closing_all(&drops, |it| {
+                    it.placed(position, |it| it.expr(expr, Mult::Many))
+                })
             }
             StmtKind::Expr(_) => Err(ElabError::Missing {
                 what: Missing::Sequencing,
@@ -638,7 +784,7 @@ impl<'a> Elaborator<'a> {
             StmtKind::Let(_) if rest.is_empty() => {
                 Err(ElabError::BlockWithoutValue { span: first.span })
             }
-            StmtKind::Let(bindings) => self.bindings(bindings, rest, closing),
+            StmtKind::Let(bindings) => self.bindings(bindings, rest, closing, position),
         }
     }
 
@@ -649,9 +795,10 @@ impl<'a> Elaborator<'a> {
         bindings: &[Binding],
         rest: &[Stmt],
         closing: &mut Vec<(u32, Symbol)>,
+        position: Position,
     ) -> Result<Term, ElabError> {
         let Some((binding, tail)) = bindings.split_first() else {
-            return self.statements(rest, closing);
+            return self.statements(rest, closing, position);
         };
         if !binding.params.is_empty() {
             return Err(ElabError::Missing {
@@ -679,12 +826,17 @@ impl<'a> Elaborator<'a> {
         // кратности у него.
         self.expected = pi_arguments(&ty, self.owned);
         let value = self.expr(&binding.body, Mult::Many)?;
+        // §3.3: связывание, инициализированное привязанным к scope значением,
+        // само привязано. Без этого правило обходится в одну строку - и обход
+        // выписан в §3.3 дословно.
+        let scoped = self.produced.take().is_some();
         let born = u32::try_from(self.scope.len()).unwrap_or(u32::MAX);
-        let body = self.owning(&binding.name.text, owns, |inner| {
+        let bound = Bound::owning_scoping(&binding.name.text, owns, scoped);
+        let body = self.binding(bound, |inner| {
             if let Some(drop) = drop {
                 closing.push((born, drop));
             }
-            inner.bindings(tail, rest, closing)
+            inner.bindings(tail, rest, closing, position)
         })?;
         Ok(Term::Let(
             mult,
@@ -758,8 +910,16 @@ impl<'a> Elaborator<'a> {
             });
         };
         let callee = self.name(operator)?;
-        let left = self.expr(&chain.head, Mult::Many)?;
-        let right = self.expr(operand, Mult::Many)?;
+        // Операнды - те же аргументы применения, и позиция у них та же:
+        // оператор-конструктор уносит их внутрь собранного, обычный не уносит.
+        let inside = if self.builds(operator) {
+            Position::Field
+        } else {
+            Position::Inner
+        };
+        let left = self.placed(inside, |it| it.expr(&chain.head, Mult::Many))?;
+        let right = self.placed(inside, |it| it.expr(operand, Mult::Many))?;
+        self.produced = None;
         Ok(callee.apply([left, right]))
     }
 
@@ -847,8 +1007,11 @@ impl<'a> Elaborator<'a> {
         let bound = self.clause_variables(clause, &patterns);
         let closing = closing_of(&bound);
         let depth = self.scope.len();
-        self.scope
-            .extend(bound.iter().map(|it| Bound::owning(&it.name, it.owned)));
+        self.scope.extend(
+            bound
+                .iter()
+                .map(|it| Bound::owning_scoping(&it.name, it.owned, it.scoped)),
+        );
         // Паттерны сняли первые связывания написанного типа; остаток спайна -
         // тем лямбдам, которыми клауза продолжается.
         self.expected = self
@@ -856,7 +1019,10 @@ impl<'a> Elaborator<'a> {
             .split_at(patterns.len().min(self.declared.len()))
             .1
             .to_vec();
-        let body = self.closing_all(&closing, |it| it.expr(&clause.body, Mult::Many));
+        // Тело клаузы - возвращаемое значение определения (§3.3).
+        let body = self.closing_all(&closing, |it| {
+            it.placed(Position::Returned, |it| it.expr(&clause.body, Mult::Many))
+        });
         self.scope.truncate(depth);
 
         Ok(Clause {
@@ -913,6 +1079,7 @@ impl<'a> Elaborator<'a> {
                 found.push(BoundVar {
                     name: Rc::from(&**name),
                     owned: argument.is_some_and(|it| it.owned),
+                    scoped: argument.is_some_and(Argument::scoped),
                     drop: argument
                         .and_then(Argument::closes)
                         .filter(|_| !mentioned)
@@ -920,11 +1087,25 @@ impl<'a> Elaborator<'a> {
                 });
             }
             CorePattern::Constructor(constructor, fields) => {
-                let types = self
-                    .signature
-                    .lookup(constructor)
-                    .map(|definition| pi_arguments(&definition.ty, self.owned))
-                    .unwrap_or_default();
+                // Спайн типа конструктора начинается с телескопа параметров
+                // семейства - ветвь их не получает, и паттерн не пишет.
+                // Сегодня параметров не бывает (их отвергает `declare_data`),
+                // но сдвиг молча испортил бы соответствие, как только они
+                // появятся: поле взяло бы владение у параметра.
+                let (types, params) = self.signature.lookup(constructor).map_or_else(
+                    || (Vec::new(), 0),
+                    |definition| {
+                        let params = match &definition.kind {
+                            DefinitionKind::Constructor { data } => self
+                                .signature
+                                .lookup(data)
+                                .and_then(|it| it.data_shape().map(|(params, _)| params as usize))
+                                .unwrap_or(0),
+                            _ => 0,
+                        };
+                        (pi_arguments(&definition.ty, self.owned), params)
+                    },
+                );
                 let inner = match written.map(|it| &it.kind) {
                     Some(PatternKind::App { fields, .. }) => fields.as_slice(),
                     _ => &[],
@@ -933,7 +1114,7 @@ impl<'a> Elaborator<'a> {
                     self.pattern_variables(
                         inner.get(position),
                         field,
-                        types.get(position),
+                        types.get(position + params),
                         body,
                         found,
                     );
@@ -960,6 +1141,7 @@ impl<'a> Elaborator<'a> {
 struct BoundVar {
     name: Symbol,
     owned: bool,
+    scoped: bool,
     drop: Option<Symbol>,
 }
 
@@ -1007,6 +1189,7 @@ fn pi_arguments(ty: &Term, owned: &Owned) -> Vec<Argument> {
         found.push(Argument {
             mult: *mult,
             owned: name.is_some_and(|name| owned.owns(name)),
+            functional: matches!(&**domain, Term::Pi(..)),
             drop: name.and_then(|name| owned.destructor_of(name)).cloned(),
         });
         current = codomain;

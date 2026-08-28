@@ -791,7 +791,7 @@ closeFile b = b
         "{preamble}\nmkCloser : File -> Bool -> Bool\nmkCloser h = \\x -> drop h\n"
     ));
     assert!(
-        matches!(error, ElabError::OwnedCapture { .. }),
+        matches!(error, ElabError::ScopeBound { .. }),
         "получено {error:?}"
     );
 
@@ -1174,7 +1174,7 @@ share k = k True
         "{preamble}\nescaped : File -> (Bool -> Bool)\nescaped h = \\b -> drop h\n"
     ));
     assert!(
-        matches!(escaped, ElabError::OwnedCapture { .. }),
+        matches!(escaped, ElabError::ScopeBound { .. }),
         "позиция возвращаемого значения - побег: {escaped:?}"
     );
 
@@ -1190,4 +1190,66 @@ share k = k True
         matches!(core.kind, ErrorKind::UsageViolation { .. }),
         "получено {core:?}"
     );
+}
+
+#[test]
+fn being_scope_bound_travels_with_the_value_not_with_the_literal() {
+    // §3.3 прямо говорит, что проверять позицию **литерала** недостаточно, и
+    // показывает обход через `let`. Обходов на деле три, и все три об одном:
+    // свойство принадлежит значению. Связывание перенимает его у значения,
+    // конструктор уносит внутрь собранного, а функция, возвращающая свой
+    // `1`-аргумент функционального типа, выносит наружу.
+    let preamble = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+data Holder where
+  Hold : (Bool -> Bool) -> Holder
+"
+    );
+
+    for (name, source) in [
+        (
+            "поле конструктора",
+            "stash : File -> Holder\nstash h = Hold (\\b -> drop h)\n",
+        ),
+        (
+            "возврат через связывание",
+            "sneaky : File -> (Bool -> Bool)\nsneaky h =\n  let 1 k : Bool -> Bool = \\b -> drop h\n  k\n",
+        ),
+        (
+            "функция, возвращающая свой `1`-аргумент",
+            "forward : (1 k : Bool -> Bool) -> (Bool -> Bool)\nforward k = k\n",
+        ),
+    ] {
+        let error = refused(&format!("{preamble}\n{source}"));
+        assert!(
+            matches!(error, ElabError::ScopeBound { .. }),
+            "{name}: получено {error:?}"
+        );
+    }
+
+    // Применить - можно, в том числе через связывание и через оператор:
+    // значение остаётся в своём scope, а сколько раз его позовут, считает
+    // кратность, то есть ядро.
+    let allowed = format!(
+        "{preamble}
+(<|) : (1 x : Bool) -> (1 k : Bool -> Bool) -> Bool
+(<|) x k = k True
+
+local : File -> Bool
+local h =
+  let 1 k : Bool -> Bool = \\b -> drop h
+  k True
+
+operand : File -> Bool
+operand h = True <| (\\b -> drop h)
+"
+    );
+    let signature = program(&allowed);
+    for name in ["local", "operand"] {
+        assert!(signature.lookup(name).is_some(), "{name}");
+    }
 }

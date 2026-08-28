@@ -733,6 +733,38 @@ fn a_resource_without_a_destructor_is_refused() {
 }
 
 #[test]
+fn a_destructor_names_its_own_refusals() {
+    // Оба случая раньше отвечали чужой причиной: голая сигнатура становилась
+    // конструктором, и отказ приходил про отсутствующий `drop`, а второй
+    // ресурсный тип получал от ядра «определение уже существует».
+    let without_body = refused(&format!(
+        "{BASE}\nresource File where\n  Open : Bool -> File\n  drop : File -> Bool\n"
+    ));
+    assert!(
+        matches!(without_body, ElabError::DestructorWithoutBody { .. }),
+        "получено {without_body:?}"
+    );
+
+    let text = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+resource Socket where
+  Conn : Bool -> Socket
+  drop : Socket -> Bool
+  drop (Conn b) = closeFile b
+"
+    );
+    let shared = refused(&text);
+    assert!(
+        matches!(shared, ElabError::SharedDestructor { .. }),
+        "получено {shared:?}"
+    );
+}
+
+#[test]
 fn a_destructor_that_cannot_close_is_refused() {
     // Вызов `drop` подставляет вставка, поэтому его форма - не вкус, а
     // условие работоспособности: лишний параметр превращает вставку в

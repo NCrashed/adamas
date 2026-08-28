@@ -81,6 +81,18 @@ impl Owned {
         self.types.get(head(ty)?).copied()
     }
 
+    /// Ресурс, деструктор которого уже назван так.
+    ///
+    /// Имя деструктора одно на модуль: пространств имён ещё нет (§4.8), и
+    /// второй `drop` столкнулся бы с первым.
+    #[must_use]
+    pub fn named(&self, drop: &str) -> Option<&Symbol> {
+        self.drops
+            .iter()
+            .find(|(_, it)| &***it == drop)
+            .map(|(data, _)| data)
+    }
+
     /// Объявлен ли тип с этим именем владеемым.
     #[must_use]
     pub fn owns(&self, name: &str) -> bool {

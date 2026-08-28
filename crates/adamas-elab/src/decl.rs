@@ -312,12 +312,37 @@ fn declare_resource(
     }
     constructors.extend(pending.take().map(constructor));
 
+    // Голая сигнатура - конструктор, поэтому `drop` без клауз стал бы им же, а
+    // отказ пришёл бы позже и не про то: «деструктора нет» вместо «у него нет
+    // тела».
+    if let Some(bare) = constructors.iter().find(|it| &*it.name.text == "drop") {
+        return Err(ElabError::DestructorWithoutBody {
+            data: Rc::clone(&resource.name.text),
+            span: bare.span,
+        });
+    }
+
     let Some((drop_ty, clauses, drop_span)) = destructor else {
         return Err(ElabError::ResourceWithoutDrop {
             name: Rc::clone(&resource.name.text),
             span,
         });
     };
+
+    // Деструктор объявляется под написанным именем, поэтому второй ресурсный
+    // тип столкнулся бы с первым в общем пространстве имён (§4.8, Фаза 3).
+    // Отказ говорит об этом прямо: `DuplicateDefinition` от ядра называл бы
+    // столкновение имён, не называя причины.
+    if let Some(first) = owned
+        .named("drop")
+        .filter(|it| ***it != *resource.name.text)
+    {
+        return Err(ElabError::SharedDestructor {
+            data: Rc::clone(&resource.name.text),
+            first: Rc::clone(first),
+            span: drop_span,
+        });
+    }
 
     let data = ast::Data {
         unique: true,

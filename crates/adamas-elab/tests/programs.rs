@@ -750,6 +750,14 @@ resource File where
     );
 }
 
+/// Тело определения, напечатанное ядром: снимок формы, а не счёт подстрок.
+fn body(signature: &Signature, name: &str) -> String {
+    let Some(body) = signature.lookup(name).and_then(|it| it.body.clone()) else {
+        panic!("у `{name}` есть тело")
+    };
+    body.to_string()
+}
+
 /// Сколько вызовов `drop` в теле определения.
 fn drops(signature: &Signature, name: &str) -> usize {
     let Some(body) = signature.lookup(name).and_then(|it| it.body.clone()) else {
@@ -828,20 +836,110 @@ leaked h = describe h
 #[test]
 fn a_shadowed_name_is_not_a_mention() {
     // Внутреннее связывание закрывает внешнее, и внешний ресурс остаётся
-    // нетронутым - значит закрывается сам.
+    // нетронутым - значит закрывается сам. Имя в теле при этом **есть**: не
+    // будь оно затенено, вставка бы не сработала.
     let text = format!(
         "{BASE}
 closeFile : (1 b : Bool) -> Bool
 closeFile b = b
 
 {RESOURCE}
-same : (1 h : Bool) -> Bool
-same h = h
-
 shadowed : File -> Bool
-shadowed h = same True
+shadowed h =
+  let h : Bool = True
+  h
 "
     );
     let signature = program(&text);
     assert_eq!(drops(&signature, "shadowed"), 1);
+}
+
+#[test]
+fn an_erased_owned_binding_is_not_closed() {
+    // `drop` расходует ресурс, а стёртому связыванию расходовать нечем:
+    // вставка отвергала бы корректную программу. §10 вопрос 71 обещает, что
+    // лишний `drop` не вставляется никогда.
+    let text = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+openIt : Bool -> File
+openIt b = Open b
+
+quiet : (0 h : File) -> Bool
+quiet h = True
+
+bound : Bool -> Bool
+bound b =
+  let 0 h : File = openIt b
+  True
+"
+    );
+    let signature = program(&text);
+    assert_eq!(drops(&signature, "quiet"), 0, "стёртый аргумент");
+    assert_eq!(drops(&signature, "bound"), 0, "стёртое связывание");
+}
+
+#[test]
+fn a_wildcard_and_a_lambda_close_like_a_named_argument() {
+    // Три записи одного определения обязаны означать одно и то же: имя, `_` и
+    // лямбда. У `_` имени нет вовсе, поэтому упоминанию взяться неоткуда, а у
+    // лямбды тип виден по тому же спайну, из которого она берёт кратность.
+    let text = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+named : File -> Bool
+named h = True
+
+anonymous : File -> Bool
+anonymous _ = True
+
+viaLambda : File -> Bool
+viaLambda = \\h -> True
+
+viaWildcardLambda : File -> Bool
+viaWildcardLambda = \\_ -> True
+"
+    );
+    let signature = program(&text);
+    for name in ["named", "anonymous", "viaLambda", "viaWildcardLambda"] {
+        assert_eq!(drops(&signature, name), 1, "{name}");
+    }
+}
+
+#[test]
+fn closing_runs_at_the_end_of_the_scope_in_lifo_order() {
+    // §3.3: деструктор зовётся при выходе из scope, порядок - LIFO. Форма
+    // терма - предмет проверки: счёт вызовов её не видит, а разъехаться могут
+    // именно порядок и индексы.
+    let text = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+openIt : Bool -> File
+openIt b = Open b
+
+lets : Bool -> Bool
+lets b =
+  let h : File = openIt b
+      g : File = openIt b
+  True
+
+arguments : File -> File -> Bool
+arguments h g = True
+"
+    );
+    let signature = program(&text);
+    insta::assert_snapshot!(format!(
+        "lets = {}\n\narguments = {}",
+        body(&signature, "lets"),
+        body(&signature, "arguments")
+    ));
 }

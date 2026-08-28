@@ -733,6 +733,27 @@ fn a_resource_without_a_destructor_is_refused() {
 }
 
 #[test]
+fn a_destructor_that_cannot_close_is_refused() {
+    // Вызов `drop` подставляет вставка, поэтому его форма - не вкус, а
+    // условие работоспособности: лишний параметр превращает вставку в
+    // частичное применение, владеемый результат заводит ресурс на каждом
+    // закрытии, стёртый домен запрещает телу тронуть то, что оно закрывает.
+    for drop in [
+        "drop : File -> File\n  drop (Open b) = Open b",
+        "drop : File -> Bool -> Bool\n  drop (Open b) c = b",
+        "drop : (0 h : File) -> Bool\n  drop h = True",
+        "drop : Bool -> Bool\n  drop b = b",
+    ] {
+        let text = format!("{BASE}\nresource File where\n  Open : Bool -> File\n  {drop}\n");
+        let error = refused(&text);
+        assert!(
+            matches!(error, ElabError::DestructorShape { .. }),
+            "для {drop:?} получено {error:?}"
+        );
+    }
+}
+
+#[test]
 fn a_resource_body_defines_only_its_destructor() {
     // Тело держит конструкторы и `drop`; всё прочее определяется рядом.
     let text = format!(

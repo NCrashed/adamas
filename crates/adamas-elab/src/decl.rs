@@ -337,7 +337,7 @@ fn declare_resource(
     // Форма проверяется здесь, один раз, а не в каждой точке вставки: вызов
     // `drop` подставляется компилятором, и тип его результата обязан быть
     // написан в области видимости, где ресурса уже нет.
-    destructor_shape(&elaborated, &resource.name.text, drop_ty.span)?;
+    destructor_shape(&elaborated, &resource.name.text, owned, drop_ty.span)?;
     let declared = Pending {
         name: Rc::from("drop"),
         ty: elaborated,
@@ -355,25 +355,40 @@ fn declare_resource(
 /// `let`-связывание, тип которого пишется **рядом** с вызовом, а зависимый
 /// результат пришлось бы инстанцировать самим ресурсом - тем самым, которого
 /// после вызова уже нет.
-fn destructor_shape(ty: &Term, data: &Symbol, span: Span) -> Result<(), ElabError> {
+fn destructor_shape(ty: &Term, data: &Symbol, owned: &Owned, span: Span) -> Result<(), ElabError> {
     let refuse = || ElabError::DestructorShape {
         data: Rc::clone(data),
         span,
     };
-    let Term::Pi(_, _, domain, result) = ty else {
+    let Term::Pi(mult, _, domain, result) = ty else {
         return Err(refuse());
     };
-    let mut head = &**domain;
-    while let Term::App(callee, _) = head {
-        head = callee;
+    // Кратность домена `1`: при `0` тело деструктора не вправе тронуть ресурс
+    // (ядро отвергнет его же), то есть объявлен заведомо пустой `drop`.
+    if *mult != Mult::One || name_head(domain).is_none_or(|name| **name != **data) {
+        return Err(refuse());
     }
-    let Term::Const(name, _) = head else {
-        return Err(refuse());
-    };
-    if **name != **data || mentions_local(result) {
+    // Ровно один аргумент: вызов подставляет вставка, и лишний параметр
+    // превратил бы её в частичное применение - тело `drop` не выполнилось бы
+    // никогда. Результат не владеемый: иначе каждое закрытие заводило бы новый
+    // ресурс, которого никто не держит.
+    let returns_owned = name_head(result).is_some_and(|name| owned.owns(name));
+    if matches!(result.as_ref(), Term::Pi(..)) || returns_owned || mentions_local(result) {
         return Err(refuse());
     }
     Ok(())
+}
+
+/// Имя в голове спайна применения, если она константа.
+fn name_head(term: &Term) -> Option<&adamas_core::term::Name> {
+    let mut head = term;
+    while let Term::App(callee, _) = head {
+        head = callee;
+    }
+    match head {
+        Term::Const(name, _) => Some(name),
+        _ => None,
+    }
 }
 
 /// Ссылается ли терм хоть на одно локальное связывание.

@@ -81,6 +81,12 @@ impl Owned {
         self.types.get(head(ty)?).copied()
     }
 
+    /// Объявлен ли тип с этим именем владеемым.
+    #[must_use]
+    pub fn owns(&self, name: &str) -> bool {
+        self.types.contains_key(name)
+    }
+
     /// Деструктор типа, стоящего головой написанного.
     #[must_use]
     pub fn destructor(&self, ty: &Expr) -> Option<&Symbol> {

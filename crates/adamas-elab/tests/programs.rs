@@ -733,6 +733,89 @@ fn a_resource_without_a_destructor_is_refused() {
 }
 
 #[test]
+fn a_field_with_ownership_requires_an_owning_type() {
+    // Обёртка из обычного `data` отмывала бы владение: её связывания `ω`,
+    // разбор идёт при `r = ω`, и поле кратности `1` приходит в ветвь как `ω` -
+    // ресурс оказывается снаружи без линейности (§10 вопрос 70).
+    let preamble = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+both : (1 x : Bool) -> (1 y : Bool) -> Bool
+both x y = x
+"
+    );
+    let error = refused(&format!(
+        "{preamble}\ndata Wrap where\n  MkWrap : File -> Wrap\n"
+    ));
+    assert!(
+        matches!(error, ElabError::OwnedField { .. }),
+        "получено {error:?}"
+    );
+
+    // Обёртка остаётся выразимой - её объявляют `unique data`, и тогда разбор
+    // идёт при `r = 1`, а поле остаётся линейным.
+    let wrapper = format!(
+        "{preamble}
+unique data Wrap where
+  MkWrap : File -> Wrap
+
+closeOnce : Wrap -> Bool
+closeOnce (MkWrap h) = drop h
+"
+    );
+    assert!(program(&wrapper).lookup("closeOnce").is_some());
+    let twice =
+        format!("{wrapper}\ntwice : Wrap -> Bool\ntwice (MkWrap h) = both (drop h) (drop h)\n");
+    assert!(
+        matches!(refused(&twice), ElabError::Core { .. }),
+        "линейное поле не расходуется дважды"
+    );
+}
+
+#[test]
+fn a_lambda_does_not_capture_an_owned_binding() {
+    // Замыкание переживает scope: вернув его, вызывающий получает ω-значение,
+    // каждый вызов которого расходует один и тот же ресурс. Ядро этого не
+    // видит - одноразовость применения в типе стрелки не записана.
+    let preamble = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}"
+    );
+    let error = refused(&format!(
+        "{preamble}\nmkCloser : File -> Bool -> Bool\nmkCloser h = \\x -> drop h\n"
+    ));
+    assert!(
+        matches!(error, ElabError::OwnedCapture { .. }),
+        "получено {error:?}"
+    );
+
+    // Свой параметр захватом не является, и ресурс, которого лямбда не
+    // касается, ей не мешает.
+    let allowed = format!(
+        "{preamble}
+own : File -> Bool
+own = \\h -> True
+
+beside : File -> Bool -> Bool
+beside h = \\b -> b
+"
+    );
+    let signature = program(&allowed);
+    assert_eq!(drops(&signature, "own"), 1, "свой параметр закрывается");
+    assert_eq!(
+        drops(&signature, "beside"),
+        1,
+        "чужой ресурс закрыт снаружи"
+    );
+}
+
+#[test]
 fn the_consumption_multiplicity_is_outside_conversion() {
     // `r` - учётная аннотация, а не часть вычисления: ι-редукция её не
     // смотрит, и два разбора, различающиеся только ею, дают одно значение.

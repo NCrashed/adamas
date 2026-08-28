@@ -43,6 +43,8 @@ pub fn is_reference(name: &str) -> bool {
 struct Argument {
     /// Кратность из `Pi`.
     mult: Mult,
+    /// Объявлена ли голова домена `unique` или `resource`.
+    owned: bool,
     /// Деструктор, если голова домена - ресурсный тип.
     drop: Option<Symbol>,
 }
@@ -58,10 +60,12 @@ impl Argument {
     }
 }
 
-/// Локальное связывание: имя и видно ли оно поиску (см. `hiding`).
+/// Локальное связывание: имя, видно ли оно поиску (см. `hiding`) и владеет ли
+/// оно (§3.3) - последнее решает, вправе ли его захватить лямбда.
 struct Bound {
     name: Symbol,
     visible: bool,
+    owned: bool,
 }
 
 impl Bound {
@@ -69,6 +73,14 @@ impl Bound {
         Self {
             name: Rc::clone(name),
             visible: true,
+            owned: false,
+        }
+    }
+
+    fn owning(name: &Symbol, owned: bool) -> Self {
+        Self {
+            owned,
+            ..Self::visible(name)
         }
     }
 }
@@ -172,10 +184,31 @@ impl<'a> Elaborator<'a> {
 
     /// Выполняет `body` под связыванием `name`.
     fn under<T>(&mut self, name: &Symbol, body: impl FnOnce(&mut Self) -> T) -> T {
-        self.scope.push(Bound::visible(name));
+        self.owning(name, false, body)
+    }
+
+    /// То же, но связывание помечено владеющим (§3.3).
+    fn owning<T>(&mut self, name: &Symbol, owned: bool, body: impl FnOnce(&mut Self) -> T) -> T {
+        self.scope.push(Bound::owning(name, owned));
         let outcome = body(self);
         self.scope.pop();
         outcome
+    }
+
+    /// Владеющее связывание извне, упомянутое в теле лямбды.
+    ///
+    /// Замыкание переживает scope, в котором ресурс связан: вернув его,
+    /// вызывающий получает ω-значение, каждый вызов которого расходует один и
+    /// тот же ресурс (§3.3, `mkCloser`). Ядро этого не видит - одноразовость
+    /// применения в типе стрелки не записана, - поэтому правило стоит здесь и
+    /// сформулировано грубее нужного: захват запрещён вовсе, а не только
+    /// уезжающий из scope.
+    fn captured(&self, body: &Expr) -> Option<&Symbol> {
+        self.scope
+            .iter()
+            .rev()
+            .find(|bound| bound.visible && bound.owned && live::mentions(&bound.name, body))
+            .map(|bound| &bound.name)
     }
 
     /// Выполняет `body`, спрятав `count` последних связываний.
@@ -310,7 +343,15 @@ impl<'a> Elaborator<'a> {
                 ))
             }
             ExprKind::Pi { binders, codomain } => self.pi(binders, codomain, default),
-            ExprKind::Lam { params, body } => self.lam(params, body, &expected),
+            ExprKind::Lam { params, body } => {
+                if let Some(name) = self.captured(body) {
+                    return Err(ElabError::OwnedCapture {
+                        name: Rc::clone(name),
+                        span: expr.span,
+                    });
+                }
+                self.lam(params, body, &expected)
+            }
             ExprKind::Block(block) => self.block(block),
             ExprKind::Chain(chain) => self.chain(chain, expr.span),
 
@@ -419,7 +460,8 @@ impl<'a> Elaborator<'a> {
             return self.expr(codomain, default);
         };
         let domain = self.hiding(*siblings, |inner| inner.expr(ty, Mult::Many))?;
-        let body = self.under(name, |inner| inner.pi_flat(rest, codomain, default))?;
+        let owns = self.owned.of(ty).is_some();
+        let body = self.owning(name, owns, |inner| inner.pi_flat(rest, codomain, default))?;
         Ok(Term::Pi(
             *mult,
             CoreName::from(&**name),
@@ -492,7 +534,10 @@ impl<'a> Elaborator<'a> {
             .map_or((Mult::Many, expected), |(argument, rest)| {
                 (argument.mult, rest)
             });
-        let inner = self.under(&name, |inner| inner.lam_params(rest, body, deeper, drops))?;
+        let owns = expected.first().is_some_and(|argument| argument.owned);
+        let inner = self.owning(&name, owns, |inner| {
+            inner.lam_params(rest, body, deeper, drops)
+        })?;
         Ok(Term::Lam(mult, CoreName::from(&*name), Rc::new(inner)))
     }
 
@@ -609,13 +654,14 @@ impl<'a> Elaborator<'a> {
             && !live::in_bindings_body(&binding.name.text, tail, rest)
             && self.owned.destructor(ty).is_some();
         let drop = closes.then(|| self.owned.destructor(ty).cloned()).flatten();
+        let owns = self.owned.of(ty).is_some();
         let ty = self.typing(|inner| inner.expr(ty, Mult::Many))?;
         // Аннотация `let` - тот же написанный тип, и лямбда значения берёт
         // кратности у него.
         self.expected = pi_arguments(&ty, self.owned);
         let value = self.expr(&binding.body, Mult::Many)?;
         let born = u32::try_from(self.scope.len()).unwrap_or(u32::MAX);
-        let body = self.under(&binding.name.text, |inner| {
+        let body = self.owning(&binding.name.text, owns, |inner| {
             if let Some(drop) = drop {
                 closing.push((born, drop));
             }
@@ -776,13 +822,25 @@ impl<'a> Elaborator<'a> {
             .map(|pattern| self.pattern(pattern))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Владеющим считается только связывающий паттерн верхнего уровня: у
+        // него тип виден по спайну написанного, а тип поля живёт в объявлении
+        // конструктора и элаборации не виден.
         let mut bound = Vec::new();
-        for pattern in &patterns {
+        for (position, pattern) in patterns.iter().enumerate() {
+            let owns = matches!(pattern, CorePattern::Var(_))
+                && self.declared.get(position).is_some_and(|it| it.owned);
+            let from = bound.len();
             collect(pattern, &mut bound);
+            if owns {
+                for name in &mut bound[from..] {
+                    name.1 = true;
+                }
+            }
         }
         let closing = self.closing_arguments(clause, &patterns, bound.len());
         let depth = self.scope.len();
-        self.scope.extend(bound.iter().map(Bound::visible));
+        self.scope
+            .extend(bound.iter().map(|(name, owns)| Bound::owning(name, *owns)));
         // Паттерны сняли первые связывания написанного типа; остаток спайна -
         // тем лямбдам, которыми клауза продолжается.
         self.expected = self
@@ -875,12 +933,14 @@ fn pi_arguments(ty: &Term, owned: &Owned) -> Vec<Argument> {
         while let Term::App(callee, _) = head {
             head = callee;
         }
+        let name = match head {
+            Term::Const(name, _) => Some(name),
+            _ => None,
+        };
         found.push(Argument {
             mult: *mult,
-            drop: match head {
-                Term::Const(name, _) => owned.destructor_of(name).cloned(),
-                _ => None,
-            },
+            owned: name.is_some_and(|name| owned.owns(name)),
+            drop: name.and_then(|name| owned.destructor_of(name)).cloned(),
         });
         current = codomain;
     }
@@ -916,9 +976,9 @@ fn repeated<'a>(pattern: &'a Pattern, seen: &mut Vec<&'a ast::Name>) -> Result<(
 }
 
 /// Переменные паттерна слева направо в глубину.
-fn collect(pattern: &CorePattern, bound: &mut Vec<Symbol>) {
+fn collect(pattern: &CorePattern, bound: &mut Vec<(Symbol, bool)>) {
     match pattern {
-        CorePattern::Var(name) => bound.push(Rc::from(&**name)),
+        CorePattern::Var(name) => bound.push((Rc::from(&**name), false)),
         CorePattern::Constructor(_, fields) => {
             for field in fields {
                 collect(field, bound);

@@ -404,6 +404,40 @@ fn destructor_shape(ty: &Term, data: &Symbol, owned: &Owned, span: Span) -> Resu
     Ok(())
 }
 
+/// Поле владеемого типа у обычного `data` (§10 вопрос 70).
+///
+/// Обёртка отмывала бы владение: `Wrap` - обычный тип, связывания его `ω`,
+/// разбор идёт при `r = ω`, и поле кратности `1` приходит в ветвь как `ω`.
+/// Ресурс оказывался бы снаружи без всякой линейности - и закрывался дважды.
+/// Обёртка остаётся выразимой, но объявляется `unique data`: тогда её
+/// связывания линейны, разбор идёт при `r = 1`, и поле остаётся линейным.
+///
+/// Смотрит на голову написанного, как и всё правило владения, поэтому ресурс
+/// под переменной типа сюда не попадает - названная цена §3.3.
+fn owned_field(
+    ty: &Term,
+    owned: &Owned,
+    data: &ast::Data,
+    constructor: &ast::Constructor,
+) -> Result<(), ElabError> {
+    if data.unique {
+        return Ok(());
+    }
+    let mut current = ty;
+    while let Term::Pi(_, _, domain, codomain) = current {
+        if let Some(field) = name_head(domain).filter(|name| owned.owns(name)) {
+            return Err(ElabError::OwnedField {
+                data: Rc::clone(&data.name.text),
+                constructor: Rc::clone(&constructor.name.text),
+                field: Rc::from(&**field),
+                span: constructor.ty.span,
+            });
+        }
+        current = codomain;
+    }
+    Ok(())
+}
+
 /// Имя в голове спайна применения, если она константа.
 fn name_head(term: &Term) -> Option<&adamas_core::term::Name> {
     let mut head = term;
@@ -490,6 +524,7 @@ fn declare_data(
             let group = vec![(Rc::clone(&data.name.text), Rc::clone(&levels))];
             let ty = Elaborator::with_group(signature, metas, owned, group)
                 .typing(|it| it.expr(&constructor.ty, Mult::One))?;
+            owned_field(&ty, owned, data, constructor)?;
             Ok((&*constructor.name.text, ty))
         })
         .collect::<Result<Vec<_>, ElabError>>()?;

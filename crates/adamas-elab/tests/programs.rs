@@ -733,6 +733,32 @@ fn a_resource_without_a_destructor_is_refused() {
 }
 
 #[test]
+fn the_consumption_multiplicity_is_outside_conversion() {
+    // `r` - учётная аннотация, а не часть вычисления: ι-редукция её не
+    // смотрит, и два разбора, различающиеся только ею, дают одно значение.
+    // Сравнивай их конвертируемость по `r` - и мотив, собранный при `r = 1`,
+    // перестал бы совпадать с написанным при `r = ω`.
+    let text = format!(
+        "{BASE}
+data P where
+  MkP : Bool -> P
+
+Q : Bool -> Type
+
+fstOne : (1 p : P) -> Bool
+fstOne (MkP b) = b
+
+fstMany : P -> Bool
+fstMany (MkP b) = b
+
+same : (0 p : P) -> (1 x : Q (fstOne p)) -> Q (fstMany p)
+same p x = x
+"
+    );
+    assert!(program(&text).lookup("same").is_some());
+}
+
+#[test]
 fn a_destructor_names_its_own_refusals() {
     // Оба случая раньше отвечали чужой причиной: голая сигнатура становилась
     // конструктором, и отказ приходил про отсутствующий `drop`, а второй

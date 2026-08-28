@@ -87,6 +87,32 @@ fn a_detached_signature_shows_both_places() {
 }
 
 #[test]
+fn refusals_about_ownership_read_as_sentences() {
+    // Владение - самая молодая часть среза, и её отказы автор видит чаще
+    // прочих. Снапшот держит их текст целиком: подчёркнут написанный
+    // фрагмент, а не объявление, и причина названа своя у каждого.
+    const RESOURCE: &str = "\
+resource File where
+  Open : Bool -> File
+  drop : File -> Bool
+  drop (Open b) = True
+
+";
+    let refusals = [
+        format!("{BASE}{RESOURCE}theFile : File\n"),
+        format!("{BASE}{RESOURCE}use : (ω h : File) -> Bool\n"),
+        format!(
+            "{BASE}resource Socket where\n  Conn : Bool -> Socket\n  drop : Socket -> Socket\n  drop (Conn b) = Conn b\n"
+        ),
+        format!(
+            "{BASE}{RESOURCE}resource Socket where\n  Conn : Bool -> Socket\n  drop : Socket -> Bool\n  drop (Conn b) = True\n"
+        ),
+    ];
+    let shown: Vec<String> = refusals.iter().map(|text| refusal(text)).collect();
+    insta::assert_snapshot!(shown.join("\n\n"));
+}
+
+#[test]
 fn a_refusal_inside_a_clause_shows_the_route() {
     // Путь показывается всегда: он объясняет, почему подчёркнуто это место, а
     // когда маршрут уходит в дерево разбора - остаётся единственным указанием.

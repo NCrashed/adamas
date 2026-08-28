@@ -80,6 +80,17 @@ pub fn elaborate_into(
         match &decl.kind {
             DeclKind::Signature { name, ty } => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
+                // Владение верхнего уровня не выражается: определение всегда
+                // `ω` (`sig.rs`: линейность на всю программу не считается), а
+                // §3.3 требует `1`. Без этого отказа постулат ресурсного типа
+                // - обычное ω-имя, и `drop` по нему зовётся сколько угодно раз.
+                if let Some(how) = owned.of(ty) {
+                    return Err(ElabError::OwnedTopLevel {
+                        owned: how,
+                        name: Rc::clone(&name.text),
+                        span: ty.span,
+                    });
+                }
                 let elaborated = Elaborator::new(signature, metas, owned)
                     .typing(|it| it.expr(ty, Mult::Many))?;
                 pending = Some(Pending {

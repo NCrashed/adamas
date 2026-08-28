@@ -693,6 +693,36 @@ mention : (0 a : Buffer) -> P a
 }
 
 #[test]
+fn an_owned_type_is_not_declared_at_the_top_level() {
+    // Определение верхнего уровня всегда `ω` - линейности на всю программу
+    // ядро не считает, - а §3.3 требует владеемому связыванию `1`. Постулат
+    // ресурсного типа поэтому был бы обычным ω-именем: `drop` по нему зовётся
+    // сколько угодно раз, то есть один объект закрывается дважды.
+    let preamble = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}"
+    );
+    for text in [
+        "\ntheFile : File\n",
+        "\ntheFile : File\ntheFile = Open True\n",
+        "\nunique data Buffer where\n  MkBuffer : Bool -> Buffer\n\nshared : Buffer\n",
+    ] {
+        let error = refused(&format!("{preamble}{text}"));
+        assert!(
+            matches!(error, ElabError::OwnedTopLevel { .. }),
+            "для {text:?} получено {error:?}"
+        );
+    }
+    // Функция, **возвращающая** ресурс, законна: голова написанного типа -
+    // стрелка, а связывания владеемого типа в ней нет.
+    let text = format!("{preamble}\nopenIt : Bool -> File\nopenIt b = Open b\n");
+    assert!(program(&text).lookup("openIt").is_some());
+}
+
+#[test]
 fn a_resource_without_a_destructor_is_refused() {
     let text = format!("{BASE}\nresource File where\n  Open : Bool -> File\n");
     let error = refused(&text);

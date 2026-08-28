@@ -201,6 +201,25 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Объявление верхнего уровня типа с владением.
+    ///
+    /// Определение и постулат всегда `ω` - линейность на всю программу не
+    /// считается (`sig::LinearDefinition`), - а §3.3 требует владеемому
+    /// связыванию `1`. Держать ресурс верхним уровнем поэтому нечем: имя
+    /// осталось бы обычным ω-именем, по которому `drop` зовётся сколько
+    /// угодно раз.
+    #[error(
+        "`{name}` объявлен типом с владением ({owned}): держать его может только связывание кратности 1"
+    )]
+    OwnedTopLevel {
+        /// Чем объявлен тип.
+        owned: Ownership,
+        /// Имя объявления.
+        name: Symbol,
+        /// Написанный тип.
+        span: Span,
+    },
+
     /// В теле `resource` нет `drop`.
     #[error("у ресурсного типа `{name}` нет `drop`: деструктор обязателен (§3.3)")]
     ResourceWithoutDrop {
@@ -324,6 +343,7 @@ impl ElabError {
             | Self::RepeatedBinding { span, .. }
             | Self::BlockWithoutValue { span }
             | Self::UnrestrictedOwned { span, .. }
+            | Self::OwnedTopLevel { span, .. }
             | Self::ResourceWithoutDrop { span, .. }
             | Self::ResourceMember { span, .. }
             | Self::DestructorShape { span, .. }

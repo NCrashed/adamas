@@ -121,6 +121,14 @@ pub(crate) struct Elaborator<'a> {
     expected: Vec<Argument>,
     /// Идёт ли элаборация в позиции типа - см. `typing`.
     types: bool,
+    /// Стоит ли ближайший подтерм в позиции применения: головой или
+    /// аргументом.
+    ///
+    /// §3.3 разрешает замыканию над владеющим связыванием ровно эти две
+    /// позиции - «может применяться и передаваться аргументом», - и запрещает
+    /// позицию возвращаемого значения. Позиция синтаксическая, поэтому и
+    /// хранится рядом с прочим, что элаборация знает по написанному.
+    applied: bool,
     /// Аргументы уровня, уже выданные имени в этом объявлении.
     ///
     /// Одно имя - один набор дырок, а не свежий на каждое вхождение. Иначе
@@ -159,6 +167,7 @@ impl<'a> Elaborator<'a> {
             declared: Vec::new(),
             expected: Vec::new(),
             types: false,
+            applied: false,
             instantiated: HashMap::new(),
         }
     }
@@ -197,12 +206,15 @@ impl<'a> Elaborator<'a> {
 
     /// Владеющее связывание извне, упомянутое в теле лямбды.
     ///
-    /// Замыкание переживает scope, в котором ресурс связан: вернув его,
-    /// вызывающий получает ω-значение, каждый вызов которого расходует один и
-    /// тот же ресурс (§3.3, `mkCloser`). Ядро этого не видит - одноразовость
-    /// применения в типе стрелки не записана, - поэтому правило стоит здесь и
-    /// сформулировано грубее нужного: захват запрещён вовсе, а не только
-    /// уезжающий из scope.
+    /// Сам по себе захват законен: §3.3 разрешает применить такую лямбду и
+    /// передать её аргументом. Незаконен **побег** - позиция возвращаемого
+    /// значения, где вызывающий получает ω-замыкание, каждый вызов которого
+    /// расходует один и тот же ресурс (§3.3, `mkCloser`). Ядро этого не видит:
+    /// одноразовость применения в типе стрелки не записана.
+    ///
+    /// Аргументная позиция ядру, наоборот, видна: замыкание в ω-параметре
+    /// расходует захваченное ω раз, и отказ приходит на связывании. Поэтому
+    /// проверка здесь смотрит только на позицию.
     fn captured(&self, body: &Expr) -> Option<&Symbol> {
         self.scope
             .iter()
@@ -307,6 +319,9 @@ impl<'a> Elaborator<'a> {
         // Кратности ждут ближайшую лямбду и только её: подтерм, до которого
         // спустились иначе, написанным типом не накрыт.
         let expected = std::mem::take(&mut self.expected);
+        // То же с позицией: её выставляет применение, и достаётся она
+        // ближайшему подтерму, а не всему, что под ним.
+        let applied = std::mem::take(&mut self.applied);
         match &expr.kind {
             ExprKind::Name(name) => self.name(name),
             // Спайн собирается циклом. Рекурсия по `callee` уходила на глубину
@@ -320,8 +335,12 @@ impl<'a> Elaborator<'a> {
                     arguments.push(&**argument);
                     head = callee;
                 }
+                // Голова применяется, аргументы передаются - обе позиции
+                // §3.3 разрешает замыканию над владеющим связыванием.
+                self.applied = true;
                 let mut term = self.expr(head, Mult::Many)?;
                 for argument in arguments.into_iter().rev() {
+                    self.applied = true;
                     term = Term::App(Rc::new(term), Rc::new(self.expr(argument, Mult::Many)?));
                 }
                 Ok(term)
@@ -344,7 +363,7 @@ impl<'a> Elaborator<'a> {
             }
             ExprKind::Pi { binders, codomain } => self.pi(binders, codomain, default),
             ExprKind::Lam { params, body } => {
-                if let Some(name) = self.captured(body) {
+                if let (false, Some(name)) = (applied, self.captured(body)) {
                     return Err(ElabError::OwnedCapture {
                         name: Rc::clone(name),
                         span: expr.span,
@@ -822,25 +841,14 @@ impl<'a> Elaborator<'a> {
             .map(|pattern| self.pattern(pattern))
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Владеющим считается только связывающий паттерн верхнего уровня: у
-        // него тип виден по спайну написанного, а тип поля живёт в объявлении
-        // конструктора и элаборации не виден.
-        let mut bound = Vec::new();
-        for (position, pattern) in patterns.iter().enumerate() {
-            let owns = matches!(pattern, CorePattern::Var(_))
-                && self.declared.get(position).is_some_and(|it| it.owned);
-            let from = bound.len();
-            collect(pattern, &mut bound);
-            if owns {
-                for name in &mut bound[from..] {
-                    name.1 = true;
-                }
-            }
-        }
-        let closing = self.closing_arguments(clause, &patterns, bound.len());
+        // Тип связывания виден и у аргумента верхнего уровня (по спайну
+        // написанного), и у поля (по объявлению конструктора), поэтому
+        // владение и закрытие считаются одним проходом по паттернам.
+        let bound = self.clause_variables(clause, &patterns);
+        let closing = closing_of(&bound);
         let depth = self.scope.len();
         self.scope
-            .extend(bound.iter().map(|(name, owns)| Bound::owning(name, *owns)));
+            .extend(bound.iter().map(|it| Bound::owning(&it.name, it.owned)));
         // Паттерны сняли первые связывания написанного типа; остаток спайна -
         // тем лямбдам, которыми клауза продолжается.
         self.expected = self
@@ -857,46 +865,81 @@ impl<'a> Elaborator<'a> {
         })
     }
 
-    /// Аргументы клаузы, которые она обязана закрыть сама.
+    /// Переменные паттернов клаузы в порядке связывания.
     ///
-    /// Только связывающий паттерн верхнего уровня: у него тип виден по спайну
-    /// написанного. Ресурс, добытый разбором конструктора, сюда не попадает -
-    /// его тип живёт в объявлении конструктора, и отвечает за него рекурсия
-    /// `drop` по полям (§3.3), которой ещё нет.
-    ///
-    /// `_` закрывается всегда: имени у него нет, упоминанию взяться неоткуда.
-    ///
-    /// Порядок - LIFO: последнее связывание закрывается первым, поэтому список
-    /// идёт от последнего аргумента к первому, а индексы дописываются на
-    /// глубину уже вставленного.
-    fn closing_arguments(
-        &self,
-        clause: &ast::Clause,
-        patterns: &[CorePattern],
-        bound: usize,
-    ) -> Vec<(u32, Symbol)> {
-        let mut found: Vec<(u32, Symbol)> = Vec::new();
-        let mut offset = 0usize;
+    /// Проход один на оба вопроса - владеет ли связывание и закрывается ли, -
+    /// потому что оба решает **тип связывания**, а он известен на каждой
+    /// глубине: у аргумента верхнего уровня по спайну написанного, у поля по
+    /// объявлению конструктора. Отсюда рекурсия `drop` по полям (§3.3):
+    /// `f (Wrap h) = …` закрывает `h` так же, как закрыл бы аргумент.
+    fn clause_variables(&self, clause: &ast::Clause, patterns: &[CorePattern]) -> Vec<BoundVar> {
+        let mut found = Vec::new();
         for (position, (written, pattern)) in clause.patterns.iter().zip(patterns).enumerate() {
-            let mut variables = Vec::new();
-            collect(pattern, &mut variables);
-            let drop = self.declared.get(position).and_then(Argument::closes);
-            let mentioned = match (&written.kind, drop) {
-                (_, None) => true,
-                (PatternKind::Name(name), _) if !is_reference(&name.text) => {
-                    live::mentions(&name.text, &clause.body)
-                }
-                (PatternKind::Wildcard, _) => false,
-                _ => true,
-            };
-            if let (false, Some(drop)) = (mentioned, drop) {
-                let index = u32::try_from(bound - 1 - offset).unwrap_or(u32::MAX);
-                found.push((index, drop.clone()));
-            }
-            offset += variables.len();
+            self.pattern_variables(
+                Some(written),
+                pattern,
+                self.declared.get(position),
+                &clause.body,
+                &mut found,
+            );
         }
-        lifo(&mut found);
         found
+    }
+
+    /// То же для одного паттерна, вглубь.
+    ///
+    /// `written` теряется там, где у ядра формы нет вовсе; тогда упоминание
+    /// считается состоявшимся - направление ошибки то же, что и везде:
+    /// пропущенный `drop` вместо лишнего.
+    fn pattern_variables(
+        &self,
+        written: Option<&Pattern>,
+        compiled: &CorePattern,
+        argument: Option<&Argument>,
+        body: &Expr,
+        found: &mut Vec<BoundVar>,
+    ) {
+        match compiled {
+            CorePattern::Var(name) => {
+                // `_` закрывается всегда: имени у него нет, упоминанию взяться
+                // неоткуда.
+                let mentioned = match written.map(|it| &it.kind) {
+                    Some(PatternKind::Wildcard) => false,
+                    Some(PatternKind::Name(written)) if !is_reference(&written.text) => {
+                        live::mentions(&written.text, body)
+                    }
+                    _ => true,
+                };
+                found.push(BoundVar {
+                    name: Rc::from(&**name),
+                    owned: argument.is_some_and(|it| it.owned),
+                    drop: argument
+                        .and_then(Argument::closes)
+                        .filter(|_| !mentioned)
+                        .cloned(),
+                });
+            }
+            CorePattern::Constructor(constructor, fields) => {
+                let types = self
+                    .signature
+                    .lookup(constructor)
+                    .map(|definition| pi_arguments(&definition.ty, self.owned))
+                    .unwrap_or_default();
+                let inner = match written.map(|it| &it.kind) {
+                    Some(PatternKind::App { fields, .. }) => fields.as_slice(),
+                    _ => &[],
+                };
+                for (position, field) in fields.iter().enumerate() {
+                    self.pattern_variables(
+                        inner.get(position),
+                        field,
+                        types.get(position),
+                        body,
+                        found,
+                    );
+                }
+            }
+        }
     }
 
     /// Оборачивает тело цепочкой вставленных `drop`.
@@ -911,6 +954,30 @@ impl<'a> Elaborator<'a> {
         let drop = drop.clone();
         self.closing(Some(&drop), *index, |it| it.closing_all(rest, body))
     }
+}
+
+/// Переменная паттерна: имя, владение и деструктор, если её надо закрыть.
+struct BoundVar {
+    name: Symbol,
+    owned: bool,
+    drop: Option<Symbol>,
+}
+
+/// Закрываемые связывания в порядке вставки.
+///
+/// Индекс - расстояние от конца списка связанных: последняя переменная стоит
+/// ближе всех. Порядок - LIFO, как обещает §3.3 для вложенных scope.
+fn closing_of(bound: &[BoundVar]) -> Vec<(u32, Symbol)> {
+    let mut found: Vec<(u32, Symbol)> = bound
+        .iter()
+        .enumerate()
+        .filter_map(|(position, variable)| {
+            let index = u32::try_from(bound.len() - 1 - position).unwrap_or(u32::MAX);
+            variable.drop.clone().map(|drop| (index, drop))
+        })
+        .collect();
+    lifo(&mut found);
+    found
 }
 
 /// Переставляет закрываемые в порядок вставки: LIFO плюс поправка на глубину.
@@ -973,16 +1040,4 @@ fn repeated<'a>(pattern: &'a Pattern, seen: &mut Vec<&'a ast::Name>) -> Result<(
         _ => {}
     }
     Ok(())
-}
-
-/// Переменные паттерна слева направо в глубину.
-fn collect(pattern: &CorePattern, bound: &mut Vec<(Symbol, bool)>) {
-    match pattern {
-        CorePattern::Var(name) => bound.push((Rc::from(&**name), false)),
-        CorePattern::Constructor(_, fields) => {
-            for field in fields {
-                collect(field, bound);
-            }
-        }
-    }
 }

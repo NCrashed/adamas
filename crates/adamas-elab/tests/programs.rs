@@ -1105,3 +1105,89 @@ arguments h g = True
         body(&signature, "arguments")
     ));
 }
+
+#[test]
+fn a_resource_field_is_closed_by_the_clause_that_took_it_apart() {
+    // §3.3: уничтожение значения влечёт уничтожение его полей. Тип поля живёт
+    // в объявлении конструктора, и оттуда же берётся его владение - поэтому
+    // разобранное поле закрывается тем же правилом, что и аргумент.
+    let text = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+unique data Wrapped where
+  Wrap : File -> Wrapped
+
+forgotten : Wrapped -> Bool
+forgotten (Wrap h) = True
+
+used : Wrapped -> Bool
+used (Wrap h) = drop h
+
+nested : Wrapped -> Bool
+nested (Wrap (Open b)) = closeFile b
+"
+    );
+    let signature = program(&text);
+    assert_eq!(drops(&signature, "forgotten"), 1, "поле разобрано и забыто");
+    assert_eq!(
+        drops(&signature, "used"),
+        1,
+        "написанный `drop` не удваивается"
+    );
+    assert_eq!(
+        drops(&signature, "nested"),
+        0,
+        "разобранный до конца ресурс закрывать нечего: полей ресурсного типа в нём нет"
+    );
+}
+
+#[test]
+fn a_closure_over_an_owned_binding_may_be_passed_but_not_returned() {
+    // §3.3, scope-bound: захватившая лямбда применяется и передаётся
+    // аргументом, но в позиции возвращаемого значения не появляется.
+    let preamble = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+call : (1 k : Bool -> Bool) -> Bool
+call k = k True
+
+share : (ω k : Bool -> Bool) -> Bool
+share k = k True
+"
+    );
+
+    let signature = program(&format!(
+        "{preamble}\npassed : File -> Bool\npassed h = call (\\b -> drop h)\n"
+    ));
+    assert!(
+        signature.lookup("passed").is_some(),
+        "аргументная позиция законна"
+    );
+
+    let escaped = refused(&format!(
+        "{preamble}\nescaped : File -> (Bool -> Bool)\nescaped h = \\b -> drop h\n"
+    ));
+    assert!(
+        matches!(escaped, ElabError::OwnedCapture { .. }),
+        "позиция возвращаемого значения - побег: {escaped:?}"
+    );
+
+    // ω-параметр ловит уже ядро, и отказ приходит на связывании: замыкание,
+    // вызываемое сколько угодно раз, расходует один ресурс столько же.
+    let shared = refused(&format!(
+        "{preamble}\nwide : File -> Bool\nwide h = share (\\b -> drop h)\n"
+    ));
+    let Some(core) = shared.core() else {
+        panic!("ожидался отказ ядра, получено {shared:?}");
+    };
+    assert!(
+        matches!(core.kind, ErrorKind::UsageViolation { .. }),
+        "получено {core:?}"
+    );
+}

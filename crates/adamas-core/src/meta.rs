@@ -360,8 +360,8 @@ impl Generalization {
             // Дырка терма своих уровней не носит: они живут в её типе, а он
             // хранится отдельно и обобщается вместе с определением.
             Term::Var(_) | Term::Meta(_) => {}
-            Term::Universe(level) => self.collect_level(metas, level),
-            Term::Record(fields) => {
+            Term::Universe(level) | Term::RowKind(level) => self.collect_level(metas, level),
+            Term::Record(fields) | Term::Row(fields) => {
                 for field in fields.iter() {
                     self.collect_term(metas, &field.ty);
                 }
@@ -437,6 +437,24 @@ impl Generalization {
         }
     }
 
+    /// Поля с подставленными параметрами уровня.
+    fn apply_fields(&self, metas: &Metas, fields: &crate::term::Fields) -> crate::term::Fields {
+        crate::term::Fields {
+            fields: fields
+                .iter()
+                .map(|field| crate::term::Field {
+                    name: Rc::clone(&field.name),
+                    mult: field.mult,
+                    ty: Rc::new(self.apply_term(metas, &field.ty)),
+                })
+                .collect(),
+            tail: fields
+                .tail
+                .as_ref()
+                .map(|tail| Rc::new(self.apply_term(metas, tail))),
+        }
+    }
+
     /// То же по всем уровням терма.
     #[must_use]
     pub fn apply_term(&self, metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
@@ -446,16 +464,9 @@ impl Generalization {
         match term {
             Term::Var(_) | Term::Meta(_) => term.clone(),
             Term::Universe(level) => Term::Universe(self.apply_level(metas, level)),
-            Term::Record(fields) => Term::Record(
-                fields
-                    .iter()
-                    .map(|field| crate::term::Field {
-                        name: Rc::clone(&field.name),
-                        mult: field.mult,
-                        ty: recur(&field.ty),
-                    })
-                    .collect(),
-            ),
+            Term::RowKind(level) => Term::RowKind(self.apply_level(metas, level)),
+            Term::Record(fields) => Term::Record(self.apply_fields(metas, fields)),
+            Term::Row(fields) => Term::Row(self.apply_fields(metas, fields)),
             Term::Object(fields) => Term::Object(
                 fields
                     .iter()
@@ -517,8 +528,10 @@ pub fn unsolved_term_meta(metas: &Metas, term: &Term) -> Option<TermMeta> {
     let recur = |inner: &Rc<Term>| unsolved_term_meta(metas, inner);
     match term {
         Term::Meta(meta) => metas.term_solution(*meta).is_none().then_some(*meta),
-        Term::Var(_) | Term::Universe(_) | Term::Const(..) => None,
-        Term::Record(fields) => fields.iter().find_map(|field| recur(&field.ty)),
+        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Const(..) => None,
+        Term::Record(fields) | Term::Row(fields) => {
+            fields.iter().find_map(|field| recur(&field.ty))
+        }
         Term::Object(fields) => fields.iter().find_map(|(_, value)| recur(value)),
         Term::Project(record, _) => recur(record),
         Term::Lam(_, _, body) => recur(body),
@@ -564,8 +577,8 @@ pub fn unsolved_level_meta(metas: &Metas, term: &crate::term::Term) -> Option<Le
 
     match term {
         Term::Var(_) | Term::Meta(_) => None,
-        Term::Universe(level) => in_level(metas, level),
-        Term::Record(fields) => fields
+        Term::Universe(level) | Term::RowKind(level) => in_level(metas, level),
+        Term::Record(fields) | Term::Row(fields) => fields
             .iter()
             .find_map(|field| unsolved_level_meta(metas, &field.ty)),
         Term::Object(fields) => fields
@@ -617,7 +630,7 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
         // записали, и уровни внутри него могли решиться позже. Без этого
         // прохода дырка уровня уезжает в определение живой, а обобщение её не
         // видит - оно смотрит уже зонканный тип.
-        Term::Record(fields) => Term::Record(
+        Term::Record(fields) | Term::Row(fields) => Term::Record(
             fields
                 .iter()
                 .map(|field| crate::term::Field {
@@ -639,6 +652,7 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
             None => term.clone(),
         },
         Term::Universe(level) => Term::Universe(metas.zonk(level)),
+        Term::RowKind(level) => Term::RowKind(metas.zonk(level)),
         Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), recur(body)),
         Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
         Term::Pi(binder, name, domain, row, codomain) => Term::Pi(

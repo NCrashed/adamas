@@ -97,8 +97,8 @@ pub fn is_total(signature: &Signature, name: &Name, definition: &Definition) -> 
 fn calls_a_partial_definition(signature: &Signature, name: &Name, term: &Term) -> bool {
     let recur = |inner| calls_a_partial_definition(signature, name, inner);
     match term {
-        Term::Var(_) | Term::Universe(_) | Term::Meta(_) => false,
-        Term::Record(fields) => fields.iter().any(|field| recur(&field.ty)),
+        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Meta(_) => false,
+        Term::Record(fields) | Term::Row(fields) => fields.iter().any(|field| recur(&field.ty)),
         Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
         Term::Project(record, _) => recur(record),
         Term::Const(other, _) => {
@@ -166,11 +166,11 @@ impl Walk<'_> {
         match term {
             // Дырка размера не несёт и вызовом не является: она замкнута, а
             // зависимость от контекста выражена применениями вокруг неё.
-            Term::Var(_) | Term::Universe(_) | Term::Meta(_) => {}
+            Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Meta(_) => {}
 
             // Запись размера не несёт: поля - типы и значения, а уменьшение
             // считается по разбору. Обход нужен, чтобы вызовы внутри нашлись.
-            Term::Record(fields) => {
+            Term::Record(fields) | Term::Row(fields) => {
                 for field in fields.iter() {
                     self.term(sizes, &field.ty);
                 }

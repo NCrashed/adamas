@@ -1029,7 +1029,11 @@ fn unfolded(field: &Field) -> Term {
 fn has_negative_occurrence(term: &Term) -> bool {
     fn mentions_d(term: &Term) -> bool {
         match term {
-            Term::Record(_) | Term::Object(_) | Term::Project(..) => {
+            Term::Record(_)
+            | Term::Row(_)
+            | Term::RowKind(_)
+            | Term::Object(_)
+            | Term::Project(..) => {
                 unreachable!("генератор термов записей не порождает")
             }
             Term::Const(name, _) => &**name == "D",

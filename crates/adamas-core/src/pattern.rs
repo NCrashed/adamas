@@ -1663,15 +1663,17 @@ fn depends_term(term: &Term, depth: u32, size: u32, levels: &[u32]) -> bool {
     let under = |inner: &Rc<Term>| depends_term(inner, depth + 1, size, levels);
     match term {
         Term::Var(Index(index)) => *index >= depth && levels.contains(&(size + depth - 1 - index)),
-        Term::Universe(_) | Term::Const(..) | Term::Meta(_) => false,
-        Term::Record(fields) => fields.iter().enumerate().any(|(index, field)| {
-            depends_term(
-                &field.ty,
-                depth + u32::try_from(index).unwrap_or(0),
-                size,
-                levels,
-            )
-        }),
+        Term::Universe(_) | Term::RowKind(_) | Term::Const(..) | Term::Meta(_) => false,
+        Term::Record(fields) | Term::Row(fields) => {
+            fields.iter().enumerate().any(|(index, field)| {
+                depends_term(
+                    &field.ty,
+                    depth + u32::try_from(index).unwrap_or(0),
+                    size,
+                    levels,
+                )
+            })
+        }
         Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
         Term::Project(record, _) => recur(record),
         Term::Lam(_, _, body) => under(body),
@@ -1808,14 +1810,16 @@ fn well_scoped(term: &Term, binders: u32) -> bool {
     fn go(term: &Term, depth: u32, binders: u32) -> bool {
         match term {
             Term::Var(Index(index)) => *index < depth + binders,
-            Term::Universe(_) | Term::Const(..) | Term::Meta(_) => true,
-            Term::Record(fields) => fields.iter().enumerate().all(|(index, field)| {
-                go(
-                    &field.ty,
-                    depth + u32::try_from(index).unwrap_or(0),
-                    binders,
-                )
-            }),
+            Term::Universe(_) | Term::RowKind(_) | Term::Const(..) | Term::Meta(_) => true,
+            Term::Record(fields) | Term::Row(fields) => {
+                fields.iter().enumerate().all(|(index, field)| {
+                    go(
+                        &field.ty,
+                        depth + u32::try_from(index).unwrap_or(0),
+                        binders,
+                    )
+                })
+            }
             Term::Object(fields) => fields.iter().all(|(_, value)| go(value, depth, binders)),
             Term::Project(record, _) => go(record, depth, binders),
             Term::Lam(_, _, body) => go(body, depth + 1, binders),
@@ -1864,7 +1868,7 @@ fn rewrite<F: Fn(u32) -> Term>(term: &Term, depth: u32, from: u32, map: &F) -> T
             let level = from + depth - 1 - index;
             shift(&map(level), depth)
         }
-        Term::Record(fields) => Term::Record(
+        Term::Record(fields) | Term::Row(fields) => Term::Record(
             fields
                 .iter()
                 .enumerate()
@@ -1887,7 +1891,7 @@ fn rewrite<F: Fn(u32) -> Term>(term: &Term, depth: u32, from: u32, map: &F) -> T
                 .collect(),
         ),
         Term::Project(record, name) => Term::Project(recur(record), Rc::clone(name)),
-        Term::Universe(_) | Term::Const(..) | Term::Meta(_) => term.clone(),
+        Term::Universe(_) | Term::RowKind(_) | Term::Const(..) | Term::Meta(_) => term.clone(),
         Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), under(body)),
         Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
         Term::Pi(binder, name, domain, row, codomain) => Term::Pi(
@@ -1929,8 +1933,12 @@ fn shift(term: &Term, by: u32) -> Term {
         let under = |inner: &Rc<Term>| Rc::new(go(inner, depth + 1, by));
         match term {
             Term::Var(Index(index)) if *index >= depth => Term::Var(Index(index + by)),
-            Term::Var(_) | Term::Universe(_) | Term::Const(..) | Term::Meta(_) => term.clone(),
-            Term::Record(fields) => Term::Record(
+            Term::Var(_)
+            | Term::Universe(_)
+            | Term::RowKind(_)
+            | Term::Const(..)
+            | Term::Meta(_) => term.clone(),
+            Term::Record(fields) | Term::Row(fields) => Term::Record(
                 fields
                     .iter()
                     .enumerate()

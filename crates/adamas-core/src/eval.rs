@@ -22,7 +22,7 @@
 
 use std::rc::Rc;
 
-use crate::term::{Branch, Case, Field, Name, Term};
+use crate::term::{Branch, Case, Field, Fields, Name, Term};
 use crate::value::{Closure, Elim, Env, Head, Lvl, StuckBranch, StuckCase, Telescope, Value};
 
 impl Closure {
@@ -95,17 +95,14 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
             eval(&env.extend(value), body)
         }
 
-        // Вычисляется **одна** ветвь - та, что выбрана. Собрать застрявший
-        // разбор целиком значит вычислить мотив и все ветви, а у дерева
-        // разбора ветвь сама бывает разбором: цена растёт как `2^d` вместо
-        // `d`. Застрявший разбор собирается только когда он и правда застрял.
-        // Тип записи вычислением не раскрывается: поля живут телескопом, и
-        // вычислить тип поля можно только вместе со значениями предыдущих.
-        // Окружение поэтому захватывается целиком - как у замыкания.
-        Term::Record(fields) => Rc::new(Value::Record(Telescope {
-            env: env.clone(),
-            fields: Rc::clone(fields),
-        })),
+        Term::RowKind(level) => Rc::new(Value::RowKind(level.clone())),
+
+        // Ни тип записи, ни ряд вычислением не раскрываются: поля живут
+        // телескопом, и вычислить тип поля можно только вместе со значениями
+        // предыдущих. Окружение поэтому захватывается целиком - как у
+        // замыкания.
+        Term::Record(fields) => Rc::new(Value::Record(telescope(env, fields))),
+        Term::Row(fields) => Rc::new(Value::Row(telescope(env, fields))),
 
         Term::Object(fields) => Rc::new(Value::Object(
             fields
@@ -116,6 +113,10 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
 
         Term::Project(record, name) => project(&eval(env, record), name),
 
+        // Вычисляется **одна** ветвь - та, что выбрана. Собрать застрявший
+        // разбор целиком значит вычислить мотив и все ветви, а у дерева
+        // разбора ветвь сама бывает разбором: цена растёт как `2^d` вместо
+        // `d`. Застрявший разбор собирается только когда он и правда застрял.
         Term::Case(case) => {
             let scrutinee = eval(env, &case.scrutinee);
             let selected = match &*scrutinee {
@@ -132,6 +133,36 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
                 None => eliminate_case(&Rc::new(stuck_case(env, case)), &scrutinee),
             }
         }
+    }
+}
+
+/// Читает телескоп обратно - по одному полю, каждое под предыдущими.
+fn quote_fields(size: u32, telescope: &Telescope) -> Fields {
+    let mut earlier = Vec::with_capacity(telescope.fields().len());
+    let mut written = Vec::with_capacity(telescope.fields().len());
+    for (index, field) in telescope.fields().iter().enumerate() {
+        let ty = telescope.at(index, &earlier);
+        let depth = size + u32::try_from(index).unwrap_or(0);
+        written.push(Field {
+            name: Rc::clone(&field.name),
+            mult: field.mult,
+            ty: Rc::new(quote(depth, &ty)),
+        });
+        earlier.push(Value::var(Lvl(depth)));
+    }
+    // Хвост от полей не зависит: открытая запись зависимостей не имеет
+    // (§4.2, решение 2026-08-29), поэтому читается он на исходной глубине.
+    Fields {
+        fields: written.into(),
+        tail: telescope.tail().map(|tail| Rc::new(quote(size, &tail))),
+    }
+}
+
+/// Телескоп полей вместе с окружением, в котором их вычислять.
+fn telescope(env: &Env, fields: &Fields) -> Telescope {
+    Telescope {
+        env: env.clone(),
+        fields: fields.clone(),
     }
 }
 
@@ -287,23 +318,12 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
         // `max u 0` не отличался от `u`.
         Value::Universe(level) => Term::Universe(level.normalize()),
 
+        Value::RowKind(level) => Term::RowKind(level.normalize()),
+
         // Телескоп читается по одному полю: тип каждого следующего живёт под
         // предыдущими, и подставлять туда надо свежие переменные.
-        Value::Record(telescope) => {
-            let mut earlier = Vec::with_capacity(telescope.fields().len());
-            let mut written = Vec::with_capacity(telescope.fields().len());
-            for (index, field) in telescope.fields().iter().enumerate() {
-                let ty = telescope.at(index, &earlier);
-                let depth = size + u32::try_from(index).unwrap_or(0);
-                written.push(Field {
-                    name: Rc::clone(&field.name),
-                    mult: field.mult,
-                    ty: Rc::new(quote(depth, &ty)),
-                });
-                earlier.push(Value::var(Lvl(depth)));
-            }
-            Term::Record(written.into())
-        }
+        Value::Record(telescope) => Term::Record(quote_fields(size, telescope)),
+        Value::Row(telescope) => Term::Row(quote_fields(size, telescope)),
 
         Value::Object(fields) => Term::Object(
             fields

@@ -107,7 +107,7 @@ fn walk(signature: &Signature, owned: &Owned, term: &Term, depth: u32, found: &m
             walk(signature, owned, argument, depth, found);
         }
         Term::Lam(_, _, body) => walk(signature, owned, body, depth + 1, found),
-        Term::Record(fields) => {
+        Term::Record(fields) | Term::Row(fields) => {
             for (index, field) in fields.iter().enumerate() {
                 let depth = depth + u32::try_from(index).unwrap_or(0);
                 walk(signature, owned, &field.ty, depth, found);
@@ -140,7 +140,7 @@ fn walk(signature: &Signature, owned: &Owned, term: &Term, depth: u32, found: &m
                 walk(signature, owned, &branch.body, depth, found);
             }
         }
-        Term::Var(_) | Term::Universe(_) | Term::Const(..) | Term::Meta(_) => {}
+        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Const(..) | Term::Meta(_) => {}
     }
 }
 

@@ -12,7 +12,7 @@ use std::rc::Rc;
 use crate::level::Level;
 use crate::mult::Mult;
 use crate::row::Row;
-use crate::term::{Binder, Field, Index, Name, Term, TermMeta};
+use crate::term::{Binder, Field, Fields, Index, Name, Term, TermMeta};
 
 /// Уровень де Брёйна: сколько связываний отсчитать от начала контекста.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -193,6 +193,10 @@ pub enum Value {
     Record(Telescope),
     /// Значение записи. Зависимости здесь уже нет - поля вычислены.
     Object(Rc<[(Name, Rc<Value>)]>),
+    /// Сорт рядов `Row ℓ`.
+    RowKind(Level),
+    /// Ряд - тот же телескоп, но сортом он не тип, а ряд.
+    Row(Telescope),
     /// Универсум.
     Universe(Level),
 }
@@ -201,14 +205,27 @@ pub enum Value {
 #[derive(Clone, Debug)]
 pub struct Telescope {
     pub(crate) env: Env,
-    pub(crate) fields: Rc<[Field]>,
+    pub(crate) fields: Fields,
 }
 
 impl Telescope {
     /// Поля как они написаны - имена и кратности видны без вычисления.
     #[must_use]
     pub fn fields(&self) -> &[Field] {
-        &self.fields
+        &self.fields.fields
+    }
+
+    /// Хвост-row как значение, если запись открыта.
+    ///
+    /// Вычисляется в окружении телескопа и **не** под полями: открытая запись
+    /// зависимостей не имеет (§4.2, решение 2026-08-29), поэтому хвост от
+    /// полей не зависит.
+    #[must_use]
+    pub fn tail(&self) -> Option<Rc<Value>> {
+        self.fields
+            .tail
+            .as_ref()
+            .map(|tail| crate::eval::eval(&self.env, tail))
     }
 
     /// Тип поля `index` при уже известных значениях предыдущих полей.
@@ -267,7 +284,9 @@ impl fmt::Display for Value {
                 let (open, close) = binder.visibility.brackets();
                 write!(f, "{open}{} {name} : …{close} -> {row}…", binder.mult)
             }
-            Self::Record(telescope) => write!(f, "{{…{}}}", telescope.fields.len()),
+            Self::Record(telescope) => write!(f, "{{…{}}}", telescope.fields().len()),
+            Self::RowKind(level) => write!(f, "Row {level}"),
+            Self::Row(telescope) => write!(f, "{{|{}}}", telescope.fields().len()),
             Self::Object(fields) => write!(f, "{{={}}}", fields.len()),
             Self::Universe(level) => write!(f, "Type {level}"),
         }

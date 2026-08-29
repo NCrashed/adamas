@@ -102,7 +102,7 @@ fn any_term() -> BoxedStrategy<Term> {
 /// Все ли индексы терма попадают в область видимости.
 fn well_scoped(term: &Term, binders: u32) -> bool {
     match term {
-        Term::Record(_) | Term::Object(_) | Term::Project(..) => {
+        Term::Record(_) | Term::Row(_) | Term::RowKind(_) | Term::Object(_) | Term::Project(..) => {
             unreachable!("генератор термов записей не порождает")
         }
         Term::Var(Index(index)) => *index < binders,
@@ -130,7 +130,7 @@ fn well_scoped(term: &Term, binders: u32) -> bool {
 /// согласованность функции с самой собой.
 fn is_normal_form(term: &Term) -> bool {
     match term {
-        Term::Record(_) | Term::Object(_) | Term::Project(..) => {
+        Term::Record(_) | Term::Row(_) | Term::RowKind(_) | Term::Object(_) | Term::Project(..) => {
             unreachable!("генератор термов записей не порождает")
         }
         // Определение застревает так же, как переменная: обратное чтение его
@@ -152,7 +152,7 @@ fn is_normal_form(term: &Term) -> bool {
 /// Переименовывает все связывания - на семантику это влиять не должно.
 fn rename(term: &Term) -> Term {
     match term {
-        Term::Record(_) | Term::Object(_) | Term::Project(..) => {
+        Term::Record(_) | Term::Row(_) | Term::RowKind(_) | Term::Object(_) | Term::Project(..) => {
             unreachable!("генератор термов записей не порождает")
         }
         Term::Var(_) | Term::Universe(_) | Term::Const(..) | Term::Meta(_) => term.clone(),
@@ -199,7 +199,7 @@ fn wrap_in_redexes(term: &Term, budget: &mut u32) -> Term {
     };
 
     let rebuilt = match term {
-        Term::Record(_) | Term::Object(_) | Term::Project(..) => {
+        Term::Record(_) | Term::Row(_) | Term::RowKind(_) | Term::Object(_) | Term::Project(..) => {
             unreachable!("генератор термов записей не порождает")
         }
         Term::Var(_) | Term::Universe(_) | Term::Const(..) | Term::Meta(_) => term.clone(),

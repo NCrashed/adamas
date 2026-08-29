@@ -12,9 +12,10 @@ use std::rc::Rc;
 
 use adamas_core::check::{ErrorKind, check_closed, infer_closed};
 use adamas_core::eval::normalize;
+use adamas_core::level::Level;
 use adamas_core::mult::Mult;
 use adamas_core::sig::Signature;
-use adamas_core::term::{Field, Term};
+use adamas_core::term::{Field, Fields, Term};
 
 /// Поле кратности `1` - умолчание §4.1.
 fn field(name: &str, ty: Term) -> Field {
@@ -60,13 +61,13 @@ fn a_projection_computes() {
 fn a_record_lives_where_its_fields_do() {
     // Универсум записи - максимум по полям, как у `Pi`. `{ a : Type 0 }` живёт
     // в `Type 1`, потому что `Type 0` живёт там.
-    let ty = Term::Record(Rc::from([field("a", Term::universe(0))]));
+    let ty = Term::Record(Fields::closed(Rc::from([field("a", Term::universe(0))])));
     assert_eq!(typing(&ty).to_string(), "Type 1");
 
-    let higher = Term::Record(Rc::from([
+    let higher = Term::Record(Fields::closed(Rc::from([
         field("a", Term::universe(0)),
         field("b", Term::universe(3)),
-    ]));
+    ])));
     assert_eq!(typing(&higher).to_string(), "Type 4");
 }
 
@@ -75,10 +76,10 @@ fn the_type_of_a_later_field_sees_the_earlier_ones() {
     // Зависимое поле: `{ t : Type 2, x : t }`. Тип `x` - это **значение** поля
     // `t`, а не переменная, поэтому проверка записи подставляет туда уже
     // проверенное значение.
-    let ty = Term::Record(Rc::from([
+    let ty = Term::Record(Fields::closed(Rc::from([
         field("t", Term::universe(2)),
         field("x", Term::var(0)),
-    ]));
+    ])));
     let signature = Signature::default();
 
     // `t = Type 1` делает типом `x` именно `Type 1`, и `Type 0` его населяет.
@@ -99,10 +100,10 @@ fn a_projection_of_a_dependent_field_carries_the_earlier_ones() {
     // значения предыдущих полей у записи есть - это её же проекции. На
     // построенной записи это видно вычислением.
     let record = object(&[("t", Term::universe(1)), ("x", Term::universe(0))]);
-    let ty = Term::Record(Rc::from([
+    let ty = Term::Record(Fields::closed(Rc::from([
         field("t", Term::universe(2)),
         field("x", Term::var(0)),
-    ]));
+    ])));
     let signature = Signature::default();
     assert!(check_closed(&signature, &record, &ty).is_ok());
 
@@ -114,10 +115,10 @@ fn a_projection_of_a_dependent_field_carries_the_earlier_ones() {
 #[test]
 fn a_field_name_is_declared_once() {
     // Два поля с одним именем сделали бы проекцию неоднозначной.
-    let ty = Term::Record(Rc::from([
+    let ty = Term::Record(Fields::closed(Rc::from([
         field("a", Term::universe(0)),
         field("a", Term::universe(0)),
-    ]));
+    ])));
     let signature = Signature::default();
     let outcome = infer_closed(&signature, &ty);
     assert!(
@@ -149,11 +150,11 @@ fn a_missing_field_is_refused() {
 fn an_erased_field_has_no_value_to_take() {
     // Поле кратности `0` стёрто: значения у него в рантайме нет, и вынуть его
     // проекцией нельзя - то же правило, что у стёртой переменной.
-    let ty = Term::Record(Rc::from([Field {
+    let ty = Term::Record(Fields::closed(Rc::from([Field {
         name: "a".into(),
         mult: Mult::Zero,
         ty: Rc::new(Term::universe(0)),
-    }]));
+    }])));
     let signature = Signature::default();
     let mut metas = adamas_core::meta::Metas::default();
     let ctx = adamas_core::ctx::Ctx::new(&signature);
@@ -169,6 +170,74 @@ fn an_erased_field_has_no_value_to_take() {
         matches!(
             outcome,
             Err(ref error) if matches!(error.kind, ErrorKind::ErasedField { .. })
+        ),
+        "получено {outcome:?}"
+    );
+}
+
+/// `{ fields | tail }`.
+fn open(fields: &[Field], tail: Term) -> Fields {
+    Fields {
+        fields: fields.iter().cloned().collect(),
+        tail: Some(Rc::new(tail)),
+    }
+}
+
+#[test]
+fn a_row_is_a_sort_of_its_own() {
+    // `Row ℓ` - третий сорт рядом с `Type` и `Level` (§3.2). Живёт он в
+    // `Type (ℓ+1)`, поэтому `{0 r : Row ℓ} -> …` есть обычная `Pi`, а
+    // row-переменная - обычное связывание.
+    assert_eq!(
+        typing(&Term::RowKind(Level::number(0))).to_string(),
+        "Type 1"
+    );
+    assert_eq!(
+        typing(&Term::RowKind(Level::number(2))).to_string(),
+        "Type 3"
+    );
+
+    // Набор полей в позиции ряда - значение сорта `Row`, а не тип.
+    // Уровень тот же, что у записи с теми же полями: `Type 0` живёт в
+    // `Type 1`, значит и ряд из него - в `Row 1`.
+    let row = Term::Row(Fields::closed(Rc::from([field("a", Term::universe(0))])));
+    assert_eq!(typing(&row).to_string(), "Row 1");
+}
+
+#[test]
+fn a_tail_makes_the_record_open() {
+    // Хвост - часть типа: `{ x : Nat }` и `{ x : Nat | r }` не одно и то же,
+    // иначе значение одного встало бы на место другого.
+    let signature = Signature::default();
+    let mut metas = adamas_core::meta::Metas::default();
+    let ctx = adamas_core::ctx::Ctx::new(&signature);
+    let kind = ctx.eval(&Term::RowKind(Level::number(0)));
+    let inner = ctx.bind("r".into(), Mult::Zero, kind);
+
+    let closed = Term::Record(Fields::closed(Rc::from([field("x", Term::universe(0))])));
+    let opened = Term::Record(open(&[field("x", Term::universe(0))], Term::var(0)));
+
+    // Обе формы - типы, и универсум открытой вмещает уровень хвоста.
+    assert!(adamas_core::check::is_type(&inner, &mut metas, &closed).is_ok());
+    assert!(adamas_core::check::is_type(&inner, &mut metas, &opened).is_ok());
+
+    let (left, right) = (inner.eval(&closed), inner.eval(&opened));
+    assert!(
+        !adamas_core::conv::convertible(&signature, &mut metas, inner.size(), &left, &right),
+        "открытая и закрытая - разные типы"
+    );
+}
+
+#[test]
+fn a_tail_that_is_not_a_row_is_refused() {
+    // Хвостом бывает только ряд: `{ x : Nat | Nat }` - отказ.
+    let opened = Term::Record(open(&[field("x", Term::universe(0))], Term::universe(0)));
+    let signature = Signature::default();
+    let outcome = infer_closed(&signature, &opened);
+    assert!(
+        matches!(
+            outcome,
+            Err(ref error) if matches!(error.kind, ErrorKind::NotARow { .. })
         ),
         "получено {outcome:?}"
     );

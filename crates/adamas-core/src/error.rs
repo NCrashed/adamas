@@ -267,6 +267,13 @@ pub enum ErrorKind {
         found: usize,
     },
 
+    /// Хвост записи - не ряд.
+    #[error("хвост записи не ряд: `{ty}`")]
+    NotARow {
+        /// Тип того, что написано хвостом.
+        ty: Term,
+    },
+
     /// Проекция не из записи.
     #[error("проекция не из записи: `{ty}`")]
     NotARecord {
@@ -385,6 +392,7 @@ impl ErrorKind {
             | Self::CannotInfer { term: ty }
             | Self::NotADataSort { found: ty, .. }
             | Self::ConstructorResult { found: ty, .. }
+            | Self::NotARow { ty }
             | Self::NotARecord { ty }
             | Self::NoSuchField { ty, .. }
             | Self::NotADataValue { ty, .. } => terms.push(ty),

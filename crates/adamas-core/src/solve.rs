@@ -310,5 +310,9 @@ fn read(
             Some(Term::Object(written.into()))
         }
         Value::Universe(level) => Some(Term::Universe(level.clone())),
+        Value::RowKind(level) => Some(Term::RowKind(level.clone())),
+        // Ряд в решении дырки читается тем же проходом, что и запись; форму
+        // его вернёт вызывающий, потому что здесь она не различима.
+        Value::Row(_) => None,
     }
 }

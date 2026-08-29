@@ -225,6 +225,13 @@ fn same_telescope(
     if left.fields().len() != right.fields().len() {
         return false;
     }
+    // Хвост - часть телескопа: `{ x : A }` и `{ x : A | r }` разные типы, и
+    // значение одного не встало бы на место другого.
+    match (left.tail(), right.tail()) {
+        (None, None) => {}
+        (Some(a), Some(b)) if convertible_within(fuel, sig, metas, size, &a, &b) => {}
+        _ => return false,
+    }
     let mut earlier = Vec::with_capacity(left.fields().len());
     for (index, (a, b)) in left.fields().iter().zip(right.fields()).enumerate() {
         if a.name != b.name || a.mult != b.mult {
@@ -332,14 +339,20 @@ fn rigid(
     right: &Rc<Value>,
 ) -> bool {
     match (&**left, &**right) {
-        (Value::Universe(a), Value::Universe(b)) => metas.unify_levels(a, b),
+        // Универсум и сорт рядов сравниваются уровнем. Смешать их нельзя -
+        // варианты разные, - а правило у них одно.
+        (Value::Universe(a), Value::Universe(b)) | (Value::RowKind(a), Value::RowKind(b)) => {
+            metas.unify_levels(a, b)
+        }
 
         // Запись - телескоп, и сравнивается она как телескоп: имена и порядок
         // синтаксически, типы полей - конвертируемостью под предыдущими
         // полями. Порядок значим потому же, почему значим у `Pi`: поле вправе
         // ссылаться на предыдущее, и перестановка меняет, на что именно
         // (решение 2026-08-29, §4.2). Кратность - часть типа, как у `Pi`.
-        (Value::Record(a), Value::Record(b)) => same_telescope(fuel, sig, metas, size, a, b),
+        (Value::Record(a), Value::Record(b)) | (Value::Row(a), Value::Row(b)) => {
+            same_telescope(fuel, sig, metas, size, a, b)
+        }
 
         // Значения записи: имена и порядок те же, поля - конвертируемостью.
         // Зависимости здесь уже нет, поэтому и телескопа не нужно.

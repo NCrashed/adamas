@@ -61,7 +61,7 @@ use crate::meta::{Metas, unsolved_level_meta, unsolved_term_meta};
 use crate::mult::Mult;
 use crate::row::Row;
 use crate::sig::{Definition, DefinitionKind, Signature};
-use crate::term::{Binder, Case, Field as RecordField, Name, Term, spine};
+use crate::term::{Binder, Case, Field as RecordField, Fields, Name, Term, spine};
 use crate::value::{Elim, Head, Lvl, Value};
 
 /// Значение, уложенное в ошибку: обратное чтение плюс зонканье.
@@ -122,7 +122,7 @@ pub fn infer(
 
         // `Type n : Type (n+1)`. Предикативно (§3.2): импредикативный `Type`
         // дал бы парадокс Жирара.
-        Term::Universe(level) => Ok((
+        Term::Universe(level) | Term::RowKind(level) => Ok((
             Rc::new(Value::Universe(level.clone().succ())),
             Usage::zero(ctx.size()),
         )),
@@ -152,7 +152,17 @@ pub fn infer(
 
         Term::App(callee, argument) => infer_app(ctx, metas, sigma, callee, argument),
 
-        Term::Record(fields) => infer_record(ctx, metas, fields),
+        // Ряд и тип записи проверяются одним проходом, а сортом различаются:
+        // `{ x : A }` есть тип, а тот же набор полей в позиции ряда - значение
+        // сорта `Row ℓ` (§3.2, лог 2026-08-27).
+        Term::Record(fields) => {
+            let (level, usage) = infer_fields(ctx, metas, fields)?;
+            Ok((Rc::new(Value::Universe(level)), usage))
+        }
+        Term::Row(fields) => {
+            let (level, usage) = infer_fields(ctx, metas, fields)?;
+            Ok((Rc::new(Value::RowKind(level)), usage))
+        }
         Term::Object(fields) => infer_object(ctx, metas, sigma, fields),
         Term::Project(record, name) => infer_project(ctx, metas, sigma, record, name),
 
@@ -755,8 +765,8 @@ fn mentions_seen<'a>(
     match term {
         // Дырка имени не упоминает: она замкнута, а её тип живёт отдельно и
         // проверен там, где заведён.
-        Term::Var(_) | Term::Universe(_) | Term::Meta(_) => false,
-        Term::Record(fields) => fields.iter().any(|field| recur(&field.ty)),
+        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Meta(_) => false,
+        Term::Record(fields) | Term::Row(fields) => fields.iter().any(|field| recur(&field.ty)),
         Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
         Term::Project(record, _) => recur(record),
         // Через тело определения - тоже упоминание. Без этого позитивность
@@ -931,7 +941,7 @@ pub fn data_sort(name: &Name, params: u32, ty: &Term) -> Result<Level, TypeError
         .into());
     }
     match result {
-        Term::Universe(sort) => Ok(sort.clone()),
+        Term::Universe(sort) | Term::RowKind(sort) => Ok(sort.clone()),
         other => Err(ErrorKind::NotADataSort {
             name: Rc::clone(name),
             found: other.clone(),
@@ -1221,17 +1231,31 @@ fn check_object(
     Ok(usage)
 }
 
-/// Синтезирует тип записи: телескоп полей, универсум - максимум.
+/// Универсум полей: телескоп проверяется, максимум возвращается.
 ///
 /// Каждое следующее поле проверяется **под** предыдущими: тип поля вправе на
-/// них ссылаться, и это то, что делает запись Σ-типом (§4.2).
-fn infer_record(
+/// них ссылаться, и это то, что делает запись Σ-типом (§4.2). У открытой
+/// записи зависимости нет, и хвост читается на исходной глубине.
+fn infer_fields(
     ctx: &Ctx<'_>,
     metas: &mut Metas,
-    fields: &[RecordField],
-) -> Result<(Rc<Value>, Usage), TypeError> {
+    fields: &Fields,
+) -> Result<(Level, Usage), TypeError> {
     let mut inner = ctx.clone();
     let mut level = Level::Zero;
+    if let Some(tail) = &fields.tail {
+        let (kind, _) = framed(infer(ctx, metas, Mult::Zero, tail), Frame::Stated)?;
+        let Value::RowKind(found) = &*whnf(ctx.signature(), &kind) else {
+            return Err(refuse(
+                ctx,
+                metas,
+                ErrorKind::NotARow {
+                    ty: read_back(ctx, metas, &kind),
+                },
+            ));
+        };
+        level = level.max(found.clone());
+    }
     for (index, field) in fields.iter().enumerate() {
         if fields[..index].iter().any(|it| it.name == field.name) {
             return Err(refuse(
@@ -1251,7 +1275,7 @@ fn infer_record(
         let ty = inner.eval(&field.ty);
         inner = inner.bind(Rc::clone(&field.name), field.mult, ty);
     }
-    Ok((Rc::new(Value::Universe(level)), Usage::zero(ctx.size())))
+    Ok((level, Usage::zero(ctx.size())))
 }
 
 /// Синтезирует тип значения записи - **независимый**.

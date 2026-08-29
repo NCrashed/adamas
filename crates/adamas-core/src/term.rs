@@ -83,14 +83,35 @@ pub enum Term {
     Const(Name, Rc<[Level]>),
     /// Разбор значения индуктивного типа по конструктору.
     Case(Rc<Case>),
-    /// Тип записи - **телескоп** полей: `{ len : Nat, data : Vect a len }`.
+    /// Тип записи: телескоп полей и, возможно, хвост-row.
     ///
     /// Телескоп, а не набор: тип поля вправе ссылаться на предыдущие поля, и
     /// это то, что делает запись первоклассным Σ-типом (§4.2). Отсюда же
-    /// названная цена решения от 2026-08-29: запись с зависимостью между
-    /// полями **закрыта** - переставлять её поля нечем, а row-полиморфизм на
+    /// цена решения от 2026-08-29: запись с зависимостью между полями
+    /// **закрыта** - переставлять её поля нечем, а row-полиморфизм на
     /// перестановке и стоит.
-    Record(Rc<[Field]>),
+    ///
+    /// Хвост (`{ x : A | r }`) делает её открытой, и тогда зависимости в ней
+    /// нет по тому же правилу: поля из `r` не вправе ссылаться на поля головы,
+    /// а голова - на поля `r`, которых она не знает.
+    Record(Fields),
+    /// Сорт рядов: `Row ℓ`.
+    ///
+    /// Третий сорт рядом с `Type` и `Level` (§3.2, лог 2026-08-27). Ряд
+    /// записи однороден по уровню: все его поля живут в `Type ℓ`, и без этого
+    /// универсум открытой записи не вычислялся бы - хвост неизвестен.
+    ///
+    /// Сам `Row ℓ` живёт в `Type (ℓ+1)`, поэтому `{0 r : Row ℓ} -> …` есть
+    /// обычная `Pi`, а row-переменная - обычное связывание.
+    RowKind(Level),
+    /// Ряд: набор полей и, возможно, хвост. Значение сорта `Row ℓ`.
+    ///
+    /// Порядок в нём не значим - в отличие от телескопа записи, - потому что
+    /// зависимости в открытой записи нет. Одноимённые метки законны и
+    /// **затеняют**: scoped labels (§4.2, Leijen 2005), внешняя видна.
+    /// Написать дубликат руками нельзя - это отвергает поверхность; берётся он
+    /// от extension.
+    Row(Fields),
     /// Значение записи: `{ x = a, y = b }`.
     ///
     /// Поля хранятся в порядке типа, а не написания: порядок значим, и
@@ -108,6 +129,72 @@ pub enum Term {
     /// В том, что сохраняется надолго - в типах и телах определений, - не
     /// встречается: проверка определения отвергает остаточные дырки.
     Meta(TermMeta),
+}
+
+/// Поля с подставленными аргументами уровня.
+fn substituted(fields: &Fields, arguments: &[Level]) -> Fields {
+    Fields {
+        fields: fields
+            .iter()
+            .map(|field| Field {
+                name: Rc::clone(&field.name),
+                mult: field.mult,
+                ty: Rc::new(field.ty.substitute_levels(arguments)),
+            })
+            .collect(),
+        tail: fields
+            .tail
+            .as_ref()
+            .map(|it| Rc::new(it.substitute_levels(arguments))),
+    }
+}
+
+/// Поля вместе с хвостом: `{ x : A, y : B | r }`.
+///
+/// Отдельная структура, а не два поля варианта, потому что поля и хвост
+/// ходят вместе всюду - и в типе записи, и в ряде. [`Deref`] до среза полей
+/// даёт обходам читать их как раньше: хвост спрашивают только те, кому он
+/// нужен.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fields {
+    /// Поля в написанном порядке.
+    pub fields: Rc<[Field]>,
+    /// Хвост-row, если запись открыта.
+    pub tail: Option<Rc<Term>>,
+}
+
+impl Fields {
+    /// Закрытая запись: полей столько, сколько написано.
+    #[must_use]
+    pub fn closed(fields: Rc<[Field]>) -> Self {
+        Self { fields, tail: None }
+    }
+
+    /// Открыта ли она хвостом.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.tail.is_some()
+    }
+}
+
+impl std::ops::Deref for Fields {
+    type Target = [Field];
+
+    fn deref(&self) -> &Self::Target {
+        &self.fields
+    }
+}
+
+impl From<Vec<Field>> for Fields {
+    fn from(fields: Vec<Field>) -> Self {
+        Self::closed(fields.into())
+    }
+}
+
+impl FromIterator<Field> for Fields {
+    fn from_iter<T: IntoIterator<Item = Field>>(iter: T) -> Self {
+        Self::closed(iter.into_iter().collect())
+    }
 }
 
 /// Поле записи: имя, кратность и тип.
@@ -267,6 +354,7 @@ impl Term {
         match self {
             Self::Var(_) | Self::Meta(_) => self.clone(),
             Self::Universe(level) => Self::Universe(level.substitute(arguments)),
+            Self::RowKind(level) => Self::RowKind(level.substitute(arguments)),
             Self::Lam(mult, name, body) => Self::Lam(*mult, Rc::clone(name), recur(body)),
             Self::App(callee, argument) => Self::App(recur(callee), recur(argument)),
             Self::Pi(binder, name, domain, row, codomain) => Self::Pi(
@@ -286,16 +374,8 @@ impl Term {
                     .map(|level| level.substitute(arguments))
                     .collect(),
             ),
-            Self::Record(fields) => Self::Record(
-                fields
-                    .iter()
-                    .map(|field| Field {
-                        name: Rc::clone(&field.name),
-                        mult: field.mult,
-                        ty: recur(&field.ty),
-                    })
-                    .collect(),
-            ),
+            Self::Record(fields) => Self::Record(substituted(fields, arguments)),
+            Self::Row(fields) => Self::Row(substituted(fields, arguments)),
             Self::Object(fields) => Self::Object(
                 fields
                     .iter()
@@ -335,7 +415,7 @@ impl Term {
         };
         match self {
             Self::Var(_) | Self::Meta(_) => None,
-            Self::Universe(level) => level.max_var(),
+            Self::Universe(level) | Self::RowKind(level) => level.max_var(),
             Self::Lam(_, _, body) => body.max_level_var(),
             Self::App(callee, argument) => join(callee.max_level_var(), argument.max_level_var()),
             Self::Pi(_, _, domain, row, codomain) => {
@@ -344,9 +424,10 @@ impl Term {
                     |found, argument| join(found, argument.max_level_var()),
                 )
             }
-            Self::Record(fields) => fields
+            Self::Record(fields) | Self::Row(fields) => fields
                 .iter()
-                .fold(None, |found, field| join(found, field.ty.max_level_var())),
+                .fold(None, |found, field| join(found, field.ty.max_level_var()))
+                .max(fields.tail.as_ref().and_then(|it| it.max_level_var())),
             Self::Object(fields) => fields
                 .iter()
                 .fold(None, |found, (_, value)| join(found, value.max_level_var())),
@@ -405,11 +486,15 @@ impl fmt::Display for Term {
             Self::App(callee, argument) => {
                 write!(f, "{} {}", Callee(callee), Atom(argument))
             }
-            Self::Record(fields) => {
-                let written: Vec<String> = fields
+            Self::RowKind(level) => write!(f, "Row {level}"),
+            Self::Record(fields) | Self::Row(fields) => {
+                let mut written: Vec<String> = fields
                     .iter()
                     .map(|field| format!("{} {} : {}", field.mult, field.name, field.ty))
                     .collect();
+                if let Some(tail) = &fields.tail {
+                    written.push(format!("| {tail}"));
+                }
                 write!(f, "{{{}}}", written.join(", "))
             }
             Self::Object(fields) => {
@@ -470,7 +555,11 @@ struct Callee<'a>(&'a Term);
 impl fmt::Display for Callee<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
-            Term::Var(_) | Term::Universe(_) | Term::Const(..) | Term::App(..) => {
+            Term::Var(_)
+            | Term::Universe(_)
+            | Term::RowKind(_)
+            | Term::Const(..)
+            | Term::App(..) => {
                 write!(f, "{}", self.0)
             }
             other => write!(f, "({other})"),
@@ -484,7 +573,9 @@ struct Atom<'a>(&'a Term);
 impl fmt::Display for Atom<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
-            Term::Var(_) | Term::Universe(_) | Term::Const(..) => write!(f, "{}", self.0),
+            Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Const(..) => {
+                write!(f, "{}", self.0)
+            }
             other => write!(f, "({other})"),
         }
     }

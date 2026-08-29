@@ -18,7 +18,7 @@ use adamas_core::pattern::{Clause, Pattern as CorePattern, PatternError, compile
 use adamas_core::row::Row;
 use adamas_core::sig::{Definition, DefinitionKind, Signature};
 use adamas_core::source::Span;
-use adamas_core::term::{Binder, Field as CoreField, Name as CoreName, Term};
+use adamas_core::term::{Binder, Field as CoreField, Fields, Name as CoreName, Term};
 use adamas_core::value::{Env, Value};
 use adamas_parser::ast::{
     self, Binding, Block, Expr, ExprKind, LamParamKind, Pattern, PatternKind, Stmt, StmtKind,
@@ -1162,7 +1162,7 @@ impl<'a> Elaborator<'a> {
     /// довод, что у поля конструктора.
     fn record_type(&mut self, fields: &[ast::RecordField]) -> Result<Term, ElabError> {
         let Some((field, rest)) = fields.split_first() else {
-            return Ok(Term::Record(Rc::from([])));
+            return Ok(Term::Record(Fields::closed(Rc::from([]))));
         };
         Self::binds(&field.name)?;
         let ty = self.typing(|it| it.expr(&field.ty, Mult::Many))?;

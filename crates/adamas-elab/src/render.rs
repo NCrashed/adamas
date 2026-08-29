@@ -265,7 +265,7 @@ impl Naming {
     /// типа из телескопа это его собственная позиция, у терма сообщения - ноль.
     fn term(&self, term: &mut Term, bound: &mut Vec<Name>, outer: usize) {
         match term {
-            Term::Record(fields) => {
+            Term::Record(fields) | Term::Row(fields) => {
                 let mut written = Vec::with_capacity(fields.len());
                 for (index, field) in fields.iter().enumerate() {
                     let mut ty = field.ty.as_ref().clone();
@@ -299,7 +299,7 @@ impl Naming {
             // Дырка своего имени не имеет и переименованию не подлежит:
             // печатается она номером, а номер локализует `Naming` отдельно.
             Term::Meta(_) => {}
-            Term::Universe(level) => self.level(level),
+            Term::Universe(level) | Term::RowKind(level) => self.level(level),
             Term::Const(_, levels) => *levels = self.levels(levels),
             Term::App(callee, argument) => {
                 self.term(Rc::make_mut(callee), bound, outer);
@@ -380,7 +380,7 @@ impl Naming {
 /// Дырки терма в порядке появления в тексте.
 fn collect_term(term: &Term, ordered: &mut Vec<LevelMeta>) {
     match term {
-        Term::Record(fields) => {
+        Term::Record(fields) | Term::Row(fields) => {
             for field in fields.iter() {
                 collect_term(&field.ty, ordered);
             }
@@ -394,7 +394,7 @@ fn collect_term(term: &Term, ordered: &mut Vec<LevelMeta>) {
         // Дырка терма своих уровней не носит: они в её типе, а он живёт
         // отдельно.
         Term::Var(_) | Term::Meta(_) => {}
-        Term::Universe(level) => collect_level(level, ordered),
+        Term::Universe(level) | Term::RowKind(level) => collect_level(level, ordered),
         Term::Const(_, levels) => {
             for level in levels.iter() {
                 collect_level(level, ordered);

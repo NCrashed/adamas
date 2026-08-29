@@ -245,7 +245,7 @@ fn inherit(signature: &Signature, term: &Term, depth: u32, found: &mut [Mult]) {
             inherit(signature, argument, depth, found);
         }
         Term::Lam(_, _, body) => inherit(signature, body, depth + 1, found),
-        Term::Record(fields) => {
+        Term::Record(fields) | Term::Row(fields) => {
             for (index, field) in fields.iter().enumerate() {
                 let depth = depth + u32::try_from(index).unwrap_or(0);
                 inherit(signature, &field.ty, depth, found);
@@ -273,7 +273,7 @@ fn inherit(signature: &Signature, term: &Term, depth: u32, found: &mut [Mult]) {
                 inherit(signature, &branch.body, depth, found);
             }
         }
-        Term::Var(_) | Term::Universe(_) | Term::Const(..) | Term::Meta(_) => {}
+        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Const(..) | Term::Meta(_) => {}
     }
 }
 

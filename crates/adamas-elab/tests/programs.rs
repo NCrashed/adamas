@@ -1771,3 +1771,59 @@ fn a_record_declares_its_fields_or_assigns_them() {
     assert!(parse("type Ok = { x : Nat, y : Nat }\n").is_ok());
     assert!(parse("p : Nat\np = { x = Zero, y }.x\n").is_ok());
 }
+
+#[test]
+fn a_record_passes_through_an_implicit() {
+    // Значение записи против **дырки** (вставленного имплисита) идёт общим
+    // путём: синтез даёт независимый тип, сравнение его же и решает. Без этого
+    // всякая полиморфная функция над записью отказывала.
+    program(&format!(
+        "{BASE}
+type Point = {{ x : Nat, y : Nat }}
+
+identity : a -> a
+identity v = v
+
+p : Point
+p = identity {{ x = Zero, y = Zero }}
+"
+    ));
+}
+
+#[test]
+fn a_record_is_what_its_fields_are() {
+    // η: `q` и `{x = q.x, y = q.y}` - одно значение. Проверяется тем, что
+    // `anything q` подходит под `P (rebuild q)`: сойтись они могут только
+    // через η, потому что `rebuild q` синтаксически другое.
+    program(&format!(
+        "{BASE}
+type Point = {{ x : Nat, y : Nat }}
+
+P : Point -> Type
+anything : (0 q : Point) -> P q
+
+rebuild : Point -> Point
+rebuild q = {{ x = q.x, y = q.y }}
+
+eta : (0 q : Point) -> P (rebuild q)
+eta q = anything q
+"
+    ));
+}
+
+#[test]
+fn a_projection_is_a_function_on_its_own() {
+    // `.x` в позиции атома - сахар для `\p -> p.x` (§4.2). Примыкание решает,
+    // что перед чем: `map .x` есть применение, `p.x` - проекция.
+    program(&format!(
+        "{BASE}
+type Point = {{ x : Nat, y : Nat }}
+
+apply : (Point -> Nat) -> Point -> Nat
+apply f p = f p
+
+n : Nat
+n = apply .x {{ x = Succ Zero, y = Zero }}
+"
+    ));
+}

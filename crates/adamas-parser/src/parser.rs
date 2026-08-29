@@ -937,7 +937,9 @@ impl<'a> Parser<'a> {
         let mut blocked = contains_block(&callee);
         loop {
             let type_app = self.at(TokenKind::At);
-            if !type_app && !starts_atom(self.kind()) {
+            // Функция-проекция начинает атом, хотя её первая лексема -
+            // операторный знак: `map .x` есть применение, а не цепочка.
+            if !type_app && !starts_atom(self.kind()) && !self.at_projection() {
                 return Ok(callee);
             }
             if blocked {
@@ -964,7 +966,12 @@ impl<'a> Parser<'a> {
     /// `.` в фикситетах не участвует вовсе.
     fn postfix(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.atom()?;
-        while let Some(field) = self.projected() {
+        // Примыкание требуется и слева: `map .x` - это `map` и функция-
+        // проекция, а не `(map).x`.
+        while self.peek().span.start() == expr.span.end() {
+            let Some(field) = self.projected() else {
+                break;
+            };
             let span = expr.span.merge(field.span);
             expr = Expr {
                 kind: ExprKind::Project(Box::new(expr), field),
@@ -972,6 +979,60 @@ impl<'a> Parser<'a> {
             };
         }
         Ok(expr)
+    }
+
+    /// `.x` в позиции атома - функция-проекция: `map .x` (§4.2).
+    ///
+    /// Сахар для `\p -> p.x`, и разворачивается он здесь: связывания у него
+    /// своего нет, а имя параметра пользователю невидимо.
+    fn projection(&mut self) -> Expr {
+        let start = self.peek().span;
+        let Some(field) = self.projected() else {
+            unreachable!("вызвано не на проекции")
+        };
+        let span = start.merge(field.span);
+        let param: Symbol = Rc::from("#record");
+        let name = Name {
+            text: Rc::clone(&param),
+            span,
+        };
+        let body = Expr {
+            kind: ExprKind::Project(
+                Box::new(Expr {
+                    kind: ExprKind::Name(name.clone()),
+                    span,
+                }),
+                field,
+            ),
+            span,
+        };
+        Expr {
+            kind: ExprKind::Lam {
+                params: vec![LamParam {
+                    kind: LamParamKind::Pattern(Pattern {
+                        kind: PatternKind::Name(name),
+                        span,
+                    }),
+                    span,
+                }],
+                body: Box::new(body),
+            },
+            span,
+        }
+    }
+
+    /// Стоит ли на `.name` - функции-проекции в позиции атома.
+    fn at_projection(&self) -> bool {
+        let dot = self.peek();
+        if dot.text(self.text) != "." {
+            return false;
+        }
+        self.tokens
+            .get(self.index + 1)
+            .copied()
+            .is_some_and(|field| {
+                field.kind == TokenKind::Ident && dot.span.end() == field.span.start()
+            })
     }
 
     /// Имя поля, если дальше идёт примыкающая проекция `.name`.
@@ -1102,6 +1163,7 @@ impl<'a> Parser<'a> {
             TokenKind::Case => return self.case(),
             TokenKind::LParen => return self.parenthesised(),
             TokenKind::LBrace if self.at_record() => return self.record(),
+            TokenKind::Operator if self.at_projection() => return Ok(self.projection()),
             TokenKind::LBracket => return self.list(),
             _ if self.at_literal() => {
                 let lit = self.literal()?;

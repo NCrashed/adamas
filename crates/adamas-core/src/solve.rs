@@ -48,7 +48,7 @@ use crate::meta::Metas;
 use crate::mult::Mult;
 use crate::row::{Label, Row};
 use crate::sig::Signature;
-use crate::term::{Term, TermMeta};
+use crate::term::{Field, Term, TermMeta};
 use crate::value::{Elim, Head, Lvl, Value};
 
 /// Разворачивает решённые дырки в голове значения.
@@ -276,10 +276,39 @@ fn read(
                 )?),
             ))
         }
-        // Запись в решении дырки читать обратно нечем: телескоп требует
-        // переименования под каждым полем, а живого потребителя у этого нет.
-        // Отказ консервативен и сузится вместе с первым.
-        Value::Record(_) | Value::Object(_) => None,
+        // Телескоп читается по одному полю, как и при обычном обратном
+        // чтении: тип следующего живёт под предыдущими, поэтому глубина растёт
+        // вместе с ними, а переименование остаётся тем же.
+        Value::Record(telescope) => {
+            let mut earlier = Vec::with_capacity(telescope.fields().len());
+            let mut written = Vec::with_capacity(telescope.fields().len());
+            for (index, field) in telescope.fields().iter().enumerate() {
+                let ty = telescope.at(index, &earlier);
+                let step = u32::try_from(index).unwrap_or(0);
+                written.push(Field {
+                    name: Rc::clone(&field.name),
+                    mult: field.mult,
+                    ty: Rc::new(read(
+                        metas,
+                        meta,
+                        renaming,
+                        outer,
+                        arity,
+                        depth + step,
+                        &ty,
+                    )?),
+                });
+                earlier.push(Value::var(Lvl(outer + depth + step)));
+            }
+            Some(Term::Record(written.into()))
+        }
+        Value::Object(fields) => {
+            let mut written = Vec::with_capacity(fields.len());
+            for (name, value) in fields.iter() {
+                written.push((Rc::clone(name), Rc::new(recur(value)?)));
+            }
+            Some(Term::Object(written.into()))
+        }
         Value::Universe(level) => Some(Term::Universe(level.clone())),
     }
 }

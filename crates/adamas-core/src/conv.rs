@@ -47,7 +47,7 @@ use crate::eval::{apply, try_apply, try_eliminate_case};
 use crate::meta::Metas;
 use crate::sig::Signature;
 use crate::solve::{force, solve};
-use crate::value::{Elim, Head, Lvl, StuckCase, Value};
+use crate::value::{Elim, Head, Lvl, StuckCase, Telescope, Value};
 
 /// Конвертируемы ли два значения в контексте размера `size`.
 ///
@@ -213,6 +213,33 @@ pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
     })
 }
 
+/// Сравнивает два телескопа полей - по одному полю, под предыдущими.
+fn same_telescope(
+    fuel: u32,
+    sig: &Signature,
+    metas: &mut Metas,
+    size: u32,
+    left: &Telescope,
+    right: &Telescope,
+) -> bool {
+    if left.fields().len() != right.fields().len() {
+        return false;
+    }
+    let mut earlier = Vec::with_capacity(left.fields().len());
+    for (index, (a, b)) in left.fields().iter().zip(right.fields()).enumerate() {
+        if a.name != b.name || a.mult != b.mult {
+            return false;
+        }
+        let depth = size + u32::try_from(index).unwrap_or(0);
+        let (x, y) = (left.at(index, &earlier), right.at(index, &earlier));
+        if !convertible_within(fuel, sig, metas, depth, &x, &y) {
+            return false;
+        }
+        earlier.push(Value::var(Lvl(depth)));
+    }
+    true
+}
+
 /// Совпадают ли головы застрявших вычислений.
 ///
 /// У определения аргументы уровня не сравниваются структурно, а
@@ -306,6 +333,37 @@ fn rigid(
 ) -> bool {
     match (&**left, &**right) {
         (Value::Universe(a), Value::Universe(b)) => metas.unify_levels(a, b),
+
+        // Запись - телескоп, и сравнивается она как телескоп: имена и порядок
+        // синтаксически, типы полей - конвертируемостью под предыдущими
+        // полями. Порядок значим потому же, почему значим у `Pi`: поле вправе
+        // ссылаться на предыдущее, и перестановка меняет, на что именно
+        // (решение 2026-08-29, §4.2). Кратность - часть типа, как у `Pi`.
+        (Value::Record(a), Value::Record(b)) => same_telescope(fuel, sig, metas, size, a, b),
+
+        // Значения записи: имена и порядок те же, поля - конвертируемостью.
+        // Зависимости здесь уже нет, поэтому и телескопа не нужно.
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter().zip(b.iter()).all(|((name_a, x), (name_b, y))| {
+                    name_a == name_b && convertible_within(fuel, sig, metas, size, x, y)
+                })
+        }
+
+        // η для записи: `p` и `{x = p.x, y = p.y}` - одно значение. Сравнение
+        // здесь бестиповое, поэтому раскрывается **застрявшая** сторона: типа,
+        // из которого взять список полей, у неё нет, а у собранной он есть, и
+        // хорошо типизированными их делает то, что сравнивают их при одном
+        // типе. Без правила запись, разобранная и собранная заново, отличалась
+        // бы от исходной - а это ровно то, что делает всякий проход по полям.
+        (Value::Object(fields), Value::Neutral(..)) => fields.iter().all(|(name, value)| {
+            let projected = crate::eval::project(right, name);
+            convertible_within(fuel, sig, metas, size, value, &projected)
+        }),
+        (Value::Neutral(..), Value::Object(fields)) => fields.iter().all(|(name, value)| {
+            let projected = crate::eval::project(left, name);
+            convertible_within(fuel, sig, metas, size, &projected, value)
+        }),
 
         (Value::Neutral(head_a, spine_a), Value::Neutral(head_b, spine_b)) => {
             same_head(metas, head_a, head_b)

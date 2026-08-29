@@ -258,7 +258,12 @@ pub fn check(
         // Значение записи против написанного типа: только здесь видна
         // зависимость - тип поля живёт под предыдущими, и подставляются в него
         // **значения** уже проверенных полей.
-        (Term::Object(fields), _) => {
+        //
+        // Ожидаемое, которое записью ещё не стало (дырка от вставленного
+        // имплисита), уходит общим путём: синтез даёт независимый тип, а
+        // сравнение его же и решает. Зависимость там взяться неоткуда - её
+        // несёт написанный тип, которого в этом случае нет.
+        (Term::Object(fields), _) if is_record(ctx, expected) => {
             check_object(ctx, metas, sigma, fields, &whnf(ctx.signature(), expected))
         }
 
@@ -1154,6 +1159,11 @@ fn infer_app(
     )?;
     let result = codomain.apply(ctx.eval(argument));
     Ok((result, callee_usage + &argument_usage.scale(*mult)))
+}
+
+/// Стал ли ожидаемый тип записью - после разворота головы.
+fn is_record(ctx: &Ctx<'_>, expected: &Rc<Value>) -> bool {
+    matches!(&*whnf(ctx.signature(), expected), Value::Record(_))
 }
 
 /// Правило записи: поля проверяются по телескопу, а не по написанию.

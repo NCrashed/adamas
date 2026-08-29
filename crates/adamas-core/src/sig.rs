@@ -706,7 +706,10 @@ impl Signature {
             // обобщение свело бы её к нулю, отвергнув всякий полиморфный
             // конструктор объявленного семейства.
             level_arity: arity.declared(),
-            carriers: crate::carrier::unknown(&constructor.ty),
+            // Конструктор кладёт значение ровно однажды, поэтому носителю его
+            // параметра ограничивать нечего; держателя ресурсного поля
+            // проверяет отдельное правило (§3.3, вопрос 77).
+            carriers: crate::carrier::stored(&constructor.ty),
             ty: constructor.ty.clone(),
             body: None,
             kind: DefinitionKind::Constructor {

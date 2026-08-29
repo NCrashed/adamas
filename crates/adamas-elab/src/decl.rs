@@ -20,7 +20,7 @@ use std::rc::Rc;
 use adamas_core::check::{TypeError, is_type};
 use adamas_core::ctx::Ctx;
 use adamas_core::level::Level;
-use adamas_core::meta::{Generalization, Metas};
+use adamas_core::meta::{Generalization, Metas, zonk_term};
 use adamas_core::mult::Mult;
 use adamas_core::pattern::{PatternError, compile_traced};
 use adamas_core::sig::Signature;
@@ -29,8 +29,8 @@ use adamas_core::term::{Binder, Term};
 use adamas_parser::ast::{self, DeclKind, Module, Symbol};
 
 use crate::carrier;
-use crate::error::{ElabError, Missing, Names};
-use crate::expr::{Elaborator, Member};
+use crate::error::{ElabError, Names};
+use crate::expr::{Elaborator, Member, Param};
 use crate::own::{Owned, Ownership};
 use crate::route::{self, Declared};
 
@@ -226,6 +226,21 @@ fn define(
     // После объявления, а не до: дырки решены и подставлены, поэтому видно,
     // чем на самом деле стал каждый выводимый аргумент (§10 вопрос 76).
     carrier::check(signature, owned, &declared.name, span)
+}
+
+/// Поднимает универсум семейства до уровней его параметров.
+fn raised(kind: Term, params: &[Param]) -> Term {
+    match kind {
+        Term::Pi(binder, name, domain, row, codomain) => Term::Pi(
+            binder,
+            name,
+            domain,
+            row,
+            Rc::new(raised(codomain.as_ref().clone(), params)),
+        ),
+        Term::Universe(level) => Term::Universe(Elaborator::sort(params, level)),
+        other => other,
+    }
 }
 
 /// Где в исходнике то, на чём споткнулась сборка клауз.
@@ -558,19 +573,16 @@ fn declare_data(
     data: &ast::Data,
     span: Span,
 ) -> Result<(), ElabError> {
-    // Параметры семейства - форма, которой элаборация не владеет, и половина
-    // её хуже отказа: телескоп, построенный по шапке, не связывает имена в
-    // типах конструкторов и не отражается в их телескопах.
-    if let (Some(first), Some(last)) = (data.params.first(), data.params.last()) {
-        return Err(ElabError::Missing {
-            what: Missing::FamilyParameters,
-            span: first.span.merge(last.span),
-        });
-    }
+    // Телескоп параметров элаборируется один раз и переиспользуется: kind и
+    // каждый конструктор обязаны нести **один и тот же** телескоп, иначе
+    // `List` в результате и `List` в объявлении - два разных семейства.
+    let mut elaborator = Elaborator::new(signature, metas, owned);
+    let params = elaborator.telescope(&data.params)?;
     let kind = match &data.kind {
-        Some(kind) => {
-            Elaborator::new(signature, metas, owned).typing(|it| it.expr(kind, Mult::Many))?
-        }
+        // Параметры пишутся, поэтому в kind они явные: `Vect a n`.
+        Some(kind) => elaborator.wrapped(&params, false, |it| {
+            it.typing(|it| it.expr(kind, Mult::Many))
+        })?,
         // Тип-формер не написан - семейство живёт в нулевом универсуме.
         //
         // **Не дырка.** Дырку здесь ограничивают только неравенства `leq` от
@@ -580,8 +592,12 @@ fn declare_data(
         // Проверено подстановкой дырки вместо нуля. Ничего не написано -
         // значит и выводить не из чего; полиморфное по уровню семейство
         // пишется явно: `data D : Type where`.
-        None => Term::universe(0),
+        None => elaborator.wrapped(&params, false, |_| Ok(Term::universe(0)))?,
     };
+    // Семейство обязано вместить универсумы своих параметров: поле типа `a`
+    // живёт там же, где `a`. Написанный `Type` даёт дырку, и поднять её до
+    // максимума - наименьшее, что подходит.
+    let kind = raised(kind, &params);
     // Маршрут внутрь семейства называет конструктор номером, а имена у него
     // здесь: собираются один раз на оба возможных отказа.
     let names = Names::of(
@@ -614,15 +630,23 @@ fn declare_data(
                 levels: Rc::clone(&levels),
                 ty: Rc::new(kind.clone()),
             }];
-            let ty = Elaborator::with_group(signature, metas, owned, group)
-                .declaration(&constructor.ty, Mult::One)?;
+            // У конструктора те же параметры, но выводимые: пишут `MkPair x y`,
+            // а не `MkPair A B x y`. Свободные имена, оставшиеся сверх них,
+            // поднимаются уже под ними - и потому стоят после, как того и ждёт
+            // ядро от телескопа с параметрами.
+            let ty = Elaborator::with_group(signature, metas, owned, group).wrapped(
+                &params,
+                true,
+                |it| it.declaration(&constructor.ty, Mult::One),
+            )?;
             owned_field(&ty, owned, data, constructor)?;
             Ok((&*constructor.name.text, ty))
         })
         .collect::<Result<Vec<_>, ElabError>>()?;
 
+    let parameters = u32::try_from(params.len()).unwrap_or(u32::MAX);
     signature
-        .declare_data(metas, &data.name.text, 0, kind, &constructors)
+        .declare_data(metas, &data.name.text, parameters, kind, &constructors)
         .map_err(|error| ElabError::Core {
             span: route::locate(&Declared::Data(data), &error, span),
             error: Box::new(error),
@@ -652,8 +676,12 @@ fn self_levels(
     ty: &Term,
 ) -> Result<Rc<[Level]>, TypeError> {
     is_type(&Ctx::new(signature), metas, ty)?;
+    // Считать по зонканному: уровень, спрятавшийся в решении дырки терма,
+    // иначе не виден, и арность вышла бы меньше настоящей - той, которую
+    // посчитает объявление.
+    let ty = zonk_term(metas, ty);
     let mut generalization = Generalization::default();
-    generalization.collect_term(metas, ty);
+    generalization.collect_term(metas, &ty);
     Ok((0..generalization.arity())
         .map(|_| metas.fresh_level())
         .collect())

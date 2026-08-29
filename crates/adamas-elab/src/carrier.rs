@@ -25,7 +25,7 @@ use std::rc::Rc;
 
 use adamas_core::eval::eval;
 use adamas_core::mult::Mult;
-use adamas_core::sig::Signature;
+use adamas_core::sig::{DefinitionKind, Signature};
 use adamas_core::source::Span;
 use adamas_core::term::{Name, Term};
 use adamas_core::value::{Env, Head, Lvl, Value};
@@ -57,23 +57,39 @@ pub(crate) fn check(
     // ничуть не меньше, чем это делает тело.
     walk(signature, owned, &definition.ty, 0, &mut found);
     match found {
-        Some(bad) => Err(ElabError::OwnedCarrier {
-            callee: bad.callee,
-            parameter: bad.parameter,
-            owned: bad.owned,
-            carrier: bad.carrier,
+        Some(Bad::Carrier {
+            callee,
+            parameter,
+            owned,
+            carrier,
+        }) => Err(ElabError::OwnedCarrier {
+            callee,
+            parameter,
+            owned,
+            carrier,
+            span,
+        }),
+        Some(Bad::Holder { family, owned }) => Err(ElabError::OwnedHolder {
+            family,
+            owned,
             span,
         }),
         None => Ok(()),
     }
 }
 
-/// Найденное нарушение: кто, чей параметр, чем и с каким носителем.
-struct Bad {
-    callee: Symbol,
-    parameter: Symbol,
-    owned: Symbol,
-    carrier: Mult,
+/// Найденное нарушение.
+enum Bad {
+    /// Определение обходится со значениями параметра не так, как требует
+    /// владение.
+    Carrier {
+        callee: Symbol,
+        parameter: Symbol,
+        owned: Symbol,
+        carrier: Mult,
+    },
+    /// Семейство без деструктора наполнено владеемым типом.
+    Holder { family: Symbol, owned: Symbol },
 }
 
 /// `depth` - сколько связываний открыто над термом: аргумент вычисляется, и
@@ -131,11 +147,22 @@ fn spine(signature: &Signature, owned: &Owned, term: &Term, depth: u32, found: &
     let Some(definition) = signature.lookup(callee) else {
         return;
     };
+    // Семейство - отдельное правило: параметр, инстанцированный владеемым
+    // типом, делает поле конструктора ресурсным, а держатель обязан быть
+    // `resource` (§3.3, вопрос 77). Носителем это не выражается: положить
+    // ресурс однажды - как раз то, что конструктор и делает.
+    // Конструктор идёт за своим семейством: `Nil` кладёт значение в `List`,
+    // и держатель тут - `List`, а не `Nil`.
+    let family = match &definition.kind {
+        DefinitionKind::Data { .. } => Some(Rc::clone(callee)),
+        DefinitionKind::Constructor { data, .. } => Some(Rc::clone(data)),
+        DefinitionKind::Regular => None,
+    };
     for (position, argument) in arguments.iter().enumerate() {
         // `1` - ограничения нет; так помечены и позиции, которые вовсе не
         // параметры типа.
         let carrier = definition.carriers.get(position).copied();
-        let Some(carrier) = carrier.filter(|it| *it != Mult::One) else {
+        let Some(carrier) = carrier.filter(|it| family.is_some() || *it != Mult::One) else {
             continue;
         };
         let Some(head) = constant(argument, depth) else {
@@ -144,7 +171,19 @@ fn spine(signature: &Signature, owned: &Owned, term: &Term, depth: u32, found: &
         if !owned.owns(&head) {
             continue;
         }
-        *found = Some(Bad {
+        // Семейство, само объявленное `resource`, держать ресурс вправе: у
+        // него есть деструктор, и §3.3 требует ровно этого.
+        if let Some(family) = &family {
+            if owned.owns(family) {
+                continue;
+            }
+            *found = Some(Bad::Holder {
+                family: Rc::from(&**family),
+                owned: Rc::from(&*head),
+            });
+            return;
+        }
+        *found = Some(Bad::Carrier {
             callee: Rc::from(&**callee),
             parameter: parameter(&definition.ty, position),
             owned: Rc::from(&*head),

@@ -574,8 +574,13 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
         Term::Var(_) => term.clone(),
         // Решённая дырка подставляется целиком: решение замкнуто, поэтому
         // обратное чтение идёт в пустом контексте и сдвигов не требует.
+        //
+        // Подставленное зонкается заново: решение хранится таким, каким его
+        // записали, и уровни внутри него могли решиться позже. Без этого
+        // прохода дырка уровня уезжает в определение живой, а обобщение её не
+        // видит - оно смотрит уже зонканный тип.
         Term::Meta(meta) => match metas.term_solution(*meta) {
-            Some(solution) => crate::eval::quote(0, solution),
+            Some(solution) => zonk_term(metas, &crate::eval::quote(0, solution)),
             None => term.clone(),
         },
         Term::Universe(level) => Term::Universe(metas.zonk(level)),

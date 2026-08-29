@@ -16,7 +16,7 @@ use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::pattern::{Clause, Pattern as CorePattern};
 use adamas_core::row::Row;
-use adamas_core::sig::{DefinitionKind, Signature};
+use adamas_core::sig::{Definition, DefinitionKind, Signature};
 use adamas_core::source::Span;
 use adamas_core::term::{Binder, Name as CoreName, Term};
 use adamas_core::value::{Env, Value};
@@ -41,6 +41,20 @@ use crate::own::Owned;
 #[must_use]
 pub fn is_reference(name: &str) -> bool {
     name.chars().next().is_some_and(char::is_uppercase)
+}
+
+/// Параметр семейства - уже элаборированный.
+///
+/// Живёт отдельно от [`ast::Binder`], потому что переиспользуется: kind и все
+/// конструкторы обязаны нести один и тот же телескоп, а элаборация написанного
+/// дважды дала бы два разных набора дырок уровня.
+pub(crate) struct Param {
+    /// Кратность параметра - написанная либо `ω` по умолчанию (§4.1).
+    pub mult: Mult,
+    /// Имя, каким оно написано: под ним параметр виден в типах конструкторов.
+    pub name: Symbol,
+    /// Тип параметра. `data Pair a b` его не пишет, и там стоит дырка.
+    pub ty: Rc<Term>,
 }
 
 /// Член объявляемой группы (§10 вопрос 50).
@@ -304,6 +318,103 @@ impl<'a> Elaborator<'a> {
         let outcome = body(self);
         self.types = outer;
         outcome
+    }
+
+    /// Телескоп параметров семейства: `data Vect (a : Type) : … where`.
+    ///
+    /// Элаборируется **один раз** на объявление и переиспользуется: kind и
+    /// каждый конструктор обязаны нести один и тот же телескоп, а не два
+    /// одинаково выглядящих. Домен, которого не написали (`data Pair a b`), -
+    /// дырка: чем параметр окажется, скажет его употребление, ровно как у
+    /// поднятого имени.
+    ///
+    /// # Errors
+    ///
+    /// Если тип параметра не элаборируется либо имя заглавное.
+    pub(crate) fn telescope(&mut self, params: &[ast::Binder]) -> Result<Vec<Param>, ElabError> {
+        let depth = self.scope.len();
+        let outer = self.ctx.clone();
+        let mut found = Vec::new();
+        for binder in params {
+            for name in &binder.names {
+                Self::binds(name)?;
+                // Ненаписанный тип параметра - `Type`, а не общая дырка:
+                // `data Pair a b` называет типы, а параметр иного рода
+                // пишется (`(0 n : Nat)`). Универсум семейства обязан
+                // вместить уровни своих параметров, и без этого умолчания
+                // считать их было бы нечем.
+                let domain = match &binder.ty {
+                    Some(ty) => self.typing(|it| it.expr(ty, Mult::Many))?,
+                    None => Term::Universe(self.metas.fresh_level()),
+                };
+                let mult = match &binder.ty {
+                    Some(ty) => self.binder_mult(binder.mult, ty, Mult::Many, binder.span)?,
+                    None => Self::multiplicity(binder.mult, Mult::Many),
+                };
+                let bound = self.typed(&domain);
+                self.ctx = self
+                    .ctx
+                    .bind(CoreName::from(&*name.text), mult, Rc::clone(&bound));
+                self.scope.push(Bound::visible(&name.text, mult, bound));
+                found.push(Param {
+                    mult,
+                    name: Rc::clone(&name.text),
+                    ty: Rc::new(domain),
+                });
+            }
+        }
+        self.scope.truncate(depth);
+        self.ctx = outer;
+        Ok(found)
+    }
+
+    /// Уровень универсума, в котором обязано жить семейство с такими
+    /// параметрами.
+    ///
+    /// Поле конструктора типа `a` живёт там же, где `a`, то есть в универсуме
+    /// параметра. Значит семейство обязано быть не ниже, иначе предикативность
+    /// (§3.2) обходится через data-декларацию. Берётся максимум - наименьшее,
+    /// что подходит; так же, как `Type 0` был наименьшим у семейства без
+    /// параметров.
+    #[must_use]
+    pub(crate) fn sort(params: &[Param], written: Level) -> Level {
+        params
+            .iter()
+            .fold(written, |found, param| match &*param.ty {
+                Term::Universe(level) => found.max(level.clone()),
+                _ => found,
+            })
+    }
+
+    /// Выполняет `body` под параметрами и оборачивает результат в `Pi`.
+    ///
+    /// `implicit` - у kind параметры пишутся (`Vect a n`), у конструктора
+    /// выводятся (`Nil`, а не `Nil Int`).
+    pub(crate) fn wrapped(
+        &mut self,
+        params: &[Param],
+        implicit: bool,
+        body: impl FnOnce(&mut Self) -> Result<Term, ElabError>,
+    ) -> Result<Term, ElabError> {
+        let Some((param, rest)) = params.split_first() else {
+            return body(self);
+        };
+        let bound = self.typed(&param.ty);
+        let inner = self.binding(Bound::visible(&param.name, param.mult, bound), |it| {
+            it.wrapped(rest, implicit, body)
+        })?;
+        let binder = if implicit {
+            Binder::implicit(param.mult)
+        } else {
+            Binder::explicit(param.mult)
+        };
+        Ok(Term::Pi(
+            binder,
+            CoreName::from(&*param.name),
+            Rc::clone(&param.ty),
+            Row::empty(),
+            Rc::new(inner),
+        ))
     }
 
     /// Написанный тип объявления - со свободными именами, поднятыми в
@@ -1006,11 +1117,12 @@ impl<'a> Elaborator<'a> {
                     span: binder.span,
                 });
             }
-            // Связывание без типа бывает только параметром семейства, и туда
-            // этот путь не ведёт.
+            // Связывание без написанного типа бывает у параметра семейства
+            // (`data Pair a b`), и туда этот путь не ведёт: `(a) -> Nat`
+            // разбирается как применение в скобках, а не как связывание.
             let Some(ty) = &binder.ty else {
                 return Err(ElabError::Missing {
-                    what: Missing::FamilyParameters,
+                    what: Missing::TypelessBinder,
                     span: binder.span,
                 });
             };
@@ -1427,19 +1539,29 @@ impl<'a> Elaborator<'a> {
         name: &ast::Name,
         fields: Vec<CorePattern>,
     ) -> Result<CorePattern, ElabError> {
-        let Some(declared) = self
-            .signature
-            .lookup(&name.text)
-            .filter(|definition| matches!(definition.kind, DefinitionKind::Constructor { .. }))
-        else {
+        let Some(declared) = self.signature.lookup(&name.text) else {
             return Err(ElabError::NotAConstructor {
                 name: Rc::clone(&name.text),
                 span: name.span,
             });
         };
+        let DefinitionKind::Constructor { data, .. } = &declared.kind else {
+            return Err(ElabError::NotAConstructor {
+                name: Rc::clone(&name.text),
+                span: name.span,
+            });
+        };
+        // Параметры семейства полями не являются: разбор их не связывает, а
+        // подставляет из типа разбираемого. В паттерне их поэтому нет вовсе -
+        // ни написанных, ни вставленных.
+        let params = self
+            .signature
+            .lookup(data)
+            .and_then(Definition::data_shape)
+            .map_or(0, |(params, _)| params);
         Ok(CorePattern::Constructor(
             CoreName::from(&*name.text),
-            hidden_fields(&declared.ty, fields),
+            hidden_fields(&declared.ty, params, fields),
         ))
     }
 
@@ -1549,7 +1671,7 @@ impl<'a> Elaborator<'a> {
     /// объявлению конструктора. Отсюда рекурсия `drop` по полям (§3.3):
     /// `f (Wrap h) = …` закрывает `h` так же, как закрыл бы аргумент.
     fn clause_variables(
-        &self,
+        &mut self,
         written: &[(Option<&Pattern>, CorePattern)],
         body: &Expr,
     ) -> Vec<BoundVar> {
@@ -1562,10 +1684,11 @@ impl<'a> Elaborator<'a> {
         }
         let mut found = Vec::new();
         for (position, (source, pattern)) in written.iter().enumerate() {
+            let argument = self.declared.get(position).cloned();
             self.pattern_variables(
                 *source,
                 pattern,
-                self.declared.get(position),
+                argument.as_ref(),
                 body,
                 &names,
                 &mut found,
@@ -1581,7 +1704,7 @@ impl<'a> Elaborator<'a> {
     /// направление ошибки то же, что и везде: пропущенный `drop` вместо
     /// лишнего.
     fn pattern_variables(
-        &self,
+        &mut self,
         written: Option<&Pattern>,
         compiled: &CorePattern,
         argument: Option<&Argument>,
@@ -1618,29 +1741,40 @@ impl<'a> Elaborator<'a> {
                 // Сегодня параметров не бывает (их отвергает `declare_data`),
                 // но сдвиг молча испортил бы соответствие, как только они
                 // появятся: поле взяло бы владение у параметра.
-                let (types, params) = self.signature.lookup(constructor).map_or_else(
-                    || (Vec::new(), 0),
-                    |definition| {
-                        let params = match &definition.kind {
-                            DefinitionKind::Constructor { data } => self
-                                .signature
-                                .lookup(data)
-                                .and_then(|it| it.data_shape().map(|(params, _)| params as usize))
-                                .unwrap_or(0),
-                            _ => 0,
-                        };
-                        (pi_arguments(&definition.ty, self.owned), params)
-                    },
-                );
+                // Тип конструктора несёт **свои** параметры уровня, и брать
+                // его как есть значило бы впустить `LevelVar` семейства в
+                // определение, которое его не объявляло. Инстанциация свежими
+                // дырками - то же, что делает всякая ссылка на объявленное.
+                let declared = self.signature.lookup(constructor).map(|definition| {
+                    let params = match &definition.kind {
+                        DefinitionKind::Constructor { data } => self
+                            .signature
+                            .lookup(data)
+                            .and_then(|it| it.data_shape().map(|(params, _)| params as usize))
+                            .unwrap_or(0),
+                        _ => 0,
+                    };
+                    (definition.ty.clone(), definition.level_arity, params)
+                });
+                let (types, params) = match declared {
+                    Some((ty, arity, params)) => {
+                        let levels: Vec<Level> =
+                            (0..arity).map(|_| self.metas.fresh_level()).collect();
+                        let ty = ty.substitute_levels(&levels);
+                        (pi_arguments(&ty, self.owned), params)
+                    }
+                    None => (Vec::new(), 0),
+                };
                 let inner = match written.map(|it| &it.kind) {
                     Some(PatternKind::App { fields, .. }) => fields.as_slice(),
                     _ => &[],
                 };
                 for (position, field) in fields.iter().enumerate() {
+                    let argument = types.get(position + params).cloned();
                     self.pattern_variables(
                         inner.get(position),
                         field,
-                        types.get(position + params),
+                        argument.as_ref(),
                         body,
                         beside,
                         found,
@@ -1727,11 +1861,20 @@ fn opens_implicit(ty: &Term) -> bool {
 /// То же, что `spread` делает с паттернами клаузы, и по той же причине:
 /// имплисит поднялся в телескоп конструктора, а `Cons x xs` про него не знает.
 /// Разбирать его нечем - имя типа в паттерне не пишется, - поэтому `_`.
-fn hidden_fields(ty: &Term, written: Vec<CorePattern>) -> Vec<CorePattern> {
+///
+/// Первые `params` связываний пропускаются вовсе: параметры семейства полем не
+/// становятся, разбор берёт их из типа разбираемого, и ветвь их не связывает.
+fn hidden_fields(ty: &Term, params: u32, written: Vec<CorePattern>) -> Vec<CorePattern> {
     let mut found = Vec::new();
     let mut rest = written.into_iter();
     let mut current = ty;
+    let mut skipped = 0;
     while let Term::Pi(binder, _, _, _, codomain) = current {
+        if skipped < params {
+            skipped += 1;
+            current = codomain;
+            continue;
+        }
         if binder.visibility.is_implicit() {
             found.push(CorePattern::Var(CoreName::from("_")));
         } else {

@@ -1080,12 +1080,19 @@ pub(crate) fn check_constructor_content(
             // значение, построенное над `Type (ℓ+1)`, и предикативность (§3.2)
             // обходилась бы через data-декларацию. Параметры это правило не
             // ограничивает - они не хранятся в значении, а подставляются.
-            let field_level = is_type(&ctx, metas, &field.domain)?;
-            if !field_level.leq(sort) {
+            // Сравнивать полагается **зонканное**: `Parts` хранилища не
+            // видит, и нерешённая дырка выглядит для него атомом. Уровень
+            // поднятого имени приезжает сюда дыркой, решённой по дороге, и без
+            // подстановки `0 ≤ u0` читалось бы как `?m ≤ u0` - то есть отказ
+            // на корректном объявлении.
+            let found = is_type(&ctx, metas, &field.domain)?;
+            let field_level = metas.zonk(&found);
+            let sort = metas.zonk(sort);
+            if !field_level.leq(&sort) {
                 return Err(ErrorKind::ConstructorUniverse {
                     name: Rc::clone(name),
-                    field: metas.zonk(&field_level),
-                    sort: metas.zonk(sort),
+                    field: field_level,
+                    sort,
                 }
                 .into());
             }

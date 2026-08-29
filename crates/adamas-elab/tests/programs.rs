@@ -408,10 +408,6 @@ fn what_the_core_cannot_carry_yet_names_itself() {
         ("f : Nat\nf = [Zero]\n", Missing::List),
         ("f : Nat\nf = Zero + Zero + Zero\n", Missing::Fixities),
         (
-            "data Pair a b where\n  MkPair : Nat\n",
-            Missing::FamilyParameters,
-        ),
-        (
             "f : Nat -> Nat\nf x = y\n  where\n    y : Nat\n    y = x\n",
             Missing::LocalDefinitions,
         ),
@@ -1539,6 +1535,83 @@ release h = g h
     let error = refused(&text);
     assert!(
         matches!(error, ElabError::OwnedCarrier { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_family_parameter_makes_a_container() {
+    // §10 вопрос 78. Параметр пишется слева от `:`, и тогда он не квантифицирует
+    // конструктор, а значит и не поднимает универсум семейства. Проверяется не
+    // форма, а то, что из неё следует: контейнер пишется и **вычисляет**.
+    let signature = program(&format!(
+        "{BASE}
+P : Nat -> Type
+anything : (0 n : Nat) -> P n
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+length : List a -> Nat
+length Nil = Zero
+length (Cons x xs) = Succ (length xs)
+
+two : Nat
+two = length (Cons True (Cons False Nil))
+"
+    ));
+    let outcome = check_closed(
+        &signature,
+        &at("anything")
+            .apply([Term::constant("Succ")
+                .apply([Term::constant("Succ").apply([Term::constant("Zero")])])]),
+        &at("P").apply([Term::constant("two")]),
+    );
+    assert!(outcome.is_ok(), "список из двух элементов: {outcome:?}");
+}
+
+#[test]
+fn an_index_varies_where_a_parameter_stays() {
+    // `Vect` из §4.1: `a` - параметр (одинаков во всех конструкторах), `n` -
+    // индекс (меняется). Первое пишется слева от `:`, второе поднимается, и
+    // тип его - `Nat`, а не `Type`: сказать это может только kind семейства.
+    program(&format!(
+        "{BASE}
+data Vect (a : Type) : (0 n : Nat) -> Type where
+  Nil : Vect a Zero
+  Cons : a -> Vect a n -> Vect a (Succ n)
+
+map : (a -> b) -> Vect a n -> Vect b n
+map f Nil = Nil
+map f (Cons x xs) = Cons (f x) (map f xs)
+"
+    ));
+}
+
+#[test]
+fn a_resource_needs_a_holder_that_closes_it() {
+    // §3.3, вопрос 77: поле ресурсного типа требует держателя-`resource`.
+    // Правило читало объявленный тип поля, а у `Cons : a -> …` головы нет -
+    // инстанциация его обходила. С параметрами семейства обход стал
+    // достижимым, и проверка переехала туда, где параметр получает значение.
+    let text = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+files : List File
+files = Nil
+"
+    );
+    let error = refused(&text);
+    assert!(
+        matches!(error, ElabError::OwnedHolder { .. }),
         "получено {error:?}"
     );
 }

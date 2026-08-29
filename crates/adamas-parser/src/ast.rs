@@ -202,12 +202,31 @@ pub enum ExprKind {
         /// Ветки в порядке написания: побеждает первая совпавшая.
         alts: Vec<Alt>,
     },
+    /// Тип записи: `{ x : A, y : B }` (§4.2).
+    ///
+    /// Порядок написания сохраняется: поле вправе ссылаться на предыдущие, и
+    /// сортировка сломала бы зависимость. Решение от 2026-08-29: запись с
+    /// зависимостью между полями закрыта.
+    RecordType(Vec<RecordField>),
+    /// Значение записи: `{ x = a, y }`, где второе - punning для `y = y`.
+    Record(Vec<(Name, Expr)>),
+    /// Проекция поля: `p.x`.
+    Project(Box<Expr>, Name),
     /// Кортеж `(a, b)`; пустой - `()`.
     Tuple(Vec<Expr>),
     /// Список `[a, b, c]`.
     List(Vec<Expr>),
     /// Цепочка операторов.
     Chain(Chain),
+}
+
+/// Поле в типе записи: имя и тип.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordField {
+    /// Имя поля.
+    pub name: Name,
+    /// Написанный тип.
+    pub ty: Expr,
 }
 
 /// Параметр лямбды.
@@ -342,6 +361,19 @@ pub struct Decl {
 /// Разновидность объявления.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeclKind {
+    /// `type Point = { x : Nat }` - алиас типа (§4.2).
+    ///
+    /// Не nominal type: `Point` и написанное справа полностью взаимозаменяемы,
+    /// а различает их только имя в сообщениях. Отдельная форма нужна затем,
+    /// что написать её сигнатурой нечем: `Point : Type` обобщается в `∀u`, а
+    /// конкретный универсум в поверхностном языке не пишется.
+    Alias {
+        /// Имя алиаса.
+        name: Name,
+        /// Что он называет.
+        body: Expr,
+    },
+
     /// Сигнатура: `map : (a -> b) -> Vect n a -> Vect n b`.
     Signature {
         /// Имя.
@@ -436,6 +468,9 @@ pub fn contains_block(expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::Case { .. } | ExprKind::Block(_) => return true,
             ExprKind::Name(_) | ExprKind::Lit(_) | ExprKind::Hole => {}
+            ExprKind::RecordType(fields) => pending.extend(fields.iter().map(|it| &it.ty)),
+            ExprKind::Record(fields) => pending.extend(fields.iter().map(|(_, it)| it)),
+            ExprKind::Project(inner, _) => pending.push(inner),
             ExprKind::App(left, right)
             | ExprKind::TypeApp(left, right)
             | ExprKind::Arrow(left, right) => {
@@ -496,6 +531,13 @@ fn line(out: &mut String, depth: usize) {
 /// решает вызывающий - вложенное объявление продолжается скобкой.
 fn dump_decl(out: &mut String, decl: &Decl, depth: usize) {
     match &decl.kind {
+        DeclKind::Alias { name, body } => {
+            out.push_str("(alias ");
+            out.push_str(&name.text);
+            out.push(' ');
+            dump_expr(out, body);
+            out.push(')');
+        }
         DeclKind::Signature { name, ty } => {
             out.push_str("(sig ");
             out.push_str(&name.text);
@@ -600,11 +642,47 @@ fn dump_binder(out: &mut String, binder: &Binder) {
     out.push(close);
 }
 
+/// Проекция: `(. p x)`.
+fn dump_projection(out: &mut String, inner: &Expr, name: &Name) {
+    out.push_str("(. ");
+    dump_expr(out, inner);
+    out.push(' ');
+    out.push_str(&name.text);
+    out.push(')');
+}
+
+/// Запись или её тип: `(record (x Nat) (y Nat))`.
+fn dump_record(out: &mut String, kind: &ExprKind) {
+    let (head, fields): (&str, Vec<(&Symbol, &Expr)>) = match kind {
+        ExprKind::RecordType(fields) => (
+            "record",
+            fields.iter().map(|it| (&it.name.text, &it.ty)).collect(),
+        ),
+        ExprKind::Record(fields) => (
+            "object",
+            fields.iter().map(|(name, it)| (&name.text, it)).collect(),
+        ),
+        _ => unreachable!("не запись"),
+    };
+    out.push('(');
+    out.push_str(head);
+    for (name, value) in fields {
+        out.push_str(" (");
+        out.push_str(name);
+        out.push(' ');
+        dump_expr(out, value);
+        out.push(')');
+    }
+    out.push(')');
+}
+
 fn dump_expr(out: &mut String, expr: &Expr) {
     match &expr.kind {
         ExprKind::Name(name) => out.push_str(&name.text),
         ExprKind::Lit(lit) => out.push_str(&lit.text),
         ExprKind::Hole => out.push('_'),
+        ExprKind::RecordType(_) | ExprKind::Record(_) => dump_record(out, &expr.kind),
+        ExprKind::Project(inner, name) => dump_projection(out, inner, name),
         // Спайн применения печатается в один список: `(f x y)` читается, а
         // `(app (app f x) y)` - нет.
         ExprKind::App(..) => {

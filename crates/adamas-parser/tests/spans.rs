@@ -57,6 +57,10 @@ impl Spans<'_> {
         self.inside("объявление", parent, decl.span);
         let at = decl.span;
         match &decl.kind {
+            DeclKind::Alias { name, body } => {
+                self.name(at, name);
+                self.expr(at, body);
+            }
             DeclKind::Signature { name, ty } => {
                 self.name(at, name);
                 self.expr(at, ty);
@@ -130,6 +134,22 @@ impl Spans<'_> {
             ExprKind::Name(name) => self.name(at, name),
             ExprKind::Lit(lit) => self.inside("литерал", at, lit.span),
             ExprKind::Hole => {}
+            ExprKind::RecordType(fields) => {
+                for field in fields {
+                    self.name(at, &field.name);
+                    self.expr(at, &field.ty);
+                }
+            }
+            ExprKind::Record(fields) => {
+                for (name, value) in fields {
+                    self.name(at, name);
+                    self.expr(at, value);
+                }
+            }
+            ExprKind::Project(record, name) => {
+                self.expr(at, record);
+                self.name(at, name);
+            }
             ExprKind::App(left, right)
             | ExprKind::TypeApp(left, right)
             | ExprKind::Arrow(left, right) => {

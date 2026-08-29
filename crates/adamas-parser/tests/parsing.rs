@@ -306,10 +306,9 @@ fn forms_of_later_phases_name_their_phase() {
             Unsupported::Instance,
         ),
         ("effect State s where\n  get : s\n", Unsupported::Effect),
+        // Effect row и запись пишутся одними скобками, а различает их регистр
+        // (§4.1): метка ряда заглавная, поле записи строчное.
         ("f : {IO} a\n", Unsupported::Braces),
-        // Запись в сигнатуре - те же скобки: без стрелки это не группа
-        // implicit-связываний, и сказать надо про запись, а не про стрелку.
-        ("f : {x : Float}\n", Unsupported::Braces),
         ("infixl 6 +\n", Unsupported::Fixity),
     ];
     for (text, expected) in cases {
@@ -321,7 +320,7 @@ fn forms_of_later_phases_name_their_phase() {
     }
     // Сообщение - предложение целиком, вместе с подсказкой.
     assert_eq!(
-        parse_error("f : {x : Float}\n").to_string(),
+        parse_error("f : {IO} a\n").to_string(),
         "записи (§4.2) и effect row (§3.4) появляются в одной из следующих фаз; \
          группа implicit-связываний пишется `{a : Type}`"
     );

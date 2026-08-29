@@ -91,6 +91,22 @@ fn deepen(depth: u32, links: usize, span: Span) -> Result<u32, ParseError> {
 fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<(), ParseError> {
     match &expr.kind {
         ExprKind::Name(_) | ExprKind::Lit(_) | ExprKind::Hole => {}
+        ExprKind::RecordType(fields) => {
+            let inner = deepen(depth, 1, expr.span)?;
+            for field in fields {
+                pending.push((Node::Expr(&field.ty), inner));
+            }
+        }
+        ExprKind::Record(fields) => {
+            let inner = deepen(depth, 1, expr.span)?;
+            for (_, value) in fields {
+                pending.push((Node::Expr(value), inner));
+            }
+        }
+        ExprKind::Project(inner, _) => {
+            let deeper = deepen(depth, 1, expr.span)?;
+            pending.push((Node::Expr(inner), deeper));
+        }
         ExprKind::App(..) => application(expr, depth, pending)?,
         // Применение типа - то же `App`, стрелка - `Pi` без имени: звено и там
         // и там одно.
@@ -272,7 +288,9 @@ fn pattern_at<'a>(
 
 fn decl_at<'a>(decl: &'a Decl, depth: u32, pending: &mut Pending<'a>) -> Result<(), ParseError> {
     match &decl.kind {
-        DeclKind::Signature { ty, .. } => pending.push((Node::Expr(ty), depth)),
+        DeclKind::Alias { body, .. } | DeclKind::Signature { ty: body, .. } => {
+            pending.push((Node::Expr(body), depth));
+        }
         DeclKind::Clauses { clauses, .. } => {
             for clause in clauses {
                 clause_at(clause, depth, pending)?;

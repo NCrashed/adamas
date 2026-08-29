@@ -18,7 +18,7 @@ use adamas_core::pattern::{Clause, Pattern as CorePattern, PatternError, compile
 use adamas_core::row::Row;
 use adamas_core::sig::{Definition, DefinitionKind, Signature};
 use adamas_core::source::Span;
-use adamas_core::term::{Binder, Name as CoreName, Term};
+use adamas_core::term::{Binder, Field as CoreField, Name as CoreName, Term};
 use adamas_core::value::{Env, Value};
 use adamas_parser::ast::{
     self, Binding, Block, Expr, ExprKind, LamParamKind, Pattern, PatternKind, Stmt, StmtKind,
@@ -496,6 +496,21 @@ impl<'a> Elaborator<'a> {
                 self.free_in(codomain, bound, found);
                 bound.truncate(depth);
             }
+            // Тип записи связывает свои поля для последующих: телескоп.
+            ExprKind::RecordType(fields) => {
+                let depth = bound.len();
+                for field in fields {
+                    self.free_in(&field.ty, bound, found);
+                    bound.push(Rc::clone(&field.name.text));
+                }
+                bound.truncate(depth);
+            }
+            ExprKind::Record(fields) => {
+                for (_, value) in fields {
+                    self.free_in(value, bound, found);
+                }
+            }
+            ExprKind::Project(record, _) => self.free_in(record, bound, found),
             ExprKind::Lam { params, body } => {
                 let depth = bound.len();
                 for param in params {
@@ -895,6 +910,14 @@ impl<'a> Elaborator<'a> {
             ExprKind::Block(block) => self.block(block, position),
             ExprKind::Chain(chain) => self.chain(chain, expr.span),
 
+            // Тип записи - телескоп: каждое следующее поле элаборируется под
+            // предыдущими, потому что вправе на них ссылаться (§4.2).
+            ExprKind::RecordType(fields) => self.record_type(fields),
+            ExprKind::Record(fields) => self.record(fields),
+            ExprKind::Project(record, name) => {
+                let inner = self.placed(Position::Inner, |it| it.expr(record, Mult::Many))?;
+                Ok(Term::Project(Rc::new(inner), CoreName::from(&*name.text)))
+            }
             ExprKind::TypeApp(..) => self.type_app(expr),
 
             // `_` - дырка терма: решать её теперь есть чем, и нерешённая
@@ -1131,6 +1154,46 @@ impl<'a> Elaborator<'a> {
             Term::Const(name, _) if self.owned.owns(name) => Mult::One,
             _ => Mult::Many,
         }
+    }
+
+    /// `{ x : A, y : B }` - телескоп полей.
+    ///
+    /// Поле кратности `1` (§4.1): запись кладёт значение однажды - тот же
+    /// довод, что у поля конструктора.
+    fn record_type(&mut self, fields: &[ast::RecordField]) -> Result<Term, ElabError> {
+        let Some((field, rest)) = fields.split_first() else {
+            return Ok(Term::Record(Rc::from([])));
+        };
+        Self::binds(&field.name)?;
+        let ty = self.typing(|it| it.expr(&field.ty, Mult::Many))?;
+        let bound = self.typed(&ty);
+        let inner = self.binding(Bound::visible(&field.name.text, Mult::One, bound), |it| {
+            it.record_type(rest)
+        })?;
+        let Term::Record(tail) = inner else {
+            unreachable!("телескоп собирается только записью")
+        };
+        let head = CoreField {
+            name: CoreName::from(&*field.name.text),
+            mult: Mult::One,
+            ty: Rc::new(ty),
+        };
+        Ok(Term::Record(
+            std::iter::once(head).chain(tail.iter().cloned()).collect(),
+        ))
+    }
+
+    /// `{ x = a, y }` - значение записи.
+    fn record(&mut self, fields: &[(ast::Name, Expr)]) -> Result<Term, ElabError> {
+        let mut written = Vec::with_capacity(fields.len());
+        for (name, value) in fields {
+            // Поле уезжает внутрь собранного - та же позиция, что у аргумента
+            // конструктора (§3.3).
+            let value = self.placed(Position::Field, |it| it.expr(value, Mult::One))?;
+            written.push((CoreName::from(&*name.text), Rc::new(value)));
+        }
+        self.produced = None;
+        Ok(Term::Object(written.into()))
     }
 
     /// `f @A @B` - выводимый аргумент, написанный явно (§4.1).

@@ -1703,3 +1703,71 @@ fn a_case_reports_what_it_does_not_cover() {
     };
     assert_eq!(error.to_string(), "не покрыто: `(Succ _)`");
 }
+
+#[test]
+fn a_record_is_written_projected_and_punned() {
+    // §4.2: тип записи, её значение, punning и проекция. Проверяется не форма
+    // терма, а то, что запись **вычисляет**: `sum (mk 1 2)` сводится к трём.
+    let signature = program(&format!(
+        "{BASE}
+P : Nat -> Type
+anything : (0 n : Nat) -> P n
+
+add : Nat -> Nat -> Nat
+add Zero m = m
+add (Succ k) m = Succ (add k m)
+
+type Point = {{ x : Nat, y : Nat }}
+
+mk : Nat -> Nat -> Point
+mk x y = {{ x, y }}
+
+sum : Point -> Nat
+sum p = add p.x p.y
+"
+    ));
+    let number = |value: u32| {
+        (0..value).fold(Term::constant("Zero"), |term, _| {
+            Term::constant("Succ").apply([term])
+        })
+    };
+    let outcome = check_closed(
+        &signature,
+        &at("anything").apply([number(3)]),
+        &at("P").apply([
+            Term::constant("sum").apply([Term::constant("mk").apply([number(1), number(2)])])
+        ]),
+    );
+    assert!(outcome.is_ok(), "1 + 2 = 3 через запись: {outcome:?}");
+}
+
+#[test]
+fn a_field_may_depend_on_an_earlier_one() {
+    // `SomeVect` из §4.2: запись как первоклассный Σ-тип. Зависимость между
+    // полями закрывает запись (решение 2026-08-29), и это её единственная цена.
+    program(&format!(
+        "{BASE}
+data Vect (a : Type) : (0 n : Nat) -> Type where
+  Nil : Vect a Zero
+  Cons : a -> Vect a n -> Vect a (Succ n)
+
+type Sized = {{ len : Nat, items : Vect Nat len }}
+
+one : Sized
+one = {{ len = Succ Zero, items = Cons Zero Nil }}
+
+lengthOf : Sized -> Nat
+lengthOf s = s.len
+"
+    ));
+}
+
+#[test]
+fn a_record_declares_its_fields_or_assigns_them() {
+    // Половина каждой формы не была бы ни тем ни другим: отказ приходит от
+    // разбора, потому что решается это по написанию.
+    assert!(parse("type Bad = { x : Nat, y = Zero }\n").is_err());
+    // А написанное целиком одной формой - разбирается.
+    assert!(parse("type Ok = { x : Nat, y : Nat }\n").is_ok());
+    assert!(parse("p : Nat\np = { x = Zero, y }.x\n").is_ok());
+}

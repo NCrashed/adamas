@@ -80,6 +80,10 @@ impl<'a> Spent<'a> {
     fn in_expr<'e>(&self, name: &str, expr: &'e Expr, bound: &mut Vec<&'e str>) -> bool {
         match &expr.kind {
             ExprKind::Name(found) => &*found.text == name,
+            ExprKind::Record(fields) => fields
+                .iter()
+                .any(|(_, value)| self.in_expr(name, value, bound)),
+            ExprKind::Project(record, _) => self.in_expr(name, record, bound),
             ExprKind::App(..) => self.in_application(name, expr, bound),
             // Аргумент типа стёрт, как и всё в позиции типа.
             ExprKind::TypeApp(callee, _) => self.in_expr(name, callee, bound),
@@ -115,7 +119,12 @@ impl<'a> Spent<'a> {
             }
             ExprKind::Chain(chain) => self.in_chain(name, chain, bound),
             // `Pi` и стрелка - типы целиком: что в них написано, стёрто.
-            ExprKind::Pi { .. } | ExprKind::Arrow(..) | ExprKind::Lit(_) | ExprKind::Hole => false,
+            // Тип записи стёрт, как и всё в позиции типа.
+            ExprKind::RecordType(_)
+            | ExprKind::Pi { .. }
+            | ExprKind::Arrow(..)
+            | ExprKind::Lit(_)
+            | ExprKind::Hole => false,
         }
     }
 

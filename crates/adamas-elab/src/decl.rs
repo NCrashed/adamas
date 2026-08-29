@@ -117,6 +117,13 @@ pub fn elaborate_into(
                 };
                 define(signature, metas, owned, &declared, clauses, decl.span)?;
             }
+            // Алиас: `Point : Type` не годится - `Type` обобщается в `∀u`, а
+            // тело живёт в конкретном универсуме. Тип поэтому не пишется, а
+            // считается по телу.
+            DeclKind::Alias { name, body } => {
+                postulate(signature, metas, pending.take(), &mut postulated)?;
+                alias(signature, metas, owned, name, body, decl.span)?;
+            }
             DeclKind::Data(data) => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
                 // Маркер ставится **до** элаборации конструкторов: поле
@@ -135,6 +142,41 @@ pub fn elaborate_into(
         }
     }
     postulate(signature, metas, pending, &mut postulated)
+}
+
+/// Алиас типа: `type Point = { x : Nat }` (§4.2).
+///
+/// Собственной сигнатуры у него нет и быть не может: `Point : Type` обобщает
+/// универсум в параметр, а тело живёт в конкретном. Универсум поэтому берётся
+/// у тела - тем же `is_type`, которым его и проверяют.
+fn alias(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    owned: &Owned,
+    name: &ast::Name,
+    body: &ast::Expr,
+    span: Span,
+) -> Result<(), ElabError> {
+    let term = Elaborator::new(signature, metas, owned).typing(|it| it.expr(body, Mult::Many))?;
+    let names = Names::of(&name.text, Vec::new());
+    let level = is_type(&Ctx::new(signature), metas, &term).map_err(|error| ElabError::Core {
+        span: route::locate(&Declared::Bare(body), &error, span),
+        error: Box::new(error),
+        names: names.clone(),
+    })?;
+    signature
+        .define_inferred(
+            metas,
+            &name.text,
+            Mult::Many,
+            Term::Universe(metas.zonk(&level)),
+            Some(term),
+        )
+        .map_err(|error| ElabError::Core {
+            span: route::locate(&Declared::Bare(body), &error, span),
+            error: Box::new(error),
+            names,
+        })
 }
 
 /// Сигнатура, за которой не последовало клауз, - постулат.
@@ -300,6 +342,15 @@ fn resource_members(
             ast::DeclKind::Signature { name, ty } => {
                 constructors.extend(pending.take().map(constructor));
                 pending = Some((name, ty, member.span));
+            }
+            // Алиас телом ресурса не бывает: layout его туда пускает, а
+            // смысла у него там нет - конструктор либо деструктор.
+            ast::DeclKind::Alias { name, .. } => {
+                return Err(ElabError::ResourceMember {
+                    data: Rc::clone(&resource.name.text),
+                    name: Rc::clone(&name.text),
+                    span: member.span,
+                });
             }
             ast::DeclKind::Clauses { name, clauses } => {
                 let Some((_, ty, _)) = pending.take().filter(|(it, ..)| it.text == name.text)

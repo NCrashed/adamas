@@ -61,7 +61,7 @@ use adamas_core::source::Span;
 use crate::ast::{
     Alt, Binder, Binding, Block, Chain, Clause, Constructor, Data, Decl, DeclKind, Expr, ExprKind,
     LamParam, LamParamKind, Lit, LitKind, Module, Mult, MultAnn, Name, Pattern, PatternKind,
-    Resource, Stmt, StmtKind, Symbol, Visibility, contains_block,
+    RecordField, Resource, Stmt, StmtKind, Symbol, Visibility, contains_block,
 };
 use crate::token::{Token, TokenKind};
 
@@ -178,6 +178,20 @@ impl fmt::Display for Unsupported {
 /// Ошибка разбора.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ParseError {
+    /// `{}` - ни тип, ни значение.
+    #[error("пустая запись: `{{}}` не различает тип и значение")]
+    EmptyRecord {
+        /// Где написано.
+        span: Span,
+    },
+
+    /// В одной записи и объявления полей, и присваивания.
+    #[error("запись либо объявляет поля, либо присваивает им значения")]
+    MixedRecord {
+        /// Поле, на котором форма сменилась.
+        span: Span,
+    },
+
     /// Не та лексема.
     ///
     /// Настоящее время, а не прошедшее: `expected` и `found` - существительные
@@ -266,7 +280,9 @@ impl ParseError {
     #[must_use]
     pub fn span(&self) -> Span {
         match self {
-            Self::Expected { span, .. }
+            Self::EmptyRecord { span }
+            | Self::MixedRecord { span }
+            | Self::Expected { span, .. }
             | Self::Multiplicity { span }
             | Self::SplitClauses { again: span, .. }
             | Self::Unsupported { span, .. }
@@ -452,7 +468,6 @@ impl<'a> Parser<'a> {
             TokenKind::Mutual => Unsupported::Mutual,
             TokenKind::Effect => Unsupported::Effect,
             TokenKind::Handle | TokenKind::HandleMulti | TokenKind::With => Unsupported::Handler,
-            TokenKind::Type => Unsupported::Record,
             TokenKind::Infix | TokenKind::Infixl | TokenKind::Infixr => Unsupported::Fixity,
             TokenKind::LBrace => Unsupported::Braces,
             _ => return None,
@@ -536,6 +551,7 @@ impl<'a> Parser<'a> {
             // существующую.
             TokenKind::Unique => self.unique_data(),
             TokenKind::Resource => self.resource(),
+            TokenKind::Type => self.alias(),
             TokenKind::Ident | TokenKind::LParen => self.signature_or_clause(),
             _ => Err(self
                 .unsupported_here()
@@ -821,38 +837,54 @@ impl<'a> Parser<'a> {
 
     fn expr_inner(&mut self) -> Result<Expr, ParseError> {
         if self.at_binder() {
-            let start = self.peek().span;
-            let mut binders = vec![self.binder()?];
-            while self.at_binder() {
-                binders.push(self.binder()?);
-            }
-            if !self.at(TokenKind::Arrow) {
-                // Группа связываний без кодомена - не группа: `{x : Float}`
-                // здесь написана как запись (§4.2), и сказать надо про неё, а
-                // не про недостающую стрелку.
-                let braces = binders
-                    .first()
-                    .is_some_and(|first| first.visibility == Visibility::Implicit);
-                if braces {
-                    return Err(ParseError::Unsupported {
-                        what: Unsupported::Braces,
-                        span: start,
-                    });
+            // Единственное место, где парсер возвращается назад: `{x : Nat}`
+            // читается и как группа implicit-связываний, и как тип записи
+            // (§4.2). Различает их то, идёт ли следом стрелка, а этого не
+            // видно ни по одному токену вперёд - группа бывает любой длины, и
+            // `{x : Nat, y : Nat}` группой не является вовсе.
+            //
+            // Возврат назад разрешён только фигурным скобкам: у круглых
+            // второго прочтения нет, и подменять их ошибку записью значило бы
+            // отвечать не о том, что написано.
+            let mark = self.index;
+            let braces = self.at(TokenKind::LBrace);
+            match self.binder_group() {
+                Ok(expr) => return Ok(expr),
+                Err(error) => {
+                    if !braces || !self.at_record_at(mark) {
+                        return Err(error);
+                    }
+                    self.index = mark;
                 }
-                return Err(self.expected(Expected::Token(TokenKind::Arrow)));
             }
-            self.bump();
-            let codomain = self.expr()?;
-            let span = start.merge(codomain.span);
-            return Ok(Expr {
-                kind: ExprKind::Pi {
-                    binders,
-                    codomain: Box::new(codomain),
-                },
-                span,
-            });
         }
 
+        self.arrowed()
+    }
+
+    /// Группа связываний вместе со стрелкой: `(q x y : A) {r z : B} -> C`.
+    ///
+    /// Отказ здесь для фигурных скобок не окончателен - см. `expr_inner`.
+    fn binder_group(&mut self) -> Result<Expr, ParseError> {
+        let start = self.peek().span;
+        let mut binders = vec![self.binder()?];
+        while self.at_binder() {
+            binders.push(self.binder()?);
+        }
+        self.expect(TokenKind::Arrow)?;
+        let codomain = self.expr()?;
+        let span = start.merge(codomain.span);
+        Ok(Expr {
+            kind: ExprKind::Pi {
+                binders,
+                codomain: Box::new(codomain),
+            },
+            span,
+        })
+    }
+
+    /// Цепочка, за которой может идти стрелка.
+    fn arrowed(&mut self) -> Result<Expr, ParseError> {
         let left = self.chain()?;
         if !self.at(TokenKind::Arrow) {
             return Ok(left);
@@ -899,7 +931,7 @@ impl<'a> Parser<'a> {
     }
 
     fn application(&mut self) -> Result<Expr, ParseError> {
-        let mut callee = self.atom()?;
+        let mut callee = self.postfix()?;
         // Флаг накапливается по частям, а не пересчитывается по всему спайну
         // на каждом шаге: иначе длинный спайн стоил бы квадрата.
         let mut blocked = contains_block(&callee);
@@ -914,7 +946,7 @@ impl<'a> Parser<'a> {
             if type_app {
                 self.bump();
             }
-            let argument = self.atom()?;
+            let argument = self.postfix()?;
             blocked = contains_block(&argument);
             let span = callee.span.merge(argument.span);
             let kind = if type_app {
@@ -926,8 +958,132 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Атом вместе с проекциями: `p.x.y`.
+    ///
+    /// Проекция связывает крепче применения - `f p.x` есть `f (p.x)`, - и её
+    /// `.` в фикситетах не участвует вовсе.
+    fn postfix(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.atom()?;
+        while let Some(field) = self.projected() {
+            let span = expr.span.merge(field.span);
+            expr = Expr {
+                kind: ExprKind::Project(Box::new(expr), field),
+                span,
+            };
+        }
+        Ok(expr)
+    }
+
+    /// Имя поля, если дальше идёт примыкающая проекция `.name`.
+    ///
+    /// Примыкание проверяется по спанам: `.` - обычный операторный знак, и
+    /// отличить проекцию от оператора можно только тем, что между ними и
+    /// вокруг них ничего не написано.
+    fn projected(&mut self) -> Option<Name> {
+        let dot = self.peek();
+        if dot.kind != TokenKind::Operator || dot.text(self.text) != "." {
+            return None;
+        }
+        let field = self.tokens.get(self.index + 1).copied();
+        let field = field?;
+        if field.kind != TokenKind::Ident || dot.span.end() != field.span.start() {
+            return None;
+        }
+        self.bump();
+        self.bump();
+        Some(self.name_of(field))
+    }
+
     fn atom(&mut self) -> Result<Expr, ParseError> {
         self.nested(Self::atom_inner)
+    }
+
+    /// `{ x : A, y : B }` - тип записи, `{ x = a, y }` - её значение (§4.2).
+    ///
+    /// Различает их первый разделитель после имени поля: `:` объявляет, `=`
+    /// присваивает, а голое имя - punning, то есть `x = x`. Смешивать нельзя:
+    /// запись либо тип, либо значение, и половина каждого была бы ни тем ни
+    /// другим.
+    fn alias(&mut self) -> Result<Decl, ParseError> {
+        let start = self.expect(TokenKind::Type)?.span;
+        let name = self.expect(TokenKind::Ident)?;
+        let name = self.name_of(name);
+        self.expect(TokenKind::Equals)?;
+        let body = self.body()?;
+        let span = start.merge(body.span);
+        Ok(Decl {
+            kind: DeclKind::Alias { name, body },
+            span,
+        })
+    }
+
+    /// Метка effect row пишется теми же лексемами, что punning записи: `{IO}`
+    /// читается и как ряд с меткой `IO`, и как `{IO = IO}`. Различает их
+    /// **регистр** - то же правило §4.1, по которому заглавное имя ссылается на
+    /// объявленное, а строчное связывает. Поле записи строчное, метка ряда
+    /// заглавная, и разойтись им негде.
+    fn at_record_at(&self, mark: usize) -> bool {
+        let first = self.tokens.get(mark + 1).copied();
+        first.is_some_and(|token| {
+            token.kind == TokenKind::Ident
+                && !token
+                    .text(self.text)
+                    .starts_with(|ch: char| ch.is_uppercase())
+        })
+    }
+
+    fn at_record(&self) -> bool {
+        self.at_record_at(self.index)
+    }
+
+    fn record(&mut self) -> Result<Expr, ParseError> {
+        let open = self.expect(TokenKind::LBrace)?;
+        if let Some(close) = self.eat(TokenKind::RBrace) {
+            return Err(ParseError::EmptyRecord {
+                span: open.span.merge(close.span),
+            });
+        }
+        let mut fields = Vec::new();
+        let mut values = Vec::new();
+        loop {
+            let name = self.expect(TokenKind::Ident)?;
+            let name = self.name_of(name);
+            if self.eat(TokenKind::Colon).is_some() {
+                if !values.is_empty() {
+                    return Err(ParseError::MixedRecord { span: name.span });
+                }
+                fields.push(RecordField {
+                    name: name.clone(),
+                    ty: self.expr()?,
+                });
+            } else {
+                if !fields.is_empty() {
+                    return Err(ParseError::MixedRecord { span: name.span });
+                }
+                // Punning: `{ x }` есть `{ x = x }`, и одноимённая переменная
+                // берётся из области видимости, а не выдумывается.
+                let value = if self.eat(TokenKind::Equals).is_some() {
+                    self.expr()?
+                } else {
+                    Expr {
+                        kind: ExprKind::Name(name.clone()),
+                        span: name.span,
+                    }
+                };
+                values.push((name.clone(), value));
+            }
+            if self.eat(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        let close = self.expect(TokenKind::RBrace)?;
+        let span = open.span.merge(close.span);
+        let kind = if values.is_empty() {
+            ExprKind::RecordType(fields)
+        } else {
+            ExprKind::Record(values)
+        };
+        Ok(Expr { kind, span })
     }
 
     fn atom_inner(&mut self) -> Result<Expr, ParseError> {
@@ -945,6 +1101,7 @@ impl<'a> Parser<'a> {
             TokenKind::If => return self.conditional(),
             TokenKind::Case => return self.case(),
             TokenKind::LParen => return self.parenthesised(),
+            TokenKind::LBrace if self.at_record() => return self.record(),
             TokenKind::LBracket => return self.list(),
             _ if self.at_literal() => {
                 let lit = self.literal()?;

@@ -86,6 +86,9 @@ impl Expr {
             | ExprKind::Lit(_)
             | ExprKind::Hole
             | ExprKind::Tuple(_)
+            | ExprKind::RecordType(_)
+            | ExprKind::Record(_)
+            | ExprKind::Project(..)
             | ExprKind::List(_) => Prec::Atom,
             ExprKind::App(..) | ExprKind::TypeApp(..) => Prec::App,
             ExprKind::Chain(_) => Prec::Chain,
@@ -176,6 +179,12 @@ impl Printer {
 
     fn decl(&mut self, decl: &Decl) {
         match &decl.kind {
+            DeclKind::Alias { name, body } => {
+                self.push("type ");
+                self.push(&name.text);
+                self.push(" = ");
+                self.expr(body, Prec::Lowest);
+            }
             DeclKind::Signature { name, ty } => {
                 self.decl_name(name);
                 self.push(" : ");
@@ -341,6 +350,35 @@ impl Printer {
             ExprKind::Name(name) => self.push(&name.text),
             ExprKind::Lit(lit) => self.push(&lit.text),
             ExprKind::Hole => self.push("_"),
+            ExprKind::RecordType(fields) => {
+                self.push("{");
+                for (index, field) in fields.iter().enumerate() {
+                    if index > 0 {
+                        self.push(", ");
+                    }
+                    self.push(&field.name.text);
+                    self.push(" : ");
+                    self.expr(&field.ty, Prec::Lowest);
+                }
+                self.push("}");
+            }
+            ExprKind::Record(fields) => {
+                self.push("{");
+                for (index, (name, value)) in fields.iter().enumerate() {
+                    if index > 0 {
+                        self.push(", ");
+                    }
+                    self.push(&name.text);
+                    self.push(" = ");
+                    self.expr(value, Prec::Lowest);
+                }
+                self.push("}");
+            }
+            ExprKind::Project(inner, name) => {
+                self.expr(inner, Prec::Atom);
+                self.push(".");
+                self.push(&name.text);
+            }
             ExprKind::App(..) | ExprKind::TypeApp(..) => self.spine(expr),
             ExprKind::Lam { params, body } => {
                 self.push("\\");

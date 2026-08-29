@@ -84,6 +84,12 @@ impl<'a> Spent<'a> {
                 .iter()
                 .any(|(_, value)| self.in_expr(name, value, bound)),
             ExprKind::Project(record, _) => self.in_expr(name, record, bound),
+            ExprKind::Update(base, fields) => {
+                self.in_expr(name, base, bound)
+                    || fields
+                        .iter()
+                        .any(|(_, value)| self.in_expr(name, value, bound))
+            }
             ExprKind::App(..) => self.in_application(name, expr, bound),
             // Аргумент типа стёрт, как и всё в позиции типа.
             ExprKind::TypeApp(callee, _) => self.in_expr(name, callee, bound),

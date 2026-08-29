@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use adamas_core::check::{infer, is_type};
+use adamas_core::conv::whnf;
 use adamas_core::ctx::Ctx;
 use adamas_core::eval::{eval, quote};
 use adamas_core::level::Level;
@@ -574,6 +575,12 @@ impl<'a> Elaborator<'a> {
                 }
             }
             ExprKind::Project(record, _) => self.free_in(record, bound, found),
+            ExprKind::Update(base, fields) => {
+                self.free_in(base, bound, found);
+                for (_, value) in fields {
+                    self.free_in(value, bound, found);
+                }
+            }
             ExprKind::Lam { params, body } => {
                 let depth = bound.len();
                 for param in params {
@@ -981,6 +988,7 @@ impl<'a> Elaborator<'a> {
                 let inner = self.placed(Position::Inner, |it| it.expr(record, Mult::Many))?;
                 Ok(Term::Project(Rc::new(inner), CoreName::from(&*name.text)))
             }
+            ExprKind::Update(base, fields) => self.update(base, fields, expr.span),
             ExprKind::TypeApp(..) => self.type_app(expr),
 
             // `_` - дырка терма: решать её теперь есть чем, и нерешённая
@@ -1265,6 +1273,63 @@ impl<'a> Elaborator<'a> {
             ty: Rc::new(ty),
         };
         Ok(std::iter::once(head).chain(tail).collect())
+    }
+
+    /// `{ p | x = v }` - обновление и расширение одной формой (§4.2).
+    ///
+    /// Различает их **тип исходной записи**, а не автор: есть поле - update,
+    /// нет - extension. Собирается результат пересборкой: у каждого поля
+    /// исходной берётся либо написанное значение, либо её собственная
+    /// проекция, а ненаписанные поля дописываются следом.
+    ///
+    /// # Открытая запись сюда не проходит, и это названная граница
+    ///
+    /// У записи с хвостом полей не перечислить - их знает только хвост, - а
+    /// пересборка перечисляет. Правильный ответ - расширение и ограничение
+    /// как операции ядра; §4.2 их и предполагает («элаборатор вставляет
+    /// restriction перед extension»), но заводить их ради формы, которой в
+    /// §4.2 нет ни одного примера с открытой записью, значило бы строить
+    /// механизм без потребителя.
+    fn update(
+        &mut self,
+        base: &Expr,
+        fields: &[(ast::Name, Expr)],
+        span: Span,
+    ) -> Result<Term, ElabError> {
+        let value = self.placed(Position::Inner, |it| it.expr(base, Mult::Many))?;
+        let Some(ty) = self.synthesized(&value) else {
+            return Err(ElabError::NotMatchable { span });
+        };
+        // Голова разворачивается: `Point` - алиас, и §4.2 требует, чтобы он был
+        // полностью взаимозаменяем с тем, что назвал.
+        let ty = whnf(self.signature, &ty);
+        let Value::Record(telescope) = &*ty else {
+            return Err(ElabError::NotUpdatable { span });
+        };
+        if telescope.is_open() {
+            return Err(ElabError::OpenUpdate { span });
+        }
+        let mut written = Vec::new();
+        for field in telescope.fields() {
+            let name = CoreName::from(&*field.name);
+            let update = fields.iter().find(|(it, _)| *it.text == *field.name);
+            let value = match update {
+                Some((_, value)) => self.placed(Position::Field, |it| it.expr(value, Mult::One))?,
+                None => Term::Project(Rc::new(value.clone()), Rc::clone(&name)),
+            };
+            written.push((name, Rc::new(value)));
+        }
+        // Ненаписанного поля у исходной нет - это расширение, и дописывается
+        // оно следом, в порядке написания.
+        for (name, value) in fields {
+            if telescope.fields().iter().any(|it| *it.name == *name.text) {
+                continue;
+            }
+            let value = self.placed(Position::Field, |it| it.expr(value, Mult::One))?;
+            written.push((CoreName::from(&*name.text), Rc::new(value)));
+        }
+        self.produced = None;
+        Ok(Term::Object(written.into()))
     }
 
     /// `{ x = a, y }` - значение записи.

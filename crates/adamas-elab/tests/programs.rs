@@ -1864,3 +1864,71 @@ p = {{ x = Zero, y = Zero }}
         "получено {error:?}"
     );
 }
+
+#[test]
+fn an_update_and_an_extension_are_one_form() {
+    // §4.2: `{ p | field = value }` - и обновление, и расширение. Различает их
+    // тип исходной записи, а не автор. Проверяется вычислением: обновлённое
+    // поле изменилось, соседнее осталось.
+    let signature = program(&format!(
+        "{BASE}
+P : Nat -> Type
+anything : (0 n : Nat) -> P n
+
+type Point = {{ x : Nat, y : Nat }}
+type Point3D = {{ x : Nat, y : Nat, z : Nat }}
+
+moved : Point -> Point
+moved p = {{ p | x = Succ p.x }}
+
+promote : Point -> Nat -> Point3D
+promote p z = {{ p | z = z }}
+
+start : Point
+start = {{ x = Zero, y = Succ Zero }}
+"
+    ));
+    let number = |value: u32| {
+        (0..value).fold(Term::constant("Zero"), |term, _| {
+            Term::constant("Succ").apply([term])
+        })
+    };
+    // `(moved start).x` есть `1`, а `.y` осталось `1`.
+    for (field, expected) in [("x", 1), ("y", 1)] {
+        let projected = Term::Project(
+            Rc::new(Term::constant("moved").apply([Term::constant("start")])),
+            field.into(),
+        );
+        let outcome = check_closed(
+            &signature,
+            &at("anything").apply([number(expected)]),
+            &at("P").apply([projected]),
+        );
+        assert!(outcome.is_ok(), "поле {field}: {outcome:?}");
+    }
+    // Расширение дописывает поле, не трогая прежние.
+    let promoted = Term::constant("promote").apply([Term::constant("start"), number(2)]);
+    let outcome = check_closed(
+        &signature,
+        &at("anything").apply([number(2)]),
+        &at("P").apply([Term::Project(Rc::new(promoted), "z".into())]),
+    );
+    assert!(outcome.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn an_open_record_is_not_updated_yet() {
+    // Пересборка перечисляет поля, а у записи с хвостом их знает только хвост.
+    // Названная граница: правильный ответ - расширение и ограничение как
+    // операции ядра, и заводятся они вместе с первым потребителем.
+    let error = refused(&format!(
+        "{BASE}
+shift : {{ x : Nat, y : Nat }} -> {{ x : Nat, y : Nat }}
+shift p = {{ p | x = Succ p.x }}
+"
+    ));
+    assert!(
+        matches!(error, ElabError::OpenUpdate { .. }),
+        "получено {error:?}"
+    );
+}

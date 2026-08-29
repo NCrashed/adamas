@@ -146,6 +146,13 @@ impl Spans<'_> {
                     self.expr(at, value);
                 }
             }
+            ExprKind::Update(base, fields) => {
+                self.expr(at, base);
+                for (name, value) in fields {
+                    self.name(at, name);
+                    self.expr(at, value);
+                }
+            }
             ExprKind::Project(record, name) => {
                 self.expr(at, record);
                 self.name(at, name);

@@ -89,6 +89,7 @@ impl Expr {
             | ExprKind::RecordType(_)
             | ExprKind::Record(_)
             | ExprKind::Project(..)
+            | ExprKind::Update(..)
             | ExprKind::List(_) => Prec::Atom,
             ExprKind::App(..) | ExprKind::TypeApp(..) => Prec::App,
             ExprKind::Chain(_) => Prec::Chain,
@@ -364,6 +365,20 @@ impl Printer {
             }
             ExprKind::Record(fields) => {
                 self.push("{");
+                for (index, (name, value)) in fields.iter().enumerate() {
+                    if index > 0 {
+                        self.push(", ");
+                    }
+                    self.push(&name.text);
+                    self.push(" = ");
+                    self.expr(value, Prec::Lowest);
+                }
+                self.push("}");
+            }
+            ExprKind::Update(base, fields) => {
+                self.push("{");
+                self.expr(base, Prec::Lowest);
+                self.push(" | ");
                 for (index, (name, value)) in fields.iter().enumerate() {
                     if index > 0 {
                         self.push(", ");

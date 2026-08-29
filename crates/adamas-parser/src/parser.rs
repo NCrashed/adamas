@@ -1021,6 +1021,38 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Стоит ли на разделителе `|`.
+    fn at_pipe(&self) -> bool {
+        self.at(TokenKind::Pipe)
+    }
+
+    /// Хвост формы `{ base | x = v, y = w }` - после самого `|`.
+    fn updated(&mut self, start: Span, base: Expr) -> Result<Expr, ParseError> {
+        let mut fields = Vec::new();
+        loop {
+            let name = self.expect(TokenKind::Ident)?;
+            let name = self.name_of(name);
+            // Punning работает и здесь: `{ p | x }` есть `{ p | x = x }`.
+            let value = if self.eat(TokenKind::Equals).is_some() {
+                self.expr()?
+            } else {
+                Expr {
+                    kind: ExprKind::Name(name.clone()),
+                    span: name.span,
+                }
+            };
+            fields.push((name, value));
+            if self.eat(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        let close = self.expect(TokenKind::RBrace)?;
+        Ok(Expr {
+            kind: ExprKind::Update(Box::new(base), fields),
+            span: start.merge(close.span),
+        })
+    }
+
     /// Стоит ли на `.name` - функции-проекции в позиции атома.
     fn at_projection(&self) -> bool {
         let dot = self.peek();
@@ -1104,6 +1136,20 @@ impl<'a> Parser<'a> {
                 span: open.span.merge(close.span),
             });
         }
+        // `{ p | x = v }` - обновление. Отличается оно от списка полей только
+        // тем, что после первого выражения стоит `|`, а не `:`, `=` или `,`;
+        // выражение при этом бывает любым, поэтому парсер пробует и
+        // возвращается. Возврат тот же, что у `{x : Nat}`, и по той же причине.
+        let mark = self.index;
+        // Основа читается применением, а не выражением целиком: `|` - обычный
+        // операторный знак, и цепочка съела бы его вместе с полями.
+        if let Ok(base) = self.application() {
+            if self.at_pipe() {
+                self.bump();
+                return self.updated(open.span, base);
+            }
+        }
+        self.index = mark;
         let mut fields = Vec::new();
         let mut values = Vec::new();
         loop {

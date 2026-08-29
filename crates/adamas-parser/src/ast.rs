@@ -212,6 +212,11 @@ pub enum ExprKind {
     Record(Vec<(Name, Expr)>),
     /// Проекция поля: `p.x`.
     Project(Box<Expr>, Name),
+    /// Обновление или расширение: `{ p | x = v, y = w }` (§4.2).
+    ///
+    /// Одна форма на обе операции: есть ли поле у исходной записи, решает не
+    /// автор, а её тип. Возвращаемый тип отражает результат.
+    Update(Box<Expr>, Vec<(Name, Expr)>),
     /// Кортеж `(a, b)`; пустой - `()`.
     Tuple(Vec<Expr>),
     /// Список `[a, b, c]`.
@@ -471,6 +476,10 @@ pub fn contains_block(expr: &Expr) -> bool {
             ExprKind::RecordType(fields) => pending.extend(fields.iter().map(|it| &it.ty)),
             ExprKind::Record(fields) => pending.extend(fields.iter().map(|(_, it)| it)),
             ExprKind::Project(inner, _) => pending.push(inner),
+            ExprKind::Update(base, fields) => {
+                pending.push(base);
+                pending.extend(fields.iter().map(|(_, it)| it));
+            }
             ExprKind::App(left, right)
             | ExprKind::TypeApp(left, right)
             | ExprKind::Arrow(left, right) => {
@@ -642,6 +651,20 @@ fn dump_binder(out: &mut String, binder: &Binder) {
     out.push(close);
 }
 
+/// Обновление: `(update p (x v))`.
+fn dump_update(out: &mut String, base: &Expr, fields: &[(Name, Expr)]) {
+    out.push_str("(update ");
+    dump_expr(out, base);
+    for (name, value) in fields {
+        out.push_str(" (");
+        out.push_str(&name.text);
+        out.push(' ');
+        dump_expr(out, value);
+        out.push(')');
+    }
+    out.push(')');
+}
+
 /// Проекция: `(. p x)`.
 fn dump_projection(out: &mut String, inner: &Expr, name: &Name) {
     out.push_str("(. ");
@@ -683,6 +706,7 @@ fn dump_expr(out: &mut String, expr: &Expr) {
         ExprKind::Hole => out.push('_'),
         ExprKind::RecordType(_) | ExprKind::Record(_) => dump_record(out, &expr.kind),
         ExprKind::Project(inner, name) => dump_projection(out, inner, name),
+        ExprKind::Update(base, fields) => dump_update(out, base, fields),
         // Спайн применения печатается в один список: `(f x y)` читается, а
         // `(app (app f x) y)` - нет.
         ExprKind::App(..) => {

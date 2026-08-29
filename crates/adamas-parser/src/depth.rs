@@ -103,6 +103,13 @@ fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<
                 pending.push((Node::Expr(value), inner));
             }
         }
+        ExprKind::Update(base, fields) => {
+            let deeper = deepen(depth, 1, expr.span)?;
+            pending.push((Node::Expr(base), deeper));
+            for (_, value) in fields {
+                pending.push((Node::Expr(value), deeper));
+            }
+        }
         ExprKind::Project(inner, _) => {
             let deeper = deepen(depth, 1, expr.span)?;
             pending.push((Node::Expr(inner), deeper));

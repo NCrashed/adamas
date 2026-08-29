@@ -126,7 +126,7 @@ impl<'a> Spent<'a> {
             ExprKind::Chain(chain) => self.in_chain(name, chain, bound),
             // `Pi` и стрелка - типы целиком: что в них написано, стёрто.
             // Тип записи стёрт, как и всё в позиции типа.
-            ExprKind::RecordType(_)
+            ExprKind::RecordType(..)
             | ExprKind::Pi { .. }
             | ExprKind::Arrow(..)
             | ExprKind::Lit(_)

@@ -207,7 +207,7 @@ pub enum ExprKind {
     /// Порядок написания сохраняется: поле вправе ссылаться на предыдущие, и
     /// сортировка сломала бы зависимость. Решение от 2026-08-29: запись с
     /// зависимостью между полями закрыта.
-    RecordType(Vec<RecordField>),
+    RecordType(Vec<RecordField>, Option<Name>),
     /// Значение записи: `{ x = a, y }`, где второе - punning для `y = y`.
     Record(Vec<(Name, Expr)>),
     /// Проекция поля: `p.x`.
@@ -473,7 +473,7 @@ pub fn contains_block(expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::Case { .. } | ExprKind::Block(_) => return true,
             ExprKind::Name(_) | ExprKind::Lit(_) | ExprKind::Hole => {}
-            ExprKind::RecordType(fields) => pending.extend(fields.iter().map(|it| &it.ty)),
+            ExprKind::RecordType(fields, _) => pending.extend(fields.iter().map(|it| &it.ty)),
             ExprKind::Record(fields) => pending.extend(fields.iter().map(|(_, it)| it)),
             ExprKind::Project(inner, _) => pending.push(inner),
             ExprKind::Update(base, fields) => {
@@ -676,14 +676,16 @@ fn dump_projection(out: &mut String, inner: &Expr, name: &Name) {
 
 /// Запись или её тип: `(record (x Nat) (y Nat))`.
 fn dump_record(out: &mut String, kind: &ExprKind) {
-    let (head, fields): (&str, Vec<(&Symbol, &Expr)>) = match kind {
-        ExprKind::RecordType(fields) => (
+    let (head, fields, tail): (&str, Vec<(&Symbol, &Expr)>, Option<&Name>) = match kind {
+        ExprKind::RecordType(fields, tail) => (
             "record",
             fields.iter().map(|it| (&it.name.text, &it.ty)).collect(),
+            tail.as_ref(),
         ),
         ExprKind::Record(fields) => (
             "object",
             fields.iter().map(|(name, it)| (&name.text, it)).collect(),
+            None,
         ),
         _ => unreachable!("не запись"),
     };
@@ -696,6 +698,10 @@ fn dump_record(out: &mut String, kind: &ExprKind) {
         dump_expr(out, value);
         out.push(')');
     }
+    if let Some(tail) = tail {
+        out.push_str(" | ");
+        out.push_str(&tail.text);
+    }
     out.push(')');
 }
 
@@ -704,7 +710,7 @@ fn dump_expr(out: &mut String, expr: &Expr) {
         ExprKind::Name(name) => out.push_str(&name.text),
         ExprKind::Lit(lit) => out.push_str(&lit.text),
         ExprKind::Hole => out.push('_'),
-        ExprKind::RecordType(_) | ExprKind::Record(_) => dump_record(out, &expr.kind),
+        ExprKind::RecordType(..) | ExprKind::Record(_) => dump_record(out, &expr.kind),
         ExprKind::Project(inner, name) => dump_projection(out, inner, name),
         ExprKind::Update(base, fields) => dump_update(out, base, fields),
         // Спайн применения печатается в один список: `(f x y)` читается, а

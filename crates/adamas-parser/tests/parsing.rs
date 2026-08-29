@@ -433,3 +433,14 @@ proptest! {
         let _ = parse(&text);
     }
 }
+
+#[test]
+fn a_record_type_may_name_its_tail() {
+    // §4.2: сохранение полей пишется явно, `{ x : Nat | r }`. Первая запись
+    // читается ещё и как группа implicit-связываний, и разводит их `|` -
+    // возврат назад отсюда и начинается.
+    assert_eq!(
+        tree("keep : { x : Nat | r } -> { x : Nat | r }\n").expect("разбор удался"),
+        "(sig keep (-> (record (x Nat) | r) (record (x Nat) | r)))\n"
+    );
+}

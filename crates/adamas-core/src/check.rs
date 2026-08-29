@@ -62,7 +62,7 @@ use crate::mult::Mult;
 use crate::row::Row;
 use crate::sig::{Definition, DefinitionKind, Signature};
 use crate::term::{Binder, Case, Field as RecordField, Fields, Name, Term, spine};
-use crate::value::{Elim, Head, Lvl, Value};
+use crate::value::{Elim, Head, Lvl, Telescope, Value};
 
 /// Значение, уложенное в ошибку: обратное чтение плюс зонканье.
 ///
@@ -1358,6 +1358,27 @@ fn infer_object(
     Ok((ctx.eval(&record), usage))
 }
 
+/// Поле ряда вместе с телескопом, которому оно принадлежит.
+///
+/// Хвост, оказавшийся рядом, - это те же поля: `{ x | {y, z} }` имеет `y`, и
+/// не искать его там значило бы отказывать записи, прошедшей через функцию с
+/// написанным хвостом. Тот же разворот делает сравнение рядов
+/// (`conv::labelled`).
+fn field_of(metas: &Metas, telescope: &Telescope, name: &Name) -> Option<(Telescope, usize)> {
+    let mut current = telescope.clone();
+    loop {
+        if let Some(index) = current.fields().iter().position(|it| it.name == *name) {
+            return Some((current, index));
+        }
+        let tail = current.tail()?;
+        let tail = crate::solve::force(metas, &tail).unwrap_or(tail);
+        match &*tail {
+            Value::Row(inner) => current = inner.clone(),
+            _ => return None,
+        }
+    }
+}
+
 /// Синтезирует тип проекции `e.x`.
 ///
 /// Тип поля живёт под предыдущими полями телескопа, а их значения у записи уже
@@ -1381,7 +1402,7 @@ fn infer_project(
             },
         ));
     };
-    let Some(index) = telescope.fields().iter().position(|it| it.name == *name) else {
+    let Some((telescope, index)) = field_of(metas, telescope, name) else {
         return Err(refuse(
             ctx,
             metas,
@@ -1391,6 +1412,7 @@ fn infer_project(
             },
         ));
     };
+    let telescope = &telescope;
     // Стёртое поле в рантайм-позиции: значения у него нет, и вынуть его
     // нечем - то же правило, что у стёртой переменной.
     let field = &telescope.fields()[index];

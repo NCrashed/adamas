@@ -86,7 +86,7 @@ impl Expr {
             | ExprKind::Lit(_)
             | ExprKind::Hole
             | ExprKind::Tuple(_)
-            | ExprKind::RecordType(_)
+            | ExprKind::RecordType(..)
             | ExprKind::Record(_)
             | ExprKind::Project(..)
             | ExprKind::Update(..)
@@ -351,7 +351,7 @@ impl Printer {
             ExprKind::Name(name) => self.push(&name.text),
             ExprKind::Lit(lit) => self.push(&lit.text),
             ExprKind::Hole => self.push("_"),
-            ExprKind::RecordType(fields) => {
+            ExprKind::RecordType(fields, tail) => {
                 self.push("{");
                 for (index, field) in fields.iter().enumerate() {
                     if index > 0 {
@@ -360,6 +360,10 @@ impl Printer {
                     self.push(&field.name.text);
                     self.push(" : ");
                     self.expr(&field.ty, Prec::Lowest);
+                }
+                if let Some(tail) = tail {
+                    self.push(" | ");
+                    self.push(&tail.text);
                 }
                 self.push("}");
             }

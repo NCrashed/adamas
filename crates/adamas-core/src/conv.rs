@@ -278,10 +278,11 @@ fn same_open(
     left: &Telescope,
     right: &Telescope,
 ) -> bool {
-    let (ours, theirs) = (labelled(size, left), labelled(size, right));
-    for (name, mine) in &ours {
-        if let Some(yours) = theirs.iter().find(|(it, _)| it == name) {
-            if !convertible_within(fuel, sig, metas, size, mine, &yours.1) {
+    let (mine, yours) = (labelled(metas, size, left), labelled(metas, size, right));
+    let (ours, theirs) = (&mine.labels, &yours.labels);
+    for (name, ours) in ours {
+        if let Some(theirs) = theirs.iter().find(|(it, _)| it == name) {
+            if !convertible_within(fuel, sig, metas, size, ours, &theirs.1) {
                 return false;
             }
         }
@@ -296,8 +297,8 @@ fn same_open(
             })
             .collect()
     };
-    let (only_ours, only_theirs) = (missing(&ours, &theirs), missing(&theirs, &ours));
-    match (left.tail(), right.tail()) {
+    let (only_ours, only_theirs) = (missing(ours, theirs), missing(theirs, ours));
+    match (mine.tail, yours.tail) {
         // Один открыт: недостающее обязан дать его хвост, а лишнего у
         // закрытой стороны быть не может.
         (Some(tail), None) => {
@@ -333,22 +334,58 @@ fn same_open(
                 false
             }
         }
-        (None, None) => unreachable!("хотя бы один ряд открыт"),
+        // Развёртка хвостов сошла на нет: метки известны обе стороны, и
+        // сравнение идёт по именам - зависимостей у открытого ряда нет.
+        (None, None) => only_ours.is_empty() && only_theirs.is_empty(),
     }
 }
 
-/// Имена и типы полей ряда - под свежими переменными вместо предыдущих полей.
+/// Имена и типы полей ряда - под свежими переменными вместо предыдущих полей -
+/// вместе с остатком, который метками не выражается.
 ///
 /// Открытый ряд зависимостей не имеет, поэтому подставлять туда что-либо
 /// осмысленное незачем: переменные нужны только чтобы телескоп дошёл до конца.
-fn labelled(size: u32, telescope: &Telescope) -> Vec<(Name, Rc<Value>)> {
-    let mut earlier = Vec::with_capacity(telescope.fields().len());
-    let mut found = Vec::with_capacity(telescope.fields().len());
-    for (index, field) in telescope.fields().iter().enumerate() {
-        found.push((Rc::clone(&field.name), telescope.at(index, &earlier)));
-        earlier.push(Value::var(Lvl(size + u32::try_from(index).unwrap_or(0))));
+///
+/// **Хвост, оказавшийся рядом, разворачивается.** `{ x | {y, z} }` и
+/// `{ x, y, z }` описывают один набор меток, и пока хвост свёрнут, `y` не
+/// видно: сравнение отказывало бы на ровном месте. Так выглядит запись,
+/// прошедшая через функцию с написанным хвостом (`keep : {x : Nat | r} -> …`),
+/// где `r` уже решён.
+fn labelled(metas: &Metas, size: u32, telescope: &Telescope) -> Spread {
+    let mut labels = Vec::with_capacity(telescope.fields().len());
+    let mut current = telescope.clone();
+    loop {
+        let mut earlier = Vec::with_capacity(current.fields().len());
+        for (index, field) in current.fields().iter().enumerate() {
+            labels.push((Rc::clone(&field.name), current.at(index, &earlier)));
+            // Переменные нумеруются сквозь развёртку: у полей из хвоста они
+            // обязаны отличаться от полей головы.
+            let depth = size + u32::try_from(labels.len() - 1).unwrap_or(0);
+            earlier.push(Value::var(Lvl(depth)));
+        }
+        let Some(tail) = current.tail() else {
+            return Spread { labels, tail: None };
+        };
+        // Решённая дырка разворачивается: `?r`, ставшая рядом, - это ряд.
+        let tail = crate::solve::force(metas, &tail).unwrap_or(tail);
+        match &*tail {
+            Value::Row(inner) => current = inner.clone(),
+            _ => {
+                return Spread {
+                    labels,
+                    tail: Some(tail),
+                };
+            }
+        }
     }
-    found
+}
+
+/// Ряд, развёрнутый по хвостам.
+struct Spread {
+    /// Метки и их типы - в порядке появления, головные первыми.
+    labels: Vec<(Name, Rc<Value>)>,
+    /// Остаток, метками не выразимый: нерешённая дырка или переменная.
+    tail: Option<Rc<Value>>,
 }
 
 /// Сводит хвост с рядом из недостающих полей и, возможно, своего хвоста.

@@ -1999,3 +1999,79 @@ shift p = {{ p | x = Succ p.x }}
         "получено {error:?}"
     );
 }
+
+#[test]
+fn a_record_in_a_result_is_closed() {
+    // Подъём идёт только в отрицательных позициях (§4.2, решение 2026-08-29).
+    // До правки `mk : Nat -> { x : Nat }` был необитаем: квантор по хвосту
+    // требовал произвести поля, которых автор не знает.
+    program(&format!(
+        "{BASE}
+mk : Nat -> {{ x : Nat }}
+mk n = {{ x = n }}
+
+got : Nat
+got = (mk Zero).x
+"
+    ));
+}
+
+#[test]
+fn a_record_under_two_arrows_is_closed_again() {
+    // Полярность считается по стрелкам, а не по глубине: у `run` аргумент -
+    // функция, и её собственный аргумент оказывается в положительной позиции.
+    // Значит `f` принимает ровно `{ x : Nat }`, и лишнее поле ему не отдать.
+    let error = refused(&format!(
+        "{BASE}
+run : ({{ x : Nat, y : Nat }} -> Nat) -> Nat
+run f = f {{ x = Zero, y = Zero, z = Zero }}
+"
+    ));
+    assert!(
+        matches!(error, ElabError::Core { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_written_tail_preserves_fields() {
+    // Функция, сохраняющая поля, пишет хвост явно - так же, как §4.11. Имя
+    // хвоста поднимается как `Row ℓ`, одно на обе записи, и лишнее поле
+    // проходит насквозь.
+    program(&format!(
+        "{BASE}
+keep : {{ x : Nat | r }} -> {{ x : Nat | r }}
+keep p = p
+
+why : {{ y : Nat, z : Nat }} -> Nat
+why q = q.y
+
+through : Nat
+through = why (keep {{ x = Zero, y = Succ Zero, z = Zero }})
+
+direct : Nat
+direct = (keep {{ x = Zero, y = Succ Zero }}).y
+
+type Both = {{ x : Nat, y : Nat }}
+
+closed : Both
+closed = keep {{ x = Zero, y = Zero }}
+"
+    ));
+}
+
+#[test]
+fn a_written_tail_needs_a_binder() {
+    // Хвост только ссылается: связывания он не создаёт. В алиасе `type`
+    // поднимать некому, и молча потерять хвост нельзя - это сузило бы
+    // написанный тип.
+    let error = refused(&format!(
+        "{BASE}
+type Wide = {{ x : Nat | r }}
+"
+    ));
+    assert!(
+        matches!(error, ElabError::UnknownName { .. }),
+        "получено {error:?}"
+    );
+}

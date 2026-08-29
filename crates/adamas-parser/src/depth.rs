@@ -91,7 +91,7 @@ fn deepen(depth: u32, links: usize, span: Span) -> Result<u32, ParseError> {
 fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<(), ParseError> {
     match &expr.kind {
         ExprKind::Name(_) | ExprKind::Lit(_) | ExprKind::Hole => {}
-        ExprKind::RecordType(fields) => {
+        ExprKind::RecordType(fields, _) => {
             let inner = deepen(depth, 1, expr.span)?;
             for field in fields {
                 pending.push((Node::Expr(&field.ty), inner));

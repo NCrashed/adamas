@@ -134,10 +134,13 @@ impl Spans<'_> {
             ExprKind::Name(name) => self.name(at, name),
             ExprKind::Lit(lit) => self.inside("литерал", at, lit.span),
             ExprKind::Hole => {}
-            ExprKind::RecordType(fields) => {
+            ExprKind::RecordType(fields, tail) => {
                 for field in fields {
                     self.name(at, &field.name);
                     self.expr(at, &field.ty);
+                }
+                if let Some(tail) = tail {
+                    self.name(at, tail);
                 }
             }
             ExprKind::Record(fields) => {

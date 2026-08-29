@@ -56,29 +56,58 @@ struct Lifted {
     row: bool,
 }
 
-/// Записи, написанные в сигнатуре на верхнем уровне, - по спану каждой.
+/// Несвязанные имена сигнатуры, разделённые по сорту подъёма.
+#[derive(Default)]
+struct Unbound {
+    /// Обычные свободные: тип у них - дырка.
+    names: Vec<Symbol>,
+    /// Написанные в хвосте записи: тип у них - `Row ℓ`.
+    tails: Vec<Symbol>,
+}
+
+impl Unbound {
+    /// Встречалось ли имя - в любой из групп.
+    fn has(&self, name: &Symbol) -> bool {
+        self.names.contains(name) || self.tails.contains(name)
+    }
+}
+
+/// Записи сигнатуры, которым auto-lift раздаёт row-переменную, - по спану
+/// каждой (§4.2).
 ///
-/// Каждая получает свою row-переменную (§4.2: auto-lift в позиции аргумента и
-/// результата). Вложенная в другую запись не считается: там она поле, а поле -
-/// это тип, и закрывает его та же запись, что его объявила.
+/// **Только отрицательные позиции.** Запись слева от стрелки - то, что
+/// функция принимает, и `{x, y | r}` там значит «не меньше этих полей»:
+/// квантор по `r` инстанцирует вызывающий, принося свою запись. Запись справа
+/// от стрелки - то, что функция обязана произвести, и квантор там требует
+/// произвести её при **любом** `r`: полей, которых автор не знает, взять
+/// неоткуда, и тип выходит необитаемым. Для эффектов симметрия верна - там
+/// row в результате есть разрешение, а не обязательство, - и эта разница
+/// записана в решении от 2026-08-29.
+///
+/// Сохранение полей поэтому пишется явно: `keep : {x : Nat | r} -> {x : Nat | r}`.
+/// §4.11 так и пишет.
+///
+/// Вложенная в другую запись не считается: там она поле, а поле - это тип, и
+/// закрывает его та же запись, что его объявила. Под применение типа
+/// (`List { x : Nat }`) подъём тоже не идёт: вариантность чужого конструктора
+/// неизвестна, а синоним стрелки её переворачивает.
 ///
 /// Спан, а не число: по нему запись потом себя и узнает. Одна написанная
 /// группа связываний элаборируется по разу на имя, и счёт вхождений разъехался
 /// бы с раздачей.
-fn written_rows(expr: &Expr, found: &mut Vec<Span>) {
+fn written_rows(expr: &Expr, negative: bool, found: &mut Vec<Span>) {
     match &expr.kind {
-        ExprKind::RecordType(_) => found.push(expr.span),
-        ExprKind::App(left, right)
-        | ExprKind::TypeApp(left, right)
-        | ExprKind::Arrow(left, right) => {
-            written_rows(left, found);
-            written_rows(right, found);
+        // Запись с написанным хвостом свою переменную уже назвала.
+        ExprKind::RecordType(_, None) if negative => found.push(expr.span),
+        ExprKind::Arrow(left, right) => {
+            written_rows(left, !negative, found);
+            written_rows(right, negative, found);
         }
         ExprKind::Pi { binders, codomain } => {
             for ty in binders.iter().filter_map(|it| it.ty.as_ref()) {
-                written_rows(ty, found);
+                written_rows(ty, !negative, found);
             }
-            written_rows(codomain, found);
+            written_rows(codomain, negative, found);
         }
         _ => {}
     }
@@ -485,16 +514,22 @@ impl<'a> Elaborator<'a> {
     /// это `Nat`, говорит только kind семейства. Дырку решает проверка - там же,
     /// где решает всё прочее.
     pub(crate) fn declaration(&mut self, ty: &Expr, default: Mult) -> Result<Term, ElabError> {
-        let mut lifted: Vec<Lifted> = self
-            .free(ty)
+        let (names, tails) = self.unbound(ty);
+        // Порядок связывания: сначала обычные свободные имена, потом
+        // написанные хвосты, потом безымянные row-переменные подъёма. Все они
+        // implicit, и порядок виден только `@`-применению; складывать разные
+        // сорта в одну последовательность появления значило бы двигать позицию
+        // `@`-аргумента от того, где в тексте случилась запись.
+        let mut lifted: Vec<Lifted> = names
             .into_iter()
             .map(|name| Lifted { name, row: false })
+            .chain(tails.into_iter().map(|name| Lifted { name, row: true }))
             .collect();
         // Записи сигнатуры получают row-переменную каждая своя, и собираются
         // они синтаксически - до элаборации, ровно как свободные имена: имя
         // связывания нужно знать раньше, чем оно понадобится.
         let mut rows = Vec::new();
-        written_rows(ty, &mut rows);
+        written_rows(ty, false, &mut rows);
         for index in 0..rows.len() {
             lifted.push(Lifted {
                 name: Rc::from(format!("#row{index}").as_str()),
@@ -529,21 +564,21 @@ impl<'a> Elaborator<'a> {
         ))
     }
 
-    /// Свободные имена написанного типа - те, что §4.1 поднимает в
-    /// implicit-параметры.
+    /// Несвязанные имена написанного типа - те, что §4.1 поднимает в
+    /// implicit-параметры: обычные и стоящие в хвосте записи.
     ///
-    /// Порядок - первого появления в тексте: `Vect n a` даёт `{n} {a}`, и
-    /// автор видит их там же, где написал. Отбираются строчные имена, которые
-    /// ничем не разрешаются: заглавное обязано быть объявленным (правило
-    /// регистра §4.1), а разрешившееся - не свободно.
-    pub(crate) fn free(&self, expr: &Expr) -> Vec<Symbol> {
-        let mut found = Vec::new();
+    /// Порядок в каждой группе - первого появления в тексте: `Vect n a` даёт
+    /// `{n} {a}`, и автор видит их там же, где написал. Отбираются строчные
+    /// имена, которые ничем не разрешаются: заглавное обязано быть объявленным
+    /// (правило регистра §4.1), а разрешившееся - не свободно.
+    fn unbound(&self, expr: &Expr) -> (Vec<Symbol>, Vec<Symbol>) {
+        let mut found = Unbound::default();
         let mut bound: Vec<Symbol> = Vec::new();
         self.free_in(expr, &mut bound, &mut found);
-        found
+        (found.names, found.tails)
     }
 
-    fn free_in(&self, expr: &Expr, bound: &mut Vec<Symbol>, found: &mut Vec<Symbol>) {
+    fn free_in(&self, expr: &Expr, bound: &mut Vec<Symbol>, found: &mut Unbound) {
         match &expr.kind {
             ExprKind::Name(name) => self.free_name(name, bound, found),
             ExprKind::App(callee, argument) | ExprKind::TypeApp(callee, argument) => {
@@ -576,7 +611,11 @@ impl<'a> Elaborator<'a> {
                 bound.truncate(depth);
             }
             // Тип записи связывает свои поля для последующих: телескоп.
-            ExprKind::RecordType(fields) => {
+            // Хвост стоит снаружи полей и ими не заслоняется.
+            ExprKind::RecordType(fields, tail) => {
+                if let Some(tail) = tail {
+                    self.tail_name(tail, bound, found);
+                }
                 let depth = bound.len();
                 for field in fields {
                     self.free_in(&field.ty, bound, found);
@@ -622,17 +661,33 @@ impl<'a> Elaborator<'a> {
         }
     }
 
-    fn free_name(&self, name: &ast::Name, bound: &[Symbol], found: &mut Vec<Symbol>) {
-        let known = is_reference(&name.text)
+    fn free_name(&self, name: &ast::Name, bound: &[Symbol], found: &mut Unbound) {
+        if !self.resolves(name, bound) && !found.has(&name.text) {
+            found.names.push(Rc::clone(&name.text));
+        }
+    }
+
+    /// Имя в хвосте записи. Поднимается как ряд, а не как тип: `{x : Nat | r}`
+    /// говорит про `r` всё, что о нём нужно знать.
+    ///
+    /// Если то же имя уже поднято обычным свободным, оно **переезжает** в ряды:
+    /// сорт назначает написанная позиция, а порядок обхода - нет.
+    fn tail_name(&self, name: &ast::Name, bound: &[Symbol], found: &mut Unbound) {
+        if self.resolves(name, bound) || found.tails.contains(&name.text) {
+            return;
+        }
+        found.names.retain(|it| *it != name.text);
+        found.tails.push(Rc::clone(&name.text));
+    }
+
+    /// Разрешается ли имя чем-то, кроме подъёма.
+    fn resolves(&self, name: &ast::Name, bound: &[Symbol]) -> bool {
+        is_reference(&name.text)
             || &*name.text == "Type"
             || bound.contains(&name.text)
-            || found.contains(&name.text)
             || self.local(&name.text).is_some()
             || self.group.iter().any(|member| member.name == name.text)
-            || self.signature.lookup(&name.text).is_some();
-        if !known {
-            found.push(Rc::clone(&name.text));
-        }
+            || self.signature.lookup(&name.text).is_some()
     }
 
     /// Свежая дырка терма, стоящая в текущем контексте.
@@ -997,7 +1052,9 @@ impl<'a> Elaborator<'a> {
 
             // Тип записи - телескоп: каждое следующее поле элаборируется под
             // предыдущими, потому что вправе на них ссылаться (§4.2).
-            ExprKind::RecordType(fields) => self.record_type(fields, expr.span),
+            ExprKind::RecordType(fields, tail) => {
+                self.record_type(fields, tail.as_ref(), expr.span)
+            }
             ExprKind::Record(fields) => self.record(fields),
             ExprKind::Project(record, name) => {
                 let inner = self.placed(Position::Inner, |it| it.expr(record, Mult::Many))?;
@@ -1246,10 +1303,18 @@ impl<'a> Elaborator<'a> {
     ///
     /// Поле кратности `1` (§4.1): запись кладёт значение однажды - тот же
     /// довод, что у поля конструктора.
-    fn record_type(&mut self, fields: &[ast::RecordField], span: Span) -> Result<Term, ElabError> {
+    fn record_type(
+        &mut self,
+        fields: &[ast::RecordField],
+        written: Option<&ast::Name>,
+        span: Span,
+    ) -> Result<Term, ElabError> {
         // Хвост берётся один раз на запись - до полей: связывание его стоит
         // снаружи них, и внутри индекс был бы уже другим.
-        let tail = self.row_variable(span);
+        let tail = match written {
+            Some(name) => Some(Rc::new(self.tail_variable(name)?)),
+            None => self.row_variable(span),
+        };
         let inner = self.record_fields(fields)?;
         Ok(Term::Record(Fields {
             fields: inner.into(),
@@ -1267,6 +1332,21 @@ impl<'a> Elaborator<'a> {
         let index = self.rows.as_ref()?.iter().position(|it| *it == span)?;
         let name: Symbol = Rc::from(format!("#row{index}").as_str());
         self.local(&name).map(|it| Rc::new(Term::var(it)))
+    }
+
+    /// Написанный хвост `{ x : Nat | r }`.
+    ///
+    /// Связывания он не создаёт - только ссылается: `r` либо поднят подъёмом
+    /// сигнатуры, либо написан связыванием сам. Ненайденное имя здесь ошибка,
+    /// а не закрытая запись: молча потерять хвост значило бы сузить
+    /// написанный тип.
+    fn tail_variable(&mut self, name: &ast::Name) -> Result<Term, ElabError> {
+        self.local(&name.text)
+            .map(Term::var)
+            .ok_or_else(|| ElabError::UnknownName {
+                name: Rc::clone(&name.text),
+                span: name.span,
+            })
     }
 
     /// Поля записи телескопом - каждое под предыдущими.

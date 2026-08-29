@@ -1183,10 +1183,19 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+        // Явный хвост пишется у типа: `{ x : Nat | r }` (§4.2, §4.11). У
+        // значения его нет - там `|` уже означает обновление.
+        let tail = if values.is_empty() && self.at_pipe() {
+            self.bump();
+            let name = self.expect(TokenKind::Ident)?;
+            Some(self.name_of(name))
+        } else {
+            None
+        };
         let close = self.expect(TokenKind::RBrace)?;
         let span = open.span.merge(close.span);
         let kind = if values.is_empty() {
-            ExprKind::RecordType(fields)
+            ExprKind::RecordType(fields, tail)
         } else {
             ExprKind::Record(values)
         };

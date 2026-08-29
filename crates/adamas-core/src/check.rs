@@ -50,6 +50,7 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use crate::carrier;
 use crate::conv::{convertible, whnf};
 use crate::ctx::{Ctx, Usage};
 use crate::error::refuse;
@@ -319,7 +320,11 @@ fn check_lambda(
     let body_ty = codomain.apply(ctx.fresh());
     let usage = framed(check(&inner, metas, sigma, body, &body_ty), Frame::Body)?;
     let (used, rest) = usage.pop();
-    spend(name, *mult * sigma, used)?;
+    let allowed = *mult * sigma;
+    if let Some(carriers) = ctx.carriers() {
+        carrier::record(carriers, domain, allowed, used);
+    }
+    spend(name, allowed, used)?;
     Ok(rest)
 }
 
@@ -514,7 +519,7 @@ pub fn check_definition(
     definition: &Definition,
 ) -> Result<(), TypeError> {
     check_declaration(signature, metas, name, definition)?;
-    check_body(signature, metas, name, definition)
+    check_body(signature, metas, name, definition).map(|_| ())
 }
 
 /// Проверяет тело определения против его типа.
@@ -533,13 +538,14 @@ pub fn check_body(
     metas: &mut Metas,
     name: &Name,
     definition: &Definition,
-) -> Result<(), TypeError> {
+) -> Result<Rc<[Mult]>, TypeError> {
     let Some(body) = &definition.body else {
-        return Ok(());
+        return Ok(Rc::clone(&definition.carriers));
     };
     check_level_scope(name, definition.level_arity, body)?;
 
-    let ctx = Ctx::new(signature);
+    let carriers = carrier::Carriers::default();
+    let ctx = Ctx::new(signature).recording(&carriers);
     let ty_value = ctx.eval(&definition.ty);
     // `0`-определение проверяется при σ = 0, `ω` - при σ = 1: тело
     // присутствует в рантайме один раз, а сколько раз его позовут, определение
@@ -553,7 +559,7 @@ pub fn check_body(
 
     // Остаточные дырки здесь не проверяются: что с ними делать, решает
     // вызывающий.
-    Ok(())
+    Ok(carrier::profile(&definition.ty, body, &carriers))
 }
 
 fn check_level_scope(name: &Name, arity: u32, term: &Term) -> Result<(), TypeError> {
@@ -602,10 +608,13 @@ fn binding<T>(
 
     // Именно `define`, а не `bind`: значение известно, и тип тела не должен
     // оказаться зависящим от связывания, которого снаружи уже нет.
-    let inner = ctx.define(Rc::clone(name), mult, ty_value, ctx.eval(value));
+    let inner = ctx.define(Rc::clone(name), mult, Rc::clone(&ty_value), ctx.eval(value));
     let (result, body_usage) = framed(body(&inner, metas), Frame::BindingBody)?;
 
     let (used, rest) = body_usage.pop();
+    if let Some(carriers) = ctx.carriers() {
+        carrier::record(carriers, &ty_value, allowed, used);
+    }
     spend(name, allowed, used)?;
     Ok((result, value_usage.scale(allowed) + &rest))
 }

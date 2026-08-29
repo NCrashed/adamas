@@ -12,6 +12,7 @@
 
 use std::rc::Rc;
 
+use crate::carrier::Carriers;
 use crate::eval::{eval, quote};
 use crate::mult::Mult;
 use crate::sig::Signature;
@@ -38,6 +39,9 @@ pub struct Ctx<'a> {
     signature: &'a Signature,
     env: Env,
     bindings: Option<Rc<Cell>>,
+    /// Копилка кратностей носителей ([`crate::carrier`]), если проверка идёт
+    /// ради них. `None` - обычная проверка, и тогда запись стоит ноль.
+    carriers: Option<&'a Carriers>,
 }
 
 #[derive(Debug)]
@@ -54,7 +58,23 @@ impl<'a> Ctx<'a> {
             signature,
             env: Env::default(),
             bindings: None,
+            carriers: None,
         }
+    }
+
+    /// Тот же контекст, копящий кратности носителей.
+    #[must_use]
+    pub fn recording(self, carriers: &'a Carriers) -> Self {
+        Self {
+            carriers: Some(carriers),
+            ..self
+        }
+    }
+
+    /// Копилка носителей, если она есть.
+    #[must_use]
+    pub fn carriers(&self) -> Option<&'a Carriers> {
+        self.carriers
     }
 
     /// Сигнатура, в которой проверяется терм.
@@ -105,6 +125,7 @@ impl<'a> Ctx<'a> {
                 binding,
                 rest: self.bindings.clone(),
             })),
+            carriers: self.carriers,
         }
     }
 

@@ -97,6 +97,9 @@ pub enum DefinitionKind {
     },
 }
 
+/// Что фаза B2 узнала о теле: сам терм и носители его параметров.
+type CheckedBody = (Term, Rc<[Mult]>);
+
 /// Определение верхнего уровня.
 #[derive(Clone, Debug)]
 pub struct Definition {
@@ -122,6 +125,12 @@ pub struct Definition {
     ///
     /// Постулат тотален: разворачивать нечего, значит и расходиться нечему.
     pub total: bool,
+    /// Кратности носителей по позициям телескопа ([`crate::carrier`]).
+    ///
+    /// Выводятся из тела, как и [`Definition::total`], и по той же причине:
+    /// правила владения (§3.3) - поверхностные, а ответ им нужен от ядра.
+    /// Сверяет их с владеемым типом элаборация, ядро только считает.
+    pub carriers: Rc<[Mult]>,
 }
 
 impl Definition {
@@ -478,10 +487,14 @@ impl Signature {
         }
 
         // Тела - в сигнатуру до фазы C: позитивность смотрит сквозь
-        // определения, и определение без тела она видит непрозрачным.
+        // определения, и определение без тела она видит непрозрачным. Носители
+        // едут тем же ходом: они выведены из тела и до него не существуют.
         for (member, body) in members.iter().zip(bodies) {
-            if let (Some(term), Some(stored)) = (body, self.definitions.get_mut(member.name())) {
+            if let (Some((term, carriers)), Some(stored)) =
+                (body, self.definitions.get_mut(member.name()))
+            {
                 stored.body = Some(term);
+                stored.carriers = carriers;
             }
         }
 
@@ -512,7 +525,41 @@ impl Signature {
         for member in members {
             self.seal_member(metas, member)?;
         }
+        // Носители наследуются после зонканья: до него выводимый аргумент -
+        // дырка, и что им станет, не видно (см. [`crate::carrier`]).
+        self.settle_carriers(group);
         Ok(())
+    }
+
+    /// Переносит носители вызываемых на вызывающих до неподвижной точки.
+    ///
+    /// Цикл, а не один проход: внутри группы члены зовут друг друга, и
+    /// унаследованное одним обязано доехать до другого. Профиль только
+    /// ухудшается, а значений у кратности три, поэтому сходимость обеспечена
+    /// решёткой, а не счётчиком.
+    fn settle_carriers(&mut self, group: &Group) {
+        loop {
+            let mut moved = false;
+            for name in group_names(group) {
+                let Some(definition) = self.definitions.get(name) else {
+                    continue;
+                };
+                let Some(body) = &definition.body else {
+                    continue;
+                };
+                let inherited = crate::carrier::propagated(self, &definition.ty, body);
+                let settled = crate::carrier::worst(&definition.carriers, &inherited);
+                if *settled != *definition.carriers {
+                    if let Some(stored) = self.definitions.get_mut(name) {
+                        stored.carriers = settled;
+                    }
+                    moved = true;
+                }
+            }
+            if !moved {
+                return;
+            }
+        }
     }
 
     /// Фаза A для одного члена: проверить тип и обобщить арность.
@@ -536,6 +583,9 @@ impl Signature {
         let draft = Definition {
             mult,
             level_arity: arity.declared(),
+            // Носители неизвестны, пока тело не проверено; фаза B2 их уточнит,
+            // а постулат так и останется с `ω` - консервативным ответом.
+            carriers: crate::carrier::unknown(ty),
             ty: ty.clone(),
             body: None,
             kind: DefinitionKind::Regular,
@@ -610,7 +660,7 @@ impl Signature {
         metas: &mut Metas,
         member: &Member,
         checked: &Checked,
-    ) -> Result<Option<Term>, TypeError> {
+    ) -> Result<Option<CheckedBody>, TypeError> {
         let Member::Definition {
             name,
             body: Some(body),
@@ -630,8 +680,8 @@ impl Signature {
             body: Some(body.clone()),
             ..checked.declaration.clone()
         };
-        check_body(self, metas, name, &definition)?;
-        Ok(Some(body))
+        let carriers = check_body(self, metas, name, &definition)?;
+        Ok(Some((body, carriers)))
     }
 
     /// Фаза B1 для конструктора: тип, арность и форма.
@@ -650,6 +700,7 @@ impl Signature {
             // обобщение свело бы её к нулю, отвергнув всякий полиморфный
             // конструктор объявленного семейства.
             level_arity: arity.declared(),
+            carriers: crate::carrier::unknown(&constructor.ty),
             ty: constructor.ty.clone(),
             body: None,
             kind: DefinitionKind::Constructor {

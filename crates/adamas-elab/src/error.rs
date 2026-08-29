@@ -227,17 +227,6 @@ pub enum ElabError {
         span: Span,
     },
 
-    /// Обновляется запись с хвостом.
-    ///
-    /// Пересборка перечисляет поля, а у открытой записи их знает только хвост.
-    /// Правильный ответ - расширение и ограничение как операции ядра (§4.2), и
-    /// заводятся они вместе с первым потребителем.
-    #[error("запись с row-переменной пока не обновляется: её поля не перечислить")]
-    OpenUpdate {
-        /// Где написано обновление.
-        span: Span,
-    },
-
     /// Разбираемое, тип которого не синтезируется.
     #[error("тип разбираемого не выводится: укажите его")]
     NotMatchable {
@@ -555,7 +544,6 @@ impl ElabError {
             | Self::EmptyCase { span }
             | Self::NotMatchable { span }
             | Self::NotUpdatable { span }
-            | Self::OpenUpdate { span }
             | Self::NoImplicitParameter { span }
             | Self::BlockWithoutValue { span }
             | Self::UnrestrictedOwned { span, .. }

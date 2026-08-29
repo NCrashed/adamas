@@ -1439,8 +1439,18 @@ impl<'a> Elaborator<'a> {
         let Value::Record(telescope) = &*ty else {
             return Err(ElabError::NotUpdatable { span });
         };
+        // У открытой записи полей не перечислить - их знает хвост, - поэтому
+        // пересобрать её нечем и переопределение уходит в ядро как есть
+        // (§4.2). Какая метка обновляется, а какая дописывается, решает там
+        // тип базы - тот же критерий, что и здесь.
         if telescope.is_open() {
-            return Err(ElabError::OpenUpdate { span });
+            let mut written = Vec::with_capacity(fields.len());
+            for (name, value) in fields {
+                let value = self.placed(Position::Field, |it| it.expr(value, Mult::One))?;
+                written.push((CoreName::from(&*name.text), Rc::new(value)));
+            }
+            self.produced = None;
+            return Ok(Term::With(Rc::new(value), written.into()));
         }
         let mut written = Vec::new();
         for field in telescope.fields() {

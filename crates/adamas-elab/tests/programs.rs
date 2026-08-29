@@ -1983,20 +1983,40 @@ start = {{ x = Zero, y = Succ Zero }}
 }
 
 #[test]
-fn an_open_record_is_not_updated_yet() {
-    // Пересборка перечисляет поля, а у записи с хвостом их знает только хвост.
-    // Названная граница: правильный ответ - расширение и ограничение как
-    // операции ядра, и заводятся они вместе с первым потребителем.
-    let error = refused(&format!(
+fn an_open_record_is_updated_in_place() {
+    // Пересборка перечисляет поля, а у записи с хвостом их знает только хвост,
+    // поэтому переопределение уходит в ядро формой `With`. Хвост при этом
+    // сохраняется - и потому сигнатура пишет его явно (§4.2).
+    program(&format!(
         "{BASE}
-shift : {{ x : Nat, y : Nat }} -> {{ x : Nat, y : Nat }}
+shift : {{ x : Nat, y : Nat | r }} -> {{ x : Nat, y : Nat | r }}
 shift p = {{ p | x = Succ p.x }}
+
+moved : Nat
+moved = (shift {{ x = Zero, y = Zero, z = Zero }}).x
+
+kept : Nat
+kept = (shift {{ x = Zero, y = Zero, z = Succ Zero }}).z
 "
     ));
-    assert!(
-        matches!(error, ElabError::OpenUpdate { .. }),
-        "получено {error:?}"
-    );
+}
+
+#[test]
+fn an_open_record_gains_a_field() {
+    // Та же форма - расширение: метки нет у базы, значит она дописывается.
+    // Различает их тип базы, а не автор (§4.2).
+    program(&format!(
+        "{BASE}
+tag : {{ x : Nat | r }} -> {{ x : Nat, ok : Bool | r }}
+tag p = {{ p | ok = True }}
+
+added : Bool
+added = (tag {{ x = Zero, y = Zero }}).ok
+
+carried : Nat
+carried = (tag {{ x = Zero, y = Succ Zero }}).y
+"
+    ));
 }
 
 #[test]

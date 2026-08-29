@@ -50,6 +50,11 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
             unreachable!("незамкнутый терм: {index:?} при {} связываниях", env.len())
         }),
 
+        // Решённая дырка разворачивается сразу: её решение замкнуто, поэтому
+        // окружение ему не нужно. Нерешённая застревает - головой спайна,
+        // ровно как переменная контекста.
+        Term::Meta(meta) => Rc::new(Value::Neutral(Head::Meta(*meta), Vec::new())),
+
         Term::Universe(level) => Rc::new(Value::Universe(level.clone())),
 
         Term::Lam(mult, name, body) => Rc::new(Value::Lam(
@@ -246,6 +251,7 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
             let base = match head {
                 Head::Local(level) => Term::Var(level.to_index(size)),
                 Head::Global(name, levels) => Term::Const(Rc::clone(name), Rc::clone(levels)),
+                Head::Meta(meta) => Term::Meta(*meta),
             };
             spine.iter().fold(base, |callee, elim| match elim {
                 Elim::App(argument) => Term::App(Rc::new(callee), Rc::new(quote(size, argument))),

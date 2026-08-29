@@ -97,7 +97,7 @@ pub fn is_total(signature: &Signature, name: &Name, definition: &Definition) -> 
 fn calls_a_partial_definition(signature: &Signature, name: &Name, term: &Term) -> bool {
     let recur = |inner| calls_a_partial_definition(signature, name, inner);
     match term {
-        Term::Var(_) | Term::Universe(_) => false,
+        Term::Var(_) | Term::Universe(_) | Term::Meta(_) => false,
         Term::Const(other, _) => {
             other != name && signature.lookup(other).is_some_and(|found| !found.total)
         }
@@ -161,7 +161,9 @@ impl Walk<'_> {
 
     fn term(&mut self, sizes: &mut Vec<Option<Size>>, term: &Term) {
         match term {
-            Term::Var(_) | Term::Universe(_) => {}
+            // Дырка размера не несёт и вызовом не является: она замкнута, а
+            // зависимость от контекста выражена применениями вокруг неё.
+            Term::Var(_) | Term::Universe(_) | Term::Meta(_) => {}
 
             // Голое имя без аргументов - тоже вызов, просто без единой
             // позиции, по которой можно было бы уменьшаться.

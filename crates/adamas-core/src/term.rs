@@ -83,7 +83,24 @@ pub enum Term {
     Const(Name, Rc<[Level]>),
     /// Разбор значения индуктивного типа по конструктору.
     Case(Rc<Case>),
+    /// Метапеременная терма - дырка, которую заполняет вывод (§4.1).
+    ///
+    /// Замкнута: зависимость от контекста выражается **применением** к его
+    /// связываниям, а не хранится внутри. Так дырка остаётся термом, который
+    /// можно подставить куда угодно, а решением оказывается замкнутая цепочка
+    /// лямбд - см. [`Metas::fresh_term`](crate::meta::Metas::fresh_term).
+    ///
+    /// В том, что сохраняется надолго - в типах и телах определений, - не
+    /// встречается: проверка определения отвергает остаточные дырки.
+    Meta(TermMeta),
 }
+
+/// Метапеременная терма.
+///
+/// Живёт в [`Metas`](crate::meta::Metas) вместе с уровневыми и делит с ними
+/// счётчик: `?7` называет ровно одну дырку, какого бы сорта она ни была.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TermMeta(pub u32);
 
 /// Разбор значения индуктивного типа по конструктору (§9 Фаза 1).
 ///
@@ -217,7 +234,7 @@ impl Term {
         }
         let recur = |term: &Rc<Self>| Rc::new(term.substitute_levels(arguments));
         match self {
-            Self::Var(_) => self.clone(),
+            Self::Var(_) | Self::Meta(_) => self.clone(),
             Self::Universe(level) => Self::Universe(level.substitute(arguments)),
             Self::Lam(mult, name, body) => Self::Lam(*mult, Rc::clone(name), recur(body)),
             Self::App(callee, argument) => Self::App(recur(callee), recur(argument)),
@@ -269,7 +286,7 @@ impl Term {
             (found, None) | (None, found) => found,
         };
         match self {
-            Self::Var(_) => None,
+            Self::Var(_) | Self::Meta(_) => None,
             Self::Universe(level) => level.max_var(),
             Self::Lam(_, _, body) => body.max_level_var(),
             Self::App(callee, argument) => join(callee.max_level_var(), argument.max_level_var()),
@@ -327,6 +344,7 @@ impl fmt::Display for Term {
             // Имя не печатается: одно и то же имя может быть у разных
             // связываний, а индекс однозначен.
             Self::Var(Index(index)) => write!(f, "#{index}"),
+            Self::Meta(TermMeta(name)) => write!(f, "?{name}"),
             Self::Universe(level) => write!(f, "Type {level}"),
             Self::Lam(mult, name, body) => write!(f, "\\({mult} {name}) -> {body}"),
             Self::App(callee, argument) => {

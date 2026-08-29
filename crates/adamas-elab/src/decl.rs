@@ -515,7 +515,8 @@ fn name_head(term: &Term) -> Option<&adamas_core::term::Name> {
 fn mentions_local(term: &Term) -> bool {
     match term {
         Term::Var(_) => true,
-        Term::Universe(_) | Term::Const(..) => false,
+        // Дырка замкнута: локальных связываний в ней нет по построению.
+        Term::Universe(_) | Term::Const(..) | Term::Meta(_) => false,
         Term::Lam(_, _, body) => mentions_local(body),
         Term::App(callee, argument) => mentions_local(callee) || mentions_local(argument),
         Term::Pi(_, _, domain, row, codomain) => {

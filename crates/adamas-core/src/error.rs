@@ -159,6 +159,18 @@ pub enum ErrorKind {
         meta: crate::level::LevelMeta,
     },
 
+    /// После проверки осталась нерешённая дырка терма.
+    ///
+    /// Вывод её не заполнил, и заполнять больше нечему: ничто в оставшейся
+    /// программе на неё не сошлётся. Обобщать её в параметр, в отличие от
+    /// уровневой, нечем - аргумент терма пишется или выводится в месте
+    /// использования, а не поднимается в сигнатуру.
+    #[error("аргумент ?{} не выведен: укажите его явно", meta.0)]
+    AmbiguousTerm {
+        /// Метапеременная, оставшаяся без решения.
+        meta: crate::term::TermMeta,
+    },
+
     /// В определении, уходящем в сигнатуру, осталась дырка уровня.
     #[error("в определении `{name}` остался неразрешённый уровень ?{}", meta.0)]
     UnsolvedDefinitionLevel {
@@ -350,6 +362,7 @@ impl ErrorKind {
             | Self::ConstructorParameter { .. }
             | Self::NotStrictlyPositive { .. }
             | Self::ErasedScrutinee { .. }
+            | Self::AmbiguousTerm { .. }
             | Self::CaseParameters { .. }
             | Self::NonExhaustive { .. }
             | Self::RedundantBranch { .. }

@@ -12,7 +12,7 @@ use std::rc::Rc;
 use crate::level::Level;
 use crate::mult::Mult;
 use crate::row::Row;
-use crate::term::{Binder, Index, Name, Term};
+use crate::term::{Binder, Index, Name, Term, TermMeta};
 
 /// Уровень де Брёйна: сколько связываний отсчитать от начала контекста.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -118,6 +118,12 @@ pub enum Head {
     Local(Lvl),
     /// Определение с нормализованными аргументами уровня.
     Global(Name, Rc<[Level]>),
+    /// Нерешённая метапеременная терма.
+    ///
+    /// Застревает так же, как переменная контекста, и по той же причине:
+    /// вычислять нечего, пока не известно, чем она окажется. Решённая головой
+    /// не остаётся - её разворачивает `force` до того, как спайн понадобится.
+    Meta(TermMeta),
 }
 
 /// Элиминатор в спайне застрявшего вычисления.
@@ -211,6 +217,9 @@ impl fmt::Display for Value {
             }
             Self::Neutral(Head::Global(name, _), spine) => {
                 write!(f, "{name}·{}", spine.len())
+            }
+            Self::Neutral(Head::Meta(TermMeta(name)), spine) => {
+                write!(f, "?{name}·{}", spine.len())
             }
             Self::Lam(mult, name, _) => write!(f, "\\({mult} {name}) -> …"),
             Self::Pi(binder, name, _, row, _) => {

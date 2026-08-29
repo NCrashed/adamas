@@ -1037,7 +1037,7 @@ fn has_negative_occurrence(term: &Term) -> bool {
                 mentions_d(ty) || mentions_d(value) || mentions_d(body)
             }
             Term::Case(_) => unreachable!("генератор полей не порождает разбор"),
-            Term::Var(_) | Term::Universe(_) => false,
+            Term::Var(_) | Term::Universe(_) | Term::Meta(_) => false,
         }
     }
     match term {

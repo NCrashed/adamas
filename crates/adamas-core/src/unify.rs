@@ -114,7 +114,10 @@ pub(crate) fn classify(signature: &Signature, value: &Rc<Value>) -> Shape {
             ),
             None => Shape::Opaque,
         },
-        Head::Local(_) => Shape::Opaque,
+        // Применённая переменная формы не имеет - как и дырка: чем она
+        // окажется, ещё не решено, и различать по ней индексы значило бы
+        // гадать.
+        Head::Local(_) | Head::Meta(_) => Shape::Opaque,
     }
 }
 

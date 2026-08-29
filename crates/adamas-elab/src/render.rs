@@ -273,6 +273,9 @@ impl Naming {
                 };
                 *term = Term::Const(name, Rc::from([]));
             }
+            // Дырка своего имени не имеет и переименованию не подлежит:
+            // печатается она номером, а номер локализует `Naming` отдельно.
+            Term::Meta(_) => {}
             Term::Universe(level) => self.level(level),
             Term::Const(_, levels) => *levels = self.levels(levels),
             Term::App(callee, argument) => {
@@ -354,7 +357,9 @@ impl Naming {
 /// Дырки терма в порядке появления в тексте.
 fn collect_term(term: &Term, ordered: &mut Vec<LevelMeta>) {
     match term {
-        Term::Var(_) => {}
+        // Дырка терма своих уровней не носит: они в её типе, а он живёт
+        // отдельно.
+        Term::Var(_) | Term::Meta(_) => {}
         Term::Universe(level) => collect_level(level, ordered),
         Term::Const(_, levels) => {
             for level in levels.iter() {

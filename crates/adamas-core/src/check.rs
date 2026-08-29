@@ -56,7 +56,7 @@ use crate::error::refuse;
 pub use crate::error::{Binding, ErrorKind, Frame, TypeError};
 use crate::eval::{apply, quote};
 use crate::level::{Level, LevelMeta, LevelVar};
-use crate::meta::{Metas, unsolved_level_meta};
+use crate::meta::{Metas, unsolved_level_meta, unsolved_term_meta};
 use crate::mult::Mult;
 use crate::row::Row;
 use crate::sig::{Definition, DefinitionKind, Signature};
@@ -100,6 +100,12 @@ pub fn infer(
     term: &Term,
 ) -> Result<(Rc<Value>, Usage), TypeError> {
     match term {
+        // Дырка знает свой тип с рождения: его строит тот, кто её завёл, и
+        // хранит хранилище. Использований она не порождает - она замкнута, а
+        // зависимость от контекста выражают применения вокруг неё, и их
+        // кратности приходят из её же типа.
+        Term::Meta(meta) => Ok((Rc::clone(metas.term_type(*meta)), Usage::zero(ctx.size()))),
+
         Term::Var(index) => {
             let binding = ctx
                 .lookup(*index)
@@ -381,7 +387,7 @@ pub fn check_closed_with(
     framed(is_type(&ctx, metas, ty), Frame::Stated)?;
     let ty_value = ctx.eval(ty);
     check(&ctx, metas, Mult::One, term, &ty_value)?;
-    no_unsolved_levels(metas, term)
+    no_unsolved(metas, term)
 }
 
 /// Синтезирует тип замкнутого терма и читает его обратно в терм.
@@ -416,8 +422,14 @@ pub fn infer_closed_with(
     Ok(crate::meta::zonk_term(metas, &ctx.quote(&ty)))
 }
 
-/// Отвергает терм, в котором после проверки остались нерешённые уровни.
-fn no_unsolved_levels(metas: &Metas, term: &Term) -> Result<(), TypeError> {
+/// Отвергает терм, в котором после проверки остались нерешённые дырки.
+///
+/// Обоих сортов: и уровень, и терм, оставшиеся без решения, означают одно -
+/// проверка закончилась, а ответа на вопрос «чем это было» так и нет.
+fn no_unsolved(metas: &Metas, term: &Term) -> Result<(), TypeError> {
+    if let Some(meta) = unsolved_term_meta(metas, term) {
+        return Err(ErrorKind::AmbiguousTerm { meta }.into());
+    }
     match unsolved_level_meta(metas, term) {
         Some(meta) => Err(ErrorKind::AmbiguousLevel { meta }.into()),
         None => Ok(()),
@@ -438,6 +450,23 @@ pub fn unsolved_in_definition(metas: &Metas, definition: &Definition) -> Option<
             .body
             .as_ref()
             .and_then(|body| unsolved_level_meta(metas, body))
+    })
+}
+
+/// То же для дырок терма.
+///
+/// Отдельная функция, а не общая: сорта дают разные отказы, и склеить их
+/// значило бы сообщить «дырка осталась», не сказав какая.
+#[must_use]
+pub fn unsolved_term_in_definition(
+    metas: &Metas,
+    definition: &Definition,
+) -> Option<crate::term::TermMeta> {
+    unsolved_term_meta(metas, &definition.ty).or_else(|| {
+        definition
+            .body
+            .as_ref()
+            .and_then(|body| unsolved_term_meta(metas, body))
     })
 }
 
@@ -677,7 +706,9 @@ fn mentions_seen<'a>(
 ) -> bool {
     let mut recur = |inner| mentions_seen(signature, name, inner, seen);
     match term {
-        Term::Var(_) | Term::Universe(_) => false,
+        // Дырка имени не упоминает: она замкнута, а её тип живёт отдельно и
+        // проверен там, где заведён.
+        Term::Var(_) | Term::Universe(_) | Term::Meta(_) => false,
         // Через тело определения - тоже упоминание. Без этого позитивность
         // обходится в две строки: `def G : Type 0 = Bad -> Bad`, затем
         // `mk : G -> Bad`. Прямая запись отвергается, а эта прошла бы, хотя

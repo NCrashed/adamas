@@ -51,7 +51,7 @@ use std::rc::Rc;
 
 use crate::check::{
     Frame, TypeError, check_body, check_constructor_content, check_constructor_shape,
-    check_declaration, data_sort, unsolved_in_definition,
+    check_declaration, data_sort, unsolved_in_definition, unsolved_term_in_definition,
 };
 use crate::error::ErrorKind;
 use crate::eval::eval;
@@ -700,6 +700,9 @@ impl Signature {
             .cloned()
             .unwrap_or_else(|| unreachable!("объявление вставлено фазой A или B1"));
 
+        if let Some(meta) = unsolved_term_in_definition(metas, &definition) {
+            return Err(ErrorKind::AmbiguousTerm { meta }.into());
+        }
         if let Some(meta) = unsolved_in_definition(metas, &definition) {
             return Err(ErrorKind::UnsolvedDefinitionLevel {
                 name: Rc::clone(name),

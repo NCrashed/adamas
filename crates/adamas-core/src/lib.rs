@@ -57,6 +57,7 @@ pub mod mult;
 pub mod pattern;
 pub mod row;
 pub mod sig;
+pub mod solve;
 pub mod source;
 pub mod term;
 pub mod total;

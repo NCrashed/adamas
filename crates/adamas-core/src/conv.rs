@@ -46,6 +46,7 @@ use std::rc::Rc;
 use crate::eval::{apply, try_apply, try_eliminate_case};
 use crate::meta::Metas;
 use crate::sig::Signature;
+use crate::solve::{force, solve};
 use crate::value::{Elim, Head, Lvl, StuckCase, Value};
 
 /// Конвертируемы ли два значения в контексте размера `size`.
@@ -125,8 +126,31 @@ fn convertible_within(
     left: &Rc<Value>,
     right: &Rc<Value>,
 ) -> bool {
+    // Решённая дырка разворачивается до сравнения: иначе `?m` и её решение
+    // оказались бы разными значениями, а это одно и то же значение. Форма
+    // та же, что у разворота определений ниже: `None` - разворачивать нечего,
+    // и клонировать `Rc` на каждом шаге сравнения незачем.
+    let (forced_left, forced_right) = (force(metas, left), force(metas, right));
+    let left = forced_left.as_ref().unwrap_or(left);
+    let right = forced_right.as_ref().unwrap_or(right);
+
     if rigid(fuel, sig, metas, size, left, right) {
         return true;
+    }
+
+    // Нерешённая дырка в голове - не «не сошлось», а задача унификации.
+    // Пробуется она **после** синтаксического сравнения и **до** разворота
+    // определений. После - потому что `?m ū ≡ ?m ū` решать нечего, а проверка
+    // вхождения приняла бы это за цикл. До - потому что развернув, мы получили
+    // бы то же ограничение, только на большем терме.
+    match (&**left, &**right) {
+        (Value::Neutral(Head::Meta(meta), spine), _) => {
+            return solve(metas, size, *meta, spine, right);
+        }
+        (_, Value::Neutral(Head::Meta(meta), spine)) => {
+            return solve(metas, size, *meta, spine, left);
+        }
+        _ => {}
     }
     // Быстрый путь не сошёлся - разворачиваем то, что разворачивается.
     let (unfolded_left, unfolded_right) = (unfold(sig, left), unfold(sig, right));
@@ -194,6 +218,10 @@ pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
 fn same_head(metas: &mut Metas, left: &Head, right: &Head) -> bool {
     match (left, right) {
         (Head::Local(a), Head::Local(b)) => a == b,
+        // Одна и та же нерешённая дырка - это одно и то же значение, и решать
+        // тут нечего. Без этой строки `?m ū ≡ ?m ū` уходило бы в решение, где
+        // проверка вхождения приняла бы его за цикл.
+        (Head::Meta(a), Head::Meta(b)) => a == b,
         (Head::Global(name_a, levels_a), Head::Global(name_b, levels_b)) => {
             name_a == name_b
                 && levels_a.len() == levels_b.len()

@@ -113,6 +113,23 @@ fn written_rows(expr: &Expr, negative: bool, found: &mut Vec<Span>) {
     }
 }
 
+/// Связывание написанной группы, разложенной в плоский список.
+///
+/// Группа `(0 n m : Nat)` даёт два таких: кратность, видимость и тип у них
+/// общие, а `siblings` различает - см. [`Elaborator::pi`].
+struct Written<'a> {
+    /// Кратность: написанная либо умолчание позиции.
+    mult: Mult,
+    /// Круглые скобки против фигурных.
+    visibility: Visibility,
+    /// Имя связывания.
+    name: Symbol,
+    /// Написанный тип - общий на все имена группы.
+    ty: &'a Expr,
+    /// Сколько имён своей группы стоит перед этим: столько прячется от типа.
+    siblings: usize,
+}
+
 /// Параметр семейства - уже элаборированный.
 ///
 /// Живёт отдельно от [`ast::Binder`], потому что переиспользуется: kind и все
@@ -1003,8 +1020,31 @@ impl<'a> Elaborator<'a> {
                     Position::Inner
                 };
                 let mut term = self.placed(Position::Inner, |it| it.expr(head, Mult::Many))?;
+                // Имплисит стоит не только в голове: `f Zero True` при
+                // `f : Nat -> {0 a : Type} -> a -> Nat` обязано получить `a`
+                // между написанными аргументами. Голову свою вставку уже
+                // получила - её делает `name`, - поэтому тип нужен ровно для
+                // середины спайна.
+                //
+                // Тип не вывелся - применение собирается как раньше, без
+                // вставки: голова бывает и лямбдой, выводить которую нечем.
+                // Сказать об этом полагается `check`, а не этому проходу.
+                let mut ty = infer(&self.ctx, self.metas, Mult::Zero, &term)
+                    .ok()
+                    .map(|(ty, _)| ty);
                 for argument in arguments.into_iter().rev() {
+                    if let Some(current) = ty.take() {
+                        let (inserted, rest) = self.inserted(term, current);
+                        term = inserted;
+                        ty = Some(rest);
+                    }
                     let argument = self.placed(inside, |it| it.expr(argument, Mult::Many))?;
+                    ty = ty.and_then(|it| match &*it {
+                        Value::Pi(_, _, _, _, codomain) => {
+                            Some(codomain.clone().apply(self.ctx.eval(&argument)))
+                        }
+                        _ => None,
+                    });
                     term = Term::App(Rc::new(term), Rc::new(argument));
                 }
                 // Результат применения к scope не привязан: собрать замыкание,
@@ -1600,13 +1640,22 @@ impl<'a> Elaborator<'a> {
     /// имплисит вставится и останется нерешённым, потому что обобщать его
     /// нечем. Отложенная вставка требует двунаправленной элаборации, и это
     /// отдельный срез.
-    fn implicits(&mut self, mut term: Term, mut ty: Rc<Value>) -> Term {
+    fn implicits(&mut self, term: Term, ty: Rc<Value>) -> Term {
+        self.inserted(term, ty).0
+    }
+
+    /// То же вместе с типом, до которого вставка дошла.
+    ///
+    /// Тип нужен применению: имплисит стоит не только в голове спайна, но и
+    /// между написанными аргументами, и вставлять его там можно только зная,
+    /// что осталось от телескопа.
+    fn inserted(&mut self, mut term: Term, mut ty: Rc<Value>) -> (Term, Rc<Value>) {
         loop {
             let Value::Pi(binder, _, domain, _, codomain) = &*ty else {
-                return term;
+                return (term, ty);
             };
             if !binder.visibility.is_implicit() {
-                return term;
+                return (term, ty);
             }
             let (domain, codomain) = (Rc::clone(domain), codomain.clone());
             let argument = self.fresh_meta(&domain);
@@ -1616,32 +1665,31 @@ impl<'a> Elaborator<'a> {
         }
     }
 
-    /// `(q x y : A) (r z : B) -> C`.
+    /// `(q x y : A) {r z : B} -> C`.
     ///
     /// Группы разворачиваются в плоский список связываний: `(x y : A)` - это
     /// два `Pi`, и второй видит первое связывание, поэтому тип элаборируется
     /// заново под каждым именем. Заново - но не в другой области видимости:
     /// `A` написано раньше обоих имён, и собственные имена группы для него
     /// спрятаны (`hiding`), иначе `(0 t : Type) -> (0 t x : t) -> …` дало бы
-    /// `x` тип соседа по группе вместо написанного снаружи. Отсюда третье
-    /// поле плоского списка - сколько имён группы стоит перед этим.
+    /// `x` тип соседа по группе вместо написанного снаружи. Отсюда `siblings`
+    /// в плоском списке - сколько имён группы стоит перед этим.
     ///
     /// Дырки уровня у каждого имени свои: общий `Type` в записи не значит
     /// общий универсум, а более общее прочтение здесь безопасно.
+    ///
+    /// **Кратность у фигурной группы - то же умолчание `ω`, что у круглой.**
+    /// Подъём свободного имени даёт `0`, и расхождение намеренное: написать
+    /// группу - это и есть способ попросить имплисит, доживающий до рантайма
+    /// (`replicate : {n : Nat} -> a -> Vect n a`). Так же различает Idris 2.
     fn pi(
         &mut self,
         binders: &[ast::Binder],
         codomain: &Expr,
         default: Mult,
     ) -> Result<Term, ElabError> {
-        let mut flat: Vec<(Mult, Symbol, &Expr, usize)> = Vec::new();
+        let mut flat: Vec<Written<'_>> = Vec::new();
         for binder in binders {
-            if binder.visibility == Visibility::Implicit {
-                return Err(ElabError::Missing {
-                    what: Missing::ImplicitBinder,
-                    span: binder.span,
-                });
-            }
             // Связывание без написанного типа бывает у параметра семейства
             // (`data Pair a b`), и туда этот путь не ведёт: `(a) -> Nat`
             // разбирается как применение в скобках, а не как связывание.
@@ -1652,9 +1700,15 @@ impl<'a> Elaborator<'a> {
                 });
             };
             let mult = self.binder_mult(binder.mult, ty, default, binder.span)?;
-            for (position, name) in binder.names.iter().enumerate() {
+            for (siblings, name) in binder.names.iter().enumerate() {
                 Self::binds(name)?;
-                flat.push((mult, Rc::clone(&name.text), ty, position));
+                flat.push(Written {
+                    mult,
+                    visibility: binder.visibility,
+                    name: Rc::clone(&name.text),
+                    ty,
+                    siblings,
+                });
             }
         }
         self.pi_flat(&flat, codomain, default)
@@ -1662,22 +1716,27 @@ impl<'a> Elaborator<'a> {
 
     fn pi_flat(
         &mut self,
-        binders: &[(Mult, Symbol, &Expr, usize)],
+        binders: &[Written<'_>],
         codomain: &Expr,
         default: Mult,
     ) -> Result<Term, ElabError> {
-        let Some(((mult, name, ty, siblings), rest)) = binders.split_first() else {
+        let Some((first, rest)) = binders.split_first() else {
             return self.expr(codomain, default);
         };
-        let domain = self.hiding(*siblings, |inner| inner.expr(ty, Mult::Many))?;
-        let owns = self.owned.of(ty).is_some();
+        let domain = self.hiding(first.siblings, |inner| inner.expr(first.ty, Mult::Many))?;
+        let owns = self.owned.of(first.ty).is_some();
         let bound = self.typed(&domain);
-        let body = self.binding(Bound::owning(name, *mult, bound, owns), |inner| {
-            inner.pi_flat(rest, codomain, default)
-        })?;
+        let body = self.binding(
+            Bound::owning(&first.name, first.mult, bound, owns),
+            |inner| inner.pi_flat(rest, codomain, default),
+        )?;
+        let binder = match first.visibility {
+            Visibility::Explicit => Binder::explicit(first.mult),
+            Visibility::Implicit => Binder::implicit(first.mult),
+        };
         Ok(Term::Pi(
-            Binder::explicit(*mult),
-            CoreName::from(&**name),
+            binder,
+            CoreName::from(&*first.name),
             Rc::new(domain),
             Row::empty(),
             Rc::new(body),

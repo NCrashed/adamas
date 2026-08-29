@@ -388,7 +388,6 @@ fn what_the_core_cannot_carry_yet_names_itself() {
             "f : Nat\nf =\n  let x : a = Zero\n  x\n",
             Missing::FreeTypeVariable,
         ),
-        ("f : {a : Type} -> Nat\n", Missing::ImplicitBinder),
         ("f : Nat -> Nat\nf x = 1\n", Missing::Literal),
         ("f : Nat\nf =\n  let x = Zero\n  x\n", Missing::UntypedLet),
         (
@@ -2074,4 +2073,117 @@ type Wide = {{ x : Nat | r }}
         matches!(error, ElabError::UnknownName { .. }),
         "получено {error:?}"
     );
+}
+
+#[test]
+fn an_implicit_binder_group_is_written() {
+    // §4.1: `{0 a : Type}` пишется руками, а не только поднимается из
+    // свободного имени. Вставка аргумента в месте использования - та же, что у
+    // поднятого: видимость у `Pi` одна, откуда она взялась, дальше неважно.
+    let signature = program(&format!(
+        "{BASE}
+identity : {{0 a : Type}} -> a -> a
+identity x = x
+
+b : Bool
+b = identity True
+
+n : Nat
+n = identity Zero
+
+written : Bool
+written = identity @Bool False
+"
+    ));
+    assert!(signature.lookup("identity").is_some());
+}
+
+#[test]
+fn an_implicit_binder_group_stands_anywhere_in_the_telescope() {
+    // Имплисит между явными параметрами - не особый случай: клауза
+    // раздаёт паттерны по видимым связываниям, а на невидимые ставит `_`.
+    program(&format!(
+        "{BASE}
+first : Nat -> {{0 a : Type}} -> a -> Nat
+first n x = n
+
+got : Nat
+got = first Zero True
+"
+    ));
+}
+
+#[test]
+fn a_group_of_names_shares_its_type_and_visibility() {
+    // Группа `{0 a b : Type}` разворачивается в два связывания, и оба
+    // выводимые. Тип элаборируется заново под каждым именем, но в области
+    // видимости, где имён группы ещё нет.
+    program(&format!(
+        "{BASE}
+apply : {{0 a b : Type}} -> (a -> b) -> a -> b
+apply f x = f x
+
+double : Nat -> Nat
+double n = Succ (Succ n)
+
+used : Nat
+used = apply double Zero
+"
+    ));
+}
+
+#[test]
+fn a_written_implicit_keeps_the_default_multiplicity() {
+    // Умолчание у фигурной группы то же, что у круглой, - `ω` (§4.1).
+    // Подъём свободного имени даёт `0`, и это расхождение намеренное:
+    // написанная группа - способ попросить имплисит, доживающий до рантайма.
+    // Здесь оно видно прямо: `n` уходит в `ω`-позицию.
+    program(&format!(
+        "{BASE}
+tagged : {{n : Nat}} -> Bool -> Nat
+tagged b = n
+
+got : Nat
+got = tagged @(Succ Zero) True
+"
+    ));
+}
+
+#[test]
+fn an_erased_implicit_does_not_reach_the_body() {
+    // Зеркало предыдущего: при `0` то же тело отвергается - стёртое
+    // связывание в рантайм-позиции.
+    let error = refused(&format!(
+        "{BASE}
+tagged : {{0 n : Nat}} -> Bool -> Nat
+tagged b = n
+"
+    ));
+    assert!(
+        matches!(error, ElabError::Core { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_single_field_record_in_a_domain_reads_as_a_binder_group() {
+    // §10 вопрос 79: `{ x : Nat } -> Nat` читается и как группа связываний, и
+    // как тип записи. Побеждает связывание (решение 2026-08-29), а запись в
+    // домене пишет хвост явно - в домене она всё равно открыта, поэтому формы
+    // эквивалентны. Здесь `x` связано и видно в кодомене.
+    program(&format!(
+        "{BASE}
+depends : {{x : Nat}} -> Bool -> Nat
+depends b = x
+
+got : Nat
+got = depends @Zero True
+
+record : {{ x : Nat | r }} -> Nat
+record p = p.x
+
+wide : Nat
+wide = record {{ x = Zero, y = Zero }}
+"
+    ));
 }

@@ -392,6 +392,14 @@ fn a_flat_list_that_unfolds_into_a_chain_is_bounded_too() {
             repeat(257, |index| format!(" a{index}"))
         ),
     );
+    // Тип записи - телескоп: поле живёт под предыдущими (§4.2).
+    refused(
+        "поля типа записи",
+        &format!(
+            "type Big = {{ f0 : T{} }}\n",
+            repeat(256, |index| format!(", f{} : T", index + 1))
+        ),
+    );
     // Предел общий, поэтому формы **складываются**: каждая порознь под ним, а
     // вместе - нет. Порознь поставленные пределы этого не ловили.
     refused(
@@ -409,6 +417,21 @@ fn the_limit_does_not_cut_on_its_own_boundary() {
     assert!(parse(&format!("f = g{}\n", " x".repeat(256))).is_ok());
     let block = repeat(256, |index| format!("  let x{index} : T = y\n"));
     assert!(parse(&format!("f =\n{block}  x\n")).is_ok());
+    let fields = repeat(255, |index| format!(", f{} : T", index + 1));
+    assert!(parse(&format!("type Big = {{ f0 : T{fields} }}\n")).is_ok());
+}
+
+/// Список, который в цепочку **не** разворачивается, пределом не режется.
+///
+/// Значение записи - плоский набор: зависимости в нём нет, и `{ x = a, y = b }`
+/// глубины не даёт. Считать его телескопом значило бы запретить широкую
+/// запись ни за что - а §4.11 (`SoA`, ECS) на широких и стоит.
+#[test]
+fn a_flat_list_that_stays_flat_is_not_bounded() {
+    let values = repeat(4_000, |index| format!(", f{index} = y"));
+    assert!(parse(&format!("v = {{ f = y{values} }}\n")).is_ok());
+    let items = repeat(4_000, |index| format!(", x{index}"));
+    assert!(parse(&format!("v = [y{items}]\n")).is_ok());
 }
 
 #[test]

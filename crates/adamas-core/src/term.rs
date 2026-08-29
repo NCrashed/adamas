@@ -481,14 +481,18 @@ impl fmt::Display for Term {
             }
             Self::RowKind(level) => write!(f, "Row {level}"),
             Self::Record(fields) | Self::Row(fields) => {
-                let mut written: Vec<String> = fields
+                let written: Vec<String> = fields
                     .iter()
                     .map(|field| format!("{} {} : {}", field.mult, field.name, field.ty))
                     .collect();
-                if let Some(tail) = &fields.tail {
-                    written.push(format!("| {tail}"));
-                }
-                write!(f, "{{{}}}", written.join(", "))
+                // Хвост отделяется `|`, а не запятой: он не поле, и написан в
+                // §4.2 так же. Запятая перед ним читалась бы как пустое поле.
+                let tail = match &fields.tail {
+                    Some(tail) if written.is_empty() => format!("| {tail}"),
+                    Some(tail) => format!(" | {tail}"),
+                    None => String::new(),
+                };
+                write!(f, "{{{}{tail}}}", written.join(", "))
             }
             Self::Object(fields) => {
                 let written: Vec<String> = fields

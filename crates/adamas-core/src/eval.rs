@@ -121,6 +121,14 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
                 .collect(),
         )),
 
+        Term::With(base, fields) => with(
+            &eval(env, base),
+            fields
+                .iter()
+                .map(|(name, value)| (Rc::clone(name), eval(env, value)))
+                .collect(),
+        ),
+
         Term::Project(record, name) => project(&eval(env, record), name),
 
         // Вычисляется **одна** ветвь - та, что выбрана. Собрать застрявший
@@ -190,12 +198,58 @@ pub fn project(record: &Rc<Value>, name: &Name) -> Rc<Value> {
             };
             Rc::clone(value)
         }
+        // Проекция сквозь переопределение считается: написанное поле берётся
+        // прямо, ненаписанное - у базы, то есть `With` из спайна снимается.
+        // Это и есть правило вычисления `{ p | x = v }`, и без него проекция
+        // застревала бы на записи, поля которой известны.
         Value::Neutral(head, spine) => {
+            if let Some((Elim::With(fields), rest)) = spine.split_last().map(|it| (it.0, it.1)) {
+                if let Some((_, value)) = fields.iter().rev().find(|(field, _)| field == name) {
+                    return Rc::clone(value);
+                }
+                let base = Rc::new(Value::Neutral(head.clone(), rest.to_vec()));
+                return project(&base, name);
+            }
             let mut spine = spine.clone();
             spine.push(Elim::Project(Rc::clone(name)));
             Rc::new(Value::Neutral(head.clone(), spine))
         }
         _ => unreachable!("проекция не из записи: {record}"),
+    }
+}
+
+/// Переопределяет поля записи: `{ p | x = v }`.
+///
+/// На собранной записи пересобирает её - написанное поле заменяет одноимённое,
+/// а не найденное дописывается слева, затеняя всё, что могло бы прийти из
+/// хвоста. На застрявшей базе копит элиминатор в спайне.
+///
+/// # Panics
+///
+/// Если база не запись: сверяет это проверка типов.
+#[must_use]
+pub fn with(base: &Rc<Value>, fields: Vec<(Name, Rc<Value>)>) -> Rc<Value> {
+    match &**base {
+        Value::Object(written) => {
+            // Шаг в шаг с типизацией (`check::infer_with`): написанное поле
+            // либо заменяет своё, либо дописывается в конец. Отсюда же и
+            // ответ на дубликат в написанном - побеждает последний, потому
+            // что тип от него же и остался.
+            let mut found: Vec<(Name, Rc<Value>)> = written.to_vec();
+            for (name, value) in fields {
+                match found.iter().position(|(it, _)| *it == name) {
+                    Some(at) => found[at].1 = value,
+                    None => found.push((name, value)),
+                }
+            }
+            Rc::new(Value::Object(found.into()))
+        }
+        Value::Neutral(head, spine) => {
+            let mut spine = spine.clone();
+            spine.push(Elim::With(fields.into()));
+            Rc::new(Value::Neutral(head.clone(), spine))
+        }
+        _ => unreachable!("переопределение не записи: {base}"),
     }
 }
 
@@ -209,7 +263,7 @@ fn apply_fields(body: Rc<Value>, spine: &[Elim], params: u32) -> Option<Rc<Value
         .skip(params as usize)
         .try_fold(body, |body, elim| match elim {
             Elim::App(argument) => try_apply(&body, Rc::clone(argument)),
-            Elim::Case(_) | Elim::Project(_) => None,
+            Elim::Case(_) | Elim::Project(_) | Elim::With(_) => None,
         })
 }
 
@@ -351,6 +405,13 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
             spine.iter().fold(base, |callee, elim| match elim {
                 Elim::App(argument) => Term::App(Rc::new(callee), Rc::new(quote(size, argument))),
                 Elim::Project(name) => Term::Project(Rc::new(callee), Rc::clone(name)),
+                Elim::With(fields) => Term::With(
+                    Rc::new(callee),
+                    fields
+                        .iter()
+                        .map(|(name, value)| (Rc::clone(name), Rc::new(quote(size, value))))
+                        .collect(),
+                ),
                 // Накопленный терм и есть то, на чём разбор застрял.
                 Elim::Case(case) => Term::Case(Rc::new(Case {
                     data: Rc::clone(&case.data),

@@ -368,3 +368,106 @@ fn two_open_rows_each_missing_a_label_are_refused() {
         &signature, &mut metas, 0, &left, &right
     ));
 }
+
+#[test]
+fn a_projection_computes_through_an_override() {
+    // Правило вычисления `With` на застрявшей базе: написанное поле берётся
+    // прямо, ненаписанное - у базы. Без него проекция застревала бы на записи,
+    // поля которой известны.
+    let signature = Signature::default();
+    let mut metas = adamas_core::meta::Metas::default();
+    let ctx = adamas_core::ctx::Ctx::new(&signature);
+    let kind = ctx.eval(&Term::RowKind(Level::number(0)));
+    let inner = ctx.bind("r".into(), Mult::Zero, kind);
+    let record = Term::Record(open(
+        &[field("x", Term::universe(0)), field("y", Term::universe(0))],
+        Term::var(0),
+    ));
+    let bound = inner.eval(&record);
+    let inner = inner.bind("p".into(), Mult::Many, bound);
+
+    // `{ p | x = Type 0 }` - база застряла на переменной.
+    let updated = Term::With(
+        Rc::new(Term::var(0)),
+        Rc::from([("x".into(), Rc::new(Term::universe(0)))]),
+    );
+    let written = inner.eval(&Term::Project(Rc::new(updated.clone()), "x".into()));
+    let carried = inner.eval(&Term::Project(Rc::new(updated), "y".into()));
+
+    // Написанное поле - написанное значение.
+    assert!(adamas_core::conv::convertible(
+        &signature,
+        &mut metas,
+        inner.size(),
+        &written,
+        &inner.eval(&Term::universe(0)),
+    ));
+    // Ненаписанное - проекция базы, то есть застрявшее `p.y`.
+    let direct = inner.eval(&Term::Project(Rc::new(Term::var(0)), "y".into()));
+    assert!(adamas_core::conv::convertible(
+        &signature,
+        &mut metas,
+        inner.size(),
+        &carried,
+        &direct,
+    ));
+}
+
+#[test]
+fn an_override_keeps_the_tail_and_appends_what_is_new() {
+    // Тип переопределения: своя метка заменяется на месте, чужая дописывается
+    // перед хвостом. Первое держит сигнатуру `keep : {x | r} -> {x | r}`,
+    // второе - расширение.
+    let signature = Signature::default();
+    let ctx = adamas_core::ctx::Ctx::new(&signature);
+    let kind = ctx.eval(&Term::RowKind(Level::number(0)));
+    let inner = ctx.bind("r".into(), Mult::Zero, kind);
+    let record = Term::Record(open(&[field("x", Term::universe(0))], Term::var(0)));
+    let bound = inner.eval(&record);
+    let inner = inner.bind("p".into(), Mult::Many, bound);
+
+    let same = Term::With(
+        Rc::new(Term::var(0)),
+        Rc::from([("x".into(), Rc::new(Term::universe(1)))]),
+    );
+    let wider = Term::With(
+        Rc::new(Term::var(0)),
+        Rc::from([("z".into(), Rc::new(Term::universe(1)))]),
+    );
+    let ty = |term: &Term| {
+        let mut metas = adamas_core::meta::Metas::default();
+        match adamas_core::check::infer(&inner, &mut metas, Mult::Many, term) {
+            Ok((ty, _)) => adamas_core::eval::quote(inner.size(), &ty),
+            Err(error) => panic!("не типизировалось: {error:?}"),
+        }
+    };
+    // Значение `Type 1` живёт в `Type 2` - тип поля именно он.
+    assert_eq!(ty(&same).to_string(), "{1 x : Type 2 | #1}");
+    assert_eq!(ty(&wider).to_string(), "{1 x : Type 0, 1 z : Type 2 | #1}");
+}
+
+#[test]
+fn a_closed_record_is_not_overridden() {
+    // `With` не пересчитывает зависимость между полями, поэтому база обязана
+    // быть открытой - у открытой записи зависимости нет по построению (§4.2).
+    // Закрытая обновляется пересборкой, и это делает элаборация.
+    let signature = Signature::default();
+    let mut metas = adamas_core::meta::Metas::default();
+    let ctx = adamas_core::ctx::Ctx::new(&signature);
+    let record = Term::Record(Fields::closed(Rc::from([field("x", Term::universe(0))])));
+    let bound = ctx.eval(&record);
+    let inner = ctx.bind("p".into(), Mult::Many, bound);
+
+    let updated = Term::With(
+        Rc::new(Term::var(0)),
+        Rc::from([("x".into(), Rc::new(Term::universe(1)))]),
+    );
+    let outcome = adamas_core::check::infer(&inner, &mut metas, Mult::Many, &updated);
+    assert!(
+        matches!(
+            outcome,
+            Err(ref error) if matches!(error.kind, ErrorKind::ClosedWith { .. })
+        ),
+        "получено {outcome:?}"
+    );
+}

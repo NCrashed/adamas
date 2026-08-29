@@ -73,6 +73,7 @@ pub fn force(metas: &Metas, value: &Rc<Value>) -> Option<Rc<Value>> {
             Elim::App(argument) => apply(&head, Rc::clone(argument)),
             Elim::Case(case) => crate::eval::eliminate_case(case, &head),
             Elim::Project(name) => crate::eval::project(&head, name),
+            Elim::With(fields) => crate::eval::with(&head, fields.to_vec()),
         });
     Some(force(metas, &replayed).unwrap_or(replayed))
 }
@@ -278,6 +279,14 @@ fn read(
             };
             spine.iter().try_fold(base, |callee, elim| match elim {
                 Elim::Project(name) => Some(Term::Project(Rc::new(callee), Rc::clone(name))),
+                Elim::With(fields) => Some(Term::With(
+                    Rc::new(callee),
+                    fields
+                        .iter()
+                        .map(|(name, value)| Some((Rc::clone(name), Rc::new(recur(value)?))))
+                        .collect::<Option<Vec<_>>>()?
+                        .into(),
+                )),
                 Elim::App(argument) => Some(Term::App(Rc::new(callee), Rc::new(recur(argument)?))),
                 // Разбор переписывать нечем: мотив и ветви - значения, и
                 // обратное чтение под переименованием для них не написано.

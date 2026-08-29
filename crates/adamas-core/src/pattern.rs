@@ -1677,6 +1677,7 @@ fn depends_term(term: &Term, depth: u32, size: u32, levels: &[u32]) -> bool {
             }) || fields.tail.as_ref().is_some_and(&recur)
         }
         Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
+        Term::With(base, fields) => recur(base) || fields.iter().any(|(_, value)| recur(value)),
         Term::Project(record, _) => recur(record),
         Term::Lam(_, _, body) => under(body),
         Term::App(callee, argument) => recur(callee) || recur(argument),
@@ -1717,7 +1718,7 @@ fn constructor_value(signature: &Signature, value: &Rc<Value>) -> Option<Constru
         .iter()
         .map(|elim| match elim {
             Elim::App(argument) => Some(Rc::clone(argument)),
-            Elim::Case(_) | Elim::Project(_) => None,
+            Elim::Case(_) | Elim::Project(_) | Elim::With(_) => None,
         })
         .collect::<Option<Vec<_>>>()?;
     Some((Rc::clone(name), Rc::clone(levels), arguments))
@@ -1752,7 +1753,7 @@ fn data_head(signature: &Signature, ty: &Rc<Value>) -> Option<DataHead> {
         .iter()
         .map(|elim| match elim {
             Elim::App(argument) => Some(Rc::clone(argument)),
-            Elim::Case(_) | Elim::Project(_) => None,
+            Elim::Case(_) | Elim::Project(_) | Elim::With(_) => None,
         })
         .collect::<Option<Vec<_>>>()?;
     Some((Rc::clone(name), Rc::clone(levels), arguments))
@@ -1826,6 +1827,10 @@ fn well_scoped(term: &Term, binders: u32) -> bool {
                     .is_none_or(|tail| go(tail, depth, binders))
             }
             Term::Object(fields) => fields.iter().all(|(_, value)| go(value, depth, binders)),
+            Term::With(base, fields) => {
+                go(base, depth, binders)
+                    && fields.iter().all(|(_, value)| go(value, depth, binders))
+            }
             Term::Project(record, _) => go(record, depth, binders),
             Term::Lam(_, _, body) => go(body, depth + 1, binders),
             Term::App(callee, argument) => {
@@ -1901,6 +1906,13 @@ fn rewrite<F: Fn(u32) -> Term>(term: &Term, depth: u32, from: u32, map: &F) -> T
         Term::Record(fields) => Term::Record(rewrite_fields(fields, depth, from, map)),
         Term::Row(fields) => Term::Row(rewrite_fields(fields, depth, from, map)),
         Term::Object(fields) => Term::Object(
+            fields
+                .iter()
+                .map(|(name, value)| (Rc::clone(name), recur(value)))
+                .collect(),
+        ),
+        Term::With(base, fields) => Term::With(
+            recur(base),
             fields
                 .iter()
                 .map(|(name, value)| (Rc::clone(name), recur(value)))
@@ -1985,6 +1997,13 @@ fn shift_at(term: &Term, depth: u32, by: u32) -> Term {
             Term::Record(fields) => Term::Record(shift_fields(fields, depth, by)),
             Term::Row(fields) => Term::Row(shift_fields(fields, depth, by)),
             Term::Object(fields) => Term::Object(
+                fields
+                    .iter()
+                    .map(|(name, value)| (Rc::clone(name), recur(value)))
+                    .collect(),
+            ),
+            Term::With(base, fields) => Term::With(
+                recur(base),
                 fields
                     .iter()
                     .map(|(name, value)| (Rc::clone(name), recur(value)))

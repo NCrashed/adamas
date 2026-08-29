@@ -366,7 +366,12 @@ fn level_vars(term: &Term, found: &mut Vec<u32>) {
         }
     }
     match term {
-        Term::Record(_) | Term::Row(_) | Term::RowKind(_) | Term::Object(_) | Term::Project(..) => {
+        Term::Record(_)
+        | Term::Row(_)
+        | Term::RowKind(_)
+        | Term::Object(_)
+        | Term::With(..)
+        | Term::Project(..) => {
             unreachable!("генератор термов записей не порождает")
         }
         Term::Var(_) | Term::Meta(_) => {}

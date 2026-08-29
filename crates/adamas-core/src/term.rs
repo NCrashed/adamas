@@ -117,6 +117,20 @@ pub enum Term {
     /// Поля хранятся в порядке типа, а не написания: порядок значим, и
     /// приводит к нему проверка.
     Object(Rc<[(Name, Rc<Term>)]>),
+    /// Запись с переопределёнными полями: `{ p | x = v }` (§4.2).
+    ///
+    /// Одна форма на обновление и расширение: есть ли метка у базы, решает её
+    /// тип, а не автор. Написанное поле, которого у базы не видно,
+    /// дописывается в конец полей - перед хвостом, - и тем самым **затеняет**
+    /// одноимённое, если оно придёт из хвоста: scoped labels работают на
+    /// значениях так же, как на рядах.
+    ///
+    /// Заводится только для базы с хвостом: у закрытой записи поля
+    /// перечислимы, и обновление собирается пересборкой в [`Self::Object`],
+    /// где зависимость между полями пересчитывается сама. Здесь она была бы
+    /// не пересчитана, поэтому проверка требует от базы независимости полей -
+    /// у открытой записи это выполнено по построению (§4.2).
+    With(Rc<Term>, Rc<[(Name, Rc<Term>)]>),
     /// Проекция поля: `e.x`.
     Project(Rc<Term>, Name),
     /// Метапеременная терма - дырка, которую заполняет вывод (§4.1).
@@ -375,6 +389,13 @@ impl Term {
                     .map(|(name, value)| (Rc::clone(name), recur(value)))
                     .collect(),
             ),
+            Self::With(base, fields) => Self::With(
+                recur(base),
+                fields
+                    .iter()
+                    .map(|(name, value)| (Rc::clone(name), recur(value)))
+                    .collect(),
+            ),
             Self::Project(record, name) => Self::Project(recur(record), Rc::clone(name)),
             Self::Case(case) => Self::Case(Rc::new(Case {
                 data: Rc::clone(&case.data),
@@ -424,6 +445,11 @@ impl Term {
             Self::Object(fields) => fields
                 .iter()
                 .fold(None, |found, (_, value)| join(found, value.max_level_var())),
+            Self::With(base, fields) => fields
+                .iter()
+                .fold(base.max_level_var(), |found, (_, value)| {
+                    join(found, value.max_level_var())
+                }),
             Self::Project(record, _) => record.max_level_var(),
             Self::Let(_, _, ty, value, body) => join(
                 ty.max_level_var(),
@@ -500,6 +526,13 @@ impl fmt::Display for Term {
                     .map(|(name, value)| format!("{name} = {value}"))
                     .collect();
                 write!(f, "{{{}}}", written.join(", "))
+            }
+            Self::With(base, fields) => {
+                let written: Vec<String> = fields
+                    .iter()
+                    .map(|(name, value)| format!("{name} = {value}"))
+                    .collect();
+                write!(f, "{{{} | {}}}", Atom(base), written.join(", "))
             }
             Self::Project(record, name) => write!(f, "{}.{name}", Atom(record)),
             Self::Pi(binder, name, domain, row, codomain) => {

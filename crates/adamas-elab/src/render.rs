@@ -300,6 +300,18 @@ impl Naming {
                 }
                 *term = Term::Object(written.into());
             }
+            Term::With(base, fields) => {
+                let mut inner = base.as_ref().clone();
+                self.term(&mut inner, bound, outer);
+                *base = Rc::new(inner);
+                let mut written = Vec::with_capacity(fields.len());
+                for (name, value) in fields.iter() {
+                    let mut value = value.as_ref().clone();
+                    self.term(&mut value, bound, outer);
+                    written.push((Rc::clone(name), Rc::new(value)));
+                }
+                *fields = written.into();
+            }
             Term::Project(record, _) => {
                 let mut inner = record.as_ref().clone();
                 self.term(&mut inner, bound, outer);
@@ -406,6 +418,12 @@ fn collect_term(term: &Term, ordered: &mut Vec<LevelMeta>) {
             }
         }
         Term::Object(fields) => {
+            for (_, value) in fields.iter() {
+                collect_term(value, ordered);
+            }
+        }
+        Term::With(base, fields) => {
+            collect_term(base, ordered);
             for (_, value) in fields.iter() {
                 collect_term(value, ordered);
             }

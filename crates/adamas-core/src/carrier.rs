@@ -259,6 +259,12 @@ fn inherit(signature: &Signature, term: &Term, depth: u32, found: &mut [Mult]) {
                 inherit(signature, value, depth, found);
             }
         }
+        Term::With(base, fields) => {
+            inherit(signature, base, depth, found);
+            for (_, value) in fields.iter() {
+                inherit(signature, value, depth, found);
+            }
+        }
         Term::Project(record, _) => inherit(signature, record, depth, found),
         Term::Pi(_, _, domain, _, codomain) => {
             inherit(signature, domain, depth, found);

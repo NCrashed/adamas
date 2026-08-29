@@ -1033,6 +1033,7 @@ fn has_negative_occurrence(term: &Term) -> bool {
             | Term::Row(_)
             | Term::RowKind(_)
             | Term::Object(_)
+            | Term::With(..)
             | Term::Project(..) => {
                 unreachable!("генератор термов записей не порождает")
             }

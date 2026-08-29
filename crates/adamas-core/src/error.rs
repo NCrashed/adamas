@@ -281,6 +281,17 @@ pub enum ErrorKind {
         ty: Term,
     },
 
+    /// Переопределение полей у закрытой записи.
+    ///
+    /// `With` не пересчитывает зависимость между полями, поэтому база обязана
+    /// быть открытой: у открытой записи зависимости нет (§4.2). Закрытая
+    /// обновляется пересборкой - у неё поля перечислимы.
+    #[error("`{ty}` закрыта: обновляется она пересборкой, а не переопределением")]
+    ClosedWith {
+        /// Тип базы.
+        ty: Term,
+    },
+
     /// У записи нет такого поля.
     #[error("у `{ty}` нет поля `{name}`")]
     NoSuchField {
@@ -394,6 +405,7 @@ impl ErrorKind {
             | Self::ConstructorResult { found: ty, .. }
             | Self::NotARow { ty }
             | Self::NotARecord { ty }
+            | Self::ClosedWith { ty }
             | Self::NoSuchField { ty, .. }
             | Self::NotADataValue { ty, .. } => terms.push(ty),
             Self::ConstructorUniverse { field, sort, .. } => levels.extend([field, sort]),

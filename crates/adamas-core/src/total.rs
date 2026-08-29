@@ -103,6 +103,7 @@ fn calls_a_partial_definition(signature: &Signature, name: &Name, term: &Term) -
                 || fields.tail.as_ref().is_some_and(|tail| recur(tail))
         }
         Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
+        Term::With(base, fields) => recur(base) || fields.iter().any(|(_, value)| recur(value)),
         Term::Project(record, _) => recur(record),
         Term::Const(other, _) => {
             other != name && signature.lookup(other).is_some_and(|found| !found.total)
@@ -184,6 +185,12 @@ impl Walk<'_> {
                 }
             }
             Term::Object(fields) => {
+                for (_, value) in fields.iter() {
+                    self.term(sizes, value);
+                }
+            }
+            Term::With(base, fields) => {
+                self.term(sizes, base);
                 for (_, value) in fields.iter() {
                     self.term(sizes, value);
                 }

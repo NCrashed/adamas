@@ -212,6 +212,10 @@ pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
         Elim::Project(name) => {
             matches!(&*callee, Value::Object(_)).then(|| crate::eval::project(&callee, name))
         }
+        // То же с переопределением: развернулось до записи - пересобирается,
+        // нет - разворот не помог.
+        Elim::With(fields) => matches!(&*callee, Value::Object(_))
+            .then(|| crate::eval::with(&callee, fields.to_vec())),
     })
 }
 
@@ -452,6 +456,15 @@ fn same_elim(
         (Elim::App(a), Elim::App(b)) => convertible_within(fuel, sig, metas, size, a, b),
         (Elim::Case(a), Elim::Case(b)) => same_case(fuel, sig, metas, size, a, b),
         (Elim::Project(a), Elim::Project(b)) => a == b,
+        // Порядок написанного значим: `{ p | x = v, x = w }` поверхность не
+        // пишет, но затенение делает две последовательности разными, если они
+        // разошлись местами. Сравнение поэтому попарное.
+        (Elim::With(a), Elim::With(b)) => {
+            a.len() == b.len()
+                && a.iter().zip(b.iter()).all(|((one, ours), (two, theirs))| {
+                    one == two && convertible_within(fuel, sig, metas, size, ours, theirs)
+                })
+        }
         _ => false,
     }
 }

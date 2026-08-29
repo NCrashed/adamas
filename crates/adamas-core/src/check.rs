@@ -164,6 +164,8 @@ pub fn infer(
             Ok((Rc::new(Value::RowKind(level)), usage))
         }
         Term::Object(fields) => infer_object(ctx, metas, sigma, fields),
+
+        Term::With(base, fields) => infer_with(ctx, metas, sigma, base, fields),
         Term::Project(record, name) => infer_project(ctx, metas, sigma, record, name),
 
         Term::Let(mult, name, ty, value, body) => {
@@ -768,6 +770,7 @@ fn mentions_seen<'a>(
         Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Meta(_) => false,
         Term::Record(fields) | Term::Row(fields) => fields.iter().any(|field| recur(&field.ty)),
         Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
+        Term::With(base, fields) => recur(base) || fields.iter().any(|(_, value)| recur(value)),
         Term::Project(record, _) => recur(record),
         // Через тело определения - тоже упоминание. Без этого позитивность
         // обходится в две строки: `def G : Type 0 = Bad -> Bad`, затем
@@ -1329,6 +1332,79 @@ fn infer_fields(
     Ok((level, Usage::zero(ctx.size())))
 }
 
+/// Синтезирует тип переопределения `{ p | x = v }` (§4.2).
+///
+/// Написанная метка, которая у базы **видна**, заменяется на месте: порядок и
+/// хвост сохраняются, поэтому тип функции, вернувшей ту же запись обновлённой,
+/// совпадает с типом её аргумента. Метка, которой не видно, дописывается в
+/// конец полей - **перед** хвостом, - и тем самым затеняет одноимённую, если
+/// та придёт из хвоста: scoped labels работают на записи так же, как на ряде.
+///
+/// Дописывание идёт в конец, а не в начало, по прозаической причине: тип поля
+/// живёт под предыдущими полями телескопа, и приписка слева сдвинула бы
+/// индексы всех остальных.
+///
+/// **База обязана быть открытой.** Замена на месте не пересчитывает
+/// зависимость, а у открытой записи её нет по построению (§4.2) - на том же
+/// инварианте стоят обратное чтение телескопа и сравнение рядов. Закрытая
+/// запись обновляется пересборкой: поля у неё перечислимы, и зависимость
+/// пересчитывает `infer_object`.
+fn infer_with(
+    ctx: &Ctx<'_>,
+    metas: &mut Metas,
+    sigma: Mult,
+    base: &Term,
+    fields: &[(Name, Rc<Term>)],
+) -> Result<(Rc<Value>, Usage), TypeError> {
+    let (ty, mut usage) = framed(infer(ctx, metas, sigma, base), Frame::Scrutinee)?;
+    let ty = whnf(ctx.signature(), &ty);
+    let Value::Record(telescope) = &*ty else {
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::NotARecord {
+                ty: read_back(ctx, metas, &ty),
+            },
+        ));
+    };
+    if !telescope.is_open() {
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::ClosedWith {
+                ty: read_back(ctx, metas, &ty),
+            },
+        ));
+    }
+    let Term::Record(rows) = quote(ctx.size(), &ty) else {
+        unreachable!("запись читается записью")
+    };
+    let mut written: Vec<RecordField> = rows.fields.to_vec();
+    for (index, (name, value)) in fields.iter().enumerate() {
+        let position = u32::try_from(index).unwrap_or(u32::MAX);
+        let (field, found) = framed(infer(ctx, metas, sigma, value), Frame::MemberBody(position))?;
+        usage = usage + &found;
+        let at = written.iter().position(|it| it.name == *name);
+        // Тип поля живёт под предыдущими полями телескопа, поэтому глубина
+        // читается по месту, куда поле встанет, - своему или новому.
+        let depth = ctx.size() + u32::try_from(at.unwrap_or(written.len())).unwrap_or(u32::MAX);
+        let ty = Rc::new(quote(depth, &field));
+        match at {
+            Some(at) => written[at].ty = ty,
+            None => written.push(RecordField {
+                name: Rc::clone(name),
+                mult: Mult::One,
+                ty,
+            }),
+        }
+    }
+    let record = Term::Record(Fields {
+        fields: written.into(),
+        tail: rows.tail.clone(),
+    });
+    Ok((ctx.eval(&record), usage))
+}
+
 /// Синтезирует тип значения записи - **независимый**.
 ///
 /// Восстановить, какое поле от какого зависело, из значений нечем: зависимость
@@ -1588,7 +1664,7 @@ fn data_arguments(
         .iter()
         .map(|elim| match elim {
             Elim::App(argument) => Some(Rc::clone(argument)),
-            Elim::Case(_) | Elim::Project(_) => None,
+            Elim::Case(_) | Elim::Project(_) | Elim::With(_) => None,
         })
         .collect()
 }

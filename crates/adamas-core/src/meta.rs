@@ -374,6 +374,12 @@ impl Generalization {
                     self.collect_term(metas, value);
                 }
             }
+            Term::With(base, fields) => {
+                self.collect_term(metas, base);
+                for (_, value) in fields.iter() {
+                    self.collect_term(metas, value);
+                }
+            }
             Term::Project(record, _) => self.collect_term(metas, record),
             Term::Lam(_, _, body) => self.collect_term(metas, body),
             Term::App(callee, argument) => {
@@ -476,6 +482,13 @@ impl Generalization {
                     .map(|(name, value)| (Rc::clone(name), recur(value)))
                     .collect(),
             ),
+            Term::With(base, fields) => Term::With(
+                recur(base),
+                fields
+                    .iter()
+                    .map(|(name, value)| (Rc::clone(name), recur(value)))
+                    .collect(),
+            ),
             Term::Project(record, name) => Term::Project(recur(record), Rc::clone(name)),
             Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), recur(body)),
             Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
@@ -537,6 +550,9 @@ pub fn unsolved_term_meta(metas: &Metas, term: &Term) -> Option<TermMeta> {
             .find_map(|field| recur(&field.ty))
             .or_else(|| fields.tail.as_ref().and_then(recur)),
         Term::Object(fields) => fields.iter().find_map(|(_, value)| recur(value)),
+        Term::With(base, fields) => {
+            recur(base).or_else(|| fields.iter().find_map(|(_, value)| recur(value)))
+        }
         Term::Project(record, _) => recur(record),
         Term::Lam(_, _, body) => recur(body),
         Term::App(callee, argument) => recur(callee).or_else(|| recur(argument)),
@@ -594,6 +610,11 @@ pub fn unsolved_level_meta(metas: &Metas, term: &crate::term::Term) -> Option<Le
         Term::Object(fields) => fields
             .iter()
             .find_map(|(_, value)| unsolved_level_meta(metas, value)),
+        Term::With(base, fields) => unsolved_level_meta(metas, base).or_else(|| {
+            fields
+                .iter()
+                .find_map(|(_, value)| unsolved_level_meta(metas, value))
+        }),
         Term::Project(record, _) => unsolved_level_meta(metas, record),
         Term::Lam(_, _, body) => unsolved_level_meta(metas, body),
         Term::App(callee, argument) => {
@@ -658,6 +679,13 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
         Term::Record(fields) => Term::Record(zonk_fields(metas, fields)),
         Term::Row(fields) => Term::Row(zonk_fields(metas, fields)),
         Term::Object(fields) => Term::Object(
+            fields
+                .iter()
+                .map(|(name, value)| (Rc::clone(name), recur(value)))
+                .collect(),
+        ),
+        Term::With(base, fields) => Term::With(
+            recur(base),
             fields
                 .iter()
                 .map(|(name, value)| (Rc::clone(name), recur(value)))

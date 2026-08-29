@@ -118,6 +118,12 @@ fn walk(signature: &Signature, owned: &Owned, term: &Term, depth: u32, found: &m
                 walk(signature, owned, value, depth, found);
             }
         }
+        Term::With(base, fields) => {
+            walk(signature, owned, base, depth, found);
+            for (_, value) in fields.iter() {
+                walk(signature, owned, value, depth, found);
+            }
+        }
         Term::Project(record, _) => walk(signature, owned, record, depth, found),
         Term::Pi(_, _, domain, row, codomain) => {
             walk(signature, owned, domain, depth, found);

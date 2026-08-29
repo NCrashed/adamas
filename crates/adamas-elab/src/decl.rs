@@ -601,6 +601,9 @@ fn mentions_local(term: &Term) -> bool {
                     .is_some_and(|tail| mentions_local(tail))
         }
         Term::Object(fields) => fields.iter().any(|(_, value)| mentions_local(value)),
+        Term::With(base, fields) => {
+            mentions_local(base) || fields.iter().any(|(_, value)| mentions_local(value))
+        }
         Term::Project(record, _) => mentions_local(record),
         Term::Lam(_, _, body) => mentions_local(body),
         Term::App(callee, argument) => mentions_local(callee) || mentions_local(argument),

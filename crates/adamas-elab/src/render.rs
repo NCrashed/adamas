@@ -250,8 +250,15 @@ impl Naming {
                     naming.term(Rc::make_mut(body), bound, outer);
                 });
             }
-            Term::Pi(_, name, domain, _, codomain) => {
+            // Аргументы меток row стоят под тем же контекстом, что домен:
+            // связывание `Pi` вводится только для кодомена.
+            Term::Pi(_, name, domain, row, codomain) => {
                 self.term(Rc::make_mut(domain), bound, outer);
+                *row = row.map(|argument| {
+                    let mut argument = argument.clone();
+                    self.term(&mut argument, bound, outer);
+                    argument
+                });
                 let name = name.clone();
                 self.under(bound, name, |naming, bound| {
                     naming.term(Rc::make_mut(codomain), bound, outer);
@@ -324,9 +331,12 @@ fn collect_term(term: &Term, ordered: &mut Vec<LevelMeta>) {
             collect_term(right, ordered);
         }
         Term::Lam(_, _, body) => collect_term(body, ordered),
-        Term::Pi(_, _, domain, _, codomain) => {
+        Term::Pi(_, _, domain, row, codomain) => {
             collect_term(domain, ordered);
             collect_term(codomain, ordered);
+            for argument in row.labels().iter().flat_map(|label| &label.arguments) {
+                collect_term(argument, ordered);
+            }
         }
         Term::Let(_, _, ty, value, body) => {
             collect_term(ty, ordered);

@@ -129,18 +129,6 @@ impl Owned {
     pub fn destructor_of(&self, data: &str) -> Option<&Symbol> {
         self.drops.get(data)
     }
-
-    /// Сколько типов с владением объявлено.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.types.len()
-    }
-
-    /// Пуста ли таблица.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.types.is_empty()
-    }
 }
 
 /// Имя в голове применения: `Array n a` - это `Array`.

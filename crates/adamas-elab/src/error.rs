@@ -7,6 +7,7 @@
 //! подтерма, а объявление целиком остаётся только там, куда маршрут не дошёл.
 
 use adamas_core::check::TypeError;
+use adamas_core::mult::Mult;
 use adamas_core::pattern::PatternError;
 use adamas_core::source::Span;
 use adamas_parser::ast::Symbol;
@@ -170,6 +171,30 @@ pub enum ElabError {
         span: Span,
         /// Первое вхождение.
         first: Span,
+    },
+
+    /// Владеемый тип подставлен в параметр, который его не сбережёт.
+    ///
+    /// §3.3 обещает, что `drop` вызовется на выходе из scope. Под переменной
+    /// типа это обещание держать нечем: правило смотрит на голову написанного.
+    /// Ядро поэтому считает кратность носителя - как определение обошлось со
+    /// значениями своего параметра, - и владеемый тип принимает только `1`:
+    /// ровно один раз, то есть ни забыто, ни размножено (§10 вопрос 76).
+    #[error(
+        "`{owned}` не подставляется в параметр `{parameter}` определения `{callee}`: \
+         значение этого типа употребляется там {carrier} раз, а владение требует ровно одного"
+    )]
+    OwnedCarrier {
+        /// Чей параметр инстанцируют.
+        callee: Symbol,
+        /// Имя параметра.
+        parameter: Symbol,
+        /// Владеемый тип, которым его инстанцировали.
+        owned: Symbol,
+        /// Кратность носителя - то, что определение с ним делает.
+        carrier: Mult,
+        /// Объявление, в котором это написано.
+        span: Span,
     },
 
     /// `@`-аргумент, которому нечего заполнять.
@@ -489,6 +514,7 @@ impl ElabError {
             | Self::NotAConstructor { span, .. }
             | Self::UppercaseBinding { span, .. }
             | Self::RepeatedBinding { span, .. }
+            | Self::OwnedCarrier { span, .. }
             | Self::NoImplicitParameter { span }
             | Self::BlockWithoutValue { span }
             | Self::UnrestrictedOwned { span, .. }

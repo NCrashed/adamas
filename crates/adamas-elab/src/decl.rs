@@ -28,6 +28,7 @@ use adamas_core::source::Span;
 use adamas_core::term::{Binder, Term};
 use adamas_parser::ast::{self, DeclKind, Module, Symbol};
 
+use crate::carrier;
 use crate::error::{ElabError, Missing, Names};
 use crate::expr::{Elaborator, Member};
 use crate::own::{Owned, Ownership};
@@ -210,17 +211,21 @@ fn define(
         )
         .map_err(|error| {
             let names = Names::of(&declared.name, Vec::new());
-            let declared = Declared::Definition {
+            let source = Declared::Definition {
                 ty: declared.source,
                 clauses,
                 compiled: &tree,
             };
             ElabError::Core {
-                span: route::locate(&declared, &error, span),
+                span: route::locate(&source, &error, span),
                 error: Box::new(error),
                 names,
             }
-        })
+        })?;
+
+    // После объявления, а не до: дырки решены и подставлены, поэтому видно,
+    // чем на самом деле стал каждый выводимый аргумент (§10 вопрос 76).
+    carrier::check(signature, owned, &declared.name, span)
 }
 
 /// Где в исходнике то, на чём споткнулась сборка клауз.

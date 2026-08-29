@@ -1472,8 +1472,28 @@ fn an_implicit_does_not_take_a_written_position() {
     // прочлось бы как расход в `0`-параметре, то есть «не упомянут», а `h`
     // закрылся бы вставкой сверх собственного расхода.
     //
-    // Что такую программу принимают вовсе - §10 вопрос 76: под переменной типа
-    // ресурс не узнаётся, и `drop` не вставляется ни здесь, ни в `swallow`.
+    let text = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+consume : (1 x : a) -> (1 f : (1 y : a) -> Bool) -> Bool
+consume x f = f x
+
+release : (1 h : File) -> Bool
+release h = consume h drop
+"
+    );
+    program(&text);
+}
+
+#[test]
+fn a_resource_does_not_instantiate_a_careless_parameter() {
+    // §10 вопрос 76. Правило владения читает голову написанного типа, а под
+    // переменной головы нет, и `swallow` принимает `File`, не закрывая его.
+    // Ловит это кратность носителя: ядро посчитало, что значение типа `a`
+    // употребляется в теле ноль раз, а владение требует ровно одного.
     let text = format!(
         "{BASE}
 closeFile : (1 b : Bool) -> Bool
@@ -1487,5 +1507,38 @@ release : (1 h : File) -> Bool
 release h = swallow h
 "
     );
-    program(&text);
+    let error = refused(&text);
+    assert!(
+        matches!(error, ElabError::OwnedCarrier { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_careless_parameter_is_inherited_from_whoever_was_called() {
+    // Носители обязаны быть композиционны: `g` употребляет каждое своё
+    // связывание ровно однажды и всё равно течёт, потому что течёт тот, кому
+    // она их отдала. Без переноса чужого носителя на свою переменную дыра
+    // открывается одним лишним слоем.
+    let text = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+swallow : (1 x : a) -> Bool
+swallow x = True
+
+g : (1 x : a) -> Bool
+g x = swallow x
+
+release : (1 h : File) -> Bool
+release h = g h
+"
+    );
+    let error = refused(&text);
+    assert!(
+        matches!(error, ElabError::OwnedCarrier { .. }),
+        "получено {error:?}"
+    );
 }

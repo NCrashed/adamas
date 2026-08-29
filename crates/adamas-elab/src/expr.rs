@@ -43,6 +43,41 @@ pub fn is_reference(name: &str) -> bool {
     name.chars().next().is_some_and(char::is_uppercase)
 }
 
+/// Поднятое в implicit-параметр имя (§4.1, §4.2).
+///
+/// Свободное имя типа и row-переменная записи поднимаются одним механизмом и
+/// различаются только сортом связывания: у первого - дырка, у второй -
+/// `Row ℓ`.
+struct Lifted {
+    /// Имя, под которым связывание встанет в телескоп.
+    name: Symbol,
+    /// Ряд ли это.
+    row: bool,
+}
+
+/// Сколько записей написано в сигнатуре на верхнем уровне.
+///
+/// Каждая получает свою row-переменную (§4.2: auto-lift в позиции аргумента и
+/// результата). Вложенная в другую запись не считается: там она поле, а поле -
+/// это тип, и закрывает его та же запись, что его объявила.
+fn written_rows(expr: &Expr) -> usize {
+    match &expr.kind {
+        ExprKind::RecordType(_) => 1,
+        ExprKind::App(left, right)
+        | ExprKind::TypeApp(left, right)
+        | ExprKind::Arrow(left, right) => written_rows(left) + written_rows(right),
+        ExprKind::Pi { binders, codomain } => {
+            binders
+                .iter()
+                .filter_map(|it| it.ty.as_ref())
+                .map(written_rows)
+                .sum::<usize>()
+                + written_rows(codomain)
+        }
+        _ => 0,
+    }
+}
+
 /// Параметр семейства - уже элаборированный.
 ///
 /// Живёт отдельно от [`ast::Binder`], потому что переиспользуется: kind и все
@@ -241,6 +276,12 @@ pub(crate) struct Elaborator<'a> {
     expected: Vec<Argument>,
     /// Идёт ли элаборация в позиции типа - см. `typing`.
     types: bool,
+    /// Сколько row-переменных сигнатуры уже роздано записям (§4.2).
+    ///
+    /// `usize::MAX` - записи закрыты: так элаборируются алиас `type` и всё,
+    /// что сигнатурой не является. Auto-lift применяется только там, где
+    /// row-переменную есть кому связать.
+    rows: usize,
     /// Запрещена ли вставка имплиситов ближайшему имени - см. `type_app`.
     bare: bool,
     /// Где стоит ближайший подтерм - см. [`Position`].
@@ -294,6 +335,7 @@ impl<'a> Elaborator<'a> {
             declared: Vec::new(),
             expected: Vec::new(),
             bare: false,
+            rows: usize::MAX,
             types: false,
             position: Position::Inner,
             produced: None,
@@ -429,21 +471,42 @@ impl<'a> Elaborator<'a> {
     /// это `Nat`, говорит только kind семейства. Дырку решает проверка - там же,
     /// где решает всё прочее.
     pub(crate) fn declaration(&mut self, ty: &Expr, default: Mult) -> Result<Term, ElabError> {
-        let lifted = self.free(ty);
+        let mut lifted: Vec<Lifted> = self
+            .free(ty)
+            .into_iter()
+            .map(|name| Lifted { name, row: false })
+            .collect();
+        // Записи сигнатуры получают row-переменную каждая своя, и считаются
+        // они синтаксически - до элаборации, ровно как свободные имена: имя
+        // связывания нужно знать раньше, чем оно понадобится.
+        for index in 0..written_rows(ty) {
+            lifted.push(Lifted {
+                name: Rc::from(format!("#row{index}").as_str()),
+                row: true,
+            });
+        }
+        self.rows = 0;
         self.lifting(&lifted, ty, default)
     }
 
-    fn lifting(&mut self, lifted: &[Symbol], ty: &Expr, default: Mult) -> Result<Term, ElabError> {
-        let Some((name, rest)) = lifted.split_first() else {
+    fn lifting(&mut self, lifted: &[Lifted], ty: &Expr, default: Mult) -> Result<Term, ElabError> {
+        let Some((first, rest)) = lifted.split_first() else {
             return self.typing(|it| it.expr(ty, default));
         };
-        let sort = Rc::new(Value::Universe(self.metas.fresh_level()));
-        let domain = self.fresh_meta(&sort);
+        let level = self.metas.fresh_level();
+        let domain = if first.row {
+            Term::RowKind(level)
+        } else {
+            let sort = Rc::new(Value::Universe(level));
+            self.fresh_meta(&sort)
+        };
         let bound = self.ctx.eval(&domain);
-        let body = self.under(name, Mult::Zero, bound, |it| it.lifting(rest, ty, default))?;
+        let body = self.under(&first.name, Mult::Zero, bound, |it| {
+            it.lifting(rest, ty, default)
+        })?;
         Ok(Term::Pi(
             Binder::implicit(Mult::Zero),
-            CoreName::from(&**name),
+            CoreName::from(&*first.name),
             Rc::new(domain),
             Row::empty(),
             Rc::new(body),
@@ -1161,26 +1224,47 @@ impl<'a> Elaborator<'a> {
     /// Поле кратности `1` (§4.1): запись кладёт значение однажды - тот же
     /// довод, что у поля конструктора.
     fn record_type(&mut self, fields: &[ast::RecordField]) -> Result<Term, ElabError> {
+        // Хвост берётся один раз на запись - до полей: связывание его стоит
+        // снаружи них, и внутри индекс был бы уже другим.
+        let tail = self.row_variable();
+        let inner = self.record_fields(fields)?;
+        Ok(Term::Record(Fields {
+            fields: inner.into(),
+            tail,
+        }))
+    }
+
+    /// Row-переменная этой записи, если сигнатура их раздаёт (§4.2).
+    ///
+    /// Закрыты записи в алиасе `type` и всюду, где связать переменную нечем:
+    /// раздаёт их `declaration`, и раздаёт ровно столько, сколько насчитала.
+    fn row_variable(&mut self) -> Option<Rc<Term>> {
+        let index = self
+            .rows
+            .checked_add(1)
+            .filter(|_| self.rows != usize::MAX)?;
+        let name: Symbol = Rc::from(format!("#row{}", self.rows).as_str());
+        self.rows = index;
+        self.local(&name).map(|it| Rc::new(Term::var(it)))
+    }
+
+    /// Поля записи телескопом - каждое под предыдущими.
+    fn record_fields(&mut self, fields: &[ast::RecordField]) -> Result<Vec<CoreField>, ElabError> {
         let Some((field, rest)) = fields.split_first() else {
-            return Ok(Term::Record(Fields::closed(Rc::from([]))));
+            return Ok(Vec::new());
         };
         Self::binds(&field.name)?;
         let ty = self.typing(|it| it.expr(&field.ty, Mult::Many))?;
         let bound = self.typed(&ty);
-        let inner = self.binding(Bound::visible(&field.name.text, Mult::One, bound), |it| {
-            it.record_type(rest)
+        let tail = self.binding(Bound::visible(&field.name.text, Mult::One, bound), |it| {
+            it.record_fields(rest)
         })?;
-        let Term::Record(tail) = inner else {
-            unreachable!("телескоп собирается только записью")
-        };
         let head = CoreField {
             name: CoreName::from(&*field.name.text),
             mult: Mult::One,
             ty: Rc::new(ty),
         };
-        Ok(Term::Record(
-            std::iter::once(head).chain(tail.iter().cloned()).collect(),
-        ))
+        Ok(std::iter::once(head).chain(tail).collect())
     }
 
     /// `{ x = a, y }` - значение записи.

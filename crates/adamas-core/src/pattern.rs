@@ -76,7 +76,7 @@ use crate::mult::Mult;
 // сюда под своим полным смыслом в имени.
 use crate::row::Row as EffectRow;
 use crate::sig::{DefinitionKind, Signature};
-use crate::term::{Binder, Branch, Case, Field as RecordField, Index, Name, Term};
+use crate::term::{Binder, Branch, Case, Field as RecordField, Fields, Index, Name, Term};
 use crate::unify::{self, Match, Shape};
 use crate::value::{Elim, Head, Lvl, Value};
 
@@ -1857,6 +1857,31 @@ fn well_scoped(term: &Term, binders: u32) -> bool {
 /// Единственная операция над индексами во всём ядре, и живёт она здесь не
 /// случайно: `NbE` подстановку заменяет замыканиями, но элаборация собирает
 /// терм из кусков, записанных в разных контекстах, и сшить их иначе нечем.
+/// Поля с переписанными переменными: тип каждого - на своей глубине, хвост -
+/// на исходной, потому что зависимостей в открытой записи нет.
+fn rewrite_fields<F: Fn(u32) -> Term>(fields: &Fields, depth: u32, from: u32, map: &F) -> Fields {
+    Fields {
+        fields: fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| RecordField {
+                name: Rc::clone(&field.name),
+                mult: field.mult,
+                ty: Rc::new(rewrite(
+                    &field.ty,
+                    depth + u32::try_from(index).unwrap_or(0),
+                    from,
+                    map,
+                )),
+            })
+            .collect(),
+        tail: fields
+            .tail
+            .as_ref()
+            .map(|it| Rc::new(rewrite(it, depth, from, map))),
+    }
+}
+
 fn rewrite<F: Fn(u32) -> Term>(term: &Term, depth: u32, from: u32, map: &F) -> Term {
     let recur = |inner: &Rc<Term>| Rc::new(rewrite(inner, depth, from, map));
     let under = |inner: &Rc<Term>| Rc::new(rewrite(inner, depth + 1, from, map));
@@ -1868,22 +1893,8 @@ fn rewrite<F: Fn(u32) -> Term>(term: &Term, depth: u32, from: u32, map: &F) -> T
             let level = from + depth - 1 - index;
             shift(&map(level), depth)
         }
-        Term::Record(fields) | Term::Row(fields) => Term::Record(
-            fields
-                .iter()
-                .enumerate()
-                .map(|(index, field)| RecordField {
-                    name: Rc::clone(&field.name),
-                    mult: field.mult,
-                    ty: Rc::new(rewrite(
-                        &field.ty,
-                        depth + u32::try_from(index).unwrap_or(0),
-                        from,
-                        map,
-                    )),
-                })
-                .collect(),
-        ),
+        Term::Record(fields) => Term::Record(rewrite_fields(fields, depth, from, map)),
+        Term::Row(fields) => Term::Row(rewrite_fields(fields, depth, from, map)),
         Term::Object(fields) => Term::Object(
             fields
                 .iter()
@@ -1927,7 +1938,35 @@ fn rewrite<F: Fn(u32) -> Term>(term: &Term, depth: u32, from: u32, map: &F) -> T
 ///
 /// Нужна [`rewrite`]: подставляемый терм записан в целевом контексте, а
 /// подставляется он на глубине, где связываний уже больше.
+/// Поля со сдвинутыми индексами - той же формы, что и `rewrite_fields`.
+fn shift_fields(fields: &Fields, depth: u32, by: u32) -> Fields {
+    Fields {
+        fields: fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| RecordField {
+                name: Rc::clone(&field.name),
+                mult: field.mult,
+                ty: Rc::new(shift_at(
+                    &field.ty,
+                    depth + u32::try_from(index).unwrap_or(0),
+                    by,
+                )),
+            })
+            .collect(),
+        tail: fields
+            .tail
+            .as_ref()
+            .map(|it| Rc::new(shift_at(it, depth, by))),
+    }
+}
+
 fn shift(term: &Term, by: u32) -> Term {
+    shift_at(term, 0, by)
+}
+
+/// То же, начиная с глубины `depth`.
+fn shift_at(term: &Term, depth: u32, by: u32) -> Term {
     fn go(term: &Term, depth: u32, by: u32) -> Term {
         let recur = |inner: &Rc<Term>| Rc::new(go(inner, depth, by));
         let under = |inner: &Rc<Term>| Rc::new(go(inner, depth + 1, by));
@@ -1938,17 +1977,8 @@ fn shift(term: &Term, by: u32) -> Term {
             | Term::RowKind(_)
             | Term::Const(..)
             | Term::Meta(_) => term.clone(),
-            Term::Record(fields) | Term::Row(fields) => Term::Record(
-                fields
-                    .iter()
-                    .enumerate()
-                    .map(|(index, field)| RecordField {
-                        name: Rc::clone(&field.name),
-                        mult: field.mult,
-                        ty: Rc::new(go(&field.ty, depth + u32::try_from(index).unwrap_or(0), by)),
-                    })
-                    .collect(),
-            ),
+            Term::Record(fields) => Term::Record(shift_fields(fields, depth, by)),
+            Term::Row(fields) => Term::Row(shift_fields(fields, depth, by)),
             Term::Object(fields) => Term::Object(
                 fields
                     .iter()
@@ -1989,7 +2019,7 @@ fn shift(term: &Term, by: u32) -> Term {
     if by == 0 {
         term.clone()
     } else {
-        go(term, 0, by)
+        go(term, depth, by)
     }
 }
 

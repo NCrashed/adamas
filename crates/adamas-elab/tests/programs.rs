@@ -1827,3 +1827,40 @@ n = apply .x {{ x = Succ Zero, y = Zero }}
 "
     ));
 }
+
+#[test]
+fn a_record_in_a_signature_takes_extra_fields() {
+    // §4.2, auto-lift: `{ x : Nat, y : Nat } -> Nat` элаборируется в
+    // `{0 r : Row} -> { x : Nat, y : Nat | r } -> Nat`, поэтому работает и на
+    // записи с лишним полем. Row-переменную автор не пишет.
+    program(&format!(
+        "{BASE}
+first : {{ x : Nat, y : Nat }} -> Nat
+first p = p.x
+
+flat : Nat
+flat = first {{ x = Zero, y = Zero }}
+
+wide : Nat
+wide = first {{ x = Zero, y = Zero, z = Succ Zero }}
+"
+    ));
+}
+
+#[test]
+fn a_record_alias_is_closed() {
+    // Запись в алиасе `type` закрыта (§4.2): `Point` - конкретный тип, а не
+    // «класс записей, содержащих x и y». Лишнее поле поэтому не подходит.
+    let error = refused(&format!(
+        "{BASE}
+type Point = {{ x : Nat }}
+
+p : Point
+p = {{ x = Zero, y = Zero }}
+"
+    ));
+    assert!(
+        matches!(error, ElabError::Core { .. }),
+        "получено {error:?}"
+    );
+}

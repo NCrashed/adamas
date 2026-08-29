@@ -615,6 +615,21 @@ pub fn unsolved_level_meta(metas: &Metas, term: &crate::term::Term) -> Option<Le
     }
 }
 
+/// Поля с заменёнными решениями - вместе с хвостом.
+fn zonk_fields(metas: &Metas, fields: &crate::term::Fields) -> crate::term::Fields {
+    crate::term::Fields {
+        fields: fields
+            .iter()
+            .map(|field| crate::term::Field {
+                name: Rc::clone(&field.name),
+                mult: field.mult,
+                ty: Rc::new(zonk_term(metas, &field.ty)),
+            })
+            .collect(),
+        tail: fields.tail.as_ref().map(|it| Rc::new(zonk_term(metas, it))),
+    }
+}
+
 /// Заменяет решённые метапеременные во всём терме.
 #[must_use]
 pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
@@ -630,16 +645,8 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
         // записали, и уровни внутри него могли решиться позже. Без этого
         // прохода дырка уровня уезжает в определение живой, а обобщение её не
         // видит - оно смотрит уже зонканный тип.
-        Term::Record(fields) | Term::Row(fields) => Term::Record(
-            fields
-                .iter()
-                .map(|field| crate::term::Field {
-                    name: Rc::clone(&field.name),
-                    mult: field.mult,
-                    ty: recur(&field.ty),
-                })
-                .collect(),
-        ),
+        Term::Record(fields) => Term::Record(zonk_fields(metas, fields)),
+        Term::Row(fields) => Term::Row(zonk_fields(metas, fields)),
         Term::Object(fields) => Term::Object(
             fields
                 .iter()

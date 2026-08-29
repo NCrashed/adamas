@@ -1196,7 +1196,10 @@ fn check_object(
             },
         ));
     };
-    if written.len() != telescope.fields().len() {
+    // У закрытой записи полей ровно столько, сколько в типе. У открытой
+    // лишние не лишние: их забирает хвост, и он же ими и решается - это и
+    // есть row-полиморфизм со стороны значения (§4.2).
+    if !telescope.is_open() && written.len() != telescope.fields().len() {
         return Err(refuse(
             ctx,
             metas,
@@ -1228,7 +1231,55 @@ fn check_object(
         usage = usage + &found.scale(field.mult);
         earlier.push(ctx.eval(value));
     }
+    if let Some(tail) = telescope.tail() {
+        usage = usage + &check_tail(ctx, metas, sigma, written, telescope, &tail)?;
+    }
     Ok(usage)
+}
+
+/// Сводит хвост открытой записи с полями, которых в её голове нет.
+///
+/// Лишние поля значения - это и есть содержимое хвоста, и другого источника у
+/// него нет: тип головы о них не говорит, а значение говорит.
+fn check_tail(
+    ctx: &Ctx<'_>,
+    metas: &mut Metas,
+    sigma: Mult,
+    written: &[(Name, Rc<Term>)],
+    telescope: &crate::value::Telescope,
+    tail: &Rc<Value>,
+) -> Result<Usage, TypeError> {
+    let mut usage = Usage::zero(ctx.size());
+    let mut fields = Vec::new();
+    for (index, (name, value)) in written.iter().enumerate() {
+        if telescope.fields().iter().any(|it| it.name == *name) {
+            continue;
+        }
+        let position = u32::try_from(index).unwrap_or(u32::MAX);
+        let (ty, found) = framed(
+            infer(ctx, metas, judgement_under(Mult::One, sigma), value),
+            Frame::MemberBody(position),
+        )?;
+        fields.push(RecordField {
+            name: Rc::clone(name),
+            mult: Mult::One,
+            ty: Rc::new(quote(ctx.size(), &ty)),
+        });
+        usage = usage + &found;
+    }
+    let row = ctx.eval(&Term::Row(Fields::closed(fields.into())));
+    if convertible(ctx.signature(), metas, ctx.size(), tail, &row) {
+        Ok(usage)
+    } else {
+        Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::Mismatch {
+                expected: read_back(ctx, metas, tail),
+                found: read_back(ctx, metas, &row),
+            },
+        ))
+    }
 }
 
 /// Универсум полей: телескоп проверяется, максимум возвращается.

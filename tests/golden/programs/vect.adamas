@@ -1,0 +1,33 @@
+-- Семейство с индексом: уточнение типа в ветви и дизъюнктность ветвей.
+--
+-- `head` разбирает `Vect (Succ n)`, и ветви `Nil` у него не бывает вовсе:
+-- унификация индексов делает её невозможной, а не «непокрытой» (§9 Фаза 1).
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Vect : Nat -> Type where
+  Nil : Vect Zero
+  Cons : (0 n : Nat) -> Bool -> Vect n -> Vect (Succ n)
+
+head : (0 n : Nat) -> Vect (Succ n) -> Bool
+head n (Cons k x xs) = x
+
+tail : (0 n : Nat) -> Vect (Succ n) -> Vect n
+tail n (Cons k x xs) = xs
+
+plus : Nat -> Nat -> Nat
+plus Zero m = m
+plus (Succ k) m = Succ (plus k m)
+
+-- Длина результата считается тем же `plus`, что и в типе: индекс уточняется
+-- подстановкой, поэтому равенство `plus (Succ k) m = Succ (plus k m)` доходит
+-- до проверки без единой подсказки.
+append : (0 n : Nat) -> (0 m : Nat) -> Vect n -> Vect m -> Vect (plus n m)
+append n m Nil ys = ys
+append n m (Cons k x xs) ys = Cons (plus k m) x (append k m xs ys)

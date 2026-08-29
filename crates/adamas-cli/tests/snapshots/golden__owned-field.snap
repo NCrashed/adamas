@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: owned-field.adamas:17:12: `MkWrap` берёт поле типа `File` (resource), поэтому `Wrap` обязан быть объявлен `unique data Wrap`
+    MkWrap : File -> Wrap
+             ^^^^^^^^^^^^

@@ -1,0 +1,19 @@
+-- Замыкание над ресурсом, покидающее свой scope (§3.3).
+--
+-- Захват сам по себе законен - такую лямбду разрешено применить и передать
+-- аргументом. Незаконен побег: свойство «привязано к scope» принадлежит
+-- значению и распространяется по связываниям, а запрещает его позиция.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> Bool
+  closeFile h = True
+
+escaping : File -> Bool -> Bool
+escaping h =
+  let use : Bool -> Bool = \b -> closeFile h
+  use

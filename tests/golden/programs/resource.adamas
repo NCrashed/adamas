@@ -1,0 +1,52 @@
+-- Ресурсный тип (§3.3): связывание линейно само, `drop` вставляет компилятор.
+--
+-- Ядра это не касается ни строкой: правило элаборации назначает связыванию
+-- кратность, которую программист мог бы написать сам, и подставляет вызов,
+-- который он мог бы написать тоже.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> Bool
+  closeFile h = True
+
+-- Имя деструктора свободно (§10 вопрос 77): пространство имён плоское, и
+-- `drop` на каждый ресурс не хватило бы.
+resource Socket where
+  Listen : File -> Socket
+  closeSocket : (1 s : Socket) -> Bool
+  closeSocket (Listen h) = closeFile h
+
+-- Ресурс, о котором тело забыло, закрывается сам.
+forgotten : File -> Bool
+forgotten h = True
+
+-- Упоминание в стёртом параметре расходом не считается: кратности написаны в
+-- сигнатуре, и `describe h` ресурс не потребляет - значит `drop` всё равно
+-- вставится.
+describe : (0 h : File) -> Bool
+describe h = True
+
+erased : File -> Bool
+erased h = describe h
+
+-- Закрытое руками закрывается один раз.
+closed : File -> Bool
+closed h = closeFile h
+
+-- Поле, добытое разбором, закрывается тем же правилом, что и аргумент.
+unwrapped : Socket -> Bool
+unwrapped (Listen h) = True
+
+-- Два ресурса в одном scope закрываются в порядке LIFO.
+both : File -> Socket -> Bool
+both h s = True
+
+-- `let`-связывания закрываются на выходе из блока, а не на месте.
+nested : File -> Bool
+nested h =
+  let s : Socket = Listen h
+  True

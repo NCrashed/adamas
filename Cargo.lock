@@ -12,6 +12,7 @@ dependencies = [
  "anyhow",
  "clap",
  "criterion",
+ "insta",
 ]
 
 [[package]]

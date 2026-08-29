@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: scope-bound.adamas:19:3: `use` привязано к своему scope и возвращается: захватившее владение замыкание можно применить или передать аргументом, но не вынести наружу
+    use
+    ^^^

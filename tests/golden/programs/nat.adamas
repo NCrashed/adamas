@@ -1,0 +1,31 @@
+-- Индуктивное семейство, определение клаузами, структурная рекурсия.
+--
+-- Тотальность выводится, а не объявляется (§4.7): `plus` уменьшается по
+-- первому аргументу, и вердикт нужен ядру, чтобы разворачивать её δ.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Bool where
+  False : Bool
+  True : Bool
+
+plus : Nat -> Nat -> Nat
+plus Zero m = m
+plus (Succ k) m = Succ (plus k m)
+
+double : Nat -> Nat
+double n = plus n n
+
+isZero : Nat -> Bool
+isZero Zero = True
+isZero (Succ k) = False
+
+-- Разбор по двум колонкам сразу: ветви порождаются по списку конструкторов,
+-- поэтому полнота обеспечена построением, а не отдельным проходом.
+equal : Nat -> Nat -> Bool
+equal Zero Zero = True
+equal Zero (Succ m) = False
+equal (Succ k) Zero = False
+equal (Succ k) (Succ m) = equal k m

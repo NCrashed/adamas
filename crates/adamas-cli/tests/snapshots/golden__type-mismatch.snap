@@ -1,0 +1,11 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: type-mismatch.adamas:17:18: ожидалась функция, получено значение типа `Nat`
+  count (Succ k) = k Zero
+                   ^^^^^^
+  в контексте:
+    (ω #1 : Nat)
+    (ω #0 : Nat)
+  путь: тело члена группы #0 -> тело лямбды -> ветвь #1 -> тело лямбды

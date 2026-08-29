@@ -1,0 +1,17 @@
+-- Обёртка обычным `data` над ресурсом (§10 вопрос 70).
+--
+-- Без этого отказа владение отмывается: связывания `Wrap` неограниченны,
+-- разбор идёт при `r = ω`, поле кратности `1` приходит в ветвь как `1·ω = ω`,
+-- и ресурс оказывается снаружи без линейности.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> Bool
+  closeFile h = True
+
+data Wrap where
+  MkWrap : File -> Wrap

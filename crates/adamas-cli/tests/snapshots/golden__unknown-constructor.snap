@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: unknown-constructor.adamas:12:8: `Zeroo` не конструктор: в паттерне заглавное имя разбирает, строчное связывает
+  isZero Zeroo = Zero
+         ^^^^^

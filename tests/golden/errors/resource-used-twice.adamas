@@ -1,0 +1,21 @@
+-- Ресурс, закрытый дважды.
+--
+-- Отвергает это ядро, а не правило владения: связывание получило кратность
+-- `1`, и вектор использований её превысил. Элаборация лишь назначила
+-- кратность, которую программист мог бы написать сам.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+and : Bool -> Bool -> Bool
+and False b = False
+and True b = b
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> Bool
+  closeFile h = True
+
+twice : File -> Bool
+twice h = and (closeFile h) (closeFile h)

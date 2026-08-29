@@ -580,7 +580,7 @@ impl Signature {
             } => (name, Mult::Many, *arity, ty),
         };
 
-        let draft = Definition {
+        let mut draft = Definition {
             mult,
             level_arity: arity.declared(),
             // Носители неизвестны, пока тело не проверено; фаза B2 их уточнит,
@@ -592,6 +592,12 @@ impl Signature {
             total: true,
         };
         check_declaration(self, metas, name, &draft)?;
+
+        // Зонканье идёт **до** обобщения: уровень, спрятавшийся в решении
+        // дырки терма, иначе не виден. Дырка терма стоит доменом поднятого
+        // implicit-параметра (§4.1), а решается она универсумом, чей уровень
+        // и обязан стать параметром.
+        draft.ty = zonk_term(metas, &draft.ty);
 
         // Обобщение идёт **до** проверки тела: рекурсивная ссылка обязана знать
         // окончательную арность, иначе член в собственном теле пишется с
@@ -751,6 +757,19 @@ impl Signature {
             .cloned()
             .unwrap_or_else(|| unreachable!("объявление вставлено фазой A или B1"));
 
+        // Решённые по дороге дырки подставляются здесь: хранилище живёт прогон
+        // элаборации, а определение - всю программу, и `Meta(k)` в нём пережила
+        // бы границу, за которой память под неё освобождена. Универсум
+        // семейства - такой же уровень, как в типе, и зонкается вместе с ним.
+        definition.ty = zonk_term(metas, &definition.ty);
+        definition.body = definition.body.map(|body| zonk_term(metas, &body));
+        if let DefinitionKind::Data { sort, .. } = &mut definition.kind {
+            *sort = metas.zonk(sort);
+        }
+
+        // Остаточные дырки ищутся **после** подстановки: уровень, спрятавшийся
+        // в решении дырки терма, до неё не виден, и определение уезжало бы за
+        // границу группы с уровнем из освобождённого хранилища.
         if let Some(meta) = unsolved_term_in_definition(metas, &definition) {
             return Err(ErrorKind::AmbiguousTerm { meta }.into());
         }
@@ -760,16 +779,6 @@ impl Signature {
                 meta,
             }
             .into());
-        }
-
-        // Решённые по дороге дырки подставляются здесь: хранилище живёт прогон
-        // элаборации, а определение - всю программу, и `Meta(k)` в нём пережила
-        // бы границу, за которой память под неё освобождена. Универсум
-        // семейства - такой же уровень, как в типе, и зонкается вместе с ним.
-        definition.ty = zonk_term(metas, &definition.ty);
-        definition.body = definition.body.map(|body| zonk_term(metas, &body));
-        if let DefinitionKind::Data { sort, .. } = &mut definition.kind {
-            *sort = metas.zonk(sort);
         }
 
         self.definitions.insert(Rc::clone(name), definition);

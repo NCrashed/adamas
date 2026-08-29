@@ -309,9 +309,14 @@ impl<'a> Elaborator<'a> {
     /// Написанный тип объявления - со свободными именами, поднятыми в
     /// implicit-параметры (§4.1).
     ///
-    /// `Nil : Vect 0 a` объявляется как `{0 a : Type} -> Vect 0 a`. Кратность
-    /// `0`: поднятое имя - тип, а типы живут в стёртом фрагменте, и платить за
-    /// них в рантайме не за что.
+    /// `Nil : Vect a 0` объявляется как `{0 a : ?t} -> Vect a 0`. Кратность
+    /// `0`: поднятое имя живёт в стёртом фрагменте, и платить за него в
+    /// рантайме не за что.
+    ///
+    /// Тип связывания - **дырка**, а не `Type`: подъём не знает, чем имя
+    /// окажется. `Cons : a -> Vect a n -> Vect a (n + 1)` поднимает `n`, и что
+    /// это `Nat`, говорит только kind семейства. Дырку решает проверка - там же,
+    /// где решает всё прочее.
     pub(crate) fn declaration(&mut self, ty: &Expr, default: Mult) -> Result<Term, ElabError> {
         let lifted = self.free(ty);
         self.lifting(&lifted, ty, default)
@@ -321,13 +326,14 @@ impl<'a> Elaborator<'a> {
         let Some((name, rest)) = lifted.split_first() else {
             return self.typing(|it| it.expr(ty, default));
         };
-        let sort = Term::Universe(self.metas.fresh_level());
-        let bound = self.ctx.eval(&sort);
+        let sort = Rc::new(Value::Universe(self.metas.fresh_level()));
+        let domain = self.fresh_meta(&sort);
+        let bound = self.ctx.eval(&domain);
         let body = self.under(name, Mult::Zero, bound, |it| it.lifting(rest, ty, default))?;
         Ok(Term::Pi(
             Binder::implicit(Mult::Zero),
             CoreName::from(&**name),
-            Rc::new(sort),
+            Rc::new(domain),
             Row::empty(),
             Rc::new(body),
         ))

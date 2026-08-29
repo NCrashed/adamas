@@ -342,6 +342,28 @@ pub fn is_type(ctx: &Ctx<'_>, metas: &mut Metas, term: &Term) -> Result<Level, T
     let ty = whnf(ctx.signature(), &ty);
     match &*ty {
         Value::Universe(level) => Ok(level.clone()),
+        // Нерешённая дырка в позиции типа - не отказ, а ограничение: «чем бы
+        // ты ни была, ты универсум». Возникает это у поднятого имени (§4.1),
+        // тип которого при подъёме неизвестен: `Vect a n` говорит про `n`, что
+        // это `Nat`, а `Nil : Vect a 0` про `a` - что это `Type`, и узнаётся
+        // то и другое только здесь. Решается сравнением, чтобы решение прошло
+        // те же проверки, что и всякое другое.
+        Value::Neutral(Head::Meta(_), _) => {
+            let level = metas.fresh_level();
+            let universe = Rc::new(Value::Universe(level.clone()));
+            if convertible(ctx.signature(), metas, ctx.size(), &ty, &universe) {
+                Ok(level)
+            } else {
+                Err(refuse(
+                    ctx,
+                    metas,
+                    ErrorKind::NotAType {
+                        term: zonked(metas, term),
+                        ty: read_back(ctx, metas, &ty),
+                    },
+                ))
+            }
+        }
         _ => Err(refuse(
             ctx,
             metas,

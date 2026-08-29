@@ -17,21 +17,27 @@
 //!
 //! # Что считается упоминанием
 //!
-//! Только позиция терма. Тип - стёртый фрагмент: `let x : P h = …` ресурс не
-//! расходует, поэтому упоминанием не считается, и `drop` всё равно вставится.
-//! Так правило оказывается **точнее**, чем «встретилось имя».
+//! **Позиция терма и только расходующая.** Тип - стёртый фрагмент: `let x : P h
+//! = …` ресурс не расходует, поэтому упоминанием не считается, и `drop` всё
+//! равно вставится. То же с аргументом, стоящим в `0`-параметре: `describe : (0
+//! h : File) -> Bool` ресурс не потребляет, и `leaked h = describe h` обязана
+//! его закрыть. Кратности параметров написаны в сигнатуре, поэтому спрашивать
+//! ядро не приходится - хватает того же взгляда на написанное, каким правило
+//! владения смотрит на голову типа.
+//!
+//! Голова применения считается известной, только если она **не затенена** - ни
+//! связыванием на пути, ни связыванием снаружи выражения. Иначе локальная `k`
+//! в `k h` взяла бы кратности одноимённой глобальной, и мы вставили бы `drop` к
+//! расходующему вызову - то есть отвергли бы корректную программу.
 //!
 //! Направление ошибки одно и то же везде: лишний `drop` не вставляется
-//! никогда - иначе отвергалась бы корректная программа. Пропущенный возможен,
-//! и мест ровно три, все за пределами того, что видит это правило:
+//! никогда. Пропущенный остался в двух местах, обоих за пределами того, что
+//! видит это правило:
 //!
-//! - имя стоит в позиции терма, но попадает в `0`-параметр (`describe : (0 h :
-//!   File) -> Bool`): расхода нет, а упоминание есть;
-//! - ресурс добыт разбором конструктора - его тип живёт в объявлении
-//!   конструктора, и отвечает за него рекурсия `drop` по полям (§3.3), которой
-//!   ещё нет;
+//! - ресурс добыт разбором конструктора, а конструктор не в сигнатуре - такое
+//!   бывает только внутри объявляемой группы (`mutual`, Фаза 3);
 //! - ресурс пришёл в параметр, тип которого - переменная: голова написанного
-//!   владением не объявлена, и деструктора взять неоткуда.
+//!   владением не объявлена, и деструктора взять неоткуда (§10 вопрос 76).
 //!
 //! # Затенение
 //!
@@ -39,102 +45,217 @@
 //! оно не будет. Иначе `drop` не вставился бы там, где ресурс заведомо не
 //! тронут.
 
+use adamas_core::mult::Mult;
+use adamas_core::sig::Signature;
+use adamas_core::term::Term;
 use adamas_parser::ast::{
-    Alt, Binding, Block, Chain, Expr, ExprKind, LamParamKind, Pattern, PatternKind, Stmt, StmtKind,
+    Alt, Binding, Chain, Expr, ExprKind, LamParamKind, Pattern, PatternKind, Stmt, StmtKind, Symbol,
 };
 
-/// Встречается ли `name` в позиции терма внутри `expr`.
-pub(crate) fn mentions(name: &str, expr: &Expr) -> bool {
-    match &expr.kind {
-        ExprKind::Name(found) => &*found.text == name,
-        ExprKind::App(callee, argument) => mentions(name, callee) || mentions(name, argument),
-        // Аргумент типа стёрт, как и всё в позиции типа.
-        ExprKind::TypeApp(callee, _) => mentions(name, callee),
-        ExprKind::Lam { params, body } => {
-            let shadowed = params.iter().any(|param| match &param.kind {
-                LamParamKind::Pattern(pattern) => binds(name, pattern),
-                LamParamKind::Binder(binder) => binder.names.iter().any(|it| &*it.text == name),
-            });
-            !shadowed && mentions(name, body)
+/// Поиск расходующего упоминания.
+///
+/// Сигнатура нужна одному вопросу - в какой кратности стоит аргумент; список
+/// локальных имён нужен другому - не затенена ли голова применения.
+pub(crate) struct Spent<'a> {
+    signature: &'a Signature,
+    locals: &'a [Symbol],
+}
+
+impl<'a> Spent<'a> {
+    pub(crate) fn new(signature: &'a Signature, locals: &'a [Symbol]) -> Self {
+        Self { signature, locals }
+    }
+
+    /// Встречается ли `name` в позиции терма, где он расходуется.
+    pub(crate) fn mentions(&self, name: &str, expr: &Expr) -> bool {
+        self.in_expr(name, expr, &mut Vec::new())
+    }
+
+    /// Встречается ли имя в том, что стоит **после** связывания: в остальных
+    /// связываниях того же `let` и в последующих операторах.
+    pub(crate) fn in_bindings_body(&self, name: &str, tail: &[Binding], rest: &[Stmt]) -> bool {
+        self.in_bindings(name, tail, rest, &mut Vec::new())
+    }
+
+    fn in_expr<'e>(&self, name: &str, expr: &'e Expr, bound: &mut Vec<&'e str>) -> bool {
+        match &expr.kind {
+            ExprKind::Name(found) => &*found.text == name,
+            ExprKind::App(..) => self.in_application(name, expr, bound),
+            // Аргумент типа стёрт, как и всё в позиции типа.
+            ExprKind::TypeApp(callee, _) => self.in_expr(name, callee, bound),
+            ExprKind::Lam { params, body } => {
+                let names: Vec<&str> = params
+                    .iter()
+                    .flat_map(|param| match &param.kind {
+                        LamParamKind::Pattern(pattern) => bindings_of(pattern),
+                        LamParamKind::Binder(binder) => {
+                            binder.names.iter().map(|it| &*it.text).collect()
+                        }
+                    })
+                    .collect();
+                !names.contains(&name)
+                    && self.under(&names, bound, |it, bound| it.in_expr(name, body, bound))
+            }
+            ExprKind::Block(block) => self.in_stmts(name, &block.stmts, bound),
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                self.in_expr(name, cond, bound)
+                    || self.in_expr(name, then_branch, bound)
+                    || self.in_expr(name, else_branch, bound)
+            }
+            ExprKind::Case { scrutinee, alts } => {
+                self.in_expr(name, scrutinee, bound)
+                    || alts.iter().any(|alt| self.in_alt(name, alt, bound))
+            }
+            ExprKind::Tuple(items) | ExprKind::List(items) => {
+                items.iter().any(|item| self.in_expr(name, item, bound))
+            }
+            ExprKind::Chain(chain) => self.in_chain(name, chain, bound),
+            // `Pi` и стрелка - типы целиком: что в них написано, стёрто.
+            ExprKind::Pi { .. } | ExprKind::Arrow(..) | ExprKind::Lit(_) | ExprKind::Hole => false,
         }
-        ExprKind::Block(block) => in_block(name, block),
-        ExprKind::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => mentions(name, cond) || mentions(name, then_branch) || mentions(name, else_branch),
-        ExprKind::Case { scrutinee, alts } => {
-            mentions(name, scrutinee) || alts.iter().any(|alt| in_alt(name, alt))
+    }
+
+    /// Применение: спайн разбирается целиком, потому что кратность аргумента
+    /// известна по его номеру.
+    fn in_application<'e>(&self, name: &str, expr: &'e Expr, bound: &mut Vec<&'e str>) -> bool {
+        let mut arguments = Vec::new();
+        let mut head = expr;
+        while let ExprKind::App(callee, argument) = &head.kind {
+            arguments.push(&**argument);
+            head = callee;
         }
-        ExprKind::Tuple(items) | ExprKind::List(items) => {
-            items.iter().any(|item| mentions(name, item))
+        arguments.reverse();
+        if self.in_expr(name, head, bound) {
+            return true;
         }
-        ExprKind::Chain(chain) => in_chain(name, chain),
-        // `Pi` и стрелка - типы целиком: что в них написано, стёрто.
-        ExprKind::Pi { .. } | ExprKind::Arrow(..) | ExprKind::Lit(_) | ExprKind::Hole => false,
+        let mults = self.mults(head, bound);
+        arguments.iter().enumerate().any(|(position, argument)| {
+            // Кратность неизвестна - считаем расходом: пропущенный `drop`
+            // хуже лишнего только на утечку, а лишний отвергает корректное.
+            mults.get(position) != Some(&Mult::Zero) && self.in_expr(name, argument, bound)
+        })
+    }
+
+    /// Кратности параметров головы, если она объявленное имя и не затенена.
+    fn mults(&self, head: &Expr, bound: &[&str]) -> Vec<Mult> {
+        let ExprKind::Name(name) = &head.kind else {
+            return Vec::new();
+        };
+        self.named_mults(&name.text, bound)
+    }
+
+    /// То же по имени: пустой список - «неизвестно», то есть расходует.
+    fn named_mults(&self, name: &str, bound: &[&str]) -> Vec<Mult> {
+        if bound.contains(&name) || self.locals.iter().any(|it| **it == *name) {
+            return Vec::new();
+        }
+        let Some(definition) = self.signature.lookup(name) else {
+            return Vec::new();
+        };
+        let mut mults = Vec::new();
+        let mut current = &definition.ty;
+        while let Term::Pi(mult, _, _, codomain) = current {
+            mults.push(*mult);
+            current = codomain;
+        }
+        mults
+    }
+
+    fn in_stmts<'e>(&self, name: &str, stmts: &'e [Stmt], bound: &mut Vec<&'e str>) -> bool {
+        let Some((first, rest)) = stmts.split_first() else {
+            return false;
+        };
+        match &first.kind {
+            StmtKind::Expr(expr) => {
+                self.in_expr(name, expr, bound) || self.in_stmts(name, rest, bound)
+            }
+            // Значение связывания видит **внешнее** имя, а последующие операторы
+            // - уже новое: `let h = f h` расходует старое и заводит другое.
+            StmtKind::Let(bindings) => self.in_bindings(name, bindings, rest, bound),
+        }
+    }
+
+    fn in_bindings<'e>(
+        &self,
+        name: &str,
+        bindings: &'e [Binding],
+        rest: &'e [Stmt],
+        bound: &mut Vec<&'e str>,
+    ) -> bool {
+        let Some((binding, tail)) = bindings.split_first() else {
+            return self.in_stmts(name, rest, bound);
+        };
+        if self.in_expr(name, &binding.body, bound) {
+            return true;
+        }
+        let own = [&*binding.name.text];
+        &*binding.name.text != name
+            && self.under(&own, bound, |it, bound| {
+                it.in_bindings(name, tail, rest, bound)
+            })
+    }
+
+    fn in_alt<'e>(&self, name: &str, alt: &'e Alt, bound: &mut Vec<&'e str>) -> bool {
+        let names = bindings_of(&alt.pattern);
+        !names.contains(&name)
+            && self.under(&names, bound, |it, bound| {
+                it.in_expr(name, &alt.body, bound)
+            })
+    }
+
+    fn in_chain<'e>(&self, name: &str, chain: &'e Chain, bound: &mut Vec<&'e str>) -> bool {
+        // Оператор - та же голова применения, операнды - два его аргумента.
+        chain.tail.iter().any(|(operator, operand)| {
+            let mults = self.named_mults(&operator.text, bound);
+            &*operator.text == name
+                || (mults.first() != Some(&Mult::Zero) && self.in_expr(name, &chain.head, bound))
+                || (mults.get(1) != Some(&Mult::Zero) && self.in_expr(name, operand, bound))
+        })
+    }
+
+    /// Выполняет `body` под связываниями `names`.
+    fn under<'e, T>(
+        &self,
+        names: &[&'e str],
+        bound: &mut Vec<&'e str>,
+        body: impl FnOnce(&Self, &mut Vec<&'e str>) -> T,
+    ) -> T {
+        let depth = bound.len();
+        bound.extend_from_slice(names);
+        let outcome = body(self, bound);
+        bound.truncate(depth);
+        outcome
     }
 }
 
-/// То же для последовательности операторов блока.
-pub(crate) fn in_stmts(name: &str, stmts: &[Stmt]) -> bool {
-    let Some((first, rest)) = stmts.split_first() else {
-        return false;
-    };
-    match &first.kind {
-        StmtKind::Expr(expr) => mentions(name, expr) || in_stmts(name, rest),
-        // Значение связывания видит **внешнее** имя, а последующие операторы -
-        // уже новое: `let h = f h` расходует старое и заводит другое.
-        StmtKind::Let(bindings) => in_bindings(name, bindings, rest),
-    }
-}
-
-fn in_bindings(name: &str, bindings: &[Binding], rest: &[Stmt]) -> bool {
-    let Some((binding, tail)) = bindings.split_first() else {
-        return in_stmts(name, rest);
-    };
-    if mentions(name, &binding.body) {
-        return true;
-    }
-    &*binding.name.text != name && in_bindings(name, tail, rest)
-}
-
-fn in_block(name: &str, block: &Block) -> bool {
-    in_stmts(name, &block.stmts)
-}
-
-fn in_alt(name: &str, alt: &Alt) -> bool {
-    !binds(name, &alt.pattern) && mentions(name, &alt.body)
-}
-
-fn in_chain(name: &str, chain: &Chain) -> bool {
-    mentions(name, &chain.head)
-        || chain
-            .tail
-            .iter()
-            .any(|(operator, operand)| &*operator.text == name || mentions(name, operand))
-}
-
-/// Связывает ли паттерн это имя - то есть затеняет ли внешнее.
-fn binds(name: &str, pattern: &Pattern) -> bool {
+/// Имена, которые связывает паттерн, - то есть затеняют внешнее.
+fn bindings_of(pattern: &Pattern) -> Vec<&str> {
     match &pattern.kind {
-        PatternKind::Name(found) => &*found.text == name,
-        PatternKind::App { fields, .. } => fields.iter().any(|field| binds(name, field)),
-        PatternKind::Tuple(items) => items.iter().any(|item| binds(name, item)),
-        PatternKind::Wildcard | PatternKind::Lit(_) => false,
+        PatternKind::Name(found) => vec![&found.text],
+        PatternKind::App { fields, .. } => fields.iter().flat_map(bindings_of).collect(),
+        PatternKind::Tuple(items) => items.iter().flat_map(bindings_of).collect(),
+        PatternKind::Wildcard | PatternKind::Lit(_) => Vec::new(),
     }
-}
-
-/// Встречается ли имя в том, что стоит **после** связывания: в остальных
-/// связываниях того же `let` и в последующих операторах.
-pub(crate) fn in_bindings_body(name: &str, tail: &[Binding], rest: &[Stmt]) -> bool {
-    in_bindings(name, tail, rest)
 }
 
 #[cfg(test)]
 mod tests {
+    use adamas_core::sig::Signature;
     use adamas_parser::ast::{Decl, DeclKind};
 
-    use super::mentions;
+    use super::Spent;
+
+    /// Расход в пустой сигнатуре: голов, чьи кратности известны, здесь нет, и
+    /// всякий аргумент считается расходующим. Кратности проверяются отдельно,
+    /// на живых программах (`tests/programs.rs`).
+    fn mentions(name: &str, expr: &adamas_parser::ast::Expr) -> bool {
+        let signature = Signature::default();
+        Spent::new(&signature, &[]).mentions(name, expr)
+    }
 
     /// Тело определения `f h = <body>` из текста.
     fn body(source: &str) -> adamas_parser::ast::Expr {

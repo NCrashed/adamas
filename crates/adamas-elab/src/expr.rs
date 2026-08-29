@@ -273,9 +273,41 @@ impl<'a> Elaborator<'a> {
             .iter()
             .rev()
             .find(|bound| {
-                bound.visible && (bound.owned || bound.scoped) && live::mentions(&bound.name, body)
+                bound.visible && (bound.owned || bound.scoped) && self.mentions(&bound.name, body)
             })
             .map(|bound| &bound.name)
+    }
+
+    /// Расходуется ли `name` в теле - правило вставки `drop` (см.
+    /// [`crate::live`]). Кратности параметров берутся из сигнатуры, а
+    /// локальные имена - из текущей области видимости: затенённая голова
+    /// применения чужих кратностей не получает.
+    fn mentions(&self, name: &str, body: &Expr) -> bool {
+        self.mentions_beside(name, body, &[])
+    }
+
+    /// То же, но связывания, которых в области видимости ещё нет: решение о
+    /// вставке принимается **до** того, как переменные клаузы и параметры
+    /// лямбды туда попадут, а затенять голову они уже вправе.
+    fn mentions_beside(&self, name: &str, body: &Expr, beside: &[Symbol]) -> bool {
+        let mut locals = self.locals();
+        locals.extend_from_slice(beside);
+        live::Spent::new(self.signature, &locals).mentions(name, body)
+    }
+
+    /// То же для того, что стоит после связывания `let`.
+    fn mentioned_later(&self, name: &str, tail: &[Binding], rest: &[Stmt]) -> bool {
+        let locals = self.locals();
+        live::Spent::new(self.signature, &locals).in_bindings_body(name, tail, rest)
+    }
+
+    /// Видимые локальные имена.
+    fn locals(&self) -> Vec<Symbol> {
+        self.scope
+            .iter()
+            .filter(|bound| bound.visible)
+            .map(|bound| Rc::clone(&bound.name))
+            .collect()
     }
 
     /// Привязано ли имя к scope своим связыванием.
@@ -641,7 +673,7 @@ impl<'a> Elaborator<'a> {
     ) -> Result<Term, ElabError> {
         // Считается до спуска: индексы закрываемых меряются от тела, то есть
         // от точки, где связаны все параметры этой лямбды.
-        let drops = Self::closing_params(params, body, expected);
+        let drops = self.closing_params(params, body, expected);
         self.lam_params(params, body, expected, &drops)
     }
 
@@ -707,10 +739,23 @@ impl<'a> Elaborator<'a> {
     /// отвергает, - а `_` попадает: имени у него нет, упоминанию взяться
     /// неоткуда, и закрыть его обязаны всегда.
     fn closing_params(
+        &self,
         params: &[ast::LamParam],
         body: &Expr,
         expected: &[Argument],
     ) -> Vec<(u32, Symbol)> {
+        // Параметры связывают тело и затеняют в нём головы применений, а в
+        // области видимости их ещё нет - решение принимается до спуска.
+        let beside: Vec<Symbol> = params
+            .iter()
+            .filter_map(|param| match &param.kind {
+                LamParamKind::Pattern(pattern) => match &pattern.kind {
+                    PatternKind::Name(name) => Some(Rc::clone(&name.text)),
+                    _ => None,
+                },
+                LamParamKind::Binder(_) => None,
+            })
+            .collect();
         let mut found: Vec<(u32, Symbol)> = Vec::new();
         for (position, param) in params.iter().enumerate() {
             let Some(drop) = expected.get(position).and_then(Argument::closes) else {
@@ -721,7 +766,7 @@ impl<'a> Elaborator<'a> {
             };
             let mentioned = match &pattern.kind {
                 PatternKind::Name(name) if !is_reference(&name.text) => {
-                    live::mentions(&name.text, body)
+                    self.mentions_beside(&name.text, body, &beside)
                 }
                 PatternKind::Wildcard => false,
                 _ => continue,
@@ -817,7 +862,7 @@ impl<'a> Elaborator<'a> {
         // Ресурс, имя которого дальше не встречается, закрывается сам (§3.3);
         // стёртое связывание - нет, расходовать там нечего.
         let closes = mult != Mult::Zero
-            && !live::in_bindings_body(&binding.name.text, tail, rest)
+            && !self.mentioned_later(&binding.name.text, tail, rest)
             && self.owned.destructor(ty).is_some();
         let drop = closes.then(|| self.owned.destructor(ty).cloned()).flatten();
         let owns = self.owned.of(ty).is_some();
@@ -1039,6 +1084,13 @@ impl<'a> Elaborator<'a> {
     /// объявлению конструктора. Отсюда рекурсия `drop` по полям (§3.3):
     /// `f (Wrap h) = …` закрывает `h` так же, как закрыл бы аргумент.
     fn clause_variables(&self, clause: &ast::Clause, patterns: &[CorePattern]) -> Vec<BoundVar> {
+        // Имена собираются первым проходом: они связывают тело, а значит и
+        // затеняют в нём головы применений, - но в области видимости их ещё
+        // нет, решение о вставке принимается раньше.
+        let mut names = Vec::new();
+        for pattern in patterns {
+            variables_of(pattern, &mut names);
+        }
         let mut found = Vec::new();
         for (position, (written, pattern)) in clause.patterns.iter().zip(patterns).enumerate() {
             self.pattern_variables(
@@ -1046,6 +1098,7 @@ impl<'a> Elaborator<'a> {
                 pattern,
                 self.declared.get(position),
                 &clause.body,
+                &names,
                 &mut found,
             );
         }
@@ -1063,6 +1116,7 @@ impl<'a> Elaborator<'a> {
         compiled: &CorePattern,
         argument: Option<&Argument>,
         body: &Expr,
+        beside: &[Symbol],
         found: &mut Vec<BoundVar>,
     ) {
         match compiled {
@@ -1072,7 +1126,7 @@ impl<'a> Elaborator<'a> {
                 let mentioned = match written.map(|it| &it.kind) {
                     Some(PatternKind::Wildcard) => false,
                     Some(PatternKind::Name(written)) if !is_reference(&written.text) => {
-                        live::mentions(&written.text, body)
+                        self.mentions_beside(&written.text, body, beside)
                     }
                     _ => true,
                 };
@@ -1116,6 +1170,7 @@ impl<'a> Elaborator<'a> {
                         field,
                         types.get(position + params),
                         body,
+                        beside,
                         found,
                     );
                 }
@@ -1160,6 +1215,18 @@ fn closing_of(bound: &[BoundVar]) -> Vec<(u32, Symbol)> {
         .collect();
     lifo(&mut found);
     found
+}
+
+/// Имена переменных паттерна слева направо в глубину.
+fn variables_of(pattern: &CorePattern, names: &mut Vec<Symbol>) {
+    match pattern {
+        CorePattern::Var(name) => names.push(Rc::from(&**name)),
+        CorePattern::Constructor(_, fields) => {
+            for field in fields {
+                variables_of(field, names);
+            }
+        }
+    }
 }
 
 /// Переставляет закрываемые в порядок вставки: LIFO плюс поправка на глубину.

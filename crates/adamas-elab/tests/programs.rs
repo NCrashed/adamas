@@ -1054,11 +1054,54 @@ consumed h = drop h
 }
 
 #[test]
-fn a_resource_mentioned_only_in_an_erased_position_still_leaks() {
-    // Названная граница правила (§10 вопрос 71): имя стоит в позиции терма,
-    // поэтому упоминанием считается, - но попадает в `0`-параметр и ресурс не
-    // расходует. `drop` не вставляется, и ресурс утекает. Тест фиксирует
-    // именно это, чтобы граница не сдвинулась молча.
+fn a_mention_in_an_erased_argument_is_not_a_use() {
+    // Упоминание считается расходом только там, где расход есть: аргумент,
+    // стоящий в `0`-параметре, ресурс не потребляет, и закрыть его обязана
+    // сама функция. Кратности параметров написаны в сигнатуре - спрашивать
+    // ядро (§10 вопросы 49а и 71) для этого не требуется.
+    let text = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+describe : (0 h : File) -> (1 b : Bool) -> Bool
+consume : (1 h : File) -> Bool
+
+erased : File -> Bool
+erased h = describe h True
+
+spent : File -> Bool
+spent h = consume h
+
+partly : File -> Bool
+partly h = describe h (consume h)
+"
+    );
+    let signature = program(&text);
+    assert_eq!(
+        drops(&signature, "erased"),
+        1,
+        "стёртый аргумент не расходует - ресурс закрывает вставка"
+    );
+    assert_eq!(
+        drops(&signature, "spent"),
+        0,
+        "расходующий аргумент закрывает сам, вставке там делать нечего"
+    );
+    assert_eq!(
+        drops(&signature, "partly"),
+        0,
+        "хватает одного расходующего вхождения"
+    );
+}
+
+#[test]
+fn a_shadowed_callee_does_not_lend_its_multiplicities() {
+    // Голова применения даёт кратности, только если она то самое объявленное
+    // имя. Затенённая локальная о них ничего не знает, и считать её аргумент
+    // стёртым значило бы вставить `drop` к расходующему вызову - то есть
+    // отвергнуть корректную программу.
     let text = format!(
         "{BASE}
 closeFile : (1 b : Bool) -> Bool
@@ -1067,15 +1110,15 @@ closeFile b = b
 {RESOURCE}
 describe : (0 h : File) -> Bool
 
-leaked : File -> Bool
-leaked h = describe h
+shadowing : (1 describe : File -> Bool) -> File -> Bool
+shadowing describe h = describe h
 "
     );
     let signature = program(&text);
     assert_eq!(
-        drops(&signature, "leaked"),
+        drops(&signature, "shadowing"),
         0,
-        "упоминание в позиции терма считается расходом, даже когда им не является"
+        "локальная голова расходует, как и всякая неизвестная"
     );
 }
 

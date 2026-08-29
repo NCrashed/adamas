@@ -19,13 +19,13 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::rc::Rc;
 
-use adamas_core::check::TypeError;
+use adamas_core::check::{Frame, TypeError};
 use adamas_core::level::{Level, LevelMeta};
 use adamas_core::pattern::PatternError;
 use adamas_core::source::{Location, SourceFile, Span};
 use adamas_core::term::{Case, Index, Name, Term};
 
-use crate::error::ElabError;
+use crate::error::{ElabError, Names};
 
 /// Сообщение целиком: позиция, строка исходника с подчёркиванием, телескоп и
 /// путь до места отказа.
@@ -37,7 +37,7 @@ pub fn report(file: &SourceFile, error: &ElabError) -> String {
         out.push_str(&located(file, *signature, "сигнатура написана здесь"));
     }
     if let Some(core) = error.core() {
-        out.push_str(&explain(core));
+        out.push_str(&explain(core, error.names().unwrap_or(&Names::default())));
     }
     out
 }
@@ -97,7 +97,7 @@ fn message(error: &ElabError) -> String {
 /// неоткуда взять - в тексте на месте отказа видно только имя. Путь объясняет,
 /// **почему** подчёркнуто именно это место, и когда маршрут уходит в структуру,
 /// порождённую элаборацией, он остаётся единственным указанием, куда смотреть.
-fn explain(error: &TypeError) -> String {
+fn explain(error: &TypeError, names: &Names) -> String {
     let mut out = String::new();
     let naming = Naming::of(error);
     let context = error.context();
@@ -118,11 +118,46 @@ fn explain(error: &TypeError) -> String {
             );
         }
     }
-    let route: Vec<String> = error.path().map(|frame| frame.to_string()).collect();
+    let route = route(error, names);
     if !route.is_empty() {
         let _ = write!(out, "\n  путь: {}", route.join(" -> "));
     }
     out
+}
+
+/// Маршрут словами.
+///
+/// Номер члена и номер конструктора заменяются именами: ядру они не нужны, а
+/// читателю номер не говорит ничего - тем более что группа сегодня всегда из
+/// одного члена, и «#0» в ней постоянно.
+///
+/// Номер конструктора считается **внутри** члена, поэтому пройденный член
+/// запоминается: маршрут идёт снаружи внутрь, и `MemberType` приходит раньше
+/// своего `Constructor`.
+fn route(error: &TypeError, names: &Names) -> Vec<String> {
+    let mut member = None;
+    error
+        .path()
+        .map(|frame| {
+            if let Frame::MemberType(index) | Frame::MemberBody(index) = frame {
+                member = Some(index);
+            }
+            step(frame, member, names)
+        })
+        .collect()
+}
+
+/// Один кадр словами; имени нет - остаётся номер, который знает ядро.
+fn step(frame: Frame, member: Option<u32>, names: &Names) -> String {
+    let found = match frame {
+        Frame::MemberType(index) => names.member(index).map(|name| format!("тип `{name}`")),
+        Frame::MemberBody(index) => names.member(index).map(|name| format!("тело `{name}`")),
+        Frame::Constructor(index) => member
+            .and_then(|member| names.constructor(member, index))
+            .map(|name| format!("конструктор `{name}`")),
+        _ => None,
+    };
+    found.unwrap_or_else(|| frame.to_string())
 }
 
 /// Окно вокруг подчёркнутого фрагмента.

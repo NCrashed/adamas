@@ -5,4 +5,4 @@ expression: text
 Error: resource-used-twice.adamas:21:11: `h` объявлена с кратностью 1, а использована ω
   twice h = and (closeFile h) (closeFile h)
             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  путь: тело члена группы #0
+  путь: тело `twice`

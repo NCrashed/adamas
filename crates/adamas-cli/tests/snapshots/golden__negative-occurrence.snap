@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: negative-occurrence.adamas:9:8: конструктор `Mk` использует `Bad` в отрицательной позиции
+    Mk : (Bad -> Bad) -> Bad
+         ^^^^^^^^^^^^^^^^^^^
+  путь: тип `Bad` -> конструктор `Mk`

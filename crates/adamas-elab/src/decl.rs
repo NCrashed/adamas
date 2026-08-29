@@ -28,7 +28,7 @@ use adamas_core::source::Span;
 use adamas_core::term::Term;
 use adamas_parser::ast::{self, DeclKind, Module, Symbol};
 
-use crate::error::{ElabError, Missing};
+use crate::error::{ElabError, Missing, Names};
 use crate::expr::Elaborator;
 use crate::own::{Owned, Ownership};
 use crate::route::{self, Declared};
@@ -155,6 +155,7 @@ fn postulate(
             ElabError::Core {
                 error: Box::new(error),
                 span,
+                names: Names::of(&pending.name, Vec::new()),
             }
         })
 }
@@ -173,6 +174,7 @@ fn define(
     let levels = self_levels(signature, metas, &declared.ty).map_err(|error| ElabError::Core {
         span: route::locate(&Declared::Bare(declared.source), &error, declared.span),
         error: Box::new(error),
+        names: Names::of(&declared.name, Vec::new()),
     })?;
     let group = vec![(Rc::clone(&declared.name), levels)];
     let compiled = {
@@ -203,6 +205,7 @@ fn define(
             Some(tree.term.clone()),
         )
         .map_err(|error| {
+            let names = Names::of(&declared.name, Vec::new());
             let declared = Declared::Definition {
                 ty: declared.source,
                 clauses,
@@ -211,6 +214,7 @@ fn define(
             ElabError::Core {
                 span: route::locate(&declared, &error, span),
                 error: Box::new(error),
+                names,
             }
         })
 }
@@ -569,6 +573,15 @@ fn declare_data(
         // пишется явно: `data D : Type where`.
         None => Term::universe(0),
     };
+    // Маршрут внутрь семейства называет конструктор номером, а имена у него
+    // здесь: собираются один раз на оба возможных отказа.
+    let names = Names::of(
+        &data.name.text,
+        data.constructors
+            .iter()
+            .map(|constructor| Rc::clone(&constructor.name.text))
+            .collect(),
+    );
     // Конструктор называет своё семейство, а в сигнатуре его ещё нет: группа
     // объявляется целиком, и арность тип-формера считает элаборация.
     let levels = self_levels(signature, metas, &kind).map_err(|error| ElabError::Core {
@@ -576,6 +589,7 @@ fn declare_data(
             route::locate(&Declared::Bare(kind), &error, span)
         }),
         error: Box::new(error),
+        names: names.clone(),
     })?;
 
     // Поле конструктора получает `1` (§4.1): конструктор кладёт аргумент
@@ -599,6 +613,7 @@ fn declare_data(
         .map_err(|error| ElabError::Core {
             span: route::locate(&Declared::Data(data), &error, span),
             error: Box::new(error),
+            names,
         })
 }
 

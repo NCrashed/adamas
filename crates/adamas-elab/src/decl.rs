@@ -25,7 +25,7 @@ use adamas_core::mult::Mult;
 use adamas_core::pattern::{PatternError, compile_traced};
 use adamas_core::sig::Signature;
 use adamas_core::source::Span;
-use adamas_core::term::Term;
+use adamas_core::term::{Binder, Term};
 use adamas_parser::ast::{self, DeclKind, Module, Symbol};
 
 use crate::error::{ElabError, Missing, Names};
@@ -429,7 +429,7 @@ fn destructor_shape(
         name: Rc::clone(name),
         span,
     };
-    let Term::Pi(mult, _, domain, _, result) = ty else {
+    let Term::Pi(Binder { mult, .. }, _, domain, _, result) = ty else {
         return Err(refuse());
     };
     // Кратность домена `1`: при `0` тело деструктора не вправе тронуть ресурс

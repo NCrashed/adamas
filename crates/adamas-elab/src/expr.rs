@@ -15,7 +15,7 @@ use adamas_core::pattern::{Clause, Pattern as CorePattern};
 use adamas_core::row::Row;
 use adamas_core::sig::{DefinitionKind, Signature};
 use adamas_core::source::Span;
-use adamas_core::term::{Name as CoreName, Term};
+use adamas_core::term::{Binder, Name as CoreName, Term};
 use adamas_parser::ast::{
     self, Binding, Block, Expr, ExprKind, LamParamKind, Pattern, PatternKind, Stmt, StmtKind,
     Symbol, Visibility,
@@ -497,7 +497,9 @@ impl<'a> Elaborator<'a> {
                 let anonymous: Symbol = Rc::from("_");
                 let codomain = self.under(&anonymous, |inner| inner.expr(codomain, default))?;
                 Ok(Term::Pi(
-                    mult,
+                    // Стрелка пишется без скобок, поэтому связывание у неё
+                    // явное: выводить нечего, аргумент стоит в месте вызова.
+                    Binder::explicit(mult),
                     CoreName::from("_"),
                     Rc::new(domain),
                     // Эффектов в поверхностном языке ещё нет (§3.4, Фаза 4),
@@ -653,7 +655,7 @@ impl<'a> Elaborator<'a> {
             inner.pi_flat(rest, codomain, default)
         })?;
         Ok(Term::Pi(
-            *mult,
+            Binder::explicit(*mult),
             CoreName::from(&**name),
             Rc::new(domain),
             Row::empty(),
@@ -1249,7 +1251,7 @@ fn lifo(found: &mut [(u32, Symbol)]) {
 fn pi_arguments(ty: &Term, owned: &Owned) -> Vec<Argument> {
     let mut found = Vec::new();
     let mut current = ty;
-    while let Term::Pi(mult, _, domain, _, codomain) = current {
+    while let Term::Pi(Binder { mult, .. }, _, domain, _, codomain) = current {
         let mut head = &**domain;
         while let Term::App(callee, _) = head {
             head = callee;

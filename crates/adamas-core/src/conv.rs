@@ -282,17 +282,21 @@ fn rigid(
                     .all(|(a, b)| same_elim(fuel, sig, metas, size, a, b))
         }
 
-        // Кратность - часть типа функции, поэтому здесь она значима:
-        // `(1 x : A) -> B` и `(ω x : A) -> B` - разные типы. Row - по той же
-        // причине и на тех же правах (§3.4): `A -> {IO} B` и `A -> B`
-        // различаются, потому что различается контракт применения. Формы
-        // сравниваются синтаксически - метки в каноническом порядке, - а
-        // аргументы меток конвертируемостью, как всякие термы.
+        // Связывание - часть типа функции целиком: `(1 x : A) -> B` и
+        // `(ω x : A) -> B` разные типы, и `{a : A} -> B` с `(a : A) -> B`
+        // тоже. Видимость сравнивается по тому же доводу, что кратность:
+        // считай их одним типом - и значение одного встало бы на место
+        // другого, а вставка имплиситов перестала бы быть определённой.
+        //
+        // Row - на тех же правах (§3.4): `A -> {IO} B` и `A -> B` различаются,
+        // потому что различается контракт применения. Формы сравниваются
+        // синтаксически - метки в каноническом порядке, - а аргументы меток
+        // конвертируемостью, как всякие термы.
         (
-            Value::Pi(mult_a, _, domain_a, row_a, codomain_a),
-            Value::Pi(mult_b, _, domain_b, row_b, codomain_b),
+            Value::Pi(binder_a, _, domain_a, row_a, codomain_a),
+            Value::Pi(binder_b, _, domain_b, row_b, codomain_b),
         ) => {
-            mult_a == mult_b
+            binder_a == binder_b
                 && row_a.same_shape(row_b)
                 && row_a
                     .zip(row_b)
@@ -371,6 +375,8 @@ mod tests {
     use std::rc::Rc;
 
     use crate::row::{Label, Row};
+    use crate::term::Binder;
+    use crate::visibility::Visibility;
 
     use super::{UNFOLD_LIMIT, convertible};
     use crate::eval::eval;
@@ -387,7 +393,13 @@ mod tests {
     }
 
     fn rowed(mult: Mult, row: Row<Term>, domain: Term, codomain: Term) -> Term {
-        Term::Pi(mult, "x".into(), Rc::new(domain), row, Rc::new(codomain))
+        Term::Pi(
+            Binder::explicit(mult),
+            "x".into(),
+            Rc::new(domain),
+            row,
+            Rc::new(codomain),
+        )
     }
 
     fn effect(name: &str, arguments: Vec<Term>) -> Row<Term> {
@@ -624,7 +636,7 @@ mod tests {
             };
             (0..UNFOLD_LIMIT + 8).fold(Term::universe(0), |tail, _| {
                 Term::Pi(
-                    Mult::Zero,
+                    Binder::explicit(Mult::Zero),
                     "_".into(),
                     Rc::new(Term::constant("F").apply([index.clone()])),
                     Row::empty(),
@@ -748,6 +760,34 @@ mod tests {
                 &ty(vec![("A", 1), ("A", 0)])
             ),
             "порядок внутри группы значим"
+        );
+    }
+
+    #[test]
+    fn visibility_is_part_of_the_function_type() {
+        // §4.1: `{a : A} -> B` и `(a : A) -> B` - разные типы. Считай их одним,
+        // и значение одного встало бы на место другого, а вставка имплиситов
+        // перестала бы быть определённой.
+        let visible = |visibility| {
+            Term::Pi(
+                Binder {
+                    mult: Mult::Many,
+                    visibility,
+                },
+                "x".into(),
+                Rc::new(Term::universe(0)),
+                Row::empty(),
+                Rc::new(Term::universe(0)),
+            )
+        };
+        let explicit = visible(Visibility::Explicit);
+        let implicit = visible(Visibility::Implicit);
+        assert!(!conv_in(0, &explicit, &implicit));
+        assert!(conv_in(0, &implicit, &implicit.clone()));
+        assert_eq!(
+            implicit.to_string(),
+            "{ω x : Type 0} -> Type 0",
+            "вид скобок несёт связывание"
         );
     }
 }

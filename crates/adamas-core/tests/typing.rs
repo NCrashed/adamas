@@ -13,7 +13,7 @@ use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::row::Row;
 use adamas_core::sig::Signature;
-use adamas_core::term::Term;
+use adamas_core::term::{Binder, Term};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 
@@ -67,7 +67,7 @@ fn lam(mult: Mult, name: &str, body: Term) -> Term {
 
 fn pi(mult: Mult, name: &str, domain: Term, codomain: Term) -> Term {
     Term::Pi(
-        mult,
+        Binder::explicit(mult),
         name.into(),
         Rc::new(domain),
         Row::empty(),
@@ -570,7 +570,7 @@ fn any_small_term() -> BoxedStrategy<Term> {
                 .prop_map(|(callee, arg)| Term::App(Rc::new(callee), Rc::new(arg))),
             (any_mult(), inner.clone(), inner.clone()).prop_map(|(mult, domain, codomain)| {
                 Term::Pi(
-                    mult,
+                    Binder::explicit(mult),
                     "x".into(),
                     Rc::new(domain),
                     Row::empty(),

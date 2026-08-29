@@ -60,7 +60,7 @@ use crate::meta::{Metas, unsolved_level_meta};
 use crate::mult::Mult;
 use crate::row::Row;
 use crate::sig::{Definition, DefinitionKind, Signature};
-use crate::term::{Case, Name, Term, spine};
+use crate::term::{Binder, Case, Name, Term, spine};
 use crate::value::{Elim, Head, Lvl, Value};
 
 /// Значение, уложенное в ошибку: обратное чтение плюс зонканье.
@@ -133,7 +133,7 @@ pub fn infer(
         // - Фаза 4 (§3.4). Сегодня цены у долга нет: синтаксиса для row не
         // существует, и пустой её делает не соглашение, а отсутствие способа
         // написать иную. Правило приходит вместе с погашением.
-        Term::Pi(mult, name, domain, _, codomain) => {
+        Term::Pi(Binder { mult, .. }, name, domain, _, codomain) => {
             let domain_level = framed(is_type(ctx, metas, domain), Frame::Domain)?;
             let inner = ctx.bind(Rc::clone(name), *mult, ctx.eval(domain));
             let codomain_level = framed(is_type(&inner, metas, codomain), Frame::Codomain)?;
@@ -286,7 +286,7 @@ fn check_lambda(
     let Term::Lam(mult, name, body) = term else {
         unreachable!("правило лямбды вызвано не на лямбде: {term}")
     };
-    let Value::Pi(pi_mult, _, domain, _, codomain) = &**expected else {
+    let Value::Pi(Binder { mult: pi_mult, .. }, _, domain, _, codomain) = &**expected else {
         return Err(refuse(
             ctx,
             metas,
@@ -615,9 +615,11 @@ fn spend(name: &Name, allowed: Mult, actual: Mult) -> Result<(), TypeError> {
 
 // ------------------------------------------------------------ индуктивные типы
 
-/// Одно связывание из телескопа `Pi`.
-struct Binder {
-    mult: Mult,
+/// Одно связывание из телескопа `Pi` вместе с тем, что оно связывает.
+struct Field {
+    /// Кратность и видимость.
+    binder: Binder,
+    /// Имя - только для печати.
     name: Name,
     domain: Rc<Term>,
     /// Row той стрелки, что ввела это связывание. Хранится, потому что
@@ -627,12 +629,12 @@ struct Binder {
 }
 
 /// Снимает цепочку `Pi`, возвращая связывания и итоговый терм.
-fn peel_pis(term: &Term) -> (Vec<Binder>, &Term) {
+fn peel_pis(term: &Term) -> (Vec<Field>, &Term) {
     let mut fields = Vec::new();
     let mut current = term;
-    while let Term::Pi(mult, name, domain, row, codomain) = current {
-        fields.push(Binder {
-            mult: *mult,
+    while let Term::Pi(binder, name, domain, row, codomain) = current {
+        fields.push(Field {
+            binder: *binder,
             name: Rc::clone(name),
             domain: Rc::clone(domain),
             row: row.clone(),
@@ -907,7 +909,7 @@ pub(crate) fn check_constructor_shape(
             // кратности. Иначе `List` в результате и `List` в объявлении - два
             // разных семейства, и элиминации не на что опереться.
             let expected = &telescope[index];
-            if expected.mult != field.mult
+            if expected.binder.mult != field.binder.mult
                 || !convertible(
                     signature,
                     metas,
@@ -919,7 +921,11 @@ pub(crate) fn check_constructor_shape(
                 return Err(mismatched(depth).into());
             }
         }
-        ctx = ctx.bind(Rc::clone(&field.name), field.mult, ctx.eval(&field.domain));
+        ctx = ctx.bind(
+            Rc::clone(&field.name),
+            field.binder.mult,
+            ctx.eval(&field.domain),
+        );
     }
 
     // Результат - тот самый тип, инстанцированный собственными параметрами
@@ -1022,7 +1028,11 @@ pub(crate) fn check_constructor_content(
                 .into());
             }
         }
-        ctx = ctx.bind(Rc::clone(&field.name), field.mult, ctx.eval(&field.domain));
+        ctx = ctx.bind(
+            Rc::clone(&field.name),
+            field.binder.mult,
+            ctx.eval(&field.domain),
+        );
     }
     Ok(())
 }
@@ -1042,7 +1052,7 @@ fn infer_app(
     // такой же тип функции, как записанная стрелка, и `f : Fn` обязана
     // применяться.
     let callee_ty = whnf(ctx.signature(), &callee_ty);
-    let Value::Pi(mult, _, domain, _, codomain) = &*callee_ty else {
+    let Value::Pi(Binder { mult, .. }, _, domain, _, codomain) = &*callee_ty else {
         return Err(refuse(
             ctx,
             metas,
@@ -1250,13 +1260,15 @@ fn motive_type(
 
     // Складывается изнутри наружу: сперва само разбираемое значение, потом
     // индексы в обратном порядке, чтобы первым объявленным оказался внешний.
-    let result = std::iter::once((Mult::Zero, Name::from("x"), scrutinee_ty))
+    let result = std::iter::once((Binder::explicit(Mult::Zero), Name::from("x"), scrutinee_ty))
         .chain(telescope.into_iter().rev())
         .fold(
             Term::Universe(metas.fresh_level()),
             |codomain, (_, name, domain)| {
+                // Мотив связывает всё стёртым и явным: он тип, а не функция,
+                // которую пишут в месте вызова.
                 Term::Pi(
-                    Mult::Zero,
+                    Binder::explicit(Mult::Zero),
                     name,
                     Rc::new(domain),
                     Row::empty(),
@@ -1320,9 +1332,12 @@ fn branch_type(
     let result = telescope
         .into_iter()
         .rev()
-        .fold(result, |codomain, (mult, name, domain)| {
+        .fold(result, |codomain, (binder, name, domain)| {
             Term::Pi(
-                mult * case.consumed,
+                Binder {
+                    mult: binder.mult * case.consumed,
+                    ..binder
+                },
                 name,
                 Rc::new(domain),
                 // Тип ветви строится из телескопа конструктора, а он чист:
@@ -1357,12 +1372,12 @@ pub(crate) fn instantiate_telescope(ty: Rc<Value>, arguments: &[Rc<Value>]) -> R
 ///
 /// Домены читаются обратно по одному, каждый в своём контексте: `quote` до
 /// увеличения размера, потому что домен живёт снаружи собственного связывания.
-fn telescope_of(size: u32, value: &Rc<Value>) -> (Vec<(Mult, Name, Term)>, u32) {
+fn telescope_of(size: u32, value: &Rc<Value>) -> (Vec<(Binder, Name, Term)>, u32) {
     let mut telescope = Vec::new();
     let mut current = Rc::clone(value);
     let mut size = size;
-    while let Value::Pi(mult, name, domain, _, codomain) = &*current {
-        telescope.push((*mult, Rc::clone(name), quote(size, domain)));
+    while let Value::Pi(binder, name, domain, _, codomain) = &*current {
+        telescope.push((*binder, Rc::clone(name), quote(size, domain)));
         let next = codomain.apply(Value::var(Lvl(size)));
         size += 1;
         current = next;

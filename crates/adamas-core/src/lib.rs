@@ -62,3 +62,4 @@ pub mod term;
 pub mod total;
 mod unify;
 pub mod value;
+pub mod visibility;

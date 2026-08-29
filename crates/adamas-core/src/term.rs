@@ -14,6 +14,7 @@ use std::rc::Rc;
 use crate::level::Level;
 use crate::mult::Mult;
 use crate::row::Row;
+use crate::visibility::Visibility;
 
 /// Индекс де Брёйна: сколько связываний отсчитать наружу.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -59,7 +60,11 @@ pub enum Term {
     /// погашения приходят Фазой 4, - но поле заводится сейчас, потому что
     /// добавить его задним числом значит тронуть все места конструирования;
     /// см. заголовок [`crate::row`].
-    Pi(Mult, Name, Rc<Term>, Row<Term>, Rc<Term>),
+    ///
+    /// Кратность и видимость собраны в [`Binder`]: обе - часть типа, обе
+    /// сравниваются конвертируемостью, и порознь они дали бы шесть позиций
+    /// подряд, из которых читатель узнаёт разве что порядок.
+    Pi(Binder, Name, Rc<Term>, Row<Term>, Rc<Term>),
     /// `Type level`.
     Universe(Level),
     /// `let q x : ty = value in body`.
@@ -126,6 +131,40 @@ pub struct Case {
     pub branches: Vec<Branch>,
 }
 
+/// Чем `Pi` ограничивает аргумент: сколько раз и кто его пишет.
+///
+/// Обе части - **часть типа**, и обе сравниваются конвертируемостью (§3.2,
+/// §4.1). Имя в связывание не входит: оно только для печати, а два байта
+/// рядом с толстым `Rc<str>` стоили бы восьми - `Name` выравнивает структуру
+/// по слову, и `Term` вырос бы на каждом узле.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Binder {
+    /// Сколько раз функция вправе израсходовать аргумент.
+    pub mult: Mult,
+    /// Пишется он в месте вызова или выводится.
+    pub visibility: Visibility,
+}
+
+impl Binder {
+    /// Обычное связывание: аргумент пишется.
+    #[must_use]
+    pub const fn explicit(mult: Mult) -> Self {
+        Self {
+            mult,
+            visibility: Visibility::Explicit,
+        }
+    }
+
+    /// Выводимое связывание: `{q x : A} -> …`.
+    #[must_use]
+    pub const fn implicit(mult: Mult) -> Self {
+        Self {
+            mult,
+            visibility: Visibility::Implicit,
+        }
+    }
+}
+
 /// Ветвь разбора - функция от полей конструктора.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Branch {
@@ -182,8 +221,8 @@ impl Term {
             Self::Universe(level) => Self::Universe(level.substitute(arguments)),
             Self::Lam(mult, name, body) => Self::Lam(*mult, Rc::clone(name), recur(body)),
             Self::App(callee, argument) => Self::App(recur(callee), recur(argument)),
-            Self::Pi(mult, name, domain, row, codomain) => Self::Pi(
-                *mult,
+            Self::Pi(binder, name, domain, row, codomain) => Self::Pi(
+                *binder,
                 Rc::clone(name),
                 recur(domain),
                 row.map(|argument| argument.substitute_levels(arguments)),
@@ -293,8 +332,14 @@ impl fmt::Display for Term {
             Self::App(callee, argument) => {
                 write!(f, "{} {}", Callee(callee), Atom(argument))
             }
-            Self::Pi(mult, name, domain, row, codomain) => {
-                write!(f, "({mult} {name} : {domain}) -> {row}{codomain}")
+            Self::Pi(binder, name, domain, row, codomain) => {
+                // Вид скобок несёт связывание: у выводимого они фигурные.
+                let (open, close) = binder.visibility.brackets();
+                let mult = binder.mult;
+                write!(
+                    f,
+                    "{open}{mult} {name} : {domain}{close} -> {row}{codomain}"
+                )
             }
             Self::Let(mult, name, ty, value, body) => {
                 write!(f, "let {mult} {name} : {ty} = {value} in {body}")
@@ -362,6 +407,7 @@ mod tests {
     use std::rc::Rc;
 
     use crate::row::{Label, Row};
+    use crate::term::Binder;
 
     use super::Term;
     use crate::mult::Mult;
@@ -423,7 +469,7 @@ mod tests {
         // Ранний выход при пустом списке обязан совпадать с тем, что делает
         // общий путь: переменная вне списка аргументов остаётся собой.
         let term = Term::Pi(
-            Mult::Zero,
+            Binder::explicit(Mult::Zero),
             "a".into(),
             Rc::new(Term::Universe(Level::Var(LevelVar(0)))),
             Row::empty(),
@@ -435,7 +481,7 @@ mod tests {
     #[test]
     fn pi_shows_its_multiplicity() {
         let pi = Term::Pi(
-            Mult::Zero,
+            Binder::explicit(Mult::Zero),
             "a".into(),
             Rc::new(Term::universe(0)),
             Row::empty(),
@@ -451,7 +497,7 @@ mod tests {
         // где эффектов ещё нет ни у одной функции.
         let with = |row| {
             Term::Pi(
-                Mult::Many,
+                Binder::explicit(Mult::Many),
                 "a".into(),
                 Rc::new(Term::universe(0)),
                 row,

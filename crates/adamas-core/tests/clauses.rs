@@ -15,13 +15,13 @@ use adamas_core::mult::Mult;
 use adamas_core::pattern::{Clause, Pattern, PatternError, compile};
 use adamas_core::row::Row as EffectRow;
 use adamas_core::sig::Signature;
-use adamas_core::term::Term;
+use adamas_core::term::{Binder, Term};
 
 // -------------------------------------------------------------- конструкторы
 
 fn pi(mult: Mult, name: &str, domain: Term, codomain: Term) -> Term {
     Term::Pi(
-        mult,
+        Binder::explicit(mult),
         name.into(),
         Rc::new(domain),
         EffectRow::empty(),

@@ -47,7 +47,7 @@
 
 use adamas_core::mult::Mult;
 use adamas_core::sig::Signature;
-use adamas_core::term::Term;
+use adamas_core::term::{Binder, Term};
 use adamas_parser::ast::{
     Alt, Binding, Chain, Expr, ExprKind, LamParamKind, Pattern, PatternKind, Stmt, StmtKind, Symbol,
 };
@@ -158,7 +158,7 @@ impl<'a> Spent<'a> {
         };
         let mut mults = Vec::new();
         let mut current = &definition.ty;
-        while let Term::Pi(mult, _, _, _, codomain) = current {
+        while let Term::Pi(Binder { mult, .. }, _, _, _, codomain) = current {
             mults.push(*mult);
             current = codomain;
         }

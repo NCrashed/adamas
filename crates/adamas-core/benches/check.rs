@@ -33,12 +33,12 @@ use adamas_core::mult::Mult;
 use adamas_core::pattern::{Clause, Pattern, compile};
 use adamas_core::row::Row;
 use adamas_core::sig::Signature;
-use adamas_core::term::Term;
+use adamas_core::term::{Binder, Term};
 use criterion::{Criterion, criterion_group, criterion_main};
 
 fn pi(mult: Mult, name: &str, domain: Term, codomain: Term) -> Term {
     Term::Pi(
-        mult,
+        Binder::explicit(mult),
         name.into(),
         Rc::new(domain),
         Row::empty(),

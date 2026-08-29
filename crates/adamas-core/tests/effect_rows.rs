@@ -17,12 +17,12 @@ use adamas_core::meta::{Generalization, Metas, unsolved_level_meta, zonk_term};
 use adamas_core::mult::Mult;
 use adamas_core::row::{Label, Row};
 use adamas_core::sig::Signature;
-use adamas_core::term::Term;
+use adamas_core::term::{Binder, Term};
 
 /// `(ω _ : domain) -> row codomain`.
 fn rowed(row: Row<Term>, domain: Term, codomain: Term) -> Term {
     Term::Pi(
-        Mult::Many,
+        Binder::explicit(Mult::Many),
         "_".into(),
         Rc::new(domain),
         row,

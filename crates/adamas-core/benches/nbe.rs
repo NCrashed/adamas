@@ -23,7 +23,7 @@ use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::row::Row;
 use adamas_core::sig::Signature;
-use adamas_core::term::Term;
+use adamas_core::term::{Binder, Term};
 use adamas_core::value::Env;
 use criterion::{Criterion, criterion_group, criterion_main};
 
@@ -33,7 +33,7 @@ fn lam(body: Term) -> Term {
 
 fn arrow(domain: Term, codomain: Term) -> Term {
     Term::Pi(
-        Mult::Many,
+        Binder::explicit(Mult::Many),
         "_".into(),
         Rc::new(domain),
         Row::empty(),

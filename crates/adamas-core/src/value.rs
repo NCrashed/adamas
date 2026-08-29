@@ -12,7 +12,7 @@ use std::rc::Rc;
 use crate::level::Level;
 use crate::mult::Mult;
 use crate::row::Row;
-use crate::term::{Index, Name, Term};
+use crate::term::{Binder, Index, Name, Term};
 
 /// Уровень де Брёйна: сколько связываний отсчитать от начала контекста.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -175,7 +175,7 @@ pub enum Value {
     /// Функция.
     Lam(Mult, Name, Closure),
     /// Тип функции вместе с row того, что происходит при применении (§3.4).
-    Pi(Mult, Name, Rc<Value>, Row<Rc<Value>>, Closure),
+    Pi(Binder, Name, Rc<Value>, Row<Rc<Value>>, Closure),
     /// Универсум.
     Universe(Level),
 }
@@ -213,7 +213,10 @@ impl fmt::Display for Value {
                 write!(f, "{name}·{}", spine.len())
             }
             Self::Lam(mult, name, _) => write!(f, "\\({mult} {name}) -> …"),
-            Self::Pi(mult, name, _, row, _) => write!(f, "({mult} {name} : …) -> {row}…"),
+            Self::Pi(binder, name, _, row, _) => {
+                let (open, close) = binder.visibility.brackets();
+                write!(f, "{open}{} {name} : …{close} -> {row}…", binder.mult)
+            }
             Self::Universe(level) => write!(f, "Type {level}"),
         }
     }

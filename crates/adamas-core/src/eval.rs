@@ -61,8 +61,8 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
             },
         )),
 
-        Term::Pi(mult, name, domain, row, codomain) => Rc::new(Value::Pi(
-            *mult,
+        Term::Pi(binder, name, domain, row, codomain) => Rc::new(Value::Pi(
+            *binder,
             Rc::clone(name),
             eval(env, domain),
             // Аргументы меток - обычные термы и вычисляются как всё прочее:
@@ -275,8 +275,8 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
             Rc::new(quote(size + 1, &closure.apply(Value::var(Lvl(size))))),
         ),
 
-        Value::Pi(mult, name, domain, row, codomain) => Term::Pi(
-            *mult,
+        Value::Pi(binder, name, domain, row, codomain) => Term::Pi(
+            *binder,
             Rc::clone(name),
             Rc::new(quote(size, domain)),
             row.map(|argument| quote(size, argument)),
@@ -296,6 +296,7 @@ mod tests {
     use std::rc::Rc;
 
     use crate::row::Row;
+    use crate::term::Binder;
 
     use super::{eval, normalize, quote};
     use crate::level::Level;
@@ -311,7 +312,7 @@ mod tests {
     /// `(ω _ : domain) -> codomain`
     fn arrow(domain: Term, codomain: Term) -> Term {
         Term::Pi(
-            Mult::Many,
+            Binder::explicit(Mult::Many),
             "_".into(),
             Rc::new(domain),
             Row::empty(),

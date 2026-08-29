@@ -330,8 +330,8 @@ impl Generalization {
             Term::Universe(level) => Term::Universe(self.apply_level(metas, level)),
             Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), recur(body)),
             Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
-            Term::Pi(mult, name, domain, row, codomain) => Term::Pi(
-                *mult,
+            Term::Pi(binder, name, domain, row, codomain) => Term::Pi(
+                *binder,
                 Rc::clone(name),
                 recur(domain),
                 row.map(|argument| self.apply_term(metas, argument)),
@@ -433,8 +433,8 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
         Term::Universe(level) => Term::Universe(metas.zonk(level)),
         Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), recur(body)),
         Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
-        Term::Pi(mult, name, domain, row, codomain) => Term::Pi(
-            *mult,
+        Term::Pi(binder, name, domain, row, codomain) => Term::Pi(
+            *binder,
             Rc::clone(name),
             recur(domain),
             row.map(|argument| zonk_term(metas, argument)),

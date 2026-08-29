@@ -19,7 +19,7 @@ use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::row::Row;
 use adamas_core::sig::Signature;
-use adamas_core::term::{Index, Term};
+use adamas_core::term::{Binder, Index, Term};
 use adamas_core::value::Env;
 use proptest::prelude::*;
 use proptest::strategy::{BoxedStrategy, Union};
@@ -80,7 +80,7 @@ fn normal(binders: u32, depth: u32) -> BoxedStrategy<Term> {
             )
                 .prop_map(|(mult, domain, codomain)| {
                     Term::Pi(
-                        mult,
+                        Binder::explicit(mult),
                         "x".into(),
                         Rc::new(domain),
                         Row::empty(),
@@ -151,8 +151,8 @@ fn rename(term: &Term) -> Term {
         Term::App(callee, argument) => {
             Term::App(Rc::new(rename(callee)), Rc::new(rename(argument)))
         }
-        Term::Pi(mult, _, domain, row, codomain) => Term::Pi(
-            *mult,
+        Term::Pi(Binder { mult, .. }, _, domain, row, codomain) => Term::Pi(
+            Binder::explicit(*mult),
             "renamed".into(),
             Rc::new(rename(domain)),
             row.clone(),
@@ -200,8 +200,8 @@ fn wrap_in_redexes(term: &Term, budget: &mut u32) -> Term {
             Rc::new(wrap_in_redexes(callee, budget)),
             Rc::new(wrap_in_redexes(argument, budget)),
         ),
-        Term::Pi(mult, name, domain, row, codomain) => Term::Pi(
-            *mult,
+        Term::Pi(Binder { mult, .. }, name, domain, row, codomain) => Term::Pi(
+            Binder::explicit(*mult),
             Rc::clone(name),
             Rc::new(wrap_in_redexes(domain, budget)),
             row.clone(),

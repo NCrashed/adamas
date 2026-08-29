@@ -76,7 +76,7 @@ use crate::mult::Mult;
 // сюда под своим полным смыслом в имени.
 use crate::row::Row as EffectRow;
 use crate::sig::{DefinitionKind, Signature};
-use crate::term::{Branch, Case, Index, Name, Term};
+use crate::term::{Binder, Branch, Case, Index, Name, Term};
 use crate::unify::{self, Match, Shape};
 use crate::value::{Elim, Head, Lvl, Value};
 
@@ -294,7 +294,7 @@ pub fn compile_traced(
     let mut current = ctx.eval(ty);
     while telescope.len() != wanted {
         let reduced = crate::conv::whnf(signature, &current);
-        let Value::Pi(mult, name, domain, _, codomain) = &*reduced else {
+        let Value::Pi(Binder { mult, .. }, name, domain, _, codomain) = &*reduced else {
             break;
         };
         let bound = Lvl(ctx.size());
@@ -1011,7 +1011,7 @@ impl Compiler<'_> {
         let mut inner = ctx.clone();
         let mut names = Vec::new();
         let mut work = Vec::new();
-        while let Value::Pi(_, name, domain, _, codomain) = &*current {
+        while let Value::Pi(Binder { .. }, name, domain, _, codomain) = &*current {
             let level = inner.size();
             let next = codomain.apply(Value::var(Lvl(level)));
             inner = inner.bind(Rc::clone(name), Mult::Zero, Rc::clone(domain));
@@ -1252,7 +1252,7 @@ impl Compiler<'_> {
         let mut current = instantiate_telescope(declaration.instantiate_type(levels), params);
         let mut fields = Vec::new();
         let mut level = ctx.size();
-        while let Value::Pi(mult, name, domain, _, codomain) = &*current {
+        while let Value::Pi(Binder { mult, .. }, name, domain, _, codomain) = &*current {
             fields.push(Field {
                 mult: *mult,
                 name: Rc::clone(name),
@@ -1590,7 +1590,7 @@ fn goal(
         .rev()
         .fold(result, |codomain, (mult, name, domain)| {
             Term::Pi(
-                mult,
+                Binder::explicit(mult),
                 name,
                 Rc::new(domain),
                 EffectRow::empty(),
@@ -1609,7 +1609,7 @@ fn trivial(ctx: &Ctx<'_>, plan: &Split<'_>, size: u32, solved: &[(u32, u32)]) ->
     let goal = goal(ctx, &plan.borrowed(), plan.target, size, solved);
     let shifted = shift(&goal, 1);
     Term::Pi(
-        Mult::One,
+        Binder::explicit(Mult::One),
         "_".into(),
         Rc::new(goal),
         EffectRow::empty(),
@@ -1848,8 +1848,8 @@ fn rewrite<F: Fn(u32) -> Term>(term: &Term, depth: u32, from: u32, map: &F) -> T
         Term::Universe(_) | Term::Const(..) => term.clone(),
         Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), under(body)),
         Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
-        Term::Pi(mult, name, domain, row, codomain) => Term::Pi(
-            *mult,
+        Term::Pi(binder, name, domain, row, codomain) => Term::Pi(
+            *binder,
             Rc::clone(name),
             recur(domain),
             row.map(|argument| rewrite(argument, depth, from, map)),
@@ -1890,8 +1890,8 @@ fn shift(term: &Term, by: u32) -> Term {
             Term::Var(_) | Term::Universe(_) | Term::Const(..) => term.clone(),
             Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), under(body)),
             Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
-            Term::Pi(mult, name, domain, row, codomain) => Term::Pi(
-                *mult,
+            Term::Pi(binder, name, domain, row, codomain) => Term::Pi(
+                *binder,
                 Rc::clone(name),
                 recur(domain),
                 row.map(|argument| go(argument, depth, by)),

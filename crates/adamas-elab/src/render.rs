@@ -23,7 +23,7 @@ use adamas_core::check::{Frame, TypeError};
 use adamas_core::level::{Level, LevelMeta};
 use adamas_core::pattern::PatternError;
 use adamas_core::source::{Location, SourceFile, Span};
-use adamas_core::term::{Case, Index, Name, Term};
+use adamas_core::term::{Binder, Case, Index, Name, Term};
 
 use crate::error::{ElabError, Names};
 
@@ -287,7 +287,7 @@ impl Naming {
             }
             // Аргументы меток row стоят под тем же контекстом, что домен:
             // связывание `Pi` вводится только для кодомена.
-            Term::Pi(_, name, domain, row, codomain) => {
+            Term::Pi(Binder { .. }, name, domain, row, codomain) => {
                 self.term(Rc::make_mut(domain), bound, outer);
                 *row = row.map(|argument| {
                     let mut argument = argument.clone();

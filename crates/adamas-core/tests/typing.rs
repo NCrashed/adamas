@@ -11,6 +11,7 @@ use adamas_core::ctx::{Ctx, Usage};
 use adamas_core::eval::normalize;
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
+use adamas_core::row::Row;
 use adamas_core::sig::Signature;
 use adamas_core::term::Term;
 use proptest::prelude::*;
@@ -65,7 +66,13 @@ fn lam(mult: Mult, name: &str, body: Term) -> Term {
 }
 
 fn pi(mult: Mult, name: &str, domain: Term, codomain: Term) -> Term {
-    Term::Pi(mult, name.into(), Rc::new(domain), Rc::new(codomain))
+    Term::Pi(
+        mult,
+        name.into(),
+        Rc::new(domain),
+        Row::empty(),
+        Rc::new(codomain),
+    )
 }
 
 fn let_in(mult: Mult, name: &str, ty: Term, value: Term, body: Term) -> Term {
@@ -562,7 +569,13 @@ fn any_small_term() -> BoxedStrategy<Term> {
             (inner.clone(), inner.clone())
                 .prop_map(|(callee, arg)| Term::App(Rc::new(callee), Rc::new(arg))),
             (any_mult(), inner.clone(), inner.clone()).prop_map(|(mult, domain, codomain)| {
-                Term::Pi(mult, "x".into(), Rc::new(domain), Rc::new(codomain))
+                Term::Pi(
+                    mult,
+                    "x".into(),
+                    Rc::new(domain),
+                    Row::empty(),
+                    Rc::new(codomain),
+                )
             }),
             (any_mult(), inner.clone(), inner.clone(), inner).prop_map(
                 |(mult, ty, value, body)| {

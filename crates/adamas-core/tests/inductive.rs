@@ -15,6 +15,7 @@ use adamas_core::check::{ErrorKind, TypeError, check_closed, infer_closed};
 use adamas_core::level::{Level, LevelVar};
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
+use adamas_core::row::Row;
 use adamas_core::sig::{Group, Member, Signature};
 use adamas_core::term::Term;
 use proptest::prelude::*;
@@ -22,7 +23,13 @@ use proptest::prelude::*;
 // -------------------------------------------------------------- конструкторы
 
 fn pi(mult: Mult, name: &str, domain: Term, codomain: Term) -> Term {
-    Term::Pi(mult, name.into(), Rc::new(domain), Rc::new(codomain))
+    Term::Pi(
+        mult,
+        name.into(),
+        Rc::new(domain),
+        Row::empty(),
+        Rc::new(codomain),
+    )
 }
 
 /// Стрелка без зависимости. Кодомен сдвигать не нужно: он замкнут.
@@ -1023,7 +1030,7 @@ fn has_negative_occurrence(term: &Term) -> bool {
     fn mentions_d(term: &Term) -> bool {
         match term {
             Term::Const(name, _) => &**name == "D",
-            Term::Pi(_, _, domain, codomain) => mentions_d(domain) || mentions_d(codomain),
+            Term::Pi(_, _, domain, _, codomain) => mentions_d(domain) || mentions_d(codomain),
             Term::App(a, b) => mentions_d(a) || mentions_d(b),
             Term::Lam(_, _, body) => mentions_d(body),
             Term::Let(_, _, ty, value, body) => {
@@ -1034,7 +1041,9 @@ fn has_negative_occurrence(term: &Term) -> bool {
         }
     }
     match term {
-        Term::Pi(_, _, domain, codomain) => mentions_d(domain) || has_negative_occurrence(codomain),
+        Term::Pi(_, _, domain, _, codomain) => {
+            mentions_d(domain) || has_negative_occurrence(codomain)
+        }
         _ => false,
     }
 }

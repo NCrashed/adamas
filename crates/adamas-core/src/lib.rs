@@ -55,6 +55,7 @@ pub mod level;
 pub mod meta;
 pub mod mult;
 pub mod pattern;
+pub mod row;
 pub mod sig;
 pub mod source;
 pub mod term;

@@ -12,6 +12,7 @@ use adamas_core::eval::normalize;
 use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
+use adamas_core::row::Row;
 use adamas_core::sig::{Group, Member, Signature};
 use adamas_core::term::{Branch, Case, Term};
 use proptest::prelude::*;
@@ -19,7 +20,13 @@ use proptest::prelude::*;
 // -------------------------------------------------------------- конструкторы
 
 fn pi(mult: Mult, name: &str, domain: Term, codomain: Term) -> Term {
-    Term::Pi(mult, name.into(), Rc::new(domain), Rc::new(codomain))
+    Term::Pi(
+        mult,
+        name.into(),
+        Rc::new(domain),
+        Row::empty(),
+        Rc::new(codomain),
+    )
 }
 
 fn lam(mult: Mult, name: &str, body: Term) -> Term {

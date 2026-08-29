@@ -58,6 +58,7 @@ use crate::eval::{apply, quote};
 use crate::level::{Level, LevelMeta, LevelVar};
 use crate::meta::{Metas, unsolved_level_meta};
 use crate::mult::Mult;
+use crate::row::Row;
 use crate::sig::{Definition, DefinitionKind, Signature};
 use crate::term::{Case, Name, Term, spine};
 use crate::value::{Elim, Head, Lvl, Value};
@@ -126,7 +127,7 @@ pub fn infer(
         // `imax` вернуло бы `Type 0`, когда там живёт кодомен, то есть сделало
         // бы нижний универсум импредикативным; см. заголовок
         // [`crate::level`], почему это несовместимо с §3.2.
-        Term::Pi(mult, name, domain, codomain) => {
+        Term::Pi(mult, name, domain, _, codomain) => {
             let domain_level = framed(is_type(ctx, metas, domain), Frame::Domain)?;
             let inner = ctx.bind(Rc::clone(name), *mult, ctx.eval(domain));
             let codomain_level = framed(is_type(&inner, metas, codomain), Frame::Codomain)?;
@@ -279,7 +280,7 @@ fn check_lambda(
     let Term::Lam(mult, name, body) = term else {
         unreachable!("правило лямбды вызвано не на лямбде: {term}")
     };
-    let Value::Pi(pi_mult, _, domain, codomain) = &**expected else {
+    let Value::Pi(pi_mult, _, domain, _, codomain) = &**expected else {
         return Err(refuse(
             ctx,
             metas,
@@ -619,7 +620,7 @@ struct Binder {
 fn peel_pis(term: &Term) -> (Vec<Binder>, &Term) {
     let mut fields = Vec::new();
     let mut current = term;
-    while let Term::Pi(mult, name, domain, codomain) = current {
+    while let Term::Pi(mult, name, domain, _, codomain) = current {
         fields.push(Binder {
             mult: *mult,
             name: Rc::clone(name),
@@ -677,7 +678,7 @@ fn mentions_seen<'a>(
         }
         Term::Lam(_, _, body) => recur(body),
         Term::App(callee, argument) => recur(callee) || recur(argument),
-        Term::Pi(_, _, domain, codomain) => recur(domain) || recur(codomain),
+        Term::Pi(_, _, domain, _, codomain) => recur(domain) || recur(codomain),
         Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || recur(body),
         // Имя типа стоит в самом узле, а имена конструкторов - в ветвях:
         // упоминанием считается и то и другое, иначе разбор по `Bad` внутри
@@ -752,7 +753,7 @@ fn positive_seen<'a>(
 ) -> bool {
     match term {
         // Слева от стрелки тип не должен встречаться вовсе; справа - рекурсия.
-        Term::Pi(_, _, domain, codomain) => {
+        Term::Pi(_, _, domain, _, codomain) => {
             !mentions(signature, data, domain)
                 && positive_seen(signature, data, params, depth + 1, codomain, seen)
         }
@@ -997,7 +998,7 @@ fn infer_app(
     // такой же тип функции, как записанная стрелка, и `f : Fn` обязана
     // применяться.
     let callee_ty = whnf(ctx.signature(), &callee_ty);
-    let Value::Pi(mult, _, domain, codomain) = &*callee_ty else {
+    let Value::Pi(mult, _, domain, _, codomain) = &*callee_ty else {
         return Err(refuse(
             ctx,
             metas,
@@ -1210,7 +1211,13 @@ fn motive_type(
         .fold(
             Term::Universe(metas.fresh_level()),
             |codomain, (_, name, domain)| {
-                Term::Pi(Mult::Zero, name, Rc::new(domain), Rc::new(codomain))
+                Term::Pi(
+                    Mult::Zero,
+                    name,
+                    Rc::new(domain),
+                    Row::empty(),
+                    Rc::new(codomain),
+                )
             },
         );
     ctx.eval(&result)
@@ -1274,6 +1281,9 @@ fn branch_type(
                 mult * case.consumed,
                 name,
                 Rc::new(domain),
+                // Тип ветви строится из телескопа конструктора, а он чист:
+                // конструктор не вычисляет, он кладёт.
+                Row::empty(),
                 Rc::new(codomain),
             )
         });
@@ -1293,7 +1303,7 @@ pub(crate) fn instantiate_telescope(ty: Rc<Value>, arguments: &[Rc<Value>]) -> R
     arguments
         .iter()
         .fold(ty, |current, argument| match &*current {
-            Value::Pi(_, _, _, codomain) => codomain.apply(Rc::clone(argument)),
+            Value::Pi(_, _, _, _, codomain) => codomain.apply(Rc::clone(argument)),
             other => unreachable!("телескоп короче списка аргументов: {other}"),
         })
 }
@@ -1307,7 +1317,7 @@ fn telescope_of(size: u32, value: &Rc<Value>) -> (Vec<(Mult, Name, Term)>, u32) 
     let mut telescope = Vec::new();
     let mut current = Rc::clone(value);
     let mut size = size;
-    while let Value::Pi(mult, name, domain, codomain) = &*current {
+    while let Value::Pi(mult, name, domain, _, codomain) = &*current {
         telescope.push((*mult, Rc::clone(name), quote(size, domain)));
         let next = codomain.apply(Value::var(Lvl(size)));
         size += 1;
@@ -1321,7 +1331,7 @@ fn telescope_tail(size: u32, value: &Rc<Value>) -> Rc<Value> {
     let mut current = Rc::clone(value);
     let mut size = size;
     loop {
-        let Value::Pi(_, _, _, codomain) = &*current else {
+        let Value::Pi(_, _, _, _, codomain) = &*current else {
             return current;
         };
         let next = codomain.apply(Value::var(Lvl(size)));

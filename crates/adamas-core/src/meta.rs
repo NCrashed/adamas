@@ -259,9 +259,12 @@ impl Generalization {
                 self.collect_term(metas, callee);
                 self.collect_term(metas, argument);
             }
-            Term::Pi(_, _, domain, codomain) => {
+            Term::Pi(_, _, domain, row, codomain) => {
                 self.collect_term(metas, domain);
                 self.collect_term(metas, codomain);
+                for argument in row.labels().iter().flat_map(|label| &label.arguments) {
+                    self.collect_term(metas, argument);
+                }
             }
             Term::Let(_, _, ty, value, body) => {
                 self.collect_term(metas, ty);
@@ -327,9 +330,13 @@ impl Generalization {
             Term::Universe(level) => Term::Universe(self.apply_level(metas, level)),
             Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), recur(body)),
             Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
-            Term::Pi(mult, name, domain, codomain) => {
-                Term::Pi(*mult, Rc::clone(name), recur(domain), recur(codomain))
-            }
+            Term::Pi(mult, name, domain, row, codomain) => Term::Pi(
+                *mult,
+                Rc::clone(name),
+                recur(domain),
+                row.map(|argument| self.apply_term(metas, argument)),
+                recur(codomain),
+            ),
             Term::Let(mult, name, ty, value, body) => {
                 Term::Let(*mult, Rc::clone(name), recur(ty), recur(value), recur(body))
             }
@@ -389,9 +396,14 @@ pub fn unsolved_level_meta(metas: &Metas, term: &crate::term::Term) -> Option<Le
         Term::App(callee, argument) => {
             unsolved_level_meta(metas, callee).or_else(|| unsolved_level_meta(metas, argument))
         }
-        Term::Pi(_, _, domain, codomain) => {
-            unsolved_level_meta(metas, domain).or_else(|| unsolved_level_meta(metas, codomain))
-        }
+        Term::Pi(_, _, domain, row, codomain) => unsolved_level_meta(metas, domain)
+            .or_else(|| unsolved_level_meta(metas, codomain))
+            .or_else(|| {
+                row.labels()
+                    .iter()
+                    .flat_map(|label| &label.arguments)
+                    .find_map(|argument| unsolved_level_meta(metas, argument))
+            }),
         Term::Let(_, _, ty, value, body) => unsolved_level_meta(metas, ty)
             .or_else(|| unsolved_level_meta(metas, value))
             .or_else(|| unsolved_level_meta(metas, body)),
@@ -421,9 +433,13 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
         Term::Universe(level) => Term::Universe(metas.zonk(level)),
         Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), recur(body)),
         Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
-        Term::Pi(mult, name, domain, codomain) => {
-            Term::Pi(*mult, Rc::clone(name), recur(domain), recur(codomain))
-        }
+        Term::Pi(mult, name, domain, row, codomain) => Term::Pi(
+            *mult,
+            Rc::clone(name),
+            recur(domain),
+            row.map(|argument| zonk_term(metas, argument)),
+            recur(codomain),
+        ),
         Term::Let(mult, name, ty, value, body) => {
             Term::Let(*mult, Rc::clone(name), recur(ty), recur(value), recur(body))
         }

@@ -13,13 +13,20 @@ use adamas_core::check::{ErrorKind, TypeError, check_closed};
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::pattern::{Clause, Pattern, PatternError, compile};
+use adamas_core::row::Row as EffectRow;
 use adamas_core::sig::Signature;
 use adamas_core::term::Term;
 
 // -------------------------------------------------------------- конструкторы
 
 fn pi(mult: Mult, name: &str, domain: Term, codomain: Term) -> Term {
-    Term::Pi(mult, name.into(), Rc::new(domain), Rc::new(codomain))
+    Term::Pi(
+        mult,
+        name.into(),
+        Rc::new(domain),
+        EffectRow::empty(),
+        Rc::new(codomain),
+    )
 }
 
 fn arrow(domain: Term, codomain: Term) -> Term {

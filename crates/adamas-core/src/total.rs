@@ -103,7 +103,15 @@ fn calls_a_partial_definition(signature: &Signature, name: &Name, term: &Term) -
         }
         Term::Lam(_, _, body) => recur(body),
         Term::App(callee, argument) => recur(callee) || recur(argument),
-        Term::Pi(_, _, domain, codomain) => recur(domain) || recur(codomain),
+        Term::Pi(_, _, domain, row, codomain) => {
+            recur(domain)
+                || recur(codomain)
+                || row
+                    .labels()
+                    .iter()
+                    .flat_map(|label| &label.arguments)
+                    .any(recur)
+        }
         Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || recur(body),
         Term::Case(case) => {
             recur(&case.scrutinee)
@@ -183,9 +191,14 @@ impl Walk<'_> {
                 }
             }
 
-            Term::Pi(_, _, domain, codomain) => {
+            Term::Pi(_, _, domain, row, codomain) => {
                 self.term(sizes, domain);
                 self.under(sizes, None, codomain);
+                // Аргументы меток стоят под тем же контекстом, что домен:
+                // связывание `Pi` вводится только для кодомена.
+                for argument in row.labels().iter().flat_map(|label| &label.arguments) {
+                    self.term(sizes, argument);
+                }
             }
 
             Term::Let(_, _, ty, value, body) => {
@@ -224,7 +237,7 @@ impl Walk<'_> {
         };
         let mut binders = 0usize;
         let mut current = &declaration.ty;
-        while let Term::Pi(_, _, _, codomain) = current {
+        while let Term::Pi(_, _, _, _, codomain) = current {
             binders += 1;
             current = codomain;
         }

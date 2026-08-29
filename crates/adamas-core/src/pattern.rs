@@ -72,6 +72,9 @@ use crate::eval::quote;
 use crate::level::Level;
 use crate::meta::Metas;
 use crate::mult::Mult;
+// Строка задачи разбора тоже зовётся `Row`, поэтому row эффектов приходит
+// сюда под своим полным смыслом в имени.
+use crate::row::Row as EffectRow;
 use crate::sig::{DefinitionKind, Signature};
 use crate::term::{Branch, Case, Index, Name, Term};
 use crate::unify::{self, Match, Shape};
@@ -291,7 +294,7 @@ pub fn compile_traced(
     let mut current = ctx.eval(ty);
     while telescope.len() != wanted {
         let reduced = crate::conv::whnf(signature, &current);
-        let Value::Pi(mult, name, domain, codomain) = &*reduced else {
+        let Value::Pi(mult, name, domain, _, codomain) = &*reduced else {
             break;
         };
         let bound = Lvl(ctx.size());
@@ -1008,7 +1011,7 @@ impl Compiler<'_> {
         let mut inner = ctx.clone();
         let mut names = Vec::new();
         let mut work = Vec::new();
-        while let Value::Pi(_, name, domain, codomain) = &*current {
+        while let Value::Pi(_, name, domain, _, codomain) = &*current {
             let level = inner.size();
             let next = codomain.apply(Value::var(Lvl(level)));
             inner = inner.bind(Rc::clone(name), Mult::Zero, Rc::clone(domain));
@@ -1161,7 +1164,7 @@ impl Compiler<'_> {
             instantiate_telescope(declaration.instantiate_type(levels), &arguments[..params]);
         let mut fields = Vec::new();
         for argument in &arguments[params..] {
-            let Value::Pi(_, _, domain, codomain) = &*current else {
+            let Value::Pi(_, _, domain, _, codomain) = &*current else {
                 break;
             };
             fields.push((Rc::clone(argument), Rc::clone(domain)));
@@ -1249,7 +1252,7 @@ impl Compiler<'_> {
         let mut current = instantiate_telescope(declaration.instantiate_type(levels), params);
         let mut fields = Vec::new();
         let mut level = ctx.size();
-        while let Value::Pi(mult, name, domain, codomain) = &*current {
+        while let Value::Pi(mult, name, domain, _, codomain) = &*current {
             fields.push(Field {
                 mult: *mult,
                 name: Rc::clone(name),
@@ -1586,7 +1589,13 @@ fn goal(
         .into_iter()
         .rev()
         .fold(result, |codomain, (mult, name, domain)| {
-            Term::Pi(mult, name, Rc::new(domain), Rc::new(codomain))
+            Term::Pi(
+                mult,
+                name,
+                Rc::new(domain),
+                EffectRow::empty(),
+                Rc::new(codomain),
+            )
         })
 }
 
@@ -1599,7 +1608,13 @@ fn goal(
 fn trivial(ctx: &Ctx<'_>, plan: &Split<'_>, size: u32, solved: &[(u32, u32)]) -> Term {
     let goal = goal(ctx, &plan.borrowed(), plan.target, size, solved);
     let shifted = shift(&goal, 1);
-    Term::Pi(Mult::One, "_".into(), Rc::new(goal), Rc::new(shifted))
+    Term::Pi(
+        Mult::One,
+        "_".into(),
+        Rc::new(goal),
+        EffectRow::empty(),
+        Rc::new(shifted),
+    )
 }
 
 /// Какие позиции индексов различает мотив.
@@ -1651,7 +1666,15 @@ fn depends_term(term: &Term, depth: u32, size: u32, levels: &[u32]) -> bool {
         Term::Universe(_) | Term::Const(..) => false,
         Term::Lam(_, _, body) => under(body),
         Term::App(callee, argument) => recur(callee) || recur(argument),
-        Term::Pi(_, _, domain, codomain) => recur(domain) || under(codomain),
+        Term::Pi(_, _, domain, row, codomain) => {
+            recur(domain)
+                || under(codomain)
+                || row
+                    .labels()
+                    .iter()
+                    .flat_map(|label| &label.arguments)
+                    .any(|argument| depends_term(argument, depth, size, levels))
+        }
         Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || under(body),
         Term::Case(case) => {
             recur(&case.scrutinee)
@@ -1725,7 +1748,7 @@ fn data_head(signature: &Signature, ty: &Rc<Value>) -> Option<DataHead> {
 fn binders(ty: &Term) -> usize {
     let mut count = 0;
     let mut current = ty;
-    while let Term::Pi(_, _, _, codomain) = current {
+    while let Term::Pi(_, _, _, _, codomain) = current {
         count += 1;
         current = codomain;
     }
@@ -1780,8 +1803,14 @@ fn well_scoped(term: &Term, binders: u32) -> bool {
             Term::App(callee, argument) => {
                 go(callee, depth, binders) && go(argument, depth, binders)
             }
-            Term::Pi(_, _, domain, codomain) => {
-                go(domain, depth, binders) && go(codomain, depth + 1, binders)
+            Term::Pi(_, _, domain, row, codomain) => {
+                go(domain, depth, binders)
+                    && go(codomain, depth + 1, binders)
+                    && row
+                        .labels()
+                        .iter()
+                        .flat_map(|label| &label.arguments)
+                        .all(|argument| go(argument, depth, binders))
             }
             Term::Let(_, _, ty, value, body) => {
                 go(ty, depth, binders) && go(value, depth, binders) && go(body, depth + 1, binders)
@@ -1819,9 +1848,13 @@ fn rewrite<F: Fn(u32) -> Term>(term: &Term, depth: u32, from: u32, map: &F) -> T
         Term::Universe(_) | Term::Const(..) => term.clone(),
         Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), under(body)),
         Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
-        Term::Pi(mult, name, domain, codomain) => {
-            Term::Pi(*mult, Rc::clone(name), recur(domain), under(codomain))
-        }
+        Term::Pi(mult, name, domain, row, codomain) => Term::Pi(
+            *mult,
+            Rc::clone(name),
+            recur(domain),
+            row.map(|argument| rewrite(argument, depth, from, map)),
+            under(codomain),
+        ),
         Term::Let(mult, name, ty, value, body) => {
             Term::Let(*mult, Rc::clone(name), recur(ty), recur(value), under(body))
         }
@@ -1857,9 +1890,13 @@ fn shift(term: &Term, by: u32) -> Term {
             Term::Var(_) | Term::Universe(_) | Term::Const(..) => term.clone(),
             Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), under(body)),
             Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
-            Term::Pi(mult, name, domain, codomain) => {
-                Term::Pi(*mult, Rc::clone(name), recur(domain), under(codomain))
-            }
+            Term::Pi(mult, name, domain, row, codomain) => Term::Pi(
+                *mult,
+                Rc::clone(name),
+                recur(domain),
+                row.map(|argument| go(argument, depth, by)),
+                under(codomain),
+            ),
             Term::Let(mult, name, ty, value, body) => {
                 Term::Let(*mult, Rc::clone(name), recur(ty), recur(value), under(body))
             }

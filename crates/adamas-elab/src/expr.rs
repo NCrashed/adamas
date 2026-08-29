@@ -12,6 +12,7 @@ use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::pattern::{Clause, Pattern as CorePattern};
+use adamas_core::row::Row;
 use adamas_core::sig::{DefinitionKind, Signature};
 use adamas_core::source::Span;
 use adamas_core::term::{Name as CoreName, Term};
@@ -499,6 +500,9 @@ impl<'a> Elaborator<'a> {
                     mult,
                     CoreName::from("_"),
                     Rc::new(domain),
+                    // Эффектов в поверхностном языке ещё нет (§3.4, Фаза 4),
+                    // поэтому всякая написанная стрелка чиста.
+                    Row::empty(),
                     Rc::new(codomain),
                 ))
             }
@@ -652,6 +656,7 @@ impl<'a> Elaborator<'a> {
             *mult,
             CoreName::from(&**name),
             Rc::new(domain),
+            Row::empty(),
             Rc::new(body),
         ))
     }
@@ -935,7 +940,7 @@ impl<'a> Elaborator<'a> {
         let levels: Rc<[Level]> = (0..definition.level_arity)
             .map(|_| self.metas.fresh_level())
             .collect();
-        let Term::Pi(_, _, _, result) = definition.ty.substitute_levels(&levels) else {
+        let Term::Pi(_, _, _, _, result) = definition.ty.substitute_levels(&levels) else {
             unreachable!("`{drop}` проверен на форму при объявлении")
         };
         let call = Term::Const(CoreName::from(&**drop), levels).apply([Term::var(index)]);
@@ -1244,7 +1249,7 @@ fn lifo(found: &mut [(u32, Symbol)]) {
 fn pi_arguments(ty: &Term, owned: &Owned) -> Vec<Argument> {
     let mut found = Vec::new();
     let mut current = ty;
-    while let Term::Pi(mult, _, domain, codomain) = current {
+    while let Term::Pi(mult, _, domain, _, codomain) = current {
         let mut head = &**domain;
         while let Term::App(callee, _) = head {
             head = callee;

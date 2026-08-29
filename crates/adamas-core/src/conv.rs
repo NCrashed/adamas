@@ -283,12 +283,20 @@ fn rigid(
         }
 
         // Кратность - часть типа функции, поэтому здесь она значима:
-        // `(1 x : A) -> B` и `(ω x : A) -> B` - разные типы.
+        // `(1 x : A) -> B` и `(ω x : A) -> B` - разные типы. Row - по той же
+        // причине и на тех же правах (§3.4): `A -> {IO} B` и `A -> B`
+        // различаются, потому что различается контракт применения. Формы
+        // сравниваются синтаксически - метки в каноническом порядке, - а
+        // аргументы меток конвертируемостью, как всякие термы.
         (
-            Value::Pi(mult_a, _, domain_a, codomain_a),
-            Value::Pi(mult_b, _, domain_b, codomain_b),
+            Value::Pi(mult_a, _, domain_a, row_a, codomain_a),
+            Value::Pi(mult_b, _, domain_b, row_b, codomain_b),
         ) => {
             mult_a == mult_b
+                && row_a.same_shape(row_b)
+                && row_a
+                    .zip(row_b)
+                    .all(|(a, b)| convertible_within(fuel, sig, metas, size, a, b))
                 && convertible_within(fuel, sig, metas, size, domain_a, domain_b)
                 && convertible_under(
                     fuel,
@@ -362,6 +370,8 @@ fn convertible_under(
 mod tests {
     use std::rc::Rc;
 
+    use crate::row::{Label, Row};
+
     use super::{UNFOLD_LIMIT, convertible};
     use crate::eval::eval;
     use crate::mult::Mult;
@@ -373,7 +383,18 @@ mod tests {
     }
 
     fn pi(mult: Mult, domain: Term, codomain: Term) -> Term {
-        Term::Pi(mult, "x".into(), Rc::new(domain), Rc::new(codomain))
+        rowed(mult, Row::empty(), domain, codomain)
+    }
+
+    fn rowed(mult: Mult, row: Row<Term>, domain: Term, codomain: Term) -> Term {
+        Term::Pi(mult, "x".into(), Rc::new(domain), row, Rc::new(codomain))
+    }
+
+    fn effect(name: &str, arguments: Vec<Term>) -> Row<Term> {
+        Row::new([Label {
+            name: name.into(),
+            arguments,
+        }])
     }
 
     /// Вычисляет оба терма в контексте с `free` свободными переменными.
@@ -606,6 +627,7 @@ mod tests {
                     Mult::Zero,
                     "_".into(),
                     Rc::new(Term::constant("F").apply([index.clone()])),
+                    Row::empty(),
                     Rc::new(tail),
                 )
             })
@@ -640,5 +662,92 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_row_is_part_of_the_function_type() {
+        // §3.4: row описывает, что происходит при применении, и стоит на тех
+        // же правах, что кратность. `A -> {IO} B` и `A -> B` - разные типы,
+        // ровно как `(1 x : A) -> B` и `(ω x : A) -> B`.
+        let pure = pi(Mult::Many, Term::universe(0), Term::universe(0));
+        let effectful = rowed(
+            Mult::Many,
+            effect("IO", Vec::new()),
+            Term::universe(0),
+            Term::universe(0),
+        );
+        assert!(!conv_in(0, &pure, &effectful), "чистая против эффектной");
+        assert!(conv_in(0, &effectful, &effectful.clone()));
+    }
+
+    #[test]
+    fn row_arguments_are_compared_up_to_conversion() {
+        // Аргументы метки - обычные термы, поэтому сравниваются так же, как
+        // всё прочее: с точностью до вычисления, а не по написанию.
+        let redex = Term::App(Rc::new(lam(Term::var(0))), Rc::new(Term::universe(0)));
+        let written = rowed(
+            Mult::Many,
+            effect("State", vec![Term::universe(0)]),
+            Term::universe(0),
+            Term::universe(0),
+        );
+        let computed = rowed(
+            Mult::Many,
+            effect("State", vec![redex]),
+            Term::universe(0),
+            Term::universe(0),
+        );
+        assert!(
+            conv_in(0, &written, &computed),
+            "`(\\x -> x) Type 0` есть `Type 0`"
+        );
+
+        let other = rowed(
+            Mult::Many,
+            effect("State", vec![Term::universe(1)]),
+            Term::universe(0),
+            Term::universe(0),
+        );
+        assert!(
+            !conv_in(0, &written, &other),
+            "разные аргументы - разные типы"
+        );
+    }
+
+    #[test]
+    fn labels_are_ordered_canonically_but_not_within_a_group() {
+        // Группы упорядочены по имени, поэтому написание не влияет; порядок
+        // внутри группы значим - внутренний хендлер перехватывает раньше
+        // внешнего (§4.1), и переставить их значит изменить тип.
+        let row = |labels: Vec<(&str, u32)>| {
+            Row::new(labels.into_iter().map(|(name, level)| Label {
+                name: name.into(),
+                arguments: vec![Term::universe(level)],
+            }))
+        };
+        let ty = |labels| {
+            rowed(
+                Mult::Many,
+                row(labels),
+                Term::universe(0),
+                Term::universe(0),
+            )
+        };
+        assert!(
+            conv_in(
+                0,
+                &ty(vec![("A", 0), ("B", 1)]),
+                &ty(vec![("B", 1), ("A", 0)])
+            ),
+            "порядок групп канонический"
+        );
+        assert!(
+            !conv_in(
+                0,
+                &ty(vec![("A", 0), ("A", 1)]),
+                &ty(vec![("A", 1), ("A", 0)])
+            ),
+            "порядок внутри группы значим"
+        );
     }
 }

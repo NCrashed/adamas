@@ -158,7 +158,7 @@ impl<'a> Spent<'a> {
         };
         let mut mults = Vec::new();
         let mut current = &definition.ty;
-        while let Term::Pi(mult, _, _, codomain) = current {
+        while let Term::Pi(mult, _, _, _, codomain) = current {
             mults.push(*mult);
             current = codomain;
         }

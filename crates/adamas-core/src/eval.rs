@@ -61,10 +61,14 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
             },
         )),
 
-        Term::Pi(mult, name, domain, codomain) => Rc::new(Value::Pi(
+        Term::Pi(mult, name, domain, row, codomain) => Rc::new(Value::Pi(
             *mult,
             Rc::clone(name),
             eval(env, domain),
+            // Аргументы меток - обычные термы и вычисляются как всё прочее:
+            // `State s` под связыванием `s` без этого осталось бы термом с
+            // индексом, которому в значении не на что указывать.
+            row.map(|argument| eval(env, argument)),
             Closure {
                 env: env.clone(),
                 body: Rc::clone(codomain),
@@ -271,10 +275,11 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
             Rc::new(quote(size + 1, &closure.apply(Value::var(Lvl(size))))),
         ),
 
-        Value::Pi(mult, name, domain, codomain) => Term::Pi(
+        Value::Pi(mult, name, domain, row, codomain) => Term::Pi(
             *mult,
             Rc::clone(name),
             Rc::new(quote(size, domain)),
+            row.map(|argument| quote(size, argument)),
             Rc::new(quote(size + 1, &codomain.apply(Value::var(Lvl(size))))),
         ),
     }
@@ -290,6 +295,8 @@ pub fn normalize(term: &Term) -> Term {
 mod tests {
     use std::rc::Rc;
 
+    use crate::row::Row;
+
     use super::{eval, normalize, quote};
     use crate::level::Level;
     use crate::mult::Mult;
@@ -303,7 +310,13 @@ mod tests {
 
     /// `(ω _ : domain) -> codomain`
     fn arrow(domain: Term, codomain: Term) -> Term {
-        Term::Pi(Mult::Many, "_".into(), Rc::new(domain), Rc::new(codomain))
+        Term::Pi(
+            Mult::Many,
+            "_".into(),
+            Rc::new(domain),
+            Row::empty(),
+            Rc::new(codomain),
+        )
     }
 
     #[test]

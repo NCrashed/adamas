@@ -17,6 +17,7 @@ use adamas_core::eval::{eval, normalize};
 use adamas_core::level::{Level, LevelVar};
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
+use adamas_core::row::Row;
 use adamas_core::sig::Signature;
 use adamas_core::term::{Index, Term};
 use adamas_core::value::Env;
@@ -78,7 +79,13 @@ fn normal(binders: u32, depth: u32) -> BoxedStrategy<Term> {
                 normal(binders + 1, depth - 1),
             )
                 .prop_map(|(mult, domain, codomain)| {
-                    Term::Pi(mult, "x".into(), Rc::new(domain), Rc::new(codomain))
+                    Term::Pi(
+                        mult,
+                        "x".into(),
+                        Rc::new(domain),
+                        Row::empty(),
+                        Rc::new(codomain),
+                    )
                 })
                 .boxed(),
         );
@@ -101,7 +108,7 @@ fn well_scoped(term: &Term, binders: u32) -> bool {
         Term::App(callee, argument) => {
             well_scoped(callee, binders) && well_scoped(argument, binders)
         }
-        Term::Pi(_, _, domain, codomain) => {
+        Term::Pi(_, _, domain, _, codomain) => {
             well_scoped(domain, binders) && well_scoped(codomain, binders + 1)
         }
         Term::Let(_, _, ty, value, body) => {
@@ -125,7 +132,7 @@ fn is_normal_form(term: &Term) -> bool {
         Term::Var(_) | Term::Const(..) => true,
         Term::Universe(level) => level.normalize() == *level,
         Term::Lam(_, _, body) => is_normal_form(body),
-        Term::Pi(_, _, domain, codomain) => is_normal_form(domain) && is_normal_form(codomain),
+        Term::Pi(_, _, domain, _, codomain) => is_normal_form(domain) && is_normal_form(codomain),
         // Голова применения обязана быть застрявшей: под лямбдой это редекс.
         Term::App(callee, argument) => {
             !matches!(**callee, Term::Lam(..)) && is_normal_form(callee) && is_normal_form(argument)
@@ -144,10 +151,11 @@ fn rename(term: &Term) -> Term {
         Term::App(callee, argument) => {
             Term::App(Rc::new(rename(callee)), Rc::new(rename(argument)))
         }
-        Term::Pi(mult, _, domain, codomain) => Term::Pi(
+        Term::Pi(mult, _, domain, row, codomain) => Term::Pi(
             *mult,
             "renamed".into(),
             Rc::new(rename(domain)),
+            row.clone(),
             Rc::new(rename(codomain)),
         ),
         Term::Let(mult, _, ty, value, body) => Term::Let(
@@ -192,10 +200,11 @@ fn wrap_in_redexes(term: &Term, budget: &mut u32) -> Term {
             Rc::new(wrap_in_redexes(callee, budget)),
             Rc::new(wrap_in_redexes(argument, budget)),
         ),
-        Term::Pi(mult, name, domain, codomain) => Term::Pi(
+        Term::Pi(mult, name, domain, row, codomain) => Term::Pi(
             *mult,
             Rc::clone(name),
             Rc::new(wrap_in_redexes(domain, budget)),
+            row.clone(),
             Rc::new(wrap_in_redexes(codomain, budget)),
         ),
         Term::Let(mult, name, ty, value, body) => Term::Let(

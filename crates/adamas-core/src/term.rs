@@ -13,6 +13,7 @@ use std::rc::Rc;
 
 use crate::level::Level;
 use crate::mult::Mult;
+use crate::row::Row;
 
 /// Индекс де Брёйна: сколько связываний отсчитать наружу.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -50,8 +51,15 @@ pub enum Term {
     Lam(Mult, Name, Rc<Term>),
     /// Применение.
     App(Rc<Term>, Rc<Term>),
-    /// Зависимая функция `(q x : domain) -> codomain`.
-    Pi(Mult, Name, Rc<Term>, Rc<Term>),
+    /// Зависимая функция `(q x : domain) -> ε ▷ codomain`.
+    ///
+    /// Row описывает, что происходит при применении, и стоит там же, где
+    /// кратность, по той же причине: принимающая сторона обязана знать
+    /// контракт до вызова (§3.4). Сегодня она всегда пуста - правила
+    /// погашения приходят Фазой 4, - но поле заводится сейчас, потому что
+    /// добавить его задним числом значит тронуть все места конструирования;
+    /// см. заголовок [`crate::row`].
+    Pi(Mult, Name, Rc<Term>, Row<Term>, Rc<Term>),
     /// `Type level`.
     Universe(Level),
     /// `let q x : ty = value in body`.
@@ -174,9 +182,13 @@ impl Term {
             Self::Universe(level) => Self::Universe(level.substitute(arguments)),
             Self::Lam(mult, name, body) => Self::Lam(*mult, Rc::clone(name), recur(body)),
             Self::App(callee, argument) => Self::App(recur(callee), recur(argument)),
-            Self::Pi(mult, name, domain, codomain) => {
-                Self::Pi(*mult, Rc::clone(name), recur(domain), recur(codomain))
-            }
+            Self::Pi(mult, name, domain, row, codomain) => Self::Pi(
+                *mult,
+                Rc::clone(name),
+                recur(domain),
+                row.map(|argument| argument.substitute_levels(arguments)),
+                recur(codomain),
+            ),
             Self::Let(mult, name, ty, value, body) => {
                 Self::Let(*mult, Rc::clone(name), recur(ty), recur(value), recur(body))
             }
@@ -222,8 +234,11 @@ impl Term {
             Self::Universe(level) => level.max_var(),
             Self::Lam(_, _, body) => body.max_level_var(),
             Self::App(callee, argument) => join(callee.max_level_var(), argument.max_level_var()),
-            Self::Pi(_, _, domain, codomain) => {
-                join(domain.max_level_var(), codomain.max_level_var())
+            Self::Pi(_, _, domain, row, codomain) => {
+                row.labels().iter().flat_map(|label| &label.arguments).fold(
+                    join(domain.max_level_var(), codomain.max_level_var()),
+                    |found, argument| join(found, argument.max_level_var()),
+                )
             }
             Self::Let(_, _, ty, value, body) => join(
                 ty.max_level_var(),
@@ -278,8 +293,8 @@ impl fmt::Display for Term {
             Self::App(callee, argument) => {
                 write!(f, "{} {}", Callee(callee), Atom(argument))
             }
-            Self::Pi(mult, name, domain, codomain) => {
-                write!(f, "({mult} {name} : {domain}) -> {codomain}")
+            Self::Pi(mult, name, domain, row, codomain) => {
+                write!(f, "({mult} {name} : {domain}) -> {row}{codomain}")
             }
             Self::Let(mult, name, ty, value, body) => {
                 write!(f, "let {mult} {name} : {ty} = {value} in {body}")
@@ -346,6 +361,8 @@ impl fmt::Display for Atom<'_> {
 mod tests {
     use std::rc::Rc;
 
+    use crate::row::{Label, Row};
+
     use super::Term;
     use crate::mult::Mult;
 
@@ -409,6 +426,7 @@ mod tests {
             Mult::Zero,
             "a".into(),
             Rc::new(Term::Universe(Level::Var(LevelVar(0)))),
+            Row::empty(),
             Rc::new(Term::Universe(Level::Var(LevelVar(1)).succ())),
         );
         assert_eq!(term.substitute_levels(&[]), term);
@@ -420,8 +438,41 @@ mod tests {
             Mult::Zero,
             "a".into(),
             Rc::new(Term::universe(0)),
+            Row::empty(),
             Rc::new(Term::var(0)),
         );
         assert_eq!(pi.to_string(), "(0 a : Type 0) -> #0");
+    }
+
+    #[test]
+    fn pi_shows_its_row_and_hides_the_empty_one() {
+        // Пустая row не печатается вовсе: её отсутствие и означает чистую
+        // стрелку, а печатать `{}` значило бы засорить каждый тип в языке,
+        // где эффектов ещё нет ни у одной функции.
+        let with = |row| {
+            Term::Pi(
+                Mult::Many,
+                "a".into(),
+                Rc::new(Term::universe(0)),
+                row,
+                Rc::new(Term::var(0)),
+            )
+            .to_string()
+        };
+        assert_eq!(with(Row::empty()), "(ω a : Type 0) -> #0");
+        assert_eq!(
+            with(Row::new([
+                Label {
+                    name: "State".into(),
+                    arguments: vec![Term::constant("Int")],
+                },
+                Label {
+                    name: "IO".into(),
+                    arguments: Vec::new(),
+                },
+            ])),
+            // Группы упорядочены по имени, а не по написанию (§3.4).
+            "(ω a : Type 0) -> {IO, State Int} #0"
+        );
     }
 }

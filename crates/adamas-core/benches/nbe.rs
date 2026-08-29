@@ -21,6 +21,7 @@ use adamas_core::conv::convertible;
 use adamas_core::eval::{eval, normalize};
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
+use adamas_core::row::Row;
 use adamas_core::sig::Signature;
 use adamas_core::term::Term;
 use adamas_core::value::Env;
@@ -31,7 +32,13 @@ fn lam(body: Term) -> Term {
 }
 
 fn arrow(domain: Term, codomain: Term) -> Term {
-    Term::Pi(Mult::Many, "_".into(), Rc::new(domain), Rc::new(codomain))
+    Term::Pi(
+        Mult::Many,
+        "_".into(),
+        Rc::new(domain),
+        Row::empty(),
+        Rc::new(codomain),
+    )
 }
 
 /// Числа Чёрча: `\f -> \x -> f (f (… x))`, `n` применений.

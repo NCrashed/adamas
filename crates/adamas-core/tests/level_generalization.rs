@@ -6,6 +6,7 @@ use adamas_core::check::{ErrorKind, TypeError, check_definition, infer_closed_wi
 use adamas_core::level::{Level, LevelVar};
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
+use adamas_core::row::Row;
 use adamas_core::sig::Signature;
 use adamas_core::term::Term;
 use proptest::prelude::*;
@@ -17,7 +18,13 @@ fn lam(mult: Mult, name: &str, body: Term) -> Term {
 }
 
 fn pi(mult: Mult, name: &str, domain: Term, codomain: Term) -> Term {
-    Term::Pi(mult, name.into(), Rc::new(domain), Rc::new(codomain))
+    Term::Pi(
+        mult,
+        name.into(),
+        Rc::new(domain),
+        Row::empty(),
+        Rc::new(codomain),
+    )
 }
 
 // -------------------------------------------------------------------- вывод
@@ -367,7 +374,7 @@ fn level_vars(term: &Term, found: &mut Vec<u32>) {
             level_vars(a, found);
             level_vars(b, found);
         }
-        Term::Pi(_, _, domain, codomain) => {
+        Term::Pi(_, _, domain, _, codomain) => {
             level_vars(domain, found);
             level_vars(codomain, found);
         }

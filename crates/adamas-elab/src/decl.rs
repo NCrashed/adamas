@@ -427,7 +427,7 @@ fn destructor_shape(
         name: Rc::clone(name),
         span,
     };
-    let Term::Pi(mult, _, domain, result) = ty else {
+    let Term::Pi(mult, _, domain, _, result) = ty else {
         return Err(refuse());
     };
     // Кратность домена `1`: при `0` тело деструктора не вправе тронуть ресурс
@@ -471,7 +471,7 @@ fn owned_field(
 ) -> Result<(), ElabError> {
     let holder = owned.how(&data.name.text);
     let mut current = ty;
-    while let Term::Pi(_, _, domain, codomain) = current {
+    while let Term::Pi(_, _, domain, _, codomain) = current {
         let field = name_head(domain).and_then(|name| owned.how(name).map(|how| (name, how)));
         if let Some((name, field)) = field {
             let refuse = |needed| {
@@ -516,7 +516,7 @@ fn mentions_local(term: &Term) -> bool {
         Term::Universe(_) | Term::Const(..) => false,
         Term::Lam(_, _, body) => mentions_local(body),
         Term::App(callee, argument) => mentions_local(callee) || mentions_local(argument),
-        Term::Pi(_, _, domain, codomain) => mentions_local(domain) || mentions_local(codomain),
+        Term::Pi(_, _, domain, _, codomain) => mentions_local(domain) || mentions_local(codomain),
         Term::Let(_, _, ty, value, body) => {
             mentions_local(ty) || mentions_local(value) || mentions_local(body)
         }

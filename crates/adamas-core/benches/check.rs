@@ -31,12 +31,19 @@ use adamas_core::eval::normalize;
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::pattern::{Clause, Pattern, compile};
+use adamas_core::row::Row;
 use adamas_core::sig::Signature;
 use adamas_core::term::Term;
 use criterion::{Criterion, criterion_group, criterion_main};
 
 fn pi(mult: Mult, name: &str, domain: Term, codomain: Term) -> Term {
-    Term::Pi(mult, name.into(), Rc::new(domain), Rc::new(codomain))
+    Term::Pi(
+        mult,
+        name.into(),
+        Rc::new(domain),
+        Row::empty(),
+        Rc::new(codomain),
+    )
 }
 
 fn arrow(domain: Term, codomain: Term) -> Term {

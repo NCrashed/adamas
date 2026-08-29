@@ -14,6 +14,7 @@ use adamas_core::check::{Binding, ErrorKind, Frame, TypeError, check_closed};
 use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
+use adamas_core::row::Row;
 use adamas_core::sig::Signature;
 use adamas_core::term::Term;
 use proptest::prelude::*;
@@ -25,7 +26,13 @@ fn lam(mult: Mult, name: &str, body: Term) -> Term {
 }
 
 fn pi(mult: Mult, name: &str, domain: Term, codomain: Term) -> Term {
-    Term::Pi(mult, name.into(), Rc::new(domain), Rc::new(codomain))
+    Term::Pi(
+        mult,
+        name.into(),
+        Rc::new(domain),
+        Row::empty(),
+        Rc::new(codomain),
+    )
 }
 
 fn let_(mult: Mult, name: &str, ty: Term, value: Term, body: Term) -> Term {
@@ -88,8 +95,8 @@ fn step(term: &Term, frame: Frame) -> Option<&Term> {
     match (term, frame) {
         (Term::App(callee, _), Frame::Callee) => Some(callee),
         (Term::App(_, argument), Frame::Argument) => Some(argument),
-        (Term::Pi(_, _, domain, _), Frame::Domain) => Some(domain),
-        (Term::Pi(_, _, _, codomain), Frame::Codomain) => Some(codomain),
+        (Term::Pi(_, _, domain, _, _), Frame::Domain) => Some(domain),
+        (Term::Pi(_, _, _, _, codomain), Frame::Codomain) => Some(codomain),
         (Term::Lam(_, _, body), Frame::Body) => Some(body),
         (Term::Let(_, _, ty, _, _), Frame::BindingType) => Some(ty),
         (Term::Let(_, _, _, value, _), Frame::BindingValue) => Some(value),

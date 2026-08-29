@@ -193,7 +193,7 @@ fn applied_constructor<'a>(
     };
     let mut arity = 0;
     let mut current = &declaration.ty;
-    while let Term::Pi(_, _, _, codomain) = current {
+    while let Term::Pi(_, _, _, _, codomain) = current {
         arity += 1;
         current = codomain;
     }

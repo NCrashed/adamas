@@ -250,7 +250,7 @@ impl Naming {
                     naming.term(Rc::make_mut(body), bound, outer);
                 });
             }
-            Term::Pi(_, name, domain, codomain) => {
+            Term::Pi(_, name, domain, _, codomain) => {
                 self.term(Rc::make_mut(domain), bound, outer);
                 let name = name.clone();
                 self.under(bound, name, |naming, bound| {
@@ -324,7 +324,7 @@ fn collect_term(term: &Term, ordered: &mut Vec<LevelMeta>) {
             collect_term(right, ordered);
         }
         Term::Lam(_, _, body) => collect_term(body, ordered),
-        Term::Pi(_, _, domain, codomain) => {
+        Term::Pi(_, _, domain, _, codomain) => {
             collect_term(domain, ordered);
             collect_term(codomain, ordered);
         }

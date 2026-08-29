@@ -14,7 +14,7 @@ use adamas_core::eval::{eval, quote};
 use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
-use adamas_core::pattern::{Clause, Pattern as CorePattern};
+use adamas_core::pattern::{Clause, Pattern as CorePattern, PatternError, compile};
 use adamas_core::row::Row;
 use adamas_core::sig::{Definition, DefinitionKind, Signature};
 use adamas_core::source::Span;
@@ -905,11 +905,231 @@ impl<'a> Elaborator<'a> {
                 Ok(self.fresh_meta(&goal))
             }
             ExprKind::Lit(_) => missing(Missing::Literal),
-            ExprKind::If { .. } => missing(Missing::Conditional),
-            ExprKind::Case { .. } => missing(Missing::CaseExpression),
+            // `if` - разбор по `Bool` (§4.1), и записывается он ровно им:
+            // отдельного узла в ядре нет, а различать их было бы двумя путями
+            // к одному терму.
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                let alts = conditional(then_branch, else_branch);
+                self.case(cond, &alts, expr.span)
+            }
+            ExprKind::Case { scrutinee, alts } => self.case(scrutinee, alts, expr.span),
             ExprKind::Tuple(items) if items.is_empty() => missing(Missing::Unit),
             ExprKind::Tuple(_) => missing(Missing::Tuple),
             ExprKind::List(_) => missing(Missing::List),
+        }
+    }
+
+    /// `case e of …` - разбор выражением (§4.1).
+    ///
+    /// # Разбор компилируется тем же компилятором, что и клаузы
+    ///
+    /// Вложенные паттерны, порядок «побеждает первая совпавшая» и проверка
+    /// полноты уже написаны ([`adamas_core::pattern`]), и второй экземпляр
+    /// этого не нужен ни здесь, ни где-либо ещё. Компилятор работает с
+    /// **замкнутым** типом и клаузами над телескопом его аргументов, а `case`
+    /// стоит внутри тела, где в области видимости есть локальные связывания.
+    /// Поэтому разбор поднимается в функцию от всего контекста и тут же к нему
+    /// применяется: `case e of …` в контексте `Γ` есть `(\Γ x -> match x) Γ e`.
+    ///
+    /// Подъём не бесплатен - лямбда по всему контексту на каждый `case`, - но
+    /// плата эта времени сборки: кратности связываний сохраняются, поэтому
+    /// применение к `Γ` расходует ровно столько же, сколько расходовало бы
+    /// прямое употребление, и линейность не ломается.
+    ///
+    /// # Мотив недепендентный, и это названная граница
+    ///
+    /// Тип результата - дырка, заведённая **до** связывания разбираемого,
+    /// поэтому от него он зависеть не может. `case` над `Vect a n`, чей
+    /// результат меняется от ветви к ветви, отсюда не пишется; ему нужен
+    /// написанный мотив, и это отдельный срез.
+    fn case(&mut self, scrutinee: &Expr, alts: &[ast::Alt], span: Span) -> Result<Term, ElabError> {
+        if alts.is_empty() {
+            return Err(ElabError::EmptyCase { span });
+        }
+        let value = self.placed(Position::Inner, |it| it.expr(scrutinee, Mult::Many))?;
+        let Some(ty) = self.synthesized(&value) else {
+            return Err(ElabError::NotMatchable { span });
+        };
+        let domain = quote(self.ctx.size(), &ty);
+        let consumed = self.consumption(scrutinee, &domain);
+
+        // Тип поднятой функции: телескоп контекста, затем разбираемое, затем
+        // дырка результата. Дырка заводится в `Γ`, а стоит под ещё одним
+        // связыванием, поэтому читается обратно на единицу глубже.
+        let sort = Rc::new(Value::Universe(self.metas.fresh_level()));
+        let result = self.fresh_meta(&sort);
+        let result = quote(self.ctx.size() + 1, &self.ctx.eval(&result));
+        let lifted = self.lifted(Term::Pi(
+            Binder::explicit(consumed),
+            CoreName::from("_"),
+            Rc::new(domain),
+            Row::empty(),
+            Rc::new(result),
+        ));
+
+        // Связывания контекста идут первыми паттернами: компилятор нумерует
+        // переменные слева направо, и порядок совпадает с областью видимости,
+        // в которой элаборируется тело ветви.
+        let outer: Vec<CorePattern> = self
+            .scope
+            .iter()
+            .map(|bound| CorePattern::Var(CoreName::from(&*bound.name)))
+            .collect();
+        let mut clauses = Vec::with_capacity(alts.len());
+        for alt in alts {
+            let pattern = self.pattern(&alt.pattern)?;
+            let mut patterns = outer.clone();
+            patterns.push(pattern.clone());
+            let body = self.branch(&alt.pattern, &pattern, &alt.body)?;
+            clauses.push(Clause { patterns, body });
+        }
+
+        let outer = u32::try_from(outer.len()).unwrap_or(u32::MAX);
+        let tree = compile(self.signature, self.metas, &lifted, &clauses).map_err(|error| {
+            let error = uncovered(error, outer);
+            ElabError::Clauses {
+                span: alts
+                    .get(clause_of(&error))
+                    .map_or(span, |alt: &ast::Alt| alt.span),
+                error: Box::new(error),
+            }
+        })?;
+        // Поднятое связывается `let`ом, а не применяется на месте: тип
+        // цепочки лямбд не синтезируется, а `let` несёт аннотацию - ту самую,
+        // по которой её и собрали.
+        let size = self.ctx.size();
+        // Под связыванием `let` всё съезжает на единицу; читается обратно на
+        // ту же единицу глубже.
+        let scrutinee = quote(size + 1, &self.ctx.eval(&value));
+        let applied = (0..size).fold(Term::var(0), |term, depth| {
+            Term::App(Rc::new(term), Rc::new(Term::var(size - depth)))
+        });
+        self.produced = None;
+        Ok(Term::Let(
+            Mult::Many,
+            CoreName::from("case"),
+            Rc::new(lifted),
+            Rc::new(tree),
+            Rc::new(Term::App(Rc::new(applied), Rc::new(scrutinee))),
+        ))
+    }
+
+    /// Тип терма - у ядра, а если оно не знает, то у объявляемой группы.
+    ///
+    /// Рекурсивный вызов в разбираемом (`if even k then …` внутри `even`)
+    /// сигнатуре ещё не известен по построению (§10 вопрос 50), а тип его
+    /// известен группе. Считается он тем же правилом применения: спайн
+    /// снимает по связыванию за аргумент.
+    fn synthesized(&mut self, term: &Term) -> Option<Rc<Value>> {
+        if let Ok((ty, _)) = infer(&self.ctx, self.metas, Mult::Zero, term) {
+            return Some(ty);
+        }
+        let mut arguments = Vec::new();
+        let mut head = term;
+        while let Term::App(callee, argument) = head {
+            arguments.push(&**argument);
+            head = callee;
+        }
+        arguments.reverse();
+        let Term::Const(name, levels) = head else {
+            return None;
+        };
+        let member = self.group.iter().find(|it| *it.name == **name)?;
+        let mut ty = eval(&Env::default(), &member.ty.substitute_levels(levels));
+        for argument in arguments {
+            let Value::Pi(_, _, _, _, codomain) = &*ty else {
+                return None;
+            };
+            let codomain = codomain.clone();
+            ty = codomain.apply(self.ctx.eval(argument));
+        }
+        Some(ty)
+    }
+
+    /// Тело одной ветви - под переменными её паттерна.
+    fn branch(
+        &mut self,
+        written: &Pattern,
+        compiled: &CorePattern,
+        body: &Expr,
+    ) -> Result<Term, ElabError> {
+        let mut names = Vec::new();
+        variables_of(compiled, &mut names);
+        let mut bound = Vec::new();
+        self.pattern_variables(Some(written), compiled, None, body, &names, &mut bound);
+        let depth = self.scope.len();
+        let outer = self.ctx.clone();
+        for variable in &bound {
+            let ty = match &variable.domain {
+                Some(domain) => self.typed(domain),
+                None => self.hole(),
+            };
+            self.ctx = self.ctx.bind(
+                CoreName::from(&*variable.name),
+                variable.mult,
+                Rc::clone(&ty),
+            );
+            self.scope.push(Bound::owning_scoping(
+                &variable.name,
+                variable.mult,
+                ty,
+                variable.owned,
+                variable.scoped,
+            ));
+        }
+        let term = self.expr(body, Mult::Many);
+        self.scope.truncate(depth);
+        self.ctx = outer;
+        term
+    }
+
+    /// Оборачивает тип в телескоп контекста - с теми же кратностями.
+    ///
+    /// Кратности сохраняются, иначе применение к `Γ` масштабировало бы
+    /// использование: `1`-связывание, поданное в ω-параметр, отвергалось бы
+    /// на каждом `case` внутри его области видимости.
+    fn lifted(&self, inner: Term) -> Term {
+        let mut telescope = inner;
+        for (depth, bound) in self.scope.iter().enumerate().rev() {
+            let depth = u32::try_from(depth).unwrap_or(u32::MAX);
+            telescope = Term::Pi(
+                Binder::explicit(bound.mult),
+                CoreName::from(&*bound.name),
+                Rc::new(quote(depth, &bound.ty)),
+                Row::empty(),
+                Rc::new(telescope),
+            );
+        }
+        telescope
+    }
+
+    /// Кратность, с которой разбор потребляет разбираемое (§3.3, вопрос 65).
+    ///
+    /// У написанного имени берётся кратность его связывания: разбирается
+    /// именно оно. У составного выражения связывания нет, и решает голова
+    /// типа - владеемое потребляется однажды, прочее неограниченно.
+    fn consumption(&self, scrutinee: &Expr, ty: &Term) -> Mult {
+        if let ExprKind::Name(name) = &scrutinee.kind {
+            if let Some(bound) = self
+                .scope
+                .iter()
+                .rev()
+                .find(|bound| bound.visible && bound.name == name.text)
+            {
+                return bound.mult;
+            }
+        }
+        let mut head = ty;
+        while let Term::App(callee, _) = head {
+            head = callee;
+        }
+        match head {
+            Term::Const(name, _) if self.owned.owns(name) => Mult::One,
+            _ => Mult::Many,
         }
     }
 
@@ -1216,7 +1436,7 @@ impl<'a> Elaborator<'a> {
                 _ => {
                     // Разбор в параметре лямбды - это `case` без мотива.
                     return Err(ElabError::Missing {
-                        what: Missing::CaseExpression,
+                        what: Missing::LambdaPattern,
                         span: pattern.span,
                     });
                 }
@@ -1848,6 +2068,54 @@ fn lifo(found: &mut [(u32, Symbol)]) {
     found.reverse();
     for (depth, entry) in found.iter_mut().enumerate() {
         entry.0 += u32::try_from(depth).unwrap_or(0);
+    }
+}
+
+/// Ветки `if` как альтернативы разбора по `Bool`.
+///
+/// Спаны берутся у самих веток: ошибка внутри ветки указывает на неё, а не на
+/// `if` целиком. Имена конструкторов - `True` и `False`; не найдись они, откажет
+/// компилятор клауз, и скажет он это про имя, а не про `if`.
+fn conditional(then_branch: &Expr, else_branch: &Expr) -> Vec<ast::Alt> {
+    let alt = |text: &str, body: &Expr| ast::Alt {
+        pattern: Pattern {
+            kind: PatternKind::Name(ast::Name {
+                text: Rc::from(text),
+                span: body.span,
+            }),
+            span: body.span,
+        },
+        body: body.clone(),
+        span: body.span,
+    };
+    vec![alt("True", then_branch), alt("False", else_branch)]
+}
+
+/// Убирает из примера непокрытого набора поднятые колонки контекста.
+///
+/// Автор их не писал, и показывать их значило бы отвечать про терм, которого
+/// в исходнике нет. Колонки эти - всегда переменные, то есть в примере занимают
+/// ровно по одному слову без скобок, поэтому отделяются по пробелам.
+fn uncovered(error: PatternError, outer: u32) -> PatternError {
+    let PatternError::NonExhaustive { example } = error else {
+        return error;
+    };
+    let outer = usize::try_from(outer).unwrap_or(usize::MAX);
+    let example = example
+        .splitn(outer + 1, char::is_whitespace)
+        .last()
+        .unwrap_or(&example)
+        .to_owned();
+    PatternError::NonExhaustive { example }
+}
+
+/// Номер клаузы, на которой споткнулась сборка; `0` - когда его нет.
+fn clause_of(error: &PatternError) -> usize {
+    match error {
+        PatternError::ClauseArity { clause, .. }
+        | PatternError::UnboundInBody { clause }
+        | PatternError::UnreachableClause { clause } => *clause,
+        _ => 0,
     }
 }
 

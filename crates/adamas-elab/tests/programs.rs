@@ -396,12 +396,8 @@ fn what_the_core_cannot_carry_yet_names_itself() {
             Missing::LambdaAnnotation,
         ),
         (
-            "f : Nat -> Nat\nf x = if x then x else x\n",
-            Missing::Conditional,
-        ),
-        (
-            "f : Nat -> Nat\nf x = case x of\n  Zero -> Zero\n",
-            Missing::CaseExpression,
+            "f : Nat -> Nat\nf = \\(Cons x xs) -> Zero\n",
+            Missing::LambdaPattern,
         ),
         ("f : Nat\nf = (Zero, Zero)\n", Missing::Tuple),
         ("f : Nat\nf = ()\n", Missing::Unit),
@@ -1614,4 +1610,96 @@ files = Nil
         matches!(error, ElabError::OwnedHolder { .. }),
         "получено {error:?}"
     );
+}
+
+#[test]
+fn a_case_expression_computes_what_it_says() {
+    // §4.1: разбор выражением. Собирает его тот же компилятор, что и клаузы,
+    // поэтому вложенные паттерны и «побеждает первая совпавшая» достаются
+    // даром. Проверяется не форма терма, а то, что он **вычисляет**.
+    let signature = program(&format!(
+        "{BASE}
+P : Nat -> Type
+anything : (0 n : Nat) -> P n
+
+pred : Nat -> Nat
+pred n = case n of
+  Zero -> Zero
+  Succ k -> k
+"
+    ));
+    for (input, output) in [(0, 0), (1, 0), (3, 2)] {
+        let number = |value: u32| {
+            (0..value).fold(Term::constant("Zero"), |term, _| {
+                Term::constant("Succ").apply([term])
+            })
+        };
+        let outcome = check_closed(
+            &signature,
+            &at("anything").apply([number(output)]),
+            &at("P").apply([Term::constant("pred").apply([number(input)])]),
+        );
+        assert!(outcome.is_ok(), "pred {input} = {output}: {outcome:?}");
+    }
+}
+
+#[test]
+fn a_conditional_is_a_case_on_bool() {
+    // `if` отдельного узла в ядре не имеет: он и есть разбор по `Bool`.
+    // Отсюда и диагностика - про конструктор, а не про `if`.
+    let signature = program(&format!(
+        "{BASE}
+P : Nat -> Type
+anything : (0 n : Nat) -> P n
+
+pick : Bool -> Nat
+pick b = if b then Succ Zero else Zero
+"
+    ));
+    let outcome = check_closed(
+        &signature,
+        &at("anything").apply([Term::constant("Succ").apply([Term::constant("Zero")])]),
+        &at("P").apply([Term::constant("pick").apply([Term::constant("True")])]),
+    );
+    assert!(outcome.is_ok(), "{outcome:?}");
+
+    let error = refused(&format!("{BASE}f : Nat -> Nat\nf x = if x then x else x\n"));
+    assert!(
+        matches!(error, ElabError::Clauses { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_case_under_a_binding_keeps_what_is_in_scope() {
+    // Разбор поднимается в функцию от контекста и тут же к нему применяется,
+    // поэтому связывания, видимые снаружи, видны и в ветвях - и кратности их
+    // при подъёме сохраняются.
+    program(&format!(
+        "{BASE}
+add : Nat -> Nat -> Nat
+add Zero m = m
+add (Succ k) m = Succ (add k m)
+
+f : Nat -> Nat
+f n =
+  let m : Nat = Succ n
+  case n of
+    Zero -> m
+    Succ k -> add k m
+"
+    ));
+}
+
+#[test]
+fn a_case_reports_what_it_does_not_cover() {
+    // Полнота приходит от того же компилятора, а поднятые колонки контекста в
+    // примере не показываются: автор их не писал.
+    let error = refused(&format!(
+        "{BASE}f : Nat -> Bool\nf n = case n of\n  Zero -> True\n"
+    ));
+    let ElabError::Clauses { error, .. } = error else {
+        panic!("ожидалась сборка клауз, получено {error:?}");
+    };
+    assert_eq!(error.to_string(), "не покрыто: `(Succ _)`");
 }

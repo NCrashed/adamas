@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ab368cf5703532e603870e3fc47d11c1e135b180b04c84ecf5750a85452312a9 # shrinks to text = "data Nat where\n  Zero : Nat\n  Succ : Nat -> Nat\n\nf : Nat -> Nat\nf x = ((Type (Zero Type)) -> Zero)\n\ng : Zero\n"
+cc 45f507e5f4ea2a688b548a04fd59623ab42b4e97f696359ba528a70e545abec0 # shrinks to text = "data Nat where\n  Zero : Nat\n  Succ : Nat -> Nat\n\nf : Nat -> Nat\nf x = ((((0 x : Type) -> Nat) Zero) -> Zero)\n\ng : Zero\n"

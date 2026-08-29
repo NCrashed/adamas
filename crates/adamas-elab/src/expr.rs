@@ -8,6 +8,9 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use adamas_core::check::is_type;
+use adamas_core::ctx::Ctx;
+use adamas_core::eval::{eval, quote};
 use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
@@ -16,6 +19,7 @@ use adamas_core::row::Row;
 use adamas_core::sig::{DefinitionKind, Signature};
 use adamas_core::source::Span;
 use adamas_core::term::{Binder, Name as CoreName, Term};
+use adamas_core::value::{Env, Value};
 use adamas_parser::ast::{
     self, Binding, Block, Expr, ExprKind, LamParamKind, Pattern, PatternKind, Stmt, StmtKind,
     Symbol, Visibility,
@@ -44,6 +48,14 @@ pub fn is_reference(name: &str) -> bool {
 struct Argument {
     /// Кратность из `Pi`.
     mult: Mult,
+    /// Домен - тип, который получит связывание.
+    ///
+    /// Живёт под теми же связываниями, что и в исходном телескопе, а
+    /// элаборация связывает их в том же порядке, поэтому вычислять его можно
+    /// прямо в её контексте. Держится это на том, что параметров у семейств
+    /// пока нет (§10 вопрос про `FamilyParameters`): появись они, телескоп
+    /// конструктора начинался бы с них, а паттерн - нет.
+    domain: Rc<Term>,
     /// Объявлена ли голова домена `unique` или `resource`.
     owned: bool,
     /// Функция ли это - домен сам `Pi`.
@@ -77,6 +89,11 @@ impl Argument {
 /// оно (§3.3) и не привязано ли к своему scope.
 struct Bound {
     name: Symbol,
+    /// Кратность, с которой связывание объявлено.
+    mult: Mult,
+    /// Тип связывания. Нужен вставке имплиситов: дырка замкнута телескопом
+    /// контекста, и построить её тип без типов связываний нечем.
+    ty: Rc<Value>,
     visible: bool,
     owned: bool,
     /// Значение, которое не вправе покинуть scope: замыкание над владеющим
@@ -86,27 +103,29 @@ struct Bound {
 }
 
 impl Bound {
-    fn visible(name: &Symbol) -> Self {
+    fn visible(name: &Symbol, mult: Mult, ty: Rc<Value>) -> Self {
         Self {
             name: Rc::clone(name),
+            mult,
+            ty,
             visible: true,
             owned: false,
             scoped: false,
         }
     }
 
-    fn owning(name: &Symbol, owned: bool) -> Self {
+    fn owning(name: &Symbol, mult: Mult, ty: Rc<Value>, owned: bool) -> Self {
         Self {
             owned,
-            ..Self::visible(name)
+            ..Self::visible(name, mult, ty)
         }
     }
 
-    fn owning_scoping(name: &Symbol, owned: bool, scoped: bool) -> Self {
+    fn owning_scoping(name: &Symbol, mult: Mult, ty: Rc<Value>, owned: bool, scoped: bool) -> Self {
         Self {
             owned,
             scoped,
-            ..Self::visible(name)
+            ..Self::visible(name, mult, ty)
         }
     }
 }
@@ -152,6 +171,12 @@ pub(crate) struct Elaborator<'a> {
     /// Локальные связывания снаружи внутрь; индекс де Брёйна - расстояние от
     /// конца.
     scope: Vec<Bound>,
+    /// Типовой контекст, двигающийся вместе с областью видимости.
+    ///
+    /// Тот же, которым пользуется ядро: имена, кратности и типы связываний
+    /// плюс окружение вычисления. Заводить свой значило бы держать второй
+    /// источник истины о том, что связано.
+    ctx: Ctx<'a>,
     /// Члены объявляемой группы вместе с арностью параметров уровня.
     ///
     /// В сигнатуре их ещё нет - она увидит группу целиком (§10 вопрос 50), - а
@@ -221,6 +246,7 @@ impl<'a> Elaborator<'a> {
             signature,
             metas,
             owned,
+            ctx: Ctx::new(signature),
             scope: Vec::new(),
             group,
             declared: Vec::new(),
@@ -251,16 +277,89 @@ impl<'a> Elaborator<'a> {
         outcome
     }
 
-    /// Выполняет `body` под связыванием `name`.
-    fn under<T>(&mut self, name: &Symbol, body: impl FnOnce(&mut Self) -> T) -> T {
-        self.binding(Bound::visible(name), body)
+    /// Свежая дырка терма, стоящая в текущем контексте.
+    ///
+    /// Тип её - телескоп по контексту, оканчивающийся целью: дырка замкнута, и
+    /// зависимость от связываний выражена применением к ним. Кратности
+    /// телескопа - `0`: дырку заводят на месте типа, а тип живёт в стёртом
+    /// фрагменте, и применение к контексту не должно ничего расходовать.
+    fn fresh_meta(&mut self, goal: &Rc<Value>) -> Term {
+        let size = self.ctx.size();
+        let mut telescope = quote(size, goal);
+        for (depth, bound) in self.scope.iter().enumerate().rev() {
+            let depth = u32::try_from(depth).unwrap_or(u32::MAX);
+            telescope = Term::Pi(
+                Binder::explicit(Mult::Zero),
+                CoreName::from(&*bound.name),
+                Rc::new(quote(depth, &bound.ty)),
+                Row::empty(),
+                Rc::new(telescope),
+            );
+        }
+        let closed = eval(&Env::default(), &telescope);
+        self.metas.fresh_term(closed, size)
+    }
+
+    /// Тип связывания как значение - настолько, насколько он известен.
+    ///
+    /// **Проверка обязательна перед вычислением, а не желательна:** `eval`
+    /// вправе паниковать на нетипизированном входе, а элаборация вычисляет то,
+    /// что ядро ещё не смотрело. Без этой проверки первый же неверно
+    /// написанный домен ронял бы процесс вместо отказа.
+    ///
+    /// **Отказ ядра здесь не отказ элаборации, а «типа пока нет».** Причин
+    /// две, и обе законные. Тип может быть неверен - тогда об этом скажет
+    /// `check`, которому терм и уйдёт: он авторитет, а не этот проход. И тип
+    /// может называть члена объявляемой группы (`Succ : Nat -> Nat`), которого
+    /// в сигнатуре ещё нет по построению (§10 вопрос 50), - здесь это не
+    /// ошибка вовсе.
+    ///
+    /// Контекст элаборации поэтому **best-effort**: он нужен ей самой - чтобы
+    /// строить типы дырок, - и полнота его не влияет ни на принимаемые
+    /// программы, ни на отвергаемые. Названная цена: под связыванием, тип
+    /// которого не сошёлся, вставка имплиситов знает меньше.
+    fn typed(&mut self, term: &Term) -> Rc<Value> {
+        if is_type(&self.ctx, self.metas, term).is_err() {
+            return self.hole();
+        }
+        self.ctx.eval(term)
+    }
+
+    /// Дырка на месте типа, которого не написали.
+    fn hole(&mut self) -> Rc<Value> {
+        let level = self.metas.fresh_level();
+        let sort = Rc::new(Value::Universe(level));
+        let meta = self.fresh_meta(&sort);
+        self.ctx.eval(&meta)
+    }
+
+    /// Выполняет `body` под связыванием `name` типа `ty`.
+    fn under<T>(
+        &mut self,
+        name: &Symbol,
+        mult: Mult,
+        ty: Rc<Value>,
+        body: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        self.binding(Bound::visible(name, mult, ty), body)
     }
 
     /// То же, но связывание несёт свойства владения и привязки к scope (§3.3).
+    ///
+    /// Область видимости и типовой контекст двигаются вместе и только здесь:
+    /// разойдись они, индекс де Брёйна указывал бы на одно связывание, а тип -
+    /// на другое.
     fn binding<T>(&mut self, bound: Bound, body: impl FnOnce(&mut Self) -> T) -> T {
+        let inner = self.ctx.bind(
+            CoreName::from(&*bound.name),
+            bound.mult,
+            Rc::clone(&bound.ty),
+        );
+        let outer = std::mem::replace(&mut self.ctx, inner);
         self.scope.push(bound);
         let outcome = body(self);
         self.scope.pop();
+        self.ctx = outer;
         outcome
     }
 
@@ -495,7 +594,10 @@ impl<'a> Elaborator<'a> {
                 let mult = self.binder_mult(None, domain, default, expr.span)?;
                 let domain = self.expr(domain, Mult::Many)?;
                 let anonymous: Symbol = Rc::from("_");
-                let codomain = self.under(&anonymous, |inner| inner.expr(codomain, default))?;
+                let bound = self.typed(&domain);
+                let codomain = self.under(&anonymous, mult, bound, |inner| {
+                    inner.expr(codomain, default)
+                })?;
                 Ok(Term::Pi(
                     // Стрелка пишется без скобок, поэтому связывание у неё
                     // явное: выводить нечего, аргумент стоит в месте вызова.
@@ -651,7 +753,8 @@ impl<'a> Elaborator<'a> {
         };
         let domain = self.hiding(*siblings, |inner| inner.expr(ty, Mult::Many))?;
         let owns = self.owned.of(ty).is_some();
-        let body = self.binding(Bound::owning(name, owns), |inner| {
+        let bound = self.typed(&domain);
+        let body = self.binding(Bound::owning(name, *mult, bound, owns), |inner| {
             inner.pi_flat(rest, codomain, default)
         })?;
         Ok(Term::Pi(
@@ -731,9 +834,27 @@ impl<'a> Elaborator<'a> {
             .map_or((Mult::Many, expected), |(argument, rest)| {
                 (argument.mult, rest)
             });
+        // Тип параметра приходит из написанного типа; там, где он не
+        // написан, лямбда и кратности не получает, и связывание берёт тип
+        // дырки - решать её потом будет проверка.
+        let ty = match expected.first() {
+            Some(argument) => {
+                let domain = Rc::clone(&argument.domain);
+                self.typed(&domain)
+            }
+            None => self.hole(),
+        };
         let bound = expected.first().map_or_else(
-            || Bound::visible(&name),
-            |argument| Bound::owning_scoping(&name, argument.owned, argument.scoped()),
+            || Bound::visible(&name, mult, Rc::clone(&ty)),
+            |argument| {
+                Bound::owning_scoping(
+                    &name,
+                    mult,
+                    Rc::clone(&ty),
+                    argument.owned,
+                    argument.scoped(),
+                )
+            },
         );
         let inner = self.binding(bound, |inner| inner.lam_params(rest, body, deeper, drops))?;
         Ok(Term::Lam(mult, CoreName::from(&*name), Rc::new(inner)))
@@ -883,7 +1004,8 @@ impl<'a> Elaborator<'a> {
         // выписан в §3.3 дословно.
         let scoped = self.produced.take().is_some();
         let born = u32::try_from(self.scope.len()).unwrap_or(u32::MAX);
-        let bound = Bound::owning_scoping(&binding.name.text, owns, scoped);
+        let annotation = self.typed(&ty);
+        let bound = Bound::owning_scoping(&binding.name.text, mult, annotation, owns, scoped);
         let body = self.binding(bound, |inner| {
             if let Some(drop) = drop {
                 closing.push((born, drop));
@@ -920,7 +1042,8 @@ impl<'a> Elaborator<'a> {
         };
         let (call, result) = self.destructor(drop, index);
         let anonymous: Symbol = Rc::from("_");
-        let inner = self.under(&anonymous, body)?;
+        let bound = self.typed(&result);
+        let inner = self.under(&anonymous, Mult::One, bound, body)?;
         Ok(Term::Let(
             Mult::One,
             CoreName::from("_"),
@@ -1059,11 +1182,27 @@ impl<'a> Elaborator<'a> {
         let bound = self.clause_variables(clause, &patterns);
         let closing = closing_of(&bound);
         let depth = self.scope.len();
-        self.scope.extend(
-            bound
-                .iter()
-                .map(|it| Bound::owning_scoping(&it.name, it.owned, it.scoped)),
-        );
+        let outer = self.ctx.clone();
+        // По одному: домен связывания живёт под предыдущими, и вычислить его
+        // можно только тогда, когда те уже стоят в контексте.
+        for variable in &bound {
+            let ty = match &variable.domain {
+                Some(domain) => self.typed(domain),
+                None => self.hole(),
+            };
+            self.ctx = self.ctx.bind(
+                CoreName::from(&*variable.name),
+                variable.mult,
+                Rc::clone(&ty),
+            );
+            self.scope.push(Bound::owning_scoping(
+                &variable.name,
+                variable.mult,
+                ty,
+                variable.owned,
+                variable.scoped,
+            ));
+        }
         // Паттерны сняли первые связывания написанного типа; остаток спайна -
         // тем лямбдам, которыми клауза продолжается.
         self.expected = self
@@ -1076,6 +1215,7 @@ impl<'a> Elaborator<'a> {
             it.placed(Position::Returned, |it| it.expr(&clause.body, Mult::Many))
         });
         self.scope.truncate(depth);
+        self.ctx = outer;
 
         Ok(Clause {
             patterns,
@@ -1139,6 +1279,8 @@ impl<'a> Elaborator<'a> {
                 };
                 found.push(BoundVar {
                     name: Rc::from(&**name),
+                    mult: argument.map_or(Mult::Many, |it| it.mult),
+                    domain: argument.map(|it| Rc::clone(&it.domain)),
                     owned: argument.is_some_and(|it| it.owned),
                     scoped: argument.is_some_and(Argument::scoped),
                     drop: argument
@@ -1202,6 +1344,11 @@ impl<'a> Elaborator<'a> {
 /// Переменная паттерна: имя, владение и деструктор, если её надо закрыть.
 struct BoundVar {
     name: Symbol,
+    /// Кратность и тип связывания - из телескопа, по которому шёл разбор.
+    mult: Mult,
+    /// Домен, ещё не вычисленный: считать его надо на той глубине, на которой
+    /// связывание встанет, а связываются переменные по одной.
+    domain: Option<Rc<Term>>,
     owned: bool,
     scoped: bool,
     drop: Option<Symbol>,
@@ -1262,6 +1409,7 @@ fn pi_arguments(ty: &Term, owned: &Owned) -> Vec<Argument> {
         };
         found.push(Argument {
             mult: *mult,
+            domain: Rc::clone(domain),
             owned: name.is_some_and(|name| owned.owns(name)),
             functional: matches!(&**domain, Term::Pi(..)),
             drop: name.and_then(|name| owned.destructor_of(name)).cloned(),

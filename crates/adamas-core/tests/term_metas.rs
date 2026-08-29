@@ -40,15 +40,33 @@ fn unify(metas: &mut Metas, free: u32, left: &Term, right: &Term) -> bool {
     )
 }
 
-/// Тип дырки. Проверка типов здесь не идёт, поэтому годится любой замкнутый.
-fn any_type() -> Rc<Value> {
-    Rc::new(Value::Universe(adamas_core::level::Level::Zero))
+/// Тип дырки: `Type n`.
+///
+/// Замкнут, и это существенно - решение проверяется против него (см.
+/// `solve::well_typed`), поэтому тип обязан подходить тому, чем дырку решают.
+fn universe(level: u32) -> Rc<Value> {
+    eval(&Env::default(), &Term::universe(level))
+}
+
+/// Тип дырки, заведённой под `free` связываниями: телескоп из `Type 0` с
+/// `Type 0` в конце. Столько же связываний будет и у решения.
+fn telescope(free: u32) -> Rc<Value> {
+    let body = (0..free).fold(Term::universe(0), |body, _| {
+        Term::Pi(
+            Binder::explicit(Mult::Zero),
+            "_".into(),
+            Rc::new(Term::universe(0)),
+            Row::empty(),
+            Rc::new(body),
+        )
+    });
+    eval(&Env::default(), &body)
 }
 
 #[test]
 fn a_hole_takes_the_shape_it_is_compared_with() {
     let mut metas = Metas::default();
-    let hole = metas.fresh_term(any_type(), 0);
+    let hole = metas.fresh_term(universe(4), 0);
     assert!(unify(&mut metas, 0, &hole, &Term::universe(3)));
     // Решение наблюдается тем же способом, каким его увидит проверка типов:
     // дырка стала конвертируема с тем, чем её решили, и только с ним.
@@ -61,7 +79,7 @@ fn a_hole_is_solved_once_and_keeps_its_solution() {
     // Backtracking'а в проверке нет, поэтому первое решение окончательно:
     // второе ограничение либо совпадает с ним, либо это отказ.
     let mut metas = Metas::default();
-    let hole = metas.fresh_term(any_type(), 0);
+    let hole = metas.fresh_term(universe(2), 0);
     let pair = |left, right| {
         Term::Pi(
             Binder::explicit(Mult::Many),
@@ -91,19 +109,19 @@ fn a_hole_in_a_context_is_solved_by_a_function_of_it() {
     // `?m x₀ x₁`. Решением становится функция, и выбирает она то связывание,
     // против которого дырку сравнили.
     let mut metas = Metas::default();
-    let hole = metas.fresh_term(any_type(), 2);
+    let hole = metas.fresh_term(telescope(2), 2);
     // `#0` - ближайшее связывание, то есть уровень 1.
     assert!(unify(&mut metas, 2, &hole, &Term::var(0)));
 
     let mut other = Metas::default();
-    let hole = other.fresh_term(any_type(), 2);
+    let hole = other.fresh_term(telescope(2), 2);
     assert!(unify(&mut other, 2, &hole, &Term::var(1)));
 
     // Решения разные, и различие видно снаружи: одна и та же запись `?m x₀ x₁`
     // после решения означает разные переменные.
     let mut compare = Metas::default();
-    let left = compare.fresh_term(any_type(), 2);
-    let right = compare.fresh_term(any_type(), 2);
+    let left = compare.fresh_term(telescope(2), 2);
+    let right = compare.fresh_term(telescope(2), 2);
     assert!(unify(&mut compare, 2, &left, &Term::var(0)));
     assert!(unify(&mut compare, 2, &right, &Term::var(1)));
     assert!(!unify(&mut compare, 2, &left, &right));
@@ -114,7 +132,7 @@ fn a_solution_may_not_mention_what_the_hole_cannot_see() {
     // Дырка заведена в пустом контексте, а сравнивают её под связыванием:
     // решением была бы переменная, свободная в замкнутом терме.
     let mut metas = Metas::default();
-    let hole = metas.fresh_term(any_type(), 0);
+    let hole = metas.fresh_term(telescope(0), 0);
     assert!(
         !unify(&mut metas, 1, &hole, &Term::var(0)),
         "переменная вне спайна - побег из области видимости"
@@ -126,13 +144,13 @@ fn a_hole_does_not_solve_itself() {
     // `?m ≡ (\x -> x) ?m` после вычисления есть `?m ≡ ?m` - решать нечего, и
     // это не отказ, а совпадение.
     let mut metas = Metas::default();
-    let hole = metas.fresh_term(any_type(), 0);
+    let hole = metas.fresh_term(universe(1), 0);
     assert!(unify(&mut metas, 0, &hole, &hole.clone()));
 
     // А вот `?m ≡ Pi ?m ?m` решения не имеет: подстановка дала бы бесконечный
     // терм, и проверка вхождения обязана это поймать.
     let mut other = Metas::default();
-    let hole = other.fresh_term(any_type(), 0);
+    let hole = other.fresh_term(universe(1), 0);
     let cyclic = Term::Pi(
         Binder::explicit(Mult::Many),
         "_".into(),
@@ -151,7 +169,14 @@ fn a_solved_hole_computes() {
     // Решение - обычное значение, поэтому дырка под применением сводится:
     // `(?m) Type 0` после решения `?m := \x -> x` даёт `Type 0`.
     let mut metas = Metas::default();
-    let hole = metas.fresh_term(any_type(), 0);
+    let self_map = Term::Pi(
+        Binder::explicit(Mult::Many),
+        "x".into(),
+        Rc::new(Term::universe(1)),
+        Row::empty(),
+        Rc::new(Term::universe(1)),
+    );
+    let hole = metas.fresh_term(eval(&Env::default(), &self_map), 0);
     let identity = Term::Lam(Mult::Many, "x".into(), Rc::new(Term::var(0)));
     assert!(unify(&mut metas, 0, &hole, &identity));
 
@@ -170,7 +195,7 @@ fn a_spine_that_is_not_a_pattern_is_refused() {
     // `?m (f x) ≡ …` - спайн не переменная; `?m x x ≡ …` - переменная
     // повторена, и какое из двух связываний имелось в виду, не определено.
     let mut metas = Metas::default();
-    let hole = metas.fresh_term(any_type(), 0);
+    let hole = metas.fresh_term(telescope(0), 0);
     let applied = Term::App(
         Rc::new(hole),
         Rc::new(Term::constant("f").apply([Term::var(0)])),
@@ -178,7 +203,7 @@ fn a_spine_that_is_not_a_pattern_is_refused() {
     assert!(!unify(&mut metas, 1, &applied, &Term::var(0)));
 
     let mut other = Metas::default();
-    let hole = other.fresh_term(any_type(), 0);
+    let hole = other.fresh_term(telescope(0), 0);
     let repeated = Term::App(
         Rc::new(Term::App(Rc::new(hole), Rc::new(Term::var(0)))),
         Rc::new(Term::var(0)),
@@ -193,7 +218,7 @@ fn an_unsolved_hole_does_not_reach_the_signature() {
     // нечем: аргумент терма выводится в месте использования.
     let mut signature = Signature::default();
     let mut metas = Metas::default();
-    let hole = metas.fresh_term(any_type(), 0);
+    let hole = metas.fresh_term(universe(1), 0);
     let outcome = signature.postulate(&mut metas, "f", Mult::Many, 0, hole);
     assert!(
         matches!(
@@ -210,7 +235,7 @@ fn a_solved_hole_reaches_the_signature_as_its_solution() {
     // уровневая: хранилище живёт прогон, а определение всю программу.
     let mut signature = Signature::default();
     let mut metas = Metas::default();
-    let hole = metas.fresh_term(any_type(), 0);
+    let hole = metas.fresh_term(universe(1), 0);
     assert!(unify(&mut metas, 0, &hole, &Term::universe(0)));
     let outcome = signature.postulate(&mut metas, "f", Mult::Many, 0, hole);
     assert!(outcome.is_ok(), "{outcome:?}");
@@ -219,4 +244,27 @@ fn a_solved_hole_reaches_the_signature_as_its_solution() {
         "Type 0",
         "в сигнатуре стоит решение, а не дырка"
     );
+}
+
+#[test]
+fn solving_a_hole_settles_the_levels_of_its_type() {
+    // Тип дырки несёт свои ограничения, и решение - единственное место, где их
+    // предъявляют: `?m : Type ?u`, решённая `Type 3`, даёт `?u = 4`. Из этого
+    // же выводится уровень поднятого implicit-параметра (§4.1): `{0 a : Type
+    // ?u}`, заполненная `Nat`, определяет `?u` только так.
+    let mut metas = Metas::default();
+    let level = metas.fresh_level();
+    let ty = eval(&Env::default(), &Term::Universe(level.clone()));
+    let hole = metas.fresh_term(ty, 0);
+    assert!(unify(&mut metas, 0, &hole, &Term::universe(3)));
+    assert_eq!(metas.zonk(&level).to_string(), "4");
+}
+
+#[test]
+fn a_solution_that_does_not_fit_the_hole_is_refused() {
+    // `Type 3` живёт в `Type 4`, а дырка объявлена в `Type 0`: решение сделало
+    // бы терм неверным по типу, и молча записанное оно ушло бы в определение.
+    let mut metas = Metas::default();
+    let hole = metas.fresh_term(universe(0), 0);
+    assert!(!unify(&mut metas, 0, &hole, &Term::universe(3)));
 }

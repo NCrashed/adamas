@@ -15,7 +15,7 @@
 //! одно значило бы принять программу по догадке. Отказ отвергает корректную,
 //! и это та же граница, на которой стоит вывод уровней (§10 вопрос 39).
 //!
-//! # Две проверки, без которых решение неверно
+//! # Три проверки, без которых решение неверно
 //!
 //! **Область видимости.** Правая часть не вправе упоминать переменные, не
 //! попавшие в спайн: решение замкнуто, а такая переменная в нём оказалась бы
@@ -25,6 +25,12 @@
 //! **Вхождение самой дырки.** `?m ≡ f ?m` решения не имеет: подстановка
 //! породила бы бесконечный терм. Проверка идёт тем же проходом, что и
 //! переименование, потому что смотрят они одно и то же.
+//!
+//! **Тип решения.** Сравнение `?m ≡ t` типов не касается - оно сводит
+//! значения, - поэтому проверка решения есть единственное место, где тип дырки
+//! вообще предъявляется. Без неё `?a : Type ?u`, решённая `Nat`, оставляет `?u`
+//! свободным, и определение отвергается за нерешённый уровень при полностью
+//! выведенном имплисите. См. `well_typed`.
 //!
 //! # Решение записывается один раз
 //!
@@ -36,10 +42,12 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::ctx::Ctx;
 use crate::eval::apply;
 use crate::meta::Metas;
 use crate::mult::Mult;
 use crate::row::{Label, Row};
+use crate::sig::Signature;
 use crate::term::{Term, TermMeta};
 use crate::value::{Elim, Head, Lvl, Value};
 
@@ -73,6 +81,7 @@ pub fn force(metas: &Metas, value: &Rc<Value>) -> Option<Rc<Value>> {
 /// `false` - задача вне паттернового фрагмента либо решения не существует;
 /// вызывающий тогда продолжает обычным сравнением или отказывается.
 pub fn solve(
+    sig: &Signature,
     metas: &mut Metas,
     size: u32,
     meta: TermMeta,
@@ -89,16 +98,62 @@ pub fn solve(
     let Some(body) = read(metas, meta, &renaming, size, arity, 0, right) else {
         return false;
     };
-    // Кратность лямбд решения не значит ничего: тип дырки её и несёт, а
-    // проверка кратностей идёт по типу, а не по решению.
+    // Кратности лямбд берутся из телескопа: `check` требует, чтобы лямбда
+    // совпадала с `Pi` по кратности, а решение обязано пройти эту проверку.
+    let mults = multiplicities(metas, meta, arity);
     let abstracted = (0..arity).fold(body, |body, index| {
-        Term::Lam(Mult::Many, format!("m{index}").into(), Rc::new(body))
+        let depth = usize::try_from(arity - 1 - index).unwrap_or(0);
+        Term::Lam(
+            mults.get(depth).copied().unwrap_or(Mult::Many),
+            format!("m{index}").into(),
+            Rc::new(body),
+        )
     });
+    if !well_typed(sig, metas, meta, &abstracted) {
+        return false;
+    }
     metas.solve_term(
         meta,
         crate::eval::eval(&crate::value::Env::default(), &abstracted),
     );
     true
+}
+
+/// Кратности телескопа типа дырки, снаружи внутрь.
+///
+/// Короче `arity`, если тип дырки телескопа такой длины не имеет: тогда
+/// оставшимся лямбдам достаётся `ω`, и отвергнет их проверка решения.
+fn multiplicities(metas: &Metas, meta: TermMeta, arity: u32) -> Vec<Mult> {
+    let mut found = Vec::new();
+    let mut ty = Rc::clone(metas.term_type(meta));
+    for depth in 0..arity {
+        let Value::Pi(binder, _, _, _, codomain) = &*ty else {
+            break;
+        };
+        found.push(binder.mult);
+        let codomain = codomain.clone();
+        ty = codomain.apply(Value::var(Lvl(depth)));
+    }
+    found
+}
+
+/// Проверяет решение против типа дырки.
+///
+/// Проверка здесь не подстраховка, а **единственное место, где тип решения
+/// вообще смотрят**. Сравнение `?m ≡ t` типов не касается: оно сводит значения,
+/// а `?m` подходит по форме к чему угодно. Между тем тип дырки несёт свои
+/// ограничения - `?a : Type ?u` от implicit-параметра, - и решение `?a := Nat`
+/// и есть то, что даёт `?u = 0`. Без этой проверки уровень остаётся свободным,
+/// и определение отвергается за нерешённый уровень при полностью выведенном
+/// имплисите.
+///
+/// И дырка, и решение замкнуты - первая по построению ([`Metas::fresh_term`]),
+/// второе как цепочка лямбд, - поэтому проверять их можно в пустом контексте.
+/// `0` в судейской кратности: решение стоит там же, где стояла дырка, а
+/// расходование считается по типу вокруг неё, не здесь.
+fn well_typed(sig: &Signature, metas: &mut Metas, meta: TermMeta, solution: &Term) -> bool {
+    let ty = Rc::clone(metas.term_type(meta));
+    crate::check::check(&Ctx::new(sig), metas, Mult::Zero, solution, &ty).is_ok()
 }
 
 /// Спайн как паттерн: различные переменные контекста и ничего больше.

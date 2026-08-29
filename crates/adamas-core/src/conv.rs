@@ -145,10 +145,10 @@ fn convertible_within(
     // бы то же ограничение, только на большем терме.
     match (&**left, &**right) {
         (Value::Neutral(Head::Meta(meta), spine), _) => {
-            return solve(metas, size, *meta, spine, right);
+            return solve(sig, metas, size, *meta, spine, right);
         }
         (_, Value::Neutral(Head::Meta(meta), spine)) => {
-            return solve(metas, size, *meta, spine, left);
+            return solve(sig, metas, size, *meta, spine, left);
         }
         _ => {}
     }

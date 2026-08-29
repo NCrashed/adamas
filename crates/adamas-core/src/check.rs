@@ -127,6 +127,12 @@ pub fn infer(
         // `imax` вернуло бы `Type 0`, когда там живёт кодомен, то есть сделало
         // бы нижний универсум импредикативным; см. заголовок
         // [`crate::level`], почему это несовместимо с §3.2.
+        //
+        // **Row не проверяется, и это долг, а не решение.** Чтобы сказать, что
+        // `State Int` собрана верно, нужен формер метки, а объявление эффектов
+        // - Фаза 4 (§3.4). Сегодня цены у долга нет: синтаксиса для row не
+        // существует, и пустой её делает не соглашение, а отсутствие способа
+        // написать иную. Правило приходит вместе с погашением.
         Term::Pi(mult, name, domain, _, codomain) => {
             let domain_level = framed(is_type(ctx, metas, domain), Frame::Domain)?;
             let inner = ctx.bind(Rc::clone(name), *mult, ctx.eval(domain));
@@ -614,21 +620,34 @@ struct Binder {
     mult: Mult,
     name: Name,
     domain: Rc<Term>,
+    /// Row той стрелки, что ввела это связывание. Хранится, потому что
+    /// позитивность обязана смотреть и туда: без неё телескоп конструктора
+    /// терял бы метки по дороге.
+    row: Row<Term>,
 }
 
 /// Снимает цепочку `Pi`, возвращая связывания и итоговый терм.
 fn peel_pis(term: &Term) -> (Vec<Binder>, &Term) {
     let mut fields = Vec::new();
     let mut current = term;
-    while let Term::Pi(mult, name, domain, _, codomain) = current {
+    while let Term::Pi(mult, name, domain, row, codomain) = current {
         fields.push(Binder {
             mult: *mult,
             name: Rc::clone(name),
             domain: Rc::clone(domain),
+            row: row.clone(),
         });
         current = codomain;
     }
     (fields, current)
+}
+
+/// Упоминает ли имя хоть один аргумент метки.
+fn mentioned_in_row(signature: &Signature, name: &Name, row: &Row<Term>) -> bool {
+    row.labels()
+        .iter()
+        .flat_map(|label| &label.arguments)
+        .any(|argument| mentions(signature, name, argument))
 }
 
 /// Встречается ли имя в терме.
@@ -678,7 +697,19 @@ fn mentions_seen<'a>(
         }
         Term::Lam(_, _, body) => recur(body),
         Term::App(callee, argument) => recur(callee) || recur(argument),
-        Term::Pi(_, _, domain, _, codomain) => recur(domain) || recur(codomain),
+        // Аргументы меток row - тоже упоминание. Сегодня row пуста у всякой
+        // стрелки, но пропуск здесь был бы дырой в **позитивности**: метка
+        // `{State Bad}` в домене конструктора спрятала бы `Bad` от проверки, и
+        // заметить это было бы нечем.
+        Term::Pi(_, _, domain, row, codomain) => {
+            recur(domain)
+                || recur(codomain)
+                || row
+                    .labels()
+                    .iter()
+                    .flat_map(|label| &label.arguments)
+                    .any(recur)
+        }
         Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || recur(body),
         // Имя типа стоит в самом узле, а имена конструкторов - в ветвях:
         // упоминанием считается и то и другое, иначе разбор по `Bad` внутри
@@ -753,8 +784,11 @@ fn positive_seen<'a>(
 ) -> bool {
     match term {
         // Слева от стрелки тип не должен встречаться вовсе; справа - рекурсия.
-        Term::Pi(_, _, domain, _, codomain) => {
+        // Аргументы меток row - та же левая позиция: применение стрелки
+        // предъявляет их так же, как домен.
+        Term::Pi(_, _, domain, row, codomain) => {
             !mentions(signature, data, domain)
+                && !mentioned_in_row(signature, data, row)
                 && positive_seen(signature, data, params, depth + 1, codomain, seen)
         }
         other => {
@@ -956,6 +990,16 @@ pub(crate) fn check_constructor_content(
     let mut ctx = Ctx::new(signature);
     for (index, field) in peel_pis(ty).0.iter().enumerate() {
         let depth = u32::try_from(index).unwrap_or(u32::MAX);
+        // Метка на собственной стрелке конструктора стоит там же, где домен:
+        // применение предъявляет её аргументы так же. Проверяется она и на
+        // параметрах - там правило то же, а исключать нечего.
+        if mentioned_in_row(signature, data, &field.row) {
+            return Err(ErrorKind::NotStrictlyPositive {
+                name: Rc::clone(name),
+                data: Rc::clone(data),
+            }
+            .into());
+        }
         if depth >= params {
             if !positive_field(signature, data, params, depth, &field.domain) {
                 return Err(ErrorKind::NotStrictlyPositive {

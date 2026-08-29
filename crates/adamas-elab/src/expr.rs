@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use adamas_core::check::is_type;
+use adamas_core::check::{infer, is_type};
 use adamas_core::ctx::Ctx;
 use adamas_core::eval::{eval, quote};
 use adamas_core::level::Level;
@@ -43,6 +43,22 @@ pub fn is_reference(name: &str) -> bool {
     name.chars().next().is_some_and(char::is_uppercase)
 }
 
+/// Член объявляемой группы (§10 вопрос 50).
+///
+/// Пока группа объявляется, в сигнатуре её нет, а ссылаться на членов надо:
+/// конструктор называет своё семейство, тело определения - само определение.
+/// Значит всё, что о члене знает вставка имени, приходит отсюда.
+pub(crate) struct Member {
+    /// Имя, каким оно написано.
+    pub name: Symbol,
+    /// Аргументы уровня - общие на всё объявление; их считает вызывающий
+    /// обобщением по типу члена, и это §10 вопрос 63.
+    pub levels: Rc<[Level]>,
+    /// Уже элаборированный тип. По нему вставляются имплиситы: спросить его у
+    /// сигнатуры нельзя, там члена ещё нет.
+    pub ty: Rc<Term>,
+}
+
 /// Связывание написанного типа: что о нём известно до элаборации тела.
 #[derive(Clone, Debug)]
 struct Argument {
@@ -56,6 +72,12 @@ struct Argument {
     /// пока нет (§10 вопрос про `FamilyParameters`): появись они, телескоп
     /// конструктора начинался бы с них, а паттерн - нет.
     domain: Rc<Term>,
+    /// Имя связывания. Имплиситу оно нужно как имя переменной: аргумента ему
+    /// никто не писал, а тело вправе его назвать - тем именем, под которым его
+    /// подняли (см. `lifting`).
+    name: CoreName,
+    /// Выводится ли аргумент вместо того, чтобы писаться.
+    implicit: bool,
     /// Объявлена ли голова домена `unique` или `resource`.
     owned: bool,
     /// Функция ли это - домен сам `Pi`.
@@ -96,6 +118,9 @@ struct Bound {
     ty: Rc<Value>,
     visible: bool,
     owned: bool,
+    /// Значение связывания, если оно `let`. Вычисление его подставляет,
+    /// поэтому переменной такое связывание не остаётся - см. `fresh_meta`.
+    value: Option<Rc<Term>>,
     /// Значение, которое не вправе покинуть scope: замыкание над владеющим
     /// связыванием, связывание, инициализированное таким замыканием, и
     /// `1`-параметр функционального типа (§3.3).
@@ -111,6 +136,7 @@ impl Bound {
             visible: true,
             owned: false,
             scoped: false,
+            value: None,
         }
     }
 
@@ -184,7 +210,7 @@ pub(crate) struct Elaborator<'a> {
     /// называет само определение. Спросить арность у сигнатуры поэтому нечего,
     /// и её считает вызывающий обобщением по типу члена; это и есть §10
     /// вопрос 63.
-    group: Vec<(Symbol, Rc<[Level]>)>,
+    group: Vec<Member>,
     /// Связывания написанного типа - по одному на `Pi` его спайна.
     ///
     /// Лямбда в ядре несёт кратность, и `check` требует, чтобы она совпадала с
@@ -201,6 +227,8 @@ pub(crate) struct Elaborator<'a> {
     expected: Vec<Argument>,
     /// Идёт ли элаборация в позиции типа - см. `typing`.
     types: bool,
+    /// Запрещена ли вставка имплиситов ближайшему имени - см. `type_app`.
+    bare: bool,
     /// Где стоит ближайший подтерм - см. [`Position`].
     position: Position,
     /// Привязано ли к scope значение, которое только что собрано, и каким
@@ -240,7 +268,7 @@ impl<'a> Elaborator<'a> {
         signature: &'a Signature,
         metas: &'a mut Metas,
         owned: &'a Owned,
-        group: Vec<(Symbol, Rc<[Level]>)>,
+        group: Vec<Member>,
     ) -> Self {
         Self {
             signature,
@@ -251,6 +279,7 @@ impl<'a> Elaborator<'a> {
             group,
             declared: Vec::new(),
             expected: Vec::new(),
+            bare: false,
             types: false,
             position: Position::Inner,
             produced: None,
@@ -277,6 +306,118 @@ impl<'a> Elaborator<'a> {
         outcome
     }
 
+    /// Написанный тип объявления - со свободными именами, поднятыми в
+    /// implicit-параметры (§4.1).
+    ///
+    /// `Nil : Vect 0 a` объявляется как `{0 a : Type} -> Vect 0 a`. Кратность
+    /// `0`: поднятое имя - тип, а типы живут в стёртом фрагменте, и платить за
+    /// них в рантайме не за что.
+    pub(crate) fn declaration(&mut self, ty: &Expr, default: Mult) -> Result<Term, ElabError> {
+        let lifted = self.free(ty);
+        self.lifting(&lifted, ty, default)
+    }
+
+    fn lifting(&mut self, lifted: &[Symbol], ty: &Expr, default: Mult) -> Result<Term, ElabError> {
+        let Some((name, rest)) = lifted.split_first() else {
+            return self.typing(|it| it.expr(ty, default));
+        };
+        let sort = Term::Universe(self.metas.fresh_level());
+        let bound = self.ctx.eval(&sort);
+        let body = self.under(name, Mult::Zero, bound, |it| it.lifting(rest, ty, default))?;
+        Ok(Term::Pi(
+            Binder::implicit(Mult::Zero),
+            CoreName::from(&**name),
+            Rc::new(sort),
+            Row::empty(),
+            Rc::new(body),
+        ))
+    }
+
+    /// Свободные имена написанного типа - те, что §4.1 поднимает в
+    /// implicit-параметры.
+    ///
+    /// Порядок - первого появления в тексте: `Vect n a` даёт `{n} {a}`, и
+    /// автор видит их там же, где написал. Отбираются строчные имена, которые
+    /// ничем не разрешаются: заглавное обязано быть объявленным (правило
+    /// регистра §4.1), а разрешившееся - не свободно.
+    pub(crate) fn free(&self, expr: &Expr) -> Vec<Symbol> {
+        let mut found = Vec::new();
+        let mut bound: Vec<Symbol> = Vec::new();
+        self.free_in(expr, &mut bound, &mut found);
+        found
+    }
+
+    fn free_in(&self, expr: &Expr, bound: &mut Vec<Symbol>, found: &mut Vec<Symbol>) {
+        match &expr.kind {
+            ExprKind::Name(name) => self.free_name(name, bound, found),
+            ExprKind::App(callee, argument) | ExprKind::TypeApp(callee, argument) => {
+                self.free_in(callee, bound, found);
+                self.free_in(argument, bound, found);
+            }
+            ExprKind::Arrow(domain, codomain) => {
+                self.free_in(domain, bound, found);
+                self.free_in(codomain, bound, found);
+            }
+            ExprKind::Chain(chain) => {
+                self.free_in(&chain.head, bound, found);
+                for (operator, operand) in &chain.tail {
+                    self.free_name(operator, bound, found);
+                    self.free_in(operand, bound, found);
+                }
+            }
+            // Связывание закрывает своё имя для всего, что под ним. Тип группы
+            // `(x y : A)` при этом читается до обоих имён - как и в самой
+            // элаборации, где та же группа прячет их от собственного домена.
+            ExprKind::Pi { binders, codomain } => {
+                let depth = bound.len();
+                for binder in binders {
+                    if let Some(ty) = &binder.ty {
+                        self.free_in(ty, bound, found);
+                    }
+                    bound.extend(binder.names.iter().map(|it| Rc::clone(&it.text)));
+                }
+                self.free_in(codomain, bound, found);
+                bound.truncate(depth);
+            }
+            ExprKind::Lam { params, body } => {
+                let depth = bound.len();
+                for param in params {
+                    match &param.kind {
+                        LamParamKind::Pattern(pattern) => binds_names(pattern, bound),
+                        LamParamKind::Binder(binder) => {
+                            bound.extend(binder.names.iter().map(|it| Rc::clone(&it.text)));
+                        }
+                    }
+                }
+                self.free_in(body, bound, found);
+                bound.truncate(depth);
+            }
+            // Формы, до которых элаборация типа не доходит вовсе: искать в них
+            // свободные имена значило бы поднять параметр ради того, что всё
+            // равно ответит `Missing`.
+            ExprKind::Block(_)
+            | ExprKind::If { .. }
+            | ExprKind::Case { .. }
+            | ExprKind::Tuple(_)
+            | ExprKind::List(_)
+            | ExprKind::Lit(_)
+            | ExprKind::Hole => {}
+        }
+    }
+
+    fn free_name(&self, name: &ast::Name, bound: &[Symbol], found: &mut Vec<Symbol>) {
+        let known = is_reference(&name.text)
+            || &*name.text == "Type"
+            || bound.contains(&name.text)
+            || found.contains(&name.text)
+            || self.local(&name.text).is_some()
+            || self.group.iter().any(|member| member.name == name.text)
+            || self.signature.lookup(&name.text).is_some();
+        if !known {
+            found.push(Rc::clone(&name.text));
+        }
+    }
+
     /// Свежая дырка терма, стоящая в текущем контексте.
     ///
     /// Тип её - телескоп по контексту, оканчивающийся целью: дырка замкнута, и
@@ -286,18 +427,31 @@ impl<'a> Elaborator<'a> {
     fn fresh_meta(&mut self, goal: &Rc<Value>) -> Term {
         let size = self.ctx.size();
         let mut telescope = quote(size, goal);
+        let mut spine = Vec::new();
         for (depth, bound) in self.scope.iter().enumerate().rev() {
             let depth = u32::try_from(depth).unwrap_or(u32::MAX);
-            telescope = Term::Pi(
-                Binder::explicit(Mult::Zero),
-                CoreName::from(&*bound.name),
-                Rc::new(quote(depth, &bound.ty)),
-                Row::empty(),
-                Rc::new(telescope),
-            );
+            let ty = Rc::new(quote(depth, &bound.ty));
+            let name = CoreName::from(&*bound.name);
+            // Связывание со значением идёт `Let`ом: индексы цели считаны по
+            // всему контексту, и пропустить его значило бы их сдвинуть.
+            // Вычисление телескопа его подставит - ровно так же, как подставит
+            // проверка, - и параметром дырки оно не станет.
+            telescope = if let Some(value) = &bound.value {
+                Term::Let(Mult::Zero, name, ty, Rc::clone(value), Rc::new(telescope))
+            } else {
+                spine.push(depth);
+                Term::Pi(
+                    Binder::explicit(Mult::Zero),
+                    name,
+                    ty,
+                    Row::empty(),
+                    Rc::new(telescope),
+                )
+            };
         }
+        spine.reverse();
         let closed = eval(&Env::default(), &telescope);
-        self.metas.fresh_term(closed, size)
+        self.metas.fresh_term_over(closed, &spine, size)
     }
 
     /// Тип связывания как значение - настолько, насколько он известен.
@@ -624,15 +778,80 @@ impl<'a> Elaborator<'a> {
             ExprKind::Block(block) => self.block(block, position),
             ExprKind::Chain(chain) => self.chain(chain, expr.span),
 
-            ExprKind::Hole => missing(Missing::TermHole),
+            ExprKind::TypeApp(..) => self.type_app(expr),
+
+            // `_` - дырка терма: решать её теперь есть чем, и нерешённая
+            // доезжает до объявления своим отказом (`AmbiguousTerm`), а не
+            // «механизма нет».
+            ExprKind::Hole => {
+                let goal = self.hole();
+                Ok(self.fresh_meta(&goal))
+            }
             ExprKind::Lit(_) => missing(Missing::Literal),
-            ExprKind::TypeApp(..) => missing(Missing::TypeApplication),
             ExprKind::If { .. } => missing(Missing::Conditional),
             ExprKind::Case { .. } => missing(Missing::CaseExpression),
             ExprKind::Tuple(items) if items.is_empty() => missing(Missing::Unit),
             ExprKind::Tuple(_) => missing(Missing::Tuple),
             ExprKind::List(_) => missing(Missing::List),
         }
+    }
+
+    /// `f @A @B` - выводимый аргумент, написанный явно (§4.1).
+    ///
+    /// Голова элаборируется **без** вставки: `@` пишет ровно те аргументы,
+    /// которые иначе стали бы дырками, и вставленную дырку `@` уже не заменит.
+    /// Остаток ведущих имплиситов вставляется после цепочки, поэтому `g @Nat x`
+    /// при `g : {a} -> {b} -> a -> b -> …` пишет `a` и выводит `b`.
+    ///
+    /// Цепочка снимается циклом по той же причине, что и спайн применения:
+    /// длину её ограничивает только текст.
+    fn type_app(&mut self, expr: &Expr) -> Result<Term, ElabError> {
+        let mut written = Vec::new();
+        let mut head = expr;
+        while let ExprKind::TypeApp(callee, argument) = &head.kind {
+            written.push(&**argument);
+            head = callee;
+        }
+        let mut term = self.placed(Position::Inner, |it| {
+            if matches!(head.kind, ExprKind::Name(_)) {
+                it.bare(|it| it.expr(head, Mult::Many))
+            } else {
+                it.expr(head, Mult::Many)
+            }
+        })?;
+        let mut ty = infer(&self.ctx, self.metas, Mult::Zero, &term)
+            .map(|(ty, _)| ty)
+            .map_err(|_| ElabError::NoImplicitParameter { span: expr.span })?;
+        for argument in written.into_iter().rev() {
+            let Value::Pi(binder, _, _, _, codomain) = &*ty else {
+                return Err(ElabError::NoImplicitParameter {
+                    span: argument.span,
+                });
+            };
+            if !binder.visibility.is_implicit() {
+                return Err(ElabError::NoImplicitParameter {
+                    span: argument.span,
+                });
+            }
+            let codomain = codomain.clone();
+            // Написанный аргумент - тип, и подходит ли он домену, скажет
+            // `check`: авторитет он, а не этот проход.
+            let written = self.typing(|it| it.expr(argument, Mult::Zero))?;
+            let value = self.typed(&written);
+            term = Term::App(Rc::new(term), Rc::new(written));
+            ty = codomain.apply(value);
+        }
+        // Применение к scope результат к нему не привязывает - см. `App`.
+        self.produced = None;
+        Ok(self.implicits(term, ty))
+    }
+
+    /// Выполняет `body`, не вставляя имплиситы ближайшему имени.
+    fn bare<T>(&mut self, body: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = std::mem::replace(&mut self.bare, true);
+        let outcome = body(self);
+        self.bare = outer;
+        outcome
     }
 
     /// Собирает ли применение с такой головой значение - то есть конструктор
@@ -669,15 +888,21 @@ impl<'a> Elaborator<'a> {
             return Ok(Term::Universe(self.metas.fresh_level()));
         }
         // Член объявляемой группы: аргументы уровня - дырки, числом в арность,
-        // посчитанную вызывающим.
-        if let Some((_, levels)) = self.group.iter().find(|(member, _)| **member == *name.text) {
-            return Ok(Term::Const(CoreName::from(&*name.text), Rc::clone(levels)));
+        // посчитанную вызывающим. Тип его сигнатура ещё не знает (§10 вопрос
+        // 50), поэтому имплиситы вставляются по типу, принесённому в группе.
+        if let Some(member) = self.group.iter().find(|it| it.name == name.text) {
+            let term = Term::Const(CoreName::from(&*name.text), Rc::clone(&member.levels));
+            if self.bare || !opens_implicit(&member.ty) {
+                return Ok(term);
+            }
+            let ty = eval(&Env::default(), &member.ty);
+            return Ok(self.implicits(term, ty));
         }
         // Аргументы уровня подставляются дырками - это implicit UP со стороны
         // места использования (§3.2), - и одному имени они выдаются один раз
         // на объявление (см. `instantiated`).
-        if let Some(term) = self.instantiated.get(&name.text) {
-            return Ok(term.clone());
+        if let Some(term) = self.instantiated.get(&name.text).cloned() {
+            return Ok(self.implicit_use(&name.text, term));
         }
         let term = self
             .signature
@@ -685,7 +910,7 @@ impl<'a> Elaborator<'a> {
             .ok_or_else(|| {
                 if self.types && !is_reference(&name.text) {
                     return ElabError::Missing {
-                        what: Missing::Implicits,
+                        what: Missing::FreeTypeVariable,
                         span: name.span,
                     };
                 }
@@ -696,7 +921,57 @@ impl<'a> Elaborator<'a> {
             })?;
         self.instantiated
             .insert(Rc::clone(&name.text), term.clone());
-        Ok(term)
+        Ok(self.implicit_use(&name.text, term))
+    }
+
+    /// Вставляет выводимые аргументы имени, тип которого знает ядро.
+    ///
+    /// Под `@` не вставляет ничего: аргументы там пишутся, и дырка на месте
+    /// первого из них заняла бы его место.
+    ///
+    /// Кэш `instantiated` держит имя **без** них: аргументы уровня у имени в
+    /// объявлении общие, а имплиситы - нет. `id x` и `id y` в одном теле стоят
+    /// при разных типах, и общая дырка связала бы их в один.
+    fn implicit_use(&mut self, name: &str, term: Term) -> Term {
+        // Отбор по объявленному типу идёт до `infer`: тот вычисляет тип
+        // целиком, а имён без имплиситов в обычной программе подавляющее
+        // большинство, и платить за них этим вычислением не за что.
+        let opens = self
+            .signature
+            .lookup(name)
+            .is_some_and(|definition| opens_implicit(&definition.ty));
+        if self.bare || !opens {
+            return term;
+        }
+        let Ok((ty, _)) = infer(&self.ctx, self.metas, Mult::Zero, &term) else {
+            // Тип не сошёлся - вставлять нечего, а сказать об этом полагается
+            // `check`: авторитет он, а не этот проход (см. `typed`).
+            return term;
+        };
+        self.implicits(term, ty)
+    }
+
+    /// Применяет `term` к дырке на каждое ведущее implicit-связывание его типа.
+    ///
+    /// Вставка **энергичная**: аргумент выводится там, где имя встретилось, а
+    /// не там, где до него доберётся проверка. Названная цена - `f = id`:
+    /// имплисит вставится и останется нерешённым, потому что обобщать его
+    /// нечем. Отложенная вставка требует двунаправленной элаборации, и это
+    /// отдельный срез.
+    fn implicits(&mut self, mut term: Term, mut ty: Rc<Value>) -> Term {
+        loop {
+            let Value::Pi(binder, _, domain, _, codomain) = &*ty else {
+                return term;
+            };
+            if !binder.visibility.is_implicit() {
+                return term;
+            }
+            let (domain, codomain) = (Rc::clone(domain), codomain.clone());
+            let argument = self.fresh_meta(&domain);
+            let value = self.ctx.eval(&argument);
+            term = Term::App(Rc::new(term), Rc::new(argument));
+            ty = codomain.apply(value);
+        }
     }
 
     /// `(q x y : A) (r z : B) -> C`.
@@ -729,7 +1004,7 @@ impl<'a> Elaborator<'a> {
             // этот путь не ведёт.
             let Some(ty) = &binder.ty else {
                 return Err(ElabError::Missing {
-                    what: Missing::Implicits,
+                    what: Missing::FamilyParameters,
                     span: binder.span,
                 });
             };
@@ -1005,7 +1280,10 @@ impl<'a> Elaborator<'a> {
         let scoped = self.produced.take().is_some();
         let born = u32::try_from(self.scope.len()).unwrap_or(u32::MAX);
         let annotation = self.typed(&ty);
-        let bound = Bound::owning_scoping(&binding.name.text, mult, annotation, owns, scoped);
+        let bound = Bound {
+            value: Some(Rc::new(value.clone())),
+            ..Bound::owning_scoping(&binding.name.text, mult, annotation, owns, scoped)
+        };
         let body = self.binding(bound, |inner| {
             if let Some(drop) = drop {
                 closing.push((born, drop));
@@ -1042,8 +1320,12 @@ impl<'a> Elaborator<'a> {
         };
         let (call, result) = self.destructor(drop, index);
         let anonymous: Symbol = Rc::from("_");
-        let bound = self.typed(&result);
-        let inner = self.under(&anonymous, Mult::One, bound, body)?;
+        let ty = self.typed(&result);
+        let bound = Bound {
+            value: Some(Rc::new(call.clone())),
+            ..Bound::visible(&anonymous, Mult::One, ty)
+        };
+        let inner = self.binding(bound, body)?;
         Ok(Term::Let(
             Mult::One,
             CoreName::from("_"),
@@ -1139,20 +1421,20 @@ impl<'a> Elaborator<'a> {
         name: &ast::Name,
         fields: Vec<CorePattern>,
     ) -> Result<CorePattern, ElabError> {
-        let known = self.signature.lookup(&name.text).is_some_and(|definition| {
-            matches!(definition.kind, DefinitionKind::Constructor { .. })
-        });
-        if known {
-            Ok(CorePattern::Constructor(
-                CoreName::from(&*name.text),
-                fields,
-            ))
-        } else {
-            Err(ElabError::NotAConstructor {
+        let Some(declared) = self
+            .signature
+            .lookup(&name.text)
+            .filter(|definition| matches!(definition.kind, DefinitionKind::Constructor { .. }))
+        else {
+            return Err(ElabError::NotAConstructor {
                 name: Rc::clone(&name.text),
                 span: name.span,
-            })
-        }
+            });
+        };
+        Ok(CorePattern::Constructor(
+            CoreName::from(&*name.text),
+            hidden_fields(&declared.ty, fields),
+        ))
     }
 
     /// Клауза: паттерны, затем тело в контексте их переменных.
@@ -1170,16 +1452,13 @@ impl<'a> Elaborator<'a> {
         for pattern in &clause.patterns {
             repeated(pattern, &mut seen)?;
         }
-        let patterns = clause
-            .patterns
-            .iter()
-            .map(|pattern| self.pattern(pattern))
-            .collect::<Result<Vec<_>, _>>()?;
+        let written = self.spread(&clause.patterns)?;
+        let patterns: Vec<CorePattern> = written.iter().map(|(_, it)| it.clone()).collect();
 
         // Тип связывания виден и у аргумента верхнего уровня (по спайну
         // написанного), и у поля (по объявлению конструктора), поэтому
         // владение и закрытие считаются одним проходом по паттернам.
-        let bound = self.clause_variables(clause, &patterns);
+        let bound = self.clause_variables(&written, &clause.body);
         let closing = closing_of(&bound);
         let depth = self.scope.len();
         let outer = self.ctx.clone();
@@ -1223,6 +1502,39 @@ impl<'a> Elaborator<'a> {
         })
     }
 
+    /// Паттерны клаузы, разложенные по связываниям объявленного типа.
+    ///
+    /// Имплисит аргумента не получает, но связывание вводит, и подняли его
+    /// (`lifting`) в тот же телескоп, по которому идут паттерны. Значит паттерн
+    /// у него обязан быть: [`adamas_core::pattern::compile`] считает арность по
+    /// их числу, и без вставки первый написанный паттерн встал бы на место
+    /// имплисита. Имя берётся из связывания - оно и есть то, под которым тип
+    /// назвал переменную.
+    ///
+    /// Написанное, не покрытое телескопом, идёт следом как есть: спайн виден
+    /// синтаксически, и дальше него записей нет (см. `declared`).
+    fn spread<'p>(
+        &self,
+        written: &'p [Pattern],
+    ) -> Result<Vec<(Option<&'p Pattern>, CorePattern)>, ElabError> {
+        let mut found = Vec::new();
+        let mut rest = written.iter();
+        for argument in &self.declared {
+            if argument.implicit {
+                found.push((None, CorePattern::Var(Rc::clone(&argument.name))));
+                continue;
+            }
+            let Some(pattern) = rest.next() else {
+                break;
+            };
+            found.push((Some(pattern), self.pattern(pattern)?));
+        }
+        for pattern in rest {
+            found.push((Some(pattern), self.pattern(pattern)?));
+        }
+        Ok(found)
+    }
+
     /// Переменные паттернов клаузы в порядке связывания.
     ///
     /// Проход один на оба вопроса - владеет ли связывание и закрывается ли, -
@@ -1230,21 +1542,25 @@ impl<'a> Elaborator<'a> {
     /// глубине: у аргумента верхнего уровня по спайну написанного, у поля по
     /// объявлению конструктора. Отсюда рекурсия `drop` по полям (§3.3):
     /// `f (Wrap h) = …` закрывает `h` так же, как закрыл бы аргумент.
-    fn clause_variables(&self, clause: &ast::Clause, patterns: &[CorePattern]) -> Vec<BoundVar> {
+    fn clause_variables(
+        &self,
+        written: &[(Option<&Pattern>, CorePattern)],
+        body: &Expr,
+    ) -> Vec<BoundVar> {
         // Имена собираются первым проходом: они связывают тело, а значит и
         // затеняют в нём головы применений, - но в области видимости их ещё
         // нет, решение о вставке принимается раньше.
         let mut names = Vec::new();
-        for pattern in patterns {
+        for (_, pattern) in written {
             variables_of(pattern, &mut names);
         }
         let mut found = Vec::new();
-        for (position, (written, pattern)) in clause.patterns.iter().zip(patterns).enumerate() {
+        for (position, (source, pattern)) in written.iter().enumerate() {
             self.pattern_variables(
-                Some(written),
+                *source,
                 pattern,
                 self.declared.get(position),
-                &clause.body,
+                body,
                 &names,
                 &mut found,
             );
@@ -1254,9 +1570,10 @@ impl<'a> Elaborator<'a> {
 
     /// То же для одного паттерна, вглубь.
     ///
-    /// `written` теряется там, где у ядра формы нет вовсе; тогда упоминание
-    /// считается состоявшимся - направление ошибки то же, что и везде:
-    /// пропущенный `drop` вместо лишнего.
+    /// `written` теряется у имплисита, которого автор не писал, и там, где у
+    /// ядра формы нет вовсе; тогда упоминание считается состоявшимся -
+    /// направление ошибки то же, что и везде: пропущенный `drop` вместо
+    /// лишнего.
     fn pattern_variables(
         &self,
         written: Option<&Pattern>,
@@ -1394,11 +1711,41 @@ fn lifo(found: &mut [(u32, Symbol)]) {
     }
 }
 
+/// Начинается ли телескоп с выводимого связывания.
+fn opens_implicit(ty: &Term) -> bool {
+    matches!(ty, Term::Pi(binder, ..) if binder.visibility.is_implicit())
+}
+
+/// Поля конструктора с `_` на местах имплиситов.
+///
+/// То же, что `spread` делает с паттернами клаузы, и по той же причине:
+/// имплисит поднялся в телескоп конструктора, а `Cons x xs` про него не знает.
+/// Разбирать его нечем - имя типа в паттерне не пишется, - поэтому `_`.
+fn hidden_fields(ty: &Term, written: Vec<CorePattern>) -> Vec<CorePattern> {
+    let mut found = Vec::new();
+    let mut rest = written.into_iter();
+    let mut current = ty;
+    while let Term::Pi(binder, _, _, _, codomain) = current {
+        if binder.visibility.is_implicit() {
+            found.push(CorePattern::Var(CoreName::from("_")));
+        } else {
+            let Some(pattern) = rest.next() else {
+                break;
+            };
+            found.push(pattern);
+        }
+        current = codomain;
+    }
+    found.extend(rest);
+    found
+}
+
 /// Связывания по спайну `Pi` - столько, сколько видно синтаксически.
 fn pi_arguments(ty: &Term, owned: &Owned) -> Vec<Argument> {
     let mut found = Vec::new();
     let mut current = ty;
-    while let Term::Pi(Binder { mult, .. }, _, domain, _, codomain) = current {
+    while let Term::Pi(binder, bound, domain, _, codomain) = current {
+        let mult = &binder.mult;
         let mut head = &**domain;
         while let Term::App(callee, _) = head {
             head = callee;
@@ -1410,6 +1757,8 @@ fn pi_arguments(ty: &Term, owned: &Owned) -> Vec<Argument> {
         found.push(Argument {
             mult: *mult,
             domain: Rc::clone(domain),
+            name: Rc::clone(bound),
+            implicit: binder.visibility.is_implicit(),
             owned: name.is_some_and(|name| owned.owns(name)),
             functional: matches!(&**domain, Term::Pi(..)),
             drop: name.and_then(|name| owned.destructor_of(name)).cloned(),
@@ -1417,6 +1766,24 @@ fn pi_arguments(ty: &Term, owned: &Owned) -> Vec<Argument> {
         current = codomain;
     }
     found
+}
+
+/// Имена, которые связывает паттерн.
+fn binds_names(pattern: &Pattern, bound: &mut Vec<Symbol>) {
+    match &pattern.kind {
+        PatternKind::Name(name) => bound.push(Rc::clone(&name.text)),
+        PatternKind::App { fields, .. } => {
+            for field in fields {
+                binds_names(field, bound);
+            }
+        }
+        PatternKind::Tuple(items) => {
+            for item in items {
+                binds_names(item, bound);
+            }
+        }
+        PatternKind::Wildcard | PatternKind::Lit(_) => {}
+    }
 }
 
 /// Повторное имя переменной в клаузе.

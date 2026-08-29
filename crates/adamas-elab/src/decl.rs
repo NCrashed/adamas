@@ -29,7 +29,7 @@ use adamas_core::term::{Binder, Term};
 use adamas_parser::ast::{self, DeclKind, Module, Symbol};
 
 use crate::error::{ElabError, Missing, Names};
-use crate::expr::Elaborator;
+use crate::expr::{Elaborator, Member};
 use crate::own::{Owned, Ownership};
 use crate::route::{self, Declared};
 
@@ -91,8 +91,8 @@ pub fn elaborate_into(
                         span: ty.span,
                     });
                 }
-                let elaborated = Elaborator::new(signature, metas, owned)
-                    .typing(|it| it.expr(ty, Mult::Many))?;
+                let elaborated =
+                    Elaborator::new(signature, metas, owned).declaration(ty, Mult::Many)?;
                 pending = Some(Pending {
                     name: Rc::clone(&name.text),
                     ty: elaborated,
@@ -176,7 +176,11 @@ fn define(
         error: Box::new(error),
         names: Names::of(&declared.name, Vec::new()),
     })?;
-    let group = vec![(Rc::clone(&declared.name), levels)];
+    let group = vec![Member {
+        name: Rc::clone(&declared.name),
+        levels,
+        ty: Rc::new(declared.ty.clone()),
+    }];
     let compiled = {
         let mut elaborator =
             Elaborator::with_group(signature, metas, owned, group).declaring(&declared.ty);
@@ -382,8 +386,7 @@ fn declare_resource(
     // сигнатуре тот появляется только сейчас. Домен получает `1` тем же
     // правилом, что и всякое связывание ресурсного типа, - писать `(1 h : …)`
     // руками не нужно и не требуется §3.3.
-    let elaborated =
-        Elaborator::new(signature, metas, owned).typing(|it| it.expr(drop_ty, Mult::Many))?;
+    let elaborated = Elaborator::new(signature, metas, owned).declaration(drop_ty, Mult::Many)?;
     // Форма проверяется здесь, один раз, а не в каждой точке вставки: вызов
     // `drop` подставляется компилятором, и тип его результата обязан быть
     // написан в области видимости, где ресурса уже нет.
@@ -601,9 +604,13 @@ fn declare_data(
         .constructors
         .iter()
         .map(|constructor| {
-            let group = vec![(Rc::clone(&data.name.text), Rc::clone(&levels))];
+            let group = vec![Member {
+                name: Rc::clone(&data.name.text),
+                levels: Rc::clone(&levels),
+                ty: Rc::new(kind.clone()),
+            }];
             let ty = Elaborator::with_group(signature, metas, owned, group)
-                .typing(|it| it.expr(&constructor.ty, Mult::One))?;
+                .declaration(&constructor.ty, Mult::One)?;
             owned_field(&ty, owned, data, constructor)?;
             Ok((&*constructor.name.text, ty))
         })

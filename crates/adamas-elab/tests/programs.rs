@@ -384,10 +384,11 @@ fn what_the_core_cannot_carry_yet_names_itself() {
     // Таблица покрывает варианты целиком: непокрытый вариант - это форма,
     // про которую никто не проверял, что она вообще досюда доходит.
     let missing = [
-        ("f : a -> a\n", Missing::Implicits),
+        (
+            "f : Nat\nf =\n  let x : a = Zero\n  x\n",
+            Missing::FreeTypeVariable,
+        ),
         ("f : {a : Type} -> Nat\n", Missing::ImplicitBinder),
-        ("f : Nat -> Nat\nf x = x @Nat\n", Missing::TypeApplication),
-        ("f : Nat -> Nat\nf x = _\n", Missing::TermHole),
         ("f : Nat -> Nat\nf x = 1\n", Missing::Literal),
         ("f : Nat\nf =\n  let x = Zero\n  x\n", Missing::UntypedLet),
         (
@@ -483,22 +484,74 @@ fn a_block_must_end_with_a_value() {
 }
 
 #[test]
-fn a_free_type_variable_is_refused_for_now() {
-    // Полиморфизм упирается в ядро, а не в элаборацию: подъём `a` в
-    // implicit-параметр требует видимости у `Pi` и метапеременных на термах.
-    let error = refused("f : a -> a\n");
-    let ElabError::Missing {
-        what: Missing::Implicits,
-        ..
-    } = error
-    else {
-        panic!("ожидались имплиситы, получено {error:?}");
-    };
-    // В теле то же имя - опечатка, а не свободная переменная: поднимать в
-    // implicit-параметр там нечего.
+fn a_free_type_variable_of_a_signature_is_lifted() {
+    // §4.1: свободное имя сигнатуры - implicit-параметр. Проверяется не форма
+    // поднятого типа, а то, что за ней следует: определение применимо к
+    // значениям разных типов, и аргумент к нему никто не писал.
+    let signature = program(&format!(
+        "{BASE}
+P : Nat -> Type
+anything : (0 n : Nat) -> P n
+
+identity : a -> a
+identity x = x
+
+one : Nat
+one = identity (Succ Zero)
+
+yes : Bool
+yes = identity True
+"
+    ));
+    // Одно определение при двух разных типах аргумента - это и значит, что
+    // параметр поднялся: писать его никто не писал.
+    let one = Term::constant("one");
+    let outcome = check_closed(
+        &signature,
+        &at("anything").apply([Term::constant("Succ").apply([Term::constant("Zero")])]),
+        &at("P").apply([one]),
+    );
+    assert!(outcome.is_ok(), "поднятое вычисляет: {outcome:?}");
+
+    // В теле то же имя - опечатка, а не свободная переменная: поднимается
+    // сигнатура объявления, а тело от неё уже связано.
     let error = refused(&format!("{BASE}f : Nat -> Nat\nf n = a\n"));
     assert!(
         matches!(error, ElabError::UnknownName { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_lifted_parameter_is_written_with_an_at_sign() {
+    // §4.1: `@` пишет то, что иначе вывелось бы. Написанное и выведенное дают
+    // одно определение - это и есть проверяемое, а не форма терма.
+    let signature = program(&format!(
+        "{BASE}
+P : Nat -> Type
+anything : (0 n : Nat) -> P n
+
+identity : a -> a
+identity x = x
+
+written : Nat
+written = identity @Nat Zero
+"
+    ));
+    let outcome = check_closed(
+        &signature,
+        &at("anything").apply([Term::constant("Zero")]),
+        &at("P").apply([Term::constant("written")]),
+    );
+    assert!(outcome.is_ok(), "написанное вычисляет так же: {outcome:?}");
+
+    // Явному связыванию `@` не соответствует: аргумент туда пишется обычным
+    // применением, и подмена одного другим - ошибка, а не вкус.
+    let error = refused(&format!(
+        "{BASE}f : Nat -> Nat\nf n = n\n\ng : Nat\ng = f @Nat Zero\n"
+    ));
+    assert!(
+        matches!(error, ElabError::NoImplicitParameter { .. }),
         "получено {error:?}"
     );
 }
@@ -1381,4 +1434,58 @@ operand h = True <| (\\b -> drop h)
     for name in ["local", "operand"] {
         assert!(signature.lookup(name).is_some(), "{name}");
     }
+}
+
+#[test]
+fn an_implicit_is_inserted_under_a_let() {
+    // Дырка, заведённая под `let`, не вправе брать его связывание в спайн:
+    // вычисление подставляет значение, и спайн перестаёт быть переменными, то
+    // есть паттерном. В типе дырки связывание при этом остаётся - иначе
+    // поехали бы индексы цели.
+    let signature = program(&format!(
+        "{BASE}
+P : Nat -> Type
+anything : (0 n : Nat) -> P n
+
+identity : a -> a
+identity x = x
+
+f : Nat
+f =
+  let x : Nat = Succ Zero
+  identity x
+"
+    ));
+    let outcome = check_closed(
+        &signature,
+        &at("anything").apply([Term::constant("Succ").apply([Term::constant("Zero")])]),
+        &at("P").apply([Term::constant("f")]),
+    );
+    assert!(outcome.is_ok(), "{outcome:?}");
+}
+
+#[test]
+fn an_implicit_does_not_take_a_written_position() {
+    // Правило вставки `drop` (§3.3) читает кратности параметров по спайну
+    // объявленного типа, сопоставляя их с написанными аргументами. Имплисит
+    // места в написанном не занимает: сочти его позицией - и `swallow h`
+    // прочлось бы как расход в `0`-параметре, то есть «не упомянут», а `h`
+    // закрылся бы вставкой сверх собственного расхода.
+    //
+    // Что такую программу принимают вовсе - §10 вопрос 76: под переменной типа
+    // ресурс не узнаётся, и `drop` не вставляется ни здесь, ни в `swallow`.
+    let text = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+swallow : (1 x : a) -> Bool
+swallow x = True
+
+release : (1 h : File) -> Bool
+release h = swallow h
+"
+    );
+    program(&text);
 }

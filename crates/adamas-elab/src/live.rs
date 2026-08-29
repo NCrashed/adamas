@@ -47,7 +47,7 @@
 
 use adamas_core::mult::Mult;
 use adamas_core::sig::Signature;
-use adamas_core::term::{Binder, Term};
+use adamas_core::term::Term;
 use adamas_parser::ast::{
     Alt, Binding, Chain, Expr, ExprKind, LamParamKind, Pattern, PatternKind, Stmt, StmtKind, Symbol,
 };
@@ -158,8 +158,12 @@ impl<'a> Spent<'a> {
         };
         let mut mults = Vec::new();
         let mut current = &definition.ty;
-        while let Term::Pi(Binder { mult, .. }, _, _, _, codomain) = current {
-            mults.push(*mult);
+        while let Term::Pi(binder, _, _, _, codomain) = current {
+            // Имплисит написанной позиции не занимает: аргумент ему вставляет
+            // элаборация, а считают здесь то, что написал автор.
+            if !binder.visibility.is_implicit() {
+                mults.push(binder.mult);
+            }
             current = codomain;
         }
         mults

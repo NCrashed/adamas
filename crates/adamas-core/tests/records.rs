@@ -242,3 +242,55 @@ fn a_tail_that_is_not_a_row_is_refused() {
         "получено {outcome:?}"
     );
 }
+
+#[test]
+fn a_tail_absorbs_what_the_other_side_has() {
+    // `{ x : Type 0 | ?r } ~ { x : Type 0, y : Type 1 }` решается однозначно:
+    // общая метка совпала, а недостающее уходит в хвост. Это и есть то, на чём
+    // стоит §4.2: `magnitude` над записью с лишними полями.
+    let signature = Signature::default();
+    let mut metas = adamas_core::meta::Metas::default();
+    let ctx = adamas_core::ctx::Ctx::new(&signature);
+
+    let kind = ctx.eval(&Term::RowKind(Level::number(2)));
+    let hole = metas.fresh_term(kind, 0);
+    let opened = Term::Record(open(&[field("x", Term::universe(0))], hole));
+    let closed = Term::Record(Fields::closed(Rc::from([
+        field("x", Term::universe(0)),
+        field("y", Term::universe(1)),
+    ])));
+
+    let (left, right) = (ctx.eval(&opened), ctx.eval(&closed));
+    assert!(
+        adamas_core::conv::convertible(&signature, &mut metas, 0, &left, &right),
+        "хвост обязан вобрать `y`"
+    );
+    // Решение наблюдается тем же способом, каким его увидит проверка: после
+    // него открытая запись конвертируема с закрытой и только с ней.
+    let other = Term::Record(Fields::closed(Rc::from([field("x", Term::universe(0))])));
+    let other = ctx.eval(&other);
+    assert!(
+        !adamas_core::conv::convertible(&signature, &mut metas, 0, &left, &other),
+        "решение окончательно"
+    );
+}
+
+#[test]
+fn a_common_label_must_agree() {
+    // Хвост берёт только то, чего у другой стороны нет; общая метка обязана
+    // сойтись типом.
+    let signature = Signature::default();
+    let mut metas = adamas_core::meta::Metas::default();
+    let ctx = adamas_core::ctx::Ctx::new(&signature);
+
+    let kind = ctx.eval(&Term::RowKind(Level::number(2)));
+    let hole = metas.fresh_term(kind, 0);
+    let opened = Term::Record(open(&[field("x", Term::universe(0))], hole));
+    let clashing = Term::Record(Fields::closed(Rc::from([field("x", Term::universe(1))])));
+
+    let (left, right) = (ctx.eval(&opened), ctx.eval(&clashing));
+    assert!(
+        !adamas_core::conv::convertible(&signature, &mut metas, 0, &left, &right),
+        "`x : Type 0` против `x : Type 1`"
+    );
+}

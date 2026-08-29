@@ -43,10 +43,12 @@
 
 use std::rc::Rc;
 
-use crate::eval::{apply, try_apply, try_eliminate_case};
+use crate::eval::{apply, quote, try_apply, try_eliminate_case};
 use crate::meta::Metas;
+use crate::mult::Mult;
 use crate::sig::Signature;
 use crate::solve::{force, solve};
+use crate::term::{Field, Fields, Name, Term};
 use crate::value::{Elim, Head, Lvl, StuckCase, Telescope, Value};
 
 /// Конвертируемы ли два значения в контексте размера `size`.
@@ -222,15 +224,15 @@ fn same_telescope(
     left: &Telescope,
     right: &Telescope,
 ) -> bool {
+    // Закрытая запись - **телескоп**: порядок значим, потому что поле вправе
+    // ссылаться на предыдущее (§4.2). Открытая зависимостей не имеет, и там
+    // сравнение идёт по именам - иначе `{ x : A | r }` не сошлось бы с
+    // `{ y : B, x : A }`, а ровно это row-полиморфизм и обещает.
+    if left.is_open() || right.is_open() {
+        return same_open(fuel, sig, metas, size, left, right);
+    }
     if left.fields().len() != right.fields().len() {
         return false;
-    }
-    // Хвост - часть телескопа: `{ x : A }` и `{ x : A | r }` разные типы, и
-    // значение одного не встало бы на место другого.
-    match (left.tail(), right.tail()) {
-        (None, None) => {}
-        (Some(a), Some(b)) if convertible_within(fuel, sig, metas, size, &a, &b) => {}
-        _ => return false,
     }
     let mut earlier = Vec::with_capacity(left.fields().len());
     for (index, (a, b)) in left.fields().iter().zip(right.fields()).enumerate() {
@@ -245,6 +247,105 @@ fn same_telescope(
         earlier.push(Value::var(Lvl(depth)));
     }
     true
+}
+
+/// Сравнивает ряды, из которых хотя бы один открыт.
+///
+/// Общие метки сравниваются попарно, а расхождение уходит в хвост: то, чего
+/// нет слева, обязан дать хвост левого, и наоборот. Два открытых ряда решаются
+/// через **свежий** хвост - тот, что остаётся после изъятия обеих голов; без
+/// него `{ x : A | r } ~ { y : B | s }` не имело бы наименьшего решения.
+fn same_open(
+    fuel: u32,
+    sig: &Signature,
+    metas: &mut Metas,
+    size: u32,
+    left: &Telescope,
+    right: &Telescope,
+) -> bool {
+    let (ours, theirs) = (labelled(size, left), labelled(size, right));
+    for (name, mine) in &ours {
+        if let Some(yours) = theirs.iter().find(|(it, _)| it == name) {
+            if !convertible_within(fuel, sig, metas, size, mine, &yours.1) {
+                return false;
+            }
+        }
+    }
+    let missing = |from: &[(Name, Rc<Value>)], other: &[(Name, Rc<Value>)]| -> Vec<Field> {
+        from.iter()
+            .filter(|(name, _)| !other.iter().any(|(it, _)| it == name))
+            .map(|(name, ty)| Field {
+                name: Rc::clone(name),
+                mult: Mult::One,
+                ty: Rc::new(quote(size, ty)),
+            })
+            .collect()
+    };
+    let (only_ours, only_theirs) = (missing(&ours, &theirs), missing(&theirs, &ours));
+    match (left.tail(), right.tail()) {
+        // Один открыт: недостающее обязан дать его хвост, а лишнего у
+        // закрытой стороны быть не может.
+        (Some(tail), None) => {
+            only_ours.is_empty() && solved(fuel, sig, metas, size, &tail, only_theirs, None)
+        }
+        (None, Some(tail)) => {
+            only_theirs.is_empty() && solved(fuel, sig, metas, size, &tail, only_ours, None)
+        }
+        (Some(ours_tail), Some(theirs_tail)) => {
+            let level = metas.fresh_level();
+            let kind = Rc::new(Value::RowKind(level));
+            let rest = metas.fresh_term(kind, size);
+            solved(
+                fuel,
+                sig,
+                metas,
+                size,
+                &ours_tail,
+                only_theirs,
+                Some(rest.clone()),
+            ) && solved(fuel, sig, metas, size, &theirs_tail, only_ours, Some(rest))
+        }
+        (None, None) => unreachable!("хотя бы один ряд открыт"),
+    }
+}
+
+/// Имена и типы полей ряда - под свежими переменными вместо предыдущих полей.
+///
+/// Открытый ряд зависимостей не имеет, поэтому подставлять туда что-либо
+/// осмысленное незачем: переменные нужны только чтобы телескоп дошёл до конца.
+fn labelled(size: u32, telescope: &Telescope) -> Vec<(Name, Rc<Value>)> {
+    let mut earlier = Vec::with_capacity(telescope.fields().len());
+    let mut found = Vec::with_capacity(telescope.fields().len());
+    for (index, field) in telescope.fields().iter().enumerate() {
+        found.push((Rc::clone(&field.name), telescope.at(index, &earlier)));
+        earlier.push(Value::var(Lvl(size + u32::try_from(index).unwrap_or(0))));
+    }
+    found
+}
+
+/// Сводит хвост с рядом из недостающих полей и, возможно, своего хвоста.
+fn solved(
+    fuel: u32,
+    sig: &Signature,
+    metas: &mut Metas,
+    size: u32,
+    tail: &Rc<Value>,
+    fields: Vec<Field>,
+    rest: Option<Term>,
+) -> bool {
+    let row = Term::Row(Fields {
+        fields: fields.into(),
+        tail: rest.map(Rc::new),
+    });
+    let expected = crate::eval::eval(&fresh_env(size), &row);
+    convertible_within(fuel, sig, metas, size, tail, &expected)
+}
+
+/// Окружение из `size` свободных переменных - под ним читаются ряды.
+fn fresh_env(size: u32) -> crate::value::Env {
+    (0..size).fold(crate::value::Env::default(), |env, level| {
+        env.extend(Value::var(Lvl(level)))
+    })
 }
 
 /// Совпадают ли головы застрявших вычислений.

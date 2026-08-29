@@ -48,7 +48,7 @@ use crate::meta::Metas;
 use crate::mult::Mult;
 use crate::row::{Label, Row};
 use crate::sig::Signature;
-use crate::term::{Field, Term, TermMeta};
+use crate::term::{Field, Fields, Term, TermMeta};
 use crate::value::{Elim, Head, Lvl, Value};
 
 /// Разворачивает решённые дырки в голове значения.
@@ -118,6 +118,52 @@ pub fn solve(
         crate::eval::eval(&crate::value::Env::default(), &abstracted),
     );
     true
+}
+
+/// Читает телескоп полей под переименованием - по одному полю.
+///
+/// Хвост читается на исходной глубине: открытый ряд зависимостей не имеет
+/// (§4.2, решение 2026-08-29), и под поля он не заходит.
+#[allow(clippy::too_many_arguments)]
+fn read_fields(
+    metas: &Metas,
+    meta: TermMeta,
+    renaming: &HashMap<u32, u32>,
+    outer: u32,
+    arity: u32,
+    depth: u32,
+    telescope: &crate::value::Telescope,
+) -> Option<Fields> {
+    let mut earlier = Vec::with_capacity(telescope.fields().len());
+    let mut written = Vec::with_capacity(telescope.fields().len());
+    for (index, field) in telescope.fields().iter().enumerate() {
+        let ty = telescope.at(index, &earlier);
+        let step = u32::try_from(index).unwrap_or(0);
+        written.push(Field {
+            name: Rc::clone(&field.name),
+            mult: field.mult,
+            ty: Rc::new(read(
+                metas,
+                meta,
+                renaming,
+                outer,
+                arity,
+                depth + step,
+                &ty,
+            )?),
+        });
+        earlier.push(Value::var(Lvl(outer + depth + step)));
+    }
+    let tail = match telescope.tail() {
+        Some(tail) => Some(Rc::new(read(
+            metas, meta, renaming, outer, arity, depth, &tail,
+        )?)),
+        None => None,
+    };
+    Some(Fields {
+        fields: written.into(),
+        tail,
+    })
 }
 
 /// Кратности телескопа типа дырки, снаружи внутрь.
@@ -279,29 +325,12 @@ fn read(
         // Телескоп читается по одному полю, как и при обычном обратном
         // чтении: тип следующего живёт под предыдущими, поэтому глубина растёт
         // вместе с ними, а переименование остаётся тем же.
-        Value::Record(telescope) => {
-            let mut earlier = Vec::with_capacity(telescope.fields().len());
-            let mut written = Vec::with_capacity(telescope.fields().len());
-            for (index, field) in telescope.fields().iter().enumerate() {
-                let ty = telescope.at(index, &earlier);
-                let step = u32::try_from(index).unwrap_or(0);
-                written.push(Field {
-                    name: Rc::clone(&field.name),
-                    mult: field.mult,
-                    ty: Rc::new(read(
-                        metas,
-                        meta,
-                        renaming,
-                        outer,
-                        arity,
-                        depth + step,
-                        &ty,
-                    )?),
-                });
-                earlier.push(Value::var(Lvl(outer + depth + step)));
-            }
-            Some(Term::Record(written.into()))
-        }
+        Value::Record(telescope) => Some(Term::Record(read_fields(
+            metas, meta, renaming, outer, arity, depth, telescope,
+        )?)),
+        Value::Row(telescope) => Some(Term::Row(read_fields(
+            metas, meta, renaming, outer, arity, depth, telescope,
+        )?)),
         Value::Object(fields) => {
             let mut written = Vec::with_capacity(fields.len());
             for (name, value) in fields.iter() {
@@ -311,8 +340,5 @@ fn read(
         }
         Value::Universe(level) => Some(Term::Universe(level.clone())),
         Value::RowKind(level) => Some(Term::RowKind(level.clone())),
-        // Ряд в решении дырки читается тем же проходом, что и запись; форму
-        // его вернёт вызывающий, потому что здесь она не различима.
-        Value::Row(_) => None,
     }
 }

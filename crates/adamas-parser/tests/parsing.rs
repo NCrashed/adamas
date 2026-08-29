@@ -11,6 +11,15 @@ fn tree(text: &str) -> Result<String, Error> {
     Ok(dump(&parse(text)?))
 }
 
+/// `count` строк подряд, каждая по своему номеру.
+fn repeat(count: usize, each: impl Fn(usize) -> String) -> String {
+    let mut out = String::new();
+    for index in 0..count {
+        out.push_str(&each(index));
+    }
+    out
+}
+
 /// Ошибка разбора; всё остальное - провал теста.
 fn parse_error(text: &str) -> ParseError {
     match parse(text) {
@@ -337,30 +346,70 @@ fn an_error_names_what_was_expected_and_points_at_the_token() {
 
 #[test]
 fn deep_nesting_is_an_error_not_a_crash() {
-    // Спуск рекурсивен, поэтому глубина исходника - это глубина стека. Урок
+    // Спуск рекурсивен, поэтому глубина записи - это глубина стека. Урок
     // warm-up'а Фазы 0: без предела компилятор падает вместо сообщения.
     let deep = format!("f = {}x{}\n", "(".repeat(20_000), ")".repeat(20_000));
-    let error = parse_error(&deep);
-    assert!(
-        matches!(error, ParseError::TooDeep { .. }),
-        "получено {error:?}"
-    );
-    // Спайн вложенности не стоит, поэтому у него предел свой: рекурсивен не
-    // разбор, а всякий, кто пойдёт по получившемуся дереву (§10 вопрос 62).
-    let long = format!("f = g{}\n", " x".repeat(300));
-    let error = parse_error(&long);
-    assert!(
-        matches!(error, ParseError::TooLong { .. }),
-        "получено {error:?}"
-    );
-    assert!(
-        parse(&format!("f = g{}\n", " x".repeat(256))).is_ok(),
-        "предел не должен резать программу ровно на границе"
-    );
+    assert!(matches!(parse_error(&deep), ParseError::TooDeep { .. }));
     // Предел не должен резать законные программы: сотня стрелок в сигнатуре
     // абсурдна, но глубже неё предел не опускается.
     let wide = format!("f : {}a\n", "a -> ".repeat(100));
     assert!(tree(&wide).is_ok());
+}
+
+/// Плоский список, разворачивающийся в цепочку узлов ядра, ограничен той же
+/// мерой, что и вложенность записи (§10 вопрос 62).
+///
+/// Все четыре набираются циклом, поэтому разбор их переживает: рекурсивен не
+/// он, а всякий, кто пойдёт по получившемуся дереву.
+#[test]
+fn a_flat_list_that_unfolds_into_a_chain_is_bounded_too() {
+    let refused = |what: &str, text: &str| {
+        let error = parse_error(text);
+        assert!(
+            matches!(error, ParseError::TooDeep { .. }),
+            "{what}: получено {error:?}"
+        );
+    };
+
+    refused("спайн", &format!("f = g{}\n", " x".repeat(257)));
+    refused(
+        "операторы блока",
+        &format!(
+            "f =\n{}  x\n",
+            repeat(257, |index| format!("  let x{index} : T = y\n"))
+        ),
+    );
+    refused(
+        "связывания одного `let`",
+        &format!(
+            "f =\n  let\n{}  x\n",
+            repeat(257, |index| format!("    x{index} : T = y\n"))
+        ),
+    );
+    refused(
+        "имена в группе",
+        &format!(
+            "f : (0{} : T) -> T\n",
+            repeat(257, |index| format!(" a{index}"))
+        ),
+    );
+    // Предел общий, поэтому формы **складываются**: каждая порознь под ним, а
+    // вместе - нет. Порознь поставленные пределы этого не ловили.
+    refused(
+        "скобки со спайнами",
+        &format!(
+            "f = {}x{}\n",
+            "(g ".repeat(30),
+            format!("{})", " y".repeat(20)).repeat(30)
+        ),
+    );
+}
+
+#[test]
+fn the_limit_does_not_cut_on_its_own_boundary() {
+    assert!(parse(&format!("f = g{}\n", " x".repeat(256))).is_ok());
+    let block = repeat(256, |index| format!("  let x{index} : T = y\n"));
+    assert!(parse(&format!("f =\n{block}  x\n")).is_ok());
 }
 
 #[test]

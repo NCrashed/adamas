@@ -1352,7 +1352,9 @@ fn infer_object(
         });
         usage = usage + &found;
     }
-    let record = Term::Record(written.into());
+    // Закрытая: у значения записи полей ровно столько, сколько написано, и
+    // хвосту взяться неоткуда.
+    let record = Term::Record(Fields::closed(written.into()));
     Ok((ctx.eval(&record), usage))
 }
 

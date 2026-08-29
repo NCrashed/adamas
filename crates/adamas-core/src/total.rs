@@ -98,7 +98,10 @@ fn calls_a_partial_definition(signature: &Signature, name: &Name, term: &Term) -
     let recur = |inner| calls_a_partial_definition(signature, name, inner);
     match term {
         Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Meta(_) => false,
-        Term::Record(fields) | Term::Row(fields) => fields.iter().any(|field| recur(&field.ty)),
+        Term::Record(fields) | Term::Row(fields) => {
+            fields.iter().any(|field| recur(&field.ty))
+                || fields.tail.as_ref().is_some_and(|tail| recur(tail))
+        }
         Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
         Term::Project(record, _) => recur(record),
         Term::Const(other, _) => {
@@ -173,6 +176,11 @@ impl Walk<'_> {
             Term::Record(fields) | Term::Row(fields) => {
                 for field in fields.iter() {
                     self.term(sizes, &field.ty);
+                }
+                // Хвост - обычный терм на исходной глубине: вызов в нём
+                // обязан найтись так же, как в поле.
+                if let Some(tail) = &fields.tail {
+                    self.term(sizes, tail);
                 }
             }
             Term::Object(fields) => {

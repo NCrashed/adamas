@@ -294,3 +294,77 @@ fn a_common_label_must_agree() {
         "`x : Type 0` против `x : Type 1`"
     );
 }
+
+#[test]
+fn a_row_without_own_fields_is_its_tail() {
+    // Единичный закон расширения: `{| r }` и `r` описывают один набор меток.
+    // Без него `r` - переменная, а `{| r }` - конструктор, и свести их нечем;
+    // на этом спотыкалась унификация двух открытых записей.
+    let signature = Signature::default();
+    let mut metas = adamas_core::meta::Metas::default();
+    let ctx = adamas_core::ctx::Ctx::new(&signature);
+
+    let kind = ctx.eval(&Term::RowKind(Level::number(0)));
+    let hole = metas.fresh_term(kind, 0);
+    let empty = Term::Row(Fields {
+        fields: Rc::from([]),
+        tail: Some(Rc::new(hole.clone())),
+    });
+    let (left, right) = (ctx.eval(&empty), ctx.eval(&hole));
+    assert!(adamas_core::conv::convertible(
+        &signature, &mut metas, 0, &left, &right
+    ));
+}
+
+#[test]
+fn two_open_rows_meet_through_the_tail_that_lacks_nothing() {
+    // `{ x : A | ?r } ~ { x : A, y : B | ?s }`: разность на одной стороне, и
+    // остаток - хвост другой. Свежая дырка под остаток не заводится - её тип
+    // был бы телескопом контекста, которого сравнение не знает.
+    let signature = Signature::default();
+    let mut metas = adamas_core::meta::Metas::default();
+    let ctx = adamas_core::ctx::Ctx::new(&signature);
+
+    let kind = ctx.eval(&Term::RowKind(Level::number(2)));
+    let ours = metas.fresh_term(Rc::clone(&kind), 0);
+    let theirs = metas.fresh_term(kind, 0);
+    let narrow = Term::Record(open(&[field("x", Term::universe(0))], ours.clone()));
+    let wide = Term::Record(open(
+        &[field("x", Term::universe(0)), field("y", Term::universe(1))],
+        theirs.clone(),
+    ));
+
+    let (left, right) = (ctx.eval(&narrow), ctx.eval(&wide));
+    assert!(adamas_core::conv::convertible(
+        &signature, &mut metas, 0, &left, &right
+    ));
+    // Решение наблюдается тем же способом, каким его увидит проверка: хвост
+    // узкой стороны стал недостающей меткой поверх хвоста широкой.
+    let expected = ctx.eval(&Term::Row(open(&[field("y", Term::universe(1))], theirs)));
+    let solved = ctx.eval(&ours);
+    assert!(
+        adamas_core::conv::convertible(&signature, &mut metas, 0, &solved, &expected),
+        "хвост узкой стороны получил недостающую метку"
+    );
+}
+
+#[test]
+fn two_open_rows_each_missing_a_label_are_refused() {
+    // Названная граница: обе разности непусты, остаток выразить нечем, и
+    // завести его дыркой нельзя - тип у неё телескоп контекста, которого
+    // сравнение не носит (§10 вопрос 80).
+    let signature = Signature::default();
+    let mut metas = adamas_core::meta::Metas::default();
+    let ctx = adamas_core::ctx::Ctx::new(&signature);
+
+    let kind = ctx.eval(&Term::RowKind(Level::number(2)));
+    let ours = metas.fresh_term(Rc::clone(&kind), 0);
+    let theirs = metas.fresh_term(kind, 0);
+    let left = Term::Record(open(&[field("x", Term::universe(0))], ours));
+    let right = Term::Record(open(&[field("y", Term::universe(1))], theirs));
+
+    let (left, right) = (ctx.eval(&left), ctx.eval(&right));
+    assert!(!adamas_core::conv::convertible(
+        &signature, &mut metas, 0, &left, &right
+    ));
+}

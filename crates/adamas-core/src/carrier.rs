@@ -250,6 +250,9 @@ fn inherit(signature: &Signature, term: &Term, depth: u32, found: &mut [Mult]) {
                 let depth = depth + u32::try_from(index).unwrap_or(0);
                 inherit(signature, &field.ty, depth, found);
             }
+            if let Some(tail) = &fields.tail {
+                inherit(signature, tail, depth, found);
+            }
         }
         Term::Object(fields) => {
             for (_, value) in fields.iter() {

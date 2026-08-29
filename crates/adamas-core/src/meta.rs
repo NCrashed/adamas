@@ -365,6 +365,9 @@ impl Generalization {
                 for field in fields.iter() {
                     self.collect_term(metas, &field.ty);
                 }
+                if let Some(tail) = &fields.tail {
+                    self.collect_term(metas, tail);
+                }
             }
             Term::Object(fields) => {
                 for (_, value) in fields.iter() {
@@ -529,9 +532,10 @@ pub fn unsolved_term_meta(metas: &Metas, term: &Term) -> Option<TermMeta> {
     match term {
         Term::Meta(meta) => metas.term_solution(*meta).is_none().then_some(*meta),
         Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Const(..) => None,
-        Term::Record(fields) | Term::Row(fields) => {
-            fields.iter().find_map(|field| recur(&field.ty))
-        }
+        Term::Record(fields) | Term::Row(fields) => fields
+            .iter()
+            .find_map(|field| recur(&field.ty))
+            .or_else(|| fields.tail.as_ref().and_then(recur)),
         Term::Object(fields) => fields.iter().find_map(|(_, value)| recur(value)),
         Term::Project(record, _) => recur(record),
         Term::Lam(_, _, body) => recur(body),
@@ -580,7 +584,13 @@ pub fn unsolved_level_meta(metas: &Metas, term: &crate::term::Term) -> Option<Le
         Term::Universe(level) | Term::RowKind(level) => in_level(metas, level),
         Term::Record(fields) | Term::Row(fields) => fields
             .iter()
-            .find_map(|field| unsolved_level_meta(metas, &field.ty)),
+            .find_map(|field| unsolved_level_meta(metas, &field.ty))
+            .or_else(|| {
+                fields
+                    .tail
+                    .as_ref()
+                    .and_then(|tail| unsolved_level_meta(metas, tail))
+            }),
         Term::Object(fields) => fields
             .iter()
             .find_map(|(_, value)| unsolved_level_meta(metas, value)),

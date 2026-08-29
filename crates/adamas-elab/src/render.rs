@@ -23,7 +23,7 @@ use adamas_core::check::{Frame, TypeError};
 use adamas_core::level::{Level, LevelMeta};
 use adamas_core::pattern::PatternError;
 use adamas_core::source::{Location, SourceFile, Span};
-use adamas_core::term::{Binder, Case, Index, Name, Term};
+use adamas_core::term::{Binder, Case, Fields, Index, Name, Term};
 
 use crate::error::{ElabError, Names};
 
@@ -265,6 +265,11 @@ impl Naming {
     /// типа из телескопа это его собственная позиция, у терма сообщения - ноль.
     fn term(&self, term: &mut Term, bound: &mut Vec<Name>, outer: usize) {
         match term {
+            // Ряд и запись переписываются одинаково, но **собираются каждый
+            // своим узлом**: `Row` - значение сорта `Row ℓ`, и назвать его
+            // записью значит соврать о том, что не сошлось. Хвост при этом
+            // стоит на исходной глубине, а не под полями: открытый ряд
+            // зависимостей не имеет (§4.2).
             Term::Record(fields) | Term::Row(fields) => {
                 let mut written = Vec::with_capacity(fields.len());
                 for (index, field) in fields.iter().enumerate() {
@@ -272,7 +277,19 @@ impl Naming {
                     self.term(&mut ty, bound, outer + index);
                     written.push(renamed(field, ty));
                 }
-                *term = Term::Record(written.into());
+                let tail = fields.tail.as_ref().map(|tail| {
+                    let mut tail = tail.as_ref().clone();
+                    self.term(&mut tail, bound, outer);
+                    Rc::new(tail)
+                });
+                let rebuilt = Fields {
+                    fields: written.into(),
+                    tail,
+                };
+                *term = match term {
+                    Term::Row(_) => Term::Row(rebuilt),
+                    _ => Term::Record(rebuilt),
+                };
             }
             Term::Object(fields) => {
                 let mut written = Vec::with_capacity(fields.len());
@@ -383,6 +400,9 @@ fn collect_term(term: &Term, ordered: &mut Vec<LevelMeta>) {
         Term::Record(fields) | Term::Row(fields) => {
             for field in fields.iter() {
                 collect_term(&field.ty, ordered);
+            }
+            if let Some(tail) = &fields.tail {
+                collect_term(tail, ordered);
             }
         }
         Term::Object(fields) => {

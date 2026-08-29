@@ -56,26 +56,31 @@ struct Lifted {
     row: bool,
 }
 
-/// Сколько записей написано в сигнатуре на верхнем уровне.
+/// Записи, написанные в сигнатуре на верхнем уровне, - по спану каждой.
 ///
 /// Каждая получает свою row-переменную (§4.2: auto-lift в позиции аргумента и
 /// результата). Вложенная в другую запись не считается: там она поле, а поле -
 /// это тип, и закрывает его та же запись, что его объявила.
-fn written_rows(expr: &Expr) -> usize {
+///
+/// Спан, а не число: по нему запись потом себя и узнает. Одна написанная
+/// группа связываний элаборируется по разу на имя, и счёт вхождений разъехался
+/// бы с раздачей.
+fn written_rows(expr: &Expr, found: &mut Vec<Span>) {
     match &expr.kind {
-        ExprKind::RecordType(_) => 1,
+        ExprKind::RecordType(_) => found.push(expr.span),
         ExprKind::App(left, right)
         | ExprKind::TypeApp(left, right)
-        | ExprKind::Arrow(left, right) => written_rows(left) + written_rows(right),
-        ExprKind::Pi { binders, codomain } => {
-            binders
-                .iter()
-                .filter_map(|it| it.ty.as_ref())
-                .map(written_rows)
-                .sum::<usize>()
-                + written_rows(codomain)
+        | ExprKind::Arrow(left, right) => {
+            written_rows(left, found);
+            written_rows(right, found);
         }
-        _ => 0,
+        ExprKind::Pi { binders, codomain } => {
+            for ty in binders.iter().filter_map(|it| it.ty.as_ref()) {
+                written_rows(ty, found);
+            }
+            written_rows(codomain, found);
+        }
+        _ => {}
     }
 }
 
@@ -277,12 +282,20 @@ pub(crate) struct Elaborator<'a> {
     expected: Vec<Argument>,
     /// Идёт ли элаборация в позиции типа - см. `typing`.
     types: bool,
-    /// Сколько row-переменных сигнатуры уже роздано записям (§4.2).
+    /// Записи сигнатуры, которым роздана row-переменная (§4.2), - по спану
+    /// каждой в порядке написания.
     ///
-    /// `usize::MAX` - записи закрыты: так элаборируются алиас `type` и всё,
-    /// что сигнатурой не является. Auto-lift применяется только там, где
+    /// `None` - записи закрыты: так элаборируются алиас `type` и всё, что
+    /// сигнатурой не является. Auto-lift применяется только там, где
     /// row-переменную есть кому связать.
-    rows: usize,
+    ///
+    /// **Ключ - спан, а не счётчик.** Один написанный тип элаборируется
+    /// столько раз, сколько имён в его группе (`(0 a b : { x : Nat })` - два),
+    /// и счётчик уезжал бы на каждом: второе имя искало бы переменную, которой
+    /// никто не связал, и молча получало закрытую запись. Спан один на всю
+    /// группу, поэтому и переменная одна - как и обязано быть у одного
+    /// написанного типа.
+    rows: Option<Vec<Span>>,
     /// Запрещена ли вставка имплиситов ближайшему имени - см. `type_app`.
     bare: bool,
     /// Где стоит ближайший подтерм - см. [`Position`].
@@ -336,7 +349,7 @@ impl<'a> Elaborator<'a> {
             declared: Vec::new(),
             expected: Vec::new(),
             bare: false,
-            rows: usize::MAX,
+            rows: None,
             types: false,
             position: Position::Inner,
             produced: None,
@@ -477,16 +490,18 @@ impl<'a> Elaborator<'a> {
             .into_iter()
             .map(|name| Lifted { name, row: false })
             .collect();
-        // Записи сигнатуры получают row-переменную каждая своя, и считаются
+        // Записи сигнатуры получают row-переменную каждая своя, и собираются
         // они синтаксически - до элаборации, ровно как свободные имена: имя
         // связывания нужно знать раньше, чем оно понадобится.
-        for index in 0..written_rows(ty) {
+        let mut rows = Vec::new();
+        written_rows(ty, &mut rows);
+        for index in 0..rows.len() {
             lifted.push(Lifted {
                 name: Rc::from(format!("#row{index}").as_str()),
                 row: true,
             });
         }
-        self.rows = 0;
+        self.rows = Some(rows);
         self.lifting(&lifted, ty, default)
     }
 
@@ -982,7 +997,7 @@ impl<'a> Elaborator<'a> {
 
             // Тип записи - телескоп: каждое следующее поле элаборируется под
             // предыдущими, потому что вправе на них ссылаться (§4.2).
-            ExprKind::RecordType(fields) => self.record_type(fields),
+            ExprKind::RecordType(fields) => self.record_type(fields, expr.span),
             ExprKind::Record(fields) => self.record(fields),
             ExprKind::Project(record, name) => {
                 let inner = self.placed(Position::Inner, |it| it.expr(record, Mult::Many))?;
@@ -1231,10 +1246,10 @@ impl<'a> Elaborator<'a> {
     ///
     /// Поле кратности `1` (§4.1): запись кладёт значение однажды - тот же
     /// довод, что у поля конструктора.
-    fn record_type(&mut self, fields: &[ast::RecordField]) -> Result<Term, ElabError> {
+    fn record_type(&mut self, fields: &[ast::RecordField], span: Span) -> Result<Term, ElabError> {
         // Хвост берётся один раз на запись - до полей: связывание его стоит
         // снаружи них, и внутри индекс был бы уже другим.
-        let tail = self.row_variable();
+        let tail = self.row_variable(span);
         let inner = self.record_fields(fields)?;
         Ok(Term::Record(Fields {
             fields: inner.into(),
@@ -1245,14 +1260,12 @@ impl<'a> Elaborator<'a> {
     /// Row-переменная этой записи, если сигнатура их раздаёт (§4.2).
     ///
     /// Закрыты записи в алиасе `type` и всюду, где связать переменную нечем:
-    /// раздаёт их `declaration`, и раздаёт ровно столько, сколько насчитала.
-    fn row_variable(&mut self) -> Option<Rc<Term>> {
-        let index = self
-            .rows
-            .checked_add(1)
-            .filter(|_| self.rows != usize::MAX)?;
-        let name: Symbol = Rc::from(format!("#row{}", self.rows).as_str());
-        self.rows = index;
+    /// раздаёт их `declaration`, и раздаёт ровно тем, кого насчитала. Запись
+    /// узнаёт свою по спану, поэтому повторная элаборация одного написанного
+    /// типа берёт ту же переменную, а не следующую.
+    fn row_variable(&mut self, span: Span) -> Option<Rc<Term>> {
+        let index = self.rows.as_ref()?.iter().position(|it| *it == span)?;
+        let name: Symbol = Rc::from(format!("#row{index}").as_str());
         self.local(&name).map(|it| Rc::new(Term::var(it)))
     }
 

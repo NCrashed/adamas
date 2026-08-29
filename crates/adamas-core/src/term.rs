@@ -177,23 +177,16 @@ impl Fields {
     }
 }
 
+/// Читать поля как срез удобно, и на это [`Deref`] и заведён. **Строить так
+/// нельзя:** `From<Vec<Field>>` и `FromIterator` отсюда убраны намеренно.
+/// Пересобранный список полей, отданный в `.into()`, закрывал бы запись
+/// молча - и закрывал: за один срез это случилось шесть раз, каждый раз в
+/// новом проходе. Пусть тот, кто собирает, скажет про хвост вслух.
 impl std::ops::Deref for Fields {
     type Target = [Field];
 
     fn deref(&self) -> &Self::Target {
         &self.fields
-    }
-}
-
-impl From<Vec<Field>> for Fields {
-    fn from(fields: Vec<Field>) -> Self {
-        Self::closed(fields.into())
-    }
-}
-
-impl FromIterator<Field> for Fields {
-    fn from_iter<T: IntoIterator<Item = Field>>(iter: T) -> Self {
-        Self::closed(iter.into_iter().collect())
     }
 }
 

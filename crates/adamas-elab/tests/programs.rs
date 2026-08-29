@@ -1848,6 +1848,73 @@ wide = first {{ x = Zero, y = Zero, z = Succ Zero }}
 }
 
 #[test]
+fn open_records_compose() {
+    // Открытая запись, переданная дальше, - самый обычный код, и до правки
+    // 2026-08-30 он не проходил: два открытых ряда сводились через свежий
+    // остаток, дырку под который нечем было типизировать. Остаток теперь
+    // выражается хвостом той стороны, которой нечего добавить.
+    program(&format!(
+        "{BASE}
+first : {{ x : Nat, y : Nat }} -> Nat
+first p = p.x
+
+again : {{ x : Nat, y : Nat }} -> Nat
+again q = first q
+
+wider : {{ x : Nat, y : Nat, z : Nat }} -> Nat
+wider q = first q
+
+counted : {{ x : Nat, y : Nat }} -> Nat -> Nat
+counted p Zero = p.x
+counted p (Succ k) = counted p k
+"
+    ));
+}
+
+#[test]
+fn one_written_record_gives_one_row_variable() {
+    // Группа `(0 a b : …)` элаборирует свой тип по разу на имя, и раздача по
+    // счётчику уезжала: `b` получала закрытую запись молча. Написан тип один -
+    // значит и переменная одна. Соседняя запись при этом своя: два разных
+    // параметра расширяются независимо.
+    program(&format!(
+        "{BASE}
+pair : (0 a b : {{ x : Nat, y : Nat }}) -> Nat
+pair a b = Zero
+
+both : Nat
+both = pair {{ x = Zero, y = Zero, z = Zero }} {{ x = Zero, y = Zero, z = Zero }}
+
+apart : {{ x : Nat, y : Nat }} -> {{ a : Nat, b : Nat }} -> Nat
+apart p q = p.x
+
+mixed : Nat
+mixed = apart {{ x = Zero, y = Zero, z = Zero }} {{ a = Zero, b = Zero }}
+"
+    ));
+}
+
+#[test]
+fn an_open_record_does_not_gain_fields_it_lacks() {
+    // Обратное направление обязано отказывать: `wide` требует `z`, а у
+    // открытой записи с `x` и `y` его нет и взяться неоткуда - хвост
+    // принадлежит вызывающему, не вызываемому.
+    let error = refused(&format!(
+        "{BASE}
+wide : {{ x : Nat, y : Nat, z : Nat }} -> Nat
+wide q = q.z
+
+narrow : {{ x : Nat, y : Nat }} -> Nat
+narrow p = wide p
+"
+    ));
+    assert!(
+        matches!(error, ElabError::Core { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
 fn a_record_alias_is_closed() {
     // Запись в алиасе `type` закрыта (§4.2): `Point` - конкретный тип, а не
     // «класс записей, содержащих x и y». Лишнее поле поэтому не подходит.

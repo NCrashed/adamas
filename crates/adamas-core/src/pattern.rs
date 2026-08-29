@@ -1664,6 +1664,8 @@ fn depends_term(term: &Term, depth: u32, size: u32, levels: &[u32]) -> bool {
     match term {
         Term::Var(Index(index)) => *index >= depth && levels.contains(&(size + depth - 1 - index)),
         Term::Universe(_) | Term::RowKind(_) | Term::Const(..) | Term::Meta(_) => false,
+        // Хвост стоит на исходной глубине, а не под полями: открытый ряд
+        // зависимостей не имеет (§4.2).
         Term::Record(fields) | Term::Row(fields) => {
             fields.iter().enumerate().any(|(index, field)| {
                 depends_term(
@@ -1672,7 +1674,7 @@ fn depends_term(term: &Term, depth: u32, size: u32, levels: &[u32]) -> bool {
                     size,
                     levels,
                 )
-            })
+            }) || fields.tail.as_ref().is_some_and(&recur)
         }
         Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
         Term::Project(record, _) => recur(record),
@@ -1818,7 +1820,10 @@ fn well_scoped(term: &Term, binders: u32) -> bool {
                         depth + u32::try_from(index).unwrap_or(0),
                         binders,
                     )
-                })
+                }) && fields
+                    .tail
+                    .as_ref()
+                    .is_none_or(|tail| go(tail, depth, binders))
             }
             Term::Object(fields) => fields.iter().all(|(_, value)| go(value, depth, binders)),
             Term::Project(record, _) => go(record, depth, binders),

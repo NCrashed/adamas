@@ -102,7 +102,17 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
         // предыдущих. Окружение поэтому захватывается целиком - как у
         // замыкания.
         Term::Record(fields) => Rc::new(Value::Record(telescope(env, fields))),
-        Term::Row(fields) => Rc::new(Value::Row(telescope(env, fields))),
+
+        // **Ряд без собственных полей есть его хвост.** Это не оптимизация, а
+        // единичный закон расширения: `{| r }` и `r` описывают один набор
+        // меток. Без него `r` - переменная, а `{| r }` - конструктор, и
+        // сравнение их не сводит ничем; на этом спотыкалась унификация двух
+        // открытых записей. Запись так не схлопывается: `{ | r }` - тип
+        // значения с полями `r`, а не сам ряд.
+        Term::Row(fields) => match (fields.is_empty(), &fields.tail) {
+            (true, Some(tail)) => eval(env, tail),
+            _ => Rc::new(Value::Row(telescope(env, fields))),
+        },
 
         Term::Object(fields) => Rc::new(Value::Object(
             fields

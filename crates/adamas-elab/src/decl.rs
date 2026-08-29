@@ -595,6 +595,10 @@ fn mentions_local(term: &Term) -> bool {
         Term::Universe(_) | Term::RowKind(_) | Term::Const(..) | Term::Meta(_) => false,
         Term::Record(fields) | Term::Row(fields) => {
             fields.iter().any(|field| mentions_local(&field.ty))
+                || fields
+                    .tail
+                    .as_ref()
+                    .is_some_and(|tail| mentions_local(tail))
         }
         Term::Object(fields) => fields.iter().any(|(_, value)| mentions_local(value)),
         Term::Project(record, _) => mentions_local(record),

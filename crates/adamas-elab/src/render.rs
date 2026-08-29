@@ -265,6 +265,29 @@ impl Naming {
     /// типа из телескопа это его собственная позиция, у терма сообщения - ноль.
     fn term(&self, term: &mut Term, bound: &mut Vec<Name>, outer: usize) {
         match term {
+            Term::Record(fields) => {
+                let mut written = Vec::with_capacity(fields.len());
+                for (index, field) in fields.iter().enumerate() {
+                    let mut ty = field.ty.as_ref().clone();
+                    self.term(&mut ty, bound, outer + index);
+                    written.push(renamed(field, ty));
+                }
+                *term = Term::Record(written.into());
+            }
+            Term::Object(fields) => {
+                let mut written = Vec::with_capacity(fields.len());
+                for (name, value) in fields.iter() {
+                    let mut value = value.as_ref().clone();
+                    self.term(&mut value, bound, outer);
+                    written.push((Rc::clone(name), Rc::new(value)));
+                }
+                *term = Term::Object(written.into());
+            }
+            Term::Project(record, _) => {
+                let mut inner = record.as_ref().clone();
+                self.term(&mut inner, bound, outer);
+                *record = Rc::new(inner);
+            }
             Term::Var(Index(index)) => {
                 let index = *index as usize;
                 let name = match bound.len().checked_sub(index + 1) {
@@ -357,6 +380,17 @@ impl Naming {
 /// Дырки терма в порядке появления в тексте.
 fn collect_term(term: &Term, ordered: &mut Vec<LevelMeta>) {
     match term {
+        Term::Record(fields) => {
+            for field in fields.iter() {
+                collect_term(&field.ty, ordered);
+            }
+        }
+        Term::Object(fields) => {
+            for (_, value) in fields.iter() {
+                collect_term(value, ordered);
+            }
+        }
+        Term::Project(record, _) => collect_term(record, ordered),
         // Дырка терма своих уровней не носит: они в её типе, а он живёт
         // отдельно.
         Term::Var(_) | Term::Meta(_) => {}
@@ -411,5 +445,14 @@ fn collect_level(level: &Level, ordered: &mut Vec<LevelMeta>) {
 fn push(ordered: &mut Vec<LevelMeta>, meta: LevelMeta) {
     if !ordered.contains(&meta) {
         ordered.push(meta);
+    }
+}
+
+/// Поле записи с переписанным типом - именование его не трогает.
+fn renamed(field: &adamas_core::term::Field, ty: Term) -> adamas_core::term::Field {
+    adamas_core::term::Field {
+        name: Rc::clone(&field.name),
+        mult: field.mult,
+        ty: Rc::new(ty),
     }
 }

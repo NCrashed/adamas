@@ -102,6 +102,9 @@ fn any_term() -> BoxedStrategy<Term> {
 /// Все ли индексы терма попадают в область видимости.
 fn well_scoped(term: &Term, binders: u32) -> bool {
     match term {
+        Term::Record(_) | Term::Object(_) | Term::Project(..) => {
+            unreachable!("генератор термов записей не порождает")
+        }
         Term::Var(Index(index)) => *index < binders,
         Term::Const(..) | Term::Universe(_) | Term::Meta(_) => true,
         Term::Lam(_, _, body) => well_scoped(body, binders + 1),
@@ -127,6 +130,9 @@ fn well_scoped(term: &Term, binders: u32) -> bool {
 /// согласованность функции с самой собой.
 fn is_normal_form(term: &Term) -> bool {
     match term {
+        Term::Record(_) | Term::Object(_) | Term::Project(..) => {
+            unreachable!("генератор термов записей не порождает")
+        }
         // Определение застревает так же, как переменная: обратное чтение его
         // не разворачивает, значит это уже нормальная форма.
         Term::Var(_) | Term::Const(..) | Term::Meta(_) => true,
@@ -146,6 +152,9 @@ fn is_normal_form(term: &Term) -> bool {
 /// Переименовывает все связывания - на семантику это влиять не должно.
 fn rename(term: &Term) -> Term {
     match term {
+        Term::Record(_) | Term::Object(_) | Term::Project(..) => {
+            unreachable!("генератор термов записей не порождает")
+        }
         Term::Var(_) | Term::Universe(_) | Term::Const(..) | Term::Meta(_) => term.clone(),
         Term::Lam(mult, _, body) => Term::Lam(*mult, "renamed".into(), Rc::new(rename(body))),
         Term::App(callee, argument) => {
@@ -190,6 +199,9 @@ fn wrap_in_redexes(term: &Term, budget: &mut u32) -> Term {
     };
 
     let rebuilt = match term {
+        Term::Record(_) | Term::Object(_) | Term::Project(..) => {
+            unreachable!("генератор термов записей не порождает")
+        }
         Term::Var(_) | Term::Universe(_) | Term::Const(..) | Term::Meta(_) => term.clone(),
         Term::Lam(mult, name, body) => Term::Lam(
             *mult,

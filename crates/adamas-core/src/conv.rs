@@ -205,6 +205,11 @@ pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
     spine.iter().try_fold(body, |callee, elim| match elim {
         Elim::App(argument) => try_apply(&callee, Rc::clone(argument)),
         Elim::Case(case) => try_eliminate_case(case, &callee),
+        // ÐÑÐ¾ÐµÐºÑÐ¸Ñ Ð¸Ð· ÑÐ°Ð·Ð²ÑÑÐ½ÑÑÐ¾Ð³Ð¾ Ð¾Ð¿ÑÐµÐ´ÐµÐ»ÐµÐ½Ð¸Ñ: ÐµÑÐ»Ð¸ ÑÑÐ¾ ÑÐ¶Ðµ Ð·Ð°Ð¿Ð¸ÑÑ, Ð¿Ð¾Ð»Ðµ
+        // Ð±ÐµÑÑÑÑÑ, Ð¸Ð½Ð°ÑÐµ ÑÐ°Ð·Ð²Ð¾ÑÐ¾Ñ Ð½Ðµ Ð¿Ð¾Ð¼Ð¾Ð³ Ð¸ ÑÑÐ°Ð²Ð½ÐµÐ½Ð¸Ðµ Ð¸Ð´ÑÑ Ð´Ð°Ð»ÑÑÐµ.
+        Elim::Project(name) => {
+            matches!(&*callee, Value::Object(_)).then(|| crate::eval::project(&callee, name))
+        }
     })
 }
 
@@ -246,6 +251,7 @@ fn same_elim(
     match (left, right) {
         (Elim::App(a), Elim::App(b)) => convertible_within(fuel, sig, metas, size, a, b),
         (Elim::Case(a), Elim::Case(b)) => same_case(fuel, sig, metas, size, a, b),
+        (Elim::Project(a), Elim::Project(b)) => a == b,
         _ => false,
     }
 }

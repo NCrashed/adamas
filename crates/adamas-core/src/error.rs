@@ -251,6 +251,48 @@ pub enum ErrorKind {
         sort: Level,
     },
 
+    /// Два поля записи с одним именем.
+    #[error("поле `{name}` объявлено дважды")]
+    DuplicateField {
+        /// Имя поля.
+        name: Name,
+    },
+
+    /// У записи не столько полей, сколько у её типа.
+    #[error("полей записи {found} при {expected} в типе")]
+    RecordFields {
+        /// Сколько полей у типа.
+        expected: usize,
+        /// Сколько написано.
+        found: usize,
+    },
+
+    /// Проекция не из записи.
+    #[error("проекция не из записи: `{ty}`")]
+    NotARecord {
+        /// Тип того, из чего проецировали.
+        ty: Term,
+    },
+
+    /// У записи нет такого поля.
+    #[error("у `{ty}` нет поля `{name}`")]
+    NoSuchField {
+        /// Имя поля.
+        name: Name,
+        /// Тип записи.
+        ty: Term,
+    },
+
+    /// Стёртое поле в рантайм-позиции.
+    ///
+    /// То же правило, что у стёртой переменной: значения у поля нет, и вынуть
+    /// его нечем.
+    #[error("поле `{name}` стёрто: значения у него нет")]
+    ErasedField {
+        /// Имя поля.
+        name: Name,
+    },
+
     /// Разбирается значение, тип которого не то индуктивное семейство.
     #[error("разбор `{data}`, но значение имеет тип `{ty}`")]
     NotADataValue {
@@ -343,12 +385,17 @@ impl ErrorKind {
             | Self::CannotInfer { term: ty }
             | Self::NotADataSort { found: ty, .. }
             | Self::ConstructorResult { found: ty, .. }
+            | Self::NotARecord { ty }
+            | Self::NoSuchField { ty, .. }
             | Self::NotADataValue { ty, .. } => terms.push(ty),
             Self::ConstructorUniverse { field, sort, .. } => levels.extend([field, sort]),
             Self::AmbiguousLevel { meta } | Self::UnsolvedDefinitionLevel { meta, .. } => {
                 metas.push(meta);
             }
-            Self::UnboundIndex { .. }
+            Self::RecordFields { .. }
+            | Self::DuplicateField { .. }
+            | Self::ErasedField { .. }
+            | Self::UnboundIndex { .. }
             | Self::LambdaMultiplicity { .. }
             | Self::UsageViolation { .. }
             | Self::UnknownConstant { .. }

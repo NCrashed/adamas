@@ -98,6 +98,9 @@ fn calls_a_partial_definition(signature: &Signature, name: &Name, term: &Term) -
     let recur = |inner| calls_a_partial_definition(signature, name, inner);
     match term {
         Term::Var(_) | Term::Universe(_) | Term::Meta(_) => false,
+        Term::Record(fields) => fields.iter().any(|field| recur(&field.ty)),
+        Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
+        Term::Project(record, _) => recur(record),
         Term::Const(other, _) => {
             other != name && signature.lookup(other).is_some_and(|found| !found.total)
         }
@@ -164,6 +167,20 @@ impl Walk<'_> {
             // Дырка размера не несёт и вызовом не является: она замкнута, а
             // зависимость от контекста выражена применениями вокруг неё.
             Term::Var(_) | Term::Universe(_) | Term::Meta(_) => {}
+
+            // ÐÐ°Ð¿Ð¸ÑÑ ÑÐ°Ð·Ð¼ÐµÑÐ° Ð½Ðµ Ð½ÐµÑÑÑ: Ð¿Ð¾Ð»Ñ - ÑÐ¸Ð¿Ñ Ð¸ Ð·Ð½Ð°ÑÐµÐ½Ð¸Ñ, Ð° ÑÐ¼ÐµÐ½ÑÑÐµÐ½Ð¸Ðµ
+            // ÑÑÐ¸ÑÐ°ÐµÑÑÑ Ð¿Ð¾ ÑÐ°Ð·Ð±Ð¾ÑÑ. ÐÐ±ÑÐ¾Ð´ Ð½ÑÐ¶ÐµÐ½, ÑÑÐ¾Ð±Ñ Ð²ÑÐ·Ð¾Ð²Ñ Ð²Ð½ÑÑÑÐ¸ Ð½Ð°ÑÐ»Ð¸ÑÑ.
+            Term::Record(fields) => {
+                for field in fields.iter() {
+                    self.term(sizes, &field.ty);
+                }
+            }
+            Term::Object(fields) => {
+                for (_, value) in fields.iter() {
+                    self.term(sizes, value);
+                }
+            }
+            Term::Project(record, _) => self.term(sizes, record),
 
             // Голое имя без аргументов - тоже вызов, просто без единой
             // позиции, по которой можно было бы уменьшаться.

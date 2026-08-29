@@ -76,7 +76,7 @@ use crate::mult::Mult;
 // сюда под своим полным смыслом в имени.
 use crate::row::Row as EffectRow;
 use crate::sig::{DefinitionKind, Signature};
-use crate::term::{Binder, Branch, Case, Index, Name, Term};
+use crate::term::{Binder, Branch, Case, Field as RecordField, Index, Name, Term};
 use crate::unify::{self, Match, Shape};
 use crate::value::{Elim, Head, Lvl, Value};
 
@@ -1664,6 +1664,16 @@ fn depends_term(term: &Term, depth: u32, size: u32, levels: &[u32]) -> bool {
     match term {
         Term::Var(Index(index)) => *index >= depth && levels.contains(&(size + depth - 1 - index)),
         Term::Universe(_) | Term::Const(..) | Term::Meta(_) => false,
+        Term::Record(fields) => fields.iter().enumerate().any(|(index, field)| {
+            depends_term(
+                &field.ty,
+                depth + u32::try_from(index).unwrap_or(0),
+                size,
+                levels,
+            )
+        }),
+        Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
+        Term::Project(record, _) => recur(record),
         Term::Lam(_, _, body) => under(body),
         Term::App(callee, argument) => recur(callee) || recur(argument),
         Term::Pi(_, _, domain, row, codomain) => {
@@ -1703,7 +1713,7 @@ fn constructor_value(signature: &Signature, value: &Rc<Value>) -> Option<Constru
         .iter()
         .map(|elim| match elim {
             Elim::App(argument) => Some(Rc::clone(argument)),
-            Elim::Case(_) => None,
+            Elim::Case(_) | Elim::Project(_) => None,
         })
         .collect::<Option<Vec<_>>>()?;
     Some((Rc::clone(name), Rc::clone(levels), arguments))
@@ -1738,7 +1748,7 @@ fn data_head(signature: &Signature, ty: &Rc<Value>) -> Option<DataHead> {
         .iter()
         .map(|elim| match elim {
             Elim::App(argument) => Some(Rc::clone(argument)),
-            Elim::Case(_) => None,
+            Elim::Case(_) | Elim::Project(_) => None,
         })
         .collect::<Option<Vec<_>>>()?;
     Some((Rc::clone(name), Rc::clone(levels), arguments))
@@ -1799,6 +1809,15 @@ fn well_scoped(term: &Term, binders: u32) -> bool {
         match term {
             Term::Var(Index(index)) => *index < depth + binders,
             Term::Universe(_) | Term::Const(..) | Term::Meta(_) => true,
+            Term::Record(fields) => fields.iter().enumerate().all(|(index, field)| {
+                go(
+                    &field.ty,
+                    depth + u32::try_from(index).unwrap_or(0),
+                    binders,
+                )
+            }),
+            Term::Object(fields) => fields.iter().all(|(_, value)| go(value, depth, binders)),
+            Term::Project(record, _) => go(record, depth, binders),
             Term::Lam(_, _, body) => go(body, depth + 1, binders),
             Term::App(callee, argument) => {
                 go(callee, depth, binders) && go(argument, depth, binders)
@@ -1845,6 +1864,29 @@ fn rewrite<F: Fn(u32) -> Term>(term: &Term, depth: u32, from: u32, map: &F) -> T
             let level = from + depth - 1 - index;
             shift(&map(level), depth)
         }
+        Term::Record(fields) => Term::Record(
+            fields
+                .iter()
+                .enumerate()
+                .map(|(index, field)| RecordField {
+                    name: Rc::clone(&field.name),
+                    mult: field.mult,
+                    ty: Rc::new(rewrite(
+                        &field.ty,
+                        depth + u32::try_from(index).unwrap_or(0),
+                        from,
+                        map,
+                    )),
+                })
+                .collect(),
+        ),
+        Term::Object(fields) => Term::Object(
+            fields
+                .iter()
+                .map(|(name, value)| (Rc::clone(name), recur(value)))
+                .collect(),
+        ),
+        Term::Project(record, name) => Term::Project(recur(record), Rc::clone(name)),
         Term::Universe(_) | Term::Const(..) | Term::Meta(_) => term.clone(),
         Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), under(body)),
         Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
@@ -1888,6 +1930,24 @@ fn shift(term: &Term, by: u32) -> Term {
         match term {
             Term::Var(Index(index)) if *index >= depth => Term::Var(Index(index + by)),
             Term::Var(_) | Term::Universe(_) | Term::Const(..) | Term::Meta(_) => term.clone(),
+            Term::Record(fields) => Term::Record(
+                fields
+                    .iter()
+                    .enumerate()
+                    .map(|(index, field)| RecordField {
+                        name: Rc::clone(&field.name),
+                        mult: field.mult,
+                        ty: Rc::new(go(&field.ty, depth + u32::try_from(index).unwrap_or(0), by)),
+                    })
+                    .collect(),
+            ),
+            Term::Object(fields) => Term::Object(
+                fields
+                    .iter()
+                    .map(|(name, value)| (Rc::clone(name), recur(value)))
+                    .collect(),
+            ),
+            Term::Project(record, name) => Term::Project(recur(record), Rc::clone(name)),
             Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), under(body)),
             Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
             Term::Pi(binder, name, domain, row, codomain) => Term::Pi(

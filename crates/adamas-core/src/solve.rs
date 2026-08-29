@@ -72,6 +72,7 @@ pub fn force(metas: &Metas, value: &Rc<Value>) -> Option<Rc<Value>> {
         .fold(Rc::clone(solution), |head, elim| match elim {
             Elim::App(argument) => apply(&head, Rc::clone(argument)),
             Elim::Case(case) => crate::eval::eliminate_case(case, &head),
+            Elim::Project(name) => crate::eval::project(&head, name),
         });
     Some(force(metas, &replayed).unwrap_or(replayed))
 }
@@ -230,6 +231,7 @@ fn read(
                 Head::Meta(found) => Term::Meta(*found),
             };
             spine.iter().try_fold(base, |callee, elim| match elim {
+                Elim::Project(name) => Some(Term::Project(Rc::new(callee), Rc::clone(name))),
                 Elim::App(argument) => Some(Term::App(Rc::new(callee), Rc::new(recur(argument)?))),
                 // Разбор переписывать нечем: мотив и ветви - значения, и
                 // обратное чтение под переименованием для них не написано.
@@ -274,6 +276,10 @@ fn read(
                 )?),
             ))
         }
+        // ÐÐ°Ð¿Ð¸ÑÑ Ð² ÑÐµÑÐµÐ½Ð¸Ð¸ Ð´ÑÑÐºÐ¸ ÑÐ¸ÑÐ°ÑÑ Ð¾Ð±ÑÐ°ÑÐ½Ð¾ Ð½ÐµÑÐµÐ¼: ÑÐµÐ»ÐµÑÐºÐ¾Ð¿ ÑÑÐµÐ±ÑÐµÑ
+        // Ð¿ÐµÑÐµÐ¸Ð¼ÐµÐ½Ð¾Ð²Ð°Ð½Ð¸Ñ Ð¿Ð¾Ð´ ÐºÐ°Ð¶Ð´ÑÐ¼ Ð¿Ð¾Ð»ÐµÐ¼, Ð° Ð¶Ð¸Ð²Ð¾Ð³Ð¾ Ð¿Ð¾ÑÑÐµÐ±Ð¸ÑÐµÐ»Ñ Ñ ÑÑÐ¾Ð³Ð¾ Ð½ÐµÑ.
+        // ÐÑÐºÐ°Ð· ÐºÐ¾Ð½ÑÐµÑÐ²Ð°ÑÐ¸Ð²ÐµÐ½ Ð¸ ÑÑÐ·Ð¸ÑÑÑ Ð²Ð¼ÐµÑÑÐµ Ñ Ð¿ÐµÑÐ²ÑÐ¼.
+        Value::Record(_) | Value::Object(_) => None,
         Value::Universe(level) => Some(Term::Universe(level.clone())),
     }
 }

@@ -22,8 +22,8 @@
 
 use std::rc::Rc;
 
-use crate::term::{Branch, Case, Term};
-use crate::value::{Closure, Elim, Env, Head, Lvl, StuckBranch, StuckCase, Value};
+use crate::term::{Branch, Case, Field, Name, Term};
+use crate::value::{Closure, Elim, Env, Head, Lvl, StuckBranch, StuckCase, Telescope, Value};
 
 impl Closure {
     /// Применяет замыкание к аргументу.
@@ -99,6 +99,23 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
         // разбор целиком значит вычислить мотив и все ветви, а у дерева
         // разбора ветвь сама бывает разбором: цена растёт как `2^d` вместо
         // `d`. Застрявший разбор собирается только когда он и правда застрял.
+        // Тип записи вычислением не раскрывается: поля живут телескопом, и
+        // вычислить тип поля можно только вместе со значениями предыдущих.
+        // Окружение поэтому захватывается целиком - как у замыкания.
+        Term::Record(fields) => Rc::new(Value::Record(Telescope {
+            env: env.clone(),
+            fields: Rc::clone(fields),
+        })),
+
+        Term::Object(fields) => Rc::new(Value::Object(
+            fields
+                .iter()
+                .map(|(name, value)| (Rc::clone(name), eval(env, value)))
+                .collect(),
+        )),
+
+        Term::Project(record, name) => project(&eval(env, record), name),
+
         Term::Case(case) => {
             let scrutinee = eval(env, &case.scrutinee);
             let selected = match &*scrutinee {
@@ -118,6 +135,29 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
     }
 }
 
+/// Берёт поле у записи; на застрявшем значении копит проекцию в спайне.
+///
+/// # Panics
+///
+/// Если поля нет: имена сверяет проверка типов, и промах здесь - её пропуск.
+#[must_use]
+pub fn project(record: &Rc<Value>, name: &Name) -> Rc<Value> {
+    match &**record {
+        Value::Object(fields) => {
+            let Some((_, value)) = fields.iter().find(|(field, _)| field == name) else {
+                unreachable!("поля `{name}` нет в записи")
+            };
+            Rc::clone(value)
+        }
+        Value::Neutral(head, spine) => {
+            let mut spine = spine.clone();
+            spine.push(Elim::Project(Rc::clone(name)));
+            Rc::new(Value::Neutral(head.clone(), spine))
+        }
+        _ => unreachable!("проекция не из записи: {record}"),
+    }
+}
+
 /// Применяет тело ветви к полям конструктора.
 ///
 /// Спайн конструктора - это параметры, потом поля; ветвь получает только
@@ -128,7 +168,7 @@ fn apply_fields(body: Rc<Value>, spine: &[Elim], params: u32) -> Option<Rc<Value
         .skip(params as usize)
         .try_fold(body, |body, elim| match elim {
             Elim::App(argument) => try_apply(&body, Rc::clone(argument)),
-            Elim::Case(_) => None,
+            Elim::Case(_) | Elim::Project(_) => None,
         })
 }
 
@@ -247,6 +287,31 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
         // `max u 0` не отличался от `u`.
         Value::Universe(level) => Term::Universe(level.normalize()),
 
+        // Телескоп читается по одному полю: тип каждого следующего живёт под
+        // предыдущими, и подставлять туда надо свежие переменные.
+        Value::Record(telescope) => {
+            let mut earlier = Vec::with_capacity(telescope.fields().len());
+            let mut written = Vec::with_capacity(telescope.fields().len());
+            for (index, field) in telescope.fields().iter().enumerate() {
+                let ty = telescope.at(index, &earlier);
+                let depth = size + u32::try_from(index).unwrap_or(0);
+                written.push(Field {
+                    name: Rc::clone(&field.name),
+                    mult: field.mult,
+                    ty: Rc::new(quote(depth, &ty)),
+                });
+                earlier.push(Value::var(Lvl(depth)));
+            }
+            Term::Record(written.into())
+        }
+
+        Value::Object(fields) => Term::Object(
+            fields
+                .iter()
+                .map(|(name, value)| (Rc::clone(name), Rc::new(quote(size, value))))
+                .collect(),
+        ),
+
         Value::Neutral(head, spine) => {
             let base = match head {
                 Head::Local(level) => Term::Var(level.to_index(size)),
@@ -255,6 +320,7 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
             };
             spine.iter().fold(base, |callee, elim| match elim {
                 Elim::App(argument) => Term::App(Rc::new(callee), Rc::new(quote(size, argument))),
+                Elim::Project(name) => Term::Project(Rc::new(callee), Rc::clone(name)),
                 // Накопленный терм и есть то, на чём разбор застрял.
                 Elim::Case(case) => Term::Case(Rc::new(Case {
                     data: Rc::clone(&case.data),

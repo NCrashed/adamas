@@ -12,7 +12,7 @@ use std::rc::Rc;
 use crate::level::Level;
 use crate::mult::Mult;
 use crate::row::Row;
-use crate::term::{Binder, Index, Name, Term, TermMeta};
+use crate::term::{Binder, Field, Index, Name, Term, TermMeta};
 
 /// Уровень де Брёйна: сколько связываний отсчитать от начала контекста.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -138,6 +138,8 @@ pub enum Elim {
     App(Rc<Value>),
     /// Разбор по конструктору.
     Case(Rc<StuckCase>),
+    /// Проекция поля записи.
+    Project(Name),
 }
 
 /// Разбор, застрявший на неизвестном значении.
@@ -182,8 +184,47 @@ pub enum Value {
     Lam(Mult, Name, Closure),
     /// Тип функции вместе с row того, что происходит при применении (§3.4).
     Pi(Binder, Name, Rc<Value>, Row<Rc<Value>>, Closure),
+    /// Тип записи - телескоп полей вместе с окружением.
+    ///
+    /// Хранится термами, а не значениями: тип поля живёт под предыдущими
+    /// полями, поэтому вычислить его можно только тогда, когда их значения
+    /// известны. Ровно тот же приём, что у [`Closure`], только связываний в нём
+    /// не одно.
+    Record(Telescope),
+    /// Значение записи. Зависимости здесь уже нет - поля вычислены.
+    Object(Rc<[(Name, Rc<Value>)]>),
     /// Универсум.
     Universe(Level),
+}
+
+/// Телескоп полей записи: термы вместе с окружением, в котором их вычислять.
+#[derive(Clone, Debug)]
+pub struct Telescope {
+    pub(crate) env: Env,
+    pub(crate) fields: Rc<[Field]>,
+}
+
+impl Telescope {
+    /// Поля как они написаны - имена и кратности видны без вычисления.
+    #[must_use]
+    pub fn fields(&self) -> &[Field] {
+        &self.fields
+    }
+
+    /// Тип поля `index` при уже известных значениях предыдущих полей.
+    ///
+    /// # Panics
+    ///
+    /// Если значений меньше, чем полей до `index`: телескоп вычисляется по
+    /// одному полю, и пропуск - баг вызывающего.
+    #[must_use]
+    pub fn at(&self, index: usize, earlier: &[Rc<Value>]) -> Rc<Value> {
+        assert!(earlier.len() >= index, "телескоп вычисляется по порядку");
+        let env = earlier[..index]
+            .iter()
+            .fold(self.env.clone(), |env, value| env.extend(Rc::clone(value)));
+        crate::eval::eval(&env, &self.fields[index].ty)
+    }
 }
 
 impl Value {
@@ -226,6 +267,8 @@ impl fmt::Display for Value {
                 let (open, close) = binder.visibility.brackets();
                 write!(f, "{open}{} {name} : …{close} -> {row}…", binder.mult)
             }
+            Self::Record(telescope) => write!(f, "{{…{}}}", telescope.fields.len()),
+            Self::Object(fields) => write!(f, "{{={}}}", fields.len()),
             Self::Universe(level) => write!(f, "Type {level}"),
         }
     }

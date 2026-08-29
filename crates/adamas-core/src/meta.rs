@@ -361,6 +361,17 @@ impl Generalization {
             // хранится отдельно и обобщается вместе с определением.
             Term::Var(_) | Term::Meta(_) => {}
             Term::Universe(level) => self.collect_level(metas, level),
+            Term::Record(fields) => {
+                for field in fields.iter() {
+                    self.collect_term(metas, &field.ty);
+                }
+            }
+            Term::Object(fields) => {
+                for (_, value) in fields.iter() {
+                    self.collect_term(metas, value);
+                }
+            }
+            Term::Project(record, _) => self.collect_term(metas, record),
             Term::Lam(_, _, body) => self.collect_term(metas, body),
             Term::App(callee, argument) => {
                 self.collect_term(metas, callee);
@@ -435,6 +446,23 @@ impl Generalization {
         match term {
             Term::Var(_) | Term::Meta(_) => term.clone(),
             Term::Universe(level) => Term::Universe(self.apply_level(metas, level)),
+            Term::Record(fields) => Term::Record(
+                fields
+                    .iter()
+                    .map(|field| crate::term::Field {
+                        name: Rc::clone(&field.name),
+                        mult: field.mult,
+                        ty: recur(&field.ty),
+                    })
+                    .collect(),
+            ),
+            Term::Object(fields) => Term::Object(
+                fields
+                    .iter()
+                    .map(|(name, value)| (Rc::clone(name), recur(value)))
+                    .collect(),
+            ),
+            Term::Project(record, name) => Term::Project(recur(record), Rc::clone(name)),
             Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), recur(body)),
             Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
             Term::Pi(binder, name, domain, row, codomain) => Term::Pi(
@@ -490,6 +518,9 @@ pub fn unsolved_term_meta(metas: &Metas, term: &Term) -> Option<TermMeta> {
     match term {
         Term::Meta(meta) => metas.term_solution(*meta).is_none().then_some(*meta),
         Term::Var(_) | Term::Universe(_) | Term::Const(..) => None,
+        Term::Record(fields) => fields.iter().find_map(|field| recur(&field.ty)),
+        Term::Object(fields) => fields.iter().find_map(|(_, value)| recur(value)),
+        Term::Project(record, _) => recur(record),
         Term::Lam(_, _, body) => recur(body),
         Term::App(callee, argument) => recur(callee).or_else(|| recur(argument)),
         Term::Pi(_, _, domain, row, codomain) => {
@@ -534,6 +565,13 @@ pub fn unsolved_level_meta(metas: &Metas, term: &crate::term::Term) -> Option<Le
     match term {
         Term::Var(_) | Term::Meta(_) => None,
         Term::Universe(level) => in_level(metas, level),
+        Term::Record(fields) => fields
+            .iter()
+            .find_map(|field| unsolved_level_meta(metas, &field.ty)),
+        Term::Object(fields) => fields
+            .iter()
+            .find_map(|(_, value)| unsolved_level_meta(metas, value)),
+        Term::Project(record, _) => unsolved_level_meta(metas, record),
         Term::Lam(_, _, body) => unsolved_level_meta(metas, body),
         Term::App(callee, argument) => {
             unsolved_level_meta(metas, callee).or_else(|| unsolved_level_meta(metas, argument))
@@ -579,6 +617,23 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
         // записали, и уровни внутри него могли решиться позже. Без этого
         // прохода дырка уровня уезжает в определение живой, а обобщение её не
         // видит - оно смотрит уже зонканный тип.
+        Term::Record(fields) => Term::Record(
+            fields
+                .iter()
+                .map(|field| crate::term::Field {
+                    name: Rc::clone(&field.name),
+                    mult: field.mult,
+                    ty: recur(&field.ty),
+                })
+                .collect(),
+        ),
+        Term::Object(fields) => Term::Object(
+            fields
+                .iter()
+                .map(|(name, value)| (Rc::clone(name), recur(value)))
+                .collect(),
+        ),
+        Term::Project(record, name) => Term::Project(recur(record), Rc::clone(name)),
         Term::Meta(meta) => match metas.term_solution(*meta) {
             Some(solution) => zonk_term(metas, &crate::eval::quote(0, solution)),
             None => term.clone(),

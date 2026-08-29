@@ -107,6 +107,18 @@ fn walk(signature: &Signature, owned: &Owned, term: &Term, depth: u32, found: &m
             walk(signature, owned, argument, depth, found);
         }
         Term::Lam(_, _, body) => walk(signature, owned, body, depth + 1, found),
+        Term::Record(fields) => {
+            for (index, field) in fields.iter().enumerate() {
+                let depth = depth + u32::try_from(index).unwrap_or(0);
+                walk(signature, owned, &field.ty, depth, found);
+            }
+        }
+        Term::Object(fields) => {
+            for (_, value) in fields.iter() {
+                walk(signature, owned, value, depth, found);
+            }
+        }
+        Term::Project(record, _) => walk(signature, owned, record, depth, found),
         Term::Pi(_, _, domain, row, codomain) => {
             walk(signature, owned, domain, depth, found);
             for label in row.labels() {

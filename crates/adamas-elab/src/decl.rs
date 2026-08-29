@@ -540,6 +540,9 @@ fn mentions_local(term: &Term) -> bool {
         Term::Var(_) => true,
         // Дырка замкнута: локальных связываний в ней нет по построению.
         Term::Universe(_) | Term::Const(..) | Term::Meta(_) => false,
+        Term::Record(fields) => fields.iter().any(|field| mentions_local(&field.ty)),
+        Term::Object(fields) => fields.iter().any(|(_, value)| mentions_local(value)),
+        Term::Project(record, _) => mentions_local(record),
         Term::Lam(_, _, body) => mentions_local(body),
         Term::App(callee, argument) => mentions_local(callee) || mentions_local(argument),
         Term::Pi(_, _, domain, row, codomain) => {

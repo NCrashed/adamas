@@ -61,7 +61,7 @@ use crate::meta::{Metas, unsolved_level_meta, unsolved_term_meta};
 use crate::mult::Mult;
 use crate::row::Row;
 use crate::sig::{Definition, DefinitionKind, Signature};
-use crate::term::{Binder, Case, Name, Term, spine};
+use crate::term::{Binder, Case, Field as RecordField, Name, Term, spine};
 use crate::value::{Elim, Head, Lvl, Value};
 
 /// Значение, уложенное в ошибку: обратное чтение плюс зонканье.
@@ -151,6 +151,10 @@ pub fn infer(
         }
 
         Term::App(callee, argument) => infer_app(ctx, metas, sigma, callee, argument),
+
+        Term::Record(fields) => infer_record(ctx, metas, fields),
+        Term::Object(fields) => infer_object(ctx, metas, sigma, fields),
+        Term::Project(record, name) => infer_project(ctx, metas, sigma, record, name),
 
         Term::Let(mult, name, ty, value, body) => {
             let described = LetBinding {
@@ -249,6 +253,13 @@ pub fn check(
         //   терме: форма ожидаемого типа значима только для лямбды.
         (Term::Lam(..), _) => {
             check_lambda(ctx, metas, sigma, term, &whnf(ctx.signature(), expected))
+        }
+
+        // Значение записи против написанного типа: только здесь видна
+        // зависимость - тип поля живёт под предыдущими, и подставляются в него
+        // **значения** уже проверенных полей.
+        (Term::Object(fields), _) => {
+            check_object(ctx, metas, sigma, fields, &whnf(ctx.signature(), expected))
         }
 
         (Term::Let(mult, name, ty, value, body), _) => {
@@ -740,6 +751,9 @@ fn mentions_seen<'a>(
         // Дырка имени не упоминает: она замкнута, а её тип живёт отдельно и
         // проверен там, где заведён.
         Term::Var(_) | Term::Universe(_) | Term::Meta(_) => false,
+        Term::Record(fields) => fields.iter().any(|field| recur(&field.ty)),
+        Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
+        Term::Project(record, _) => recur(record),
         // Через тело определения - тоже упоминание. Без этого позитивность
         // обходится в две строки: `def G : Type 0 = Bad -> Bad`, затем
         // `mk : G -> Bad`. Прямая запись отвергается, а эта прошла бы, хотя
@@ -1142,6 +1156,174 @@ fn infer_app(
     Ok((result, callee_usage + &argument_usage.scale(*mult)))
 }
 
+/// Правило записи: поля проверяются по телескопу, а не по написанию.
+///
+/// Порядок задаёт **тип**: поле ищется по имени, и записать их иначе - не
+/// ошибка. Порядок значим для зависимости, а не для автора.
+fn check_object(
+    ctx: &Ctx<'_>,
+    metas: &mut Metas,
+    sigma: Mult,
+    written: &[(Name, Rc<Term>)],
+    expected: &Rc<Value>,
+) -> Result<Usage, TypeError> {
+    let Value::Record(telescope) = &**expected else {
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::NotARecord {
+                ty: read_back(ctx, metas, expected),
+            },
+        ));
+    };
+    if written.len() != telescope.fields().len() {
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::RecordFields {
+                expected: telescope.fields().len(),
+                found: written.len(),
+            },
+        ));
+    }
+    let mut usage = Usage::zero(ctx.size());
+    let mut earlier = Vec::with_capacity(written.len());
+    for (index, field) in telescope.fields().iter().enumerate() {
+        let Some((_, value)) = written.iter().find(|(name, _)| *name == field.name) else {
+            return Err(refuse(
+                ctx,
+                metas,
+                ErrorKind::NoSuchField {
+                    name: Rc::clone(&field.name),
+                    ty: read_back(ctx, metas, expected),
+                },
+            ));
+        };
+        let ty = telescope.at(index, &earlier);
+        let position = u32::try_from(index).unwrap_or(u32::MAX);
+        let found = framed(
+            check(ctx, metas, judgement_under(field.mult, sigma), value, &ty),
+            Frame::MemberBody(position),
+        )?;
+        usage = usage + &found.scale(field.mult);
+        earlier.push(ctx.eval(value));
+    }
+    Ok(usage)
+}
+
+/// Синтезирует тип записи: телескоп полей, универсум - максимум.
+///
+/// Каждое следующее поле проверяется **под** предыдущими: тип поля вправе на
+/// них ссылаться, и это то, что делает запись Σ-типом (§4.2).
+fn infer_record(
+    ctx: &Ctx<'_>,
+    metas: &mut Metas,
+    fields: &[RecordField],
+) -> Result<(Rc<Value>, Usage), TypeError> {
+    let mut inner = ctx.clone();
+    let mut level = Level::Zero;
+    for (index, field) in fields.iter().enumerate() {
+        if fields[..index].iter().any(|it| it.name == field.name) {
+            return Err(refuse(
+                ctx,
+                metas,
+                ErrorKind::DuplicateField {
+                    name: Rc::clone(&field.name),
+                },
+            ));
+        }
+        let position = u32::try_from(index).unwrap_or(u32::MAX);
+        let found = framed(
+            is_type(&inner, metas, &field.ty),
+            Frame::MemberType(position),
+        )?;
+        level = level.max(found);
+        let ty = inner.eval(&field.ty);
+        inner = inner.bind(Rc::clone(&field.name), field.mult, ty);
+    }
+    Ok((Rc::new(Value::Universe(level)), Usage::zero(ctx.size())))
+}
+
+/// Синтезирует тип значения записи - **независимый**.
+///
+/// Восстановить, какое поле от какого зависело, из значений нечем: зависимость
+/// живёт в типе, а не в них. Зависимая запись поэтому проверяется против
+/// написанного типа, где телескоп есть.
+fn infer_object(
+    ctx: &Ctx<'_>,
+    metas: &mut Metas,
+    sigma: Mult,
+    fields: &[(Name, Rc<Term>)],
+) -> Result<(Rc<Value>, Usage), TypeError> {
+    let mut usage = Usage::zero(ctx.size());
+    let mut written = Vec::with_capacity(fields.len());
+    for (index, (name, value)) in fields.iter().enumerate() {
+        let position = u32::try_from(index).unwrap_or(u32::MAX);
+        let (ty, found) = framed(infer(ctx, metas, sigma, value), Frame::MemberBody(position))?;
+        written.push(RecordField {
+            name: Rc::clone(name),
+            mult: Mult::One,
+            ty: Rc::new(quote(ctx.size() + position, &ty)),
+        });
+        usage = usage + &found;
+    }
+    let record = Term::Record(written.into());
+    Ok((ctx.eval(&record), usage))
+}
+
+/// Синтезирует тип проекции `e.x`.
+///
+/// Тип поля живёт под предыдущими полями телескопа, а их значения у записи уже
+/// есть - это её же проекции. Отсюда правило: `e.data` при
+/// `{ len : Nat, data : Vect a len }` имеет тип `Vect a e.len`.
+fn infer_project(
+    ctx: &Ctx<'_>,
+    metas: &mut Metas,
+    sigma: Mult,
+    record: &Term,
+    name: &Name,
+) -> Result<(Rc<Value>, Usage), TypeError> {
+    let (ty, usage) = framed(infer(ctx, metas, sigma, record), Frame::Scrutinee)?;
+    let ty = whnf(ctx.signature(), &ty);
+    let Value::Record(telescope) = &*ty else {
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::NotARecord {
+                ty: read_back(ctx, metas, &ty),
+            },
+        ));
+    };
+    let Some(index) = telescope.fields().iter().position(|it| it.name == *name) else {
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::NoSuchField {
+                name: Rc::clone(name),
+                ty: read_back(ctx, metas, &ty),
+            },
+        ));
+    };
+    // Стёртое поле в рантайм-позиции: значения у него нет, и вынуть его
+    // нечем - то же правило, что у стёртой переменной.
+    let field = &telescope.fields()[index];
+    if field.mult == Mult::Zero && sigma != Mult::Zero {
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::ErasedField {
+                name: Rc::clone(name),
+            },
+        ));
+    }
+    let value = ctx.eval(record);
+    let earlier: Vec<Rc<Value>> = telescope.fields()[..index]
+        .iter()
+        .map(|it| crate::eval::project(&value, &it.name))
+        .collect();
+    Ok((telescope.at(index, &earlier), usage))
+}
+
 /// Синтезирует тип разбора по конструктору.
 ///
 /// Мотив записан в самом узле, поэтому тип получается, а не берётся из режима
@@ -1297,7 +1479,7 @@ fn data_arguments(
         .iter()
         .map(|elim| match elim {
             Elim::App(argument) => Some(Rc::clone(argument)),
-            Elim::Case(_) => None,
+            Elim::Case(_) | Elim::Project(_) => None,
         })
         .collect()
 }

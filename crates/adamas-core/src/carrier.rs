@@ -245,6 +245,18 @@ fn inherit(signature: &Signature, term: &Term, depth: u32, found: &mut [Mult]) {
             inherit(signature, argument, depth, found);
         }
         Term::Lam(_, _, body) => inherit(signature, body, depth + 1, found),
+        Term::Record(fields) => {
+            for (index, field) in fields.iter().enumerate() {
+                let depth = depth + u32::try_from(index).unwrap_or(0);
+                inherit(signature, &field.ty, depth, found);
+            }
+        }
+        Term::Object(fields) => {
+            for (_, value) in fields.iter() {
+                inherit(signature, value, depth, found);
+            }
+        }
+        Term::Project(record, _) => inherit(signature, record, depth, found),
         Term::Pi(_, _, domain, _, codomain) => {
             inherit(signature, domain, depth, found);
             inherit(signature, codomain, depth + 1, found);

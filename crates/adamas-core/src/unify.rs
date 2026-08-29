@@ -208,7 +208,7 @@ fn applied_constructor<'a>(
         .skip(*params as usize)
         .map(|elim| match elim {
             Elim::App(argument) => Some(argument),
-            Elim::Case(_) => None,
+            Elim::Case(_) | Elim::Project(_) => None,
         })
         .collect()
 }

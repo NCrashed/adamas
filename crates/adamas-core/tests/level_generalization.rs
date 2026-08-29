@@ -366,6 +366,9 @@ fn level_vars(term: &Term, found: &mut Vec<u32>) {
         }
     }
     match term {
+        Term::Record(_) | Term::Object(_) | Term::Project(..) => {
+            unreachable!("генератор термов записей не порождает")
+        }
         Term::Var(_) | Term::Meta(_) => {}
         Term::Universe(level) => in_level(level, found),
         Term::Case(_) => unreachable!("генератор определений не порождает разбор"),

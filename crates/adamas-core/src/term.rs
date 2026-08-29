@@ -83,6 +83,21 @@ pub enum Term {
     Const(Name, Rc<[Level]>),
     /// Разбор значения индуктивного типа по конструктору.
     Case(Rc<Case>),
+    /// Тип записи - **телескоп** полей: `{ len : Nat, data : Vect a len }`.
+    ///
+    /// Телескоп, а не набор: тип поля вправе ссылаться на предыдущие поля, и
+    /// это то, что делает запись первоклассным Σ-типом (§4.2). Отсюда же
+    /// названная цена решения от 2026-08-29: запись с зависимостью между
+    /// полями **закрыта** - переставлять её поля нечем, а row-полиморфизм на
+    /// перестановке и стоит.
+    Record(Rc<[Field]>),
+    /// Значение записи: `{ x = a, y = b }`.
+    ///
+    /// Поля хранятся в порядке типа, а не написания: порядок значим, и
+    /// приводит к нему проверка.
+    Object(Rc<[(Name, Rc<Term>)]>),
+    /// Проекция поля: `e.x`.
+    Project(Rc<Term>, Name),
     /// Метапеременная терма - дырка, которую заполняет вывод (§4.1).
     ///
     /// Замкнута: зависимость от контекста выражается **применением** к его
@@ -93,6 +108,22 @@ pub enum Term {
     /// В том, что сохраняется надолго - в типах и телах определений, - не
     /// встречается: проверка определения отвергает остаточные дырки.
     Meta(TermMeta),
+}
+
+/// Поле записи: имя, кратность и тип.
+///
+/// Кратность - как у поля конструктора (§4.1): запись кладёт значение однажды.
+/// Тип живёт **под предыдущими полями** телескопа, поэтому индексы де Брёйна в
+/// нём отсчитываются от них: `{ len : Nat, data : Vect a len }` читает `len`
+/// как `#0`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Field {
+    /// Имя поля - им же идёт проекция.
+    pub name: Name,
+    /// Кратность: сколько раз конструирование расходует значение.
+    pub mult: Mult,
+    /// Тип поля, под предыдущими полями.
+    pub ty: Rc<Term>,
 }
 
 /// Метапеременная терма.
@@ -255,6 +286,23 @@ impl Term {
                     .map(|level| level.substitute(arguments))
                     .collect(),
             ),
+            Self::Record(fields) => Self::Record(
+                fields
+                    .iter()
+                    .map(|field| Field {
+                        name: Rc::clone(&field.name),
+                        mult: field.mult,
+                        ty: recur(&field.ty),
+                    })
+                    .collect(),
+            ),
+            Self::Object(fields) => Self::Object(
+                fields
+                    .iter()
+                    .map(|(name, value)| (Rc::clone(name), recur(value)))
+                    .collect(),
+            ),
+            Self::Project(record, name) => Self::Project(recur(record), Rc::clone(name)),
             Self::Case(case) => Self::Case(Rc::new(Case {
                 data: Rc::clone(&case.data),
                 levels: case
@@ -296,6 +344,13 @@ impl Term {
                     |found, argument| join(found, argument.max_level_var()),
                 )
             }
+            Self::Record(fields) => fields
+                .iter()
+                .fold(None, |found, field| join(found, field.ty.max_level_var())),
+            Self::Object(fields) => fields
+                .iter()
+                .fold(None, |found, (_, value)| join(found, value.max_level_var())),
+            Self::Project(record, _) => record.max_level_var(),
             Self::Let(_, _, ty, value, body) => join(
                 ty.max_level_var(),
                 join(value.max_level_var(), body.max_level_var()),
@@ -350,6 +405,21 @@ impl fmt::Display for Term {
             Self::App(callee, argument) => {
                 write!(f, "{} {}", Callee(callee), Atom(argument))
             }
+            Self::Record(fields) => {
+                let written: Vec<String> = fields
+                    .iter()
+                    .map(|field| format!("{} {} : {}", field.mult, field.name, field.ty))
+                    .collect();
+                write!(f, "{{{}}}", written.join(", "))
+            }
+            Self::Object(fields) => {
+                let written: Vec<String> = fields
+                    .iter()
+                    .map(|(name, value)| format!("{name} = {value}"))
+                    .collect();
+                write!(f, "{{{}}}", written.join(", "))
+            }
+            Self::Project(record, name) => write!(f, "{}.{name}", Atom(record)),
             Self::Pi(binder, name, domain, row, codomain) => {
                 // Вид скобок несёт связывание: у выводимого они фигурные.
                 let (open, close) = binder.visibility.brackets();

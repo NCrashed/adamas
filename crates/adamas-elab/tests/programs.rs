@@ -747,20 +747,49 @@ both : (1 x : Bool) -> (1 y : Bool) -> Bool
 both x y = x
 "
     );
-    let error = refused(&format!(
-        "{preamble}\ndata Wrap where\n  MkWrap : File -> Wrap\n"
-    ));
-    assert!(
-        matches!(error, ElabError::OwnedField { .. }),
-        "получено {error:?}"
-    );
+    // Правило в одну фразу, обе половины которой - закрытые вопросы §10:
+    // владеемое поле требует владеемого типа (70), ресурсное - ресурсного
+    // (77). Второе о том, что уничтожение значения влечёт уничтожение полей, а
+    // у `unique` деструктора нет и влечь ему нечем.
+    for (name, source) in [
+        (
+            "обычный `data` с владеемым полем",
+            "data Wrap where\n  MkWrap : File -> Wrap\n",
+        ),
+        (
+            "`unique data` с ресурсным полем",
+            "unique data Wrap where\n  MkWrap : File -> Wrap\n",
+        ),
+    ] {
+        let error = refused(&format!("{preamble}\n{source}"));
+        assert!(
+            matches!(error, ElabError::OwnedField { .. }),
+            "{name}: получено {error:?}"
+        );
+    }
 
-    // Обёртка остаётся выразимой - её объявляют `unique data`, и тогда разбор
-    // идёт при `r = 1`, а поле остаётся линейным.
+    // `unique` поле у `unique` держателя законно: закрывать там нечего, а
+    // линейность разбор сохраняет.
+    let unique = format!(
+        "{preamble}
+unique data Buffer where
+  MkBuffer : Bool -> Buffer
+
+unique data Held where
+  Hold : Buffer -> Held
+"
+    );
+    assert!(program(&unique).lookup("Hold").is_some());
+
+    // Обёртка над ресурсом остаётся выразимой - её объявляют `resource` со
+    // своим деструктором, и тогда разбор идёт при `r = 1`, поле остаётся
+    // линейным, а забытая обёртка закрывается.
     let wrapper = format!(
         "{preamble}
-unique data Wrap where
+resource Wrap where
   MkWrap : File -> Wrap
+  closeWrap : Wrap -> Bool
+  closeWrap (MkWrap h) = drop h
 
 closeOnce : Wrap -> Bool
 closeOnce (MkWrap h) = drop h
@@ -772,6 +801,26 @@ closeOnce (MkWrap h) = drop h
     assert!(
         matches!(refused(&twice), ElabError::Core { .. }),
         "линейное поле не расходуется дважды"
+    );
+
+    // И теперь она закрывается, будучи забытой: рекурсия §3.3 получила точку
+    // входа, которой у `unique` не было.
+    let forgotten = format!(
+        "{wrapper}
+openIt : Bool -> File
+openIt b = Open b
+
+leaked : Bool -> Bool
+leaked b =
+  let w : Wrap = MkWrap (openIt b)
+  True
+"
+    );
+    let signature = program(&forgotten);
+    assert_eq!(
+        calls(&signature, "leaked", "closeWrap"),
+        1,
+        "забытая обёртка зовёт свой деструктор"
     );
 }
 
@@ -896,11 +945,19 @@ fn a_destructor_that_cannot_close_is_refused() {
 
 #[test]
 fn a_resource_body_defines_only_its_destructor() {
-    // Тело держит конструкторы и `drop`; всё прочее определяется рядом.
+    // Тело держит конструкторы и **одно** определение - деструктор, каким бы
+    // именем ни было названо. Второе определение - то, чему в теле не место:
+    // пусти мы его туда, пришлось бы отвечать, видно ли снаружи имя, а это
+    // пространства имён (§4.8, Фаза 3).
     let text = format!(
         "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
 resource File where
   Open : Bool -> File
+  close : File -> Bool
+  close (Open b) = closeFile b
   helper : Bool -> Bool
   helper b = b
 "
@@ -910,6 +967,28 @@ resource File where
         matches!(error, ElabError::ResourceMember { .. }),
         "получено {error:?}"
     );
+
+    // Имя деструктора свободно: `drop` - соглашение §4.1, а не правило.
+    let named = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+resource File where
+  Open : Bool -> File
+  close : File -> Bool
+  close (Open b) = closeFile b
+
+forgotten : File -> Bool
+forgotten h = True
+"
+    );
+    let signature = program(&named);
+    assert_eq!(
+        calls(&signature, "forgotten", "close"),
+        1,
+        "вставка зовёт деструктор по его собственному имени"
+    );
 }
 
 /// Тело определения, напечатанное ядром: снимок формы, а не счёт подстрок.
@@ -918,6 +997,11 @@ fn body(signature: &Signature, name: &str) -> String {
         panic!("у `{name}` есть тело")
     };
     body.to_string()
+}
+
+/// Сколько раз тело зовёт деструктор с этим именем.
+fn calls(signature: &Signature, name: &str, destructor: &str) -> usize {
+    body(signature, name).matches(destructor).count()
 }
 
 /// Сколько вызовов `drop` в теле определения.
@@ -1117,8 +1201,10 @@ closeFile : (1 b : Bool) -> Bool
 closeFile b = b
 
 {RESOURCE}
-unique data Wrapped where
+resource Wrapped where
   Wrap : File -> Wrapped
+  closeWrapped : Wrapped -> Bool
+  closeWrapped (Wrap h) = drop h
 
 forgotten : Wrapped -> Bool
 forgotten (Wrap h) = True

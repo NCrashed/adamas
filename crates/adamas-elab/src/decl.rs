@@ -253,21 +253,30 @@ fn clause_span(
 /// столкнётся с первым. Имя менять нельзя, пока `drop` рекурсивен по
 /// написанному имени; развяжется это тогда же, когда компилятор начнёт искать
 /// `drop` сам, - вместе со вставкой в exit-points.
-fn declare_resource(
-    signature: &mut Signature,
-    metas: &mut Metas,
-    owned: &mut Owned,
+/// Члены тела: конструкторы и деструктор.
+///
+/// Жанр читается формой записи (§4.1): голая сигнатура - конструктор,
+/// сигнатура с клаузами - определение. Определение в теле одно, и оно и есть
+/// деструктор - **под любым именем**: пространство имён плоское (§4.8, Фаза
+/// 3), и `drop` на каждый ресурс не хватило бы (§10 вопрос 77). Второе
+/// определение - то, чему в теле не место: пусти мы его туда, пришлось бы
+/// отвечать, видно ли снаружи написанное внутри имя.
+fn resource_members(
     resource: &ast::Resource,
-    span: Span,
-) -> Result<(), ElabError> {
+) -> Result<(Vec<ast::Constructor>, Option<Destructor<'_>>), ElabError> {
     let mut constructors: Vec<ast::Constructor> = Vec::new();
-    let mut destructor: Option<(&ast::Expr, &[ast::Clause], Span)> = None;
+    let mut destructor: Option<Destructor<'_>> = None;
     // Сигнатура, о которой ещё не известно, конструктор она или заголовок
     // определения: решают следующие за ней клаузы.
     let mut pending: Option<(&ast::Name, &ast::Expr, Span)> = None;
     let constructor = |(name, ty, span): (&ast::Name, &ast::Expr, Span)| ast::Constructor {
         name: name.clone(),
         ty: ty.clone(),
+        span,
+    };
+    let refuse = |name: &Symbol, span| ElabError::ResourceMember {
+        data: Rc::clone(&resource.name.text),
+        name: Rc::clone(name),
         span,
     };
 
@@ -285,60 +294,80 @@ fn declare_resource(
                         span: member.span,
                     });
                 };
-                if &*name.text != "drop" {
-                    return Err(ElabError::ResourceMember {
-                        data: Rc::clone(&resource.name.text),
-                        name: Rc::clone(&name.text),
-                        span: member.span,
-                    });
+                if let Some(first) = &destructor {
+                    return Err(refuse(&first.name.text, member.span));
                 }
-                destructor = Some((ty, clauses, member.span));
-            }
-            ast::DeclKind::Data(inner) => {
-                return Err(ElabError::ResourceMember {
-                    data: Rc::clone(&resource.name.text),
-                    name: Rc::clone(&inner.name.text),
+                destructor = Some(Destructor {
+                    name,
+                    ty,
+                    clauses,
                     span: member.span,
                 });
             }
-            ast::DeclKind::Resource(inner) => {
-                return Err(ElabError::ResourceMember {
-                    data: Rc::clone(&resource.name.text),
-                    name: Rc::clone(&inner.name.text),
-                    span: member.span,
-                });
-            }
+            ast::DeclKind::Data(inner) => return Err(refuse(&inner.name.text, member.span)),
+            ast::DeclKind::Resource(inner) => return Err(refuse(&inner.name.text, member.span)),
         }
     }
     constructors.extend(pending.take().map(constructor));
+    Ok((constructors, destructor))
+}
 
-    // Голая сигнатура - конструктор, поэтому `drop` без клауз стал бы им же, а
-    // отказ пришёл бы позже и не про то: «деструктора нет» вместо «у него нет
-    // тела».
-    if let Some(bare) = constructors.iter().find(|it| &*it.name.text == "drop") {
+/// Деструктор, снятый с тела ресурса.
+struct Destructor<'a> {
+    name: &'a ast::Name,
+    ty: &'a ast::Expr,
+    clauses: &'a [ast::Clause],
+    span: Span,
+}
+
+fn declare_resource(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    owned: &mut Owned,
+    resource: &ast::Resource,
+    span: Span,
+) -> Result<(), ElabError> {
+    let (constructors, destructor) = resource_members(resource)?;
+
+    // Голая сигнатура - конструктор, а конструктор пишется заглавной (§4.1).
+    // Строчное имя без клауз - деструктор, у которого забыли тело, и сказать
+    // об этом надо здесь: иначе отказ придёт позже и не про то - «деструктора
+    // нет» вместо «у него нет тела».
+    if let Some(bare) = constructors
+        .iter()
+        .find(|it| !crate::is_reference(&it.name.text))
+    {
         return Err(ElabError::DestructorWithoutBody {
             data: Rc::clone(&resource.name.text),
+            name: Rc::clone(&bare.name.text),
             span: bare.span,
         });
     }
 
-    let Some((drop_ty, clauses, drop_span)) = destructor else {
+    let Some(Destructor {
+        name: drop_name,
+        ty: drop_ty,
+        clauses,
+        span: drop_span,
+    }) = destructor
+    else {
         return Err(ElabError::ResourceWithoutDrop {
             name: Rc::clone(&resource.name.text),
             span,
         });
     };
 
-    // Деструктор объявляется под написанным именем, поэтому второй ресурсный
-    // тип столкнулся бы с первым в общем пространстве имён (§4.8, Фаза 3).
-    // Отказ говорит об этом прямо: `DuplicateDefinition` от ядра называл бы
-    // столкновение имён, не называя причины.
+    // Имя деструктора свободно, но пространство имён плоское: два ресурса,
+    // назвавшие деструктор одинаково, столкнутся (§4.8, Фаза 3). Отказ говорит
+    // об этом прямо - `DuplicateDefinition` от ядра назвал бы столкновение
+    // имён, не называя причины.
     if let Some(first) = owned
-        .named("drop")
+        .named(&drop_name.text)
         .filter(|it| ***it != *resource.name.text)
     {
         return Err(ElabError::SharedDestructor {
             data: Rc::clone(&resource.name.text),
+            name: Rc::clone(&drop_name.text),
             first: Rc::clone(first),
             span: drop_span,
         });
@@ -362,9 +391,15 @@ fn declare_resource(
     // Форма проверяется здесь, один раз, а не в каждой точке вставки: вызов
     // `drop` подставляется компилятором, и тип его результата обязан быть
     // написан в области видимости, где ресурса уже нет.
-    destructor_shape(&elaborated, &resource.name.text, owned, drop_ty.span)?;
+    destructor_shape(
+        &elaborated,
+        &resource.name.text,
+        &drop_name.text,
+        owned,
+        drop_ty.span,
+    )?;
     let declared = Pending {
-        name: Rc::from("drop"),
+        name: Rc::clone(&drop_name.text),
         ty: elaborated,
         source: drop_ty,
         span: drop_span,
@@ -380,9 +415,16 @@ fn declare_resource(
 /// `let`-связывание, тип которого пишется **рядом** с вызовом, а зависимый
 /// результат пришлось бы инстанцировать самим ресурсом - тем самым, которого
 /// после вызова уже нет.
-fn destructor_shape(ty: &Term, data: &Symbol, owned: &Owned, span: Span) -> Result<(), ElabError> {
+fn destructor_shape(
+    ty: &Term,
+    data: &Symbol,
+    name: &Symbol,
+    owned: &Owned,
+    span: Span,
+) -> Result<(), ElabError> {
     let refuse = || ElabError::DestructorShape {
         data: Rc::clone(data),
+        name: Rc::clone(name),
         span,
     };
     let Term::Pi(mult, _, domain, result) = ty else {
@@ -404,34 +446,51 @@ fn destructor_shape(ty: &Term, data: &Symbol, owned: &Owned, span: Span) -> Resu
     Ok(())
 }
 
-/// Поле владеемого типа у обычного `data` (§10 вопрос 70).
+/// Поле с владением требует владения от типа, который его держит.
 ///
-/// Обёртка отмывала бы владение: `Wrap` - обычный тип, связывания его `ω`,
-/// разбор идёт при `r = ω`, и поле кратности `1` приходит в ветвь как `ω`.
-/// Ресурс оказывался бы снаружи без всякой линейности - и закрывался дважды.
-/// Обёртка остаётся выразимой, но объявляется `unique data`: тогда её
-/// связывания линейны, разбор идёт при `r = 1`, и поле остаётся линейным.
+/// Правило в одну фразу, обе половины которой - закрытые вопросы §10.
+///
+/// **Владеемое поле требует владеемого типа** (вопрос 70). Обёртка из обычного
+/// `data` отмывала бы владение: связывания её `ω`, разбор идёт при `r = ω`, и
+/// поле кратности `1` приходит в ветвь как `ω` - ресурс оказывается снаружи
+/// без линейности и закрывается дважды.
+///
+/// **Ресурсное поле требует ресурсного типа** (вопрос 77). Уничтожение
+/// значения влечёт уничтожение полей (§3.3), но у `unique` деструктора нет, и
+/// влечь ему нечем: `let w : Wrap = …` с забытым `w` не закрывает ничего.
+/// Рекурсия `drop` по полям идёт по разбору, а забытое значение не
+/// разбирается.
 ///
 /// Смотрит на голову написанного, как и всё правило владения, поэтому ресурс
-/// под переменной типа сюда не попадает - названная цена §3.3.
+/// под переменной типа сюда не попадает - вопрос 76.
 fn owned_field(
     ty: &Term,
     owned: &Owned,
     data: &ast::Data,
     constructor: &ast::Constructor,
 ) -> Result<(), ElabError> {
-    if data.unique {
-        return Ok(());
-    }
+    let holder = owned.how(&data.name.text);
     let mut current = ty;
     while let Term::Pi(_, _, domain, codomain) = current {
-        if let Some(field) = name_head(domain).filter(|name| owned.owns(name)) {
-            return Err(ElabError::OwnedField {
-                data: Rc::clone(&data.name.text),
-                constructor: Rc::clone(&constructor.name.text),
-                field: Rc::from(&**field),
-                span: constructor.ty.span,
-            });
+        let field = name_head(domain).and_then(|name| owned.how(name).map(|how| (name, how)));
+        if let Some((name, field)) = field {
+            let refuse = |needed| {
+                Err(ElabError::OwnedField {
+                    data: Rc::clone(&data.name.text),
+                    constructor: Rc::clone(&constructor.name.text),
+                    field: Rc::from(&**name),
+                    owned: field,
+                    needed,
+                    span: constructor.ty.span,
+                })
+            };
+            match (field, holder) {
+                (_, None) => return refuse(Ownership::Unique),
+                (Ownership::Resource, Some(Ownership::Unique)) => {
+                    return refuse(Ownership::Resource);
+                }
+                _ => {}
+            }
         }
         current = codomain;
     }

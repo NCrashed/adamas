@@ -48,6 +48,15 @@ impl Ownership {
             Self::Resource => "resource",
         }
     }
+
+    /// Чем это объявляется в исходнике.
+    #[must_use]
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Unique => "unique data",
+            Self::Resource => "resource",
+        }
+    }
 }
 
 impl std::fmt::Display for Ownership {
@@ -97,6 +106,16 @@ impl Owned {
     #[must_use]
     pub fn owns(&self, name: &str) -> bool {
         self.types.contains_key(name)
+    }
+
+    /// Чем объявлен тип с этим именем.
+    ///
+    /// Отвечает и во время объявления самого типа: маркер ставится до
+    /// элаборации конструкторов, потому что поле собственного типа получает
+    /// кратность тем же правилом, что и всякое другое связывание.
+    #[must_use]
+    pub fn how(&self, name: &str) -> Option<Ownership> {
+        self.types.get(name).copied()
     }
 
     /// Деструктор типа, стоящего головой написанного.

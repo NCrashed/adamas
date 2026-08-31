@@ -837,6 +837,9 @@ impl<'a> Parser<'a> {
     }
 
     fn expr_inner(&mut self) -> Result<Expr, ParseError> {
+        if self.at_constraint() {
+            return self.constrained();
+        }
         if self.at_binder() {
             // Единственное место, где парсер возвращается назад: `{x : Nat}`
             // читается и как группа implicit-связываний, и как тип записи
@@ -861,6 +864,71 @@ impl<'a> Parser<'a> {
         }
 
         self.arrowed()
+    }
+
+    /// Стоит ли на констрейнт-контексте: `{Eqv a} => …` (§4.1).
+    ///
+    /// Просмотр до закрывающей скобки, а не на одну лексему: отличает контекст
+    /// от группы связываний и от записи именно `=>` за скобкой, и увидеть её
+    /// иначе нечем.
+    fn at_constraint(&self) -> bool {
+        if !self.at(TokenKind::LBrace) {
+            return false;
+        }
+        let mut depth = 0_u32;
+        let mut offset = 0;
+        loop {
+            match self.kind_ahead(offset) {
+                TokenKind::LBrace => depth += 1,
+                TokenKind::RBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return self.kind_ahead(offset + 1) == TokenKind::FatArrow;
+                    }
+                }
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+            offset += 1;
+        }
+    }
+
+    /// `{Eqv a, Ord b} => T` - контекст констрейнтов.
+    ///
+    /// Раскрывается в группу implicit-связываний без имён: констрейнт и есть
+    /// выводимый аргумент-словарь, а `=>` от `->` отличается только тем, что
+    /// заполняет его поиском, а не унификацией (§3.5). Отдельного узла дерева
+    /// поэтому нет - раскрытие идёт здесь, где написанная форма ещё видна.
+    fn constrained(&mut self) -> Result<Expr, ParseError> {
+        let open = self.expect(TokenKind::LBrace)?;
+        let mut binders = Vec::new();
+        loop {
+            let ty = self.expr()?;
+            binders.push(Binder {
+                visibility: Visibility::Implicit,
+                mult: None,
+                names: vec![Name {
+                    text: Rc::from("_"),
+                    span: ty.span,
+                }],
+                span: ty.span,
+                ty: Some(ty),
+            });
+            if self.eat(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        self.expect(TokenKind::RBrace)?;
+        self.expect(TokenKind::FatArrow)?;
+        let codomain = self.expr()?;
+        let span = open.span.merge(codomain.span);
+        Ok(Expr {
+            kind: ExprKind::Pi {
+                binders,
+                codomain: Box::new(codomain),
+            },
+            span,
+        })
     }
 
     /// Группа связываний вместе со стрелкой: `(q x y : A) {r z : B} -> C`.

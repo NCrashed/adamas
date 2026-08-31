@@ -521,3 +521,14 @@ instance Eqv Nat where
 ";
     insta::assert_snapshot!(tree(text).expect("разбор удался"));
 }
+
+#[test]
+fn a_constraint_context_is_a_group_of_implicit_binders() {
+    // §4.1: `{C a} => T` раскрывается в группу implicit-связываний без имён -
+    // констрейнт и есть выводимый аргумент-словарь. Отличает контекст от
+    // записи и от группы именно `=>` за скобкой.
+    assert_eq!(
+        tree("same : {Eqv a} => a -> Bool\n").expect("разбор удался"),
+        "(sig same (pi ({_ : (Eqv a)}) (-> a Bool)))\n"
+    );
+}

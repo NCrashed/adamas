@@ -464,7 +464,6 @@ impl<'a> Parser<'a> {
             TokenKind::Coherent | TokenKind::When => Unsupported::Class,
             TokenKind::Using => Unsupported::NamedInstance,
             TokenKind::Import => Unsupported::Import,
-            TokenKind::Mutual => Unsupported::Mutual,
             TokenKind::Effect => Unsupported::Effect,
             TokenKind::Handle | TokenKind::HandleMulti | TokenKind::With => Unsupported::Handler,
             TokenKind::Infix | TokenKind::Infixl | TokenKind::Infixr => Unsupported::Fixity,
@@ -553,6 +552,7 @@ impl<'a> Parser<'a> {
             TokenKind::Type => self.alias(),
             TokenKind::Module => self.module_decl(),
             TokenKind::Class | TokenKind::Instance => self.class_decl(),
+            TokenKind::Mutual => self.mutual(),
             TokenKind::Ident | TokenKind::LParen => self.signature_or_clause(),
             _ => Err(self
                 .unsupported_here()
@@ -1166,6 +1166,23 @@ impl<'a> Parser<'a> {
     /// присваивает, а голое имя - punning, то есть `x = x`. Смешивать нельзя:
     /// запись либо тип, либо значение, и половина каждого была бы ни тем ни
     /// другим.
+    /// `mutual` и блок объявлений (§4.8).
+    ///
+    /// Своей структуры у группы нет: члены - обычные объявления, а группой их
+    /// делает то, что объявляются они разом. Вложенный `mutual` разбирается
+    /// сам собой; законен ли он там, решает элаборация.
+    fn mutual(&mut self) -> Result<Decl, ParseError> {
+        let start = self.bump().span;
+        self.expect(TokenKind::Open)?;
+        let members = self.members(TokenKind::Close, Self::decl)?;
+        self.expect(TokenKind::Close)?;
+        let end = members.last().map_or(start, |last| last.span);
+        Ok(Decl {
+            kind: DeclKind::Mutual(members),
+            span: start.merge(end),
+        })
+    }
+
     /// `class Ord a where …` и `instance Ord Int where …` (§4.1, §3.5).
     ///
     /// Голова разбирается **выражением**: `Ord a` и `Ord Int` - применения, и

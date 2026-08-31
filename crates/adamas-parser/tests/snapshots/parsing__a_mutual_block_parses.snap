@@ -1,0 +1,11 @@
+---
+source: crates/adamas-parser/tests/parsing.rs
+expression: "tree(text).expect(\"разбор удался\")"
+---
+(mutual
+  (sig even (-> Nat Bool))
+  (def even
+    (clause (Zero) True))
+  (sig odd (-> Nat Bool))
+  (def odd
+    (clause (Zero) False)))

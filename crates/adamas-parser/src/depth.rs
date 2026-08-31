@@ -319,6 +319,12 @@ fn decl_at<'a>(decl: &'a Decl, depth: u32, pending: &mut Pending<'a>) -> Result<
                 clause_at(clause, depth, pending)?;
             }
         }
+        DeclKind::Mutual(members) => {
+            let inner = deepen(depth, 1, decl.span)?;
+            for member in members {
+                decl_at(member, inner, pending)?;
+            }
+        }
         DeclKind::Class(class) => {
             let inner = deepen(depth, 1, decl.span)?;
             pending.push((Node::Expr(&class.head), depth));

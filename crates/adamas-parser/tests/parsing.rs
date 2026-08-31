@@ -545,3 +545,18 @@ class Ord a when Eqv a, Show a where
 ";
     insta::assert_snapshot!(tree(text).expect("разбор удался"));
 }
+
+#[test]
+fn a_mutual_block_parses() {
+    // §4.8: своей структуры у группы нет - члены её обычные объявления, а
+    // группой их делает то, что объявляются они разом.
+    let text = "\
+mutual
+  even : Nat -> Bool
+  even Zero = True
+
+  odd : Nat -> Bool
+  odd Zero = False
+";
+    insta::assert_snapshot!(tree(text).expect("разбор удался"));
+}

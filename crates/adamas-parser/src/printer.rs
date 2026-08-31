@@ -203,6 +203,10 @@ impl Printer {
             }
             DeclKind::Data(data) => self.data(data),
             DeclKind::Module(module) => self.module_decl(module),
+            DeclKind::Mutual(members) => {
+                self.push("mutual");
+                self.block_of(members, Self::decl);
+            }
             DeclKind::Class(class) => {
                 self.push(if class.instance {
                     "instance "

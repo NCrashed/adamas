@@ -73,6 +73,11 @@ impl Spans<'_> {
                     self.clause(at, clause);
                 }
             }
+            DeclKind::Mutual(members) => {
+                for member in members {
+                    self.decl(at, member);
+                }
+            }
             DeclKind::Class(class) => {
                 self.expr(at, &class.head);
                 for superclass in &class.superclasses {

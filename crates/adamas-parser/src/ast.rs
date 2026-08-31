@@ -401,6 +401,11 @@ pub enum DeclKind {
     Module(ModuleDecl),
     /// Класс или инстанс: `class Ord a where …` (§4.1, §3.5).
     Class(ClassDecl),
+    /// Группа взаимной рекурсии: `mutual` и блок объявлений (§4.8).
+    ///
+    /// Отдельной структуры не заводит: члены - обычные объявления, а группой
+    /// их делает то, что объявляются они разом (§10 вопрос 50).
+    Mutual(Vec<Decl>),
     /// Ресурсный тип: `resource File where drop h = …` (§3.3).
     Resource(Resource),
 }
@@ -607,7 +612,36 @@ fn dump_class(out: &mut String, class: &ClassDecl, depth: usize) {
         out.push_str(" when ");
         dump_expr(out, superclass);
     }
-    for member in &class.members {
+    dump_block(out, "", &class.members, depth);
+}
+
+/// Модуль или его сигнатура: `(module M : S …)`.
+fn dump_module(out: &mut String, module: &ModuleDecl, depth: usize) {
+    out.push_str(if module.signature {
+        "(module-type "
+    } else {
+        "(module "
+    });
+    out.push_str(&module.name.text);
+    for param in &module.params {
+        out.push(' ');
+        dump_binder(out, param);
+    }
+    if let Some(ascription) = &module.ascription {
+        out.push_str(if module.sealed { " :> " } else { " : " });
+        dump_expr(out, ascription);
+    }
+    if let Some(body) = &module.body {
+        out.push_str(" = ");
+        dump_expr(out, body);
+    }
+    dump_block(out, "", &module.members, depth);
+}
+
+/// Заголовок и вложенные объявления, каждое со своей строки.
+fn dump_block(out: &mut String, head: &str, members: &[Decl], depth: usize) {
+    out.push_str(head);
+    for member in members {
         out.push('\n');
         out.push_str(&"  ".repeat(depth + 1));
         dump_decl(out, member, depth + 1);
@@ -629,32 +663,8 @@ fn dump_decl(out: &mut String, decl: &Decl, depth: usize) {
             out.push(')');
         }
         DeclKind::Class(class) => dump_class(out, class, depth),
-        DeclKind::Module(module) => {
-            out.push_str(if module.signature {
-                "(module-type "
-            } else {
-                "(module "
-            });
-            out.push_str(&module.name.text);
-            for param in &module.params {
-                out.push(' ');
-                dump_binder(out, param);
-            }
-            if let Some(ascription) = &module.ascription {
-                out.push_str(if module.sealed { " :> " } else { " : " });
-                dump_expr(out, ascription);
-            }
-            if let Some(body) = &module.body {
-                out.push_str(" = ");
-                dump_expr(out, body);
-            }
-            for member in &module.members {
-                out.push('\n');
-                out.push_str(&"  ".repeat(depth + 1));
-                dump_decl(out, member, depth + 1);
-            }
-            out.push(')');
-        }
+        DeclKind::Mutual(members) => dump_block(out, "(mutual", members, depth),
+        DeclKind::Module(module) => dump_module(out, module, depth),
         DeclKind::Signature { name, ty } => {
             out.push_str("(sig ");
             out.push_str(&name.text);

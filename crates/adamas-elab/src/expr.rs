@@ -344,6 +344,13 @@ pub(crate) struct Elaborator<'a> {
     rows: Option<Vec<Span>>,
     /// Запрещена ли вставка имплиситов ближайшему имени - см. `type_app`.
     bare: bool,
+    /// Имя модуля, чьё тело элаборируется (§4.8).
+    ///
+    /// Члены подняты на верхний уровень под квалифицированными именами, и
+    /// короткое имя внутри тела - ссылка на своего же соседа: `compare` рядом
+    /// с `type T = Int` видит `T`, то есть `IntOrd.T`. Заслоняет одноимённое
+    /// глобальное - это ordered scoping §4.8, а не особый случай.
+    qualifier: Option<Symbol>,
     /// Где стоит ближайший подтерм - см. [`Position`].
     position: Position,
     /// Привязано ли к scope значение, которое только что собрано, и каким
@@ -378,6 +385,12 @@ impl<'a> Elaborator<'a> {
         Self::with_group(signature, metas, owned, Vec::new())
     }
 
+    /// То же, внутри тела модуля: короткое имя члена ищется квалифицированным.
+    pub(crate) fn within(mut self, qualifier: Option<&Symbol>) -> Self {
+        self.qualifier = qualifier.map(Rc::clone);
+        self
+    }
+
     /// То же, но с членами объявляемой группы.
     pub(crate) fn with_group(
         signature: &'a Signature,
@@ -395,6 +408,7 @@ impl<'a> Elaborator<'a> {
             declared: Vec::new(),
             expected: Vec::new(),
             bare: false,
+            qualifier: None,
             rows: None,
             types: false,
             position: Position::Inner,
@@ -678,6 +692,30 @@ impl<'a> Elaborator<'a> {
         }
     }
 
+    /// Как имя члена выглядит на верхнем уровне: `T` внутри `IntOrd` есть
+    /// `IntOrd.T`. `None` - элаборируется не тело модуля.
+    fn qualified_name(&self, name: &str) -> Option<Symbol> {
+        let qualifier = self.qualifier.as_ref()?;
+        Some(Rc::from(format!("{qualifier}.{name}").as_str()))
+    }
+
+    /// То же, но только если такой член уже объявлен.
+    fn qualified(&self, name: &str) -> Option<Symbol> {
+        let full = self.qualified_name(name)?;
+        self.signature.lookup(&full).is_some().then_some(full)
+    }
+
+    /// Член объявляемой группы под своим именем или под квалифицированным.
+    ///
+    /// Второе - рекурсивная ссылка внутри модуля: определение объявлено как
+    /// `NatEq.eq`, а в теле написано `eq`, и найти себя оно обязано.
+    fn member_of_group(&self, name: &str) -> Option<&Member> {
+        let full = self.qualified_name(name);
+        self.group.iter().find(|member| {
+            *member.name == *name || full.as_ref().is_some_and(|it| member.name == *it)
+        })
+    }
+
     fn free_name(&self, name: &ast::Name, bound: &[Symbol], found: &mut Unbound) {
         if !self.resolves(name, bound) && !found.has(&name.text) {
             found.names.push(Rc::clone(&name.text));
@@ -703,7 +741,8 @@ impl<'a> Elaborator<'a> {
             || &*name.text == "Type"
             || bound.contains(&name.text)
             || self.local(&name.text).is_some()
-            || self.group.iter().any(|member| member.name == name.text)
+            || self.member_of_group(&name.text).is_some()
+            || self.qualified(&name.text).is_some()
             || self.signature.lookup(&name.text).is_some()
     }
 
@@ -1361,6 +1400,35 @@ impl<'a> Elaborator<'a> {
         Ok(std::iter::once(head).chain(tail).collect())
     }
 
+    /// Телескоп полей по членам сигнатуры модуля (§4.8).
+    ///
+    /// Тот же телескоп, что у записи: член видит предыдущих, поэтому
+    /// `compare : T -> T -> Ordering` находит `T`. Абстрактный типовой член
+    /// (`type T` без уравнения) - поле сорта `Type` со свежей дыркой уровня:
+    /// какой универсум ему достанется, решает тот, кто сигнатуру реализует.
+    pub(crate) fn module_members(
+        &mut self,
+        members: &[(ast::Name, Option<&Expr>)],
+    ) -> Result<Vec<CoreField>, ElabError> {
+        let Some(((name, written), rest)) = members.split_first() else {
+            return Ok(Vec::new());
+        };
+        let ty = match written {
+            Some(written) => self.typing(|it| it.expr(written, Mult::Many))?,
+            None => Term::Universe(self.metas.fresh_level()),
+        };
+        let bound = self.typed(&ty);
+        let tail = self.binding(Bound::visible(&name.text, Mult::One, bound), |it| {
+            it.module_members(rest)
+        })?;
+        let head = CoreField {
+            name: CoreName::from(&*name.text),
+            mult: Mult::One,
+            ty: Rc::new(ty),
+        };
+        Ok(std::iter::once(head).chain(tail).collect())
+    }
+
     /// `{ p | x = v }` - обновление и расширение одной формой (§4.2).
     ///
     /// Различает их **тип исходной записи**, а не автор: есть поле - update,
@@ -1535,13 +1603,20 @@ impl<'a> Elaborator<'a> {
         // Член объявляемой группы: аргументы уровня - дырки, числом в арность,
         // посчитанную вызывающим. Тип его сигнатура ещё не знает (§10 вопрос
         // 50), поэтому имплиситы вставляются по типу, принесённому в группе.
-        if let Some(member) = self.group.iter().find(|it| it.name == name.text) {
-            let term = Term::Const(CoreName::from(&*name.text), Rc::clone(&member.levels));
+        if let Some(member) = self.member_of_group(&name.text) {
+            let term = Term::Const(CoreName::from(&*member.name), Rc::clone(&member.levels));
             if self.bare || !opens_implicit(&member.ty) {
                 return Ok(term);
             }
             let ty = eval(&Env::default(), &member.ty);
             return Ok(self.implicits(term, ty));
+        }
+        // Сосед по модулю заслоняет глобальное имя: члены подняты на верхний
+        // уровень, но написаны они внутри, и видеть автор обязан своего.
+        if let Some(full) = self.qualified(&name.text) {
+            if let Some(term) = self.signature.instantiate(&full, self.metas) {
+                return Ok(self.implicit_use(&full, term));
+            }
         }
         // Аргументы уровня подставляются дырками - это implicit UP со стороны
         // места использования (§3.2), - и одному имени они выдаются один раз

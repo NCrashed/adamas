@@ -2207,3 +2207,127 @@ wide = record {{ x = Zero, y = Zero }}
 "
     ));
 }
+
+#[test]
+fn a_module_is_a_record_of_its_members() {
+    // §4.8: члены поднимаются на верхний уровень под квалифицированными
+    // именами, а модуль объявляется записью из них. Доступ - проекция, и
+    // потому `NatEq.T` в позиции типа работает тем же правилом, что и
+    // `NatEq.zero` в позиции терма.
+    program(&format!(
+        "{BASE}
+module NatEq where
+  type T = Nat
+  zero : T
+  zero = Zero
+
+typed : NatEq.T
+typed = NatEq.zero
+"
+    ));
+}
+
+#[test]
+fn a_member_sees_its_neighbours_and_itself() {
+    // Короткое имя внутри тела - ссылка на соседа: `eq` находит `T`, а
+    // рекурсивный вызов находит себя. Оба - следствие подъёма: определение
+    // объявлено как `NatEq.eq`, и найти его надо по написанному `eq`.
+    program(&format!(
+        "{BASE}
+module NatEq where
+  type T = Nat
+  eq : T -> T -> Bool
+  eq Zero Zero = True
+  eq (Succ a) (Succ b) = eq a b
+  eq a b = False
+
+answer : Bool
+answer = NatEq.eq (Succ Zero) (Succ Zero)
+"
+    ));
+}
+
+#[test]
+fn a_module_signature_is_a_record_type() {
+    // `module type` объявляет тип записи, а члены её - телескоп: `eq` видит
+    // `T`. Абстрактный типовой член - поле сорта `Type`, и какой универсум
+    // ему достанется, решает тот, кто сигнатуру реализует.
+    program(&format!(
+        "{BASE}
+module type Eqv where
+  type T
+  eq : T -> T -> Bool
+
+module NatEq : Eqv where
+  type T = Nat
+  eq : T -> T -> Bool
+  eq a b = True
+"
+    ));
+}
+
+#[test]
+fn a_module_must_satisfy_its_ascription() {
+    // Аннотация - обязательство: член сигнатуры, которого нет в модуле,
+    // отвергается той же проверкой, что и всякое тело против типа.
+    let error = refused(&format!(
+        "{BASE}
+module type Eqv where
+  type T
+  eq : T -> T -> Bool
+
+module Broken : Eqv where
+  type T = Nat
+"
+    ));
+    assert!(
+        matches!(error, ElabError::Core { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn modules_nest() {
+    // Вложенность даётся квалификацией: член внутреннего модуля объявлен как
+    // `Outer.Inner.flag`, сам внутренний - поле внешнего. Отдельного правила
+    // для этого нет.
+    program(&format!(
+        "{BASE}
+module Outer where
+  module Inner where
+    flag : Bool
+    flag = True
+
+used : Bool
+used = Outer.Inner.flag
+"
+    ));
+}
+
+#[test]
+fn an_abstract_type_member_belongs_to_a_signature() {
+    // `type T` без уравнения объявляет член сигнатуры модуля; снаружи неё тип
+    // брать неоткуда, а постулировать имя можно обычной сигнатурой.
+    let error = refused(&format!("{BASE}type T\n"));
+    assert!(
+        matches!(error, ElabError::AbstractType { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_signature_carries_no_implementations() {
+    // Клаузы в `module type` и семейство в теле модуля - две названные
+    // границы. Первая - от смысла сигнатуры, вторая от того, что имена
+    // конструкторов пока не квалифицируются.
+    for text in [
+        "module type Eqv where\n  eq : Bool\n  eq = True\n",
+        "module M where\n  data Tree where\n    Leaf : Tree\n",
+    ] {
+        let error = refused(&format!("{BASE}{text}"));
+        assert!(
+            matches!(error, ElabError::ModuleMember { .. }),
+            "для {text:?} получено {error:?}"
+        );
+    }
+}

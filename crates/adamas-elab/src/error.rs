@@ -227,6 +227,33 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// `type T` без уравнения вне сигнатуры модуля.
+    ///
+    /// Абстрактный типовой член объявляет сигнатура (§4.8); снаружи неё тип
+    /// брать неоткуда, а постулировать имя можно обычной сигнатурой.
+    #[error(
+        "`type {name}` без уравнения объявляет член сигнатуры модуля; здесь тип брать неоткуда"
+    )]
+    AbstractType {
+        /// Имя.
+        name: Symbol,
+        /// Где написано.
+        span: Span,
+    },
+
+    /// Объявление, которому не место в теле модуля или его сигнатуры.
+    #[error("`{name}` в {what} не объявляется: {why}")]
+    ModuleMember {
+        /// Имя члена.
+        name: Symbol,
+        /// Куда написано: «модуле» либо «сигнатуре модуля».
+        what: &'static str,
+        /// Чего именно не бывает.
+        why: &'static str,
+        /// Где написано.
+        span: Span,
+    },
+
     /// Разбираемое, тип которого не синтезируется.
     #[error("тип разбираемого не выводится: укажите его")]
     NotMatchable {
@@ -543,6 +570,8 @@ impl ElabError {
             | Self::OwnedHolder { span, .. }
             | Self::EmptyCase { span }
             | Self::NotMatchable { span }
+            | Self::AbstractType { span, .. }
+            | Self::ModuleMember { span, .. }
             | Self::NotUpdatable { span }
             | Self::NoImplicitParameter { span }
             | Self::BlockWithoutValue { span }

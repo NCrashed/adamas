@@ -163,6 +163,10 @@ impl Spans<'_> {
         let at = expr.span;
         match &expr.kind {
             ExprKind::Name(name) => self.name(at, name),
+            ExprKind::Using { name, body } => {
+                self.name(at, name);
+                self.expr(at, body);
+            }
             ExprKind::Lit(lit) => self.inside("литерал", at, lit.span),
             ExprKind::Hole => {}
             ExprKind::RecordType(fields, tail) => {

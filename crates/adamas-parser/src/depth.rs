@@ -96,6 +96,7 @@ fn deepen(depth: u32, links: usize, span: Span) -> Result<u32, ParseError> {
 fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<(), ParseError> {
     match &expr.kind {
         ExprKind::Name(_) | ExprKind::Lit(_) | ExprKind::Hole => {}
+        ExprKind::Using { body, .. } => pending.push((Node::Expr(body), depth)),
         // Тип записи - **телескоп**: тип поля живёт под предыдущими, и звено
         // ставит каждое (§4.2). Хвост звена не ставит - он переменная, а не
         // поле.

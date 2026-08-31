@@ -168,6 +168,17 @@ pub enum ExprKind {
     App(Box<Expr>, Box<Expr>),
     /// Применение типа: `runExcept @IOError prog` (§4.1).
     TypeApp(Box<Expr>, Box<Expr>),
+    /// `using productMonoid expr` - именованный инстанс в области видимости
+    /// (§4.3).
+    ///
+    /// Область - всё, что правее: применение связывает теснее, поэтому
+    /// `using p f x` читается как `using p (f x)`.
+    Using {
+        /// Имя инстанса.
+        name: Name,
+        /// Что под ним элаборируется.
+        body: Box<Expr>,
+    },
     /// `\x y -> body`.
     Lam {
         /// Параметры.
@@ -426,6 +437,11 @@ pub enum DeclKind {
 pub struct ClassDecl {
     /// `instance Ord Int where` против `class Ord a where`.
     pub instance: bool,
+    /// Имя инстанса: `instance productMonoid : Monoid Int where` (§4.3).
+    ///
+    /// `None` - анонимный. Имя нужно тем инстансам, которых на один тип
+    /// несколько: выбрать между ними автоматика не вправе.
+    pub name: Option<Name>,
     /// Голова: имя класса, применённое к аргументам.
     pub head: Expr,
     /// Суперклассы: `class Ord a when Eqv a where …` (§4.1).
@@ -555,7 +571,7 @@ pub fn contains_block(expr: &Expr) -> bool {
                 pending.push(left);
                 pending.push(right);
             }
-            ExprKind::Lam { body, .. } => pending.push(body),
+            ExprKind::Lam { body, .. } | ExprKind::Using { body, .. } => pending.push(body),
             ExprKind::Pi { binders, codomain } => {
                 pending.extend(binders.iter().filter_map(|binder| binder.ty.as_ref()));
                 pending.push(codomain);
@@ -612,12 +628,37 @@ fn dump_class(out: &mut String, class: &ClassDecl, depth: usize) {
     } else {
         "(class "
     });
+    if let Some(name) = &class.name {
+        out.push_str(&name.text);
+        out.push_str(" : ");
+    }
     dump_expr(out, &class.head);
     for superclass in &class.superclasses {
         out.push_str(" when ");
         dump_expr(out, superclass);
     }
     dump_block(out, "", &class.members, depth);
+}
+
+/// `\x y -> body`: `(lam (x y) body)`.
+fn dump_lambda(out: &mut String, params: &[LamParam], body: &Expr) {
+    out.push_str("(lam (");
+    dump_list(out, params, |out, param| match &param.kind {
+        LamParamKind::Pattern(pattern) => dump_pattern(out, pattern),
+        LamParamKind::Binder(binder) => dump_binder(out, binder),
+    });
+    out.push_str(") ");
+    dump_expr(out, body);
+    out.push(')');
+}
+
+/// `using name expr`: `(using name expr)`.
+fn dump_using(out: &mut String, name: &Name, body: &Expr) {
+    out.push_str("(using ");
+    out.push_str(&name.text);
+    out.push(' ');
+    dump_expr(out, body);
+    out.push(')');
 }
 
 /// Модуль или его сигнатура: `(module M : S …)`.
@@ -843,6 +884,7 @@ fn dump_expr(out: &mut String, expr: &Expr) {
         ExprKind::Lit(lit) => out.push_str(&lit.text),
         ExprKind::Hole => out.push('_'),
         ExprKind::RecordType(..) | ExprKind::Record(_) => dump_record(out, &expr.kind),
+        ExprKind::Using { name, body } => dump_using(out, name, body),
         ExprKind::Project(inner, name) => dump_projection(out, inner, name),
         ExprKind::Update(base, fields) => dump_update(out, base, fields),
         // Спайн применения печатается в один список: `(f x y)` читается, а
@@ -859,16 +901,7 @@ fn dump_expr(out: &mut String, expr: &Expr) {
             dump_expr(out, argument);
             out.push(')');
         }
-        ExprKind::Lam { params, body } => {
-            out.push_str("(lam (");
-            dump_list(out, params, |out, param| match &param.kind {
-                LamParamKind::Pattern(pattern) => dump_pattern(out, pattern),
-                LamParamKind::Binder(binder) => dump_binder(out, binder),
-            });
-            out.push_str(") ");
-            dump_expr(out, body);
-            out.push(')');
-        }
+        ExprKind::Lam { params, body } => dump_lambda(out, params, body),
         ExprKind::Pi { binders, codomain } => {
             out.push_str("(pi (");
             dump_list(out, binders, dump_binder);

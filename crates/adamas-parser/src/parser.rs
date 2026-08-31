@@ -1222,6 +1222,19 @@ impl<'a> Parser<'a> {
     fn class_decl(&mut self) -> Result<Decl, ParseError> {
         let start = self.peek().span;
         let instance = self.bump().kind == TokenKind::Instance;
+        // `instance productMonoid : Monoid Int` - именованный (§4.3).
+        // Различает его двоеточие после имени: у анонимного за `instance`
+        // идёт имя класса, а за ним аргументы, и двоеточия там нет.
+        let name = if instance
+            && self.kind() == TokenKind::Ident
+            && self.kind_ahead(1) == TokenKind::Colon
+        {
+            let written = self.ident()?;
+            self.bump();
+            Some(written)
+        } else {
+            None
+        };
         let head = self.expr()?;
         if self.at(TokenKind::Where) && contains_block(&head) {
             return Err(self.block_not_last(&head));
@@ -1251,6 +1264,7 @@ impl<'a> Parser<'a> {
         Ok(Decl {
             kind: DeclKind::Class(ClassDecl {
                 instance,
+                name,
                 head,
                 superclasses,
                 members,
@@ -1442,6 +1456,7 @@ impl<'a> Parser<'a> {
                 (ExprKind::Hole, token.span)
             }
             TokenKind::Backslash => return self.lambda(),
+            TokenKind::Using => return self.using(),
             TokenKind::If => return self.conditional(),
             TokenKind::Case => return self.case(),
             TokenKind::LParen => return self.parenthesised(),
@@ -1501,6 +1516,25 @@ impl<'a> Parser<'a> {
         };
         let span = start.map_or(token.span, |sign| sign.span.merge(token.span));
         Ok(Lit { kind, text, span })
+    }
+
+    /// `using productMonoid expr` (§4.3).
+    ///
+    /// Область - всё, что правее: применение связывает теснее, поэтому
+    /// `using p f x` читается как `using p (f x)`, а скобки из примеров §4.3
+    /// ничего не меняют.
+    fn using(&mut self) -> Result<Expr, ParseError> {
+        let start = self.bump().span;
+        let name = self.ident()?;
+        let body = self.expr()?;
+        let span = start.merge(body.span);
+        Ok(Expr {
+            kind: ExprKind::Using {
+                name,
+                body: Box::new(body),
+            },
+            span,
+        })
     }
 
     fn lambda(&mut self) -> Result<Expr, ParseError> {

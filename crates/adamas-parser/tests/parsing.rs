@@ -575,3 +575,17 @@ fn an_attribute_stands_before_a_signature() {
         ParseError::Expected { .. }
     ));
 }
+
+#[test]
+fn a_named_instance_and_using_parse() {
+    // §4.3: имя инстанса отделяется двоеточием, а `using` берёт всё, что
+    // правее - применение связывает теснее.
+    assert_eq!(
+        tree("instance productMonoid : Monoid Int where\n  mempty = 1\n").expect("разбор удался"),
+        "(instance productMonoid : (Monoid Int)\n  (def mempty\n    (clause () 1)))\n"
+    );
+    assert_eq!(
+        tree("n = using productMonoid foldM xs\n").expect("разбор удался"),
+        "(def n\n  (clause () (using productMonoid (foldM xs))))\n"
+    );
+}

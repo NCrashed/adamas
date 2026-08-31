@@ -94,6 +94,7 @@ impl Expr {
             ExprKind::App(..) | ExprKind::TypeApp(..) => Prec::App,
             ExprKind::Chain(_) => Prec::Chain,
             ExprKind::Lam { .. }
+            | ExprKind::Using { .. }
             | ExprKind::Pi { .. }
             | ExprKind::Arrow(..)
             | ExprKind::Block(_)
@@ -405,6 +406,12 @@ impl Printer {
             ExprKind::Name(name) => self.push(&name.text),
             ExprKind::Lit(lit) => self.push(&lit.text),
             ExprKind::Hole => self.push("_"),
+            ExprKind::Using { name, body } => {
+                self.push("using ");
+                self.push(&name.text);
+                self.push(" ");
+                self.expr(body, Prec::Lowest);
+            }
             ExprKind::RecordType(fields, tail) => {
                 self.push("{");
                 for (index, field) in fields.iter().enumerate() {

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use adamas_core::check::{infer, is_type};
+use adamas_core::check::{check, infer, is_type};
 use adamas_core::conv::whnf;
 use adamas_core::ctx::Ctx;
 use adamas_core::eval::{eval, quote};
@@ -1004,54 +1004,7 @@ impl<'a> Elaborator<'a> {
             // числа аргументов, а его ограничивает только длина файла: предел
             // вложенности парсера на плоское `f a b c …` не тратится, и тысячи
             // аргументов роняли процесс вместо отказа (§10 вопрос 62).
-            ExprKind::App(..) => {
-                let mut arguments = Vec::new();
-                let mut head = expr;
-                while let ExprKind::App(callee, argument) = &head.kind {
-                    arguments.push(&**argument);
-                    head = callee;
-                }
-                // Аргумент конструктора уезжает внутри собранного значения, а
-                // аргумент функции - нет: §3.3 разрешает замыканию над
-                // владеющим связыванием применяться и передаваться.
-                let inside = if self.constructs(head) {
-                    Position::Field
-                } else {
-                    Position::Inner
-                };
-                let mut term = self.placed(Position::Inner, |it| it.expr(head, Mult::Many))?;
-                // Имплисит стоит не только в голове: `f Zero True` при
-                // `f : Nat -> {0 a : Type} -> a -> Nat` обязано получить `a`
-                // между написанными аргументами. Голову свою вставку уже
-                // получила - её делает `name`, - поэтому тип нужен ровно для
-                // середины спайна.
-                //
-                // Тип не вывелся - применение собирается как раньше, без
-                // вставки: голова бывает и лямбдой, выводить которую нечем.
-                // Сказать об этом полагается `check`, а не этому проходу.
-                let mut ty = infer(&self.ctx, self.metas, Mult::Zero, &term)
-                    .ok()
-                    .map(|(ty, _)| ty);
-                for argument in arguments.into_iter().rev() {
-                    if let Some(current) = ty.take() {
-                        let (inserted, rest) = self.inserted(term, current);
-                        term = inserted;
-                        ty = Some(rest);
-                    }
-                    let argument = self.placed(inside, |it| it.expr(argument, Mult::Many))?;
-                    ty = ty.and_then(|it| match &*it {
-                        Value::Pi(_, _, _, _, codomain) => {
-                            Some(codomain.clone().apply(self.ctx.eval(&argument)))
-                        }
-                        _ => None,
-                    });
-                    term = Term::App(Rc::new(term), Rc::new(argument));
-                }
-                // Результат применения к scope не привязан: собрать замыкание,
-                // которое его возвращает, не даёт правило позиции.
-                self.produced = None;
-                Ok(term)
-            }
+            ExprKind::App(..) => self.application(expr),
             ExprKind::Arrow(domain, codomain) => {
                 // Стрелка связывает так же, как `(x : A) ->`, только без
                 // имени, поэтому правило владения (§3.3) действует и здесь:
@@ -1641,6 +1594,69 @@ impl<'a> Elaborator<'a> {
             return term;
         };
         self.implicits(term, ty)
+    }
+
+    /// `f a b c` - спайн целиком, а не по одному применению за раз.
+    ///
+    /// Собирается он **циклом**: рекурсия по левому поддереву стоила бы кадра
+    /// на аргумент, а их ограничивает только длина файла - предел вложенности
+    /// парсера на плоское `f a b c …` не тратится (§10 вопрос 62).
+    fn application(&mut self, expr: &Expr) -> Result<Term, ElabError> {
+        let mut arguments = Vec::new();
+        let mut head = expr;
+        while let ExprKind::App(callee, argument) = &head.kind {
+            arguments.push(&**argument);
+            head = callee;
+        }
+        // Аргумент конструктора уезжает внутри собранного значения, а аргумент
+        // функции - нет: §3.3 разрешает замыканию над владеющим связыванием
+        // применяться и передаваться.
+        let inside = if self.constructs(head) {
+            Position::Field
+        } else {
+            Position::Inner
+        };
+        let mut term = self.placed(Position::Inner, |it| it.expr(head, Mult::Many))?;
+        // Имплисит стоит не только в голове: `f Zero True` при
+        // `f : Nat -> {0 a : Type} -> a -> Nat` обязано получить `a` между
+        // написанными аргументами. Голову свою вставку уже получила - её
+        // делает `name`, - поэтому тип нужен ровно для середины спайна.
+        //
+        // Тип не вывелся - применение собирается как раньше, без вставки:
+        // голова бывает и лямбдой, выводить которую нечем. Сказать об этом
+        // полагается `check`, а не этому проходу.
+        let mut ty = infer(&self.ctx, self.metas, Mult::Zero, &term)
+            .ok()
+            .map(|(ty, _)| ty);
+        for argument in arguments.into_iter().rev() {
+            if let Some(current) = ty.take() {
+                let (inserted, rest) = self.inserted(term, current);
+                term = inserted;
+                ty = Some(rest);
+            }
+            let argument = self.placed(inside, |it| it.expr(argument, Mult::Many))?;
+            ty = ty.and_then(|it| self.stepped(&it, &argument));
+            term = Term::App(Rc::new(term), Rc::new(argument));
+        }
+        // Результат применения к scope не привязан: собрать замыкание, которое
+        // его возвращает, не даёт правило позиции.
+        self.produced = None;
+        Ok(term)
+    }
+
+    /// Тип применения к написанному аргументу - если он вычислим.
+    ///
+    /// Аргумент вычисляется только после проверки: `eval` работает на
+    /// типизированных термах, а элаборация встречает и другие - `(Type Type)`
+    /// роняло бы её на применении не-функции. Тот же порядок, что у `typed`:
+    /// сперва авторитет, потом вычисление.
+    fn stepped(&mut self, ty: &Rc<Value>, argument: &Term) -> Option<Rc<Value>> {
+        let Value::Pi(_, _, domain, _, codomain) = &**ty else {
+            return None;
+        };
+        let (domain, codomain) = (Rc::clone(domain), codomain.clone());
+        check(&self.ctx, self.metas, Mult::Zero, argument, &domain).ok()?;
+        Some(codomain.apply(self.ctx.eval(argument)))
     }
 
     /// Применяет `term` к дырке на каждое ведущее implicit-связывание его типа.

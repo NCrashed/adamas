@@ -76,3 +76,14 @@ proptest! {
         prop_assert!(shown.contains('^'), "сообщение без подчёркивания: {shown}");
     }
 }
+
+#[test]
+fn an_ill_typed_argument_is_not_evaluated() {
+    // Элаборация применения шагает по телескопу и вычисляет аргументы, чтобы
+    // находить имплиситы в середине спайна. Вычислять непроверенное при этом
+    // нельзя: `eval` работает на типизированных термах и на применении
+    // не-функции роняет компилятор. `(Type Type)` - ровно такой аргумент.
+    let text = format!("{BASE}f : Nat -> Nat\nf x = Succ (Type Type)\n");
+    let module = parse(&text).expect("разбор удался");
+    assert!(elaborate(&module).is_err(), "ожидался отказ, а не паника");
+}

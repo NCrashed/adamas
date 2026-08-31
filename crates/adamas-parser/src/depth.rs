@@ -306,12 +306,28 @@ fn pattern_at<'a>(
 
 fn decl_at<'a>(decl: &'a Decl, depth: u32, pending: &mut Pending<'a>) -> Result<(), ParseError> {
     match &decl.kind {
-        DeclKind::Alias { body, .. } | DeclKind::Signature { ty: body, .. } => {
+        DeclKind::Alias { body, .. } => {
+            if let Some(body) = body {
+                pending.push((Node::Expr(body), depth));
+            }
+        }
+        DeclKind::Signature { ty: body, .. } => {
             pending.push((Node::Expr(body), depth));
         }
         DeclKind::Clauses { clauses, .. } => {
             for clause in clauses {
                 clause_at(clause, depth, pending)?;
+            }
+        }
+        // Вложенность модуля считается как вложенность блока: член объявлен
+        // глубже, и глубина у него на шаг больше.
+        DeclKind::Module(module) => {
+            let inner = deepen(depth, 1, decl.span)?;
+            if let Some(ascription) = &module.ascription {
+                pending.push((Node::Expr(ascription), depth));
+            }
+            for member in &module.members {
+                decl_at(member, inner, pending)?;
             }
         }
         DeclKind::Data(data) => {

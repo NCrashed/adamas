@@ -60,8 +60,8 @@ use adamas_core::source::Span;
 
 use crate::ast::{
     Alt, Binder, Binding, Block, Chain, Clause, Constructor, Data, Decl, DeclKind, Expr, ExprKind,
-    LamParam, LamParamKind, Lit, LitKind, Module, Mult, MultAnn, Name, Pattern, PatternKind,
-    RecordField, Resource, Stmt, StmtKind, Symbol, Visibility, contains_block,
+    LamParam, LamParamKind, Lit, LitKind, Module, ModuleDecl, Mult, MultAnn, Name, Pattern,
+    PatternKind, RecordField, Resource, Stmt, StmtKind, Symbol, Visibility, contains_block,
 };
 use crate::token::{Token, TokenKind};
 
@@ -463,7 +463,6 @@ impl<'a> Parser<'a> {
             TokenKind::Class | TokenKind::Coherent | TokenKind::When => Unsupported::Class,
             TokenKind::Instance => Unsupported::Instance,
             TokenKind::Using => Unsupported::NamedInstance,
-            TokenKind::Module => Unsupported::Module,
             TokenKind::Import => Unsupported::Import,
             TokenKind::Mutual => Unsupported::Mutual,
             TokenKind::Effect => Unsupported::Effect,
@@ -552,6 +551,7 @@ impl<'a> Parser<'a> {
             TokenKind::Unique => self.unique_data(),
             TokenKind::Resource => self.resource(),
             TokenKind::Type => self.alias(),
+            TokenKind::Module => self.module_decl(),
             TokenKind::Ident | TokenKind::LParen => self.signature_or_clause(),
             _ => Err(self
                 .unsupported_here()
@@ -1097,13 +1097,61 @@ impl<'a> Parser<'a> {
     /// присваивает, а голое имя - punning, то есть `x = x`. Смешивать нельзя:
     /// запись либо тип, либо значение, и половина каждого была бы ни тем ни
     /// другим.
+    /// `module M [: S] where …` и `module type S where …` (§4.8).
+    ///
+    /// Обе формы разбираются одной: различает их `type` сразу за `module`, а
+    /// дальше у них общее всё - имя, необязательная аннотация и блок членов.
+    /// Член - обычное объявление, поэтому вложенный модуль разбирается сам
+    /// собой; законен ли он там, решает элаборация.
+    fn module_decl(&mut self) -> Result<Decl, ParseError> {
+        let start = self.bump().span;
+        let signature = self.eat(TokenKind::Type).is_some();
+        let name = self.expect(TokenKind::Ident)?;
+        let name = self.name_of(name);
+        let ascription = if self.eat(TokenKind::Colon).is_some() {
+            let written = self.expr()?;
+            if self.at(TokenKind::Where) && contains_block(&written) {
+                return Err(self.block_not_last(&written));
+            }
+            Some(written)
+        } else {
+            None
+        };
+        let mut end = ascription.as_ref().map_or(name.span, |it| it.span);
+        let mut members = Vec::new();
+        if self.eat(TokenKind::Where).is_some() {
+            self.expect(TokenKind::Open)?;
+            members = self.members(TokenKind::Close, Self::decl)?;
+            self.expect(TokenKind::Close)?;
+            end = members.last().map_or(end, |last| last.span);
+        }
+        Ok(Decl {
+            kind: DeclKind::Module(ModuleDecl {
+                signature,
+                name,
+                ascription,
+                members,
+            }),
+            span: start.merge(end),
+        })
+    }
+
+    /// Уравнение необязательно: `type T` без него объявляет абстрактный
+    /// типовой член сигнатуры модуля (§4.8). Что эта форма законна только
+    /// внутри `module type`, решает элаборация - парсеру про место объявления
+    /// знать неоткуда.
     fn alias(&mut self) -> Result<Decl, ParseError> {
         let start = self.expect(TokenKind::Type)?.span;
         let name = self.expect(TokenKind::Ident)?;
         let name = self.name_of(name);
-        self.expect(TokenKind::Equals)?;
-        let body = self.body()?;
-        let span = start.merge(body.span);
+        let mut span = start.merge(name.span);
+        let body = if self.eat(TokenKind::Equals).is_some() {
+            let body = self.body()?;
+            span = start.merge(body.span);
+            Some(body)
+        } else {
+            None
+        };
         Ok(Decl {
             kind: DeclKind::Alias { name, body },
             span,

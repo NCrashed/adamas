@@ -59,7 +59,9 @@ impl Spans<'_> {
         match &decl.kind {
             DeclKind::Alias { name, body } => {
                 self.name(at, name);
-                self.expr(at, body);
+                if let Some(body) = body {
+                    self.expr(at, body);
+                }
             }
             DeclKind::Signature { name, ty } => {
                 self.name(at, name);
@@ -69,6 +71,15 @@ impl Spans<'_> {
                 self.name(at, name);
                 for clause in clauses {
                     self.clause(at, clause);
+                }
+            }
+            DeclKind::Module(module) => {
+                self.name(at, &module.name);
+                if let Some(ascription) = &module.ascription {
+                    self.expr(at, ascription);
+                }
+                for member in &module.members {
+                    self.decl(at, member);
                 }
             }
             DeclKind::Data(data) => self.data(at, data),

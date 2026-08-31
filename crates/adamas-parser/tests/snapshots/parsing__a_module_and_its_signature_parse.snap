@@ -1,0 +1,14 @@
+---
+source: crates/adamas-parser/tests/parsing.rs
+expression: "tree(text).expect(\"разбор удался\")"
+---
+(module-type Eqv
+  (alias T)
+  (sig eq (-> T (-> T Bool))))
+(module NatEq : Eqv
+  (alias T Nat)
+  (def eq
+    (clause (a b) True)))
+(module Outer
+  (module Inner
+    (sig flag Bool)))

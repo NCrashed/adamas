@@ -375,8 +375,10 @@ pub enum DeclKind {
     Alias {
         /// Имя алиаса.
         name: Name,
-        /// Что он называет.
-        body: Expr,
+        /// Что он называет. `None` - написано `type T` без уравнения: так
+        /// сигнатура модуля объявляет **абстрактный** типовой член (§4.8), и
+        /// больше нигде эта форма не законна.
+        body: Option<Expr>,
     },
 
     /// Сигнатура: `map : (a -> b) -> Vect n a -> Vect n b`.
@@ -395,8 +397,28 @@ pub enum DeclKind {
     },
     /// Индуктивный тип: `data Vect : … where …`.
     Data(Data),
+    /// Модуль или его сигнатура: `module M where …` (§4.8).
+    Module(ModuleDecl),
     /// Ресурсный тип: `resource File where drop h = …` (§3.3).
     Resource(Resource),
+}
+
+/// Модуль или сигнатура модуля.
+///
+/// Одна структура на обе формы: различает их `signature`, а всё остальное -
+/// имя, аннотация и члены - у них общее. Сигнатура несёт объявления без
+/// реализаций, модуль - с ними, и решает это элаборация, а не разбор.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleDecl {
+    /// `module type S where` против `module M where`.
+    pub signature: bool,
+    /// Имя.
+    pub name: Name,
+    /// Аннотация сигнатурой: `module IntOrd : Ord where`. У самой сигнатуры её
+    /// не бывает.
+    pub ascription: Option<Expr>,
+    /// Члены в порядке написания: порядок значим, член видит предыдущих (§4.8).
+    pub members: Vec<Decl>,
 }
 
 /// Индуктивный тип.
@@ -543,8 +565,28 @@ fn dump_decl(out: &mut String, decl: &Decl, depth: usize) {
         DeclKind::Alias { name, body } => {
             out.push_str("(alias ");
             out.push_str(&name.text);
-            out.push(' ');
-            dump_expr(out, body);
+            if let Some(body) = body {
+                out.push(' ');
+                dump_expr(out, body);
+            }
+            out.push(')');
+        }
+        DeclKind::Module(module) => {
+            out.push_str(if module.signature {
+                "(module-type "
+            } else {
+                "(module "
+            });
+            out.push_str(&module.name.text);
+            if let Some(ascription) = &module.ascription {
+                out.push_str(" : ");
+                dump_expr(out, ascription);
+            }
+            for member in &module.members {
+                out.push('\n');
+                out.push_str(&"  ".repeat(depth + 1));
+                dump_decl(out, member, depth + 1);
+            }
             out.push(')');
         }
         DeclKind::Signature { name, ty } => {

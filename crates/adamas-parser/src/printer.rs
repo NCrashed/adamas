@@ -51,8 +51,8 @@
 
 use crate::ast::{
     Alt, Binder, Binding, Block, Chain, Clause, Constructor, Data, Decl, DeclKind, Expr, ExprKind,
-    LamParam, LamParamKind, Lit, Module, Name, Pattern, PatternKind, Resource, Stmt, StmtKind,
-    Visibility, contains_block,
+    LamParam, LamParamKind, Lit, Module, ModuleDecl, Name, Pattern, PatternKind, Resource, Stmt,
+    StmtKind, Visibility, contains_block,
 };
 use crate::lexer::is_operator;
 
@@ -183,8 +183,10 @@ impl Printer {
             DeclKind::Alias { name, body } => {
                 self.push("type ");
                 self.push(&name.text);
-                self.push(" = ");
-                self.expr(body, Prec::Lowest);
+                if let Some(body) = body {
+                    self.push(" = ");
+                    self.expr(body, Prec::Lowest);
+                }
             }
             DeclKind::Signature { name, ty } => {
                 self.decl_name(name);
@@ -200,6 +202,7 @@ impl Printer {
                 }
             }
             DeclKind::Data(data) => self.data(data),
+            DeclKind::Module(module) => self.module_decl(module),
             DeclKind::Resource(resource) => self.resource(resource),
         }
     }
@@ -231,6 +234,21 @@ impl Printer {
             printer.push("where");
             printer.block_of(&clause.wheres, Self::decl);
         });
+    }
+
+    fn module_decl(&mut self, module: &ModuleDecl) {
+        self.push(if module.signature {
+            "module type "
+        } else {
+            "module "
+        });
+        self.decl_name(&module.name);
+        if let Some(ascription) = &module.ascription {
+            self.push(" : ");
+            self.expr(ascription, Prec::Lowest);
+        }
+        self.push(" where");
+        self.block_of(&module.members, Self::decl);
     }
 
     fn data(&mut self, data: &Data) {

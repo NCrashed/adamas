@@ -467,3 +467,24 @@ fn a_record_type_may_name_its_tail() {
         "(sig keep (-> (record (x Nat) | r) (record (x Nat) | r)))\n"
     );
 }
+
+#[test]
+fn a_module_and_its_signature_parse() {
+    // §4.8: обе формы разбираются одной, различает их `type` сразу за
+    // `module`. Член - обычное объявление, поэтому вложенный модуль
+    // разбирается сам собой.
+    let text = "\
+module type Eqv where
+  type T
+  eq : T -> T -> Bool
+
+module NatEq : Eqv where
+  type T = Nat
+  eq a b = True
+
+module Outer where
+  module Inner where
+    flag : Bool
+";
+    insta::assert_snapshot!(tree(text).expect("разбор удался"));
+}

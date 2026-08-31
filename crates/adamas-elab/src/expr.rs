@@ -380,6 +380,13 @@ pub(crate) struct Elaborator<'a> {
     bare: bool,
     /// Модуль, чьё тело элаборируется (§4.8). `None` - верхний уровень.
     enclosing: Option<Enclosing<'a>>,
+    /// Именованные инстансы, выбранные `using`: класс и имя (§4.3).
+    ///
+    /// Выбор действует на **вставку**, а не на разрешение: словарь для
+    /// этого класса не заводится дыркой вовсе, а сразу берётся написанным.
+    /// Иначе выбор пришлось бы доносить до отложенного поиска, а он
+    /// работает по дыркам, у которых места написания уже нет.
+    using: Vec<(Symbol, Symbol)>,
     /// Где стоит ближайший подтерм - см. [`Position`].
     position: Position,
     /// Привязано ли к scope значение, которое только что собрано, и каким
@@ -457,6 +464,7 @@ impl<'a> Elaborator<'a> {
             expected: Vec::new(),
             bare: false,
             enclosing: None,
+            using: Vec::new(),
             rows: None,
             types: false,
             position: Position::Inner,
@@ -674,6 +682,9 @@ impl<'a> Elaborator<'a> {
     fn free_in(&self, expr: &Expr, bound: &mut Vec<Symbol>, found: &mut Unbound) {
         match &expr.kind {
             ExprKind::Name(name) => self.free_name(name, bound, found),
+            // Имя инстанса свободным не считается: оно обязано быть
+            // объявленным, как и всякая ссылка (§4.3).
+            ExprKind::Using { body, .. } => self.free_in(body, bound, found),
             ExprKind::App(callee, argument) | ExprKind::TypeApp(callee, argument) => {
                 self.free_in(callee, bound, found);
                 self.free_in(argument, bound, found);
@@ -1135,6 +1146,21 @@ impl<'a> Elaborator<'a> {
             })
         };
         match &expr.kind {
+            // `using p expr` - выбор именованного инстанса на всё, что правее
+            // (§4.3). Класс берётся из типа самого инстанса: заключение его
+            // есть применение класса, и другого источника не нужно.
+            ExprKind::Using { name, body } => {
+                let Some(class) = self.class_of(&name.text) else {
+                    return Err(ElabError::UnknownName {
+                        name: Rc::clone(&name.text),
+                        span: name.span,
+                    });
+                };
+                self.using.push((class, Rc::clone(&name.text)));
+                let inner = self.expr(body, default);
+                self.using.pop();
+                inner
+            }
             ExprKind::Name(name) => {
                 if let Some(scoped) = self.scoped_name(&name.text) {
                     self.produced = Some(Rc::clone(scoped));
@@ -1881,11 +1907,42 @@ impl<'a> Elaborator<'a> {
                 return (term, ty);
             }
             let (domain, codomain) = (Rc::clone(domain), codomain.clone());
-            let argument = self.fresh_meta(&domain);
+            // `using` выбирает словарь до всякого поиска: место написания
+            // здесь ещё есть, а у дырки его уже не будет.
+            let argument = self
+                .chosen(&domain)
+                .unwrap_or_else(|| self.fresh_meta(&domain));
             let value = self.ctx.eval(&argument);
             term = Term::App(Rc::new(term), Rc::new(argument));
             ty = codomain.apply(value);
         }
+    }
+
+    /// Написанный `using`-инстанс для этого домена, если он есть.
+    fn chosen(&mut self, domain: &Rc<Value>) -> Option<Term> {
+        let head = head_name(domain)?;
+        let chosen = self
+            .using
+            .iter()
+            .rev()
+            .find(|(class, _)| **class == **head)
+            .map(|(_, name)| Rc::clone(name))?;
+        self.signature.instantiate(&chosen, self.metas)
+    }
+
+    /// Класс, инстансом которого объявлено имя: `Monoid Int` даёт `Monoid`.
+    fn class_of(&self, name: &str) -> Option<Symbol> {
+        let mut current = &self.signature.lookup(name)?.ty;
+        while let Term::Pi(_, _, _, _, codomain) = current {
+            current = codomain;
+        }
+        let Term::App(callee, _) = current else {
+            return None;
+        };
+        let Term::Const(class, _) = &**callee else {
+            return None;
+        };
+        Some(Rc::from(&**class))
     }
 
     /// `(q x y : A) {r z : B} -> C`.

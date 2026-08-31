@@ -80,6 +80,7 @@ impl<'a> Spent<'a> {
     fn in_expr<'e>(&self, name: &str, expr: &'e Expr, bound: &mut Vec<&'e str>) -> bool {
         match &expr.kind {
             ExprKind::Name(found) => &*found.text == name,
+            ExprKind::Using { body, .. } => self.in_expr(name, body, bound),
             ExprKind::Record(fields) => fields
                 .iter()
                 .any(|(_, value)| self.in_expr(name, value, bound)),

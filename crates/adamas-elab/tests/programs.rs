@@ -2919,3 +2919,69 @@ fn an_unchecked_attribute_names_what_is_missing() {
         );
     }
 }
+
+/// Класс с двумя именованными инстансами на один тип - случай, ради которого
+/// имена и существуют (§4.3).
+const PICK: &str = "
+class Pick a where
+  pick : a -> a -> a
+
+instance first : Pick Nat where
+  pick a b = a
+
+instance second : Pick Nat where
+  pick a b = b
+";
+
+#[test]
+fn using_chooses_a_named_instance() {
+    // §4.3: выбор в месте использования. Выбор действует на **вставку**, а не
+    // на отложенный поиск: словарь берётся написанным сразу, потому что у
+    // дырки места написания уже не будет.
+    program(&format!(
+        "{BASE}{PICK}
+data Wit : Nat -> Type where
+  Yes : Wit Zero
+
+taken : Wit (using first (pick Zero (Succ Zero)))
+taken = Yes
+
+pointed : Wit (pick @Nat @first Zero (Succ Zero))
+pointed = Yes
+"
+    ));
+}
+
+#[test]
+fn several_named_instances_ask_for_a_choice() {
+    // Выбрать между ними автоматика не вправе, и молча взять первый - хуже
+    // отказа: программа поменяла бы смысл от порядка объявлений.
+    let error = refused(&format!(
+        "{BASE}{PICK}
+bad : Nat
+bad = pick Zero Zero
+"
+    ));
+    assert!(
+        matches!(error, ElabError::AmbiguousInstance { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_single_named_instance_resolves_by_itself() {
+    // Имя - возможность сослаться, а не отказ от автоматики (решение
+    // 2026-08-31): пока кандидат один, `using` писать незачем.
+    program(&format!(
+        "{BASE}
+class Pick a where
+  pick : a -> a -> a
+
+instance only : Pick Nat where
+  pick a b = a
+
+auto : Nat
+auto = pick Zero (Succ Zero)
+"
+    ));
+}

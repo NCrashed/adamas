@@ -46,6 +46,22 @@ pub struct Instances {
     /// импортов в языке ещё нет, и вопрос 48 (приоритет при импорте) пока не
     /// имеет предмета.
     candidates: HashMap<(Symbol, Symbol), Symbol>,
+    /// Именованные кандидаты по той же паре.
+    ///
+    /// Список, а не один: имя нужно ровно тем инстансам, которых на один
+    /// тип несколько (§4.3). Пока такой один, разрешение берёт его само;
+    /// несколько - отказ с требованием `using`.
+    named: HashMap<(Symbol, Symbol), Vec<Symbol>>,
+}
+
+/// Чем разрешение отвечает на пару «класс, голова».
+pub(crate) enum Candidate {
+    /// Кандидат один - он и берётся.
+    One(Symbol),
+    /// Кандидата нет.
+    None,
+    /// Именованных несколько: выбрать автоматика не вправе.
+    Many(Vec<Symbol>),
 }
 
 /// Что о классе знают разрешение и объявление инстанса.
@@ -83,18 +99,36 @@ impl Instances {
         self.classes.insert(Rc::clone(name), class);
     }
 
-    /// Запоминает инстанс. `false` - такой уже есть.
+    /// Запоминает анонимный инстанс. `false` - такой уже есть.
     pub fn add(&mut self, class: &Symbol, head: &Symbol, name: Symbol) -> bool {
         self.candidates
             .insert((Rc::clone(class), Rc::clone(head)), name)
             .is_none()
     }
 
-    /// Кандидат для `class head`, если он один и есть.
-    fn candidate(&self, class: &Symbol, head: &Symbol) -> Option<Symbol> {
-        self.candidates
-            .get(&(Rc::clone(class), Rc::clone(head)))
-            .map(Rc::clone)
+    /// Запоминает именованный инстанс. Их на пару бывает сколько угодно.
+    pub fn add_named(&mut self, class: &Symbol, head: &Symbol, name: Symbol) {
+        self.named
+            .entry((Rc::clone(class), Rc::clone(head)))
+            .or_default()
+            .push(name);
+    }
+
+    /// Кандидат для `class head`.
+    ///
+    /// Анонимный выигрывает всегда: он и объявлен как «тот самый». Его нет -
+    /// берётся единственный именованный; несколько - выбирать автоматике
+    /// нечем, и об этом надо сказать, а не молча взять первый.
+    fn candidate(&self, class: &Symbol, head: &Symbol) -> Candidate {
+        let key = (Rc::clone(class), Rc::clone(head));
+        if let Some(found) = self.candidates.get(&key) {
+            return Candidate::One(Rc::clone(found));
+        }
+        match self.named.get(&key).map(Vec::as_slice) {
+            Some([one]) => Candidate::One(Rc::clone(one)),
+            Some(many) if many.len() > 1 => Candidate::Many(many.to_vec()),
+            _ => Candidate::None,
+        }
     }
 }
 
@@ -219,8 +253,17 @@ fn settle(
             metas.solve_term(meta, solution);
             continue;
         }
-        let Some(name) = instances.candidate(&class, &head) else {
-            return Err(ElabError::NoInstance { class, head, span });
+        let name = match instances.candidate(&class, &head) {
+            Candidate::One(name) => name,
+            Candidate::None => return Err(ElabError::NoInstance { class, head, span }),
+            Candidate::Many(candidates) => {
+                return Err(ElabError::AmbiguousInstance {
+                    class,
+                    head,
+                    candidates,
+                    span,
+                });
+            }
         };
         let Some(dictionary) = signature.instantiate(&name, metas) else {
             return Err(ElabError::NoInstance { class, head, span });

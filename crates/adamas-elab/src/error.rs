@@ -274,6 +274,22 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Именованных инстансов на пару «класс, голова» несколько.
+    #[error(
+        "инстансов `{class} {head}` несколько ({}); выберите один через `using`",
+        candidates.iter().map(|it| format!("`{it}`")).collect::<Vec<_>>().join(", ")
+    )]
+    AmbiguousInstance {
+        /// Имя класса.
+        class: Symbol,
+        /// Голова написанного типа.
+        head: Symbol,
+        /// Имена кандидатов в порядке объявления.
+        candidates: Vec<Symbol>,
+        /// Где написано использование.
+        span: Span,
+    },
+
     /// `type T` без уравнения вне сигнатуры модуля.
     ///
     /// Абстрактный типовой член объявляет сигнатура (§4.8); снаружи неё тип
@@ -619,6 +635,7 @@ impl ElabError {
             | Self::NotMatchable { span }
             | Self::AbstractType { span, .. }
             | Self::NoInstance { span, .. }
+            | Self::AmbiguousInstance { span, .. }
             | Self::ClassHead { span }
             | Self::Attribute { span, .. }
             | Self::NotTotal { span, .. }

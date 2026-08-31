@@ -792,14 +792,22 @@ fn declare_instance(
     let Some((_, argument)) = applied_head(under_prefix(&written)) else {
         return Err(ElabError::ClassHead { span });
     };
-    let declared: Symbol = Rc::from(format!("{}#{argument}", name.text).as_str());
+    // Именованный объявляется под своим именем: сослаться на него через
+    // `using` и `@` можно только так (§4.3). Анонимный - под невыразимым.
+    let declared: Symbol = match &class.name {
+        Some(written) => Rc::clone(&written.text),
+        None => Rc::from(format!("{}#{argument}", name.text).as_str()),
+    };
     // Кандидат запоминается **до** членов: иначе о дубликате скажет ядро,
     // назвав `Eqv#Nat.eq` - имя, которого автор не писал.
-    if !instances.add(&name.text, &argument, Rc::clone(&declared)) {
+    if class.name.is_some() {
+        instances.add_named(&name.text, &argument, Rc::clone(&declared));
+    } else if !instances.add(&name.text, &argument, Rc::clone(&declared)) {
         return Err(ElabError::ModuleMember {
             name: Rc::clone(&name.text),
             what: "программе",
-            why: "инстанс для этого типа уже объявлен, а именованных инстансов пока нет",
+            why: "анонимный инстанс для этого типа уже объявлен; несколько на один тип \
+                  пишутся именованными",
             span,
         });
     }

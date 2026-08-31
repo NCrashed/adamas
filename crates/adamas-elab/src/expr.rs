@@ -130,6 +130,37 @@ struct Written<'a> {
     siblings: usize,
 }
 
+/// Модуль, чьё тело элаборируется (§4.8).
+///
+/// Члены подняты на верхний уровень под квалифицированными именами, и короткое
+/// имя внутри тела - ссылка на своего же соседа: `compare` рядом с
+/// `type T = Int` видит `T`, то есть `IntOrd.T`. Заслоняет одноимённое
+/// глобальное - это ordered scoping §4.8, а не особый случай.
+///
+/// У функтора член поднят **вместе с параметрами**, поэтому ссылка на него
+/// изнутри применяется к ним: написанное `insert` есть `F.insert Key`.
+#[derive(Clone)]
+pub(crate) struct Enclosing<'a> {
+    /// Имя модуля - им квалифицируются члены.
+    pub name: Symbol,
+    /// Параметры функтора как написаны. Пусто - обычный модуль.
+    ///
+    /// Написанными, а не элаборированными: граница объявления освобождает
+    /// дырки (`Metas::release`), и телескоп, посчитанный один раз на всех,
+    /// умер бы на первом же члене. Каждый член элаборирует его заново и
+    /// обобщает свои уровни сам - применяются они к нему тоже по одному.
+    pub params: &'a [ast::Binder],
+}
+
+impl Enclosing<'_> {
+    /// Имена параметров в порядке написания.
+    fn names(&self) -> impl Iterator<Item = &Symbol> {
+        self.params
+            .iter()
+            .flat_map(|binder| binder.names.iter().map(|name| &name.text))
+    }
+}
+
 /// Параметр семейства - уже элаборированный.
 ///
 /// Живёт отдельно от [`ast::Binder`], потому что переиспользуется: kind и все
@@ -344,13 +375,8 @@ pub(crate) struct Elaborator<'a> {
     rows: Option<Vec<Span>>,
     /// Запрещена ли вставка имплиситов ближайшему имени - см. `type_app`.
     bare: bool,
-    /// Имя модуля, чьё тело элаборируется (§4.8).
-    ///
-    /// Члены подняты на верхний уровень под квалифицированными именами, и
-    /// короткое имя внутри тела - ссылка на своего же соседа: `compare` рядом
-    /// с `type T = Int` видит `T`, то есть `IntOrd.T`. Заслоняет одноимённое
-    /// глобальное - это ordered scoping §4.8, а не особый случай.
-    qualifier: Option<Symbol>,
+    /// Модуль, чьё тело элаборируется (§4.8). `None` - верхний уровень.
+    enclosing: Option<Enclosing<'a>>,
     /// Где стоит ближайший подтерм - см. [`Position`].
     position: Position,
     /// Привязано ли к scope значение, которое только что собрано, и каким
@@ -386,9 +412,27 @@ impl<'a> Elaborator<'a> {
     }
 
     /// То же, внутри тела модуля: короткое имя члена ищется квалифицированным.
-    pub(crate) fn within(mut self, qualifier: Option<&Symbol>) -> Self {
-        self.qualifier = qualifier.map(Rc::clone);
+    pub(crate) fn within(mut self, enclosing: Option<&Enclosing<'a>>) -> Self {
+        self.enclosing = enclosing.cloned();
         self
+    }
+
+    /// Выполняет `body` под параметрами, ничего вокруг результата не строя.
+    ///
+    /// [`Self::wrapped`] делает то же и оборачивает результат в `Pi`; здесь
+    /// нужен сам результат - тело функтора, которое обернётся лямбдой.
+    pub(crate) fn beneath<T>(
+        &mut self,
+        params: &[Param],
+        body: impl FnOnce(&mut Self) -> Result<T, ElabError>,
+    ) -> Result<T, ElabError> {
+        let Some((param, rest)) = params.split_first() else {
+            return body(self);
+        };
+        let bound = self.typed(&param.ty);
+        self.binding(Bound::visible(&param.name, param.mult, bound), |it| {
+            it.beneath(rest, body)
+        })
     }
 
     /// То же, но с членами объявляемой группы.
@@ -408,7 +452,7 @@ impl<'a> Elaborator<'a> {
             declared: Vec::new(),
             expected: Vec::new(),
             bare: false,
-            qualifier: None,
+            enclosing: None,
             rows: None,
             types: false,
             position: Position::Inner,
@@ -447,13 +491,26 @@ impl<'a> Elaborator<'a> {
     /// # Errors
     ///
     /// Если тип параметра не элаборируется либо имя заглавное.
-    pub(crate) fn telescope(&mut self, params: &[ast::Binder]) -> Result<Vec<Param>, ElabError> {
+    /// `uppercase` - разрешено ли заглавное имя параметра.
+    ///
+    /// У семейства нет: `data Pair a b` называет типовые переменные, и правило
+    /// регистра §4.1 держит их строчными. У функтора **есть**: его параметр -
+    /// модуль, а модули заглавные, и §4.8 так и пишет - `(Key : Ord)`.
+    /// Двусмысленности здесь нет и быть не может: имя стоит в написанной
+    /// группе связываний, то есть связывает по форме записи, а не по регистру.
+    pub(crate) fn telescope(
+        &mut self,
+        params: &[ast::Binder],
+        uppercase: bool,
+    ) -> Result<Vec<Param>, ElabError> {
         let depth = self.scope.len();
         let outer = self.ctx.clone();
         let mut found = Vec::new();
         for binder in params {
             for name in &binder.names {
-                Self::binds(name)?;
+                if !uppercase {
+                    Self::binds(name)?;
+                }
                 // Ненаписанный тип параметра - `Type`, а не общая дырка:
                 // `data Pair a b` называет типы, а параметр иного рода
                 // пишется (`(0 n : Nat)`). Универсум семейства обязан
@@ -695,8 +752,36 @@ impl<'a> Elaborator<'a> {
     /// Как имя члена выглядит на верхнем уровне: `T` внутри `IntOrd` есть
     /// `IntOrd.T`. `None` - элаборируется не тело модуля.
     fn qualified_name(&self, name: &str) -> Option<Symbol> {
-        let qualifier = self.qualifier.as_ref()?;
-        Some(Rc::from(format!("{qualifier}.{name}").as_str()))
+        let enclosing = self.enclosing.as_ref()?;
+        Some(Rc::from(format!("{}.{name}", enclosing.name).as_str()))
+    }
+
+    /// Применяет ссылку на члена к параметрам функтора.
+    ///
+    /// Член поднят вместе с ними, поэтому написанное внутри `insert` есть
+    /// `F.insert Key` - **специализированный** член, а не общий. Параметры
+    /// стоят у него implicit-связываниями, и потому пишутся здесь, а не
+    /// вставляются дырками: дырку пришлось бы решать унификацией, а ответ
+    /// известен - это связывание, стоящее прямо в области видимости.
+    fn specialized(&mut self, mut term: Term, mut ty: Rc<Value>) -> (Term, Rc<Value>) {
+        let Some(enclosing) = self.enclosing.clone() else {
+            return (term, ty);
+        };
+        let names: Vec<Symbol> = enclosing.names().map(Rc::clone).collect();
+        for name in names {
+            let Some(index) = self.local(&name) else {
+                break;
+            };
+            let Value::Pi(_, _, _, _, codomain) = &*ty else {
+                break;
+            };
+            let codomain = codomain.clone();
+            let argument = Term::var(index);
+            let value = self.ctx.eval(&argument);
+            term = Term::App(Rc::new(term), Rc::new(argument));
+            ty = codomain.apply(value);
+        }
+        (term, ty)
     }
 
     /// То же, но только если такой член уже объявлен.
@@ -744,6 +829,18 @@ impl<'a> Elaborator<'a> {
             || self.member_of_group(&name.text).is_some()
             || self.qualified(&name.text).is_some()
             || self.signature.lookup(&name.text).is_some()
+    }
+
+    /// Универсум написанного типа - в текущем контексте, а не в пустом.
+    ///
+    /// Нужно телу функтора: тип его члена живёт под параметрами, и считать
+    /// его сортом в пустом контексте нечем.
+    ///
+    /// # Errors
+    ///
+    /// Если написанное типом не является.
+    pub(crate) fn sort_of(&mut self, term: &Term) -> Result<Level, adamas_core::check::TypeError> {
+        is_type(&self.ctx, self.metas, term)
     }
 
     /// Свежая дырка терма, стоящая в текущем контексте.
@@ -1605,17 +1702,25 @@ impl<'a> Elaborator<'a> {
         // 50), поэтому имплиситы вставляются по типу, принесённому в группе.
         if let Some(member) = self.member_of_group(&name.text) {
             let term = Term::Const(CoreName::from(&*member.name), Rc::clone(&member.levels));
-            if self.bare || !opens_implicit(&member.ty) {
+            let ty = eval(&Env::default(), &member.ty);
+            let (term, ty) = self.specialized(term, ty);
+            if self.bare {
                 return Ok(term);
             }
-            let ty = eval(&Env::default(), &member.ty);
             return Ok(self.implicits(term, ty));
         }
         // Сосед по модулю заслоняет глобальное имя: члены подняты на верхний
         // уровень, но написаны они внутри, и видеть автор обязан своего.
         if let Some(full) = self.qualified(&name.text) {
             if let Some(term) = self.signature.instantiate(&full, self.metas) {
-                return Ok(self.implicit_use(&full, term));
+                let Ok((ty, _)) = infer(&self.ctx, self.metas, Mult::Zero, &term) else {
+                    return Ok(term);
+                };
+                let (term, ty) = self.specialized(term, ty);
+                if self.bare {
+                    return Ok(term);
+                }
+                return Ok(self.implicits(term, ty));
             }
         }
         // Аргументы уровня подставляются дырками - это implicit UP со стороны

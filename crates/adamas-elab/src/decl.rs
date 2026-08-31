@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use adamas_core::check::{TypeError, check_closed_with, infer, is_type};
+use adamas_core::check::{TypeError, check_closed_with, check_within, infer, is_type};
 use adamas_core::ctx::Ctx;
 use adamas_core::eval::quote;
 use adamas_core::level::Level;
@@ -31,7 +31,7 @@ use adamas_parser::ast::{self, DeclKind, Module, Symbol};
 
 use crate::carrier;
 use crate::error::{ElabError, Names};
-use crate::expr::{Elaborator, Member, Param};
+use crate::expr::{Elaborator, Enclosing, Member, Param};
 use crate::own::{Owned, Ownership};
 use crate::route::{self, Declared};
 
@@ -83,17 +83,33 @@ pub fn elaborate_into(
 /// Точка в имени - то, чего поверхностный лексер не порождает, поэтому
 /// столкнуться с написанным именем квалифицированное не может, а написать его
 /// автор не в состоянии: снаружи модуль читается проекцией.
-fn qualify(within: Option<&Symbol>, name: &str) -> Symbol {
+fn qualify(within: Option<&Enclosing<'_>>, name: &str) -> Symbol {
     match within {
-        Some(outer) => Rc::from(format!("{outer}.{name}").as_str()),
+        Some(outer) => Rc::from(format!("{}.{name}", outer.name).as_str()),
         None => Rc::from(name),
     }
+}
+
+/// Параметры функтора, под которыми объявляется член. Пусто вне функтора.
+fn params_of<'a>(within: Option<&Enclosing<'a>>) -> &'a [ast::Binder] {
+    within.map_or(&[], |it| it.params)
+}
+
+/// Оборачивает тело члена лямбдами по параметрам функтора.
+///
+/// Клаузы делают это сами - параметры стоят у них implicit-связываниями, и
+/// компилятор разбора абстрагирует по всем аргументам, - а алиасу и объекту
+/// модуля обёртку строит этот помощник.
+fn abstracted(params: &[Param], body: Term) -> Term {
+    params.iter().rev().fold(body, |inner, param| {
+        Term::Lam(param.mult, CoreName::from(&*param.name), Rc::new(inner))
+    })
 }
 
 /// Объявления одного уровня: верхнего либо тела модуля.
 fn members_into(
     decls: &[ast::Decl],
-    within: Option<&Symbol>,
+    within: Option<&Enclosing<'_>>,
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &mut Owned,
@@ -117,9 +133,13 @@ fn members_into(
                         span: ty.span,
                     });
                 }
-                let elaborated = Elaborator::new(signature, metas, owned)
-                    .within(within)
-                    .declaration(ty, Mult::Many)?;
+                // Параметры функтора стоят у члена implicit-связываниями:
+                // компилятор клауз связывает такие сам, а ссылка изнутри
+                // применяется к ним явно (`Elaborator::specialized`).
+                let mut elaborator = Elaborator::new(signature, metas, owned).within(within);
+                let params = elaborator.telescope(params_of(within), true)?;
+                let elaborated =
+                    elaborator.wrapped(&params, true, |it| it.declaration(ty, Mult::Many))?;
                 pending = Some(Pending {
                     name: qualify(within, &name.text),
                     ty: elaborated,
@@ -216,29 +236,33 @@ fn alias(
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &Owned,
-    within: Option<&Symbol>,
+    within: Option<&Enclosing<'_>>,
     name: &ast::Name,
     body: &ast::Expr,
     span: Span,
 ) -> Result<(), ElabError> {
-    let term = Elaborator::new(signature, metas, owned)
-        .within(within)
-        .typing(|it| it.expr(body, Mult::Many))?;
     let declared = qualify(within, &name.text);
     let names = Names::of(&declared, Vec::new());
-    let level = is_type(&Ctx::new(signature), metas, &term).map_err(|error| ElabError::Core {
-        span: route::locate(&Declared::Bare(body), &error, span),
-        error: Box::new(error),
-        names: names.clone(),
+    let mut elaborator = Elaborator::new(signature, metas, owned).within(within);
+    let params = elaborator.telescope(params_of(within), true)?;
+    // Тело и его сорт считаются **под параметрами**: тип члена функтора живёт
+    // под ними, и в пустом контексте считать его нечем.
+    let (term, level) = elaborator.beneath(&params, |it| {
+        let term = it.typing(|inner| inner.expr(body, Mult::Many))?;
+        let level = it.sort_of(&term).map_err(|error| ElabError::Core {
+            span: route::locate(&Declared::Bare(body), &error, span),
+            error: Box::new(error),
+            names: names.clone(),
+        })?;
+        Ok((term, level))
     })?;
+    let sort = Term::Universe(metas.zonk(&level));
+    let ty = Elaborator::new(signature, metas, owned)
+        .within(within)
+        .wrapped(&params, true, |_| Ok(sort))?;
+    let wrapped_body = abstracted(&params, term);
     signature
-        .define_inferred(
-            metas,
-            &declared,
-            Mult::Many,
-            Term::Universe(metas.zonk(&level)),
-            Some(term),
-        )
+        .define_inferred(metas, &declared, Mult::Many, ty, Some(wrapped_body))
         .map_err(|error| ElabError::Core {
             span: route::locate(&Declared::Bare(body), &error, span),
             error: Box::new(error),
@@ -261,65 +285,202 @@ fn declare_module(
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &mut Owned,
-    within: Option<&Symbol>,
+    within: Option<&Enclosing<'_>>,
     module: &ast::ModuleDecl,
     span: Span,
 ) -> Result<(), ElabError> {
     let declared = qualify(within, &module.name.text);
+    writable(within, module, span)?;
     if module.signature {
-        // Аннотация у сигнатуры бессмысленна: она сама и есть интерфейс,
-        // проверять её против другого - отдельная операция (уточнение
-        // сигнатуры), и её в языке пока нет.
-        if module.ascription.is_some() {
-            return Err(ElabError::ModuleMember {
-                name: Rc::clone(&module.name.text),
-                what: "сигнатуре модуля",
-                why: "аннотация проверяет модуль против интерфейса, а сигнатура \
-                      интерфейсом и является",
-                span,
-            });
-        }
         return declare_module_type(signature, metas, owned, &declared, module, span);
     }
-    members_into(&module.members, Some(&declared), signature, metas, owned)?;
+    let names = Names::of(&declared, Vec::new());
+    if let Some(body) = &module.body {
+        return declare_module_value(
+            signature, metas, owned, within, module, body, &declared, span,
+        );
+    }
+    let inner = Enclosing {
+        name: Rc::clone(&declared),
+        params: &module.params,
+    };
+    members_into(&module.members, Some(&inner), signature, metas, owned)?;
+    // Телескоп для самой записи считается **после** членов: граница объявления
+    // освобождает дырки, и посчитанный заранее умер бы на первом же члене.
+    let params = Elaborator::new(signature, metas, owned)
+        .within(within)
+        .telescope(&module.params, true)?;
 
     // Поле на каждого объявленного члена, в порядке написания. Клаузы своего
-    // поля не заводят: его завела сигнатура, за которой они идут.
+    // поля не заводят: его завела сигнатура, за которой они идут. Член
+    // функтора поднят вместе с параметрами, поэтому здесь он применяется к
+    // ним - запись собирается уже специализированной.
     let mut written = Vec::new();
     for member in &module.members {
         let Some(name) = member_name(member) else {
             continue;
         };
-        let full = qualify(Some(&declared), name);
-        let Some(term) = signature.instantiate(&full, metas) else {
+        let full = qualify(Some(&inner), name);
+        let Some(mut term) = signature.instantiate(&full, metas) else {
             continue;
         };
+        for position in 0..params.len() {
+            let index = u32::try_from(params.len() - 1 - position).unwrap_or(u32::MAX);
+            term = Term::App(Rc::new(term), Rc::new(Term::var(index)));
+        }
         written.push((CoreName::from(&**name), Rc::new(term)));
     }
     let object = Term::Object(written.into());
-    let names = Names::of(&declared, Vec::new());
+    // Контекст параметров: тип записи считается под ними, а `Pi` над ним
+    // строится тем же телескопом.
+    let mut ctx = Ctx::new(signature);
+    for param in &params {
+        let bound = ctx.eval(&param.ty);
+        ctx = ctx.bind(CoreName::from(&*param.name), param.mult, bound);
+    }
     // Аннотация - тип объявления; проверяет соответствие ей `declare`, тем же
     // правилом, что и всякое тело. Без аннотации тип **структурный**: он
     // синтезируется по собранной записи, как и обещает §4.8.
-    let ty = if let Some(ascription) = &module.ascription {
+    // Аннотация - тип объявления; проверяет соответствие ей `declare`, тем же
+    // правилом, что и всякое тело. Без аннотации тип **структурный**: он
+    // синтезируется по собранной записи, как и обещает §4.8. У функтора
+    // аннотация относится к результату - к записи под параметрами.
+    let inner_ty = if let Some(ascription) = &module.ascription {
         let written = Elaborator::new(signature, metas, owned)
             .within(within)
-            .typing(|it| it.expr(ascription, Mult::Many))?;
+            .beneath(&params, |it| {
+                it.typing(|inner| inner.expr(ascription, Mult::Many))
+            })?;
         // Проверка **до** объявления, и это не дубль той, что сделает
         // `declare`. Аннотация написана именем, а у имени есть аргументы
         // уровня - дырки; не решив их сравнением с телом, обобщение примет их
         // за параметры самого модуля, и `Nat : Type 0` перестанет подходить
         // под `T : Type u0`, ставшую жёсткой.
-        check_closed_with(signature, metas, &object, &written).map_err(|error| {
-            ElabError::Core {
-                span,
-                error: Box::new(error),
-                names: names.clone(),
-            }
+        check_within(&ctx, metas, &object, &written).map_err(|error| ElabError::Core {
+            span,
+            error: Box::new(error),
+            names: names.clone(),
         })?;
         zonk_term(metas, &written)
     } else {
-        let (ty, _) = infer(&Ctx::new(signature), metas, Mult::Many, &object).map_err(|error| {
+        let (ty, _) = infer(&ctx, metas, Mult::Many, &object).map_err(|error| ElabError::Core {
+            span,
+            error: Box::new(error),
+            names: names.clone(),
+        })?;
+        quote(ctx.size(), &ty)
+    };
+    // Тип модуля-функтора - `Pi` по параметрам, тело - лямбда по ним же.
+    // Видимость здесь **явная**: `OrderedMap IntOrd` пишется, в отличие от
+    // параметров у членов, которые автор не пишет никогда.
+    let ty = params.iter().rev().fold(inner_ty, |codomain, param| {
+        Term::Pi(
+            Binder::explicit(param.mult),
+            CoreName::from(&*param.name),
+            Rc::clone(&param.ty),
+            adamas_core::row::Row::empty(),
+            Rc::new(codomain),
+        )
+    });
+    let body = abstracted(&params, object);
+    // Запечатывание - свойство определения, а не значения (§3.5): тело
+    // остаётся, а сравнение перестаёт его разворачивать. Без аннотации
+    // запечатывать нечего - скрывать было бы от чего, но нечем.
+    signature
+        .define_opaque(metas, &declared, Mult::Many, ty, Some(body), module.sealed)
+        .map_err(|error| ElabError::Core {
+            span,
+            error: Box::new(error),
+            names,
+        })
+}
+
+/// Формы объявления, которых язык не несёт, - названные границы среза.
+fn writable(
+    within: Option<&Enclosing<'_>>,
+    module: &ast::ModuleDecl,
+    span: Span,
+) -> Result<(), ElabError> {
+    let refuse = |what, why| {
+        Err(ElabError::ModuleMember {
+            name: Rc::clone(&module.name.text),
+            what,
+            why,
+            span,
+        })
+    };
+    if module.signature {
+        if !module.params.is_empty() {
+            return refuse(
+                "сигнатуре модуля",
+                "параметр делает функцию от интерфейса, а сигнатура интерфейсом и является",
+            );
+        }
+        // Аннотация у сигнатуры бессмысленна: она сама и есть интерфейс,
+        // проверять её против другого - отдельная операция (уточнение
+        // сигнатуры), и её в языке пока нет.
+        if module.ascription.is_some() {
+            return refuse(
+                "сигнатуре модуля",
+                "аннотация проверяет модуль против интерфейса, а сигнатура интерфейсом \
+                 и является",
+            );
+        }
+        return Ok(());
+    }
+    // Вложенность внутри функтора не поддержана: члены внутреннего модуля
+    // подняты со **своими** параметрами, а внешние им тоже нужны, и склеивать
+    // два телескопа этот срез не берётся.
+    if within.is_some_and(|it| !it.params.is_empty()) {
+        return refuse(
+            "теле функтора",
+            "члены вложенного модуля поднимаются со своими параметрами, \
+             а внешние им тоже нужны",
+        );
+    }
+    Ok(())
+}
+
+/// `module IntMap = OrderedMap IntOrd` - тело написано выражением.
+///
+/// Членов оно не поднимает: их поднял тот функтор, к которому применились.
+/// Само объявление - обычное определение, и путь к члену читается проекцией
+/// сквозь него.
+#[allow(clippy::too_many_arguments)]
+fn declare_module_value(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    owned: &mut Owned,
+    within: Option<&Enclosing<'_>>,
+    module: &ast::ModuleDecl,
+    body: &ast::Expr,
+    declared: &Symbol,
+    span: Span,
+) -> Result<(), ElabError> {
+    if !module.params.is_empty() {
+        return Err(ElabError::ModuleMember {
+            name: Rc::clone(&module.name.text),
+            what: "модуле с телом-выражением",
+            why: "параметр объявляется у модуля с блоком членов",
+            span,
+        });
+    }
+    let names = Names::of(declared, Vec::new());
+    let term = Elaborator::new(signature, metas, owned)
+        .within(within)
+        .typing(|it| it.expr(body, Mult::Many))?;
+    let ty = if let Some(ascription) = &module.ascription {
+        let written = Elaborator::new(signature, metas, owned)
+            .within(within)
+            .typing(|it| it.expr(ascription, Mult::Many))?;
+        check_closed_with(signature, metas, &term, &written).map_err(|error| ElabError::Core {
+            span,
+            error: Box::new(error),
+            names: names.clone(),
+        })?;
+        zonk_term(metas, &written)
+    } else {
+        let (ty, _) = infer(&Ctx::new(signature), metas, Mult::Many, &term).map_err(|error| {
             ElabError::Core {
                 span,
                 error: Box::new(error),
@@ -328,18 +489,8 @@ fn declare_module(
         })?;
         quote(0, &ty)
     };
-    // Запечатывание - свойство определения, а не значения (§3.5): тело
-    // остаётся, а сравнение перестаёт его разворачивать. Без аннотации
-    // запечатывать нечего - скрывать было бы от чего, но нечем.
     signature
-        .define_opaque(
-            metas,
-            &declared,
-            Mult::Many,
-            ty,
-            Some(object),
-            module.sealed,
-        )
+        .define_opaque(metas, declared, Mult::Many, ty, Some(term), module.sealed)
         .map_err(|error| ElabError::Core {
             span,
             error: Box::new(error),
@@ -455,7 +606,7 @@ fn define(
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &Owned,
-    within: Option<&Symbol>,
+    within: Option<&Enclosing<'_>>,
     declared: &Pending<'_>,
     clauses: &[ast::Clause],
     span: Span,
@@ -892,7 +1043,7 @@ fn declare_data(
     // каждый конструктор обязаны нести **один и тот же** телескоп, иначе
     // `List` в результате и `List` в объявлении - два разных семейства.
     let mut elaborator = Elaborator::new(signature, metas, owned);
-    let params = elaborator.telescope(&data.params)?;
+    let params = elaborator.telescope(&data.params, false)?;
     let kind = match &data.kind {
         // Параметры пишутся, поэтому в kind они явные: `Vect a n`.
         Some(kind) => elaborator.wrapped(&params, false, |it| {

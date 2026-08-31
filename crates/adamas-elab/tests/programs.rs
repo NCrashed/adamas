@@ -2396,3 +2396,113 @@ module type B : A where
         "получено {error:?}"
     );
 }
+
+/// Сигнатура и её реализация - основа примеров про функторы.
+const EQV: &str = "
+module type Eqv where
+  type T
+  eq : T -> T -> Bool
+
+module NatEq : Eqv where
+  type T = Nat
+  eq : T -> T -> Bool
+  eq a b = True
+";
+
+#[test]
+fn a_functor_takes_a_module() {
+    // §4.8: функтор - модуль, параметризованный модулем, а применение его -
+    // обычный вызов. Член поднят вместе с параметром, поэтому написанное
+    // внутри `drain` есть `Counting.drain Key` - специализированный член, и
+    // рекурсия внутри функтора работает тем же правилом, что и снаружи.
+    program(&format!(
+        "{BASE}{EQV}
+module Counting (Key : Eqv) where
+  type Item = Key.T
+  drain : Nat -> Item -> Nat
+  drain Zero x = Zero
+  drain (Succ k) x = drain k x
+
+module NatCounting = Counting NatEq
+
+used : Nat
+used = NatCounting.drain (Succ Zero) Zero
+"
+    ));
+}
+
+#[test]
+fn a_functor_argument_is_checked() {
+    // Параметр несёт сигнатуру, и модуль, ей не удовлетворяющий, отвергается
+    // там же, где написан - применение функтора есть обычное применение.
+    let error = refused(&format!(
+        "{BASE}{EQV}
+module Empty where
+  flag : Bool
+  flag = True
+
+module Broken = Counting Empty
+
+module Counting (Key : Eqv) where
+  same : Key.T -> Bool
+  same a = True
+"
+    ));
+    assert!(
+        matches!(
+            error,
+            ElabError::Core { .. } | ElabError::UnknownName { .. }
+        ),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_sealed_functor_hides_its_result() {
+    // §3.5: аппликативность - следствие, а не отдельное решение. `Hidden.T`
+    // разворачивается в проекцию от применения, а `Dup` запечатан, поэтому
+    // вычисление застревает и представление наружу не выходит.
+    let text = format!(
+        "{BASE}{EQV}
+module Dup (Key : Eqv) :> Eqv where
+  type T = Key.T
+  eq : T -> T -> Bool
+  eq a b = Key.eq a b
+
+module Hidden = Dup NatEq
+"
+    );
+    program(&format!(
+        "{text}
+kept : Bool
+kept = True
+"
+    ));
+    let error = refused(&format!(
+        "{text}
+leaked : Hidden.T
+leaked = Zero
+"
+    ));
+    assert!(
+        matches!(error, ElabError::Core { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_signature_takes_no_parameters() {
+    // Параметр делает функцию от интерфейса, а сигнатура интерфейсом и
+    // является. То же и с вложенностью внутри функтора: члены внутреннего
+    // модуля поднялись бы со своими параметрами, а внешние им тоже нужны.
+    for text in [
+        "module type Bad (Key : Eqv) where\n  flag : Bool\n",
+        "module Outer (Key : Eqv) where\n  module Inner where\n    flag : Bool\n    flag = True\n",
+    ] {
+        let error = refused(&format!("{BASE}{EQV}{text}"));
+        assert!(
+            matches!(error, ElabError::ModuleMember { .. }),
+            "для {text:?} получено {error:?}"
+        );
+    }
+}

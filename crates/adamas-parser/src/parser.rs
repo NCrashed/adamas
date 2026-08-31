@@ -1355,7 +1355,12 @@ impl<'a> Parser<'a> {
         let start = self.expect(TokenKind::Type)?.span;
         let name = self.expect(TokenKind::Ident)?;
         let name = self.name_of(name);
-        let mut span = start.merge(name.span);
+        // Параметры разбираются тем же помощником, что у семейства: форма у
+        // них одна, и расходиться ей незачем.
+        let params = self.params()?;
+        let mut span = params
+            .last()
+            .map_or(start.merge(name.span), |last| start.merge(last.span));
         let body = if self.eat(TokenKind::Equals).is_some() {
             let body = self.body()?;
             span = start.merge(body.span);
@@ -1364,7 +1369,7 @@ impl<'a> Parser<'a> {
             None
         };
         Ok(Decl {
-            kind: DeclKind::Alias { name, body },
+            kind: DeclKind::Alias { name, params, body },
             span,
         })
     }

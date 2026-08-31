@@ -386,6 +386,12 @@ pub enum DeclKind {
     Alias {
         /// Имя алиаса.
         name: Name,
+        /// Параметры: `type Twice a = a -> a`, `type Bag (a : Type)`.
+        ///
+        /// Пишутся теми же формами, что у семейства - голым именем или
+        /// связыванием в скобках, - и означают то же: алиас с параметрами есть
+        /// типовая функция, а абстрактный член с параметрами - её объявление.
+        params: Vec<Binder>,
         /// Что он называет. `None` - написано `type T` без уравнения: так
         /// сигнатура модуля объявляет **абстрактный** типовой член (§4.8), и
         /// больше нигде эта форма не законна.
@@ -709,9 +715,13 @@ fn dump_block(out: &mut String, head: &str, members: &[Decl], depth: usize) {
 /// решает вызывающий - вложенное объявление продолжается скобкой.
 fn dump_decl(out: &mut String, decl: &Decl, depth: usize) {
     match &decl.kind {
-        DeclKind::Alias { name, body } => {
+        DeclKind::Alias { name, params, body } => {
             out.push_str("(alias ");
             out.push_str(&name.text);
+            for param in params {
+                out.push(' ');
+                dump_binder(out, param);
+            }
             if let Some(body) = body {
                 out.push(' ');
                 dump_expr(out, body);

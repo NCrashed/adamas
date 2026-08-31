@@ -181,9 +181,13 @@ impl Printer {
 
     fn decl(&mut self, decl: &Decl) {
         match &decl.kind {
-            DeclKind::Alias { name, body } => {
+            DeclKind::Alias { name, params, body } => {
                 self.push("type ");
                 self.push(&name.text);
+                for param in params {
+                    self.push(" ");
+                    self.binder(param);
+                }
                 if let Some(body) = body {
                     self.push(" = ");
                     self.expr(body, Prec::Lowest);

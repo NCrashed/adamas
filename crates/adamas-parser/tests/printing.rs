@@ -34,6 +34,18 @@ data Void : Type
 ",
     ),
     (
+        "type_members",
+        "\
+type Twice a = Pair a a
+
+type Endo (a : Type) = a -> a
+
+module type BagSig where
+  type Bag (a : Type)
+  empty : Bag Int
+",
+    ),
+    (
         "classes_and_instances",
         "\
 coherent class Key a when Eqv a where

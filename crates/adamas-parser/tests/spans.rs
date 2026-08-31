@@ -57,7 +57,7 @@ impl Spans<'_> {
         self.inside("объявление", parent, decl.span);
         let at = decl.span;
         match &decl.kind {
-            DeclKind::Alias { name, body } => {
+            DeclKind::Alias { name, body, .. } => {
                 self.name(at, name);
                 if let Some(body) = body {
                     self.expr(at, body);

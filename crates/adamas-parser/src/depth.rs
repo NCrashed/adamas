@@ -307,7 +307,8 @@ fn pattern_at<'a>(
 
 fn decl_at<'a>(decl: &'a Decl, depth: u32, pending: &mut Pending<'a>) -> Result<(), ParseError> {
     match &decl.kind {
-        DeclKind::Alias { body, .. } => {
+        DeclKind::Alias { params, body, .. } => {
+            binder_types(params, depth, pending);
             if let Some(body) = body {
                 pending.push((Node::Expr(body), depth));
             }

@@ -2808,3 +2808,72 @@ answer = neq Zero (Succ Zero)
 "
     ));
 }
+
+#[test]
+fn mutual_definitions_see_each_other() {
+    // §4.8: члены группы объявляются разом, поэтому ссылка на соседа законна
+    // до того, как он попал в сигнатуру. Вердикт тотальности при этом даётся
+    // по совместному графу вызовов - без него разворота бы не случилось, и
+    // `Wit (even 2)` не принял бы `Yes`.
+    program(&format!(
+        "{BASE}
+data Wit : Bool -> Type where
+  Yes : Wit True
+
+mutual
+  even : Nat -> Bool
+  even Zero = True
+  even (Succ k) = odd k
+
+  odd : Nat -> Bool
+  odd Zero = False
+  odd (Succ k) = even k
+
+computed : Wit (even (Succ (Succ Zero)))
+computed = Yes
+"
+    ));
+}
+
+#[test]
+fn a_mutual_member_keeps_its_own_level_arity() {
+    // §10 вопрос 54, решение 2026-08-31: обобщение идёт по написанному типу
+    // каждого члена, а не общее на группу. Ссылка на себя несёт свои
+    // параметры, на соседа - свежие дырки; фантомных параметров нет, и `ping`
+    // остаётся арности нуль рядом с полиморфным `pong`.
+    program(&format!(
+        "{BASE}
+mutual
+  ping : Nat -> Bool
+  ping Zero = True
+  ping (Succ k) = pong True k
+
+  pong : {{0 a : Type}} -> a -> Nat -> Bool
+  pong x Zero = False
+  pong x (Succ k) = ping k
+
+used : Bool
+used = pong True (Succ Zero)
+"
+    ));
+}
+
+#[test]
+fn a_mutual_group_carries_definitions_only() {
+    // Названные границы: постулат группой объявлять незачем - он и есть
+    // отсутствие тела, - а семейство в группе требует смешанной группы, и
+    // это отдельный срез.
+    for text in [
+        "mutual\n  loose : Nat\n",
+        "mutual\n  data Tree where\n    Leaf : Tree\n",
+    ] {
+        let error = refused(&format!("{BASE}{text}"));
+        assert!(
+            matches!(
+                error,
+                ElabError::MissingSignature { .. } | ElabError::ModuleMember { .. }
+            ),
+            "для {text:?} получено {error:?}"
+        );
+    }
+}

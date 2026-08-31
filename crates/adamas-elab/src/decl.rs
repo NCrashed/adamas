@@ -116,6 +116,62 @@ struct Known<'a> {
     declaring: Option<&'a Declaring>,
 }
 
+/// Клаузы, которым не нашлось сигнатуры рядом.
+///
+/// Сигнатура, ставшая постулатом, - не «её нет», а «она не рядом», и сказать
+/// об этом полагается по-разному.
+fn detached(
+    name: &Symbol,
+    postulated: &HashMap<Symbol, Span>,
+    qualified: &Symbol,
+    span: Span,
+) -> ElabError {
+    match postulated.get(qualified) {
+        Some(signature) => ElabError::DetachedSignature {
+            name: Rc::clone(name),
+            signature: *signature,
+            span,
+        },
+        None => ElabError::MissingSignature {
+            name: Rc::clone(name),
+            span,
+        },
+    }
+}
+
+/// `type T = …` на своём месте.
+///
+/// `type T` без уравнения объявляет абстрактный типовой член, и законно это
+/// только в сигнатуре модуля: снаружи её тип брать неоткуда, а постулировать
+/// `T : Type` можно и сигнатурой.
+#[allow(clippy::too_many_arguments)]
+fn written_alias(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    owned: &Owned,
+    instances: &Instances,
+    within: Option<&Enclosing<'_>>,
+    name: &ast::Name,
+    body: Option<&ast::Expr>,
+    span: Span,
+) -> Result<(), ElabError> {
+    let Some(body) = body else {
+        return Err(ElabError::AbstractType {
+            name: Rc::clone(&name.text),
+            span,
+        });
+    };
+    alias(
+        signature,
+        metas,
+        known(owned, instances),
+        within,
+        name,
+        body,
+        span,
+    )
+}
+
 /// Написанная сигнатура - объявление, ждущее своих клауз.
 #[allow(clippy::too_many_arguments)]
 fn declared_signature<'a>(
@@ -219,17 +275,7 @@ fn members_into(
             DeclKind::Clauses { name, clauses } => {
                 let qualified = qualify(within, &name.text);
                 let Some(declared) = pending.take().filter(|it| it.name == qualified) else {
-                    return Err(match postulated.get(&qualified) {
-                        Some(signature) => ElabError::DetachedSignature {
-                            name: Rc::clone(&name.text),
-                            signature: *signature,
-                            span: decl.span,
-                        },
-                        None => ElabError::MissingSignature {
-                            name: Rc::clone(&name.text),
-                            span: decl.span,
-                        },
-                    });
+                    return Err(detached(&name.text, &postulated, &qualified, decl.span));
                 };
                 define(
                     signature,
@@ -246,22 +292,14 @@ fn members_into(
             // считается по телу.
             DeclKind::Alias { name, body } => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
-                // `type T` без уравнения объявляет абстрактный типовой член, и
-                // законно это только в сигнатуре модуля: снаружи её тип брать
-                // неоткуда, а постулировать `T : Type` можно и сигнатурой.
-                let Some(body) = body else {
-                    return Err(ElabError::AbstractType {
-                        name: Rc::clone(&name.text),
-                        span: decl.span,
-                    });
-                };
-                alias(
+                written_alias(
                     signature,
                     metas,
-                    known(owned, instances),
+                    owned,
+                    instances,
                     within,
                     name,
-                    body,
+                    body.as_ref(),
                     decl.span,
                 )?;
             }
@@ -270,6 +308,16 @@ fn members_into(
                 declare_module(
                     signature, metas, owned, instances, within, declared, decl.span,
                 )?;
+            }
+            DeclKind::Mutual(members) => {
+                postulate(signature, metas, pending.take(), &mut postulated)?;
+                only_at_top(
+                    within,
+                    &Rc::from("mutual"),
+                    "члены группы объявляются одним вызовом, а модуль их квалифицирует",
+                    decl.span,
+                )?;
+                declare_mutual(signature, metas, owned, instances, members, decl.span)?;
             }
             DeclKind::Class(class) => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
@@ -1130,6 +1178,190 @@ fn declare_members(
     Ok(())
 }
 
+/// Группа взаимной рекурсии (§4.8).
+///
+/// Члены объявляются **одним вызовом** - той же группой §10 вопроса 50, на
+/// которой стоят `data` и члены инстанса: имена и типы известны до проверки
+/// любого тела, поэтому ссылка на соседа законна.
+///
+/// # Уровни: своя арность у каждого члена (§10 вопрос 54)
+///
+/// Обобщение идёт по **написанному типу** члена и до проверки всех тел - то
+/// же правило, что у одиночного определения, только применённое ко всем
+/// сразу. Отсюда и ссылки: на себя - своими параметрами, на соседа - свежими
+/// дырками, как всякая ссылка на объявленное. Общая арность на группу дала бы
+/// фантомные параметры члену, которому уровни не нужны, и решать их в месте
+/// использования было бы нечем. Решение от 2026-08-31.
+fn declare_mutual(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    owned: &mut Owned,
+    instances: &Instances,
+    members: &[ast::Decl],
+    span: Span,
+) -> Result<(), ElabError> {
+    let planned = mutual_members(members, span)?;
+    // Типы элаборируются до всякого объявления: граница объявления одна на
+    // группу, и дырки уровня доживают до неё.
+    let mut types = Vec::with_capacity(planned.len());
+    for member in &planned {
+        types.push(Elaborator::new(signature, metas, owned).declaration(member.ty, Mult::Many)?);
+    }
+    let mut arities = Vec::with_capacity(planned.len());
+    let mut generalized = Vec::with_capacity(planned.len());
+    for ty in &types {
+        let zonked = zonk_term(metas, ty);
+        let mut generalization = Generalization::default();
+        generalization.collect_term(metas, &zonked);
+        arities.push(generalization.arity());
+        generalized.push(generalization.apply_term(metas, &zonked));
+    }
+
+    let mut trees = Vec::with_capacity(planned.len());
+    for (at, member) in planned.iter().enumerate() {
+        let mut visible = Vec::with_capacity(planned.len());
+        for (other, sibling) in planned.iter().enumerate() {
+            // Свой параметр - `Var`, чужой - дырка: сосед объявляется рядом,
+            // но инстанцируется в каждом месте использования заново.
+            let levels: Rc<[Level]> = if other == at {
+                (0..arities[at])
+                    .map(|index| Level::Var(LevelVar(index)))
+                    .collect()
+            } else {
+                (0..arities[other]).map(|_| metas.fresh_level()).collect()
+            };
+            visible.push(Member {
+                name: Rc::clone(&sibling.name.text),
+                ty: Rc::new(generalized[other].substitute_levels(&levels)),
+                levels,
+            });
+        }
+        let compiled = {
+            let mut elaborator = Elaborator::with_group(signature, metas, owned, visible)
+                .declaring(&generalized[at]);
+            member
+                .clauses
+                .iter()
+                .map(|clause| elaborator.clause(clause))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let tree =
+            compile_traced(signature, metas, &generalized[at], &compiled).map_err(|error| {
+                ElabError::Clauses {
+                    span: member.span,
+                    error: Box::new(error),
+                }
+            })?;
+        class::resolve(
+            signature,
+            metas,
+            instances,
+            None,
+            &tree.term,
+            &generalized[at],
+            member.span,
+        )?;
+        trees.push(tree);
+    }
+
+    let mut group: Option<Group> = None;
+    for (at, member) in planned.iter().enumerate() {
+        let declared =
+            SigMember::definition(&member.name.text, Mult::Many, generalized[at].clone())
+                .with_body(trees[at].term.clone())
+                .with_arity(arities[at]);
+        group = Some(match group {
+            None => Group::of(declared),
+            Some(group) => group.and(declared),
+        });
+    }
+    if let Some(group) = group {
+        signature
+            .declare(metas, &group)
+            .map_err(|error| ElabError::Core {
+                span,
+                error: Box::new(error),
+                names: Names::of(&planned[0].name.text, Vec::new()),
+            })?;
+    }
+    for member in &planned {
+        carrier::check(signature, owned, &member.name.text, member.span)?;
+    }
+    Ok(())
+}
+
+/// Член группы: имя, написанный тип и клаузы.
+struct Mutual<'a> {
+    name: &'a ast::Name,
+    ty: &'a ast::Expr,
+    clauses: &'a [ast::Clause],
+    span: Span,
+}
+
+/// Разбирает блок `mutual` на членов.
+///
+/// Постулата в группе не бывает: члены её объявляются вместе, а постулат -
+/// это отсутствие тела, и объявлять его группой незачем.
+fn mutual_members(members: &[ast::Decl], span: Span) -> Result<Vec<Mutual<'_>>, ElabError> {
+    let mut found = Vec::with_capacity(members.len() / 2);
+    let mut pending: Option<(&ast::Name, &ast::Expr, Span)> = None;
+    for member in members {
+        match &member.kind {
+            DeclKind::Signature { name, ty } => {
+                if let Some((waiting, ..)) = pending {
+                    return Err(ElabError::MissingSignature {
+                        name: Rc::clone(&waiting.text),
+                        span: member.span,
+                    });
+                }
+                pending = Some((name, ty, member.span));
+            }
+            DeclKind::Clauses { name, clauses } => {
+                let Some((declared, ty, at)) =
+                    pending.take().filter(|(it, ..)| it.text == name.text)
+                else {
+                    return Err(ElabError::MissingSignature {
+                        name: Rc::clone(&name.text),
+                        span: member.span,
+                    });
+                };
+                found.push(Mutual {
+                    name: declared,
+                    ty,
+                    clauses,
+                    span: at.merge(member.span),
+                });
+            }
+            _ => {
+                return Err(ElabError::ModuleMember {
+                    name: member_name(member)
+                        .cloned()
+                        .unwrap_or_else(|| Rc::from("_")),
+                    what: "группе `mutual`",
+                    why: "группа несёт определения с сигнатурами; семейства и модули \
+                          объявляются отдельно",
+                    span: member.span,
+                });
+            }
+        }
+    }
+    if let Some((waiting, ..)) = pending {
+        return Err(ElabError::MissingSignature {
+            name: Rc::clone(&waiting.text),
+            span,
+        });
+    }
+    if found.is_empty() {
+        return Err(ElabError::ModuleMember {
+            name: Rc::from("mutual"),
+            what: "группе `mutual`",
+            why: "группа без членов ничего не объявляет",
+            span,
+        });
+    }
+    Ok(found)
+}
+
 /// Формы объявления, которых язык не несёт, - названные границы среза.
 fn writable(
     within: Option<&Enclosing<'_>>,
@@ -1244,7 +1476,7 @@ fn member_name(member: &ast::Decl) -> Option<&Symbol> {
         DeclKind::Module(inner) => Some(&inner.name.text),
         DeclKind::Data(data) => Some(&data.name.text),
         DeclKind::Resource(resource) => Some(&resource.name.text),
-        DeclKind::Clauses { .. } | DeclKind::Class(_) => None,
+        DeclKind::Clauses { .. } | DeclKind::Class(_) | DeclKind::Mutual(_) => None,
     }
 }
 
@@ -1496,10 +1728,10 @@ fn resource_members(
             }
             // Ни алиас, ни модуль телом ресурса не бывают: layout их туда
             // пускает, а смысла у них там нет - конструктор либо деструктор.
-            ast::DeclKind::Class(_) => {
+            ast::DeclKind::Class(_) | ast::DeclKind::Mutual(_) => {
                 return Err(ElabError::ResourceMember {
                     data: Rc::clone(&resource.name.text),
-                    name: Rc::from("класс"),
+                    name: Rc::from("группа"),
                     span: member.span,
                 });
             }

@@ -67,6 +67,11 @@ pub(crate) enum Candidate {
 /// Что о классе знают разрешение и объявление инстанса.
 #[derive(Debug, Default)]
 pub struct Class {
+    /// Маркер `coherent` (§3.5): не более одного инстанса на программу.
+    ///
+    /// Условия пригодности проверяются на каждом инстансе, а не здесь:
+    /// объявлению класса проверять нечего - инстансов у него ещё нет.
+    pub coherent: bool,
     /// Сколько полей словаря занимают суперклассы. Стоят они **первыми**:
     /// разряжает их объявление инстанса, а не автор.
     pub superclasses: usize,
@@ -92,6 +97,22 @@ impl Instances {
     #[must_use]
     pub fn class(&self, name: &str) -> Option<&Class> {
         self.classes.get(name)
+    }
+
+    /// Объявлен ли класс `coherent`.
+    #[must_use]
+    pub fn is_coherent(&self, name: &str) -> bool {
+        self.classes.get(name).is_some_and(|it| it.coherent)
+    }
+
+    /// Есть ли уже инстанс на эту пару - анонимный или именованный.
+    ///
+    /// Спрашивает пункт 3 §3.5: у когерентного класса второго инстанса не
+    /// бывает, каким бы именем он ни назывался.
+    #[must_use]
+    pub fn declared(&self, class: &Symbol, heads: &Rc<[Symbol]>) -> bool {
+        let key = (Rc::clone(class), Rc::clone(heads));
+        self.candidates.contains_key(&key) || self.named.contains_key(&key)
     }
 
     /// Запоминает класс.
@@ -215,7 +236,7 @@ fn settle(
         let goal = normalized(signature, &ty);
         // Дырка не про класс - её сюда и не звали: решить её могла только
         // унификация, и о том, что не решила, скажет объявление.
-        let Some((class, head)) = applied(&goal) else {
+        let Some((class, head)) = applied(signature, &goal) else {
             return Ok(());
         };
         if !instances.is_class(&class) {
@@ -346,7 +367,7 @@ fn from_context(
 /// Внешний `None` - тип не применение определения, то есть словарём он не
 /// является вовсе. Внутренний - голова аргумента переменная, и кандидата для
 /// неё искать негде.
-pub(crate) fn applied(ty: &Term) -> Option<(Symbol, Head)> {
+pub(crate) fn applied(signature: &Signature, ty: &Term) -> Option<(Symbol, Head)> {
     let mut arguments = Vec::new();
     let mut current = ty;
     while let Term::App(callee, argument) = current {
@@ -370,13 +391,56 @@ pub(crate) fn applied(ty: &Term) -> Option<(Symbol, Head)> {
             head = inner;
         }
         match head {
-            Term::Const(name, _) => heads.push(Rc::clone(name)),
+            Term::Const(name, _) => heads.push(unfolded(signature, name)),
             Term::Var(_) => return Some((Rc::clone(class), Head::Rigid)),
             _ => return Some((Rc::clone(class), Head::Unknown)),
         }
     }
     Some((Rc::clone(class), Head::Named(heads.into())))
 }
+
+/// Голова аргумента после δ.
+///
+/// `type Alias = Nat` и `Nat` обязаны дать один ключ: иначе на один тип
+/// объявляются два инстанса, и какой из них возьмётся, решает написание цели,
+/// а не программа. Разворачивается только голова - ключу больше ничего не
+/// нужно; запечатанное не разворачивается, потому что снаружи δ по нему
+/// запрещено (§3.5), и абстрактный тип обязан остаться собственной головой.
+fn unfolded(signature: &Signature, name: &Symbol) -> Symbol {
+    let mut current = Rc::clone(name);
+    // Предел тот же по смыслу, что у δ в конвертируемости: цепочка синонимов
+    // конечна, но замыкать её на честность объявления не стоит.
+    for _ in 0..UNFOLD_LIMIT {
+        let Some(definition) = signature.lookup(&current) else {
+            return current;
+        };
+        if definition.opaque {
+            return current;
+        }
+        let Some(body) = &definition.body else {
+            return current;
+        };
+        // Тело синонима - лямбды по параметрам, под ними применение.
+        let mut head = body;
+        while let Term::Lam(_, _, inner) = head {
+            head = inner;
+        }
+        while let Term::App(callee, _) = head {
+            head = callee;
+        }
+        let Term::Const(next, _) = head else {
+            return current;
+        };
+        if *next == current {
+            return current;
+        }
+        current = Rc::clone(next);
+    }
+    current
+}
+
+/// Сколько синонимов разрешено развернуть, добираясь до головы.
+const UNFOLD_LIMIT: u32 = 128;
 
 /// Головы аргументов цели.
 pub(crate) enum Head {
@@ -580,7 +644,7 @@ fn superclass_path(
         return None;
     }
     let quoted = quote(size, domain);
-    let (class, _) = applied(&quoted)?;
+    let (class, _) = applied(signature, &quoted)?;
     let count = instances.class(&class)?.superclasses;
     if count == 0 {
         return None;

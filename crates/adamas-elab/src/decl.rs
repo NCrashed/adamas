@@ -260,6 +260,27 @@ fn known<'a>(owned: &'a Owned, instances: &'a Instances) -> Known<'a> {
     }
 }
 
+/// Почему класс и инстанс не пишутся в теле модуля - причины у них разные.
+///
+/// У класса своя: методы его - имена верхнего уровня, а модуль их
+/// квалифицирует, и разрешение искало бы не то имя. У инстанса - записанная
+/// правилом (§3.5, пункт 4): тело функтора инстанциируется на каждое
+/// применение, и уникальности там нет по построению.
+fn outside_a_module(instance: bool) -> (&'static str, &'static str) {
+    if instance {
+        (
+            "instance",
+            "тело функтора инстанциируется на каждое применение, \
+             и уникальности инстанса там нет (§3.5)",
+        )
+    } else {
+        (
+            "class",
+            "методы класса - имена верхнего уровня, а модуль их квалифицирует",
+        )
+    }
+}
+
 /// Отвергает форму, законную только на верхнем уровне.
 fn only_at_top(
     within: Option<&Enclosing<'_>>,
@@ -368,15 +389,8 @@ fn members_into(
             }
             DeclKind::Class(class) => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
-                // Класс в теле модуля не объявляется: методы его - имена
-                // верхнего уровня, а модуль их квалифицирует, и разрешение
-                // искало бы не то имя.
-                only_at_top(
-                    within,
-                    &Rc::from("класс"),
-                    "методы класса - имена верхнего уровня, а модуль их квалифицирует",
-                    decl.span,
-                )?;
+                let (what, why) = outside_a_module(class.instance);
+                only_at_top(within, &Rc::from(what), why, decl.span)?;
                 declare_class(signature, metas, owned, instances, class, decl.span)?;
             }
             DeclKind::Data(data) => {
@@ -684,6 +698,7 @@ fn declare_class(
     // не автор, и имя у них невыразимое - написать его нечем (§3.5).
     let mut members = Vec::with_capacity(class.superclasses.len() + class.members.len());
     let mut info = Class {
+        coherent: class.coherent,
         superclasses: class.superclasses.len(),
         ..Class::default()
     };
@@ -789,9 +804,10 @@ fn declare_instance(
     // доживают до неё.
     let written = written_head(signature, metas, owned, class, span, &names)?;
     let prefix = leading(&written);
-    let Some((_, arguments)) = applied_head(under_prefix(&written)) else {
+    let Some((_, arguments)) = applied_head(signature, under_prefix(&written)) else {
         return Err(ElabError::ClassHead { span });
     };
+    coherence(signature, instances, name, &arguments, &prefix, span)?;
     // Именованный объявляется под своим именем: сослаться на него через
     // `using` и `@` можно только так (§4.3). Анонимный - под невыразимым.
     let declared: Symbol = match &class.name {
@@ -860,6 +876,53 @@ fn declare_instance(
     signature
         .define_inferred(metas, &declared, Mult::Many, written, Some(object))
         .map_err(fail)
+}
+
+/// Условия пригодности `coherent` (§3.5), проверяемые на объявлении инстанса.
+///
+/// Пункты 2 и 4 - orphan-правило и «только верхний уровень» - предмета
+/// сегодня не имеют: инстанс объявляется единственной единицей компиляции и
+/// только на верхнем уровне (`only_at_top`), поэтому чужого модуля, где его
+/// можно было бы написать, просто нет.
+///
+/// Пункт 3 - глобальная непересекаемость - проверяется реестром, а не обходом
+/// программы: ключ кандидата есть головы всех аргументов после δ, значит две
+/// декларации с унифицирующимися головами дают один ключ, а с разными -
+/// заведомо не унифицируются.
+fn coherence(
+    signature: &Signature,
+    instances: &Instances,
+    class: &ast::Name,
+    arguments: &Rc<[Symbol]>,
+    prefix: &[Param],
+    span: Span,
+) -> Result<(), ElabError> {
+    if !instances.is_coherent(&class.text) {
+        return Ok(());
+    }
+    if instances.declared(&class.text, arguments) {
+        return Err(ElabError::CoherentDuplicate {
+            class: Rc::clone(&class.text),
+            written: class::written(&class.text, arguments),
+            span,
+        });
+    }
+    // Пункт 1: контекст состоит только из когерентных классов. Связывания
+    // префикса - это и типовые параметры, и словари контекста; первые головы
+    // класса не имеют, поэтому отсеиваются сами.
+    for param in prefix {
+        let Some((context, _)) = class::applied(signature, &param.ty) else {
+            continue;
+        };
+        if instances.is_class(&context) && !instances.is_coherent(&context) {
+            return Err(ElabError::CoherentContext {
+                class: Rc::clone(&class.text),
+                context,
+                span,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Написанная голова инстанса как тип словаря.
@@ -1042,8 +1105,8 @@ fn mangled(class: &str, heads: &[Symbol]) -> String {
 ///
 /// Головы **всех**: у многопараметрического класса первая ничего не решает
 /// (§4.1), и ключ кандидата составляется из них целиком.
-fn applied_head(ty: &Term) -> Option<(Symbol, Rc<[Symbol]>)> {
-    let (class, head) = class::applied(ty)?;
+fn applied_head(signature: &Signature, ty: &Term) -> Option<(Symbol, Rc<[Symbol]>)> {
+    let (class, head) = class::applied(signature, ty)?;
     match head {
         class::Head::Named(heads) => Some((class, heads)),
         _ => None,

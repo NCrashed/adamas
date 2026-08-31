@@ -3114,3 +3114,122 @@ defaulted = twice Zero
 "
     ));
 }
+
+#[test]
+fn a_coherent_class_takes_one_instance() {
+    // §3.5 пункт 3: маркер обещает не более одного инстанса на программу, и
+    // имя обещания не снимает - именованных на один тип тоже не бывает.
+    program(&format!(
+        "{BASE}
+coherent class Key a where
+  key : a -> Nat
+
+instance Key Nat where
+  key n = n
+
+taken : Nat
+taken = key (Succ Zero)
+"
+    ));
+    let error = refused(&format!(
+        "{BASE}
+coherent class Key a where
+  key : a -> Nat
+
+instance Key Nat where
+  key n = n
+
+instance other : Key Nat where
+  key n = Zero
+"
+    ));
+    assert!(
+        matches!(&error, ElabError::CoherentDuplicate { written, .. } if &**written == "Key Nat"),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_coherent_context_holds_only_coherent_classes() {
+    // §3.5 пункт 1: инстанс с некогерентным контекстом - семейство словарей, а
+    // не словарь, и уникальность декларации о значении ничего не говорит.
+    let head = format!(
+        "{BASE}
+data List (a : Type) where
+  Nil : List a
+
+class Eqv a where
+  eq : a -> a -> Bool
+
+coherent class Key a where
+  key : a -> Nat
+"
+    );
+    let error = refused(&format!(
+        "{head}
+instance {{Eqv a}} => Key (List a) where
+  key xs = Zero
+"
+    ));
+    assert!(
+        matches!(&error, ElabError::CoherentContext { context, .. } if &**context == "Eqv"),
+        "получено {error:?}"
+    );
+    // Тот же инстанс с когерентным контекстом законен.
+    program(&format!(
+        "{head}
+instance Key Nat where
+  key n = n
+
+instance {{Key a}} => Key (List a) where
+  key xs = Zero
+"
+    ));
+}
+
+#[test]
+fn a_coherent_class_keeps_its_superclasses() {
+    // §3.5: суперкласс ограничения не требует. Словарь суперкласса - поле
+    // словаря класса, разряжаемое в точке объявления инстанса, и при
+    // уникальном инстансе уникально и поле.
+    program(&format!(
+        "{BASE}
+class Eqv a where
+  eq : a -> a -> Bool
+
+instance Eqv Nat where
+  eq x y = True
+
+coherent class Key a when Eqv a where
+  key : a -> Nat
+
+instance Key Nat where
+  key n = n
+"
+    ));
+}
+
+#[test]
+fn a_synonym_head_names_the_same_instance() {
+    // Ключ кандидата берётся после δ: `Alias` и `Nat` - один тип, и двух
+    // инстансов на него не бывает. Иначе какой из словарей возьмётся, решало
+    // бы написание цели.
+    let error = refused(&format!(
+        "{BASE}
+type Alias = Nat
+
+class Eqv a where
+  eq : a -> a -> Bool
+
+instance Eqv Nat where
+  eq x y = True
+
+instance Eqv Alias where
+  eq x y = False
+"
+    ));
+    assert!(
+        matches!(error, ElabError::ModuleMember { .. }),
+        "получено {error:?}"
+    );
+}

@@ -42,6 +42,7 @@
 //! типе, которого элаборация не знает.
 
 mod carrier;
+pub mod class;
 mod decl;
 mod error;
 mod expr;

@@ -31,6 +31,9 @@ use adamas_parser::ast::{self, DeclKind, Module, Symbol};
 
 use crate::carrier;
 use crate::error::{ElabError, Names};
+use adamas_core::value::Value;
+
+use crate::class::{self, Instances};
 use crate::expr::{Elaborator, Enclosing, Member, Param};
 use crate::own::{Owned, Ownership};
 use crate::route::{self, Declared};
@@ -58,7 +61,14 @@ pub fn elaborate(module: &Module) -> Result<Signature, ElabError> {
     let mut signature = Signature::default();
     let mut metas = Metas::default();
     let mut owned = Owned::default();
-    elaborate_into(module, &mut signature, &mut metas, &mut owned)?;
+    let mut instances = Instances::default();
+    elaborate_into(
+        module,
+        &mut signature,
+        &mut metas,
+        &mut owned,
+        &mut instances,
+    )?;
     Ok(signature)
 }
 
@@ -73,8 +83,9 @@ pub fn elaborate_into(
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &mut Owned,
+    instances: &mut Instances,
 ) -> Result<(), ElabError> {
-    members_into(&module.decls, None, signature, metas, owned)
+    members_into(&module.decls, None, signature, metas, owned, instances)
 }
 
 /// Квалифицирует имя членом модуля: `T` внутри `IntOrd` объявляется как
@@ -88,6 +99,77 @@ fn qualify(within: Option<&Enclosing<'_>>, name: &str) -> Symbol {
         Some(outer) => Rc::from(format!("{}.{name}", outer.name).as_str()),
         None => Rc::from(name),
     }
+}
+
+/// Что объявление читает, но не меняет.
+///
+/// Одной ссылкой, а не двумя: список параметров у каждого помощника и без того
+/// длинный, а эти две всегда ходят вместе.
+#[derive(Clone, Copy)]
+struct Known<'a> {
+    /// Владеемые типы (§3.3).
+    owned: &'a Owned,
+    /// Классы и их инстансы (§3.5).
+    instances: &'a Instances,
+}
+
+/// Написанная сигнатура - объявление, ждущее своих клауз.
+#[allow(clippy::too_many_arguments)]
+fn declared_signature<'a>(
+    signature: &Signature,
+    metas: &mut Metas,
+    owned: &Owned,
+    within: Option<&Enclosing<'_>>,
+    name: &ast::Name,
+    ty: &'a ast::Expr,
+    span: Span,
+) -> Result<Pending<'a>, ElabError> {
+    // Владение верхнего уровня не выражается: определение всегда `ω`
+    // (`sig.rs`: линейность на всю программу не считается), а §3.3 требует
+    // `1`. Без этого отказа постулат ресурсного типа - обычное ω-имя, и `drop`
+    // по нему зовётся сколько угодно раз.
+    if let Some(how) = owned.of(ty) {
+        return Err(ElabError::OwnedTopLevel {
+            owned: how,
+            name: Rc::clone(&name.text),
+            span: ty.span,
+        });
+    }
+    // Параметры функтора стоят у члена implicit-связываниями: компилятор
+    // клауз связывает такие сам, а ссылка изнутри применяется к ним явно
+    // (`Elaborator::specialized`).
+    let mut elaborator = Elaborator::new(signature, metas, owned).within(within);
+    let params = elaborator.telescope(params_of(within), true)?;
+    let elaborated = elaborator.wrapped(&params, true, |it| it.declaration(ty, Mult::Many))?;
+    Ok(Pending {
+        name: qualify(within, &name.text),
+        ty: elaborated,
+        source: ty,
+        span,
+    })
+}
+
+/// Собирает read-only половину состояния.
+fn known<'a>(owned: &'a Owned, instances: &'a Instances) -> Known<'a> {
+    Known { owned, instances }
+}
+
+/// Отвергает форму, законную только на верхнем уровне.
+fn only_at_top(
+    within: Option<&Enclosing<'_>>,
+    name: &Symbol,
+    why: &'static str,
+    span: Span,
+) -> Result<(), ElabError> {
+    if within.is_none() {
+        return Ok(());
+    }
+    Err(ElabError::ModuleMember {
+        name: Rc::clone(name),
+        what: "модуле",
+        why,
+        span,
+    })
 }
 
 /// Параметры функтора, под которыми объявляется член. Пусто вне функтора.
@@ -113,6 +195,7 @@ fn members_into(
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &mut Owned,
+    instances: &mut Instances,
 ) -> Result<(), ElabError> {
     // Сигнатуры, ставшие постулатами по ходу прогона: клаузы, пришедшие за
     // ними, - не «нет сигнатуры», а сигнатура не рядом.
@@ -122,30 +205,9 @@ fn members_into(
         match &decl.kind {
             DeclKind::Signature { name, ty } => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
-                // Владение верхнего уровня не выражается: определение всегда
-                // `ω` (`sig.rs`: линейность на всю программу не считается), а
-                // §3.3 требует `1`. Без этого отказа постулат ресурсного типа
-                // - обычное ω-имя, и `drop` по нему зовётся сколько угодно раз.
-                if let Some(how) = owned.of(ty) {
-                    return Err(ElabError::OwnedTopLevel {
-                        owned: how,
-                        name: Rc::clone(&name.text),
-                        span: ty.span,
-                    });
-                }
-                // Параметры функтора стоят у члена implicit-связываниями:
-                // компилятор клауз связывает такие сам, а ссылка изнутри
-                // применяется к ним явно (`Elaborator::specialized`).
-                let mut elaborator = Elaborator::new(signature, metas, owned).within(within);
-                let params = elaborator.telescope(params_of(within), true)?;
-                let elaborated =
-                    elaborator.wrapped(&params, true, |it| it.declaration(ty, Mult::Many))?;
-                pending = Some(Pending {
-                    name: qualify(within, &name.text),
-                    ty: elaborated,
-                    source: ty,
-                    span: decl.span,
-                });
+                pending = Some(declared_signature(
+                    signature, metas, owned, within, name, ty, decl.span,
+                )?);
             }
             DeclKind::Clauses { name, clauses } => {
                 let qualified = qualify(within, &name.text);
@@ -163,7 +225,13 @@ fn members_into(
                     });
                 };
                 define(
-                    signature, metas, owned, within, &declared, clauses, decl.span,
+                    signature,
+                    metas,
+                    known(owned, instances),
+                    within,
+                    &declared,
+                    clauses,
+                    decl.span,
                 )?;
             }
             // Алиас: `Point : Type` не годится - `Type` обобщается в `∀u`, а
@@ -180,26 +248,47 @@ fn members_into(
                         span: decl.span,
                     });
                 };
-                alias(signature, metas, owned, within, name, body, decl.span)?;
+                alias(
+                    signature,
+                    metas,
+                    known(owned, instances),
+                    within,
+                    name,
+                    body,
+                    decl.span,
+                )?;
             }
             DeclKind::Module(declared) => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
-                declare_module(signature, metas, owned, within, declared, decl.span)?;
+                declare_module(
+                    signature, metas, owned, instances, within, declared, decl.span,
+                )?;
+            }
+            DeclKind::Class(class) => {
+                postulate(signature, metas, pending.take(), &mut postulated)?;
+                // Класс в теле модуля не объявляется: методы его - имена
+                // верхнего уровня, а модуль их квалифицирует, и разрешение
+                // искало бы не то имя.
+                only_at_top(
+                    within,
+                    &Rc::from("класс"),
+                    "методы класса - имена верхнего уровня, а модуль их квалифицирует",
+                    decl.span,
+                )?;
+                declare_class(signature, metas, owned, instances, class, decl.span)?;
             }
             DeclKind::Data(data) => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
                 // Семейство в теле модуля - названная граница среза: имя
                 // квалифицируется, а имена конструкторов нет, и разбор по ним
                 // писать было бы нечем. Заводится вместе с путём в паттерне.
-                if within.is_some() {
-                    return Err(ElabError::ModuleMember {
-                        name: Rc::clone(&data.name.text),
-                        what: "модуле",
-                        why: "конструкторы квалифицированного имени пока не носят, \
-                              и разобрать их в паттерне нечем",
-                        span: decl.span,
-                    });
-                }
+                only_at_top(
+                    within,
+                    &data.name.text,
+                    "конструкторы квалифицированного имени пока не носят, \
+                     и разобрать их в паттерне нечем",
+                    decl.span,
+                )?;
                 // Маркер ставится **до** элаборации конструкторов: поле
                 // собственного типа получит `1` тем же правилом, что и всякое
                 // другое связывание, а не отдельным случаем.
@@ -210,17 +299,15 @@ fn members_into(
             }
             DeclKind::Resource(resource) => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
-                if within.is_some() {
-                    return Err(ElabError::ModuleMember {
-                        name: Rc::clone(&resource.name.text),
-                        what: "модуле",
-                        why: "ресурс объявляет конструкторы, а они пока \
-                              квалифицированного имени не носят",
-                        span: decl.span,
-                    });
-                }
+                only_at_top(
+                    within,
+                    &resource.name.text,
+                    "ресурс объявляет конструкторы, а они пока квалифицированного \
+                     имени не носят",
+                    decl.span,
+                )?;
                 owned.declare(&resource.name.text, Ownership::Resource);
-                declare_resource(signature, metas, owned, resource, decl.span)?;
+                declare_resource(signature, metas, owned, instances, resource, decl.span)?;
             }
         }
     }
@@ -235,7 +322,7 @@ fn members_into(
 fn alias(
     signature: &mut Signature,
     metas: &mut Metas,
-    owned: &Owned,
+    known: Known<'_>,
     within: Option<&Enclosing<'_>>,
     name: &ast::Name,
     body: &ast::Expr,
@@ -243,7 +330,7 @@ fn alias(
 ) -> Result<(), ElabError> {
     let declared = qualify(within, &name.text);
     let names = Names::of(&declared, Vec::new());
-    let mut elaborator = Elaborator::new(signature, metas, owned).within(within);
+    let mut elaborator = Elaborator::new(signature, metas, known.owned).within(within);
     let params = elaborator.telescope(params_of(within), true)?;
     // Тело и его сорт считаются **под параметрами**: тип члена функтора живёт
     // под ними, и в пустом контексте считать его нечем.
@@ -257,10 +344,11 @@ fn alias(
         Ok((term, level))
     })?;
     let sort = Term::Universe(metas.zonk(&level));
-    let ty = Elaborator::new(signature, metas, owned)
+    let ty = Elaborator::new(signature, metas, known.owned)
         .within(within)
         .wrapped(&params, true, |_| Ok(sort))?;
     let wrapped_body = abstracted(&params, term);
+    class::resolve(signature, metas, known.instances, &wrapped_body, &ty, span)?;
     signature
         .define_inferred(metas, &declared, Mult::Many, ty, Some(wrapped_body))
         .map_err(|error| ElabError::Core {
@@ -285,6 +373,7 @@ fn declare_module(
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &mut Owned,
+    instances: &mut Instances,
     within: Option<&Enclosing<'_>>,
     module: &ast::ModuleDecl,
     span: Span,
@@ -297,14 +386,21 @@ fn declare_module(
     let names = Names::of(&declared, Vec::new());
     if let Some(body) = &module.body {
         return declare_module_value(
-            signature, metas, owned, within, module, body, &declared, span,
+            signature, metas, owned, instances, within, module, body, &declared, span,
         );
     }
     let inner = Enclosing {
         name: Rc::clone(&declared),
         params: &module.params,
     };
-    members_into(&module.members, Some(&inner), signature, metas, owned)?;
+    members_into(
+        &module.members,
+        Some(&inner),
+        signature,
+        metas,
+        owned,
+        instances,
+    )?;
     // Телескоп для самой записи считается **после** членов: граница объявления
     // освобождает дырки, и посчитанный заранее умер бы на первом же члене.
     let params = Elaborator::new(signature, metas, owned)
@@ -395,6 +491,361 @@ fn declare_module(
         })
 }
 
+/// Имя в голове объявления и её аргументы: `Eqv Nat` даёт `(Eqv, [Nat])`.
+fn spine_of(head: &ast::Expr) -> Option<(&ast::Name, Vec<&ast::Expr>)> {
+    let mut arguments = Vec::new();
+    let mut current = head;
+    while let ast::ExprKind::App(callee, argument) = &current.kind {
+        arguments.push(&**argument);
+        current = callee;
+    }
+    arguments.reverse();
+    match &current.kind {
+        ast::ExprKind::Name(name) => Some((name, arguments)),
+        _ => None,
+    }
+}
+
+/// Класс либо его инстанс (§3.5, §4.1).
+///
+/// **Класс - это тип записи, параметризованный своими аргументами**, плюс по
+/// определению верхнего уровня на каждый метод: `eq` объявляется как
+/// `{0 a : Type} -> {ω d : Eqv a} -> a -> a -> Bool` с телом `\a d -> d.eq`.
+/// Словарь стоит implicit-связыванием, поэтому в месте вызова он вставляется
+/// дыркой, а заполняется поиском - см. [`crate::class`].
+///
+/// **Инстанс - это запись**, объявленная под невыразимым именем `Eqv#Nat` и
+/// проверенная против `Eqv Nat`. Тип метода в нём не пишется: он **выводится**
+/// из класса проекцией словаря, иначе автор переписывал бы сигнатуру, уже
+/// написанную в классе.
+fn declare_class(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    owned: &mut Owned,
+    instances: &mut Instances,
+    class: &ast::ClassDecl,
+    span: Span,
+) -> Result<(), ElabError> {
+    let Some((name, arguments)) = spine_of(&class.head) else {
+        return Err(ElabError::ClassHead { span });
+    };
+    if class.instance {
+        return declare_instance(signature, metas, owned, instances, class, name, span);
+    }
+    // Параметр класса пишется именем: `class Eqv a where`. Тип у него не
+    // написан, и умолчание то же, что у параметра семейства, - `Type`.
+    let mut params = Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        let ast::ExprKind::Name(bound) = &argument.kind else {
+            return Err(ElabError::ClassHead {
+                span: argument.span,
+            });
+        };
+        params.push(ast::Binder {
+            visibility: ast::Visibility::Explicit,
+            // Параметр класса стёрт: это тип, и в рантайме его нет. Тем же
+            // нулём он стоит у метода - `{0 a : Type} -> {ω d : C a} -> …`.
+            mult: Some(ast::MultAnn {
+                mult: ast::Mult::Zero,
+                span: argument.span,
+            }),
+            names: vec![bound.clone()],
+            ty: None,
+            span: argument.span,
+        });
+    }
+    let mut members = Vec::with_capacity(class.members.len());
+    for member in &class.members {
+        let DeclKind::Signature { name, ty } = &member.kind else {
+            return Err(ElabError::ModuleMember {
+                name: member_name(member)
+                    .cloned()
+                    .unwrap_or_else(|| Rc::from("_")),
+                what: "классе",
+                why: "класс несёт сигнатуры методов; умолчания и суперклассы пока не \
+                      объявляются",
+                span: member.span,
+            });
+        };
+        members.push((name.clone(), Some(ty)));
+    }
+    let names = Names::of(&name.text, Vec::new());
+    // Класс - **функция** от своих параметров в тип записи, а не сам тип:
+    // `Eqv Nat` есть применение. Отсюда тело лямбдой, а тип - `Pi` над
+    // универсумом, в котором живёт запись.
+    let mut elaborator = Elaborator::new(signature, metas, owned);
+    let telescope = elaborator.telescope(&params, false)?;
+    let (record, level) = elaborator.beneath(&telescope, |it| {
+        let fields = it.module_members(&members)?;
+        let record = Term::Record(Fields::closed(fields.into()));
+        let level = it.sort_of(&record).map_err(|error| ElabError::Core {
+            span,
+            error: Box::new(error),
+            names: names.clone(),
+        })?;
+        Ok((record, level))
+    })?;
+    let sort = Term::Universe(metas.zonk(&level));
+    let ty = Elaborator::new(signature, metas, owned).wrapped(&telescope, false, |_| Ok(sort))?;
+    let body = abstracted(&telescope, record);
+    signature
+        .define_inferred(metas, &name.text, Mult::Many, ty, Some(body))
+        .map_err(|error| ElabError::Core {
+            span,
+            error: Box::new(error),
+            names,
+        })?;
+    instances.declare(&name.text);
+    for (method, _) in &members {
+        declare_method(signature, metas, &name.text, &method.text, span)?;
+    }
+    Ok(())
+}
+
+/// Метод инстанса, готовый к объявлению: имя, клаузы, выведенный тип и место.
+struct Method<'a> {
+    /// Имя, как написано.
+    name: &'a ast::Name,
+    /// Клаузы.
+    clauses: &'a [ast::Clause],
+    /// Тип, выведенный из класса.
+    ty: Term,
+    /// Где написан член.
+    span: Span,
+}
+
+/// Типы методов инстанса - выведенные из класса проекцией словаря.
+///
+/// Считаются **до** объявления первого: контекст со словарём заимствует
+/// сигнатуру, а объявление её меняет.
+fn instance_methods<'a>(
+    signature: &Signature,
+    metas: &mut Metas,
+    class: &'a ast::ClassDecl,
+    head: &Term,
+    span: Span,
+) -> Result<Vec<Method<'a>>, ElabError> {
+    let names = Names::of(&Rc::from("instance"), Vec::new());
+    let fail = |error: TypeError| ElabError::Core {
+        span,
+        error: Box::new(error),
+        names: names.clone(),
+    };
+    let ctx = Ctx::new(signature);
+    let value = ctx.eval(head);
+    let bound = ctx.bind(CoreName::from("d"), Mult::Many, value);
+    let mut planned = Vec::with_capacity(class.members.len());
+    for member in &class.members {
+        let DeclKind::Clauses {
+            name: method,
+            clauses,
+        } = &member.kind
+        else {
+            return Err(ElabError::ModuleMember {
+                name: member_name(member)
+                    .cloned()
+                    .unwrap_or_else(|| Rc::from("_")),
+                what: "инстансе",
+                why: "тип метода написан в классе, поэтому инстанс несёт только клаузы",
+                span: member.span,
+            });
+        };
+        // Тип метода **выводится** из класса: под связыванием словаря его
+        // считает та же проверка, что считает всякую проекцию.
+        let projection = Term::Project(Rc::new(Term::var(0)), CoreName::from(&*method.text));
+        let (ty, _) = infer(&bound, metas, Mult::Zero, &projection).map_err(fail)?;
+        let ty = zonk_term(metas, &quote(bound.size(), &ty));
+        if mentions_local(&ty) {
+            return Err(ElabError::ModuleMember {
+                name: Rc::clone(&method.text),
+                what: "классе",
+                why: "тип метода зависит от значения другого метода, и вывести его \
+                      в инстансе нечем",
+                span: member.span,
+            });
+        }
+        planned.push(Method {
+            name: method,
+            clauses: clauses.as_slice(),
+            ty,
+            span: member.span,
+        });
+    }
+    Ok(planned)
+}
+
+/// `instance Eqv Nat where …` - запись, проверенная против `Eqv Nat`.
+#[allow(clippy::too_many_arguments)]
+fn declare_instance(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    owned: &mut Owned,
+    instances: &mut Instances,
+    class: &ast::ClassDecl,
+    name: &ast::Name,
+    span: Span,
+) -> Result<(), ElabError> {
+    if !instances.is_class(&name.text) {
+        return Err(ElabError::UnknownName {
+            name: Rc::clone(&name.text),
+            span: name.span,
+        });
+    }
+    let names = Names::of(&name.text, Vec::new());
+    let fail = |error: TypeError| ElabError::Core {
+        span,
+        error: Box::new(error),
+        names: names.clone(),
+    };
+    // Написанная голова - это тип словаря, и её же проверяет объявление.
+    let head =
+        Elaborator::new(signature, metas, owned).typing(|it| it.expr(&class.head, Mult::Many))?;
+    // Сорт считается до всего прочего: он решает аргументы уровня класса, а
+    // граница объявления, которую сейчас перейдёт каждый метод, освободит
+    // дырки - несолвленные до неё уже не дожили бы.
+    is_type(&Ctx::new(signature), metas, &head).map_err(fail)?;
+    let head = zonk_term(metas, &head);
+    let Some((_, argument)) = applied_head(&head) else {
+        return Err(ElabError::ClassHead { span });
+    };
+    let declared: Symbol = Rc::from(format!("{}#{argument}", name.text).as_str());
+    // Кандидат запоминается **до** членов: иначе о дубликате скажет ядро,
+    // назвав `Eqv#Nat.eq` - имя, которого автор не писал.
+    if !instances.add(&name.text, &argument, Rc::clone(&declared)) {
+        return Err(ElabError::ModuleMember {
+            name: Rc::clone(&name.text),
+            what: "программе",
+            why: "инстанс для этого типа уже объявлен, а именованных инстансов пока нет",
+            span,
+        });
+    }
+    // Типы всех методов считаются **до** объявления первого: контекст со
+    // словарём заимствует сигнатуру, а объявление её меняет.
+    let planned = instance_methods(signature, metas, class, &head, span)?;
+    // Внутри инстанса имя метода - ссылка на **своего же** члена, а не на
+    // метод класса: `eq a b` в теле `Eqv Nat` есть `Eqv#Nat.eq a b`. Иначе
+    // рекурсия упиралась бы в словарь, которого ещё нет - его объявляет тот
+    // самый инстанс, тело которого проверяется. Названная цена: вызов метода
+    // **другого** типа изнутри инстанса так не пишется, для него имя занято.
+    let inner = Enclosing {
+        name: Rc::clone(&declared),
+        params: &[],
+    };
+    let mut written = Vec::with_capacity(planned.len());
+    for method in planned {
+        let qualified: Symbol = Rc::from(format!("{declared}.{}", method.name.text).as_str());
+        let pending = Pending {
+            name: Rc::clone(&qualified),
+            ty: method.ty,
+            source: &class.head,
+            span: method.span,
+        };
+        define(
+            signature,
+            metas,
+            known(owned, instances),
+            Some(&inner),
+            &pending,
+            method.clauses,
+            method.span,
+        )?;
+        let Some(term) = signature.instantiate(&qualified, metas) else {
+            continue;
+        };
+        written.push((CoreName::from(&*method.name.text), Rc::new(term)));
+    }
+    let object = Term::Object(written.into());
+    check_closed_with(signature, metas, &object, &head).map_err(fail)?;
+    signature
+        .define_inferred(
+            metas,
+            &declared,
+            Mult::Many,
+            zonk_term(metas, &head),
+            Some(object),
+        )
+        .map_err(fail)
+}
+
+/// Голова применения и голова её аргумента - по элаборированному типу.
+fn applied_head(ty: &Term) -> Option<(Symbol, Symbol)> {
+    let Term::App(callee, argument) = ty else {
+        return None;
+    };
+    let Term::Const(class, _) = &**callee else {
+        return None;
+    };
+    let mut head = &**argument;
+    while let Term::App(inner, _) = head {
+        head = inner;
+    }
+    let Term::Const(name, _) = head else {
+        return None;
+    };
+    Some((Rc::clone(class), Rc::clone(name)))
+}
+
+/// Метод класса - определение верхнего уровня, проецирующее словарь.
+///
+/// Тип его собирается не переписыванием написанного, а **проекцией**: под
+/// связываниями `{0 a} {ω d : C a}` тип `d.eq` считает та же проверка, что
+/// считает всякую проекцию, и телескоп класса с его зависимостями учитывается
+/// сам собой.
+fn declare_method(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    class: &Symbol,
+    method: &Symbol,
+    span: Span,
+) -> Result<(), ElabError> {
+    let names = Names::of(method, Vec::new());
+    let fail = |error: TypeError| ElabError::Core {
+        span,
+        error: Box::new(error),
+        names: names.clone(),
+    };
+    let Some(applied) = signature.instantiate(class, metas) else {
+        return Ok(());
+    };
+    let (kind, _) = infer(&Ctx::new(signature), metas, Mult::Zero, &applied).map_err(fail)?;
+    let Value::Pi(_, _, domain, _, _) = &*kind else {
+        return Ok(());
+    };
+    let sort = quote(0, domain);
+    let ctx = Ctx::new(signature);
+    let inner = ctx.bind(CoreName::from("a"), Mult::Zero, Rc::clone(domain));
+    let dictionary = Term::App(Rc::new(applied.clone()), Rc::new(Term::var(0)));
+    let bound = inner.eval(&dictionary);
+    let inner = inner.bind(CoreName::from("d"), Mult::Many, bound);
+    let projection = Term::Project(Rc::new(Term::var(0)), CoreName::from(&**method));
+    let (ty, _) = infer(&inner, metas, Mult::Zero, &projection).map_err(fail)?;
+    let ty = Term::Pi(
+        Binder::implicit(Mult::Zero),
+        CoreName::from("a"),
+        Rc::new(sort),
+        adamas_core::row::Row::empty(),
+        Rc::new(Term::Pi(
+            Binder::implicit(Mult::Many),
+            CoreName::from("d"),
+            Rc::new(dictionary),
+            adamas_core::row::Row::empty(),
+            Rc::new(quote(inner.size(), &ty)),
+        )),
+    );
+    let body = Term::Lam(
+        Mult::Zero,
+        CoreName::from("a"),
+        Rc::new(Term::Lam(
+            Mult::Many,
+            CoreName::from("d"),
+            Rc::new(projection),
+        )),
+    );
+    signature
+        .define_inferred(metas, method, Mult::Many, ty, Some(body))
+        .map_err(fail)
+}
+
 /// Формы объявления, которых язык не несёт, - названные границы среза.
 fn writable(
     within: Option<&Enclosing<'_>>,
@@ -451,6 +902,7 @@ fn declare_module_value(
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &mut Owned,
+    instances: &Instances,
     within: Option<&Enclosing<'_>>,
     module: &ast::ModuleDecl,
     body: &ast::Expr,
@@ -489,6 +941,7 @@ fn declare_module_value(
         })?;
         quote(0, &ty)
     };
+    class::resolve(signature, metas, instances, &term, &ty, span)?;
     signature
         .define_opaque(metas, declared, Mult::Many, ty, Some(term), module.sealed)
         .map_err(|error| ElabError::Core {
@@ -507,7 +960,7 @@ fn member_name(member: &ast::Decl) -> Option<&Symbol> {
         DeclKind::Module(inner) => Some(&inner.name.text),
         DeclKind::Data(data) => Some(&data.name.text),
         DeclKind::Resource(resource) => Some(&resource.name.text),
-        DeclKind::Clauses { .. } => None,
+        DeclKind::Clauses { .. } | DeclKind::Class(_) => None,
     }
 }
 
@@ -605,7 +1058,7 @@ fn postulate(
 fn define(
     signature: &mut Signature,
     metas: &mut Metas,
-    owned: &Owned,
+    known: Known<'_>,
     within: Option<&Enclosing<'_>>,
     declared: &Pending<'_>,
     clauses: &[ast::Clause],
@@ -624,7 +1077,7 @@ fn define(
         ty: Rc::new(declared.ty.clone()),
     }];
     let compiled = {
-        let mut elaborator = Elaborator::with_group(signature, metas, owned, group)
+        let mut elaborator = Elaborator::with_group(signature, metas, known.owned, group)
             .within(within)
             .declaring(&declared.ty);
         clauses
@@ -642,6 +1095,17 @@ fn define(
             error: Box::new(error),
         }
     })?;
+
+    // Словари, вставленные дырками, заполняются поиском - до объявления,
+    // которому нерешённая дырка запрещена (§3.5, `crate::class`).
+    class::resolve(
+        signature,
+        metas,
+        known.instances,
+        &tree.term,
+        &declared.ty,
+        span,
+    )?;
 
     signature
         .define_inferred(
@@ -667,7 +1131,7 @@ fn define(
 
     // После объявления, а не до: дырки решены и подставлены, поэтому видно,
     // чем на самом деле стал каждый выводимый аргумент (§10 вопрос 76).
-    carrier::check(signature, owned, &declared.name, span)
+    carrier::check(signature, known.owned, &declared.name, span)
 }
 
 /// Поднимает универсум семейства до уровней его параметров.
@@ -747,6 +1211,13 @@ fn resource_members(
             }
             // Ни алиас, ни модуль телом ресурса не бывают: layout их туда
             // пускает, а смысла у них там нет - конструктор либо деструктор.
+            ast::DeclKind::Class(_) => {
+                return Err(ElabError::ResourceMember {
+                    data: Rc::clone(&resource.name.text),
+                    name: Rc::from("класс"),
+                    span: member.span,
+                });
+            }
             ast::DeclKind::Module(ast::ModuleDecl { name, .. })
             | ast::DeclKind::Alias { name, .. } => {
                 return Err(ElabError::ResourceMember {
@@ -798,6 +1269,7 @@ fn declare_resource(
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &mut Owned,
+    instances: &Instances,
     resource: &ast::Resource,
     span: Span,
 ) -> Result<(), ElabError> {
@@ -877,7 +1349,15 @@ fn declare_resource(
         source: drop_ty,
         span: drop_span,
     };
-    define(signature, metas, owned, None, &declared, clauses, drop_span)?;
+    define(
+        signature,
+        metas,
+        known(owned, instances),
+        None,
+        &declared,
+        clauses,
+        drop_span,
+    )?;
     // Имя деструктора связывается с типом **после** того, как собрано его
     // тело, и это не порядок ради порядка. Связав раньше, мы получили бы
     // вставку `drop` внутрь самого `drop`: параметр там ресурсного типа, и

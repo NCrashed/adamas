@@ -227,6 +227,27 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Голова класса или инстанса написана не именем с аргументами.
+    #[error("голова класса пишется именем с аргументами: `class Eqv a`, `instance Eqv Nat`")]
+    ClassHead {
+        /// Где написано.
+        span: Span,
+    },
+
+    /// Инстанса для написанного типа нет.
+    ///
+    /// Поиск - управляющий поток (§10 вопрос 52): «не подошёл» там норма. Сюда
+    /// приходит окончательный отказ, когда кандидатов не осталось вовсе.
+    #[error("инстанс `{class} {head}` не найден")]
+    NoInstance {
+        /// Имя класса.
+        class: Symbol,
+        /// Голова написанного типа.
+        head: Symbol,
+        /// Где написано использование.
+        span: Span,
+    },
+
     /// `type T` без уравнения вне сигнатуры модуля.
     ///
     /// Абстрактный типовой член объявляет сигнатура (§4.8); снаружи неё тип
@@ -571,6 +592,8 @@ impl ElabError {
             | Self::EmptyCase { span }
             | Self::NotMatchable { span }
             | Self::AbstractType { span, .. }
+            | Self::NoInstance { span, .. }
+            | Self::ClassHead { span }
             | Self::ModuleMember { span, .. }
             | Self::NotUpdatable { span }
             | Self::NoImplicitParameter { span }

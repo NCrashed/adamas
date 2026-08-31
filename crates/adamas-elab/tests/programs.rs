@@ -2506,3 +2506,100 @@ fn a_signature_takes_no_parameters() {
         );
     }
 }
+
+/// Класс с одним методом и инстанс на `Nat` - основа примеров про разрешение.
+const EQ_CLASS: &str = "
+class Eqv a where
+  eq : a -> a -> Bool
+
+instance Eqv Nat where
+  eq Zero Zero = True
+  eq (Succ a) (Succ b) = eq a b
+  eq a b = False
+";
+
+#[test]
+fn a_method_resolves_by_the_type_of_its_argument() {
+    // §3.5: класс есть module type плюс режим разрешения. Словарь вставляется
+    // дыркой и заполняется поиском, когда проверка уже решила `a := Nat`;
+    // энергично его не вставить - тип в момент вставки ещё неизвестен.
+    program(&format!(
+        "{BASE}{EQ_CLASS}
+instance Eqv Bool where
+  eq a b = True
+
+counted : Bool
+counted = eq (Succ Zero) (Succ Zero)
+
+flagged : Bool
+flagged = eq True False
+"
+    ));
+}
+
+#[test]
+fn a_method_computes_through_the_dictionary() {
+    // Словарь - обычная запись, метод - обычная проекция, поэтому вызов
+    // **вычисляется**: `Wit (eq Zero Zero)` принимает `Yes : Wit True` только
+    // если разворот дошёл до `True`.
+    program(&format!(
+        "{BASE}{EQ_CLASS}
+data Wit : Bool -> Type where
+  Yes : Wit True
+
+witnessed : Wit (eq Zero Zero)
+witnessed = Yes
+"
+    ));
+}
+
+#[test]
+fn a_missing_instance_names_the_type() {
+    // Поиск - управляющий поток, и окончательный отказ называет и класс, и тип.
+    let error = refused(&format!(
+        "{BASE}{EQ_CLASS}
+data Unit where
+  It : Unit
+
+missing : Bool
+missing = eq It It
+"
+    ));
+    assert!(
+        matches!(error, ElabError::NoInstance { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn one_instance_per_type_and_class() {
+    // Два инстанса на один тип - неоднозначность, и разрешать её пока нечем:
+    // именованных инстансов и `using` в языке нет.
+    let error = refused(&format!(
+        "{BASE}{EQ_CLASS}
+instance Eqv Nat where
+  eq a b = False
+"
+    ));
+    assert!(
+        matches!(error, ElabError::ModuleMember { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn an_instance_carries_only_clauses() {
+    // Тип метода написан в классе, поэтому инстанс его не переписывает - и
+    // не вправе: две записи одного типа разъезжались бы молча.
+    let error = refused(&format!(
+        "{BASE}{EQ_CLASS}
+instance Eqv Bool where
+  eq : Bool -> Bool -> Bool
+  eq a b = True
+"
+    ));
+    assert!(
+        matches!(error, ElabError::ModuleMember { .. }),
+        "получено {error:?}"
+    );
+}

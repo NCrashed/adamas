@@ -93,6 +93,7 @@ pub fn resolve(
     signature: &Signature,
     metas: &mut Metas,
     instances: &Instances,
+    declaring: Option<&Declaring<'_>>,
     term: &Term,
     ty: &Term,
     span: Span,
@@ -107,8 +108,8 @@ pub fn resolve(
         adamas_core::check::check_within(&adamas_core::ctx::Ctx::new(signature), metas, term, ty);
     // И тело, и тип: словарь стоит в обоих - `witnessed : Wit (eq Zero Zero)`
     // несёт его в написанном типе, а не в теле.
-    settle(signature, metas, instances, ty, span)?;
-    settle(signature, metas, instances, term, span)
+    settle(signature, metas, instances, declaring, ty, span)?;
+    settle(signature, metas, instances, declaring, term, span)
 }
 
 /// Заполняет словари по уже проверенному терму.
@@ -116,16 +117,33 @@ fn settle(
     signature: &Signature,
     metas: &mut Metas,
     instances: &Instances,
+    declaring: Option<&Declaring<'_>>,
     term: &Term,
     span: Span,
 ) -> Result<(), ElabError> {
-    while let Some(meta) = unsolved_term_meta(metas, term) {
+    // Дырки, заведённые самим разрешением: их в терме нет - они живут в
+    // решении той дырки, ради которой заведены, - а решать их надо тем же
+    // циклом. Так рекурсия по контексту инстанса получается из очереди.
+    let mut pending: Vec<adamas_core::term::TermMeta> = Vec::new();
+    loop {
+        let meta = match pending.pop() {
+            Some(meta) if metas.term_solution(meta).is_none() => meta,
+            Some(_) => continue,
+            None => match unsolved_term_meta(metas, term) {
+                Some(meta) => meta,
+                None => return Ok(()),
+            },
+        };
         // Тип дырки замкнут по построению, поэтому читается на нулевой
         // глубине; зонканье подставляет всё, что решила проверка.
         let ty = zonk_term(metas, &quote(0, metas.term_type(meta)));
+        // Цель **вычисляется**: зонканье подставляет решение дырки лямбдой, и
+        // `Eqv ((\m -> Nat) x)` синтаксически головы не имеет. Тот же порядок,
+        // что у носителей: сперва вычислить, потом читать голову.
+        let goal = normalized(signature, &ty);
         // Дырка не про класс - её сюда и не звали: решить её могла только
         // унификация, и о том, что не решила, скажет объявление.
-        let Some((class, head)) = applied(goal_of(&ty)) else {
+        let Some((class, head)) = applied(&goal) else {
             return Ok(());
         };
         if !instances.is_class(&class) {
@@ -139,23 +157,42 @@ fn settle(
             metas.solve_term(meta, solution);
             continue;
         }
-        let Some(head) = head else {
-            return Err(ElabError::NoInstance {
-                class,
-                head: Rc::from("переменная"),
-                span,
-            });
+        let head = match head {
+            Head::Named(name) => name,
+            // Голова-переменная: инстанса для неё нет и быть не может, а
+            // словарь из контекста уже не нашёлся.
+            Head::Rigid => {
+                return Err(ElabError::NoInstance {
+                    class,
+                    head: Rc::from("переменная"),
+                    span,
+                });
+            }
+            // Голова не определилась вовсе - решать её должна была
+            // унификация, и о том, что не решила, скажет объявление.
+            Head::Unknown => return Ok(()),
         };
+        // Объявляемый сейчас инстанс собой сослаться не может - в сигнатуре
+        // его ещё нет, - и словарь для него собирается **записью из членов**.
+        if let Some(inner) = declaring.filter(|it| it.matches(&class, &head)) {
+            let Some(solution) = inner.dictionary(signature, metas, &ty) else {
+                return Err(ElabError::NoInstance { class, head, span });
+            };
+            metas.solve_term(meta, solution);
+            continue;
+        }
         let Some(name) = instances.candidate(&class, &head) else {
             return Err(ElabError::NoInstance { class, head, span });
         };
         let Some(dictionary) = signature.instantiate(&name, metas) else {
-            return Ok(());
+            return Err(ElabError::NoInstance { class, head, span });
         };
-        let value = adamas_core::eval::eval(&adamas_core::value::Env::default(), &dictionary);
-        metas.solve_term(meta, value);
+        let Some((solution, fresh)) = applied_candidate(signature, metas, &ty, &dictionary) else {
+            return Err(ElabError::NoInstance { class, head, span });
+        };
+        metas.solve_term(meta, solution);
+        pending.extend(fresh);
     }
-    Ok(())
 }
 
 /// Цель дырки - то, чем оканчивается телескоп её типа.
@@ -212,7 +249,7 @@ fn from_context(signature: &Signature, metas: &mut Metas, ty: &Term) -> Option<R
 /// Внешний `None` - тип не применение определения, то есть словарём он не
 /// является вовсе. Внутренний - голова аргумента переменная, и кандидата для
 /// неё искать негде.
-fn applied(ty: &Term) -> Option<(Symbol, Option<Symbol>)> {
+fn applied(ty: &Term) -> Option<(Symbol, Head)> {
     let Term::App(callee, argument) = ty else {
         return None;
     };
@@ -223,11 +260,185 @@ fn applied(ty: &Term) -> Option<(Symbol, Option<Symbol>)> {
     while let Term::App(inner, _) = head {
         head = inner;
     }
-    let name = match head {
-        Term::Const(name, _) => Some(Rc::clone(name)),
-        // Голова-переменная: инстанса для неё нет и быть не может, а словарь
-        // приходит из контекста. Это и есть полиморфный случай.
-        _ => None,
+    let found = match head {
+        Term::Const(name, _) => Head::Named(Rc::clone(name)),
+        // Переменная - полиморфный случай: словарь приходит из контекста.
+        Term::Var(_) => Head::Rigid,
+        _ => Head::Unknown,
     };
-    Some((Rc::clone(class), name))
+    Some((Rc::clone(class), found))
+}
+
+/// Голова аргумента цели.
+enum Head {
+    /// Определение - по нему и ищется кандидат.
+    Named(Symbol),
+    /// Переменная: кандидата для неё нет и быть не может.
+    Rigid,
+    /// Ещё не определилась.
+    Unknown,
+}
+
+/// Цель дырки, приведённая к нормальной форме под своим телескопом.
+fn normalized(signature: &Signature, ty: &Term) -> Term {
+    let binders = binders_of(ty);
+    let mut ctx = adamas_core::ctx::Ctx::new(signature);
+    for (mult, name, domain) in &binders {
+        let value = ctx.eval(domain);
+        ctx = ctx.bind(Rc::clone(name), *mult, value);
+    }
+    let goal = ctx.eval(goal_of(ty));
+    quote(ctx.size(), &goal)
+}
+
+/// Инстанс, который объявляется прямо сейчас.
+///
+/// Ссылаться на него именем нельзя - в сигнатуре его ещё нет, - поэтому
+/// словарь собирается записью из членов. Самореференция члена при этом
+/// обычная: он объявляется определением и видит себя (решение 2026-08-31).
+#[derive(Debug)]
+pub struct Declaring<'a> {
+    /// Имя класса.
+    pub class: Symbol,
+    /// Голова аргумента.
+    pub head: Symbol,
+    /// Сколько ведущих связываний у словаря: столько же у каждого члена.
+    pub prefix: usize,
+    /// Члены: короткое имя поля и терм, которым член берётся.
+    pub members: &'a [(Symbol, Term)],
+}
+
+impl Declaring<'_> {
+    /// Про этот ли инстанс цель.
+    fn matches(&self, class: &Symbol, head: &Symbol) -> bool {
+        self.class == *class && self.head == *head
+    }
+
+    /// Словарь записью из членов, применённых к ведущим связываниям цели.
+    ///
+    /// Телескоп цели начинается ровно теми связываниями, что стоят у членов:
+    /// член объявлен под тем же префиксом, что и сам словарь. Значит аргументы
+    /// - первые `prefix` переменных телескопа.
+    fn dictionary(&self, signature: &Signature, metas: &mut Metas, ty: &Term) -> Option<Rc<Value>> {
+        let binders = binders_of(ty);
+        let size = binders.len();
+        if size < self.prefix {
+            return None;
+        }
+        let mut written = Vec::with_capacity(self.members.len());
+        for (field, member) in self.members {
+            let mut term = member.clone();
+            for position in 0..self.prefix {
+                let index = u32::try_from(size - 1 - position).ok()?;
+                term = Term::App(Rc::new(term), Rc::new(Term::var(index)));
+            }
+            written.push((Rc::clone(field), Rc::new(term)));
+        }
+        let object = Term::Object(written.into());
+        let solution = abstracted(&binders, object);
+        let _ = (signature, metas);
+        Some(adamas_core::eval::eval(
+            &adamas_core::value::Env::default(),
+            &solution,
+        ))
+    }
+}
+
+/// Связывания телескопа дырки: кратность, имя и тип на своей глубине.
+fn binders_of(ty: &Term) -> Vec<(adamas_core::mult::Mult, adamas_core::term::Name, Rc<Term>)> {
+    let mut found = Vec::new();
+    let mut current = ty;
+    while let Term::Pi(binder, name, domain, _, codomain) = current {
+        found.push((binder.mult, Rc::clone(name), Rc::clone(domain)));
+        current = codomain;
+    }
+    found
+}
+
+/// Оборачивает тело лямбдами по телескопу.
+fn abstracted(
+    binders: &[(adamas_core::mult::Mult, adamas_core::term::Name, Rc<Term>)],
+    body: Term,
+) -> Term {
+    binders.iter().rev().fold(body, |inner, (mult, name, _)| {
+        Term::Lam(*mult, Rc::clone(name), Rc::new(inner))
+    })
+}
+
+/// Кандидат, применённый к дыркам на каждое ведущее выводимое связывание.
+///
+/// Инстанс с контекстом - не значение, а функция от словарей (§3.5), поэтому
+/// сослаться на него именем мало: `Eqv#List` надо применить к `?a` и к словарю
+/// `Eqv ?a`, а сам этот словарь вернётся в цикл и решится следующим шагом.
+/// Так рекурсия разрешения получается из цикла, а не из отдельного обхода.
+fn applied_candidate(
+    signature: &Signature,
+    metas: &mut Metas,
+    ty: &Term,
+    candidate: &Term,
+) -> Option<(Rc<Value>, Vec<adamas_core::term::TermMeta>)> {
+    let binders = binders_of(ty);
+    let size = u32::try_from(binders.len()).ok()?;
+    let mut ctx = adamas_core::ctx::Ctx::new(signature);
+    for (mult, name, domain) in &binders {
+        let value = ctx.eval(domain);
+        ctx = ctx.bind(Rc::clone(name), *mult, value);
+    }
+    let goal = ctx.eval(goal_of(ty));
+    let mut term = candidate.clone();
+    let mut fresh = Vec::new();
+    let (mut current, _) =
+        adamas_core::check::infer(&ctx, metas, adamas_core::mult::Mult::Zero, candidate).ok()?;
+    while let Value::Pi(binder, _, domain, _, codomain) = &*current.clone() {
+        if !binder.visibility.is_implicit() {
+            break;
+        }
+        // Тип дырки - тот же телескоп, но оканчивающийся доменом связывания.
+        let over = abstracted_pi(&binders, quote(size, domain));
+        let argument = metas.fresh_term(ctx.eval(&over), size);
+        if let Some(created) = head_meta(&argument) {
+            fresh.push(created);
+        }
+        let value = ctx.eval(&argument);
+        term = Term::App(Rc::new(term), Rc::new(argument));
+        current = codomain.clone().apply(value);
+    }
+    if !adamas_core::conv::convertible(signature, metas, size, &current, &goal) {
+        return None;
+    }
+    Some((
+        adamas_core::eval::eval(
+            &adamas_core::value::Env::default(),
+            &abstracted(&binders, term),
+        ),
+        fresh,
+    ))
+}
+
+/// Дырка в голове написанного применения.
+fn head_meta(term: &Term) -> Option<adamas_core::term::TermMeta> {
+    let mut current = term;
+    while let Term::App(callee, _) = current {
+        current = callee;
+    }
+    match current {
+        Term::Meta(meta) => Some(*meta),
+        _ => None,
+    }
+}
+
+/// Телескоп `Pi` над написанным телом - тип дырки, стоящей в том же контексте.
+fn abstracted_pi(
+    binders: &[(adamas_core::mult::Mult, adamas_core::term::Name, Rc<Term>)],
+    body: Term,
+) -> Term {
+    binders.iter().rev().fold(body, |inner, (mult, name, ty)| {
+        Term::Pi(
+            adamas_core::term::Binder::explicit(*mult),
+            Rc::clone(name),
+            Rc::clone(ty),
+            adamas_core::row::Row::empty(),
+            Rc::new(inner),
+        )
+    })
 }

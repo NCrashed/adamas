@@ -33,7 +33,7 @@ use crate::carrier;
 use crate::error::{ElabError, Names};
 use adamas_core::value::Value;
 
-use crate::class::{self, Instances};
+use crate::class::{self, Declaring, Instances};
 use crate::expr::{Elaborator, Enclosing, Member, Param};
 use crate::own::{Owned, Ownership};
 use crate::route::{self, Declared};
@@ -111,6 +111,9 @@ struct Known<'a> {
     owned: &'a Owned,
     /// Классы и их инстансы (§3.5).
     instances: &'a Instances,
+    /// Инстанс, который объявляется прямо сейчас: сослаться на него именем
+    /// нельзя, и словарь для него собирается записью из членов.
+    declaring: Option<&'a Declaring<'a>>,
 }
 
 /// Написанная сигнатура - объявление, ждущее своих клауз.
@@ -151,7 +154,11 @@ fn declared_signature<'a>(
 
 /// Собирает read-only половину состояния.
 fn known<'a>(owned: &'a Owned, instances: &'a Instances) -> Known<'a> {
-    Known { owned, instances }
+    Known {
+        owned,
+        instances,
+        declaring: None,
+    }
 }
 
 /// Отвергает форму, законную только на верхнем уровне.
@@ -348,7 +355,15 @@ fn alias(
         .within(within)
         .wrapped(&params, true, |_| Ok(sort))?;
     let wrapped_body = abstracted(&params, term);
-    class::resolve(signature, metas, known.instances, &wrapped_body, &ty, span)?;
+    class::resolve(
+        signature,
+        metas,
+        known.instances,
+        None,
+        &wrapped_body,
+        &ty,
+        span,
+    )?;
     signature
         .define_inferred(metas, &declared, Mult::Many, ty, Some(wrapped_body))
         .map_err(|error| ElabError::Core {
@@ -491,6 +506,15 @@ fn declare_module(
         })
 }
 
+/// Заключение написанной головы: `{Eqv a} => Eqv (List a)` даёт `Eqv (List a)`.
+fn conclusion_of(head: &ast::Expr) -> &ast::Expr {
+    let mut current = head;
+    while let ast::ExprKind::Pi { codomain, .. } = &current.kind {
+        current = codomain;
+    }
+    current
+}
+
 /// Имя в голове объявления и её аргументы: `Eqv Nat` даёт `(Eqv, [Nat])`.
 fn spine_of(head: &ast::Expr) -> Option<(&ast::Name, Vec<&ast::Expr>)> {
     let mut arguments = Vec::new();
@@ -526,7 +550,14 @@ fn declare_class(
     class: &ast::ClassDecl,
     span: Span,
 ) -> Result<(), ElabError> {
-    let Some((name, arguments)) = spine_of(&class.head) else {
+    // У инстанса с контекстом голова написана `Pi`: имя класса живёт в её
+    // заключении, а связывания перед ним - словари контекста.
+    let written = if class.instance {
+        conclusion_of(&class.head)
+    } else {
+        &class.head
+    };
+    let Some((name, arguments)) = spine_of(written) else {
         return Err(ElabError::ClassHead { span });
     };
     if class.instance {
@@ -602,78 +633,6 @@ fn declare_class(
     Ok(())
 }
 
-/// Метод инстанса, готовый к объявлению: имя, клаузы, выведенный тип и место.
-struct Method<'a> {
-    /// Имя, как написано.
-    name: &'a ast::Name,
-    /// Клаузы.
-    clauses: &'a [ast::Clause],
-    /// Тип, выведенный из класса.
-    ty: Term,
-    /// Где написан член.
-    span: Span,
-}
-
-/// Типы методов инстанса - выведенные из класса проекцией словаря.
-///
-/// Считаются **до** объявления первого: контекст со словарём заимствует
-/// сигнатуру, а объявление её меняет.
-fn instance_methods<'a>(
-    signature: &Signature,
-    metas: &mut Metas,
-    class: &'a ast::ClassDecl,
-    head: &Term,
-    span: Span,
-) -> Result<Vec<Method<'a>>, ElabError> {
-    let names = Names::of(&Rc::from("instance"), Vec::new());
-    let fail = |error: TypeError| ElabError::Core {
-        span,
-        error: Box::new(error),
-        names: names.clone(),
-    };
-    let ctx = Ctx::new(signature);
-    let value = ctx.eval(head);
-    let bound = ctx.bind(CoreName::from("d"), Mult::Many, value);
-    let mut planned = Vec::with_capacity(class.members.len());
-    for member in &class.members {
-        let DeclKind::Clauses {
-            name: method,
-            clauses,
-        } = &member.kind
-        else {
-            return Err(ElabError::ModuleMember {
-                name: member_name(member)
-                    .cloned()
-                    .unwrap_or_else(|| Rc::from("_")),
-                what: "инстансе",
-                why: "тип метода написан в классе, поэтому инстанс несёт только клаузы",
-                span: member.span,
-            });
-        };
-        // Тип метода **выводится** из класса: под связыванием словаря его
-        // считает та же проверка, что считает всякую проекцию.
-        let projection = Term::Project(Rc::new(Term::var(0)), CoreName::from(&*method.text));
-        let (ty, _) = infer(&bound, metas, Mult::Zero, &projection).map_err(fail)?;
-        let ty = zonk_term(metas, &quote(bound.size(), &ty));
-        if mentions_local(&ty) {
-            return Err(ElabError::ModuleMember {
-                name: Rc::clone(&method.text),
-                what: "классе",
-                why: "тип метода зависит от значения другого метода, и вывести его \
-                      в инстансе нечем",
-                span: member.span,
-            });
-        }
-        planned.push(Method {
-            name: method,
-            clauses: clauses.as_slice(),
-            ty,
-            span: member.span,
-        });
-    }
-    Ok(planned)
-}
-
 /// `instance Eqv Nat where …` - запись, проверенная против `Eqv Nat`.
 #[allow(clippy::too_many_arguments)]
 fn declare_instance(
@@ -697,15 +656,11 @@ fn declare_instance(
         error: Box::new(error),
         names: names.clone(),
     };
-    // Написанная голова - это тип словаря, и её же проверяет объявление.
-    let head =
-        Elaborator::new(signature, metas, owned).typing(|it| it.expr(&class.head, Mult::Many))?;
-    // Сорт считается до всего прочего: он решает аргументы уровня класса, а
-    // граница объявления, которую сейчас перейдёт каждый метод, освободит
-    // дырки - несолвленные до неё уже не дожили бы.
-    is_type(&Ctx::new(signature), metas, &head).map_err(fail)?;
-    let head = zonk_term(metas, &head);
-    let Some((_, argument)) = applied_head(&head) else {
+    // Голова элаборируется заново на каждое объявление: граница объявления
+    // освобождает дырки уровня, а у полиморфного инстанса они как раз и
+    // остаются нерешёнными - тот же порядок, что у функтора.
+    let written = written_head(signature, metas, owned, class, span, &names)?;
+    let Some((_, argument)) = applied_head(under_prefix(&written)) else {
         return Err(ElabError::ClassHead { span });
     };
     let declared: Symbol = Rc::from(format!("{}#{argument}", name.text).as_str());
@@ -719,52 +674,198 @@ fn declare_instance(
             span,
         });
     }
-    // Типы всех методов считаются **до** объявления первого: контекст со
-    // словарём заимствует сигнатуру, а объявление её меняет.
-    let planned = instance_methods(signature, metas, class, &head, span)?;
-    // Внутри инстанса имя метода - ссылка на **своего же** члена, а не на
-    // метод класса: `eq a b` в теле `Eqv Nat` есть `Eqv#Nat.eq a b`. Иначе
-    // рекурсия упиралась бы в словарь, которого ещё нет - его объявляет тот
-    // самый инстанс, тело которого проверяется. Названная цена: вызов метода
-    // **другого** типа изнутри инстанса так не пишется, для него имя занято.
-    let inner = Enclosing {
-        name: Rc::clone(&declared),
-        params: &[],
-    };
-    let mut written = Vec::with_capacity(planned.len());
-    for method in planned {
-        let qualified: Symbol = Rc::from(format!("{declared}.{}", method.name.text).as_str());
-        let pending = Pending {
-            name: Rc::clone(&qualified),
-            ty: method.ty,
-            source: &class.head,
-            span: method.span,
+    let members = instance_members(class)?;
+    let qualified: Vec<Symbol> = members
+        .iter()
+        .map(|(method, _)| Rc::from(format!("{declared}.{}", method.text).as_str()))
+        .collect();
+    for (at, (method, clauses)) in members.iter().enumerate() {
+        let written = written_head(signature, metas, owned, class, span, &names)?;
+        let prefix = leading(&written);
+        let ty = instance_method(signature, metas, &prefix, &written, method, span, &names)?;
+        // Словарь для **собственной** цели собирается записью из членов:
+        // сослаться на объявляемый инстанс именем нельзя, в сигнатуре его ещё
+        // нет. Член, объявленный ниже, сюда не попадает - тогда рекурсия по
+        // нему и отвергается (решение 2026-08-31).
+        let mut fields = Vec::with_capacity(members.len());
+        for (other, full) in qualified.iter().enumerate() {
+            let term = if other == at {
+                Term::Const(
+                    CoreName::from(&**full),
+                    self_levels(signature, metas, &ty).map_err(fail)?,
+                )
+            } else if let Some(term) = signature.instantiate(full, metas) {
+                term
+            } else {
+                continue;
+            };
+            fields.push((Rc::clone(&members[other].0.text), term));
+        }
+        let declaring = Declaring {
+            class: Rc::clone(&name.text),
+            head: Rc::clone(&argument),
+            prefix: prefix.len(),
+            members: &fields,
         };
-        define(
-            signature,
-            metas,
-            known(owned, instances),
-            Some(&inner),
-            &pending,
-            method.clauses,
-            method.span,
-        )?;
-        let Some(term) = signature.instantiate(&qualified, metas) else {
+        let complete = fields.len() == members.len();
+        let pending = Pending {
+            name: Rc::clone(&qualified[at]),
+            ty,
+            source: &class.head,
+            span: span_of(clauses, span),
+        };
+        let mut known = known(owned, instances);
+        if complete {
+            known.declaring = Some(&declaring);
+        }
+        define(signature, metas, known, None, &pending, clauses, span)?;
+    }
+    // Словарь - запись из членов, применённых к своим же связываниям.
+    let written = written_head(signature, metas, owned, class, span, &names)?;
+    let prefix = leading(&written);
+    let mut object = Vec::with_capacity(members.len());
+    for (at, (method, _)) in members.iter().enumerate() {
+        let Some(term) = signature.instantiate(&qualified[at], metas) else {
             continue;
         };
-        written.push((CoreName::from(&*method.name.text), Rc::new(term)));
+        let applied = (0..prefix.len()).fold(term, |callee, position| {
+            let index = u32::try_from(prefix.len() - 1 - position).unwrap_or(u32::MAX);
+            Term::App(Rc::new(callee), Rc::new(Term::var(index)))
+        });
+        object.push((CoreName::from(&*method.text), Rc::new(applied)));
     }
-    let object = Term::Object(written.into());
-    check_closed_with(signature, metas, &object, &head).map_err(fail)?;
+    let object = abstracted(&prefix, Term::Object(object.into()));
+    // `check_within`, а не `check_closed_with`: нерешённая дырка уровня здесь -
+    // будущий параметр самого словаря, и запрет отвергал бы всякий
+    // полиморфный инстанс. Окончательный запрет ставит объявление.
+    check_within(&Ctx::new(signature), metas, &object, &written).map_err(fail)?;
+    let written = zonk_term(metas, &written);
     signature
-        .define_inferred(
-            metas,
-            &declared,
-            Mult::Many,
-            zonk_term(metas, &head),
-            Some(object),
-        )
+        .define_inferred(metas, &declared, Mult::Many, written, Some(object))
         .map_err(fail)
+}
+
+/// Место клауз - для маршрута ошибки.
+fn span_of(clauses: &[ast::Clause], span: Span) -> Span {
+    clauses.first().map_or(span, |clause| clause.span)
+}
+
+/// Написанная голова инстанса как тип словаря.
+///
+/// Считается заново на каждое объявление: граница объявления освобождает
+/// дырки, а у полиморфного инстанса уровень как раз и остаётся нерешённым до
+/// обобщения. Тот же порядок у функтора (лог 2026-08-31).
+fn written_head(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    owned: &mut Owned,
+    class: &ast::ClassDecl,
+    span: Span,
+    names: &Names,
+) -> Result<Term, ElabError> {
+    let written = Elaborator::new(signature, metas, owned).declaration(&class.head, Mult::Many)?;
+    is_type(&Ctx::new(signature), metas, &written).map_err(|error| ElabError::Core {
+        span,
+        error: Box::new(error),
+        names: names.clone(),
+    })?;
+    Ok(zonk_term(metas, &written))
+}
+
+/// Члены инстанса: только клаузы, и тип каждого пишет класс.
+fn instance_members(
+    class: &ast::ClassDecl,
+) -> Result<Vec<(&ast::Name, &[ast::Clause])>, ElabError> {
+    let mut found = Vec::with_capacity(class.members.len());
+    for member in &class.members {
+        let DeclKind::Clauses { name, clauses } = &member.kind else {
+            return Err(ElabError::ModuleMember {
+                name: member_name(member)
+                    .cloned()
+                    .unwrap_or_else(|| Rc::from("_")),
+                what: "инстансе",
+                why: "тип метода написан в классе, поэтому инстанс несёт только клаузы",
+                span: member.span,
+            });
+        };
+        found.push((name, clauses.as_slice()));
+    }
+    Ok(found)
+}
+
+/// Тип одного метода инстанса - выведенный из класса проекцией словаря.
+///
+/// Тип читается дважды: под словарём - чтобы проверить, что он на него не
+/// ссылается, - и без него, потому что члену словарь не связывает. Индексы у
+/// двух чтений различаются ровно на это связывание.
+#[allow(clippy::too_many_arguments)]
+fn instance_method(
+    signature: &Signature,
+    metas: &mut Metas,
+    prefix: &[Param],
+    written: &Term,
+    method: &ast::Name,
+    span: Span,
+    names: &Names,
+) -> Result<Term, ElabError> {
+    let fail = |error: TypeError| ElabError::Core {
+        span,
+        error: Box::new(error),
+        names: names.clone(),
+    };
+    let mut ctx = Ctx::new(signature);
+    for param in prefix {
+        let bound = ctx.eval(&param.ty);
+        ctx = ctx.bind(CoreName::from(&*param.name), param.mult, bound);
+    }
+    let value = ctx.eval(under_prefix(written));
+    let bound = ctx.bind(CoreName::from("d"), Mult::Many, value);
+    let projection = Term::Project(Rc::new(Term::var(0)), CoreName::from(&*method.text));
+    let (found, _) = infer(&bound, metas, Mult::Zero, &projection).map_err(fail)?;
+    if mentions_depth(&quote(bound.size(), &found), 0) {
+        return Err(ElabError::ModuleMember {
+            name: Rc::clone(&method.text),
+            what: "классе",
+            why: "тип метода зависит от значения другого метода, и вывести его \
+                  в инстансе нечем",
+            span,
+        });
+    }
+    let depth = u32::try_from(prefix.len()).unwrap_or(u32::MAX);
+    let ty = zonk_term(metas, &quote(depth, &found));
+    Ok(prefix.iter().rev().fold(ty, |inner, param| {
+        Term::Pi(
+            Binder::implicit(param.mult),
+            CoreName::from(&*param.name),
+            Rc::clone(&param.ty),
+            adamas_core::row::Row::empty(),
+            Rc::new(inner),
+        )
+    }))
+}
+
+/// Ведущие связывания типа - те, под которыми живут и словарь, и его члены.
+fn leading(ty: &Term) -> Vec<Param> {
+    let mut found = Vec::new();
+    let mut current = ty;
+    while let Term::Pi(binder, name, domain, _, codomain) = current {
+        found.push(Param {
+            mult: binder.mult,
+            name: Rc::from(&**name),
+            ty: Rc::clone(domain),
+        });
+        current = codomain;
+    }
+    found
+}
+
+/// Что под ними написано.
+fn under_prefix(ty: &Term) -> &Term {
+    let mut current = ty;
+    while let Term::Pi(_, _, _, _, codomain) = current {
+        current = codomain;
+    }
+    current
 }
 
 /// Голова применения и голова её аргумента - по элаборированному типу.
@@ -941,7 +1042,7 @@ fn declare_module_value(
         })?;
         quote(0, &ty)
     };
-    class::resolve(signature, metas, instances, &term, &ty, span)?;
+    class::resolve(signature, metas, instances, None, &term, &ty, span)?;
     signature
         .define_opaque(metas, declared, Mult::Many, ty, Some(term), module.sealed)
         .map_err(|error| ElabError::Core {
@@ -1102,6 +1203,7 @@ fn define(
         signature,
         metas,
         known.instances,
+        known.declaring,
         &tree.term,
         &declared.ty,
         span,
@@ -1469,6 +1571,45 @@ fn name_head(term: &Term) -> Option<&adamas_core::term::Name> {
 }
 
 /// Ссылается ли терм хоть на одно локальное связывание.
+/// Ссылается ли терм на связывание глубины `depth`.
+///
+/// Нужно типу метода инстанса: считается он под связыванием словаря, и
+/// ссылка на него означала бы, что тип метода зависит от значения соседа.
+/// Такой тип под префикс не вынести - индекс уехал бы на чужое связывание.
+fn mentions_depth(term: &Term, depth: u32) -> bool {
+    let recur = |inner| mentions_depth(inner, depth);
+    let under = |inner| mentions_depth(inner, depth + 1);
+    match term {
+        Term::Var(index) => index.0 == depth,
+        Term::Universe(_) | Term::RowKind(_) | Term::Const(..) | Term::Meta(_) => false,
+        Term::Record(fields) | Term::Row(fields) => {
+            fields.iter().enumerate().any(|(at, field)| {
+                mentions_depth(&field.ty, depth + u32::try_from(at).unwrap_or(0))
+            }) || fields.tail.as_ref().is_some_and(|tail| recur(tail))
+        }
+        Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
+        Term::With(base, fields) => recur(base) || fields.iter().any(|(_, value)| recur(value)),
+        Term::Project(record, _) => recur(record),
+        Term::Lam(_, _, body) => under(body),
+        Term::App(callee, argument) => recur(callee) || recur(argument),
+        Term::Pi(_, _, domain, row, codomain) => {
+            recur(domain)
+                || under(codomain)
+                || row
+                    .labels()
+                    .iter()
+                    .flat_map(|label| &label.arguments)
+                    .any(recur)
+        }
+        Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || under(body),
+        Term::Case(case) => {
+            recur(&case.scrutinee)
+                || recur(&case.motive)
+                || case.branches.iter().any(|branch| recur(&branch.body))
+        }
+    }
+}
+
 fn mentions_local(term: &Term) -> bool {
     match term {
         Term::Var(_) => true,

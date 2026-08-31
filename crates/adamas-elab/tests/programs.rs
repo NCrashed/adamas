@@ -2642,3 +2642,42 @@ loose x y = eq x y
         "получено {error:?}"
     );
 }
+
+#[test]
+fn an_instance_may_have_a_context() {
+    // §3.5: инстанс с контекстом - не значение, а функция от словарей.
+    // Разрешение поэтому применяет кандидата к дыркам, а словарь его
+    // контекста возвращается в ту же очередь и решается следующим шагом -
+    // рекурсия поиска получается из цикла, а не из отдельного обхода.
+    program(&format!(
+        "{BASE}{EQ_CLASS}
+data Box a where
+  Wrap : a -> Box a
+
+instance {{Eqv a}} => Eqv (Box a) where
+  eq (Wrap x) q = eq x x
+
+used : Bool
+used = eq (Wrap Zero) (Wrap Zero)
+"
+    ));
+}
+
+#[test]
+fn a_context_dictionary_is_not_an_instance_for_the_variable() {
+    // Инстанса на `Box a` нет, а контекст говорит только про `a`: цель
+    // `Eqv (Box a)` внутри такого тела не решается ничем.
+    let error = refused(&format!(
+        "{BASE}{EQ_CLASS}
+data Box a where
+  Wrap : a -> Box a
+
+wrong : {{Eqv a}} => Box a -> Bool
+wrong p = eq p p
+"
+    ));
+    assert!(
+        matches!(error, ElabError::NoInstance { .. }),
+        "получено {error:?}"
+    );
+}

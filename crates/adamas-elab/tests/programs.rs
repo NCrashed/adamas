@@ -2783,11 +2783,11 @@ both x y = eq x y
 }
 
 #[test]
-fn an_instance_member_does_not_see_one_declared_below() {
-    // Названная граница решения 2026-08-31: словарь для собственной цели
-    // собирается записью из членов, а член, объявленный ниже, в неё ещё не
-    // попал. Здесь `eq` рекурсивен, а `neq` идёт после него.
-    let error = refused(&format!(
+fn an_instance_member_sees_all_its_siblings() {
+    // Члены инстанса объявляются **одной группой** (§10 вопрос 50), поэтому
+    // словарь для собственной цели собирается из всех сразу: рекурсия в
+    // первом же члене работает, и умолчание, зовущее написанный метод, тоже.
+    program(&format!(
         "{BASE}
 not : Bool -> Bool
 not True = False
@@ -2802,10 +2802,9 @@ instance Eqv Nat where
   eq Zero Zero = True
   eq (Succ a) (Succ b) = eq a b
   eq a b = False
+
+answer : Bool
+answer = neq Zero (Succ Zero)
 "
     ));
-    assert!(
-        matches!(error, ElabError::NoInstance { .. }),
-        "получено {error:?}"
-    );
 }

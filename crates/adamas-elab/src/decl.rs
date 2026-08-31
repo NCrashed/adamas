@@ -20,11 +20,11 @@ use std::rc::Rc;
 use adamas_core::check::{TypeError, check_closed_with, check_within, infer, is_type};
 use adamas_core::ctx::Ctx;
 use adamas_core::eval::quote;
-use adamas_core::level::Level;
+use adamas_core::level::{Level, LevelVar};
 use adamas_core::meta::{Generalization, Metas, zonk_term};
 use adamas_core::mult::Mult;
 use adamas_core::pattern::{PatternError, compile_traced};
-use adamas_core::sig::Signature;
+use adamas_core::sig::{Group, Member as SigMember, Signature};
 use adamas_core::source::Span;
 use adamas_core::term::{Binder, Fields, Name as CoreName, Term};
 use adamas_parser::ast::{self, DeclKind, Module, Symbol};
@@ -689,10 +689,11 @@ fn declare_instance(
         error: Box::new(error),
         names: names.clone(),
     };
-    // Голова элаборируется заново на каждое объявление: граница объявления
-    // освобождает дырки уровня, а у полиморфного инстанса они как раз и
-    // остаются нерешёнными - тот же порядок, что у функтора.
+    // Голова элаборируется **один раз на всю группу**: члены инстанса
+    // объявляются вместе, поэтому граница объявления одна, и дырки уровня
+    // доживают до неё.
     let written = written_head(signature, metas, owned, class, span, &names)?;
+    let prefix = leading(&written);
     let Some((_, argument)) = applied_head(under_prefix(&written)) else {
         return Err(ElabError::ClassHead { span });
     };
@@ -712,51 +713,15 @@ fn declare_instance(
         .iter()
         .map(|(method, ..)| Rc::from(format!("{declared}.{method}").as_str()))
         .collect();
-    for (at, (method, clauses, at_span)) in members.iter().enumerate() {
-        let written = written_head(signature, metas, owned, class, span, &names)?;
-        let prefix = leading(&written);
-        let ty = instance_method(signature, metas, &prefix, &written, method, span, &names)?;
-        // Словарь для **собственной** цели собирается записью из членов:
-        // сослаться на объявляемый инстанс именем нельзя, в сигнатуре его ещё
-        // нет. Член, объявленный ниже, сюда не попадает - тогда рекурсия по
-        // нему и отвергается (решение 2026-08-31).
-        let mut fields = Vec::with_capacity(members.len());
-        for (other, full) in qualified.iter().enumerate() {
-            // У объявляемого сейчас члена аргументы уровня ставит `define`:
-            // рекурсивная ссылка обязана нести те же дырки, что и его тип.
-            let term = if other == at {
-                // Аргументы уровня - **свои же**, те, что обобщение сделает
-                // параметрами. Свежие тут не годятся: связать их с
-                // параметрами определения нечем, ссылка живёт внутри решения
-                // дырки, и `check` в него не заходит.
-                Term::Const(CoreName::from(&**full), own_levels(metas, &ty))
-            } else if let Some(term) = signature.instantiate(full, metas) {
-                term
-            } else {
-                continue;
-            };
-            fields.push((Rc::clone(&members[other].0), term));
-        }
-        let complete = fields.len() == members.len();
-        let declaring = Declaring {
-            class: Rc::clone(&name.text),
-            head: Rc::clone(&argument),
-            prefix: prefix.len(),
-            members: fields,
-        };
-        let pending = Pending {
-            name: Rc::clone(&qualified[at]),
-            ty,
-            source: &class.head,
-            span: *at_span,
-        };
-        let mut known = known(owned, instances);
-        if complete {
-            known.declaring = Some(&declaring);
-        }
-        define(signature, metas, known, None, &pending, clauses, *at_span)?;
-    }
+
+    declare_members(
+        signature, metas, owned, instances, name, &argument, &prefix, &written, &members,
+        &qualified, span, &names,
+    )?;
+
     // Словарь - запись из членов, применённых к своим же связываниям.
+    // Заголовок считается заново: объявление группы освободило дырки, и
+    // прежний уже не жив.
     let written = written_head(signature, metas, owned, class, span, &names)?;
     let prefix = leading(&written);
     let mut object = Vec::with_capacity(superclasses + members.len());
@@ -1030,6 +995,139 @@ fn declare_method(
     signature
         .define_inferred(metas, method, Mult::Many, ty, Some(body))
         .map_err(fail)
+}
+
+/// Члены инстанса - **одной группой**.
+///
+/// Группа нужна затем, что словарь для собственной цели собирается записью из
+/// всех членов сразу: объявляй их по одному, и первый не смог бы пользоваться
+/// собственным инстансом - включая простую саморекурсию. Арность параметров
+/// уровня при этом известна **до** проверки тел: тип члена выводится из класса
+/// и головы, а не из тела, - поэтому она объявляется явно, и предмет §10
+/// вопроса 54 здесь не возникает.
+#[allow(clippy::too_many_arguments)]
+fn declare_members(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    owned: &mut Owned,
+    instances: &Instances,
+    name: &ast::Name,
+    argument: &Symbol,
+    prefix: &[Param],
+    written: &Term,
+    members: &[Written],
+    qualified: &[Symbol],
+    span: Span,
+    names: &Names,
+) -> Result<(), ElabError> {
+    let fail = |error: TypeError| ElabError::Core {
+        span,
+        error: Box::new(error),
+        names: names.clone(),
+    };
+    // Типы всех членов - из одного заголовка, значит с общими дырками уровня.
+    let mut types = Vec::with_capacity(members.len());
+    for (method, ..) in members {
+        types.push(instance_method(
+            signature, metas, prefix, written, method, span, names,
+        )?);
+    }
+    // Обобщение **общее на группу**: члены живут под одним заголовком, и
+    // параметры уровня у них одни и те же. Арность поэтому известна до
+    // проверки тел - в отличие от `mutual`, где она зависит от них (§10
+    // вопрос 54), - и объявляется явно.
+    let mut generalization = Generalization::default();
+    for ty in &types {
+        let zonked = zonk_term(metas, ty);
+        generalization.collect_term(metas, &zonked);
+    }
+    let arity = generalization.arity();
+    let types: Vec<Term> = types
+        .iter()
+        .map(|ty| {
+            let zonked = zonk_term(metas, ty);
+            generalization.apply_term(metas, &zonked)
+        })
+        .collect();
+    let levels: Rc<[Level]> = (0..arity)
+        .map(|index| Level::Var(LevelVar(index)))
+        .collect();
+
+    // Члены видят друг друга: группа - единица объявления (§10 вопрос 50), и
+    // ссылка на соседа законна ещё до того, как он попал в сигнатуру.
+    let visible: Vec<Member> = qualified
+        .iter()
+        .zip(&types)
+        .map(|(name, ty)| Member {
+            name: Rc::clone(name),
+            levels: Rc::clone(&levels),
+            ty: Rc::new(ty.clone()),
+        })
+        .collect();
+    // Словарь для собственной цели - запись из **всех** членов: они уже
+    // названы, и объявятся вместе.
+    let declaring = Declaring {
+        class: Rc::clone(&name.text),
+        head: Rc::clone(argument),
+        prefix: prefix.len(),
+        members: members
+            .iter()
+            .zip(qualified)
+            .map(|((method, ..), full)| {
+                (
+                    Rc::clone(method),
+                    Term::Const(CoreName::from(&**full), Rc::clone(&levels)),
+                )
+            })
+            .collect(),
+    };
+
+    let mut trees = Vec::with_capacity(members.len());
+    for (at, (_, clauses, at_span)) in members.iter().enumerate() {
+        let compiled = {
+            let mut elaborator = Elaborator::with_group(signature, metas, owned, visible.clone())
+                .declaring(&types[at]);
+            clauses
+                .iter()
+                .map(|clause| elaborator.clause(clause))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let tree = compile_traced(signature, metas, &types[at], &compiled).map_err(|error| {
+            ElabError::Clauses {
+                span: *at_span,
+                error: Box::new(error),
+            }
+        })?;
+        class::resolve(
+            signature,
+            metas,
+            instances,
+            Some(&declaring),
+            &tree.term,
+            &types[at],
+            *at_span,
+        )?;
+        trees.push(tree);
+    }
+
+    let mut group: Option<Group> = None;
+    for (at, ty) in types.iter().enumerate() {
+        let member = SigMember::definition(&qualified[at], Mult::Many, ty.clone())
+            .with_body(trees[at].term.clone())
+            .with_arity(arity);
+        group = Some(match group {
+            None => Group::of(member),
+            Some(group) => group.and(member),
+        });
+    }
+    if let Some(group) = group {
+        signature.declare(metas, &group).map_err(fail)?;
+    }
+    for method in qualified {
+        carrier::check(signature, owned, method, span)?;
+    }
+
+    Ok(())
 }
 
 /// Формы объявления, которых язык не несёт, - названные границы среза.
@@ -1857,16 +1955,4 @@ fn self_levels(
     Ok((0..generalization.arity())
         .map(|_| metas.fresh_level())
         .collect())
-}
-
-/// Аргументы уровня, которыми определение ссылается на себя.
-///
-/// Это те же дырки, что обобщение сделает параметрами: ссылка изнутри обязана
-/// нести именно их. Свежие годятся только там, где ссылку строит элаборация -
-/// её терм проверяется, и унификация дырки свяжет; внутри решения другой
-/// дырки проверки нет, и связывать было бы нечем.
-fn own_levels(metas: &mut Metas, ty: &Term) -> Rc<[Level]> {
-    let mut generalization = Generalization::default();
-    generalization.collect_term(metas, &zonk_term(metas, ty));
-    generalization.collected().into()
 }

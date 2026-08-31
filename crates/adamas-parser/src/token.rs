@@ -94,6 +94,8 @@ pub enum TokenKind {
     Equals,
     /// `:`
     Colon,
+    /// `:>` - запечатывающая аннотация модуля (§3.5).
+    Seal,
     /// `|`
     Pipe,
     /// `\`
@@ -191,6 +193,7 @@ impl TokenKind {
             Self::FatArrow => Face::Spelled("=>"),
             Self::Equals => Face::Spelled("="),
             Self::Colon => Face::Spelled(":"),
+            Self::Seal => Face::Spelled(":>"),
             Self::Pipe => Face::Spelled("|"),
             Self::Backslash => Face::Spelled("\\"),
             Self::At => Face::Spelled("@"),

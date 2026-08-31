@@ -417,6 +417,12 @@ pub struct ModuleDecl {
     /// Аннотация сигнатурой: `module IntOrd : Ord where`. У самой сигнатуры её
     /// не бывает.
     pub ascription: Option<Expr>,
+    /// Запечатывает ли аннотация: `:>` против `:` (§3.5).
+    ///
+    /// Проверка и сокрытие - разные операции: первая оставляет представление
+    /// видимым, вторая делает определение непрозрачным. Без аннотации
+    /// запечатывать нечем, и тогда здесь `false`.
+    pub sealed: bool,
     /// Члены в порядке написания: порядок значим, член видит предыдущих (§4.8).
     pub members: Vec<Decl>,
 }
@@ -579,7 +585,7 @@ fn dump_decl(out: &mut String, decl: &Decl, depth: usize) {
             });
             out.push_str(&module.name.text);
             if let Some(ascription) = &module.ascription {
-                out.push_str(" : ");
+                out.push_str(if module.sealed { " :> " } else { " : " });
                 dump_expr(out, ascription);
             }
             for member in &module.members {

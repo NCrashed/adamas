@@ -1108,15 +1108,17 @@ impl<'a> Parser<'a> {
         let signature = self.eat(TokenKind::Type).is_some();
         let name = self.expect(TokenKind::Ident)?;
         let name = self.name_of(name);
-        let ascription = if self.eat(TokenKind::Colon).is_some() {
-            let written = self.expr()?;
-            if self.at(TokenKind::Where) && contains_block(&written) {
-                return Err(self.block_not_last(&written));
-            }
-            Some(written)
-        } else {
-            None
-        };
+        let sealed = self.at(TokenKind::Seal);
+        let ascription =
+            if self.eat(TokenKind::Colon).is_some() || self.eat(TokenKind::Seal).is_some() {
+                let written = self.expr()?;
+                if self.at(TokenKind::Where) && contains_block(&written) {
+                    return Err(self.block_not_last(&written));
+                }
+                Some(written)
+            } else {
+                None
+            };
         let mut end = ascription.as_ref().map_or(name.span, |it| it.span);
         let mut members = Vec::new();
         if self.eat(TokenKind::Where).is_some() {
@@ -1130,6 +1132,7 @@ impl<'a> Parser<'a> {
                 signature,
                 name,
                 ascription,
+                sealed,
                 members,
             }),
             span: start.merge(end),

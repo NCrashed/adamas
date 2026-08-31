@@ -381,6 +381,7 @@ fn symbol(cursor: &mut Cursor<'_>) -> TokenKind {
         "=>" => TokenKind::FatArrow,
         "=" => TokenKind::Equals,
         ":" => TokenKind::Colon,
+        ":>" => TokenKind::Seal,
         "|" => TokenKind::Pipe,
         "\\" => TokenKind::Backslash,
         "@" => TokenKind::At,

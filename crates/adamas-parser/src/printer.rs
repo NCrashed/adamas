@@ -244,7 +244,7 @@ impl Printer {
         });
         self.decl_name(&module.name);
         if let Some(ascription) = &module.ascription {
-            self.push(" : ");
+            self.push(if module.sealed { " :> " } else { " : " });
             self.expr(ascription, Prec::Lowest);
         }
         self.push(" where");

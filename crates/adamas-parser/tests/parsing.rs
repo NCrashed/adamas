@@ -488,3 +488,14 @@ module Outer where
 ";
     insta::assert_snapshot!(tree(text).expect("разбор удался"));
 }
+
+#[test]
+fn a_sealing_ascription_parses() {
+    // §3.5: `:` и `:>` - разные операции, и разбор их различает. `:>` -
+    // отдельная лексема, а не оператор: символьный кусок берётся максимальным,
+    // и `: >` слиплось бы в неё же.
+    assert_eq!(
+        tree("module M :> S where\n  flag : Bool\n").expect("разбор удался"),
+        "(module M :> S\n  (sig flag Bool))\n"
+    );
+}

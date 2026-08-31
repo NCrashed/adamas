@@ -322,6 +322,9 @@ fn decl_at<'a>(decl: &'a Decl, depth: u32, pending: &mut Pending<'a>) -> Result<
         DeclKind::Class(class) => {
             let inner = deepen(depth, 1, decl.span)?;
             pending.push((Node::Expr(&class.head), depth));
+            for superclass in &class.superclasses {
+                pending.push((Node::Expr(superclass), depth));
+            }
             for member in &class.members {
                 decl_at(member, inner, pending)?;
             }

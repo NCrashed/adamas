@@ -75,6 +75,9 @@ impl Spans<'_> {
             }
             DeclKind::Class(class) => {
                 self.expr(at, &class.head);
+                for superclass in &class.superclasses {
+                    self.expr(at, superclass);
+                }
                 for member in &class.members {
                     self.decl(at, member);
                 }

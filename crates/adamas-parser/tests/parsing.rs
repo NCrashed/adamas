@@ -532,3 +532,16 @@ fn a_constraint_context_is_a_group_of_implicit_binders() {
         "(sig same (pi ({_ : (Eqv a)}) (-> a Bool)))\n"
     );
 }
+
+#[test]
+fn a_class_carries_superclasses_and_defaults() {
+    // §4.1: `when` перечисляет суперклассы через запятую, одним clause на все.
+    // Умолчание - обычные клаузы рядом с сигнатурой.
+    let text = "\
+class Ord a when Eqv a, Show a where
+  cmp : a -> a -> Bool
+  gt : a -> a -> Bool
+  gt x y = cmp y x
+";
+    insta::assert_snapshot!(tree(text).expect("разбор удался"));
+}

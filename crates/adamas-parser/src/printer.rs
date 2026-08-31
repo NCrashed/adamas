@@ -210,6 +210,10 @@ impl Printer {
                     "class "
                 });
                 self.expr(&class.head, Prec::Lowest);
+                for (index, superclass) in class.superclasses.iter().enumerate() {
+                    self.push(if index == 0 { " when " } else { ", " });
+                    self.expr(superclass, Prec::Lowest);
+                }
                 self.push(" where");
                 self.block_of(&class.members, Self::decl);
             }

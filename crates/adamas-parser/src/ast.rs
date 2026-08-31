@@ -418,6 +418,12 @@ pub struct ClassDecl {
     pub instance: bool,
     /// Голова: имя класса, применённое к аргументам.
     pub head: Expr,
+    /// Суперклассы: `class Ord a when Eqv a where …` (§4.1).
+    ///
+    /// Словарь суперкласса - поле словаря класса, разряжаемое в точке
+    /// объявления инстанса (§3.5). У инстанса этот список пуст: контекст ему
+    /// пишется головой, а не `when`.
+    pub superclasses: Vec<Expr>,
     /// Члены: сигнатуры методов у класса, клаузы у инстанса.
     pub members: Vec<Decl>,
 }
@@ -597,6 +603,10 @@ fn dump_class(out: &mut String, class: &ClassDecl, depth: usize) {
         "(class "
     });
     dump_expr(out, &class.head);
+    for superclass in &class.superclasses {
+        out.push_str(" when ");
+        dump_expr(out, superclass);
+    }
     for member in &class.members {
         out.push('\n');
         out.push_str(&"  ".repeat(depth + 1));

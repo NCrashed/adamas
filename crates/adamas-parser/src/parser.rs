@@ -1180,6 +1180,20 @@ impl<'a> Parser<'a> {
             return Err(self.block_not_last(&head));
         }
         let mut end = head.span;
+        // `when` перечисляет суперклассы через запятую: `class Ord a when
+        // Eqv a, Show a where …`. Один clause на все, а не keyword на каждый
+        // (§4.1, решение 2026-05-11).
+        let mut superclasses = Vec::new();
+        if self.eat(TokenKind::When).is_some() {
+            loop {
+                let written = self.expr()?;
+                end = written.span;
+                superclasses.push(written);
+                if self.eat(TokenKind::Comma).is_none() {
+                    break;
+                }
+            }
+        }
         let mut members = Vec::new();
         if self.eat(TokenKind::Where).is_some() {
             self.expect(TokenKind::Open)?;
@@ -1191,6 +1205,7 @@ impl<'a> Parser<'a> {
             kind: DeclKind::Class(ClassDecl {
                 instance,
                 head,
+                superclasses,
                 members,
             }),
             span: start.merge(end),

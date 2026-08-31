@@ -59,9 +59,10 @@ use std::rc::Rc;
 use adamas_core::source::Span;
 
 use crate::ast::{
-    Alt, Binder, Binding, Block, Chain, Clause, Constructor, Data, Decl, DeclKind, Expr, ExprKind,
-    LamParam, LamParamKind, Lit, LitKind, Module, ModuleDecl, Mult, MultAnn, Name, Pattern,
-    PatternKind, RecordField, Resource, Stmt, StmtKind, Symbol, Visibility, contains_block,
+    Alt, Binder, Binding, Block, Chain, ClassDecl, Clause, Constructor, Data, Decl, DeclKind, Expr,
+    ExprKind, LamParam, LamParamKind, Lit, LitKind, Module, ModuleDecl, Mult, MultAnn, Name,
+    Pattern, PatternKind, RecordField, Resource, Stmt, StmtKind, Symbol, Visibility,
+    contains_block,
 };
 use crate::token::{Token, TokenKind};
 
@@ -460,8 +461,7 @@ impl<'a> Parser<'a> {
     fn unsupported_here(&self) -> Option<ParseError> {
         let token = self.peek();
         let what = match token.kind {
-            TokenKind::Class | TokenKind::Coherent | TokenKind::When => Unsupported::Class,
-            TokenKind::Instance => Unsupported::Instance,
+            TokenKind::Coherent | TokenKind::When => Unsupported::Class,
             TokenKind::Using => Unsupported::NamedInstance,
             TokenKind::Import => Unsupported::Import,
             TokenKind::Mutual => Unsupported::Mutual,
@@ -552,6 +552,7 @@ impl<'a> Parser<'a> {
             TokenKind::Resource => self.resource(),
             TokenKind::Type => self.alias(),
             TokenKind::Module => self.module_decl(),
+            TokenKind::Class | TokenKind::Instance => self.class_decl(),
             TokenKind::Ident | TokenKind::LParen => self.signature_or_clause(),
             _ => Err(self
                 .unsupported_here()
@@ -1097,6 +1098,37 @@ impl<'a> Parser<'a> {
     /// присваивает, а голое имя - punning, то есть `x = x`. Смешивать нельзя:
     /// запись либо тип, либо значение, и половина каждого была бы ни тем ни
     /// другим.
+    /// `class Ord a where …` и `instance Ord Int where …` (§4.1, §3.5).
+    ///
+    /// Голова разбирается **выражением**: `Ord a` и `Ord Int` - применения, и
+    /// различать их формой разбора незачем. Что аргумент значит - связываемый
+    /// параметр или написанный тип, - решает элаборация по тому, класс это
+    /// или инстанс.
+    fn class_decl(&mut self) -> Result<Decl, ParseError> {
+        let start = self.peek().span;
+        let instance = self.bump().kind == TokenKind::Instance;
+        let head = self.expr()?;
+        if self.at(TokenKind::Where) && contains_block(&head) {
+            return Err(self.block_not_last(&head));
+        }
+        let mut end = head.span;
+        let mut members = Vec::new();
+        if self.eat(TokenKind::Where).is_some() {
+            self.expect(TokenKind::Open)?;
+            members = self.members(TokenKind::Close, Self::decl)?;
+            self.expect(TokenKind::Close)?;
+            end = members.last().map_or(end, |last| last.span);
+        }
+        Ok(Decl {
+            kind: DeclKind::Class(ClassDecl {
+                instance,
+                head,
+                members,
+            }),
+            span: start.merge(end),
+        })
+    }
+
     /// `module M [: S] where …` и `module type S where …` (§4.8).
     ///
     /// Обе формы разбираются одной: различает их `type` сразу за `module`, а

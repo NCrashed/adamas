@@ -73,6 +73,12 @@ impl Spans<'_> {
                     self.clause(at, clause);
                 }
             }
+            DeclKind::Class(class) => {
+                self.expr(at, &class.head);
+                for member in &class.members {
+                    self.decl(at, member);
+                }
+            }
             DeclKind::Module(module) => {
                 self.name(at, &module.name);
                 for param in &module.params {

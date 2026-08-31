@@ -399,8 +399,27 @@ pub enum DeclKind {
     Data(Data),
     /// Модуль или его сигнатура: `module M where …` (§4.8).
     Module(ModuleDecl),
+    /// Класс или инстанс: `class Ord a where …` (§4.1, §3.5).
+    Class(ClassDecl),
     /// Ресурсный тип: `resource File where drop h = …` (§3.3).
     Resource(Resource),
+}
+
+/// Класс или его инстанс.
+///
+/// Одна структура на обе формы: по §3.5 класс есть module type плюс режим
+/// разрешения, а инстанс - его module value, и различает их `instance`.
+/// Голова написана применением - `Ord a` у класса, `Ord Int` у инстанса, -
+/// потому что разбирается она одинаково, а смысл аргументу придаёт форма:
+/// у класса это связываемый параметр, у инстанса написанный тип.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClassDecl {
+    /// `instance Ord Int where` против `class Ord a where`.
+    pub instance: bool,
+    /// Голова: имя класса, применённое к аргументам.
+    pub head: Expr,
+    /// Члены: сигнатуры методов у класса, клаузы у инстанса.
+    pub members: Vec<Decl>,
 }
 
 /// Модуль или сигнатура модуля.
@@ -570,6 +589,22 @@ fn line(out: &mut String, depth: usize) {
     }
 }
 
+/// Класс или инстанс: `(class (Eqv a) (sig eq …))`.
+fn dump_class(out: &mut String, class: &ClassDecl, depth: usize) {
+    out.push_str(if class.instance {
+        "(instance "
+    } else {
+        "(class "
+    });
+    dump_expr(out, &class.head);
+    for member in &class.members {
+        out.push('\n');
+        out.push_str(&"  ".repeat(depth + 1));
+        dump_decl(out, member, depth + 1);
+    }
+    out.push(')');
+}
+
 /// Печатает объявление без завершающего перевода строки: где его ставить,
 /// решает вызывающий - вложенное объявление продолжается скобкой.
 fn dump_decl(out: &mut String, decl: &Decl, depth: usize) {
@@ -583,6 +618,7 @@ fn dump_decl(out: &mut String, decl: &Decl, depth: usize) {
             }
             out.push(')');
         }
+        DeclKind::Class(class) => dump_class(out, class, depth),
         DeclKind::Module(module) => {
             out.push_str(if module.signature {
                 "(module-type "

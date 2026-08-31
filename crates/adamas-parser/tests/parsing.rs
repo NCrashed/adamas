@@ -300,11 +300,7 @@ fn forms_of_later_phases_name_their_phase() {
     // Лексема зарезервирована и опечаткой быть не может, поэтому честнее
     // назвать фазу, чем перечислять, что бывает здесь вместо неё.
     let cases = [
-        ("class Functor f where\n  map : a\n", Unsupported::Class),
-        (
-            "instance Functor Option where\n  map = f\n",
-            Unsupported::Instance,
-        ),
+        ("coherent class Key a\n", Unsupported::Class),
         ("effect State s where\n  get : s\n", Unsupported::Effect),
         // Effect row и запись пишутся одними скобками, а различает их регистр
         // (§4.1): метка ряда заглавная, поле записи строчное.
@@ -509,6 +505,19 @@ module OrderedMap (Key : Ord) where
   empty : Map
 
 module IntMap = OrderedMap IntOrd
+";
+    insta::assert_snapshot!(tree(text).expect("разбор удался"));
+}
+
+#[test]
+fn a_class_and_its_instance_parse() {
+    // §4.1: голова разбирается выражением, различает формы только keyword.
+    let text = "\
+class Eqv a where
+  eq : a -> a -> Bool
+
+instance Eqv Nat where
+  eq a b = True
 ";
     insta::assert_snapshot!(tree(text).expect("разбор удался"));
 }

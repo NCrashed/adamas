@@ -203,6 +203,16 @@ impl Printer {
             }
             DeclKind::Data(data) => self.data(data),
             DeclKind::Module(module) => self.module_decl(module),
+            DeclKind::Class(class) => {
+                self.push(if class.instance {
+                    "instance "
+                } else {
+                    "class "
+                });
+                self.expr(&class.head, Prec::Lowest);
+                self.push(" where");
+                self.block_of(&class.members, Self::decl);
+            }
             DeclKind::Resource(resource) => self.resource(resource),
         }
     }

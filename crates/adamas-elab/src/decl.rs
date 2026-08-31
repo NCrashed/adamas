@@ -267,6 +267,18 @@ fn declare_module(
 ) -> Result<(), ElabError> {
     let declared = qualify(within, &module.name.text);
     if module.signature {
+        // Аннотация у сигнатуры бессмысленна: она сама и есть интерфейс,
+        // проверять её против другого - отдельная операция (уточнение
+        // сигнатуры), и её в языке пока нет.
+        if module.ascription.is_some() {
+            return Err(ElabError::ModuleMember {
+                name: Rc::clone(&module.name.text),
+                what: "сигнатуре модуля",
+                why: "аннотация проверяет модуль против интерфейса, а сигнатура \
+                      интерфейсом и является",
+                span,
+            });
+        }
         return declare_module_type(signature, metas, owned, &declared, module, span);
     }
     members_into(&module.members, Some(&declared), signature, metas, owned)?;
@@ -316,8 +328,18 @@ fn declare_module(
         })?;
         quote(0, &ty)
     };
+    // Запечатывание - свойство определения, а не значения (§3.5): тело
+    // остаётся, а сравнение перестаёт его разворачивать. Без аннотации
+    // запечатывать нечего - скрывать было бы от чего, но нечем.
     signature
-        .define_inferred(metas, &declared, Mult::Many, ty, Some(object))
+        .define_opaque(
+            metas,
+            &declared,
+            Mult::Many,
+            ty,
+            Some(object),
+            module.sealed,
+        )
         .map_err(|error| ElabError::Core {
             span,
             error: Box::new(error),

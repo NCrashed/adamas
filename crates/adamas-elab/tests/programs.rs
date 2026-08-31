@@ -2331,3 +2331,68 @@ fn a_signature_carries_no_implementations() {
         );
     }
 }
+
+#[test]
+fn sealing_hides_the_representation() {
+    // §3.5: `:` проверяет, `:>` проверяет и запечатывает. Запечатанное
+    // определение ядро не разворачивает, поэтому `Sealed.T` снаружи - атом, а
+    // не `Nat`, и значение своего представления под него не подходит.
+    let text = "
+module type Counter where
+  type T
+  start : T
+
+module Clear : Counter where
+  type T = Nat
+  start : T
+  start = Zero
+
+module Hidden :> Counter where
+  type T = Nat
+  start : T
+  start = Zero
+";
+    // Незапечатанный прозрачен: представление видно, и `Zero` подходит.
+    program(&format!(
+        "{BASE}{text}
+seen : Clear.T
+seen = Zero
+"
+    ));
+    // Запечатанный - нет, и пользоваться им можно только через его же члены.
+    program(&format!(
+        "{BASE}{text}
+carried : Hidden.T
+carried = Hidden.start
+"
+    ));
+    let error = refused(&format!(
+        "{BASE}{text}
+leaked : Hidden.T
+leaked = Zero
+"
+    ));
+    assert!(
+        matches!(error, ElabError::Core { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_signature_takes_no_ascription() {
+    // Аннотация проверяет модуль против интерфейса, а сигнатура интерфейсом и
+    // является. Уточнение сигнатуры - отдельная операция, и её пока нет.
+    let error = refused(&format!(
+        "{BASE}
+module type A where
+  flag : Bool
+
+module type B : A where
+  flag : Bool
+"
+    ));
+    assert!(
+        matches!(error, ElabError::ModuleMember { .. }),
+        "получено {error:?}"
+    );
+}

@@ -34,7 +34,7 @@ use crate::error::{ElabError, Names};
 use adamas_core::value::Value;
 
 use crate::class::{self, Class, Declaring, Instances};
-use crate::expr::{Elaborator, Enclosing, Member, Param};
+use crate::expr::{Elaborator, Enclosing, Member, Param, WrittenField};
 use crate::own::{Owned, Ownership};
 use crate::route::{self, Declared};
 
@@ -153,13 +153,12 @@ fn written_alias(
     owned: &Owned,
     instances: &Instances,
     within: Option<&Enclosing<'_>>,
-    name: &ast::Name,
-    body: Option<&ast::Expr>,
+    written: &WrittenAlias<'_>,
     span: Span,
 ) -> Result<(), ElabError> {
-    let Some(body) = body else {
+    let Some(body) = written.body else {
         return Err(ElabError::AbstractType {
-            name: Rc::clone(&name.text),
+            name: Rc::clone(&written.name.text),
             span,
         });
     };
@@ -168,10 +167,38 @@ fn written_alias(
         metas,
         known(owned, instances),
         within,
-        name,
-        body,
+        &Aliased {
+            name: written.name,
+            params: written.params,
+            body,
+        },
         span,
     )
+}
+
+/// Написанный алиас: имя, параметры и тело.
+///
+/// `body` - `None` у абстрактного типового члена, и законна такая форма
+/// только в сигнатуре модуля.
+#[derive(Clone, Copy)]
+struct WrittenAlias<'a> {
+    /// Имя.
+    name: &'a ast::Name,
+    /// Параметры: `type Twice a = …`.
+    params: &'a [ast::Binder],
+    /// Что алиас называет.
+    body: Option<&'a ast::Expr>,
+}
+
+/// То же с телом, которое уже есть: алиас, а не абстрактный член.
+#[derive(Clone, Copy)]
+struct Aliased<'a> {
+    /// Имя.
+    name: &'a ast::Name,
+    /// Параметры.
+    params: &'a [ast::Binder],
+    /// Что алиас называет.
+    body: &'a ast::Expr,
 }
 
 /// Разбирает атрибуты сигнатуры: что из них требует проверки (§4.7).
@@ -358,7 +385,7 @@ fn members_into(
             // Алиас: `Point : Type` не годится - `Type` обобщается в `∀u`, а
             // тело живёт в конкретном универсуме. Тип поэтому не пишется, а
             // считается по телу.
-            DeclKind::Alias { name, body } => {
+            DeclKind::Alias { name, params, body } => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
                 written_alias(
                     signature,
@@ -366,8 +393,11 @@ fn members_into(
                     owned,
                     instances,
                     within,
-                    name,
-                    body.as_ref(),
+                    &WrittenAlias {
+                        name,
+                        params,
+                        body: body.as_ref(),
+                    },
                     decl.span,
                 )?;
             }
@@ -440,14 +470,19 @@ fn alias(
     metas: &mut Metas,
     known: Known<'_>,
     within: Option<&Enclosing<'_>>,
-    name: &ast::Name,
-    body: &ast::Expr,
+    written: &Aliased<'_>,
     span: Span,
 ) -> Result<(), ElabError> {
+    let (name, body) = (written.name, written.body);
     let declared = qualify(within, &name.text);
     let names = Names::of(&declared, Vec::new());
     let mut elaborator = Elaborator::new(signature, metas, known.owned).within(within);
-    let params = elaborator.telescope(params_of(within), true)?;
+    // Связывания двух родов и в одном телескопе: сперва параметры функтора,
+    // потом свои. Написанный параметр живёт под функторными - его тип вправе
+    // их упоминать, - поэтому и элаборируются они одной последовательностью.
+    let outer = elaborator.telescope(params_of(within), true)?;
+    let owned_params = elaborator.beneath(&outer, |it| it.telescope(written.params, false))?;
+    let params: Vec<Param> = outer.iter().chain(owned_params.iter()).cloned().collect();
     // Тело и его сорт считаются **под параметрами**: тип члена функтора живёт
     // под ними, и в пустом контексте считать его нечем.
     let (term, level) = elaborator.beneath(&params, |it| {
@@ -460,9 +495,13 @@ fn alias(
         Ok((term, level))
     })?;
     let sort = Term::Universe(metas.zonk(&level));
+    // Функторные связывания implicit - их подставляет вставка, - а свои
+    // explicit: `Twice Nat` автор пишет сам.
     let ty = Elaborator::new(signature, metas, known.owned)
         .within(within)
-        .wrapped(&params, true, |_| Ok(sort))?;
+        .wrapped(&outer, true, |it| {
+            it.wrapped(&owned_params, false, |_| Ok(sort))
+        })?;
     let wrapped_body = abstracted(&params, term);
     class::resolve(
         signature,
@@ -703,44 +742,16 @@ fn declare_class(
         ..Class::default()
     };
     for (index, superclass) in class.superclasses.iter().enumerate() {
-        members.push((
-            ast::Name {
+        members.push(WrittenField {
+            name: ast::Name {
                 text: Rc::from(format!("#super{index}").as_str()),
                 span: superclass.span,
             },
-            Some(superclass),
-        ));
+            params: &[],
+            ty: Some(superclass),
+        });
     }
-    for member in &class.members {
-        match &member.kind {
-            DeclKind::Signature { name, ty, .. } => {
-                members.push((name.clone(), Some(ty)));
-                info.methods.push(Rc::clone(&name.text));
-            }
-            // Умолчание хранится написанным: тело его зовёт другие методы того
-            // же класса, а словарь для них объявляет инстанс. Раскрывается оно
-            // поэтому там, где этот словарь и собирается.
-            DeclKind::Clauses { name, clauses } => {
-                if !info.methods.contains(&name.text) {
-                    return Err(ElabError::MissingSignature {
-                        name: Rc::clone(&name.text),
-                        span: member.span,
-                    });
-                }
-                info.defaults.insert(Rc::clone(&name.text), clauses.clone());
-            }
-            _ => {
-                return Err(ElabError::ModuleMember {
-                    name: member_name(member)
-                        .cloned()
-                        .unwrap_or_else(|| Rc::from("_")),
-                    what: "классе",
-                    why: "класс несёт сигнатуры методов и умолчания к ним",
-                    span: member.span,
-                });
-            }
-        }
-    }
+    class_members(class, &mut info, &mut members)?;
     let names = Names::of(&name.text, Vec::new());
     // Класс - **функция** от своих параметров в тип записи, а не сам тип:
     // `Eqv Nat` есть применение. Отсюда тело лямбдой, а тип - `Pi` над
@@ -876,6 +887,52 @@ fn declare_instance(
     signature
         .define_inferred(metas, &declared, Mult::Many, written, Some(object))
         .map_err(fail)
+}
+
+/// Члены класса: сигнатуры методов в поля, умолчания - в реестр.
+///
+/// Поля суперклассов уже сложены вызывающим, поэтому список приходит
+/// непустым, а не собирается здесь с нуля.
+fn class_members<'a>(
+    class: &'a ast::ClassDecl,
+    info: &mut Class,
+    members: &mut Vec<WrittenField<'a>>,
+) -> Result<(), ElabError> {
+    for member in &class.members {
+        match &member.kind {
+            DeclKind::Signature { name, ty, .. } => {
+                members.push(WrittenField {
+                    name: name.clone(),
+                    params: &[],
+                    ty: Some(ty),
+                });
+                info.methods.push(Rc::clone(&name.text));
+            }
+            // Умолчание хранится написанным: тело его зовёт другие методы того
+            // же класса, а словарь для них объявляет инстанс. Раскрывается оно
+            // поэтому там, где этот словарь и собирается.
+            DeclKind::Clauses { name, clauses } => {
+                if !info.methods.contains(&name.text) {
+                    return Err(ElabError::MissingSignature {
+                        name: Rc::clone(&name.text),
+                        span: member.span,
+                    });
+                }
+                info.defaults.insert(Rc::clone(&name.text), clauses.clone());
+            }
+            _ => {
+                return Err(ElabError::ModuleMember {
+                    name: member_name(member)
+                        .cloned()
+                        .unwrap_or_else(|| Rc::from("_")),
+                    what: "классе",
+                    why: "класс несёт сигнатуры методов и умолчания к ним",
+                    span: member.span,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Условия пригодности `coherent` (§3.5), проверяемые на объявлении инстанса.
@@ -1634,10 +1691,22 @@ fn declare_module_type(
     let mut members = Vec::with_capacity(module.members.len());
     for member in &module.members {
         match &member.kind {
-            DeclKind::Signature { name, ty, .. } => members.push((name.clone(), Some(ty))),
+            DeclKind::Signature { name, ty, .. } => members.push(WrittenField {
+                name: name.clone(),
+                params: &[],
+                ty: Some(ty),
+            }),
             // Абстрактный типовой член. Уравнение здесь - полупрозрачная
             // сигнатура (§10 вопрос 46), и её в языке пока нет.
-            DeclKind::Alias { name, body: None } => members.push((name.clone(), None)),
+            DeclKind::Alias {
+                name,
+                params,
+                body: None,
+            } => members.push(WrittenField {
+                name: name.clone(),
+                params,
+                ty: None,
+            }),
             DeclKind::Alias { name, .. } => {
                 return Err(ElabError::ModuleMember {
                     name: Rc::clone(&name.text),
@@ -1663,9 +1732,8 @@ fn declare_module_type(
             }
         }
     }
-    let borrowed: Vec<(ast::Name, Option<&ast::Expr>)> = members;
     let fields =
-        Elaborator::new(signature, metas, owned).typing(|it| it.module_members(&borrowed))?;
+        Elaborator::new(signature, metas, owned).typing(|it| it.module_members(&members))?;
     let record = Term::Record(Fields::closed(fields.into()));
     let names = Names::of(declared, Vec::new());
     let level = is_type(&Ctx::new(signature), metas, &record).map_err(|error| ElabError::Core {

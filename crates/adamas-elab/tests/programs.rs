@@ -3233,3 +3233,69 @@ instance Eqv Alias where
         "получено {error:?}"
     );
 }
+
+#[test]
+fn a_type_alias_takes_parameters() {
+    // §4.1: алиас с параметрами - типовая функция. Пишутся они теми же
+    // формами, что у семейства, и означают то же.
+    program(&format!(
+        "{BASE}
+data Pair (a : Type) (b : Type) where
+  Both : a -> b -> Pair a b
+
+type Twice a = Pair a a
+
+type Endo (a : Type) = a -> a
+
+pair : Twice Nat
+pair = Both Zero (Succ Zero)
+
+same : Endo Bool
+same x = x
+"
+    ));
+}
+
+#[test]
+fn an_abstract_type_member_takes_parameters() {
+    // §4.8: абстрактный типовой член с параметрами - объявление типовой
+    // функции. Аннотация `:` представление оставляет видимой, поэтому
+    // `Clear.Bag Bool` разворачивается до написанного.
+    program(&format!(
+        "{BASE}
+module type BagSig where
+  type Bag (a : Type)
+  empty : {{a : Type}} -> Bag a
+
+module Clear : BagSig where
+  type Bag (a : Type) = a -> Bool
+  empty : {{a : Type}} -> Bag a
+  empty x = False
+
+seen : Bool -> Bool
+seen x = Clear.empty x
+"
+    ));
+}
+
+#[test]
+fn a_sealed_parametrised_member_hides_its_representation() {
+    // `:>` запечатывает: снаружи `Bag a` - абстрактный тип, а не своё
+    // представление, и число параметров этому ничего не меняет.
+    let error = refused(&format!(
+        "{BASE}
+module type BagSig where
+  type Bag (a : Type)
+  empty : {{a : Type}} -> Bag a
+
+module Sealed :> BagSig where
+  type Bag (a : Type) = a -> Bool
+  empty : {{a : Type}} -> Bag a
+  empty x = False
+
+hidden : Bool -> Bool
+hidden x = Sealed.empty x
+"
+    ));
+    assert!(error.to_string().contains("Bag"), "получено {error:?}");
+}

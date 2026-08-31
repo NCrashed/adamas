@@ -161,11 +161,25 @@ impl Enclosing<'_> {
     }
 }
 
+/// Член сигнатуры модуля или класса, как он написан.
+///
+/// Параметры несёт только абстрактный типовой член: у члена с написанным
+/// типом их нет и быть не может - тип там пишется целиком.
+pub(crate) struct WrittenField<'a> {
+    /// Имя поля.
+    pub name: ast::Name,
+    /// Параметры абстрактного типового члена: `type Bag (a : Type)`.
+    pub params: &'a [ast::Binder],
+    /// Написанный тип. `None` - абстрактный типовой член.
+    pub ty: Option<&'a Expr>,
+}
+
 /// Параметр семейства - уже элаборированный.
 ///
 /// Живёт отдельно от [`ast::Binder`], потому что переиспользуется: kind и все
 /// конструкторы обязаны нести один и тот же телескоп, а элаборация написанного
 /// дважды дала бы два разных набора дырок уровня.
+#[derive(Clone)]
 pub(crate) struct Param {
     /// Кратность параметра - написанная либо `ω` по умолчанию (§4.1).
     pub mult: Mult,
@@ -1548,21 +1562,28 @@ impl<'a> Elaborator<'a> {
     /// какой универсум ему достанется, решает тот, кто сигнатуру реализует.
     pub(crate) fn module_members(
         &mut self,
-        members: &[(ast::Name, Option<&Expr>)],
+        members: &[WrittenField<'_>],
     ) -> Result<Vec<CoreField>, ElabError> {
-        let Some(((name, written), rest)) = members.split_first() else {
+        let Some((first, rest)) = members.split_first() else {
             return Ok(Vec::new());
         };
-        let ty = match written {
-            Some(written) => self.typing(|it| it.expr(written, Mult::Many))?,
-            None => Term::Universe(self.metas.fresh_level()),
+        let ty = if let Some(written) = first.ty {
+            self.typing(|it| it.expr(written, Mult::Many))?
+        } else {
+            // Абстрактный типовой член: тип его - сорт, а с параметрами -
+            // телескоп по ним, оканчивающийся сортом. Написать этот телескоп
+            // сигнатурой нельзя по той же причине, по какой не пишется алиас:
+            // конкретный универсум в поверхностном языке не выражается.
+            let params = self.telescope(first.params, false)?;
+            let level = self.metas.fresh_level();
+            self.wrapped(&params, false, |_| Ok(Term::Universe(level)))?
         };
         let bound = self.typed(&ty);
-        let tail = self.binding(Bound::visible(&name.text, Mult::One, bound), |it| {
+        let tail = self.binding(Bound::visible(&first.name.text, Mult::One, bound), |it| {
             it.module_members(rest)
         })?;
         let head = CoreField {
-            name: CoreName::from(&*name.text),
+            name: CoreName::from(&*first.name.text),
             mult: Mult::One,
             ty: Rc::new(ty),
         };

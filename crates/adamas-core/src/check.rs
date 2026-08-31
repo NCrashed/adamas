@@ -438,11 +438,32 @@ pub fn check_closed_with(
     term: &Term,
     ty: &Term,
 ) -> Result<(), TypeError> {
-    let ctx = Ctx::new(signature);
-    framed(is_type(&ctx, metas, ty), Frame::Stated)?;
-    let ty_value = ctx.eval(ty);
-    check(&ctx, metas, Mult::One, term, &ty_value)?;
+    check_within(&Ctx::new(signature), metas, term, ty)?;
     no_unsolved(metas, term)
+}
+
+/// То же в написанном контексте, а не в пустом, и **без** запрета на
+/// нерешённые дырки.
+///
+/// Нужно телу функтора (§4.8): оно живёт под его параметрами и замкнутым не
+/// бывает, а нерешённая дырка уровня там - будущий параметр уровня самого
+/// определения, и отвергать её здесь значило бы отвергать всякий полиморфный
+/// функтор. Окончательный запрет ставит объявление, где обобщение уже
+/// случилось.
+///
+/// # Errors
+///
+/// Написанное не является типом; терм ему не соответствует.
+pub fn check_within(
+    ctx: &Ctx<'_>,
+    metas: &mut Metas,
+    term: &Term,
+    ty: &Term,
+) -> Result<(), TypeError> {
+    framed(is_type(ctx, metas, ty), Frame::Stated)?;
+    let ty_value = ctx.eval(ty);
+    check(ctx, metas, Mult::One, term, &ty_value)?;
+    Ok(())
 }
 
 /// Синтезирует тип замкнутого терма и читает его обратно в терм.

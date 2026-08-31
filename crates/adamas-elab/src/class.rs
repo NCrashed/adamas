@@ -93,7 +93,7 @@ pub fn resolve(
     signature: &Signature,
     metas: &mut Metas,
     instances: &Instances,
-    declaring: Option<&Declaring<'_>>,
+    declaring: Option<&Declaring>,
     term: &Term,
     ty: &Term,
     span: Span,
@@ -109,7 +109,22 @@ pub fn resolve(
     // И тело, и тип: словарь стоит в обоих - `witnessed : Wit (eq Zero Zero)`
     // несёт его в написанном типе, а не в теле.
     settle(signature, metas, instances, declaring, ty, span)?;
-    settle(signature, metas, instances, declaring, term, span)
+    settle(signature, metas, instances, declaring, term, span)?;
+    // Проверка ещё раз - по решениям, которые поиск только что вставил. Их
+    // собственные аргументы уровня иначе не свяжет никто: `infer` у дырки
+    // читает объявленный тип, а не решение, и уровень рекурсивной ссылки
+    // остался бы нерешённым до самого объявления.
+    // По **зонканному**: решение живёт внутри дырки, а `infer` у дырки читает
+    // объявленный тип, не решение. Пока решение не подставлено, его
+    // собственные аргументы уровня не связывает никто.
+    let zonked = zonk_term(metas, term);
+    let _ = adamas_core::check::check_within(
+        &adamas_core::ctx::Ctx::new(signature),
+        metas,
+        &zonked,
+        ty,
+    );
+    Ok(())
 }
 
 /// Заполняет словари по уже проверенному терму.
@@ -117,7 +132,7 @@ fn settle(
     signature: &Signature,
     metas: &mut Metas,
     instances: &Instances,
-    declaring: Option<&Declaring<'_>>,
+    declaring: Option<&Declaring>,
     term: &Term,
     span: Span,
 ) -> Result<(), ElabError> {
@@ -296,8 +311,8 @@ fn normalized(signature: &Signature, ty: &Term) -> Term {
 /// Ссылаться на него именем нельзя - в сигнатуре его ещё нет, - поэтому
 /// словарь собирается записью из членов. Самореференция члена при этом
 /// обычная: он объявляется определением и видит себя (решение 2026-08-31).
-#[derive(Debug)]
-pub struct Declaring<'a> {
+#[derive(Clone, Debug)]
+pub struct Declaring {
     /// Имя класса.
     pub class: Symbol,
     /// Голова аргумента.
@@ -305,10 +320,10 @@ pub struct Declaring<'a> {
     /// Сколько ведущих связываний у словаря: столько же у каждого члена.
     pub prefix: usize,
     /// Члены: короткое имя поля и терм, которым член берётся.
-    pub members: &'a [(Symbol, Term)],
+    pub members: Vec<(Symbol, Term)>,
 }
 
-impl Declaring<'_> {
+impl Declaring {
     /// Про этот ли инстанс цель.
     fn matches(&self, class: &Symbol, head: &Symbol) -> bool {
         self.class == *class && self.head == *head
@@ -326,7 +341,7 @@ impl Declaring<'_> {
             return None;
         }
         let mut written = Vec::with_capacity(self.members.len());
-        for (field, member) in self.members {
+        for (field, member) in &self.members {
             let mut term = member.clone();
             for position in 0..self.prefix {
                 let index = u32::try_from(size - 1 - position).ok()?;

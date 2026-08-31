@@ -113,7 +113,7 @@ struct Known<'a> {
     instances: &'a Instances,
     /// Инстанс, который объявляется прямо сейчас: сослаться на него именем
     /// нельзя, и словарь для него собирается записью из членов.
-    declaring: Option<&'a Declaring<'a>>,
+    declaring: Option<&'a Declaring>,
 }
 
 /// Написанная сигнатура - объявление, ждущее своих клауз.
@@ -689,11 +689,14 @@ fn declare_instance(
         // нему и отвергается (решение 2026-08-31).
         let mut fields = Vec::with_capacity(members.len());
         for (other, full) in qualified.iter().enumerate() {
+            // У объявляемого сейчас члена аргументы уровня ставит `define`:
+            // рекурсивная ссылка обязана нести те же дырки, что и его тип.
             let term = if other == at {
-                Term::Const(
-                    CoreName::from(&**full),
-                    self_levels(signature, metas, &ty).map_err(fail)?,
-                )
+                // Аргументы уровня - **свои же**, те, что обобщение сделает
+                // параметрами. Свежие тут не годятся: связать их с
+                // параметрами определения нечем, ссылка живёт внутри решения
+                // дырки, и `check` в него не заходит.
+                Term::Const(CoreName::from(&**full), own_levels(metas, &ty))
             } else if let Some(term) = signature.instantiate(full, metas) {
                 term
             } else {
@@ -701,13 +704,13 @@ fn declare_instance(
             };
             fields.push((Rc::clone(&members[other].0.text), term));
         }
+        let complete = fields.len() == members.len();
         let declaring = Declaring {
             class: Rc::clone(&name.text),
             head: Rc::clone(&argument),
             prefix: prefix.len(),
-            members: &fields,
+            members: fields,
         };
-        let complete = fields.len() == members.len();
         let pending = Pending {
             name: Rc::clone(&qualified[at]),
             ty,
@@ -1772,4 +1775,16 @@ fn self_levels(
     Ok((0..generalization.arity())
         .map(|_| metas.fresh_level())
         .collect())
+}
+
+/// Аргументы уровня, которыми определение ссылается на себя.
+///
+/// Это те же дырки, что обобщение сделает параметрами: ссылка изнутри обязана
+/// нести именно их. Свежие годятся только там, где ссылку строит элаборация -
+/// её терм проверяется, и унификация дырки свяжет; внутри решения другой
+/// дырки проверки нет, и связывать было бы нечем.
+fn own_levels(metas: &mut Metas, ty: &Term) -> Rc<[Level]> {
+    let mut generalization = Generalization::default();
+    generalization.collect_term(metas, &zonk_term(metas, ty));
+    generalization.collected().into()
 }

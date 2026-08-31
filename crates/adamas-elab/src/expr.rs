@@ -11,7 +11,7 @@ use std::rc::Rc;
 use adamas_core::check::{check, infer, is_type};
 use adamas_core::conv::whnf;
 use adamas_core::ctx::Ctx;
-use adamas_core::eval::{eval, quote};
+use adamas_core::eval::{apply, eval, quote};
 use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
@@ -20,7 +20,7 @@ use adamas_core::row::Row;
 use adamas_core::sig::{Definition, DefinitionKind, Signature};
 use adamas_core::source::Span;
 use adamas_core::term::{Binder, Field as CoreField, Fields, Name as CoreName, Term};
-use adamas_core::value::{Env, Value};
+use adamas_core::value::{Elim, Env, Head, Lvl, Value};
 use adamas_parser::ast::{
     self, Binding, Block, Expr, ExprKind, LamParamKind, Pattern, PatternKind, Stmt, StmtKind,
     Symbol, Visibility,
@@ -353,6 +353,8 @@ pub(crate) struct Elaborator<'a> {
     /// константа, разворачивающаяся в `Pi`) записи кончаются, и лямбда снова
     /// берёт `ω` без закрытия.
     declared: Vec<Argument>,
+    /// Тип объявления значением - им шагает разбор паттернов клаузы.
+    declared_ty: Option<Rc<Value>>,
     /// Записи, ожидающие ближайшую лямбду. Их выставляет тот, кто знает
     /// написанный тип: клауза - остатком спайна после своих паттернов, `let` -
     /// спайном своей аннотации.
@@ -450,6 +452,7 @@ impl<'a> Elaborator<'a> {
             scope: Vec::new(),
             group,
             declared: Vec::new(),
+            declared_ty: None,
             expected: Vec::new(),
             bare: false,
             enclosing: None,
@@ -464,6 +467,7 @@ impl<'a> Elaborator<'a> {
     /// Кратности написанного типа - те, что достанутся лямбдам тела.
     pub(crate) fn declaring(mut self, ty: &Term) -> Self {
         self.declared = pi_arguments(ty, self.owned);
+        self.declared_ty = Some(eval(&Env::default(), ty));
         self
     }
 
@@ -1355,12 +1359,24 @@ impl<'a> Elaborator<'a> {
         let mut names = Vec::new();
         variables_of(compiled, &mut names);
         let mut bound = Vec::new();
-        self.pattern_variables(Some(written), compiled, None, body, &names, &mut bound);
+        let mut level = self.ctx.size();
+        // Тип разбираемого сюда не приходит: ветвь `case` собирается отдельно
+        // от него, и поля берут дырку - решать её будет проверка.
+        self.pattern_variables(
+            Some(written),
+            compiled,
+            Mult::Many,
+            None,
+            body,
+            &names,
+            &mut bound,
+            &mut level,
+        );
         let depth = self.scope.len();
         let outer = self.ctx.clone();
         for variable in &bound {
-            let ty = match &variable.domain {
-                Some(domain) => self.typed(domain),
+            let ty = match &variable.ty {
+                Some(ty) => Rc::clone(ty),
                 None => self.hole(),
             };
             self.ctx = self.ctx.bind(
@@ -2383,8 +2399,8 @@ impl<'a> Elaborator<'a> {
         // По одному: домен связывания живёт под предыдущими, и вычислить его
         // можно только тогда, когда те уже стоят в контексте.
         for variable in &bound {
-            let ty = match &variable.domain {
-                Some(domain) => self.typed(domain),
+            let ty = match &variable.ty {
+                Some(ty) => Rc::clone(ty),
                 None => self.hole(),
             };
             self.ctx = self.ctx.bind(
@@ -2453,13 +2469,23 @@ impl<'a> Elaborator<'a> {
         Ok(found)
     }
 
-    /// Переменные паттернов клаузы в порядке связывания.
+    /// Переменные паттернов клаузы в порядке связывания - вместе с типами.
     ///
-    /// Проход один на оба вопроса - владеет ли связывание и закрывается ли, -
-    /// потому что оба решает **тип связывания**, а он известен на каждой
-    /// глубине: у аргумента верхнего уровня по спайну написанного, у поля по
-    /// объявлению конструктора. Отсюда рекурсия `drop` по полям (§3.3):
-    /// `f (Wrap h) = …` закрывает `h` так же, как закрыл бы аргумент.
+    /// Проход один на три вопроса - тип связывания, владеет ли оно и
+    /// закрывается ли, - потому что все три решает **тип**, а он известен на
+    /// каждом шаге: у аргумента верхнего уровня из телескопа написанного, у
+    /// поля из объявления конструктора при аргументах семейства, взятых у
+    /// типа разбираемого.
+    ///
+    /// # Тип - значение, а не терм, и это не оптимизация
+    ///
+    /// Домен связывания, взятый термом, записан на глубине **своего места в
+    /// телескопе**, а связывается на глубине **числа уже связанных
+    /// переменных**. Совпадают они, только пока каждый аргумент даёт ровно
+    /// одну переменную; `f (Wrap x) (Wrap y)` их разводит, и `y` получал тип
+    /// чужого связывания (лог 2026-08-31). Значение от глубины не зависит:
+    /// уровни в нём абсолютны, и телескоп шагает применением замыкания - тем
+    /// же, чем шагает проверка.
     fn clause_variables(
         &mut self,
         written: &[(Option<&Pattern>, CorePattern)],
@@ -2473,35 +2499,45 @@ impl<'a> Elaborator<'a> {
             variables_of(pattern, &mut names);
         }
         let mut found = Vec::new();
-        for (position, (source, pattern)) in written.iter().enumerate() {
-            let argument = self.declared.get(position).cloned();
-            self.pattern_variables(
-                *source,
-                pattern,
-                argument.as_ref(),
-                body,
-                &names,
-                &mut found,
+        let mut level = self.ctx.size();
+        let mut current = self.declared_ty.clone();
+        for (source, pattern) in written {
+            let (mult, domain, codomain) = match current.as_deref() {
+                Some(Value::Pi(binder, _, domain, _, codomain)) => {
+                    (binder.mult, Some(Rc::clone(domain)), Some(codomain.clone()))
+                }
+                _ => (Mult::Many, None, None),
+            };
+            let value = self.pattern_variables(
+                *source, pattern, mult, domain, body, &names, &mut found, &mut level,
             );
+            current = match (codomain, value) {
+                (Some(codomain), Some(value)) => Some(codomain.apply(value)),
+                _ => None,
+            };
         }
         found
     }
 
-    /// То же для одного паттерна, вглубь.
+    /// То же для одного паттерна, вглубь. Возвращает значение разобранного -
+    /// им шагает телескоп дальше.
     ///
     /// `written` теряется у имплисита, которого автор не писал, и там, где у
     /// ядра формы нет вовсе; тогда упоминание считается состоявшимся -
     /// направление ошибки то же, что и везде: пропущенный `drop` вместо
     /// лишнего.
+    #[allow(clippy::too_many_arguments)]
     fn pattern_variables(
         &mut self,
         written: Option<&Pattern>,
         compiled: &CorePattern,
-        argument: Option<&Argument>,
+        mult: Mult,
+        ty: Option<Rc<Value>>,
         body: &Expr,
         beside: &[Symbol],
         found: &mut Vec<BoundVar>,
-    ) {
+        level: &mut u32,
+    ) -> Option<Rc<Value>> {
         match compiled {
             CorePattern::Var(name) => {
                 // `_` закрывается всегда: имени у него нет, упоминанию взяться
@@ -2513,65 +2549,139 @@ impl<'a> Elaborator<'a> {
                     }
                     _ => true,
                 };
+                let head = ty.as_deref().and_then(head_name);
+                let drop = head
+                    .and_then(|name| self.owned.destructor_of(name))
+                    .cloned()
+                    .filter(|_| mult != Mult::Zero && !mentioned);
+                let owned = head.is_some_and(|name| self.owned.owns(name));
+                // §3.3: параметр кратности `1` функционального типа наследует
+                // то же ограничение внутри вызываемой функции.
+                let scoped = mult == Mult::One && matches!(ty.as_deref(), Some(Value::Pi(..)));
                 found.push(BoundVar {
                     name: Rc::from(&**name),
-                    mult: argument.map_or(Mult::Many, |it| it.mult),
-                    domain: argument.map(|it| Rc::clone(&it.domain)),
-                    owned: argument.is_some_and(|it| it.owned),
-                    scoped: argument.is_some_and(Argument::scoped),
-                    drop: argument
-                        .and_then(Argument::closes)
-                        .filter(|_| !mentioned)
-                        .cloned(),
+                    mult,
+                    ty,
+                    owned,
+                    scoped,
+                    drop,
                 });
+                let bound = Value::var(Lvl(*level));
+                *level += 1;
+                Some(bound)
             }
-            CorePattern::Constructor(constructor, fields) => {
-                // Спайн типа конструктора начинается с телескопа параметров
-                // семейства - ветвь их не получает, и паттерн не пишет.
-                // Сегодня параметров не бывает (их отвергает `declare_data`),
-                // но сдвиг молча испортил бы соответствие, как только они
-                // появятся: поле взяло бы владение у параметра.
-                // Тип конструктора несёт **свои** параметры уровня, и брать
-                // его как есть значило бы впустить `LevelVar` семейства в
-                // определение, которое его не объявляло. Инстанциация свежими
-                // дырками - то же, что делает всякая ссылка на объявленное.
-                let declared = self.signature.lookup(constructor).map(|definition| {
-                    let params = match &definition.kind {
-                        DefinitionKind::Constructor { data } => self
-                            .signature
-                            .lookup(data)
-                            .and_then(|it| it.data_shape().map(|(params, _)| params as usize))
-                            .unwrap_or(0),
-                        _ => 0,
-                    };
-                    (definition.ty.clone(), definition.level_arity, params)
-                });
-                let (types, params) = match declared {
-                    Some((ty, arity, params)) => {
-                        let levels: Vec<Level> =
-                            (0..arity).map(|_| self.metas.fresh_level()).collect();
-                        let ty = ty.substitute_levels(&levels);
-                        (pi_arguments(&ty, self.owned), params)
-                    }
-                    None => (Vec::new(), 0),
-                };
-                let inner = match written.map(|it| &it.kind) {
-                    Some(PatternKind::App { fields, .. }) => fields.as_slice(),
-                    _ => &[],
-                };
-                for (position, field) in fields.iter().enumerate() {
-                    let argument = types.get(position + params).cloned();
-                    self.pattern_variables(
-                        inner.get(position),
-                        field,
-                        argument.as_ref(),
-                        body,
-                        beside,
-                        found,
-                    );
+            CorePattern::Constructor(constructor, fields) => self.constructor_variables(
+                written,
+                constructor,
+                fields,
+                ty.as_ref(),
+                body,
+                beside,
+                found,
+                level,
+            ),
+        }
+    }
+
+    /// То же для паттерна-конструктора: телескоп его типа шагает полями, а
+    /// аргументы семейства берутся у типа разбираемого.
+    #[allow(clippy::too_many_arguments)]
+    fn constructor_variables(
+        &mut self,
+        written: Option<&Pattern>,
+        constructor: &CoreName,
+        fields: &[CorePattern],
+        ty: Option<&Rc<Value>>,
+        body: &Expr,
+        beside: &[Symbol],
+        found: &mut Vec<BoundVar>,
+        level: &mut u32,
+    ) -> Option<Rc<Value>> {
+        let inner = match written.map(|it| &it.kind) {
+            Some(PatternKind::App { fields, .. }) => fields.as_slice(),
+            _ => &[],
+        };
+        // Тип конструктора несёт **свои** параметры уровня, и брать его
+        // как есть значило бы впустить `LevelVar` семейства в
+        // определение, которое его не объявляло. Инстанциация свежими
+        // дырками - то же, что делает всякая ссылка на объявленное.
+        let declared = self.signature.lookup(constructor).map(|definition| {
+            let params = match &definition.kind {
+                DefinitionKind::Constructor { data } => self
+                    .signature
+                    .lookup(data)
+                    .and_then(|it| it.data_shape().map(|(params, _)| params as usize))
+                    .unwrap_or(0),
+                _ => 0,
+            };
+            (definition.ty.clone(), definition.level_arity, params)
+        });
+        let Some((declared, arity, params)) = declared else {
+            for (position, field) in fields.iter().enumerate() {
+                self.pattern_variables(
+                    inner.get(position),
+                    field,
+                    Mult::Many,
+                    None,
+                    body,
+                    beside,
+                    found,
+                    level,
+                );
+            }
+            return None;
+        };
+        let levels: Vec<Level> = (0..arity).map(|_| self.metas.fresh_level()).collect();
+        let mut current = eval(&Env::default(), &declared.substitute_levels(&levels));
+        // Аргументы семейства берутся у **типа разбираемого**: ветвь
+        // их не связывает, а телескоп конструктора с них начинается.
+        let spine = arguments_of(ty.map(std::convert::AsRef::as_ref));
+        let mut known = spine.len() >= params;
+        let mut applied = Vec::new();
+        for argument in spine.into_iter().take(params) {
+            // Телескоп шагает **замыканием кодомена**: `current` тут
+            // тип, а не функция, и применять его как значение нельзя.
+            let Value::Pi(_, _, _, _, codomain) = &*current else {
+                known = false;
+                break;
+            };
+            let codomain = codomain.clone();
+            current = codomain.apply(Rc::clone(&argument));
+            applied.push(argument);
+        }
+        for (position, field) in fields.iter().enumerate() {
+            let (mult, domain, codomain) = match (known, &*current) {
+                (true, Value::Pi(binder, _, domain, _, codomain)) => {
+                    (binder.mult, Some(Rc::clone(domain)), Some(codomain.clone()))
                 }
+                _ => (Mult::Many, None, None),
+            };
+            let value = self.pattern_variables(
+                inner.get(position),
+                field,
+                mult,
+                domain,
+                body,
+                beside,
+                found,
+                level,
+            );
+            match (codomain, value) {
+                (Some(codomain), Some(value)) => {
+                    applied.push(Rc::clone(&value));
+                    current = codomain.apply(value);
+                }
+                _ => return None,
             }
         }
+        let name = CoreName::from(&**constructor);
+        Some(
+            applied
+                .into_iter()
+                .fold(Value::constant(name, &levels), |callee, argument| {
+                    apply(&callee, argument)
+                }),
+        )
     }
 
     /// Оборачивает тело цепочкой вставленных `drop`.
@@ -2593,9 +2703,10 @@ struct BoundVar {
     name: Symbol,
     /// Кратность и тип связывания - из телескопа, по которому шёл разбор.
     mult: Mult,
-    /// Домен, ещё не вычисленный: считать его надо на той глубине, на которой
-    /// связывание встанет, а связываются переменные по одной.
-    domain: Option<Rc<Term>>,
+    /// Тип связывания - **значением**: терм пришлось бы сдвигать, потому что
+    /// записан он на глубине своего места в телескопе, а связывается на
+    /// глубине числа уже связанных переменных.
+    ty: Option<Rc<Value>>,
     owned: bool,
     scoped: bool,
     drop: Option<Symbol>,
@@ -2799,4 +2910,26 @@ fn repeated<'a>(pattern: &'a Pattern, seen: &mut Vec<&'a ast::Name>) -> Result<(
         _ => {}
     }
     Ok(())
+}
+
+/// Имя головы значения-типа: `Vect a n` даёт `Vect`.
+fn head_name(ty: &Value) -> Option<&CoreName> {
+    match ty {
+        Value::Neutral(Head::Global(name, _), _) => Some(name),
+        _ => None,
+    }
+}
+
+/// Аргументы применения в голове типа - в порядке написания.
+fn arguments_of(ty: Option<&Value>) -> Vec<Rc<Value>> {
+    match ty {
+        Some(Value::Neutral(Head::Global(_, _), spine)) => spine
+            .iter()
+            .filter_map(|elim| match elim {
+                Elim::App(argument) => Some(Rc::clone(argument)),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }

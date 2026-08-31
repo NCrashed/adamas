@@ -2681,3 +2681,42 @@ wrong p = eq p p
         "получено {error:?}"
     );
 }
+
+#[test]
+fn a_pattern_variable_takes_the_type_of_its_own_binding() {
+    // Домен связывания, взятый термом, записан на глубине своего места в
+    // телескопе, а связывается на глубине числа уже связанных переменных.
+    // Совпадают они, только пока каждый аргумент даёт ровно одну переменную;
+    // здесь `y` получал тип чужого связывания (лог 2026-08-31).
+    program(&format!(
+        "{BASE}
+data Box a where
+  Wrap : a -> Box a
+
+second : {{0 a : Type}} -> {{0 b : Type}} -> Box a -> Box b -> Box b
+second (Wrap x) (Wrap y) = Wrap y
+"
+    ));
+}
+
+#[test]
+fn an_instance_context_carries_recursion() {
+    // Канонический случай §3.5: инстанс на списке зовёт себя на хвосте и
+    // словарь контекста на элементе. Оба имени - одно и то же `eq`, и
+    // различает их только тип аргумента.
+    program(&format!(
+        "{BASE}{EQ_CLASS}
+data List a where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+instance {{Eqv a}} => Eqv (List a) where
+  eq Nil Nil = True
+  eq (Cons x xs) (Cons y ys) = eq xs ys
+  eq p q = False
+
+answer : Bool
+answer = eq (Cons Zero Nil) (Cons Zero Nil)
+"
+    ));
+}

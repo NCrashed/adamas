@@ -203,6 +203,13 @@ pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
     if !definition.total {
         return None;
     }
+    // Запечатанное не разворачивается вовсе (§3.5): снаружи его тело - не
+    // представление, а обещание, и сравнение обязано считать `M.T` атомом.
+    // Цена названа дизайном: доказать про запечатанную структуру что-либо
+    // вычислением нельзя, и законы она обязана экспортировать леммами.
+    if definition.opaque {
+        return None;
+    }
     let body = definition.instantiate_body(levels)?;
     spine.iter().try_fold(body, |callee, elim| match elim {
         Elim::App(argument) => try_apply(&callee, Rc::clone(argument)),

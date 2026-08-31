@@ -125,6 +125,17 @@ pub struct Definition {
     ///
     /// Постулат тотален: разворачивать нечего, значит и расходиться нечему.
     pub total: bool,
+    /// Запечатано ли определение: `module M :> Sig` (§3.5).
+    ///
+    /// Непрозрачность **булева**: скрыто тело целиком, снаружи не
+    /// редуцируется ничего. Семантика `abstract` Agda и `opaque` Lean.
+    /// Проверке типов тело по-прежнему известно - оно проверено при
+    /// объявлении, - а вот сравнение его не разворачивает, и потому
+    /// `M.T` снаружи есть абстрактный тип, а не своё представление.
+    ///
+    /// Переход к полупрозрачным сигнатурам (уравнения прямо в сигнатуре,
+    /// §10 вопрос 46) булево значение не ломает: оно его частный случай.
+    pub opaque: bool,
     /// Кратности носителей по позициям телескопа ([`crate::carrier`]).
     ///
     /// Выводятся из тела, как и [`Definition::total`], и по той же причине:
@@ -207,6 +218,8 @@ pub enum Member {
         ty: Term,
         /// Тело. `None` - постулат.
         body: Option<Term>,
+        /// Запечатано ли: тело есть, но развороту не подлежит (§3.5).
+        opaque: bool,
     },
     /// Индуктивное семейство вместе со своими конструкторами.
     Data {
@@ -238,7 +251,23 @@ impl Member {
             arity: Arity::Inferred,
             ty,
             body: None,
+            opaque: false,
         }
+    }
+
+    /// Запечатывает определение: тело остаётся, разворот - нет.
+    ///
+    /// # Panics
+    ///
+    /// В отладочной сборке - если член не определение: у семейства тела нет,
+    /// и запечатывать там нечего.
+    #[must_use]
+    pub fn sealed(mut self) -> Self {
+        match &mut self {
+            Self::Definition { opaque, .. } => *opaque = true,
+            Self::Data { .. } => debug_assert!(false, "запечатывается определение, а не семейство"),
+        }
+        self
     }
 
     /// Индуктивное семейство с выведенной арностью и без конструкторов.
@@ -582,6 +611,7 @@ impl Signature {
 
         let mut draft = Definition {
             mult,
+            opaque: matches!(member, Member::Definition { opaque: true, .. }),
             level_arity: arity.declared(),
             // Носители неизвестны, пока тело не проверено; фаза B2 их уточнит,
             // а постулат так и останется с `ω` - консервативным ответом.
@@ -710,6 +740,7 @@ impl Signature {
             // параметра ограничивать нечего; держателя ресурсного поля
             // проверяет отдельное правило (§3.3, вопрос 77).
             carriers: crate::carrier::stored(&constructor.ty),
+            opaque: false,
             ty: constructor.ty.clone(),
             body: None,
             kind: DefinitionKind::Constructor {
@@ -877,9 +908,29 @@ impl Signature {
         ty: Term,
         body: Option<Term>,
     ) -> Result<(), TypeError> {
+        self.define_opaque(metas, name, mult, ty, body, false)
+    }
+
+    /// То же, с выбором прозрачности: `true` запечатывает (§3.5).
+    ///
+    /// # Errors
+    ///
+    /// То же, что у [`Signature::declare`].
+    pub fn define_opaque(
+        &mut self,
+        metas: &mut Metas,
+        name: &str,
+        mult: Mult,
+        ty: Term,
+        body: Option<Term>,
+        opaque: bool,
+    ) -> Result<(), TypeError> {
         let mut member = Member::definition(name, mult, ty);
         if let Some(body) = body {
             member = member.with_body(body);
+        }
+        if opaque {
+            member = member.sealed();
         }
         self.declare(metas, &Group::of(member))
     }

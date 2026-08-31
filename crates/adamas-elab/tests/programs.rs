@@ -2720,3 +2720,92 @@ answer = eq (Cons Zero Nil) (Cons Zero Nil)
 "
     ));
 }
+
+#[test]
+fn a_class_method_may_have_a_default() {
+    // §4.1: умолчание пишется в классе и раскрывается **в инстансе** - тело
+    // его зовёт другие методы того же класса, а словарь для них объявляет
+    // инстанс. Элаборировать его в классе было бы нечем.
+    program(&format!(
+        "{BASE}
+not : Bool -> Bool
+not True = False
+not False = True
+
+class Eqv a where
+  eq : a -> a -> Bool
+  neq : a -> a -> Bool
+  neq x y = not (eq x y)
+
+instance Eqv Nat where
+  eq a b = True
+
+answer : Bool
+answer = neq Zero (Succ Zero)
+"
+    ));
+}
+
+#[test]
+fn a_superclass_is_a_field_of_the_dictionary() {
+    // §3.5: словарь суперкласса - поле словаря класса, разряжаемое в точке
+    // объявления инстанса. Автор его не пишет: поле заполняет поиск.
+    program(&format!(
+        "{BASE}{EQ_CLASS}
+class Ord a when Eqv a where
+  cmp : a -> a -> Bool
+
+instance Ord Nat where
+  cmp a b = eq a b
+
+used : Bool
+used = cmp Zero Zero
+"
+    ));
+}
+
+#[test]
+fn a_superclass_is_reached_through_the_context() {
+    // Изнутри `{Ord a} =>` словарь `Eqv a` берётся проекцией поля, а не
+    // отдельным поиском: инстанса для переменной нет и быть не может.
+    program(&format!(
+        "{BASE}{EQ_CLASS}
+class Ord a when Eqv a where
+  cmp : a -> a -> Bool
+
+instance Ord Nat where
+  cmp a b = True
+
+both : {{Ord a}} => a -> a -> Bool
+both x y = eq x y
+"
+    ));
+}
+
+#[test]
+fn an_instance_member_does_not_see_one_declared_below() {
+    // Названная граница решения 2026-08-31: словарь для собственной цели
+    // собирается записью из членов, а член, объявленный ниже, в неё ещё не
+    // попал. Здесь `eq` рекурсивен, а `neq` идёт после него.
+    let error = refused(&format!(
+        "{BASE}
+not : Bool -> Bool
+not True = False
+not False = True
+
+class Eqv a where
+  eq : a -> a -> Bool
+  neq : a -> a -> Bool
+  neq x y = not (eq x y)
+
+instance Eqv Nat where
+  eq Zero Zero = True
+  eq (Succ a) (Succ b) = eq a b
+  eq a b = False
+"
+    ));
+    assert!(
+        matches!(error, ElabError::NoInstance { .. }),
+        "получено {error:?}"
+    );
+}

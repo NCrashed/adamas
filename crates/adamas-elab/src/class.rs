@@ -18,7 +18,7 @@
 //! проверки, - и есть обязательство, а класс ли у неё в типе, видно по нему
 //! самому.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use adamas_core::eval::quote;
@@ -37,8 +37,8 @@ use crate::error::ElabError;
 /// должно - для него словарь есть обычная запись, а метод обычная проекция.
 #[derive(Debug, Default)]
 pub struct Instances {
-    /// Имена объявленных классов.
-    classes: HashSet<Symbol>,
+    /// Объявленные классы и то, что о них знает разрешение.
+    classes: HashMap<Symbol, Class>,
     /// Кандидаты: класс и голова аргумента - имя объявленного словаря.
     ///
     /// Голова, а не тип целиком: `instance Eqv (List a)` этим срезом не
@@ -48,16 +48,39 @@ pub struct Instances {
     candidates: HashMap<(Symbol, Symbol), Symbol>,
 }
 
+/// Что о классе знают разрешение и объявление инстанса.
+#[derive(Debug, Default)]
+pub struct Class {
+    /// Сколько полей словаря занимают суперклассы. Стоят они **первыми**:
+    /// разряжает их объявление инстанса, а не автор.
+    pub superclasses: usize,
+    /// Методы в порядке объявления.
+    pub methods: Vec<Symbol>,
+    /// Умолчания: клаузы, написанные в самом классе.
+    ///
+    /// Хранятся написанными, а не элаборированными: тело умолчания зовёт
+    /// другие методы того же класса, и словарь для них - тот, который
+    /// объявляет инстанс. Раскрывается умолчание поэтому **в инстансе**, где
+    /// этот словарь уже собирается.
+    pub defaults: HashMap<Symbol, Vec<adamas_parser::ast::Clause>>,
+}
+
 impl Instances {
     /// Объявлен ли класс с таким именем.
     #[must_use]
     pub fn is_class(&self, name: &str) -> bool {
-        self.classes.contains(name)
+        self.classes.contains_key(name)
+    }
+
+    /// Что известно о классе.
+    #[must_use]
+    pub fn class(&self, name: &str) -> Option<&Class> {
+        self.classes.get(name)
     }
 
     /// Запоминает класс.
-    pub fn declare(&mut self, name: &Symbol) {
-        self.classes.insert(Rc::clone(name));
+    pub fn declare(&mut self, name: &Symbol, class: Class) {
+        self.classes.insert(Rc::clone(name), class);
     }
 
     /// Запоминает инстанс. `false` - такой уже есть.
@@ -168,7 +191,7 @@ fn settle(
         // о котором договорилась сигнатура, а искать инстанс для переменной
         // всё равно негде. Так пишется всякая полиморфная функция над
         // классом - `same : {Eqv a} => a -> a -> Bool`.
-        if let Some(solution) = from_context(signature, metas, &ty) {
+        if let Some(solution) = from_context(signature, metas, instances, &ty) {
             metas.solve_term(meta, solution);
             continue;
         }
@@ -228,7 +251,12 @@ fn goal_of(ty: &Term) -> &Term {
 /// `Let` в телескопе обрывает поиск: определённое связывание в спайн дырки не
 /// попадает (`fresh_term_over`), и числа лямбд по телескопу уже не посчитать.
 /// Названная граница - словарь, объявленный `let`-ом, отсюда не виден.
-fn from_context(signature: &Signature, metas: &mut Metas, ty: &Term) -> Option<Rc<Value>> {
+fn from_context(
+    signature: &Signature,
+    metas: &mut Metas,
+    instances: &Instances,
+    ty: &Term,
+) -> Option<Rc<Value>> {
     let mut ctx = adamas_core::ctx::Ctx::new(signature);
     let mut binders = Vec::new();
     let mut current = ty;
@@ -242,17 +270,31 @@ fn from_context(signature: &Signature, metas: &mut Metas, ty: &Term) -> Option<R
         return None;
     }
     let goal = ctx.eval(current);
-    let found = binders.iter().position(|(_, _, domain)| {
-        adamas_core::conv::convertible(signature, metas, ctx.size(), domain, &goal)
-    })?;
     let arity = binders.len();
+    // Сперва прямое совпадение, потом путь через суперкласс: словарь `Ord a`
+    // несёт `Eqv a` полем, и §3.5 разряжает его именно так - проекцией, а не
+    // отдельным поиском.
+    let mut taken = None;
+    for (at, (_, _, domain)) in binders.iter().enumerate() {
+        if adamas_core::conv::convertible(signature, metas, ctx.size(), domain, &goal) {
+            taken = Some((at, Vec::new()));
+            break;
+        }
+        if let Some(path) =
+            superclass_path(signature, metas, instances, domain, &goal, ctx.size(), 8)
+        {
+            taken = Some((at, path));
+            break;
+        }
+    }
+    let (found, path) = taken?;
     let index = u32::try_from(arity - 1 - found).ok()?;
-    let solution = binders
-        .iter()
-        .rev()
-        .fold(Term::var(index), |body, (mult, name, _)| {
-            Term::Lam(*mult, Rc::clone(name), Rc::new(body))
-        });
+    let taken = path.into_iter().fold(Term::var(index), |inner, field| {
+        Term::Project(Rc::new(inner), field)
+    });
+    let solution = binders.iter().rev().fold(taken, |body, (mult, name, _)| {
+        Term::Lam(*mult, Rc::clone(name), Rc::new(body))
+    });
     Some(adamas_core::eval::eval(
         &adamas_core::value::Env::default(),
         &solution,
@@ -456,4 +498,56 @@ fn abstracted_pi(
             Rc::new(inner),
         )
     })
+}
+
+/// Путь по полям-суперклассам от словаря `domain` к цели.
+///
+/// Пустой путь означал бы сам словарь, и его проверяет вызывающий; здесь
+/// путь всегда непуст. Топливо - от класса, объявленного суперклассом самому
+/// себе: язык этого не запрещает, а поиск обязан закончиться.
+fn superclass_path(
+    signature: &Signature,
+    metas: &mut Metas,
+    instances: &Instances,
+    domain: &Rc<Value>,
+    goal: &Rc<Value>,
+    size: u32,
+    fuel: u32,
+) -> Option<Vec<adamas_core::term::Name>> {
+    if fuel == 0 {
+        return None;
+    }
+    let quoted = quote(size, domain);
+    let (class, _) = applied(&quoted)?;
+    let count = instances.class(&class)?.superclasses;
+    if count == 0 {
+        return None;
+    }
+    let record = adamas_core::conv::whnf(signature, domain);
+    let Value::Record(telescope) = &*record else {
+        return None;
+    };
+    for index in 0..count {
+        // Поля суперклассов идут первыми и друг от друга не зависят, поэтому
+        // предыдущие значения им безразличны.
+        let earlier: Vec<Rc<Value>> = (0..index)
+            .map(|at| {
+                Value::var(adamas_core::value::Lvl(
+                    size + u32::try_from(at).unwrap_or(0),
+                ))
+            })
+            .collect();
+        let field = telescope.at(index, &earlier);
+        let name = adamas_core::term::Name::from(format!("#super{index}").as_str());
+        if adamas_core::conv::convertible(signature, metas, size, &field, goal) {
+            return Some(vec![name]);
+        }
+        if let Some(mut path) =
+            superclass_path(signature, metas, instances, &field, goal, size, fuel - 1)
+        {
+            path.insert(0, name);
+            return Some(path);
+        }
+    }
+    None
 }

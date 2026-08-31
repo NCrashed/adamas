@@ -33,7 +33,7 @@ use crate::carrier;
 use crate::error::{ElabError, Names};
 use adamas_core::value::Value;
 
-use crate::class::{self, Declaring, Instances};
+use crate::class::{self, Class, Declaring, Instances};
 use crate::expr::{Elaborator, Enclosing, Member, Param};
 use crate::own::{Owned, Ownership};
 use crate::route::{self, Declared};
@@ -585,20 +585,51 @@ fn declare_class(
             span: argument.span,
         });
     }
-    let mut members = Vec::with_capacity(class.members.len());
+    // Поля суперклассов идут **первыми**: разряжает их объявление инстанса, а
+    // не автор, и имя у них невыразимое - написать его нечем (§3.5).
+    let mut members = Vec::with_capacity(class.superclasses.len() + class.members.len());
+    let mut info = Class {
+        superclasses: class.superclasses.len(),
+        ..Class::default()
+    };
+    for (index, superclass) in class.superclasses.iter().enumerate() {
+        members.push((
+            ast::Name {
+                text: Rc::from(format!("#super{index}").as_str()),
+                span: superclass.span,
+            },
+            Some(superclass),
+        ));
+    }
     for member in &class.members {
-        let DeclKind::Signature { name, ty } = &member.kind else {
-            return Err(ElabError::ModuleMember {
-                name: member_name(member)
-                    .cloned()
-                    .unwrap_or_else(|| Rc::from("_")),
-                what: "классе",
-                why: "класс несёт сигнатуры методов; умолчания и суперклассы пока не \
-                      объявляются",
-                span: member.span,
-            });
-        };
-        members.push((name.clone(), Some(ty)));
+        match &member.kind {
+            DeclKind::Signature { name, ty } => {
+                members.push((name.clone(), Some(ty)));
+                info.methods.push(Rc::clone(&name.text));
+            }
+            // Умолчание хранится написанным: тело его зовёт другие методы того
+            // же класса, а словарь для них объявляет инстанс. Раскрывается оно
+            // поэтому там, где этот словарь и собирается.
+            DeclKind::Clauses { name, clauses } => {
+                if !info.methods.contains(&name.text) {
+                    return Err(ElabError::MissingSignature {
+                        name: Rc::clone(&name.text),
+                        span: member.span,
+                    });
+                }
+                info.defaults.insert(Rc::clone(&name.text), clauses.clone());
+            }
+            _ => {
+                return Err(ElabError::ModuleMember {
+                    name: member_name(member)
+                        .cloned()
+                        .unwrap_or_else(|| Rc::from("_")),
+                    what: "классе",
+                    why: "класс несёт сигнатуры методов и умолчания к ним",
+                    span: member.span,
+                });
+            }
+        }
     }
     let names = Names::of(&name.text, Vec::new());
     // Класс - **функция** от своих параметров в тип записи, а не сам тип:
@@ -626,10 +657,12 @@ fn declare_class(
             error: Box::new(error),
             names,
         })?;
-    instances.declare(&name.text);
-    for (method, _) in &members {
-        declare_method(signature, metas, &name.text, &method.text, span)?;
+    // Имя верхнего уровня получает **метод**, а не поле суперкласса: его
+    // разряжает разрешение, и писать его автору незачем.
+    for method in &info.methods {
+        declare_method(signature, metas, &name.text, method, span)?;
     }
+    instances.declare(&name.text, info);
     Ok(())
 }
 
@@ -674,12 +707,12 @@ fn declare_instance(
             span,
         });
     }
-    let members = instance_members(class)?;
+    let (superclasses, members) = instance_members(class, instances, &name.text, span)?;
     let qualified: Vec<Symbol> = members
         .iter()
-        .map(|(method, _)| Rc::from(format!("{declared}.{}", method.text).as_str()))
+        .map(|(method, ..)| Rc::from(format!("{declared}.{method}").as_str()))
         .collect();
-    for (at, (method, clauses)) in members.iter().enumerate() {
+    for (at, (method, clauses, at_span)) in members.iter().enumerate() {
         let written = written_head(signature, metas, owned, class, span, &names)?;
         let prefix = leading(&written);
         let ty = instance_method(signature, metas, &prefix, &written, method, span, &names)?;
@@ -702,7 +735,7 @@ fn declare_instance(
             } else {
                 continue;
             };
-            fields.push((Rc::clone(&members[other].0.text), term));
+            fields.push((Rc::clone(&members[other].0), term));
         }
         let complete = fields.len() == members.len();
         let declaring = Declaring {
@@ -715,19 +748,29 @@ fn declare_instance(
             name: Rc::clone(&qualified[at]),
             ty,
             source: &class.head,
-            span: span_of(clauses, span),
+            span: *at_span,
         };
         let mut known = known(owned, instances);
         if complete {
             known.declaring = Some(&declaring);
         }
-        define(signature, metas, known, None, &pending, clauses, span)?;
+        define(signature, metas, known, None, &pending, clauses, *at_span)?;
     }
     // Словарь - запись из членов, применённых к своим же связываниям.
     let written = written_head(signature, metas, owned, class, span, &names)?;
     let prefix = leading(&written);
-    let mut object = Vec::with_capacity(members.len());
-    for (at, (method, _)) in members.iter().enumerate() {
+    let mut object = Vec::with_capacity(superclasses + members.len());
+    // Поле суперкласса - дырка: разряжает его **разрешение**, а не автор
+    // (§3.5). Стоит она в контексте префикса, поэтому и тип у неё - тот же
+    // телескоп, оканчивающийся типом поля.
+    for index in 0..superclasses {
+        let field: Symbol = Rc::from(format!("#super{index}").as_str());
+        let ty = instance_method(signature, metas, &prefix, &written, &field, span, &names)?;
+        let size = u32::try_from(prefix.len()).unwrap_or(u32::MAX);
+        let hole = metas.fresh_term(Ctx::new(signature).eval(&ty), size);
+        object.push((CoreName::from(&*field), Rc::new(hole)));
+    }
+    for (at, (method, ..)) in members.iter().enumerate() {
         let Some(term) = signature.instantiate(&qualified[at], metas) else {
             continue;
         };
@@ -735,9 +778,12 @@ fn declare_instance(
             let index = u32::try_from(prefix.len() - 1 - position).unwrap_or(u32::MAX);
             Term::App(Rc::new(callee), Rc::new(Term::var(index)))
         });
-        object.push((CoreName::from(&*method.text), Rc::new(applied)));
+        object.push((CoreName::from(&**method), Rc::new(applied)));
     }
     let object = abstracted(&prefix, Term::Object(object.into()));
+    // Поля суперклассов заполняются поиском - до проверки, которой дырка
+    // уже мешала бы.
+    class::resolve(signature, metas, instances, None, &object, &written, span)?;
     // `check_within`, а не `check_closed_with`: нерешённая дырка уровня здесь -
     // будущий параметр самого словаря, и запрет отвергал бы всякий
     // полиморфный инстанс. Окончательный запрет ставит объявление.
@@ -746,11 +792,6 @@ fn declare_instance(
     signature
         .define_inferred(metas, &declared, Mult::Many, written, Some(object))
         .map_err(fail)
-}
-
-/// Место клауз - для маршрута ошибки.
-fn span_of(clauses: &[ast::Clause], span: Span) -> Span {
-    clauses.first().map_or(span, |clause| clause.span)
 }
 
 /// Написанная голова инстанса как тип словаря.
@@ -775,11 +816,20 @@ fn written_head(
     Ok(zonk_term(metas, &written))
 }
 
-/// Члены инстанса: только клаузы, и тип каждого пишет класс.
+/// Член инстанса: имя метода, клаузы и место, откуда они взяты.
+type Written = (Symbol, Vec<ast::Clause>, Span);
+
+/// Члены инстанса: методы класса вместе с клаузами, которые их определяют.
+///
+/// Порядок - **классовый**, а не написанный: поля словаря обязаны идти так,
+/// как объявлены. Ненаписанный метод берёт умолчание, а его нет - отказ.
 fn instance_members(
     class: &ast::ClassDecl,
-) -> Result<Vec<(&ast::Name, &[ast::Clause])>, ElabError> {
-    let mut found = Vec::with_capacity(class.members.len());
+    instances: &Instances,
+    name: &Symbol,
+    span: Span,
+) -> Result<(usize, Vec<Written>), ElabError> {
+    let mut written = Vec::with_capacity(class.members.len());
     for member in &class.members {
         let DeclKind::Clauses { name, clauses } = &member.kind else {
             return Err(ElabError::ModuleMember {
@@ -791,9 +841,41 @@ fn instance_members(
                 span: member.span,
             });
         };
-        found.push((name, clauses.as_slice()));
+        written.push((name, clauses, member.span));
     }
-    Ok(found)
+    let Some(info) = instances.class(name) else {
+        return Err(ElabError::UnknownName {
+            name: Rc::clone(name),
+            span,
+        });
+    };
+    for (method, _, at) in &written {
+        if !info.methods.contains(&method.text) {
+            return Err(ElabError::ModuleMember {
+                name: Rc::clone(&method.text),
+                what: "инстансе",
+                why: "у класса нет такого метода",
+                span: *at,
+            });
+        }
+    }
+    let mut found = Vec::with_capacity(info.methods.len());
+    for method in &info.methods {
+        let (clauses, at) = match written.iter().find(|(it, ..)| it.text == *method) {
+            Some((_, clauses, at)) => ((*clauses).clone(), *at),
+            None => match info.defaults.get(method) {
+                Some(clauses) => (clauses.clone(), span),
+                None => {
+                    return Err(ElabError::MissingSignature {
+                        name: Rc::clone(method),
+                        span,
+                    });
+                }
+            },
+        };
+        found.push((Rc::clone(method), clauses, at));
+    }
+    Ok((info.superclasses, found))
 }
 
 /// Тип одного метода инстанса - выведенный из класса проекцией словаря.
@@ -807,7 +889,7 @@ fn instance_method(
     metas: &mut Metas,
     prefix: &[Param],
     written: &Term,
-    method: &ast::Name,
+    method: &str,
     span: Span,
     names: &Names,
 ) -> Result<Term, ElabError> {
@@ -823,11 +905,11 @@ fn instance_method(
     }
     let value = ctx.eval(under_prefix(written));
     let bound = ctx.bind(CoreName::from("d"), Mult::Many, value);
-    let projection = Term::Project(Rc::new(Term::var(0)), CoreName::from(&*method.text));
+    let projection = Term::Project(Rc::new(Term::var(0)), CoreName::from(method));
     let (found, _) = infer(&bound, metas, Mult::Zero, &projection).map_err(fail)?;
     if mentions_depth(&quote(bound.size(), &found), 0) {
         return Err(ElabError::ModuleMember {
-            name: Rc::clone(&method.text),
+            name: Rc::from(method),
             what: "классе",
             why: "тип метода зависит от значения другого метода, и вывести его \
                   в инстансе нечем",

@@ -63,7 +63,7 @@ impl Spans<'_> {
                     self.expr(at, body);
                 }
             }
-            DeclKind::Signature { name, ty } => {
+            DeclKind::Signature { name, ty, .. } => {
                 self.name(at, name);
                 self.expr(at, ty);
             }

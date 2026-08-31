@@ -387,6 +387,11 @@ pub enum DeclKind {
         name: Name,
         /// Тип.
         ty: Expr,
+        /// Атрибуты, написанные перед ней: `@total` и прочие (§4.7).
+        ///
+        /// Стоят при сигнатуре, а не при клаузах: обязательство берёт на
+        /// себя определение целиком, а объявляет его сигнатура.
+        attributes: Vec<Name>,
     },
     /// Клаузы одного определения, идущие подряд.
     Clauses {
@@ -665,8 +670,17 @@ fn dump_decl(out: &mut String, decl: &Decl, depth: usize) {
         DeclKind::Class(class) => dump_class(out, class, depth),
         DeclKind::Mutual(members) => dump_block(out, "(mutual", members, depth),
         DeclKind::Module(module) => dump_module(out, module, depth),
-        DeclKind::Signature { name, ty } => {
+        DeclKind::Signature {
+            name,
+            ty,
+            attributes,
+        } => {
             out.push_str("(sig ");
+            for attribute in attributes {
+                out.push('@');
+                out.push_str(&attribute.text);
+                out.push(' ');
+            }
             out.push_str(&name.text);
             out.push(' ');
             dump_expr(out, ty);

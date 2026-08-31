@@ -553,23 +553,53 @@ impl<'a> Parser<'a> {
             TokenKind::Module => self.module_decl(),
             TokenKind::Class | TokenKind::Instance => self.class_decl(),
             TokenKind::Mutual => self.mutual(),
-            TokenKind::Ident | TokenKind::LParen => self.signature_or_clause(),
+            TokenKind::At => self.attributed(),
+            TokenKind::Ident | TokenKind::LParen => self.signature_or_clause(Vec::new()),
             _ => Err(self
                 .unsupported_here()
                 .unwrap_or_else(|| self.expected(Expected::Declaration))),
         }
     }
 
+    /// `@total` и прочие атрибуты перед сигнатурой (§4.7).
+    ///
+    /// Атрибут - обязательство определения, а объявляет его сигнатура, и
+    /// потому стоит он при ней. Перед чем угодно другим - отказ: обещать
+    /// тотальность семейству или модулю нечего.
+    fn attributed(&mut self) -> Result<Decl, ParseError> {
+        let mut attributes = Vec::new();
+        while self.eat(TokenKind::At).is_some() {
+            let name = self.expect(TokenKind::Ident)?;
+            attributes.push(self.name_of(name));
+            self.expect(TokenKind::Sep)?;
+        }
+        if !matches!(self.kind(), TokenKind::Ident | TokenKind::LParen) {
+            return Err(self.expected(Expected::Declaration));
+        }
+        self.signature_or_clause(attributes)
+    }
+
     /// `name : ty` или `name pat* = body [where …]` - решает лексема после
     /// имени, поэтому возврата назад не требуется.
-    fn signature_or_clause(&mut self) -> Result<Decl, ParseError> {
+    fn signature_or_clause(&mut self, attributes: Vec<Name>) -> Result<Decl, ParseError> {
         let name = self.decl_name()?;
         if self.eat(TokenKind::Colon).is_some() {
             let ty = self.expr()?;
             let span = name.span.merge(ty.span);
             return Ok(Decl {
-                kind: DeclKind::Signature { name, ty },
+                kind: DeclKind::Signature {
+                    name,
+                    ty,
+                    attributes,
+                },
                 span,
+            });
+        }
+        if let Some(attribute) = attributes.first() {
+            return Err(ParseError::Expected {
+                expected: Expected::Token(TokenKind::Colon),
+                found: TokenKind::Equals,
+                span: attribute.span,
             });
         }
 

@@ -188,7 +188,16 @@ impl Printer {
                     self.expr(body, Prec::Lowest);
                 }
             }
-            DeclKind::Signature { name, ty } => {
+            DeclKind::Signature {
+                name,
+                ty,
+                attributes,
+            } => {
+                for attribute in attributes {
+                    self.push("@");
+                    self.push(&attribute.text);
+                    self.line();
+                }
                 self.decl_name(name);
                 self.push(" : ");
                 self.expr(ty, Prec::Lowest);

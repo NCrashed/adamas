@@ -560,3 +560,18 @@ mutual
 ";
     insta::assert_snapshot!(tree(text).expect("разбор удался"));
 }
+
+#[test]
+fn an_attribute_stands_before_a_signature() {
+    // §4.7: атрибут - обязательство определения, а объявляет его сигнатура.
+    assert_eq!(
+        tree("@total\nf : Nat\n").expect("разбор удался"),
+        "(sig @total f Nat)\n"
+    );
+    // Перед клаузами его ставить нечему: обещание берёт на себя определение
+    // целиком, и написано оно при сигнатуре.
+    assert!(matches!(
+        parse_error("@total\nf = Zero\n"),
+        ParseError::Expected { .. }
+    ));
+}

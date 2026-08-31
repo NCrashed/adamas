@@ -26,6 +26,7 @@ use adamas_core::meta::{Metas, unsolved_term_meta, zonk_term};
 use adamas_core::sig::Signature;
 use adamas_core::source::Span;
 use adamas_core::term::Term;
+use adamas_core::value::Value;
 use adamas_parser::ast::Symbol;
 
 use crate::error::ElabError;
@@ -122,12 +123,29 @@ fn settle(
         // Тип дырки замкнут по построению, поэтому читается на нулевой
         // глубине; зонканье подставляет всё, что решила проверка.
         let ty = zonk_term(metas, &quote(0, metas.term_type(meta)));
-        let Some((class, head)) = applied(&ty) else {
+        // Дырка не про класс - её сюда и не звали: решить её могла только
+        // унификация, и о том, что не решила, скажет объявление.
+        let Some((class, head)) = applied(goal_of(&ty)) else {
             return Ok(());
         };
         if !instances.is_class(&class) {
             return Ok(());
         }
+        // Локальный словарь **раньше** глобального инстанса: он и есть тот,
+        // о котором договорилась сигнатура, а искать инстанс для переменной
+        // всё равно негде. Так пишется всякая полиморфная функция над
+        // классом - `same : {Eqv a} => a -> a -> Bool`.
+        if let Some(solution) = from_context(signature, metas, &ty) {
+            metas.solve_term(meta, solution);
+            continue;
+        }
+        let Some(head) = head else {
+            return Err(ElabError::NoInstance {
+                class,
+                head: Rc::from("переменная"),
+                span,
+            });
+        };
         let Some(name) = instances.candidate(&class, &head) else {
             return Err(ElabError::NoInstance { class, head, span });
         };
@@ -140,11 +158,61 @@ fn settle(
     Ok(())
 }
 
-/// Имя класса и голова его первого аргумента: `Eqv Nat` даёт `(Eqv, Nat)`.
+/// Цель дырки - то, чем оканчивается телескоп её типа.
+fn goal_of(ty: &Term) -> &Term {
+    let mut current = ty;
+    while let Term::Pi(_, _, _, _, codomain) = current {
+        current = codomain;
+    }
+    current
+}
+
+/// Связывание контекста, чей тип и есть цель.
 ///
-/// `None` - тип не применение определения к определению, то есть словарём он
-/// не является.
-fn applied(ty: &Term) -> Option<(Symbol, Symbol)> {
+/// Тип дырки - телескоп по контексту, оканчивающийся целью, а сама дырка
+/// применена к контексту целиком. Значит подходящее связывание - решение:
+/// `\x0 … xn -> xk`, и применение к спайну выдаёт ровно его.
+///
+/// `Let` в телескопе обрывает поиск: определённое связывание в спайн дырки не
+/// попадает (`fresh_term_over`), и числа лямбд по телескопу уже не посчитать.
+/// Названная граница - словарь, объявленный `let`-ом, отсюда не виден.
+fn from_context(signature: &Signature, metas: &mut Metas, ty: &Term) -> Option<Rc<Value>> {
+    let mut ctx = adamas_core::ctx::Ctx::new(signature);
+    let mut binders = Vec::new();
+    let mut current = ty;
+    while let Term::Pi(binder, name, domain, _, codomain) = current {
+        let value = ctx.eval(domain);
+        binders.push((binder.mult, Rc::clone(name), Rc::clone(&value)));
+        ctx = ctx.bind(Rc::clone(name), binder.mult, value);
+        current = codomain;
+    }
+    if matches!(current, Term::Let(..)) {
+        return None;
+    }
+    let goal = ctx.eval(current);
+    let found = binders.iter().position(|(_, _, domain)| {
+        adamas_core::conv::convertible(signature, metas, ctx.size(), domain, &goal)
+    })?;
+    let arity = binders.len();
+    let index = u32::try_from(arity - 1 - found).ok()?;
+    let solution = binders
+        .iter()
+        .rev()
+        .fold(Term::var(index), |body, (mult, name, _)| {
+            Term::Lam(*mult, Rc::clone(name), Rc::new(body))
+        });
+    Some(adamas_core::eval::eval(
+        &adamas_core::value::Env::default(),
+        &solution,
+    ))
+}
+
+/// Имя класса и голова его первого аргумента: `Eqv Nat` даёт `(Eqv, Some(Nat))`.
+///
+/// Внешний `None` - тип не применение определения, то есть словарём он не
+/// является вовсе. Внутренний - голова аргумента переменная, и кандидата для
+/// неё искать негде.
+fn applied(ty: &Term) -> Option<(Symbol, Option<Symbol>)> {
     let Term::App(callee, argument) = ty else {
         return None;
     };
@@ -155,8 +223,11 @@ fn applied(ty: &Term) -> Option<(Symbol, Symbol)> {
     while let Term::App(inner, _) = head {
         head = inner;
     }
-    let Term::Const(name, _) = head else {
-        return None;
+    let name = match head {
+        Term::Const(name, _) => Some(Rc::clone(name)),
+        // Голова-переменная: инстанса для неё нет и быть не может, а словарь
+        // приходит из контекста. Это и есть полиморфный случай.
+        _ => None,
     };
-    Some((Rc::clone(class), Rc::clone(name)))
+    Some((Rc::clone(class), name))
 }

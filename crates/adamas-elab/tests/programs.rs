@@ -2603,3 +2603,42 @@ instance Eqv Bool where
         "получено {error:?}"
     );
 }
+
+#[test]
+fn a_constraint_is_written_and_resolved_from_the_context() {
+    // §4.1: `{Eqv a} =>` есть группа implicit-связываний, у которой аргумент
+    // заполняется поиском, а не унификацией. Внутри тела голова цели -
+    // переменная, инстанса для неё нет и быть не может, поэтому словарь
+    // берётся из контекста: он и есть тот, о котором договорилась сигнатура.
+    program(&format!(
+        "{BASE}{EQ_CLASS}
+same : {{Eqv a}} => a -> a -> Bool
+same x y = eq x y
+
+both : {{Eqv a, Eqv b}} => a -> b -> Bool
+both x y = eq x x
+
+data Wit : Bool -> Type where
+  Yes : Wit True
+
+used : Wit (same Zero Zero)
+used = Yes
+"
+    ));
+}
+
+#[test]
+fn a_constraint_without_an_instance_is_refused() {
+    // Полиморфная функция без констрейнта словарь взять неоткуда: ни
+    // контекста, ни инстанса для переменной.
+    let error = refused(&format!(
+        "{BASE}{EQ_CLASS}
+loose : a -> a -> Bool
+loose x y = eq x y
+"
+    ));
+    assert!(
+        matches!(error, ElabError::NoInstance { .. }),
+        "получено {error:?}"
+    );
+}

@@ -227,6 +227,32 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Атрибут, которого компилятор не проверяет.
+    #[error("атрибут `@{name}` не проверяется: {why}")]
+    Attribute {
+        /// Имя атрибута.
+        name: Symbol,
+        /// Почему.
+        why: &'static str,
+        /// Где написан.
+        span: Span,
+    },
+
+    /// `@total` при отрицательном вердикте.
+    ///
+    /// Вердикт ядро считает всегда (§4.7, лог 2026-08-24), а атрибут - это
+    /// требование «ответ обязан быть да».
+    #[error(
+        "`{name}` объявлено `@total`, но вердикт отрицательный: рекурсия не структурна \
+         либо вызвано нетотальное"
+    )]
+    NotTotal {
+        /// Имя определения.
+        name: Symbol,
+        /// Где написан атрибут.
+        span: Span,
+    },
+
     /// Голова класса или инстанса написана не именем с аргументами.
     #[error("голова класса пишется именем с аргументами: `class Eqv a`, `instance Eqv Nat`")]
     ClassHead {
@@ -594,6 +620,8 @@ impl ElabError {
             | Self::AbstractType { span, .. }
             | Self::NoInstance { span, .. }
             | Self::ClassHead { span }
+            | Self::Attribute { span, .. }
+            | Self::NotTotal { span, .. }
             | Self::ModuleMember { span, .. }
             | Self::NotUpdatable { span }
             | Self::NoImplicitParameter { span }

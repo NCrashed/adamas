@@ -43,6 +43,8 @@ use crate::route::{self, Declared};
 /// Написанный тип хранится вместе с собранным: маршрут отказа пойдёт по нему
 /// обратно, чтобы стать спаном (§10 вопрос 49б).
 struct Pending<'a> {
+    /// Требует ли `@total` положительного вердикта (§4.7).
+    total: bool,
     name: Symbol,
     ty: Term,
     source: &'a ast::Expr,
@@ -172,6 +174,44 @@ fn written_alias(
     )
 }
 
+/// Разбирает атрибуты сигнатуры: что из них требует проверки (§4.7).
+///
+/// `@total` - единственный, который компилятор сегодня проверяет: вердикт
+/// ядро считает всегда, и атрибут превращается в требование «ответ обязан
+/// быть да». `@fbip` и `@noalloc` - обязательства перед backend'ом, а его нет;
+/// принять их молча значило бы обещать проверку, которой не будет.
+fn required(attributes: &[ast::Name]) -> Result<bool, ElabError> {
+    let mut total = false;
+    for attribute in attributes {
+        match &*attribute.text {
+            "total" => total = true,
+            "fbip" => {
+                return Err(ElabError::Attribute {
+                    name: Rc::clone(&attribute.text),
+                    why: "совместимость с FBIP проверяется по коду backend'а (§5.1), \
+                          а его ещё нет",
+                    span: attribute.span,
+                });
+            }
+            "noalloc" => {
+                return Err(ElabError::Attribute {
+                    name: Rc::clone(&attribute.text),
+                    why: "источники аллокации перечисляет backend (§5.1), а его ещё нет",
+                    span: attribute.span,
+                });
+            }
+            _ => {
+                return Err(ElabError::Attribute {
+                    name: Rc::clone(&attribute.text),
+                    why: "такого атрибута в языке нет",
+                    span: attribute.span,
+                });
+            }
+        }
+    }
+    Ok(total)
+}
+
 /// Написанная сигнатура - объявление, ждущее своих клауз.
 #[allow(clippy::too_many_arguments)]
 fn declared_signature<'a>(
@@ -181,8 +221,10 @@ fn declared_signature<'a>(
     within: Option<&Enclosing<'_>>,
     name: &ast::Name,
     ty: &'a ast::Expr,
+    attributes: &[ast::Name],
     span: Span,
 ) -> Result<Pending<'a>, ElabError> {
+    let total = required(attributes)?;
     // Владение верхнего уровня не выражается: определение всегда `ω`
     // (`sig.rs`: линейность на всю программу не считается), а §3.3 требует
     // `1`. Без этого отказа постулат ресурсного типа - обычное ω-имя, и `drop`
@@ -201,6 +243,7 @@ fn declared_signature<'a>(
     let params = elaborator.telescope(params_of(within), true)?;
     let elaborated = elaborator.wrapped(&params, true, |it| it.declaration(ty, Mult::Many))?;
     Ok(Pending {
+        total,
         name: qualify(within, &name.text),
         ty: elaborated,
         source: ty,
@@ -266,10 +309,14 @@ fn members_into(
     let mut pending: Option<Pending<'_>> = None;
     for decl in decls {
         match &decl.kind {
-            DeclKind::Signature { name, ty } => {
+            DeclKind::Signature {
+                name,
+                ty,
+                attributes,
+            } => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
                 pending = Some(declared_signature(
-                    signature, metas, owned, within, name, ty, decl.span,
+                    signature, metas, owned, within, name, ty, attributes, decl.span,
                 )?);
             }
             DeclKind::Clauses { name, clauses } => {
@@ -651,7 +698,7 @@ fn declare_class(
     }
     for member in &class.members {
         match &member.kind {
-            DeclKind::Signature { name, ty } => {
+            DeclKind::Signature { name, ty, .. } => {
                 members.push((name.clone(), Some(ty)));
                 info.methods.push(Rc::clone(&name.text));
             }
@@ -1307,7 +1354,7 @@ fn mutual_members(members: &[ast::Decl], span: Span) -> Result<Vec<Mutual<'_>>, 
     let mut pending: Option<(&ast::Name, &ast::Expr, Span)> = None;
     for member in members {
         match &member.kind {
-            DeclKind::Signature { name, ty } => {
+            DeclKind::Signature { name, ty, .. } => {
                 if let Some((waiting, ..)) = pending {
                     return Err(ElabError::MissingSignature {
                         name: Rc::clone(&waiting.text),
@@ -1492,7 +1539,7 @@ fn declare_module_type(
     let mut members = Vec::with_capacity(module.members.len());
     for member in &module.members {
         match &member.kind {
-            DeclKind::Signature { name, ty } => members.push((name.clone(), Some(ty))),
+            DeclKind::Signature { name, ty, .. } => members.push((name.clone(), Some(ty))),
             // Абстрактный типовой член. Уравнение здесь - полупрозрачная
             // сигнатура (§10 вопрос 46), и её в языке пока нет.
             DeclKind::Alias { name, body: None } => members.push((name.clone(), None)),
@@ -1646,6 +1693,15 @@ fn define(
             }
         })?;
 
+    // Вердикт читается после объявления: считает его ядро, а атрибут только
+    // требует, чтобы ответ был «да» (§4.7).
+    if declared.total && !signature.lookup(&declared.name).is_some_and(|it| it.total) {
+        return Err(ElabError::NotTotal {
+            name: Rc::clone(&declared.name),
+            span: declared.span,
+        });
+    }
+
     // После объявления, а не до: дырки решены и подставлены, поэтому видно,
     // чем на самом деле стал каждый выводимый аргумент (§10 вопрос 76).
     carrier::check(signature, known.owned, &declared.name, span)
@@ -1722,7 +1778,7 @@ fn resource_members(
 
     for member in &resource.members {
         match &member.kind {
-            ast::DeclKind::Signature { name, ty } => {
+            ast::DeclKind::Signature { name, ty, .. } => {
                 constructors.extend(pending.take().map(constructor));
                 pending = Some((name, ty, member.span));
             }
@@ -1861,6 +1917,7 @@ fn declare_resource(
         drop_ty.span,
     )?;
     let declared = Pending {
+        total: false,
         name: Rc::clone(&drop_name.text),
         ty: elaborated,
         source: drop_ty,

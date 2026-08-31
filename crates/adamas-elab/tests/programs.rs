@@ -2877,3 +2877,45 @@ fn a_mutual_group_carries_definitions_only() {
         );
     }
 }
+
+#[test]
+fn the_total_attribute_requires_a_positive_verdict() {
+    // §4.7: вердикт ядро считает всегда (лог 2026-08-24), а атрибут - это
+    // требование «ответ обязан быть да». Отсюда и отказ: он не о том, что
+    // проверка не справилась, а о том, что обещание не выполнено.
+    program(&format!(
+        "{BASE}
+@total
+plus : Nat -> Nat -> Nat
+plus Zero m = m
+plus (Succ k) m = Succ (plus k m)
+"
+    ));
+    let error = refused(&format!(
+        "{BASE}
+loop : Nat -> Nat
+loop n = loop n
+
+@total
+bad : Nat -> Nat
+bad n = loop n
+"
+    ));
+    assert!(
+        matches!(error, ElabError::NotTotal { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn an_unchecked_attribute_names_what_is_missing() {
+    // `@fbip` и `@noalloc` - обязательства перед backend'ом, а его нет.
+    // Принять их молча значило бы обещать проверку, которой не будет.
+    for text in ["@fbip\nf : Nat\nf = Zero\n", "@fast\nf : Nat\nf = Zero\n"] {
+        let error = refused(&format!("{BASE}{text}"));
+        assert!(
+            matches!(error, ElabError::Attribute { .. }),
+            "для {text:?} получено {error:?}"
+        );
+    }
+}

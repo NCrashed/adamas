@@ -45,13 +45,13 @@ pub struct Instances {
     /// поддержан, поэтому ключ однозначен. Область видимости одна на прогон -
     /// импортов в языке ещё нет, и вопрос 48 (приоритет при импорте) пока не
     /// имеет предмета.
-    candidates: HashMap<(Symbol, Symbol), Symbol>,
+    candidates: HashMap<(Symbol, Rc<[Symbol]>), Symbol>,
     /// Именованные кандидаты по той же паре.
     ///
     /// Список, а не один: имя нужно ровно тем инстансам, которых на один
     /// тип несколько (§4.3). Пока такой один, разрешение берёт его само;
     /// несколько - отказ с требованием `using`.
-    named: HashMap<(Symbol, Symbol), Vec<Symbol>>,
+    named: HashMap<(Symbol, Rc<[Symbol]>), Vec<Symbol>>,
 }
 
 /// Чем разрешение отвечает на пару «класс, голова».
@@ -100,16 +100,16 @@ impl Instances {
     }
 
     /// Запоминает анонимный инстанс. `false` - такой уже есть.
-    pub fn add(&mut self, class: &Symbol, head: &Symbol, name: Symbol) -> bool {
+    pub fn add(&mut self, class: &Symbol, heads: &Rc<[Symbol]>, name: Symbol) -> bool {
         self.candidates
-            .insert((Rc::clone(class), Rc::clone(head)), name)
+            .insert((Rc::clone(class), Rc::clone(heads)), name)
             .is_none()
     }
 
     /// Запоминает именованный инстанс. Их на пару бывает сколько угодно.
-    pub fn add_named(&mut self, class: &Symbol, head: &Symbol, name: Symbol) {
+    pub fn add_named(&mut self, class: &Symbol, heads: &Rc<[Symbol]>, name: Symbol) {
         self.named
-            .entry((Rc::clone(class), Rc::clone(head)))
+            .entry((Rc::clone(class), Rc::clone(heads)))
             .or_default()
             .push(name);
     }
@@ -119,8 +119,8 @@ impl Instances {
     /// Анонимный выигрывает всегда: он и объявлен как «тот самый». Его нет -
     /// берётся единственный именованный; несколько - выбирать автоматике
     /// нечем, и об этом надо сказать, а не молча взять первый.
-    fn candidate(&self, class: &Symbol, head: &Symbol) -> Candidate {
-        let key = (Rc::clone(class), Rc::clone(head));
+    fn candidate(&self, class: &Symbol, heads: &Rc<[Symbol]>) -> Candidate {
+        let key = (Rc::clone(class), Rc::clone(heads));
         if let Some(found) = self.candidates.get(&key) {
             return Candidate::One(Rc::clone(found));
         }
@@ -229,47 +229,44 @@ fn settle(
             metas.solve_term(meta, solution);
             continue;
         }
-        let head = match head {
-            Head::Named(name) => name,
+        let heads = match head {
+            Head::Named(heads) => heads,
             // Голова-переменная: инстанса для неё нет и быть не может, а
             // словарь из контекста уже не нашёлся.
             Head::Rigid => {
-                return Err(ElabError::NoInstance {
-                    class,
-                    head: Rc::from("переменная"),
-                    span,
-                });
+                let written = written(&class, &[Rc::from("переменная")]);
+                return Err(ElabError::NoInstance { written, span });
             }
             // Голова не определилась вовсе - решать её должна была
             // унификация, и о том, что не решила, скажет объявление.
             Head::Unknown => return Ok(()),
         };
+        let written = written(&class, &heads);
         // Объявляемый сейчас инстанс собой сослаться не может - в сигнатуре
         // его ещё нет, - и словарь для него собирается **записью из членов**.
-        if let Some(inner) = declaring.filter(|it| it.matches(&class, &head)) {
+        if let Some(inner) = declaring.filter(|it| it.matches(&class, &heads)) {
             let Some(solution) = inner.dictionary(signature, metas, &ty) else {
-                return Err(ElabError::NoInstance { class, head, span });
+                return Err(ElabError::NoInstance { written, span });
             };
             metas.solve_term(meta, solution);
             continue;
         }
-        let name = match instances.candidate(&class, &head) {
+        let name = match instances.candidate(&class, &heads) {
             Candidate::One(name) => name,
-            Candidate::None => return Err(ElabError::NoInstance { class, head, span }),
+            Candidate::None => return Err(ElabError::NoInstance { written, span }),
             Candidate::Many(candidates) => {
                 return Err(ElabError::AmbiguousInstance {
-                    class,
-                    head,
+                    written,
                     candidates,
                     span,
                 });
             }
         };
         let Some(dictionary) = signature.instantiate(&name, metas) else {
-            return Err(ElabError::NoInstance { class, head, span });
+            return Err(ElabError::NoInstance { written, span });
         };
         let Some((solution, fresh)) = applied_candidate(signature, metas, &ty, &dictionary) else {
-            return Err(ElabError::NoInstance { class, head, span });
+            return Err(ElabError::NoInstance { written, span });
         };
         metas.solve_term(meta, solution);
         pending.extend(fresh);
@@ -349,34 +346,56 @@ fn from_context(
 /// Внешний `None` - тип не применение определения, то есть словарём он не
 /// является вовсе. Внутренний - голова аргумента переменная, и кандидата для
 /// неё искать негде.
-fn applied(ty: &Term) -> Option<(Symbol, Head)> {
-    let Term::App(callee, argument) = ty else {
-        return None;
-    };
-    let Term::Const(class, _) = &**callee else {
-        return None;
-    };
-    let mut head = &**argument;
-    while let Term::App(inner, _) = head {
-        head = inner;
+pub(crate) fn applied(ty: &Term) -> Option<(Symbol, Head)> {
+    let mut arguments = Vec::new();
+    let mut current = ty;
+    while let Term::App(callee, argument) = current {
+        arguments.push(&**argument);
+        current = callee;
     }
-    let found = match head {
-        Term::Const(name, _) => Head::Named(Rc::clone(name)),
-        // Переменная - полиморфный случай: словарь приходит из контекста.
-        Term::Var(_) => Head::Rigid,
-        _ => Head::Unknown,
+    arguments.reverse();
+    let Term::Const(class, _) = current else {
+        return None;
     };
-    Some((Rc::clone(class), found))
+    if arguments.is_empty() {
+        return None;
+    }
+    // Ключ кандидата - головы **всех** аргументов: у многопараметрического
+    // класса первая ничего не решает (§4.1). Хватает одной переменной, чтобы
+    // кандидата не было вовсе: искать его негде, словарь придёт из контекста.
+    let mut heads = Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        let mut head = argument;
+        while let Term::App(inner, _) = head {
+            head = inner;
+        }
+        match head {
+            Term::Const(name, _) => heads.push(Rc::clone(name)),
+            Term::Var(_) => return Some((Rc::clone(class), Head::Rigid)),
+            _ => return Some((Rc::clone(class), Head::Unknown)),
+        }
+    }
+    Some((Rc::clone(class), Head::Named(heads.into())))
 }
 
-/// Голова аргумента цели.
-enum Head {
-    /// Определение - по нему и ищется кандидат.
-    Named(Symbol),
-    /// Переменная: кандидата для неё нет и быть не может.
+/// Головы аргументов цели.
+pub(crate) enum Head {
+    /// Все определения - по ним и ищется кандидат.
+    Named(Rc<[Symbol]>),
+    /// Есть переменная: кандидата для неё нет и быть не может.
     Rigid,
-    /// Ещё не определилась.
+    /// Ещё не определились.
     Unknown,
+}
+
+/// Головы одной строкой - для сообщения: `Conv Nat Bool`.
+pub(crate) fn written(class: &Symbol, heads: &[Symbol]) -> Symbol {
+    let mut out = String::from(&**class);
+    for head in heads {
+        out.push(' ');
+        out.push_str(head);
+    }
+    Rc::from(out.as_str())
 }
 
 /// Цель дырки, приведённая к нормальной форме под своим телескопом.
@@ -400,8 +419,8 @@ fn normalized(signature: &Signature, ty: &Term) -> Term {
 pub struct Declaring {
     /// Имя класса.
     pub class: Symbol,
-    /// Голова аргумента.
-    pub head: Symbol,
+    /// Головы аргументов.
+    pub heads: Rc<[Symbol]>,
     /// Сколько ведущих связываний у словаря: столько же у каждого члена.
     pub prefix: usize,
     /// Члены: короткое имя поля и терм, которым член берётся.
@@ -410,8 +429,8 @@ pub struct Declaring {
 
 impl Declaring {
     /// Про этот ли инстанс цель.
-    fn matches(&self, class: &Symbol, head: &Symbol) -> bool {
-        self.class == *class && self.head == *head
+    fn matches(&self, class: &Symbol, heads: &Rc<[Symbol]>) -> bool {
+        self.class == *class && self.heads == *heads
     }
 
     /// Словарь записью из членов, применённых к ведущим связываниям цели.

@@ -2985,3 +2985,132 @@ auto = pick Zero (Succ Zero)
 "
     ));
 }
+
+/// Класс о **паре** типов: у него ни один параметр не главнее прочих.
+const CONV: &str = "
+class Conv a b where
+  conv : a -> b
+
+instance Conv Nat Bool where
+  conv Zero = False
+  conv (Succ k) = True
+
+instance Conv Bool Nat where
+  conv True = Succ Zero
+  conv False = Zero
+";
+
+#[test]
+fn a_class_takes_several_parameters() {
+    // §4.1: кандидат ищется по головам **всех** аргументов, поэтому `Conv Nat
+    // Bool` и `Conv Bool Nat` - разные инстансы, а не переобъявление одного.
+    program(&format!(
+        "{BASE}{CONV}
+forward : Bool
+forward = conv (Succ Zero)
+
+backward : Nat
+backward = conv True
+"
+    ));
+}
+
+#[test]
+fn a_candidate_is_keyed_by_every_argument() {
+    // Голова первого аргумента подходит, второго - нет. Ключ из одной головы
+    // взял бы здесь `Conv Nat Bool` и соврал бы о типе результата.
+    let error = refused(&format!(
+        "{BASE}
+class Conv a b where
+  conv : a -> b
+
+instance Conv Nat Bool where
+  conv n = True
+
+bad : Nat
+bad = conv Zero
+"
+    ));
+    assert!(
+        matches!(&error, ElabError::NoInstance { written, .. } if &**written == "Conv Nat Nat"),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_multi_parameter_instance_carries_a_context() {
+    // Контекст связывает обе переменные сразу: `b` в голове видно только из
+    // второго аргумента.
+    program(&format!(
+        "{BASE}
+data Pair (a : Type) (b : Type) where
+  Both : a -> b -> Pair a b
+
+class Conv a b where
+  conv : a -> b
+
+instance Conv Nat Bool where
+  conv n = True
+
+instance {{Conv a b}} => Conv (Pair a a) (Pair b b) where
+  conv (Both x y) = Both (conv x) (conv y)
+
+lifted : Pair Bool Bool
+lifted = conv (Both Zero (Succ Zero))
+"
+    ));
+}
+
+#[test]
+fn a_head_binds_more_than_one_variable() {
+    // Заголовок с двумя связываниями: домен второго - дырка над первым, и
+    // подстановка её решения оставляет бета-редекс. Читать заголовок надо из
+    // значения, иначе инференс домена спотыкается о лямбду.
+    program(&format!(
+        "{BASE}
+data Pair (a : Type) (b : Type) where
+  Both : a -> b -> Pair a b
+
+class Eqv a where
+  eq : a -> a -> Bool
+
+instance Eqv Nat where
+  eq x y = True
+
+instance Eqv Bool where
+  eq x y = False
+
+instance {{Eqv a, Eqv b}} => Eqv (Pair a b) where
+  eq (Both x y) (Both p q) = eq x p
+
+mixed : Bool
+mixed = eq (Both Zero True) (Both Zero False)
+"
+    ));
+}
+
+#[test]
+fn a_multi_parameter_class_keeps_superclasses_and_defaults() {
+    // Суперкласс и умолчание метода стоят у класса, а не у ключа поиска, и от
+    // числа параметров зависеть не должны.
+    program(&format!(
+        "{BASE}
+class Eqv a where
+  eq : a -> a -> Bool
+
+instance Eqv Nat where
+  eq x y = True
+
+class Conv a b when Eqv a where
+  conv : a -> b
+  twice : a -> b
+  twice x = conv x
+
+instance Conv Nat Bool where
+  conv n = True
+
+defaulted : Bool
+defaulted = twice Zero
+"
+    ));
+}

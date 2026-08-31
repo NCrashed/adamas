@@ -789,20 +789,20 @@ fn declare_instance(
     // доживают до неё.
     let written = written_head(signature, metas, owned, class, span, &names)?;
     let prefix = leading(&written);
-    let Some((_, argument)) = applied_head(under_prefix(&written)) else {
+    let Some((_, arguments)) = applied_head(under_prefix(&written)) else {
         return Err(ElabError::ClassHead { span });
     };
     // Именованный объявляется под своим именем: сослаться на него через
     // `using` и `@` можно только так (§4.3). Анонимный - под невыразимым.
     let declared: Symbol = match &class.name {
         Some(written) => Rc::clone(&written.text),
-        None => Rc::from(format!("{}#{argument}", name.text).as_str()),
+        None => Rc::from(mangled(&name.text, &arguments).as_str()),
     };
     // Кандидат запоминается **до** членов: иначе о дубликате скажет ядро,
     // назвав `Eqv#Nat.eq` - имя, которого автор не писал.
     if class.name.is_some() {
-        instances.add_named(&name.text, &argument, Rc::clone(&declared));
-    } else if !instances.add(&name.text, &argument, Rc::clone(&declared)) {
+        instances.add_named(&name.text, &arguments, Rc::clone(&declared));
+    } else if !instances.add(&name.text, &arguments, Rc::clone(&declared)) {
         return Err(ElabError::ModuleMember {
             name: Rc::clone(&name.text),
             what: "программе",
@@ -818,7 +818,7 @@ fn declare_instance(
         .collect();
 
     declare_members(
-        signature, metas, owned, instances, name, &argument, &prefix, &written, &members,
+        signature, metas, owned, instances, name, &arguments, &prefix, &written, &members,
         &qualified, span, &names,
     )?;
 
@@ -881,7 +881,14 @@ fn written_head(
         error: Box::new(error),
         names: names.clone(),
     })?;
-    Ok(zonk_term(metas, &written))
+    // Зонк подставляет решение дырки целиком и оставляет бета-редекс:
+    // домен второго связывания заголовка - дырка над первым, и её решение
+    // приезжает лямбдой, применённой к нему. Инференс такого домена спотыкается
+    // (лямбде нужна аннотация), поэтому заголовок читается обратно из значения.
+    // Константы при этом остаются свёрнутыми - класс в голове переживает
+    // нормализацию.
+    let written = zonk_term(metas, &written);
+    Ok(quote(0, &Ctx::new(signature).eval(&written)))
 }
 
 /// Член инстанса: имя метода, клаузы и место, откуда они взяты.
@@ -1021,22 +1028,26 @@ fn under_prefix(ty: &Term) -> &Term {
     current
 }
 
-/// Голова применения и голова её аргумента - по элаборированному типу.
-fn applied_head(ty: &Term) -> Option<(Symbol, Symbol)> {
-    let Term::App(callee, argument) = ty else {
-        return None;
-    };
-    let Term::Const(class, _) = &**callee else {
-        return None;
-    };
-    let mut head = &**argument;
-    while let Term::App(inner, _) = head {
-        head = inner;
+/// Невыразимое имя анонимного инстанса: `Eqv#Nat`, `Conv#Nat#Bool`.
+fn mangled(class: &str, heads: &[Symbol]) -> String {
+    let mut out = String::from(class);
+    for head in heads {
+        out.push('#');
+        out.push_str(head);
     }
-    let Term::Const(name, _) = head else {
-        return None;
-    };
-    Some((Rc::clone(class), Rc::clone(name)))
+    out
+}
+
+/// Имя класса и головы всех его аргументов - по элаборированному типу.
+///
+/// Головы **всех**: у многопараметрического класса первая ничего не решает
+/// (§4.1), и ключ кандидата составляется из них целиком.
+fn applied_head(ty: &Term) -> Option<(Symbol, Rc<[Symbol]>)> {
+    let (class, head) = class::applied(ty)?;
+    match head {
+        class::Head::Named(heads) => Some((class, heads)),
+        _ => None,
+    }
 }
 
 /// Метод класса - определение верхнего уровня, проецирующее словарь.
@@ -1061,40 +1072,53 @@ fn declare_method(
     let Some(applied) = signature.instantiate(class, metas) else {
         return Ok(());
     };
-    let (kind, _) = infer(&Ctx::new(signature), metas, Mult::Zero, &applied).map_err(fail)?;
-    let Value::Pi(_, _, domain, _, _) = &*kind else {
+    let (mut kind, _) = infer(&Ctx::new(signature), metas, Mult::Zero, &applied).map_err(fail)?;
+    // Параметров у класса бывает несколько (§4.1), поэтому связывания
+    // собираются циклом: у двухпараметрического `Conv a b` метод получает оба,
+    // и словарь стоит за ними.
+    let mut ctx = Ctx::new(signature);
+    let mut sorts = Vec::new();
+    while let Value::Pi(_, _, domain, _, codomain) = &*kind.clone() {
+        sorts.push(quote(ctx.size(), domain));
+        let name = CoreName::from(format!("a{}", sorts.len() - 1).as_str());
+        ctx = ctx.bind(name, Mult::Zero, Rc::clone(domain));
+        kind = codomain.clone().apply(ctx.eval(&Term::var(0)));
+    }
+    if sorts.is_empty() {
         return Ok(());
-    };
-    let sort = quote(0, domain);
-    let ctx = Ctx::new(signature);
-    let inner = ctx.bind(CoreName::from("a"), Mult::Zero, Rc::clone(domain));
-    let dictionary = Term::App(Rc::new(applied.clone()), Rc::new(Term::var(0)));
-    let bound = inner.eval(&dictionary);
-    let inner = inner.bind(CoreName::from("d"), Mult::Many, bound);
+    }
+    let arity = u32::try_from(sorts.len()).unwrap_or(u32::MAX);
+    let dictionary = (0..arity).fold(applied.clone(), |callee, at| {
+        Term::App(Rc::new(callee), Rc::new(Term::var(arity - 1 - at)))
+    });
+    let bound = ctx.eval(&dictionary);
+    let inner = ctx.bind(CoreName::from("d"), Mult::Many, bound);
     let projection = Term::Project(Rc::new(Term::var(0)), CoreName::from(&**method));
     let (ty, _) = infer(&inner, metas, Mult::Zero, &projection).map_err(fail)?;
     let ty = Term::Pi(
-        Binder::implicit(Mult::Zero),
-        CoreName::from("a"),
-        Rc::new(sort),
+        Binder::implicit(Mult::Many),
+        CoreName::from("d"),
+        Rc::new(dictionary),
         adamas_core::row::Row::empty(),
-        Rc::new(Term::Pi(
-            Binder::implicit(Mult::Many),
-            CoreName::from("d"),
-            Rc::new(dictionary),
+        Rc::new(quote(inner.size(), &ty)),
+    );
+    let ty = sorts.iter().enumerate().rev().fold(ty, |body, (at, sort)| {
+        Term::Pi(
+            Binder::implicit(Mult::Zero),
+            CoreName::from(format!("a{at}").as_str()),
+            Rc::new(sort.clone()),
             adamas_core::row::Row::empty(),
-            Rc::new(quote(inner.size(), &ty)),
-        )),
-    );
-    let body = Term::Lam(
-        Mult::Zero,
-        CoreName::from("a"),
-        Rc::new(Term::Lam(
-            Mult::Many,
-            CoreName::from("d"),
-            Rc::new(projection),
-        )),
-    );
+            Rc::new(body),
+        )
+    });
+    let body = Term::Lam(Mult::Many, CoreName::from("d"), Rc::new(projection));
+    let body = (0..sorts.len()).rev().fold(body, |inner, at| {
+        Term::Lam(
+            Mult::Zero,
+            CoreName::from(format!("a{at}").as_str()),
+            Rc::new(inner),
+        )
+    });
     signature
         .define_inferred(metas, method, Mult::Many, ty, Some(body))
         .map_err(fail)
@@ -1115,7 +1139,7 @@ fn declare_members(
     owned: &mut Owned,
     instances: &Instances,
     name: &ast::Name,
-    argument: &Symbol,
+    arguments: &Rc<[Symbol]>,
     prefix: &[Param],
     written: &Term,
     members: &[Written],
@@ -1171,7 +1195,7 @@ fn declare_members(
     // названы, и объявятся вместе.
     let declaring = Declaring {
         class: Rc::clone(&name.text),
-        head: Rc::clone(argument),
+        heads: Rc::clone(arguments),
         prefix: prefix.len(),
         members: members
             .iter()

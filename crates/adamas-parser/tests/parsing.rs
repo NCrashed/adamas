@@ -499,3 +499,16 @@ fn a_sealing_ascription_parses() {
         "(module M :> S\n  (sig flag Bool))\n"
     );
 }
+
+#[test]
+fn a_functor_and_its_application_parse() {
+    // §4.8: параметр модуля пишется группой связываний, применение функтора -
+    // обычным выражением после `=`. Блока членов у второй формы нет.
+    let text = "\
+module OrderedMap (Key : Ord) where
+  empty : Map
+
+module IntMap = OrderedMap IntOrd
+";
+    insta::assert_snapshot!(tree(text).expect("разбор удался"));
+}

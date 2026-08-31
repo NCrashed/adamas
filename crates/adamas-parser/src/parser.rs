@@ -1108,6 +1108,10 @@ impl<'a> Parser<'a> {
         let signature = self.eat(TokenKind::Type).is_some();
         let name = self.expect(TokenKind::Ident)?;
         let name = self.name_of(name);
+        // Параметры есть только у модуля: сигнатура интерфейс, а не функция от
+        // него. Написанные у сигнатуры отвергает элаборация - сказать это
+        // словами она умеет, а парсер их просто разбирает.
+        let params = self.params()?;
         let sealed = self.at(TokenKind::Seal);
         let ascription =
             if self.eat(TokenKind::Colon).is_some() || self.eat(TokenKind::Seal).is_some() {
@@ -1120,8 +1124,17 @@ impl<'a> Parser<'a> {
                 None
             };
         let mut end = ascription.as_ref().map_or(name.span, |it| it.span);
+        // `module IntMap = OrderedMap IntOrd` - применение функтора; тела
+        // блоком у него нет, и `where` за ним не идёт.
+        let body = if self.eat(TokenKind::Equals).is_some() {
+            let written = self.body()?;
+            end = written.span;
+            Some(written)
+        } else {
+            None
+        };
         let mut members = Vec::new();
-        if self.eat(TokenKind::Where).is_some() {
+        if body.is_none() && self.eat(TokenKind::Where).is_some() {
             self.expect(TokenKind::Open)?;
             members = self.members(TokenKind::Close, Self::decl)?;
             self.expect(TokenKind::Close)?;
@@ -1131,6 +1144,8 @@ impl<'a> Parser<'a> {
             kind: DeclKind::Module(ModuleDecl {
                 signature,
                 name,
+                params,
+                body,
                 ascription,
                 sealed,
                 members,

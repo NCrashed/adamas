@@ -1,0 +1,7 @@
+---
+source: crates/adamas-parser/tests/parsing.rs
+expression: "tree(text).expect(\"разбор удался\")"
+---
+(module OrderedMap (Key : Ord)
+  (sig empty Map))
+(module IntMap = (OrderedMap IntOrd))

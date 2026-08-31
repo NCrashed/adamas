@@ -75,8 +75,14 @@ impl Spans<'_> {
             }
             DeclKind::Module(module) => {
                 self.name(at, &module.name);
+                for param in &module.params {
+                    self.binder(at, param);
+                }
                 if let Some(ascription) = &module.ascription {
                     self.expr(at, ascription);
+                }
+                if let Some(body) = &module.body {
+                    self.expr(at, body);
                 }
                 for member in &module.members {
                     self.decl(at, member);

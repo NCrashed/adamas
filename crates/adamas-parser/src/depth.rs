@@ -323,8 +323,14 @@ fn decl_at<'a>(decl: &'a Decl, depth: u32, pending: &mut Pending<'a>) -> Result<
         // глубже, и глубина у него на шаг больше.
         DeclKind::Module(module) => {
             let inner = deepen(depth, 1, decl.span)?;
+            for ty in module.params.iter().filter_map(|it| it.ty.as_ref()) {
+                pending.push((Node::Expr(ty), depth));
+            }
             if let Some(ascription) = &module.ascription {
                 pending.push((Node::Expr(ascription), depth));
+            }
+            if let Some(body) = &module.body {
+                pending.push((Node::Expr(body), depth));
             }
             for member in &module.members {
                 decl_at(member, inner, pending)?;

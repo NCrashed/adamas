@@ -414,6 +414,12 @@ pub struct ModuleDecl {
     pub signature: bool,
     /// Имя.
     pub name: Name,
+    /// Параметры функтора: `module OrderedMap (Key : Ord) where` (§4.8).
+    /// Пусто - обычный модуль.
+    pub params: Vec<Binder>,
+    /// Тело, написанное выражением: `module IntMap = OrderedMap IntOrd`.
+    /// `None` - тело написано блоком членов.
+    pub body: Option<Expr>,
     /// Аннотация сигнатурой: `module IntOrd : Ord where`. У самой сигнатуры её
     /// не бывает.
     pub ascription: Option<Expr>,
@@ -584,9 +590,17 @@ fn dump_decl(out: &mut String, decl: &Decl, depth: usize) {
                 "(module "
             });
             out.push_str(&module.name.text);
+            for param in &module.params {
+                out.push(' ');
+                dump_binder(out, param);
+            }
             if let Some(ascription) = &module.ascription {
                 out.push_str(if module.sealed { " :> " } else { " : " });
                 dump_expr(out, ascription);
+            }
+            if let Some(body) = &module.body {
+                out.push_str(" = ");
+                dump_expr(out, body);
             }
             for member in &module.members {
                 out.push('\n');

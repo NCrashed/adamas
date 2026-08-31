@@ -243,9 +243,18 @@ impl Printer {
             "module "
         });
         self.decl_name(&module.name);
+        for param in &module.params {
+            self.push(" ");
+            self.binder(param);
+        }
         if let Some(ascription) = &module.ascription {
             self.push(if module.sealed { " :> " } else { " : " });
             self.expr(ascription, Prec::Lowest);
+        }
+        if let Some(body) = &module.body {
+            self.push(" = ");
+            self.expr(body, Prec::Lowest);
+            return;
         }
         self.push(" where");
         self.block_of(&module.members, Self::decl);

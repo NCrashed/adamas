@@ -435,6 +435,10 @@ pub enum DeclKind {
 /// у класса это связываемый параметр, у инстанса написанный тип.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClassDecl {
+    /// Маркер `coherent` перед `class` (§3.5): запрос на глобальную
+    /// уникальность инстансов. У инстанса всегда `false` - маркер ставится
+    /// классу, а условия пригодности проверяются на каждом его инстансе.
+    pub coherent: bool,
     /// `instance Ord Int where` против `class Ord a where`.
     pub instance: bool,
     /// Имя инстанса: `instance productMonoid : Monoid Int where` (§4.3).
@@ -623,6 +627,9 @@ fn line(out: &mut String, depth: usize) {
 
 /// Класс или инстанс: `(class (Eqv a) (sig eq …))`.
 fn dump_class(out: &mut String, class: &ClassDecl, depth: usize) {
+    if class.coherent {
+        out.push_str("(coherent ");
+    }
     out.push_str(if class.instance {
         "(instance "
     } else {
@@ -638,6 +645,9 @@ fn dump_class(out: &mut String, class: &ClassDecl, depth: usize) {
         dump_expr(out, superclass);
     }
     dump_block(out, "", &class.members, depth);
+    if class.coherent {
+        out.push(')');
+    }
 }
 
 /// `\x y -> body`: `(lam (x y) body)`.

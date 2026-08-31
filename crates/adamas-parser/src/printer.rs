@@ -218,11 +218,18 @@ impl Printer {
                 self.block_of(members, Self::decl);
             }
             DeclKind::Class(class) => {
+                if class.coherent {
+                    self.push("coherent ");
+                }
                 self.push(if class.instance {
                     "instance "
                 } else {
                     "class "
                 });
+                if let Some(name) = &class.name {
+                    self.decl_name(name);
+                    self.push(" : ");
+                }
                 self.expr(&class.head, Prec::Lowest);
                 for (index, superclass) in class.superclasses.iter().enumerate() {
                     self.push(if index == 0 { " when " } else { ", " });

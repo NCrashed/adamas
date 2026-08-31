@@ -300,7 +300,6 @@ fn forms_of_later_phases_name_their_phase() {
     // Лексема зарезервирована и опечаткой быть не может, поэтому честнее
     // назвать фазу, чем перечислять, что бывает здесь вместо неё.
     let cases = [
-        ("coherent class Key a\n", Unsupported::Class),
         ("effect State s where\n  get : s\n", Unsupported::Effect),
         // Effect row и запись пишутся одними скобками, а различает их регистр
         // (§4.1): метка ряда заглавная, поле записи строчное.
@@ -587,5 +586,19 @@ fn a_named_instance_and_using_parse() {
     assert_eq!(
         tree("n = using productMonoid foldM xs\n").expect("разбор удался"),
         "(def n\n  (clause () (using productMonoid (foldM xs))))\n"
+    );
+}
+
+#[test]
+fn the_coherent_marker_stands_before_a_class() {
+    // `coherent` помечает класс и ничего больше не открывает - как `unique`
+    // перед `data`. Перед инстансом он бессмыслен: маркер ставится классу, а
+    // условия пригодности проверяются на каждом его инстансе (§3.5).
+    let dumped = tree("coherent class Key a where\n  key : a -> Nat\n").expect("разбор удался");
+    assert!(dumped.starts_with("(coherent (class"), "получено {dumped}");
+    let error = parse_error("coherent instance Key Int\n");
+    assert!(
+        matches!(error, ParseError::Expected { .. }),
+        "получено {error:?}"
     );
 }

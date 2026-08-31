@@ -34,6 +34,19 @@ data Void : Type
 ",
     ),
     (
+        "classes_and_instances",
+        "\
+coherent class Key a when Eqv a where
+  key : a -> Nat
+
+instance Key Int where
+  key n = n
+
+instance productMonoid : Monoid Int where
+  unit = 1
+",
+    ),
+    (
         "block_of_statements",
         "\
 counter =

@@ -1,0 +1,30 @@
+-- Контекст инстанса когерентного класса (§3.5, пункт 1).
+--
+-- Маркер `coherent` обещает не более одного словаря на программу, а инстанс
+-- с контекстом - не словарь, а семейство: аргумент контекста резолвится в
+-- точке употребления. Два разных `Eqv Nat` дали бы два разных `Key (List Nat)`
+-- внутри escape hatch, заведённого чтобы этого не было.
+--
+-- Замыкание вниз поэтому обязательно: контекст состоит только из когерентных
+-- классов.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+class Eqv a where
+  eq : a -> a -> Bool
+
+coherent class Key a where
+  key : a -> Nat
+
+instance {Eqv a} => Key (List a) where
+  key xs = Zero

@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: coherent-context.adamas:29:1: контекст инстанса `Key` несёт `Eqv`, а он `coherent` не объявлен
+  instance {Eqv a} => Key (List a) where
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

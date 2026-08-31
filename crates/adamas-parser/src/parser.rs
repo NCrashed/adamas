@@ -461,7 +461,7 @@ impl<'a> Parser<'a> {
     fn unsupported_here(&self) -> Option<ParseError> {
         let token = self.peek();
         let what = match token.kind {
-            TokenKind::Coherent | TokenKind::When => Unsupported::Class,
+            TokenKind::When => Unsupported::Class,
             TokenKind::Using => Unsupported::NamedInstance,
             TokenKind::Import => Unsupported::Import,
             TokenKind::Effect => Unsupported::Effect,
@@ -551,7 +551,10 @@ impl<'a> Parser<'a> {
             TokenKind::Resource => self.resource(),
             TokenKind::Type => self.alias(),
             TokenKind::Module => self.module_decl(),
-            TokenKind::Class | TokenKind::Instance => self.class_decl(),
+            TokenKind::Class | TokenKind::Instance => self.class_decl(false),
+            // `coherent` стоит перед `class` и, как `unique` перед `data`,
+            // своей формы объявления не заводит: он помечает уже имеющуюся.
+            TokenKind::Coherent => self.coherent_class(),
             TokenKind::Mutual => self.mutual(),
             TokenKind::At => self.attributed(),
             TokenKind::Ident | TokenKind::LParen => self.signature_or_clause(Vec::new()),
@@ -1219,7 +1222,20 @@ impl<'a> Parser<'a> {
     /// различать их формой разбора незачем. Что аргумент значит - связываемый
     /// параметр или написанный тип, - решает элаборация по тому, класс это
     /// или инстанс.
-    fn class_decl(&mut self) -> Result<Decl, ParseError> {
+    /// `coherent class Key a where …` (§3.5, §4.1).
+    fn coherent_class(&mut self) -> Result<Decl, ParseError> {
+        let start = self.bump().span;
+        if !self.at(TokenKind::Class) {
+            return Err(self.expected(Expected::Token(TokenKind::Class)));
+        }
+        let decl = self.class_decl(true)?;
+        Ok(Decl {
+            span: start.merge(decl.span),
+            ..decl
+        })
+    }
+
+    fn class_decl(&mut self, coherent: bool) -> Result<Decl, ParseError> {
         let start = self.peek().span;
         let instance = self.bump().kind == TokenKind::Instance;
         // `instance productMonoid : Monoid Int` - именованный (§4.3).
@@ -1263,6 +1279,7 @@ impl<'a> Parser<'a> {
         }
         Ok(Decl {
             kind: DeclKind::Class(ClassDecl {
+                coherent,
                 instance,
                 name,
                 head,

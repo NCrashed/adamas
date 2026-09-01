@@ -46,6 +46,18 @@ module type BagSig where
 ",
     ),
     (
+        "parameter_defaults",
+        "\
+data Pair (a : Type) (b = a) where
+  Both : a -> b -> Pair a b
+
+type Store (a : Type) (idx = UInt32) = idx -> a
+
+class Mul a (b = a) where
+  mul : a -> b -> a
+",
+    ),
+    (
         "classes_and_instances",
         "\
 coherent class Key a when Eqv a where

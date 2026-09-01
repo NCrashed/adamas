@@ -100,6 +100,13 @@ pub struct Binder {
     /// Общий тип. `None` - тип не написан: так пишутся параметры семейства
     /// (`data Pair a b where`, §4.1), и подставляет его элаборация.
     pub ty: Option<Expr>,
+    /// Умолчание хвостового параметра: `(b = a)`, `(idx = UInt32)` (§4.1).
+    ///
+    /// Пишется только у параметра - типового конструктора, класса, алиаса, - и
+    /// только у одного имени: группа `(a b = x)` связывает двоих, а умолчание
+    /// у них одно на двоих смысла не имеет. Термовых умолчаний нет вовсе, и
+    /// грамматика их не принимает: в позиции типа `=` за связыванием не стоит.
+    pub default: Option<Expr>,
     /// Скобки целиком, или само имя у параметра без скобок.
     pub span: Span,
 }
@@ -452,8 +459,14 @@ pub struct ClassDecl {
     /// `None` - анонимный. Имя нужно тем инстансам, которых на один тип
     /// несколько: выбрать между ними автоматика не вправе.
     pub name: Option<Name>,
-    /// Голова: имя класса, применённое к аргументам.
+    /// Голова: имя класса у класса, применение целиком у инстанса.
     pub head: Expr,
+    /// Параметры класса: `class Mul a (b = a) where …` (§4.1).
+    ///
+    /// У инстанса пуст: там написана голова целиком, и параметров у неё нет -
+    /// есть аргументы. Разбираются те же формы, что у семейства, вместе с
+    /// умолчаниями хвостовых.
+    pub params: Vec<Binder>,
     /// Суперклассы: `class Ord a when Eqv a where …` (§4.1).
     ///
     /// Словарь суперкласса - поле словаря класса, разряжаемое в точке
@@ -646,6 +659,10 @@ fn dump_class(out: &mut String, class: &ClassDecl, depth: usize) {
         out.push_str(" : ");
     }
     dump_expr(out, &class.head);
+    for param in &class.params {
+        out.push(' ');
+        dump_binder(out, param);
+    }
     for superclass in &class.superclasses {
         out.push_str(" when ");
         dump_expr(out, superclass);
@@ -818,10 +835,11 @@ fn dump_list<T>(out: &mut String, items: &[T], each: fn(&mut String, &T)) {
 fn dump_binder(out: &mut String, binder: &Binder) {
     // Параметр, написанный голым именем, так и печатается: скобки вокруг него
     // показывали бы то, чего в исходнике нет.
-    if let (Visibility::Explicit, None, None, [name]) = (
+    if let (Visibility::Explicit, None, None, None, [name]) = (
         binder.visibility,
         binder.mult,
         binder.ty.as_ref(),
+        binder.default.as_ref(),
         binder.names.as_slice(),
     ) {
         out.push_str(&name.text);
@@ -840,6 +858,10 @@ fn dump_binder(out: &mut String, binder: &Binder) {
     if let Some(ty) = &binder.ty {
         out.push_str(" : ");
         dump_expr(out, ty);
+    }
+    if let Some(default) = &binder.default {
+        out.push_str(" = ");
+        dump_expr(out, default);
     }
     out.push(close);
 }

@@ -761,9 +761,10 @@ impl<'a> Parser<'a> {
                     span: name.span,
                     names: vec![name],
                     ty: None,
+                    default: None,
                 });
-            } else if self.at_binder() {
-                params.push(self.binder()?);
+            } else if self.at_param() {
+                params.push(self.param_binder()?);
             } else {
                 return Ok(params);
             }
@@ -946,6 +947,7 @@ impl<'a> Parser<'a> {
                 }],
                 span: ty.span,
                 ty: Some(ty),
+                default: None,
             });
             if self.eat(TokenKind::Comma).is_none() {
                 break;
@@ -1251,7 +1253,20 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let head = self.expr()?;
+        // У класса голова - имя и параметры, у инстанса - применение целиком.
+        // Разные формы, и разбираются они порознь: `class Mul a (b = a)`
+        // выражением не читается, а `{Eqv a} => Eqv (List a)` параметрами.
+        let (head, params) = if instance {
+            (self.expr()?, Vec::new())
+        } else {
+            let written = self.ident()?;
+            let head = Expr {
+                span: written.span,
+                kind: ExprKind::Name(written),
+            };
+            let params = self.params()?;
+            (head, params)
+        };
         if self.at(TokenKind::Where) && contains_block(&head) {
             return Err(self.block_not_last(&head));
         }
@@ -1283,6 +1298,7 @@ impl<'a> Parser<'a> {
                 instance,
                 name,
                 head,
+                params,
                 superclasses,
                 members,
             }),
@@ -1711,6 +1727,16 @@ impl<'a> Parser<'a> {
     /// продолжения - группа, кортеж и просто скобки, - и различает их наличие
     /// `:` после списка имён.
     fn at_binder(&self) -> bool {
+        self.at_binder_of(false)
+    }
+
+    /// То же в позиции параметра, где связывание бывает и без типа: `(b = a)`
+    /// пишет одно умолчание и ничего больше (§4.1).
+    fn at_param(&self) -> bool {
+        self.at_binder_of(true)
+    }
+
+    fn at_binder_of(&self, defaults: bool) -> bool {
         if !matches!(self.kind(), TokenKind::LParen | TokenKind::LBrace) {
             return false;
         }
@@ -1726,7 +1752,9 @@ impl<'a> Parser<'a> {
             offset += 1;
             names += 1;
         }
-        names > 0 && self.kind_ahead(offset) == TokenKind::Colon
+        names > 0
+            && (self.kind_ahead(offset) == TokenKind::Colon
+                || (defaults && self.kind_ahead(offset) == TokenKind::Equals))
     }
 
     /// Может ли лексема на `offset` быть кратностью. Число здесь любое: не то
@@ -1741,6 +1769,16 @@ impl<'a> Parser<'a> {
     }
 
     fn binder(&mut self) -> Result<Binder, ParseError> {
+        self.binder_of(false)
+    }
+
+    /// Связывание в позиции параметра: тип и умолчание оба необязательны, но
+    /// хоть одно написано - иначе это голое имя, и скобки при нём лишние.
+    fn param_binder(&mut self) -> Result<Binder, ParseError> {
+        self.binder_of(true)
+    }
+
+    fn binder_of(&mut self, defaults: bool) -> Result<Binder, ParseError> {
         let open = self.bump();
         let visibility = if open.kind == TokenKind::LParen {
             Visibility::Explicit
@@ -1752,15 +1790,30 @@ impl<'a> Parser<'a> {
         while matches!(self.kind(), TokenKind::Ident | TokenKind::Underscore) {
             names.push(self.binder_name()?);
         }
-        self.expect(TokenKind::Colon)?;
-        let ty = self.expr()?;
+        let ty = if defaults && !self.at(TokenKind::Colon) {
+            None
+        } else {
+            self.expect(TokenKind::Colon)?;
+            Some(self.expr()?)
+        };
+        // Умолчание - у одного имени: группа связывает нескольких, и одно
+        // значение на всех означало бы не то, что написано.
+        let default = if defaults && self.eat(TokenKind::Equals).is_some() {
+            if names.len() > 1 {
+                return Err(self.expected(Expected::Token(TokenKind::Colon)));
+            }
+            Some(self.expr()?)
+        } else {
+            None
+        };
         let closing = open.kind.closing_bracket().unwrap_or(TokenKind::RParen);
         let close = self.expect(closing)?;
         Ok(Binder {
             visibility,
             mult,
             names,
-            ty: Some(ty),
+            ty,
+            default,
             span: open.span.merge(close.span),
         })
     }

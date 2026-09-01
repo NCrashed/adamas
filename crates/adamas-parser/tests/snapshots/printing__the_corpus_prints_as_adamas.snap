@@ -22,6 +22,14 @@ type Endo (a : Type) = a -> a
 module type BagSig where
   type Bag (a : Type)
   empty : Bag Int
+=== parameter_defaults
+data Pair (a : Type) (b = a) where
+  Both : a -> b -> Pair a b
+
+type Store (a : Type) (idx = UInt32) = idx -> a
+
+class Mul a (b = a) where
+  mul : a -> b -> a
 === classes_and_instances
 coherent class Key a when Eqv a where
   key : a -> Nat

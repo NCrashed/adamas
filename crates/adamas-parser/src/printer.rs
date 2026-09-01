@@ -235,6 +235,10 @@ impl Printer {
                     self.push(" : ");
                 }
                 self.expr(&class.head, Prec::Lowest);
+                for param in &class.params {
+                    self.push(" ");
+                    self.binder(param);
+                }
                 for (index, superclass) in class.superclasses.iter().enumerate() {
                     self.push(if index == 0 { " when " } else { ", " });
                     self.expr(superclass, Prec::Lowest);
@@ -615,10 +619,11 @@ impl Printer {
 
     fn binder(&mut self, binder: &Binder) {
         // Параметр без скобок - тот, у которого нечего в них писать.
-        if let (Visibility::Explicit, None, None, [name]) = (
+        if let (Visibility::Explicit, None, None, None, [name]) = (
             binder.visibility,
             binder.mult,
             binder.ty.as_ref(),
+            binder.default.as_ref(),
             binder.names.as_slice(),
         ) {
             self.push(&name.text);
@@ -642,6 +647,10 @@ impl Printer {
         if let Some(ty) = &binder.ty {
             self.push(" : ");
             self.expr(ty, Prec::Lowest);
+        }
+        if let Some(default) = &binder.default {
+            self.push(" = ");
+            self.expr(default, Prec::Lowest);
         }
         self.push(close);
     }

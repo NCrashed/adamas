@@ -2,7 +2,7 @@
 source: crates/adamas-parser/tests/parsing.rs
 expression: "tree(text).expect(\"разбор удался\")"
 ---
-(class (Ord a) when (Eqv a) when (Show a)
+(class Ord a when (Eqv a) when (Show a)
   (sig cmp (-> a (-> a Bool)))
   (sig gt (-> a (-> a Bool)))
   (def gt

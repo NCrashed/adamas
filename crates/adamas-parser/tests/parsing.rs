@@ -602,3 +602,18 @@ fn the_coherent_marker_stands_before_a_class() {
         "получено {error:?}"
     );
 }
+
+#[test]
+fn a_default_stands_at_a_parameter_and_nowhere_else() {
+    // §4.1: умолчания бывают у параметров типового конструктора, класса и
+    // алиаса. Термовых нет вовсе, и грамматика их не принимает - при
+    // каррировании `f 1` неотличимо от частичного применения.
+    let dumped = tree("data Pair (a : Type) (b = a) where\n  Both : a -> b -> Pair a b\n")
+        .expect("разбор удался");
+    assert!(dumped.contains("(b = a)"), "получено {dumped}");
+    let error = parse_error("wrong : (n = Zero) -> Nat\n");
+    assert!(
+        matches!(error, ParseError::Expected { .. }),
+        "получено {error:?}"
+    );
+}

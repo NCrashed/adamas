@@ -518,7 +518,20 @@ fn alias(
             span: route::locate(&Declared::Bare(body), &error, span),
             error: Box::new(error),
             names,
-        })
+        })?;
+    // Умолчание у члена функтора не объявляется: дописывается оно по
+    // написанной арности, а член несёт ещё и параметры функтора - написанного
+    // и дописанного там разное число.
+    if !outer.is_empty() && written.params.iter().any(|it| it.default.is_some()) {
+        return Err(ElabError::ModuleMember {
+            name: Rc::clone(&name.text),
+            what: "функторе",
+            why: "умолчание дописывается по написанной арности, а член функтора \
+                  несёт ещё и его параметры",
+            span,
+        });
+    }
+    declare_defaults(signature, metas, known.owned, &declared, written.params)
 }
 
 /// Модуль или его сигнатура (§4.8).
@@ -718,33 +731,29 @@ fn declare_class(
     } else {
         &class.head
     };
-    let Some((name, arguments)) = spine_of(written) else {
+    let Some((name, _)) = spine_of(written) else {
         return Err(ElabError::ClassHead { span });
     };
     if class.instance {
         return declare_instance(signature, metas, owned, instances, class, name, span);
     }
-    // Параметр класса пишется именем: `class Eqv a where`. Тип у него не
-    // написан, и умолчание то же, что у параметра семейства, - `Type`.
-    let mut params = Vec::with_capacity(arguments.len());
-    for argument in arguments {
-        let ast::ExprKind::Name(bound) = &argument.kind else {
-            return Err(ElabError::ClassHead {
-                span: argument.span,
-            });
-        };
-        params.push(ast::Binder {
-            visibility: ast::Visibility::Explicit,
-            // Параметр класса стёрт: это тип, и в рантайме его нет. Тем же
-            // нулём он стоит у метода - `{0 a : Type} -> {ω d : C a} -> …`.
-            mult: Some(ast::MultAnn {
+    // Параметры класса разбирает парсер теми же формами, что у семейства.
+    // Ненаписанная кратность здесь **нулевая**: параметр класса - это тип, и в
+    // рантайме его нет. Тем же нулём он стоит у метода:
+    // `{0 a : Type} -> {ω d : C a} -> …`.
+    let params: Vec<ast::Binder> = class
+        .params
+        .iter()
+        .map(|binder| ast::Binder {
+            mult: binder.mult.or(Some(ast::MultAnn {
                 mult: ast::Mult::Zero,
-                span: argument.span,
-            }),
-            names: vec![bound.clone()],
-            ty: None,
-            span: argument.span,
-        });
+                span: binder.span,
+            })),
+            ..binder.clone()
+        })
+        .collect();
+    if params.is_empty() {
+        return Err(ElabError::ClassHead { span });
     }
     // Поля суперклассов идут **первыми**: разряжает их объявление инстанса, а
     // не автор, и имя у них невыразимое - написать его нечем (§3.5).
@@ -791,6 +800,7 @@ fn declare_class(
             error: Box::new(error),
             names,
         })?;
+    declare_defaults(signature, metas, owned, &name.text, &params)?;
     // Имя верхнего уровня получает **метод**, а не поле суперкласса: его
     // разряжает разрешение, и писать его автору незачем.
     for method in &info.methods {
@@ -1561,7 +1571,17 @@ fn declare_families(
             span,
             error: Box::new(error),
             names,
-        })
+        })?;
+    for family in &families {
+        declare_defaults(
+            signature,
+            metas,
+            owned,
+            &family.data.name.text,
+            &family.data.params,
+        )?;
+    }
+    Ok(())
 }
 
 /// Член группы: имя, написанный тип и клаузы.
@@ -2607,6 +2627,81 @@ fn mentions_local(term: &Term) -> bool {
 }
 
 /// Индуктивное семейство вместе с конструкторами - одной группой.
+/// Объявляет умолчания хвостовых параметров невыразимыми именами (§4.1).
+///
+/// Умолчание - синтаксический сахар: при неполном применении элаборация
+/// дописывает его аргументом, до всякого резолвинга (правило 1). Хранится оно
+/// **определением** - `Mul#default1` - потому что спрашивают его в местах
+/// использования, а сигнатура и есть то, что там доступно; отдельного реестра
+/// для этого не нужно, и точку в имени автор не напишет.
+///
+/// Тело умолчания живёт под предшествующими параметрами: `(b = a)` есть
+/// `\a -> a`. Отсюда и правило 2 - упоминать оно вправе только их.
+fn declare_defaults(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    owned: &Owned,
+    declared: &Symbol,
+    written: &[ast::Binder],
+) -> Result<(), ElabError> {
+    let mut at = 0;
+    let mut trailing = false;
+    for (position, binder) in written.iter().enumerate() {
+        let Some(default) = &binder.default else {
+            if trailing {
+                return Err(ElabError::TrailingDefault {
+                    name: Rc::clone(&binder.names[0].text),
+                    span: binder.span,
+                });
+            }
+            at += binder.names.len();
+            continue;
+        };
+        trailing = true;
+        // Телескоп считается заново на каждое умолчание: объявление
+        // предыдущего освободило дырки уровня, и посчитанный один раз умер бы
+        // на втором.
+        let mut elaborator = Elaborator::new(signature, metas, owned);
+        let params = elaborator.telescope(&written[..=position], false)?;
+        let Some(param) = params.get(at) else {
+            return Err(ElabError::TrailingDefault {
+                name: Rc::clone(&binder.names[0].text),
+                span: binder.span,
+            });
+        };
+        let domain = Rc::clone(&param.ty);
+        let leading: Vec<Param> = params[..at].to_vec();
+        let (body, inferred) = elaborator.beneath(&leading, |it| {
+            let body = it.typing(|inner| inner.expr(default, Mult::Many))?;
+            let inferred = it.inferred(&body);
+            Ok((body, inferred))
+        })?;
+        // Тип - **выведенный по телу**, а не написанный домен параметра: у
+        // ненаписанного домена свой уровень, независимый от уровня тела, и
+        // `(b = a)` при `b : Type u1` и `a : Type u0` не сошлось бы. Подходит
+        // ли умолчание параметру, скажет место использования: дописанный
+        // аргумент проверяется там наравне с написанным.
+        let ty = elaborator.wrapped(&leading, false, |_| {
+            Ok(inferred.unwrap_or_else(|| (*domain).clone()))
+        })?;
+        let term = abstracted(&leading, body);
+        let name: Symbol = Rc::from(format!("{declared}#default{at}").as_str());
+        // Кратность нулевая: умолчание живёт только на этапе проверки типов -
+        // в результат элаборации попадает не оно, а то, во что оно
+        // развернулось. Параметр класса при этом стёрт, и тело `\a -> a` при
+        // ω-суждении было бы его употреблением.
+        signature
+            .define_inferred(metas, &name, Mult::Zero, ty, Some(term))
+            .map_err(|error| ElabError::Core {
+                span: binder.span,
+                error: Box::new(error),
+                names: Names::of(&name, Vec::new()),
+            })?;
+        at += binder.names.len();
+    }
+    Ok(())
+}
+
 /// Заголовок семейства: всё, что известно о нём **до** конструкторов.
 ///
 /// Отдельно от конструкторов потому, что в группе конструктор одного семейства
@@ -2764,7 +2859,10 @@ fn declare_data(
             span: route::locate(&Declared::Data(data), &error, span),
             error: Box::new(error),
             names: family.names,
-        })
+        })?;
+    // Умолчания - **после** объявления: они обычные определения, и семейство
+    // им доступно как всякое другое имя.
+    declare_defaults(signature, metas, owned, &data.name.text, &data.params)
 }
 /// Аргументы уровня, с которыми член группы называет сам себя.
 ///

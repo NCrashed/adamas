@@ -286,7 +286,22 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Умолчание написано не у хвостового параметра (§4.1, правило 2).
+    ///
+    /// Иначе понадобился бы позиционный пропуск (`Mul _ Int`), то есть вторая
+    /// нотация ради редкого случая.
+    #[error(
+        "у параметра `{name}` умолчания нет, а у предыдущего есть: умолчания бывают только у хвостовых"
+    )]
+    TrailingDefault {
+        /// Параметр без умолчания.
+        name: Symbol,
+        /// Где написан.
+        span: Span,
+    },
+
     /// Констрейнт на параметре запечатанного типа (§3.5).
+
     ///
     /// Инстанс, участвовавший в построении значения абстрактного типа,
     /// переживает вызов, а тип значения о нём молчит: `Map Int String`,
@@ -711,6 +726,7 @@ impl ElabError {
             | Self::NoInstance { span, .. }
             | Self::AmbiguousInstance { span, .. }
             | Self::CoherentDuplicate { span, .. }
+            | Self::TrailingDefault { span, .. }
             | Self::SealedConstraint { span, .. }
             | Self::SealedInstance { span, .. }
             | Self::CoherentContext { span, .. }

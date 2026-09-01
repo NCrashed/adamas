@@ -3604,3 +3604,67 @@ mutual
         "получено {message}"
     );
 }
+
+#[test]
+fn a_trailing_parameter_takes_a_default() {
+    // §4.1: умолчание срабатывает по **написанной** арности применения, до
+    // всякого вывода. `Pair Nat` есть `Pair Nat Nat`, а написанные оба
+    // параметра умолчание не трогает.
+    program(&format!(
+        "{BASE}
+data Pair (a : Type) (b = a) where
+  Both : a -> b -> Pair a b
+
+homo : Pair Nat
+homo = Both Zero (Succ Zero)
+
+hetero : Pair Nat Bool
+hetero = Both Zero True
+
+type Store (a : Type) (idx = Nat) = idx -> a
+
+kept : Store Bool
+kept n = True
+"
+    ));
+}
+
+#[test]
+fn a_class_parameter_takes_a_default() {
+    // Мотивирующий случай §4.3: `Mul` гетерогенен, а однородное применение
+    // возвращается умолчанием - `Mul Int` есть `Mul Int Int`.
+    program(&format!(
+        "{BASE}
+class Mul a (b = a) where
+  mul : a -> b -> a
+
+instance Mul Nat where
+  mul x y = x
+
+instance Mul Nat Bool where
+  mul x y = x
+
+homo : Nat
+homo = mul Zero Zero
+
+hetero : Nat
+hetero = mul Zero True
+"
+    ));
+}
+
+#[test]
+fn a_default_belongs_to_a_trailing_parameter() {
+    // §4.1, правило 2: иначе понадобился бы позиционный пропуск (`Mul _ Int`),
+    // то есть вторая нотация ради редкого случая.
+    let error = refused(&format!(
+        "{BASE}
+data Pair (a = Nat) (b : Type) where
+  Both : a -> b -> Pair a b
+"
+    ));
+    assert!(
+        matches!(&error, ElabError::TrailingDefault { name, .. } if &**name == "b"),
+        "получено {error:?}"
+    );
+}

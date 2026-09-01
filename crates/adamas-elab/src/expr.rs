@@ -568,6 +568,12 @@ impl<'a> Elaborator<'a> {
         Ok(found)
     }
 
+    /// Тип терма, каким его видит ядро. `None` - не вывелся.
+    pub(crate) fn inferred(&mut self, term: &Term) -> Option<Term> {
+        let (ty, _) = infer(&self.ctx, self.metas, Mult::Zero, term).ok()?;
+        Some(quote(self.ctx.size(), &ty))
+    }
+
     /// Уровень универсума, в котором обязано жить семейство с такими
     /// параметрами.
     ///
@@ -1911,6 +1917,14 @@ impl<'a> Elaborator<'a> {
             Position::Inner
         };
         let mut term = self.placed(Position::Inner, |it| it.expr(head, Mult::Many))?;
+        // Имя головы нужно умолчаниям параметров: они дописываются по
+        // **написанной** арности применения (§4.1, правило 1), и спросить о
+        // них можно только зная, к чему применяются.
+        let named = match &term {
+            Term::Const(name, _) => Some(Rc::clone(name)),
+            _ => None,
+        };
+        let mut given: Vec<Term> = Vec::with_capacity(arguments.len());
         // Имплисит стоит не только в голове: `f Zero True` при
         // `f : Nat -> {0 a : Type} -> a -> Nat` обязано получить `a` между
         // написанными аргументами. Голову свою вставку уже получила - её
@@ -1930,12 +1944,44 @@ impl<'a> Elaborator<'a> {
             }
             let argument = self.placed(inside, |it| it.expr(argument, Mult::Many))?;
             ty = ty.and_then(|it| self.stepped(&it, &argument));
-            term = Term::App(Rc::new(term), Rc::new(argument));
+            term = Term::App(Rc::new(term), Rc::new(argument.clone()));
+            given.push(argument);
+        }
+        // Умолчания хвостовых параметров - дописанные аргументы, и ничем от
+        // написанных не отличаются: вставка имплиситов перед ними та же.
+        if let Some(head) = named {
+            while let Some(argument) = self.default_argument(&head, &given) {
+                if let Some(current) = ty.take() {
+                    let (inserted, rest) = self.inserted(term, current);
+                    term = inserted;
+                    ty = Some(rest);
+                }
+                ty = ty.and_then(|it| self.stepped(&it, &argument));
+                term = Term::App(Rc::new(term), Rc::new(argument.clone()));
+                given.push(argument);
+            }
         }
         // Результат применения к scope не привязан: собрать замыкание, которое
         // его возвращает, не даёт правило позиции.
         self.produced = None;
         Ok(term)
+    }
+
+    /// Умолчание параметра, следующего за написанными (§4.1).
+    ///
+    /// Хранится оно определением `C#default{k}` - лямбдой по предшествующим
+    /// параметрам, - поэтому применяется к уже собранным аргументам и
+    /// разворачивается. Разворот здесь обязателен: оставленное применение
+    /// прошло бы проверку типов (δ и β его сводят), но голову аргумента читает
+    /// поиск инстанса, а он смотрит на написанное.
+    fn default_argument(&mut self, head: &str, given: &[Term]) -> Option<Term> {
+        let name = format!("{head}#default{}", given.len());
+        let term = self.signature.instantiate(&name, self.metas)?;
+        let applied = given.iter().fold(term, |callee, argument| {
+            Term::App(Rc::new(callee), Rc::new(argument.clone()))
+        });
+        let value = adamas_core::conv::whnf(self.signature, &self.ctx.eval(&applied));
+        Some(quote(self.ctx.size(), &value))
     }
 
     /// Тип применения к написанному аргументу - если он вычислим.

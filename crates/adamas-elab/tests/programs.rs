@@ -2859,13 +2859,13 @@ used = pong True (Succ Zero)
 }
 
 #[test]
-fn a_mutual_group_carries_definitions_only() {
+fn a_mutual_group_carries_definitions_and_families() {
     // Названные границы: постулат группой объявлять незачем - он и есть
-    // отсутствие тела, - а семейство в группе требует смешанной группы, и
-    // это отдельный срез.
+    // отсутствие тела, - а модуль и класс объявляются отдельно.
     for text in [
         "mutual\n  loose : Nat\n",
-        "mutual\n  data Tree where\n    Leaf : Tree\n",
+        "mutual\n  type Alias = Nat\n",
+        "mutual\n  module M where\n    inner : Nat\n    inner = Zero\n",
     ] {
         let error = refused(&format!("{BASE}{text}"));
         assert!(
@@ -3534,4 +3534,73 @@ instance {{Eqv a}} => Show (Clear.Bag a) where
   render b = True
 "
     ));
+}
+
+#[test]
+fn mutual_families_are_declared_together() {
+    // `Tree` и `Forest` друг без друга не объявляются - случай, ради которого
+    // `mutual` и написан. Единица объявления у семейств общая, и фаза
+    // конструкторов у ядра идёт раньше тел.
+    program(&format!(
+        "{BASE}
+mutual
+  data Tree (a : Type) where
+    Node : a -> Forest a -> Tree a
+
+  data Forest (a : Type) where
+    Nil : Forest a
+    Cons : Tree a -> Forest a -> Forest a
+
+one : Tree Bool
+one = Node True Nil
+"
+    ));
+}
+
+#[test]
+fn a_mutual_group_mixes_families_and_definitions() {
+    // Семейства объявляются первыми и своей группой: разбор берёт у
+    // конструктора тип, и в сигнатуре он обязан быть раньше клауз.
+    program(&format!(
+        "{BASE}
+mutual
+  data Tree where
+    Node : Forest -> Tree
+
+  data Forest where
+    Nil : Forest
+    Cons : Tree -> Forest -> Forest
+
+  size : Tree -> Nat
+  size (Node f) = sizes f
+
+  sizes : Forest -> Nat
+  sizes Nil = Zero
+  sizes (Cons t f) = size t
+"
+    ));
+}
+
+#[test]
+fn positivity_is_measured_over_the_whole_group() {
+    // `A` становится негативным через `B` ровно так же, как через себя:
+    // `A ≅ B -> Bool` и `B ≅ A` дают `A ≅ A -> Bool`, то есть жителя любого
+    // типа. Проверка, знающая только своё имя, такую пару принимала бы.
+    let error = refused(&format!(
+        "{BASE}
+mutual
+  data A where
+    MkA : (B -> Bool) -> A
+
+  data B where
+    MkB : A -> B
+"
+    ));
+    // Названо **найденное** семейство, а не проверяемое: написано в поле `B`,
+    // и искать надо там.
+    let message = error.to_string();
+    assert!(
+        message.contains("`MkA` использует `B` в отрицательной позиции"),
+        "получено {message}"
+    );
 }

@@ -1414,6 +1414,23 @@ fn declare_mutual(
     span: Span,
 ) -> Result<(), ElabError> {
     let planned = mutual_members(members, span)?;
+    // Семейства объявляются **первыми и своей группой**. Разбор в теле
+    // определения берёт у конструктора тип, а элаборация читает его из
+    // сигнатуры: значит конструкторы обязаны быть там раньше, чем компилируется
+    // первая клауза. Взаимная рекурсия семейств от этого не страдает - она
+    // внутри их группы, - а названная цена в том, что тип конструктора не
+    // вправе назвать определение того же блока.
+    declare_families(signature, metas, owned, &planned, span)?;
+    let planned: Vec<&Mutual<'_>> = planned
+        .iter()
+        .filter_map(|member| match member {
+            Planned::Definition(it) => Some(it),
+            Planned::Family(..) => None,
+        })
+        .collect();
+    if planned.is_empty() {
+        return Ok(());
+    }
     // Типы элаборируются до всякого объявления: граница объявления одна на
     // группу, и дырки уровня доживают до неё.
     let mut types = Vec::with_capacity(planned.len());
@@ -1503,6 +1520,50 @@ fn declare_mutual(
     Ok(())
 }
 
+/// Семейства блока - одной группой, конструкторы под нею целиком.
+///
+/// `Tree` и `Forest` друг без друга не объявляются, и единица объявления у них
+/// поэтому общая: ядро принимает членов двух видов по построению (§10
+/// вопрос 50), а фаза B1 кладёт типы конструкторов раньше тел.
+fn declare_families(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    owned: &Owned,
+    planned: &[Planned<'_>],
+    span: Span,
+) -> Result<(), ElabError> {
+    let mut families = Vec::new();
+    for member in planned {
+        if let Planned::Family(data, at) = member {
+            families.push(family_header(signature, metas, owned, data, *at)?);
+        }
+    }
+    let Some(first) = families.first() else {
+        return Ok(());
+    };
+    let names = first.names.clone();
+    let seen: Vec<Member> = families.iter().map(Family::visible).collect();
+    let mut group: Option<Group> = None;
+    for family in &families {
+        let constructors = family_constructors(signature, metas, owned, family, &seen)?;
+        let declared = family_member(family, &constructors);
+        group = Some(match group {
+            None => Group::of(declared),
+            Some(group) => group.and(declared),
+        });
+    }
+    let Some(group) = group else {
+        return Ok(());
+    };
+    signature
+        .declare(metas, &group)
+        .map_err(|error| ElabError::Core {
+            span,
+            error: Box::new(error),
+            names,
+        })
+}
+
 /// Член группы: имя, написанный тип и клаузы.
 struct Mutual<'a> {
     name: &'a ast::Name,
@@ -1511,11 +1572,18 @@ struct Mutual<'a> {
     span: Span,
 }
 
+/// Что написано членом группы.
+enum Planned<'a> {
+    /// Определение с сигнатурой.
+    Definition(Mutual<'a>),
+    /// Семейство.
+    Family(&'a ast::Data, Span),
+}
 /// Разбирает блок `mutual` на членов.
 ///
 /// Постулата в группе не бывает: члены её объявляются вместе, а постулат -
 /// это отсутствие тела, и объявлять его группой незачем.
-fn mutual_members(members: &[ast::Decl], span: Span) -> Result<Vec<Mutual<'_>>, ElabError> {
+fn mutual_members(members: &[ast::Decl], span: Span) -> Result<Vec<Planned<'_>>, ElabError> {
     let mut found = Vec::with_capacity(members.len() / 2);
     let mut pending: Option<(&ast::Name, &ast::Expr, Span)> = None;
     for member in members {
@@ -1538,12 +1606,23 @@ fn mutual_members(members: &[ast::Decl], span: Span) -> Result<Vec<Mutual<'_>>, 
                         span: member.span,
                     });
                 };
-                found.push(Mutual {
+                found.push(Planned::Definition(Mutual {
                     name: declared,
                     ty,
                     clauses,
                     span: at.merge(member.span),
-                });
+                }));
+            }
+            // Семейство в группе - тот самый случай, ради которого `mutual` и
+            // пишут: `Tree` и `Forest` друг без друга не объявляются.
+            DeclKind::Data(data) => {
+                if let Some((waiting, ..)) = pending {
+                    return Err(ElabError::MissingSignature {
+                        name: Rc::clone(&waiting.text),
+                        span: member.span,
+                    });
+                }
+                found.push(Planned::Family(data, member.span));
             }
             _ => {
                 return Err(ElabError::ModuleMember {
@@ -1551,8 +1630,8 @@ fn mutual_members(members: &[ast::Decl], span: Span) -> Result<Vec<Mutual<'_>>, 
                         .cloned()
                         .unwrap_or_else(|| Rc::from("_")),
                     what: "группе `mutual`",
-                    why: "группа несёт определения с сигнатурами; семейства и модули \
-                          объявляются отдельно",
+                    why: "группа несёт определения с сигнатурами и семейства; \
+                          модули и классы объявляются отдельно",
                     span: member.span,
                 });
             }
@@ -1574,7 +1653,6 @@ fn mutual_members(members: &[ast::Decl], span: Span) -> Result<Vec<Mutual<'_>>, 
     }
     Ok(found)
 }
-
 /// Формы объявления, которых язык не несёт, - названные границы среза.
 fn writable(
     within: Option<&Enclosing<'_>>,
@@ -2529,13 +2607,48 @@ fn mentions_local(term: &Term) -> bool {
 }
 
 /// Индуктивное семейство вместе с конструкторами - одной группой.
-fn declare_data(
-    signature: &mut Signature,
+/// Заголовок семейства: всё, что известно о нём **до** конструкторов.
+///
+/// Отдельно от конструкторов потому, что в группе конструктор одного семейства
+/// называет другое: заголовки обязаны быть готовы все, прежде чем
+/// элаборируется первый конструктор. Одиночное объявление проходит тем же
+/// путём - группа из одного члена.
+struct Family<'a> {
+    /// Написанное.
+    data: &'a ast::Data,
+    /// Телескоп параметров - один на kind и на все конструкторы.
+    params: Vec<Param>,
+    /// Тип-формер.
+    kind: Term,
+    /// Аргументы уровня, которыми семейство называют внутри группы.
+    ///
+    /// Общие на всю группу, а не свежие на вхождение: семейство одно, и
+    /// независимые дырки сделали бы его полиморфным по нескольким уровням
+    /// сразу (§10 вопрос 63).
+    levels: Rc<[Level]>,
+    /// Имена для маршрута.
+    names: Names,
+}
+
+impl Family<'_> {
+    /// Каким его видят соседи по группе.
+    fn visible(&self) -> Member {
+        Member {
+            name: Rc::clone(&self.data.name.text),
+            levels: Rc::clone(&self.levels),
+            ty: Rc::new(self.kind.clone()),
+        }
+    }
+}
+
+/// Телескоп, kind и арность уровней семейства.
+fn family_header<'a>(
+    signature: &Signature,
     metas: &mut Metas,
     owned: &Owned,
-    data: &ast::Data,
+    data: &'a ast::Data,
     span: Span,
-) -> Result<(), ElabError> {
+) -> Result<Family<'a>, ElabError> {
     // Телескоп параметров элаборируется один раз и переиспользуется: kind и
     // каждый конструктор обязаны нести **один и тот же** телескоп, иначе
     // `List` в результате и `List` в объявлении - два разных семейства.
@@ -2579,44 +2692,80 @@ fn declare_data(
         error: Box::new(error),
         names: names.clone(),
     })?;
+    Ok(Family {
+        data,
+        params,
+        kind,
+        levels,
+        names,
+    })
+}
 
+/// Типы конструкторов - под группой, в которой семейство объявляется.
+fn family_constructors<'a>(
+    signature: &Signature,
+    metas: &mut Metas,
+    owned: &Owned,
+    family: &Family<'a>,
+    visible: &[Member],
+) -> Result<Vec<(&'a str, Term)>, ElabError> {
     // Поле конструктора получает `1` (§4.1): конструктор кладёт аргумент
     // однажды. Обычный код этого не замечает, потому что при разборе поле
     // приходит в ветвь при `q · r`, а `r` - кратность потребления
     // разбираемого; у ω-связывания `1 · ω = ω` (§3.3, вопрос 65).
-    let constructors = data
+    family
+        .data
         .constructors
         .iter()
         .map(|constructor| {
-            let group = vec![Member {
-                name: Rc::clone(&data.name.text),
-                levels: Rc::clone(&levels),
-                ty: Rc::new(kind.clone()),
-            }];
             // У конструктора те же параметры, но выводимые: пишут `MkPair x y`,
             // а не `MkPair A B x y`. Свободные имена, оставшиеся сверх них,
             // поднимаются уже под ними - и потому стоят после, как того и ждёт
             // ядро от телескопа с параметрами.
-            let ty = Elaborator::with_group(signature, metas, owned, group).wrapped(
-                &params,
+            let ty = Elaborator::with_group(signature, metas, owned, visible.to_vec()).wrapped(
+                &family.params,
                 true,
                 |it| it.declaration(&constructor.ty, Mult::One),
             )?;
-            owned_field(&ty, owned, data, constructor)?;
+            owned_field(&ty, owned, family.data, constructor)?;
             Ok((&*constructor.name.text, ty))
         })
-        .collect::<Result<Vec<_>, ElabError>>()?;
+        .collect()
+}
 
-    let parameters = u32::try_from(params.len()).unwrap_or(u32::MAX);
+/// Член ядра, собранный из семейства и типов его конструкторов.
+fn family_member(family: &Family<'_>, constructors: &[(&str, Term)]) -> SigMember {
+    let parameters = u32::try_from(family.params.len()).unwrap_or(u32::MAX);
+    constructors.iter().fold(
+        SigMember::data(&family.data.name.text, parameters, family.kind.clone()),
+        |member, (constructor, ty)| member.with_constructor(constructor, ty.clone()),
+    )
+}
+
+fn declare_data(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    owned: &Owned,
+    data: &ast::Data,
+    span: Span,
+) -> Result<(), ElabError> {
+    let family = family_header(signature, metas, owned, data, span)?;
+    let constructors = family_constructors(signature, metas, owned, &family, &[family.visible()])?;
+    let parameters = u32::try_from(family.params.len()).unwrap_or(u32::MAX);
     signature
-        .declare_data(metas, &data.name.text, parameters, kind, &constructors)
+        .declare_data(
+            metas,
+            &data.name.text,
+            parameters,
+            family.kind.clone(),
+            &constructors,
+        )
         .map_err(|error| ElabError::Core {
             span: route::locate(&Declared::Data(data), &error, span),
             error: Box::new(error),
-            names,
+            names: family.names,
         })
 }
-
 /// Аргументы уровня, с которыми член группы называет сам себя.
 ///
 /// Их число - арность, которую выведет ядро: обобщение считает нерешённые

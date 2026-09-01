@@ -576,6 +576,15 @@ impl Signature {
                 })?;
             }
         }
+        // Вердикт считается **до** зонканья, и это названная граница, а не
+        // выбор: в незонканном теле словарь метода инстанса стоит дыркой, а
+        // `Meta` для проверки инертна, поэтому рекурсия метода через словарь
+        // сюда не видна вовсе. Перенести вердикт за зонканье одним движением
+        // нельзя - там та же рекурсия приходит голым именем внутри
+        // подставленной записи-словаря, и структурная проверка считает её
+        // вызовом без аргументов, то есть отвергает всякий рекурсивный метод.
+        // Чинится это вместе с вопросом о том, что именно перепроверяется по
+        // выходу элаборации (§10, ревью 2026-09-02), а не здесь.
         self.settle_totality(group);
 
         for member in members {
@@ -853,7 +862,64 @@ impl Signature {
     /// и тот же ответ, что раньше; для взаимной рекурсии - единственный
     /// корректный способ, потому что вердикт члена зависит от вердиктов
     /// соседей.
+    /// Для каждого члена группы - имена, с которыми он лежит на одном цикле
+    /// вызовов, включая его самого.
+    ///
+    /// Рекурсией считается вызов **по циклу**, а не всякое упоминание соседа.
+    /// Разница видна на первом же инстансе: словарь `Eqv#Nat` называет свой
+    /// метод `Eqv#Nat.eq`, а метод словарь не зовёт - убывать словарю не по
+    /// чему и не за чем. И она же существенна в другую сторону: `ping n = pong n`
+    /// вместе с `pong n = ping n` цикл образуют, и без него проверка не видела
+    /// в паре ни одного вызова, объявляя расходящуюся пару тотальной - в том
+    /// числе для §4.7, то есть пропуская её в тип.
+    ///
+    /// Замыкание считается наивно, повторными проходами: членов в группе
+    /// единицы, и заводить ради них Тарьяна не за что.
+    fn call_cycles(&self, group: &Group) -> HashMap<Name, Vec<Name>> {
+        let names: Vec<Name> = group_names(group).cloned().collect();
+        let mut reaches: HashMap<Name, Vec<Name>> = HashMap::new();
+        for name in &names {
+            let direct = self
+                .definitions
+                .get(name)
+                .and_then(|it| it.body.as_ref())
+                .map_or_else(Vec::new, |body| crate::total::calls_within(&names, body));
+            reaches.insert(Rc::clone(name), direct);
+        }
+        loop {
+            let mut grew = false;
+            for name in &names {
+                let mut grown = reaches[name].clone();
+                for step in &reaches[name] {
+                    for far in &reaches[step] {
+                        if !grown.contains(far) {
+                            grown.push(Rc::clone(far));
+                            grew = true;
+                        }
+                    }
+                }
+                reaches.insert(Rc::clone(name), grown);
+            }
+            if !grew {
+                break;
+            }
+        }
+        names
+            .iter()
+            .map(|name| {
+                let mut cycle = vec![Rc::clone(name)];
+                for other in &reaches[name] {
+                    if other != name && reaches[other].contains(name) {
+                        cycle.push(Rc::clone(other));
+                    }
+                }
+                (Rc::clone(name), cycle)
+            })
+            .collect()
+    }
+
     fn settle_totality(&mut self, group: &Group) {
+        let cycles = self.call_cycles(group);
         loop {
             let mut demoted = false;
             for member in group.members() {
@@ -865,7 +931,10 @@ impl Signature {
                     continue;
                 }
                 let definition = definition.clone();
-                if !crate::total::is_total(self, name, &definition) {
+                let cycle = cycles
+                    .get(name)
+                    .map_or_else(|| std::slice::from_ref(name), Vec::as_slice);
+                if !crate::total::is_total(self, name, cycle, &definition) {
                     if let Some(stored) = self.definitions.get_mut(name) {
                         stored.total = false;
                     }

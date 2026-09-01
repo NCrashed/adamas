@@ -2931,6 +2931,71 @@ used = pong True (Succ Zero)
 }
 
 #[test]
+fn a_diverging_mutual_pair_is_not_total() {
+    // Вызов соседа - такая же рекурсия, как свой. Проверка, знавшая только своё
+    // имя, не видела в этой паре ни одного вызова и объявляла её тотальной, а
+    // §4.7 пускает тотальное в тип: расходимость проходила в стёртый фрагмент.
+    // Побуквенно та же расходимость под одним именем отвергалась всегда.
+    let error = refused(&format!(
+        "{BASE}
+data Wit (n : Nat) where
+  Mk : Wit n
+
+mutual
+  ping : Nat -> Nat
+  ping n = pong n
+
+  pong : Nat -> Nat
+  pong n = ping n
+
+use : Wit (ping Zero) -> Nat
+use w = Zero
+"
+    ));
+    assert!(
+        matches!(
+            error,
+            ElabError::Core {
+                ref error,
+                ..
+            } if matches!(error.kind, ErrorKind::PartialConstant { .. })
+        ),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn mutual_recursion_decreases_at_a_position_of_its_own() {
+    // Одной позиции на всю группу не хватает: у `even` убывает нулевой
+    // аргумент, у `pong` - второй, потому что перед ним стоит стёртый параметр
+    // типа. Позиция ищется каждому члену своя, но согласованно - вызов
+    // засчитывается, когда аргумент на позиции вызываемого произошёл разбором
+    // от параметра на позиции вызывающего.
+    let signature = program(&format!(
+        "{BASE}
+data Wit (b : Bool) where
+  Mk : Wit b
+
+mutual
+  even : Nat -> Bool
+  even Zero = True
+  even (Succ k) = odd True k
+
+  odd : {{0 a : Type}} -> a -> Nat -> Bool
+  odd x Zero = False
+  odd x (Succ k) = even k
+
+used : Wit (even Zero) -> Bool
+used w = True
+"
+    ));
+    assert!(
+        signature.lookup("even").is_some_and(|it| it.total),
+        "`even` обязана быть тотальной: `Wit (even Zero)` иначе не проверился бы"
+    );
+}
+
+#[test]
 fn a_mutual_group_carries_definitions_and_families() {
     // Названные границы: постулат группой объявлять незачем - он и есть
     // отсутствие тела, - а модуль и класс объявляются отдельно.

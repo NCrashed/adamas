@@ -33,13 +33,30 @@
 //! каждом аргументе, прошедшем через уточнение, - то есть ровно на тех, ради
 //! которых пишут индексированные семейства.
 //!
+//! # Взаимная рекурсия
+//!
+//! `mutual` (§4.8) делает её выразимой, поэтому вызов соседа по циклу считается
+//! рекурсивным наравне с самовызовом. Позиция убывания при этом у каждого члена
+//! своя - у `even : Nat -> Bool` нулевой аргумент, у `odd : {0 a : Type} -> a
+//! -> Nat -> Bool` второй, - но согласованная: вызов из `A` в `B` засчитывается,
+//! когда аргумент на позиции `B` произошёл разбором от параметра на позиции `A`.
+//! Рекурсией считается вызов **по циклу**, а не всякое упоминание соседа:
+//! словарь инстанса называет свои методы, и убывать ему не по чему.
+//!
 //! # Что не покрыто
 //!
-//! Лексикографический порядок (`ack`), well-founded рекурсия с явной мерой,
-//! взаимная рекурсия. Последняя невозможна и по построению сигнатуры
-//! (ordered scoping, §4.8), остальное - отдельная работа. Проверка
-//! консервативна: отвергает часть завершающихся определений, но не пропускает
-//! расходящиеся.
+//! Лексикографический порядок (`ack`), well-founded рекурсия с явной мерой.
+//! Проверка консервативна: отвергает часть завершающихся определений, но не
+//! пропускает расходящиеся.
+//!
+//! **Названная граница: вердикт считается до зонканья тел.** Словарь метода
+//! инстанса стоит в теле дыркой, а `Meta` здесь инертна - ни вызовом, ни
+//! носителем размера, - поэтому рекурсия метода **через словарь** этой проверке
+//! не видна. Перенести вердикт за зонканье одним движением нельзя: там та же
+//! рекурсия приходит голым именем внутри подставленной записи-словаря, и
+//! спайна с аргументами у неё нет. См. ревью 2026-09-02 и §10.
+
+use std::rc::Rc;
 
 use crate::mult::Mult;
 use crate::sig::{Definition, Signature};
@@ -58,8 +75,21 @@ struct Size {
 ///
 /// Постулат тотален: тела нет, разворачивать нечего. Определение без
 /// рекурсивных вызовов тотально, если тотально всё, что оно зовёт.
+///
+/// `group` - имена всех членов объявляемой группы, включая само `name`. Вызов
+/// соседа по группе считается рекурсивным наравне с самовызовом: `ping`, зовущий
+/// `pong`, зовущий `ping`, расходится ровно так же, как `ping`, зовущий себя, а
+/// проверка, знающая только своё имя, не видела в такой паре ни одного вызова и
+/// объявляла её тотальной. Позиция убывания при этом ищется у каждого члена
+/// своя: убывает ли `ping` по первому аргументу, а `pong` по второму, для
+/// завершаемости безразлично - важно, что каждый вызов группы убывает.
 #[must_use]
-pub fn is_total(signature: &Signature, name: &Name, definition: &Definition) -> bool {
+pub fn is_total(
+    signature: &Signature,
+    name: &Name,
+    group: &[Name],
+    definition: &Definition,
+) -> bool {
     let Some(body) = &definition.body else {
         return true;
     };
@@ -67,27 +97,168 @@ pub fn is_total(signature: &Signature, name: &Name, definition: &Definition) -> 
     // Тотальность распространяется по графу вызовов (§4.7). Отдельного обхода
     // это не требует: определения добавляются по одному и каждое уже несёт свой
     // вердикт, поэтому достаточно посмотреть на непосредственно вызванные.
+    // Внутри группы вердикта ещё нет ни у кого - его считает неподвижная точка
+    // вызывающего, - и понижение соседа доедет сюда её следующим проходом.
     if calls_a_partial_definition(signature, name, body) {
         return false;
     }
 
-    let mut walk = Walk {
-        signature,
-        name,
-        calls: Vec::new(),
-    };
-    let mut sizes = Vec::new();
-    let arity = walk.parameters(&mut sizes, body);
-    walk.calls.is_empty()
+    if group.len() > 1 {
+        return cycle_decreases(signature, group);
+    }
+
+    let (arity, calls) = collected(signature, group, body);
+    calls.is_empty()
         || (0..arity).any(|position| {
-            walk.calls.iter().all(|call| {
+            calls.iter().all(|(_, sizes)| {
                 matches!(
-                    call.get(position),
+                    sizes.get(position),
                     Some(&Some(Size { argument, depth }))
                         if argument == position && depth > 0
                 )
             })
         })
+}
+
+/// Арность тела и рекурсивные вызовы в нём.
+fn collected(signature: &Signature, group: &[Name], body: &Term) -> (usize, Vec<Call>) {
+    let mut walk = Walk {
+        signature,
+        group,
+        calls: Vec::new(),
+    };
+    let mut sizes = Vec::new();
+    let arity = walk.parameters(&mut sizes, body);
+    (arity, walk.calls)
+}
+
+/// Убывает ли **каждый** вызов внутри цикла взаимной рекурсии.
+///
+/// Одной позиции на всех не хватает: у `ping : Nat -> Bool` убывает нулевой
+/// аргумент, а у `pong : {0 a : Type} -> a -> Nat -> Bool` - второй, и мерить
+/// их одним числом нечем. Позиция поэтому ищется **каждому члену своя**, но
+/// согласованно: вызов из `A` в `B` засчитывается, если аргумент, стоящий у
+/// него на позиции `B`, произошёл разбором от параметра на позиции `A`.
+/// Тогда по любому обходу цикла величина строго убывает, а значит цикл
+/// конечен.
+///
+/// Позиции подбираются перебором - как и у одиночного определения, объявлять
+/// их незачем. Названная граница: перебор ограничен [`SEARCH_LIMIT`]
+/// сочетаниями, и группа, у которой их больше, отвергается как непроверенная.
+/// Вердикт один на весь цикл: завершаемость его членов - общее свойство.
+fn cycle_decreases(signature: &Signature, cycle: &[Name]) -> bool {
+    let mut members = Vec::with_capacity(cycle.len());
+    for name in cycle {
+        let Some(body) = signature.lookup(name).and_then(|it| it.body.as_ref()) else {
+            return false;
+        };
+        members.push(collected(signature, cycle, body));
+    }
+    let combinations = members
+        .iter()
+        .try_fold(1usize, |count, (arity, _)| count.checked_mul(*arity))
+        .unwrap_or(usize::MAX);
+    if combinations == 0 || combinations > SEARCH_LIMIT {
+        return false;
+    }
+    let mut positions = vec![0usize; members.len()];
+    for _ in 0..combinations {
+        if agrees(&members, &positions) {
+            return true;
+        }
+        for (at, position) in positions.iter_mut().enumerate() {
+            *position += 1;
+            if *position < members[at].0 {
+                break;
+            }
+            *position = 0;
+        }
+    }
+    false
+}
+
+/// Убывает ли каждый вызов при таком назначении позиций.
+fn agrees(members: &[(usize, Vec<Call>)], positions: &[usize]) -> bool {
+    members.iter().enumerate().all(|(caller, (_, calls))| {
+        calls.iter().all(|(callee, sizes)| {
+            matches!(
+                sizes.get(positions[*callee]),
+                Some(&Some(Size { argument, depth }))
+                    if argument == positions[caller] && depth > 0
+            )
+        })
+    })
+}
+
+/// Сколько назначений позиций разрешено перебрать у одной группы.
+const SEARCH_LIMIT: usize = 4096;
+
+/// Имена из `group`, которые тело зовёт напрямую.
+///
+/// Нужно вызывающему, чтобы построить граф вызовов внутри группы: рекурсией
+/// считается вызов по **циклу**, а не всякое упоминание соседа. Словарь
+/// инстанса называет свои методы, методы словарь не зовут - цикла нет, и
+/// требовать от словаря убывания было бы отказом ни за что.
+pub(crate) fn calls_within(group: &[Name], term: &Term) -> Vec<Name> {
+    let mut found = Vec::new();
+    collect_calls(group, term, &mut found);
+    found
+}
+
+fn collect_calls(group: &[Name], term: &Term, found: &mut Vec<Name>) {
+    let mut recur = |inner| collect_calls(group, inner, found);
+    match term {
+        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Meta(_) => {}
+        Term::Const(other, _) => {
+            if group.contains(other) && !found.contains(other) {
+                found.push(Rc::clone(other));
+            }
+        }
+        Term::Record(fields) | Term::Row(fields) => {
+            for field in fields.iter() {
+                recur(&field.ty);
+            }
+            if let Some(tail) = fields.tail.as_ref() {
+                recur(tail);
+            }
+        }
+        Term::Object(fields) => {
+            for (_, value) in fields.iter() {
+                recur(value);
+            }
+        }
+        Term::With(base, fields) => {
+            recur(base);
+            for (_, value) in fields.iter() {
+                recur(value);
+            }
+        }
+        Term::Project(record, _) => recur(record),
+        Term::Lam(_, _, body) => recur(body),
+        Term::App(callee, argument) => {
+            recur(callee);
+            recur(argument);
+        }
+        Term::Pi(_, _, domain, row, codomain) => {
+            recur(domain);
+            recur(codomain);
+            for argument in row.labels().iter().flat_map(|label| &label.arguments) {
+                recur(argument);
+            }
+        }
+        Term::Let(_, _, ty, value, body) => {
+            recur(ty);
+            recur(value);
+            recur(body);
+        }
+        Term::Case(case) => {
+            recur(&case.scrutinee);
+            recur(&case.motive);
+            for branch in &case.branches {
+                recur(&branch.body);
+            }
+        }
+    }
 }
 
 /// Зовёт ли тело хоть одно нетотальное определение.
@@ -129,11 +300,15 @@ fn calls_a_partial_definition(signature: &Signature, name: &Name, term: &Term) -
 }
 
 /// Обход тела с накоплением рекурсивных вызовов.
+/// Рекурсивный вызов: кого из цикла зовут и с какими размерами аргументов.
+type Call = (usize, Vec<Option<Size>>);
+
 struct Walk<'a> {
     signature: &'a Signature,
-    name: &'a Name,
-    /// Для каждого вызова - размеры его аргументов по позициям.
-    calls: Vec<Vec<Option<Size>>>,
+    /// Имена, вызов которых считается рекурсивным: своё и соседи по циклу.
+    group: &'a [Name],
+    /// Вызовы в порядке обхода.
+    calls: Vec<Call>,
 }
 
 impl Walk<'_> {
@@ -200,8 +375,8 @@ impl Walk<'_> {
             // Голое имя без аргументов - тоже вызов, просто без единой
             // позиции, по которой можно было бы уменьшаться.
             Term::Const(other, _) => {
-                if other == self.name {
-                    self.calls.push(Vec::new());
+                if let Some(callee) = self.group.iter().position(|it| it == other) {
+                    self.calls.push((callee, Vec::new()));
                 }
             }
 
@@ -214,7 +389,11 @@ impl Walk<'_> {
                     .map(|argument| Self::size(sizes, argument))
                     .collect();
                 match head {
-                    Term::Const(other, _) if other == self.name => self.calls.push(applied),
+                    Term::Const(other, _)
+                        if let Some(callee) = self.group.iter().position(|it| it == other) =>
+                    {
+                        self.calls.push((callee, applied));
+                    }
                     // Convoy: аргументы применения - те самые соседи, которые
                     // ветвь связывает лямбдами сверх полей.
                     Term::Case(case) => self.case(sizes, case, &applied),

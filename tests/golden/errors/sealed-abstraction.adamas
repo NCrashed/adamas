@@ -1,0 +1,30 @@
+-- Правило запечатанной абстракции (§3.5, §4.8).
+--
+-- Канонический дефект: `Map Int String`, собранная под одним `Ord Int` и
+-- опрошенная под другим. Обе стороны типизируются, а `lookup` возвращает
+-- `None` на присутствующем ключе - потому что инстанс участвовал в построении
+-- значения, чей тип о нём молчит, и осадок пережил вызов.
+--
+-- Запрещена поэтому форма: констрейнт `C τ` у операции запечатывающей
+-- сигнатуры, где `τ` стоит параметром запечатанного типа. Выходов два -
+-- вынести констрейнт в параметр модуля (`module OrderedMap (Key : Ord) :> …`)
+-- либо объявить класс `coherent`, то есть пообещать один инстанс на программу.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+class Ord k where
+  compare : k -> k -> Bool
+
+module type MapSig where
+  type Map (k : Type) (v : Type)
+  empty  : {k : Type} -> {v : Type} -> Map k v
+  insert : {k : Type} -> {v : Type} -> {Ord k} => k -> v -> Map k v -> Map k v
+
+module OrderedMap :> MapSig where
+  type Map (k : Type) (v : Type) = k -> Bool
+  empty : {k : Type} -> {v : Type} -> Map k v
+  empty x = False
+  insert : {k : Type} -> {v : Type} -> {Ord k} => k -> v -> Map k v -> Map k v
+  insert k v m = m

@@ -3403,3 +3403,135 @@ used x = Twin.pick @BoolElem x
 "
     ));
 }
+
+/// Сигнатура, запечатывающая `Bag`, и операция с констрейнтом на его
+/// параметре - форма, которую §3.5 и запрещает.
+const BAGSIG: &str = "
+class Eqv a where
+  eq : a -> a -> Bool
+
+module type BagSig where
+  type Bag (a : Type)
+  empty : {a : Type} -> Bag a
+  add : {a : Type} -> {Eqv a} => a -> Bag a -> Bag a
+";
+
+/// Тело модуля к ней.
+const BAGBODY: &str = "
+  type Bag (a : Type) = a -> Bool
+  empty : {a : Type} -> Bag a
+  empty x = False
+  add : {a : Type} -> {Eqv a} => a -> Bag a -> Bag a
+  add x b = b
+";
+
+#[test]
+fn sealing_refuses_a_constraint_on_its_own_parameter() {
+    // §3.5: инстанс, участвовавший в построении значения абстрактного типа,
+    // переживает вызов, а тип о нём молчит. `Bag a`, собранный под одним
+    // `Eqv a` и опрошенный под другим, типизируется обеими сторонами.
+    let error = refused(&format!(
+        "{BASE}{BAGSIG}
+module Sealed :> BagSig where{BAGBODY}"
+    ));
+    assert!(
+        matches!(&error, ElabError::SealedConstraint { class, param, sealed, .. }
+            if &**class == "Eqv" && &**param == "a" && &**sealed == "Bag"),
+        "получено {error:?}"
+    );
+    // Область действия - только запечатывающий модуль: при `:` представление
+    // видно, и осаждать нечего.
+    program(&format!(
+        "{BASE}{BAGSIG}
+module Clear : BagSig where{BAGBODY}"
+    ));
+}
+
+#[test]
+fn a_coherent_class_passes_the_sealing_rule() {
+    // Маркер и заведён затем, чтобы такая сигнатура запечатывала: при одном
+    // инстансе на программу осадок один и тот же.
+    program(&format!(
+        "{BASE}
+coherent class Key a where
+  key : a -> Bool
+
+module type BagSig where
+  type Bag (a : Type)
+  add : {{a : Type}} -> {{Key a}} => a -> Bag a -> Bag a
+
+module Sealed :> BagSig where
+  type Bag (a : Type) = a -> Bool
+  add : {{a : Type}} -> {{Key a}} => a -> Bag a -> Bag a
+  add x b = b
+"
+    ));
+}
+
+#[test]
+fn a_constraint_beside_the_sealed_type_is_legal() {
+    // Правило про параметр запечатанного типа, а не про констрейнты вообще:
+    // `b` аргументом `Bag` не стоит, и осаждать его не в чем.
+    program(&format!(
+        "{BASE}
+class Eqv a where
+  eq : a -> a -> Bool
+
+module type BagSig where
+  type Bag (a : Type)
+  size : {{a : Type}} -> Bag a -> Bool
+  cmp : {{b : Type}} -> {{Eqv b}} => b -> b -> Bool
+
+module Sealed :> BagSig where
+  type Bag (a : Type) = a -> Bool
+  size : {{a : Type}} -> Bag a -> Bool
+  size b = True
+  cmp : {{b : Type}} -> {{Eqv b}} => b -> b -> Bool
+  cmp x y = eq x y
+"
+    ));
+}
+
+#[test]
+fn an_instance_context_cannot_settle_a_sealed_parameter() {
+    // Контексты инстансов включены в правило намеренно: иначе та же форма
+    // пишется в обход сигнатур.
+    let head = format!(
+        "{BASE}
+class Eqv a where
+  eq : a -> a -> Bool
+
+class Show a where
+  render : a -> Bool
+
+module type BagSig where
+  type Bag (a : Type)
+  empty : {{a : Type}} -> Bag a
+"
+    );
+    let body = "
+  type Bag (a : Type) = a -> Bool
+  empty : {a : Type} -> Bag a
+  empty x = False
+";
+    let error = refused(&format!(
+        "{head}
+module Sealed :> BagSig where{body}
+instance {{Eqv a}} => Show (Sealed.Bag a) where
+  render b = True
+"
+    ));
+    assert!(
+        matches!(&error, ElabError::SealedInstance { class, sealed, .. }
+            if &**class == "Eqv" && &**sealed == "Sealed.Bag"),
+        "получено {error:?}"
+    );
+    // Незапечатанный тип правилу не подлежит.
+    program(&format!(
+        "{head}
+module Clear : BagSig where{body}
+instance {{Eqv a}} => Show (Clear.Bag a) where
+  render b = True
+"
+    ));
+}

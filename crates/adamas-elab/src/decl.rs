@@ -33,7 +33,7 @@ use crate::carrier;
 use crate::error::{ElabError, Names};
 use adamas_core::value::Value;
 
-use crate::class::{self, Class, Declaring, Instances};
+use crate::class::{self, Class, Declaring, Instances, Offence};
 use crate::expr::{Elaborator, Enclosing, Member, Param, WrittenField};
 use crate::own::{Owned, Ownership};
 use crate::route::{self, Declared};
@@ -543,8 +543,9 @@ fn declare_module(
 ) -> Result<(), ElabError> {
     let declared = qualify(within, &module.name.text);
     writable(within, module, span)?;
+    sealable(instances, module, span)?;
     if module.signature {
-        return declare_module_type(signature, metas, owned, &declared, module, span);
+        return declare_module_type(signature, metas, owned, instances, &declared, module, span);
     }
     let names = Names::of(&declared, Vec::new());
     if let Some(body) = &module.body {
@@ -831,6 +832,7 @@ fn declare_instance(
         return Err(ElabError::ClassHead { span });
     };
     coherence(signature, instances, name, &arguments, &prefix, span)?;
+    sealed_abstraction(signature, instances, &prefix, &written, span)?;
     // Именованный объявляется под своим именем: сослаться на него через
     // `using` и `@` можно только так (§4.3). Анонимный - под невыразимым.
     let declared: Symbol = match &class.name {
@@ -1691,15 +1693,242 @@ fn member_name(member: &ast::Decl) -> Option<&Symbol> {
     }
 }
 
+/// Правило запечатанной абстракции у инстанса (§3.5).
+///
+/// Контексты инстансов включены в правило намеренно: `instance {Ord k} =>
+/// Functor (Map k)` даёт запрещённую форму в обход сигнатур - словарь `Ord k`
+/// осаждается в значении, чей тип о нём молчит, ровно как у операции.
+///
+/// Названная граница обхода: запечатанный тип ищется в спайне заключения.
+/// Спрятанный под `Pi` внутри аргумента не находится - в голове инстанса
+/// такого не пишут.
+fn sealed_abstraction(
+    signature: &Signature,
+    instances: &Instances,
+    prefix: &[Param],
+    written: &Term,
+    span: Span,
+) -> Result<(), ElabError> {
+    let depth = u32::try_from(prefix.len()).unwrap_or(u32::MAX);
+    let mut beneath = Vec::new();
+    sealed_arguments(signature, under_prefix(written), depth, &mut beneath);
+    if beneath.is_empty() {
+        return Ok(());
+    }
+    for (at, param) in prefix.iter().enumerate() {
+        let position = u32::try_from(at).unwrap_or(u32::MAX);
+        let Some((class, arguments)) = spine(&param.ty) else {
+            continue;
+        };
+        if !instances.is_class(&class) || instances.is_coherent(&class) {
+            continue;
+        }
+        for argument in arguments {
+            let Term::Var(index) = argument else {
+                continue;
+            };
+            let Some(bound) = position
+                .checked_sub(1)
+                .and_then(|it| it.checked_sub(index.0))
+            else {
+                continue;
+            };
+            let Some((_, sealed)) = beneath.iter().find(|(it, _)| *it == bound) else {
+                continue;
+            };
+            return Err(ElabError::SealedInstance {
+                class,
+                param: Rc::clone(&prefix[bound as usize].name),
+                sealed: Rc::clone(sealed),
+                span,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Переменные префикса, стоящие аргументами запечатанного типа.
+fn sealed_arguments(signature: &Signature, ty: &Term, depth: u32, found: &mut Vec<(u32, Symbol)>) {
+    let Some((name, arguments)) = spine(ty) else {
+        return;
+    };
+    if signature.lookup(&name).is_some_and(|it| it.opaque) {
+        for argument in &arguments {
+            let Term::Var(index) = argument else {
+                continue;
+            };
+            if let Some(bound) = depth.checked_sub(1).and_then(|it| it.checked_sub(index.0)) {
+                found.push((bound, Rc::clone(&name)));
+            }
+        }
+    }
+    for argument in arguments {
+        sealed_arguments(signature, argument, depth, found);
+    }
+}
+
+/// Спайн применения константы: её имя и аргументы.
+fn spine(ty: &Term) -> Option<(Symbol, Vec<&Term>)> {
+    let mut arguments = Vec::new();
+    let mut current = ty;
+    while let Term::App(callee, argument) = current {
+        arguments.push(&**argument);
+        current = callee;
+    }
+    arguments.reverse();
+    match current {
+        Term::Const(name, _) => Some((Rc::clone(name), arguments)),
+        _ => None,
+    }
+}
+
+/// Отвергает `:>` по сигнатуре, которой запечатывать нельзя (§3.5).
+///
+/// Аннотация `:` при том же тексте законна: правило охраняет **осадок**, а он
+/// заводится только там, где представление скрыто.
+fn sealable(instances: &Instances, module: &ast::ModuleDecl, span: Span) -> Result<(), ElabError> {
+    if !module.sealed {
+        return Ok(());
+    }
+    // Аннотация выражением, а не именем, сюда не проходит: искать нарушение
+    // негде, а разворачивать выражение правило не берётся - оно локально.
+    let Some(ast::ExprKind::Name(name)) = module.ascription.as_ref().map(|it| &it.kind) else {
+        return Ok(());
+    };
+    let Some(offence) = instances.offence(&name.text) else {
+        return Ok(());
+    };
+    Err(ElabError::SealedConstraint {
+        signature: Rc::clone(&name.text),
+        member: Rc::clone(&offence.member),
+        class: Rc::clone(&offence.class),
+        param: Rc::clone(&offence.param),
+        sealed: Rc::clone(&offence.sealed),
+        span,
+    })
+}
+
+/// Правило запечатанной абстракции (§3.5), посчитанное по тексту сигнатуры.
+///
+/// Констрейнт `C τ` у операции, где `τ` стоит аргументом абстрактного типового
+/// члена, означает, что инстанс участвовал в построении значения, чей тип о нём
+/// молчит. Проверяется локально, без разворачивания представлений: сигнатура и
+/// есть то, что автор написал.
+///
+/// Названная граница обхода: констрейнт ищется в написанных стрелках и группах
+/// связываний. Спрятанный внутрь поля записи или блока не находится - в
+/// сигнатуре такого не пишут, а обход, честный ко всякой форме, стоил бы
+/// второго `free_in`.
+fn sealing_offence(module: &ast::ModuleDecl, instances: &Instances) -> Option<Offence> {
+    let sealed: Vec<&Symbol> = module
+        .members
+        .iter()
+        .filter_map(|member| match &member.kind {
+            DeclKind::Alias {
+                name, body: None, ..
+            } => Some(&name.text),
+            _ => None,
+        })
+        .collect();
+    if sealed.is_empty() {
+        return None;
+    }
+    for member in &module.members {
+        let DeclKind::Signature { name, ty, .. } = &member.kind else {
+            continue;
+        };
+        let mut written = Vec::new();
+        constraints(ty, instances, &mut written);
+        for (class, param) in written {
+            if let Some(found) = argument_of(ty, &sealed, param) {
+                return Some(Offence {
+                    member: Rc::clone(&name.text),
+                    class: Rc::clone(class),
+                    param: Rc::clone(param),
+                    sealed: Rc::clone(found),
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Констрейнты написанного типа: класс и переменная, на которую он написан.
+///
+/// Некогерентные только: у когерентного класса словарь на программу один, и
+/// осадка он не оставляет (§3.5).
+fn constraints<'a>(
+    ty: &'a ast::Expr,
+    instances: &Instances,
+    found: &mut Vec<(&'a Symbol, &'a Symbol)>,
+) {
+    match &ty.kind {
+        ast::ExprKind::Pi { binders, codomain } => {
+            for binder in binders {
+                let Some(domain) = &binder.ty else {
+                    continue;
+                };
+                let Some((class, arguments)) = spine_of(domain) else {
+                    continue;
+                };
+                if !instances.is_class(&class.text) || instances.is_coherent(&class.text) {
+                    continue;
+                }
+                for argument in arguments {
+                    if let ast::ExprKind::Name(param) = &argument.kind {
+                        found.push((&class.text, &param.text));
+                    }
+                }
+            }
+            constraints(codomain, instances, found);
+        }
+        ast::ExprKind::Arrow(domain, codomain) => {
+            constraints(domain, instances, found);
+            constraints(codomain, instances, found);
+        }
+        _ => {}
+    }
+}
+
+/// Запечатываемый тип, чьим аргументом стоит переменная.
+fn argument_of<'a>(ty: &'a ast::Expr, sealed: &[&'a Symbol], param: &Symbol) -> Option<&'a Symbol> {
+    match &ty.kind {
+        ast::ExprKind::Pi { binders, codomain } => binders
+            .iter()
+            .filter_map(|binder| binder.ty.as_ref())
+            .find_map(|domain| argument_of(domain, sealed, param))
+            .or_else(|| argument_of(codomain, sealed, param)),
+        ast::ExprKind::Arrow(domain, codomain) => {
+            argument_of(domain, sealed, param).or_else(|| argument_of(codomain, sealed, param))
+        }
+        ast::ExprKind::App(..) => {
+            let (head, arguments) = spine_of(ty)?;
+            let found = *sealed.iter().find(|it| **it == &head.text)?;
+            let takes = arguments.iter().any(
+                |argument| matches!(&argument.kind, ast::ExprKind::Name(it) if it.text == *param),
+            );
+            takes.then_some(found)
+        }
+        _ => None,
+    }
+}
+
 /// `module type S where …` - тип записи, собранный телескопом.
 fn declare_module_type(
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &Owned,
+    instances: &mut Instances,
     declared: &Symbol,
     module: &ast::ModuleDecl,
     span: Span,
 ) -> Result<(), ElabError> {
+    // Правило запечатанной абстракции считается здесь - тут ещё есть текст
+    // сигнатуры, - а спрашивается на `:>`: с аннотацией `:` та же сигнатура
+    // законна, потому что представление остаётся видимым.
+    if let Some(offence) = sealing_offence(module, instances) {
+        instances.forbid_sealing(declared, offence);
+    }
     let mut members = Vec::with_capacity(module.members.len());
     for member in &module.members {
         match &member.kind {

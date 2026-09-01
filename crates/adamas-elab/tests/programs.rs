@@ -2722,6 +2722,78 @@ answer = eq (Cons Zero Nil) (Cons Zero Nil)
 }
 
 #[test]
+fn an_instance_context_that_does_not_shrink_is_refused() {
+    // Разрешение рекурсивно по построению (§3.5), а убывания цели форма
+    // инстанса не обещает: `Eqv (Box a)` в контексте у `Eqv (Box a)` -
+    // законная запись, ведущая в саму себя. Без предела глубины она съедает
+    // память вместо ответа, поэтому проверяется именно отказ, а не «не упало».
+    let error = refused(&format!(
+        "{BASE}{EQ_CLASS}
+data Box a where
+  Wrap : a -> Box a
+
+instance {{Eqv (Box a)}} => Eqv (Box a) where
+  eq p q = True
+
+answer : Bool
+answer = eq (Wrap Zero) (Wrap Zero)
+"
+    ));
+    assert!(
+        matches!(error, ElabError::InstanceDepth { .. }),
+        "ожидался предел глубины, получено: {error}"
+    );
+}
+
+#[test]
+fn the_dictionary_of_the_declared_instance_carries_its_superclasses() {
+    // Член инстанса вправе потребовать словарь **своего же** инстанса: имени у
+    // того ещё нет, и словарь собирается записью из членов. Запись эта обязана
+    // нести и поля суперклассов - иначе первая же их проекция роняет `eval`, а
+    // без проекции неполный словарь молча уезжает в сигнатуру.
+    program(&format!(
+        "{BASE}{EQ_CLASS}
+class Ord a when Eqv a where
+  cmp : a -> a -> Bool
+
+both : {{Ord a}} => a -> a -> Bool
+both x y = eq x y
+
+instance Ord Nat where
+  cmp x y = both x y
+"
+    ));
+}
+
+#[test]
+fn a_goal_of_another_shape_is_not_the_declared_instance() {
+    // Головы аргументов у `Eqv (List a)` и `Eqv (List Nat)` одни и те же, а
+    // словари разные. Выбор по головам отдавал второй цели словарь
+    // объявляемого инстанса с непривязанным `a`: ядро такой терм отвергает,
+    // элаборация принимала. Собрать для неё правильный словарь сегодня нечем -
+    // имени у инстанса до конца объявления нет, - и это названный отказ, а не
+    // принятая неверная программа.
+    let error = refused(&format!(
+        "{BASE}{EQ_CLASS}
+data List a where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+instance {{Eqv a}} => Eqv (List a) where
+  eq Nil Nil = eq (Cons Zero Nil) (Cons Zero Nil)
+  eq p q = False
+
+answer : Bool
+answer = eq (Cons Zero Nil) (Cons Zero Nil)
+"
+    ));
+    assert!(
+        matches!(error, ElabError::DeclaringInstance { .. }),
+        "ожидался отказ про объявляемый инстанс, получено: {error}"
+    );
+}
+
+#[test]
 fn a_class_method_may_have_a_default() {
     // §4.1: умолчание пишется в классе и раскрывается **в инстансе** - тело
     // его зовёт другие методы того же класса, а словарь для них объявляет

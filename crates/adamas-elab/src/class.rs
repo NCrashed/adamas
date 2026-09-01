@@ -252,13 +252,17 @@ fn settle(
     // Дырки, заведённые самим разрешением: их в терме нет - они живут в
     // решении той дырки, ради которой заведены, - а решать их надо тем же
     // циклом. Так рекурсия по контексту инстанса получается из очереди.
-    let mut pending: Vec<adamas_core::term::TermMeta> = Vec::new();
+    //
+    // Вместе с дыркой очередь несёт **глубину**: сколько контекстов пройдено,
+    // чтобы до неё добраться. Цель из самого терма стоит на нуле, цель из
+    // контекста кандидата - на единицу глубже своего.
+    let mut pending: Vec<(adamas_core::term::TermMeta, u32)> = Vec::new();
     loop {
-        let meta = match pending.pop() {
-            Some(meta) if metas.term_solution(meta).is_none() => meta,
+        let (meta, depth) = match pending.pop() {
+            Some((meta, depth)) if metas.term_solution(meta).is_none() => (meta, depth),
             Some(_) => continue,
             None => match unsolved_term_meta(metas, term) {
-                Some(meta) => meta,
+                Some(meta) => (meta, 0),
                 None => return Ok(()),
             },
         };
@@ -298,13 +302,36 @@ fn settle(
             Head::Unknown => return Ok(()),
         };
         let written = written(&class, &heads);
+        // Предел спрашивается здесь, а не при постановке в очередь: до этого
+        // места не известно, про класс ли цель вообще, и сообщению нужны её
+        // головы. Цель, дошедшая сюда на предельной глубине, - это цепочка
+        // контекстов, которая не убывает; отказ называет ту, на которой
+        // терпение кончилось.
+        if depth >= DEPTH_LIMIT {
+            return Err(ElabError::InstanceDepth {
+                written,
+                limit: DEPTH_LIMIT,
+                span,
+            });
+        }
         // Объявляемый сейчас инстанс собой сослаться не может - в сигнатуре
         // его ещё нет, - и словарь для него собирается **записью из членов**.
-        if let Some(inner) = declaring.filter(|it| it.matches(&class, &heads)) {
-            let Some(solution) = inner.dictionary(signature, metas, &ty) else {
+        // Головы сходятся у всякой цели того же класса на том же конструкторе,
+        // поэтому за ними спрашивается заголовок: цель `Eqv (List Nat)`,
+        // встреченная внутри `instance {Eqv a} => Eqv (List a)`, разряжается
+        // объявленным кандидатом, а не собой. Не сошёлся заголовок - это не
+        // отказ, а «не про этот инстанс»: поиск идёт дальше.
+        if let Some(inner) = declaring
+            .filter(|it| it.matches(&class, &heads))
+            .filter(|it| it.fits(signature, metas, &ty))
+        {
+            let Some((solution, fresh)) = inner.dictionary(signature, metas, &ty) else {
                 return Err(ElabError::NoInstance { written, span });
             };
             metas.solve_term(meta, solution);
+            // Поля суперклассов ушли дырками - разряжает их тот же цикл, на
+            // шаг глубже, как и всякий контекст.
+            pending.extend(fresh.into_iter().map(|created| (created, depth + 1)));
             continue;
         }
         let name = match instances.candidate(&class, &heads) {
@@ -319,18 +346,39 @@ fn settle(
             }
         };
         let Some(dictionary) = signature.instantiate(&name, metas) else {
+            // Кандидат в реестре есть, а тела у него в сигнатуре нет - значит
+            // это тот самый инстанс, который объявляется прямо сейчас. Сюда
+            // цель попадает, когда по головам она с ним совпала, а по
+            // заголовку нет: `Eqv (List Nat)` внутри `Eqv (List a)`. Отказ
+            // обязан назвать это, а не «инстанс не найден» - он на экране.
+            if declaring.is_some_and(|it| it.matches(&class, &heads)) {
+                return Err(ElabError::DeclaringInstance { written, span });
+            }
             return Err(ElabError::NoInstance { written, span });
         };
         let Some((solution, fresh)) = applied_candidate(signature, metas, &ty, &dictionary) else {
             return Err(ElabError::NoInstance { written, span });
         };
         metas.solve_term(meta, solution);
-        pending.extend(fresh);
+        pending.extend(fresh.into_iter().map(|created| (created, depth + 1)));
     }
 }
 
+/// Сколько контекстов инстансов разрешено пройти вглубь, разряжая одну цель.
+///
+/// Предел стоит на **глубине**, а не на числе шагов, и причина в том, какая
+/// именно рекурсия здесь бывает. Разрешение рекурсивно по построению: словарь
+/// контекста кандидата возвращается в ту же очередь (§3.5), и цепочка целей у
+/// живого кода коротка - `Eqv (List (List Nat))` это три звена. Убывания цели
+/// при этом никто не обещает: `instance {Eqv (Box a)} => Eqv (Box a)` законен
+/// по форме, а цель у него та же, что и была. Счётчик шагов такую цепочку тоже
+/// оборвёт, но оборвёт поздно - к тому времени она уже накоплена, и пройти по
+/// ней хотя бы раз стоит стека. Порядок величины взят тот же, что у топлива
+/// суперклассов, только с запасом на вложенность контейнеров.
+const DEPTH_LIMIT: u32 = 64;
+
 /// Цель дырки - то, чем оканчивается телескоп её типа.
-fn goal_of(ty: &Term) -> &Term {
+pub(crate) fn goal_of(ty: &Term) -> &Term {
     let mut current = ty;
     while let Term::Pi(_, _, _, _, codomain) = current {
         current = codomain;
@@ -522,6 +570,20 @@ pub struct Declaring {
     pub heads: Rc<[Symbol]>,
     /// Сколько ведущих связываний у словаря: столько же у каждого члена.
     pub prefix: usize,
+    /// Типы полей `#super`, лямбдами по префиксу - по одному на суперкласс.
+    ///
+    /// Словарь несёт их **перед** членами, и запись без них словарём не
+    /// является: первая же проекция `#super0` у такой записи роняла `eval`.
+    /// Заполняются они дырками и разряжаются тем же поиском, что и у
+    /// объявленного инстанса (§3.5) - разница только в том, что там дырки
+    /// заводит объявление, а здесь их приходится завести на месте.
+    pub super_types: Vec<Term>,
+    /// Заголовок инстанса лямбдами по префиксу: `\a -> Eqv (List a)`.
+    ///
+    /// Лямбдами, а не как написан, потому что сравнивать его приходится в
+    /// контексте цели, а он написан в контексте префикса; применение к
+    /// связываниям цели переименовывает его бета-редукцией.
+    pub header: Term,
     /// Члены: короткое имя поля и терм, которым член берётся.
     pub members: Vec<(Symbol, Term)>,
 }
@@ -532,32 +594,104 @@ impl Declaring {
         self.class == *class && self.heads == *heads
     }
 
+    /// Про этот ли инстанс цель **по заголовку**, а не по головам аргументов.
+    ///
+    /// Совпадения имени класса и голов для выбора мало: у `Eqv (List a)` и
+    /// `Eqv (List Nat)` головы одни и те же, а словари разные, и вторая цель
+    /// разряжается объявленным `Eqv#List`, а не собой. До этой проверки она
+    /// получала словарь объявляемого инстанса с непривязанным `a`: ядро на
+    /// таком терме даёт `Mismatch`, а элаборация принимала.
+    ///
+    /// Сравнивается заголовок, применённый к ведущим связываниям **цели**.
+    /// Подставить их напрямую нельзя - заголовок написан в контексте префикса,
+    /// а цель живёт в контексте своего места, - поэтому заголовок хранится
+    /// лямбдами по префиксу, и переименование делает бета-редукция, как оно
+    /// делает его у членов ниже.
+    fn fits(&self, signature: &Signature, metas: &mut Metas, ty: &Term) -> bool {
+        let binders = binders_of(ty);
+        let size = binders.len();
+        if size < self.prefix {
+            return false;
+        }
+        let mut ctx = adamas_core::ctx::Ctx::new(signature);
+        for (mult, name, domain) in &binders {
+            let value = ctx.eval(domain);
+            ctx = ctx.bind(Rc::clone(name), *mult, value);
+        }
+        let mut term = self.header.clone();
+        for position in 0..self.prefix {
+            let Ok(index) = u32::try_from(size - 1 - position) else {
+                return false;
+            };
+            term = Term::App(Rc::new(term), Rc::new(Term::var(index)));
+        }
+        let mine = ctx.eval(&term);
+        let goal = ctx.eval(goal_of(ty));
+        adamas_core::conv::convertible(signature, metas, ctx.size(), &mine, &goal)
+    }
+
     /// Словарь записью из членов, применённых к ведущим связываниям цели.
     ///
     /// Телескоп цели начинается ровно теми связываниями, что стоят у членов:
     /// член объявлен под тем же префиксом, что и сам словарь. Значит аргументы
     /// - первые `prefix` переменных телескопа.
-    fn dictionary(&self, signature: &Signature, metas: &mut Metas, ty: &Term) -> Option<Rc<Value>> {
+    ///
+    /// Поля `#super` идут первыми и заводятся дырками: чем их разрядить, знает
+    /// поиск, а не эта сборка. Заведённые дырки возвращаются вызывающему -
+    /// иначе они остались бы нерешёнными и всплыли отказом на границе
+    /// объявления, далеко от места, где их завели.
+    fn dictionary(
+        &self,
+        signature: &Signature,
+        metas: &mut Metas,
+        ty: &Term,
+    ) -> Option<(Rc<Value>, Vec<adamas_core::term::TermMeta>)> {
         let binders = binders_of(ty);
         let size = binders.len();
         if size < self.prefix {
             return None;
         }
-        let mut written = Vec::with_capacity(self.members.len());
-        for (field, member) in &self.members {
-            let mut term = member.clone();
+        let width = u32::try_from(size).ok()?;
+        // Ведущие связывания цели - те же, под которыми написаны и члены, и
+        // типы полей суперкласса. Применение к ним и есть переименование.
+        let leading = |term: &Term| -> Option<Term> {
+            let mut applied = term.clone();
             for position in 0..self.prefix {
                 let index = u32::try_from(size - 1 - position).ok()?;
-                term = Term::App(Rc::new(term), Rc::new(Term::var(index)));
+                applied = Term::App(Rc::new(applied), Rc::new(Term::var(index)));
             }
-            written.push((Rc::clone(field), Rc::new(term)));
+            Some(applied)
+        };
+        let mut ctx = adamas_core::ctx::Ctx::new(signature);
+        for (mult, name, domain) in &binders {
+            let value = ctx.eval(domain);
+            ctx = ctx.bind(Rc::clone(name), *mult, value);
+        }
+        let mut written = Vec::with_capacity(self.super_types.len() + self.members.len());
+        let mut fresh = Vec::new();
+        for (index, over) in self.super_types.iter().enumerate() {
+            let field: adamas_core::term::Name = Rc::from(format!("#super{index}").as_str());
+            let at_goal = ctx.eval(&leading(over)?);
+            // Тип дырки - телескоп по связываниям цели, оканчивающийся типом
+            // поля: дырка замкнута, а зависимость выражает спайн.
+            let telescope = abstracted_pi(&binders, quote(width, &at_goal));
+            let hole = metas.fresh_term(
+                adamas_core::eval::eval(&adamas_core::value::Env::default(), &telescope),
+                width,
+            );
+            if let Some(created) = head_meta(&hole) {
+                fresh.push(created);
+            }
+            written.push((field, Rc::new(hole)));
+        }
+        for (field, member) in &self.members {
+            written.push((Rc::clone(field), Rc::new(leading(member)?)));
         }
         let object = Term::Object(written.into());
         let solution = abstracted(&binders, object);
-        let _ = (signature, metas);
-        Some(adamas_core::eval::eval(
-            &adamas_core::value::Env::default(),
-            &solution,
+        Some((
+            adamas_core::eval::eval(&adamas_core::value::Env::default(), &solution),
+            fresh,
         ))
     }
 }

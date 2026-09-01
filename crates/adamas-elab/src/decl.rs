@@ -869,8 +869,19 @@ fn declare_instance(
         .collect();
 
     declare_members(
-        signature, metas, owned, instances, name, &arguments, &prefix, &written, &members,
-        &qualified, span, &names,
+        signature,
+        metas,
+        owned,
+        instances,
+        name,
+        &arguments,
+        &prefix,
+        &written,
+        superclasses,
+        &members,
+        &qualified,
+        span,
+        &names,
     )?;
 
     // Словарь - запись из членов, применённых к своим же связываниям.
@@ -1276,6 +1287,69 @@ fn declare_method(
 /// уровня при этом известна **до** проверки тел: тип члена выводится из класса
 /// и головы, а не из тела, - поэтому она объявляется явно, и предмет §10
 /// вопроса 54 здесь не возникает.
+/// Чем член инстанса разряжает цель, указывающую на его же инстанс.
+///
+/// Сослаться на инстанс именем член не может - в сигнатуре его ещё нет, -
+/// поэтому словарь для собственной цели собирается записью: поля суперклассов
+/// дырками, члены именами, которые объявятся вместе с ним.
+///
+/// Заголовок и типы полей суперкласса кладутся **лямбдами по префиксу**.
+/// Написаны они в контексте префикса, а спрашивают их в контексте цели, и
+/// глубины эти не совпадают: цель живёт под связываниями клаузы. Применение к
+/// ведущим связываниям цели переименовывает их бета-редукцией, и отдельного
+/// сдвига индексов не нужно.
+///
+/// # Errors
+///
+/// Если тип поля суперкласса не читается из заголовка.
+#[allow(clippy::too_many_arguments)]
+fn self_dictionary(
+    signature: &Signature,
+    metas: &mut Metas,
+    name: &ast::Name,
+    arguments: &Rc<[Symbol]>,
+    prefix: &[Param],
+    written: &Term,
+    superclasses: usize,
+    members: &[Written],
+    qualified: &[Symbol],
+    levels: &Rc<[Level]>,
+    span: Span,
+    names: &Names,
+) -> Result<Declaring, ElabError> {
+    let over_prefix = |body: Term| -> Term {
+        prefix
+            .iter()
+            .rev()
+            .fold(body, |inner: Term, param: &Param| {
+                Term::Lam(param.mult, CoreName::from(&*param.name), Rc::new(inner))
+            })
+    };
+    let mut super_types = Vec::with_capacity(superclasses);
+    for index in 0..superclasses {
+        let field = format!("#super{index}");
+        let ty = instance_method(signature, metas, prefix, written, &field, span, names)?;
+        super_types.push(over_prefix(ty));
+    }
+    Ok(Declaring {
+        class: Rc::clone(&name.text),
+        heads: Rc::clone(arguments),
+        prefix: prefix.len(),
+        super_types,
+        header: over_prefix(class::goal_of(written).clone()),
+        members: members
+            .iter()
+            .zip(qualified)
+            .map(|((method, ..), full)| {
+                (
+                    Rc::clone(method),
+                    Term::Const(CoreName::from(&**full), Rc::clone(levels)),
+                )
+            })
+            .collect(),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn declare_members(
     signature: &mut Signature,
@@ -1286,6 +1360,7 @@ fn declare_members(
     arguments: &Rc<[Symbol]>,
     prefix: &[Param],
     written: &Term,
+    superclasses: usize,
     members: &[Written],
     qualified: &[Symbol],
     span: Span,
@@ -1335,23 +1410,20 @@ fn declare_members(
             ty: Rc::new(ty.clone()),
         })
         .collect();
-    // Словарь для собственной цели - запись из **всех** членов: они уже
-    // названы, и объявятся вместе.
-    let declaring = Declaring {
-        class: Rc::clone(&name.text),
-        heads: Rc::clone(arguments),
-        prefix: prefix.len(),
-        members: members
-            .iter()
-            .zip(qualified)
-            .map(|((method, ..), full)| {
-                (
-                    Rc::clone(method),
-                    Term::Const(CoreName::from(&**full), Rc::clone(&levels)),
-                )
-            })
-            .collect(),
-    };
+    let declaring = self_dictionary(
+        signature,
+        metas,
+        name,
+        arguments,
+        prefix,
+        written,
+        superclasses,
+        members,
+        qualified,
+        &levels,
+        span,
+        names,
+    )?;
 
     let mut trees = Vec::with_capacity(members.len());
     for (at, (_, clauses, at_span)) in members.iter().enumerate() {

@@ -544,6 +544,16 @@ impl Signature {
         }
 
         // (C) группа закрыта: позитивность, укладка полей, вердикт тотальности.
+        //
+        // Позитивность меряется **по всей группе**: `Tree` становится
+        // негативным через `Forest` ровно так же, как через себя, и проверка,
+        // знающая только своё имя, такую пару принимала бы.
+        let families: Vec<Name> = members
+            .iter()
+            .zip(&checked)
+            .filter(|(_, it)| it.declaration.data_shape().is_some())
+            .map(|(member, _)| Rc::clone(member.name()))
+            .collect();
         for (index, ((member, family), declarations)) in
             members.iter().zip(&checked).zip(&constructors).enumerate()
         {
@@ -555,6 +565,7 @@ impl Signature {
                     metas,
                     &declared.name,
                     member.name(),
+                    &families,
                     &family.declaration,
                     &constructor.ty,
                 )

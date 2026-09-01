@@ -1,0 +1,28 @@
+-- Взаимно рекурсивные семейства и функции над ними (§4.8).
+--
+-- `Tree` и `Forest` друг без друга не объявляются: конструктор одного называет
+-- другое. Ordered scoping такую пару не пропускает, и `mutual` заводится ровно
+-- для неё - единица объявления у членов блока общая.
+--
+-- Семейства объявляются первыми и своей группой: разбор в теле определения
+-- берёт у конструктора тип, и в сигнатуре конструкторы обязаны быть раньше,
+-- чем компилируется первая клауза.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+mutual
+  data Tree (a : Type) where
+    Node : a -> Forest a -> Tree a
+
+  data Forest (a : Type) where
+    Nil  : Forest a
+    Cons : Tree a -> Forest a -> Forest a
+
+  count : {a : Type} -> Tree a -> Nat
+  count (Node x f) = Succ (counts f)
+
+  counts : {a : Type} -> Forest a -> Nat
+  counts Nil = Zero
+  counts (Cons t f) = count t

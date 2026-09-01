@@ -881,46 +881,73 @@ fn uniform_parameters(params: u32, depth: u32, arguments: &[&Term]) -> bool {
 /// (`def F A = A -> Tree`, поле `F Bool`) потребовал бы β-редукции на термах, а
 /// её в ядре нет - подстановку заменяет `NbE`, работающий на значениях. Отказ
 /// в таком случае остаётся, и он в безопасную сторону.
-fn positive_field(
+/// Семейство группы, стоящее в поле неправильно. `None` - поле позитивно.
+///
+/// Возвращается **найденное**, а не проверяемое: в группе они расходятся, и
+/// сообщение «`MkA` использует `A` в отрицательной позиции» отправляло бы
+/// искать `A` там, где написано `B`.
+fn positive_field<'a>(
     signature: &Signature,
-    data: &Name,
+    group: &'a [Name],
     params: u32,
     depth: u32,
     term: &Term,
-) -> bool {
-    positive_seen(signature, data, params, depth, term, &mut HashSet::new())
+) -> Option<&'a Name> {
+    positive_seen(signature, group, params, depth, term, &mut HashSet::new())
 }
 
-fn positive_seen<'a>(
+/// Первое семейство группы, которое терм упоминает.
+fn mentioned_by<'a>(signature: &Signature, group: &'a [Name], term: &Term) -> Option<&'a Name> {
+    group.iter().find(|name| mentions(signature, name, term))
+}
+
+/// Упоминает ли терм хоть одно семейство группы.
+fn mentions_any(signature: &Signature, group: &[Name], term: &Term) -> bool {
+    group.iter().any(|name| mentions(signature, name, term))
+}
+
+fn positive_seen<'a, 'g>(
     signature: &'a Signature,
-    data: &Name,
+    group: &'g [Name],
     params: u32,
     depth: u32,
     term: &'a Term,
     seen: &mut HashSet<&'a Name>,
-) -> bool {
+) -> Option<&'g Name> {
     match term {
         // Слева от стрелки тип не должен встречаться вовсе; справа - рекурсия.
         // Аргументы меток row - та же левая позиция: применение стрелки
         // предъявляет их так же, как домен.
-        Term::Pi(_, _, domain, row, codomain) => {
-            !mentions(signature, data, domain)
-                && !mentioned_in_row(signature, data, row)
-                && positive_seen(signature, data, params, depth + 1, codomain, seen)
-        }
+        Term::Pi(_, _, domain, row, codomain) => mentioned_by(signature, group, domain)
+            .or_else(|| {
+                group
+                    .iter()
+                    .find(|name| mentioned_in_row(signature, name, row))
+            })
+            .or_else(|| positive_seen(signature, group, params, depth + 1, codomain, seen)),
         other => {
             let (head, arguments) = spine(other);
             match head {
-                // Рекурсивное вхождение: аргументы обязаны быть свободны от
-                // самого типа, иначе `D (D x)` протащило бы его в позицию,
-                // которую проверка не контролирует.
-                Term::Const(name, _) if name == data => {
-                    uniform_parameters(params, depth, &arguments)
-                        && arguments
-                            .iter()
-                            .all(|argument| !mentions(signature, data, argument))
+                // Рекурсивное вхождение - своё или соседа по группе: `Tree`
+                // становится негативным через `Forest` ровно так же, как через
+                // себя. Аргументы обязаны быть свободны от группы, иначе
+                // `D (D x)` протащило бы её в позицию, которую проверка не
+                // контролирует.
+                Term::Const(name, _) if group.iter().any(|it| it == name) => {
+                    // Единообразие меряется параметрами **того** семейства,
+                    // которое стоит в голове: у соседа их своё число.
+                    let own = signature
+                        .lookup(name)
+                        .and_then(Definition::data_shape)
+                        .map_or(params, |(count, _)| count);
+                    if !uniform_parameters(own, depth, &arguments) {
+                        return mentioned_by(signature, group, other);
+                    }
+                    arguments
+                        .iter()
+                        .find_map(|argument| mentioned_by(signature, group, argument))
                 }
-                _ if !mentions(signature, data, other) => true,
+                _ if !mentions_any(signature, group, other) => None,
                 // Тип упомянут, но позиция ещё не разобрана: если голова -
                 // определение, смотрим на то, чем она является.
                 Term::Const(name, _) if arguments.is_empty() => {
@@ -928,13 +955,17 @@ fn positive_seen<'a>(
                         .lookup(name)
                         .and_then(|definition| definition.body.as_ref())
                     else {
-                        return false;
+                        return mentioned_by(signature, group, other);
                     };
                     // Память о развёрнутых - против самоссылки в теле; та же
                     // причина и та же форма, что у `mentions_seen`.
-                    seen.insert(name) && positive_seen(signature, data, params, depth, body, seen)
+                    if seen.insert(name) {
+                        positive_seen(signature, group, params, depth, body, seen)
+                    } else {
+                        mentioned_by(signature, group, other)
+                    }
                 }
-                _ => false,
+                _ => mentioned_by(signature, group, other),
             }
         }
     }
@@ -1098,6 +1129,7 @@ pub(crate) fn check_constructor_content(
     metas: &mut Metas,
     name: &Name,
     data: &Name,
+    group: &[Name],
     family: &Definition,
     ty: &Term,
 ) -> Result<(), TypeError> {
@@ -1114,18 +1146,21 @@ pub(crate) fn check_constructor_content(
         // Метка на собственной стрелке конструктора стоит там же, где домен:
         // применение предъявляет её аргументы так же. Проверяется она и на
         // параметрах - там правило то же, а исключать нечего.
-        if mentioned_in_row(signature, data, &field.row) {
+        if let Some(found) = group
+            .iter()
+            .find(|it| mentioned_in_row(signature, it, &field.row))
+        {
             return Err(ErrorKind::NotStrictlyPositive {
                 name: Rc::clone(name),
-                data: Rc::clone(data),
+                data: Rc::clone(found),
             }
             .into());
         }
         if depth >= params {
-            if !positive_field(signature, data, params, depth, &field.domain) {
+            if let Some(found) = positive_field(signature, group, params, depth, &field.domain) {
                 return Err(ErrorKind::NotStrictlyPositive {
                     name: Rc::clone(name),
-                    data: Rc::clone(data),
+                    data: Rc::clone(found),
                 }
                 .into());
             }

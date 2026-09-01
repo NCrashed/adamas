@@ -651,7 +651,19 @@ fn declare_module(
             span,
             error: Box::new(error),
             names,
-        })
+        })?;
+    // Запечатываются и **поднятые члены**: снаружи `M.f` есть ссылка на них, а
+    // не проекция из записи, и одной непрозрачной записи для сокрытия уже мало.
+    // Ставится флаг после проверки всего модуля: члены видят друг друга, и
+    // непрозрачность, поставленная сразу, запретила бы δ соседу.
+    if module.sealed {
+        for member in &module.members {
+            if let Some(name) = member_name(member) {
+                signature.seal(&qualify(Some(&inner), name));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Заключение написанной головы: `{Eqv a} => Eqv (List a)` даёт `Eqv (List a)`.

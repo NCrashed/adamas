@@ -3299,3 +3299,107 @@ hidden x = Sealed.empty x
     ));
     assert!(error.to_string().contains("Bag"), "получено {error:?}");
 }
+
+#[test]
+fn a_dotted_name_is_the_lifted_member() {
+    // Снаружи `M.f` есть ссылка на поднятый член, а не проекция из записи
+    // (решение 2026-08-31). Проекция теряла параметры уровня тех членов,
+    // которых не касалась: поле записи полиморфным по уровню не бывает, и
+    // модуль обобщался целиком.
+    program(&format!(
+        "{BASE}
+module Plain where
+  ident : {{a : Type}} -> a -> a
+  ident x = x
+  other : Bool
+  other = True
+
+taken : Bool
+taken = Plain.other
+
+applied : Nat
+applied = Plain.ident Zero
+"
+    ));
+}
+
+#[test]
+fn a_nested_member_is_named_by_its_path() {
+    // Правило одно на любую глубину: каждое звено точечного имени - имя.
+    program(&format!(
+        "{BASE}
+module Outer where
+  module Inner where
+    flag : Bool
+    flag = True
+  near : Bool
+  near = Inner.flag
+
+deep : Bool
+deep = Outer.Inner.flag
+"
+    ));
+}
+
+#[test]
+fn sealing_reaches_the_lifted_members() {
+    // Запечатывание держалось на том, что `M.f` - проекция из непрозрачной
+    // записи. Раз `M.f` стало именем, флаг переехал на сами имена: иначе `:>`
+    // протекал бы через них.
+    let head = format!(
+        "{BASE}
+module type FlagSig where
+  type Flag
+  make : Flag
+  read : Flag -> Bool
+
+module Sealed :> FlagSig where
+  type Flag = Bool
+  make : Flag
+  make = True
+  read : Flag -> Bool
+  read f = f
+"
+    );
+    // Своими членами запечатанный модуль пользуется как обычно.
+    program(&format!(
+        "{head}
+used : Bool
+used = Sealed.read Sealed.make
+"
+    ));
+    // А представление снаружи не видно.
+    let error = refused(&format!(
+        "{head}
+leaked : Bool
+leaked = Sealed.read True
+"
+    ));
+    assert!(
+        error.to_string().contains("Sealed.Flag"),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_functor_member_takes_its_parameter_written() {
+    // Член функтора поднят вместе с параметром, и параметр стоит у него
+    // implicit-связыванием. Раз имя доступно снаружи, `@` его и пишет -
+    // вывести его там нечем.
+    program(&format!(
+        "{BASE}
+module type Elem where
+  type T
+
+module Twin (E : Elem) where
+  pick : E.T -> E.T
+  pick x = x
+
+module BoolElem where
+  type T = Bool
+
+used : Bool -> Bool
+used x = Twin.pick @BoolElem x
+"
+    ));
+}

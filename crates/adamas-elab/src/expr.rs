@@ -1054,6 +1054,38 @@ impl<'a> Elaborator<'a> {
         outcome
     }
 
+    /// Точечное имя целиком, если каждое его звено - имя, а не выражение.
+    ///
+    /// Связывание обрывает разбор: `m.f` при локальном `m` - проекция из
+    /// записи, что бы ни было объявлено под именем `m.f`.
+    fn dotted(&self, expr: &Expr) -> Option<String> {
+        match &expr.kind {
+            ExprKind::Name(name) => self
+                .local(&name.text)
+                .is_none()
+                .then(|| name.text.to_string()),
+            ExprKind::Project(inner, field) => {
+                let prefix = self.dotted(inner)?;
+                Some(format!("{prefix}.{}", field.text))
+            }
+            _ => None,
+        }
+    }
+
+    /// Поднятый член под точечным именем - если он объявлен.
+    ///
+    /// Не объявлен - значит префикс модулем не был (или поля с таким именем у
+    /// него нет), и об этом скажет проекция, у которой есть тип записи.
+    fn member(&self, record: &Expr, field: &str) -> Option<Symbol> {
+        let full: Symbol = Rc::from(format!("{}.{field}", self.dotted(record)?).as_str());
+        // Сосед по модулю заслоняет глобальное имя тем же правилом, что и у
+        // простого имени: `N.f` внутри `M` - это `M.N.f`.
+        let neighbour = self
+            .qualified_name(&full)
+            .is_some_and(|it| self.signature.lookup(&it).is_some());
+        (neighbour || self.signature.lookup(&full).is_some()).then_some(full)
+    }
+
     /// Индекс де Брёйна локального связывания.
     fn local(&self, name: &str) -> Option<u32> {
         self.scope
@@ -1231,6 +1263,16 @@ impl<'a> Elaborator<'a> {
             }
             ExprKind::Record(fields) => self.record(fields),
             ExprKind::Project(record, name) => {
+                // Точечное имя, чей префикс называет объявленный модуль, есть
+                // ссылка на **поднятый член**, а не проекция из записи. Внутри
+                // модуля так было всегда; снаружи проекция теряла аргументы
+                // уровня тех членов, которых не касалась (решение 2026-08-31).
+                if let Some(full) = self.member(record, &name.text) {
+                    return self.name(&ast::Name {
+                        text: full,
+                        span: name.span,
+                    });
+                }
                 let inner = self.placed(Position::Inner, |it| it.expr(record, Mult::Many))?;
                 Ok(Term::Project(Rc::new(inner), CoreName::from(&*name.text)))
             }
@@ -1687,7 +1729,15 @@ impl<'a> Elaborator<'a> {
             head = callee;
         }
         let mut term = self.placed(Position::Inner, |it| {
-            if matches!(head.kind, ExprKind::Name(_)) {
+            // Точечное имя поднятого члена - тоже имя (решение 2026-08-31), и
+            // вставку `@` обязано отключать так же: иначе первый выводимый
+            // аргумент уже занят дыркой, и писать его нечем.
+            let named = match &head.kind {
+                ExprKind::Name(_) => true,
+                ExprKind::Project(record, field) => it.member(record, &field.text).is_some(),
+                _ => false,
+            };
+            if named {
                 it.bare(|it| it.expr(head, Mult::Many))
             } else {
                 it.expr(head, Mult::Many)

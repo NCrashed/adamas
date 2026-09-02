@@ -4649,6 +4649,59 @@ apart : Bool -> Bool -> {{State Bool | e}} Bool
 }
 
 #[test]
+fn a_clause_with_a_carried_neighbour_keeps_its_ambient_row() {
+    // Стрелки, в которые компилятор клауз заворачивает вынесенных соседей,
+    // несут окружающую row: ветвь есть часть разбора, разбор работает в
+    // окружающей (§3.4). Снималась она с телескопа вместе с отбрасыванием
+    // самой row, поэтому контекст разбора был пуст, стрелки объявляли «чисто»,
+    // и клауза с эффектным телом отвергалась непогашенностью в теле функции,
+    // чья сигнатура эту row и написала.
+    let text = "\
+data Bool where
+  True : Bool
+  False : Bool
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Vect : Nat -> Type where
+  Nil : Vect Zero
+  Cons : (0 n : Nat) -> Bool -> Vect n -> Vect (Succ n)
+
+effect State s where
+  put : s -> Unit
+
+step : Bool -> {State Bool} Unit
+step b = put b
+";
+    // Вторая колонка зависит от уточняемого уровня - её компилятор и выносит.
+    program(&format!(
+        "{text}
+both : (0 n : Nat) -> Vect n -> Vect n -> {{State Bool}} Unit
+both n Nil ys = MkUnit
+both n (Cons k x xs) ys = step x
+"
+    ));
+    // Направление проверки: чистая сигнатура при том же теле обязана
+    // отвергаться, иначе тест ловил бы не то.
+    let error = refused(&format!(
+        "{text}
+both : (0 n : Nat) -> Vect n -> Vect n -> Unit
+both n Nil ys = MkUnit
+both n (Cons k x xs) ys = step x
+"
+    ));
+    assert!(
+        error.to_string().contains("не погашены"),
+        "получено {error:?}"
+    );
+}
+
+#[test]
 fn a_row_hole_does_not_outlive_its_declaration() {
     // Дырка, дожившая до сигнатуры, зависит от хранилища, которого за границей
     // группы уже нет. Для уровня и терма это отказ с Фазы 2, для row сорт

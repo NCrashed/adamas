@@ -289,17 +289,25 @@ pub fn compile_traced(
     // Снимается по значению, а не по терму: `def Fn = Nat -> Nat` - такой же
     // тип функции, как записанная стрелка, и синтаксическое снятие насчитало бы
     // ему нулевую арность, отвергнув клаузы с выдуманным числом аргументов.
+    // Окружающая row снимается вместе со связыванием, тем же правилом, каким
+    // её снимает `check_lambda`: тело работает в row своей стрелки (§3.4).
+    // Без этого `ctx.row()` оставался пустым на весь разбор, и стрелки, в
+    // которые компилятор заворачивает вынесенных соседей, объявляли «чисто» -
+    // клауза с эффектным телом и уточняемым соседом отвергалась
+    // непогашенностью в теле функции, чья сигнатура эту row и написала.
     let mut ctx = ctx;
     let mut telescope = Vec::new();
     let mut current = ctx.eval(ty);
     while telescope.len() != wanted {
         let reduced = crate::conv::whnf(signature, &current);
-        let Value::Pi(Binder { mult, .. }, name, domain, _, codomain) = &*reduced else {
+        let Value::Pi(Binder { mult, .. }, name, domain, row, codomain) = &*reduced else {
             break;
         };
         let bound = Lvl(ctx.size());
         telescope.push((*mult, Rc::clone(name), Rc::clone(domain)));
-        ctx = ctx.bind(Rc::clone(name), *mult, Rc::clone(domain));
+        ctx = ctx
+            .within(row.clone())
+            .bind(Rc::clone(name), *mult, Rc::clone(domain));
         current = codomain.apply(Value::var(bound));
     }
     let arity = telescope.len();

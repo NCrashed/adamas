@@ -2582,6 +2582,37 @@ module Counting (Key : Eqv) where
 }
 
 #[test]
+fn a_functor_applied_twice_gives_one_type() {
+    // §4.8: аппликативность «получена даром» - и не была получена. Разворот
+    // определения переигрывал спайн только над записью, а у модуля,
+    // объявленного выражением, тело - нейтраль: проекция на ней не бралась,
+    // и `None` отбрасывал уже сделанный δ-шаг вместе с ней. `M.T` не
+    // разворачивалась вовсе, поэтому два применения функтора к одному
+    // аргументу давали неконвертируемые типы, а `module A = NatEq` был
+    // непрозрачен без всякого `:>`.
+    program(&format!(
+        "{BASE}{EQV}
+module Plain (Key : Eqv) where
+  type T = Key.T
+
+module G1 = Plain NatEq
+module G2 = Plain NatEq
+
+conv : G1.T -> G2.T
+conv x = x
+
+toNat : G1.T -> Nat
+toNat x = x
+
+module A1 = NatEq
+
+alias : A1.T -> Nat
+alias x = x
+"
+    ));
+}
+
+#[test]
 fn a_sealed_functor_hides_its_result() {
     // §3.5: аппликативность - следствие, а не отдельное решение. `Hidden.T`
     // разворачивается в проекцию от применения, а `Dup` запечатан, поэтому

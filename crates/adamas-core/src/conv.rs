@@ -214,14 +214,17 @@ pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
     spine.iter().try_fold(body, |callee, elim| match elim {
         Elim::App(argument) => try_apply(&callee, Rc::clone(argument)),
         Elim::Case(case) => try_eliminate_case(case, &callee),
-        // Проекция из развёрнутого определения: если это уже запись, поле
-        // берётся, иначе разворот не помог и сравнение идёт дальше.
-        Elim::Project(name) => {
-            matches!(&*callee, Value::Object(_)).then(|| crate::eval::project(&callee, name))
-        }
-        // То же с переопределением: развернулось до записи - пересобирается,
-        // нет - разворот не помог.
-        Elim::With(fields) => matches!(&*callee, Value::Object(_))
+        // Проекция из развёрнутого определения. Записью тело быть не обязано:
+        // у модуля, объявленного выражением (`module M = F A`), тело - это
+        // нейтраль, и проекция на ней **копится в спайне**, а не застревает.
+        // Требуй здесь записи - и `None` отбросил бы уже сделанный δ-шаг
+        // вместе с ним: `M.T` не разворачивалась бы вовсе, два применения
+        // функтора к одному аргументу давали бы неконвертируемые типы, а
+        // разница между `:` и `:>` у модуля-значения исчезала.
+        Elim::Project(name) => matches!(&*callee, Value::Object(_) | Value::Neutral(..))
+            .then(|| crate::eval::project(&callee, name)),
+        // То же с переопределением: на записи пересобирает, на нейтрали копит.
+        Elim::With(fields) => matches!(&*callee, Value::Object(_) | Value::Neutral(..))
             .then(|| crate::eval::with(&callee, fields.to_vec())),
     })
 }

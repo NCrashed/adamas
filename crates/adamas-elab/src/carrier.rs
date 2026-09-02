@@ -228,7 +228,7 @@ fn constant(term: &Term, depth: u32) -> Option<Name> {
         env.extend(Value::var(Lvl(level)))
     });
     match &*eval(&env, term) {
-        Value::Neutral(Head::Global(name, _), _) => Some(Rc::clone(name)),
+        Value::Neutral(Head::Global(name, ..), _) => Some(Rc::clone(name)),
         _ => None,
     }
 }

@@ -3039,13 +3039,10 @@ impl<'a> Elaborator<'a> {
             }
         }
         let name = CoreName::from(&**constructor);
-        Some(
-            applied
-                .into_iter()
-                .fold(Value::constant(name, &levels), |callee, argument| {
-                    apply(&callee, argument)
-                }),
-        )
+        Some(applied.into_iter().fold(
+            Value::constant(name, &levels, Rc::from([])),
+            |callee, argument| apply(&callee, argument),
+        ))
     }
 
     /// Оборачивает тело цепочкой вставленных `drop`.
@@ -3261,7 +3258,7 @@ fn repeated<'a>(pattern: &'a Pattern, seen: &mut Vec<&'a ast::Name>) -> Result<(
 /// Имя головы значения-типа: `Vect a n` даёт `Vect`.
 fn head_name(ty: &Value) -> Option<&CoreName> {
     match ty {
-        Value::Neutral(Head::Global(name, _), _) => Some(name),
+        Value::Neutral(Head::Global(name, ..), _) => Some(name),
         _ => None,
     }
 }
@@ -3269,7 +3266,7 @@ fn head_name(ty: &Value) -> Option<&CoreName> {
 /// Аргументы применения в голове типа - в порядке написания.
 fn arguments_of(ty: Option<&Value>) -> Vec<Rc<Value>> {
     match ty {
-        Some(Value::Neutral(Head::Global(_, _), spine)) => spine
+        Some(Value::Neutral(Head::Global(..), spine)) => spine
             .iter()
             .filter_map(|elim| match elim {
                 Elim::App(argument) => Some(Rc::clone(argument)),

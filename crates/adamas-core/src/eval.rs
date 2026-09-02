@@ -86,13 +86,17 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
         // δ-редукцию делает проверка конвертируемости и только когда это
         // действительно нужно (`crate::conv`). Иначе нормальные формы и
         // сообщения об ошибках раздувались бы телами всех определений.
-        Term::Const(name, levels, rows) => {
-            // Аргументы-row до значения ещё не доходят: их носит `Head::Global`,
-            // и это следующий срез (§10 вопрос 73). Пока их не бывает, молчать
-            // об этом нельзя - иначе первая же непустая уедет в никуда.
-            debug_assert!(rows.is_empty(), "аргументы-row в значении ещё не носятся");
-            Value::constant(Rc::clone(name), levels)
-        }
+        // Аргументы-row вычисляются вместе с термом: метки несут обычные
+        // термы, и под связыванием они без вычисления остались бы индексами,
+        // которым в значении не на что указывать.
+        Term::Const(name, levels, rows) => Value::constant(
+            Rc::clone(name),
+            levels,
+            rows.as_slice()
+                .iter()
+                .map(|row| row.map(|argument| eval(env, argument)))
+                .collect(),
+        ),
 
         // Тип связывания при вычислении не нужен: он влияет на проверку, а не
         // на значение.
@@ -145,7 +149,7 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
         Term::Case(case) => {
             let scrutinee = eval(env, &case.scrutinee);
             let selected = match &*scrutinee {
-                Value::Neutral(Head::Global(name, _), spine) => case
+                Value::Neutral(Head::Global(name, ..), spine) => case
                     .branches
                     .iter()
                     .find(|branch| branch.constructor == *name)
@@ -332,7 +336,7 @@ pub fn try_eliminate_case(case: &Rc<StuckCase>, scrutinee: &Rc<Value>) -> Option
         return None;
     };
 
-    if let Head::Global(name, _) = head {
+    if let Head::Global(name, ..) = head {
         if let Some(branch) = case
             .branches
             .iter()
@@ -407,9 +411,14 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
         Value::Neutral(head, spine) => {
             let base = match head {
                 Head::Local(level) => Term::Var(level.to_index(size)),
-                Head::Global(name, levels) => {
-                    Term::Const(Rc::clone(name), Rc::clone(levels), Rows::none())
-                }
+                Head::Global(name, levels, rows) => Term::Const(
+                    Rc::clone(name),
+                    Rc::clone(levels),
+                    Rows::new(
+                        rows.iter()
+                            .map(|row| row.map(|argument| quote(size, argument))),
+                    ),
+                ),
                 Head::Meta(meta) => Term::Meta(*meta),
             };
             spine.iter().fold(base, |callee, elim| match elim {

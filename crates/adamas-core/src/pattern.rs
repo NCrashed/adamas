@@ -1099,8 +1099,10 @@ impl Compiler<'_> {
 
         // Связывания мотива: индексы семейства, потом само разбираемое
         // значение. Формы индексов идут с ними парой - по ним и различается.
-        let mut current =
-            instantiate_telescope(declaration.instantiate_type(&family.levels), &family.params);
+        let mut current = instantiate_telescope(
+            declaration.instantiate_type(&family.levels, &[]),
+            &family.params,
+        );
         let mut inner = ctx.clone();
         let mut names = Vec::new();
         let mut work = Vec::new();
@@ -1257,8 +1259,10 @@ impl Compiler<'_> {
         let Some(declaration) = self.signature.lookup(constructor) else {
             unreachable!("конструктор `{constructor}` объявлен")
         };
-        let mut current =
-            instantiate_telescope(declaration.instantiate_type(levels), &arguments[..params]);
+        let mut current = instantiate_telescope(
+            declaration.instantiate_type(levels, &[]),
+            &arguments[..params],
+        );
         let mut fields = Vec::new();
         for argument in &arguments[params..] {
             let Value::Pi(_, _, domain, _, codomain) = &*current else {
@@ -1346,7 +1350,7 @@ impl Compiler<'_> {
         let Some(declaration) = self.signature.lookup(constructor) else {
             unreachable!("конструктор `{constructor}` объявлен")
         };
-        let mut current = instantiate_telescope(declaration.instantiate_type(levels), params);
+        let mut current = instantiate_telescope(declaration.instantiate_type(levels, &[]), params);
         let mut fields = Vec::new();
         let mut level = ctx.size();
         while let Value::Pi(Binder { mult, .. }, name, domain, _, codomain) = &*current {
@@ -1806,7 +1810,7 @@ type ConstructorValue = (Name, Rc<[Level]>, Vec<Rc<Value>>);
 /// Конструктор и его аргументы, если значение построено конструктором.
 fn constructor_value(signature: &Signature, value: &Rc<Value>) -> Option<ConstructorValue> {
     let reduced = crate::conv::whnf(signature, value);
-    let Value::Neutral(Head::Global(name, levels), spine) = &*reduced else {
+    let Value::Neutral(Head::Global(name, levels, _), spine) = &*reduced else {
         return None;
     };
     if !matches!(
@@ -1841,7 +1845,7 @@ type DataHead = (Name, Rc<[Level]>, Vec<Rc<Value>>);
 /// собственного цикла здесь не было.
 fn data_head(signature: &Signature, ty: &Rc<Value>) -> Option<DataHead> {
     let reduced = crate::conv::whnf(signature, ty);
-    let Value::Neutral(Head::Global(name, levels), spine) = &*reduced else {
+    let Value::Neutral(Head::Global(name, levels, _), spine) = &*reduced else {
         return None;
     };
     if !matches!(

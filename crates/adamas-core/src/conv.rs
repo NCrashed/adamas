@@ -224,7 +224,7 @@ fn convertible_within(
 /// штатный исход - `convertible` обязана отвечать `false`, - а не поломка
 /// инварианта, поэтому здесь стоят `try_`-варианты, а не паникующие.
 pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
-    let Value::Neutral(Head::Global(name, levels), spine) = &**value else {
+    let Value::Neutral(Head::Global(name, levels, rows), spine) = &**value else {
         return None;
     };
     let definition = sig.lookup(name)?;
@@ -244,7 +244,13 @@ pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
     if definition.opaque {
         return None;
     }
-    let body = definition.instantiate_body(levels)?;
+    // Аргументы-row в δ пока не подставляются, и это не пропуск: подставить их
+    // синтаксически, как уровни, нельзя - метка несёт **открытые** термы (§3.2),
+    // и класть их в замкнутое тело нечем. Инстанциация row обязана идти через
+    // окружение вычисления, и это отдельный срез. Пока параметров-row ни у кого
+    // нет, сторож молчит по существу.
+    debug_assert!(rows.is_empty(), "разворот определения с параметрами-row");
+    let body = definition.instantiate_body(levels, &[])?;
     spine.iter().try_fold(body, |callee, elim| match elim {
         Elim::App(argument) => try_apply(&callee, Rc::clone(argument)),
         Elim::Case(case) => try_eliminate_case(case, &callee),
@@ -489,20 +495,36 @@ fn fresh_env(size: u32) -> crate::value::Env {
 /// это не расхождение, а ограничение `?l ~ 2`. Структурное сравнение здесь
 /// отвергло бы корректную программу, а у постулата - окончательно, потому что
 /// разворачивать нечего.
-fn same_head(metas: &mut Metas, left: &Head, right: &Head) -> bool {
+fn same_head(
+    fuel: u32,
+    sig: &Signature,
+    metas: &mut Metas,
+    size: u32,
+    left: &Head,
+    right: &Head,
+) -> bool {
     match (left, right) {
         (Head::Local(a), Head::Local(b)) => a == b,
         // Одна и та же нерешённая дырка - это одно и то же значение, и решать
         // тут нечего. Без этой строки `?m ū ≡ ?m ū` уходило бы в решение, где
         // проверка вхождения приняла бы его за цикл.
         (Head::Meta(a), Head::Meta(b)) => a == b,
-        (Head::Global(name_a, levels_a), Head::Global(name_b, levels_b)) => {
+        (Head::Global(name_a, levels_a, rows_a), Head::Global(name_b, levels_b, rows_b)) => {
             name_a == name_b
                 && levels_a.len() == levels_b.len()
                 && levels_a
                     .iter()
                     .zip(levels_b.iter())
                     .all(|(a, b)| metas.unify_levels(a, b))
+                // Аргументы-row сравниваются формой, а их метки - аргументами:
+                // атом row есть метка, несущая термы, поэтому равенство row
+                // полно лишь с точностью до конвертируемости (§3.2).
+                && rows_a.len() == rows_b.len()
+                && rows_a.iter().zip(rows_b.iter()).all(|(a, b)| {
+                    a.same_shape(b)
+                        && a.zip(b)
+                            .all(|(x, y)| convertible_within(fuel, sig, metas, size, x, y))
+                })
         }
         _ => false,
     }
@@ -638,7 +660,7 @@ fn rigid(
         }),
 
         (Value::Neutral(head_a, spine_a), Value::Neutral(head_b, spine_b)) => {
-            same_head(metas, head_a, head_b)
+            same_head(fuel, sig, metas, size, head_a, head_b)
                 && spine_a.len() == spine_b.len()
                 && spine_a
                     .iter()
@@ -1054,6 +1076,30 @@ mod tests {
         );
         assert!(!conv_in(0, &pure, &effectful), "чистая против эффектной");
         assert!(conv_in(0, &effectful, &effectful.clone()));
+    }
+
+    #[test]
+    fn row_arguments_of_a_constant_are_compared() {
+        // Ссылка на определение несёт два списка аргументов, и различаются они
+        // оба: `f{IO}` и `f{State}` - разные значения, ровно как `f{0}` и
+        // `f{1}`. Метки при этом сравниваются формой, а их аргументы -
+        // конвертируемостью (§3.2).
+        let label = |name: &str| Label {
+            name: name.into(),
+            arguments: Vec::new(),
+        };
+        let applied = |name: &str| {
+            Term::Const(
+                "f".into(),
+                Rc::from([]),
+                crate::term::Rows::new([Row::new([label(name)])]),
+            )
+        };
+        assert!(conv_in(0, &applied("IO"), &applied("IO")));
+        assert!(
+            !conv_in(0, &applied("IO"), &applied("State")),
+            "разные аргументы-row - разные значения"
+        );
     }
 
     #[test]

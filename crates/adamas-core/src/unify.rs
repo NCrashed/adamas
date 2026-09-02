@@ -104,7 +104,7 @@ pub(crate) fn classify(signature: &Signature, value: &Rc<Value>) -> Shape {
     };
     match head {
         Head::Local(Lvl(level)) if spine.is_empty() => Shape::Variable(*level),
-        Head::Global(name, _) => match applied_constructor(signature, name, spine) {
+        Head::Global(name, ..) => match applied_constructor(signature, name, spine) {
             Some(fields) => Shape::Constructor(
                 Rc::clone(name),
                 fields
@@ -150,7 +150,7 @@ fn unify(
         }
         Shape::Constructor(name, fields) => {
             let reduced = whnf(signature, index);
-            let Value::Neutral(Head::Global(found, _), spine) = &*reduced else {
+            let Value::Neutral(Head::Global(found, ..), spine) = &*reduced else {
                 return Err(stuck(name, &reduced));
             };
             let Some(arguments) = applied_constructor(signature, found, spine) else {

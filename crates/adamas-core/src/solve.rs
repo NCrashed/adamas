@@ -272,7 +272,7 @@ fn read(
                     };
                     Term::Var(Lvl(level).to_index(size))
                 }
-                Head::Global(name, levels) => {
+                Head::Global(name, levels, _) => {
                     Term::Const(Rc::clone(name), Rc::clone(levels), Rows::none())
                 }
                 // Вхождение самой дырки: подстановка дала бы бесконечный терм.

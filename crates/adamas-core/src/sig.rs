@@ -58,6 +58,7 @@ use crate::eval::eval;
 use crate::level::Level;
 use crate::meta::{Generalization, Metas, zonk_term};
 use crate::mult::Mult;
+use crate::row::Row;
 use crate::term::{Name, Rows, Term};
 use crate::value::{Env, Value};
 
@@ -152,15 +153,19 @@ pub struct Definition {
 impl Definition {
     /// Тип, инстанцированный аргументами уровня.
     #[must_use]
-    pub fn instantiate_type(&self, levels: &[Level]) -> Rc<Value> {
-        eval(&Env::default(), &self.ty.substitute_levels(levels))
+    pub fn instantiate_type(&self, levels: &[Level], rows: &[Row<Term>]) -> Rc<Value> {
+        let ty = self.ty.substitute_levels(levels).substitute_rows(rows);
+        eval(&Env::default(), &ty)
     }
 
-    /// Тело, инстанцированное аргументами уровня. `None` у постулата.
+    /// Тело, инстанцированное обоими списками аргументов. `None` у постулата.
     #[must_use]
-    pub fn instantiate_body(&self, levels: &[Level]) -> Option<Rc<Value>> {
+    pub fn instantiate_body(&self, levels: &[Level], rows: &[Row<Term>]) -> Option<Rc<Value>> {
         let body = self.body.as_ref()?;
-        Some(eval(&Env::default(), &body.substitute_levels(levels)))
+        Some(eval(
+            &Env::default(),
+            &body.substitute_levels(levels).substitute_rows(rows),
+        ))
     }
 
     /// Число параметров и универсум тип-формера. `None` - не семейство.

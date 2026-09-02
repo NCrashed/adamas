@@ -112,12 +112,19 @@ pub struct Closure {
 /// что [`Value::constant`] приводит их к нормальной форме. Нормальная форма
 /// уровня - полный инвариант (см. [`crate::level`]), так что структурное
 /// равенство нормализованных уровней и есть семантическое.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Равенство голов не выводится: аргументы-row несут значения, а у значений
+/// равенство есть конвертируемость, и живёт она в [`crate::conv`]. Сравнивать
+/// головы структурно значило бы завести второе, более грубое.
+#[derive(Clone, Debug)]
 pub enum Head {
     /// Переменная контекста.
     Local(Lvl),
-    /// Определение с нормализованными аргументами уровня.
-    Global(Name, Rc<[Level]>),
+    /// Определение с нормализованными аргументами уровня и аргументами row.
+    ///
+    /// Списка два, потому что и параметров у определения два набора (§10
+    /// вопрос 73). Row здесь несут значения: аргументы метки - обычные термы,
+    /// и на стороне значения они уже вычислены.
+    Global(Name, Rc<[Level]>, Rc<[Row<Rc<Value>>]>),
     /// Нерешённая метапеременная терма.
     ///
     /// Застревает так же, как переменная контекста, и по той же причине:
@@ -273,9 +280,12 @@ impl Value {
     /// У определения с телом это спасал бы δ-разворот, у постулата
     /// разворачивать нечего.
     #[must_use]
-    pub fn constant(name: Name, levels: &[Level]) -> Rc<Self> {
+    pub fn constant(name: Name, levels: &[Level], rows: Rc<[Row<Rc<Self>>]>) -> Rc<Self> {
         let normalized: Rc<[Level]> = levels.iter().map(Level::normalize).collect();
-        Rc::new(Self::Neutral(Head::Global(name, normalized), Vec::new()))
+        Rc::new(Self::Neutral(
+            Head::Global(name, normalized, rows),
+            Vec::new(),
+        ))
     }
 }
 
@@ -287,7 +297,7 @@ impl fmt::Display for Value {
             Self::Neutral(Head::Local(Lvl(level)), spine) => {
                 write!(f, "@{level}·{}", spine.len())
             }
-            Self::Neutral(Head::Global(name, _), spine) => {
+            Self::Neutral(Head::Global(name, ..), spine) => {
                 write!(f, "{name}·{}", spine.len())
             }
             Self::Neutral(Head::Meta(TermMeta(name)), spine) => {

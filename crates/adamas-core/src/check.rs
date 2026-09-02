@@ -89,6 +89,62 @@ fn zonked(metas: &Metas, term: &Term) -> Term {
     crate::meta::zonk_term(metas, term)
 }
 
+/// Тип ссылки на определение: арность обоих сортов, кратность и тотальность.
+fn constant(
+    ctx: &Ctx<'_>,
+    metas: &Metas,
+    sigma: Mult,
+    name: &Name,
+    levels: &[Level],
+    rows: &Rows,
+) -> Result<(Rc<Value>, Usage), TypeError> {
+    let definition = ctx
+        .signature()
+        .lookup(name)
+        .ok_or_else(|| ErrorKind::UnknownConstant {
+            name: Rc::clone(name),
+        })?;
+    // Насыщение здесь дало бы несовпадение арности, то есть ошибку, а
+    // не тихо неверный результат. Но правило одно на весь крейт:
+    // счётчик, не помещающийся в u32, - поломка, а не вход.
+    let found = u32::try_from(levels.len())
+        .unwrap_or_else(|_| unreachable!("аргументов уровня больше, чем помещается в u32"));
+    if found != definition.level_arity {
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::LevelArity {
+                name: Rc::clone(name),
+                expected: definition.level_arity,
+                found,
+            },
+        ));
+    }
+    if !definition.mult.admits(sigma) {
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::ErasedConstant {
+                name: Rc::clone(name),
+            },
+        ));
+    }
+    // Зеркальное ограничение: стёртая функция доступна **только** при
+    // σ = 0, нетотальная - только при σ ≠ 0. §4.7: доказательством
+    // нетотальная функция быть не может, а тип - тот же фрагмент.
+    if !crate::total::admits(definition, sigma) {
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::PartialConstant {
+                name: Rc::clone(name),
+            },
+        ));
+    }
+    let ty = definition.instantiate_type(levels, rows.as_slice());
+    Ok((ty, Usage::zero(ctx.size())))
+}
+
 /// Универсум номер `n` значением - для сортов с фиксированным уровнем.
 fn sort(n: u32) -> Rc<Value> {
     Rc::new(Value::Universe(Level::number(n)))
@@ -187,57 +243,8 @@ pub fn infer(
             })
         }
 
-        // Определение не занимает места в контексте, поэтому вектор
-        // использований нулевой. Ограничение на кратность при этом есть, но
-        // проверяется локально: `0`-определение (доказательство, тип) в
-        // рантайм-позиции - ошибка.
-        Term::Const(name, levels, _) => {
-            let definition =
-                ctx.signature()
-                    .lookup(name)
-                    .ok_or_else(|| ErrorKind::UnknownConstant {
-                        name: Rc::clone(name),
-                    })?;
-            // Насыщение здесь дало бы несовпадение арности, то есть ошибку, а
-            // не тихо неверный результат. Но правило одно на весь крейт:
-            // счётчик, не помещающийся в u32, - поломка, а не вход.
-            let found = u32::try_from(levels.len())
-                .unwrap_or_else(|_| unreachable!("аргументов уровня больше, чем помещается в u32"));
-            if found != definition.level_arity {
-                return Err(refuse(
-                    ctx,
-                    metas,
-                    ErrorKind::LevelArity {
-                        name: Rc::clone(name),
-                        expected: definition.level_arity,
-                        found,
-                    },
-                ));
-            }
-            if !definition.mult.admits(sigma) {
-                return Err(refuse(
-                    ctx,
-                    metas,
-                    ErrorKind::ErasedConstant {
-                        name: Rc::clone(name),
-                    },
-                ));
-            }
-            // Зеркальное ограничение: стёртая функция доступна **только** при
-            // σ = 0, нетотальная - только при σ ≠ 0. §4.7: доказательством
-            // нетотальная функция быть не может, а тип - тот же фрагмент.
-            if !crate::total::admits(definition, sigma) {
-                return Err(refuse(
-                    ctx,
-                    metas,
-                    ErrorKind::PartialConstant {
-                        name: Rc::clone(name),
-                    },
-                ));
-            }
-            Ok((definition.instantiate_type(levels), Usage::zero(ctx.size())))
-        }
-
+        // Определение места в контексте не занимает, поэтому вектор нулевой.
+        Term::Const(name, levels, rows) => constant(ctx, metas, sigma, name, levels, rows),
         // Мотив записан в самом разборе, поэтому тип синтезируется, а не
         // берётся из режима проверки.
         Term::Case(case) => infer_case(ctx, metas, sigma, case),
@@ -1713,7 +1720,7 @@ fn infer_case(
 
     let constructors = constructors.clone();
     let binders = peel_pis(&declaration.ty).0.len();
-    let family = declaration.instantiate_type(&case.levels);
+    let family = declaration.instantiate_type(&case.levels, &[]);
 
     // Тип разбираемого значения обязан быть этим семейством, применённым
     // полностью: параметры, потом индексы.
@@ -1771,7 +1778,7 @@ fn data_arguments(
     ty: &Rc<Value>,
 ) -> Option<Vec<Rc<Value>>> {
     let reduced = whnf_solved(signature, metas, ty);
-    let Value::Neutral(Head::Global(name, levels), spine) = &*reduced else {
+    let Value::Neutral(Head::Global(name, levels, _), spine) = &*reduced else {
         return None;
     };
     if *name != case.data || levels.len() != case.levels.len() {
@@ -1856,7 +1863,7 @@ fn branch_type(
         .signature()
         .lookup(constructor)
         .unwrap_or_else(|| unreachable!("конструктор `{constructor}` пропал из сигнатуры"));
-    let applied = instantiate_telescope(declaration.instantiate_type(&case.levels), params);
+    let applied = instantiate_telescope(declaration.instantiate_type(&case.levels, &[]), params);
     let (telescope, size) = telescope_of(ctx.size(), &applied);
 
     // Хвост телескопа - `D levels params indices`, оттуда и берутся индексы,

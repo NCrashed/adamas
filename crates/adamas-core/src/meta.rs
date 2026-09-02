@@ -26,6 +26,7 @@
 use std::rc::Rc;
 
 use crate::level::{Level, LevelMeta, LevelVar, peel};
+use crate::row::{Row, RowMeta, RowVar, Tail};
 use crate::term::{Rows, Term, TermMeta};
 use crate::value::Value;
 
@@ -70,6 +71,9 @@ pub struct Metas {
 enum Slot {
     /// Дырка уровня; решение - выражение уровня.
     Level(Option<Level>),
+    /// Дырка row; решение - целая row, которой она заменяется вместе с
+    /// хвостом. Сорт устроен по образцу уровня (§3.2), и хранилище у них одно.
+    Row(Option<Row<Term>>),
     /// Дырка терма. Тип известен с рождения - его строит тот, кто дырку
     /// завёл, - а решение приходит от унификации и **замкнуто**: цепочка
     /// лямбд по контексту, в котором дырка заведена.
@@ -87,6 +91,58 @@ impl Metas {
         let meta = LevelMeta(self.limit());
         self.slots.push(Slot::Level(None));
         Level::Meta(meta)
+    }
+
+    /// Свежая метапеременная row - открытая row без собственных меток.
+    ///
+    /// Возвращается не сама дырка, а `{| ?m}`: row - это то, чем дырка станет,
+    /// и всякое место, где она стоит, ждёт именно row.
+    pub fn fresh_row(&mut self) -> Row<Term> {
+        let meta = RowMeta(self.limit());
+        self.slots.push(Slot::Row(None));
+        Row::closing([], Some(Tail::Meta(meta)))
+    }
+
+    /// Решение метапеременной row, если оно есть.
+    ///
+    /// # Panics
+    ///
+    /// Те же случаи, что у [`Metas::term_solution`].
+    #[must_use]
+    pub fn row_solution(&self, meta: RowMeta) -> Option<&Row<Term>> {
+        match &self.slots[self.offset(meta.0)] {
+            Slot::Row(solution) => solution.as_ref(),
+            _ => unreachable!("?{} - дырка не row", meta.0),
+        }
+    }
+
+    /// Записывает решение метапеременной row.
+    ///
+    /// # Panics
+    ///
+    /// Если дырка уже решена: решения не переписываются.
+    pub fn solve_row(&mut self, meta: RowMeta, row: Row<Term>) {
+        let offset = self.offset(meta.0);
+        match &mut self.slots[offset] {
+            Slot::Row(solution @ None) => *solution = Some(row),
+            Slot::Row(_) => unreachable!("?{} решена дважды", meta.0),
+            _ => unreachable!("?{} - дырка не row", meta.0),
+        }
+    }
+
+    /// Row с подставленными решениями - и своим хвостом, и хвостами решений.
+    ///
+    /// Цепочка разворачивается до конца: решением дырки бывает row с другой
+    /// дыркой в хвосте.
+    #[must_use]
+    pub fn zonk_row(&self, row: &Row<Term>) -> Row<Term> {
+        let Some(Tail::Meta(meta)) = row.tail() else {
+            return row.clone();
+        };
+        match self.row_solution(meta) {
+            Some(solution) => row.substituted(&self.zonk_row(solution)),
+            None => row.clone(),
+        }
     }
 
     /// Свежая метапеременная терма, стоящая в контексте размера `size`.
@@ -131,7 +187,7 @@ impl Metas {
     pub fn term_solution(&self, meta: TermMeta) -> Option<&Rc<Value>> {
         match &self.slots[self.offset(meta.0)] {
             Slot::Term { solution, .. } => solution.as_ref(),
-            Slot::Level(_) => unreachable!("?{} - дырка уровня, а не терма", meta.0),
+            Slot::Level(_) | Slot::Row(_) => unreachable!("?{} - дырка не терма", meta.0),
         }
     }
 
@@ -144,7 +200,7 @@ impl Metas {
     pub fn term_type(&self, meta: TermMeta) -> &Rc<Value> {
         match &self.slots[self.offset(meta.0)] {
             Slot::Term { ty, .. } => ty,
-            Slot::Level(_) => unreachable!("?{} - дырка уровня, а не терма", meta.0),
+            Slot::Level(_) | Slot::Row(_) => unreachable!("?{} - дырка не терма", meta.0),
         }
     }
 
@@ -162,7 +218,7 @@ impl Metas {
                 ..
             } => *solution = Some(value),
             Slot::Term { .. } => unreachable!("?{} решена дважды", meta.0),
-            Slot::Level(_) => unreachable!("?{} - дырка уровня, а не терма", meta.0),
+            Slot::Level(_) | Slot::Row(_) => unreachable!("?{} - дырка не терма", meta.0),
         }
     }
 
@@ -213,7 +269,7 @@ impl Metas {
     pub fn solution(&self, meta: LevelMeta) -> Option<&Level> {
         match &self.slots[self.offset(meta.0)] {
             Slot::Level(solution) => solution.as_ref(),
-            Slot::Term { .. } => unreachable!("?{} - дырка терма, а не уровня", meta.0),
+            Slot::Term { .. } | Slot::Row(_) => unreachable!("?{} - дырка не уровня", meta.0),
         }
     }
 
@@ -332,6 +388,10 @@ fn occurs(meta: LevelMeta, level: &Level) -> bool {
 #[derive(Debug, Default)]
 pub struct Generalization {
     bound: Vec<LevelMeta>,
+    /// Дырки row в порядке появления - вторая компонента арности (§10
+    /// вопрос 73). Список свой, потому что и параметры свои: у определения два
+    /// независимых набора.
+    rows: Vec<RowMeta>,
 }
 
 impl Generalization {
@@ -349,6 +409,19 @@ impl Generalization {
                     self.bound.push(meta);
                 }
             }
+        }
+    }
+
+    /// Собирает нерешённую дырку в хвосте row и уровни её меток.
+    pub fn collect_row(&mut self, metas: &Metas, row: &Row<crate::term::Term>) {
+        let row = metas.zonk_row(row);
+        if let Some(Tail::Meta(meta)) = row.tail() {
+            if !self.rows.contains(&meta) {
+                self.rows.push(meta);
+            }
+        }
+        for argument in row.labels().iter().flat_map(|label| &label.arguments) {
+            self.collect_term(metas, argument);
         }
     }
 
@@ -390,18 +463,19 @@ impl Generalization {
             Term::Pi(_, _, domain, row, codomain) => {
                 self.collect_term(metas, domain);
                 self.collect_term(metas, codomain);
-                for argument in row.labels().iter().flat_map(|label| &label.arguments) {
-                    self.collect_term(metas, argument);
-                }
+                self.collect_row(metas, row);
             }
             Term::Let(_, _, ty, value, body) => {
                 self.collect_term(metas, ty);
                 self.collect_term(metas, value);
                 self.collect_term(metas, body);
             }
-            Term::Const(_, levels, _) => {
+            Term::Const(_, levels, rows) => {
                 for level in levels.iter() {
                     self.collect_level(metas, level);
+                }
+                for row in rows.as_slice() {
+                    self.collect_row(metas, row);
                 }
             }
             Term::Case(case) => {
@@ -433,6 +507,42 @@ impl Generalization {
     pub fn arity(&self) -> u32 {
         u32::try_from(self.bound.len())
             .unwrap_or_else(|_| unreachable!("параметров уровня не бывает столько"))
+    }
+
+    /// Сколько параметров row получится - вторая компонента арности.
+    #[must_use]
+    pub fn row_arity(&self) -> u32 {
+        u32::try_from(self.rows.len())
+            .unwrap_or_else(|_| unreachable!("параметров row не бывает столько"))
+    }
+
+    /// Заменяет собранные дырки row параметрами.
+    ///
+    /// Дырка, которую не собирали, остаётся дыркой - тем же правилом, что у
+    /// уровней: вызывающий видит, что она осталась.
+    #[must_use]
+    pub fn apply_row(&self, metas: &Metas, row: &Row<crate::term::Term>) -> Row<crate::term::Term> {
+        let row = metas.zonk_row(row);
+        let labels = row.labels().iter().map(|label| crate::row::Label {
+            name: Rc::clone(&label.name),
+            arguments: label
+                .arguments
+                .iter()
+                .map(|argument| self.apply_term(metas, argument))
+                .collect(),
+        });
+        let tail = match row.tail() {
+            Some(Tail::Meta(meta)) => self.rows.iter().position(|bound| *bound == meta).map_or(
+                Some(Tail::Meta(meta)),
+                |index| {
+                    Some(Tail::Var(RowVar(
+                        u32::try_from(index).unwrap_or_else(|_| unreachable!("индекс параметра")),
+                    )))
+                },
+            ),
+            other => other,
+        };
+        Row::closing(labels, tail)
     }
 
     /// Заменяет собранные дырки параметрами.
@@ -508,19 +618,19 @@ impl Generalization {
                 *binder,
                 Rc::clone(name),
                 recur(domain),
-                row.map(|argument| self.apply_term(metas, argument)),
+                self.apply_row(metas, row),
                 recur(codomain),
             ),
             Term::Let(mult, name, ty, value, body) => {
                 Term::Let(*mult, Rc::clone(name), recur(ty), recur(value), recur(body))
             }
-            Term::Const(name, levels, _) => Term::Const(
+            Term::Const(name, levels, rows) => Term::Const(
                 Rc::clone(name),
                 levels
                     .iter()
                     .map(|level| self.apply_level(metas, level))
                     .collect(),
-                Rows::none(),
+                Rows::new(rows.as_slice().iter().map(|row| self.apply_row(metas, row))),
             ),
             Term::Case(case) => Term::Case(Rc::new(crate::term::Case {
                 data: Rc::clone(&case.data),
@@ -721,16 +831,18 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
             *binder,
             Rc::clone(name),
             recur(domain),
-            row.map(|argument| zonk_term(metas, argument)),
+            metas
+                .zonk_row(row)
+                .map(|argument| zonk_term(metas, argument)),
             recur(codomain),
         ),
         Term::Let(mult, name, ty, value, body) => {
             Term::Let(*mult, Rc::clone(name), recur(ty), recur(value), recur(body))
         }
-        Term::Const(name, levels, _) => Term::Const(
+        Term::Const(name, levels, rows) => Term::Const(
             Rc::clone(name),
             levels.iter().map(|level| metas.zonk(level)).collect(),
-            Rows::none(),
+            Rows::new(rows.as_slice().iter().map(|row| metas.zonk_row(row))),
         ),
         Term::Case(case) => Term::Case(Rc::new(crate::term::Case {
             data: Rc::clone(&case.data),
@@ -753,8 +865,9 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
 
 #[cfg(test)]
 mod tests {
-    use super::Metas;
+    use super::{Generalization, Metas};
     use crate::level::{Level, LevelVar};
+    use crate::row::{Row, RowVar, Tail};
 
     #[test]
     fn a_bare_metavariable_is_solved_by_anything() {
@@ -873,6 +986,59 @@ mod tests {
         assert!(
             super::unsolved_level_meta(&metas, &term).is_none(),
             "после решения дырок не остаётся"
+        );
+    }
+
+    /// `{name args | tail}`.
+    fn row(names: &[&str], tail: Option<Tail>) -> Row<crate::term::Term> {
+        Row::closing(
+            names.iter().map(|name| crate::row::Label {
+                name: (*name).into(),
+                arguments: Vec::new(),
+            }),
+            tail,
+        )
+    }
+
+    #[test]
+    fn a_solved_row_meta_extends_the_row_it_stood_in() {
+        // Решение дырки подставляется вместе с хвостом: `{IO | ?m}` при
+        // `?m := {State | e}` даёт `{IO, State | e}`, а не `{IO}`.
+        let mut metas = Metas::default();
+        let fresh = metas.fresh_row();
+        let Some(Tail::Meta(meta)) = fresh.tail() else {
+            panic!("свежая row открыта дыркой");
+        };
+        let written = row(&["IO"], Some(Tail::Meta(meta)));
+        metas.solve_row(meta, row(&["State"], Some(Tail::Var(RowVar(0)))));
+        let zonked = metas.zonk_row(&written);
+        assert_eq!(
+            zonked.labels().len(),
+            2,
+            "метки решения дописываются к написанным"
+        );
+        assert_eq!(zonked.tail(), Some(Tail::Var(RowVar(0))));
+    }
+
+    #[test]
+    fn an_unsolved_row_meta_becomes_a_parameter() {
+        // Обобщение на границе определения - вторая компонента арности (§10
+        // вопрос 73). Дырка, которую не собирали, остаётся дыркой: вызывающий
+        // обязан видеть, что она осталась.
+        let mut metas = Metas::default();
+        let first = metas.fresh_row();
+        let second = metas.fresh_row();
+        let mut generalization = Generalization::default();
+        generalization.collect_row(&metas, &first);
+        assert_eq!(generalization.row_arity(), 1);
+        assert_eq!(
+            generalization.apply_row(&metas, &first).tail(),
+            Some(Tail::Var(RowVar(0)))
+        );
+        assert_eq!(
+            generalization.apply_row(&metas, &second).tail(),
+            second.tail(),
+            "несобранная дырка остаётся дыркой"
         );
     }
 }

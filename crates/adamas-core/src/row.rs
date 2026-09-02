@@ -106,8 +106,15 @@ struct Labels<T> {
 /// Пустая row - `None`, а не пустой срез: у подавляющего большинства стрелок
 /// эффектов нет вовсе, и аллокация под заголовок `Rc` была бы платой за
 /// хранение ничего.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Row<T>(Option<Rc<Labels<T>>>);
+
+impl<T> Clone for Row<T> {
+    /// Клонирование не требует `T: Clone`: метки лежат за `Rc`.
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
 
 impl<T> Row<T> {
     /// Пустая row - «применение ничего не делает».
@@ -155,6 +162,37 @@ impl<T> Row<T> {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_none()
+    }
+
+    /// Подставляет вместо хвоста другую row.
+    ///
+    /// Так решается дырка и так же инстанцируется параметр: `{IO | ?m}` при
+    /// `?m := {State s | e}` даёт `{IO, State s | e}`.
+    ///
+    /// **Написанное идёт первым.** Порядок внутри группы одноимённых меток
+    /// значим - внутренний хендлер перехватывает раньше внешнего (§4.1), - а
+    /// подстановка приписывает **сзади**: то, что стояло в row до подстановки,
+    /// перехватывает первым. Сортировка устойчивая, поэтому порядок групп
+    /// канонический, а внутри группы - этот.
+    ///
+    /// Закрытая row не меняется: подставлять некуда.
+    #[must_use]
+    pub fn substituted(&self, tail: &Row<T>) -> Self
+    where
+        T: Clone,
+    {
+        let Some(inner) = &self.0 else {
+            return Self::empty();
+        };
+        if inner.tail.is_none() {
+            return self.clone();
+        }
+        let labels = inner
+            .labels
+            .iter()
+            .cloned()
+            .chain(tail.labels().iter().cloned());
+        Self::closing(labels, tail.tail())
     }
 
     /// Переносит row на другую нагрузку - `eval` и `quote` ходят этим путём.

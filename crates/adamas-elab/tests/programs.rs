@@ -5301,6 +5301,51 @@ run = handle True with
 }
 
 #[test]
+fn a_constructor_field_carries_no_row_tail() {
+    // Подъём у конструктора выключен намеренно (§3.4): стрелки его - не позиции
+    // сигнатуры, а форма самого значения, и открытая row у поля означала бы,
+    // что два значения с разными эффектами дают один тип. Написанный руками
+    // хвост проходил мимо этого запрета - `free_in` хвост эффектной row не
+    // собирает, его связывает `named_tail`, - и обобщение делало конструктор
+    // row-полиморфным при row-арности семейства нуль. Тип получался тихо
+    // неверный: номер параметра зависел от того, какое поле тронуло тело, а
+    // законная программа, зовущая оба, отвергалась с чужим именем в сообщении.
+    let text = "\
+data Bool where
+  True : Bool
+
+data Unit where
+  MkUnit : Unit
+
+effect State s where
+  put : s -> Unit
+";
+    let error = refused(&format!(
+        "{text}
+data Cell where
+  MkCell : (Bool -> {{State Bool | e}} Unit) -> Cell
+"
+    ));
+    assert!(
+        matches!(error, ElabError::ConstructorRow { .. }),
+        "получено {error:?}"
+    );
+    // Замкнутый набор меток у поля законен и работает: пустую row вызываемого
+    // гасит любая окружающая, а эта объявлена.
+    program(&format!(
+        "{text}
+data Cell where
+  MkCell : (Bool -> {{State Bool}} Unit) -> (Bool -> {{State Bool}} Unit) -> Cell
+
+both : Cell -> Bool -> {{State Bool}} Unit
+both (MkCell g h) b =
+  g b
+  h b
+"
+    ));
+}
+
+#[test]
 fn a_group_member_instantiates_its_neighbour_row_afresh() {
     // Правило одно на оба сорта параметров (§10 вопросы 54 и 73): свой -
     // переменная, чужой - дырка, потому что сосед объявляется рядом, но

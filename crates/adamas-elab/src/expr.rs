@@ -318,6 +318,71 @@ fn depends_by_text(fields: &[ast::RecordField]) -> bool {
     false
 }
 
+/// Первый написанный хвост effect row в выражении: `{IO | e}` даёт `e`.
+///
+/// Ищется синтаксически, а не через сбор свободных имён: хвост эффектной row
+/// туда не попадает вовсе - `free_in` его не собирает, потому что связывает его
+/// не подъём, а `named_tail`, заводящий дырку и отдающий её обобщению. Для
+/// сигнатуры это верно, для конструктора - нет: обобщение делает конструктор
+/// row-полиморфным при row-арности семейства нуль.
+fn written_row_tail(expr: &Expr) -> Option<&ast::Name> {
+    let recur = written_row_tail;
+    match &expr.kind {
+        ExprKind::Effectful { tail, body, labels } => tail.as_ref().or_else(|| {
+            recur(body).or_else(|| {
+                labels
+                    .iter()
+                    .flat_map(|it| &it.arguments)
+                    .find_map(written_row_tail)
+            })
+        }),
+        ExprKind::Name(_) | ExprKind::Lit(_) | ExprKind::Hole => None,
+        ExprKind::Project(inner, _) => recur(inner),
+        ExprKind::App(left, right)
+        | ExprKind::TypeApp(left, right)
+        | ExprKind::Arrow(left, right) => recur(left).or_else(|| recur(right)),
+        ExprKind::Using { body, .. } | ExprKind::Lam { body, .. } => recur(body),
+        ExprKind::Pi { binders, codomain } => binders
+            .iter()
+            .filter_map(|it| it.ty.as_ref())
+            .find_map(written_row_tail)
+            .or_else(|| recur(codomain)),
+        ExprKind::Block(block) => block.stmts.iter().find_map(|stmt| match &stmt.kind {
+            ast::StmtKind::Expr(inner) => recur(inner),
+            ast::StmtKind::Let(bindings) => bindings.iter().find_map(|it| {
+                it.ty
+                    .as_ref()
+                    .and_then(written_row_tail)
+                    .or_else(|| recur(&it.body))
+            }),
+        }),
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => recur(cond)
+            .or_else(|| recur(then_branch))
+            .or_else(|| recur(else_branch)),
+        ExprKind::Case { scrutinee, alts } => {
+            recur(scrutinee).or_else(|| alts.iter().find_map(|alt| recur(&alt.body)))
+        }
+        ExprKind::Handle {
+            computation,
+            branches,
+            ..
+        } => recur(computation).or_else(|| branches.iter().find_map(|it| recur(&it.body))),
+        ExprKind::RecordType(fields, _) => fields.iter().find_map(|it| written_row_tail(&it.ty)),
+        ExprKind::Record(fields) => fields.iter().find_map(|(_, value)| recur(value)),
+        ExprKind::Update(base, fields) => {
+            recur(base).or_else(|| fields.iter().find_map(|(_, value)| recur(value)))
+        }
+        ExprKind::Tuple(items) | ExprKind::List(items) => items.iter().find_map(written_row_tail),
+        ExprKind::Chain(chain) => {
+            recur(&chain.head).or_else(|| chain.tail.iter().find_map(|(_, item)| recur(item)))
+        }
+    }
+}
+
 /// Встречается ли в выражении хоть одно из имён.
 pub(crate) fn names_any(expr: &Expr, wanted: &[&Symbol]) -> bool {
     let recur = |inner: &Expr| names_any(inner, wanted);
@@ -936,6 +1001,19 @@ impl<'a> Elaborator<'a> {
     /// не знает, какой из них лежит. Зваться откуда угодно конструктор при
     /// этом не перестаёт: пустую row гасит любая окружающая.
     pub(crate) fn constructor_type(&mut self, ty: &Expr, default: Mult) -> Result<Term, ElabError> {
+        // Отсутствие подъёма само по себе хвост не запрещает: написанный
+        // руками проходил мимо него и делал конструктор row-полиморфным при
+        // row-арности семейства нуль. Элиминация подставляет такому `&[]`, и
+        // переменная остаётся свободной - тип получается тихо неверный: у двух
+        // полей со своими хвостами номер параметра начинал зависеть от того,
+        // какое из них тронуло тело, а законная программа, зовущая оба,
+        // отвергалась непогашенностью с чужим именем в сообщении.
+        if let Some(name) = written_row_tail(ty) {
+            return Err(ElabError::ConstructorRow {
+                name: Rc::clone(&name.text),
+                span: name.span,
+            });
+        }
         self.declared_type(ty, default, false)
     }
 

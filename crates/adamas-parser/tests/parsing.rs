@@ -399,6 +399,13 @@ fn a_nested_record_type_does_not_cost_exponentially() {
     // попыток, и сорок уровней под ним.
     let deep = format!("type T = {}Nat{}\n", "{ x : ".repeat(40), " }".repeat(40));
     assert!(tree(&deep).is_ok());
+    // Просмотра «за скобкой стрелка» мало: у `{x : E, y : Nat} -> Nat` он
+    // отвечает «да», группа отказывает на запятой, и откат оживает вместе с
+    // экспонентой. Тридцать четыре уровня - меньше килобайта - зависали.
+    let arrowed = (0..34).fold("Nat".to_owned(), |inner, _| {
+        format!("{{ x : {inner}, y : Nat }} -> Nat")
+    });
+    assert!(tree(&format!("type E = {arrowed}\n")).is_ok());
     // Просмотр обязан проходить всю цепочку групп: стрелка стоит не сразу.
     assert!(tree("f : {a : Type} {b : Type} -> Nat\n").is_ok());
     assert!(tree("g : {a : Type} (b : Nat) -> Nat\n").is_ok());
@@ -469,6 +476,31 @@ fn a_flat_list_that_unfolds_into_a_chain_is_bounded_too() {
         &format!(
             "type Big (a = {{ f0 : T{} }}) = T\n",
             repeat(256, |index| format!(", f{} : T", index + 1))
+        ),
+    );
+    // Оператор, за которым в блоке что-то стоит, - такое же связывание, как
+    // написанный `let` (§3.4): последовательность собственного узла не имеет.
+    // Мерился только `let`, и восемь тысяч операторов роняли разбор.
+    refused(
+        "операторы блока подряд",
+        &format!("f b =\n{}  b\n", repeat(300, |_| "  b\n".to_owned())),
+    );
+    // Имена ветки хендлера - не соседи: элаборация заворачивает каждое в свою
+    // лямбду, и тело живёт под всеми сразу.
+    refused(
+        "имена ветки хендлера",
+        &format!(
+            "run = handle prod with\n  op{} -> resume MkUnit\n",
+            repeat(300, |index| format!(" a{index}"))
+        ),
+    );
+    // Операции эффекта дают элиминатору по связыванию каждая, поэтому тип
+    // `k`-й стоит под `k` из них - цепочка, а не набор соседей.
+    refused(
+        "операции эффекта",
+        &format!(
+            "effect Many where\n{}",
+            repeat(300, |index| format!("  op{index} : Bool -> Unit\n"))
         ),
     );
     // Предел общий, поэтому формы **складываются**: каждая порознь под ним, а

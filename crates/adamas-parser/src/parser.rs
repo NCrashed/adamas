@@ -935,7 +935,18 @@ impl<'a> Parser<'a> {
             // вложенных типов записи - двести байт исходника - стоили четырёх
             // с половиной секунд, и предел вложенности от этого не спасал: он
             // ограничивает глубину, а не число попыток.
-            if braces && self.at_record_at(mark) && !self.at_binder_chain() {
+            // Просмотра «за скобкой стрелка» мало: `{x : E, y : Nat} -> Nat`
+            // отвечает «да», группа отказывает на запятой, и откат оживает
+            // вместе с экспонентой - двадцать четыре уровня вложенной записи
+            // стоили восьми секунд при пятистах семидесяти байтах. Запятая на
+            // верхнем уровне скобки решает сама: группа связываний её не
+            // содержит - `binder_of` читает имена, `:`, тип, умолчание и
+            // закрывающую скобку, а запятыми разделяет только констрейнт-
+            // контекст, и он спрошен выше по `=>`.
+            if braces
+                && self.at_record_at(mark)
+                && (self.at_record_comma() || !self.at_binder_chain())
+            {
                 return self.arrowed();
             }
             match self.binder_group() {
@@ -971,6 +982,31 @@ impl<'a> Parser<'a> {
                 TokenKind::LBrace | TokenKind::LParen => {}
                 _ => return false,
             }
+        }
+    }
+
+    /// Стоит ли запятая на верхнем уровне фигурной скобки, на которой мы стоим.
+    ///
+    /// Запятая делает форму записью независимо от того, что идёт за скобкой:
+    /// группа связываний её не содержит вовсе. Вложенность считается по всем
+    /// трём родам скобок, иначе `{x : (a, b)}` спутался бы с записью.
+    fn at_record_comma(&self) -> bool {
+        let mut depth = 0_u32;
+        let mut at = 0;
+        loop {
+            match self.kind_ahead(at) {
+                TokenKind::LBrace | TokenKind::LParen | TokenKind::LBracket => depth += 1,
+                TokenKind::RBrace | TokenKind::RParen | TokenKind::RBracket => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                TokenKind::Comma if depth == 1 => return true,
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+            at += 1;
         }
     }
 

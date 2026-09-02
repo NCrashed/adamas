@@ -157,10 +157,12 @@ fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<
                 pending.push((Node::Expr(part), inner));
             }
         }
-        // Ветки - соседи: разбор один, и каждая стоит под ним, а не под
-        // предыдущей.
-        // Ветки хендлера - тоже соседи: вычисление одно, и каждая стоит под
-        // ним.
+        // Ветки хендлера - соседи: вычисление одно, и каждая стоит под ним.
+        // А вот **имена внутри ветки** соседями не являются: элаборация
+        // заворачивает каждое в свою лямбду, и тело ветки живёт под всеми
+        // сразу. Плюс одно связывание на резумпцию - её дописывает сама форма
+        // (§3.4). Пропущенный, этот список предела не имел вовсе, и четыреста
+        // сорок имён убивали процесс файлом в пять килобайт.
         ExprKind::Handle {
             label,
             computation,
@@ -169,7 +171,10 @@ fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<
         } => {
             let inner = deepen(depth, 1, expr.span)?;
             pending.push((Node::Expr(computation), inner));
-            pending.extend(branches.iter().map(|it| (Node::Expr(&it.body), inner)));
+            for branch in branches {
+                let under = deepen(inner, branch.params.len() + 1, branch.span)?;
+                pending.push((Node::Expr(&branch.body), under));
+            }
             if let Some(label) = label {
                 pending.extend(label.arguments.iter().map(|it| (Node::Expr(it), inner)));
             }
@@ -269,9 +274,19 @@ fn lam<'a>(
 }
 
 /// Блок: каждое связывание даёт `Let`, и всё, что за ним, стоит под ним.
+///
+/// Связывание не одно такое. Оператор, за которым в блоке что-то стоит, тоже
+/// даёт `Let` - связывание, которого никто не упоминает (§3.4, лог
+/// 2026-09-02): последовательность собственного узла не имеет, эффекты копятся
+/// в суждении. Значит и звено он ставит наравне с написанным `let`, а
+/// пропущенный - это предел, который молчит: восемь тысяч операторов подряд
+/// роняли разбор в переполнение стека, тогда как триста `let` отвергались.
+///
+/// Хвостовой оператор звена не ставит: он значение блока, а не связывание.
 fn block_at<'a>(block: &'a Block, depth: u32, pending: &mut Pending<'a>) -> Result<(), ParseError> {
     let mut at = depth;
-    for stmt in &block.stmts {
+    let last = block.stmts.len().saturating_sub(1);
+    for (index, stmt) in block.stmts.iter().enumerate() {
         match &stmt.kind {
             StmtKind::Let(bindings) => {
                 for binding in bindings {
@@ -288,8 +303,12 @@ fn block_at<'a>(block: &'a Block, depth: u32, pending: &mut Pending<'a>) -> Resu
                     );
                 }
             }
-            // Хвост блока - тело последнего `let`.
-            StmtKind::Expr(expr) => pending.push((Node::Expr(expr), at)),
+            StmtKind::Expr(expr) => {
+                if index != last {
+                    at = deepen(at, 1, stmt.span)?;
+                }
+                pending.push((Node::Expr(expr), at));
+            }
         }
     }
     Ok(())
@@ -393,13 +412,18 @@ fn decl_at<'a>(decl: &'a Decl, depth: u32, pending: &mut Pending<'a>) -> Result<
         }
         DeclKind::Effect(effect) => {
             binder_terms(&effect.params, depth, pending);
-            // Операции - соседи, и каждая начинает свой тип с нуля.
-            pending.extend(
-                effect
-                    .operations
-                    .iter()
-                    .map(|operation| (Node::Expr(&operation.ty), depth)),
-            );
+            // Собственный тип операции действительно начинается с нуля -
+            // соседом ей операция и приходится. Но объявление заводит ещё и
+            // **элиминатор**, а тот берёт по связыванию на операцию и кладёт
+            // тип `k`-й под `k` из них. Считать их соседями значило бы не
+            // мерить эту цепочку вовсе: семь тысяч операций роняли проверку в
+            // переполнение стека, а двадцать тысяч конструкторов `data` -
+            // настоящие соседи - проходили.
+            let mut at = depth;
+            for operation in &effect.operations {
+                at = deepen(at, 1, operation.name.span)?;
+                pending.push((Node::Expr(&operation.ty), at));
+            }
         }
         DeclKind::Resource(resource) => {
             binder_terms(&resource.params, depth, pending);

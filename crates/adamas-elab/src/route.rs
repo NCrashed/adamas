@@ -47,6 +47,8 @@ pub(crate) enum Declared<'a> {
     },
     /// Индуктивное семейство: тип-формер и типы конструкторов.
     Data(&'a ast::Data),
+    /// Эффект: типы его операций. Формер не пишется, указывать в нём не на что.
+    Effect(&'a ast::EffectDecl),
 }
 
 /// Где в исходнике то, что отверг `check`.
@@ -77,6 +79,16 @@ pub(crate) fn locate(declared: &Declared<'_>, error: &TypeError, fallback: Span)
                         .map(|clause| narrow(&clause.body, inner))
                 })
                 .unwrap_or(fallback),
+            _ => fallback,
+        },
+        Declared::Effect(effect) => match route.split_first() {
+            Some((Frame::MemberType(_), rest)) => match rest.split_first() {
+                Some((Frame::Constructor(index), inner)) => effect
+                    .operations
+                    .get(*index as usize)
+                    .map_or(fallback, |operation| narrow(&operation.ty, inner)),
+                _ => fallback,
+            },
             _ => fallback,
         },
         Declared::Data(data) => match route.split_first() {

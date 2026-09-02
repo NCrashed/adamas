@@ -179,7 +179,11 @@ fn spine(signature: &Signature, owned: &Owned, term: &Term, depth: u32, found: &
     let family = match &definition.kind {
         DefinitionKind::Data { .. } => Some(Rc::clone(callee)),
         DefinitionKind::Constructor { data, .. } => Some(Rc::clone(data)),
-        DefinitionKind::Regular => None,
+        // Метка держателем не бывает: полем она стоять не может, а операция
+        // ничего не кладёт - она производит.
+        DefinitionKind::Regular
+        | DefinitionKind::Effect { .. }
+        | DefinitionKind::Operation { .. } => None,
     };
     for (position, argument) in arguments.iter().enumerate() {
         // `1` - ограничения нет; так помечены и позиции, которые вовсе не

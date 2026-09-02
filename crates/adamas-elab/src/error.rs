@@ -755,23 +755,54 @@ pub enum ElabError {
 /// Конструкторы лежат при своём члене, а не общим списком: маршрут называет их
 /// номером **внутри** члена (`sig.rs`, фаза C), и с приходом `mutual` в группе
 /// окажется больше одного семейства.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Names(Vec<(Symbol, Vec<Symbol>)>);
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Names {
+    members: Vec<(Symbol, Vec<Symbol>)>,
+    /// Как называть вложенное объявление в маршруте. Кадр у конструктора и у
+    /// операции один - номер внутри члена, - а слова разные, и знает разницу
+    /// только тот, кто объявлял.
+    inner: &'static str,
+}
+
+impl Default for Names {
+    fn default() -> Self {
+        Self {
+            members: Vec::new(),
+            inner: "конструктор",
+        }
+    }
+}
 
 impl Names {
     /// Объявление из одного члена - то, чем сегодня является всякая группа.
     pub(crate) fn of(name: &Symbol, constructors: Vec<Symbol>) -> Self {
-        Self(vec![(Symbol::clone(name), constructors)])
+        Self {
+            members: vec![(Symbol::clone(name), constructors)],
+            inner: "конструктор",
+        }
+    }
+
+    /// То же для эффекта: вложенное в него - операции.
+    pub(crate) fn of_effect(name: &Symbol, operations: Vec<Symbol>) -> Self {
+        Self {
+            members: vec![(Symbol::clone(name), operations)],
+            inner: "операция",
+        }
     }
 
     /// Имя члена группы по номеру из маршрута.
     pub(crate) fn member(&self, index: u32) -> Option<&Symbol> {
-        self.0.get(index as usize).map(|(name, _)| name)
+        self.members.get(index as usize).map(|(name, _)| name)
     }
 
-    /// Имя конструктора по номеру внутри члена.
+    /// Имя вложенного объявления по номеру внутри члена.
     pub(crate) fn constructor(&self, member: u32, index: u32) -> Option<&Symbol> {
-        self.0.get(member as usize)?.1.get(index as usize)
+        self.members.get(member as usize)?.1.get(index as usize)
+    }
+
+    /// Как звать вложенное объявление словами.
+    pub(crate) fn inner(&self) -> &'static str {
+        self.inner
     }
 }
 

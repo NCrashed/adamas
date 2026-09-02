@@ -155,7 +155,7 @@ fn step(frame: Frame, member: Option<u32>, names: &Names) -> String {
         Frame::MemberBody(index) => names.member(index).map(|name| format!("тело `{name}`")),
         Frame::Constructor(index) => member
             .and_then(|member| names.constructor(member, index))
-            .map(|name| format!("конструктор `{name}`")),
+            .map(|name| format!("{} `{name}`", names.inner())),
         _ => None,
     };
     found.unwrap_or_else(|| frame.to_string())

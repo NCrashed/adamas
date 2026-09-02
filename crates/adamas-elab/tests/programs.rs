@@ -4565,6 +4565,125 @@ apart : Bool -> Bool -> {{State Bool | e}} Bool
 }
 
 #[test]
+fn an_effect_declares_a_label_and_its_operations() {
+    // §3.4: `effect` устроен как data-объявление - формер плюс члены, чьи типы
+    // обязаны упоминать формер в предписанной позиции. Позиция эта row, а не
+    // результат: операция не строит значение метки, она её производит.
+    let signature = program(&format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+effect State s where
+  get : s
+  put : s -> Unit
+"
+    ));
+    assert_eq!(
+        signature
+            .lookup("State")
+            .expect("метка объявлена")
+            .effect_shape(),
+        Some(1),
+        "у метки один параметр"
+    );
+    // Операция - постулат: развернуть её нечем, пока хендлер не подставит
+    // evidence, и потому расходиться нечему.
+    let put = signature.lookup("put").expect("операция объявлена");
+    assert!(
+        put.body.is_none() && put.total,
+        "операция - тотальный постулат"
+    );
+}
+
+#[test]
+fn an_operation_produces_exactly_its_own_label() {
+    // Row операции либо пишут, либо нет, и обе записи законны: §3.4 пишет
+    // `yield : a -> ()`, §3.6 пишет `allocIn : … -> {Alloc r} (Ref r a)`.
+    // Проверяется же одно и то же - что производится ровно объявляемая метка,
+    // применённая к собственным параметрам.
+    let head = format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+Log : Effect
+"
+    );
+    program(&format!(
+        "{head}
+effect State s where
+  put : s -> {{State s}} Unit
+"
+    ));
+    for written in [
+        "put : s -> {Log} Unit",
+        "put : s -> {State s, Log} Unit",
+        "put : s -> {Log | e} Unit",
+    ] {
+        let error = refused(&format!(
+            "{head}
+effect State s where
+  {written}
+"
+        ));
+        assert!(
+            error.to_string().contains("обязана производить ровно"),
+            "для {written:?} получено {error:?}"
+        );
+    }
+    // Параметры повторяются дословно - тем же правилом, каким конструктор
+    // повторяет параметры своего семейства.
+    let error = refused(&format!(
+        "{head}
+effect Both a b where
+  op : a -> {{Both a a}} Unit
+"
+    ));
+    assert!(
+        error.to_string().contains("обязана производить ровно"),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn an_operation_without_arrows_is_a_computation() {
+    // `get : s` есть `{State s} s`, то есть приостановленное вычисление
+    // (§3.4). Отдельного случая для него нет: та же дописанная row, просто
+    // дописывать её некуда, кроме как в сам тип.
+    program(&format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+effect State s where
+  get : s
+
+peek : {{State Bool}} Bool
+peek = get
+"
+    ));
+    // Операция со стрелками под чужой окружающей не гасится - обычное правило
+    // погашения, и никакого отдельного статуса у операции в нём нет.
+    let error = refused(&format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+effect State s where
+  put : s -> Unit
+
+silent : Bool -> Unit
+silent b = put b
+"
+    ));
+    assert!(
+        error.to_string().contains("не погашены"),
+        "получено {error:?}"
+    );
+}
+
+#[test]
 fn a_signature_without_a_written_row_is_row_polymorphic() {
     // Auto-lift (§3.4): позиция без написанной `{}` получает ту же свежую
     // переменную, что и прочие позиции сигнатуры, и при вызове она

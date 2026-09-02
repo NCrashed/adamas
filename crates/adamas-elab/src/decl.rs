@@ -418,23 +418,19 @@ fn members_into(
             }
             DeclKind::Data(data) => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
-                // Семейство в теле модуля - названная граница среза: имя
-                // квалифицируется, а имена конструкторов нет, и разбор по ним
-                // писать было бы нечем. Заводится вместе с путём в паттерне.
+                declare_family(signature, metas, owned, within, data, decl.span)?;
+            }
+            DeclKind::Effect(effect) => {
+                postulate(signature, metas, pending.take(), &mut postulated)?;
+                // Та же граница, что у семейства, и по той же причине: имя
+                // метки квалифицировалось бы, а имена операций нет.
                 only_at_top(
                     within,
-                    &data.name.text,
-                    "конструкторы квалифицированного имени пока не носят, \
-                     и разобрать их в паттерне нечем",
+                    &effect.name.text,
+                    "операции квалифицированного имени пока не носят",
                     decl.span,
                 )?;
-                // Маркер ставится **до** элаборации конструкторов: поле
-                // собственного типа получит `1` тем же правилом, что и всякое
-                // другое связывание, а не отдельным случаем.
-                if data.unique {
-                    owned.declare(&data.name.text, Ownership::Unique);
-                }
-                declare_data(signature, metas, owned, data, decl.span)?;
+                declare_effect(signature, metas, owned, effect, decl.span)?;
             }
             DeclKind::Resource(resource) => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
@@ -1980,6 +1976,7 @@ fn member_name(member: &ast::Decl) -> Option<&Symbol> {
         DeclKind::Signature { name, .. } | DeclKind::Alias { name, .. } => Some(&name.text),
         DeclKind::Module(inner) => Some(&inner.name.text),
         DeclKind::Data(data) => Some(&data.name.text),
+        DeclKind::Effect(effect) => Some(&effect.name.text),
         DeclKind::Resource(resource) => Some(&resource.name.text),
         DeclKind::Clauses { .. } | DeclKind::Class(_) | DeclKind::Mutual(_) => None,
     }
@@ -2544,6 +2541,7 @@ fn resource_members(
                 });
             }
             ast::DeclKind::Data(inner) => return Err(refuse(&inner.name.text, member.span)),
+            ast::DeclKind::Effect(inner) => return Err(refuse(&inner.name.text, member.span)),
             ast::DeclKind::Resource(inner) => return Err(refuse(&inner.name.text, member.span)),
         }
     }
@@ -3067,6 +3065,142 @@ fn family_member(family: &Family<'_>, constructors: &[(&str, Term)]) -> SigMembe
         SigMember::data(&family.data.name.text, parameters, family.kind.clone()),
         |member, (constructor, ty)| member.with_constructor(constructor, ty.clone()),
     )
+}
+
+/// Семейство вместе с тем, что решается до его объявления.
+fn declare_family(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    owned: &mut Owned,
+    within: Option<&Enclosing<'_>>,
+    data: &ast::Data,
+    span: Span,
+) -> Result<(), ElabError> {
+    // Семейство в теле модуля - названная граница среза: имя квалифицируется, а
+    // имена конструкторов нет, и разбор по ним писать было бы нечем. Заводится
+    // вместе с путём в паттерне.
+    only_at_top(
+        within,
+        &data.name.text,
+        "конструкторы квалифицированного имени пока не носят, \
+         и разобрать их в паттерне нечем",
+        span,
+    )?;
+    // Маркер ставится **до** элаборации конструкторов: поле собственного типа
+    // получит `1` тем же правилом, что и всякое другое связывание, а не
+    // отдельным случаем.
+    if data.unique {
+        owned.declare(&data.name.text, Ownership::Unique);
+    }
+    declare_data(signature, metas, owned, data, span)
+}
+
+/// Объявление эффекта: формер метки плюс её операции (§3.4).
+///
+/// Устроено как семейство и объявляется той же группой: операция называет свою
+/// метку, а в сигнатуре её ещё нет. Отличий два. Формер не пишется - результат
+/// метки всегда `Effect`, - и укладывать метку некуда: она не тип, полем стоять
+/// не может, поэтому ни универсума, ни позитивности у неё нет.
+fn declare_effect(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    owned: &Owned,
+    effect: &ast::EffectDecl,
+    span: Span,
+) -> Result<(), ElabError> {
+    let mut elaborator = Elaborator::new(signature, metas, owned);
+    let params = elaborator.telescope(&effect.params, false, Mult::Zero)?;
+    let kind = elaborator.wrapped(&params, false, |_| Ok(Term::EffectKind))?;
+    let names = Names::of_effect(
+        &effect.name.text,
+        effect
+            .operations
+            .iter()
+            .map(|operation| Rc::clone(&operation.name.text))
+            .collect(),
+    );
+    let levels = self_levels(signature, metas, &kind).map_err(|error| ElabError::Core {
+        span,
+        error: Box::new(error),
+        names: names.clone(),
+    })?;
+    let visible = Member {
+        name: Rc::clone(&effect.name.text),
+        levels,
+        ty: Rc::new(kind.clone()),
+    };
+
+    let label = own_label(effect);
+    let mut operations = Vec::with_capacity(effect.operations.len());
+    for operation in &effect.operations {
+        let written = performed(&operation.ty, &label);
+        let ty = Elaborator::with_group(signature, metas, owned, vec![visible.clone()]).wrapped(
+            &params,
+            true,
+            |it| it.declaration(&written, Mult::Many),
+        )?;
+        operations.push((&*operation.name.text, ty));
+    }
+
+    let parameters = u32::try_from(params.len()).unwrap_or(u32::MAX);
+    signature
+        .declare_effect(metas, &effect.name.text, parameters, kind, &operations)
+        .map_err(|error| ElabError::Core {
+            span: route::locate(&Declared::Effect(effect), &error, span),
+            error: Box::new(error),
+            names,
+        })?;
+    declare_defaults(signature, metas, owned, &effect.name.text, &effect.params)
+}
+
+/// Метка, применённая к собственным параметрам: `State s`.
+fn own_label(effect: &ast::EffectDecl) -> ast::EffectLabel {
+    ast::EffectLabel {
+        name: effect.name.clone(),
+        arguments: effect
+            .params
+            .iter()
+            .flat_map(|binder| &binder.names)
+            .map(|name| ast::Expr {
+                kind: ast::ExprKind::Name(name.clone()),
+                span: name.span,
+            })
+            .collect(),
+        span: effect.name.span,
+    }
+}
+
+/// Тип операции с дописанной row: `yield : a -> ()` есть `a -> {Yield a} ()`.
+///
+/// Обе записи законны, и обе стоят в дизайне: §3.4 пишет `yield : a -> ()`,
+/// §3.6 пишет `allocIn : … -> {Alloc r} (Ref r a)`. Дописывается метка в
+/// **последний** кодомен - операция производится, когда применена целиком, - а
+/// написанную не трогаем: её проверит ядро, и оно же скажет, если написана не
+/// та.
+///
+/// Операция без стрелок вовсе (`get : s`) становится `{State s} s`, то есть
+/// приостановленным вычислением (§3.4). Отдельного случая для неё нет: это та
+/// же дописанная row, просто дописывать её некуда, кроме как в сам тип.
+fn performed(ty: &ast::Expr, label: &ast::EffectLabel) -> ast::Expr {
+    let kind = match &ty.kind {
+        ast::ExprKind::Arrow(domain, codomain) => {
+            ast::ExprKind::Arrow(domain.clone(), Box::new(performed(codomain, label)))
+        }
+        ast::ExprKind::Pi { binders, codomain } => ast::ExprKind::Pi {
+            binders: binders.clone(),
+            codomain: Box::new(performed(codomain, label)),
+        },
+        ast::ExprKind::Effectful { .. } => return ty.clone(),
+        _ => ast::ExprKind::Effectful {
+            labels: vec![label.clone()],
+            tail: None,
+            body: Box::new(ty.clone()),
+        },
+    };
+    ast::Expr {
+        kind,
+        span: ty.span,
+    }
 }
 
 fn declare_data(

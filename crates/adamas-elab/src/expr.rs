@@ -1690,9 +1690,10 @@ impl<'a> Elaborator<'a> {
                 applied = Term::App(Rc::new(applied), Rc::new(argument.clone()));
                 arguments.push(argument);
             }
-            let sorted = infer(&self.ctx, self.metas, Mult::Zero, &applied)
-                .ok()
-                .map(|(ty, _)| ty);
+            // Через `synthesized`, а не напрямую: метка объявляемого эффекта
+            // сигнатуре ещё не известна, а собственная операция называет её по
+            // построению - в её же row.
+            let sorted = self.synthesized(&applied);
             if !matches!(sorted.as_deref(), Some(Value::EffectKind)) {
                 return Err(ElabError::NotAnEffect {
                     name: Rc::clone(&label.name.text),

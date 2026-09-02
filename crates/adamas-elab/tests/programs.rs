@@ -5301,6 +5301,67 @@ run = handle True with
 }
 
 #[test]
+fn a_field_of_a_branch_carries_the_multiplicity_of_the_scrutinee() {
+    // §3.3 дословно: «поле, связанное при `qᵢ·r`, разобранное в свою очередь,
+    // даёт `r' = qᵢ·r`». Ядро так и делает, элаборация брала `qᵢ` как есть, и
+    // вложенный разбор давал полю `1` там, где ядро дало `ω`. Расхождение
+    // всегда в строгую сторону, поэтому это false-rejection, а не unsoundness -
+    // но отвергалась `case`-версия программы, которую клаузами написать можно,
+    // и сообщение называло безымянное `_`, которого автор не писал.
+    let text = "\
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+g : Nat -> Nat -> Nat
+g a b = a
+";
+    program(&format!(
+        "{text}
+deepClause : Nat -> Nat
+deepClause Zero = Zero
+deepClause (Succ Zero) = Zero
+deepClause (Succ (Succ m)) = g m m
+
+deepCase : Nat -> Nat
+deepCase n = case n of
+  Zero -> Zero
+  Succ k -> case k of
+    Zero -> Zero
+    Succ m -> g m m
+"
+    ));
+    // Направление проверки: линейное поле дважды по-прежнему отказ, и по обоим
+    // путям одинаково.
+    let linear = "\
+data Bool where
+  True : Bool
+  False : Bool
+
+close : (1 b : Bool) -> Bool
+close b = True
+
+resource File where
+  Open : Bool -> File
+  shut : (1 h : File) -> Bool
+  shut (Open b) = close b
+
+both : Bool -> Bool -> Bool
+both a b = a
+";
+    for body in [
+        "twice : (1 s : File) -> Bool\ntwice s = case s of\n  Open b -> both (close b) (close b)\n",
+        "twice : (1 s : File) -> Bool\ntwice (Open b) = both (close b) (close b)\n",
+    ] {
+        let error = refused(&format!("{linear}\n{body}"));
+        assert!(
+            error.to_string().contains("использована"),
+            "{body}: получено {error:?}"
+        );
+    }
+}
+
+#[test]
 fn a_case_over_a_written_index_typechecks() {
     // Цель разбора заводилась дыркой по **всему** контексту, включая только
     // что связанное разбираемое, а мотив переписывает разбираемое в собственное

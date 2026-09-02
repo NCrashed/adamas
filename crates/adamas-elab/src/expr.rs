@@ -3744,6 +3744,7 @@ impl<'a> Elaborator<'a> {
                 written,
                 constructor,
                 fields,
+                mult,
                 ty.as_ref(),
                 body,
                 beside,
@@ -3755,12 +3756,22 @@ impl<'a> Elaborator<'a> {
 
     /// То же для паттерна-конструктора: телескоп его типа шагает полями, а
     /// аргументы семейства берутся у типа разбираемого.
+    ///
+    /// `consumed` - кратность, с которой потребляется само разбираемое, и поле
+    /// связывается при `qᵢ · consumed`: §3.3 пишет это дословно - «поле,
+    /// связанное при `qᵢ·r`, разобранное в свою очередь, даёт `r' = qᵢ·r`».
+    /// Ядро так и делает; элаборация же брала `qᵢ` как есть, и вложенный
+    /// разбор давал полю `1` там, где ядро дало `ω`. Отсюда отказ на
+    /// `case`-версии программы, которую клаузами написать можно: «`_`
+    /// объявлена с кратностью 1, а использована ω» - про безымянное `_`,
+    /// которого автор не писал.
     #[allow(clippy::too_many_arguments)]
     fn constructor_variables(
         &mut self,
         written: Option<&Pattern>,
         constructor: &CoreName,
         fields: &[CorePattern],
+        consumed: Mult,
         ty: Option<&Rc<Value>>,
         body: &Expr,
         beside: &[Symbol],
@@ -3821,9 +3832,11 @@ impl<'a> Elaborator<'a> {
         }
         for (position, field) in fields.iter().enumerate() {
             let (mult, domain, codomain) = match (known, &*current) {
-                (true, Value::Pi(binder, _, domain, _, codomain)) => {
-                    (binder.mult, Some(Rc::clone(domain)), Some(codomain.clone()))
-                }
+                (true, Value::Pi(binder, _, domain, _, codomain)) => (
+                    binder.mult * consumed,
+                    Some(Rc::clone(domain)),
+                    Some(codomain.clone()),
+                ),
                 _ => (Mult::Many, None, None),
             };
             let value = self.pattern_variables(

@@ -1359,12 +1359,21 @@ impl Signature {
         params: u32,
         ty: Term,
         operations: &[(&str, Term)],
+        handlers: &[(&str, Term)],
     ) -> Result<(), TypeError> {
         let member = operations.iter().fold(
             Member::effect(name, params, ty),
             |member, (operation, ty)| member.with_operation(operation, ty.clone()),
         );
-        self.declare(metas, &Group::of(member))
+        // Элиминаторы идут той же группой: их типы называют метку, а в
+        // сигнатуре её ещё нет (§10 вопрос 50). Постулатами - развернуть их
+        // нечем, пока evidence не подставлен.
+        let group = handlers
+            .iter()
+            .fold(Group::of(member), |group, (name, ty)| {
+                group.and(Member::definition(name, Mult::Many, ty.clone()))
+            });
+        self.declare(metas, &group)
     }
 }
 

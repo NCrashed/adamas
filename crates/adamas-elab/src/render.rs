@@ -327,7 +327,8 @@ impl Naming {
             }
             // Дырка своего имени не имеет и переименованию не подлежит:
             // печатается она номером, а номер локализует `Naming` отдельно.
-            Term::Meta(_) => {}
+            // Сорт `Effect` рядом по той же причине: ни имён, ни уровней.
+            Term::Meta(_) | Term::EffectKind => {}
             Term::Universe(level) | Term::RowKind(level) => self.level(level),
             Term::Const(_, levels) => *levels = self.levels(levels),
             Term::App(callee, argument) => {
@@ -431,7 +432,7 @@ fn collect_term(term: &Term, ordered: &mut Vec<LevelMeta>) {
         Term::Project(record, _) => collect_term(record, ordered),
         // Дырка терма своих уровней не носит: они в её типе, а он живёт
         // отдельно.
-        Term::Var(_) | Term::Meta(_) => {}
+        Term::Var(_) | Term::Meta(_) | Term::EffectKind => {}
         Term::Universe(level) | Term::RowKind(level) => collect_level(level, ordered),
         Term::Const(_, levels) => {
             for level in levels.iter() {

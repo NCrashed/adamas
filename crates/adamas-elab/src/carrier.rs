@@ -146,7 +146,12 @@ fn walk(signature: &Signature, owned: &Owned, term: &Term, depth: u32, found: &m
                 walk(signature, owned, &branch.body, depth, found);
             }
         }
-        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Const(..) | Term::Meta(_) => {}
+        Term::Var(_)
+        | Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Const(..)
+        | Term::Meta(_) => {}
     }
 }
 

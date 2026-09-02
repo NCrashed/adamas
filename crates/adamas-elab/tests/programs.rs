@@ -4425,3 +4425,32 @@ everywhere h c = case c of
         );
     }
 }
+
+#[test]
+fn the_effect_sort_is_written_and_inhabited() {
+    // §3.4: `effect State s where …` объявляет `State : Type ℓ -> Effect`, то
+    // есть формер метки оканчивается сортом `Effect`. Сорт устроен по образцу
+    // `Level`: населяют его метки, а не типы, и уровня у него нет - метка
+    // ничего не содержит.
+    program(&format!(
+        "{BASE}
+State : Type -> Effect
+
+Reader : Effect
+
+named : Effect
+named = Reader
+
+applied : Effect
+applied = State Nat
+"
+    ));
+    // Тип и эффект - разные сорта, и населять один другим нечем.
+    let error = refused(&format!(
+        "{BASE}
+wrong : Effect
+wrong = Zero
+"
+    ));
+    assert!(error.to_string().contains("Effect"), "получено {error:?}");
+}

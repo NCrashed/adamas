@@ -2776,7 +2776,11 @@ fn mentions_depth(term: &Term, depth: u32) -> bool {
     let under = |inner| mentions_depth(inner, depth + 1);
     match term {
         Term::Var(index) => index.0 == depth,
-        Term::Universe(_) | Term::RowKind(_) | Term::Const(..) | Term::Meta(_) => false,
+        Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Const(..)
+        | Term::Meta(_) => false,
         Term::Record(fields) | Term::Row(fields) => {
             fields.iter().enumerate().any(|(at, field)| {
                 mentions_depth(&field.ty, depth + u32::try_from(at).unwrap_or(0))
@@ -2809,7 +2813,11 @@ fn mentions_local(term: &Term) -> bool {
     match term {
         Term::Var(_) => true,
         // Дырка замкнута: локальных связываний в ней нет по построению.
-        Term::Universe(_) | Term::RowKind(_) | Term::Const(..) | Term::Meta(_) => false,
+        Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Const(..)
+        | Term::Meta(_) => false,
         Term::Record(fields) | Term::Row(fields) => {
             fields.iter().any(|field| mentions_local(&field.ty))
                 || fields

@@ -2830,6 +2830,14 @@ impl<'a> Elaborator<'a> {
             let sort = Rc::new(Value::Universe(self.metas.fresh_level()));
             return Ok(self.fresh_meta(&sort));
         };
+        // Голова читается **после** подстановки решений и δ. Выведенный тип
+        // кодомена приходит нейтралью с дыркой в голове - `infer` приводит к
+        // головной форме только тип вызываемого, - и ворота обходились всяким
+        // выражением, чей результирующий тип выведен, а не написан: разбор
+        // выражением (мотив у него свежая дырка) или вызов полиморфной
+        // функции. Ресурс уезжал молча, тогда как монотипный тот же ресурс
+        // отвергался.
+        let ty = whnf_solved(self.signature, self.metas, &ty);
         if let Some(owned) = head_name(&ty).and_then(|head| self.owned.how(head)) {
             return Err(ElabError::OwnedDiscarded { owned, span });
         }

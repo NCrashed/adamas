@@ -4872,6 +4872,36 @@ use b =
         error.to_string().contains("отбрасывается"),
         "получено {error:?}"
     );
+    // Голова читается после подстановки решений и δ. Без этого ворота
+    // обходились всяким выражением, чей результирующий тип **выведен**, а не
+    // написан: у разбора выражением мотив - свежая дырка, у полиморфного
+    // вызова кодомен приходит нейтралью с дыркой в голове. Ресурс уезжал
+    // молча, тогда как монотипный тот же ресурс отвергался.
+    for what in [
+        "  case b of\n    True -> Open True\n    False -> Open False",
+        "  idf (Open b)",
+    ] {
+        let error = refused(&format!(
+            "{BASE}
+resource File where
+  Open : Bool -> File
+  close : File -> Bool
+  close (Open b) = b
+
+idf : {{a : Type}} -> a -> a
+idf x = x
+
+use : Bool -> Bool
+use b =
+{what}
+  b
+"
+        ));
+        assert!(
+            error.to_string().contains("отбрасывается"),
+            "{what}: получено {error:?}"
+        );
+    }
 }
 
 #[test]

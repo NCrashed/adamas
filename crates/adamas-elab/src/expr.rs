@@ -1798,7 +1798,14 @@ impl<'a> Elaborator<'a> {
                 .map(|(alt, pattern)| {
                     let mut beside = Vec::new();
                     variables_of(pattern, &mut beside);
-                    self.mentions_beside(&name, &alt.body, &beside)
+                    // Затенённое имя ветвь не называет, чем бы ни было
+                    // написано в теле: `Full h -> h` при внешнем ресурсном `h`
+                    // говорит о своём поле. Список `beside` этого не решает -
+                    // он про то, у каких имён не спрашивать кратность в
+                    // сигнатуре, - и без явной проверки упоминание затеняющего
+                    // засчитывалось ресурсу, а путь оставался незакрытым.
+                    !beside.iter().any(|it| **it == *name)
+                        && self.mentions_beside(&name, &alt.body, &beside)
                 })
                 .collect();
             if !mentioned.iter().any(|it| *it) {
@@ -1974,6 +1981,15 @@ impl<'a> Elaborator<'a> {
             &mut bound,
             &mut level,
         );
+        // Индекс закрываемого извне считается **до** спуска в ветвь. Внутри
+        // неё имя затеняется переменной паттерна, а поиск идёт изнутри наружу,
+        // и `case b of Full h -> …` при внешнем ресурсном `h` подставлял бы
+        // `drop` паттерновому: корректная программа отвергалась несовпадением
+        // типов, а вставка промахивалась мимо того, что обязана была закрыть.
+        let outer_drops: Vec<(u32, Symbol)> = closing
+            .iter()
+            .filter_map(|(name, drop)| self.local(name).map(|index| (index, drop.clone())))
+            .collect();
         let depth = self.scope.len();
         let outer = self.ctx.clone();
         for variable in &bound {
@@ -1994,13 +2010,20 @@ impl<'a> Elaborator<'a> {
                 variable.scoped,
             ));
         }
-        // Ресурс, о котором забыла **эта** ветвь, закрывается в ней: решение
+        // Закрываются двое. Ресурс, о котором забыла **эта** ветвь: решение
         // выше принимается по телу целиком, а ветвь - отдельный путь (§3.3,
-        // §10 вопрос 71).
-        let mut drops: Vec<(u32, Symbol)> = closing
-            .iter()
-            .filter_map(|(name, drop)| self.local(name).map(|index| (index, drop.clone())))
-            .collect();
+        // §10 вопрос 71). И ресурс, который ветвь **сама разобрала**: поле,
+        // связанное её паттерном, - такое же владение, как аргумент, и клауза
+        // закрывает его тем же `closing_of`. В ветви этого не делалось вовсе,
+        // и `byCase s = case s of Listen h -> True` уносил дескриптор молча,
+        // тогда как побуквенно та же клауза его закрывала.
+        let shift = u32::try_from(bound.len()).unwrap_or(u32::MAX);
+        let mut drops: Vec<(u32, Symbol)> = closing_of(&bound);
+        drops.extend(
+            outer_drops
+                .into_iter()
+                .map(|(index, drop)| (index.saturating_add(shift), drop)),
+        );
         lifo(&mut drops);
         let term = self.closing_all(&drops, |it| it.expr(body, Mult::Many));
         self.scope.truncate(depth);

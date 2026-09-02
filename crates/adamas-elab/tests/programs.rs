@@ -4396,6 +4396,91 @@ nested h c d = case c of
 }
 
 #[test]
+fn a_branch_closes_what_its_own_pattern_bound() {
+    // Поле, связанное паттерном ветви, - такое же владение, как аргумент, и
+    // клауза закрывает его тем же правилом. В ветви `case` этого не делалось
+    // вовсе: вставка собиралась только из ресурсов объемлющего scope, а
+    // `closing_of` по собственным переменным не звался. Побуквенно одинаковые
+    // `byClause` и `byCase` расходились - первая закрывала, вторая уносила.
+    let signature = program(
+        "\
+data Bool where
+  True : Bool
+  False : Bool
+
+resource File where
+  Open : File
+  close : (1 h : File) -> Bool
+  close h = True
+
+resource Socket where
+  Listen : File -> Socket
+  shut : (1 s : Socket) -> Bool
+  shut (Listen h) = close h
+
+byClause : Socket -> Bool
+byClause (Listen h) = True
+
+byCase : Socket -> Bool
+byCase s = case s of
+  Listen h -> True
+",
+    );
+    for name in ["byClause", "byCase"] {
+        let body = signature
+            .lookup(name)
+            .and_then(|definition| definition.body.clone())
+            .unwrap_or_else(|| panic!("`{name}` объявлено"));
+        let rendered = body.to_string();
+        assert_eq!(
+            rendered.matches("close").count(),
+            1,
+            "у `{name}` поле паттерна не закрыто: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn a_shadowing_pattern_does_not_capture_the_insertion() {
+    // Индекс закрываемого извне считается до спуска в ветвь: внутри неё имя
+    // затеняется переменной паттерна, а поиск идёт изнутри наружу. Вставка
+    // промахивалась мимо того, что обязана была закрыть, - корректная
+    // программа отвергалась несовпадением типов, а путь с затенением уносил
+    // внешний дескриптор молча.
+    let signature = program(
+        "\
+data Bool where
+  True : Bool
+  False : Bool
+
+resource File where
+  Open : File
+  close : (1 h : File) -> Bool
+  close h = True
+
+data Box where
+  Empty : Box
+  Full : Bool -> Box
+
+shadow : (1 h : File) -> Box -> Bool
+shadow h b = case b of
+  Empty -> close h
+  Full h -> h
+",
+    );
+    let body = signature
+        .lookup("shadow")
+        .and_then(|definition| definition.body.clone())
+        .expect("`shadow` объявлено");
+    let rendered = body.to_string();
+    assert_eq!(
+        rendered.matches("close").count(),
+        2,
+        "затенённый путь не закрыт: {rendered}"
+    );
+}
+
+#[test]
 fn a_resource_no_branch_names_is_closed_once() {
     // Граница правила с двух сторон. Ресурс, которого не называет ни одна
     // ветвь, закрывает правило снаружи - вставить его ещё и в каждую ветвь

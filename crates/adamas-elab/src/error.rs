@@ -530,6 +530,26 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Ветка хендлера не сходится с объявлением эффекта (§3.4).
+    #[error("ветка `{name}`: {why}")]
+    HandlerBranch {
+        /// Имя ветки.
+        name: Symbol,
+        /// Чем именно не сходится.
+        why: &'static str,
+        /// Ветка либо хендлер целиком.
+        span: Span,
+    },
+
+    /// Вычисление под хендлером метки не производит.
+    #[error("под хендлером обязано стоять вычисление, производящее `{effect}`")]
+    NotHandled {
+        /// Снимаемый эффект.
+        effect: Symbol,
+        /// Написанное вычисление.
+        span: Span,
+    },
+
     /// В теле `resource` нет определения - то есть нет деструктора.
     #[error("у ресурсного типа `{name}` нет деструктора: определение в теле обязательно (§3.3)")]
     ResourceWithoutDrop {
@@ -875,6 +895,8 @@ impl ElabError {
             | Self::UnrestrictedOwned { span, .. }
             | Self::OwnedTopLevel { span, .. }
             | Self::OwnedDiscarded { span, .. }
+            | Self::HandlerBranch { span, .. }
+            | Self::NotHandled { span, .. }
             | Self::ResourceWithoutDrop { span, .. }
             | Self::ScopeBound { span, .. }
             | Self::OwnedField { span, .. }

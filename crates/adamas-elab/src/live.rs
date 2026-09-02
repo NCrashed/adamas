@@ -53,6 +53,8 @@
 use adamas_core::mult::Mult;
 use adamas_core::sig::Signature;
 use adamas_core::term::Term;
+
+use crate::expr::RESUME;
 use adamas_parser::ast::{
     Alt, Binding, Chain, Expr, ExprKind, LamParamKind, Pattern, PatternKind, Stmt, StmtKind, Symbol,
 };
@@ -125,6 +127,20 @@ impl<'a> Spent<'a> {
             ExprKind::Case { scrutinee, alts } => {
                 self.in_expr(name, scrutinee, bound)
                     || alts.iter().any(|alt| self.in_alt(name, alt, bound))
+            }
+            // Ветка хендлера связывает свои имена - аргументы операции и
+            // резумпцию, - и упоминание под ними именем считается чужим.
+            ExprKind::Handle {
+                computation,
+                branches,
+                ..
+            } => {
+                self.in_expr(name, computation, bound)
+                    || branches.iter().any(|branch| {
+                        !branch.params.iter().any(|it| *it.text == *name)
+                            && name != RESUME
+                            && self.in_expr(name, &branch.body, bound)
+                    })
             }
             ExprKind::Tuple(items) | ExprKind::List(items) => {
                 items.iter().any(|item| self.in_expr(name, item, bound))

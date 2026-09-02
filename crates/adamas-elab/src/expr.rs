@@ -34,6 +34,101 @@ use crate::own::Owned;
 /// ядро не знает, а сахар `{ε} A` без него не разворачивается.
 pub(crate) const UNIT: &str = "Unit";
 
+/// Имя ветки, принимающей значение вычисления.
+pub(crate) const RETURN: &str = "return";
+
+/// Ветка `return`, которую подставляет её отсутствие: значение вычисления и
+/// есть ответ хендлера, то есть `b := a`.
+fn identity_return(span: Span) -> ast::HandlerBranch {
+    let name = |text: &str| ast::Name {
+        text: Rc::from(text),
+        span,
+    };
+    ast::HandlerBranch {
+        name: name(RETURN),
+        params: vec![name("v")],
+        body: Expr {
+            kind: ExprKind::Name(name("v")),
+            span,
+        },
+        span,
+    }
+}
+
+/// Row без первого вхождения метки: остаток и есть ρ (§3.4).
+fn without(row: &Row<Rc<Value>>, effect: &str) -> Option<Row<Rc<Value>>> {
+    let mut labels = Vec::with_capacity(row.labels().len());
+    let mut removed = false;
+    for label in row.labels() {
+        if !removed && &*label.name == effect {
+            removed = true;
+            continue;
+        }
+        labels.push(label.clone());
+    }
+    removed.then(|| Row::closing(labels, row.tail()))
+}
+
+/// Имя параметром лямбды.
+fn bind_as(name: ast::Name) -> ast::LamParam {
+    let span = name.span;
+    ast::LamParam {
+        kind: LamParamKind::Pattern(Pattern {
+            kind: PatternKind::Name(name),
+            span,
+        }),
+        span,
+    }
+}
+
+/// Ветки в порядке объявления операций; `return` первой.
+///
+/// Порядок написания значения не имеет - сопоставляются они по имени, - а
+/// элиминатор ждёт их в объявленном. Ветка `return` необязательна: без неё
+/// значение вычисления и есть ответ, то есть `b := a`.
+fn ordered_branches<'a>(
+    operations: &[Symbol],
+    branches: &'a [ast::HandlerBranch],
+    identity: &'a ast::HandlerBranch,
+    span: Span,
+) -> Result<Vec<&'a ast::HandlerBranch>, ElabError> {
+    let mut seen: Vec<&Symbol> = Vec::new();
+    for branch in branches {
+        if seen.iter().any(|it| ***it == *branch.name.text) {
+            return Err(ElabError::HandlerBranch {
+                name: Rc::clone(&branch.name.text),
+                why: "ветка написана дважды",
+                span: branch.span,
+            });
+        }
+        seen.push(&branch.name.text);
+        let known =
+            &*branch.name.text == RETURN || operations.iter().any(|it| **it == *branch.name.text);
+        if !known {
+            return Err(ElabError::HandlerBranch {
+                name: Rc::clone(&branch.name.text),
+                why: "такой операции у эффекта нет",
+                span: branch.name.span,
+            });
+        }
+    }
+    let named = |wanted: &str| branches.iter().find(|it| &*it.name.text == wanted);
+    let mut ordered = Vec::with_capacity(operations.len() + 1);
+    ordered.push(named(RETURN).unwrap_or(identity));
+    for operation in operations {
+        ordered.push(named(operation).ok_or_else(|| ElabError::HandlerBranch {
+            name: Rc::clone(operation),
+            why: "ветка не написана, а хендлер обязан покрыть все операции",
+            span,
+        })?);
+    }
+    Ok(ordered)
+}
+
+/// Имя резумпции. Связывает его сама форма хендлера (§3.4), поэтому оно и
+/// единственное в языке магическое: вложенный хендлер его затеняет.
+pub(crate) const RESUME: &str = "resume";
+
 /// Что написанный тип говорит о теле клаузы - после того, как паттерны сняли
 /// свои связывания.
 struct Rest {
@@ -218,6 +313,11 @@ pub(crate) fn names_any(expr: &Expr, wanted: &[&Symbol]) -> bool {
         ExprKind::Case { scrutinee, alts } => {
             recur(scrutinee) || alts.iter().any(|alt| recur(&alt.body))
         }
+        ExprKind::Handle {
+            computation,
+            branches,
+            ..
+        } => recur(computation) || branches.iter().any(|it| recur(&it.body)),
         ExprKind::RecordType(inner, _) => inner.iter().any(|it| recur(&it.ty)),
         ExprKind::Record(inner) => inner.iter().any(|(_, value)| recur(value)),
         ExprKind::Update(base, inner) => recur(base) || inner.iter().any(|(_, value)| recur(value)),
@@ -951,6 +1051,7 @@ impl<'a> Elaborator<'a> {
             ExprKind::Block(_)
             | ExprKind::If { .. }
             | ExprKind::Case { .. }
+            | ExprKind::Handle { .. }
             | ExprKind::Tuple(_)
             | ExprKind::List(_)
             | ExprKind::Lit(_)
@@ -1481,6 +1582,11 @@ impl<'a> Elaborator<'a> {
                 self.case(cond, &alts, expr.span, position)
             }
             ExprKind::Case { scrutinee, alts } => self.case(scrutinee, alts, expr.span, position),
+            ExprKind::Handle {
+                multi,
+                computation,
+                branches,
+            } => self.handled(*multi, computation, branches, expr.span),
             ExprKind::Tuple(items) if items.is_empty() => missing(Missing::Unit),
             ExprKind::Tuple(_) => missing(Missing::Tuple),
             ExprKind::List(_) => missing(Missing::List),
@@ -2395,6 +2501,180 @@ impl<'a> Elaborator<'a> {
             return term;
         }
         self.run(term)
+    }
+
+    /// `handle e with …` - применение элиминатора эффекта (§3.4).
+    ///
+    /// Метка не пишется: её называют ветки, а операция принадлежит ровно
+    /// одному эффекту. Первое (внутреннее) её вхождение снимается с row
+    /// вычисления, остаток и есть ρ - глубина хендлера, - и он передаётся
+    /// элиминатору аргументом-row.
+    fn handled(
+        &mut self,
+        multi: bool,
+        computation: &Expr,
+        branches: &[ast::HandlerBranch],
+        span: Span,
+    ) -> Result<Term, ElabError> {
+        let effect = self.handled_effect(branches, span)?;
+        let operations = self.operations_of(&effect);
+        let identity = identity_return(span);
+        let ordered = ordered_branches(&operations, branches, &identity, span)?;
+
+        // Вычисление элаборируется в окружающей самого `handle`: передаётся
+        // оно замыканием, а не исполняется здесь.
+        let value = self.expr(computation, Mult::Many)?;
+        let ty = self
+            .synthesized(&value)
+            .ok_or_else(|| ElabError::NotHandled {
+                effect: Rc::clone(&effect),
+                span: computation.span,
+            })?;
+        let Value::Pi(_, _, _, row, _) = &*whnf_solved(self.signature, self.metas, &ty) else {
+            return Err(ElabError::NotHandled {
+                effect: Rc::clone(&effect),
+                span: computation.span,
+            });
+        };
+        let rho = without(row, &effect).ok_or_else(|| ElabError::NotHandled {
+            effect: Rc::clone(&effect),
+            span: computation.span,
+        })?;
+        let quoted = rho.map(|argument| quote(self.ctx.size(), argument));
+
+        let name: Symbol = Rc::from(
+            format!(
+                "{}.{effect}",
+                if multi { "#handleMulti" } else { "#handle" }
+            )
+            .as_str(),
+        );
+        let handler = self
+            .signature
+            .lookup(&name)
+            .ok_or_else(|| ElabError::UnknownName {
+                name: Rc::clone(&name),
+                span,
+            })?;
+        // ρ - нулевой параметр-row элиминатора: он стоит на первой же его
+        // стрелке, а обобщение собирает дырки в порядке появления. Прочие,
+        // если операция принесла свои, остаются дырками.
+        let rows = std::iter::once(quoted.clone())
+            .chain((1..handler.row_arity).map(|_| self.metas.fresh_row()))
+            .collect::<Vec<_>>();
+        let levels = (0..handler.level_arity)
+            .map(|_| self.metas.fresh_level())
+            .collect::<Vec<_>>();
+        let mut term = Term::Const(CoreName::from(&*name), levels.into(), Rows::new(rows));
+        let Some(mut current) = self.synthesized(&term) else {
+            return Err(ElabError::UnknownName { name, span });
+        };
+        let (inserted, rest) = self.inserted(term, current);
+        term = inserted;
+        current = rest;
+
+        // Аргументы идут в порядке связываний: вычисление, `return`, ветки по
+        // объявлению. Тела веток работают в ρ - метка снята, хендлер
+        // переустановлен (§3.4).
+        let outer = self.ctx.clone();
+        for (index, branch) in std::iter::once(None)
+            .chain(ordered.into_iter().map(Some))
+            .enumerate()
+        {
+            let argument = match branch {
+                None => value.clone(),
+                Some(branch) => {
+                    self.ctx = outer.within(rho.clone());
+                    let lambda = self.branch_lambda(&current, branch);
+                    self.ctx = outer.clone();
+                    lambda?
+                }
+            };
+            let _ = index;
+            // Тип шагает **без** проверки аргумента: арность известна, а
+            // проверка идёт при `σ = 0`, где окружающая пуста (§3.4), - и
+            // погасила бы хвост ρ пустой row, то есть решила бы за настоящую
+            // проверку, которая пойдёт при своей кратности.
+            let Value::Pi(_, _, _, _, codomain) = &*current else {
+                return Ok(Term::App(Rc::new(term), Rc::new(argument)));
+            };
+            let codomain = codomain.clone();
+            let value = self.ctx.eval(&argument);
+            term = Term::App(Rc::new(term), Rc::new(argument));
+            current = codomain.apply(value);
+        }
+        Ok(term)
+    }
+
+    /// Эффект, который снимает хендлер: его называет первая ветка-операция.
+    fn handled_effect(
+        &self,
+        branches: &[ast::HandlerBranch],
+        span: Span,
+    ) -> Result<Symbol, ElabError> {
+        let named = branches
+            .iter()
+            .find(|branch| &*branch.name.text != RETURN)
+            .ok_or(ElabError::HandlerBranch {
+                name: Rc::from(RETURN),
+                why: "хендлер без веток операций метки не называет",
+                span,
+            })?;
+        match self
+            .signature
+            .lookup(&named.name.text)
+            .map(|definition| &definition.kind)
+        {
+            Some(DefinitionKind::Operation { effect }) => Ok(Rc::from(&**effect)),
+            _ => Err(ElabError::HandlerBranch {
+                name: Rc::clone(&named.name.text),
+                why: "ветка называет операцию эффекта",
+                span: named.name.span,
+            }),
+        }
+    }
+
+    /// Операции эффекта в порядке объявления.
+    fn operations_of(&self, effect: &str) -> Vec<Symbol> {
+        match self.signature.lookup(effect).map(|it| &it.kind) {
+            Some(DefinitionKind::Effect { operations, .. }) => {
+                operations.iter().map(|it| Rc::from(&**it)).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Ветка лямбдой: написанные аргументы плюс резумпция.
+    ///
+    /// Собирается она поверхностной записью и элаборируется обычной лямбдой -
+    /// оттуда берутся и кратности связываний, и закрытие ресурсов.
+    fn branch_lambda(
+        &mut self,
+        expected: &Rc<Value>,
+        branch: &ast::HandlerBranch,
+    ) -> Result<Term, ElabError> {
+        let Value::Pi(_, _, domain, _, _) = &*whnf_solved(self.signature, self.metas, expected)
+        else {
+            return Err(ElabError::HandlerBranch {
+                name: Rc::clone(&branch.name.text),
+                why: "столько веток у эффекта нет",
+                span: branch.span,
+            });
+        };
+        let domain = quote(self.ctx.size(), domain);
+        let bound = pi_arguments(&domain, self.owned);
+        let mut params: Vec<ast::LamParam> = branch
+            .params
+            .iter()
+            .map(|name| bind_as(name.clone()))
+            .collect();
+        if &*branch.name.text != RETURN {
+            params.push(bind_as(ast::Name {
+                text: Rc::from(RESUME),
+                span: branch.name.span,
+            }));
+        }
+        self.lam(&params, &branch.body, &bound)
     }
 
     /// Исполняет вычисление безусловно - режим `infer` (§3.4).

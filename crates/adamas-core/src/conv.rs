@@ -298,17 +298,38 @@ fn same_open(
             }
         }
     }
-    let missing = |from: &[(Name, Rc<Value>)], other: &[(Name, Rc<Value>)]| -> Vec<Field> {
-        from.iter()
-            .filter(|(name, _)| !other.iter().any(|(it, _)| it == name))
-            .map(|(name, ty)| Field {
+    // Развёртка считает тип `i`-го поля под `size + i` переменными - её
+    // собственными, - а собираемый ряд стоит при `size`. Пока поле на них не
+    // ссылается, глубины расходятся безвредно: свободных переменных у типа
+    // меньше `size`, и обратное чтение при `size` их адресует. Сошлись бы они
+    // и на зависимом поле - но такого поля у открытой записи не бывает (§4.2),
+    // а до этой проверки оно роняло процесс: обратное чтение при `size`
+    // упиралось в уровень, которого при `size` нет.
+    let missing = |from: &[(Name, Rc<Value>)], other: &[(Name, Rc<Value>)]| -> Option<Vec<Field>> {
+        let mut fields = Vec::new();
+        for (index, (name, ty)) in from.iter().enumerate() {
+            if other.iter().any(|(it, _)| it == name) {
+                continue;
+            }
+            let spread = u32::try_from(index).unwrap_or(u32::MAX);
+            if reaches_spread(&quote(size + spread, ty), 0, spread) {
+                return None;
+            }
+            fields.push(Field {
                 name: Rc::clone(name),
                 mult: Mult::One,
                 ty: Rc::new(quote(size, ty)),
-            })
-            .collect()
+            });
+        }
+        Some(fields)
     };
-    let (only_ours, only_theirs) = (missing(ours, theirs), missing(theirs, ours));
+    let (Some(only_ours), Some(only_theirs)) = (missing(ours, theirs), missing(theirs, ours))
+    else {
+        // Сравнить их этот алгоритм не берётся, и «не равны» здесь честнее
+        // молчаливого принятия: цена - отвергнутая программа, которую §4.2 и
+        // так не разрешает написать.
+        return false;
+    };
     match (mine.tail, yours.tail) {
         // Один открыт: недостающее обязан дать его хвост, а лишнего у
         // закрытой стороны быть не может.
@@ -387,6 +408,57 @@ fn labelled(metas: &Metas, size: u32, telescope: &Telescope) -> Spread {
                     tail: Some(tail),
                 };
             }
+        }
+    }
+}
+
+/// Ссылается ли терм на переменные развёртки ряда.
+///
+/// Терм прочитан обратно в контексте размера `size + spread`, где последние
+/// `spread` переменных - те, что развёртка завела под предыдущие поля.
+/// `depth` - сколько связываний пройдено внутри самого терма: под ними индексы
+/// смещаются, и переменная развёртки видна как `depth + k` при `k < spread`.
+fn reaches_spread(term: &Term, depth: u32, spread: u32) -> bool {
+    let recur = |inner| reaches_spread(inner, depth, spread);
+    let under = |inner| reaches_spread(inner, depth + 1, spread);
+    match term {
+        Term::Var(index) => index.0 >= depth && index.0 - depth < spread,
+        Term::Universe(_) | Term::RowKind(_) | Term::Const(..) | Term::Meta(_) => false,
+        Term::Project(record, _) => recur(record),
+        Term::App(callee, argument) => recur(callee) || recur(argument),
+        Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
+        Term::With(base, fields) => recur(base) || fields.iter().any(|(_, value)| recur(value)),
+        // Поля записи и ряда - телескоп: `i`-е стоит под `i` связываниями.
+        Term::Record(fields) | Term::Row(fields) => {
+            fields.iter().enumerate().any(|(at, field)| {
+                reaches_spread(
+                    &field.ty,
+                    depth + u32::try_from(at).unwrap_or(u32::MAX),
+                    spread,
+                )
+            }) || fields.tail.as_ref().is_some_and(|tail| {
+                reaches_spread(
+                    tail,
+                    depth + u32::try_from(fields.len()).unwrap_or(u32::MAX),
+                    spread,
+                )
+            })
+        }
+        Term::Lam(_, _, body) => under(body),
+        Term::Pi(_, _, domain, row, codomain) => {
+            recur(domain)
+                || under(codomain)
+                || row
+                    .labels()
+                    .iter()
+                    .flat_map(|label| &label.arguments)
+                    .any(recur)
+        }
+        Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || under(body),
+        Term::Case(case) => {
+            recur(&case.scrutinee)
+                || recur(&case.motive)
+                || case.branches.iter().any(|branch| recur(&branch.body))
         }
     }
 }

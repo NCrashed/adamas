@@ -1235,6 +1235,37 @@ fn is_record(ctx: &Ctx<'_>, expected: &Rc<Value>) -> bool {
     matches!(&*whnf(ctx.signature(), expected), Value::Record(_))
 }
 
+/// Отвергает написанное поле, имя которого уже занято.
+///
+/// Проверка по имени, а не по позиции, держится на том, что имя одно: поле
+/// ищется в написанном первым совпадением, а хвост забирает то, чего в голове
+/// нет. Второе одноимённое поле не попадало **ни в один** проход - ни в
+/// проверку, ни в вывод, - и оседало в терме непроверенным. Дальше его брал
+/// `eval`, который считает поля записи жадно, и ронял процесс там, где у
+/// одиночного поля была бы обычная диагностика.
+///
+/// У типа записи тот же запрет стоял с самого начала (`is_record`); здесь он
+/// был пропущен, потому что закрытую запись прикрывала арность, а открытую не
+/// прикрывало ничто.
+fn distinct_labels(
+    ctx: &Ctx<'_>,
+    metas: &mut Metas,
+    written: &[(Name, Rc<Term>)],
+) -> Result<(), TypeError> {
+    for (index, (name, _)) in written.iter().enumerate() {
+        if written[..index].iter().any(|(it, _)| it == name) {
+            return Err(refuse(
+                ctx,
+                metas,
+                ErrorKind::DuplicateField {
+                    name: Rc::clone(name),
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Правило записи: поля проверяются по телескопу, а не по написанию.
 ///
 /// Порядок задаёт **тип**: поле ищется по имени, и записать их иначе - не
@@ -1255,6 +1286,7 @@ fn check_object(
             },
         ));
     };
+    distinct_labels(ctx, metas, written)?;
     // У закрытой записи полей ровно столько, сколько в типе. У открытой
     // лишние не лишние: их забирает хвост, и он же ими и решается - это и
     // есть row-полиморфизм со стороны значения (§4.2).
@@ -1472,6 +1504,7 @@ fn infer_object(
     sigma: Mult,
     fields: &[(Name, Rc<Term>)],
 ) -> Result<(Rc<Value>, Usage), TypeError> {
+    distinct_labels(ctx, metas, fields)?;
     let mut usage = Usage::zero(ctx.size());
     let mut written = Vec::with_capacity(fields.len());
     for (index, (name, value)) in fields.iter().enumerate() {

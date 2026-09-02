@@ -131,6 +131,28 @@ fn a_field_name_is_declared_once() {
 }
 
 #[test]
+fn a_value_field_is_written_once() {
+    // Тот же запрет со стороны **значения**, и без него он не работал: поле
+    // ищется по имени, первым совпадением, а хвост забирает то, чего в голове
+    // нет, - и второе одноимённое не попадало ни в проверку, ни в вывод.
+    // Закрытую запись прикрывала арность, открытую не прикрывало ничто, и
+    // непроверенный подтерм доезжал до `eval`, роняя процесс.
+    let object = Term::Object(Rc::from([
+        ("a".into(), Rc::new(Term::universe(0))),
+        ("a".into(), Rc::new(Term::universe(0))),
+    ]));
+    let signature = Signature::default();
+    let outcome = infer_closed(&signature, &object);
+    assert!(
+        matches!(
+            outcome,
+            Err(ref error) if matches!(error.kind, ErrorKind::DuplicateField { .. })
+        ),
+        "получено {outcome:?}"
+    );
+}
+
+#[test]
 fn a_missing_field_is_refused() {
     // Имя, которого в типе нет, - отказ, а не застрявшая проекция.
     let record = object(&[("a", Term::universe(0))]);

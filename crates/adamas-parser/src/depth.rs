@@ -308,7 +308,7 @@ fn pattern_at<'a>(
 fn decl_at<'a>(decl: &'a Decl, depth: u32, pending: &mut Pending<'a>) -> Result<(), ParseError> {
     match &decl.kind {
         DeclKind::Alias { params, body, .. } => {
-            binder_types(params, depth, pending);
+            binder_terms(params, depth, pending);
             if let Some(body) = body {
                 pending.push((Node::Expr(body), depth));
             }
@@ -330,7 +330,7 @@ fn decl_at<'a>(decl: &'a Decl, depth: u32, pending: &mut Pending<'a>) -> Result<
         DeclKind::Class(class) => {
             let inner = deepen(depth, 1, decl.span)?;
             pending.push((Node::Expr(&class.head), depth));
-            binder_types(&class.params, depth, pending);
+            binder_terms(&class.params, depth, pending);
             for superclass in &class.superclasses {
                 pending.push((Node::Expr(superclass), depth));
             }
@@ -356,7 +356,7 @@ fn decl_at<'a>(decl: &'a Decl, depth: u32, pending: &mut Pending<'a>) -> Result<
             }
         }
         DeclKind::Data(data) => {
-            binder_types(&data.params, depth, pending);
+            binder_terms(&data.params, depth, pending);
             if let Some(kind) = &data.kind {
                 pending.push((Node::Expr(kind), depth));
             }
@@ -368,7 +368,7 @@ fn decl_at<'a>(decl: &'a Decl, depth: u32, pending: &mut Pending<'a>) -> Result<
             );
         }
         DeclKind::Resource(resource) => {
-            binder_types(&resource.params, depth, pending);
+            binder_terms(&resource.params, depth, pending);
             pending.extend(
                 resource
                     .members
@@ -398,11 +398,20 @@ fn clause_at<'a>(
     Ok(())
 }
 
-/// Типы групп связываний - каждый со своей глубины.
-fn binder_types<'a>(binders: &'a [Binder], depth: u32, pending: &mut Pending<'a>) {
-    pending.extend(
-        binders
-            .iter()
-            .filter_map(|binder| Some((Node::Expr(binder.ty.as_ref()?), depth))),
-    );
+/// Термы групп связываний - каждый со своей глубины.
+///
+/// Термов у связывания **два**, и оба написаны автором: тип и умолчание
+/// (§4.1). Пропусти любой - и предел его не меряет: `type T (a = {f0 : Nat,
+/// … })` роняло разбор в переполнение стека, ни разу не нарушив предела,
+/// потому что глубина считалась только по типу.
+fn binder_terms<'a>(binders: &'a [Binder], depth: u32, pending: &mut Pending<'a>) {
+    for binder in binders {
+        pending.extend(binder.ty.as_ref().map(|ty| (Node::Expr(ty), depth)));
+        pending.extend(
+            binder
+                .default
+                .as_ref()
+                .map(|default| (Node::Expr(default), depth)),
+        );
+    }
 }

@@ -267,7 +267,7 @@ fn declared_signature<'a>(
     // клауз связывает такие сам, а ссылка изнутри применяется к ним явно
     // (`Elaborator::specialized`).
     let mut elaborator = Elaborator::new(signature, metas, owned).within(within);
-    let params = elaborator.telescope(params_of(within), true)?;
+    let params = elaborator.telescope(params_of(within), true, Mult::Many)?;
     let elaborated = elaborator.wrapped(&params, true, |it| it.declaration(ty, Mult::Many))?;
     Ok(Pending {
         total,
@@ -480,8 +480,9 @@ fn alias(
     // Связывания двух родов и в одном телескопе: сперва параметры функтора,
     // потом свои. Написанный параметр живёт под функторными - его тип вправе
     // их упоминать, - поэтому и элаборируются они одной последовательностью.
-    let outer = elaborator.telescope(params_of(within), true)?;
-    let owned_params = elaborator.beneath(&outer, |it| it.telescope(written.params, false))?;
+    let outer = elaborator.telescope(params_of(within), true, Mult::Many)?;
+    let owned_params =
+        elaborator.beneath(&outer, |it| it.telescope(written.params, false, Mult::Zero))?;
     let params: Vec<Param> = outer.iter().chain(owned_params.iter()).cloned().collect();
     // Тело и его сорт считаются **под параметрами**: тип члена функтора живёт
     // под ними, и в пустом контексте считать его нечем.
@@ -582,7 +583,7 @@ fn declare_module(
     // освобождает дырки, и посчитанный заранее умер бы на первом же члене.
     let params = Elaborator::new(signature, metas, owned)
         .within(within)
-        .telescope(&module.params, true)?;
+        .telescope(&module.params, true, Mult::Many)?;
 
     // Поле на каждого объявленного члена, в порядке написания. Клаузы своего
     // поля не заводят: его завела сигнатура, за которой они идут. Член
@@ -779,7 +780,7 @@ fn declare_class(
     // `Eqv Nat` есть применение. Отсюда тело лямбдой, а тип - `Pi` над
     // универсумом, в котором живёт запись.
     let mut elaborator = Elaborator::new(signature, metas, owned);
-    let telescope = elaborator.telescope(&params, false)?;
+    let telescope = elaborator.telescope(&params, false, Mult::Zero)?;
     let (record, level) = elaborator.beneath(&telescope, |it| {
         let fields = it.module_members(&members)?;
         let record = Term::Record(Fields::closed(fields.into()));
@@ -2734,7 +2735,7 @@ fn declare_defaults(
         // предыдущего освободило дырки уровня, и посчитанный один раз умер бы
         // на втором.
         let mut elaborator = Elaborator::new(signature, metas, owned);
-        let params = elaborator.telescope(&written[..=position], false)?;
+        let params = elaborator.telescope(&written[..=position], false, Mult::Zero)?;
         let Some(param) = params.get(at) else {
             return Err(ElabError::TrailingDefault {
                 name: Rc::clone(&binder.names[0].text),
@@ -2820,7 +2821,7 @@ fn family_header<'a>(
     // каждый конструктор обязаны нести **один и тот же** телескоп, иначе
     // `List` в результате и `List` в объявлении - два разных семейства.
     let mut elaborator = Elaborator::new(signature, metas, owned);
-    let params = elaborator.telescope(&data.params, false)?;
+    let params = elaborator.telescope(&data.params, false, Mult::Zero)?;
     let kind = match &data.kind {
         // Параметры пишутся, поэтому в kind они явные: `Vect a n`.
         Some(kind) => elaborator.wrapped(&params, false, |it| {

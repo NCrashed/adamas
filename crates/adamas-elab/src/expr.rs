@@ -525,10 +525,20 @@ impl<'a> Elaborator<'a> {
     /// модуль, а модули заглавные, и §4.8 так и пишет - `(Key : Ord)`.
     /// Двусмысленности здесь нет и быть не может: имя стоит в написанной
     /// группе связываний, то есть связывает по форме записи, а не по регистру.
+    ///
+    /// `default` - кратность параметра, у которого она не написана. У
+    /// **типового формера** - семейства, класса, алиаса - она нулевая:
+    /// параметр в значении не хранится (§10 вопрос 78), и конструктор получает
+    /// его так же, как поднятое имя получает `{0 a : Type}` (§4.1). Написав ей
+    /// `ω`, язык лишился бы всякого полиморфного конструктора: `plain y = Wrap
+    /// y` при `{0 b : Type}` требует `b` в параметре `Wrap`, и при ω-параметре
+    /// это расход стёртой переменной. У **функтора** умолчание обычное: его
+    /// параметр - модуль, значение с полями, и стирать его нечем.
     pub(crate) fn telescope(
         &mut self,
         params: &[ast::Binder],
         uppercase: bool,
+        default: Mult,
     ) -> Result<Vec<Param>, ElabError> {
         let depth = self.scope.len();
         let outer = self.ctx.clone();
@@ -548,8 +558,8 @@ impl<'a> Elaborator<'a> {
                     None => Term::Universe(self.metas.fresh_level()),
                 };
                 let mult = match &binder.ty {
-                    Some(ty) => self.binder_mult(binder.mult, ty, Mult::Many, binder.span)?,
-                    None => Self::multiplicity(binder.mult, Mult::Many),
+                    Some(ty) => self.binder_mult(binder.mult, ty, default, binder.span)?,
+                    None => Self::multiplicity(binder.mult, default),
                 };
                 let bound = self.typed(&domain);
                 self.ctx = self
@@ -1622,7 +1632,7 @@ impl<'a> Elaborator<'a> {
             // телескоп по ним, оканчивающийся сортом. Написать этот телескоп
             // сигнатурой нельзя по той же причине, по какой не пишется алиас:
             // конкретный универсум в поверхностном языке не выражается.
-            let params = self.telescope(first.params, false)?;
+            let params = self.telescope(first.params, false, Mult::Zero)?;
             let level = self.metas.fresh_level();
             self.wrapped(&params, false, |_| Ok(Term::Universe(level)))?
         };

@@ -2186,6 +2186,61 @@ tagged b = n
 }
 
 #[test]
+fn an_inserted_argument_costs_what_a_written_one_costs() {
+    // Проверка до финальных ворот смотрела на терм с дырками, а дырка инертна:
+    // ничего не расходует. Поэтому `pair2 k (len v)` при `(1 k : Nat)`
+    // принималось, а `pair2 k (len @k v)` - тот же аргумент, написанный рукой -
+    // отвергалось. Кто вписал аргумент, к §3.1 отношения не имеет: обе формы
+    // расходуют `k` дважды, и обе обязаны быть отказом.
+    let inserted = format!(
+        "{BASE}
+data Vect : Nat -> Type where
+  Nil : Vect Zero
+  Cons : (0 n : Nat) -> Nat -> Vect n -> Vect (Succ n)
+
+pair2 : (1 x : Nat) -> (1 y : Nat) -> Nat
+pair2 x y = x
+
+len : {{n : Nat}} -> Vect n -> Nat
+len v = Zero
+
+sneaky : (1 k : Nat) -> Vect k -> Nat
+sneaky k v = pair2 k (len v)
+"
+    );
+    let written = inserted.replace("len v)", "len @k v)");
+    assert!(
+        matches!(refused(&inserted), ElabError::Core { .. }),
+        "вставленный аргумент обязан расходовать"
+    );
+    assert!(
+        matches!(refused(&written), ElabError::Core { .. }),
+        "написанный аргумент расходовал всегда"
+    );
+}
+
+#[test]
+fn a_parameter_of_a_family_is_erased() {
+    // §10 вопрос 78: параметр семейства в значении не хранится, поэтому
+    // конструктор берёт его стёртым - как поднятое имя берёт `{0 a : Type}`
+    // (§4.1). Умолчание `ω` лишило бы язык всякого полиморфного конструктора:
+    // `Wrap y` при `{0 b : Type}` расходовало бы стёртую переменную. Обе формы
+    // - и вставленная, и написанная - проверяются вместе: разойдись они, это и
+    // был бы дефект, который ворота ловят.
+    let inserted = format!(
+        "{BASE}
+data Box a where
+  Wrap : a -> Box a
+
+plain : {{0 b : Type}} -> b -> Box b
+plain y = Wrap y
+"
+    );
+    program(&inserted);
+    program(&inserted.replace("Wrap y\n", "Wrap @b y\n"));
+}
+
+#[test]
 fn a_single_field_record_in_a_domain_reads_as_a_binder_group() {
     // §10 вопрос 79: `{ x : Nat } -> Nat` читается и как группа связываний, и
     // как тип записи. Побеждает связывание (решение 2026-08-29), а запись в

@@ -3483,6 +3483,34 @@ defaulted = twice Zero
 }
 
 #[test]
+fn a_synonym_that_gives_back_its_parameter_has_no_key() {
+    // Ключ кандидата - головы аргументов, и они обязаны быть одни у всех
+    // написаний одного типа: иначе на тип объявляются два инстанса, и какой
+    // возьмётся, решает написание цели. Разворот головы шёл по символам и
+    // останавливался на `type Id (a : Type) = a` - под лямбдами там
+    // переменная, - поэтому `Key Nat` и `Key (Id Nat)` получали разные ключи и
+    // уживались в одном файле при `Id Nat ≡ Nat`, обещая обратное `coherent`.
+    let error = refused(&format!(
+        "{BASE}
+type Id (a : Type) = a
+
+coherent class Key a where
+  key : a -> Nat
+
+instance Key Nat where
+  key n = Succ n
+
+instance Key (Id Nat) where
+  key n = Zero
+"
+    ));
+    assert!(
+        matches!(error, ElabError::ProjectingHead { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
 fn a_coherent_class_takes_one_instance() {
     // §3.5 пункт 3: маркер обещает не более одного инстанса на программу, и
     // имя обещания не снимает - именованных на один тип тоже не бывает.

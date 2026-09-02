@@ -839,7 +839,7 @@ fn declare_instance(
     // доживают до неё.
     let written = written_head(signature, metas, owned, class, span, &names)?;
     let prefix = leading(&written);
-    let Some((_, arguments)) = applied_head(signature, under_prefix(&written)) else {
+    let Some((_, arguments)) = applied_head(signature, under_prefix(&written), span)? else {
         return Err(ElabError::ClassHead { span });
     };
     coherence(signature, instances, name, &arguments, &prefix, span)?;
@@ -1194,15 +1194,28 @@ fn mangled(class: &str, heads: &[Symbol]) -> String {
     out
 }
 
+/// Имя класса и головы всех его аргументов - ключ кандидата.
+type AppliedHead = (Symbol, Rc<[Symbol]>);
+
 /// Имя класса и головы всех его аргументов - по элаборированному типу.
 ///
 /// Головы **всех**: у многопараметрического класса первая ничего не решает
 /// (§4.1), и ключ кандидата составляется из них целиком.
-fn applied_head(signature: &Signature, ty: &Term) -> Option<(Symbol, Rc<[Symbol]>)> {
-    let (class, head) = class::applied(signature, ty)?;
+fn applied_head(
+    signature: &Signature,
+    ty: &Term,
+    span: Span,
+) -> Result<Option<AppliedHead>, ElabError> {
+    let Some((class, head)) = class::applied(signature, ty) else {
+        return Ok(None);
+    };
     match head {
-        class::Head::Named(heads) => Some((class, heads)),
-        _ => None,
+        class::Head::Named(heads) => Ok(Some((class, heads))),
+        // Ключа у такой головы нет, и «голова пишется именем с аргументами»
+        // здесь неправда: написана она именно так, просто имя разворачивается
+        // в собственный параметр.
+        class::Head::Projecting => Err(ElabError::ProjectingHead { class, span }),
+        _ => Ok(None),
     }
 }
 

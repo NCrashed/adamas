@@ -312,6 +312,24 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Голова аргумента - синоним, отдающий свой параметр.
+    ///
+    /// Кандидат ищется по паре «класс, головы аргументов», и головы обязаны
+    /// быть одни у всех написаний одного типа - иначе на тип объявляются два
+    /// инстанса, и какой возьмётся, решает написание цели. У `type Id (a :
+    /// Type) = a` головы нет вовсе: `Id Nat` есть `Nat`, а символ `Id` был бы
+    /// вторым ключом на тот же тип - `coherent` обещает обратное.
+    #[error(
+        "голова аргумента `{class}` - синоним, отдающий свой параметр: ключа у неё нет, \
+         напишите тип, который он называет"
+    )]
+    ProjectingHead {
+        /// Класс цели.
+        class: Symbol,
+        /// Где написано.
+        span: Span,
+    },
+
     /// Именованных инстансов на пару «класс, голова» несколько.
     #[error(
         "инстансов `{written}` несколько ({}); выберите один через `using`",
@@ -789,6 +807,7 @@ impl ElabError {
             | Self::NoInstance { span, .. }
             | Self::InstanceDepth { span, .. }
             | Self::DeclaringInstance { span, .. }
+            | Self::ProjectingHead { span, .. }
             | Self::AmbiguousInstance { span, .. }
             | Self::CoherentDuplicate { span, .. }
             | Self::TrailingDefault { span, .. }

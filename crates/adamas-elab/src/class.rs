@@ -297,6 +297,14 @@ fn settle(
                 let written = written(&class, &[Rc::from("переменная")]);
                 return Err(ElabError::NoInstance { written, span });
             }
+            // Синоним, отдающий параметр: ключа у цели нет, а взять вместо
+            // него имя синонима значило бы завести второй ключ на тот же тип.
+            Head::Projecting => {
+                return Err(ElabError::ProjectingHead {
+                    class: Rc::clone(&class),
+                    span,
+                });
+            }
             // Голова не определилась вовсе - решать её должна была
             // унификация, и о том, что не решила, скажет объявление.
             Head::Unknown => return Ok(()),
@@ -474,7 +482,10 @@ pub(crate) fn applied(signature: &Signature, ty: &Term) -> Option<(Symbol, Head)
             head = inner;
         }
         match head {
-            Term::Const(name, _) => heads.push(unfolded(signature, name)),
+            Term::Const(name, _) => match unfolded(signature, name) {
+                Some(found) => heads.push(found),
+                None => return Some((Rc::clone(class), Head::Projecting)),
+            },
             Term::Var(_) => return Some((Rc::clone(class), Head::Rigid)),
             _ => return Some((Rc::clone(class), Head::Unknown)),
         }
@@ -489,37 +500,46 @@ pub(crate) fn applied(signature: &Signature, ty: &Term) -> Option<(Symbol, Head)
 /// а не программа. Разворачивается только голова - ключу больше ничего не
 /// нужно; запечатанное не разворачивается, потому что снаружи δ по нему
 /// запрещено (§3.5), и абстрактный тип обязан остаться собственной головой.
-fn unfolded(signature: &Signature, name: &Symbol) -> Symbol {
+///
+/// `None` - **синоним отдаёт свой параметр**: у `type Id (a : Type) = a` под
+/// лямбдами стоит переменная, и голова у `Id Nat` не своя, а того аргумента,
+/// который подставят. Символа для такого ключа нет, и брать вместо него `Id`
+/// значило бы завести второй ключ на тот же тип: `Key Nat` и `Key (Id Nat)`
+/// уживались бы в одном файле при `Id Nat ≡ Nat`, а `coherent` обещает
+/// обратное. Названная цена - отказ там, где определить ключ нечем.
+fn unfolded(signature: &Signature, name: &Symbol) -> Option<Symbol> {
     let mut current = Rc::clone(name);
     // Предел тот же по смыслу, что у δ в конвертируемости: цепочка синонимов
     // конечна, но замыкать её на честность объявления не стоит.
     for _ in 0..UNFOLD_LIMIT {
         let Some(definition) = signature.lookup(&current) else {
-            return current;
+            return Some(current);
         };
         if definition.opaque {
-            return current;
+            return Some(current);
         }
         let Some(body) = &definition.body else {
-            return current;
+            return Some(current);
         };
         // Тело синонима - лямбды по параметрам, под ними применение.
         let mut head = body;
+        let mut abstracted = false;
         while let Term::Lam(_, _, inner) = head {
             head = inner;
+            abstracted = true;
         }
         while let Term::App(callee, _) = head {
             head = callee;
         }
-        let Term::Const(next, _) = head else {
-            return current;
-        };
-        if *next == current {
-            return current;
+        match head {
+            Term::Const(next, _) if *next != current => current = Rc::clone(next),
+            // Синоним отдаёт свой параметр: голова у применения не своя, а
+            // того аргумента, который подставят, и символом она не выражается.
+            Term::Var(_) if abstracted => return None,
+            _ => return Some(current),
         }
-        current = Rc::clone(next);
     }
-    current
+    Some(current)
 }
 
 /// Сколько синонимов разрешено развернуть, добираясь до головы.
@@ -531,6 +551,8 @@ pub(crate) enum Head {
     Named(Rc<[Symbol]>),
     /// Есть переменная: кандидата для неё нет и быть не может.
     Rigid,
+    /// Голова аргумента - синоним, отдающий свой параметр: ключа у неё нет.
+    Projecting,
     /// Ещё не определились.
     Unknown,
 }

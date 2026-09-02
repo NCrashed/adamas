@@ -17,13 +17,6 @@
 //!
 //! # Чего здесь нет и почему
 //!
-//! **Хвоста нет.** Row-полиморфизм (`{IO | e}`) приходит вместе с
-//! метапеременными row и их унификацией, то есть Фазой 4. Слот, который
-//! сегодня нечем заполнить, был бы механизмом без потребителя: следующий
-//! читатель заключил бы из него, что хвосты уже работают. Добавление хвоста
-//! тронет этот модуль и сравнение - то есть ровно ту «одну точку», про которую
-//! говорит довод выше.
-//!
 //! **Суждение окружающей row не несёт.** По той же причине: правило «ограничение
 //! вводит применение» (§3.4) появляется вместе с погашением, а компонента,
 //! которая всегда пуста и которую никто не читает, - тот же механизм без
@@ -35,11 +28,51 @@
 //! группы **значим** и сохраняется (внутренний хендлер перехватывает раньше
 //! внешнего, §4.1), группы между собой упорядочены по имени. Отсюда `A -> {IO}
 //! B` и `A -> B` - разные типы, ровно как `(1 x : A) -> B` и `(ω x : A) -> B`.
+//!
+//! **Хвост.** Row оканчивается либо ничем - тогда она закрыта, - либо
+//! параметром определения ([`RowVar`]), либо дыркой ([`RowMeta`]). Устроено это
+//! по образцу `Level` (§3.2): row не тип, связывания под неё не заводится, а
+//! обобщение на границе определения превращает дырку в параметр. Отличие от
+//! уровня одно и названо §3.2: атом уровня есть переменная, атом row есть
+//! метка, несущая термы, поэтому нормальная форма row полна с точностью до
+//! конвертируемости аргументов меток.
 
 use std::fmt;
 use std::rc::Rc;
 
 use crate::term::Name;
+
+/// Параметр-row определения: `f : A -> {IO | e} B` несёт один такой.
+///
+/// По образцу [`crate::level::LevelVar`]: номер параметра в списке, а не имя.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RowVar(pub u32);
+
+/// Метапеременная row - то, что обобщение превращает в [`RowVar`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RowMeta(pub u32);
+
+/// Чем row продолжается сверх написанных меток.
+///
+/// Отсутствие хвоста - закрытая row: `{IO}` означает «ровно `IO` и ничего
+/// больше». Хвост делает её открытой: `{IO | e}` означает «`IO` и что угодно
+/// ещё».
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tail {
+    /// Параметр определения.
+    Var(RowVar),
+    /// Дырка, которую решит унификация либо обобщит объявление.
+    Meta(RowMeta),
+}
+
+impl fmt::Display for Tail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Var(RowVar(index)) => write!(f, "e{index}"),
+            Self::Meta(RowMeta(name)) => write!(f, "?{name}"),
+        }
+    }
+}
 
 /// Метка эффекта: конструктор и его аргументы.
 ///
@@ -64,7 +97,11 @@ pub struct Label<T> {
 /// холодная: её читают сравнение и печать, поэтому лишняя косвенность не стоит
 /// ничего, а восемь байт на каждом терме стоят.
 #[derive(Debug, PartialEq, Eq)]
-struct Labels<T>(Vec<Label<T>>);
+struct Labels<T> {
+    labels: Vec<Label<T>>,
+    /// Чем row продолжается. `None` - закрыта.
+    tail: Option<Tail>,
+}
 
 /// Пустая row - `None`, а не пустой срез: у подавляющего большинства стрелок
 /// эффектов нет вовсе, и аллокация под заголовок `Rc` была бы платой за
@@ -85,21 +122,36 @@ impl<T> Row<T> {
     /// значим и сохраняется, а группы между собой выстраиваются по имени.
     #[must_use]
     pub fn new(labels: impl IntoIterator<Item = Label<T>>) -> Self {
+        Self::closing(labels, None)
+    }
+
+    /// То же с хвостом: `{IO | e}`.
+    ///
+    /// Row из одного хвоста законна и не схлопывается в «пусто»: `{| e}`
+    /// означает «что угодно», а пустая - «ничего».
+    #[must_use]
+    pub fn closing(labels: impl IntoIterator<Item = Label<T>>, tail: Option<Tail>) -> Self {
         let mut labels: Vec<Label<T>> = labels.into_iter().collect();
-        if labels.is_empty() {
+        if labels.is_empty() && tail.is_none() {
             return Self::empty();
         }
         labels.sort_by(|left, right| left.name.cmp(&right.name));
-        Self(Some(Rc::new(Labels(labels))))
+        Self(Some(Rc::new(Labels { labels, tail })))
     }
 
     /// Метки в каноническом порядке.
     #[must_use]
     pub fn labels(&self) -> &[Label<T>] {
-        self.0.as_ref().map_or(&[], |labels| &labels.0)
+        self.0.as_ref().map_or(&[], |it| &it.labels)
     }
 
-    /// Ничего не происходит при применении.
+    /// Чем row продолжается. `None` - закрыта.
+    #[must_use]
+    pub fn tail(&self) -> Option<Tail> {
+        self.0.as_ref().and_then(|it| it.tail)
+    }
+
+    /// Ничего не происходит при применении: ни меток, ни хвоста.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_none()
@@ -113,16 +165,17 @@ impl<T> Row<T> {
         let Some(labels) = &self.0 else {
             return Row::empty();
         };
-        Row(Some(Rc::new(Labels(
-            labels
-                .0
+        Row(Some(Rc::new(Labels {
+            labels: labels
+                .labels
                 .iter()
                 .map(|label| Label {
                     name: Name::clone(&label.name),
                     arguments: label.arguments.iter().map(&mut carry).collect(),
                 })
                 .collect(),
-        ))))
+            tail: labels.tail,
+        })))
     }
 
     /// Совпадают ли формы двух row - имена и число аргументов.
@@ -131,7 +184,10 @@ impl<T> Row<T> {
     /// конвертируемость, а она живёт в [`crate::conv`] и знает про сигнатуру.
     #[must_use]
     pub fn same_shape<U>(&self, other: &Row<U>) -> bool {
-        self.labels().len() == other.labels().len()
+        // Хвосты сравниваются как метки - синтаксически: параметр равен себе,
+        // дырка равна себе, а решать их - работа унификации, не сравнения.
+        self.tail() == other.tail()
+            && self.labels().len() == other.labels().len()
             && self
                 .labels()
                 .iter()
@@ -171,6 +227,13 @@ impl<T: fmt::Display> fmt::Display for Row<T> {
             f.write_str(&label.name)?;
             for argument in &label.arguments {
                 write!(f, " {argument}")?;
+            }
+        }
+        if let Some(tail) = self.tail() {
+            if self.labels().is_empty() {
+                write!(f, "| {tail}")?;
+            } else {
+                write!(f, " | {tail}")?;
             }
         }
         f.write_str("} ")

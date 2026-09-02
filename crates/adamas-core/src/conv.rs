@@ -738,7 +738,7 @@ fn convertible_under(
 mod tests {
     use std::rc::Rc;
 
-    use crate::row::{Label, Row};
+    use crate::row::{Label, Row, RowVar, Tail};
     use crate::term::Binder;
     use crate::visibility::Visibility;
 
@@ -1054,6 +1054,36 @@ mod tests {
         );
         assert!(!conv_in(0, &pure, &effectful), "чистая против эффектной");
         assert!(conv_in(0, &effectful, &effectful.clone()));
+    }
+
+    #[test]
+    fn a_tail_is_part_of_the_row() {
+        // Хвост - такая же часть row, как метки: `{IO}` означает «ровно `IO`»,
+        // `{IO | e}` - «`IO` и что угодно ещё», и это разные обещания.
+        // Сравниваются хвосты синтаксически: решать дырку - работа унификации.
+        let closed = rowed(
+            Mult::Many,
+            effect("IO", Vec::new()),
+            Term::universe(0),
+            Term::universe(0),
+        );
+        let open = |index| {
+            rowed(
+                Mult::Many,
+                Row::closing(
+                    [Label {
+                        name: "IO".into(),
+                        arguments: Vec::new(),
+                    }],
+                    Some(Tail::Var(RowVar(index))),
+                ),
+                Term::universe(0),
+                Term::universe(0),
+            )
+        };
+        assert!(!conv_in(0, &closed, &open(0)), "закрытая против открытой");
+        assert!(!conv_in(0, &open(0), &open(1)), "разные параметры");
+        assert!(conv_in(0, &open(0), &open(0)));
     }
 
     #[test]

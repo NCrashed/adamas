@@ -34,6 +34,15 @@ use crate::own::Owned;
 /// ядро не знает, а сахар `{ε} A` без него не разворачивается.
 const UNIT: &str = "Unit";
 
+/// Что написанный тип говорит о теле клаузы - после того, как паттерны сняли
+/// свои связывания.
+struct Rest {
+    /// Тип тела. `None` - написанного типа не хватило.
+    result: Option<Rc<Value>>,
+    /// Окружающая row тела: её несёт последняя снятая стрелка (§3.4).
+    ambient: Row<Rc<Value>>,
+}
+
 /// Домен связывания, если тип им является.
 fn domain_of(ty: &Value) -> Option<Rc<Value>> {
     match ty {
@@ -2382,10 +2391,21 @@ impl<'a> Elaborator<'a> {
     /// §3.4 сюда пока не приходит: `let` без аннотации и отбрасываемый оператор
     /// блока - формы следующих срезов.
     fn executed(&mut self, term: Term, expected: Option<&Rc<Value>>) -> Term {
-        if expected.is_none_or(|ty| self.computation(ty)) || !self.suspends(&term) {
+        if expected.is_none_or(|ty| self.computation(ty)) {
             return term;
         }
-        let Ok((ty, _)) = infer(&self.ctx, self.metas, Mult::Zero, &term) else {
+        self.run(term)
+    }
+
+    /// Исполняет вычисление безусловно - режим `infer` (§3.4).
+    fn run(&mut self, term: Term) -> Term {
+        if !self.suspends(&term) {
+            return term;
+        }
+        // Кратность суждения `ω`, а не `0`: при `0` окружающая row пуста
+        // (§3.4), и вывод типа спотыкался бы о непогашенные эффекты у всего,
+        // что их производит, - то есть ровно у того, ради чего правило и есть.
+        let Ok((ty, _)) = infer(&self.ctx, self.metas, Mult::Many, &term) else {
             return term;
         };
         if !self.computation(&ty) {
@@ -2395,6 +2415,25 @@ impl<'a> Elaborator<'a> {
             return term;
         };
         Term::App(Rc::new(term), Rc::new(unit))
+    }
+
+    /// Тип отброшенного значения; владеемый - отказ.
+    ///
+    /// Вставка `drop` решается по **написанному** типу (§3.3), а у оператора
+    /// его нет вовсе, поэтому ресурс здесь закрыть нечем. Отказ, а не молчание:
+    /// направление консервативности у владения то же, что и везде.
+    ///
+    /// Тип не вывелся - берётся дырка, и сказать об этом полагается `check`:
+    /// авторитет он, а не этот проход.
+    fn discarded(&mut self, value: &Term, span: Span) -> Result<Term, ElabError> {
+        let Ok((ty, _)) = infer(&self.ctx, self.metas, Mult::Many, value) else {
+            let sort = Rc::new(Value::Universe(self.metas.fresh_level()));
+            return Ok(self.fresh_meta(&sort));
+        };
+        if let Some(owned) = head_name(&ty).and_then(|head| self.owned.how(head)) {
+            return Err(ElabError::OwnedDiscarded { owned, span });
+        }
+        Ok(quote(self.ctx.size(), &ty))
     }
 
     /// Тип приостановленного вычисления: стрелка от единицы (§3.4).
@@ -2791,10 +2830,35 @@ impl<'a> Elaborator<'a> {
                     it.placed(position, |it| it.expr(expr, Mult::Many))
                 })
             }
-            StmtKind::Expr(_) => Err(ElabError::Missing {
-                what: Missing::Sequencing,
-                span: first.span,
-            }),
+            // Оператор, значение которого отбрасывается: пишется он ради
+            // эффектов (§3.4), а связывание ему нужно затем, чтобы вычисление
+            // случилось до хвоста и в написанном порядке.
+            //
+            // Кратность `1`, а не `ω`, по тому же доводу, что и у вставленного
+            // `drop`: при `ω` вектор использований масштабируется до `ω`, и
+            // значение, потребившее что-то линейное, оказалось бы израсходовано
+            // сверх меры.
+            StmtKind::Expr(expr) => {
+                let value = self.placed(Position::Inner, |it| it.expr(expr, Mult::Many))?;
+                // Ожидаемого типа здесь нет - это и есть режим `infer` §3.4, и
+                // вычисление в нём исполняется.
+                let value = self.run(value);
+                let ty = self.discarded(&value, first.span)?;
+                let anonymous: Symbol = Rc::from("_");
+                let bound = Bound {
+                    value: Some(Rc::new(value.clone())),
+                    ..Bound::visible(&anonymous, Mult::One, self.typed(&ty))
+                };
+                let body =
+                    self.binding(bound, |inner| inner.statements(rest, closing, position))?;
+                Ok(Term::Let(
+                    Mult::One,
+                    CoreName::from("_"),
+                    Rc::new(ty),
+                    Rc::new(value),
+                    Rc::new(body),
+                ))
+            }
             // Блок кончается связыванием: значения у него нет, и дело не в
             // недостающем механизме - написана неполная форма.
             StmtKind::Let(_) if rest.is_empty() => {
@@ -3040,7 +3104,7 @@ impl<'a> Elaborator<'a> {
         // Тип связывания виден и у аргумента верхнего уровня (по спайну
         // написанного), и у поля (по объявлению конструктора), поэтому
         // владение и закрытие считаются одним проходом по паттернам.
-        let (bound, result) = self.clause_variables(&written, &clause.body);
+        let (bound, rest) = self.clause_variables(&written, &clause.body);
         let closing = closing_of(&bound);
         let depth = self.scope.len();
         let outer = self.ctx.clone();
@@ -3072,13 +3136,17 @@ impl<'a> Elaborator<'a> {
             .1
             .to_vec();
         // Тело клаузы - возвращаемое значение определения (§3.3).
+        // Окружающая row тела - у элаборации она нужна затем же, зачем ядру:
+        // вывод типа в ней спотыкается о непогашенные эффекты, а на нём стоит
+        // правило исполнения (§3.4).
+        self.ctx = self.ctx.within(rest.ambient);
         // Тип, оставшийся от написанного после паттернов, и есть ожидаемый
-        // тип тела: по нему решается исполнение (§3.4).
+        // тип тела: по нему решается исполнение.
         let body = self
             .closing_all(&closing, |it| {
                 it.placed(Position::Returned, |it| it.expr(&clause.body, Mult::Many))
             })
-            .map(|body| self.executed(body, result.as_ref()));
+            .map(|body| self.executed(body, rest.result.as_ref()));
         self.scope.truncate(depth);
         self.ctx = outer;
 
@@ -3142,7 +3210,7 @@ impl<'a> Elaborator<'a> {
         &mut self,
         written: &[(Option<&Pattern>, CorePattern)],
         body: &Expr,
-    ) -> (Vec<BoundVar>, Option<Rc<Value>>) {
+    ) -> (Vec<BoundVar>, Rest) {
         // Имена собираются первым проходом: они связывают тело, а значит и
         // затеняют в нём головы применений, - но в области видимости их ещё
         // нет, решение о вставке принимается раньше.
@@ -3153,9 +3221,13 @@ impl<'a> Elaborator<'a> {
         let mut found = Vec::new();
         let mut level = self.ctx.size();
         let mut current = self.declared_ty.clone();
+        let mut ambient = Row::empty();
         for (source, pattern) in written {
             let (mult, domain, codomain) = match current.as_deref() {
-                Some(Value::Pi(binder, _, domain, _, codomain)) => {
+                Some(Value::Pi(binder, _, domain, row, codomain)) => {
+                    // Окружающую row тела несёт последняя снятая стрелка
+                    // (§3.4): под связыванием работают уже в ней.
+                    ambient = row.clone();
                     (binder.mult, Some(Rc::clone(domain)), Some(codomain.clone()))
                 }
                 _ => (Mult::Many, None, None),
@@ -3168,9 +3240,15 @@ impl<'a> Elaborator<'a> {
                 _ => None,
             };
         }
-        // Остаток - тип тела клаузы. Он же считается по дороге: шагает по
-        // написанному типу этот проход, и второй такой был бы его копией.
-        (found, current)
+        // Остаток написанного типа считается по дороге: шагает по нему этот
+        // проход, и второй такой был бы его копией.
+        (
+            found,
+            Rest {
+                result: current,
+                ambient,
+            },
+        )
     }
 
     /// То же для одного паттерна, вглубь. Возвращает значение разобранного -

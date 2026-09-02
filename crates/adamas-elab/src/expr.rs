@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use adamas_core::check::{check, infer, is_type};
-use adamas_core::conv::{whnf, whnf_solved};
+use adamas_core::conv::{convertible, whnf, whnf_solved};
 use adamas_core::ctx::Ctx;
 use adamas_core::eval::{apply, eval, quote};
 use adamas_core::level::Level;
@@ -55,18 +55,54 @@ fn identity_return(span: Span) -> ast::HandlerBranch {
     }
 }
 
+/// Что написано у хендлера.
+#[derive(Clone, Copy)]
+struct Handled<'a> {
+    /// Мультишотный ли.
+    multi: bool,
+    /// Написанная метка, если есть.
+    label: Option<&'a ast::EffectLabel>,
+    /// Вычисление под хендлером.
+    computation: &'a Expr,
+    /// Ветки в порядке написания.
+    branches: &'a [ast::HandlerBranch],
+    /// Хендлер целиком.
+    span: Span,
+}
+
 /// Row без первого вхождения метки: остаток и есть ρ (§3.4).
-fn without(row: &Row<Rc<Value>>, effect: &str) -> Option<Row<Rc<Value>>> {
+///
+/// Снимается **первое** вхождение имени, и другого выбора нет: элиминатор
+/// ставит снимаемую метку первой в своём домене, а порядок внутри группы
+/// одноимённых значим - внутренний хендлер перехватывает раньше внешнего. Взять
+/// не первое значило бы пройти мимо внутреннего, а это `mask`, отдельный
+/// примитив, которого в дизайне нет.
+///
+/// Написанные аргументы метки поэтому не выбирают вхождение, а **закрепляют**
+/// его: они говорят, чем должно оказаться `p⃗` у первого. Не совпало - отказ,
+/// и правило §3.4 остаётся тем же.
+fn without(row: &Row<Rc<Value>>, effect: &str) -> Option<Snatched> {
     let mut labels = Vec::with_capacity(row.labels().len());
-    let mut removed = false;
+    let mut removed = None;
     for label in row.labels() {
-        if !removed && &*label.name == effect {
-            removed = true;
+        if removed.is_none() && &*label.name == effect {
+            removed = Some(label.arguments.clone());
             continue;
         }
         labels.push(label.clone());
     }
-    removed.then(|| Row::closing(labels, row.tail()))
+    removed.map(|arguments| Snatched {
+        rest: Row::closing(labels, row.tail()),
+        arguments,
+    })
+}
+
+/// Что дало снятие метки: остаток row и аргументы снятого вхождения.
+struct Snatched {
+    /// Остаток - глубина хендлера ρ.
+    rest: Row<Rc<Value>>,
+    /// Аргументы снятой метки: с ними сверяется написанная.
+    arguments: Vec<Rc<Value>>,
 }
 
 /// Имя параметром лямбды.
@@ -314,10 +350,15 @@ pub(crate) fn names_any(expr: &Expr, wanted: &[&Symbol]) -> bool {
             recur(scrutinee) || alts.iter().any(|alt| recur(&alt.body))
         }
         ExprKind::Handle {
+            label,
             computation,
             branches,
             ..
-        } => recur(computation) || branches.iter().any(|it| recur(&it.body)),
+        } => {
+            recur(computation)
+                || branches.iter().any(|it| recur(&it.body))
+                || label.iter().flat_map(|label| &label.arguments).any(&recur)
+        }
         ExprKind::RecordType(inner, _) => inner.iter().any(|it| recur(&it.ty)),
         ExprKind::Record(inner) => inner.iter().any(|(_, value)| recur(value)),
         ExprKind::Update(base, inner) => recur(base) || inner.iter().any(|(_, value)| recur(value)),
@@ -1584,9 +1625,16 @@ impl<'a> Elaborator<'a> {
             ExprKind::Case { scrutinee, alts } => self.case(scrutinee, alts, expr.span, position),
             ExprKind::Handle {
                 multi,
+                label,
                 computation,
                 branches,
-            } => self.handled(*multi, computation, branches, expr.span),
+            } => self.handled(Handled {
+                multi: *multi,
+                label: label.as_deref(),
+                computation,
+                branches,
+                span: expr.span,
+            }),
             ExprKind::Tuple(items) if items.is_empty() => missing(Missing::Unit),
             ExprKind::Tuple(_) => missing(Missing::Tuple),
             ExprKind::List(_) => missing(Missing::List),
@@ -1845,6 +1893,14 @@ impl<'a> Elaborator<'a> {
             labels.push(Label { name, arguments });
         }
         Ok(Row::closing(labels, tail.tail()))
+    }
+
+    /// Совпадают ли аргументы метки с написанными.
+    fn same_arguments(&mut self, found: &[Rc<Value>], wanted: &[Rc<Value>]) -> bool {
+        found.len() == wanted.len()
+            && found.iter().zip(wanted).all(|(found, wanted)| {
+                convertible(self.signature, self.metas, self.ctx.size(), found, wanted)
+            })
     }
 
     /// Row позиции, где ничего не написано, - подъём или пустая.
@@ -2509,14 +2565,21 @@ impl<'a> Elaborator<'a> {
     /// одному эффекту. Первое (внутреннее) её вхождение снимается с row
     /// вычисления, остаток и есть ρ - глубина хендлера, - и он передаётся
     /// элиминатору аргументом-row.
-    fn handled(
-        &mut self,
-        multi: bool,
-        computation: &Expr,
-        branches: &[ast::HandlerBranch],
-        span: Span,
-    ) -> Result<Term, ElabError> {
-        let effect = self.handled_effect(branches, span)?;
+    fn handled(&mut self, handled: Handled<'_>) -> Result<Term, ElabError> {
+        let Handled {
+            multi,
+            label,
+            computation,
+            branches,
+            span,
+        } = handled;
+        let effect = self.handled_effect(label, branches, span)?;
+        // Написанные аргументы метки выбирают вхождение: одноимённых меток в
+        // row бывает несколько, и без них снимается первое (§4.1).
+        let wanted = match label {
+            Some(label) => Some(self.label_arguments(label)?),
+            None => None,
+        };
         let operations = self.operations_of(&effect);
         let identity = identity_return(span);
         let ordered = ordered_branches(&operations, branches, &identity, span)?;
@@ -2536,10 +2599,22 @@ impl<'a> Elaborator<'a> {
                 span: computation.span,
             });
         };
-        let rho = without(row, &effect).ok_or_else(|| ElabError::NotHandled {
+        let Snatched {
+            rest: rho,
+            arguments,
+        } = without(row, &effect).ok_or_else(|| ElabError::NotHandled {
             effect: Rc::clone(&effect),
             span: computation.span,
         })?;
+        if let (Some(wanted), Some(label)) = (wanted, label) {
+            if !self.same_arguments(&arguments, &wanted) {
+                return Err(ElabError::HandlerLabel {
+                    name: Rc::clone(&label.name.text),
+                    why: "первое вхождение написано с другими аргументами",
+                    span: label.span,
+                });
+            }
+        }
         let quoted = rho.map(|argument| quote(self.ctx.size(), argument));
 
         let name: Symbol = Rc::from(
@@ -2549,7 +2624,7 @@ impl<'a> Elaborator<'a> {
             )
             .as_str(),
         );
-        let handler = self
+        let eliminator = self
             .signature
             .lookup(&name)
             .ok_or_else(|| ElabError::UnknownName {
@@ -2559,12 +2634,12 @@ impl<'a> Elaborator<'a> {
         // ρ - нулевой параметр-row элиминатора: он стоит на первой же его
         // стрелке, а обобщение собирает дырки в порядке появления. Прочие,
         // если операция принесла свои, остаются дырками.
-        let rows = std::iter::once(quoted.clone())
-            .chain((1..handler.row_arity).map(|_| self.metas.fresh_row()))
-            .collect::<Vec<_>>();
-        let levels = (0..handler.level_arity)
+        let rows: Vec<Row<Term>> = std::iter::once(quoted.clone())
+            .chain((1..eliminator.row_arity).map(|_| self.metas.fresh_row()))
+            .collect();
+        let levels: Vec<Level> = (0..eliminator.level_arity)
             .map(|_| self.metas.fresh_level())
-            .collect::<Vec<_>>();
+            .collect();
         let mut term = Term::Const(CoreName::from(&*name), levels.into(), Rows::new(rows));
         let Some(mut current) = self.synthesized(&term) else {
             return Err(ElabError::UnknownName { name, span });
@@ -2606,12 +2681,34 @@ impl<'a> Elaborator<'a> {
         Ok(term)
     }
 
-    /// Эффект, который снимает хендлер: его называет первая ветка-операция.
+    /// Аргументы написанной метки - значениями, которыми сравнивают вхождения.
+    fn label_arguments(&mut self, label: &ast::EffectLabel) -> Result<Vec<Rc<Value>>, ElabError> {
+        let mut found = Vec::with_capacity(label.arguments.len());
+        for argument in &label.arguments {
+            let argument = self.typing(|it| it.expr(argument, Mult::Many))?;
+            found.push(self.ctx.eval(&argument));
+        }
+        Ok(found)
+    }
+
+    /// Эффект, который снимает хендлер: написанная метка либо первая
+    /// ветка-операция.
     fn handled_effect(
         &self,
+        label: Option<&ast::EffectLabel>,
         branches: &[ast::HandlerBranch],
         span: Span,
     ) -> Result<Symbol, ElabError> {
+        if let Some(label) = label {
+            return match self.signature.lookup(&label.name.text).map(|it| &it.kind) {
+                Some(DefinitionKind::Effect { .. }) => Ok(Rc::clone(&label.name.text)),
+                _ => Err(ElabError::HandlerLabel {
+                    name: Rc::clone(&label.name.text),
+                    why: "обязана быть эффектом",
+                    span: label.span,
+                }),
+            };
+        }
         let named = branches
             .iter()
             .find(|branch| &*branch.name.text != RETURN)

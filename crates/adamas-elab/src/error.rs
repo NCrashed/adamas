@@ -541,6 +541,17 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Написанная метка хендлера не сходится с row вычисления (§3.4).
+    #[error("метка `{name}`: {why}")]
+    HandlerLabel {
+        /// Имя метки.
+        name: Symbol,
+        /// Чем именно не сходится.
+        why: &'static str,
+        /// Написанная метка.
+        span: Span,
+    },
+
     /// Вычисление под хендлером метки не производит.
     #[error("под хендлером обязано стоять вычисление, производящее `{effect}`")]
     NotHandled {
@@ -896,6 +907,7 @@ impl ElabError {
             | Self::OwnedTopLevel { span, .. }
             | Self::OwnedDiscarded { span, .. }
             | Self::HandlerBranch { span, .. }
+            | Self::HandlerLabel { span, .. }
             | Self::NotHandled { span, .. }
             | Self::ResourceWithoutDrop { span, .. }
             | Self::ScopeBound { span, .. }

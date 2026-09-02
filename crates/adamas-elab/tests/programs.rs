@@ -4492,18 +4492,52 @@ step : Bool -> {{Wrong Bool}} Bool
 }
 
 #[test]
-fn a_row_without_an_arrow_names_what_it_waits_for() {
-    // `{ε} A` есть нульместная функция `(ω _ : ()) -> ε ▷ A` (§3.4), а
-    // единица приходит с prelude. Хвост ждёт auto-lift. Обе границы названы,
-    // а не обойдены молчанием.
-    for text in [
-        "State : Type -> Effect\nsuspended : {State Bool} Bool\n",
-        "State : Type -> Effect\nstep : Bool -> {State Bool | e} Bool\n",
-    ] {
-        let error = refused(&format!("{BASE}{text}"));
-        assert!(
-            matches!(error, ElabError::Missing { .. }),
-            "для {text:?} получено {error:?}"
-        );
-    }
+fn a_suspended_computation_is_a_function_of_unit() {
+    // §3.4: `{ε} A` есть нульместная функция `(ω _ : Unit) -> ε ▷ A`, а
+    // нульместных функций в ядре нет - их место занимает аргумент-единица.
+    // Берётся она по имени, тем же соглашением, каким `if` берёт `Bool`.
+    program(&format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+State : Type -> Effect
+
+counter : {{State Bool}} Bool
+counter u = True
+
+taken : ({{State Bool}} Bool) -> Bool
+taken c = c MkUnit
+"
+    ));
+    // Не объявлена - отказывает обычный поиск имени, и говорит он про имя.
+    let error = refused(&format!(
+        "{BASE}
+State : Type -> Effect
+
+counter : {{State Bool}} Bool
+counter u = True
+"
+    ));
+    assert!(
+        matches!(&error, ElabError::UnknownName { name, .. } if &**name == "Unit"),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_written_row_tail_names_what_it_waits_for() {
+    // Хвост ждёт auto-lift: связать написанное имя сегодня нечем, а
+    // промолчать значило бы принять открытую row за закрытую.
+    let error = refused(&format!(
+        "{BASE}
+State : Type -> Effect
+
+step : Bool -> {{State Bool | e}} Bool
+"
+    ));
+    assert!(
+        matches!(error, ElabError::Missing { .. }),
+        "получено {error:?}"
+    );
 }

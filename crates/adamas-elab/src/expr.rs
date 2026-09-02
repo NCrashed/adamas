@@ -1349,11 +1349,7 @@ impl<'a> Elaborator<'a> {
                 ))
             }
             ExprKind::Pi { binders, codomain } => self.pi(binders, codomain, default),
-            // Row без стрелки - нульместная функция, и та ждёт единицы.
-            ExprKind::Effectful { .. } => Err(ElabError::Missing {
-                what: Missing::Suspended,
-                span: expr.span,
-            }),
+            ExprKind::Effectful { .. } => self.suspended(expr, default),
             ExprKind::Lam { params, body } => {
                 // Захват - то, чем лямбда привязывается к scope. Позиция
                 // решает снаружи; здесь только считается свойство, и ставится
@@ -1586,6 +1582,35 @@ impl<'a> Elaborator<'a> {
             }
         }
         found
+    }
+
+    /// `{ε} A` - нульместная функция `(ω _ : Unit) -> ε ▷ A` (§3.4).
+    ///
+    /// Приостановленное вычисление в строгом языке (§3.1) есть замыкание без
+    /// аргументов, а нульместных функций в ядре нет: их место занимает
+    /// аргумент-единица. Регресса при этом не возникает - внутренняя `ε ▷ A`
+    /// не самостоятельный тип, а поле и кодомен той же стрелки.
+    ///
+    /// Единица берётся **по имени**, тем же соглашением, каким `if` берёт
+    /// `Bool` с `True` и `False`: не объявлена - откажет обычный поиск, и
+    /// скажет он про имя, а не про форму, которая его позвала.
+    fn suspended(&mut self, expr: &Expr, default: Mult) -> Result<Term, ElabError> {
+        let (row, body) = split_row(expr);
+        let row = self.effects(row)?;
+        let unit = self.name(&ast::Name {
+            text: Rc::from("Unit"),
+            span: expr.span,
+        })?;
+        let anonymous: Symbol = Rc::from("_");
+        let bound = self.typed(&unit);
+        let body = self.under(&anonymous, Mult::Many, bound, |it| it.expr(body, default))?;
+        Ok(Term::Pi(
+            Binder::explicit(Mult::Many),
+            CoreName::from("_"),
+            Rc::new(unit),
+            row,
+            Rc::new(body),
+        ))
     }
 
     /// Row, написанная перед типом, в поле `Pi` (§3.4).

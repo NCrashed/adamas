@@ -152,7 +152,7 @@ fn depends_by_text(fields: &[ast::RecordField]) -> bool {
 }
 
 /// Встречается ли в выражении хоть одно из имён.
-fn names_any(expr: &Expr, wanted: &[&Symbol]) -> bool {
+pub(crate) fn names_any(expr: &Expr, wanted: &[&Symbol]) -> bool {
     let recur = |inner: &Expr| names_any(inner, wanted);
     match &expr.kind {
         ExprKind::Name(name) => wanted.iter().any(|it| **it == name.text),

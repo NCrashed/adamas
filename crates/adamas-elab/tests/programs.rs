@@ -3219,6 +3219,44 @@ used = pong True (Succ Zero)
 }
 
 #[test]
+fn the_type_of_a_member_may_not_name_a_sibling() {
+    // §10 вопрос 64: типы всех членов проверяются до объявления группы, и
+    // соседа тип назвать не вправе. Элаборация группы не видела, поэтому
+    // строчное имя соседа уходило в свободные и §4.1 поднимала его в
+    // implicit-параметр: обёртка в `mutual` не добавляла типу видимости, а
+    // отнимала - программа, законная снаружи блока, внутри меняла смысл молча,
+    // и отказ всплывал в месте использования как «аргумент не выведен».
+    let error = refused(&format!(
+        "{BASE}
+data P (n : Nat) where
+  Mk : P n
+
+mutual
+  n : Nat
+  n = Zero
+
+  g : P n -> Bool
+  g w = True
+"
+    ));
+    assert!(
+        matches!(error, ElabError::ModuleMember { .. }),
+        "получено {error:?}"
+    );
+    // Семейство той же группы назвать можно: объявляется оно первым.
+    program(&format!(
+        "{BASE}
+mutual
+  data Tree where
+    Leaf : Tree
+
+  size : Tree -> Nat
+  size Leaf = Zero
+"
+    ));
+}
+
+#[test]
 fn an_attribute_inside_a_group_is_not_dropped() {
     // Заголовок члена группы разбирался без атрибутов, и они выбрасывались
     // молча: `@fbip` внутри `mutual` принимался вместо отказа, обещанного

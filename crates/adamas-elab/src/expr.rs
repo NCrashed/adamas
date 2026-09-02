@@ -469,6 +469,20 @@ pub(crate) struct Elaborator<'a> {
     /// группу, поэтому и переменная одна - как и обязано быть у одного
     /// написанного типа.
     rows: Option<Vec<Span>>,
+    /// Row-переменная auto-lift'а - одна на всю написанную сигнатуру (§3.4).
+    ///
+    /// `None` - позиция сигнатурой не является, и стрелки её замкнуты: алиас
+    /// `type`, тело, конструктор. Одна на сигнатуру, а не по одной на позицию,
+    /// и это критично для higher-order: `withFile : String -> (File -> {IO} a)
+    /// -> {IO, Except IOError} a` обязан пробросить эффекты колбэка в
+    /// результат, а разные переменные разорвали бы связь.
+    lifted: Option<Row<Term>>,
+    /// Хвосты, названные руками: `{IO | e}` (§3.4).
+    ///
+    /// Одно имя - одна переменная на сигнатуру, по тому же доводу, что и у
+    /// `instantiated`: два вхождения `e` обязаны быть одним параметром, иначе
+    /// написанная связь между позициями теряется.
+    tails: HashMap<Symbol, Row<Term>>,
     /// Запрещена ли вставка имплиситов ближайшему имени - см. `type_app`.
     bare: bool,
     /// Модуль, чьё тело элаборируется (§4.8). `None` - верхний уровень.
@@ -559,6 +573,8 @@ impl<'a> Elaborator<'a> {
             enclosing: None,
             using: Vec::new(),
             rows: None,
+            lifted: None,
+            tails: HashMap::new(),
             types: false,
             position: Position::Inner,
             produced: None,
@@ -724,6 +740,22 @@ impl<'a> Elaborator<'a> {
     /// это `Nat`, говорит только kind семейства. Дырку решает проверка - там же,
     /// где решает всё прочее.
     pub(crate) fn declaration(&mut self, ty: &Expr, default: Mult) -> Result<Term, ElabError> {
+        self.declared_type(ty, default, true)
+    }
+
+    /// То же для конструктора: подъём не применяется (§3.4).
+    ///
+    /// Тип конструктора приходит из `data`, и стрелки его - не позиции
+    /// сигнатуры, а форма самого значения: поле его есть данные семейства, а
+    /// семейство row-параметра не несёт. Открытая row у поля означала бы, что
+    /// два `MkCell` с разными эффектами дают один тип `Cell`, а разбор потом
+    /// не знает, какой из них лежит. Зваться откуда угодно конструктор при
+    /// этом не перестаёт: пустую row гасит любая окружающая.
+    pub(crate) fn constructor_type(&mut self, ty: &Expr, default: Mult) -> Result<Term, ElabError> {
+        self.declared_type(ty, default, false)
+    }
+
+    fn declared_type(&mut self, ty: &Expr, default: Mult, lift: bool) -> Result<Term, ElabError> {
         let (names, tails) = self.unbound(ty);
         // Порядок связывания: сначала обычные свободные имена, потом
         // написанные хвосты, потом безымянные row-переменные подъёма. Все они
@@ -747,7 +779,14 @@ impl<'a> Elaborator<'a> {
             });
         }
         self.rows = Some(rows);
-        self.lifting(&lifted, ty, default)
+        // Auto-lift (§3.4): свежая row-переменная на всю сигнатуру. Параметром
+        // она станет обобщением на границе объявления - тем же проходом, что
+        // делает параметрами уровни.
+        self.lifted = lift.then(|| self.metas.fresh_row());
+        self.tails.clear();
+        let elaborated = self.lifting(&lifted, ty, default);
+        self.lifted = None;
+        elaborated
     }
 
     fn lifting(&mut self, lifted: &[Lifted], ty: &Expr, default: Mult) -> Result<Term, ElabError> {
@@ -1621,20 +1660,18 @@ impl<'a> Elaborator<'a> {
     /// вопроса незачем.
     fn effects(&mut self, written: Option<&Expr>) -> Result<Row<Term>, ElabError> {
         let Some(row) = written else {
-            return Ok(Row::empty());
+            return Ok(self.opened());
         };
         let ExprKind::Effectful { labels, tail, .. } = &row.kind else {
-            return Ok(Row::empty());
+            return Ok(self.opened());
         };
-        // Хвост приходит вместе с auto-lift (§3.4): связать написанное имя
-        // сегодня нечем, а промолчать о нём значило бы принять `{IO | e}` как
-        // `{IO}` - то есть закрытую row вместо открытой.
-        if let Some(tail) = tail {
-            return Err(ElabError::Missing {
-                what: Missing::RowTail,
-                span: tail.span,
-            });
-        }
+        // Написанный хвост закрывает auto-lift на этой позиции: программист
+        // управляет полиморфизмом сам (§3.4). Одноимённые хвосты одной
+        // сигнатуры - один параметр.
+        let tail = match tail {
+            Some(name) => self.named_tail(&name.text),
+            None => self.opened(),
+        };
         let written = labels;
         let mut labels = Vec::with_capacity(written.len());
         for label in written {
@@ -1664,7 +1701,22 @@ impl<'a> Elaborator<'a> {
             }
             labels.push(Label { name, arguments });
         }
-        Ok(Row::new(labels))
+        Ok(Row::closing(labels, tail.tail()))
+    }
+
+    /// Row позиции, где ничего не написано, - подъём или пустая.
+    fn opened(&self) -> Row<Term> {
+        self.lifted.clone().unwrap_or_else(Row::empty)
+    }
+
+    /// Хвост, названный руками. Второе вхождение того же имени берёт первую.
+    fn named_tail(&mut self, name: &Symbol) -> Row<Term> {
+        if let Some(known) = self.tails.get(name) {
+            return known.clone();
+        }
+        let fresh = self.metas.fresh_row();
+        self.tails.insert(Rc::clone(name), fresh.clone());
+        fresh
     }
 
     /// Тип терма - у ядра, а если оно не знает, то у объявляемой группы.
@@ -2409,6 +2461,17 @@ impl<'a> Elaborator<'a> {
         let domain = self.hiding(first.siblings, |inner| inner.expr(first.ty, Mult::Many))?;
         let owns = self.owned.of(first.ty).is_some();
         let bound = self.typed(&domain);
+        // Row снимается с кодомена и у связывания с именем - тем же правилом,
+        // что у безымянной стрелки: `(x : A) -> {IO} B` и `A -> {IO} B`
+        // различаются именем аргумента, а не тем, где написаны эффекты. Снимать
+        // её вправе только последнее связывание группы: у `(x : A) (y : B) ->
+        // {IO} C` кодомен принадлежит `y`.
+        let (written, codomain) = if rest.is_empty() {
+            split_row(codomain)
+        } else {
+            (None, codomain)
+        };
+        let row = self.effects(written)?;
         let body = self.binding(
             Bound::owning(&first.name, first.mult, bound, owns),
             |inner| inner.pi_flat(rest, codomain, default),
@@ -2421,7 +2484,7 @@ impl<'a> Elaborator<'a> {
             binder,
             CoreName::from(&*first.name),
             Rc::new(domain),
-            Row::empty(),
+            row,
             Rc::new(body),
         ))
     }

@@ -3052,7 +3052,7 @@ fn family_constructors<'a>(
             let ty = Elaborator::with_group(signature, metas, owned, visible.to_vec()).wrapped(
                 &family.params,
                 true,
-                |it| it.declaration(&constructor.ty, Mult::One),
+                |it| it.constructor_type(&constructor.ty, Mult::One),
             )?;
             owned_field(&ty, owned, family.data, constructor)?;
             Ok((&*constructor.name.text, ty))

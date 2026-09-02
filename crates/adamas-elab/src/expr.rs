@@ -1201,10 +1201,25 @@ impl<'a> Elaborator<'a> {
     /// телескопа - `0`: дырку заводят на месте типа, а тип живёт в стёртом
     /// фрагменте, и применение к контексту не должно ничего расходовать.
     fn fresh_meta(&mut self, goal: &Rc<Value>) -> Term {
+        self.fresh_meta_outside(goal, 0)
+    }
+
+    /// То же, но телескоп собирается **без** `skip` внутренних связываний.
+    ///
+    /// Дырка тогда от них не зависит, а индексы спайна всё равно считаются для
+    /// сегодняшнего контекста - того, что глубже. Нужно это цели разбора:
+    /// мотив переписывает разбираемое в собственное связывание, не трогая
+    /// индексы, и дырка, у которой разбираемое стоит в спайне, перестаёт быть
+    /// типизируемой. `case v of Nil -> True` над `Vect Zero` отвечало
+    /// «ожидался `Vect Zero`, получен `Vect #1`», а побуквенно та же клауза
+    /// проходила.
+    fn fresh_meta_outside(&mut self, goal: &Rc<Value>, skip: usize) -> Term {
         let size = self.ctx.size();
-        let mut telescope = quote(size, goal);
+        let outer = u32::try_from(self.scope.len().saturating_sub(skip)).unwrap_or(u32::MAX);
+        let mut telescope = quote(outer, goal);
         let mut spine = Vec::new();
-        for (depth, bound) in self.scope.iter().enumerate().rev() {
+        let kept = self.scope.len().saturating_sub(skip);
+        for (depth, bound) in self.scope[..kept].iter().enumerate().rev() {
             let depth = u32::try_from(depth).unwrap_or(u32::MAX);
             let ty = Rc::new(quote(depth, &bound.ty));
             let name = CoreName::from(&*bound.name);
@@ -1729,8 +1744,13 @@ impl<'a> Elaborator<'a> {
         span: Span,
         position: Position,
     ) -> Result<Term, ElabError> {
+        // Цель заводится **без** разбираемого в спайне: связывание его стоит
+        // последним - его только что положил вызывающий, - а мотив перепишет
+        // его в своё, оставив индексы прежними. Дырка, зависящая от него,
+        // после этого не типизируется, и `case` над семейством с неголым
+        // индексом отвергался там, где клауза проходила.
         let sort = Rc::new(Value::Universe(self.metas.fresh_level()));
-        let result = self.fresh_meta(&sort);
+        let result = self.fresh_meta_outside(&sort, 1);
         let mut clauses = Vec::with_capacity(alts.len());
         // Паттерны собираются заранее: они затеняют имена в своих телах, а
         // решение о вставке `drop` принимается до спуска в тело.

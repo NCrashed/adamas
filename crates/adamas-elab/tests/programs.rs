@@ -5301,6 +5301,46 @@ run = handle True with
 }
 
 #[test]
+fn a_case_over_a_written_index_typechecks() {
+    // Цель разбора заводилась дыркой по **всему** контексту, включая только
+    // что связанное разбираемое, а мотив переписывает разбираемое в собственное
+    // связывание, индексов не трогая. Дырка после этого не типизировалась, и
+    // ломалось это на всяком индексе, который не голая переменная: `case v of
+    // Nil -> True` над `Vect Zero` отвечало «ожидался `Vect Zero`, получен
+    // `Vect #1`», а побуквенно та же клауза проходила. Канонический `head`
+    // через `case` не писался вовсе.
+    program(
+        "\
+data Bool where
+  True : Bool
+  False : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Vect : Nat -> Type where
+  Nil : Vect Zero
+  Cons : (0 n : Nat) -> Bool -> Vect n -> Vect (Succ n)
+
+emptyClause : Vect Zero -> Bool
+emptyClause Nil = True
+
+emptyCase : Vect Zero -> Bool
+emptyCase v = case v of
+  Nil -> True
+
+headClause : (0 n : Nat) -> Vect (Succ n) -> Bool
+headClause n (Cons k x xs) = x
+
+headCase : (0 n : Nat) -> Vect (Succ n) -> Bool
+headCase n v = case v of
+  Cons k x xs -> x
+",
+    );
+}
+
+#[test]
 fn a_callback_with_fewer_effects_is_passed_as_is() {
     // §3.4 разводит равенство и унификацию: второе сопоставляет метки по имени,
     // а **остаток уходит в хвостовую метапеременную**. Реализовано было первое,

@@ -1772,6 +1772,28 @@ fn a_record_declares_its_fields_or_assigns_them() {
 }
 
 #[test]
+fn the_order_of_written_fields_does_not_matter() {
+    // §4.2: ряд - набор меток, порядок в нём не значит ничего, и у значения
+    // записи он инертен тем более. Сравнение же было позиционным с обеих
+    // сторон: два написания одного ряда (`{y, z}` против `{z, y}`) не
+    // сходились, и два значения одного типа - тоже.
+    program(&format!(
+        "{BASE}
+two : {{ x : Nat | r }} -> {{ x : Nat | r }} -> Nat
+two p q = Zero
+
+rows : Nat
+rows = two {{ x = Zero, y = Zero, z = Zero }} {{ x = Zero, z = Zero, y = Zero }}
+
+type Point = {{ x : Nat, y : Nat }}
+
+values : (0 f : Point -> Type) -> f {{ x = Zero, y = Succ Zero }} -> f {{ y = Succ Zero, x = Zero }}
+values f v = v
+"
+    ));
+}
+
+#[test]
 fn a_type_that_is_a_solved_hole_keeps_its_shape() {
     // Решённая дырка и есть своё решение, и всякий, кто смотрит на форму типа,
     // обязан видеть его, а не `?m`. Приведение к головной форме разворачивало

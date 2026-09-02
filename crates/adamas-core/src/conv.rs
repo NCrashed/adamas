@@ -244,13 +244,9 @@ pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
     if definition.opaque {
         return None;
     }
-    // Аргументы-row в δ пока не подставляются, и это не пропуск: подставить их
-    // синтаксически, как уровни, нельзя - метка несёт **открытые** термы (§3.2),
-    // и класть их в замкнутое тело нечем. Инстанциация row обязана идти через
-    // окружение вычисления, и это отдельный срез. Пока параметров-row ни у кого
-    // нет, сторож молчит по существу.
-    debug_assert!(rows.is_empty(), "разворот определения с параметрами-row");
-    let body = definition.instantiate_body(levels, &[])?;
+    // Аргументы-row подставляются **окружением**: метка несёт открытые термы,
+    // и вложить их в замкнутое тело нечем (§3.2).
+    let body = definition.unfolded(levels, Rc::clone(rows))?;
     spine.iter().try_fold(body, |callee, elim| match elim {
         Elim::App(argument) => try_apply(&callee, Rc::clone(argument)),
         Elim::Case(case) => try_eliminate_case(case, &callee),
@@ -974,6 +970,39 @@ mod tests {
             !convertible(&signature, &mut metas, 0, &constant, &lambda),
             "и в обратную сторону"
         );
+    }
+
+    #[test]
+    fn a_row_parameter_is_substituted_when_the_definition_unfolds() {
+        // Подстановка row идёт **окружением**, а не по терму: метка несёт
+        // открытые термы, и вложить их в замкнутое тело нечем (§3.2). Здесь
+        // `f{IO}` разворачивается в стрелку с row `{IO}`, а не с параметром.
+        let mut signature = crate::sig::Signature::default();
+        let mut metas = crate::meta::Metas::default();
+        let open = Row::closing([], Some(Tail::Var(RowVar(0))));
+        let body = rowed(Mult::Many, open, Term::universe(0), Term::universe(0));
+        let member = crate::sig::Member::definition("f", Mult::Many, Term::universe(1))
+            .with_arity(0, 1)
+            .with_body(body);
+        signature
+            .declare(&mut metas, &crate::sig::Group::of(member))
+            .expect("`f` корректно");
+
+        let label = Label {
+            name: "IO".into(),
+            arguments: Vec::new(),
+        };
+        let applied = Term::Const(
+            "f".into(),
+            Rc::from([]),
+            crate::term::Rows::new([Row::new([label])]),
+        );
+        let unfolded = super::whnf(&signature, &eval(&Env::default(), &applied));
+        let Value::Pi(_, _, _, row, _) = &*unfolded else {
+            panic!("разворот даёт стрелку, получено {unfolded}");
+        };
+        assert_eq!(row.labels().len(), 1, "аргумент подставился");
+        assert_eq!(row.tail(), None, "параметра не осталось");
     }
 
     /// Топливо разворота тратится вдоль пути, а не на всё сравнение.

@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use crate::level::Level;
 use crate::mult::Mult;
-use crate::row::Row;
+use crate::row::{Row, RowVar};
 use crate::term::{Binder, Field, Fields, Index, Name, Term, TermMeta};
 
 /// Уровень де Брёйна: сколько связываний отсчитать от начала контекста.
@@ -48,6 +48,14 @@ impl Lvl {
 pub struct Env {
     head: Option<Rc<Cell>>,
     len: u32,
+    /// Аргументы-row определения, которое сейчас вычисляется (§10 вопрос 73).
+    ///
+    /// Живут здесь, а не подставляются в терм заранее, и причина не в удобстве.
+    /// Уровень **замкнут**, поэтому подставляется до вычисления; row - нет: её
+    /// метка несёт термы, и `{State s}` при локальном `s` открыта. Положить
+    /// такую row в замкнутое тело нечем, а окружение для того и заведено -
+    /// оно уже носит открытые значения.
+    rows: Rc<[Row<Rc<Value>>]>,
 }
 
 #[derive(Debug)]
@@ -69,6 +77,22 @@ impl Env {
         self.len == 0
     }
 
+    /// Окружение с аргументами-row: так вычисляется тело определения при δ.
+    #[must_use]
+    pub fn rowed(rows: Rc<[Row<Rc<Value>>]>) -> Self {
+        Self {
+            rows,
+            ..Self::default()
+        }
+    }
+
+    /// Аргумент-row по номеру параметра. `None` - параметра столько нет, и
+    /// хвост остаётся собой: подставлять нечего.
+    #[must_use]
+    pub fn row(&self, RowVar(index): RowVar) -> Option<&Row<Rc<Value>>> {
+        self.rows.get(index as usize)
+    }
+
     /// Окружение с добавленным значением. Исходное не меняется.
     #[must_use]
     pub fn extend(&self, value: Rc<Value>) -> Self {
@@ -78,6 +102,7 @@ impl Env {
                 rest: self.head.clone(),
             })),
             len: self.len + 1,
+            rows: Rc::clone(&self.rows),
         }
     }
 

@@ -22,6 +22,7 @@
 
 use std::rc::Rc;
 
+use crate::row::{Row, Tail};
 use crate::term::{Branch, Case, Field, Fields, Name, Rows, Term};
 use crate::value::{Closure, Elim, Env, Head, Lvl, StuckBranch, StuckCase, Telescope, Value};
 
@@ -73,7 +74,7 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
             // Аргументы меток - обычные термы и вычисляются как всё прочее:
             // `State s` под связыванием `s` без этого осталось бы термом с
             // индексом, которому в значении не на что указывать.
-            row.map(|argument| eval(env, argument)),
+            row_of(env, row),
             Closure {
                 env: env.clone(),
                 body: Rc::clone(codomain),
@@ -92,10 +93,7 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
         Term::Const(name, levels, rows) => Value::constant(
             Rc::clone(name),
             levels,
-            rows.as_slice()
-                .iter()
-                .map(|row| row.map(|argument| eval(env, argument)))
-                .collect(),
+            rows.as_slice().iter().map(|row| row_of(env, row)).collect(),
         ),
 
         // Тип связывания при вычислении не нужен: он влияет на проверку, а не
@@ -162,6 +160,22 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
                 None => eliminate_case(&Rc::new(stuck_case(env, case)), &scrutinee),
             }
         }
+    }
+}
+
+/// Row в значение: аргументы меток вычисляются, а хвост-параметр заменяется
+/// аргументом из окружения.
+///
+/// Подстановка идёт здесь, а не заранее по терму, потому что метка несёт
+/// **открытые** термы: замкнутого шага, на котором её можно было бы вложить в
+/// тело определения, не существует (§3.2).
+fn row_of(env: &Env, row: &Row<Term>) -> Row<Rc<Value>> {
+    let mapped = row.map(|argument| eval(env, argument));
+    match row.tail() {
+        Some(Tail::Var(index)) => env
+            .row(index)
+            .map_or(mapped.clone(), |tail| mapped.substituted(tail)),
+        _ => mapped,
     }
 }
 

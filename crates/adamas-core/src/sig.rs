@@ -168,6 +168,16 @@ impl Definition {
         ))
     }
 
+    /// То же, но аргументы-row приходят значениями - как при δ.
+    ///
+    /// Подставляются они **окружением**, а не по терму: метка несёт открытые
+    /// термы, и вложить их в замкнутое тело нечем (§3.2).
+    #[must_use]
+    pub fn unfolded(&self, levels: &[Level], rows: Rc<[Row<Rc<Value>>]>) -> Option<Rc<Value>> {
+        let body = self.body.as_ref()?;
+        Some(eval(&Env::rowed(rows), &body.substitute_levels(levels)))
+    }
+
     /// Число параметров и универсум тип-формера. `None` - не семейство.
     #[must_use]
     pub fn data_shape(&self) -> Option<(u32, &Level)> {

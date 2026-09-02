@@ -19,11 +19,12 @@ use std::rc::Rc;
 
 use adamas_core::check::{TypeError, check_closed_with, check_within, infer, is_type};
 use adamas_core::ctx::Ctx;
-use adamas_core::eval::quote;
+use adamas_core::eval::{eval, quote};
 use adamas_core::level::{Level, LevelVar};
 use adamas_core::meta::{Generalization, Metas, zonk_term};
 use adamas_core::mult::Mult;
 use adamas_core::pattern::{PatternError, compile_traced};
+use adamas_core::row::{Label, Row};
 use adamas_core::sig::{Group, Member as SigMember, Signature};
 use adamas_core::source::Span;
 use adamas_core::term::{Binder, Fields, Name as CoreName, Rows, Term};
@@ -31,10 +32,10 @@ use adamas_parser::ast::{self, DeclKind, Module, Symbol};
 
 use crate::carrier;
 use crate::error::{ElabError, Names};
-use adamas_core::value::Value;
+use adamas_core::value::{Env, Lvl, Value};
 
 use crate::class::{self, Class, Declaring, Instances, Offence};
-use crate::expr::{Elaborator, Enclosing, Member, Param, WrittenField};
+use crate::expr::{Elaborator, Enclosing, Member, Param, UNIT, WrittenField};
 use crate::own::{Owned, Ownership};
 use crate::route::{self, Declared};
 
@@ -3134,23 +3135,296 @@ fn declare_effect(
     let mut operations = Vec::with_capacity(effect.operations.len());
     for operation in &effect.operations {
         let written = performed(&operation.ty, &label);
+        let suspended = suspends(&written);
         let ty = Elaborator::with_group(signature, metas, owned, vec![visible.clone()]).wrapped(
             &params,
             true,
             |it| it.declaration(&written, Mult::Many),
         )?;
-        operations.push((&*operation.name.text, ty));
+        operations.push((&*operation.name.text, ty, suspended));
     }
 
+    // Элиминаторы объявляются той же группой: их типы называют метку, а в
+    // сигнатуре её ещё нет. Их два, и различает их кратность резумпции -
+    // мультишот от одношотного отличается только ею (§3.4).
+    let mut handlers = Vec::with_capacity(2);
+    for (prefix, resumed) in [("#handle", Mult::One), ("#handleMulti", Mult::Many)] {
+        let ty = handler_type(
+            signature,
+            metas,
+            &kind,
+            &effect.name.text,
+            &operations,
+            resumed,
+            span,
+        )?;
+        handlers.push((format!("{prefix}.{}", effect.name.text), ty));
+    }
+    let handlers: Vec<(&str, Term)> = handlers
+        .iter()
+        .map(|(name, ty)| (name.as_str(), ty.clone()))
+        .collect();
+
+    let written: Vec<(&str, Term)> = operations
+        .iter()
+        .map(|(name, ty, _)| (*name, ty.clone()))
+        .collect();
     let parameters = u32::try_from(params.len()).unwrap_or(u32::MAX);
     signature
-        .declare_effect(metas, &effect.name.text, parameters, kind, &operations)
+        .declare_effect(
+            metas,
+            &effect.name.text,
+            parameters,
+            kind,
+            &written,
+            &handlers,
+        )
         .map_err(|error| ElabError::Core {
             span: route::locate(&Declared::Effect(effect), &error, span),
             error: Box::new(error),
             names,
         })?;
     declare_defaults(signature, metas, owned, &effect.name.text, &effect.params)
+}
+
+/// Переменная контекста по её уровню.
+fn at(level: u32, depth: u32) -> Term {
+    Term::Var(Lvl(level).to_index(depth))
+}
+
+/// Складывает связывания в `Pi`, надевая на каждую стрелку одну и ту же row.
+fn arrows(binders: Vec<(Binder, CoreName, Term)>, row: &Row<Term>, result: Term) -> Term {
+    binders
+        .into_iter()
+        .rev()
+        .fold(result, |codomain, (binder, name, domain)| {
+            Term::Pi(
+                binder,
+                name,
+                Rc::new(domain),
+                row.clone(),
+                Rc::new(codomain),
+            )
+        })
+}
+
+/// Тип элиминатора эффекта (§3.4).
+///
+/// `handle e with …` есть применение этой константы, а не узел ядра. Правило
+/// хендлера выражается обычной стрелкой: строка `{L p⃗ | ρ}` в домене и `ρ` в
+/// результате и есть «снимает первое вхождение метки», а row-полиморфизм для
+/// того и заведён. Отсюда даром полнота веток (по арности), тип каждой ветки,
+/// кратность резумпции и `@`-выбор вхождения; и отсюда же то, что тотальность,
+/// носители и живость видят обычное применение с лямбдами.
+///
+/// `resumed` - кратность самой резумпции: `1` у `handle`, `ω` у
+/// `handleMulti`. Аффинность `1` и означает «вызывается не более одного раза»,
+/// а забыть её законно: ветка, не зовущая её, обрывает вычисление.
+///
+/// Стрелки спайна несут `{| ρ}` все до одной - элиминатор применяется под
+/// окружающей ρ, и Λ у каждого применения пуста. Та же ρ становится окружающей
+/// тела ветки, отсюда «собственные эффекты веток гасятся окружающей».
+fn handler_type(
+    signature: &Signature,
+    metas: &mut Metas,
+    kind: &Term,
+    label: &str,
+    operations: &[(&str, Term, bool)],
+    resumed: Mult,
+    span: Span,
+) -> Result<Term, ElabError> {
+    let missing = || ElabError::UnknownName {
+        name: Rc::from(UNIT),
+        span,
+    };
+    let unit = signature.instantiate(UNIT, metas).ok_or_else(missing)?;
+    let [only] = signature.constructors(UNIT).ok_or_else(missing)? else {
+        return Err(missing());
+    };
+    let only = Rc::clone(only);
+    let trivial = signature.instantiate(&only, metas).ok_or_else(missing)?;
+    let rho = metas.fresh_row();
+
+    // Параметры метки повторяются у элиминатора implicit-связываниями: писать
+    // их в месте вызова незачем, они читаются из типа вычисления.
+    let mut binders: Vec<(Binder, CoreName, Term)> = Vec::new();
+    let mut level = 0;
+    let mut former = eval(&Env::default(), kind);
+    while let Some(next) = peeled(&former, level, &mut binders) {
+        former = next;
+        level += 1;
+    }
+    let params = level;
+
+    // `a` - результат вычисления, `b` - ответ хендлера. Оба стёрты: они типы.
+    let (answer, result) = (level + 1, level);
+    for name in ["a", "b"] {
+        let sort = Term::Universe(metas.fresh_level());
+        binders.push((Binder::implicit(Mult::Zero), CoreName::from(name), sort));
+        level += 1;
+    }
+
+    // Вычисление: `{L p⃗ | ρ} a`, то есть нульместная функция от единицы.
+    let performed = Row::closing(
+        [Label {
+            name: CoreName::from(label),
+            arguments: (0..params).map(|param| at(param, level)).collect(),
+        }],
+        rho.tail(),
+    );
+    binders.push((
+        Binder::explicit(Mult::Many),
+        CoreName::from("computation"),
+        Term::Pi(
+            Binder::explicit(Mult::Many),
+            CoreName::from("_"),
+            Rc::new(unit),
+            performed,
+            Rc::new(at(result, level + 1)),
+        ),
+    ));
+    level += 1;
+
+    // Ветка `return`: значение вычисления в ответ хендлера.
+    binders.push((
+        Binder::explicit(Mult::Many),
+        CoreName::from("return"),
+        Term::Pi(
+            Binder::explicit(Mult::Many),
+            CoreName::from("_"),
+            Rc::new(at(result, level)),
+            rho.clone(),
+            Rc::new(at(answer, level + 1)),
+        ),
+    ));
+    level += 1;
+
+    for (name, ty, suspended) in operations {
+        let branch = branch_type(Branch {
+            operation: ty,
+            params,
+            suspended: *suspended,
+            depth: level,
+            row: &rho,
+            answer,
+            trivial: &trivial,
+            resumed,
+        });
+        binders.push((Binder::explicit(Mult::Many), CoreName::from(*name), branch));
+        level += 1;
+    }
+
+    let body = at(answer, level);
+    Ok(arrows(binders, &rho, body))
+}
+
+/// Снимает одно связывание типа, дописывая его в телескоп.
+///
+/// Связывание implicit и стёртое: параметры метки у элиминатора не пишут - они
+/// читаются из типа вычисления.
+fn peeled(
+    ty: &Rc<Value>,
+    level: u32,
+    into: &mut Vec<(Binder, CoreName, Term)>,
+) -> Option<Rc<Value>> {
+    let Value::Pi(_, name, domain, _, codomain) = &**ty else {
+        return None;
+    };
+    into.push((
+        Binder::implicit(Mult::Zero),
+        Rc::clone(name),
+        quote(level, domain),
+    ));
+    Some(codomain.clone().apply(Value::var(Lvl(level))))
+}
+
+/// Тип ветки одной операции: её аргументы, резумпция, ответ.
+///
+/// Аргументы - те, что **написаны**: связывание-единицу, вставленную сахаром
+/// `{ε} A`, ветка не связывает. Различить их по типу нечем - `get : s` и
+/// `put : Unit -> Unit` после сахара одинаковы, - поэтому знание приходит от
+/// объявления, где сахар и разворачивался.
+#[derive(Clone, Copy)]
+struct Branch<'a> {
+    /// Тип операции, как его собрало объявление.
+    operation: &'a Term,
+    /// Сколько ведущих связываний - параметры метки.
+    params: u32,
+    /// Синтезирован ли триггер сахаром `{ε} A`.
+    suspended: bool,
+    /// Глубина, на которой стоит домен ветки.
+    depth: u32,
+    /// Окружающая row элиминатора.
+    row: &'a Row<Term>,
+    /// Уровень связывания ответа `b`.
+    answer: u32,
+    /// Значение единицы - им подставляется синтезированный триггер.
+    trivial: &'a Term,
+    /// Кратность резумпции.
+    resumed: Mult,
+}
+
+fn branch_type(branch: Branch<'_>) -> Term {
+    let Branch {
+        operation,
+        params,
+        suspended,
+        depth,
+        row,
+        answer,
+        trivial,
+        resumed,
+    } = branch;
+    // Параметры метки у операции - те же связывания и в том же порядке, что у
+    // элиминатора, поэтому снимаются они своими же переменными.
+    let mut current = eval(&Env::default(), operation);
+    for param in 0..params {
+        let Value::Pi(_, _, _, _, codomain) = &*current else {
+            break;
+        };
+        let codomain = codomain.clone();
+        current = codomain.apply(Value::var(Lvl(param)));
+    }
+    let mut binders: Vec<(Binder, CoreName, Term)> = Vec::new();
+    let mut level = depth;
+    let result = loop {
+        let Value::Pi(binder, name, domain, labels, codomain) = &*current else {
+            // Row обязана где-то стоять - это проверило объявление, - так что
+            // сюда приходят только стрелки; ответ на всякий случай тот же.
+            break quote(level, &current);
+        };
+        let performing = !labels.labels().is_empty();
+        let (binder, name, domain) = (*binder, Rc::clone(name), quote(level, domain));
+        let codomain = codomain.clone();
+        let argument = if performing && suspended {
+            // Триггер синтезирован сахаром: аргументом операции он не является,
+            // а кодомен от него не зависит - связывание безымянное.
+            eval(&Env::default(), trivial)
+        } else {
+            binders.push((binder, name, domain));
+            level += 1;
+            Value::var(Lvl(level - 1))
+        };
+        let next = codomain.apply(argument);
+        if performing {
+            break quote(level, &next);
+        }
+        current = next;
+    };
+
+    binders.push((
+        Binder::explicit(resumed),
+        CoreName::from("resume"),
+        Term::Pi(
+            Binder::explicit(Mult::Many),
+            CoreName::from("_"),
+            Rc::new(result),
+            row.clone(),
+            Rc::new(at(answer, level + 1)),
+        ),
+    ));
+    level += 1;
+    arrows(binders, row, at(answer, level))
 }
 
 /// Метка, применённая к собственным параметрам: `State s`.
@@ -3201,6 +3475,17 @@ fn performed(ty: &ast::Expr, label: &ast::EffectLabel) -> ast::Expr {
         kind,
         span: ty.span,
     }
+}
+
+/// Синтезировано ли связывание, на котором стоит row операции.
+///
+/// Row, легшая на **сам тип**, а не на кодомен стрелки, разворачивается сахаром
+/// `{ε} A` в нульместную функцию, и связывание-единица в ней - не аргумент
+/// операции: ветка хендлера его не связывает. Различить это по ядерному типу
+/// нечем (`get : s` и `put : Unit -> Unit` после сахара одинаковы), а по
+/// написанному - видно сразу, и видно одинаково у обеих форм записи row.
+fn suspends(written: &ast::Expr) -> bool {
+    matches!(written.kind, ast::ExprKind::Effectful { .. })
 }
 
 fn declare_data(

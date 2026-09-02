@@ -1,0 +1,44 @@
+-- Записи и row-полиморфизм (§4.2).
+--
+-- Запись объявляется алиасом `type`, а не `data`: у неё нет конструктора, и
+-- собирается она перечислением полей. Порядок полей ни в типе, ни в значении
+-- не значит ничего - и то и другое сравнивается по именам.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+type Point = { x : Nat, y : Nat }
+
+origin : Point
+origin = { x = Zero, y = Zero }
+
+-- Порядок написания свободен: поле ищется по имени.
+flipped : Point
+flipped = { y = Zero, x = Zero }
+
+-- Проекция - первого класса: `.x` есть функция от записи.
+abscissa : Point -> Nat
+abscissa p = p.x
+
+-- Открытая запись: `| r` значит «не меньше этих полей», и хвост приносит
+-- вызывающий. Написанный хвост здесь не нужен - в отрицательной позиции
+-- переменную раздаёт auto-lift, - но написан ради ясности.
+labelled : { name : Bool | r } -> Bool
+labelled it = it.name
+
+-- Значит функция принимает и запись с лишними полями.
+asked : Bool
+asked = labelled { name = True, extra = Zero }
+
+-- Обновление заменяет написанное поле и оставляет прочие.
+shifted : Point -> Point
+shifted p = { p | x = Succ p.x }
+
+-- Расширение дописывает поле, которого у базы нет.
+tagged : Point -> { x : Nat, y : Nat, seen : Bool }
+tagged p = { p | seen = True }

@@ -1,0 +1,10 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: open-dependent-record.adamas:13:40: поле `b` зависит от предыдущего, а такая запись не открывается
+  dependent : { a : Type, b : a | r } -> Nat
+                                         ^^^
+  в контексте:
+    (0 r : Row ?0)
+  путь: кодомен -> домен

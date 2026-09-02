@@ -1,0 +1,53 @@
+-- Модули, сигнатуры, функторы и запечатывание (§4.8, §3.5).
+--
+-- `module type` объявляет тип записи, `module` - её значение. Члены поднимаются
+-- на верхний уровень под квалифицированными именами, и `M.f` снаружи есть
+-- ссылка на поднятое имя, а не проекция.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+module type Eqv where
+  type T
+  eq : T -> T -> Bool
+
+module NatEq : Eqv where
+  type T = Nat
+  eq : T -> T -> Bool
+  eq Zero Zero = True
+  eq a b = False
+
+-- Аннотация `:` проверяет соответствие, представление при этом видно: `NatEq.T`
+-- снаружи разворачивается в `Nat`.
+transparent : NatEq.T -> Nat
+transparent n = n
+
+-- Функтор - модуль, параметризованный модулем. Параметр становится implicit у
+-- каждого члена, а применение - обычный вызов.
+module Twice (Key : Eqv) where
+  type T = Key.T
+  both : T -> T -> Bool
+  both x y = Key.eq x y
+
+module NatTwice = Twice NatEq
+
+-- Аппликативность: два применения к одному аргументу дают один тип.
+module Again = Twice NatEq
+
+sameType : NatTwice.T -> Again.T
+sameType x = x
+
+-- `:>` скрывает представление: снаружи `Hidden.T` - атом, и `Nat` под него не
+-- подходит. Внутри модуля это по-прежнему `Nat`.
+module Hidden :> Eqv where
+  type T = Nat
+  eq : T -> T -> Bool
+  eq a b = True
+
+opaque : Hidden.T -> Hidden.T
+opaque x = x

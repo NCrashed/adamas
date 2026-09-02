@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: record-holds-a-resource.adamas:20:18: поле `h` записи держит `File` (resource), а запись владения не несёт: владеемое поле требует владеемого держателя
+  type Box = { h : File }
+                   ^^^^

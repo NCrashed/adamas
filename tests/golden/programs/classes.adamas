@@ -1,0 +1,58 @@
+-- Классы, инстансы и разрешение словарей (§4.1, §3.5).
+--
+-- Класс есть тип записи, параметризованный своими аргументами, инстанс - её
+-- значение, метод - проекция. Словарь автор не пишет: его находит разрешение
+-- по типу аргумента.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+and : Bool -> Bool -> Bool
+and True b = b
+and False b = False
+
+class Eqv a where
+  eq : a -> a -> Bool
+
+instance Eqv Nat where
+  eq Zero Zero = True
+  eq (Succ a) (Succ b) = eq a b
+  eq a b = False
+
+-- Контекст инстанса: словарь для элемента приходит извне, а на хвосте инстанс
+-- зовёт сам себя. Оба `eq` - одно имя, и различает их тип аргумента.
+instance {Eqv a} => Eqv (List a) where
+  eq Nil Nil = True
+  eq (Cons x xs) (Cons y ys) = and (eq x y) (eq xs ys)
+  eq p q = False
+
+-- Констрейнт-контекст в сигнатуре: словарь передаётся в точке вызова.
+same : {Eqv a} => a -> a -> Bool
+same x y = eq x y
+
+-- Суперкласс - поле словаря, и разряжает его объявление инстанса, а не автор.
+class Ord a when Eqv a where
+  below : a -> a -> Bool
+  -- Умолчание метода пишется в классе, а раскрывается в инстансе: тело зовёт
+  -- другие методы того же класса.
+  atMost : a -> a -> Bool
+  atMost x y = below x y
+
+instance Ord Nat where
+  below Zero (Succ b) = True
+  below a b = False
+
+nested : Bool
+nested = same (Cons Zero Nil) (Cons Zero Nil)
+
+ordered : Bool
+ordered = atMost Zero (Succ Zero)

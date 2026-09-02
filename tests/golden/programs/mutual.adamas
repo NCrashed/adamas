@@ -12,6 +12,10 @@ data Nat where
   Zero : Nat
   Succ : Nat -> Nat
 
+plus : Nat -> Nat -> Nat
+plus Zero m = m
+plus (Succ k) m = Succ (plus k m)
+
 mutual
   data Tree (a : Type) where
     Node : a -> Forest a -> Tree a
@@ -25,4 +29,4 @@ mutual
 
   counts : {a : Type} -> Forest a -> Nat
   counts Nil = Zero
-  counts (Cons t f) = count t
+  counts (Cons t f) = plus (count t) (counts f)

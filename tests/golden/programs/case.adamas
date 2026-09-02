@@ -1,0 +1,55 @@
+-- Разбор выражением, `if` и атрибут `@total` (§4.1, §4.7).
+--
+-- `case` собирает тот же компилятор клауз, что и определение; `if` отдельного
+-- узла не имеет - он и есть разбор по `Bool`. Мотив недепендентный: тип
+-- результата от ветви к ветви не меняется.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+not : Bool -> Bool
+not True = False
+not False = True
+
+-- Разбор выражением стоит там, где написан, и ветви разбирают конструкторы.
+isZero : Nat -> Bool
+isZero n = case n of
+  Zero -> True
+  Succ k -> False
+
+-- `if` - тот же разбор, записанный привычно.
+pick : Bool -> Nat -> Nat -> Nat
+pick c a b = if c then a else b
+
+-- Атрибут требует положительного вердикта: рекурсия структурна, потому что
+-- `k` - поле разобранного значения, строго меньшее самого значения.
+@total
+double : Nat -> Nat
+double Zero = Zero
+double (Succ k) = Succ (Succ (double k))
+
+-- Тотальное определение вправе стоять в типе: стёртый фрагмент принимает
+-- только то, что заведомо завершается (§4.7).
+data Wit (n : Nat) where
+  Mk : Wit n
+
+witnessed : Wit (double (Succ Zero))
+witnessed = Mk
+
+-- Взаимная рекурсия проверяется по циклу вызовов: убывает нулевой аргумент у
+-- обоих членов, и вызов соседа засчитывается наравне с самовызовом.
+mutual
+  @total
+  even : Nat -> Bool
+  even Zero = True
+  even (Succ k) = odd k
+
+  @total
+  odd : Nat -> Bool
+  odd Zero = False
+  odd (Succ k) = even k

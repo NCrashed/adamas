@@ -530,6 +530,21 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Операция названа именем, которое занято формой хендлера.
+    ///
+    /// `return` - ветка **значения** вычисления (§3.4, §4.1), и операция с тем
+    /// же именем делает из одной написанной ветки две: у элиминатора это разные
+    /// связывания. Расходились они молча - при операции-вычислении слоты
+    /// получают структурно один тип, хендлер проходит проверку, а ветка
+    /// исполняет две роли.
+    #[error("`{name}` - имя ветки значения хендлера, операцию так назвать нельзя")]
+    ReservedOperation {
+        /// Имя операции.
+        name: Symbol,
+        /// Где написано.
+        span: Span,
+    },
+
     /// Ветка хендлера не сходится с объявлением эффекта (§3.4).
     #[error("ветка `{name}`: {why}")]
     HandlerBranch {
@@ -906,6 +921,7 @@ impl ElabError {
             | Self::UnrestrictedOwned { span, .. }
             | Self::OwnedTopLevel { span, .. }
             | Self::OwnedDiscarded { span, .. }
+            | Self::ReservedOperation { span, .. }
             | Self::HandlerBranch { span, .. }
             | Self::HandlerLabel { span, .. }
             | Self::NotHandled { span, .. }

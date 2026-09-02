@@ -3109,6 +3109,22 @@ fn declare_effect(
     effect: &ast::EffectDecl,
     span: Span,
 ) -> Result<(), ElabError> {
+    // `return` занято формой хендлера: так называется ветка **значения**
+    // вычисления (§3.4, §4.1), и разрешение операции с тем же именем сделало
+    // бы одну написанную ветку двумя. У элиминатора это разные связывания, и
+    // расходились они молча: при операции-вычислении слоты получают
+    // структурно один тип, хендлер проходит проверку, а ветка исполняет две
+    // роли - линейное имя, написанное в ней раз, становится ω.
+    if let Some(clash) = effect
+        .operations
+        .iter()
+        .find(|operation| &*operation.name.text == crate::expr::RETURN)
+    {
+        return Err(ElabError::ReservedOperation {
+            name: Rc::clone(&clash.name.text),
+            span: clash.name.span,
+        });
+    }
     let mut elaborator = Elaborator::new(signature, metas, owned);
     let params = elaborator.telescope(&effect.params, false, Mult::Zero)?;
     let kind = elaborator.wrapped(&params, false, |_| Ok(Term::EffectKind))?;

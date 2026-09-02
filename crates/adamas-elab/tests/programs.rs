@@ -4649,6 +4649,31 @@ apart : Bool -> Bool -> {{State Bool | e}} Bool
 }
 
 #[test]
+fn an_operation_may_not_be_called_return() {
+    // `return` - имя ветки **значения** вычисления (§3.4, §4.1), и операция с
+    // тем же именем делает из одной написанной ветки две: у элиминатора это
+    // разные связывания. Проверялось это нигде, а расходились слоты молча -
+    // при операции-вычислении они получают структурно один тип, хендлер
+    // проходит проверку, и одна ветка исполняет две роли.
+    let error = refused(
+        "\
+data Bool where
+  True : Bool
+
+data Unit where
+  MkUnit : Unit
+
+effect Log where
+  return : {Log} Bool
+",
+    );
+    assert!(
+        matches!(error, ElabError::ReservedOperation { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
 fn a_clause_with_a_carried_neighbour_keeps_its_ambient_row() {
     // Стрелки, в которые компилятор клауз заворачивает вынесенных соседей,
     // несут окружающую row: ветвь есть часть разбора, разбор работает в

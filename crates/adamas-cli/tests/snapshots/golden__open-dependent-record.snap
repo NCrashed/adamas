@@ -6,5 +6,5 @@ Error: open-dependent-record.adamas:13:40: поле `b` зависит от пр
   dependent : { a : Type, b : a | r } -> Nat
                                          ^^^
   в контексте:
-    (0 r : Row ?0)
+    (0 r : Row ?1)
   путь: кодомен -> домен

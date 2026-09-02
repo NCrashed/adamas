@@ -237,6 +237,32 @@ fn pattern(spine: &[Elim]) -> Option<HashMap<u32, u32>> {
     Some(renaming)
 }
 
+/// Row обратным чтением: аргументы метки идут тем же переименованием, что и
+/// всё прочее, а хвост переезжает как есть - он переменная или дырка, и
+/// связываний контекста в нём нет.
+fn read_row(
+    metas: &Metas,
+    meta: TermMeta,
+    renaming: &HashMap<u32, u32>,
+    outer: u32,
+    arity: u32,
+    depth: u32,
+    row: &Row<Rc<Value>>,
+) -> Option<Row<Term>> {
+    let mut labels = Vec::with_capacity(row.labels().len());
+    for label in row.labels() {
+        let mut arguments = Vec::with_capacity(label.arguments.len());
+        for argument in &label.arguments {
+            arguments.push(read(metas, meta, renaming, outer, arity, depth, argument)?);
+        }
+        labels.push(Label {
+            name: Rc::clone(&label.name),
+            arguments,
+        });
+    }
+    Some(Row::closing(labels, row.tail()))
+}
+
 /// Читает значение обратно, переводя переменные спайна в связывания решения.
 ///
 /// `outer` - размер контекста, в котором живёт правая часть. Он и арность
@@ -272,8 +298,12 @@ fn read(
                     };
                     Term::Var(Lvl(level).to_index(size))
                 }
-                Head::Global(name, levels, _) => {
-                    Term::Const(Rc::clone(name), Rc::clone(levels), Rows::none())
+                Head::Global(name, levels, rows) => {
+                    let mut read = Vec::with_capacity(rows.len());
+                    for row in rows.iter() {
+                        read.push(read_row(metas, meta, renaming, outer, arity, depth, row)?);
+                    }
+                    Term::Const(Rc::clone(name), Rc::clone(levels), Rows::new(read))
                 }
                 // Вхождение самой дырки: подстановка дала бы бесконечный терм.
                 Head::Meta(found) if *found == meta => return None,
@@ -305,23 +335,13 @@ fn read(
             ))
         }
         Value::Pi(binder, name, domain, row, closure) => {
-            let mut labels = Vec::new();
-            for label in row.labels() {
-                let mut arguments = Vec::new();
-                for argument in &label.arguments {
-                    arguments.push(recur(argument)?);
-                }
-                labels.push(Label {
-                    name: Rc::clone(&label.name),
-                    arguments,
-                });
-            }
+            let row = read_row(metas, meta, renaming, outer, arity, depth, row)?;
             let codomain = closure.apply(Value::var(Lvl(outer + depth)));
             Some(Term::Pi(
                 *binder,
                 Rc::clone(name),
                 Rc::new(recur(domain)?),
-                Row::new(labels),
+                row,
                 Rc::new(read(
                     metas,
                     meta,

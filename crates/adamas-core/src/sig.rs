@@ -110,6 +110,11 @@ pub struct Definition {
     /// Сколько параметров уровня. Внутри `ty` и `body` они видны как
     /// [`crate::level::LevelVar`] с индексами `0..arity`.
     pub level_arity: u32,
+    /// Сколько параметров row - вторая компонента арности (§10 вопрос 73).
+    ///
+    /// Внутри `ty` и `body` они видны как [`crate::row::RowVar`], и место
+    /// использования подставляет вместо каждого целую row.
+    pub row_arity: u32,
     /// Тип. Замкнут по локальным переменным, открыт по параметрам уровня.
     pub ty: Term,
     /// Тело. `None` - постулат: тип есть, вычислять нечего.
@@ -168,27 +173,45 @@ impl Definition {
     }
 }
 
-/// Арность параметров уровня: объявлена руками или выводится обобщением.
+/// Арность параметров: объявлена руками или выводится обобщением.
+///
+/// Компонент два - уровни и row (§10 вопрос 73), - и оба ведут себя одинаково:
+/// выводятся обобщением на границе определения либо объявляются вызывающим,
+/// когда он посчитал их сам. Второе нужно группе взаимной рекурсии: там
+/// арность считается по написанному типу члена, до проверки тел.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arity {
     /// Нерешённые дырки становятся параметрами, и их число и есть арность.
     /// Это implicit universe polymorphism со стороны определения (§3.2).
     Inferred,
-    /// Арность написана, параметры уровня стоят в терме как
-    /// [`crate::level::LevelVar`]. Дырка, оставшаяся при такой записи, - отказ:
+    /// Арность написана, параметры стоят в терме как [`crate::level::LevelVar`]
+    /// и [`crate::row::RowVar`]. Дырка, оставшаяся при такой записи, - отказ:
     /// обобщать её некуда.
-    Declared(u32),
+    Declared {
+        /// Параметров уровня.
+        levels: u32,
+        /// Параметров row.
+        rows: u32,
+    },
 }
 
 impl Arity {
-    /// Арность на входе проверки.
+    /// Объявленная арность уровней.
     ///
     /// У выведенной она нулевая: параметров во входном терме нет вовсе, только
     /// дырки, и `check_level_scope` этим пользуется - параметр уровня там
     /// означал бы, что вызывающий смешал две записи.
     fn declared(self) -> u32 {
         match self {
-            Self::Declared(declared) => declared,
+            Self::Declared { levels, .. } => levels,
+            Self::Inferred => 0,
+        }
+    }
+
+    /// То же для row.
+    fn declared_rows(self) -> u32 {
+        match self {
+            Self::Declared { rows, .. } => rows,
             Self::Inferred => 0,
         }
     }
@@ -303,12 +326,12 @@ impl Member {
         self
     }
 
-    /// Объявляет арность параметров уровня вместо вывода.
+    /// Объявляет арность вместо вывода: сперва уровни, потом row.
     #[must_use]
-    pub fn with_arity(mut self, declared: u32) -> Self {
+    pub fn with_arity(mut self, levels: u32, rows: u32) -> Self {
         match &mut self {
             Self::Definition { arity, .. } | Self::Data { arity, .. } => {
-                *arity = Arity::Declared(declared);
+                *arity = Arity::Declared { levels, rows };
             }
         }
         self
@@ -433,9 +456,11 @@ impl Signature {
     /// `None` - определения с таким именем нет.
     #[must_use]
     pub fn instantiate(&self, name: &str, metas: &mut Metas) -> Option<Term> {
-        let arity = self.lookup(name)?.level_arity;
-        let levels: Rc<[Level]> = (0..arity).map(|_| metas.fresh_level()).collect();
-        Some(Term::Const(name.into(), levels, Rows::none()))
+        let definition = self.lookup(name)?;
+        let (levels, rows) = (definition.level_arity, definition.row_arity);
+        let levels: Rc<[Level]> = (0..levels).map(|_| metas.fresh_level()).collect();
+        let rows = Rows::new((0..rows).map(|_| metas.fresh_row()));
+        Some(Term::Const(name.into(), levels, rows))
     }
 
     /// Проверяет группу и добавляет её целиком.
@@ -649,6 +674,7 @@ impl Signature {
             mult,
             opaque: matches!(member, Member::Definition { opaque: true, .. }),
             level_arity: arity.declared(),
+            row_arity: arity.declared_rows(),
             // Носители неизвестны, пока тело не проверено; фаза B2 их уточнит,
             // а постулат так и останется с `ω` - консервативным ответом.
             carriers: crate::carrier::unknown(ty),
@@ -772,6 +798,7 @@ impl Signature {
             // обобщение свело бы её к нулю, отвергнув всякий полиморфный
             // конструктор объявленного семейства.
             level_arity: arity.declared(),
+            row_arity: arity.declared_rows(),
             // Конструктор кладёт значение ровно однажды, поэтому носителю его
             // параметра ограничивать нечего; держателя ресурсного поля
             // проверяет отдельное правило (§3.3, вопрос 77).
@@ -1006,7 +1033,7 @@ impl Signature {
         ty: Term,
         body: Option<Term>,
     ) -> Result<(), TypeError> {
-        let mut member = Member::definition(name, mult, ty).with_arity(level_arity);
+        let mut member = Member::definition(name, mult, ty).with_arity(level_arity, 0);
         if let Some(body) = body {
             member = member.with_body(body);
         }
@@ -1135,12 +1162,13 @@ fn generalize(
     draft: Definition,
 ) -> (Definition, Option<Generalization>) {
     match arity {
-        Arity::Declared(_) => (draft, None),
+        Arity::Declared { .. } => (draft, None),
         Arity::Inferred => {
             let mut generalization = Generalization::default();
             generalization.collect_term(metas, &draft.ty);
             let declaration = Definition {
                 level_arity: generalization.arity(),
+                row_arity: generalization.row_arity(),
                 ty: generalization.apply_term(metas, &draft.ty),
                 ..draft
             };

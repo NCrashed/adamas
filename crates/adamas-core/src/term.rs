@@ -13,7 +13,7 @@ use std::rc::Rc;
 
 use crate::level::Level;
 use crate::mult::Mult;
-use crate::row::Row;
+use crate::row::{Row, RowVar, Tail};
 use crate::visibility::Visibility;
 
 /// Индекс де Брёйна: сколько связываний отсчитать наружу.
@@ -209,6 +209,35 @@ pub enum Term {
 }
 
 /// Поля с подставленными аргументами уровня.
+/// Row с подставленными аргументами-row: хвост-параметр заменяется целой row.
+fn instantiate_row(row: &Row<Term>, arguments: &[Row<Term>]) -> Row<Term> {
+    let mapped = row.map(|argument| argument.substitute_rows(arguments));
+    match row.tail() {
+        Some(Tail::Var(RowVar(index))) => arguments
+            .get(index as usize)
+            .map_or(mapped.clone(), |tail| mapped.substituted(tail)),
+        _ => mapped,
+    }
+}
+
+/// Поля с подставленными аргументами-row.
+fn rowed_fields(fields: &Fields, arguments: &[Row<Term>]) -> Fields {
+    Fields {
+        fields: fields
+            .iter()
+            .map(|field| Field {
+                name: Rc::clone(&field.name),
+                mult: field.mult,
+                ty: Rc::new(field.ty.substitute_rows(arguments)),
+            })
+            .collect(),
+        tail: fields
+            .tail
+            .as_ref()
+            .map(|tail| Rc::new(tail.substitute_rows(arguments))),
+    }
+}
+
 fn substituted(fields: &Fields, arguments: &[Level]) -> Fields {
     Fields {
         fields: fields
@@ -406,6 +435,81 @@ impl Term {
         Self::Const(name.into(), Rc::from([]), Rows::none())
     }
 
+    /// Подставляет аргументы вместо параметров row по всему терму.
+    ///
+    /// Вторая половина инстанциации (§10 вопрос 73): та же операция, что
+    /// [`Term::substitute_levels`], только по другому сорту. Хвост-параметр
+    /// заменяется целой row, и её метки дописываются к написанным - подстановка
+    /// приписывает сзади, потому что порядок внутри группы значим.
+    #[must_use]
+    pub fn substitute_rows(&self, arguments: &[Row<Self>]) -> Self {
+        if arguments.is_empty() {
+            return self.clone();
+        }
+        let recur = |term: &Rc<Self>| Rc::new(term.substitute_rows(arguments));
+        match self {
+            // Сорта и переменные row не носят.
+            Self::Var(_)
+            | Self::Meta(_)
+            | Self::EffectKind
+            | Self::Universe(_)
+            | Self::RowKind(_) => self.clone(),
+            Self::Lam(mult, name, body) => Self::Lam(*mult, Rc::clone(name), recur(body)),
+            Self::App(callee, argument) => Self::App(recur(callee), recur(argument)),
+            Self::Pi(binder, name, domain, row, codomain) => Self::Pi(
+                *binder,
+                Rc::clone(name),
+                recur(domain),
+                instantiate_row(row, arguments),
+                recur(codomain),
+            ),
+            Self::Let(mult, name, ty, value, body) => {
+                Self::Let(*mult, Rc::clone(name), recur(ty), recur(value), recur(body))
+            }
+            Self::Const(name, levels, rows) => Self::Const(
+                Rc::clone(name),
+                Rc::clone(levels),
+                Rows::new(
+                    rows.as_slice()
+                        .iter()
+                        .map(|row| instantiate_row(row, arguments)),
+                ),
+            ),
+            Self::Record(fields) => Self::Record(rowed_fields(fields, arguments)),
+            Self::Row(fields) => Self::Row(rowed_fields(fields, arguments)),
+            Self::Object(fields) => Self::Object(
+                fields
+                    .iter()
+                    .map(|(name, value)| (Rc::clone(name), recur(value)))
+                    .collect(),
+            ),
+            Self::With(base, fields) => Self::With(
+                recur(base),
+                fields
+                    .iter()
+                    .map(|(name, value)| (Rc::clone(name), recur(value)))
+                    .collect(),
+            ),
+            Self::Project(record, name) => Self::Project(recur(record), Rc::clone(name)),
+            Self::Case(case) => Self::Case(Rc::new(Case {
+                data: Rc::clone(&case.data),
+                levels: Rc::clone(&case.levels),
+                params: case.params,
+                consumed: case.consumed,
+                scrutinee: recur(&case.scrutinee),
+                motive: recur(&case.motive),
+                branches: case
+                    .branches
+                    .iter()
+                    .map(|branch| Branch {
+                        constructor: Rc::clone(&branch.constructor),
+                        body: Rc::new(branch.body.substitute_rows(arguments)),
+                    })
+                    .collect(),
+            })),
+        }
+    }
+
     /// Подставляет аргументы вместо параметров уровня по всему терму.
     ///
     /// Так тип определения инстанцируется в месте использования.
@@ -437,13 +541,17 @@ impl Term {
             Self::Let(mult, name, ty, value, body) => {
                 Self::Let(*mult, Rc::clone(name), recur(ty), recur(value), recur(body))
             }
-            Self::Const(name, levels, _) => Self::Const(
+            Self::Const(name, levels, rows) => Self::Const(
                 Rc::clone(name),
                 levels
                     .iter()
                     .map(|level| level.substitute(arguments))
                     .collect(),
-                Rows::none(),
+                Rows::new(
+                    rows.as_slice()
+                        .iter()
+                        .map(|row| row.map(|argument| argument.substitute_levels(arguments))),
+                ),
             ),
             Self::Record(fields) => Self::Record(substituted(fields, arguments)),
             Self::Row(fields) => Self::Row(substituted(fields, arguments)),
@@ -737,7 +845,7 @@ impl fmt::Display for Atom<'_> {
 mod tests {
     use std::rc::Rc;
 
-    use crate::row::{Label, Row};
+    use crate::row::{Label, Row, RowVar, Tail};
     use crate::term::Binder;
 
     use super::Term;
@@ -851,5 +959,31 @@ mod tests {
             // Группы упорядочены по имени, а не по написанию (§3.4).
             "(ω a : Type 0) -> {IO, State Int} #0"
         );
+    }
+
+    #[test]
+    fn a_row_parameter_is_replaced_by_a_whole_row() {
+        // Вторая половина инстанциации (§10 вопрос 73): вместо параметра
+        // подставляется целая row, и её метки дописываются к написанным.
+        // Приписывание идёт сзади - порядок внутри группы значим.
+        let label = |name: &str| Label {
+            name: name.into(),
+            arguments: Vec::new(),
+        };
+        let written = Row::closing([label("IO")], Some(Tail::Var(RowVar(0))));
+        let ty = Term::Pi(
+            Binder::explicit(Mult::Many),
+            "_".into(),
+            Rc::new(Term::universe(0)),
+            written,
+            Rc::new(Term::universe(0)),
+        );
+        let argument = Row::closing([label("State")], Some(Tail::Var(RowVar(3))));
+        let Term::Pi(_, _, _, row, _) = ty.substitute_rows(&[argument]) else {
+            panic!("подстановка формы не меняет");
+        };
+        assert_eq!(row.labels().len(), 2, "метки аргумента дописались");
+        assert_eq!(row.labels()[0].name.as_ref(), "IO", "написанное первым");
+        assert_eq!(row.tail(), Some(Tail::Var(RowVar(3))), "хвост из аргумента");
     }
 }

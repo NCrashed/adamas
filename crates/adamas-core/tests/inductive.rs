@@ -717,7 +717,7 @@ fn a_family_with_a_declared_arity_takes_polymorphic_constructors() {
     );
     let group = Group::of(
         Member::data("Box", 1, former)
-            .with_arity(1)
+            .with_arity(1, 0)
             .with_constructor("pack", pack),
     );
     let outcome = signature.declare(&mut metas, &group);

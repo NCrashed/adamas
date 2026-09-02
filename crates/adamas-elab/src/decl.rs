@@ -1430,6 +1430,9 @@ fn declare_members(
         generalization.collect_term(metas, &zonked);
     }
     let arity = generalization.arity();
+    // Арность-пара: вторая компонента считается тем же обобщением по тому же
+    // написанному типу (§10 вопрос 73).
+    let row_arity = generalization.row_arity();
     let types: Vec<Term> = types
         .iter()
         .map(|ty| {
@@ -1499,7 +1502,7 @@ fn declare_members(
     for (at, ty) in types.iter().enumerate() {
         let member = SigMember::definition(&qualified[at], Mult::Many, ty.clone())
             .with_body(trees[at].term.clone())
-            .with_arity(arity);
+            .with_arity(arity, row_arity);
         group = Some(match group {
             None => Group::of(member),
             Some(group) => group.and(member),
@@ -1577,7 +1580,7 @@ fn declare_mutual(
         let zonked = zonk_term(metas, ty);
         let mut generalization = Generalization::default();
         generalization.collect_term(metas, &zonked);
-        arities.push(generalization.arity());
+        arities.push((generalization.arity(), generalization.row_arity()));
         generalized.push(generalization.apply_term(metas, &zonked));
     }
 
@@ -1588,11 +1591,11 @@ fn declare_mutual(
             // Свой параметр - `Var`, чужой - дырка: сосед объявляется рядом,
             // но инстанцируется в каждом месте использования заново.
             let levels: Rc<[Level]> = if other == at {
-                (0..arities[at])
+                (0..arities[at].0)
                     .map(|index| Level::Var(LevelVar(index)))
                     .collect()
             } else {
-                (0..arities[other]).map(|_| metas.fresh_level()).collect()
+                (0..arities[other].0).map(|_| metas.fresh_level()).collect()
             };
             visible.push(Member {
                 name: Rc::clone(&sibling.name.text),
@@ -1633,7 +1636,7 @@ fn declare_mutual(
         let declared =
             SigMember::definition(&member.name.text, Mult::Many, generalized[at].clone())
                 .with_body(trees[at].term.clone())
-                .with_arity(arities[at]);
+                .with_arity(arities[at].0, arities[at].1);
         group = Some(match group {
             None => Group::of(declared),
             Some(group) => group.and(declared),

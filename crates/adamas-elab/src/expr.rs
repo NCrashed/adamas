@@ -98,7 +98,14 @@ impl Unbound {
 fn written_rows(expr: &Expr, negative: bool, found: &mut Vec<Span>) {
     match &expr.kind {
         // Запись с написанным хвостом свою переменную уже назвала.
-        ExprKind::RecordType(_, None) if negative => found.push(expr.span),
+        // Зависимая закрыта по §4.2, и правило читается из текста: поле,
+        // назвавшее предыдущее, - и есть зависимость. Считать это по
+        // элаборированной записи поздно: параметр раздаётся раньше, чем поля
+        // проверены, и снятый после раздачи хвост оставил бы параметр без
+        // потребителя - то есть невыводимым в каждом употреблении.
+        ExprKind::RecordType(fields, None) if negative && !depends_by_text(fields) => {
+            found.push(expr.span);
+        }
         ExprKind::Arrow(left, right) => {
             written_rows(left, !negative, found);
             written_rows(right, negative, found);
@@ -110,6 +117,75 @@ fn written_rows(expr: &Expr, negative: bool, found: &mut Vec<Span>) {
             written_rows(codomain, negative, found);
         }
         _ => {}
+    }
+}
+
+/// Есть ли у записи поле, чей тип зависит от предыдущего.
+///
+/// Телескоп: `i`-е поле стоит под `i` связываниями, и упоминание любого из них
+/// и есть зависимость (§4.2).
+fn dependent(fields: &[CoreField]) -> bool {
+    fields.iter().enumerate().any(|(index, field)| {
+        field
+            .ty
+            .mentions_recent(0, u32::try_from(index).unwrap_or(u32::MAX))
+    })
+}
+
+/// То же по тексту: назвал ли тип поля имя одного из предыдущих.
+///
+/// §4.2 требует, чтобы правило читалось из объявления, и здесь это буквально
+/// так: имя ищется вхождением, затенение не разбирается. Разойтись с
+/// [`dependent`] эти два взгляда могут только в сторону строгости - имя,
+/// затенённое внутренним связыванием, текст сочтёт зависимостью, а элаборация
+/// нет, - и цена такого расхождения одна: запись, которую можно было бы
+/// открыть, останется закрытой.
+fn depends_by_text(fields: &[ast::RecordField]) -> bool {
+    let mut earlier: Vec<&Symbol> = Vec::with_capacity(fields.len());
+    for field in fields {
+        if names_any(&field.ty, &earlier) {
+            return true;
+        }
+        earlier.push(&field.name.text);
+    }
+    false
+}
+
+/// Встречается ли в выражении хоть одно из имён.
+fn names_any(expr: &Expr, wanted: &[&Symbol]) -> bool {
+    let recur = |inner: &Expr| names_any(inner, wanted);
+    match &expr.kind {
+        ExprKind::Name(name) => wanted.iter().any(|it| **it == name.text),
+        ExprKind::Lit(_) | ExprKind::Hole => false,
+        ExprKind::Project(inner, _) => recur(inner),
+        ExprKind::App(left, right)
+        | ExprKind::TypeApp(left, right)
+        | ExprKind::Arrow(left, right) => recur(left) || recur(right),
+        ExprKind::Using { body, .. } | ExprKind::Lam { body, .. } => recur(body),
+        ExprKind::Pi { binders, codomain } => {
+            binders.iter().filter_map(|it| it.ty.as_ref()).any(&recur) || recur(codomain)
+        }
+        ExprKind::Block(block) => block.stmts.iter().any(|stmt| match &stmt.kind {
+            ast::StmtKind::Expr(inner) => recur(inner),
+            ast::StmtKind::Let(bindings) => bindings
+                .iter()
+                .any(|it| it.ty.as_ref().is_some_and(&recur) || recur(&it.body)),
+        }),
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => recur(cond) || recur(then_branch) || recur(else_branch),
+        ExprKind::Case { scrutinee, alts } => {
+            recur(scrutinee) || alts.iter().any(|alt| recur(&alt.body))
+        }
+        ExprKind::RecordType(inner, _) => inner.iter().any(|it| recur(&it.ty)),
+        ExprKind::Record(inner) => inner.iter().any(|(_, value)| recur(value)),
+        ExprKind::Update(base, inner) => recur(base) || inner.iter().any(|(_, value)| recur(value)),
+        ExprKind::Tuple(items) | ExprKind::List(items) => items.iter().any(&recur),
+        ExprKind::Chain(chain) => {
+            recur(&chain.head) || chain.tail.iter().any(|(_, item)| recur(item))
+        }
     }
 }
 
@@ -1560,6 +1636,14 @@ impl<'a> Elaborator<'a> {
             None => self.row_variable(span),
         };
         let inner = self.record_fields(fields)?;
+        // **Зависимость закрывает запись** (§4.2), и auto-lift обязан это
+        // видеть: `{ a : Type, b : a }` - закрытая запись, а не открытая,
+        // которой не написали хвост. Раздача метит запись по спану, до полей,
+        // и зависимость к тому моменту ещё не известна - поэтому переменная
+        // снимается здесь, когда поля уже элаборированы. Написанный хвост так
+        // не снимается: автор попросил открытую запись явно, и отвечает ему
+        // ядро отказом, а не молчаливым сужением написанного.
+        let tail = tail.filter(|_| written.is_some() || !dependent(&inner));
         Ok(Term::Record(Fields {
             fields: inner.into(),
             tail,

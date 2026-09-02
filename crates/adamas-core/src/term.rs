@@ -420,6 +420,59 @@ impl Term {
         }
     }
 
+    /// Ссылается ли терм на `window` ближайших связываний контекста.
+    ///
+    /// Спрашивают это в двух местах, и оба про **зависимость поля от соседа**.
+    /// Тип `i`-го поля телескопа стоит под `i` связываниями предыдущих, и
+    /// упоминание любого из них означает, что запись зависимая (§4.2). Тем же
+    /// вопросом сравнение рядов узнаёт, можно ли прочитать тип поля обратно на
+    /// исходной глубине.
+    ///
+    /// `depth` - сколько связываний уже пройдено внутри самого терма: под ними
+    /// индексы смещаются, и искомое связывание видно как `depth + k` при
+    /// `k < window`.
+    #[must_use]
+    pub fn mentions_recent(&self, depth: u32, window: u32) -> bool {
+        let recur = |inner: &Self| inner.mentions_recent(depth, window);
+        let under = |inner: &Self| inner.mentions_recent(depth + 1, window);
+        match self {
+            Self::Var(index) => index.0 >= depth && index.0 - depth < window,
+            Self::Universe(_) | Self::RowKind(_) | Self::Const(..) | Self::Meta(_) => false,
+            Self::Project(record, _) => recur(record),
+            Self::App(callee, argument) => recur(callee) || recur(argument),
+            Self::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
+            Self::With(base, fields) => recur(base) || fields.iter().any(|(_, value)| recur(value)),
+            // Поля записи и ряда - телескоп: `i`-е стоит под `i` связываниями.
+            Self::Record(fields) | Self::Row(fields) => {
+                let at = |index: usize| depth + u32::try_from(index).unwrap_or(u32::MAX);
+                fields
+                    .iter()
+                    .enumerate()
+                    .any(|(index, field)| field.ty.mentions_recent(at(index), window))
+                    || fields
+                        .tail
+                        .as_ref()
+                        .is_some_and(|tail| tail.mentions_recent(at(fields.len()), window))
+            }
+            Self::Lam(_, _, body) => under(body),
+            Self::Pi(_, _, domain, row, codomain) => {
+                recur(domain)
+                    || under(codomain)
+                    || row
+                        .labels()
+                        .iter()
+                        .flat_map(|label| &label.arguments)
+                        .any(recur)
+            }
+            Self::Let(_, _, ty, value, body) => recur(ty) || recur(value) || under(body),
+            Self::Case(case) => {
+                recur(&case.scrutinee)
+                    || recur(&case.motive)
+                    || case.branches.iter().any(|branch| recur(&branch.body))
+            }
+        }
+    }
+
     /// Наибольший индекс параметра уровня, встречающийся в терме.
     #[must_use]
     pub fn max_level_var(&self) -> Option<u32> {

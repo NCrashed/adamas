@@ -1772,6 +1772,49 @@ fn a_record_declares_its_fields_or_assigns_them() {
 }
 
 #[test]
+fn a_dependent_record_is_closed() {
+    // §4.2: зависимость закрывает запись, и auto-lift обязан это видеть.
+    // Раздавая row-переменную всякой записи без написанного хвоста, он
+    // открывал и `{ a : Type, b : a }`: лишнее поле проходило, а
+    // `{ p | a = Bool }` подставляло чужое `a`, оставив прежнее `b`, - то есть
+    // давало жителя любого типа. Сама подпись при этом законна: закрытой она и
+    // задумана, отказом отвечает только лишнее поле.
+    let signature = format!(
+        "{BASE}
+pick : {{ a : Type, b : a }} -> Nat
+pick p = Zero
+"
+    );
+    program(&format!(
+        "{signature}\nfits : Nat\nfits = pick {{ a = Nat, b = Zero }}\n"
+    ));
+    let error = refused(&format!(
+        "{signature}\nextra : Nat\nextra = pick {{ a = Nat, b = Zero, more = Zero }}\n"
+    ));
+    assert!(
+        matches!(error, ElabError::Core { .. }),
+        "получено {error:?}"
+    );
+
+    // Написанный хвост у зависимой записи - отказ, а не молчаливое сужение:
+    // автор попросил открытую явно.
+    let written = refused(&format!(
+        "{BASE}
+dep : {{ a : Type, b : a | r }} -> Nat
+dep p = Zero
+"
+    ));
+    assert!(
+        matches!(
+            written,
+            ElabError::Core { ref error, .. }
+                if matches!(error.kind, ErrorKind::OpenDependentRecord { .. })
+        ),
+        "получено {written:?}"
+    );
+}
+
+#[test]
 fn two_open_rows_of_different_depth_do_not_crash() {
     // Развёртка ряда считает тип `i`-го поля под своими `i` переменными, а
     // собираемый ряд стоит при исходном размере. На поле, ссылающемся на

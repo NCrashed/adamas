@@ -312,7 +312,7 @@ fn same_open(
                 continue;
             }
             let spread = u32::try_from(index).unwrap_or(u32::MAX);
-            if reaches_spread(&quote(size + spread, ty), 0, spread) {
+            if quote(size + spread, ty).mentions_recent(0, spread) {
                 return None;
             }
             fields.push(Field {
@@ -408,57 +408,6 @@ fn labelled(metas: &Metas, size: u32, telescope: &Telescope) -> Spread {
                     tail: Some(tail),
                 };
             }
-        }
-    }
-}
-
-/// Ссылается ли терм на переменные развёртки ряда.
-///
-/// Терм прочитан обратно в контексте размера `size + spread`, где последние
-/// `spread` переменных - те, что развёртка завела под предыдущие поля.
-/// `depth` - сколько связываний пройдено внутри самого терма: под ними индексы
-/// смещаются, и переменная развёртки видна как `depth + k` при `k < spread`.
-fn reaches_spread(term: &Term, depth: u32, spread: u32) -> bool {
-    let recur = |inner| reaches_spread(inner, depth, spread);
-    let under = |inner| reaches_spread(inner, depth + 1, spread);
-    match term {
-        Term::Var(index) => index.0 >= depth && index.0 - depth < spread,
-        Term::Universe(_) | Term::RowKind(_) | Term::Const(..) | Term::Meta(_) => false,
-        Term::Project(record, _) => recur(record),
-        Term::App(callee, argument) => recur(callee) || recur(argument),
-        Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
-        Term::With(base, fields) => recur(base) || fields.iter().any(|(_, value)| recur(value)),
-        // Поля записи и ряда - телескоп: `i`-е стоит под `i` связываниями.
-        Term::Record(fields) | Term::Row(fields) => {
-            fields.iter().enumerate().any(|(at, field)| {
-                reaches_spread(
-                    &field.ty,
-                    depth + u32::try_from(at).unwrap_or(u32::MAX),
-                    spread,
-                )
-            }) || fields.tail.as_ref().is_some_and(|tail| {
-                reaches_spread(
-                    tail,
-                    depth + u32::try_from(fields.len()).unwrap_or(u32::MAX),
-                    spread,
-                )
-            })
-        }
-        Term::Lam(_, _, body) => under(body),
-        Term::Pi(_, _, domain, row, codomain) => {
-            recur(domain)
-                || under(codomain)
-                || row
-                    .labels()
-                    .iter()
-                    .flat_map(|label| &label.arguments)
-                    .any(recur)
-        }
-        Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || under(body),
-        Term::Case(case) => {
-            recur(&case.scrutinee)
-                || recur(&case.motive)
-                || case.branches.iter().any(|branch| recur(&branch.body))
         }
     }
 }

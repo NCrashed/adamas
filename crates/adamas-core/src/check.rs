@@ -1409,6 +1409,21 @@ fn infer_fields(
             ));
         }
         let position = u32::try_from(index).unwrap_or(u32::MAX);
+        // **Зависимость закрывает запись** (§4.2). Хвост обещает поля, которых
+        // объявление не знает, а тип поля, ссылающийся на предыдущее,
+        // осмыслен только при известном значении того предыдущего: расширить
+        // такую запись значит подставить в `b : a` чужое `a`, оставив старое
+        // `b`. Отсюда житель любого типа, и код опирается на этот инвариант в
+        // пяти местах, ни разу его не проверив.
+        if fields.tail.is_some() && field.ty.mentions_recent(0, position) {
+            return Err(refuse(
+                ctx,
+                metas,
+                ErrorKind::OpenDependentRecord {
+                    name: Rc::clone(&field.name),
+                },
+            ));
+        }
         let found = framed(
             is_type(&inner, metas, &field.ty),
             Frame::MemberType(position),

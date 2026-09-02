@@ -258,6 +258,18 @@ pub enum ErrorKind {
         name: Name,
     },
 
+    /// У записи с хвостом поле, чей тип зависит от предыдущего.
+    ///
+    /// §4.2: зависимость закрывает запись. Хвост обещает поля, которых
+    /// объявление не знает, а тип `b : a` осмыслен только при известном `a`:
+    /// расширение подставило бы чужое `a`, оставив прежнее `b`, и из этого
+    /// строится житель любого типа.
+    #[error("поле `{name}` зависит от предыдущего, а такая запись не открывается")]
+    OpenDependentRecord {
+        /// Имя зависимого поля.
+        name: Name,
+    },
+
     /// У записи не столько полей, сколько у её типа.
     #[error("полей записи {found} при {expected} в типе")]
     RecordFields {
@@ -414,6 +426,7 @@ impl ErrorKind {
             }
             Self::RecordFields { .. }
             | Self::DuplicateField { .. }
+            | Self::OpenDependentRecord { .. }
             | Self::ErasedField { .. }
             | Self::UnboundIndex { .. }
             | Self::LambdaMultiplicity { .. }

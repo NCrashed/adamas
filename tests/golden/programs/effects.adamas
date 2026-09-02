@@ -141,3 +141,17 @@ twice = handleMulti counted with
   return v -> v
   get -> resume (resume True)
   put x -> resume MkUnit
+
+-- `@`-аннотация правила не меняет: снимается всё то же первое (внутреннее)
+-- вхождение, а написанные аргументы говорят, чем обязаны оказаться его. Выбрать
+-- вхождение она не может - элиминатор ставит снимаемую метку первой в своём
+-- домене, а порядок внутри группы одноимённых значим.
+nested : {State Nat, State Bool} Bool
+nested u =
+  put True
+  get
+
+pinned : {State Bool} Bool
+pinned u = handle @(State Nat) nested with
+  get -> resume Zero
+  put x -> resume MkUnit

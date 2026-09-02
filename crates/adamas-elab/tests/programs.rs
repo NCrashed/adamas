@@ -4938,6 +4938,46 @@ outer u = handle both with
 }
 
 #[test]
+fn a_written_label_pins_the_occurrence_it_removes() {
+    // §3.4: `@`-аннотация правила не меняет - снимается всё то же первое
+    // (внутреннее) вхождение, - а говорит, чем обязаны оказаться его аргументы.
+    // Выбирать вхождение она не может: элиминатор ставит снимаемую метку первой
+    // в своём домене, а порядок внутри группы одноимённых значим.
+    let head = format!(
+        "{}
+both : {{State Nat, State Bool}} Bool
+both u =
+  put True
+  get
+",
+        effects()
+    );
+    program(&format!(
+        "{head}
+inner : {{State Bool}} Bool
+inner u = handle @(State Nat) both with
+  get -> resume Zero
+  put x -> resume MkUnit
+"
+    ));
+    for (written, why) in [
+        ("@(State Bool)", "первое вхождение"),
+        ("@Bool", "обязана быть эффектом"),
+        ("@Log", "такой операции у эффекта нет"),
+    ] {
+        let error = refused(&format!(
+            "{head}
+inner : {{State Bool}} Bool
+inner u = handle {written} both with
+  get -> resume Zero
+  put x -> resume MkUnit
+"
+        ));
+        assert!(error.to_string().contains(why), "получено {error:?}");
+    }
+}
+
+#[test]
 fn a_single_shot_resumption_is_affine() {
     // Различие single-shot и multi-shot выражено не отдельным механизмом, а
     // линейностью (§3.3): `resume` при `handle` аффинна, при `handleMulti` -

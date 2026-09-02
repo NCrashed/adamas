@@ -1032,6 +1032,7 @@ fn has_negative_occurrence(term: &Term) -> bool {
             Term::Record(_)
             | Term::Row(_)
             | Term::RowKind(_)
+            | Term::EffectKind
             | Term::Object(_)
             | Term::With(..)
             | Term::Project(..) => {

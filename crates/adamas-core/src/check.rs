@@ -89,6 +89,11 @@ fn zonked(metas: &Metas, term: &Term) -> Term {
     crate::meta::zonk_term(metas, term)
 }
 
+/// Универсум номер `n` значением - для сортов с фиксированным уровнем.
+fn sort(n: u32) -> Rc<Value> {
+    Rc::new(Value::Universe(Level::number(n)))
+}
+
 /// Синтезирует тип терма и считает использования.
 ///
 /// # Errors
@@ -126,6 +131,8 @@ pub fn infer(
             Rc::new(Value::Universe(level.clone().succ())),
             Usage::zero(ctx.size()),
         )),
+        // `Effect : Type 1` - содержимого у метки нет, поднимать сорт не над чем.
+        Term::EffectKind => Ok((sort(1), Usage::zero(ctx.size()))),
 
         // `Pi` сам является типом, поэтому и домен, и кодомен проверяются в
         // стёртом фрагменте, а использований он не порождает вовсе.
@@ -796,7 +803,9 @@ fn mentions_seen<'a>(
     match term {
         // Дырка имени не упоминает: она замкнута, а её тип живёт отдельно и
         // проверен там, где заведён.
-        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Meta(_) => false,
+        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::EffectKind | Term::Meta(_) => {
+            false
+        }
         Term::Record(fields) | Term::Row(fields) => fields.iter().any(|field| recur(&field.ty)),
         Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
         Term::With(base, fields) => recur(base) || fields.iter().any(|(_, value)| recur(value)),

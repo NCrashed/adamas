@@ -104,6 +104,17 @@ pub enum Term {
     /// Сам `Row ℓ` живёт в `Type (ℓ+1)`, поэтому `{0 r : Row ℓ} -> …` есть
     /// обычная `Pi`, а row-переменная - обычное связывание.
     RowKind(Level),
+    /// Сорт `Effect` - то, чем оканчивается тип формера метки (§3.4).
+    ///
+    /// `effect State s where …` объявляет `State : Type ℓ -> Effect`, и
+    /// `State Int` есть **эффект**, а row - набор эффектов. Сорт устроен по
+    /// образцу `Level`: населяют его не типы, а метки, и обитателей его в
+    /// рантайме нет.
+    ///
+    /// Уровня у него нет, в отличие от `Row ℓ`: аргументы метки живут в своих
+    /// универсумах, а сама метка ничего не содержит - она имя. Отсюда и
+    /// предикативность не задета: `Effect` живёт в `Type 0`.
+    EffectKind,
     /// Ряд: набор полей и, возможно, хвост. Значение сорта `Row ℓ`.
     ///
     /// Порядок в нём не значим - в отличие от телескопа записи, - потому что
@@ -362,7 +373,7 @@ impl Term {
         }
         let recur = |term: &Rc<Self>| Rc::new(term.substitute_levels(arguments));
         match self {
-            Self::Var(_) | Self::Meta(_) => self.clone(),
+            Self::Var(_) | Self::Meta(_) | Self::EffectKind => self.clone(),
             Self::Universe(level) => Self::Universe(level.substitute(arguments)),
             Self::RowKind(level) => Self::RowKind(level.substitute(arguments)),
             Self::Lam(mult, name, body) => Self::Lam(*mult, Rc::clone(name), recur(body)),
@@ -440,7 +451,11 @@ impl Term {
         let under = |inner: &Self| inner.mentions_recent(depth + 1, window);
         match self {
             Self::Var(index) => index.0 >= depth && index.0 - depth < window,
-            Self::Universe(_) | Self::RowKind(_) | Self::Const(..) | Self::Meta(_) => false,
+            Self::Universe(_)
+            | Self::RowKind(_)
+            | Self::EffectKind
+            | Self::Const(..)
+            | Self::Meta(_) => false,
             Self::Project(record, _) => recur(record),
             Self::App(callee, argument) => recur(callee) || recur(argument),
             Self::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
@@ -484,7 +499,7 @@ impl Term {
             (found, None) | (None, found) => found,
         };
         match self {
-            Self::Var(_) | Self::Meta(_) => None,
+            Self::Var(_) | Self::Meta(_) | Self::EffectKind => None,
             Self::Universe(level) | Self::RowKind(level) => level.max_var(),
             Self::Lam(_, _, body) => body.max_level_var(),
             Self::App(callee, argument) => join(callee.max_level_var(), argument.max_level_var()),
@@ -556,6 +571,7 @@ impl fmt::Display for Term {
             // связываний, а индекс однозначен.
             Self::Var(Index(index)) => write!(f, "#{index}"),
             Self::Meta(TermMeta(name)) => write!(f, "?{name}"),
+            Self::EffectKind => f.write_str("Effect"),
             Self::Universe(level) => write!(f, "Type {level}"),
             Self::Lam(mult, name, body) => write!(f, "\\({mult} {name}) -> {body}"),
             Self::App(callee, argument) => {

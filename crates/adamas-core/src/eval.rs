@@ -96,6 +96,7 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
         }
 
         Term::RowKind(level) => Rc::new(Value::RowKind(level.clone())),
+        Term::EffectKind => Rc::new(Value::EffectKind),
 
         // Ни тип записи, ни ряд вычислением не раскрываются: поля живут
         // телескопом, и вычислить тип поля можно только вместе со значениями
@@ -383,6 +384,7 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
         Value::Universe(level) => Term::Universe(level.normalize()),
 
         Value::RowKind(level) => Term::RowKind(level.normalize()),
+        Value::EffectKind => Term::EffectKind,
 
         // Телескоп читается по одному полю: тип каждого следующего живёт под
         // предыдущими, и подставлять туда надо свежие переменные.

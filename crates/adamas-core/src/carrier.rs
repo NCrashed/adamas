@@ -282,7 +282,12 @@ fn inherit(signature: &Signature, term: &Term, depth: u32, found: &mut [Mult]) {
                 inherit(signature, &branch.body, depth, found);
             }
         }
-        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Const(..) | Term::Meta(_) => {}
+        Term::Var(_)
+        | Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Const(..)
+        | Term::Meta(_) => {}
     }
 }
 

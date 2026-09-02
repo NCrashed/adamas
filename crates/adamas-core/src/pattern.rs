@@ -1752,7 +1752,11 @@ fn depends_term(term: &Term, depth: u32, size: u32, levels: &[u32]) -> bool {
     let under = |inner: &Rc<Term>| depends_term(inner, depth + 1, size, levels);
     match term {
         Term::Var(Index(index)) => *index >= depth && levels.contains(&(size + depth - 1 - index)),
-        Term::Universe(_) | Term::RowKind(_) | Term::Const(..) | Term::Meta(_) => false,
+        Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Const(..)
+        | Term::Meta(_) => false,
         // Хвост стоит на исходной глубине, а не под полями: открытый ряд
         // зависимостей не имеет (§4.2).
         Term::Record(fields) | Term::Row(fields) => {
@@ -1902,7 +1906,11 @@ fn well_scoped(term: &Term, binders: u32) -> bool {
     fn go(term: &Term, depth: u32, binders: u32) -> bool {
         match term {
             Term::Var(Index(index)) => *index < depth + binders,
-            Term::Universe(_) | Term::RowKind(_) | Term::Const(..) | Term::Meta(_) => true,
+            Term::Universe(_)
+            | Term::RowKind(_)
+            | Term::EffectKind
+            | Term::Const(..)
+            | Term::Meta(_) => true,
             Term::Record(fields) | Term::Row(fields) => {
                 fields.iter().enumerate().all(|(index, field)| {
                     go(
@@ -2008,7 +2016,11 @@ fn rewrite<F: Fn(u32) -> Term>(term: &Term, depth: u32, from: u32, map: &F) -> T
                 .collect(),
         ),
         Term::Project(record, name) => Term::Project(recur(record), Rc::clone(name)),
-        Term::Universe(_) | Term::RowKind(_) | Term::Const(..) | Term::Meta(_) => term.clone(),
+        Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Const(..)
+        | Term::Meta(_) => term.clone(),
         Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), under(body)),
         Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
         Term::Pi(binder, name, domain, row, codomain) => Term::Pi(
@@ -2081,6 +2093,7 @@ fn shift_at(term: &Term, depth: u32, by: u32) -> Term {
             Term::Var(_)
             | Term::Universe(_)
             | Term::RowKind(_)
+            | Term::EffectKind
             | Term::Const(..)
             | Term::Meta(_) => term.clone(),
             Term::Record(fields) => Term::Record(shift_fields(fields, depth, by)),

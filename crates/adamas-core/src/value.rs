@@ -201,6 +201,8 @@ pub enum Value {
     Object(Rc<[(Name, Rc<Value>)]>),
     /// Сорт рядов `Row ℓ`.
     RowKind(Level),
+    /// Сорт `Effect` - то, чем оканчивается тип формера метки (§3.4).
+    EffectKind,
     /// Ряд - тот же телескоп, но сортом он не тип, а ряд.
     Row(Telescope),
     /// Универсум.
@@ -298,6 +300,7 @@ impl fmt::Display for Value {
             }
             Self::Record(telescope) => write!(f, "{{…{}}}", telescope.fields().len()),
             Self::RowKind(level) => write!(f, "Row {level}"),
+            Self::EffectKind => f.write_str("Effect"),
             Self::Row(telescope) => write!(f, "{{|{}}}", telescope.fields().len()),
             Self::Object(fields) => write!(f, "{{={}}}", fields.len()),
             Self::Universe(level) => write!(f, "Type {level}"),

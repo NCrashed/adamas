@@ -208,7 +208,7 @@ pub(crate) fn calls_within(group: &[Name], term: &Term) -> Vec<Name> {
 fn collect_calls(group: &[Name], term: &Term, found: &mut Vec<Name>) {
     let mut recur = |inner| collect_calls(group, inner, found);
     match term {
-        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Meta(_) => {}
+        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::EffectKind | Term::Meta(_) => {}
         Term::Const(other, _) => {
             if group.contains(other) && !found.contains(other) {
                 found.push(Rc::clone(other));
@@ -268,7 +268,9 @@ fn collect_calls(group: &[Name], term: &Term, found: &mut Vec<Name>) {
 fn calls_a_partial_definition(signature: &Signature, name: &Name, term: &Term) -> bool {
     let recur = |inner| calls_a_partial_definition(signature, name, inner);
     match term {
-        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Meta(_) => false,
+        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::EffectKind | Term::Meta(_) => {
+            false
+        }
         Term::Record(fields) | Term::Row(fields) => {
             fields.iter().any(|field| recur(&field.ty))
                 || fields.tail.as_ref().is_some_and(|tail| recur(tail))
@@ -345,7 +347,11 @@ impl Walk<'_> {
         match term {
             // Дырка размера не несёт и вызовом не является: она замкнута, а
             // зависимость от контекста выражена применениями вокруг неё.
-            Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Meta(_) => {}
+            Term::Var(_)
+            | Term::Universe(_)
+            | Term::RowKind(_)
+            | Term::EffectKind
+            | Term::Meta(_) => {}
 
             // Запись размера не несёт: поля - типы и значения, а уменьшение
             // считается по разбору. Обход нужен, чтобы вызовы внутри нашлись.

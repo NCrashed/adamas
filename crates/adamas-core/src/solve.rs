@@ -349,5 +349,6 @@ fn read(
         }
         Value::Universe(level) => Some(Term::Universe(level.clone())),
         Value::RowKind(level) => Some(Term::RowKind(level.clone())),
+        Value::EffectKind => Some(Term::EffectKind),
     }
 }

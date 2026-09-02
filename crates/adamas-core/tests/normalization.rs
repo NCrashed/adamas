@@ -105,6 +105,7 @@ fn well_scoped(term: &Term, binders: u32) -> bool {
         Term::Record(_)
         | Term::Row(_)
         | Term::RowKind(_)
+        | Term::EffectKind
         | Term::Object(_)
         | Term::With(..)
         | Term::Project(..) => {
@@ -138,6 +139,7 @@ fn is_normal_form(term: &Term) -> bool {
         Term::Record(_)
         | Term::Row(_)
         | Term::RowKind(_)
+        | Term::EffectKind
         | Term::Object(_)
         | Term::With(..)
         | Term::Project(..) => {
@@ -165,6 +167,7 @@ fn rename(term: &Term) -> Term {
         Term::Record(_)
         | Term::Row(_)
         | Term::RowKind(_)
+        | Term::EffectKind
         | Term::Object(_)
         | Term::With(..)
         | Term::Project(..) => {
@@ -217,6 +220,7 @@ fn wrap_in_redexes(term: &Term, budget: &mut u32) -> Term {
         Term::Record(_)
         | Term::Row(_)
         | Term::RowKind(_)
+        | Term::EffectKind
         | Term::Object(_)
         | Term::With(..)
         | Term::Project(..) => {

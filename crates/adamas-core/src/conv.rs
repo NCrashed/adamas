@@ -585,6 +585,9 @@ fn rigid(
     match (&**left, &**right) {
         // Универсум и сорт рядов сравниваются уровнем. Смешать их нельзя -
         // варианты разные, - а правило у них одно.
+        // Сорт `Effect` один на всех: сравнивать в нём нечего - ни уровня,
+        // ни аргументов у него нет.
+        (Value::EffectKind, Value::EffectKind) => true,
         (Value::Universe(a), Value::Universe(b)) | (Value::RowKind(a), Value::RowKind(b)) => {
             metas.unify_levels(a, b)
         }

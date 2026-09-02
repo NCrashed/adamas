@@ -369,6 +369,7 @@ fn level_vars(term: &Term, found: &mut Vec<u32>) {
         Term::Record(_)
         | Term::Row(_)
         | Term::RowKind(_)
+        | Term::EffectKind
         | Term::Object(_)
         | Term::With(..)
         | Term::Project(..) => {

@@ -4506,7 +4506,7 @@ State : Type -> Effect
 counter : {{State Bool}} Bool
 counter u = True
 
-taken : ({{State Bool}} Bool) -> Bool
+taken : ({{State Bool}} Bool) -> {{State Bool}} Bool
 taken c = c MkUnit
 "
     ));
@@ -4538,6 +4538,44 @@ step : Bool -> {{State Bool | e}} Bool
     ));
     assert!(
         matches!(error, ElabError::Missing { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn an_effect_must_be_discharged_by_the_surrounding_row() {
+    // §3.4: применение допустимо, когда окружающая row есть row вызываемого,
+    // расширенная слева замкнутым набором меток. Отсюда две стороны: чистая
+    // функция эффектную не зовёт, а под своей row - зовёт.
+    let head = format!(
+        "{BASE}
+State : Type -> Effect
+
+Log : Effect
+
+step : Bool -> {{State Bool}} Bool
+step b = b
+"
+    );
+    program(&format!(
+        "{head}
+same : Bool -> {{State Bool}} Bool
+same b = step b
+
+wider : Bool -> {{Log, State Bool}} Bool
+wider b = step b
+"
+    ));
+    // Пустая окружающая не гасит ничего - в том числе и в стёртом фрагменте,
+    // где она пуста всегда.
+    let error = refused(&format!(
+        "{head}
+pure : Bool -> Bool
+pure b = step b
+"
+    ));
+    assert!(
+        error.to_string().contains("не погашены"),
         "получено {error:?}"
     );
 }

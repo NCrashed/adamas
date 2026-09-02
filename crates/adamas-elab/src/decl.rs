@@ -482,7 +482,7 @@ fn alias(
     // их упоминать, - поэтому и элаборируются они одной последовательностью.
     let outer = elaborator.telescope(params_of(within), true, Mult::Many)?;
     let owned_params =
-        elaborator.beneath(&outer, |it| it.telescope(written.params, false, Mult::Zero))?;
+        elaborator.beneath(&outer, |it| it.telescope(written.params, false, Mult::Many))?;
     let params: Vec<Param> = outer.iter().chain(owned_params.iter()).cloned().collect();
     // Тело и его сорт считаются **под параметрами**: тип члена функтора живёт
     // под ними, и в пустом контексте считать его нечем.

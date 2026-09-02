@@ -1734,7 +1734,7 @@ impl<'a> Elaborator<'a> {
             // телескоп по ним, оканчивающийся сортом. Написать этот телескоп
             // сигнатурой нельзя по той же причине, по какой не пишется алиас:
             // конкретный универсум в поверхностном языке не выражается.
-            let params = self.telescope(first.params, false, Mult::Zero)?;
+            let params = self.telescope(first.params, false, Mult::Many)?;
             let level = self.metas.fresh_level();
             self.wrapped(&params, false, |_| Ok(Term::Universe(level)))?
         };

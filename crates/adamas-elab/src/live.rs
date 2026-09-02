@@ -135,6 +135,8 @@ impl<'a> Spent<'a> {
             ExprKind::RecordType(..)
             | ExprKind::Pi { .. }
             | ExprKind::Arrow(..)
+            // Row стоит в позиции типа, а тип ничего не расходует.
+            | ExprKind::Effectful { .. }
             | ExprKind::Lit(_)
             | ExprKind::Hole => false,
         }

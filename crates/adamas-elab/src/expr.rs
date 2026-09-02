@@ -16,7 +16,7 @@ use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::pattern::{Clause, Pattern as CorePattern, PatternError, compile_case};
-use adamas_core::row::Row;
+use adamas_core::row::{Label, Row};
 use adamas_core::sig::{Definition, DefinitionKind, Signature};
 use adamas_core::source::Span;
 use adamas_core::term::{Binder, Field as CoreField, Fields, Name as CoreName, Rows, Term};
@@ -157,6 +157,9 @@ pub(crate) fn names_any(expr: &Expr, wanted: &[&Symbol]) -> bool {
     match &expr.kind {
         ExprKind::Name(name) => wanted.iter().any(|it| **it == name.text),
         ExprKind::Lit(_) | ExprKind::Hole => false,
+        ExprKind::Effectful { labels, body, .. } => {
+            recur(body) || labels.iter().flat_map(|it| &it.arguments).any(recur)
+        }
         ExprKind::Project(inner, _) => recur(inner),
         ExprKind::App(left, right)
         | ExprKind::TypeApp(left, right)
@@ -788,6 +791,15 @@ impl<'a> Elaborator<'a> {
     fn free_in(&self, expr: &Expr, bound: &mut Vec<Symbol>, found: &mut Unbound) {
         match &expr.kind {
             ExprKind::Name(name) => self.free_name(name, bound, found),
+            // Метка row - объявленное имя, свободной быть не может; аргументы
+            // её - обычные термы, и свободные имена в них поднимаются как
+            // всюду. Хвост здесь не считается: он приходит с auto-lift.
+            ExprKind::Effectful { labels, body, .. } => {
+                self.free_in(body, bound, found);
+                for argument in labels.iter().flat_map(|it| &it.arguments) {
+                    self.free_in(argument, bound, found);
+                }
+            }
             // Имя инстанса свободным не считается: оно обязано быть
             // объявленным, как и всякая ссылка (§4.3).
             ExprKind::Using { body, .. } => self.free_in(body, bound, found),
@@ -1319,6 +1331,10 @@ impl<'a> Elaborator<'a> {
                 let domain = self.expr(domain, Mult::Many)?;
                 let anonymous: Symbol = Rc::from("_");
                 let bound = self.typed(&domain);
+                // Row снимается с кодомена и встаёт полем стрелки: написана она
+                // перед типом результата, а описывает применение (§3.4).
+                let (row, codomain) = split_row(codomain);
+                let row = self.effects(row)?;
                 let codomain = self.under(&anonymous, mult, bound, |inner| {
                     inner.expr(codomain, default)
                 })?;
@@ -1328,13 +1344,16 @@ impl<'a> Elaborator<'a> {
                     Binder::explicit(mult),
                     CoreName::from("_"),
                     Rc::new(domain),
-                    // Эффектов в поверхностном языке ещё нет (§3.4, Фаза 4),
-                    // поэтому всякая написанная стрелка чиста.
-                    Row::empty(),
+                    row,
                     Rc::new(codomain),
                 ))
             }
             ExprKind::Pi { binders, codomain } => self.pi(binders, codomain, default),
+            // Row без стрелки - нульместная функция, и та ждёт единицы.
+            ExprKind::Effectful { .. } => Err(ElabError::Missing {
+                what: Missing::Suspended,
+                span: expr.span,
+            }),
             ExprKind::Lam { params, body } => {
                 // Захват - то, чем лямбда привязывается к scope. Позиция
                 // решает снаружи; здесь только считается свойство, и ставится
@@ -1567,6 +1586,60 @@ impl<'a> Elaborator<'a> {
             }
         }
         found
+    }
+
+    /// Row, написанная перед типом, в поле `Pi` (§3.4).
+    ///
+    /// Метка обязана оканчиваться сортом `Effect`: `{Maybe Int}` - не row, а
+    /// ошибка, и сказать об этом должен тот, кто её читает. Проверяет это
+    /// обычный вывод типа применения: строить второе правило для того же
+    /// вопроса незачем.
+    fn effects(&mut self, written: Option<&Expr>) -> Result<Row<Term>, ElabError> {
+        let Some(row) = written else {
+            return Ok(Row::empty());
+        };
+        let ExprKind::Effectful { labels, tail, .. } = &row.kind else {
+            return Ok(Row::empty());
+        };
+        // Хвост приходит вместе с auto-lift (§3.4): связать написанное имя
+        // сегодня нечем, а промолчать о нём значило бы принять `{IO | e}` как
+        // `{IO}` - то есть закрытую row вместо открытой.
+        if let Some(tail) = tail {
+            return Err(ElabError::Missing {
+                what: Missing::RowTail,
+                span: tail.span,
+            });
+        }
+        let written = labels;
+        let mut labels = Vec::with_capacity(written.len());
+        for label in written {
+            let head = self.name(&label.name)?;
+            let Term::Const(name, ..) = &head else {
+                return Err(ElabError::NotAnEffect {
+                    name: Rc::clone(&label.name.text),
+                    span: label.span,
+                });
+            };
+            let name = CoreName::from(&**name);
+            let mut arguments = Vec::with_capacity(label.arguments.len());
+            let mut applied = head.clone();
+            for argument in &label.arguments {
+                let argument = self.typing(|it| it.expr(argument, Mult::Many))?;
+                applied = Term::App(Rc::new(applied), Rc::new(argument.clone()));
+                arguments.push(argument);
+            }
+            let sorted = infer(&self.ctx, self.metas, Mult::Zero, &applied)
+                .ok()
+                .map(|(ty, _)| ty);
+            if !matches!(sorted.as_deref(), Some(Value::EffectKind)) {
+                return Err(ElabError::NotAnEffect {
+                    name: Rc::clone(&label.name.text),
+                    span: label.span,
+                });
+            }
+            labels.push(Label { name, arguments });
+        }
+        Ok(Row::new(labels))
     }
 
     /// Тип терма - у ядра, а если оно не знает, то у объявляемой группы.
@@ -3088,6 +3161,17 @@ fn closing_of(bound: &[BoundVar]) -> Vec<(u32, Symbol)> {
         .collect();
     lifo(&mut found);
     found
+}
+
+/// Снимает row с кодомена: `A -> {ε} B` есть стрелка с row и кодоменом `B`.
+///
+/// Написанный хвост сюда не проходит: он приходит вместе с auto-lift (§3.4,
+/// Фаза 4), и связать его сегодня нечем.
+fn split_row(codomain: &Expr) -> (Option<&Expr>, &Expr) {
+    match &codomain.kind {
+        ExprKind::Effectful { body, .. } => (Some(codomain), body),
+        _ => (None, codomain),
+    }
 }
 
 /// Имена переменных паттерна слева направо в глубину.

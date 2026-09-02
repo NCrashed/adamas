@@ -45,6 +45,10 @@ pub enum Missing {
     LocalDefinitions,
     /// Оператор блока, значение которого отбрасывается.
     Sequencing,
+    /// Row без стрелки: `{State Int} Int`.
+    Suspended,
+    /// Написанный хвост row: `{IO | e}`.
+    RowTail,
 }
 
 impl Missing {
@@ -94,6 +98,16 @@ impl Missing {
                 "локальное определение",
                 "у ядра единица объявления верхнеуровневая, и `where` с \
                  `let f x = …` - отдельная работа",
+            ),
+            Self::RowTail => (
+                "хвост row",
+                "переменная хвоста приходит вместе с auto-lift (§3.4): связать \
+                 написанное имя сегодня нечем",
+            ),
+            Self::Suspended => (
+                "row без стрелки",
+                "`{ε} A` есть нульместная функция `(ω _ : ()) -> ε ▷ A` (§3.4), \
+                 а единица приходит вместе с prelude (§4.4)",
             ),
             Self::Sequencing => (
                 "оператор, значение которого отбрасывается",
@@ -355,6 +369,15 @@ pub enum ElabError {
         /// Параметр без умолчания.
         name: Symbol,
         /// Где написан.
+        span: Span,
+    },
+
+    /// Метка row не оканчивается сортом `Effect` (§3.4).
+    #[error("`{name}` не метка эффекта: метка обязана оканчиваться сортом `Effect`")]
+    NotAnEffect {
+        /// Написанное имя.
+        name: Symbol,
+        /// Где написано.
         span: Span,
     },
 
@@ -810,6 +833,7 @@ impl ElabError {
             | Self::ProjectingHead { span, .. }
             | Self::AmbiguousInstance { span, .. }
             | Self::CoherentDuplicate { span, .. }
+            | Self::NotAnEffect { span, .. }
             | Self::TrailingDefault { span, .. }
             | Self::SealedConstraint { span, .. }
             | Self::SealedInstance { span, .. }

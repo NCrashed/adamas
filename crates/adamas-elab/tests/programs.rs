@@ -4454,3 +4454,56 @@ wrong = Zero
     ));
     assert!(error.to_string().contains("Effect"), "получено {error:?}");
 }
+
+#[test]
+fn a_row_is_written_on_the_arrow() {
+    // §3.4: row описывает, что происходит при применении, и стоит полем
+    // стрелки. Написанная перед типом результата, она снимается туда же.
+    let signature = program(&format!(
+        "{BASE}
+State : Type -> Effect
+
+step : Bool -> {{State Bool}} Bool
+"
+    ));
+    let ty = signature
+        .lookup("step")
+        .map(|definition| definition.ty.to_string())
+        .expect("`step` объявлено");
+    assert!(ty.contains("State Bool"), "row не попала в тип: {ty}");
+}
+
+#[test]
+fn a_label_must_end_in_the_effect_sort() {
+    // Метка - конструктор эффекта, а не любое имя: `{Maybe Int}` не row, и
+    // сказать об этом должен тот, кто её читает. Проверяет это обычный вывод
+    // типа применения - второго правила для того же вопроса не нужно.
+    let error = refused(&format!(
+        "{BASE}
+Wrong : Type -> Type
+
+step : Bool -> {{Wrong Bool}} Bool
+"
+    ));
+    assert!(
+        matches!(&error, ElabError::NotAnEffect { name, .. } if &**name == "Wrong"),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_row_without_an_arrow_names_what_it_waits_for() {
+    // `{ε} A` есть нульместная функция `(ω _ : ()) -> ε ▷ A` (§3.4), а
+    // единица приходит с prelude. Хвост ждёт auto-lift. Обе границы названы,
+    // а не обойдены молчанием.
+    for text in [
+        "State : Type -> Effect\nsuspended : {State Bool} Bool\n",
+        "State : Type -> Effect\nstep : Bool -> {State Bool | e} Bool\n",
+    ] {
+        let error = refused(&format!("{BASE}{text}"));
+        assert!(
+            matches!(error, ElabError::Missing { .. }),
+            "для {text:?} получено {error:?}"
+        );
+    }
+}

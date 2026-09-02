@@ -4876,6 +4876,144 @@ pure b = step b
     );
 }
 
+fn effects() -> String {
+    format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+effect Log where
+  note : Bool -> Unit
+
+effect State s where
+  get : s
+  put : s -> Unit
+
+program : {{State Bool}} Bool
+program = get
+"
+    )
+}
+
+#[test]
+fn a_handler_removes_the_first_occurrence_of_its_label() {
+    // §3.4: `handle e with …` снимает первое вхождение метки, а результат
+    // работает в остатке. Метка не пишется - её называют ветки.
+    program(&format!(
+        "{}
+run : Bool
+run = handle program with
+  return v -> v
+  get -> resume True
+  put x -> resume MkUnit
+",
+        effects()
+    ));
+    // Ветка `return` необязательна: без неё значение вычисления и есть ответ.
+    program(&format!(
+        "{}
+run : Bool
+run = handle program with
+  get -> resume True
+  put x -> resume MkUnit
+",
+        effects()
+    ));
+    // Остаток непуст: `Log` хендлер не трогает, и он остаётся окружающей.
+    program(&format!(
+        "{}
+both : {{Log, State Bool}} Bool
+both u =
+  note True
+  get
+
+outer : {{Log}} Bool
+outer u = handle both with
+  return v -> v
+  get -> resume True
+  put x -> resume MkUnit
+",
+        effects()
+    ));
+}
+
+#[test]
+fn a_single_shot_resumption_is_affine() {
+    // Различие single-shot и multi-shot выражено не отдельным механизмом, а
+    // линейностью (§3.3): `resume` при `handle` аффинна, при `handleMulti` -
+    // неограниченна. Забыть её законно - ветка, не зовущая её, обрывает
+    // вычисление.
+    let twice = "
+run : Bool
+run = handle program with
+  return v -> v
+  get -> resume (resume True)
+  put x -> resume MkUnit
+";
+    let error = refused(&format!("{}{twice}", effects()));
+    assert!(
+        error.to_string().contains("кратностью 1"),
+        "получено {error:?}"
+    );
+    program(&format!(
+        "{}{}",
+        effects(),
+        twice.replace("handle program", "handleMulti program")
+    ));
+    // Не позвать её - законно.
+    program(&format!(
+        "{}
+run : Bool
+run = handle program with
+  return v -> v
+  get -> False
+  put x -> True
+",
+        effects()
+    ));
+}
+
+#[test]
+fn a_handler_covers_its_effect_exactly() {
+    // Полнота веток следует из арности элиминатора, а не из отдельной
+    // проверки: у каждой операции своё связывание.
+    for (written, why) in [
+        ("  return v -> v\n  get -> resume True\n", "не написана"),
+        (
+            "  return v -> v\n  get -> resume True\n  get -> resume False\n  put x -> resume MkUnit\n",
+            "дважды",
+        ),
+        (
+            "  return v -> v\n  get -> resume True\n  put x -> resume MkUnit\n  note b -> resume MkUnit\n",
+            "такой операции у эффекта нет",
+        ),
+    ] {
+        let error = refused(&format!(
+            "{}
+run : Bool
+run = handle program with
+{written}",
+            effects()
+        ));
+        assert!(error.to_string().contains(why), "получено {error:?}");
+    }
+    // Под хендлером обязано стоять вычисление, производящее метку.
+    let error = refused(&format!(
+        "{}
+run : Bool
+run = handle True with
+  return v -> v
+  get -> resume True
+  put x -> resume MkUnit
+",
+        effects()
+    ));
+    assert!(
+        error.to_string().contains("обязано стоять вычисление"),
+        "получено {error:?}"
+    );
+}
+
 #[test]
 fn an_effect_declares_its_eliminators() {
     // §3.4: `handle e with …` есть применение константы, а не узел ядра.

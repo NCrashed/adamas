@@ -310,6 +310,40 @@ fn forms_of_later_phases_name_their_phase() {
 }
 
 #[test]
+fn a_handler_is_a_computation_and_a_block_of_branches() {
+    // §3.4: `handle e with …` - выражение, а не объявление; блок открывает
+    // `with` тем же layout'ом, что `of` у разбора. Метка не пишется, `resume`
+    // не связывается - его связывает сама форма.
+    let dumped = tree(
+        "run : Bool
+run = handle program with
+  return v -> v
+  get -> resume True
+  put x -> resume MkUnit
+",
+    )
+    .expect("разбор удался");
+    assert!(dumped.contains("(handle program"), "получено {dumped}");
+    assert!(dumped.contains("(on return v v)"), "получено {dumped}");
+    assert!(
+        dumped.contains("(on get (resume True))"),
+        "получено {dumped}"
+    );
+    assert!(
+        dumped.contains("(on put x (resume MkUnit))"),
+        "получено {dumped}"
+    );
+    let multi = tree(
+        "run : Bool
+run = handleMulti program with
+  return v -> v
+",
+    )
+    .expect("разбор удался");
+    assert!(multi.contains("(handleMulti program"), "получено {multi}");
+}
+
+#[test]
 fn an_effect_declares_a_label_and_its_operations() {
     // §3.4: формер не пишется - результат метки всегда `Effect`, - а операции
     // идут блоком, как конструкторы у семейства.

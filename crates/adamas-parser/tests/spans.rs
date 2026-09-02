@@ -14,8 +14,8 @@
 
 use adamas_core::source::Span;
 use adamas_parser::ast::{
-    Binder, Binding, Block, Clause, Data, Decl, DeclKind, EffectDecl, Expr, ExprKind, LamParamKind,
-    Module, Name, Pattern, PatternKind, Resource, Stmt, StmtKind,
+    Alt, Binder, Binding, Block, Clause, Data, Decl, DeclKind, EffectDecl, Expr, ExprKind,
+    HandlerBranch, LamParamKind, Module, Name, Pattern, PatternKind, Resource, Stmt, StmtKind,
 };
 use adamas_parser::parse;
 use proptest::prelude::*;
@@ -145,6 +145,27 @@ impl Spans<'_> {
         }
     }
 
+    fn alts(&mut self, at: Span, scrutinee: &Expr, alts: &[Alt]) {
+        self.expr(at, scrutinee);
+        for alt in alts {
+            self.inside("ветка", at, alt.span);
+            self.pattern(alt.span, &alt.pattern);
+            self.expr(alt.span, &alt.body);
+        }
+    }
+
+    fn handler(&mut self, at: Span, computation: &Expr, branches: &[HandlerBranch]) {
+        self.expr(at, computation);
+        for branch in branches {
+            self.inside("ветка", at, branch.span);
+            self.name(branch.span, &branch.name);
+            for param in &branch.params {
+                self.name(branch.span, param);
+            }
+            self.expr(branch.span, &branch.body);
+        }
+    }
+
     fn clause(&mut self, parent: Span, clause: &Clause) {
         self.inside("клауза", parent, clause.span);
         let at = clause.span;
@@ -249,14 +270,12 @@ impl Spans<'_> {
                 self.expr(at, then_branch);
                 self.expr(at, else_branch);
             }
-            ExprKind::Case { scrutinee, alts } => {
-                self.expr(at, scrutinee);
-                for alt in alts {
-                    self.inside("ветка", at, alt.span);
-                    self.pattern(alt.span, &alt.pattern);
-                    self.expr(alt.span, &alt.body);
-                }
-            }
+            ExprKind::Handle {
+                computation,
+                branches,
+                ..
+            } => self.handler(at, computation, branches),
+            ExprKind::Case { scrutinee, alts } => self.alts(at, scrutinee, alts),
             ExprKind::Tuple(items) | ExprKind::List(items) => {
                 for item in items {
                     self.expr(at, item);

@@ -2794,9 +2794,7 @@ impl<'a> Elaborator<'a> {
             .chain((2..eliminator.row_arity).map(|_| self.metas.fresh_row()))
             .take(eliminator.row_arity as usize)
             .collect();
-        let levels: Vec<Level> = (0..eliminator.level_arity)
-            .map(|_| self.metas.fresh_level())
-            .collect();
+        let levels = self.handler_levels(&effect, eliminator.level_arity);
         let mut term = Term::Const(CoreName::from(&*name), levels.into(), Rows::new(rows));
         let Some(mut current) = self.synthesized(&term) else {
             return Err(ElabError::UnknownName { name, span });
@@ -2833,6 +2831,39 @@ impl<'a> Elaborator<'a> {
             current = codomain.apply(value);
         }
         Ok(term)
+    }
+
+    /// Аргументы-уровни элиминатора.
+    ///
+    /// Порядок их задан построением его типа (см. `handler_type`): обобщение
+    /// собирает дырки в порядке появления, поэтому сперва идут параметры метки,
+    /// затем универсумы результата вычисления и ответа хендлера, затем те, что
+    /// принесли операции своими implicit-параметрами.
+    ///
+    /// Первые выводятся - их держат тип вычисления и ожидаемый тип, - а
+    /// последние связать нечем и не с чем: `throw : e -> a` поднимает `a`
+    /// (§4.1), ветка по нему полиморфна, метка о нём не несёт ничего, тип
+    /// вычисления его не называет. Свежая дырка на этом месте осталась бы
+    /// нерешённой навсегда, отвергая всякий хендлер, чья ветка не зовёт
+    /// `resume`, - то есть ровно `try` из §4.4.
+    ///
+    /// Берётся нуль: аргумент этот стёрт, ветка обращается с поднятым именем
+    /// только параметрически, и никакой другой уровень здесь не выразимее.
+    fn handler_levels(&mut self, effect: &Symbol, arity: u32) -> Vec<Level> {
+        let inferred = self
+            .signature
+            .lookup(effect)
+            .map_or(0, |it| it.level_arity)
+            .saturating_add(2);
+        (0..arity)
+            .map(|index| {
+                if index < inferred {
+                    self.metas.fresh_level()
+                } else {
+                    Level::Zero
+                }
+            })
+            .collect()
     }
 
     /// Аргументы написанной метки - значениями, которыми сравнивают вхождения.
@@ -2925,6 +2956,7 @@ impl<'a> Elaborator<'a> {
                 span: branch.name.span,
             }));
         }
+        let params = spread_branch(&bound, params, branch.name.span);
         self.lam(&params, &branch.body, &bound)
     }
 
@@ -4137,6 +4169,44 @@ fn pi_arguments(ty: &Term, owned: &Owned) -> Vec<Argument> {
         });
         current = codomain;
     }
+    found
+}
+
+/// Параметры ветки хендлера, разложенные по связываниям её типа.
+///
+/// Имплисит аргумента не получает, но связывание вводит, и без вставки первый
+/// написанный параметр встал бы на его место - ровно то же соображение, что у
+/// клаузы (см. `Declared::spread`). Приносит имплиситы сама операция: `throw :
+/// e -> a` поднимает `a` в implicit-параметр (§4.1), и ветка честно
+/// полиморфна по нему - `handler_type` разбирает тип операции телескопом, а не
+/// по числу параметров метки.
+///
+/// Имя берётся из связывания: тело вправе назвать поднятое тем же именем, под
+/// которым его подняли.
+fn spread_branch(
+    bound: &[Argument],
+    written: Vec<ast::LamParam>,
+    span: Span,
+) -> Vec<ast::LamParam> {
+    if !bound.iter().any(|argument| argument.implicit) {
+        return written;
+    }
+    let mut found = Vec::with_capacity(bound.len());
+    let mut rest = written.into_iter();
+    for argument in bound {
+        if argument.implicit {
+            found.push(bind_as(ast::Name {
+                text: Rc::clone(&argument.name),
+                span,
+            }));
+            continue;
+        }
+        let Some(param) = rest.next() else {
+            break;
+        };
+        found.push(param);
+    }
+    found.extend(rest);
     found
 }
 

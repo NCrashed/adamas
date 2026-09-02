@@ -155,3 +155,37 @@ pinned : {State Bool} Bool
 pinned u = handle @(State Nat) nested with
   get -> resume Zero
   put x -> resume MkUnit
+
+-- Операция вправе иметь свои параметры сверх параметров метки: телескоп метки
+-- она повторяет, но им не исчерпывается. Свободное имя поднимается тем же
+-- правилом §4.1, что и в сигнатуре функции, и без этого не пишется `throw` из
+-- §4.4 - каноническая обрывающая операция.
+effect Except e where
+  throw : e -> a
+
+guard : Bool -> {Except Bool} Bool
+guard True = True
+guard False = throw False
+
+risky : {Except Bool} Bool
+risky u = guard False
+
+-- Ветка связывает поднятое `a` наравне с написанными аргументами - имплисит
+-- аргумента не получает, но связывание вводит, - и по нему честно полиморфна:
+-- эта ветка резумпцию не зовёт вовсе, а следующая зовёт, и `a` определяется её
+-- аргументом.
+caught : Bool
+caught = handle risky with
+  return v -> v
+  throw x -> x
+
+effect Amb where
+  pick : a -> a -> a
+
+both : {Amb} Bool
+both u = pick True False
+
+first : Bool
+first = handle both with
+  return v -> v
+  pick x y -> resume x

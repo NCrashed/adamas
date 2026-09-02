@@ -5687,6 +5687,104 @@ effect State s where
     );
 }
 
+#[test]
+fn an_operation_may_have_parameters_of_its_own() {
+    // §4.4 пишет `throw : e -> {Except e} a` - каноническую обрывающую
+    // операцию. Своих параметров операции не полагалось: арность уровня
+    // сверялась с арностью метки равенством, скопированным у конструктора. Довод
+    // конструктора («элиминация инстанцирует его теми же аргументами, что и
+    // семейство») к операции не относится - её инстанцирует место вызова, - и
+    // §4.4 не писалась ни в одну из двух записей: явную `{a : Type} -> e -> a`
+    // отвергала арность, а свободное имя не обобщалось вовсе.
+    let text = "\
+data Bool where
+  True : Bool
+  False : Bool
+
+data Unit where
+  MkUnit : Unit
+
+effect Except e where
+  throw : e -> a
+
+guard : Bool -> {Except Bool} Bool
+guard True = True
+guard False = throw False
+";
+    let signature = program(text);
+    // Параметры метки у операции первыми, свои - следом. Метка полиморфна по
+    // одному уровню, операция по двум: своему `a` и её.
+    let former = signature.lookup("Except").expect("метка объявлена");
+    let throw = signature.lookup("throw").expect("операция объявлена");
+    assert_eq!(former.level_arity, 1);
+    assert_eq!(throw.level_arity, 2);
+
+    // Явная запись того же - та же арность.
+    let explicit = program(&text.replace("throw : e -> a", "throw : {a : Type} -> e -> a"));
+    assert_eq!(explicit.lookup("throw").expect("объявлена").level_arity, 2);
+
+    // Ветка связывает поднятое `a` наравне с написанными аргументами: без
+    // вставки первый написанный параметр встал бы на его место, и `throw x -> x`
+    // получало бы `x : Type`.
+    program(&format!(
+        "{text}
+risky : {{Except Bool}} Bool
+risky u = guard False
+
+caught : Bool
+caught = handle risky with
+  return v -> v
+  throw x -> x
+"
+    ));
+}
+
+#[test]
+fn a_polymorphic_operation_is_handled_at_a_single_level() {
+    // Уровень поднятого параметра операции связать нечем: ветка по нему
+    // полиморфна, метка о нём не несёт ничего, тип вычисления его не называет.
+    // Свежая дырка на этом месте оставалась бы нерешённой навсегда, и хендлер,
+    // чья ветка не зовёт `resume`, отвергался бы всегда - то есть ровно `try`
+    // из §4.4. Берётся нуль; аргумент стёрт, и ветка обращается с ним
+    // параметрически.
+    let signature = program(
+        "\
+data Bool where
+  True : Bool
+  False : Bool
+
+data Unit where
+  MkUnit : Unit
+
+effect Amb where
+  pick : a -> a -> a
+
+both : {Amb} Bool
+both u = pick True False
+
+first : Bool
+first = handle both with
+  return v -> v
+  pick x y -> resume x
+",
+    );
+    // Уровней у элиминатора три: параметров метки нет вовсе, два несут
+    // результат вычисления и ответ хендлера, третий принесла операция.
+    let handler = signature
+        .lookup("#handle.Amb")
+        .expect("элиминатор объявлен");
+    assert_eq!(handler.level_arity, 3);
+    // Ветка зовёт резумпцию, и `a` определяется её аргументом - уровень при
+    // этом остаётся тем, что подставило применение.
+    let body = signature
+        .lookup("first")
+        .expect("определено")
+        .body
+        .as_ref()
+        .expect("тело есть");
+    assert!(body.to_string().contains("#handle.Amb"), "получено {body}");
+}
+
 /// Сколько связываний у спайна типа.
 fn binders(ty: &Term) -> usize {
     let mut found = 0;

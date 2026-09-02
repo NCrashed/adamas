@@ -3219,6 +3219,41 @@ used = pong True (Succ Zero)
 }
 
 #[test]
+fn an_attribute_inside_a_group_is_not_dropped() {
+    // Заголовок члена группы разбирался без атрибутов, и они выбрасывались
+    // молча: `@fbip` внутри `mutual` принимался вместо отказа, обещанного
+    // §4.7, а `@total` не значил ничего - та же расходящаяся функция
+    // отвергалась вне блока и проходила внутри.
+    let refuse = |what: &str, text: String| {
+        let error = refused(&text);
+        assert!(
+            matches!(
+                error,
+                ElabError::Attribute { .. } | ElabError::NotTotal { .. }
+            ),
+            "{what}: получено {error:?}"
+        );
+    };
+    refuse(
+        "@fbip",
+        format!("{BASE}\nmutual\n  @fbip\n  a : Nat -> Nat\n  a n = n\n"),
+    );
+    refuse(
+        "@total",
+        format!("{BASE}\nmutual\n  @total\n  loopy : Nat -> Nat\n  loopy n = loopy n\n"),
+    );
+    // И тот же атрибут у метода класса: обещанием за каждый инстанс он быть не
+    // вправе - вердикт считается у определения.
+    let error = refused(&format!(
+        "{BASE}\nclass C a where\n  @total\n  size : a -> a\n"
+    ));
+    assert!(
+        matches!(error, ElabError::ModuleMember { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
 fn a_diverging_mutual_pair_is_not_total() {
     // Вызов соседа - такая же рекурсия, как свой. Проверка, знавшая только своё
     // имя, не видела в этой паре ни одного вызова и объявляла её тотальной, а

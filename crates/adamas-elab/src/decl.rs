@@ -954,7 +954,25 @@ fn class_members<'a>(
 ) -> Result<(), ElabError> {
     for member in &class.members {
         match &member.kind {
-            DeclKind::Signature { name, ty, .. } => {
+            DeclKind::Signature {
+                name,
+                ty,
+                attributes,
+            } => {
+                // Атрибуты у метода не выбрасываются молча. `@fbip` и
+                // `@noalloc` отвергает общий разбор - проверки под них нет
+                // (§4.7); `@total` отвергается здесь, потому что у метода он
+                // был бы обещанием про **каждый** инстанс, а вердикт считается
+                // у определения, и определение это - член инстанса.
+                if required(attributes)? {
+                    return Err(ElabError::ModuleMember {
+                        name: Rc::clone(&name.text),
+                        what: "классе",
+                        why: "`@total` у метода обещал бы вердикт за каждый инстанс, \
+                              а считается он у определения - пишите атрибут у члена инстанса",
+                        span: member.span,
+                    });
+                }
                 members.push(WrittenField {
                     name: name.clone(),
                     params: &[],
@@ -1628,8 +1646,31 @@ fn declare_mutual(
                 names: Names::of(&planned[0].name.text, Vec::new()),
             })?;
     }
+    required_verdicts(signature, &planned)?;
     for member in &planned {
         carrier::check(signature, owned, &member.name.text, member.span)?;
+    }
+    Ok(())
+}
+
+/// Требует положительного вердикта там, где написан `@total` (§4.7).
+///
+/// Спрашивается **после** объявления группы, и это существенно: у члена группы
+/// вердикт зависит от соседей, неподвижная точка понижает их вместе, и
+/// спросить раньше значило бы спросить не тот. До этой проверки атрибут внутри
+/// `mutual` выбрасывался вместе с заголовком, то есть не значил ничего.
+fn required_verdicts(signature: &Signature, planned: &[&Mutual<'_>]) -> Result<(), ElabError> {
+    for member in planned {
+        if member.total
+            && !signature
+                .lookup(&member.name.text)
+                .is_some_and(|it| it.total)
+        {
+            return Err(ElabError::NotTotal {
+                name: Rc::clone(&member.name.text),
+                span: member.span,
+            });
+        }
     }
     Ok(())
 }
@@ -1694,6 +1735,8 @@ struct Mutual<'a> {
     ty: &'a ast::Expr,
     clauses: &'a [ast::Clause],
     span: Span,
+    /// Требует ли `@total` положительного вердикта (§4.7).
+    total: bool,
 }
 
 /// Что написано членом группы.
@@ -1709,20 +1752,28 @@ enum Planned<'a> {
 /// это отсутствие тела, и объявлять его группой незачем.
 fn mutual_members(members: &[ast::Decl], span: Span) -> Result<Vec<Planned<'_>>, ElabError> {
     let mut found = Vec::with_capacity(members.len() / 2);
-    let mut pending: Option<(&ast::Name, &ast::Expr, Span)> = None;
+    let mut pending: Option<(&ast::Name, &ast::Expr, Span, bool)> = None;
     for member in members {
         match &member.kind {
-            DeclKind::Signature { name, ty, .. } => {
+            DeclKind::Signature {
+                name,
+                ty,
+                attributes,
+            } => {
                 if let Some((waiting, ..)) = pending {
                     return Err(ElabError::MissingSignature {
                         name: Rc::clone(&waiting.text),
                         span: member.span,
                     });
                 }
-                pending = Some((name, ty, member.span));
+                // Атрибуты читаются здесь же, а не выбрасываются вместе с
+                // остальным заголовком: обещание, принятое молча, - обещание,
+                // которого никто не давал. `@fbip` внутри группы принимался,
+                // а `@total` внутри неё не значил ничего.
+                pending = Some((name, ty, member.span, required(attributes)?));
             }
             DeclKind::Clauses { name, clauses } => {
-                let Some((declared, ty, at)) =
+                let Some((declared, ty, at, total)) =
                     pending.take().filter(|(it, ..)| it.text == name.text)
                 else {
                     return Err(ElabError::MissingSignature {
@@ -1735,6 +1786,7 @@ fn mutual_members(members: &[ast::Decl], span: Span) -> Result<Vec<Planned<'_>>,
                     ty,
                     clauses,
                     span: at.merge(member.span),
+                    total,
                 }));
             }
             // Семейство в группе - тот самый случай, ради которого `mutual` и

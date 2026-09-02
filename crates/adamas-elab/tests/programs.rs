@@ -1405,6 +1405,50 @@ share k = k True
 }
 
 #[test]
+fn a_resource_wrapper_may_carry_a_captured_resource_out() {
+    // §3.3 записывает это исключением и приводит `spawn`/`Task` собственным
+    // примером: «захваченный ресурс покидает свой scope только внутри чего-то,
+    // у чего есть деструктор». Проверялось же одно - конструктор ли голова, -
+    // и `resource`-обёртка отвергалась наравне с обычной. Без исключения не
+    // пишется вся документированная идиома переноса владения.
+    let text = "\
+data Bool where
+  True : Bool
+
+close : (1 b : Bool) -> Bool
+close b = True
+
+resource File where
+  Open : Bool -> File
+  shut : (1 h : File) -> Bool
+  shut (Open b) = close b
+";
+    program(&format!(
+        "{text}
+resource Task where
+  Spawned : (Bool -> Bool) -> Task
+  cancel : (1 t : Task) -> Bool
+  cancel (Spawned f) = True
+
+spawn : (1 h : File) -> Task
+spawn h = Spawned (\\b -> shut h)
+"
+    ));
+    // У обычного `data` деструктора нет, и запрет остаётся: ровно та разница,
+    // ради которой исключение и сформулировано.
+    let error = refused(&format!(
+        "{text}
+data Holder where
+  Held : (Bool -> Bool) -> Holder
+
+leak : (1 h : File) -> Holder
+leak h = Held (\\b -> shut h)
+"
+    ));
+    assert!(error.to_string().contains("scope"), "получено {error:?}");
+}
+
+#[test]
 fn being_scope_bound_travels_with_the_value_not_with_the_literal() {
     // §3.3 прямо говорит, что проверять позицию **литерала** недостаточно, и
     // показывает обход через `let`. Обходов на деле три, и все три об одном:

@@ -24,7 +24,7 @@ use adamas_core::level::{Level, LevelVar};
 use adamas_core::meta::{Generalization, Metas, zonk_term};
 use adamas_core::mult::Mult;
 use adamas_core::pattern::{PatternError, compile_traced};
-use adamas_core::row::{Label, Row};
+use adamas_core::row::{Label, Row, RowVar, Tail};
 use adamas_core::sig::{Group, Member as SigMember, Signature};
 use adamas_core::source::Span;
 use adamas_core::term::{Binder, Fields, Name as CoreName, Rows, Term};
@@ -1449,6 +1449,10 @@ fn declare_members(
         .map(|(name, ty)| Member {
             name: Rc::clone(name),
             levels: Rc::clone(&levels),
+            // Обобщение здесь общее на группу, поэтому `RowVar(k)` у членов
+            // общий, и подстановка тождественна. Полный список аргументов
+            // ждёт сверки row-арности (§10, ревью 2026-09-03).
+            rows: Rows::none(),
             ty: Rc::new(ty.clone()),
         })
         .collect();
@@ -1583,23 +1587,7 @@ fn declare_mutual(
 
     let mut trees = Vec::with_capacity(planned.len());
     for (at, member) in planned.iter().enumerate() {
-        let mut visible = Vec::with_capacity(planned.len());
-        for (other, sibling) in planned.iter().enumerate() {
-            // Свой параметр - `Var`, чужой - дырка: сосед объявляется рядом,
-            // но инстанцируется в каждом месте использования заново.
-            let levels: Rc<[Level]> = if other == at {
-                (0..arities[at].0)
-                    .map(|index| Level::Var(LevelVar(index)))
-                    .collect()
-            } else {
-                (0..arities[other].0).map(|_| metas.fresh_level()).collect()
-            };
-            visible.push(Member {
-                name: Rc::clone(&sibling.name.text),
-                ty: Rc::new(generalized[other].substitute_levels(&levels)),
-                levels,
-            });
-        }
+        let visible = siblings_of(metas, &planned, &arities, &generalized, at);
         let compiled = {
             let mut elaborator = Elaborator::with_group(signature, metas, owned, visible)
                 .declaring(&generalized[at]);
@@ -1653,6 +1641,51 @@ fn declare_mutual(
         carrier::check(signature, owned, &member.name.text, member.span)?;
     }
     Ok(())
+}
+
+/// Чем члены группы видят друг друга при проверке тела `at`-го.
+///
+/// Свой параметр приходит переменной, чужой - дыркой: сосед объявляется рядом,
+/// но инстанцируется в каждом месте использования заново. Правило одно на оба
+/// сорта - уровни и row (§10 вопросы 54 и 73), - и для row оно соблюдалось
+/// только на словах: список аргументов был пуст, то есть подстановка
+/// тождественна, а ядро её не ловит. Параметры соседа читались после этого как
+/// свои, и `mutual` над двумя эффектными сигнатурами отвергался сообщением про
+/// переменную, которой в области видимости нет.
+fn siblings_of(
+    metas: &mut Metas,
+    planned: &[&Mutual<'_>],
+    arities: &[(u32, u32)],
+    generalized: &[Term],
+    at: usize,
+) -> Vec<Member> {
+    let mut visible = Vec::with_capacity(planned.len());
+    for (other, sibling) in planned.iter().enumerate() {
+        let levels: Rc<[Level]> = if other == at {
+            (0..arities[at].0)
+                .map(|index| Level::Var(LevelVar(index)))
+                .collect()
+        } else {
+            (0..arities[other].0).map(|_| metas.fresh_level()).collect()
+        };
+        let rows: Vec<Row<Term>> = if other == at {
+            (0..arities[at].1)
+                .map(|index| Row::closing([], Some(Tail::Var(RowVar(index)))))
+                .collect()
+        } else {
+            (0..arities[other].1).map(|_| metas.fresh_row()).collect()
+        };
+        let ty = generalized[other]
+            .substitute_levels(&levels)
+            .substitute_rows(&rows);
+        visible.push(Member {
+            name: Rc::clone(&sibling.name.text),
+            ty: Rc::new(ty),
+            rows: Rows::new(rows),
+            levels,
+        });
+    }
+    visible
 }
 
 /// Отвергает тип члена группы, назвавший соседа (§10 вопрос 64).
@@ -2359,6 +2392,9 @@ fn define(
     let group = vec![Member {
         name: Rc::clone(&declared.name),
         levels,
+        // Одиночное определение: своя row-переменная приходит из типа как
+        // есть, подставлять нечего.
+        rows: Rows::none(),
         ty: Rc::new(declared.ty.clone()),
     }];
     let compiled = {
@@ -2962,6 +2998,8 @@ impl Family<'_> {
         Member {
             name: Rc::clone(&self.data.name.text),
             levels: Rc::clone(&self.levels),
+            // Тип-формер семейства row не носит: метка не тип.
+            rows: Rows::none(),
             ty: Rc::new(self.kind.clone()),
         }
     }
@@ -3144,6 +3182,8 @@ fn declare_effect(
     let visible = Member {
         name: Rc::clone(&effect.name.text),
         levels,
+        // Формер метки оканчивается `Effect`, своей row у него нет.
+        rows: Rows::none(),
         ty: Rc::new(kind.clone()),
     };
 

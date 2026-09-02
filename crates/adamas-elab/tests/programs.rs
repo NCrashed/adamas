@@ -5301,6 +5301,47 @@ run = handle True with
 }
 
 #[test]
+fn a_group_member_instantiates_its_neighbour_row_afresh() {
+    // Правило одно на оба сорта параметров (§10 вопросы 54 и 73): свой -
+    // переменная, чужой - дырка, потому что сосед объявляется рядом, но
+    // инстанцируется в каждом месте использования заново. Для уровней оно
+    // соблюдалось, для row - только на словах: список аргументов был пуст, то
+    // есть подстановка тождественна, и параметры соседа читались как свои.
+    // Отказ называл переменную, которой в области видимости нет, а те же два
+    // определения подряд проходили - обёртка в `mutual` снова отнимала.
+    let text = "\
+data Bool where
+  True : Bool
+
+data Unit where
+  MkUnit : Unit
+
+effect State s where
+  put : s -> Unit
+";
+    program(&format!(
+        "{text}
+mutual
+  f : Bool -> Bool -> {{State Bool | e}} Bool
+  f a b = a
+
+  g : Bool -> {{State Bool | e}} Bool
+  g a = f a a
+"
+    ));
+    // Тот же текст без группы обязан проходить - иначе тест ловил бы не то.
+    program(&format!(
+        "{text}
+f : Bool -> Bool -> {{State Bool | e}} Bool
+f a b = a
+
+g : Bool -> {{State Bool | e}} Bool
+g a = f a a
+"
+    ));
+}
+
+#[test]
 fn a_field_of_a_branch_carries_the_multiplicity_of_the_scrutinee() {
     // §3.3 дословно: «поле, связанное при `qᵢ·r`, разобранное в свою очередь,
     // даёт `r' = qᵢ·r`». Ядро так и делает, элаборация брала `qᵢ` как есть, и

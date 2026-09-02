@@ -15,7 +15,7 @@ use adamas_core::eval::{apply, eval, quote};
 use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
-use adamas_core::pattern::{Clause, Pattern as CorePattern, PatternError, compile};
+use adamas_core::pattern::{Clause, Pattern as CorePattern, PatternError, compile_case};
 use adamas_core::row::Row;
 use adamas_core::sig::{Definition, DefinitionKind, Signature};
 use adamas_core::source::Span;
@@ -1388,9 +1388,9 @@ impl<'a> Elaborator<'a> {
                 else_branch,
             } => {
                 let alts = conditional(then_branch, else_branch);
-                self.case(cond, &alts, expr.span)
+                self.case(cond, &alts, expr.span, position)
             }
-            ExprKind::Case { scrutinee, alts } => self.case(scrutinee, alts, expr.span),
+            ExprKind::Case { scrutinee, alts } => self.case(scrutinee, alts, expr.span, position),
             ExprKind::Tuple(items) if items.is_empty() => missing(Missing::Unit),
             ExprKind::Tuple(_) => missing(Missing::Tuple),
             ExprKind::List(_) => missing(Missing::List),
@@ -1427,7 +1427,13 @@ impl<'a> Elaborator<'a> {
     /// поэтому от него он зависеть не может. `case` над `Vect a n`, чей
     /// результат меняется от ветви к ветви, отсюда не пишется; ему нужен
     /// написанный мотив, и это отдельный срез.
-    fn case(&mut self, scrutinee: &Expr, alts: &[ast::Alt], span: Span) -> Result<Term, ElabError> {
+    fn case(
+        &mut self,
+        scrutinee: &Expr,
+        alts: &[ast::Alt],
+        span: Span,
+        position: Position,
+    ) -> Result<Term, ElabError> {
         if alts.is_empty() {
             return Err(ElabError::EmptyCase { span });
         }
@@ -1435,70 +1441,79 @@ impl<'a> Elaborator<'a> {
         let Some(ty) = self.synthesized(&value) else {
             return Err(ElabError::NotMatchable { span });
         };
-        let domain = quote(self.ctx.size(), &ty);
-        let consumed = self.consumption(scrutinee, &domain);
-
-        // Тип поднятой функции: телескоп контекста, затем разбираемое, затем
-        // дырка результата. Дырка заводится в `Γ`, а стоит под ещё одним
-        // связыванием, поэтому читается обратно на единицу глубже.
-        let sort = Rc::new(Value::Universe(self.metas.fresh_level()));
-        let result = self.fresh_meta(&sort);
-        let result = quote(self.ctx.size() + 1, &self.ctx.eval(&result));
-        let lifted = self.lifted(Term::Pi(
-            Binder::explicit(consumed),
-            CoreName::from("_"),
-            Rc::new(domain),
-            Row::empty(),
-            Rc::new(result),
-        ));
-
-        // Связывания контекста идут первыми паттернами: компилятор нумерует
-        // переменные слева направо, и порядок совпадает с областью видимости,
-        // в которой элаборируется тело ветви.
-        let outer: Vec<CorePattern> = self
-            .scope
-            .iter()
-            .map(|bound| CorePattern::Var(CoreName::from(&*bound.name)))
-            .collect();
-        let mut clauses = Vec::with_capacity(alts.len());
-        for alt in alts {
-            let pattern = self.pattern(&alt.pattern)?;
-            let mut patterns = outer.clone();
-            patterns.push(pattern.clone());
-            let body = self.branch(&alt.pattern, &pattern, &alt.body)?;
-            clauses.push(Clause { patterns, body });
-        }
-
-        let outer = u32::try_from(outer.len()).unwrap_or(u32::MAX);
-        let tree = compile(self.signature, self.metas, &lifted, &clauses).map_err(|error| {
-            let error = uncovered(error, outer);
-            ElabError::Clauses {
-                span: alts
-                    .get(clause_of(&error))
-                    .map_or(span, |alt: &ast::Alt| alt.span),
-                error: Box::new(error),
+        // Разбор идёт по **связыванию**: колонка у ядра - переменная, а не
+        // терм. Написанное переменной берётся как есть, и терм выходит тот же,
+        // что у клауз; прочее связывается `let`ом - **одним** связыванием, а не
+        // всем контекстом. Применение к контексту расходовало бы всякое его
+        // `1`-связывание, которого ни одна ветвь не называет (§10 вопрос 82).
+        if let Term::Var(index) = &value {
+            if let Some(level) = index.to_level(self.ctx.size()) {
+                return self.discriminated(level, alts, span, position);
             }
-        })?;
-        // Поднятое связывается `let`ом, а не применяется на месте: тип
-        // цепочки лямбд не синтезируется, а `let` несёт аннотацию - ту самую,
-        // по которой её и собрали.
-        let size = self.ctx.size();
-        // Под связыванием `let` всё съезжает на единицу; читается обратно на
-        // ту же единицу глубже.
-        let scrutinee = quote(size + 1, &self.ctx.eval(&value));
-        let applied = (0..size).fold(Term::var(0), |term, depth| {
-            Term::App(Rc::new(term), Rc::new(Term::var(size - depth)))
+        }
+        let domain = quote(self.ctx.size(), &ty);
+        let mult = self.consumption(scrutinee, &domain);
+        let name: Symbol = Rc::from("case");
+        let outer = self.scope.len();
+        let saved = self.ctx.clone();
+        self.ctx = self.ctx.bind(CoreName::from(&*name), mult, Rc::clone(&ty));
+        self.scope.push(Bound {
+            visible: false,
+            ..Bound::visible(&name, mult, ty)
         });
-        self.produced = None;
+        let inner = self.discriminated(Lvl(self.ctx.size() - 1), alts, span, position);
+        self.scope.truncate(outer);
+        self.ctx = saved;
         Ok(Term::Let(
-            Mult::Many,
-            CoreName::from("case"),
-            Rc::new(lifted),
-            Rc::new(tree),
-            Rc::new(Term::App(Rc::new(applied), Rc::new(scrutinee))),
+            mult,
+            CoreName::from(&*name),
+            Rc::new(domain),
+            Rc::new(value),
+            Rc::new(inner?),
         ))
     }
 
+    /// Разбор по связыванию: дерево строит тот же компилятор, что и у клауз.
+    ///
+    /// Лямбд вокруг дерева нет и контекст в аргументы не поднимается: тела
+    /// ветвей живут под тем же контекстом, что и сам разбор, поэтому кратности
+    /// считаются поветвенно - ядром, а не элаборацией.
+    fn discriminated(
+        &mut self,
+        level: Lvl,
+        alts: &[ast::Alt],
+        span: Span,
+        position: Position,
+    ) -> Result<Term, ElabError> {
+        let sort = Rc::new(Value::Universe(self.metas.fresh_level()));
+        let result = self.fresh_meta(&sort);
+        let mut clauses = Vec::with_capacity(alts.len());
+        // Позиция разбора достаётся **каждой** ветви: разбор сам значения не
+        // строит, его строят ветви, и возвращается наружу то, что построила
+        // сработавшая. Без этого `if c then k else k` отмывал бы привязку к
+        // scope, которую прямое `k` не проходит (§10 вопрос 82).
+        let mut produced = None;
+        for alt in alts {
+            let pattern = self.pattern(&alt.pattern)?;
+            let body = self.placed(position, |it| it.branch(&alt.pattern, &pattern, &alt.body))?;
+            produced = produced.or_else(|| self.produced.take());
+            clauses.push(Clause {
+                patterns: vec![pattern],
+                body,
+            });
+        }
+        let tree =
+            compile_case(&self.ctx, self.metas, level, &result, &clauses).map_err(|error| {
+                ElabError::Clauses {
+                    span: alts
+                        .get(clause_of(&error))
+                        .map_or(span, |alt: &ast::Alt| alt.span),
+                    error: Box::new(error),
+                }
+            })?;
+        self.produced = produced;
+        Ok(tree.term)
+    }
     /// Тип терма - у ядра, а если оно не знает, то у объявляемой группы.
     ///
     /// Рекурсивный вызов в разбираемом (`if even k then …` внутри `even`)
@@ -1578,26 +1593,6 @@ impl<'a> Elaborator<'a> {
         self.scope.truncate(depth);
         self.ctx = outer;
         term
-    }
-
-    /// Оборачивает тип в телескоп контекста - с теми же кратностями.
-    ///
-    /// Кратности сохраняются, иначе применение к `Γ` масштабировало бы
-    /// использование: `1`-связывание, поданное в ω-параметр, отвергалось бы
-    /// на каждом `case` внутри его области видимости.
-    fn lifted(&self, inner: Term) -> Term {
-        let mut telescope = inner;
-        for (depth, bound) in self.scope.iter().enumerate().rev() {
-            let depth = u32::try_from(depth).unwrap_or(u32::MAX);
-            telescope = Term::Pi(
-                Binder::explicit(bound.mult),
-                CoreName::from(&*bound.name),
-                Rc::new(quote(depth, &bound.ty)),
-                Row::empty(),
-                Rc::new(telescope),
-            );
-        }
-        telescope
     }
 
     /// Кратность, с которой разбор потребляет разбираемое (§3.3, вопрос 65).
@@ -3064,24 +3059,6 @@ fn conditional(then_branch: &Expr, else_branch: &Expr) -> Vec<ast::Alt> {
         span: body.span,
     };
     vec![alt("True", then_branch), alt("False", else_branch)]
-}
-
-/// Убирает из примера непокрытого набора поднятые колонки контекста.
-///
-/// Автор их не писал, и показывать их значило бы отвечать про терм, которого
-/// в исходнике нет. Колонки эти - всегда переменные, то есть в примере занимают
-/// ровно по одному слову без скобок, поэтому отделяются по пробелам.
-fn uncovered(error: PatternError, outer: u32) -> PatternError {
-    let PatternError::NonExhaustive { example } = error else {
-        return error;
-    };
-    let outer = usize::try_from(outer).unwrap_or(usize::MAX);
-    let example = example
-        .splitn(outer + 1, char::is_whitespace)
-        .last()
-        .unwrap_or(&example)
-        .to_owned();
-    PatternError::NonExhaustive { example }
 }
 
 /// Номер клаузы, на которой споткнулась сборка; `0` - когда его нет.

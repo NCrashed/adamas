@@ -1715,15 +1715,15 @@ f n =
 
 #[test]
 fn a_case_reports_what_it_does_not_cover() {
-    // Полнота приходит от того же компилятора, а поднятые колонки контекста в
-    // примере не показываются: автор их не писал.
+    // Полнота приходит от того же компилятора, а колонка у разбора выражением
+    // одна - разбираемое, - поэтому в примере стоит ровно то, что автор писал.
     let error = refused(&format!(
         "{BASE}f : Nat -> Bool\nf n = case n of\n  Zero -> True\n"
     ));
     let ElabError::Clauses { error, .. } = error else {
         panic!("ожидалась сборка клауз, получено {error:?}");
     };
-    assert_eq!(error.to_string(), "не покрыто: `(Succ _)`");
+    assert_eq!(error.to_string(), "не покрыто: `Succ _`");
 }
 
 #[test]
@@ -4192,5 +4192,90 @@ data Pair (a = Nat) (b : Type) where
     assert!(
         matches!(&error, ElabError::TrailingDefault { name, .. } if &**name == "b"),
         "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_case_over_a_resource_is_written() {
+    // §10 вопрос 82, расхождение (3): разбор по ресурсу отвергался, тогда как
+    // побуквенно та же функция клаузами работала. Причина была в форме -
+    // подъём применял разбор ко всему контексту, а применение расходует.
+    program(
+        "\
+data Bool where
+  True : Bool
+  False : Bool
+
+resource Socket where
+  Listen : Socket
+  close : (1 s : Socket) -> Bool
+  close s = True
+
+byCase : (1 s : Socket) -> Bool
+byCase s = case s of
+  Listen -> True
+",
+    );
+}
+
+#[test]
+fn recursion_through_a_case_is_structural() {
+    // Расхождение (4): размеры терялись под поднятым `case`, и рекурсия через
+    // него структурной не считалась никогда. Разбор выражением даёт теперь тот
+    // же терм, что и клаузы, поэтому вердикт у них один.
+    program(&format!(
+        "{BASE}
+@total
+count : Nat -> Nat
+count n = case n of
+  Zero -> Zero
+  Succ k -> count k
+"
+    ));
+}
+
+#[test]
+fn a_branch_does_not_wash_out_scope_binding() {
+    // Расхождение (1): позиция не доходила до ветвей, и `if c then k else k`
+    // выносил наружу то, что прямое `k` вынести не может. Разбор значения не
+    // строит - их строят ветви, и позиция достаётся каждой.
+    let error = refused(
+        "\
+data Bool where
+  True : Bool
+  False : Bool
+
+forwardIf : (1 k : Bool -> Bool) -> Bool -> Bool -> Bool
+forwardIf k c = if c then k else k
+",
+    );
+    assert!(
+        matches!(&error, ElabError::ScopeBound { name, .. } if &**name == "k"),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_case_leaves_untouched_bindings_alone() {
+    // Расхождение (2): применение к контексту засчитывалось как употребление
+    // каждого связывания, включая те, которых ни одна ветвь не называет.
+    // Ресурс, о котором тело забыло, получал `drop` плюс применение и
+    // становился ω.
+    program(
+        "\
+data Bool where
+  True : Bool
+  False : Bool
+
+resource File where
+  Open : File
+  close : (1 h : File) -> Bool
+  close h = True
+
+forgotten : (1 h : File) -> Bool -> Bool
+forgotten h c = case c of
+  True -> True
+  False -> False
+",
     );
 }

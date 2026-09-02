@@ -96,6 +96,15 @@ fn deepen(depth: u32, links: usize, span: Span) -> Result<u32, ParseError> {
 fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<(), ParseError> {
     match &expr.kind {
         ExprKind::Name(_) | ExprKind::Lit(_) | ExprKind::Hole => {}
+        // Row звено ставит одно - как стрелка, на которой она стоит; метки
+        // соседи, и каждая живёт на той же глубине.
+        ExprKind::Effectful { labels, body, .. } => {
+            let inner = deepen(depth, 1, expr.span)?;
+            pending.push((Node::Expr(body), inner));
+            for label in labels {
+                pending.extend(label.arguments.iter().map(|it| (Node::Expr(it), inner)));
+            }
+        }
         ExprKind::Using { body, .. } => pending.push((Node::Expr(body), depth)),
         // Тип записи - **телескоп**: тип поля живёт под предыдущими, и звено
         // ставит каждое (§4.2). Хвост звена не ставит - он переменная, а не

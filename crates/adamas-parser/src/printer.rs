@@ -93,7 +93,9 @@ impl Expr {
             | ExprKind::List(_) => Prec::Atom,
             ExprKind::App(..) | ExprKind::TypeApp(..) => Prec::App,
             ExprKind::Chain(_) => Prec::Chain,
-            ExprKind::Lam { .. }
+            // Row связывает так же слабо, как стрелка, на которой написана.
+            ExprKind::Effectful { .. }
+            | ExprKind::Lam { .. }
             | ExprKind::Using { .. }
             | ExprKind::Pi { .. }
             | ExprKind::Arrow(..)
@@ -421,6 +423,7 @@ impl Printer {
             ExprKind::Name(name) => self.push(&name.text),
             ExprKind::Lit(lit) => self.push(&lit.text),
             ExprKind::Hole => self.push("_"),
+            ExprKind::Effectful { .. } => self.effect_row(expr),
             ExprKind::Using { name, body } => {
                 self.push("using ");
                 self.push(&name.text);
@@ -616,6 +619,31 @@ impl Printer {
     }
 
     // --- связывания и паттерны --------------------------------------------
+
+    /// `{State Int | e} A` - row перед типом (§3.4).
+    fn effect_row(&mut self, expr: &Expr) {
+        let ExprKind::Effectful { labels, tail, body } = &expr.kind else {
+            return;
+        };
+        let tail = tail.as_ref();
+        self.push("{");
+        for (position, label) in labels.iter().enumerate() {
+            if position > 0 {
+                self.push(", ");
+            }
+            self.push(&label.name.text);
+            for argument in &label.arguments {
+                self.push(" ");
+                self.expr(argument, Prec::Atom);
+            }
+        }
+        if let Some(tail) = tail {
+            self.push(" | ");
+            self.push(&tail.text);
+        }
+        self.push("} ");
+        self.expr(body, Prec::Lowest);
+    }
 
     fn binder(&mut self, binder: &Binder) {
         // Параметр без скобок - тот, у которого нечего в них писать.

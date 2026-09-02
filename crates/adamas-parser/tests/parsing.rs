@@ -301,9 +301,6 @@ fn forms_of_later_phases_name_their_phase() {
     // назвать фазу, чем перечислять, что бывает здесь вместо неё.
     let cases = [
         ("effect State s where\n  get : s\n", Unsupported::Effect),
-        // Effect row и запись пишутся одними скобками, а различает их регистр
-        // (§4.1): метка ряда заглавная, поле записи строчное.
-        ("f : {IO} a\n", Unsupported::Braces),
         ("infixl 6 +\n", Unsupported::Fixity),
     ];
     for (text, expected) in cases {
@@ -313,12 +310,20 @@ fn forms_of_later_phases_name_their_phase() {
         };
         assert_eq!(what, expected, "для {text:?}");
     }
-    // Сообщение - предложение целиком, вместе с подсказкой.
-    assert_eq!(
-        parse_error("f : {IO} a\n").to_string(),
-        "записи (§4.2) и effect row (§3.4) появляются в одной из следующих фаз; \
-         группа implicit-связываний пишется `{a : Type}`"
+}
+
+#[test]
+fn an_effect_row_is_told_from_a_record_by_case() {
+    // §4.1: effect row и запись пишутся одними скобками, а различает их
+    // регистр - метка ряда заглавная, поле записи строчное. Группу
+    // implicit-связываний отличает двоеточие, констрейнт - `=>` за скобкой.
+    let dumped = tree("step : Bool -> {State Bool} Bool\n").expect("разбор удался");
+    assert!(
+        dumped.contains("(row (State Bool) Bool)"),
+        "получено {dumped}"
     );
+    let record = tree("f : {x : Nat} -> Nat\n").expect("разбор удался");
+    assert!(record.contains("(pi "), "группа связываний: {record}");
 }
 
 #[test]

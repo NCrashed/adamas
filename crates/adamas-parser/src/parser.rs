@@ -59,9 +59,9 @@ use std::rc::Rc;
 use adamas_core::source::Span;
 
 use crate::ast::{
-    Alt, Binder, Binding, Block, Chain, ClassDecl, Clause, Constructor, Data, Decl, DeclKind, Expr,
-    ExprKind, LamParam, LamParamKind, Lit, LitKind, Module, ModuleDecl, Mult, MultAnn, Name,
-    Pattern, PatternKind, RecordField, Resource, Stmt, StmtKind, Symbol, Visibility,
+    Alt, Binder, Binding, Block, Chain, ClassDecl, Clause, Constructor, Data, Decl, DeclKind,
+    EffectLabel, Expr, ExprKind, LamParam, LamParamKind, Lit, LitKind, Module, ModuleDecl, Mult,
+    MultAnn, Name, Pattern, PatternKind, RecordField, Resource, Stmt, StmtKind, Symbol, Visibility,
     contains_block,
 };
 use crate::token::{Token, TokenKind};
@@ -874,6 +874,9 @@ impl<'a> Parser<'a> {
         if self.at_constraint() {
             return self.constrained();
         }
+        if self.at_effect_row() {
+            return self.effect_row();
+        }
         if self.at_binder() {
             // Единственное место, где парсер возвращается назад: `{x : Nat}`
             // читается и как группа implicit-связываний, и как тип записи
@@ -1459,6 +1462,59 @@ impl<'a> Parser<'a> {
                 && !token
                     .text(self.text)
                     .starts_with(|ch: char| ch.is_uppercase())
+        })
+    }
+
+    /// Начинается ли здесь effect row (§3.4).
+    ///
+    /// Различает её от типа записи **регистр** первого имени - то же правило
+    /// §4.1, по которому заглавное имя ссылается на объявленное, а строчное
+    /// связывает: метка ряда заглавная, поле записи строчное. От группы
+    /// implicit-связываний её отличает отсутствие двоеточия, от констрейнта -
+    /// отсутствие `=>` за скобкой, и оба проверены раньше.
+    fn at_effect_row(&self) -> bool {
+        self.at(TokenKind::LBrace)
+            && self.kind_ahead(1) == TokenKind::Ident
+            && self.text_ahead(1).starts_with(|ch: char| ch.is_uppercase())
+            && !self.at_binder()
+    }
+
+    /// `{State Int, IO | e} A`.
+    fn effect_row(&mut self) -> Result<Expr, ParseError> {
+        let open = self.expect(TokenKind::LBrace)?;
+        let mut labels = Vec::new();
+        let mut tail = None;
+        loop {
+            let name = self.ident()?;
+            let mut arguments = Vec::new();
+            while starts_atom(self.kind()) {
+                arguments.push(self.atom()?);
+            }
+            let span = arguments
+                .last()
+                .map_or(name.span, |last| name.span.merge(last.span));
+            labels.push(EffectLabel {
+                name,
+                arguments,
+                span,
+            });
+            if self.eat(TokenKind::Comma).is_some() {
+                continue;
+            }
+            if self.eat(TokenKind::Pipe).is_some() {
+                tail = Some(self.ident()?);
+            }
+            break;
+        }
+        self.expect(TokenKind::RBrace)?;
+        let body = self.expr()?;
+        Ok(Expr {
+            span: open.span.merge(body.span),
+            kind: ExprKind::Effectful {
+                labels,
+                tail,
+                body: Box::new(body),
+            },
         })
     }
 

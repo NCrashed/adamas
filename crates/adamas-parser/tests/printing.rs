@@ -46,6 +46,16 @@ module type BagSig where
 ",
     ),
     (
+        "effect_rows",
+        "\
+State : Type -> Effect
+
+step : Bool -> {State Bool} Bool
+
+both : Bool -> {IO, State Bool | e} Bool
+",
+    ),
+    (
         "parameter_defaults",
         "\
 data Pair (a : Type) (b = a) where

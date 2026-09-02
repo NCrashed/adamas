@@ -111,6 +111,17 @@ pub struct Binder {
     pub span: Span,
 }
 
+/// Метка эффекта, как она написана: `State Int`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectLabel {
+    /// Имя конструктора метки.
+    pub name: Name,
+    /// Аргументы, к которым он применён.
+    pub arguments: Vec<Expr>,
+    /// Метка целиком.
+    pub span: Span,
+}
+
 /// Вид литерала. Класс преобразования выбирается по нему же (§4.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LitKind {
@@ -202,6 +213,20 @@ pub enum ExprKind {
     },
     /// Независимая функция: `A -> B`.
     Arrow(Box<Expr>, Box<Expr>),
+    /// Row эффектов перед типом: `A -> {State Int} B` (§3.4).
+    ///
+    /// Узел стоит на месте **кодомена**, а не самой стрелки: так `A -> {ε} B`
+    /// и `{ε} A` разбираются одной формой, а различает их то, куда она попала.
+    /// Элаборация снимает её со стрелки в поле `Pi`; написанная сама по себе,
+    /// она есть нульместная функция (§3.4), и та ждёт единицы из prelude.
+    Effectful {
+        /// Метки: имя конструктора и его аргументы.
+        labels: Vec<EffectLabel>,
+        /// Хвост, если написан: `{IO | e}`.
+        tail: Option<Name>,
+        /// Что стоит за row.
+        body: Box<Expr>,
+    },
     /// Блок операторов - тело определения или `let` (§4.1).
     Block(Block),
     /// `if c then a else b`.
@@ -581,6 +606,10 @@ pub fn contains_block(expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::Case { .. } | ExprKind::Block(_) => return true,
             ExprKind::Name(_) | ExprKind::Lit(_) | ExprKind::Hole => {}
+            ExprKind::Effectful { labels, body, .. } => {
+                pending.push(body);
+                pending.extend(labels.iter().flat_map(|label| &label.arguments));
+            }
             ExprKind::RecordType(fields, _) => pending.extend(fields.iter().map(|it| &it.ty)),
             ExprKind::Record(fields) => pending.extend(fields.iter().map(|(_, it)| it)),
             ExprKind::Project(inner, _) => pending.push(inner),
@@ -671,6 +700,26 @@ fn dump_class(out: &mut String, class: &ClassDecl, depth: usize) {
     if class.coherent {
         out.push(')');
     }
+}
+
+/// `{State Int | e} A`: `(row ((State Int)) | e A)`.
+fn dump_row(out: &mut String, labels: &[EffectLabel], tail: Option<&Name>, body: &Expr) {
+    out.push_str("(row (");
+    dump_list(out, labels, |out, label| {
+        out.push_str(&label.name.text);
+        for argument in &label.arguments {
+            out.push(' ');
+            dump_expr(out, argument);
+        }
+    });
+    out.push(')');
+    if let Some(tail) = tail {
+        out.push_str(" | ");
+        out.push_str(&tail.text);
+    }
+    out.push(' ');
+    dump_expr(out, body);
+    out.push(')');
 }
 
 /// `\x y -> body`: `(lam (x y) body)`.
@@ -925,6 +974,7 @@ fn dump_expr(out: &mut String, expr: &Expr) {
         ExprKind::Name(name) => out.push_str(&name.text),
         ExprKind::Lit(lit) => out.push_str(&lit.text),
         ExprKind::Hole => out.push('_'),
+        ExprKind::Effectful { labels, tail, body } => dump_row(out, labels, tail.as_ref(), body),
         ExprKind::RecordType(..) | ExprKind::Record(_) => dump_record(out, &expr.kind),
         ExprKind::Using { name, body } => dump_using(out, name, body),
         ExprKind::Project(inner, name) => dump_projection(out, inner, name),

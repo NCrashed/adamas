@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use adamas_core::check::{check, infer, is_type};
-use adamas_core::conv::whnf;
+use adamas_core::conv::{whnf, whnf_solved};
 use adamas_core::ctx::Ctx;
 use adamas_core::eval::{apply, eval, quote};
 use adamas_core::level::Level;
@@ -19,7 +19,7 @@ use adamas_core::pattern::{Clause, Pattern as CorePattern, PatternError, compile
 use adamas_core::row::{Label, Row};
 use adamas_core::sig::{Definition, DefinitionKind, Signature};
 use adamas_core::source::Span;
-use adamas_core::term::{Binder, Field as CoreField, Fields, Name as CoreName, Rows, Term};
+use adamas_core::term::{Binder, Field as CoreField, Fields, Index, Name as CoreName, Rows, Term};
 use adamas_core::value::{Elim, Env, Head, Lvl, Value};
 use adamas_parser::ast::{
     self, Binding, Block, Expr, ExprKind, LamParamKind, Pattern, PatternKind, Stmt, StmtKind,
@@ -29,6 +29,33 @@ use adamas_parser::ast::{
 use crate::error::{ElabError, Missing};
 use crate::live;
 use crate::own::Owned;
+
+/// Имя единицы. Соглашение то же, каким `if` берёт `Bool` (§3.4): типа этого
+/// ядро не знает, а сахар `{ε} A` без него не разворачивается.
+const UNIT: &str = "Unit";
+
+/// Домен связывания, если тип им является.
+fn domain_of(ty: &Value) -> Option<Rc<Value>> {
+    match ty {
+        Value::Pi(_, _, domain, _, _) => Some(Rc::clone(domain)),
+        _ => None,
+    }
+}
+
+/// Ждёт ли спайн типа единицу хоть одним связыванием.
+///
+/// Приближение сверху для [`Elaborator::suspends`]: имплиситы у имени ещё не
+/// вставлены, поэтому какое именно связывание окажется первым, здесь неизвестно.
+fn awaits_unit(ty: &Term) -> bool {
+    let mut current = ty;
+    while let Term::Pi(_, _, domain, _, codomain) = current {
+        if matches!(&**domain, Term::Const(name, ..) if &**name == UNIT) {
+            return true;
+        }
+        current = codomain;
+    }
+    false
+}
 
 /// Разбирает ли имя (заглавное) или связывает (строчное).
 ///
@@ -2281,7 +2308,11 @@ impl<'a> Elaborator<'a> {
                 term = inserted;
                 ty = Some(rest);
             }
+            // Ожидаемый тип аргумента - домен того связывания, к которому он
+            // приписывается; исполнение по нему и решается (§3.4).
+            let expected = ty.as_deref().and_then(domain_of);
             let argument = self.placed(inside, |it| it.expr(argument, Mult::Many))?;
+            let argument = self.executed(argument, expected.as_ref());
             ty = ty.and_then(|it| self.stepped(&it, &argument));
             term = Term::App(Rc::new(term), Rc::new(argument.clone()));
             given.push(argument);
@@ -2336,6 +2367,94 @@ impl<'a> Elaborator<'a> {
         let (domain, codomain) = (Rc::clone(domain), codomain.clone());
         check(&self.ctx, self.metas, Mult::Zero, argument, &domain).ok()?;
         Some(codomain.apply(self.ctx.eval(argument)))
+    }
+
+    /// Исполняет приостановленное вычисление, если его не ждут (§3.4).
+    ///
+    /// Одна и та же запись означает «передать вычисление» и «выполнить его», а
+    /// различает их ожидаемый тип: против типа вычисления терм передаётся как
+    /// есть, против любого другого - применяется к единице, и его row обязана
+    /// погаситься окружающей. Форма правила та же, что у вставки имплиситов, и
+    /// детерминизм тот же.
+    ///
+    /// `expected` - `None` там, где написанного типа нет; тогда правило не
+    /// срабатывает, и вычисление пишется применённым руками. Режим `infer`
+    /// §3.4 сюда пока не приходит: `let` без аннотации и отбрасываемый оператор
+    /// блока - формы следующих срезов.
+    fn executed(&mut self, term: Term, expected: Option<&Rc<Value>>) -> Term {
+        if expected.is_none_or(|ty| self.computation(ty)) || !self.suspends(&term) {
+            return term;
+        }
+        let Ok((ty, _)) = infer(&self.ctx, self.metas, Mult::Zero, &term) else {
+            return term;
+        };
+        if !self.computation(&ty) {
+            return term;
+        }
+        let Some(unit) = self.unit_value() else {
+            return term;
+        };
+        Term::App(Rc::new(term), Rc::new(unit))
+    }
+
+    /// Тип приостановленного вычисления: стрелка от единицы (§3.4).
+    ///
+    /// Собственного типа у вычисления нет - `{ε} A` есть сахар, - поэтому и
+    /// узнаётся оно по форме. Единица берётся по имени, тем же соглашением,
+    /// каким её ставит сам сахар, и обязана быть типом с одним конструктором:
+    /// иначе это не единица, и стрелка от неё - обычная функция.
+    fn computation(&mut self, ty: &Rc<Value>) -> bool {
+        let Value::Pi(_, _, domain, _, _) = &*whnf_solved(self.signature, self.metas, ty) else {
+            return false;
+        };
+        let Value::Neutral(Head::Global(name, ..), spine) =
+            &*whnf_solved(self.signature, self.metas, domain)
+        else {
+            return false;
+        };
+        spine.is_empty() && &**name == UNIT && self.unit_value().is_some()
+    }
+
+    /// Значение единицы - её единственный конструктор.
+    ///
+    /// Второго имени по соглашению не заводится: тип назван, а какой у него
+    /// конструктор, знает сигнатура.
+    fn unit_value(&mut self) -> Option<Term> {
+        let [only] = self.signature.constructors(UNIT)? else {
+            return None;
+        };
+        let only = Rc::clone(only);
+        self.signature.instantiate(&only, self.metas)
+    }
+
+    /// Может ли терм оказаться вычислением - дёшево, до всякого вывода типа.
+    ///
+    /// Отбор по объявленному типу идёт до `infer` тем же доводом, каким его
+    /// ведёт вставка имплиситов: вывод считает тип целиком, а вычислений в
+    /// обычной программе единицы. Приближение сверху: отвечает «может» чаще,
+    /// чем нужно, но никогда не пропускает настоящее вычисление.
+    fn suspends(&self, term: &Term) -> bool {
+        let mut head = term;
+        while let Term::App(callee, _) = head {
+            head = callee;
+        }
+        match head {
+            Term::Const(name, ..) => self
+                .signature
+                .lookup(name)
+                .is_some_and(|definition| awaits_unit(&definition.ty)),
+            Term::Var(Index(index)) => self
+                .scope
+                .len()
+                .checked_sub(*index as usize + 1)
+                .and_then(|position| self.scope.get(position))
+                .is_some_and(|bound| matches!(&*bound.ty, Value::Pi(..))),
+            // Блок собирается в цепочку `let`, а разбор - в узел с ветвями;
+            // вычислением бывает то, чем они кончаются.
+            Term::Let(_, _, _, _, body) => self.suspends(body),
+            Term::Case(case) => case.branches.iter().any(|it| self.suspends(&it.body)),
+            _ => false,
+        }
     }
 
     /// Применяет `term` к дырке на каждое ведущее implicit-связывание его типа.
@@ -2722,13 +2841,16 @@ impl<'a> Elaborator<'a> {
         // Аннотация `let` - тот же написанный тип, и лямбда значения берёт
         // кратности у него.
         self.expected = pi_arguments(&ty, self.owned);
+        let annotation = self.typed(&ty);
         let value = self.expr(&binding.body, Mult::Many)?;
+        // Аннотация и есть ожидаемый тип - `let n : Bool = get` исполняет,
+        // `let f : {State Bool} Bool = get` передаёт (§3.4).
+        let value = self.executed(value, Some(&annotation));
         // §3.3: связывание, инициализированное привязанным к scope значением,
         // само привязано. Без этого правило обходится в одну строку - и обход
         // выписан в §3.3 дословно.
         let scoped = self.produced.take().is_some();
         let born = u32::try_from(self.scope.len()).unwrap_or(u32::MAX);
-        let annotation = self.typed(&ty);
         let bound = Bound {
             value: Some(Rc::new(value.clone())),
             ..Bound::owning_scoping(&binding.name.text, mult, annotation, owns, scoped)
@@ -2918,7 +3040,7 @@ impl<'a> Elaborator<'a> {
         // Тип связывания виден и у аргумента верхнего уровня (по спайну
         // написанного), и у поля (по объявлению конструктора), поэтому
         // владение и закрытие считаются одним проходом по паттернам.
-        let bound = self.clause_variables(&written, &clause.body);
+        let (bound, result) = self.clause_variables(&written, &clause.body);
         let closing = closing_of(&bound);
         let depth = self.scope.len();
         let outer = self.ctx.clone();
@@ -2950,9 +3072,13 @@ impl<'a> Elaborator<'a> {
             .1
             .to_vec();
         // Тело клаузы - возвращаемое значение определения (§3.3).
-        let body = self.closing_all(&closing, |it| {
-            it.placed(Position::Returned, |it| it.expr(&clause.body, Mult::Many))
-        });
+        // Тип, оставшийся от написанного после паттернов, и есть ожидаемый
+        // тип тела: по нему решается исполнение (§3.4).
+        let body = self
+            .closing_all(&closing, |it| {
+                it.placed(Position::Returned, |it| it.expr(&clause.body, Mult::Many))
+            })
+            .map(|body| self.executed(body, result.as_ref()));
         self.scope.truncate(depth);
         self.ctx = outer;
 
@@ -3016,7 +3142,7 @@ impl<'a> Elaborator<'a> {
         &mut self,
         written: &[(Option<&Pattern>, CorePattern)],
         body: &Expr,
-    ) -> Vec<BoundVar> {
+    ) -> (Vec<BoundVar>, Option<Rc<Value>>) {
         // Имена собираются первым проходом: они связывают тело, а значит и
         // затеняют в нём головы применений, - но в области видимости их ещё
         // нет, решение о вставке принимается раньше.
@@ -3042,7 +3168,9 @@ impl<'a> Elaborator<'a> {
                 _ => None,
             };
         }
-        found
+        // Остаток - тип тела клаузы. Он же считается по дороге: шагает по
+        // написанному типу этот проход, и второй такой был бы его копией.
+        (found, current)
     }
 
     /// То же для одного паттерна, вглубь. Возвращает значение разобранного -

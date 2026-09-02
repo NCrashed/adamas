@@ -22,6 +22,7 @@ use std::rc::Rc;
 use adamas_core::check::{Frame, TypeError};
 use adamas_core::level::{Level, LevelMeta};
 use adamas_core::pattern::PatternError;
+use adamas_core::row::{Row, RowMeta, Tail};
 use adamas_core::source::{Location, SourceFile, Span};
 use adamas_core::term::{Binder, Case, Fields, Index, Name, Rows, Term};
 
@@ -239,11 +240,11 @@ impl Naming {
             collect_level(level, &mut ordered);
         }
         for meta in &*metas {
-            push(&mut ordered, **meta);
+            push(&mut ordered, meta.0);
         }
         for meta in ordered {
             let next = u32::try_from(self.metas.len()).unwrap_or(u32::MAX);
-            self.metas.entry(meta.0).or_insert(next);
+            self.metas.entry(meta).or_insert(next);
         }
 
         let (terms, levels, metas) = kind.parts_mut();
@@ -271,21 +272,7 @@ impl Naming {
             // стоит на исходной глубине, а не под полями: открытый ряд
             // зависимостей не имеет (§4.2).
             Term::Record(fields) | Term::Row(fields) => {
-                let mut written = Vec::with_capacity(fields.len());
-                for (index, field) in fields.iter().enumerate() {
-                    let mut ty = field.ty.as_ref().clone();
-                    self.term(&mut ty, bound, outer + index);
-                    written.push(renamed(field, ty));
-                }
-                let tail = fields.tail.as_ref().map(|tail| {
-                    let mut tail = tail.as_ref().clone();
-                    self.term(&mut tail, bound, outer);
-                    Rc::new(tail)
-                });
-                let rebuilt = Fields {
-                    fields: written.into(),
-                    tail,
-                };
+                let rebuilt = self.fields(fields, bound, outer);
                 *term = match term {
                     Term::Row(_) => Term::Row(rebuilt),
                     _ => Term::Record(rebuilt),
@@ -330,7 +317,14 @@ impl Naming {
             // Сорт `Effect` рядом по той же причине: ни имён, ни уровней.
             Term::Meta(_) | Term::EffectKind => {}
             Term::Universe(level) | Term::RowKind(level) => self.level(level),
-            Term::Const(_, levels, _) => *levels = self.levels(levels),
+            Term::Const(_, levels, rows) => {
+                *levels = self.levels(levels);
+                *rows = Rows::new(
+                    rows.as_slice()
+                        .iter()
+                        .map(|row| self.row(row, bound, outer)),
+                );
+            }
             Term::App(callee, argument) => {
                 self.term(Rc::make_mut(callee), bound, outer);
                 self.term(Rc::make_mut(argument), bound, outer);
@@ -345,11 +339,7 @@ impl Naming {
             // связывание `Pi` вводится только для кодомена.
             Term::Pi(Binder { .. }, name, domain, row, codomain) => {
                 self.term(Rc::make_mut(domain), bound, outer);
-                *row = row.map(|argument| {
-                    let mut argument = argument.clone();
-                    self.term(&mut argument, bound, outer);
-                    argument
-                });
+                *row = self.row(row, bound, outer);
                 let name = name.clone();
                 self.under(bound, name, |naming, bound| {
                     naming.term(Rc::make_mut(codomain), bound, outer);
@@ -381,6 +371,43 @@ impl Naming {
         bound.pop();
     }
 
+    /// Телескоп полей: тип следующего стоит под предыдущими, поэтому глубина
+    /// растёт вместе с ними. Хвост при этом стоит на исходной: открытый ряд
+    /// зависимостей не имеет (§4.2).
+    fn fields(&self, fields: &Fields, bound: &mut Vec<Name>, outer: usize) -> Fields {
+        let mut written = Vec::with_capacity(fields.len());
+        for (index, field) in fields.iter().enumerate() {
+            let mut ty = field.ty.as_ref().clone();
+            self.term(&mut ty, bound, outer + index);
+            written.push(renamed(field, ty));
+        }
+        let tail = fields.tail.as_ref().map(|tail| {
+            let mut tail = tail.as_ref().clone();
+            self.term(&mut tail, bound, outer);
+            Rc::new(tail)
+        });
+        Fields {
+            fields: written.into(),
+            tail,
+        }
+    }
+
+    /// Row с локализованными номерами - и в аргументах меток, и в хвосте.
+    fn row(&self, row: &Row<Term>, bound: &mut Vec<Name>, outer: usize) -> Row<Term> {
+        let mapped = row.map(|argument| {
+            let mut argument = argument.clone();
+            self.term(&mut argument, bound, outer);
+            argument
+        });
+        let tail = match mapped.tail() {
+            Some(Tail::Meta(RowMeta(meta))) => Some(Tail::Meta(RowMeta(
+                self.metas.get(&meta).copied().unwrap_or(meta),
+            ))),
+            other => other,
+        };
+        Row::closing(mapped.labels().iter().cloned(), tail)
+    }
+
     fn levels(&self, levels: &Rc<[Level]>) -> Rc<[Level]> {
         levels
             .iter()
@@ -408,7 +435,7 @@ impl Naming {
 }
 
 /// Дырки терма в порядке появления в тексте.
-fn collect_term(term: &Term, ordered: &mut Vec<LevelMeta>) {
+fn collect_term(term: &Term, ordered: &mut Vec<u32>) {
     match term {
         Term::Record(fields) | Term::Row(fields) => {
             for field in fields.iter() {
@@ -447,9 +474,7 @@ fn collect_term(term: &Term, ordered: &mut Vec<LevelMeta>) {
         Term::Pi(_, _, domain, row, codomain) => {
             collect_term(domain, ordered);
             collect_term(codomain, ordered);
-            for argument in row.labels().iter().flat_map(|label| &label.arguments) {
-                collect_term(argument, ordered);
-            }
+            collect_row(row, ordered);
         }
         Term::Let(_, _, ty, value, body) => {
             collect_term(ty, ordered);
@@ -469,9 +494,22 @@ fn collect_term(term: &Term, ordered: &mut Vec<LevelMeta>) {
     }
 }
 
-fn collect_level(level: &Level, ordered: &mut Vec<LevelMeta>) {
+/// Дырки row: аргументы меток термами, хвост - своим номером.
+///
+/// Счётчик хранилища один на все сорта, поэтому номер дырки-row с номером
+/// дырки уровня не столкнётся, и локализовать их можно вместе.
+fn collect_row(row: &Row<Term>, ordered: &mut Vec<u32>) {
+    for argument in row.labels().iter().flat_map(|label| &label.arguments) {
+        collect_term(argument, ordered);
+    }
+    if let Some(Tail::Meta(RowMeta(meta))) = row.tail() {
+        push(ordered, meta);
+    }
+}
+
+fn collect_level(level: &Level, ordered: &mut Vec<u32>) {
     match level {
-        Level::Meta(meta) => push(ordered, *meta),
+        Level::Meta(meta) => push(ordered, meta.0),
         Level::Succ(inner) => collect_level(inner, ordered),
         Level::Max(left, right) => {
             collect_level(left, ordered);
@@ -481,7 +519,7 @@ fn collect_level(level: &Level, ordered: &mut Vec<LevelMeta>) {
     }
 }
 
-fn push(ordered: &mut Vec<LevelMeta>, meta: LevelMeta) {
+fn push(ordered: &mut Vec<u32>, meta: u32) {
     if !ordered.contains(&meta) {
         ordered.push(meta);
     }

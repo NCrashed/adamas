@@ -886,6 +886,16 @@ impl<'a> Parser<'a> {
             // отвечать не о том, что написано.
             let mark = self.index;
             let braces = self.at(TokenKind::LBrace);
+            // Неоднозначность разрешается **просмотром**, а не разбором с
+            // возвратом. Возврат стоил экспоненты: тип поля разбирался целиком
+            // внутри группы, отказывал на отсутствующей стрелке и разбирался
+            // заново записью, то есть T(n) = 2·T(n−1). Двадцать четыре уровня
+            // вложенных типов записи - двести байт исходника - стоили четырёх
+            // с половиной секунд, и предел вложенности от этого не спасал: он
+            // ограничивает глубину, а не число попыток.
+            if braces && self.at_record_at(mark) && !self.at_binder_chain() {
+                return self.arrowed();
+            }
             match self.binder_group() {
                 Ok(expr) => return Ok(expr),
                 Err(error) => {
@@ -898,6 +908,53 @@ impl<'a> Parser<'a> {
         }
 
         self.arrowed()
+    }
+
+    /// Стоит ли на **цепочке групп связываний**, оканчивающейся стрелкой.
+    ///
+    /// Группа от типа записи отличается тем, что за нею стоит стрелка, - но
+    /// стоит она не сразу: `{a : Type} {b : Type} -> Nat` и
+    /// `{a : Type} (b : Nat) -> Nat` законны, и просмотр обязан пройти всю
+    /// цепочку. Скобки уравновешиваются, поэтому вложенная запись просмотр не
+    /// сбивает.
+    fn at_binder_chain(&self) -> bool {
+        let mut offset = 0;
+        loop {
+            let Some(next) = self.past_group(offset) else {
+                return false;
+            };
+            offset = next;
+            match self.kind_ahead(offset) {
+                TokenKind::Arrow | TokenKind::FatArrow => return true,
+                TokenKind::LBrace | TokenKind::LParen => {}
+                _ => return false,
+            }
+        }
+    }
+
+    /// Смещение сразу за уравновешенной скобкой, стоящей на `offset`.
+    fn past_group(&self, offset: usize) -> Option<usize> {
+        let (open, close) = match self.kind_ahead(offset) {
+            TokenKind::LBrace => (TokenKind::LBrace, TokenKind::RBrace),
+            TokenKind::LParen => (TokenKind::LParen, TokenKind::RParen),
+            _ => return None,
+        };
+        let mut depth = 0_u32;
+        let mut at = offset;
+        loop {
+            let kind = self.kind_ahead(at);
+            if kind == open {
+                depth += 1;
+            } else if kind == close {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at + 1);
+                }
+            } else if kind == TokenKind::Eof {
+                return None;
+            }
+            at += 1;
+        }
     }
 
     /// Стоит ли на констрейнт-контексте: `{Eqv a} => …` (§4.1).

@@ -8,9 +8,9 @@
 //! # Единица объявления - группа
 //!
 //! Объявляется не определение, а **группа** ([`Group`]), одним вызовом
-//! [`Signature::declare`] (§10 вопрос 50). Члены двух видов - определение и
-//! индуктивное семейство со своими конструкторами; группа из одного члена и
-//! есть обычное определение. Промежуточных наблюдаемых состояний сигнатуры
+//! [`Signature::declare`] (§10 вопрос 50). Члены трёх видов - определение,
+//! индуктивное семейство со своими конструкторами и метка эффекта со своими
+//! операциями (§3.4); группа из одного члена и есть обычное определение. Промежуточных наблюдаемых состояний сигнатуры
 //! нет: снаружи группа либо добавлена целиком, либо не добавлена вовсе.
 //!
 //! Проверка идёт в четыре фазы, и порядок в них существенный:
@@ -18,7 +18,8 @@
 //! - **(A)** типы членов - против сигнатуры **без** группы. Здесь ловится
 //!   `f : f -> Nat`: тип, ссылающийся на определяемое, цикличен. Цена правила -
 //!   §10 вопрос 64: сосед в типе члена по той же причине не пишется.
-//! - **(B1)** типы конструкторов - против сигнатуры **с** типами членов.
+//! - **(B1)** типы конструкторов и операций - против сигнатуры **с** типами
+//!   членов.
 //! - **(B2)** тела определений - с типами членов и с объявлениями
 //!   конструкторов. Отсюда рекурсия. δ по членам открытой группы не работает
 //!   по построению: их тела в сигнатуру ещё не попали, и разворачивать нечего.
@@ -51,7 +52,8 @@ use std::rc::Rc;
 
 use crate::check::{
     Frame, TypeError, check_body, check_constructor_content, check_constructor_shape,
-    check_declaration, data_sort, unsolved_in_definition, unsolved_term_in_definition,
+    check_declaration, check_operation_shape, data_sort, effect_sort, unsolved_in_definition,
+    unsolved_term_in_definition,
 };
 use crate::error::ErrorKind;
 use crate::eval::eval;
@@ -95,6 +97,21 @@ pub enum DefinitionKind {
     Constructor {
         /// Тип, которому конструктор принадлежит.
         data: Name,
+    },
+    /// Формер метки эффекта (§3.4).
+    Effect {
+        /// Операции в порядке объявления. Порядок задаёт порядок веток
+        /// хендлера - тем же доводом, каким конструкторы задают порядок
+        /// ветвей разбора.
+        operations: Vec<Name>,
+        /// Сколько связываний формера - параметры метки. Все: результат
+        /// метки всегда `Effect`, индексов у неё не бывает.
+        params: u32,
+    },
+    /// Операция эффекта.
+    Operation {
+        /// Эффект, которому операция принадлежит.
+        effect: Name,
     },
 }
 
@@ -186,6 +203,18 @@ impl Definition {
             _ => None,
         }
     }
+
+    /// Число параметров метки. `None` - не эффект.
+    ///
+    /// Универсума рядом нет, и это не пропуск: метка не тип, полем стоять не
+    /// может, укладывать её некуда.
+    #[must_use]
+    pub fn effect_shape(&self) -> Option<u32> {
+        match &self.kind {
+            DefinitionKind::Effect { params, .. } => Some(*params),
+            _ => None,
+        }
+    }
 }
 
 /// Арность параметров: объявлена руками или выводится обобщением.
@@ -232,12 +261,15 @@ impl Arity {
     }
 }
 
-/// Конструктор в объявлении семейства.
+/// Объявление внутри члена: конструктор семейства или операция эффекта.
+///
+/// Форма у них одна - имя плюс написанный тип, - и проходят они одними и теми
+/// же фазами; различает их то, что проверяет форму (§3.4, §10 вопрос 50).
 #[derive(Clone, Debug)]
-pub struct ConstructorDecl {
+pub struct MemberDecl {
     /// Имя.
     pub name: Name,
-    /// Тип. Проверяется в фазе B - против сигнатуры, где тип-формер уже есть.
+    /// Тип. Проверяется в фазе B - против сигнатуры, где формер уже есть.
     pub ty: Term,
 }
 
@@ -275,7 +307,21 @@ pub enum Member {
         /// Тип-формер.
         ty: Term,
         /// Конструкторы в порядке объявления.
-        constructors: Vec<ConstructorDecl>,
+        constructors: Vec<MemberDecl>,
+    },
+    /// Метка эффекта вместе со своими операциями (§3.4).
+    Effect {
+        /// Имя метки.
+        name: Name,
+        /// Сколько связываний формера - параметры. Телескоп их повторяется в
+        /// каждой операции дословно.
+        params: u32,
+        /// Арность параметров уровня.
+        arity: Arity,
+        /// Формер: `params -> Effect`.
+        ty: Term,
+        /// Операции в порядке объявления.
+        operations: Vec<MemberDecl>,
     },
 }
 
@@ -303,7 +349,44 @@ impl Member {
     pub fn sealed(mut self) -> Self {
         match &mut self {
             Self::Definition { opaque, .. } => *opaque = true,
-            Self::Data { .. } => debug_assert!(false, "запечатывается определение, а не семейство"),
+            Self::Data { .. } | Self::Effect { .. } => {
+                debug_assert!(false, "запечатывается определение, а не формер");
+            }
+        }
+        self
+    }
+
+    /// Метка эффекта с выведенной арностью и без операций.
+    ///
+    /// Эффект без операций законен по той же причине, что семейство без
+    /// конструкторов: объявить его можно, производить нечем.
+    #[must_use]
+    pub fn effect(name: &str, params: u32, ty: Term) -> Self {
+        Self::Effect {
+            name: name.into(),
+            params,
+            arity: Arity::Inferred,
+            ty,
+            operations: Vec::new(),
+        }
+    }
+
+    /// Добавляет операцию метке.
+    ///
+    /// # Panics
+    ///
+    /// В отладочной сборке - если член не метка.
+    #[must_use]
+    pub fn with_operation(mut self, name: &str, ty: Term) -> Self {
+        debug_assert!(
+            matches!(self, Self::Effect { .. }),
+            "операция приписывается метке, а не семейству"
+        );
+        if let Self::Effect { operations, .. } = &mut self {
+            operations.push(MemberDecl {
+                name: name.into(),
+                ty,
+            });
         }
         self
     }
@@ -345,7 +428,9 @@ impl Member {
     #[must_use]
     pub fn with_arity(mut self, levels: u32, rows: u32) -> Self {
         match &mut self {
-            Self::Definition { arity, .. } | Self::Data { arity, .. } => {
+            Self::Definition { arity, .. }
+            | Self::Data { arity, .. }
+            | Self::Effect { arity, .. } => {
                 *arity = Arity::Declared { levels, rows };
             }
         }
@@ -365,7 +450,7 @@ impl Member {
             "конструктор приписывается семейству, а не определению"
         );
         if let Self::Data { constructors, .. } = &mut self {
-            constructors.push(ConstructorDecl {
+            constructors.push(MemberDecl {
                 name: name.into(),
                 ty,
             });
@@ -377,7 +462,9 @@ impl Member {
     #[must_use]
     pub fn name(&self) -> &Name {
         match self {
-            Self::Definition { name, .. } | Self::Data { name, .. } => name,
+            Self::Definition { name, .. } | Self::Data { name, .. } | Self::Effect { name, .. } => {
+                name
+            }
         }
     }
 }
@@ -556,7 +643,7 @@ impl Signature {
             );
         }
         for (member, declarations) in members.iter().zip(&constructors) {
-            for (name, declaration) in constructor_names(member).zip(declarations) {
+            for (name, declaration) in member_names(member).zip(declarations) {
                 self.definitions
                     .insert(Rc::clone(name), declaration.clone());
             }
@@ -680,7 +767,14 @@ impl Signature {
             // Кратность тип-формера `ω`: он живёт и в позиции типа (там σ = 0,
             // и `ω` это допускает), и как обычное значение - §3.2 разрешает
             // `List Type`.
+            //
+            // Метка эффекта живёт там же и по той же причине: она стоит
+            // аргументом row, то есть в стёртом фрагменте, но запрещать ей
+            // рантайм незачем.
             Member::Data {
+                name, arity, ty, ..
+            }
+            | Member::Effect {
                 name, arity, ty, ..
             } => (name, Mult::Many, *arity, ty),
         };
@@ -734,6 +828,22 @@ impl Signature {
                 sort,
             };
         }
+        if let Member::Effect {
+            name,
+            params,
+            operations,
+            ..
+        } = member
+        {
+            effect_sort(name, *params, &declaration.ty)?;
+            declaration.kind = DefinitionKind::Effect {
+                operations: operations
+                    .iter()
+                    .map(|operation| Rc::clone(&operation.name))
+                    .collect(),
+                params: *params,
+            };
+        }
         Ok(Checked {
             declaration,
             generalization,
@@ -747,23 +857,105 @@ impl Signature {
         member: &Member,
         checked: &Checked,
     ) -> Result<Vec<Definition>, TypeError> {
-        let Member::Data {
-            name,
-            arity,
-            constructors,
-            ..
-        } = member
-        else {
-            return Ok(Vec::new());
-        };
-        let mut declarations = Vec::with_capacity(constructors.len());
-        for (slot, constructor) in constructors.iter().enumerate() {
-            declarations.push(
-                self.check_constructor_type(metas, name, *arity, &checked.declaration, constructor)
-                    .map_err(|error| error.in_frame(Frame::Constructor(at(slot))))?,
-            );
+        match member {
+            Member::Definition { .. } => Ok(Vec::new()),
+            Member::Data {
+                name,
+                arity,
+                constructors,
+                ..
+            } => {
+                let mut declarations = Vec::with_capacity(constructors.len());
+                for (slot, constructor) in constructors.iter().enumerate() {
+                    declarations.push(
+                        self.check_constructor_type(
+                            metas,
+                            name,
+                            *arity,
+                            &checked.declaration,
+                            constructor,
+                        )
+                        .map_err(|error| error.in_frame(Frame::Constructor(at(slot))))?,
+                    );
+                }
+                Ok(declarations)
+            }
+            Member::Effect {
+                name,
+                arity,
+                operations,
+                ..
+            } => {
+                let mut declarations = Vec::with_capacity(operations.len());
+                for (slot, operation) in operations.iter().enumerate() {
+                    declarations.push(
+                        self.check_operation_type(
+                            metas,
+                            name,
+                            *arity,
+                            &checked.declaration,
+                            operation,
+                        )
+                        .map_err(|error| error.in_frame(Frame::Constructor(at(slot))))?,
+                    );
+                }
+                Ok(declarations)
+            }
         }
-        Ok(declarations)
+    }
+
+    /// Фаза B1 для операции: тип, арность и форма.
+    ///
+    /// Отличие от конструктора одно, и оно всё: конструктор обязан **вернуть**
+    /// своё семейство, а операция - **произвести** свою метку. Проверяется
+    /// поэтому не результат, а row (§3.4).
+    fn check_operation_type(
+        &self,
+        metas: &mut Metas,
+        effect: &Name,
+        arity: Arity,
+        former: &Definition,
+        operation: &MemberDecl,
+    ) -> Result<Definition, TypeError> {
+        let draft = Definition {
+            mult: Mult::Many,
+            level_arity: arity.declared(),
+            row_arity: arity.declared_rows(),
+            carriers: crate::carrier::stored(&operation.ty),
+            opaque: false,
+            ty: operation.ty.clone(),
+            body: None,
+            kind: DefinitionKind::Operation {
+                effect: Rc::clone(effect),
+            },
+            // Тела у операции нет и не будет: развернуть её нечем до тех пор,
+            // пока хендлер не подставит evidence. Расходиться, значит, нечему.
+            total: true,
+        };
+        check_declaration(self, metas, &operation.name, &draft)?;
+        let (declaration, _) = generalize(metas, arity, draft);
+
+        // Арность уровня обязана совпасть с арностью метки - тем же доводом,
+        // каким она совпадает у конструктора: телескоп повторяется дословно, и
+        // лишний параметр заполнить было бы нечем.
+        if declaration.level_arity != former.level_arity {
+            return Err(ErrorKind::LevelArity {
+                name: Rc::clone(&operation.name),
+                expected: former.level_arity,
+                found: declaration.level_arity,
+            }
+            .into());
+        }
+
+        check_operation_shape(
+            self,
+            metas,
+            &operation.name,
+            effect,
+            former,
+            &declaration.ty,
+        )?;
+        Ok(declaration)
     }
 
     /// Фаза B2 для одного члена: тело определения. `None` - постулат или
@@ -804,7 +996,7 @@ impl Signature {
         data: &Name,
         arity: Arity,
         family: &Definition,
-        constructor: &ConstructorDecl,
+        constructor: &MemberDecl,
     ) -> Result<Definition, TypeError> {
         let draft = Definition {
             mult: Mult::Many,
@@ -855,7 +1047,7 @@ impl Signature {
 
     /// Кладёт члена в сигнатуру насовсем - его самого и его конструкторы.
     fn seal_member(&mut self, metas: &mut Metas, member: &Member) -> Result<(), TypeError> {
-        for constructor in constructor_names(member) {
+        for constructor in member_names(member) {
             self.seal_definition(metas, constructor)?;
         }
         self.seal_definition(metas, member.name())
@@ -1154,6 +1346,26 @@ impl Signature {
         );
         self.declare(metas, &Group::of(member))
     }
+
+    /// Объявляет метку эффекта вместе с её операциями - одной группой (§3.4).
+    ///
+    /// # Errors
+    ///
+    /// Те же, что у [`Signature::declare`], плюс форма операции.
+    pub fn declare_effect(
+        &mut self,
+        metas: &mut Metas,
+        name: &str,
+        params: u32,
+        ty: Term,
+        operations: &[(&str, Term)],
+    ) -> Result<(), TypeError> {
+        let member = operations.iter().fold(
+            Member::effect(name, params, ty),
+            |member, (operation, ty)| member.with_operation(operation, ty.clone()),
+        );
+        self.declare(metas, &Group::of(member))
+    }
 }
 
 /// Что фаза A наработала по члену.
@@ -1197,14 +1409,31 @@ fn group_names(group: &Group) -> impl Iterator<Item = &Name> {
     group
         .members()
         .iter()
-        .flat_map(|member| std::iter::once(member.name()).chain(constructor_names(member)))
+        .flat_map(|member| std::iter::once(member.name()).chain(member_names(member)))
 }
 
-/// Конструкторы члена; у определения их нет.
-fn constructor_decls(member: &Member) -> impl Iterator<Item = &ConstructorDecl> {
-    let constructors: &[ConstructorDecl] = match member {
+/// Объявления внутри члена: конструкторы семейства либо операции эффекта.
+fn member_decls(member: &Member) -> impl Iterator<Item = &MemberDecl> {
+    let inner: &[MemberDecl] = match member {
         Member::Data { constructors, .. } => constructors,
+        Member::Effect { operations, .. } => operations,
         Member::Definition { .. } => &[],
+    };
+    inner.iter()
+}
+
+/// Их имена.
+fn member_names(member: &Member) -> impl Iterator<Item = &Name> {
+    member_decls(member).map(|decl| &decl.name)
+}
+
+/// Конструкторы члена - только они: фаза C меряет позитивность, а у метки
+/// аналога ей нет (§3.4). Метка не тип и полем стоять не может, поэтому
+/// рекурсии по объявляемому эффекту не бывает.
+fn constructor_decls(member: &Member) -> impl Iterator<Item = &MemberDecl> {
+    let constructors: &[MemberDecl] = match member {
+        Member::Data { constructors, .. } => constructors,
+        Member::Definition { .. } | Member::Effect { .. } => &[],
     };
     constructors.iter()
 }
@@ -1215,9 +1444,4 @@ fn constructor_decls(member: &Member) -> impl Iterator<Item = &ConstructorDecl> 
 /// ради которого проверка типов падает, а маршрут в ней всё равно нечитаем.
 fn at(index: usize) -> u32 {
     u32::try_from(index).unwrap_or(u32::MAX)
-}
-
-/// Имена конструкторов члена.
-fn constructor_names(member: &Member) -> impl Iterator<Item = &Name> {
-    constructor_decls(member).map(|constructor| &constructor.name)
 }

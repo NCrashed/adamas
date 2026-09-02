@@ -240,6 +240,41 @@ pub enum ErrorKind {
         found: Term,
     },
 
+    /// Формер эффекта не заканчивается сортом `Effect` (§3.4).
+    #[error("`{name}` объявлен эффектом, но заканчивается на `{found}`")]
+    NotAnEffectSort {
+        /// Имя эффекта.
+        name: Name,
+        /// Что оказалось на месте сорта.
+        found: Term,
+    },
+
+    /// Операция не повторяет телескоп параметров эффекта дословно.
+    #[error("операция `{name}` обязана повторить параметры `{effect}`, а расходится на {index}-м")]
+    OperationParameter {
+        /// Имя операции.
+        name: Name,
+        /// Имя эффекта.
+        effect: Name,
+        /// Номер параметра, на котором разошлось.
+        index: u32,
+    },
+
+    /// Операция производит не ровно объявляемую метку (§3.4).
+    #[error(
+        "операция `{name}` обязана производить ровно `{effect}` со своими параметрами, \
+         а производит `{}`",
+        shown(found)
+    )]
+    OperationRow {
+        /// Имя операции.
+        name: Name,
+        /// Имя эффекта.
+        effect: Name,
+        /// Что оказалось её row.
+        found: crate::row::Row<crate::term::Term>,
+    },
+
     /// Row вызываемого не гасится окружающей (§3.4).
     #[error(
         "эффекты `{}` не погашены: вокруг разрешено `{}`",
@@ -437,6 +472,7 @@ impl ErrorKind {
             Self::NotAFunction { ty }
             | Self::CannotInfer { term: ty }
             | Self::NotADataSort { found: ty, .. }
+            | Self::NotAnEffectSort { found: ty, .. }
             | Self::ConstructorResult { found: ty, .. }
             | Self::NotARow { ty }
             | Self::NotARecord { ty }
@@ -449,7 +485,8 @@ impl ErrorKind {
             }
             // Row в сообщении несёт термы, но обходу они не нужны: имена меток
             // и так печатаются, а аргументы приходят уже прочитанными.
-            Self::Undischarged { .. }
+            Self::OperationRow { .. }
+            | Self::Undischarged { .. }
             | Self::RecordFields { .. }
             | Self::DuplicateField { .. }
             | Self::OpenDependentRecord { .. }
@@ -466,6 +503,7 @@ impl ErrorKind {
             | Self::DataParameters { .. }
             | Self::NotADataType { .. }
             | Self::ConstructorParameter { .. }
+            | Self::OperationParameter { .. }
             | Self::NotStrictlyPositive { .. }
             | Self::ErasedScrutinee { .. }
             | Self::AmbiguousTerm { .. }

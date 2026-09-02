@@ -1033,6 +1033,135 @@ pub fn data_sort(name: &Name, params: u32, ty: &Term) -> Result<Level, TypeError
     }
 }
 
+/// Проверяет формер метки: телескоп параметров и сорт `Effect`.
+///
+/// Универсума он не возвращает, в отличие от [`data_sort`], и это не пропуск:
+/// метка не тип, полем стоять не может, укладывать её некуда.
+///
+/// # Errors
+///
+/// Связываний меньше, чем объявлено параметров; формер заканчивается не
+/// `Effect`.
+pub fn effect_sort(name: &Name, params: u32, ty: &Term) -> Result<(), TypeError> {
+    let (fields, result) = peel_pis(ty);
+    let found = u32::try_from(fields.len()).unwrap_or(u32::MAX);
+    if found < params {
+        return Err(ErrorKind::DataParameters {
+            name: Rc::clone(name),
+            expected: params,
+            found,
+        }
+        .into());
+    }
+    match result {
+        Term::EffectKind => Ok(()),
+        other => Err(ErrorKind::NotAnEffectSort {
+            name: Rc::clone(name),
+            found: other.clone(),
+        }
+        .into()),
+    }
+}
+
+/// Проверяет форму операции: телескоп параметров и производимая метка.
+///
+/// Фаза B1, парная [`check_constructor_shape`]. Отличие одно, и оно всё:
+/// конструктор обязан **вернуть** своё семейство, а операция - **произвести**
+/// свою метку, поэтому проверяется не результат, а row (§3.4).
+///
+/// Требование к row: ровно одна стрелка операции несёт метки, и её row есть
+/// ровно объявляемая метка, применённая к собственным параметрам, плюс хвост.
+/// Второй метки там быть не может - собственных эффектов у операции нет, они
+/// приходят от хендлера, - а хвост обязателен: без него операция звалась бы
+/// только там, где кроме неё не происходит ничего.
+///
+/// # Errors
+///
+/// Имя не эффект; операция не повторяет параметры; row не та.
+pub(crate) fn check_operation_shape(
+    signature: &Signature,
+    metas: &mut Metas,
+    name: &Name,
+    effect: &Name,
+    former: &Definition,
+    ty: &Term,
+) -> Result<(), TypeError> {
+    let Some(params) = former.effect_shape() else {
+        return Err(ErrorKind::NotADataType {
+            name: Rc::clone(effect),
+        }
+        .into());
+    };
+    let telescope = peel_pis(&former.ty).0;
+    let (fields, _) = peel_pis(ty);
+
+    let mut performed: Option<(u32, &Row<Term>)> = None;
+    let mut ctx = Ctx::new(signature);
+    for (index, field) in fields.iter().enumerate() {
+        let depth = u32::try_from(index).unwrap_or(u32::MAX);
+        if depth < params {
+            // Параметры операция обязана повторить дословно - и по типу, и по
+            // кратности, как конструктор повторяет параметры семейства.
+            let expected = &telescope[index];
+            if expected.binder.mult != field.binder.mult
+                || !convertible(
+                    signature,
+                    metas,
+                    ctx.size(),
+                    &ctx.eval(&expected.domain),
+                    &ctx.eval(&field.domain),
+                )
+            {
+                return Err(ErrorKind::OperationParameter {
+                    name: Rc::clone(name),
+                    effect: Rc::clone(effect),
+                    index: depth,
+                }
+                .into());
+            }
+        }
+        // Метки стоят на глубине домена: связывание `Pi` вводится только для
+        // кодомена, поэтому аргументы метки адресуют то же, что и домен.
+        if !field.row.labels().is_empty() {
+            if performed.is_some() {
+                return Err(refused_row(name, effect, &field.row));
+            }
+            performed = Some((ctx.size(), &field.row));
+        }
+        ctx = ctx.bind(
+            Rc::clone(&field.name),
+            field.binder.mult,
+            ctx.eval(&field.domain),
+        );
+    }
+
+    let Some((depth, row)) = performed else {
+        return Err(refused_row(name, effect, &Row::empty()));
+    };
+    let [label] = row.labels() else {
+        return Err(refused_row(name, effect, row));
+    };
+    let arguments: Vec<&Term> = label.arguments.iter().collect();
+    let addressed = label.name == *effect
+        && u32::try_from(arguments.len()).is_ok_and(|given| given == params)
+        && uniform_parameters(params, depth, &arguments)
+        && row.tail().is_some();
+    if !addressed {
+        return Err(refused_row(name, effect, row));
+    }
+    Ok(())
+}
+
+/// Отказ по row операции - собирается в одном месте, чтобы сообщение было одно.
+fn refused_row(name: &Name, effect: &Name, found: &Row<Term>) -> TypeError {
+    ErrorKind::OperationRow {
+        name: Rc::clone(name),
+        effect: Rc::clone(effect),
+        found: found.clone(),
+    }
+    .into()
+}
+
 /// Проверяет форму конструктора: телескоп параметров и результат.
 ///
 /// Фаза B1 объявления группы (§10 вопрос 50). Здесь всё, для чего довольно

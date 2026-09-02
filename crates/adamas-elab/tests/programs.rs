@@ -611,6 +611,29 @@ resource File where
 ";
 
 #[test]
+fn a_record_does_not_hold_a_resource() {
+    // Держателем владеемого поля обязан быть владеемый тип (§3.3, вопрос 77),
+    // и у записи исключений нет: объявляется она `type`, деструктора не имеет,
+    // связывание её `ω`. Запись была единственным обходом правила - поле
+    // проецировалось сколько угодно раз, то есть дескриптор закрывался дважды,
+    // а забытая запись не закрывала его ни разу. Прямой аналог на `data`
+    // отвергался всегда.
+    let error = refused(&format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+type Box = {{ h : File }}
+"
+    ));
+    assert!(
+        matches!(error, ElabError::OwnedRecordField { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
 fn a_resource_declares_a_family_and_its_destructor() {
     let text = format!("{BASE}\ncloseFile : (1 b : Bool) -> Bool\ncloseFile b = b\n\n{RESOURCE}");
     let signature = program(&text);

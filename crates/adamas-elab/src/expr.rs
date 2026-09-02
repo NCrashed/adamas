@@ -1678,12 +1678,30 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Поля записи телескопом - каждое под предыдущими.
+    ///
+    /// **Владеемого поля у записи не бывает.** У конструктора это правило с
+    /// исключениями - держатель бывает `unique` или `resource`, - а у записи
+    /// исключений нет: объявляется она `type`, деструктора у неё нет, а
+    /// связывание её `ω`. `type Box = { h : File }` поэтому не закрывался
+    /// никогда, а `ω`-связывание позволяло проецировать поле сколько угодно
+    /// раз, то есть закрыть дескриптор дважды. Прямой аналог на `data`-обёртке
+    /// отвергался всегда - запись была единственным обходом (§3.3, вопрос 77).
     fn record_fields(&mut self, fields: &[ast::RecordField]) -> Result<Vec<CoreField>, ElabError> {
         let Some((field, rest)) = fields.split_first() else {
             return Ok(Vec::new());
         };
         Self::binds(&field.name)?;
         let ty = self.typing(|it| it.expr(&field.ty, Mult::Many))?;
+        if let Some(how) = self.owned.of(&field.ty) {
+            return Err(ElabError::OwnedRecordField {
+                field: Rc::clone(&field.name.text),
+                ty: crate::own::head(&field.ty)
+                    .cloned()
+                    .unwrap_or_else(|| Rc::from("_")),
+                owned: how,
+                span: field.ty.span,
+            });
+        }
         let bound = self.typed(&ty);
         let tail = self.binding(Bound::visible(&field.name.text, Mult::One, bound), |it| {
             it.record_fields(rest)

@@ -132,7 +132,7 @@ impl Owned {
 }
 
 /// Имя в голове применения: `Array n a` - это `Array`.
-fn head(expr: &Expr) -> Option<&Symbol> {
+pub(crate) fn head(expr: &Expr) -> Option<&Symbol> {
     match &expr.kind {
         ExprKind::Name(name) => Some(&name.text),
         ExprKind::App(callee, _) => head(callee),

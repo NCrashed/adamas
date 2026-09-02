@@ -5301,6 +5301,71 @@ run = handle True with
 }
 
 #[test]
+fn a_branch_works_in_the_ambient_of_its_handle() {
+    // §3.4: «собственные эффекты веток гасятся окружающей по тому же правилу
+    // расширения», и окружающая тела ветки - окружающая **применения**
+    // `handle`, а не остаток вычисления. Пока обе роли играла ρ, ветка могла
+    // производить только то, что осталось в вычислении, и хендлер-трансформер
+    // `mapS` - приведённый §3.4 мотивом самого правила погашения - не
+    // типизировался.
+    let base = "\
+data Bool where
+  True : Bool
+
+data Unit where
+  MkUnit : Unit
+
+effect Tick where
+  tick : Unit
+
+effect Log where
+  note : Bool -> Unit
+";
+    // Ветка производит эффект, которого у вычисления нет вовсе.
+    program(&format!(
+        "{base}
+prod : {{Tick}} Bool
+prod u = True
+
+transform : {{Log}} Bool
+transform u = handle prod with
+  return v -> v
+  tick -> resume (note True)
+"
+    ));
+    // Остаток вычисления при этом обязан всплывать по-прежнему - и тогда,
+    // когда ветка резюмирует, и тогда, когда обрывает: до первой операции
+    // вычисление успевает сделать своё.
+    for branch in ["resume MkUnit", "True"] {
+        let leaks = format!(
+            "{base}
+prod : {{Tick, Log}} Bool
+prod u =
+  note True
+  tick
+  True
+
+escapes : Bool
+escapes = handle prod with
+  return v -> v
+  tick -> {branch}
+"
+        );
+        let error = refused(&leaks);
+        assert!(
+            error.to_string().contains("не погашены"),
+            "{branch}: получено {error:?}"
+        );
+        // Та же программа с объявленным остатком проходит.
+        program(
+            &leaks
+                .replace("escapes : Bool", "escapes : {Log} Bool")
+                .replace("escapes = handle prod with", "escapes u = handle prod with"),
+        );
+    }
+}
+
+#[test]
 fn an_effect_declares_its_eliminators() {
     // §3.4: `handle e with …` есть применение константы, а не узел ядра.
     // Объявление заводит две - одношотную и мультишотную, - и различает их
@@ -5317,8 +5382,13 @@ effect State s where
     ));
     for name in ["#handle.State", "#handleMulti.State"] {
         let handler = signature.lookup(name).expect("элиминатор объявлен");
-        // Один параметр-row - та самая ρ, глубина хендлера.
-        assert_eq!(handler.row_arity, 1, "{name}");
+        // Параметров-row два, и роли у них разные (§3.4). ρ - остаток
+        // вычисления, глубина хендлера: её несут `resume` и стрелки спайна,
+        // потому что остаток производится и тогда, когда ветка обрывает. λ -
+        // окружающая применения: её несут тела веток, потому что ветка
+        // выполняется там, где написан сам хендлер. Совпадать они не обязаны -
+        // на этом стоит хендлер-трансформер.
+        assert_eq!(handler.row_arity, 2, "{name}");
         // Связывания: параметр метки, `a`, `b`, вычисление, `return` и по
         // ветке на операцию.
         assert_eq!(binders(&handler.ty), 1 + 2 + 1 + 1 + 2, "{name}");

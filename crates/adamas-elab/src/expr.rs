@@ -2654,11 +2654,24 @@ impl<'a> Elaborator<'a> {
                 name: Rc::clone(&name),
                 span,
             })?;
-        // ρ - нулевой параметр-row элиминатора: он стоит на первой же его
-        // стрелке, а обобщение собирает дырки в порядке появления. Прочие,
-        // если операция принесла свои, остаются дырками.
-        let rows: Vec<Row<Term>> = std::iter::once(quoted.clone())
-            .chain((1..eliminator.row_arity).map(|_| self.metas.fresh_row()))
+        // Параметров-row у элиминатора два, и порядок их задан построением его
+        // типа (см. `handler_type`): обобщение собирает дырки в порядке
+        // появления, домен вычисления встречается раньше домена ветки, поэтому
+        // ρ нулевой, а λ первый. Прочие, если операция принесла свои,
+        // остаются дырками.
+        //
+        // λ - окружающая **применения**: ветка выполняется там, где написан
+        // сам хендлер, а не в остатке вычисления. Совпадать они не обязаны, и
+        // ровно на этом стоит хендлер-трансформер §3.4.
+        let ambient = self
+            .ctx
+            .row()
+            .clone()
+            .map(|argument| quote(self.ctx.size(), argument));
+        let rows: Vec<Row<Term>> = [quoted.clone(), ambient]
+            .into_iter()
+            .chain((2..eliminator.row_arity).map(|_| self.metas.fresh_row()))
+            .take(eliminator.row_arity as usize)
             .collect();
         let levels: Vec<Level> = (0..eliminator.level_arity)
             .map(|_| self.metas.fresh_level())
@@ -2672,21 +2685,18 @@ impl<'a> Elaborator<'a> {
         current = rest;
 
         // Аргументы идут в порядке связываний: вычисление, `return`, ветки по
-        // объявлению. Тела веток работают в ρ - метка снята, хендлер
-        // переустановлен (§3.4).
-        let outer = self.ctx.clone();
+        // объявлению. Тела веток работают в окружающей самого `handle` - там,
+        // где хендлер и написан, - а не в остатке вычисления: остаток несёт
+        // `resume`, и связь между ними держит обычное погашение в точке, где
+        // резумпцию зовут (§3.4). Контекст поэтому не подменяется вовсе -
+        // окружающую ветки задаёт row в её ожидаемом типе.
         for (index, branch) in std::iter::once(None)
             .chain(ordered.into_iter().map(Some))
             .enumerate()
         {
             let argument = match branch {
                 None => value.clone(),
-                Some(branch) => {
-                    self.ctx = outer.within(rho.clone());
-                    let lambda = self.branch_lambda(&current, branch);
-                    self.ctx = outer.clone();
-                    lambda?
-                }
+                Some(branch) => self.branch_lambda(&current, branch)?,
             };
             let _ = index;
             // Тип шагает **без** проверки аргумента: арность известна, а

@@ -2688,6 +2688,64 @@ alias x = x
 }
 
 #[test]
+fn sealing_reaches_a_nested_module() {
+    // Флаг непрозрачности ставился только непосредственным членам, а вложенный
+    // модуль поднимает свои под своей квалификацией: `Outer.Inner.Flag`
+    // оставался прозрачным. На одном уровне `:>` держал, на двух - нет.
+    let error = refused(&format!(
+        "{BASE}
+module type InnerSig where
+  type Flag
+
+module type OuterSig where
+  Inner : InnerSig
+
+module Outer :> OuterSig where
+  module Inner where
+    type Flag = Bool
+
+leak : Outer.Inner.Flag
+leak = True
+"
+    ));
+    assert!(
+        matches!(error, ElabError::Core { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn the_sealing_rule_reaches_a_signature_inside_a_module() {
+    // Нарушение записывалось под квалифицированным именем сигнатуры, а
+    // спрашивалось по написанному тексту аннотации: клалось `Outer.BagSig`,
+    // искалось `BagSig`, и `module type` внутри модуля обходил правило
+    // целиком. Спрашиваются теперь обе формы - и короткая, и квалифицированная.
+    let error = refused(&format!(
+        "{BASE}
+class Eqv a where
+  eq : a -> a -> Bool
+
+module Outer where
+  module type BagSig where
+    type Bag (a : Type)
+    empty : {{a : Type}} -> Bag a
+    add : {{a : Type}} -> {{Eqv a}} => a -> Bag a -> Bag a
+
+  module Sealed :> BagSig where
+    type Bag (a : Type) = Nat
+    empty : {{a : Type}} -> Nat
+    empty = Zero
+    add : {{a : Type}} -> {{Eqv a}} => a -> Nat -> Nat
+    add x b = b
+"
+    ));
+    assert!(
+        matches!(error, ElabError::SealedConstraint { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
 fn a_sealed_functor_hides_its_result() {
     // §3.5: аппликативность - следствие, а не отдельное решение. `Hidden.T`
     // разворачивается в проекцию от применения, а `Dup` запечатан, поэтому

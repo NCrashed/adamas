@@ -557,7 +557,7 @@ fn declare_module(
 ) -> Result<(), ElabError> {
     let declared = qualify(within, &module.name.text);
     writable(within, module, span)?;
-    sealable(instances, module, span)?;
+    sealable(instances, within, module, span)?;
     if module.signature {
         return declare_module_type(signature, metas, owned, instances, &declared, module, span);
     }
@@ -672,13 +672,31 @@ fn declare_module(
     // Ставится флаг после проверки всего модуля: члены видят друг друга, и
     // непрозрачность, поставленная сразу, запретила бы δ соседу.
     if module.sealed {
-        for member in &module.members {
-            if let Some(name) = member_name(member) {
-                signature.seal(&qualify(Some(&inner), name));
-            }
-        }
+        seal_members(signature, &inner, &module.members);
     }
     Ok(())
+}
+
+/// Ставит непрозрачность поднятым членам - **включая вложенные модули**.
+///
+/// Вложенный модуль поднимает свои члены под своей квалификацией, и в
+/// `module.members` объемлющего их нет: запечатав только непосредственных,
+/// `Outer.Inner.Flag` оставляли прозрачным, и `:>` на двух уровнях не держал
+/// того, что держал на одном. Спуск здесь тот же, что и у подъёма, - иначе два
+/// обхода разъезжаются.
+fn seal_members(signature: &mut Signature, within: &Enclosing<'_>, members: &[ast::Decl]) {
+    for member in members {
+        if let Some(name) = member_name(member) {
+            signature.seal(&qualify(Some(within), name));
+        }
+        if let DeclKind::Module(inner) = &member.kind {
+            let deeper = Enclosing {
+                name: qualify(Some(within), &inner.name.text),
+                params: within.params,
+            };
+            seal_members(signature, &deeper, &inner.members);
+        }
+    }
 }
 
 /// Заключение написанной головы: `{Eqv a} => Eqv (List a)` даёт `Eqv (List a)`.
@@ -1970,26 +1988,54 @@ fn spine(ty: &Term) -> Option<(Symbol, Vec<&Term>)> {
 ///
 /// Аннотация `:` при том же тексте законна: правило охраняет **осадок**, а он
 /// заводится только там, где представление скрыто.
-fn sealable(instances: &Instances, module: &ast::ModuleDecl, span: Span) -> Result<(), ElabError> {
+fn sealable(
+    instances: &Instances,
+    within: Option<&Enclosing<'_>>,
+    module: &ast::ModuleDecl,
+    span: Span,
+) -> Result<(), ElabError> {
     if !module.sealed {
         return Ok(());
     }
-    // Аннотация выражением, а не именем, сюда не проходит: искать нарушение
-    // негде, а разворачивать выражение правило не берётся - оно локально.
-    let Some(ast::ExprKind::Name(name)) = module.ascription.as_ref().map(|it| &it.kind) else {
+    let Some(written) = module.ascription.as_ref().and_then(ascription_name) else {
         return Ok(());
     };
-    let Some(offence) = instances.offence(&name.text) else {
+    // Нарушение записано под **квалифицированным** именем сигнатуры, а
+    // написать её автор вправе двумя способами: коротким именем изнутри того
+    // же модуля и квалифицированным откуда угодно. Спрашивались обе формы по
+    // написанному тексту, поэтому `module type` внутри модуля правило обходил:
+    // клалось `Outer.BagSig`, искалось `BagSig`.
+    let (short, qualified) = (Rc::clone(&written), qualify(within, &written));
+    let Some(offence) = instances
+        .offence(&short)
+        .or_else(|| instances.offence(&qualified))
+    else {
         return Ok(());
     };
     Err(ElabError::SealedConstraint {
-        signature: Rc::clone(&name.text),
+        signature: written,
         member: Rc::clone(&offence.member),
         class: Rc::clone(&offence.class),
         param: Rc::clone(&offence.param),
         sealed: Rc::clone(&offence.sealed),
         span,
     })
+}
+
+/// Имя сигнатуры, написанное аннотацией.
+///
+/// Формы две: короткое имя и квалифицированное - `Outer.BagSig` есть проекция,
+/// а не имя. Всё прочее правилу не подлежит: разворачивать выражение оно не
+/// берётся, тем и локально.
+fn ascription_name(ascription: &ast::Expr) -> Option<Symbol> {
+    match &ascription.kind {
+        ast::ExprKind::Name(name) => Some(Rc::clone(&name.text)),
+        ast::ExprKind::Project(base, field) => {
+            let outer = ascription_name(base)?;
+            Some(Rc::from(format!("{outer}.{}", field.text).as_str()))
+        }
+        _ => None,
+    }
 }
 
 /// Правило запечатанной абстракции (§3.5), посчитанное по тексту сигнатуры.

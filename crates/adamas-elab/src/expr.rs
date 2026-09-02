@@ -1488,14 +1488,22 @@ impl<'a> Elaborator<'a> {
         let sort = Rc::new(Value::Universe(self.metas.fresh_level()));
         let result = self.fresh_meta(&sort);
         let mut clauses = Vec::with_capacity(alts.len());
+        // Паттерны собираются заранее: они затеняют имена в своих телах, а
+        // решение о вставке `drop` принимается до спуска в тело.
+        let patterns = alts
+            .iter()
+            .map(|alt| self.pattern(&alt.pattern))
+            .collect::<Result<Vec<_>, _>>()?;
+        let forgotten = self.forgotten(alts, &patterns);
         // Позиция разбора достаётся **каждой** ветви: разбор сам значения не
         // строит, его строят ветви, и возвращается наружу то, что построила
         // сработавшая. Без этого `if c then k else k` отмывал бы привязку к
         // scope, которую прямое `k` не проходит (§10 вопрос 82).
         let mut produced = None;
-        for alt in alts {
-            let pattern = self.pattern(&alt.pattern)?;
-            let body = self.placed(position, |it| it.branch(&alt.pattern, &pattern, &alt.body))?;
+        for ((alt, pattern), closing) in alts.iter().zip(patterns).zip(&forgotten) {
+            let body = self.placed(position, |it| {
+                it.branch(&alt.pattern, &pattern, &alt.body, closing)
+            })?;
             produced = produced.or_else(|| self.produced.take());
             clauses.push(Clause {
                 patterns: vec![pattern],
@@ -1514,6 +1522,53 @@ impl<'a> Elaborator<'a> {
         self.produced = produced;
         Ok(tree.term)
     }
+    /// Что каждая ветвь обязана закрыть сама.
+    ///
+    /// Ресурс, которого не называет **ни одна** ветвь, закрывает правило
+    /// снаружи - там решение и принимается, по телу целиком. Ресурс, который
+    /// называют **все**, закрывать не надо вовсе. Остаётся середина: одна ветвь
+    /// его расходует, другая забыла, - и забывшая обязана закрыть его сама,
+    /// иначе второй путь течёт.
+    ///
+    /// Это переоткрытый §10 вопрос 71: «клауза и есть ветвь» верно ровно до тех
+    /// пор, пока разбор не написан выражением - он заводит ветвь **внутри**
+    /// того, что видит правило.
+    fn forgotten(&self, alts: &[ast::Alt], patterns: &[CorePattern]) -> Vec<Vec<(Symbol, Symbol)>> {
+        let mut found = vec![Vec::new(); alts.len()];
+        let owned: Vec<(Symbol, Symbol)> = self
+            .scope
+            .iter()
+            // Стёртое не закрывается: `drop` расходует ресурс, а расходовать
+            // стёртое связывание нечем (§10 вопрос 71).
+            .filter(|bound| bound.visible && bound.owned && bound.mult != Mult::Zero)
+            .filter_map(|bound| {
+                head_name(&bound.ty)
+                    .and_then(|name| self.owned.destructor_of(name))
+                    .map(|drop| (Rc::clone(&bound.name), Rc::clone(drop)))
+            })
+            .collect();
+        for (name, drop) in owned {
+            let mentioned: Vec<bool> = alts
+                .iter()
+                .zip(patterns)
+                .map(|(alt, pattern)| {
+                    let mut beside = Vec::new();
+                    variables_of(pattern, &mut beside);
+                    self.mentions_beside(&name, &alt.body, &beside)
+                })
+                .collect();
+            if !mentioned.iter().any(|it| *it) {
+                continue;
+            }
+            for (at, seen) in mentioned.iter().enumerate() {
+                if !seen {
+                    found[at].push((Rc::clone(&name), Rc::clone(&drop)));
+                }
+            }
+        }
+        found
+    }
+
     /// Тип терма - у ядра, а если оно не знает, то у объявляемой группы.
     ///
     /// Рекурсивный вызов в разбираемом (`if even k then …` внутри `even`)
@@ -1552,6 +1607,7 @@ impl<'a> Elaborator<'a> {
         written: &Pattern,
         compiled: &CorePattern,
         body: &Expr,
+        closing: &[(Symbol, Symbol)],
     ) -> Result<Term, ElabError> {
         let mut names = Vec::new();
         variables_of(compiled, &mut names);
@@ -1589,7 +1645,15 @@ impl<'a> Elaborator<'a> {
                 variable.scoped,
             ));
         }
-        let term = self.expr(body, Mult::Many);
+        // Ресурс, о котором забыла **эта** ветвь, закрывается в ней: решение
+        // выше принимается по телу целиком, а ветвь - отдельный путь (§3.3,
+        // §10 вопрос 71).
+        let mut drops: Vec<(u32, Symbol)> = closing
+            .iter()
+            .filter_map(|(name, drop)| self.local(name).map(|index| (index, drop.clone())))
+            .collect();
+        lifo(&mut drops);
+        let term = self.closing_all(&drops, |it| it.expr(body, Mult::Many));
         self.scope.truncate(depth);
         self.ctx = outer;
         term

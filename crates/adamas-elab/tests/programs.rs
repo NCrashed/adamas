@@ -4279,3 +4279,149 @@ forgotten h c = case c of
 ",
     );
 }
+
+/// Ресурс с деструктором и разбор по нему в двух ветвях.
+const FORGETFUL: &str = "
+data Bool where
+  True : Bool
+  False : Bool
+
+resource File where
+  Open : File
+  close : (1 h : File) -> Bool
+  close h = True
+
+pick : (1 h : File) -> Bool -> Bool
+pick h c = case c of
+  True -> close h
+  False -> True
+";
+
+#[test]
+fn a_branch_closes_what_it_forgot() {
+    // §10 вопрос 71 переоткрыт разбором выражением: «клауза и есть ветвь»
+    // верно ровно до тех пор, пока ветвь не заведена **внутри** того, что
+    // видит правило вставки. Одна ветвь расходует `h`, другая забыла - и
+    // забывшая обязана закрыть его сама, иначе второй путь течёт.
+    let signature = program(FORGETFUL);
+    let body = signature
+        .lookup("pick")
+        .and_then(|definition| definition.body.clone())
+        .expect("`pick` объявлено");
+    let rendered = body.to_string();
+    assert_eq!(
+        rendered.matches("close").count(),
+        2,
+        "закрыт только один путь: {rendered}"
+    );
+}
+
+#[test]
+fn every_branch_closes_every_resource_it_forgot() {
+    // Правило поветвенное и по каждому ресурсу отдельно: ветвь, закрывшая
+    // один, обязана закрыть и второй - путь у неё один на оба.
+    let signature = program(
+        "\
+data Bool where
+  True : Bool
+  False : Bool
+
+resource File where
+  Open : File
+  close : (1 h : File) -> Bool
+  close h = True
+
+both : (1 a : File) -> (1 b : File) -> Bool -> Bool
+both a b c = case c of
+  True -> close a
+  False -> close b
+",
+    );
+    let body = signature
+        .lookup("both")
+        .and_then(|definition| definition.body.clone())
+        .expect("`both` объявлено");
+    let rendered = body.to_string();
+    assert_eq!(
+        rendered.matches("close").count(),
+        4,
+        "в каждой ветви должно быть по два закрытия: {rendered}"
+    );
+}
+
+#[test]
+fn a_nested_branch_closes_what_it_forgot() {
+    // Вложенный разбор - тот же разбор: правило применяется на каждом, а не
+    // один раз на самый внешний.
+    let signature = program(
+        "\
+data Bool where
+  True : Bool
+  False : Bool
+
+resource File where
+  Open : File
+  close : (1 h : File) -> Bool
+  close h = True
+
+nested : (1 h : File) -> Bool -> Bool -> Bool
+nested h c d = case c of
+  True -> case d of
+    True -> close h
+    False -> True
+  False -> True
+",
+    );
+    let body = signature
+        .lookup("nested")
+        .and_then(|definition| definition.body.clone())
+        .expect("`nested` объявлено");
+    let rendered = body.to_string();
+    assert_eq!(
+        rendered.matches("close").count(),
+        3,
+        "закрыт не всякий путь: {rendered}"
+    );
+}
+
+#[test]
+fn a_resource_no_branch_names_is_closed_once() {
+    // Граница правила с двух сторон. Ресурс, которого не называет ни одна
+    // ветвь, закрывает правило снаружи - вставить его ещё и в каждую ветвь
+    // значило бы закрыть дважды. Ресурс, который называют все, закрывать не
+    // надо вовсе.
+    let signature = program(
+        "\
+data Bool where
+  True : Bool
+  False : Bool
+
+resource File where
+  Open : File
+  close : (1 h : File) -> Bool
+  close h = True
+
+forgotten : (1 h : File) -> Bool -> Bool
+forgotten h c = case c of
+  True -> True
+  False -> False
+
+everywhere : (1 h : File) -> Bool -> Bool
+everywhere h c = case c of
+  True -> close h
+  False -> close h
+",
+    );
+    for (name, expected) in [("forgotten", 1), ("everywhere", 2)] {
+        let body = signature
+            .lookup(name)
+            .and_then(|definition| definition.body.clone())
+            .unwrap_or_else(|| panic!("`{name}` объявлено"));
+        let rendered = body.to_string();
+        assert_eq!(
+            rendered.matches("close").count(),
+            expected,
+            "у `{name}` закрытий не столько: {rendered}"
+        );
+    }
+}

@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 use adamas_core::check::{ErrorKind, check_closed};
 use adamas_core::level::Level;
+use adamas_core::row::Row;
 use adamas_core::sig::Signature;
 use adamas_core::term::{Rows, Term};
 use adamas_elab::{ElabError, Missing, elaborate};
@@ -44,7 +45,23 @@ fn refused(text: &str) -> ElabError {
 /// оказывается полиморфным по уровню. Тесту нужен замкнутый терм, поэтому
 /// уровень задаётся явно.
 fn at(name: &str) -> Term {
-    Term::Const(name.into(), Rc::from([Level::Zero]), Rows::none())
+    Term::Const(name.into(), Rc::from([Level::Zero]), pure())
+}
+
+/// Ссылка на определение без аргументов уровня.
+///
+/// Конструктор так не пишется: подъём его типа не трогает, row-параметра у
+/// него нет, и лишний аргумент разошёлся бы с тем, что стоит в теле.
+fn to(name: &str) -> Term {
+    Term::Const(name.into(), Rc::from([]), pure())
+}
+
+/// Аргументы-row замкнутого терма: подъём (§3.4) даёт параметр всякой
+/// написанной сигнатуре, и ссылка на неё обязана его заполнить. Тест строит
+/// терм руками, эффектов в нём нет, поэтому все они пусты; лишние арностью
+/// отбрасываются, и одного хватает на любое определение этого файла.
+fn pure() -> Rows {
+    Rows::new([Row::empty()])
 }
 
 /// `Nat` и `Bool` - минимальная база, на которой пишется всё остальное.
@@ -105,7 +122,7 @@ plus (Succ k) m = Succ (plus k m)
     // задаётся явно - тесту нужен замкнутый терм, а не ещё одна дырка.
     for (left, right, sum) in [(0, 0, 0), (2, 3, 5), (4, 1, 5)] {
         let witness = at("anything").apply([number(sum)]);
-        let family = at("P").apply([Term::constant("plus").apply([number(left), number(right)])]);
+        let family = at("P").apply([to("plus").apply([number(left), number(right)])]);
         let outcome = check_closed(&signature, &witness, &family);
         assert!(outcome.is_ok(), "{left}+{right} = {sum}: {outcome:?}");
     }
@@ -136,14 +153,14 @@ constant _ = True
             Term::constant("Succ").apply([term])
         });
         let witness = at("q").apply([Term::constant(expected)]);
-        let stated = at("Q").apply([Term::constant("even").apply([number])]);
+        let stated = at("Q").apply([to("even").apply([number])]);
         let outcome = check_closed(&signature, &witness, &stated);
         assert!(outcome.is_ok(), "even {input} = {expected}: {outcome:?}");
     }
     // `_` связывает, ничего не называя: тело обязано считаться так же, как
     // если бы аргумента не было вовсе.
     let witness = at("q").apply([Term::constant("True")]);
-    let stated = at("Q").apply([Term::constant("constant").apply([Term::constant("Zero")])]);
+    let stated = at("Q").apply([to("constant").apply([Term::constant("Zero")])]);
     assert!(check_closed(&signature, &witness, &stated).is_ok());
 }
 
@@ -271,7 +288,7 @@ anything : (0 n : Nat) -> P n
         })
     };
     let witness = at("anything").apply([number(3)]);
-    let stated = at("P").apply([Term::constant("+").apply([number(1), number(2)])]);
+    let stated = at("P").apply([to("+").apply([number(1), number(2)])]);
     assert!(
         check_closed(&signature, &witness, &stated).is_ok(),
         "1 + 2 = 3"
@@ -496,7 +513,7 @@ yes = identity True
     ));
     // Одно определение при двух разных типах аргумента - это и значит, что
     // параметр поднялся: писать его никто не писал.
-    let one = Term::constant("one");
+    let one = to("one");
     let outcome = check_closed(
         &signature,
         &at("anything").apply([Term::constant("Succ").apply([Term::constant("Zero")])]),
@@ -532,7 +549,7 @@ written = identity @Nat Zero
     let outcome = check_closed(
         &signature,
         &at("anything").apply([Term::constant("Zero")]),
-        &at("P").apply([Term::constant("written")]),
+        &at("P").apply([to("written")]),
     );
     assert!(outcome.is_ok(), "написанное вычисляет так же: {outcome:?}");
 
@@ -1473,7 +1490,7 @@ f =
     let outcome = check_closed(
         &signature,
         &at("anything").apply([Term::constant("Succ").apply([Term::constant("Zero")])]),
-        &at("P").apply([Term::constant("f")]),
+        &at("P").apply([to("f")]),
     );
     assert!(outcome.is_ok(), "{outcome:?}");
 }
@@ -1584,7 +1601,7 @@ two = length (Cons True (Cons False Nil))
         &at("anything")
             .apply([Term::constant("Succ")
                 .apply([Term::constant("Succ").apply([Term::constant("Zero")])])]),
-        &at("P").apply([Term::constant("two")]),
+        &at("P").apply([to("two")]),
     );
     assert!(outcome.is_ok(), "список из двух элементов: {outcome:?}");
 }
@@ -1659,7 +1676,7 @@ pred n = case n of
         let outcome = check_closed(
             &signature,
             &at("anything").apply([number(output)]),
-            &at("P").apply([Term::constant("pred").apply([number(input)])]),
+            &at("P").apply([to("pred").apply([number(input)])]),
         );
         assert!(outcome.is_ok(), "pred {input} = {output}: {outcome:?}");
     }
@@ -1681,7 +1698,7 @@ pick b = if b then Succ Zero else Zero
     let outcome = check_closed(
         &signature,
         &at("anything").apply([Term::constant("Succ").apply([Term::constant("Zero")])]),
-        &at("P").apply([Term::constant("pick").apply([Term::constant("True")])]),
+        &at("P").apply([to("pick").apply([Term::constant("True")])]),
     );
     assert!(outcome.is_ok(), "{outcome:?}");
 
@@ -1756,9 +1773,7 @@ sum p = add p.x p.y
     let outcome = check_closed(
         &signature,
         &at("anything").apply([number(3)]),
-        &at("P").apply([
-            Term::constant("sum").apply([Term::constant("mk").apply([number(1), number(2)])])
-        ]),
+        &at("P").apply([to("sum").apply([to("mk").apply([number(1), number(2)])])]),
     );
     assert!(outcome.is_ok(), "1 + 2 = 3 через запись: {outcome:?}");
 }
@@ -2105,10 +2120,7 @@ start = {{ x = Zero, y = Succ Zero }}
     };
     // `(moved start).x` есть `1`, а `.y` осталось `1`.
     for (field, expected) in [("x", 1), ("y", 1)] {
-        let projected = Term::Project(
-            Rc::new(Term::constant("moved").apply([Term::constant("start")])),
-            field.into(),
-        );
+        let projected = Term::Project(Rc::new(to("moved").apply([to("start")])), field.into());
         let outcome = check_closed(
             &signature,
             &at("anything").apply([number(expected)]),
@@ -2117,7 +2129,7 @@ start = {{ x = Zero, y = Succ Zero }}
         assert!(outcome.is_ok(), "поле {field}: {outcome:?}");
     }
     // Расширение дописывает поле, не трогая прежние.
-    let promoted = Term::constant("promote").apply([Term::constant("start"), number(2)]);
+    let promoted = to("promote").apply([to("start"), number(2)]);
     let outcome = check_closed(
         &signature,
         &at("anything").apply([number(2)]),
@@ -4526,20 +4538,75 @@ counter u = True
 }
 
 #[test]
-fn a_written_row_tail_names_what_it_waits_for() {
-    // Хвост ждёт auto-lift: связать написанное имя сегодня нечем, а
-    // промолчать значило бы принять открытую row за закрытую.
-    let error = refused(&format!(
+fn a_written_row_tail_names_one_parameter_per_name() {
+    // Написанный хвост закрывает подъём на своей позиции: полиморфизмом там
+    // управляет программист (§3.4). Одно имя - один параметр, сколько бы раз
+    // оно ни встретилось; позиция без написанной row берёт переменную подъёма,
+    // и она у сигнатуры одна.
+    let signature = program(&format!(
         "{BASE}
 State : Type -> Effect
 
-step : Bool -> {{State Bool | e}} Bool
+Log : Effect
+
+named : Bool -> {{State Bool | e}} Bool
+shared : Bool -> {{Log | e}} (Bool -> {{State Bool | e}} Bool)
+apart : Bool -> Bool -> {{State Bool | e}} Bool
 "
     ));
-    assert!(
-        matches!(error, ElabError::Missing { .. }),
-        "получено {error:?}"
+    let arity = |name: &str| signature.lookup(name).expect("объявлено").row_arity;
+    assert_eq!(arity("named"), 1, "написанный хвост - один параметр");
+    assert_eq!(arity("shared"), 1, "два вхождения имени - тот же параметр");
+    assert_eq!(
+        arity("apart"),
+        2,
+        "позиция без записи берёт переменную подъёма"
     );
+}
+
+#[test]
+fn a_signature_without_a_written_row_is_row_polymorphic() {
+    // Auto-lift (§3.4): позиция без написанной `{}` получает ту же свежую
+    // переменную, что и прочие позиции сигнатуры, и при вызове она
+    // инстанцируется окружающей. Проверяются три следствия сразу: написанное
+    // без эффектов зовётся под эффектной окружающей; разбор её не сбрасывает -
+    // ветвь работает в той же row, что и сам разбор; общая переменная связывает
+    // row колбэка с row результата, и потому higher-order композируется.
+    program(&format!(
+        "{BASE}
+State : Type -> Effect
+
+flip : Bool -> Bool
+flip True = False
+flip False = True
+
+under : Bool -> {{State Bool}} Bool
+under b = flip b
+
+carried : (Bool -> {{State Bool}} Bool) -> Bool -> {{State Bool}} Bool
+carried f b = f (flip b)
+"
+    ));
+}
+
+#[test]
+fn a_pure_call_needs_no_evidence_and_so_needs_no_row() {
+    // Пустая row вызываемого гасится любой окружающей (§3.4): Λ без хвоста
+    // требуется потому, что её длина есть смещение вектора evidence, а тому,
+    // кто не производит ничего, вектор не передаётся вовсе. Замкнута row у
+    // всякого конструктора - `data` пишется без эффектов, - и без этого случая
+    // `Succ` под открытой окружающей был бы незовущимся.
+    program(&format!(
+        "{BASE}
+State : Type -> Effect
+
+counted : Nat -> {{State Bool}} Nat
+counted n = Succ n
+
+lifted : Nat -> Nat
+lifted n = Succ n
+"
+    ));
 }
 
 #[test]

@@ -76,7 +76,7 @@ use crate::mult::Mult;
 // сюда под своим полным смыслом в имени.
 use crate::row::Row as EffectRow;
 use crate::sig::{DefinitionKind, Signature};
-use crate::term::{Binder, Branch, Case, Field as RecordField, Fields, Index, Name, Term};
+use crate::term::{Binder, Branch, Case, Field as RecordField, Fields, Index, Name, Rows, Term};
 use crate::unify::{self, Match, Shape};
 use crate::value::{Elim, Head, Lvl, Value};
 
@@ -1025,7 +1025,11 @@ impl Compiler<'_> {
         let base = inner.size();
         let built = fields.iter().fold(
             family.params.iter().fold(
-                Term::Const(Rc::clone(constructor), Rc::clone(&family.levels)),
+                Term::Const(
+                    Rc::clone(constructor),
+                    Rc::clone(&family.levels),
+                    Rows::none(),
+                ),
                 |applied, param| Term::App(Rc::new(applied), Rc::new(quote(base, param))),
             ),
             |applied, field| {
@@ -1115,7 +1119,11 @@ impl Compiler<'_> {
             current = next;
         }
 
-        let mut scrutinee = Term::Const(Rc::clone(&family.data), Rc::clone(&family.levels));
+        let mut scrutinee = Term::Const(
+            Rc::clone(&family.data),
+            Rc::clone(&family.levels),
+            Rows::none(),
+        );
         for param in &family.params {
             scrutinee = Term::App(Rc::new(scrutinee), Rc::new(quote(inner.size(), param)));
         }

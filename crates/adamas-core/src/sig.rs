@@ -58,7 +58,7 @@ use crate::eval::eval;
 use crate::level::Level;
 use crate::meta::{Generalization, Metas, zonk_term};
 use crate::mult::Mult;
-use crate::term::{Name, Term};
+use crate::term::{Name, Rows, Term};
 use crate::value::{Env, Value};
 
 /// Чем определение является помимо "имя с типом и, может быть, телом".
@@ -435,7 +435,7 @@ impl Signature {
     pub fn instantiate(&self, name: &str, metas: &mut Metas) -> Option<Term> {
         let arity = self.lookup(name)?.level_arity;
         let levels: Rc<[Level]> = (0..arity).map(|_| metas.fresh_level()).collect();
-        Some(Term::Const(name.into(), levels))
+        Some(Term::Const(name.into(), levels, Rows::none()))
     }
 
     /// Проверяет группу и добавляет её целиком.

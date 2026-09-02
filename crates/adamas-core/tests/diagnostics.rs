@@ -16,7 +16,7 @@ use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::row::Row;
 use adamas_core::sig::Signature;
-use adamas_core::term::{Binder, Term};
+use adamas_core::term::{Binder, Rows, Term};
 use proptest::prelude::*;
 
 // ------------------------------------------------------------- конструкторы
@@ -377,7 +377,11 @@ fn any_term(depth: u32) -> BoxedStrategy<Term> {
     let leaf = prop_oneof![
         (0u32..3).prop_map(Term::universe),
         (0u32..3).prop_map(Term::var),
-        Just(Term::Const("f".into(), Rc::from([] as [Level; 0]))),
+        Just(Term::Const(
+            "f".into(),
+            Rc::from([] as [Level; 0]),
+            Rows::none()
+        )),
     ];
     leaf.prop_recursive(4, 64, 3, move |inner| {
         let _ = depth;

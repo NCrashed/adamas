@@ -26,7 +26,7 @@ use adamas_core::mult::Mult;
 use adamas_core::pattern::{PatternError, compile_traced};
 use adamas_core::sig::{Group, Member as SigMember, Signature};
 use adamas_core::source::Span;
-use adamas_core::term::{Binder, Fields, Name as CoreName, Term};
+use adamas_core::term::{Binder, Fields, Name as CoreName, Rows, Term};
 use adamas_parser::ast::{self, DeclKind, Module, Symbol};
 
 use crate::carrier;
@@ -1385,7 +1385,7 @@ fn self_dictionary(
             .map(|((method, ..), full)| {
                 (
                     Rc::clone(method),
-                    Term::Const(CoreName::from(&**full), Rc::clone(levels)),
+                    Term::Const(CoreName::from(&**full), Rc::clone(levels), Rows::none()),
                 )
             })
             .collect(),
@@ -2066,7 +2066,7 @@ fn spine(ty: &Term) -> Option<(Symbol, Vec<&Term>)> {
     }
     arguments.reverse();
     match current {
-        Term::Const(name, _) => Some((Rc::clone(name), arguments)),
+        Term::Const(name, _, _) => Some((Rc::clone(name), arguments)),
         _ => None,
     }
 }
@@ -2760,7 +2760,7 @@ fn name_head(term: &Term) -> Option<&adamas_core::term::Name> {
         head = callee;
     }
     match head {
-        Term::Const(name, _) => Some(name),
+        Term::Const(name, _, _) => Some(name),
         _ => None,
     }
 }

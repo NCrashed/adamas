@@ -209,7 +209,7 @@ fn collect_calls(group: &[Name], term: &Term, found: &mut Vec<Name>) {
     let mut recur = |inner| collect_calls(group, inner, found);
     match term {
         Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::EffectKind | Term::Meta(_) => {}
-        Term::Const(other, _) => {
+        Term::Const(other, _, _) => {
             if group.contains(other) && !found.contains(other) {
                 found.push(Rc::clone(other));
             }
@@ -278,7 +278,7 @@ fn calls_a_partial_definition(signature: &Signature, name: &Name, term: &Term) -
         Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
         Term::With(base, fields) => recur(base) || fields.iter().any(|(_, value)| recur(value)),
         Term::Project(record, _) => recur(record),
-        Term::Const(other, _) => {
+        Term::Const(other, _, _) => {
             other != name && signature.lookup(other).is_some_and(|found| !found.total)
         }
         Term::Lam(_, _, body) => recur(body),
@@ -380,7 +380,7 @@ impl Walk<'_> {
 
             // Голое имя без аргументов - тоже вызов, просто без единой
             // позиции, по которой можно было бы уменьшаться.
-            Term::Const(other, _) => {
+            Term::Const(other, _, _) => {
                 if let Some(callee) = self.group.iter().position(|it| it == other) {
                     self.calls.push((callee, Vec::new()));
                 }
@@ -395,7 +395,7 @@ impl Walk<'_> {
                     .map(|argument| Self::size(sizes, argument))
                     .collect();
                 match head {
-                    Term::Const(other, _)
+                    Term::Const(other, _, _)
                         if let Some(callee) = self.group.iter().position(|it| it == other) =>
                     {
                         self.calls.push((callee, applied));

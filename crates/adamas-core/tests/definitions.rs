@@ -8,7 +8,7 @@ use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::row::Row;
 use adamas_core::sig::Signature;
-use adamas_core::term::{Binder, Term};
+use adamas_core::term::{Binder, Rows, Term};
 use proptest::prelude::*;
 
 // ------------------------------------------------------------- конструкторы
@@ -39,7 +39,7 @@ fn universe_var(index: u32) -> Term {
 
 /// Ссылка на определение с явными аргументами уровня.
 fn at(name: &str, levels: &[Level]) -> Term {
-    Term::Const(name.into(), levels.iter().cloned().collect())
+    Term::Const(name.into(), levels.iter().cloned().collect(), Rows::none())
 }
 
 /// `Id : (0 a : Type u0) -> (ω x : a) -> a`, полиморфная по уровню

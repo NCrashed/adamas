@@ -48,7 +48,7 @@ use crate::meta::Metas;
 use crate::mult::Mult;
 use crate::row::{Label, Row};
 use crate::sig::Signature;
-use crate::term::{Field, Fields, Term, TermMeta};
+use crate::term::{Field, Fields, Rows, Term, TermMeta};
 use crate::value::{Elim, Head, Lvl, Value};
 
 /// Разворачивает решённые дырки в голове значения.
@@ -272,7 +272,9 @@ fn read(
                     };
                     Term::Var(Lvl(level).to_index(size))
                 }
-                Head::Global(name, levels) => Term::Const(Rc::clone(name), Rc::clone(levels)),
+                Head::Global(name, levels) => {
+                    Term::Const(Rc::clone(name), Rc::clone(levels), Rows::none())
+                }
                 // Вхождение самой дырки: подстановка дала бы бесконечный терм.
                 Head::Meta(found) if *found == meta => return None,
                 Head::Meta(found) => Term::Meta(*found),

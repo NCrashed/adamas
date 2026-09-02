@@ -10,7 +10,7 @@ use std::rc::Rc;
 use adamas_core::check::{ErrorKind, check_closed};
 use adamas_core::level::Level;
 use adamas_core::sig::Signature;
-use adamas_core::term::Term;
+use adamas_core::term::{Rows, Term};
 use adamas_elab::{ElabError, Missing, elaborate};
 use adamas_parser::parse;
 
@@ -44,7 +44,7 @@ fn refused(text: &str) -> ElabError {
 /// оказывается полиморфным по уровню. Тесту нужен замкнутый терм, поэтому
 /// уровень задаётся явно.
 fn at(name: &str) -> Term {
-    Term::Const(name.into(), Rc::from([Level::Zero]))
+    Term::Const(name.into(), Rc::from([Level::Zero]), Rows::none())
 }
 
 /// `Nat` и `Bool` - минимальная база, на которой пишется всё остальное.

@@ -22,7 +22,7 @@
 
 use std::rc::Rc;
 
-use crate::term::{Branch, Case, Field, Fields, Name, Term};
+use crate::term::{Branch, Case, Field, Fields, Name, Rows, Term};
 use crate::value::{Closure, Elim, Env, Head, Lvl, StuckBranch, StuckCase, Telescope, Value};
 
 impl Closure {
@@ -86,7 +86,13 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
         // δ-редукцию делает проверка конвертируемости и только когда это
         // действительно нужно (`crate::conv`). Иначе нормальные формы и
         // сообщения об ошибках раздувались бы телами всех определений.
-        Term::Const(name, levels) => Value::constant(Rc::clone(name), levels),
+        Term::Const(name, levels, rows) => {
+            // Аргументы-row до значения ещё не доходят: их носит `Head::Global`,
+            // и это следующий срез (§10 вопрос 73). Пока их не бывает, молчать
+            // об этом нельзя - иначе первая же непустая уедет в никуда.
+            debug_assert!(rows.is_empty(), "аргументы-row в значении ещё не носятся");
+            Value::constant(Rc::clone(name), levels)
+        }
 
         // Тип связывания при вычислении не нужен: он влияет на проверку, а не
         // на значение.
@@ -401,7 +407,9 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
         Value::Neutral(head, spine) => {
             let base = match head {
                 Head::Local(level) => Term::Var(level.to_index(size)),
-                Head::Global(name, levels) => Term::Const(Rc::clone(name), Rc::clone(levels)),
+                Head::Global(name, levels) => {
+                    Term::Const(Rc::clone(name), Rc::clone(levels), Rows::none())
+                }
                 Head::Meta(meta) => Term::Meta(*meta),
             };
             spine.iter().fold(base, |callee, elim| match elim {

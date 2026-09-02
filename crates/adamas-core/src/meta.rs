@@ -26,7 +26,7 @@
 use std::rc::Rc;
 
 use crate::level::{Level, LevelMeta, LevelVar, peel};
-use crate::term::{Term, TermMeta};
+use crate::term::{Rows, Term, TermMeta};
 use crate::value::Value;
 
 /// Хранилище метапеременных уровня - одно на прогон элаборации (§10 вопрос 51).
@@ -399,7 +399,7 @@ impl Generalization {
                 self.collect_term(metas, value);
                 self.collect_term(metas, body);
             }
-            Term::Const(_, levels) => {
+            Term::Const(_, levels, _) => {
                 for level in levels.iter() {
                     self.collect_level(metas, level);
                 }
@@ -514,12 +514,13 @@ impl Generalization {
             Term::Let(mult, name, ty, value, body) => {
                 Term::Let(*mult, Rc::clone(name), recur(ty), recur(value), recur(body))
             }
-            Term::Const(name, levels) => Term::Const(
+            Term::Const(name, levels, _) => Term::Const(
                 Rc::clone(name),
                 levels
                     .iter()
                     .map(|level| self.apply_level(metas, level))
                     .collect(),
+                Rows::none(),
             ),
             Term::Case(case) => Term::Case(Rc::new(crate::term::Case {
                 data: Rc::clone(&case.data),
@@ -647,7 +648,7 @@ pub fn unsolved_level_meta(metas: &Metas, term: &crate::term::Term) -> Option<Le
         Term::Let(_, _, ty, value, body) => unsolved_level_meta(metas, ty)
             .or_else(|| unsolved_level_meta(metas, value))
             .or_else(|| unsolved_level_meta(metas, body)),
-        Term::Const(_, levels) => levels.iter().find_map(|level| in_level(metas, level)),
+        Term::Const(_, levels, _) => levels.iter().find_map(|level| in_level(metas, level)),
         Term::Case(case) => case
             .levels
             .iter()
@@ -726,9 +727,10 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
         Term::Let(mult, name, ty, value, body) => {
             Term::Let(*mult, Rc::clone(name), recur(ty), recur(value), recur(body))
         }
-        Term::Const(name, levels) => Term::Const(
+        Term::Const(name, levels, _) => Term::Const(
             Rc::clone(name),
             levels.iter().map(|level| metas.zonk(level)).collect(),
+            Rows::none(),
         ),
         Term::Case(case) => Term::Case(Rc::new(crate::term::Case {
             data: Rc::clone(&case.data),

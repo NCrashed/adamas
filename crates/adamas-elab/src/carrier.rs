@@ -164,7 +164,7 @@ fn spine(signature: &Signature, owned: &Owned, term: &Term, depth: u32, found: &
         head = callee;
     }
     arguments.reverse();
-    let Term::Const(callee, _) = head else {
+    let Term::Const(callee, _, _) = head else {
         return;
     };
     let Some(definition) = signature.lookup(callee) else {

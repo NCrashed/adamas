@@ -8,7 +8,7 @@ use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::row::Row;
 use adamas_core::sig::Signature;
-use adamas_core::term::{Binder, Term};
+use adamas_core::term::{Binder, Rows, Term};
 use proptest::prelude::*;
 
 // ------------------------------------------------------------- конструкторы
@@ -366,7 +366,7 @@ fn a_solved_level_is_shown_solved_in_the_error() {
             "mk",
             Mult::Many,
             1,
-            Term::Const("Box".into(), Rc::from([u(0)])),
+            Term::Const("Box".into(), Rc::from([u(0)]), Rows::none()),
         )
         .expect("mk корректен");
 
@@ -376,11 +376,11 @@ fn a_solved_level_is_shown_solved_in_the_error() {
         .expect("Box объявлен");
 
     // Первая проверка решает дырку в `2`.
-    let two = Term::Const("mk".into(), Rc::from([Level::number(2)]));
+    let two = Term::Const("mk".into(), Rc::from([Level::number(2)]), Rows::none());
     check_closed_with(&signature, &mut metas, &two, &boxed).expect("решает ?0 := 2");
 
     // Вторая расходится с ней, и сообщение обязано назвать решение, а не дырку.
-    let three = Term::Const("mk".into(), Rc::from([Level::number(3)]));
+    let three = Term::Const("mk".into(), Rc::from([Level::number(3)]), Rows::none());
     let error = check_closed_with(&signature, &mut metas, &three, &boxed)
         .expect_err("2 и 3 - разные уровни");
     let ErrorKind::Mismatch { expected, found } = &error.kind else {
@@ -390,7 +390,7 @@ fn a_solved_level_is_shown_solved_in_the_error() {
     // сверяются структурно: зонканье в точке возбуждения обязано было
     // подставить решение, и `Level::Meta` здесь не остаётся.
     let level_of = |term: &Term| match term {
-        Term::Const(_, levels) => levels.first().cloned(),
+        Term::Const(_, levels, _) => levels.first().cloned(),
         other => panic!("ожидалась ссылка на `Box`, получено `{other}`"),
     };
     assert_eq!(

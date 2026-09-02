@@ -8,7 +8,7 @@ use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::row::Row;
 use adamas_core::sig::Signature;
-use adamas_core::term::{Binder, Term};
+use adamas_core::term::{Binder, Rows, Term};
 use proptest::prelude::*;
 
 // ------------------------------------------------------------- конструкторы
@@ -215,7 +215,7 @@ fn a_hole_living_only_in_the_body_is_rejected() {
         "BodyOnly",
         Mult::Many,
         Term::universe(9),
-        Some(Term::Const("Any".into(), Rc::from([hole]))),
+        Some(Term::Const("Any".into(), Rc::from([hole]), Rows::none())),
     );
     assert!(
         matches!(
@@ -273,7 +273,7 @@ fn the_explicit_path_still_rejects_leftover_holes() {
         Mult::Many,
         0,
         Term::universe(9),
-        Some(Term::Const("Any".into(), Rc::from([hole]))),
+        Some(Term::Const("Any".into(), Rc::from([hole]), Rows::none())),
     );
     assert!(
         matches!(
@@ -392,7 +392,7 @@ fn level_vars(term: &Term, found: &mut Vec<u32>) {
             level_vars(value, found);
             level_vars(body, found);
         }
-        Term::Const(_, levels) => {
+        Term::Const(_, levels, _) => {
             for level in levels.iter() {
                 in_level(level, found);
             }

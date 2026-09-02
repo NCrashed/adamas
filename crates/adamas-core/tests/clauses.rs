@@ -15,7 +15,7 @@ use adamas_core::mult::Mult;
 use adamas_core::pattern::{Clause, Pattern, PatternError, compile};
 use adamas_core::row::Row as EffectRow;
 use adamas_core::sig::Signature;
-use adamas_core::term::{Binder, Term};
+use adamas_core::term::{Binder, Rows, Term};
 
 // -------------------------------------------------------------- конструкторы
 
@@ -119,7 +119,7 @@ fn with_lists(signature: &mut Signature) {
     // нечего - семейства там ещё нет. Число дырок обязано совпасть с арностью,
     // и это проверяется (`LevelArity`).
     let list_of = |metas: &mut Metas, element: Term| {
-        Term::Const("List".into(), Rc::from([metas.fresh_level()])).apply([element])
+        Term::Const("List".into(), Rc::from([metas.fresh_level()]), Rows::none()).apply([element])
     };
     let nil = pi(
         Mult::Zero,
@@ -358,8 +358,12 @@ fn a_parameter_survives_the_split() {
     let mut signature = base();
     with_lists(&mut signature);
 
-    let list_of_bool =
-        Term::Const("List".into(), [adamas_core::level::Level::Zero].into()).apply([c("Bool")]);
+    let list_of_bool = Term::Const(
+        "List".into(),
+        [adamas_core::level::Level::Zero].into(),
+        Rows::none(),
+    )
+    .apply([c("Bool")]);
     define(
         &mut signature,
         "length",
@@ -379,14 +383,19 @@ fn a_parameter_survives_the_split() {
     );
 
     let cons = |head: Term, tail: Term| {
-        Term::Const("cons".into(), [adamas_core::level::Level::Zero].into()).apply([
-            c("Bool"),
-            head,
-            tail,
-        ])
+        Term::Const(
+            "cons".into(),
+            [adamas_core::level::Level::Zero].into(),
+            Rows::none(),
+        )
+        .apply([c("Bool"), head, tail])
     };
-    let empty =
-        Term::Const("nil".into(), [adamas_core::level::Level::Zero].into()).apply([c("Bool")]);
+    let empty = Term::Const(
+        "nil".into(),
+        [adamas_core::level::Level::Zero].into(),
+        Rows::none(),
+    )
+    .apply([c("Bool")]);
     let two = cons(c("true"), cons(c("false"), empty));
     let outcome = check_closed(
         &signature,

@@ -466,7 +466,7 @@ pub(crate) fn applied(signature: &Signature, ty: &Term) -> Option<(Symbol, Head)
         current = callee;
     }
     arguments.reverse();
-    let Term::Const(class, _) = current else {
+    let Term::Const(class, _, _) = current else {
         return None;
     };
     if arguments.is_empty() {
@@ -482,7 +482,7 @@ pub(crate) fn applied(signature: &Signature, ty: &Term) -> Option<(Symbol, Head)
             head = inner;
         }
         match head {
-            Term::Const(name, _) => match unfolded(signature, name) {
+            Term::Const(name, _, _) => match unfolded(signature, name) {
                 Some(found) => heads.push(found),
                 None => return Some((Rc::clone(class), Head::Projecting)),
             },
@@ -532,7 +532,7 @@ fn unfolded(signature: &Signature, name: &Symbol) -> Option<Symbol> {
             head = callee;
         }
         match head {
-            Term::Const(next, _) if *next != current => current = Rc::clone(next),
+            Term::Const(next, _, _) if *next != current => current = Rc::clone(next),
             // Синоним отдаёт свой параметр: голова у применения не своя, а
             // того аргумента, который подставят, и символом она не выражается.
             Term::Var(_) if abstracted => return None,

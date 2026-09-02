@@ -23,7 +23,7 @@ use adamas_core::check::{Frame, TypeError};
 use adamas_core::level::{Level, LevelMeta};
 use adamas_core::pattern::PatternError;
 use adamas_core::source::{Location, SourceFile, Span};
-use adamas_core::term::{Binder, Case, Fields, Index, Name, Term};
+use adamas_core::term::{Binder, Case, Fields, Index, Name, Rows, Term};
 
 use crate::error::{ElabError, Names};
 
@@ -323,14 +323,14 @@ impl Naming {
                     Some(position) => bound[position].clone(),
                     None => self.local(index - bound.len() + outer),
                 };
-                *term = Term::Const(name, Rc::from([]));
+                *term = Term::Const(name, Rc::from([]), Rows::none());
             }
             // Дырка своего имени не имеет и переименованию не подлежит:
             // печатается она номером, а номер локализует `Naming` отдельно.
             // Сорт `Effect` рядом по той же причине: ни имён, ни уровней.
             Term::Meta(_) | Term::EffectKind => {}
             Term::Universe(level) | Term::RowKind(level) => self.level(level),
-            Term::Const(_, levels) => *levels = self.levels(levels),
+            Term::Const(_, levels, _) => *levels = self.levels(levels),
             Term::App(callee, argument) => {
                 self.term(Rc::make_mut(callee), bound, outer);
                 self.term(Rc::make_mut(argument), bound, outer);
@@ -434,7 +434,7 @@ fn collect_term(term: &Term, ordered: &mut Vec<LevelMeta>) {
         // отдельно.
         Term::Var(_) | Term::Meta(_) | Term::EffectKind => {}
         Term::Universe(level) | Term::RowKind(level) => collect_level(level, ordered),
-        Term::Const(_, levels) => {
+        Term::Const(_, levels, _) => {
             for level in levels.iter() {
                 collect_level(level, ordered);
             }

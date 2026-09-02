@@ -19,7 +19,7 @@ use adamas_core::pattern::{Clause, Pattern as CorePattern, PatternError, compile
 use adamas_core::row::Row;
 use adamas_core::sig::{Definition, DefinitionKind, Signature};
 use adamas_core::source::Span;
-use adamas_core::term::{Binder, Field as CoreField, Fields, Name as CoreName, Term};
+use adamas_core::term::{Binder, Field as CoreField, Fields, Name as CoreName, Rows, Term};
 use adamas_core::value::{Elim, Env, Head, Lvl, Value};
 use adamas_parser::ast::{
     self, Binding, Block, Expr, ExprKind, LamParamKind, Pattern, PatternKind, Stmt, StmtKind,
@@ -1586,7 +1586,7 @@ impl<'a> Elaborator<'a> {
             head = callee;
         }
         arguments.reverse();
-        let Term::Const(name, levels) = head else {
+        let Term::Const(name, levels, _) = head else {
             return None;
         };
         let member = self.group.iter().find(|it| *it.name == **name)?;
@@ -1680,7 +1680,7 @@ impl<'a> Elaborator<'a> {
             head = callee;
         }
         match head {
-            Term::Const(name, _) if self.owned.owns(name) => Mult::One,
+            Term::Const(name, _, _) if self.owned.owns(name) => Mult::One,
             _ => Mult::Many,
         }
     }
@@ -2005,7 +2005,11 @@ impl<'a> Elaborator<'a> {
         // посчитанную вызывающим. Тип его сигнатура ещё не знает (§10 вопрос
         // 50), поэтому имплиситы вставляются по типу, принесённому в группе.
         if let Some(member) = self.member_of_group(&name.text) {
-            let term = Term::Const(CoreName::from(&*member.name), Rc::clone(&member.levels));
+            let term = Term::Const(
+                CoreName::from(&*member.name),
+                Rc::clone(&member.levels),
+                Rows::none(),
+            );
             let ty = eval(&Env::default(), &member.ty);
             let (term, ty) = self.specialized(term, ty);
             if self.bare {
@@ -2105,7 +2109,7 @@ impl<'a> Elaborator<'a> {
         // **написанной** арности применения (§4.1, правило 1), и спросить о
         // них можно только зная, к чему применяются.
         let named = match &term {
-            Term::Const(name, _) => Some(Rc::clone(name)),
+            Term::Const(name, _, _) => Some(Rc::clone(name)),
             _ => None,
         };
         let mut given: Vec<Term> = Vec::with_capacity(arguments.len());
@@ -2240,7 +2244,7 @@ impl<'a> Elaborator<'a> {
         let Term::App(callee, _) = current else {
             return None;
         };
-        let Term::Const(class, _) = &**callee else {
+        let Term::Const(class, _, _) = &**callee else {
             return None;
         };
         Some(Rc::from(&**class))
@@ -2633,7 +2637,8 @@ impl<'a> Elaborator<'a> {
         let Term::Pi(_, _, _, _, result) = definition.ty.substitute_levels(&levels) else {
             unreachable!("`{drop}` проверен на форму при объявлении")
         };
-        let call = Term::Const(CoreName::from(&**drop), levels).apply([Term::var(index)]);
+        let call =
+            Term::Const(CoreName::from(&**drop), levels, Rows::none()).apply([Term::var(index)]);
         (call, (*result).clone())
     }
 
@@ -3190,7 +3195,7 @@ fn pi_arguments(ty: &Term, owned: &Owned) -> Vec<Argument> {
             head = callee;
         }
         let name = match head {
-            Term::Const(name, _) => Some(name),
+            Term::Const(name, _, _) => Some(name),
             _ => None,
         };
         found.push(Argument {

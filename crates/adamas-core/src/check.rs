@@ -61,7 +61,7 @@ use crate::meta::{Metas, unsolved_level_meta, unsolved_term_meta};
 use crate::mult::Mult;
 use crate::row::Row;
 use crate::sig::{Definition, DefinitionKind, Signature};
-use crate::term::{Binder, Case, Field as RecordField, Fields, Name, Term, spine};
+use crate::term::{Binder, Case, Field as RecordField, Fields, Name, Rows, Term, spine};
 use crate::value::{Elim, Head, Lvl, Telescope, Value};
 
 /// Значение, уложенное в ошибку: обратное чтение плюс зонканье.
@@ -191,7 +191,7 @@ pub fn infer(
         // использований нулевой. Ограничение на кратность при этом есть, но
         // проверяется локально: `0`-определение (доказательство, тип) в
         // рантайм-позиции - ошибка.
-        Term::Const(name, levels) => {
+        Term::Const(name, levels, _) => {
             let definition =
                 ctx.signature()
                     .lookup(name)
@@ -814,7 +814,7 @@ fn mentions_seen<'a>(
         // обходится в две строки: `def G : Type 0 = Bad -> Bad`, затем
         // `mk : G -> Bad`. Прямая запись отвергается, а эта прошла бы, хотя
         // после δ-разворота это тот же самый негативный конструктор.
-        Term::Const(other, _) => {
+        Term::Const(other, _, _) => {
             if other == name {
                 return true;
             }
@@ -950,7 +950,7 @@ fn positive_seen<'a, 'g>(
                 // себя. Аргументы обязаны быть свободны от группы, иначе
                 // `D (D x)` протащило бы её в позицию, которую проверка не
                 // контролирует.
-                Term::Const(name, _) if group.iter().any(|it| it == name) => {
+                Term::Const(name, _, _) if group.iter().any(|it| it == name) => {
                     // Единообразие меряется параметрами **того** семейства,
                     // которое стоит в голове: у соседа их своё число.
                     let own = signature
@@ -967,7 +967,7 @@ fn positive_seen<'a, 'g>(
                 _ if !mentions_any(signature, group, other) => None,
                 // Тип упомянут, но позиция ещё не разобрана: если голова -
                 // определение, смотрим на то, чем она является.
-                Term::Const(name, _) if arguments.is_empty() => {
+                Term::Const(name, _, _) if arguments.is_empty() => {
                     let Some(body) = signature
                         .lookup(name)
                         .and_then(|definition| definition.body.as_ref())
@@ -1104,7 +1104,7 @@ pub(crate) fn check_constructor_shape(
     let (head, arguments) = spine(result);
     let expected = identity_levels(arity);
     let addressed = match head {
-        Term::Const(head_name, levels) => {
+        Term::Const(head_name, levels, _) => {
             head_name == data
                 && levels.len() == expected.len()
                 && levels
@@ -1807,7 +1807,8 @@ fn motive_type(
     params: &[Rc<Value>],
 ) -> Rc<Value> {
     let (telescope, size) = telescope_of(ctx.size(), family);
-    let mut scrutinee_ty = Term::Const(Rc::clone(&case.data), Rc::clone(&case.levels));
+    let mut scrutinee_ty =
+        Term::Const(Rc::clone(&case.data), Rc::clone(&case.levels), Rows::none());
     for param in params {
         scrutinee_ty = Term::App(Rc::new(scrutinee_ty), Rc::new(quote(size, param)));
     }
@@ -1872,7 +1873,11 @@ fn branch_type(
         result = Term::App(Rc::new(result), Rc::new(quote(size, index)));
     }
 
-    let mut built = Term::Const(Rc::clone(constructor), Rc::clone(&case.levels));
+    let mut built = Term::Const(
+        Rc::clone(constructor),
+        Rc::clone(&case.levels),
+        Rows::none(),
+    );
     for param in params {
         built = Term::App(Rc::new(built), Rc::new(quote(size, param)));
     }

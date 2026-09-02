@@ -38,6 +38,55 @@ impl Index {
 /// Имя для печати. На семантику не влияет.
 pub type Name = Rc<str>;
 
+/// Аргументы-row ссылки на определение (§3.2, вопрос 73).
+///
+/// Вторая компонента арности: у определения `f : A -> {IO | e} B` один такой
+/// аргумент, и место использования подставляет вместо `e` целую row.
+///
+/// **Тонкий указатель, а не `Rc<[Row<Term>]>`** - по той же причине, по какой
+/// он тонкий у самой [`Row`]: тот вдвое шире, `Const` стоит в каждом упоминании
+/// имени, а row-аргументов у подавляющего большинства определений нет вовсе.
+/// Отсутствие - `None`, а не пустой срез: аллокация под заголовок была бы
+/// платой за хранение ничего.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Rows(Option<Rc<Vec<Row<Term>>>>);
+
+impl Rows {
+    /// Аргументов нет - определение по row не полиморфно.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self(None)
+    }
+
+    /// Собирает список аргументов.
+    #[must_use]
+    pub fn new(rows: impl IntoIterator<Item = Row<Term>>) -> Self {
+        let rows: Vec<Row<Term>> = rows.into_iter().collect();
+        if rows.is_empty() {
+            return Self::none();
+        }
+        Self(Some(Rc::new(rows)))
+    }
+
+    /// Аргументы по порядку.
+    #[must_use]
+    pub fn as_slice(&self) -> &[Row<Term>] {
+        self.0.as_ref().map_or(&[], |rows| rows.as_slice())
+    }
+
+    /// Сколько их.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    /// Пуст ли список.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
 /// Терм core-языка.
 ///
 /// Зависимых пар (`(q x : A) ** B` из §3.2) здесь нет: механика у них та же,
@@ -80,7 +129,7 @@ pub enum Term {
     /// туда свежие дырки, а решает их проверка конвертируемости. Собирать этот
     /// узел напрямую значит обойти вывод и получить `LevelArity` там, где он
     /// сработал бы.
-    Const(Name, Rc<[Level]>),
+    Const(Name, Rc<[Level]>, Rows),
     /// Разбор значения индуктивного типа по конструктору.
     Case(Rc<Case>),
     /// Тип записи: телескоп полей и, возможно, хвост-row.
@@ -354,7 +403,7 @@ impl Term {
     /// Ссылка на определение без параметров уровня.
     #[must_use]
     pub fn constant(name: &str) -> Self {
-        Self::Const(name.into(), Rc::from([]))
+        Self::Const(name.into(), Rc::from([]), Rows::none())
     }
 
     /// Подставляет аргументы вместо параметров уровня по всему терму.
@@ -388,12 +437,13 @@ impl Term {
             Self::Let(mult, name, ty, value, body) => {
                 Self::Let(*mult, Rc::clone(name), recur(ty), recur(value), recur(body))
             }
-            Self::Const(name, levels) => Self::Const(
+            Self::Const(name, levels, _) => Self::Const(
                 Rc::clone(name),
                 levels
                     .iter()
                     .map(|level| level.substitute(arguments))
                     .collect(),
+                Rows::none(),
             ),
             Self::Record(fields) => Self::Record(substituted(fields, arguments)),
             Self::Row(fields) => Self::Row(substituted(fields, arguments)),
@@ -526,7 +576,7 @@ impl Term {
                 ty.max_level_var(),
                 join(value.max_level_var(), body.max_level_var()),
             ),
-            Self::Const(_, levels) => levels
+            Self::Const(_, levels, _) => levels
                 .iter()
                 .fold(None, |found, level| join(found, level.max_var())),
             Self::Case(case) => {
@@ -619,8 +669,8 @@ impl fmt::Display for Term {
             Self::Let(mult, name, ty, value, body) => {
                 write!(f, "let {mult} {name} : {ty} = {value} in {body}")
             }
-            Self::Const(name, levels) if levels.is_empty() => write!(f, "{name}"),
-            Self::Const(name, levels) => {
+            Self::Const(name, levels, _) if levels.is_empty() => write!(f, "{name}"),
+            Self::Const(name, levels, _) => {
                 let printed: Vec<String> = levels.iter().map(ToString::to_string).collect();
                 write!(f, "{name}{{{}}}", printed.join(", "))
             }

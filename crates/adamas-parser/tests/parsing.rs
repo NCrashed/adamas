@@ -299,10 +299,7 @@ fn a_multiplicity_is_zero_one_or_omega() {
 fn forms_of_later_phases_name_their_phase() {
     // Лексема зарезервирована и опечаткой быть не может, поэтому честнее
     // назвать фазу, чем перечислять, что бывает здесь вместо неё.
-    let cases = [
-        ("effect State s where\n  get : s\n", Unsupported::Effect),
-        ("infixl 6 +\n", Unsupported::Fixity),
-    ];
+    let cases = [("infixl 6 +\n", Unsupported::Fixity)];
     for (text, expected) in cases {
         let error = parse_error(text);
         let ParseError::Unsupported { what, .. } = error else {
@@ -310,6 +307,21 @@ fn forms_of_later_phases_name_their_phase() {
         };
         assert_eq!(what, expected, "для {text:?}");
     }
+}
+
+#[test]
+fn an_effect_declares_a_label_and_its_operations() {
+    // §3.4: формер не пишется - результат метки всегда `Effect`, - а операции
+    // идут блоком, как конструкторы у семейства.
+    let dumped =
+        tree("effect State s where\n  get : s\n  put : s -> Unit\n").expect("разбор удался");
+    assert!(dumped.contains("(effect State s"), "получено {dumped}");
+    assert!(dumped.contains("(op get s)"), "получено {dumped}");
+    assert!(dumped.contains("(op put (-> s Unit))"), "получено {dumped}");
+    // Без операций блок не пишется, и это законно: объявить метку можно,
+    // производить её нечем.
+    let bare = tree("effect Fail\n").expect("разбор удался");
+    assert!(bare.contains("(effect Fail)"), "получено {bare}");
 }
 
 #[test]

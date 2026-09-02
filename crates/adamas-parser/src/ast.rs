@@ -462,6 +462,8 @@ pub enum DeclKind {
     Mutual(Vec<Decl>),
     /// Ресурсный тип: `resource File where drop h = …` (§3.3).
     Resource(Resource),
+    /// Объявление эффекта: `effect State s where …` (§3.4).
+    Effect(EffectDecl),
 }
 
 /// Класс или его инстанс.
@@ -561,6 +563,36 @@ pub struct Constructor {
     /// Тип.
     pub ty: Expr,
     /// Конструктор целиком.
+    pub span: Span,
+}
+
+/// Объявление эффекта (§3.4).
+///
+/// Устроено как data-объявление: формер плюс члены, чьи типы обязаны упоминать
+/// формер в предписанной позиции. Различие в том, что позиция эта - **row**, а
+/// не результат: операция не строит значение метки, она её производит.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectDecl {
+    /// Имя метки.
+    pub name: Name,
+    /// Параметры, написанные до `where`: `effect State s where`.
+    ///
+    /// Пишутся теми же формами, что у семейства, и телескоп их повторяется в
+    /// каждой операции дословно.
+    pub params: Vec<Binder>,
+    /// Операции в порядке написания.
+    pub operations: Vec<Operation>,
+}
+
+/// Операция эффекта.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Operation {
+    /// Имя.
+    pub name: Name,
+    /// Тип - как написан. Row с объявляемой меткой в нём либо стоит, либо нет;
+    /// вторую форму дописывает элаборация, парсер разницы не знает.
+    pub ty: Expr,
+    /// Операция целиком.
     pub span: Span,
 }
 
@@ -777,6 +809,25 @@ fn dump_block(out: &mut String, head: &str, members: &[Decl], depth: usize) {
     out.push(')');
 }
 
+/// Объявление эффекта: формер параметрами, операции блоком.
+fn dump_effect(out: &mut String, effect: &EffectDecl, depth: usize) {
+    out.push_str("(effect ");
+    out.push_str(&effect.name.text);
+    for param in &effect.params {
+        out.push(' ');
+        dump_binder(out, param);
+    }
+    for operation in &effect.operations {
+        line(out, depth + 1);
+        out.push_str("(op ");
+        out.push_str(&operation.name.text);
+        out.push(' ');
+        dump_expr(out, &operation.ty);
+        out.push(')');
+    }
+    out.push(')');
+}
+
 /// Печатает объявление без завершающего перевода строки: где его ставить,
 /// решает вызывающий - вложенное объявление продолжается скобкой.
 fn dump_decl(out: &mut String, decl: &Decl, depth: usize) {
@@ -832,6 +883,7 @@ fn dump_decl(out: &mut String, decl: &Decl, depth: usize) {
             }
             out.push(')');
         }
+        DeclKind::Effect(effect) => dump_effect(out, effect, depth),
         DeclKind::Data(data) => {
             out.push_str("(data ");
             out.push_str(&data.name.text);

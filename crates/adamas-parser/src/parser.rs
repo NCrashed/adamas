@@ -60,9 +60,9 @@ use adamas_core::source::Span;
 
 use crate::ast::{
     Alt, Binder, Binding, Block, Chain, ClassDecl, Clause, Constructor, Data, Decl, DeclKind,
-    EffectLabel, Expr, ExprKind, LamParam, LamParamKind, Lit, LitKind, Module, ModuleDecl, Mult,
-    MultAnn, Name, Pattern, PatternKind, RecordField, Resource, Stmt, StmtKind, Symbol, Visibility,
-    contains_block,
+    EffectDecl, EffectLabel, Expr, ExprKind, LamParam, LamParamKind, Lit, LitKind, Module,
+    ModuleDecl, Mult, MultAnn, Name, Operation, Pattern, PatternKind, RecordField, Resource, Stmt,
+    StmtKind, Symbol, Visibility, contains_block,
 };
 use crate::token::{Token, TokenKind};
 
@@ -464,7 +464,6 @@ impl<'a> Parser<'a> {
             TokenKind::When => Unsupported::Class,
             TokenKind::Using => Unsupported::NamedInstance,
             TokenKind::Import => Unsupported::Import,
-            TokenKind::Effect => Unsupported::Effect,
             TokenKind::Handle | TokenKind::HandleMulti | TokenKind::With => Unsupported::Handler,
             TokenKind::Infix | TokenKind::Infixl | TokenKind::Infixr => Unsupported::Fixity,
             TokenKind::LBrace => Unsupported::Braces,
@@ -549,6 +548,7 @@ impl<'a> Parser<'a> {
             // существующую.
             TokenKind::Unique => self.unique_data(),
             TokenKind::Resource => self.resource(),
+            TokenKind::Effect => self.effect_decl(),
             TokenKind::Type => self.alias(),
             TokenKind::Module => self.module_decl(),
             TokenKind::Class | TokenKind::Instance => self.class_decl(false),
@@ -727,6 +727,46 @@ impl<'a> Parser<'a> {
         let ty = self.expr()?;
         let span = name.span.merge(ty.span);
         Ok(Constructor { name, ty, span })
+    }
+
+    /// `effect Name param* where` и блок операций (§3.4).
+    ///
+    /// Формер не пишется: результат метки всегда `Effect`, и писать было бы
+    /// нечего. Пустой блок, как и у семейства, законен - производить такой
+    /// эффект нечем, но объявить его можно.
+    fn effect_decl(&mut self) -> Result<Decl, ParseError> {
+        let start = self.bump().span;
+        let name = self.ident()?;
+        let params = self.params()?;
+        let mut end = params.last().map_or(name.span, |last| last.span);
+        let mut operations = Vec::new();
+        if self.eat(TokenKind::Where).is_some() {
+            self.expect(TokenKind::Open)?;
+            loop {
+                operations.push(self.operation()?);
+                if self.eat(TokenKind::Sep).is_none() {
+                    break;
+                }
+            }
+            self.expect(TokenKind::Close)?;
+            end = operations.last().map_or(end, |last| last.span);
+        }
+        Ok(Decl {
+            kind: DeclKind::Effect(EffectDecl {
+                name,
+                params,
+                operations,
+            }),
+            span: start.merge(end),
+        })
+    }
+
+    fn operation(&mut self) -> Result<Operation, ParseError> {
+        let name = self.decl_name()?;
+        self.expect(TokenKind::Colon)?;
+        let ty = self.expr()?;
+        let span = name.span.merge(ty.span);
+        Ok(Operation { name, ty, span })
     }
 
     /// `resource Name param* where` и блок членов (§3.3).

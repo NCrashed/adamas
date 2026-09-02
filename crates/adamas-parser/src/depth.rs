@@ -376,6 +376,16 @@ fn decl_at<'a>(decl: &'a Decl, depth: u32, pending: &mut Pending<'a>) -> Result<
                     .map(|constructor| (Node::Expr(&constructor.ty), depth)),
             );
         }
+        DeclKind::Effect(effect) => {
+            binder_terms(&effect.params, depth, pending);
+            // Операции - соседи, и каждая начинает свой тип с нуля.
+            pending.extend(
+                effect
+                    .operations
+                    .iter()
+                    .map(|operation| (Node::Expr(&operation.ty), depth)),
+            );
+        }
         DeclKind::Resource(resource) => {
             binder_terms(&resource.params, depth, pending);
             pending.extend(

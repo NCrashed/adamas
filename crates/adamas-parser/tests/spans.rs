@@ -14,8 +14,8 @@
 
 use adamas_core::source::Span;
 use adamas_parser::ast::{
-    Binder, Binding, Block, Clause, Data, Decl, DeclKind, Expr, ExprKind, LamParamKind, Module,
-    Name, Pattern, PatternKind, Resource, Stmt, StmtKind,
+    Binder, Binding, Block, Clause, Data, Decl, DeclKind, EffectDecl, Expr, ExprKind, LamParamKind,
+    Module, Name, Pattern, PatternKind, Resource, Stmt, StmtKind,
 };
 use adamas_parser::parse;
 use proptest::prelude::*;
@@ -104,6 +104,7 @@ impl Spans<'_> {
             }
             DeclKind::Data(data) => self.data(at, data),
             DeclKind::Resource(resource) => self.resource(at, resource),
+            DeclKind::Effect(effect) => self.effect_decl(at, effect),
         }
     }
 
@@ -119,6 +120,18 @@ impl Spans<'_> {
             self.inside("конструктор", at, constructor.span);
             self.name(constructor.span, &constructor.name);
             self.expr(constructor.span, &constructor.ty);
+        }
+    }
+
+    fn effect_decl(&mut self, at: Span, effect: &EffectDecl) {
+        self.name(at, &effect.name);
+        for param in &effect.params {
+            self.binder(at, param);
+        }
+        for operation in &effect.operations {
+            self.inside("операция", at, operation.span);
+            self.name(operation.span, &operation.name);
+            self.expr(operation.span, &operation.ty);
         }
     }
 

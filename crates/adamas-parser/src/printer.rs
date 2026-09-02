@@ -50,9 +50,9 @@
 //! дереву значило бы держать второй экземпляр логики печати рядом с первым.
 
 use crate::ast::{
-    Alt, Binder, Binding, Block, Chain, Clause, Constructor, Data, Decl, DeclKind, Expr, ExprKind,
-    LamParam, LamParamKind, Lit, Module, ModuleDecl, Name, Pattern, PatternKind, Resource, Stmt,
-    StmtKind, Visibility, contains_block,
+    Alt, Binder, Binding, Block, Chain, Clause, Constructor, Data, Decl, DeclKind, EffectDecl,
+    Expr, ExprKind, LamParam, LamParamKind, Lit, Module, ModuleDecl, Name, Operation, Pattern,
+    PatternKind, Resource, Stmt, StmtKind, Visibility, contains_block,
 };
 use crate::lexer::is_operator;
 
@@ -249,6 +249,7 @@ impl Printer {
                 self.block_of(&class.members, Self::decl);
             }
             DeclKind::Resource(resource) => self.resource(resource),
+            DeclKind::Effect(effect) => self.effect_decl(effect),
         }
     }
 
@@ -331,6 +332,27 @@ impl Printer {
         self.decl_name(&constructor.name);
         self.push(" : ");
         self.expr(&constructor.ty, Prec::Lowest);
+    }
+
+    fn effect_decl(&mut self, effect: &EffectDecl) {
+        self.push("effect ");
+        self.decl_name(&effect.name);
+        for param in &effect.params {
+            self.push(" ");
+            self.binder(param);
+        }
+        // Без операций `where` не пишется - по той же причине, что у семейства
+        // без конструкторов: пустого блока layout не делает.
+        if !effect.operations.is_empty() {
+            self.push(" where");
+            self.block_of(&effect.operations, Self::operation);
+        }
+    }
+
+    fn operation(&mut self, operation: &Operation) {
+        self.decl_name(&operation.name);
+        self.push(" : ");
+        self.expr(&operation.ty, Prec::Lowest);
     }
 
     fn resource(&mut self, resource: &Resource) {

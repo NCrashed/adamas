@@ -355,6 +355,7 @@ pub fn compile_traced(
     let mut compiler = Compiler {
         signature,
         metas,
+        base: 0,
         used: vec![false; clauses.len()],
     };
     let tree = compiler.solve(&ctx, &columns, &rows, &target, &example)?;
@@ -377,6 +378,79 @@ pub fn compile_traced(
                 tree.map(|body| Term::Lam(mult, name, Rc::new(body)))
                     .under(Frame::Body)
             });
+    Ok(Compiled {
+        term: tree.term,
+        clauses: tree.sites,
+    })
+}
+
+/// Разбор по связыванию, уже стоящему в контексте, - `case` выражением (§4.1).
+///
+/// Отличается от [`compile_traced`] тем, что колонка одна, стоит она в
+/// переданном контексте, и лямбд вокруг дерева нет: тела ветвей живут под тем
+/// же контекстом, что и сам разбор.
+///
+/// Поднимать контекст в аргументы, как делала первая форма, значит применять
+/// разбор к нему целиком, а применение расходует **всякое** `1`-связывание -
+/// включая те, которых ни одна ветвь не называет. Отсюда и четыре расхождения
+/// с §3.3 и §4.7, разобранные в §10 вопросе 82.
+///
+/// # Errors
+///
+/// То же, что у [`compile_traced`], плюс `ClauseArity`, если в клаузе не ровно
+/// один паттерн.
+pub fn compile_case(
+    ctx: &Ctx<'_>,
+    metas: &mut Metas,
+    scrutinee: Lvl,
+    target: &Term,
+    clauses: &[Clause],
+) -> Result<Compiled, PatternError> {
+    let base = ctx.size();
+    let Lvl(level) = scrutinee;
+    let ty = Rc::clone(&binding(ctx, level).ty);
+    let mut rows = Vec::with_capacity(clauses.len());
+    for (index, clause) in clauses.iter().enumerate() {
+        if clause.patterns.len() != 1 {
+            return Err(PatternError::ClauseArity {
+                clause: index,
+                expected: 1,
+                found: clause.patterns.len(),
+            });
+        }
+        let mut variables = 0;
+        let patterns = clause
+            .patterns
+            .iter()
+            .map(|pattern| number(pattern, &mut variables))
+            .collect();
+        // Связывания контекста телу законны: оно и написано под ними.
+        if !well_scoped(&clause.body, base + arity_u32(variables)) {
+            return Err(PatternError::UnboundInBody { clause: index });
+        }
+        rows.push(Row {
+            clause: index,
+            patterns,
+            assigned: vec![None; variables],
+            body: Rc::new(clause.body.clone()),
+        });
+    }
+    let columns = vec![Column {
+        value: Value::var(scrutinee),
+        path: vec![0],
+        ty,
+    }];
+    let example = vec![Pattern::Var("_".into())];
+    let mut compiler = Compiler {
+        signature: ctx.signature(),
+        metas,
+        base,
+        used: vec![false; clauses.len()],
+    };
+    let tree = compiler.solve(ctx, &columns, &rows, target, &example)?;
+    if let Some(clause) = compiler.used.iter().position(|used| !used) {
+        return Err(PatternError::UnreachableClause { clause });
+    }
     Ok(Compiled {
         term: tree.term,
         clauses: tree.sites,
@@ -598,6 +672,13 @@ struct Compiler<'a> {
     /// Нужны для уровня универсума цели: мотив, различающий индексы, пишет
     /// `Type ℓ` руками, а `ℓ` спрашивают у проверки типов.
     metas: &'a mut Metas,
+    /// Сколько связываний контекста стоит **до** колонок.
+    ///
+    /// У клауз ноль: тело живёт под одними аргументами. У `case` выражением -
+    /// размер контекста, в котором он написан: тело ветви законно называет
+    /// всё, что там связано, и переписывать эти переменные значениями колонок
+    /// нельзя - они не колонки.
+    base: u32,
     used: Vec<bool>,
 }
 
@@ -664,8 +745,16 @@ impl Compiler<'_> {
         }
         let bound = arity_u32(assigned.len());
         let size = ctx.size();
-        let body = rewrite(&row.body, 0, bound, &|variable| {
-            let value = assigned[variable as usize]
+        // Свободные переменные тела нумеруются одним рядом: сперва связывания
+        // контекста, потом переменные клаузы. Первые остаются собой - меняется
+        // только глубина, на которой они стоят, - вторые заменяются значениями
+        // колонок.
+        let base = self.base;
+        let body = rewrite(&row.body, 0, base + bound, &|level| {
+            if level < base {
+                return Term::Var(Lvl(level).to_index(size));
+            }
+            let value = assigned[(level - base) as usize]
                 .as_ref()
                 .unwrap_or_else(|| unreachable!("переменная клаузы осталась несвязанной"));
             quote(size, value)

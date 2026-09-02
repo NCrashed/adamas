@@ -51,7 +51,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::carrier;
-use crate::conv::{convertible, whnf};
+use crate::conv::{convertible, whnf_solved};
 use crate::ctx::{Ctx, Usage};
 use crate::error::refuse;
 pub use crate::error::{Binding, ErrorKind, Frame, TypeError};
@@ -263,9 +263,13 @@ pub fn check(
         // - тип функции, и `\x -> x : Fn` обязано проходить. Разворот стоит
         //   здесь, а не в начале `check`, чтобы не платить за него на каждом
         //   терме: форма ожидаемого типа значима только для лямбды.
-        (Term::Lam(..), _) => {
-            check_lambda(ctx, metas, sigma, term, &whnf(ctx.signature(), expected))
-        }
+        (Term::Lam(..), _) => check_lambda(
+            ctx,
+            metas,
+            sigma,
+            term,
+            &whnf_solved(ctx.signature(), metas, expected),
+        ),
 
         // Значение записи против написанного типа: только здесь видна
         // зависимость - тип поля живёт под предыдущими, и подставляются в него
@@ -275,9 +279,13 @@ pub fn check(
         // имплисита), уходит общим путём: синтез даёт независимый тип, а
         // сравнение его же и решает. Зависимость там взяться неоткуда - её
         // несёт написанный тип, которого в этом случае нет.
-        (Term::Object(fields), _) if is_record(ctx, expected) => {
-            check_object(ctx, metas, sigma, fields, &whnf(ctx.signature(), expected))
-        }
+        (Term::Object(fields), _) if is_record(ctx, metas, expected) => check_object(
+            ctx,
+            metas,
+            sigma,
+            fields,
+            &whnf_solved(ctx.signature(), metas, expected),
+        ),
 
         (Term::Let(mult, name, ty, value, body), _) => {
             let described = LetBinding {
@@ -367,7 +375,7 @@ pub fn is_type(ctx: &Ctx<'_>, metas: &mut Metas, term: &Term) -> Result<Level, T
     let (ty, _) = infer(ctx, metas, Mult::Zero, term)?;
     // Универсум ищут в развёрнутой голове: у `def Sort2 = Type 2` голова своя,
     // и без разворота `T : Sort2` не годилось бы как тип вовсе.
-    let ty = whnf(ctx.signature(), &ty);
+    let ty = whnf_solved(ctx.signature(), metas, &ty);
     match &*ty {
         Value::Universe(level) => Ok(level.clone()),
         // Нерешённая дырка в позиции типа - не отказ, а ограничение: «чем бы
@@ -1208,7 +1216,7 @@ fn infer_app(
     // Форму типа спрашивают у развёрнутой головы: `def Fn = Nat -> Nat` -
     // такой же тип функции, как записанная стрелка, и `f : Fn` обязана
     // применяться.
-    let callee_ty = whnf(ctx.signature(), &callee_ty);
+    let callee_ty = whnf_solved(ctx.signature(), metas, &callee_ty);
     let Value::Pi(Binder { mult, .. }, _, domain, _, codomain) = &*callee_ty else {
         return Err(refuse(
             ctx,
@@ -1230,9 +1238,12 @@ fn infer_app(
     Ok((result, callee_usage + &argument_usage.scale(*mult)))
 }
 
-/// Стал ли ожидаемый тип записью - после разворота головы.
-fn is_record(ctx: &Ctx<'_>, expected: &Rc<Value>) -> bool {
-    matches!(&*whnf(ctx.signature(), expected), Value::Record(_))
+/// Стал ли ожидаемый тип записью - после разворота головы и решённых дырок.
+fn is_record(ctx: &Ctx<'_>, metas: &Metas, expected: &Rc<Value>) -> bool {
+    matches!(
+        &*whnf_solved(ctx.signature(), metas, expected),
+        Value::Record(_)
+    )
 }
 
 /// Отвергает написанное поле, имя которого уже занято.
@@ -1387,7 +1398,7 @@ fn infer_fields(
     let mut level = Level::Zero;
     if let Some(tail) = &fields.tail {
         let (kind, _) = framed(infer(ctx, metas, Mult::Zero, tail), Frame::Stated)?;
-        let Value::RowKind(found) = &*whnf(ctx.signature(), &kind) else {
+        let Value::RowKind(found) = &*whnf_solved(ctx.signature(), metas, &kind) else {
             return Err(refuse(
                 ctx,
                 metas,
@@ -1460,7 +1471,7 @@ fn infer_with(
     fields: &[(Name, Rc<Term>)],
 ) -> Result<(Rc<Value>, Usage), TypeError> {
     let (ty, mut usage) = framed(infer(ctx, metas, sigma, base), Frame::Scrutinee)?;
-    let ty = whnf(ctx.signature(), &ty);
+    let ty = whnf_solved(ctx.signature(), metas, &ty);
     let Value::Record(telescope) = &*ty else {
         return Err(refuse(
             ctx,
@@ -1572,7 +1583,7 @@ fn infer_project(
     name: &Name,
 ) -> Result<(Rc<Value>, Usage), TypeError> {
     let (ty, usage) = framed(infer(ctx, metas, sigma, record), Frame::Scrutinee)?;
-    let ty = whnf(ctx.signature(), &ty);
+    let ty = whnf_solved(ctx.signature(), metas, &ty);
     let Value::Record(telescope) = &*ty else {
         return Err(refuse(
             ctx,
@@ -1750,7 +1761,7 @@ fn data_arguments(
     case: &Case,
     ty: &Rc<Value>,
 ) -> Option<Vec<Rc<Value>>> {
-    let reduced = whnf(signature, ty);
+    let reduced = whnf_solved(signature, metas, ty);
     let Value::Neutral(Head::Global(name, levels), spine) = &*reduced else {
         return None;
     };

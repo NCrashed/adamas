@@ -1772,6 +1772,36 @@ fn a_record_declares_its_fields_or_assigns_them() {
 }
 
 #[test]
+fn a_type_that_is_a_solved_hole_keeps_its_shape() {
+    // Решённая дырка и есть своё решение, и всякий, кто смотрит на форму типа,
+    // обязан видеть его, а не `?m`. Приведение к головной форме разворачивало
+    // только глобальное имя, поэтому результат `identity` не был ни функцией,
+    // ни записью: `(identity plus1) Zero` отвечало «ожидалась функция, получено
+    // значение типа `(ω _ : Nat) -> Nat`» - печатая ровно ту форму, отсутствие
+    // которой объявляло.
+    program(&format!(
+        "{BASE}
+type Rec = {{ x : Nat }}
+
+identity : a -> a
+identity v = v
+
+plus1 : Nat -> Nat
+plus1 n = Succ n
+
+r : Rec
+r = {{ x = Zero }}
+
+applied : Nat
+applied = (identity plus1) Zero
+
+projected : Nat
+projected = (identity r).x
+"
+    ));
+}
+
+#[test]
 fn a_dependent_record_is_closed() {
     // §4.2: зависимость закрывает запись, и auto-lift обязан это видеть.
     // Раздавая row-переменную всякой записи без написанного хвоста, он

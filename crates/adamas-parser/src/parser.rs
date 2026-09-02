@@ -1819,6 +1819,10 @@ impl<'a> Parser<'a> {
         let opening = self.peek();
         let multi = opening.kind == TokenKind::HandleMulti;
         let start = self.bump().span;
+        let label = match self.eat(TokenKind::At) {
+            Some(_) => Some(Box::new(self.handled_label()?)),
+            None => None,
+        };
         let computation = self.expr()?;
         if contains_block(&computation) {
             return Err(self.block_not_last(&computation));
@@ -1837,10 +1841,36 @@ impl<'a> Parser<'a> {
         Ok(Expr {
             kind: ExprKind::Handle {
                 multi,
+                label,
                 computation: Box::new(computation),
                 branches,
             },
             span: start.merge(end),
+        })
+    }
+
+    /// Метка за `@`: `@Yield` либо `@(Yield a)`.
+    ///
+    /// Скобки нужны только аргументам: без них метка была бы неотличима от
+    /// вычисления, которое идёт следом.
+    fn handled_label(&mut self) -> Result<EffectLabel, ParseError> {
+        let open = self.eat(TokenKind::LParen);
+        let name = self.ident()?;
+        let mut arguments = Vec::new();
+        if open.is_some() {
+            while starts_atom(self.kind()) {
+                arguments.push(self.atom()?);
+            }
+        }
+        let written = name.span;
+        let end = match open {
+            Some(_) => self.expect(TokenKind::RParen)?.span,
+            None => written,
+        };
+        Ok(EffectLabel {
+            name,
+            arguments,
+            span: open.map_or(written, |open| open.span).merge(end),
         })
     }
 

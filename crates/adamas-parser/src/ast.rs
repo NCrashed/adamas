@@ -232,12 +232,19 @@ pub enum ExprKind {
     /// Хендлер: `handle e with …` (§3.4).
     ///
     /// Формой ядра не является: объявление эффекта заводит константу-элиминатор,
-    /// а эта запись есть её применение. Метка не пишется - её называют ветки,
-    /// каждая операция принадлежит ровно одному эффекту.
+    /// а эта запись есть её применение.
     Handle {
         /// Мультишотный ли: `handleMulti`. Различает он кратность резумпции -
         /// `ω` вместо `1`, - и больше ничего.
         multi: bool,
+        /// Метка, если написана: `handle @(Yield a) prod with …` (§4.1).
+        ///
+        /// Не написана - её называют ветки, каждая операция принадлежит ровно
+        /// одному эффекту, и снимается первое вхождение. Написана - её
+        /// аргументы выбирают, какое именно вхождение снять; нужно это там,
+        /// где одноимённых меток в row несколько.
+        /// В `Box` - иначе узел раздувает `Expr`, а с ним и всякое связывание.
+        label: Option<Box<EffectLabel>>,
         /// Вычисление под хендлером.
         computation: Box<Expr>,
         /// Ветки в порядке написания. Порядок значения не имеет:
@@ -860,8 +867,23 @@ fn dump_effect(out: &mut String, effect: &EffectDecl, depth: usize) {
 }
 
 /// Хендлер: вычисление и ветки соседями.
-fn dump_handler(out: &mut String, multi: bool, computation: &Expr, branches: &[HandlerBranch]) {
+fn dump_handler(
+    out: &mut String,
+    multi: bool,
+    label: Option<&EffectLabel>,
+    computation: &Expr,
+    branches: &[HandlerBranch],
+) {
     out.push_str(if multi { "(handleMulti " } else { "(handle " });
+    if let Some(label) = label {
+        out.push_str("(at ");
+        out.push_str(&label.name.text);
+        for argument in &label.arguments {
+            out.push(' ');
+            dump_expr(out, argument);
+        }
+        out.push_str(") ");
+    }
     dump_expr(out, computation);
     for branch in branches {
         out.push_str(" (on ");
@@ -1127,9 +1149,10 @@ fn dump_expr(out: &mut String, expr: &Expr) {
         }
         ExprKind::Handle {
             multi,
+            label,
             computation,
             branches,
-        } => dump_handler(out, *multi, computation, branches),
+        } => dump_handler(out, *multi, label.as_deref(), computation, branches),
         ExprKind::Case { scrutinee, alts } => {
             out.push_str("(case ");
             dump_expr(out, scrutinee);

@@ -51,8 +51,8 @@
 
 use crate::ast::{
     Alt, Binder, Binding, Block, Chain, Clause, Constructor, Data, Decl, DeclKind, EffectDecl,
-    Expr, ExprKind, HandlerBranch, LamParam, LamParamKind, Lit, Module, ModuleDecl, Name,
-    Operation, Pattern, PatternKind, Resource, Stmt, StmtKind, Visibility, contains_block,
+    EffectLabel, Expr, ExprKind, HandlerBranch, LamParam, LamParamKind, Lit, Module, ModuleDecl,
+    Name, Operation, Pattern, PatternKind, Resource, Stmt, StmtKind, Visibility, contains_block,
 };
 use crate::lexer::is_operator;
 
@@ -520,9 +520,10 @@ impl Printer {
             } => self.conditional(cond, then_branch, else_branch),
             ExprKind::Handle {
                 multi,
+                label,
                 computation,
                 branches,
-            } => self.handler(*multi, computation, branches),
+            } => self.handler(*multi, label.as_deref(), computation, branches),
             ExprKind::Case { scrutinee, alts } => {
                 self.push("case ");
                 self.expr(scrutinee, Prec::Chain);
@@ -547,8 +548,30 @@ impl Printer {
         }
     }
 
-    fn handler(&mut self, multi: bool, computation: &Expr, branches: &[HandlerBranch]) {
+    fn handler(
+        &mut self,
+        multi: bool,
+        label: Option<&EffectLabel>,
+        computation: &Expr,
+        branches: &[HandlerBranch],
+    ) {
         self.push(if multi { "handleMulti " } else { "handle " });
+        if let Some(label) = label {
+            self.push("@");
+            let parens = !label.arguments.is_empty();
+            if parens {
+                self.push("(");
+            }
+            self.push(&label.name.text);
+            for argument in &label.arguments {
+                self.push(" ");
+                self.expr(argument, Prec::Atom);
+            }
+            if parens {
+                self.push(")");
+            }
+            self.push(" ");
+        }
         self.expr(computation, Prec::Chain);
         self.push(" with");
         self.block_of(branches, Self::handler_branch);

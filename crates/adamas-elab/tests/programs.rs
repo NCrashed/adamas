@@ -4647,6 +4647,74 @@ effect Both a b where
 }
 
 #[test]
+fn a_computation_is_run_or_passed_by_the_expected_type() {
+    // §3.4: одна и та же запись означает «передать вычисление» и «выполнить
+    // его», а различает их ожидаемый тип. Проверяются все три позиции, где
+    // написанный тип элаборации известен: тело клаузы, аргумент применения,
+    // аннотация `let`.
+    let head = format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+effect State s where
+  get : s
+"
+    );
+    program(&format!(
+        "{head}
+-- Ожидается `Bool` - исполняется.
+peek : Bool -> {{State Bool}} Bool
+peek b = get
+
+-- Ожидается вычисление - передаётся как есть.
+runState : Bool -> ({{State Bool}} Bool) -> Bool
+
+passed : Bool -> Bool
+passed b = runState b get
+
+-- Аннотация решает то же самое.
+bound : Bool -> {{State Bool}} Bool
+bound b =
+  let n : Bool = get
+  n
+"
+    ));
+    // Исполнение обязано гаситься окружающей - отдельного послабления у него
+    // нет. Без правила отказ был бы про несовпадение типов, а он про эффекты.
+    let error = refused(&format!(
+        "{head}
+peek : Bool -> Bool
+peek b = get
+"
+    ));
+    assert!(
+        error.to_string().contains("не погашены"),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn any_function_from_unit_is_a_computation() {
+    // Названная цена сахара: `{ε} A` есть `(ω _ : Unit) -> ε ▷ A`, то есть
+    // собственного типа у вычисления нет. Значит и всякая написанная руками
+    // функция от единицы исполняется по тому же правилу - различить их нечем,
+    // и заводить различие значило бы заводить второй тип.
+    program(&format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+mk : Unit -> Bool
+mk u = True
+
+got : Bool
+got = mk
+"
+    ));
+}
+
+#[test]
 fn an_operation_without_arrows_is_a_computation() {
     // `get : s` есть `{State s} s`, то есть приостановленное вычисление
     // (§3.4). Отдельного случая для него нет: та же дописанная row, просто

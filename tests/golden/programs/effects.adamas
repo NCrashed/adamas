@@ -73,3 +73,22 @@ carried f b = f (flip b)
 -- встретилось.
 named : Bool -> {State Bool | e} Unit
 named b = step b
+
+-- Исполнение по ожидаемому типу. Одна и та же запись означает «передать
+-- вычисление» и «выполнить его», а различает их тип, которого ждут: против
+-- `Bool` операция исполняется, против типа вычисления - передаётся.
+peek : Bool -> {State Bool} Bool
+peek b = get
+
+-- Аннотация `let` решает то же самое.
+bound : Bool -> {State Bool} Bool
+bound b =
+  let n : Bool = get
+  n
+
+-- Домен - тип вычисления, поэтому `get` уезжает невыполненным. Выполнит его
+-- хендлер, которого ещё нет.
+runState : Bool -> ({State Bool} Bool) -> Bool
+
+passed : Bool -> Bool
+passed b = runState b get

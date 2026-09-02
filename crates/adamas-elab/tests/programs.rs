@@ -5301,6 +5301,56 @@ run = handle True with
 }
 
 #[test]
+fn a_callback_with_fewer_effects_is_passed_as_is() {
+    // §3.4 разводит равенство и унификацию: второе сопоставляет метки по имени,
+    // а **остаток уходит в хвостовую метапеременную**. Реализовано было первое,
+    // и решатель хвоста писал решение всегда без меток - поэтому `withLog
+    // pure1` отвергалось, хотя решение `?m := {Log | e}` единственно. Обходилось
+    // η-развёрткой, то есть higher-order-передача, которую §3.4 приводит
+    // мотивом правила погашения, не писалась.
+    let base = "\
+data Bool where
+  True : Bool
+
+data Unit where
+  MkUnit : Unit
+
+effect Log where
+  note : Bool -> Unit
+
+effect Tick where
+  tick : Unit
+
+withLog : (Bool -> {Log} Bool) -> {Log} Bool
+withLog f = f True
+";
+    program(&format!(
+        "{base}
+pure1 : Bool -> Bool
+pure1 b = b
+
+got : {{Log}} Bool
+got u = withLog pure1
+"
+    ));
+    // Направление одностороннее: у колбэка, производящего **своё**, остаток
+    // непуст с обеих сторон, и это §10 вопрос 80 - отказ, а не догадка.
+    let error = refused(&format!(
+        "{base}
+noisy : Bool -> {{Tick}} Bool
+noisy b = b
+
+got : {{Log}} Bool
+got u = withLog noisy
+"
+    ));
+    assert!(
+        matches!(error, ElabError::Core { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
 fn a_branch_works_in_the_ambient_of_its_handle() {
     // §3.4: «собственные эффекты веток гасятся окружающей по тому же правилу
     // расширения», и окружающая тела ветки - окружающая **применения**

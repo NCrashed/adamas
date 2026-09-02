@@ -46,7 +46,7 @@ use std::rc::Rc;
 use crate::eval::{apply, quote, try_apply, try_eliminate_case};
 use crate::meta::Metas;
 use crate::mult::Mult;
-use crate::row::Row;
+use crate::row::{Label, Row, Tail};
 use crate::sig::Signature;
 use crate::solve::{force, solve};
 use crate::term::{Field, Fields, Name, Term};
@@ -478,6 +478,27 @@ fn solved(
     convertible_within(fuel, sig, metas, size, tail, &expected)
 }
 
+/// Row значения с подставленным решением хвоста.
+///
+/// Нужна с тех пор, как решением хвоста стала row **с метками** (§3.4,
+/// унификация scoped labels). `Metas::zonk_tail` такое решение не
+/// разворачивает и не может: его тип - один хвост, а решение с метками хвостом
+/// не выражается. Пока метки в решения не попадали, разницы не было; теперь
+/// сравнение, взявшее row неразвёрнутой, сравнивало бы устаревшую.
+///
+/// Аргументы решения - термы, прочитанные при том же `size`, поэтому и
+/// вычисляются они под тем же окружением.
+pub(crate) fn expanded(metas: &Metas, size: u32, row: &Row<Rc<Value>>) -> Row<Rc<Value>> {
+    let Some(Tail::Meta(meta)) = row.tail() else {
+        return row.clone();
+    };
+    let Some(solution) = metas.row_solution(meta) else {
+        return row.clone();
+    };
+    let solution = solution.map(|term| crate::eval::eval(&fresh_env(size), term));
+    row.substituted(&expanded(metas, size, &solution))
+}
+
 /// Окружение из `size` свободных переменных - под ним читаются ряды.
 fn fresh_env(size: u32) -> crate::value::Env {
     (0..size).fold(crate::value::Env::default(), |env, level| {
@@ -526,12 +547,25 @@ fn same_head(
     }
 }
 
-/// Равны ли две row: формы совпадают, хвосты сводятся, аргументы меток
-/// конвертируемы.
+/// Равны ли две row - унификацией scoped labels (§3.4).
 ///
-/// Хвосты именно **сводятся**, а не сравниваются: после auto-lift у каждой
-/// сигнатуры своя дырка, и два употребления одного имени пришли бы с разными.
-/// Решать их - работа унификации, и это ровно scoped labels §3.4.
+/// §3.4 разводит два действия, и здесь делается второе. Равенство - совпадение
+/// хвостов и групп. **Унификация** - метки сопоставляются по имени, аргументы
+/// унифицируются как обычные термы, а **остаток уходит в хвостовую
+/// метапеременную**; отсутствие хвоста при непустом остатке даёт отказ.
+///
+/// Пока остаток никуда не уходил, сравнение требовало совпадения числа меток,
+/// и `withLog pure1` при `withLog : (Bool -> {Log} Bool) -> …` отвергалось:
+/// у чистого колбэка row после auto-lift есть дырка, решение `?m := {Log | e}`
+/// единственно, а найти его было нечем. Обходилась дыра η-развёрткой
+/// `\b -> pure1 b`, то есть higher-order-передача - та самая, которую §3.4
+/// приводит мотивом правила погашения, - не писалась.
+///
+/// **Порядок: сначала форма, потом хвост.** Решение хвоста не откатывается, и
+/// записанное до сравнения меток пережило бы неудачу этого сравнения.
+///
+/// Одноимённые метки сопоставляются попарно в порядке появления: порядок
+/// внутри группы значим (§3.4), и лишние в конце группы и есть остаток.
 fn same_row(
     fuel: u32,
     sig: &Signature,
@@ -540,18 +574,76 @@ fn same_row(
     left: &Row<Rc<Value>>,
     right: &Row<Rc<Value>>,
 ) -> bool {
-    if !metas.unify_tails(left.tail(), right.tail()) {
-        return false;
+    let (left, right) = (&expanded(metas, size, left), &expanded(metas, size, right));
+    let mut ours: Vec<&Label<Rc<Value>>> = Vec::new();
+    let mut theirs: Vec<&Label<Rc<Value>>> = Vec::new();
+    let mut names: Vec<&Name> = Vec::new();
+    for label in left.labels().iter().chain(right.labels()) {
+        if !names.contains(&&label.name) {
+            names.push(&label.name);
+        }
     }
-    left.labels().len() == right.labels().len()
-        && left
+    for name in names {
+        let mine: Vec<&Label<Rc<Value>>> =
+            left.labels().iter().filter(|it| it.name == *name).collect();
+        let yours: Vec<&Label<Rc<Value>>> = right
             .labels()
             .iter()
-            .zip(right.labels())
-            .all(|(a, b)| a.name == b.name && a.arguments.len() == b.arguments.len())
-        && left
-            .zip(right)
-            .all(|(a, b)| convertible_within(fuel, sig, metas, size, a, b))
+            .filter(|it| it.name == *name)
+            .collect();
+        let common = mine.len().min(yours.len());
+        for (a, b) in mine.iter().zip(&yours).take(common) {
+            if a.arguments.len() != b.arguments.len() {
+                return false;
+            }
+            for (x, y) in a.arguments.iter().zip(&b.arguments) {
+                if !convertible_within(fuel, sig, metas, size, x, y) {
+                    return false;
+                }
+            }
+        }
+        ours.extend(mine.into_iter().skip(common));
+        theirs.extend(yours.into_iter().skip(common));
+    }
+
+    // Обе разности непусты - остаток не выражается ни через один хвост, и это
+    // §10 вопрос 80: отказ, а не догадка.
+    if !ours.is_empty() && !theirs.is_empty() {
+        return false;
+    }
+    let quoted = |labels: &[&Label<Rc<Value>>]| -> Vec<Label<Term>> {
+        labels
+            .iter()
+            .map(|label| Label {
+                name: Rc::clone(&label.name),
+                arguments: label
+                    .arguments
+                    .iter()
+                    .map(|argument| quote(size, argument))
+                    .collect(),
+            })
+            .collect()
+    };
+    if ours.is_empty() && theirs.is_empty() {
+        return metas.unify_tails(left.tail(), right.tail());
+    }
+    // Остаток одной стороны обязан уйти в хвост другой. Хвост этот обязан быть
+    // дыркой: жёсткая переменная лишних меток не примет, а отсутствие хвоста -
+    // тем более.
+    let (rest, absorbing, keeping) = if theirs.is_empty() {
+        (quoted(&ours), right.tail(), left.tail())
+    } else {
+        (quoted(&theirs), left.tail(), right.tail())
+    };
+    let Some(Tail::Meta(meta)) = metas.zonk_tail(absorbing) else {
+        return false;
+    };
+    // `?m := {остаток | ?m}` не строится: решение содержало бы саму дырку.
+    if metas.zonk_tail(keeping) == Some(Tail::Meta(meta)) {
+        return false;
+    }
+    metas.solve_row(meta, Row::closing(rest, keeping));
+    true
 }
 
 /// Совпадают ли элиминаторы в одной позиции спайна.

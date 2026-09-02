@@ -4875,3 +4875,50 @@ pure b = step b
         "получено {error:?}"
     );
 }
+
+#[test]
+fn an_effect_declares_its_eliminators() {
+    // §3.4: `handle e with …` есть применение константы, а не узел ядра.
+    // Объявление заводит две - одношотную и мультишотную, - и различает их
+    // только кратность резумпции.
+    let signature = program(&format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+effect State s where
+  get : s
+  put : s -> Unit
+"
+    ));
+    for name in ["#handle.State", "#handleMulti.State"] {
+        let handler = signature.lookup(name).expect("элиминатор объявлен");
+        // Один параметр-row - та самая ρ, глубина хендлера.
+        assert_eq!(handler.row_arity, 1, "{name}");
+        // Связывания: параметр метки, `a`, `b`, вычисление, `return` и по
+        // ветке на операцию.
+        assert_eq!(binders(&handler.ty), 1 + 2 + 1 + 1 + 2, "{name}");
+        // Постулат: развернуть его нечем, пока evidence не подставлен.
+        assert!(handler.body.is_none(), "{name}");
+    }
+    // Резумпция аффинна у `handle` и неограниченна у `handleMulti` - это и
+    // есть single-shot против multi-shot (§3.3).
+    let one = &signature.lookup("#handle.State").expect("объявлен").ty;
+    let many = &signature.lookup("#handleMulti.State").expect("объявлен").ty;
+    assert_ne!(one.to_string(), many.to_string());
+    assert_eq!(
+        one.to_string().replace("(1 resume", "(ω resume"),
+        many.to_string()
+    );
+}
+
+/// Сколько связываний у спайна типа.
+fn binders(ty: &Term) -> usize {
+    let mut found = 0;
+    let mut current = ty;
+    while let Term::Pi(_, _, _, _, codomain) = current {
+        found += 1;
+        current = codomain;
+    }
+    found
+}

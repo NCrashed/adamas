@@ -737,6 +737,63 @@ pub fn unsolved_term_meta(metas: &Metas, term: &Term) -> Option<TermMeta> {
     }
 }
 
+/// Первая нерешённая метапеременная **row**, если она есть.
+///
+/// Третий сорт, и довод у него тот же, что у двух первых: дырка, дожившая до
+/// сигнатуры, зависит от хранилища, которого за границей группы уже нет.
+/// Разница в том, чем это кончается. Уровневая и термовая ловились отказом, а
+/// row-дырки не искал никто, и она уезжала в сохранённый тип живой: `{State
+/// Bool | e}` в типе члена класса роняло **компилятор** - не здесь, а позже, в
+/// объявлении метода-проекции, где зонканье бралось за неё после `release`.
+///
+/// Обходятся места, где row вообще стоит: хвост стрелки, аргументы её меток,
+/// список аргументов-row у ссылки на определение и оба вида телескопа.
+#[must_use]
+pub fn unsolved_row_meta(metas: &Metas, term: &Term) -> Option<RowMeta> {
+    let recur = |inner: &Rc<Term>| unsolved_row_meta(metas, inner);
+    let in_row = |row: &Row<Term>| {
+        row.labels()
+            .iter()
+            .flat_map(|label| &label.arguments)
+            .find_map(|argument| unsolved_row_meta(metas, argument))
+            .or_else(|| match row.tail() {
+                Some(Tail::Meta(meta)) if metas.row_solution(meta).is_none() => Some(meta),
+                _ => None,
+            })
+    };
+    match term {
+        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::EffectKind | Term::Meta(_) => {
+            None
+        }
+        // Аргументы-row ссылки: второй список арности, заведённый Фазой 4.
+        Term::Const(_, _, rows) => rows.as_slice().iter().find_map(in_row),
+        Term::Record(fields) | Term::Row(fields) => fields
+            .iter()
+            .find_map(|field| recur(&field.ty))
+            .or_else(|| fields.tail.as_ref().and_then(recur)),
+        Term::Object(fields) => fields.iter().find_map(|(_, value)| recur(value)),
+        Term::With(base, fields) => {
+            recur(base).or_else(|| fields.iter().find_map(|(_, value)| recur(value)))
+        }
+        Term::Project(record, _) => recur(record),
+        Term::Lam(_, _, body) => recur(body),
+        Term::App(callee, argument) => recur(callee).or_else(|| recur(argument)),
+        Term::Pi(_, _, domain, row, codomain) => recur(domain)
+            .or_else(|| recur(codomain))
+            .or_else(|| in_row(row)),
+        Term::Let(_, _, ty, value, body) => {
+            recur(ty).or_else(|| recur(value)).or_else(|| recur(body))
+        }
+        Term::Case(case) => recur(&case.scrutinee)
+            .or_else(|| recur(&case.motive))
+            .or_else(|| {
+                case.branches
+                    .iter()
+                    .find_map(|branch| unsolved_row_meta(metas, &branch.body))
+            }),
+    }
+}
+
 /// Первая нерешённая метапеременная уровня в терме, если она есть.
 ///
 /// Определение, в котором после проверки осталась дырка, неоднозначно: ничто в

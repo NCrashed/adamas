@@ -1084,6 +1084,16 @@ impl Signature {
             }
             .into());
         }
+        // Третий сорт. Пропущенный, он давал не неверную программу, а падение:
+        // дырка уезжала в сохранённый тип живой, а бралось за неё зонканье
+        // следующей группы - уже после `release`, вне живого диапазона.
+        if let Some(meta) = crate::check::unsolved_row_in_definition(metas, &definition) {
+            return Err(ErrorKind::UnsolvedDefinitionRow {
+                name: Rc::clone(name),
+                meta,
+            }
+            .into());
+        }
 
         self.definitions.insert(Rc::clone(name), definition);
         Ok(())

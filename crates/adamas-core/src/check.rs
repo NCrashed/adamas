@@ -572,6 +572,22 @@ pub fn unsolved_term_in_definition(
     })
 }
 
+/// Первая нерешённая метапеременная row в объявлении, если она есть.
+///
+/// Третий сорт рядом с термовым и уровневым; довод и место те же.
+#[must_use]
+pub fn unsolved_row_in_definition(
+    metas: &Metas,
+    definition: &Definition,
+) -> Option<crate::row::RowMeta> {
+    crate::meta::unsolved_row_meta(metas, &definition.ty).or_else(|| {
+        definition
+            .body
+            .as_ref()
+            .and_then(|body| crate::meta::unsolved_row_meta(metas, body))
+    })
+}
+
 /// Проверяет объявление - всё, что можно проверить без тела.
 ///
 /// Идёт против сигнатуры **без** собственного имени: тип, ссылающийся на

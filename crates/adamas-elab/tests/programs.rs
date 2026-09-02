@@ -4564,6 +4564,59 @@ apart : Bool -> Bool -> {{State Bool | e}} Bool
 }
 
 #[test]
+fn a_row_hole_does_not_outlive_its_declaration() {
+    // Дырка, дожившая до сигнатуры, зависит от хранилища, которого за границей
+    // группы уже нет. Для уровня и терма это отказ с Фазы 2, для row сорт
+    // добавлен Фазой 4, а отказа к нему не завели - и дырка уезжала в
+    // сохранённый тип **живой**, роняя компилятор позже, в чужой группе, где
+    // зонканье бралось за неё после `release`.
+    //
+    // Написанный хвост в типе члена класса связать сегодня нечем: типы членов
+    // не идут через `declared_type`, поэтому ни свободные имена, ни хвосты там
+    // не поднимаются. Тест закрепляет **ворота**, а не желаемое поведение:
+    // отказ по месту вместо падения в другом объявлении.
+    let error = refused(
+        "\
+data Bool where
+  True : Bool
+
+data Unit where
+  MkUnit : Unit
+
+effect State s where
+  put : s -> Unit
+
+class Runner a where
+  run : a -> {State Bool | e} Bool
+",
+    );
+    assert!(
+        matches!(
+            error,
+            ElabError::Core { ref error, .. }
+                if matches!(error.kind, ErrorKind::UnsolvedDefinitionRow { .. })
+        ),
+        "получено {error:?}"
+    );
+    // Там, где хвост связывается, он по-прежнему работает.
+    program(
+        "\
+data Bool where
+  True : Bool
+
+data Unit where
+  MkUnit : Unit
+
+effect State s where
+  put : s -> Unit
+
+top : Bool -> {State Bool | e} Unit
+top b = put b
+",
+    );
+}
+
+#[test]
 fn an_effect_declares_a_label_and_its_operations() {
     // §3.4: `effect` устроен как data-объявление - формер плюс члены, чьи типы
     // обязаны упоминать формер в предписанной позиции. Позиция эта row, а не

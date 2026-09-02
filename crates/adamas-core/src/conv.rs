@@ -46,6 +46,7 @@ use std::rc::Rc;
 use crate::eval::{apply, quote, try_apply, try_eliminate_case};
 use crate::meta::Metas;
 use crate::mult::Mult;
+use crate::row::Row;
 use crate::sig::Signature;
 use crate::solve::{force, solve};
 use crate::term::{Field, Fields, Name, Term};
@@ -516,14 +517,41 @@ fn same_head(
                 // атом row есть метка, несущая термы, поэтому равенство row
                 // полно лишь с точностью до конвертируемости (§3.2).
                 && rows_a.len() == rows_b.len()
-                && rows_a.iter().zip(rows_b.iter()).all(|(a, b)| {
-                    a.same_shape(b)
-                        && a.zip(b)
-                            .all(|(x, y)| convertible_within(fuel, sig, metas, size, x, y))
-                })
+                && rows_a
+                    .iter()
+                    .zip(rows_b.iter())
+                    .all(|(a, b)| same_row(fuel, sig, metas, size, a, b))
         }
         _ => false,
     }
+}
+
+/// Равны ли две row: формы совпадают, хвосты сводятся, аргументы меток
+/// конвертируемы.
+///
+/// Хвосты именно **сводятся**, а не сравниваются: после auto-lift у каждой
+/// сигнатуры своя дырка, и два употребления одного имени пришли бы с разными.
+/// Решать их - работа унификации, и это ровно scoped labels §3.4.
+fn same_row(
+    fuel: u32,
+    sig: &Signature,
+    metas: &mut Metas,
+    size: u32,
+    left: &Row<Rc<Value>>,
+    right: &Row<Rc<Value>>,
+) -> bool {
+    if !metas.unify_tails(left.tail(), right.tail()) {
+        return false;
+    }
+    left.labels().len() == right.labels().len()
+        && left
+            .labels()
+            .iter()
+            .zip(right.labels())
+            .all(|(a, b)| a.name == b.name && a.arguments.len() == b.arguments.len())
+        && left
+            .zip(right)
+            .all(|(a, b)| convertible_within(fuel, sig, metas, size, a, b))
 }
 
 /// Совпадают ли элиминаторы в одной позиции спайна.
@@ -679,10 +707,7 @@ fn rigid(
             Value::Pi(binder_b, _, domain_b, row_b, codomain_b),
         ) => {
             binder_a == binder_b
-                && row_a.same_shape(row_b)
-                && row_a
-                    .zip(row_b)
-                    .all(|(a, b)| convertible_within(fuel, sig, metas, size, a, b))
+                && same_row(fuel, sig, metas, size, row_a, row_b)
                 && convertible_within(fuel, sig, metas, size, domain_a, domain_b)
                 && convertible_under(
                     fuel,
@@ -1128,6 +1153,40 @@ mod tests {
         assert!(
             !conv_in(0, &applied("IO"), &applied("State")),
             "разные аргументы-row - разные значения"
+        );
+    }
+
+    #[test]
+    fn two_row_holes_are_unified_not_compared() {
+        // После auto-lift у каждой сигнатуры своя дырка в хвосте, и два
+        // употребления одного имени приходят с разными. Сравнение их не
+        // различает, а **сводит** - это scoped labels §3.4 в той части, что
+        // касается хвоста.
+        let mut metas = crate::meta::Metas::default();
+        let signature = crate::sig::Signature::default();
+        let hole = |metas: &mut crate::meta::Metas| {
+            let Some(tail) = metas.fresh_row().tail() else {
+                unreachable!("свежая row открыта дыркой")
+            };
+            rowed(
+                Mult::Many,
+                Row::closing(
+                    [Label {
+                        name: "IO".into(),
+                        arguments: Vec::new(),
+                    }],
+                    Some(tail),
+                ),
+                Term::universe(0),
+                Term::universe(0),
+            )
+        };
+        let left = hole(&mut metas);
+        let right = hole(&mut metas);
+        let (left, right) = (eval(&Env::default(), &left), eval(&Env::default(), &right));
+        assert!(
+            convertible(&signature, &mut metas, 0, &left, &right),
+            "две дырки сводятся, а не расходятся"
         );
     }
 

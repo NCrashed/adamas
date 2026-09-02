@@ -130,6 +130,39 @@ impl Metas {
         }
     }
 
+    /// Хвост после подстановки решений.
+    ///
+    /// Решение дырки-хвоста само бывает хвостом: цепочка разворачивается до
+    /// конца. Решение с **метками** сюда не приходит - хвосты решает только
+    /// погашение, а оно приписывает хвост, а не метки.
+    #[must_use]
+    pub fn zonk_tail(&self, tail: Option<Tail>) -> Option<Tail> {
+        let Some(Tail::Meta(meta)) = tail else {
+            return tail;
+        };
+        match self.row_solution(meta) {
+            Some(row) if row.labels().is_empty() => self.zonk_tail(row.tail()),
+            _ => tail,
+        }
+    }
+
+    /// Сводит два хвоста, решая дырку, если она есть.
+    ///
+    /// Это унификация scoped labels в той части, что касается хвоста (§3.4):
+    /// метки сопоставляет вызывающий по имени, а остаток уходит сюда.
+    pub fn unify_tails(&mut self, left: Option<Tail>, right: Option<Tail>) -> bool {
+        let (left, right) = (self.zonk_tail(left), self.zonk_tail(right));
+        if left == right {
+            return true;
+        }
+        match (left, right) {
+            (_, Some(Tail::Meta(meta))) => self.solve_row(meta, Row::closing([], left)),
+            (Some(Tail::Meta(meta)), _) => self.solve_row(meta, Row::closing([], right)),
+            _ => return false,
+        }
+        true
+    }
+
     /// Row с подставленными решениями - и своим хвостом, и хвостами решений.
     ///
     /// Цепочка разворачивается до конца: решением дырки бывает row с другой

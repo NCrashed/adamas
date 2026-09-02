@@ -59,7 +59,7 @@ use crate::eval::{apply, quote};
 use crate::level::{Level, LevelMeta, LevelVar};
 use crate::meta::{Metas, unsolved_level_meta, unsolved_term_meta};
 use crate::mult::Mult;
-use crate::row::Row;
+use crate::row::{Label, Row};
 use crate::sig::{Definition, DefinitionKind, Signature};
 use crate::term::{Binder, Case, Field as RecordField, Fields, Name, Rows, Term, spine};
 use crate::value::{Elim, Head, Lvl, Telescope, Value};
@@ -343,7 +343,7 @@ fn check_lambda(
     let Term::Lam(mult, name, body) = term else {
         unreachable!("правило лямбды вызвано не на лямбде: {term}")
     };
-    let Value::Pi(Binder { mult: pi_mult, .. }, _, domain, _, codomain) = &**expected else {
+    let Value::Pi(Binder { mult: pi_mult, .. }, _, domain, row, codomain) = &**expected else {
         return Err(refuse(
             ctx,
             metas,
@@ -366,7 +366,11 @@ fn check_lambda(
             },
         ));
     }
-    let inner = ctx.bind(Rc::clone(name), *mult, Rc::clone(domain));
+    // Тело работает в row **своей** стрелки: лямбда и есть та функция, чей
+    // контракт эта row описывает (§3.4).
+    let inner = ctx
+        .within(row.clone())
+        .bind(Rc::clone(name), *mult, Rc::clone(domain));
     let body_ty = codomain.apply(ctx.fresh());
     let usage = framed(check(&inner, metas, sigma, body, &body_ty), Frame::Body)?;
     let (used, rest) = usage.pop();
@@ -1233,7 +1237,7 @@ fn infer_app(
     // такой же тип функции, как записанная стрелка, и `f : Fn` обязана
     // применяться.
     let callee_ty = whnf_solved(ctx.signature(), metas, &callee_ty);
-    let Value::Pi(Binder { mult, .. }, _, domain, _, codomain) = &*callee_ty else {
+    let Value::Pi(Binder { mult, .. }, _, domain, row, codomain) = &*callee_ty else {
         return Err(refuse(
             ctx,
             metas,
@@ -1242,6 +1246,28 @@ fn infer_app(
             },
         ));
     };
+    // Правило погашения (§3.4): применение допустимо, когда окружающая row
+    // есть row вызываемого, **расширенная слева** замкнутым набором меток.
+    // Сабтайпинга это не заводит - правило живёт в одной точке, а сами
+    // функциональные типы по-прежнему сравниваются равенством.
+    //
+    // При `σ = 0` окружающая пуста: стёртый фрагмент чист, и отдельного
+    // запрета «эффектное определение не попадает в тип» не нужно - пустая row
+    // не гасит ничего.
+    let ambient = match sigma {
+        Mult::Zero => Row::empty(),
+        _ => ctx.row().clone(),
+    };
+    if !discharges(ctx.signature(), metas, ctx.size(), &ambient, row) {
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::Undischarged {
+                wanted: quote_row(ctx.size(), row),
+                ambient: quote_row(ctx.size(), &ambient),
+            },
+        ));
+    }
     // Правило Аткея `Γ + q · Δ`: аргумент проверяется при собственной кратности
     // суждения, а на `q` умножается его **вектор использований**. При `q = 0`
     // внутри аргумента ничего не расходуется - это и есть "доказательства
@@ -1252,6 +1278,63 @@ fn infer_app(
     )?;
     let result = codomain.apply(ctx.eval(argument));
     Ok((result, callee_usage + &argument_usage.scale(*mult)))
+}
+
+/// Гасит ли окружающая row row вызываемого (§3.4).
+///
+/// Правило: `ε' ≡ Λ ++ ε`, где `Λ` хвоста не содержит. Λ определяется
+/// однозначно - порядок между разными именами несуществен, а внутри имени
+/// приписывание идёт спереди, - поэтому метки вызываемого суть **суффикс**
+/// меток окружающей, а Λ есть их разность.
+///
+/// Суффикс, а не префикс, и это не деталь: `{State Int} ⊑ {State Int, State
+/// Int}` отдаёт вызываемому **внешнее** вхождение. Верно потому, что
+/// вызываемый писался, когда внутреннего хендлера ещё не было.
+fn discharges(
+    sig: &Signature,
+    metas: &mut Metas,
+    size: u32,
+    ambient: &Row<Rc<Value>>,
+    wanted: &Row<Rc<Value>>,
+) -> bool {
+    // Хвост у обеих один и тот же: Λ замкнута, значит продолжаются они
+    // одинаково. Открытая row вызываемого при закрытой окружающей означала бы
+    // эффекты, о которых окружение не знает.
+    if ambient.tail() != wanted.tail() {
+        return false;
+    }
+    for name in wanted.labels().iter().map(|label| &label.name) {
+        let mine: Vec<&Label<Rc<Value>>> = wanted
+            .labels()
+            .iter()
+            .filter(|label| label.name == *name)
+            .collect();
+        let theirs: Vec<&Label<Rc<Value>>> = ambient
+            .labels()
+            .iter()
+            .filter(|label| label.name == *name)
+            .collect();
+        let Some(skipped) = theirs.len().checked_sub(mine.len()) else {
+            return false;
+        };
+        let matched = mine.iter().zip(&theirs[skipped..]).all(|(mine, theirs)| {
+            mine.arguments.len() == theirs.arguments.len()
+                && mine
+                    .arguments
+                    .iter()
+                    .zip(&theirs.arguments)
+                    .all(|(a, b)| convertible(sig, metas, size, a, b))
+        });
+        if !matched {
+            return false;
+        }
+    }
+    true
+}
+
+/// Row обратным чтением - для сообщения.
+fn quote_row(size: u32, row: &Row<Rc<Value>>) -> Row<Term> {
+    row.map(|argument| crate::eval::quote(size, argument))
 }
 
 /// Стал ли ожидаемый тип записью - после разворота головы и решённых дырок.

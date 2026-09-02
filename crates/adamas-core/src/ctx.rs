@@ -15,6 +15,7 @@ use std::rc::Rc;
 use crate::carrier::Carriers;
 use crate::eval::{eval, quote};
 use crate::mult::Mult;
+use crate::row::Row;
 use crate::sig::Signature;
 use crate::term::{Index, Name, Term};
 use crate::value::{Env, Lvl, Value};
@@ -42,6 +43,14 @@ pub struct Ctx<'a> {
     /// Копилка кратностей носителей ([`crate::carrier`]), если проверка идёт
     /// ради них. `None` - обычная проверка, и тогда запись стоит ноль.
     carriers: Option<&'a Carriers>,
+    /// Окружающая row - вторая компонента суждения `Γ ⊢ e ⇐ A ! ε` (§3.4).
+    ///
+    /// Живёт здесь, а не параметром рядом с `σ`, хотя §3.4 ставит их рядом.
+    /// Причина в том, чем они друг от друга отличаются: `σ` **умножается** на
+    /// каждом шаге и читается вектором использований, а `ε` меняется только на
+    /// связывании - это «где мы находимся», то есть ровно контекст. Параметром
+    /// она стоила бы восьмидесяти двух мест вызова, не давая взамен ничего.
+    row: Row<Rc<Value>>,
 }
 
 #[derive(Debug)]
@@ -59,6 +68,7 @@ impl<'a> Ctx<'a> {
             env: Env::default(),
             bindings: None,
             carriers: None,
+            row: Row::empty(),
         }
     }
 
@@ -69,6 +79,24 @@ impl<'a> Ctx<'a> {
             carriers: Some(carriers),
             ..self
         }
+    }
+
+    /// Тот же контекст с другой окружающей row.
+    ///
+    /// Меняется она на связывании: тело лямбды работает в row той стрелки,
+    /// которой лямбда является.
+    #[must_use]
+    pub fn within(&self, row: Row<Rc<Value>>) -> Self {
+        Self {
+            row,
+            ..self.clone()
+        }
+    }
+
+    /// Окружающая row - в ней терму разрешено работать.
+    #[must_use]
+    pub fn row(&self) -> &Row<Rc<Value>> {
+        &self.row
     }
 
     /// Копилка носителей, если она есть.
@@ -120,6 +148,7 @@ impl<'a> Ctx<'a> {
     fn push(&self, binding: Binding, value: Rc<Value>) -> Self {
         Self {
             signature: self.signature,
+            row: self.row.clone(),
             env: self.env.extend(value),
             bindings: Some(Rc::new(Cell {
                 binding,

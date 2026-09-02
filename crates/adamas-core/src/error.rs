@@ -44,6 +44,15 @@ use crate::meta::Metas;
 use crate::mult::Mult;
 use crate::term::{Index, Name, Term};
 
+/// Row в сообщении: пустая печатается `{}`, прочие - без хвостового пробела,
+/// который [`crate::row::Row`] ставит для позиции перед типом.
+fn shown(row: &crate::row::Row<crate::term::Term>) -> String {
+    if row.is_empty() {
+        return "{}".to_owned();
+    }
+    row.to_string().trim_end().to_owned()
+}
+
 /// Что именно не сошлось.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ErrorKind {
@@ -231,7 +240,21 @@ pub enum ErrorKind {
         found: Term,
     },
 
+    /// Row вызываемого не гасится окружающей (§3.4).
+    #[error(
+        "эффекты `{}` не погашены: вокруг разрешено `{}`",
+        shown(wanted),
+        shown(ambient)
+    )]
+    Undischarged {
+        /// Row вызываемого.
+        wanted: crate::row::Row<crate::term::Term>,
+        /// Окружающая row.
+        ambient: crate::row::Row<crate::term::Term>,
+    },
+
     /// Нарушена строгая позитивность.
+
     #[error("конструктор `{name}` использует `{data}` в отрицательной позиции")]
     NotStrictlyPositive {
         /// Имя конструктора.
@@ -424,7 +447,10 @@ impl ErrorKind {
             Self::AmbiguousLevel { meta } | Self::UnsolvedDefinitionLevel { meta, .. } => {
                 metas.push(meta);
             }
-            Self::RecordFields { .. }
+            // Row в сообщении несёт термы, но обходу они не нужны: имена меток
+            // и так печатаются, а аргументы приходят уже прочитанными.
+            Self::Undischarged { .. }
+            | Self::RecordFields { .. }
             | Self::DuplicateField { .. }
             | Self::OpenDependentRecord { .. }
             | Self::ErasedField { .. }

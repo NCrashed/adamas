@@ -60,9 +60,9 @@ use adamas_core::source::Span;
 
 use crate::ast::{
     Alt, Binder, Binding, Block, Chain, ClassDecl, Clause, Constructor, Data, Decl, DeclKind,
-    EffectDecl, EffectLabel, Expr, ExprKind, LamParam, LamParamKind, Lit, LitKind, Module,
-    ModuleDecl, Mult, MultAnn, Name, Operation, Pattern, PatternKind, RecordField, Resource, Stmt,
-    StmtKind, Symbol, Visibility, contains_block,
+    EffectDecl, EffectLabel, Expr, ExprKind, HandlerBranch, LamParam, LamParamKind, Lit, LitKind,
+    Module, ModuleDecl, Mult, MultAnn, Name, Operation, Pattern, PatternKind, RecordField,
+    Resource, Stmt, StmtKind, Symbol, Visibility, contains_block,
 };
 use crate::token::{Token, TokenKind};
 
@@ -464,7 +464,6 @@ impl<'a> Parser<'a> {
             TokenKind::When => Unsupported::Class,
             TokenKind::Using => Unsupported::NamedInstance,
             TokenKind::Import => Unsupported::Import,
-            TokenKind::Handle | TokenKind::HandleMulti | TokenKind::With => Unsupported::Handler,
             TokenKind::Infix | TokenKind::Infixl | TokenKind::Infixr => Unsupported::Fixity,
             TokenKind::LBrace => Unsupported::Braces,
             _ => return None,
@@ -1650,6 +1649,7 @@ impl<'a> Parser<'a> {
             TokenKind::Using => return self.using(),
             TokenKind::If => return self.conditional(),
             TokenKind::Case => return self.case(),
+            TokenKind::Handle | TokenKind::HandleMulti => return self.handler(),
             TokenKind::LParen => return self.parenthesised(),
             TokenKind::LBrace if self.at_record() => return self.record(),
             TokenKind::Operator if self.at_projection() => return Ok(self.projection()),
@@ -1807,6 +1807,61 @@ impl<'a> Parser<'a> {
                 alts,
             },
             span: start.merge(end),
+        })
+    }
+
+    /// `handle e with` и блок веток (§3.4). `handleMulti` - та же форма.
+    ///
+    /// Метка не пишется: её называют ветки. `@`-выбор вхождения (§4.1) сюда
+    /// пока не входит - он нужен только там, где одноимённых меток в row
+    /// несколько, а без него снимается первое, то есть внутреннее.
+    fn handler(&mut self) -> Result<Expr, ParseError> {
+        let opening = self.peek();
+        let multi = opening.kind == TokenKind::HandleMulti;
+        let start = self.bump().span;
+        let computation = self.expr()?;
+        if contains_block(&computation) {
+            return Err(self.block_not_last(&computation));
+        }
+        self.expect(TokenKind::With)?;
+        self.expect(TokenKind::Open)?;
+        let mut branches = Vec::new();
+        loop {
+            branches.push(self.handler_branch()?);
+            if self.eat(TokenKind::Sep).is_none() {
+                break;
+            }
+        }
+        self.expect(TokenKind::Close)?;
+        let end = branches.last().map_or(start, |last| last.span);
+        Ok(Expr {
+            kind: ExprKind::Handle {
+                multi,
+                computation: Box::new(computation),
+                branches,
+            },
+            span: start.merge(end),
+        })
+    }
+
+    fn handler_branch(&mut self) -> Result<HandlerBranch, ParseError> {
+        let name = self.ident()?;
+        let mut params = Vec::new();
+        while self.at(TokenKind::Ident) || self.at(TokenKind::Underscore) {
+            let token = self.bump();
+            params.push(Name {
+                text: self.symbol(token),
+                span: token.span,
+            });
+        }
+        self.expect(TokenKind::Arrow)?;
+        let body = self.expr()?;
+        let span = name.span.merge(body.span);
+        Ok(HandlerBranch {
+            name,
+            params,
+            body,
+            span,
         })
     }
 

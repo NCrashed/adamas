@@ -229,6 +229,21 @@ pub enum ExprKind {
     },
     /// Блок операторов - тело определения или `let` (§4.1).
     Block(Block),
+    /// Хендлер: `handle e with …` (§3.4).
+    ///
+    /// Формой ядра не является: объявление эффекта заводит константу-элиминатор,
+    /// а эта запись есть её применение. Метка не пишется - её называют ветки,
+    /// каждая операция принадлежит ровно одному эффекту.
+    Handle {
+        /// Мультишотный ли: `handleMulti`. Различает он кратность резумпции -
+        /// `ω` вместо `1`, - и больше ничего.
+        multi: bool,
+        /// Вычисление под хендлером.
+        computation: Box<Expr>,
+        /// Ветки в порядке написания. Порядок значения не имеет:
+        /// сопоставляются они по имени.
+        branches: Vec<HandlerBranch>,
+    },
     /// `if c then a else b`.
     If {
         /// Условие.
@@ -609,6 +624,22 @@ pub struct Resource {
     pub members: Vec<Decl>,
 }
 
+/// Ветка хендлера: операция либо `return` (§3.4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HandlerBranch {
+    /// Имя операции либо `return`.
+    pub name: Name,
+    /// Связываемые имена - написанные аргументы операции.
+    ///
+    /// Резумпции среди них нет: её связывает сама форма именем `resume`
+    /// (§3.4).
+    pub params: Vec<Name>,
+    /// Тело.
+    pub body: Expr,
+    /// Ветка целиком.
+    pub span: Span,
+}
+
 /// Разобранный файл.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Module {
@@ -636,7 +667,7 @@ pub fn contains_block(expr: &Expr) -> bool {
     let mut pending = vec![expr];
     while let Some(expr) = pending.pop() {
         match &expr.kind {
-            ExprKind::Case { .. } | ExprKind::Block(_) => return true,
+            ExprKind::Case { .. } | ExprKind::Block(_) | ExprKind::Handle { .. } => return true,
             ExprKind::Name(_) | ExprKind::Lit(_) | ExprKind::Hole => {}
             ExprKind::Effectful { labels, body, .. } => {
                 pending.push(body);
@@ -823,6 +854,24 @@ fn dump_effect(out: &mut String, effect: &EffectDecl, depth: usize) {
         out.push_str(&operation.name.text);
         out.push(' ');
         dump_expr(out, &operation.ty);
+        out.push(')');
+    }
+    out.push(')');
+}
+
+/// Хендлер: вычисление и ветки соседями.
+fn dump_handler(out: &mut String, multi: bool, computation: &Expr, branches: &[HandlerBranch]) {
+    out.push_str(if multi { "(handleMulti " } else { "(handle " });
+    dump_expr(out, computation);
+    for branch in branches {
+        out.push_str(" (on ");
+        out.push_str(&branch.name.text);
+        for param in &branch.params {
+            out.push(' ');
+            out.push_str(&param.text);
+        }
+        out.push(' ');
+        dump_expr(out, &branch.body);
         out.push(')');
     }
     out.push(')');
@@ -1076,6 +1125,11 @@ fn dump_expr(out: &mut String, expr: &Expr) {
             });
             out.push(')');
         }
+        ExprKind::Handle {
+            multi,
+            computation,
+            branches,
+        } => dump_handler(out, *multi, computation, branches),
         ExprKind::Case { scrutinee, alts } => {
             out.push_str("(case ");
             dump_expr(out, scrutinee);

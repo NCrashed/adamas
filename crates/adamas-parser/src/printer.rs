@@ -51,8 +51,8 @@
 
 use crate::ast::{
     Alt, Binder, Binding, Block, Chain, Clause, Constructor, Data, Decl, DeclKind, EffectDecl,
-    Expr, ExprKind, LamParam, LamParamKind, Lit, Module, ModuleDecl, Name, Operation, Pattern,
-    PatternKind, Resource, Stmt, StmtKind, Visibility, contains_block,
+    Expr, ExprKind, HandlerBranch, LamParam, LamParamKind, Lit, Module, ModuleDecl, Name,
+    Operation, Pattern, PatternKind, Resource, Stmt, StmtKind, Visibility, contains_block,
 };
 use crate::lexer::is_operator;
 
@@ -101,7 +101,8 @@ impl Expr {
             | ExprKind::Arrow(..)
             | ExprKind::Block(_)
             | ExprKind::If { .. }
-            | ExprKind::Case { .. } => Prec::Lowest,
+            | ExprKind::Case { .. }
+            | ExprKind::Handle { .. } => Prec::Lowest,
         }
     }
 }
@@ -470,28 +471,14 @@ impl Printer {
             }
             ExprKind::Record(fields) => {
                 self.push("{");
-                for (index, (name, value)) in fields.iter().enumerate() {
-                    if index > 0 {
-                        self.push(", ");
-                    }
-                    self.push(&name.text);
-                    self.push(" = ");
-                    self.expr(value, Prec::Lowest);
-                }
+                self.written_fields(fields);
                 self.push("}");
             }
             ExprKind::Update(base, fields) => {
                 self.push("{");
                 self.expr(base, Prec::Lowest);
                 self.push(" | ");
-                for (index, (name, value)) in fields.iter().enumerate() {
-                    if index > 0 {
-                        self.push(", ");
-                    }
-                    self.push(&name.text);
-                    self.push(" = ");
-                    self.expr(value, Prec::Lowest);
-                }
+                self.written_fields(fields);
                 self.push("}");
             }
             ExprKind::Project(inner, name) => {
@@ -531,6 +518,11 @@ impl Printer {
                 then_branch,
                 else_branch,
             } => self.conditional(cond, then_branch, else_branch),
+            ExprKind::Handle {
+                multi,
+                computation,
+                branches,
+            } => self.handler(*multi, computation, branches),
             ExprKind::Case { scrutinee, alts } => {
                 self.push("case ");
                 self.expr(scrutinee, Prec::Chain);
@@ -541,6 +533,35 @@ impl Printer {
             ExprKind::List(items) => self.sequence("[", items, "]"),
             ExprKind::Chain(chain) => self.chain(chain),
         }
+    }
+
+    /// Написанные поля через запятую - у записи и у переопределения они одни.
+    fn written_fields(&mut self, fields: &[(Name, Expr)]) {
+        for (index, (name, value)) in fields.iter().enumerate() {
+            if index > 0 {
+                self.push(", ");
+            }
+            self.push(&name.text);
+            self.push(" = ");
+            self.expr(value, Prec::Lowest);
+        }
+    }
+
+    fn handler(&mut self, multi: bool, computation: &Expr, branches: &[HandlerBranch]) {
+        self.push(if multi { "handleMulti " } else { "handle " });
+        self.expr(computation, Prec::Chain);
+        self.push(" with");
+        self.block_of(branches, Self::handler_branch);
+    }
+
+    fn handler_branch(&mut self, branch: &HandlerBranch) {
+        self.push(&branch.name.text);
+        for param in &branch.params {
+            self.push(" ");
+            self.push(&param.text);
+        }
+        self.push(" -> ");
+        self.expr(&branch.body, Prec::Lowest);
     }
 
     /// Спайн применения - циклом, а не спуском.

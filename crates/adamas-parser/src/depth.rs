@@ -159,6 +159,17 @@ fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<
         }
         // Ветки - соседи: разбор один, и каждая стоит под ним, а не под
         // предыдущей.
+        // Ветки хендлера - тоже соседи: вычисление одно, и каждая стоит под
+        // ним.
+        ExprKind::Handle {
+            computation,
+            branches,
+            ..
+        } => {
+            let inner = deepen(depth, 1, expr.span)?;
+            pending.push((Node::Expr(computation), inner));
+            pending.extend(branches.iter().map(|it| (Node::Expr(&it.body), inner)));
+        }
         ExprKind::Case { scrutinee, alts } => {
             let inner = deepen(depth, 1, expr.span)?;
             pending.push((Node::Expr(scrutinee), inner));

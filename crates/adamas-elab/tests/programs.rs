@@ -423,7 +423,6 @@ fn what_the_core_cannot_carry_yet_names_itself() {
             "f : Nat -> Nat\nf x = y\n  where\n    y : Nat\n    y = x\n",
             Missing::LocalDefinitions,
         ),
-        ("f : Nat\nf =\n  Zero\n  Zero\n", Missing::Sequencing),
     ];
     for (text, expected) in missing {
         let text = format!("{BASE}{text}");
@@ -4690,6 +4689,49 @@ peek b = get
     ));
     assert!(
         error.to_string().contains("не погашены"),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_statement_runs_for_its_effects_and_drops_its_value() {
+    // §3.4: последовательность собственного узла не имеет - эффекты копятся в
+    // суждении, - поэтому оператор есть связывание, которого никто не
+    // упоминает. Кратность `1`: значение, потребившее что-то линейное, при `ω`
+    // оказалось бы израсходовано сверх меры.
+    program(&format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+effect State s where
+  get : s
+  put : s -> Unit
+
+swap : Bool -> {{State Bool}} Bool
+swap b =
+  put b
+  put True
+  get
+"
+    ));
+    // Значение оператора владеемого типа отбрасывается молча - вставка `drop`
+    // решается по написанному типу, а у оператора его нет (§3.3).
+    let error = refused(&format!(
+        "{BASE}
+resource File where
+  Open : Bool -> File
+  close : File -> Bool
+  close (Open b) = b
+
+use : Bool -> Bool
+use b =
+  Open b
+  b
+"
+    ));
+    assert!(
+        error.to_string().contains("отбрасывается"),
         "получено {error:?}"
     );
 }

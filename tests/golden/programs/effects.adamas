@@ -92,3 +92,12 @@ runState : Bool -> ({State Bool} Bool) -> Bool
 
 passed : Bool -> Bool
 passed b = runState b get
+
+-- Последовательность собственного узла не имеет: эффекты копятся в суждении,
+-- а оператор есть связывание, которого никто не упоминает. Ожидаемого типа у
+-- него нет вовсе - это режим вывода, и вычисление в нём исполняется.
+swap : Bool -> {State Bool} Bool
+swap b =
+  put b
+  put True
+  get

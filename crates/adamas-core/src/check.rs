@@ -1988,10 +1988,15 @@ fn branch_type(
     // разборе она обязана следовать тому, сколько раз доступно само
     // разбираемое. Умножение полукольца даёт три случая даром: `0 · r = 0`,
     // `ω · 1 = ω` (на чём стоит `Ur`), `1 · 1 = 1`.
-    let result = telescope
-        .into_iter()
-        .rev()
-        .fold(result, |codomain, (binder, name, domain)| {
+    // Стрелки ветви строит проверка, а не автор, и row у них **окружающая**.
+    // Телескоп конструктора чист - конструктор не вычисляет, он кладёт, - но
+    // ветвь есть часть разбора, а разбор работает в окружающей row (§3.4).
+    // Пустая означала бы «чисто» и сбрасывала бы окружающую на входе в ветвь.
+    let ambient = ctx.row().map(|value| quote(ctx.size(), value));
+    let result = telescope.into_iter().enumerate().rev().fold(
+        result,
+        |codomain, (at, (binder, name, domain))| {
+            let depth = u32::try_from(at).unwrap_or(u32::MAX);
             Term::Pi(
                 Binder {
                     mult: binder.mult * case.consumed,
@@ -1999,13 +2004,21 @@ fn branch_type(
                 },
                 name,
                 Rc::new(domain),
-                // Тип ветви строится из телескопа конструктора, а он чист:
-                // конструктор не вычисляет, он кладёт.
-                Row::empty(),
+                ambient.map(|term| shifted(term, depth)),
                 Rc::new(codomain),
             )
-        });
+        },
+    );
     ctx.eval(&result)
+}
+
+/// Сдвигает свободные индексы терма на `by` - для row, уезжающей под
+/// связывания телескопа ветви.
+fn shifted(term: &Term, by: u32) -> Term {
+    if by == 0 {
+        return term.clone();
+    }
+    crate::pattern::shift_free(term, by)
 }
 
 /// Подставляет аргументы в телескоп `Pi`, снимая по одному связыванию.

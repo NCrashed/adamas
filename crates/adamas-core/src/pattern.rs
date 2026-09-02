@@ -1686,15 +1686,22 @@ fn goal(
     }
 
     let result = rewrite(target, 0, size, &refinement.at(inner.size()));
+    // Стрелки эти строит компилятор, а не автор, и row у них - **окружающая**,
+    // а не пустая. Ветвь есть часть разбора, разбор работает в окружающей row
+    // (§3.4), значит и функция от вынесенных соседей работает в ней же.
+    // Пустая означала бы «чисто» и сбрасывала бы окружающую на входе в ветвь.
+    let ambient = ctx.row().map(|value| quote(ctx.size(), value));
     domains
         .into_iter()
+        .enumerate()
         .rev()
-        .fold(result, |codomain, (mult, name, domain)| {
+        .fold(result, |codomain, (at, (mult, name, domain))| {
+            let row = ambient.map(|term| shift_at(term, 0, arity_u32(at)));
             Term::Pi(
                 Binder::explicit(mult),
                 name,
                 Rc::new(domain),
-                EffectRow::empty(),
+                row,
                 Rc::new(codomain),
             )
         })
@@ -2089,6 +2096,10 @@ fn shift_fields(fields: &Fields, depth: u32, by: u32) -> Fields {
             .as_ref()
             .map(|it| Rc::new(shift_at(it, depth, by))),
     }
+}
+
+pub(crate) fn shift_free(term: &Term, by: u32) -> Term {
+    shift_at(term, 0, by)
 }
 
 fn shift(term: &Term, by: u32) -> Term {

@@ -5013,6 +5013,52 @@ both n (Cons k x xs) ys = step x
 }
 
 #[test]
+fn a_meta_headed_application_is_solved_by_the_constant() {
+    // `?f Bool ≡ Option Bool` вне паттернового фрагмента Миллера: аргумент не
+    // переменная. Отбрасывание позиции решает такую задачу **постоянной**
+    // функцией - `?f := \_ -> Option Bool`, - и `f Nat` остаётся `Option
+    // Bool`: законно по типам и неверно по смыслу. Голова правой части
+    // константа, арности совпадают, поэтому решение единственно.
+    let signature = program(&format!(
+        "{BASE}
+data Option (a : Type) where
+  None : Option a
+  Some : a -> Option a
+
+fmap : {{0 f : (0 _ : Type) -> Type}} -> {{0 a b : Type}} -> (a -> b) -> f a -> f b
+
+flip : Bool -> Bool
+flip True = False
+flip False = True
+
+same : Option Bool
+same = fmap flip (Some True)
+"
+    ));
+    // Постулат не разворачивается, но тип его посчитан - значит `?f` решена
+    // `Option`, а не постоянной функцией.
+    assert!(
+        signature.lookup("same").is_some(),
+        "определение обязано пройти проверку"
+    );
+    // Переменная в спайне по-прежнему идёт паттерновым путём, и решение там
+    // общее: `?f` зависит от аргумента, а не игнорирует его.
+    program(&format!(
+        "{BASE}
+data Option (a : Type) where
+  None : Option a
+  Some : a -> Option a
+
+use : {{0 a : Type}} -> Option a -> Option a
+use x = x
+
+held : Option Bool
+held = use (Some True)
+"
+    ));
+}
+
+#[test]
 fn a_member_may_quantify_beyond_the_class_parameters() {
     // §4.3, решение 2026-09-03: свободные имена члена поднимаются в
     // implicit-связывания его поля, а универсум словаря считается по полям.

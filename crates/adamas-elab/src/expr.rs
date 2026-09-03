@@ -26,6 +26,7 @@ use adamas_parser::ast::{
     Symbol, Visibility,
 };
 
+use crate::decl::CLOSING;
 use crate::error::{ElabError, Missing};
 use crate::fixity::Fixities;
 use crate::live;
@@ -2924,6 +2925,22 @@ impl<'a> Elaborator<'a> {
     /// одному эффекту. Первое (внутреннее) её вхождение снимается с row
     /// вычисления, остаток и есть ρ - глубина хендлера, - и он передаётся
     /// элиминатору аргументом-row.
+    /// Отвергает ресурс в области видимости (§3.4, ограничение `handleMulti`).
+    ///
+    /// Резумпция там `ω` и зовёт продолжение сколько угодно раз, а деструктор
+    /// срабатывает один: при втором вызове ресурс был бы уже закрыт. Проверка
+    /// стоит на области видимости, а не на упоминании, - резумпцию вправе
+    /// сохранить, и куда дойдёт сохранённая копия, статически неизвестно.
+    fn without_resource(&self, span: Span) -> Result<(), ElabError> {
+        let Some(owned) = self.scope.iter().rev().find(|bound| bound.owned) else {
+            return Ok(());
+        };
+        Err(ElabError::MultiWithResource {
+            name: Rc::clone(&owned.name),
+            span,
+        })
+    }
+
     fn handled(&mut self, handled: Handled<'_>) -> Result<Term, ElabError> {
         let Handled {
             multi,
@@ -2932,6 +2949,9 @@ impl<'a> Elaborator<'a> {
             branches,
             span,
         } = handled;
+        if multi {
+            self.without_resource(span)?;
+        }
         let effect = self.handled_effect(label, branches, span)?;
         // Написанные аргументы метки закрепляют вхождение, а не выбирают его:
         // снимается всё то же первое, а они говорят, чем обязаны оказаться его
@@ -3749,21 +3769,91 @@ impl<'a> Elaborator<'a> {
         let Some(drop) = drop else {
             return body(self);
         };
-        let (call, result) = self.destructor(drop, index);
-        let anonymous: Symbol = Rc::from("_");
-        let ty = self.typed(&result);
-        let bound = Bound {
-            value: Some(Rc::new(call.clone())),
-            ..Bound::visible(&anonymous, Mult::One, ty)
+        // Тело считается **первым**: `drop` стоит в точке выхода из scope
+        // (§3.3), а не входа в него. Прежняя форма - `let _ = drop h in тело` -
+        // вычисляла деструктор раньше тела, и до исполнения эффектов этого не
+        // было видно: результат отбрасывается, а `drop` не производил ничего.
+        // С первым же эффектным `drop` порядок стал наблюдаем и оказался
+        // обратным обещанному.
+        let value = body(self)?;
+
+        // Связать значение тела нужно с его типом, а написан он нигде: спайн
+        // ожидаемого результирующего типа не несёт (§9 Фаза 4). Синтезируется
+        // он по уже собранному терму - тот для того и собран.
+        let Some(held) = self.held_type(&value) else {
+            // Синтез не удался - тело есть **значение** (лямбда, запись):
+            // вычислять до `drop` нечего, и прежняя форма верна. Тело при этом
+            // собрано без связывания над ним, поэтому сдвигается.
+            let (call, result) = self.destructor(drop, index);
+            return Ok(Term::Let(
+                Mult::One,
+                CoreName::from("_"),
+                Rc::new(result),
+                Rc::new(call),
+                Rc::new(adamas_core::pattern::shift_free(&value, 1)),
+            ));
         };
-        let inner = self.binding(bound, body)?;
-        Ok(Term::Let(
-            Mult::One,
-            CoreName::from("_"),
-            Rc::new(result),
-            Rc::new(call),
-            Rc::new(inner),
-        ))
+
+        // Оба вычисления приостановлены, поэтому деструктор стоит под одним
+        // связыванием - триггером - и индекс его аргумента на единицу глубже.
+        let Some(closing) = self.closing_eliminator() else {
+            // Единицы в программе нет, значит нет и эффектов: раскручивать
+            // нечего, и прежняя форма считает то же самое.
+            let (call, result) = self.destructor(drop, index.saturating_add(1));
+            return Ok(Term::Let(
+                Mult::One,
+                CoreName::from("held"),
+                Rc::new(quote(self.ctx.size(), &held)),
+                Rc::new(value),
+                Rc::new(Term::Let(
+                    Mult::One,
+                    CoreName::from("_"),
+                    Rc::new(result),
+                    Rc::new(call),
+                    Rc::new(Term::var(1)),
+                )),
+            ));
+        };
+        let (call, result) = self.destructor(drop, index.saturating_add(1));
+        let suspend = |term: Term| Term::Lam(Mult::Many, CoreName::from("_"), Rc::new(term));
+        Ok(closing.apply([
+            quote(self.ctx.size(), &held),
+            result,
+            suspend(adamas_core::pattern::shift_free(&value, 1)),
+            suspend(call),
+        ]))
+    }
+
+    /// Элиминатор scope с **окружающей** row в аргументе. `None` - не объявлен.
+    ///
+    /// Row подставляется, а не берётся дыркой, и это не оптимизация. Дырка
+    /// связалась бы с окружающей только при погашении самого применения, а тело
+    /// проверяется раньше - аргументом, - и его собственные эффекты гасить было
+    /// бы нечем: `{Log | e}` против `{| ?0}` даёт отказ, потому что метки у
+    /// нерешённой дырки нет ни одной.
+    fn closing_eliminator(&mut self) -> Option<Term> {
+        let definition = self.signature.lookup(CLOSING)?;
+        let (levels, rows) = (definition.level_arity, definition.row_arity);
+        let levels: Rc<[Level]> = (0..levels).map(|_| self.metas.fresh_level()).collect();
+        let size = self.ctx.size();
+        let ambient = self.ctx.row().map(|value| quote(size, value));
+        let rows = Rows::new((0..rows).map(|_| ambient.clone()).collect::<Vec<_>>());
+        Some(Term::Const(CoreName::from(CLOSING), levels, rows))
+    }
+
+    /// Тип тела, которое связывается ради `drop` в точке выхода.
+    ///
+    /// От [`Elaborator::synthesized`] отличается первой попыткой: при `σ = 0`
+    /// окружающая пуста (§3.4), и эффектное тело синтеза не получает вовсе, а
+    /// именно эффектное тело правку и потребовало. Неудачная попытка
+    /// откатывается: решать за настоящую проверку она не вправе.
+    fn held_type(&mut self, term: &Term) -> Option<Rc<Value>> {
+        let mark = self.metas.mark();
+        if let Ok((ty, _)) = infer(&self.ctx, self.metas, Mult::Many, term) {
+            return Some(ty);
+        }
+        self.metas.rollback(mark);
+        self.synthesized(term)
     }
 
     /// Вызов деструктора и тип его результата.
@@ -4245,7 +4335,10 @@ impl<'a> Elaborator<'a> {
         drops: &[(u32, Symbol)],
         body: impl FnOnce(&mut Self) -> Result<Term, ElabError>,
     ) -> Result<Term, ElabError> {
-        let Some(((index, drop), rest)) = drops.split_first() else {
+        // Снимается **последний**, потому что обёртка теперь ставит свой `drop`
+        // после тела: самый внешний слой срабатывает позже всех. Список идёт в
+        // порядке LIFO, значит первым его элементом обязан быть внутренний слой.
+        let Some(((index, drop), rest)) = drops.split_last() else {
             return body(self);
         };
         let drop = drop.clone();
@@ -4313,9 +4406,6 @@ fn variables_of(pattern: &CorePattern, names: &mut Vec<Symbol>) {
 /// область видимости на одно связывание глубже - на своё же предыдущее.
 fn lifo(found: &mut [(u32, Symbol)]) {
     found.reverse();
-    for (depth, entry) in found.iter_mut().enumerate() {
-        entry.0 += u32::try_from(depth).unwrap_or(0);
-    }
 }
 
 /// Ветки `if` как альтернативы разбора по `Bool`.

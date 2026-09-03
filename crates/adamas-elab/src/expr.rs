@@ -169,6 +169,12 @@ pub(crate) const ZERO: &str = "Zero";
 /// Конструктор-последователь.
 pub(crate) const SUCC: &str = "Succ";
 
+/// Пустой список.
+pub(crate) const NIL: &str = "Nil";
+
+/// Присоединение к списку.
+pub(crate) const CONS: &str = "Cons";
+
 /// Преобразование литерала. Не объявлено - литерал есть само число.
 pub(crate) const FROM_NAT: &str = "fromNat";
 
@@ -1780,7 +1786,7 @@ impl<'a> Elaborator<'a> {
             }),
             ExprKind::Tuple(items) if items.is_empty() => missing(Missing::Unit),
             ExprKind::Tuple(_) => missing(Missing::Tuple),
-            ExprKind::List(_) => missing(Missing::List),
+            ExprKind::List(items) => self.list(items, expr.span),
         }
     }
 
@@ -2096,6 +2102,29 @@ impl<'a> Elaborator<'a> {
             None => Ok(numeral),
             Some(_) => Ok(self.name(&named(FROM_NAT))?.apply([numeral])),
         }
+    }
+
+    /// Список: `[a, b]` есть `Cons a (Cons b Nil)` (§4.4).
+    ///
+    /// Имена берутся по соглашению, как `Bool` у `if` и `Unit` у сахара
+    /// `{ε} A`. Собирается справа налево - список правоассоциативен по
+    /// построению, и хвост его есть список же.
+    fn list(&mut self, items: &[Expr], span: Span) -> Result<Term, ElabError> {
+        let named = |text: &str| ast::Name {
+            text: Rc::from(text),
+            span,
+        };
+        let empty = self.name(&named(NIL))?;
+        let cons = self.name(&named(CONS))?;
+        let mut built = empty;
+        for item in items.iter().rev() {
+            // Элемент уезжает внутрь собранного значения, как поле
+            // конструктора: позиция у него та же (§3.3).
+            let item = self.placed(Position::Field, |it| it.expr(item, Mult::Many))?;
+            built = cons.clone().apply([item, built]);
+        }
+        self.produced = None;
+        Ok(built)
     }
 
     /// Row позиции, где ничего не написано, - подъём или пустая.

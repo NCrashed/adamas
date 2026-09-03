@@ -1,0 +1,19 @@
+-- Значение читается насквозь: поля записи считаются, как и аргументы
+-- конструктора.
+
+data Bool where
+  True : Bool
+  False : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+type Point = { x : Nat, y : Nat }
+
+flip : Bool -> Bool
+flip True = False
+flip False = True
+
+main : Point
+main = { x = Succ Zero, y = Succ (Succ Zero) }

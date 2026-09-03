@@ -1,0 +1,13 @@
+-- Под связывание вычисление не заходит: функция читается такой, какой
+-- построена. Глубокая нормализация рекурсивного определения не завершилась бы.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+plus : Nat -> Nat -> Nat
+plus Zero m = m
+plus (Succ k) m = Succ (plus k m)
+
+main : Nat -> Nat
+main n = plus n (Succ Zero)

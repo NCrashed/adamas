@@ -1,0 +1,20 @@
+-- Вычисление до значения: рекурсия по `Nat` и разбор считаются (§9 Фаза 5).
+
+data Bool where
+  True : Bool
+  False : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+plus : Nat -> Nat -> Nat
+plus Zero m = m
+plus (Succ k) m = Succ (plus k m)
+
+times : Nat -> Nat -> Nat
+times Zero m = Zero
+times (Succ k) m = plus m (times k m)
+
+main : Nat
+main = times (Succ (Succ (Succ Zero))) (Succ (Succ Zero))

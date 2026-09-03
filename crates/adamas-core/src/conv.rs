@@ -114,6 +114,59 @@ pub fn whnf(sig: &Signature, value: &Rc<Value>) -> Rc<Value> {
     current
 }
 
+/// Вычисляет замкнутый терм до **значения** (§9 Фаза 5).
+///
+/// Не до нормальной формы, и разница существенная: под связывание вычисление
+/// не заходит. Глубокая нормализация рекурсивного определения не завершается
+/// даже у тотального - `plus` под своим же связыванием разворачивается в себя
+/// бесконечно, - и ровно поэтому у сравнения стоит предел разворота. Значение
+/// же считается столько, сколько считает программа, и топлива ему не нужно.
+///
+/// Значение читается насквозь у конструктора и записи: `Succ (plus 1 1)` есть
+/// значение только снаружи, а внутрь надо посчитать. Всё прочее - функция,
+/// застрявший разбор - читается таким, каким построено.
+#[must_use]
+pub fn evaluated(sig: &Signature, term: &Term) -> Term {
+    let value = crate::eval::eval(&crate::value::Env::default(), term);
+    read_value(sig, &value)
+}
+
+/// Терм головной формы: глобальное имя развёрнуто, разбор сведён.
+fn forced(sig: &Signature, value: &Rc<Value>) -> Rc<Value> {
+    let mut current = Rc::clone(value);
+    while let Some(next) = unfolded(sig, &current) {
+        current = next;
+    }
+    current
+}
+
+fn read_value(sig: &Signature, value: &Rc<Value>) -> Term {
+    let value = forced(sig, value);
+    match &*value {
+        Value::Neutral(head @ Head::Global(name, ..), spine)
+            if matches!(
+                sig.lookup(name).map(|it| &it.kind),
+                Some(crate::sig::DefinitionKind::Constructor { .. })
+            ) =>
+        {
+            let base = crate::eval::quote(0, &Rc::new(Value::Neutral(head.clone(), Vec::new())));
+            spine.iter().fold(base, |callee, elim| match elim {
+                Elim::App(argument) => {
+                    Term::App(Rc::new(callee), Rc::new(read_value(sig, argument)))
+                }
+                _ => crate::eval::quote(0, &value),
+            })
+        }
+        Value::Object(fields) => Term::Object(
+            fields
+                .iter()
+                .map(|(name, field)| (Rc::clone(name), Rc::new(read_value(sig, field))))
+                .collect(),
+        ),
+        _ => crate::eval::quote(0, &value),
+    }
+}
+
 /// То же, но сквозь решённые дырки.
 ///
 /// Решённая дырка **и есть** своё решение, и всякий, кто смотрит на форму
@@ -245,6 +298,32 @@ pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
     if definition.opaque {
         return None;
     }
+    replayed(definition, levels, rows, spine)
+}
+
+/// δ-шаг **без** ворот тотальности и запечатывания - для исполнения.
+///
+/// Ворота стоят у сравнения, и обе их причины к исполнению не относятся.
+/// Нетотальное определение запрещено разворачивать сравнению, потому что оно
+/// обязано завершаться; исполнение нетотального обязано расходиться ровно там,
+/// где расходится сама программа. Запечатанное сравнение считает атомом, потому
+/// что снаружи его тело - обещание, а не представление (§3.5); исполнять
+/// обещание нечем, и тело у него то же самое.
+pub(crate) fn unfolded(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
+    let Value::Neutral(Head::Global(name, levels, rows), spine) = &**value else {
+        return None;
+    };
+    let definition = sig.lookup(name)?;
+    replayed(definition, levels, rows, spine)
+}
+
+/// Тело определения с переигранным спайном - общее у обоих δ.
+fn replayed(
+    definition: &crate::sig::Definition,
+    levels: &[crate::level::Level],
+    rows: &Rc<[Row<Rc<Value>>]>,
+    spine: &[Elim],
+) -> Option<Rc<Value>> {
     // Аргументы-row подставляются **окружением**: метка несёт открытые термы,
     // и вложить их в замкнутое тело нечем (§3.2).
     let body = definition.unfolded(levels, Rc::clone(rows))?;

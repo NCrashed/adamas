@@ -46,6 +46,7 @@ pub mod class;
 mod decl;
 mod error;
 mod expr;
+pub mod fixity;
 mod live;
 mod own;
 mod render;

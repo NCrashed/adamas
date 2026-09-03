@@ -27,6 +27,7 @@ use adamas_parser::ast::{
 };
 
 use crate::error::{ElabError, Missing};
+use crate::fixity::Fixities;
 use crate::live;
 use crate::own::Owned;
 
@@ -669,6 +670,9 @@ pub(crate) struct Elaborator<'a> {
     /// Типы, объявленные `unique` или `resource` (§3.3). Как и хранилище
     /// дырок, приходит снаружи: прогон элаборации - модуль целиком.
     pub owned: &'a Owned,
+    /// Объявленные фикситеты (§4.4). Приходит снаружи по тому же доводу:
+    /// таблица собирается по ходу объявлений, а прогон элаборации - модуль.
+    pub fixities: &'a Fixities,
     /// Локальные связывания снаружи внутрь; индекс де Брёйна - расстояние от
     /// конца.
     scope: Vec<Bound>,
@@ -782,8 +786,13 @@ pub(crate) struct Elaborator<'a> {
 
 impl<'a> Elaborator<'a> {
     /// Элаборатор с пустым локальным контекстом.
-    pub(crate) fn new(signature: &'a Signature, metas: &'a mut Metas, owned: &'a Owned) -> Self {
-        Self::with_group(signature, metas, owned, Vec::new())
+    pub(crate) fn new(
+        signature: &'a Signature,
+        metas: &'a mut Metas,
+        owned: &'a Owned,
+        fixities: &'a Fixities,
+    ) -> Self {
+        Self::with_group(signature, metas, owned, fixities, Vec::new())
     }
 
     /// То же, внутри тела модуля: короткое имя члена ищется квалифицированным.
@@ -815,12 +824,14 @@ impl<'a> Elaborator<'a> {
         signature: &'a Signature,
         metas: &'a mut Metas,
         owned: &'a Owned,
+        fixities: &'a Fixities,
         group: Vec<Member>,
     ) -> Self {
         Self {
             signature,
             metas,
             owned,
+            fixities,
             ctx: Ctx::new(signature),
             scope: Vec::new(),
             group,
@@ -3592,17 +3603,15 @@ impl<'a> Elaborator<'a> {
         (call, (*result).clone())
     }
 
-    /// Цепочка операторов. Скобки расставляются по фикситетам, а их ещё нет,
-    /// поэтому цепочка длиннее одного оператора - отказ.
+    /// Цепочка операторов.
+    ///
+    /// Длиннее одного оператора - сперва расставляются скобки по объявленным
+    /// фикситетам (§4.4), и цепочка становится вложенными одноместными: той
+    /// формой, которую разбирает всё, что ниже.
     fn chain(&mut self, chain: &ast::Chain, span: Span) -> Result<Term, ElabError> {
         let [(operator, operand)] = &chain.tail[..] else {
-            // Спан - цепочка целиком: отказ про то, как расставить в ней
-            // скобки, а не про первый операнд, к операторам отношения не
-            // имеющий.
-            return Err(ElabError::Missing {
-                what: Missing::Fixities,
-                span,
-            });
+            let resolved = self.fixities.resolve(chain, span)?;
+            return self.expr(&resolved, Mult::Many);
         };
         let callee = self.name(operator)?;
         // Операнды - те же аргументы применения, и позиция у них та же:

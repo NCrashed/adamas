@@ -37,8 +37,6 @@ pub enum Missing {
     Unit,
     /// Список `[…]`.
     List,
-    /// Цепочка из нескольких операторов подряд.
-    Fixities,
     /// Связывание `Pi` без написанного типа.
     TypelessBinder,
     /// Локальные определения `where` или `let` с аргументами.
@@ -78,11 +76,6 @@ impl Missing {
             Self::Tuple => ("кортеж", "зависимых пар в ядре нет"),
             Self::Unit => ("единица `()`", "она появляется вместе с prelude"),
             Self::List => ("список", "`List` появляется вместе с prelude"),
-            Self::Fixities => (
-                "цепочка из нескольких операторов",
-                "скобки расставляются по фикситетам, а `infixl` объявляется в \
-                 prelude (§4.4)",
-            ),
             Self::TypelessBinder => (
                 "связывание без написанного типа",
                 "тип связывания `Pi` выводить не из чего: без параметра \
@@ -563,6 +556,17 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Цепочка операторов не читается по объявленным фикситетам (§4.4).
+    #[error("оператор `{operator}`: {why}")]
+    Fixity {
+        /// Имя оператора.
+        operator: Symbol,
+        /// Чем именно не читается.
+        why: &'static str,
+        /// Оператор либо пара соседних.
+        span: Span,
+    },
+
     /// Ветка хендлера не сходится с объявлением эффекта (§3.4).
     #[error("ветка `{name}`: {why}")]
     HandlerBranch {
@@ -941,6 +945,7 @@ impl ElabError {
             | Self::OwnedDiscarded { span, .. }
             | Self::ReservedOperation { span, .. }
             | Self::ConstructorRow { span, .. }
+            | Self::Fixity { span, .. }
             | Self::HandlerBranch { span, .. }
             | Self::HandlerLabel { span, .. }
             | Self::NotHandled { span, .. }

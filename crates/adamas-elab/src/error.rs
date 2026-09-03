@@ -528,14 +528,13 @@ pub enum ElabError {
     /// row у поля означала бы, что два значения с разными эффектами дают один
     /// тип, а разбор потом не знает, какое из них лежит. Подъём здесь выключен
     /// по этой же причине, а написанный руками хвост проходил мимо него.
-    #[error(
-        "хвост `{name}` в типе конструктора: поле есть данные семейства, а семейство \
-         row-параметра не несёт - напишите набор меток замкнутым"
-    )]
-    ConstructorRow {
+    #[error("хвост `{name}`: {why}")]
+    WrittenRowTail {
         /// Имя написанного хвоста.
         name: Symbol,
-        /// Написанный тип конструктора.
+        /// Почему связать его нечем - причины у конструктора и члена разные.
+        why: &'static str,
+        /// Написанный хвост.
         span: Span,
     },
 
@@ -942,7 +941,7 @@ impl ElabError {
             | Self::OwnedTopLevel { span, .. }
             | Self::OwnedDiscarded { span, .. }
             | Self::ReservedOperation { span, .. }
-            | Self::ConstructorRow { span, .. }
+            | Self::WrittenRowTail { span, .. }
             | Self::Fixity { span, .. }
             | Self::HandlerBranch { span, .. }
             | Self::HandlerLabel { span, .. }

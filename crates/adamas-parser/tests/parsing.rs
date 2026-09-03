@@ -552,10 +552,16 @@ fn the_limit_does_not_cut_on_its_own_boundary() {
 /// запись ни за что - а §4.11 (`SoA`, ECS) на широких и стоит.
 #[test]
 fn a_flat_list_that_stays_flat_is_not_bounded() {
+    // Поля значения записи - соседи, и пределом они не ограничены.
     let values = repeat(4_000, |index| format!(", f{index} = y"));
     assert!(parse(&format!("v = {{ f = y{values} }}\n")).is_ok());
+    // А список - **не** соседи: `[a, b]` есть `Cons a (Cons b Nil)`, хвост
+    // каждого звена вложен в предыдущее, и мера у него длина. Род списка
+    // читается по тому, что из него получится, а не по скобкам.
     let items = repeat(4_000, |index| format!(", x{index}"));
-    assert!(parse(&format!("v = [y{items}]\n")).is_ok());
+    assert!(parse(&format!("v = [y{items}]\n")).is_err());
+    let short = repeat(8, |index| format!(", x{index}"));
+    assert!(parse(&format!("v = [y{short}]\n")).is_ok());
 }
 
 #[test]

@@ -1,0 +1,23 @@
+-- Список: `[a, b]` есть `Cons a (Cons b Nil)` (§4.4). Имена берутся по
+-- соглашению, как `Bool` у `if`; хвост каждого звена вложен в предыдущее,
+-- поэтому мера у списка - его длина, а не соседство.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+infixl 6 +
+(+) : Nat -> Nat -> Nat
+(+) Zero m = m
+(+) (Succ k) m = Succ (k + m)
+
+sum : List Nat -> Nat
+sum Nil = Zero
+sum (Cons x xs) = x + sum xs
+
+main : Nat
+main = sum [1, 2, 3]

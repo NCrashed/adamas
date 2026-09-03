@@ -205,9 +205,16 @@ fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<
                 pending.push((Node::Expr(&alt.body), inner));
             }
         }
-        // Элементы собирает конструктор, а не цепочка: они соседи.
-        ExprKind::Tuple(items) | ExprKind::List(items) => {
+        // Элементы кортежа собирает конструктор: они соседи.
+        ExprKind::Tuple(items) => {
             let inner = deepen(depth, 1, expr.span)?;
+            pending.extend(items.iter().map(|item| (Node::Expr(item), inner)));
+        }
+        // А список - **не** соседи: `[a, b, c]` есть `Cons a (Cons b …)`, и
+        // хвост каждого звена вложен в предыдущее. Мерится он поэтому длиной,
+        // как литерал мерится значением.
+        ExprKind::List(items) => {
+            let inner = deepen(depth, items.len(), expr.span)?;
             pending.extend(items.iter().map(|item| (Node::Expr(item), inner)));
         }
         ExprKind::Chain(chain) => chain_at(chain, depth, expr.span, pending)?,

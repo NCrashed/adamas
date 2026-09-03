@@ -1,0 +1,28 @@
+-- Класс над конструктором типов (§4.4). Три вещи сходятся здесь вместе:
+-- член класса квантифицирует по своим именам, применение с головой-дыркой
+-- решается константой, а по этой константе поиск инстанса находит словарь.
+--
+-- Кратность у кинда пишется руками: умолчание §4.1 для стрелки - `ω`, а
+-- параметр семейства стёрт, и `Option` под `Type -> Type` не подходит.
+
+data Bool where
+  True : Bool
+  False : Bool
+
+data Option (a : Type) where
+  None : Option a
+  Some : a -> Option a
+
+class Functor (f : (0 _ : Type) -> Type) where
+  map : (a -> b) -> f a -> f b
+
+instance Functor Option where
+  map g None = None
+  map g (Some x) = Some (g x)
+
+not : Bool -> Bool
+not True = False
+not False = True
+
+main : Option Bool
+main = map not (Some True)

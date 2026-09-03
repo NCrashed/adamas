@@ -254,26 +254,20 @@ fn headed(
     if mine.len() != theirs.len() {
         return false;
     }
-    let arity = u32::try_from(mine.len()).unwrap_or(u32::MAX);
-    let body = Term::Const(
+    // Решение - **сама** константа, без эта-развёртки: `?m := C` превращает
+    // `?m ū ≡ C v̄` в `C ū ≡ C v̄`, то есть ровно в попарное сведение ниже.
+    // Лишние лямбды прячут голову, а по голове читают - поиск инстанса
+    // ключуется ею, и `Box (\m -> Option m)` головы не имеет. Форма решения
+    // здесь не деталь записи.
+    let solution = Term::Const(
         Rc::clone(name),
         Rc::clone(levels),
         Rows::new(
             rows.iter()
                 .map(|row| row.map(|argument| crate::eval::quote(0, argument))),
         ),
-    )
-    .apply((0..arity).map(|index| Term::var(arity - 1 - index)));
-    let mults = multiplicities(metas, meta, arity);
-    let abstracted = (0..arity).fold(body, |body, index| {
-        let depth = usize::try_from(arity - 1 - index).unwrap_or(0);
-        Term::Lam(
-            mults.get(depth).copied().unwrap_or(Mult::Many),
-            format!("m{index}").into(),
-            Rc::new(body),
-        )
-    });
-    if !well_typed(sig, metas, meta, &abstracted) {
+    );
+    if !well_typed(sig, metas, meta, &solution) {
         return false;
     }
     if !mine
@@ -285,7 +279,7 @@ fn headed(
     }
     metas.solve_term(
         meta,
-        crate::eval::eval(&crate::value::Env::default(), &abstracted),
+        crate::eval::eval(&crate::value::Env::default(), &solution),
     );
     true
 }

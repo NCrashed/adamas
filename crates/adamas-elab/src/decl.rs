@@ -2705,6 +2705,10 @@ fn declare_resource(
     resource: &ast::Resource,
     span: Span,
 ) -> Result<(), ElabError> {
+    // Элиминатор scope объявляется вместе с первым же ресурсом: раньше он
+    // предмета не имеет, а позже его было бы негде взять - вставка идёт при
+    // элаборации тел, когда объявления уже закончились.
+    declare_closing(signature, metas, span)?;
     let (constructors, destructor) = resource_members(resource)?;
 
     // Голая сигнатура - конструктор, а конструктор пишется заглавной (§4.1).
@@ -3368,6 +3372,85 @@ fn arrows(binders: Vec<(Binder, CoreName, Term)>, row: &Row<Term>, result: Term)
                 row.clone(),
                 Rc::new(codomain),
             )
+        })
+}
+
+/// Невыразимое имя элиминатора scope (§3.3).
+pub(crate) const CLOSING: &str = "#closing";
+
+/// Объявляет `#closing` - элиминатор scope, держащего ресурс.
+///
+/// Он один на программу, а не по ресурсу на штуку: ресурса в типе он не
+/// называет вовсе - оба его аргумента приостановленные вычисления, а какой
+/// именно деструктор зовётся, решено в том, что подставлено вторым.
+///
+/// Зачем он нужен, если `let held = тело in let _ = drop h in held` считает то
+/// же самое: `let` невидим машине. Продолжение - цепочка замыканий, и `drop`,
+/// оставшийся внутри неё, уходит вместе с ней, когда ветка хендлера не зовёт
+/// `resume`. Элиминатор делает scope **наблюдаемым**: машина видит, что вошла
+/// в него, и знает, что при обрыве отсюда надо запустить отложенное.
+///
+/// # Errors
+///
+/// Те же, что у [`Signature::declare`], плюс отсутствие `Unit` в сигнатуре.
+fn declare_closing(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    span: Span,
+) -> Result<(), ElabError> {
+    if signature.lookup(CLOSING).is_some() {
+        return Ok(());
+    }
+    // Единицы в программе может не быть, и это не отказ: приостановленное
+    // вычисление `{ε} A` есть функция от неё, значит без неё нет ни эффектов,
+    // ни обрыва через них - раскручивать нечего. Вставка тогда идёт прежней
+    // формой, тоже в точку выхода, только машине она невидима.
+    let Some(unit) = signature.instantiate(UNIT, metas) else {
+        return Ok(());
+    };
+    let rho = metas.fresh_row();
+    // Приостановленное вычисление: `{ρ} t` есть нульместная функция от единицы.
+    let suspended = |result: u32| {
+        Term::Pi(
+            Binder::explicit(Mult::Many),
+            CoreName::from("_"),
+            Rc::new(unit.clone()),
+            rho.clone(),
+            Rc::new(Term::var(result)),
+        )
+    };
+    let binders = vec![
+        (
+            Binder::implicit(Mult::Zero),
+            CoreName::from("a"),
+            Term::Universe(metas.fresh_level()),
+        ),
+        (
+            Binder::implicit(Mult::Zero),
+            CoreName::from("b"),
+            Term::Universe(metas.fresh_level()),
+        ),
+        // Тело и деструктор - оба по разу: деструктор зовётся либо на выходе,
+        // либо при раскрутке, но не дважды. Кратность `1` это и говорит, а
+        // заодно пропускает захват ресурса замыканием: `ω` умножил бы его
+        // расход и отверг бы то, что §3.3 разрешает.
+        (Binder::explicit(Mult::One), CoreName::from("body"), {
+            suspended(2)
+        }),
+        (Binder::explicit(Mult::One), CoreName::from("close"), {
+            suspended(2)
+        }),
+    ];
+    let ty = arrows(binders, &rho, Term::var(3));
+    signature
+        .declare(
+            metas,
+            &Group::of(SigMember::definition(CLOSING, Mult::Many, ty)),
+        )
+        .map_err(|error| ElabError::Core {
+            span,
+            error: Box::new(error),
+            names: Names::of(&Rc::from(CLOSING), Vec::new()),
         })
 }
 

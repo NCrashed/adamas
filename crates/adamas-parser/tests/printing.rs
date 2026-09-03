@@ -56,6 +56,101 @@ both : Bool -> {IO, State Bool | e} Bool
 ",
     ),
     (
+        "effect_declarations",
+        "\
+effect State s where
+  put : s -> Unit
+  get : s
+
+effect Big (s : Type) a where
+  op : s -> a
+
+effect Alt where
+  (<|>) : a -> a -> a
+
+effect Empty
+",
+    ),
+    (
+        "handlers",
+        "\
+handled = handle counted with
+  return v -> v
+  get -> resume True
+  put x -> resume MkUnit
+
+twice = handleMulti counted with
+  get -> resume (resume True)
+
+pinned = handle @(State Nat) nested with
+  put _ -> resume MkUnit
+
+bare = handle @State nested with
+  get -> resume Zero
+
+passed = g handle counted with
+  get -> 1
+
+deep = handle counted with
+  get -> case x of
+           A -> 1
+  put y -> 2
+
+bound =
+  let x = handle counted with
+            get -> 1
+  x
+
+named = y
+  where
+    y = handle counted with
+          get -> 1
+",
+    ),
+    (
+        "rows_in_every_position",
+        "\
+counted : {State Bool} Bool
+
+named : Bool -> {State Bool | e} Unit
+
+runState : Bool -> ({State Bool} Bool) -> Bool
+
+leading : {IO} A -> B
+
+several : {Log, State Bool, IO | e} Unit
+
+nested : {State ({IO} Nat)} Bool
+
+field : {x : {IO} Nat}
+
+grouped : ({IO} A, B)
+
+listed : [{IO} A]
+
+bound : (0 a : {IO} Nat) -> a
+
+constrained : {Eqv a} => {IO} a
+
+type Eff a = {IO} a
+
+data D where
+  C : {IO} Nat -> D
+
+class C a where
+  m : a -> {IO} a
+",
+    ),
+    (
+        "sequence_of_statements",
+        "\
+swap b =
+  put b
+  put True
+  get
+",
+    ),
+    (
         "parameter_defaults",
         "\
 data Pair (a : Type) (b = a) where
@@ -333,7 +428,22 @@ fn expression() -> impl Strategy<Value = String> {
                 .prop_map(|(c, t, e)| format!("(if {c} then {t} else {e})")),
             inner.clone().prop_map(|body| format!("(\\z -> {body})")),
             inner.clone().prop_map(|item| format!("[{item}]")),
-            inner.prop_map(|argument| format!("(g @({argument}))")),
+            inner
+                .clone()
+                .prop_map(|argument| format!("(g @({argument}))")),
+            // Формы Фазы 4, каждая скобочно замкнута: row стоит перед типом, и
+            // без скобок она захватывала бы то, что идёт следом.
+            inner.clone().prop_map(|body| format!("({{IO}} {body})")),
+            inner
+                .clone()
+                .prop_map(|body| format!("({{State {body}}} y)")),
+            inner
+                .clone()
+                .prop_map(|body| format!("({{IO | e}} {body})")),
+            inner
+                .clone()
+                .prop_map(|body| format!("({{Log, State y | e}} {body})")),
+            inner.prop_map(|ty| format!("{{f : {ty}}}")),
         ]
     })
 }
@@ -368,6 +478,20 @@ fn declaration() -> impl Strategy<Value = String> {
         expression().prop_map(|body| format!("f = g case z of\n  A -> {body}\n")),
         expression().prop_map(|body| format!("f = g \\w -> case w of\n  A -> {body}\n")),
         expression().prop_map(|operand| format!("f = {operand} + case z of\n  A -> 1\n")),
+        // Объявление эффекта и хендлер: блок операций, блок веток, метка за
+        // `@` и хендлер в хвостовой позиции - у каждого свой отступ при печати.
+        expression().prop_map(|ty| format!("effect E s where\n  op : {ty}\n")),
+        expression().prop_map(|ty| format!("effect E s where\n  op : {ty}\n  op2 : s\n")),
+        expression().prop_map(|body| format!("f = handle c with\n  get -> {body}\n")),
+        expression().prop_map(|body| format!("f = handleMulti c with\n  get -> {body}\n")),
+        (expression(), expression())
+            .prop_map(|(c, b)| format!("f = handle {c} with\n  put z -> {b}\n  return v -> v\n")),
+        expression().prop_map(|body| format!("f = handle @State c with\n  get -> {body}\n")),
+        expression()
+            .prop_map(|argument| format!("f = handle @(State {argument}) c with\n  get -> 1\n")),
+        expression().prop_map(|body| format!("f = g handle c with\n  get -> {body}\n")),
+        (expression(), expression()).prop_map(|(a, b)| format!("f =\n  {a}\n  {b}\n  g x\n")),
+        expression().prop_map(|ty| format!("type Eff a = {ty}\n")),
     ]
 }
 

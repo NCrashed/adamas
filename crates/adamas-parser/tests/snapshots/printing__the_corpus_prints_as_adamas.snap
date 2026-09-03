@@ -26,6 +26,74 @@ module type BagSig where
 State : Type -> Effect
 step : Bool -> {State Bool} Bool
 both : Bool -> {IO, State Bool | e} Bool
+=== effect_declarations
+effect State s where
+  put : s -> Unit
+  get : s
+
+effect Big (s : Type) a where
+  op : s -> a
+
+effect Alt where
+  (<|>) : a -> a -> a
+
+effect Empty
+=== handlers
+handled = handle counted with
+  return v -> v
+  get -> resume True
+  put x -> resume MkUnit
+
+twice = handleMulti counted with
+  get -> resume (resume True)
+
+pinned = handle @(State Nat) nested with
+  put _ -> resume MkUnit
+
+bare = handle @State nested with
+  get -> resume Zero
+
+passed = g handle counted with
+  get -> 1
+
+deep = handle counted with
+  get -> case x of
+    A -> 1
+  put y -> 2
+
+bound =
+  let x = handle counted with
+        get -> 1
+  x
+
+named = y
+  where
+    y = handle counted with
+      get -> 1
+=== rows_in_every_position
+counted : {State Bool} Bool
+named : Bool -> {State Bool | e} Unit
+runState : Bool -> ({State Bool} Bool) -> Bool
+leading : {IO} A -> B
+several : {Log, State Bool, IO | e} Unit
+nested : {State ({IO} Nat)} Bool
+field : {x : {IO} Nat}
+grouped : ({IO} A, B)
+listed : [{IO} A]
+bound : (0 a : {IO} Nat) -> a
+constrained : {_ : Eqv a} -> {IO} a
+type Eff a = {IO} a
+
+data D where
+  C : {IO} Nat -> D
+
+class C a where
+  m : a -> {IO} a
+=== sequence_of_statements
+swap b =
+  put b
+  put True
+  get
 === parameter_defaults
 data Pair (a : Type) (b = a) where
   Both : a -> b -> Pair a b

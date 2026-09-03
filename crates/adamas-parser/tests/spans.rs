@@ -14,8 +14,9 @@
 
 use adamas_core::source::Span;
 use adamas_parser::ast::{
-    Alt, Binder, Binding, Block, Clause, Data, Decl, DeclKind, EffectDecl, Expr, ExprKind,
-    HandlerBranch, LamParamKind, Module, Name, Pattern, PatternKind, Resource, Stmt, StmtKind,
+    Alt, Binder, Binding, Block, Clause, Data, Decl, DeclKind, EffectDecl, EffectLabel, Expr,
+    ExprKind, HandlerBranch, LamParamKind, Module, Name, Pattern, PatternKind, Resource, Stmt,
+    StmtKind,
 };
 use adamas_parser::parse;
 use proptest::prelude::*;
@@ -154,7 +155,19 @@ impl Spans<'_> {
         }
     }
 
-    fn handler(&mut self, at: Span, computation: &Expr, branches: &[HandlerBranch]) {
+    fn handler(
+        &mut self,
+        at: Span,
+        label: Option<&EffectLabel>,
+        computation: &Expr,
+        branches: &[HandlerBranch],
+    ) {
+        if let Some(label) = label {
+            self.name(at, &label.name);
+            for argument in &label.arguments {
+                self.expr(at, argument);
+            }
+        }
         self.expr(at, computation);
         for branch in branches {
             self.inside("ветка", at, branch.span);
@@ -271,10 +284,11 @@ impl Spans<'_> {
                 self.expr(at, else_branch);
             }
             ExprKind::Handle {
+                label,
                 computation,
                 branches,
                 ..
-            } => self.handler(at, computation, branches),
+            } => self.handler(at, label.as_deref(), computation, branches),
             ExprKind::Case { scrutinee, alts } => self.alts(at, scrutinee, alts),
             ExprKind::Tuple(items) | ExprKind::List(items) => {
                 for item in items {
@@ -379,6 +393,19 @@ const FORMS: &[&str] = &[
     "f = \\(0 a : Type) x -> x\ng = \\() -> get\n",
     "f = g (-42)\nh = x - 42\nk = a + b * c\n",
     "f = (a, b, c)\ng = [1, 2, 3]\nh = ((a))\n",
+    // Формы Фазы 4. Спан объявления эффекта кончается блоком операций, спан
+    // ветки - своим телом, а метка за `@` стоит **до** вычисления, и обход
+    // обязан в неё заходить: иначе её поддерево не проверяется вовсе.
+    "effect State s where\n  put : s -> Unit\n  get : s\n",
+    "effect Empty\n\neffect Big (s : Type) a where\n  op : s -> a\n",
+    "f : Bool -> {State Bool} Unit\ng : {Log, State Bool | e} Unit\n",
+    "f : ({State Bool} Bool) -> Bool\n",
+    "h = handle c with\n  return v -> v\n  get -> resume True\n  put x -> resume MkUnit\n",
+    "h = handleMulti c with\n  get -> resume (resume True)\n",
+    "h = handle @State c with\n  get -> 1\n\nk = handle @(State Nat) c with\n  get -> 1\n",
+    "h = g handle c with\n  get -> 1\n",
+    "h = handle c with\n  get -> case x of\n           A -> 1\n  put y -> 2\n",
+    "f =\n  put b\n  put True\n  get\n",
 ];
 
 #[test]
@@ -390,8 +417,12 @@ fn spans_of_every_form_nest() {
 
 proptest! {
     /// То же свойство на всём, что вообще разбирается.
+    ///
+    /// Алфавит несёт заглавные, `|` и `@`: без них не порождается ни метка, ни
+    /// хвост row, ни `@`-аннотация, то есть весь синтаксис Фазы 4 проходил
+    /// мимо случайного текста.
     #[test]
-    fn spans_of_a_parsed_tree_nest(text in r"[a-z=(){}\[\]:,\n ]{0,120}") {
+    fn spans_of_a_parsed_tree_nest(text in r"[a-zA-Z=(){}\[\]:,|@\n -]{0,120}") {
         let found = problems(&text);
         prop_assert!(found.is_empty(), "{found:?}");
     }

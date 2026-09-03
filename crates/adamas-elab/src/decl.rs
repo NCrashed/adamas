@@ -858,7 +858,15 @@ fn declare_class(
             error: Box::new(error),
             names: names.clone(),
         })?;
-        Ok((record, level))
+        // Через значение, а не зонканьем: домен поднятого связывания есть
+        // дырка терма, решается она универсумом, и решение подставляется как
+        // записано - `?m #0` даёт бета-редекс `(\m -> Type u) a` вместо
+        // `Type u`. Обратное чтение из значения его сводит, и тогда уровень
+        // виден и типу словаря, и обобщению (тот же приём, что у головы
+        // инстанса, лог 2026-08-31).
+        let zonked = zonk_term(it.metas, &record);
+        let value = it.valued(&zonked);
+        Ok((quote(it.depth(), &value), level))
     })?;
     let sort = Term::Universe(metas.zonk(&level));
     let ty =

@@ -34,7 +34,9 @@ crates/adamas-core        QTT-ядро: термы, вычисление, про
                           сборка клауз в дерево разбора, тотальность
 crates/adamas-parser      лексер, значимые отступы, разбор, обратная печать
 crates/adamas-elab        поверхностный язык в термы ядра; вне TCB
+crates/adamas-interp      исполнение термов ядра с хендлерами эффектов
 crates/adamas-cli         драйвер `adamas`; из команд §7.1 есть `check`
+                          и `eval`
 crates/adamas-lsp         заглушка; language server - Фаза 3
 crates/adamas-warmup-stlc учебный STLC+HM Фазы 0: лексер, парсер,
                           bidirectional-вывод типов, интерпретатор

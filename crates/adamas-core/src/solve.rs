@@ -90,6 +90,13 @@ pub fn solve(
     spine: &[Elim],
     right: &Rc<Value>,
 ) -> bool {
+    // Спайн не паттерн - пробуем голову-константу. Отбрасывание позиции ниже
+    // решает такую задачу постоянной функцией: `?f Bool ≡ Option Bool` даёт
+    // `?f := \_ -> Option Bool`, и `f Nat` остаётся `Option Bool`. Решение
+    // законно по типам и **неверно** по смыслу, а верное здесь единственно.
+    if !exact(spine) && headed(sig, metas, size, meta, spine, right) {
+        return true;
+    }
     let Some(renaming) = pattern(spine) else {
         return false;
     };
@@ -202,6 +209,96 @@ fn multiplicities(metas: &Metas, meta: TermMeta, arity: u32) -> Vec<Mult> {
 fn well_typed(sig: &Signature, metas: &mut Metas, meta: TermMeta, solution: &Term) -> bool {
     let ty = Rc::clone(metas.term_type(meta));
     crate::check::check(&Ctx::new(sig), metas, Mult::Zero, solution, &ty).is_ok()
+}
+
+/// Все ли позиции спайна - переменные контекста.
+///
+/// Паттерновым фрагментом Миллера задача считается только тогда; ниже
+/// [`pattern`] позволяет себе отбросить позицию, и вот **для отброшенной**
+/// голова-константа и нужна.
+fn exact(spine: &[Elim]) -> bool {
+    spine.iter().all(|elim| {
+        matches!(
+            elim,
+            Elim::App(argument)
+                if matches!(&**argument, Value::Neutral(Head::Local(_), inner) if inner.is_empty())
+        )
+    })
+}
+
+/// Решает `?m ū ≡ C v̄` при совпадающих арностях: `?m := C`, аргументы попарно.
+///
+/// Решение единственно ровно при этих условиях. Голова правой части -
+/// константа, то есть подставить вместо `?m` что-либо, кроме неё, нельзя, не
+/// потеряв головы; арности совпадают, то есть эта-развёрнутая `C` подходит по
+/// форме. Обобщать это на переменную-голову нельзя - там решений несколько, и
+/// выбор был бы догадкой.
+///
+/// Аргументы сводятся **до** записи решения: записанное решение окончательно
+/// (backtracking'а нет), и оставлять его после неудачного сведения значило бы
+/// портить состояние отказом, который вызывающий вправе перебирать.
+fn headed(
+    sig: &Signature,
+    metas: &mut Metas,
+    size: u32,
+    meta: TermMeta,
+    spine: &[Elim],
+    right: &Rc<Value>,
+) -> bool {
+    let Value::Neutral(Head::Global(name, levels, rows), other) = &**right else {
+        return false;
+    };
+    let (Some(mine), Some(theirs)) = (applied(spine), applied(other)) else {
+        return false;
+    };
+    if mine.len() != theirs.len() {
+        return false;
+    }
+    let arity = u32::try_from(mine.len()).unwrap_or(u32::MAX);
+    let body = Term::Const(
+        Rc::clone(name),
+        Rc::clone(levels),
+        Rows::new(
+            rows.iter()
+                .map(|row| row.map(|argument| crate::eval::quote(0, argument))),
+        ),
+    )
+    .apply((0..arity).map(|index| Term::var(arity - 1 - index)));
+    let mults = multiplicities(metas, meta, arity);
+    let abstracted = (0..arity).fold(body, |body, index| {
+        let depth = usize::try_from(arity - 1 - index).unwrap_or(0);
+        Term::Lam(
+            mults.get(depth).copied().unwrap_or(Mult::Many),
+            format!("m{index}").into(),
+            Rc::new(body),
+        )
+    });
+    if !well_typed(sig, metas, meta, &abstracted) {
+        return false;
+    }
+    if !mine
+        .iter()
+        .zip(&theirs)
+        .all(|(mine, theirs)| crate::conv::convertible(sig, metas, size, mine, theirs))
+    {
+        return false;
+    }
+    metas.solve_term(
+        meta,
+        crate::eval::eval(&crate::value::Env::default(), &abstracted),
+    );
+    true
+}
+
+/// Аргументы спайна, если он состоит из одних применений.
+fn applied(spine: &[Elim]) -> Option<Vec<Rc<Value>>> {
+    spine
+        .iter()
+        .map(|elim| match elim {
+            Elim::App(argument) => Some(Rc::clone(argument)),
+            Elim::Project(_) | Elim::With(_) | Elim::Case(_) => None,
+        })
+        .collect()
 }
 
 /// Спайн как паттерн: различные переменные контекста и ничего больше.

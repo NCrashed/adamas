@@ -26,7 +26,7 @@ enum Command {
         /// Путь к файлу `.adamas`.
         path: PathBuf,
     },
-    /// Проверить и вычислить определение до нормальной формы (§9 Фаза 5).
+    /// Проверить и исполнить определение (§9 Фаза 5).
     Eval {
         /// Путь к файлу `.adamas`.
         path: PathBuf,
@@ -47,12 +47,11 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Вычисляет определение и печатает нормальную форму.
+/// Исполняет определение и печатает значение.
 ///
-/// Это **нормализация**, а не исполнение: стирания нет, поэтому стёртые
-/// аргументы видны в ответе, а эффекты не производятся - их производит
-/// evidence, которой пока нет. Наблюдать построенный терм этого довольно, и
-/// ради наблюдения оно и заведено (§9 Фаза 5, первый пункт).
+/// Считает **машина** (`adamas-interp`), а не `conv::evaluated`: эффекты
+/// производятся, хендлеры срабатывают. Стирания по-прежнему нет, поэтому
+/// стёртые аргументы видны в ответе - оно придёт с понижением (§9 Фаза 5).
 fn evaluate(path: &Path, name: &str) -> anyhow::Result<()> {
     let (_, signature) = checked(path)?;
     let Some(definition) = signature.lookup(name) else {
@@ -70,7 +69,7 @@ fn evaluate(path: &Path, name: &str) -> anyhow::Result<()> {
         .collect();
     let rows: Vec<Row<Term>> = (0..definition.row_arity).map(|_| Row::empty()).collect();
     let body = body.substitute_levels(&levels).substitute_rows(&rows);
-    println!("{}", adamas_core::conv::evaluated(&signature, &body));
+    println!("{}", adamas_interp::run(&signature, &body)?);
     Ok(())
 }
 

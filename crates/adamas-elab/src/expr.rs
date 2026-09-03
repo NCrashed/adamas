@@ -31,6 +31,33 @@ use crate::fixity::Fixities;
 use crate::live;
 use crate::own::Owned;
 
+/// Умолчание кратности с поправкой на домен-универсум (§4.1).
+///
+/// Аргумент-тип стирается: типов в рантайме нет вовсе, и `Level` с `Effect`
+/// дизайн объявил всегда стёртыми ровно поэтому. Без этого `Type -> Type`
+/// читается при `ω`, а параметр семейства стёрт, и `Option` под написанный
+/// кинд не подходит.
+///
+/// Поправка **позиционная**, как и само умолчание. Она не трогает ни поле
+/// конструктора - там умолчание `1`, и `MkDyn : (a : Type) -> a -> Dyn`
+/// хранит тип, а стерев его, разбор перестал бы отдавать хранимое, - ни
+/// телескоп параметров объявления: у алиаса `type Id (a : Type) = a` тело и
+/// есть параметр, то есть расходует его однажды.
+fn kinded(written: Option<ast::MultAnn>, ty: &Expr, default: Mult) -> Mult {
+    if written.is_none() && default == Mult::Many && universe(ty) {
+        return Mult::Zero;
+    }
+    default
+}
+
+/// Написан ли универсум: `Type` и ничего больше.
+///
+/// Проверка синтаксическая, и это не приближение: конкретный универсум в
+/// поверхностном языке не пишется (§3.2), поэтому иных записей у него нет.
+fn universe(ty: &Expr) -> bool {
+    matches!(&ty.kind, ExprKind::Name(name) if &*name.text == "Type")
+}
+
 /// Имя единицы. Соглашение то же, каким `if` берёт `Bool` (§3.4): типа этого
 /// ядро не знает, а сахар `{ε} A` без него не разворачивается.
 pub(crate) const UNIT: &str = "Unit";
@@ -1728,32 +1755,7 @@ impl<'a> Elaborator<'a> {
             // вложенности парсера на плоское `f a b c …` не тратится, и тысячи
             // аргументов роняли процесс вместо отказа (§10 вопрос 62).
             ExprKind::App(..) => self.application(expr),
-            ExprKind::Arrow(domain, codomain) => {
-                // Стрелка связывает так же, как `(x : A) ->`, только без
-                // имени, поэтому правило владения (§3.3) действует и здесь:
-                // `drop : File -> Unit` даёт `(1 _ : File) -> Unit`, и писать
-                // кратность руками не нужно.
-                let mult = self.binder_mult(None, domain, default, expr.span)?;
-                let domain = self.expr(domain, Mult::Many)?;
-                let anonymous: Symbol = Rc::from("_");
-                let bound = self.typed(&domain);
-                // Row снимается с кодомена и встаёт полем стрелки: написана она
-                // перед типом результата, а описывает применение (§3.4).
-                let (row, codomain) = split_row(codomain);
-                let row = self.effects(row)?;
-                let codomain = self.under(&anonymous, mult, bound, |inner| {
-                    inner.expr(codomain, default)
-                })?;
-                Ok(Term::Pi(
-                    // Стрелка пишется без скобок, поэтому связывание у неё
-                    // явное: выводить нечего, аргумент стоит в месте вызова.
-                    Binder::explicit(mult),
-                    CoreName::from("_"),
-                    Rc::new(domain),
-                    row,
-                    Rc::new(codomain),
-                ))
-            }
+            ExprKind::Arrow(domain, codomain) => self.arrow(domain, codomain, default, expr.span),
             ExprKind::Pi { binders, codomain } => self.pi(binders, codomain, default),
             ExprKind::Effectful { .. } => self.suspended(expr, default),
             ExprKind::Lam { params, body } => {
@@ -2098,6 +2100,40 @@ impl<'a> Elaborator<'a> {
             && found.iter().zip(wanted).all(|(found, wanted)| {
                 convertible(self.signature, self.metas, self.ctx.size(), found, wanted)
             })
+    }
+
+    /// `A -> B`: связывание без имени.
+    ///
+    /// Правило владения (§3.3) действует и здесь: `drop : File -> Unit` даёт
+    /// `(1 _ : File) -> Unit`, и писать кратность руками не нужно. Домен-
+    /// универсум даёт `0` - см. [`kinded`].
+    fn arrow(
+        &mut self,
+        domain: &Expr,
+        codomain: &Expr,
+        default: Mult,
+        span: Span,
+    ) -> Result<Term, ElabError> {
+        let mult = self.binder_mult(None, domain, kinded(None, domain, default), span)?;
+        let domain = self.expr(domain, Mult::Many)?;
+        let anonymous: Symbol = Rc::from("_");
+        let bound = self.typed(&domain);
+        // Row снимается с кодомена и встаёт полем стрелки: написана она перед
+        // типом результата, а описывает применение (§3.4).
+        let (row, codomain) = split_row(codomain);
+        let row = self.effects(row)?;
+        let codomain = self.under(&anonymous, mult, bound, |inner| {
+            inner.expr(codomain, default)
+        })?;
+        Ok(Term::Pi(
+            // Стрелка пишется без скобок, поэтому связывание у неё явное:
+            // выводить нечего, аргумент стоит в месте вызова.
+            Binder::explicit(mult),
+            CoreName::from("_"),
+            Rc::new(domain),
+            row,
+            Rc::new(codomain),
+        ))
     }
 
     /// Числовой литерал (§4.3).
@@ -3329,7 +3365,12 @@ impl<'a> Elaborator<'a> {
                     span: binder.span,
                 });
             };
-            let mult = self.binder_mult(binder.mult, ty, default, binder.span)?;
+            let mult = self.binder_mult(
+                binder.mult,
+                ty,
+                kinded(binder.mult, ty, default),
+                binder.span,
+            )?;
             for (siblings, name) in binder.names.iter().enumerate() {
                 Self::binds(name)?;
                 flat.push(Written {

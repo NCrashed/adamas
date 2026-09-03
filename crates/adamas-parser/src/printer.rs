@@ -251,6 +251,15 @@ impl Printer {
             }
             DeclKind::Resource(resource) => self.resource(resource),
             DeclKind::Effect(effect) => self.effect_decl(effect),
+            DeclKind::Fixity(fixity) => {
+                self.push(fixity.assoc.keyword());
+                self.push(" ");
+                self.push(&fixity.precedence.to_string());
+                for (index, operator) in fixity.operators.iter().enumerate() {
+                    self.push(if index == 0 { " " } else { ", " });
+                    self.push(&operator.text);
+                }
+            }
         }
     }
 

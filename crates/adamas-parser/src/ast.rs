@@ -486,6 +486,8 @@ pub enum DeclKind {
     Resource(Resource),
     /// Объявление эффекта: `effect State s where …` (§3.4).
     Effect(EffectDecl),
+    /// Фикситет: `infixl 6 +, -` (§4.4).
+    Fixity(FixityDecl),
 }
 
 /// Класс или его инстанс.
@@ -586,6 +588,43 @@ pub struct Constructor {
     pub ty: Expr,
     /// Конструктор целиком.
     pub span: Span,
+}
+
+/// Ассоциативность оператора (§4.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Assoc {
+    /// `infixl` - левая.
+    Left,
+    /// `infixr` - правая.
+    Right,
+    /// `infix` - цепочка без скобок запрещена.
+    None,
+}
+
+impl Assoc {
+    /// Как написано.
+    #[must_use]
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Left => "infixl",
+            Self::Right => "infixr",
+            Self::None => "infix",
+        }
+    }
+}
+
+/// Объявление фикситета: `infixl 6 +, -` (§4.4).
+///
+/// Оператор отделён от класса намеренно: приоритет принадлежит записи, а не
+/// тому, что за ней стоит, и одна функция бывает под несколькими операторами.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixityDecl {
+    /// Ассоциативность.
+    pub assoc: Assoc,
+    /// Приоритет 0-9, как в Haskell.
+    pub precedence: u8,
+    /// Операторы, которым он объявлен.
+    pub operators: Vec<Name>,
 }
 
 /// Объявление эффекта (§3.4).
@@ -955,6 +994,16 @@ fn dump_decl(out: &mut String, decl: &Decl, depth: usize) {
             out.push(')');
         }
         DeclKind::Effect(effect) => dump_effect(out, effect, depth),
+        DeclKind::Fixity(fixity) => {
+            out.push('(');
+            out.push_str(fixity.assoc.keyword());
+            out.push(char::from(b'0' + fixity.precedence));
+            for operator in &fixity.operators {
+                out.push(' ');
+                out.push_str(&operator.text);
+            }
+            out.push(')');
+        }
         DeclKind::Data(data) => {
             out.push_str("(data ");
             out.push_str(&data.name.text);

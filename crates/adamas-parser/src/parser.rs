@@ -59,10 +59,10 @@ use std::rc::Rc;
 use adamas_core::source::Span;
 
 use crate::ast::{
-    Alt, Binder, Binding, Block, Chain, ClassDecl, Clause, Constructor, Data, Decl, DeclKind,
-    EffectDecl, EffectLabel, Expr, ExprKind, HandlerBranch, LamParam, LamParamKind, Lit, LitKind,
-    Module, ModuleDecl, Mult, MultAnn, Name, Operation, Pattern, PatternKind, RecordField,
-    Resource, Stmt, StmtKind, Symbol, Visibility, contains_block,
+    Alt, Assoc, Binder, Binding, Block, Chain, ClassDecl, Clause, Constructor, Data, Decl,
+    DeclKind, EffectDecl, EffectLabel, Expr, ExprKind, FixityDecl, HandlerBranch, LamParam,
+    LamParamKind, Lit, LitKind, Module, ModuleDecl, Mult, MultAnn, Name, Operation, Pattern,
+    PatternKind, RecordField, Resource, Stmt, StmtKind, Symbol, Visibility, contains_block,
 };
 use crate::token::{Token, TokenKind};
 
@@ -186,6 +186,13 @@ pub enum ParseError {
         span: Span,
     },
 
+    /// Приоритет фикситета вне 0-9.
+    #[error("приоритет пишется числом от 0 до 9 (§4.4)")]
+    Precedence {
+        /// Где написан.
+        span: Span,
+    },
+
     /// В одной записи и объявления полей, и присваивания.
     #[error("запись либо объявляет поля, либо присваивает им значения")]
     MixedRecord {
@@ -282,6 +289,7 @@ impl ParseError {
     pub fn span(&self) -> Span {
         match self {
             Self::EmptyRecord { span }
+            | Self::Precedence { span }
             | Self::MixedRecord { span }
             | Self::Expected { span, .. }
             | Self::Multiplicity { span }
@@ -464,7 +472,6 @@ impl<'a> Parser<'a> {
             TokenKind::When => Unsupported::Class,
             TokenKind::Using => Unsupported::NamedInstance,
             TokenKind::Import => Unsupported::Import,
-            TokenKind::Infix | TokenKind::Infixl | TokenKind::Infixr => Unsupported::Fixity,
             TokenKind::LBrace => Unsupported::Braces,
             _ => return None,
         };
@@ -548,6 +555,7 @@ impl<'a> Parser<'a> {
             TokenKind::Unique => self.unique_data(),
             TokenKind::Resource => self.resource(),
             TokenKind::Effect => self.effect_decl(),
+            TokenKind::Infix | TokenKind::Infixl | TokenKind::Infixr => self.fixity(),
             TokenKind::Type => self.alias(),
             TokenKind::Module => self.module_decl(),
             TokenKind::Class | TokenKind::Instance => self.class_decl(false),
@@ -726,6 +734,45 @@ impl<'a> Parser<'a> {
         let ty = self.expr()?;
         let span = name.span.merge(ty.span);
         Ok(Constructor { name, ty, span })
+    }
+
+    /// `infixl 6 +, -` (§4.4). Приоритет 0-9, как в Haskell.
+    fn fixity(&mut self) -> Result<Decl, ParseError> {
+        let opening = self.peek();
+        let assoc = match opening.kind {
+            TokenKind::Infixl => Assoc::Left,
+            TokenKind::Infixr => Assoc::Right,
+            _ => Assoc::None,
+        };
+        let start = self.bump().span;
+        let digits = self.expect(TokenKind::Nat)?;
+        let text = digits.text(self.text);
+        let Ok(precedence) = text.parse::<u8>() else {
+            return Err(ParseError::Precedence { span: digits.span });
+        };
+        if precedence > 9 {
+            return Err(ParseError::Precedence { span: digits.span });
+        }
+        let mut operators = Vec::new();
+        loop {
+            let token = self.expect(TokenKind::Operator)?;
+            operators.push(Name {
+                text: self.symbol(token),
+                span: token.span,
+            });
+            if self.eat(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        let end = operators.last().map_or(start, |last| last.span);
+        Ok(Decl {
+            kind: DeclKind::Fixity(FixityDecl {
+                assoc,
+                precedence,
+                operators,
+            }),
+            span: start.merge(end),
+        })
     }
 
     /// `effect Name param* where` и блок операций (§3.4).

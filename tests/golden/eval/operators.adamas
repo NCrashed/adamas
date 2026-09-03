@@ -1,0 +1,25 @@
+-- Фикситеты: скобки в цепочке расставляются по объявленным приоритетам
+-- (§4.4). `1 + 2 * 2` есть `1 + (2 * 2)`, и вычисление это показывает.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+infixl 6 +
+(+) : Nat -> Nat -> Nat
+(+) Zero m = m
+(+) (Succ k) m = Succ (k + m)
+
+infixl 7 *
+(*) : Nat -> Nat -> Nat
+(*) Zero m = Zero
+(*) (Succ k) m = m + (k * m)
+
+one : Nat
+one = Succ Zero
+
+two : Nat
+two = one + one
+
+main : Nat
+main = one + two * two

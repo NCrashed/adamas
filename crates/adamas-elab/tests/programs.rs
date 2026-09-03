@@ -145,6 +145,29 @@ two = 2
 }
 
 #[test]
+fn a_list_is_built_right_to_left() {
+    // §4.4: `[a, b]` есть `Cons a (Cons b Nil)`, имена по соглашению.
+    let signature = program(&format!(
+        "{BASE}
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+items : List Bool
+items = [True, False]
+
+empty : List Bool
+empty = []
+"
+    ));
+    assert_eq!(
+        value(&signature, "items"),
+        "Cons{0} Bool True (Cons{0} Bool False (Nil{0} Bool))"
+    );
+    assert_eq!(value(&signature, "empty"), "Nil{0} Bool");
+}
+
+#[test]
 fn a_numeral_is_measured_by_its_value() {
     // Одна лексема даёт столько звеньев, сколько в ней написано, и предел
     // вложенности обязан считать её значением - иначе короткая запись роняет
@@ -638,7 +661,6 @@ fn what_the_core_cannot_carry_yet_names_itself() {
         ),
         ("f : Nat\nf = (Zero, Zero)\n", Missing::Tuple),
         ("f : Nat\nf = ()\n", Missing::Unit),
-        ("f : Nat\nf = [Zero]\n", Missing::List),
         (
             "f : Nat -> Nat\nf x = y\n  where\n    y : Nat\n    y = x\n",
             Missing::LocalDefinitions,

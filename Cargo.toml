@@ -4,6 +4,7 @@ members = [
     "crates/adamas-core",
     "crates/adamas-parser",
     "crates/adamas-elab",
+    "crates/adamas-interp",
     "crates/adamas-cli",
     "crates/adamas-lsp",
     # Учебный крейт Фазы 0 (§9). Удаляется вместе с этой строкой.
@@ -24,6 +25,7 @@ repository = "https://github.com/NCrashed/adamas"
 adamas-core = { path = "crates/adamas-core", version = "0.0.0" }
 adamas-parser = { path = "crates/adamas-parser", version = "0.0.0" }
 adamas-elab = { path = "crates/adamas-elab", version = "0.0.0" }
+adamas-interp = { path = "crates/adamas-interp", version = "0.0.0" }
 
 # Строгие defaults (CONTRIBUTING.md, «Стиль кода»).
 [workspace.lints.rust]

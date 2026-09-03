@@ -1,0 +1,23 @@
+[package]
+name = "adamas-interp"
+description = "Adamas interpreter: running core terms with effect handlers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+adamas-core.workspace = true
+thiserror = "2"
+
+[dev-dependencies]
+adamas-elab.workspace = true
+adamas-parser.workspace = true

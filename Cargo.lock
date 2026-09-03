@@ -8,6 +8,7 @@ version = "0.0.0"
 dependencies = [
  "adamas-core",
  "adamas-elab",
+ "adamas-interp",
  "adamas-parser",
  "anyhow",
  "clap",
@@ -33,6 +34,16 @@ dependencies = [
  "adamas-parser",
  "insta",
  "proptest",
+ "thiserror",
+]
+
+[[package]]
+name = "adamas-interp"
+version = "0.0.0"
+dependencies = [
+ "adamas-core",
+ "adamas-elab",
+ "adamas-parser",
  "thiserror",
 ]
 

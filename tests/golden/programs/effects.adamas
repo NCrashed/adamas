@@ -110,8 +110,13 @@ swap b =
 -- `resume` связывает сама форма. При `handle` она аффинна - «вызывается не
 -- более одного раза», - и не позвать её законно: ветка тогда обрывает
 -- вычисление.
+--
+-- Слева от `=` ничего не стоит: нульместных функций в ядре нет, приостановленное
+-- вычисление разворачивается сахаром в стрелку от единицы, но аргументом
+-- определения это связывание не является. Написать его тоже законно
+-- (`counted u =`), и тогда оно связывается как обычный параметр.
 counted : {State Bool} Bool
-counted u =
+counted =
   put True
   get
 
@@ -124,12 +129,12 @@ handled = handle counted with
 -- Остаток row и есть глубина хендлера: `Log` он не трогает, и тот остаётся
 -- окружающей результата.
 mixed : {Log, State Bool} Bool
-mixed u =
+mixed =
   note True
   get
 
 logged : {Log} Bool
-logged u = handle mixed with
+logged = handle mixed with
   return v -> v
   get -> resume True
   put x -> resume MkUnit
@@ -147,12 +152,12 @@ twice = handleMulti counted with
 -- вхождение она не может - элиминатор ставит снимаемую метку первой в своём
 -- домене, а порядок внутри группы одноимённых значим.
 nested : {State Nat, State Bool} Bool
-nested u =
+nested =
   put True
   get
 
 pinned : {State Bool} Bool
-pinned u = handle @(State Nat) nested with
+pinned = handle @(State Nat) nested with
   get -> resume Zero
   put x -> resume MkUnit
 
@@ -168,7 +173,7 @@ guard True = True
 guard False = throw False
 
 risky : {Except Bool} Bool
-risky u = guard False
+risky = guard False
 
 -- Ветка связывает поднятое `a` наравне с написанными аргументами - имплисит
 -- аргумента не получает, но связывание вводит, - и по нему честно полиморфна:
@@ -183,7 +188,7 @@ effect Amb where
   pick : a -> a -> a
 
 both : {Amb} Bool
-both u = pick True False
+both = pick True False
 
 first : Bool
 first = handle both with

@@ -1590,7 +1590,8 @@ fn declare_mutual(
         let visible = siblings_of(metas, &planned, &arities, &generalized, at);
         let compiled = {
             let mut elaborator = Elaborator::with_group(signature, metas, owned, visible)
-                .declaring(&generalized[at]);
+                .declaring(&generalized[at])
+                .suspending(suspends(member.ty));
             member
                 .clauses
                 .iter()
@@ -2400,7 +2401,8 @@ fn define(
     let compiled = {
         let mut elaborator = Elaborator::with_group(signature, metas, known.owned, group)
             .within(within)
-            .declaring(&declared.ty);
+            .declaring(&declared.ty)
+            .suspending(suspends(declared.source));
         clauses
             .iter()
             .map(|clause| elaborator.clause(clause))

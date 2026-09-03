@@ -696,6 +696,15 @@ pub(crate) struct Elaborator<'a> {
     /// константа, разворачивающаяся в `Pi`) записи кончаются, и лямбда снова
     /// берёт `ω` без закрытия.
     declared: Vec<Argument>,
+    /// Синтезировано ли первое связывание написанного типа сахаром `{ε} A`.
+    ///
+    /// Нульместных функций в ядре нет, и приостановленное вычисление
+    /// разворачивается в стрелку от единицы (см. `suspended`). Аргументом
+    /// определения это связывание не является, поэтому писать его не обязаны -
+    /// ровно как ветка хендлера не связывает то, что вставил тот же сахар.
+    /// Различить по ядерному типу нечем (`{State s} s` и `Unit -> {State s} s`
+    /// после сахара одинаковы), а по написанному - видно сразу.
+    declared_suspends: bool,
     /// Тип объявления значением - им шагает разбор паттернов клаузы.
     declared_ty: Option<Rc<Value>>,
     /// Записи, ожидающие ближайшую лямбду. Их выставляет тот, кто знает
@@ -816,6 +825,7 @@ impl<'a> Elaborator<'a> {
             scope: Vec::new(),
             group,
             declared: Vec::new(),
+            declared_suspends: false,
             declared_ty: None,
             expected: Vec::new(),
             bare: false,
@@ -835,6 +845,18 @@ impl<'a> Elaborator<'a> {
     pub(crate) fn declaring(mut self, ty: &Term) -> Self {
         self.declared = pi_arguments(ty, self.owned);
         self.declared_ty = Some(eval(&Env::default(), ty));
+        self
+    }
+
+    /// Отмечает, что первое связывание написанного типа синтезировал сахар
+    /// `{ε} A`, и клауза вправе его не писать.
+    ///
+    /// Знание синтаксическое, поэтому и приходит оно от того, кто держит
+    /// написанное. Метод инстанса его сегодня не получает: тип метода приходит
+    /// из заголовка класса, а не из написанного при инстансе, и связывание там
+    /// пишут как раньше.
+    pub(crate) fn suspending(mut self, written: bool) -> Self {
+        self.declared_suspends = written;
         self
     }
 
@@ -3738,14 +3760,25 @@ impl<'a> Elaborator<'a> {
     ///
     /// Написанное, не покрытое телескопом, идёт следом как есть: спайн виден
     /// синтаксически, и дальше него записей нет (см. `declared`).
+    ///
+    /// Связывание-единица, синтезированное сахаром `{ε} A`, вставляется по тому
+    /// же соображению: аргументом определения оно не является, и §4.1 пишет
+    /// `counter =` без него. Написанное при этом уважается - `counter u =`
+    /// связывает единицу сам, - потому что вставка идёт только там, где
+    /// паттернов не написали вовсе.
     fn spread<'p>(
         &self,
         written: &'p [Pattern],
     ) -> Result<Vec<(Option<&'p Pattern>, CorePattern)>, ElabError> {
         let mut found = Vec::new();
         let mut rest = written.iter();
+        let mut suspends = self.declared_suspends && written.is_empty();
         for argument in &self.declared {
             if argument.implicit {
+                found.push((None, CorePattern::Var(Rc::clone(&argument.name))));
+                continue;
+            }
+            if std::mem::take(&mut suspends) {
                 found.push((None, CorePattern::Var(Rc::clone(&argument.name))));
                 continue;
             }

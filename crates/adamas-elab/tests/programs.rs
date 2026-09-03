@@ -5688,6 +5688,41 @@ effect State s where
 }
 
 #[test]
+fn a_suspended_definition_need_not_bind_the_unit() {
+    // §4.1 пишет `counter =` и следом блок: нульместных функций в ядре нет,
+    // приостановленное вычисление разворачивается сахаром `{ε} A` в стрелку от
+    // единицы, но аргументом определения это связывание не является - ровно как
+    // ветка хендлера его не связывает. Клауза без паттернов его не снимала,
+    // окружающая тела оставалась пустой, и единственный пример раздела давал
+    // «эффекты не погашены: вокруг разрешено `{}`».
+    let text = "\
+data Bool where
+  True : Bool
+  False : Bool
+
+data Unit where
+  MkUnit : Unit
+
+effect State s where
+  get : s
+  put : s -> Unit
+
+counter : {State Bool} Bool
+counter =
+  put True
+  get
+";
+    program(text);
+    // Написанное уважается: вставка идёт только там, где паттернов не написали
+    // вовсе.
+    program(&text.replace("counter =", "counter u ="));
+    program(&text.replace("counter =", "counter _ ="));
+    // Тело без эффектов проверяется той же вставкой - до неё оно требовало
+    // стрелку от единицы там, где написан результат.
+    program(&text.replace("counter =\n  put True\n  get", "counter =\n  True"));
+}
+
+#[test]
 fn an_operation_may_have_parameters_of_its_own() {
     // §4.4 пишет `throw : e -> {Except e} a` - каноническую обрывающую
     // операцию. Своих параметров операции не полагалось: арность уровня

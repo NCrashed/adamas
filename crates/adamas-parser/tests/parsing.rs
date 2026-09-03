@@ -299,7 +299,7 @@ fn a_multiplicity_is_zero_one_or_omega() {
 fn forms_of_later_phases_name_their_phase() {
     // Лексема зарезервирована и опечаткой быть не может, поэтому честнее
     // назвать фазу, чем перечислять, что бывает здесь вместо неё.
-    let cases = [("infixl 6 +\n", Unsupported::Fixity)];
+    let cases = [("import Prelude\n", Unsupported::Import)];
     for (text, expected) in cases {
         let error = parse_error(text);
         let ParseError::Unsupported { what, .. } = error else {

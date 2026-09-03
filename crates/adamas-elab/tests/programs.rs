@@ -93,6 +93,107 @@ fn value(signature: &Signature, name: &str) -> String {
     adamas_core::conv::evaluated(signature, &body).to_string()
 }
 
+/// Арифметика операторами - основа тестов фикситета.
+fn operators() -> String {
+    format!(
+        "{BASE}
+infixl 6 +
+(+) : Nat -> Nat -> Nat
+(+) Zero m = m
+(+) (Succ k) m = Succ (k + m)
+
+infixl 7 *
+(*) : Nat -> Nat -> Nat
+(*) Zero m = Zero
+(*) (Succ k) m = m + (k * m)
+
+one : Nat
+one = Succ Zero
+
+two : Nat
+two = Succ one
+"
+    )
+}
+
+#[test]
+fn fixities_bracket_a_chain() {
+    // §4.4: приоритет 0-9, `infixl` слева, `infixr` справа. Проверяется не
+    // форма дерева, а то, что оно **вычисляет**: скобки, расставленные не так,
+    // дали бы другое число.
+    let signature = program(&format!(
+        "{}
+mixed : Nat
+mixed = one + two * two
+
+grouped : Nat
+grouped = (one + two) * two
+",
+        operators()
+    ));
+    // 1 + 2*2 = 5, а не (1+2)*2 = 6.
+    assert_eq!(
+        value(&signature, "mixed"),
+        "Succ (Succ (Succ (Succ (Succ Zero))))"
+    );
+    assert_eq!(
+        value(&signature, "grouped"),
+        "Succ (Succ (Succ (Succ (Succ (Succ Zero)))))"
+    );
+}
+
+#[test]
+fn a_chain_without_a_fixity_is_refused() {
+    // Скобки без объявленного фикситета не выводятся, и молча выбранное
+    // прочтение здесь хуже отказа.
+    let error = refused(&format!(
+        "{}
+(?) : Nat -> Nat -> Nat
+(?) a b = a
+
+odd : Nat
+odd = one + two ? two
+",
+        operators()
+    ));
+    assert!(
+        error.to_string().contains("фикситет не объявлен"),
+        "получено {error:?}"
+    );
+    // Одного оператора это не касается: расставлять в нём нечего.
+    program(&format!(
+        "{}
+(?) : Nat -> Nat -> Nat
+(?) a b = a
+
+fine : Nat
+fine = one ? two
+",
+        operators()
+    ));
+}
+
+#[test]
+fn associativity_must_agree_within_one_precedence() {
+    for (written, why) in [
+        (
+            "infixr 6 -\n(-) : Nat -> Nat -> Nat\n(-) a b = a\n\nbad : Nat\nbad = one + two - one\n",
+            "ассоциативности",
+        ),
+        (
+            "infix 6 %\n(%) : Nat -> Nat -> Nat\n(%) a b = a\n\nbad : Nat\nbad = one % two % one\n",
+            "ассоциативности",
+        ),
+        ("infixl 7 +\n", "дважды"),
+    ] {
+        let error = refused(&format!("{}{written}", operators()));
+        assert!(
+            error.to_string().contains(why),
+            "для {written:?}: {error:?}"
+        );
+    }
+}
+
 #[test]
 fn a_program_evaluates_to_a_value() {
     // §9 Фаза 5: вычисление до значения, а не до нормальной формы. Разбор
@@ -490,7 +591,6 @@ fn what_the_core_cannot_carry_yet_names_itself() {
         ("f : Nat\nf = (Zero, Zero)\n", Missing::Tuple),
         ("f : Nat\nf = ()\n", Missing::Unit),
         ("f : Nat\nf = [Zero]\n", Missing::List),
-        ("f : Nat\nf = Zero + Zero + Zero\n", Missing::Fixities),
         (
             "f : Nat -> Nat\nf x = y\n  where\n    y : Nat\n    y = x\n",
             Missing::LocalDefinitions,

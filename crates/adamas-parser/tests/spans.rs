@@ -106,6 +106,12 @@ impl Spans<'_> {
             DeclKind::Data(data) => self.data(at, data),
             DeclKind::Resource(resource) => self.resource(at, resource),
             DeclKind::Effect(effect) => self.effect_decl(at, effect),
+            // Фикситет подтермов не несёт: имена операторов и число.
+            DeclKind::Fixity(fixity) => {
+                for operator in &fixity.operators {
+                    self.name(at, operator);
+                }
+            }
         }
     }
 

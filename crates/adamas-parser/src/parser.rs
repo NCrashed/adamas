@@ -1911,7 +1911,11 @@ impl<'a> Parser<'a> {
     }
 
     fn handler_branch(&mut self) -> Result<HandlerBranch, ParseError> {
-        let name = self.ident()?;
+        // Тем же чтением, каким объявлена сама операция: `effect Alt where
+        // (<|>) : …` пишется и зовётся инфиксно, а ветку для неё написать было
+        // нечем - элаборация требовала её сообщением «ветка `<|>`: ветка не
+        // написана», печатая имя, которого разбор ветки не принимал.
+        let name = self.decl_name()?;
         let mut params = Vec::new();
         while self.at(TokenKind::Ident) || self.at(TokenKind::Underscore) {
             let token = self.bump();

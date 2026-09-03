@@ -5688,6 +5688,36 @@ effect State s where
 }
 
 #[test]
+fn an_operation_named_by_an_operator_is_handled() {
+    // Имя операции читается разбором объявления и принимает оператор в скобках,
+    // а имя ветки читалось идентификатором. Операция объявлялась и звалась
+    // инфиксно, но ветку для неё написать было нечем - элаборация требовала её
+    // сообщением, печатающим имя, которого разбор ветки не принимал.
+    program(
+        "\
+data Bool where
+  True : Bool
+  False : Bool
+
+data Unit where
+  MkUnit : Unit
+
+effect Alt where
+  (<|>) : Bool -> Bool -> Bool
+
+chosen : {Alt} Bool
+chosen =
+  True <|> False
+
+taken : Bool
+taken = handle chosen with
+  return v -> v
+  (<|>) x y -> resume x
+",
+    );
+}
+
+#[test]
 fn a_suspended_definition_need_not_bind_the_unit() {
     // §4.1 пишет `counter =` и следом блок: нульместных функций в ядре нет,
     // приостановленное вычисление разворачивается сахаром `{ε} A` в стрелку от

@@ -578,7 +578,7 @@ impl Printer {
     }
 
     fn handler_branch(&mut self, branch: &HandlerBranch) {
-        self.push(&branch.name.text);
+        self.decl_name(&branch.name);
         for param in &branch.params {
             self.push(" ");
             self.push(&param.text);

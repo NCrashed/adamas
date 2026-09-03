@@ -344,6 +344,27 @@ run = handleMulti program with
 }
 
 #[test]
+fn a_branch_names_its_operation_the_way_the_operation_was_declared() {
+    // Имя операции читается разбором объявления, значит принимает оператор в
+    // скобках: `effect Alt where (<|>) : …` объявляется и зовётся инфиксно.
+    // Ветка же читалась идентификатором, и написать её для такой операции было
+    // нечем - элаборация требовала её сообщением «ветка `<|>`: ветка не
+    // написана», печатая имя, которого разбор ветки не принимал.
+    let dumped = tree(
+        "run : Bool
+run = handle program with
+  return v -> v
+  (<|>) x y -> resume x
+",
+    )
+    .expect("разбор удался");
+    assert!(
+        dumped.contains("(on <|> x y (resume x))"),
+        "получено {dumped}"
+    );
+}
+
+#[test]
 fn an_effect_declares_a_label_and_its_operations() {
     // §3.4: формер не пишется - результат метки всегда `Effect`, - а операции
     // идут блоком, как конструкторы у семейства.

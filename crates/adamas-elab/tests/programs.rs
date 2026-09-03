@@ -117,6 +117,54 @@ two = Succ one
 }
 
 #[test]
+fn a_numeral_unfolds_unary_and_converts_if_it_can() {
+    // §4.3: литерал элаборируется в вызов преобразования. Примитивного числа
+    // в ядре нет, поэтому `42` разворачивается унарно, а `fromNat`
+    // применяется только если объявлена: без неё литерал и есть число.
+    let signature = program(&format!(
+        "{BASE}
+three : Nat
+three = 3
+"
+    ));
+    assert_eq!(value(&signature, "three"), "Succ (Succ (Succ Zero))");
+    // Объявленное преобразование применяется, и вычисление это показывает.
+    let converted = program(&format!(
+        "{BASE}
+data Wrapped where
+  Wrap : Nat -> Wrapped
+
+fromNat : Nat -> Wrapped
+fromNat n = Wrap n
+
+two : Wrapped
+two = 2
+"
+    ));
+    assert_eq!(value(&converted, "two"), "Wrap (Succ (Succ Zero))");
+}
+
+#[test]
+fn a_numeral_is_measured_by_its_value() {
+    // Одна лексема даёт столько звеньев, сколько в ней написано, и предел
+    // вложенности обязан считать её значением - иначе короткая запись роняет
+    // процесс глубиной терма, которого никто не видел.
+    let text = format!(
+        "{BASE}
+big : Nat
+big = 100000
+"
+    );
+    let Err(error) = parse(&text) else {
+        panic!("литерал в сто тысяч обязан быть отвергнут");
+    };
+    assert!(
+        error.to_string().contains("вложенность глубже предела"),
+        "получено {error:?}"
+    );
+}
+
+#[test]
 fn fixities_bracket_a_chain() {
     // §4.4: приоритет 0-9, `infixl` слева, `infixr` справа. Проверяется не
     // форма дерева, а то, что оно **вычисляет**: скобки, расставленные не так,
@@ -578,7 +626,7 @@ fn what_the_core_cannot_carry_yet_names_itself() {
             "f : Nat\nf =\n  let x : a = Zero\n  x\n",
             Missing::FreeTypeVariable,
         ),
-        ("f : Nat -> Nat\nf x = 1\n", Missing::Literal),
+        ("f : Nat\nf = 3.14\n", Missing::Literal),
         ("f : Nat\nf =\n  let x = Zero\n  x\n", Missing::UntypedLet),
         (
             "f : Nat -> Nat\nf = \\(0 x : Nat) -> x\n",

@@ -35,7 +35,7 @@ pub struct Machine<'a> {
     ///
     /// Таблица растёт до конца прогона: резумпция живёт столько же, сколько
     /// значение, в которое она попала, а узнать это без счётчика ссылок нельзя.
-    resumptions: RefCell<Vec<Cont>>,
+    resumptions: RefCell<Vec<(Cont, bool)>>,
 }
 
 impl std::fmt::Debug for Machine<'_> {
@@ -472,18 +472,34 @@ impl<'a> Machine<'a> {
     }
 
     /// Регистрирует резумпцию и отдаёт её значением.
-    pub(crate) fn resumption(&self, cont: Cont) -> Rc<Value> {
+    pub(crate) fn resumption(&self, cont: Cont) -> (Rc<Value>, usize) {
         let mut table = self.resumptions.borrow_mut();
         let index = table.len();
-        table.push(cont);
-        Rc::new(Value::Neutral(
+        table.push((cont, false));
+        let value = Rc::new(Value::Neutral(
             Head::Global(
                 Rc::from(format!("{RESUME}{index}")),
                 Rc::from([] as [Level; 0]),
                 Rc::from([] as [Row<Rc<Value>>; 0]),
             ),
             Vec::new(),
-        ))
+        ));
+        (value, index)
+    }
+
+    /// Звали ли резумпцию хоть раз.
+    ///
+    /// Так различается обрыв: ветка `handle` вернулась значением, не позвав
+    /// продолжение, - значит оно мертво, и отложенные деструкторы пора
+    /// запускать. Работает это ровно потому, что резумпция при `handle`
+    /// **аффинна** (§3.4): позвать её позже неоткуда, вынести наружу не даёт
+    /// правило scope-bound (§3.3). У `handleMulti` довод не держится - её
+    /// резумпция `ω` и вправе быть сохранена, - и оттуда ресурсы запрещены.
+    pub(crate) fn invoked(&self, index: usize) -> bool {
+        self.resumptions
+            .borrow()
+            .get(index)
+            .is_some_and(|(_, invoked)| *invoked)
     }
 
     /// Что делать с насыщенным глобальным именем.
@@ -509,9 +525,12 @@ impl<'a> Machine<'a> {
     /// Вызов резумпции. Аргумент у неё один - место операции.
     fn resumed(&self, index: usize, spine: &[Elim]) -> Outcome {
         let cont = {
-            let table = self.resumptions.borrow();
-            match table.get(index) {
-                Some(cont) => Rc::clone(cont),
+            let mut table = self.resumptions.borrow_mut();
+            match table.get_mut(index) {
+                Some((cont, invoked)) => {
+                    *invoked = true;
+                    Rc::clone(cont)
+                }
                 None => unreachable!("резумпция {index} не заведена"),
             }
         };

@@ -17,6 +17,7 @@
 mod effect;
 mod machine;
 mod outcome;
+mod scope;
 
 pub use machine::Machine;
 pub use outcome::{Cont, Outcome, Performed};

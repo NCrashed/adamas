@@ -34,6 +34,9 @@ const MULTI: &str = "#handleMulti.";
 /// Имя единицы: вычисление под хендлером запускается её значением.
 const UNIT: &str = "Unit";
 
+/// Невыразимое имя элиминатора scope - то же, что ставит элаборация.
+const CLOSING: &str = "#closing";
+
 /// Форма элиминатора: всё, что читается из сигнатуры, а не со спайна.
 struct Shape {
     /// Метка, которую он снимает.
@@ -58,6 +61,12 @@ struct Handler {
 impl Machine<'_> {
     /// Насыщенное имя, у которого есть эффектный смысл. `None` - обычное.
     pub(crate) fn effectful(&self, name: &Name, spine: &[Elim]) -> Option<Outcome> {
+        // Scope, держащий ресурс: тело под ним запускает машина, чтобы видеть,
+        // что из него вышли (§3.3).
+        if &**name == CLOSING {
+            let arguments = applied(spine);
+            return (arguments.len() >= 4).then(|| self.closing(&arguments));
+        }
         if let Some(definition) = self.signature().lookup(name)
             && let DefinitionKind::Operation { effect } = &definition.kind
         {
@@ -69,6 +78,7 @@ impl Machine<'_> {
                     operation: Rc::clone(name),
                     arguments,
                     resumption: identity(),
+                    pending: Vec::new(),
                 })
             });
         }
@@ -165,8 +175,28 @@ impl Machine<'_> {
             .iter()
             .map(Rc::clone)
             .collect();
-        given.push(self.resumption(resuming(&performed.resumption, handler)));
-        self.pass(branch, &given, 0)
+        let (resume, slot) = self.resumption(resuming(&performed.resumption, handler));
+        given.push(resume);
+        let outcome = self.pass(branch, &given, 0);
+        self.settled(outcome, slot, &performed.pending)
+    }
+
+    /// Ветка договорила: пора решать, жив ли остаток вычисления.
+    ///
+    /// Пока ветка сама производит операции, решать рано - `resume` она вправе
+    /// позвать и после них.
+    fn settled(&self, outcome: Outcome, slot: usize, pending: &[Rc<Value>]) -> Outcome {
+        let performed = match outcome {
+            Outcome::Done(value) if self.invoked(slot) => return Outcome::Done(value),
+            // Продолжение выброшено вместе со всем, что в нём стояло, - а
+            // деструкторы там стояли (§3.3).
+            Outcome::Done(value) => return self.unwound(pending, 0, &value),
+            Outcome::Performed(performed) => performed,
+        };
+        let pending = pending.to_vec();
+        Outcome::Performed(performed.after(Rc::new(move |machine, value| {
+            machine.settled(Outcome::Done(value), slot, &pending)
+        })))
     }
 
     /// Применяет ветку к её аргументам по одному.
@@ -190,7 +220,7 @@ impl Machine<'_> {
     }
 
     /// Значение единицы - единственный конструктор `Unit`.
-    fn unit(&self) -> Option<Rc<Value>> {
+    pub(crate) fn unit(&self) -> Option<Rc<Value>> {
         let [only] = self.signature().constructors(UNIT)? else {
             return None;
         };

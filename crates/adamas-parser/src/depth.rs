@@ -45,8 +45,8 @@
 use adamas_core::source::Span;
 
 use crate::ast::{
-    Binder, Block, Chain, Clause, Decl, DeclKind, Expr, ExprKind, LamParam, LamParamKind, Module,
-    Pattern, PatternKind, StmtKind,
+    Binder, Block, Chain, Clause, Decl, DeclKind, Expr, ExprKind, LamParam, LamParamKind, Lit,
+    LitKind, Module, Pattern, PatternKind, StmtKind,
 };
 use crate::parser::{MAX_DEPTH, ParseError};
 
@@ -93,9 +93,27 @@ fn deepen(depth: u32, links: usize, span: Span) -> Result<u32, ParseError> {
     Ok(depth)
 }
 
+/// Сколько звеньев даст литерал: для числа - его значение, для прочих ноль.
+///
+/// Не разобралось - ноль: отказ про запись литерала принадлежит элаборации, и
+/// предел его не подменяет.
+fn numeral(lit: &Lit) -> usize {
+    match lit.kind {
+        LitKind::Nat => lit.text.parse().unwrap_or(0),
+        LitKind::Int | LitKind::Float | LitKind::Str => 0,
+    }
+}
+
 fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<(), ParseError> {
     match &expr.kind {
-        ExprKind::Name(_) | ExprKind::Lit(_) | ExprKind::Hole => {}
+        ExprKind::Name(_) | ExprKind::Hole => {}
+        // Числовой литерал разворачивается унарно (§4.3), и терм у него
+        // глубиной **в само число**: одна лексема даёт столько звеньев,
+        // сколько в ней написано. Мерится он поэтому значением, а не длиной
+        // записи - `1e9` короток, а терм за ним не построить.
+        ExprKind::Lit(lit) => {
+            deepen(depth, numeral(lit), expr.span)?;
+        }
         // Row звено ставит одно - как стрелка, на которой она стоит; метки
         // соседи, и каждая живёт на той же глубине.
         ExprKind::Effectful { labels, body, .. } => {

@@ -229,7 +229,7 @@ impl Naming {
 
     /// Подставляет имена и локальные номера во все части сообщения.
     fn rewrite(&mut self, kind: &mut adamas_core::error::ErrorKind) {
-        let (terms, levels, metas) = kind.parts_mut();
+        let (terms, levels, metas, rows) = kind.parts_mut();
         // Части одного сообщения нумеруются вместе: `?0` в ожидаемом типе и
         // `?0` в полученном - одна дырка.
         let mut ordered = Vec::new();
@@ -242,12 +242,15 @@ impl Naming {
         for meta in &*metas {
             push(&mut ordered, meta.0);
         }
+        for row in &*rows {
+            collect_row(row, &mut ordered);
+        }
         for meta in ordered {
             let next = u32::try_from(self.metas.len()).unwrap_or(u32::MAX);
             self.metas.entry(meta).or_insert(next);
         }
 
-        let (terms, levels, metas) = kind.parts_mut();
+        let (terms, levels, metas, rows) = kind.parts_mut();
         for term in terms {
             self.term(term, &mut Vec::new(), 0);
         }
@@ -256,6 +259,9 @@ impl Naming {
         }
         for meta in metas {
             *meta = LevelMeta(self.metas.get(&meta.0).copied().unwrap_or(meta.0));
+        }
+        for row in rows {
+            *row = self.row(row, &mut Vec::new(), 0);
         }
     }
 

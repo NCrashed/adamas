@@ -469,18 +469,32 @@ pub enum ErrorKind {
     },
 }
 
+/// Части сообщения, отдаваемые печати на переименование: термы, уровни, дырки
+/// уровня и row.
+pub type MessageParts<'a> = (
+    Vec<&'a mut Term>,
+    Vec<&'a mut Level>,
+    Vec<&'a mut LevelMeta>,
+    Vec<&'a mut crate::row::Row<Term>>,
+);
+
 impl ErrorKind {
-    /// Части, попадающие в текст сообщения: термы, уровни и дырки.
+    /// Части, попадающие в текст сообщения: термы, уровни, дырки и row.
     ///
     /// Печать человеку живёт вне ядра (§9 Фаза 2): там переменные получают
     /// имена телескопа, а дырки - локальные номера. Список мест, куда это
     /// подставлять, стоит здесь, рядом с вариантами: разбор исчерпывающий,
     /// поэтому новый вариант не пройдёт мимо молча, оставшись в сообщении с
     /// индексами де Брёйна.
+    ///
+    /// Row - четвёртая часть, и она такая же: аргументы её меток суть термы,
+    /// а хвост её - дырка. Без неё «эффекты `{State #1 | ?21}` не погашены»
+    /// печаталось рядом с блоком «в контексте», где то же связывание названо
+    /// именем.
     #[must_use]
-    pub fn parts_mut(&mut self) -> (Vec<&mut Term>, Vec<&mut Level>, Vec<&mut LevelMeta>) {
-        let (mut terms, mut levels, mut metas): (Vec<_>, Vec<_>, Vec<_>) =
-            (Vec::new(), Vec::new(), Vec::new());
+    pub fn parts_mut(&mut self) -> MessageParts<'_> {
+        let (mut terms, mut levels, mut metas, mut rows): (Vec<_>, Vec<_>, Vec<_>, Vec<_>) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         match self {
             Self::NotAType { term, ty } => terms.extend([term, ty]),
             Self::Mismatch { expected, found } => terms.extend([expected, found]),
@@ -498,11 +512,12 @@ impl ErrorKind {
             Self::AmbiguousLevel { meta } | Self::UnsolvedDefinitionLevel { meta, .. } => {
                 metas.push(meta);
             }
-            // Row в сообщении несёт термы, но обходу они не нужны: имена меток
-            // и так печатаются, а аргументы приходят уже прочитанными.
+            Self::Undischarged { wanted, ambient } => rows.extend([wanted, ambient]),
+            // У этих row тоже есть, но телескопа у них нет: `OperationRow`
+            // печатает написанный тип операции до всякого контекста, а
+            // `UnsolvedDefinitionRow` - одну дырку по имени определения.
             Self::OperationRow { .. }
             | Self::UnsolvedDefinitionRow { .. }
-            | Self::Undischarged { .. }
             | Self::RecordFields { .. }
             | Self::DuplicateField { .. }
             | Self::OpenDependentRecord { .. }
@@ -529,7 +544,7 @@ impl ErrorKind {
             | Self::BranchOrder { .. }
             | Self::LevelVarOutOfScope { .. } => {}
         }
-        (terms, levels, metas)
+        (terms, levels, metas, rows)
     }
 }
 

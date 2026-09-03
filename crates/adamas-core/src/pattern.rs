@@ -2106,7 +2106,12 @@ fn shift_fields(fields: &Fields, depth: u32, by: u32) -> Fields {
     }
 }
 
-pub(crate) fn shift_free(term: &Term, by: u32) -> Term {
+/// Сдвигает свободные индексы терма на `by`.
+///
+/// Публична ради элаборации: вставка `drop` в точку выхода строит терм, тело
+/// которого собрано **до** появления связывания над ним (§3.3).
+#[must_use]
+pub fn shift_free(term: &Term, by: u32) -> Term {
     shift_at(term, 0, by)
 }
 

@@ -2874,7 +2874,26 @@ impl<'a> Elaborator<'a> {
             return None;
         };
         let (domain, codomain) = (Rc::clone(domain), codomain.clone());
-        check(&self.ctx, self.metas, Mult::Zero, argument, &domain).ok()?;
+        // Проверка здесь - **ворота** для `eval`, а не суждение о программе:
+        // решает за неё `check`, а тут нужно лишь не звать `eval` на терме, на
+        // котором он развалится. Поэтому решения прохода откатываются: без
+        // этого он закрывал row операции в `{Ask}` (при `σ = 0` окружающая
+        // пуста по §3.4), отказ уходил в `.ok()?`, а запись оставалась - и
+        // `plus ask ask` отвергалось там, где `let n : Nat = ask` проходило.
+        //
+        // Ни одно `σ` не годится обоим сортам аргументов. При `0` окружающая
+        // пуста, и эффектный аргумент не гасится; при `ω` считается расход, и
+        // стёртая позиция отвергается кратностью (`vect.adamas`). Ворота
+        // пробуют оба и довольствуются любым: сказать, какое верно, - дело
+        // настоящей проверки, у которой есть и `σ`, и окружающая.
+        let mark = self.metas.mark();
+        let mut checked = check(&self.ctx, self.metas, Mult::Zero, argument, &domain);
+        self.metas.rollback(mark);
+        if checked.is_err() {
+            checked = check(&self.ctx, self.metas, Mult::Many, argument, &domain);
+            self.metas.rollback(mark);
+        }
+        checked.ok()?;
         Some(codomain.apply(self.ctx.eval(argument)))
     }
 
@@ -3772,23 +3791,31 @@ impl<'a> Elaborator<'a> {
     /// Длиннее одного оператора - сперва расставляются скобки по объявленным
     /// фикситетам (§4.4), и цепочка становится вложенными одноместными: той
     /// формой, которую разбирает всё, что ниже.
+    /// Операнды - те же аргументы применения, поэтому цепочка **становится**
+    /// применением и уходит в тот же проход. Своя элаборация операндов, стоявшая
+    /// здесь раньше, ожидаемого типа не видела вовсе: не вставлялись имплиситы
+    /// посреди спайна и не исполнялось вычисление по ожидаемому типу, и
+    /// `ask + ask` отвергалось там, где `plus ask ask` проходило.
     fn chain(&mut self, chain: &ast::Chain, span: Span) -> Result<Term, ElabError> {
         let [(operator, operand)] = &chain.tail[..] else {
             let resolved = self.fixities.resolve(chain, span)?;
             return self.expr(&resolved, Mult::Many);
         };
-        let callee = self.name(operator)?;
-        // Операнды - те же аргументы применения, и позиция у них та же:
-        // оператор-конструктор уносит их внутрь собранного, обычный не уносит.
-        let inside = if self.builds(operator) {
-            Position::Field
-        } else {
-            Position::Inner
+        let head = ast::Expr {
+            kind: ast::ExprKind::Name(operator.clone()),
+            span: operator.span,
         };
-        let left = self.placed(inside, |it| it.expr(&chain.head, Mult::Many))?;
-        let right = self.placed(inside, |it| it.expr(operand, Mult::Many))?;
-        self.produced = None;
-        Ok(callee.apply([left, right]))
+        let applied = ast::Expr {
+            kind: ast::ExprKind::App(
+                Box::new(ast::Expr {
+                    kind: ast::ExprKind::App(Box::new(head), chain.head.clone()),
+                    span,
+                }),
+                Box::new(operand.clone()),
+            ),
+            span,
+        };
+        self.expr(&applied, Mult::Many)
     }
 
     // --- паттерны ---------------------------------------------------------

@@ -5625,14 +5625,87 @@ outer u = handle both with
 }
 
 #[test]
+fn an_operation_takes_the_innermost_occurrence_of_its_label() {
+    // §3.4 после разворота правила: `ε' ≡ ε ++ Λ`, поэтому метки вызываемого -
+    // **префикс** окружающей, и операция берёт то вхождение, которое снимет
+    // ближайший хендлер. Наблюдаемо это только у параметризованной метки: без
+    // параметра два вхождения неразличимы в типе.
+    let head = format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+effect Ask s where
+  ask : s
+"
+    );
+    // Первая метка - `Ask Nat`, значит `ask` обязана быть `Nat`.
+    program(&format!(
+        "{head}
+probe : {{Ask Nat, Ask Bool}} Unit
+probe u =
+  let n : Nat = ask
+  MkUnit
+"
+    ));
+    let error = refused(&format!(
+        "{head}
+probe : {{Ask Nat, Ask Bool}} Unit
+probe u =
+  let n : Bool = ask
+  MkUnit
+"
+    ));
+    assert!(
+        error.to_string().contains("несовпадение типов"),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn an_operation_runs_where_a_written_type_expects_a_value() {
+    // Позиция аргумента - написанный тип, значит вычисление исполняется (§3.4).
+    // Не работало по двум причинам разом: спекулятивный шаг спайна закрывал row
+    // операции решением, которое не откатывалось, а операторная цепочка
+    // элаборировала операнды мимо спайна и ожидаемого типа не видела вовсе.
+    let head = format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+infixl 6 +
+(+) : Nat -> Nat -> Nat
+(+) Zero m = m
+(+) (Succ k) m = Succ (k + m)
+
+plus : Nat -> Nat -> Nat
+plus n m = n + m
+
+effect Ask where
+  ask : Nat
+"
+    );
+    for written in ["plus ask ask", "ask + ask", "plus (plus ask ask) ask"] {
+        program(&format!(
+            "{head}
+probe : {{Ask}} Nat
+probe u = {written}
+"
+        ));
+    }
+}
+
+#[test]
 fn a_written_label_pins_the_occurrence_it_removes() {
     // §3.4: `@`-аннотация правила не меняет - снимается всё то же первое
     // (внутреннее) вхождение, - а говорит, чем обязаны оказаться его аргументы.
     // Выбирать вхождение она не может: элиминатор ставит снимаемую метку первой
     // в своём домене, а порядок внутри группы одноимённых значим.
+    // Операция берёт первое вхождение своей метки, поэтому `put True` работает
+    // с `State Bool` - той же, что снимает хендлер.
     let head = format!(
         "{}
-both : {{State Nat, State Bool}} Bool
+both : {{State Bool, State Nat}} Bool
 both u =
   put True
   get
@@ -5641,22 +5714,22 @@ both u =
     );
     program(&format!(
         "{head}
-inner : {{State Bool}} Bool
-inner u = handle @(State Nat) both with
-  get -> resume Zero
+inner : {{State Nat}} Bool
+inner u = handle @(State Bool) both with
+  get -> resume True
   put x -> resume MkUnit
 "
     ));
     for (written, why) in [
-        ("@(State Bool)", "первое вхождение"),
+        ("@(State Nat)", "первое вхождение"),
         ("@Bool", "обязана быть эффектом"),
         ("@Log", "такой операции у эффекта нет"),
     ] {
         let error = refused(&format!(
             "{head}
-inner : {{State Bool}} Bool
+inner : {{State Nat}} Bool
 inner u = handle {written} both with
-  get -> resume Zero
+  get -> resume True
   put x -> resume MkUnit
 "
         ));

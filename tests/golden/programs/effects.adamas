@@ -151,14 +151,17 @@ twice = handleMulti counted with
 -- вхождение, а написанные аргументы говорят, чем обязаны оказаться его. Выбрать
 -- вхождение она не может - элиминатор ставит снимаемую метку первой в своём
 -- домене, а порядок внутри группы одноимённых значим.
-nested : {State Nat, State Bool} Bool
+--
+-- Операция берёт **первое** вхождение своей метки, то есть внутреннее: `put`
+-- здесь работает с `State Bool`, а не с `State Nat`, и хендлер снимает ту же.
+nested : {State Bool, State Nat} Bool
 nested =
   put True
   get
 
-pinned : {State Bool} Bool
-pinned = handle @(State Nat) nested with
-  get -> resume Zero
+pinned : {State Nat} Bool
+pinned = handle @(State Bool) nested with
+  get -> resume True
   put x -> resume MkUnit
 
 -- Операция вправе иметь свои параметры сверх параметров метки: телескоп метки

@@ -218,6 +218,61 @@ main = handle inner with
     assert_eq!(ran(&source, "main"), "Succ (Succ Zero)");
 }
 
+/// Вложенные хендлеры одной метки: операция достаётся ближайшему.
+///
+/// Это тот случай, где машина и проверка типов расходились. Правило погашения
+/// было `ε' ≡ Λ ++ ε` и отдавало вызываемому **внешнее** вхождение, машина -
+/// внутреннее; развёрнутое правило `ε' ≡ ε ++ Λ` отдаёт внутреннее обеим, и
+/// смещение вектора evidence обращается в нуль.
+#[test]
+fn the_nearest_handler_of_a_repeated_label_wins() {
+    let source = format!(
+        "{BASE}
+effect Ask where
+  ask : Nat
+
+twice : {{Ask, Ask}} Nat
+twice =
+  let n : Nat = ask
+  n
+
+inner : {{Ask}} Nat
+inner = handle twice with
+  return v -> v
+  ask -> resume 1
+
+main : Nat
+main = handle inner with
+  return v -> v
+  ask -> resume 2
+"
+    );
+    assert_eq!(ran(&source, "main"), "Succ Zero");
+}
+
+/// Операция считается там, где написанный тип ждёт значение.
+#[test]
+fn an_operation_runs_in_an_argument_position() {
+    let source = format!(
+        "{BASE}
+effect Ask where
+  ask : Nat
+
+sums : {{Ask}} Nat
+sums = ask + ask + ask
+
+main : Nat
+main = handle sums with
+  return v -> v
+  ask -> resume 2
+"
+    );
+    assert_eq!(
+        ran(&source, "main"),
+        "Succ (Succ (Succ (Succ (Succ (Succ Zero)))))"
+    );
+}
+
 /// Значение, которое только возвращают, всё равно досчитывается.
 ///
 /// Регрессия: разворот определения стоит у применения, разбора и проекции, а

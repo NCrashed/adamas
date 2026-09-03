@@ -6,6 +6,6 @@ Error: undischarged-effects.adamas:24:15: эффекты `{State a | ?0}` не �
   escapes a x = leaks a x
                 ^^^^^^^^^
   в контексте:
-    (ω a : Type u0)
+    (0 a : Type u0)
     (ω x : a)
   путь: тело `escapes` -> тело лямбды -> тело лямбды

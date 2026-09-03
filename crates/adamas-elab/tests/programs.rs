@@ -5059,6 +5059,47 @@ held = use (Some True)
 }
 
 #[test]
+fn a_binder_over_a_universe_is_erased() {
+    // §4.1: аргумент-тип стирается - типов в рантайме нет вовсе, и `Level` с
+    // `Effect` объявлены всегда стёртыми ровно поэтому. Поправка позиционная:
+    // поле конструктора умалчивает `1` и тип **хранит**, а телескоп параметров
+    // объявления её не видит - у алиаса тело и есть параметр.
+    let signature = program(&format!(
+        "{BASE}
+type Id (a : Type) = a
+
+identity : (a : Type) -> a -> a
+identity a x = x
+
+used : Bool
+used = identity Bool True
+
+held : Id Bool
+held = True
+"
+    ));
+    assert_eq!(value(&signature, "used"), "True");
+    let Some(identity) = signature.lookup("identity") else {
+        panic!("объявлено");
+    };
+    assert!(
+        identity.ty.to_string().starts_with("(0 a : Type"),
+        "получено {}",
+        identity.ty
+    );
+    // Телескоп параметров объявления поправки не видит: у алиаса тело и есть
+    // параметр, то есть расходует его однажды, и стёртым он быть не может.
+    let Some(alias) = signature.lookup("Id") else {
+        panic!("объявлен");
+    };
+    assert!(
+        alias.ty.to_string().starts_with("(ω a : Type"),
+        "получено {}",
+        alias.ty
+    );
+}
+
+#[test]
 fn a_class_over_a_type_constructor_resolves() {
     // §4.4 стоит на этом: `Functor`, `Applicative`, `Monad` - классы над
     // конструктором типов. Сходятся три вещи: член квантифицирует по своим
@@ -5070,7 +5111,7 @@ data Option (a : Type) where
   None : Option a
   Some : a -> Option a
 
-class Functor (f : (0 _ : Type) -> Type) where
+class Functor (f : Type -> Type) where
   map : (a -> b) -> f a -> f b
 
 instance Functor Option where

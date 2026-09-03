@@ -5013,6 +5013,48 @@ both n (Cons k x xs) ys = step x
 }
 
 #[test]
+fn a_member_may_quantify_beyond_the_class_parameters() {
+    // §4.3, решение 2026-09-03: свободные имена члена поднимаются в
+    // implicit-связывания его поля, а универсум словаря считается по полям.
+    // Без этого `Functor`, `Applicative` и `Monad` из §4.4 не пишутся.
+    let signature = program(&format!(
+        "{BASE}
+class Keep a where
+  keep : a -> b -> a
+
+instance Keep Bool where
+  keep x y = x
+
+used : Bool
+used = keep True False
+"
+    ));
+    assert_eq!(value(&signature, "used"), "True");
+    // Член полиморфен по-настоящему: инстанс обязан работать при любом `b`, и
+    // вернуть аргумент этого типа он не может.
+    let error = refused(&format!(
+        "{BASE}
+class Convert a where
+  into : a -> b
+
+instance Convert Bool where
+  into x = x
+"
+    ));
+    assert!(
+        error.to_string().contains("несовпадение типов"),
+        "получено {error:?}"
+    );
+    // Член сигнатуры модуля - тем же путём.
+    program(&format!(
+        "{BASE}
+module type Store where
+  save : Bool -> a
+"
+    ));
+}
+
+#[test]
 fn a_row_hole_does_not_outlive_its_declaration() {
     // Дырка, дожившая до сигнатуры, зависит от хранилища, которого за границей
     // группы уже нет. Для уровня и терма это отказ с Фазы 2, для row сорт
@@ -5020,10 +5062,10 @@ fn a_row_hole_does_not_outlive_its_declaration() {
     // сохранённый тип **живой**, роняя компилятор позже, в чужой группе, где
     // зонканье бралось за неё после `release`.
     //
-    // Написанный хвост в типе члена класса связать сегодня нечем: типы членов
-    // не идут через `declared_type`, поэтому ни свободные имена, ни хвосты там
-    // не поднимаются. Тест закрепляет **ворота**, а не желаемое поведение:
-    // отказ по месту вместо падения в другом объявлении.
+    // Написанный хвост в типе члена класса связать нечем, и причина у этого
+    // своя: row-параметр принадлежит определению, а член живёт в его теле.
+    // Свободные имена там при этом поднимаются - это разные механизмы, и
+    // отказ теперь называет именно тот, который не сработал.
     let error = refused(
         "\
 data Bool where
@@ -5040,11 +5082,7 @@ class Runner a where
 ",
     );
     assert!(
-        matches!(
-            error,
-            ElabError::Core { ref error, .. }
-                if matches!(error.kind, ErrorKind::UnsolvedDefinitionRow { .. })
-        ),
+        matches!(error, ElabError::WrittenRowTail { .. }),
         "получено {error:?}"
     );
     // Там, где хвост связывается, он по-прежнему работает.
@@ -5613,7 +5651,7 @@ data Cell where
 "
     ));
     assert!(
-        matches!(error, ElabError::ConstructorRow { .. }),
+        matches!(error, ElabError::WrittenRowTail { .. }),
         "получено {error:?}"
     );
     // Замкнутый набор меток у поля законен и работает: пустую row вызываемого

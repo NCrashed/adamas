@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+\(ω n) -> plus #0 (Succ Zero)

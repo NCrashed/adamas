@@ -46,8 +46,21 @@ fn fixtures(kind: &str) -> Vec<PathBuf> {
     reason = "заготовка теста: отказ здесь означает сломанное окружение, и падать он должен громко"
 )]
 fn checked(path: &Path) -> (bool, String) {
+    driven("check", path)
+}
+
+/// То же для вычисления: значение печатается на stdout.
+fn evaluated(path: &Path) -> (bool, String) {
+    driven("eval", path)
+}
+
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение, и падать он должен громко"
+)]
+fn driven(command: &str, path: &Path) -> (bool, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_adamas"))
-        .arg("check")
+        .arg(command)
         .arg(path)
         .output()
         .unwrap();
@@ -81,6 +94,22 @@ fn every_program_checks() {
         let (passed, text) = checked(&path);
         assert!(passed, "{} отвергнута:\n{text}", path.display());
         insta::assert_snapshot!(name(&path), text);
+    }
+}
+
+/// Программа вычисляется, и значение её в снапшоте.
+///
+/// Это первый способ увидеть построенный терм: до сих пор о нём можно было
+/// судить только по тому, отвергла его проверка типов или нет, а ревью Фазы 4
+/// показало, что этого мало - пять его находок были «терм тихо неверен».
+#[test]
+fn every_program_evaluates() {
+    for path in fixtures("eval") {
+        let (passed, text) = evaluated(&path);
+        assert!(passed, "{} не вычислилась:\n{text}", path.display());
+        // Имя корпуса в имени снапшота: фикстуры разных корпусов вправе
+        // называться одинаково, а снапшоты живут одной директорией.
+        insta::assert_snapshot!(format!("eval-{}", name(&path)), text);
     }
 }
 

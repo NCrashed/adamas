@@ -75,6 +75,78 @@ data Nat where
   Succ : Nat -> Nat
 ";
 
+/// Значение определения - им наблюдают построенный терм.
+fn value(signature: &Signature, name: &str) -> String {
+    let Some(definition) = signature.lookup(name) else {
+        panic!("определение `{name}` не найдено");
+    };
+    let Some(body) = definition.body.as_ref() else {
+        panic!("у `{name}` нет тела");
+    };
+    let levels: Vec<Level> = (0..definition.level_arity)
+        .map(|_| Level::number(0))
+        .collect();
+    let rows: Vec<adamas_core::row::Row<Term>> = (0..definition.row_arity)
+        .map(|_| adamas_core::row::Row::empty())
+        .collect();
+    let body = body.substitute_levels(&levels).substitute_rows(&rows);
+    adamas_core::conv::evaluated(signature, &body).to_string()
+}
+
+#[test]
+fn a_program_evaluates_to_a_value() {
+    // §9 Фаза 5: вычисление до значения, а не до нормальной формы. Разбор
+    // сводится, рекурсия считается, поля записи читаются насквозь.
+    let signature = program(&format!(
+        "{BASE}
+plus : Nat -> Nat -> Nat
+plus Zero m = m
+plus (Succ k) m = Succ (plus k m)
+
+five : Nat
+five = plus (Succ (Succ Zero)) (Succ (Succ (Succ Zero)))
+
+flip : Bool -> Bool
+flip True = False
+flip False = True
+
+flipped : Bool
+flipped = flip (flip False)
+"
+    ));
+    assert_eq!(
+        value(&signature, "five"),
+        "Succ (Succ (Succ (Succ (Succ Zero))))"
+    );
+    assert_eq!(value(&signature, "flipped"), "False");
+    // Под связывание вычисление не заходит, и это не выбор ради простоты:
+    // глубокая нормализация `plus` разворачивала бы его под собственным
+    // связыванием бесконечно. Тест проходит - значит не расходится.
+    assert!(value(&signature, "plus").starts_with("\\(ω "));
+}
+
+#[test]
+fn a_partial_definition_evaluates_too() {
+    // Ворота тотальности стоят у сравнения - оно обязано завершаться, - а
+    // исполнение обязано расходиться ровно там, где расходится программа.
+    // Здесь оно не расходится, и разворот обязан случиться.
+    let signature = program(&format!(
+        "{BASE}
+loop : Nat -> Nat
+loop Zero = Zero
+loop (Succ k) = loop (Succ k)
+
+done : Nat
+done = loop Zero
+"
+    ));
+    assert!(
+        !signature.lookup("loop").expect("объявлена").total,
+        "рекурсия не структурна"
+    );
+    assert_eq!(value(&signature, "done"), "Zero");
+}
+
 #[test]
 fn a_family_and_its_constructors_reach_the_signature() {
     let signature = program(BASE);

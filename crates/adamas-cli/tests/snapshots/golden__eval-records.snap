@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+{x = Succ Zero, y = Succ (Succ Zero)}

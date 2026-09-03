@@ -869,6 +869,44 @@ resource File where
 ";
 
 #[test]
+fn a_resource_is_refused_in_the_scope_of_multi_shot() {
+    // §3.4: resource-типы не допускаются в scope `handleMulti` - резумпция там
+    // `ω`, и деструктор был бы позван дважды. Раньше проверки не было, и
+    // последствий тоже: `drop` не исполнялся. Теперь исполняется, и на нём
+    // стоит раскрутка при обрыве - а она держится на аффинности резумпции,
+    // которой у `handleMulti` нет.
+    let source = format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+effect Amb where
+  toss : Bool
+
+branching : {{Amb}} Bool
+branching = toss
+
+held : File -> Bool
+held h = handleMulti branching with
+  return v -> v
+  toss -> resume True
+"
+    );
+    let error = refused(&source);
+    assert!(
+        matches!(error, ElabError::MultiWithResource { .. }),
+        "получено {error:?}"
+    );
+
+    // Одношотный тем же телом проходит: там резумпция аффинна.
+    program(&source.replace("handleMulti", "handle"));
+}
+
+#[test]
 fn a_record_does_not_hold_a_resource() {
     // Держателем владеемого поля обязан быть владеемый тип (§3.3, вопрос 77),
     // и у записи исключений нет: объявляется она `type`, деструктора не имеет,

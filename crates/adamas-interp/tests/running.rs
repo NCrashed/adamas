@@ -273,6 +273,100 @@ main = handle sums with
     );
 }
 
+/// Ресурс закрывается на выходе из scope, а не на входе в него.
+///
+/// Порядок стал наблюдаем вместе с исполнением эффектов: до него `drop` не
+/// производил ничего, и `let _ = drop h in тело` считало то же, что и обратная
+/// форма. Считало - но не в том порядке, и §3.3 обещает exit-point.
+#[test]
+fn a_resource_closes_after_the_body_not_before_it() {
+    let source = format!(
+        "{BASE}
+effect Log where
+  note : Nat -> Unit
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {{Log}} Bool
+  closeFile h =
+    note 9
+    True
+
+plain : File -> {{Log}} Bool
+plain h =
+  note 1
+  True
+
+opened : {{Log}} Bool
+opened = plain Open
+
+-- Первая отметка - тела, вторая - деструктора.
+empty : List Nat
+empty = Nil
+
+main : List Nat
+main = handle opened with
+  return v -> empty
+  note n -> Cons n (resume MkUnit)
+"
+    );
+    assert_eq!(
+        ran(&source, "main"),
+        "Cons{0} Nat (Succ Zero) (Cons{0} Nat (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) (Nil{0} Nat))"
+    );
+}
+
+/// Ресурс закрывается и тогда, когда вычисление оборвано операцией.
+///
+/// Ветка `fail` не зовёт `resume`, поэтому продолжение выброшено - а `drop`
+/// стоял в нём. Без раскрутки дескриптор уезжал молча: отметок было одна вместо
+/// двух, и половина ответа при этом оставалась верной.
+#[test]
+fn a_resource_closes_when_the_computation_is_abandoned() {
+    let source = format!(
+        "{BASE}
+effect Log where
+  note : Nat -> Unit
+
+effect Fail where
+  fail : a
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {{Log}} Bool
+  closeFile h =
+    note 9
+    True
+
+leaky : File -> {{Fail, Log}} Bool
+leaky h =
+  note 1
+  let n : Bool = fail
+  True
+
+broken : {{Fail, Log}} Bool
+broken = leaky Open
+
+guarded : {{Log}} Bool
+guarded = handle broken with
+  return v -> v
+  fail -> False
+
+empty : List Nat
+empty = Nil
+
+main : List Nat
+main = handle guarded with
+  return v -> empty
+  note n -> Cons n (resume MkUnit)
+"
+    );
+    assert_eq!(
+        ran(&source, "main"),
+        "Cons{0} Nat (Succ Zero) (Cons{0} Nat (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) (Nil{0} Nat))"
+    );
+}
+
 /// Значение, которое только возвращают, всё равно досчитывается.
 ///
 /// Регрессия: разворот определения стоит у применения, разбора и проекции, а

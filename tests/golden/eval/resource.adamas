@@ -1,0 +1,84 @@
+-- Очистка ресурса на обоих выходах: нормальном и исключительном (§3.3 × §3.4).
+--
+-- До исполнения эффектов вставленный `drop` не производил ничего, и порядок
+-- его относительно тела был ненаблюдаем. Теперь наблюдаем: `closeFile`
+-- отмечается девяткой, тело - единицей, и порядок отметок говорит всё.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+append : List Nat -> List Nat -> List Nat
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+effect Log where
+  note : Nat -> Unit
+
+effect Fail where
+  fail : a
+
+-- Ряд деструктора - обязательство того, кто держит ресурс: `quiet : File ->
+-- Bool` с этим `closeFile` отвергается, потому что закрыть его молча нельзя
+-- (§10 вопрос 75, вариант (б)).
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {Log} Bool
+  closeFile h =
+    note 9
+    True
+
+-- Нормальный выход: тело отмечается, потом закрывается ресурс.
+plain : File -> {Log} Bool
+plain h =
+  note 1
+  True
+
+opened : {Log} Bool
+opened = plain Open
+
+-- Исключительный: тело обрывается операцией после своей отметки, продолжение
+-- выбрасывается веткой `fail` - а `drop` стоял в нём.
+leaky : File -> {Fail, Log} Bool
+leaky h =
+  note 1
+  let n : Bool = fail
+  True
+
+broken : {Fail, Log} Bool
+broken = leaky Open
+
+guarded : {Log} Bool
+guarded = handle broken with
+  return v -> v
+  fail -> False
+
+-- Тип ответа хендлера берётся из первой ветки, а не из ожидаемого, поэтому
+-- пустой список назван отдельно.
+empty : List Nat
+empty = Nil
+
+normal : List Nat
+normal = handle opened with
+  return v -> empty
+  note n -> Cons n (resume MkUnit)
+
+abandoned : List Nat
+abandoned = handle guarded with
+  return v -> empty
+  note n -> Cons n (resume MkUnit)
+
+-- Оба пути дают `[1, 9]`: тело, потом деструктор.
+main : List Nat
+main = append normal abandoned

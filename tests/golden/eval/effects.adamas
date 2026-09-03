@@ -1,0 +1,118 @@
+-- Эффекты исполняются (§3.4, §9 Фаза 5).
+--
+-- До сих пор эффекты только проверялись: `handle` элаборировался в применение
+-- элиминатора, а элиминатор был постулатом, то есть вычисление на нём вставало
+-- нейтралью. Здесь оно доходит до значения.
+--
+-- Хендлер **глубокий**: резумпция переустанавливает его на себе, поэтому
+-- операция, произведённая после возобновления, попадает тому же хендлеру.
+
+data Bool where
+  True : Bool
+  False : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+infixl 6 +
+(+) : Nat -> Nat -> Nat
+(+) Zero m = m
+(+) (Succ k) m = Succ (k + m)
+
+append : List Nat -> List Nat -> List Nat
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+effect Ask where
+  ask : Nat
+
+effect Amb where
+  toss : Bool
+
+effect Fail where
+  fail : a
+
+-- Три операции подряд: каждая возобновляется на своём месте, и складываются
+-- уже возвращённые значения. Одного `resume` тут мало - их три, и хендлер
+-- обязан пережить первый.
+thrice : {Ask} Nat
+thrice =
+  let a : Nat = ask
+  let b : Nat = ask
+  let c : Nat = ask
+  a + b + c
+
+answered : Nat
+answered = handle thrice with
+  return v -> v
+  ask -> resume 2
+
+-- Операция под рекурсией: глубина стека продолжений равна глубине рекурсии.
+counted : Nat -> {Ask} Nat
+counted Zero = Zero
+counted (Succ k) =
+  let one : Nat = ask
+  one + counted k
+
+three : {Ask} Nat
+three = counted 3
+
+summed : Nat
+summed = handle three with
+  return v -> v
+  ask -> resume 1
+
+-- Резумпция зовётся дважды - в этом вся разница `handleMulti` с `handle`, и
+-- цена её в кратности, которую видно на месте вызова.
+branching : {Amb} List Nat
+branching =
+  let b : Bool = toss
+  case b of
+    True -> [1]
+    False -> [2, 3]
+
+collected : List Nat
+collected = handleMulti branching with
+  return v -> v
+  toss -> append (resume True) (resume False)
+
+-- Ветка, не зовущая резумпцию, обрывает вычисление: остаток `broken` после
+-- `fail` не считается вовсе.
+broken : {Fail} Nat
+broken =
+  let n : Nat = fail
+  Succ n
+
+recovered : Nat
+recovered = handle broken with
+  return v -> v
+  fail -> Zero
+
+-- Вложенные хендлеры разных меток: внутренний пропускает чужую операцию
+-- наружу, переустанавливая себя на её продолжении.
+mixed : {Ask, Fail} Nat
+mixed =
+  let n : Nat = ask
+  let m : Nat = ask
+  n + m
+
+layered : {Ask} Nat
+layered = handle mixed with
+  return v -> v
+  fail -> Zero
+
+nested : Nat
+nested = handle layered with
+  return v -> v
+  ask -> resume 5
+
+main : List Nat
+main = Cons answered (Cons summed (append collected (Cons recovered (Cons nested Nil))))

@@ -162,6 +162,16 @@ fn ordered_branches<'a>(
     Ok(ordered)
 }
 
+/// Имена, которыми записывается число (§4.3). Соглашение то же, каким `if`
+/// берёт `Bool`: ядро этих имён не знает, а сахар без них не разворачивается.
+pub(crate) const ZERO: &str = "Zero";
+
+/// Конструктор-последователь.
+pub(crate) const SUCC: &str = "Succ";
+
+/// Преобразование литерала. Не объявлено - литерал есть само число.
+pub(crate) const FROM_NAT: &str = "fromNat";
+
 /// Имя резумпции. Связывает его сама форма хендлера (§3.4), поэтому оно и
 /// единственное в языке магическое: вложенный хендлер его затеняет.
 pub(crate) const RESUME: &str = "resume";
@@ -1743,7 +1753,7 @@ impl<'a> Elaborator<'a> {
                 let goal = self.hole();
                 Ok(self.fresh_meta(&goal))
             }
-            ExprKind::Lit(_) => missing(Missing::Literal),
+            ExprKind::Lit(lit) => self.literal(lit),
             // `if` - разбор по `Bool` (§4.1), и записывается он ровно им:
             // отдельного узла в ядре нет, а различать их было бы двумя путями
             // к одному терму.
@@ -2042,6 +2052,50 @@ impl<'a> Elaborator<'a> {
             && found.iter().zip(wanted).all(|(found, wanted)| {
                 convertible(self.signature, self.metas, self.ctx.size(), found, wanted)
             })
+    }
+
+    /// Числовой литерал (§4.3).
+    ///
+    /// `42` разворачивается унарно в `Succ`-цепочку над `Zero` и, если
+    /// `fromNat` объявлена, применяется к ней. Имена берутся по соглашению -
+    /// тем же, каким `if` берёт `Bool`, а сахар `{ε} A` берёт `Unit`.
+    ///
+    /// **Названная цена: терм литерала размером с само число.** Примитивного
+    /// числа в ядре нет, оно приходит с представлением (§4.9, Фаза 6), а до
+    /// него `42` есть сорок два конструктора. Предел вложенности это знает и
+    /// считает литерал по значению.
+    ///
+    /// Отрицательные и дробные не пишутся: им нужны `Int` и `Float`, которых
+    /// без примитивного представления не существует.
+    fn literal(&mut self, lit: &ast::Lit) -> Result<Term, ElabError> {
+        let refuse = || {
+            Err(ElabError::Missing {
+                what: Missing::Literal,
+                span: lit.span,
+            })
+        };
+        if lit.kind != ast::LitKind::Nat {
+            return refuse();
+        }
+        let Ok(value) = lit.text.parse::<u32>() else {
+            return refuse();
+        };
+        let named = |text: &str| ast::Name {
+            text: Rc::from(text),
+            span: lit.span,
+        };
+        let zero = self.name(&named(ZERO))?;
+        let successor = self.name(&named(SUCC))?;
+        let numeral = (0..value).fold(zero, |built, _| {
+            Term::App(Rc::new(successor.clone()), Rc::new(built))
+        });
+        // Преобразование применяется, только если объявлено: без него литерал
+        // и есть число, и требовать класс ради `x : Nat` значило бы требовать
+        // prelude там, где он ни при чём.
+        match self.signature.lookup(FROM_NAT) {
+            None => Ok(numeral),
+            Some(_) => Ok(self.name(&named(FROM_NAT))?.apply([numeral])),
+        }
     }
 
     /// Row позиции, где ничего не написано, - подъём или пустая.

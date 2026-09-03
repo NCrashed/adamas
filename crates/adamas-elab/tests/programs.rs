@@ -5059,6 +5059,36 @@ held = use (Some True)
 }
 
 #[test]
+fn a_class_over_a_type_constructor_resolves() {
+    // §4.4 стоит на этом: `Functor`, `Applicative`, `Monad` - классы над
+    // конструктором типов. Сходятся три вещи: член квантифицирует по своим
+    // именам, `?f Bool ≡ Option Bool` решается константой, и **по ней** поиск
+    // инстанса находит словарь. Эта-развёрнутое решение прятало бы голову.
+    let signature = program(&format!(
+        "{BASE}
+data Option (a : Type) where
+  None : Option a
+  Some : a -> Option a
+
+class Functor (f : (0 _ : Type) -> Type) where
+  map : (a -> b) -> f a -> f b
+
+instance Functor Option where
+  map g None = None
+  map g (Some x) = Some (g x)
+
+flip : Bool -> Bool
+flip True = False
+flip False = True
+
+mapped : Option Bool
+mapped = map flip (Some True)
+"
+    ));
+    assert_eq!(value(&signature, "mapped"), "Some{0} Bool False");
+}
+
+#[test]
 fn a_member_may_quantify_beyond_the_class_parameters() {
     // §4.3, решение 2026-09-03: свободные имена члена поднимаются в
     // implicit-связывания его поля, а универсум словаря считается по полям.

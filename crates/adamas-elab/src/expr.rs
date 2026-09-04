@@ -93,6 +93,8 @@ struct Handled<'a> {
     label: Option<&'a ast::EffectLabel>,
     /// Вычисление под хендлером.
     computation: &'a Expr,
+    /// Начальное состояние, если хендлер параметризован (§10 вопрос 86).
+    state: Option<&'a Expr>,
     /// Ветки в порядке написания.
     branches: &'a [ast::HandlerBranch],
     /// Хендлер целиком.
@@ -209,6 +211,10 @@ pub(crate) const FROM_NAT: &str = "fromNat";
 /// Имя резумпции. Связывает его сама форма хендлера (§3.4), поэтому оно и
 /// единственное в языке магическое: вложенный хендлер его затеняет.
 pub(crate) const RESUME: &str = "resume";
+
+/// Имя состояния параметризованного хендлера. Связывает его та же форма и по
+/// той же причине - см. [`RESUME`] (§10 вопрос 86).
+pub(crate) const STATE: &str = "state";
 
 /// Что написанный тип говорит о теле клаузы - после того, как паттерны сняли
 /// свои связывания.
@@ -1842,11 +1848,13 @@ impl<'a> Elaborator<'a> {
                 multi,
                 label,
                 computation,
+                state,
                 branches,
             } => self.handled(Handled {
                 multi: *multi,
                 label: label.as_deref(),
                 computation,
+                state: state.as_deref(),
                 branches,
                 span: expr.span,
             }),
@@ -2912,7 +2920,13 @@ impl<'a> Elaborator<'a> {
     /// роняло бы её на применении не-функции. Тот же порядок, что у `typed`:
     /// сперва авторитет, потом вычисление.
     fn stepped(&mut self, ty: &Rc<Value>, argument: &Term) -> Option<Rc<Value>> {
-        let Value::Pi(_, _, domain, _, codomain) = &**ty else {
+        // Форсировать обязательно: решение дырки живёт в таблице, а значение
+        // остаётся нейтралью, и `?b`, решённое стрелкой уже после того, как
+        // этот тип собран, сравнением с `Pi` не поймалось бы. Так и было у
+        // параметризованного хендлера - ответ его закрепляется до веток, а
+        // `resume` в ветке несёт тип, собранный раньше (§10 вопрос 86).
+        let forced = whnf_solved(self.signature, self.metas, ty);
+        let Value::Pi(_, _, domain, _, codomain) = &*forced else {
             return None;
         };
         let (domain, codomain) = (Rc::clone(domain), codomain.clone());
@@ -3027,6 +3041,7 @@ impl<'a> Elaborator<'a> {
             multi,
             label,
             computation,
+            state,
             branches,
             span,
         } = handled;
@@ -3044,6 +3059,8 @@ impl<'a> Elaborator<'a> {
         let operations = self.operations_of(&effect);
         let identity = identity_return(span);
         let ordered = ordered_branches(&operations, branches, &identity, span)?;
+
+        let initial = self.initial_state(state, &effect, multi, span)?;
 
         // Вычисление элаборируется в окружающей самого `handle`: передаётся
         // оно замыканием, а не исполняется здесь.
@@ -3092,25 +3109,7 @@ impl<'a> Elaborator<'a> {
                 name: Rc::clone(&name),
                 span,
             })?;
-        // Параметров-row у элиминатора два, и порядок их задан построением его
-        // типа (см. `handler_type`): обобщение собирает дырки в порядке
-        // появления, домен вычисления встречается раньше домена ветки, поэтому
-        // ρ нулевой, а λ первый. Прочие, если операция принесла свои,
-        // остаются дырками.
-        //
-        // λ - окружающая **применения**: ветка выполняется там, где написан
-        // сам хендлер, а не в остатке вычисления. Совпадать они не обязаны, и
-        // ровно на этом стоит хендлер-трансформер §3.4.
-        let ambient = self
-            .ctx
-            .row()
-            .clone()
-            .map(|argument| quote(self.ctx.size(), argument));
-        let rows: Vec<Row<Term>> = [quoted.clone(), ambient]
-            .into_iter()
-            .chain((2..eliminator.row_arity).map(|_| self.metas.fresh_row()))
-            .take(eliminator.row_arity as usize)
-            .collect();
+        let rows = self.eliminator_rows(&quoted, eliminator.row_arity);
         let levels = self.handler_levels(&effect, eliminator.level_arity);
         let mut term = Term::Const(CoreName::from(&*name), levels.into(), Rows::new(rows));
         let Some(mut current) = self.synthesized(&term) else {
@@ -3120,6 +3119,18 @@ impl<'a> Elaborator<'a> {
         term = inserted;
         current = rest;
 
+        // Ответ параметризованного хендлера есть `S -> B`, и вся форма - его
+        // применение к начальному состоянию. Отсюда всё остальное следует
+        // само: ветка получает `state` последним связыванием, а `resume`
+        // оказывается двухаргументным - его результат и есть `S -> B`.
+        //
+        // Закрепить это надо **до** веток: без известного ответа `state` не
+        // связано ничем, потому что связывания ветки читаются из её
+        // ожидаемого типа.
+        if let Some((_, ty)) = &initial {
+            let answer = self.result.clone().unwrap_or_else(|| self.hole());
+            self.result = Some(self.threaded(ty, &answer));
+        }
         self.answered(&current, ordered.len());
 
         // Аргументы идут в порядке связываний: вычисление, `return`, ветки по
@@ -3131,7 +3142,7 @@ impl<'a> Elaborator<'a> {
         for branch in std::iter::once(None).chain(ordered.into_iter().map(Some)) {
             let argument = match branch {
                 None => value.clone(),
-                Some(branch) => self.branch_lambda(&current, branch)?,
+                Some(branch) => self.branch_lambda(&current, branch, initial.is_some())?,
             };
             // Тип шагает **без** проверки аргумента: арность известна, а
             // проверка идёт при `σ = 0`, где окружающая пуста (§3.4), - и
@@ -3153,7 +3164,86 @@ impl<'a> Elaborator<'a> {
             term = Term::App(Rc::new(term), Rc::new(argument));
             current = codomain.apply(value);
         }
+        // Начальное состояние идёт последним: ответ хендлера есть `S -> B`, и
+        // форма целиком - его применение.
+        if let Some((initial, _)) = initial {
+            term = Term::App(Rc::new(term), Rc::new(initial));
+        }
         Ok(term)
+    }
+
+    /// Аргументы-row элиминатора.
+    ///
+    /// Их два, и порядок задан построением его типа (см. `handler_type`):
+    /// обобщение собирает дырки в порядке появления, домен вычисления
+    /// встречается раньше домена ветки, поэтому ρ нулевой, а λ первый. Прочие,
+    /// если операция принесла свои, остаются дырками.
+    ///
+    /// λ - окружающая **применения**: ветка выполняется там, где написан сам
+    /// хендлер, а не в остатке вычисления. Совпадать они не обязаны, и ровно на
+    /// этом стоит хендлер-трансформер §3.4.
+    fn eliminator_rows(&mut self, rho: &Row<Term>, arity: u32) -> Vec<Row<Term>> {
+        let ambient = self
+            .ctx
+            .row()
+            .clone()
+            .map(|argument| quote(self.ctx.size(), argument));
+        [rho.clone(), ambient]
+            .into_iter()
+            .chain((2..arity).map(|_| self.metas.fresh_row()))
+            .take(arity as usize)
+            .collect()
+    }
+
+    /// Начальное состояние параметризованного хендлера и его тип.
+    ///
+    /// Считается оно **в окружающей** и один раз, до того как хендлер
+    /// установлен: это обычное значение, а не ветка.
+    fn initial_state(
+        &mut self,
+        state: Option<&Expr>,
+        effect: &Symbol,
+        multi: bool,
+        span: Span,
+    ) -> Result<Option<(Term, Rc<Value>)>, ElabError> {
+        let Some(state) = state else {
+            return Ok(None);
+        };
+        // Состояние - одна нить, и мультишот раздваивал бы её молча: у двух
+        // возобновлений одной ветки состояния разошлись бы, а какое из них
+        // считать итоговым, не сказано ничем.
+        if multi {
+            return Err(ElabError::HandlerBranch {
+                name: Rc::clone(effect),
+                why: "`state` не сочетается с `handleMulti`",
+                span,
+            });
+        }
+        let term = self.expr(state, Mult::Many)?;
+        let ty = self
+            .synthesized(&term)
+            .ok_or_else(|| ElabError::NotHandled {
+                effect: Rc::clone(effect),
+                span: state.span,
+            })?;
+        Ok(Some((term, ty)))
+    }
+
+    /// `S -> B` - ответ параметризованного хендлера.
+    ///
+    /// Кратность связывания `ω`: `get -> resume state state` тратит состояние
+    /// дважды, и это законное употребление, а не ошибка.
+    fn threaded(&mut self, state: &Rc<Value>, answer: &Rc<Value>) -> Rc<Value> {
+        let size = self.ctx.size();
+        let arrow = Term::Pi(
+            Binder::explicit(Mult::Many),
+            CoreName::from(STATE),
+            Rc::new(quote(size, state)),
+            Row::empty(),
+            // Ответ о связывании не знает: написан он снаружи хендлера.
+            Rc::new(adamas_core::pattern::shift_free(&quote(size, answer), 1)),
+        );
+        self.ctx.eval(&arrow)
     }
 
     /// Сводит ответ хендлера с ожидаемым - **до** проверки веток (§10 вопрос 87).
@@ -3285,6 +3375,7 @@ impl<'a> Elaborator<'a> {
         &mut self,
         expected: &Rc<Value>,
         branch: &ast::HandlerBranch,
+        stateful: bool,
     ) -> Result<Term, ElabError> {
         let Value::Pi(_, _, domain, _, _) = &*whnf_solved(self.signature, self.metas, expected)
         else {
@@ -3304,6 +3395,16 @@ impl<'a> Elaborator<'a> {
         if &*branch.name.text != RETURN {
             params.push(bind_as(ast::Name {
                 text: Rc::from(RESUME),
+                span: branch.name.span,
+            }));
+        }
+        // Состояние - последнее связывание ветки, и связывает его сама форма,
+        // как `resume`. Лямбду эту пишет элаборация, а не пользователь, и в
+        // этом вся разница с идиомой из §10 вопроса 86: написанная руками, она
+        // выносит резумпцию наружу и отвергается scope-bound (§3.3).
+        if stateful {
+            params.push(bind_as(ast::Name {
+                text: Rc::from(STATE),
                 span: branch.name.span,
             }));
         }

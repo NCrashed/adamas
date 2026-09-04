@@ -100,5 +100,47 @@ collected = handle relayed with
   return v -> Nil
   yield x -> Cons x (resume MkUnit)
 
+-- Несколько однотипных эффектов разом (§10 вопрос 23). Метки одноимённые и
+-- различаются аргументом, а адресует их та же маска: сколько хендлеров
+-- пропустить, столько раз она и написана.
+--
+-- Приостанавливает аргумент сама форма: `raise MkParse` - применение полное и
+-- производит сразу, а элиминатор ждёт вычисление. Иначе каждая маска стоила бы
+-- отдельного определения.
+data IOError where
+  MkIO : IOError
+
+data ParseError where
+  MkParse : ParseError
+
+data EvalError where
+  MkEval : EvalError
+
+effect Raise e where
+  raise : e -> Nat
+
+program : {Raise IOError, Raise ParseError, Raise EvalError} Nat
+program =
+  let a : Nat = raise MkIO
+  let b : Nat = mask (raise MkParse)
+  let c : Nat = mask (mask (raise MkEval))
+  a + b + c
+
+onIO : {Raise ParseError, Raise EvalError} Nat
+onIO = handle program with
+  return v -> v
+  raise e -> resume (Succ Zero)
+
+onParse : {Raise EvalError} Nat
+onParse = handle onIO with
+  return v -> v
+  raise e -> resume (Succ (Succ Zero))
+
+-- 1 + 2 + 3: каждая ошибка досталась своему хендлеру.
+triple : Nat
+triple = handle onParse with
+  return v -> v
+  raise e -> resume (Succ (Succ (Succ Zero)))
+
 main : List Nat
-main = Cons masked (Cons unmasked collected)
+main = Cons masked (Cons unmasked (Cons triple collected))

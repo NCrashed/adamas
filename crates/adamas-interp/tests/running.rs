@@ -792,3 +792,54 @@ main = handle layered with
     );
     assert_eq!(ran(&source, "main"), "Zero");
 }
+
+/// Несколько однотипных эффектов адресуются вложенными масками (§10 вопрос 23).
+///
+/// Метки одноимённые и различаются аргументом; сколько хендлеров пропустить,
+/// столько раз маска и написана. Аргумент приостанавливает сама форма -
+/// `raise MkParse` применение полное и производит сразу.
+#[test]
+fn nested_masks_address_several_handlers_of_one_label() {
+    let source = format!(
+        "{BASE}
+data IOError where
+  MkIO : IOError
+
+data ParseError where
+  MkParse : ParseError
+
+data EvalError where
+  MkEval : EvalError
+
+effect Raise e where
+  raise : e -> Nat
+
+program : {{Raise IOError, Raise ParseError, Raise EvalError}} Nat
+program =
+  let a : Nat = raise MkIO
+  let b : Nat = mask (raise MkParse)
+  let c : Nat = mask (mask (raise MkEval))
+  a + b + c
+
+onIO : {{Raise ParseError, Raise EvalError}} Nat
+onIO = handle program with
+  return v -> v
+  raise e -> resume (Succ Zero)
+
+onParse : {{Raise EvalError}} Nat
+onParse = handle onIO with
+  return v -> v
+  raise e -> resume (Succ (Succ Zero))
+
+main : Nat
+main = handle onParse with
+  return v -> v
+  raise e -> resume (Succ (Succ (Succ Zero)))
+"
+    );
+    // 1 + 2 + 3: каждая ошибка досталась своему хендлеру.
+    assert_eq!(
+        ran(&source, "main"),
+        "Succ (Succ (Succ (Succ (Succ (Succ Zero)))))"
+    );
+}

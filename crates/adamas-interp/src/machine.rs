@@ -335,6 +335,9 @@ impl<'a> Machine<'a> {
             Frame::Unwinding(segment, index, held) => {
                 Ok(self.unwinding(&segment, index, held, kont))
             }
+            // Маскированное вычисление договорило: кадр снят, и следующие
+            // операции той же метки снова видят ближайший хендлер.
+            Frame::Masking(_) => Ok(Step::Return(value)),
             Frame::Passing(given, index) => Ok(Self::passing(value, &given, index, kont)),
         }
     }

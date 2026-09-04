@@ -39,6 +39,7 @@ use crate::machine::{Machine, Step};
 const HANDLE: &str = "#handle.";
 const MULTI: &str = "#handleMulti.";
 const CLOSING: &str = "#closing";
+const MASK: &str = "#mask.";
 
 /// Имя единицы: приостановленное вычисление запускается её значением.
 const UNIT: &str = "Unit";
@@ -73,6 +74,24 @@ impl Machine<'_> {
                 return Ok(None);
             }
             return self.performed(effect, name, &arguments, kont).map(Some);
+        }
+        if let Some(effect) = name.strip_prefix(MASK) {
+            let Some(definition) = self.signature().lookup(effect) else {
+                return Ok(None);
+            };
+            let DefinitionKind::Effect { params, .. } = &definition.kind else {
+                return Ok(None);
+            };
+            let arguments = applied(spine);
+            // Параметры метки, `a`, вычисление.
+            let arity = *params as usize + 2;
+            if arguments.len() < arity {
+                return Ok(None);
+            }
+            let unit = self.unit()?;
+            kont.push(Frame::Masking(Rc::from(effect)));
+            // Вычисление приостановлено, как и под хендлером.
+            return Ok(Some(Step::Apply(Rc::clone(&arguments[arity - 1]), unit)));
         }
         let Some(handler) = self.shape(name) else {
             return Ok(None);
@@ -151,16 +170,29 @@ impl Machine<'_> {
         arguments: &[Rc<Value>],
         kont: &mut Kont,
     ) -> Result<Step, RunError> {
-        let found = kont.iter().enumerate().rev().find_map(|(index, frame)| {
-            let Frame::Handler(handler) = frame else {
-                return None;
-            };
-            if handler.effect != *effect {
-                return None;
-            }
-            let slot = handler.operations.iter().position(|it| it == operation)?;
-            Some((index, Rc::clone(handler), slot))
-        });
+        // Маски считаются по дороге наружу: каждая пропускает один подходящий
+        // хендлер. Стоят они внутри того, мимо кого идут, поэтому поиск изнутри
+        // встречает их раньше - и счёт получается сам собой (§10 вопрос 72).
+        let mut masked = 0usize;
+        let found = kont
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, frame)| match frame {
+                Frame::Masking(name) if name == effect => {
+                    masked += 1;
+                    None
+                }
+                Frame::Handler(handler) if handler.effect == *effect => {
+                    if masked > 0 {
+                        masked -= 1;
+                        return None;
+                    }
+                    let slot = handler.operations.iter().position(|it| it == operation)?;
+                    Some((index, Rc::clone(handler), slot))
+                }
+                _ => None,
+            });
         let Some((index, handler, slot)) = found else {
             return Err(RunError::Unhandled {
                 effect: effect.to_string(),

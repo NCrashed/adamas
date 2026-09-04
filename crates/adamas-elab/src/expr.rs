@@ -26,7 +26,7 @@ use adamas_parser::ast::{
     Symbol, Visibility,
 };
 
-use crate::decl::CLOSING;
+use crate::decl::{CLOSING, MASK};
 use crate::error::{ElabError, Missing};
 use crate::fixity::Fixities;
 use crate::live;
@@ -388,7 +388,7 @@ fn written_row_tail(expr: &Expr) -> Option<&ast::Name> {
             })
         }),
         ExprKind::Name(_) | ExprKind::Lit(_) | ExprKind::Hole => None,
-        ExprKind::Project(inner, _) => recur(inner),
+        ExprKind::Mask(inner) | ExprKind::Project(inner, _) => recur(inner),
         ExprKind::App(left, right)
         | ExprKind::TypeApp(left, right)
         | ExprKind::Arrow(left, right) => recur(left).or_else(|| recur(right)),
@@ -443,7 +443,7 @@ pub(crate) fn names_any(expr: &Expr, wanted: &[&Symbol]) -> bool {
         ExprKind::Effectful { labels, body, .. } => {
             recur(body) || labels.iter().flat_map(|it| &it.arguments).any(recur)
         }
-        ExprKind::Project(inner, _) => recur(inner),
+        ExprKind::Mask(inner) | ExprKind::Project(inner, _) => recur(inner),
         ExprKind::App(left, right)
         | ExprKind::TypeApp(left, right)
         | ExprKind::Arrow(left, right) => recur(left) || recur(right),
@@ -1217,6 +1217,7 @@ impl<'a> Elaborator<'a> {
     fn free_in(&self, expr: &Expr, bound: &mut Vec<Symbol>, found: &mut Unbound) {
         match &expr.kind {
             ExprKind::Name(name) => self.free_name(name, bound, found),
+            ExprKind::Mask(inner) => self.free_in(inner, bound, found),
             // Метка row - объявленное имя, свободной быть не может; аргументы
             // её - обычные термы, и свободные имена в них поднимаются как
             // всюду. Хвост здесь не считается: он приходит с auto-lift.
@@ -1858,10 +1859,57 @@ impl<'a> Elaborator<'a> {
                 branches,
                 span: expr.span,
             }),
+            ExprKind::Mask(inner) => self.masked(inner, expr.span),
             ExprKind::Tuple(items) if items.is_empty() => missing(Missing::Unit),
             ExprKind::Tuple(_) => missing(Missing::Tuple),
             ExprKind::List(items) => self.list(items, expr.span),
         }
+    }
+
+    /// `mask e` - вычисление мимо ближайшего одноимённого хендлера (§3.4).
+    ///
+    /// Маскируется **внутреннее** вхождение окружающей row: ровно тот хендлер,
+    /// который иначе перехватил бы операцию. Писать метку незачем - она
+    /// читается оттуда же, откуда её читает сам хендлер, и другого разумного
+    /// выбора у формы нет: «пропустить ближайший» есть весь её смысл.
+    ///
+    /// Собирается применением элиминатора и отдаётся обычному спайну: тому
+    /// нужны и вставка имплиситов, и правило исполнения - аргумент здесь
+    /// **передаётся**, а не выполняется, потому что ждут от него вычисление.
+    fn masked(&mut self, inner: &Expr, span: Span) -> Result<Term, ElabError> {
+        let Some(label) = self
+            .ctx
+            .row()
+            .labels()
+            .first()
+            .map(|it| Rc::clone(&it.name))
+        else {
+            return Err(ElabError::NothingToMask { span });
+        };
+        let name: Symbol = Rc::from(format!("{MASK}.{label}").as_str());
+        if self.signature.lookup(&name).is_none() {
+            return Err(ElabError::UnknownName { name, span });
+        }
+        let head = Expr {
+            kind: ExprKind::Name(ast::Name {
+                text: name,
+                span: inner.span,
+            }),
+            span: inner.span,
+        };
+        let applied = Expr {
+            kind: ExprKind::App(Box::new(head), Box::new(inner.clone())),
+            span,
+        };
+        // Имена под маской инстанцируются **заново**. Кэш `instantiated` держит
+        // одно инстанцирование на определение, и обычному коду это верно: два
+        // `ask` в одном теле производят в одно вхождение метки. Под маской - в
+        // разные, в том вся её суть, и общая дырка row делала бы это
+        // невыразимым (§10 вопрос 72).
+        let outer = std::mem::take(&mut self.instantiated);
+        let term = self.expr(&applied, Mult::Many);
+        self.instantiated = outer;
+        term
     }
 
     /// `case e of …` - разбор выражением (§4.1).

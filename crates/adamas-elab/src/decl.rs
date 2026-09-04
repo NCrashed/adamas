@@ -3376,6 +3376,12 @@ fn declare_effect(
         )?;
         handlers.push((format!("{prefix}.{}", effect.name.text), ty));
     }
+    // Маска - третий элиминатор той же группы и по той же причине: её тип
+    // называет метку (§10 вопрос 72).
+    handlers.push((
+        format!("{MASK}.{}", effect.name.text),
+        mask_type(signature, metas, &kind, &effect.name.text, span)?,
+    ));
     let handlers: Vec<(&str, Term)> = handlers
         .iter()
         .map(|(name, ty)| (name.as_str(), ty.clone()))
@@ -3430,6 +3436,9 @@ fn arrows(binders: Vec<(Binder, CoreName, Term)>, row: &Row<Term>, result: Term)
             )
         })
 }
+
+/// Невыразимое имя элиминатора маски (§3.4, §10 вопрос 72).
+pub(crate) const MASK: &str = "#mask";
 
 /// Невыразимое имя элиминатора scope (§3.3).
 pub(crate) const CLOSING: &str = "#closing";
@@ -3553,6 +3562,91 @@ fn declare_closing(
 /// вычисления - там стоит `{L p⃗ | ρ}`, - и только потом домен ветки `return`,
 /// где стоит `λ`. Отсюда `ρ` нулевой, `λ` первый, и на это опирается
 /// `Elaborator::handled`, подставляя их позиционно.
+/// Тип `#mask.L` - элиминатора, пропускающего ближайший одноимённый хендлер.
+///
+/// ```text
+/// #mask.L : {0 p⃗} -> {0 a} -> (ω c : {ρ} a) -> {L p⃗ | ρ} a
+/// ```
+///
+/// Читается так: вычисление умеет `ρ`, а место применения обязано уметь `L p⃗`
+/// **сверх** того. Лишняя метка впереди - фантом: её снимет ближайший хендлер,
+/// и настоящие операции вычисления, если они той же метки, останутся в row и
+/// достанутся следующему наружу (§3.4, §10 вопрос 72).
+///
+/// Row у элиминатора одна, а не две, как у хендлера: окружающая из неё
+/// выводится дописыванием метки, а не задаётся отдельно.
+fn mask_type(
+    signature: &Signature,
+    metas: &mut Metas,
+    kind: &Term,
+    label: &str,
+    span: Span,
+) -> Result<Term, ElabError> {
+    let unit = signature
+        .instantiate(UNIT, metas)
+        .ok_or_else(|| ElabError::UnknownName {
+            name: Rc::from(UNIT),
+            span,
+        })?;
+    let rho = metas.fresh_row();
+
+    // Параметры метки - те же implicit-связывания, что у хендлера.
+    let mut binders: Vec<(Binder, CoreName, Term)> = Vec::new();
+    let mut level = 0;
+    let mut former = eval(&Env::default(), kind);
+    while let Some(next) = peeled(&former, level, &mut binders) {
+        former = next;
+        level += 1;
+    }
+    let params = level;
+
+    // Глубина под всеми связываниями: параметры метки, `a`, вычисление.
+    let depth = params + 2;
+    let answer = at(params, depth);
+    let computation = Term::Pi(
+        Binder::explicit(Mult::Many),
+        CoreName::from("_"),
+        Rc::new(unit),
+        rho.clone(),
+        Rc::new(answer.clone()),
+    );
+    // Окружающая стоит на стрелке вычисления и читается в её **внешнем**
+    // контексте - там связаны параметры метки и `a`.
+    let ambient = Row::closing(
+        [Label {
+            name: CoreName::from(label),
+            arguments: (0..params).map(|param| at(param, params + 1)).collect(),
+        }],
+        rho.tail(),
+    );
+    let mut ty = Term::Pi(
+        Binder::explicit(Mult::Many),
+        CoreName::from("computation"),
+        Rc::new(computation),
+        ambient,
+        Rc::new(answer),
+    );
+    ty = Term::Pi(
+        Binder::implicit(Mult::Zero),
+        CoreName::from("a"),
+        Rc::new(Term::Universe(metas.fresh_level())),
+        Row::empty(),
+        Rc::new(ty),
+    );
+    Ok(binders
+        .into_iter()
+        .rev()
+        .fold(ty, |codomain, (binder, name, domain)| {
+            Term::Pi(
+                binder,
+                name,
+                Rc::new(domain),
+                Row::empty(),
+                Rc::new(codomain),
+            )
+        }))
+}
+
 fn handler_type(
     signature: &Signature,
     metas: &mut Metas,

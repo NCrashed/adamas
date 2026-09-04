@@ -586,6 +586,17 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// `mask` написан там, где окружающая row пуста или начинается хвостом.
+    ///
+    /// Маскировать нечего: форма значит «пропустить ближайший хендлер», а
+    /// ближайшего нет - либо его не существует, либо метка его неизвестна
+    /// (§10 вопрос 72).
+    #[error("`mask` нечего маскировать: окружающая row не называет метки")]
+    NothingToMask {
+        /// Где написан `mask`.
+        span: Span,
+    },
+
     /// Вычисление под хендлером метки не производит.
     #[error("под хендлером обязано стоять вычисление, производящее `{effect}`")]
     NotHandled {
@@ -985,6 +996,7 @@ impl ElabError {
             | Self::NotUpdatable { span }
             | Self::NoImplicitParameter { span }
             | Self::BlockWithoutValue { span }
+            | Self::NothingToMask { span }
             | Self::UnrestrictedOwned { span, .. }
             | Self::OwnedTopLevel { span, .. }
             | Self::OwnedDiscarded { span, .. }

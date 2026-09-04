@@ -7063,3 +7063,41 @@ asked = mask ask
         "вхождений ровно два: {printed}"
     );
 }
+
+/// Конструктор видит конструкторы семейств, объявленных раньше в той же группе.
+///
+/// Довод тот же, что у тип-формеров (§10 вопрос 64): взаимная ссылка
+/// конструкторов друг на друга не обоснована - `MkA : A MkB` вместе с
+/// `MkB : B MkA` есть круг по значениям, - и симметрии, которую порядок мог бы
+/// нарушить, здесь нет.
+#[test]
+fn a_constructor_sees_constructors_of_earlier_families() {
+    let signature = program(
+        "\
+mutual
+  data Tag : Type where
+    Leaf : Tag
+
+  data Held : Tag -> Type where
+    One : Held Leaf
+",
+    );
+    assert!(signature.lookup("One").is_some(), "конструктор объявлен");
+}
+
+/// Семейства при этом видны **все**: на этом стоит `Tree`/`Forest`.
+#[test]
+fn a_constructor_still_sees_every_family_of_the_group() {
+    let signature = program(
+        "\
+mutual
+  data Tree (a : Type) where
+    Node : a -> Forest a -> Tree a
+
+  data Forest (a : Type) where
+    Empty : Forest a
+    More : Tree a -> Forest a -> Forest a
+",
+    );
+    assert!(signature.lookup("Node").is_some(), "оба объявлены");
+}

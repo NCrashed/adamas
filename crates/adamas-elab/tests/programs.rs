@@ -6368,3 +6368,73 @@ fn binders(ty: &Term) -> usize {
     }
     found
 }
+
+/// Индекс, решённый разбором, уходит из спайна дырок ветви.
+///
+/// §3.7 уровня 1 стоит на этом целиком. `sym Refl = Refl` строит `Refl` в
+/// ветви, где разбор уже решил `y := x`; дырки под его аргументы заводятся с
+/// контекстом в спайне, и связывание `y` было в нём **вторым именем** `x`.
+/// Спайн переставал быть паттерном Миллера - `?m a x x`, - и решение,
+/// единственное по существу, не находилось.
+#[test]
+fn an_index_solved_by_matching_leaves_the_spine() {
+    let equality = format!(
+        "{BASE}
+data Eqv (a : Type) (x : a) : a -> Type where
+  Refl : Eqv a x x
+"
+    );
+    // Разбирается `Refl` - уточнение не нужно, спайн и так линеен.
+    program(&format!(
+        "{equality}
+subst : (0 p : a -> Type) -> Eqv a x y -> p x -> p y
+subst p Refl px = px
+"
+    ));
+    // Строится `Refl` - без уточнения не проходило.
+    program(&format!(
+        "{equality}
+sym : Eqv a x y -> Eqv a y x
+sym Refl = Refl
+"
+    ));
+    program(&format!(
+        "{equality}
+cong : (0 f : (1 _ : a) -> b) -> Eqv a x y -> Eqv b (f x) (f y)
+cong f Refl = Refl
+"
+    ));
+    // Уточнение принадлежит своей клаузе: соседке `y` по-прежнему переменная.
+    program(&format!(
+        "{equality}
+pair : Eqv Nat x y -> Eqv Nat y x
+pair Refl = Refl
+
+other : Eqv Nat x y -> Eqv Nat z x -> Eqv Nat z y
+other Refl q = q
+"
+    ));
+}
+
+/// Уточнение узко: индекс, решённый полем конструктора, им не берётся.
+///
+/// Значение связывания живёт на его же глубине, а поле связывается позже -
+/// выразить `n := Succ k` там нечем. Такой индекс остаётся переменной, то есть
+/// ровно как до правки; отказ приходит оттуда же, откуда приходил.
+#[test]
+fn an_index_solved_by_a_field_is_left_alone() {
+    let vectors = format!(
+        "{BASE}
+data Vect (a : Type) : Nat -> Type where
+  VNil : Vect a Zero
+  VCons : (0 k : Nat) -> a -> Vect a k -> Vect a (Succ k)
+"
+    );
+    // Разбор при этом работает: уточнение нужно построению, а не разбору.
+    program(&format!(
+        "{vectors}
+head : Vect Bool (Succ n) -> Bool
+head (VCons k x xs) = x
+"
+    ));
+}

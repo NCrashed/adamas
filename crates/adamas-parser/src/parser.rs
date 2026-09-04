@@ -350,6 +350,17 @@ pub fn parse(text: &str, tokens: &[Token]) -> Result<Module, ParseError> {
 /// самой цепочки `Rc`).
 pub(crate) const MAX_DEPTH: u32 = 256;
 
+/// Имя члена, объявляющего начальное состояние параметризованного хендлера.
+const STATE: &str = "state";
+
+/// Член блока хендлера.
+enum Member {
+    /// `state s0` - начальное состояние.
+    State(Expr),
+    /// Ветка `op p -> body` либо `return v -> body`.
+    Branch(HandlerBranch),
+}
+
 /// Состояние разбора: поток, позиция в нём и глубина спуска.
 struct Parser<'a> {
     text: &'a str,
@@ -1910,23 +1921,48 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::With)?;
         self.expect(TokenKind::Open)?;
         let mut branches = Vec::new();
+        let mut state = None;
+        let mut end;
         loop {
-            branches.push(self.handler_branch()?);
+            match self.handler_member()? {
+                Member::State(initial) => {
+                    end = initial.span;
+                    state = Some(Box::new(initial));
+                }
+                Member::Branch(branch) => {
+                    end = branch.span;
+                    branches.push(branch);
+                }
+            }
             if self.eat(TokenKind::Sep).is_none() {
                 break;
             }
         }
         self.expect(TokenKind::Close)?;
-        let end = branches.last().map_or(start, |last| last.span);
         Ok(Expr {
             kind: ExprKind::Handle {
                 multi,
                 label,
                 computation: Box::new(computation),
+                state,
                 branches,
             },
             span: start.merge(end),
         })
+    }
+
+    /// Член блока хендлера: ветка либо начальное состояние.
+    ///
+    /// `state` особо по имени - как `return` и `resume`, и с тем же
+    /// ограничением: операция, названная так же, ветки себе написать не сможет.
+    /// Стрелки у этого члена нет, поэтому и читается он до применения, а не до
+    /// стрелочного уровня: `state s0 -> b` иначе разобралось бы типом функции.
+    fn handler_member(&mut self) -> Result<Member, ParseError> {
+        if self.at(TokenKind::Ident) && self.text_ahead(0) == STATE {
+            self.bump();
+            return Ok(Member::State(self.application()?));
+        }
+        Ok(Member::Branch(self.handler_branch()?))
     }
 
     /// Метка за `@`: `@Yield` либо `@(Yield a)`.

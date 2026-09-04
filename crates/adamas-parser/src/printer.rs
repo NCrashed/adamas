@@ -531,8 +531,15 @@ impl Printer {
                 multi,
                 label,
                 computation,
+                state,
                 branches,
-            } => self.handler(*multi, label.as_deref(), computation, branches),
+            } => self.handler(
+                *multi,
+                label.as_deref(),
+                computation,
+                state.as_deref(),
+                branches,
+            ),
             ExprKind::Case { scrutinee, alts } => {
                 self.push("case ");
                 self.expr(scrutinee, Prec::Chain);
@@ -562,6 +569,7 @@ impl Printer {
         multi: bool,
         label: Option<&EffectLabel>,
         computation: &Expr,
+        state: Option<&Expr>,
         branches: &[HandlerBranch],
     ) {
         self.push(if multi { "handleMulti " } else { "handle " });
@@ -583,7 +591,19 @@ impl Printer {
         }
         self.expr(computation, Prec::Chain);
         self.push(" with");
-        self.block_of(branches, Self::handler_branch);
+        // Состояние идёт первым членом: оно относится к хендлеру целиком, а не
+        // к какой-то из веток.
+        self.nested(STEP, |printer| {
+            if let Some(state) = state {
+                printer.line();
+                printer.push("state ");
+                printer.expr(state, Prec::Chain);
+            }
+            for branch in branches {
+                printer.line();
+                printer.handler_branch(branch);
+            }
+        });
     }
 
     fn handler_branch(&mut self, branch: &HandlerBranch) {

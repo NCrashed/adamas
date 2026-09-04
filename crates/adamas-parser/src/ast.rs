@@ -247,6 +247,13 @@ pub enum ExprKind {
         label: Option<Box<EffectLabel>>,
         /// Вычисление под хендлером.
         computation: Box<Expr>,
+        /// Начальное состояние параметризованного хендлера: член `state s0`
+        /// (§4.1, §10 вопрос 86).
+        ///
+        /// Есть - хендлер параметризован: ветки видят `state` и зовут `resume`
+        /// двумя аргументами. Нет - обычный хендлер, и `state` в ветках не
+        /// связано ничем.
+        state: Option<Box<Expr>>,
         /// Ветки в порядке написания. Порядок значения не имеет:
         /// сопоставляются они по имени.
         branches: Vec<HandlerBranch>,
@@ -905,15 +912,35 @@ fn dump_effect(out: &mut String, effect: &EffectDecl, depth: usize) {
     out.push(')');
 }
 
+/// Разбор: скрутиний и альтернативы соседями.
+fn dump_case(out: &mut String, scrutinee: &Expr, alts: &[Alt]) {
+    out.push_str("(case ");
+    dump_expr(out, scrutinee);
+    for alt in alts {
+        out.push_str(" (alt ");
+        dump_pattern(out, &alt.pattern);
+        out.push(' ');
+        dump_expr(out, &alt.body);
+        out.push(')');
+    }
+    out.push(')');
+}
+
 /// Хендлер: вычисление и ветки соседями.
 fn dump_handler(
     out: &mut String,
     multi: bool,
     label: Option<&EffectLabel>,
     computation: &Expr,
+    state: Option<&Expr>,
     branches: &[HandlerBranch],
 ) {
     out.push_str(if multi { "(handleMulti " } else { "(handle " });
+    if let Some(state) = state {
+        out.push_str("(state ");
+        dump_expr(out, state);
+        out.push_str(") ");
+    }
     if let Some(label) = label {
         out.push_str("(at ");
         out.push_str(&label.name.text);
@@ -1200,20 +1227,17 @@ fn dump_expr(out: &mut String, expr: &Expr) {
             multi,
             label,
             computation,
+            state,
             branches,
-        } => dump_handler(out, *multi, label.as_deref(), computation, branches),
-        ExprKind::Case { scrutinee, alts } => {
-            out.push_str("(case ");
-            dump_expr(out, scrutinee);
-            for alt in alts {
-                out.push_str(" (alt ");
-                dump_pattern(out, &alt.pattern);
-                out.push(' ');
-                dump_expr(out, &alt.body);
-                out.push(')');
-            }
-            out.push(')');
-        }
+        } => dump_handler(
+            out,
+            *multi,
+            label.as_deref(),
+            computation,
+            state.as_deref(),
+            branches,
+        ),
+        ExprKind::Case { scrutinee, alts } => dump_case(out, scrutinee, alts),
         ExprKind::Tuple(items) => {
             out.push_str("(tuple");
             for item in items {

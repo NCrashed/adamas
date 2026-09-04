@@ -6561,3 +6561,64 @@ useUp k s = k MkUnit s
 "
     ));
 }
+
+/// Метод класса над конструктором типов зовётся не только из пустого контекста.
+///
+/// Имитация срабатывала лишь при совпадении длины спайна дырки с арностью
+/// головы, а спайн есть контекст места вызова: `map toNat (Some True)` проходило
+/// из определения без параметров, `useMap o = map toNat o` - нет, и решение
+/// печаталось постоянной функцией. §4.4 держалась на одной форме записи - той, в
+/// которой её звал собственный тест (§10 вопрос 91).
+#[test]
+fn a_method_over_a_type_constructor_is_called_from_any_context() {
+    let classes = format!(
+        "{BASE}
+data Option (a : Type) where
+  None : Option a
+  Some : a -> Option a
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+class Functor (f : Type -> Type) where
+  map : (a -> b) -> f a -> f b
+
+instance Functor Option where
+  map g None = None
+  map g (Some x) = Some (g x)
+
+instance Functor List where
+  map g Nil = Nil
+  map g (Cons x xs) = Cons (g x) (map g xs)
+
+toNat : Bool -> Nat
+toNat True = Succ Zero
+toNat False = Zero
+"
+    );
+    // Из пустого контекста - проходило и раньше.
+    program(&format!(
+        "{classes}
+direct : Option Nat
+direct = map toNat (Some True)
+"
+    ));
+    // Под параметром - спайн длиннее арности головы.
+    program(&format!(
+        "{classes}
+useMap : Option Bool -> Option Nat
+useMap o = map toNat o
+
+overList : List Bool -> List Nat
+overList xs = map toNat xs
+"
+    ));
+    // Голова - параметр класса, а не константа: проекция, а не имитация.
+    program(&format!(
+        "{classes}
+twice : {{Functor f}} => (a -> a) -> f a -> f a
+twice g x = map g (map g x)
+"
+    ));
+}

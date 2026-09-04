@@ -25,5 +25,31 @@ not : Bool -> Bool
 not True = False
 not False = True
 
-main : Option Bool
-main = map not (Some True)
+-- Метод зовётся не только из пустого контекста: спайн дырки есть контекст
+-- места вызова, и требовать совпадения его длины с арностью головы значило бы
+-- держать §4.4 на одной форме записи (§10 вопрос 91).
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+instance Functor List where
+  map g Nil = Nil
+  map g (Cons x xs) = Cons (g x) (map g xs)
+
+-- Под параметром: спайн дырки длиннее арности головы.
+flipped : Option Bool -> Option Bool
+flipped o = map not o
+
+-- Голова - параметр класса, а не константа: решается проекцией.
+twice : {Functor f} => (a -> a) -> f a -> f a
+twice g x = map g (map g x)
+
+held : Option Bool -> Bool
+held None = False
+held (Some b) = b
+
+-- Три формы разом: из пустого контекста, под параметром и по констрейнту.
+main : List Bool
+main =
+  Cons (held (map not (Some True)))
+    (Cons (held (flipped (Some True))) (twice not [True, False]))

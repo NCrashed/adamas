@@ -807,3 +807,16 @@ run = handle program with
     );
     assert!(refused.is_err(), "получено {refused:?}");
 }
+
+#[test]
+fn a_mask_reads_its_argument_up_to_application() {
+    // §10 вопрос 72: `mask f x` есть маска над `f x`, а не применение маски к
+    // двум аргументам. Метка не пишется - её называет окружающая row.
+    let dumped = tree(
+        "run : Nat
+run = mask f x
+",
+    )
+    .expect("разбор удался");
+    assert!(dumped.contains("(mask (f x))"), "получено {dumped}");
+}

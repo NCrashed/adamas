@@ -1,0 +1,104 @@
+-- Адресация внешнего хендлера одноимённой метки (§3.4, §10 вопрос 72).
+--
+-- Мимо внутреннего хендлера ходит и сама **ветка**: окружающая у неё есть
+-- окружающая применения `handle`, а не остаток вычисления, поэтому операция из
+-- ветки достаётся следующему наружу. Это и есть `relay` ниже, и `mask` ему не
+-- нужен.
+--
+-- `mask` нужен другому: коду **внутри вычисления**, который обязан пройти мимо
+-- ближайшего хендлера. Метку он не пишет - маскируется внутреннее вхождение
+-- окружающей, ровно тот хендлер, который иначе перехватил бы операцию.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+infixl 6 +
+(+) : Nat -> Nat -> Nat
+(+) Zero m = m
+(+) (Succ k) m = Succ (k + m)
+
+append : List Nat -> List Nat -> List Nat
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+effect Ask where
+  ask : Nat
+
+-- Внутренний хендлер отвечает нулём и продолжает.
+inner : ({Ask, Ask} Nat) -> {Ask} Nat
+inner act = handle act with
+  return v -> v
+  ask -> resume Zero
+
+-- Два запроса разного смысла: первый достаётся внутреннему, второй проходит
+-- мимо него к внешнему. Без `mask` написать это нечем: операция всегда берёт
+-- первое вхождение метки.
+asked : {Ask, Ask} Nat
+asked =
+  let near : Nat = ask
+  let far : Nat = mask ask
+  near + far
+
+layered : {Ask} Nat
+layered = inner asked
+
+-- 0 от внутреннего плюс 1 от внешнего.
+masked : Nat
+masked = handle layered with
+  return v -> v
+  ask -> resume (Succ Zero)
+
+-- Тот же код без маски: оба запроса достаются внутреннему, и ответ - ноль.
+plain : {Ask, Ask} Nat
+plain =
+  let near : Nat = ask
+  let far : Nat = ask
+  near + far
+
+flat : {Ask} Nat
+flat = inner plain
+
+unmasked : Nat
+unmasked = handle flat with
+  return v -> v
+  ask -> resume (Succ Zero)
+
+-- Маска считается по одной: вложенные пропускают по хендлеру каждая.
+effect Yield a where
+  yield : a -> Unit
+
+-- Переизлучение через ветку - маски не требует. Хендлер снимает внутреннее
+-- вхождение, а `yield` в ветке производит во внешнее.
+relay : ({Yield Nat} Unit) -> {Yield Nat} Unit
+relay prod = handle prod with
+  return v -> MkUnit
+  yield x -> resume (yield (Succ x))
+
+three : {Yield Nat} Unit
+three =
+  let a : Unit = yield Zero
+  let b : Unit = yield (Succ Zero)
+  yield (Succ (Succ Zero))
+
+relayed : {Yield Nat} Unit
+relayed = relay three
+
+collected : List Nat
+collected = handle relayed with
+  return v -> Nil
+  yield x -> Cons x (resume MkUnit)
+
+main : List Nat
+main = Cons masked (Cons unmasked collected)

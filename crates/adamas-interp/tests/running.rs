@@ -726,3 +726,69 @@ main = handle bumped with
     // Записано 2 + 1, и отвечает хендлер нитью, а не значением тела.
     assert_eq!(ran(&source, "main"), "Succ (Succ (Succ Zero))");
 }
+
+/// `mask` уводит операцию мимо ближайшего одноимённого хендлера (§10 вопрос 72).
+///
+/// Свидетель - контраст: тот же код без маски отвечает нулём, потому что оба
+/// запроса достаются внутреннему хендлеру.
+#[test]
+fn a_masked_operation_reaches_the_outer_handler() {
+    let source = format!(
+        "{BASE}
+effect Ask where
+  ask : Nat
+
+inner : ({{Ask, Ask}} Nat) -> {{Ask}} Nat
+inner act = handle act with
+  return v -> v
+  ask -> resume Zero
+
+asked : {{Ask, Ask}} Nat
+asked =
+  let near : Nat = ask
+  let far : Nat = mask ask
+  near + far
+
+layered : {{Ask}} Nat
+layered = inner asked
+
+main : Nat
+main = handle layered with
+  return v -> v
+  ask -> resume (Succ Zero)
+"
+    );
+    // Ноль от внутреннего, единица от внешнего.
+    assert_eq!(ran(&source, "main"), "Succ Zero");
+}
+
+/// Без маски оба запроса достаются внутреннему.
+#[test]
+fn without_a_mask_both_operations_reach_the_inner_handler() {
+    let source = format!(
+        "{BASE}
+effect Ask where
+  ask : Nat
+
+inner : ({{Ask, Ask}} Nat) -> {{Ask}} Nat
+inner act = handle act with
+  return v -> v
+  ask -> resume Zero
+
+asked : {{Ask, Ask}} Nat
+asked =
+  let near : Nat = ask
+  let far : Nat = ask
+  near + far
+
+layered : {{Ask}} Nat
+layered = inner asked
+
+main : Nat
+main = handle layered with
+  return v -> v
+  ask -> resume (Succ Zero)
+"
+    );
+    assert_eq!(ran(&source, "main"), "Zero");
+}

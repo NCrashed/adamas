@@ -7009,3 +7009,57 @@ mutual
     );
     assert!(signature.lookup("Tree").is_some(), "оба объявлены");
 }
+
+/// `mask` там, где маскировать нечего, - отказ по месту.
+///
+/// Форма значит «пропустить ближайший хендлер», а окружающая row метки не
+/// называет: пропускать нечего (§10 вопрос 72).
+#[test]
+fn a_mask_without_an_ambient_label_is_refused() {
+    let error = refused(
+        "\
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+quiet : Nat
+quiet = mask Zero
+",
+    );
+    assert!(
+        matches!(error, ElabError::NothingToMask { .. }),
+        "ожидалось «нечего маскировать», получено: {error}"
+    );
+}
+
+/// Маска не трогает арность окружающей: написанное и выведенное совпадают.
+///
+/// Погашение спрашивается **после** проверки аргумента, иначе row вызываемого -
+/// у `#mask.L` это row маскируемого вычисления - склеивалась бы с хвостом
+/// окружающей раньше времени, и та раздувалась бы на лишнее вхождение
+/// (§10 вопрос 72).
+#[test]
+fn a_mask_does_not_inflate_the_ambient_row() {
+    let signature = program(
+        "\
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+effect Ask where
+  ask : Nat
+
+asked : {Ask, Ask} Nat
+asked = mask ask
+",
+    );
+    let definition = signature.lookup("asked").expect("определение объявлено");
+    let printed = format!("{}", definition.ty);
+    assert!(
+        printed.contains("{Ask, Ask |"),
+        "вхождений ровно два: {printed}"
+    );
+}

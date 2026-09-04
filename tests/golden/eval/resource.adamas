@@ -64,19 +64,14 @@ guarded = handle broken with
   return v -> v
   fail -> False
 
--- Тип ответа хендлера берётся из первой ветки, а не из ожидаемого, поэтому
--- пустой список назван отдельно.
-empty : List Nat
-empty = Nil
-
 normal : List Nat
 normal = handle opened with
-  return v -> empty
+  return v -> Nil
   note n -> Cons n (resume MkUnit)
 
 abandoned : List Nat
 abandoned = handle guarded with
-  return v -> empty
+  return v -> Nil
   note n -> Cons n (resume MkUnit)
 
 -- Оба пути дают `[1, 9]`: тело, потом деструктор.

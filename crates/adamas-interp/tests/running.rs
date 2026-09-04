@@ -301,12 +301,9 @@ opened : {{Log}} Bool
 opened = plain Open
 
 -- Первая отметка - тела, вторая - деструктора.
-empty : List Nat
-empty = Nil
-
 main : List Nat
 main = handle opened with
-  return v -> empty
+  return v -> Nil
   note n -> Cons n (resume MkUnit)
 "
     );
@@ -352,12 +349,9 @@ guarded = handle broken with
   return v -> v
   fail -> False
 
-empty : List Nat
-empty = Nil
-
 main : List Nat
 main = handle guarded with
-  return v -> empty
+  return v -> Nil
   note n -> Cons n (resume MkUnit)
 "
     );
@@ -471,12 +465,9 @@ guarded = handle broken with
   return v -> v
   ask -> False
 
-empty : List Nat
-empty = Nil
-
 main : List Nat
 main = handle guarded with
-  return v -> empty
+  return v -> Nil
   note n -> Cons n (resume MkUnit)
 "
     );
@@ -536,12 +527,9 @@ outer = handle guarded with
   return v -> v
   boom -> False
 
-empty : List Nat
-empty = Nil
-
 main : List Nat
 main = handle outer with
-  return v -> empty
+  return v -> Nil
   note n -> Cons n (resume MkUnit)
 "
     );
@@ -586,12 +574,9 @@ outer = handle guarded with
   return v -> v
   boom -> False
 
-empty : List Nat
-empty = Nil
-
 main : List Nat
 main = handle outer with
-  return v -> empty
+  return v -> Nil
   note n -> Cons n (resume MkUnit)
 ";
     // Деструктор, который обрывают, и тот же без обрыва: ответ обязан совпасть.

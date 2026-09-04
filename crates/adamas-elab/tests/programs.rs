@@ -6676,3 +6676,62 @@ chained = bind (Some True) (\\b -> Some (toNat b))
     );
     program(&source);
 }
+
+/// Тип ответа хендлера берётся из ожидаемого, а не только из первой ветки.
+///
+/// `handle e with …` есть применение элиминатора, чей ответ `b` - имплисит, и
+/// вставлен он дыркой. Ветка `return v -> Nil` проверялась против дырки, а
+/// против дырки не проверяется ничто, у чего нет режима вывода; обходили это
+/// отдельным определением (§10 вопрос 87).
+#[test]
+fn the_answer_of_a_handler_comes_from_the_expected_type() {
+    let source = format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+noted : {{Log}} Bool
+noted =
+  note 1
+  True
+
+collected : List Nat
+collected = handle noted with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+"
+    );
+    program(&source);
+}
+
+/// Тело лямбды исполняет вычисление по ожидаемому типу наравне с телом клаузы.
+///
+/// Остаток спайна до него доходил, а результирующего типа не нёс (§9 Фаза 4),
+/// и `\b -> get` отвергался там, где `f b = get` принимался. Разошлись две
+/// записи одного и того же.
+#[test]
+fn a_lambda_body_runs_a_computation_like_a_clause_body() {
+    let source = format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+effect State where
+  get : Bool
+
+clause : Bool -> {{State}} Bool
+clause b = get
+
+lambda : Bool -> {{State}} Bool
+lambda = \\b -> get
+"
+    );
+    program(&source);
+}

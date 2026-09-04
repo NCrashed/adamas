@@ -643,3 +643,28 @@ main = even (times 100 40)
     );
     assert_eq!(ran(&source, "main"), "True");
 }
+
+/// Глубина **освобождения** тоже не упирается в кадры Rust.
+///
+/// Программа значение только строит и не обходит: `ignore` смотрит на аргумент
+/// ноль раз. Исполнение к этому месту рекурсию уже не держало, а освобождение
+/// держало - и `SIGABRT` приходил после того, как ответ был готов (§10 вопрос
+/// 92). Свидетель поставлен здесь, а не только на структурах ядра: он ловит
+/// цепочку целиком - значение, окружение и терм чтения назад.
+#[test]
+fn freeing_depth_does_not_ride_the_rust_stack() {
+    let source = format!(
+        "{BASE}
+times : Nat -> Nat -> Nat
+times Zero m = Zero
+times (Succ k) m = m + times k m
+
+ignore : Nat -> Bool
+ignore n = True
+
+main : Bool
+main = ignore (times 200 200)
+"
+    );
+    assert_eq!(ran(&source, "main"), "True");
+}

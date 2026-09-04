@@ -843,3 +843,46 @@ main = handle onParse with
         "Succ (Succ (Succ (Succ (Succ (Succ Zero)))))"
     );
 }
+
+/// Два открытых ряда с непустыми разностями сводятся общим остатком.
+///
+/// Ветви `if` сравниваются приостановленными вычислениями: `{Ask | ?}` против
+/// `{Log | ?}`, у каждого своя метка. Прежде такое равенство отвергалось, хотя
+/// объявленная row покрывает обе (§10 вопрос 80).
+#[test]
+fn two_open_rows_meet_in_a_shared_remainder() {
+    let source = format!(
+        "{BASE}
+effect Ask where
+  ask : Nat
+
+effect Log where
+  note : Nat -> Unit
+
+asked : {{Ask}} Nat
+asked = ask
+
+logged : {{Log}} Nat
+logged =
+  let u : Unit = note (Succ Zero)
+  Zero
+
+choose : Bool -> {{Ask, Log}} Nat
+choose b = if b then asked else logged
+
+taken : {{Ask, Log}} Nat
+taken = choose True
+
+quiet : {{Ask}} Nat
+quiet = handle taken with
+  return v -> v
+  note n -> resume MkUnit
+
+main : Nat
+main = handle quiet with
+  return v -> v
+  ask -> resume (Succ (Succ Zero))
+"
+    );
+    assert_eq!(ran(&source, "main"), "Succ (Succ Zero)");
+}

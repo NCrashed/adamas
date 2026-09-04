@@ -1,0 +1,76 @@
+-- Два открытых ряда с непустыми разностями (§3.4, §10 вопрос 80).
+--
+-- Ветви `if` сравниваются приостановленными вычислениями, и ряды у них
+-- `{Ask | ?}` против `{Log | ?}`: у каждого есть метка, которой нет у другого.
+-- Прежде такое равенство отвергалось, хотя программа корректна - объявленная
+-- row покрывает обе метки.
+--
+-- Решается заведением **общего остатка**: `{ū | ?l} ~ {v̄ | ?r}` равносильно
+-- `?l := {v̄ | ρ}` и `?r := {ū | ρ}`. Догадкой это не является - другого
+-- способа уравнять два открытых ряда нет.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Ask where
+  ask : Nat
+
+effect Log where
+  note : Nat -> Unit
+
+asked : {Ask} Nat
+asked = ask
+
+logged : {Log} Nat
+logged =
+  let u : Unit = note (Succ Zero)
+  Zero
+
+-- Ветви производят разное; объявленная row покрывает обе.
+choose : Bool -> {Ask, Log} Nat
+choose b = if b then asked else logged
+
+taken : {Ask, Log} Nat
+taken = choose True
+
+dropped : {Ask, Log} Nat
+dropped = choose False
+
+-- Хендлеры одни и те же на обе ветви: разность ушла в общий остаток, а не в
+-- отказ.
+quietTaken : {Ask} Nat
+quietTaken = handle taken with
+  return v -> v
+  note n -> resume MkUnit
+
+quietDropped : {Ask} Nat
+quietDropped = handle dropped with
+  return v -> v
+  note n -> resume MkUnit
+
+-- Ветка `True` спрашивает и получает двойку; ветка `False` пишет в лог и
+-- отвечает нулём.
+answered : Nat
+answered = handle quietTaken with
+  return v -> v
+  ask -> resume (Succ (Succ Zero))
+
+silent : Nat
+silent = handle quietDropped with
+  return v -> v
+  ask -> resume (Succ (Succ Zero))
+
+main : List Nat
+main = Cons answered (Cons silent Nil)

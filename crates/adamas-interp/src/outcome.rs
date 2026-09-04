@@ -83,6 +83,35 @@ impl Performed {
             ..self
         }
     }
+
+    /// То же, но каждый исход по дороге уносит **долг** - деструкторы, которые
+    /// запустит тот, кто это продолжение оборвёт.
+    ///
+    /// Приписать долг одному исходу мало: продолжение перевзводится, и
+    /// следующая операция на том же пути даёт новый исход с собственным
+    /// пустым списком. Оборви её - и долг некому платить. Поэтому он едет со
+    /// всей цепочкой, пока она жива.
+    ///
+    /// Дважды долг не платится: отложенное читает только оборвавший, а обрыв
+    /// на цепочке случается один раз - дальше неё продолжения нет.
+    #[must_use]
+    pub fn owing(mut self, owed: Rc<[Rc<Value>]>, step: Cont) -> Self {
+        self.pending.extend(owed.iter().map(Rc::clone));
+        Self {
+            resumption: indebted(self.resumption, owed, step),
+            ..self
+        }
+    }
+}
+
+/// Продолжение из двух, несущее долг на всех исходах по дороге.
+fn indebted(first: Cont, owed: Rc<[Rc<Value>]>, then: Cont) -> Cont {
+    Rc::new(move |machine, value| match first(machine, value) {
+        Outcome::Done(value) => then(machine, value),
+        Outcome::Performed(performed) => {
+            Outcome::Performed(performed.owing(Rc::clone(&owed), Rc::clone(&then)))
+        }
+    })
 }
 
 /// Продолжение из двух: сперва первое, потом второе.

@@ -2588,8 +2588,24 @@ fn raised(kind: &Term, params: &[Param]) -> Term {
             row.clone(),
             Rc::new(raised(codomain, params)),
         ),
+        // Написанный `Type` даёт дырку, и здесь она **заземляется нулём** - тем
+        // же, чем ветка без написанного kind, и по той же причине. Ограничивают
+        // её только неравенства `leq` от полей, а их вопрос 39 не решает;
+        // обобщённая в параметр, она уезжает в тело и остаётся там свободной:
+        // `Eqv` получал два уровня вместо одного, и `subst`, чьё доказательство
+        // построено в теле, отвергался «остался неразрешённый уровень» (§10
+        // вопрос 88).
+        //
+        // Ноль здесь не догадка, а наименьшее: `sort` поднимет его до
+        // универсумов параметров, и семейство окажется ровно там, где обязано
+        // быть.
         Term::Universe(level) | Term::RowKind(level) => {
-            Term::Universe(Elaborator::sort(params, level.clone()))
+            let written = if matches!(level, Level::Meta(_)) {
+                Level::Zero
+            } else {
+                level.clone()
+            };
+            Term::Universe(Elaborator::sort(params, written))
         }
         other => other.clone(),
     }

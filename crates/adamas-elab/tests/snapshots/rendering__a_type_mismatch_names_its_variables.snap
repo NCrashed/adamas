@@ -2,10 +2,10 @@
 source: crates/adamas-elab/tests/rendering.rs
 expression: refusal(&text)
 ---
-проба.adamas:13:9: несовпадение типов: ожидался `Bool`, получен `Even{u0} n`
+проба.adamas:13:9: несовпадение типов: ожидался `Bool`, получен `Even n`
   f n e = e
           ^
   в контексте:
     (0 n : Nat)
-    (ω e : Even{u0} n)
+    (ω e : Even n)
   путь: тело `f` -> тело лямбды -> тело лямбды

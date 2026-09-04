@@ -11,16 +11,19 @@
 //! в ядре значило бы протащить самую нетривиальную часть рантайма в TCB ради
 //! редукции, которой в типах никто не просит.
 //!
+//! **Стек у машины явный.** Глубина исполнения перестала зависеть от кадров
+//! Rust, а вместе с ней исчез и учёт продолжения рядом с продолжением: резумпция
+//! есть сегмент стека, и деструкторы в ней видны обходом.
+//!
 //! Стирания здесь нет: типы доходят до исполнения наравне со значениями. Оно
 //! придёт с понижением, а понижения пока нет - есть машина над самим термом.
 
 mod effect;
+mod frame;
 mod machine;
-mod outcome;
-mod scope;
+mod read;
 
 pub use machine::Machine;
-pub use outcome::{Cont, Outcome, Performed};
 
 use adamas_core::sig::Signature;
 use adamas_core::term::Term;
@@ -41,28 +44,25 @@ pub enum RunError {
         /// Сама операция.
         operation: String,
     },
+
+    /// Единицы в сигнатуре нет либо конструктор у неё не один.
+    ///
+    /// Приостановленное вычисление `{ε} A` есть функция от единицы, и запустить
+    /// его без неё нечем. Проверка типов до этого места не доходит: без единицы
+    /// не объявляется ни эффект, ни вставка закрытия.
+    #[error(
+        "единица не объявлена одним конструктором: приостановленное вычисление запускать нечем"
+    )]
+    NoUnit,
 }
 
 /// Исполняет замкнутый терм и читает результат обратно в терм.
 ///
 /// # Errors
 ///
-/// [`RunError::Unhandled`] - операция дошла до верха.
+/// [`RunError`] - операция без хендлера либо отсутствующая единица.
 pub fn run(signature: &Signature, term: &Term) -> Result<Term, RunError> {
     let machine = Machine::new(signature);
-    let value = match machine.eval(&Env::default(), term) {
-        Outcome::Done(value) => value,
-        Outcome::Performed(performed) => return Err(unhandled(&performed)),
-    };
-    machine
-        .read(value)
-        .map_err(|performed| unhandled(&performed))
-}
-
-/// Операция, не встретившая хендлера.
-fn unhandled(performed: &Performed) -> RunError {
-    RunError::Unhandled {
-        effect: performed.effect.to_string(),
-        operation: performed.operation.to_string(),
-    }
+    let value = machine.evaluate(&Env::default(), term)?;
+    machine.read(value)
 }

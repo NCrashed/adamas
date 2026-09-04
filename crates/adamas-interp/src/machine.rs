@@ -1,14 +1,16 @@
-//! Машина: вычисление терма с перехватом операций.
+//! Машина: вычисление терма с явным стеком продолжения.
 //!
-//! Повторяет [`adamas_core::eval`] в резумпционной монаде. Повторяет не всё:
-//! формы, которые вычислением ничего не запускают - переменная, замыкание,
-//! типы, сорта, - отданы ядерному `eval` дословно. Операции в них не бывает,
-//! и переписывать их значило бы завести второе место, где `Pi` превращается в
-//! значение.
+//! Повторяет [`adamas_core::eval`] по смыслу, но не по устройству: у ядра
+//! рекурсия по кадрам Rust, здесь - цикл над состоянием в куче. Разница
+//! наблюдаема: `even (times 100 20)` - обычная структурная рекурсия -
+//! роняла процесс `SIGABRT`'ом около полутора тысяч уровней, причём порог
+//! двигался от профиля сборки **компилятора**, то есть свойством программы не
+//! был вовсе.
 //!
-//! Считает **машина**, а не `eval`, ровно там, где под вычислением бывает
-//! пользовательский код: применение, разбор, `let`, проекция, поле записи и
-//! δ-разворот определения.
+//! Повторяет не всё: формы, которые вычислением ничего не запускают -
+//! переменная, замыкание, типы, сорта, - отданы ядерному `eval` дословно.
+//! Операции в них не бывает, и переписывать их значило бы завести второе место,
+//! где `Pi` превращается в значение.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -16,26 +18,27 @@ use std::rc::Rc;
 use adamas_core::eval;
 use adamas_core::level::Level;
 use adamas_core::row::Row;
-use adamas_core::sig::Signature;
+use adamas_core::sig::{DefinitionKind, Signature};
 use adamas_core::term::{Case, Name, Term};
 use adamas_core::value::{Elim, Env, Head, StuckBranch, StuckCase, Value};
 
-use crate::outcome::{Cont, Outcome, Performed};
+use crate::RunError;
+use crate::frame::{Frame, Kont};
 
 /// Машина: сигнатура и таблица живых резумпций.
 pub struct Machine<'a> {
     signature: &'a Signature,
-    /// Резумпции по номеру. Номер - это имя `#resume.N` в значении.
+    /// Резумпции по номеру: сегмент стека и была ли она позвана.
     ///
-    /// Таблица нужна потому, что [`Value`] хост-функции нести не умеет, а
-    /// резумпция ветке отдаётся именно значением - ветка её применяет. Заводить
-    /// ради этого вариант в ядре значило бы протащить рантайм в TCB; невыразимое
-    /// имя делает то же самое снаружи, и приём тот же, каким названы словарь
-    /// класса и сам элиминатор.
+    /// Сегмент - и есть продолжение: положить его обратно значит возобновить.
+    /// Мультишот копирует его на каждый вызов, поэтому кадры и сделаны дёшево
+    /// клонируемыми.
     ///
-    /// Таблица растёт до конца прогона: резумпция живёт столько же, сколько
-    /// значение, в которое она попала, а узнать это без счётчика ссылок нельзя.
-    resumptions: RefCell<Vec<(Cont, bool)>>,
+    /// Отметка нужна одному - обрыву: ветка вернулась значением, не позвав
+    /// продолжение, значит оно мертво, и деструкторы из него пора запускать.
+    /// Работает это ровно потому, что резумпция при `handle` **аффинна**
+    /// (§3.4); у `handleMulti` довод не держится, и оттуда ресурсы запрещены.
+    resumptions: RefCell<Vec<(Rc<[Frame]>, bool)>>,
 }
 
 impl std::fmt::Debug for Machine<'_> {
@@ -47,7 +50,17 @@ impl std::fmt::Debug for Machine<'_> {
 }
 
 /// Префикс невыразимого имени резумпции.
-const RESUME: &str = "#resume.";
+pub(crate) const RESUME: &str = "#resume.";
+
+/// Что машина делает на следующем шаге.
+pub(crate) enum Step {
+    /// Вычислить терм в окружении.
+    Eval(Env, Rc<Term>),
+    /// Применить значение к значению.
+    Apply(Rc<Value>, Rc<Value>),
+    /// Отдать значение верхнему кадру.
+    Return(Rc<Value>),
+}
 
 impl<'a> Machine<'a> {
     /// Машина над сигнатурой.
@@ -65,12 +78,55 @@ impl<'a> Machine<'a> {
         self.signature
     }
 
-    /// Вычисляет терм в окружении.
-    pub fn eval(&self, env: &Env, term: &Term) -> Outcome {
-        match term {
-            // Ничего не запускают: значение получается сразу, и ядерный `eval`
-            // даёт ровно его. Замыкание сюда входит намеренно - тело его
-            // побежит позже, через `apply`, то есть через машину.
+    /// Считает терм до значения.
+    ///
+    /// # Errors
+    ///
+    /// Операция, не встретившая хендлера.
+    pub fn evaluate(&self, env: &Env, term: &Term) -> Result<Rc<Value>, RunError> {
+        let mut kont: Kont = Vec::new();
+        self.driving(Step::Eval(env.clone(), Rc::new(term.clone())), &mut kont)
+    }
+
+    /// Крутит машину, пока стек не опустеет.
+    ///
+    /// Здесь и живёт вся глубина исполнения: цикл вместо рекурсии, состояние в
+    /// куче вместо кадров Rust.
+    fn driving(&self, start: Step, kont: &mut Kont) -> Result<Rc<Value>, RunError> {
+        let mut step = start;
+        loop {
+            step = match step {
+                Step::Eval(env, term) => Self::evaluating(&env, &term, kont),
+                Step::Apply(callee, argument) => self.forcing(&callee, argument, kont)?,
+                Step::Return(value) => match kont.pop() {
+                    None => return Ok(value),
+                    Some(frame) => self.resuming(frame, value, kont)?,
+                },
+            };
+        }
+    }
+
+    /// Приводит значение к головной форме: разворачивает определение с телом.
+    ///
+    /// # Errors
+    ///
+    /// Операция, не встретившая хендлера: тело определения - обычный код.
+    pub(crate) fn forced(&self, value: Rc<Value>) -> Result<Rc<Value>, RunError> {
+        let mut current = value;
+        loop {
+            let mut kont: Kont = Vec::new();
+            let Some(step) = self.unfolding(&current, &mut kont) else {
+                return Ok(current);
+            };
+            current = self.driving(step, &mut kont)?;
+        }
+    }
+
+    /// Шаг по терму.
+    fn evaluating(env: &Env, term: &Rc<Term>, kont: &mut Kont) -> Step {
+        match &**term {
+            // Ничего не запускают: значение получается сразу. Замыкание сюда
+            // входит намеренно - тело его побежит позже, через применение.
             Term::Var(_)
             | Term::Meta(_)
             | Term::Universe(_)
@@ -80,209 +136,222 @@ impl<'a> Machine<'a> {
             | Term::Record(_)
             | Term::Row(_)
             | Term::RowKind(_)
-            | Term::EffectKind => Outcome::Done(eval::eval(env, term)),
+            | Term::EffectKind => Step::Return(eval::eval(env, term)),
 
             Term::App(callee, argument) => {
-                let callee = match self.eval(env, callee) {
-                    Outcome::Done(value) => value,
-                    Outcome::Performed(performed) => {
-                        let (env, argument) = (env.clone(), Rc::clone(argument));
-                        return performed
-                            .after(Rc::new(move |machine, callee| {
-                                machine.applied(&callee, &env, &argument)
-                            }))
-                            .into();
-                    }
-                };
-                self.applied(&callee, env, argument)
+                kont.push(Frame::Argument(env.clone(), Rc::clone(argument)));
+                Step::Eval(env.clone(), Rc::clone(callee))
             }
-
             Term::Let(_, _, _, value, body) => {
-                let value = match self.eval(env, value) {
-                    Outcome::Done(value) => value,
-                    Outcome::Performed(performed) => {
-                        let (env, body) = (env.clone(), Rc::clone(body));
-                        return performed
-                            .after(Rc::new(move |machine, value| {
-                                machine.eval(&env.extend(value), &body)
-                            }))
-                            .into();
-                    }
-                };
-                self.eval(&env.extend(value), body)
+                kont.push(Frame::Bind(env.clone(), Rc::clone(body)));
+                Step::Eval(env.clone(), Rc::clone(value))
             }
-
             Term::Case(case) => {
-                let scrutinee = match self.eval(env, &case.scrutinee) {
-                    Outcome::Done(value) => value,
-                    Outcome::Performed(performed) => {
-                        let (env, case) = (env.clone(), Rc::clone(case));
-                        return performed
-                            .after(Rc::new(move |machine, scrutinee| {
-                                machine.eliminate(scrutinee, &env, &case)
-                            }))
-                            .into();
-                    }
-                };
-                self.eliminate(scrutinee, env, case)
+                kont.push(Frame::Scrutinee(env.clone(), Rc::clone(case)));
+                Step::Eval(env.clone(), Rc::clone(&case.scrutinee))
             }
-
             Term::Project(record, name) => {
-                let record = match self.eval(env, record) {
-                    Outcome::Done(value) => value,
-                    Outcome::Performed(performed) => {
-                        let name = Rc::clone(name);
-                        return performed
-                            .after(Rc::new(move |machine, record| {
-                                machine.project(record, &name)
-                            }))
-                            .into();
-                    }
-                };
-                self.project(record, name)
+                kont.push(Frame::Project(Rc::clone(name)));
+                Step::Eval(env.clone(), Rc::clone(record))
             }
-
-            Term::Object(fields) => self.object(env, fields, Vec::new()),
-
+            Term::Object(fields) => Self::object(env, fields, Rc::from([]), kont),
             Term::With(base, fields) => {
-                let base = match self.eval(env, base) {
-                    Outcome::Done(value) => value,
-                    Outcome::Performed(performed) => {
-                        let (env, fields) = (env.clone(), Rc::clone(fields));
-                        return performed
-                            .after(Rc::new(move |machine, base| {
-                                machine.overridden(&base, &env, &fields, Vec::new())
-                            }))
-                            .into();
-                    }
-                };
-                self.overridden(&base, env, fields, Vec::new())
+                kont.push(Frame::Overriding(
+                    env.clone(),
+                    Rc::clone(fields),
+                    Rc::from([]),
+                    // База ещё не посчитана; кадр ждёт её первой.
+                    None,
+                ));
+                Step::Eval(env.clone(), Rc::clone(base))
             }
         }
     }
 
-    /// Поля записи по порядку: слева направо, как их пишет автор.
+    /// Следующее поле записи или готовая запись.
     fn object(
-        &self,
         env: &Env,
         fields: &Rc<[(Name, Rc<Term>)]>,
-        mut done: Vec<(Name, Rc<Value>)>,
-    ) -> Outcome {
-        while done.len() < fields.len() {
-            let (name, term) = &fields[done.len()];
-            match self.eval(env, term) {
-                Outcome::Done(value) => done.push((Rc::clone(name), value)),
-                Outcome::Performed(performed) => {
-                    let (env, fields, name) = (env.clone(), Rc::clone(fields), Rc::clone(name));
-                    return performed
-                        .after(Rc::new(move |machine, value| {
-                            let mut done = done.clone();
-                            done.push((Rc::clone(&name), value));
-                            machine.object(&env, &fields, done)
-                        }))
-                        .into();
-                }
-            }
-        }
-        Outcome::Done(Rc::new(Value::Object(done.into())))
+        done: Rc<[(Name, Rc<Value>)]>,
+        kont: &mut Kont,
+    ) -> Step {
+        let Some((_, term)) = fields.get(done.len()) else {
+            return Step::Return(Rc::new(Value::Object(done)));
+        };
+        let term = Rc::clone(term);
+        kont.push(Frame::Object(env.clone(), Rc::clone(fields), done));
+        Step::Eval(env.clone(), term)
     }
 
-    /// Переопределяемые поля по порядку, потом само переопределение.
-    fn overridden(
-        &self,
+    /// Следующее переопределяемое поле или готовое переопределение.
+    fn overriding(
+        env: &Env,
+        fields: &Rc<[(Name, Rc<Term>)]>,
+        done: Rc<[(Name, Rc<Value>)]>,
         base: &Rc<Value>,
-        env: &Env,
-        fields: &Rc<[(Name, Rc<Term>)]>,
-        mut done: Vec<(Name, Rc<Value>)>,
-    ) -> Outcome {
-        while done.len() < fields.len() {
-            let (name, term) = &fields[done.len()];
-            match self.eval(env, term) {
-                Outcome::Done(value) => done.push((Rc::clone(name), value)),
-                Outcome::Performed(performed) => {
-                    let (base, env) = (Rc::clone(base), env.clone());
-                    let (fields, name) = (Rc::clone(fields), Rc::clone(name));
-                    return performed
-                        .after(Rc::new(move |machine, value| {
-                            let mut done = done.clone();
-                            done.push((Rc::clone(&name), value));
-                            machine.overridden(&base, &env, &fields, done)
-                        }))
-                        .into();
-                }
+        kont: &mut Kont,
+    ) -> Step {
+        let Some((_, term)) = fields.get(done.len()) else {
+            return Step::Return(eval::with(base, done.to_vec()));
+        };
+        let term = Rc::clone(term);
+        kont.push(Frame::Overriding(
+            env.clone(),
+            Rc::clone(fields),
+            done,
+            Some(Rc::clone(base)),
+        ));
+        Step::Eval(env.clone(), term)
+    }
+
+    /// Применение: сперва привести функцию к головной форме.
+    ///
+    /// δ-разворот идёт **шагом**, а не рекурсией: тело определения - обычный
+    /// пользовательский код, и глубина его та же, что у программы. Ворот
+    /// тотальности и запечатывания здесь нет по тому же доводу, что и у
+    /// `conv::unfolded`: они стоят у сравнения, которое обязано завершаться, а
+    /// исполнение обязано расходиться там, где расходится программа.
+    fn forcing(
+        &self,
+        callee: &Rc<Value>,
+        argument: Rc<Value>,
+        kont: &mut Kont,
+    ) -> Result<Step, RunError> {
+        match self.unfolding(callee, kont) {
+            Some(step) => {
+                // Кадр применения стоит **под** переигрыванием спайна: сперва
+                // развёрнутое доберётся до головной формы, потом применится.
+                let position = kont.len() - 1;
+                kont.insert(position, Frame::Forcing(argument));
+                Ok(step)
             }
+            None => self.applying(callee, argument, kont),
         }
-        Outcome::Done(eval::with(base, done))
     }
 
-    /// Аргумент применения, когда функция уже посчитана.
-    fn applied(&self, callee: &Rc<Value>, env: &Env, argument: &Rc<Term>) -> Outcome {
-        let argument = match self.eval(env, argument) {
-            Outcome::Done(value) => value,
-            Outcome::Performed(performed) => {
-                let callee = Rc::clone(callee);
-                return performed
-                    .after(Rc::new(move |machine, argument| {
-                        machine.apply(&callee, argument)
-                    }))
-                    .into();
-            }
+    /// δ-шаг, если значение его требует.
+    fn unfolding(&self, value: &Rc<Value>, kont: &mut Kont) -> Option<Step> {
+        let Value::Neutral(Head::Global(name, levels, rows), spine) = &**value else {
+            return None;
         };
-        self.apply(callee, argument)
+        let body = self.signature.lookup(name)?.body.as_ref()?;
+        let body = Rc::new(body.substitute_levels(levels));
+        kont.push(Frame::Spine(spine.as_slice().into(), 0));
+        Some(Step::Eval(Env::rowed(Rc::clone(rows)), body))
     }
 
-    /// Применяет значение к значению.
-    pub fn apply(&self, callee: &Rc<Value>, argument: Rc<Value>) -> Outcome {
-        let callee = match self.forced(Rc::clone(callee)) {
-            Outcome::Done(value) => value,
-            Outcome::Performed(performed) => {
-                return performed
-                    .after(Rc::new(move |machine, callee| {
-                        machine.applying(&callee, Rc::clone(&argument))
-                    }))
-                    .into();
-            }
-        };
-        self.applying(&callee, argument)
-    }
-
-    /// Применение к значению **головной формы**: разворачивать больше нечего.
-    fn applying(&self, callee: &Rc<Value>, argument: Rc<Value>) -> Outcome {
+    /// Применение к значению головной формы.
+    fn applying(
+        &self,
+        callee: &Rc<Value>,
+        argument: Rc<Value>,
+        kont: &mut Kont,
+    ) -> Result<Step, RunError> {
         match &**callee {
             Value::Lam(_, _, closure) => {
                 let (env, body) = closure.open();
-                self.eval(&env.extend(argument), body)
+                Ok(Step::Eval(env.extend(argument), Rc::clone(body)))
             }
             Value::Neutral(Head::Global(name, levels, rows), spine) => {
                 let mut spine = spine.clone();
                 spine.push(Elim::App(argument));
-                self.dispatch(name, levels, rows, spine)
+                self.dispatch(name, levels, rows, spine, kont)
             }
             // Локальная переменная и дырка: применение копится в спайне, как и
-            // в ядре. Значение под связыванием машине не встречается - она
-            // считает замкнутое, - но открытое приходит из инертных форм.
-            _ => Outcome::Done(eval::apply(callee, argument)),
+            // в ядре.
+            _ => Ok(Step::Return(eval::apply(callee, argument))),
+        }
+    }
+
+    /// Что делать с насыщенным глобальным именем.
+    fn dispatch(
+        &self,
+        name: &Name,
+        levels: &Rc<[Level]>,
+        rows: &Rc<[Row<Rc<Value>>]>,
+        spine: Vec<Elim>,
+        kont: &mut Kont,
+    ) -> Result<Step, RunError> {
+        if let Some(index) = name.strip_prefix(RESUME).and_then(|it| it.parse().ok()) {
+            return Ok(self.resumed(index, &spine, kont));
+        }
+        if let Some(step) = self.effectful(name, &spine, kont)? {
+            return Ok(step);
+        }
+        Ok(Step::Return(Rc::new(Value::Neutral(
+            Head::Global(Rc::clone(name), Rc::clone(levels), Rc::clone(rows)),
+            spine,
+        ))))
+    }
+
+    /// Шаг по кадру, которому пришло значение.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "разбор кадров - одна таблица, и делить её значило бы прятать её половину"
+    )]
+    fn resuming(&self, frame: Frame, value: Rc<Value>, kont: &mut Kont) -> Result<Step, RunError> {
+        match frame {
+            Frame::Argument(env, argument) => {
+                kont.push(Frame::Callee(value));
+                Ok(Step::Eval(env, argument))
+            }
+            Frame::Callee(callee) => Ok(Step::Apply(callee, value)),
+            Frame::Forcing(argument) => Ok(Step::Apply(value, argument)),
+            Frame::Bind(env, body) => Ok(Step::Eval(env.extend(value), body)),
+            Frame::Scrutinee(env, case) => Ok(self.eliminating(&value, &env, &case, kont)),
+            Frame::Fields(fields, index) => Ok(Self::spreading(value, &fields, index, kont)),
+            Frame::Project(name) => match self.unfolding(&value, kont) {
+                Some(step) => {
+                    let position = kont.len() - 1;
+                    kont.insert(position, Frame::Project(name));
+                    Ok(step)
+                }
+                None => Ok(Step::Return(eval::project(&value, &name))),
+            },
+            Frame::Object(env, fields, done) => {
+                let (name, _) = &fields[done.len()];
+                let done = extended(&done, Rc::clone(name), value);
+                Ok(Self::object(&env, &fields, done, kont))
+            }
+            // Первой приходит база, дальше - поля по порядку.
+            Frame::Overriding(env, fields, done, None) => {
+                Ok(Self::overriding(&env, &fields, done, &value, kont))
+            }
+            Frame::Overriding(env, fields, done, Some(base)) => {
+                let (name, _) = &fields[done.len()];
+                let done = extended(&done, Rc::clone(name), value);
+                Ok(Self::overriding(&env, &fields, done, &base, kont))
+            }
+            Frame::Spine(spine, index) => Ok(Self::replaying(value, &spine, index, kont)),
+            Frame::Handler(handler) => Ok(Self::handled(value, &handler)),
+            Frame::Branch(slot) => Ok(self.settled(slot, value, kont)),
+            Frame::Closing(close) => {
+                // Нормальный выход: деструктор, потом значение тела.
+                kont.push(Frame::Closed(value));
+                let unit = self.unit()?;
+                Ok(Step::Apply(close, unit))
+            }
+            Frame::Closed(held) => Ok(Step::Return(held)),
+            Frame::Unwinding(segment, index, held) => {
+                Ok(self.unwinding(&segment, index, held, kont))
+            }
+            Frame::Passing(given, index) => Ok(Self::passing(value, &given, index, kont)),
         }
     }
 
     /// Разбор по значению.
-    fn eliminate(&self, scrutinee: Rc<Value>, env: &Env, case: &Rc<Case>) -> Outcome {
-        let scrutinee = match self.forced(scrutinee) {
-            Outcome::Done(value) => value,
-            Outcome::Performed(performed) => {
-                let (env, case) = (env.clone(), Rc::clone(case));
-                return performed
-                    .after(Rc::new(move |machine, scrutinee| {
-                        machine.eliminating(&scrutinee, &env, &case)
-                    }))
-                    .into();
-            }
-        };
-        self.eliminating(&scrutinee, env, case)
-    }
-
-    /// Разбор по значению головной формы.
-    fn eliminating(&self, scrutinee: &Rc<Value>, env: &Env, case: &Rc<Case>) -> Outcome {
+    fn eliminating(
+        &self,
+        scrutinee: &Rc<Value>,
+        env: &Env,
+        case: &Rc<Case>,
+        kont: &mut Kont,
+    ) -> Step {
+        if let Some(step) = self.unfolding(scrutinee, kont) {
+            let position = kont.len() - 1;
+            kont.insert(position, Frame::Scrutinee(env.clone(), Rc::clone(case)));
+            return step;
+        }
         let selected = match &**scrutinee {
             Value::Neutral(Head::Global(name, ..), spine) => case
                 .branches
@@ -292,13 +361,12 @@ impl<'a> Machine<'a> {
             _ => None,
         };
         let Some((body, spine)) = selected else {
-            // Застрял: ветви и мотив вычисляются ядерным `eval`. Тело ветви
-            // при этом не побежит - разбор потому и застрял, - так что
-            // операции в нём остаться негде.
-            return Outcome::Done(eval::eliminate_case(&Rc::new(stuck(env, case)), scrutinee));
+            // Застрял: ветви и мотив вычисляются ядерным `eval`. Тело ветви при
+            // этом не побежит - разбор потому и застрял.
+            return Step::Return(eval::eliminate_case(&Rc::new(stuck(env, case)), scrutinee));
         };
         // Ветвь получает поля конструктора - параметры она не связывает.
-        let fields: Vec<Rc<Value>> = spine
+        let fields: Rc<[Rc<Value>]> = spine
             .iter()
             .skip(case.params as usize)
             .filter_map(|elim| match elim {
@@ -306,176 +374,63 @@ impl<'a> Machine<'a> {
                 _ => None,
             })
             .collect();
-        match self.eval(env, &body) {
-            Outcome::Done(body) => self.spread(body, &fields, 0),
-            Outcome::Performed(performed) => performed
-                .after(Rc::new(move |machine, body| {
-                    machine.spread(body, &fields, 0)
-                }))
-                .into(),
-        }
+        kont.push(Frame::Fields(fields, 0));
+        Step::Eval(env.clone(), body)
     }
 
-    /// Применяет тело ветви к полям конструктора по одному.
-    fn spread(&self, body: Rc<Value>, fields: &[Rc<Value>], from: usize) -> Outcome {
-        let mut body = body;
-        for index in from..fields.len() {
-            match self.apply(&body, Rc::clone(&fields[index])) {
-                Outcome::Done(value) => body = value,
-                Outcome::Performed(performed) => {
-                    let fields = fields.to_vec();
-                    return performed
-                        .after(Rc::new(move |machine, body| {
-                            machine.spread(body, &fields, index + 1)
-                        }))
-                        .into();
-                }
+    /// Тело ветви к полям конструктора по одному.
+    fn spreading(body: Rc<Value>, fields: &Rc<[Rc<Value>]>, index: usize, kont: &mut Kont) -> Step {
+        let Some(field) = fields.get(index) else {
+            return Step::Return(body);
+        };
+        kont.push(Frame::Fields(Rc::clone(fields), index + 1));
+        Step::Apply(body, Rc::clone(field))
+    }
+
+    /// Аргументы ветке хендлера по одному.
+    pub(crate) fn passing(
+        branch: Rc<Value>,
+        given: &Rc<[Rc<Value>]>,
+        index: usize,
+        kont: &mut Kont,
+    ) -> Step {
+        let Some(argument) = given.get(index) else {
+            return Step::Return(branch);
+        };
+        kont.push(Frame::Passing(Rc::clone(given), index + 1));
+        Step::Apply(branch, Rc::clone(argument))
+    }
+
+    /// Переигрывание спайна развёрнутого определения.
+    fn replaying(callee: Rc<Value>, spine: &Rc<[Elim]>, index: usize, kont: &mut Kont) -> Step {
+        let Some(elim) = spine.get(index) else {
+            return Step::Return(callee);
+        };
+        match elim {
+            Elim::App(argument) => {
+                kont.push(Frame::Spine(Rc::clone(spine), index + 1));
+                Step::Apply(callee, Rc::clone(argument))
+            }
+            // Прочие элиминаторы сюда доходят только от инертных форм, то есть
+            // от типов, а типы операций не производят.
+            Elim::Case(case) => match eval::try_eliminate_case(case, &callee) {
+                Some(value) => Self::replaying(value, spine, index + 1, kont),
+                None => Step::Return(callee),
+            },
+            Elim::Project(name) => {
+                Self::replaying(eval::project(&callee, name), spine, index + 1, kont)
+            }
+            Elim::With(fields) => {
+                Self::replaying(eval::with(&callee, fields.to_vec()), spine, index + 1, kont)
             }
         }
-        Outcome::Done(body)
     }
 
-    /// Проекция поля.
-    fn project(&self, record: Rc<Value>, name: &Name) -> Outcome {
-        let record = match self.forced(record) {
-            Outcome::Done(value) => value,
-            Outcome::Performed(performed) => {
-                let name = Rc::clone(name);
-                return performed
-                    .after(Rc::new(move |machine, record| {
-                        machine.project(record, &name)
-                    }))
-                    .into();
-            }
-        };
-        Outcome::Done(eval::project(&record, name))
-    }
-
-    /// Приводит значение к головной форме: разворачивает определение с телом.
-    ///
-    /// Разворот идёт **машиной**, а не `eval`: тело определения - обычный
-    /// пользовательский код, и операция в нём бывает ровно так же, как в любом
-    /// другом месте. Ворот тотальности и запечатывания здесь нет по тому же
-    /// доводу, что и у `conv::unfolded`: они стоят у сравнения, которое обязано
-    /// завершаться, а исполнение обязано расходиться там, где расходится
-    /// программа.
-    fn forced(&self, value: Rc<Value>) -> Outcome {
-        let Value::Neutral(Head::Global(name, levels, rows), spine) = &*value else {
-            return Outcome::Done(value);
-        };
-        let Some(definition) = self.signature.lookup(name) else {
-            return Outcome::Done(Rc::clone(&value));
-        };
-        let Some(body) = &definition.body else {
-            return Outcome::Done(Rc::clone(&value));
-        };
-        let body = body.substitute_levels(levels);
-        let (rows, spine) = (Rc::clone(rows), spine.clone());
-        match self.eval(&Env::rowed(rows), &body) {
-            Outcome::Done(body) => self.replay(body, &spine, 0),
-            Outcome::Performed(performed) => performed
-                .after(Rc::new(move |machine, body| {
-                    machine.replay(body, &spine, 0)
-                }))
-                .into(),
-        }
-    }
-
-    /// Переигрывает спайн развёрнутого определения.
-    ///
-    /// Применение идёт машиной; прочие элиминаторы - ядром. Разбор в спайне
-    /// сюда доходит только от инертных форм, то есть от типов, а типы операций
-    /// не производят.
-    fn replay(&self, callee: Rc<Value>, spine: &[Elim], from: usize) -> Outcome {
-        let mut callee = callee;
-        for index in from..spine.len() {
-            match &spine[index] {
-                Elim::App(argument) => match self.apply(&callee, Rc::clone(argument)) {
-                    Outcome::Done(value) => callee = value,
-                    Outcome::Performed(performed) => {
-                        let spine = spine.to_vec();
-                        return performed
-                            .after(Rc::new(move |machine, callee| {
-                                machine.replay(callee, &spine, index + 1)
-                            }))
-                            .into();
-                    }
-                },
-                Elim::Case(case) => match eval::try_eliminate_case(case, &callee) {
-                    Some(value) => callee = value,
-                    None => return Outcome::Done(callee),
-                },
-                Elim::Project(name) => callee = eval::project(&callee, name),
-                Elim::With(fields) => callee = eval::with(&callee, fields.to_vec()),
-            }
-        }
-        // Развёрнутое могло снова оказаться определением с телом: `f = g`.
-        match &*callee {
-            Value::Neutral(Head::Global(..), _) => self.forced(callee),
-            _ => Outcome::Done(callee),
-        }
-    }
-
-    /// Читает значение в терм, досчитывая его насквозь.
-    ///
-    /// Читает **машина**, а не `conv`: значение, которое просто вернули, до сих
-    /// пор не разворачивалось - разворот стоит у применения, разбора и
-    /// проекции, а `Cons answered …` не делает ни того, ни другого, ни
-    /// третьего. Дочитывало его обратное чтение ядра, то есть `eval`, и
-    /// хендлер под ним оставался нейтралью. Ошибка тем и коварна, что
-    /// **половина** ответа при этом верна: то, что попало под разбор, машина
-    /// посчитала.
-    ///
-    /// # Errors
-    ///
-    /// Операция, дошедшая до чтения, хендлера не встретила: возобновлять её
-    /// некуда, чтение и есть конец программы.
-    pub fn read(&self, value: Rc<Value>) -> Result<Term, Performed> {
-        let value = match self.forced(value) {
-            Outcome::Done(value) => value,
-            Outcome::Performed(performed) => return Err(performed),
-        };
-        match &*value {
-            Value::Neutral(head @ Head::Global(name, ..), spine)
-                if self.constructor(name) && applications(spine) =>
-            {
-                let base = eval::quote(0, &Rc::new(Value::Neutral(head.clone(), Vec::new())));
-                spine.iter().try_fold(base, |callee, elim| {
-                    let Elim::App(argument) = elim else {
-                        unreachable!("спайн конструктора - одни применения");
-                    };
-                    Ok(Term::App(
-                        Rc::new(callee),
-                        Rc::new(self.read(Rc::clone(argument))?),
-                    ))
-                })
-            }
-            Value::Object(fields) => Ok(Term::Object(
-                fields
-                    .iter()
-                    .map(|(name, field)| {
-                        Ok((Rc::clone(name), Rc::new(self.read(Rc::clone(field))?)))
-                    })
-                    .collect::<Result<Vec<_>, Performed>>()?
-                    .into(),
-            )),
-            _ => Ok(eval::quote(0, &value)),
-        }
-    }
-
-    /// Конструктор ли это имя.
-    fn constructor(&self, name: &Name) -> bool {
-        matches!(
-            self.signature.lookup(name).map(|it| &it.kind),
-            Some(adamas_core::sig::DefinitionKind::Constructor { .. })
-        )
-    }
-
-    /// Регистрирует резумпцию и отдаёт её значением.
-    pub(crate) fn resumption(&self, cont: Cont) -> (Rc<Value>, usize) {
+    /// Заводит резумпцию из сегмента и отдаёт её значением.
+    pub(crate) fn resumption(&self, segment: Rc<[Frame]>) -> (Rc<Value>, usize) {
         let mut table = self.resumptions.borrow_mut();
         let index = table.len();
-        table.push((cont, false));
+        table.push((segment, false));
         let value = Rc::new(Value::Neutral(
             Head::Global(
                 Rc::from(format!("{RESUME}{index}")),
@@ -487,14 +442,15 @@ impl<'a> Machine<'a> {
         (value, index)
     }
 
+    /// Сегмент резумпции по номеру.
+    pub(crate) fn segment(&self, index: usize) -> Option<Rc<[Frame]>> {
+        self.resumptions
+            .borrow()
+            .get(index)
+            .map(|(segment, _)| Rc::clone(segment))
+    }
+
     /// Звали ли резумпцию хоть раз.
-    ///
-    /// Так различается обрыв: ветка `handle` вернулась значением, не позвав
-    /// продолжение, - значит оно мертво, и отложенные деструкторы пора
-    /// запускать. Работает это ровно потому, что резумпция при `handle`
-    /// **аффинна** (§3.4): позвать её позже неоткуда, вынести наружу не даёт
-    /// правило scope-bound (§3.3). У `handleMulti` довод не держится - её
-    /// резумпция `ω` и вправе быть сохранена, - и оттуда ресурсы запрещены.
     pub(crate) fn invoked(&self, index: usize) -> bool {
         self.resumptions
             .borrow()
@@ -502,34 +458,14 @@ impl<'a> Machine<'a> {
             .is_some_and(|(_, invoked)| *invoked)
     }
 
-    /// Что делать с насыщенным глобальным именем.
-    fn dispatch(
-        &self,
-        name: &Name,
-        levels: &Rc<[Level]>,
-        rows: &Rc<[Row<Rc<Value>>]>,
-        spine: Vec<Elim>,
-    ) -> Outcome {
-        if let Some(index) = name.strip_prefix(RESUME).and_then(|it| it.parse().ok()) {
-            return self.resumed(index, &spine);
-        }
-        if let Some(outcome) = self.effectful(name, &spine) {
-            return outcome;
-        }
-        Outcome::Done(Rc::new(Value::Neutral(
-            Head::Global(Rc::clone(name), Rc::clone(levels), Rc::clone(rows)),
-            spine,
-        )))
-    }
-
-    /// Вызов резумпции. Аргумент у неё один - место операции.
-    fn resumed(&self, index: usize, spine: &[Elim]) -> Outcome {
-        let cont = {
+    /// Возобновление: сегмент кладётся обратно, значение идёт ему.
+    fn resumed(&self, index: usize, spine: &[Elim], kont: &mut Kont) -> Step {
+        let segment = {
             let mut table = self.resumptions.borrow_mut();
             match table.get_mut(index) {
-                Some((cont, invoked)) => {
+                Some((segment, invoked)) => {
                     *invoked = true;
-                    Rc::clone(cont)
+                    Rc::clone(segment)
                 }
                 None => unreachable!("резумпция {index} не заведена"),
             }
@@ -537,13 +473,21 @@ impl<'a> Machine<'a> {
         let Some(Elim::App(argument)) = spine.last() else {
             unreachable!("резумпция без аргумента");
         };
-        cont(self, Rc::clone(argument))
+        kont.extend(segment.iter().cloned());
+        Step::Return(Rc::clone(argument))
     }
 }
 
-/// Все ли элиминаторы спайна - применения.
-fn applications(spine: &[Elim]) -> bool {
-    spine.iter().all(|elim| matches!(elim, Elim::App(_)))
+/// Список полей с дописанным.
+fn extended(
+    done: &Rc<[(Name, Rc<Value>)]>,
+    name: Name,
+    value: Rc<Value>,
+) -> Rc<[(Name, Rc<Value>)]> {
+    done.iter()
+        .cloned()
+        .chain(std::iter::once((name, value)))
+        .collect()
 }
 
 /// Застрявший разбор: мотив и ветви как значения.
@@ -565,8 +509,10 @@ fn stuck(env: &Env, case: &Case) -> StuckCase {
     }
 }
 
-impl From<Performed> for Outcome {
-    fn from(performed: Performed) -> Self {
-        Self::Performed(performed)
-    }
+/// Конструктор ли это имя.
+pub(crate) fn constructor(signature: &Signature, name: &Name) -> bool {
+    matches!(
+        signature.lookup(name).map(|it| &it.kind),
+        Some(DefinitionKind::Constructor { .. })
+    )
 }

@@ -18,10 +18,17 @@
 //! общих `suc` с обеих сторон: конструктор инъективен, поэтому `suc ?m ~ 3`
 //! однозначно даёт `?m ~ 2`.
 //!
-//! Не решается дырка под `max`: `max ?a u ~ max v w` не имеет единственного
+//! Не решается **сразу** дырка под `max`: `max ?a u ~ v` не имеет единственного
 //! решения (`?a` может быть чем угодно, не превосходящим правую часть), и
 //! угадывать его нельзя - неверная догадка принимает некорректную программу.
-//! Отказ отвергает корректную, см. §10 вопрос 39.
+//!
+//! Поэтому такое ограничение **откладывается**, а не отвергается ([`Metas::settle`],
+//! §10 вопрос 39): позже его определяют соседние. `max X Y ~ X` читается как
+//! `Y ≤ X`, и два таких в разные стороны дают `X = Y` - это вывод, а не выбор.
+//! Дошедшее до границы объявления неопределённым отвергается там.
+//!
+//! Откладывается ровно `max`: `?m ~ suc ?m` решения не имеет **никогда**, и
+//! отказ ему полагается точный, на подтерме.
 
 use std::rc::Rc;
 
@@ -60,6 +67,12 @@ pub struct Metas {
     /// живо, заведено текущим объявлением, потому что предыдущее закончилось
     /// [`Metas::release`].
     base: u32,
+    /// Ограничения на уровнях, отложенные до границы объявления.
+    ///
+    /// `max ?a ?b ~ ?a` сейчас не решается, а позже бывает решаемо: соседние
+    /// ограничения определят `?b`, и `max ?a ?a` нормализуется в `?a`.
+    /// Догадкой это не является - откладывание ничего не выбирает.
+    pending: Vec<(Level, Level)>,
     /// Смещения слотов в порядке решения - для откатов ([`Metas::mark`]).
     ///
     /// Ведётся всегда. Включать журнал по отметке значило бы завести два режима
@@ -83,6 +96,7 @@ pub struct Metas {
 pub struct Mark {
     slots: usize,
     journal: usize,
+    pending: usize,
 }
 
 /// Живая дырка одного из двух сортов.
@@ -296,6 +310,7 @@ impl Metas {
         Mark {
             slots: self.slots.len(),
             journal: self.journal.len(),
+            pending: self.pending.len(),
         }
     }
 
@@ -323,6 +338,9 @@ impl Metas {
             }
         }
         self.slots.truncate(mark.slots);
+        // Отложенное - тоже решение прохода: спекулятивный не вправе оставить
+        // ограничение, которого настоящий не увидит.
+        self.pending.truncate(mark.pending.min(self.pending.len()));
     }
 
     /// Отпускает все живые дырки и сдвигает границу.
@@ -436,10 +454,84 @@ impl Metas {
         }
 
         match (&left, &right) {
-            (Level::Meta(meta), other) | (other, Level::Meta(meta)) => self.solve(*meta, other),
-            // Обе стороны жёсткие и неравны, либо метапеременная спрятана под
-            // конструктором - решать нечем.
+            (Level::Meta(meta), other) | (other, Level::Meta(meta)) if !occurs(*meta, other) => {
+                self.solve(*meta, other)
+            }
+            // Дырка под `max` - `max ?a ?b ~ ?a`. Решать её **сейчас** нечем, а
+            // позже бывает чем: соседние ограничения определят `?b`, и
+            // `max ?a ?a` нормализуется в `?a`. Откладываем - это не выбор, а
+            // отсрочка.
+            //
+            // Требуется именно `max`, а не любое вхождение дырки: `?m ~ suc ?m`
+            // решения не имеет **никогда**, конструктор инъективен и
+            // возрастающ. Откладывать такое значило бы менять точный отказ на
+            // отложенный, а он и приходит позже, и говорит меньше.
+            _ if (matches!(left, Level::Max(..)) || matches!(right, Level::Max(..)))
+                && (mentions_meta(&left) || mentions_meta(&right)) =>
+            {
+                self.pending.push((left, right));
+                true
+            }
+            // Обе стороны жёсткие и неравны - отказ окончателен, и приходит он
+            // сюда, то есть на подтерм. Откладывать его значило бы переносить
+            // диагностику на объявление там, где она уже точна.
             _ => false,
+        }
+    }
+
+    /// Перебирает отложенные ограничения до неподвижной точки.
+    ///
+    /// Возвращает то, что так и не сошлось. Зовётся на границе объявления: там
+    /// соседние ограничения уже решены, и отложенное либо становится
+    /// тождеством, либо не станет им никогда.
+    ///
+    /// Перебор нужен именно перебором: одно решённое ограничение делает
+    /// решаемым следующее, и порядок между ними произволен.
+    pub fn settle(&mut self) -> Option<(Level, Level)> {
+        loop {
+            self.derive();
+            let pending = std::mem::take(&mut self.pending);
+            let count = pending.len();
+            if count == 0 {
+                return None;
+            }
+            for (left, right) in pending {
+                if !self.unify_levels(&left, &right) {
+                    return Some((left, right));
+                }
+            }
+            // Нерешённое `unify_levels` кладёт обратно. Столько же, сколько
+            // было, - значит за проход не сдвинулось ничего, и следующий даст
+            // то же самое.
+            if self.pending.len() >= count {
+                return self.pending.pop();
+            }
+        }
+    }
+
+    /// Выводит равенства, следующие из отложенных **необходимо**.
+    ///
+    /// `max X Y ~ X` говорит `Y ≤ X` - само по себе оно решения не имеет.
+    /// Но два таких в разные стороны, `Y ≤ X` и `X ≤ Y`, дают `X = Y`, и это
+    /// вывод, а не выбор: другого решения у пары нет.
+    ///
+    /// Ровно так и выглядит `ap : f (a -> b) -> f a -> f b`. Домен `f`
+    /// решается первым - `max ?a ?b`, - и дальше `f a` даёт `max ?a ?b ~ ?a`,
+    /// а `f b` даёт `max ?a ?b ~ ?b`. Порознь неразрешимы обе; вместе
+    /// определяют `?a = ?b`, то есть ту самую одноуровневую формулировку, какой
+    /// класс и пишут.
+    fn derive(&mut self) {
+        let bounds: Vec<(Level, Level)> = self
+            .pending
+            .iter()
+            .filter_map(|(left, right)| bounded(left, right).or_else(|| bounded(right, left)))
+            .collect();
+        for (index, (smaller, larger)) in bounds.iter().enumerate() {
+            for (other, bigger) in &bounds[index + 1..] {
+                if smaller.equiv(bigger) && larger.equiv(other) {
+                    self.unify_levels(&smaller.clone(), &larger.clone());
+                }
+            }
         }
     }
 
@@ -1024,6 +1116,37 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
     }
 }
 
+/// Есть ли в уровне нерешённая метапеременная.
+///
+/// Различает «решать нечем **сейчас**» и «решать нечем вовсе»: без дырок обе
+/// стороны жёстки, и откладывать отказ значило бы уносить его с подтерма на
+/// объявление там, где он уже точен.
+fn mentions_meta(level: &Level) -> bool {
+    match level {
+        Level::Meta(_) => true,
+        Level::Zero | Level::Var(_) => false,
+        Level::Succ(inner) => mentions_meta(inner),
+        Level::Max(left, right) => mentions_meta(left) || mentions_meta(right),
+    }
+}
+
+/// Ограничение вида `max X Y ~ X`, прочитанное как `Y ≤ X`.
+///
+/// `None` - форма другая, и никакого неравенства из неё не следует.
+fn bounded(left: &Level, right: &Level) -> Option<(Level, Level)> {
+    let Level::Max(first, second) = left else {
+        return None;
+    };
+    if first.equiv(right) {
+        return Some(((**second).clone(), (**first).clone()));
+    }
+    if second.equiv(right) {
+        return Some(((**first).clone(), (**second).clone()));
+    }
+    None
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::{Generalization, Metas};
@@ -1114,14 +1237,34 @@ mod tests {
         assert_eq!(metas.zonk(&meta), Level::Var(LevelVar(0)));
     }
 
-    /// Граница решаемого класса, зафиксированная тестом: метапеременная под
-    /// `max` не решается, потому что решение не единственно.
+    /// Метапеременная под `max` не решается **сейчас**, а откладывается: решение
+    /// не единственно, но соседние ограничения бывают его определяют.
+    ///
+    /// Здесь соседних нет, и перебор кончается тем же отказом - только позже и
+    /// на границе объявления. Это и есть названная цена откладывания.
     #[test]
-    fn a_metavariable_under_max_is_out_of_the_solvable_class() {
+    fn a_metavariable_under_max_is_deferred_and_then_refused() {
         let mut metas = Metas::default();
         let meta = metas.fresh_level();
         let left = meta.max(Level::Var(LevelVar(0)));
-        assert!(!metas.unify_levels(&left, &Level::number(5)));
+        assert!(metas.unify_levels(&left, &Level::number(5)));
+        assert!(metas.settle().is_some(), "определить его было нечем");
+    }
+
+    /// Два ограничения, порознь неразрешимые, вместе определяют равенство.
+    ///
+    /// `max ?a ?b ~ ?a` говорит `?b ≤ ?a`, `max ?a ?b ~ ?b` - обратное; вместе
+    /// они дают `?a = ?b`, и это вывод, а не выбор. Так пишется `ap` из §4.4.
+    #[test]
+    fn two_bounds_in_opposite_directions_determine_equality() {
+        let mut metas = Metas::default();
+        let first = metas.fresh_level();
+        let second = metas.fresh_level();
+        let joined = first.clone().max(second.clone());
+        assert!(metas.unify_levels(&joined, &first));
+        assert!(metas.unify_levels(&joined, &second));
+        assert!(metas.settle().is_none(), "пара обязана сойтись");
+        assert_eq!(metas.zonk(&first), metas.zonk(&second));
     }
 
     #[test]

@@ -1856,11 +1856,34 @@ fn declare_families(
     planned: &[Planned<'_>],
     span: Span,
 ) -> Result<(), ElabError> {
-    let mut families = Vec::new();
+    // Тип-формер видит семейства, объявленные **раньше него** в той же группе
+    // (§10 вопрос 64): `data Held : Tag -> Type` рядом с `data Tag` пишется.
+    //
+    // Порядок здесь не компромисс, а верное правило: kind'ы взаимно
+    // рекурсивными быть не могут - `data A : B -> Type` вместе с `data B : A ->
+    // Type` не обосновано, - и симметрии, которую порядок мог бы нарушить, у
+    // них нет. Конструкторы по-прежнему видят **всю** группу: у них взаимная
+    // рекурсия настоящая, и на ней стоит `Tree`/`Forest`.
+    let mut families: Vec<Family<'_>> = Vec::new();
+    // Черновая копия сигнатуры, куда по ходу кладутся тип-формеры уже
+    // разобранных семейств. Нужна она потому, что арность уровней считается
+    // **настоящим** `is_type` (см. `self_levels`), а тот смотрит в сигнатуру, и
+    // соседа там иначе нет. Копия заводится только со второго семейства -
+    // одиночному объявлению она не стоит ничего.
+    let mut scratch: Option<Signature> = None;
     for member in planned {
-        if let Planned::Family(data, at) = member {
-            families.push(family_header(signature, metas, owned, fixities, data, *at)?);
+        let Planned::Family(data, at) = member else {
+            continue;
+        };
+        if let Some(previous) = families.last() {
+            scratch.get_or_insert_with(|| signature.clone()).assume(
+                &previous.data.name.text,
+                u32::try_from(previous.levels.len()).unwrap_or(u32::MAX),
+                previous.kind.clone(),
+            );
         }
+        let known = scratch.as_ref().unwrap_or(signature);
+        families.push(family_header(known, metas, owned, fixities, data, *at)?);
     }
     let Some(first) = families.first() else {
         return Ok(());

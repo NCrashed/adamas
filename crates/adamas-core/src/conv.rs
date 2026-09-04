@@ -702,11 +702,6 @@ fn same_row(
         theirs.extend(yours.into_iter().skip(common));
     }
 
-    // Обе разности непусты - остаток не выражается ни через один хвост, и это
-    // §10 вопрос 80: отказ, а не догадка.
-    if !ours.is_empty() && !theirs.is_empty() {
-        return false;
-    }
     let quoted = |labels: &[&Label<Rc<Value>>]| -> Vec<Label<Term>> {
         labels
             .iter()
@@ -722,6 +717,33 @@ fn same_row(
     };
     if ours.is_empty() && theirs.is_empty() {
         return metas.unify_tails(left.tail(), right.tail());
+    }
+    // Обе разности непусты - и это решается заведением **общего остатка**
+    // (§10 вопрос 80): `{ū | ?l} ~ {v̄ | ?r}` равносильно `?l := {v̄ | ρ}` и
+    // `?r := {ū | ρ}`, где ρ - то, чем оба ряда продолжаются одинаково.
+    //
+    // Записанное препятствие - «тип такой дырки есть телескоп контекста, а
+    // сравнение бестиповое» - при измерении не подтвердилось: у row-дырки типа
+    // нет вовсе, `fresh_row` его не спрашивает. Догадкой решение не является:
+    // другого способа уравнять два открытых ряда нет, и ρ определяется
+    // единственным образом.
+    if !ours.is_empty() && !theirs.is_empty() {
+        let (Some(Tail::Meta(mine)), Some(Tail::Meta(yours))) =
+            (metas.zonk_tail(left.tail()), metas.zonk_tail(right.tail()))
+        else {
+            // Жёсткая переменная лишних меток не примет, а отсутствие хвоста -
+            // тем более: там равенства действительно нет.
+            return false;
+        };
+        // Один и тот же хвост с обеих сторон: решение содержало бы саму дырку.
+        if mine == yours {
+            return false;
+        }
+        let rho = metas.fresh_row();
+        let (ours, theirs) = (quoted(&ours), quoted(&theirs));
+        metas.solve_row(mine, Row::closing(theirs, rho.tail()));
+        metas.solve_row(yours, Row::closing(ours, rho.tail()));
+        return true;
     }
     // Остаток одной стороны обязан уйти в хвост другой. Хвост этот обязан быть
     // дыркой: жёсткая переменная лишних меток не примет, а отсутствие хвоста -

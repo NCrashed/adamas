@@ -632,3 +632,29 @@ resource File where
     );
     assert_eq!(ran(&aborting, "main"), ran(&quiet, "main"));
 }
+
+/// Глубина исполнения не упирается в кадры Rust.
+///
+/// До явного стека `even (times 100 20)` - обычная структурная рекурсия -
+/// роняла процесс `SIGABRT`'ом, а порог двигался от профиля сборки
+/// **компилятора**: ~450 уровней в debug, ~1500 в release. Свойством программы
+/// он, стало быть, не был вовсе (§10 вопрос 89).
+#[test]
+fn execution_depth_does_not_ride_the_rust_stack() {
+    let source = format!(
+        "{BASE}
+times : Nat -> Nat -> Nat
+times Zero m = Zero
+times (Succ k) m = m + times k m
+
+even : Nat -> Bool
+even Zero = True
+even (Succ Zero) = False
+even (Succ (Succ k)) = even k
+
+main : Bool
+main = even (times 100 40)
+"
+    );
+    assert_eq!(ran(&source, "main"), "True");
+}

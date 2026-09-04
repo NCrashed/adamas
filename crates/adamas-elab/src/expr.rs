@@ -1897,18 +1897,102 @@ impl<'a> Elaborator<'a> {
             }),
             span: inner.span,
         };
-        let applied = Expr {
-            kind: ExprKind::App(Box::new(head), Box::new(inner.clone())),
-            span,
-        };
         // Имена под маской инстанцируются **заново**. Кэш `instantiated` держит
         // одно инстанцирование на определение, и обычному коду это верно: два
         // `ask` в одном теле производят в одно вхождение метки. Под маской - в
         // разные, в том вся её суть, и общая дырка row делала бы это
         // невыразимым (§10 вопрос 72).
         let outer = std::mem::take(&mut self.instantiated);
-        let term = self.expr(&applied, Mult::Many);
+        let term = self.masking(head, &label, inner, span);
         self.instantiated = outer;
+        term
+    }
+
+    /// Кладёт в кэш элиминатор маски с **заданной** ρ.
+    ///
+    /// Обычный путь имени выдал бы ρ свежей дыркой, а её тут выводить нечем:
+    /// погашение сверяет окружающую, а не пополняет её.
+    fn seed_mask(&mut self, head: &Expr, rho: &Row<Term>) {
+        let ExprKind::Name(name) = &head.kind else {
+            return;
+        };
+        let Some(definition) = self.signature.lookup(&name.text) else {
+            return;
+        };
+        let levels: Rc<[Level]> = (0..definition.level_arity)
+            .map(|_| self.metas.fresh_level())
+            .collect();
+        let term = Term::Const(
+            CoreName::from(&*name.text),
+            levels,
+            Rows::new([rho.clone()]),
+        );
+        self.instantiated.insert(Rc::clone(&name.text), term);
+    }
+
+    /// Собирает применение маски, приостанавливая аргумент, если он не
+    /// приостановлен сам.
+    ///
+    /// Элиминатор ждёт вычисление, а операция с написанными аргументами -
+    /// `fetch MkParse` - применение полное и производит сразу. Приостановить её
+    /// автору нечем, кроме отдельного определения, и маска стоила бы имени на
+    /// каждое употребление (§10 вопрос 23). Форма приостанавливает сама.
+    ///
+    /// Приостановлено ли написанное - решает его тип, и спрашивается он
+    /// **пробным** проходом: настоящий пойдёт заново и с той же чистой доски,
+    /// потому что решения пробного откатываются вместе с кэшем.
+    fn masking(
+        &mut self,
+        head: Expr,
+        label: &Symbol,
+        inner: &Expr,
+        span: Span,
+    ) -> Result<Term, ElabError> {
+        // ρ - **окружающая без первого вхождения метки**, и берётся она отсюда,
+        // а не из аргумента. Смысл маски в этом и состоит: вычисление под ней
+        // работает там же, где сама маска, минус пропущенный хендлер. Оставь ρ
+        // дыркой - и операция внутри упёрлась бы в окружающую без единой метки,
+        // потому что погашение сверяет, а не выводит.
+        let Some(rest) = without(self.ctx.row(), label).map(|it| it.rest) else {
+            return Err(ElabError::NothingToMask { span });
+        };
+        let rho = rest.map(|argument| quote(self.ctx.size(), argument));
+        self.seed_mask(&head, &rho);
+        let mark = self.metas.mark();
+        let ready = self
+            .expr(inner, Mult::Many)
+            .ok()
+            .and_then(|term| self.synthesized(&term))
+            .is_some_and(|ty| self.computation(&ty));
+        self.metas.rollback(mark);
+        self.instantiated.clear();
+        self.seed_mask(&head, &rho);
+
+        let argument = if ready {
+            inner.clone()
+        } else {
+            Expr {
+                kind: ExprKind::Lam {
+                    params: vec![bind_as(ast::Name {
+                        text: Rc::from("_"),
+                        span: inner.span,
+                    })],
+                    body: Box::new(inner.clone()),
+                },
+                span: inner.span,
+            }
+        };
+        let applied = Expr {
+            kind: ExprKind::App(Box::new(head), Box::new(argument)),
+            span,
+        };
+        // Аргумент элаборируется **под ρ**: маска сдвигает окружающую на одно
+        // вхождение, и вложенная маска обязана снимать следующее, а не то же
+        // самое (§10 вопрос 23).
+        let inner = self.ctx.within(rest);
+        let outer = std::mem::replace(&mut self.ctx, inner);
+        let term = self.expr(&applied, Mult::Many);
+        self.ctx = outer;
         term
     }
 

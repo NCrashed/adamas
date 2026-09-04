@@ -193,10 +193,17 @@ impl Machine<'_> {
             Outcome::Done(value) => return self.unwound(pending, 0, &value),
             Outcome::Performed(performed) => performed,
         };
+        // Ветка сама произвела операцию, и оборвать её вправе уже снаружи -
+        // не эту, так следующую на том же пути. Выброшенным тогда окажется
+        // **это** продолжение вместе с отложенными деструкторами, и запустить
+        // их будет некому. Они и есть долг: едет он со всей цепочкой, и платит
+        // его тот, кто её оборвал.
+        let owed: Rc<[Rc<Value>]> = pending.into();
         let pending = pending.to_vec();
-        Outcome::Performed(performed.after(Rc::new(move |machine, value| {
-            machine.settled(Outcome::Done(value), slot, &pending)
-        })))
+        Outcome::Performed(performed.owing(
+            owed,
+            Rc::new(move |machine, value| machine.settled(Outcome::Done(value), slot, &pending)),
+        ))
     }
 
     /// Применяет ветку к её аргументам по одному.

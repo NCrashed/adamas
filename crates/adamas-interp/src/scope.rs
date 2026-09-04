@@ -83,10 +83,17 @@ impl Machine<'_> {
             match self.apply(&pending[index], Rc::clone(&unit)) {
                 Outcome::Done(_) => {}
                 Outcome::Performed(performed) => {
+                    // Деструктор сам произвёл операцию, и оборвать её вправе -
+                    // не эту, так следующую на том же пути. Выброшенным тогда
+                    // окажется продолжение раскрутки, а в нём стоял её
+                    // **остаток**: деструкторы, до которых не дошли. Он и есть
+                    // долг, и едет он со всей цепочкой.
+                    let owed: Rc<[Rc<Value>]> = pending[index + 1..].into();
                     let (pending, value) = (pending.to_vec(), Rc::clone(value));
-                    return Outcome::Performed(performed.after(Rc::new(move |machine, _| {
-                        machine.unwound(&pending, index + 1, &value)
-                    })));
+                    return Outcome::Performed(performed.owing(
+                        owed,
+                        Rc::new(move |machine, _| machine.unwound(&pending, index + 1, &value)),
+                    ));
                 }
             }
         }

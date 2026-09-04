@@ -486,3 +486,149 @@ main = handle guarded with
         "Cons{0} Nat (Succ Zero) (Cons{0} Nat (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) (Nil{0} Nat))"
     );
 }
+
+/// Ветка, сама производящая операцию, не теряет отложенных деструкторов.
+///
+/// Ветка `fail` производит `boom`, а внешний хендлер `boom` обрывает.
+/// Выброшенным тогда оказывается продолжение раскрутки, и запустить отложенное
+/// стало некому: ресурс уходил молча, а половина ответа оставалась верной.
+#[test]
+fn a_branch_that_performs_keeps_its_pending_destructors() {
+    let source = format!(
+        "{BASE}
+effect Log where
+  note : Nat -> Unit
+
+effect Fail where
+  fail : a
+
+effect Boom where
+  boom : a
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {{Log}} Bool
+  closeFile h =
+    note 9
+    True
+
+leaky : File -> {{Fail, Log}} Bool
+leaky h =
+  note 1
+  let n : Bool = fail
+  True
+
+broken : {{Fail, Boom, Log}} Bool
+broken = leaky Open
+
+boomed : Unit -> {{Boom, Log}} Bool
+boomed u =
+  let b : Bool = boom
+  b
+
+guarded : {{Boom, Log}} Bool
+guarded = handle broken with
+  return v -> v
+  fail -> boomed MkUnit
+
+outer : {{Log}} Bool
+outer = handle guarded with
+  return v -> v
+  boom -> False
+
+empty : List Nat
+empty = Nil
+
+main : List Nat
+main = handle outer with
+  return v -> empty
+  note n -> Cons n (resume MkUnit)
+"
+    );
+    // Отметка тела и отметка деструктора - обе.
+    assert_eq!(
+        ran(&source, "main"),
+        "Cons{0} Nat (Succ Zero) (Cons{0} Nat (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) (Nil{0} Nat))"
+    );
+}
+
+/// Обрыв внутри деструктора не съедает остаток раскрутки.
+///
+/// Два ресурса; первый по порядку деструктор сам производит операцию, которую
+/// обрывают. Долг - деструкторы, до которых не дошли, - обязан уехать с
+/// исходом, иначе второй ресурс уходит молча.
+#[test]
+fn an_abort_inside_a_destructor_leaves_the_rest_of_the_unwinding() {
+    let effects = "\
+resource Socket where
+  Listen : Socket
+  closeSocket : (1 s : Socket) -> {Log} Bool
+  closeSocket s =
+    note 8
+    True
+
+held : Socket -> File -> {Fail, Boom, Log} Bool
+held s h =
+  note 1
+  let n : Bool = fail
+  True
+
+broken : {Fail, Boom, Log} Bool
+broken = held Listen Open
+
+guarded : {Boom, Log} Bool
+guarded = handle broken with
+  return v -> v
+  fail -> False
+
+outer : {Log} Bool
+outer = handle guarded with
+  return v -> v
+  boom -> False
+
+empty : List Nat
+empty = Nil
+
+main : List Nat
+main = handle outer with
+  return v -> empty
+  note n -> Cons n (resume MkUnit)
+";
+    // Деструктор, который обрывают, и тот же без обрыва: ответ обязан совпасть.
+    let declared = format!(
+        "{BASE}
+effect Log where
+  note : Nat -> Unit
+
+effect Fail where
+  fail : a
+
+effect Boom where
+  boom : a
+"
+    );
+    let aborting = format!(
+        "{declared}
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {{Boom, Log}} Bool
+  closeFile h =
+    note 9
+    let z : Bool = boom
+    True
+
+{effects}"
+    );
+    let quiet = format!(
+        "{declared}
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {{Log}} Bool
+  closeFile h =
+    note 9
+    True
+
+{effects}"
+    );
+    assert_eq!(ran(&aborting, "main"), ran(&quiet, "main"));
+}

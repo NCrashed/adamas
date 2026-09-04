@@ -730,6 +730,12 @@ impl From<ErrorKind> for TypeError {
 /// глубины уже нет, и восстановить его нечем. Обратное чтение и зонканье идут
 /// тем же путём, что у термов внутри [`ErrorKind`], и по той же причине.
 pub(crate) fn refuse(ctx: &Ctx<'_>, metas: &Metas, kind: ErrorKind) -> TypeError {
+    // Спекулятивный проход отказ выбросит, и телескоп ему не нужен: сбор стоит
+    // обхода локального контекста с обратным чтением каждого связывания, а
+    // форма ошибки рассчитана на редкость отказа (§10 вопрос 52).
+    if ctx.is_speculative() {
+        return kind.into();
+    }
     let context = telescope(ctx, metas);
     if context.is_empty() {
         return kind.into();

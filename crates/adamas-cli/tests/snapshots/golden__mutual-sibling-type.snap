@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: mutual-sibling-type.adamas:30:3: `held` в группе `mutual` не объявляется: тип члена не вправе назвать соседа - типы всех членов проверяются до объявления группы; вынесите его отдельным объявлением перед блоком, ordered scoping это позволяет. Семейство группы назвать можно
+    held : Vec Bool count
+    ^^^^^^^^^^^^^^^^^^^^^

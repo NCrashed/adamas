@@ -118,8 +118,6 @@ pub enum Unsupported {
     Handler,
     /// `type` - записи.
     Record,
-    /// `infix`, `infixl`, `infixr`.
-    Fixity,
     /// Фигурные скобки там, где это не группа implicit-связываний.
     Braces,
 }
@@ -155,7 +153,6 @@ impl Unsupported {
             Self::Effect => form("объявления эффектов (§3.4)", "Фазе 4"),
             Self::Handler => form("handler'ы (§3.4)", "Фазе 4"),
             Self::Record => form("записи (§4.2)", "одной из следующих фаз"),
-            Self::Fixity => form("объявления фикситетов (§4.4)", "фазе с prelude"),
             Self::Braces => Message {
                 what: "записи (§4.2) и effect row (§3.4)",
                 phase: "одной из следующих фаз",

@@ -6820,3 +6820,48 @@ next = Succ state
         "`state` связывается сам"
     );
 }
+
+/// Заготовка: тождество и перенос вдоль него.
+const IDENTITY: &str = "\
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Eqv (a : Type) (x : a) : a -> Type where
+  Refl : Eqv a x x
+
+subst : (0 p : a -> Type) -> Eqv a x y -> p x -> p y
+subst p Refl px = px
+
+mk : (n : Nat) -> Eqv Nat n n
+mk n = Refl
+";
+
+/// Написанный kind не заводит семейству лишнего уровня (§10 вопрос 88).
+///
+/// `Eqv (a : Type) (x : a) : a -> Type` называет два `Type`, но свободен из них
+/// только первый - универсум параметра. Собственный сорт семейства ничем не
+/// ограничен, поэтому берётся наименьшим и поднимается до параметров, а не
+/// обобщается во второй параметр.
+#[test]
+fn a_written_family_kind_does_not_add_a_free_level() {
+    let signature = program(IDENTITY);
+    let family = signature.lookup("Eqv").expect("семейство объявлено");
+    assert_eq!(family.level_arity, 1, "уровень один - универсум параметра");
+}
+
+/// Перенос, чьё доказательство **построено в теле**.
+///
+/// Свободный сорт семейства уезжал сюда и оставался: обобщение поднимает
+/// уровни, встречающиеся в типе, а этот встречался только в теле. Параметром
+/// доказательство проходило и тогда - тем и различались два случая.
+#[test]
+fn a_transport_over_a_proof_built_in_the_body_elaborates() {
+    let signature = program(&format!(
+        "{IDENTITY}
+moved : (n : Nat) -> Nat -> Nat
+moved n x = subst (\\k -> Nat) (mk n) x
+"
+    ));
+    assert!(signature.lookup("moved").is_some(), "перенос объявлен");
+}

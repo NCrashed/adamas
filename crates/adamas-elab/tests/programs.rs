@@ -6865,3 +6865,85 @@ moved n x = subst (\\k -> Nat) (mk n) x
     ));
     assert!(signature.lookup("moved").is_some(), "перенос объявлен");
 }
+
+/// Заготовка: `Functor`, `Applicative` и инстансы для `Option`.
+const APPLICATIVE: &str = "\
+data Bool where
+  True : Bool
+  False : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Option (a : Type) where
+  None : Option a
+  Some : a -> Option a
+
+class Functor (f : Type -> Type) where
+  map : (a -> b) -> f a -> f b
+
+instance Functor Option where
+  map g None = None
+  map g (Some x) = Some (g x)
+
+class Applicative (f : Type -> Type) when Functor f where
+  pure : a -> f a
+  ap : f (a -> b) -> f a -> f b
+
+instance Applicative Option where
+  pure x = Some x
+  ap None y = None
+  ap (Some g) y = map g y
+
+toNat : Bool -> Nat
+toNat True = Succ Zero
+toNat False = Zero
+";
+
+/// Метод в аргументе, чей носитель определяет **следующий** аргумент.
+///
+/// `ap (pure toNat) (Some True)`: когда проверяется первый аргумент, `?f` у
+/// `pure` не известно ничем, и сравнивались две дырки. Прежде это решалось
+/// постоянной функцией - законно по типам, неверно по смыслу, - а теперь
+/// откладывается и перебирается на границе объявления (§10 вопрос 91).
+#[test]
+fn a_method_whose_carrier_is_decided_by_a_later_argument() {
+    let signature = program(&format!(
+        "{APPLICATIVE}
+lifted : Option Nat
+lifted = ap (pure toNat) (Some True)
+"
+    ));
+    assert!(signature.lookup("lifted").is_some(), "аппликация выведена");
+}
+
+/// Оба аргумента - методы: носитель приходит из ожидаемого типа.
+#[test]
+fn both_arguments_may_be_methods() {
+    let signature = program(&format!(
+        "{APPLICATIVE}
+doubled : Option Nat
+doubled = ap (pure toNat) (pure True)
+"
+    ));
+    assert!(signature.lookup("doubled").is_some(), "оба выведены");
+}
+
+/// Откладывание - не дыра в проверке: несходящееся отвергается.
+///
+/// `Some Zero` требует `a = Nat`, а `toNat` требует `a = Bool`. Прежний путь
+/// принял бы это постоянным решением; теперь отказ приходит на аргументе.
+#[test]
+fn a_postponed_constraint_that_disagrees_is_refused() {
+    let error = refused(&format!(
+        "{APPLICATIVE}
+wrong : Option Nat
+wrong = ap (pure toNat) (Some Zero)
+"
+    ));
+    assert!(
+        matches!(error, ElabError::Core { .. }),
+        "ожидался отказ ядра, получено: {error}"
+    );
+}

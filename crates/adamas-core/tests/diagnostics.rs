@@ -436,3 +436,51 @@ proptest! {
         }
     }
 }
+
+/// Спекулятивный отказ телескопа не несёт (§10 вопрос 52).
+///
+/// Форма ошибки рассчитана на редкость отказа: сбор телескопа стоит обхода
+/// локального контекста с обратным чтением каждого связывания. Проход, который
+/// отказ **выбросит**, платить за это не обязан, и говорит он об этом сам -
+/// контекстом, а не догадкой вызываемого.
+#[test]
+fn a_speculative_refusal_carries_no_telescope() {
+    let term = lam(Mult::Zero, "a", lam(Mult::Many, "x", broken()));
+    let ty = pi(
+        Mult::Zero,
+        "a",
+        Term::universe(0),
+        pi(Mult::Many, "x", Term::var(0), Term::universe(3)),
+    );
+    let signature = Signature::default();
+    let mut metas = Metas::default();
+
+    let honest = adamas_core::check::check(
+        &adamas_core::ctx::Ctx::new(&signature),
+        &mut metas,
+        Mult::One,
+        &term,
+        &adamas_core::ctx::Ctx::new(&signature).eval(&ty),
+    )
+    .expect_err("ожидался отказ");
+    assert_eq!(honest.context().len(), 2, "обычный отказ несёт связывания");
+
+    let mut metas = Metas::default();
+    let speculative = adamas_core::check::check(
+        &adamas_core::ctx::Ctx::new(&signature).speculating(),
+        &mut metas,
+        Mult::One,
+        &term,
+        &adamas_core::ctx::Ctx::new(&signature).eval(&ty),
+    )
+    .expect_err("ожидался отказ");
+    assert!(
+        speculative.context().is_empty(),
+        "спекулятивный отказ телескопа не собирает"
+    );
+    assert_eq!(
+        speculative.to_string(),
+        honest.to_string(),
+        "сам отказ тот же: дешевеет только нагрузка"
+    );
+}

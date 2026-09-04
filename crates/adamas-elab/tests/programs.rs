@@ -6470,3 +6470,94 @@ head (VCons k x xs) = x
 "
     ));
 }
+
+/// Ресурс **внутри** обрабатываемого вычисления тоже отвергается.
+///
+/// Лексической проверки мало, и ревью 2026-09-04 показало это двойным
+/// закрытием: `closeFile` отрабатывал дважды на один `Open`, а программа
+/// проходила проверку. Живой случай - ресурс в теле вызываемого, где
+/// упоминания в точке `handleMulti` нет вовсе.
+#[test]
+fn a_resource_inside_the_handled_computation_is_refused() {
+    let source = format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+effect Amb where
+  toss : Bool
+
+inner : File -> {{Amb}} Bool
+inner h =
+  let b : Bool = toss
+  b
+
+held : {{Amb}} Bool
+held = inner (Open True)
+
+both : Bool
+both = handleMulti held with
+  return v -> v
+  toss -> resume True
+"
+    );
+    let error = refused(&source);
+    assert!(
+        matches!(error, ElabError::MultiOverHolder { .. }),
+        "получено {error:?}"
+    );
+
+    // Одношотный тем же телом проходит.
+    program(&source.replace("handleMulti", "handle"));
+
+    // Вычисление, собранное на месте, спросить не у кого - и это отказ, пока в
+    // программе ресурсы объявлены.
+    let unknown = source.replace(
+        "both : Bool\nboth = handleMulti held with",
+        "both : ({Amb} Bool) -> Bool\nboth c = handleMulti c with",
+    );
+    assert!(
+        matches!(refused(&unknown), ElabError::MultiWithUnknown { .. }),
+        "вычисление параметром обязано быть отвергнуто"
+    );
+}
+
+/// Частичное применение выносит привязанное к scope значение наружу.
+///
+/// §3.3 разрешает передать такое значение аргументом и запрещает вернуть.
+/// Обходилось это помощником, который свой `1`-параметр недоприменяет:
+/// результат - замыкание над ним, и резумпция переживала ветку хендлера
+/// (§10 вопрос 90). Комментарий рядом с правилом утверждал, что собрать
+/// возвращающее замыкание нельзя вовсе.
+#[test]
+fn a_partial_application_carries_the_scope_bound_property() {
+    let preamble = format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+"
+    );
+    // Недоприменённое `k` возвращается - отказ приходит в само определение.
+    let error = refused(&format!(
+        "{preamble}
+feedPut : (1 k : Unit -> Bool -> Bool) -> Bool -> Bool -> Bool
+feedPut k s = k MkUnit
+"
+    ));
+    assert!(
+        matches!(error, ElabError::ScopeBound { .. }),
+        "получено {error:?}"
+    );
+
+    // Применённое до конца замыканием не является, и правило его не трогает.
+    program(&format!(
+        "{preamble}
+useUp : (1 k : Unit -> Bool -> Bool) -> Bool -> Bool
+useUp k s = k MkUnit s
+"
+    ));
+}

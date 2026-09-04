@@ -1,0 +1,34 @@
+-- Ресурс внутри обрабатываемого вычисления под `handleMulti` (§3.4).
+--
+-- Лексической проверки мало: в точке `handleMulti` упоминания ресурса нет
+-- вовсе, он живёт в теле вызываемого. Мультишотная резумпция звала бы его
+-- деструктор столько раз, сколько возобновляет продолжение, - и звала: до
+-- этой проверки программа проходила, а `closeFile` отрабатывал дважды.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Unit where
+  MkUnit : Unit
+
+effect Amb where
+  toss : Bool
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> Bool
+  closeFile h = True
+
+inner : File -> {Amb} Bool
+inner h =
+  let b : Bool = toss
+  b
+
+held : {Amb} Bool
+held = inner Open
+
+both : Bool
+both = handleMulti held with
+  return v -> v
+  toss -> resume True

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use adamas_core::level::Level;
 use adamas_core::row::Row;
 use adamas_core::source::SourceFile;
-use adamas_core::term::Term;
+use adamas_core::term::{PRINT_DEPTH, Term};
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 
@@ -33,6 +33,9 @@ enum Command {
         /// Что вычислять. По умолчанию `main`.
         #[arg(default_value = "main")]
         name: String,
+        /// Печатать ответ целиком, без среза по глубине.
+        #[arg(long)]
+        full: bool,
     },
 }
 
@@ -43,7 +46,7 @@ fn main() -> anyhow::Result<()> {
             println!("{}: проверено, объявлений {}", file.name(), signature.len());
             Ok(())
         }
-        Command::Eval { path, name } => evaluate(&path, &name),
+        Command::Eval { path, name, full } => evaluate(&path, &name, full),
     }
 }
 
@@ -52,7 +55,11 @@ fn main() -> anyhow::Result<()> {
 /// Считает **машина** (`adamas-interp`), а не `conv::evaluated`: эффекты
 /// производятся, хендлеры срабатывают. Стирания по-прежнему нет, поэтому
 /// стёртые аргументы видны в ответе - оно придёт с понижением (§9 Фаза 5).
-fn evaluate(path: &Path, name: &str) -> anyhow::Result<()> {
+///
+/// Ответ печатается со срезом по глубине: вырожденно глубокое значение даёт
+/// сотни килобайт текста, которых никто не читает. `--full` его снимает, и
+/// снимает по-настоящему - печать не рекурсивна (§10 вопрос 93).
+fn evaluate(path: &Path, name: &str, full: bool) -> anyhow::Result<()> {
     let (_, signature) = checked(path)?;
     let Some(definition) = signature.lookup(name) else {
         anyhow::bail!("определение `{name}` не найдено");
@@ -69,7 +76,9 @@ fn evaluate(path: &Path, name: &str) -> anyhow::Result<()> {
         .collect();
     let rows: Vec<Row<Term>> = (0..definition.row_arity).map(|_| Row::empty()).collect();
     let body = body.substitute_levels(&levels).substitute_rows(&rows);
-    println!("{}", adamas_interp::run(&signature, &body)?);
+    let answer = adamas_interp::run(&signature, &body)?;
+    let depth = if full { None } else { Some(PRINT_DEPTH) };
+    println!("{}", answer.printed(depth));
     Ok(())
 }
 

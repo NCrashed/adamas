@@ -26,7 +26,7 @@ impl Machine<'_> {
             unreachable!("`#closing` объявлен четырёхместным");
         };
         let Some(unit) = self.unit() else {
-            unreachable!("`#closing` объявляется только вместе с единицей");
+            unreachable!("`#closing` объявляется только при единственном конструкторе единицы");
         };
         let outcome = self.apply(body, unit);
         self.guarded(outcome, close)

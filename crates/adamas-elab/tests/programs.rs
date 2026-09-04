@@ -256,6 +256,21 @@ fn associativity_must_agree_within_one_precedence() {
             "ассоциативности",
         ),
         ("infixl 7 +\n", "дважды"),
+        // Оператор **сильнее** соседей их не разделяет: он связывает теснее, а
+        // в дереве они по-прежнему встречаются на своём уровне. Пока
+        // сравнивался текстуально предыдущий, такая цепочка принималась молча
+        // и давала другое число, чем правое прочтение (ревью 2026-09-04).
+        (
+            "infixr 6 -\n(-) : Nat -> Nat -> Nat\n(-) a b = a\n\nbad : Nat\n\
+             bad = one + two * one - one\n",
+            "ассоциативности",
+        ),
+        // И в обратную сторону: правая ассоциативность перед левой.
+        (
+            "infixr 6 -\n(-) : Nat -> Nat -> Nat\n(-) a b = a\n\nbad : Nat\n\
+             bad = one - two * one + one\n",
+            "ассоциативности",
+        ),
     ] {
         let error = refused(&format!("{}{written}", operators()));
         assert!(
@@ -263,6 +278,23 @@ fn associativity_must_agree_within_one_precedence() {
             "для {written:?}: {error:?}"
         );
     }
+    // Оператор **слабее** соседей разделяет: они уходят в разные поддеревья, и
+    // цепочка законна.
+    program(&format!(
+        "{}
+infixl 2 |>
+(|>) : Nat -> Nat -> Nat
+(|>) a b = b
+
+infixr 6 -
+(-) : Nat -> Nat -> Nat
+(-) a b = a
+
+fine : Nat
+fine = one + two |> one - two
+",
+        operators()
+    ));
 }
 
 #[test]

@@ -3615,42 +3615,21 @@ impl<'a> Elaborator<'a> {
 
     /// Блок операторов: цепочка `let` и значение последним.
     fn block(&mut self, block: &Block, position: Position) -> Result<Term, ElabError> {
-        // Закрываемые копятся до конца блока: их область видимости кончается
-        // там же, где блок, и закрыть их раньше значило бы закрыть не на
-        // выходе из scope (§3.3).
-        let mut closing = Vec::new();
-        self.statements(&block.stmts, &mut closing, position)
+        self.statements(&block.stmts, position)
     }
 
-    fn statements(
-        &mut self,
-        stmts: &[Stmt],
-        closing: &mut Vec<(u32, Symbol)>,
-        position: Position,
-    ) -> Result<Term, ElabError> {
+    fn statements(&mut self, stmts: &[Stmt], position: Position) -> Result<Term, ElabError> {
         let Some((first, rest)) = stmts.split_first() else {
             // Пустых блоков layout не делает.
             unreachable!("блок без операторов")
         };
         match &first.kind {
+            // Хвост блока стоит там же, где блок: возвращаемое значение
+            // остаётся возвращаемым (§3.3), и отказ придёт на нём, а не на
+            // блоке целиком. Закрытие сюда больше не копится - его ставит на
+            // себя каждое связывание, см. `bindings`.
             StmtKind::Expr(expr) if rest.is_empty() => {
-                // Хвост блока: все связывания на месте, индексы копившихся
-                // закрываемых считаются отсюда.
-                let depth = self.scope.len();
-                let mut drops: Vec<(u32, Symbol)> = closing
-                    .iter()
-                    .map(|(born, drop)| {
-                        let index = u32::try_from(depth - 1 - *born as usize).unwrap_or(u32::MAX);
-                        (index, drop.clone())
-                    })
-                    .collect();
-                lifo(&mut drops);
-                // Хвост блока стоит там же, где блок: возвращаемое значение
-                // остаётся возвращаемым (§3.3), и отказ придёт на нём, а не
-                // на блоке целиком.
-                self.closing_all(&drops, |it| {
-                    it.placed(position, |it| it.expr(expr, Mult::Many))
-                })
+                self.placed(position, |it| it.expr(expr, Mult::Many))
             }
             // Оператор, значение которого отбрасывается: пишется он ради
             // эффектов (§3.4), а связывание ему нужно затем, чтобы вычисление
@@ -3671,8 +3650,7 @@ impl<'a> Elaborator<'a> {
                     value: Some(Rc::new(value.clone())),
                     ..Bound::visible(&anonymous, Mult::One, self.typed(&ty))
                 };
-                let body =
-                    self.binding(bound, |inner| inner.statements(rest, closing, position))?;
+                let body = self.binding(bound, |inner| inner.statements(rest, position))?;
                 Ok(Term::Let(
                     Mult::One,
                     CoreName::from("_"),
@@ -3686,7 +3664,7 @@ impl<'a> Elaborator<'a> {
             StmtKind::Let(_) if rest.is_empty() => {
                 Err(ElabError::BlockWithoutValue { span: first.span })
             }
-            StmtKind::Let(bindings) => self.bindings(bindings, rest, closing, position),
+            StmtKind::Let(bindings) => self.bindings(bindings, rest, position),
         }
     }
 
@@ -3696,11 +3674,10 @@ impl<'a> Elaborator<'a> {
         &mut self,
         bindings: &[Binding],
         rest: &[Stmt],
-        closing: &mut Vec<(u32, Symbol)>,
         position: Position,
     ) -> Result<Term, ElabError> {
         let Some((binding, tail)) = bindings.split_first() else {
-            return self.statements(rest, closing, position);
+            return self.statements(rest, position);
         };
         if !binding.params.is_empty() {
             return Err(ElabError::Missing {
@@ -3736,16 +3713,26 @@ impl<'a> Elaborator<'a> {
         // само привязано. Без этого правило обходится в одну строку - и обход
         // выписан в §3.3 дословно.
         let scoped = self.produced.take().is_some();
-        let born = u32::try_from(self.scope.len()).unwrap_or(u32::MAX);
         let bound = Bound {
             value: Some(Rc::new(value.clone())),
             ..Bound::owning_scoping(&binding.name.text, mult, annotation, owns, scoped)
         };
+        // Вставка оборачивает **остаток блока**, а не его хвост: область
+        // видимости связывания начинается здесь, и всё, что стоит между `let` и
+        // хвостом, обязано быть внутри неё. Пока закрытие копилось до хвоста,
+        // ресурс, за которым в блоке стоял хоть один оператор, при обрыве не
+        // закрывался вовсе - машина не знала, что вошла в scope, - а разница
+        // между «закрылся» и «утёк» была в одной строке между `let` и хвостом
+        // (ревью 2026-09-04).
+        //
+        // LIFO выходит само: связывание, стоящее ниже, оборачивает меньший
+        // кусок и закрывается первым.
         let body = self.binding(bound, |inner| {
-            if let Some(drop) = drop {
-                closing.push((born, drop));
+            let rest = |it: &mut Self| it.bindings(tail, rest, position);
+            match &drop {
+                Some(drop) => inner.closing(Some(drop), 0, rest),
+                None => rest(inner),
             }
-            inner.bindings(tail, rest, closing, position)
         })?;
         Ok(Term::Let(
             mult,

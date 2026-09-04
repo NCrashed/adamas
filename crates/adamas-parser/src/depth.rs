@@ -395,21 +395,29 @@ fn decl_at<'a>(decl: &'a Decl, depth: u32, pending: &mut Pending<'a>) -> Result<
                 decl_at(member, inner, pending)?;
             }
         }
+        // Члены класса - **телескоп**, а не соседи: класс элаборируется в тип
+        // записи, а поле её стоит под всеми предыдущими. Тот же довод, каким
+        // мерятся операции эффекта и поля типа записи, и та же цена, если его
+        // не применить: семь тысяч членов клали процесс по памяти, тогда как
+        // семь тысяч операций на том же входе отвечали честным отказом.
         DeclKind::Class(class) => {
-            let inner = deepen(depth, 1, decl.span)?;
+            let mut at = deepen(depth, 1, decl.span)?;
             pending.push((Node::Expr(&class.head), depth));
             binder_terms(&class.params, depth, pending);
             for superclass in &class.superclasses {
+                at = deepen(at, 1, superclass.span)?;
                 pending.push((Node::Expr(superclass), depth));
             }
             for member in &class.members {
-                decl_at(member, inner, pending)?;
+                at = deepen(at, 1, member.span)?;
+                decl_at(member, at, pending)?;
             }
         }
         // Вложенность модуля считается как вложенность блока: член объявлен
-        // глубже, и глубина у него на шаг больше.
+        // глубже, и глубина у него на шаг больше. Члены при этом цепочка, а не
+        // соседи, - `module type` элаборируется в тот же телескоп, что и класс.
         DeclKind::Module(module) => {
-            let inner = deepen(depth, 1, decl.span)?;
+            let mut at = deepen(depth, 1, decl.span)?;
             for ty in module.params.iter().filter_map(|it| it.ty.as_ref()) {
                 pending.push((Node::Expr(ty), depth));
             }
@@ -420,7 +428,8 @@ fn decl_at<'a>(decl: &'a Decl, depth: u32, pending: &mut Pending<'a>) -> Result<
                 pending.push((Node::Expr(body), depth));
             }
             for member in &module.members {
-                decl_at(member, inner, pending)?;
+                at = deepen(at, 1, member.span)?;
+                decl_at(member, at, pending)?;
             }
         }
         DeclKind::Data(data) => {

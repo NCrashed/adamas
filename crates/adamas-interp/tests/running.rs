@@ -396,3 +396,93 @@ main = Cons answer Nil
     );
     assert_eq!(ran(&source, "main"), "Cons{0} Nat (Succ Zero) (Nil{0} Nat)");
 }
+
+/// Единица без единственного конструктора: `#closing` не объявляется, и
+/// машина её не встречает.
+///
+/// Объявление вставки требовало «`Unit` объявлен», а машина строит значение
+/// единицы по её **единственному** конструктору. Расходились они молча:
+/// `data Unit` с двумя конструкторами вместе с любым ресурсом давал принятую
+/// проверкой программу, которая роняла исполнение на `unreachable!` в
+/// раскрутке. Спрашивается теперь одно и то же с обеих сторон.
+#[test]
+fn a_unit_with_two_constructors_leaves_the_insertion_out() {
+    let source = "\
+data Unit where
+  A : Unit
+  B : Unit
+
+data Bool where
+  False : Bool
+  True : Bool
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> Bool
+  closeFile h = True
+
+use : File -> Bool
+use h = True
+
+main : Bool
+main = use Open
+";
+    assert_eq!(ran(source, "main"), "True");
+}
+
+/// Ресурс, связанный `let`, закрывается при обрыве и тогда, когда между `let`
+/// и хвостом блока что-то стоит.
+///
+/// Вставка оборачивала **хвост** блока, а область видимости связывания
+/// начинается на `let`: всё, что между ними, оказывалось снаружи, и машина не
+/// знала, что вошла в scope. Разница между «закрылся» и «утёк» была ровно в
+/// одной строке между `let` и хвостом.
+#[test]
+fn a_let_bound_resource_closes_when_the_block_is_abandoned() {
+    let source = format!(
+        "{BASE}
+effect Log where
+  note : Nat -> Unit
+
+effect Ask where
+  ask : Nat
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {{Log}} Bool
+  closeFile h =
+    note 9
+    True
+
+leaky : Unit -> {{Ask, Log}} Bool
+leaky u =
+  let h : File = Open
+  note 1
+  let n : Nat = ask
+  True
+
+broken : {{Ask, Log}} Bool
+broken = leaky MkUnit
+
+-- Ветка резумпцию не зовёт: вычисление обрывается на `ask`, и деструктор
+-- обязан сработать при раскрутке.
+guarded : {{Log}} Bool
+guarded = handle broken with
+  return v -> v
+  ask -> False
+
+empty : List Nat
+empty = Nil
+
+main : List Nat
+main = handle guarded with
+  return v -> empty
+  note n -> Cons n (resume MkUnit)
+"
+    );
+    // Отметка тела, затем отметка деструктора: `[1, 9]`.
+    assert_eq!(
+        ran(&source, "main"),
+        "Cons{0} Nat (Succ Zero) (Cons{0} Nat (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) (Nil{0} Nat))"
+    );
+}

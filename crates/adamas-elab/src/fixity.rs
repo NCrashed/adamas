@@ -80,6 +80,7 @@ impl Fixities {
         for (operator, _) in &chain.tail {
             operators.push((operator.clone(), self.fixity(operator)?));
         }
+        mixed(&operators)?;
         let mut climber = Climber {
             chain,
             operators: &operators,
@@ -130,21 +131,6 @@ impl Climber<'_> {
             if fixity.precedence < least {
                 break;
             }
-            // Цепочка одной силы обязана быть одной ассоциативности, и `infix`
-            // не образует её вовсе: где скобки не выводятся, их пишет автор.
-            if let Some(previous) = self.at.checked_sub(1) {
-                let (before, earlier) = &self.operators[previous];
-                if earlier.precedence == fixity.precedence
-                    && (earlier.assoc != fixity.assoc || fixity.assoc == Assoc::None)
-                {
-                    return Err(ElabError::Fixity {
-                        operator: Symbol::clone(&operator.text),
-                        why: "рядом с оператором той же силы и другой \
-                              ассоциативности скобки не выводятся - напишите их",
-                        span: before.span.merge(operator.span),
-                    });
-                }
-            }
             self.at += 1;
             // Левая ассоциативность останавливает правую часть на своей силе,
             // правая - пускает её собрать соседа той же.
@@ -164,4 +150,43 @@ impl Climber<'_> {
         }
         Ok(left)
     }
+}
+
+/// Отвергает цепочку, где две силы одного уровня стоят рядом с разной
+/// ассоциативностью, и всякую цепочку из `infix`.
+///
+/// «Рядом» здесь не значит «подряд в тексте»: между двумя операторами одной
+/// силы вправе стоять оператор **сильнее**, и он их не разделяет - связывает
+/// теснее, а в дереве они по-прежнему встречаются на своём уровне. Разделяет
+/// только оператор **слабее**: он уводит соседей в разные поддеревья.
+///
+/// Пока сравнивался текстуально предыдущий оператор, `9 - 1 <> 3` при
+/// `infixl 6 -` и `infixr 6 <>` отвергалось верно, а `9 - 1 * 2 <> 3` при
+/// `infixl 7 *` принималось молча и давало другое число, чем правое прочтение
+/// (ревью 2026-09-04). Обещание §4.4 «где скобки не выводятся, молча выбранное
+/// прочтение хуже отказа» держалось на соседстве в тексте.
+fn mixed(operators: &[(Name, Fixity)]) -> Result<(), ElabError> {
+    for (index, (operator, fixity)) in operators.iter().enumerate() {
+        // Ближайший слева оператор, между которым и этим нет ничего слабее.
+        let found = operators[..index]
+            .iter()
+            .rev()
+            .find(|(_, earlier)| earlier.precedence <= fixity.precedence);
+        let Some((before, earlier)) = found else {
+            continue;
+        };
+        if earlier.precedence != fixity.precedence {
+            continue;
+        }
+        if earlier.assoc == fixity.assoc && fixity.assoc != Assoc::None {
+            continue;
+        }
+        return Err(ElabError::Fixity {
+            operator: Symbol::clone(&operator.text),
+            why: "рядом с оператором той же силы и другой ассоциативности \
+                  скобки не выводятся - напишите их",
+            span: before.span.merge(operator.span),
+        });
+    }
+    Ok(())
 }

@@ -595,6 +595,35 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Вычисление под `handleMulti` держит ресурс внутри себя (§3.4).
+    ///
+    /// Отличается от [`ElabError::MultiWithResource`] тем, где ресурс: там он
+    /// в области видимости самой точки, здесь - в теле обрабатываемого, и
+    /// упоминания в точке нет вовсе. Свойство спрашивается по телу, потому
+    /// что в типе его нет.
+    #[error(
+        "`{name}` держит ресурс, а резумпция `handleMulti` мультишотна: деструктор был бы вызван дважды (§3.4)"
+    )]
+    MultiOverHolder {
+        /// Имя вычисления.
+        name: Symbol,
+        /// Написанный `handleMulti`.
+        span: Span,
+    },
+
+    /// Вычисление под `handleMulti`, чьё определение не спросить.
+    ///
+    /// Голова его не имя - оно пришло параметром или собрано на месте, - а
+    /// держит ли оно ресурс, написано в теле определения, которого нет.
+    /// Отказ этот стоит только там, где ресурсы в программе объявлены.
+    #[error(
+        "вычисление под `handleMulti` собрано на месте: держит ли оно ресурс, спросить не у кого (§3.4)"
+    )]
+    MultiWithUnknown {
+        /// Написанный `handleMulti`.
+        span: Span,
+    },
+
     /// Ресурс в области видимости `handleMulti` (§3.4).
     ///
     /// Мультишотная резумпция зовёт продолжение сколько угодно раз, а
@@ -966,6 +995,8 @@ impl ElabError {
             | Self::HandlerLabel { span, .. }
             | Self::NotHandled { span, .. }
             | Self::MultiWithResource { span, .. }
+            | Self::MultiWithUnknown { span }
+            | Self::MultiOverHolder { span, .. }
             | Self::ResourceWithoutDrop { span, .. }
             | Self::ScopeBound { span, .. }
             | Self::OwnedField { span, .. }

@@ -92,6 +92,14 @@ pub fn elaborate_into(
     fixities: &mut Fixities,
     instances: &mut Instances,
 ) -> Result<(), ElabError> {
+    // Есть ли в модуле ресурсы, спрашивается **до** объявлений: иначе тот же
+    // `handleMulti` принимался бы или отвергался в зависимости от того, выше
+    // или ниже него написан `resource`, - а гарантия §3.4 от порядка записи не
+    // зависит. Само владение по-прежнему объявляется по ходу: ordered scoping
+    // §4.8 - решение, и трогать его тут незачем.
+    if declares_resource(&module.decls) {
+        owned.expect_resources();
+    }
     members_into(
         &module.decls,
         None,
@@ -101,6 +109,15 @@ pub fn elaborate_into(
         fixities,
         instances,
     )
+}
+
+/// Объявлен ли в модуле ресурсный тип - на любой глубине вложенности.
+fn declares_resource(decls: &[ast::Decl]) -> bool {
+    decls.iter().any(|decl| match &decl.kind {
+        DeclKind::Resource(_) => true,
+        DeclKind::Module(written) => declares_resource(&written.members),
+        _ => false,
+    })
 }
 
 /// Квалифицирует имя членом модуля: `T` внутри `IntOrd` объявляется как

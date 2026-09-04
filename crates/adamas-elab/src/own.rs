@@ -71,6 +71,8 @@ pub struct Owned {
     types: HashMap<Symbol, Ownership>,
     /// Имя деструктора ресурсного типа. У `unique` его нет по определению.
     drops: HashMap<Symbol, Symbol>,
+    /// Объявлены ли в модуле ресурсы - по предпроходу, до объявлений.
+    resources: bool,
 }
 
 impl Owned {
@@ -137,5 +139,28 @@ pub(crate) fn head(expr: &Expr) -> Option<&Symbol> {
         ExprKind::Name(name) => Some(&name.text),
         ExprKind::App(callee, _) => head(callee),
         _ => None,
+    }
+}
+
+impl Owned {
+    /// Записывает, что ресурсы в модуле объявлены, - до самих объявлений.
+    pub fn expect_resources(&mut self) {
+        self.resources = true;
+    }
+
+    /// Объявлен ли в программе хоть один ресурсный тип.
+    ///
+    /// Спрашивается предпроходом, а не по уже объявленному: иначе ответ
+    /// зависел бы от того, выше или ниже написан `resource`, а гарантия §3.4
+    /// от порядка записи не зависит. Пока ресурсов нет, проверка про
+    /// `handleMulti` беспредметна, и спрашивать её значило бы отвергать
+    /// программы за то, чего в них не бывает.
+    #[must_use]
+    pub fn any_resource(&self) -> bool {
+        self.resources
+            || self
+                .types
+                .values()
+                .any(|how| matches!(how, Ownership::Resource))
     }
 }

@@ -759,6 +759,17 @@ pub(crate) struct Elaborator<'a> {
     /// написанный тип: клауза - остатком спайна после своих паттернов, `let` -
     /// спайном своей аннотации.
     expected: Vec<Argument>,
+    /// Ожидаемый тип **результата** - то, чем окажется выражение, когда спайн
+    /// кончится.
+    ///
+    /// `expected` несёт связывания написанного типа, а результат выбрасывал:
+    /// он нужен был лишь тому, кто вставляет имплиситы. Хендлеру он нужен
+    /// иначе - его ответ `b` есть результат применения элиминатора, и знать
+    /// его надо **до** веток (§10 вопрос 87).
+    ///
+    /// Живёт только в хвостовой позиции: при спуске в аргумент снимается, иначе
+    /// вложенный `handle` принял бы за свой ответ результат объемлющего.
+    result: Option<Rc<Value>>,
     /// Идёт ли элаборация в позиции типа - см. `typing`.
     types: bool,
     /// Записи сигнатуры, которым роздана row-переменная (§4.2), - по спану
@@ -883,6 +894,7 @@ impl<'a> Elaborator<'a> {
             declared_suspends: false,
             declared_ty: None,
             expected: Vec::new(),
+            result: None,
             bare: false,
             enclosing: None,
             using: Vec::new(),
@@ -1571,6 +1583,17 @@ impl<'a> Elaborator<'a> {
         let outer = std::mem::replace(&mut self.position, position);
         let outcome = body(self);
         self.position = outer;
+        outcome
+    }
+
+    /// Выполняет `body` вне хвостовой позиции: ожидаемый результат снимается.
+    ///
+    /// Аргумент применения результатом объемлющего не является, и `handle` в
+    /// нём обязан выводить свой ответ сам.
+    fn aside<T>(&mut self, body: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = self.result.take();
+        let outcome = body(self);
+        self.result = outer;
         outcome
     }
 
@@ -2830,7 +2853,8 @@ impl<'a> Elaborator<'a> {
             // Ожидаемый тип аргумента - домен того связывания, к которому он
             // приписывается; исполнение по нему и решается (§3.4).
             let expected = ty.as_deref().and_then(domain_of);
-            let argument = self.placed(inside, |it| it.expr(argument, Mult::Many))?;
+            let argument =
+                self.aside(|it| it.placed(inside, |it| it.expr(argument, Mult::Many)))?;
             let argument = self.executed(argument, expected.as_ref());
             ty = ty.and_then(|it| self.stepped(&it, &argument));
             term = Term::App(Rc::new(term), Rc::new(argument.clone()));
@@ -3096,6 +3120,8 @@ impl<'a> Elaborator<'a> {
         term = inserted;
         current = rest;
 
+        self.answered(&current, ordered.len());
+
         // Аргументы идут в порядке связываний: вычисление, `return`, ветки по
         // объявлению. Тела веток работают в окружающей самого `handle` - там,
         // где хендлер и написан, - а не в остатке вычисления: остаток несёт
@@ -3130,6 +3156,34 @@ impl<'a> Elaborator<'a> {
         Ok(term)
     }
 
+    /// Сводит ответ хендлера с ожидаемым - **до** проверки веток (§10 вопрос 87).
+    ///
+    /// Ответ есть результат применения элиминатора, то есть имплисит `b`, и
+    /// вставлен он дыркой. Ветка `return v -> Nil` проверяется против него, а
+    /// против дырки не проверяется ничто, у чего нет режима вывода; обходили
+    /// это отдельным определением.
+    ///
+    /// Спайн снимается **без** аргументов: кодомен элиминатора от них не
+    /// зависит (см. `handler_type`), поэтому подставить можно что угодно.
+    fn answered(&mut self, spine: &Rc<Value>, branches: usize) {
+        let Some(expected) = self.result.clone() else {
+            return;
+        };
+        let mut answer = Rc::clone(spine);
+        for _ in 0..=branches {
+            let Value::Pi(_, _, _, _, codomain) = &*answer else {
+                break;
+            };
+            answer = codomain.clone().apply(self.ctx.fresh());
+        }
+        convertible(
+            self.signature,
+            self.metas,
+            self.ctx.size(),
+            &answer,
+            &expected,
+        );
+    }
     /// Аргументы-уровни элиминатора.
     ///
     /// Порядок их задан построением его типа (см. `handler_type`): обобщение
@@ -3555,9 +3609,15 @@ impl<'a> Elaborator<'a> {
             self.expected = expected.to_vec();
             // Тело лямбды - её возвращаемое значение, и правило §3.3 стоит
             // здесь так же, как у тела клаузы.
-            return self.closing_all(drops, |it| {
+            let inner = self.closing_all(drops, |it| {
                 it.placed(Position::Returned, |it| it.expr(body, Mult::Many))
             });
+            // И правило исполнения по ожидаемому типу - тоже. Прежде оно тело
+            // лямбды не покрывало: остаток спайна до него доходил, а
+            // результирующего типа `Argument` не несла (§9 Фаза 4), и
+            // `\b -> get` отвергался там, где `f b = get` принимался.
+            let result = self.result.clone();
+            return inner.map(|body| self.executed(body, result.as_ref()));
         };
         let name = match &param.kind {
             LamParamKind::Binder(_) => {
@@ -3611,6 +3671,13 @@ impl<'a> Elaborator<'a> {
                 )
             },
         );
+        // Ожидаемый результат шагает вместе со спайном: связывание снято, и
+        // телу достаётся кодомен, а не весь тип.
+        let stepped = self.result.take().and_then(|ty| match &*ty {
+            Value::Pi(_, _, _, _, codomain) => Some(codomain.clone().apply(self.ctx.fresh())),
+            _ => None,
+        });
+        self.result = stepped;
         let inner = self.binding(bound, |inner| inner.lam_params(rest, body, deeper, drops))?;
         Ok(Term::Lam(mult, CoreName::from(&*name), Rc::new(inner)))
     }
@@ -3755,6 +3822,8 @@ impl<'a> Elaborator<'a> {
         // Аннотация `let` - тот же написанный тип, и лямбда значения берёт
         // кратности у него.
         self.expected = pi_arguments(&ty, self.owned);
+        // Аннотация снята до конца - остаток и есть ожидаемый результат.
+        self.result = Some(self.typed(&peeled(&ty)));
         let annotation = self.typed(&ty);
         let value = self.expr(&binding.body, Mult::Many)?;
         // Аннотация и есть ожидаемый тип - `let n : Bool = get` исполняет,
@@ -4081,6 +4150,7 @@ impl<'a> Elaborator<'a> {
         // Окружающая row тела - у элаборации она нужна затем же, зачем ядру:
         // вывод типа в ней спотыкается о непогашенные эффекты, а на нём стоит
         // правило исполнения (§3.4).
+        self.result.clone_from(&rest.result);
         self.ctx = self.ctx.within(rest.ambient);
         // Тип, оставшийся от написанного после паттернов, и есть ожидаемый
         // тип тела: по нему решается исполнение.
@@ -4790,4 +4860,13 @@ fn constants(term: &Term, into: &mut Vec<CoreName>) {
             }
         }
     }
+}
+
+/// Результат типа: то, что остаётся, когда сняты все связывания.
+fn peeled(ty: &Term) -> Term {
+    let mut current = ty;
+    while let Term::Pi(_, _, _, _, codomain) = current {
+        current = codomain;
+    }
+    current.clone()
 }

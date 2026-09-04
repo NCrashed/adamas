@@ -8,6 +8,7 @@
 //! Имена хранятся только для печати. Единственный источник истины о том, на
 //! что ссылается переменная, - индекс.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::rc::Rc;
 
@@ -720,123 +721,282 @@ pub(crate) fn spine(term: &Term) -> (&Term, Vec<&Term>) {
     (current, arguments)
 }
 
+/// Предел вложенности при печати по умолчанию.
+///
+/// Ответ на сорок тысяч звеньев есть двести восемьдесят килобайт текста,
+/// которых никто не читает, а тип такого размера в сообщении об отказе только
+/// прячет сам отказ. Двести уровней выбраны так, чтобы обычный ответ - список,
+/// запись, дерево разбора - печатался целиком, а вырожденно глубокий обрывался
+/// раньше, чем перестанет быть читаемым.
+pub const PRINT_DEPTH: usize = 200;
+
+/// Многоточие на месте среза.
+const ELIDED: &str = "…";
+
+/// Терм с явно заданным пределом вложенности: `None` - без предела.
+///
+/// Печать **не рекурсивна** независимо от предела (§10 вопрос 93), поэтому
+/// `None` действительно печатает ответ целиком, а не роняет процесс на нём.
+#[derive(Debug)]
+pub struct Printed<'a> {
+    term: &'a Term,
+    depth: Option<usize>,
+}
+
+impl Term {
+    /// Печать с явным пределом вложенности вместо [`PRINT_DEPTH`].
+    #[must_use]
+    pub fn printed(&self, depth: Option<usize>) -> Printed<'_> {
+        Printed { term: self, depth }
+    }
+}
+
+impl fmt::Display for Printed<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        print(f, self.term, self.depth)
+    }
+}
+
 impl fmt::Display for Term {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        print(f, self, Some(PRINT_DEPTH))
+    }
+}
+
+/// Позиция терма: она решает, нужны ли скобки.
+#[derive(Clone, Copy)]
+enum Pos {
+    /// Свободная: скобки не нужны никому.
+    Free,
+    /// Слева от применения: применение скобок не требует, прочее составное -
+    /// требует.
+    Callee,
+    /// Аргумент: всё составное берётся в скобки.
+    Atom,
+}
+
+impl Pos {
+    /// Нужны ли скобки терму, стоящему в этой позиции.
+    fn wraps(self, term: &Term) -> bool {
+        let atomic = matches!(
+            term,
+            Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Const(..)
+        );
         match self {
-            // Имя не печатается: одно и то же имя может быть у разных
-            // связываний, а индекс однозначен.
-            Self::Var(Index(index)) => write!(f, "#{index}"),
-            Self::Meta(TermMeta(name)) => write!(f, "?{name}"),
-            Self::EffectKind => f.write_str("Effect"),
-            Self::Universe(level) => write!(f, "Type {level}"),
-            Self::Lam(mult, name, body) => write!(f, "\\({mult} {name}) -> {body}"),
-            Self::App(callee, argument) => {
-                write!(f, "{} {}", Callee(callee), Atom(argument))
-            }
-            Self::RowKind(level) => write!(f, "Row {level}"),
-            Self::Record(fields) | Self::Row(fields) => {
-                let written: Vec<String> = fields
-                    .iter()
-                    .map(|field| format!("{} {} : {}", field.mult, field.name, field.ty))
-                    .collect();
-                // Хвост отделяется `|`, а не запятой: он не поле, и написан в
-                // §4.2 так же. Запятая перед ним читалась бы как пустое поле.
-                let tail = match &fields.tail {
-                    Some(tail) if written.is_empty() => format!("| {tail}"),
-                    Some(tail) => format!(" | {tail}"),
-                    None => String::new(),
-                };
-                write!(f, "{{{}{tail}}}", written.join(", "))
-            }
-            Self::Object(fields) => {
-                let written: Vec<String> = fields
-                    .iter()
-                    .map(|(name, value)| format!("{name} = {value}"))
-                    .collect();
-                write!(f, "{{{}}}", written.join(", "))
-            }
-            Self::With(base, fields) => {
-                let written: Vec<String> = fields
-                    .iter()
-                    .map(|(name, value)| format!("{name} = {value}"))
-                    .collect();
-                write!(f, "{{{} | {}}}", Atom(base), written.join(", "))
-            }
-            Self::Project(record, name) => write!(f, "{}.{name}", Atom(record)),
-            Self::Pi(binder, name, domain, row, codomain) => {
-                // Вид скобок несёт связывание: у выводимого они фигурные.
-                let (open, close) = binder.visibility.brackets();
-                let mult = binder.mult;
-                write!(
-                    f,
-                    "{open}{mult} {name} : {domain}{close} -> {row}{codomain}"
-                )
-            }
-            Self::Let(mult, name, ty, value, body) => {
-                write!(f, "let {mult} {name} : {ty} = {value} in {body}")
-            }
-            Self::Const(name, levels, _) if levels.is_empty() => write!(f, "{name}"),
-            Self::Const(name, levels, _) => {
-                let printed: Vec<String> = levels.iter().map(ToString::to_string).collect();
-                write!(f, "{name}{{{}}}", printed.join(", "))
-            }
-            // Имя семейства и аргументы уровня печатаются: по конструкторам
-            // ветвей они восстанавливаются не всегда - у разбора пустого
-            // семейства ветвей нет вовсе, - а производное равенство их
-            // различает. Без них два разных разбора печатались одинаково, и
-            // `Mismatch` показывал две дословно совпадающие строки.
-            Self::Case(case) => {
-                let branches: Vec<String> = case
-                    .branches
-                    .iter()
-                    .map(|branch| format!("{} => {}", branch.constructor, branch.body))
-                    .collect();
-                write!(f, "case {} : {}", Atom(&case.scrutinee), case.data)?;
-                if !case.levels.is_empty() {
-                    let levels: Vec<String> = case.levels.iter().map(ToString::to_string).collect();
-                    write!(f, "{{{}}}", levels.join(", "))?;
-                }
-                write!(
-                    f,
-                    " return {} of {{{}}}",
-                    Atom(&case.motive),
-                    branches.join("; ")
-                )
-            }
+            Self::Free => false,
+            Self::Callee => !atomic && !matches!(term, Term::App(..)),
+            Self::Atom => !atomic,
         }
     }
 }
 
-/// Позиция функции: применение слева от применения скобок не требует.
-struct Callee<'a>(&'a Term);
+/// Кусок, ждущий печати.
+enum Piece<'a> {
+    /// Терм в заданной позиции и на заданной вложенности.
+    Term(&'a Term, Pos, usize),
+    /// Готовый текст.
+    Text(Cow<'static, str>),
+}
 
-impl fmt::Display for Callee<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            Term::Var(_)
-            | Term::Universe(_)
-            | Term::RowKind(_)
-            | Term::Const(..)
-            | Term::App(..) => {
-                write!(f, "{}", self.0)
-            }
-            other => write!(f, "({other})"),
+/// Печатает терм **циклом**, а не рекурсией.
+///
+/// Спайн применений бывает какой угодно длины, и рекурсивный принтер кладёт на
+/// нём стек - раньше всего прочего: предел был между двумя и четырьмя тысячами
+/// уровней, туже, чем у исполнения и у освобождения (§10 вопрос 93).
+///
+/// Обход - LIFO: куски кладутся в обратном порядке и снимаются в прямом.
+fn print(f: &mut fmt::Formatter<'_>, term: &Term, limit: Option<usize>) -> fmt::Result {
+    let mut pending = vec![Piece::Term(term, Pos::Free, 0)];
+    while let Some(piece) = pending.pop() {
+        match piece {
+            Piece::Text(text) => f.write_str(&text)?,
+            Piece::Term(term, pos, depth) => emit(f, term, pos, depth, limit, &mut pending)?,
         }
+    }
+    Ok(())
+}
+
+/// Печатает один узел, откладывая детей в рабочий список.
+fn emit<'a>(
+    f: &mut fmt::Formatter<'_>,
+    term: &'a Term,
+    pos: Pos,
+    depth: usize,
+    limit: Option<usize>,
+    pending: &mut Vec<Piece<'a>>,
+) -> fmt::Result {
+    if limit.is_some_and(|limit| depth > limit) {
+        // Срез стоит до скобок: `(…)` не сообщает больше, чем `…`.
+        return f.write_str(ELIDED);
+    }
+    if pos.wraps(term) {
+        f.write_str("(")?;
+        pending.push(Piece::Text(")".into()));
+    }
+    let inner = depth + 1;
+    match term {
+        // Имя не печатается: одно и то же имя может быть у разных связываний, а
+        // индекс однозначен.
+        Term::Var(Index(index)) => write!(f, "#{index}")?,
+        Term::Meta(TermMeta(name)) => write!(f, "?{name}")?,
+        Term::EffectKind => f.write_str("Effect")?,
+        Term::Universe(level) => write!(f, "Type {level}")?,
+        Term::RowKind(level) => write!(f, "Row {level}")?,
+        Term::Lam(mult, name, body) => {
+            write!(f, "\\({mult} {name}) -> ")?;
+            pending.push(Piece::Term(body, Pos::Free, inner));
+        }
+        Term::App(callee, argument) => {
+            later(
+                pending,
+                [
+                    Piece::Term(callee, Pos::Callee, inner),
+                    Piece::Text(" ".into()),
+                    Piece::Term(argument, Pos::Atom, inner),
+                ],
+            );
+        }
+        Term::Record(fields) | Term::Row(fields) => {
+            f.write_str("{")?;
+            queued(pending, telescope(fields, inner));
+        }
+        Term::Object(fields) => {
+            f.write_str("{")?;
+            let mut pieces = Vec::new();
+            assignments(&mut pieces, fields, inner);
+            pieces.push(Piece::Text("}".into()));
+            queued(pending, pieces);
+        }
+        Term::With(base, fields) => {
+            f.write_str("{")?;
+            let mut pieces = vec![
+                Piece::Term(base, Pos::Atom, inner),
+                Piece::Text(" | ".into()),
+            ];
+            assignments(&mut pieces, fields, inner);
+            pieces.push(Piece::Text("}".into()));
+            queued(pending, pieces);
+        }
+        Term::Project(record, name) => {
+            later(
+                pending,
+                [
+                    Piece::Term(record, Pos::Atom, inner),
+                    Piece::Text(format!(".{name}").into()),
+                ],
+            );
+        }
+        Term::Pi(binder, name, domain, row, codomain) => {
+            // Вид скобок несёт связывание: у выводимого они фигурные.
+            let (open, close) = binder.visibility.brackets();
+            write!(f, "{open}{} {name} : ", binder.mult)?;
+            later(
+                pending,
+                [
+                    Piece::Term(domain, Pos::Free, inner),
+                    Piece::Text(format!("{close} -> {row}").into()),
+                    Piece::Term(codomain, Pos::Free, inner),
+                ],
+            );
+        }
+        Term::Let(mult, name, ty, value, body) => {
+            write!(f, "let {mult} {name} : ")?;
+            later(
+                pending,
+                [
+                    Piece::Term(ty, Pos::Free, inner),
+                    Piece::Text(" = ".into()),
+                    Piece::Term(value, Pos::Free, inner),
+                    Piece::Text(" in ".into()),
+                    Piece::Term(body, Pos::Free, inner),
+                ],
+            );
+        }
+        Term::Const(name, levels, _) if levels.is_empty() => write!(f, "{name}")?,
+        Term::Const(name, levels, _) => {
+            let printed: Vec<String> = levels.iter().map(ToString::to_string).collect();
+            write!(f, "{name}{{{}}}", printed.join(", "))?;
+        }
+        // Имя семейства и аргументы уровня печатаются: по конструкторам ветвей
+        // они восстанавливаются не всегда - у разбора пустого семейства ветвей
+        // нет вовсе, - а производное равенство их различает. Без них два разных
+        // разбора печатались одинаково, и `Mismatch` показывал две дословно
+        // совпадающие строки.
+        Term::Case(case) => {
+            f.write_str("case ")?;
+            queued(pending, analysis(case, inner));
+        }
+    }
+    Ok(())
+}
+
+/// Телескоп полей без ведущей `{`: `1 x : A, ω y : B | r}`.
+fn telescope(fields: &Fields, inner: usize) -> Vec<Piece<'_>> {
+    let mut pieces = Vec::new();
+    for (position, field) in fields.iter().enumerate() {
+        let lead = if position > 0 { ", " } else { "" };
+        pieces.push(Piece::Text(
+            format!("{lead}{} {} : ", field.mult, field.name).into(),
+        ));
+        pieces.push(Piece::Term(&field.ty, Pos::Free, inner));
+    }
+    // Хвост отделяется `|`, а не запятой: он не поле, и написан в §4.2 так же.
+    // Запятая перед ним читалась бы как пустое поле.
+    if let Some(tail) = &fields.tail {
+        let lead = if fields.fields.is_empty() {
+            "| "
+        } else {
+            " | "
+        };
+        pieces.push(Piece::Text(lead.into()));
+        pieces.push(Piece::Term(tail, Pos::Free, inner));
+    }
+    pieces.push(Piece::Text("}".into()));
+    pieces
+}
+
+/// Присваивания полей: `x = a, y = b`. Общее у значения записи и у обновления.
+fn assignments<'a>(pieces: &mut Vec<Piece<'a>>, fields: &'a [(Name, Rc<Term>)], inner: usize) {
+    for (position, (name, value)) in fields.iter().enumerate() {
+        let lead = if position > 0 { ", " } else { "" };
+        pieces.push(Piece::Text(format!("{lead}{name} = ").into()));
+        pieces.push(Piece::Term(value, Pos::Free, inner));
     }
 }
 
-/// Позиция аргумента: всё составное берётся в скобки.
-struct Atom<'a>(&'a Term);
-
-impl fmt::Display for Atom<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Const(..) => {
-                write!(f, "{}", self.0)
-            }
-            other => write!(f, "({other})"),
-        }
+/// Разбор без ведущего `case `.
+fn analysis(case: &Case, inner: usize) -> Vec<Piece<'_>> {
+    let levels = if case.levels.is_empty() {
+        String::new()
+    } else {
+        let printed: Vec<String> = case.levels.iter().map(ToString::to_string).collect();
+        format!("{{{}}}", printed.join(", "))
+    };
+    let mut pieces = vec![
+        Piece::Term(&case.scrutinee, Pos::Atom, inner),
+        Piece::Text(format!(" : {}{levels} return ", case.data).into()),
+        Piece::Term(&case.motive, Pos::Atom, inner),
+        Piece::Text(" of {".into()),
+    ];
+    for (position, branch) in case.branches.iter().enumerate() {
+        let lead = if position > 0 { "; " } else { "" };
+        pieces.push(Piece::Text(
+            format!("{lead}{} => ", branch.constructor).into(),
+        ));
+        pieces.push(Piece::Term(&branch.body, Pos::Free, inner));
     }
+    pieces.push(Piece::Text("}".into()));
+    pieces
+}
+
+/// Кладёт куски так, чтобы снялись они в написанном порядке.
+fn later<'a, const N: usize>(pending: &mut Vec<Piece<'a>>, pieces: [Piece<'a>; N]) {
+    pending.extend(pieces.into_iter().rev());
+}
+
+/// То же для списка, длина которого известна только на месте.
+fn queued<'a>(pending: &mut Vec<Piece<'a>>, pieces: Vec<Piece<'a>>) {
+    pending.extend(pieces.into_iter().rev());
 }
 
 thread_local! {
@@ -902,8 +1062,48 @@ mod tests {
     use crate::row::{Label, Row, RowVar, Tail};
     use crate::term::Binder;
 
-    use super::Term;
+    use super::{PRINT_DEPTH, Term};
     use crate::mult::Mult;
+
+    /// Глубина, на которой рекурсивная печать кладёт стек теста заведомо: у
+    /// тестового потока его два мегабайта, а рвалась она уже на четырёх
+    /// тысячах уровней.
+    const DEEP: usize = 200_000;
+
+    /// Строит `f (f (… #0))` заданной глубины.
+    fn nested(depth: usize) -> Term {
+        let mut term = Term::var(0);
+        for _ in 0..depth {
+            term = Term::var(1).apply([term]);
+        }
+        term
+    }
+
+    #[test]
+    fn a_deep_spine_is_printed_without_the_rust_stack() {
+        let printed = nested(DEEP).printed(None).to_string();
+        // По три символа на уровень - `#1 ` - плюс скобки и хвостовой `#0`.
+        assert!(
+            printed.len() > DEEP * 3,
+            "напечатано целиком: {} байт",
+            printed.len()
+        );
+        assert!(printed.starts_with("#1 (#1 ("), "спайн слева направо");
+    }
+
+    #[test]
+    fn printing_elides_below_the_depth_limit() {
+        let printed = nested(PRINT_DEPTH + 10).to_string();
+        assert!(printed.contains('…'), "срез отмечен многоточием");
+        // Срез стоит раньше дна: `#0` до него не доходит.
+        assert!(!printed.contains("#0"), "дно не напечатано");
+    }
+
+    #[test]
+    fn a_term_above_the_limit_prints_whole() {
+        let printed = nested(4).to_string();
+        assert_eq!(printed, "#1 (#1 (#1 (#1 #0)))");
+    }
 
     #[test]
     fn application_prints_left_associatively() {

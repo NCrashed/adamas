@@ -1146,7 +1146,6 @@ fn bounded(left: &Level, right: &Level) -> Option<(Level, Level)> {
     None
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::{Generalization, Metas};

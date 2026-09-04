@@ -668,3 +668,61 @@ main = ignore (times 200 200)
     );
     assert_eq!(ran(&source, "main"), "True");
 }
+
+/// Параметризованный хендлер: состояние ведёт сама форма (§10 вопрос 86).
+///
+/// `handle` здесь одношотный, и замыкание наружу не выходит: лямбду по
+/// состоянию строит элаборация. Написанная руками, та же идиома отвергается
+/// scope-bound - свидетель на это стоит в `adamas-elab`.
+#[test]
+fn a_parameterised_handler_threads_its_state() {
+    let source = format!(
+        "{BASE}
+effect State where
+  get : Nat
+  put : Nat -> Unit
+
+counter : {{State}} Nat
+counter =
+  let a : Nat = get
+  let u : Unit = put (a + 1)
+  let b : Nat = get
+  a + b
+
+main : Nat
+main = handle counter with
+  state 1
+  return v -> v
+  get -> resume state state
+  put x -> resume MkUnit x
+"
+    );
+    // 1 + 2: второе чтение видит записанное.
+    assert_eq!(ran(&source, "main"), "Succ (Succ (Succ Zero))");
+}
+
+/// Ветка `return` состояние тоже видит.
+#[test]
+fn a_parameterised_handler_answers_with_its_final_state() {
+    let source = format!(
+        "{BASE}
+effect State where
+  get : Nat
+  put : Nat -> Unit
+
+bumped : {{State}} Unit
+bumped =
+  let n : Nat = get
+  put (n + 1)
+
+main : Nat
+main = handle bumped with
+  state 2
+  return v -> state
+  get -> resume state state
+  put x -> resume MkUnit x
+"
+    );
+    // Записано 2 + 1, и отвечает хендлер нитью, а не значением тела.
+    assert_eq!(ran(&source, "main"), "Succ (Succ (Succ Zero))");
+}

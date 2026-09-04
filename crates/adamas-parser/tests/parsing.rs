@@ -771,3 +771,39 @@ fn a_default_stands_at_a_parameter_and_nowhere_else() {
         "получено {error:?}"
     );
 }
+
+#[test]
+fn a_parameterised_handler_declares_its_initial_state() {
+    // §10 вопрос 86: `state s0` - член блока, а не часть заголовка. Место у
+    // него вынужденное: `with` открывает блок сразу, и написанное на той же
+    // строке оказалось бы первым членом с чужой колонкой.
+    let dumped = tree(
+        "run : Nat
+run = handle program with
+  state 10
+  return v -> v
+  get -> resume state state
+",
+    )
+    .expect("разбор удался");
+    assert!(dumped.contains("(state 10)"), "получено {dumped}");
+    assert!(
+        dumped.contains("(on get (resume state state))"),
+        "получено {dumped}"
+    );
+}
+
+#[test]
+fn state_without_an_arrow_is_not_a_branch() {
+    // Ветка `state s0 -> b` разобралась бы типом функции, если читать член до
+    // стрелочного уровня. Читается он до применения, поэтому стрелка тут -
+    // отказ, а не тихо другой смысл.
+    let refused = tree(
+        "run : Nat
+run = handle program with
+  state s0 -> b
+  return v -> v
+",
+    );
+    assert!(refused.is_err(), "получено {refused:?}");
+}

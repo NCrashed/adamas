@@ -1,0 +1,95 @@
+-- Параметризованный хендлер: состояние несёт сам хендлер (§3.4, §10 вопрос 86).
+--
+-- Канонический способ протащить состояние - сделать ответ функцией от него -
+-- пишется замыканием, которое захватывает `resume` и возвращается наружу, а
+-- `resume` scope-bound (§3.3). Отказ там верен: одношотная резумпция не должна
+-- переживать ветку. Здесь ту же нить ведёт форма: `state s0` объявляет
+-- начальное значение, `state` в ветке значит текущее, а `resume` двухаргументен
+-- - значение операции и состояние, с которым идёт продолжение.
+--
+-- Замыкание при этом никуда не выносится: лямбду по состоянию пишет
+-- элаборация, а не программа, и `handle` остаётся одношотным.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+infixl 6 +
+(+) : Nat -> Nat -> Nat
+(+) Zero m = m
+(+) (Succ k) m = Succ (k + m)
+
+effect State where
+  get : Nat
+  put : Nat -> Unit
+
+-- Читает, пишет, читает снова: второе чтение обязано увидеть записанное.
+counter : {State} Nat
+counter =
+  let a : Nat = get
+  let u : Unit = put (a + 1)
+  let b : Nat = get
+  a + b
+
+-- 10 + 11 = 21.
+summed : Nat
+summed = handle counter with
+  state 10
+  return v -> v
+  get -> resume state state
+  put x -> resume MkUnit x
+
+-- Ветка `return` состояние тоже видит: им отвечают, когда нужен итог нити, а
+-- не итог вычисления.
+final : Nat
+final = handle counter with
+  state 10
+  return v -> state
+  get -> resume state state
+  put x -> resume MkUnit x
+
+-- Состояние живёт под рекурсией: каждый шаг пишет своё, и хендлер один на всю
+-- глубину.
+counted : Nat -> {State} Unit
+counted Zero = MkUnit
+counted (Succ k) =
+  let n : Nat = get
+  let u : Unit = put (n + 1)
+  counted k
+
+thrice : {State} Unit
+thrice = counted 3
+
+ticks : Nat
+ticks = handle thrice with
+  state Zero
+  return v -> state
+  get -> resume state state
+  put x -> resume MkUnit x
+
+-- Состояние не обязано быть числом: нить несёт что угодно.
+flipped : {State} Nat
+flipped =
+  let u : Unit = put 7
+  get
+
+seven : Nat
+seven = handle flipped with
+  state Zero
+  return v -> v
+  get -> resume state state
+  put x -> resume MkUnit x
+
+main : List Nat
+main = Cons summed (Cons final (Cons ticks (Cons seven Nil)))

@@ -6735,3 +6735,88 @@ lambda = \\b -> get
     );
     program(&source);
 }
+
+/// Заготовка для параметризованного хендлера: эффект и вычисление.
+const STATEFUL: &str = "\
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+effect State where
+  get : Nat
+  put : Nat -> Unit
+
+counter : {State} Nat
+counter =
+  let a : Nat = get
+  let u : Unit = put a
+  get
+";
+
+/// Идиома, ради которой форма и заведена, - но написанная руками (§10 вопрос
+/// 86).
+///
+/// Отвергается по-прежнему: `resume` scope-bound, а замыкание над ним
+/// возвращается наружу. Свидетель стоит здесь, чтобы правка формы не сняла
+/// правило заодно - параметризованный хендлер строит эту лямбду сам, и в этом
+/// вся разница.
+#[test]
+fn a_handwritten_state_closure_is_still_refused() {
+    let error = refused(&format!(
+        "{STATEFUL}
+stated : Nat -> Nat
+stated = handle counter with
+  return v -> \\s -> v
+  get -> \\s -> resume s s
+  put x -> \\s -> resume MkUnit x
+"
+    ));
+    assert!(
+        matches!(error, ElabError::ScopeBound { .. }),
+        "ожидался scope-bound, получено: {error}"
+    );
+}
+
+/// Состояние - одна нить, и мультишот раздваивал бы её молча.
+#[test]
+fn a_parameterised_handler_is_not_multishot() {
+    let error = refused(&format!(
+        "{STATEFUL}
+stated : Nat
+stated = handleMulti counter with
+  state Zero
+  return v -> v
+  get -> resume state state
+  put x -> resume MkUnit x
+"
+    ));
+    assert!(
+        matches!(error, ElabError::HandlerBranch { .. }),
+        "ожидался отказ по ветке, получено: {error}"
+    );
+}
+
+/// Вне параметризованного хендлера `state` - обычное имя.
+#[test]
+fn state_outside_a_parameterised_handler_is_an_ordinary_name() {
+    let signature = program(
+        "\
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+state : Nat
+state = Zero
+
+next : Nat
+next = Succ state
+",
+    );
+    assert!(
+        signature.lookup("next").is_some(),
+        "`state` связывается сам"
+    );
+}

@@ -161,6 +161,19 @@ pub enum ErrorKind {
         name: Name,
     },
 
+    /// Отложенное ограничение на уровнях так и не сошлось.
+    ///
+    /// Откладываются те, что не решаются **сейчас**: `max ?a ?b ~ ?a` ждёт,
+    /// пока соседние ограничения определят `?b`. Дошедшее сюда не определилось
+    /// ничем, и выбирать за автора нечего - решений у него несколько.
+    #[error("уровни `{left}` и `{right}` не сводятся: решение неоднозначно, нужна аннотация")]
+    UnsettledLevel {
+        /// Левая сторона отложенного ограничения.
+        left: crate::level::Level,
+        /// Правая.
+        right: crate::level::Level,
+    },
+
     /// После проверки остался неразрешённый уровень.
     #[error("уровень ?{} не определён: добавьте аннотацию", meta.0)]
     AmbiguousLevel {
@@ -498,6 +511,7 @@ impl ErrorKind {
         match self {
             Self::NotAType { term, ty } => terms.extend([term, ty]),
             Self::Mismatch { expected, found } => terms.extend([expected, found]),
+            Self::UnsettledLevel { left, right } => levels.extend([left, right]),
             Self::NotAFunction { ty }
             | Self::CannotInfer { term: ty }
             | Self::NotADataSort { found: ty, .. }

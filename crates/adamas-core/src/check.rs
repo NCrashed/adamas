@@ -489,7 +489,13 @@ pub fn check_within(
     framed(is_type(ctx, metas, ty), Frame::Stated)?;
     let ty_value = ctx.eval(ty);
     check(ctx, metas, Mult::One, term, &ty_value)?;
-    Ok(())
+    // Отложенные ограничения на уровнях перебираются здесь: проверка одного
+    // написанного кончилась, значит все её ограничения уже собраны, и
+    // отложенное либо сходится, либо не сойдётся никогда (§10 вопрос 39).
+    match metas.settle() {
+        None => Ok(()),
+        Some((left, right)) => Err(ErrorKind::UnsettledLevel { left, right }.into()),
+    }
 }
 
 /// Синтезирует тип замкнутого терма и читает его обратно в терм.
@@ -612,7 +618,12 @@ pub fn check_declaration(
     }
     check_level_scope(name, definition.level_arity, &definition.ty)?;
     is_type(&Ctx::new(signature), metas, &definition.ty)?;
-    Ok(())
+    // Отложенные ограничения на уровнях перебираются здесь: тип объявления
+    // прочитан целиком, значит все его ограничения собраны (§10 вопрос 39).
+    match metas.settle() {
+        None => Ok(()),
+        Some((left, right)) => Err(ErrorKind::UnsettledLevel { left, right }.into()),
+    }
 }
 
 /// Проверяет определение целиком - объявление и тело подряд.

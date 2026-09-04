@@ -234,6 +234,23 @@ fn convertible_within(
     // вхождения приняла бы это за цикл. До - потому что развернув, мы получили
     // бы то же ограничение, только на большем терме.
     match (&**left, &**right) {
+        // Дырка головой с обеих сторон - **отложить**, а не отвергнуть.
+        //
+        // Решения у `?f ū ≡ ?g v̄` сейчас нет: обе стороны гибкие, и всякий
+        // выбор был бы догадкой. Позже оно бывает - `ap (pure toNat) (Some
+        // True)` определяет `?f` вторым аргументом, когда первый уже проверен
+        // (§10 вопрос 91).
+        //
+        // Отложенное **обязано** быть перебрано: `true` здесь говорит «пока не
+        // возражаю», а не «сошлось», и без пересмотра это была бы дыра в
+        // проверке. Перебирает `check::settle_terms` на границе объявления.
+        (Value::Neutral(Head::Meta(a), spine), Value::Neutral(Head::Meta(b), _)) if a != b => {
+            if solve(sig, metas, size, *a, spine, right) {
+                return true;
+            }
+            metas.postpone(size, Rc::clone(left), Rc::clone(right));
+            return true;
+        }
         (Value::Neutral(Head::Meta(meta), spine), _) => {
             return solve(sig, metas, size, *meta, spine, right);
         }

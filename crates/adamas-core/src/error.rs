@@ -174,6 +174,19 @@ pub enum ErrorKind {
         right: crate::level::Level,
     },
 
+    /// Отложенное ограничение на термах не сошлось к границе объявления.
+    ///
+    /// Обе стороны стояли дырками, поэтому сравнение было отложено (§10
+    /// вопрос 91). К границе объявления соседние ограничения уже решены, и
+    /// не сошедшееся здесь не сойдётся никогда.
+    #[error("не сошлось отложенное: `{left}` и `{right}`")]
+    UnsettledTerm {
+        /// Левая часть.
+        left: crate::term::Term,
+        /// Правая часть.
+        right: crate::term::Term,
+    },
+
     /// После проверки остался неразрешённый уровень.
     #[error("уровень ?{} не определён: добавьте аннотацию", meta.0)]
     AmbiguousLevel {
@@ -511,6 +524,7 @@ impl ErrorKind {
         match self {
             Self::NotAType { term, ty } => terms.extend([term, ty]),
             Self::Mismatch { expected, found } => terms.extend([expected, found]),
+            Self::UnsettledTerm { left, right } => terms.extend([left, right]),
             Self::UnsettledLevel { left, right } => levels.extend([left, right]),
             Self::NotAFunction { ty }
             | Self::CannotInfer { term: ty }

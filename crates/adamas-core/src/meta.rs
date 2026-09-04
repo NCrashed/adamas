@@ -73,6 +73,18 @@ pub struct Metas {
     /// ограничения определят `?b`, и `max ?a ?a` нормализуется в `?a`.
     /// Догадкой это не является - откладывание ничего не выбирает.
     pending: Vec<(Level, Level)>,
+    /// Ограничения на термах, отложенные до границы объявления (§10 вопрос 91).
+    ///
+    /// Откладывается ровно **flexible-flexible**: `?f ū ≡ ?g v̄`, где дырка
+    /// стоит головой с обеих сторон. Решения у такого сейчас нет, а позже
+    /// бывает: `ap (pure toNat) (Some True)` определяет `?f` вторым
+    /// аргументом, когда первый уже проверен. Догадкой откладывание не
+    /// является - оно ничего не выбирает; выбором была бы постоянная функция,
+    /// которую выдавал прежний путь.
+    ///
+    /// Размер контекста хранится рядом: значения открыты, и сравнить их позже
+    /// без него нечем.
+    postponed: Vec<(u32, Rc<Value>, Rc<Value>)>,
     /// Смещения слотов в порядке решения - для откатов ([`Metas::mark`]).
     ///
     /// Ведётся всегда. Включать журнал по отметке значило бы завести два режима
@@ -97,6 +109,7 @@ pub struct Mark {
     slots: usize,
     journal: usize,
     pending: usize,
+    postponed: usize,
 }
 
 /// Живая дырка одного из двух сортов.
@@ -311,6 +324,7 @@ impl Metas {
             slots: self.slots.len(),
             journal: self.journal.len(),
             pending: self.pending.len(),
+            postponed: self.postponed.len(),
         }
     }
 
@@ -341,6 +355,8 @@ impl Metas {
         // Отложенное - тоже решение прохода: спекулятивный не вправе оставить
         // ограничение, которого настоящий не увидит.
         self.pending.truncate(mark.pending.min(self.pending.len()));
+        self.postponed
+            .truncate(mark.postponed.min(self.postponed.len()));
     }
 
     /// Отпускает все живые дырки и сдвигает границу.
@@ -477,6 +493,28 @@ impl Metas {
             // диагностику на объявление там, где она уже точна.
             _ => false,
         }
+    }
+
+    /// Откладывает ограничение на термах до границы объявления.
+    ///
+    /// Зовётся из [`crate::conv`], когда дырка стоит головой с обеих сторон:
+    /// решения сейчас нет, а позже бывает.
+    pub fn postpone(&mut self, size: u32, left: Rc<Value>, right: Rc<Value>) {
+        self.postponed.push((size, left, right));
+    }
+
+    /// Забирает отложенные ограничения на термах.
+    ///
+    /// Перебирает их [`crate::check::settle_terms`]: сравнение требует
+    /// сигнатуры, а её у хранилища нет.
+    pub fn take_postponed(&mut self) -> Vec<(u32, Rc<Value>, Rc<Value>)> {
+        std::mem::take(&mut self.postponed)
+    }
+
+    /// Сколько ограничений на термах отложено.
+    #[must_use]
+    pub fn postponed_len(&self) -> usize {
+        self.postponed.len()
     }
 
     /// Перебирает отложенные ограничения до неподвижной точки.
@@ -1151,6 +1189,22 @@ mod tests {
     use super::{Generalization, Metas};
     use crate::level::{Level, LevelVar};
     use crate::row::{Row, RowVar, Tail};
+
+    /// Откат снимает и отложенное на термах.
+    ///
+    /// Спекулятивный проход не вправе оставить ограничение, которого настоящий
+    /// не увидит: перебирает отложенное граница объявления, и оставленное там
+    /// отвергало бы программу, которую никто не проверял (§10 вопрос 91).
+    #[test]
+    fn a_rollback_drops_postponed_term_constraints() {
+        let mut metas = Metas::default();
+        let mark = metas.mark();
+        let value = std::rc::Rc::new(crate::value::Value::EffectKind);
+        metas.postpone(0, std::rc::Rc::clone(&value), value);
+        assert_eq!(metas.postponed_len(), 1, "отложено");
+        metas.rollback(mark);
+        assert_eq!(metas.postponed_len(), 0, "откат снял отложенное");
+    }
 
     #[test]
     fn a_bare_metavariable_is_solved_by_anything() {

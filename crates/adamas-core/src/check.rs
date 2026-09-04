@@ -492,10 +492,10 @@ pub fn check_within(
     // Отложенные ограничения на уровнях перебираются здесь: проверка одного
     // написанного кончилась, значит все её ограничения уже собраны, и
     // отложенное либо сходится, либо не сойдётся никогда (§10 вопрос 39).
-    match metas.settle() {
-        None => Ok(()),
-        Some((left, right)) => Err(ErrorKind::UnsettledLevel { left, right }.into()),
+    if let Some((left, right)) = metas.settle() {
+        return Err(ErrorKind::UnsettledLevel { left, right }.into());
     }
+    settle_terms(ctx.signature(), metas)
 }
 
 /// Синтезирует тип замкнутого терма и читает его обратно в терм.
@@ -620,9 +620,53 @@ pub fn check_declaration(
     is_type(&Ctx::new(signature), metas, &definition.ty)?;
     // Отложенные ограничения на уровнях перебираются здесь: тип объявления
     // прочитан целиком, значит все его ограничения собраны (§10 вопрос 39).
-    match metas.settle() {
-        None => Ok(()),
-        Some((left, right)) => Err(ErrorKind::UnsettledLevel { left, right }.into()),
+    if let Some((left, right)) = metas.settle() {
+        return Err(ErrorKind::UnsettledLevel { left, right }.into());
+    }
+    settle_terms(signature, metas)
+}
+
+/// Перебирает отложенные ограничения на термах до неподвижной точки.
+///
+/// Живёт здесь, а не в хранилище: сравнение требует сигнатуры, а у [`Metas`]
+/// её нет. Всё прочее устроено как у уровней (§10 вопрос 39) - и по той же
+/// причине: одно решённое ограничение делает решаемым следующее, а порядок
+/// между ними произволен.
+///
+/// Дошедшее до границы объявления нерешённым отвергается **здесь**: `true` в
+/// точке откладывания означало «пока не возражаю», и это место - последнее,
+/// где возражение ещё возможно (§10 вопрос 91).
+fn settle_terms(signature: &Signature, metas: &mut Metas) -> Result<(), TypeError> {
+    loop {
+        let postponed = metas.take_postponed();
+        let count = postponed.len();
+        if count == 0 {
+            return Ok(());
+        }
+        for (size, left, right) in postponed {
+            // Размер контекста взят из точки откладывания: значения открыты, и
+            // сравнивать их полагается там же, где они собраны.
+            if !crate::conv::convertible(signature, metas, size, &left, &right) {
+                return Err(ErrorKind::UnsettledTerm {
+                    left: crate::eval::quote(size, &left),
+                    right: crate::eval::quote(size, &right),
+                }
+                .into());
+            }
+        }
+        // Не сошедшееся `convertible` откладывает заново. Столько же, сколько
+        // было, - значит за проход не сдвинулось ничего, и следующий даст то
+        // же самое.
+        if metas.postponed_len() >= count {
+            let Some((_, left, right)) = metas.take_postponed().into_iter().next() else {
+                return Ok(());
+            };
+            return Err(ErrorKind::UnsettledTerm {
+                left: crate::eval::quote(0, &left),
+                right: crate::eval::quote(0, &right),
+            }
+            .into());
+        }
     }
 }
 

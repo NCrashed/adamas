@@ -3981,12 +3981,13 @@ impl<'a> Elaborator<'a> {
         let levels: Rc<[Level]> = (0..definition.level_arity)
             .map(|_| self.metas.fresh_level())
             .collect();
-        let Term::Pi(_, _, _, _, result) = definition.ty.substitute_levels(&levels) else {
+        let substituted = definition.ty.substitute_levels(&levels);
+        let Term::Pi(_, _, _, _, result) = &substituted else {
             unreachable!("`{drop}` проверен на форму при объявлении")
         };
         let call =
             Term::Const(CoreName::from(&**drop), levels, Rows::none()).apply([Term::var(index)]);
-        (call, (*result).clone())
+        (call, (**result).clone())
     }
 
     /// Цепочка операторов.

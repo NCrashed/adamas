@@ -839,6 +839,62 @@ impl fmt::Display for Atom<'_> {
     }
 }
 
+thread_local! {
+    /// Заглушка, которой замещаются снятые дети.
+    ///
+    /// Она листовая, поэтому у разобранного узла собственное освобождение
+    /// глубины не имеет. Одна на поток: аллокация на каждый разобранный узел
+    /// стоила бы дороже самой рекурсии, от которой уходим.
+    static HOLE: Rc<Term> = Rc::new(Term::EffectKind);
+}
+
+/// Освобождение терма идёт **циклом**, а не рекурсией.
+///
+/// Спайн применений бывает какой угодно длины: `Succ (Succ …)` глубиной в сто
+/// тысяч - законный ответ законной программы, и рекурсивный `drop` кладёт на
+/// нём стек (§10 вопрос 92). Замерено порознь от [`crate::value::Value`]:
+/// падают оба, и правка одного второго не спасает.
+///
+/// Рвётся только спайн применений - глубина берётся оттуда. Тело `Lam`,
+/// телескоп записи, ветви `Case` остаются рекурсивными: вложенность там идёт от
+/// текста программы, а не от данных, которые она построила.
+impl Drop for Term {
+    fn drop(&mut self) {
+        // Всё, кроме применения, уходит немедленно - ценой сравнения тега.
+        if !matches!(self, Self::App(..)) {
+            return;
+        }
+        HOLE.with(|hole| {
+            let mut pending = Vec::new();
+            detach(self, hole, &mut pending);
+            while let Some(term) = pending.pop() {
+                // `None` - терм делят с кем-то ещё, и рвать его не наше дело.
+                if let Some(mut owned) = Rc::into_inner(term) {
+                    detach(&mut owned, hole, &mut pending);
+                }
+            }
+        });
+    }
+}
+
+/// Отбирает у терма детей, которых предстоит освободить, не входя в них.
+///
+/// После этого собственный `drop` узла глубины не имеет: на месте детей стоит
+/// заглушка.
+fn detach(term: &mut Term, hole: &Rc<Term>, into: &mut Vec<Rc<Term>>) {
+    let Term::App(callee, argument) = term else {
+        return;
+    };
+    // Узел, чьи дети уже сняты, приходит сюда второй раз - своим `drop`'ом,
+    // когда владелец из `pending` уходит из области видимости. Заглушка на
+    // месте ребёнка и есть признак, что заходить незачем.
+    if Rc::ptr_eq(callee, hole) {
+        return;
+    }
+    into.push(std::mem::replace(callee, Rc::clone(hole)));
+    into.push(std::mem::replace(argument, Rc::clone(hole)));
+}
+
 #[cfg(test)]
 mod tests {
     use std::rc::Rc;
@@ -977,7 +1033,8 @@ mod tests {
             Rc::new(Term::universe(0)),
         );
         let argument = Row::closing([label("State")], Some(Tail::Var(RowVar(3))));
-        let Term::Pi(_, _, _, row, _) = ty.substitute_rows(&[argument]) else {
+        let substituted = ty.substitute_rows(&[argument]);
+        let Term::Pi(_, _, _, row, _) = &substituted else {
             panic!("подстановка формы не меняет");
         };
         assert_eq!(row.labels().len(), 2, "метки аргумента дописались");

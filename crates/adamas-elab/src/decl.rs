@@ -2579,19 +2579,19 @@ fn define(
 }
 
 /// Поднимает универсум семейства до уровней его параметров.
-fn raised(kind: Term, params: &[Param]) -> Term {
+fn raised(kind: &Term, params: &[Param]) -> Term {
     match kind {
         Term::Pi(binder, name, domain, row, codomain) => Term::Pi(
-            binder,
-            name,
-            domain,
-            row,
-            Rc::new(raised(codomain.as_ref().clone(), params)),
+            *binder,
+            name.clone(),
+            Rc::clone(domain),
+            row.clone(),
+            Rc::new(raised(codomain, params)),
         ),
         Term::Universe(level) | Term::RowKind(level) => {
-            Term::Universe(Elaborator::sort(params, level))
+            Term::Universe(Elaborator::sort(params, level.clone()))
         }
-        other => other,
+        other => other.clone(),
     }
 }
 
@@ -3159,7 +3159,7 @@ fn family_header<'a>(
     // Семейство обязано вместить универсумы своих параметров: поле типа `a`
     // живёт там же, где `a`. Написанный `Type` даёт дырку, и поднять её до
     // максимума - наименьшее, что подходит.
-    let kind = raised(kind, &params);
+    let kind = raised(&kind, &params);
     // Маршрут внутрь семейства называет конструктор номером, а имена у него
     // здесь: собираются один раз на оба возможных отказа.
     let names = Names::of(

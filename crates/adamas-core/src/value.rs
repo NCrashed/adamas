@@ -80,9 +80,12 @@ impl Env {
     /// Окружение с аргументами-row: так вычисляется тело определения при δ.
     #[must_use]
     pub fn rowed(rows: Rc<[Row<Rc<Value>>]>) -> Self {
+        // Поля выписаны поимённо: у `Env` теперь свой `Drop`, а через него
+        // синтаксис обновления структуры не проходит.
         Self {
+            head: None,
+            len: 0,
             rows,
-            ..Self::default()
         }
     }
 
@@ -343,10 +346,104 @@ impl fmt::Display for Value {
     }
 }
 
+/// Освобождение окружения идёт **циклом**, а не рекурсией.
+///
+/// Окружение - односвязный список ячеек, и его длина растёт с числом
+/// связываний, а не с текстом программы: замыкание, снявшее окружение глубокой
+/// раскрутки, носит его целиком. Рекурсивный `drop` кладёт стек там же, где и
+/// на значении (§10 вопрос 92).
+///
+/// Разбор ячейки здесь свободен - [`Cell`] своего `Drop` не имеет, - поэтому
+/// заглушка, нужная терму, тут не нужна.
+impl Drop for Env {
+    fn drop(&mut self) {
+        let mut current = self.head.take();
+        while let Some(cell) = current {
+            // `None` - хвост делят с кем-то ещё, и дальше он не наш.
+            let Some(cell) = Rc::into_inner(cell) else {
+                break;
+            };
+            current = cell.rest;
+        }
+    }
+}
+
+/// Освобождение значения идёт **циклом**, а не рекурсией.
+///
+/// Цепочка конструкторов бывает какой угодно длины - список в сорок тысяч
+/// звеньев есть `Cons x (Cons y …)` той же глубины, - и рекурсивный `drop`
+/// кладёт на ней стек. Наблюдалось это как `SIGABRT` на программе, которая
+/// глубокое значение **только строит и не обходит** (§10 вопрос 92): исполнение
+/// к тому времени рекурсию уже не держало, а освобождение держало.
+///
+/// Снимаются только дети из спайна нейтрали: глубина берётся оттуда. Прочие
+/// поля - окружение замыкания, телескоп записи - рвутся по-прежнему рекурсивно,
+/// и предел у них остаётся; глубоким бывает и то и другое реже, а
+/// единообразного способа отобрать `Rc<[T]>` по частям нет.
+impl Drop for Value {
+    fn drop(&mut self) {
+        let mut pending = Vec::new();
+        detach(self, &mut pending);
+        while let Some(value) = pending.pop() {
+            // `None` - значение делят с кем-то ещё, и рвать его не наше дело.
+            if let Some(mut owned) = Rc::into_inner(value) {
+                detach(&mut owned, &mut pending);
+            }
+        }
+    }
+}
+
+/// Отбирает у значения детей, которых предстоит освободить, не входя в них.
+///
+/// После этого собственный `drop` значения глубины не имеет: спайн пуст.
+fn detach(value: &mut Value, into: &mut Vec<Rc<Value>>) {
+    let Value::Neutral(_, spine) = value else {
+        return;
+    };
+    for elim in spine.drain(..) {
+        if let Elim::App(argument) = elim {
+            into.push(argument);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Env, Head, Lvl, Value};
-    use crate::term::Index;
+    use std::rc::Rc;
+
+    use super::{Elim, Env, Head, Lvl, Value};
+    use crate::term::{Index, Term};
+
+    /// Глубина, на которой рекурсивное освобождение кладёт стек теста
+    /// заведомо: у тестового потока его два мегабайта.
+    const DEEP: usize = 200_000;
+
+    #[test]
+    fn a_deep_constructor_chain_is_freed_without_the_rust_stack() {
+        let mut value = Value::var(Lvl(0));
+        for _ in 0..DEEP {
+            value = Rc::new(Value::Neutral(Head::Local(Lvl(0)), vec![Elim::App(value)]));
+        }
+        drop(value);
+    }
+
+    #[test]
+    fn a_deep_application_spine_is_freed_without_the_rust_stack() {
+        let mut term = Rc::new(Term::Var(Index(0)));
+        for _ in 0..DEEP {
+            term = Rc::new(Term::App(Rc::new(Term::Var(Index(0))), term));
+        }
+        drop(term);
+    }
+
+    #[test]
+    fn a_long_environment_is_freed_without_the_rust_stack() {
+        let mut env = Env::default();
+        for _ in 0..DEEP {
+            env = env.extend(Value::var(Lvl(0)));
+        }
+        drop(env);
+    }
 
     #[test]
     fn lookup_walks_outwards_from_the_innermost_binding() {

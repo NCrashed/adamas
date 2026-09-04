@@ -1775,7 +1775,8 @@ fn infer_with(
             },
         ));
     }
-    let Term::Record(rows) = quote(ctx.size(), &ty) else {
+    let quoted = quote(ctx.size(), &ty);
+    let Term::Record(rows) = &quoted else {
         unreachable!("запись читается записью")
     };
     let mut written: Vec<RecordField> = rows.fields.to_vec();

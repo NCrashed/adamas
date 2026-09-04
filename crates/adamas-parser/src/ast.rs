@@ -258,6 +258,13 @@ pub enum ExprKind {
         /// сопоставляются они по имени.
         branches: Vec<HandlerBranch>,
     },
+    /// `mask e` - вычисление, чьи операции ближайший одноимённый хендлер
+    /// пропускает (§3.4, §10 вопрос 72).
+    ///
+    /// Метка не пишется: маскируется **внутреннее** вхождение окружающей row,
+    /// то есть ровно тот хендлер, мимо которого и надо пройти. Больше одного за
+    /// раз не бывает - вложенные `mask` считаются по одному.
+    Mask(Box<Expr>),
     /// `if c then a else b`.
     If {
         /// Условие.
@@ -728,7 +735,7 @@ pub fn contains_block(expr: &Expr) -> bool {
             }
             ExprKind::RecordType(fields, _) => pending.extend(fields.iter().map(|it| &it.ty)),
             ExprKind::Record(fields) => pending.extend(fields.iter().map(|(_, it)| it)),
-            ExprKind::Project(inner, _) => pending.push(inner),
+            ExprKind::Mask(inner) | ExprKind::Project(inner, _) => pending.push(inner),
             ExprKind::Update(base, fields) => {
                 pending.push(base);
                 pending.extend(fields.iter().map(|(_, it)| it));
@@ -909,6 +916,15 @@ fn dump_effect(out: &mut String, effect: &EffectDecl, depth: usize) {
         dump_expr(out, &operation.ty);
         out.push(')');
     }
+    out.push(')');
+}
+
+/// Односложная форма с одним подвыражением: `(mask e)`.
+fn dump_wrapped(out: &mut String, form: &str, inner: &Expr) {
+    out.push('(');
+    out.push_str(form);
+    out.push(' ');
+    dump_expr(out, inner);
     out.push(')');
 }
 
@@ -1173,6 +1189,7 @@ fn dump_expr(out: &mut String, expr: &Expr) {
         ExprKind::Name(name) => out.push_str(&name.text),
         ExprKind::Lit(lit) => out.push_str(&lit.text),
         ExprKind::Hole => out.push('_'),
+        ExprKind::Mask(inner) => dump_wrapped(out, "mask", inner),
         ExprKind::Effectful { labels, tail, body } => dump_row(out, labels, tail.as_ref(), body),
         ExprKind::RecordType(..) | ExprKind::Record(_) => dump_record(out, &expr.kind),
         ExprKind::Using { name, body } => dump_using(out, name, body),

@@ -107,6 +107,7 @@ fn numeral(lit: &Lit) -> usize {
 fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<(), ParseError> {
     match &expr.kind {
         ExprKind::Name(_) | ExprKind::Hole => {}
+        ExprKind::Mask(inner) => pending.push((Node::Expr(inner), depth + 1)),
         // Числовой литерал разворачивается унарно (§4.3), и терм у него
         // глубиной **в само число**: одна лексема даёт столько звеньев,
         // сколько в ней написано. Мерится он поэтому значением, а не длиной

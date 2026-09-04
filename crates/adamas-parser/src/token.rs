@@ -59,6 +59,9 @@ pub enum TokenKind {
     Handle,
     /// `handleMulti` (§3.4)
     HandleMulti,
+    /// `mask` - адресация внешнего хендлера одноимённой метки (§3.4, §10
+    /// вопрос 72)
+    Mask,
     /// `with`
     With,
     /// `class` (§4.1)
@@ -175,6 +178,7 @@ impl TokenKind {
             Self::Effect => Face::Spelled("effect"),
             Self::Handle => Face::Spelled("handle"),
             Self::HandleMulti => Face::Spelled("handleMulti"),
+            Self::Mask => Face::Spelled("mask"),
             Self::With => Face::Spelled("with"),
             Self::Class => Face::Spelled("class"),
             Self::Instance => Face::Spelled("instance"),
@@ -292,6 +296,7 @@ pub fn keyword(text: &str) -> Option<TokenKind> {
         "effect" => TokenKind::Effect,
         "handle" => TokenKind::Handle,
         "handleMulti" => TokenKind::HandleMulti,
+        "mask" => TokenKind::Mask,
         "with" => TokenKind::With,
         "class" => TokenKind::Class,
         "instance" => TokenKind::Instance,
@@ -457,6 +462,7 @@ mod tests {
         TokenKind::Effect,
         TokenKind::Handle,
         TokenKind::HandleMulti,
+        TokenKind::Mask,
         TokenKind::With,
         TokenKind::Class,
         TokenKind::Instance,

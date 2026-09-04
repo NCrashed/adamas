@@ -91,7 +91,9 @@ impl Expr {
             | ExprKind::Project(..)
             | ExprKind::Update(..)
             | ExprKind::List(_) => Prec::Atom,
-            ExprKind::App(..) | ExprKind::TypeApp(..) => Prec::App,
+            // `mask` держится как применение: аргумент читается до того же
+            // уровня, и в скобки его берут по тем же поводам.
+            ExprKind::App(..) | ExprKind::TypeApp(..) | ExprKind::Mask(_) => Prec::App,
             ExprKind::Chain(_) => Prec::Chain,
             // Row связывает так же слабо, как стрелка, на которой написана.
             ExprKind::Effectful { .. }
@@ -450,11 +452,18 @@ impl Printer {
         }
     }
 
+    /// Односложная форма с одним подвыражением: `mask e`.
+    fn wrapped(&mut self, form: &str, inner: &Expr) {
+        self.push(form);
+        self.expr(inner, Prec::Chain);
+    }
+
     fn expr_kind(&mut self, expr: &Expr) {
         match &expr.kind {
             ExprKind::Name(name) => self.push(&name.text),
             ExprKind::Lit(lit) => self.push(&lit.text),
             ExprKind::Hole => self.push("_"),
+            ExprKind::Mask(inner) => self.wrapped("mask ", inner),
             ExprKind::Effectful { .. } => self.effect_row(expr),
             ExprKind::Using { name, body } => {
                 self.push("using ");

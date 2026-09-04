@@ -1741,6 +1741,7 @@ impl<'a> Parser<'a> {
             TokenKind::If => return self.conditional(),
             TokenKind::Case => return self.case(),
             TokenKind::Handle | TokenKind::HandleMulti => return self.handler(),
+            TokenKind::Mask => return self.masked(),
             TokenKind::LParen => return self.parenthesised(),
             TokenKind::LBrace if self.at_record() => return self.record(),
             TokenKind::Operator if self.at_projection() => return Ok(self.projection()),
@@ -1898,6 +1899,21 @@ impl<'a> Parser<'a> {
                 alts,
             },
             span: start.merge(end),
+        })
+    }
+
+    /// `mask e` - вычисление мимо ближайшего одноимённого хендлера (§3.4).
+    ///
+    /// Метка не пишется: маскируется внутреннее вхождение окружающей row.
+    /// Аргумент читается до уровня применения - `mask f x` есть маска над
+    /// `f x`, а не применение маски к двум аргументам.
+    fn masked(&mut self) -> Result<Expr, ParseError> {
+        let start = self.bump().span;
+        let inner = self.application()?;
+        let span = start.merge(inner.span);
+        Ok(Expr {
+            kind: ExprKind::Mask(Box::new(inner)),
+            span,
         })
     }
 

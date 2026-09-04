@@ -216,6 +216,7 @@ impl Spans<'_> {
         let at = expr.span;
         match &expr.kind {
             ExprKind::Name(name) => self.name(at, name),
+            ExprKind::Mask(inner) => self.expr(at, inner),
             ExprKind::Effectful { labels, body, .. } => {
                 for label in labels {
                     self.name(at, &label.name);

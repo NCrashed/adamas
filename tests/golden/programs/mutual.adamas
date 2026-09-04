@@ -30,3 +30,18 @@ mutual
   counts : {a : Type} -> Forest a -> Nat
   counts Nil = Zero
   counts (Cons t f) = plus (count t) (counts f)
+
+-- Тип-формер видит семейства, объявленные раньше него в той же группе (§10
+-- вопрос 64). Порядок здесь не компромисс: kind'ы взаимно рекурсивными быть не
+-- могут - `data A : B -> Type` вместе с `data B : A -> Type` не обосновано, - и
+-- симметрии, которую порядок мог бы нарушить, у них нет.
+mutual
+  data Tag : Type where
+    Leaf : Tag
+    Branch : Tag
+
+  data Held : Tag -> Type where
+    One : (t : Tag) -> Held t
+
+-- Конструкторы по-прежнему видят **всю** группу: у них взаимная рекурсия
+-- настоящая, и на ней стоит пара `Tree`/`Forest` выше.

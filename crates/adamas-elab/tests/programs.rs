@@ -6947,3 +6947,65 @@ wrong = ap (pure toNat) (Some Zero)
         "ожидался отказ ядра, получено: {error}"
     );
 }
+
+/// Тип-формер видит семейства, объявленные раньше него в той же группе.
+///
+/// Порядок здесь не компромисс, а верное правило: kind'ы взаимно рекурсивными
+/// быть не могут, и симметрии, которую порядок мог бы нарушить, у них нет
+/// (§10 вопрос 64).
+#[test]
+fn a_family_kind_sees_earlier_families_of_its_group() {
+    let signature = program(
+        "\
+mutual
+  data Tag : Type where
+    Leaf : Tag
+
+  data Held : Tag -> Type where
+    One : (t : Tag) -> Held t
+",
+    );
+    assert!(signature.lookup("Held").is_some(), "семейство объявлено");
+}
+
+/// Действительно циклическая пара kind'ов отвергается.
+///
+/// `data A : B -> Type` вместе с `data B : A -> Type` не обосновано, и отказ
+/// приходит на том имени, которое ещё не объявлено.
+#[test]
+fn a_circular_pair_of_kinds_is_refused() {
+    let error = refused(
+        "\
+mutual
+  data A : B -> Type where
+    MkA : (b : B) -> A b
+
+  data B : A -> Type where
+    MkB : (a : A) -> B a
+",
+    );
+    assert!(
+        matches!(error, ElabError::UnknownName { .. }),
+        "ожидалось неизвестное имя, получено: {error}"
+    );
+}
+
+/// Конструкторы видят **всю** группу, а не только объявленное раньше.
+///
+/// У них взаимная рекурсия настоящая, и порядок ей не указ: `Tree` называет
+/// `Forest` до того, как `Forest` объявлен.
+#[test]
+fn constructors_still_see_the_whole_group() {
+    let signature = program(
+        "\
+mutual
+  data Tree (a : Type) where
+    Node : a -> Forest a -> Tree a
+
+  data Forest (a : Type) where
+    Empty : Forest a
+    More : Tree a -> Forest a -> Forest a
+",
+    );
+    assert!(signature.lookup("Tree").is_some(), "оба объявлены");
+}

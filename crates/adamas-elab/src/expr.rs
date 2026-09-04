@@ -2296,13 +2296,19 @@ impl<'a> Elaborator<'a> {
                 variable.mult,
                 Rc::clone(&ty),
             );
-            self.scope.push(Bound::owning_scoping(
-                &variable.name,
-                variable.mult,
-                ty,
-                variable.owned,
-                variable.scoped,
-            ));
+            self.scope.push(Bound {
+                // Решённое разбором связывание уходит из спайна дырок: в нём
+                // оно было бы вторым именем решившего, и спайн переставал бы
+                // быть паттерном Миллера.
+                value: variable.value.clone(),
+                ..Bound::owning_scoping(
+                    &variable.name,
+                    variable.mult,
+                    ty,
+                    variable.owned,
+                    variable.scoped,
+                )
+            });
         }
         // Закрываются двое. Ресурс, о котором забыла **эта** ветвь: решение
         // выше принимается по телу целиком, а ветвь - отдельный путь (§3.3,
@@ -4012,13 +4018,19 @@ impl<'a> Elaborator<'a> {
                 variable.mult,
                 Rc::clone(&ty),
             );
-            self.scope.push(Bound::owning_scoping(
-                &variable.name,
-                variable.mult,
-                ty,
-                variable.owned,
-                variable.scoped,
-            ));
+            self.scope.push(Bound {
+                // Решённое разбором связывание уходит из спайна дырок: в нём
+                // оно было бы вторым именем решившего, и спайн переставал бы
+                // быть паттерном Миллера.
+                value: variable.value.clone(),
+                ..Bound::owning_scoping(
+                    &variable.name,
+                    variable.mult,
+                    ty,
+                    variable.owned,
+                    variable.scoped,
+                )
+            });
         }
         // Паттерны сняли первые связывания написанного типа; остаток спайна -
         // тем лямбдам, которыми клауза продолжается.
@@ -4194,6 +4206,7 @@ impl<'a> Elaborator<'a> {
                 // то же ограничение внутри вызываемой функции.
                 let scoped = mult == Mult::One && matches!(ty.as_deref(), Some(Value::Pi(..)));
                 found.push(BoundVar {
+                    value: None,
                     name: Rc::from(&**name),
                     mult,
                     ty,
@@ -4322,11 +4335,64 @@ impl<'a> Elaborator<'a> {
                 _ => return None,
             }
         }
+        // Разбор решил индексы за автора: результат конструктора обязан
+        // совпасть с типом разбираемого, и там, где у разбираемого стоит
+        // переменная, она этим и определяется (§3.3, уточнение).
+        if known {
+            self.refine(ty, &current, params, found);
+        }
         let name = CoreName::from(&**constructor);
         Some(applied.into_iter().fold(
             Value::constant(name, &levels, Rc::from([])),
             |callee, argument| apply(&callee, argument),
         ))
+    }
+
+    /// Записывает индексы, решённые разбором, значениями своих связываний.
+    ///
+    /// Зачем это элаборации, а не одному ядру: дырка, заведённая в ветви,
+    /// несёт контекст спайном, и связывание, которое разбор уже решил, стоит в
+    /// нём **вторым именем** решившего. `sym Refl = Refl` при `y := x` давало
+    /// `?m a x x` - спайн нелинеен, паттерна Миллера нет, и решения не
+    /// находилось, хотя оно единственно. Записанное значение выводит связывание
+    /// из спайна: [`Elaborator::fresh_meta_outside`] ставит такие `Let`ом.
+    ///
+    /// Узко намеренно: решается только переменная переменной, и только той,
+    /// что стоит **раньше**. Значение связывания живёт на его же глубине, и
+    /// индекс, решённый полем конструктора (`n := Succ k` у `Vect`), туда не
+    /// выражается - поле связывается позже. Такой индекс остаётся нерешённым,
+    /// то есть ровно как сегодня.
+    fn refine(
+        &self,
+        scrutinee: Option<&Rc<Value>>,
+        result: &Rc<Value>,
+        params: usize,
+        found: &mut [BoundVar],
+    ) {
+        let base = self.ctx.size();
+        let theirs = arguments_of(scrutinee.map(std::convert::AsRef::as_ref));
+        let mine = arguments_of(Some(result));
+        for (position, their) in theirs.iter().enumerate().skip(params) {
+            let (Some(target), Some(source)) =
+                (variable(their), mine.get(position).and_then(variable))
+            else {
+                continue;
+            };
+            // Раньше базы - связывание не этой клаузы, и трогать его нельзя:
+            // область видимости у клауз общая.
+            if target < base || source >= target {
+                continue;
+            }
+            let Some(bound) = found.get_mut((target - base) as usize) else {
+                continue;
+            };
+            if bound.value.is_some() {
+                continue;
+            }
+            // Индекс на глубине связывания: переменная уровня `source` стоит от
+            // него на `target - source - 1` связываний.
+            bound.value = Some(Rc::new(Term::var(target - source - 1)));
+        }
     }
 
     /// Оборачивает тело цепочкой вставленных `drop`.
@@ -4358,6 +4424,9 @@ struct BoundVar {
     owned: bool,
     scoped: bool,
     drop: Option<Symbol>,
+    /// Значение, решённое разбором индексов: `y := x` у `Refl`. `None` - не
+    /// решено, то есть обычная переменная.
+    value: Option<Rc<Term>>,
 }
 
 /// Закрываемые связывания в порядке вставки.
@@ -4607,5 +4676,13 @@ fn arguments_of(ty: Option<&Value>) -> Vec<Rc<Value>> {
             })
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+/// Локальная переменная без спайна - её уровень.
+fn variable(value: &Rc<Value>) -> Option<u32> {
+    match &**value {
+        Value::Neutral(Head::Local(Lvl(level)), spine) if spine.is_empty() => Some(*level),
+        _ => None,
     }
 }

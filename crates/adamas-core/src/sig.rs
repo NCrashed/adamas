@@ -651,18 +651,24 @@ impl Signature {
         // ветви. Конструктор, чей собственный тип разбирает по семейству той
         // же группы, упрётся в `UnknownConstant` - громкий отказ, а не молча
         // принятый неполный список.
+        // Конструкторы видят конструкторы членов, объявленных **раньше** в той
+        // же группе: `data Held : Tag -> Type where One : Held Leaf` рядом с
+        // `data Tag` пишется. Довод тот же, что у тип-формеров в фазе A:
+        // взаимная ссылка конструкторов друг на друга не обоснована - `MkA : A
+        // MkB` вместе с `MkB : B MkA` есть круг по значениям, - и симметрии,
+        // которую порядок мог бы нарушить, здесь нет. Семейства при этом видны
+        // **все**: их типы вставлены фазой A целиком, и на этом стоит
+        // `Tree`/`Forest`.
         let mut constructors = Vec::with_capacity(members.len());
         for (index, (member, checked)) in members.iter().zip(&checked).enumerate() {
-            constructors.push(
-                self.check_member_constructors(metas, member, checked)
-                    .map_err(|error| error.in_frame(Frame::MemberType(at(index))))?,
-            );
-        }
-        for (member, declarations) in members.iter().zip(&constructors) {
-            for (name, declaration) in member_names(member).zip(declarations) {
+            let declarations = self
+                .check_member_constructors(metas, member, checked)
+                .map_err(|error| error.in_frame(Frame::MemberType(at(index))))?;
+            for (name, declaration) in member_names(member).zip(&declarations) {
                 self.definitions
                     .insert(Rc::clone(name), declaration.clone());
             }
+            constructors.push(declarations);
         }
 
         // (B2) тела определений - с полной таблицей конструкторов.

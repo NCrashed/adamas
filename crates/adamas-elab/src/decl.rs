@@ -1889,10 +1889,20 @@ fn declare_families(
         return Ok(());
     };
     let names = first.names.clone();
-    let seen: Vec<Member> = families.iter().map(Family::visible).collect();
+    // Семейства видны **все** сразу: на этом стоит `Tree`/`Forest`, где
+    // конструктор одного называет другое. Конструкторы же дописываются по
+    // ходу - тот же порядок, что у тип-формеров, и по тому же доводу: взаимная
+    // ссылка конструкторов друг на друга не обоснована.
+    let mut seen: Vec<Member> = families.iter().map(Family::visible).collect();
     let mut group: Option<Group> = None;
     for family in &families {
         let constructors = family_constructors(signature, metas, owned, fixities, family, &seen)?;
+        seen.extend(constructors.iter().map(|(name, ty)| Member {
+            name: Rc::from(*name),
+            levels: Rc::clone(&family.levels),
+            rows: Rows::none(),
+            ty: Rc::new(ty.clone()),
+        }));
         let declared = family_member(family, &constructors);
         group = Some(match group {
             None => Group::of(declared),

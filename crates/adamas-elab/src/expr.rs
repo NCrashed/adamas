@@ -2799,6 +2799,9 @@ impl<'a> Elaborator<'a> {
             Position::Inner
         };
         let mut term = self.placed(Position::Inner, |it| it.expr(head, Mult::Many))?;
+        // Привязанность головы к scope: её переживает **частичное** применение,
+        // потому что недоприменённое и есть замыкание над ней.
+        let captured = self.produced.take();
         // Имя головы нужно умолчаниям параметров: они дописываются по
         // **написанной** арности применения (§4.1, правило 1), и спросить о
         // них можно только зная, к чему применяются.
@@ -2847,9 +2850,17 @@ impl<'a> Elaborator<'a> {
                 given.push(argument);
             }
         }
-        // Результат применения к scope не привязан: собрать замыкание, которое
-        // его возвращает, не даёт правило позиции.
-        self.produced = None;
+        // Применение свойство **передаёт**, пока результат остаётся функцией.
+        // Прежде оно его снимало всегда, и рядом стояло обоснование «построить
+        // возвращающее замыкание нельзя - запрет на позицию возврата не даёт
+        // собрать его вовсе». Собирает: `feedPut k s = k MkUnit` при
+        // `(1 k : Unit -> Nat -> Nat)` возвращает недоприменённое `k`, то есть
+        // замыкание над ним, и через такого помощника резумпция переживала
+        // ветку хендлера (§10 вопрос 90).
+        //
+        // Неизвестный тип результата считается функцией: тип здесь
+        // best-effort, а дыра в гарантии дороже лишнего отказа.
+        self.produced = captured.filter(|_| !ty.as_deref().is_some_and(saturated));
         Ok(term)
     }
 
@@ -2937,14 +2948,54 @@ impl<'a> Elaborator<'a> {
     /// срабатывает один: при втором вызове ресурс был бы уже закрыт. Проверка
     /// стоит на области видимости, а не на упоминании, - резумпцию вправе
     /// сохранить, и куда дойдёт сохранённая копия, статически неизвестно.
-    fn without_resource(&self, span: Span) -> Result<(), ElabError> {
-        let Some(owned) = self.scope.iter().rev().find(|bound| bound.owned) else {
+    fn without_resource(&self, computation: &Expr, span: Span) -> Result<(), ElabError> {
+        if let Some(owned) = self.scope.iter().rev().find(|bound| bound.owned) {
+            return Err(ElabError::MultiWithResource {
+                name: Rc::clone(&owned.name),
+                span,
+            });
+        }
+        // Лексической области видимости мало, и это ревью 2026-09-04 показало
+        // двойным закрытием: живой случай - ресурс **внутри** обрабатываемого
+        // вычисления, где упоминания в точке `handleMulti` нет вовсе. Свойство
+        // это принадлежит определению, а не типу, - как и кратность носителя, -
+        // и спрашивается обходом тел.
+        if !self.owned.any_resource() {
             return Ok(());
+        }
+        let Some(head) = applied_head(computation) else {
+            // Голова не имя - вычисление пришло параметром или собрано на
+            // месте, и спросить его определение не у кого.
+            return Err(ElabError::MultiWithUnknown { span });
         };
-        Err(ElabError::MultiWithResource {
-            name: Rc::clone(&owned.name),
-            span,
-        })
+        if self.local(&head).is_some() {
+            return Err(ElabError::MultiWithUnknown { span });
+        }
+        if self.holds_resource(&head, &mut Vec::new()) {
+            return Err(ElabError::MultiOverHolder { name: head, span });
+        }
+        Ok(())
+    }
+
+    /// Держит ли определение ресурс - своим связыванием или через вызов такого.
+    ///
+    /// Спрашивается по телу, а не по типу: в типе этого нет. Признак - вставка
+    /// закрытия или вызов деструктора; дальше по вызовам, с отметкой пройденных,
+    /// потому что определения бывают взаимно рекурсивны.
+    fn holds_resource(&self, name: &str, seen: &mut Vec<Symbol>) -> bool {
+        if name == CLOSING || self.owned.named(name).is_some() {
+            return true;
+        }
+        if seen.iter().any(|it| &**it == name) {
+            return false;
+        }
+        seen.push(Rc::from(name));
+        let Some(body) = self.signature.lookup(name).and_then(|it| it.body.as_ref()) else {
+            return false;
+        };
+        let mut called = Vec::new();
+        constants(body, &mut called);
+        called.iter().any(|it| self.holds_resource(it, seen))
     }
 
     fn handled(&mut self, handled: Handled<'_>) -> Result<Term, ElabError> {
@@ -2956,7 +3007,7 @@ impl<'a> Elaborator<'a> {
             span,
         } = handled;
         if multi {
-            self.without_resource(span)?;
+            self.without_resource(computation, span)?;
         }
         let effect = self.handled_effect(label, branches, span)?;
         // Написанные аргументы метки закрепляют вхождение, а не выбирают его:
@@ -4671,5 +4722,71 @@ fn variable(value: &Rc<Value>) -> Option<u32> {
     match &**value {
         Value::Neutral(Head::Local(Lvl(level)), spine) if spine.is_empty() => Some(*level),
         _ => None,
+    }
+}
+
+/// Применено ли до конца: результат больше не функция.
+///
+/// Только по этому и различаются «передать значение аргументом» - что §3.3
+/// разрешает - и «собрать над ним замыкание», что она запрещает.
+fn saturated(ty: &Value) -> bool {
+    !matches!(ty, Value::Pi(..))
+}
+
+/// Имя головы применения. `None` - голова не имя.
+fn applied_head(expr: &Expr) -> Option<Symbol> {
+    let mut head = expr;
+    while let ExprKind::App(callee, _) = &head.kind {
+        head = callee;
+    }
+    match &head.kind {
+        ExprKind::Name(name) => Some(Rc::clone(&name.text)),
+        _ => None,
+    }
+}
+
+/// Имена определений, упомянутые термом.
+fn constants(term: &Term, into: &mut Vec<CoreName>) {
+    match term {
+        Term::Const(name, _, _) => into.push(Rc::clone(name)),
+        Term::App(callee, argument) => {
+            constants(callee, into);
+            constants(argument, into);
+        }
+        Term::Lam(_, _, body) => constants(body, into),
+        Term::Pi(_, _, domain, _, codomain) => {
+            constants(domain, into);
+            constants(codomain, into);
+        }
+        Term::Let(_, _, ty, value, body) => {
+            constants(ty, into);
+            constants(value, into);
+            constants(body, into);
+        }
+        Term::Project(record, _) => constants(record, into),
+        Term::With(base, fields) => {
+            constants(base, into);
+            for (_, field) in fields.iter() {
+                constants(field, into);
+            }
+        }
+        Term::Object(fields) => {
+            for (_, field) in fields.iter() {
+                constants(field, into);
+            }
+        }
+        Term::Case(case) => {
+            constants(&case.scrutinee, into);
+            constants(&case.motive, into);
+            for branch in &case.branches {
+                constants(&branch.body, into);
+            }
+        }
+        Term::Var(_) | Term::Meta(_) | Term::Universe(_) | Term::RowKind(_) | Term::EffectKind => {}
+        Term::Record(fields) | Term::Row(fields) => {
+            for field in fields.fields.iter() {
+                constants(&field.ty, into);
+            }
+        }
     }
 }

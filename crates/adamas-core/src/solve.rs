@@ -226,13 +226,33 @@ fn exact(spine: &[Elim]) -> bool {
     })
 }
 
-/// Решает `?m ū ≡ C v̄` при совпадающих арностях: `?m := C`, аргументы попарно.
+/// Решает `?m ū ≡ C v̄` **имитацией**: `?m := λx⃗. C`, аргументы попарно.
 ///
-/// Решение единственно ровно при этих условиях. Голова правой части -
-/// константа, то есть подставить вместо `?m` что-либо, кроме неё, нельзя, не
-/// потеряв головы; арности совпадают, то есть эта-развёрнутая `C` подходит по
-/// форме. Обобщать это на переменную-голову нельзя - там решений несколько, и
-/// выбор был бы догадкой.
+/// # Это догадка, и она названа
+///
+/// Единственности здесь нет, и утверждать её было ошибкой: `?f Bool ≡ Option
+/// Bool` имеет решением и `Option`, и `λx. Option Bool`, и второе тот же
+/// решатель выдаёт всюду, где до имитации не дошло. Выбирается первое, потому
+/// что второе теряет зависимость от аргумента - `f Nat` осталось бы `Option
+/// Bool`, - и это стандартная имитация Юэ: неполная, но та, которую имел в виду
+/// автор. Обобщать на переменную-голову нельзя: там решений несколько **и**
+/// структурного среди них не выделить.
+///
+/// # Хвост спайна, а не вся его длина
+///
+/// Спайн дырки есть контекст места вызова, продолженный тем, к чему её
+/// применили. Требуй совпадения длин - и правило срабатывало бы только в
+/// определении без параметров и без лямбд: `map toNat (Some True)` проходило, а
+/// `useMap o = map toNat o` отвергалось решением-константой, и §4.4 держалась
+/// на одной форме записи - той, в которой её звал собственный тест.
+///
+/// Поэтому аргументы правой части выравниваются по **хвосту** спайна, а
+/// ведущие позиции - контекст - просто связываются: `?m := λx₀…x_{k-n-1}. C`
+/// даёт `?m ū = C u_{k-n} … u_{k-1}`, и остаётся попарное сведение.
+///
+/// Эта-развёртки нет ни при каком `k`: лишние лямбды прячут голову, а по голове
+/// читают - поиск инстанса ключуется ею, и `Box (\m -> Option m)` головы не
+/// имеет. При `k = n` решение и есть сама константа.
 ///
 /// Аргументы сводятся **до** записи решения: записанное решение окончательно
 /// (backtracking'а нет), и оставлять его после неудачного сведения значило бы
@@ -245,32 +265,34 @@ fn headed(
     spine: &[Elim],
     right: &Rc<Value>,
 ) -> bool {
-    let Value::Neutral(Head::Global(name, levels, rows), other) = &**right else {
+    let Value::Neutral(head, other) = &**right else {
         return false;
     };
     let (Some(mine), Some(theirs)) = (applied(spine), applied(other)) else {
         return false;
     };
-    if mine.len() != theirs.len() {
+    let Some(skipped) = mine.len().checked_sub(theirs.len()) else {
         return false;
-    }
-    // Решение - **сама** константа, без эта-развёртки: `?m := C` превращает
-    // `?m ū ≡ C v̄` в `C ū ≡ C v̄`, то есть ровно в попарное сведение ниже.
-    // Лишние лямбды прячут голову, а по голове читают - поиск инстанса
-    // ключуется ею, и `Box (\m -> Option m)` головы не имеет. Форма решения
-    // здесь не деталь записи.
-    let solution = Term::Const(
-        Rc::clone(name),
-        Rc::clone(levels),
-        Rows::new(
-            rows.iter()
-                .map(|row| row.map(|argument| crate::eval::quote(0, argument))),
-        ),
-    );
+    };
+    let Some(constant) = rigid(head, &mine[..skipped]) else {
+        return false;
+    };
+    // Кратности связываний - из телескопа дырки: `check` требует, чтобы лямбда
+    // совпадала с `Pi` по кратности.
+    let arity = u32::try_from(skipped).unwrap_or(u32::MAX);
+    let mults = multiplicities(metas, meta, arity);
+    let solution = (0..arity).fold(constant, |body, index| {
+        let depth = usize::try_from(arity - 1 - index).unwrap_or(0);
+        Term::Lam(
+            mults.get(depth).copied().unwrap_or(Mult::Many),
+            format!("m{index}").into(),
+            Rc::new(body),
+        )
+    });
     if !well_typed(sig, metas, meta, &solution) {
         return false;
     }
-    if !mine
+    if !mine[skipped..]
         .iter()
         .zip(&theirs)
         .all(|(mine, theirs)| crate::conv::convertible(sig, metas, size, mine, theirs))
@@ -463,5 +485,43 @@ fn read(
         Value::Universe(level) => Some(Term::Universe(level.clone())),
         Value::RowKind(level) => Some(Term::RowKind(level.clone())),
         Value::EffectKind => Some(Term::EffectKind),
+    }
+}
+
+/// Голова правой части как тело решения - если она жёсткая и выразима.
+///
+/// Константа выразима всегда: она замкнута. Переменная контекста - только через
+/// связывание решения, то есть если она стоит в ведущей части спайна, и **ровно
+/// один раз**: два вхождения дали бы два решения, а выбор между ними был бы
+/// догадкой уже безосновательной - структурного среди них не выделить.
+///
+/// Переменная здесь бывает не реже константы: `once g x = map g x` при
+/// `{Functor f} => …` даёт `?m ū ≡ f a`, где `f` - параметр класса, связанный
+/// сигнатурой. Без этого случая §4.4 пишется только над конкретным типом.
+fn rigid(head: &Head, leading: &[Rc<Value>]) -> Option<Term> {
+    match head {
+        Head::Global(name, levels, rows) => Some(Term::Const(
+            Rc::clone(name),
+            Rc::clone(levels),
+            Rows::new(
+                rows.iter()
+                    .map(|row| row.map(|argument| crate::eval::quote(0, argument))),
+            ),
+        )),
+        Head::Local(Lvl(level)) => {
+            let mut found = leading.iter().enumerate().filter(|(_, argument)| {
+                matches!(&***argument, Value::Neutral(Head::Local(it), inner)
+                    if inner.is_empty() && it.0 == *level)
+            });
+            let (position, _) = found.next()?;
+            if found.next().is_some() {
+                return None;
+            }
+            // Индекс в решении: связываний `leading.len()`, и позиция `position`
+            // отстоит от тела на `leading.len() - 1 - position`.
+            let index = leading.len().checked_sub(position + 1)?;
+            Some(Term::var(u32::try_from(index).ok()?))
+        }
+        Head::Meta(_) => None,
     }
 }

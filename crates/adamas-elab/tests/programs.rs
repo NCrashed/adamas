@@ -6622,3 +6622,57 @@ twice g x = map g (map g x)
 "
     ));
 }
+
+/// Член класса с двумя квантифицированными именами объявляется и зовётся.
+///
+/// `ap : f (a -> b) -> f a -> f b` требует, чтобы домен `f` вмещал и `a`, и
+/// `b`, и `a -> b`. Домен решается первым - `max ?a ?b`, - после чего `f a`
+/// даёт `max ?a ?b ~ ?a`, а `f b` - обратное. Порознь неразрешимы обе; вместе
+/// определяют `?a = ?b` (§10 вопрос 39).
+#[test]
+fn a_member_with_two_quantified_names_is_declared_and_called() {
+    let source = format!(
+        "{BASE}
+data Option (a : Type) where
+  None : Option a
+  Some : a -> Option a
+
+class Functor (f : Type -> Type) where
+  map : (a -> b) -> f a -> f b
+
+instance Functor Option where
+  map g None = None
+  map g (Some x) = Some (g x)
+
+class Applicative (f : Type -> Type) when Functor f where
+  pure : a -> f a
+  ap : f (a -> b) -> f a -> f b
+
+instance Applicative Option where
+  pure x = Some x
+  ap None y = None
+  ap (Some g) y = map g y
+
+class Monad (m : Type -> Type) when Applicative m where
+  bind : m a -> (a -> m b) -> m b
+
+instance Monad Option where
+  bind None g = None
+  bind (Some x) g = g x
+
+toNat : Bool -> Nat
+toNat True = Succ Zero
+toNat False = Zero
+
+pured : Option Bool
+pured = pure True
+
+lifted : Option Nat
+lifted = ap (Some toNat) (Some True)
+
+chained : Option Nat
+chained = bind (Some True) (\\b -> Some (toNat b))
+"
+    );
+    program(&source);
+}

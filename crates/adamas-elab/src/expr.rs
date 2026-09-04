@@ -1019,7 +1019,7 @@ impl<'a> Elaborator<'a> {
 
     /// Тип терма, каким его видит ядро. `None` - не вывелся.
     pub(crate) fn inferred(&mut self, term: &Term) -> Option<Term> {
-        let (ty, _) = infer(&self.ctx, self.metas, Mult::Zero, term).ok()?;
+        let (ty, _) = infer(&self.ctx.speculating(), self.metas, Mult::Zero, term).ok()?;
         Some(quote(self.ctx.size(), &ty))
     }
 
@@ -2389,7 +2389,7 @@ impl<'a> Elaborator<'a> {
     /// известен группе. Считается он тем же правилом применения: спайн
     /// снимает по связыванию за аргумент.
     fn synthesized(&mut self, term: &Term) -> Option<Rc<Value>> {
-        if let Ok((ty, _)) = infer(&self.ctx, self.metas, Mult::Zero, term) {
+        if let Ok((ty, _)) = infer(&self.ctx.speculating(), self.metas, Mult::Zero, term) {
             return Some(ty);
         }
         let mut arguments = Vec::new();
@@ -2768,7 +2768,7 @@ impl<'a> Elaborator<'a> {
                 it.expr(head, Mult::Many)
             }
         })?;
-        let mut ty = infer(&self.ctx, self.metas, Mult::Zero, &term)
+        let mut ty = infer(&self.ctx.speculating(), self.metas, Mult::Zero, &term)
             .map(|(ty, _)| ty)
             .map_err(|_| ElabError::NoImplicitParameter { span: expr.span })?;
         for argument in written.into_iter().rev() {
@@ -2878,7 +2878,8 @@ impl<'a> Elaborator<'a> {
         // уровень, но написаны они внутри, и видеть автор обязан своего.
         if let Some(full) = self.qualified(&name.text) {
             if let Some(term) = self.signature.instantiate(&full, self.metas) {
-                let Ok((ty, _)) = infer(&self.ctx, self.metas, Mult::Zero, &term) else {
+                let Ok((ty, _)) = infer(&self.ctx.speculating(), self.metas, Mult::Zero, &term)
+                else {
                     return Ok(term);
                 };
                 let (term, ty) = self.specialized(term, ty);
@@ -2933,7 +2934,7 @@ impl<'a> Elaborator<'a> {
         if self.bare || !opens {
             return term;
         }
-        let Ok((ty, _)) = infer(&self.ctx, self.metas, Mult::Zero, &term) else {
+        let Ok((ty, _)) = infer(&self.ctx.speculating(), self.metas, Mult::Zero, &term) else {
             // Тип не сошёлся - вставлять нечего, а сказать об этом полагается
             // `check`: авторитет он, а не этот проход (см. `typed`).
             return term;
@@ -2981,7 +2982,7 @@ impl<'a> Elaborator<'a> {
         // Тип не вывелся - применение собирается как раньше, без вставки:
         // голова бывает и лямбдой, выводить которую нечем. Сказать об этом
         // полагается `check`, а не этому проходу.
-        let mut ty = infer(&self.ctx, self.metas, Mult::Zero, &term)
+        let mut ty = infer(&self.ctx.speculating(), self.metas, Mult::Zero, &term)
             .ok()
             .map(|(ty, _)| ty);
         for argument in arguments.into_iter().rev() {
@@ -3075,10 +3076,22 @@ impl<'a> Elaborator<'a> {
         // пробуют оба и довольствуются любым: сказать, какое верно, - дело
         // настоящей проверки, у которой есть и `σ`, и окружающая.
         let mark = self.metas.mark();
-        let mut checked = check(&self.ctx, self.metas, Mult::Zero, argument, &domain);
+        let mut checked = check(
+            &self.ctx.speculating(),
+            self.metas,
+            Mult::Zero,
+            argument,
+            &domain,
+        );
         self.metas.rollback(mark);
         if checked.is_err() {
-            checked = check(&self.ctx, self.metas, Mult::Many, argument, &domain);
+            checked = check(
+                &self.ctx.speculating(),
+                self.metas,
+                Mult::Many,
+                argument,
+                &domain,
+            );
             self.metas.rollback(mark);
         }
         checked.ok()?;
@@ -3552,7 +3565,7 @@ impl<'a> Elaborator<'a> {
         // Кратность суждения `ω`, а не `0`: при `0` окружающая row пуста
         // (§3.4), и вывод типа спотыкался бы о непогашенные эффекты у всего,
         // что их производит, - то есть ровно у того, ради чего правило и есть.
-        let Ok((ty, _)) = infer(&self.ctx, self.metas, Mult::Many, &term) else {
+        let Ok((ty, _)) = infer(&self.ctx.speculating(), self.metas, Mult::Many, &term) else {
             return term;
         };
         if !self.computation(&ty) {
@@ -3573,7 +3586,7 @@ impl<'a> Elaborator<'a> {
     /// Тип не вывелся - берётся дырка, и сказать об этом полагается `check`:
     /// авторитет он, а не этот проход.
     fn discarded(&mut self, value: &Term, span: Span) -> Result<Term, ElabError> {
-        let Ok((ty, _)) = infer(&self.ctx, self.metas, Mult::Many, value) else {
+        let Ok((ty, _)) = infer(&self.ctx.speculating(), self.metas, Mult::Many, value) else {
             let sort = Rc::new(Value::Universe(self.metas.fresh_level()));
             return Ok(self.fresh_meta(&sort));
         };
@@ -4195,7 +4208,7 @@ impl<'a> Elaborator<'a> {
     /// откатывается: решать за настоящую проверку она не вправе.
     fn held_type(&mut self, term: &Term) -> Option<Rc<Value>> {
         let mark = self.metas.mark();
-        if let Ok((ty, _)) = infer(&self.ctx, self.metas, Mult::Many, term) {
+        if let Ok((ty, _)) = infer(&self.ctx.speculating(), self.metas, Mult::Many, term) {
             return Some(ty);
         }
         self.metas.rollback(mark);

@@ -209,7 +209,14 @@ fn multiplicities(metas: &Metas, meta: TermMeta, arity: u32) -> Vec<Mult> {
 /// расходование считается по типу вокруг неё, не здесь.
 fn well_typed(sig: &Signature, metas: &mut Metas, meta: TermMeta, solution: &Term) -> bool {
     let ty = Rc::clone(metas.term_type(meta));
-    crate::check::check(&Ctx::new(sig), metas, Mult::Zero, solution, &ty).is_ok()
+    crate::check::check(
+        &Ctx::new(sig).speculating(),
+        metas,
+        Mult::Zero,
+        solution,
+        &ty,
+    )
+    .is_ok()
 }
 
 /// Все ли позиции спайна - переменные контекста.

@@ -90,7 +90,8 @@ main = handle deep with
 fn prepared(hundreds: usize) -> (Signature, Term) {
     let text = source(hundreds);
     let module = adamas_parser::parse(&text).expect("исходник обязан разбираться");
-    let signature = adamas_elab::elaborate(&module).expect("исходник обязан проходить проверку");
+    let (signature, _) =
+        adamas_elab::elaborate(&module).expect("исходник обязан проходить проверку");
     let definition = signature.lookup("main").expect("`main` объявлен");
     let body = definition.body.as_ref().expect("у `main` есть тело");
     let levels: Vec<Level> = (0..definition.level_arity)

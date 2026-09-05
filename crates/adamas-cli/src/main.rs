@@ -104,5 +104,12 @@ fn checked(path: &Path) -> anyhow::Result<(SourceFile, adamas_core::sig::Signatu
         Err(error) => anyhow::bail!("{}", adamas_elab::report(&file, &error)),
     };
 
+    let (signature, warnings) = signature;
+    for warning in &warnings {
+        eprintln!(
+            "{}",
+            adamas_elab::located(&file, warning.span(), &warning.to_string())
+        );
+    }
     Ok((file, signature))
 }

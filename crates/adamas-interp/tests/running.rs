@@ -39,7 +39,9 @@ infixl 6 +
 )]
 fn elaborated(source: &str) -> Signature {
     let module = adamas_parser::parse(source).expect("исходник обязан разбираться");
-    adamas_elab::elaborate(&module).expect("исходник обязан проходить проверку")
+    adamas_elab::elaborate(&module)
+        .expect("исходник обязан проходить проверку")
+        .0
 }
 
 /// Тело определения с подставленными аргументами уровня и row.

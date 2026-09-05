@@ -1,0 +1,72 @@
+-- Словарь как значение: разрешение доводится до ответа, а не до типа.
+--
+-- `programs/classes.adamas` проверяет то же разрешение, но снапшот там -
+-- «проверено, объявлений N», и наблюдаемых бита два. Промах проекции словаря
+-- при этом типизируется молча: методы одного класса сплошь и рядом одного
+-- типа, и `eq` вместо `neq` - ошибка, которую ловит только значение.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+not : Bool -> Bool
+not True = False
+not False = True
+
+and : Bool -> Bool -> Bool
+and True b = b
+and False b = False
+
+or : Bool -> Bool -> Bool
+or True b = True
+or False b = b
+
+-- Два метода **одного типа**: перепутать их проекция может, а типизация нет.
+class Eqv a where
+  eq : a -> a -> Bool
+  -- Умолчание зовёт соседний метод того же класса: раскрывается оно в
+  -- инстансе, где `eq` уже своё.
+  neq : a -> a -> Bool
+  neq x y = not (eq x y)
+
+instance Eqv Nat where
+  eq Zero Zero = True
+  eq (Succ a) (Succ b) = eq a b
+  eq a b = False
+
+-- Контекст инстанса: словарь элемента приходит извне, на хвосте инстанс зовёт
+-- сам себя.
+instance {Eqv a} => Eqv (List a) where
+  eq Nil Nil = True
+  eq (Cons x xs) (Cons y ys) = and (eq x y) (eq xs ys)
+  eq p q = False
+
+class Ord a when Eqv a where
+  below : a -> a -> Bool
+
+instance Ord Nat where
+  below Zero (Succ b) = True
+  below a b = False
+
+-- Суперкласс достаётся из словаря `Ord`: `eq` здесь разрешается через поле
+-- `Eqv`, которого автор не писал.
+atMost : {Ord a} => a -> a -> Bool
+atMost x y = or (below x y) (eq x y)
+
+-- `[True, False, True, True, False]`. Второй элемент - весь смысл умолчания:
+-- проекция, взявшая `eq` вместо `neq`, дала бы `True`.
+main : List Bool
+main =
+  Cons (eq Zero Zero)
+    (Cons (neq Zero Zero)
+      (Cons (eq (Cons Zero Nil) (Cons Zero Nil))
+        (Cons (atMost Zero Zero)
+          (Cons (atMost (Succ Zero) Zero) Nil))))

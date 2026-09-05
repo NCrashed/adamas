@@ -1,0 +1,28 @@
+-- Запечатанное представление, вскрытое снаружи (§4.8, §3.5).
+--
+-- `:>` скрывает `type T = Nat`: снаружи `Hidden.T` - атом, и `Nat` под него не
+-- подходит. Отказ - единственное наблюдаемое содержание запечатывания:
+-- `opaque : Hidden.T -> Hidden.T` в `programs/modules.adamas` проходит при
+-- любом поведении `:>`, включая полностью прозрачное.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+module type Eqv where
+  type T
+  eq : T -> T -> Bool
+
+module Hidden :> Eqv where
+  type T = Nat
+  eq : T -> T -> Bool
+  eq a b = True
+
+-- Ближайший проходящий сосед - `module Hidden : Eqv`: с прозрачной аннотацией
+-- `Hidden.T` разворачивается в `Nat`, и та же строка проходит.
+leaked : Hidden.T -> Nat
+leaked x = x

@@ -1,0 +1,38 @@
+-- `@`-метка, не совпавшая с первым вхождением (§4.1).
+--
+-- `@` метку **закрепляет**, а не выбирает: снимается всё то же первое
+-- вхождение, а написанные аргументы говорят, чем оно обязано оказаться. Здесь
+-- первое вхождение - `State Bool`, и написанный `State Nat` его не описывает.
+--
+-- Отказ и есть всё содержание аннотации. Совпавшую `@` корпус держит в
+-- `programs/effects.adamas`, но она там ничего не решает: убрать её - файл
+-- проходит тем же снапшотом, потому что без неё снимается ровно та же метка.
+
+data Bool where
+  True : Bool
+  False : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+effect State s where
+  put : s -> Unit
+  get : s
+
+-- Первое вхождение - внутреннее, и операции работают с ним: `put True` берёт
+-- `State Bool`.
+nested : {State Bool, State Nat} Bool
+nested =
+  put True
+  get
+
+-- Ближайший проходящий сосед - `handle @(State Bool) nested`: та же позиция, то
+-- же вхождение, написанное верно.
+pinned : {State Nat} Bool
+pinned = handle @(State Nat) nested with
+  get -> resume True
+  put x -> resume MkUnit

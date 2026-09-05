@@ -598,6 +598,52 @@ f a b c = Zero
 }
 
 #[test]
+fn a_written_row_bounds_the_callback_without_a_closedness_marker() {
+    // §10 вопрос 22 ждёт use case для «функция требует ровно этот набор
+    // эффектов, ни больше». Мера показывает, что гарантия уже есть и без
+    // маркера: подъём делает row открытой, поэтому лишний эффект колбэка не
+    // прячется, а **всплывает** в результате вызывающего.
+    let base = format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+effect Log where
+  emit : Nat -> Unit
+
+effect Fail where
+  fail : Nat -> Nat
+
+sandbox : (Nat -> {{Log}} Nat) -> {{Log}} Nat
+sandbox k = k Zero
+
+sneaky : Nat -> {{Log, Fail}} Nat
+sneaky n = fail n
+"
+    );
+    // Лишний эффект уехал в результат - и это верно, а не дыра.
+    program(&format!(
+        "{base}
+escaped : {{Log, Fail}} Nat
+escaped = sandbox sneaky
+"
+    ));
+    // Спрятать его нельзя: вызывающий, обещавший `{Log}`, отвергается.
+    let error = refused(&format!(
+        "{base}
+escaped : {{Log}} Nat
+escaped = sandbox sneaky
+"
+    ));
+    // И отказ **читается**: обе row печатаются развёрнутыми, поэтому видно
+    // ровно ту метку, из-за которой он случился. Прежде на её месте стояла
+    // нерешённая дырка, и сообщение прятало причину.
+    let shown = error.to_string();
+    assert!(shown.contains("`{Fail, Log | e0}`"), "получено {shown}");
+    assert!(shown.contains("`{Log | e0}`"), "получено {shown}");
+}
+
+#[test]
 fn an_unused_implicit_group_is_warned_about_not_refused() {
     // §10 вопрос 81: третий исход рядом с принятой программой и отказом. Первым
     // потребителем оказалась цена вопроса 79: `{ x : Nat }` в домене читается

@@ -952,6 +952,80 @@ fn mentions_seen<'a>(
     }
 }
 
+/// Положителен ли `index`-й параметр семейства во всех его конструкторах.
+///
+/// Спрашивается у **внешнего** семейства при вложенном вхождении (§10 вопрос
+/// 42): `List Tree` обосновано ровно тогда, когда `List` кладёт свой параметр в
+/// поле, а не слева от стрелки. Проверка та же синтаксическая и так же
+/// консервативная, что и для самого семейства, только предмет её - связывание, а
+/// не имя.
+fn parameter_positive(signature: &Signature, family: &Name, index: u32) -> bool {
+    let Some((params, _)) = signature.lookup(family).and_then(Definition::data_shape) else {
+        return false;
+    };
+    if index >= params {
+        return false;
+    }
+    let Some(constructors) = signature.constructors(family) else {
+        return false;
+    };
+    constructors.iter().all(|constructor| {
+        signature.lookup(constructor).is_some_and(|definition| {
+            let fields = peel_pis(&definition.ty).0;
+            fields.iter().enumerate().all(|(at, field)| {
+                let depth = u32::try_from(at).unwrap_or(u32::MAX);
+                // Параметры телескопа полем не являются - там и проверять
+                // нечего: связывание ещё не в области видимости.
+                depth < params || positive_var(&field.domain, depth, params - 1 - index)
+            })
+        })
+    })
+}
+
+/// Не стоит ли `Var(index)` слева от стрелки внутри терма.
+///
+/// Индекс считается **снаружи**: вызывающий даёт его для той глубины, на
+/// которой стоит терм, а спуск под связывание сдвигает сам.
+fn positive_var(term: &Term, depth: u32, index: u32) -> bool {
+    let Some(index) = depth.checked_sub(index + 1) else {
+        return true;
+    };
+    positive_at(term, index)
+}
+
+fn positive_at(term: &Term, index: u32) -> bool {
+    match term {
+        Term::Pi(_, _, domain, _, codomain) => {
+            !mentions_var(domain, index) && positive_at(codomain, index + 1)
+        }
+        // Аргументы применения проверка не контролирует - тот же
+        // консервативный отказ, что у вложенного вхождения самой группы.
+        other => {
+            let (head, arguments) = spine(other);
+            match head {
+                Term::Var(_) => arguments.iter().all(|it| !mentions_var(it, index)),
+                _ => arguments.iter().all(|it| positive_at(it, index)),
+            }
+        }
+    }
+}
+
+/// Упоминает ли терм связывание с этим индексом.
+fn mentions_var(term: &Term, index: u32) -> bool {
+    match term {
+        Term::Var(at) => at.0 == index,
+        Term::Pi(_, _, domain, _, codomain) => {
+            mentions_var(domain, index) || mentions_var(codomain, index + 1)
+        }
+        Term::Lam(_, _, body) => mentions_var(body, index + 1),
+        Term::App(callee, argument) => mentions_var(callee, index) || mentions_var(argument, index),
+        Term::Let(_, _, ty, value, body) => {
+            mentions_var(ty, index) || mentions_var(value, index) || mentions_var(body, index + 1)
+        }
+        _ => false,
+    }
+}
+
 /// Стоят ли на первых `params` местах спины ровно параметры телескопа.
 ///
 /// Параметр `i` связан `i`-м снаружи, поэтому там, где в области видимости
@@ -1145,6 +1219,41 @@ fn positive_seen<'a, 'g>(
                     )
                 }
                 _ if !mentions_any(signature, group, other) => None,
+                // **Вложенное вхождение** (§10 вопрос 42): группа стоит
+                // аргументом другого семейства - `Node : Nat -> List Tree ->
+                // Tree`. Позитивность спускается в объявление внешнего и
+                // спрашивает, положителен ли **его** параметр на этом месте:
+                // `List` кладёт свой в поле, значит `Tree` внутри него стоит
+                // положительно, и розовое дерево обосновано.
+                //
+                // Запечатанный тип сюда не проходит и после снятия ограничения:
+                // объявления у него нет, а без него спросить не о чем. Это
+                // записано §10 заранее, чтобы не выглядело регрессом.
+                Term::Const(name, _, _)
+                    if !arguments.is_empty()
+                        && signature
+                            .lookup(name)
+                            .and_then(Definition::data_shape)
+                            .is_some() =>
+                {
+                    for (position, argument) in arguments.iter().enumerate() {
+                        if !mentions_any(signature, group, argument) {
+                            continue;
+                        }
+                        let index = u32::try_from(position).unwrap_or(u32::MAX);
+                        if !parameter_positive(signature, name, index) {
+                            return negative(mentioned_by(signature, group, other));
+                        }
+                        // Само вхождение проверяется обычным правилом: внутри
+                        // аргумента группа обязана стоять так же положительно.
+                        if let Some(found) =
+                            positive_seen(signature, cycling, group, params, depth, argument, seen)
+                        {
+                            return Some(found);
+                        }
+                    }
+                    None
+                }
                 // Тип упомянут, но позиция ещё не разобрана: если голова -
                 // определение, смотрим на то, чем она является.
                 Term::Const(name, _, _) if arguments.is_empty() => {

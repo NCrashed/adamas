@@ -1693,6 +1693,15 @@ fn infer_app(
         Frame::Argument,
     )?;
     if !discharges(ctx.signature(), metas, ctx.size(), &ambient, row) {
+        // Обе row печатаются **развёрнутыми** по решённым хвостам: правило
+        // считает по развёрнутым, и без этого сообщение показывает `{Log | ?0}`
+        // там, где на деле стоит `{Log, Fail | e}`, - то есть прячет ровно ту
+        // метку, из-за которой отказ и случился.
+        let (ambient, row) = (
+            crate::conv::expanded(metas, ctx.size(), &ambient),
+            crate::conv::expanded(metas, ctx.size(), row),
+        );
+        let row = &row;
         return Err(refuse(
             ctx,
             metas,

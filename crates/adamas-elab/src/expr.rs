@@ -4025,6 +4025,19 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Исполняет вычисление безусловно - режим `infer` (§3.4).
+    /// Тип имени, ещё не попавшего в сигнатуру: члена объявляемой группы.
+    ///
+    /// Спрашивается только у голого имени: имплиситов у нульместного
+    /// вычисления нет - первое связывание его сахарной стрелки написано, - и
+    /// спайна на этом месте не бывает.
+    fn group_type(&self, term: &Term) -> Option<Rc<Value>> {
+        let Term::Const(name, ..) = term else {
+            return None;
+        };
+        let member = self.member_of_group(name)?;
+        Some(eval(&Env::default(), &member.ty))
+    }
+
     fn run(&mut self, term: Term) -> Term {
         if !self.suspends(&term) {
             return term;
@@ -4032,8 +4045,17 @@ impl<'a> Elaborator<'a> {
         // Кратность суждения `ω`, а не `0`: при `0` окружающая row пуста
         // (§3.4), и вывод типа спотыкался бы о непогашенные эффекты у всего,
         // что их производит, - то есть ровно у того, ради чего правило и есть.
-        let Ok((ty, _)) = infer(&self.ctx.speculating(), self.metas, Mult::Many, &term) else {
-            return term;
+        //
+        // Тип члена объявляемой группы `infer` не знает - в сигнатуре его ещё
+        // нет, - и берётся он из самой группы.
+        let known = self.group_type(&term);
+        let ty = if let Some(ty) = known {
+            ty
+        } else {
+            let Ok((ty, _)) = infer(&self.ctx.speculating(), self.metas, Mult::Many, &term) else {
+                return term;
+            };
+            ty
         };
         if !self.computation(&ty) {
             return term;
@@ -4113,10 +4135,21 @@ impl<'a> Elaborator<'a> {
             head = callee;
         }
         match head {
+            // Член объявляемой группы спрашивается отдельно: в сигнатуре его
+            // ещё нет (§10 вопрос 50), а приостановленным он бывает ровно так
+            // же. Без этой ветки рекурсивное нульместное вычисление оставалось
+            // неисполненным, и `let n : Nat = loop` отвергалось.
             Term::Const(name, ..) => self
                 .signature
                 .lookup(name)
-                .is_some_and(|definition| awaits_unit(&definition.ty)),
+                .map_or_else(
+                    || {
+                        self.member_of_group(name)
+                            .map(|member| Rc::clone(&member.ty))
+                    },
+                    |definition| Some(Rc::new(definition.ty.clone())),
+                )
+                .is_some_and(|ty| awaits_unit(&ty)),
             Term::Var(Index(index)) => self
                 .scope
                 .len()

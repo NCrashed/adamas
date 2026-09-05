@@ -7384,6 +7384,53 @@ counter =
     program(&text.replace("counter =\n  put True\n  get", "counter =\n  True"));
 }
 
+/// Нульместное вычисление исполняется и внутри собственной группы.
+///
+/// `{ε} A` есть нульместная функция, и она применяется, когда ожидаемый тип
+/// вычислением не является (§3.4). Решалось это по **сигнатуре**, а члена
+/// объявляемой группы там ещё нет (§10 вопрос 50), поэтому рекурсивная ссылка
+/// оставалась приостановленной: `let n : Nat = loop` отвергалось «ожидался
+/// `Nat`, получен `(ω _ : Unit) -> {Ask} Nat`». Нашёл это capstone Фазы 5.
+///
+/// Свидетель различает: с аргументом форма проходила и до правки - её
+/// исполняет применение, - а без аргумента нет.
+#[test]
+fn a_nullary_computation_runs_inside_its_own_group() {
+    let text = "\
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+effect Ask where
+  ask : Nat
+";
+    // Ссылка на себя.
+    program(&format!(
+        "{text}
+loop : {{Ask}} Nat
+loop =
+  let n : Nat = loop
+  n
+"
+    ));
+    // Сосед по `mutual` - тот же путь: в сигнатуре его тоже ещё нет.
+    program(&format!(
+        "{text}
+mutual
+  first : {{Ask}} Nat
+  first =
+    let n : Nat = second
+    n
+
+  second : {{Ask}} Nat
+  second = ask
+"
+    ));
+}
+
 #[test]
 fn an_operation_may_have_parameters_of_its_own() {
     // §4.4 пишет `throw : e -> {Except e} a` - каноническую обрывающую

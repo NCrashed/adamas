@@ -268,3 +268,19 @@ fn a_solution_that_does_not_fit_the_hole_is_refused() {
     let hole = metas.fresh_term(universe(0), 0);
     assert!(!unify(&mut metas, 0, &hole, &Term::universe(3)));
 }
+
+#[test]
+fn an_abandoned_constraint_does_not_outlive_the_boundary() {
+    // Отказ закрывает границу так же, как успех: перебирать отложенное не для
+    // кого - объявления не будет, - но пережить границу оно не вправе, потому
+    // что значения в нём ссылаются на дырки, память под которые здесь
+    // освобождается. `abandon` и есть этот путь (§10 вопрос 111).
+    let mut metas = Metas::default();
+    let hole = metas.fresh_term(universe(0), 0);
+    let left = eval(&Env::default(), &hole);
+    let right = eval(&Env::default(), &Term::universe(0));
+    metas.postpone(0, left, right);
+    assert_eq!(metas.postponed_len(), 1);
+    metas.abandon();
+    metas.release();
+}

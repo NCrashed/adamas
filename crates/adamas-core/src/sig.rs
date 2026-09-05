@@ -707,7 +707,24 @@ impl Signature {
     /// параметры или возвращает не то семейство; нарушена строгая позитивность;
     /// поле не укладывается в универсум.
     pub fn declare(&mut self, metas: &mut Metas, group: &Group) -> Result<(), TypeError> {
-        let outcome = self.declare_fresh(metas, group);
+        // Отложенное перебирается **здесь**, у самой границы, а не только в
+        // проверке написанного типа. Откладывать умеет и тело - `resume Zero
+        // Nil` под параметризованным хендлером оставляет flexible-flexible на
+        // элементе нити, - а перебора после тел не стояло, и граница роняла
+        // процесс `assert`-ом вместо отказа (§10 вопрос 111).
+        let outcome = self
+            .declare_fresh(metas, group)
+            .and_then(|()| crate::check::settle_terms(self, metas))
+            .and_then(|()| match metas.settle() {
+                Some((left, right)) => Err(ErrorKind::UnsettledLevel { left, right }.into()),
+                None => Ok(()),
+            });
+        if outcome.is_err() {
+            // Отказ закрывает границу тоже: объявление не состоится, а
+            // значения в отложенном ссылаются на дырки, которые вот-вот
+            // освободятся.
+            metas.abandon();
+        }
         // Граница группы: всё, что было живо, либо решено и подставлено, либо
         // обобщено в параметры, либо стало отказом.
         metas.release();

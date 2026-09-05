@@ -653,7 +653,7 @@ pub fn check_declaration(
 /// Дошедшее до границы объявления нерешённым отвергается **здесь**: `true` в
 /// точке откладывания означало «пока не возражаю», и это место - последнее,
 /// где возражение ещё возможно (§10 вопрос 91).
-fn settle_terms(signature: &Signature, metas: &mut Metas) -> Result<(), TypeError> {
+pub(crate) fn settle_terms(signature: &Signature, metas: &mut Metas) -> Result<(), TypeError> {
     loop {
         let postponed = metas.take_postponed();
         let count = postponed.len();

@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: unsettled-state.adamas:32:1: аргумент ?21 не выведен: укажите его явно
+  got = handle solo with
+  ^^^^^^^^^^^^^^^^^^^^^^

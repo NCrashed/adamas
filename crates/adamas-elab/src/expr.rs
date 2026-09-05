@@ -16,7 +16,7 @@ use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::pattern::{Clause, Pattern as CorePattern, PatternError, compile_case};
-use adamas_core::row::{Label, Row};
+use adamas_core::row::{Label, Row, Tail};
 use adamas_core::sig::{Definition, DefinitionKind, Signature};
 use adamas_core::source::Span;
 use adamas_core::term::{Binder, Field as CoreField, Fields, Index, Name as CoreName, Rows, Term};
@@ -1145,6 +1145,43 @@ impl<'a> Elaborator<'a> {
     pub(crate) fn declaration(&mut self, ty: &Expr, default: Mult) -> Result<Term, ElabError> {
         let lift = self.metas.fresh_row();
         self.declared_type(ty, default, Some(lift))
+    }
+
+    /// То же с **готовым** подъёмом: его делят члены одного функтора.
+    pub(crate) fn declaration_lifted(
+        &mut self,
+        ty: &Expr,
+        default: Mult,
+        lift: Row<Term>,
+    ) -> Result<Term, ElabError> {
+        self.declared_type(ty, default, Some(lift))
+    }
+
+    /// Подъём, разделённый с row-параметрами функтора (§10 вопрос 107).
+    ///
+    /// Параметр функтора - сигнатура модуля, и с вопроса 102 у неё бывает свой
+    /// row-параметр: место использования получает его дыркой. Дырка эта и
+    /// подъём члена обязаны быть **одной** переменной - иначе обобщение заводит
+    /// две, а тело требует их равенства, и связать их уже нечем.
+    ///
+    /// Решается это здесь, а не подстановкой по терму: дырка ещё жива, и
+    /// достаточно решить её подъёмом.
+    pub(crate) fn shared_lift(&mut self, params: &[Param]) -> Row<Term> {
+        let lift = self.metas.fresh_row();
+        for param in params {
+            let Term::Const(_, _, rows) = &*param.ty else {
+                continue;
+            };
+            for row in rows.as_slice() {
+                if let Some(Tail::Meta(meta)) = row.tail()
+                    && row.labels().is_empty()
+                    && self.metas.row_solution(meta).is_none()
+                {
+                    self.metas.solve_row(meta, lift.clone());
+                }
+            }
+        }
+        lift
     }
 
     /// То же для конструктора: подъём не применяется (§3.4).

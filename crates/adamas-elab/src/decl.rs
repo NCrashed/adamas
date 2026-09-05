@@ -299,7 +299,12 @@ fn declared_signature<'a>(
     // (`Elaborator::specialized`).
     let mut elaborator = Elaborator::new(signature, metas, owned, fixities).within(within);
     let params = elaborator.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
-    let elaborated = elaborator.wrapped(&params, true, |it| it.declaration(ty, Mult::Many))?;
+    // Row-параметр функтора и подъём члена - одна переменная (§10 вопрос 107).
+    // Порознь обобщение заводит две, а тело требует их равенства.
+    let lift = elaborator.shared_lift(&params);
+    let elaborated = elaborator.wrapped(&params, true, |it| {
+        it.declaration_lifted(ty, Mult::Many, lift)
+    })?;
     Ok(Pending {
         total,
         name: qualify(within, &name.text),
@@ -2615,8 +2620,16 @@ fn declare_module_type(
             }
         }
     }
+    // Row-параметр у сигнатуры модуля - тот же, что у класса (§10 вопрос 102):
+    // один на все члены и только при написанных метках. Причина та же: поля
+    // живут в теле, а обобщение читает тип, - и вывести число оттуда нечем.
+    let rowed = members
+        .iter()
+        .filter_map(|it| it.ty)
+        .any(crate::expr::writes_effects)
+        .then(|| Row::closing([], Some(Tail::Var(RowVar(0)))));
     let fields = Elaborator::new(signature, metas, owned, fixities)
-        .typing(|it| it.module_members(&members, None))?;
+        .typing(|it| it.module_members(&members, rowed.as_ref()))?;
     let record = Term::Record(Fields::closed(fields.into()));
     let names = Names::of(declared, Vec::new());
     let level = is_type(&Ctx::new(signature), metas, &record).map_err(|error| ElabError::Core {
@@ -2625,12 +2638,13 @@ fn declare_module_type(
         names: names.clone(),
     })?;
     signature
-        .define_inferred(
+        .define_rowed(
             metas,
             declared,
             Mult::Many,
             Term::Universe(metas.zonk(&level)),
             Some(record),
+            u32::from(rowed.is_some()),
         )
         .map_err(|error| ElabError::Core {
             span,

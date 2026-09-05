@@ -4434,6 +4434,96 @@ impl<'a> Elaborator<'a> {
         }
     }
 
+    /// `let` без аннотации: тип берётся синтезом значения (§10 вопрос 105).
+    ///
+    /// Владению синтезированного типа **довольно**. Правило смотрит на голову
+    /// написанного, но ключуется по её **имени**, и у всех его читателей есть
+    /// двойники по имени - `how`, `destructor_of`. Имя головы у синтезированного
+    /// типа есть, значит ресурс узнаётся, кратность считается тем же правилом и
+    /// `drop` вставляется там же. Прежний отказ ссылался на «ресурс не
+    /// узнаётся», и это было неточно.
+    ///
+    /// Настоящее ограничение одно: **синтез иногда не удаётся**. У лямбды типа
+    /// нет вовсе (§10 вопрос 101), и там отказ остаётся - сузившись до своей
+    /// причины.
+    fn untyped(
+        &mut self,
+        binding: &Binding,
+        tail: &[Binding],
+        rest: &[Stmt],
+        position: Position,
+    ) -> Result<Term, ElabError> {
+        Self::binds(&binding.name)?;
+        let value = self.expr(&binding.body, Mult::Many)?;
+        // §3.3: связывание, инициализированное привязанным к scope значением,
+        // само привязано - то же правило и тем же порядком, что у написанного.
+        let scoped = self.produced.take().is_some();
+        // Правило исполнения по ожидаемому типу в режиме **вывода** (§3.4):
+        // написанного типа нет, значит вычисление исполняется, а не передаётся.
+        // Ровно это §4.1 и обещает записью `let n = get`.
+        let value = self.run(value);
+        // Синтез идёт `held_type`, а не `synthesized`: при `σ = 0` окружающая
+        // пуста (§3.4), и эффектное значение типа не получает вовсе - а
+        // исполненное вычисление ровно такое.
+        let Some(found) = self.held_type(&value) else {
+            return Err(ElabError::Missing {
+                what: Missing::UnsynthesizedLet,
+                span: binding.span,
+            });
+        };
+        let quoted = quote(self.ctx.size(), &found);
+        let head = head_name(&found).cloned();
+        let owns = head.as_deref().and_then(|it| self.owned.how(it));
+        let mult = match owns {
+            None => Self::multiplicity(binding.mult, Mult::Many),
+            // Владеемое связывается `1`; написанная `ω` отвергается там же, где
+            // отвергается у написанного типа.
+            Some(owned) => match binding.mult.map(|ann| ann.mult) {
+                None | Some(ast::Mult::One) => Mult::One,
+                Some(ast::Mult::Zero) => Mult::Zero,
+                Some(ast::Mult::Many) => {
+                    return Err(ElabError::UnrestrictedOwned {
+                        owned,
+                        span: binding.mult.map_or(binding.span, |ann| ann.span),
+                    });
+                }
+            },
+        };
+        // Ресурс, имя которого дальше не встречается, закрывается сам (§3.3);
+        // стёртое связывание - нет, расходовать там нечего.
+        let drop = (mult != Mult::Zero && !self.mentioned_later(&binding.name.text, tail, rest))
+            .then(|| {
+                head.as_deref()
+                    .and_then(|it| self.owned.destructor_of(it))
+                    .cloned()
+            })
+            .flatten();
+        let bound = Bound {
+            value: Some(Rc::new(value.clone())),
+            ..Bound::owning_scoping(
+                &binding.name.text,
+                mult,
+                Rc::clone(&found),
+                owns.is_some(),
+                scoped,
+            )
+        };
+        let body = self.binding(bound, |inner| {
+            let rest = |it: &mut Self| it.bindings(tail, rest, position);
+            match &drop {
+                Some(drop) => inner.closing(Some(drop), 0, rest),
+                None => rest(inner),
+            }
+        })?;
+        Ok(Term::Let(
+            mult,
+            CoreName::from(&*binding.name.text),
+            Rc::new(quoted),
+            Rc::new(value),
+            Rc::new(body),
+        ))
+    }
+
     /// `let` со своими связываниями: каждое даёт узел `Let`, вложенный в
     /// следующее.
     fn bindings(
@@ -4452,10 +4542,7 @@ impl<'a> Elaborator<'a> {
             });
         }
         let Some(ty) = &binding.ty else {
-            return Err(ElabError::Missing {
-                what: Missing::UntypedLet,
-                span: binding.span,
-            });
+            return self.untyped(binding, tail, rest, position);
         };
         Self::binds(&binding.name)?;
         let mult = self.binder_mult(binding.mult, ty, Mult::Many, binding.span)?;

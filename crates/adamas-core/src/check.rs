@@ -995,14 +995,62 @@ fn uniform_parameters(params: u32, depth: u32, arguments: &[&Term]) -> bool {
 /// Возвращается **найденное**, а не проверяемое: в группе они расходятся, и
 /// сообщение «`MkA` использует `A` в отрицательной позиции» отправляло бы
 /// искать `A` там, где написано `B`.
+///
+/// `cycling` - члены группы, **возвращающиеся** к объявляемому семейству. Только
+/// с них спрашивается единообразие (§10 вопрос 96).
 fn positive_field<'a>(
     signature: &Signature,
+    cycling: &[&Name],
     group: &'a [Name],
     params: u32,
     depth: u32,
     term: &Term,
 ) -> Option<(&'a Name, Fault)> {
-    positive_seen(signature, group, params, depth, term, &mut HashSet::new())
+    positive_seen(
+        signature,
+        cycling,
+        group,
+        params,
+        depth,
+        term,
+        &mut HashSet::new(),
+    )
+}
+
+/// Возвращается ли `from` к `to` по конструкторам группы.
+///
+/// Ребро - «конструктор члена упоминает соседа», и путь ищется только внутри
+/// группы: наружу цикл не уходит, потому что объявленное раньше объявляемого
+/// упомянуть не может (§4.8, ordered scoping). Фаза C идёт над **закрытой**
+/// группой, поэтому конструкторы всех членов уже в сигнатуре, и граф полон.
+fn reaches(signature: &Signature, group: &[Name], from: &Name, to: &Name) -> bool {
+    let mut stack = vec![from];
+    let mut seen: HashSet<&Name> = HashSet::new();
+    while let Some(current) = stack.pop() {
+        let Some(index) = group.iter().position(|it| it == current) else {
+            continue;
+        };
+        if !seen.insert(&group[index]) {
+            continue;
+        }
+        let Some(constructors) = signature.constructors(current) else {
+            continue;
+        };
+        for constructor in constructors {
+            let Some(ty) = signature.lookup(constructor).map(|it| &it.ty) else {
+                continue;
+            };
+            if mentions(signature, to, ty) {
+                return true;
+            }
+            for next in group {
+                if mentions(signature, next, ty) {
+                    stack.push(next);
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Какое из двух правил нарушено.
@@ -1036,6 +1084,7 @@ fn mentions_any(signature: &Signature, group: &[Name], term: &Term) -> bool {
 
 fn positive_seen<'a, 'g>(
     signature: &'a Signature,
+    cycling: &[&Name],
     group: &'g [Name],
     params: u32,
     depth: u32,
@@ -1054,7 +1103,9 @@ fn positive_seen<'a, 'g>(
                         .find(|name| mentioned_in_row(signature, name, row)),
                 )
             })
-            .or_else(|| positive_seen(signature, group, params, depth + 1, codomain, seen)),
+            .or_else(|| {
+                positive_seen(signature, cycling, group, params, depth + 1, codomain, seen)
+            }),
         other => {
             let (head, arguments) = spine(other);
             match head {
@@ -1064,12 +1115,25 @@ fn positive_seen<'a, 'g>(
                 // `D (D x)` протащило бы её в позицию, которую проверка не
                 // контролирует.
                 Term::Const(name, _, _) if group.iter().any(|it| it == name) => {
-                    // Единообразие меряется параметрами **того** семейства,
-                    // которое стоит в голове: у соседа их своё число.
-                    let own = signature
-                        .lookup(name)
-                        .and_then(Definition::data_shape)
-                        .map_or(params, |(count, _)| count);
+                    // Единообразие спрашивается только с вхождения, чей член
+                    // **возвращается** к объявляемому семейству (§10 вопрос 96).
+                    // Довод правила - послойная смена параметра: `Nest a`
+                    // содержит `Nest (Pair a)`, и тогда параметр приходится
+                    // хранить. Меняться послойно он может лишь на цикле, а
+                    // сосед вне цикла - обычное применение типа, и вне группы
+                    // то же объявление проходит.
+                    //
+                    // Число параметров берётся у семейства **в голове**: у
+                    // соседа их своё, и цикл с разными телескопами параметра не
+                    // сохраняет - там отказ и остаётся.
+                    let own = if cycling.contains(&name) {
+                        signature
+                            .lookup(name)
+                            .and_then(Definition::data_shape)
+                            .map_or(params, |(count, _)| count)
+                    } else {
+                        0
+                    };
                     if !uniform_parameters(own, depth, &arguments) {
                         return mentioned_by(signature, group, other)
                             .map(|found| (found, Fault::NonUniform));
@@ -1093,7 +1157,7 @@ fn positive_seen<'a, 'g>(
                     // Память о развёрнутых - против самоссылки в теле; та же
                     // причина и та же форма, что у `mentions_seen`.
                     if seen.insert(name) {
-                        positive_seen(signature, group, params, depth, body, seen)
+                        positive_seen(signature, cycling, group, params, depth, body, seen)
                     } else {
                         negative(mentioned_by(signature, group, other))
                     }
@@ -1402,6 +1466,15 @@ pub(crate) fn check_constructor_content(
         .into());
     };
 
+    // Члены, возвращающиеся к объявляемому семейству: только с их вхождений
+    // спрашивается единообразие (§10 вопрос 96). Считается это здесь, потому
+    // что фаза C идёт над закрытой группой и конструкторы всех членов уже в
+    // сигнатуре; в фазе B1 половины графа ещё нет.
+    let cycling: Vec<&Name> = group
+        .iter()
+        .filter(|member| reaches(signature, group, member, data))
+        .collect();
+
     let mut ctx = Ctx::new(signature);
     for (index, field) in peel_pis(ty).0.iter().enumerate() {
         let depth = u32::try_from(index).unwrap_or(u32::MAX);
@@ -1420,7 +1493,7 @@ pub(crate) fn check_constructor_content(
         }
         if depth >= params {
             if let Some((found, fault)) =
-                positive_field(signature, group, params, depth, &field.domain)
+                positive_field(signature, &cycling, group, params, depth, &field.domain)
             {
                 let (name, data) = (Rc::clone(name), Rc::clone(found));
                 return Err(match fault {

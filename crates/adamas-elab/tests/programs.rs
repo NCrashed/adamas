@@ -7175,3 +7175,44 @@ answer = handle counted with
         "получено {error:?}"
     );
 }
+
+#[test]
+fn a_constructor_in_a_mutual_group_may_not_name_a_definition() {
+    // Семейства блока объявляются раньше определений, поэтому в сигнатуре их
+    // ещё нет, и цена эта названа там, где заведён порядок. Отказа при этом не
+    // было: строчное имя соседа уходило в свободные, §4.1 поднимала его в
+    // implicit-параметр **конструктора**, и обёртка в `mutual` принимала
+    // программу, отвергаемую вне блока, молча меняя тип конструктора против
+    // написанного. Заплатка вопроса 64 закрыла тип определения и этот случай
+    // не тронула.
+    let error = refused(&format!(
+        "{BASE}
+data Box : Nat -> Type where
+  MkBox : Box Zero
+
+mutual
+  count : Nat
+  count = Succ Zero
+
+  data Held : Type where
+    One : Box count -> Held
+"
+    ));
+    assert!(
+        error.to_string().contains("тип конструктора не вправе"),
+        "получено {error:?}"
+    );
+    // Семейство блока назвать по-прежнему можно: у конструкторов взаимная
+    // рекурсия настоящая, и на ней стоит `Tree`/`Forest`.
+    program(&format!(
+        "{BASE}
+mutual
+  data Tree : Type where
+    Node : Forest -> Tree
+
+  data Forest : Type where
+    Empty : Forest
+    Grove : Tree -> Forest -> Forest
+"
+    ));
+}

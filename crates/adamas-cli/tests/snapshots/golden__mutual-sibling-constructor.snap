@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: mutual-sibling-constructor.adamas:28:5: `One` в группе `mutual` не объявляется: тип конструктора не вправе назвать определение блока - семейства объявляются раньше определений, и в сигнатуре их ещё нет; вынесите его отдельным объявлением перед блоком, ordered scoping это позволяет. Семейство группы назвать можно
+      One : Box count -> Held
+      ^^^^^^^^^^^^^^^^^^^^^^^

@@ -3538,7 +3538,8 @@ impl<'a> Elaborator<'a> {
             .flatten();
         if let Some(ty) = &awaited {
             self.expected = pi_arguments(ty, self.owned);
-            self.result = Some(self.typed(&peeled(ty)));
+            let result = peeled(self.signature, ty);
+            self.result = Some(self.typed(&result));
         }
         let value = self.expr(computation, Mult::Many)?;
         let ty = match &awaited {
@@ -4595,7 +4596,8 @@ impl<'a> Elaborator<'a> {
         // кратности у него.
         self.expected = pi_arguments(&ty, self.owned);
         // Аннотация снята до конца - остаток и есть ожидаемый результат.
-        self.result = Some(self.typed(&peeled(&ty)));
+        let result = peeled(self.signature, &ty);
+        self.result = Some(self.typed(&result));
         let annotation = self.typed(&ty);
         let value = self.expr(&binding.body, Mult::Many)?;
         // Аннотация и есть ожидаемый тип - `let n : Bool = get` исполняет,
@@ -5649,12 +5651,29 @@ fn constants(term: &Term, into: &mut Vec<CoreName>) {
 }
 
 /// Результат типа: то, что остаётся, когда сняты все связывания.
-fn peeled(ty: &Term) -> Term {
-    let mut current = ty;
-    while let Term::Pi(_, _, _, _, codomain) = current {
-        current = codomain;
+///
+/// Алиас по дороге **разворачивается**: `Comp = {ε} A` есть стрелка, и
+/// результат у неё - `A`, а не сам `Comp` (§10 вопрос 106). Без разворота
+/// `let c : Comp = …` ставил ожидаемым результатом `Comp`, и хендлер сравнивал
+/// его с настоящим ответом - две разные вещи под одним `let`.
+///
+/// Разворот идёт только по имени **без** row-аргументов: подстановка row по
+/// терму δ-разворот обслужить не может (§3.2), а алиас с row-параметром сюда не
+/// доходит - его тип уже не голый универсум.
+fn peeled(signature: &Signature, ty: &Term) -> Term {
+    let mut current = ty.clone();
+    loop {
+        match &current {
+            Term::Pi(_, _, _, _, codomain) => current = (**codomain).clone(),
+            Term::Const(name, levels, rows) if rows.as_slice().is_empty() => {
+                let Some(body) = signature.lookup(name).and_then(|it| it.body.as_ref()) else {
+                    return current;
+                };
+                current = body.substitute_levels(levels);
+            }
+            _ => return current,
+        }
     }
-    current.clone()
 }
 
 /// Сколько аргументов операция принимает до того, как произведёт свою метку.

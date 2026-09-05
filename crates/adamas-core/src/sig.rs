@@ -385,6 +385,13 @@ pub enum Member {
         ty: Term,
         /// Конструкторы в порядке объявления.
         constructors: Vec<MemberDecl>,
+        /// Выведен ли универсум семейства, а не написан (§10 вопрос 109).
+        ///
+        /// Выведенный поднимается до универсумов полей: поверхностный язык
+        /// уровня не пишет (§3.2), поэтому нуль в нём - умолчание, а не выбор
+        /// автора. Написанный остаётся потолком, и поле выше него отвергается
+        /// - это и есть импредикативность через data-декларацию.
+        inferred_sort: bool,
     },
     /// Метка эффекта вместе со своими операциями (§3.4).
     Effect {
@@ -480,7 +487,23 @@ impl Member {
             arity: Arity::inferred(),
             ty,
             constructors: Vec::new(),
+            inferred_sort: false,
         }
+    }
+
+    /// Помечает универсум семейства **выведенным**, а не написанным.
+    ///
+    /// Разница решает, поднимать ли его до полей конструкторов (§10 вопрос
+    /// 109). Написанный - потолок: `Small : Type 0` с полем `(0 A : Type)`
+    /// отвергается, и это ровно импредикативность через data-декларацию.
+    /// Выведенный - нижняя граница: поверхностный язык уровня не пишет
+    /// (§3.2), поэтому нуль там не выбор автора, а умолчание.
+    #[must_use]
+    pub fn with_inferred_sort(mut self) -> Self {
+        if let Self::Data { inferred_sort, .. } = &mut self {
+            *inferred_sort = true;
+        }
+        self
     }
 
     /// Приписывает тело определению.
@@ -779,7 +802,15 @@ impl Signature {
         // (B1½) семейство с индексом-универсумом обобщается **после** своих
         // конструкторов (§10 вопрос 53).
         for (index, (member, declarations)) in members.iter().zip(&mut constructors).enumerate() {
-            self.settle_family(metas, member, declarations)
+            self.settle_family(metas, member, declarations, checked[index].deferred)
+                .map_err(|error| error.in_frame(Frame::MemberType(at(index))))?;
+        }
+
+        // (B1¾) семейство поднимается до универсумов своих полей (§10 вопрос
+        // 109). До конструкторов знать это неоткуда, а написать автору нечем:
+        // уровень в kind'е не пишется (§3.2).
+        for (index, (member, declarations)) in members.iter().zip(&constructors).enumerate() {
+            self.raise_family(metas, member, declarations)
                 .map_err(|error| error.in_frame(Frame::MemberType(at(index))))?;
         }
 
@@ -819,9 +850,13 @@ impl Signature {
             .filter(|(_, it)| it.declaration.data_shape().is_some())
             .map(|(member, _)| Rc::clone(member.name()))
             .collect();
-        for (index, ((member, family), declarations)) in
-            members.iter().zip(&checked).zip(&constructors).enumerate()
-        {
+        for (index, (member, declarations)) in members.iter().zip(&constructors).enumerate() {
+            // Семейство берётся **из сигнатуры**, а не снимком фазы A: с тех
+            // пор его универсум успел подняться до полей (§10 вопрос 109), и
+            // снимок сравнивал бы поля с сортом, которого у семейства уже нет.
+            let Some(family) = self.definitions.get(member.name()).cloned() else {
+                continue;
+            };
             for (slot, (declared, constructor)) in
                 constructor_decls(member).zip(declarations).enumerate()
             {
@@ -831,7 +866,7 @@ impl Signature {
                     &declared.name,
                     member.name(),
                     &families,
-                    &family.declaration,
+                    &family,
                     &constructor.ty,
                 )
                 .map_err(|error| {
@@ -968,10 +1003,7 @@ impl Signature {
         // конструктора получит `LevelArity` на ровном месте. Подставлять по
         // ней нечего: параметров в типе ещё нет, и аргументы ссылки инертны,
         // пока обобщение их не перепишет.
-        let deferred = match member {
-            Member::Data { params, .. } => universe_indexed(&draft.ty, *params),
-            _ => false,
-        };
+        let deferred = postponed(member, &draft.ty);
         let (mut declaration, generalization) = if aliasing {
             (draft, None)
         } else if deferred {
@@ -1031,6 +1063,7 @@ impl Signature {
         Ok(Checked {
             declaration,
             generalization,
+            deferred,
         })
     }
 
@@ -1058,6 +1091,7 @@ impl Signature {
                             *arity,
                             &checked.declaration,
                             constructor,
+                            checked.deferred,
                         )
                         .map_err(|error| error.in_frame(Frame::Constructor(at(slot))))?,
                     );
@@ -1212,6 +1246,7 @@ impl Signature {
         metas: &mut Metas,
         member: &Member,
         constructors: &mut [Definition],
+        deferred: bool,
     ) -> Result<(), TypeError> {
         let Member::Data { name, params, .. } = member else {
             return Ok(());
@@ -1219,7 +1254,7 @@ impl Signature {
         let Some(family) = self.definitions.get(name) else {
             return Ok(());
         };
-        if !universe_indexed(&family.ty, *params) {
+        if !deferred {
             return Ok(());
         }
         // Аргументы уровня у внутригрупповых ссылок снимаются **до** сбора:
@@ -1228,6 +1263,13 @@ impl Signature {
         // параметрами, которых семейство не просило.
         let stripped = |ty: &Term| relevelled(ty, name, &Rc::from([]));
         let family = stripped(&family.ty);
+        // Зонкать типы конструкторов здесь нельзя, и это измерено: решение
+        // дырки терма разворачивается цепочкой лямбд, и на месте домена встаёт
+        // бета-редекс, которого синтезу не разобрать - `data Vec (a : Type) :
+        // Nat -> Type` отвергается «тип `\(0 m0) -> Nat` невозможно
+        // синтезировать». Оттого и цена: уровень **поднятого** типового имени
+        // прячется в этой дырке, собрать его нечем, и `MkSome : a -> Some`
+        // пишется явным связыванием `(0 a : Type)`.
         let bodies: Vec<Term> = constructors.iter().map(|it| stripped(&it.ty)).collect();
         let mut generalization = Generalization::default();
         generalization.collect_term(metas, &family);
@@ -1260,6 +1302,50 @@ impl Signature {
         Ok(())
     }
 
+    /// Фаза B1¾: универсум семейства поднимается до его полей.
+    ///
+    /// §4.1 называет правило - «поднятое в имплисит конструктора имя требует от
+    /// семейства `Type (ℓ+1)`», - но потребовать этого автору нечем: уровень в
+    /// kind'е не пишется. Поэтому считается он здесь, тем же ходом, каким
+    /// элаборация уже поднимает сорт до универсумов **параметров**; поля
+    /// добавляются к ним, когда конструкторы прочитаны.
+    ///
+    /// Поднимается только вверх: написанный автором универсум - нижняя
+    /// граница, а не потолок.
+    fn raise_family(
+        &mut self,
+        metas: &mut Metas,
+        member: &Member,
+        constructors: &[Definition],
+    ) -> Result<(), TypeError> {
+        let Member::Data {
+            name,
+            params,
+            inferred_sort: true,
+            ..
+        } = member
+        else {
+            return Ok(());
+        };
+        let Some(family) = self.definitions.get(name) else {
+            return Ok(());
+        };
+        let mut sort = data_sort(name, *params, &family.ty)?;
+        for constructor in constructors {
+            let found = crate::check::constructor_sort(self, metas, *params, &constructor.ty)?;
+            sort = sort.max(found);
+        }
+        let sort = metas.zonk(&sort).normalize();
+        let Some(stored) = self.definitions.get_mut(name) else {
+            return Ok(());
+        };
+        stored.ty = resorted(&stored.ty, &sort);
+        if let DefinitionKind::Data { sort: stored, .. } = &mut stored.kind {
+            *stored = sort;
+        }
+        Ok(())
+    }
+
     /// Фаза B1 для конструктора: тип, арность и форма.
     fn check_constructor_type(
         &self,
@@ -1268,6 +1354,7 @@ impl Signature {
         arity: Arity,
         family: &Definition,
         constructor: &MemberDecl,
+        deferred: bool,
     ) -> Result<Definition, TypeError> {
         let draft = Definition {
             mult: Mult::Many,
@@ -1295,9 +1382,6 @@ impl Signature {
         // Семейство с индексом-универсумом обобщается позже, вместе со своими
         // конструкторами (§10 вопрос 53): здесь их дырки обязаны дожить
         // открытыми, иначе решать индексу уровень уже нечем.
-        let deferred = family
-            .data_shape()
-            .is_some_and(|(params, _)| universe_indexed(&family.ty, params));
         if deferred {
             let declaration = Definition {
                 level_arity: family.level_arity,
@@ -1740,6 +1824,31 @@ impl Signature {
         self.declare(metas, &Group::of(member))
     }
 
+    /// То же, но универсум семейства **выведен**, а не написан.
+    ///
+    /// Так объявляет элаборация: поверхностный язык уровня не пишет (§3.2),
+    /// поэтому нуль в kind'е - умолчание, и семейство вправе подняться до
+    /// универсумов своих полей (§10 вопрос 109). Ядро, вызванное напрямую,
+    /// пишет уровень числом, и там он потолок.
+    ///
+    /// # Errors
+    ///
+    /// Те же, что у [`Signature::declare_data`].
+    pub fn declare_data_inferred(
+        &mut self,
+        metas: &mut Metas,
+        name: &str,
+        params: u32,
+        ty: Term,
+        constructors: &[(&str, Term)],
+    ) -> Result<(), TypeError> {
+        let member = constructors.iter().fold(
+            Member::data(name, params, ty).with_inferred_sort(),
+            |member, (constructor, ty)| member.with_constructor(constructor, ty.clone()),
+        );
+        self.declare(metas, &Group::of(member))
+    }
+
     /// Объявляет метку эффекта вместе с её операциями - одной группой (§3.4).
     ///
     /// # Errors
@@ -1777,6 +1886,10 @@ struct Checked {
     /// Отображение дырок в параметры уровня. `None` - арность объявлена, и
     /// обобщать нечего.
     generalization: Option<Generalization>,
+    /// Обобщается ли семейство **после** своих конструкторов (§10 вопросы 53,
+    /// 109). Решается один раз, в фазе A: дырки к фазе B1 успевают решиться,
+    /// и пересчитанный там ответ разошёлся бы с принятым здесь.
+    deferred: bool,
 }
 
 /// Приводит черновик к окончательной арности.
@@ -1817,6 +1930,78 @@ fn generalize(
     (declaration, Some(generalization))
 }
 
+/// Обобщается ли семейство **после** своих конструкторов.
+///
+/// Два случая, и оба про одно: обобщать рано, потому что уровень семейства
+/// решают конструкторы.
+///
+/// - **Индекс-универсум** (§10 вопрос 53): конструктор индекс инстанцирует и
+///   вместе с ним заземляет уровень. `Expr Nat` требует `Nat : Type u`.
+/// - **Собственный типовой параметр конструктора** (§10 вопрос 109): поднятое
+///   имя приходит связыванием, чей домен - нерешённая дырка терма, и уровень
+///   внутри неё обязан стать параметром **общим** с семейством. Порознь у
+///   конструктора выходит на один параметр больше, чем у семейства.
+///
+/// Спрашивается по написанному в фазе A: к фазе B1 дырки успевают решиться, и
+/// пересчитанный там ответ разошёлся бы с принятым здесь.
+fn postponed(member: &Member, ty: &Term) -> bool {
+    let Member::Data {
+        params,
+        constructors,
+        ..
+    } = member
+    else {
+        return false;
+    };
+    universe_indexed(ty, *params)
+        || constructors
+            .iter()
+            .any(|constructor| lifts_a_type(&constructor.ty, *params))
+}
+
+/// Несёт ли конструктор собственный уровень сверх параметров семейства.
+///
+/// Три записи одного и того же, и все три измерены: поднятое имя
+/// (`MkSome : a -> Some`) приходит связыванием, чей домен - **дырка терма**
+/// (§4.1: решает её `is_type` уже при объявлении); написанное `(0 a : Type)` -
+/// готовым универсумом; поле-семейство (`Hold : (Nat -> Type) -> Held`) несёт
+/// универсум внутри своего типа, а связывания не заводит вовсе.
+///
+/// Поэтому ищется не форма связывания, а сам уровень: универсум либо
+/// нерешённая дырка где угодно **правее** параметров. Параметры пропускаются
+/// потому, что их семейство уже обобщило: `Cons : a -> List a -> List a` под
+/// `data List (a : Type)` собственного уровня не несёт.
+fn lifts_a_type(ty: &Term, params: u32) -> bool {
+    let mut current = ty;
+    let mut passed = 0;
+    while let Term::Pi(_, _, domain, _, codomain) = current {
+        if passed >= params && carries_a_level(domain) {
+            return true;
+        }
+        passed += 1;
+        current = codomain;
+    }
+    false
+}
+
+/// Есть ли в терме универсум или нерешённая дырка.
+fn carries_a_level(term: &Term) -> bool {
+    match term {
+        Term::Universe(_) | Term::RowKind(_) | Term::Meta(_) => true,
+        Term::App(callee, argument) => carries_a_level(callee) || carries_a_level(argument),
+        Term::Lam(_, _, body) => carries_a_level(body),
+        Term::Pi(_, _, domain, _, codomain) => carries_a_level(domain) || carries_a_level(codomain),
+        Term::Let(_, _, ty, value, body) => {
+            carries_a_level(ty) || carries_a_level(value) || carries_a_level(body)
+        }
+        Term::Record(fields) | Term::Row(fields) => {
+            fields.iter().any(|field| carries_a_level(&field.ty))
+        }
+        Term::Project(record, _) => carries_a_level(record),
+        _ => false,
+    }
+}
+
 /// Есть ли у семейства индекс, тип которого - универсум (§10 вопрос 53).
 ///
 /// Смотрятся только индексы: параметр конструктор **повторяет**, а индекс
@@ -1834,6 +2019,21 @@ fn universe_indexed(ty: &Term, params: u32) -> bool {
         current = codomain;
     }
     false
+}
+
+/// Ставит семейству другой универсум, оставляя телескоп как есть.
+fn resorted(ty: &Term, sort: &Level) -> Term {
+    match ty {
+        Term::Pi(binder, name, domain, row, codomain) => Term::Pi(
+            *binder,
+            Rc::clone(name),
+            Rc::clone(domain),
+            row.clone(),
+            Rc::new(resorted(codomain, sort)),
+        ),
+        Term::Universe(_) => Term::Universe(sort.clone()),
+        other => other.clone(),
+    }
 }
 
 /// Переписывает аргументы уровня у ссылок на `name`.

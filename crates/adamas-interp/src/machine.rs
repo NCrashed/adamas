@@ -19,7 +19,7 @@ use adamas_core::eval;
 use adamas_core::level::Level;
 use adamas_core::row::Row;
 use adamas_core::sig::{DefinitionKind, Signature};
-use adamas_core::term::{Case, Name, Term};
+use adamas_core::term::{Case, Mults, Name, Term};
 use adamas_core::value::{Elim, Env, Head, StuckBranch, StuckCase, Value};
 
 use crate::RunError;
@@ -230,7 +230,7 @@ impl<'a> Machine<'a> {
 
     /// δ-шаг, если значение его требует.
     fn unfolding(&self, value: &Rc<Value>, kont: &mut Kont) -> Option<Step> {
-        let Value::Neutral(Head::Global(name, levels, rows), spine) = &**value else {
+        let Value::Neutral(Head::Global(name, levels, rows, _), spine) = &**value else {
             return None;
         };
         let body = self.signature.lookup(name)?.body.as_ref()?;
@@ -251,10 +251,10 @@ impl<'a> Machine<'a> {
                 let (env, body) = closure.open();
                 Ok(Step::Eval(env.extend(argument), Rc::clone(body)))
             }
-            Value::Neutral(Head::Global(name, levels, rows), spine) => {
+            Value::Neutral(Head::Global(name, levels, rows, mults), spine) => {
                 let mut spine = spine.clone();
                 spine.push(Elim::App(argument));
-                self.dispatch(name, levels, rows, spine, kont)
+                self.dispatch(name, levels, rows, mults, spine, kont)
             }
             // Локальная переменная и дырка: применение копится в спайне, как и
             // в ядре.
@@ -268,6 +268,7 @@ impl<'a> Machine<'a> {
         name: &Name,
         levels: &Rc<[Level]>,
         rows: &Rc<[Row<Rc<Value>>]>,
+        mults: &Mults,
         spine: Vec<Elim>,
         kont: &mut Kont,
     ) -> Result<Step, RunError> {
@@ -278,7 +279,12 @@ impl<'a> Machine<'a> {
             return Ok(step);
         }
         Ok(Step::Return(Rc::new(Value::Neutral(
-            Head::Global(Rc::clone(name), Rc::clone(levels), Rc::clone(rows)),
+            Head::Global(
+                Rc::clone(name),
+                Rc::clone(levels),
+                Rc::clone(rows),
+                mults.clone(),
+            ),
             spine,
         ))))
     }
@@ -440,6 +446,7 @@ impl<'a> Machine<'a> {
                 Rc::from(format!("{RESUME}{index}")),
                 Rc::from([] as [Level; 0]),
                 Rc::from([] as [Row<Rc<Value>>; 0]),
+                Mults::none(),
             ),
             Vec::new(),
         ));

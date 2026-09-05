@@ -76,7 +76,7 @@ use crate::mult::Mult;
 // сюда под своим полным смыслом в имени.
 use crate::row::Row as EffectRow;
 use crate::sig::{DefinitionKind, Signature};
-use crate::term::{Binder, Branch, Case, Field as RecordField, Fields, Index, Name, Rows, Term};
+use crate::term::{Args, Binder, Branch, Case, Field as RecordField, Fields, Index, Name, Term};
 use crate::unify::{self, Match, Shape};
 use crate::value::{Elim, Head, Lvl, Value};
 
@@ -903,9 +903,12 @@ impl Compiler<'_> {
         // доходит: `case⁰` ядро отвергает, а линейное потребление стёртого
         // связывания отвергает учёт использований - там же, но с сообщением
         // про само связывание, которое и есть ошибка автора.
+        // Неконкретная кратность до связывания контекста не доходит: тело
+        // проверяется подстановкой (§10 вопрос 41). Дошедшая читается единицей
+        // - поля приходят в ветвь при `q · 1`, то есть строже всего.
         let consumed = match binding(ctx, scrutinee).mult {
             Mult::Many => Mult::Many,
-            Mult::One | Mult::Zero => Mult::One,
+            _ => Mult::One,
         };
 
         // Ветви до сборки: поля конструктора и вердикт унификации его индексов
@@ -1082,7 +1085,7 @@ impl Compiler<'_> {
                 Term::Const(
                     Rc::clone(constructor),
                     Rc::clone(&family.levels),
-                    Rows::none(),
+                    Args::none(),
                 ),
                 |applied, param| Term::App(Rc::new(applied), Rc::new(quote(base, param))),
             ),
@@ -1154,7 +1157,7 @@ impl Compiler<'_> {
         // Связывания мотива: индексы семейства, потом само разбираемое
         // значение. Формы индексов идут с ними парой - по ним и различается.
         let mut current = instantiate_telescope(
-            declaration.instantiate_type(&family.levels, &[]),
+            declaration.instantiate_type(&family.levels, &[], &[]),
             &family.params,
         );
         let mut inner = ctx.clone();
@@ -1178,7 +1181,7 @@ impl Compiler<'_> {
         let mut scrutinee = Term::Const(
             Rc::clone(&family.data),
             Rc::clone(&family.levels),
-            Rows::none(),
+            Args::none(),
         );
         for param in &family.params {
             scrutinee = Term::App(Rc::new(scrutinee), Rc::new(quote(inner.size(), param)));
@@ -1314,7 +1317,7 @@ impl Compiler<'_> {
             unreachable!("конструктор `{constructor}` объявлен")
         };
         let mut current = instantiate_telescope(
-            declaration.instantiate_type(levels, &[]),
+            declaration.instantiate_type(levels, &[], &[]),
             &arguments[..params],
         );
         let mut fields = Vec::new();
@@ -1404,7 +1407,8 @@ impl Compiler<'_> {
         let Some(declaration) = self.signature.lookup(constructor) else {
             unreachable!("конструктор `{constructor}` объявлен")
         };
-        let mut current = instantiate_telescope(declaration.instantiate_type(levels, &[]), params);
+        let mut current =
+            instantiate_telescope(declaration.instantiate_type(levels, &[], &[]), params);
         let mut fields = Vec::new();
         let mut level = ctx.size();
         while let Value::Pi(Binder { mult, .. }, name, domain, _, codomain) = &*current {
@@ -1872,7 +1876,7 @@ type ConstructorValue = (Name, Rc<[Level]>, Vec<Rc<Value>>);
 /// Конструктор и его аргументы, если значение построено конструктором.
 fn constructor_value(signature: &Signature, value: &Rc<Value>) -> Option<ConstructorValue> {
     let reduced = crate::conv::whnf(signature, value);
-    let Value::Neutral(Head::Global(name, levels, _), spine) = &*reduced else {
+    let Value::Neutral(Head::Global(name, levels, _, _), spine) = &*reduced else {
         return None;
     };
     if !matches!(
@@ -1907,7 +1911,7 @@ type DataHead = (Name, Rc<[Level]>, Vec<Rc<Value>>);
 /// собственного цикла здесь не было.
 fn data_head(signature: &Signature, ty: &Rc<Value>) -> Option<DataHead> {
     let reduced = crate::conv::whnf(signature, ty);
-    let Value::Neutral(Head::Global(name, levels, _), spine) = &*reduced else {
+    let Value::Neutral(Head::Global(name, levels, _, _), spine) = &*reduced else {
         return None;
     };
     if !matches!(

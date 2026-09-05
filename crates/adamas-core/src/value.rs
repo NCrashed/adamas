@@ -12,7 +12,7 @@ use std::rc::Rc;
 use crate::level::Level;
 use crate::mult::Mult;
 use crate::row::{Row, RowVar};
-use crate::term::{Binder, Field, Fields, Index, Name, Term, TermMeta};
+use crate::term::{Binder, Field, Fields, Index, Mults, Name, Term, TermMeta};
 
 /// Уровень де Брёйна: сколько связываний отсчитать от начала контекста.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -152,7 +152,7 @@ pub enum Head {
     /// Списка два, потому что и параметров у определения два набора (§10
     /// вопрос 73). Row здесь несут значения: аргументы метки - обычные термы,
     /// и на стороне значения они уже вычислены.
-    Global(Name, Rc<[Level]>, Rc<[Row<Rc<Value>>]>),
+    Global(Name, Rc<[Level]>, Rc<[Row<Rc<Value>>]>, Mults),
     /// Нерешённая метапеременная терма.
     ///
     /// Застревает так же, как переменная контекста, и по той же причине:
@@ -308,10 +308,15 @@ impl Value {
     /// У определения с телом это спасал бы δ-разворот, у постулата
     /// разворачивать нечего.
     #[must_use]
-    pub fn constant(name: Name, levels: &[Level], rows: Rc<[Row<Rc<Self>>]>) -> Rc<Self> {
+    pub fn constant(
+        name: Name,
+        levels: &[Level],
+        rows: Rc<[Row<Rc<Self>>]>,
+        mults: Mults,
+    ) -> Rc<Self> {
         let normalized: Rc<[Level]> = levels.iter().map(Level::normalize).collect();
         Rc::new(Self::Neutral(
-            Head::Global(name, normalized, rows),
+            Head::Global(name, normalized, rows, mults),
             Vec::new(),
         ))
     }

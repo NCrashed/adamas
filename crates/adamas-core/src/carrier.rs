@@ -95,11 +95,14 @@ impl Carriers {
 }
 
 /// Худшее из двух с точки зрения владения: `1` хорошо, `ω` хуже `0`.
+///
+/// Неконкретная кратность худшая из всех: параметр может прийти любым, и
+/// носитель, чьё значение зависит от подстановки, владением не считается.
 fn worse(left: Mult, right: Mult) -> Mult {
     match (left, right) {
-        (Mult::Many, _) | (_, Mult::Many) => Mult::Many,
-        (Mult::Zero, _) | (_, Mult::Zero) => Mult::Zero,
         (Mult::One, Mult::One) => Mult::One,
+        (Mult::Zero, Mult::Zero | Mult::One) | (Mult::One, Mult::Zero) => Mult::Zero,
+        _ => Mult::Many,
     }
 }
 

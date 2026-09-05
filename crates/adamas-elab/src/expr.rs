@@ -14,12 +14,14 @@ use adamas_core::ctx::Ctx;
 use adamas_core::eval::{apply, eval, quote};
 use adamas_core::level::Level;
 use adamas_core::meta::Metas;
-use adamas_core::mult::Mult;
+use adamas_core::mult::{Mult, MultVar};
 use adamas_core::pattern::{Clause, Pattern as CorePattern, PatternError, compile_case};
 use adamas_core::row::{Label, Row, Tail};
 use adamas_core::sig::{Definition, DefinitionKind, Signature};
 use adamas_core::source::Span;
-use adamas_core::term::{Binder, Field as CoreField, Fields, Index, Name as CoreName, Rows, Term};
+use adamas_core::term::{
+    Args, Binder, Field as CoreField, Fields, Index, Mults, Name as CoreName, Term,
+};
 use adamas_core::value::{Elim, Env, Head, Lvl, Value};
 use adamas_parser::ast::{
     self, Binding, Block, Expr, ExprKind, LamParamKind, Pattern, PatternKind, Stmt, StmtKind,
@@ -61,6 +63,7 @@ fn universe(ty: &Expr) -> bool {
 
 /// Имя единицы. Соглашение то же, каким `if` берёт `Bool` (§3.4): типа этого
 /// ядро не знает, а сахар `{ε} A` без него не разворачивается.
+pub(crate) const GRADE: &str = "Mult";
 pub(crate) const UNIT: &str = "Unit";
 
 /// Имя ветки, принимающей значение вычисления.
@@ -630,7 +633,12 @@ pub(crate) struct Member {
     /// не ловит: параметры соседа читались бы как свои, и `mutual` над двумя
     /// эффектными сигнатурами отвергался, тогда как те же два определения
     /// подряд проходят.
-    pub rows: Rows,
+    ///
+    /// Здесь же аргументы-кратности - третья компонента (§10 вопрос 41).
+    /// Правило у них то же: свой параметр приходит переменной. Дырка была бы
+    /// хуже, чем у уровней: дозволенное ей множество считается **проверкой
+    /// тела**, а рекурсивная ссылка стоит внутри этого самого тела.
+    pub args: Args,
     /// Уже элаборированный тип. По нему вставляются имплиситы: спросить его у
     /// сигнатуры нельзя, там члена ещё нет.
     pub ty: Rc<Term>,
@@ -894,6 +902,15 @@ pub(crate) struct Elaborator<'a> {
     /// поверхностном языке не именуются, - и появится это вместе с
     /// имплиситами (§4.1).
     instantiated: HashMap<Symbol, Term>,
+    /// Параметры кратности написанной сигнатуры, в порядке объявления (§10
+    /// вопрос 41).
+    ///
+    /// Индекс в списке и есть [`MultVar`]. Заводит их группа `{q : Mult}`, а
+    /// читает позиция кратности: `(q x : a)` - это группа из двух имён, и
+    /// первое имя читается кратностью ровно тогда, когда оно здесь есть.
+    /// Разрешать это в разборе нечем - имя связывается объявлением, а не
+    /// формой, - поэтому решает элаборация, как и со всяким именем.
+    grades: Vec<Symbol>,
 }
 
 impl<'a> Elaborator<'a> {
@@ -962,6 +979,7 @@ impl<'a> Elaborator<'a> {
             position: Position::Inner,
             produced: None,
             instantiated: HashMap::new(),
+            grades: Vec::new(),
         }
     }
 
@@ -1147,6 +1165,15 @@ impl<'a> Elaborator<'a> {
         self.declared_type(ty, default, Some(lift))
     }
 
+    /// Сколько параметров кратности объявила написанная сигнатура.
+    ///
+    /// Третья компонента арности (§10 вопрос 41): её, как и первые две, считает
+    /// элаборация и передаёт объявлению - ядро вывести её неоткуда, параметры
+    /// не оставляют в типе ни дырки, ни следа помимо самих себя.
+    pub(crate) fn grade_arity(&self) -> u32 {
+        u32::try_from(self.grades.len()).unwrap_or(u32::MAX)
+    }
+
     /// То же с **готовым** подъёмом: его делят члены одного функтора.
     pub(crate) fn declaration_lifted(
         &mut self,
@@ -1172,7 +1199,7 @@ impl<'a> Elaborator<'a> {
             let Term::Const(_, _, rows) = &*param.ty else {
                 continue;
             };
-            for row in rows.as_slice() {
+            for row in rows.row_args() {
                 if let Some(Tail::Meta(meta)) = row.tail()
                     && row.labels().is_empty()
                     && self.metas.row_solution(meta).is_none()
@@ -2139,7 +2166,7 @@ impl<'a> Elaborator<'a> {
         let term = Term::Const(
             CoreName::from(&*name.text),
             levels,
-            Rows::new([rho.clone()]),
+            Args::rows([rho.clone()]),
         );
         self.instantiated.insert(Rc::clone(&name.text), term);
     }
@@ -3072,7 +3099,7 @@ impl<'a> Elaborator<'a> {
             let term = Term::Const(
                 CoreName::from(&*member.name),
                 Rc::clone(&member.levels),
-                member.rows.clone(),
+                member.args.clone(),
             );
             let ty = eval(&Env::default(), &member.ty);
             let (term, ty) = self.specialized(term, ty);
@@ -3664,7 +3691,7 @@ impl<'a> Elaborator<'a> {
             })?;
         let rows = self.eliminator_rows(&quoted, eliminator.row_arity);
         let levels = self.handler_levels(&effect, eliminator.level_arity);
-        let mut term = Term::Const(CoreName::from(&*name), levels.into(), Rows::new(rows));
+        let mut term = Term::Const(CoreName::from(&*name), levels.into(), Args::rows(rows));
         let Some(mut current) = self.synthesized(&term) else {
             return Err(ElabError::UnknownName { name, span });
         };
@@ -4184,6 +4211,55 @@ impl<'a> Elaborator<'a> {
     /// Подъём свободного имени даёт `0`, и расхождение намеренное: написать
     /// группу - это и есть способ попросить имплисит, доживающий до рантайма
     /// (`replicate : {n : Nat} -> a -> Vect n a`). Так же различает Idris 2.
+    /// Вводит ли группа параметры кратности: `{q : Mult} -> …` (§10 вопрос 41).
+    ///
+    /// Сорт `Mult` пишется именем и заслоняется тем же правилом, что `Type` и
+    /// `Effect`: локальным связыванием - да, определением - нет.
+    ///
+    /// Связывания группа не даёт вовсе, поэтому и `Pi` от неё не остаётся:
+    /// кратность подставляется значением полукольца, как уровень - выражением
+    /// уровня. Аргументом её не сделать - в рантайме её нет, а в типе она не
+    /// живёт.
+    fn declares_grades(&mut self, binder: &ast::Binder, ty: &Expr) -> Result<bool, ElabError> {
+        if !matches!(&ty.kind, ExprKind::Name(name) if &*name.text == GRADE)
+            || self.local(GRADE).is_some()
+        {
+            return Ok(false);
+        }
+        if let Some(mult) = binder.mult {
+            return Err(ElabError::GradedSort { span: mult.span });
+        }
+        for name in &binder.names {
+            Self::binds(name)?;
+            if self.grades.contains(&name.text) {
+                return Err(ElabError::RepeatedGrade {
+                    name: Rc::clone(&name.text),
+                    span: name.span,
+                });
+            }
+            self.grades.push(Rc::clone(&name.text));
+        }
+        Ok(true)
+    }
+
+    /// Кратность-параметр, написанная в позиции кратности: `(q x : a)`.
+    ///
+    /// Разбор видит здесь группу из двух имён - `q` и `x`, - и различить их
+    /// формой нечем: та же форма пишет `(x y : A)`. Различает объявление:
+    /// первое имя читается кратностью ровно тогда, когда его ввела группа
+    /// `{q : Mult}`. Цена названа - имя, занятое параметром кратности,
+    /// связыванием в этой сигнатуре больше не станет.
+    fn graded(&self, binder: &ast::Binder) -> Option<Mult> {
+        if binder.mult.is_some() || binder.names.len() < 2 {
+            return None;
+        }
+        let at = self
+            .grades
+            .iter()
+            .position(|it| *it == binder.names[0].text)?;
+        u16::try_from(at).ok().map(|at| Mult::Var(MultVar(at)))
+    }
+
     fn pi(
         &mut self,
         binders: &[ast::Binder],
@@ -4201,13 +4277,25 @@ impl<'a> Elaborator<'a> {
                     span: binder.span,
                 });
             };
-            let mult = self.binder_mult(
-                binder.mult,
-                ty,
-                kinded(binder.mult, ty, default),
-                binder.span,
-            )?;
-            for (siblings, name) in binder.names.iter().enumerate() {
+            // `{q : Mult}` вводит параметр кратности, а связывания не даёт:
+            // подставляется он значением полукольца, а не аргументом (§10
+            // вопрос 41).
+            if self.declares_grades(binder, ty)? {
+                continue;
+            }
+            let (mult, names) = match self.graded(binder) {
+                Some(found) => (found, &binder.names[1..]),
+                None => (
+                    self.binder_mult(
+                        binder.mult,
+                        ty,
+                        kinded(binder.mult, ty, default),
+                        binder.span,
+                    )?,
+                    binder.names.as_slice(),
+                ),
+            };
+            for (siblings, name) in names.iter().enumerate() {
                 Self::binds(name)?;
                 flat.push(Written {
                     mult,
@@ -4724,7 +4812,7 @@ impl<'a> Elaborator<'a> {
         let levels: Rc<[Level]> = (0..levels).map(|_| self.metas.fresh_level()).collect();
         let size = self.ctx.size();
         let ambient = self.ctx.row().map(|value| quote(size, value));
-        let rows = Rows::new((0..rows).map(|_| ambient.clone()).collect::<Vec<_>>());
+        let rows = Args::rows((0..rows).map(|_| ambient.clone()).collect::<Vec<_>>());
         Some(Term::Const(CoreName::from(CLOSING), levels, rows))
     }
 
@@ -4772,8 +4860,8 @@ impl<'a> Elaborator<'a> {
         let Term::Pi(_, _, _, _, result) = &substituted else {
             unreachable!("`{drop}` проверен на форму при объявлении")
         };
-        let call =
-            Term::Const(CoreName::from(&**drop), levels, Rows::new(rows)).apply([Term::var(index)]);
+        let call = Term::Const(CoreName::from(&**drop), levels, Args::rows(rows))
+            .apply([Term::var(index)]);
         (call, (**result).clone())
     }
 
@@ -5239,7 +5327,7 @@ impl<'a> Elaborator<'a> {
         }
         let name = CoreName::from(&**constructor);
         Some(applied.into_iter().fold(
-            Value::constant(name, &levels, Rc::from([])),
+            Value::constant(name, &levels, Rc::from([]), Mults::none()),
             |callee, argument| apply(&callee, argument),
         ))
     }
@@ -5665,7 +5753,7 @@ fn peeled(signature: &Signature, ty: &Term) -> Term {
     loop {
         match &current {
             Term::Pi(_, _, _, _, codomain) => current = (**codomain).clone(),
-            Term::Const(name, levels, rows) if rows.as_slice().is_empty() => {
+            Term::Const(name, levels, args) if args.is_empty() => {
                 let Some(body) = signature.lookup(name).and_then(|it| it.body.as_ref()) else {
                     return current;
                 };

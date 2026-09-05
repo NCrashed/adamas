@@ -23,7 +23,7 @@
 use std::rc::Rc;
 
 use crate::row::{Row, Tail};
-use crate::term::{Branch, Case, Field, Fields, Name, Rows, Term};
+use crate::term::{Args, Branch, Case, Field, Fields, Mults, Name, Term};
 use crate::value::{Closure, Elim, Env, Head, Lvl, StuckBranch, StuckCase, Telescope, Value};
 
 impl Closure {
@@ -100,10 +100,11 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
         // Аргументы-row вычисляются вместе с термом: метки несут обычные
         // термы, и под связыванием они без вычисления остались бы индексами,
         // которым в значении не на что указывать.
-        Term::Const(name, levels, rows) => Value::constant(
+        Term::Const(name, levels, args) => Value::constant(
             Rc::clone(name),
             levels,
-            rows.as_slice().iter().map(|row| row_of(env, row)).collect(),
+            args.row_args().iter().map(|row| row_of(env, row)).collect(),
+            Mults::new(args.mult_args().iter().copied()),
         ),
 
         // Тип связывания при вычислении не нужен: он влияет на проверку, а не
@@ -435,12 +436,13 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
         Value::Neutral(head, spine) => {
             let base = match head {
                 Head::Local(level) => Term::Var(level.to_index(size)),
-                Head::Global(name, levels, rows) => Term::Const(
+                Head::Global(name, levels, rows, mults) => Term::Const(
                     Rc::clone(name),
                     Rc::clone(levels),
-                    Rows::new(
+                    Args::new(
                         rows.iter()
                             .map(|row| row.map(|argument| quote(size, argument))),
+                        mults.as_slice().iter().copied(),
                     ),
                 ),
                 Head::Meta(meta) => Term::Meta(*meta),

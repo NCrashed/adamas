@@ -13,7 +13,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::level::Level;
-use crate::mult::Mult;
+use crate::mult::{Mult, MultVar};
 use crate::row::{Row, RowVar, Tail};
 use crate::visibility::Visibility;
 
@@ -39,21 +39,91 @@ impl Index {
 /// Имя для печати. На семантику не влияет.
 pub type Name = Rc<str>;
 
-/// Аргументы-row ссылки на определение (§3.2, вопрос 73).
+/// Аргументы ссылки на определение помимо уровней: row и кратности.
 ///
-/// Вторая компонента арности: у определения `f : A -> {IO | e} B` один такой
-/// аргумент, и место использования подставляет вместо `e` целую row.
+/// Вторая и третья компоненты арности (§10 вопросы 73 и 41). У определения
+/// `f : A -> {IO | e} B` один row-аргумент, у `id : (q x : a) -> a` - один
+/// аргумент-кратность, и место использования подставляет вместо каждого своё.
 ///
-/// **Тонкий указатель, а не `Rc<[Row<Term>]>`** - по той же причине, по какой
-/// он тонкий у самой [`Row`]: тот вдвое шире, `Const` стоит в каждом упоминании
-/// имени, а row-аргументов у подавляющего большинства определений нет вовсе.
-/// Отсутствие - `None`, а не пустой срез: аллокация под заголовок была бы
-/// платой за хранение ничего.
+/// **Один тонкий указатель на оба списка, а не по указателю на список.**
+/// Причина измерена: `Const` стоит в каждом упоминании имени, а имя и уровни в
+/// нём - жирные указатели по 16 байт. Второе поле-указатель растит узел терма
+/// с 48 байт до 56, и лестница исполнения на этом упирается в стек там, где
+/// раньше проходила. У подавляющего большинства определений нет ни тех
+/// аргументов, ни других, поэтому отсутствие - `None`, а не пустой срез:
+/// аллокация под заголовок была бы платой за хранение ничего.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Rows(Option<Rc<Vec<Row<Term>>>>);
+pub struct Args(Option<Rc<Instance>>);
 
-impl Rows {
-    /// Аргументов нет - определение по row не полиморфно.
+/// Списки аргументов за одним указателем.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Instance {
+    rows: Vec<Row<Term>>,
+    mults: Vec<Mult>,
+}
+
+impl Args {
+    /// Аргументов нет - определение не полиморфно ни по row, ни по кратности.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self(None)
+    }
+
+    /// Только row-аргументы.
+    #[must_use]
+    pub fn rows(rows: impl IntoIterator<Item = Row<Term>>) -> Self {
+        Self::new(rows, [])
+    }
+
+    /// Только аргументы-кратности.
+    #[must_use]
+    pub fn mults(mults: impl IntoIterator<Item = Mult>) -> Self {
+        Self::new([], mults)
+    }
+
+    /// Оба списка.
+    #[must_use]
+    pub fn new(
+        rows: impl IntoIterator<Item = Row<Term>>,
+        mults: impl IntoIterator<Item = Mult>,
+    ) -> Self {
+        let rows: Vec<Row<Term>> = rows.into_iter().collect();
+        let mults: Vec<Mult> = mults.into_iter().collect();
+        if rows.is_empty() && mults.is_empty() {
+            return Self::none();
+        }
+        Self(Some(Rc::new(Instance { rows, mults })))
+    }
+
+    /// Row-аргументы по порядку.
+    #[must_use]
+    pub fn row_args(&self) -> &[Row<Term>] {
+        self.0.as_ref().map_or(&[], |it| it.rows.as_slice())
+    }
+
+    /// Аргументы-кратности по порядку.
+    #[must_use]
+    pub fn mult_args(&self) -> &[Mult] {
+        self.0.as_ref().map_or(&[], |it| it.mults.as_slice())
+    }
+
+    /// Нет ли аргументов вовсе.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+/// Аргументы-кратности на стороне значения (§10 вопрос 41).
+///
+/// Отдельно от [`Args`], потому что row там несут **значения**, а не термы;
+/// узел значения при этом и без того шире, поэтому экономить на нём поле не
+/// приходится.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Mults(Option<Rc<Vec<Mult>>>);
+
+impl Mults {
+    /// Аргументов нет - определение по кратности не полиморфно.
     #[must_use]
     pub const fn none() -> Self {
         Self(None)
@@ -61,18 +131,18 @@ impl Rows {
 
     /// Собирает список аргументов.
     #[must_use]
-    pub fn new(rows: impl IntoIterator<Item = Row<Term>>) -> Self {
-        let rows: Vec<Row<Term>> = rows.into_iter().collect();
-        if rows.is_empty() {
+    pub fn new(mults: impl IntoIterator<Item = Mult>) -> Self {
+        let mults: Vec<Mult> = mults.into_iter().collect();
+        if mults.is_empty() {
             return Self::none();
         }
-        Self(Some(Rc::new(rows)))
+        Self(Some(Rc::new(mults)))
     }
 
     /// Аргументы по порядку.
     #[must_use]
-    pub fn as_slice(&self) -> &[Row<Term>] {
-        self.0.as_ref().map_or(&[], |rows| rows.as_slice())
+    pub fn as_slice(&self) -> &[Mult] {
+        self.0.as_ref().map_or(&[], |mults| mults.as_slice())
     }
 
     /// Сколько их.
@@ -128,7 +198,7 @@ pub enum Term {
     /// туда свежие дырки, а решает их проверка конвертируемости. Собирать этот
     /// узел напрямую значит обойти вывод и получить `LevelArity` там, где он
     /// сработал бы.
-    Const(Name, Rc<[Level]>, Rows),
+    Const(Name, Rc<[Level]>, Args),
     /// Разбор значения индуктивного типа по конструктору.
     Case(Rc<Case>),
     /// Тип записи: телескоп полей и, возможно, хвост-row.
@@ -234,6 +304,31 @@ fn rowed_fields(fields: &Fields, arguments: &[Row<Term>]) -> Fields {
             .tail
             .as_ref()
             .map(|tail| Rc::new(tail.substitute_rows(arguments))),
+    }
+}
+
+/// Поля с подставленными кратностями.
+fn graded(fields: &Fields, arguments: &[Mult]) -> Fields {
+    let at = |mult: Mult| match mult {
+        Mult::Var(MultVar(index)) => arguments
+            .get(index as usize)
+            .copied()
+            .unwrap_or(Mult::Var(MultVar(index))),
+        other => other,
+    };
+    Fields {
+        fields: fields
+            .iter()
+            .map(|field| Field {
+                name: Rc::clone(&field.name),
+                mult: at(field.mult),
+                ty: Rc::new(field.ty.substitute_mults(arguments)),
+            })
+            .collect(),
+        tail: fields
+            .tail
+            .as_ref()
+            .map(|it| Rc::new(it.substitute_mults(arguments))),
     }
 }
 
@@ -431,7 +526,7 @@ impl Term {
     /// Ссылка на определение без параметров уровня.
     #[must_use]
     pub fn constant(name: &str) -> Self {
-        Self::Const(name.into(), Rc::from([]), Rows::none())
+        Self::Const(name.into(), Rc::from([]), Args::none())
     }
 
     /// Подставляет аргументы вместо параметров row по всему терму.
@@ -465,13 +560,14 @@ impl Term {
             Self::Let(mult, name, ty, value, body) => {
                 Self::Let(*mult, Rc::clone(name), recur(ty), recur(value), recur(body))
             }
-            Self::Const(name, levels, rows) => Self::Const(
+            Self::Const(name, levels, args) => Self::Const(
                 Rc::clone(name),
                 Rc::clone(levels),
-                Rows::new(
-                    rows.as_slice()
+                Args::new(
+                    args.row_args()
                         .iter()
                         .map(|row| instantiate_row(row, arguments)),
+                    args.mult_args().iter().copied(),
                 ),
             ),
             Self::Record(fields) => Self::Record(rowed_fields(fields, arguments)),
@@ -540,16 +636,17 @@ impl Term {
             Self::Let(mult, name, ty, value, body) => {
                 Self::Let(*mult, Rc::clone(name), recur(ty), recur(value), recur(body))
             }
-            Self::Const(name, levels, rows) => Self::Const(
+            Self::Const(name, levels, args) => Self::Const(
                 Rc::clone(name),
                 levels
                     .iter()
                     .map(|level| level.substitute(arguments))
                     .collect(),
-                Rows::new(
-                    rows.as_slice()
+                Args::new(
+                    args.row_args()
                         .iter()
                         .map(|row| row.map(|argument| argument.substitute_levels(arguments))),
+                    args.mult_args().iter().copied(),
                 ),
             ),
             Self::Record(fields) => Self::Record(substituted(fields, arguments)),
@@ -577,6 +674,98 @@ impl Term {
                     .collect(),
                 params: case.params,
                 consumed: case.consumed,
+                scrutinee: recur(&case.scrutinee),
+                motive: recur(&case.motive),
+                branches: case
+                    .branches
+                    .iter()
+                    .map(|branch| Branch {
+                        constructor: Rc::clone(&branch.constructor),
+                        body: recur(&branch.body),
+                    })
+                    .collect(),
+            })),
+        }
+    }
+
+    /// Подставляет значения вместо параметров кратности по всему терму.
+    ///
+    /// Третья половина инстанциации (§10 вопрос 41). От двух других отличается
+    /// тем, **зачем** она нужна: уровни и row подставляются, чтобы получить тип
+    /// на месте использования, а кратности - ещё и чтобы **проверить тело**.
+    /// Арифметика полукольца символьных значений не считает, поэтому
+    /// полиморфное тело проверяется по одному разу на каждую подстановку.
+    #[must_use]
+    pub fn substitute_mults(&self, arguments: &[Mult]) -> Self {
+        if arguments.is_empty() {
+            return self.clone();
+        }
+        let at = |mult: Mult| match mult {
+            Mult::Var(MultVar(index)) => arguments
+                .get(index as usize)
+                .copied()
+                .unwrap_or(Mult::Var(MultVar(index))),
+            other => other,
+        };
+        let recur = |term: &Rc<Self>| Rc::new(term.substitute_mults(arguments));
+        match self {
+            Self::Var(_)
+            | Self::Meta(_)
+            | Self::EffectKind
+            | Self::Universe(_)
+            | Self::RowKind(_) => self.clone(),
+            Self::Lam(mult, name, body) => Self::Lam(at(*mult), Rc::clone(name), recur(body)),
+            Self::App(callee, argument) => Self::App(recur(callee), recur(argument)),
+            Self::Pi(binder, name, domain, row, codomain) => Self::Pi(
+                Binder {
+                    mult: at(binder.mult),
+                    visibility: binder.visibility,
+                },
+                Rc::clone(name),
+                recur(domain),
+                row.map(|argument| argument.substitute_mults(arguments)),
+                recur(codomain),
+            ),
+            Self::Let(mult, name, ty, value, body) => Self::Let(
+                at(*mult),
+                Rc::clone(name),
+                recur(ty),
+                recur(value),
+                recur(body),
+            ),
+            // Аргументы чужого определения сами написаны в терминах наших
+            // параметров: `f` внутри полиморфного `g` стоит `f{q0}`.
+            Self::Const(name, levels, args) => Self::Const(
+                Rc::clone(name),
+                Rc::clone(levels),
+                Args::new(
+                    args.row_args()
+                        .iter()
+                        .map(|row| row.map(|argument| argument.substitute_mults(arguments))),
+                    args.mult_args().iter().map(|mult| at(*mult)),
+                ),
+            ),
+            Self::Record(fields) => Self::Record(graded(fields, arguments)),
+            Self::Row(fields) => Self::Row(graded(fields, arguments)),
+            Self::Object(fields) => Self::Object(
+                fields
+                    .iter()
+                    .map(|(name, value)| (Rc::clone(name), recur(value)))
+                    .collect(),
+            ),
+            Self::With(base, fields) => Self::With(
+                recur(base),
+                fields
+                    .iter()
+                    .map(|(name, value)| (Rc::clone(name), recur(value)))
+                    .collect(),
+            ),
+            Self::Project(record, name) => Self::Project(recur(record), Rc::clone(name)),
+            Self::Case(case) => Self::Case(Rc::new(Case {
+                data: Rc::clone(&case.data),
+                levels: Rc::clone(&case.levels),
+                params: case.params,
+                consumed: at(case.consumed),
                 scrutinee: recur(&case.scrutinee),
                 motive: recur(&case.motive),
                 branches: case

@@ -49,7 +49,7 @@ use crate::mult::Mult;
 use crate::row::{Label, Row, Tail};
 use crate::sig::Signature;
 use crate::solve::{force, solve};
-use crate::term::{Field, Fields, Name, Term};
+use crate::term::{Field, Fields, Mults, Name, Term};
 use crate::value::{Elim, Head, Lvl, StuckCase, Telescope, Value};
 
 /// Конвертируемы ли два значения в контексте размера `size`.
@@ -295,7 +295,7 @@ fn convertible_within(
 /// штатный исход - `convertible` обязана отвечать `false`, - а не поломка
 /// инварианта, поэтому здесь стоят `try_`-варианты, а не паникующие.
 pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
-    let Value::Neutral(Head::Global(name, levels, rows), spine) = &**value else {
+    let Value::Neutral(Head::Global(name, levels, rows, mults), spine) = &**value else {
         return None;
     };
     let definition = sig.lookup(name)?;
@@ -315,7 +315,7 @@ pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
     if definition.opaque {
         return None;
     }
-    replayed(definition, levels, rows, spine)
+    replayed(definition, levels, rows, mults, spine)
 }
 
 /// δ-шаг **без** ворот тотальности и запечатывания - для исполнения.
@@ -327,11 +327,11 @@ pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
 /// что снаружи его тело - обещание, а не представление (§3.5); исполнять
 /// обещание нечем, и тело у него то же самое.
 pub(crate) fn unfolded(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
-    let Value::Neutral(Head::Global(name, levels, rows), spine) = &**value else {
+    let Value::Neutral(Head::Global(name, levels, rows, mults), spine) = &**value else {
         return None;
     };
     let definition = sig.lookup(name)?;
-    replayed(definition, levels, rows, spine)
+    replayed(definition, levels, rows, mults, spine)
 }
 
 /// Тело определения с переигранным спайном - общее у обоих δ.
@@ -339,11 +339,12 @@ fn replayed(
     definition: &crate::sig::Definition,
     levels: &[crate::level::Level],
     rows: &Rc<[Row<Rc<Value>>]>,
+    mults: &Mults,
     spine: &[Elim],
 ) -> Option<Rc<Value>> {
     // Аргументы-row подставляются **окружением**: метка несёт открытые термы,
     // и вложить их в замкнутое тело нечем (§3.2).
-    let body = definition.unfolded(levels, Rc::clone(rows))?;
+    let body = definition.unfolded(levels, Rc::clone(rows), mults.as_slice())?;
     spine.iter().try_fold(body, |callee, elim| match elim {
         Elim::App(argument) => try_apply(&callee, Rc::clone(argument)),
         Elim::Case(case) => try_eliminate_case(case, &callee),
@@ -383,7 +384,7 @@ fn same_telescope(
     }
     let mut earlier = Vec::with_capacity(left.fields().len());
     for (index, (a, b)) in left.fields().iter().zip(right.fields()).enumerate() {
-        if a.name != b.name || a.mult != b.mult {
+        if a.name != b.name || !unify_mults(metas, a.mult, b.mult) {
             return false;
         }
         let depth = size + u32::try_from(index).unwrap_or(0);
@@ -623,7 +624,10 @@ fn same_head(
         // тут нечего. Без этой строки `?m ū ≡ ?m ū` уходило бы в решение, где
         // проверка вхождения приняла бы его за цикл.
         (Head::Meta(a), Head::Meta(b)) => a == b,
-        (Head::Global(name_a, levels_a, rows_a), Head::Global(name_b, levels_b, rows_b)) => {
+        (
+            Head::Global(name_a, levels_a, rows_a, mults_a),
+            Head::Global(name_b, levels_b, rows_b, mults_b),
+        ) => {
             name_a == name_b
                 && levels_a.len() == levels_b.len()
                 && levels_a
@@ -638,6 +642,44 @@ fn same_head(
                     .iter()
                     .zip(rows_b.iter())
                     .all(|(a, b)| same_row(fuel, sig, metas, size, a, b))
+                // Аргументы-кратности - по значению полукольца (§10 вопрос 41).
+                && mults_a.len() == mults_b.len()
+                && mults_a
+                    .as_slice()
+                    .iter()
+                    .zip(mults_b.as_slice().iter())
+                    .all(|(a, b)| unify_mults(metas, *a, *b))
+        }
+        _ => false,
+    }
+}
+
+/// Сводятся ли две кратности к одной - решением дырок (§10 вопрос 41).
+///
+/// Кратность стоит в типе и сравнивается конвертируемостью наравне с доменом и
+/// row: `(1 x : A) -> B` и `(ω x : A) -> B` - разные типы. Полиморфная сторона
+/// приходит сюда дыркой, и решает её ровно это сравнение - как решает дырки
+/// уровня и хвоста row.
+///
+/// **Дозволенное проверяется здесь же.** Дырка помнит, при каких значениях
+/// проверилось тело её определения, и подстановка вне этого множества - не
+/// решение, а отказ: `id{0}` отвергается, потому что `id x = x` при стёртом
+/// связывании не проверяется.
+///
+/// Две нерешённые дырки объединяются решением одной через другую. Порядок
+/// произволен, а множества их при этом **не пересекаются** - берётся то, что
+/// у решаемой: пересечение сузило бы дозволенное задним числом, а сравнение
+/// вправе быть неудачным и откатиться.
+fn unify_mults(metas: &mut Metas, left: Mult, right: Mult) -> bool {
+    let (left, right) = (metas.zonk_mult(left), metas.zonk_mult(right));
+    match (left, right) {
+        (a, b) if a == b => true,
+        (Mult::Meta(meta), other) | (other, Mult::Meta(meta)) => {
+            if !metas.mult_allowed(meta).contains(&other) {
+                return false;
+            }
+            metas.solve_mult(meta, other);
+            true
         }
         _ => false,
     }
@@ -916,7 +958,8 @@ fn rigid(
             Value::Pi(binder_a, _, domain_a, row_a, codomain_a),
             Value::Pi(binder_b, _, domain_b, row_b, codomain_b),
         ) => {
-            binder_a == binder_b
+            binder_a.visibility == binder_b.visibility
+                && unify_mults(metas, binder_a.mult, binder_b.mult)
                 && same_row(fuel, sig, metas, size, row_a, row_b)
                 && convertible_within(fuel, sig, metas, size, domain_a, domain_b)
                 && convertible_under(
@@ -1230,7 +1273,7 @@ mod tests {
         let applied = Term::Const(
             "f".into(),
             Rc::from([]),
-            crate::term::Rows::new([Row::new([label])]),
+            crate::term::Args::rows([Row::new([label])]),
         );
         let unfolded = super::whnf(&signature, &eval(&Env::default(), &applied));
         let Value::Pi(_, _, _, row, _) = &*unfolded else {
@@ -1356,7 +1399,7 @@ mod tests {
             Term::Const(
                 "f".into(),
                 Rc::from([]),
-                crate::term::Rows::new([Row::new([label(name)])]),
+                crate::term::Args::rows([Row::new([label(name)])]),
             )
         };
         assert!(conv_in(0, &applied("IO"), &applied("IO")));

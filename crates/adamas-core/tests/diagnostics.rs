@@ -16,7 +16,7 @@ use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::row::Row;
 use adamas_core::sig::Signature;
-use adamas_core::term::{Binder, Rows, Term};
+use adamas_core::term::{Args, Binder, Term};
 use proptest::prelude::*;
 
 // ------------------------------------------------------------- конструкторы
@@ -380,7 +380,7 @@ fn any_term(depth: u32) -> BoxedStrategy<Term> {
         Just(Term::Const(
             "f".into(),
             Rc::from([] as [Level; 0]),
-            Rows::none()
+            Args::none()
         )),
     ];
     leaf.prop_recursive(4, 64, 3, move |inner| {

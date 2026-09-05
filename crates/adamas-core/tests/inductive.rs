@@ -17,7 +17,7 @@ use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::row::Row;
 use adamas_core::sig::{Group, Member, Signature};
-use adamas_core::term::{Binder, Rows, Term};
+use adamas_core::term::{Args, Binder, Term};
 use proptest::prelude::*;
 
 // -------------------------------------------------------------- конструкторы
@@ -60,7 +60,7 @@ fn declared(what: &str, outcome: &Result<(), TypeError>) {
 /// дырок пишется. Разойдётся с выведенной арностью - будет `LevelArity`.
 fn ahead(name: &str, metas: &mut Metas, arity: u32) -> Term {
     let levels: Vec<Level> = (0..arity).map(|_| metas.fresh_level()).collect();
-    Term::Const(name.into(), levels.into(), Rows::none())
+    Term::Const(name.into(), levels.into(), Args::none())
 }
 
 /// `Bool : Type 0` с двумя конструкторами - минимальный перечислимый тип.
@@ -290,7 +290,7 @@ fn a_parameter_may_live_above_the_type_it_parameterizes() {
     assert_eq!(
         infer_closed(
             &signature,
-            &Term::Const("List".into(), [u(0)].into(), Rows::none())
+            &Term::Const("List".into(), [u(0)].into(), Args::none())
         ),
         Ok(pi(
             Mult::Zero,
@@ -305,14 +305,14 @@ fn a_parameter_may_live_above_the_type_it_parameterizes() {
 #[test]
 fn a_parametric_constructor_applies_to_its_parameter() {
     let signature = lists();
-    let empty = Term::Const("nil".into(), [Level::Zero].into(), Rows::none()).apply([c("Bool")]);
-    let single = Term::Const("cons".into(), [Level::Zero].into(), Rows::none()).apply([
+    let empty = Term::Const("nil".into(), [Level::Zero].into(), Args::none()).apply([c("Bool")]);
+    let single = Term::Const("cons".into(), [Level::Zero].into(), Args::none()).apply([
         c("Bool"),
         c("true"),
         empty.clone(),
     ]);
     let expected =
-        Term::Const("List".into(), [Level::Zero].into(), Rows::none()).apply([c("Bool")]);
+        Term::Const("List".into(), [Level::Zero].into(), Args::none()).apply([c("Bool")]);
     assert_eq!(infer_closed(&signature, &empty), Ok(expected.clone()));
     assert_eq!(infer_closed(&signature, &single), Ok(expected));
 }
@@ -411,13 +411,13 @@ fn declaring_more_parameters_than_binders_is_rejected() {
 #[test]
 fn an_index_may_differ_between_constructors() {
     let signature = vectors();
-    let one = Term::Const("vcons".into(), [Level::Zero].into(), Rows::none()).apply([
+    let one = Term::Const("vcons".into(), [Level::Zero].into(), Args::none()).apply([
         c("Bool"),
         c("zero"),
         c("true"),
-        Term::Const("vnil".into(), [Level::Zero].into(), Rows::none()).apply([c("Bool")]),
+        Term::Const("vnil".into(), [Level::Zero].into(), Args::none()).apply([c("Bool")]),
     ]);
-    let expected = Term::Const("Vect".into(), [Level::Zero].into(), Rows::none())
+    let expected = Term::Const("Vect".into(), [Level::Zero].into(), Args::none())
         .apply([c("Bool"), c("succ").apply([c("zero")])]);
     assert_eq!(infer_closed(&signature, &one), Ok(expected));
 }
@@ -427,13 +427,13 @@ fn an_index_is_checked_against_the_declared_length() {
     let signature = vectors();
     // `vcons` строит вектор длины `succ n`; сверять его с `Vect Bool zero`
     // нельзя, и именно на этом держится вся польза индекса.
-    let one = Term::Const("vcons".into(), [Level::Zero].into(), Rows::none()).apply([
+    let one = Term::Const("vcons".into(), [Level::Zero].into(), Args::none()).apply([
         c("Bool"),
         c("zero"),
         c("true"),
-        Term::Const("vnil".into(), [Level::Zero].into(), Rows::none()).apply([c("Bool")]),
+        Term::Const("vnil".into(), [Level::Zero].into(), Args::none()).apply([c("Bool")]),
     ]);
-    let wrong = Term::Const("Vect".into(), [Level::Zero].into(), Rows::none())
+    let wrong = Term::Const("Vect".into(), [Level::Zero].into(), Args::none())
         .apply([c("Bool"), c("zero")]);
     assert!(
         matches!(
@@ -712,7 +712,7 @@ fn a_family_with_a_declared_arity_takes_polymorphic_constructors() {
             Mult::Many,
             "x",
             Term::var(0),
-            Term::Const("Box".into(), Rc::from([u(0)]), Rows::none()).apply([Term::var(1)]),
+            Term::Const("Box".into(), Rc::from([u(0)]), Args::none()).apply([Term::var(1)]),
         ),
     );
     let group = Group::of(
@@ -927,7 +927,7 @@ fn a_denormalised_level_in_the_result_is_still_the_family() {
     let mut metas = Metas::default();
     let carrier = metas.fresh_level();
     signature
-        .postulate_inferred(&mut metas, "E", Mult::Many, Term::Universe(carrier))
+        .postulate_inferred(&mut metas, "E", Mult::Many, Term::Universe(carrier), 0)
         .expect("E корректен");
 
     let sort = metas.fresh_level();
@@ -943,8 +943,8 @@ fn a_denormalised_level_in_the_result_is_still_the_family() {
             pi(
                 Mult::Zero,
                 "_",
-                Term::Const("E".into(), Rc::from([field]), Rows::none()),
-                Term::Const("D".into(), Rc::from([doubled]), Rows::none()),
+                Term::Const("E".into(), Rc::from([field]), Args::none()),
+                Term::Const("D".into(), Rc::from([doubled]), Args::none()),
             ),
         )],
     );

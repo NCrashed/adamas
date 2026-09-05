@@ -8,7 +8,7 @@ use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::row::Row;
 use adamas_core::sig::Signature;
-use adamas_core::term::{Binder, Rows, Term};
+use adamas_core::term::{Args, Binder, Term};
 use proptest::prelude::*;
 
 // ------------------------------------------------------------- конструкторы
@@ -338,6 +338,7 @@ fn a_hole_that_outlived_its_declaration_is_refused_loudly() {
             "First",
             Mult::Many,
             Term::Universe(hole.clone()),
+            0,
         )
         .expect("дырка обобщается в параметр");
     let _ = signature.postulate(&mut metas, "Second", Mult::Many, 0, Term::Universe(hole));
@@ -366,7 +367,7 @@ fn a_solved_level_is_shown_solved_in_the_error() {
             "mk",
             Mult::Many,
             1,
-            Term::Const("Box".into(), Rc::from([u(0)]), Rows::none()),
+            Term::Const("Box".into(), Rc::from([u(0)]), Args::none()),
         )
         .expect("mk корректен");
 
@@ -376,11 +377,11 @@ fn a_solved_level_is_shown_solved_in_the_error() {
         .expect("Box объявлен");
 
     // Первая проверка решает дырку в `2`.
-    let two = Term::Const("mk".into(), Rc::from([Level::number(2)]), Rows::none());
+    let two = Term::Const("mk".into(), Rc::from([Level::number(2)]), Args::none());
     check_closed_with(&signature, &mut metas, &two, &boxed).expect("решает ?0 := 2");
 
     // Вторая расходится с ней, и сообщение обязано назвать решение, а не дырку.
-    let three = Term::Const("mk".into(), Rc::from([Level::number(3)]), Rows::none());
+    let three = Term::Const("mk".into(), Rc::from([Level::number(3)]), Args::none());
     let error = check_closed_with(&signature, &mut metas, &three, &boxed)
         .expect_err("2 и 3 - разные уровни");
     let ErrorKind::Mismatch { expected, found } = &error.kind else {

@@ -14,7 +14,7 @@ use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::row::Row;
 use adamas_core::sig::{Group, Member, Signature};
-use adamas_core::term::{Binder, Branch, Case, Rows, Term};
+use adamas_core::term::{Args, Binder, Branch, Case, Term};
 use proptest::prelude::*;
 
 // -------------------------------------------------------------- конструкторы
@@ -267,7 +267,7 @@ fn lists() -> Signature {
     // Ссылка на член объявляемой группы: спросить арность у сигнатуры нечего -
     // семейства там ещё нет, - поэтому дырка пишется.
     let list_of = |metas: &mut Metas, element: Term| {
-        Term::Const("List".into(), Rc::from([metas.fresh_level()]), Rows::none()).apply([element])
+        Term::Const("List".into(), Rc::from([metas.fresh_level()]), Args::none()).apply([element])
     };
     let nil = pi(
         Mult::Zero,
@@ -727,14 +727,14 @@ fn a_parametric_case_carries_its_level_arguments() {
     let ty = pi(
         Mult::One,
         "xs",
-        Term::Const("List".into(), [Level::Zero].into(), Rows::none()).apply([c("Bool")]),
+        Term::Const("List".into(), [Level::Zero].into(), Args::none()).apply([c("Bool")]),
         c("Bool"),
     );
     let outcome = check_closed(&signature, &empty, &ty);
     assert!(outcome.is_ok(), "{outcome:?}");
 
     let applied = empty
-        .apply([Term::Const("nil".into(), [Level::Zero].into(), Rows::none()).apply([c("Bool")])]);
+        .apply([Term::Const("nil".into(), [Level::Zero].into(), Args::none()).apply([c("Bool")])]);
     assert_eq!(normalize(&applied), c("true"));
 }
 
@@ -762,7 +762,7 @@ fn a_wrong_parameter_count_is_rejected() {
     let ty = pi(
         Mult::One,
         "xs",
-        Term::Const("List".into(), [Level::Zero].into(), Rows::none()).apply([c("Bool")]),
+        Term::Const("List".into(), [Level::Zero].into(), Args::none()).apply([c("Bool")]),
         c("Bool"),
     );
     assert!(

@@ -164,12 +164,20 @@ fn spine(signature: &Signature, owned: &Owned, term: &Term, depth: u32, found: &
         head = callee;
     }
     arguments.reverse();
-    let Term::Const(callee, _, _) = head else {
+    let Term::Const(callee, _, args) = head else {
         return;
     };
     let Some(definition) = signature.lookup(callee) else {
         return;
     };
+    // Носители берутся при **этой** подстановке кратностей, а не худшие из
+    // возможных (§10 вопрос 41): `applyTo f x = f x` алиасит значение при
+    // `q = ω` и не алиасит при `q = 1`, и здесь видно, которое из двух.
+    let carriers = definition
+        .graded_carriers
+        .iter()
+        .find(|it| *it.mults == *args.mult_args())
+        .map_or(&definition.carriers, |it| &it.carriers);
     // Семейство - отдельное правило: параметр, инстанцированный владеемым
     // типом, делает поле конструктора ресурсным, а держатель обязан быть
     // `resource` (§3.3, вопрос 77). Носителем это не выражается: положить
@@ -188,7 +196,7 @@ fn spine(signature: &Signature, owned: &Owned, term: &Term, depth: u32, found: &
     for (position, argument) in arguments.iter().enumerate() {
         // `1` - ограничения нет; так помечены и позиции, которые вовсе не
         // параметры типа.
-        let carrier = definition.carriers.get(position).copied();
+        let carrier = carriers.get(position).copied();
         let Some(carrier) = carrier.filter(|it| family.is_some() || *it != Mult::One) else {
             continue;
         };

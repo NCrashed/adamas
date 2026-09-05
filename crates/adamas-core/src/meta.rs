@@ -33,8 +33,9 @@
 use std::rc::Rc;
 
 use crate::level::{Level, LevelMeta, LevelVar, peel};
+use crate::mult::{Mult, MultMeta};
 use crate::row::{Row, RowMeta, RowVar, Tail};
-use crate::term::{Rows, Term, TermMeta};
+use crate::term::{Args, Term, TermMeta};
 use crate::value::Value;
 
 /// Хранилище метапеременных уровня - одно на прогон элаборации (§10 вопрос 51).
@@ -125,6 +126,19 @@ enum Slot {
     /// Дырка row; решение - целая row, которой она заменяется вместе с
     /// хвостом. Сорт устроен по образцу уровня (§3.2), и хранилище у них одно.
     Row(Option<Row<Term>>),
+    /// Дырка кратности (§10 вопрос 41); решение - значение полукольца.
+    ///
+    /// Рядом с решением - множество значений, при которых тело определения
+    /// проверилось. Оно не выводится из типа: при `q = 0` тело `id x = x`
+    /// использует стёртое связывание, при `q = 1` дублирующее - расходует
+    /// дважды. Поэтому список приходит от объявления и сопровождает дырку до
+    /// самого решения.
+    Mult {
+        /// Что подставить дозволено.
+        allowed: Rc<[Mult]>,
+        /// Решение, когда оно найдено.
+        solution: Option<Mult>,
+    },
     /// Дырка терма. Тип известен с рождения - его строит тот, кто дырку
     /// завёл, - а решение приходит от унификации и **замкнуто**: цепочка
     /// лямбд по контексту, в котором дырка заведена.
@@ -152,6 +166,116 @@ impl Metas {
         let meta = RowMeta(self.limit());
         self.slots.push(Slot::Row(None));
         Row::closing([], Some(Tail::Meta(meta)))
+    }
+
+    /// Свежая дырка кратности, которой дозволены значения `allowed`.
+    ///
+    /// **Номер здесь - смещение внутри объявления, а не сквозной идентификатор**
+    /// (в отличие от дырок трёх прочих сортов). Причина измерена: кратность
+    /// живёт полем [`Binder`](crate::term::Binder), то есть внутри каждой `Pi`,
+    /// и `u32` растит узел терма с 48 байт до 56 - лестница исполнения на этом
+    /// упирается в стек там, где раньше проходила. Смещение хватает `u16`,
+    /// потому что дырка не переживает границу объявления.
+    ///
+    /// Переполнение `u16` даёт не дырку, а **первое дозволенное значение**:
+    /// подстановка законна по построению, программа от неё делается строже, а
+    /// не свободнее, и предела автор не замечает иначе как отказом там, где
+    /// вывод справился бы.
+    ///
+    /// Пустой список означал бы «подставить нечего», и такое определение
+    /// объявление отвергает раньше: дырка с ним завелась бы неразрешимой.
+    pub fn fresh_mult(&mut self, allowed: Rc<[Mult]>) -> Mult {
+        let Ok(offset) = u16::try_from(self.slots.len()) else {
+            return allowed.first().copied().unwrap_or(Mult::Many);
+        };
+        self.slots.push(Slot::Mult {
+            allowed,
+            solution: None,
+        });
+        Mult::Meta(MultMeta(offset))
+    }
+
+    /// Значения, дозволенные дырке кратности.
+    ///
+    /// # Panics
+    ///
+    /// Те же случаи, что у [`Metas::term_solution`].
+    #[must_use]
+    pub fn mult_allowed(&self, meta: MultMeta) -> &[Mult] {
+        match &self.slots[meta.0 as usize] {
+            Slot::Mult { allowed, .. } => allowed,
+            _ => unreachable!("?q{} - дырка не кратности", meta.0),
+        }
+    }
+
+    /// Решение дырки кратности, если оно есть.
+    ///
+    /// # Panics
+    ///
+    /// Те же случаи, что у [`Metas::term_solution`].
+    #[must_use]
+    pub fn mult_solution(&self, meta: MultMeta) -> Option<Mult> {
+        match &self.slots[meta.0 as usize] {
+            Slot::Mult { solution, .. } => *solution,
+            _ => unreachable!("?q{} - дырка не кратности", meta.0),
+        }
+    }
+
+    /// Решает дырку кратности.
+    ///
+    /// # Panics
+    ///
+    /// Дырка не кратности или решена дважды.
+    pub fn solve_mult(&mut self, meta: MultMeta, mult: Mult) {
+        let offset = meta.0 as usize;
+        match &mut self.slots[offset] {
+            Slot::Mult {
+                solution: solution @ None,
+                ..
+            } => {
+                *solution = Some(mult);
+                self.journal.push(offset);
+            }
+            Slot::Mult { .. } => unreachable!("?q{} решена дважды", meta.0),
+            _ => unreachable!("?q{} - дырка не кратности", meta.0),
+        }
+    }
+
+    /// Кратность после подстановки решений.
+    ///
+    /// Нерешённая дырка возвращается собой: выбирать за вывод здесь нечего,
+    /// а кто именно выберет - [`Metas::settle_mult`] на границе объявления.
+    #[must_use]
+    pub fn zonk_mult(&self, mult: Mult) -> Mult {
+        let Mult::Meta(meta) = mult else {
+            return mult;
+        };
+        match self.mult_solution(meta) {
+            Some(solution) => self.zonk_mult(solution),
+            None => mult,
+        }
+    }
+
+    /// Кратность, доведённая до значения полукольца.
+    ///
+    /// Дырку, которую ничто не определило, приходится выбрать: `Meta` не
+    /// переживает границу объявления - память под неё освобождается, - и
+    /// определение с ней уехало бы в сигнатуру со ссылкой в никуда.
+    ///
+    /// Берётся **наименьшее дозволенное**, и это не произвол: кратность домена
+    /// масштабирует использование аргумента на месте вызова, поэтому меньшая
+    /// требует от вызывающего меньше. Список хранится в порядке `0 < 1 < ω`,
+    /// значит первое дозволенное и есть самое слабое требование.
+    #[must_use]
+    pub fn settle_mult(&self, mult: Mult) -> Mult {
+        match self.zonk_mult(mult) {
+            Mult::Meta(meta) => self
+                .mult_allowed(meta)
+                .first()
+                .copied()
+                .unwrap_or(Mult::Many),
+            settled => settled,
+        }
     }
 
     /// Решение метапеременной row, если оно есть.
@@ -279,7 +403,9 @@ impl Metas {
     pub fn term_solution(&self, meta: TermMeta) -> Option<&Rc<Value>> {
         match &self.slots[self.offset(meta.0)] {
             Slot::Term { solution, .. } => solution.as_ref(),
-            Slot::Level(_) | Slot::Row(_) => unreachable!("?{} - дырка не терма", meta.0),
+            Slot::Level(_) | Slot::Row(_) | Slot::Mult { .. } => {
+                unreachable!("?{} - дырка не терма", meta.0)
+            }
         }
     }
 
@@ -292,7 +418,9 @@ impl Metas {
     pub fn term_type(&self, meta: TermMeta) -> &Rc<Value> {
         match &self.slots[self.offset(meta.0)] {
             Slot::Term { ty, .. } => ty,
-            Slot::Level(_) | Slot::Row(_) => unreachable!("?{} - дырка не терма", meta.0),
+            Slot::Level(_) | Slot::Row(_) | Slot::Mult { .. } => {
+                unreachable!("?{} - дырка не терма", meta.0)
+            }
         }
     }
 
@@ -313,7 +441,9 @@ impl Metas {
                 self.journal.push(offset);
             }
             Slot::Term { .. } => unreachable!("?{} решена дважды", meta.0),
-            Slot::Level(_) | Slot::Row(_) => unreachable!("?{} - дырка не терма", meta.0),
+            Slot::Level(_) | Slot::Row(_) | Slot::Mult { .. } => {
+                unreachable!("?{} - дырка не терма", meta.0)
+            }
         }
     }
 
@@ -349,6 +479,7 @@ impl Metas {
                 Slot::Level(solution) => *solution = None,
                 Slot::Row(solution) => *solution = None,
                 Slot::Term { solution, .. } => *solution = None,
+                Slot::Mult { solution, .. } => *solution = None,
             }
         }
         self.slots.truncate(mark.slots);
@@ -428,7 +559,9 @@ impl Metas {
     pub fn solution(&self, meta: LevelMeta) -> Option<&Level> {
         match &self.slots[self.offset(meta.0)] {
             Slot::Level(solution) => solution.as_ref(),
-            Slot::Term { .. } | Slot::Row(_) => unreachable!("?{} - дырка не уровня", meta.0),
+            Slot::Term { .. } | Slot::Row(_) | Slot::Mult { .. } => {
+                unreachable!("?{} - дырка не уровня", meta.0)
+            }
         }
     }
 
@@ -745,11 +878,11 @@ impl Generalization {
                 self.collect_term(metas, value);
                 self.collect_term(metas, body);
             }
-            Term::Const(_, levels, rows) => {
+            Term::Const(_, levels, args) => {
                 for level in levels.iter() {
                     self.collect_level(metas, level);
                 }
-                for row in rows.as_slice() {
+                for row in args.row_args() {
                     self.collect_row(metas, row);
                 }
             }
@@ -896,16 +1029,23 @@ impl Generalization {
                 self.apply_row(metas, row),
                 recur(codomain),
             ),
-            Term::Let(mult, name, ty, value, body) => {
-                Term::Let(*mult, Rc::clone(name), recur(ty), recur(value), recur(body))
-            }
-            Term::Const(name, levels, rows) => Term::Const(
+            Term::Let(mult, name, ty, value, body) => Term::Let(
+                metas.settle_mult(*mult),
+                Rc::clone(name),
+                recur(ty),
+                recur(value),
+                recur(body),
+            ),
+            Term::Const(name, levels, args) => Term::Const(
                 Rc::clone(name),
                 levels
                     .iter()
                     .map(|level| self.apply_level(metas, level))
                     .collect(),
-                Rows::new(rows.as_slice().iter().map(|row| self.apply_row(metas, row))),
+                Args::new(
+                    args.row_args().iter().map(|row| self.apply_row(metas, row)),
+                    args.mult_args().iter().map(|mult| metas.zonk_mult(*mult)),
+                ),
             ),
             Term::Case(case) => Term::Case(Rc::new(crate::term::Case {
                 data: Rc::clone(&case.data),
@@ -1008,7 +1148,7 @@ pub fn unsolved_row_meta(metas: &Metas, term: &Term) -> Option<RowMeta> {
             None
         }
         // Аргументы-row ссылки: второй список арности, заведённый Фазой 4.
-        Term::Const(_, _, rows) => rows.as_slice().iter().find_map(in_row),
+        Term::Const(_, _, args) => args.row_args().iter().find_map(in_row),
         Term::Record(fields) | Term::Row(fields) => fields
             .iter()
             .find_map(|field| recur(&field.ty))
@@ -1157,10 +1297,15 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
         },
         Term::Universe(level) => Term::Universe(metas.zonk(level)),
         Term::RowKind(level) => Term::RowKind(metas.zonk(level)),
-        Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), recur(body)),
+        Term::Lam(mult, name, body) => {
+            Term::Lam(metas.settle_mult(*mult), Rc::clone(name), recur(body))
+        }
         Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
         Term::Pi(binder, name, domain, row, codomain) => Term::Pi(
-            *binder,
+            crate::term::Binder {
+                mult: metas.settle_mult(binder.mult),
+                visibility: binder.visibility,
+            },
             Rc::clone(name),
             recur(domain),
             metas
@@ -1168,13 +1313,20 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
                 .map(|argument| zonk_term(metas, argument)),
             recur(codomain),
         ),
-        Term::Let(mult, name, ty, value, body) => {
-            Term::Let(*mult, Rc::clone(name), recur(ty), recur(value), recur(body))
-        }
-        Term::Const(name, levels, rows) => Term::Const(
+        Term::Let(mult, name, ty, value, body) => Term::Let(
+            metas.settle_mult(*mult),
+            Rc::clone(name),
+            recur(ty),
+            recur(value),
+            recur(body),
+        ),
+        Term::Const(name, levels, args) => Term::Const(
             Rc::clone(name),
             levels.iter().map(|level| metas.zonk(level)).collect(),
-            Rows::new(rows.as_slice().iter().map(|row| metas.zonk_row(row))),
+            Args::new(
+                args.row_args().iter().map(|row| metas.zonk_row(row)),
+                args.mult_args().iter().map(|mult| metas.settle_mult(*mult)),
+            ),
         ),
         Term::Case(case) => Term::Case(Rc::new(crate::term::Case {
             data: Rc::clone(&case.data),

@@ -11,7 +11,7 @@ use adamas_core::check::{ErrorKind, check_closed};
 use adamas_core::level::Level;
 use adamas_core::row::Row;
 use adamas_core::sig::Signature;
-use adamas_core::term::{Rows, Term};
+use adamas_core::term::{Args, Term};
 use adamas_elab::{ElabError, Missing, elaborate};
 use adamas_parser::parse;
 
@@ -72,8 +72,8 @@ fn to(name: &str) -> Term {
 /// написанной сигнатуре, и ссылка на неё обязана его заполнить. Тест строит
 /// терм руками, эффектов в нём нет, поэтому все они пусты; лишние арностью
 /// отбрасываются, и одного хватает на любое определение этого файла.
-fn pure() -> Rows {
-    Rows::new([Row::empty()])
+fn pure() -> Args {
+    Args::rows([Row::empty()])
 }
 
 /// `Nat` и `Bool` - минимальная база, на которой пишется всё остальное.

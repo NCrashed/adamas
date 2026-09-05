@@ -27,7 +27,7 @@ use adamas_core::pattern::{PatternError, compile_traced};
 use adamas_core::row::{Label, Row, RowVar, Tail};
 use adamas_core::sig::{Group, Member as SigMember, Signature};
 use adamas_core::source::Span;
-use adamas_core::term::{Binder, Fields, Name as CoreName, Rows, Term};
+use adamas_core::term::{Args, Binder, Fields, Name as CoreName, Term};
 use adamas_parser::ast::{self, DeclKind, Module, Symbol};
 
 use crate::carrier;
@@ -50,6 +50,8 @@ struct Pending<'a> {
     total: bool,
     name: Symbol,
     ty: Term,
+    /// Сколько параметров кратности написано (§10 вопрос 41).
+    grades: u32,
     source: &'a ast::Expr,
     span: Span,
 }
@@ -310,10 +312,12 @@ fn declared_signature<'a>(
     let elaborated = elaborator.wrapped(&params, true, |it| {
         it.declaration_lifted(ty, Mult::Many, lift)
     })?;
+    let grades = elaborator.grade_arity();
     Ok(Pending {
         total,
         name: qualify(within, &name.text),
         ty: elaborated,
+        grades,
         source: ty,
         span,
     })
@@ -342,11 +346,18 @@ fn unused_implicits(ty: &ast::Expr, into: &mut Warnings) {
             if &*name.text == "_" {
                 continue;
             }
+            // Имя, стоящее в позиции кратности, - это первое имя группы, а не
+            // выражение (§10 вопрос 41), и обход типов его не находит.
+            let graded = binders[at + 1..]
+                .iter()
+                .filter_map(|it| it.names.first())
+                .any(|it| it.text == name.text)
+                || grades(codomain, &name.text);
             let later = binders[at + 1..]
                 .iter()
                 .filter_map(|it| it.ty.as_ref())
                 .any(|it| crate::expr::names_any(it, &[&name.text]));
-            if later || crate::expr::names_any(codomain, &[&name.text]) {
+            if graded || later || crate::expr::names_any(codomain, &[&name.text]) {
                 continue;
             }
             into.push(Warning::UnusedImplicit {
@@ -356,6 +367,24 @@ fn unused_implicits(ty: &ast::Expr, into: &mut Warnings) {
         }
     }
     unused_implicits(codomain, into);
+}
+
+/// Стоит ли имя в позиции кратности где-нибудь в типе (§10 вопрос 41).
+///
+/// Спрашивается по написанному, а в написанном кратность-параметр - это первое
+/// имя группы, а не выражение: `(q x : a)` разбирается двумя именами. Обход
+/// типов его поэтому не находит, и без этой проверки предупреждение о
+/// неиспользованном имплисите срабатывало бы на всякий `{q : Mult}`.
+fn grades(ty: &ast::Expr, name: &str) -> bool {
+    let ast::ExprKind::Pi { binders, codomain } = &ty.kind else {
+        return false;
+    };
+    binders
+        .iter()
+        .filter(|it| it.names.len() > 1)
+        .filter_map(|it| it.names.first())
+        .any(|it| &*it.text == name)
+        || grades(codomain, name)
 }
 
 /// Собирает read-only половину состояния.
@@ -1401,7 +1430,7 @@ fn head_rows(ty: &Term) -> Vec<Row<Term>> {
         current = callee;
     }
     match current {
-        Term::Const(_, _, rows) => rows.as_slice().to_vec(),
+        Term::Const(_, _, args) => args.row_args().to_vec(),
         _ => Vec::new(),
     }
 }
@@ -1427,7 +1456,7 @@ fn instantiate_carrying(
             .cloned()
             .unwrap_or_else(|| metas.fresh_row())
     });
-    Some(Term::Const(CoreName::from(name), levels, Rows::new(rows)))
+    Some(Term::Const(CoreName::from(name), levels, Args::rows(rows)))
 }
 
 /// Невыразимое имя анонимного инстанса: `Eqv#Nat`, `Conv#Nat#Bool`.
@@ -1619,7 +1648,7 @@ fn self_dictionary(
             .map(|((method, ..), full)| {
                 (
                     Rc::clone(method),
-                    Term::Const(CoreName::from(&**full), Rc::clone(levels), Rows::none()),
+                    Term::Const(CoreName::from(&**full), Rc::clone(levels), Args::none()),
                 )
             })
             .collect(),
@@ -1690,7 +1719,7 @@ fn declare_members(
             // Обобщение здесь общее на группу, поэтому `RowVar(k)` у членов
             // общий, и подстановка тождественна. Полный список аргументов
             // ждёт сверки row-арности (§10, ревью 2026-09-03).
-            rows: Rows::none(),
+            args: Args::none(),
             ty: Rc::new(ty.clone()),
         })
         .collect();
@@ -1925,7 +1954,7 @@ fn siblings_of(
         visible.push(Member {
             name: Rc::clone(&sibling.name.text),
             ty: Rc::new(ty),
-            rows: Rows::new(rows),
+            args: Args::rows(rows),
             levels,
         });
     }
@@ -2106,7 +2135,7 @@ fn declare_families(
         seen.extend(constructors.iter().map(|(name, ty)| Member {
             name: Rc::from(*name),
             levels: Rc::clone(&family.levels),
-            rows: Rows::none(),
+            args: Args::none(),
             ty: Rc::new(ty.clone()),
         }));
         let declared = family_member(family, &constructors);
@@ -2719,7 +2748,7 @@ fn postulate(
     postulated.insert(Rc::clone(&pending.name), pending.span);
     let source = pending.source;
     signature
-        .postulate_inferred(metas, &pending.name, Mult::Many, pending.ty)
+        .postulate_inferred(metas, &pending.name, Mult::Many, pending.ty, pending.grades)
         .map_err(|error| {
             let span = route::locate(&Declared::Postulate(source), &error, pending.span);
             ElabError::Core {
@@ -2752,7 +2781,7 @@ fn define(
         levels,
         // Одиночное определение: своя row-переменная приходит из типа как
         // есть, подставлять нечего.
-        rows: Rows::none(),
+        args: Args::none(),
         ty: Rc::new(declared.ty.clone()),
     }];
     let compiled = {
@@ -2792,12 +2821,13 @@ fn define(
     )?;
 
     signature
-        .define_inferred(
+        .define_graded(
             metas,
             &declared.name,
             Mult::Many,
             declared.ty.clone(),
             Some(tree.term.clone()),
+            declared.grades,
         )
         .map_err(|error| {
             let names = Names::of(&declared.name, Vec::new());
@@ -3066,6 +3096,9 @@ fn declare_resource(
         total: false,
         name: Rc::clone(&drop_name.text),
         ty: elaborated,
+        // Деструктор ресурса кратностями не полиморфен: его домен - `1` по
+        // правилу §3.3, а не по выбору автора.
+        grades: 0,
         source: drop_ty,
         span: drop_span,
     };
@@ -3391,7 +3424,7 @@ impl Family<'_> {
             name: Rc::clone(&self.data.name.text),
             levels: Rc::clone(&self.levels),
             // Тип-формер семейства row не носит: метка не тип.
-            rows: Rows::none(),
+            args: Args::none(),
             ty: Rc::new(self.kind.clone()),
         }
     }
@@ -3578,7 +3611,7 @@ fn declare_effect(
         name: Rc::clone(&effect.name.text),
         levels,
         // Формер метки оканчивается `Effect`, своей row у него нет.
-        rows: Rows::none(),
+        args: Args::none(),
         ty: Rc::new(kind.clone()),
     };
 

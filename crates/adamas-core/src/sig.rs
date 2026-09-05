@@ -69,7 +69,7 @@ use crate::level::Level;
 use crate::meta::{Generalization, Metas, zonk_term};
 use crate::mult::Mult;
 use crate::row::Row;
-use crate::term::{Name, Rows, Term};
+use crate::term::{Args, Name, Term};
 use crate::value::{Env, Value};
 
 /// Чем определение является помимо "имя с типом и, может быть, телом".
@@ -123,8 +123,12 @@ pub enum DefinitionKind {
     },
 }
 
-/// Что фаза B2 узнала о теле: сам терм и носители его параметров.
-type CheckedBody = (Term, Rc<[Mult]>);
+/// Что фаза B2 узнала о теле: сам терм, носители его параметров и дозволенные
+/// подстановки кратностей (§10 вопрос 41).
+type CheckedBody = (Term, crate::check::Body);
+
+/// Полукольцо целиком - все подстановки, которые перебирает фаза B2.
+const ALL_MULTS: [Mult; 3] = [Mult::Zero, Mult::One, Mult::Many];
 
 /// Определение верхнего уровня.
 #[derive(Clone, Debug)]
@@ -141,6 +145,21 @@ pub struct Definition {
     /// Внутри `ty` и `body` они видны как [`crate::row::RowVar`], и место
     /// использования подставляет вместо каждого целую row.
     pub row_arity: u32,
+    /// Значения, дозволенные каждому параметру кратности (§10 вопрос 41).
+    ///
+    /// Длина - третья компонента арности; внутри `ty` и `body` параметры видны
+    /// как [`crate::mult::MultVar`]. Множество, а не одно только число, потому
+    /// что **не всякая подстановка законна**: `id x = x` не проверяется при
+    /// `q = 0`, а дублирующее тело - при `q = 1`. Считается оно перебором на
+    /// объявлении: полукольцо конечно, и подстановок ровно `3ⁿ`.
+    pub mult_allowed: Rc<[Rc<[Mult]>]>,
+    /// Носители при каждой дозволенной подстановке кратностей.
+    ///
+    /// [`Definition::carriers`] сводит их к худшему, и на полиморфном
+    /// комбинаторе этого мало: `applyTo` алиасит своё значение при `q = ω` и
+    /// не алиасит при `q = 1`, а место использования подставляет одно из двух
+    /// и знает какое.
+    pub graded_carriers: Rc<[crate::check::Graded]>,
     /// Тип. Замкнут по локальным переменным, открыт по параметрам уровня.
     pub ty: Term,
     /// Тело. `None` - постулат: тип есть, вычислять нечего.
@@ -178,8 +197,17 @@ pub struct Definition {
 impl Definition {
     /// Тип, инстанцированный аргументами уровня.
     #[must_use]
-    pub fn instantiate_type(&self, levels: &[Level], rows: &[Row<Term>]) -> Rc<Value> {
-        let ty = self.ty.substitute_levels(levels).substitute_rows(rows);
+    pub fn instantiate_type(
+        &self,
+        levels: &[Level],
+        rows: &[Row<Term>],
+        mults: &[Mult],
+    ) -> Rc<Value> {
+        let ty = self
+            .ty
+            .substitute_levels(levels)
+            .substitute_rows(rows)
+            .substitute_mults(mults);
         eval(&Env::default(), &ty)
     }
 
@@ -190,9 +218,17 @@ impl Definition {
     /// форма: подстановка по терму, написанная было рядом, δ-разворот
     /// обслужить не могла и не звалась ниоткуда.
     #[must_use]
-    pub fn unfolded(&self, levels: &[Level], rows: Rc<[Row<Rc<Value>>]>) -> Option<Rc<Value>> {
+    pub fn unfolded(
+        &self,
+        levels: &[Level],
+        rows: Rc<[Row<Rc<Value>>]>,
+        mults: &[Mult],
+    ) -> Option<Rc<Value>> {
         let body = self.body.as_ref()?;
-        Some(eval(&Env::rowed(rows), &body.substitute_levels(levels)))
+        Some(eval(
+            &Env::rowed(rows),
+            &body.substitute_levels(levels).substitute_mults(mults),
+        ))
     }
 
     /// Число параметров и универсум тип-формера. `None` - не семейство.
@@ -223,49 +259,82 @@ impl Definition {
 /// выводятся обобщением на границе определения либо объявляются вызывающим,
 /// когда он посчитал их сам. Второе нужно группе взаимной рекурсии: там
 /// арность считается по написанному типу члена, до проверки тел.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Arity {
-    /// Нерешённые дырки становятся параметрами, и их число и есть арность.
-    /// Это implicit universe polymorphism со стороны определения (§3.2).
-    Inferred,
-    /// Арность написана, параметры стоят в терме как [`crate::level::LevelVar`]
-    /// и [`crate::row::RowVar`]. Дырка, оставшаяся при такой записи, - отказ:
-    /// обобщать её некуда.
-    Declared {
-        /// Параметров уровня.
-        levels: u32,
-        /// Параметров row.
-        rows: u32,
-    },
-    /// Уровни выводятся, row объявлены. Так объявляется класс (§4.4): его
-    /// row-параметр несут **поля словаря**, то есть тело, а обобщение читает
-    /// тип, - вывести число оттуда нечем. Уровень при этом выводится как
-    /// обычно: универсум словаря считается по полям.
-    Rowed {
-        /// Параметров row.
-        rows: u32,
-    },
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Arity {
+    /// Параметров уровня; `None` - выводятся обобщением.
+    ///
+    /// Написанные стоят в терме как [`crate::level::LevelVar`], и дырка,
+    /// оставшаяся при такой записи, - отказ: обобщать её некуда. Выведенные
+    /// наоборот: параметров во входном терме нет вовсе, только дырки, и
+    /// `check_level_scope` этим пользуется.
+    levels: Option<u32>,
+    /// Параметров row. Всегда написаны: класс (§4.4) несёт свой row-параметр
+    /// **полями словаря**, то есть телом, а обобщение читает тип - вывести
+    /// число оттуда нечем.
+    rows: u32,
+    /// Параметров кратности (§10 вопрос 41). Всегда написаны - других способов
+    /// их ввести нет: неаннотированная стрелка по-прежнему `ω` (§3.2).
+    mults: u32,
 }
 
 impl Arity {
-    /// Объявленная арность уровней.
-    ///
-    /// У выведенной она нулевая: параметров во входном терме нет вовсе, только
-    /// дырки, и `check_level_scope` этим пользуется - параметр уровня там
-    /// означал бы, что вызывающий смешал две записи.
-    fn declared(self) -> u32 {
-        match self {
-            Self::Declared { levels, .. } => levels,
-            Self::Inferred | Self::Rowed { .. } => 0,
+    /// Всё выводится: ни одного написанного параметра.
+    #[must_use]
+    pub const fn inferred() -> Self {
+        Self {
+            levels: None,
+            rows: 0,
+            mults: 0,
+        }
+    }
+
+    /// Написаны и уровни, и row.
+    #[must_use]
+    pub const fn declared(levels: u32, rows: u32) -> Self {
+        Self {
+            levels: Some(levels),
+            rows,
+            mults: 0,
+        }
+    }
+
+    /// Написаны только row: уровни выводятся как обычно (§4.4).
+    #[must_use]
+    pub const fn rowed(rows: u32) -> Self {
+        Self {
+            levels: None,
+            rows,
+            mults: 0,
+        }
+    }
+
+    /// Та же арность с написанными параметрами кратности.
+    #[must_use]
+    pub const fn with_mults(self, mults: u32) -> Self {
+        Self { mults, ..self }
+    }
+
+    /// Написаны ли уровни.
+    const fn is_declared(self) -> bool {
+        self.levels.is_some()
+    }
+
+    /// Объявленная арность уровней; у выведенной - ноль.
+    const fn level_count(self) -> u32 {
+        match self.levels {
+            Some(levels) => levels,
+            None => 0,
         }
     }
 
     /// То же для row.
-    fn declared_rows(self) -> u32 {
-        match self {
-            Self::Declared { rows, .. } | Self::Rowed { rows } => rows,
-            Self::Inferred => 0,
-        }
+    const fn row_count(self) -> u32 {
+        self.rows
+    }
+
+    /// То же для кратностей.
+    const fn mult_count(self) -> u32 {
+        self.mults
     }
 }
 
@@ -340,7 +409,7 @@ impl Member {
         Self::Definition {
             name: name.into(),
             mult,
-            arity: Arity::Inferred,
+            arity: Arity::inferred(),
             ty,
             body: None,
             opaque: false,
@@ -373,7 +442,7 @@ impl Member {
         Self::Effect {
             name: name.into(),
             params,
-            arity: Arity::Inferred,
+            arity: Arity::inferred(),
             ty,
             operations: Vec::new(),
         }
@@ -408,7 +477,7 @@ impl Member {
         Self::Data {
             name: name.into(),
             params,
-            arity: Arity::Inferred,
+            arity: Arity::inferred(),
             ty,
             constructors: Vec::new(),
         }
@@ -439,7 +508,20 @@ impl Member {
             Self::Definition { arity, .. }
             | Self::Data { arity, .. }
             | Self::Effect { arity, .. } => {
-                *arity = Arity::Declared { levels, rows };
+                *arity = Arity::declared(levels, rows);
+            }
+        }
+        self
+    }
+
+    /// Объявляет параметры кратности: уровни и row остаются как были.
+    #[must_use]
+    pub fn with_mults(mut self, mults: u32) -> Self {
+        match &mut self {
+            Self::Definition { arity, .. }
+            | Self::Data { arity, .. }
+            | Self::Effect { arity, .. } => {
+                *arity = arity.with_mults(mults);
             }
         }
         self
@@ -452,7 +534,7 @@ impl Member {
             Self::Definition { arity, .. }
             | Self::Data { arity, .. }
             | Self::Effect { arity, .. } => {
-                *arity = Arity::Rowed { rows };
+                *arity = Arity::rowed(rows);
             }
         }
         self
@@ -581,9 +663,11 @@ impl Signature {
     pub fn instantiate(&self, name: &str, metas: &mut Metas) -> Option<Term> {
         let definition = self.lookup(name)?;
         let (levels, rows) = (definition.level_arity, definition.row_arity);
+        let allowed: Vec<Rc<[Mult]>> = definition.mult_allowed.to_vec();
         let levels: Rc<[Level]> = (0..levels).map(|_| metas.fresh_level()).collect();
-        let rows = Rows::new((0..rows).map(|_| metas.fresh_row()));
-        Some(Term::Const(name.into(), levels, rows))
+        let rows: Vec<_> = (0..rows).map(|_| metas.fresh_row()).collect();
+        let mults: Vec<_> = allowed.into_iter().map(|it| metas.fresh_mult(it)).collect();
+        Some(Term::Const(name.into(), levels, Args::new(rows, mults)))
     }
 
     /// Проверяет группу и добавляет её целиком.
@@ -705,11 +789,15 @@ impl Signature {
         // определения, и определение без тела она видит непрозрачным. Носители
         // едут тем же ходом: они выведены из тела и до него не существуют.
         for (member, body) in members.iter().zip(bodies) {
-            if let (Some((term, carriers)), Some(stored)) =
+            if let (Some((term, report)), Some(stored)) =
                 (body, self.definitions.get_mut(member.name()))
             {
                 stored.body = Some(term);
-                stored.carriers = carriers;
+                stored.carriers = report.carriers;
+                // Дозволенные подстановки кратностей до проверки тела были
+                // полукольцом целиком; проверка их сузила (§10 вопрос 41).
+                stored.mult_allowed = report.allowed;
+                stored.graded_carriers = report.graded;
             }
         }
 
@@ -825,8 +913,12 @@ impl Signature {
         let mut draft = Definition {
             mult,
             opaque: matches!(member, Member::Definition { opaque: true, .. }),
-            level_arity: arity.declared(),
-            row_arity: arity.declared_rows(),
+            level_arity: arity.level_count(),
+            row_arity: arity.row_count(),
+            // Дозволенное каждому параметру уточнит фаза B2 перебором: до
+            // проверки тела известно только их число.
+            mult_allowed: (0..arity.mult_count()).map(|_| ALL_MULTS.into()).collect(),
+            graded_carriers: Rc::from([]),
             // Носители неизвестны, пока тело не проверено; фаза B2 их уточнит,
             // а постулат так и останется с `ω` - консервативным ответом.
             carriers: crate::carrier::unknown(ty),
@@ -983,8 +1075,10 @@ impl Signature {
     ) -> Result<Definition, TypeError> {
         let mut draft = Definition {
             mult: Mult::Many,
-            level_arity: arity.declared(),
-            row_arity: arity.declared_rows(),
+            level_arity: arity.level_count(),
+            row_arity: arity.row_count(),
+            mult_allowed: Rc::from([]),
+            graded_carriers: Rc::from([]),
             carriers: crate::carrier::stored(&operation.ty),
             opaque: false,
             ty: operation.ty.clone(),
@@ -1064,8 +1158,8 @@ impl Signature {
             body: Some(body.clone()),
             ..checked.declaration.clone()
         };
-        let carriers = check_body(self, metas, name, &definition)?;
-        Ok(Some((body, carriers)))
+        let report = check_body(self, metas, name, &definition)?;
+        Ok(Some((body, report)))
     }
 
     /// Фаза B1 для конструктора: тип, арность и форма.
@@ -1083,11 +1177,13 @@ impl Signature {
             // обобщать нечем - её параметры уже стоят в типе как `LevelVar`, - и
             // обобщение свело бы её к нулю, отвергнув всякий полиморфный
             // конструктор объявленного семейства.
-            level_arity: arity.declared(),
-            row_arity: arity.declared_rows(),
+            level_arity: arity.level_count(),
+            row_arity: arity.row_count(),
             // Конструктор кладёт значение ровно однажды, поэтому носителю его
             // параметра ограничивать нечего; держателя ресурсного поля
             // проверяет отдельное правило (§3.3, вопрос 77).
+            mult_allowed: Rc::from([]),
+            graded_carriers: Rc::from([]),
             carriers: crate::carrier::stored(&constructor.ty),
             opaque: false,
             ty: constructor.ty.clone(),
@@ -1215,8 +1311,16 @@ impl Signature {
                 body: Some(normal),
                 ..definition
             };
-            crate::check::check_body(self, metas, name, &checked)
+            let report = crate::check::check_body(self, metas, name, &checked)
                 .map_err(|error| error.in_frame(Frame::MemberBody(at(index))))?;
+            // Дозволенные подстановки сужаются и здесь: проход идёт по
+            // нормальной форме, и она бывает строже (§10 вопрос 41). Оставить
+            // множество от фазы B2 значило бы обещать подстановку, при которой
+            // тело на самом деле не проверяется.
+            if let Some(stored) = self.definitions.get_mut(name) {
+                stored.mult_allowed = report.allowed;
+                stored.graded_carriers = report.graded;
+            }
         }
         Ok(())
     }
@@ -1356,6 +1460,8 @@ impl Signature {
                 mult: Mult::Many,
                 level_arity,
                 row_arity: 0,
+                mult_allowed: Rc::from([]),
+                graded_carriers: Rc::from([]),
                 ty,
                 body: None,
                 kind: DefinitionKind::Regular,
@@ -1427,6 +1533,30 @@ impl Signature {
         self.declare(metas, &Group::of(member))
     }
 
+    /// То же с написанными параметрами кратности (§10 вопрос 41).
+    ///
+    /// Уровни выводятся как обычно: параметры кратности им ортогональны -
+    /// стоят они в `Pi`, а не в универсуме.
+    ///
+    /// # Errors
+    ///
+    /// То же, что у [`Signature::declare`].
+    pub fn define_graded(
+        &mut self,
+        metas: &mut Metas,
+        name: &str,
+        mult: Mult,
+        ty: Term,
+        body: Option<Term>,
+        mults: u32,
+    ) -> Result<(), TypeError> {
+        let mut member = Member::definition(name, mult, ty).with_mults(mults);
+        if let Some(body) = body {
+            member = member.with_body(body);
+        }
+        self.declare(metas, &Group::of(member))
+    }
+
     /// То же с объявленной row-арностью: уровни выводятся, row написаны.
     ///
     /// Так объявляется класс (§4.4): row-параметр стоит в **полях словаря**, а
@@ -1462,8 +1592,9 @@ impl Signature {
         name: &str,
         mult: Mult,
         ty: Term,
+        mults: u32,
     ) -> Result<(), TypeError> {
-        self.define_inferred(metas, name, mult, ty, None)
+        self.define_graded(metas, name, mult, ty, None, mults)
     }
 
     /// Индуктивное семейство вместе с конструкторами - одним вызовом.
@@ -1540,35 +1671,31 @@ fn generalize(
     arity: Arity,
     draft: Definition,
 ) -> (Definition, Option<Generalization>) {
-    match arity {
-        Arity::Declared { .. } => (draft, None),
+    if arity.is_declared() {
+        return (draft, None);
+    }
+    let mut generalization = Generalization::default();
+    if arity.row_count() > 0 {
         // Row-параметры объявлены - обобщать их нечем и незачем: в терме они уже
         // стоят как `RowVar`. Дырка row, если она сюда всё же дошла,
         // отображению не подлежит - номера заняты, - и её ловит запечатывание
         // тем же отказом, что у объявленной арности.
-        Arity::Rowed { rows } => {
-            let mut generalization = Generalization::default();
-            generalization.collect_levels(metas, &draft.ty);
-            let declaration = Definition {
-                level_arity: generalization.arity(),
-                row_arity: rows,
-                ty: generalization.apply_term(metas, &draft.ty),
-                ..draft
-            };
-            (declaration, Some(generalization))
-        }
-        Arity::Inferred => {
-            let mut generalization = Generalization::default();
-            generalization.collect_term(metas, &draft.ty);
-            let declaration = Definition {
-                level_arity: generalization.arity(),
-                row_arity: generalization.row_arity(),
-                ty: generalization.apply_term(metas, &draft.ty),
-                ..draft
-            };
-            (declaration, Some(generalization))
-        }
+        generalization.collect_levels(metas, &draft.ty);
+    } else {
+        generalization.collect_term(metas, &draft.ty);
     }
+    let rows = if arity.row_count() > 0 {
+        arity.row_count()
+    } else {
+        generalization.row_arity()
+    };
+    let declaration = Definition {
+        level_arity: generalization.arity(),
+        row_arity: rows,
+        ty: generalization.apply_term(metas, &draft.ty),
+        ..draft
+    };
+    (declaration, Some(generalization))
 }
 
 /// Все имена, которые занимает группа: члены и их конструкторы.

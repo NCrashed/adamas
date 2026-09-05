@@ -31,7 +31,7 @@ use std::rc::Rc;
 use adamas_core::level::Level;
 use adamas_core::row::Row;
 use adamas_core::sig::DefinitionKind;
-use adamas_core::term::{Name, Term};
+use adamas_core::term::{Mults, Name, Term};
 use adamas_core::value::{Elim, Value};
 
 use crate::RunError;
@@ -308,6 +308,7 @@ impl Machine<'_> {
             Rc::clone(only),
             &levels,
             Rc::from([] as [Row<Rc<Value>>; 0]),
+            Mults::none(),
         ))
     }
 

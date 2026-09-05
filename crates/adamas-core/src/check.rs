@@ -61,7 +61,7 @@ use crate::meta::{Metas, unsolved_level_meta, unsolved_term_meta};
 use crate::mult::Mult;
 use crate::row::{Label, Row};
 use crate::sig::{Definition, DefinitionKind, Signature};
-use crate::term::{Binder, Case, Field as RecordField, Fields, Name, Rows, Term, spine};
+use crate::term::{Args, Binder, Case, Field as RecordField, Fields, Name, Term, spine};
 use crate::value::{Elim, Head, Lvl, Telescope, Value};
 
 /// Значение, уложенное в ошибку: обратное чтение плюс зонканье.
@@ -96,7 +96,7 @@ fn constant(
     sigma: Mult,
     name: &Name,
     levels: &[Level],
-    rows: &Rows,
+    args: &Args,
 ) -> Result<(Rc<Value>, Usage), TypeError> {
     let definition = ctx
         .signature()
@@ -141,7 +141,7 @@ fn constant(
             },
         ));
     }
-    let ty = definition.instantiate_type(levels, rows.as_slice());
+    let ty = definition.instantiate_type(levels, args.row_args(), args.mult_args());
     Ok((ty, Usage::zero(ctx.size())))
 }
 
@@ -244,7 +244,7 @@ pub fn infer(
         }
 
         // Определение места в контексте не занимает, поэтому вектор нулевой.
-        Term::Const(name, levels, rows) => constant(ctx, metas, sigma, name, levels, rows),
+        Term::Const(name, levels, args) => constant(ctx, metas, sigma, name, levels, args),
         // Мотив записан в самом разборе, поэтому тип синтезируется, а не
         // берётся из режима проверки.
         Term::Case(case) => infer_case(ctx, metas, sigma, case),
@@ -716,12 +716,155 @@ pub fn check_body(
     metas: &mut Metas,
     name: &Name,
     definition: &Definition,
-) -> Result<Rc<[Mult]>, TypeError> {
+) -> Result<Body, TypeError> {
     let Some(body) = &definition.body else {
-        return Ok(Rc::clone(&definition.carriers));
+        return Ok(Body {
+            carriers: Rc::clone(&definition.carriers),
+            allowed: Rc::clone(&definition.mult_allowed),
+            graded: Rc::clone(&definition.graded_carriers),
+        });
     };
     check_level_scope(name, definition.level_arity, body)?;
+    if definition.mult_allowed.is_empty() {
+        return Ok(Body {
+            carriers: check_instance(signature, metas, definition, body)?,
+            allowed: Rc::from([]),
+            graded: Rc::from([]),
+        });
+    }
+    check_graded(signature, metas, name, definition, body)
+}
 
+/// Что проверка тела узнала помимо «сошлось».
+#[derive(Clone, Debug)]
+pub struct Body {
+    /// Кратности носителей по позициям телескопа ([`carrier`]).
+    pub carriers: Rc<[Mult]>,
+    /// Значения, при которых тело проверилось, - по параметру кратности
+    /// (§10 вопрос 41). Пусто у определения, не полиморфного по кратности.
+    pub allowed: Rc<[Rc<[Mult]>]>,
+    /// Носители при каждой прошедшей подстановке.
+    ///
+    /// Худшего из них не хватает, и это измерено: `applyTo f x = f x` при
+    /// `q = ω` алиасит своё значение, при `q = 1` - нет, а место использования
+    /// подставляет **одно** из двух. Свести их к худшему значит запретить
+    /// ресурс всюду, где комбинатор годится и при `ω`.
+    pub graded: Rc<[Graded]>,
+}
+
+/// Носители при одной подстановке кратностей (§10 вопрос 41).
+#[derive(Clone, Debug)]
+pub struct Graded {
+    /// Подстановка: по значению на параметр.
+    pub mults: Rc<[Mult]>,
+    /// Носители по позициям телескопа при ней.
+    pub carriers: Rc<[Mult]>,
+}
+
+/// Тело полиморфного по кратности определения - перебором подстановок.
+///
+/// Арифметика полукольца символьных значений не считает (§10 вопрос 41), а
+/// само полукольцо конечно, поэтому «тело проверяется при любом `q`» решается
+/// прямо: подставить каждое `q` и проверить. Подстановок `3ⁿ`, и `n` - число
+/// написанных параметров.
+///
+/// **Прошедшие подстановки обязаны образовать произведение** множеств по
+/// параметрам. Иначе параметры связаны между собой - у `compose` домен равен
+/// `q · r`, - а выразить связь сигнатуре нечем: арифметики кратностей в ней
+/// нет. Такое определение отвергается с указанием на связь, а не принимается с
+/// множеством, которое обещало бы больше законных подстановок, чем есть.
+fn check_graded(
+    signature: &Signature,
+    metas: &mut Metas,
+    name: &Name,
+    definition: &Definition,
+    body: &Term,
+) -> Result<Body, TypeError> {
+    let mut passing: Vec<Vec<Mult>> = Vec::new();
+    let mut graded: Vec<Graded> = Vec::new();
+    let mut carriers: Option<Rc<[Mult]>> = None;
+    let mut refusal = None;
+    for tuple in substitutions(&definition.mult_allowed) {
+        let instance = Definition {
+            ty: definition.ty.substitute_mults(&tuple),
+            body: None,
+            mult_allowed: Rc::from([]),
+            ..definition.clone()
+        };
+        let substituted = body.substitute_mults(&tuple);
+        let mark = metas.mark();
+        let outcome = check_instance(signature, metas, &instance, &substituted);
+        metas.rollback(mark);
+        match outcome {
+            Ok(found) => {
+                graded.push(Graded {
+                    mults: Rc::from(tuple.as_slice()),
+                    carriers: Rc::clone(&found),
+                });
+                carriers = Some(match &carriers {
+                    Some(earlier) => carrier::worst(earlier, &found),
+                    None => found,
+                });
+                passing.push(tuple);
+            }
+            // Отказ запоминается последний: перебор идёт по возрастанию, и
+            // последняя подстановка - сплошная `ω`, самая слабая из всех. Тело,
+            // не прошедшее и при ней, отказано по причине, к кратностям
+            // отношения не имеющей, - её и стоит показать.
+            Err(error) => refusal = Some(error),
+        }
+    }
+    let Some(carriers) = carriers else {
+        return Err(refusal
+            .unwrap_or_else(|| unreachable!("подстановок ноль при непустом списке параметров")));
+    };
+    let allowed: Rc<[Rc<[Mult]>]> = (0..definition.mult_allowed.len())
+        .map(|at| {
+            let column: Vec<Mult> = definition.mult_allowed[at]
+                .iter()
+                .copied()
+                .filter(|value| passing.iter().any(|tuple| tuple[at] == *value))
+                .collect();
+            Rc::from(column)
+        })
+        .collect();
+    let product: usize = allowed.iter().map(|values| values.len()).product();
+    if product != passing.len() {
+        return Err(ErrorKind::MultEntangled {
+            name: Rc::clone(name),
+        }
+        .into());
+    }
+    Ok(Body {
+        carriers,
+        allowed,
+        graded: Rc::from(graded),
+    })
+}
+
+/// Все подстановки: декартово произведение дозволенных значений.
+fn substitutions(allowed: &[Rc<[Mult]>]) -> Vec<Vec<Mult>> {
+    allowed.iter().fold(vec![Vec::new()], |grown, values| {
+        grown
+            .iter()
+            .flat_map(|prefix| {
+                values.iter().map(move |value| {
+                    let mut tuple = prefix.clone();
+                    tuple.push(*value);
+                    tuple
+                })
+            })
+            .collect()
+    })
+}
+
+/// Тело при конкретных кратностях - собственно проверка.
+fn check_instance(
+    signature: &Signature,
+    metas: &mut Metas,
+    definition: &Definition,
+    body: &Term,
+) -> Result<Rc<[Mult]>, TypeError> {
     let carriers = carrier::Carriers::default();
     let ctx = Ctx::new(signature).recording(&carriers);
     let ty_value = ctx.eval(&definition.ty);
@@ -1689,7 +1832,13 @@ fn infer_app(
     // этот хвост вырасти, и окружающая раздувается на вхождение, которого
     // программа не просила (§10 вопрос 72).
     let argument_usage = framed(
-        check(ctx, metas, judgement_under(*mult, sigma), argument, domain),
+        check(
+            ctx,
+            metas,
+            judgement_under(metas.settle_mult(*mult), sigma),
+            argument,
+            domain,
+        ),
         Frame::Argument,
     )?;
     if !discharges(ctx.signature(), metas, ctx.size(), &ambient, row) {
@@ -1712,7 +1861,14 @@ fn infer_app(
         ));
     }
     let result = codomain.apply(ctx.eval(argument));
-    Ok((result, callee_usage + &argument_usage.scale(*mult)))
+    // Кратность домена бывает дыркой - у полиморфного по кратности вызываемого
+    // (§10 вопрос 41). Масштабировать ею нечего: полукольцо символьных значений
+    // не считает, поэтому нерешённая доводится до наименьшей дозволенной -
+    // самого слабого требования к вызывающему.
+    Ok((
+        result,
+        callee_usage + &argument_usage.scale(metas.settle_mult(*mult)),
+    ))
 }
 
 /// Гасит ли окружающая row row вызываемого (§3.4).
@@ -2269,7 +2425,7 @@ fn infer_case(
 
     let constructors = constructors.clone();
     let binders = peel_pis(&declaration.ty).0.len();
-    let family = declaration.instantiate_type(&case.levels, &[]);
+    let family = declaration.instantiate_type(&case.levels, &[], &[]);
 
     // Тип разбираемого значения обязан быть этим семейством, применённым
     // полностью: параметры, потом индексы.
@@ -2327,7 +2483,7 @@ fn data_arguments(
     ty: &Rc<Value>,
 ) -> Option<Vec<Rc<Value>>> {
     let reduced = whnf_solved(signature, metas, ty);
-    let Value::Neutral(Head::Global(name, levels, _), spine) = &*reduced else {
+    let Value::Neutral(Head::Global(name, levels, _, _), spine) = &*reduced else {
         return None;
     };
     if *name != case.data || levels.len() != case.levels.len() {
@@ -2364,7 +2520,7 @@ fn motive_type(
 ) -> Rc<Value> {
     let (telescope, size) = telescope_of(ctx.size(), family);
     let mut scrutinee_ty =
-        Term::Const(Rc::clone(&case.data), Rc::clone(&case.levels), Rows::none());
+        Term::Const(Rc::clone(&case.data), Rc::clone(&case.levels), Args::none());
     for param in params {
         scrutinee_ty = Term::App(Rc::new(scrutinee_ty), Rc::new(quote(size, param)));
     }
@@ -2412,7 +2568,8 @@ fn branch_type(
         .signature()
         .lookup(constructor)
         .unwrap_or_else(|| unreachable!("конструктор `{constructor}` пропал из сигнатуры"));
-    let applied = instantiate_telescope(declaration.instantiate_type(&case.levels, &[]), params);
+    let applied =
+        instantiate_telescope(declaration.instantiate_type(&case.levels, &[], &[]), params);
     let (telescope, size) = telescope_of(ctx.size(), &applied);
 
     // Хвост телескопа - `D levels params indices`, оттуда и берутся индексы,
@@ -2432,7 +2589,7 @@ fn branch_type(
     let mut built = Term::Const(
         Rc::clone(constructor),
         Rc::clone(&case.levels),
-        Rows::none(),
+        Args::none(),
     );
     for param in params {
         built = Term::App(Rc::new(built), Rc::new(quote(size, param)));

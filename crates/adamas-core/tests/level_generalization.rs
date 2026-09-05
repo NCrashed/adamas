@@ -8,7 +8,7 @@ use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
 use adamas_core::row::Row;
 use adamas_core::sig::Signature;
-use adamas_core::term::{Binder, Rows, Term};
+use adamas_core::term::{Args, Binder, Term};
 use proptest::prelude::*;
 
 // ------------------------------------------------------------- конструкторы
@@ -119,6 +119,7 @@ fn parameters_are_numbered_by_first_appearance() {
                 Term::Universe(second),
                 Term::Universe(first.succ()),
             ),
+            0,
         )
         .unwrap();
 
@@ -144,6 +145,7 @@ fn a_hole_used_twice_becomes_one_parameter() {
                 Term::Universe(level.clone()),
                 Term::Universe(level),
             ),
+            0,
         )
         .unwrap();
 
@@ -215,7 +217,7 @@ fn a_hole_living_only_in_the_body_is_rejected() {
         "BodyOnly",
         Mult::Many,
         Term::universe(9),
-        Some(Term::Const("Any".into(), Rc::from([hole]), Rows::none())),
+        Some(Term::Const("Any".into(), Rc::from([hole]), Args::none())),
     );
     assert!(
         matches!(
@@ -241,6 +243,7 @@ fn a_level_parameter_in_the_input_is_rejected() {
         "Wrong",
         Mult::Many,
         Term::Universe(Level::Var(LevelVar(0)).succ()),
+        0,
     );
     assert!(
         matches!(
@@ -273,7 +276,7 @@ fn the_explicit_path_still_rejects_leftover_holes() {
         Mult::Many,
         0,
         Term::universe(9),
-        Some(Term::Const("Any".into(), Rc::from([hole]), Rows::none())),
+        Some(Term::Const("Any".into(), Rc::from([hole]), Args::none())),
     );
     assert!(
         matches!(

@@ -139,6 +139,25 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// У группы `{q : Mult}` написана кратность.
+    ///
+    /// Параметр кратности сам кратности не имеет: в рантайме его нет, и
+    /// расходовать нечего (§10 вопрос 41).
+    #[error("у параметра кратности своей кратности нет")]
+    GradedSort {
+        /// Написанная кратность.
+        span: Span,
+    },
+
+    /// Имя параметра кратности повторено в одной сигнатуре.
+    #[error("`{name}` объявлено параметром кратности дважды")]
+    RepeatedGrade {
+        /// Имя.
+        name: Symbol,
+        /// Второе вхождение.
+        span: Span,
+    },
+
     /// Одно имя связано клаузой дважды.
     #[error("`{name}` в клаузе дважды: равенство аргументов паттерном не выражается")]
     RepeatedBinding {
@@ -1021,6 +1040,8 @@ impl ElabError {
             | Self::NotAConstructor { span, .. }
             | Self::UppercaseBinding { span, .. }
             | Self::RepeatedBinding { span, .. }
+            | Self::GradedSort { span }
+            | Self::RepeatedGrade { span, .. }
             | Self::OwnedCarrier { span, .. }
             | Self::OwnedHolder { span, .. }
             | Self::EmptyCase { span }

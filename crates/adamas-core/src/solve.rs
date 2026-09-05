@@ -48,7 +48,7 @@ use crate::meta::Metas;
 use crate::mult::Mult;
 use crate::row::{Label, Row};
 use crate::sig::Signature;
-use crate::term::{Field, Fields, Rows, Term, TermMeta};
+use crate::term::{Args, Field, Fields, Term, TermMeta};
 use crate::value::{Elim, Head, Lvl, Value};
 
 /// Разворачивает решённые дырки в голове значения.
@@ -425,12 +425,16 @@ fn read(
                     };
                     Term::Var(Lvl(level).to_index(size))
                 }
-                Head::Global(name, levels, rows) => {
+                Head::Global(name, levels, rows, mults) => {
                     let mut read = Vec::with_capacity(rows.len());
                     for row in rows.iter() {
                         read.push(read_row(metas, meta, renaming, outer, arity, depth, row)?);
                     }
-                    Term::Const(Rc::clone(name), Rc::clone(levels), Rows::new(read))
+                    Term::Const(
+                        Rc::clone(name),
+                        Rc::clone(levels),
+                        Args::new(read, mults.as_slice().iter().copied()),
+                    )
                 }
                 // Вхождение самой дырки: подстановка дала бы бесконечный терм.
                 Head::Meta(found) if *found == meta => return None,
@@ -514,12 +518,13 @@ fn read(
 /// сигнатурой. Без этого случая §4.4 пишется только над конкретным типом.
 fn rigid(head: &Head, leading: &[Rc<Value>]) -> Option<Term> {
     match head {
-        Head::Global(name, levels, rows) => Some(Term::Const(
+        Head::Global(name, levels, rows, mults) => Some(Term::Const(
             Rc::clone(name),
             Rc::clone(levels),
-            Rows::new(
+            Args::new(
                 rows.iter()
                     .map(|row| row.map(|argument| crate::eval::quote(0, argument))),
+                mults.as_slice().iter().copied(),
             ),
         )),
         Head::Local(Lvl(level)) => {

@@ -136,6 +136,16 @@ struct Snatched {
     arguments: Vec<Rc<Value>>,
 }
 
+/// Разобранное вычисление под хендлером.
+struct Handling {
+    /// Терм вычисления.
+    value: Term,
+    /// Остаток row после снятия метки - глубина хендлера ρ.
+    rho: Row<Rc<Value>>,
+    /// Аргументы снятой метки.
+    arguments: Vec<Rc<Value>>,
+}
+
 /// Имя параметром лямбды.
 fn bind_as(name: ast::Name) -> ast::LamParam {
     let span = name.span;
@@ -3365,6 +3375,43 @@ impl<'a> Elaborator<'a> {
         called.iter().any(|it| self.holds_resource(it, seen))
     }
 
+    /// Вычисление под хендлером: терм, остаток row и аргументы снятой метки.
+    ///
+    /// Тип написанного спрашивается **синтезом**, и потому лямбда сюда не
+    /// проходит: домена она не хранит, и вывести её тип нечем (§10 вопрос 101).
+    /// Причина эта - не «метки не производит», и сообщение обязано называть ту,
+    /// что сработала, вместе с исполнимым выходом: назвать вычисление `let`-ом
+    /// с написанным типом (§10 вопрос 104).
+    ///
+    /// Элаборируется вычисление в окружающей самого `handle`: передаётся оно
+    /// замыканием, а не исполняется здесь.
+    fn snatched(&mut self, computation: &Expr, effect: &Symbol) -> Result<Handling, ElabError> {
+        let refuse = |why: &'static str| ElabError::NotHandled {
+            effect: Rc::clone(effect),
+            why,
+            span: computation.span,
+        };
+        let value = self.expr(computation, Mult::Many)?;
+        let ty = self.synthesized(&value).ok_or_else(|| {
+            refuse(
+                "тип написанного не выводится - назовите вычисление `let`-ом \
+                 с написанным типом",
+            )
+        })?;
+        let Value::Pi(_, _, _, row, _) = &*whnf_solved(self.signature, self.metas, &ty) else {
+            return Err(refuse(
+                "написано значение, а не приостановленное вычисление",
+            ));
+        };
+        let Snatched { rest, arguments } =
+            without(row, effect).ok_or_else(|| refuse("вычисление этой метки не производит"))?;
+        Ok(Handling {
+            value,
+            rho: rest,
+            arguments,
+        })
+    }
+
     fn handled(&mut self, handled: Handled<'_>) -> Result<Term, ElabError> {
         let Handled {
             multi,
@@ -3391,28 +3438,11 @@ impl<'a> Elaborator<'a> {
 
         let initial = self.initial_state(state, &effect, multi, span)?;
 
-        // Вычисление элаборируется в окружающей самого `handle`: передаётся
-        // оно замыканием, а не исполняется здесь.
-        let value = self.expr(computation, Mult::Many)?;
-        let ty = self
-            .synthesized(&value)
-            .ok_or_else(|| ElabError::NotHandled {
-                effect: Rc::clone(&effect),
-                span: computation.span,
-            })?;
-        let Value::Pi(_, _, _, row, _) = &*whnf_solved(self.signature, self.metas, &ty) else {
-            return Err(ElabError::NotHandled {
-                effect: Rc::clone(&effect),
-                span: computation.span,
-            });
-        };
-        let Snatched {
-            rest: rho,
+        let Handling {
+            value,
+            rho,
             arguments,
-        } = without(row, &effect).ok_or_else(|| ElabError::NotHandled {
-            effect: Rc::clone(&effect),
-            span: computation.span,
-        })?;
+        } = self.snatched(computation, &effect)?;
         if let (Some(wanted), Some(label)) = (wanted, label) {
             if !self.same_arguments(&arguments, &wanted) {
                 return Err(ElabError::HandlerLabel {
@@ -3550,10 +3580,15 @@ impl<'a> Elaborator<'a> {
             });
         }
         let term = self.expr(state, Mult::Many)?;
+        // Здесь стоит **значение**, а не вычисление, и прежний отказ говорил
+        // про написанное неправду: «под хендлером обязано стоять вычисление,
+        // производящее `L`» - тогда как нить вычислением быть не обязана вовсе.
         let ty = self
             .synthesized(&term)
-            .ok_or_else(|| ElabError::NotHandled {
+            .ok_or_else(|| ElabError::HandlerState {
                 effect: Rc::clone(effect),
+                why: "тип начального значения не выводится - назовите его \
+                      `let`-ом с написанным типом",
                 span: state.span,
             })?;
         Ok(Some((term, ty)))

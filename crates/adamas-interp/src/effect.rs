@@ -4,10 +4,13 @@
 //! которого стоит row. Позиция эта не соглашение машины, а то самое место, где
 //! объявление проверило форму операции (§3.4).
 //!
-//! **Хендлер ищется ближайший по стеку, и это совпадает с проверкой типов.**
+//! **Хендлер ищется ближайший одноимённый, и это совпадает с проверкой типов.**
 //! Правило погашения `ε' ≡ ε ++ Λ` отдаёт вызываемому внутреннее вхождение
 //! метки (§3.4, лог 2026-09-04), значит смещение вектора evidence всегда нуль -
-//! искать по стеку и есть верный ответ, а не приближение к нему.
+//! ближайший и есть верный ответ, а не приближение к нему.
+//!
+//! Ищется он по **указателю меток** стека, а не обходом кадров: обход шёл по
+//! длине сегмента и на глубокой рекурсии давал квадрат (§10 вопрос 94).
 //!
 //! Хендлер **глубокий**: сегмент резумпции включает сам кадр хендлера, поэтому
 //! возобновление ставит его обратно, и операция после возобновления попадает
@@ -32,7 +35,7 @@ use adamas_core::term::{Name, Term};
 use adamas_core::value::{Elim, Value};
 
 use crate::RunError;
-use crate::frame::{Frame, Handler, Kont};
+use crate::frame::{Frame, Handler, Kont, Mark, Segment};
 use crate::machine::{Machine, Step};
 
 /// Невыразимые имена элиминаторов - те же, что ставит элаборация.
@@ -172,54 +175,30 @@ impl Machine<'_> {
         arguments: &[Rc<Value>],
         kont: &mut Kont,
     ) -> Result<Step, RunError> {
-        // Маски считаются по дороге наружу: каждая пропускает один подходящий
-        // хендлер. Стоят они внутри того, мимо кого идут, поэтому поиск изнутри
-        // встречает их раньше - и счёт получается сам собой (§10 вопрос 72).
-        let mut masked = 0usize;
-        let found = kont
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(index, frame)| match frame {
-                Frame::Masking(name) if name == effect => {
-                    masked += 1;
-                    None
-                }
-                // Раскручиваемый хендлер считается наравне с настоящим: он и
-                // есть тот, кому погашение отдало этот ряд. Маска пропускает
-                // его тем же счётом.
-                Frame::Suppressing(name) if name == effect => {
-                    if masked > 0 {
-                        masked -= 1;
-                        return None;
-                    }
-                    Some(Caught::Suppressed(index))
-                }
-                Frame::Handler(handler) if handler.effect == *effect => {
-                    if masked > 0 {
-                        masked -= 1;
-                        return None;
-                    }
-                    let slot = handler.operations.iter().position(|it| it == operation)?;
-                    Some(Caught::Handled(index, Rc::clone(handler), slot))
-                }
-                _ => None,
-            });
+        // Хендлер ищется по **указателю меток**, а не обходом стека: смещение
+        // вектора evidence всегда нуль (§3.4), поэтому нужен ближайший
+        // одноимённый кадр, а не ближайший вообще. Маски учтены там же.
+        let unhandled = || RunError::Unhandled {
+            effect: effect.to_string(),
+            operation: operation.to_string(),
+        };
+        let (mark, index) = kont.catching(effect).ok_or_else(unhandled)?;
         // Дошло до раскручиваемого - деструктор обрывается, а раскрутка идёт
         // дальше: ответ хендлеру уже дан веткой, и второму деться некуда.
-        if let Some(Caught::Suppressed(index)) = found {
+        if mark == Mark::Suppressing {
             kont.truncate(index);
             return Ok(Step::Return(self.trivial()));
         }
-        let Some(Caught::Handled(index, handler, slot)) = found else {
-            return Err(RunError::Unhandled {
-                effect: effect.to_string(),
-                operation: operation.to_string(),
-            });
+        let Frame::Handler(handler) = kont.guard(index) else {
+            unreachable!("указатель меток назвал не хендлер")
+        };
+        let handler = Rc::clone(handler);
+        let Some(slot) = handler.operations.iter().position(|it| it == operation) else {
+            return Err(unhandled());
         };
         // Сегмент включает сам кадр хендлера: возобновление ставит его обратно,
         // и это и значит «глубокий».
-        let segment: Rc<[Frame]> = kont.drain(index..).collect();
+        let segment = kont.cut(index);
         let (resume, ticket) = self.resumption(segment, handler.multi);
         let mut given: Vec<Rc<Value>> = arguments
             [handler.params..handler.params + handler.written[slot]]
@@ -252,7 +231,7 @@ impl Machine<'_> {
     /// этого сегмента, и брошенные ветки внутри него: их сегменты тоже мертвы.
     pub(crate) fn unwinding(
         &self,
-        segment: &Rc<[Frame]>,
+        segment: &Segment,
         index: usize,
         held: Rc<Value>,
         kont: &mut Kont,
@@ -260,13 +239,13 @@ impl Machine<'_> {
         let mut index = index;
         while index > 0 {
             index -= 1;
-            match &segment[index] {
+            match segment.at(index) {
                 Frame::Closing(close) => {
                     let Ok(unit) = self.unit() else {
                         continue;
                     };
                     let close = Rc::clone(close);
-                    kont.push(Frame::Unwinding(Rc::clone(segment), index, held));
+                    kont.push(Frame::Unwinding(segment.clone(), index, held));
                     // Метка раскручиваемого хендлера - на время деструктора:
                     // его ряд погашение отдало именно ей, и без кадра операция
                     // ушла бы к внешнему хендлеру (§3.3).
@@ -279,8 +258,8 @@ impl Machine<'_> {
                 // этим сегментом. Случается, когда деструктор сам произвёл
                 // операцию, а её оборвали.
                 Frame::Unwinding(inner, at, _) => {
-                    let (inner, at) = (Rc::clone(inner), *at);
-                    kont.push(Frame::Unwinding(Rc::clone(segment), index, held));
+                    let (inner, at) = (inner.clone(), *at);
+                    kont.push(Frame::Unwinding(segment.clone(), index, held));
                     return self.unwinding(&inner, at, self.trivial(), kont);
                 }
                 // Ветка внутри сегмента, чью резумпцию не позвали: её
@@ -289,7 +268,7 @@ impl Machine<'_> {
                     let Some(inner) = self.segment(*ticket) else {
                         continue;
                     };
-                    kont.push(Frame::Unwinding(Rc::clone(segment), index, held));
+                    kont.push(Frame::Unwinding(segment.clone(), index, held));
                     let length = inner.len();
                     return self.unwinding(&inner, length, self.trivial(), kont);
                 }
@@ -388,12 +367,4 @@ fn domain(ty: &Term, index: usize) -> Option<&Term> {
         Term::Pi(_, _, domain, _, _) => Some(domain),
         _ => None,
     }
-}
-
-/// Чем кончился поиск хендлера по стеку.
-enum Caught {
-    /// Нашёлся настоящий: индекс кадра, сам хендлер и номер ветки.
-    Handled(usize, Rc<Handler>, usize),
-    /// Нашёлся раскручиваемый: операция подавляется, деструктор обрывается.
-    Suppressed(usize),
 }

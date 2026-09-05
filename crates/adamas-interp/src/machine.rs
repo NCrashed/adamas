@@ -23,7 +23,7 @@ use adamas_core::term::{Case, Name, Term};
 use adamas_core::value::{Elim, Env, Head, StuckBranch, StuckCase, Value};
 
 use crate::RunError;
-use crate::frame::{Frame, Kont};
+use crate::frame::{Frame, Kont, Segment};
 
 /// Машина: сигнатура и таблица живых резумпций.
 pub struct Machine<'a> {
@@ -84,7 +84,7 @@ impl<'a> Machine<'a> {
     ///
     /// Операция, не встретившая хендлера.
     pub fn evaluate(&self, env: &Env, term: &Term) -> Result<Rc<Value>, RunError> {
-        let mut kont: Kont = Vec::new();
+        let mut kont = Kont::default();
         self.driving(Step::Eval(env.clone(), Rc::new(term.clone())), &mut kont)
     }
 
@@ -114,7 +114,7 @@ impl<'a> Machine<'a> {
     pub(crate) fn forced(&self, value: Rc<Value>) -> Result<Rc<Value>, RunError> {
         let mut current = value;
         loop {
-            let mut kont: Kont = Vec::new();
+            let mut kont = Kont::default();
             let Some(step) = self.unfolding(&current, &mut kont) else {
                 return Ok(current);
             };
@@ -221,8 +221,7 @@ impl<'a> Machine<'a> {
             Some(step) => {
                 // Кадр применения стоит **под** переигрыванием спайна: сперва
                 // развёрнутое доберётся до головной формы, потом применится.
-                let position = kont.len() - 1;
-                kont.insert(position, Frame::Forcing(argument));
+                kont.tuck(Frame::Forcing(argument));
                 Ok(step)
             }
             None => self.applying(callee, argument, kont),
@@ -302,8 +301,7 @@ impl<'a> Machine<'a> {
             Frame::Fields(fields, index) => Ok(Self::spreading(value, &fields, index, kont)),
             Frame::Project(name) => match self.unfolding(&value, kont) {
                 Some(step) => {
-                    let position = kont.len() - 1;
-                    kont.insert(position, Frame::Project(name));
+                    kont.tuck(Frame::Project(name));
                     Ok(step)
                 }
                 None => Ok(Step::Return(eval::project(&value, &name))),
@@ -351,8 +349,7 @@ impl<'a> Machine<'a> {
         kont: &mut Kont,
     ) -> Step {
         if let Some(step) = self.unfolding(scrutinee, kont) {
-            let position = kont.len() - 1;
-            kont.insert(position, Frame::Scrutinee(env.clone(), Rc::clone(case)));
+            kont.tuck(Frame::Scrutinee(env.clone(), Rc::clone(case)));
             return step;
         }
         let selected = match &**scrutinee {
@@ -430,7 +427,7 @@ impl<'a> Machine<'a> {
     }
 
     /// Заводит резумпцию из сегмента и отдаёт её значением.
-    pub(crate) fn resumption(&self, segment: Rc<[Frame]>, multi: bool) -> (Rc<Value>, usize) {
+    pub(crate) fn resumption(&self, segment: Segment, multi: bool) -> (Rc<Value>, usize) {
         let mut table = self.resumptions.borrow_mut();
         let index = table.len();
         table.push(Resumption {
@@ -450,11 +447,11 @@ impl<'a> Machine<'a> {
     }
 
     /// Сегмент резумпции по номеру.
-    pub(crate) fn segment(&self, index: usize) -> Option<Rc<[Frame]>> {
+    pub(crate) fn segment(&self, index: usize) -> Option<Segment> {
         self.resumptions
             .borrow()
             .get(index)
-            .map(|it| Rc::clone(&it.segment))
+            .map(|it| it.segment.clone())
     }
 
     /// Звали ли резумпцию хоть раз.
@@ -481,9 +478,9 @@ impl<'a> Machine<'a> {
                     // число (ревью 2026-09-05). Мультишотной сегмент нужен
                     // и дальше - там повтор и есть её смысл.
                     if entry.multi {
-                        Rc::clone(&entry.segment)
+                        entry.segment.clone()
                     } else {
-                        std::mem::replace(&mut entry.segment, Rc::from([] as [Frame; 0]))
+                        std::mem::take(&mut entry.segment)
                     }
                 }
                 None => unreachable!("резумпция {index} не заведена"),
@@ -492,7 +489,7 @@ impl<'a> Machine<'a> {
         let Some(Elim::App(argument)) = spine.last() else {
             unreachable!("резумпция без аргумента");
         };
-        kont.extend(segment.iter().cloned());
+        kont.restore(segment);
         Step::Return(Rc::clone(argument))
     }
 }
@@ -542,7 +539,7 @@ pub(crate) fn constructor(signature: &Signature, name: &Name) -> bool {
 /// первого возобновления: у аффинной второго вызова не бывает по построению
 /// (§3.4), а у мультишотной повтор и есть её смысл.
 struct Resumption {
-    segment: Rc<[Frame]>,
+    segment: Segment,
     invoked: bool,
     multi: bool,
 }

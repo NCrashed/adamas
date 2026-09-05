@@ -91,5 +91,40 @@ seven = handle flipped with
   get -> resume state state
   put x -> resume MkUnit x
 
+-- Нить сочетается с остатком ряда: `State` снимается, `Log` уходит наружу.
+--
+-- Тело ветки живёт в окружающей **применения** `handle`, а не в пустой:
+-- §3.4 говорит о ветке ровно это, и ветка вправе производить эффект, которого
+-- у вычисления нет вовсе. Пока row на стрелке нити была пустой, всякий
+-- остаток отвергался непогашенностью, и параметризованный хендлер не
+-- сочетался ни с чем - то есть не делал того, ради чего заведён. Корпус
+-- этого не видел: до сих пор он состоял из хендлеров, гасящих `State` в
+-- чистый результат.
+
+effect Log where
+  note : Nat -> Unit
+
+mixed : {State, Log} Nat
+mixed =
+  let a : Nat = get
+  let u : Unit = note a
+  let v : Unit = put (a + 10)
+  let b : Nat = get
+  b
+
+-- Снимает State, оставляя Log вызывающему.
+threadedOut : {Log} Nat
+threadedOut = handle mixed with
+  state 7
+  return v -> v
+  get -> resume state state
+  put x -> resume MkUnit x
+
+-- Отметка видит состояние **на момент операции**, ответ - конечное.
+composed : List Nat
+composed = handle threadedOut with
+  return v -> Cons v Nil
+  note n -> Cons n (resume MkUnit)
+
 main : List Nat
-main = Cons summed (Cons final (Cons ticks (Cons seven Nil)))
+main = Cons summed (Cons final (Cons ticks (Cons seven composed)))

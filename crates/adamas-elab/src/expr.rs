@@ -3425,11 +3425,25 @@ impl<'a> Elaborator<'a> {
 
     fn threaded(&mut self, state: &Rc<Value>, answer: &Rc<Value>) -> Rc<Value> {
         let size = self.ctx.size();
+        // Row на этой стрелке - **окружающая применения `handle`**, а не
+        // пустая. Тело ветки живёт под ней, и §3.4 говорит о ветке ровно это:
+        // она работает там, где написан сам хендлер, и вправе производить
+        // эффект, которого у вычисления нет вовсе. Пока стояла пустая,
+        // параметризованный хендлер не сочетался ни с чем: всякий остаток
+        // ряда - `{Log}` рядом со снимаемым `State` - отвергался
+        // непогашенностью, то есть форма не делала того, ради чего заведена
+        // (ревью 2026-09-05). Голден этого не видел: он состоит из хендлеров,
+        // гасящих `State` в чистый результат.
+        let ambient = self
+            .ctx
+            .row()
+            .clone()
+            .map(|argument| quote(size, argument));
         let arrow = Term::Pi(
             Binder::explicit(Mult::Many),
             CoreName::from(STATE),
             Rc::new(quote(size, state)),
-            Row::empty(),
+            ambient,
             // Ответ о связывании не знает: написан он снаружи хендлера.
             Rc::new(adamas_core::pattern::shift_free(&quote(size, answer), 1)),
         );

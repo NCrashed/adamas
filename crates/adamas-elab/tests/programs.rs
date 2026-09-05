@@ -3346,6 +3346,89 @@ flagged = eq True False
     ));
 }
 
+/// Класс с эффектным методом - основа свидетелей вопроса 102.
+const EVAL_CLASS: &str = "
+data Unit where
+  MkUnit : Unit
+
+effect Fail where
+  fail : Nat -> Nat
+
+effect Trace where
+  note : Nat -> Unit
+
+class Eval a where
+  run : a -> {Fail} Nat
+
+instance Eval Nat where
+  run n = n
+";
+
+#[test]
+fn an_effectful_method_is_called_from_a_wider_ambient() {
+    // §10 вопрос 102: row метода - параметр **класса**, и место вызова его
+    // инстанцирует. Без параметра метод годился бы ровно в той окружающей, что
+    // совпадает с его метками, и терял бы row-полиморфизм у всякого, кто его
+    // позвал.
+    //
+    // Контроль - та же сигнатура обычной функцией. Он проходил всегда: у
+    // определения row поднята, и разницу между ним и методом даёт ровно то, что
+    // чинит вопрос.
+    let signature = program(&format!(
+        "{BASE}{EVAL_CLASS}
+control : Nat -> {{Fail}} Nat
+control n = n
+
+byControl : Nat -> {{Fail, Trace}} Nat
+byControl s = control s
+
+byMethod : Nat -> {{Fail, Trace}} Nat
+byMethod s = run s
+"
+    ));
+    assert_eq!(
+        signature.lookup("Eval").map(|it| it.row_arity),
+        Some(1),
+        "класс с эффектным членом несёт row-параметр"
+    );
+}
+
+#[test]
+fn a_class_without_written_effects_carries_no_row() {
+    // Параметр заводится по написанным меткам, а не всем классам подряд.
+    // Заведённый впустую, он в месте вызова не определяется ничем: у метода без
+    // стрелки погашению не за что зацепиться.
+    let signature = program(&format!("{BASE}{EQ_CLASS}"));
+    assert_eq!(
+        signature.lookup("Eqv").map(|it| it.row_arity),
+        Some(0),
+        "класс без написанных меток остаётся без row-параметра"
+    );
+}
+
+#[test]
+fn an_arrowless_member_lives_beside_an_effectful_one() {
+    // Член без стрелки row класса не называет, поэтому и не получает её: иначе
+    // дырка дожила бы до границы объявления того, кто его позвал.
+    program(&format!(
+        "{BASE}{EVAL_CLASS}
+class Origin a where
+  run2 : a -> {{Fail}} Nat
+  zero : a
+
+instance Origin Nat where
+  run2 n = n
+  zero = Zero
+
+widely : Nat -> {{Fail, Trace}} Nat
+widely s = run2 s
+
+taken : Nat
+taken = zero
+"
+    ));
+}
+
 #[test]
 fn a_method_computes_through_the_dictionary() {
     // Словарь - обычная запись, метод - обычная проекция, поэтому вызов

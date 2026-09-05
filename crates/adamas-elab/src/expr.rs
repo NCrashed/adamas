@@ -978,6 +978,7 @@ impl<'a> Elaborator<'a> {
         params: &[ast::Binder],
         uppercase: bool,
         default: Mult,
+        unwritten: Unwritten<'_>,
     ) -> Result<Vec<Param>, ElabError> {
         let depth = self.scope.len();
         let outer = self.ctx.clone();
@@ -987,14 +988,21 @@ impl<'a> Elaborator<'a> {
                 if !uppercase {
                     Self::binds(name)?;
                 }
-                // Ненаписанный тип параметра - `Type`, а не общая дырка:
-                // `data Pair a b` называет типы, а параметр иного рода
-                // пишется (`(0 n : Nat)`). Универсум семейства обязан
-                // вместить уровни своих параметров, и без этого умолчания
-                // считать их было бы нечем.
-                let domain = match &binder.ty {
-                    Some(ty) => self.typing(|it| it.expr(ty, Mult::Many))?,
-                    None => Term::Universe(self.metas.fresh_level()),
+                let given = match unwritten {
+                    Unwritten::Given(kinds) => kinds.get(&name.text).cloned(),
+                    Unwritten::Sort => None,
+                };
+                let domain = match (&binder.ty, given) {
+                    (Some(ty), _) => self.typing(|it| it.expr(ty, Mult::Many))?,
+                    // Кайнд пришёл от суперкласса: писать его автору незачем,
+                    // констрейнт его уже назвал.
+                    (None, Some(kind)) => kind,
+                    // У семейства ненаписанный тип параметра - `Type`, а не
+                    // общая дырка: `data Pair a b` называет типы, а параметр
+                    // иного рода пишется (`(0 n : Nat)`). Универсум семейства
+                    // обязан вместить уровни своих параметров, и без этого
+                    // умолчания считать их было бы нечем.
+                    (None, None) => Term::Universe(self.metas.fresh_level()),
                 };
                 let mult = match &binder.ty {
                     Some(ty) => self.binder_mult(binder.mult, ty, default, binder.span)?,
@@ -2694,7 +2702,7 @@ impl<'a> Elaborator<'a> {
             // телескоп по ним, оканчивающийся сортом. Написать этот телескоп
             // сигнатурой нельзя по той же причине, по какой не пишется алиас:
             // конкретный универсум в поверхностном языке не выражается.
-            let params = self.telescope(first.params, false, Mult::Many)?;
+            let params = self.telescope(first.params, false, Mult::Many, Unwritten::Sort)?;
             let level = self.metas.fresh_level();
             self.wrapped(&params, false, |_| Ok(Term::Universe(level)))?
         };
@@ -5218,4 +5226,22 @@ fn performing(ty: &Term) -> Option<usize> {
         current = codomain;
     }
     None
+}
+
+/// Чем становится ненаписанный тип параметра телескопа.
+///
+/// Правило расходится по видам объявления, и довод у каждого свой.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unwritten<'a> {
+    /// `Type`: универсум семейства обязан вместить уровни своих параметров, и
+    /// без умолчания считать их было бы нечем.
+    Sort,
+    /// Кайнды, вычитанные снаружи по имени параметра; остальным - `Type`.
+    ///
+    /// Так объявляется класс: `class Applicative f when Functor f` кайнда не
+    /// пишет, а суперкласс его знает - `Functor` объявлен `(f : Type ->
+    /// Type)`. Общий вывод кайнда сюда не годится: дырка вместо `Type`
+    /// потребовала бы изобретать функциональный тип при применении `f a`,
+    /// чего элаборация не делает, и ломала бы умолчание параметра.
+    Given(&'a std::collections::HashMap<Symbol, Term>),
 }

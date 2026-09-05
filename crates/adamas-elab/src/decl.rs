@@ -35,7 +35,7 @@ use crate::error::{ElabError, Names};
 use adamas_core::value::{Env, Lvl, Value};
 
 use crate::class::{self, Class, Declaring, Instances, Offence};
-use crate::expr::{Elaborator, Enclosing, Member, Param, UNIT, WrittenField};
+use crate::expr::{Elaborator, Enclosing, Member, Param, UNIT, Unwritten, WrittenField};
 use crate::fixity::Fixities;
 use crate::own::{Owned, Ownership};
 use crate::route::{self, Declared};
@@ -298,7 +298,7 @@ fn declared_signature<'a>(
     // клауз связывает такие сам, а ссылка изнутри применяется к ним явно
     // (`Elaborator::specialized`).
     let mut elaborator = Elaborator::new(signature, metas, owned, fixities).within(within);
-    let params = elaborator.telescope(params_of(within), true, Mult::Many)?;
+    let params = elaborator.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
     let elaborated = elaborator.wrapped(&params, true, |it| it.declaration(ty, Mult::Many))?;
     Ok(Pending {
         total,
@@ -534,9 +534,10 @@ fn alias(
     // Связывания двух родов и в одном телескопе: сперва параметры функтора,
     // потом свои. Написанный параметр живёт под функторными - его тип вправе
     // их упоминать, - поэтому и элаборируются они одной последовательностью.
-    let outer = elaborator.telescope(params_of(within), true, Mult::Many)?;
-    let owned_params =
-        elaborator.beneath(&outer, |it| it.telescope(written.params, false, Mult::Many))?;
+    let outer = elaborator.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
+    let owned_params = elaborator.beneath(&outer, |it| {
+        it.telescope(written.params, false, Mult::Many, Unwritten::Sort)
+    })?;
     let params: Vec<Param> = outer.iter().chain(owned_params.iter()).cloned().collect();
     // Тело и его сорт считаются **под параметрами**: тип члена функтора живёт
     // под ними, и в пустом контексте считать его нечем.
@@ -593,6 +594,7 @@ fn alias(
         known.fixities,
         &declared,
         written.params,
+        Unwritten::Sort,
     )
 }
 
@@ -649,7 +651,7 @@ fn declare_module(
     // освобождает дырки, и посчитанный заранее умер бы на первом же члене.
     let params = Elaborator::new(signature, metas, owned, fixities)
         .within(within)
-        .telescope(&module.params, true, Mult::Many)?;
+        .telescope(&module.params, true, Mult::Many, Unwritten::Sort)?;
 
     // Поле на каждого объявленного члена, в порядке написания. Клаузы своего
     // поля не заводят: его завела сигнатура, за которой они идут. Член
@@ -865,8 +867,9 @@ fn declare_class(
     // Класс - **функция** от своих параметров в тип записи, а не сам тип:
     // `Eqv Nat` есть применение. Отсюда тело лямбдой, а тип - `Pi` над
     // универсумом, в котором живёт запись.
+    let kinds = superclass_kinds(signature, metas, class);
     let mut elaborator = Elaborator::new(signature, metas, owned, fixities);
-    let telescope = elaborator.telescope(&params, false, Mult::Zero)?;
+    let telescope = elaborator.telescope(&params, false, Mult::Zero, Unwritten::Given(&kinds))?;
     let (record, level) = elaborator.beneath(&telescope, |it| {
         let fields = it.module_members(&members)?;
         let record = Term::Record(Fields::closed(fields.into()));
@@ -897,7 +900,15 @@ fn declare_class(
             error: Box::new(error),
             names,
         })?;
-    declare_defaults(signature, metas, owned, fixities, &name.text, &params)?;
+    declare_defaults(
+        signature,
+        metas,
+        owned,
+        fixities,
+        &name.text,
+        &params,
+        Unwritten::Sort,
+    )?;
     // Имя верхнего уровня получает **метод**, а не поле суперкласса: его
     // разряжает разрешение, и писать его автору незачем.
     for method in &info.methods {
@@ -1989,6 +2000,7 @@ fn declare_families(
             fixities,
             &family.data.name.text,
             &family.data.params,
+            Unwritten::Sort,
         )?;
     }
     Ok(())
@@ -3142,6 +3154,7 @@ fn declare_defaults(
     fixities: &Fixities,
     declared: &Symbol,
     written: &[ast::Binder],
+    unwritten: Unwritten<'_>,
 ) -> Result<(), ElabError> {
     let mut at = 0;
     let mut trailing = false;
@@ -3161,7 +3174,7 @@ fn declare_defaults(
         // предыдущего освободило дырки уровня, и посчитанный один раз умер бы
         // на втором.
         let mut elaborator = Elaborator::new(signature, metas, owned, fixities);
-        let params = elaborator.telescope(&written[..=position], false, Mult::Zero)?;
+        let params = elaborator.telescope(&written[..=position], false, Mult::Zero, unwritten)?;
         let Some(param) = params.get(at) else {
             return Err(ElabError::TrailingDefault {
                 name: Rc::clone(&binder.names[0].text),
@@ -3250,7 +3263,7 @@ fn family_header<'a>(
     // каждый конструктор обязаны нести **один и тот же** телескоп, иначе
     // `List` в результате и `List` в объявлении - два разных семейства.
     let mut elaborator = Elaborator::new(signature, metas, owned, fixities);
-    let params = elaborator.telescope(&data.params, false, Mult::Zero)?;
+    let params = elaborator.telescope(&data.params, false, Mult::Zero, Unwritten::Sort)?;
     let kind = match &data.kind {
         // Параметры пишутся, поэтому в kind они явные: `Vect a n`.
         Some(kind) => elaborator.wrapped(&params, false, |it| {
@@ -3399,7 +3412,7 @@ fn declare_effect(
         });
     }
     let mut elaborator = Elaborator::new(signature, metas, owned, fixities);
-    let params = elaborator.telescope(&effect.params, false, Mult::Zero)?;
+    let params = elaborator.telescope(&effect.params, false, Mult::Zero, Unwritten::Sort)?;
     let kind = elaborator.wrapped(&params, false, |_| Ok(Term::EffectKind))?;
     let names = Names::of_effect(
         &effect.name.text,
@@ -3485,6 +3498,7 @@ fn declare_effect(
         fixities,
         &effect.name.text,
         &effect.params,
+        Unwritten::Sort,
     )
 }
 
@@ -4039,6 +4053,7 @@ fn declare_data(
         fixities,
         &data.name.text,
         &data.params,
+        Unwritten::Sort,
     )
 }
 /// Аргументы уровня, с которыми член группы называет сам себя.
@@ -4072,4 +4087,67 @@ fn self_levels(
     Ok((0..generalization.arity())
         .map(|_| metas.fresh_level())
         .collect())
+}
+
+/// Кайнды параметров класса, названные его суперклассами.
+///
+/// `class Applicative f when Functor f` кайнда `f` не пишет, а `Functor`
+/// объявлен `(f : Type -> Type)` и, значит, уже его назвал. Читается кайнд по
+/// позиции: аргумент констрейнта, написанный голым именем параметра, получает
+/// домен суперкласса, стоящий на том же месте.
+///
+/// Общий вывод кайнда сюда не годится, и это измерено: дырка вместо `Type`
+/// потребовала бы изобретать функциональный тип при применении `f a`, чего
+/// элаборация не делает, и вдобавок ломала бы умолчание параметра. §4.4 при
+/// этом пишет высококайндовый параметр без аннотации ровно там, где есть
+/// суперкласс, - `Functor` объявлен с аннотацией, `Applicative` и
+/// `Traversable` без неё.
+fn superclass_kinds(
+    signature: &Signature,
+    metas: &mut Metas,
+    class: &ast::ClassDecl,
+) -> HashMap<Symbol, Term> {
+    let named: Vec<&Symbol> = class
+        .params
+        .iter()
+        .filter(|binder| binder.ty.is_none())
+        .flat_map(|binder| &binder.names)
+        .map(|name| &name.text)
+        .collect();
+    let mut found = HashMap::new();
+    for superclass in &class.superclasses {
+        let Some((head, arguments)) = spine_of(superclass) else {
+            continue;
+        };
+        let Some(definition) = signature.lookup(&head.text) else {
+            continue;
+        };
+        // Параметры уровня у суперкласса свои, и в новом классе их нет:
+        // домен берётся инстанцированным свежими, как всякая ссылка на
+        // объявленное.
+        let levels: Vec<Level> = (0..definition.level_arity)
+            .map(|_| metas.fresh_level())
+            .collect();
+        let rows: Vec<Row<Term>> = (0..definition.row_arity)
+            .map(|_| metas.fresh_row())
+            .collect();
+        let mut domains = Vec::new();
+        let mut current = &definition.ty;
+        while let Term::Pi(_, _, domain, _, codomain) = current {
+            domains.push(domain.substitute_levels(&levels).substitute_rows(&rows));
+            current = codomain;
+        }
+        for (at, argument) in arguments.iter().enumerate() {
+            let ast::ExprKind::Name(name) = &argument.kind else {
+                continue;
+            };
+            let Some(domain) = domains.get(at) else {
+                continue;
+            };
+            if named.contains(&&name.text) {
+                found.insert(Symbol::clone(&name.text), Term::clone(domain));
+            }
+        }
+    }
+    found
 }

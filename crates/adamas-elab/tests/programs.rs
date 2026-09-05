@@ -7265,3 +7265,74 @@ twice = mask (mask (raise True))
 "
     ));
 }
+
+#[test]
+fn a_class_reads_its_parameter_kind_from_a_superclass() {
+    // §4.4 пишет `class Applicative f when Functor f` без аннотации кайнда, а
+    // параметру без написанного типа доставался `Type`, и `pure : a -> f a`
+    // упиралось в «ожидалась функция». Кайнд при этом уже назван: `Functor`
+    // объявлен `(f : Type -> Type)`, и констрейнт указывает на тот же
+    // параметр.
+    let chain = format!(
+        "{BASE}
+data Option a where
+  None : Option a
+  Some : a -> Option a
+
+class Functor (f : Type -> Type) where
+  map : (a -> b) -> f a -> f b
+
+class Applicative f when Functor f where
+  pure : a -> f a
+  ap : f (a -> b) -> f a -> f b
+
+class Monad m when Applicative m where
+  bind : m a -> (a -> m b) -> m b
+
+instance Functor Option where
+  map g None = None
+  map g (Some x) = Some (g x)
+
+instance Applicative Option where
+  pure x = Some x
+  ap None y = None
+  ap (Some g) y = map g y
+
+instance Monad Option where
+  bind None g = None
+  bind (Some x) g = g x
+
+used : Option Bool
+used = bind (pure True) (\\b -> Some b)
+"
+    );
+    // Кайнд едет по цепочке: `Monad` берёт его у `Applicative`, а тот у
+    // `Functor`.
+    program(&chain);
+
+    // Умолчание `Type` остаётся там, где суперкласс кайнда не называет:
+    // первопорядковый параметр пишется без аннотации, как и писался.
+    program(&format!(
+        "{BASE}
+class Eqv a where
+  eq : a -> a -> Bool
+
+instance Eqv Bool where
+  eq x y = True
+"
+    ));
+
+    // Названная цена: высококайндовый параметр без суперкласса по-прежнему
+    // требует аннотации - выводить кайнд из типов членов значило бы изобретать
+    // функциональный тип при применении, чего элаборация не делает.
+    let error = refused(&format!(
+        "{BASE}
+class Alone f where
+  peek : f Bool -> Bool
+"
+    ));
+    assert!(
+        error.to_string().contains("ожидалась функция"),
+        "получено {error:?}"
+    );
+}

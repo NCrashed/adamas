@@ -237,6 +237,14 @@ pub enum Arity {
         /// Параметров row.
         rows: u32,
     },
+    /// Уровни выводятся, row объявлены. Так объявляется класс (§4.4): его
+    /// row-параметр несут **поля словаря**, то есть тело, а обобщение читает
+    /// тип, - вывести число оттуда нечем. Уровень при этом выводится как
+    /// обычно: универсум словаря считается по полям.
+    Rowed {
+        /// Параметров row.
+        rows: u32,
+    },
 }
 
 impl Arity {
@@ -248,14 +256,14 @@ impl Arity {
     fn declared(self) -> u32 {
         match self {
             Self::Declared { levels, .. } => levels,
-            Self::Inferred => 0,
+            Self::Inferred | Self::Rowed { .. } => 0,
         }
     }
 
     /// То же для row.
     fn declared_rows(self) -> u32 {
         match self {
-            Self::Declared { rows, .. } => rows,
+            Self::Declared { rows, .. } | Self::Rowed { rows } => rows,
             Self::Inferred => 0,
         }
     }
@@ -432,6 +440,19 @@ impl Member {
             | Self::Data { arity, .. }
             | Self::Effect { arity, .. } => {
                 *arity = Arity::Declared { levels, rows };
+            }
+        }
+        self
+    }
+
+    /// Объявляет только row-арность: уровни остаются выведенными (§4.4).
+    #[must_use]
+    pub fn with_rows(mut self, rows: u32) -> Self {
+        match &mut self {
+            Self::Definition { arity, .. }
+            | Self::Data { arity, .. }
+            | Self::Effect { arity, .. } => {
+                *arity = Arity::Rowed { rows };
             }
         }
         self
@@ -1385,6 +1406,30 @@ impl Signature {
         self.declare(metas, &Group::of(member))
     }
 
+    /// То же с объявленной row-арностью: уровни выводятся, row написаны.
+    ///
+    /// Так объявляется класс (§4.4): row-параметр стоит в **полях словаря**, а
+    /// обобщение читает тип, - вывести число оттуда нечем.
+    ///
+    /// # Errors
+    ///
+    /// То же, что у [`Signature::declare`].
+    pub fn define_rowed(
+        &mut self,
+        metas: &mut Metas,
+        name: &str,
+        mult: Mult,
+        ty: Term,
+        body: Option<Term>,
+        rows: u32,
+    ) -> Result<(), TypeError> {
+        let mut member = Member::definition(name, mult, ty).with_rows(rows);
+        if let Some(body) = body {
+            member = member.with_body(body);
+        }
+        self.declare(metas, &Group::of(member))
+    }
+
     /// Постулат с выведенной арностью.
     ///
     /// # Errors
@@ -1476,6 +1521,21 @@ fn generalize(
 ) -> (Definition, Option<Generalization>) {
     match arity {
         Arity::Declared { .. } => (draft, None),
+        // Row-параметры объявлены - обобщать их нечем и незачем: в терме они уже
+        // стоят как `RowVar`. Дырка row, если она сюда всё же дошла,
+        // отображению не подлежит - номера заняты, - и её ловит запечатывание
+        // тем же отказом, что у объявленной арности.
+        Arity::Rowed { rows } => {
+            let mut generalization = Generalization::default();
+            generalization.collect_levels(metas, &draft.ty);
+            let declaration = Definition {
+                level_arity: generalization.arity(),
+                row_arity: rows,
+                ty: generalization.apply_term(metas, &draft.ty),
+                ..draft
+            };
+            (declaration, Some(generalization))
+        }
         Arity::Inferred => {
             let mut generalization = Generalization::default();
             generalization.collect_term(metas, &draft.ty);

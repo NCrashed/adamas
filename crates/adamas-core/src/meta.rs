@@ -648,9 +648,28 @@ pub struct Generalization {
     /// вопрос 73). Список свой, потому что и параметры свои: у определения два
     /// независимых набора.
     rows: Vec<RowMeta>,
+    /// Row-параметры объявлены вызывающим - собирать их хвосты нельзя.
+    ///
+    /// Номера параметров при такой записи уже заняты стоящими в терме
+    /// `RowVar`, и дырка, отображённая в тот же номер, слилась бы с чужим
+    /// параметром. Оставленная как есть, она доходит до запечатывания и там
+    /// отвергается - тем же отказом, что у полностью объявленной арности.
+    declared_rows: bool,
 }
 
 impl Generalization {
+    /// Собирает только уровни: row-параметры объявлены (§4.4, класс).
+    pub fn collect_levels(&mut self, metas: &Metas, term: &crate::term::Term) {
+        self.declared_rows = true;
+        self.collect_term(metas, term);
+    }
+
+    /// Собранные дырки row - в порядке появления.
+    #[must_use]
+    pub fn rows(&self) -> &[RowMeta] {
+        &self.rows
+    }
+
     /// Собирает нерешённые дырки уровня в порядке появления.
     pub fn collect_level(&mut self, metas: &Metas, level: &Level) {
         match metas.zonk(level) {
@@ -672,7 +691,7 @@ impl Generalization {
     pub fn collect_row(&mut self, metas: &Metas, row: &Row<crate::term::Term>) {
         let row = metas.zonk_row(row);
         if let Some(Tail::Meta(meta)) = row.tail() {
-            if !self.rows.contains(&meta) {
+            if !self.declared_rows && !self.rows.contains(&meta) {
                 self.rows.push(meta);
             }
         }

@@ -4774,6 +4774,87 @@ one = Node True Nil
 }
 
 #[test]
+fn a_group_neighbour_off_the_cycle_takes_its_own_parameters() {
+    // §10 вопрос 96: единообразие спрашивается с вхождения, чей член
+    // **возвращается** к объявляемому семейству. `P` о `Q` не знает, цикла нет,
+    // и `P a a` - обычное применение типа. Пока правило шло по всей группе, оно
+    // отвергало это, а те же два объявления **вне** группы проходили.
+    program(&format!(
+        "{BASE}
+mutual
+  data P (a : Type) (b : Type) where
+    MkP : P a b
+
+  data Q (a : Type) where
+    MkQ : P a a -> Q a
+"
+    ));
+    // Контроль: те же два объявления **вне** группы. Они проходили всегда, и
+    // разницу между ними и группой давало ровно то, что чинит вопрос.
+    program(&format!(
+        "{BASE}
+data P (a : Type) (b : Type) where
+  MkP : P a b
+
+data Q (a : Type) where
+  MkQ : P a a -> Q a
+"
+    ));
+
+    // Перестановка параметров соседа - то же самое: цикла нет.
+    program(&format!(
+        "{BASE}
+mutual
+  data P (a : Type) (b : Type) where
+    MkP : P a b
+
+  data Q (a : Type) (b : Type) where
+    MkQ : P b a -> Q a b
+"
+    ));
+}
+
+#[test]
+fn a_group_neighbour_on_the_cycle_keeps_uniformity() {
+    // Граница правила, и она же довод против «мерить только у объявляемого»:
+    // `A a` содержит `B (Pair a)`, а `B b` - `A b`, значит `A a` содержит
+    // `A (Pair a)`. Параметр меняется послойно, то есть его придётся хранить -
+    // ровно то, ради чего единообразие и введено, только достигнутое через
+    // соседа.
+    let error = refused(&format!(
+        "{BASE}
+data Pair (a : Type) where
+  MkPair : a -> a -> Pair a
+
+mutual
+  data A (a : Type) where
+    MkA : B (Pair a) -> A a
+
+  data B (b : Type) where
+    MkB : A b -> B b
+    StopB : B b
+"
+    ));
+    assert!(
+        error.to_string().contains("не к своим параметрам"),
+        "получено {error}"
+    );
+
+    // Соседи на цикле с тем же телескопом проходят - это `Tree`/`Forest`.
+    program(&format!(
+        "{BASE}
+mutual
+  data Tree (a : Type) where
+    Node : a -> Forest a -> Tree a
+
+  data Forest (a : Type) where
+    Nil : Forest a
+    Cons : Tree a -> Forest a -> Forest a
+"
+    ));
+}
+
+#[test]
 fn a_mutual_group_mixes_families_and_definitions() {
     // Семейства объявляются первыми и своей группой: разбор берёт у
     // конструктора тип, и в сигнатуре он обязан быть раньше клауз.

@@ -1,0 +1,41 @@
+-- Розовое дерево: тип, рекурсивно вложенный в **другое** семейство (§10
+-- вопрос 42).
+--
+-- Позитивность спускается в объявление внешнего семейства и спрашивает,
+-- положителен ли его параметр на этом месте. `List` кладёт свой в поле, значит
+-- `Tree` внутри него стоит положительно, и объявление обосновано. Слева от
+-- стрелки параметр стоять не вправе - `Fn Bad` при `MkFn : (a -> Nat) -> Fn a`
+-- отвергается, и это тот отказ, ради которого правило и есть.
+--
+-- Обходилось ручным разворотом `List` под каждый вложенный тип; пара к этому
+-- файлу осталась в `programs/` - там же взаимная рекурсия по развёрнутому.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+infixl 6 +
+(+) : Nat -> Nat -> Nat
+(+) Zero m = m
+(+) (Succ k) m = Succ (k + m)
+
+data Tree where
+  Node : Nat -> List Tree -> Tree
+
+mutual
+  size : Tree -> Nat
+  size (Node n kids) = Succ (sizes kids)
+
+  sizes : List Tree -> Nat
+  sizes Nil = Zero
+  sizes (Cons t rest) = size t + sizes rest
+
+sample : Tree
+sample = Node Zero (Cons (Node Zero Nil) (Cons (Node Zero Nil) Nil))
+
+main : Nat
+main = size sample

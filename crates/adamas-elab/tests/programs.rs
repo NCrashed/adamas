@@ -5163,6 +5163,68 @@ one = Node True Nil
 }
 
 #[test]
+fn a_nested_occurrence_is_positive_when_the_outer_parameter_is() {
+    // §10 вопрос 42: розовое дерево - тип, рекурсивно вложенный в **другое**
+    // семейство. Позитивность спускается в объявление внешнего и спрашивает,
+    // положителен ли его параметр на этом месте: `List` кладёт свой в поле,
+    // значит `Tree` внутри него стоит положительно.
+    //
+    // Обходилось это ручным разворотом `List` под каждый вложенный тип.
+    program(&format!(
+        "{BASE}
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+data Tree where
+  Node : Nat -> List Tree -> Tree
+
+mutual
+  @total
+  size : Tree -> Nat
+  size (Node n kids) = Succ (sizes kids)
+
+  @total
+  sizes : List Tree -> Nat
+  sizes Nil = Zero
+  sizes (Cons t rest) = size t
+"
+    ));
+
+    // Граница, ради которой правило и существует: параметр внешнего семейства
+    // слева от стрелки. `Fn Bad` дало бы необоснованный тип, и отказ остаётся.
+    let negative = refused(&format!(
+        "{BASE}
+data Fn (a : Type) where
+  MkFn : (a -> Nat) -> Fn a
+
+data Bad where
+  Wrap : Fn Bad -> Bad
+"
+    ));
+    assert!(
+        negative.to_string().contains("отрицательной позиции"),
+        "получено {negative}"
+    );
+
+    // Вложение **в себя** правилом единообразия отвергается по-прежнему
+    // (§10 вопрос 96): там меняется параметр, а не внешнее семейство.
+    let nested = refused(&format!(
+        "{BASE}
+data Box (a : Type) where
+  MkBox : a -> Box a
+
+data Nested (a : Type) where
+  Wrap : Nested (Box a) -> Nested a
+"
+    ));
+    assert!(
+        nested.to_string().contains("не к своим параметрам"),
+        "получено {nested}"
+    );
+}
+
+#[test]
 fn a_group_neighbour_off_the_cycle_takes_its_own_parameters() {
     // §10 вопрос 96: единообразие спрашивается с вхождения, чей член
     // **возвращается** к объявляемому семейству. `P` о `Q` не знает, цикла нет,

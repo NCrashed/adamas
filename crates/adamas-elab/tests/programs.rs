@@ -938,6 +938,92 @@ held h = handleMulti branching with
     program(&source.replace("handleMulti", "handle"));
 }
 
+/// База свидетелей вопроса 95: недетерминизм и функция с линейным параметром.
+const AMB: &str = "\
+data Unit where
+  MkUnit : Unit
+
+effect Amb where
+  toss : Bool
+
+pick : (1 n : Nat) -> Bool -> Nat
+pick n True = n
+pick n False = n
+";
+
+#[test]
+fn a_linear_binding_survives_a_one_shot_handler() {
+    // §10 вопрос 95: кратность вычисления есть кратность **резумпции**. У
+    // одношотного она аффинна, вычисление проходится один раз, и `1`-связывание
+    // под ним расходуется однажды. Пока стояло `ω`, элиминатор масштабировал
+    // расход и отвергал законное - а обхода у автора не было.
+    program(&format!(
+        "{BASE}{AMB}
+onces : (1 n : Nat) -> Nat
+onces n =
+  let 1 c : {{Amb}} Nat = \\u -> pick n toss
+  handle c with
+    return v -> v
+    toss -> resume True
+"
+    ));
+}
+
+#[test]
+fn a_linear_binding_is_refused_under_multi_shot() {
+    // Контроль к предыдущему, и он же граница правила. Резумпция мультишота -
+    // **участок вычисления**, а не что-то рядом: захваченное замыканием
+    // расходуется заново на каждом возобновлении. Измерено: при `1` у обоих
+    // форм это проверку проходит, а прогон отдаёт `n + n` при `(1 n : Nat)`.
+    let error = refused(&format!(
+        "{BASE}{AMB}
+infixl 6 +
+(+) : Nat -> Nat -> Nat
+(+) Zero m = m
+(+) (Succ k) m = Succ (k + m)
+
+doubled : (1 n : Nat) -> Nat
+doubled n =
+  let 1 c : {{Amb}} Nat = \\u -> pick n toss
+  handleMulti c with
+    return v -> v
+    toss -> resume True + resume False
+"
+    ));
+    assert!(
+        error.to_string().contains("кратностью 1, а использована ω"),
+        "получено {error}"
+    );
+}
+
+#[test]
+fn a_linear_binding_survives_a_mask() {
+    // У маски резумпции нет вовсе, поэтому вычисление проходится один раз.
+    // Это тот случай, которым вопрос 95 и был записан: `mask (closeFile h)` при
+    // `(1 h : File)` отвергалось, а `closeFile h` без маски проходило.
+    program(&format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+effect Log where
+  emit : Nat -> Unit
+
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+logged : (1 h : File) -> {{Log}} Bool
+logged h =
+  emit Zero
+  drop h
+
+masked : (1 h : File) -> {{Log, Log}} Bool
+masked h = mask (logged h)
+"
+    ));
+}
+
 #[test]
 fn a_record_does_not_hold_a_resource() {
     // Держателем владеемого поля обязан быть владеемый тип (§3.3, вопрос 77),
@@ -6454,12 +6540,17 @@ effect State s where
         assert!(handler.body.is_none(), "{name}");
     }
     // Резумпция аффинна у `handle` и неограниченна у `handleMulti` - это и
-    // есть single-shot против multi-shot (§3.3).
+    // есть single-shot против multi-shot (§3.3). Той же кратностью объявлено и
+    // **вычисление**: резумпция есть его участок, поэтому мультишот проходит
+    // его столько раз, сколько её позвали (§10 вопрос 95). Двумя этими местами
+    // различие форм и исчерпывается.
     let one = &signature.lookup("#handle.State").expect("объявлен").ty;
     let many = &signature.lookup("#handleMulti.State").expect("объявлен").ty;
     assert_ne!(one.to_string(), many.to_string());
     assert_eq!(
-        one.to_string().replace("(1 resume", "(ω resume"),
+        one.to_string()
+            .replace("(1 resume", "(ω resume")
+            .replace("(1 computation", "(ω computation"),
         many.to_string()
     );
 }

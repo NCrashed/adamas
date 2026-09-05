@@ -313,6 +313,27 @@ impl Unbound {
 /// Спан, а не число: по нему запись потом себя и узнает. Одна написанная
 /// группа связываний элаборируется по разу на имя, и счёт вхождений разъехался
 /// бы с раздачей.
+/// Написана ли в типе хоть одна метка эффекта.
+///
+/// Спрашивается у членов класса и решает, заводить ли ему row-параметр (§10
+/// вопрос 102). Заводить всегда нельзя: параметр, которого не называет ни один
+/// член, в месте вызова метода не определяется ничем и доходит до границы
+/// объявления нерешённой дыркой.
+pub(crate) fn writes_effects(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Effectful { labels, body, .. } => !labels.is_empty() || writes_effects(body),
+        ExprKind::Arrow(left, right) => writes_effects(left) || writes_effects(right),
+        ExprKind::Pi { binders, codomain } => {
+            binders
+                .iter()
+                .filter_map(|it| it.ty.as_ref())
+                .any(writes_effects)
+                || writes_effects(codomain)
+        }
+        _ => false,
+    }
+}
+
 fn written_rows(expr: &Expr, negative: bool, found: &mut Vec<Span>) {
     match &expr.kind {
         // Запись с написанным хвостом свою переменную уже назвала.
@@ -1092,7 +1113,8 @@ impl<'a> Elaborator<'a> {
     /// это `Nat`, говорит только kind семейства. Дырку решает проверка - там же,
     /// где решает всё прочее.
     pub(crate) fn declaration(&mut self, ty: &Expr, default: Mult) -> Result<Term, ElabError> {
-        self.declared_type(ty, default, true)
+        let lift = self.metas.fresh_row();
+        self.declared_type(ty, default, Some(lift))
     }
 
     /// То же для конструктора: подъём не применяется (§3.4).
@@ -1114,6 +1136,7 @@ impl<'a> Elaborator<'a> {
         self.unlifted(
             ty,
             default,
+            None,
             "поле есть данные семейства, а семейство row-параметра не несёт - \
              напишите набор меток замкнутым",
         )
@@ -1123,20 +1146,40 @@ impl<'a> Elaborator<'a> {
     ///
     /// Свободные имена поднимаются в implicit-связывания **поля**, и универсум
     /// словаря считается по полям: член, квантифицирующий по `Type ℓ`,
-    /// поднимает словарь на этаж выше. А row не поднимается, и причина другая,
-    /// чем у конструктора: row-параметр принадлежит определению, связывания
-    /// row в термах не существует, и хвосту у поля стать нечем.
-    pub(crate) fn member_type(&mut self, ty: &Expr, default: Mult) -> Result<Term, ElabError> {
+    /// поднимает словарь на этаж выше.
+    ///
+    /// Подъём row идёт **не в дырку, а прямо в параметр** - `rowed` его и
+    /// передаёт (§10 вопрос 102). Дырка тут не годится: обобщение читает тип
+    /// определения, а поле живёт в его теле, и вывести оттуда число параметров
+    /// нечем - дырка дошла бы до запечатывания нерешённой. Параметр
+    /// принадлежит **классу**: у него он один на все члены, и место вызова
+    /// метода инстанцирует его свежей дыркой.
+    ///
+    /// `None` - подъёма нет вовсе: так у члена `module type`, чей словарь
+    /// row-параметра не несёт.
+    pub(crate) fn member_type(
+        &mut self,
+        ty: &Expr,
+        default: Mult,
+        rowed: Option<Row<Term>>,
+    ) -> Result<Term, ElabError> {
         self.unlifted(
             ty,
             default,
-            "row-параметр принадлежит определению, а член живёт в его теле - \
-             связать хвост нечем",
+            rowed,
+            "подъём даёт члену один хвост на весь класс, а названный требует \
+             своего параметра - связать его нечем",
         )
     }
 
-    /// Общее у обоих: имена поднимаются, row - нет, написанный хвост отвергнут.
-    fn unlifted(&mut self, ty: &Expr, default: Mult, why: &'static str) -> Result<Term, ElabError> {
+    /// Общее у обоих: имена поднимаются, написанный хвост отвергнут.
+    fn unlifted(
+        &mut self,
+        ty: &Expr,
+        default: Mult,
+        rowed: Option<Row<Term>>,
+        why: &'static str,
+    ) -> Result<Term, ElabError> {
         // Отсутствие подъёма само по себе хвост не запрещает: написанный
         // руками проходил мимо него и оставлял переменную свободной - тип
         // получался тихо неверный.
@@ -1147,10 +1190,15 @@ impl<'a> Elaborator<'a> {
                 span: name.span,
             });
         }
-        self.declared_type(ty, default, false)
+        self.declared_type(ty, default, rowed)
     }
 
-    fn declared_type(&mut self, ty: &Expr, default: Mult, lift: bool) -> Result<Term, ElabError> {
+    fn declared_type(
+        &mut self,
+        ty: &Expr,
+        default: Mult,
+        lift: Option<Row<Term>>,
+    ) -> Result<Term, ElabError> {
         let (names, tails) = self.unbound(ty);
         // Порядок связывания: сначала обычные свободные имена, потом
         // написанные хвосты, потом безымянные row-переменные подъёма. Все они
@@ -1174,10 +1222,11 @@ impl<'a> Elaborator<'a> {
             });
         }
         self.rows = Some(rows);
-        // Auto-lift (§3.4): свежая row-переменная на всю сигнатуру. Параметром
-        // она станет обобщением на границе объявления - тем же проходом, что
-        // делает параметрами уровни.
-        self.lifted = lift.then(|| self.metas.fresh_row());
+        // Auto-lift (§3.4): одна row-переменная на всю сигнатуру. У определения
+        // это дырка, и параметром она станет обобщением на границе объявления -
+        // тем же проходом, что делает параметрами уровни. У члена класса
+        // параметр приходит готовым: обобщать его негде (§10 вопрос 102).
+        self.lifted = lift;
         self.tails.clear();
         let elaborated = self.lifting(&lifted, ty, default);
         self.lifted = None;
@@ -2714,6 +2763,7 @@ impl<'a> Elaborator<'a> {
     pub(crate) fn module_members(
         &mut self,
         members: &[WrittenField<'_>],
+        rowed: Option<&Row<Term>>,
     ) -> Result<Vec<CoreField>, ElabError> {
         let Some((first, rest)) = members.split_first() else {
             return Ok(Vec::new());
@@ -2722,10 +2772,10 @@ impl<'a> Elaborator<'a> {
             // Свободные имена члена поднимаются в implicit-связывания его
             // поля, а универсум словаря считается по полям: член,
             // квантифицирующий по `Type ℓ`, поднимает словарь на этаж выше
-            // (решение 2026-09-03). Подъёма row здесь нет: row-параметр
-            // принадлежит определению, а связывания row в термах не
-            // существует, поэтому написанный хвост у члена связать нечем.
-            self.member_type(written, Mult::Many)?
+            // (решение 2026-09-03). Row поднимается в **параметр класса**, а не
+            // в дырку, и приходит сюда готовой; написанный хвост по-прежнему
+            // отвергается - связать его всё так же нечем.
+            self.member_type(written, Mult::Many, rowed.cloned())?
         } else {
             // Абстрактный типовой член: тип его - сорт, а с параметрами -
             // телескоп по ним, оканчивающийся сортом. Написать этот телескоп
@@ -2737,7 +2787,7 @@ impl<'a> Elaborator<'a> {
         };
         let bound = self.typed(&ty);
         let tail = self.binding(Bound::visible(&first.name.text, Mult::One, bound), |it| {
-            it.module_members(rest)
+            it.module_members(rest, rowed)
         })?;
         let head = CoreField {
             name: CoreName::from(&*first.name.text),

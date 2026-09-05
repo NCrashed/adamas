@@ -868,10 +868,19 @@ fn declare_class(
     // `Eqv Nat` есть применение. Отсюда тело лямбдой, а тип - `Pi` над
     // универсумом, в котором живёт запись.
     let kinds = superclass_kinds(signature, metas, class);
+    // Row-параметр у класса один на все члены и заводится, только если метки
+    // написаны хоть у одного (§10 вопрос 102). Он **не дырка**: обобщение
+    // читает тип определения, а поля словаря живут в теле, и вывести число
+    // оттуда нечем - параметр пишется сразу и объявляется арностью.
+    let rowed = members
+        .iter()
+        .filter_map(|it| it.ty)
+        .any(crate::expr::writes_effects)
+        .then(|| Row::closing([], Some(Tail::Var(RowVar(0)))));
     let mut elaborator = Elaborator::new(signature, metas, owned, fixities);
     let telescope = elaborator.telescope(&params, false, Mult::Zero, Unwritten::Given(&kinds))?;
     let (record, level) = elaborator.beneath(&telescope, |it| {
-        let fields = it.module_members(&members)?;
+        let fields = it.module_members(&members, rowed.as_ref())?;
         let record = Term::Record(Fields::closed(fields.into()));
         let level = it.sort_of(&record).map_err(|error| ElabError::Core {
             span,
@@ -894,7 +903,14 @@ fn declare_class(
             .wrapped(&telescope, false, |_| Ok(sort))?;
     let body = abstracted(&telescope, record);
     signature
-        .define_inferred(metas, &name.text, Mult::Many, ty, Some(body))
+        .define_rowed(
+            metas,
+            &name.text,
+            Mult::Many,
+            ty,
+            Some(body),
+            u32::from(rowed.is_some()),
+        )
         .map_err(|error| ElabError::Core {
             span,
             error: Box::new(error),
@@ -1010,8 +1026,15 @@ fn declare_instance(
         let hole = metas.fresh_term(Ctx::new(signature).eval(&ty), size);
         object.push((CoreName::from(&*field), Rc::new(hole)));
     }
+    // Row-аргументы члена берутся у **заголовка**, а не свежими дырками. Член
+    // обобщён по тем же дыркам, что стоят в голове класса, поэтому
+    // инстанцирование его заголовком тождественно. Свежие годились, пока
+    // row-параметров у класса не было; с ними член, чей тип row не называет
+    // (`zero : a` рядом с эффектным `run`), получал дырку, которую не
+    // определяет ничто, и она доживала до границы объявления (§10 вопрос 102).
+    let carried = head_rows(under_prefix(&written));
     for (at, (method, ..)) in members.iter().enumerate() {
-        let Some(term) = signature.instantiate(&qualified[at], metas) else {
+        let Some(term) = instantiate_carrying(signature, metas, &qualified[at], &carried) else {
             continue;
         };
         let applied = (0..prefix.len()).fold(term, |callee, position| {
@@ -1313,6 +1336,42 @@ fn under_prefix(ty: &Term) -> &Term {
     current
 }
 
+/// Row-аргументы головы применения. Пусто, если голова не ссылка.
+fn head_rows(ty: &Term) -> Vec<Row<Term>> {
+    let mut current = ty;
+    while let Term::App(callee, _) = current {
+        current = callee;
+    }
+    match current {
+        Term::Const(_, _, rows) => rows.as_slice().to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+/// Ссылка на определение со **своими** row-аргументами и свежими уровнями.
+///
+/// От [`Signature::instantiate`] отличается только row: уровни там и здесь
+/// свежие. Недостающие берутся дырками - член вправе нести row-параметров
+/// больше, чем голова, если его тип назвал свой хвост.
+fn instantiate_carrying(
+    signature: &Signature,
+    metas: &mut Metas,
+    name: &str,
+    carried: &[Row<Term>],
+) -> Option<Term> {
+    let definition = signature.lookup(name)?;
+    let levels: Rc<[Level]> = (0..definition.level_arity)
+        .map(|_| metas.fresh_level())
+        .collect();
+    let rows = (0..definition.row_arity as usize).map(|index| {
+        carried
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| metas.fresh_row())
+    });
+    Some(Term::Const(CoreName::from(name), levels, Rows::new(rows)))
+}
+
 /// Невыразимое имя анонимного инстанса: `Eqv#Nat`, `Conv#Nat#Bool`.
 fn mangled(class: &str, heads: &[Symbol]) -> String {
     let mut out = String::from(class);
@@ -1393,12 +1452,28 @@ fn declare_method(
     let inner = ctx.bind(CoreName::from("d"), Mult::Many, bound);
     let projection = Term::Project(Rc::new(Term::var(0)), CoreName::from(&**method));
     let (ty, _) = infer(&inner, metas, Mult::Zero, &projection).map_err(fail)?;
+    // Row-параметр класса достаётся методу, **только если его называет поле**.
+    // Иначе он не определяется в месте вызова ничем: погашение решает хвост по
+    // стрелке типа метода, а у `zero : a` стрелки нет вовсе, и дырка доживала
+    // бы до границы объявления вызывающего (§10 вопрос 102). Незваный решается
+    // пустой row - «метод не производит ничего сверх написанного», - и тогда
+    // словарь ему нужен при пустом аргументе, каким его и даст разрешение.
+    let quoted = quote(inner.size(), &ty);
+    let mut mentioned = Generalization::default();
+    mentioned.collect_term(metas, &quoted);
+    for row in head_rows(&applied) {
+        if let Some(Tail::Meta(meta)) = row.tail() {
+            if !mentioned.rows().contains(&meta) {
+                metas.solve_row(meta, Row::empty());
+            }
+        }
+    }
     let ty = Term::Pi(
         Binder::implicit(Mult::Many),
         CoreName::from("d"),
         Rc::new(dictionary),
         adamas_core::row::Row::empty(),
-        Rc::new(quote(inner.size(), &ty)),
+        Rc::new(quoted),
     );
     let ty = sorts.iter().enumerate().rev().fold(ty, |body, (at, sort)| {
         Term::Pi(
@@ -2541,7 +2616,7 @@ fn declare_module_type(
         }
     }
     let fields = Elaborator::new(signature, metas, owned, fixities)
-        .typing(|it| it.module_members(&members))?;
+        .typing(|it| it.module_members(&members, None))?;
     let record = Term::Record(Fields::closed(fields.into()));
     let names = Names::of(declared, Vec::new());
     let level = is_type(&Ctx::new(signature), metas, &record).map_err(|error| ElabError::Core {

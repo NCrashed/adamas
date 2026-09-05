@@ -174,8 +174,140 @@ escaped = handle local with
   return v -> v
   fail e -> Succ (Succ (Succ (Succ Zero)))
 
--- `[8, 4, 0, 9]`: восемь от вычисления, четыре от фатальной ошибки, ушедшей
--- мимо локального обработчика, и отметки `[0, 9]` от оборванного - вторая из
--- них поставлена деструктором ресурса уже на исключительном пути.
+-- ------------------------------------------------------ типизация объектного
+--
+-- Вторая половина сценария 18. Выше объектный язык считался; здесь он ещё и
+-- типизируется, причём двумя разными способами - и разница между ними
+-- принципиальна.
+
+-- **Типы объектного языка - код, а не `Type`.** Разбирать `Type` нечем: у него
+-- нет элиминатора, а внутреннего доказательства `Nat ≢ Bool` не существует
+-- (§10 вопрос 53). §4.1 прямо советует дополнительный индекс-код, и вот он.
+data Ty where
+  TyNat : Ty
+  TyBool : Ty
+  TyArr : Ty -> Ty -> Ty
+
+and : Bool -> Bool -> Bool
+and True b = b
+and False b = False
+
+append : List Nat -> List Nat -> List Nat
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+sameTy : Ty -> Ty -> Bool
+sameTy TyNat TyNat = True
+sameTy TyBool TyBool = True
+sameTy (TyArr a b) (TyArr c d) = and (sameTy a c) (sameTy b d)
+sameTy a b = False
+
+-- Отказ типизации обрывает проверку, поэтому результат его - **собственный
+-- параметр операции** (§10 вопрос 83): годится на месте любого типа. Такой
+-- бывает только обрывающая операция - резюмирующая обязана была бы произвести
+-- значение произвольного типа, а взять его неоткуда.
+effect Reject where
+  reject : Nat -> a
+
+-- Термы с аннотацией на связывании: вывод обходится без унификации.
+data Term where
+  TmLit : Nat -> Term
+  TmVar : Nat -> Term
+  TmAdd : Term -> Term -> Term
+  TmLam : Ty -> Term -> Term
+  TmApp : Term -> Term -> Term
+
+tyAt : Nat -> List Ty -> {Reject} Ty
+tyAt n Nil = reject n
+tyAt Zero (Cons t ts) = t
+tyAt (Succ k) (Cons t ts) = tyAt k ts
+
+wanted : Bool -> Ty -> {Reject} Ty
+wanted True t = t
+wanted False t = reject (Succ Zero)
+
+applied : Ty -> Ty -> {Reject} Ty
+applied (TyArr d r) x = wanted (sameTy d x) r
+applied TyNat x = reject (Succ (Succ Zero))
+applied TyBool x = reject (Succ (Succ Zero))
+
+-- Контекст здесь - обычный аргумент, а не эффект: у `infer` он растёт вниз по
+-- дереву и наружу не возвращается, тогда как окружение вычисления (`Env`
+-- выше) нитью проходит через весь прогон. Одна и та же вещь стоит того и
+-- другого в зависимости от того, кто ею распоряжается.
+infer : List Ty -> Term -> {Reject} Ty
+infer ctx (TmLit n) = TyNat
+infer ctx (TmVar i) = tyAt i ctx
+infer ctx (TmAdd l r) =
+  let lt : Ty = wanted (sameTy (infer ctx l) TyNat) TyNat
+  wanted (sameTy (infer ctx r) TyNat) lt
+infer ctx (TmLam t body) = TyArr t (infer (Cons t ctx) body)
+infer ctx (TmApp f x) = applied (infer ctx f) (infer ctx x)
+
+-- `(\x : Nat -> x + 1) 2` - хорошо типизировано, тип его `Nat`.
+wellTyped : Term
+wellTyped = TmApp (TmLam TyNat (TmAdd (TmVar Zero) (TmLit (Succ Zero)))) (TmLit (Succ (Succ Zero)))
+
+-- `2 1` - применение того, что функцией не является.
+illTyped : Term
+illTyped = TmApp (TmLit (Succ (Succ Zero))) (TmLit (Succ Zero))
+
+-- Вердикт берёт **вычисление**, а не терм: аргументом оно передаётся, а не
+-- исполняется (§3.4), и хендлеру достаётся неисполненным. Само вычисление при
+-- этом называется определением - там его тип написан, и приостановка видна.
+verdict : ({Reject} Ty) -> Nat
+verdict checked = handle checked with
+  return t -> Succ Zero
+  reject e -> Zero
+
+checkedWell : {Reject} Ty
+checkedWell = infer Nil wellTyped
+
+checkedIll : {Reject} Ty
+checkedIll = infer Nil illTyped
+
+-- **Внутренне типизированное представление.** Здесь индекс - не код, а сам
+-- `Type` (§4.1), и семейство обобщается после своих конструкторов (§10 вопрос
+-- 53): `TNat` инстанцирует индекс и заземляет его уровень. Ветка `TPick`
+-- поднимает свободное `a` в стёртое поле, и семейство встаёт над ним (§10
+-- вопрос 109).
+--
+-- Плата за это названа: разбирать по такому индексу нельзя, поэтому
+-- `evalTyped` идёт по конструкторам, а не по типу. Зато проверять нечего -
+-- плохо типизированный терм здесь попросту не собирается.
+data Typed : Type -> Type where
+  TNat : Nat -> Typed Nat
+  TBool : Bool -> Typed Bool
+  TSum : Typed Nat -> Typed Nat -> Typed Nat
+  TPick : Typed Bool -> Typed a -> Typed a -> Typed a
+
+mutual
+  evalTyped : (0 a : Type) -> Typed a -> a
+  evalTyped a (TNat n) = n
+  evalTyped a (TBool b) = b
+  evalTyped a (TSum l r) = evalTyped Nat l + evalTyped Nat r
+  evalTyped a (TPick c t e) = chosen a (evalTyped Bool c) t e
+
+  chosen : (0 a : Type) -> Bool -> Typed a -> Typed a -> a
+  chosen a True t e = evalTyped a t
+  chosen a False t e = evalTyped a e
+
+-- `if True then 2 + 3 else 0` даёт пять - и без единой проверки в рантайме.
+intrinsic : Typed Nat
+intrinsic =
+  TPick (TBool True)
+    (TSum (TNat (Succ (Succ Zero))) (TNat (Succ (Succ (Succ Zero)))))
+    (TNat Zero)
+
+-- `[8, 4, 0, 9, 1, 0, 5]`: восемь от вычисления, четыре от фатальной ошибки,
+-- ушедшей мимо локального обработчика, отметки `[0, 9]` от оборванного -
+-- вторая поставлена деструктором ресурса уже на исключительном пути, - затем
+-- два вердикта типизации и значение внутренне типизированного терма.
 main : List Nat
-main = Cons answer (Cons escaped traced)
+main =
+  Cons answer
+    (Cons escaped
+      (append traced
+        (Cons (verdict checkedWell)
+          (Cons (verdict checkedIll)
+            (Cons (evalTyped Nat intrinsic) Nil)))))

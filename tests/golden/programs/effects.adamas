@@ -197,3 +197,29 @@ first : Bool
 first = handle both with
   return v -> v
   pick x y -> resume x
+
+-- Нить параметризованного хендлера разбирается **в самой ветке**.
+--
+-- Связывания ветки читаются по её ожидаемому типу, а хвост его - ответ
+-- хендлера, у параметризованного равный `S -> B`. Стоит он дыркой, решаемой
+-- до веток, но обратное чтение решений не разворачивает - это работа `whnf`.
+-- Оттого `state` в телескоп ветки не попадал вовсе и получал дырку вместо
+-- нити: видно это становилось только там, где тип нужен **до** употребления,
+-- то есть здесь.
+data Stack (a : Type) where
+  Empty : Stack a
+  Push : a -> Stack a -> Stack a
+
+effect Pop where
+  pop : Bool
+
+stock : Stack Bool
+stock = Push True (Push False Empty)
+
+popped : Bool
+popped = handle pop with
+  state stock
+  return v -> v
+  pop -> case state of
+    Empty -> resume False Empty
+    Push x rest -> resume x rest

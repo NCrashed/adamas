@@ -3979,6 +3979,31 @@ impl<'a> Elaborator<'a> {
         }
     }
 
+    /// Телескоп типа с **развёрнутыми** решениями дырок.
+    ///
+    /// Связывания ветки читаются по её ожидаемому типу, а хвост этого типа -
+    /// ответ хендлера, стоящий дыркой. У параметризованного он `S -> B`, и
+    /// решается дырка перед ветками (см. `answered`), но `quote` решений не
+    /// разворачивает - это работа `whnf`. Оттого последнее связывание ветки,
+    /// `state`, в телескоп не попадало вовсе: лямбду ему элаборация писала, а
+    /// тип брать было неоткуда, и он выходил дыркой. Видно это становилось
+    /// только там, где тип нити нужен **до** употребления, - `case state of`
+    /// отвечал «разбирать нечего».
+    fn unfolded_pi(&mut self, ty: &Rc<Value>, depth: u32) -> Term {
+        let forced = whnf_solved(self.signature, self.metas, ty);
+        let Value::Pi(binder, name, domain, row, codomain) = &*forced else {
+            return quote(depth, &forced);
+        };
+        let inner = codomain.clone().apply(Value::var(Lvl(depth)));
+        Term::Pi(
+            *binder,
+            Rc::clone(name),
+            Rc::new(quote(depth, domain)),
+            row.map(|argument| quote(depth, argument)),
+            Rc::new(self.unfolded_pi(&inner, depth + 1)),
+        )
+    }
+
     /// Ветка лямбдой: написанные аргументы плюс резумпция.
     ///
     /// Собирается она поверхностной записью и элаборируется обычной лямбдой -
@@ -3997,7 +4022,7 @@ impl<'a> Elaborator<'a> {
                 span: branch.span,
             });
         };
-        let domain = quote(self.ctx.size(), domain);
+        let domain = self.unfolded_pi(&Rc::clone(domain), self.ctx.size());
         let bound = pi_arguments(&domain, self.owned);
         let mut params: Vec<ast::LamParam> = branch
             .params

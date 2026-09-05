@@ -1,0 +1,61 @@
+-- Последовательность в теле ветки и лямбды (§10 вопросы 55 и 61).
+--
+-- Блок открывают `where`, `with`, `of`, `mutual`, `let` и `=` в конце строки.
+-- Стрелки в этом списке не было, поэтому телом ветки и телом лямбды могло быть
+-- только выражение - а цепочка `let` есть обычный способ писать эффектный код
+-- (§3.4), и первая же ветка с двумя эффектами оказывалась незаписуемой.
+--
+-- Теперь `->` открывает блок тем же правилом, что и `=`, но **не везде**:
+-- только в ветке `of` и в теле лямбды. Стрелка живёт и в типах, где
+-- `f : Nat ->` с переносом есть продолжение, а не блок.
+--
+-- Под скобкой layout выключен не весь: `let` и `where` там работают, а блок
+-- закрывается парной скобкой. `of` и `=` остаются выключенными - первому нужны
+-- разделители, которых там нет, второй столкнулся бы с записью `{ x = 1 }`.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  emit : Nat -> Unit
+
+-- Цепочка в теле ветки.
+branched : Bool -> {Log} Nat
+branched b =
+  case b of
+    True ->
+      let u : Unit = emit Zero
+      Succ Zero
+    False -> Zero
+
+mapped : List Nat -> (Nat -> {Log} Nat) -> {Log} List Nat
+mapped Nil f = Nil
+mapped (Cons x xs) f = Cons (f x) (mapped xs f)
+
+-- Цепочка в теле лямбды под скобкой. Форма с блоком стоит последней: где она
+-- кончается, видно по парной скобке, а после неё на строке ничего не пишется.
+walked : List Nat -> {Log} List Nat
+walked xs =
+  mapped xs (\x ->
+    let u : Unit = emit x
+    Succ x)
+
+collected : {Log} List Nat
+collected = walked (Cons Zero (Cons (Succ Zero) Nil))
+
+main : List Nat
+main = handle collected with
+  return v -> v
+  emit n -> resume MkUnit

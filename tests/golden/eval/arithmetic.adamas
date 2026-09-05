@@ -1,4 +1,8 @@
 -- Вычисление до значения: рекурсия по `Nat` и разбор считаются (§9 Фаза 5).
+--
+-- Одного `times` мало: он коммутативен, и порядок операндов на нём
+-- ненаблюдаем - `times 3 2` и `times 2 3` дают 6 одинаково. Порядок ловит
+-- усечённое вычитание: 3 против 0, если операнды поменять местами.
 
 data Bool where
   True : Bool
@@ -16,5 +20,14 @@ times : Nat -> Nat -> Nat
 times Zero m = Zero
 times (Succ k) m = plus m (times k m)
 
-main : Nat
-main = times (Succ (Succ (Succ Zero))) (Succ (Succ Zero))
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+monus : Nat -> Nat -> Nat
+monus Zero m = Zero
+monus (Succ k) Zero = Succ k
+monus (Succ k) (Succ m) = monus k m
+
+main : List Nat
+main = Cons (times (Succ (Succ (Succ Zero))) (Succ (Succ Zero))) (Cons (monus 5 2) Nil)

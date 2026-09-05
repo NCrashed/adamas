@@ -37,7 +37,7 @@ effect Ask where
   ask : Nat
 
 -- Внутренний хендлер отвечает нулём и продолжает.
-inner : ({Ask, Ask} Nat) -> {Ask} Nat
+inner : ({Ask, Ask} List Nat) -> {Ask} List Nat
 inner act = handle act with
   return v -> v
   ask -> resume Zero
@@ -45,32 +45,34 @@ inner act = handle act with
 -- Два запроса разного смысла: первый достаётся внутреннему, второй проходит
 -- мимо него к внешнему. Без `mask` написать это нечем: операция всегда берёт
 -- первое вхождение метки.
-asked : {Ask, Ask} Nat
+asked : {Ask, Ask} List Nat
 asked =
   let near : Nat = ask
   let far : Nat = mask ask
-  near + far
+  Cons near (Cons far Nil)
 
-layered : {Ask} Nat
+layered : {Ask} List Nat
 layered = inner asked
 
--- 0 от внутреннего плюс 1 от внешнего.
-masked : Nat
+-- `[0, 1]`: внутреннему достался `near`, внешнему - `far`. Суммой это было
+-- ненаблюдаемо: `0 + 1` и `1 + 0` дают одно и то же, и маска, наехавшая на
+-- `near`, проходила незамеченной.
+masked : List Nat
 masked = handle layered with
   return v -> v
   ask -> resume (Succ Zero)
 
 -- Тот же код без маски: оба запроса достаются внутреннему, и ответ - ноль.
-plain : {Ask, Ask} Nat
+plain : {Ask, Ask} List Nat
 plain =
   let near : Nat = ask
   let far : Nat = ask
-  near + far
+  Cons near (Cons far Nil)
 
-flat : {Ask} Nat
+flat : {Ask} List Nat
 flat = inner plain
 
-unmasked : Nat
+unmasked : List Nat
 unmasked = handle flat with
   return v -> v
   ask -> resume (Succ Zero)
@@ -119,28 +121,63 @@ data EvalError where
 effect Raise e where
   raise : e -> Nat
 
-program : {Raise IOError, Raise ParseError, Raise EvalError} Nat
+program : {Raise IOError, Raise ParseError, Raise EvalError} List Nat
 program =
   let a : Nat = raise MkIO
   let b : Nat = mask (raise MkParse)
   let c : Nat = mask (mask (raise MkEval))
-  a + b + c
+  Cons a (Cons b (Cons c Nil))
 
-onIO : {Raise ParseError, Raise EvalError} Nat
+onIO : {Raise ParseError, Raise EvalError} List Nat
 onIO = handle program with
   return v -> v
   raise e -> resume (Succ Zero)
 
-onParse : {Raise EvalError} Nat
+onParse : {Raise EvalError} List Nat
 onParse = handle onIO with
   return v -> v
   raise e -> resume (Succ (Succ Zero))
 
--- 1 + 2 + 3: каждая ошибка досталась своему хендлеру.
-triple : Nat
+-- `[1, 2, 3]` позиционно: суммой `1 + 2 + 3` любая перестановка ответов дала
+-- бы те же 6.
+triple : List Nat
 triple = handle onParse with
   return v -> v
   raise e -> resume (Succ (Succ (Succ Zero)))
 
+-- Метка читается по **голове написанного**, а не из окружающей.
+--
+-- Порядок между различными метками §4.1 объявляет несущественным, а окружающая
+-- хранится отсортированной по имени метки. Пока маска брала первую метку
+-- окружающей, при `{Ask, Get, Get}` она маскировала `Ask` - то есть не делала
+-- ничего, - и значение программы менялось от переименования постороннего
+-- эффекта. Прочие примеры файла этого не ловят: окружающие в них однородны по
+-- имени, и первая метка совпадает с нужной по построению.
+
+effect Get where
+  get : Nat
+
+-- Маскируется `Get`, хотя в каноническом порядке окружающей первым стоит `Ask`.
+far : {Ask, Get, Get} Nat
+far = mask get
+
+-- Ближайший `Get` отвечает нулём и обязан быть пропущен.
+nearGet : {Ask, Get} Nat
+nearGet = handle far with
+  return v -> v
+  get -> resume Zero
+
+-- Внешний отвечает единицей - это и есть верный ответ.
+farGet : {Ask} Nat
+farGet = handle nearGet with
+  return v -> v
+  get -> resume (Succ Zero)
+
+-- Взяв метку из окружающей, маска дала бы здесь нуль.
+across : Nat
+across = handle farGet with
+  return v -> v
+  ask -> resume Zero
+
 main : List Nat
-main = Cons masked (Cons unmasked (Cons triple collected))
+main = append masked (append unmasked (append triple (Cons across collected)))

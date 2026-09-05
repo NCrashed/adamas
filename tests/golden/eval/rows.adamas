@@ -49,28 +49,34 @@ dropped : {Ask, Log} Nat
 dropped = choose False
 
 -- Хендлеры одни и те же на обе ветви: разность ушла в общий остаток, а не в
--- отказ.
-quietTaken : {Ask} Nat
+-- отказ. Отметки **собираются**, а не гасятся: с `note n -> resume MkUnit`
+-- аргумент операции пропадал, и ветка `False` была неотличима от «ничего не
+-- произвела» - удаление строки 38 не меняло снапшота.
+quietTaken : {Ask} List Nat
 quietTaken = handle taken with
-  return v -> v
-  note n -> resume MkUnit
+  return v -> Cons v Nil
+  note n -> Cons n (resume MkUnit)
 
-quietDropped : {Ask} Nat
+quietDropped : {Ask} List Nat
 quietDropped = handle dropped with
-  return v -> v
-  note n -> resume MkUnit
+  return v -> Cons v Nil
+  note n -> Cons n (resume MkUnit)
 
 -- Ветка `True` спрашивает и получает двойку; ветка `False` пишет в лог и
 -- отвечает нулём.
-answered : Nat
+answered : List Nat
 answered = handle quietTaken with
   return v -> v
   ask -> resume (Succ (Succ Zero))
 
-silent : Nat
+silent : List Nat
 silent = handle quietDropped with
   return v -> v
   ask -> resume (Succ (Succ Zero))
 
+append : List Nat -> List Nat -> List Nat
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
 main : List Nat
-main = Cons answered (Cons silent Nil)
+main = append answered silent

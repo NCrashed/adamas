@@ -19,5 +19,7 @@ sum : List Nat -> Nat
 sum Nil = Zero
 sum (Cons x xs) = x + sum xs
 
-main : Nat
-main = sum [1, 2, 3]
+-- Голова - сумма, хвост - сам список: без хвоста порядок звеньев ненаблюдаем
+-- (`sum [3, 2, 1]` тоже 6), а без головы `sum` не участвует ни в чём.
+main : List Nat
+main = Cons (sum [1, 2, 3]) [1, 2, 3]

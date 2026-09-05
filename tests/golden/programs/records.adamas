@@ -17,9 +17,17 @@ type Point = { x : Nat, y : Nat }
 origin : Point
 origin = { x = Zero, y = Zero }
 
--- Порядок написания свободен: поле ищется по имени.
+-- Порядок написания свободен: поле ищется по имени. На `Point` это
+-- неотличимо от позиционного сопоставления - оба поля `Nat`, - поэтому рядом
+-- стоит запись с разнотипными полями: `{ b = True, n = Zero }` позиционная
+-- реализация принять не может.
 flipped : Point
 flipped = { y = Zero, x = Zero }
+
+type Tagged = { n : Nat, b : Bool }
+
+swapped : Tagged
+swapped = { b = True, n = Zero }
 
 -- Проекция - первого класса: `.x` есть функция от записи.
 abscissa : Point -> Nat

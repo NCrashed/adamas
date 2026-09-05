@@ -78,18 +78,30 @@ ticks = handle thrice with
   get -> resume state state
   put x -> resume MkUnit x
 
--- Состояние не обязано быть числом: нить несёт что угодно.
-flipped : {State} Nat
-flipped =
-  let u : Unit = put 7
-  get
+-- Состояние не обязано быть числом: нить несёт что угодно. С `Nat`-нитью это
+-- было только написано в комментарии - все примеры выше несут число, и
+-- реализация, вшившая `Nat`, проходила бы их все.
+effect Flag where
+  read : Bool
+  write : Bool -> Unit
 
-seven : Nat
-seven = handle flipped with
-  state Zero
+raised : {Flag} Bool
+raised =
+  let u : Unit = write True
+  read
+
+-- `True`, то есть записанное: с потерянной нитью `read` вернул бы начальное
+-- `False`.
+toggled : Bool
+toggled = handle raised with
+  state False
   return v -> v
-  get -> resume state state
-  put x -> resume MkUnit x
+  read -> resume state state
+  write x -> resume MkUnit x
+
+mark : Bool -> Nat
+mark False = Zero
+mark True = Succ Zero
 
 -- Нить сочетается с остатком ряда: `State` снимается, `Log` уходит наружу.
 --
@@ -127,4 +139,4 @@ composed = handle threadedOut with
   note n -> Cons n (resume MkUnit)
 
 main : List Nat
-main = Cons summed (Cons final (Cons ticks (Cons seven composed)))
+main = Cons summed (Cons final (Cons ticks (Cons (mark toggled) composed)))

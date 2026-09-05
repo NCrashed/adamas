@@ -64,6 +64,42 @@ guarded = handle broken with
   return v -> v
   fail -> False
 
+-- Порядок при вложенных scope - LIFO (§3.3), и различить его можно только
+-- **двумя** деструкторами: на одном порядок ненаблюдаем, и прежние примеры
+-- файла его не ловили.
+resource Sock where
+  Bind : Sock
+  closeSock : (1 s : Sock) -> {Log} Bool
+  closeSock s =
+    note 8
+    True
+
+-- `s` связан позже `h`, значит закрывается раньше: `[1, 8, 9]`. Порядок
+-- вставки, обратный верному, дал бы `[1, 9, 8]`.
+paired : File -> Sock -> {Log} Bool
+paired h s =
+  note 1
+  True
+
+coupled : {Log} Bool
+coupled = paired Open Bind
+
+-- Тот же порядок обязан держаться и на исключительном выходе: раскрутка идёт
+-- изнутри наружу, и остаток её не теряется, когда первый деструктор отработал.
+pairedLeaky : File -> Sock -> {Fail, Log} Bool
+pairedLeaky h s =
+  note 1
+  let n : Bool = fail
+  True
+
+coupledBroken : {Fail, Log} Bool
+coupledBroken = pairedLeaky Open Bind
+
+coupledGuarded : {Log} Bool
+coupledGuarded = handle coupledBroken with
+  return v -> v
+  fail -> False
+
 normal : List Nat
 normal = handle opened with
   return v -> Nil
@@ -74,6 +110,19 @@ abandoned = handle guarded with
   return v -> Nil
   note n -> Cons n (resume MkUnit)
 
--- Оба пути дают `[1, 9]`: тело, потом деструктор.
+
+lifo : List Nat
+lifo = handle coupled with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+
+lifoAbandoned : List Nat
+lifoAbandoned = handle coupledGuarded with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+
+-- Нормальный и исключительный выходы, по одному ресурсу и по два: `[1, 9]`
+-- дважды, затем `[1, 8, 9]` дважды. Порядок вставки, обратный верному, дал бы
+-- в последних двух `[1, 9, 8]`.
 main : List Nat
-main = append normal abandoned
+main = append normal (append abandoned (append lifo lifoAbandoned))

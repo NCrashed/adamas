@@ -1,19 +1,35 @@
 -- Значение читается насквозь: поля записи считаются, как и аргументы
 -- конструктора.
-
-data Bool where
-  True : Bool
-  False : Bool
+--
+-- Считать при этом должно быть **что**: запись из готовых значений
+-- (`{ x = Succ Zero, … }`) даёт тот же снапшот и у реализации, не вычисляющей
+-- поля вовсе. Здесь поле `x` требует работы.
+--
+-- Проекция и переопределение тоже стоят тут, а не только в `programs/`: типы
+-- их не различают, когда поля одного типа, и обновление, попавшее в `y` вместо
+-- `x`, типизируется молча.
 
 data Nat where
   Zero : Nat
   Succ : Nat -> Nat
 
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+plus : Nat -> Nat -> Nat
+plus Zero m = m
+plus (Succ k) m = Succ (plus k m)
+
 type Point = { x : Nat, y : Nat }
 
-flip : Bool -> Bool
-flip True = False
-flip False = True
+base : Point
+base = { x = plus 1 1, y = 5 }
 
-main : Point
-main = { x = Succ Zero, y = Succ (Succ Zero) }
+-- Переопределение трогает `x` и не трогает `y`: `[2, 3, 5]` против `[2, 2, 6]`,
+-- если бы оно попало не в то поле.
+bumped : Point
+bumped = { base | x = Succ base.x }
+
+main : List Nat
+main = Cons base.x (Cons bumped.x (Cons bumped.y Nil))

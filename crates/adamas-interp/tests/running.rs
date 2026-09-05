@@ -1036,3 +1036,37 @@ main = handle outer with
          (Cons{0} Nat (Succ (Succ (Succ (Succ Zero)))) (Nil{0} Nat)))"
     );
 }
+
+/// Маска над **именованным** вычислением работает так же, как над операцией.
+///
+/// `handle` над применением требует имени, поэтому вычисления в этом языке
+/// называют - и `mask asked` при `asked = ask` обязано значить то же, что
+/// `mask ask`. Прежде первое отвергалось дважды: окружающая с двумя
+/// одноимёнными метками считалась неоднозначной, а имя - неприостановленным.
+#[test]
+fn a_mask_over_a_named_computation_reaches_the_outer_handler() {
+    let source = format!(
+        "{BASE}
+effect Ask where
+  ask : Nat
+
+asked : {{Ask}} Nat
+asked = ask
+
+work : {{Ask, Ask}} Nat
+work = mask asked
+
+inner : {{Ask}} Nat
+inner = handle work with
+  return v -> v
+  ask -> resume Zero
+
+main : Nat
+main = handle inner with
+  return v -> v
+  ask -> resume (Succ Zero)
+"
+    );
+    // Ноль дал бы внутренний хендлер, единицу - внешний.
+    assert_eq!(ran(&source, "main"), "Succ Zero");
+}

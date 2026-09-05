@@ -7450,3 +7450,40 @@ class Alone f where
         "получено {error:?}"
     );
 }
+
+/// Маска над именем при окружающей из разных меток - отказ, а не догадка.
+///
+/// Порядок между различными метками несуществен (§4.1), поэтому выбрать одну
+/// из них значило бы решить программу порядком её написания. Однородная
+/// окружающая неоднозначной при этом не является.
+#[test]
+fn a_mask_over_a_name_refuses_an_ambiguous_ambient() {
+    let error = refused(
+        "\
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+effect Ask where
+  ask : Nat
+
+effect Log where
+  note : Nat -> Unit
+
+mixed : {Ask, Log} Nat
+mixed =
+  let u : Unit = note Zero
+  ask
+
+work : {Ask, Ask, Log} Nat
+work = mask mixed
+",
+    );
+    assert!(
+        matches!(error, ElabError::NothingToMask { .. }),
+        "ожидалась неоднозначность, получено: {error}"
+    );
+}

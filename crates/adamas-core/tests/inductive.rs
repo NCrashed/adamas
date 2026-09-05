@@ -1021,6 +1021,46 @@ fn with_carrier(field: Term) -> Group {
     )
 }
 
+/// Семейство, индексированное `Type`, обобщается **после** конструкторов.
+///
+/// Конструктор такой индекс инстанцирует, а вместе с ним фиксирует и уровень:
+/// `Expr Nat` требует `Nat : Type u`, то есть заземляет `u` нулём. Обобщённое
+/// раньше семейство получило бы параметр, который конструктор потом заземлит,
+/// и арности разошлись бы - `LevelArity` на ровном месте (§10 вопрос 53).
+///
+/// Свидетель различает: арность у семейства и у конструктора обязана быть
+/// одной, и обе - нулевые, потому что уровень заземлён.
+#[test]
+fn a_family_indexed_by_a_universe_generalises_after_its_constructors() {
+    let mut signature = booleans();
+    let mut metas = Metas::default();
+    // Индекс приходит от элаборации дыркой: `Type` без уровня. Это и есть
+    // случай, ради которого обобщение откладывается, - решает дырку
+    // конструктор.
+    let index = Term::Universe(metas.fresh_level());
+    let literal = pi(
+        Mult::Many,
+        "b",
+        c("Bool"),
+        ahead("Expr", &mut metas, 1).apply([c("Bool")]),
+    );
+    let outcome = signature.declare_data(
+        &mut metas,
+        "Expr",
+        0,
+        pi(Mult::Zero, "a", index, Term::universe(0)),
+        &[("lit", literal)],
+    );
+    declared("семейство с индексом-универсумом", &outcome);
+    let family = signature.lookup("Expr").expect("семейство объявлено");
+    let constructor = signature.lookup("lit").expect("конструктор объявлен");
+    assert_eq!(family.level_arity, 0, "уровень заземлён конструктором");
+    assert_eq!(
+        constructor.level_arity, family.level_arity,
+        "арности сходятся - на этом и стоит элиминация"
+    );
+}
+
 /// Развернуть определения в поле - так видно, что проверка увидела бы, если бы
 /// смотрела на δ-нормальную форму, а не на запись.
 fn unfolded(field: &Field) -> Term {

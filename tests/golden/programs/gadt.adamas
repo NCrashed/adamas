@@ -1,0 +1,33 @@
+-- GADT с индексом-`Type` (§4.1, §10 вопрос 53).
+--
+-- Конструктор такой индекс **инстанцирует**, а вместе с ним фиксирует и
+-- уровень: `Expr Nat` требует `Nat : Type u`, то есть заземляет `u` нулём.
+-- Обобщи семейство раньше конструкторов - уровень стал бы параметром, который
+-- они потом заземлят, и арности разошлись бы. Поэтому обобщение отложено до
+-- фазы B1½ и идёт совместно по kind'у и типам конструкторов.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Expr : Type -> Type where
+  LitNat : Nat -> Expr Nat
+  LitBool : Bool -> Expr Bool
+  Add : Expr Nat -> Expr Nat -> Expr Nat
+
+-- Уточнение индекса разбором: ветвь `LitNat` знает, что `a` есть `Nat`, и
+-- возвращает `n` там, где ожидается `a`.
+evalAny : (0 a : Type) -> Expr a -> a
+evalAny a (LitNat n) = n
+evalAny a (LitBool b) = b
+evalAny a (Add l r) = Zero
+
+-- Индекс, не являющийся `Type`, шёл этим путём и раньше: конструктор его тоже
+-- инстанцирует, но уровня у `Nat` нет, и заземлять нечего.
+data Vec : Nat -> Type where
+  Empty : Vec Zero
+  Cons : (0 n : Nat) -> Nat -> Vec n -> Vec (Succ n)

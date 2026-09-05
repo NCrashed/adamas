@@ -3396,6 +3396,78 @@ module NatEq : Eqv where
 ";
 
 #[test]
+fn an_effectful_signature_member_is_called_from_a_wider_ambient() {
+    // §10 вопрос 107: у сигнатуры модуля тот же row-параметр, что у класса
+    // (вопрос 102), а у функтора он **делится с подъёмом члена**. Порознь
+    // обобщение заводит две переменные, а тело требует их равенства - и связать
+    // их уже нечем: обобщение идёт раньше тела.
+    let base = "\
+data Bool where
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+effect Log where
+  emit : Nat -> Unit
+
+effect Fail where
+  fail : Nat -> Nat
+
+module type Source where
+  type T
+  read : T -> {Log} Nat
+
+module Counter : Source where
+  type T = Nat
+  read : T -> {Log} Nat
+  read n =
+    emit n
+    n
+";
+    // Через параметр функтора - из окружающей шире на `Fail`.
+    program(&format!(
+        "{base}
+module Wider (S : Source) where
+  twice : S.T -> {{Log, Fail}} Nat
+  twice x = S.read x
+"
+    ));
+    // И та же окружающая: две переменные вместо одной ломали и этот случай.
+    program(&format!(
+        "{base}
+module Same (S : Source) where
+  once : S.T -> {{Log}} Nat
+  once x = S.read x
+"
+    ));
+    // Прямое употребление, без функтора.
+    program(&format!(
+        "{base}
+direct : {{Log, Fail}} Nat
+direct = Counter.read Zero
+"
+    ));
+
+    // Граница: окружающая, которая метки не называет, по-прежнему отвергает.
+    let error = refused(&format!(
+        "{base}
+module Pure (S : Source) where
+  once : S.T -> Nat
+  once x = S.read x
+"
+    ));
+    assert!(
+        error.to_string().contains("не погашены"),
+        "получено {error}"
+    );
+}
+
+#[test]
 fn a_functor_takes_a_module() {
     // §4.8: функтор - модуль, параметризованный модулем, а применение его -
     // обычный вызов. Член поднят вместе с параметром, поэтому написанное

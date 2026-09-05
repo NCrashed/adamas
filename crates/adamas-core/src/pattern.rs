@@ -333,10 +333,11 @@ pub fn compile_traced(
             });
         }
         let mut variables = 0;
+        let mut names = Vec::new();
         let patterns = clause
             .patterns
             .iter()
-            .map(|pattern| number(pattern, &mut variables))
+            .map(|pattern| number(pattern, &mut variables, &mut names))
             .collect();
         if !well_scoped(&clause.body, arity_u32(variables)) {
             return Err(PatternError::UnboundInBody { clause: index });
@@ -344,6 +345,7 @@ pub fn compile_traced(
         rows.push(Row {
             clause: index,
             patterns,
+            names,
             assigned: vec![None; variables],
             body: Rc::new(clause.body.clone()),
         });
@@ -427,10 +429,11 @@ pub fn compile_case(
             });
         }
         let mut variables = 0;
+        let mut names = Vec::new();
         let patterns = clause
             .patterns
             .iter()
-            .map(|pattern| number(pattern, &mut variables))
+            .map(|pattern| number(pattern, &mut variables, &mut names))
             .collect();
         // Связывания контекста телу законны: оно и написано под ними.
         if !well_scoped(&clause.body, base + arity_u32(variables)) {
@@ -439,6 +442,7 @@ pub fn compile_case(
         rows.push(Row {
             clause: index,
             patterns,
+            names,
             assigned: vec![None; variables],
             body: Rc::new(clause.body.clone()),
         });
@@ -475,6 +479,29 @@ fn written(clauses: &[Clause], index: usize) -> Option<Name> {
         .iter()
         .find_map(|clause| match clause.patterns.get(index) {
             Some(Pattern::Var(name)) if &**name != "_" => Some(Rc::clone(name)),
+            _ => None,
+        })
+}
+
+/// Как автор назвал `at`-е поле конструктора.
+///
+/// То же правило, что у аргумента (`written`), только смотрит на строку в
+/// разбираемом столбце: у первой клаузы, где на этом месте стоит переменная.
+/// Из объявления имя приходит `_` - безымянная стрелка `Succ : Nat -> Nat`
+/// имени не несёт, - и телескоп печатал позицию вместо написанного автором
+/// (§10 вопрос 69).
+fn bound_as(plan: &Split<'_>, constructor: &Name, at: usize) -> Option<Name> {
+    plan.rows
+        .iter()
+        .find_map(|row| match row.patterns.get(plan.column)? {
+            Pat::Ctor(name, arguments) if name == constructor => match arguments.get(at)? {
+                Pat::Var(variable) => row
+                    .names
+                    .get(*variable)
+                    .filter(|it| &***it != "_")
+                    .map(Rc::clone),
+                _ => None,
+            },
             _ => None,
         })
 }
@@ -622,17 +649,25 @@ enum Pat {
     Ctor(Name, Vec<Pat>),
 }
 
-/// Нумерует переменные слева направо в глубину.
-fn number(pattern: &Pattern, next: &mut usize) -> Pat {
+/// Нумерует переменные слева направо в глубину, попутно запоминая их имена.
+///
+/// Имена нужны диагностике: связывание поля ветви приходит из **объявления**
+/// конструктора, где оно `_`, и телескоп точки отказа печатал позицию вместо
+/// написанного автором имени (§10 вопрос 69).
+fn number(pattern: &Pattern, next: &mut usize, names: &mut Vec<Name>) -> Pat {
     match pattern {
-        Pattern::Var(_) => {
+        Pattern::Var(name) => {
             let index = *next;
             *next += 1;
+            names.push(Rc::clone(name));
             Pat::Var(index)
         }
         Pattern::Constructor(name, fields) => Pat::Ctor(
             Rc::clone(name),
-            fields.iter().map(|field| number(field, next)).collect(),
+            fields
+                .iter()
+                .map(|field| number(field, next, names))
+                .collect(),
         ),
     }
 }
@@ -670,6 +705,8 @@ impl Column {
 struct Row {
     clause: usize,
     patterns: Vec<Pat>,
+    /// Имена переменных клаузы по их номерам - для диагностики (§10 вопрос 69).
+    names: Vec<Name>,
     /// Значение каждой переменной клаузы по мере связывания.
     assigned: Vec<Option<Rc<Value>>>,
     body: Rc<Term>,
@@ -998,14 +1035,23 @@ impl Compiler<'_> {
         // ветви, который построит `check`. Разойдись они - `LambdaMultiplicity`
         // на терме, который сборка же и собрала.
         let taken = |field: &Field| field.mult * plan.consumed;
+        // Связывание на поле одно, а клауз через ветвь проходит сколько угодно:
+        // берётся первое написанное имя, как и у аргумента.
+        let named = |at: usize| {
+            bound_as(plan, constructor, at).unwrap_or_else(|| Rc::clone(&fields[at].name))
+        };
         let mut inner = ctx.clone();
-        for field in fields {
-            inner = inner.bind(Rc::clone(&field.name), taken(field), Rc::clone(&field.ty));
+        for (at, field) in fields.iter().enumerate() {
+            inner = inner.bind(named(at), taken(field), Rc::clone(&field.ty));
         }
         let wrap = |body: Term| {
-            fields.iter().rev().fold(body, |body, field| {
-                Term::Lam(taken(field), Rc::clone(&field.name), Rc::new(body))
-            })
+            fields
+                .iter()
+                .enumerate()
+                .rev()
+                .fold(body, |body, (at, field)| {
+                    Term::Lam(taken(field), named(at), Rc::new(body))
+                })
         };
 
         // Индексы разошлись - такой ветви не бывает. Мотив отдал ей заведомо
@@ -1450,6 +1496,7 @@ fn specialise(
     Ok(Some(Row {
         clause: row.clause,
         patterns,
+        names: row.names.clone(),
         assigned,
         body: Rc::clone(&row.body),
     }))

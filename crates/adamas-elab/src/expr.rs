@@ -1936,11 +1936,22 @@ impl<'a> Elaborator<'a> {
                 _ => None,
             });
         performed.or_else(|| {
+            // Голова не операция - берём из окружающей, но **только** если
+            // выбирать там не из чего: все метки одного имени. Разных имён
+            // хватает, чтобы выбор стал догадкой, а порядок между ними
+            // несуществен (§4.1).
+            //
+            // Однородная окружающая неоднозначной не является, и требовать
+            // ровно одной метки было ошибкой: `mask asked` при `{Ask, Ask}`
+            // отвергалось «нечего маскировать», хотя `mask ask` - то же самое,
+            // написанное операцией, - проходило. Именовать вычисление
+            // приходится постоянно: `handle` над применением тоже требует
+            // имени.
             let labels = self.ctx.row().labels();
-            match labels {
-                [only] => Some(Rc::clone(&only.name)),
-                _ => None,
-            }
+            let (first, rest) = labels.split_first()?;
+            rest.iter()
+                .all(|label| label.name == first.name)
+                .then(|| Rc::clone(&first.name))
         })
     }
 
@@ -1971,10 +1982,28 @@ impl<'a> Elaborator<'a> {
         let Some(definition) = self.signature.lookup(&name.text) else {
             return false;
         };
-        if !matches!(definition.kind, DefinitionKind::Operation { .. }) {
-            return false;
+        if matches!(definition.kind, DefinitionKind::Operation { .. }) {
+            return performing(&definition.ty).is_some_and(|arity| applied < arity);
         }
-        performing(&definition.ty).is_some_and(|arity| applied < arity)
+        // Не операция - обычное имя, и вычислением оно бывает не реже:
+        // `handle` над применением требует имени, поэтому вычисления в этом
+        // языке **называют**. Считать их неприостановленными значило бы, что
+        // `mask asked` и `mask ask` - разные формы, хотя `asked = ask`.
+        //
+        // Спрашивается остаток типа после написанных аргументов: ждёт ли он
+        // ещё единицу. Имплиситы пропускаются - их пишет не автор.
+        let mut current = &definition.ty;
+        let mut left = applied;
+        while left > 0 {
+            let Term::Pi(binder, _, _, _, codomain) = current else {
+                return false;
+            };
+            if binder.visibility == adamas_core::visibility::Visibility::Explicit {
+                left -= 1;
+            }
+            current = codomain;
+        }
+        awaits_unit(current)
     }
 
     /// Кладёт в кэш элиминатор маски с **заданной** ρ.

@@ -51,9 +51,11 @@ mod live;
 mod own;
 mod render;
 mod route;
+mod warn;
 
 pub use decl::{elaborate, elaborate_into};
 pub use error::{ElabError, Missing, Names};
 pub use expr::is_reference;
 pub use own::{Owned, Ownership};
 pub use render::{located, report};
+pub use warn::{Warning, Warnings};

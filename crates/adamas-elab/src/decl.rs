@@ -39,6 +39,7 @@ use crate::expr::{Elaborator, Enclosing, Member, Param, UNIT, Unwritten, Written
 use crate::fixity::Fixities;
 use crate::own::{Owned, Ownership};
 use crate::route::{self, Declared};
+use crate::warn::{Warning, Warnings};
 
 /// Сигнатура, ожидающая клауз.
 ///
@@ -61,12 +62,13 @@ struct Pending<'a> {
 /// # Errors
 ///
 /// Любой отказ элаборации, сборки клауз или проверки типов.
-pub fn elaborate(module: &Module) -> Result<Signature, ElabError> {
+pub fn elaborate(module: &Module) -> Result<(Signature, Warnings), ElabError> {
     let mut signature = Signature::default();
     let mut metas = Metas::default();
     let mut owned = Owned::default();
     let mut instances = Instances::default();
     let mut fixities = Fixities::default();
+    let mut warnings = Warnings::new();
     elaborate_into(
         module,
         &mut signature,
@@ -74,8 +76,9 @@ pub fn elaborate(module: &Module) -> Result<Signature, ElabError> {
         &mut owned,
         &mut fixities,
         &mut instances,
+        &mut warnings,
     )?;
-    Ok(signature)
+    Ok((signature, warnings))
 }
 
 /// То же, но поверх уже собранной сигнатуры - так к модулю приставляется
@@ -91,6 +94,7 @@ pub fn elaborate_into(
     owned: &mut Owned,
     fixities: &mut Fixities,
     instances: &mut Instances,
+    warnings: &mut Warnings,
 ) -> Result<(), ElabError> {
     // Есть ли в модуле ресурсы, спрашивается **до** объявлений: иначе тот же
     // `handleMulti` принимался бы или отвергался в зависимости от того, выше
@@ -108,6 +112,7 @@ pub fn elaborate_into(
         owned,
         fixities,
         instances,
+        warnings,
     )
 }
 
@@ -314,6 +319,45 @@ fn declared_signature<'a>(
     })
 }
 
+/// Имена implicit-групп, не встречающиеся в остатке типа (§10 вопросы 79, 81).
+///
+/// Спрашивается по **написанному**, а не по элаборированному: у поднятого
+/// связывания имя тоже implicit, но оно поднято именно потому, что встречается,
+/// - а спан у написанного точный, и указать есть на что.
+///
+/// Форма `{ x : Nat }` в домене читается связыванием, тогда как записана могла
+/// быть записью (§4.2, вопрос 79). Оба прочтения дают корректный тип, поэтому
+/// отказом это не ловится; различает их ровно то, что имя больше нигде не
+/// стоит.
+fn unused_implicits(ty: &ast::Expr, into: &mut Warnings) {
+    let ast::ExprKind::Pi { binders, codomain } = &ty.kind else {
+        return;
+    };
+    for (at, binder) in binders.iter().enumerate() {
+        if binder.visibility != ast::Visibility::Implicit {
+            continue;
+        }
+        for name in &binder.names {
+            // `_` не используется намеренно - о нём и предупреждать нечего.
+            if &*name.text == "_" {
+                continue;
+            }
+            let later = binders[at + 1..]
+                .iter()
+                .filter_map(|it| it.ty.as_ref())
+                .any(|it| crate::expr::names_any(it, &[&name.text]));
+            if later || crate::expr::names_any(codomain, &[&name.text]) {
+                continue;
+            }
+            into.push(Warning::UnusedImplicit {
+                name: Rc::clone(&name.text),
+                span: name.span,
+            });
+        }
+    }
+    unused_implicits(codomain, into);
+}
+
 /// Собирает read-only половину состояния.
 fn known<'a>(owned: &'a Owned, fixities: &'a Fixities, instances: &'a Instances) -> Known<'a> {
     Known {
@@ -379,6 +423,10 @@ fn abstracted(params: &[Param], body: Term) -> Term {
 }
 
 /// Объявления одного уровня: верхнего либо тела модуля.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "прогон элаборации несёт своё состояние; складывать его в структуру значило бы прятать, что именно меняется"
+)]
 fn members_into(
     decls: &[ast::Decl],
     within: Option<&Enclosing<'_>>,
@@ -387,6 +435,7 @@ fn members_into(
     owned: &mut Owned,
     fixities: &mut Fixities,
     instances: &mut Instances,
+    warnings: &mut Warnings,
 ) -> Result<(), ElabError> {
     // Сигнатуры, ставшие постулатами по ходу прогона: клаузы, пришедшие за
     // ними, - не «нет сигнатуры», а сигнатура не рядом.
@@ -400,6 +449,7 @@ fn members_into(
                 attributes,
             } => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
+                unused_implicits(ty, warnings);
                 pending = Some(declared_signature(
                     signature, metas, owned, fixities, within, name, ty, attributes, decl.span,
                 )?);
@@ -442,7 +492,8 @@ fn members_into(
             DeclKind::Module(declared) => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
                 declare_module(
-                    signature, metas, owned, fixities, instances, within, declared, decl.span,
+                    signature, metas, owned, fixities, instances, warnings, within, declared,
+                    decl.span,
                 )?;
             }
             DeclKind::Mutual(members) => {
@@ -621,6 +672,7 @@ fn declare_module(
     owned: &mut Owned,
     fixities: &mut Fixities,
     instances: &mut Instances,
+    warnings: &mut Warnings,
     within: Option<&Enclosing<'_>>,
     module: &ast::ModuleDecl,
     span: Span,
@@ -651,6 +703,7 @@ fn declare_module(
         owned,
         fixities,
         instances,
+        warnings,
     )?;
     // Телескоп для самой записи считается **после** членов: граница объявления
     // освобождает дырки, и посчитанный заранее умер бы на первом же члене.

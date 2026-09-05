@@ -1,0 +1,181 @@
+-- Мини-интерпретатор: capstone Фазы 5.
+--
+-- Написан ради результата, а не ради форм. Ценность его в том, что формы здесь
+-- **встречаются друг с другом**: класс с эффектом в методе, окружение нитью
+-- параметризованного хендлера, ошибки эффектом, ресурс, закрываемый на
+-- исключительном выходе, и маска, отличающая восстановимую ошибку от фатальной.
+--
+-- Каждый механизм по отдельности проверен своим голденом. Здесь проверяется
+-- то, чего не проверяет ни один из них: что они **сочетаются**.
+--
+-- Одна пара не сочетается, и она названа на месте: метод класса не зовётся из
+-- окружающей шире его собственной row (§10 вопрос 102).
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+infixl 6 +
+(+) : Nat -> Nat -> Nat
+(+) Zero m = m
+(+) (Succ k) m = Succ (k + m)
+
+infixl 7 *
+(*) : Nat -> Nat -> Nat
+(*) Zero m = Zero
+(*) (Succ k) m = m + k * m
+
+-- Синтаксис: выражения и последовательность связываний.
+data Expr where
+  Lit : Nat -> Expr
+  Var : Nat -> Expr
+  Add : Expr -> Expr -> Expr
+  Mul : Expr -> Expr -> Expr
+
+data Stmt where
+  Done : Expr -> Stmt
+  Def : Expr -> Stmt -> Stmt
+
+-- Окружение и ошибки - эффекты, а не параметры.
+effect Fail where
+  fail : Nat -> Nat
+
+effect Env where
+  look : Nat -> Nat
+  bind : Nat -> Unit
+
+effect Trace where
+  note : Nat -> Unit
+
+lookupAt : Nat -> List Nat -> {Fail} Nat
+lookupAt n Nil = fail n
+lookupAt Zero (Cons x xs) = x
+lookupAt (Succ k) (Cons x xs) = lookupAt k xs
+
+-- Один интерфейс на оба вида узлов; метод производит эффекты.
+class Eval a where
+  run : a -> {Env, Fail} Nat
+
+instance Eval Expr where
+  run (Lit n) = n
+  run (Var i) = look i
+  run (Add a b) = run a + run b
+  run (Mul a b) = run a * run b
+
+instance Eval Stmt where
+  run (Done e) = run e
+  run (Def v rest) =
+    let n : Nat = run v
+    let u : Unit = bind n
+    run rest
+
+-- `let x = 2 in let y = x * 3 in y + x` даёт восемь.
+sample : Stmt
+sample =
+  Def (Lit (Succ (Succ Zero)))
+    (Def (Mul (Var Zero) (Lit (Succ (Succ (Succ Zero)))))
+      (Done (Add (Var Zero) (Var (Succ Zero)))))
+
+program : {Env, Fail} Nat
+program = run sample
+
+-- Окружение - нить хендлера, а `Fail` остаётся в остатке: это композиция, а не
+-- хендлер, гасящий всё в чистый результат.
+resolved : {Fail} Nat
+resolved = handle program with
+  state Nil
+  return v -> v
+  look i -> resume (lookupAt i state) state
+  bind n -> resume MkUnit (Cons n state)
+
+answer : Nat
+answer = handle resolved with
+  return v -> v
+  fail e -> Zero
+
+-- Источник программы - ресурс: закрыть его обязаны оба выхода, и здесь
+-- вычисление обрывается ошибкой.
+resource Source where
+  Open : Source
+  close : (1 s : Source) -> {Trace} Bool
+  close s =
+    note (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero)))))))))
+    True
+
+-- Метод класса сюда не зовётся, и это не выбор: эффектный член класса замкнут
+-- по row, поэтому гасится только окружающей, **совпадающей** с его набором
+-- меток, а здесь она шире на `Trace` (§10 вопрос 102). Операция ограничения не
+-- знает: её row поднята, как у всякой написанной сигнатуры.
+guarded : Source -> {Env, Fail, Trace} Nat
+guarded s =
+  let u : Unit = note Zero
+  look (Succ (Succ Zero))
+
+opened : {Env, Fail, Trace} Nat
+opened = guarded Open
+
+broken : {Fail, Trace} Nat
+broken = handle opened with
+  state Nil
+  return v -> v
+  look i -> resume (lookupAt i state) state
+  bind n -> resume MkUnit (Cons n state)
+
+recovered : {Trace} Nat
+recovered = handle broken with
+  return v -> v
+  fail e -> Zero
+
+-- Отметки идут по порядку: тело, потом деструктор. Обе доходят, хотя ветка
+-- `fail` вычисление оборвала.
+traced : List Nat
+traced = handle recovered with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+
+-- Локальное восстановление снимает **одно** вхождение метки. Чтобы это
+-- сказать, лишнее вхождение выписывается, а хвост называется: поднятая row
+-- одна на сигнатуру, и `({Fail} Nat) -> {Fail} Nat` значило бы «сколько
+-- вошло, столько и вышло».
+attempt : ({Fail, Fail | e} Nat) -> {Fail | e} Nat
+attempt act = handle act with
+  return v -> v
+  fail e2 -> resume Zero
+
+recoverable : {Fail} Nat
+recoverable = fail (Succ Zero)
+
+fatal : {Fail} Nat
+fatal = fail (Succ (Succ Zero))
+
+-- Первая ошибка гасится локально, вторая обязана уйти мимо него наружу.
+risky : {Fail, Fail} Nat
+risky =
+  let a : Nat = recoverable
+  let b : Nat = mask fatal
+  a + b
+
+local : {Fail} Nat
+local = attempt risky
+
+escaped : Nat
+escaped = handle local with
+  return v -> v
+  fail e -> Succ (Succ (Succ (Succ Zero)))
+
+-- `[8, 4, 0, 9]`: восемь от вычисления, четыре от фатальной ошибки, ушедшей
+-- мимо локального обработчика, и отметки `[0, 9]` от оборванного - вторая из
+-- них поставлена деструктором ресурса уже на исключительном пути.
+main : List Nat
+main = Cons answer (Cons escaped traced)

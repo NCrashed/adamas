@@ -1856,7 +1856,8 @@ impl<'a> Parser<'a> {
             return Err(self.expected(Expected::Pattern));
         }
         self.expect(TokenKind::Arrow)?;
-        let body = self.expr()?;
+        // То же у лямбды: блок, если стрелка его открыла (§10 вопросы 55, 61).
+        let body = self.body()?;
         let span = start.merge(body.span);
         Ok(Expr {
             kind: ExprKind::Lam {
@@ -2053,7 +2054,9 @@ impl<'a> Parser<'a> {
     fn alt(&mut self) -> Result<Alt, ParseError> {
         let pattern = self.pattern()?;
         self.expect(TokenKind::Arrow)?;
-        let body = self.expr()?;
+        // Тело ветки - блок, если стрелка его открыла (§10 вопрос 61): за ней
+        // пишут последовательность ровно так же, как за `=`.
+        let body = self.body()?;
         let span = pattern.span.merge(body.span);
         Ok(Alt {
             pattern,

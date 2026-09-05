@@ -378,11 +378,11 @@ fn a_parameter_must_stay_the_same_under_recursion() {
                 &[("nest", nest)],
             ),
             Err(TypeError {
-                kind: ErrorKind::NotStrictlyPositive { .. },
+                kind: ErrorKind::NonUniformParameter { .. },
                 ..
             })
         ),
-        "неединообразный параметр отвергается"
+        "неединообразный параметр отвергается своим сообщением, а не как отрицательная позиция"
     );
 }
 
@@ -514,11 +514,11 @@ fn a_nested_occurrence_in_an_argument_is_rejected() {
                 &[("mk", mk)],
             ),
             Err(TypeError {
-                kind: ErrorKind::NotStrictlyPositive { .. },
+                kind: ErrorKind::NonUniformParameter { .. },
                 ..
             })
         ),
-        "рекурсивное вхождение под собственным аргументом отвергается"
+        "рекурсивное вхождение под собственным аргументом отвергается: аргумент не параметр"
     );
 }
 

@@ -1001,8 +1001,27 @@ fn positive_field<'a>(
     params: u32,
     depth: u32,
     term: &Term,
-) -> Option<&'a Name> {
+) -> Option<(&'a Name, Fault)> {
     positive_seen(signature, group, params, depth, term, &mut HashSet::new())
+}
+
+/// Какое из двух правил нарушено.
+///
+/// Считает их один обход одного терма, но сообщения у них разные: про
+/// отрицательную позицию в неединообразном вхождении читать нечего - стрелки
+/// там может не быть вовсе. Пока текст был общим, единообразие ломалось
+/// незаметно для корпуса.
+#[derive(Clone, Copy)]
+enum Fault {
+    /// Тип стоит слева от стрелки.
+    Negative,
+    /// Рекурсивное вхождение применено не к своим параметрам.
+    NonUniform,
+}
+
+/// Найденное семейство как нарушение позитивности.
+fn negative(found: Option<&Name>) -> Option<(&Name, Fault)> {
+    found.map(|name| (name, Fault::Negative))
 }
 
 /// Первое семейство группы, которое терм упоминает.
@@ -1022,16 +1041,18 @@ fn positive_seen<'a, 'g>(
     depth: u32,
     term: &'a Term,
     seen: &mut HashSet<&'a Name>,
-) -> Option<&'g Name> {
+) -> Option<(&'g Name, Fault)> {
     match term {
         // Слева от стрелки тип не должен встречаться вовсе; справа - рекурсия.
         // Аргументы меток row - та же левая позиция: применение стрелки
         // предъявляет их так же, как домен.
-        Term::Pi(_, _, domain, row, codomain) => mentioned_by(signature, group, domain)
+        Term::Pi(_, _, domain, row, codomain) => negative(mentioned_by(signature, group, domain))
             .or_else(|| {
-                group
-                    .iter()
-                    .find(|name| mentioned_in_row(signature, name, row))
+                negative(
+                    group
+                        .iter()
+                        .find(|name| mentioned_in_row(signature, name, row)),
+                )
             })
             .or_else(|| positive_seen(signature, group, params, depth + 1, codomain, seen)),
         other => {
@@ -1050,11 +1071,14 @@ fn positive_seen<'a, 'g>(
                         .and_then(Definition::data_shape)
                         .map_or(params, |(count, _)| count);
                     if !uniform_parameters(own, depth, &arguments) {
-                        return mentioned_by(signature, group, other);
+                        return mentioned_by(signature, group, other)
+                            .map(|found| (found, Fault::NonUniform));
                     }
-                    arguments
-                        .iter()
-                        .find_map(|argument| mentioned_by(signature, group, argument))
+                    negative(
+                        arguments
+                            .iter()
+                            .find_map(|argument| mentioned_by(signature, group, argument)),
+                    )
                 }
                 _ if !mentions_any(signature, group, other) => None,
                 // Тип упомянут, но позиция ещё не разобрана: если голова -
@@ -1064,17 +1088,17 @@ fn positive_seen<'a, 'g>(
                         .lookup(name)
                         .and_then(|definition| definition.body.as_ref())
                     else {
-                        return mentioned_by(signature, group, other);
+                        return negative(mentioned_by(signature, group, other));
                     };
                     // Память о развёрнутых - против самоссылки в теле; та же
                     // причина и та же форма, что у `mentions_seen`.
                     if seen.insert(name) {
                         positive_seen(signature, group, params, depth, body, seen)
                     } else {
-                        mentioned_by(signature, group, other)
+                        negative(mentioned_by(signature, group, other))
                     }
                 }
-                _ => mentioned_by(signature, group, other),
+                _ => negative(mentioned_by(signature, group, other)),
             }
         }
     }
@@ -1395,10 +1419,13 @@ pub(crate) fn check_constructor_content(
             .into());
         }
         if depth >= params {
-            if let Some(found) = positive_field(signature, group, params, depth, &field.domain) {
-                return Err(ErrorKind::NotStrictlyPositive {
-                    name: Rc::clone(name),
-                    data: Rc::clone(found),
+            if let Some((found, fault)) =
+                positive_field(signature, group, params, depth, &field.domain)
+            {
+                let (name, data) = (Rc::clone(name), Rc::clone(found));
+                return Err(match fault {
+                    Fault::Negative => ErrorKind::NotStrictlyPositive { name, data },
+                    Fault::NonUniform => ErrorKind::NonUniformParameter { name, data },
                 }
                 .into());
             }

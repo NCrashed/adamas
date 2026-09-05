@@ -7216,3 +7216,52 @@ mutual
 "
     ));
 }
+
+#[test]
+fn a_mask_decides_suspension_by_the_head_it_is_written_over() {
+    // Приостановлено ли написанное, спрашивалось пробным проходом с откатом, и
+    // он элаборировал всё поддерево второй раз: на `n` вложенных масках
+    // выходило `2ⁿ`, и двадцать масок в шестистах байтах не заканчивались
+    // вовсе. Решается это теперь по голове, без элаборации, и обе формы обязаны
+    // остаться рабочими: операция, которой не хватает написанных аргументов,
+    // есть вычисление сама, применённая до конца - нет.
+    let text = "\
+data Bool where
+  True : Bool
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+effect Raise e where
+  raise : e -> a
+
+effect Get where
+  get : Nat
+";
+    // Неприменённая операция: обёртки не требует.
+    program(&format!(
+        "{text}
+bare : {{Get, Get}} Nat
+bare = mask get
+"
+    ));
+    // Применённая до конца: обёртку ставит форма.
+    program(&format!(
+        "{text}
+full : {{Raise Bool, Raise Bool}} Nat
+full = mask (raise True)
+"
+    ));
+    // Вложенная маска приостановленной не считается: её тип несёт аргументы
+    // метки дырками, а решает их проверка против домена элиминатора.
+    program(&format!(
+        "{text}
+twice : {{Raise Bool, Raise Bool, Raise Bool}} Nat
+twice = mask (mask (raise True))
+"
+    ));
+}

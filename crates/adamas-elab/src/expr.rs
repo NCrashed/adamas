@@ -1936,6 +1936,39 @@ impl<'a> Elaborator<'a> {
         })
     }
 
+    /// Приостановлено ли написанное под маской - по **голове**, без элаборации.
+    ///
+    /// Элиминатор ждёт вычисление, а операция, применённая до конца, производит
+    /// сразу; форма приостанавливает её сама. Раньше это спрашивалось пробным
+    /// проходом с откатом, и он элаборировал всё поддерево второй раз: на `n`
+    /// вложенных масках выходило `2ⁿ`, и двадцать масок в шестистах байтах не
+    /// заканчивались вовсе (ревью 2026-09-05).
+    ///
+    /// Приостановлена ровно операция, которой не хватает написанных аргументов:
+    /// `ask : s` есть вычисление само, `raise MkParse` - уже нет. **Вложенная
+    /// маска приостановленной не считается**, и это измерено, а не выведено:
+    /// её тип несёт аргументы метки дырками, а решает их проверка против
+    /// домена элиминатора - то есть обёртка. Без неё `mask (mask (raise
+    /// MkEval))` отвергается непогашенностью с нерешённым аргументом метки.
+    fn suspended_by_head(&self, inner: &Expr) -> bool {
+        let mut applied = 0usize;
+        let mut head = inner;
+        while let ExprKind::App(callee, _) = &head.kind {
+            applied += 1;
+            head = callee;
+        }
+        let ExprKind::Name(name) = &head.kind else {
+            return false;
+        };
+        let Some(definition) = self.signature.lookup(&name.text) else {
+            return false;
+        };
+        if !matches!(definition.kind, DefinitionKind::Operation { .. }) {
+            return false;
+        }
+        performing(&definition.ty).is_some_and(|arity| applied < arity)
+    }
+
     /// Кладёт в кэш элиминатор маски с **заданной** ρ.
     ///
     /// Обычный путь имени выдал бы ρ свежей дыркой, а её тут выводить нечем:
@@ -1986,15 +2019,7 @@ impl<'a> Elaborator<'a> {
         };
         let rho = rest.map(|argument| quote(self.ctx.size(), argument));
         self.seed_mask(&head, &rho);
-        let mark = self.metas.mark();
-        let ready = self
-            .expr(inner, Mult::Many)
-            .ok()
-            .and_then(|term| self.synthesized(&term))
-            .is_some_and(|ty| self.computation(&ty));
-        self.metas.rollback(mark);
-        self.instantiated.clear();
-        self.seed_mask(&head, &rho);
+        let ready = self.suspended_by_head(inner);
 
         let argument = if ready {
             inner.clone()
@@ -5171,4 +5196,26 @@ fn peeled(ty: &Term) -> Term {
         current = codomain;
     }
     current.clone()
+}
+
+/// Сколько аргументов операция принимает до того, как произведёт свою метку.
+///
+/// Row стоит на стрелке, и связывание, её несущее, - последнее из написанных:
+/// операция производится, когда применена целиком (§3.4). То же считает машина
+/// у себя, и разъехаться им негде - обе читают объявленный тип.
+fn performing(ty: &Term) -> Option<usize> {
+    let mut current = ty;
+    let mut count = 0;
+    while let Term::Pi(binder, _, _, row, codomain) = current {
+        // Считаются **явные** связывания: применение в исходнике пишет только
+        // их, а поднятые имена и параметры метки вставляет вывод.
+        if !binder.visibility.is_implicit() {
+            count += 1;
+        }
+        if !row.labels().is_empty() {
+            return Some(count);
+        }
+        current = codomain;
+    }
+    None
 }

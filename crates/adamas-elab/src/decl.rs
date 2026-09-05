@@ -2857,6 +2857,25 @@ fn define(
     carrier::check(signature, known.owned, &declared.name, span)
 }
 
+/// Подлежит ли связывание заземлению.
+///
+/// Различие измерено, и оно существенно. **Написанный `Type`** приезжает
+/// готовым универсумом с дыркой уровня - тут сомнений нет: связывание типовое.
+/// **Поднятое имя** приезжает дыркой терма, и чем она окажется, к этому моменту
+/// известно не всегда: у операции `throw : e -> a` домен `a` так и остаётся
+/// нерешённым - его ничто не ограничивает, кроме употребления в позиции типа, -
+/// а у конструктора `VCons : a -> Vec a n -> Vec a (Succ n)` домен поднятого
+/// `n` решается в `Nat` соседним полем. Заземлять поднятое поэтому вправе
+/// только implicit-связывание: явное `(0 a : Type)` пишет автор, и там уже
+/// стоит универсум.
+fn grounds(domain: &Term, lifted: bool) -> bool {
+    match spine_head(domain) {
+        Term::Universe(Level::Meta(_)) => true,
+        Term::Meta(_) => lifted,
+        _ => false,
+    }
+}
+
 /// Голова спайна применения.
 fn spine_head(term: &Term) -> &Term {
     let mut head = term;
@@ -2882,7 +2901,7 @@ fn spine_head(term: &Term) -> &Term {
 /// Названная цена - операция не бывает полиморфной по `Type`. Правильный
 /// ответ - сделать ветку полиморфной и по уровню, но уровневых `Pi` в ядре
 /// нет (вариант «б» вопроса 83).
-fn grounded(ty: &Term, params: usize) -> Term {
+fn grounded(ty: &Term, params: usize, lifted: bool) -> Term {
     let Term::Pi(binder, name, domain, row, codomain) = ty else {
         return ty.clone();
     };
@@ -2890,16 +2909,7 @@ fn grounded(ty: &Term, params: usize) -> Term {
     // `Type` (§4.1): решает её `is_type` уже при объявлении группы, то есть
     // после того, как тип ветки с неё снят. Поэтому заземляется она здесь
     // подстановкой, а не решением - решать нечего, дырка ещё пуста.
-    let own = params == 0
-        && binder.visibility == adamas_core::visibility::Visibility::Implicit
-        && binder.mult == Mult::Zero
-        && matches!(
-            spine_head(domain),
-            // Поднятое имя приходит дыркой, написанное `{a : Type}` - готовым
-            // универсумом с дыркой уровня. Заземляются обе записи: они и есть
-            // одна и та же вещь, набранная по-разному (§4.1).
-            Term::Meta(_) | Term::Universe(Level::Meta(_))
-        );
+    let own = params == 0 && binder.mult == Mult::Zero && grounds(domain, lifted);
     let domain = if own {
         Rc::new(Term::Universe(Level::Zero))
     } else {
@@ -2910,7 +2920,7 @@ fn grounded(ty: &Term, params: usize) -> Term {
         Rc::clone(name),
         domain,
         row.clone(),
-        Rc::new(grounded(codomain, params.saturating_sub(1))),
+        Rc::new(grounded(codomain, params.saturating_sub(1), lifted)),
     )
 }
 
@@ -3574,6 +3584,13 @@ fn family_constructors<'a>(
                 .wrapped(&family.params, true, |it| {
                     it.constructor_type(&constructor.ty, Mult::One)
                 })?;
+            // Собственный типовой параметр конструктора живёт в нулевом
+            // универсуме (§10 вопрос 109) - тем же доводом, что у операции
+            // (вопрос 83): полиморфный по уровню он делает и само семейство
+            // полиморфным, а запинить уровень в месте использования нечем -
+            // уровни не пишутся (§3.2). Семейство встаёт над ним само: сорт
+            // поднимается до полей.
+            let ty = grounded(&ty, family.params.len(), false);
             owned_field(&ty, owned, family.data, constructor)?;
             Ok((&*constructor.name.text, ty))
         })
@@ -3679,7 +3696,7 @@ fn declare_effect(
         let suspended = suspends(&written);
         let ty = Elaborator::with_group(signature, metas, owned, fixities, vec![visible.clone()])
             .wrapped(&params, true, |it| it.declaration(&written, Mult::Many))?;
-        let ty = grounded(&zonk_term(metas, &ty), params.len());
+        let ty = grounded(&zonk_term(metas, &ty), params.len(), true);
         operations.push((&*operation.name.text, ty, suspended));
     }
 
@@ -4282,7 +4299,7 @@ fn declare_data(
     )?;
     let parameters = u32::try_from(family.params.len()).unwrap_or(u32::MAX);
     signature
-        .declare_data(
+        .declare_data_inferred(
             metas,
             &data.name.text,
             parameters,

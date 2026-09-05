@@ -44,6 +44,7 @@ dependencies = [
  "adamas-core",
  "adamas-elab",
  "adamas-parser",
+ "criterion",
  "thiserror",
 ]
 

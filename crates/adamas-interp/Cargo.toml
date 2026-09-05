@@ -14,6 +14,10 @@ workspace = true
 [lib]
 bench = false
 
+[[bench]]
+name = "handlers"
+harness = false
+
 [dependencies]
 adamas-core.workspace = true
 thiserror = "2"
@@ -21,3 +25,4 @@ thiserror = "2"
 [dev-dependencies]
 adamas-elab.workspace = true
 adamas-parser.workspace = true
+criterion = "0.7"

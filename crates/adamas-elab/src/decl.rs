@@ -3022,7 +3022,12 @@ fn owned_field(
                 })
             };
             match (field, holder) {
-                (_, None) => return refuse(Ownership::Unique),
+                // Советуется то, чем объявлено **поле**, а не `unique` всегда.
+                // Половины правила стоят лестницей, и `unique data` для
+                // ресурсного поля - ступенька в никуда: следующая же половина
+                // потребует `resource`. Совет обязан вести к проходящему
+                // файлу за один шаг.
+                (_, None) => return refuse(field),
                 (Ownership::Resource, Some(Ownership::Unique)) => {
                     return refuse(Ownership::Resource);
                 }

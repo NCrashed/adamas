@@ -2857,6 +2857,63 @@ fn define(
     carrier::check(signature, known.owned, &declared.name, span)
 }
 
+/// Голова спайна применения.
+fn spine_head(term: &Term) -> &Term {
+    let mut head = term;
+    while let Term::App(callee, _) = head {
+        head = callee;
+    }
+    head
+}
+
+/// Заземляет универсумы собственных параметров операции (§10 вопрос 83).
+///
+/// Параметры метки операция **повторяет**, и уровни у них общие с формером -
+/// их трогать нечем. Свои же она поднимает сама из свободных имён (`throw : e
+/// -> a`), и вот их уровень связать в точке `handle` нечем: метка о нём не
+/// несёт ничего, тип вычисления его не называет.
+///
+/// Тип ветки хендлера строится по типу операции и берёт этот универсум как
+/// есть, а место вызова инстанцирует **свою** копию. Обе стёрты, поэтому
+/// расхождения никто не увидит: `throw` при `a := Type` проходил, тогда как
+/// ветка ждала нулевой универсум. Заземление сводит обе копии к одной, и
+/// вызов в высшем универсуме отвергается там, где написан.
+///
+/// Названная цена - операция не бывает полиморфной по `Type`. Правильный
+/// ответ - сделать ветку полиморфной и по уровню, но уровневых `Pi` в ядре
+/// нет (вариант «б» вопроса 83).
+fn grounded(ty: &Term, params: usize) -> Term {
+    let Term::Pi(binder, name, domain, row, codomain) = ty else {
+        return ty.clone();
+    };
+    // Универсум поднятого имени приезжает сюда **дыркой терма**, а не готовым
+    // `Type` (§4.1): решает её `is_type` уже при объявлении группы, то есть
+    // после того, как тип ветки с неё снят. Поэтому заземляется она здесь
+    // подстановкой, а не решением - решать нечего, дырка ещё пуста.
+    let own = params == 0
+        && binder.visibility == adamas_core::visibility::Visibility::Implicit
+        && binder.mult == Mult::Zero
+        && matches!(
+            spine_head(domain),
+            // Поднятое имя приходит дыркой, написанное `{a : Type}` - готовым
+            // универсумом с дыркой уровня. Заземляются обе записи: они и есть
+            // одна и та же вещь, набранная по-разному (§4.1).
+            Term::Meta(_) | Term::Universe(Level::Meta(_))
+        );
+    let domain = if own {
+        Rc::new(Term::Universe(Level::Zero))
+    } else {
+        Rc::clone(domain)
+    };
+    Term::Pi(
+        *binder,
+        Rc::clone(name),
+        domain,
+        row.clone(),
+        Rc::new(grounded(codomain, params.saturating_sub(1))),
+    )
+}
+
 /// Поднимает универсум семейства до уровней его параметров.
 fn raised(kind: &Term, params: &[Param]) -> Term {
     match kind {
@@ -3622,6 +3679,7 @@ fn declare_effect(
         let suspended = suspends(&written);
         let ty = Elaborator::with_group(signature, metas, owned, fixities, vec![visible.clone()])
             .wrapped(&params, true, |it| it.declaration(&written, Mult::Many))?;
+        let ty = grounded(&zonk_term(metas, &ty), params.len());
         operations.push((&*operation.name.text, ty, suspended));
     }
 

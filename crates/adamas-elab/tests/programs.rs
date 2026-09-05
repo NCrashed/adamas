@@ -682,7 +682,12 @@ fn what_the_core_cannot_carry_yet_names_itself() {
             Missing::FreeTypeVariable,
         ),
         ("f : Nat\nf = 3.14\n", Missing::Literal),
-        ("f : Nat\nf =\n  let x = Zero\n  x\n", Missing::UntypedLet),
+        // Тип берётся синтезом значения, поэтому отказ остался ровно там, где
+        // синтезировать нечего: у лямбды домена нет (§10 вопросы 101 и 105).
+        (
+            "f : Nat -> Nat\nf =\n  let g = \\x -> x\n  g\n",
+            Missing::UnsynthesizedLet,
+        ),
         (
             "f : Nat -> Nat\nf = \\(0 x : Nat) -> x\n",
             Missing::LambdaAnnotation,
@@ -1674,6 +1679,102 @@ fn drops(signature: &Signature, name: &str) -> usize {
         panic!("у `{name}` есть тело")
     };
     body.to_string().matches("drop").count()
+}
+
+#[test]
+fn an_untyped_let_takes_its_type_from_the_value() {
+    // §10 вопрос 105: тип связывания берётся синтезом значения. Владению этого
+    // довольно - правило ключуется по **имени** головы, а не по написанному
+    // синтаксису, - поэтому ресурс узнаётся и `drop` вставляется там же, где у
+    // написанного типа. Прежний отказ ссылался на «ресурс не узнаётся».
+    let text = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+plain : Bool
+plain =
+  let b = True
+  b
+
+held : Bool
+held =
+  let h = Open True
+  True
+"
+    );
+    let signature = program(&text);
+    assert_eq!(
+        drops(&signature, "held"),
+        1,
+        "ресурс без аннотации закрывается так же, как с ней"
+    );
+    assert_eq!(drops(&signature, "plain"), 0, "закрывать нечего");
+
+    // Написанная `ω` у владеемого отвергается тем же правилом, что и у
+    // написанного типа: значений при `ω` у него не существует.
+    let error = refused(&format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+held : Bool
+held =
+  let ω h = Open True
+  True
+"
+    ));
+    assert!(
+        matches!(error, ElabError::UnrestrictedOwned { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn an_untyped_let_runs_a_computation() {
+    // §3.4 в режиме вывода **исполняет**, и §4.1 обещает это записью
+    // `let n = get`. Написанного типа тут нет, значит режим именно вывод.
+    let signature = program(&format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+effect Ask where
+  ask : Nat
+
+used : {{Ask}} Nat
+used =
+  let n = ask
+  n
+"
+    ));
+    assert!(
+        signature.lookup("used").is_some_and(|it| it.body.is_some()),
+        "определение собрано"
+    );
+
+    // Граница: синтезировать нечего. У лямбды домена нет (§10 вопрос 101), и
+    // отказ остаётся - сузившись до своей причины.
+    let error = refused(&format!(
+        "{BASE}
+plain : Bool
+plain =
+  let f = \\b -> b
+  f True
+"
+    ));
+    assert!(
+        matches!(
+            error,
+            ElabError::Missing {
+                what: Missing::UnsynthesizedLet,
+                ..
+            }
+        ),
+        "получено {error:?}"
+    );
 }
 
 #[test]

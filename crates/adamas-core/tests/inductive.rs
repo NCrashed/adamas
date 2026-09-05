@@ -1021,6 +1021,46 @@ fn with_carrier(field: Term) -> Group {
     )
 }
 
+/// Написанный универсум семейства - потолок, выведенный - нижняя граница.
+///
+/// Разница решает, поднимать ли сорт до полей конструкторов (§10 вопрос 109).
+/// Поверхностный язык уровня не пишет (§3.2), поэтому нуль в kind'е там
+/// умолчание, и `MkSome : (0 a : Type) -> a -> Some` обязан подняться до
+/// `Type 1`. Ядро, вызванное напрямую, пишет уровень числом, и тогда поле выше
+/// него - импредикативность через data-декларацию, то есть отказ.
+///
+/// Свидетель различает: одно и то же объявление двумя путями даёт разные
+/// ответы, и оба верны.
+#[test]
+fn an_inferred_sort_rises_to_its_fields_but_a_written_one_does_not() {
+    let pack = || ("pack", pi(Mult::Zero, "A", Term::universe(0), c("Boxed")));
+    let mut written = Signature::default();
+    let mut metas = Metas::default();
+    let refused = written.declare_data(&mut metas, "Boxed", 0, Term::universe(0), &[pack()]);
+    assert!(
+        matches!(
+            refused,
+            Err(TypeError {
+                kind: ErrorKind::ConstructorUniverse { .. },
+                ..
+            })
+        ),
+        "написанный `Type 0` - потолок: {refused:?}"
+    );
+
+    let mut inferred = Signature::default();
+    let mut metas = Metas::default();
+    let outcome =
+        inferred.declare_data_inferred(&mut metas, "Boxed", 0, Term::universe(0), &[pack()]);
+    declared("выведенный сорт поднимается до полей", &outcome);
+    let family = inferred.lookup("Boxed").expect("семейство объявлено");
+    assert_eq!(
+        family.ty.to_string(),
+        "Type 1",
+        "поле `Type 0` живёт в `Type 1`, туда семейство и встаёт"
+    );
+}
+
 /// Семейство, индексированное `Type`, обобщается **после** конструкторов.
 ///
 /// Конструктор такой индекс инстанцирует, а вместе с ним фиксирует и уровень:

@@ -1,0 +1,48 @@
+-- Универсум семейства поднимается до его полей (§10 вопрос 109).
+--
+-- §4.1 называет правило - «поднятое в имплисит конструктора имя требует от
+-- семейства `Type (ℓ+1)`», - но потребовать этого автору нечем: уровень в
+-- kind'е не пишется (§3.2). Сорт поэтому считается по конструкторам, тем же
+-- ходом, каким он уже поднимался до универсумов параметров.
+--
+-- Написанный уровень при этом остаётся потолком: `Type 0` с полем `Type` -
+-- импредикативность через data-декларацию, и она отвергается. Поверхностный
+-- язык уровня не пишет, значит нуль в нём - умолчание, а не выбор автора.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Bool where
+  False : Bool
+  True : Bool
+
+-- Экзистенциал: тип спрятан в значении, наружу видно только `Some`. §3.2
+-- обещает его зависимой парой, и вот та же вещь data-декларацией.
+data Some where
+  MkSome : (0 a : Type) -> a -> Some
+
+someNat : Some
+someNat = MkSome Nat Zero
+
+someBool : Some
+someBool = MkSome Bool True
+
+-- Поле-семейство типов: собственного связывания конструктор не заводит, а
+-- универсум несёт внутри типа поля.
+data Held where
+  Hold : (Nat -> Type) -> Held
+
+-- GADT §4.1 целиком, вместе с веткой `If`: свободное `a` поднимается в стёртое
+-- поле `{0 a : Type ℓ}`, и семейство встаёт над ним.
+data Expr : Type -> Type where
+  LitNat : Nat -> Expr Nat
+  LitBool : Bool -> Expr Bool
+  Add : Expr Nat -> Expr Nat -> Expr Nat
+  If : Expr Bool -> Expr a -> Expr a -> Expr a
+
+evalAny : (0 a : Type) -> Expr a -> a
+evalAny a (LitNat n) = n
+evalAny a (LitBool b) = b
+evalAny a (Add l r) = Zero
+evalAny a (If c t e) = evalAny a t

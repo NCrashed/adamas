@@ -337,7 +337,7 @@ impl<'a> Machine<'a> {
             }
             // Маскированное вычисление договорило: кадр снят, и следующие
             // операции той же метки снова видят ближайший хендлер.
-            Frame::Masking(_) => Ok(Step::Return(value)),
+            Frame::Masking(_) | Frame::Suppressing(_) => Ok(Step::Return(value)),
             Frame::Passing(given, index) => Ok(Self::passing(value, &given, index, kont)),
         }
     }

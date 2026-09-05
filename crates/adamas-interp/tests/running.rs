@@ -967,3 +967,72 @@ main = handle deep with
     let value = ran(&source, "main");
     assert_eq!(value.matches("Succ").count(), 200, "получено {value}");
 }
+
+/// Деструктор раскрутки исполняется под тем же хендлером, которому погашение
+/// отдало его ряд; повторный обрыв подавляется.
+///
+/// Ветка обрыва уже дала ответ, и хендлер со стека снят - иначе ветка работала
+/// бы внутри себя. Деструкторы же шли **снаружи** него, и `fail` деструктора
+/// уходил к внешнему хендлеру вместо своего: статика и динамика расходились, а
+/// программа молча считала другое. Второму ответу хендлера деться некуда, и
+/// операция, дошедшая до раскручиваемого, обрывает свой деструктор - раскрутка
+/// идёт дальше (§3.3, прецедент - suppressed exceptions).
+#[test]
+fn an_unwinding_destructor_meets_the_handler_that_aborted_it() {
+    let source = format!(
+        "{BASE}
+effect Fail where
+  fail : a
+
+effect Log where
+  note : Nat -> Unit
+
+resource Inner where
+  MkInner : Inner
+  dropInner : (1 h : Inner) -> {{Fail, Log}} Bool
+  dropInner h =
+    let u : Unit = note 3
+    fail
+
+resource Outer where
+  MkOuter : Outer
+  dropOuter : (1 h : Outer) -> {{Fail, Log}} Bool
+  dropOuter h =
+    let u : Unit = note 4
+    True
+
+body : Outer -> Inner -> {{Fail, Log}} Bool
+body a b =
+  let u : Unit = note 2
+  let z : Bool = fail
+  True
+
+broken : {{Fail, Log}} Bool
+broken = body MkOuter MkInner
+
+-- Внешний хендлер той же метки: до него `fail` деструктора доходить не должен.
+caught : {{Fail, Log}} Bool
+caught = handle broken with
+  return v -> v
+  fail -> False
+
+outer : {{Log}} Bool
+outer = handle caught with
+  return v -> v
+  fail -> True
+
+main : List Nat
+main = handle outer with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+"
+    );
+    // Тело (2), деструктор внутреннего (3) - его `fail` подавлен, - и всё
+    // равно отработавший деструктор внешнего (4). Дойди `fail` до внешнего
+    // хендлера, в списке была бы его отметка.
+    assert_eq!(
+        ran(&source, "main"),
+        "Cons{0} Nat (Succ (Succ Zero)) (Cons{0} Nat (Succ (Succ (Succ Zero))) \
+         (Cons{0} Nat (Succ (Succ (Succ (Succ Zero)))) (Nil{0} Nat)))"
+    );
+}

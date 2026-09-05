@@ -185,17 +185,33 @@ impl Machine<'_> {
                     masked += 1;
                     None
                 }
+                // Раскручиваемый хендлер считается наравне с настоящим: он и
+                // есть тот, кому погашение отдало этот ряд. Маска пропускает
+                // его тем же счётом.
+                Frame::Suppressing(name) if name == effect => {
+                    if masked > 0 {
+                        masked -= 1;
+                        return None;
+                    }
+                    Some(Caught::Suppressed(index))
+                }
                 Frame::Handler(handler) if handler.effect == *effect => {
                     if masked > 0 {
                         masked -= 1;
                         return None;
                     }
                     let slot = handler.operations.iter().position(|it| it == operation)?;
-                    Some((index, Rc::clone(handler), slot))
+                    Some(Caught::Handled(index, Rc::clone(handler), slot))
                 }
                 _ => None,
             });
-        let Some((index, handler, slot)) = found else {
+        // Дошло до раскручиваемого - деструктор обрывается, а раскрутка идёт
+        // дальше: ответ хендлеру уже дан веткой, и второму деться некуда.
+        if let Some(Caught::Suppressed(index)) = found {
+            kont.truncate(index);
+            return Ok(Step::Return(self.trivial()));
+        }
+        let Some(Caught::Handled(index, handler, slot)) = found else {
             return Err(RunError::Unhandled {
                 effect: effect.to_string(),
                 operation: operation.to_string(),
@@ -251,6 +267,12 @@ impl Machine<'_> {
                     };
                     let close = Rc::clone(close);
                     kont.push(Frame::Unwinding(Rc::clone(segment), index, held));
+                    // Метка раскручиваемого хендлера - на время деструктора:
+                    // его ряд погашение отдало именно ей, и без кадра операция
+                    // ушла бы к внешнему хендлеру (§3.3).
+                    if let Some(Frame::Handler(handler)) = segment.first() {
+                        kont.push(Frame::Suppressing(Name::clone(&handler.effect)));
+                    }
                     return Step::Apply(close, unit);
                 }
                 // Раскрутка, недобежавшая своё: её остаток брошен вместе с
@@ -366,4 +388,12 @@ fn domain(ty: &Term, index: usize) -> Option<&Term> {
         Term::Pi(_, _, domain, _, _) => Some(domain),
         _ => None,
     }
+}
+
+/// Чем кончился поиск хендлера по стеку.
+enum Caught {
+    /// Нашёлся настоящий: индекс кадра, сам хендлер и номер ветки.
+    Handled(usize, Rc<Handler>, usize),
+    /// Нашёлся раскручиваемый: операция подавляется, деструктор обрывается.
+    Suppressed(usize),
 }

@@ -586,6 +586,65 @@ f a b c = Zero
 }
 
 #[test]
+fn a_nullary_type_alias_names_a_type() {
+    // §10 вопрос 106: определение, чей тип есть **голый универсум**, уровень в
+    // параметр не обобщает - его решает тело. Обобщение сделало бы алиас
+    // `∀u. Type u`, а тело живёт на конкретном уровне, и `Type 0` под `Type u`
+    // не подходит; написать уровень руками §3.2 не даёт.
+    program(&format!(
+        "{BASE}
+Number : Type
+Number = Nat
+
+double : Number -> Number
+double n = Succ n
+
+mixed : Number
+mixed = Succ Zero
+
+used : Nat
+used = double mixed
+"
+    ));
+
+    // Алиас в **кодомене** возвращает приостановленное вычисление - то, чего
+    // сахар не даёт (§10 вопрос 103): там `{ε} A` есть контракт стрелки.
+    program(&format!(
+        "{BASE}{AMB}
+Comp : Type
+Comp = {{Amb}} Nat
+
+suspending : (1 n : Nat) -> Comp
+suspending n = \\u -> pick n toss
+
+doubled : (1 n : Nat) -> Nat
+doubled n =
+  let 1 c : Comp = suspending n
+  handle c with
+    return v -> v
+    toss -> resume True
+"
+    ));
+
+    // Граница: параметризованный алиас. Нульместному полиморфизм не нужен -
+    // потому уровень и решается телом; у параметризованного один уровень обязан
+    // обобщиться, а другой решиться, и порядок фаз этого не даёт.
+    let error = refused(&format!(
+        "{BASE}
+data Pair (a : Type) where
+  MkPair : a -> a -> Pair a
+
+Twin : Type -> Type
+Twin a = Pair a
+"
+    ));
+    assert!(
+        error.to_string().contains("несовпадение типов"),
+        "получено {error}"
+    );
+}
+
+#[test]
 fn a_recursive_definition_sees_its_own_level_arity() {
     // Арность параметров уровня считается по проверенному типу: `is_type`
     // решает часть дырок, и самоссылка обязана получить столько же аргументов,

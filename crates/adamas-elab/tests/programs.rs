@@ -22,7 +22,19 @@ fn program(text: &str) -> Signature {
         Err(error) => panic!("не разобралось: {error}"),
     };
     match elaborate(&module) {
-        Ok(signature) => signature,
+        Ok((signature, _)) => signature,
+        Err(error) => panic!("не элаборировалось: {error}"),
+    }
+}
+
+/// Принятая программа вместе с предупреждениями (§10 вопрос 81).
+fn warned(text: &str) -> adamas_elab::Warnings {
+    let module = match parse(text) {
+        Ok(module) => module,
+        Err(error) => panic!("не разобралось: {error}"),
+    };
+    match elaborate(&module) {
+        Ok((_, warnings)) => warnings,
         Err(error) => panic!("не элаборировалось: {error}"),
     }
 }
@@ -583,6 +595,59 @@ f a b c = Zero
     );
     let signature = program(&text);
     assert!(signature.lookup("f").is_some(), "группа не захватила себя");
+}
+
+#[test]
+fn an_unused_implicit_group_is_warned_about_not_refused() {
+    // §10 вопрос 81: третий исход рядом с принятой программой и отказом. Первым
+    // потребителем оказалась цена вопроса 79: `{ x : Nat }` в домене читается
+    // связыванием, а написана могла быть записью. Оба прочтения дают корректный
+    // тип, поэтому отказом это не поймать - различает их только то, что имя из
+    // группы больше нигде не стоит.
+    let warnings = warned(&format!(
+        "{BASE}
+f : {{ x : Nat }} -> Nat
+f = Zero
+"
+    ));
+    assert_eq!(warnings.len(), 1, "получено {warnings:?}");
+    assert!(
+        warnings[0].to_string().contains("`x`"),
+        "получено {warnings:?}"
+    );
+
+    // Программа при этом **принята**: предупреждение не отказ.
+    program(&format!(
+        "{BASE}
+f : {{ x : Nat }} -> Nat
+f = Zero
+"
+    ));
+
+    // Молчит там, где имя используется, - иначе предупреждение было бы шумом.
+    assert!(
+        warned(&format!(
+            "{BASE}
+g : {{ a : Type }} -> a -> a
+g v = v
+"
+        ))
+        .is_empty(),
+        "используемое имя предупреждения не даёт"
+    );
+
+    // И на `_`: он не используется намеренно, а так пишется контекст класса
+    // (`{Eqv a} => …` разбирается связыванием без имени).
+    assert!(
+        warned(&format!(
+            "{BASE}{EQ_CLASS}
+same : {{Eqv a}} => a -> a -> Bool
+same x y = eq x y
+"
+        ))
+        .is_empty(),
+        "`_` предупреждения не даёт"
+    );
 }
 
 #[test]

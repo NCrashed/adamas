@@ -931,3 +931,39 @@ main = handle outerGet with
     // Переименование постороннего эффекта ответа не меняет - в этом всё дело.
     assert_eq!(ran(&source("Zask", "zask"), "main"), "Succ Zero");
 }
+
+/// Одношотный хендлер отпускает сегмент после возобновления.
+///
+/// Аффинная резумпция второго вызова не имеет по построению (§3.4), а таблица
+/// держала её сегмент до конца прогона. Сегмент над хендлером растёт с
+/// глубиной рекурсии, поэтому память шла квадратом: две тысячи операций
+/// требовали пятисот мегабайт, четыре - двух гигабайт, шесть - четырёх, при
+/// ответе в одно число. Здесь проверяется, что глубокая цепочка операций
+/// **считает верно**; сам квадрат меряется руками - стенда по памяти у набора
+/// нет.
+#[test]
+fn a_one_shot_handler_lets_its_segment_go() {
+    let source = format!(
+        "{BASE}
+effect Ask where
+  ask : Nat
+
+counted : Nat -> {{Ask}} Nat
+counted Zero = Zero
+counted (Succ k) =
+  let one : Nat = ask
+  one + counted k
+
+deep : {{Ask}} Nat
+deep = counted 200
+
+main : Nat
+main = handle deep with
+  return v -> v
+  ask -> resume 1
+"
+    );
+    // Двести операций, каждая отдаёт единицу: ответ - двести.
+    let value = ran(&source, "main");
+    assert_eq!(value.matches("Succ").count(), 200, "получено {value}");
+}

@@ -107,6 +107,7 @@ impl Machine<'_> {
 
     /// Форма элиминатора: параметры метки, операции и арности веток.
     fn shape(&self, name: &Name) -> Option<Handler> {
+        let multi = name.starts_with(MULTI);
         let effect = name
             .strip_prefix(MULTI)
             .or_else(|| name.strip_prefix(HANDLE))?;
@@ -132,6 +133,7 @@ impl Machine<'_> {
             // Ветки снимаются со спайна в `installed`.
             branches: Rc::from([]),
             returned: Rc::new(Value::Object(Rc::from([]))),
+            multi,
         })
     }
 
@@ -202,7 +204,7 @@ impl Machine<'_> {
         // Сегмент включает сам кадр хендлера: возобновление ставит его обратно,
         // и это и значит «глубокий».
         let segment: Rc<[Frame]> = kont.drain(index..).collect();
-        let (resume, ticket) = self.resumption(segment);
+        let (resume, ticket) = self.resumption(segment, handler.multi);
         let mut given: Vec<Rc<Value>> = arguments
             [handler.params..handler.params + handler.written[slot]]
             .iter()

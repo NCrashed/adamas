@@ -3434,11 +3434,7 @@ impl<'a> Elaborator<'a> {
         // непогашенностью, то есть форма не делала того, ради чего заведена
         // (ревью 2026-09-05). Голден этого не видел: он состоит из хендлеров,
         // гасящих `State` в чистый результат.
-        let ambient = self
-            .ctx
-            .row()
-            .clone()
-            .map(|argument| quote(size, argument));
+        let ambient = self.ctx.row().clone().map(|argument| quote(size, argument));
         let arrow = Term::Pi(
             Binder::explicit(Mult::Many),
             CoreName::from(STATE),

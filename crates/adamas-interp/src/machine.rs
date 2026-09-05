@@ -38,7 +38,7 @@ pub struct Machine<'a> {
     /// продолжение, значит оно мертво, и деструкторы из него пора запускать.
     /// Работает это ровно потому, что резумпция при `handle` **аффинна**
     /// (§3.4); у `handleMulti` довод не держится, и оттуда ресурсы запрещены.
-    resumptions: RefCell<Vec<(Rc<[Frame]>, bool)>>,
+    resumptions: RefCell<Vec<Resumption>>,
 }
 
 impl std::fmt::Debug for Machine<'_> {
@@ -430,10 +430,14 @@ impl<'a> Machine<'a> {
     }
 
     /// Заводит резумпцию из сегмента и отдаёт её значением.
-    pub(crate) fn resumption(&self, segment: Rc<[Frame]>) -> (Rc<Value>, usize) {
+    pub(crate) fn resumption(&self, segment: Rc<[Frame]>, multi: bool) -> (Rc<Value>, usize) {
         let mut table = self.resumptions.borrow_mut();
         let index = table.len();
-        table.push((segment, false));
+        table.push(Resumption {
+            segment,
+            invoked: false,
+            multi,
+        });
         let value = Rc::new(Value::Neutral(
             Head::Global(
                 Rc::from(format!("{RESUME}{index}")),
@@ -450,7 +454,7 @@ impl<'a> Machine<'a> {
         self.resumptions
             .borrow()
             .get(index)
-            .map(|(segment, _)| Rc::clone(segment))
+            .map(|it| Rc::clone(&it.segment))
     }
 
     /// Звали ли резумпцию хоть раз.
@@ -458,7 +462,7 @@ impl<'a> Machine<'a> {
         self.resumptions
             .borrow()
             .get(index)
-            .is_some_and(|(_, invoked)| *invoked)
+            .is_some_and(|it| it.invoked)
     }
 
     /// Возобновление: сегмент кладётся обратно, значение идёт ему.
@@ -466,9 +470,21 @@ impl<'a> Machine<'a> {
         let segment = {
             let mut table = self.resumptions.borrow_mut();
             match table.get_mut(index) {
-                Some((segment, invoked)) => {
-                    *invoked = true;
-                    Rc::clone(segment)
+                Some(entry) => {
+                    entry.invoked = true;
+                    // Аффинная резумпция второго вызова не имеет по
+                    // построению (§3.4), поэтому её сегмент после первого
+                    // отпускается. Держать его до конца прогона стоило
+                    // квадрата: сегмент над хендлером растёт с глубиной
+                    // рекурсии, а таблица только пополнялась, и шесть тысяч
+                    // операций требовали четырёх гигабайт при ответе в одно
+                    // число (ревью 2026-09-05). Мультишотной сегмент нужен
+                    // и дальше - там повтор и есть её смысл.
+                    if entry.multi {
+                        Rc::clone(&entry.segment)
+                    } else {
+                        std::mem::replace(&mut entry.segment, Rc::from([] as [Frame; 0]))
+                    }
                 }
                 None => unreachable!("резумпция {index} не заведена"),
             }
@@ -518,4 +534,15 @@ pub(crate) fn constructor(signature: &Signature, name: &Name) -> bool {
         signature.lookup(name).map(|it| &it.kind),
         Some(DefinitionKind::Constructor { .. })
     )
+}
+
+/// Запись таблицы резумпций: сегмент, звали ли её и мультишотна ли она.
+///
+/// Мультишотность нужна ровно затем, чтобы решить, отпускать ли сегмент после
+/// первого возобновления: у аффинной второго вызова не бывает по построению
+/// (§3.4), а у мультишотной повтор и есть её смысл.
+struct Resumption {
+    segment: Rc<[Frame]>,
+    invoked: bool,
+    multi: bool,
 }

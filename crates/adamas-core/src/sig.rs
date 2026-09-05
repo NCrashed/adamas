@@ -65,7 +65,7 @@ use crate::check::{
 };
 use crate::error::ErrorKind;
 use crate::eval::eval;
-use crate::level::Level;
+use crate::level::{Level, LevelVar};
 use crate::meta::{Generalization, Metas, zonk_term};
 use crate::mult::Mult;
 use crate::row::Row;
@@ -776,6 +776,13 @@ impl Signature {
             constructors.push(declarations);
         }
 
+        // (B1½) семейство с индексом-универсумом обобщается **после** своих
+        // конструкторов (§10 вопрос 53).
+        for (index, (member, declarations)) in members.iter().zip(&mut constructors).enumerate() {
+            self.settle_family(metas, member, declarations)
+                .map_err(|error| error.in_frame(Frame::MemberType(at(index))))?;
+        }
+
         // (B2) тела определений - с полной таблицей конструкторов.
         let mut bodies = Vec::with_capacity(members.len());
         for (index, (member, checked)) in members.iter().zip(&checked).enumerate() {
@@ -955,8 +962,29 @@ impl Signature {
                 Term::Universe(Level::Meta(_))
             )
         );
+        // Семейство с индексом-универсумом обобщается позже, в фазе B1½: его
+        // уровень заземляют конструкторы (§10 вопрос 53). Арность при этом
+        // объявляется сразу - числом дырок, - иначе ссылка на семейство внутри
+        // конструктора получит `LevelArity` на ровном месте. Подставлять по
+        // ней нечего: параметров в типе ещё нет, и аргументы ссылки инертны,
+        // пока обобщение их не перепишет.
+        let deferred = match member {
+            Member::Data { params, .. } => universe_indexed(&draft.ty, *params),
+            _ => false,
+        };
         let (mut declaration, generalization) = if aliasing {
             (draft, None)
+        } else if deferred {
+            let mut counting = Generalization::default();
+            counting.collect_term(metas, &draft.ty);
+            let level_arity = counting.arity();
+            (
+                Definition {
+                    level_arity,
+                    ..draft
+                },
+                None,
+            )
         } else {
             generalize(metas, arity, draft)
         };
@@ -1162,6 +1190,76 @@ impl Signature {
         Ok(Some((body, report)))
     }
 
+    /// Фаза B1½: обобщение семейства, отложенное до его конструкторов.
+    ///
+    /// Обычное семейство обобщается в фазе A, и этого хватает: его параметры
+    /// уровня конструктор **повторяет**, поэтому арности сходятся. Семейство с
+    /// индексом-универсумом устроено иначе - конструктор индекс
+    /// **инстанцирует**: `LitNat : Nat -> Expr Nat` требует `Nat : Type u`, то
+    /// есть заземляет `u` нулём. Обобщи мы уровень раньше, он стал бы
+    /// параметром, который конструктор потом заземлит, и арности разошлись бы
+    /// - ровно тот отказ, из-за которого GADT §4.1 не объявлялся вовсе.
+    ///
+    /// Поэтому здесь: дырки семейства дожили до конструкторов открытыми, те их
+    /// решили, и обобщается остаток - **совместно** по kind'у и по всем типам
+    /// конструкторов, чтобы уцелевший параметр был у них общим.
+    ///
+    /// Аргументы уровня у внутригрупповых ссылок переписываются заново: до
+    /// обобщения они инертны (подставлять их некуда - параметров нет), а после
+    /// обязаны быть ровно параметрами семейства.
+    fn settle_family(
+        &mut self,
+        metas: &mut Metas,
+        member: &Member,
+        constructors: &mut [Definition],
+    ) -> Result<(), TypeError> {
+        let Member::Data { name, params, .. } = member else {
+            return Ok(());
+        };
+        let Some(family) = self.definitions.get(name) else {
+            return Ok(());
+        };
+        if !universe_indexed(&family.ty, *params) {
+            return Ok(());
+        }
+        // Аргументы уровня у внутригрупповых ссылок снимаются **до** сбора:
+        // они инертны - подставлять по ним нечего, параметров у семейства ещё
+        // нет, - и собранные наравне с прочими дырками они стали бы лишними
+        // параметрами, которых семейство не просило.
+        let stripped = |ty: &Term| relevelled(ty, name, &Rc::from([]));
+        let family = stripped(&family.ty);
+        let bodies: Vec<Term> = constructors.iter().map(|it| stripped(&it.ty)).collect();
+        let mut generalization = Generalization::default();
+        generalization.collect_term(metas, &family);
+        for constructor in &bodies {
+            generalization.collect_term(metas, constructor);
+        }
+        let arity = generalization.arity();
+        let levels: Rc<[Level]> = (0..arity)
+            .map(|index| Level::Var(LevelVar(index)))
+            .collect();
+        let settle = |ty: &Term| relevelled(&generalization.apply_term(metas, ty), name, &levels);
+        let ty = settle(&family);
+        let sort = data_sort(name, *params, &ty)?;
+        let Some(stored) = self.definitions.get_mut(name) else {
+            return Ok(());
+        };
+        stored.ty = ty;
+        stored.level_arity = arity;
+        if let DefinitionKind::Data { sort: stored, .. } = &mut stored.kind {
+            *stored = sort;
+        }
+        for (constructor, body) in constructors.iter_mut().zip(&bodies) {
+            constructor.ty = settle(body);
+            constructor.level_arity = arity;
+        }
+        for (constructor, declaration) in member_names(member).zip(constructors.iter()) {
+            self.definitions
+                .insert(Rc::clone(constructor), declaration.clone());
+        }
+        Ok(())
+    }
+
     /// Фаза B1 для конструктора: тип, арность и форма.
     fn check_constructor_type(
         &self,
@@ -1194,6 +1292,27 @@ impl Signature {
             total: true,
         };
         check_declaration(self, metas, &constructor.name, &draft)?;
+        // Семейство с индексом-универсумом обобщается позже, вместе со своими
+        // конструкторами (§10 вопрос 53): здесь их дырки обязаны дожить
+        // открытыми, иначе решать индексу уровень уже нечем.
+        let deferred = family
+            .data_shape()
+            .is_some_and(|(params, _)| universe_indexed(&family.ty, params));
+        if deferred {
+            let declaration = Definition {
+                level_arity: family.level_arity,
+                ..draft
+            };
+            check_constructor_shape(
+                self,
+                metas,
+                &constructor.name,
+                data,
+                family,
+                &declaration.ty,
+            )?;
+            return Ok(declaration);
+        }
         let (declaration, _) = generalize(metas, arity, draft);
 
         // Арность уровня обязана совпасть с арностью семейства: элиминация
@@ -1696,6 +1815,56 @@ fn generalize(
         ..draft
     };
     (declaration, Some(generalization))
+}
+
+/// Есть ли у семейства индекс, тип которого - универсум (§10 вопрос 53).
+///
+/// Смотрятся только индексы: параметр конструктор **повторяет**, а индекс
+/// **инстанцирует**, и вместе с индексом инстанцируется его уровень.
+/// Семейства с индексом-`Nat` это не касается вовсе, поэтому и путь
+/// добавочный - он срабатывает ровно там, где сегодня отказ.
+fn universe_indexed(ty: &Term, params: u32) -> bool {
+    let mut current = ty;
+    let mut passed = 0;
+    while let Term::Pi(_, _, domain, _, codomain) = current {
+        if passed >= params && matches!(&**domain, Term::Universe(_)) {
+            return true;
+        }
+        passed += 1;
+        current = codomain;
+    }
+    false
+}
+
+/// Переписывает аргументы уровня у ссылок на `name`.
+///
+/// До обобщения они инертны: подставлять их некуда, параметров у семейства
+/// ещё нет. После - обязаны быть ровно его параметрами, и число их обязано
+/// сойтись с арностью, иначе ядро ответит `LevelArity` на собственной ссылке.
+fn relevelled(term: &Term, name: &Name, levels: &Rc<[Level]>) -> Term {
+    let recur = |inner: &Rc<Term>| Rc::new(relevelled(inner, name, levels));
+    match term {
+        Term::Const(found, _, args) if found == name => {
+            Term::Const(Rc::clone(found), Rc::clone(levels), args.clone())
+        }
+        Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
+        Term::Lam(mult, bound, body) => Term::Lam(*mult, Rc::clone(bound), recur(body)),
+        Term::Pi(binder, bound, domain, row, codomain) => Term::Pi(
+            *binder,
+            Rc::clone(bound),
+            recur(domain),
+            row.map(|argument| relevelled(argument, name, levels)),
+            recur(codomain),
+        ),
+        Term::Let(mult, bound, ty, value, body) => Term::Let(
+            *mult,
+            Rc::clone(bound),
+            recur(ty),
+            recur(value),
+            recur(body),
+        ),
+        other => other.clone(),
+    }
 }
 
 /// Все имена, которые занимает группа: члены и их конструкторы.

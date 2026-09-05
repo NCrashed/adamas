@@ -1,7 +1,7 @@
 ---
 source: crates/adamas-elab/tests/programs.rs
-expression: "format!(\"lets = {}\\n\\narguments = {}\", body(&signature, \"lets\"),\nbody(&signature, \"arguments\"))"
+expression: shown
 ---
-lets = \(ω b) -> let 1 h : File = openIt #0 in let 1 held : Bool = let 1 g : File = openIt #1 in let 1 held : Bool = True in let 1 _ : Bool = drop #1 in #1 in let 1 _ : Bool = drop #1 in #1
+lets = \(ω b) -> let 1 h : File = openIt #0 in #closing{0, 0} Bool Bool (\(ω _) -> let 1 g : File = openIt #2 in #closing{0, 0} Bool Bool (\(ω _) -> True) (\(ω _) -> drop #1)) (\(ω _) -> drop #1)
 
-arguments = \(1 h) -> \(1 g) -> let 1 held : Bool = let 1 held : Bool = True in let 1 _ : Bool = drop #1 in #1 in let 1 _ : Bool = drop #2 in #1
+arguments = \(1 h) -> \(1 g) -> #closing{0, 0} Bool Bool (\(ω _) -> #closing{0, 0} Bool Bool (\(ω _) -> True) (\(ω _) -> drop #2)) (\(ω _) -> drop #2)

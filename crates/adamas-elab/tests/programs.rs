@@ -1601,8 +1601,18 @@ fn closing_runs_at_the_end_of_the_scope_in_lifo_order() {
     // §3.3: деструктор зовётся при выходе из scope, порядок - LIFO. Форма
     // терма - предмет проверки: счёт вызовов её не видит, а разъехаться могут
     // именно порядок и индексы.
+    //
+    // Единица объявлена намеренно. Без неё `#closing` не объявляется вовсе
+    // (см. `declare_closing`), вставка идёт запасной формой, и снапшот
+    // закреплял бы её - то есть путь, которого §3.3 не обещает. Наблюдаемость
+    // scope машине и есть весь смысл элиминатора: `let` она не видит, и
+    // `drop`, оставшийся в невызванном продолжении, уходит вместе с ним.
+    // Запасная форма проверяется соседним тестом, своим.
     let text = format!(
         "{BASE}
+data Unit where
+  MkUnit : Unit
+
 closeFile : (1 b : Bool) -> Bool
 closeFile b = b
 
@@ -1621,11 +1631,51 @@ arguments h g = True
 "
     );
     let signature = program(&text);
-    insta::assert_snapshot!(format!(
+    let shown = format!(
         "lets = {}\n\narguments = {}",
         body(&signature, "lets"),
         body(&signature, "arguments")
-    ));
+    );
+    assert!(
+        shown.matches("#closing").count() == 4,
+        "оба scope в обоих определениях обязаны идти через элиминатор:\n{shown}"
+    );
+    insta::assert_snapshot!(shown);
+}
+
+#[test]
+fn without_a_unit_the_scope_falls_back_to_a_let() {
+    // Единицы в программе может не быть, и это не отказ: приостановленное
+    // вычисление есть функция от неё, значит без неё нет ни эффектов, ни
+    // обрыва через них - раскручивать нечего. Вставка тогда идёт прежней
+    // формой, тоже в точку выхода, только машине она невидима.
+    //
+    // Путь этот живой и до сих пор был тем, что проверял тест выше: его база
+    // единицы не содержала. Теперь он проверяется своим тестом и **назван**
+    // запасным, а не выдаётся за основной.
+    let text = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+openIt : Bool -> File
+openIt b = Open b
+
+lets : Bool -> Bool
+lets b =
+  let h : File = openIt b
+      g : File = openIt b
+  True
+"
+    );
+    let signature = program(&text);
+    let shown = body(&signature, "lets");
+    assert!(
+        !shown.contains("#closing"),
+        "без единицы элиминатору неоткуда взяться:\n{shown}"
+    );
+    insta::assert_snapshot!(shown);
 }
 
 #[test]

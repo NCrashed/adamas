@@ -1,0 +1,5 @@
+---
+source: crates/adamas-elab/tests/programs.rs
+expression: shown
+---
+\(ω b) -> let 1 h : File = openIt #0 in let 1 held : Bool = let 1 g : File = openIt #1 in let 1 held : Bool = True in let 1 _ : Bool = drop #1 in #1 in let 1 _ : Bool = drop #1 in #1

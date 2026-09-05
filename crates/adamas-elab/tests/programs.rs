@@ -970,6 +970,70 @@ onces n =
 }
 
 #[test]
+fn a_function_returns_a_computation_through_a_written_unit() {
+    // §3.4, третья цена сахара (§10 вопрос 103): в **кодомене** `{ε} A` есть
+    // контракт стрелки, а не приостановленное вычисление, и скобки этого не
+    // меняют - узла у них нет, только спан. Вернуть вычисление можно, выписав
+    // единичное связывание руками: сахар и **есть** эта запись, поэтому обход
+    // не обходной путь, а развёртка. Вторая цена того же абзаца говорит это с
+    // другой стороны: написанную руками функцию от единицы от сахара не
+    // отличить.
+    program(&format!(
+        "{BASE}{AMB}
+suspending : (1 n : Nat) -> (ω u : Unit) -> {{Amb}} Nat
+suspending n u = pick n toss
+
+doubled : (1 n : Nat) -> Nat
+doubled n =
+  let 1 c : {{Amb}} Nat = suspending n
+  handle c with
+    return v -> v
+    toss -> resume True
+"
+    ));
+
+    // Контроль: та же сигнатура с row в кодомене даёт **другой** тип - функцию,
+    // производящую `Amb`, - и та же программа отвергается непогашенностью.
+    let error = refused(&format!(
+        "{BASE}{AMB}
+performing : (1 n : Nat) -> {{Amb}} Nat
+performing n = pick n toss
+
+doubled : (1 n : Nat) -> Nat
+doubled n =
+  let 1 c : {{Amb}} Nat = performing n
+  handle c with
+    return v -> v
+    toss -> resume True
+"
+    ));
+    assert!(
+        error.to_string().contains("не погашены"),
+        "получено {error}"
+    );
+
+    // Скобки в кодомене ничего не меняют: тот же отказ, тот же текст.
+    let parenthesised = refused(&format!(
+        "{BASE}{AMB}
+performing : (1 n : Nat) -> ({{Amb}} Nat)
+performing n = pick n toss
+
+doubled : (1 n : Nat) -> Nat
+doubled n =
+  let 1 c : {{Amb}} Nat = performing n
+  handle c with
+    return v -> v
+    toss -> resume True
+"
+    ));
+    assert_eq!(
+        parenthesised.to_string(),
+        error.to_string(),
+        "скобки в кодомене не различают записи"
+    );
+}
+
+#[test]
 fn a_linear_binding_is_refused_under_multi_shot() {
     // Контроль к предыдущему, и он же граница правила. Резумпция мультишота -
     // **участок вычисления**, а не что-то рядом: захваченное замыканием

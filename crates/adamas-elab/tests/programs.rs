@@ -6190,7 +6190,8 @@ run = handle program with
         ));
         assert!(error.to_string().contains(why), "получено {error:?}");
     }
-    // Под хендлером обязано стоять вычисление, производящее метку.
+    // Под хендлером обязано стоять вычисление, производящее метку. Причина
+    // называется своя: здесь написано значение (§10 вопрос 104).
     let error = refused(&format!(
         "{}
 run : Bool
@@ -6202,7 +6203,9 @@ run = handle True with
         effects()
     ));
     assert!(
-        error.to_string().contains("обязано стоять вычисление"),
+        error
+            .to_string()
+            .contains("написано значение, а не приостановленное вычисление"),
         "получено {error:?}"
     );
 }
@@ -6248,6 +6251,111 @@ both : Cell -> Bool -> {{State Bool}} Unit
 both (MkCell g h) b =
   g b
   h b
+"
+    ));
+}
+
+#[test]
+fn a_handler_names_which_of_its_refusals_fired() {
+    // §10 вопрос 104: причин отказа под хендлером три, а сообщение было одно, и
+    // лямбде оно называло **не ту** - «не производит `L`», хотя она производит,
+    // а не выводится её тип (§10 вопрос 101). Четвёртое место - нить
+    // параметризованного, где прежний текст говорил про написанное неправду:
+    // вычислением нить быть не обязана вовсе.
+    let base = format!(
+        "{BASE}{AMB}
+effect Other where
+  ping : Nat
+
+elsewhere : {{Other}} Nat
+elsewhere = ping
+"
+    );
+    let causes = [
+        (
+            "handle (\\u -> pick n toss) with\n    return v -> v\n    toss -> resume True",
+            "тип написанного не выводится",
+        ),
+        (
+            "handle Zero with\n    return v -> v\n    toss -> resume True",
+            "написано значение, а не приостановленное вычисление",
+        ),
+        (
+            "handle elsewhere with\n    return v -> v\n    toss -> resume True",
+            "вычисление этой метки не производит",
+        ),
+    ];
+    for (written, why) in causes {
+        let error = refused(&format!(
+            "{base}
+tried : (1 n : Nat) -> Nat
+tried n =
+  {written}
+"
+        ));
+        assert!(error.to_string().contains(why), "получено {error}");
+    }
+
+    // Совет исполним: названное `let`-ом вычисление проходит **за один шаг**.
+    // Половина сообщений этого проекта уже ломалась на том, что совет вёл в
+    // тупик, поэтому выход проверяется, а не декларируется.
+    program(&format!(
+        "{base}
+tried : (1 n : Nat) -> Nat
+tried n =
+  let 1 c : {{Amb}} Nat = \\u -> pick n toss
+  handle c with
+    return v -> v
+    toss -> resume True
+"
+    ));
+}
+
+#[test]
+fn a_handler_state_refusal_does_not_talk_about_computations() {
+    // Нить - значение, и «под хендлером обязано стоять вычисление» про неё
+    // неправда. Отказ теперь называет позицию и причину, а совет тот же и так же
+    // проверен на исполнимость.
+    let base = format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+effect St where
+  fetch : Nat
+
+held : {{St}} Nat
+held = fetch
+"
+    );
+    let error = refused(&format!(
+        "{base}
+threaded : Nat
+threaded = handle held with
+  state (\\x -> x)
+  return v -> v
+  fetch -> resume Zero state
+"
+    ));
+    let shown = error.to_string();
+    assert!(
+        shown.contains("`state` у хендлера `St`") && shown.contains("не выводится"),
+        "получено {shown}"
+    );
+    assert!(
+        !shown.contains("обязано стоять вычисление"),
+        "отказ у нити не про вычисление: {shown}"
+    );
+
+    program(&format!(
+        "{base}
+threaded : Nat
+threaded =
+  let s : Nat -> Nat = \\x -> x
+  handle held with
+    state s
+    return v -> v
+    fetch -> resume Zero state
 "
     ));
 }

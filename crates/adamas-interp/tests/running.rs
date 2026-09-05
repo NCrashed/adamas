@@ -886,3 +886,48 @@ main = handle quiet with
     );
     assert_eq!(ran(&source, "main"), "Succ (Succ Zero)");
 }
+
+/// Маска пропускает хендлер **своей** метки, а не первой в окружающей.
+///
+/// Метка бралась из окружающей безусловно, а окружающая хранится в
+/// каноническом порядке - по имени метки. Пропускался поэтому хендлер
+/// лексикографически меньшего имени, и значение программы менялось от
+/// переименования постороннего эффекта: при `{Ask, Get, Get}` маскировался
+/// `Ask`, то есть маска не делала ничего. В корпусе дефект невидим по
+/// построению - там все окружающие однородны по имени.
+#[test]
+fn a_mask_skips_the_handler_of_its_own_label() {
+    let source = |ask: &str, op: &str| {
+        format!(
+            "{BASE}
+effect {ask} where
+  {op} : Nat
+
+effect Get where
+  get : Nat
+
+far : {{{ask}, Get, Get}} Nat
+far = mask get
+
+innerGet : {{{ask}, Get}} Nat
+innerGet = handle far with
+  return v -> v
+  get -> resume Zero
+
+outerGet : {{{ask}}} Nat
+outerGet = handle innerGet with
+  return v -> v
+  get -> resume (Succ Zero)
+
+main : Nat
+main = handle outerGet with
+  return v -> v
+  {op} -> resume Zero
+"
+        )
+    };
+    // Внутренний `Get` пропущен, отвечает внешний.
+    assert_eq!(ran(&source("Ask", "ask"), "main"), "Succ Zero");
+    // Переименование постороннего эффекта ответа не меняет - в этом всё дело.
+    assert_eq!(ran(&source("Zask", "zask"), "main"), "Succ Zero");
+}

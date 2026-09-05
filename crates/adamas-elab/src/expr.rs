@@ -1877,13 +1877,7 @@ impl<'a> Elaborator<'a> {
     /// нужны и вставка имплиситов, и правило исполнения - аргумент здесь
     /// **передаётся**, а не выполняется, потому что ждут от него вычисление.
     fn masked(&mut self, inner: &Expr, span: Span) -> Result<Term, ElabError> {
-        let Some(label) = self
-            .ctx
-            .row()
-            .labels()
-            .first()
-            .map(|it| Rc::clone(&it.name))
-        else {
+        let Some(label) = self.masked_label(inner) else {
             return Err(ElabError::NothingToMask { span });
         };
         let name: Symbol = Rc::from(format!("{MASK}.{label}").as_str());
@@ -1906,6 +1900,40 @@ impl<'a> Elaborator<'a> {
         let term = self.masking(head, &label, inner, span);
         self.instantiated = outer;
         term
+    }
+
+    /// Метка, чей хендлер маска пропускает.
+    ///
+    /// Читается по **голове написанного**: пропустить надо хендлер той метки,
+    /// которую производит вычисление под маской. Вложенная маска отвечает той
+    /// же меткой - счётчик считает хендлеры, а не метки, - а прочее берётся из
+    /// окружающей, где метка одна: там выбирать не из чего.
+    ///
+    /// Пока метка бралась из окружающей безусловно, бралась она **первой в
+    /// каноническом порядке**, то есть лексикографически меньшей по имени
+    /// эффекта. §4.1 при этом прямо говорит, что порядок между различными
+    /// метками несущественен, - и значение программы менялось от
+    /// переименования постороннего эффекта: `mask get` при `{Ask, Get, Get}`
+    /// маскировало `Ask`, то есть не делало ничего (ревью 2026-09-05). В
+    /// корпусе дефект невидим по построению: там все окружающие однородны по
+    /// имени метки.
+    fn masked_label(&self, inner: &Expr) -> Option<Symbol> {
+        if let ExprKind::Mask(deeper) = &inner.kind {
+            return self.masked_label(deeper);
+        }
+        let performed = crate::own::head(inner)
+            .and_then(|head| self.signature.lookup(head))
+            .and_then(|definition| match &definition.kind {
+                DefinitionKind::Operation { effect } => Some(Rc::from(&**effect)),
+                _ => None,
+            });
+        performed.or_else(|| {
+            let labels = self.ctx.row().labels();
+            match labels {
+                [only] => Some(Rc::clone(&only.name)),
+                _ => None,
+            }
+        })
     }
 
     /// Кладёт в кэш элиминатор маски с **заданной** ρ.

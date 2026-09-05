@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Cons{0} Bool True (Cons{0} Bool False (Cons{0} Bool True (Cons{0} Bool True (Cons{0} Bool False (Nil{0} Bool)))))

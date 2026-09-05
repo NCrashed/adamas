@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: nonuniform-parameter.adamas:19:10: конструктор `Deep` применяет `Nest` не к своим параметрам
+    Deep : Nest (Pair a) -> Nest a
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  путь: тип `Nest` -> конструктор `Deep`

@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: resource-used-twice.adamas:28:11: `h` объявлена с кратностью 1, а использована ω
+  twice h = andL (closeFile h) (closeFile h)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  путь: тело `twice`

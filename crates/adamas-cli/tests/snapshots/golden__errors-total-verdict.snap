@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: total-verdict.adamas:15:1: `loop` объявлено `@total`, но вердикт отрицательный: рекурсия не структурна либо вызвано нетотальное
+  loop : Nat -> Nat
+  ^^^^^^^^^^^^^^^^^

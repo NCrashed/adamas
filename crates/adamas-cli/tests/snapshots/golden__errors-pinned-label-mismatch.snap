@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: pinned-label-mismatch.adamas:36:18: метка `State`: первое вхождение написано с другими аргументами
+  pinned = handle @(State Nat) nested with
+                   ^^^^^^^^^^^

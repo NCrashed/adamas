@@ -93,7 +93,7 @@ fn every_program_checks() {
     for path in fixtures("programs") {
         let (passed, text) = checked(&path);
         assert!(passed, "{} отвергнута:\n{text}", path.display());
-        insta::assert_snapshot!(name(&path), text);
+        insta::assert_snapshot!(format!("programs-{}", name(&path)), text);
     }
 }
 
@@ -107,11 +107,13 @@ fn every_program_evaluates() {
     for path in fixtures("eval") {
         let (passed, text) = evaluated(&path);
         assert!(passed, "{} не вычислилась:\n{text}", path.display());
-        // Имя корпуса в имени снапшота: фикстуры разных корпусов вправе
-        // называться одинаково, а снапшоты живут одной директорией.
         insta::assert_snapshot!(format!("eval-{}", name(&path)), text);
     }
 }
+
+// Имя корпуса в имени снапшота: фикстуры разных корпусов вправе называться
+// одинаково, а снапшоты живут одной директорией. Пара «отказ и его проходящий
+// сосед» под общим именем - приём корпуса, и без префикса он был невозможен.
 
 /// Отвергнутое отвергается **и объясняется**: сообщение целиком в снапшоте,
 /// потому что диагностика - обещание Фазы 2 наравне с проверкой типов.
@@ -120,6 +122,6 @@ fn every_error_is_refused() {
     for path in fixtures("errors") {
         let (passed, text) = checked(&path);
         assert!(!passed, "{} прошла, а не должна была", path.display());
-        insta::assert_snapshot!(name(&path), text);
+        insta::assert_snapshot!(format!("errors-{}", name(&path)), text);
     }
 }

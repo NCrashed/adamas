@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Cons{0} Nat (Succ (Succ Zero)) (Cons{0} Nat Zero (Nil{0} Nat))
+Cons{0} Nat (Succ (Succ Zero)) (Cons{0} Nat (Succ Zero) (Cons{0} Nat Zero (Nil{0} Nat)))

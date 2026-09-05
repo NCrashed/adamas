@@ -1,0 +1,10 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: sealed-representation.adamas:28:12: несовпадение типов: ожидался `Nat`, получен `Hidden.T`
+  leaked x = x
+             ^
+  в контексте:
+    (ω x : Hidden.T)
+  путь: тело `leaked` -> тело лямбды

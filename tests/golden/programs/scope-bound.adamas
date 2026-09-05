@@ -1,0 +1,24 @@
+-- Проходящая сторона scope-bound (§3.3).
+--
+-- Правило запрещает побег, а не захват: без этого файла корпус не отличал бы
+-- «привязано к scope» от «любой захват владеемого запрещён», потому что в
+-- `errors/` лежит только отказ.
+--
+-- Параметр обязан быть линейным. При `ω` замыкание расходовало бы захваченный
+-- ресурс `ω` раз, и ядро отвергло бы файл на самом связывании - позиция тут ни
+-- при чём.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> Bool
+  closeFile h = True
+
+feed : (1 f : Bool -> Bool) -> Bool
+feed f = f True
+
+passed : File -> Bool
+passed h = feed (\b -> closeFile h)

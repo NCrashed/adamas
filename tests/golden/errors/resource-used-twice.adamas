@@ -3,19 +3,26 @@
 -- Отвергает это ядро, а не правило владения: связывание получило кратность
 -- `1`, и вектор использований её превысил. Элаборация лишь назначила
 -- кратность, которую программист мог бы написать сам.
+--
+-- Комбинатор здесь **линейный** намеренно. С обычным `and : Bool -> Bool ->
+-- Bool` аргумент приходит при `ω`, и одного `closeFile h` в такой позиции уже
+-- хватало для того же отказа слово в слово - второе закрытие в нём не
+-- участвовало, и фикстура ловила не свой случай.
 
 data Bool where
   False : Bool
   True : Bool
 
-and : Bool -> Bool -> Bool
-and False b = False
-and True b = b
+andL : (1 a : Bool) -> (1 b : Bool) -> Bool
+andL False b = False
+andL True b = b
 
 resource File where
   Open : File
   closeFile : (1 h : File) -> Bool
   closeFile h = True
 
+-- Ближайший проходящий сосед - `andL (closeFile h) True`: та же позиция, то же
+-- связывание, одно использование вместо двух.
 twice : File -> Bool
-twice h = and (closeFile h) (closeFile h)
+twice h = andL (closeFile h) (closeFile h)

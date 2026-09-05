@@ -151,6 +151,8 @@ struct Block {
     column: u32,
     /// Что за члены.
     members: Members,
+    /// Чем открыт: по нему `->` узнаёт, что стоит в ветке (§10 вопрос 61).
+    opener: TokenKind,
 }
 
 impl Block {
@@ -159,16 +161,21 @@ impl Block {
         Self {
             column,
             members: Members::Declarations,
+            opener: TokenKind::Eof,
         }
     }
 
-    /// Блок, открытый ключевым словом (или `=`).
+    /// Блок, открытый ключевым словом (или `=`, или `->`).
     fn opened_by(keyword: TokenKind, column: u32) -> Self {
         let members = match keyword {
-            TokenKind::Equals | TokenKind::Let => Members::Statements,
+            TokenKind::Equals | TokenKind::Let | TokenKind::Arrow => Members::Statements,
             _ => Members::Declarations,
         };
-        Self { column, members }
+        Self {
+            column,
+            members,
+            opener: keyword,
+        }
     }
 }
 
@@ -197,14 +204,14 @@ pub fn layout(tokens: &[Token]) -> Result<Vec<Token>, LayoutError> {
     // Открытые блоки, снаружи внутрь. Первый - блок файла.
     let mut blocks: Vec<Block> = Vec::new();
     // Открытые скобки: внутри них layout выключен.
-    let mut brackets: Vec<Token> = Vec::new();
+    let mut brackets: Vec<(Token, usize)> = Vec::new();
     let mut pending = Some(Pending::TopLevel);
     // Строка предыдущего токена: по ней видно, первая ли лексема на строке.
     let mut previous_line = 0;
 
     for (index, token) in tokens.iter().enumerate() {
         if token.kind == TokenKind::Eof {
-            if let Some(open) = brackets.first() {
+            if let Some((open, _)) = brackets.first() {
                 return Err(LayoutError::UnclosedBracket { open: open.span });
             }
             match pending {
@@ -228,17 +235,28 @@ pub fn layout(tokens: &[Token]) -> Result<Vec<Token>, LayoutError> {
             break;
         }
 
-        if let Some(&outermost) = brackets.first() {
-            if opens_block_keyword(token.kind) {
+        // Внутри скобок layout выключен **не весь** (§10 вопрос 55). `let` и
+        // `where` там работают: без них лямбда с телом-цепочкой не пишется, а
+        // цепочка `let` - обычный способ писать эффектный код (§3.4). Прочие
+        // открывашки остаются выключенными: `of` под скобкой требовал бы
+        // разделителей, которых там нет, а `=` столкнулся бы с записью
+        // `{ x = 1, y = 2 }`, где блок обязан закрыться на запятой.
+        //
+        // Блок, открытый под скобкой, закрывается на **парной**: она и есть его
+        // граница, потому что отступ внутри скобок ничего не обещает.
+        if let Some(&(outermost, _)) = brackets.first() {
+            if opens_block_keyword(token.kind) && !opens_inside_brackets(token.kind) {
                 return Err(LayoutError::BlockInBrackets {
                     keyword: token.span,
                     open: outermost.span,
                 });
             }
-            track_bracket(&mut brackets, token)?;
-            out.push(*token);
-            previous_line = token.line;
-            continue;
+            if bare_in_brackets(tokens, index, &brackets, &blocks, pending.is_some()) {
+                track_bracket(&mut brackets, token, &mut blocks, &mut out)?;
+                out.push(*token);
+                previous_line = token.line;
+                continue;
+            }
         }
 
         if let Some(opener) = pending.take() {
@@ -261,26 +279,7 @@ pub fn layout(tokens: &[Token]) -> Result<Vec<Token>, LayoutError> {
             out.push(virtual_token(TokenKind::Open, token));
             blocks.push(block);
         } else if token.line != previous_line {
-            // Блок файла переживает любой офсайд и закрывается только на Eof:
-            // иначе всё, что левее первой декларации, оказалось бы вне всякого
-            // блока, а парсер дочитал бы файл до края, ничего не заметив.
-            while blocks.len() > 1 && blocks.last().is_some_and(|last| token.column < last.column) {
-                blocks.pop();
-                out.push(virtual_token(TokenKind::Close, token));
-            }
-            // `where` присоединяется к объявлению; в блоке от `=` или `let`
-            // присоединяться не к чему, значит он закончился - на какой бы
-            // колонке `where` ни стоял. Блок файла этим не задеть: он
-            // `Declarations`, и цикл останавливается на нём.
-            if token.kind == TokenKind::Where {
-                while blocks
-                    .last()
-                    .is_some_and(|last| last.members == Members::Statements)
-                {
-                    blocks.pop();
-                    out.push(virtual_token(TokenKind::Close, token));
-                }
-            }
+            offside(token, &mut blocks, &mut out);
             if let Some(file) = blocks.first().map(|first| first.column) {
                 if token.column < file {
                     return Err(LayoutError::LeftOfFile {
@@ -296,15 +295,33 @@ pub fn layout(tokens: &[Token]) -> Result<Vec<Token>, LayoutError> {
             }
         }
 
+        // Закрывающая скобка сперва закрывает блоки, открытые под ней, и лишь
+        // потом идёт в поток: иначе `Close` встанет после неё, и парсер
+        // увидит скобку посреди блока.
+        track_bracket(&mut brackets, token, &mut blocks, &mut out)?;
         out.push(*token);
-        track_bracket(&mut brackets, token)?;
-        if opens_block(tokens, index) {
+        let inside = blocks.last().map(|it| it.opener);
+        if opens_block(
+            tokens,
+            index,
+            sequenced(tokens, index, inside),
+            !brackets.is_empty(),
+        ) {
             pending = Some(Pending::Body(*token));
         }
         previous_line = token.line;
     }
 
     Ok(out)
+}
+
+/// Открывашка, работающая и под скобкой (§10 вопрос 55).
+///
+/// `let` и `where` - потому что без них лямбда с телом-цепочкой не пишется.
+/// `of` под скобкой требовал бы разделителей, которых там нет; `=` столкнулся
+/// бы с записью `{ x = 1, y = 2 }`, где блок обязан закрыться на запятой.
+fn opens_inside_brackets(kind: TokenKind) -> bool {
+    matches!(kind, TokenKind::Let | TokenKind::Where)
 }
 
 /// Ключевое слово, которое открывает блок всегда.
@@ -316,18 +333,95 @@ fn opens_block_keyword(kind: TokenKind) -> bool {
 }
 
 /// Открывает ли токен блок.
-fn opens_block(tokens: &[Token], index: usize) -> bool {
+///
+/// `sequenced` - стоим ли там, где стрелка открывает блок; `bracketed` - внутри
+/// скобок, где часть открывашек выключена (§10 вопрос 55).
+fn opens_block(tokens: &[Token], index: usize, sequenced: bool, bracketed: bool) -> bool {
     let token = tokens[index];
     if opens_block_keyword(token.kind) {
-        return true;
+        return !bracketed || opens_inside_brackets(token.kind);
+    }
+    // `=` под скобкой выключен: он столкнулся бы с записью `{ x = 1, y = 2 }`,
+    // где блок обязан закрыться на запятой, а закрывать его там нечем.
+    if bracketed && token.kind == TokenKind::Equals {
+        return false;
     }
     // `=` - только последним на строке, см. заголовок модуля. Конец файла
     // считается концом строки: иначе `f =` без финального перевода строки и с
     // ним отвергались бы разными проходами.
-    token.kind == TokenKind::Equals
-        && tokens
-            .get(index + 1)
-            .is_some_and(|next| next.line != token.line || next.kind == TokenKind::Eof)
+    //
+    // `->` - тем же правилом, но **не везде** (§10 вопрос 61). Стрелка живёт и
+    // в типах, где `f : Nat ->` с переносом есть продолжение, а не блок;
+    // различает их место: тело ветки `of` и тело лямбды - позиции, где
+    // последовательность и пишут.
+    let last_on_line = tokens
+        .get(index + 1)
+        .is_some_and(|next| next.line != token.line || next.kind == TokenKind::Eof);
+    last_on_line
+        && (token.kind == TokenKind::Equals || (sequenced && token.kind == TokenKind::Arrow))
+}
+
+/// Офсайд: первая лексема строки закрывает всё, что левее её колонки.
+///
+/// Блок файла переживает любой офсайд и закрывается только на `Eof`: иначе всё,
+/// что левее первой декларации, оказалось бы вне всякого блока, а парсер дочитал
+/// бы файл до края, ничего не заметив.
+///
+/// `where` вдобавок закрывает блоки от `=` и `let`: он присоединяется к
+/// объявлению, а членам таких блоков присоединяться не к чему - на какой бы
+/// колонке он ни стоял. Блок файла этим не задеть: он `Declarations`, и цикл
+/// останавливается на нём.
+fn offside(token: &Token, blocks: &mut Vec<Block>, out: &mut Vec<Token>) {
+    while blocks.len() > 1 && blocks.last().is_some_and(|last| token.column < last.column) {
+        blocks.pop();
+        out.push(virtual_token(TokenKind::Close, token));
+    }
+    if token.kind == TokenKind::Where {
+        while blocks
+            .last()
+            .is_some_and(|last| last.members == Members::Statements)
+        {
+            blocks.pop();
+            out.push(virtual_token(TokenKind::Close, token));
+        }
+    }
+}
+
+/// Молчит ли layout на этом токене под скобкой.
+///
+/// Пока под скобкой ни одного блока не открыто, скобочное выражение отступом не
+/// размечается - как и прежде. Молчит, но не глух: лексему, которая блок
+/// **откроет**, проход обязан увидеть, иначе стрелка лямбды под скобкой пройдёт
+/// мимо (§10 вопрос 55).
+fn bare_in_brackets(
+    tokens: &[Token],
+    index: usize,
+    brackets: &[(Token, usize)],
+    blocks: &[Block],
+    pending: bool,
+) -> bool {
+    let inside = blocks.last().map(|it| it.opener);
+    brackets
+        .last()
+        .is_some_and(|&(_, depth)| blocks.len() <= depth)
+        && !pending
+        && !opens_block(tokens, index, sequenced(tokens, index, inside), true)
+}
+
+/// Стоит ли стрелка там, где за ней разрешена последовательность.
+///
+/// Два места, и оба узнаются на месте: тело ветки - когда ближайший блок открыт
+/// `of`; тело лямбды - когда на этой же строке левее стоит `\`.
+fn sequenced(tokens: &[Token], index: usize, inside: Option<TokenKind>) -> bool {
+    if inside == Some(TokenKind::Of) {
+        return true;
+    }
+    let line = tokens[index].line;
+    tokens[..index]
+        .iter()
+        .rev()
+        .take_while(|it| it.line == line)
+        .any(|it| it.kind == TokenKind::Backslash)
 }
 
 /// Может ли лексема начинать член блока.
@@ -350,15 +444,30 @@ fn starts_a_member(kind: TokenKind) -> bool {
 /// Учитывает скобку. Внутри скобок layout выключен, поэтому знать, где они
 /// открылись и закрылись, обязан именно этот проход - и он же даёт по ним
 /// диагностику, потому что рассинхронизация видна здесь раньше всего.
-fn track_bracket(brackets: &mut Vec<Token>, token: &Token) -> Result<(), LayoutError> {
+fn track_bracket(
+    brackets: &mut Vec<(Token, usize)>,
+    token: &Token,
+    blocks: &mut Vec<Block>,
+    out: &mut Vec<Token>,
+) -> Result<(), LayoutError> {
     if token.kind.opens_bracket() {
-        brackets.push(*token);
+        brackets.push((*token, blocks.len()));
         return Ok(());
+    }
+    // Блоки, открытые под этой скобкой, закрываются ею: отступ внутри скобок
+    // границы не задаёт, а парная её задаёт однозначно (§10 вопрос 55).
+    if token.kind.closes_bracket()
+        && let Some(&(_, depth)) = brackets.last()
+    {
+        while blocks.len() > depth {
+            blocks.pop();
+            out.push(virtual_token(TokenKind::Close, token));
+        }
     }
     if !token.kind.closes_bracket() {
         return Ok(());
     }
-    let Some(open) = brackets.pop() else {
+    let Some((open, _)) = brackets.pop() else {
         return Err(LayoutError::UnmatchedBracket { close: token.span });
     };
     if open.kind.closing_bracket() == Some(token.kind) {
@@ -510,16 +619,21 @@ mod tests {
 
     #[test]
     fn a_block_keyword_inside_brackets_is_refused() {
-        // §10 вопрос 55: блок внутри скобок невыразим - и это видно сразу,
-        // а не в парсере, которому достался бы поток без границ.
-        assert!(matches!(
-            run("f = map (\\x -> let y = f x\n  g y) xs"),
-            Err(LayoutError::BlockInBrackets { .. })
-        ));
+        // §10 вопрос 55: под скобкой работают `let` и `where`, прочие
+        // открывашки выключены - и это видно сразу, а не в парсере, которому
+        // достался бы поток без границ.
+        //
+        // `of` там требовал бы разделителей, которых внутри скобок нет.
         assert!(matches!(
             run("f = (case x of A -> 1)"),
             Err(LayoutError::BlockInBrackets { .. })
         ));
+        // А лямбда с телом-цепочкой пишется: блок открывает стрелка, закрывает
+        // парная скобка (§10 вопрос 61).
+        assert_eq!(
+            shape("f = map xs (\\x ->\n  let y = f x\n  g y)"),
+            "{| f = map xs ( \\ x -> {| let {| y = f x |} ; g y |} ) |}"
+        );
     }
 
     #[test]

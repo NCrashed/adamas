@@ -323,6 +323,26 @@ impl Unbound {
 /// Спан, а не число: по нему запись потом себя и узнает. Одна написанная
 /// группа связываний элаборируется по разу на имя, и счёт вхождений разъехался
 /// бы с раздачей.
+/// Что осталось от редекса: лямбда по оставшимся параметрам под остатком спайна.
+fn remaining(params: &[ast::LamParam], body: &Expr, arguments: &[&Expr], span: Span) -> Expr {
+    let head = if params.is_empty() {
+        body.clone()
+    } else {
+        Expr {
+            kind: ExprKind::Lam {
+                params: params.to_vec(),
+                body: Box::new(body.clone()),
+            },
+            span: body.span,
+        }
+    };
+    // Аргументы собраны снаружи внутрь, поэтому применяются с конца.
+    arguments.iter().rev().fold(head, |callee, argument| Expr {
+        kind: ExprKind::App(Box::new(callee), Box::new((*argument).clone())),
+        span,
+    })
+}
+
 /// Написана ли в типе хоть одна метка эффекта.
 ///
 /// Спрашивается у членов класса и решает, заводить ли ему row-параметр (§10
@@ -3092,6 +3112,67 @@ impl<'a> Elaborator<'a> {
         self.implicits(term, ty)
     }
 
+    /// Бета-редекс связыванием. `None` - форма не по зубам, отказ прежний.
+    ///
+    /// Не по зубам две вещи, и обе сознательно. **Паттерн сложнее имени**
+    /// требует разбора, а не связывания, - это отдельная форма, и советовать
+    /// вместо неё `case` честнее, чем строить его молча. **Владеемый тип** без
+    /// написанного требует решить, вставлять ли `drop`, а решается это по
+    /// написанному типу связывания (§10 вопрос 76); с ресурсом тип всё равно
+    /// пишут, и прежний совет - `let` с аннотацией - там исполним.
+    fn redex(
+        &mut self,
+        params: &[ast::LamParam],
+        body: &Expr,
+        arguments: &[&Expr],
+        span: Span,
+    ) -> Result<Option<Term>, ElabError> {
+        let Some((first, rest)) = params.split_first() else {
+            return Ok(None);
+        };
+        // Аргументы собраны снаружи внутрь, поэтому первому параметру достаётся
+        // последний из списка.
+        let Some((argument, earlier)) = arguments.split_last() else {
+            return Ok(None);
+        };
+        let LamParamKind::Pattern(pattern) = &first.kind else {
+            return Ok(None);
+        };
+        let name: Symbol = match &pattern.kind {
+            PatternKind::Name(name) if !self.resolves(name, &[]) => Rc::clone(&name.text),
+            PatternKind::Wildcard => Rc::from("_"),
+            _ => return Ok(None),
+        };
+        let value = self.expr(argument, Mult::Many)?;
+        let Some(ty) = self.synthesized(&value) else {
+            return Ok(None);
+        };
+        let quoted = quote(self.ctx.size(), &ty);
+        if head_name(&ty).is_some_and(|head| self.owned.owns(head)) {
+            return Err(ElabError::Missing {
+                what: Missing::OwnedRedex,
+                span: argument.span,
+            });
+        }
+        let bound = Bound {
+            value: Some(Rc::new(value.clone())),
+            ..Bound::visible(&name, Mult::Many, ty)
+        };
+        let inner = self.binding(bound, |it| {
+            // Параметры кончились - остаток спайна применяется к телу как
+            // обычно; кончились аргументы - остаток лямбды остаётся лямбдой.
+            let written = remaining(rest, body, earlier, span);
+            it.expr(&written, Mult::Many)
+        })?;
+        Ok(Some(Term::Let(
+            Mult::Many,
+            CoreName::from(&*name),
+            Rc::new(quoted),
+            Rc::new(value),
+            Rc::new(inner),
+        )))
+    }
+
     /// `f a b c` - спайн целиком, а не по одному применению за раз.
     ///
     /// Собирается он **циклом**: рекурсия по левому поддереву стоила бы кадра
@@ -3103,6 +3184,23 @@ impl<'a> Elaborator<'a> {
         while let ExprKind::App(callee, argument) = &head.kind {
             arguments.push(&**argument);
             head = callee;
+        }
+        // Лямбда в голове: бета-редекс становится связыванием (§10 вопрос 101).
+        //
+        // Синтезировать её тип нечем - домена `Term::Lam` не хранит, - а
+        // ожидаемый достаётся результату применения, не голове. Строить вместо
+        // этого `Pi` из дырок значило бы решать дырку **внешнего** контекста
+        // телом, стоящим уже под связыванием: вложенная лямбда утащила бы его в
+        // замкнутый терм, и `solve` отвергает такое областью видимости - заход
+        // по этому пути был написан, измерен и откачен.
+        //
+        // Связывание обходит всё это: тип его - синтезированный тип **аргумента**,
+        // а тело элаборируется под известным связыванием, без дырок вовсе. Это
+        // ровно то, что автору сегодня и советуют написать руками.
+        if let ExprKind::Lam { params, body } = &head.kind
+            && let Some(term) = self.redex(params, body, &arguments, expr.span)?
+        {
+            return Ok(term);
         }
         // Аргумент конструктора уезжает внутри собранного значения, а аргумент
         // функции - нет: §3.3 разрешает замыканию над владеющим связыванием
@@ -3391,13 +3489,30 @@ impl<'a> Elaborator<'a> {
             why,
             span: computation.span,
         };
+        // Написанная лямбда синтезу не поддаётся - домена `Term::Lam` не хранит
+        // (§10 вопрос 101), - но **ожидаемый** тип у неё здесь есть: под
+        // хендлером стоит приостановленное вычисление, чья row начинается
+        // снимаемой меткой. Проверка против него узнаёт ρ там, где синтез не
+        // узнаёт ничего (§10 вопрос 104). Прочие формы идут прежним путём: их
+        // тип синтезируется, и подменять его ожидаемым значило бы сужать row
+        // вычисления до одной метки.
+        let awaited = matches!(&computation.kind, ExprKind::Lam { .. })
+            .then(|| self.suspension(effect))
+            .flatten();
+        if let Some(ty) = &awaited {
+            self.expected = pi_arguments(ty, self.owned);
+            self.result = Some(self.typed(&peeled(ty)));
+        }
         let value = self.expr(computation, Mult::Many)?;
-        let ty = self.synthesized(&value).ok_or_else(|| {
-            refuse(
-                "тип написанного не выводится - назовите вычисление `let`-ом \
-                 с написанным типом",
-            )
-        })?;
+        let ty = match &awaited {
+            Some(ty) => self.typed(ty),
+            None => self.synthesized(&value).ok_or_else(|| {
+                refuse(
+                    "тип написанного не выводится - назовите вычисление `let`-ом \
+                     с написанным типом",
+                )
+            })?,
+        };
         let Value::Pi(_, _, _, row, _) = &*whnf_solved(self.signature, self.metas, &ty) else {
             return Err(refuse(
                 "написано значение, а не приостановленное вычисление",
@@ -3410,6 +3525,47 @@ impl<'a> Elaborator<'a> {
             rho: rest,
             arguments,
         })
+    }
+
+    /// Приостановленное вычисление метки: `(ω _ : ()) -> {L ?p⃗ | ?ρ} ?a`.
+    ///
+    /// Аргументы метки берутся дырками по её **формеру**: их типы там и
+    /// написаны, а сколько их - решает он же. `None` - единицы или самой метки
+    /// в сигнатуре нет, и тогда ожидаемого типа не существует.
+    fn suspension(&mut self, effect: &Symbol) -> Option<Term> {
+        let unit = self.signature.instantiate(UNIT, self.metas)?;
+        let former = self.signature.instantiate(effect, self.metas)?;
+        let mut kind = self.synthesized(&former)?;
+        let mut arguments = Vec::new();
+        while let Value::Pi(_, _, domain, _, codomain) =
+            &*whnf_solved(self.signature, self.metas, &kind)
+        {
+            let argument = self.fresh_meta(domain);
+            let value = self.typed(&argument);
+            arguments.push(argument);
+            kind = codomain.clone().apply(value);
+        }
+        let rho = self.metas.fresh_row();
+        let row = Row::closing(
+            [Label {
+                name: CoreName::from(&**effect),
+                arguments,
+            }],
+            rho.tail(),
+        );
+        let level = self.metas.fresh_level();
+        let answer = self.fresh_meta(&Rc::new(Value::Universe(level)));
+        // Дырка ответа заведена **снаружи** связывания, а стоять ей под ним:
+        // спайн её считан на здешней глубине, и без сдвига индексы уезжают.
+        // Row сдвига не требует - она стоит на стрелке и читается в её внешнем
+        // контексте, там же, где заведены аргументы метки.
+        Some(Term::Pi(
+            Binder::explicit(Mult::Many),
+            CoreName::from("_"),
+            Rc::new(unit),
+            row,
+            Rc::new(adamas_core::pattern::shift_free(&answer, 1)),
+        ))
     }
 
     fn handled(&mut self, handled: Handled<'_>) -> Result<Term, ElabError> {

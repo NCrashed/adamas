@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: lambda-in-head-position.adamas:21:9: тип `\(ω b) -> b` невозможно синтезировать, нужна аннотация
+  plain = (\b -> b) True
+          ^^^^^^^^^
+  путь: тело `plain` -> функция применения

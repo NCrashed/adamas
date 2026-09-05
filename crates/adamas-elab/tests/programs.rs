@@ -1291,6 +1291,37 @@ keep h b = drop h"
     assert_eq!(drops(&signature, "settled"), 0, "закрывает `keep`, не мы");
 }
 
+#[test]
+fn a_lambda_in_head_position_is_refused_by_synthesis_not_by_ownership() {
+    // §10 вопрос 100. `(\b -> closeFile h) True` отвергалось как побег, хотя
+    // ничего не возвращается: `Term::Lam` домена не хранит, тип головы не
+    // выводится, а умолчание считает невыведенный результат функцией.
+    //
+    // Отказ верен, но причина не та. Тот же бета-редекс **без единого
+    // ресурса** не типизируется тем же сообщением: лямбда в голове требует
+    // аннотации, и владение тут ни при чём. Правило §3.3 сообщало о чужом
+    // случае, потому что докладывалось первым.
+    let plain = refused(&format!("{BASE}\nplain : Bool\nplain = (\\b -> b) True\n"));
+    assert!(
+        matches!(plain, ElabError::Core { .. }),
+        "бета-редекс без ресурсов - отказ синтеза, получено {plain:?}"
+    );
+
+    let owned = refused(&format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+direct : File -> Bool
+direct h = (\\b -> drop h) True
+"
+    ));
+    assert!(
+        matches!(owned, ElabError::Core { .. }),
+        "с ресурсом обязан прийти тот же отказ, а не ScopeBound: получено {owned:?}"
+    );
+}
 
 #[test]
 fn the_consumption_multiplicity_is_outside_conversion() {

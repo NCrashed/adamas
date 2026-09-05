@@ -1,0 +1,66 @@
+-- Полиморфизм по кратностям (§10 вопрос 41): комбинатор пишется однажды и
+-- служит и линейному значению, и обычному.
+--
+-- Параметр объявляется группой `{q : Mult}` - сорт `Mult` пишется именем, как
+-- `Type` и `Effect`. В позиции кратности он стоит первым именем группы:
+-- `(q x : a)` - это `q` и `x`, и различает их не форма, а объявление.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+double : Nat -> Nat
+double Zero = Zero
+double (Succ k) = Succ (Succ (double k))
+
+once : (1 n : Nat) -> Nat
+once n = n
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> Bool
+  closeFile h = True
+
+-- Первый порядок. Линейной копии хватило бы и без полиморфизма - `(1 x : a)`
+-- принимает ω-значение, потому что поставить его однажды законно, - а
+-- полиморфная годится там же.
+identity : {q : Mult} -> (q x : a) -> a
+identity x = x
+
+closedThrough : File -> Bool
+closedThrough h = closeFile (identity h)
+
+plainThrough : Nat -> Nat
+plainThrough n = identity n
+
+-- Второй порядок - тот, ради которого вопрос и стоял. Здесь линейная копия
+-- бессильна: тип функции-аргумента сверяется конвертируемостью, а она по
+-- кратностям инвариантна, и `(1 x : a) -> b` не принимает `(ω _ : a) -> b`.
+applyTo : {q : Mult} -> (ω f : (q x : a) -> b) -> (q y : a) -> b
+applyTo f x = f x
+
+atOmega : Nat -> Nat
+atOmega n = applyTo double n
+
+atOne : (1 n : Nat) -> Nat
+atOne n = applyTo once n
+
+-- Ресурс проходит тем же путём: носители считаются при **той** подстановке,
+-- которую сделало место использования, а не худшие из возможных.
+closedByApply : File -> Bool
+closedByApply h = applyTo closeFile h
+
+-- Дозволенное множество считается перебором, и не всякая подстановка в него
+-- попадает: тело, расходующее аргумент дважды, проходит только при `ω`.
+data Pair (a : Type) where
+  MkPair : a -> a -> Pair a
+
+duplicate : {q : Mult} -> (q x : Nat) -> Pair Nat
+duplicate x = MkPair x x
+
+duplicated : Nat -> Pair Nat
+duplicated n = duplicate n

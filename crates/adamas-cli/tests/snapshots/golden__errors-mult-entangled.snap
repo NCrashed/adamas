@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: mult-entangled.adamas:18:14: параметры кратности `comp` связаны между собой: тело проверяется не при всех их сочетаниях, а выразить связь сигнатуре нечем
+  comp f g x = f (g x)
+               ^^^^^^^
+  путь: тело `comp`

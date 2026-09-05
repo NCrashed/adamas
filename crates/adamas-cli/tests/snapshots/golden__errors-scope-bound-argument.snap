@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: scope-bound-argument.adamas:37:14: `h` привязано к своему scope и возвращается: захватившее владение замыкание можно применить или передать аргументом, но не вынести наружу
+  escaping h = keep h
+               ^^^^^^

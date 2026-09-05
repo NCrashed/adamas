@@ -1,0 +1,37 @@
+-- Частичное применение выносит наружу владеемый **аргумент** (§3.3).
+--
+-- Зеркало `errors/scope-bound-partial.adamas`. Там привязана к scope голова,
+-- и правило её передавало; здесь голова - обычное имя, а привязан аргумент,
+-- и свойство не снималось ни с чего. `keep h` есть замыкание над линейным
+-- `h`, тип его `Bool -> {Log} Bool`, то есть ω, и каждый вызов закрывает один
+-- и тот же ресурс: двойное закрытие на этом исполнялось.
+--
+-- Ближайший проходящий сосед - `escaping h b = keep h b`: то же связывание,
+-- тот же аргумент, применение доведено до конца, и замыкания не остаётся.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+effect Log where
+  note : Nat -> Unit
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {Log} Bool
+  closeFile h =
+    note 9
+    True
+
+keep : (1 h : File) -> Bool -> {Log} Bool
+keep h b = closeFile h
+
+escaping : File -> Bool -> {Log} Bool
+escaping h = keep h

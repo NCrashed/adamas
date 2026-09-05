@@ -1260,6 +1260,39 @@ beside h = \\b -> b
 }
 
 #[test]
+fn a_partial_application_carries_its_owned_argument() {
+    // §3.3: недоприменённое есть замыкание, и держит оно **и уже поданные
+    // аргументы**, а не одну голову. Зеркало §10 вопроса 90: там привязана к
+    // scope голова, здесь - аргумент. Пока свойство снималось только с головы,
+    // `escaping h = keep h` возвращало наружу ω-замыкание над линейным `h`, и
+    // двойное закрытие на нём исполнялось.
+    let preamble = format!(
+        "{BASE}
+closeFile : (1 b : Bool) -> Bool
+closeFile b = b
+
+{RESOURCE}
+keep : (1 h : File) -> Bool -> Bool
+keep h b = drop h"
+    );
+    let error = refused(&format!(
+        "{preamble}\nescaping : File -> Bool -> Bool\nescaping h = keep h\n"
+    ));
+    assert!(
+        matches!(error, ElabError::ScopeBound { .. }),
+        "получено {error:?}"
+    );
+
+    // Доприменённое замыканием не является: свойство снимается насыщением, как
+    // и снималось.
+    let signature = program(&format!(
+        "{preamble}\nsettled : File -> Bool -> Bool\nsettled h b = keep h b\n"
+    ));
+    assert_eq!(drops(&signature, "settled"), 0, "закрывает `keep`, не мы");
+}
+
+
+#[test]
 fn the_consumption_multiplicity_is_outside_conversion() {
     // `r` - учётная аннотация, а не часть вычисления: ι-редукция её не
     // смотрит, и два разбора, различающиеся только ею, дают одно значение.

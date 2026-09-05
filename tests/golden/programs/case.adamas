@@ -26,6 +26,40 @@ isZero n = case n of
 pick : Bool -> Nat -> Nat -> Nat
 pick c a b = if c then a else b
 
+-- Разбор по конструктору **параметризованного** семейства связывает все свои
+-- поля, а не одно (§10 вопрос 110). Тип разбираемого в ветвь не приходит -
+-- она собирается отдельно от него, - и телескоп конструктора шагать по нему
+-- нечем; число полей задаёт при этом паттерн, а не телескоп.
+--
+-- Поля здесь **разных типов** намеренно: у одинаковых пропажа незаметна -
+-- дырка решится тем же, - и два месяца ошибка стояла ровно поэтому.
+data Tagged (a : Type) where
+  Tag : a -> Nat -> Tagged a
+
+payload : Tagged Bool -> Bool
+payload t = case t of
+  Tag x n -> x
+
+marker : Tagged Bool -> Nat
+marker t = case t of
+  Tag x n -> n
+
+-- Рекурсивное поле - тот же случай: `List a` и `a` разных типов по построению.
+data Stack (a : Type) where
+  Empty : Stack a
+  Push : a -> Stack a -> Stack a
+
+top : Stack Nat -> Nat
+top s = case s of
+  Empty -> Zero
+  Push x rest -> x
+
+-- Хвост употребляется: связан он или нет, видно только так.
+second : Stack Nat -> Nat
+second s = case s of
+  Empty -> Zero
+  Push x tail -> top tail
+
 -- Атрибут требует положительного вердикта: рекурсия структурна, потому что
 -- `k` - поле разобранного значения, строго меньшее самого значения.
 @total

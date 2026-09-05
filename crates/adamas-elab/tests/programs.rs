@@ -1450,6 +1450,46 @@ forgotten h = True
     );
 }
 
+#[test]
+fn an_effectful_destructor_is_instantiated_like_any_other_name() {
+    // Контроль формы вставки - тот же деструктор, вызванный руками: он проходит
+    // потому, что row его сигнатуры инстанцируется, как у всякого имени. Вставка
+    // строила вызов вовсе без row-аргументов, и поднятая `{Trace | e0}`
+    // требовала от места вставки **буквальную** `e0`.
+    //
+    // Держащее row-параметров два, и это существенно: при одном свободная
+    // переменная случайно попадает в него же и дефект невидим. Здесь первый -
+    // написанный хвост аргумента, и погашение спрашивало его вместо окружающей.
+    let text = format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+effect Trace where
+  note : Nat -> Unit
+
+effect Fail where
+  fail : Nat -> Nat
+
+resource File where
+  Open : File
+  close : (1 h : File) -> {{Trace}} Bool
+  close h =
+    note Zero
+    True
+
+held : ({{Fail | e}} Nat) -> File -> {{Trace}} Nat
+held act h = Zero
+"
+    );
+    let signature = program(&text);
+    assert_eq!(
+        calls(&signature, "held", "close"),
+        1,
+        "вставка зовёт эффектный деструктор так же, как чистый"
+    );
+}
+
 /// Тело определения, напечатанное ядром: снимок формы, а не счёт подстрок.
 fn body(signature: &Signature, name: &str) -> String {
     let Some(body) = signature.lookup(name).and_then(|it| it.body.clone()) else {

@@ -4258,6 +4258,84 @@ mutual
 }
 
 #[test]
+fn a_partial_value_in_a_type_is_confined_not_leaked() {
+    // §10 вопрос 43. Нетотальное значение доходит до типа через `let`: тип
+    // связывания синтезируется в `P (loop Zero)`, тогда как та же ссылка,
+    // написанная в типе, отвергается. Записано это было дырой в обещании §4.7.
+    //
+    // Измерено, что дыра **заперта**, и запирают её два правила, а не одно.
+    let base = format!(
+        "{BASE}
+data P : Nat -> Type where
+  MkP : (n : Nat) -> P n
+
+loop : Nat -> Nat
+loop n = loop n
+
+anything : (n : Nat) -> P n
+anything n = MkP n
+"
+    );
+
+    // Первое: **стёртый фрагмент** защищён. При `q = 0` значение проверяется
+    // при `0 · σ = 0`, и правило ссылки срабатывает - ровно там, где §4.7
+    // обещание и даёт.
+    let erased = refused(&format!(
+        "{base}
+held : Nat
+held =
+  let 0 x : Nat = loop Zero
+  Zero
+"
+    ));
+    assert!(
+        erased.to_string().contains("не тотальна"),
+        "получено {erased}"
+    );
+
+    // Второе: определение, донёсшее нетотальное до типа, **само нетотально**,
+    // и в тип попасть уже не может. Утечка остаётся внутри него.
+    let demanded = refused(&format!(
+        "{base}
+@total
+held : Nat
+held =
+  let x : Nat = loop Zero
+  let p = anything x
+  Zero
+"
+    ));
+    assert!(
+        demanded.to_string().contains("вердикт отрицательный"),
+        "получено {demanded}"
+    );
+
+    // Само по себе такое тело проходит - это и есть остаток, и он безвреден:
+    // δ нетотальное не разворачивает, тип застревает и наружу не выходит.
+    program(&format!(
+        "{base}
+held : Nat
+held =
+  let x : Nat = loop Zero
+  let p = anything x
+  Zero
+"
+    ));
+
+    // Написанная в типе ссылка по-прежнему отвергается - контроль к первому.
+    let written = refused(&format!(
+        "{base}
+direct : P (loop Zero)
+direct = MkP (loop Zero)
+"
+    ));
+    assert!(
+        written.to_string().contains("не тотальна"),
+        "получено {written}"
+    );
+}
+
+#[test]
 fn an_attribute_inside_a_group_is_not_dropped() {
     // Заголовок члена группы разбирался без атрибутов, и они выбрасывались
     // молча: `@fbip` внутри `mutual` принимался вместо отказа, обещанного

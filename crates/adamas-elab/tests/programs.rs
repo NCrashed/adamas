@@ -7101,3 +7101,77 @@ mutual
     );
     assert!(signature.lookup("Node").is_some(), "оба объявлены");
 }
+
+#[test]
+fn a_thread_may_not_carry_an_owned_value() {
+    // Нить связывается `ω`: `resume state state` тратит состояние дважды, и
+    // это законное употребление. Владеемому типу оно не подходит - значений
+    // при `ω` у него не существует, - а связывание нити строилось мимо общего
+    // правила кратности, где отказ и живёт. Ресурс ехал нитью, закрывался
+    // дважды и утекал молча, при том что то же связывание, написанное руками,
+    // отвергалось.
+    let error = refused(&format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> Bool
+  closeFile h = True
+
+effect Swap where
+  swap : Bool
+
+prog : {{Swap}} Nat
+prog =
+  let b : Bool = swap
+  Succ Zero
+
+reclosed : Bool
+reclosed = handle prog with
+  state Open
+  return v -> closeFile state
+  swap -> resume (closeFile state) state
+"
+    ));
+    assert!(
+        error.to_string().contains("нить связывается ω"),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_handler_declares_its_initial_state_once() {
+    // Начальное состояние у нити одно (§3.4). Повтор молча затирал первый, и
+    // побеждал последний - при том что повтор ветки отвергается «написана
+    // дважды» соседним правилом.
+    let text = format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+effect State where
+  get : Nat
+  put : Nat -> Unit
+
+counted : {{State}} Nat
+counted = get
+
+answer : Nat
+answer = handle counted with
+  state Zero
+  state (Succ Zero)
+  return v -> v
+  get -> resume state state
+  put x -> resume MkUnit x
+"
+    );
+    let Err(error) = adamas_parser::parse(&text) else {
+        panic!("ожидался отказ разбора")
+    };
+    assert!(
+        error.to_string().contains("написано дважды"),
+        "получено {error:?}"
+    );
+}

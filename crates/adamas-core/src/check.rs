@@ -658,12 +658,22 @@ fn settle_terms(signature: &Signature, metas: &mut Metas) -> Result<(), TypeErro
         // было, - значит за проход не сдвинулось ничего, и следующий даст то
         // же самое.
         if metas.postponed_len() >= count {
-            let Some((_, left, right)) = metas.take_postponed().into_iter().next() else {
+            // Глубина берётся из точки откладывания - та же, что и выше, и по
+            // той же причине. Пока здесь стоял нуль, всякое неподвижное
+            // ограничение, отложенное **под связыванием**, роняло процесс на
+            // `unreachable!` в обратном чтении: значения открыты, `Lvl(0)` в
+            // контексте размера нуль не адресуется. Ловилось это первой же
+            // пропущенной аннотацией у `pure`/`ap` внутри функции с
+            // параметрами (ревью 2026-09-05).
+            //
+            // Пустым список тут не бывает - `postponed_len() >= count > 0`, -
+            // но отвечать на это паникой незачем: цикл и так кончается.
+            let Some((size, left, right)) = metas.take_postponed().into_iter().next() else {
                 return Ok(());
             };
             return Err(ErrorKind::UnsettledTerm {
-                left: crate::eval::quote(0, &left),
-                right: crate::eval::quote(0, &right),
+                left: crate::eval::quote(size, &left),
+                right: crate::eval::quote(size, &right),
             }
             .into());
         }

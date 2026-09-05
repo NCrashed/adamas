@@ -222,6 +222,17 @@ pub enum ParseError {
         span: Span,
     },
 
+    /// Член `state` написан в блоке хендлера дважды.
+    ///
+    /// Начальное состояние у нити одно (§3.4). Повтор молча затирал первый, и
+    /// побеждал последний, - при том что повтор ветки отвергается соседним
+    /// правилом.
+    #[error("`state`: начальное состояние написано дважды")]
+    DuplicateState {
+        /// Второе вхождение.
+        span: Span,
+    },
+
     /// Клаузы одного определения разделены другим объявлением.
     ///
     /// Порядок клауз значим - побеждает первая совпавшая (§9 Фаза 1), - поэтому
@@ -286,6 +297,7 @@ impl ParseError {
     pub fn span(&self) -> Span {
         match self {
             Self::EmptyRecord { span }
+            | Self::DuplicateState { span }
             | Self::Precedence { span }
             | Self::MixedRecord { span }
             | Self::Expected { span, .. }
@@ -1942,6 +1954,13 @@ impl<'a> Parser<'a> {
         loop {
             match self.handler_member()? {
                 Member::State(initial) => {
+                    // Начальное состояние у нити одно (§3.4). Повтор молча
+                    // затирал первый, и побеждал последний - при том что
+                    // повтор ветки отвергается «написана дважды» соседним
+                    // правилом (ревью 2026-09-05).
+                    if state.is_some() {
+                        return Err(ParseError::DuplicateState { span: initial.span });
+                    }
                     end = initial.span;
                     state = Some(Box::new(initial));
                 }

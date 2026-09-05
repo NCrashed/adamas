@@ -490,6 +490,14 @@ fn declaration() -> impl Strategy<Value = String> {
         expression()
             .prop_map(|argument| format!("f = handle @(State {argument}) c with\n  get -> 1\n")),
         expression().prop_map(|body| format!("f = g handle c with\n  get -> {body}\n")),
+        // Формы среза пост-фазы: у обеих нет закрывающего токена, и аргумент
+        // читается разбором как применение. Пока их в генераторе не было,
+        // печать теряла скобки и меняла программу.
+        expression().prop_map(|body| format!("f = mask {body}\n")),
+        expression().prop_map(|body| format!("f = g (mask {body})\n")),
+        expression().prop_map(|body| format!(
+            "f = handle c with\n  state {body}\n  get -> resume state state\n"
+        )),
         (expression(), expression()).prop_map(|(a, b)| format!("f =\n  {a}\n  {b}\n  g x\n")),
         expression().prop_map(|ty| format!("type Eff a = {ty}\n")),
     ]

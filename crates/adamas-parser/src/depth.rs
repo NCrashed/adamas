@@ -188,7 +188,14 @@ fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<
             branches,
             ..
         } => {
-            let inner = deepen(depth, 1, expr.span)?;
+            // Хендлер есть **применение** элиминатора: `#handle.L p⃗ a b comp
+            // ret op₁ … op_K` - спайн со звеном на каждую ветку, а не одно
+            // звено на всю форму. Пока стояло одно, шестьдесят вложенных
+            // хендлеров давали измеренную глубину 120 из 256 при настоящей
+            // около пятнадцати тысяч, и `check` срывался на них в переполнение
+            // стека (ревью 2026-09-05). Тот же довод, каким мерятся операции
+            // эффекта, поля типа записи и члены класса.
+            let inner = deepen(depth, 1 + branches.len(), expr.span)?;
             pending.push((Node::Expr(computation), inner));
             for branch in branches {
                 let under = deepen(inner, branch.params.len() + 1, branch.span)?;

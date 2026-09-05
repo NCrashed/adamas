@@ -3273,6 +3273,7 @@ impl<'a> Elaborator<'a> {
         // связано ничем, потому что связывания ветки читаются из её
         // ожидаемого типа.
         if let Some((_, ty)) = &initial {
+            self.owned_state(ty, span)?;
             let answer = self.result.clone().unwrap_or_else(|| self.hole());
             self.result = Some(self.threaded(ty, &answer));
         }
@@ -3378,6 +3379,22 @@ impl<'a> Elaborator<'a> {
     ///
     /// Кратность связывания `ω`: `get -> resume state state` тратит состояние
     /// дважды, и это законное употребление, а не ошибка.
+    /// Отвергает нить владеемого типа (§3.3 × §3.4).
+    ///
+    /// Нить связывается `ω`: `resume state state` тратит состояние дважды, и
+    /// это законное употребление. Владеемому типу оно не подходит - значений
+    /// при `ω` у него не существует, - а спросить об этом надо **здесь**:
+    /// связывание строится мимо общего правила кратности, где отказ и живёт.
+    /// Пока не спрашивали, ресурс ехал нитью, закрывался дважды и утекал, а то
+    /// же связывание, написанное руками, отвергалось (ревью 2026-09-05).
+    fn owned_state(&mut self, state: &Rc<Value>, span: Span) -> Result<(), ElabError> {
+        let head = head_name(&whnf_solved(self.signature, self.metas, state)).cloned();
+        match head.filter(|it| self.owned.owns(it)) {
+            Some(name) => Err(ElabError::OwnedState { name, span }),
+            None => Ok(()),
+        }
+    }
+
     fn threaded(&mut self, state: &Rc<Value>, answer: &Rc<Value>) -> Rc<Value> {
         let size = self.ctx.size();
         let arrow = Term::Pi(

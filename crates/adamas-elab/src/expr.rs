@@ -4378,9 +4378,16 @@ impl<'a> Elaborator<'a> {
 
     /// Вызов деструктора и тип его результата.
     ///
-    /// Аргументы уровня свежие на каждую вставку: два `drop` в одном
+    /// Аргументы уровня **и row** свежие на каждую вставку: два `drop` в одном
     /// определении - два независимых вхождения, и общие дырки связали бы их
-    /// уровни между собой без причины.
+    /// между собой без причины.
+    ///
+    /// Row подставляются потому же, почему уровни: деструктор - обычное имя, и
+    /// вставка обязана инстанцировать его так же, как это делает всякое другое
+    /// употребление. Пока здесь стояло «row нет», эффектный деструктор уходил в
+    /// применение со **свободной** row-переменной своей сигнатуры: `close`,
+    /// поднятая до `{Trace | e0}`, требовала от места вставки буквальную `e0`,
+    /// которой там не связано ничего.
     fn destructor(&mut self, drop: &Symbol, index: u32) -> (Term, Term) {
         let Some(definition) = self.signature.lookup(drop) else {
             unreachable!("деструктор `{drop}` объявлен вместе с типом")
@@ -4388,12 +4395,18 @@ impl<'a> Elaborator<'a> {
         let levels: Rc<[Level]> = (0..definition.level_arity)
             .map(|_| self.metas.fresh_level())
             .collect();
-        let substituted = definition.ty.substitute_levels(&levels);
+        let rows: Vec<Row<Term>> = (0..definition.row_arity)
+            .map(|_| self.metas.fresh_row())
+            .collect();
+        let substituted = definition
+            .ty
+            .substitute_levels(&levels)
+            .substitute_rows(&rows);
         let Term::Pi(_, _, _, _, result) = &substituted else {
             unreachable!("`{drop}` проверен на форму при объявлении")
         };
         let call =
-            Term::Const(CoreName::from(&**drop), levels, Rows::none()).apply([Term::var(index)]);
+            Term::Const(CoreName::from(&**drop), levels, Rows::new(rows)).apply([Term::var(index)]);
         (call, (**result).clone())
     }
 

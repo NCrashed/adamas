@@ -510,6 +510,21 @@ pub enum ErrorKind {
         arity: u32,
     },
 
+    /// Выводимый аргумент не укладывается в тип своей дырки.
+    ///
+    /// Отдельно от [`ErrorKind::Mismatch`], потому что дырка доезжает до
+    /// отказа **нерешённой** и печатается собой: `(?22) #0` вместо причины.
+    /// Здесь названы обе стороны - чего дырка требует и что на её месте нужно.
+    #[error(
+        "выводимый аргумент не укладывается в свой тип `{hole}`: на его месте требуется `{wanted}`"
+    )]
+    HoleMisfit {
+        /// Тип дырки - то, чем ограничено решение.
+        hole: Term,
+        /// Что на её месте требуется.
+        wanted: Term,
+    },
+
     /// Параметры кратности связаны между собой, а сигнатура связь не выражает.
     ///
     /// У `compose` домен собственного аргумента равен `q · r`, и написать это
@@ -554,6 +569,7 @@ impl ErrorKind {
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         match self {
             Self::NotAType { term, ty } => terms.extend([term, ty]),
+            Self::HoleMisfit { hole, wanted } => terms.extend([hole, wanted]),
             Self::Mismatch { expected, found } => terms.extend([expected, found]),
             Self::UnsettledTerm { left, right } => terms.extend([left, right]),
             Self::UnsettledLevel { left, right } => levels.extend([left, right]),

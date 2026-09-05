@@ -319,16 +319,33 @@ pub fn check(
             if convertible(ctx.signature(), metas, ctx.size(), expected, &found) {
                 Ok(usage)
             } else {
-                Err(refuse(
-                    ctx,
-                    metas,
-                    ErrorKind::Mismatch {
-                        expected: read_back(ctx, metas, expected),
-                        found: read_back(ctx, metas, &found),
-                    },
-                ))
+                Err(refuse(ctx, metas, misfit(ctx, metas, expected, &found)))
             }
         }
+    }
+}
+
+/// Отказ сравнения: несовпадение типов - либо дырка, не принявшая решение.
+///
+/// Дырка, чьё решение отвергнуто её собственным типом, доезжает сюда
+/// **нерешённой**, и печатается тогда собой: `(?22) #0` вместо причины.
+/// Сравнение об этом не рассказывает - оно возвращает «не сошлось», - поэтому
+/// причина берётся у хранилища, и только про ту же дырку, которая в отказе и
+/// стоит.
+fn misfit(ctx: &Ctx<'_>, metas: &Metas, expected: &Rc<Value>, found: &Rc<Value>) -> ErrorKind {
+    let hole = |value: &Rc<Value>| match &**value {
+        Value::Neutral(Head::Meta(meta), _) => metas.refused(*meta),
+        _ => None,
+    };
+    if let Some(ty) = hole(found).or_else(|| hole(expected)) {
+        return ErrorKind::HoleMisfit {
+            hole: read_back(ctx, metas, ty),
+            wanted: read_back(ctx, metas, expected),
+        };
+    }
+    ErrorKind::Mismatch {
+        expected: read_back(ctx, metas, expected),
+        found: read_back(ctx, metas, found),
     }
 }
 

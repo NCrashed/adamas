@@ -116,11 +116,38 @@ resource File where
 fn a_refusal_inside_a_clause_shows_the_route() {
     // Путь показывается всегда: он объясняет, почему подчёркнуто это место, а
     // когда маршрут уходит в дерево разбора - остаётся единственным указанием.
+    //
+    // Поле ветви при этом названо так, как написал автор (§10 вопрос 69): из
+    // объявления имя приходит `_`, потому что `Succ : Nat -> Nat` - безымянная
+    // стрелка, и телескоп печатал позицию. Аргумент рядом остаётся позицией, и
+    // верно: переменной на его месте не написала ни одна клауза.
     let text = format!(
         "{BASE}f : Nat -> Bool
 f Zero = True
 f (Succ k) = k
 "
     );
-    insta::assert_snapshot!(refusal(&text));
+    let shown = refusal(&text);
+    assert!(shown.contains("(ω k : Nat)"), "получено {shown}");
+    insta::assert_snapshot!(shown);
+}
+
+#[test]
+fn a_field_name_comes_from_the_first_clause_that_binds_it() {
+    // Правило то же, что у аргумента: имя берётся у первой клаузы, где на этом
+    // месте стоит переменная. Названы оба поля - и голова, и хвост, - на любой
+    // глубине: имена собираются тем же проходом, что нумерует переменные.
+    let text = format!(
+        "{BASE}data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+g : List Nat -> Bool
+g Nil = True
+g (Cons x xs) = x
+"
+    );
+    let shown = refusal(&text);
+    assert!(shown.contains("(ω x : Nat)"), "получено {shown}");
+    assert!(shown.contains("(ω xs : "), "получено {shown}");
 }

@@ -675,7 +675,15 @@ fn unify_mults(metas: &mut Metas, left: Mult, right: Mult) -> bool {
     match (left, right) {
         (a, b) if a == b => true,
         (Mult::Meta(meta), other) | (other, Mult::Meta(meta)) => {
-            if !metas.mult_allowed(meta).contains(&other) {
+            // Дозволенное проверяется у **конкретного** решения. Неконкретное -
+            // параметр вызывающего или выражение над ним - сравнить со списком
+            // нечем, и проверять его здесь не нужно: вызывающий сам полиморфен
+            // по кратности, а значит его тело перебирается подстановками, и на
+            // каждой из них аргумент приходит сюда уже значением (§10 вопрос
+            // 41). Без этого полиморфное определение не могло позвать
+            // полиморфное: `via f g z = comp f g z` отвергалось при том, что
+            // сигнатуры у них совпадают дословно.
+            if other.is_fixed() && !metas.mult_allowed(meta).contains(&other) {
                 return false;
             }
             metas.solve_mult(meta, other);

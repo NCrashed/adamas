@@ -65,7 +65,7 @@ use crate::check::{
 };
 use crate::error::ErrorKind;
 use crate::eval::eval;
-use crate::level::{Level, LevelVar};
+use crate::level::{Level, LevelMeta, LevelVar};
 use crate::meta::{Generalization, Metas, zonk_term};
 use crate::mult::Mult;
 use crate::row::Row;
@@ -999,21 +999,24 @@ impl Signature {
         // числом аргументов уровня, которого у него ещё нет.
         //
         // Исключение - **алиас типа** (§10 вопрос 106): определение, чей тип
-        // есть голый универсум. Обобщение сделало бы его уровень параметром -
-        // `∀u. Type u`, - а тело живёт на конкретном, и `Type 0` под `Type u`
-        // не подходит. Написать уровень руками нельзя: §3.2 держит их
-        // неявными. Дырка остаётся дыркой, и решает её тело - как решало бы
-        // всякое другое ограничение.
+        // кончается голым универсумом. Обобщение сделало бы его уровень
+        // параметром - `∀u. … -> Type u`, - а тело живёт на конкретном, и
+        // `Type 0` под `Type u` не подходит. Написать уровень руками нельзя:
+        // §3.2 держит их неявными. Дырка **результата** остаётся дыркой, и
+        // решает её тело - как решало бы всякое другое ограничение.
         //
-        // Путь добавочный: определение с типом-универсумом сегодня отвергается
-        // **всегда**, поэтому проходящая программа сюда не попадает.
-        let aliasing = matches!(
-            (member, &draft.ty),
-            (
-                Member::Definition { body: Some(_), .. },
-                Term::Universe(Level::Meta(_))
-            )
-        );
+        // Обобщается при этом всё остальное: у `Twin : Type -> Type` уровень
+        // домена обязан стать параметром - иначе его не определит ничто, - а
+        // уровень результата обязан остаться дыркой, чтобы тело приравняло его
+        // к домену. Порознь ни то ни другое не работает.
+        //
+        // Путь добавочный: определение, чей тип кончается универсумом, сегодня
+        // отвергается **всегда**, поэтому проходящая программа сюда не
+        // попадает.
+        let aliasing = match member {
+            Member::Definition { body: Some(_), .. } => alias_result(metas, &draft.ty),
+            _ => None,
+        };
         // Семейство с индексом-универсумом обобщается позже, в фазе B1½: его
         // уровень заземляют конструкторы (§10 вопрос 53). Арность при этом
         // объявляется сразу - числом дырок, - иначе ссылка на семейство внутри
@@ -1021,8 +1024,8 @@ impl Signature {
         // ней нечего: параметров в типе ещё нет, и аргументы ссылки инертны,
         // пока обобщение их не перепишет.
         let deferred = postponed(member, &draft.ty);
-        let (mut declaration, generalization) = if aliasing {
-            (draft, None)
+        let (mut declaration, generalization) = if let Some(result) = aliasing {
+            generalize(metas, arity, draft, Some(result))
         } else if deferred {
             let mut counting = Generalization::default();
             counting.collect_term(metas, &draft.ty);
@@ -1035,7 +1038,7 @@ impl Signature {
                 None,
             )
         } else {
-            generalize(metas, arity, draft)
+            generalize(metas, arity, draft, None)
         };
 
         if let Member::Data {
@@ -1180,7 +1183,7 @@ impl Signature {
         // запечатывании неразрешённым, отвергая всякую операцию со свободным
         // именем в типе.
         draft.ty = zonk_term(metas, &draft.ty);
-        let (declaration, _) = generalize(metas, arity, draft);
+        let (declaration, _) = generalize(metas, arity, draft, None);
 
         // Параметры метки обязаны стоять у операции первыми - телескоп метки
         // повторяется у неё дословно, - но своих сверх них операция иметь
@@ -1414,7 +1417,7 @@ impl Signature {
             )?;
             return Ok(declaration);
         }
-        let (declaration, _) = generalize(metas, arity, draft);
+        let (declaration, _) = generalize(metas, arity, draft, None);
 
         // Арность уровня обязана совпасть с арностью семейства: элиминация
         // инстанцирует конструктор теми же аргументами, что и само семейство,
@@ -1919,11 +1922,15 @@ fn generalize(
     metas: &mut Metas,
     arity: Arity,
     draft: Definition,
+    released: Option<LevelMeta>,
 ) -> (Definition, Option<Generalization>) {
     if arity.is_declared() {
         return (draft, None);
     }
     let mut generalization = Generalization::default();
+    if let Some(meta) = released {
+        generalization.release(meta);
+    }
     if arity.row_count() > 0 {
         // Row-параметры объявлены - обобщать их нечем и незачем: в терме они уже
         // стоят как `RowVar`. Дырка row, если она сюда всё же дошла,
@@ -1945,6 +1952,36 @@ fn generalize(
         ..draft
     };
     (declaration, Some(generalization))
+}
+
+/// Дырка уровня у результата-универсума - признак алиаса типа (§10 вопрос 106).
+///
+/// Снимаются все связывания: `Twin : Type -> Type` кончается универсумом так
+/// же, как `Number : Type`, и правило у них одно. Уже решённый уровень
+/// признаком не является - там писать нечего, тело сравнится с написанным.
+///
+/// **Дырка, стоящая где-то ещё в том же типе, признаком не является тоже.** У
+/// синонима, чей kind выведен по телу (`type Id a = a`), результат и домен -
+/// одна и та же дырка, и она обязана стать параметром: `Id` полиморфен по
+/// уровню, как всякое другое определение. Оставленная дыркой, она не решается
+/// уже ничем. Различает эти два случая только вхождение: у написанного
+/// `Type -> Type` дырки разные, потому что написаны они порознь.
+fn alias_result(metas: &Metas, ty: &Term) -> Option<LevelMeta> {
+    let mut current = ty;
+    while let Term::Pi(_, _, _, _, codomain) = current {
+        current = codomain;
+    }
+    let Term::Universe(Level::Meta(meta)) = current else {
+        return None;
+    };
+    let mut elsewhere = Generalization::default();
+    let mut current = ty;
+    while let Term::Pi(_, _, domain, row, codomain) = current {
+        elsewhere.collect_term(metas, domain);
+        elsewhere.collect_row(metas, row);
+        current = codomain;
+    }
+    (!elsewhere.collected().contains(&Level::Meta(*meta))).then_some(*meta)
 }
 
 /// Обобщается ли семейство **после** своих конструкторов.

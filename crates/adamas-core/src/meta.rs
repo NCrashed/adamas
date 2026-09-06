@@ -877,9 +877,21 @@ pub struct Generalization {
     /// параметром. Оставленная как есть, она доходит до запечатывания и там
     /// отвергается - тем же отказом, что у полностью объявленной арности.
     declared_rows: bool,
+    /// Дырки, оставленные дырками намеренно (§10 вопрос 106).
+    released: Vec<LevelMeta>,
 }
 
 impl Generalization {
+    /// Оставляет дырку дыркой, сколько бы раз она ни встретилась.
+    ///
+    /// Одна на всё обобщение и одна по смыслу: это уровень **результата**
+    /// алиаса типа, и определяет его тело, а не место использования (§10
+    /// вопрос 106). Собранная, она стала бы параметром `∀u. … -> Type u`, под
+    /// который конкретное тело не подходит.
+    pub fn release(&mut self, meta: LevelMeta) {
+        self.released.push(meta);
+    }
+
     /// Собирает только уровни: row-параметры объявлены (§4.4, класс).
     pub fn collect_levels(&mut self, metas: &Metas, term: &crate::term::Term) {
         self.declared_rows = true;
@@ -902,7 +914,7 @@ impl Generalization {
                 self.collect_level(metas, &right);
             }
             Level::Meta(meta) => {
-                if !self.bound.contains(&meta) {
+                if !self.bound.contains(&meta) && !self.released.contains(&meta) {
                     self.bound.push(meta);
                 }
             }

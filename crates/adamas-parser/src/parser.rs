@@ -60,7 +60,7 @@ use adamas_core::source::Span;
 
 use crate::ast::{
     Alt, Assoc, Binder, Binding, Block, Chain, ClassDecl, Clause, Constructor, Data, Decl,
-    DeclKind, EffectDecl, EffectLabel, Expr, ExprKind, FixityDecl, HandlerBranch, LamParam,
+    DeclKind, EffectDecl, EffectLabel, Expr, ExprKind, FixityDecl, Grade, HandlerBranch, LamParam,
     LamParamKind, Lit, LitKind, Module, ModuleDecl, Mult, MultAnn, Name, Operation, Pattern,
     PatternKind, RecordField, Resource, Stmt, StmtKind, Symbol, Visibility, contains_block,
 };
@@ -867,6 +867,7 @@ impl<'a> Parser<'a> {
                     span: name.span,
                     names: vec![name],
                     factors: Vec::new(),
+                    grade: None,
                     ty: None,
                     default: None,
                 });
@@ -1149,6 +1150,7 @@ impl<'a> Parser<'a> {
                     span: ty.span,
                 }],
                 factors: Vec::new(),
+                grade: None,
                 span: ty.span,
                 ty: Some(ty),
                 default: None,
@@ -2152,7 +2154,7 @@ impl<'a> Parser<'a> {
             // Произведение кратностей стоит на месте первого имени и только
             // там: `(q * r z : a)` (§10 вопрос 41). Дальше по группе `*` -
             // уже не кратность, и связыванием такая форма не является.
-            while names == 1 && self.at_factor(offset) {
+            while names == 1 && self.at_grade(offset).is_some() {
                 if self.kind_ahead(offset + 1) != TokenKind::Ident {
                     return false;
                 }
@@ -2175,9 +2177,16 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Стоит ли на `offset` знак произведения кратностей.
-    fn at_factor(&self, offset: usize) -> bool {
-        self.kind_ahead(offset) == TokenKind::Operator && self.text_ahead(offset) == "*"
+    /// Знак, соединяющий параметры кратности, если он стоит на `offset`.
+    fn at_grade(&self, offset: usize) -> Option<Grade> {
+        if self.kind_ahead(offset) != TokenKind::Operator {
+            return None;
+        }
+        match self.text_ahead(offset) {
+            "*" => Some(Grade::Product),
+            "+" => Some(Grade::Sum),
+            _ => None,
+        }
     }
 
     fn binder(&mut self) -> Result<Binder, ParseError> {
@@ -2199,12 +2208,18 @@ impl<'a> Parser<'a> {
         };
         let mult = self.multiplicity()?;
         let mut names = vec![self.binder_name()?];
-        // Первый сомножитель произведения уже прочитан именем: форма у них
-        // общая, и различает их только `*` (§10 вопрос 41).
+        // Первая часть выражения кратности уже прочитана именем: форма у них
+        // общая, и различает их только знак (§10 вопрос 41).
         let mut factors = Vec::new();
-        while self.at_factor(0) {
+        let mut grade: Option<Grade> = None;
+        while let Some(written) = self.at_grade(0) {
             self.bump();
             factors.push(self.binder_name()?);
+            grade = Some(match grade {
+                None => written,
+                Some(earlier) if earlier == written => written,
+                Some(_) => Grade::Mixed,
+            });
         }
         while matches!(self.kind(), TokenKind::Ident | TokenKind::Underscore) {
             names.push(self.binder_name()?);
@@ -2232,6 +2247,7 @@ impl<'a> Parser<'a> {
             mult,
             names,
             factors,
+            grade,
             ty,
             default,
             span: open.span.merge(close.span),

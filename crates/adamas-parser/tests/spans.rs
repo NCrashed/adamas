@@ -414,6 +414,7 @@ const FORMS: &[&str] = &[
     "h = handle c with\n  get -> case x of\n           A -> 1\n  put y -> 2\n",
     "f =\n  put b\n  put True\n  get\n",
     "comp : {q r : Mult} -> (q * r z : a) -> a\ncomp x = x\n",
+    "both : {q r : Mult} -> (q + r z : a) -> a\nboth x = x\n",
 ];
 
 #[test]

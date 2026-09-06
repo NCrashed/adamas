@@ -51,8 +51,9 @@
 
 use crate::ast::{
     Alt, Binder, Binding, Block, Chain, Clause, Constructor, Data, Decl, DeclKind, EffectDecl,
-    EffectLabel, Expr, ExprKind, HandlerBranch, LamParam, LamParamKind, Lit, Module, ModuleDecl,
-    Name, Operation, Pattern, PatternKind, Resource, Stmt, StmtKind, Visibility, contains_block,
+    EffectLabel, Expr, ExprKind, Grade, HandlerBranch, LamParam, LamParamKind, Lit, Module,
+    ModuleDecl, Name, Operation, Pattern, PatternKind, Resource, Stmt, StmtKind, Visibility,
+    contains_block,
 };
 use crate::lexer::is_operator;
 
@@ -787,11 +788,17 @@ impl Printer {
                 self.push(" ");
             }
             self.push(&name.text);
-            // Остальные сомножители произведения кратностей стоят сразу за
-            // первым именем и только там: `(q * r z : a)` (§10 вопрос 41).
+            // Остальные части выражения кратности стоят сразу за первым именем
+            // и только там: `(q * r z : a)`, `(q + r z : a)` (§10 вопрос 41).
             if index == 0 {
+                let between = match binder.grade {
+                    Some(Grade::Sum) => " + ",
+                    // Смешанное написано обоими знаками, и печать выбирает
+                    // один: обратно оно всё равно отвергается элаборацией.
+                    Some(Grade::Product | Grade::Mixed) | None => " * ",
+                };
                 for factor in &binder.factors {
-                    self.push(" * ");
+                    self.push(between);
                     self.push(&factor.text);
                 }
             }

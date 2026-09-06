@@ -300,6 +300,7 @@ apply = runExcept @IOError prog
         "\
 identity : {q : Mult} -> (q x : a) -> a
 comp : {q r : Mult} -> (ω f : (q y : b) -> c) -> (ω g : (r x : a) -> b) -> (q * r z : a) -> c
+both : {q r : Mult} -> (ω f : (q x : a) -> b) -> (ω g : (r y : a) -> c) -> (q + r z : a) -> Pair b c
 ",
     ),
 ];

@@ -2,7 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: operation-universe.adamas:28:8: выводимый аргумент не укладывается в свой тип `(0 _ : Unit) -> Type 0`: на его месте требуется `Type u0`
+Error: operation-universe.adamas:28:8: выводимый аргумент не укладывается в свой тип `(0 _ : Unit) -> Type 0`: на его месте требуется `Type ?0`
   high = throw True
          ^^^^^^^^^^
   в контексте:

@@ -737,22 +737,24 @@ doubled n =
 "
     ));
 
-    // Граница: параметризованный алиас. Нульместному полиморфизм не нужен -
-    // потому уровень и решается телом; у параметризованного один уровень обязан
-    // обобщиться, а другой решиться, и порядок фаз этого не даёт.
-    let error = refused(&format!(
+    // Параметризованный: уровень домена обобщается в параметр, уровень
+    // результата остаётся дыркой и решается телом. Порознь ни то ни другое не
+    // работает - `∀u0 u1. Type u0 -> Type u1` тело не удовлетворяет.
+    program(&format!(
         "{BASE}
 data Pair (a : Type) where
   MkPair : a -> a -> Pair a
 
 Twin : Type -> Type
 Twin a = Pair a
+
+origin : Twin Nat
+origin = MkPair Zero Zero
+
+firstOf : Twin Nat -> Nat
+firstOf (MkPair l r) = l
 "
     ));
-    assert!(
-        error.to_string().contains("несовпадение типов"),
-        "получено {error}"
-    );
 }
 
 #[test]

@@ -1,0 +1,92 @@
+-- Алиас типа определением, с параметрами и без (§10 вопрос 106).
+--
+-- Написанный `Type` в сигнатуре получает дырку уровня, а обобщение сделало бы
+-- её параметром - `∀u. Type u`, - тогда как тело живёт на конкретном уровне.
+-- Написать уровень руками нельзя: §3.2 держит их неявными.
+--
+-- Поэтому уровень **результата** остаётся дыркой и решается телом, а всё
+-- остальное обобщается как обычно: у `Twin : Type -> Type` уровень домена
+-- обязан стать параметром - иначе его не определит ничто. Порознь ни то ни
+-- другое не работает.
+--
+-- Различает алиас от синонима, чей kind выведен по телу, только вхождение
+-- дырки: у написанного `Type -> Type` их две, потому что написаны они порознь,
+-- а у `type Id a = a` домен и результат - одна и та же.
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Pair (a : Type) (b : Type) where
+  MkPair : a -> b -> Pair a b
+
+effect Amb where
+  flip : Bool
+
+-- Нульместный.
+Number : Type
+Number = Nat
+
+two : Number
+two = Succ (Succ Zero)
+
+-- Параметризованный.
+Twin : Type -> Type
+Twin a = Pair a a
+
+origin : Twin Nat
+origin = MkPair Zero Zero
+
+firstOf : Twin Nat -> Nat
+firstOf (MkPair l r) = l
+
+mirror : a -> Twin a
+mirror x = MkPair x x
+
+-- Уровень домена - параметр, поэтому алиас служит и высшему универсуму.
+higher : Twin Type
+higher = MkPair Nat Nat
+
+-- Параметр-значение, а не тип.
+Flagged : Bool -> Type
+Flagged b = Nat
+
+zeroFlag : Flagged True
+zeroFlag = Zero
+
+-- Два параметра, и порядок их тело вправе менять.
+Swap : Type -> Type -> Type
+Swap a b = Pair b a
+
+swapped : Swap Nat Bool
+swapped = MkPair True Zero
+
+-- Алиас через алиас.
+TwinNat : Type
+TwinNat = Twin Nat
+
+alsoOrigin : TwinNat
+alsoOrigin = MkPair Zero Zero
+
+-- Алиас с эффектом: в кодомене он **возвращает вычисление**, чего сахар
+-- `{ε} A` на стрелке не даёт (§10 вопрос 103). Развёртка `(ω u : Unit) ->`
+-- при этом остаётся написанной.
+Amb1 : Type -> Type
+Amb1 a = {Amb} a
+
+picking : (1 n : Nat) -> Amb1 Nat
+picking n u = n
+
+-- Форма `type` работает и работала: у неё kind выводится по телу, и уровень
+-- там один на домен и результат.
+type Id a = a
+
+itself : Id Nat
+itself = Zero

@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: handle-application.adamas:25:18: под хендлером `Log`: тип написанного не выводится: `handle` берёт приостановленное вычисление - назовите его `let`-ом с написанным типом, а применение при этом приостановите (`\u -> …`)
+  plain x = handle readTop x with
+                   ^^^^^^^^^

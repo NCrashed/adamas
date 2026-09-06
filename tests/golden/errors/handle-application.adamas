@@ -1,0 +1,27 @@
+-- `handle` над применением (§3.4).
+--
+-- `handle` берёт **приостановленное** вычисление: нульместное определение
+-- `{ε} A` уже им является, а применение производит эффекты на месте, и
+-- окружающая их не разрешает.
+--
+-- Обход у отказа две половины, и вторая существенна: одного `let` с написанным
+-- типом мало - тот же отказ придёт уже к нему. Приостановить применение надо
+-- явно, `\u -> …`; так это и написано в `programs/functor-effects.adamas`.
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+effect Log where
+  note : Nat -> Unit
+
+readTop : Nat -> {Log} Nat
+readTop n = n
+
+plain : Nat -> Nat
+plain x = handle readTop x with
+  return v -> v
+  note n -> resume MkUnit

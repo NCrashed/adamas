@@ -64,3 +64,15 @@ duplicate x = MkPair x x
 
 duplicated : Nat -> Pair Nat
 duplicated n = duplicate n
+
+-- Дырка в теле переживает подстановку. Конструктор с параметром вставляет
+-- имплисит, а тип дырки записан элаборацией в контексте, где `q` ещё
+-- переменная; подстановка правит и его, иначе не сходится ни одна подстановка.
+data Box (a : Type) where
+  MkBox : a -> Box a
+
+boxed : {q : Mult} -> (ω f : (q x : a) -> b) -> (q y : a) -> Box b
+boxed f y = MkBox (f y)
+
+boxedTwice : Nat -> Box Nat
+boxedTwice n = boxed double n

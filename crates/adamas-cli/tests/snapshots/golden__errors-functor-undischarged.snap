@@ -1,0 +1,11 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: functor-undischarged.adamas:33:14: эффекты `{Log | e0}` не погашены: вокруг разрешено `{Fail | e0}`
+    narrow x = S.read x
+               ^^^^^^^^
+  в контексте:
+    (ω S : Source{u0})
+    (ω x : Narrow.T{u0} S)
+  путь: тело `Narrow.narrow` -> тело лямбды -> тело лямбды

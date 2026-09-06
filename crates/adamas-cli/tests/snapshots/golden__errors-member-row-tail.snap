@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: member-row-tail.adamas:23:22: хвост `e`: подъём даёт члену один хвост на весь класс, а названный требует своего параметра - связать его нечем
+    read : T -> {Log | e} Nat
+                       ^

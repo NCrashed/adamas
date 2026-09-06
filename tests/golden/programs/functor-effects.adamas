@@ -1,0 +1,77 @@
+-- Эффектный член сигнатуры модуля, вызванный через параметр функтора
+-- (§10 вопрос 107, §4.8).
+--
+-- Row-параметр у сигнатуры модуля тот же, что у класса, а у функтора он
+-- **делится с подъёмом члена**: одна переменная вместо двух. Порознь их
+-- пришлось бы связывать в теле, а связать два уже обобщённых параметра нечем -
+-- и это была бы та же стена, что у вопросов 102 и 106.
+--
+-- Свидетель обязан различать: `errors/functor-undischarged.adamas` показывает
+-- ту же форму с окружающей без `Log`, и она отвергается.
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+effect Log where
+  note : Nat -> Unit
+
+effect Fail where
+  bail : Nat
+
+module type Source where
+  type T
+  read : T -> {Log} Nat
+
+module NatSource : Source where
+  type T = Nat
+  read : T -> {Log} Nat
+  read n = n
+
+-- Окружающая члена шире написанной у члена сигнатуры: `{Log}` гасится
+-- `{Log, Fail}`.
+module Wider (S : Source) where
+  type T = S.T
+  wider : T -> {Log, Fail} Nat
+  wider x = S.read x
+
+-- Ровно та же: `{Log}` гасится `{Log}`.
+module Same (S : Source) where
+  type T = S.T
+  same : T -> {Log} Nat
+  same x = S.read x
+
+module A = Wider NatSource
+module B = Same NatSource
+
+-- Эффект гасится **внутри** функтора, и наружу член выходит чистым.
+--
+-- Приостановка написана лямбдой: `handle` берёт приостановленное вычисление, а
+-- применение, производящее эффекты, им не является. Нульместное вычисление
+-- приостанавливать не нужно - оно уже приостановлено, - но здесь под рукой
+-- параметр, и нульместным его не назвать.
+module Quiet (S : Source) where
+  type T = S.T
+  quiet : T -> Nat
+  quiet x =
+    let 1 c : {Log} Nat = \u -> S.read x
+    handle c with
+      return v -> v
+      note n -> resume MkUnit
+
+module C = Quiet NatSource
+
+-- Запечатанный модуль с эффектным членом: представление скрыто, row - нет.
+module Sealed :> Source where
+  type T = Nat
+  read : T -> {Log} Nat
+  read n = n
+
+module D = Wider Sealed

@@ -1,0 +1,33 @@
+-- Эффект члена сигнатуры не гасится окружающей (§10 вопрос 107, §3.4).
+--
+-- Свидетель к `programs/functor-effects.adamas`: там та же форма проходит,
+-- потому что окружающая член row шире написанной у члена сигнатуры. Здесь
+-- `Log` не разрешён вокруг, и вызов отвергается - row у члена не «чем-то
+-- вообще», а ровно написанным, разделённым с подъёмом.
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+effect Log where
+  note : Nat -> Unit
+
+effect Fail where
+  bail : Nat
+
+module type Source where
+  type T
+  read : T -> {Log} Nat
+
+module NatSource : Source where
+  type T = Nat
+  read : T -> {Log} Nat
+  read n = n
+
+module Narrow (S : Source) where
+  type T = S.T
+  narrow : T -> {Fail} Nat
+  narrow x = S.read x

@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: mult-grade-mixed.adamas:11:78: произведение и сумма в одной позиции кратности не смешиваются
+Error: mult-grade-mixed.adamas:16:78: произведение и сумма в одной позиции кратности не смешиваются: напишите `ω` - определение пройдёт, но связывание перестанет быть полиморфным
   ... s : Mult} -> (ω f : (q x : Nat) -> Nat) -> (ω h : (s w : Nat) -> Nat) -> (q * r + s z : Nat) -> Nat
                                                                                ^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: mult-product-misplaced.adamas:14:24: произведение кратностей пишется перед связываемым именем и своей кратности не имеет
+  lost : {q r : Mult} -> (0 q * r z : Nat) -> Nat
+                         ^^^^^^^^^^^^^^^^^

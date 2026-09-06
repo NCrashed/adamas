@@ -1,0 +1,60 @@
+-- Произведение параметров кратности (§10 вопрос 41): `(q * r z : a)`.
+--
+-- У композиции домен собственного аргумента равен `q · r`: `g` расходует его
+-- `r` раз, а `f` расходует результат `q` раз. Никакое одно из двух имён на его
+-- месте не годится, и без произведения `comp` отвергался - см.
+-- `errors/mult-entangled.adamas`.
+--
+-- Пишется произведение только именами параметров: `0 * q` и `ω * q` считаются,
+-- а не пишутся. Различает произведение от группы имён сам `*` - связывания
+-- через него не пишутся, - и потому непонятое имя в нём отвергается, а не
+-- читается связыванием.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+double : Nat -> Nat
+double Zero = Zero
+double (Succ k) = Succ (Succ (double k))
+
+once : (1 n : Nat) -> Nat
+once n = n
+
+keep : (1 b : Bool) -> Bool
+keep b = b
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> Bool
+  closeFile h = True
+
+comp : {q r : Mult} -> (ω f : (q y : b) -> c) -> (ω g : (r x : a) -> b) -> (q * r z : a) -> c
+comp f g x = f (g x)
+
+-- `ω · ω = ω`.
+plainly : Nat -> Nat
+plainly n = comp double double n
+
+-- `1 · 1 = 1`: линейное через линейное остаётся линейным.
+linearly : (1 n : Nat) -> Nat
+linearly n = comp once once n
+
+-- `1 · ω = ω`: та самая клетка, которую теряло написанное `q`.
+mixed : Nat -> Nat
+mixed n = comp once double n
+
+-- Ресурс проходит композицией, и носитель считается при выбранной подстановке.
+closedBy : (1 h : File) -> Bool
+closedBy h = comp keep closeFile h
+
+-- Произведение с самим собой - тот же параметр: умножение идемпотентно.
+twice : {q : Mult} -> (ω f : (q x : a) -> a) -> (q * q y : a) -> a
+twice f y = f (f y)
+
+twiceOver : Nat -> Nat
+twiceOver n = twice double n

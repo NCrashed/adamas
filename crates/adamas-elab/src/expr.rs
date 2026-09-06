@@ -14,7 +14,7 @@ use adamas_core::ctx::Ctx;
 use adamas_core::eval::{apply, eval, quote};
 use adamas_core::level::Level;
 use adamas_core::meta::Metas;
-use adamas_core::mult::{Mult, MultVar};
+use adamas_core::mult::{Mult, MultProduct, MultVar};
 use adamas_core::pattern::{Clause, Pattern as CorePattern, PatternError, compile_case};
 use adamas_core::row::{Label, Row, Tail};
 use adamas_core::sig::{Definition, DefinitionKind, Signature};
@@ -4315,15 +4315,44 @@ impl<'a> Elaborator<'a> {
     /// первое имя читается кратностью ровно тогда, когда его ввела группа
     /// `{q : Mult}`. Цена названа - имя, занятое параметром кратности,
     /// связыванием в этой сигнатуре больше не станет.
-    fn graded(&self, binder: &ast::Binder) -> Option<Mult> {
+    ///
+    /// Сомножителей бывает несколько - `(q * r z : a)`, - и тогда различает
+    /// уже форма: связывания через `*` не пишутся. Поэтому непонятое имя в
+    /// произведении отвергается, а не читается связыванием: читать его там
+    /// нечем, и молча пропасть оно не вправе.
+    fn graded(&self, binder: &ast::Binder) -> Result<Option<Mult>, ElabError> {
         if binder.mult.is_some() || binder.names.len() < 2 {
-            return None;
+            // Написанное произведение молча пропасть не вправе: связывания
+            // через `*` не пишутся, и другого чтения у этой формы нет.
+            if binder.factors.is_empty() {
+                return Ok(None);
+            }
+            return Err(ElabError::MisplacedProduct { span: binder.span });
         }
-        let at = self
-            .grades
-            .iter()
-            .position(|it| *it == binder.names[0].text)?;
-        u16::try_from(at).ok().map(|at| Mult::Var(MultVar(at)))
+        let at = |name: &ast::Name| {
+            self.grades
+                .iter()
+                .position(|it| *it == name.text)
+                .and_then(|at| u16::try_from(at).ok())
+                .map(MultVar)
+        };
+        let Some(first) = at(&binder.names[0]) else {
+            return match binder.factors.first() {
+                Some(_) => Err(ElabError::UnknownFactor {
+                    name: Rc::clone(&binder.names[0].text),
+                    span: binder.names[0].span,
+                }),
+                None => Ok(None),
+            };
+        };
+        let mut factors = vec![first];
+        for name in &binder.factors {
+            factors.push(at(name).ok_or_else(|| ElabError::UnknownFactor {
+                name: Rc::clone(&name.text),
+                span: name.span,
+            })?);
+        }
+        Ok(MultProduct::of(factors))
     }
 
     fn pi(
@@ -4349,7 +4378,7 @@ impl<'a> Elaborator<'a> {
             if self.declares_grades(binder, ty)? {
                 continue;
             }
-            let (mult, names) = match self.graded(binder) {
+            let (mult, names) = match self.graded(binder)? {
                 Some(found) => (found, &binder.names[1..]),
                 None => (
                     self.binder_mult(

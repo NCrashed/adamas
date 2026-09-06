@@ -382,7 +382,7 @@ fn grades(ty: &ast::Expr, name: &str) -> bool {
     binders
         .iter()
         .filter(|it| it.names.len() > 1)
-        .filter_map(|it| it.names.first())
+        .flat_map(|it| it.names.first().into_iter().chain(&it.factors))
         .any(|it| &*it.text == name)
         || grades(codomain, name)
 }

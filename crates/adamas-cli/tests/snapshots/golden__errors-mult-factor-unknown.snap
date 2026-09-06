@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: mult-factor-unknown.adamas:12:79: `r` не параметр кратности: произведение пишется только ими
+  comp : {q : Mult} -> (ω f : (q y : b) -> c) -> (ω g : (q x : a) -> b) -> (q * r z : a) -> c
+                                                                                ^

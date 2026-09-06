@@ -24,6 +24,50 @@ pub struct MultVar(pub u16);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MultMeta(pub u16);
 
+/// Произведение параметров кратности (§10 вопрос 41).
+///
+/// Умножение в `{0, 1, ω}` идемпотентно - `q · q = q` при всех трёх, - поэтому
+/// произведение определяется **множеством** сомножителей, а не их
+/// последовательностью и не их числом. Множество и хранится: битовая маска по
+/// номерам параметров, один `u16`. Узел кратности остаётся `Copy` и мелким, а
+/// равенство произведений - структурным.
+///
+/// Значений полукольца в произведении нет намеренно: `0 · q` и `ω · q`
+/// считаются, а не пишутся, и пускать их сюда значило бы завести вторую
+/// нормальную форму у того же выражения.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MultProduct(u16);
+
+impl MultProduct {
+    /// Сколько параметров кратности умещается в произведении.
+    pub const LIMIT: u32 = u16::BITS;
+
+    /// Произведение перечисленных параметров; `None`, если номер не влезает.
+    ///
+    /// Один сомножитель произведением не становится: `q · 1 = q`, и вторая
+    /// форма у того же выражения сломала бы структурное равенство. Ноль
+    /// сомножителей - пустое произведение, то есть `1`.
+    #[must_use]
+    pub fn of(factors: impl IntoIterator<Item = MultVar>) -> Option<Mult> {
+        let mut mask = 0u16;
+        for MultVar(index) in factors {
+            mask |= 1u16.checked_shl(u32::from(index))?;
+        }
+        Some(match mask.count_ones() {
+            0 => Mult::One,
+            1 => Mult::Var(MultVar(mask.trailing_zeros().try_into().ok()?)),
+            _ => Mult::Prod(Self(mask)),
+        })
+    }
+
+    /// Сомножители по возрастанию номера.
+    pub fn factors(self) -> impl Iterator<Item = MultVar> {
+        (0..u16::BITS)
+            .filter(move |index| self.0 & (1 << index) != 0)
+            .filter_map(|index| index.try_into().ok().map(MultVar))
+    }
+}
+
 /// Кратность.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Mult {
@@ -36,6 +80,12 @@ pub enum Mult {
     Many,
     /// Параметр определения: конкретное значение придёт подстановкой.
     Var(MultVar),
+    /// Произведение параметров: `q * r` (§10 вопрос 41).
+    ///
+    /// Пишется там, где кратность связывания зависит сразу от двух параметров:
+    /// у композиции домен собственного аргумента равен `q · r`, и никакое одно
+    /// из двух имён на его месте не годится.
+    Prod(MultProduct),
     /// Дырка вывода: конкретное значение придёт решением.
     Meta(MultMeta),
 }
@@ -81,7 +131,7 @@ impl Mult {
     pub const fn fixed(self) -> Option<Self> {
         match self {
             Self::Zero | Self::One | Self::Many => Some(self),
-            Self::Var(_) | Self::Meta(_) => None,
+            Self::Var(_) | Self::Prod(_) | Self::Meta(_) => None,
         }
     }
 
@@ -121,7 +171,7 @@ impl Mult {
             Self::Zero => usage == Self::Zero,
             Self::One => usage == Self::Zero || usage == Self::One,
             Self::Many => true,
-            Self::Var(_) | Self::Meta(_) => false,
+            Self::Var(_) | Self::Prod(_) | Self::Meta(_) => false,
         }
     }
 }
@@ -133,6 +183,16 @@ impl fmt::Display for Mult {
             Self::One => f.write_str("1"),
             Self::Many => f.write_str("ω"),
             Self::Var(MultVar(index)) => write!(f, "q{index}"),
+            Self::Prod(product) => {
+                let mut first = true;
+                for MultVar(index) in product.factors() {
+                    if !std::mem::take(&mut first) {
+                        f.write_str(" * ")?;
+                    }
+                    write!(f, "q{index}")?;
+                }
+                Ok(())
+            }
             Self::Meta(MultMeta(index)) => write!(f, "?q{index}"),
         }
     }
@@ -140,7 +200,7 @@ impl fmt::Display for Mult {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mult, MultMeta, MultVar};
+    use super::{Mult, MultMeta, MultProduct, MultVar};
 
     const ALL: [Mult; 3] = [Mult::Zero, Mult::One, Mult::Many];
 
@@ -240,6 +300,50 @@ mod tests {
                 );
                 assert_eq!(a.join(opaque), Mult::Many, "объединение завышает");
             }
+        }
+    }
+
+    /// Произведение - множество, а не последовательность: умножение в
+    /// `{0, 1, ω}` идемпотентно, поэтому `q · q = q` и порядок ничего не
+    /// значит. Форма у выражения обязана быть одна, иначе структурное
+    /// равенство перестаёт отвечать на вопрос про семантическое.
+    #[test]
+    fn a_product_is_a_set_of_factors() {
+        let q = MultVar(0);
+        let r = MultVar(1);
+        let product = MultProduct::of([q, r]);
+        assert_eq!(product, MultProduct::of([r, q]), "порядок не значим");
+        assert_eq!(product, MultProduct::of([q, r, q]), "повтор не значим");
+        assert_eq!(MultProduct::of([q, q]), Some(Mult::Var(q)), "`q · q = q`");
+        assert_eq!(
+            MultProduct::of([q]),
+            Some(Mult::Var(q)),
+            "один - не произведение"
+        );
+        assert_eq!(MultProduct::of([]), Some(Mult::One), "пустое - единица");
+        assert_eq!(
+            MultProduct::of([MultVar(u16::MAX)]),
+            None,
+            "номер за пределом маски"
+        );
+    }
+
+    /// Произведение считается подстановкой, а до неё отвечает как всякая
+    /// неконкретная кратность - самым строгим из возможных.
+    #[test]
+    fn a_product_is_answered_strictly() {
+        let product = MultProduct::of([MultVar(0), MultVar(1)]).expect("два номера в маске");
+        assert!(!product.is_fixed());
+        for a in ALL {
+            assert!(!product.admits(a), "объявленное произведение не допускает");
+            assert_eq!(
+                a * product,
+                match a {
+                    Mult::Zero => Mult::Zero,
+                    Mult::One => product,
+                    _ => Mult::Many,
+                }
+            );
         }
     }
 }

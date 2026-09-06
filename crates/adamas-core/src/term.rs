@@ -307,15 +307,28 @@ fn rowed_fields(fields: &Fields, arguments: &[Row<Term>]) -> Fields {
     }
 }
 
+/// Кратность с подставленными параметрами.
+///
+/// Произведение сворачивается, только когда подставлены **все** его
+/// сомножители. Частично подставленное осталось бы `ω · q`, а константного
+/// множителя в произведении нет намеренно (§10 вопрос 41); неподстановка же
+/// оставляет кратность неконкретной, то есть ведёт к отказу, а не к пропуску.
+fn substituted_mult(mult: Mult, arguments: &[Mult]) -> Mult {
+    let at = |MultVar(index): MultVar| arguments.get(index as usize).copied();
+    match mult {
+        Mult::Var(var) => at(var).unwrap_or(mult),
+        Mult::Prod(product) => product
+            .factors()
+            .map(at)
+            .try_fold(Mult::One, |product, factor| Some(product * factor?))
+            .unwrap_or(mult),
+        other => other,
+    }
+}
+
 /// Поля с подставленными кратностями.
 fn graded(fields: &Fields, arguments: &[Mult]) -> Fields {
-    let at = |mult: Mult| match mult {
-        Mult::Var(MultVar(index)) => arguments
-            .get(index as usize)
-            .copied()
-            .unwrap_or(Mult::Var(MultVar(index))),
-        other => other,
-    };
+    let at = |mult: Mult| substituted_mult(mult, arguments);
     Fields {
         fields: fields
             .iter()
@@ -700,13 +713,7 @@ impl Term {
         if arguments.is_empty() {
             return self.clone();
         }
-        let at = |mult: Mult| match mult {
-            Mult::Var(MultVar(index)) => arguments
-                .get(index as usize)
-                .copied()
-                .unwrap_or(Mult::Var(MultVar(index))),
-            other => other,
-        };
+        let at = |mult: Mult| substituted_mult(mult, arguments);
         let recur = |term: &Rc<Self>| Rc::new(term.substitute_mults(arguments));
         match self {
             Self::Var(_)

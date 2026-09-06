@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-existential.adamas: проверено, объявлений 31
+True

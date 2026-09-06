@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: existential-universe.adamas:20:15: выводимый аргумент не укладывается в свой тип `Type 0`: на его месте требуется `?6`
+  high = MkSome Nat
+                ^^^
+  путь: тело `high` -> аргумент применения

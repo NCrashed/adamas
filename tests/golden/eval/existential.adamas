@@ -1,0 +1,34 @@
+-- Экзистенциал исполняется: упаковка держит носитель и свидетеля, распаковка
+-- зовёт второго на первом (§10 вопрос 109).
+--
+-- Тип носителя наружу не выходит ни на одном шаге: `Showable` о нём молчит, а
+-- ветка связывает его стёртым. Проверить это можно только исполнением - в
+-- типах разницы между работающей упаковкой и неработающей нет.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Showable where
+  MkShowable : a -> (a -> Bool) -> Showable
+
+isZero : Nat -> Bool
+isZero Zero = True
+isZero (Succ k) = False
+
+isTrue : Bool -> Bool
+isTrue False = False
+isTrue True = True
+
+runShowable : Showable -> Bool
+runShowable (MkShowable x f) = f x
+
+both : Showable -> Showable -> Bool
+both l r = isTrue (runShowable l)
+
+main : Bool
+main = both (MkShowable Zero isZero) (MkShowable False isTrue)

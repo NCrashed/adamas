@@ -28,6 +28,45 @@ someNat = MkSome Nat Zero
 someBool : Some
 someBool = MkSome Bool True
 
+-- То же **поднятым** именем: связывание не пишется, и аргумент на месте
+-- упаковки тоже. Уровень поднятого имени приезжает дыркой терма, а решение её
+-- стоит бета-редексом - цепочкой лямбд по контексту, применённой к спайну, -
+-- и универсум в нём виден только из-под лямбд.
+data Lifted where
+  MkLifted : a -> Lifted
+
+liftedNat : Lifted
+liftedNat = MkLifted Zero
+
+liftedBool : Lifted
+liftedBool = MkLifted True
+
+-- Имён бывает больше одного, и вот тут редекс и появляется: вторая дырка
+-- заведена уже над первым связыванием.
+data Two where
+  MkTwo : a -> b -> Two
+
+two : Two
+two = MkTwo Zero True
+
+-- Упаковка со свидетелем и распаковка: скрытый тип связывается веткой и
+-- наружу не выходит - ровно то, ради чего экзистенциал и нужен.
+data Showable where
+  MkShowable : a -> (a -> Bool) -> Showable
+
+isZero : Nat -> Bool
+isZero Zero = True
+isZero (Succ k) = False
+
+wrapped : Showable
+wrapped = MkShowable Zero isZero
+
+runShowable : Showable -> Bool
+runShowable (MkShowable x f) = f x
+
+answer : Bool
+answer = runShowable wrapped
+
 -- Поле-семейство типов: собственного связывания конструктор не заводит, а
 -- универсум несёт внутри типа поля.
 data Held where

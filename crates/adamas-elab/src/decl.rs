@@ -2880,11 +2880,30 @@ fn define(
 /// только implicit-связывание: явное `(0 a : Type)` пишет автор, и там уже
 /// стоит универсум.
 fn grounds(domain: &Term, lifted: bool) -> bool {
-    match spine_head(domain) {
+    match peeled_head(domain) {
         Term::Universe(Level::Meta(_)) => true,
         Term::Meta(_) => lifted,
         _ => false,
     }
+}
+
+/// Голова спайна, из-под лямбд решения дырки.
+///
+/// Развёрнутое решение дырки терма стоит **бета-редексом**: `?m` заведена над
+/// контекстом, и решение её - цепочка лямбд по нему, применённая к спайну.
+/// Второе поднятое имя конструктора приезжает именно так - `(\(0 m0) -> Type
+/// ?0) a`, - и по одной голове спайна универсум в нём не виден (§10 вопрос
+/// 109).
+///
+/// Считать саму бету не нужно: тело лямбды - `Type ?0`, и от аргумента оно не
+/// зависит вовсе. Уровень внутри терма зависеть от него и не может: уровни
+/// термовых переменных не называют.
+fn peeled_head(term: &Term) -> &Term {
+    let mut head = spine_head(term);
+    while let Term::Lam(_, _, body) = head {
+        head = spine_head(body);
+    }
+    head
 }
 
 /// Голова спайна применения.
@@ -3601,7 +3620,7 @@ fn family_constructors<'a>(
             // полиморфным, а запинить уровень в месте использования нечем -
             // уровни не пишутся (§3.2). Семейство встаёт над ним само: сорт
             // поднимается до полей.
-            let ty = grounded(&ty, family.params.len(), false);
+            let ty = grounded(&zonk_term(metas, &ty), family.params.len(), false);
             owned_field(&ty, owned, family.data, constructor)?;
             Ok((&*constructor.name.text, ty))
         })

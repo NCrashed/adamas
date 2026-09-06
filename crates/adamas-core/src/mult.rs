@@ -62,10 +62,56 @@ impl MultProduct {
 
     /// Сомножители по возрастанию номера.
     pub fn factors(self) -> impl Iterator<Item = MultVar> {
-        (0..u16::BITS)
-            .filter(move |index| self.0 & (1 << index) != 0)
-            .filter_map(|index| index.try_into().ok().map(MultVar))
+        parts(self.0)
     }
+}
+
+/// Сумма параметров кратности (§10 вопрос 41).
+///
+/// Сложение, в отличие от умножения, **не идемпотентно**: `1 + 1 = ω`, тогда
+/// как `1 · 1 = 1`. Множеством поэтому выражается не всякая сумма, а только
+/// сумма различных параметров - `q + q` пришлось бы хранить кратностью
+/// слагаемого, а она нужна лишь одна («один раз» против «дважды и больше»), и
+/// заводить ради неё вторую компоненту не за что: повтор в сумме отвергается.
+///
+/// Хранение - как у произведения: битовая маска по номерам параметров, один
+/// `u16`, узел кратности остаётся `Copy` и мелким.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MultSum(u16);
+
+impl MultSum {
+    /// Сумма перечисленных параметров; `None` при повторе или номере за маской.
+    ///
+    /// Одно слагаемое суммой не становится - `q + 0 = q`, - а ноль слагаемых
+    /// есть пустая сумма, то есть `0`.
+    #[must_use]
+    pub fn of(summands: impl IntoIterator<Item = MultVar>) -> Option<Mult> {
+        let mut mask = 0u16;
+        for MultVar(index) in summands {
+            let bit = 1u16.checked_shl(u32::from(index))?;
+            if mask & bit != 0 {
+                return None;
+            }
+            mask |= bit;
+        }
+        Some(match mask.count_ones() {
+            0 => Mult::Zero,
+            1 => Mult::Var(MultVar(mask.trailing_zeros().try_into().ok()?)),
+            _ => Mult::Sum(Self(mask)),
+        })
+    }
+
+    /// Слагаемые по возрастанию номера.
+    pub fn summands(self) -> impl Iterator<Item = MultVar> {
+        parts(self.0)
+    }
+}
+
+/// Номера, отмеченные в маске, по возрастанию.
+fn parts(mask: u16) -> impl Iterator<Item = MultVar> {
+    (0..u16::BITS)
+        .filter(move |index| mask & (1 << index) != 0)
+        .filter_map(|index| index.try_into().ok().map(MultVar))
 }
 
 /// Кратность.
@@ -86,6 +132,11 @@ pub enum Mult {
     /// у композиции домен собственного аргумента равен `q · r`, и никакое одно
     /// из двух имён на его месте не годится.
     Prod(MultProduct),
+    /// Сумма параметров: `q + r` (§10 вопрос 41).
+    ///
+    /// Пишется там, где связывание расходуется двумя независимыми способами:
+    /// у `both f g z = MkPair (f z) (g z)` домен равен `q + r`.
+    Sum(MultSum),
     /// Дырка вывода: конкретное значение придёт решением.
     Meta(MultMeta),
 }
@@ -131,7 +182,7 @@ impl Mult {
     pub const fn fixed(self) -> Option<Self> {
         match self {
             Self::Zero | Self::One | Self::Many => Some(self),
-            Self::Var(_) | Self::Prod(_) | Self::Meta(_) => None,
+            Self::Var(_) | Self::Prod(_) | Self::Sum(_) | Self::Meta(_) => None,
         }
     }
 
@@ -171,9 +222,25 @@ impl Mult {
             Self::Zero => usage == Self::Zero,
             Self::One => usage == Self::Zero || usage == Self::One,
             Self::Many => true,
-            Self::Var(_) | Self::Prod(_) | Self::Meta(_) => false,
+            Self::Var(_) | Self::Prod(_) | Self::Sum(_) | Self::Meta(_) => false,
         }
     }
+}
+
+/// Параметры через разделитель - так печатаются произведение и сумма.
+fn joined(
+    f: &mut fmt::Formatter<'_>,
+    parts: impl Iterator<Item = MultVar>,
+    between: &str,
+) -> fmt::Result {
+    let mut first = true;
+    for MultVar(index) in parts {
+        if !std::mem::take(&mut first) {
+            f.write_str(between)?;
+        }
+        write!(f, "q{index}")?;
+    }
+    Ok(())
 }
 
 impl fmt::Display for Mult {
@@ -183,16 +250,8 @@ impl fmt::Display for Mult {
             Self::One => f.write_str("1"),
             Self::Many => f.write_str("ω"),
             Self::Var(MultVar(index)) => write!(f, "q{index}"),
-            Self::Prod(product) => {
-                let mut first = true;
-                for MultVar(index) in product.factors() {
-                    if !std::mem::take(&mut first) {
-                        f.write_str(" * ")?;
-                    }
-                    write!(f, "q{index}")?;
-                }
-                Ok(())
-            }
+            Self::Prod(product) => joined(f, product.factors(), " * "),
+            Self::Sum(sum) => joined(f, sum.summands(), " + "),
             Self::Meta(MultMeta(index)) => write!(f, "?q{index}"),
         }
     }
@@ -200,7 +259,7 @@ impl fmt::Display for Mult {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mult, MultMeta, MultProduct, MultVar};
+    use super::{Mult, MultMeta, MultProduct, MultSum, MultVar};
 
     const ALL: [Mult; 3] = [Mult::Zero, Mult::One, Mult::Many];
 
@@ -325,6 +384,25 @@ mod tests {
             MultProduct::of([MultVar(u16::MAX)]),
             None,
             "номер за пределом маски"
+        );
+    }
+
+    /// Сумма - множество, но, в отличие от произведения, **различных**
+    /// параметров: сложение не идемпотентно, и `q + q` через множество не
+    /// выражается вовсе.
+    #[test]
+    fn a_sum_is_a_set_of_distinct_summands() {
+        let q = MultVar(0);
+        let r = MultVar(1);
+        let sum = MultSum::of([q, r]);
+        assert_eq!(sum, MultSum::of([r, q]), "порядок не значим");
+        assert_eq!(MultSum::of([q, q]), None, "`q + q` не равно `q`");
+        assert_eq!(MultSum::of([q]), Some(Mult::Var(q)), "одно - не сумма");
+        assert_eq!(MultSum::of([]), Some(Mult::Zero), "пустая - ноль");
+        assert_ne!(
+            sum,
+            MultProduct::of([q, r]),
+            "сумма не то же, что произведение"
         );
     }
 

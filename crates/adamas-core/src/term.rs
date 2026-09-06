@@ -309,10 +309,11 @@ fn rowed_fields(fields: &Fields, arguments: &[Row<Term>]) -> Fields {
 
 /// Кратность с подставленными параметрами.
 ///
-/// Произведение сворачивается, только когда подставлены **все** его
-/// сомножители. Частично подставленное осталось бы `ω · q`, а константного
-/// множителя в произведении нет намеренно (§10 вопрос 41); неподстановка же
-/// оставляет кратность неконкретной, то есть ведёт к отказу, а не к пропуску.
+/// Произведение и сумма сворачиваются, только когда подставлены **все** их
+/// части. Частично подставленное осталось бы `ω · q` или `ω + q`, а
+/// константного слагаемого и множителя там нет намеренно (§10 вопрос 41);
+/// неподстановка же оставляет кратность неконкретной, то есть ведёт к отказу,
+/// а не к пропуску.
 fn substituted_mult(mult: Mult, arguments: &[Mult]) -> Mult {
     let at = |MultVar(index): MultVar| arguments.get(index as usize).copied();
     match mult {
@@ -321,6 +322,11 @@ fn substituted_mult(mult: Mult, arguments: &[Mult]) -> Mult {
             .factors()
             .map(at)
             .try_fold(Mult::One, |product, factor| Some(product * factor?))
+            .unwrap_or(mult),
+        Mult::Sum(sum) => sum
+            .summands()
+            .map(at)
+            .try_fold(Mult::Zero, |sum, summand| Some(sum + summand?))
             .unwrap_or(mult),
         other => other,
     }

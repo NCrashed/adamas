@@ -816,7 +816,7 @@ fn check_graded(
         // Кратности подставляются и в хранилище дырок: типы записанных
         // элаборацией дырок стоят в терминах параметра, а контекст здесь уже
         // подставлен, и сойтись им иначе нечем (§10 вопрос 41).
-        let outcome = metas.with_mults(&tuple, |metas| {
+        let outcome = metas.with_mults(&tuple, false, |metas| {
             let mark = metas.mark();
             let outcome = check_instance(signature, metas, &instance, &substituted);
             metas.rollback(mark);
@@ -862,11 +862,49 @@ fn check_graded(
         }
         .into());
     }
+    settle_graded(signature, metas, definition, body, &passing)?;
     Ok(Body {
         carriers,
         allowed,
         graded: Rc::from(graded),
     })
+}
+
+/// Закрепляющий проход: дырки тела получают решения, которые останутся.
+///
+/// Проходы перебора спекулятивны - иначе дырка, заведённая одним из них,
+/// уезжала бы в решение соседнего, а её идентификатор к тому времени выдан
+/// заново (см. [`Metas::rollback`]). Но дырка, пришедшая **из тела**, одна на
+/// все подстановки, и решает её только проверка тела: без этого прохода
+/// рекурсивное определение под параметром кратности переставало выводить свои
+/// имплиситы, и `copy (Cons x xs) = Cons x (copy xs)` отвергалось «аргумент не
+/// выведен» (§10 вопрос 41).
+///
+/// Закрепляет **последняя** прошедшая подстановка: перебор идёт по возрастанию,
+/// и последняя - самая слабая из прошедших. Названная цена: решение,
+/// упоминающее кратность, закрепится с её значением при этой подстановке.
+/// Расхождение с остальными ловит сравнение - это отказ, а не пропуск.
+fn settle_graded(
+    signature: &Signature,
+    metas: &mut Metas,
+    definition: &Definition,
+    body: &Term,
+    passing: &[Vec<Mult>],
+) -> Result<(), TypeError> {
+    let Some(tuple) = passing.last() else {
+        return Ok(());
+    };
+    let instance = Definition {
+        ty: definition.ty.substitute_mults(tuple),
+        body: None,
+        mult_allowed: Rc::from([]),
+        ..definition.clone()
+    };
+    let substituted = body.substitute_mults(tuple);
+    metas.with_mults(tuple, true, |metas| {
+        check_instance(signature, metas, &instance, &substituted)
+    })?;
+    Ok(())
 }
 
 /// Все подстановки: декартово произведение дозволенных значений.

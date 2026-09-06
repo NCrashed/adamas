@@ -709,7 +709,19 @@ impl Metas {
     /// делается намеренно: копия раздавала бы те же идентификаторы от того же
     /// `base` - ровно то смешение, ради запрета которого [`Clone`] у хранилища
     /// и не выводится.
-    pub fn with_mults<T>(&mut self, arguments: &[Mult], run: impl FnOnce(&mut Self) -> T) -> T {
+    ///
+    /// `keeping` различает два зова. Спекулятивный проход перебора отдаёт
+    /// `false`: результат его отбрасывается целиком, и вместе с ним - всё, что
+    /// он решил. Закрепляющий отдаёт `true`: решения, найденные им, остаются, а
+    /// возвращаются только типы. Второй нужен потому, что дырка в теле **одна
+    /// на все подстановки** - тело у проходов общее, - и решает её проверка
+    /// тела, больше некому.
+    pub fn with_mults<T>(
+        &mut self,
+        arguments: &[Mult],
+        keeping: bool,
+        run: impl FnOnce(&mut Self) -> T,
+    ) -> T {
         let saved = self.slots.clone();
         for slot in &mut self.slots {
             if let Slot::Term { ty, solution } = slot {
@@ -720,7 +732,20 @@ impl Metas {
             }
         }
         let outcome = run(self);
-        self.slots = saved;
+        for (at, was) in saved.into_iter().enumerate() {
+            // Решение, найденное проходом у дырки, которая была нерешённой, -
+            // это и есть то, ради чего закрепляющий проход существует. Всё
+            // прочее возвращается: типы - всегда, чужие решения - как были.
+            if keeping && acquired(&was, &self.slots[at]) {
+                if let (Slot::Term { ty: before, .. }, Slot::Term { ty, .. }) =
+                    (&was, &mut self.slots[at])
+                {
+                    *ty = Rc::clone(before);
+                }
+                continue;
+            }
+            self.slots[at] = was;
+        }
         outcome
     }
 
@@ -1322,6 +1347,29 @@ fn zonk_fields(metas: &Metas, fields: &crate::term::Fields) -> crate::term::Fiel
             .collect(),
         tail: fields.tail.as_ref().map(|it| Rc::new(zonk_term(metas, it))),
     }
+}
+
+/// Обзавелась ли дырка решением за время прохода.
+fn acquired(was: &Slot, live: &Slot) -> bool {
+    matches!(
+        (was, live),
+        (Slot::Level(None), Slot::Level(Some(_)))
+            | (Slot::Row(None), Slot::Row(Some(_)))
+            | (
+                Slot::Mult { solution: None, .. },
+                Slot::Mult {
+                    solution: Some(_),
+                    ..
+                }
+            )
+            | (
+                Slot::Term { solution: None, .. },
+                Slot::Term {
+                    solution: Some(_),
+                    ..
+                }
+            )
+    )
 }
 
 /// Значение с подставленными кратностями.

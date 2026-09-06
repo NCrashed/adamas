@@ -22,7 +22,7 @@ use adamas_core::ctx::Ctx;
 use adamas_core::eval::{eval, quote};
 use adamas_core::level::{Level, LevelVar};
 use adamas_core::meta::{Generalization, Metas, zonk_term};
-use adamas_core::mult::Mult;
+use adamas_core::mult::{Mult, MultVar};
 use adamas_core::pattern::{PatternError, compile_traced};
 use adamas_core::row::{Label, Row, RowVar, Tail};
 use adamas_core::sig::{Group, Member as SigMember, Signature};
@@ -2781,7 +2781,18 @@ fn define(
         levels,
         // Одиночное определение: своя row-переменная приходит из типа как
         // есть, подставлять нечего.
-        args: Args::none(),
+        //
+        // С кратностями так нельзя, и в этом их отличие от уровней и row.
+        // Тождественная подстановка у тех работает, потому что окружающий тип
+        // подставляется той же тождественной; кратности же перебираются
+        // **значениями** (§10 вопрос 41), и тип рекурсивной ссылки, взятый из
+        // сигнатуры, остался бы при `q0`, когда всё вокруг уже конкретно.
+        // Поэтому свой параметр приходит переменной явно: подстановка тела
+        // перепишет её вместе со всем остальным.
+        args: Args::mults(
+            (0..declared.grades)
+                .map(|index| Mult::Var(MultVar(u16::try_from(index).unwrap_or(u16::MAX)))),
+        ),
         ty: Rc::new(declared.ty.clone()),
     }];
     let compiled = {

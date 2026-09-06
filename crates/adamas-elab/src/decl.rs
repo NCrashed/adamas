@@ -377,13 +377,27 @@ fn unused_implicits(ty: &ast::Expr, into: &mut Warnings) {
 /// неиспользованном имплисите срабатывало бы на всякий `{q : Mult}`.
 fn grades(ty: &ast::Expr, name: &str) -> bool {
     let ast::ExprKind::Pi { binders, codomain } = &ty.kind else {
-        return false;
+        // Стрелка без имени параметра кратности не пишет, но нести его в своих
+        // сторонах вправе: `(q x : a) -> b` стоит доменом у `->`.
+        return matches!(&ty.kind, ast::ExprKind::Arrow(left, right)
+            if grades(left, name) || grades(right, name));
     };
+    let written = |binder: &ast::Binder| {
+        binder.names.len() > 1
+            && binder
+                .names
+                .first()
+                .into_iter()
+                .chain(&binder.factors)
+                .any(|it| &*it.text == name)
+    };
+    // Тип связывания смотрится тоже: `(ω f : (q x : a) -> b)` пишет `q` в
+    // домене, а не в кодомене, и у второго порядка это обычное место. Без
+    // этого предупреждение о неиспользованном имплисите срабатывало на всякий
+    // комбинатор, чей параметр кратности стоит только у аргумента-функции.
     binders
         .iter()
-        .filter(|it| it.names.len() > 1)
-        .flat_map(|it| it.names.first().into_iter().chain(&it.factors))
-        .any(|it| &*it.text == name)
+        .any(|binder| written(binder) || binder.ty.as_ref().is_some_and(|it| grades(it, name)))
         || grades(codomain, name)
 }
 

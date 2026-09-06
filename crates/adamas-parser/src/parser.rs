@@ -866,6 +866,7 @@ impl<'a> Parser<'a> {
                     mult: None,
                     span: name.span,
                     names: vec![name],
+                    factors: Vec::new(),
                     ty: None,
                     default: None,
                 });
@@ -1147,6 +1148,7 @@ impl<'a> Parser<'a> {
                     text: Rc::from("_"),
                     span: ty.span,
                 }],
+                factors: Vec::new(),
                 span: ty.span,
                 ty: Some(ty),
                 default: None,
@@ -2147,6 +2149,15 @@ impl<'a> Parser<'a> {
         ) {
             offset += 1;
             names += 1;
+            // Произведение кратностей стоит на месте первого имени и только
+            // там: `(q * r z : a)` (§10 вопрос 41). Дальше по группе `*` -
+            // уже не кратность, и связыванием такая форма не является.
+            while names == 1 && self.at_factor(offset) {
+                if self.kind_ahead(offset + 1) != TokenKind::Ident {
+                    return false;
+                }
+                offset += 2;
+            }
         }
         names > 0
             && (self.kind_ahead(offset) == TokenKind::Colon
@@ -2162,6 +2173,11 @@ impl<'a> Parser<'a> {
             TokenKind::Ident => self.text_ahead(offset) == "ω",
             _ => false,
         }
+    }
+
+    /// Стоит ли на `offset` знак произведения кратностей.
+    fn at_factor(&self, offset: usize) -> bool {
+        self.kind_ahead(offset) == TokenKind::Operator && self.text_ahead(offset) == "*"
     }
 
     fn binder(&mut self) -> Result<Binder, ParseError> {
@@ -2183,6 +2199,13 @@ impl<'a> Parser<'a> {
         };
         let mult = self.multiplicity()?;
         let mut names = vec![self.binder_name()?];
+        // Первый сомножитель произведения уже прочитан именем: форма у них
+        // общая, и различает их только `*` (§10 вопрос 41).
+        let mut factors = Vec::new();
+        while self.at_factor(0) {
+            self.bump();
+            factors.push(self.binder_name()?);
+        }
         while matches!(self.kind(), TokenKind::Ident | TokenKind::Underscore) {
             names.push(self.binder_name()?);
         }
@@ -2208,6 +2231,7 @@ impl<'a> Parser<'a> {
             visibility,
             mult,
             names,
+            factors,
             ty,
             default,
             span: open.span.merge(close.span),

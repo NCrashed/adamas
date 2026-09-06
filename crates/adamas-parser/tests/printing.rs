@@ -295,6 +295,13 @@ implicits : {0 a : Type} -> (1 h : File) -> a
 apply = runExcept @IOError prog
 ",
     ),
+    (
+        "multiplicity_parameters",
+        "\
+identity : {q : Mult} -> (q x : a) -> a
+comp : {q r : Mult} -> (ω f : (q y : b) -> c) -> (ω g : (r x : a) -> b) -> (q * r z : a) -> c
+",
+    ),
 ];
 
 /// Разбор, который обязан удаться.

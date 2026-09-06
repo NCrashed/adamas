@@ -787,6 +787,14 @@ impl Printer {
                 self.push(" ");
             }
             self.push(&name.text);
+            // Остальные сомножители произведения кратностей стоят сразу за
+            // первым именем и только там: `(q * r z : a)` (§10 вопрос 41).
+            if index == 0 {
+                for factor in &binder.factors {
+                    self.push(" * ");
+                    self.push(&factor.text);
+                }
+            }
         }
         if let Some(ty) = &binder.ty {
             self.push(" : ");

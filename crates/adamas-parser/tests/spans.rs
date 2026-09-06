@@ -203,7 +203,7 @@ impl Spans<'_> {
         if let Some(mult) = binder.mult {
             self.inside("кратность", at, mult.span);
         }
-        for name in &binder.names {
+        for name in binder.names.iter().chain(&binder.factors) {
             self.name(at, name);
         }
         if let Some(ty) = &binder.ty {
@@ -413,6 +413,7 @@ const FORMS: &[&str] = &[
     "h = g handle c with\n  get -> 1\n",
     "h = handle c with\n  get -> case x of\n           A -> 1\n  put y -> 2\n",
     "f =\n  put b\n  put True\n  get\n",
+    "comp : {q r : Mult} -> (q * r z : a) -> a\ncomp x = x\n",
 ];
 
 #[test]

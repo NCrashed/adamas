@@ -14,7 +14,7 @@ use adamas_core::ctx::Ctx;
 use adamas_core::eval::{apply, eval, quote};
 use adamas_core::level::Level;
 use adamas_core::meta::Metas;
-use adamas_core::mult::{Mult, MultProduct, MultVar};
+use adamas_core::mult::{Mult, MultProduct, MultSum, MultVar};
 use adamas_core::pattern::{Clause, Pattern as CorePattern, PatternError, compile_case};
 use adamas_core::row::{Label, Row, Tail};
 use adamas_core::sig::{Definition, DefinitionKind, Signature};
@@ -4316,14 +4316,14 @@ impl<'a> Elaborator<'a> {
     /// `{q : Mult}`. Цена названа - имя, занятое параметром кратности,
     /// связыванием в этой сигнатуре больше не станет.
     ///
-    /// Сомножителей бывает несколько - `(q * r z : a)`, - и тогда различает
-    /// уже форма: связывания через `*` не пишутся. Поэтому непонятое имя в
-    /// произведении отвергается, а не читается связыванием: читать его там
-    /// нечем, и молча пропасть оно не вправе.
+    /// Частей бывает несколько - `(q * r z : a)`, `(q + r z : a)`, - и тогда
+    /// различает уже форма: связывания через `*` и `+` не пишутся. Поэтому
+    /// непонятое имя в выражении отвергается, а не читается связыванием:
+    /// читать его там нечем, и молча пропасть оно не вправе.
     fn graded(&self, binder: &ast::Binder) -> Result<Option<Mult>, ElabError> {
         if binder.mult.is_some() || binder.names.len() < 2 {
-            // Написанное произведение молча пропасть не вправе: связывания
-            // через `*` не пишутся, и другого чтения у этой формы нет.
+            // Написанное выражение молча пропасть не вправе: связывания через
+            // знак не пишутся, и другого чтения у этой формы нет.
             if binder.factors.is_empty() {
                 return Ok(None);
             }
@@ -4345,14 +4345,25 @@ impl<'a> Elaborator<'a> {
                 None => Ok(None),
             };
         };
-        let mut factors = vec![first];
+        let mut parts = vec![first];
         for name in &binder.factors {
-            factors.push(at(name).ok_or_else(|| ElabError::UnknownFactor {
+            parts.push(at(name).ok_or_else(|| ElabError::UnknownFactor {
                 name: Rc::clone(&name.text),
                 span: name.span,
             })?);
         }
-        Ok(MultProduct::of(factors))
+        match binder.grade {
+            // Смешанного выражения нет: приоритета между `*` и `+` в позиции
+            // кратности не заведено, и двухъярусное там не хранится.
+            Some(ast::Grade::Mixed) => Err(ElabError::MixedGrade { span: binder.span }),
+            // Сумма множеством выражает только различные слагаемые: сложение
+            // не идемпотентно, и `q + q` - не `q`.
+            Some(ast::Grade::Sum) => MultSum::of(parts.iter().copied()).map_or_else(
+                || Err(ElabError::RepeatedSummand { span: binder.span }),
+                |mult| Ok(Some(mult)),
+            ),
+            Some(ast::Grade::Product) | None => Ok(MultProduct::of(parts)),
+        }
     }
 
     fn pi(

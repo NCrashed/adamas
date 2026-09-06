@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: mult-sum-repeated.adamas:12:53: слагаемое в сумме кратностей повторено: `q + q` не равно `q`, и написать его нечем
+  twice : {q : Mult} -> (ω f : (q x : Nat) -> Nat) -> (q + q z : Nat) -> Nat
+                                                      ^^^^^^^^^^^^^^^

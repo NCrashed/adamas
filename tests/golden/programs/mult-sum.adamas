@@ -1,0 +1,51 @@
+-- Сумма параметров кратности (§10 вопрос 41): `(q + r z : a)`.
+--
+-- Домен раздваивающего комбинатора равен `q + r`: `z` расходуется `q` раз у
+-- `f` и `r` раз у `g`, и оба расхода происходят. Произведение здесь не годится
+-- - `1 · 1 = 1`, а двое линейных потребителей требуют `ω`.
+--
+-- Сложение, в отличие от умножения, не идемпотентно, поэтому суммой пишутся
+-- только **различные** параметры: `q + q` не равно `q` и через множество не
+-- выражается. Смешивать знаки нельзя тоже: приоритета между `*` и `+` в
+-- позиции кратности не заведено.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Pair (a : Type) (b : Type) where
+  MkPair : a -> b -> Pair a b
+
+double : Nat -> Nat
+double Zero = Zero
+double (Succ k) = Succ (Succ (double k))
+
+once : (1 n : Nat) -> Nat
+once n = n
+
+isZero : (0 n : Nat) -> Bool
+isZero n = True
+
+both : {q r : Mult} -> (ω f : (q x : a) -> b) -> (ω g : (r y : a) -> c) -> (q + r z : a) -> Pair b c
+both f g z = MkPair (f z) (g z)
+
+-- `ω + ω = ω`.
+twiceOver : Nat -> Pair Nat Nat
+twiceOver n = both double double n
+
+-- `1 + 1 = ω`: двое линейных потребителей вместе линейными не остаются.
+linearPair : Nat -> Pair Nat Nat
+linearPair n = both once once n
+
+-- `0 + 1 = 1`: стёртый потребитель ничего не расходует, и `z` остаётся
+-- линейным. Ровно эту клетку теряло написанное `ω`.
+erasedAndLinear : (1 n : Nat) -> Pair Bool Nat
+erasedAndLinear n = both isZero once n
+
+-- `0 + 0 = 0`.
+erasedTwice : (0 n : Nat) -> Pair Bool Bool
+erasedTwice n = both isZero isZero n

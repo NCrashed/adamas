@@ -1,0 +1,52 @@
+-- Рекурсия под параметром кратности (§10 вопрос 41).
+--
+-- Ссылка на себя обязана нести **свои** параметры кратности переменными. У
+-- уровней и row на её месте стоит тождественная подстановка, и там она верна:
+-- окружающий тип подставляется той же тождественной. Кратности же
+-- перебираются значениями, и тип рекурсивной ссылки, взятый из сигнатуры,
+-- оставался при `q0`, когда всё вокруг уже конкретно.
+--
+-- Второе условие - дырки тела. Решает их проверка тела, а проходы перебора
+-- спекулятивны: без закрепляющего прохода рекурсия с поднятой типовой
+-- переменной отвергалась «аргумент не выведен».
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+-- Рекурсия, конкретный тип.
+countDown : {q : Mult} -> (q n : Nat) -> Nat
+countDown Zero = Zero
+countDown (Succ k) = countDown k
+
+-- Рекурсия и поднятая типовая переменная: имплиситы у ссылки на себя выводятся.
+copy : {q : Mult} -> (q xs : List a) -> List a
+copy Nil = Nil
+copy (Cons x xs) = Cons x (copy xs)
+
+-- Записанный триггер возврата к вопросу 41 - `foldr` в prelude. Суммы ему не
+-- понадобилось: упирался он в рекурсию.
+foldr : {q : Mult} -> (ω f : (q x : a) -> (1 acc : b) -> b) -> (1 z : b) -> (q xs : List a) -> b
+foldr f z Nil = z
+foldr f z (Cons x xs) = f x (foldr f z xs)
+
+plus : Nat -> (1 m : Nat) -> Nat
+plus Zero m = m
+plus (Succ k) m = Succ (plus k m)
+
+ones : List Nat
+ones = Cons (Succ Zero) (Cons (Succ Zero) Nil)
+
+copied : List Nat
+copied = copy ones
+
+summed : Nat
+summed = foldr plus Zero ones

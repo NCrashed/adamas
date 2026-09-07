@@ -28,7 +28,6 @@
 
 use std::rc::Rc;
 
-use adamas_core::level::Level;
 use adamas_core::row::Row;
 use adamas_core::sig::DefinitionKind;
 use adamas_core::term::{Mults, Name, Term};
@@ -298,15 +297,9 @@ impl Machine<'_> {
         let Some([only]) = self.signature().constructors(UNIT) else {
             return Err(RunError::NoUnit);
         };
-        let Some(definition) = self.signature().lookup(only) else {
-            return Err(RunError::NoUnit);
-        };
-        let levels: Vec<Level> = (0..definition.level_arity)
-            .map(|_| Level::number(0))
-            .collect();
         Ok(Value::constant(
             Rc::clone(only),
-            &levels,
+            &[],
             Rc::from([] as [Row<Rc<Value>>; 0]),
             Mults::none(),
         ))

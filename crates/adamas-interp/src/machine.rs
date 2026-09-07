@@ -133,11 +133,28 @@ impl<'a> Machine<'a> {
             | Term::Universe(_)
             | Term::Pi(..)
             | Term::Lam(..)
-            | Term::Const(..)
             | Term::Record(_)
             | Term::Row(_)
             | Term::RowKind(_)
             | Term::EffectKind => Step::Return(eval::eval(env, term)),
+
+            // Аргументы **уровня** в рантайм не едут (§3.3): они стёрты, и
+            // машине не нужны - измерено тем, что исполнение проходит без их
+            // подстановки, а меняется только печать. Row и кратности остаются:
+            // row несёт значения и решает диспетчер эффектов.
+            //
+            // Форма единственная, ради которой этот случай отобран у ядерного
+            // `eval`, и row всё равно считает ядро: второго места, где хвост
+            // подставляется из окружения, заводить нельзя.
+            Term::Const(name, _, args) => Step::Return(Value::constant(
+                Rc::clone(name),
+                &[],
+                args.row_args()
+                    .iter()
+                    .map(|row| eval::row_of(env, row))
+                    .collect(),
+                Mults::new(args.mult_args().iter().copied()),
+            )),
 
             Term::App(callee, argument) => {
                 kont.push(Frame::Argument(env.clone(), Rc::clone(argument)));

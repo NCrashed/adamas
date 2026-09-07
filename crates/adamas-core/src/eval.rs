@@ -180,7 +180,8 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
 /// Подстановка идёт здесь, а не заранее по терму, потому что метка несёт
 /// **открытые** термы: замкнутого шага, на котором её можно было бы вложить в
 /// тело определения, не существует (§3.2).
-fn row_of(env: &Env, row: &Row<Term>) -> Row<Rc<Value>> {
+#[must_use]
+pub fn row_of(env: &Env, row: &Row<Term>) -> Row<Rc<Value>> {
     let mapped = row.map(|argument| eval(env, argument));
     match row.tail() {
         Some(Tail::Var(index)) => env

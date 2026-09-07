@@ -1,0 +1,99 @@
+-- Параметризованный хендлер и ресурс: решение о смерти резумпции отложено до
+-- применения ответа к состоянию (§3.4, §10 вопрос 129).
+--
+-- Ветка `state`-хендлера отвечает функцией от состояния и зовёт резумпцию
+-- **при её применении** - позже собственного возврата. Машина, решавшая
+-- «резумпцию не позвали - продолжение мертво» на возврате ветки, хоронила
+-- живой сегмент на каждой операции: деструктор бежал до работы и повторно на
+-- настоящем выходе - `[1, 9, 10, 9, 5]` вместо `[1, 10, 9, 5]`, - а прогон
+-- становился квадратичным: раскрутка всего сегмента на каждой операции,
+-- 4051 мс против 420 на 25600 операций (замер 2026-09-08).
+--
+-- Две стороны решения, обе здесь:
+-- * нить с резумпцией: деструктор ровно один раз, на выходе из scope,
+--   после всей работы - `[1, 10, 9, 5]`;
+-- * обрывающая ветка (`put` не зовёт резумпцию): деструктор в точке
+--   решения, недостижимая отметка пропущена - `[1, 9, 99]`.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+append : List Nat -> List Nat -> List Nat
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+effect Log where
+  note : Nat -> Unit
+
+effect State where
+  get : Nat
+  put : Nat -> Unit
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {Log} Bool
+  closeFile h =
+    let a : Unit = note 9
+    True
+
+-- Нить: операция между отметками, ресурс закрывается на настоящем выходе.
+holder : File -> {State, Log} Nat
+holder h =
+  let u : Unit = note 1
+  let n : Nat = get
+  let v : Unit = note 10
+  n
+
+held : {State, Log} Nat
+held = holder Open
+
+threaded : {Log} Nat
+threaded = handle held with
+  state 5
+  return v -> v
+  get -> resume state state
+  put x -> resume MkUnit x
+
+flow : List Nat
+flow = handle threaded with
+  return v -> Cons v Nil
+  note n -> Cons n (resume MkUnit)
+
+-- Обрыв: `put` отвечает нитью 99, не зовя резумпцию; отметка 10 недостижима.
+aborter : File -> {State, Log} Nat
+aborter h =
+  let u : Unit = note 1
+  let v : Unit = put 3
+  let w : Unit = note 10
+  Zero
+
+heldAbort : {State, Log} Nat
+heldAbort = aborter Open
+
+dropped : {Log} Nat
+dropped = handle heldAbort with
+  state 5
+  return v -> v
+  get -> resume state state
+  put x -> 99
+
+cut : List Nat
+cut = handle dropped with
+  return v -> Cons v Nil
+  note n -> Cons n (resume MkUnit)
+
+-- [1, 10, 9, 5] ++ [1, 9, 99]
+main : List Nat
+main = append flow cut

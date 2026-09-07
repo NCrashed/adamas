@@ -41,6 +41,7 @@ use crate::machine::{Machine, Step};
 /// Невыразимые имена элиминаторов - те же, что ставит элаборация.
 const HANDLE: &str = "#handle.";
 const MULTI: &str = "#handleMulti.";
+const STATEFUL: &str = "#handleState.";
 const CLOSING: &str = "#closing";
 const MASK: &str = "#mask.";
 
@@ -126,8 +127,10 @@ impl Machine<'_> {
     /// Форма элиминатора: параметры метки, операции и арности веток.
     fn shape(&self, name: &Name) -> Option<Handler> {
         let multi = name.starts_with(MULTI);
+        let stateful = name.starts_with(STATEFUL);
         let effect = name
             .strip_prefix(MULTI)
+            .or_else(|| name.strip_prefix(STATEFUL))
             .or_else(|| name.strip_prefix(HANDLE))?;
         let definition = self.signature().lookup(effect)?;
         let DefinitionKind::Effect { operations, params } = &definition.kind else {
@@ -152,6 +155,7 @@ impl Machine<'_> {
             branches: Rc::from([]),
             returned: Rc::new(Value::Object(Rc::from([]))),
             multi,
+            stateful,
         })
     }
 
@@ -221,7 +225,7 @@ impl Machine<'_> {
         // Сегмент включает сам кадр хендлера: возобновление ставит его обратно,
         // и это и значит «глубокий».
         let segment = kont.cut(index);
-        let (resume, ticket) = self.resumption(segment, handler.multi);
+        let (resume, ticket) = self.resumption(segment, handler.multi, handler.stateful);
         let mut given: Vec<Rc<Value>> = arguments
             [handler.params..handler.params + handler.written[slot]]
             .iter()
@@ -236,8 +240,32 @@ impl Machine<'_> {
     /// Ветка договорила: жив ли остаток вычисления.
     ///
     /// Резумпцию не позвали - продолжение мертво, и всё, что оно было должно,
-    /// стоит в его сегменте.
+    /// стоит в его сегменте. У параметризованного хендлера этот вывод на
+    /// возврате ветки неверен: ответ - функция от состояния, и резумпцию она
+    /// вправе позвать при применении. Решение поэтому откладывается кадром
+    /// [`Frame::Settling`] вокруг применения к состоянию, которое по
+    /// построению формы стоит под кадром ветки: начальное кладёт элаборация
+    /// (`(#handleState … ) s0`), последующие ставит `resume v s` своим вторым
+    /// аргументом (§10 вопрос 129).
     pub(crate) fn settled(&self, ticket: usize, value: Rc<Value>, kont: &mut Kont) -> Step {
+        if self.invoked(ticket) {
+            return Step::Return(value);
+        }
+        if self.stateful(ticket) {
+            if let Some(Frame::Argument(env, state)) = kont.pop_argument() {
+                kont.push(Frame::Settling(ticket));
+                kont.push(Frame::Callee(value));
+                return Step::Eval(env, state);
+            }
+            // Ожидающего применения нет - протокол формы нарушен тем, кто
+            // позвал элиминатор мимо неё. Прежнее решение здесь безопаснее
+            // молчания: хоронить, как хоронит одношотный.
+        }
+        self.buried(ticket, value, kont)
+    }
+
+    /// Продолжение мертво: раскрутить его сегмент и продолжить значением.
+    pub(crate) fn buried(&self, ticket: usize, value: Rc<Value>, kont: &mut Kont) -> Step {
         if self.invoked(ticket) {
             return Step::Return(value);
         }
@@ -325,8 +353,10 @@ impl Machine<'_> {
                     return self.unwinding(&inner, length, self.trivial(), kont);
                 }
                 // Ветка внутри сегмента, чью резумпцию не позвали: её
-                // собственный сегмент брошен вместе с этим.
-                Frame::Branch(ticket) if !self.invoked(*ticket) => {
+                // собственный сегмент брошен вместе с этим. Отложенное решение
+                // параметризованного хендлера - тот же случай: применение к
+                // состоянию оборвано, ответа резумпция уже не дождётся.
+                Frame::Branch(ticket) | Frame::Settling(ticket) if !self.invoked(*ticket) => {
                     let Some(inner) = self.segment(*ticket) else {
                         continue;
                     };

@@ -3807,31 +3807,7 @@ fn declare_effect(
         operations.push((&*operation.name.text, ty, suspended, grades));
     }
 
-    // Элиминаторы объявляются той же группой: их типы называют метку, а в
-    // сигнатуре её ещё нет. Их два, и различает их кратность резумпции -
-    // мультишот от одношотного отличается только ею (§3.4).
-    let mut handlers = Vec::with_capacity(2);
-    for (prefix, resumed) in [("#handle", Mult::One), ("#handleMulti", Mult::Many)] {
-        let ty = handler_type(
-            signature,
-            metas,
-            &Handled {
-                kind: &kind,
-                label: &effect.name.text,
-                operations: &operations,
-                resumed,
-                rho: rho.clone(),
-            },
-            span,
-        )?;
-        handlers.push((format!("{prefix}.{}", effect.name.text), ty));
-    }
-    // Маска - третий элиминатор той же группы и по той же причине: её тип
-    // называет метку (§10 вопрос 72).
-    handlers.push((
-        format!("{MASK}.{}", effect.name.text),
-        mask_type(signature, metas, &kind, &effect.name.text, span)?,
-    ));
+    let handlers = eliminator_types(signature, metas, &kind, effect, &operations, &rho, span)?;
     let handlers: Vec<(&str, Term)> = handlers
         .iter()
         .map(|(name, ty)| (name.as_str(), ty.clone()))
@@ -4107,6 +4083,52 @@ fn mask_type(
 }
 
 /// Объявляемая метка глазами её элиминатора.
+/// Типы элиминаторов эффекта - той же группой, что метка: они её называют, а
+/// в сигнатуре её ещё нет.
+///
+/// Форм `handle` три. Мультишот отличается кратностью резумпции (§3.4);
+/// параметризованный - только именем: оно доводит до машины признак, по
+/// которому решение «резумпцию не позвали» откладывается до применения
+/// ответа к состоянию (§10 вопрос 129), а ответ `S -> B` и двухаргументный
+/// `resume` строит элаборация формы, не объявление. Маска - четвёртый
+/// элиминатор той же группы и по той же причине (§10 вопрос 72).
+fn eliminator_types(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    kind: &Term,
+    effect: &ast::EffectDecl,
+    operations: &[(&str, Term, bool, u32)],
+    rho: &Row<Term>,
+    span: Span,
+) -> Result<Vec<(String, Term)>, ElabError> {
+    let forms = [
+        ("#handle", Mult::One),
+        ("#handleMulti", Mult::Many),
+        ("#handleState", Mult::One),
+    ];
+    let mut handlers = Vec::with_capacity(forms.len() + 1);
+    for (prefix, resumed) in forms {
+        let ty = handler_type(
+            signature,
+            metas,
+            &Handled {
+                kind,
+                label: &effect.name.text,
+                operations,
+                resumed,
+                rho: rho.clone(),
+            },
+            span,
+        )?;
+        handlers.push((format!("{prefix}.{}", effect.name.text), ty));
+    }
+    handlers.push((
+        format!("{MASK}.{}", effect.name.text),
+        mask_type(signature, metas, kind, &effect.name.text, span)?,
+    ));
+    Ok(handlers)
+}
+
 struct Handled<'a> {
     /// Сорт формера метки: по нему снимаются её параметры.
     kind: &'a Term,

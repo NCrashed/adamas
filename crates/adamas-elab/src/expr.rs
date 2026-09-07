@@ -3867,10 +3867,20 @@ impl<'a> Elaborator<'a> {
         }
         let quoted = rho.map(|argument| quote(self.ctx.size(), argument));
 
+        // Параметризованная форма идёт третьим элиминатором: тип у него
+        // одношотный, а имя доводит до машины признак, по которому решение о
+        // смерти резумпции откладывается до применения ответа к состоянию
+        // (§10 вопрос 129).
         let name: Symbol = Rc::from(
             format!(
                 "{}.{effect}",
-                if multi { "#handleMulti" } else { "#handle" }
+                if multi {
+                    "#handleMulti"
+                } else if initial.is_some() {
+                    "#handleState"
+                } else {
+                    "#handle"
+                }
             )
             .as_str(),
         );

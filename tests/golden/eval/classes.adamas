@@ -61,12 +61,21 @@ instance Ord Nat where
 atMost : {Ord a} => a -> a -> Bool
 atMost x y = or (below x y) (eq x y)
 
--- `[True, False, True, True, False]`. Второй элемент - весь смысл умолчания:
--- проекция, взявшая `eq` вместо `neq`, дала бы `True`.
+-- `[True, False, True, False, True, True, False]`. Второй элемент - весь смысл
+-- умолчания: проекция, взявшая `eq` вместо `neq`, дала бы `True`.
+--
+-- Списки сравниваются **разные**: на `[0]` против `[0]` оба конъюнкта верны, и
+-- `and` в инстансе неотличимо от `or`. Четвёртый элемент это и ловит.
+--
+-- `atMost Zero (Succ Zero)` стоит здесь потому, что это единственное место,
+-- где срабатывает содержательная ветка `below`: на `(0,0)` и `(1,0)` она даёт
+-- `False`, и сломанная `below` проходила незамеченной (ревью 2026-09-07).
 main : List Bool
 main =
   Cons (eq Zero Zero)
     (Cons (neq Zero Zero)
       (Cons (eq (Cons Zero Nil) (Cons Zero Nil))
-        (Cons (atMost Zero Zero)
-          (Cons (atMost (Succ Zero) Zero) Nil))))
+        (Cons (eq (Cons Zero (Cons (Succ Zero) Nil)) (Cons Zero (Cons Zero Nil)))
+          (Cons (atMost Zero (Succ Zero))
+            (Cons (atMost Zero Zero)
+              (Cons (atMost (Succ Zero) Zero) Nil))))))

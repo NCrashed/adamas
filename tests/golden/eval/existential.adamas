@@ -13,6 +13,10 @@ data Nat where
   Zero : Nat
   Succ : Nat -> Nat
 
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
 data Showable where
   MkShowable : a -> (a -> Bool) -> Showable
 
@@ -27,8 +31,14 @@ isTrue True = True
 runShowable : Showable -> Bool
 runShowable (MkShowable x f) = f x
 
-both : Showable -> Showable -> Bool
-both l r = isTrue (runShowable l)
+-- Распаковываются **все** носители, и позиционно. Пока смотрели на один левый,
+-- второй экзистенциал заменялся копией первого незаметно, а ответ в один бит
+-- совпадал с `isZero Zero` по построению (ревью 2026-09-07).
+both : Showable -> Showable -> Showable -> List Bool
+both a b c = Cons (runShowable a) (Cons (runShowable b) (Cons (runShowable c) Nil))
 
-main : Bool
-main = both (MkShowable Zero isZero) (MkShowable False isTrue)
+-- `[True, False, True]`. Средний носитель и делает ответ не тождеством: без
+-- него `True` выходило при всякой сломанной распаковке.
+main : List Bool
+main =
+  both (MkShowable Zero isZero) (MkShowable (Succ Zero) isZero) (MkShowable True isTrue)

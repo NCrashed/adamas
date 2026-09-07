@@ -16,8 +16,12 @@ data Nat where
   Zero : Nat
   Succ : Nat -> Nat
 
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
 once : (1 n : Nat) -> Nat
-once n = n
+once n = Succ n
 
 double : Nat -> Nat
 double Zero = Zero
@@ -36,10 +40,20 @@ linearly = applyIt once
 both : {Apply} Nat
 both = applyIt double
 
+-- Ветка **зовёт** переданную функцию, и это видно: `once` больше не тождество,
+-- поэтому невызов дал бы 1 вместо 2. Прежде `once n = n` совпадала с
+-- аргументом, и заявленное шапкой правило значением не показывалось.
 handled : Nat
 handled = handle linearly with
   return v -> v
   applyIt f -> resume (f (Succ Zero))
 
-main : Nat
-main = handled
+-- ω-инстанциация того же параметра: `double 1` есть 2, и обе ветви ответа
+-- различимы позиционно.
+doubled : Nat
+doubled = handle both with
+  return v -> v
+  applyIt f -> resume (f (Succ (Succ Zero)))
+
+main : List Nat
+main = Cons handled (Cons doubled Nil)

@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Cons True (Cons False (Cons True (Cons True (Cons False Nil))))
+Cons True (Cons False (Cons True (Cons False (Cons True (Cons True (Cons False Nil))))))

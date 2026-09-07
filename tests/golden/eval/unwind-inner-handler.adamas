@@ -1,0 +1,89 @@
+-- Деструктор на раскрутке и хендлер, стоявший **внутри** брошенного сегмента
+-- (§3.3).
+--
+-- Ряд деструктора гасил внутренний `Log`, а обрывает вычисление внешний
+-- `Fail`. Внутренний уходит вместе с сегментом, и вопрос в том, куда денется
+-- операция деструктора. Прежде она уходила к **внешнему** `Log` - молча и не
+-- туда, - а когда внешнего не было, роняла прогон принятой программы
+-- сообщением «операция `note` осталась без хендлера» (ревью 2026-09-07).
+--
+-- Метки хендлеров, стоявших в сегменте, теперь подавляются так же, как метка
+-- основания: ответ им уже дан, продолжения у них мертвы, и второму ответу
+-- деться некуда. Операция обрывает свой деструктор, раскрутка идёт дальше.
+--
+-- Различающая сила - в отсутствии `109`: внешний `Log` метит прибавлением
+-- сотни, поэтому чужой хендлер, поймавший отметку деструктора, был бы виден
+-- сразу. Открытая сторона вопроса записана в §10: деструктор, чей хендлер
+-- мёртв, своей работы не делает вовсе.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+plus : Nat -> Nat -> Nat
+plus Zero m = m
+plus (Succ k) m = Succ (plus k m)
+
+effect Log where
+  note : Nat -> Unit
+
+effect Fail where
+  fail : Bool
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {Log} Bool
+  closeFile h =
+    note 9
+    True
+
+-- Тело отмечается пятёркой и обрывается.
+body : File -> {Fail, Log} Bool
+body h =
+  note 5
+  let n : Bool = fail
+  True
+
+held : {Fail, Log} Bool
+held = body Open
+
+-- Внутренний `Log`: он и погасил ряд `closeFile`. Собирает отметки как есть.
+inner : {Fail} List Nat
+inner = handle held with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+
+-- Ветка обрыва сама производит в `Log`: иначе внешнему хендлеру нечего было
+-- бы ловить, и подмена стала бы ненаблюдаемой.
+warn : Unit -> {Log} List Nat
+warn u =
+  note 7
+  Nil
+
+-- Внешний `Fail` обрывает: ветка резумпцию не зовёт, сегмент с внутренним
+-- `Log` внутри выброшен, и раскрутка идёт по нему.
+aborted : {Log} List Nat
+aborted = handle inner with
+  return v -> v
+  fail -> warn MkUnit
+
+-- Внешний `Log` метит прибавлением сотни. Поймай он отметку деструктора -
+-- в ответе появилась бы 109.
+outer : List Nat
+outer = handle aborted with
+  return v -> v
+  note n -> Cons (plus 100 n) (resume MkUnit)
+
+main : List Nat
+main = outer

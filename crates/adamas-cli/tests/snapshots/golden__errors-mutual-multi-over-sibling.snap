@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: mutual-multi-over-sibling.adamas:47:13: вычисление под `handleMulti` собрано на месте: держит ли оно ресурс, спросить не у кого (§3.4)
+    doubled = handleMulti held with
+              ^^^^^^^^^^^^^^^^^^^^^

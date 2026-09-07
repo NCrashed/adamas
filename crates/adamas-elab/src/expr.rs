@@ -3592,6 +3592,12 @@ impl<'a> Elaborator<'a> {
         if self.local(&head).is_some() {
             return Err(ElabError::MultiWithUnknown { span });
         }
+        // Сосед по объявляемой группе: имени ещё нет в сигнатуре, и спросить
+        // его определение не у кого - ровно как у головы-не-имени. Сказать это
+        // полагается здесь, чтобы сообщение называло незнание, а не удержание.
+        if self.signature.lookup(&head).is_none() {
+            return Err(ElabError::MultiWithUnknown { span });
+        }
         if self.holds_resource(&head, &mut Vec::new()) {
             return Err(ElabError::MultiOverHolder { name: head, span });
         }
@@ -3611,7 +3617,18 @@ impl<'a> Elaborator<'a> {
             return false;
         }
         seen.push(Rc::from(name));
-        let Some(body) = self.signature.lookup(name).and_then(|it| it.body.as_ref()) else {
+        // Имени нет в сигнатуре вовсе - это сосед по объявляемой группе, чьё
+        // тело ещё не легло. Спросить его не у кого, и ответ здесь обязан быть
+        // тот же, что у головы-не-имени: отказ. Пока `None` читался как «не
+        // держит», `handleMulti` над ресурсом внутри `mutual` принимался, и
+        // деструктор отрабатывал дважды (ревью 2026-09-07).
+        //
+        // Отсутствие **тела** при объявленном имени - другое: так выглядят
+        // конструкторы и постулаты, и для них `false` верен.
+        let Some(entry) = self.signature.lookup(name) else {
+            return true;
+        };
+        let Some(body) = entry.body.as_ref() else {
             return false;
         };
         let mut called = Vec::new();

@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: mutual-owned-toplevel.adamas:24:12: `leaked` объявлен типом с владением (resource): держать его может только связывание кратности 1
+    leaked : File
+             ^^^^

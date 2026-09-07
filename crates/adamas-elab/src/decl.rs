@@ -1877,6 +1877,18 @@ fn declare_mutual(
     unnamed_siblings(&planned)?;
     let mut types = Vec::with_capacity(planned.len());
     for member in &planned {
+        // Владение верхнего уровня не выражается и внутри группы (§3.3). Путь
+        // сюда идёт мимо `definition`, где этот отказ и стоит, поэтому его
+        // приходится повторить: `mutual` меняет **видимость**, и только её
+        // (§4.8), а без этой строки `leaked : File` внутри блока принималось,
+        // тогда как то же объявление снаружи отвергалось (ревью 2026-09-07).
+        if let Some(how) = owned.of(member.ty) {
+            return Err(ElabError::OwnedTopLevel {
+                owned: how,
+                name: Rc::clone(&member.name.text),
+                span: member.ty.span,
+            });
+        }
         types.push(
             Elaborator::new(signature, metas, owned, fixities)
                 .declaration(member.ty, Mult::Many)?,

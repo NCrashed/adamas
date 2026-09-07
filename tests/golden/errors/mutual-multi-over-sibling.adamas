@@ -1,0 +1,49 @@
+-- `handleMulti` над соседом по объявляемой группе (§3.4, §4.8).
+--
+-- Проверка «держит ли вычисление ресурс» спрашивает тело по сигнатуре, а у
+-- соседа по группе тела там ещё нет. Пока отсутствие имени читалось как «не
+-- держит», проверка молча проходила, и деструктор отрабатывал дважды - при
+-- том что снаружи блока тот же текст отвергался (ревью 2026-09-07).
+--
+-- Незнание и есть ответ: сказано о нём тем же сообщением, что и о голове,
+-- которая не имя. Ближайший проходящий сосед - те же два определения **вне**
+-- `mutual`: там тело соседа видно, и отказ приходит по существу, называя
+-- удерживающего.
+--
+-- Ответ хендлера здесь `Nat`, а не список, из-за §10 вопроса 126: член
+-- `mutual`, чей тип применяет семейство, сегодня не объявляется вовсе.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+plus : Nat -> Nat -> Nat
+plus Zero m = m
+plus (Succ k) m = Succ (plus k m)
+
+effect Amb where
+  toss : Bool
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> Bool
+  closeFile h = True
+
+mutual
+  held : {Amb} Nat
+  held =
+    let h : File = Open
+    let b : Bool = toss
+    Zero
+
+  doubled : Nat
+  doubled = handleMulti held with
+    return v -> v
+    toss -> plus (resume True) (resume False)

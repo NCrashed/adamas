@@ -76,3 +76,19 @@ boxed f y = MkBox (f y)
 
 boxedTwice : Nat -> Box Nat
 boxedTwice n = boxed double n
+
+-- Два вхождения одного имени при разных кратностях в одном теле (§10 вопрос
+-- 117). Кэш инстанциации держит одну на имя, и для уровней это выбор: их в
+-- поверхностном языке не именуют. С кратностями довод обратный - их пишут, - и
+-- общая дырка связывала два вхождения в одно: второе приходило с кратностью,
+-- выбранной первым.
+data Both (a : Type) (b : Type) where
+  MkBoth : a -> b -> Both a b
+
+mixed : (1 h : File) -> Nat -> Both Bool Nat
+mixed h n = MkBoth (closeFile (identity h)) (double (identity n))
+
+-- И в разных клаузах одного определения.
+split : Nat -> Nat
+split Zero = identity Zero
+split (Succ k) = double (identity (Succ k))

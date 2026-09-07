@@ -30,11 +30,7 @@ double (Succ k) = Succ (Succ (double k))
 digits : List Nat
 digits = Cons (Succ Zero) (Cons Zero Nil)
 
--- Два употребления с разными кратностями в одном теле сегодня не пишутся, и
--- это ограничение старше поля: то же отвергается у обычного полиморфного
--- определения. Поэтому здесь по одному на определение.
-kept : List Nat
-kept = fmap once digits
-
+-- Два вхождения одного метода при разных кратностях в одном теле: раньше
+-- второе приходило с кратностью, выбранной первым (§10 вопрос 117).
 main : List Nat
-main = fmap double kept
+main = fmap double (fmap once digits)

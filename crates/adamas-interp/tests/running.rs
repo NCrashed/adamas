@@ -213,6 +213,13 @@ main = handleMulti branching with
 }
 
 /// Чужая метка уходит наружу, а внутренний хендлер встаёт на её продолжении.
+///
+/// Порядок операций тут и есть всё содержание. Пока обе были `ask`, ветка
+/// `fail` не срабатывала ни разу, и потерянная переустановка ничего не меняла:
+/// за вторым `ask` не следовало ничего, что внутренний должен был бы поймать
+/// (ревью 2026-09-07). Здесь `fail` идёт **после** пропущенного наружу `ask`,
+/// то есть уже на продолжении, и без переустановки ушёл бы к внешнему
+/// хендлеру, у которого такой ветки нет.
 #[test]
 fn a_foreign_label_passes_through_and_reinstalls_the_handler() {
     let source = format!(
@@ -226,13 +233,13 @@ effect Fail where
 mixed : {{Ask, Fail}} Nat
 mixed =
   let n : Nat = ask
-  let m : Nat = ask
+  let m : Nat = fail
   n + m
 
 inner : {{Ask}} Nat
 inner = handle mixed with
   return v -> v
-  fail -> Zero
+  fail -> Succ Zero
 
 main : Nat
 main = handle inner with
@@ -240,9 +247,9 @@ main = handle inner with
   ask -> resume 1
 "
     );
-    // Второй `ask` доходит до внешнего хендлера только если внутренний
-    // переустановился после первого.
-    assert_eq!(ran(&source, "main"), "Succ (Succ Zero)");
+    // Ответ - ветка `fail` внутреннего, то есть единица: она сработала только
+    // потому, что хендлер встал обратно на продолжении первого `ask`.
+    assert_eq!(ran(&source, "main"), "Succ Zero");
 }
 
 /// Вложенные хендлеры одной метки: операция достаётся ближайшему.
@@ -793,28 +800,30 @@ fn a_masked_operation_reaches_the_outer_handler() {
 effect Ask where
   ask : Nat
 
-inner : ({{Ask, Ask}} Nat) -> {{Ask}} Nat
+inner : ({{Ask, Ask}} List Nat) -> {{Ask}} List Nat
 inner act = handle act with
   return v -> v
   ask -> resume Zero
 
-asked : {{Ask, Ask}} Nat
+asked : {{Ask, Ask}} List Nat
 asked =
   let near : Nat = ask
   let far : Nat = mask ask
-  near + far
+  Cons near (Cons far Nil)
 
-layered : {{Ask}} Nat
+layered : {{Ask}} List Nat
 layered = inner asked
 
-main : Nat
+main : List Nat
 main = handle layered with
   return v -> v
   ask -> resume (Succ Zero)
 "
     );
-    // Ноль от внутреннего, единица от внешнего.
-    assert_eq!(ran(&source, "main"), "Succ Zero");
+    // Ноль от внутреннего, единица от внешнего - и **позиционно**: суммой
+    // `near + far` та же единица выходила и при маске, наехавшей на `near`,
+    // то есть правило значением не показывалось вовсе (ревью 2026-09-07).
+    assert_eq!(ran(&source, "main"), "Cons Zero (Cons (Succ Zero) Nil)");
 }
 
 /// Без маски оба запроса достаются внутреннему.
@@ -825,27 +834,29 @@ fn without_a_mask_both_operations_reach_the_inner_handler() {
 effect Ask where
   ask : Nat
 
-inner : ({{Ask, Ask}} Nat) -> {{Ask}} Nat
+inner : ({{Ask, Ask}} List Nat) -> {{Ask}} List Nat
 inner act = handle act with
   return v -> v
   ask -> resume Zero
 
-asked : {{Ask, Ask}} Nat
+asked : {{Ask, Ask}} List Nat
 asked =
   let near : Nat = ask
   let far : Nat = ask
-  near + far
+  Cons near (Cons far Nil)
 
-layered : {{Ask}} Nat
+layered : {{Ask}} List Nat
 layered = inner asked
 
-main : Nat
+main : List Nat
 main = handle layered with
   return v -> v
   ask -> resume (Succ Zero)
 "
     );
-    assert_eq!(ran(&source, "main"), "Zero");
+    // Оба нуля от внутреннего. Позиционно - по той же причине, что и у
+    // соседа с маской: сумма обе позиции гасила.
+    assert_eq!(ran(&source, "main"), "Cons Zero (Cons Zero Nil)");
 }
 
 /// Несколько однотипных эффектов адресуются вложенными масками (§10 вопрос 23).
@@ -869,33 +880,36 @@ data EvalError where
 effect Raise e where
   raise : e -> Nat
 
-program : {{Raise IOError, Raise ParseError, Raise EvalError}} Nat
+program : {{Raise IOError, Raise ParseError, Raise EvalError}} List Nat
 program =
   let a : Nat = raise MkIO
   let b : Nat = mask (raise MkParse)
   let c : Nat = mask (mask (raise MkEval))
-  a + b + c
+  Cons a (Cons b (Cons c Nil))
 
-onIO : {{Raise ParseError, Raise EvalError}} Nat
+onIO : {{Raise ParseError, Raise EvalError}} List Nat
 onIO = handle program with
   return v -> v
   raise e -> resume (Succ Zero)
 
-onParse : {{Raise EvalError}} Nat
+onParse : {{Raise EvalError}} List Nat
 onParse = handle onIO with
   return v -> v
   raise e -> resume (Succ (Succ Zero))
 
-main : Nat
+main : List Nat
 main = handle onParse with
   return v -> v
   raise e -> resume (Succ (Succ (Succ Zero)))
 "
     );
-    // 1 + 2 + 3: каждая ошибка досталась своему хендлеру.
+    // `[1, 2, 3]` позиционно: каждая ошибка досталась своему хендлеру. Суммой
+    // `a + b + c` те же 6 выходили при **любой** перестановке ответов трёх
+    // хендлеров, то есть перепутанные маски проходили незамеченными.
     assert_eq!(
         ran(&source, "main"),
-        "Succ (Succ (Succ (Succ (Succ (Succ Zero)))))"
+        "Cons (Succ Zero) (Cons (Succ (Succ Zero)) \
+         (Cons (Succ (Succ (Succ Zero))) Nil))"
     );
 }
 

@@ -128,7 +128,7 @@ pub enum DefinitionKind {
 type CheckedBody = (Term, crate::check::Body);
 
 /// Полукольцо целиком - все подстановки, которые перебирает фаза B2.
-const ALL_MULTS: [Mult; 3] = [Mult::Zero, Mult::One, Mult::Many];
+pub(crate) const ALL_MULTS: [Mult; 3] = [Mult::Zero, Mult::One, Mult::Many];
 
 /// Определение верхнего уровня.
 #[derive(Clone, Debug)]

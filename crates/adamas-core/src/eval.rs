@@ -200,6 +200,7 @@ fn quote_fields(size: u32, telescope: &Telescope) -> Fields {
         written.push(Field {
             name: Rc::clone(&field.name),
             mult: field.mult,
+            shape: field.shape,
             ty: Rc::new(quote(depth, &ty)),
         });
         earlier.push(Value::var(Lvl(depth)));

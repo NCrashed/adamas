@@ -2056,6 +2056,7 @@ fn rewrite_fields<F: Fn(u32) -> Term>(fields: &Fields, depth: u32, from: u32, ma
             .map(|(index, field)| RecordField {
                 name: Rc::clone(&field.name),
                 mult: field.mult,
+                shape: field.shape,
                 ty: Rc::new(rewrite(
                     &field.ty,
                     depth + u32::try_from(index).unwrap_or(0),
@@ -2147,6 +2148,7 @@ fn shift_fields(fields: &Fields, depth: u32, by: u32) -> Fields {
             .map(|(index, field)| RecordField {
                 name: Rc::clone(&field.name),
                 mult: field.mult,
+                shape: field.shape,
                 ty: Rc::new(shift_at(
                     &field.ty,
                     depth + u32::try_from(index).unwrap_or(0),

@@ -151,6 +151,7 @@ fn read_fields(
         written.push(Field {
             name: Rc::clone(&field.name),
             mult: field.mult,
+            shape: field.shape,
             ty: Rc::new(read(
                 metas,
                 meta,

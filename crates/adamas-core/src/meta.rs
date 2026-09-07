@@ -724,11 +724,23 @@ impl Metas {
     ) -> T {
         let saved = self.slots.clone();
         for slot in &mut self.slots {
-            if let Slot::Term { ty, solution } = slot {
-                *ty = regraded(ty, arguments);
-                if let Some(found) = solution {
-                    *found = regraded(found, arguments);
+            match slot {
+                Slot::Term { ty, solution } => {
+                    *ty = regraded(ty, arguments);
+                    if let Some(found) = solution {
+                        *found = regraded(found, arguments);
+                    }
                 }
+                // Решение дырки кратности бывает **параметром** вызывающего:
+                // так полиморфное зовёт полиморфное (§10 вопрос 41). В терме
+                // его подставляет обход, а здесь оно живёт решением, и без
+                // подстановки доезжает до сравнения переменной там, где всё
+                // вокруг уже значение.
+                Slot::Mult {
+                    solution: Some(found),
+                    ..
+                } => *found = crate::term::substituted_mult_of(*found, arguments),
+                _ => {}
             }
         }
         let outcome = run(self);
@@ -1085,6 +1097,7 @@ impl Generalization {
                 .map(|field| crate::term::Field {
                     name: Rc::clone(&field.name),
                     mult: field.mult,
+                    shape: field.shape,
                     ty: Rc::new(self.apply_term(metas, &field.ty)),
                 })
                 .collect(),
@@ -1368,6 +1381,7 @@ fn zonk_fields(metas: &Metas, fields: &crate::term::Fields) -> crate::term::Fiel
             .map(|field| crate::term::Field {
                 name: Rc::clone(&field.name),
                 mult: field.mult,
+                shape: field.shape,
                 ty: Rc::new(zonk_term(metas, &field.ty)),
             })
             .collect(),

@@ -2157,7 +2157,15 @@ fn check_object(
                 },
             ));
         };
-        let ty = telescope.at(index, &earlier);
+        // Связывание поля **раскрывается**: значение обязано подойти при любом
+        // его параметре, поэтому на месте параметра стоит жёсткая переменная, а
+        // не дырка (§10 вопрос 115). Жёсткой её делает то, что связать её здесь
+        // нечем: мономорфное значение с ней не сойдётся, а полиморфное - своей
+        // же дыркой инстанцирования.
+        let opened: Vec<Mult> = (0..field.shape.mults)
+            .map(|at| Mult::Var(crate::mult::MultVar(at)))
+            .collect();
+        let ty = telescope.instantiated(index, &earlier, &[], &[], &opened);
         let position = u32::try_from(index).unwrap_or(u32::MAX);
         let found = framed(
             check(ctx, metas, judgement_under(field.mult, sigma), value, &ty),
@@ -2198,6 +2206,7 @@ fn check_tail(
         fields.push(RecordField {
             name: Rc::clone(name),
             mult: Mult::One,
+            shape: crate::term::Shape::default(),
             ty: Rc::new(quote(ctx.size(), &ty)),
         });
         usage = usage + &found;
@@ -2342,6 +2351,7 @@ fn infer_with(
             None => written.push(RecordField {
                 name: Rc::clone(name),
                 mult: Mult::One,
+                shape: crate::term::Shape::default(),
                 ty,
             }),
         }
@@ -2373,6 +2383,7 @@ fn infer_object(
         written.push(RecordField {
             name: Rc::clone(name),
             mult: Mult::One,
+            shape: crate::term::Shape::default(),
             ty: Rc::new(quote(ctx.size() + position, &ty)),
         });
         usage = usage + &found;
@@ -2416,6 +2427,57 @@ fn infer_project(
     record: &Term,
     name: &Name,
 ) -> Result<(Rc<Value>, Usage), TypeError> {
+    project_with(ctx, metas, sigma, record, name, None)
+}
+
+/// Тип проекции с **названными** аргументами кратности вместо дырок.
+///
+/// Зовут это объявление метода и члена инстанса: там параметр поля переходит в
+/// параметр определения, а не инстанцируется дыркой (§10 вопрос 115).
+///
+/// # Errors
+///
+/// То же, что у проекции вообще: не запись, нет такого поля, поле стёрто.
+pub fn projected(
+    ctx: &Ctx<'_>,
+    metas: &mut Metas,
+    record: &Term,
+    name: &Name,
+) -> Result<(Rc<Value>, crate::term::Shape), TypeError> {
+    let shape = field_shape(ctx, metas, record, name)?;
+    let mults: Vec<Mult> = (0..shape.mults)
+        .map(|at| Mult::Var(crate::mult::MultVar(at)))
+        .collect();
+    let (ty, _) = project_with(ctx, metas, Mult::Zero, record, name, Some(&mults))?;
+    Ok((ty, shape))
+}
+
+/// Сколько собственных параметров у поля записи. Пустая форма - их нет.
+fn field_shape(
+    ctx: &Ctx<'_>,
+    metas: &mut Metas,
+    record: &Term,
+    name: &Name,
+) -> Result<crate::term::Shape, TypeError> {
+    let (ty, _) = infer(ctx, metas, Mult::Zero, record)?;
+    let ty = whnf_solved(ctx.signature(), metas, &ty);
+    let Value::Record(telescope) = &*ty else {
+        return Ok(crate::term::Shape::default());
+    };
+    Ok(field_of(metas, telescope, name)
+        .map_or_else(crate::term::Shape::default, |(telescope, index)| {
+            telescope.fields()[index].shape
+        }))
+}
+
+fn project_with(
+    ctx: &Ctx<'_>,
+    metas: &mut Metas,
+    sigma: Mult,
+    record: &Term,
+    name: &Name,
+    named: Option<&[Mult]>,
+) -> Result<(Rc<Value>, Usage), TypeError> {
     let (ty, usage) = framed(infer(ctx, metas, sigma, record), Frame::Scrutinee)?;
     let ty = whnf_solved(ctx.signature(), metas, &ty);
     let Value::Record(telescope) = &*ty else {
@@ -2455,7 +2517,24 @@ fn infer_project(
         .iter()
         .map(|it| crate::eval::project(&value, &it.name))
         .collect();
-    Ok((telescope.at(index, &earlier), usage))
+    // Собственные параметры поля инстанцируются здесь - тем же ходом, что у
+    // ссылки на определение: свежие дырки, а решает их проверка (§10 вопрос
+    // 115). Поле без параметров идёт прежним путём: подставлять нечего.
+    let shape = field.shape;
+    let levels: Vec<Level> = (0..shape.levels).map(|_| metas.fresh_level()).collect();
+    let rows: Vec<crate::row::Row<Term>> = (0..shape.rows).map(|_| metas.fresh_row()).collect();
+    let mults: Vec<Mult> = match named {
+        // Названные аргументы приходят от объявления: там параметр поля
+        // становится параметром определения, а не дыркой.
+        Some(named) => named.to_vec(),
+        None => (0..shape.mults)
+            .map(|_| metas.fresh_mult(crate::sig::ALL_MULTS.into()))
+            .collect(),
+    };
+    Ok((
+        telescope.instantiated(index, &earlier, &levels, &rows, &mults),
+        usage,
+    ))
 }
 
 /// Синтезирует тип разбора по конструктору.

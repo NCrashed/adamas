@@ -285,11 +285,43 @@ impl Telescope {
     /// одному полю, и пропуск - баг вызывающего.
     #[must_use]
     pub fn at(&self, index: usize, earlier: &[Rc<Value>]) -> Rc<Value> {
+        self.instantiated(index, earlier, &[], &[], &[])
+    }
+
+    /// То же с подставленными **собственными** параметрами поля.
+    ///
+    /// Поле записи связывает свои стёртые параметры (§10 вопрос 115), и
+    /// проекция их инстанцирует - как всякая ссылка на определение. Пустые
+    /// списки дают прежнее поведение: поле без параметров подставлять нечем.
+    ///
+    /// # Panics
+    ///
+    /// Если предыдущих полей дано меньше, чем нужно: телескоп вычисляется по
+    /// порядку, и это баг вызывающего, а не ошибка проверяемой программы.
+    #[must_use]
+    pub fn instantiated(
+        &self,
+        index: usize,
+        earlier: &[Rc<Value>],
+        levels: &[crate::level::Level],
+        rows: &[crate::row::Row<crate::term::Term>],
+        mults: &[crate::mult::Mult],
+    ) -> Rc<Value> {
         assert!(earlier.len() >= index, "телескоп вычисляется по порядку");
         let env = earlier[..index]
             .iter()
             .fold(self.env.clone(), |env, value| env.extend(Rc::clone(value)));
-        crate::eval::eval(&env, &self.fields[index].ty)
+        let ty = &self.fields[index].ty;
+        let ty = if levels.is_empty() && rows.is_empty() && mults.is_empty() {
+            Rc::clone(ty)
+        } else {
+            Rc::new(
+                ty.substitute_levels(levels)
+                    .substitute_rows(rows)
+                    .substitute_field_mults(mults),
+            )
+        };
+        crate::eval::eval(&env, &ty)
     }
 }
 

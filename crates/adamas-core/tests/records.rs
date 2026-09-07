@@ -22,6 +22,7 @@ fn field(name: &str, ty: Term) -> Field {
     Field {
         name: name.into(),
         mult: Mult::One,
+        shape: adamas_core::term::Shape::default(),
         ty: Rc::new(ty),
     }
 }
@@ -174,6 +175,7 @@ fn an_erased_field_has_no_value_to_take() {
     // проекцией нельзя - то же правило, что у стёртой переменной.
     let ty = Term::Record(Fields::closed(Rc::from([Field {
         name: "a".into(),
+        shape: adamas_core::term::Shape::default(),
         mult: Mult::Zero,
         ty: Rc::new(Term::universe(0)),
     }])));

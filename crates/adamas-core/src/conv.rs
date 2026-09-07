@@ -455,6 +455,7 @@ fn same_open(
             fields.push(Field {
                 name: Rc::clone(name),
                 mult: Mult::One,
+                shape: crate::term::Shape::default(),
                 ty: Rc::new(quote(size, ty)),
             });
         }

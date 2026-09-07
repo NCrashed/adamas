@@ -3156,6 +3156,7 @@ impl<'a> Elaborator<'a> {
         // места использования (§3.2), - и одному имени они выдаются один раз
         // на объявление (см. `instantiated`).
         if let Some(term) = self.instantiated.get(&name.text).cloned() {
+            let term = self.regraded(&name.text, term);
             return Ok(self.implicit_use(&name.text, term));
         }
         let term = self
@@ -3176,6 +3177,37 @@ impl<'a> Elaborator<'a> {
         self.instantiated
             .insert(Rc::clone(&name.text), term.clone());
         Ok(self.implicit_use(&name.text, term))
+    }
+
+    /// Свежие аргументы **кратности** у имени, взятого из кэша.
+    ///
+    /// Кэш держит одну инстанциацию на имя, и для уровней это выбор: их в
+    /// поверхностном языке не именуют, а два вхождения на разных уровнях
+    /// написать нечем. С кратностями довод обратный: их **пишут**, и два
+    /// вхождения при разных - обычное употребление (`map once` рядом с
+    /// `map double`). Общая дырка связывала их в одну, и второе вхождение
+    /// отвергалось кратностью, выбранной первым (§10 вопрос 117).
+    fn regraded(&mut self, name: &str, term: Term) -> Term {
+        let Term::Const(head, levels, args) = &term else {
+            return term;
+        };
+        if args.mult_args().is_empty() {
+            return term;
+        }
+        let allowed: Vec<Rc<[Mult]>> = self
+            .signature
+            .lookup(name)
+            .map(|it| it.mult_allowed.to_vec())
+            .unwrap_or_default();
+        let mults: Vec<Mult> = allowed
+            .into_iter()
+            .map(|it| self.metas.fresh_mult(it))
+            .collect();
+        Term::Const(
+            Rc::clone(head),
+            Rc::clone(levels),
+            Args::new(args.row_args().iter().cloned(), mults),
+        )
     }
 
     /// Вставляет выводимые аргументы имени, тип которого знает ядро.

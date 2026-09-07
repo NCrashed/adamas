@@ -79,13 +79,22 @@ impl Machine<'_> {
                 if constructor(self.signature(), name) && applications(spine) =>
             {
                 let base = quote(0, &Rc::new(Value::Neutral(head.clone(), Vec::new())));
-                work.push(Pending::Constructor(base, spine.len()));
+                // Стёртые аргументы не печатаются: их в значении нет - на их
+                // месте стоит маркер, а вычислено не было ничего (§3.3).
+                // Печатать маркер значило бы показывать место, которого нет.
+                let live: Vec<&Rc<Value>> = spine
+                    .iter()
+                    .filter_map(|elim| match elim {
+                        Elim::App(argument) if !matches!(&**argument, Value::Erased) => {
+                            Some(argument)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                work.push(Pending::Constructor(base, live.len()));
                 // Аргументы читаются слева направо, поэтому в стек кладутся
                 // справа налево.
-                for elim in spine.iter().rev() {
-                    let Elim::App(argument) = elim else {
-                        unreachable!("спайн конструктора - одни применения");
-                    };
+                for argument in live.into_iter().rev() {
                     work.push(Pending::Read(Rc::clone(argument)));
                 }
             }

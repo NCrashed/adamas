@@ -17,6 +17,7 @@ use std::rc::Rc;
 
 use adamas_core::eval;
 use adamas_core::level::Level;
+use adamas_core::mult::Mult;
 use adamas_core::row::Row;
 use adamas_core::sig::{DefinitionKind, Signature};
 use adamas_core::term::{Case, Mults, Name, Term};
@@ -240,6 +241,33 @@ impl<'a> Machine<'a> {
     }
 
     /// Применение к значению головной формы.
+    /// Стёрто ли связывание, в которое пойдёт следующий аргумент.
+    ///
+    /// У лямбды кратность лежит в самом значении. У конструктора и постулата её
+    /// там нет - спайн копится нейтралью, - зато есть тип в сигнатуре, и
+    /// позиция считается по длине спайна: сколько применений уже пришло, столько
+    /// связываний и снято.
+    fn erases(&self, callee: &Rc<Value>) -> bool {
+        match &**callee {
+            // У лямбды кратность связывания **не** признак стирания, и это
+            // измерено: решение дырки терма есть цепочка лямбд по контексту, и
+            // все они стоят при `0` - дырка замкнута и использований не
+            // порождает. Стирать по ней значило бы выбрасывать настоящие
+            // значения: словарь класса приезжает в тело ровно этим спайном.
+            Value::Neutral(Head::Global(name, ..), spine) => {
+                let Some(definition) = self.signature.lookup(name) else {
+                    return false;
+                };
+                let taken = spine
+                    .iter()
+                    .filter(|elim| matches!(elim, Elim::App(_)))
+                    .count();
+                binder_at(&definition.ty, taken).is_some_and(|mult| mult == Mult::Zero)
+            }
+            _ => false,
+        }
+    }
+
     fn applying(
         &self,
         callee: &Rc<Value>,
@@ -296,7 +324,14 @@ impl<'a> Machine<'a> {
     )]
     fn resuming(&self, frame: Frame, value: Rc<Value>, kont: &mut Kont) -> Result<Step, RunError> {
         match frame {
+            // Стёртый аргумент **не вычисляется**: §3.3 обещает, что его в
+            // рантайме нет, и обещание это проверяется здесь, а не откладывается
+            // до понижения (§9 Фаза 6). Вызываемое к этому месту уже посчитано -
+            // порядок «сперва вызываемое» и делает пропуск возможным.
             Frame::Argument(env, argument) => {
+                if self.erases(&value) {
+                    return Ok(Step::Apply(value, Rc::new(Value::Erased)));
+                }
                 kont.push(Frame::Callee(value));
                 Ok(Step::Eval(env, argument))
             }
@@ -549,4 +584,19 @@ struct Resumption {
     segment: Segment,
     invoked: bool,
     multi: bool,
+}
+
+/// Кратность `n`-го связывания типа. `None` - связываний столько нет.
+fn binder_at(ty: &Term, at: usize) -> Option<Mult> {
+    let mut current = ty;
+    for _ in 0..at {
+        let Term::Pi(_, _, _, _, codomain) = current else {
+            return None;
+        };
+        current = codomain;
+    }
+    match current {
+        Term::Pi(binder, ..) => Some(binder.mult),
+        _ => None,
+    }
 }

@@ -56,3 +56,40 @@ nested = same (Cons Zero Nil) (Cons Zero Nil)
 
 ordered : Bool
 ordered = atMost Zero (Succ Zero)
+
+-- Рекурсия под констрейнтом (§10 вопрос 114).
+--
+-- Словарь на ссылке к себе приходит дыркой, и решать её поиском инстансов
+-- негде: `a` здесь переменная. Берётся он из связывания сигнатуры - тем же
+-- ходом, что и у всякого полиморфного употребления класса.
+--
+-- Не писалось это вовсе, и причина была не в классах: разрешение
+-- останавливалось на **первой** нерешённой дырке терма, а у ссылки к себе
+-- раньше словаря стоит её типовой аргумент. Его решить разрешению нечем - и
+-- нечего, - но и прятать за ним словарь оно не вправе.
+elem : {Eqv a} => a -> List a -> Bool
+elem x Nil = False
+elem x (Cons y ys) = if same x y then True else elem x ys
+
+-- То же под констрейнтом с суперклассом.
+biggest : {Ord a} => a -> List a -> a
+biggest best Nil = best
+biggest best (Cons x xs) = if atMost best x then biggest x xs else biggest best xs
+
+-- Два констрейнтных вызова в одном теле: свой и соседний.
+nub : {Eqv a} => List a -> List a
+nub Nil = Nil
+nub (Cons x xs) = if elem x xs then nub xs else Cons x (nub xs)
+
+-- Взаимная рекурсия под констрейнтом.
+mutual
+  evens : {Eqv a} => List a -> List a
+  evens Nil = Nil
+  evens (Cons x xs) = Cons x (odds xs)
+
+  odds : {Eqv a} => List a -> List a
+  odds Nil = Nil
+  odds (Cons x xs) = evens xs
+
+deduped : List Nat
+deduped = nub (Cons Zero (Cons Zero Nil))

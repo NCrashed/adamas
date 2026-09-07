@@ -8,11 +8,11 @@
 --
 -- Многофайловой прелюдии нет: `import` есть лексемой и больше нигде.
 --
--- Две границы найдены сборкой этого файла и обойдены в нём же:
+-- Границы, найденные сборкой этого файла:
 --
---   * **рекурсия под констрейнтом не пишется** (§10 вопрос 114). `elem` и
---     `maximum` живут помощниками без констрейнта, а констрейнт остаётся у
---     обёртки, которая отдаёт словарь обычным аргументом.
+--   * **рекурсия под констрейнтом** не писалась вовсе (§10 вопрос 114,
+--     закрыт логом 2026-09-07): `elem`, `maximum` и `nub` написаны здесь
+--     прямо, и они же были свидетелем правки.
 --   * **метод класса не бывает полиморфным по кратности** (§10 вопрос 115),
 --     поэтому `Functor.map` берёт ω-функцию, и линейную ею не отобразить.
 --     Полиморфный по кратности `mapList` живёт рядом отдельным именем.
@@ -208,22 +208,20 @@ instance Ord Nat where
   lte (Succ k) Zero = False
   lte (Succ k) (Succ m) = lte k m
 
--- Рекурсия живёт в помощнике **без** констрейнта: под констрейнтом она не
--- пишется (§10 вопрос 114). Констрейнт остаётся у обёртки, и словарь она
--- отдаёт помощнику обычным аргументом.
-maximumBy : (ω le : a -> a -> Bool) -> a -> List a -> a
-maximumBy le best Nil = best
-maximumBy le best (Cons x xs) = if le best x then maximumBy le x xs else maximumBy le best xs
-
+-- Рекурсия под констрейнтом: словарь на ссылке к себе берётся из связывания
+-- сигнатуры, а не ищется среди инстансов - искать его там негде, `a` тут
+-- переменная.
 maximum : {Ord a} => a -> List a -> a
-maximum best xs = maximumBy lte best xs
-
-elemBy : (ω same : a -> a -> Bool) -> a -> List a -> Bool
-elemBy same x Nil = False
-elemBy same x (Cons y ys) = if same x y then True else elemBy same x ys
+maximum best Nil = best
+maximum best (Cons x xs) = if lte best x then maximum x xs else maximum best xs
 
 elem : {Eqv a} => a -> List a -> Bool
-elem x xs = elemBy eq x xs
+elem x Nil = False
+elem x (Cons y ys) = if eq x y then True else elem x ys
+
+nub : {Eqv a} => List a -> List a
+nub Nil = Nil
+nub (Cons x xs) = if elem x xs then nub xs else Cons x (nub xs)
 
 -- Алиас-определение: параметризованный.
 Pred : Type -> Type
@@ -251,8 +249,14 @@ fromMaybe : (1 d : a) -> Maybe a -> a
 fromMaybe d Nothing = d
 fromMaybe d (Just x) = x
 
+-- Повтор в списке: без `nub` длина была бы три, с ним - два. Свидетель
+-- обязан различать, иначе он проверяет форму, а не результат.
+repeated : List Nat
+repeated = Cons (Succ Zero) (Cons (Succ (Succ Zero)) (Cons (Succ Zero) Nil))
+
 main : Nat
 main =
   let top : Nat = maximum Zero (collected digits)
   let head : Nat = fromMaybe Zero (safeHead digits)
-  plus top head
+  let kept : Nat = length (nub repeated)
+  plus (plus top head) kept

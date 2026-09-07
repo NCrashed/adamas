@@ -1,0 +1,131 @@
+-- Кооперативный планировщик файберов, написанный на самом языке (§5.2, §9
+-- Фаза 5).
+--
+-- Файбер здесь - захваченное продолжение: `handleMulti` отдаёт ветке резумпцию
+-- кратности `ω`, ветка кладёт её в конструктор и возвращает наружу. Всё
+-- остальное - обычная программа: очередь задач списком, драйвер рекурсией,
+-- результаты завершившихся - списком пар. Машину это не трогает ни строкой.
+--
+-- Планировщик состоит из трёх частей §5.2, и все три работают: уступка
+-- (`yield`), порождение задачи (`spawn`) и ожидание чужого результата
+-- (`await`), причём ожидающий уходит в хвост очереди и добирает ответ позже.
+--
+-- **Продолжение в поле обязано быть чистым, и это не стиль, а ограничение.**
+-- Поле конструктора row-параметра не несёт (§3.4), поэтому написанная у поля
+-- row замкнута, а замкнутая непустая row не гасится ни под какой открытой
+-- окружающей - то есть определение, зовущее эффектную функцию из поля, само
+-- становится незовущимся. Свидетель - `errors/field-effect-undischarged`.
+-- Отсюда форма: хендлер гасит у задачи **всё**, трасса возвращается значением,
+-- а не эффектом.
+--
+-- **Названная цена: сегмент мультишотной резумпции таблица не отпускает.**
+-- Каждая уступка оставляет захваченный сегмент до конца прогона, и рост
+-- измеряется: 50/100/200 уступок дают 8.2/9.5/12.3 МБ - линейно и безвозвратно.
+-- Одношотная резумпция сегмент отпускает после первого возобновления, но она
+-- scope-bound (§3.3) и в очередь не кладётся.
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Maybe (a : Type) where
+  Nothing : Maybe a
+  Just : a -> Maybe a
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+append : List a -> List a -> List a
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+same : Nat -> Nat -> Bool
+same Zero Zero = True
+same Zero (Succ m) = False
+same (Succ k) Zero = False
+same (Succ k) (Succ m) = same k m
+
+effect Async where
+  yield : Nat -> Unit
+  spawn : ({Async} Nat) -> Nat
+  await : Nat -> Nat
+
+-- Где задача остановилась и чем её продолжить. Продолжение чистое: `Async`
+-- снят хендлером, а другого эффекта у задачи нет.
+data Fiber where
+  Finished : Nat -> Fiber
+  Paused : Nat -> (Unit -> Fiber) -> Fiber
+  Spawned : (Unit -> Fiber) -> (Nat -> Fiber) -> Fiber
+  Awaiting : Nat -> (Nat -> Fiber) -> Fiber
+
+-- Один шаг задачи: считает её до ближайшей точки остановки. Резумпция уезжает
+-- в поле, и ради этого хендлер мультишотный - одношотная scope-bound.
+step : ({Async} Nat) -> Fiber
+step c = handleMulti c with
+  return v -> Finished v
+  yield n -> Paused n (\u -> resume MkUnit)
+  spawn b -> Spawned (\u -> step b) (\i -> resume i)
+  await i -> Awaiting i (\r -> resume r)
+
+-- Задача в очереди: свой номер и текущее состояние.
+data Task where
+  MkTask : Nat -> Fiber -> Task
+
+-- Результат завершившейся задачи.
+data Done where
+  MkDone : Nat -> Nat -> Done
+
+answer : Nat -> List Done -> Maybe Nat
+answer i Nil = Nothing
+answer i (Cons (MkDone id v) rest) =
+  case same i id of
+    True -> Just v
+    False -> answer i rest
+
+-- Драйвер: очередь по кругу, номер следующей задачи и готовые результаты.
+-- Ожидающий, чей ответ ещё не готов, уходит в хвост неизменным.
+drive : Nat -> List Task -> List Done -> List Nat
+drive next Nil done = Nil
+drive next (Cons (MkTask id (Finished v)) rest) done =
+  drive next rest (Cons (MkDone id v) done)
+drive next (Cons (MkTask id (Paused n k)) rest) done =
+  Cons n (drive next (append rest (Cons (MkTask id (k MkUnit)) Nil)) done)
+drive next (Cons (MkTask id (Spawned kid back)) rest) done =
+  drive (Succ next)
+    (append rest (Cons (MkTask next (kid MkUnit)) (Cons (MkTask id (back next)) Nil)))
+    done
+drive next (Cons (MkTask id (Awaiting i k)) rest) done =
+  case answer i done of
+    Just v -> drive next (append rest (Cons (MkTask id (k v)) Nil)) done
+    Nothing -> drive next (append rest (Cons (MkTask id (Awaiting i k)) Nil)) done
+
+worker : Nat -> Nat -> {Async} Nat
+worker tag Zero = tag
+worker tag (Succ k) =
+  let u : Unit = yield tag
+  worker tag k
+
+kid : {Async} Nat
+kid = worker 9 2
+
+-- Порождает задачу, уступает, ждёт её ответа и отмечается им.
+boss : {Async} Nat
+boss =
+  let t : Nat = spawn kid
+  let a : Unit = yield 1
+  let r : Nat = await t
+  let b : Unit = yield r
+  r
+
+-- 9 1 9 9: порождённая отмечается первой, дальше по кругу, последняя отметка -
+-- дождавшийся `await` результат.
+main : List Nat
+main = drive 1 (Cons (MkTask Zero (step boss)) Nil) Nil

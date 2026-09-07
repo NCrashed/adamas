@@ -1,0 +1,10 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: field-effect-undischarged.adamas:45:9: эффекты `{Log}` не погашены: вокруг разрешено `{Log | e0}`
+  round = runBox held
+          ^^^^^^^^^^^
+  в контексте:
+    (ω #0 : Unit)
+  путь: тело `round` -> тело лямбды

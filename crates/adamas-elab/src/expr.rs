@@ -28,7 +28,7 @@ use adamas_parser::ast::{
     Symbol, Visibility,
 };
 
-use crate::decl::{CLOSING, MASK};
+use crate::decl::{CLOSING, MASK, NURSERY};
 use crate::error::{ElabError, Missing};
 use crate::fixity::Fixities;
 use crate::live;
@@ -3606,7 +3606,7 @@ impl<'a> Elaborator<'a> {
         // вычисления, где упоминания в точке `handleMulti` нет вовсе. Свойство
         // это принадлежит определению, а не типу, - как и кратность носителя, -
         // и спрашивается обходом тел.
-        if !self.owned.any_resource() {
+        if !self.owned.any_resource() && !self.nursery_known() {
             return Ok(());
         }
         let Some(head) = applied_head(computation) else {
@@ -3623,10 +3623,50 @@ impl<'a> Elaborator<'a> {
         if self.signature.lookup(&head).is_none() {
             return Err(ElabError::MultiWithUnknown { span });
         }
-        if self.holds_resource(&head, &mut Vec::new()) {
+        if self.owned.any_resource() && self.holds_resource(&head, &mut Vec::new()) {
             return Err(ElabError::MultiOverHolder { name: head, span });
         }
+        if self.nursery_known() && self.reaches_nursery(&head, &mut Vec::new()) {
+            return Err(ElabError::MultiOverNursery { name: head, span });
+        }
         Ok(())
+    }
+
+    /// Объявлен ли в программе питомник: постулат `withNursery` без тела.
+    ///
+    /// Условие то же, каким машина решает давать ему тело: имя с телом -
+    /// обычное определение, так назвали своё.
+    fn nursery_known(&self) -> bool {
+        self.signature
+            .lookup(NURSERY)
+            .is_some_and(|it| it.body.is_none())
+    }
+
+    /// Достигает ли определение питомника - собой или через вызов такого.
+    ///
+    /// Обход тот же, что у [`Self::holds_resource`], и довод тот же: свойство
+    /// принадлежит определению, а не типу. Состояние питомника живёт в таблице
+    /// машины, и копия мультишотного сегмента копирует кадр, но не очередь
+    /// (§10 вопрос 125).
+    fn reaches_nursery(&self, name: &str, seen: &mut Vec<Symbol>) -> bool {
+        if name == NURSERY {
+            return self.nursery_known();
+        }
+        if seen.iter().any(|it| &**it == name) {
+            return false;
+        }
+        seen.push(Rc::from(name));
+        // Незнакомое имя - сосед по объявляемой группе: ответ обязан быть
+        // отказом, как у `holds_resource`.
+        let Some(entry) = self.signature.lookup(name) else {
+            return true;
+        };
+        let Some(body) = entry.body.as_ref() else {
+            return false;
+        };
+        let mut called = Vec::new();
+        constants(body, &mut called);
+        called.iter().any(|it| self.reaches_nursery(it, seen))
     }
 
     /// Держит ли определение ресурс - своим связыванием или через вызов такого.

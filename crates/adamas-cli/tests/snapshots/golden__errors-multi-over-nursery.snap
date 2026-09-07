@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: multi-over-nursery.adamas:56:10: `program` запускает питомник, а резумпция `handleMulti` мультишотна: повторное возобновление не переиграет его файберов (§3.4, §5.2)
+  summed = handleMulti program with
+           ^^^^^^^^^^^^^^^^^^^^^^^^

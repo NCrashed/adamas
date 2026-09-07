@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use adamas_core::check::{TypeError, check_closed_with, check_within, infer, is_type};
+use adamas_core::check::{TypeError, check_within, infer, is_type};
 use adamas_core::ctx::Ctx;
 use adamas_core::eval::{eval, quote};
 use adamas_core::level::{Level, LevelVar};
@@ -133,7 +133,7 @@ fn declares_resource(decls: &[ast::Decl]) -> bool {
 /// Точка в имени - то, чего поверхностный лексер не порождает, поэтому
 /// столкнуться с написанным именем квалифицированное не может, а написать его
 /// автор не в состоянии: снаружи модуль читается проекцией.
-fn qualify(within: Option<&Enclosing<'_>>, name: &str) -> Symbol {
+fn qualify(within: Option<&Enclosing>, name: &str) -> Symbol {
     match within {
         Some(outer) => Rc::from(format!("{}.{name}", outer.name).as_str()),
         None => Rc::from(name),
@@ -189,7 +189,7 @@ fn written_alias(
     owned: &Owned,
     fixities: &Fixities,
     instances: &Instances,
-    within: Option<&Enclosing<'_>>,
+    within: Option<&Enclosing>,
     written: &WrittenAlias<'_>,
     span: Span,
 ) -> Result<(), ElabError> {
@@ -283,7 +283,7 @@ fn declared_signature<'a>(
     metas: &mut Metas,
     owned: &Owned,
     fixities: &Fixities,
-    within: Option<&Enclosing<'_>>,
+    within: Option<&Enclosing>,
     name: &ast::Name,
     ty: &'a ast::Expr,
     attributes: &[ast::Name],
@@ -433,7 +433,7 @@ fn outside_a_module(instance: bool) -> (&'static str, &'static str) {
 
 /// Отвергает форму, законную только на верхнем уровне.
 fn only_at_top(
-    within: Option<&Enclosing<'_>>,
+    within: Option<&Enclosing>,
     name: &Symbol,
     why: &'static str,
     span: Span,
@@ -450,8 +450,11 @@ fn only_at_top(
 }
 
 /// Параметры функтора, под которыми объявляется член. Пусто вне функтора.
-fn params_of<'a>(within: Option<&Enclosing<'a>>) -> &'a [ast::Binder] {
-    within.map_or(&[], |it| it.params)
+///
+/// У вложенного модуля это склейка: объемлющие параметры идут первыми, свои
+/// вторыми, и член поднимается под всеми сразу.
+fn params_of(within: Option<&Enclosing>) -> &[ast::Binder] {
+    within.map_or(&[][..], |it| &it.params)
 }
 
 /// Оборачивает тело члена лямбдами по параметрам функтора.
@@ -472,7 +475,7 @@ fn abstracted(params: &[Param], body: Term) -> Term {
 )]
 fn members_into(
     decls: &[ast::Decl],
-    within: Option<&Enclosing<'_>>,
+    within: Option<&Enclosing>,
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &mut Owned,
@@ -597,7 +600,7 @@ fn declare_owned(
     owned: &mut Owned,
     fixities: &Fixities,
     instances: &mut Instances,
-    within: Option<&Enclosing<'_>>,
+    within: Option<&Enclosing>,
     resource: &ast::Resource,
     span: Span,
 ) -> Result<(), ElabError> {
@@ -621,7 +624,7 @@ fn alias(
     signature: &mut Signature,
     metas: &mut Metas,
     known: Known<'_>,
-    within: Option<&Enclosing<'_>>,
+    within: Option<&Enclosing>,
     written: &Aliased<'_>,
     span: Span,
 ) -> Result<(), ElabError> {
@@ -716,7 +719,7 @@ fn declare_module(
     fixities: &mut Fixities,
     instances: &mut Instances,
     warnings: &mut Warnings,
-    within: Option<&Enclosing<'_>>,
+    within: Option<&Enclosing>,
     module: &ast::ModuleDecl,
     span: Span,
 ) -> Result<(), ElabError> {
@@ -725,7 +728,7 @@ fn declare_module(
     sealable(instances, within, module, span)?;
     if module.signature {
         return declare_module_type(
-            signature, metas, owned, fixities, instances, &declared, module, span,
+            signature, metas, owned, fixities, instances, within, &declared, module, span,
         );
     }
     let names = Names::of(&declared, Vec::new());
@@ -734,10 +737,7 @@ fn declare_module(
             signature, metas, owned, fixities, instances, within, module, body, &declared, span,
         );
     }
-    let inner = Enclosing {
-        name: Rc::clone(&declared),
-        params: &module.params,
-    };
+    let inner = Enclosing::nested(within, Rc::clone(&declared), &module.params);
     members_into(
         &module.members,
         Some(&inner),
@@ -750,37 +750,21 @@ fn declare_module(
     )?;
     // Телескоп для самой записи считается **после** членов: граница объявления
     // освобождает дырки, и посчитанный заранее умер бы на первом же члене.
-    let params = Elaborator::new(signature, metas, owned, fixities)
-        .within(within)
-        .telescope(&module.params, true, Mult::Many, Unwritten::Sort)?;
+    //
+    // Связывания двух родов, как у всякого члена: объемлющие параметры, потом
+    // свои. У вложенного модуля первые есть, и без них его запись не собрать -
+    // члены подняты под ними.
+    let mut telescopes = Elaborator::new(signature, metas, owned, fixities).within(within);
+    let outer = telescopes.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
+    let own = telescopes.beneath(&outer, |it| {
+        it.telescope(&module.params, true, Mult::Many, Unwritten::Sort)
+    })?;
+    let params: Vec<Param> = outer.iter().chain(own.iter()).cloned().collect();
 
-    // Поле на каждого объявленного члена, в порядке написания. Клаузы своего
-    // поля не заводят: его завела сигнатура, за которой они идут. Член
-    // функтора поднят вместе с параметрами, поэтому здесь он применяется к
-    // ним - запись собирается уже специализированной.
-    let mut written = Vec::new();
-    for member in &module.members {
-        let Some(name) = member_name(member) else {
-            continue;
-        };
-        let full = qualify(Some(&inner), name);
-        let Some(mut term) = signature.instantiate(&full, metas) else {
-            continue;
-        };
-        for position in 0..params.len() {
-            let index = u32::try_from(params.len() - 1 - position).unwrap_or(u32::MAX);
-            term = Term::App(Rc::new(term), Rc::new(Term::var(index)));
-        }
-        written.push((CoreName::from(&**name), Rc::new(term)));
-    }
-    let object = Term::Object(written.into());
+    let object = module_object(signature, metas, &inner, &module.members, &params);
     // Контекст параметров: тип записи считается под ними, а `Pi` над ним
     // строится тем же телескопом.
-    let mut ctx = Ctx::new(signature);
-    for param in &params {
-        let bound = ctx.eval(&param.ty);
-        ctx = ctx.bind(CoreName::from(&*param.name), param.mult, bound);
-    }
+    let ctx = beneath_params(signature, &params);
     // Аннотация - тип объявления; проверяет соответствие ей `declare`, тем же
     // правилом, что и всякое тело. Без аннотации тип **структурный**: он
     // Аннотация - тип объявления; проверяет соответствие ей `declare`, тем же
@@ -813,17 +797,27 @@ fn declare_module(
         quote(ctx.size(), &ty)
     };
     // Тип модуля-функтора - `Pi` по параметрам, тело - лямбда по ним же.
-    // Видимость здесь **явная**: `OrderedMap IntOrd` пишется, в отличие от
-    // параметров у членов, которые автор не пишет никогда.
-    let ty = params.iter().rev().fold(inner_ty, |codomain, param| {
-        Term::Pi(
-            Binder::explicit(param.mult),
-            CoreName::from(&*param.name),
-            Rc::clone(&param.ty),
-            adamas_core::row::Row::empty(),
-            Rc::new(codomain),
-        )
-    });
+    // Видимость у своих **явная**: `OrderedMap IntOrd` пишется, в отличие от
+    // параметров у членов, которые автор не пишет никогда. У объемлющих
+    // обратное, и по той же причине: `Outer.Inner` изнутри `Outer` пишется без
+    // `Key`, потому что писать эту позицию некому - её подставляет вставка.
+    let piled = |inner: Term, params: &[Param], implicit: bool| {
+        params.iter().rev().fold(inner, |codomain, param| {
+            let binder = if implicit {
+                Binder::implicit(param.mult)
+            } else {
+                Binder::explicit(param.mult)
+            };
+            Term::Pi(
+                binder,
+                CoreName::from(&*param.name),
+                Rc::clone(&param.ty),
+                adamas_core::row::Row::empty(),
+                Rc::new(codomain),
+            )
+        })
+    };
+    let ty = piled(piled(inner_ty, &own, false), &outer, true);
     let body = abstracted(&params, object);
     // Запечатывание - свойство определения, а не значения (§3.5): тело
     // остаётся, а сравнение перестаёт его разворачивать. Без аннотации
@@ -850,13 +844,53 @@ fn declare_module(
     // такой неявно значило бы решать за автора, какая абстракция ему нужна.
     // Функтор тоже не идёт - он сам ждёт аргумента, и реализацией сигнатуры
     // является не он, а его применение.
+    // Вложенный в функтор не идёт по тому же доводу: параметр он несёт, пусть и
+    // не свой, поэтому реализацией сигнатуры является не он, а его применение.
     if !module.sealed
-        && module.params.is_empty()
+        && params.is_empty()
         && let Some(written) = module.ascription.as_ref().and_then(ascription_name)
     {
         instances.implements(&written, &declared);
     }
     Ok(())
+}
+
+/// Контекст, в котором стоят параметры: под ними живут и запись, и её тип.
+fn beneath_params<'a>(signature: &'a Signature, params: &[Param]) -> Ctx<'a> {
+    params.iter().fold(Ctx::new(signature), |ctx, param| {
+        let bound = ctx.eval(&param.ty);
+        ctx.bind(CoreName::from(&*param.name), param.mult, bound)
+    })
+}
+
+/// Запись модуля: поле на каждого объявленного члена, в порядке написания.
+///
+/// Клаузы своего поля не заводят - его завела сигнатура, за которой они идут.
+/// Член функтора поднят вместе с параметрами, поэтому здесь он применяется к
+/// ним: запись собирается уже специализированной.
+fn module_object(
+    signature: &Signature,
+    metas: &mut Metas,
+    within: &Enclosing,
+    members: &[ast::Decl],
+    params: &[Param],
+) -> Term {
+    let mut written = Vec::new();
+    for member in members {
+        let Some(name) = member_name(member) else {
+            continue;
+        };
+        let full = qualify(Some(within), name);
+        let Some(mut term) = signature.instantiate(&full, metas) else {
+            continue;
+        };
+        for position in 0..params.len() {
+            let index = u32::try_from(params.len() - 1 - position).unwrap_or(u32::MAX);
+            term = Term::App(Rc::new(term), Rc::new(Term::var(index)));
+        }
+        written.push((CoreName::from(&**name), Rc::new(term)));
+    }
+    Term::Object(written.into())
 }
 
 /// Ставит непрозрачность поднятым членам - **включая вложенные модули**.
@@ -866,15 +900,17 @@ fn declare_module(
 /// `Outer.Inner.Flag` оставляли прозрачным, и `:>` на двух уровнях не держал
 /// того, что держал на одном. Спуск здесь тот же, что и у подъёма, - иначе два
 /// обхода разъезжаются.
-fn seal_members(signature: &mut Signature, within: &Enclosing<'_>, members: &[ast::Decl]) {
+fn seal_members(signature: &mut Signature, within: &Enclosing, members: &[ast::Decl]) {
     for member in members {
         if let Some(name) = member_name(member) {
             signature.seal(&qualify(Some(within), name));
         }
         if let DeclKind::Module(inner) = &member.kind {
+            // Спуску нужно только имя: запечатывается имя члена, а телескоп в
+            // квалификации не участвует.
             let deeper = Enclosing {
                 name: qualify(Some(within), &inner.name.text),
-                params: within.params,
+                params: Rc::clone(&within.params),
             };
             seal_members(signature, &deeper, &inner.members);
         }
@@ -2346,7 +2382,7 @@ fn mutual_members(members: &[ast::Decl], span: Span) -> Result<Vec<Planned<'_>>,
 }
 /// Формы объявления, которых язык не несёт, - названные границы среза.
 fn writable(
-    within: Option<&Enclosing<'_>>,
+    within: Option<&Enclosing>,
     module: &ast::ModuleDecl,
     span: Span,
 ) -> Result<(), ElabError> {
@@ -2377,17 +2413,30 @@ fn writable(
         }
         return Ok(());
     }
-    // Вложенность внутри функтора не поддержана: члены внутреннего модуля
-    // подняты со **своими** параметрами, а внешние им тоже нужны, и склеивать
-    // два телескопа этот срез не берётся.
-    if within.is_some_and(|it| !it.params.is_empty()) {
+    // Параметр вложенного функтора, названный как у объемлющего, отвергается.
+    // Подстановка параметров у ссылки на соседа ищет их **по имени** (`insert`
+    // изнутри есть `F.insert Key`), и затенённый внешний ей не найти: оба слота
+    // получают внутренний. При одинаковых сигнатурах это молча меняет значение,
+    // при разных приезжает несовпадением типов в чужом месте - измерено зондом.
+    // Написать внешний параметр внутри всё равно нечем, поэтому отказ ничего не
+    // отнимает.
+    let outer = params_of(within);
+    let shadows = names_of(&module.params).any(|own| names_of(outer).any(|it| it == own));
+    if shadows {
         return refuse(
             "теле функтора",
-            "члены вложенного модуля поднимаются со своими параметрами, \
-             а внешние им тоже нужны",
+            "параметр назван так же, как у объемлющего, а подстановка ищет их \
+             по имени, и внешний стал бы недостижим",
         );
     }
     Ok(())
+}
+
+/// Имена связываний телескопа в порядке написания.
+fn names_of(params: &[ast::Binder]) -> impl Iterator<Item = &Symbol> {
+    params
+        .iter()
+        .flat_map(|binder| binder.names.iter().map(|name| &name.text))
 }
 
 /// `module IntMap = OrderedMap IntOrd` - тело написано выражением.
@@ -2402,7 +2451,7 @@ fn declare_module_value(
     owned: &mut Owned,
     fixities: &Fixities,
     instances: &Instances,
-    within: Option<&Enclosing<'_>>,
+    within: Option<&Enclosing>,
     module: &ast::ModuleDecl,
     body: &ast::Expr,
     declared: &Symbol,
@@ -2417,29 +2466,37 @@ fn declare_module_value(
         });
     }
     let names = Names::of(declared, Vec::new());
-    let term = Elaborator::new(signature, metas, owned, fixities)
-        .within(within)
-        .typing(|it| it.expr(body, Mult::Many))?;
-    let ty = if let Some(ascription) = &module.ascription {
+    // Внутри функтора выражение живёт **под его параметрами**: `Twice Key`
+    // называет `Key`, а он связывание, а не имя. Телескоп поэтому тот же, что у
+    // всякого члена, и вне функтора он пуст - тогда остаётся ровно прежнее.
+    let mut elaborator = Elaborator::new(signature, metas, owned, fixities).within(within);
+    let params = elaborator.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
+    let term = elaborator.beneath(&params, |it| it.typing(|it| it.expr(body, Mult::Many)))?;
+    let ctx = beneath_params(signature, &params);
+    let inner_ty = if let Some(ascription) = &module.ascription {
         let written = Elaborator::new(signature, metas, owned, fixities)
             .within(within)
-            .typing(|it| it.expr(ascription, Mult::Many))?;
-        check_closed_with(signature, metas, &term, &written).map_err(|error| ElabError::Core {
+            .beneath(&params, |it| {
+                it.typing(|it| it.expr(ascription, Mult::Many))
+            })?;
+        check_within(&ctx, metas, &term, &written).map_err(|error| ElabError::Core {
             span,
             error: Box::new(error),
             names: names.clone(),
         })?;
         zonk_term(metas, &written)
     } else {
-        let (ty, _) = infer(&Ctx::new(signature), metas, Mult::Many, &term).map_err(|error| {
-            ElabError::Core {
-                span,
-                error: Box::new(error),
-                names: names.clone(),
-            }
+        let (ty, _) = infer(&ctx, metas, Mult::Many, &term).map_err(|error| ElabError::Core {
+            span,
+            error: Box::new(error),
+            names: names.clone(),
         })?;
-        quote(0, &ty)
+        quote(ctx.size(), &ty)
     };
+    let ty = Elaborator::new(signature, metas, owned, fixities)
+        .within(within)
+        .wrapped(&params, true, |_| Ok(inner_ty))?;
+    let term = abstracted(&params, term);
     class::resolve(signature, metas, instances, None, &term, &ty, span)?;
     signature
         .define_opaque(metas, declared, Mult::Many, ty, Some(term), module.sealed)
@@ -2563,7 +2620,7 @@ fn spine(ty: &Term) -> Option<(Symbol, Vec<&Term>)> {
 /// заводится только там, где представление скрыто.
 fn sealable(
     instances: &Instances,
-    within: Option<&Enclosing<'_>>,
+    within: Option<&Enclosing>,
     module: &ast::ModuleDecl,
     span: Span,
 ) -> Result<(), ElabError> {
@@ -2724,6 +2781,7 @@ fn declare_module_type(
     owned: &Owned,
     fixities: &Fixities,
     instances: &mut Instances,
+    within: Option<&Enclosing>,
     declared: &Symbol,
     module: &ast::ModuleDecl,
     span: Span,
@@ -2786,22 +2844,36 @@ fn declare_module_type(
         .filter_map(|it| it.ty)
         .any(crate::expr::writes_effects)
         .then(|| Row::closing([], Some(Tail::Var(RowVar(0)))));
-    let fields = Elaborator::new(signature, metas, owned, fixities)
-        .typing(|it| it.module_members(&members, rowed.as_ref()))?;
+    // Сигнатура внутри функтора поднимается тем же телескопом, что и всякий
+    // член: `Local` объемлющего `Outer (Key : Eqv)` есть `{Key : Eqv} -> Type`,
+    // а её члены вправе называть `Key`. Вне функтора телескоп пуст, и остаётся
+    // ровно прежнее - тип записи без параметров.
+    let mut elaborator = Elaborator::new(signature, metas, owned, fixities).within(within);
+    let params = elaborator.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
+    let fields = elaborator.beneath(&params, |it| {
+        it.typing(|it| it.module_members(&members, rowed.as_ref()))
+    })?;
     let record = Term::Record(Fields::closed(fields.into()));
     let names = Names::of(declared, Vec::new());
-    let level = is_type(&Ctx::new(signature), metas, &record).map_err(|error| ElabError::Core {
+    // Сорт считается **под параметрами**: члены живут под ними, и в пустом
+    // контексте считать запись нечем.
+    let ctx = beneath_params(signature, &params);
+    let level = is_type(&ctx, metas, &record).map_err(|error| ElabError::Core {
         span,
         error: Box::new(error),
         names: names.clone(),
     })?;
+    let sort = Term::Universe(metas.zonk(&level));
+    let ty = Elaborator::new(signature, metas, owned, fixities)
+        .within(within)
+        .wrapped(&params, true, |_| Ok(sort))?;
     signature
         .define_rowed(
             metas,
             declared,
             Mult::Many,
-            Term::Universe(metas.zonk(&level)),
-            Some(record),
+            ty,
+            Some(abstracted(&params, record)),
             u32::from(rowed.is_some()),
         )
         .map_err(|error| ElabError::Core {
@@ -2840,7 +2912,7 @@ fn define(
     signature: &mut Signature,
     metas: &mut Metas,
     known: Known<'_>,
-    within: Option<&Enclosing<'_>>,
+    within: Option<&Enclosing>,
     declared: &Pending<'_>,
     clauses: &[ast::Clause],
     span: Span,
@@ -3611,7 +3683,7 @@ fn family_header<'a>(
     metas: &mut Metas,
     owned: &Owned,
     fixities: &Fixities,
-    within: Option<&Enclosing<'_>>,
+    within: Option<&Enclosing>,
     data: &'a ast::Data,
     span: Span,
 ) -> Result<Family<'a>, ElabError> {
@@ -3685,7 +3757,7 @@ fn family_constructors(
     metas: &mut Metas,
     owned: &Owned,
     fixities: &Fixities,
-    within: Option<&Enclosing<'_>>,
+    within: Option<&Enclosing>,
     family: &Family<'_>,
     visible: &[Member],
 ) -> Result<Vec<(Symbol, Term)>, ElabError> {
@@ -3735,7 +3807,7 @@ fn declare_family(
     metas: &mut Metas,
     owned: &mut Owned,
     fixities: &Fixities,
-    within: Option<&Enclosing<'_>>,
+    within: Option<&Enclosing>,
     data: &ast::Data,
     span: Span,
 ) -> Result<(), ElabError> {
@@ -4449,7 +4521,7 @@ fn declare_data(
     metas: &mut Metas,
     owned: &Owned,
     fixities: &Fixities,
-    within: Option<&Enclosing<'_>>,
+    within: Option<&Enclosing>,
     data: &ast::Data,
     span: Span,
 ) -> Result<(), ElabError> {

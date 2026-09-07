@@ -1,0 +1,83 @@
+-- Вложенность внутри функтора (§4.8).
+--
+-- Член вложенного модуля поднимается под **обоими** телескопами: сперва
+-- параметры объемлющего функтора, потом свои. Изнутри он пишется без них -
+-- их подставляет вставка, ровно как у прямого члена, - а снаружи параметр
+-- решается тем же механизмом, что и у функтора верхнего уровня.
+--
+-- Телескоп нужен всем трём формам модуля одинаково: блоку членов, сигнатуре
+-- и выражению. Двум последним он был пуст и до вложенности - брался у
+-- написанного, а объемлющего не было вовсе, - поэтому `Key` в них не
+-- находился.
+--
+-- Абстрактные типы двух параметров при этом не смешиваются: `Key.T` и `Src.T`
+-- внутри тела - разные типы, и это обычное правило функтора, а не изъян
+-- вложенности.
+--
+-- Проверяется значением: `Succ (Succ Zero)` собран так, что ветвь выбирает
+-- объемлющий параметр, число даёт внутренний, а путь до члена идёт через два
+-- уровня вложенности.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+module type Eqv where
+  type T
+  base : T
+  eq : T -> T -> Bool
+
+module type Sized where
+  size : Nat
+
+module NatEq : Eqv where
+  type T = Nat
+  base : T
+  base = Zero
+  eq : T -> T -> Bool
+  eq Zero Zero = True
+  eq a b = False
+
+module TwoSized : Sized where
+  size : Nat
+  size = Succ (Succ Zero)
+
+module Plain (Key : Eqv) where
+  same : Key.T -> Bool
+  same x = Key.eq x x
+
+module Outer (Key : Eqv) where
+  -- Сигнатура внутри функтора: её члены называют параметр объемлющего.
+  module type Local where
+    pick : Key.T -> Bool
+
+  -- Обычный вложенный модуль, аннотированный ею же.
+  module Impl : Local where
+    pick : Key.T -> Bool
+    pick x = Key.eq x x
+
+  -- Модуль-выражение: аргументом идёт связывание, а не имя.
+  module Applied = Plain Key
+
+  -- Функтор внутри функтора: два телескопа, объемлющий первым.
+  module Inner (Src : Sized) where
+    score : Key.T -> Nat
+    score x = case Key.eq x Key.base of
+      True -> Src.size
+      False -> Zero
+
+  run : Key.T -> Nat
+  run x = case Impl.pick x of
+    True -> case Applied.same x of
+      True -> Inner.score x
+      False -> Zero
+    False -> Zero
+
+module NatOuter = Outer NatEq
+
+main : Nat
+main = Outer.run Zero

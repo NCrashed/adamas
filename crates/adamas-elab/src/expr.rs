@@ -566,19 +566,42 @@ struct Written<'a> {
 /// У функтора член поднят **вместе с параметрами**, поэтому ссылка на него
 /// изнутри применяется к ним: написанное `insert` есть `F.insert Key`.
 #[derive(Clone)]
-pub(crate) struct Enclosing<'a> {
+pub(crate) struct Enclosing {
     /// Имя модуля - им квалифицируются члены.
     pub name: Symbol,
-    /// Параметры функтора как написаны. Пусто - обычный модуль.
+    /// Параметры функтора как написаны, **вместе с объемлющими**. Пусто -
+    /// обычный модуль вне функтора.
     ///
     /// Написанными, а не элаборированными: граница объявления освобождает
     /// дырки (`Metas::release`), и телескоп, посчитанный один раз на всех,
     /// умер бы на первом же члене. Каждый член элаборирует его заново и
     /// обобщает свои уровни сам - применяются они к нему тоже по одному.
-    pub params: &'a [ast::Binder],
+    ///
+    /// Владеющим, а не заимствованным у AST: вложенный модуль внутри функтора
+    /// склеивает два написанных телескопа, и непрерывного среза под них нет.
+    /// `Rc` затем, что `Enclosing` копируется на каждый элаборатор, а копия
+    /// связываний вместе с их типами - обход дерева.
+    pub params: Rc<[ast::Binder]>,
 }
 
-impl Enclosing<'_> {
+impl Enclosing {
+    /// Объемлющий телескоп плюс свой: параметры вложенного модуля идут вторыми.
+    ///
+    /// Порядок не безразличен - тип своего параметра вправе назвать объемлющий
+    /// (`module Inner (Sub : Eqv Key.T)`), а наоборот не бывает.
+    pub(crate) fn nested(outer: Option<&Self>, name: Symbol, own: &[ast::Binder]) -> Self {
+        let params = match outer {
+            Some(outer) if !outer.params.is_empty() => outer
+                .params
+                .iter()
+                .chain(own.iter())
+                .cloned()
+                .collect::<Rc<[_]>>(),
+            _ => Rc::from(own),
+        };
+        Self { name, params }
+    }
+
     /// Имена параметров в порядке написания.
     fn names(&self) -> impl Iterator<Item = &Symbol> {
         self.params
@@ -868,7 +891,7 @@ pub(crate) struct Elaborator<'a> {
     /// Запрещена ли вставка имплиситов ближайшему имени - см. `type_app`.
     bare: bool,
     /// Модуль, чьё тело элаборируется (§4.8). `None` - верхний уровень.
-    enclosing: Option<Enclosing<'a>>,
+    enclosing: Option<Enclosing>,
     /// Именованные инстансы, выбранные `using`: класс и имя (§4.3).
     ///
     /// Выбор действует на **вставку**, а не на разрешение: словарь для
@@ -930,7 +953,7 @@ impl<'a> Elaborator<'a> {
     }
 
     /// То же, внутри тела модуля: короткое имя члена ищется квалифицированным.
-    pub(crate) fn within(mut self, enclosing: Option<&Enclosing<'a>>) -> Self {
+    pub(crate) fn within(mut self, enclosing: Option<&Enclosing>) -> Self {
         self.enclosing = enclosing.cloned();
         self
     }

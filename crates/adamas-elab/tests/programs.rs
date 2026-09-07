@@ -3960,18 +3960,177 @@ leaked = Zero
 #[test]
 fn a_signature_takes_no_parameters() {
     // Параметр делает функцию от интерфейса, а сигнатура интерфейсом и
-    // является. То же и с вложенностью внутри функтора: члены внутреннего
-    // модуля поднялись бы со своими параметрами, а внешние им тоже нужны.
-    for text in [
-        "module type Bad (Key : Eqv) where\n  flag : Bool\n",
-        "module Outer (Key : Eqv) where\n  module Inner where\n    flag : Bool\n    flag = True\n",
-    ] {
-        let error = refused(&format!("{BASE}{EQV}{text}"));
-        assert!(
-            matches!(error, ElabError::ModuleMember { .. }),
-            "для {text:?} получено {error:?}"
-        );
-    }
+    // является.
+    let error = refused(&format!(
+        "{BASE}{EQV}module type Bad (Key : Eqv) where\n  flag : Bool\n"
+    ));
+    assert!(
+        matches!(error, ElabError::ModuleMember { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_nested_module_inherits_the_functor_parameter() {
+    // Член вложенного модуля поднимается под **обоими** телескопами: сперва
+    // параметры объемлющего функтора, потом свои. Изнутри он пишется без них -
+    // их подставляет вставка, как и у прямого члена.
+    let signature = program(&format!(
+        "{BASE}
+module type Eqv where
+  type T
+  eq : T -> T -> Bool
+
+module NatEq : Eqv where
+  type T = Nat
+  eq : T -> T -> Bool
+  eq Zero Zero = True
+  eq a b = False
+
+module Outer (Key : Eqv) where
+  module Inner where
+    same : Key.T -> Key.T -> Bool
+    same x y = Key.eq x y
+
+    data Tag where
+      Yes : Tag
+      No : Tag
+
+    tag : Key.T -> Key.T -> Tag
+    tag x y = case same x y of
+      True -> Yes
+      False -> No
+
+  count : Key.T -> Key.T -> Nat
+  count x y = case Inner.tag x y of
+    Inner.Yes -> Succ Zero
+    Inner.No -> Zero
+
+module NatOuter = Outer NatEq
+
+counted : Nat
+counted = Outer.count Zero Zero
+"
+    ));
+    assert_eq!(value(&signature, "counted"), "Succ Zero");
+}
+
+#[test]
+fn a_nested_functor_carries_both_telescopes() {
+    // Функтор внутри функтора: у члена два параметра, и оба в деле - ветвь
+    // выбирает объемлющий, число даёт внутренний. Сигнатуры разные, поэтому
+    // каждый параметр решается однозначно, а ответ различает их: перепутай
+    // телескоп - и разрешение подставит модуль не той сигнатуры.
+    //
+    // Абстрактные типы двух параметров при этом **не** смешиваются: `Key.T` и
+    // тип внутреннего параметра - разные типы внутри тела, и это не изъян
+    // вложенности, а обычное правило функтора.
+    let signature = program(&format!(
+        "{BASE}
+module type Eqv where
+  type T
+  base : T
+  eq : T -> T -> Bool
+
+module type Sized where
+  size : Nat
+
+module NatEq : Eqv where
+  type T = Nat
+  base : T
+  base = Zero
+  eq : T -> T -> Bool
+  eq Zero Zero = True
+  eq a b = False
+
+module TwoSized : Sized where
+  size : Nat
+  size = Succ (Succ Zero)
+
+module Outer (Key : Eqv) where
+  module Inner (Src : Sized) where
+    score : Nat
+    score = case Key.eq Key.base Key.base of
+      True -> Src.size
+      False -> Zero
+
+scored : Nat
+scored = Outer.Inner.score
+"
+    ));
+    assert_eq!(value(&signature, "scored"), "Succ (Succ Zero)");
+}
+
+#[test]
+fn the_functor_parameter_reaches_all_three_module_forms() {
+    // Форм у модуля три - блок членов, сигнатура, выражение, - и телескоп
+    // объемлющего функтора нужен всем трём одинаково. Сигнатура внутри функтора
+    // и модуль-выражение отказывали «имя `Key` не найдено» и до вложенности:
+    // их телескоп был пуст, потому что брался у написанного, а не у объемлющего.
+    let signature = program(&format!(
+        "{BASE}
+module type Eqv where
+  type T
+  base : T
+  eq : T -> T -> Bool
+
+module NatEq : Eqv where
+  type T = Nat
+  base : T
+  base = Zero
+  eq : T -> T -> Bool
+  eq Zero Zero = True
+  eq a b = False
+
+module Twice (Key : Eqv) where
+  same : Key.T -> Bool
+  same x = Key.eq x x
+
+module Outer (Key : Eqv) where
+  module type Local where
+    pick : Key.T -> Bool
+
+  module Impl : Local where
+    pick : Key.T -> Bool
+    pick x = Key.eq x x
+
+  module Applied = Twice Key
+
+  run : Key.T -> Bool
+  run x = case Impl.pick x of
+    True -> Applied.same x
+    False -> False
+
+answered : Bool
+answered = Outer.run Zero
+"
+    ));
+    assert_eq!(value(&signature, "answered"), "True");
+}
+
+#[test]
+fn a_nested_parameter_may_not_shadow_the_enclosing_one() {
+    // Подстановка параметров у ссылки на соседа ищет их **по имени**, и
+    // затенённый внешний ей не найти: оба слота получили бы внутренний. При
+    // одинаковых сигнатурах это молча меняет значение, при разных приезжает
+    // несовпадением типов в чужом месте. Написать внешний внутри всё равно
+    // нечем, поэтому отказ ничего не отнимает.
+    let error = refused(&format!(
+        "{BASE}
+module type Eqv where
+  type T
+  eq : T -> T -> Bool
+
+module Outer (Key : Eqv) where
+  module Inner (Key : Eqv) where
+    same : Key.T -> Bool
+    same x = Key.eq x x
+"
+    ));
+    assert!(
+        matches!(error, ElabError::ModuleMember { .. }),
+        "получено {error:?}"
+    );
 }
 
 /// Класс с одним методом и инстанс на `Nat` - основа примеров про разрешение.

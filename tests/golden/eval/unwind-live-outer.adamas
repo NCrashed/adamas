@@ -1,0 +1,71 @@
+-- Граница §3.3 на раскрутке: операция деструктора к живому хендлеру работает,
+-- к погибшему - обрывает остаток деструктора (§10 вопрос 128).
+--
+-- Ряд `closeFile` погашен двумя хендлерами: `Tell` стоит снаружи обрыва и
+-- переживает его, `Log` - внутри брошенного сегмента и умирает с ним.
+-- Деструктор зовёт `tell 3`, `note 9`, `tell 4`.
+--
+-- Различающая сила - в составе ответа: `tell 3` дошёл до живого хендлера, и
+-- деструктор после него продолжился; `note 9` пришёлся подавленной метке и
+-- оборвал остаток - `tell 4` не случился. Эффектный деструктор на
+-- исключительном пути работает ровно до первой операции, чей хендлер погиб
+-- вместе с сегментом; реальное закрытие, чей ряд гасится у корня, доходит.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+effect Tell where
+  tell : Nat -> Unit
+
+effect Fail where
+  fail : Bool
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {Log, Tell} Bool
+  closeFile h =
+    let a : Unit = tell 3
+    let b : Unit = note 9
+    let c : Unit = tell 4
+    True
+
+body : File -> {Fail, Log, Tell} Bool
+body h =
+  let n : Bool = fail
+  True
+
+held : {Fail, Log, Tell} Bool
+held = body Open
+
+-- Внутренний Log умрёт вместе с сегментом: ему был отдан `note` деструктора.
+inner : {Fail, Tell} List Nat
+inner = handle held with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+
+-- Fail обрывает: резумпция не звана, сегмент с Log и scope выброшен.
+aborted : {Tell} List Nat
+aborted = handle inner with
+  return v -> v
+  fail -> Nil
+
+-- Живой внешний Tell: 3 обязана дойти, 4 - нет.
+main : List Nat
+main = handle aborted with
+  return v -> v
+  tell n -> Cons n (resume MkUnit)

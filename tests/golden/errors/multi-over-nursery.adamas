@@ -1,0 +1,58 @@
+-- Питомник внутри обрабатываемого вычисления под `handleMulti` (§3.4, §5.2).
+--
+-- Состояние питомника живёт в таблице машины, а не в сегменте стека: копия
+-- мультишотного сегмента копирует кадр питомника, но не его очередь. До этой
+-- проверки программа проходила и считала молча неверно: запаркованный файбер
+-- отрабатывал один раз на два возобновления, значение корня второго прохода
+-- падало в слот мёртвого файбера, и питомник отвечал единицей - `Succ MkUnit`
+-- в позиции `Nat` (§10 вопрос 125).
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+plus : Nat -> Nat -> Nat
+plus Zero m = m
+plus (Succ k) m = Succ (plus k m)
+
+effect Amb where
+  flip : Bool
+
+effect Async where
+  suspend : Unit
+  spawnDetached : ({Async} Unit) -> Unit
+
+withNursery : ({Async, Amb} Nat) -> {Amb} Nat
+
+fiber : {Async} Unit
+fiber =
+  let s : Unit = suspend
+  MkUnit
+
+-- Файбер запаркован в момент захвата: `flip` уходит к хендлеру снаружи
+-- питомника, и сегмент забирает кадр питомника с собой.
+root : {Async, Amb} Nat
+root =
+  let s : Unit = spawnDetached fiber
+  let y : Unit = suspend
+  let b : Bool = flip
+  case b of
+    True -> Succ Zero
+    False -> Succ (Succ Zero)
+
+-- Питомник достигается не литералом в точке `handleMulti`, а через вызов:
+-- проверка идёт обходом тел, как у ресурсов.
+program : {Amb} Nat
+program = withNursery root
+
+summed : Nat
+summed = handleMulti program with
+  return v -> v
+  flip -> plus (resume True) (resume False)

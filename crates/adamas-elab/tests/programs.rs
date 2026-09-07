@@ -7585,8 +7585,9 @@ escapes = handle prod with
 #[test]
 fn an_effect_declares_its_eliminators() {
     // §3.4: `handle e with …` есть применение константы, а не узел ядра.
-    // Объявление заводит две - одношотную и мультишотную, - и различает их
-    // только кратность резумпции.
+    // Объявление заводит три формы: одношотную, мультишотную и
+    // параметризованную. Мультишот отличается кратностью резумпции;
+    // параметризованная - только именем, признак для машины (§10 вопрос 129).
     let signature = program(&format!(
         "{BASE}
 data Unit where
@@ -7597,7 +7598,7 @@ effect State s where
   put : s -> Unit
 "
     ));
-    for name in ["#handle.State", "#handleMulti.State"] {
+    for name in ["#handle.State", "#handleMulti.State", "#handleState.State"] {
         let handler = signature.lookup(name).expect("элиминатор объявлен");
         // Параметров-row два, и роли у них разные (§3.4). ρ - остаток
         // вычисления, глубина хендлера: её несут `resume` и стрелки спайна,
@@ -7626,6 +7627,10 @@ effect State s where
             .replace("(1 computation", "(ω computation"),
         many.to_string()
     );
+    // Параметризованный от одношотного типом не отличается вовсе: ответ
+    // `S -> B` и двухаргументный `resume` строит элаборация формы.
+    let stateful = &signature.lookup("#handleState.State").expect("объявлен").ty;
+    assert_eq!(one.to_string(), stateful.to_string());
 }
 
 #[test]

@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-functor-effects.adamas: проверено, объявлений 38
+functor-effects.adamas: проверено, объявлений 40

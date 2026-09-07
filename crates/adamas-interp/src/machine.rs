@@ -406,6 +406,11 @@ impl<'a> Machine<'a> {
             // следующий из очереди.
             Frame::Nursery(id) => self.nursed(id, &value, kont),
             Frame::Branch(slot) => Ok(self.settled(slot, value, kont)),
+            // Применение ответа параметризованной ветки к состоянию кончилось:
+            // теперь «резумпцию не позвали» действительно значит «мертва».
+            // Повторно перехватывать здесь нечего - ожидающее применение ниже,
+            // если оно есть, принадлежит уже другой резумпции.
+            Frame::Settling(slot) => Ok(self.buried(slot, value, kont)),
             Frame::Closing(close) => {
                 // Нормальный выход: деструктор, потом значение тела.
                 kont.push(Frame::Closed(value));
@@ -510,7 +515,12 @@ impl<'a> Machine<'a> {
     }
 
     /// Заводит резумпцию из сегмента и отдаёт её значением.
-    pub(crate) fn resumption(&self, segment: Segment, multi: bool) -> (Rc<Value>, usize) {
+    pub(crate) fn resumption(
+        &self,
+        segment: Segment,
+        multi: bool,
+        stateful: bool,
+    ) -> (Rc<Value>, usize) {
         let mut table = self.resumptions.borrow_mut();
         if multi {
             self.multishot.set(true);
@@ -520,6 +530,7 @@ impl<'a> Machine<'a> {
             segment,
             invoked: false,
             multi,
+            stateful,
         });
         let value = Rc::new(Value::Neutral(
             Head::Global(
@@ -547,6 +558,14 @@ impl<'a> Machine<'a> {
             .borrow()
             .get(index)
             .is_some_and(|it| it.invoked)
+    }
+
+    /// Параметризован ли хендлер этой резумпции (§10 вопрос 129).
+    pub(crate) fn stateful(&self, index: usize) -> bool {
+        self.resumptions
+            .borrow()
+            .get(index)
+            .is_some_and(|it| it.stateful)
     }
 
     /// Возобновление: сегмент кладётся обратно, значение идёт ему.
@@ -620,15 +639,20 @@ pub(crate) fn constructor(signature: &Signature, name: &Name) -> bool {
     )
 }
 
-/// Запись таблицы резумпций: сегмент, звали ли её и мультишотна ли она.
+/// Запись таблицы резумпций: сегмент, звали ли её, мультишотна ли она и
+/// параметризован ли её хендлер.
 ///
 /// Мультишотность нужна ровно затем, чтобы решить, отпускать ли сегмент после
 /// первого возобновления: у аффинной второго вызова не бывает по построению
-/// (§3.4), а у мультишотной повтор и есть её смысл.
+/// (§3.4), а у мультишотной повтор и есть её смысл. Признак `stateful` нужен
+/// решению о смерти: ветка параметризованного хендлера отвечает функцией от
+/// состояния и зовёт резумпцию при её применении, поэтому «не позвали на
+/// возврате ветки» там не значит «мертва» (§10 вопрос 129).
 struct Resumption {
     segment: Segment,
     invoked: bool,
     multi: bool,
+    stateful: bool,
 }
 
 /// Кратность `n`-го связывания типа. `None` - связываний столько нет.

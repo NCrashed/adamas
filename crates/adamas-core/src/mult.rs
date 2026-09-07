@@ -126,6 +126,18 @@ pub enum Mult {
     Many,
     /// Параметр определения: конкретное значение придёт подстановкой.
     Var(MultVar),
+    /// Параметр **поля записи** (§10 вопрос 115).
+    ///
+    /// Пространство индексов у него своё, и это не украшение. Сегодня у сорта
+    /// ровно один связыватель - определение, - поэтому `MultVar(0)` работает
+    /// именем: ни один обход его не сдвигает. Второй связыватель в общем
+    /// пространстве потребовал бы сдвига во всех обходах сразу, а цена промаха
+    /// там - молча неверный тип. В раздельном промах невозможен: подстановка
+    /// определения на параметр поля просто не попадает.
+    ///
+    /// Инстанцирует его проекция, а на границе с определением - объявление
+    /// метода и члена инстанса: там `Field(i)` переходит в `Var(i)`.
+    Field(MultVar),
     /// Произведение параметров: `q * r` (§10 вопрос 41).
     ///
     /// Пишется там, где кратность связывания зависит сразу от двух параметров:
@@ -182,7 +194,7 @@ impl Mult {
     pub const fn fixed(self) -> Option<Self> {
         match self {
             Self::Zero | Self::One | Self::Many => Some(self),
-            Self::Var(_) | Self::Prod(_) | Self::Sum(_) | Self::Meta(_) => None,
+            Self::Var(_) | Self::Field(_) | Self::Prod(_) | Self::Sum(_) | Self::Meta(_) => None,
         }
     }
 
@@ -222,7 +234,7 @@ impl Mult {
             Self::Zero => usage == Self::Zero,
             Self::One => usage == Self::Zero || usage == Self::One,
             Self::Many => true,
-            Self::Var(_) | Self::Prod(_) | Self::Sum(_) | Self::Meta(_) => false,
+            Self::Var(_) | Self::Field(_) | Self::Prod(_) | Self::Sum(_) | Self::Meta(_) => false,
         }
     }
 }
@@ -250,6 +262,7 @@ impl fmt::Display for Mult {
             Self::One => f.write_str("1"),
             Self::Many => f.write_str("ω"),
             Self::Var(MultVar(index)) => write!(f, "q{index}"),
+            Self::Field(MultVar(index)) => write!(f, "f.q{index}"),
             Self::Prod(product) => joined(f, product.factors(), " * "),
             Self::Sum(sum) => joined(f, sum.summands(), " + "),
             Self::Meta(MultMeta(index)) => write!(f, "?q{index}"),

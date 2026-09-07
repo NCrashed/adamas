@@ -297,6 +297,7 @@ fn rowed_fields(fields: &Fields, arguments: &[Row<Term>]) -> Fields {
             .map(|field| Field {
                 name: Rc::clone(&field.name),
                 mult: field.mult,
+                shape: field.shape,
                 ty: Rc::new(field.ty.substitute_rows(arguments)),
             })
             .collect(),
@@ -307,6 +308,19 @@ fn rowed_fields(fields: &Fields, arguments: &[Row<Term>]) -> Fields {
     }
 }
 
+/// Чьи параметры подставляются - определения или поля записи.
+///
+/// Пространства у них раздельные (§10 вопрос 115), поэтому подстановка обязана
+/// сказать, о чьих идёт речь: иначе аргументы определения переписали бы
+/// параметр поля, и вышел бы молча неверный тип вместо отказа.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// Параметры определения - обычный случай.
+    Definition,
+    /// Собственные параметры поля записи: их инстанцирует проекция.
+    Field,
+}
+
 /// Кратность с подставленными параметрами.
 ///
 /// Произведение и сумма сворачиваются, только когда подставлены **все** их
@@ -314,9 +328,20 @@ fn rowed_fields(fields: &Fields, arguments: &[Row<Term>]) -> Fields {
 /// константного слагаемого и множителя там нет намеренно (§10 вопрос 41);
 /// неподстановка же оставляет кратность неконкретной, то есть ведёт к отказу,
 /// а не к пропуску.
-fn substituted_mult(mult: Mult, arguments: &[Mult]) -> Mult {
+/// Кратность с подставленными параметрами определения - для хранилища дырок.
+#[must_use]
+pub fn substituted_mult_of(mult: Mult, arguments: &[Mult]) -> Mult {
+    substituted_mult(mult, arguments, Scope::Definition)
+}
+
+fn substituted_mult(mult: Mult, arguments: &[Mult], scope: Scope) -> Mult {
     let at = |MultVar(index): MultVar| arguments.get(index as usize).copied();
     match mult {
+        // Параметр поля и параметр определения живут в **разных** пространствах
+        // (§10 вопрос 115): подстановка одного на другой не попадает, и промах
+        // поэтому невозможен - вместо тихой подмены получается несовпадение.
+        Mult::Field(var) if scope == Scope::Field => at(var).unwrap_or(mult),
+        _ if scope == Scope::Field => mult,
         Mult::Var(var) => at(var).unwrap_or(mult),
         Mult::Prod(product) => product
             .factors()
@@ -333,14 +358,15 @@ fn substituted_mult(mult: Mult, arguments: &[Mult]) -> Mult {
 }
 
 /// Поля с подставленными кратностями.
-fn graded(fields: &Fields, arguments: &[Mult]) -> Fields {
-    let at = |mult: Mult| substituted_mult(mult, arguments);
+fn graded(fields: &Fields, arguments: &[Mult], scope: Scope) -> Fields {
+    let at = |mult: Mult| substituted_mult(mult, arguments, scope);
     Fields {
         fields: fields
             .iter()
             .map(|field| Field {
                 name: Rc::clone(&field.name),
                 mult: at(field.mult),
+                shape: field.shape,
                 ty: Rc::new(field.ty.substitute_mults(arguments)),
             })
             .collect(),
@@ -358,6 +384,7 @@ fn substituted(fields: &Fields, arguments: &[Level]) -> Fields {
             .map(|field| Field {
                 name: Rc::clone(&field.name),
                 mult: field.mult,
+                shape: field.shape,
                 ty: Rc::new(field.ty.substitute_levels(arguments)),
             })
             .collect(),
@@ -421,8 +448,38 @@ pub struct Field {
     pub name: Name,
     /// Кратность: сколько раз конструирование расходует значение.
     pub mult: Mult,
-    /// Тип поля, под предыдущими полями.
+    /// Собственные стёртые параметры поля (§10 вопрос 115).
+    ///
+    /// Запись уже телескоп: тип `i`-го поля стоит под `i` связываниями
+    /// предыдущих. Здесь к ним добавляются параметры трёх стёртых сортов -
+    /// уровня, row и кратности, - связанные **у самого поля**. Проекция их
+    /// инстанцирует, как всякая ссылка на определение.
+    pub shape: Shape,
+    /// Тип поля, под предыдущими полями и под своими параметрами.
     pub ty: Rc<Term>,
+}
+
+/// Сколько стёртых параметров связывает поле записи (§10 вопрос 115).
+///
+/// Отдельно от [`crate::sig::Arity`]: у определения уровни бывают **выведены**,
+/// и там третье состояние («ещё не посчитано») существенно. У поля считать
+/// нечего - параметры написаны автором члена, - поэтому здесь три числа.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Shape {
+    /// Параметры уровня.
+    pub levels: u16,
+    /// Параметры row.
+    pub rows: u16,
+    /// Параметры кратности.
+    pub mults: u16,
+}
+
+impl Shape {
+    /// Связывает ли поле хоть что-нибудь.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.levels == 0 && self.rows == 0 && self.mults == 0
+    }
 }
 
 /// Метапеременная терма.
@@ -716,11 +773,23 @@ impl Term {
     /// полиморфное тело проверяется по одному разу на каждую подстановку.
     #[must_use]
     pub fn substitute_mults(&self, arguments: &[Mult]) -> Self {
+        self.substitute_grades(arguments, Scope::Definition)
+    }
+
+    /// То же для собственных параметров **поля** записи (§10 вопрос 115).
+    #[must_use]
+    pub fn substitute_field_mults(&self, arguments: &[Mult]) -> Self {
+        self.substitute_grades(arguments, Scope::Field)
+    }
+
+    /// Подстановка кратностей в названном пространстве.
+    #[must_use]
+    pub fn substitute_grades(&self, arguments: &[Mult], scope: Scope) -> Self {
         if arguments.is_empty() {
             return self.clone();
         }
-        let at = |mult: Mult| substituted_mult(mult, arguments);
-        let recur = |term: &Rc<Self>| Rc::new(term.substitute_mults(arguments));
+        let at = |mult: Mult| substituted_mult(mult, arguments, scope);
+        let recur = |term: &Rc<Self>| Rc::new(term.substitute_grades(arguments, scope));
         match self {
             Self::Var(_)
             | Self::Meta(_)
@@ -758,8 +827,8 @@ impl Term {
                     args.mult_args().iter().map(|mult| at(*mult)),
                 ),
             ),
-            Self::Record(fields) => Self::Record(graded(fields, arguments)),
-            Self::Row(fields) => Self::Row(graded(fields, arguments)),
+            Self::Record(fields) => Self::Record(graded(fields, arguments, scope)),
+            Self::Row(fields) => Self::Row(graded(fields, arguments, scope)),
             Self::Object(fields) => Self::Object(
                 fields
                     .iter()

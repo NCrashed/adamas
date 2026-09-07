@@ -1815,6 +1815,7 @@ fn declare_members(
     if let Some(group) = group {
         signature.declare(metas, &group).map_err(fail)?;
     }
+    kept_promise(signature, members, qualified, span)?;
     for method in qualified {
         carrier::check(signature, owned, method, span)?;
     }
@@ -4534,4 +4535,66 @@ fn superclass_kinds(
         }
     }
     found
+}
+
+/// Выполняет ли каждый член обещание своего поля целиком (§10 вопрос 115).
+///
+/// Поле, объявленное `{q : Mult}`, обещает **все** кратности, и место вызова
+/// инстанцирует `q` по этому обещанию. Член же проверяется перебором
+/// подстановок, как всякое определение, и множество прошедших бывает у́же:
+/// `idy x = x` при `q = 0` не проверяется вовсе - стёртое связывание стоит в
+/// рантайм-позиции.
+///
+/// Перебор объявление уже сделало; сравнить его итог с обещанием поля больше
+/// некому. Разница наружу не уезжала: член ссылается на своё определение с
+/// `Args::none()`, а место вызова идёт по **методу-проекции**, чьё множество
+/// полное, - и нерешённая дырка оседала в наименьшее `0`, отчего линейный
+/// аргумент переставал считаться израсходованным (ревью 2026-09-07).
+///
+/// Замерено: `Idy#File.idy` сужается до `[1, ω]`, тогда как `Functor#List.map`
+/// и `Functor#Maybe.map` остаются полными - правило бьёт по тому, что и правда
+/// невыполнимо.
+///
+/// # Errors
+///
+/// Член проверяется не при всех кратностях, обещанных полем.
+fn kept_promise(
+    signature: &Signature,
+    members: &[Written],
+    qualified: &[Symbol],
+    span: Span,
+) -> Result<(), ElabError> {
+    for ((method, ..), full) in members.iter().zip(qualified) {
+        let (Some(promised), Some(passing)) = (
+            signature.lookup(method).map(|it| &it.mult_allowed),
+            signature.lookup(full).map(|it| &it.mult_allowed),
+        ) else {
+            continue;
+        };
+        let narrower = promised
+            .iter()
+            .zip(passing.iter())
+            .any(|(want, have)| want.iter().any(|value| !have.contains(value)));
+        if narrower {
+            return Err(ElabError::MemberMultiplicity {
+                method: Rc::clone(method),
+                passing: shown_mults(passing),
+                promised: shown_mults(promised),
+                span,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Множества кратностей в сообщении: по параметру, через запятую.
+fn shown_mults(allowed: &[Rc<[adamas_core::mult::Mult]>]) -> String {
+    allowed
+        .iter()
+        .map(|values| {
+            let inner: Vec<String> = values.iter().map(ToString::to_string).collect();
+            format!("{{{}}}", inner.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }

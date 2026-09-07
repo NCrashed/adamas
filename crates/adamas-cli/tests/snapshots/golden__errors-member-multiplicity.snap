@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: member-multiplicity.adamas:34:1: член `idy` проверяется при кратностях {1, ω}, а поле обещает {0, 1, ω}: инстанс обязан выполнять обещание поля целиком
+  instance Idy Bool where
+  ^^^^^^^^^^^^^^^^^^^^^^^

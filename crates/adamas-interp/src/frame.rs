@@ -92,6 +92,13 @@ pub(crate) enum Frame {
     /// раскрутка идёт дальше. Прецедент - suppressed exceptions в Java: там
     /// вторичное исключение из `close` тоже не заменяет первичное.
     Suppressing(Name),
+    /// Питомник: под ним идёт файбер, и ему же файбер отдаёт значение (§5.2).
+    ///
+    /// Номер - запись в таблице питомников: очередь готовых файберов и ответ
+    /// корневого. Рядом со стеком её держать нельзя ровно по той же причине, по
+    /// какой нельзя список деструкторов: кадр уезжает в сегмент резумпции, когда
+    /// файбер производит операцию с хендлером **снаружи** питомника.
+    Nursery(usize),
     /// Ветка хендлера договорила: пора решать, жив ли остаток.
     Branch(usize),
     /// Scope, держащий ресурс: деструктор ждёт выхода.
@@ -113,7 +120,13 @@ pub(crate) enum Mark {
     Masking,
     /// Раскручиваемый хендлер: метка на время деструкторов.
     Suppressing,
+    /// Питомник файберов. Меткой эффекта не бывает: имя его невыразимо, поэтому
+    /// поиск хендлера мимо него проходит, а поиск питомника - находит.
+    Nursery,
 }
+
+/// Невыразимое имя метки питомника.
+pub(crate) const NURSERY: &str = "#nursery";
 
 impl Frame {
     /// Метка кадра, если поиск хендлера его различает.
@@ -122,6 +135,7 @@ impl Frame {
             Self::Handler(handler) => Some((Mark::Handler, Rc::clone(&handler.effect))),
             Self::Masking(name) => Some((Mark::Masking, Rc::clone(name))),
             Self::Suppressing(name) => Some((Mark::Suppressing, Rc::clone(name))),
+            Self::Nursery(_) => Some((Mark::Nursery, Rc::from(NURSERY))),
             _ => None,
         }
     }
@@ -284,6 +298,9 @@ impl Kont {
             }
             match mark {
                 Mark::Masking => masked += 1,
+                // Имя питомника невыразимо и с меткой эффекта не совпадает
+                // никогда: фильтр по имени выше сюда его не пускает.
+                Mark::Nursery => {}
                 Mark::Handler | Mark::Suppressing => {
                     if masked > 0 {
                         masked -= 1;
@@ -299,5 +316,17 @@ impl Kont {
     /// Первый кадр звена - им стоит метка, которую отдал [`Kont::catching`].
     pub(crate) fn guard(&self, link: usize) -> &Frame {
         &self.links[link][0]
+    }
+
+    /// Ближайший питомник: звено и его номер в таблице. `None` - файберов нет.
+    pub(crate) fn nested(&self) -> Option<(usize, usize)> {
+        self.marks
+            .iter()
+            .rev()
+            .find(|(mark, _, _)| *mark == Mark::Nursery)
+            .and_then(|(_, _, at)| match self.guard(*at) {
+                Frame::Nursery(id) => Some((*at, *id)),
+                _ => None,
+            })
     }
 }

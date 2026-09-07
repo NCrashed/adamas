@@ -34,6 +34,7 @@ use adamas_core::term::{Mults, Name, Term};
 use adamas_core::value::{Elim, Value};
 
 use crate::RunError;
+use crate::fiber;
 use crate::frame::{Frame, Handler, Kont, Mark, Segment};
 use crate::machine::{Machine, Step};
 
@@ -65,6 +66,18 @@ impl Machine<'_> {
             }
             return Ok(Some(self.entering(&arguments, kont)?));
         }
+        // Питомник: постулат, чьё тело даёт машина. Тело у имени означает, что
+        // так назвали своё - в питомник его превращать нечего.
+        if &**name == fiber::NURSERY
+            && let Some(definition) = self.signature().lookup(name)
+            && definition.body.is_none()
+        {
+            let arguments = applied(spine);
+            let Some(body) = arguments.first() else {
+                return Ok(None);
+            };
+            return Ok(Some(self.nursing(body, kont)?));
+        }
         if let Some(definition) = self.signature().lookup(name)
             && let DefinitionKind::Operation { effect } = &definition.kind
         {
@@ -74,6 +87,9 @@ impl Machine<'_> {
             let arguments = applied(spine);
             if arguments.len() < arity {
                 return Ok(None);
+            }
+            if let Some(step) = self.scheduled(name, effect, &arguments, kont)? {
+                return Ok(Some(step));
             }
             return self.performed(effect, name, &arguments, kont).map(Some);
         }

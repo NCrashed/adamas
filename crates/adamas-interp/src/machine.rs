@@ -40,6 +40,12 @@ pub struct Machine<'a> {
     /// Работает это ровно потому, что резумпция при `handle` **аффинна**
     /// (§3.4); у `handleMulti` довод не держится, и оттуда ресурсы запрещены.
     resumptions: RefCell<Vec<Resumption>>,
+    /// Питомники по номеру: очередь готовых файберов и ответ корневого.
+    ///
+    /// Рядом со стеком её держать нельзя по той же причине, по какой нельзя
+    /// список деструкторов: кадр питомника уезжает в сегмент резумпции, когда
+    /// файбер производит операцию с хендлером **снаружи** питомника.
+    pub(crate) nurseries: RefCell<Vec<crate::fiber::Nursery>>,
 }
 
 impl std::fmt::Debug for Machine<'_> {
@@ -70,6 +76,7 @@ impl<'a> Machine<'a> {
         Self {
             signature,
             resumptions: RefCell::new(Vec::new()),
+            nurseries: RefCell::new(Vec::new()),
         }
     }
 
@@ -380,6 +387,9 @@ impl<'a> Machine<'a> {
             }
             Frame::Spine(spine, index) => Ok(Self::replaying(value, &spine, index, kont)),
             Frame::Handler(handler) => Ok(Self::handled(value, &handler)),
+            // Файбер договорил: ответ корневого запоминается, дальше идёт
+            // следующий из очереди.
+            Frame::Nursery(id) => self.nursed(id, value, kont),
             Frame::Branch(slot) => Ok(self.settled(slot, value, kont)),
             Frame::Closing(close) => {
                 // Нормальный выход: деструктор, потом значение тела.

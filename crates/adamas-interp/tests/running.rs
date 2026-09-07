@@ -125,12 +125,19 @@ matched = case Succ Zero of
     // типа у `Cons` стёрт. Машина его не вычисляет и не печатает, ядро держит.
     assert_eq!(
         ran(&source, "nested"),
-        "Cons{0} (Succ (Succ (Succ (Succ Zero)))) \
-         (Cons{0} (Succ (Succ (Succ Zero))) (Cons{0} Zero Nil{0}))"
+        "Cons (Succ (Succ (Succ (Succ Zero)))) \
+         (Cons (Succ (Succ (Succ Zero))) (Cons Zero Nil))"
     );
     assert!(
         normalized(&source, "nested").contains("Nat"),
         "ядро стёртый аргумент держит: он стоит в типах"
+    );
+    // Аргумент уровня - та же разница и то же место: `List` полиморфен по
+    // уровню, ядро пишет `Cons{0}`, машина не несёт этого списка вовсе.
+    assert!(!ran(&source, "nested").contains('{'));
+    assert!(
+        normalized(&source, "nested").contains("{0}"),
+        "ядро аргумент уровня держит"
     );
 }
 
@@ -329,7 +336,7 @@ main = handle opened with
     );
     assert_eq!(
         ran(&source, "main"),
-        "Cons{0} (Succ Zero) (Cons{0} (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) Nil{0})"
+        "Cons (Succ Zero) (Cons (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) Nil)"
     );
 }
 
@@ -377,7 +384,7 @@ main = handle guarded with
     );
     assert_eq!(
         ran(&source, "main"),
-        "Cons{0} (Succ Zero) (Cons{0} (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) Nil{0})"
+        "Cons (Succ Zero) (Cons (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) Nil)"
     );
 }
 
@@ -408,7 +415,7 @@ main : List Nat
 main = Cons answer Nil
 "
     );
-    assert_eq!(ran(&source, "main"), "Cons{0} (Succ Zero) Nil{0}");
+    assert_eq!(ran(&source, "main"), "Cons (Succ Zero) Nil");
 }
 
 /// Единица без единственного конструктора: `#closing` не объявляется, и
@@ -494,7 +501,7 @@ main = handle guarded with
     // Отметка тела, затем отметка деструктора: `[1, 9]`.
     assert_eq!(
         ran(&source, "main"),
-        "Cons{0} (Succ Zero) (Cons{0} (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) Nil{0})"
+        "Cons (Succ Zero) (Cons (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) Nil)"
     );
 }
 
@@ -556,7 +563,7 @@ main = handle outer with
     // Отметка тела и отметка деструктора - обе.
     assert_eq!(
         ran(&source, "main"),
-        "Cons{0} (Succ Zero) (Cons{0} (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) Nil{0})"
+        "Cons (Succ Zero) (Cons (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) Nil)"
     );
 }
 
@@ -1052,8 +1059,8 @@ main = handle outer with
     // хендлера, в списке была бы его отметка.
     assert_eq!(
         ran(&source, "main"),
-        "Cons{0} (Succ (Succ Zero)) (Cons{0} (Succ (Succ (Succ Zero))) \
-         (Cons{0} (Succ (Succ (Succ (Succ Zero)))) Nil{0}))"
+        "Cons (Succ (Succ Zero)) (Cons (Succ (Succ (Succ Zero))) \
+         (Cons (Succ (Succ (Succ (Succ Zero)))) Nil))"
     );
 }
 

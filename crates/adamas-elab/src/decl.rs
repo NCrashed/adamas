@@ -3755,6 +3755,16 @@ fn declare_effect(
     };
 
     let label = own_label(effect);
+    // Подъём у операций и у элиминаторов - **одна** переменная (§10 вопрос 120).
+    //
+    // Собственный row-параметр операции есть окружающая места вызова, а под
+    // хендлером она равна `{L | ρ}`: правило погашения §3.4 связывает хвост
+    // вызываемого с хвостом окружающей. Заведи операция свою переменную, тип
+    // ветки унёс бы её в элиминатор, обобщение сделало бы её лишним параметром,
+    // и место применения не решало бы её ничем - всякий `handle` над операцией
+    // с **функциональным** аргументом отвергался «остался неразрешённый хвост
+    // row». Видно это только там, потому что аргумент без стрелки row не носит.
+    let rho = metas.fresh_row();
     let mut operations = Vec::with_capacity(effect.operations.len());
     for operation in &effect.operations {
         let written = performed(&operation.ty, &label);
@@ -3764,7 +3774,10 @@ fn declare_effect(
         // 116). Считаются они тем же элаборатором, что строит тип.
         let mut it =
             Elaborator::with_group(signature, metas, owned, fixities, vec![visible.clone()]);
-        let ty = it.wrapped(&params, true, |it| it.declaration(&written, Mult::Many))?;
+        let lift = rho.clone();
+        let ty = it.wrapped(&params, true, |it| {
+            it.declaration_lifted(&written, Mult::Many, lift)
+        })?;
         let grades = it.grade_arity();
         let ty = grounded(&zonk_term(metas, &ty), params.len(), true);
         operations.push((&*operation.name.text, ty, suspended, grades));
@@ -3778,10 +3791,13 @@ fn declare_effect(
         let ty = handler_type(
             signature,
             metas,
-            &kind,
-            &effect.name.text,
-            &operations,
-            resumed,
+            &Handled {
+                kind: &kind,
+                label: &effect.name.text,
+                operations: &operations,
+                resumed,
+                rho: rho.clone(),
+            },
             span,
         )?;
         handlers.push((format!("{prefix}.{}", effect.name.text), ty));
@@ -4062,15 +4078,35 @@ fn mask_type(
         }))
 }
 
+/// Объявляемая метка глазами её элиминатора.
+struct Handled<'a> {
+    /// Сорт формера метки: по нему снимаются её параметры.
+    kind: &'a Term,
+    /// Имя метки.
+    label: &'a str,
+    /// Операции: имя, тип, синтезирован ли триггер сахаром, арность кратностей.
+    operations: &'a [(&'a str, Term, bool, u32)],
+    /// Кратность резумпции - ею и различаются два элиминатора.
+    resumed: Mult,
+    /// Подъём, общий у элиминатора с операциями (§10 вопрос 120).
+    rho: Row<Term>,
+}
+
 fn handler_type(
     signature: &Signature,
     metas: &mut Metas,
-    kind: &Term,
-    label: &str,
-    operations: &[(&str, Term, bool, u32)],
-    resumed: Mult,
+    handled: &Handled<'_>,
     span: Span,
 ) -> Result<Term, ElabError> {
+    let Handled {
+        kind,
+        label,
+        operations,
+        resumed,
+        rho,
+    } = handled;
+    let (kind, label, operations) = (*kind, *label, *operations);
+    let (resumed, rho) = (*resumed, rho.clone());
     let missing = || ElabError::UnknownName {
         name: Rc::from(UNIT),
         span,
@@ -4081,7 +4117,6 @@ fn handler_type(
     };
     let only = Rc::clone(only);
     let trivial = signature.instantiate(&only, metas).ok_or_else(missing)?;
-    let rho = metas.fresh_row();
     let lambda = metas.fresh_row();
 
     // Параметры метки повторяются у элиминатора implicit-связываниями: писать

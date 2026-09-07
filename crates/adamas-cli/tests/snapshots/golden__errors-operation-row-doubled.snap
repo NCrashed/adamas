@@ -1,0 +1,12 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: operation-row-doubled.adamas:44:16: эффекты `{Log, Log | e0}` не погашены: вокруг разрешено `{Log | e0}`
+  sequential c = handle c with
+                 ^^^^^^^^^^^^^
+  в контексте:
+    (ω c : (ω _ : Unit) -> {Async, Log | e0} Unit)
+    (ω b : (ω _ : Unit) -> {Async, Log, Log | e0} Unit)
+    (1 resume : (ω _ : Unit) -> {Log | e0} (\(0 m0) -> Unit) c)
+  путь: тело `sequential` -> тело лямбды -> аргумент применения -> тело лямбды -> тело лямбды -> аргумент применения

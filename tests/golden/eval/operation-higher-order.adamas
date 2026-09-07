@@ -13,7 +13,15 @@
 -- операции есть окружающая места вызова, а под хендлером она равна `{L | ρ}`.
 --
 -- Здесь стоит самая тяжёлая форма аргумента - приостановленное вычисление
--- **своей же** метки, то есть то, что берёт `spawnDetached` (§5.2).
+-- **своей же** метки, то есть то, что берёт `spawnDetached` (§5.2), - и ветка
+-- его **запускает**, а не выбрасывает: это последовательный планировщик, мимо
+-- которого §5.2 идёт к файберам.
+--
+-- Операция пишет в аргументе одну свою метку, а не весь ряд. Написать там
+-- `{Async, Log}` можно, но под хендлером, чья окружающая уже несёт `Log`,
+-- подъём допишет остаток и метка удвоится - `{Async, Log, Log | e0}`, - после
+-- чего аргумент не гасится ничем. Остальное приезжает подъёмом, и это не
+-- сокращение записи, а то, ради чего auto-lift и заведён (§3.4).
 
 data Unit where
   MkUnit : Unit
@@ -31,7 +39,7 @@ effect Log where
 
 effect Async where
   step : Unit
-  fork : ({Async, Log} Unit) -> Unit
+  fork : ({Async} Unit) -> Unit
 
 child : {Async, Log} Unit
 child =
@@ -45,18 +53,25 @@ parent =
   let b : Unit = step
   note 1
 
--- Уступка ничего не делает, порождённое выбрасывается: вырожденный
--- последовательный планировщик, который до правки не типизировался вовсе.
-sequential : ({Async, Log} Unit) -> {Log} Unit
-sequential c = handle c with
+-- Вложенного порождения у ребёнка нет: его ветка тело выбрасывает.
+runChild : ({Async, Log} Unit) -> {Log} Unit
+runChild c = handle c with
   return v -> v
   step -> resume MkUnit
   fork b -> resume MkUnit
 
+-- Уступка ничего не делает, порождённое исполняется на месте: ветка получает
+-- чужое вычисление и запускает его. До правки не типизировалось вовсе.
+sequential : ({Async, Log} Unit) -> {Log} Unit
+sequential c = handle c with
+  return v -> v
+  step -> resume MkUnit
+  fork b -> resume (runChild b)
+
 program : {Log} Unit
 program = sequential parent
 
--- 1 1: обе отметки родителя и ни одной от выброшенного порождения.
+-- 1 9 9 1: порождённое договаривает целиком там, где было порождено.
 main : List Nat
 main = handle program with
   return v -> Nil

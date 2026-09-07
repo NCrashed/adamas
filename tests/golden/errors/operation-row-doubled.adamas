@@ -1,0 +1,47 @@
+-- Написанный в аргументе операции ряд удваивает метку (§3.4).
+--
+-- `fork : ({Async, Log} Unit) -> Unit` выглядит точнее, чем `({Async} Unit)`, и
+-- ошибается ровно этим: подъём дописывает **остаток** окружающей, а под
+-- хендлером, гасящим `Async`, остаток и есть `{Log | e0}`. Аргумент получает
+-- `{Async, Log, Log | e0}`, и запустить его в ветке нечем - окружающая несёт
+-- `Log` однажды.
+--
+-- Метку в аргументе пишут одну, свою; остальное приезжает подъёмом, и это не
+-- сокращение записи, а то, ради чего auto-lift и заведён.
+--
+-- Голден стоит здесь ещё и потому, что показывает **починенную диагностику**.
+-- До 2026-09-07 отказ выходил наружу как «`resume` привязано к своему scope и
+-- возвращается» - про имя, которое ни при чём: пробная проверка аргумента не
+-- проходила, тип результата применения терялся целиком, применение по умолчанию
+-- считалось недоприменённым, и срабатывало правило §3.3. Настоящая причина не
+-- показывалась вовсе.
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+effect Async where
+  step : Unit
+  fork : ({Async, Log} Unit) -> Unit
+
+runChild : ({Async, Log} Unit) -> {Log} Unit
+runChild c = handle c with
+  return v -> v
+  step -> resume MkUnit
+  fork b -> resume MkUnit
+
+sequential : ({Async, Log} Unit) -> {Log} Unit
+sequential c = handle c with
+  return v -> v
+  step -> resume MkUnit
+  fork b -> resume (runChild b)

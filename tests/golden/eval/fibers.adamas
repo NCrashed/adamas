@@ -107,8 +107,11 @@ drive next (Cons (MkTask id (Awaiting i k)) rest) done =
     Just v -> drive next (append rest (Cons (MkTask id (k v)) Nil)) done
     Nothing -> drive next (append rest (Cons (MkTask id (Awaiting i k)) Nil)) done
 
+-- Ответ отличается от того, что файбер уступает: пока `worker tag Zero = tag`,
+-- дожданное значение совпадало с меткой, и «что ему принесли» было
+-- ненаблюдаемо - наблюдалось только «возобновился» (ревью 2026-09-07).
 worker : Nat -> Nat -> {Async} Nat
-worker tag Zero = tag
+worker tag Zero = Succ tag
 worker tag (Succ k) =
   let u : Unit = yield tag
   worker tag k

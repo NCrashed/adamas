@@ -43,14 +43,14 @@ plus : Nat -> Nat -> Nat
 plus a b = a + b
 
 applied : Nat
-applied = (\f -> f) plus (Succ Zero) (Succ Zero)
+applied = (\f -> f) plus (Succ Zero) (Succ (Succ Zero))
 
 -- Параметров больше, чем аргументов: остаток лямбды остаётся лямбдой, и его
 -- принимает написанный тип связывания.
 partial : Nat
 partial =
   let f : Nat -> Nat = (\x y -> y) True
-  f (Succ (Succ Zero))
+  f (Succ (Succ (Succ (Succ (Succ Zero)))))
 
 -- Редекс внутри редекса: тело первого связывания само им является.
 nested : Bool
@@ -64,5 +64,20 @@ twice = (\n -> n + n) (Succ Zero)
 ignored : Bool
 ignored = (\_ -> True) Zero
 
+-- Значения разведены намеренно: пока все три были двойкой, их перестановка
+-- была ненаблюдаема. Булевы формы входят через `mark`: без них `plain`,
+-- `second`, `nested` и `ignored` не участвовали ни в чём, и перевёрнутое
+-- значение у любой из них проходило молча (ревью 2026-09-07).
+mark : Bool -> Nat
+mark False = Zero
+mark True = Succ Zero
+
 main : List Nat
-main = Cons applied (Cons partial (Cons twice Nil))
+main =
+  Cons applied
+    (Cons partial
+      (Cons twice
+        (Cons (mark plain)
+          (Cons (mark second)
+            (Cons (mark nested)
+              (Cons (mark ignored) Nil))))))

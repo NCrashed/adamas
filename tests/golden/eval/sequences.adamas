@@ -55,7 +55,36 @@ walked xs =
 collected : {Log} List Nat
 collected = walked (Cons Zero (Cons (Succ Zero) Nil))
 
-main : List Nat
-main = handle collected with
+append : List Nat -> List Nat -> List Nat
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+-- Отметки **собираются**, а не гасятся: с `emit n -> resume MkUnit` аргумент
+-- операции пропадал, и первый оператор цепочки лямбды в ответ не попадал
+-- вовсе (ревью 2026-09-07).
+walkedOut : List Nat
+walkedOut = handle collected with
   return v -> v
-  emit n -> resume MkUnit
+  emit n -> Cons n (resume MkUnit)
+
+-- `branched` - единственный свидетель цепочки в теле **ветки** `of` (§10
+-- вопрос 55), и из ответа он был недостижим. Обе ветви входят: одна
+-- отмечается и даёт единицу, другая молчит и даёт ноль.
+taken : {Log} Nat
+taken = branched True
+
+skipped : {Log} Nat
+skipped = branched False
+
+branchOut : List Nat
+branchOut = handle taken with
+  return v -> Cons v Nil
+  emit n -> Cons n (resume MkUnit)
+
+branchSkip : List Nat
+branchSkip = handle skipped with
+  return v -> Cons v Nil
+  emit n -> Cons n (resume MkUnit)
+
+main : List Nat
+main = append walkedOut (append branchOut branchSkip)

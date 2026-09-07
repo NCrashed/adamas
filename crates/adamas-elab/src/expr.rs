@@ -3598,6 +3598,29 @@ impl<'a> Elaborator<'a> {
         called.iter().any(|it| self.holds_resource(it, seen))
     }
 
+    /// Результат типа: то, что остаётся, когда сняты все связывания.
+    ///
+    /// Считается **вычислением**, а не обходом терма (§10 вопрос 113): δ-разворот
+    /// и бета там даровые, и применённый алиас разворачивается сам. Обход по
+    /// терму разворачивал только голову спайна - `Comp = {ε} A` он снимал, а
+    /// `Amb1 Nat` нет, потому что применить развёрнутую голову к аргументу ему
+    /// было нечем. Оттого `let 1 c : Amb1 Nat = …` под `handle` ставил ожидаемым
+    /// результатом сам алиас.
+    ///
+    /// Кодомен спрашивается у нейтрали текущей глубины: зависимости результата
+    /// от связывания здесь не предполагается, и то же допущение стояло у обхода
+    /// по терму - он связывание попросту отбрасывал.
+    fn peeled(&mut self, ty: &Rc<Value>) -> Rc<Value> {
+        let mut current = whnf_solved(self.signature, self.metas, ty);
+        loop {
+            let Value::Pi(_, _, _, _, codomain) = &*current else {
+                return current;
+            };
+            let next = codomain.clone().apply(Value::var(Lvl(self.ctx.size())));
+            current = whnf_solved(self.signature, self.metas, &next);
+        }
+    }
+
     /// Вычисление под хендлером: терм, остаток row и аргументы снятой метки.
     ///
     /// Тип написанного спрашивается **синтезом**, и потому лямбда сюда не
@@ -3626,8 +3649,8 @@ impl<'a> Elaborator<'a> {
             .flatten();
         if let Some(ty) = &awaited {
             self.expected = pi_arguments(ty, self.owned);
-            let result = peeled(self.signature, ty);
-            self.result = Some(self.typed(&result));
+            let value = self.typed(ty);
+            self.result = Some(self.peeled(&value));
         }
         let value = self.expr(computation, Mult::Many)?;
         let ty = match &awaited {
@@ -4864,9 +4887,8 @@ impl<'a> Elaborator<'a> {
         // кратности у него.
         self.expected = pi_arguments(&ty, self.owned);
         // Аннотация снята до конца - остаток и есть ожидаемый результат.
-        let result = peeled(self.signature, &ty);
-        self.result = Some(self.typed(&result));
         let annotation = self.typed(&ty);
+        self.result = Some(self.peeled(&annotation));
         let value = self.expr(&binding.body, Mult::Many)?;
         // Аннотация и есть ожидаемый тип - `let n : Bool = get` исполняет,
         // `let f : {State Bool} Bool = get` передаёт (§3.4).
@@ -5927,32 +5949,6 @@ fn constants(term: &Term, into: &mut Vec<CoreName>) {
             for field in fields.fields.iter() {
                 constants(&field.ty, into);
             }
-        }
-    }
-}
-
-/// Результат типа: то, что остаётся, когда сняты все связывания.
-///
-/// Алиас по дороге **разворачивается**: `Comp = {ε} A` есть стрелка, и
-/// результат у неё - `A`, а не сам `Comp` (§10 вопрос 106). Без разворота
-/// `let c : Comp = …` ставил ожидаемым результатом `Comp`, и хендлер сравнивал
-/// его с настоящим ответом - две разные вещи под одним `let`.
-///
-/// Разворот идёт только по имени **без** row-аргументов: подстановка row по
-/// терму δ-разворот обслужить не может (§3.2), а алиас с row-параметром сюда не
-/// доходит - его тип уже не голый универсум.
-fn peeled(signature: &Signature, ty: &Term) -> Term {
-    let mut current = ty.clone();
-    loop {
-        match &current {
-            Term::Pi(_, _, _, _, codomain) => current = (**codomain).clone(),
-            Term::Const(name, levels, args) if args.is_empty() => {
-                let Some(body) = signature.lookup(name).and_then(|it| it.body.as_ref()) else {
-                    return current;
-                };
-                current = body.substitute_levels(levels);
-            }
-            _ => return current,
         }
     }
 }

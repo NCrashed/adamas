@@ -58,6 +58,18 @@ pub struct Instances {
     /// тип несколько (§4.3). Пока такой один, разрешение берёт его само;
     /// несколько - отказ с требованием `using`.
     named: HashMap<(Symbol, Rc<[Symbol]>), Vec<Symbol>>,
+    /// Модули, аннотированные сигнатурой: сигнатура - список её реализаций.
+    ///
+    /// Нужны implicit-параметру функтора (`module Sorted {Key : Ordered}`,
+    /// §4.8): он апплицируется без явного аргумента «через тот же механизм
+    /// резолвинга, что и class-инстансы», и механизм этот - вот он. Список, а
+    /// не один: реализаций сигнатуры бывает несколько, и тогда выбор за
+    /// автором, а не за разрешением.
+    ///
+    /// Запечатанные (`:>`) сюда не идут: снаружи их представление скрыто, и
+    /// подставлять такой модуль неявно значило бы решать за автора, какая из
+    /// абстракций ему нужна.
+    implementations: HashMap<Symbol, Vec<Symbol>>,
 }
 
 /// Чем разрешение отвечает на пару «класс, голова».
@@ -111,6 +123,26 @@ pub struct Class {
 }
 
 impl Instances {
+    /// Запоминает, что модуль реализует сигнатуру (§4.8).
+    pub fn implements(&mut self, signature: &Symbol, module: &Symbol) {
+        self.implementations
+            .entry(Rc::clone(signature))
+            .or_default()
+            .push(Rc::clone(module));
+    }
+
+    /// Единственная реализация сигнатуры. `None` - ни одной либо несколько.
+    ///
+    /// Несколько - не отказ разрешения, а отказ **выбирать за автора**: то же
+    /// правило, что у именованных инстансов (§4.3).
+    #[must_use]
+    pub fn implementation(&self, signature: &str) -> Option<&Symbol> {
+        match self.implementations.get(signature)?.as_slice() {
+            [only] => Some(only),
+            _ => None,
+        }
+    }
+
     /// Объявлен ли класс с таким именем.
     #[must_use]
     pub fn is_class(&self, name: &str) -> bool {
@@ -280,6 +312,14 @@ fn settle(
         // `Eqv ((\m -> Nat) x)` синтаксически головы не имеет. Тот же порядок,
         // что у носителей: сперва вычислить, потом читать голову.
         let goal = normalized(signature, &ty);
+        // Implicit-параметр функтора: цель есть **имя сигнатуры** без
+        // аргументов, и разрешается она модулем, который её реализует (§4.8).
+        // Проверяется раньше класса потому, что `applied` требует непустого
+        // спайна, а у сигнатуры его нет вовсе.
+        if let Some(solution) = implementing(signature, metas, instances, &ty) {
+            metas.solve_term(meta, solution);
+            continue;
+        }
         // Дырка не про класс - её сюда и не звали: решить её могла только
         // унификация, и о том, что не решила, скажет объявление.
         let Some((class, head)) = applied(signature, &goal) else {
@@ -406,6 +446,44 @@ pub(crate) fn goal_of(ty: &Term) -> &Term {
     current
 }
 
+/// Модуль, реализующий сигнатуру-цель, готовым решением дырки (§4.8).
+///
+/// Тип дырки - телескоп по контексту, оканчивающийся целью, а сама дырка
+/// применена к контексту целиком. Значит решение обязано быть лямбдой по тому
+/// же телескопу: `\x0 … xn -> NatOrd`. Без обёртки подставленный модуль
+/// оказывается применённым к аргументам вызова - `(NatOrd a b).T` вместо
+/// `NatOrd.T` (проверено).
+///
+/// Цель у сигнатуры - **имя без аргументов**, поэтому путь через `applied` ей
+/// не годится: тот требует непустого спайна.
+fn implementing(
+    signature: &Signature,
+    metas: &mut Metas,
+    instances: &Instances,
+    ty: &Term,
+) -> Option<Rc<Value>> {
+    let mut binders = Vec::new();
+    let mut current = ty;
+    while let Term::Pi(binder, name, _, _, codomain) = current {
+        binders.push((binder.mult, Rc::clone(name)));
+        current = codomain;
+    }
+    let Term::Const(goal, ..) = current else {
+        return None;
+    };
+    let module = instances.implementation(goal)?;
+    let term = signature.instantiate(module, metas)?;
+    let solution = binders.iter().rev().fold(term, |body, (mult, name)| {
+        Term::Lam(*mult, Rc::clone(name), Rc::new(body))
+    });
+    // Решение проверяется против типа дырки: цель полиморфна по уровню
+    // (`Ordered ?0`), а реализация - нет, и связать `?0` может только это
+    // сравнение. Замерено: арность уровня у сигнатуры 1, у модуля 0, поэтому
+    // ни передать уровни цели, ни завести свежие не выходит.
+    let ctx = adamas_core::ctx::Ctx::new(signature);
+    adamas_core::check::check_within(&ctx, metas, &solution, ty).ok()?;
+    Some(adamas_core::ctx::Ctx::new(signature).eval(&solution))
+}
 /// Связывание контекста, чей тип и есть цель.
 ///
 /// Тип дырки - телескоп по контексту, оканчивающийся целью, а сама дырка

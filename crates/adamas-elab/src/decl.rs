@@ -842,6 +842,20 @@ fn declare_module(
     if module.sealed {
         seal_members(signature, &inner, &module.members);
     }
+    // Модуль, аннотированный сигнатурой, становится кандидатом для
+    // implicit-параметра функтора (§4.8): тот апплицируется без явного
+    // аргумента «через тот же механизм резолвинга, что и class-инстансы».
+    //
+    // Запечатанный не идёт: снаружи его представление скрыто, и подставлять
+    // такой неявно значило бы решать за автора, какая абстракция ему нужна.
+    // Функтор тоже не идёт - он сам ждёт аргумента, и реализацией сигнатуры
+    // является не он, а его применение.
+    if !module.sealed
+        && module.params.is_empty()
+        && let Some(written) = module.ascription.as_ref().and_then(ascription_name)
+    {
+        instances.implements(&written, &declared);
+    }
     Ok(())
 }
 

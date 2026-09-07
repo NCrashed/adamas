@@ -91,7 +91,7 @@ struct Fiber {
 #[derive(Default)]
 pub(crate) struct Nursery {
     /// Готовые к исполнению, в порядке круга.
-    queue: Vec<Fiber>,
+    queue: std::collections::VecDeque<Fiber>,
     /// Ждущие чужого ответа: номер ожидаемого файбера и сам ждущий.
     ///
     /// Ждущий стоит **не** в очереди: круг его не касается, пока ожидаемый не
@@ -194,7 +194,7 @@ impl Machine<'_> {
                     if let Suspended::Parked(_, answer) = &mut waiting.state {
                         *answer = Rc::clone(value);
                     }
-                    nursery.queue.push(waiting);
+                    nursery.queue.push_back(waiting);
                 } else {
                     nursery.blocked.push((awaited, waiting));
                 }
@@ -215,7 +215,7 @@ impl Machine<'_> {
         // питомником, а не под чужим.
         let segment = kont.cut(link);
         let current = self.halted(id, segment)?;
-        self.nurseries.borrow_mut()[id].queue.push(current);
+        self.nurseries.borrow_mut()[id].queue.push_back(current);
         self.scheduling(id, kont)
     }
 
@@ -276,7 +276,7 @@ impl Machine<'_> {
             let nursery = &mut table[id];
             let fiber = nursery.next;
             nursery.next += 1;
-            nursery.queue.push(Fiber {
+            nursery.queue.push_back(Fiber {
                 id: fiber,
                 root: false,
                 state: Suspended::Fresh(body),
@@ -357,7 +357,7 @@ impl Machine<'_> {
     pub(crate) fn parked_of(&self, id: usize) -> Option<Segment> {
         let mut table = self.nurseries.borrow_mut();
         let nursery = &mut table[id];
-        while let Some(fiber) = nursery.queue.pop() {
+        while let Some(fiber) = nursery.queue.pop_back() {
             if let Suspended::Parked(segment, _) = fiber.state {
                 return Some(segment);
             }
@@ -381,13 +381,26 @@ impl Machine<'_> {
                 if !nursery.blocked.is_empty() {
                     return Err(RunError::Deadlock);
                 }
+                // Питомник договорил: содержимое записи больше не нужно, а
+                // место в таблице остаётся - номер его несёт кадр, и сдвигать
+                // индексы нечем. Пока `done` держал ответ **каждого** файбера,
+                // включая корневой и `spawnDetached`, у которого дождаться
+                // некому, программа с `withNursery` в цикле росла по числу
+                // **завершённых** питомников: 11 МБ у контроля против 34 на
+                // двухстах раундах (ревью 2026-09-07).
                 let result = nursery.result.take();
+                nursery.done = Vec::new();
+                nursery.queue = std::collections::VecDeque::new();
+                nursery.blocked = Vec::new();
                 return match result {
                     Some(value) => Ok(Step::Return(value)),
                     None => Ok(Step::Return(self.unit()?)),
                 };
             }
-            nursery.queue.remove(0)
+            nursery
+                .queue
+                .pop_front()
+                .unwrap_or_else(|| unreachable!("очередь проверена непустой"))
         };
         self.nurseries.borrow_mut()[id].running = Some((next.id, next.root));
         match next.state {

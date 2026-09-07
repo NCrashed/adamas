@@ -1,0 +1,81 @@
+-- Обрыв питомника снаружи и деструктор уступившей задачи (§3.3, §5.2).
+--
+-- Файберы, ушедшие из круга, живут сегментами в таблице машины, а не на стеке,
+-- поэтому в выброшенный сегмент они не входят. Раскрутка их не находила, и
+-- `Closing` внутри уступившей задачи не отрабатывал никогда: ответ был `[1]`
+-- вместо `[1, 7]` (ревью 2026-09-07).
+--
+-- §5.2 этим не покрыта. Там заявлено, что настоящей отмены нет и недожданная
+-- задача **договаривает**; здесь она не делала ни того, ни другого. §3.3 же
+-- требует деструктора при любой политике отмены.
+--
+-- Различающая сила - в семёрке: она приходит только с раскруткой сегмента,
+-- который лежит в таблице. Тело задачи при этом не досчитывается, и это верно:
+-- задача оборвана, а не завершена.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+effect Fail where
+  fail : Bool
+
+effect Async where
+  suspend : Unit
+  spawnDetached : ({Async, Log} Unit) -> Unit
+
+withNursery : ({Async, Fail, Log} Unit) -> {Fail, Log} Unit
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {Log} Bool
+  closeFile h =
+    note 7
+    True
+
+-- Задача берёт ресурс, отмечается единицей и уступает. Второй отметки после
+-- уступки не будет: корневой оборвёт питомник, пока она стоит в очереди.
+child : File -> {Async, Log} Unit
+child h =
+  note 1
+  let s : Unit = suspend
+  note 2
+
+held : {Async, Log} Unit
+held = child Open
+
+-- Корневой порождает задачу, уступает ей и обрывается.
+root : {Async, Fail, Log} Unit
+root =
+  let u : Unit = spawnDetached held
+  let s : Unit = suspend
+  let n : Bool = fail
+  MkUnit
+
+nursed : {Fail, Log} Unit
+nursed = withNursery root
+
+-- Хендлер обрыва стоит **снаружи** питомника и резумпции не зовёт.
+aborted : {Log} Unit
+aborted = handle nursed with
+  return v -> v
+  fail -> MkUnit
+
+main : List Nat
+main = handle aborted with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)

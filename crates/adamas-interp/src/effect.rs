@@ -303,6 +303,27 @@ impl Machine<'_> {
                     kont.push(Frame::Unwinding(segment.clone(), index, held));
                     return self.unwinding(&inner, at, self.trivial(), kont);
                 }
+                // Питомник внутри сегмента: его файберы брошены вместе с ним,
+                // а сегменты их лежат в таблице и в этот обход не входят -
+                // поэтому `Closing` внутри уступившей задачи не отрабатывал
+                // никогда (ревью 2026-09-07: `[1]` вместо `[1, 1, 7]`).
+                //
+                // §5.2 этим не покрыта: там заявлено, что настоящей отмены нет
+                // и файбер **договаривает**; здесь он не делает ни того, ни
+                // другого. §3.3 же требует деструктора при любой политике.
+                //
+                // Берётся по одному, и кадр посещается снова: снятый из таблицы
+                // не вернётся, поэтому обход конечен. `Fresh` раскручивать
+                // нечего - тело не начиналось.
+                Frame::Nursery(id) => {
+                    let parked = self.parked_of(*id);
+                    let Some(inner) = parked else {
+                        continue;
+                    };
+                    kont.push(Frame::Unwinding(segment.clone(), index + 1, held));
+                    let length = inner.len();
+                    return self.unwinding(&inner, length, self.trivial(), kont);
+                }
                 // Ветка внутри сегмента, чью резумпцию не позвали: её
                 // собственный сегмент брошен вместе с этим.
                 Frame::Branch(ticket) if !self.invoked(*ticket) => {

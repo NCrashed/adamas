@@ -345,6 +345,31 @@ impl Machine<'_> {
         )))
     }
 
+    /// Снимает один брошенный файбер питомника: его сегмент надо раскрутить.
+    ///
+    /// Зовётся раскруткой, когда кадр питомника попал в выброшенный сегмент.
+    /// По одному, потому что раскрутка одного сегмента - один шаг машины;
+    /// снятый обратно не кладётся, поэтому обход конечен. `Fresh` отбрасывается
+    /// молча: тело его не начиналось, и закрывать в нём нечего.
+    ///
+    /// Ждущие чужого ответа брошены наравне с очередью: ответа им теперь не
+    /// будет ни от кого.
+    pub(crate) fn parked_of(&self, id: usize) -> Option<Segment> {
+        let mut table = self.nurseries.borrow_mut();
+        let nursery = &mut table[id];
+        while let Some(fiber) = nursery.queue.pop() {
+            if let Suspended::Parked(segment, _) = fiber.state {
+                return Some(segment);
+            }
+        }
+        while let Some((_, fiber)) = nursery.blocked.pop() {
+            if let Suspended::Parked(segment, _) = fiber.state {
+                return Some(segment);
+            }
+        }
+        None
+    }
+
     /// Следующий файбер очереди либо ответ питомника, если её больше нет.
     fn scheduling(&self, id: usize, kont: &mut Kont) -> Result<Step, RunError> {
         let next = {

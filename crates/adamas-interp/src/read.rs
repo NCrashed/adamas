@@ -94,9 +94,7 @@ impl Machine<'_> {
                 let live: Vec<&Rc<Value>> = spine
                     .iter()
                     .filter_map(|elim| match elim {
-                        Elim::App(argument)
-                            if !(built && matches!(&**argument, Value::Erased)) =>
-                        {
+                        Elim::App(argument) if !(built && matches!(&**argument, Value::Erased)) => {
                             Some(argument)
                         }
                         _ => None,

@@ -389,7 +389,7 @@ impl<'a> Machine<'a> {
             Frame::Handler(handler) => Ok(Self::handled(value, &handler)),
             // Файбер договорил: ответ корневого запоминается, дальше идёт
             // следующий из очереди.
-            Frame::Nursery(id) => self.nursed(id, value, kont),
+            Frame::Nursery(id) => self.nursed(id, &value, kont),
             Frame::Branch(slot) => Ok(self.settled(slot, value, kont)),
             Frame::Closing(close) => {
                 // Нормальный выход: деструктор, потом значение тела.

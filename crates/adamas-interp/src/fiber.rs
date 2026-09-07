@@ -63,8 +63,16 @@ const FIBER: &str = "#fiber.";
 enum Suspended {
     /// Ещё не начатый: приостановленное вычисление, которое запустит питомник.
     Fresh(Rc<Value>),
-    /// Уступивший: сегмент стека от кадра питомника до вершины.
-    Parked(Segment),
+    /// Уступивший: сегмент стека от кадра питомника до вершины и то, чем
+    /// возобновление ему ответит.
+    ///
+    /// Ответ хранится **при файбере**, а не берётся у пробуждающего: уступка
+    /// отвечает единицей, а ожидание - значением дождавшейся задачи, и
+    /// различить их в момент пробуждения нечем. Пока `waking` отвечала
+    /// единицей всегда, `await`, которому пришлось ждать, отдавал `MkUnit` в
+    /// позицию чужого типа - при том что тот же `await` над уже договорившей
+    /// задачей отдавал верное значение (ревью 2026-09-07).
+    Parked(Segment, Rc<Value>),
 }
 
 /// Файбер очереди.
@@ -165,7 +173,7 @@ impl Machine<'_> {
     pub(crate) fn nursed(
         &self,
         id: usize,
-        value: Rc<Value>,
+        value: &Rc<Value>,
         kont: &mut Kont,
     ) -> Result<Step, RunError> {
         {
@@ -175,12 +183,17 @@ impl Machine<'_> {
                 return Err(RunError::NoFiber);
             };
             if root {
-                nursery.result = Some(Rc::clone(&value));
+                nursery.result = Some(Rc::clone(value));
             }
-            nursery.done.push((fiber, value));
-            // Ждавшие его возвращаются в круг: чужой ответ готов.
-            for (awaited, waiting) in std::mem::take(&mut nursery.blocked) {
+            nursery.done.push((fiber, Rc::clone(value)));
+            // Ждавшие его возвращаются в круг: чужой ответ готов - и он же
+            // становится тем, чем возобновление им ответит. Единицу тут
+            // положить нельзя: `await` объявлен отдающим `a` задачи (§5.2).
+            for (awaited, mut waiting) in std::mem::take(&mut nursery.blocked) {
                 if awaited == fiber {
+                    if let Suspended::Parked(_, answer) = &mut waiting.state {
+                        *answer = Rc::clone(value);
+                    }
                     nursery.queue.push(waiting);
                 } else {
                     nursery.blocked.push((awaited, waiting));
@@ -243,7 +256,7 @@ impl Machine<'_> {
         Ok(Fiber {
             id: fiber,
             root,
-            state: Suspended::Parked(segment),
+            state: Suspended::Parked(segment, self.unit()?),
         })
     }
 
@@ -336,7 +349,7 @@ impl Machine<'_> {
         self.nurseries.borrow_mut()[id].running = Some((next.id, next.root));
         match next.state {
             Suspended::Fresh(body) => self.starting(id, body, kont),
-            Suspended::Parked(segment) => self.waking(segment, kont),
+            Suspended::Parked(segment, answer) => Ok(Self::waking(segment, answer, kont)),
         }
     }
 
@@ -348,11 +361,12 @@ impl Machine<'_> {
     }
 
     /// Возвращает уступивший файбер на стек: сегмент несёт свой кадр питомника.
-    fn waking(&self, segment: Segment, kont: &mut Kont) -> Result<Step, RunError> {
+    fn waking(segment: Segment, answer: Rc<Value>, kont: &mut Kont) -> Step {
         kont.restore(segment);
-        // Уступка отвечает единицей - тем же, чем ответила бы написанная ветка
-        // `suspend -> resume MkUnit`.
-        Ok(Step::Return(self.unit()?))
+        // Чем отвечать, решено при парковке: уступка кладёт единицу - тем же
+        // ответила бы написанная ветка `suspend -> resume MkUnit`, - а
+        // ожидание получает значение дождавшейся задачи, когда та договорит.
+        Step::Return(answer)
     }
 }
 

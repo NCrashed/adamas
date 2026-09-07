@@ -1,0 +1,71 @@
+-- `await` отдаёт ответ задачи, а не единицу (§5.2).
+--
+-- Тип его написан `await : (1 t : Task) -> Nat`, и разница видна только когда
+-- ждущему **пришлось ждать**: над уже договорившей задачей ответ приходил
+-- верный и прежде, потому что берётся он тогда из таблицы готовых. Ушедший же
+-- из круга возобновлялся единицей - тем же, чем возобновляется уступка, - и
+-- `MkUnit` выходил наружу в позицию `Nat` (ревью 2026-09-07).
+--
+-- `eval/task.adamas` этого не видит: там `await` объявлен отдающим `Unit`, и
+-- подмена по построению незаметна.
+--
+-- Различающая сила - в паре: `after` ждёт уже готовую, `before` уходит из
+-- круга. Прежде первый давал 5, второй `MkUnit`; теперь оба дают 5, и
+-- перепутать их нечем - значения одинаковы намеренно, а наблюдаем сам факт,
+-- что второй есть число.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+data Task where
+  MkTask : Nat -> Task
+
+effect Async where
+  suspend : Unit
+  spawn : ({Async} Nat) -> Task
+  await : (1 t : Task) -> Nat
+
+-- Задача уступает дважды, потом отвечает пятёркой.
+slow : {Async} Nat
+slow =
+  let a : Unit = suspend
+  let b : Unit = suspend
+  5
+
+-- Ждущий уходит из круга: задача к моменту `await` ещё бежит.
+before : {Async} Nat
+before =
+  let t : Task = spawn slow
+  await t
+
+-- Ждущий не уходит: задача успевает договорить, пока он уступает.
+after : {Async} Nat
+after =
+  let t : Task = spawn slow
+  let a : Unit = suspend
+  let b : Unit = suspend
+  let c : Unit = suspend
+  await t
+
+withNursery : ({Async} Nat) -> Nat
+
+waited : Nat
+waited = withNursery before
+
+ready : Nat
+ready = withNursery after
+
+main : List Nat
+main = Cons waited (Cons ready Nil)

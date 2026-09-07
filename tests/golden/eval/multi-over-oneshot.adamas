@@ -1,0 +1,75 @@
+-- `handleMulti` над вложенным одношотным `handle` (§3.4).
+--
+-- Одношотный сегмент отпускается после первого возобновления - на доводе, что
+-- аффинная резумпция второго вызова не имеет по построению. Довод верен для
+-- одного динамического входа и ломается, когда снаружи стоит `handleMulti`:
+-- тот проходит захваченный участок заново, и та же одношотная резумпция
+-- зовётся на каждом проходе. Второй раз она получала **пустой** сегмент, и
+-- ответ был `[2, 2]` вместо `[2, 4]` - причём второй элемент равнялся
+-- аргументу `resume` без изменений, то есть второй проход не исполнялся вовсе
+-- (ревью 2026-09-07).
+--
+-- Различающая сила - в четвёрке: она приходит только оттого, что `a + a`
+-- посчиталось второй раз с ответом 2. Контроль - тот же файл, где внутренний
+-- `handle` заменён на `handleMulti`: одним словом, и ответ прежде совпадал.
+--
+-- `toss` производится **до** вызова резумпции внутреннего хендлера: иначе
+-- захваченная точка не попадает внутрь его ветки, и случай не строится.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+infixl 6 +
+(+) : Nat -> Nat -> Nat
+(+) Zero m = m
+(+) (Succ k) m = Succ (k + m)
+
+append : List Nat -> List Nat -> List Nat
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+effect Ask where
+  ask : Nat
+
+effect Amb where
+  toss : Bool
+
+-- Дважды спрашивает: ответ приходит от внутреннего хендлера.
+doubled : {Ask} Nat
+doubled =
+  let a : Nat = ask
+  a + a
+
+-- Развилка вынесена определением: в ветке хендлера `case` над операцией не
+-- пишется, а вызов её резумпции обязан идти **после** `toss`.
+pick : Unit -> {Amb} Nat
+pick u =
+  let b : Bool = toss
+  case b of
+    True -> Succ Zero
+    False -> Succ (Succ Zero)
+
+-- Внутренний одношотный. Ответ на `ask` добывается развилкой, поэтому `toss`
+-- идёт раньше вызова его резумпции.
+inner : {Amb} Nat
+inner = handle doubled with
+  return v -> v
+  ask -> resume (pick MkUnit)
+
+-- Внешний мультишотный: проходит захваченное дважды.
+main : List Nat
+main = handleMulti inner with
+  return v -> Cons v Nil
+  toss -> append (resume True) (resume False)

@@ -46,6 +46,20 @@ pub struct Machine<'a> {
     /// список деструкторов: кадр питомника уезжает в сегмент резумпции, когда
     /// файбер производит операцию с хендлером **снаружи** питомника.
     pub(crate) nurseries: RefCell<Vec<crate::fiber::Nursery>>,
+    /// Заводилась ли хоть одна мультишотная резумпция.
+    ///
+    /// Отпускание одношотного сегмента стоит на доводе «второго вызова не
+    /// бывает по построению» (§3.4). Довод верен для одного динамического
+    /// входа и ломается, когда снаружи стоит `handleMulti`: он проходит
+    /// захваченный участок заново, и одношотная резумпция **внутри** ветки
+    /// зовётся на каждом проходе - второй раз получая пустой сегмент (ревью
+    /// 2026-09-07).
+    ///
+    /// Признак монотонный и грубый намеренно: точный ответ требовал бы знать,
+    /// входит ли этот сегмент в захваченный, а знания там нет. Цена - память
+    /// вопроса 94 в программах, где мультишот есть; программ таких мало, и
+    /// платят они только за себя.
+    multishot: std::cell::Cell<bool>,
 }
 
 impl std::fmt::Debug for Machine<'_> {
@@ -76,6 +90,7 @@ impl<'a> Machine<'a> {
         Self {
             signature,
             resumptions: RefCell::new(Vec::new()),
+            multishot: std::cell::Cell::new(false),
             nurseries: RefCell::new(Vec::new()),
         }
     }
@@ -497,6 +512,9 @@ impl<'a> Machine<'a> {
     /// Заводит резумпцию из сегмента и отдаёт её значением.
     pub(crate) fn resumption(&self, segment: Segment, multi: bool) -> (Rc<Value>, usize) {
         let mut table = self.resumptions.borrow_mut();
+        if multi {
+            self.multishot.set(true);
+        }
         let index = table.len();
         table.push(Resumption {
             segment,
@@ -546,7 +564,7 @@ impl<'a> Machine<'a> {
                     // операций требовали четырёх гигабайт при ответе в одно
                     // число (ревью 2026-09-05). Мультишотной сегмент нужен
                     // и дальше - там повтор и есть её смысл.
-                    if entry.multi {
+                    if entry.multi || self.multishot.get() {
                         entry.segment.clone()
                     } else {
                         std::mem::take(&mut entry.segment)

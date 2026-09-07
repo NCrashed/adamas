@@ -1282,3 +1282,55 @@ main = handle program with
          (Cons (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) Nil))))"
     );
 }
+
+/// Значение задачи, собранное руками, отвергается, а не угадывается.
+///
+/// Конструктор ресурса публичен (§3.3), поэтому `MkTask Zero` пишется. Номер
+/// файбера при этом стоит невыразимым именем, которого там нет, - и питомник
+/// говорит об этом прямо.
+#[test]
+fn a_forged_task_is_refused() {
+    let source = format!(
+        "{BASE}
+effect Log where
+  note : Nat -> Unit
+
+resource Task where
+  MkTask : Nat -> Task
+  cancelTask : (1 t : Task) -> {{Log}} Unit
+  cancelTask (MkTask n) = note 8
+
+effect Async where
+  suspend : Unit
+  spawn : ({{Async, Log}} Unit) -> Task
+  await : (1 t : Task) -> Unit
+
+withNursery : ({{Async, Log}} Unit) -> {{Log}} Unit
+
+slow : {{Async, Log}} Unit
+slow = note 9
+
+forging : {{Async, Log}} Unit
+forging =
+  let t : Task = MkTask Zero
+  let 1 r : Unit = await t
+  note 1
+
+program : {{Log}} Unit
+program = withNursery forging
+
+main : List Nat
+main = handle program with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+"
+    );
+    let signature = elaborated(&source);
+    let body = body(&signature, "main");
+    let error =
+        adamas_interp::run(&signature, &body).expect_err("подделка обязана быть отвергнута");
+    assert!(
+        error.to_string().contains("не называет живого файбера"),
+        "отказ обязан называть причину, а не падать иначе: {error}"
+    );
+}

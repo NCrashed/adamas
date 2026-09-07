@@ -1,0 +1,94 @@
+-- Задача, ожидание и отмена по владению (§5.2, §9 Фаза 5).
+--
+-- Типовая сторона §5.2 пишется **без единой правки языка**, и это измерено:
+-- `Task` объявляется обычным `resource`, `spawn` возвращает его, `await` его
+-- потребляет, а недожданная задача закрывается вставленным `drop` - тем же
+-- правилом §3.3, каким закрывается всякий ресурс, не упомянутый в теле. Ровно
+-- это §5.2 и обещает словами «untask'нутый Task при drop Scope — cancelled».
+--
+-- Машина знает пять имён, как знает `Unit`: `withNursery`, `suspend`,
+-- `spawnDetached`, `spawn` и `await`. Значение задачи она собирает **объявленным
+-- конструктором** типа, названного в результате самого `spawn`, - вшитого имени
+-- типа нет, - применённым к невыразимому имени файбера. Поэтому `drop (MkTask
+-- n)` разбирается как обычно, а написать такое значение руками автор не может.
+--
+-- Ожидание **блокирует**: ждущий уходит из круга, пока ожидаемый не договорит,
+-- и возвращается в очередь, когда тот ответил. Пустая очередь при непустом
+-- списке ждущих есть взаимная блокировка, и она отказ, а не зависание.
+--
+-- Названо ценой и не сделано: настоящая **отмена**. Питомник дожидается всех, а
+-- `drop` недожданной задачи запускает написанный автором деструктор - но файбер
+-- при этом договаривает, а не обрывается. §5.2 хочет обрыва.
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+-- Задача - ресурс: её обязаны либо дождаться, либо отпустить деструктором.
+resource Task where
+  MkTask : Nat -> Task
+  cancelTask : (1 t : Task) -> {Log} Unit
+  cancelTask (MkTask n) = note 8
+
+effect Async where
+  suspend : Unit
+  spawn : ({Async, Log} Unit) -> Task
+  await : (1 t : Task) -> Unit
+
+withNursery : ({Async, Log} Unit) -> {Log} Unit
+
+slow : {Async, Log} Unit
+slow =
+  let a : Unit = note 9
+  let s : Unit = suspend
+  note 9
+
+-- Дожидается: `await` потребляет задачу, и после него виден её след.
+awaiting : {Async, Log} Unit
+awaiting =
+  let t : Task = spawn slow
+  let a : Unit = note 1
+  let 1 r : Unit = await t
+  note 1
+
+-- Не дожидается: задача не упомянута дальше, и `drop` вставлен сам.
+dropping : {Async, Log} Unit
+dropping =
+  let t : Task = spawn slow
+  note 1
+
+waited : {Log} Unit
+waited = withNursery awaiting
+
+released : {Log} Unit
+released = withNursery dropping
+
+-- Первое: 1 9 9 1 - ждущий ушёл из круга и вернулся с ответом.
+shown : List Nat
+shown = handle waited with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+
+-- Второе: 1 8 9 9 - восьмёрка это деструктор недожданной задачи, и стоит она
+-- **до** её следов: питомник дожидается порождённого уже после корневого.
+lost : List Nat
+lost = handle released with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+
+append : List a -> List a -> List a
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+main : List Nat
+main = append shown lost

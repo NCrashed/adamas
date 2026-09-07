@@ -3759,10 +3759,15 @@ fn declare_effect(
     for operation in &effect.operations {
         let written = performed(&operation.ty, &label);
         let suspended = suspends(&written);
-        let ty = Elaborator::with_group(signature, metas, owned, fixities, vec![visible.clone()])
-            .wrapped(&params, true, |it| it.declaration(&written, Mult::Many))?;
+        // Параметры кратности, написанные операцией, - её собственные: она
+        // инстанцируется местом вызова, как всякое определение (§10 вопрос
+        // 116). Считаются они тем же элаборатором, что строит тип.
+        let mut it =
+            Elaborator::with_group(signature, metas, owned, fixities, vec![visible.clone()]);
+        let ty = it.wrapped(&params, true, |it| it.declaration(&written, Mult::Many))?;
+        let grades = it.grade_arity();
         let ty = grounded(&zonk_term(metas, &ty), params.len(), true);
-        operations.push((&*operation.name.text, ty, suspended));
+        operations.push((&*operation.name.text, ty, suspended, grades));
     }
 
     // Элиминаторы объявляются той же группой: их типы называют метку, а в
@@ -3792,9 +3797,9 @@ fn declare_effect(
         .map(|(name, ty)| (name.as_str(), ty.clone()))
         .collect();
 
-    let written: Vec<(&str, Term)> = operations
+    let written: Vec<(&str, Term, u32)> = operations
         .iter()
-        .map(|(name, ty, _)| (*name, ty.clone()))
+        .map(|(name, ty, _, grades)| (*name, ty.clone(), *grades))
         .collect();
     let parameters = u32::try_from(params.len()).unwrap_or(u32::MAX);
     signature
@@ -4062,7 +4067,7 @@ fn handler_type(
     metas: &mut Metas,
     kind: &Term,
     label: &str,
-    operations: &[(&str, Term, bool)],
+    operations: &[(&str, Term, bool, u32)],
     resumed: Mult,
     span: Span,
 ) -> Result<Term, ElabError> {
@@ -4142,7 +4147,7 @@ fn handler_type(
     ));
     level += 1;
 
-    for (name, ty, suspended) in operations {
+    for (name, ty, suspended, _) in operations {
         let branch = branch_type(Branch {
             operation: ty,
             params,

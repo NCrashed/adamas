@@ -348,6 +348,13 @@ pub struct MemberDecl {
     pub name: Name,
     /// Тип. Проверяется в фазе B - против сигнатуры, где формер уже есть.
     pub ty: Term,
+    /// Сколько параметров кратности написано **самим членом** (§10 вопрос 116).
+    ///
+    /// У конструктора их не бывает: он инстанцируется элиминацией теми же
+    /// аргументами, что и семейство. У операции бывают: она инстанцируется
+    /// местом вызова, и своих параметров сверх параметров метки иметь вправе -
+    /// ровно как уровней.
+    pub mults: u32,
 }
 
 /// Член группы.
@@ -461,7 +468,7 @@ impl Member {
     ///
     /// В отладочной сборке - если член не метка.
     #[must_use]
-    pub fn with_operation(mut self, name: &str, ty: Term) -> Self {
+    pub fn with_operation(mut self, name: &str, ty: Term, mults: u32) -> Self {
         debug_assert!(
             matches!(self, Self::Effect { .. }),
             "операция приписывается метке, а не семейству"
@@ -470,6 +477,7 @@ impl Member {
             operations.push(MemberDecl {
                 name: name.into(),
                 ty,
+                mults,
             });
         }
         self
@@ -579,6 +587,7 @@ impl Member {
             constructors.push(MemberDecl {
                 name: name.into(),
                 ty,
+                mults: 0,
             });
         }
         self
@@ -1159,7 +1168,10 @@ impl Signature {
             mult: Mult::Many,
             level_arity: arity.level_count(),
             row_arity: arity.row_count(),
-            mult_allowed: Rc::from([]),
+            // Свои параметры кратности у операции бывают (§10 вопрос 116): она
+            // инстанцируется местом вызова, как всякое определение, и
+            // дозволенное им уточнит не тело - его нет, - а само объявление.
+            mult_allowed: (0..operation.mults).map(|_| ALL_MULTS.into()).collect(),
             graded_carriers: Rc::from([]),
             carriers: crate::carrier::stored(&operation.ty),
             opaque: false,
@@ -1880,12 +1892,12 @@ impl Signature {
         name: &str,
         params: u32,
         ty: Term,
-        operations: &[(&str, Term)],
+        operations: &[(&str, Term, u32)],
         handlers: &[(&str, Term)],
     ) -> Result<(), TypeError> {
         let member = operations.iter().fold(
             Member::effect(name, params, ty),
-            |member, (operation, ty)| member.with_operation(operation, ty.clone()),
+            |member, (operation, ty, mults)| member.with_operation(operation, ty.clone(), *mults),
         );
         // Элиминаторы идут той же группой: их типы называют метку, а в
         // сигнатуре её ещё нет (§10 вопрос 50). Постулатами - развернуть их

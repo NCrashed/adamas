@@ -79,11 +79,17 @@ fn normalized(source: &str, name: &str) -> String {
     adamas_core::conv::evaluated(&signature, &body).to_string()
 }
 
-/// На чистом фрагменте вычислители сходятся.
+/// На чистом фрагменте вычислители сходятся - **с точностью до стирания**.
 ///
 /// Это договор между ними: машина заведена ради эффектов, а не ради другого
 /// ответа на то же самое. Разойдись они здесь - и `adamas eval` перестал бы
 /// говорить о той же программе, которую проверил `adamas check`.
+///
+/// Оговорка появилась вместе со стиранием (§3.3): машина отвечает о **рантайме**
+/// и стёртого туда не пускает, ядро - о типизированной программе, где стёртое
+/// стоит в типах и обязано остаться. Поэтому корпус здесь - значения без стёртых
+/// аргументов, а сама разница закреплена отдельным тестом ниже: прятать её
+/// сужением корпуса значило бы завести тест, который перестал различать.
 #[test]
 fn the_machine_agrees_with_the_core_on_the_pure_fragment() {
     let source = format!(
@@ -107,13 +113,25 @@ matched = case Succ Zero of
   Succ k -> True
 "
     );
-    for name in ["nested", "applied", "matched", "double", "sum"] {
+    for name in ["applied", "matched", "double", "sum"] {
         assert_eq!(
             ran(&source, name),
             normalized(&source, name),
             "определение `{name}` посчиталось по-разному"
         );
     }
+
+    // Единственное значение корпуса со стёртым аргументом - список: параметр
+    // типа у `Cons` стёрт. Машина его не вычисляет и не печатает, ядро держит.
+    assert_eq!(
+        ran(&source, "nested"),
+        "Cons{0} (Succ (Succ (Succ (Succ Zero)))) \
+         (Cons{0} (Succ (Succ (Succ Zero))) (Cons{0} Zero Nil{0}))"
+    );
+    assert!(
+        normalized(&source, "nested").contains("Nat"),
+        "ядро стёртый аргумент держит: он стоит в типах"
+    );
 }
 
 /// Хендлер глубокий: операция после возобновления попадает ему же.
@@ -311,7 +329,7 @@ main = handle opened with
     );
     assert_eq!(
         ran(&source, "main"),
-        "Cons{0} Nat (Succ Zero) (Cons{0} Nat (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) (Nil{0} Nat))"
+        "Cons{0} (Succ Zero) (Cons{0} (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) Nil{0})"
     );
 }
 
@@ -359,7 +377,7 @@ main = handle guarded with
     );
     assert_eq!(
         ran(&source, "main"),
-        "Cons{0} Nat (Succ Zero) (Cons{0} Nat (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) (Nil{0} Nat))"
+        "Cons{0} (Succ Zero) (Cons{0} (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) Nil{0})"
     );
 }
 
@@ -390,7 +408,7 @@ main : List Nat
 main = Cons answer Nil
 "
     );
-    assert_eq!(ran(&source, "main"), "Cons{0} Nat (Succ Zero) (Nil{0} Nat)");
+    assert_eq!(ran(&source, "main"), "Cons{0} (Succ Zero) Nil{0}");
 }
 
 /// Единица без единственного конструктора: `#closing` не объявляется, и
@@ -476,7 +494,7 @@ main = handle guarded with
     // Отметка тела, затем отметка деструктора: `[1, 9]`.
     assert_eq!(
         ran(&source, "main"),
-        "Cons{0} Nat (Succ Zero) (Cons{0} Nat (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) (Nil{0} Nat))"
+        "Cons{0} (Succ Zero) (Cons{0} (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) Nil{0})"
     );
 }
 
@@ -538,7 +556,7 @@ main = handle outer with
     // Отметка тела и отметка деструктора - обе.
     assert_eq!(
         ran(&source, "main"),
-        "Cons{0} Nat (Succ Zero) (Cons{0} Nat (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) (Nil{0} Nat))"
+        "Cons{0} (Succ Zero) (Cons{0} (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) Nil{0})"
     );
 }
 
@@ -1034,8 +1052,8 @@ main = handle outer with
     // хендлера, в списке была бы его отметка.
     assert_eq!(
         ran(&source, "main"),
-        "Cons{0} Nat (Succ (Succ Zero)) (Cons{0} Nat (Succ (Succ (Succ Zero))) \
-         (Cons{0} Nat (Succ (Succ (Succ (Succ Zero)))) (Nil{0} Nat)))"
+        "Cons{0} (Succ (Succ Zero)) (Cons{0} (Succ (Succ (Succ Zero))) \
+         (Cons{0} (Succ (Succ (Succ (Succ Zero)))) Nil{0}))"
     );
 }
 

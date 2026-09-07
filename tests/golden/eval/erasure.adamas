@@ -1,0 +1,56 @@
+-- Стирание в рантайме (§3.3, §9 Фаза 5).
+--
+-- §3.3 обещает: «доказательства ничего не стоят в рантайме». До этого голдена
+-- обещание было ничем не проверено - стёртое ехало в значении наравне с прочим
+-- и печаталось: `VCons Nat (Succ Zero) Zero (VNil Nat)`.
+--
+-- Машина аргумент при стёртом связывании **не вычисляет**: на его место встаёт
+-- маркер, а печать его опускает. Признаком служит написанный тип вызываемого, а
+-- не кратность лямбды: решение дырки терма - цепочка лямбд по контексту, и все
+-- они стоят при `0`, потому что дырка замкнута и использований не порождает.
+-- Стирать по ней значило бы выбрасывать словарь класса, который приезжает в
+-- тело ровно таким спайном.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+-- Параметр семейства стёрт: в значении списка типа нет.
+digits : List Nat
+digits = Cons Zero (Cons (Succ Zero) Nil)
+
+-- Индекс стёрт тоже, и он **значение**, а не тип: длина в значении не лежит.
+data Vect : (0 n : Nat) -> Type -> Type where
+  VNil : Vect Zero a
+  VCons : a -> Vect n a -> Vect (Succ n) a
+
+pair : Vect (Succ (Succ Zero)) Nat
+pair = VCons Zero (VCons (Succ Zero) VNil)
+
+-- Экзистенциал: носитель спрятан и в типе, и в значении.
+data Some where
+  MkSome : (0 a : Type) -> a -> Some
+
+boxed : Some
+boxed = MkSome Nat (Succ Zero)
+
+-- Написанное стёртое связывание у обычного определения.
+konst : (ω x : Nat) -> (0 y : Nat) -> Nat
+konst x y = x
+
+kept : Nat
+kept = konst (Succ Zero) Zero
+
+data Both (a : Type) (b : Type) where
+  MkBoth : a -> b -> Both a b
+
+main : Both (Vect (Succ (Succ Zero)) Nat) Some
+main = MkBoth pair boxed

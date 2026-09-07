@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+MkBoth{1, 1} (VCons Zero (VCons (Succ Zero) VNil)) (MkSome (Succ Zero))

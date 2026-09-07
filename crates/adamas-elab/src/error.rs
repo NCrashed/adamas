@@ -127,6 +127,21 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Конструктор семейства, объявленного в запечатанном модуле.
+    ///
+    /// Запечатывание скрывает представление (§3.5), а представление семейства -
+    /// это его конструкторы: снаружи `M.T` есть формер без них. Внутри тела
+    /// модуля они видны - флаг ставится, когда модуль проверен целиком.
+    #[error("`{name}` не виден: `{data}` объявлен в запечатанном модуле, и представление скрыто")]
+    SealedConstructor {
+        /// Имя конструктора.
+        name: Symbol,
+        /// Семейство, чьё представление скрыто.
+        data: Symbol,
+        /// Где написано.
+        span: Span,
+    },
+
     /// Имя с заглавной буквы в позиции связывания.
     ///
     /// Обратная сторона [`ElabError::NotAConstructor`]: связать заглавным
@@ -1132,6 +1147,7 @@ impl ElabError {
         match self {
             Self::UnknownName { span, .. }
             | Self::NotAConstructor { span, .. }
+            | Self::SealedConstructor { span, .. }
             | Self::UppercaseBinding { span, .. }
             | Self::RepeatedBinding { span, .. }
             | Self::GradedSort { span }

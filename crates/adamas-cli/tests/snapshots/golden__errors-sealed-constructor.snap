@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: sealed-constructor.adamas:32:7: `Hidden.Wrap` не виден: `Hidden.T` объявлен в запечатанном модуле, и представление скрыто
+  peek (Hidden.Wrap n) = n
+        ^^^^^^^^^^^

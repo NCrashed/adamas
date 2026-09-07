@@ -2191,7 +2191,9 @@ fn declare_families(
             );
         }
         let known = scratch.as_ref().unwrap_or(signature);
-        families.push(family_header(known, metas, owned, fixities, data, *at)?);
+        families.push(family_header(
+            known, metas, owned, fixities, None, data, *at,
+        )?);
     }
     let Some(first) = families.first() else {
         return Ok(());
@@ -2204,9 +2206,10 @@ fn declare_families(
     let mut seen: Vec<Member> = families.iter().map(Family::visible).collect();
     let mut group: Option<Group> = None;
     for family in &families {
-        let constructors = family_constructors(signature, metas, owned, fixities, family, &seen)?;
+        let constructors =
+            family_constructors(signature, metas, owned, fixities, None, family, &seen)?;
         seen.extend(constructors.iter().map(|(name, ty)| Member {
-            name: Rc::from(*name),
+            name: Rc::clone(name),
             levels: Rc::clone(&family.levels),
             args: Args::none(),
             ty: Rc::new(ty.clone()),
@@ -3244,7 +3247,7 @@ fn declare_resource(
         kind: None,
         constructors,
     };
-    declare_data(signature, metas, owned, fixities, &data, span)?;
+    declare_data(signature, metas, owned, fixities, None, &data, span)?;
 
     // `drop` объявляется после семейства: его тип называет ресурс, а в
     // сигнатуре тот появляется только сейчас. Домен получает `1` тем же
@@ -3573,6 +3576,8 @@ fn declare_defaults(
 struct Family<'a> {
     /// Написанное.
     data: &'a ast::Data,
+    /// Имя, под которым семейство объявляется: квалифицированное в теле модуля.
+    declared: Symbol,
     /// Телескоп параметров - один на kind и на все конструкторы.
     params: Vec<Param>,
     /// Тип-формер.
@@ -3591,7 +3596,7 @@ impl Family<'_> {
     /// Каким его видят соседи по группе.
     fn visible(&self) -> Member {
         Member {
-            name: Rc::clone(&self.data.name.text),
+            name: Rc::clone(&self.declared),
             levels: Rc::clone(&self.levels),
             // Тип-формер семейства row не носит: метка не тип.
             args: Args::none(),
@@ -3606,18 +3611,27 @@ fn family_header<'a>(
     metas: &mut Metas,
     owned: &Owned,
     fixities: &Fixities,
+    within: Option<&Enclosing<'_>>,
     data: &'a ast::Data,
     span: Span,
 ) -> Result<Family<'a>, ElabError> {
     // Телескоп параметров элаборируется один раз и переиспользуется: kind и
     // каждый конструктор обязаны нести **один и тот же** телескоп, иначе
     // `List` в результате и `List` в объявлении - два разных семейства.
-    let mut elaborator = Elaborator::new(signature, metas, owned, fixities);
-    let params = elaborator.telescope(&data.params, false, Mult::Zero, Unwritten::Sort)?;
+    let mut elaborator = Elaborator::new(signature, metas, owned, fixities).within(within);
+    // Связывания двух родов в одном телескопе, как у алиаса: сперва параметры
+    // функтора, потом свои. Написанный параметр живёт под функторными - его тип
+    // вправе их упоминать.
+    let outer = elaborator.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
+    let own = elaborator.beneath(&outer, |it| {
+        it.telescope(&data.params, false, Mult::Zero, Unwritten::Sort)
+    })?;
+    let params: Vec<Param> = outer.iter().chain(own.iter()).cloned().collect();
     let kind = match &data.kind {
-        // Параметры пишутся, поэтому в kind они явные: `Vect a n`.
-        Some(kind) => elaborator.wrapped(&params, false, |it| {
-            it.typing(|it| it.expr(kind, Mult::Many))
+        // Параметры пишутся, поэтому в kind они явные: `Vect a n`. Функторные -
+        // наоборот: писать их некому, их подставляет вставка.
+        Some(kind) => elaborator.wrapped(&outer, true, |it| {
+            it.wrapped(&own, false, |it| it.typing(|it| it.expr(kind, Mult::Many)))
         })?,
         // Тип-формер не написан - семейство живёт в нулевом универсуме.
         //
@@ -3628,7 +3642,9 @@ fn family_header<'a>(
         // Проверено подстановкой дырки вместо нуля. Ничего не написано -
         // значит и выводить не из чего; полиморфное по уровню семейство
         // пишется явно: `data D : Type where`.
-        None => elaborator.wrapped(&params, false, |_| Ok(Term::universe(0)))?,
+        None => elaborator.wrapped(&outer, true, |it| {
+            it.wrapped(&own, false, |_| Ok(Term::universe(0)))
+        })?,
     };
     // Семейство обязано вместить универсумы своих параметров: поле типа `a`
     // живёт там же, где `a`. Написанный `Type` даёт дырку, и поднять её до
@@ -3636,11 +3652,12 @@ fn family_header<'a>(
     let kind = raised(&kind, &params);
     // Маршрут внутрь семейства называет конструктор номером, а имена у него
     // здесь: собираются один раз на оба возможных отказа.
+    let declared = qualify(within, &data.name.text);
     let names = Names::of(
-        &data.name.text,
+        &declared,
         data.constructors
             .iter()
-            .map(|constructor| Rc::clone(&constructor.name.text))
+            .map(|constructor| qualify(within, &constructor.name.text))
             .collect(),
     );
     // Конструктор называет своё семейство, а в сигнатуре его ещё нет: группа
@@ -3654,6 +3671,7 @@ fn family_header<'a>(
     })?;
     Ok(Family {
         data,
+        declared,
         params,
         kind,
         levels,
@@ -3662,14 +3680,15 @@ fn family_header<'a>(
 }
 
 /// Типы конструкторов - под группой, в которой семейство объявляется.
-fn family_constructors<'a>(
+fn family_constructors(
     signature: &Signature,
     metas: &mut Metas,
     owned: &Owned,
     fixities: &Fixities,
-    family: &Family<'a>,
+    within: Option<&Enclosing<'_>>,
+    family: &Family<'_>,
     visible: &[Member],
-) -> Result<Vec<(&'a str, Term)>, ElabError> {
+) -> Result<Vec<(Symbol, Term)>, ElabError> {
     // Поле конструктора получает `1` (§4.1): конструктор кладёт аргумент
     // однажды. Обычный код этого не замечает, потому что при разборе поле
     // приходит в ветвь при `q · r`, а `r` - кратность потребления
@@ -3684,6 +3703,7 @@ fn family_constructors<'a>(
             // поднимаются уже под ними - и потому стоят после, как того и ждёт
             // ядро от телескопа с параметрами.
             let ty = Elaborator::with_group(signature, metas, owned, fixities, visible.to_vec())
+                .within(within)
                 .wrapped(&family.params, true, |it| {
                     it.constructor_type(&constructor.ty, Mult::One)
                 })?;
@@ -3695,16 +3715,16 @@ fn family_constructors<'a>(
             // поднимается до полей.
             let ty = grounded(&zonk_term(metas, &ty), family.params.len(), false);
             owned_field(&ty, owned, family.data, constructor)?;
-            Ok((&*constructor.name.text, ty))
+            Ok((qualify(within, &constructor.name.text), ty))
         })
         .collect()
 }
 
 /// Член ядра, собранный из семейства и типов его конструкторов.
-fn family_member(family: &Family<'_>, constructors: &[(&str, Term)]) -> SigMember {
+fn family_member(family: &Family<'_>, constructors: &[(Symbol, Term)]) -> SigMember {
     let parameters = u32::try_from(family.params.len()).unwrap_or(u32::MAX);
     constructors.iter().fold(
-        SigMember::data(&family.data.name.text, parameters, family.kind.clone()),
+        SigMember::data(&family.declared, parameters, family.kind.clone()),
         |member, (constructor, ty)| member.with_constructor(constructor, ty.clone()),
     )
 }
@@ -3719,23 +3739,24 @@ fn declare_family(
     data: &ast::Data,
     span: Span,
 ) -> Result<(), ElabError> {
-    // Семейство в теле модуля - названная граница среза: имя квалифицируется, а
-    // имена конструкторов нет, и разбор по ним писать было бы нечем. Заводится
-    // вместе с путём в паттерне.
-    only_at_top(
-        within,
-        &data.name.text,
-        "конструкторы квалифицированного имени пока не носят, \
-         и разобрать их в паттерне нечем",
-        span,
-    )?;
-    // Маркер ставится **до** элаборации конструкторов: поле собственного типа
-    // получит `1` тем же правилом, что и всякое другое связывание, а не
-    // отдельным случаем.
+    // Владение - названная граница: таблица `Owned` ключуется **написанным**
+    // именем головы, а оно короткое, и `A.Cell`, объявленное `unique`, делало
+    // уникальным и `B.Cell` из соседнего модуля. Измерено зондом. Заводится
+    // вместе с квалифицированным ключом таблицы.
     if data.unique {
+        only_at_top(
+            within,
+            &data.name.text,
+            "таблица владения ключуется написанным именем, а оно короткое, \
+             и одноимённые семейства двух модулей столкнулись бы",
+            span,
+        )?;
+        // Маркер ставится **до** элаборации конструкторов: поле собственного
+        // типа получит `1` тем же правилом, что и всякое другое связывание, а
+        // не отдельным случаем.
         owned.declare(&data.name.text, Ownership::Unique);
     }
-    declare_data(signature, metas, owned, fixities, data, span)
+    declare_data(signature, metas, owned, fixities, within, data, span)
 }
 
 /// Объявление эффекта: формер метки плюс её операции (§3.4).
@@ -4428,31 +4449,37 @@ fn declare_data(
     metas: &mut Metas,
     owned: &Owned,
     fixities: &Fixities,
+    within: Option<&Enclosing<'_>>,
     data: &ast::Data,
     span: Span,
 ) -> Result<(), ElabError> {
-    let family = family_header(signature, metas, owned, fixities, data, span)?;
+    let family = family_header(signature, metas, owned, fixities, within, data, span)?;
     let constructors = family_constructors(
         signature,
         metas,
         owned,
         fixities,
+        within,
         &family,
         &[family.visible()],
     )?;
     let parameters = u32::try_from(family.params.len()).unwrap_or(u32::MAX);
+    let written: Vec<(&str, Term)> = constructors
+        .iter()
+        .map(|(name, ty)| (&**name, ty.clone()))
+        .collect();
     signature
         .declare_data_inferred(
             metas,
-            &data.name.text,
+            &family.declared,
             parameters,
             family.kind.clone(),
-            &constructors,
+            &written,
         )
         .map_err(|error| ElabError::Core {
             span: route::locate(&Declared::Data(data), &error, span),
             error: Box::new(error),
-            names: family.names,
+            names: family.names.clone(),
         })?;
     // Умолчания - **после** объявления: они обычные определения, и семейство
     // им доступно как всякое другое имя.
@@ -4461,7 +4488,7 @@ fn declare_data(
         metas,
         owned,
         fixities,
-        &data.name.text,
+        &family.declared,
         &data.params,
         Unwritten::Sort,
     )

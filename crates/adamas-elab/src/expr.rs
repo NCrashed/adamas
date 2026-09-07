@@ -1811,6 +1811,19 @@ impl<'a> Elaborator<'a> {
         (neighbour || self.signature.lookup(&full).is_some()).then_some(full)
     }
 
+    /// Скрыто ли имя запечатыванием: конструктор семейства из `:>`-модуля.
+    ///
+    /// Представление семейства - это его конструкторы, и запечатывание скрывает
+    /// именно его (§3.5). Отдельного флага не нужно: непрозрачность стоит на
+    /// самом семействе, а ставится она, когда модуль проверен целиком, - внутри
+    /// тела конструкторы поэтому видны, а снаружи нет.
+    fn sealed_constructor(&self, name: &str) -> Option<Symbol> {
+        let DefinitionKind::Constructor { data, .. } = &self.signature.lookup(name)?.kind else {
+            return None;
+        };
+        self.signature.lookup(data)?.opaque.then(|| Rc::clone(data))
+    }
+
     /// Индекс де Брёйна локального связывания.
     fn local(&self, name: &str) -> Option<u32> {
         self.scope
@@ -3154,7 +3167,20 @@ impl<'a> Elaborator<'a> {
         }
         // Сосед по модулю заслоняет глобальное имя: члены подняты на верхний
         // уровень, но написаны они внутри, и видеть автор обязан своего.
-        if let Some(full) = self.qualified(&name.text) {
+        let qualified = self.qualified(&name.text);
+        // Запечатанное представление не называется и в выражении: построить
+        // значение абстрактного типа его конструктором - тот же обход, что и
+        // разобрать им. Стоит проверка здесь, а не выше, чтобы квалификация
+        // считалась один раз на имя: `Type` и сосед по группе до неё не доходят.
+        let candidate = qualified.as_ref().unwrap_or(&name.text);
+        if let Some(data) = self.sealed_constructor(candidate) {
+            return Err(ElabError::SealedConstructor {
+                name: Rc::clone(&name.text),
+                data,
+                span: name.span,
+            });
+        }
+        if let Some(full) = qualified {
             if let Some(term) = self.signature.instantiate(&full, self.metas) {
                 let Ok((ty, _)) = infer(&self.ctx.speculating(), self.metas, Mult::Zero, &term)
                 else {
@@ -5203,7 +5229,20 @@ impl<'a> Elaborator<'a> {
         name: &ast::Name,
         fields: Vec<CorePattern>,
     ) -> Result<CorePattern, ElabError> {
-        let Some(declared) = self.signature.lookup(&name.text) else {
+        // Сосед по модулю заслоняет глобальное имя тем же правилом, что и в
+        // выражении: конструктор поднят под квалифицированным именем, а в теле
+        // написан коротким.
+        let found = self
+            .qualified(&name.text)
+            .unwrap_or_else(|| Rc::clone(&name.text));
+        if let Some(data) = self.sealed_constructor(&found) {
+            return Err(ElabError::SealedConstructor {
+                name: Rc::clone(&name.text),
+                data,
+                span: name.span,
+            });
+        }
+        let Some(declared) = self.signature.lookup(&found) else {
             return Err(ElabError::NotAConstructor {
                 name: Rc::clone(&name.text),
                 span: name.span,
@@ -5224,7 +5263,7 @@ impl<'a> Elaborator<'a> {
             .and_then(Definition::data_shape)
             .map_or(0, |(params, _)| params);
         Ok(CorePattern::Constructor(
-            CoreName::from(&*name.text),
+            found,
             hidden_fields(&declared.ty, params, fields),
         ))
     }

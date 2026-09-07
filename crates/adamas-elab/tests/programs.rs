@@ -3493,12 +3493,10 @@ fn an_abstract_type_member_belongs_to_a_signature() {
 
 #[test]
 fn a_signature_carries_no_implementations() {
-    // Клаузы в `module type` и семейство в теле модуля - две названные
-    // границы. Первая - от смысла сигнатуры, вторая от того, что имена
-    // конструкторов пока не квалифицируются.
+    // Сигнатура несёт объявления без реализаций - ни клауз, ни семейства.
     for text in [
         "module type Eqv where\n  eq : Bool\n  eq = True\n",
-        "module M where\n  data Tree where\n    Leaf : Tree\n",
+        "module type Bad where\n  data Tree where\n    Leaf : Tree\n",
     ] {
         let error = refused(&format!("{BASE}{text}"));
         assert!(
@@ -3506,6 +3504,138 @@ fn a_signature_carries_no_implementations() {
             "для {text:?} получено {error:?}"
         );
     }
+}
+
+#[test]
+fn a_family_in_a_module_qualifies_its_constructors() {
+    // Семейство поднимается тем же подъёмом, что и определение: имя и имена
+    // конструкторов становятся квалифицированными. Снаружи они пишутся путём -
+    // и в выражении, и в паттерне.
+    let signature = program(&format!(
+        "{BASE}
+module Boxes where
+  data Box (a : Type) where
+    Wrap : a -> Box a
+    Nothing : Box a
+
+  unwrap : Box Nat -> Nat
+  unwrap (Wrap n) = n
+  unwrap Nothing = Zero
+
+outside : Nat
+outside = Boxes.unwrap (Boxes.Wrap (Succ Zero))
+
+matched : Boxes.Box Nat -> Nat
+matched (Boxes.Wrap n) = n
+matched Boxes.Nothing = Zero
+"
+    ));
+    assert_eq!(value(&signature, "outside"), "Succ Zero");
+    // Короткое имя снаружи не видно: оно принадлежит модулю.
+    let error = refused(&format!(
+        "{BASE}
+module Boxes where
+  data Box (a : Type) where
+    Wrap : a -> Box a
+
+loose : Boxes.Box Nat
+loose = Wrap Zero
+"
+    ));
+    assert!(
+        matches!(error, ElabError::UnknownName { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_family_in_a_functor_carries_its_parameter() {
+    // §4.8 пишет `data Map v` в теле функтора. Параметр функтора становится
+    // ведущим implicit-связыванием и формера, и каждого конструктора - тем же
+    // правилом, что у определения и у алиаса.
+    let signature = program(&format!(
+        "{BASE}
+module type Eqv where
+  type T
+  eq : T -> T -> Bool
+
+module NatEq : Eqv where
+  type T = Nat
+  eq : Nat -> Nat -> Bool
+  eq Zero Zero = True
+  eq _ _ = False
+
+module Counting (Key : Eqv) where
+  data Bag where
+    Empty : Bag
+    Put : Key.T -> Bag -> Bag
+
+  size : Bag -> Nat
+  size Empty = Zero
+  size (Put _ rest) = Succ (size rest)
+
+counted : Nat
+counted = Counting.size (Counting.Put Zero Counting.Empty)
+"
+    ));
+    assert_eq!(value(&signature, "counted"), "Succ Zero");
+}
+
+#[test]
+fn sealing_hides_the_constructors_of_a_family() {
+    // Представление семейства - это его конструкторы, и `:>` скрывает именно
+    // его (§3.5). Иначе запечатывание было бы фикцией: снаружи абстрактный тип
+    // и строился бы, и разбирался.
+    let head = format!(
+        "{BASE}
+module type Counter where
+  type T
+  start : T
+
+module Hidden :> Counter where
+  data T where
+    Wrap : Nat -> T
+
+  start : T
+  start = Wrap Zero
+"
+    );
+    // Внутри тела конструктор виден - флаг ставится, когда модуль проверен.
+    program(&format!(
+        "{head}
+used : Hidden.T
+used = Hidden.start
+"
+    ));
+    // Снаружи он не называется ни в выражении, ни в паттерне.
+    for text in [
+        "built : Hidden.T\nbuilt = Hidden.Wrap Zero\n",
+        "peeked : Hidden.T -> Nat\npeeked (Hidden.Wrap n) = n\n",
+    ] {
+        let error = refused(&format!("{head}\n{text}"));
+        assert!(
+            matches!(error, ElabError::SealedConstructor { .. }),
+            "для {text:?} получено {error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_unique_family_stays_at_the_top_level() {
+    // Названная граница, измеренная зондом: таблица владения ключуется
+    // написанным именем головы, а оно короткое, и `A.Cell`, объявленное
+    // `unique`, делало уникальным `B.Cell` из соседнего модуля.
+    let error = refused(&format!(
+        "{BASE}
+module Cells where
+  unique data Cell where
+    MkCell : Nat -> Cell
+"
+    ));
+    assert!(
+        matches!(error, ElabError::ModuleMember { .. }),
+        "получено {error:?}"
+    );
 }
 
 #[test]

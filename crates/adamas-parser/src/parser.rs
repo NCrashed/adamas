@@ -2296,12 +2296,42 @@ impl<'a> Parser<'a> {
 
     // --- паттерны --------------------------------------------------------
 
+    /// Голова паттерна: имя, а за ним - примыкающий путь `M.Wrap`.
+    ///
+    /// Собирается в **одно** имя с точками - то самое, под которым член поднят
+    /// на верхний уровень (§4.8). Проекции в паттерне не бывает, поэтому точка
+    /// здесь читается однозначно, в отличие от выражения.
+    fn pattern_head(&mut self) -> Result<Name, ParseError> {
+        let head = self.ident()?;
+        let mut span = head.span;
+        // Собирается в один буфер, а не пересобирается на каждом звене: длину
+        // пути ограничивает только текст, и пересборка была бы квадратичной.
+        // Заводится он лишь тогда, когда точка действительно съедена, - у
+        // обычного паттерна лишней аллокации не появляется.
+        let mut path: Option<String> = None;
+        while span.end() == self.peek().span.start()
+            && let Some(field) = self.projected()
+        {
+            let text = path.get_or_insert_with(|| head.text.to_string());
+            text.push('.');
+            text.push_str(&field.text);
+            span = span.merge(field.span);
+        }
+        Ok(match path {
+            Some(text) => Name {
+                text: Rc::from(text.as_str()),
+                span,
+            },
+            None => head,
+        })
+    }
+
     /// Паттерн с полями без скобок: так пишется ветка `case`.
     fn pattern(&mut self) -> Result<Pattern, ParseError> {
         if !self.at(TokenKind::Ident) {
             return self.atomic_pattern();
         }
-        let head = self.ident()?;
+        let head = self.pattern_head()?;
         let mut fields = Vec::new();
         while starts_pattern(self.kind()) {
             fields.push(self.atomic_pattern()?);
@@ -2330,8 +2360,9 @@ impl<'a> Parser<'a> {
         let token = self.peek();
         let (kind, span) = match token.kind {
             TokenKind::Ident => {
-                self.bump();
-                (PatternKind::Name(self.name_of(token)), token.span)
+                let head = self.pattern_head()?;
+                let span = head.span;
+                (PatternKind::Name(head), span)
             }
             TokenKind::Underscore => {
                 self.bump();

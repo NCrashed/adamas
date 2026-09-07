@@ -1,0 +1,71 @@
+-- Семейство в теле модуля и путь в паттерне (§4.8).
+--
+-- Подъём у семейства тот же, что у определения: квалифицируется и имя формера,
+-- и имена конструкторов. Внутри тела пишется короткое, снаружи - путь, и путь
+-- этот законен там же, где законно имя конструктора: в выражении, в клаузе, в
+-- ветке `case`.
+--
+-- §4.8 пишет `data Map v` прямо в теле функтора, поэтому параметр функтора
+-- становится ведущим implicit-связыванием и формера, и каждого конструктора -
+-- тем же правилом, что у определения и у алиаса.
+--
+-- Проверяется значением: `Succ (Succ Zero)` собран конструкторами двух разных
+-- модулей и разобран путём снаружи.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+module Boxes where
+  data Box (a : Type) where
+    Wrap : a -> Box a
+    Nothing : Box a
+
+  -- Внутри тела короткое имя ищется квалифицированным и находит своё.
+  orElse : Box Nat -> Nat -> Nat
+  orElse (Wrap n) _ = n
+  orElse Nothing fallback = fallback
+
+-- Снаружи - путь, и в клаузе, и в выражении.
+unwrap : Boxes.Box Nat -> Nat
+unwrap (Boxes.Wrap n) = n
+unwrap Boxes.Nothing = Zero
+
+-- Тот же путь в ветке `case`.
+counted : Boxes.Box Nat -> Nat
+counted b = case b of
+  Boxes.Wrap n -> Succ n
+  Boxes.Nothing -> Zero
+
+module type Eqv where
+  type T
+  eq : T -> T -> Bool
+
+module NatEq : Eqv where
+  type T = Nat
+  eq : T -> T -> Bool
+  eq Zero Zero = True
+  eq a b = False
+
+-- Семейство в теле функтора: `Key` стоит ведущим implicit у `Bag`, у `Empty` и
+-- у `Put`, и место применения решает его тем же механизмом, что и у члена.
+module Counting (Key : Eqv) where
+  data Bag where
+    Empty : Bag
+    Put : Key.T -> Bag -> Bag
+
+  size : Bag -> Nat
+  size Empty = Zero
+  size (Put _ rest) = Succ (size rest)
+
+module NatCounting = Counting NatEq
+
+main : Nat
+main = case Boxes.Nothing of
+  Boxes.Wrap n -> n
+  Boxes.Nothing ->
+    Counting.size (Counting.Put Zero (Counting.Put Zero Counting.Empty))

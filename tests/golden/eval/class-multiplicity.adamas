@@ -1,0 +1,40 @@
+-- Метод класса, полиморфный по кратности, исполняется (§10 вопрос 115).
+--
+-- Проверить это можно только вычислением: в типах работающая проекция от
+-- неработающей не отличается, а параметр кратности стёрт и до рантайма не
+-- доходит вовсе - ровно этого от него и ждут.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+class Mappable (f : Type -> Type) where
+  fmap : {q : Mult} -> (ω g : (q x : a) -> b) -> f a -> f b
+
+instance Mappable List where
+  fmap g Nil = Nil
+  fmap g (Cons x xs) = Cons (g x) (fmap g xs)
+
+-- Линейная функция: её кратность и есть та, ради которой параметр заведён.
+once : (1 n : Nat) -> Nat
+once n = n
+
+double : Nat -> Nat
+double Zero = Zero
+double (Succ k) = Succ (Succ (double k))
+
+digits : List Nat
+digits = Cons (Succ Zero) (Cons Zero Nil)
+
+-- Два употребления с разными кратностями в одном теле сегодня не пишутся, и
+-- это ограничение старше поля: то же отвергается у обычного полиморфного
+-- определения. Поэтому здесь по одному на определение.
+kept : List Nat
+kept = fmap once digits
+
+main : List Nat
+main = fmap double kept

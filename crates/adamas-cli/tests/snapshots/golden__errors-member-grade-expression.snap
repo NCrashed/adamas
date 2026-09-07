@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: member-grade-expression.adamas:15:34: у члена записи в позиции кратности пишется имя параметра, а не выражение над ними
+    twice : {q r : Mult} -> (ω g : (q * r x : Nat) -> Nat) -> f Nat -> Nat
+                                   ^^^^^^^^^^^^^^^

@@ -13,9 +13,10 @@
 --   * **рекурсия под констрейнтом** не писалась вовсе (§10 вопрос 114,
 --     закрыт логом 2026-09-07): `elem`, `maximum` и `nub` написаны здесь
 --     прямо, и они же были свидетелем правки.
---   * **метод класса не бывает полиморфным по кратности** (§10 вопрос 115),
---     поэтому `Functor.map` берёт ω-функцию, и линейную ею не отобразить.
---     Полиморфный по кратности `mapList` живёт рядом отдельным именем.
+--   * **метод класса не бывал полиморфным по кратности** (§10 вопрос 115,
+--     закрыт логом 2026-09-07): `Functor.map` берёт `{q : Mult}` и работает с
+--     линейной функцией. Параметр связывается у поля словаря, а не у класса,
+--     и живёт в своём пространстве индексов.
 
 data Unit where
   MkUnit : Unit
@@ -136,15 +137,15 @@ instance {Eqv a} => Eqv (List a) where
   eq x y = False
 
 class Functor (f : Type -> Type) where
-  map : (a -> b) -> f a -> f b
+  map : {q : Mult} -> (ω g : (q x : a) -> b) -> f a -> f b
 
 instance Functor Maybe where
-  map f Nothing = Nothing
-  map f (Just x) = Just (f x)
+  map g Nothing = Nothing
+  map g (Just x) = Just (g x)
 
 instance Functor List where
-  map f Nil = Nil
-  map f (Cons x xs) = Cons (f x) (map f xs)
+  map g Nil = Nil
+  map g (Cons x xs) = Cons (g x) (map g xs)
 
 class Applicative f when Functor f where
   pure : a -> f a

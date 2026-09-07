@@ -93,3 +93,49 @@ mutual
 
 deduped : List Nat
 deduped = nub (Cons Zero (Cons Zero Nil))
+
+-- Метод, полиморфный по кратности (§10 вопрос 115).
+--
+-- Параметр связывается **у поля** словаря, а не у класса и не у определения:
+-- у поля своя арность, и проекция её инстанцирует. Пространство индексов у
+-- него отдельное - в печати это видно как `f.q0`, - и потому подстановка
+-- аргументов определения на параметр поля не попадает: промах невозможен по
+-- построению, а не по внимательности.
+--
+-- Ради этого всё и заводилось: `map`, берущая линейную функцию. До этого метод
+-- брал только ω-функцию, и линейную ею было не отобразить.
+
+class Mappable (f : Type -> Type) where
+  fmap : {q : Mult} -> (ω g : (q x : a) -> b) -> f a -> f b
+
+data Maybe (a : Type) where
+  Nothing : Maybe a
+  Just : a -> Maybe a
+
+instance Mappable Maybe where
+  fmap g Nothing = Nothing
+  fmap g (Just x) = Just (g x)
+
+-- Рекурсивный член: ссылка на себя идёт через словарь объявляемого инстанса,
+-- и параметр поля обязан дойти туда переменной, а не дыркой.
+instance Mappable List where
+  fmap g Nil = Nil
+  fmap g (Cons x xs) = Cons (g x) (fmap g xs)
+
+onceNat : (1 n : Nat) -> Nat
+onceNat n = n
+
+twiceNat : Nat -> Nat
+twiceNat n = Succ (Succ n)
+
+-- ω-функция: как и раньше.
+plainly : List Nat -> List Nat
+plainly xs = fmap twiceNat xs
+
+-- Линейная: раньше не писалась вовсе.
+linearly : List Nat -> List Nat
+linearly xs = fmap onceNat xs
+
+-- И через второй инстанс.
+optional : Maybe Nat -> Maybe Nat
+optional m = fmap onceNat m

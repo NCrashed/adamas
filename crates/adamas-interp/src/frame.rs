@@ -250,12 +250,6 @@ impl Kont {
         }
     }
 
-    /// Обрезает стек по звено `link` включительно.
-    pub(crate) fn truncate(&mut self, link: usize) {
-        self.links.truncate(link);
-        self.marks.retain(|(_, _, at)| *at < link);
-    }
-
     /// Снимает сегмент от звена `link` до вершины.
     pub(crate) fn cut(&mut self, link: usize) -> Segment {
         let links: Vec<Link> = self.links.drain(link..).collect();

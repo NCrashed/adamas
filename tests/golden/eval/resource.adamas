@@ -121,8 +121,42 @@ lifoAbandoned = handle coupledGuarded with
   return v -> Nil
   note n -> Cons n (resume MkUnit)
 
+-- Деструктор, взявший **свой** ресурс и оборванный подавляемой меткой (§3.3).
+--
+-- Обрыв деструктора есть такой же обрыв через эффект, не зовущий резумпцию, и
+-- деструкторы при нём обязаны отработать. Пока подавление обрезало стек, вся
+-- работа, поставленная самим деструктором, отбрасывалась вместе с куском:
+-- `[1, 6]` вместо `[1, 6, 8]`. Прежние примеры этого не ловили - деструкторы
+-- в них своих ресурсов не берут.
+resource Outer where
+  Hold : Outer
+  closeOuter : (1 o : Outer) -> {Fail, Log} Bool
+  closeOuter o =
+    note 6
+    let s : Sock = Bind
+    let n : Bool = fail
+    True
+
+taken : Outer -> {Fail, Log} Bool
+taken o =
+  note 1
+  True
+
+opening : {Fail, Log} Bool
+opening = taken Hold
+
+nested : {Log} Bool
+nested = handle opening with
+  return v -> v
+  fail -> False
+
+suppressed : List Nat
+suppressed = handle nested with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+
 -- Нормальный и исключительный выходы, по одному ресурсу и по два: `[1, 9]`
 -- дважды, затем `[1, 8, 9]` дважды. Порядок вставки, обратный верному, дал бы
 -- в последних двух `[1, 9, 8]`.
 main : List Nat
-main = append normal (append abandoned (append lifo lifoAbandoned))
+main = append normal (append abandoned (append lifo (append lifoAbandoned suppressed)))

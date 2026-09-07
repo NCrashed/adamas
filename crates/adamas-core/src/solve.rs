@@ -512,6 +512,9 @@ fn read(
         Value::Universe(level) => Some(Term::Universe(level.clone())),
         Value::RowKind(level) => Some(Term::RowKind(level.clone())),
         Value::EffectKind => Some(Term::EffectKind),
+        // Стёртое обратно не читается: значения у него нет. Имя невыразимое -
+        // написать его автор не может, а увидеть в отказе вправе.
+        Value::Erased => Some(Term::constant(crate::value::ERASED)),
     }
 }
 

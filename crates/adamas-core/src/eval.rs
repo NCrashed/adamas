@@ -418,6 +418,9 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
         // Уровень нормализуется, чтобы нормальная форма была канонической и
         // `max u 0` не отличался от `u`.
         Value::Universe(level) => Term::Universe(level.normalize()),
+        // Стёртое обратно не читается - значения у него нет (§3.3). Имя
+        // невыразимое: увидеть его автор вправе, написать не может.
+        Value::Erased => Term::constant(crate::value::ERASED),
 
         Value::RowKind(level) => Term::RowKind(level.normalize()),
         Value::EffectKind => Term::EffectKind,

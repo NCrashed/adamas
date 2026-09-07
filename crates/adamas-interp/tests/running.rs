@@ -1317,6 +1317,49 @@ main = handle program with
 /// файбера при этом стоит невыразимым именем, которого там нет, - и питомник
 /// говорит об этом прямо.
 #[test]
+fn a_task_type_with_family_parameters_is_refused() {
+    // Значение задачи собирается спайном из одного применения, и стёртому
+    // параметру семейства там нужен маркер. Пока требований было два - один
+    // конструктор и одно поле, - `data Task (a : Type)` проходило: `case` над
+    // такой задачей пропускал элиминаторы параметров, поле не связывалось, и
+    // телом разбора наружу уезжала **лямбда** в позицию `Nat` (ревью
+    // 2026-09-07). Отказ здесь дешевле значения, про которое неизвестно, чем
+    // оно окажется.
+    let source = format!(
+        "{BASE}
+data Task (a : Type) where
+  MkTask : Nat -> Task a
+
+effect Async where
+  suspend : Unit
+  spawn : ({{Async}} Nat) -> Task Nat
+  await : (1 t : Task Nat) -> Nat
+
+withNursery : ({{Async}} Nat) -> Nat
+
+slow : {{Async}} Nat
+slow = Succ Zero
+
+forking : {{Async}} Nat
+forking =
+  let t : Task Nat = spawn slow
+  await t
+
+main : Nat
+main = withNursery forking
+"
+    );
+    let signature = elaborated(&source);
+    let body = body(&signature, "main");
+    let error = adamas_interp::run(&signature, &body)
+        .expect_err("параметризованная задача обязана быть отвергнута");
+    assert!(
+        error.to_string().contains("без параметров"),
+        "отказ обязан назвать параметры: {error}"
+    );
+}
+
+#[test]
 fn a_forged_task_is_refused() {
     let source = format!(
         "{BASE}

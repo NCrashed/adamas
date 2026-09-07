@@ -303,6 +303,24 @@ impl Machine<'_> {
         let Some(ty) = result_head(&definition.ty) else {
             return Err(unsuitable());
         };
+        // Параметров у семейства быть не должно, и это третье требование, а не
+        // придирка: значение собирается спайном из одного применения, а
+        // стёртые параметры в спайне обязаны стоять маркерами - как их ставит
+        // обычное применение конструктора. Пока их не спрашивали, `data Task
+        // (a : Type)` проходило, поле не связывалось, и всякий разбор над
+        // задачей выпускал наружу лямбду вместо значения (ревью 2026-09-07).
+        //
+        // §5.2 пишет `Task eff a`, то есть параметризованную задачу; когда она
+        // понадобится, дописывать надо **маркеры в спайн**, а не снимать этот
+        // отказ.
+        if self
+            .signature()
+            .lookup(&ty)
+            .and_then(adamas_core::sig::Definition::data_shape)
+            .is_none_or(|(params, _)| params != 0)
+        {
+            return Err(unsuitable());
+        }
         let Some([only]) = self.signature().constructors(&ty) else {
             return Err(unsuitable());
         };

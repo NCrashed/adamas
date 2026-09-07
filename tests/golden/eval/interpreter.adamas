@@ -43,6 +43,11 @@ data Expr where
   Var : Nat -> Expr
   Add : Expr -> Expr -> Expr
   Mul : Expr -> Expr -> Expr
+  -- Узел **некоммутативный**, и он тут не для полноты языка. `Add` и `Mul`
+  -- симметричны оба, поэтому перестановка операндов в любом из них ответа не
+  -- меняла: вычислитель объектного языка проверялся только на том, что
+  -- считает, а не на том, что считает верно (ревью 2026-09-07).
+  Sub : Expr -> Expr -> Expr
 
 data Stmt where
   Done : Expr -> Stmt
@@ -59,6 +64,12 @@ effect Env where
 effect Trace where
   note : Nat -> Unit
 
+-- Усечённое вычитание: `Nat` вычитается до нуля, ниже не уходит.
+monus : Nat -> Nat -> Nat
+monus Zero m = Zero
+monus (Succ k) Zero = Succ k
+monus (Succ k) (Succ m) = monus k m
+
 lookupAt : Nat -> List Nat -> {Fail} Nat
 lookupAt n Nil = fail n
 lookupAt Zero (Cons x xs) = x
@@ -73,6 +84,7 @@ instance Eval Expr where
   run (Var i) = look i
   run (Add a b) = run a + run b
   run (Mul a b) = run a * run b
+  run (Sub a b) = monus (run a) (run b)
 
 instance Eval Stmt where
   run (Done e) = run e
@@ -81,12 +93,16 @@ instance Eval Stmt where
     let u : Unit = bind n
     run rest
 
--- `let x = 2 in let y = x * 3 in y + x` даёт восемь.
+-- `let x = 2 in let y = x * 3 in (y - x) + 1` даёт пять.
+--
+-- Хвост написан вычитанием намеренно. С `y + x` ответ был бы тот же и при
+-- окружении, растущем с хвоста: `2 + 6` и `6 + 2` совпадают, поэтому
+-- дисциплина связывания не наблюдалась вовсе. Здесь она даёт 5 против 1.
 sample : Stmt
 sample =
   Def (Lit (Succ (Succ Zero)))
     (Def (Mul (Var Zero) (Lit (Succ (Succ (Succ Zero)))))
-      (Done (Add (Var Zero) (Var (Succ Zero)))))
+      (Done (Add (Sub (Var Zero) (Var (Succ Zero))) (Lit (Succ Zero)))))
 
 program : {Env, Fail} Nat
 program = run sample
@@ -252,23 +268,58 @@ infer ctx (TmApp f x) = applied (infer ctx f) (infer ctx x)
 wellTyped : Term
 wellTyped = TmApp (TmLam TyNat (TmAdd (TmVar Zero) (TmLit (Succ Zero)))) (TmLit (Succ (Succ Zero)))
 
+-- `\x : Bool -> 1` - домен и кодомен разные, и код это показывает.
+wellArrow : Term
+wellArrow = TmLam TyBool (TmLit (Succ Zero))
+
 -- `2 1` - применение того, что функцией не является.
 illTyped : Term
 illTyped = TmApp (TmLit (Succ (Succ Zero))) (TmLit (Succ Zero))
 
+-- `(\x : Bool -> 1) 2` - домен не совпал: отказ приходит от `wanted`, и без
+-- него `sameTy` не проверялся ничем.
+illDomain : Term
+illDomain = TmApp (TmLam TyBool (TmLit (Succ Zero))) (TmLit (Succ (Succ Zero)))
+
+-- Свободная переменная: отказ от `tyAt`, единственный его свидетель.
+illFree : Term
+illFree = TmVar (Succ (Succ (Succ (Succ (Succ Zero)))))
+
 -- Вердикт берёт **вычисление**, а не терм: аргументом оно передаётся, а не
 -- исполняется (§3.4), и хендлеру достаётся неисполненным. Само вычисление при
 -- этом называется определением - там его тип написан, и приостановка видна.
+-- Вердикт отвечает **кодом типа**, а не битом «принято». Пока он давал
+-- единицу на всякий типизирующийся терм, домен и кодомен были неразличимы, а
+-- `sameTy`, отказ `wanted` и отказ `tyAt` не наблюдались ни в чём: сломай их -
+-- ответ тот же (ревью 2026-09-07). Отказ несёт свой код, поэтому видно и
+-- **какой** именно.
+code : Ty -> Nat
+code TyNat = Succ Zero
+code TyBool = Succ (Succ Zero)
+-- Домен и кодомен входят **по-разному**: иначе `TyArr TyBool TyNat` и
+-- `TyArr TyNat TyBool` дают один код, и разворот стрелки у `TmLam` проходит
+-- незамеченным.
+code (TyArr d r) = 10 + code d * 3 + code r
+
 verdict : ({Reject} Ty) -> Nat
 verdict checked = handle checked with
-  return t -> Succ Zero
-  reject e -> Zero
+  return t -> code t
+  reject e -> 20 + e
 
 checkedWell : {Reject} Ty
 checkedWell = infer Nil wellTyped
 
 checkedIll : {Reject} Ty
 checkedIll = infer Nil illTyped
+
+checkedArrow : {Reject} Ty
+checkedArrow = infer Nil wellArrow
+
+checkedDomain : {Reject} Ty
+checkedDomain = infer Nil illDomain
+
+checkedFree : {Reject} Ty
+checkedFree = infer Nil illFree
 
 -- --------------------------------------------------------------- разбор
 --
@@ -338,6 +389,29 @@ running = handle parseTerm with
 
 -- Разбор и типизация встречаются: разобранное проверяется под контекстом, где
 -- свободная переменная имеет тип.
+-- Форма разобранного терма входит в ответ числом. Пока разбор наблюдался одним
+-- вердиктом типизации, парсер вправе был выбросить результат целиком и
+-- подставить константу: `verdict parsedType` давал единицу при всяком терме,
+-- который типизируется (ревью 2026-09-07).
+--
+-- Операнды входят по-разному, иначе `TmAdd l r` неотличимо от `TmAdd r l`.
+shapeOf : Term -> Nat
+shapeOf (TmLit n) = Succ n
+shapeOf (TmVar i) = 20 + i
+shapeOf (TmAdd l r) = 40 + shapeOf l * 3 + shapeOf r
+shapeOf (TmLam t body) = 60 + shapeOf body
+shapeOf (TmApp f x) = 80 + shapeOf f + shapeOf x
+
+shaped : {Reject} Nat
+shaped =
+  let t : Term = running
+  shapeOf t
+
+parsedShape : Nat
+parsedShape = handle shaped with
+  return n -> n
+  reject e -> Zero
+
 parsedType : {Reject} Ty
 parsedType = infer (Cons TyNat Nil) running
 
@@ -374,18 +448,26 @@ intrinsic =
     (TSum (TNat (Succ (Succ Zero))) (TNat (Succ (Succ (Succ Zero)))))
     (TNat Zero)
 
--- `[8, 4, 0, 9, 1, 0, 1, 5]`: восемь от вычисления, четыре от фатальной
--- ошибки, ушедшей мимо локального обработчика, отметки `[0, 9]` от
+-- `[5, 4, 0, 9, 1, 22, 17, 21, 25, 1, 102, 5]`: пять от вычисления, четыре от
+-- фатальной ошибки, ушедшей мимо локального обработчика, отметки `[0, 9]` от
 -- оборванного - вторая поставлена деструктором ресурса уже на исключительном
--- пути, - затем два вердикта типизации, вердикт **разобранного** и значение
--- внутренне типизированного терма. Сценарий 18 целиком: разбор, типизация,
--- вычисление.
+-- пути, - затем пять вердиктов типизации, вердикт разобранного, **форма**
+-- разобранного и значение внутренне типизированного терма.
+--
+-- Вердикты несут код типа, а отказы - свой номер: `1` есть `TyNat`, `17` есть
+-- `TyArr TyBool TyNat`, `21` - несовпадение домена, `22` - применение не
+-- функции, `25` - свободная переменная. Одним битом «принято» они были прежде,
+-- и половина типизатора не проверялась ничем (ревью 2026-09-07).
 main : List Nat
 main =
-  Cons answer
-    (Cons escaped
-      (append traced
-        (Cons (verdict checkedWell)
-          (Cons (verdict checkedIll)
-            (Cons (verdict parsedType)
-              (Cons (evalTyped Nat intrinsic) Nil))))))
+  append [answer, escaped]
+    (append traced
+      [ verdict checkedWell
+      , verdict checkedIll
+      , verdict checkedArrow
+      , verdict checkedDomain
+      , verdict checkedFree
+      , verdict parsedType
+      , parsedShape
+      , evalTyped Nat intrinsic
+      ])

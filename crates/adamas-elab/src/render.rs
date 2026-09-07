@@ -538,6 +538,7 @@ fn renamed(field: &adamas_core::term::Field, ty: Term) -> adamas_core::term::Fie
     adamas_core::term::Field {
         name: Rc::clone(&field.name),
         mult: field.mult,
+        shape: field.shape,
         ty: Rc::new(ty),
     }
 }

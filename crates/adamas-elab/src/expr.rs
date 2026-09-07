@@ -911,6 +911,11 @@ pub(crate) struct Elaborator<'a> {
     /// Разрешать это в разборе нечем - имя связывается объявлением, а не
     /// формой, - поэтому решает элаборация, как и со всяким именем.
     grades: Vec<Symbol>,
+    /// Элаборируется ли сейчас тип **члена** записи (§10 вопрос 115).
+    ///
+    /// Параметры кратности, написанные там, связываются у поля, а не у
+    /// определения, и живут в своём пространстве индексов.
+    fielding: Option<usize>,
 }
 
 impl<'a> Elaborator<'a> {
@@ -980,6 +985,7 @@ impl<'a> Elaborator<'a> {
             produced: None,
             instantiated: HashMap::new(),
             grades: Vec::new(),
+            fielding: None,
         }
     }
 
@@ -2851,6 +2857,7 @@ impl<'a> Elaborator<'a> {
         let head = CoreField {
             name: CoreName::from(&*field.name.text),
             mult: Mult::One,
+            shape: adamas_core::term::Shape::default(),
             ty: Rc::new(ty),
         };
         Ok(std::iter::once(head).chain(tail).collect())
@@ -2870,6 +2877,12 @@ impl<'a> Elaborator<'a> {
         let Some((first, rest)) = members.split_first() else {
             return Ok(Vec::new());
         };
+        // Параметры кратности, написанные членом, связываются **у поля**, а не
+        // у сигнатуры: у поля своя арность (§10 вопрос 115), и проекция её
+        // инстанцирует. Снимок нужен потому, что список общий на элаборатор:
+        // сколько член добавил, столько и связал, и соседям они не видны.
+        let grades = self.grades.len();
+        let fielding = self.fielding.replace(grades);
         let ty = if let Some(written) = first.ty {
             // Свободные имена члена поднимаются в implicit-связывания его
             // поля, а универсум словаря считается по полям: член,
@@ -2887,6 +2900,10 @@ impl<'a> Elaborator<'a> {
             let level = self.metas.fresh_level();
             self.wrapped(&params, false, |_| Ok(Term::Universe(level)))?
         };
+        let ty = ty;
+        self.fielding = fielding;
+        let mults = u16::try_from(self.grades.len() - grades).unwrap_or(0);
+        self.grades.truncate(grades);
         let bound = self.typed(&ty);
         let tail = self.binding(Bound::visible(&first.name.text, Mult::One, bound), |it| {
             it.module_members(rest, rowed)
@@ -2894,6 +2911,10 @@ impl<'a> Elaborator<'a> {
         let head = CoreField {
             name: CoreName::from(&*first.name.text),
             mult: Mult::One,
+            shape: adamas_core::term::Shape {
+                mults,
+                ..adamas_core::term::Shape::default()
+            },
             ty: Rc::new(ty),
         };
         Ok(std::iter::once(head).chain(tail).collect())
@@ -4356,6 +4377,22 @@ impl<'a> Elaborator<'a> {
                 name: Rc::clone(&name.text),
                 span: name.span,
             })?);
+        }
+        // Параметр **поля записи** живёт в своём пространстве индексов (§10
+        // вопрос 115): маски произведения и суммы нумеруют параметры
+        // определения, и выражению над параметрами поля места в них нет.
+        // Одиночное имя пишется, выражение - пока нет.
+        if let Some(base) = self.fielding {
+            if parts.len() > 1 || binder.grade.is_some() {
+                return Err(ElabError::FieldGrade { span: binder.span });
+            }
+            // Номер - **относительный**: параметры поля нумеруются от нуля
+            // у каждого члена, а общий список нужен только разрешению имён.
+            let MultVar(absolute) = first;
+            let index = usize::from(absolute).saturating_sub(base);
+            return Ok(Some(Mult::Field(MultVar(
+                u16::try_from(index).unwrap_or(u16::MAX),
+            ))));
         }
         match binder.grade {
             // Смешанного выражения нет: приоритета между `*` и `+` в позиции

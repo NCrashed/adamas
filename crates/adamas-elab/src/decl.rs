@@ -1122,7 +1122,7 @@ fn declare_instance(
     // телескоп, оканчивающийся типом поля.
     for index in 0..superclasses {
         let field: Symbol = Rc::from(format!("#super{index}").as_str());
-        let ty = instance_method(signature, metas, &prefix, &written, &field, span, &names)?;
+        let (ty, _) = instance_method(signature, metas, &prefix, &written, &field, span, &names)?;
         let size = u32::try_from(prefix.len()).unwrap_or(u32::MAX);
         let hole = metas.fresh_term(Ctx::new(signature).eval(&ty), size);
         object.push((CoreName::from(&*field), Rc::new(hole)));
@@ -1376,7 +1376,7 @@ fn instance_method(
     method: &str,
     span: Span,
     names: &Names,
-) -> Result<Term, ElabError> {
+) -> Result<(Term, u32), ElabError> {
     let fail = |error: TypeError| ElabError::Core {
         span,
         error: Box::new(error),
@@ -1389,8 +1389,11 @@ fn instance_method(
     }
     let value = ctx.eval(under_prefix(written));
     let bound = ctx.bind(CoreName::from("d"), Mult::Many, value);
-    let projection = Term::Project(Rc::new(Term::var(0)), CoreName::from(method));
-    let (found, _) = infer(&bound, metas, Mult::Zero, &projection).map_err(fail)?;
+    // Параметры поля переходят в параметры **члена инстанса**: у поля своё
+    // пространство индексов, и граница с определением - здесь (§10 вопрос 115).
+    let (found, shape) =
+        adamas_core::check::projected(&bound, metas, &Term::var(0), &CoreName::from(method))
+            .map_err(fail)?;
     if mentions_depth(&quote(bound.size(), &found), 0) {
         return Err(ElabError::ModuleMember {
             name: Rc::from(method),
@@ -1402,7 +1405,7 @@ fn instance_method(
     }
     let depth = u32::try_from(prefix.len()).unwrap_or(u32::MAX);
     let ty = zonk_term(metas, &quote(depth, &found));
-    Ok(prefix.iter().rev().fold(ty, |inner, param| {
+    let ty = prefix.iter().rev().fold(ty, |inner, param| {
         Term::Pi(
             Binder::implicit(param.mult),
             CoreName::from(&*param.name),
@@ -1410,7 +1413,8 @@ fn instance_method(
             adamas_core::row::Row::empty(),
             Rc::new(inner),
         )
-    }))
+    });
+    Ok((ty, u32::from(shape.mults)))
 }
 
 /// Ведущие связывания типа - те, под которыми живут и словарь, и его члены.
@@ -1552,7 +1556,13 @@ fn declare_method(
     let bound = ctx.eval(&dictionary);
     let inner = ctx.bind(CoreName::from("d"), Mult::Many, bound);
     let projection = Term::Project(Rc::new(Term::var(0)), CoreName::from(&**method));
-    let (ty, _) = infer(&inner, metas, Mult::Zero, &projection).map_err(fail)?;
+    // Параметры поля становятся **параметрами метода**: у поля своё
+    // пространство индексов, и на границе с определением оно переходит в его
+    // собственное (§10 вопрос 115). Дырка тут не годится - она решилась бы
+    // один раз на всё определение.
+    let (ty, shape) =
+        adamas_core::check::projected(&inner, metas, &Term::var(0), &CoreName::from(&**method))
+            .map_err(fail)?;
     // Row-параметр класса достаётся методу, **только если его называет поле**.
     // Иначе он не определяется в месте вызова ничем: погашение решает хвост по
     // стрелке типа метода, а у `zero : a` стрелки нет вовсе, и дырка доживала
@@ -1594,7 +1604,14 @@ fn declare_method(
         )
     });
     signature
-        .define_inferred(metas, method, Mult::Many, ty, Some(body))
+        .define_graded(
+            metas,
+            method,
+            Mult::Many,
+            ty,
+            Some(body),
+            u32::from(shape.mults),
+        )
         .map_err(fail)
 }
 
@@ -1647,7 +1664,7 @@ fn self_dictionary(
     let mut super_types = Vec::with_capacity(superclasses);
     for index in 0..superclasses {
         let field = format!("#super{index}");
-        let ty = instance_method(signature, metas, prefix, written, &field, span, names)?;
+        let (ty, _) = instance_method(signature, metas, prefix, written, &field, span, names)?;
         super_types.push(over_prefix(ty));
     }
     Ok(Declaring {
@@ -1693,10 +1710,13 @@ fn declare_members(
     };
     // Типы всех членов - из одного заголовка, значит с общими дырками уровня.
     let mut types = Vec::with_capacity(members.len());
+    // Арность кратностей у каждого члена **своя**: она приходит от поля, а поле
+    // связывает свои параметры само (§10 вопрос 115).
+    let mut grades = Vec::with_capacity(members.len());
     for (method, ..) in members {
-        types.push(instance_method(
-            signature, metas, prefix, written, method, span, names,
-        )?);
+        let (ty, mults) = instance_method(signature, metas, prefix, written, method, span, names)?;
+        types.push(ty);
+        grades.push(mults);
     }
     // Обобщение **общее на группу**: члены живут под одним заголовком, и
     // параметры уровня у них одни и те же. Арность поэтому известна до
@@ -1785,7 +1805,8 @@ fn declare_members(
     for (at, ty) in types.iter().enumerate() {
         let member = SigMember::definition(&qualified[at], Mult::Many, ty.clone())
             .with_body(trees[at].term.clone())
-            .with_arity(arity, row_arity);
+            .with_arity(arity, row_arity)
+            .with_mults(grades[at]);
         group = Some(match group {
             None => Group::of(member),
             Some(group) => group.and(member),

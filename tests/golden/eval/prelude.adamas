@@ -117,6 +117,13 @@ digits = Cons (Succ Zero) (Cons (Succ (Succ Zero)) (Cons (Succ (Succ (Succ Zero)
 succOf : Nat -> Nat
 succOf n = Succ n
 
+-- Линейная функция: `map` берёт `{q : Mult}`, и шапка обещает, что с такой он
+-- **работает**. Обещание держалось словом - единственное применение `map`
+-- стояло в `ap`, где функция при ω, а сам `ap` не исполнялся (ревью
+-- 2026-09-07).
+onceOf : (1 n : Nat) -> Nat
+onceOf n = Succ (Succ n)
+
 -- Классы.
 class Eqv a where
   eq : a -> a -> Bool
@@ -255,9 +262,36 @@ fromMaybe d (Just x) = x
 repeated : List Nat
 repeated = Cons (Succ Zero) (Cons (Succ (Succ Zero)) (Cons (Succ Zero) Nil))
 
-main : Nat
+-- Ответ **позиционный**, и это не украшение: суммой `plus (plus top head) kept`
+-- любая перестановка давала те же 6, а семнадцать членов библиотеки не
+-- участвовали в ответе вовсе - сломать их можно было незаметно (ревью
+-- 2026-09-07). Каждый элемент ниже держит своё правило.
+mark : Bool -> Nat
+mark False = Zero
+mark True = Succ Zero
+
+main : List Nat
 main =
-  let top : Nat = maximum Zero (collected digits)
-  let head : Nat = fromMaybe Zero (safeHead digits)
-  let kept : Nat = length (nub repeated)
-  plus (plus top head) kept
+  [ maximum Zero (collected digits)
+  , fromMaybe Zero (safeHead digits)
+  , length (nub repeated)
+  , fromMaybe 4 (safeHead Nil)
+  , length (collected digits)
+  , fromMaybe Zero (safeHead (collected digits))
+  , length (append digits digits)
+  , length (filterList isZero digits)
+  , sum (mapList succOf digits)
+  , times 2 3
+  , mark (eq True True)
+  , mark (eq digits repeated)
+  , fromMaybe Zero (nextJust (Just (Succ Zero)))
+  , sum (map succOf digits)
+  , sum (map onceOf digits)
+  , fromMaybe Zero (map succOf (Just (Succ Zero)))
+  , fromMaybe Zero (ap (pure succOf) (Just (Succ Zero)))
+  , mark (not False)
+  , mark (not True)
+  , mark (or False True)
+  , foldl (flip plus) Zero digits
+  , mark (runShowable (MkShowable Zero isZero))
+  ]

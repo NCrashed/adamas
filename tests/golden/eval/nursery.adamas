@@ -1,0 +1,89 @@
+-- Файберы в рантайме: питомник, уступка, порождение (§5.2, §9 Фаза 5).
+--
+-- Файбер здесь - **сегмент того же стека**, а не второй стек и не поток.
+-- Уступка снимает его от кадра питомника до вершины и кладёт в очередь;
+-- пробуждение возвращает на место. Копий не делается ни одной.
+--
+-- Новых форм в языке для этого нет. Машина знает три имени - ровно так же, как
+-- знает `Unit`, без которого не запускается приостановленное вычисление:
+-- `withNursery` - постулат, чьё тело она даёт; `suspend` и `spawnDetached` -
+-- операции, которые она обслуживает сама. Объявляет их автор обычным `effect`.
+--
+-- Питомник **дожидается** всех порождённых: structured concurrency в смысле
+-- Trio, на который §5.2 и ссылается. Отвечает он значением корневого файбера.
+--
+-- **Ресурс внутри задачи законен, и это главное отличие от планировщика,
+-- написанного на языке** (`eval/fibers.adamas`). Тот держится на `ω`-резумпции,
+-- а §3.4 запрещает ресурс в области видимости `handleMulti`: два возобновления
+-- звали бы деструктор дважды. Файбер возобновляют ровно один раз - он либо
+-- стоит в очереди, либо бежит, - поэтому резумпция его аффинна, и деструктор
+-- отрабатывает там, где написан, даже если между ним и телом была уступка.
+--
+-- Названо ценой и не сделано здесь: `spawn` с результатом, `Task` и `await`
+-- (им нужна типовая сторона §5.2), отмена и раскол на `Async` с `Nursery`.
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+effect Async where
+  suspend : Unit
+  spawnDetached : ({Async, Log} Unit) -> Unit
+
+-- Питомник: тип написан автором, тело даёт машина.
+withNursery : ({Async, Log} Unit) -> {Log} Unit
+
+-- Ресурс с эффектным деструктором - ровно то, что `handleMulti` запрещает.
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {Log} Bool
+  closeFile h =
+    note 7
+    True
+
+-- Задача держит ресурс и уступает, пока держит.
+holding : File -> {Async, Log} Unit
+holding h =
+  let a : Unit = note 1
+  let s : Unit = suspend
+  let b : Unit = note 1
+  MkUnit
+
+owning : {Async, Log} Unit
+owning = holding Open
+
+other : {Async, Log} Unit
+other =
+  let a : Unit = note 9
+  let s : Unit = suspend
+  note 9
+
+root : {Async, Log} Unit
+root =
+  let s : Unit = spawnDetached other
+  owning
+
+program : {Log} Unit
+program = withNursery root
+
+-- 1 9 1 7 9: корневой отмечается, уступает порождённому, отмечается снова,
+-- закрывает ресурс семёркой - и только потом договаривает порождённый,
+-- которого питомник дождался.
+main : List Nat
+main = handle program with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)

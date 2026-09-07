@@ -1097,3 +1097,124 @@ main = handle inner with
     // Ноль дал бы внутренний хендлер, единицу - внешний.
     assert_eq!(ran(&source, "main"), "Succ Zero");
 }
+
+/// Файберы под питомником чередуются по кругу.
+///
+/// Уступка снимает сегмент от кадра питомника до вершины и кладёт его в
+/// очередь; пробуждение возвращает на место. Порядок отметок и есть порядок
+/// круга, и разойдись он - планировщик перестал бы быть round-robin.
+#[test]
+fn fibers_under_a_nursery_take_turns() {
+    let source = format!(
+        "{BASE}
+effect Log where
+  note : Nat -> Unit
+
+effect Async where
+  suspend : Unit
+  spawnDetached : ({{Async, Log}} Unit) -> Unit
+
+withNursery : ({{Async, Log}} Unit) -> {{Log}} Unit
+
+worker : Nat -> Nat -> {{Async, Log}} Unit
+worker tag Zero = MkUnit
+worker tag (Succ k) =
+  let u : Unit = note tag
+  let s : Unit = suspend
+  worker tag k
+
+kid : {{Async, Log}} Unit
+kid = worker 9 2
+
+root : {{Async, Log}} Unit
+root =
+  let s : Unit = spawnDetached kid
+  worker 1 3
+
+program : {{Log}} Unit
+program = withNursery root
+
+main : List Nat
+main = handle program with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+"
+    );
+    // Корневой отмечается первым: порождённое встаёт в **хвост** очереди.
+    assert_eq!(
+        ran(&source, "main"),
+        "Cons (Succ Zero) (Cons (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) \
+         (Cons (Succ Zero) (Cons (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) \
+         (Cons (Succ Zero) Nil))))"
+    );
+}
+
+/// Питомник дожидается порождённого, даже когда корневой договорил раньше.
+///
+/// Structured concurrency в смысле Trio: порождённое не переживает своей
+/// области видимости. Ответом при этом остаётся значение **корневого**.
+#[test]
+fn a_nursery_waits_for_what_it_spawned() {
+    let source = format!(
+        "{BASE}
+effect Log where
+  note : Nat -> Unit
+
+effect Async where
+  suspend : Unit
+  spawnDetached : ({{Async, Log}} Unit) -> Unit
+
+withNursery : ({{Async, Log}} Unit) -> {{Log}} Unit
+
+slow : {{Async, Log}} Unit
+slow =
+  let a : Unit = suspend
+  let b : Unit = suspend
+  note 9
+
+root : {{Async, Log}} Unit
+root =
+  let s : Unit = spawnDetached slow
+  note 1
+
+program : {{Log}} Unit
+program = withNursery root
+
+main : List Nat
+main = handle program with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+"
+    );
+    // Девятка приходит после единицы: корневой договорил, а питомник ждал.
+    assert_eq!(
+        ran(&source, "main"),
+        "Cons (Succ Zero) (Cons (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) Nil)"
+    );
+}
+
+/// Без питомника уступка идёт к написанному хендлеру, как всякая операция.
+///
+/// Имя `suspend` машина знает, но обслуживает его **только** под питомником:
+/// иначе объявление с таким именем перестало бы значить написанное.
+#[test]
+fn suspension_outside_a_nursery_goes_to_its_handler() {
+    let source = format!(
+        "{BASE}
+effect Async where
+  suspend : Unit
+
+counting : {{Async}} Nat
+counting =
+  let a : Unit = suspend
+  let b : Unit = suspend
+  Zero
+
+main : Nat
+main = handle counting with
+  return v -> v
+  suspend -> Succ (resume MkUnit)
+"
+    );
+    assert_eq!(ran(&source, "main"), "Succ (Succ Zero)");
+}

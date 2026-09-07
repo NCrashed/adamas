@@ -223,3 +223,10 @@ popped = handle pop with
   pop -> case state of
     Empty -> resume False Empty
     Push x rest -> resume x rest
+
+-- Операция с собственными параметрами кратности (§10 вопрос 116), включая
+-- выражение над ними: своих параметров операция иметь вправе - она
+-- инстанцируется местом вызова, а не элиминацией, - и этим отличается от
+-- конструктора.
+effect Chain where
+  chainIt : {q r : Mult} -> (ω f : (q y : Nat) -> Nat) -> (ω g : (r x : Nat) -> Nat) -> (q * r z : Nat) -> Nat

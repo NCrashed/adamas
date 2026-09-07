@@ -1,7 +1,0 @@
----
-source: crates/adamas-cli/tests/golden.rs
-expression: text
----
-Error: operation-function-argument.adamas:39:1: в определении `sequential` остался неразрешённый хвост row ?34
-  sequential = handle inner with
-  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,63 @@
+-- Операция с функциональным аргументом гасится написанным хендлером (§10
+-- вопрос 120).
+--
+-- До 2026-09-07 не гасилась ничем: `fork : Nat -> Unit` обрабатывался, а
+-- `fork : (Unit -> Unit) -> Unit` давал «остался неразрешённый хвост row» на
+-- всяком `handle` над меткой. Разница была ровно в том, есть ли у аргумента
+-- стрелка, - потому что row стоит на стрелке, и без неё её негде было потерять.
+--
+-- Терялась она так: операция поднимала **свою** row-переменную, тип ветки
+-- уносил её в элиминатор, обобщение делало её лишним параметром, а место
+-- применения не решало её ничем. Подъём у операций и у элиминаторов теперь
+-- один, и это не удобство, а правило погашения §3.4: собственный row-параметр
+-- операции есть окружающая места вызова, а под хендлером она равна `{L | ρ}`.
+--
+-- Здесь стоит самая тяжёлая форма аргумента - приостановленное вычисление
+-- **своей же** метки, то есть то, что берёт `spawnDetached` (§5.2).
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+effect Async where
+  step : Unit
+  fork : ({Async, Log} Unit) -> Unit
+
+child : {Async, Log} Unit
+child =
+  let a : Unit = note 9
+  note 9
+
+parent : {Async, Log} Unit
+parent =
+  let a : Unit = note 1
+  let f : Unit = fork child
+  let b : Unit = step
+  note 1
+
+-- Уступка ничего не делает, порождённое выбрасывается: вырожденный
+-- последовательный планировщик, который до правки не типизировался вовсе.
+sequential : ({Async, Log} Unit) -> {Log} Unit
+sequential c = handle c with
+  return v -> v
+  step -> resume MkUnit
+  fork b -> resume MkUnit
+
+program : {Log} Unit
+program = sequential parent
+
+-- 1 1: обе отметки родителя и ни одной от выброшенного порождения.
+main : List Nat
+main = handle program with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)

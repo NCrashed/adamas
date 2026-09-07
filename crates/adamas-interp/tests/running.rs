@@ -1218,3 +1218,67 @@ main = handle counting with
     );
     assert_eq!(ran(&source, "main"), "Succ (Succ Zero)");
 }
+
+/// Написанный хендлер **внутри** питомника выигрывает у него.
+///
+/// Ближайший выигрывает - то же правило, по которому выбирается хендлер, и
+/// проверить его стало можно только с вопросом 120: до него `handle` над
+/// `spawnDetached` не типизировался вовсе, потому что аргумент у него со
+/// стрелкой.
+#[test]
+fn a_written_handler_inside_a_nursery_wins() {
+    let source = format!(
+        "{BASE}
+effect Log where
+  note : Nat -> Unit
+
+effect Async where
+  suspend : Unit
+  spawnDetached : ({{Async, Log}} Unit) -> Unit
+
+withNursery : ({{Async, Log}} Unit) -> {{Log}} Unit
+
+inner : {{Async, Log}} Unit
+inner =
+  let a : Unit = note 1
+  let s : Unit = suspend
+  note 1
+
+sequential : ({{Async, Log}} Unit) -> {{Log}} Unit
+sequential c = handle c with
+  return v -> v
+  suspend -> resume MkUnit
+  spawnDetached b -> resume MkUnit
+
+other : {{Async, Log}} Unit
+other =
+  let a : Unit = note 9
+  let s : Unit = suspend
+  note 9
+
+root : {{Async, Log}} Unit
+root =
+  let f : Unit = spawnDetached other
+  let u : Unit = sequential inner
+  let s : Unit = suspend
+  note 5
+
+program : {{Log}} Unit
+program = withNursery root
+
+main : List Nat
+main = handle program with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+"
+    );
+    // Единицы идут подряд: уступки под написанным хендлером в очередь питомника
+    // не попадают, иначе между ними встала бы девятка.
+    assert_eq!(
+        ran(&source, "main"),
+        "Cons (Succ Zero) (Cons (Succ Zero) \
+         (Cons (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) \
+         (Cons (Succ (Succ (Succ (Succ (Succ Zero))))) \
+         (Cons (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))) Nil))))"
+    );
+}

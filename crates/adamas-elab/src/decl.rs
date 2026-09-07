@@ -1897,7 +1897,18 @@ fn declare_mutual(
     }
     let mut arities = Vec::with_capacity(planned.len());
     let mut generalized = Vec::with_capacity(planned.len());
-    for ty in &types {
+    for (member, ty) in planned.iter().zip(&types) {
+        // Тип проверяется **до** обобщения: `is_type` решает дырки уровня, и
+        // без него применённое семейство приезжает сюда нерешённым - `List
+        // Nat` заводил параметр `u0`, которого в самом типе нет, и объявление
+        // отвергалось «ожидался `Type u0`, получен `Type 0`». Соседняя ветка
+        // (`self_levels`) делает ровно это и тем же комментарием объясняет
+        // (§10 вопрос 126, измерено 2026-09-07).
+        is_type(&Ctx::new(signature), metas, ty).map_err(|error| ElabError::Core {
+            span: member.span,
+            error: Box::new(error),
+            names: Names::of(&member.name.text, Vec::new()),
+        })?;
         let zonked = zonk_term(metas, ty);
         let mut generalization = Generalization::default();
         generalization.collect_term(metas, &zonked);

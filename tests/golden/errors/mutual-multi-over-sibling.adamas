@@ -24,9 +24,13 @@ data Nat where
 data Unit where
   MkUnit : Unit
 
-plus : Nat -> Nat -> Nat
-plus Zero m = m
-plus (Succ k) m = Succ (plus k m)
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+append : List Nat -> List Nat -> List Nat
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
 
 effect Amb where
   toss : Bool
@@ -37,13 +41,13 @@ resource File where
   closeFile h = True
 
 mutual
-  held : {Amb} Nat
+  held : {Amb} List Nat
   held =
     let h : File = Open
     let b : Bool = toss
-    Zero
+    Cons Zero Nil
 
-  doubled : Nat
+  doubled : List Nat
   doubled = handleMulti held with
     return v -> v
-    toss -> plus (resume True) (resume False)
+    toss -> append (resume True) (resume False)

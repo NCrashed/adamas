@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use adamas_core::eval::quote;
-use adamas_core::meta::{Metas, unsolved_term_meta, zonk_term};
+use adamas_core::meta::{Metas, unsolved_term_meta, unsolved_term_meta_but, zonk_term};
 use adamas_core::sig::Signature;
 use adamas_core::source::Span;
 use adamas_core::term::Term;
@@ -257,11 +257,18 @@ fn settle(
     // чтобы до неё добраться. Цель из самого терма стоит на нуле, цель из
     // контекста кандидата - на единицу глубже своего.
     let mut pending: Vec<(adamas_core::term::TermMeta, u32)> = Vec::new();
+    // Дырки, к классу отношения не имеющие. Разрешение их не решает - решить
+    // могла только унификация, - но и останавливаться на них не вправе: в
+    // терме они стоят **раньше** словаря, и остановка прятала словарь целиком.
+    // Так пропадала всякая рекурсия под констрейнтом: у ссылки на себя тип
+    // ещё не выведен, потому что сигнатуры для неё в хранилище нет, и её
+    // типовой аргумент оказывается первой нерешённой дыркой (§10 вопрос 114).
+    let mut passed: Vec<adamas_core::term::TermMeta> = Vec::new();
     loop {
         let (meta, depth) = match pending.pop() {
             Some((meta, depth)) if metas.term_solution(meta).is_none() => (meta, depth),
             Some(_) => continue,
-            None => match unsolved_term_meta(metas, term) {
+            None => match unsolved_term_meta_but(metas, term, &|it| passed.contains(&it)) {
                 Some(meta) => (meta, 0),
                 None => return Ok(()),
             },
@@ -276,10 +283,12 @@ fn settle(
         // Дырка не про класс - её сюда и не звали: решить её могла только
         // унификация, и о том, что не решила, скажет объявление.
         let Some((class, head)) = applied(signature, &goal) else {
-            return Ok(());
+            passed.push(meta);
+            continue;
         };
         if !instances.is_class(&class) {
-            return Ok(());
+            passed.push(meta);
+            continue;
         }
         // Локальный словарь **раньше** глобального инстанса: он и есть тот,
         // о котором договорилась сигнатура, а искать инстанс для переменной
@@ -307,7 +316,10 @@ fn settle(
             }
             // Голова не определилась вовсе - решать её должна была
             // унификация, и о том, что не решила, скажет объявление.
-            Head::Unknown => return Ok(()),
+            Head::Unknown => {
+                passed.push(meta);
+                continue;
+            }
         };
         let written = written(&class, &heads);
         // Предел спрашивается здесь, а не при постановке в очередь: до этого

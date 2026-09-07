@@ -1180,9 +1180,23 @@ impl Generalization {
 /// использования или пишется руками, а не поднимается в сигнатуру.
 #[must_use]
 pub fn unsolved_term_meta(metas: &Metas, term: &Term) -> Option<TermMeta> {
-    let recur = |inner: &Rc<Term>| unsolved_term_meta(metas, inner);
+    unsolved_term_meta_but(metas, term, &|_| false)
+}
+
+/// То же, минуя названные: их вызывающий уже смотрел и решить не смог.
+///
+/// Нужно разрешению инстансов: дырка, к классу отношения не имеющая, стоит в
+/// терме раньше словаря, и остановка на ней прятала словарь целиком (§10
+/// вопрос 114).
+#[must_use]
+pub fn unsolved_term_meta_but(
+    metas: &Metas,
+    term: &Term,
+    skip: &dyn Fn(TermMeta) -> bool,
+) -> Option<TermMeta> {
+    let recur = |inner: &Rc<Term>| unsolved_term_meta_but(metas, inner, skip);
     match term {
-        Term::Meta(meta) => metas.term_solution(*meta).is_none().then_some(*meta),
+        Term::Meta(meta) => (metas.term_solution(*meta).is_none() && !skip(*meta)).then_some(*meta),
         Term::Var(_)
         | Term::Universe(_)
         | Term::RowKind(_)
@@ -1204,7 +1218,7 @@ pub fn unsolved_term_meta(metas: &Metas, term: &Term) -> Option<TermMeta> {
                 row.labels()
                     .iter()
                     .flat_map(|label| &label.arguments)
-                    .find_map(|argument| unsolved_term_meta(metas, argument))
+                    .find_map(|argument| unsolved_term_meta_but(metas, argument, skip))
             })
         }
         Term::Let(_, _, ty, value, body) => {
@@ -1215,7 +1229,7 @@ pub fn unsolved_term_meta(metas: &Metas, term: &Term) -> Option<TermMeta> {
             .or_else(|| {
                 case.branches
                     .iter()
-                    .find_map(|branch| unsolved_term_meta(metas, &branch.body))
+                    .find_map(|branch| unsolved_term_meta_but(metas, &branch.body, skip))
             }),
     }
 }

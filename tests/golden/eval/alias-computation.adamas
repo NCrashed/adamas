@@ -1,0 +1,56 @@
+-- Применённый алиас вычисления под хендлером (§10 вопрос 113).
+--
+-- Результат типа считается **вычислением**, а не обходом терма: δ-разворот и
+-- бета там даровые, и `Amb1 Nat` разворачивается сам. Обход по терму снимал
+-- только голову спайна - `Comp = {Amb} Nat` он разворачивал, а применённый
+-- алиас нет, потому что применить развёрнутую голову к аргументу ему было
+-- нечем.
+--
+-- Проверяется исполнением: ожидаемым результатом ветки `return` ставился сам
+-- алиас, и хендлер сравнивал его с настоящим ответом - две разные вещи под
+-- одним `let`.
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+effect Amb where
+  toss : Bool
+
+-- Нульместный алиас: разворачивался и раньше.
+Comp : Type
+Comp = {Amb} Nat
+
+suspending : (1 n : Nat) -> Comp
+suspending n u = n
+
+viaNullary : (1 n : Nat) -> Nat
+viaNullary n =
+  let 1 c : Comp = suspending n
+  handle c with
+    return v -> v
+    toss -> resume True
+
+-- Параметризованный: тот же путь, и вот он-то не работал.
+Amb1 : Type -> Type
+Amb1 a = {Amb} a
+
+picking : (1 n : Nat) -> Amb1 Nat
+picking n u = n
+
+viaParam : (1 n : Nat) -> Nat
+viaParam n =
+  let 1 c : Amb1 Nat = picking n
+  handle c with
+    return v -> v
+    toss -> resume True
+
+main : Nat
+main = viaParam (Succ (Succ Zero))

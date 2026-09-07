@@ -753,6 +753,12 @@ pub fn contains_block(expr: &Expr) -> bool {
     let mut pending = vec![expr];
     while let Some(expr) = pending.pop() {
         match &expr.kind {
+            // Разбор без веток блока не открывает вовсе - `of` стоит последней
+            // лексемой формы, и «где она кончается» видно без отступа. Правило
+            // про форму с блоком к нему поэтому не относится: иначе `absurd v
+            // = case v of` не пишется нигде, кроме конца файла (§9 Фаза 1,
+            // сверка 2026-09-08).
+            ExprKind::Case { alts, .. } if alts.is_empty() => {}
             ExprKind::Case { .. } | ExprKind::Block(_) | ExprKind::Handle { .. } => return true,
             ExprKind::Name(_) | ExprKind::Lit(_) | ExprKind::Hole => {}
             ExprKind::Effectful { labels, body, .. } => {

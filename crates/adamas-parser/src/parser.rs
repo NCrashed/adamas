@@ -1900,15 +1900,25 @@ impl<'a> Parser<'a> {
             return Err(self.block_not_last(&scrutinee));
         }
         self.expect(TokenKind::Of)?;
-        self.expect(TokenKind::Open)?;
+        // Блок необязателен, и по той же причине, по какой необязателен `where`
+        // у семейства: layout пустых блоков не делает, а ядру разбор с нулём
+        // ветвей нужен - он и есть доказательство необитаемости (§9 Фаза 1).
+        // Без этой формы `Void` объявляется, но не элиминируется, и `absurd`
+        // не пишется вовсе (§9, сверка 2026-09-08).
+        //
+        // Отличить пустой разбор от забытого блока нечем, и это цена: `case v
+        // of` с опечаткой в теле прочтётся пустым, а отвергнет его проверка -
+        // сообщением про необитаемость, а не про отступ.
         let mut alts = Vec::new();
-        loop {
-            alts.push(self.alt()?);
-            if self.eat(TokenKind::Sep).is_none() {
-                break;
+        if self.eat(TokenKind::Open).is_some() {
+            loop {
+                alts.push(self.alt()?);
+                if self.eat(TokenKind::Sep).is_none() {
+                    break;
+                }
             }
+            self.expect(TokenKind::Close)?;
         }
-        self.expect(TokenKind::Close)?;
         let end = alts.last().map_or(start, |last| last.span);
         Ok(Expr {
             kind: ExprKind::Case {

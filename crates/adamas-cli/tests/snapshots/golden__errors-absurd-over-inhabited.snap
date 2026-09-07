@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: absurd-over-inhabited.adamas:20:11: не покрыто: `_`
+  wrong n = case n of
+            ^^^^

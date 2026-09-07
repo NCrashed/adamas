@@ -221,12 +221,19 @@ pub fn layout(tokens: &[Token]) -> Result<Vec<Token>, LayoutError> {
                     out.push(virtual_token(TokenKind::Open, token));
                     blocks.push(Block::file(token.column));
                 }
-                Some(Pending::Body(keyword)) => {
+                // `of` без веток законен: разбор с нулём ветвей и есть
+                // доказательство необитаемости, и `absurd` пишется только им
+                // (§9 Фаза 1, сверка 2026-09-08). Пустых блоков layout не
+                // делает, поэтому блок тут не открывается вовсе.
+                //
+                // Прочие ключевые слова остаются как были: `f =` без тела -
+                // ошибка, и её не с чем спутать.
+                Some(Pending::Body(keyword)) if keyword.kind != TokenKind::Of => {
                     return Err(LayoutError::EmptyBlock {
                         keyword: keyword.span,
                     });
                 }
-                None => {}
+                Some(Pending::Body(_)) | None => {}
             }
             while blocks.pop().is_some() {
                 out.push(virtual_token(TokenKind::Close, token));
@@ -259,6 +266,9 @@ pub fn layout(tokens: &[Token]) -> Result<Vec<Token>, LayoutError> {
             }
         }
 
+        if branchless(pending, token, &blocks) {
+            pending = None;
+        }
         if let Some(opener) = pending.take() {
             let block = match opener {
                 Pending::TopLevel => Block::file(token.column),
@@ -478,6 +488,27 @@ fn track_bracket(
             close: token.span,
         })
     }
+}
+
+/// Кончился ли `of` не начавшись: следующая лексема левее или на колонке
+/// объемлющего блока.
+///
+/// Мелкий отступ после `of` значит не ошибку, а **нуль ветвей**: разбор без них
+/// и есть доказательство необитаемости, и `absurd` пишется только им (§9 Фаза
+/// 1, сверка 2026-09-08). Блок тогда не открывается вовсе, и дальше всё идёт
+/// обычным путём - тем же, каким идёт токен после закрытой формы. Закрывать
+/// блоки здесь самому нельзя: виртуальные `Close` встают мимо, и парсер
+/// жалуется на конец блока (проверено).
+///
+/// Прочие ключевые слова правила не касаются: `f =` без тела остаётся ошибкой.
+fn branchless(pending: Option<Pending>, token: &Token, blocks: &[Block]) -> bool {
+    let Some(Pending::Body(keyword)) = pending else {
+        return false;
+    };
+    keyword.kind == TokenKind::Of
+        && blocks
+            .last()
+            .is_some_and(|enclosing| token.column <= enclosing.column)
 }
 
 /// Виртуальный токен в позиции того, что его вызвал. Спан пустой: в исходнике

@@ -2280,9 +2280,12 @@ impl<'a> Elaborator<'a> {
         span: Span,
         position: Position,
     ) -> Result<Term, ElabError> {
-        if alts.is_empty() {
-            return Err(ElabError::EmptyCase { span });
-        }
+        // Разбор без веток законен и **необходим**: он и есть доказательство
+        // необитаемости, и `absurd : Void -> a` пишется только им (§9 Фаза 1).
+        // Отказ стоял здесь потому, что layout пустого блока не делал, - то
+        // есть про форму, а не про тип; форму layout теперь допускает, и
+        // спрашивать необитаемость полагается ядру, которое умеет это с самого
+        // начала (сверка 2026-09-08).
         let value = self.placed(Position::Inner, |it| it.expr(scrutinee, Mult::Many))?;
         let Some(ty) = self.synthesized(&value) else {
             return Err(ElabError::NotMatchable { span });

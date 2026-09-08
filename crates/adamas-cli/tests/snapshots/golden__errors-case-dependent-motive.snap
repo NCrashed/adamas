@@ -1,0 +1,10 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: case-dependent-motive.adamas:29:12: несовпадение типов: ожидался `Eqv{0} Bool b b`, получен `?17`
+  mirror b = case b of
+             ^^^^^^^^^
+  в контексте:
+    (ω b : Bool)
+  путь: тело `mirror` -> тело лямбды

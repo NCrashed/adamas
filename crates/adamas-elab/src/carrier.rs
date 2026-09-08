@@ -152,6 +152,7 @@ fn walk(signature: &Signature, owned: &Owned, term: &Term, depth: u32, found: &m
         | Term::RowKind(_)
         | Term::EffectKind
         | Term::Const(..)
+        | Term::Prim(_)
         | Term::Meta(_) => {}
     }
 }

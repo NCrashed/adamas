@@ -93,28 +93,15 @@ fn deepen(depth: u32, links: usize, span: Span) -> Result<u32, ParseError> {
     Ok(depth)
 }
 
-/// Сколько звеньев даст литерал: для числа - его значение, для прочих ноль.
-///
-/// Не разобралось - ноль: отказ про запись литерала принадлежит элаборации, и
-/// предел его не подменяет.
-fn numeral(lit: &Lit) -> usize {
-    match lit.kind {
-        LitKind::Nat => lit.text.parse().unwrap_or(0),
-        LitKind::Int | LitKind::Float | LitKind::Str => 0,
-    }
-}
-
 fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<(), ParseError> {
     match &expr.kind {
-        ExprKind::Name(_) | ExprKind::Hole => {}
+        // Литерал - лист: одна лексема, один узел. Унарный разворот (§4.3)
+        // делает из него цепочку глубиной в само число, но случается это,
+        // только если написанный тип не примитивный, - а типа разбор не знает.
+        // Правило поэтому стоит в элаборации, там, где цепочка и строится
+        // (`expr::UNARY_LIMIT`); здесь оно измеряло бы то, чего не будет.
+        ExprKind::Name(_) | ExprKind::Hole | ExprKind::Lit(_) => {}
         ExprKind::Mask(inner) => pending.push((Node::Expr(inner), depth + 1)),
-        // Числовой литерал разворачивается унарно (§4.3), и терм у него
-        // глубиной **в само число**: одна лексема даёт столько звеньев,
-        // сколько в ней написано. Мерится он поэтому значением, а не длиной
-        // записи - `1e9` короток, а терм за ним не построить.
-        ExprKind::Lit(lit) => {
-            deepen(depth, numeral(lit), expr.span)?;
-        }
         // Row звено ставит одно - как стрелка, на которой она стоит; метки
         // соседи, и каждая живёт на той же глубине.
         ExprKind::Effectful { labels, body, .. } => {
@@ -219,8 +206,8 @@ fn expr_at<'a>(expr: &'a Expr, depth: u32, pending: &mut Pending<'a>) -> Result<
             pending.extend(items.iter().map(|item| (Node::Expr(item), inner)));
         }
         // А список - **не** соседи: `[a, b, c]` есть `Cons a (Cons b …)`, и
-        // хвост каждого звена вложен в предыдущее. Мерится он поэтому длиной,
-        // как литерал мерится значением.
+        // хвост каждого звена вложен в предыдущее. Мерится он поэтому длиной
+        // написанного, которую разбор знает.
         ExprKind::List(items) => {
             let inner = deepen(depth, items.len(), expr.span)?;
             pending.extend(items.iter().map(|item| (Node::Expr(item), inner)));

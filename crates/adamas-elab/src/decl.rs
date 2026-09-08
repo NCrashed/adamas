@@ -4030,6 +4030,7 @@ fn mentions_depth(term: &Term, depth: u32) -> bool {
         | Term::RowKind(_)
         | Term::EffectKind
         | Term::Const(..)
+        | Term::Prim(_)
         | Term::Meta(_) => false,
         Term::Record(fields) | Term::Row(fields) => {
             fields.iter().enumerate().any(|(at, field)| {
@@ -4068,6 +4069,7 @@ fn mentions_local(term: &Term) -> bool {
         | Term::RowKind(_)
         | Term::EffectKind
         | Term::Const(..)
+        | Term::Prim(_)
         | Term::Meta(_) => false,
         Term::Record(fields) | Term::Row(fields) => {
             fields.iter().any(|field| mentions_local(&field.ty))

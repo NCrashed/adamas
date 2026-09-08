@@ -59,10 +59,11 @@ use crate::eval::{apply, quote};
 use crate::level::{Level, LevelMeta, LevelVar};
 use crate::meta::{Metas, unsolved_level_meta, unsolved_term_meta};
 use crate::mult::Mult;
+use crate::prim::Prim;
 use crate::row::{Label, Row};
 use crate::sig::{Definition, DefinitionKind, Signature};
 use crate::term::{Args, Binder, Case, Field as RecordField, Fields, Name, Term, spine};
-use crate::value::{Elim, Head, Lvl, Telescope, Value};
+use crate::value::{Elim, Env, Head, Lvl, Telescope, Value};
 
 /// Значение, уложенное в ошибку: обратное чтение плюс зонканье.
 ///
@@ -150,6 +151,31 @@ fn sort(n: u32) -> Rc<Value> {
     Rc::new(Value::Universe(Level::number(n)))
 }
 
+/// Тип примитива (§4.3, §4.11).
+///
+/// Тип живёт в `Type 0`: содержимого, которое поднимало бы сорт, у него нет.
+/// Литерал типизируется своим типом, операция - двуместной стрелкой над ним.
+/// Кратность стрелки `ω`: сложить одно и то же число дважды - обычное дело.
+fn prim_type(prim: Prim) -> Rc<Value> {
+    match prim {
+        Prim::Ty(_) => sort(0),
+        Prim::Lit(ty, _) => Rc::new(Value::Prim(Prim::Ty(ty))),
+        Prim::Op(_, ty) => {
+            let over = Term::Prim(Prim::Ty(ty));
+            let arrow = |codomain| {
+                Term::Pi(
+                    Binder::explicit(Mult::Many),
+                    Name::from("_"),
+                    Rc::new(over.clone()),
+                    Row::empty(),
+                    Rc::new(codomain),
+                )
+            };
+            crate::eval::eval(&Env::default(), &arrow(arrow(over.clone())))
+        }
+    }
+}
+
 /// Синтезирует тип терма и считает использования.
 ///
 /// # Errors
@@ -189,6 +215,9 @@ pub fn infer(
         )),
         // `Effect : Type 1` - содержимого у метки нет, поднимать сорт не над чем.
         Term::EffectKind => Ok((sort(1), Usage::zero(ctx.size()))),
+
+        // Примитив замкнут: связываний не занимает, использований не порождает.
+        Term::Prim(prim) => Ok((prim_type(*prim), Usage::zero(ctx.size()))),
 
         // `Pi` сам является типом, поэтому и домен, и кодомен проверяются в
         // стёртом фрагменте, а использований он не порождает вовсе.
@@ -1110,9 +1139,12 @@ fn mentions_seen<'a>(
     match term {
         // Дырка имени не упоминает: она замкнута, а её тип живёт отдельно и
         // проверен там, где заведён.
-        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::EffectKind | Term::Meta(_) => {
-            false
-        }
+        Term::Var(_)
+        | Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Prim(_)
+        | Term::Meta(_) => false,
         Term::Record(fields) | Term::Row(fields) => fields.iter().any(|field| recur(&field.ty)),
         Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
         Term::With(base, fields) => recur(base) || fields.iter().any(|(_, value)| recur(value)),

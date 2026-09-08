@@ -285,11 +285,14 @@ fn inherit(signature: &Signature, term: &Term, depth: u32, found: &mut [Mult]) {
                 inherit(signature, &branch.body, depth, found);
             }
         }
+        // Примитив носителей не наследует: своих связываний у него нет, а
+        // литерал не алиасит ничего.
         Term::Var(_)
         | Term::Universe(_)
         | Term::RowKind(_)
         | Term::EffectKind
         | Term::Const(..)
+        | Term::Prim(_)
         | Term::Meta(_) => {}
     }
 }

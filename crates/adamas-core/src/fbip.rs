@@ -283,6 +283,7 @@ impl Walk<'_> {
             | Term::Meta(_)
             | Term::Const(..)
             | Term::Pi(..)
+            | Term::Prim(_)
             | Term::Record(_)
             | Term::Row(_) => Vec::new(),
             Term::Lam(_, _, body) => vec![(vec![Frame::Body], &**body, 1)],

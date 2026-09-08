@@ -116,8 +116,8 @@ pub(crate) fn classify(signature: &Signature, value: &Rc<Value>) -> Shape {
         },
         // Применённая переменная формы не имеет - как и дырка: чем она
         // окажется, ещё не решено, и различать по ней индексы значило бы
-        // гадать.
-        Head::Local(_) | Head::Meta(_) => Shape::Opaque,
+        // гадать. Застрявшая операция здесь же: посчитаться она ещё может.
+        Head::Local(_) | Head::Meta(_) | Head::Prim(..) => Shape::Opaque,
     }
 }
 

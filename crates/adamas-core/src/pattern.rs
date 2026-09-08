@@ -1869,6 +1869,7 @@ fn depends_term(term: &Term, depth: u32, size: u32, levels: &[u32]) -> bool {
         | Term::RowKind(_)
         | Term::EffectKind
         | Term::Const(..)
+        | Term::Prim(_)
         | Term::Meta(_) => false,
         // Хвост стоит на исходной глубине, а не под полями: открытый ряд
         // зависимостей не имеет (§4.2).
@@ -2024,6 +2025,7 @@ fn well_scoped(term: &Term, binders: u32) -> bool {
             | Term::RowKind(_)
             | Term::EffectKind
             | Term::Const(..)
+            | Term::Prim(_)
             | Term::Meta(_) => true,
             Term::Record(fields) | Term::Row(fields) => {
                 fields.iter().enumerate().all(|(index, field)| {
@@ -2136,6 +2138,7 @@ fn rewrite<F: Fn(u32) -> Term>(term: &Term, depth: u32, from: u32, map: &F) -> T
         | Term::RowKind(_)
         | Term::EffectKind
         | Term::Const(..)
+        | Term::Prim(_)
         | Term::Meta(_) => term.clone(),
         Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), under(body)),
         Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
@@ -2222,6 +2225,7 @@ fn shift_at(term: &Term, depth: u32, by: u32) -> Term {
             | Term::RowKind(_)
             | Term::EffectKind
             | Term::Const(..)
+            | Term::Prim(_)
             | Term::Meta(_) => term.clone(),
             Term::Record(fields) => Term::Record(shift_fields(fields, depth, by)),
             Term::Row(fields) => Term::Row(shift_fields(fields, depth, by)),

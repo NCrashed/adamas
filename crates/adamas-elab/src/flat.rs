@@ -14,14 +14,14 @@
 //! запрет §4.8 на class-констрейнты в запечатывающей сигнатуре сюда не
 //! распространяется - он охраняет от осадки **выбора**.
 //!
-//! # Что здесь не считается
+//! # База вывода
 //!
-//! Примитивов в языке ещё нет (§4.3, §4.9 - Фаза 6), поэтому база вывода
-//! сегодня - тег семейства: `data` из двух пустых конструкторов занимает байт,
-//! и из таких байтов складывается всё прочее. Правила укладки от этого не
-//! зависят: они те же, что в §4.11, и на примитивных размерах дают названные
-//! там числа - `Vec3` из трёх `Float32` в 12 байт при выравнивании 4,
-//! `Option Int64` в 16 байт, а не в 8.
+//! Примитив (§4.11, [`adamas_core::prim`]): `Float32` - четыре байта при
+//! выравнивании 4, `Int64` - восемь. Из них по правилам §4.11 складывается всё
+//! прочее, и числа оттуда воспроизводятся - `Vec3` из трёх `Float32` в 12 байт
+//! при выравнивании 4, хендл из двух `UInt32` в 8, `Option Int64` в 16 байт, а
+//! не в 8. Тег семейства - вторая база: `data` из двух пустых конструкторов
+//! занимает байт, и примитива для этого не требуется.
 
 use std::rc::Rc;
 
@@ -32,6 +32,7 @@ use adamas_core::eval::eval;
 use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::mult::Mult;
+use adamas_core::prim::{Prim, PrimTy};
 use adamas_core::row::Row;
 use adamas_core::sig::Signature;
 use adamas_core::source::Span;
@@ -67,10 +68,15 @@ impl Layout {
     /// Пустая укладка: ни байта, ни требований к границе.
     const EMPTY: Self = Self { size: 0, align: 1 };
 
-    /// Укладка примитива: выравнивание по его же размеру.
-    #[cfg(test)]
-    const fn primitive(size: u32) -> Self {
-        Self { size, align: size }
+    /// Укладка примитива - его собственная ширина (§4.11).
+    ///
+    /// Выравнивание натуральное, не SIMD-ное: §4.9 отказался от
+    /// пере-выравнивания, и `V4 Float32` получает 16 байт при `align 4`.
+    const fn primitive(ty: PrimTy) -> Self {
+        Self {
+            size: ty.size(),
+            align: ty.size(),
+        }
     }
 }
 
@@ -448,6 +454,8 @@ impl Walk<'_> {
         }
         match &*value {
             Value::Pi(..) | Value::Lam(..) => Err(Blame::alone(shown, Why::Closure)),
+            // Примитив - база вывода (§4.11): дальше него разбирать нечего.
+            Value::Prim(Prim::Ty(ty)) => Ok(Layout::primitive(*ty)),
             Value::Record(telescope) => self.record(metas, &shown, telescope),
             Value::Neutral(Head::Global(name, ..), spine) => {
                 self.global(metas, &shown, name, spine)
@@ -653,7 +661,12 @@ fn mentioned(signature: &Signature, name: &Name) -> Vec<Name> {
 fn constants(term: &Term, into: &mut Vec<Name>) {
     match term {
         Term::Const(name, ..) => into.push(Rc::clone(name)),
-        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::EffectKind | Term::Meta(_) => {}
+        Term::Var(_)
+        | Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Prim(_)
+        | Term::Meta(_) => {}
         Term::Record(fields) | Term::Row(fields) => {
             for field in fields.iter() {
                 constants(&field.ty, into);
@@ -740,15 +753,18 @@ fn named(value: &Rc<Value>) -> Option<Symbol> {
 
 #[cfg(test)]
 mod tests {
+    use adamas_core::prim::PrimTy;
+
     use super::{Layout, sequential, tagged};
 
     /// Числа §4.11 воспроизводятся правилом, а не пересказываются.
     ///
     /// `Vec3` из трёх `Float32` - 12 байт при выравнивании 4; поля идут подряд,
-    /// и дырок между ними нет.
+    /// и дырок между ними нет. Ширина берётся у **настоящего** примитива, а не
+    /// у придуманного числа: до §4.11 это было предположение, теперь проверка.
     #[test]
     fn a_record_of_primitives_lies_end_to_end() {
-        let float = Layout::primitive(4);
+        let float = Layout::primitive(PrimTy::Float32);
         assert_eq!(
             sequential(&[float, float, float]),
             Layout { size: 12, align: 4 }
@@ -758,7 +774,7 @@ mod tests {
     /// Хендл §4.11 - два `UInt32`, восемь байт.
     #[test]
     fn a_handle_takes_eight_bytes() {
-        let word = Layout::primitive(4);
+        let word = Layout::primitive(PrimTy::UInt32);
         assert_eq!(sequential(&[word, word]), Layout { size: 8, align: 4 });
     }
 
@@ -769,14 +785,25 @@ mod tests {
     /// стартово отвергнута, и это число - её цена.
     #[test]
     fn a_tagged_union_pays_for_its_tag() {
-        let payload = Layout::primitive(8);
+        let payload = Layout::primitive(PrimTy::Int64);
         assert_eq!(tagged(2, payload), Layout { size: 16, align: 8 });
+    }
+
+    /// Заполнитель перед payload считается по его границе, а не по ширине тега.
+    ///
+    /// `Int16` после однобайтового тега стоит со смещения 2, и `size` - 4, а не
+    /// 3. Числом это отличается от `Option Int64` только величиной, а правилом
+    /// - ничем, и без него `tagged` сходился бы с §4.11 случайно.
+    #[test]
+    fn a_tag_is_padded_up_to_the_payload_boundary() {
+        let payload = Layout::primitive(PrimTy::Int16);
+        assert_eq!(tagged(2, payload), Layout { size: 4, align: 2 });
     }
 
     /// Один конструктор тега не требует: различать нечего.
     #[test]
     fn a_single_constructor_carries_no_tag() {
-        let payload = Layout::primitive(4);
+        let payload = Layout::primitive(PrimTy::Float32);
         assert_eq!(tagged(1, payload), payload);
     }
 

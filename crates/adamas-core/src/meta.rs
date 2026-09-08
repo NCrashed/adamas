@@ -954,7 +954,8 @@ impl Generalization {
             // Дырка терма своих уровней не носит: они живут в её типе, а он
             // хранится отдельно и обобщается вместе с определением.
             // Сорт `Effect` уровня не носит: метка ничего не содержит.
-            Term::Var(_) | Term::Meta(_) | Term::EffectKind => {}
+            // Примитив тоже: он живёт в `Type 0` и по уровню не полиморфен.
+            Term::Var(_) | Term::Meta(_) | Term::EffectKind | Term::Prim(_) => {}
             Term::Universe(level) | Term::RowKind(level) => self.collect_level(metas, level),
             Term::Record(fields) | Term::Row(fields) => {
                 for field in fields.iter() {
@@ -1115,7 +1116,7 @@ impl Generalization {
 
         let recur = |inner: &Rc<Term>| Rc::new(self.apply_term(metas, inner));
         match term {
-            Term::Var(_) | Term::Meta(_) | Term::EffectKind => term.clone(),
+            Term::Var(_) | Term::Meta(_) | Term::EffectKind | Term::Prim(_) => term.clone(),
             Term::Universe(level) => Term::Universe(self.apply_level(metas, level)),
             Term::RowKind(level) => Term::RowKind(self.apply_level(metas, level)),
             Term::Record(fields) => Term::Record(self.apply_fields(metas, fields)),
@@ -1214,6 +1215,7 @@ pub fn unsolved_term_meta_but(
         | Term::Universe(_)
         | Term::RowKind(_)
         | Term::EffectKind
+        | Term::Prim(_)
         | Term::Const(..) => None,
         Term::Record(fields) | Term::Row(fields) => fields
             .iter()
@@ -1272,9 +1274,12 @@ pub fn unsolved_row_meta(metas: &Metas, term: &Term) -> Option<RowMeta> {
             })
     };
     match term {
-        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::EffectKind | Term::Meta(_) => {
-            None
-        }
+        Term::Var(_)
+        | Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Prim(_)
+        | Term::Meta(_) => None,
         // Аргументы-row ссылки: второй список арности, заведённый Фазой 4.
         Term::Const(_, _, args) => args.row_args().iter().find_map(in_row),
         Term::Record(fields) | Term::Row(fields) => fields
@@ -1323,7 +1328,7 @@ pub fn unsolved_level_meta(metas: &Metas, term: &crate::term::Term) -> Option<Le
     }
 
     match term {
-        Term::Var(_) | Term::Meta(_) | Term::EffectKind => None,
+        Term::Var(_) | Term::Meta(_) | Term::EffectKind | Term::Prim(_) => None,
         Term::Universe(level) | Term::RowKind(level) => in_level(metas, level),
         Term::Record(fields) | Term::Row(fields) => fields
             .iter()
@@ -1429,7 +1434,7 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
 
     let recur = |inner: &Rc<Term>| Rc::new(zonk_term(metas, inner));
     match term {
-        Term::Var(_) | Term::EffectKind => term.clone(),
+        Term::Var(_) | Term::EffectKind | Term::Prim(_) => term.clone(),
         // Решённая дырка подставляется целиком: решение замкнуто, поэтому
         // обратное чтение идёт в пустом контексте и сдвигов не требует.
         //

@@ -14,6 +14,7 @@ use std::rc::Rc;
 
 use crate::level::Level;
 use crate::mult::{Mult, MultVar};
+use crate::prim::Prim;
 use crate::row::{Label, Row, RowVar, Tail};
 use crate::visibility::Visibility;
 
@@ -281,6 +282,12 @@ pub enum Term {
     /// В том, что сохраняется надолго - в типах и телах определений, - не
     /// встречается: проверка определения отвергает остаточные дырки.
     Meta(TermMeta),
+    /// Примитив: тип, литерал либо операция над ними (§4.3, §4.11).
+    ///
+    /// Узел ядра, а не определение сигнатуры, и причина не в удобстве:
+    /// [`crate::eval::eval`] сигнатуры не видит, поэтому сложение, спрятанное
+    /// за именем, ей нечем было бы посчитать. Подробности - [`crate::prim`].
+    Prim(Prim),
 }
 
 /// Поля с подставленными аргументами уровня.
@@ -662,6 +669,7 @@ impl Term {
             | Self::Meta(_)
             | Self::EffectKind
             | Self::Universe(_)
+            | Self::Prim(_)
             | Self::RowKind(_) => self.clone(),
             Self::Lam(mult, name, body) => Self::Lam(*mult, Rc::clone(name), recur(body)),
             Self::App(callee, argument) => Self::App(recur(callee), recur(argument)),
@@ -736,6 +744,7 @@ impl Term {
             | Self::Meta(_)
             | Self::EffectKind
             | Self::Universe(_)
+            | Self::Prim(_)
             | Self::RowKind(_) => self.clone(),
             Self::Lam(mult, name, body) => Self::Lam(*mult, Rc::clone(name), recur(body)),
             Self::App(callee, argument) => Self::App(recur(callee), recur(argument)),
@@ -810,7 +819,7 @@ impl Term {
         }
         let recur = |term: &Rc<Self>| Rc::new(term.substitute_levels(arguments));
         match self {
-            Self::Var(_) | Self::Meta(_) | Self::EffectKind => self.clone(),
+            Self::Var(_) | Self::Meta(_) | Self::EffectKind | Self::Prim(_) => self.clone(),
             Self::Universe(level) => Self::Universe(level.substitute(arguments)),
             Self::RowKind(level) => Self::RowKind(level.substitute(arguments)),
             Self::Lam(mult, name, body) => Self::Lam(*mult, Rc::clone(name), recur(body)),
@@ -908,6 +917,7 @@ impl Term {
             | Self::Meta(_)
             | Self::EffectKind
             | Self::Universe(_)
+            | Self::Prim(_)
             | Self::RowKind(_) => self.clone(),
             Self::Lam(mult, name, body) => Self::Lam(at(*mult), Rc::clone(name), recur(body)),
             Self::App(callee, argument) => Self::App(recur(callee), recur(argument)),
@@ -996,6 +1006,7 @@ impl Term {
             | Self::RowKind(_)
             | Self::EffectKind
             | Self::Const(..)
+            | Self::Prim(_)
             | Self::Meta(_) => false,
             Self::Project(record, _) => recur(record),
             Self::App(callee, argument) => recur(callee) || recur(argument),
@@ -1042,7 +1053,7 @@ impl Term {
             (found, None) | (None, found) => found,
         };
         match self {
-            Self::Var(_) | Self::Meta(_) | Self::EffectKind => None,
+            Self::Var(_) | Self::Meta(_) | Self::EffectKind | Self::Prim(_) => None,
             Self::Universe(level) | Self::RowKind(level) => level.max_var(),
             Self::Lam(_, _, body) => body.max_level_var(),
             Self::App(callee, argument) => join(callee.max_level_var(), argument.max_level_var()),
@@ -1164,10 +1175,12 @@ enum Pos {
 impl Pos {
     /// Нужны ли скобки терму, стоящему в этой позиции.
     fn wraps(self, term: &Term) -> bool {
+        // Литерал со знаком атомарным не считается: `f -1` прочиталось бы
+        // вычитанием, и скобки вокруг него - не украшение.
         let atomic = matches!(
             term,
             Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Const(..)
-        );
+        ) || matches!(term, Term::Prim(prim) if !prim.negative());
         match self {
             Self::Free => false,
             Self::Callee => !atomic && !matches!(term, Term::App(..)),
@@ -1228,6 +1241,7 @@ fn emit<'a>(
         Term::EffectKind => f.write_str("Effect")?,
         Term::Universe(level) => write!(f, "Type {level}")?,
         Term::RowKind(level) => write!(f, "Row {level}")?,
+        Term::Prim(prim) => write!(f, "{prim}")?,
         Term::Lam(mult, name, body) => {
             write!(f, "\\({mult} {name}) -> ")?;
             pending.push(Piece::Term(body, Pos::Free, inner));
@@ -1455,6 +1469,17 @@ mod tests {
     /// тестового потока его два мегабайта, а рвалась она уже на четырёх
     /// тысячах уровней.
     const DEEP: usize = 200_000;
+
+    /// Узел терма шире 48 байт обрывает прогон, а не проваливает тест.
+    ///
+    /// Мера названа у [`Args`]: лестница исполнения упирается в стек ровно на
+    /// этом размере, и лишнее поле кладёт процесс на тесте глубины. Сторож
+    /// нужен потому, что цена лишнего поля не видна ниоткуда, кроме падения в
+    /// другом крейте.
+    #[test]
+    fn a_term_node_stays_within_its_measured_width() {
+        assert_eq!(size_of::<Term>(), 48);
+    }
 
     /// Строит `f (f (… #0))` заданной глубины.
     fn nested(depth: usize) -> Term {

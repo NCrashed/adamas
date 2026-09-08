@@ -112,7 +112,7 @@ fn well_scoped(term: &Term, binders: u32) -> bool {
             unreachable!("генератор термов записей не порождает")
         }
         Term::Var(Index(index)) => *index < binders,
-        Term::Const(..) | Term::Universe(_) | Term::Meta(_) => true,
+        Term::Const(..) | Term::Universe(_) | Term::Prim(_) | Term::Meta(_) => true,
         Term::Lam(_, _, body) => well_scoped(body, binders + 1),
         Term::App(callee, argument) => {
             well_scoped(callee, binders) && well_scoped(argument, binders)
@@ -147,7 +147,7 @@ fn is_normal_form(term: &Term) -> bool {
         }
         // Определение застревает так же, как переменная: обратное чтение его
         // не разворачивает, значит это уже нормальная форма.
-        Term::Var(_) | Term::Const(..) | Term::Meta(_) => true,
+        Term::Var(_) | Term::Const(..) | Term::Prim(_) | Term::Meta(_) => true,
         Term::Universe(level) => level.normalize() == *level,
         Term::Lam(_, _, body) => is_normal_form(body),
         Term::Pi(_, _, domain, _, codomain) => is_normal_form(domain) && is_normal_form(codomain),
@@ -173,7 +173,9 @@ fn rename(term: &Term) -> Term {
         | Term::Project(..) => {
             unreachable!("генератор термов записей не порождает")
         }
-        Term::Var(_) | Term::Universe(_) | Term::Const(..) | Term::Meta(_) => term.clone(),
+        Term::Var(_) | Term::Universe(_) | Term::Const(..) | Term::Prim(_) | Term::Meta(_) => {
+            term.clone()
+        }
         Term::Lam(mult, _, body) => Term::Lam(*mult, "renamed".into(), Rc::new(rename(body))),
         Term::App(callee, argument) => {
             Term::App(Rc::new(rename(callee)), Rc::new(rename(argument)))
@@ -226,7 +228,9 @@ fn wrap_in_redexes(term: &Term, budget: &mut u32) -> Term {
         | Term::Project(..) => {
             unreachable!("генератор термов записей не порождает")
         }
-        Term::Var(_) | Term::Universe(_) | Term::Const(..) | Term::Meta(_) => term.clone(),
+        Term::Var(_) | Term::Universe(_) | Term::Const(..) | Term::Prim(_) | Term::Meta(_) => {
+            term.clone()
+        }
         Term::Lam(mult, name, body) => Term::Lam(
             *mult,
             Rc::clone(name),

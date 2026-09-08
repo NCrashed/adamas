@@ -240,6 +240,7 @@ impl Pass<'_> {
             | Term::RowKind(_)
             | Term::EffectKind
             | Term::Pi(..)
+            | Term::Prim(_)
             | Term::Record(_)
             | Term::Row(_) => Ok(term.clone()),
             Term::App(..) | Term::Const(..) => self.call(term),
@@ -685,7 +686,9 @@ fn substituted(term: &Term, subst: &Substitution<'_>, depth: u32) -> Term {
                 Term::Var(Index(index - count))
             }
         }
-        Term::Meta(_) | Term::Universe(_) | Term::RowKind(_) | Term::EffectKind => term.clone(),
+        Term::Meta(_) | Term::Universe(_) | Term::RowKind(_) | Term::EffectKind | Term::Prim(_) => {
+            term.clone()
+        }
         Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), under(body)),
         Term::App(callee, argument) => {
             let callee = substituted(callee, subst, depth);
@@ -927,6 +930,7 @@ fn scan(signature: &Signature, instances: &Instances, term: &Term, found: &mut F
         | Term::RowKind(_)
         | Term::EffectKind
         | Term::Pi(..)
+        | Term::Prim(_)
         | Term::Record(_)
         | Term::Row(_) => {}
         Term::Lam(_, _, body) => scan(signature, instances, body, found),

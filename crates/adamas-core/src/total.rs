@@ -254,7 +254,12 @@ fn collect_calls(
 ) {
     let mut recur = |at: usize, inner: &Term| collect_calls(signature, group, at, inner, found);
     match term {
-        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::EffectKind | Term::Meta(_) => {}
+        Term::Var(_)
+        | Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Prim(_)
+        | Term::Meta(_) => {}
         Term::Const(other, _, _) => {
             if group.contains(other) && !found.contains(other) {
                 found.push(Rc::clone(other));
@@ -400,9 +405,12 @@ const REDUCTION_LIMIT: u32 = 128;
 fn mentions_group(group: &[Name], term: &Term) -> bool {
     let recur = |inner: &Term| mentions_group(group, inner);
     match term {
-        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::EffectKind | Term::Meta(_) => {
-            false
-        }
+        Term::Var(_)
+        | Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Prim(_)
+        | Term::Meta(_) => false,
         Term::Const(other, _, _) => group.contains(other),
         Term::Record(fields) | Term::Row(fields) => {
             fields.iter().any(|field| recur(&field.ty))
@@ -440,6 +448,7 @@ fn closed_under(depth: usize, term: &Term) -> bool {
         | Term::RowKind(_)
         | Term::EffectKind
         | Term::Meta(_)
+        | Term::Prim(_)
         | Term::Const(..) => true,
         Term::Record(fields) | Term::Row(fields) => {
             fields
@@ -486,9 +495,12 @@ fn closed_under(depth: usize, term: &Term) -> bool {
 fn calls_a_partial_definition(signature: &Signature, name: &Name, term: &Term) -> bool {
     let recur = |inner| calls_a_partial_definition(signature, name, inner);
     match term {
-        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::EffectKind | Term::Meta(_) => {
-            false
-        }
+        Term::Var(_)
+        | Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Prim(_)
+        | Term::Meta(_) => false,
         Term::Record(fields) | Term::Row(fields) => {
             fields.iter().any(|field| recur(&field.ty))
                 || fields.tail.as_ref().is_some_and(|tail| recur(tail))
@@ -571,6 +583,7 @@ impl Walk<'_> {
             | Term::Universe(_)
             | Term::RowKind(_)
             | Term::EffectKind
+            | Term::Prim(_)
             | Term::Meta(_) => {}
 
             // Запись размера не несёт: поля - типы и значения, а уменьшение

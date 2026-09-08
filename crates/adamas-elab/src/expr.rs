@@ -16,6 +16,7 @@ use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::mult::{Mult, MultProduct, MultSum, MultVar};
 use adamas_core::pattern::{Clause, Pattern as CorePattern, PatternError, compile_case};
+use adamas_core::prim::{Prim, PrimOp, PrimTy};
 use adamas_core::row::{Label, Row, Tail};
 use adamas_core::sig::{Definition, DefinitionKind, Signature};
 use adamas_core::source::Span;
@@ -231,6 +232,28 @@ pub(crate) const CONS: &str = "Cons";
 
 /// Преобразование литерала. Не объявлено - литерал есть само число.
 pub(crate) const FROM_NAT: &str = "fromNat";
+
+/// Наибольшее число, которое разворачивается унарно.
+///
+/// Правило §4.3 «предел вложенности считает литерал значением, а не длиной
+/// записи» стоит **здесь**, а не в парсере, и переехало оно вместе с
+/// примитивами: разбор не знает типа, а без типа не знает и того, станет ли
+/// литерал одним узлом или цепочкой. Величина - та же, что у предела
+/// вложенности разбора: терм унарного числа глубиной ровно в него.
+pub(crate) const UNARY_LIMIT: u32 = 256;
+
+/// Читает цифры литерала: десятичные либо шестнадцатеричные, `_` игнорируются.
+///
+/// `None` - не разобралось либо не поместилось в `u128`. Шире `u128` не бывает
+/// ни один примитив, поэтому переполнение здесь и переполнение типа - одно и
+/// то же событие.
+fn digits(text: &str) -> Option<u128> {
+    let text = text.replace('_', "");
+    match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => u128::from_str_radix(hex, 16).ok(),
+        None => text.parse().ok(),
+    }
+}
 
 /// Имя резумпции. Связывает его сама форма хендлера (§3.4), поэтому оно и
 /// единственное в языке магическое: вложенный хендлер его затеняет.
@@ -892,6 +915,17 @@ pub(crate) struct Elaborator<'a> {
     /// Живёт только в хвостовой позиции: при спуске в аргумент снимается, иначе
     /// вложенный `handle` принял бы за свой ответ результат объемлющего.
     result: Option<Rc<Value>>,
+    /// Ожидаемый тип **ближайшего** выражения - для литерала (§4.3).
+    ///
+    /// Отдельно от [`Self::result`], и это не дубль: тот живёт в хвостовой
+    /// позиции и там же снимается, а литерал чаще стоит аргументом, где
+    /// написанный тип известен из домена связывания. Расходуется он так же,
+    /// как [`Self::expected`] и [`Self::position`], - забирается в `expr` и
+    /// достаётся ровно одному узлу, а не всему, что под ним.
+    ///
+    /// Пуст - литерал элаборируется как раньше: натуральный разворачивается
+    /// унарно, прочие отвергаются.
+    awaited: Option<Rc<Value>>,
     /// Идёт ли элаборация в позиции типа - см. `typing`.
     types: bool,
     /// Записи сигнатуры, которым роздана row-переменная (§4.2), - по спану
@@ -1031,6 +1065,7 @@ impl<'a> Elaborator<'a> {
             declared_ty: None,
             expected: Vec::new(),
             result: None,
+            awaited: None,
             bare: false,
             enclosing: None,
             using: Vec::new(),
@@ -2019,10 +2054,12 @@ impl<'a> Elaborator<'a> {
         // То же с позицией: её выставляет тот, кто спускается, и достаётся она
         // ближайшему подтерму, а не всему, что под ним.
         let position = std::mem::replace(&mut self.position, Position::Inner);
+        // То же с ожидаемым типом литерала: он достаётся ближайшему узлу.
+        let awaited = self.awaited.take();
         // Свойство «привязано к scope» считается снизу вверх, и каждый разбор
         // отвечает за своё: собранное здесь не наследует чужого.
         self.produced = None;
-        let term = self.form(expr, default, &expected, position)?;
+        let term = self.form(expr, default, &expected, position, awaited.as_ref())?;
         // Позиция встречается со свойством: привязанное к scope значение
         // возвращать и класть в поле конструктора нельзя (§3.3).
         if let (Some(face), Some(name)) = (position.face(), self.produced.as_ref()) {
@@ -2042,6 +2079,7 @@ impl<'a> Elaborator<'a> {
         default: Mult,
         expected: &[Argument],
         position: Position,
+        awaited: Option<&Rc<Value>>,
     ) -> Result<Term, ElabError> {
         let missing = |what| {
             Err(ElabError::Missing {
@@ -2122,7 +2160,7 @@ impl<'a> Elaborator<'a> {
                 let goal = self.hole();
                 Ok(self.fresh_meta(&goal))
             }
-            ExprKind::Lit(lit) => self.literal(lit),
+            ExprKind::Lit(lit) => self.literal(lit, awaited),
             // `if` - разбор по `Bool` (§4.1), и записывается он ровно им:
             // отдельного узла в ядре нет, а различать их было бы двумя путями
             // к одному терму.
@@ -2704,18 +2742,24 @@ impl<'a> Elaborator<'a> {
 
     /// Числовой литерал (§4.3).
     ///
-    /// `42` разворачивается унарно в `Succ`-цепочку над `Zero` и, если
-    /// `fromNat` объявлена, применяется к ней. Имена берутся по соглашению -
-    /// тем же, каким `if` берёт `Bool`, а сахар `{ε} A` берёт `Unit`.
+    /// Форма выбирает путь так же, как §4.3 выбирает класс преобразования:
+    /// натуральный, отрицательный и дробный - три разных литерала, и тип, их
+    /// принимающий, у каждого свой.
     ///
-    /// **Названная цена: терм литерала размером с само число.** Примитивного
-    /// числа в ядре нет, оно приходит с представлением (§4.9, Фаза 6), а до
-    /// него `42` есть сорок два конструктора. Предел вложенности это знает и
-    /// считает литерал по значению.
+    /// **Примитивный тип в ожидании - литерал и есть число.** `x : Int64 = 42`
+    /// собирается одним узлом ядра, а не сорока двумя конструкторами:
+    /// примитивы появились (§4.11), и разворачивать унарно то, у чего есть
+    /// представление, незачем.
     ///
-    /// Отрицательные и дробные не пишутся: им нужны `Int` и `Float`, которых
-    /// без примитивного представления не существует.
-    fn literal(&mut self, lit: &ast::Lit) -> Result<Term, ElabError> {
+    /// **Иначе - как прежде.** `42` разворачивается унарно в `Succ`-цепочку над
+    /// `Zero` и, если `fromNat` объявлена, применяется к ней. Имена берутся по
+    /// соглашению - тем же, каким `if` берёт `Bool`. Цена этого пути названа:
+    /// терм литерала размером с само число, и потому величина его ограничена -
+    /// см. [`UNARY_LIMIT`].
+    fn literal(&mut self, lit: &ast::Lit, awaited: Option<&Rc<Value>>) -> Result<Term, ElabError> {
+        if let Some(ty) = awaited.and_then(|ty| self.primitive_type(ty)) {
+            return self.primitive_literal(lit, ty);
+        }
         let refuse = || {
             Err(ElabError::Missing {
                 what: Missing::Literal,
@@ -2725,9 +2769,15 @@ impl<'a> Elaborator<'a> {
         if lit.kind != ast::LitKind::Nat {
             return refuse();
         }
-        let Ok(value) = lit.text.parse::<u32>() else {
+        let Some(value) = digits(&lit.text).and_then(|it| u32::try_from(it).ok()) else {
             return refuse();
         };
+        if value > UNARY_LIMIT {
+            return Err(ElabError::UnaryLiteral {
+                limit: UNARY_LIMIT,
+                span: lit.span,
+            });
+        }
         let named = |text: &str| ast::Name {
             text: Rc::from(text),
             span: lit.span,
@@ -2744,6 +2794,88 @@ impl<'a> Elaborator<'a> {
             None => Ok(numeral),
             Some(_) => Ok(self.name(&named(FROM_NAT))?.apply([numeral])),
         }
+    }
+
+    /// Ожидаемый тип, если он примитивный.
+    fn primitive_type(&mut self, ty: &Rc<Value>) -> Option<PrimTy> {
+        let reduced = whnf_solved(self.signature, self.metas, ty);
+        match &*reduced {
+            Value::Prim(Prim::Ty(ty)) => Some(*ty),
+            _ => None,
+        }
+    }
+
+    /// Литерал под примитивным типом: биты вместо конструкторов.
+    ///
+    /// Форма и тип обязаны сойтись - §4.3 разводит `FromNat`, `FromInt` и
+    /// `FromFloat` по трём классам, и здесь то же разделение без классов:
+    /// `-1` не беззнаковый, `0.5` не целый, `1` не дробный. Последнее строже
+    /// Haskell'я намеренно: там `1 :: Double` работает через `fromInteger`, а
+    /// у нас класса нет, и молча превращать натуральное в дробное значило бы
+    /// завести четвёртое правило вдобавок к трём написанным.
+    fn primitive_literal(&mut self, lit: &ast::Lit, ty: PrimTy) -> Result<Term, ElabError> {
+        let refuse = |why: &'static str| {
+            Err(ElabError::LiteralType {
+                ty: Rc::from(ty.name()),
+                why,
+                span: lit.span,
+            })
+        };
+        let overflow = || {
+            Err(ElabError::LiteralRange {
+                ty: Rc::from(ty.name()),
+                span: lit.span,
+            })
+        };
+        let bits = match lit.kind {
+            ast::LitKind::Str => {
+                return Err(ElabError::Missing {
+                    what: Missing::Literal,
+                    span: lit.span,
+                });
+            }
+            ast::LitKind::Nat => {
+                if ty.floating() {
+                    return refuse("напишите дробное: `1` и `1.0` - разные литералы (§4.3)");
+                }
+                let Some(value) = digits(&lit.text) else {
+                    return overflow();
+                };
+                let Some(bits) = ty.from_unsigned(value) else {
+                    return overflow();
+                };
+                bits
+            }
+            ast::LitKind::Int => {
+                if ty.floating() {
+                    return refuse("напишите дробное: `-1` и `-1.0` - разные литералы (§4.3)");
+                }
+                let text = lit.text.strip_prefix('-').unwrap_or(&lit.text);
+                let Some(value) = digits(text) else {
+                    return overflow();
+                };
+                let Some(bits) = ty.from_negative(value) else {
+                    if !ty.signed() {
+                        return refuse("тип беззнаковый, а литерал отрицательный");
+                    }
+                    return overflow();
+                };
+                bits
+            }
+            ast::LitKind::Float => {
+                if !ty.floating() {
+                    return refuse("тип целый, а литерал дробный");
+                }
+                let Ok(value) = lit.text.replace('_', "").parse::<f64>() else {
+                    return overflow();
+                };
+                let Some(bits) = ty.from_fraction(value) else {
+                    return overflow();
+                };
+                bits
+            }
+        };
+        Ok(Term::Prim(Prim::literal(ty, bits)))
     }
 
     /// Список: `[a, b]` есть `Cons a (Cons b Nil)` (§4.4).
@@ -3288,6 +3420,16 @@ impl<'a> Elaborator<'a> {
         if &*name.text == "Effect" {
             return Ok(Term::EffectKind);
         }
+        // Примитивы (§4.11) - тем же правилом, что `Type` и `Effect`: имя занято
+        // языком, локальное связывание его заслоняет, объявление - нет.
+        // Объявить `data Int64` и получить своё значило бы иметь два `Int64` с
+        // разными представлениями, различимых только местом объявления.
+        if let Some(prim) = PrimTy::named(&name.text) {
+            return Ok(Term::Prim(Prim::Ty(prim)));
+        }
+        if let Some((op, prim)) = PrimOp::named(&name.text) {
+            return Ok(Term::Prim(Prim::Op(op, prim)));
+        }
         // Член объявляемой группы: аргументы уровня - дырки, числом в арность,
         // посчитанную вызывающим. Тип его сигнатура ещё не знает (§10 вопрос
         // 50), поэтому имплиситы вставляются по типу, принесённому в группе.
@@ -3585,6 +3727,9 @@ impl<'a> Elaborator<'a> {
             } else {
                 argument
             };
+            // Написанный тип аргумента достаётся литералу: `mulInt64 x 2`
+            // берёт `Int64` отсюда, а не из умолчания.
+            self.awaited.clone_from(&expected);
             let argument =
                 self.aside(|it| it.placed(inside, |it| it.expr(argument, Mult::Many)))?;
             let argument = self.executed(argument, expected.as_ref());
@@ -5104,6 +5249,9 @@ impl<'a> Elaborator<'a> {
             // деструктора (§10 вопрос 131). Внешнее правило клаузы или лямбды
             // безвредно: исполненный хвост вычислением больше не является.
             StmtKind::Expr(expr) if rest.is_empty() => {
+                // Хвост блока и есть его значение: написанный тип результата
+                // достаётся ему целиком - в том числе литералу.
+                self.awaited.clone_from(&self.result);
                 let term = self.placed(position, |it| it.expr(expr, Mult::Many))?;
                 let result = self.result.clone();
                 Ok(self.executed(term, result.as_ref()))
@@ -5274,6 +5422,8 @@ impl<'a> Elaborator<'a> {
         // `let c : {Ask} Nat = \u -> ask` отвергалось (§10 вопрос 131).
         let annotation = self.typed(&ty);
         let outer = self.result.replace(Rc::clone(&annotation));
+        // Написанная аннотация - ожидание значения, и литерал читает её же.
+        self.awaited = Some(Rc::clone(&annotation));
         let value = self.expr(&binding.body, Mult::Many)?;
         // Аннотация и есть ожидаемый тип - `let n : Bool = get` исполняет,
         // `let f : {State Bool} Bool = get` передаёт (§3.4).
@@ -5644,6 +5794,7 @@ impl<'a> Elaborator<'a> {
         // вывод типа в ней спотыкается о непогашенные эффекты, а на нём стоит
         // правило исполнения (§3.4).
         self.result.clone_from(&rest.result);
+        self.awaited.clone_from(&rest.result);
         self.ctx = self.ctx.within(rest.ambient);
         // Тип, оставшийся от написанного после паттернов, и есть ожидаемый
         // тип тела: по нему решается исполнение.
@@ -6415,7 +6566,12 @@ fn constants(term: &Term, into: &mut Vec<CoreName>) {
                 constants(&branch.body, into);
             }
         }
-        Term::Var(_) | Term::Meta(_) | Term::Universe(_) | Term::RowKind(_) | Term::EffectKind => {}
+        Term::Var(_)
+        | Term::Meta(_)
+        | Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::Prim(_)
+        | Term::EffectKind => {}
         Term::Record(fields) | Term::Row(fields) => {
             for field in fields.fields.iter() {
                 constants(&field.ty, into);

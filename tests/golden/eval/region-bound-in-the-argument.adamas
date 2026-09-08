@@ -1,0 +1,50 @@
+-- Регион, связанный внутри аргумента: форма `runST` (§3.6, §3.4).
+--
+-- `withRegion` берёт вычисление под связыванием региона - развёрткой §3.4
+-- `(0 r : Region) -> (ω u : Unit) -> {Alloc r} a`, - и применяет его к региону
+-- сам. Квантор стоит в домене, поэтому `a` связана раньше `r` и назвать его не
+-- может; отвергаемую половину показывает `errors/region-escapes-its-binder`.
+--
+-- Ссылка живёт **внутри** scope: `MkRef` строится и читается там же. `fresh`
+-- отвечает двойкой, `readRef` - тройкой, итог пять. Ответь `readRef` иначе -
+-- изменится и он.
+--
+-- Гарантии §3.6 форма сама по себе не даёт: `handle` - общая форма языка, и
+-- своё погашение на prenex-регионе пишется рядом (§10 вопрос 142).
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Region where
+  Home : Region
+
+data Ref (0 r : Region) (a : Type) where
+  MkRef : Ref r a
+
+infixl 6 +
+(+) : Nat -> Nat -> Nat
+(+) Zero m = m
+(+) (Succ k) m = Succ (k + m)
+
+effect Alloc (0 r : Region) where
+  fresh : Nat
+  readRef : Ref r Nat -> Nat
+
+withRegion : ((0 r : Region) -> (ω u : Unit) -> {Alloc r} a) -> a
+withRegion k = handle k Home with
+  return v -> v
+  fresh -> resume (Succ (Succ Zero))
+  readRef p -> resume (Succ (Succ (Succ Zero)))
+
+-- Тело употребляет свой регион: ссылка и создаётся, и читается под меткой.
+inside : (0 r : Region) -> (ω u : Unit) -> {Alloc r} Nat
+inside r u =
+  let p : Ref r Nat = MkRef
+  fresh + readRef p
+
+main : Nat
+main = withRegion inside

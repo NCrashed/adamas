@@ -294,11 +294,13 @@ impl Kont {
     pub(crate) fn tuck(&mut self, frame: Frame) {
         debug_assert!(frame.marked().is_none(), "под вершину кладут не метку");
         let last = self.links.len();
-        if let Some(link) = self.links.last_mut()
-            && link.len() >= 2
-        {
-            link.insert(link.len() - 1, frame);
-            return;
+        // Цепочка `&&` с `let` тут не пишется: она требует Rust 2024, а MSRV
+        // проекта 1.85 (джоба `msrv` его и ловит).
+        if let Some(link) = self.links.last_mut() {
+            if link.len() >= 2 {
+                link.insert(link.len() - 1, frame);
+                return;
+            }
         }
         if last >= 2 {
             self.links[last - 2].push(frame);

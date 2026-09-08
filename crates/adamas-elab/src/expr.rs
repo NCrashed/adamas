@@ -1252,11 +1252,12 @@ impl<'a> Elaborator<'a> {
                 continue;
             };
             for row in rows.row_args() {
-                if let Some(Tail::Meta(meta)) = row.tail()
-                    && row.labels().is_empty()
-                    && self.metas.row_solution(meta).is_none()
-                {
-                    self.metas.solve_row(meta, lift.clone());
+                // Цепочка `&&` с `let` тут не пишется: она требует Rust 2024,
+                // а MSRV проекта 1.85 (джоба `msrv` его и ловит).
+                if let Some(Tail::Meta(meta)) = row.tail() {
+                    if row.labels().is_empty() && self.metas.row_solution(meta).is_none() {
+                        self.metas.solve_row(meta, lift.clone());
+                    }
                 }
             }
         }

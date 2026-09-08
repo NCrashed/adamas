@@ -3475,10 +3475,13 @@ fn destructor_shape(
     // Дальше идут имплиситы подъёма - параметры семейства ресурса в
     // `cancelTask : (1 t : Task a) -> …`. Их тоже подставляет вставка, дырками,
     // как всякое употребление имени; написанного домена они не касаются.
-    while let Term::Pi(binder, _, _, _, codomain) = ty
-        && binder.visibility.is_implicit()
-        && binder.mult == Mult::Zero
-    {
+    //
+    // Цепочка `&&` с `let` тут не пишется: она требует Rust 2024, а MSRV
+    // проекта 1.85 (джоба `msrv` его и ловит).
+    while let Term::Pi(binder, _, _, _, codomain) = ty {
+        if !binder.visibility.is_implicit() || binder.mult != Mult::Zero {
+            break;
+        }
         ty = codomain;
     }
     let Term::Pi(Binder { mult, .. }, _, domain, _, result) = ty else {

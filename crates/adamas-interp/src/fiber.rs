@@ -132,8 +132,12 @@ impl Machine<'_> {
         };
         // Ближайший выигрывает - то же правило, по которому выбирается хендлер.
         // Написанный `handle` **внутри** питомника значит ровно то, что написан.
-        if let Some((_, handler)) = kont.catching(effect)
-            && handler > link
+        //
+        // Цепочка `&&` с `let` тут не пишется: она требует Rust 2024, а MSRV
+        // проекта 1.85 (джоба `msrv` его и ловит).
+        if kont
+            .catching(effect)
+            .is_some_and(|(_, handler)| handler > link)
         {
             return Ok(None);
         }

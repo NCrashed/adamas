@@ -17,6 +17,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "adamas-codegen"
+version = "0.0.0"
+dependencies = [
+ "adamas-core",
+ "adamas-elab",
+ "adamas-interp",
+ "adamas-parser",
+ "adamas-runtime",
+ "cc",
+ "thiserror",
+]
+
+[[package]]
 name = "adamas-core"
 version = "0.0.0"
 dependencies = [

@@ -86,8 +86,17 @@ impl Member<'_> {
 /// область, порождённую элаборацией.
 pub(crate) fn locate(declared: &Declared<'_>, error: &TypeError, fallback: Span) -> Span {
     let route: Vec<Frame> = error.path().collect();
+    at(declared, &route, fallback)
+}
+
+/// То же по готовому маршруту.
+///
+/// Маршрут приносит не только `check`: проверка совместимости с FBIP (§5.1)
+/// ходит по тому же дереву и кадры складывает те же, а перевод их в спан от
+/// того, кто их сложил, не зависит.
+pub(crate) fn at(declared: &Declared<'_>, route: &[Frame], fallback: Span) -> Span {
     match declared {
-        Declared::Bare(ty) => narrow(ty, &route),
+        Declared::Bare(ty) => narrow(ty, route),
         Declared::Postulate(ty) => match route.split_first() {
             Some((Frame::MemberType(_), rest)) => narrow(ty, rest),
             _ => fallback,

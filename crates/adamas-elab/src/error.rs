@@ -7,6 +7,7 @@
 //! подтерма, а объявление целиком остаётся только там, куда маршрут не дошёл.
 
 use adamas_core::check::TypeError;
+use adamas_core::fbip::Fault;
 use adamas_core::mult::Mult;
 use adamas_core::pattern::PatternError;
 use adamas_core::source::Span;
@@ -1101,6 +1102,22 @@ pub enum ElabError {
         /// самой клаузе; всё прочее - объявление целиком.
         span: Span,
     },
+
+    /// `@fbip` на теле, несовместимом с reuse.
+    ///
+    /// Вердикт считает ядро ([`adamas_core::fbip`]), атрибут требует, чтобы
+    /// ответ был «да» (§5.1). Причина названа, а не сведена к «нет»: §5.1
+    /// требует показать, где именно reuse не срабатывает.
+    #[error("`{name}` объявлено `@fbip`, но совместимости нет: {fault}")]
+    NotFbip {
+        /// Имя определения.
+        name: Symbol,
+        /// Что не сошлось.
+        fault: Box<Fault>,
+        /// Место построенной структуры; объявление целиком - там, куда
+        /// маршрут не дошёл.
+        span: Span,
+    },
 }
 
 /// Имена, которых маршрут ядра не несёт.
@@ -1274,7 +1291,8 @@ impl ElabError {
             | Self::DetachedSignature { span, .. }
             | Self::Missing { span, .. }
             | Self::Core { span, .. }
-            | Self::Clauses { span, .. } => *span,
+            | Self::Clauses { span, .. }
+            | Self::NotFbip { span, .. } => *span,
         }
     }
 }

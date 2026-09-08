@@ -1,0 +1,61 @@
+-- Вывод `Flat`: укладка считается, а не объявляется (§4.11).
+--
+-- Класс объявлен программой, инстансов в ней нет ни одного: их порождает
+-- компилятор структурно. Наблюдаемое здесь - числа, потому что «принято» о
+-- выводе не говорит ничего: словарь, собранный не по тем полям, типизируется
+-- ровно так же.
+--
+-- Примитивов в языке пока нет (§4.3, Фаза 6), поэтому базой служит тег: `Bit`
+-- из двух пустых конструкторов занимает байт. Правила укладки от этого не
+-- зависят - те же, что в §4.11.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+type Layout = { size : Nat, align : Nat }
+
+class Flat a where
+  layout : Layout
+
+data Bit where
+  Off : Bit
+  On : Bit
+
+-- Запись из плоских полей - плоская, поля идут подряд.
+type Pair = { left : Bit, right : Bit }
+
+-- Один конструктор - как запись: тега не нужно, различать нечего.
+data Vec3 where
+  MkVec3 : Bit -> Bit -> Bit -> Vec3
+
+-- Несколько конструкторов - тег плюс payload размера максимума. Здесь это
+-- 1 + 2: у `That` поле шире прочих.
+data Choice where
+  This : Bit -> Choice
+  That : Pair -> Choice
+  Neither : Choice
+
+-- Параметризованное семейство: плоское при плоском аргументе. Имя семейства
+-- при этом повторяется - и рекурсией это не является.
+data Box (a : Type) where
+  MkBox : a -> Box a
+
+-- Словарь приходит из контекста, а не выводится заново: значение обязано
+-- совпасть с `layout @Choice` ниже.
+sized : {Flat a} => a -> Layout
+sized x = layout
+
+-- [1/1, 2/1, 3/1, 3/1, 1/1, 3/1]
+main : List Layout
+main =
+  Cons (layout @Bit)
+    (Cons (layout @Pair)
+      (Cons (layout @Vec3)
+        (Cons (layout @Choice)
+          (Cons (layout @(Box (Box Bit)))
+            (Cons (sized (That { left = Off, right = On })) Nil)))))

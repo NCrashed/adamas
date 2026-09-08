@@ -31,6 +31,7 @@ use adamas_core::value::Value;
 use adamas_parser::ast::Symbol;
 
 use crate::error::ElabError;
+use crate::own::Owned;
 
 /// Объявленные классы и их инстансы.
 ///
@@ -235,10 +236,15 @@ impl Instances {
 /// # Errors
 ///
 /// Инстанса для написанного типа нет.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "поиск читает всё состояние прогона: сигнатуру, дырки, реестр и владение"
+)]
 pub fn resolve(
     signature: &Signature,
     metas: &mut Metas,
     instances: &Instances,
+    owned: &Owned,
     declaring: Option<&Declaring>,
     term: &Term,
     ty: &Term,
@@ -259,11 +265,21 @@ pub fn resolve(
     // нетотальное разрешено. Дырка тела, стоящая в стёртой подпозиции,
     // грубостью σ не спасается: подставленное решение перепроверит ядро, и
     // его ворота стоят уже на точной позиции.
-    settle(signature, metas, instances, declaring, ty, Mult::Zero, span)?;
     settle(
         signature,
         metas,
         instances,
+        owned,
+        declaring,
+        ty,
+        Mult::Zero,
+        span,
+    )?;
+    settle(
+        signature,
+        metas,
+        instances,
+        owned,
         declaring,
         term,
         Mult::Many,
@@ -291,10 +307,15 @@ pub fn resolve(
 /// `sigma` - кратность позиции, в которой стоит терм: ноль у написанного
 /// типа, `ω` у тела. По ней ворота §4.7 решают, годится ли нетотальный
 /// словарь (§10 вопрос 134).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "поиск читает всё состояние прогона: сигнатуру, дырки, реестр и владение"
+)]
 fn settle(
     signature: &Signature,
     metas: &mut Metas,
     instances: &Instances,
+    owned: &Owned,
     declaring: Option<&Declaring>,
     term: &Term,
     sigma: Mult,
@@ -354,6 +375,16 @@ fn settle(
         // всё равно негде. Так пишется всякая полиморфная функция над
         // классом - `same : {Eqv a} => a -> a -> Bool`.
         if let Some(solution) = from_context(signature, metas, instances, &ty) {
+            metas.solve_term(meta, solution);
+            continue;
+        }
+        // `Flat` кандидатов не имеет вовсе: инстанс его не выбирается, а
+        // вычисляется по представлению типа (§4.11). Поэтому вывод зовётся
+        // здесь, до разбора голов: цель ему нужна целиком, а не ключом, и
+        // формы, у которых ключа нет - функция, переменная, - он разбирает сам
+        // и называет причину.
+        if &*class == crate::flat::FLAT {
+            let solution = crate::flat::derive(signature, metas, owned, &ty, &goal, span)?;
             metas.solve_term(meta, solution);
             continue;
         }
@@ -833,7 +864,9 @@ impl Declaring {
 }
 
 /// Связывания телескопа дырки: кратность, имя и тип на своей глубине.
-fn binders_of(ty: &Term) -> Vec<(adamas_core::mult::Mult, adamas_core::term::Name, Rc<Term>)> {
+pub(crate) fn binders_of(
+    ty: &Term,
+) -> Vec<(adamas_core::mult::Mult, adamas_core::term::Name, Rc<Term>)> {
     let mut found = Vec::new();
     let mut current = ty;
     while let Term::Pi(binder, name, domain, _, codomain) = current {
@@ -844,7 +877,7 @@ fn binders_of(ty: &Term) -> Vec<(adamas_core::mult::Mult, adamas_core::term::Nam
 }
 
 /// Оборачивает тело лямбдами по телескопу.
-fn abstracted(
+pub(crate) fn abstracted(
     binders: &[(adamas_core::mult::Mult, adamas_core::term::Name, Rc<Term>)],
     body: Term,
 ) -> Term {

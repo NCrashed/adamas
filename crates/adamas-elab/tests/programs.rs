@@ -9232,3 +9232,149 @@ wrong = VCons True (VCons True VNil)
         "получено {error:?}"
     );
 }
+
+/// Программа с объявленным классом `Flat` (§4.11) поверх [`BASE`].
+///
+/// Класс объявляется текстом, а не встроен в компилятор: имя `Flat` он знает
+/// тем же соглашением, каким `if` знает `Bool`.
+fn flatly(tail: &str) -> String {
+    format!(
+        "{BASE}
+type Layout = {{ size : Nat, align : Nat }}
+
+class Flat a where
+  layout : Layout
+
+data Bit where
+  Off : Bit
+  On : Bit
+
+{tail}"
+    )
+}
+
+#[test]
+fn a_flat_instance_is_derived_from_the_representation() {
+    // §4.11: `data` с одним конструктором укладывается как запись, поля идут
+    // подряд. Наблюдается значение, а не «принято»: словарь, собранный не по
+    // тем полям, типизируется точно так же.
+    let signature = program(&flatly(
+        "data Vec3 where
+  MkVec3 : Bit -> Bit -> Bit -> Vec3
+
+size3 : Layout
+size3 = layout @Vec3
+",
+    ));
+    assert_eq!(
+        value(&signature, "size3"),
+        "{size = Succ (Succ (Succ Zero)), align = Succ Zero}"
+    );
+}
+
+#[test]
+fn a_pointer_field_is_named_in_the_refusal() {
+    // §4.11 требует указать на **конкретное поле**, а не на тип целиком: у
+    // `Node` не плоское второе поле, и правит автор именно его.
+    let error = refused(&flatly(
+        "data Node where
+  MkNode : Bit -> Nat -> Node
+
+sized : Layout
+sized = layout @Node
+",
+    ));
+    let ElabError::NotFlat { ty, why, .. } = &error else {
+        panic!("получено {error:?}");
+    };
+    assert_eq!(&**ty, "`Node`");
+    assert!(
+        why.contains("поле 2 конструктора `MkNode`") && why.contains("`Nat`"),
+        "поле не названо: {why}"
+    );
+}
+
+#[test]
+fn an_owned_type_is_not_flat() {
+    // §4.11 прямо: unique- и resource-типы не `Flat`. Граница региона §3.6
+    // держится на этом - владеемое значение живёт в куче.
+    let error = refused(&flatly(
+        "unique data Buf where
+  MkBuf : Bit -> Buf
+
+sized : Layout
+sized = layout @Buf
+",
+    ));
+    let ElabError::NotFlat { why, .. } = &error else {
+        panic!("получено {error:?}");
+    };
+    assert!(why.contains("владеемый"), "причина другая: {why}");
+}
+
+#[test]
+fn a_postulated_type_is_not_flat() {
+    // Представления у постулата нет, и выводить нечего. То же у запечатанного
+    // типа: снаружи δ по нему запрещено (§3.5).
+    let error = refused(&flatly(
+        "Handle : Type
+
+sized : Layout
+sized = layout @Handle
+",
+    ));
+    let ElabError::NotFlat { why, .. } = &error else {
+        panic!("получено {error:?}");
+    };
+    assert!(why.contains("без представления"), "причина другая: {why}");
+}
+
+#[test]
+fn a_variable_needs_a_written_constraint() {
+    // Словарь для переменной берётся из контекста, а не выводится: чем она
+    // окажется, в этом месте неизвестно. Отказ говорит, что писать.
+    let error = refused(&flatly(
+        "sized : a -> Layout
+sized x = layout
+",
+    ));
+    let ElabError::NotFlat { why, .. } = &error else {
+        panic!("получено {error:?}");
+    };
+    assert!(why.contains("{Flat"), "подсказки нет: {why}");
+    // А с констрейнтом - проходит, и словарь приходит из связывания.
+    let signature = program(&flatly(
+        "sized : {Flat a} => a -> Layout
+sized x = layout
+
+one : Layout
+one = sized Off
+",
+    ));
+    assert_eq!(
+        value(&signature, "one"),
+        "{size = Succ Zero, align = Succ Zero}"
+    );
+}
+
+#[test]
+fn the_flat_class_is_declared_as_written_in_the_design() {
+    // Компилятор знает это имя и выводит по нему инстансы, поэтому вправе
+    // требовать объявленной формы: класс с тем же именем и другим содержимым
+    // ломал бы вывод молча.
+    for tail in [
+        "class Flat a where\n  width : Nat\n",
+        "class Flat a b where\n  layout : Layout\n",
+    ] {
+        let error = refused(&format!(
+            "{BASE}
+type Layout = {{ size : Nat, align : Nat }}
+
+{tail}"
+        ));
+        assert!(
+            matches!(error, ElabError::FlatShape { .. }),
+            "получено {error:?}"
+        );
+    }
+}

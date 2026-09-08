@@ -1,0 +1,33 @@
+-- Отказ вывода `Flat` называет поле, а не тип целиком (§4.11).
+--
+-- `Row` не плоская, потому что вторым полем несёт список, а список - цепочка
+-- указателей: размер значения ничем не ограничен. §4.11 требует, чтобы отказ
+-- указывал на конкретное поле: «`Row` не плоская» отправляет искать по всем
+-- трём объявлениям, а номер поля и имя конструктора - в одно место.
+--
+-- Ближайший проходящий сосед - `eval/flat.adamas`. Разница ровно одна:
+-- заменить `List Bit` в `MkRow` на плоское поле (`Bit`, `Pair`), и вывод
+-- пройдёт, посчитав укладку.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+type Layout = { size : Nat, align : Nat }
+
+class Flat a where
+  layout : Layout
+
+data Bit where
+  Off : Bit
+  On : Bit
+
+data Row where
+  MkRow : Bit -> List Bit -> Row
+
+main : Layout
+main = layout @Row

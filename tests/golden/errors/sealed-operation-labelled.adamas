@@ -27,10 +27,10 @@ module Counter :> Counting where
 
   type Counted = {Tick} Nat
 
-  pending : {Tick} Nat
+  pending : Counted
   pending = tick
 
-  run : ({Tick} Nat) -> Nat
+  run : Counted -> Nat
   run c = handle c with
     return v -> v
     tick -> resume 3

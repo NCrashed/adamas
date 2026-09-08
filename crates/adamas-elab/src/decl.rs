@@ -912,6 +912,23 @@ fn module_object(
         let Some(mut term) = signature.instantiate(&full, metas) else {
             continue;
         };
+        // Row-арность члена-значения инстанцируется пустой row, а не дыркой
+        // (§10 вопрос 147). Носит её только `module type`: поле хранит саму
+        // сигнатуру - её члены с написанными метками, - а не место её
+        // использования, поэтому дырку в теле записи объемлющего не решало бы
+        // ничто, и граница объявления отвергала бы модуль нерешённым хвостом.
+        if let Term::Const(name, levels, args) = &term {
+            if !args.row_args().is_empty() {
+                term = Term::Const(
+                    Rc::clone(name),
+                    Rc::clone(levels),
+                    Args::new(
+                        args.row_args().iter().map(|_| Row::empty()),
+                        args.mult_args().iter().copied(),
+                    ),
+                );
+            }
+        }
         for position in 0..params.len() {
             let index = u32::try_from(params.len() - 1 - position).unwrap_or(u32::MAX);
             term = Term::App(Rc::new(term), Rc::new(Term::var(index)));

@@ -23,6 +23,7 @@ use std::rc::Rc;
 
 use adamas_core::eval::quote;
 use adamas_core::meta::{Metas, unsolved_term_meta, unsolved_term_meta_but, zonk_term};
+use adamas_core::mult::Mult;
 use adamas_core::sig::Signature;
 use adamas_core::source::Span;
 use adamas_core::term::Term;
@@ -252,9 +253,22 @@ pub fn resolve(
     let _ =
         adamas_core::check::check_within(&adamas_core::ctx::Ctx::new(signature), metas, term, ty);
     // И тело, и тип: словарь стоит в обоих - `witnessed : Wit (eq Zero Zero)`
-    // несёт его в написанном типе, а не в теле.
-    settle(signature, metas, instances, declaring, ty, span)?;
-    settle(signature, metas, instances, declaring, term, span)?;
+    // несёт его в написанном типе, а не в теле. σ у проходов разная, и это
+    // ворота §4.7 (§10 вопрос 134): тип - стёртый фрагмент, и нетотальный
+    // словарь туда не пройдёт; тело объявляется при `ω`, и рантайму
+    // нетотальное разрешено. Дырка тела, стоящая в стёртой подпозиции,
+    // грубостью σ не спасается: подставленное решение перепроверит ядро, и
+    // его ворота стоят уже на точной позиции.
+    settle(signature, metas, instances, declaring, ty, Mult::Zero, span)?;
+    settle(
+        signature,
+        metas,
+        instances,
+        declaring,
+        term,
+        Mult::Many,
+        span,
+    )?;
     // Проверка ещё раз - по решениям, которые поиск только что вставил. Их
     // собственные аргументы уровня иначе не свяжет никто: `infer` у дырки
     // читает объявленный тип, а не решение, и уровень рекурсивной ссылки
@@ -273,12 +287,17 @@ pub fn resolve(
 }
 
 /// Заполняет словари по уже проверенному терму.
+///
+/// `sigma` - кратность позиции, в которой стоит терм: ноль у написанного
+/// типа, `ω` у тела. По ней ворота §4.7 решают, годится ли нетотальный
+/// словарь (§10 вопрос 134).
 fn settle(
     signature: &Signature,
     metas: &mut Metas,
     instances: &Instances,
     declaring: Option<&Declaring>,
     term: &Term,
+    sigma: Mult,
     span: Span,
 ) -> Result<(), ElabError> {
     // Дырки, заведённые самим разрешением: их в терме нет - они живут в
@@ -416,8 +435,13 @@ fn settle(
             }
             return Err(ElabError::NoInstance { written, span });
         };
-        let Some((solution, fresh)) = applied_candidate(signature, metas, &ty, &dictionary) else {
-            return Err(ElabError::NoInstance { written, span });
+        let (solution, fresh) = match applied_candidate(signature, metas, &ty, &dictionary, sigma) {
+            Ok(found) => found,
+            // Кандидат сошёлся бы, но не тотален, а позиция стёртая: отказ
+            // обязан назвать нетотальность - «не найден» лгал бы, кандидат
+            // на экране.
+            Err(Unfit::Partial) => return Err(ElabError::PartialInstance { written, span }),
+            Err(Unfit::Mismatch) => return Err(ElabError::NoInstance { written, span }),
         };
         metas.solve_term(meta, solution);
         pending.extend(fresh.into_iter().map(|created| (created, depth + 1)));
@@ -829,20 +853,35 @@ fn abstracted(
     })
 }
 
+/// Чем кандидат не подошёл.
+enum Unfit {
+    /// Не сошёлся с целью - «не про этот инстанс».
+    Mismatch,
+    /// Сошёлся бы, но словарь не тотален, а позиция - стёртый фрагмент
+    /// (§4.7): ворота ядра отказали на его имени.
+    Partial,
+}
+
 /// Кандидат, применённый к дыркам на каждое ведущее выводимое связывание.
 ///
 /// Инстанс с контекстом - не значение, а функция от словарей (§3.5), поэтому
 /// сослаться на него именем мало: `Eqv#List` надо применить к `?a` и к словарю
 /// `Eqv ?a`, а сам этот словарь вернётся в цикл и решится следующим шагом.
 /// Так рекурсия разрешения получается из цикла, а не из отдельного обхода.
+///
+/// `sigma` - кратность позиции цели: по ней ворота §4.7 в `infer` пропускают
+/// или отвергают нетотальный словарь. Отказ по нетотальности возвращается
+/// **отличимым** - переименовать его в «не найден» значило бы спрятать
+/// кандидата, который стоит перед глазами (§10 вопрос 134).
 fn applied_candidate(
     signature: &Signature,
     metas: &mut Metas,
     ty: &Term,
     candidate: &Term,
-) -> Option<(Rc<Value>, Vec<adamas_core::term::TermMeta>)> {
+    sigma: Mult,
+) -> Result<(Rc<Value>, Vec<adamas_core::term::TermMeta>), Unfit> {
     let binders = binders_of(ty);
-    let size = u32::try_from(binders.len()).ok()?;
+    let size = u32::try_from(binders.len()).map_err(|_| Unfit::Mismatch)?;
     let mut ctx = adamas_core::ctx::Ctx::new(signature);
     for (mult, name, domain) in &binders {
         let value = ctx.eval(domain);
@@ -852,7 +891,12 @@ fn applied_candidate(
     let mut term = candidate.clone();
     let mut fresh = Vec::new();
     let (mut current, _) =
-        adamas_core::check::infer(&ctx, metas, adamas_core::mult::Mult::Zero, candidate).ok()?;
+        adamas_core::check::infer(&ctx, metas, sigma, candidate).map_err(|error| {
+            match error.kind {
+                adamas_core::error::ErrorKind::PartialConstant { .. } => Unfit::Partial,
+                _ => Unfit::Mismatch,
+            }
+        })?;
     while let Value::Pi(binder, _, domain, _, codomain) = &*current.clone() {
         if !binder.visibility.is_implicit() {
             break;
@@ -868,9 +912,9 @@ fn applied_candidate(
         current = codomain.clone().apply(value);
     }
     if !adamas_core::conv::convertible(signature, metas, size, &current, &goal) {
-        return None;
+        return Err(Unfit::Mismatch);
     }
-    Some((
+    Ok((
         adamas_core::eval::eval(
             &adamas_core::value::Env::default(),
             &abstracted(&binders, term),

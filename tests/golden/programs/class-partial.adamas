@@ -1,0 +1,19 @@
+-- Нетотальный метод инстанса в рантайме (§4.7, §10 вопрос 134).
+--
+-- Вердикт члена и его пригодность словарём расходятся: `spin` нетотален, и
+-- в тип или доказательство инстанс не пройдёт (errors/instance-partial-in-
+-- type.adamas), но рантайму нетотальное разрешено - разрешение получает σ
+-- позиции и при `ω` находит словарь как всякий другой.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+class Loop a where
+  spin : a -> a
+
+instance Loop Nat where
+  spin n = spin n
+
+runtime : Nat -> Nat
+runtime n = spin n

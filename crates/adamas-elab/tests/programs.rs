@@ -4879,32 +4879,143 @@ fn an_attribute_inside_a_group_is_not_dropped() {
     // молча: `@fbip` внутри `mutual` принимался вместо отказа, обещанного
     // §4.7, а `@total` не значил ничего - та же расходящаяся функция
     // отвергалась вне блока и проходила внутри.
-    let refuse = |what: &str, text: String| {
-        let error = refused(&text);
-        assert!(
-            matches!(
-                error,
-                ElabError::Attribute { .. } | ElabError::NotTotal { .. }
-            ),
-            "{what}: получено {error:?}"
-        );
-    };
-    refuse(
-        "@fbip",
-        format!("{BASE}\nmutual\n  @fbip\n  a : Nat -> Nat\n  a n = n\n"),
+    // Вердикт спрашивается у каждого атрибута свой, поэтому и ожидание своё:
+    // общий «любой отказ» прошёл бы и у реализации, которая отвергает всё
+    // подряд.
+    let fbip = refused(&format!(
+        "{BASE}
+data Tree where
+  Leaf : Tree
+  Node : Tree -> Nat -> Tree -> Tree
+
+mutual
+  @fbip
+  spine : Tree -> Nat
+  spine Leaf = Zero
+  spine (Node l x r) = Succ (spine l)
+"
+    ));
+    assert!(
+        matches!(fbip, ElabError::NotFbip { .. }),
+        "@fbip: получено {fbip:?}"
     );
-    refuse(
-        "@total",
-        format!("{BASE}\nmutual\n  @total\n  loopy : Nat -> Nat\n  loopy n = loopy n\n"),
+    let total = refused(&format!(
+        "{BASE}\nmutual\n  @total\n  loopy : Nat -> Nat\n  loopy n = loopy n\n"
+    ));
+    assert!(
+        matches!(total, ElabError::NotTotal { .. }),
+        "@total: получено {total:?}"
     );
     // И тот же атрибут у метода класса: обещанием за каждый инстанс он быть не
     // вправе - вердикт считается у определения.
-    let error = refused(&format!(
-        "{BASE}\nclass C a where\n  @total\n  size : a -> a\n"
+    for attribute in ["@total", "@fbip"] {
+        let error = refused(&format!(
+            "{BASE}\nclass C a where\n  {attribute}\n  size : a -> a\n"
+        ));
+        assert!(
+            matches!(error, ElabError::ModuleMember { .. }),
+            "{attribute}: получено {error:?}"
+        );
+    }
+}
+
+#[test]
+fn fbip_holds_the_shape_of_what_a_branch_rebuilds() {
+    // §5.1: reuse переписывает разобранную ячейку, поэтому построенное обязано
+    // совпасть с разобранным по числу полей. Атрибут - обязательство, и
+    // проверяется он по телу, а не принимается молча.
+    let base = "\
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Tree where
+  Leaf : Tree
+  Node : Tree -> Nat -> Tree -> Tree
+";
+
+    // Обход по дереву - механика §5.1: разобран `Node`, построен `Node`.
+    program(&format!(
+        "{base}
+@fbip
+mirror : Tree -> Tree
+mirror Leaf = Leaf
+mirror (Node l x r) = Node (mirror r) x (mirror l)
+"
+    ));
+
+    // `Succ` о одном поле на месте `Node` о трёх: переписывать нечем.
+    let shape = refused(&format!(
+        "{base}
+@fbip
+height : Tree -> Nat
+height Leaf = Zero
+height (Node l x r) = Succ (height l)
+"
     ));
     assert!(
-        matches!(error, ElabError::ModuleMember { .. }),
-        "получено {error:?}"
+        matches!(shape, ElabError::NotFbip { .. }),
+        "получено {shape:?}"
+    );
+    assert!(
+        shape.to_string().contains("полей: 3"),
+        "причина не названа: {shape}"
+    );
+
+    // Форма совпадает, но разобранное значение названо ещё раз - и остаётся
+    // живым, сколько бы ни был равен RC у вызывающего.
+    let alive = refused(&format!(
+        "{base}
+@fbip
+nest : Tree -> Tree
+nest t = case t of
+  Leaf -> Leaf
+  Node l x r -> Node t x r
+"
+    ));
+    assert!(
+        alive.to_string().contains("остаётся живым"),
+        "получено {alive}"
+    );
+
+    // Ближайший проходящий сосед той же программы: поле вместо самого
+    // разобранного.
+    program(&format!(
+        "{base}
+@fbip
+nest : Tree -> Tree
+nest t = case t of
+  Leaf -> Leaf
+  Node l x r -> Node l x r
+"
+    ));
+}
+
+#[test]
+fn fbip_says_nothing_about_branches_that_build_nothing() {
+    // Обязательство §5.1 - о ветвях, **в которых создаётся** структура. Ветвь,
+    // которая ничего не строит, reuse'ом воспользоваться не может, и требовать
+    // от неё нечего; аллокацию как таковую ограничивает `@noalloc`, не этот
+    // атрибут.
+    program(
+        "\
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Tree where
+  Leaf : Tree
+  Node : Tree -> Nat -> Tree -> Tree
+
+@fbip
+label : Tree -> Nat
+label Leaf = Zero
+label (Node l x r) = x
+
+@fbip
+fresh : Nat -> Tree
+fresh n = Node Leaf n Leaf
+",
     );
 }
 
@@ -5024,9 +5135,13 @@ bad n = loop n
 
 #[test]
 fn an_unchecked_attribute_names_what_is_missing() {
-    // `@fbip` и `@noalloc` - обязательства перед backend'ом, а его нет.
-    // Принять их молча значило бы обещать проверку, которой не будет.
-    for text in ["@fbip\nf : Nat\nf = Zero\n", "@fast\nf : Nat\nf = Zero\n"] {
+    // `@noalloc` - обязательство перед backend'ом, а его нет. Принять его
+    // молча значило бы обещать проверку, которой не будет. `@fbip` рядом уже
+    // проверяется ([`adamas_core::fbip`]), и в этом списке его больше нет.
+    for text in [
+        "@noalloc\nf : Nat\nf = Zero\n",
+        "@fast\nf : Nat\nf = Zero\n",
+    ] {
         let error = refused(&format!("{BASE}{text}"));
         assert!(
             matches!(error, ElabError::Attribute { .. }),

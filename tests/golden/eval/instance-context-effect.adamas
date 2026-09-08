@@ -1,0 +1,52 @@
+-- Инстанс с контекстом и эффектным методом (§3.5, §3.4, §10 вопрос 138).
+--
+-- Граница при закрытии измерена острее постановки: полиморфия ни при чём.
+-- Полиморфный инстанс с эффектным методом БЕЗ контекста проходил и до правки;
+-- ломало само наличие контекста, даже неиспользуемого, - оба мутанта прогнаны.
+--
+-- Причина: голова инстанса элаборировалась обычной декларацией, и стрелка
+-- `{Emit a} =>` получала auto-lift row (§3.4). Открытая row уезжала
+-- row-параметром словаря, применение кандидата к контексту «производило» её,
+-- и на месте использования дырку параметра не определяло ничто - «остался
+-- неразрешённый хвост row». Стрелки заголовка словарные, применение чистое:
+-- row спайна пустая по построению.
+--
+-- Хендлер считает операции: по одной на элемент списка, рекурсия идёт через
+-- словарь контекста. Два элемента - два.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  log : Nat -> Unit
+
+class Emit a where
+  emit : a -> {Log} Unit
+
+instance Emit Nat where
+  emit n = log n
+
+instance {Emit a} => Emit (List a) where
+  emit Nil = MkUnit
+  emit (Cons x xs) =
+    let u : Unit = emit x
+    emit xs
+
+emitted : {Log} Unit
+emitted = emit (Cons Zero (Cons (Succ Zero) Nil))
+
+counted : Nat
+counted = handle emitted with
+  return v -> Zero
+  log n -> Succ (resume MkUnit)
+
+main : Nat
+main = counted

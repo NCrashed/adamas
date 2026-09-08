@@ -7,8 +7,8 @@ use std::ptr;
 use adamas_runtime::ffi::{
     Evidence, Kont, TAG_CLOSURE, Value, adamas_alloc, adamas_apply, adamas_closure,
     adamas_closure_code, adamas_closure_get, adamas_closure_missing, adamas_closure_release,
-    adamas_closure_set, adamas_drop, adamas_field, adamas_imm, adamas_imm_get, adamas_rc,
-    adamas_set_field, adamas_stat_live, adamas_stat_reset, adamas_tag,
+    adamas_closure_set, adamas_closure_taken, adamas_drop, adamas_field, adamas_imm,
+    adamas_imm_get, adamas_rc, adamas_set_field, adamas_stat_live, adamas_stat_reset, adamas_tag,
 };
 
 /// Трёхместная функция с одним захватом. Разряды разные, поэтому перепутанный
@@ -83,6 +83,31 @@ fn partial_application_collects_the_arguments_in_order() {
 
         let answer = adamas_apply(third, ptr::null(), ptr::null_mut(), adamas_imm(3));
         assert_eq!(adamas_imm_get(answer), 7 + 10 + 200 + 3000);
+
+        adamas_drop(third, Some(adamas_closure_release));
+        adamas_drop(second, Some(adamas_closure_release));
+        adamas_drop(first, Some(adamas_closure_release));
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Занятых слотов ровно столько, сколько дропать порождённому release'у.
+///
+/// Число это ему негде взять, кроме как здесь: `applied` растёт с каждым
+/// частичным применением, а указатель на release остаётся тот же (`adamas.h`,
+/// «Замыкание»). Свидетель - **рост**: у трёхместного замыкания с одним
+/// захватом занято 1, 2, 3 слота подряд.
+#[test]
+fn taken_slots_grow_with_partial_application() {
+    unsafe {
+        adamas_stat_reset();
+        let first = digits_closure(7);
+        assert_eq!(adamas_closure_taken(first), 1, "среда без аргументов");
+
+        let second = adamas_apply(first, ptr::null(), ptr::null_mut(), adamas_imm(1));
+        assert_eq!(adamas_closure_taken(second), 2);
+        let third = adamas_apply(second, ptr::null(), ptr::null_mut(), adamas_imm(2));
+        assert_eq!(adamas_closure_taken(third), 3);
 
         adamas_drop(third, Some(adamas_closure_release));
         adamas_drop(second, Some(adamas_closure_release));

@@ -182,6 +182,8 @@ unsafe extern "C" {
     pub fn adamas_closure_code(closure: Value) -> Code;
     /// Сколько аргументов замыкание ещё ждёт.
     pub fn adamas_closure_missing(closure: Value) -> u32;
+    /// Сколько слотов занято: среда плюс накопленные аргументы.
+    pub fn adamas_closure_taken(closure: Value) -> usize;
     /// Дроп замыкания как `Release`.
     pub fn adamas_closure_release(closure: Value);
     /// Применение: аргумент берётся владением.

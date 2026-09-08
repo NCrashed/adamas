@@ -89,6 +89,11 @@ uint32_t adamas_closure_missing(adamas_value closure) {
     return block->arity - block->applied;
 }
 
+size_t adamas_closure_taken(adamas_value closure) {
+    struct closure_block *block = closure_of(closure);
+    return (size_t)block->captured + (size_t)block->applied;
+}
+
 void adamas_closure_release(adamas_value closure) {
     struct closure_block *block = closure_of(closure);
     if (block->release != NULL) {

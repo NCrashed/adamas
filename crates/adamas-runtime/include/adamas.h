@@ -512,6 +512,15 @@ adamas_code adamas_closure_code(adamas_value closure);
 /** Сколько аргументов замыкание ещё ждёт. */
 uint32_t adamas_closure_missing(adamas_value closure);
 
+/**
+ * Сколько слотов **занято**: среда плюс накопленные аргументы.
+ *
+ * Спрашивает это release, порождённый понижением: `applied` меняется частичным
+ * применением, а указатель на release остаётся тот же, поэтому число обязано
+ * приходить от рантайма, а не быть вписано в порождённый код.
+ */
+size_t adamas_closure_taken(adamas_value closure);
+
 /** Дроп замыкания как `adamas_release`: зовёт носимый им release. */
 void adamas_closure_release(adamas_value closure);
 

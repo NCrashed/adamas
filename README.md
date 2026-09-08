@@ -1,3 +1,5 @@
+| [`docs/examples/`](docs/examples/) | Illustrations of forms the implementation has not reached yet. |
+| [`docs/phase6-plan.md`](docs/phase6-plan.md) | How phase 6 is cut into tracks: what parallelises, what does not, and what counts as done. |
 # Adamas
 
 A research-level prototype of a functional programming language: dependent

@@ -1,0 +1,89 @@
+-- Передача задачи в другую задачу (§5.2) - то, что блокировал вопрос 121.
+--
+-- `spawn (waiter t)` пишется обратным направлением правила исполнения (§3.4):
+-- применение против ожидаемого типа-вычисления приостанавливается, и линейный
+-- `t` уезжает в тело порождаемой задачи кратностью `1` у `body`.
+--
+-- Первый питомник ждёт чужими руками: 5 1 6 2 - `waiter` блокируется на
+-- приехавшей задаче и просыпается с её ответом. Второй роняет чужими руками:
+-- 5 3 8 - `dropper` не упоминает параметр, вставленный `drop` отменяет
+-- запаркованную задачу из другого файбера, и шестёрки после уступки нет.
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+resource Task where
+  MkTask : Nat -> Task
+  cancelTask : (1 t : Task) -> {Log} Unit
+  cancelTask (MkTask n) = note 8
+
+effect Async where
+  suspend : Unit
+  spawn : (1 body : {Async, Log} Unit) -> Task
+  await : (1 t : Task) -> Unit
+
+withNursery : ({Async, Log} Unit) -> {Log} Unit
+
+slow : {Async, Log} Unit
+slow =
+  let a : Unit = note 5
+  let s : Unit = suspend
+  note 6
+
+-- Ждёт чужую задачу, приехавшую значением.
+waiter : (1 t : Task) -> {Async, Log} Unit
+waiter t =
+  let a : Unit = note 1
+  let 1 r : Unit = await t
+  note 2
+
+-- Роняет чужую задачу: drop вставится по неупоминанию.
+dropper : (1 t : Task) -> {Async, Log} Unit
+dropper t =
+  note 3
+
+handing : {Async, Log} Unit
+handing =
+  let 1 t : Task = spawn slow
+  let 1 w : Task = spawn (waiter t)
+  await w
+
+felling : {Async, Log} Unit
+felling =
+  let 1 t : Task = spawn slow
+  let 1 w : Task = spawn (dropper t)
+  await w
+
+first : {Log} Unit
+first = withNursery handing
+
+second : {Log} Unit
+second = withNursery felling
+
+shown : List Nat
+shown = handle first with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+
+lost : List Nat
+lost = handle second with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+
+append : List a -> List a -> List a
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+main : List Nat
+main = append shown lost

@@ -94,7 +94,14 @@ static adamas_evidence *closing_evidence(adamas_frame *frame) {
 static void frame_close(adamas_frame *frame, int unwinding) {
     adamas_value closer = frame->env[0];
     adamas_evidence *evidence = unwinding ? closing_evidence(frame) : frame->evidence;
-    adamas_value answer = adamas_apply(closer, evidence, adamas_unit());
+    /* Деструктор идёт второй формой: он вправе открыть свой scope, произвести
+     * операцию и оборваться, - значит стек ему нужен, и стек этот **свой**.
+     * Обрыв тогда снимает ровно его кадры и до обхода снаружи не достаёт. */
+    adamas_kont inner;
+    adamas_kont_init(&inner);
+    adamas_value answer = adamas_apply(closer, evidence, &inner, adamas_unit());
+    /* Что деструктор отложил, доигрывается здесь же; после обрыва стек пуст. */
+    answer = adamas_kont_run(&inner, answer);
     adamas_drop(answer, NULL);
     if (unwinding) {
         adamas_evidence_drop(evidence);
@@ -107,6 +114,20 @@ static void frame_free(adamas_frame *frame) {
     }
     adamas_evidence_drop(frame->evidence);
     adamas_block_free(frame);
+}
+
+/* Раскрутка цепочки кадров сверху вниз - изнутри наружу, то есть LIFO (§3.4).
+ * Тот же порядок, каким идёт `Machine::unwinding` в интерпретаторе. */
+static void unwind_chain(adamas_frame *frame) {
+    while (frame != NULL) {
+        adamas_frame *below = frame->below;
+        if (adamas_frame_mark(frame) == ADAMAS_MARK_CLOSING) {
+            /* Хендлеры под этим scope'ом свои ответы уже дали: подавлены. */
+            frame_close(frame, 1);
+        }
+        frame_free(frame);
+        frame = below;
+    }
 }
 
 static adamas_segment *segment_alloc(adamas_frame *top, adamas_frame *base, size_t depth) {
@@ -247,19 +268,18 @@ adamas_segment *adamas_segment_copy(const adamas_segment *segment) {
 }
 
 void adamas_segment_unwind(adamas_segment *segment) {
-    /* От вершины к основанию - изнутри наружу, то есть LIFO (§3.4). Тот же
-     * порядок, каким идёт `Machine::unwinding` в интерпретаторе. */
-    adamas_frame *frame = segment->top;
-    while (frame != NULL) {
-        adamas_frame *below = frame->below;
-        if (adamas_frame_mark(frame) == ADAMAS_MARK_CLOSING) {
-            /* Хендлеры под этим scope'ом свои ответы уже дали: подавлены. */
-            frame_close(frame, 1);
-        }
-        frame_free(frame);
-        frame = below;
-    }
+    unwind_chain(segment->top);
     adamas_block_free(segment);
+}
+
+adamas_value adamas_kont_abort(adamas_kont *kont) {
+    /* Обрыв и раскрутка - одно и то же действие над разными цепочками: там
+     * вырезанный сегмент, здесь весь стек оборванного кода. Второго правила
+     * заводить не пришлось, и это то, ради чего ручка стека и появилась. */
+    unwind_chain(kont->top);
+    kont->top = NULL;
+    kont->depth = 0;
+    return adamas_unit();
 }
 
 adamas_value adamas_segment_value(adamas_segment *segment) {

@@ -1,0 +1,42 @@
+-- Ссылка не покидает связывание своего региона (§3.6, §3.4).
+--
+-- Аргумент `withRegion` связывает регион сам, а результат `a` связан раньше и
+-- назвать его нечем: решение дырки под `a` живёт вне телескопа с `r`. Утечка
+-- отвергается здесь, а не правилом погашения - метку хендлер снял.
+--
+-- Ближайший проходящий сосед - `eval/region-bound-in-the-argument`: та же
+-- программа, у которой наружу уходит `Nat`. Мутант второй: перенеси связывание
+-- в prenex (`withRegion : ({Alloc r} a) -> a`, запись §3.6) - и отказ пропадёт,
+-- потому что регион станет выбирать вызывающий (§10 вопрос 142).
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Region where
+  Home : Region
+
+data Ref (0 r : Region) (a : Type) where
+  MkRef : Ref r a
+
+effect Alloc (0 r : Region) where
+  fresh : Nat
+  readRef : Ref r Nat -> Nat
+
+withRegion : ((0 r : Region) -> (ω u : Unit) -> {Alloc r} a) -> a
+withRegion k = handle k Home with
+  return v -> v
+  fresh -> resume (Succ (Succ Zero))
+  readRef p -> resume (Succ (Succ (Succ Zero)))
+
+-- Тело аллоцирует и отдаёт ссылку на свой регион наружу.
+allocRef : (0 r : Region) -> (ω u : Unit) -> {Alloc r} (Ref r Nat)
+allocRef r u =
+  let n : Nat = fresh
+  MkRef
+
+escaped : Ref q Nat
+escaped = withRegion allocRef

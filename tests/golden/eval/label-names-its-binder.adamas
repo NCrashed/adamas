@@ -1,0 +1,66 @@
+-- Метка row называет связывание своей же стрелки (§3.4, §4.1).
+--
+-- Row описывает применение, поэтому стоит под связыванием наравне с кодоменом
+-- и вправе назвать аргумент: `(0 r : Region) -> {Alloc r} Nat` пишется, а не
+-- отвергается «связать имя нечем».
+--
+-- Связывание берётся **то, на чьей стрелке метка написана**, и видно это
+-- только на аргументе: `picked Away Home` производит `{Alloc Home}`. Назови
+-- метка соседа, тот же вызов дал бы `{Alloc Away}`, и `home` отвергся бы
+-- непогашенностью.
+--
+-- Значение считается: `fresh` отвечает двойкой, `peek` - единицей, итог три.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data Region where
+  Home : Region
+  Away : Region
+
+infixl 6 +
+(+) : Nat -> Nat -> Nat
+(+) Zero m = m
+(+) (Succ k) m = Succ (k + m)
+
+effect Alloc (0 r : Region) where
+  fresh : Nat
+
+-- Явная форма: два связывания подряд, метка называет второе.
+picked : (0 s : Region) (0 r : Region) -> {Alloc r} Nat
+picked s r = fresh
+
+home : {Alloc Home} Nat
+home = picked Away Home
+
+allocated : Nat
+allocated = handle home with
+  return v -> v
+  fresh -> resume (Succ (Succ Zero))
+
+effect St (0 a : Type) where
+  peek : Nat
+
+-- Implicit-форма того же: связывание написано, а не поднято подъёмом §4.1.
+direct : {0 a : Type} -> {St a} Nat
+direct = peek
+
+-- Аргумент метки решает окружающая: `a := Bool`.
+counted : {St Bool} Nat
+counted = direct
+
+peeked : Nat
+peeked = handle counted with
+  return v -> v
+  peek -> resume (Succ Zero)
+
+main : Nat
+main = allocated + peeked

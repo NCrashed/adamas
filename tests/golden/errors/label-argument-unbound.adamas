@@ -1,0 +1,29 @@
+-- Аргумент метки в аннотации `let`: связать имя нечем (§4.1).
+--
+-- Подъём свободных имён в implicit-параметры делает **объявление**, и дальше
+-- своей сигнатуры он не идёт: `let` собственных параметров не заводит, а `r`
+-- тут не связывает ничто.
+--
+-- Ближайший проходящий сосед - та же метка в сигнатуре: `eval/`
+-- `label-names-its-binder.adamas` пишет `(0 s : Region) (0 r : Region) ->
+-- {Alloc r} Nat` и считается. Разница не в позиции row, а в том, есть ли
+-- связывание с таким именем: у сигнатуры оно либо написано группой, либо
+-- поднято подъёмом, у `let`-аннотации - ни то ни другое.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data Region where
+  Home : Region
+
+effect Alloc (0 r : Region) where
+  fresh : Nat
+
+main : Nat
+main =
+  let c : {Alloc r} Nat = fresh
+  Zero

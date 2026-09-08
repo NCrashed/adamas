@@ -2433,7 +2433,7 @@ impl<'a> Elaborator<'a> {
         // `1`-связывание, которого ни одна ветвь не называет (§10 вопрос 82).
         if let Term::Var(index) = &value {
             if let Some(level) = index.to_level(self.ctx.size()) {
-                return self.discriminated(level, alts, span, position);
+                return self.discriminated(level, &ty, alts, span, position);
             }
         }
         let domain = quote(self.ctx.size(), &ty);
@@ -2441,12 +2441,15 @@ impl<'a> Elaborator<'a> {
         let name: Symbol = Rc::from("case");
         let outer = self.scope.len();
         let saved = self.ctx.clone();
-        self.ctx = self.ctx.bind(CoreName::from(&*name), mult, Rc::clone(&ty));
+        let evaluated = self.ctx.eval(&value);
+        self.ctx = self
+            .ctx
+            .define(CoreName::from(&*name), mult, Rc::clone(&ty), evaluated);
         self.scope.push(Bound {
             visible: false,
-            ..Bound::visible(&name, mult, ty)
+            ..Bound::visible(&name, mult, Rc::clone(&ty))
         });
-        let inner = self.discriminated(Lvl(self.ctx.size() - 1), alts, span, position);
+        let inner = self.discriminated(Lvl(self.ctx.size() - 1), &ty, alts, span, position);
         self.scope.truncate(outer);
         self.ctx = saved;
         Ok(Term::Let(
@@ -2466,10 +2469,16 @@ impl<'a> Elaborator<'a> {
     fn discriminated(
         &mut self,
         level: Lvl,
+        scrutinee: &Rc<Value>,
         alts: &[ast::Alt],
         span: Span,
         position: Position,
     ) -> Result<Term, ElabError> {
+        // Тип разбираемого доезжает до ветвей: поля паттерна берут типы из
+        // телескопа конструктора, инстанцированного аргументами семейства
+        // (§10 вопрос 141). Синоним разворачивается - спайн аргументов
+        // читается по семейству, а не по написанному имени.
+        let scrutinee = whnf(self.signature, scrutinee);
         // Цель заводится **без** разбираемого в спайне: связывание его стоит
         // последним - его только что положил вызывающий, - а мотив перепишет
         // его в своё, оставив индексы прежними. Дырка, зависящая от него,
@@ -2492,7 +2501,7 @@ impl<'a> Elaborator<'a> {
         let mut produced = None;
         for ((alt, pattern), closing) in alts.iter().zip(patterns).zip(&forgotten) {
             let body = self.placed(position, |it| {
-                it.branch(&alt.pattern, &pattern, &alt.body, closing)
+                it.branch(&alt.pattern, &pattern, &alt.body, closing, &scrutinee)
             })?;
             produced = produced.or_else(|| self.produced.take());
             clauses.push(Clause {
@@ -2822,18 +2831,22 @@ impl<'a> Elaborator<'a> {
         compiled: &CorePattern,
         body: &Expr,
         closing: &[(Symbol, Symbol)],
+        scrutinee: &Rc<Value>,
     ) -> Result<Term, ElabError> {
         let mut names = Vec::new();
         variables_of(compiled, &mut names);
         let mut bound = Vec::new();
         let mut level = self.ctx.size();
-        // Тип разбираемого сюда не приходит: ветвь `case` собирается отдельно
-        // от него, и поля берут дырку - решать её будет проверка.
+        // Тип разбираемого приходит из `discriminated` (§10 вопрос 141): поля
+        // берут типы из телескопа конструктора, инстанцированного аргументами
+        // семейства, и вложенный разбор по полю знает, что разбирает. Индексы
+        // семейства телескоп не шагает - их уточнение остаётся за проверкой,
+        // и поля за ними берут дырку, как раньше.
         self.pattern_variables(
             Some(written),
             compiled,
             Mult::Many,
-            None,
+            Some(Rc::clone(scrutinee)),
             body,
             &names,
             &mut bound,

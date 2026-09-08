@@ -72,6 +72,13 @@ pub struct Instances {
     /// подставлять такой модуль неявно значило бы решать за автора, какая из
     /// абстракций ему нужна.
     implementations: HashMap<Symbol, Vec<Symbol>>,
+    /// Эффекты-члены сигнатур модулей (§4.8, §10 вопрос 146).
+    ///
+    /// Пары «короткое имя, поднятое»: на `:>` короткое находит одноимённый
+    /// эффект модуля, а поднятое переименовывается в его метку. Полем записи
+    /// метка не становится (§3.4), поэтому запись о ней живёт здесь, рядом с
+    /// прочим знанием о сигнатурах, а не в типе.
+    effects: HashMap<Symbol, Vec<(Symbol, Symbol)>>,
 }
 
 /// Чем разрешение отвечает на пару «класс, голова».
@@ -143,6 +150,20 @@ impl Instances {
             [only] => Some(only),
             _ => None,
         }
+    }
+
+    /// Запоминает эффект-член сигнатуры модуля (§4.8).
+    pub fn declares_effect(&mut self, signature: &Symbol, short: &Symbol, full: &Symbol) {
+        self.effects
+            .entry(Rc::clone(signature))
+            .or_default()
+            .push((Rc::clone(short), Rc::clone(full)));
+    }
+
+    /// Эффекты-члены сигнатуры: пары «короткое имя, поднятое».
+    #[must_use]
+    pub fn signature_effects(&self, name: &str) -> &[(Symbol, Symbol)] {
+        self.effects.get(name).map_or(&[], Vec::as_slice)
     }
 
     /// Объявлен ли класс с таким именем.

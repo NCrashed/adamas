@@ -19,6 +19,7 @@ use std::rc::Rc;
 
 use adamas_core::alloc;
 use adamas_core::check::{TypeError, check_within, infer, is_type};
+use adamas_core::conv::{convertible, whnf};
 use adamas_core::ctx::Ctx;
 use adamas_core::error::Frame;
 use adamas_core::eval::{eval, quote};
@@ -27,7 +28,7 @@ use adamas_core::meta::{Generalization, Metas, zonk_term};
 use adamas_core::mult::{Mult, MultVar};
 use adamas_core::pattern::{Compiled, PatternError, compile_traced};
 use adamas_core::row::{Label, Row, RowVar, Tail};
-use adamas_core::sig::{Group, Member as SigMember, Signature};
+use adamas_core::sig::{DefinitionKind, Group, Member as SigMember, Signature};
 use adamas_core::source::Span;
 use adamas_core::term::{Args, Binder, Fields, Name as CoreName, Term};
 use adamas_parser::ast::{self, DeclKind, Module, Symbol};
@@ -782,6 +783,14 @@ fn declare_module(
             .beneath(&params, |it| {
                 it.typing(|inner| inner.expr(ascription, Mult::Many))
             })?;
+        // Сигнатура с эффектом-членом инстанцируется меткой модуля (§4.8,
+        // §10 вопрос 146): написанное имя разворачивается до записи, и
+        // поднятая метка сигнатуры переименовывается в одноимённую метку
+        // модуля. Без переименования проверка сравнила бы `{Counting.Tick}`
+        // с `{Counter.Tick}` и отвергла всякий модуль под такой сигнатурой:
+        // конвертируемость меток именная.
+        let written =
+            instantiated_ascription(signature, metas, instances, &ctx, &inner, &written, span)?;
         // Проверка **до** объявления, и это не дубль той, что сделает
         // `declare`. Аннотация написана именем, а у имени есть аргументы
         // уровня - дырки; не решив их сравнением с телом, обобщение примет их
@@ -2708,6 +2717,19 @@ fn declare_module_value(
             .beneath(&params, |it| {
                 it.typing(|it| it.expr(ascription, Mult::Many))
             })?;
+        // Названная граница: сигнатура с эффектом-членом требует блока -
+        // переименовывать её метку (§10 вопрос 146) в теле-выражении не во
+        // что, эффект там не объявляется.
+        if ascription_head(&written)
+            .is_some_and(|head| !instances.signature_effects(head).is_empty())
+        {
+            return Err(ElabError::ModuleMember {
+                name: Rc::clone(&module.name.text),
+                what: "модуле с телом-выражением",
+                why: "сигнатура с эффектом-членом требует блока членов: эффект в теле-выражении не объявляется",
+                span,
+            });
+        }
         check_within(&ctx, metas, &term, &written).map_err(|error| ElabError::Core {
             span,
             error: Box::new(error),
@@ -2881,6 +2903,116 @@ fn sealable(
     })
 }
 
+/// Голова элаборированной аннотации - имя определения, если оно там стоит.
+fn ascription_head(written: &Term) -> Option<&CoreName> {
+    let mut current = written;
+    loop {
+        match current {
+            Term::Const(name, ..) => return Some(name),
+            Term::App(callee, _) => current = callee,
+            _ => return None,
+        }
+    }
+}
+
+/// Называет ли написанный тип метку с таким коротким именем.
+///
+/// Обход тот же, что у [`crate::expr::writes_effects`], и по той же причине:
+/// row живёт в стрелках и группах связываний, глубже в сигнатурах её не пишут.
+fn names_label(written: &ast::Expr, label: &str) -> bool {
+    match &written.kind {
+        ast::ExprKind::Effectful { labels, body, .. } => {
+            labels.iter().any(|it| &*it.name.text == label) || names_label(body, label)
+        }
+        ast::ExprKind::Arrow(left, right) => names_label(left, label) || names_label(right, label),
+        ast::ExprKind::Pi { binders, codomain } => {
+            binders
+                .iter()
+                .filter_map(|it| it.ty.as_ref())
+                .any(|ty| names_label(ty, label))
+                || names_label(codomain, label)
+        }
+        _ => false,
+    }
+}
+
+/// Сигнатура с эффектом-членом, инстанцированная метками модуля (§4.8, §10
+/// вопрос 146).
+///
+/// Написанное имя разворачивается до записи, и каждая поднятая метка
+/// сигнатуры переименовывается в одноимённую метку модуля. Без переименования
+/// проверка сравнила бы `{Counting.Tick}` с `{Counter.Tick}` и отвергла бы
+/// всякий модуль под такой сигнатурой: конвертируемость меток именная.
+/// Сигнатура без эффектов возвращается как написана и не разворачивается -
+/// имя короче записи.
+fn instantiated_ascription(
+    signature: &Signature,
+    metas: &mut Metas,
+    instances: &Instances,
+    ctx: &Ctx<'_>,
+    inner: &Enclosing,
+    written: &Term,
+    span: Span,
+) -> Result<Term, ElabError> {
+    let Some(head) = ascription_head(written) else {
+        return Ok(written.clone());
+    };
+    let effects = instances.signature_effects(head);
+    if effects.is_empty() {
+        return Ok(written.clone());
+    }
+    let mut renames = Vec::with_capacity(effects.len());
+    for (short, full) in effects {
+        let owned_label = qualify(Some(inner), short);
+        let is_effect = signature
+            .lookup(&owned_label)
+            .is_some_and(|it| matches!(it.kind, DefinitionKind::Effect { .. }));
+        if !is_effect {
+            return Err(ElabError::ModuleMember {
+                name: Rc::clone(short),
+                what: "модуле",
+                why: "сигнатура объявляет эффект, и одноимённый эффект обязан быть членом модуля",
+                span,
+            });
+        }
+        // Формеры обязаны совпасть: телескоп метки - её интерфейс, а
+        // представление (операции) сигнатура не называет. Сравниваются типы
+        // формеров; параметры уровня инстанцируются дырками, как во всяком
+        // месте использования.
+        let former = |metas: &mut Metas, name: &str| -> Option<Term> {
+            let definition = signature.lookup(name)?;
+            let levels: Vec<Level> = (0..definition.level_arity)
+                .map(|_| metas.fresh_level())
+                .collect();
+            Some(definition.ty.substitute_levels(&levels))
+        };
+        let wanted = former(metas, full);
+        let found = former(metas, &owned_label);
+        let same = match (wanted, found) {
+            (Some(wanted), Some(found)) => {
+                let empty = Ctx::new(signature);
+                let wanted = empty.eval(&wanted);
+                let found = empty.eval(&found);
+                convertible(signature, metas, 0, &found, &wanted)
+            }
+            _ => false,
+        };
+        if !same {
+            return Err(ElabError::ModuleMember {
+                name: Rc::clone(short),
+                what: "модуле",
+                why: "телескоп метки расходится с объявленным в сигнатуре",
+                span,
+            });
+        }
+        renames.push((Rc::clone(full), owned_label));
+    }
+    // δ написанного имени руками: переименовывать метки в имени негде - они
+    // в записи, которую имя называет.
+    let unfolded = quote(ctx.size(), &whnf(signature, &ctx.eval(written)));
+    Ok(unfolded.rename_labels(&renames))
+}
+
 /// Имя сигнатуры, написанное аннотацией.
 ///
 /// Формы две: короткое имя и квалифицированное - `Outer.BagSig` есть проекция,
@@ -3002,6 +3134,54 @@ fn argument_of<'a>(ty: &'a ast::Expr, sealed: &[&'a Symbol], param: &Symbol) -> 
     }
 }
 
+/// Эффект-член сигнатуры: абстрактная метка, поднятая под её именем (§4.8).
+///
+/// Представление эффекта - его операции, ровно как представление семейства -
+/// конструкторы, и семейство в сигнатуре тоже пишется абстрактным членом, без
+/// них. Ordered scoping проверяется по тексту: метка видна с места объявления,
+/// а поднятое имя видно элаборации членов целиком.
+#[allow(clippy::too_many_arguments)]
+fn declare_signature_effect(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    owned: &Owned,
+    fixities: &Fixities,
+    instances: &mut Instances,
+    inner: &Enclosing,
+    declared: &Symbol,
+    members: &[WrittenField<'_>],
+    effect: &ast::EffectDecl,
+    span: Span,
+) -> Result<(), ElabError> {
+    if let Some(operation) = effect.operations.first() {
+        return Err(ElabError::ModuleMember {
+            name: Rc::clone(&operation.name.text),
+            what: "сигнатуре модуля",
+            why: "операции - представление эффекта, и сигнатура объявляет метку без них",
+            span,
+        });
+    }
+    if let Some(early) = members
+        .iter()
+        .filter_map(|it| it.ty)
+        .find(|ty| names_label(ty, &effect.name.text))
+    {
+        return Err(ElabError::ModuleMember {
+            name: Rc::clone(&effect.name.text),
+            what: "сигнатуре модуля",
+            why: "метка написана выше своего объявления (ordered scoping, §4.8)",
+            span: early.span,
+        });
+    }
+    declare_effect(signature, metas, owned, fixities, Some(inner), effect, span)?;
+    instances.declares_effect(
+        declared,
+        &effect.name.text,
+        &qualify(Some(inner), &effect.name.text),
+    );
+    Ok(())
+}
+
 /// `module type S where …` - тип записи, собранный телескопом.
 #[allow(clippy::too_many_arguments)]
 fn declare_module_type(
@@ -3021,9 +3201,26 @@ fn declare_module_type(
     if let Some(offence) = sealing_offence(module, instances) {
         instances.forbid_sealing(declared, offence);
     }
+    // Эффект-член поднимается под именем сигнатуры, как у модуля (§4.8):
+    // полем записи метка не становится - она не тип (§3.4), - а членам ниже
+    // нужно её короткое имя в row. На `:>` поднятая метка переименуется в
+    // метку модуля.
+    let inner = Enclosing::nested(within, Rc::clone(declared), &[]);
     let mut members = Vec::with_capacity(module.members.len());
     for member in &module.members {
         match &member.kind {
+            DeclKind::Effect(effect) => declare_signature_effect(
+                signature,
+                metas,
+                owned,
+                fixities,
+                instances,
+                &inner,
+                declared,
+                &members,
+                effect,
+                member.span,
+            )?,
             DeclKind::Signature { name, ty, .. } => members.push(WrittenField {
                 name: name.clone(),
                 params: &[],
@@ -3077,7 +3274,11 @@ fn declare_module_type(
     // член: `Local` объемлющего `Outer (Key : Eqv)` есть `{Key : Eqv} -> Type`,
     // а её члены вправе называть `Key`. Вне функтора телескоп пуст, и остаётся
     // ровно прежнее - тип записи без параметров.
-    let mut elaborator = Elaborator::new(signature, metas, owned, fixities).within(within);
+    //
+    // Члены элаборируются под собственным объемлющим: короткое имя
+    // эффекта-члена - лестница §4.8 к поднятой метке. Телескоп при этом тот
+    // же: своих параметров у сигнатуры нет, и `params_of` обоих совпадает.
+    let mut elaborator = Elaborator::new(signature, metas, owned, fixities).within(Some(&inner));
     let params = elaborator.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
     let fields = elaborator.beneath(&params, |it| {
         it.typing(|it| it.module_members(&members, rowed.as_ref()))

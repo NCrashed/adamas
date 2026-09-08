@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 use crate::level::Level;
 use crate::mult::{Mult, MultVar};
-use crate::row::{Row, RowVar, Tail};
+use crate::row::{Label, Row, RowVar, Tail};
 use crate::visibility::Visibility;
 
 /// Индекс де Брёйна: сколько связываний отсчитать наружу.
@@ -292,6 +292,40 @@ fn instantiate_row(row: &Row<Term>, arguments: &[Row<Term>]) -> Row<Term> {
             .get(index as usize)
             .map_or(mapped.clone(), |tail| mapped.substituted(tail)),
         _ => mapped,
+    }
+}
+
+/// Row с переименованными головами меток; аргументы меток обходятся тоже.
+fn renamed_row(row: &Row<Term>, renames: &[(Name, Name)]) -> Row<Term> {
+    let mapped = row.map(|argument| argument.rename_labels(renames));
+    Row::closing(
+        mapped.labels().iter().map(|label| Label {
+            name: renames
+                .iter()
+                .find(|(from, _)| *from == label.name)
+                .map_or_else(|| Rc::clone(&label.name), |(_, to)| Rc::clone(to)),
+            arguments: label.arguments.clone(),
+        }),
+        mapped.tail(),
+    )
+}
+
+/// Поля с переименованными головами меток.
+fn renamed_fields(fields: &Fields, renames: &[(Name, Name)]) -> Fields {
+    Fields {
+        fields: fields
+            .iter()
+            .map(|field| Field {
+                name: Rc::clone(&field.name),
+                mult: field.mult,
+                shape: field.shape,
+                ty: Rc::new(field.ty.rename_labels(renames)),
+            })
+            .collect(),
+        tail: fields
+            .tail
+            .as_ref()
+            .map(|tail| Rc::new(tail.rename_labels(renames))),
     }
 }
 
@@ -609,6 +643,79 @@ impl Term {
     #[must_use]
     pub fn constant(name: &str) -> Self {
         Self::Const(name.into(), Rc::from([]), Args::none())
+    }
+
+    /// Переименовывает головы меток по всему терму.
+    ///
+    /// Так сигнатура модуля с эффектом-членом инстанцируется меткой самого
+    /// модуля на `:>` (§4.8): row `{Counting.Tick}` в типе поля становится
+    /// `{Counter.Tick}`. Переименование пересобирает каноническую форму row -
+    /// группы стоят по имени, и новое имя меняет место группы.
+    #[must_use]
+    pub fn rename_labels(&self, renames: &[(Name, Name)]) -> Self {
+        if renames.is_empty() {
+            return self.clone();
+        }
+        let recur = |term: &Rc<Self>| Rc::new(term.rename_labels(renames));
+        match self {
+            Self::Var(_)
+            | Self::Meta(_)
+            | Self::EffectKind
+            | Self::Universe(_)
+            | Self::RowKind(_) => self.clone(),
+            Self::Lam(mult, name, body) => Self::Lam(*mult, Rc::clone(name), recur(body)),
+            Self::App(callee, argument) => Self::App(recur(callee), recur(argument)),
+            Self::Pi(binder, name, domain, row, codomain) => Self::Pi(
+                *binder,
+                Rc::clone(name),
+                recur(domain),
+                renamed_row(row, renames),
+                recur(codomain),
+            ),
+            Self::Let(mult, name, ty, value, body) => {
+                Self::Let(*mult, Rc::clone(name), recur(ty), recur(value), recur(body))
+            }
+            Self::Const(name, levels, args) => Self::Const(
+                Rc::clone(name),
+                Rc::clone(levels),
+                Args::new(
+                    args.row_args().iter().map(|row| renamed_row(row, renames)),
+                    args.mult_args().iter().copied(),
+                ),
+            ),
+            Self::Record(fields) => Self::Record(renamed_fields(fields, renames)),
+            Self::Row(fields) => Self::Row(renamed_fields(fields, renames)),
+            Self::Object(fields) => Self::Object(
+                fields
+                    .iter()
+                    .map(|(name, value)| (Rc::clone(name), recur(value)))
+                    .collect(),
+            ),
+            Self::With(base, fields) => Self::With(
+                recur(base),
+                fields
+                    .iter()
+                    .map(|(name, value)| (Rc::clone(name), recur(value)))
+                    .collect(),
+            ),
+            Self::Project(record, name) => Self::Project(recur(record), Rc::clone(name)),
+            Self::Case(case) => Self::Case(Rc::new(Case {
+                data: Rc::clone(&case.data),
+                levels: Rc::clone(&case.levels),
+                params: case.params,
+                consumed: case.consumed,
+                scrutinee: recur(&case.scrutinee),
+                motive: recur(&case.motive),
+                branches: case
+                    .branches
+                    .iter()
+                    .map(|branch| Branch {
+                        constructor: Rc::clone(&branch.constructor),
+                        body: Rc::new(branch.body.rename_labels(renames)),
+                    })
+                    .collect(),
+            })),
+        }
     }
 
     /// Подставляет аргументы вместо параметров row по всему терму.

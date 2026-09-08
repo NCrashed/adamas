@@ -1,0 +1,45 @@
+-- Параметризованная метка в сигнатуре: миниатюра `withRegion` (§3.6, §4.8).
+--
+-- То, ради чего заведён §10 вопрос 146: сигнатура модуля региона обязана
+-- назвать собственную метку в типе `withRegion`, иначе экспортируется функция,
+-- а её эффект - нет. Здесь оба: `effect Alloc (0 r : Reg)` объявлен членом
+-- сигнатуры с телескопом, и `withRegion` связывает регион в домене - форма
+-- решения вопроса 142.
+--
+-- Пользователь строит вычисление снаружи: метку он называет путём
+-- (`{Region.Alloc r}`), операцию зовёт тоже путём - вызов операции
+-- запечатывание не закрывает, закрывает оно **погашение**: своё `handle` над
+-- `Region.Alloc` снаружи не написать, гасит только `Region.withRegion`.
+-- Обе ноги гарантии §3.6 стоят: связывание в домене плюс единственность
+-- погашающего.
+--
+-- Ответ хендлера - единица.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data Reg where
+  MkReg : Reg
+
+module type Arena where
+  effect Alloc (0 r : Reg)
+  withRegion : {a : Type} -> ((0 r : Reg) -> (ω u : Unit) -> {Alloc r} a) -> a
+
+module Region :> Arena where
+  effect Alloc (0 r : Reg) where
+    bump : Nat
+
+  withRegion : {a : Type} -> ((0 r : Reg) -> (ω u : Unit) -> {Alloc r} a) -> a
+  withRegion body = handle body MkReg with
+    return v -> v
+    bump -> resume (Succ Zero)
+
+inside : (0 r : Reg) -> (ω u : Unit) -> {Region.Alloc r} Nat
+inside r u = Region.bump
+
+main : Nat
+main = Region.withRegion inside

@@ -1,0 +1,55 @@
+-- Эффект-член сигнатуры модуля (§4.8, §3.4, §10 вопрос 146).
+--
+-- Сигнатура объявляет метку абстрактным членом - `effect Tick`, без операций:
+-- операции суть представление эффекта, ровно как конструкторы у семейства, а
+-- семейство в сигнатуре тоже стоит абстрактным `type`. Члены ниже называют
+-- метку по короткому имени в row - `pending : {Tick} Nat`, - и это то, чего
+-- обходу через абстрактный тип (`type Counted`) не хватало: row читается по
+-- написанному, а написано теперь имя метки.
+--
+-- На `:>` сигнатура инстанцируется меткой модуля: `{Counting.Tick}` в типах
+-- полей переименовывается в `{Counter.Tick}`, и проверка сравнивает то, что
+-- модуль объявил на самом деле. Метки при этом остаются именными: два модуля
+-- под одной сигнатурой не смешиваются - `First.run Second.pending` отвергается
+-- непогашенной `{Second.Tick}`, и это проверено мутантом.
+--
+-- Запечатывание работает как в `eval/sealed-effect.adamas`: `pending` отдаётся
+-- наружу вместе со своей меткой, а снять её умеют только `run` и `runZero`.
+-- Значение - `[3, 0]`, по ответу каждого.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+module type Counting where
+  effect Tick
+  pending : {Tick} Nat
+  run : ({Tick} Nat) -> Nat
+  runZero : ({Tick} Nat) -> Nat
+
+module Counter :> Counting where
+  effect Tick where
+    tick : Nat
+
+  pending : {Tick} Nat
+  pending = tick
+
+  run : ({Tick} Nat) -> Nat
+  run c = handle c with
+    return v -> v
+    tick -> resume 3
+
+  runZero : ({Tick} Nat) -> Nat
+  runZero c = handle c with
+    return v -> v
+    tick -> resume 0
+
+main : List Nat
+main = [Counter.run Counter.pending, Counter.runZero Counter.pending]

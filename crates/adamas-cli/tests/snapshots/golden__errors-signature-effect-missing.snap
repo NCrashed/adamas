@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: signature-effect-missing.adamas:23:1: `Tick` в модуле не объявляется: сигнатура объявляет эффект, и одноимённый эффект обязан быть членом модуля
+  module Counter :> Counting where
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: signature-effect-ordered.adamas:18:13: `Tick` в сигнатуре модуля не объявляется: метка написана выше своего объявления (ordered scoping, §4.8)
+    pending : {Tick} Nat
+              ^^^^^^^^^^

@@ -192,6 +192,14 @@ pub struct Definition {
     /// правила владения (§3.3) - поверхностные, а ответ им нужен от ядра.
     /// Сверяет их с владеемым типом элаборация, ядро только считает.
     pub carriers: Rc<[Mult]>,
+    /// Чем определение аллоцирует в куче Perceus ([`crate::alloc`]). `None` -
+    /// ничем, и это вердикт для `@noalloc` (§5.1).
+    ///
+    /// Не булево, потому что диагностика §5.1 обязана назвать источник: «`f`
+    /// аллоцирует» без имени конструктора или вызванного не говорит, что
+    /// чинить. Считается на границе объявления, где дырки ещё живы, и потому
+    /// хранится, а не пересчитывается по требованию.
+    pub allocates: Option<crate::alloc::Source>,
 }
 
 impl Definition {
@@ -662,6 +670,25 @@ impl Signature {
         }
     }
 
+    /// Объявляет `@noalloc` у постулата (§5.1).
+    ///
+    /// Внутри пакета вердикт выводится по графу вызовов, но через границу
+    /// **объявляется**: тела там нет, и вывести его не из чего. Постулат и есть
+    /// эта граница, поэтому написанный на нём атрибут снимает ответ «аллоцирует
+    /// неизвестно чем», который ядро поставило по отсутствию тела. Проверить
+    /// обещание нечем - ровно как у `@total`, который постулату верит по той же
+    /// причине: разворачивать нечего.
+    ///
+    /// Определение **с телом** не трогается: там вердикт посчитан, и заменять
+    /// его обещанием значило бы принимать аллоцирующее тело по одному атрибуту.
+    pub fn promise_noalloc(&mut self, name: &str) {
+        if let Some(definition) = self.definitions.get_mut(name) {
+            if definition.body.is_none() {
+                definition.allocates = None;
+            }
+        }
+    }
+
     /// Сколько определений.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -908,6 +935,9 @@ impl Signature {
         // спайном метода-проекции, восстанавливает ограниченная головная
         // редукция в [`crate::total`] (§10 вопрос 134).
         self.settle_totality(metas, group);
+        // Вердикт `@noalloc` - по тем же зонканным телам и здесь же, пока дырки
+        // живы: после границы объявления они освобождаются, и зонканье падает.
+        self.settle_allocation(metas, group);
 
         for member in members {
             self.seal_member(metas, member)?;
@@ -992,6 +1022,9 @@ impl Signature {
             body: None,
             kind: DefinitionKind::Regular,
             total: true,
+            // Вердикт `@noalloc` считает фаза C по телу; до неё член входит не
+            // аллоцирующим, и понижает его неподвижная точка.
+            allocates: None,
         };
         check_declaration(self, metas, name, &draft)?;
 
@@ -1181,6 +1214,10 @@ impl Signature {
             // Тела у операции нет и не будет: развернуть её нечем до тех пор,
             // пока хендлер не подставит evidence. Расходиться, значит, нечему.
             total: true,
+            // Аллоцирует ли операция, решает форма ветки хендлера: не
+            // хвостово-резумптивная снимает продолжение в кучу (§5.1). Анализа
+            // хвостовой резумптивности (§3.4) нет, ответ консервативный.
+            allocates: Some(crate::alloc::Source::Operation(Rc::clone(&operation.name))),
         };
         check_declaration(self, metas, &operation.name, &draft)?;
 
@@ -1407,6 +1444,11 @@ impl Signature {
                 data: Rc::clone(data),
             },
             total: true,
+            // Конструктор с рантайм-полем строит значение в куче - это и есть
+            // аллокация (§5.1), а разрешает её только гарантированный reuse,
+            // которого нет. Конструктор без таких полей объектом не становится
+            // вовсе: его номер живёт в самом указателе (ABI, лог 2026-09-08).
+            allocates: crate::alloc::constructed(&constructor.name, &constructor.ty),
         };
         check_declaration(self, metas, &constructor.name, &draft)?;
         // Семейство с индексом-универсумом обобщается позже, вместе со своими
@@ -1657,6 +1699,41 @@ impl Signature {
         }
     }
 
+    /// Вердикт `@noalloc` по совместному графу вызовов группы (§5.1).
+    ///
+    /// Неподвижная точка сверху, как у [`Signature::settle_totality`]: члены
+    /// входят не аллоцирующими, и проход повторяется, пока кто-то понижается.
+    /// Старт оптимистичный потому, что цикл не аллоцирующих функций не
+    /// аллоцирует: рекурсия сама по себе кучи не трогает, о стеке атрибут не
+    /// говорит вовсе.
+    ///
+    /// Понизившийся обратно не поднимается, поэтому проходов не больше, чем
+    /// членов.
+    fn settle_allocation(&mut self, metas: &Metas, group: &Group) {
+        loop {
+            let mut demoted = false;
+            for name in group_names(group) {
+                let Some(definition) = self.definitions.get(name) else {
+                    continue;
+                };
+                if definition.allocates.is_some() {
+                    continue;
+                }
+                let definition = definition.clone();
+                let Some(found) = crate::alloc::source(self, metas, name, &definition) else {
+                    continue;
+                };
+                if let Some(stored) = self.definitions.get_mut(name) {
+                    stored.allocates = Some(found);
+                }
+                demoted = true;
+            }
+            if !demoted {
+                return;
+            }
+        }
+    }
+
     // --- обёртки над группой из одного члена ------------------------------
 
     /// Определение с объявленной арностью параметров уровня.
@@ -1708,6 +1785,8 @@ impl Signature {
                 total: true,
                 opaque: false,
                 carriers: Rc::from([] as [Mult; 0]),
+                // Кладётся тип-формер, а не значение: аллоцировать нечему.
+                allocates: None,
             },
         );
     }

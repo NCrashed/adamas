@@ -9,6 +9,7 @@ members = [
     "crates/adamas-lsp",
     # Учебный крейт Фазы 0 (§9). Удаляется вместе с этой строкой.
     "crates/adamas-warmup-stlc",
+    "crates/adamas-runtime",
 ]
 
 [workspace.package]

@@ -1,0 +1,76 @@
+-- Правило исполнения в двух позициях, куда оно не доходило (§3.4, §10
+-- вопрос 131). Обе формы прежде обходились написанным `ask MkUnit`.
+--
+-- Первая - тело лямбды под `let` с написанным типом: ровно та форма, которую
+-- советует сообщение `handle` над применением. Ожидаемый результат шагает по
+-- неснятой аннотации вместе со связываниями, и телу достаётся остаток.
+--
+-- Вторая - хвост блока, где вставлен деструктор. Правило стоит на хвосте до
+-- обёртки `#closing`, поэтому эффекты хвоста работают внутри scope: ветка
+-- `ask` отмечается пятёркой раньше девятки деструктора - `[1, 5, 9]`, а не
+-- `[1, 9, 5]`, который дало бы исполнение снаружи обёртки.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+effect Ask where
+  ask : Nat
+
+-- Половина 1: тело лямбды под `let` с написанным типом - `ask` исполняется
+-- правилом; хвост `c` исполняет то же правило блока.
+suspended : {Ask} Nat
+suspended =
+  let c : {Ask} Nat = \u -> ask
+  c
+
+first : Nat
+first = handle suspended with
+  return v -> v
+  ask -> resume (Succ Zero)
+
+-- Половина 2: хвост блока со вставленным деструктором.
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {Log} Bool
+  closeFile h =
+    note 9
+    True
+
+scoped : {Log, Ask} Nat
+scoped =
+  let h : File = Open
+  note 1
+  ask
+
+-- Аргументы вычисляются слева направо: пятёрка ветки `ask` встаёт до
+-- девятки деструктора, который отрабатывает внутри `resume`.
+keep : Unit -> (1 v : Nat) -> Nat
+keep u v = v
+
+answered : {Log} Nat
+answered = handle scoped with
+  return v -> v
+  ask -> keep (note 5) (resume (Succ Zero))
+
+collected : List Nat
+collected = handle answered with
+  return v -> Cons v Nil
+  note n -> Cons n (resume MkUnit)
+
+main : List Nat
+main = Cons first collected

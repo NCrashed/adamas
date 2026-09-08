@@ -1980,8 +1980,8 @@ fn infer_app(
             ctx,
             metas,
             ErrorKind::Undischarged {
-                wanted: quote_row(ctx.size(), row),
-                ambient: quote_row(ctx.size(), &ambient),
+                wanted: quote_row(metas, ctx.size(), row),
+                ambient: quote_row(metas, ctx.size(), &ambient),
             },
         ));
     }
@@ -2085,8 +2085,18 @@ fn discharges(
 }
 
 /// Row обратным чтением - для сообщения.
-fn quote_row(size: u32, row: &Row<Rc<Value>>) -> Row<Term> {
-    row.map(|argument| crate::eval::quote(size, argument))
+///
+/// Аргумент метки разворачивается по решённым дыркам, как и всякий терм в
+/// ошибке (см. [`read_back`]). Разворот идёт `force`'ом, а не зонканьем: тот
+/// переигрывает спайн, а зонканье подставляет решение как есть, и `{Alloc r}`
+/// печаталось бы `{Alloc (\(0 m2) -> \(0 m1) -> \(0 m0) -> m2) r s u}`. Без
+/// разворота вовсе выходит `{Alloc (?23) r s u}` - «регион не выведен» там, где
+/// выведен, а разошлись два разных региона (§3.6).
+fn quote_row(metas: &Metas, size: u32, row: &Row<Rc<Value>>) -> Row<Term> {
+    row.map(|argument| {
+        let argument = crate::solve::force(metas, argument).unwrap_or_else(|| Rc::clone(argument));
+        crate::eval::quote(size, &argument)
+    })
 }
 
 /// Стал ли ожидаемый тип записью - после разворота головы и решённых дырок.

@@ -1,0 +1,58 @@
+-- Своё погашение региона снаружи не пишется (§3.6, §4.8).
+--
+-- Вторая нога гарантии неутечки (§10 вопрос 142, вариант (г)): `withRegion`
+-- держит её, только пока он **единственный** погашающий `Alloc`. Держится это
+-- обычной абстракцией §4.8 - представление эффекта есть его операции, и `:>`
+-- скрывает именно их (§10 вопросы 145, 146).
+--
+-- Скрыто при этом ровно погашение, а не употребление: метка `Arena.Alloc`
+-- снаружи пишется в row, операция снаружи зовётся - `program` делает и то, и
+-- другое, - а ветка хендлера по операции не пишется. Отказ поэтому приходится
+-- на ветку, а не на то, что гасить было нечего.
+--
+-- Ближайший проходящий сосед отличается одним знаком: `module Arena : Regions`
+-- вместо `:>`. При прозрачной аннотации операции видны, тот же `handle`
+-- проходит и считает `Zero` - то есть второй погашающий появляется целиком, и
+-- регион гасит тот, кто его не заводил. Мутант отсюда и читается. Второй сосед
+-- - `eval/region-allocates-and-reads`: то же вычисление, погашенное
+-- `Arena.withRegion`.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data Region where
+  Home : Region
+
+data Ref (0 r : Region) (a : Type) where
+  MkRef : Ref r a
+
+module type Regions where
+  effect Alloc (0 r : Region)
+  withRegion : {a : Type} -> ((0 r : Region) -> (ω u : Unit) -> {Alloc r} a) -> a
+
+module Arena :> Regions where
+  effect Alloc (0 r : Region) where
+    allocIn : Nat -> Ref r Nat
+    readRef : Ref r Nat -> Nat
+
+  withRegion : {a : Type} -> ((0 r : Region) -> (ω u : Unit) -> {Alloc r} a) -> a
+  withRegion body = handle body Home with
+    return v -> v
+    allocIn n -> resume MkRef
+    readRef p -> resume (Succ (Succ (Succ Zero)))
+
+program : (0 r : Region) -> (ω u : Unit) -> {Arena.Alloc r} Nat
+program r u =
+  let p : Ref r Nat = Arena.allocIn (Succ Zero)
+  Arena.readRef p
+
+-- Погашение мимо `withRegion`: регион выбирает тот, кто его не заводил.
+stolen : Nat
+stolen = handle program Home with
+  return v -> v
+  Arena.allocIn n -> resume MkRef
+  Arena.readRef p -> resume Zero

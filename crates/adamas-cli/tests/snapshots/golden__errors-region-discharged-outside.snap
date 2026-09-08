@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: region-discharged-outside.adamas:57:3: `Arena.allocIn` не видна: `Arena.Alloc` объявлен в запечатанном модуле, и гасит его только он сам
+    Arena.allocIn n -> resume MkRef
+    ^^^^^^^^^^^^^

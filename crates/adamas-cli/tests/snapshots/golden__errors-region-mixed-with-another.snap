@@ -1,0 +1,13 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: region-mixed-with-another.adamas:39:3: эффекты `{Alloc r | e0}` не погашены: вокруг разрешено `{Alloc s | e0}`
+    readRef p
+    ^^^^^^^^^
+  в контексте:
+    (0 r : Region)
+    (0 s : Region)
+    (ω u : Unit)
+    (ω p : Ref{0} r Nat)
+  путь: тело `crossed` -> тело лямбды -> тело лямбды -> тело лямбды -> тело `let`

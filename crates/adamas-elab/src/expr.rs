@@ -3503,6 +3503,36 @@ impl<'a> Elaborator<'a> {
             // Ожидаемый тип аргумента - домен того связывания, к которому он
             // приписывается; исполнение по нему и решается (§3.4).
             let expected = ty.as_deref().and_then(domain_of);
+            // Обратное направление того же правила (§10 вопрос 121): против
+            // типа вычисления написанное **применение** приостанавливается.
+            // Row у `worker : Nat -> {Async} Unit` стоит на стрелке, поэтому
+            // `worker 5` производит на месте и вычислением не является -
+            // передать его в `spawn` было нечем, кроме замыкания руками.
+            // Обёртка та же, какой `mask` приостанавливает свой аргумент, и
+            // решение то же - по голове, без элаборации: применение, чей
+            // остаток типа сам ждёт единицу, уже приостановлено и идёт как
+            // есть. Цепочка операторов - то же применение (§4.4).
+            let suspending = matches!(argument.kind, ExprKind::App(..) | ExprKind::Chain(_))
+                && expected
+                    .as_ref()
+                    .is_some_and(|domain| self.computation(domain))
+                && !self.suspended_by_head(argument);
+            let wrapped;
+            let argument = if suspending {
+                wrapped = Expr {
+                    kind: ExprKind::Lam {
+                        params: vec![bind_as(ast::Name {
+                            text: Rc::from("_"),
+                            span: argument.span,
+                        })],
+                        body: Box::new(argument.clone()),
+                    },
+                    span: argument.span,
+                };
+                &wrapped
+            } else {
+                argument
+            };
             let argument =
                 self.aside(|it| it.placed(inside, |it| it.expr(argument, Mult::Many)))?;
             let argument = self.executed(argument, expected.as_ref());
@@ -5221,11 +5251,14 @@ impl<'a> Elaborator<'a> {
         };
 
         // Оба вычисления приостановлены, поэтому деструктор стоит под одним
-        // связыванием - триггером - и индекс его аргумента на единицу глубже.
+        // связыванием - триггером - и весь вызов сдвигается на единицу глубже.
+        // Сдвиг, а не `index + 1`: вставка инстанцирует имплиситы деструктора
+        // дырками, дырка применена к контексту, и её аргументы под добавленным
+        // связыванием обязаны сдвинуться так же, как аргумент-ресурс.
         let Some(closing) = self.closing_eliminator() else {
             // Единицы в программе нет, значит нет и эффектов: раскручивать
             // нечего, и прежняя форма считает то же самое.
-            let (call, result) = self.destructor(drop, index.saturating_add(1));
+            let (call, result) = self.destructor(drop, index);
             return Ok(Term::Let(
                 Mult::One,
                 CoreName::from("held"),
@@ -5235,18 +5268,18 @@ impl<'a> Elaborator<'a> {
                     Mult::One,
                     CoreName::from("_"),
                     Rc::new(result),
-                    Rc::new(call),
+                    Rc::new(adamas_core::pattern::shift_free(&call, 1)),
                     Rc::new(Term::var(1)),
                 )),
             ));
         };
-        let (call, result) = self.destructor(drop, index.saturating_add(1));
+        let (call, result) = self.destructor(drop, index);
         let suspend = |term: Term| Term::Lam(Mult::Many, CoreName::from("_"), Rc::new(term));
         Ok(closing.apply([
             quote(self.ctx.size(), &held),
             result,
             suspend(adamas_core::pattern::shift_free(&value, 1)),
-            suspend(call),
+            suspend(adamas_core::pattern::shift_free(&call, 1)),
         ]))
     }
 
@@ -5308,12 +5341,20 @@ impl<'a> Elaborator<'a> {
             .ty
             .substitute_levels(&levels)
             .substitute_rows(&rows);
-        let Term::Pi(_, _, _, _, result) = &substituted else {
+        // Ведущие имплиситы - параметры семейства ресурса (`Task a`): вставка
+        // инстанцирует их дырками, как всякое другое употребление имени, и
+        // решает их проверка против типа закрываемого связывания.
+        let call = Term::Const(CoreName::from(&**drop), levels, Args::rows(rows));
+        let (call, ty) = self.inserted(call, eval(&Env::default(), &substituted));
+        let Value::Pi(_, _, _, _, codomain) = &*ty else {
             unreachable!("`{drop}` проверен на форму при объявлении")
         };
-        let call = Term::Const(CoreName::from(&**drop), levels, Args::rows(rows))
-            .apply([Term::var(index)]);
-        (call, (**result).clone())
+        // Результат от ресурса не зависит - это проверено при объявлении, -
+        // поэтому связывание кодомена закрывается дыркой, а не переменной:
+        // `Lvl(ctx.size())` адресовал бы связывание, которого нет.
+        let unknown = self.hole();
+        let result = quote(self.ctx.size(), &codomain.clone().apply(unknown));
+        (call.apply([Term::var(index)]), result)
     }
 
     /// Цепочка операторов.

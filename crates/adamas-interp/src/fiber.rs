@@ -33,7 +33,6 @@ use std::rc::Rc;
 use adamas_core::level::Level;
 use adamas_core::mult::Mult;
 use adamas_core::row::Row;
-use adamas_core::sig::DefinitionKind;
 use adamas_core::term::{Mults, Name, Term};
 use adamas_core::value::{Elim, Head, Value};
 
@@ -57,6 +56,10 @@ pub(crate) const AWAIT: &str = "await";
 /// Приём тот же, что у резумпции: написать его автор не может, а `await` и
 /// печать читают из него номер. Стоит оно **аргументом объявленного
 /// конструктора**, поэтому `drop (MkTask n)` разбирается как обычно.
+///
+/// Имя несёт и питомник: номера файберов считаются на питомник, и без него
+/// отмена, встретившая задачу под чужим питомником, снимала бы одноимённый
+/// файбер не того круга.
 const FIBER: &str = "#fiber.";
 
 /// Приостановленный файбер.
@@ -137,12 +140,12 @@ impl Machine<'_> {
         if &**name == SUSPEND {
             return self.parking(id, link, kont).map(Some);
         }
-        // Ведущие аргументы операции - параметры метки, свой идёт за ними.
-        let params = match self.signature().lookup(effect).map(|it| &it.kind) {
-            Some(DefinitionKind::Effect { params, .. }) => *params as usize,
-            _ => return Ok(None),
-        };
-        let Some(own) = arguments.get(params) else {
+        // Свой аргумент операции - **последний**: row стоит на последней
+        // стрелке, и операция производит, получив его. Перед ним идут
+        // параметры метки и стёртые имплиситы - у `spawn : ({Async} a) ->
+        // Task a` тип `a` вставлен связыванием перед телом, и счёт по одним
+        // параметрам метки отдавал машине маркер стёртого вместо вычисления.
+        let Some(own) = arguments.last() else {
             return Ok(None);
         };
         if &**name == AWAIT {
@@ -150,6 +153,39 @@ impl Machine<'_> {
         }
         let task = &**name == TASK;
         self.spawning(id, Rc::clone(own), task, name).map(Some)
+    }
+
+    /// Отмена: разбор значения задачи потребил её мимо `await` (§5.2).
+    ///
+    /// Единственный способ потребить задачу, кроме ожидания, - разобрать её
+    /// значение, и так написан всякий деструктор; отмена поэтому стоит на
+    /// разборе, а не на имени деструктора, которого сигнатура машины не знает.
+    /// Явный `case` автора - то же потребление и та же отмена.
+    ///
+    /// Файбер снимается с питомника: дожидаться его больше не нужно, а ответ
+    /// договорившего никому не достанется и снимается с готовых. Уступивший
+    /// отдаёт свой сегмент - раскрутка сегмента запускает деструкторы,
+    /// набранные телом задачи, а само тело не досчитывается: задача оборвана
+    /// в suspend-точке, как §5.2 и обещает. `Fresh` отбрасывается молча: тело
+    /// не начиналось, и закрывать в нём нечего. `None` - файбер не найден:
+    /// договорил либо бежит сам, и снимать со стека нечего.
+    pub(crate) fn cancelled(&self, home: usize, fiber: usize) -> Option<Segment> {
+        let mut table = self.nurseries.borrow_mut();
+        let nursery = table.get_mut(home)?;
+        nursery.done.retain(|(it, _)| *it != fiber);
+        let removed = if let Some(at) = nursery.queue.iter().position(|it| it.id == fiber) {
+            nursery.queue.remove(at)
+        } else {
+            nursery
+                .blocked
+                .iter()
+                .position(|(_, it)| it.id == fiber)
+                .map(|at| nursery.blocked.remove(at).1)
+        };
+        match removed?.state {
+            Suspended::Parked(segment, _) => Some(segment),
+            Suspended::Fresh(_) => None,
+        }
     }
 
     /// Запускает питомник: корневой файбер под свежим кадром.
@@ -229,7 +265,12 @@ impl Machine<'_> {
         task: &Rc<Value>,
         kont: &mut Kont,
     ) -> Result<Step, RunError> {
-        let awaited = fiber_of(task).ok_or(RunError::NoFiber)?;
+        let (home, awaited) = fiber_named(task).ok_or(RunError::NoFiber)?;
+        // Задача чужого питомника: её очередь и список ждущих не здесь, и
+        // ждать её отсюда нечем.
+        if home != id {
+            return Err(RunError::NoFiber);
+        }
         if let Some(value) = self.nurseries.borrow()[id]
             .done
             .iter()
@@ -286,7 +327,7 @@ impl Machine<'_> {
         if !task {
             return Ok(Step::Return(self.unit()?));
         }
-        Ok(Step::Return(self.handle_value(operation, fiber)?))
+        Ok(Step::Return(self.handle_value(operation, id, fiber)?))
     }
 
     /// Значение задачи: конструктор её типа при невыразимом имени файбера.
@@ -295,7 +336,12 @@ impl Machine<'_> {
     /// имени: `spawn : … -> Task` называет его сам. Требований к нему два, и
     /// оба проверяются здесь, а не молча предполагаются: один конструктор и
     /// одно поле под номер.
-    fn handle_value(&self, operation: &Name, fiber: usize) -> Result<Rc<Value>, RunError> {
+    fn handle_value(
+        &self,
+        operation: &Name,
+        home: usize,
+        fiber: usize,
+    ) -> Result<Rc<Value>, RunError> {
         let unsuitable = || RunError::TaskShape {
             operation: operation.to_string(),
         };
@@ -303,24 +349,19 @@ impl Machine<'_> {
         let Some(ty) = result_head(&definition.ty) else {
             return Err(unsuitable());
         };
-        // Параметров у семейства быть не должно, и это третье требование, а не
-        // придирка: значение собирается спайном из одного применения, а
-        // стёртые параметры в спайне обязаны стоять маркерами - как их ставит
-        // обычное применение конструктора. Пока их не спрашивали, `data Task
-        // (a : Type)` проходило, поле не связывалось, и всякий разбор над
-        // задачей выпускал наружу лямбду вместо значения (ревью 2026-09-07).
-        //
-        // §5.2 пишет `Task eff a`, то есть параметризованную задачу; когда она
-        // понадобится, дописывать надо **маркеры в спайн**, а не снимать этот
-        // отказ.
-        if self
+        // Параметры семейства встают в спайн **маркерами стёртого** - ровно
+        // так их ставит обычное применение конструктора, - а поле под номер
+        // идёт за ними. `Task a` из §5.2 собирается этим же путём. Пока
+        // маркеров не было, `data Task (a : Type)` проходило, поле не
+        // связывалось, и всякий разбор над задачей выпускал наружу лямбду
+        // вместо значения (ревью 2026-09-07).
+        let Some((params, _)) = self
             .signature()
             .lookup(&ty)
             .and_then(adamas_core::sig::Definition::data_shape)
-            .is_none_or(|(params, _)| params != 0)
-        {
+        else {
             return Err(unsuitable());
-        }
+        };
         let Some([only]) = self.signature().constructors(&ty) else {
             return Err(unsuitable());
         };
@@ -329,11 +370,15 @@ impl Machine<'_> {
             return Err(unsuitable());
         }
         let marker = Value::constant(
-            Rc::from(format!("{FIBER}{fiber}")),
+            Rc::from(format!("{FIBER}{home}.{fiber}")),
             &[],
             Rc::from([] as [Row<Rc<Value>>; 0]),
             Mults::none(),
         );
+        let spine = (0..params)
+            .map(|_| Elim::App(Rc::new(Value::Erased)))
+            .chain(std::iter::once(Elim::App(marker)))
+            .collect();
         Ok(Rc::new(Value::Neutral(
             Head::Global(
                 Rc::clone(only),
@@ -341,7 +386,7 @@ impl Machine<'_> {
                 Rc::from([] as [Row<Rc<Value>>; 0]),
                 Mults::none(),
             ),
-            vec![Elim::App(marker)],
+            spine,
         )))
     }
 
@@ -426,11 +471,11 @@ impl Machine<'_> {
     }
 }
 
-/// Номер файбера из значения задачи. `None` - значение собрано не питомником.
+/// Питомник и номер файбера из значения задачи. `None` - собрано не питомником.
 ///
 /// Читается из **аргумента** конструктора: там стоит невыразимое имя, которое
 /// автор написать не может, а разбор `drop (MkTask n)` связывает как обычно.
-fn fiber_of(task: &Rc<Value>) -> Option<usize> {
+pub(crate) fn fiber_named(task: &Rc<Value>) -> Option<(usize, usize)> {
     let Value::Neutral(_, spine) = &**task else {
         return None;
     };
@@ -440,7 +485,8 @@ fn fiber_of(task: &Rc<Value>) -> Option<usize> {
     let Value::Neutral(Head::Global(name, ..), _) = &**argument else {
         return None;
     };
-    name.strip_prefix(FIBER)?.parse().ok()
+    let (home, fiber) = name.strip_prefix(FIBER)?.split_once('.')?;
+    Some((home.parse().ok()?, fiber.parse().ok()?))
 }
 
 /// Голова написанного результата определения. `None` - результат не имя.

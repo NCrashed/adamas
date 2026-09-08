@@ -440,6 +440,20 @@ impl<'a> Machine<'a> {
             kont.tuck(Frame::Scrutinee(env.clone(), Rc::clone(case)));
             return step;
         }
+        // Разбор значения задачи - её потребление мимо `await`, то есть
+        // **отмена** (§5.2): так написан всякий деструктор, и явный `case`
+        // автора - то же потребление. Файбер снимается с питомника, его
+        // сегмент раскручивается - деструкторы, набранные телом задачи,
+        // отрабатывают, а тело не досчитывается: обрыв в suspend-точке.
+        // Разбор возобновляется своим же кадром, когда раскрутка договорит;
+        // второй заход файбера не находит и идёт по ветвям.
+        if let Some((home, fiber)) = crate::fiber::fiber_named(scrutinee)
+            && let Some(inner) = self.cancelled(home, fiber)
+        {
+            kont.push(Frame::Scrutinee(env.clone(), Rc::clone(case)));
+            let length = inner.len();
+            return self.unwinding(&inner, length, Rc::clone(scrutinee), kont);
+        }
         let selected = match &**scrutinee {
             Value::Neutral(Head::Global(name, ..), spine) => case
                 .branches

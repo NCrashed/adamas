@@ -1,0 +1,105 @@
+-- Настоящая отмена: разбор значения задачи обрывает её файбер (§5.2, §3.3).
+--
+-- Потребить задачу мимо `await` можно одним способом - разобрать её значение,
+-- и так написан всякий деструктор. Отмена поэтому стоит на разборе: файбер
+-- снимается с питомника, уступивший отдаёт сегмент, и раскрутка сегмента
+-- запускает деструкторы, набранные телом задачи, - а само тело не
+-- досчитывается. Это и есть обрыв в suspend-точке, обещанный §5.2:
+-- уступивший стоит ровно в ней.
+--
+-- Первый питомник: задача берёт ресурс, отмечается единицей и уступает;
+-- корневой, проснувшись, отмечается девяткой и бросает её. Семёрка -
+-- деструктор ресурса **из раскрутки сегмента**, восьмёрка - написанный
+-- деструктор задачи; двойки нет - тело оборвано. Питомник не дожидается.
+--
+-- Второй питомник: задача договаривает (корневой уступает ей дважды), и
+-- недожданный ответ пропадает вместе с задачей - деструктор отрабатывает
+-- восьмёркой, раскручивать нечего.
+--
+-- След: 1 9 7 8 3 9 8.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {Log} Bool
+  closeFile h =
+    note 7
+    True
+
+resource Task where
+  MkTask : Nat -> Task
+  cancelTask : (1 t : Task) -> {Log} Unit
+  cancelTask (MkTask n) = note 8
+
+effect Async where
+  suspend : Unit
+  spawn : (1 body : {Async, Log} Unit) -> Task
+  await : (1 t : Task) -> Unit
+
+withNursery : ({Async, Log} Unit) -> {Log} Unit
+
+-- Тело задачи держит ресурс и уступает, пока держит. Двойка после уступки -
+-- различающая сила: при отмене её не будет.
+holding : (1 h : File) -> {Async, Log} Unit
+holding h =
+  let a : Unit = note 1
+  let s : Unit = suspend
+  note 2
+
+-- Корневой уступает порождённому и бросает его запаркованным.
+aborting : {Async, Log} Unit
+aborting =
+  let t : Task = spawn (holding Open)
+  let s : Unit = suspend
+  note 9
+
+quick : {Async, Log} Unit
+quick = note 3
+
+-- Задача договаривает, а ответа никто не ждёт: `drop` снимает его с готовых.
+finished : {Async, Log} Unit
+finished =
+  let t : Task = spawn quick
+  let s : Unit = suspend
+  let z : Unit = suspend
+  note 9
+
+parked : {Log} Unit
+parked = withNursery aborting
+
+ready : {Log} Unit
+ready = withNursery finished
+
+first : List Nat
+first = handle parked with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+
+second : List Nat
+second = handle ready with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+
+append : List a -> List a -> List a
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+main : List Nat
+main = append first second

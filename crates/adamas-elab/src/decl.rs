@@ -677,6 +677,7 @@ fn alias(
         signature,
         metas,
         known.instances,
+        known.owned,
         None,
         &wrapped_body,
         &ty,
@@ -1031,6 +1032,7 @@ fn declare_class(
         });
     }
     class_members(class, &mut info, &mut members)?;
+    flat_shape(&name.text, class, &params, &mut info)?;
     let names = Names::of(&name.text, Vec::new());
     // Класс - **функция** от своих параметров в тип записи, а не сам тип:
     // `Eqv Nat` есть применение. Отсюда тело лямбдой, а тип - `Pi` над
@@ -1102,6 +1104,41 @@ fn declare_class(
     Ok(())
 }
 
+/// Класс `Flat` объявляется так, как написан в §4.11, - и когерентен.
+///
+/// Форма спрашивается потому, что компилятор знает это имя и **выводит** по
+/// нему инстансы: класс с тем же именем и другим содержимым сломал бы вывод
+/// молча. Когерентность же не объявляется автором, а следует из вывода: инстанс
+/// вычисляется по представлению, выбирать нечего. Отсюда и §4.8 - запрет на
+/// class-констрейнты в запечатывающей сигнатуре охраняет от осадки выбора и
+/// когерентные классы пропускает, а `Flat T` в сигнатуре модуля есть
+/// обязательство о представлении.
+fn flat_shape(
+    name: &Symbol,
+    class: &ast::ClassDecl,
+    params: &[ast::Binder],
+    info: &mut Class,
+) -> Result<(), ElabError> {
+    if &**name != crate::flat::FLAT {
+        return Ok(());
+    }
+    let written = params.iter().map(|it| it.names.len()).sum::<usize>();
+    let shaped = written == 1
+        && class.superclasses.is_empty()
+        && info.defaults.is_empty()
+        && info.methods.len() == 1
+        && &*info.methods[0] == crate::flat::LAYOUT;
+    if !shaped {
+        return Err(ElabError::FlatShape {
+            why: "класс `Flat` объявляется одним параметром и единственным методом \
+                  `layout : Layout` (§4.11)",
+            span: class.head.span,
+        });
+    }
+    info.coherent = true;
+    Ok(())
+}
+
 /// `instance Eqv Nat where …` - запись, проверенная против `Eqv Nat`.
 #[allow(clippy::too_many_arguments)]
 fn declare_instance(
@@ -1118,6 +1155,17 @@ fn declare_instance(
         return Err(ElabError::UnknownName {
             name: Rc::clone(&name.text),
             span: name.span,
+        });
+    }
+    // Инстанс `Flat` не пишется: его порождает компилятор структурно (§4.11).
+    // Отказ стоит здесь, а не в разрешении, потому что написанный инстанс
+    // молча заслонил бы выведенный - и объявил бы представление, которого у
+    // типа нет.
+    if &*name.text == crate::flat::FLAT {
+        return Err(ElabError::FlatShape {
+            why: "инстанс `Flat` руками не пишется: компилятор выводит его \
+                  структурно по представлению типа (§4.11)",
+            span,
         });
     }
     let names = Names::of(&name.text, Vec::new());
@@ -1214,7 +1262,9 @@ fn declare_instance(
     let object = abstracted(&prefix, Term::Object(object.into()));
     // Поля суперклассов заполняются поиском - до проверки, которой дырка
     // уже мешала бы.
-    class::resolve(signature, metas, instances, None, &object, &written, span)?;
+    class::resolve(
+        signature, metas, instances, owned, None, &object, &written, span,
+    )?;
     // `check_within`, а не `check_closed_with`: нерешённая дырка уровня здесь -
     // будущий параметр самого словаря, и запрет отвергал бы всякий
     // полиморфный инстанс. Окончательный запрет ставит объявление.
@@ -1754,6 +1804,10 @@ fn self_dictionary(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "объявление группы идёт одной последовательностью: типы членов, общее обобщение, тела, группа"
+)]
 fn declare_members(
     signature: &mut Signature,
     metas: &mut Metas,
@@ -1860,6 +1914,7 @@ fn declare_members(
             signature,
             metas,
             instances,
+            owned,
             Some(&declaring),
             &tree.term,
             &types[at],
@@ -2007,6 +2062,7 @@ fn declare_mutual(
             signature,
             metas,
             instances,
+            owned,
             None,
             &tree.term,
             &generalized[at],
@@ -2566,7 +2622,7 @@ fn declare_module_value(
         .within(within)
         .wrapped(&params, true, |_| Ok(inner_ty))?;
     let term = abstracted(&params, term);
-    class::resolve(signature, metas, instances, None, &term, &ty, span)?;
+    class::resolve(signature, metas, instances, owned, None, &term, &ty, span)?;
     signature
         .define_opaque(metas, declared, Mult::Many, ty, Some(term), module.sealed)
         .map_err(|error| ElabError::Core {
@@ -3040,6 +3096,7 @@ fn define(
         signature,
         metas,
         known.instances,
+        known.owned,
         // Не объявляемый инстанс: сюда приходит обычное определение, а член
         // инстанса объявляется своим путём и `Declaring` получает там.
         None,

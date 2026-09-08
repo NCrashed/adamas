@@ -47,6 +47,7 @@ mod decl;
 mod error;
 mod expr;
 pub mod fixity;
+mod flat;
 mod live;
 mod own;
 mod render;

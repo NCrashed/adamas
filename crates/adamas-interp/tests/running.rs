@@ -1414,3 +1414,100 @@ main = handle program with
         "отказ обязан называть причину, а не падать иначе: {error}"
     );
 }
+
+/// Отказ машины: программа принята проверкой, но исполняться не обязана.
+fn refused(source: &str, name: &str) -> adamas_interp::RunError {
+    let signature = elaborated(source);
+    let body = body(&signature, name);
+    match adamas_interp::run(&signature, &body) {
+        Err(error) => error,
+        Ok(value) => panic!("ожидался отказ исполнения, получено {value}"),
+    }
+}
+
+/// Питомник, задача и её ожидание - объявления, которые машина знает по именам.
+const ASYNC: &str = "
+effect Log where
+  note : Nat -> Unit
+
+data Task where
+  MkTask : Nat -> Task
+
+effect Async where
+  suspend : Unit
+  spawn : (1 body : {Async, Log} Unit) -> Task
+  await : (1 t : Task) -> Unit
+";
+
+#[test]
+fn a_task_is_awaited_only_in_its_own_nursery() {
+    // Круг у задачи один - тот, что её породил, - и очередь с ждущими лежат там
+    // же. Ответа её снаружи тоже нет: питомник, закрыв круг, освобождает
+    // готовые, поэтому и договорившая чужому кругу не годится.
+    //
+    // Само значение наружу выходит - `Task` есть обычное значение, - и
+    // отвергается именно ожидание. Отказ прежде назывался `NoFiber` с
+    // сообщением «собрано не питомником», а оно ложно: собрано питомником,
+    // просто другим.
+    let source = format!(
+        "{BASE}{ASYNC}
+withNursery : ({{Async, Log}} Task) -> {{Log}} Task
+
+quick : {{Async, Log}} Unit
+quick = note 1
+
+inner : {{Async, Log}} Task
+inner =
+  let t : Task = spawn quick
+  t
+
+outer : {{Async, Log}} Task
+outer =
+  let t : Task = withNursery inner
+  let a : Unit = await t
+  spawn quick
+
+program : {{Log}} Task
+program = withNursery outer
+
+main : List Nat
+main = handle program with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+"
+    );
+    assert!(
+        matches!(
+            refused(&source, "main"),
+            adamas_interp::RunError::ForeignTask
+        ),
+        "ожидание чужой задачи обязано называть причину"
+    );
+}
+
+#[test]
+fn a_hand_built_task_names_no_fiber() {
+    // Вторая половина того же имени осталась на месте: конструктор задачи
+    // публичен (§3.3), и `MkTask Zero`, собранный руками, живого файбера не
+    // называет. Различать эти два отказа обязательно - причины разные.
+    let source = format!(
+        "{BASE}{ASYNC}
+withNursery : ({{Async, Log}} Unit) -> {{Log}} Unit
+
+faking : {{Async, Log}} Unit
+faking = await (MkTask Zero)
+
+program : {{Log}} Unit
+program = withNursery faking
+
+main : List Nat
+main = handle program with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+"
+    );
+    assert!(
+        matches!(refused(&source, "main"), adamas_interp::RunError::NoFiber),
+        "рукотворная задача обязана отвечать про файбера"
+    );
+}

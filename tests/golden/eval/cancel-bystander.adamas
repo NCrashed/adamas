@@ -1,0 +1,91 @@
+-- Отмена снимает **одну** задачу, а не круг (§5.2).
+--
+-- Сегмент уступившего файбера включает его собственный кадр питомника - им
+-- возобновление ставит файбер обратно под свой круг. Раскрутке этот кадр
+-- означает совсем другое: «питомник брошен», и она вычерпывает очередь и
+-- список ждущих целиком. Отмена отдаёт сегмент раскрутке, и потому отмена
+-- одной задачи сносила остальные: посторонняя не досчитывалась, а питомник
+-- возвращался, не дождавшись её, - вопреки обещанию §5.2 дожидаться
+-- порождённых (ревью 2026-09-08).
+--
+-- Различающая сила фикстуры - именно в посторонней: у неё есть работа
+-- **после** уступки и ресурс, который она держит. Отмена соседа не должна
+-- отнимать ни того, ни другого.
+--
+-- След: 1 3 9 5 4 7.
+--
+--   1 - отменяемая отметилась и уступила; её двойки нет, тело оборвано;
+--   3 - посторонняя отметилась и уступила;
+--   9 - корневой отменил соседа разбором значения;
+--   5 - корневой договорил;
+--   4 - посторонняя **досчитала** после отмены соседа - это и есть предмет;
+--   7 - её ресурс закрылся, когда она договорила.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {Log} Bool
+  closeFile h =
+    note 7
+    True
+
+data Task where
+  MkTask : Nat -> Task
+
+effect Async where
+  suspend : Unit
+  spawn : (1 body : {Async, Log} Unit) -> Task
+  await : (1 t : Task) -> Unit
+
+withNursery : ({Async, Log} Unit) -> {Log} Unit
+
+-- Отменяемая: двойки после уступки не будет.
+victim : {Async, Log} Unit
+victim =
+  let a : Unit = note 1
+  let s : Unit = suspend
+  note 2
+
+-- Посторонняя: её никто не отменяет, и она обязана договорить.
+bystander : (1 h : File) -> {Async, Log} Unit
+bystander h =
+  let a : Unit = note 3
+  let s : Unit = suspend
+  note 4
+
+-- Разбор значения задачи и есть отмена; отдельного имени у неё нет.
+kill : Task -> {Log} Unit
+kill (MkTask n) = note 9
+
+root : {Async, Log} Unit
+root =
+  let v : Task = spawn victim
+  let b : Task = spawn (bystander Open)
+  let s : Unit = suspend
+  let z : Unit = kill v
+  note 5
+
+body : {Log} Unit
+body = withNursery root
+
+main : List Nat
+main = handle body with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)

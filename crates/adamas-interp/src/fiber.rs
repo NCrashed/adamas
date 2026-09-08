@@ -169,6 +169,14 @@ impl Machine<'_> {
     /// в suspend-точке, как §5.2 и обещает. `Fresh` отбрасывается молча: тело
     /// не начиналось, и закрывать в нём нечего. `None` - файбер не найден:
     /// договорил либо бежит сам, и снимать со стека нечего.
+    ///
+    /// **Отдаётся сегмент без нижнего кадра.** Уступка режет его включая
+    /// собственный кадр питомника - им возобновление ставит файбер обратно под
+    /// свой круг, - а раскрутке этот кадр означает «питомник брошен» и
+    /// вычерпывает круг целиком. Отмена одной задачи сносила остальные: сосед,
+    /// которого никто не отменял, не досчитывался, и питомник возвращался, не
+    /// дождавшись его (ревью 2026-09-08). Питомник **внутри** сегмента - тот,
+    /// что файбер открыл сам, - брошен по-настоящему и остаётся на месте.
     pub(crate) fn cancelled(&self, home: usize, fiber: usize) -> Option<Segment> {
         let mut table = self.nurseries.borrow_mut();
         let nursery = table.get_mut(home)?;
@@ -183,7 +191,7 @@ impl Machine<'_> {
                 .map(|at| nursery.blocked.remove(at).1)
         };
         match removed?.state {
-            Suspended::Parked(segment, _) => Some(segment),
+            Suspended::Parked(segment, _) => Some(segment.without_base()),
             Suspended::Fresh(_) => None,
         }
     }
@@ -267,9 +275,10 @@ impl Machine<'_> {
     ) -> Result<Step, RunError> {
         let (home, awaited) = fiber_named(task).ok_or(RunError::NoFiber)?;
         // Задача чужого питомника: её очередь и список ждущих не здесь, и
-        // ждать её отсюда нечем.
+        // ждать её отсюда нечем. Ответа её тоже нет - питомник, закрыв круг,
+        // освобождает готовые, - поэтому и договорившая сюда не подходит.
         if home != id {
-            return Err(RunError::NoFiber);
+            return Err(RunError::ForeignTask);
         }
         if let Some(value) = self.nurseries.borrow()[id]
             .done

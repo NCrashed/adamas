@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: row-solution-captures-a-local.adamas:38:17: несовпадение типов: ожидался `(0 r : Reg) -> {Aux, Src r | ?0} (0 s : Reg) -> {Aux, Src s | ?0} Nat`, получен `(0 r : Reg) -> {Aux | ?1} (0 s : Reg) -> {Aux | ?1} Nat`
+  probe = squeeze double
+                  ^^^^^^
+  путь: тело `probe` -> аргумент применения

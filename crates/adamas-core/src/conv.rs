@@ -850,6 +850,9 @@ fn same_row(
         }
         let rho = metas.fresh_row();
         let (ours, theirs) = (quoted(&ours), quoted(&theirs));
+        if !closed_labels(&ours) || !closed_labels(&theirs) {
+            return false;
+        }
         metas.solve_row(mine, Row::closing(theirs, rho.tail()));
         metas.solve_row(yours, Row::closing(ours, rho.tail()));
         return true;
@@ -869,8 +872,30 @@ fn same_row(
     if metas.zonk_tail(keeping) == Some(Tail::Meta(meta)) {
         return false;
     }
+    if !closed_labels(&rest) {
+        return false;
+    }
     metas.solve_row(meta, Row::closing(rest, keeping));
     true
+}
+
+/// Замкнуты ли аргументы меток - решение row-дырки обязано быть замкнутым.
+///
+/// Решение хранится термом без телескопа и подставляется на любой глубине
+/// (§10 вопрос 143): дырка разделяется позициями по разные стороны связывания
+/// (row у `Pi` живёт глубже, чем row-аргумент у `Const`), и локальное
+/// связывание в решении читалось бы там индексом не той глубины. Замер дал
+/// падение «незамкнутый терм» на программе с одним хвостом под двумя
+/// регионами. Поглощение с локальным аргументом метки поэтому отказывает:
+/// отказ конвертируемости честен, равенство таких рядов зависело бы от
+/// глубины читателя.
+fn closed_labels(labels: &[Label<Term>]) -> bool {
+    labels.iter().all(|label| {
+        label
+            .arguments
+            .iter()
+            .all(|argument| !argument.mentions_recent(0, u32::MAX))
+    })
 }
 
 /// Совпадают ли элиминаторы в одной позиции спайна.

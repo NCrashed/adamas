@@ -47,7 +47,7 @@ use crate::eval::{apply, quote, try_apply, try_eliminate_case};
 use crate::meta::Metas;
 use crate::mult::Mult;
 use crate::row::{Label, Row, Tail};
-use crate::sig::Signature;
+use crate::sig::{DefinitionKind, Signature};
 use crate::solve::{force, solve};
 use crate::term::{Field, Fields, Mults, Name, Term};
 use crate::value::{Elim, Head, Lvl, StuckCase, Telescope, Value};
@@ -611,6 +611,64 @@ fn fresh_env(size: u32) -> crate::value::Env {
 /// это не расхождение, а ограничение `?l ~ 2`. Структурное сравнение здесь
 /// отвергло бы корректную программу, а у постулата - окончательно, потому что
 /// разворачивать нечего.
+/// Позиции конструктора, которые сравнение **пропускает**: стёртые поля.
+///
+/// # Почему пропуск законен
+///
+/// Стёртое поле в этом языке **ненаблюдаемо**. Разобрать его нельзя - разбор
+/// расходует разбираемое на `1` (§3.3); передать в функцию нельзя - тело
+/// определения проверяется при `ω`, а поле объявлено `0`. Значит ни одна
+/// функция и ни один тип не различают два значения, различающиеся только им, -
+/// и признать их равными не значит признать равным что-то ещё.
+///
+/// Отсюда же урезанная элиминация, которую Lean заводит сортом `Prop`: у
+/// `Trunc P` с полем `(0 _ : P)` нет функции `Trunc P -> P`, потому что кратность
+/// её не пропускает. Второго сорта для этого не нужно (§3.2 его отвергла), и
+/// сравнение остаётся **бестиповым**: правило смотрит в сигнатуру конструктора,
+/// а не в тип сравниваемых.
+///
+/// # Параметры семейства исключены, и это не осторожность
+///
+/// Они тоже `0` - телескоп семейства элаборируется нулевой кратностью, - но
+/// наблюдаемы: параметр стоит в **типе** значения. Пропусти их сравнение, и
+/// `List Nat` стал бы равен `List Bool`.
+///
+/// Индексы, приехавшие стёртым полем (`n` у `VCons : a -> Vect a n -> Vect a
+/// (Succ n)`), пропускать безопасно по другому доводу: такое поле **определено
+/// типом**, и два значения, сравниваемые при одном типе, совпадают на нём по
+/// построению.
+///
+/// # Форма ответа
+///
+/// Маска, а не список: сравнение - горячий путь, и аллокация на каждый спайн
+/// стоила бы дороже самого правила. Позиции за 64-й не пропускаются вовсе -
+/// направление безопасное, сравнение проверяет больше, а не меньше.
+fn irrelevant_fields(sig: &Signature, head: &Head) -> u64 {
+    let Head::Global(name, ..) = head else {
+        return 0;
+    };
+    let Some(declaration) = sig.lookup(name) else {
+        return 0;
+    };
+    let DefinitionKind::Constructor { data } = &declaration.kind else {
+        return 0;
+    };
+    let Some(DefinitionKind::Data { params, .. }) = sig.lookup(data).map(|it| &it.kind) else {
+        return 0;
+    };
+    let mut mask = 0u64;
+    let mut current = &declaration.ty;
+    let mut at = 0u32;
+    while let Term::Pi(binder, _, _, _, codomain) = current {
+        if at >= *params && at < 64 && binder.mult == Mult::Zero {
+            mask |= 1 << at;
+        }
+        at += 1;
+        current = codomain;
+    }
+    mask
+}
+
 fn same_head(
     fuel: u32,
     sig: &Signature,
@@ -944,13 +1002,16 @@ fn rigid(
             convertible_within(fuel, sig, metas, size, &projected, value)
         }),
 
+        // Стёртые поля конструктора пропускаются: они ненаблюдаемы, и потому
+        // два значения, различающиеся только ими, суть одно (§3.7).
         (Value::Neutral(head_a, spine_a), Value::Neutral(head_b, spine_b)) => {
+            let skipped = irrelevant_fields(sig, head_a);
             same_head(fuel, sig, metas, size, head_a, head_b)
                 && spine_a.len() == spine_b.len()
-                && spine_a
-                    .iter()
-                    .zip(spine_b)
-                    .all(|(a, b)| same_elim(fuel, sig, metas, size, a, b))
+                && spine_a.iter().zip(spine_b).enumerate().all(|(at, (a, b))| {
+                    u32::try_from(at).is_ok_and(|at| at < 64 && skipped & (1 << at) != 0)
+                        || same_elim(fuel, sig, metas, size, a, b)
+                })
         }
 
         // Связывание - часть типа функции целиком: `(1 x : A) -> B` и

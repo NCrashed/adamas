@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: truncation-escapes.adamas:24:19: `b` объявлена с кратностью 0, а использована 1
+  out (MkTrunc b) = b
+                    ^
+  путь: тело `out` -> тело лямбды -> ветвь #0

@@ -9029,3 +9029,91 @@ unhalf Refl = Refl
         "получено {error:?}"
     );
 }
+
+#[test]
+fn an_erased_field_is_irrelevant_to_conversion() {
+    // §3.7: два значения, различающиеся только стёртым полем, суть одно.
+    // Ненаблюдаемость поля - то, чем это законно: разобрать его нельзя, и
+    // передать в функцию нельзя, значит различить его нечем.
+    let signature = program(&format!(
+        "{BASE}data Eqv (a : Type) (x : a) : a -> Type where
+  Refl : Eqv a x x
+
+data Box where
+  MkBox : (0 b : Bool) -> Box
+
+same : Eqv Box (MkBox True) (MkBox False)
+same = Refl
+"
+    ));
+    // Тело - `Refl`, применённый к параметрам: доказательство собралось, то
+    // есть цель `Eqv Box (MkBox True) (MkBox False)` сошлась с типом `Refl`,
+    // где обе стороны одна и та же коробка.
+    assert_eq!(value(&signature, "same"), "Refl{0} Box (MkBox True)");
+}
+
+#[test]
+fn an_erased_field_cannot_be_projected_out() {
+    // Урезанная элиминация даётся кратностью, а не сортом: без неё
+    // иррелевантность была бы противоречием - `out` перенёс бы равенство
+    // коробок в равенство их содержимого.
+    let error = refused(&format!(
+        "{BASE}data Box where
+  MkBox : (0 b : Bool) -> Box
+
+out : Box -> Bool
+out (MkBox b) = b
+"
+    ));
+    assert!(
+        matches!(error, ElabError::Core { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_family_parameter_is_not_irrelevant() {
+    // Параметры семейства тоже стёрты, но наблюдаемы: параметр стоит в типе
+    // значения. Пропусти сравнение и их - `List Nat` стал бы равен `List Bool`.
+    let error = refused(&format!(
+        "{BASE}data Wrap (a : Type) where
+  MkWrap : a -> Wrap a
+
+mismatched : Wrap Nat
+mismatched = MkWrap True
+"
+    ));
+    assert!(
+        matches!(error, ElabError::Core { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn an_index_carried_by_an_erased_field_still_types() {
+    // У `VCons` длина приезжает стёртым полем и стоит в индексе результата.
+    // Пропуск её безопасен, потому что она определена типом, - и типы обязаны
+    // продолжать различаться.
+    let head = format!(
+        "{BASE}data Vect (a : Type) : Nat -> Type where
+  VNil : Vect a Zero
+  VCons : a -> Vect a n -> Vect a (Succ n)
+"
+    );
+    program(&format!(
+        "{head}
+one : Vect Bool (Succ Zero)
+one = VCons True VNil
+"
+    ));
+    let error = refused(&format!(
+        "{head}
+wrong : Vect Bool (Succ Zero)
+wrong = VCons True (VCons True VNil)
+"
+    ));
+    assert!(
+        matches!(error, ElabError::Core { .. }),
+        "получено {error:?}"
+    );
+}

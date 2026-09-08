@@ -1,5 +1,3 @@
-| [`docs/examples/`](docs/examples/) | Illustrations of forms the implementation has not reached yet. |
-| [`docs/phase6-plan.md`](docs/phase6-plan.md) | How phase 6 is cut into tracks: what parallelises, what does not, and what counts as done. |
 # Adamas
 
 A research-level prototype of a functional programming language: dependent
@@ -181,6 +179,8 @@ does not depend on it. What it taught is in
 | [`docs/reading-notes/`](docs/reading-notes/) | Notes on the key papers (QTT, Perceus, effect handlers). |
 | [`tests/golden/`](tests/golden/) | Adamas programs the compiler accepts today, with their expected output. |
 | [`docs/examples/`](docs/examples/) | Illustrations of forms the implementation has not reached yet. |
+| [`docs/phase6-plan.md`](docs/phase6-plan.md) | How phase 6 is cut into tracks: what parallelises, what does not, and what counts as done. |
+| [`docs/phase7-plan.md`](docs/phase7-plan.md) | Why the LLVM backend is worth its cost, measured against what a C backend cannot express. |
 
 A quick way into the design: §1–2 (vision and principles) → §3 (semantic core)
 → §4.1 (syntax). Contested details live in §10.

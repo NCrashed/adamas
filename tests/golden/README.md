@@ -9,7 +9,8 @@
 
 Читает их `crates/adamas-cli/tests/golden.rs` — cargo подхватывает `tests/`
 только внутри пакета, и в корне virtual workspace эта директория сборкой не
-видна.
+видна. Второй читатель — `crates/adamas-interp/tests/monomorphisation.rs`: он
+гоняет `eval/` через мономорфизацию и сверяет значение до и после.
 
 ## Раскладка
 

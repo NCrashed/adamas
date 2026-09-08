@@ -30,6 +30,11 @@ struct adamas_segment {
     size_t depth;
 };
 
+/* Смещения закреплены: числа эти уезжают от перестановки полей молча, а Фаза 7
+ * ставит по ним `align` и `dereferenceable` (шапка `adamas.h`, «Выравнивание»). */
+_Static_assert(offsetof(struct adamas_frame, env) == 48, "среда кадра идёт с 48-го байта");
+_Static_assert(sizeof(struct adamas_segment) == 32, "сегмент - четыре слова");
+
 static adamas_frame *frame_alloc(uint16_t mark, uint32_t label, adamas_frame_code code,
                                  adamas_frame_release release, size_t fields,
                                  adamas_evidence *evidence) {
@@ -48,12 +53,52 @@ static adamas_frame *frame_alloc(uint16_t mark, uint32_t label, adamas_frame_cod
     return frame;
 }
 
+/* Вектор деструктора при раскрутке: копия с подавленными записями хендлеров,
+ * которые уже ответили.
+ *
+ * Мертвы они все до одного: основание сегмента - хендлер, чья ветка ответ дала,
+ * а хендлеры **между** ним и этим scope'ом брошены вместе с сегментом. Ходит
+ * по ним рантайм и только рантайм: цепочку обходит он, и никто больше не знает,
+ * какие записи мертвы. Ровно тот же ряд ставит машина кадрами `Suppressing`
+ * (`adamas-interp/src/effect.rs`, `Machine::unwinding`); представление другое,
+ * потому что поиск здесь ведёт вектор, а не обход стека.
+ *
+ * Запись **помечается**, а не снимается, и разница названа ревью 2026-09-05:
+ * снятая уводила бы операцию деструктора к одноимённому хендлеру снаружи -
+ * статика и динамика расходились бы молча.
+ *
+ * Цена - копия вектора на деструктор. Путь холодный (раскрутка), и другого
+ * места у пометки нет: вектор общий с живым кодом, править его на месте нельзя.
+ */
+static adamas_evidence *closing_evidence(adamas_frame *frame) {
+    adamas_evidence *evidence = adamas_evidence_copy(frame->evidence);
+    for (adamas_frame *below = frame->below; below != NULL; below = below->below) {
+        if (adamas_frame_mark(below) == ADAMAS_MARK_HANDLER) {
+            adamas_evidence_suppress(evidence, below);
+        }
+    }
+    return evidence;
+}
+
 /* Деструктор scope: §3.3 требует его и при нормальном выходе, и при обрыве.
- * Отвечает он `()`, поэтому ответ дропается непосредственным. */
-static void frame_close(adamas_frame *frame) {
+ * Отвечает он `()`, поэтому ответ дропается непосредственным.
+ *
+ * `unwinding` различает два случая. При нормальном выходе хендлеры под scope'ом
+ * живы, и операция деструктора обязана их достать. При раскрутке они мертвы, и
+ * вектор деструктора говорит об этом каждому, кто спросит.
+ *
+ * Флаг явный, хотя нормальный путь и так отцепляет кадр до вызова, и
+ * `closing_evidence` нашла бы под ним пустоту. Опираться на это значило бы
+ * держать различие двух путей на порядке двух строк в третьем месте.
+ */
+static void frame_close(adamas_frame *frame, int unwinding) {
     adamas_value closer = frame->env[0];
-    adamas_value answer = adamas_apply(closer, frame->evidence, adamas_unit());
+    adamas_evidence *evidence = unwinding ? closing_evidence(frame) : frame->evidence;
+    adamas_value answer = adamas_apply(closer, evidence, adamas_unit());
     adamas_drop(answer, NULL);
+    if (unwinding) {
+        adamas_evidence_drop(evidence);
+    }
 }
 
 static void frame_free(adamas_frame *frame) {
@@ -123,8 +168,9 @@ adamas_value adamas_kont_run(adamas_kont *kont, adamas_value value) {
         frame->below = NULL;
         if (adamas_frame_mark(frame) == ADAMAS_MARK_CLOSING) {
             /* Scope закончился нормально: деструктор срабатывает, а значение
-             * идёт мимо него дальше - оно и есть ответ scope'а. */
-            frame_close(frame);
+             * идёт мимо него дальше - оно и есть ответ scope'а. Подавления
+             * тут нет: хендлеры под scope'ом живы и ответа ещё не давали. */
+            frame_close(frame, 0);
         } else if (frame->code != NULL) {
             /* Код вправе положить новые кадры: они и станут вершиной, а ответ
              * пойдёт им. */
@@ -207,7 +253,8 @@ void adamas_segment_unwind(adamas_segment *segment) {
     while (frame != NULL) {
         adamas_frame *below = frame->below;
         if (adamas_frame_mark(frame) == ADAMAS_MARK_CLOSING) {
-            frame_close(frame);
+            /* Хендлеры под этим scope'ом свои ответы уже дали: подавлены. */
+            frame_close(frame, 1);
         }
         frame_free(frame);
         frame = below;

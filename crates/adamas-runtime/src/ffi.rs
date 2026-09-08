@@ -75,6 +75,13 @@ pub const MARK_NURSERY: u16 = 4;
 /// Scope, держащий ресурс: деструктор в слоте 0.
 pub const MARK_CLOSING: u16 = 5;
 
+/// Хендлера метки нет вовсе.
+pub const LOOKUP_MISSING: c_int = 0;
+/// Нашёлся живой хендлер.
+pub const LOOKUP_HANDLER: c_int = 1;
+/// Нашёлся подавленный: операция обрывает свой деструктор.
+pub const LOOKUP_SUPPRESSED: c_int = 2;
+
 /// Тег замыкания в заголовке.
 pub const TAG_CLOSURE: u16 = 0xFFFF;
 /// Тег вектора evidence.
@@ -139,7 +146,17 @@ unsafe extern "C" {
     /// Метка записи по позиции.
     pub fn adamas_evidence_label_at(evidence: *const Evidence, index: usize) -> u32;
     /// Ближайший хендлер метки, пропустив `skip` подходящих.
-    pub fn adamas_evidence_find(evidence: *const Evidence, label: u32, skip: usize) -> *mut Frame;
+    /// Ближайшая запись метки: вердикт трёхзначный, кадр идёт в `handler`.
+    pub fn adamas_evidence_lookup(
+        evidence: *const Evidence,
+        label: u32,
+        skip: usize,
+        handler: *mut *mut Frame,
+    ) -> c_int;
+    /// Копия вектора со своим счётчиком.
+    pub fn adamas_evidence_copy(evidence: *const Evidence) -> *mut Evidence;
+    /// Помечает подавленной запись этого кадра-хендлера.
+    pub fn adamas_evidence_suppress(evidence: *mut Evidence, handler: *const Frame);
     /// Берёт лишнюю ссылку на вектор.
     pub fn adamas_evidence_dup(evidence: *mut Evidence) -> *mut Evidence;
     /// Отдаёт ссылку на вектор.

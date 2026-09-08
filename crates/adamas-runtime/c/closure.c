@@ -24,6 +24,8 @@ struct closure_block {
     adamas_value slots[];
 };
 
+_Static_assert(offsetof(struct closure_block, slots) == 40, "слоты замыкания идут с 40-го байта");
+
 static struct closure_block *closure_of(adamas_value value) {
     if (adamas_is_imm(value) || adamas_tag(value) != ADAMAS_TAG_CLOSURE) {
         adamas_fail("применение не к замыканию");

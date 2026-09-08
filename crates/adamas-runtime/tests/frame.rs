@@ -10,9 +10,10 @@ use std::cell::RefCell;
 use std::ptr;
 
 use adamas_runtime::ffi::{
-    Evidence, Frame, Kont, MARK_CLOSING, MARK_HANDLER, MARK_PLAIN, Value, adamas_alloc,
-    adamas_closure, adamas_closure_get, adamas_closure_release, adamas_closure_set, adamas_drop,
-    adamas_dup, adamas_evidence_drop, adamas_evidence_empty, adamas_field, adamas_frame_env,
+    Evidence, Frame, Kont, LOOKUP_HANDLER, LOOKUP_SUPPRESSED, MARK_CLOSING, MARK_HANDLER,
+    MARK_PLAIN, Value, adamas_alloc, adamas_closure, adamas_closure_get, adamas_closure_release,
+    adamas_closure_set, adamas_drop, adamas_dup, adamas_evidence_drop, adamas_evidence_empty,
+    adamas_evidence_extend, adamas_evidence_lookup, adamas_field, adamas_frame_env,
     adamas_frame_fields, adamas_frame_label, adamas_frame_mark, adamas_imm, adamas_imm_get,
     adamas_kont_cut, adamas_kont_init, adamas_kont_push, adamas_kont_restore, adamas_kont_run,
     adamas_rc, adamas_resumption_drop, adamas_segment_base, adamas_segment_copy,
@@ -23,6 +24,8 @@ use adamas_runtime::ffi::{
 thread_local! {
     /// Отметки сработавших деструкторов в порядке срабатывания.
     static TRACE: RefCell<Vec<isize>> = const { RefCell::new(Vec::new()) };
+    /// Вердикты поиска хендлера изнутри деструктора.
+    static VERDICTS: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Пустой стек.
@@ -100,6 +103,30 @@ unsafe fn closer(mark: isize) -> Value {
     }
 }
 
+/// Деструктор, производящий операцию, - то, что напишет понижение.
+///
+/// Спрашивает метки 7 и 9 у полученного вектора и записывает вердикты. На
+/// `SUPPRESSED` **обрывается**: ответа хендлеру нет, отметка о завершении не
+/// ставится, вместо неё отрицательная. Обрыв здесь возврат, потому что своих
+/// кадров у этого деструктора нет; у настоящего его порождает понижение.
+unsafe extern "C" fn probing(closure: Value, evidence: *const Evidence, argument: Value) -> Value {
+    unsafe {
+        let mark = adamas_imm_get(adamas_closure_get(closure, 0));
+        adamas_drop(argument, None);
+        let mut own: *mut Frame = ptr::null_mut();
+        let seven = adamas_evidence_lookup(evidence, 7, 0, &raw mut own);
+        let nine = adamas_evidence_lookup(evidence, 9, 0, ptr::null_mut());
+        let outer = adamas_evidence_lookup(evidence, 7, 1, ptr::null_mut());
+        VERDICTS.with_borrow_mut(|verdicts| verdicts.extend([seven, nine, outer]));
+        if seven == LOOKUP_SUPPRESSED {
+            TRACE.with_borrow_mut(|trace| trace.push(-mark));
+            return adamas_unit();
+        }
+        TRACE.with_borrow_mut(|trace| trace.push(mark));
+        adamas_unit()
+    }
+}
+
 /// Кадр с числом в среде.
 unsafe fn push_holding(
     kont: *mut Kont,
@@ -128,6 +155,25 @@ unsafe fn push_closing(kont: *mut Kont, mark: isize, evidence: *mut Evidence) ->
             evidence,
         );
         *adamas_frame_env(frame) = closer(mark);
+        frame
+    }
+}
+
+/// Кадр scope'а, чей деструктор производит операцию.
+unsafe fn push_probing(kont: *mut Kont, mark: isize, evidence: *mut Evidence) -> *mut Frame {
+    unsafe {
+        let frame = adamas_kont_push(
+            kont,
+            MARK_CLOSING,
+            0,
+            None,
+            Some(release_closer),
+            1,
+            evidence,
+        );
+        let closure = adamas_closure(Some(probing), None, 1, 1);
+        adamas_closure_set(closure, 0, adamas_imm(mark));
+        *adamas_frame_env(frame) = closure;
         frame
     }
 }
@@ -336,6 +382,87 @@ fn an_abandoned_resumption_inside_a_segment_unwinds_too() {
         assert_eq!(TRACE.with_borrow(Clone::clone), vec![1, 9]);
 
         adamas_evidence_drop(evidence);
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Стек под оба теста подавления: снаружи живой хендлер метки 7, внутри
+/// сегмента - хендлер той же метки и хендлер метки 9, над ними два scope'а.
+///
+/// Возвращает стек, кадр внешнего хендлера, кадр основания и четыре вектора,
+/// которые вызывающий обязан дропнуть.
+unsafe fn suppression_stack() -> (Kont, *mut Frame, *mut Frame, [*mut Evidence; 4]) {
+    unsafe {
+        let mut kont = kont();
+        let empty = adamas_evidence_empty();
+        let outer = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, empty);
+        let with_outer = adamas_evidence_extend(empty, 7, outer);
+        let base = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, with_outer);
+        let with_base = adamas_evidence_extend(with_outer, 7, base);
+        let nine = adamas_kont_push(&raw mut kont, MARK_HANDLER, 9, None, None, 0, with_base);
+        let with_nine = adamas_evidence_extend(with_base, 9, nine);
+
+        push_closing(&raw mut kont, 1, with_nine);
+        push_probing(&raw mut kont, 2, with_nine);
+        (kont, outer, base, [empty, with_outer, with_base, with_nine])
+    }
+}
+
+#[test]
+fn unwinding_suppresses_the_handlers_that_already_answered() {
+    unsafe {
+        adamas_stat_reset();
+        TRACE.with_borrow_mut(Vec::clear);
+        VERDICTS.with_borrow_mut(Vec::clear);
+        let (mut kont, outer, base, vectors) = suppression_stack();
+
+        adamas_segment_unwind(adamas_kont_cut(&raw mut kont, base));
+
+        // Операция деструктора не достаётся ни своему хендлеру - тот ответ уже
+        // дал, - ни хендлеру метки 9 под ним: оба брошены вместе с сегментом.
+        // Внешний одноимённый при этом жив и достижим за маской: подавление
+        // **помечает** запись, а не снимает её (ревью 2026-09-05).
+        assert_eq!(
+            VERDICTS.with_borrow(Clone::clone),
+            vec![LOOKUP_SUPPRESSED, LOOKUP_SUPPRESSED, LOOKUP_HANDLER]
+        );
+        // Деструктор оборвался - отметка отрицательная, - а раскрутка пошла
+        // дальше, и следующий scope закрылся как обычно.
+        assert_eq!(TRACE.with_borrow(Clone::clone), vec![-2, 1]);
+        // Внешний хендлер на стеке цел: уйти к нему было куда, и не ушли.
+        assert_eq!(kont.depth, 1);
+        assert_eq!(kont.top, outer);
+
+        adamas_kont_run(&raw mut kont, adamas_unit());
+        for evidence in vectors {
+            adamas_evidence_drop(evidence);
+        }
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+#[test]
+fn a_normal_exit_suppresses_nothing() {
+    unsafe {
+        adamas_stat_reset();
+        TRACE.with_borrow_mut(Vec::clear);
+        VERDICTS.with_borrow_mut(Vec::clear);
+        let (mut kont, _outer, _base, vectors) = suppression_stack();
+
+        // Ближайший проходящий сосед предыдущего теста: тот же стек, но выход
+        // нормальный. Хендлеры под scope'ом ответа ещё не давали, и операция
+        // деструктора обязана их достать.
+        adamas_kont_run(&raw mut kont, adamas_unit());
+
+        assert_eq!(
+            VERDICTS.with_borrow(Clone::clone),
+            vec![LOOKUP_HANDLER, LOOKUP_HANDLER, LOOKUP_HANDLER]
+        );
+        assert_eq!(TRACE.with_borrow(Clone::clone), vec![2, 1]);
+
+        for evidence in vectors {
+            adamas_evidence_drop(evidence);
+        }
         assert_eq!(adamas_stat_live(), 0);
     }
 }

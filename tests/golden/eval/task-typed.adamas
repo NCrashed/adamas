@@ -1,0 +1,88 @@
+-- Параметризованная задача `Task a`: ответ задачи типизирован (§5.2).
+--
+-- Семейство с параметром у значения задачи собирается **маркерами в спайне**:
+-- стёртый параметр встаёт туда так же, как его ставит обычное применение
+-- конструктора, и `case` над задачей связывает поле, а не пропускает его.
+-- Пока маркеров не было, параметризованная задача отвергалась целиком.
+--
+-- Свой аргумент операции машина берёт **последним**: row стоит на последней
+-- стрелке, и операция производит, получив его. Перед ним стоят стёртые
+-- имплиситы - у `spawn : ({Async, Log} a) -> Task a` тип `a` вставлен
+-- связыванием перед телом, и счёт по одним параметрам метки отдавал машине
+-- маркер стёртого вместо вычисления.
+--
+-- Деструктор параметризованного ресурса пишется как у простого: ведущие
+-- имплиситы подъёма (`cancelTask : (1 t : Task a) -> …`) подставляет вставка
+-- `drop`, дырками, как всякое употребление имени.
+--
+-- След: 1 9 5 1 8 9. Первый питомник дожидается ответа (единица корневого,
+-- девятка задачи, пятёрка - её ответ, пришедший через `await` в позицию
+-- `Nat`); второй бросает задачу - восьмёрка деструктора, - и файбер
+-- договаривает девяткой: настоящая отмена приходит отдельным срезом.
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+resource Task (a : Type) where
+  MkTask : Nat -> Task a
+  cancelTask : (1 t : Task a) -> {Log} Unit
+  cancelTask (MkTask n) = note 8
+
+effect Async where
+  suspend : Unit
+  spawn : ({Async, Log} a) -> Task a
+  await : (1 t : Task a) -> a
+
+withNursery : ({Async, Log} Nat) -> {Log} Nat
+
+slow : {Async, Log} Nat
+slow =
+  let a : Unit = note 9
+  let s : Unit = suspend
+  5
+
+awaiting : {Async, Log} Nat
+awaiting =
+  let t : Task Nat = spawn slow
+  let a : Unit = note 1
+  await t
+
+dropping : {Async, Log} Nat
+dropping =
+  let t : Task Nat = spawn slow
+  let a : Unit = note 1
+  Zero
+
+waited : {Log} Nat
+waited = withNursery awaiting
+
+released : {Log} Nat
+released = withNursery dropping
+
+shown : List Nat
+shown = handle waited with
+  return v -> Cons v Nil
+  note n -> Cons n (resume MkUnit)
+
+lost : List Nat
+lost = handle released with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)
+
+append : List a -> List a -> List a
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+main : List Nat
+main = append shown lost

@@ -33,7 +33,6 @@ use std::rc::Rc;
 use adamas_core::level::Level;
 use adamas_core::mult::Mult;
 use adamas_core::row::Row;
-use adamas_core::sig::DefinitionKind;
 use adamas_core::term::{Mults, Name, Term};
 use adamas_core::value::{Elim, Head, Value};
 
@@ -137,12 +136,12 @@ impl Machine<'_> {
         if &**name == SUSPEND {
             return self.parking(id, link, kont).map(Some);
         }
-        // Ведущие аргументы операции - параметры метки, свой идёт за ними.
-        let params = match self.signature().lookup(effect).map(|it| &it.kind) {
-            Some(DefinitionKind::Effect { params, .. }) => *params as usize,
-            _ => return Ok(None),
-        };
-        let Some(own) = arguments.get(params) else {
+        // Свой аргумент операции - **последний**: row стоит на последней
+        // стрелке, и операция производит, получив его. Перед ним идут
+        // параметры метки и стёртые имплиситы - у `spawn : ({Async} a) ->
+        // Task a` тип `a` вставлен связыванием перед телом, и счёт по одним
+        // параметрам метки отдавал машине маркер стёртого вместо вычисления.
+        let Some(own) = arguments.last() else {
             return Ok(None);
         };
         if &**name == AWAIT {
@@ -303,24 +302,19 @@ impl Machine<'_> {
         let Some(ty) = result_head(&definition.ty) else {
             return Err(unsuitable());
         };
-        // Параметров у семейства быть не должно, и это третье требование, а не
-        // придирка: значение собирается спайном из одного применения, а
-        // стёртые параметры в спайне обязаны стоять маркерами - как их ставит
-        // обычное применение конструктора. Пока их не спрашивали, `data Task
-        // (a : Type)` проходило, поле не связывалось, и всякий разбор над
-        // задачей выпускал наружу лямбду вместо значения (ревью 2026-09-07).
-        //
-        // §5.2 пишет `Task eff a`, то есть параметризованную задачу; когда она
-        // понадобится, дописывать надо **маркеры в спайн**, а не снимать этот
-        // отказ.
-        if self
+        // Параметры семейства встают в спайн **маркерами стёртого** - ровно
+        // так их ставит обычное применение конструктора, - а поле под номер
+        // идёт за ними. `Task a` из §5.2 собирается этим же путём. Пока
+        // маркеров не было, `data Task (a : Type)` проходило, поле не
+        // связывалось, и всякий разбор над задачей выпускал наружу лямбду
+        // вместо значения (ревью 2026-09-07).
+        let Some((params, _)) = self
             .signature()
             .lookup(&ty)
             .and_then(adamas_core::sig::Definition::data_shape)
-            .is_none_or(|(params, _)| params != 0)
-        {
+        else {
             return Err(unsuitable());
-        }
+        };
         let Some([only]) = self.signature().constructors(&ty) else {
             return Err(unsuitable());
         };
@@ -334,6 +328,10 @@ impl Machine<'_> {
             Rc::from([] as [Row<Rc<Value>>; 0]),
             Mults::none(),
         );
+        let spine = (0..params)
+            .map(|_| Elim::App(Rc::new(Value::Erased)))
+            .chain(std::iter::once(Elim::App(marker)))
+            .collect();
         Ok(Rc::new(Value::Neutral(
             Head::Global(
                 Rc::clone(only),
@@ -341,7 +339,7 @@ impl Machine<'_> {
                 Rc::from([] as [Row<Rc<Value>>; 0]),
                 Mults::none(),
             ),
-            vec![Elim::App(marker)],
+            spine,
         )))
     }
 

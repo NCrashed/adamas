@@ -3467,6 +3467,15 @@ fn destructor_shape(
         };
         ty = codomain;
     }
+    // Дальше идут имплиситы подъёма - параметры семейства ресурса в
+    // `cancelTask : (1 t : Task a) -> …`. Их тоже подставляет вставка, дырками,
+    // как всякое употребление имени; написанного домена они не касаются.
+    while let Term::Pi(binder, _, _, _, codomain) = ty
+        && binder.visibility.is_implicit()
+        && binder.mult == Mult::Zero
+    {
+        ty = codomain;
+    }
     let Term::Pi(Binder { mult, .. }, _, domain, _, result) = ty else {
         return Err(refuse());
     };
@@ -3784,6 +3793,20 @@ fn family_header<'a>(
     let own = elaborator.beneath(&outer, |it| {
         it.telescope(&data.params, false, Mult::Zero, Unwritten::Sort)
     })?;
+    // Параметр сортом `Effect` - `Task eff a` из §5.2 - форма следующего
+    // среза: формер по row-аргументу не применяется, спайн значения row не
+    // несёт. Отказ здесь, при объявлении, - дальше падал сам компилятор.
+    if let Some(param) = own.iter().find(|it| matches!(&*it.ty, Term::EffectKind)) {
+        let at = data
+            .params
+            .iter()
+            .find(|binder| binder.names.iter().any(|name| name.text == param.name))
+            .map_or(span, |binder| binder.span);
+        return Err(ElabError::RowParameter {
+            name: Rc::clone(&param.name),
+            span: at,
+        });
+    }
     let params: Vec<Param> = outer.iter().chain(own.iter()).cloned().collect();
     let kind = match &data.kind {
         // Параметры пишутся, поэтому в kind они явные: `Vect a n`. Функторные -

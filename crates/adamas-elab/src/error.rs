@@ -473,6 +473,23 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Параметр семейства сортом `Effect` - `Task eff a` из §5.2 (§10 вопрос
+    /// 121, граница).
+    ///
+    /// Отказ, а не молчание: формер по row-аргументу не применяется, спайн
+    /// значения row не несёт, и принятая форма падала бы дальше - на пробе
+    /// «применение не-функции» роняло сам компилятор при объявлении эффекта,
+    /// чья операция называет такое семейство.
+    #[error(
+        "row-параметр семейства - `{name}` сортом `Effect` - появляется в одном из следующих срезов; параметром `data` сегодня бывает тип"
+    )]
+    RowParameter {
+        /// Имя параметра.
+        name: Symbol,
+        /// Где написан.
+        span: Span,
+    },
+
     /// Констрейнт на параметре запечатанного типа (§3.5).
 
     ///
@@ -1217,6 +1234,7 @@ impl ElabError {
             | Self::AmbiguousInstance { span, .. }
             | Self::CoherentDuplicate { span, .. }
             | Self::NotAnEffect { span, .. }
+            | Self::RowParameter { span, .. }
             | Self::TrailingDefault { span, .. }
             | Self::SealedConstraint { span, .. }
             | Self::SealedInstance { span, .. }

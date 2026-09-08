@@ -700,6 +700,30 @@ impl<'a> Parser<'a> {
         Ok(self.name_of(token))
     }
 
+    /// Имя, дописанное путём: `Store.Ask`, `Store.ask`.
+    ///
+    /// Члены модуля подняты на верхний уровень под квалифицированным именем, и
+    /// снаружи пишется путь (§4.8). Метка эффекта и его операция - такие же
+    /// члены, и позиции, где они называются, принимают путь по той же причине,
+    /// по какой его принимает паттерн: выбирать здесь между путём и проекцией
+    /// не из чего - записи в этой позиции не бывает.
+    ///
+    /// Точка узнаётся примыканием, как и в проекции: `M . f` с пробелами - это
+    /// оператор, а не путь.
+    fn pathed(&mut self, first: Name) -> Name {
+        let mut name = first;
+        while self.peek().span.start() == name.span.end() {
+            let Some(segment) = self.projected() else {
+                break;
+            };
+            name = Name {
+                text: Rc::from(format!("{}.{}", name.text, segment.text).as_str()),
+                span: name.span.merge(segment.span),
+            };
+        }
+        name
+    }
+
     /// `data Name param* [: kind] [where блок конструкторов]`.
     ///
     /// `where` необязателен: без него семейство остаётся без конструкторов, и
@@ -1647,6 +1671,7 @@ impl<'a> Parser<'a> {
         let mut tail = None;
         loop {
             let name = self.ident()?;
+            let name = self.pathed(name);
             let mut arguments = Vec::new();
             while starts_atom(self.kind()) {
                 arguments.push(self.atom()?);
@@ -2037,6 +2062,7 @@ impl<'a> Parser<'a> {
     fn handled_label(&mut self) -> Result<EffectLabel, ParseError> {
         let open = self.eat(TokenKind::LParen);
         let name = self.ident()?;
+        let name = self.pathed(name);
         let mut arguments = Vec::new();
         if open.is_some() {
             while starts_atom(self.kind()) {
@@ -2061,6 +2087,7 @@ impl<'a> Parser<'a> {
         // нечем - элаборация требовала её сообщением «ветка `<|>`: ветка не
         // написана», печатая имя, которого разбор ветки не принимал.
         let name = self.decl_name()?;
+        let name = self.pathed(name);
         let mut params = Vec::new();
         while self.at(TokenKind::Ident) || self.at(TokenKind::Underscore) {
             let token = self.bump();

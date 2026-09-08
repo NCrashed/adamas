@@ -296,7 +296,9 @@ fn a_case_names_the_scrutinee_the_motive_and_the_branch() {
     ];
 
     for (term, expected) in cases {
-        let error = refused(&signature, &term, &Term::universe(2));
+        // Тип здесь ровно тот, который даёт мотив: разбор сверяет написанный
+        // тип **до** ветвей, и универсум повыше отвергся бы раньше `broken`.
+        let error = refused(&signature, &term, &Term::universe(1));
         assert!(
             matches!(error.kind, ErrorKind::NotAFunction { .. }),
             "отказ обязан идти от `broken`, а не от заготовки: {error:?}"

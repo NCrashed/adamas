@@ -23,7 +23,7 @@ use adamas_core::eval::{eval, quote};
 use adamas_core::level::{Level, LevelVar};
 use adamas_core::meta::{Generalization, Metas, zonk_term};
 use adamas_core::mult::{Mult, MultVar};
-use adamas_core::pattern::{PatternError, compile_traced};
+use adamas_core::pattern::{Compiled, PatternError, compile_traced};
 use adamas_core::row::{Label, Row, RowVar, Tail};
 use adamas_core::sig::{Group, Member as SigMember, Signature};
 use adamas_core::source::Span;
@@ -2010,6 +2010,36 @@ fn declare_mutual(
         trees.push(tree);
     }
 
+    declare_definitions(
+        signature,
+        metas,
+        &planned,
+        &generalized,
+        &arities,
+        &trees,
+        span,
+    )?;
+    required_verdicts(signature, &planned)?;
+    for member in &planned {
+        carrier::check(signature, owned, &member.name.text, member.span)?;
+    }
+    Ok(())
+}
+
+/// Объявляет определения группы одним вызовом - и называет отказ по месту.
+///
+/// Маршрут группы начинается **номером члена**, и по нему ищутся оба: текст для
+/// каретки и имя для пути. Без них отказ вставал на слово `mutual`, каким бы
+/// длинным блок ни был, и звал члена как «член группы #1».
+fn declare_definitions(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    planned: &[&Mutual<'_>],
+    generalized: &[Term],
+    arities: &[(u32, u32)],
+    trees: &[Compiled],
+    span: Span,
+) -> Result<(), ElabError> {
     let mut group: Option<Group> = None;
     for (at, member) in planned.iter().enumerate() {
         let declared =
@@ -2021,20 +2051,30 @@ fn declare_mutual(
             Some(group) => group.and(declared),
         });
     }
-    if let Some(group) = group {
-        signature
-            .declare(metas, &group)
-            .map_err(|error| ElabError::Core {
-                span,
-                error: Box::new(error),
-                names: Names::of(&planned[0].name.text, Vec::new()),
-            })?;
-    }
-    required_verdicts(signature, &planned)?;
-    for member in &planned {
-        carrier::check(signature, owned, &member.name.text, member.span)?;
-    }
-    Ok(())
+    let Some(group) = group else {
+        return Ok(());
+    };
+    let routed: Vec<route::Member<'_>> = planned
+        .iter()
+        .zip(trees)
+        .map(|(member, tree)| route::Member {
+            ty: member.ty,
+            clauses: member.clauses,
+            compiled: tree,
+        })
+        .collect();
+    let declared = Declared::Group(&routed);
+    signature
+        .declare(metas, &group)
+        .map_err(|error| ElabError::Core {
+            span: route::locate(&declared, &error, span),
+            error: Box::new(error),
+            names: Names::group(
+                planned
+                    .iter()
+                    .map(|it| (Rc::clone(&it.name.text), Vec::new())),
+            ),
+        })
 }
 
 /// Чем члены группы видят друг друга при проверке тела `at`-го.
@@ -2243,10 +2283,22 @@ fn declare_families(
             known, metas, owned, fixities, None, data, *at,
         )?);
     }
-    let Some(first) = families.first() else {
+    if families.is_empty() {
         return Ok(());
-    };
-    let names = first.names.clone();
+    }
+    // Имена **всей** группы: маршрут несёт номер члена, и `Tree` рядом с
+    // `Forest` печатались бы как «член группы #0» и «#1».
+    let names = Names::group(families.iter().map(|family| {
+        (
+            Rc::clone(&family.declared),
+            family
+                .data
+                .constructors
+                .iter()
+                .map(|it| Rc::clone(&it.name.text))
+                .collect(),
+        )
+    }));
     // Семейства видны **все** сразу: на этом стоит `Tree`/`Forest`, где
     // конструктор одного называет другое. Конструкторы же дописываются по
     // ходу - тот же порядок, что у тип-формеров, и по тому же доводу: взаимная

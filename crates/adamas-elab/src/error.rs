@@ -1125,6 +1125,19 @@ impl Names {
         }
     }
 
+    /// Группа из нескольких членов - `mutual` и взаимные семейства.
+    ///
+    /// Порядок обязан совпадать с порядком членов в группе: маршрут несёт
+    /// **номер**, и имя ищется по нему. Передай сюда одного первого - и
+    /// остальные напечатаются как «член группы #1», то есть ровно тем номером,
+    /// от которого имена и уводят.
+    pub(crate) fn group(members: impl IntoIterator<Item = (Symbol, Vec<Symbol>)>) -> Self {
+        Self {
+            members: members.into_iter().collect(),
+            inner: "конструктор",
+        }
+    }
+
     /// То же для эффекта: вложенное в него - операции.
     pub(crate) fn of_effect(name: &Symbol, operations: Vec<Symbol>) -> Self {
         Self {

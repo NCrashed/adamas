@@ -203,3 +203,44 @@ fn a_refusal_without_a_route_falls_back_to_the_declaration() {
     let text = format!("{BASE}data Bool where\n  Yes : Bool\n");
     assert_eq!(underlined(&text), "data Bool where\n  Yes : Bool");
 }
+
+#[test]
+fn a_group_member_is_underlined_not_the_whole_block() {
+    // У маршрута группы первый кадр несёт **номер члена**, и по нему ищутся оба
+    // - текст для каретки и имя для пути. Без него отказ вставал на слово
+    // `mutual`, то есть на весь блок, каким бы длинным тот ни был.
+    let text = format!(
+        "{BASE}mutual
+  first : Nat -> Nat
+  first n = n
+
+  second : Nat -> Bool
+  second n = Succ n
+"
+    );
+    assert_eq!(underlined(&text), "Succ n");
+}
+
+#[test]
+fn delta_over_an_open_group_member_names_the_member() {
+    // δ по членам открытой группы не работает: тела в сигнатуру ещё не попали.
+    // Названная §9 цена - отвергается корректный блок, - и потому важно, чтобы
+    // отказ показывал место, а не блок: тип `refl0` соседа не называет, а тип
+    // его тела есть `Eqv Nat n0 n0`.
+    let text = format!(
+        "{BASE}data Eqv (a : Type) (x : a) : a -> Type where
+  Refl : Eqv a x x
+
+mk : (k : Nat) -> Eqv Nat k k
+mk k = Refl
+
+mutual
+  n0 : Nat
+  n0 = Zero
+
+  refl0 : Eqv Nat Zero Zero
+  refl0 = mk n0
+"
+    );
+    assert_eq!(underlined(&text), "mk n0");
+}

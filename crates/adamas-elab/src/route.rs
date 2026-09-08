@@ -45,10 +45,39 @@ pub(crate) enum Declared<'a> {
         /// Дерево разбора вместе с местами клауз в нём.
         compiled: &'a Compiled,
     },
+    /// Группа определений: `mutual`. Кадр её маршрута начинается **номером
+    /// члена**, и без него каретка вставала на блок целиком - на сорок строк
+    /// вместо одной клаузы.
+    Group(&'a [Member<'a>]),
     /// Индуктивное семейство: тип-формер и типы конструкторов.
     Data(&'a ast::Data),
     /// Эффект: типы его операций. Формер не пишется, указывать в нём не на что.
     Effect(&'a ast::EffectDecl),
+}
+
+/// Один член группы: то же, что несёт [`Declared::Definition`].
+pub(crate) struct Member<'a> {
+    /// Написанный тип.
+    pub ty: &'a Expr,
+    /// Клаузы в порядке написания.
+    pub clauses: &'a [ast::Clause],
+    /// Дерево разбора вместе с местами клауз в нём.
+    pub compiled: &'a Compiled,
+}
+
+impl Member<'_> {
+    /// Тело определения - дерево разбора, которого автор не писал. Здесь
+    /// соответствие не выводится из формы, а взято у сборки.
+    fn body(&self, route: &[Frame], fallback: Span) -> Span {
+        self.compiled
+            .locate(route)
+            .and_then(|(clause, inner)| {
+                self.clauses
+                    .get(clause)
+                    .map(|clause| narrow(&clause.body, inner))
+            })
+            .unwrap_or(fallback)
+    }
 }
 
 /// Где в исходнике то, что отверг `check`.
@@ -67,18 +96,26 @@ pub(crate) fn locate(declared: &Declared<'_>, error: &TypeError, fallback: Span)
             ty,
             clauses,
             compiled,
-        } => match route.split_first() {
-            Some((Frame::MemberType(_), rest)) => narrow(ty, rest),
-            // Тело определения - дерево разбора, которого автор не писал.
-            // Здесь соответствие не выводится из формы, а взято у сборки.
-            Some((Frame::MemberBody(_), rest)) => compiled
-                .locate(rest)
-                .and_then(|(clause, inner)| {
-                    clauses
-                        .get(clause)
-                        .map(|clause| narrow(&clause.body, inner))
-                })
-                .unwrap_or(fallback),
+        } => {
+            let member = Member {
+                ty,
+                clauses,
+                compiled,
+            };
+            match route.split_first() {
+                Some((Frame::MemberType(_), rest)) => narrow(ty, rest),
+                Some((Frame::MemberBody(_), rest)) => member.body(rest, fallback),
+                _ => fallback,
+            }
+        }
+        // У группы номер члена значим: он и выбирает, в чей текст спускаться.
+        Declared::Group(members) => match route.split_first() {
+            Some((Frame::MemberType(index), rest)) => members
+                .get(*index as usize)
+                .map_or(fallback, |member| narrow(member.ty, rest)),
+            Some((Frame::MemberBody(index), rest)) => members
+                .get(*index as usize)
+                .map_or(fallback, |member| member.body(rest, fallback)),
             _ => fallback,
         },
         Declared::Effect(effect) => match route.split_first() {

@@ -1,0 +1,65 @@
+-- Эффект членом модуля (§4.8, §3.4).
+--
+-- Подъём у эффекта тот же, что у семейства: квалифицируется и метка, и каждая
+-- её операция. Внутри тела пишется короткое имя - лестница §4.8 находит своё, -
+-- снаружи путь, и путь законен там же, где законно имя: в row сигнатуры
+-- (`{Store.Ask}`) и в ветке хендлера (`Store.ask ->`).
+--
+-- Квалификация проверяется тем, что `Ask` объявлен **дважды**: у `Store` и у
+-- `Other`. На верхнеуровневых именах это столкновение - «определение `Ask` уже
+-- существует», - и потому корпус, где такой пары нет, о квалификации не
+-- говорит ничего.
+--
+-- Проверяется значением: `[1, 0, 2]`. Первый элемент считает хендлер внутри
+-- `Store`, второй - одноимённая операция соседнего модуля, третий - хендлер
+-- снаружи, написанный путём.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+module Store where
+  effect Ask where
+    ask : Nat
+
+  -- Короткое имя операции внутри тела - своё, а не глобальное.
+  asked : {Ask} Nat
+  asked = ask
+
+  answered : Nat
+  answered = handle asked with
+    return v -> v
+    ask -> resume 1
+
+module Other where
+  effect Ask where
+    ask : Nat
+
+  asked : {Ask} Nat
+  asked = ask
+
+  answered : Nat
+  answered = handle asked with
+    return v -> v
+    ask -> resume 0
+
+-- Снаружи метка называется путём, и это обычная row.
+outside : {Store.Ask} Nat
+outside = Store.ask
+
+-- Путём же называется операция в ветке: ветка ссылается на объявленное имя,
+-- а не связывает, поэтому выбирать между путём и проекцией здесь не из чего.
+counted : Nat
+counted = handle outside with
+  return v -> v
+  Store.ask -> resume 2
+
+main : List Nat
+main = [Store.answered, Other.answered, counted]

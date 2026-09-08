@@ -1,0 +1,41 @@
+-- Названная граница: в теле функтора эффект не объявляется (§4.8, §3.4).
+--
+-- Член функтора поднимается под его параметрами - у семейства так поднимается и
+-- формер, и каждый конструктор. У метки эффекта телескопа перед ней нет:
+-- формер её оканчивается `Effect`, параметры пишутся только свои, и назвать
+-- `Key.T` в типе операции поэтому нечем.
+--
+-- Отказ стоит на самом объявлении, а не на типе операции. Без него та же
+-- программа отвечала «имя `Key` не найдено» на строке `ask : Key.T` - о
+-- параметре, написанном строкой выше и вполне существующем.
+--
+-- Ближайший проходящий сосед - тот же модуль без параметра: `module Counting
+-- where` вместо `module Counting (Key : Eqv) where`, с `Nat` на месте `Key.T`.
+-- Полная форма - `eval/module-effect.adamas`.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+module type Eqv where
+  type T
+  eq : T -> T -> Bool
+
+module NatEq : Eqv where
+  type T = Nat
+  eq : T -> T -> Bool
+  eq a b = True
+
+module Counting (Key : Eqv) where
+  effect Ask where
+    ask : Key.T
+
+  asked : {Ask} Key.T
+  asked = ask

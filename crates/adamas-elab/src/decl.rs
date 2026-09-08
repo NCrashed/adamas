@@ -594,15 +594,7 @@ fn members_into(
             DeclKind::Fixity(decl) => fixities.declare(decl)?,
             DeclKind::Effect(effect) => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
-                // Та же граница, что у семейства, и по той же причине: имя
-                // метки квалифицировалось бы, а имена операций нет.
-                only_at_top(
-                    within,
-                    &effect.name.text,
-                    "операции квалифицированного имени пока не носят",
-                    decl.span,
-                )?;
-                declare_effect(signature, metas, owned, fixities, effect, decl.span)?;
+                declare_effect(signature, metas, owned, fixities, within, effect, decl.span)?;
             }
         }
     }
@@ -895,6 +887,15 @@ fn module_object(
 ) -> Term {
     let mut written = Vec::new();
     for member in members {
+        // Метка эффекта полем не становится: поле записи типизируется типом, а
+        // метка - не тип (§3.4), и `module type` объявить её нечем. Снаружи она
+        // видна поднятым именем наравне с прочими членами - `Store.Ask`, - а в
+        // самой записи её места нет. Оставь поле, и всякий модуль с эффектом
+        // перестал бы подходить под свою сигнатуру числом полей, то есть
+        // запечатать эффект стало бы нечем.
+        if matches!(member.kind, DeclKind::Effect(_)) {
+            continue;
+        }
         let Some(name) = member_name(member) else {
             continue;
         };
@@ -4141,11 +4142,21 @@ fn declare_family(
 /// метку, а в сигнатуре её ещё нет. Отличий два. Формер не пишется - результат
 /// метки всегда `Effect`, - и укладывать метку некуда: она не тип, полем стоять
 /// не может, поэтому ни универсума, ни позитивности у неё нет.
+///
+/// В теле модуля квалифицируются и метка, и каждая операция - подъём тот же,
+/// что у семейства (§4.8). Полем записи метка при этом не становится, и
+/// [`module_object`] её пропускает: поле типизируется типом, а метка им не
+/// является.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "объявление несёт своё окружение; складывать его в структуру значило бы прятать, что именно читается"
+)]
 fn declare_effect(
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &Owned,
     fixities: &Fixities,
+    within: Option<&Enclosing>,
     effect: &ast::EffectDecl,
     span: Span,
 ) -> Result<(), ElabError> {
@@ -4165,15 +4176,35 @@ fn declare_effect(
             span: clash.name.span,
         });
     }
-    let mut elaborator = Elaborator::new(signature, metas, owned, fixities);
+    // Имя, под которым эффект объявляется, - квалифицированное в теле модуля,
+    // и квалифицируются **и метка, и операции**: представление эффекта есть
+    // его операции ровно так же, как представление семейства есть его
+    // конструкторы (§4.8). Оставь операции на верхнем уровне - и два модуля с
+    // одноимённым `Ask` столкнулись бы, а запечатывать было бы нечего.
+    let declared = qualify(within, &effect.name.text);
+    // Названная граница: в теле функтора эффект не объявляется. Член функтора
+    // поднимается под его параметрами, а метка их не несёт - формер её
+    // оканчивается `Effect`, и телескопа перед ним элаборация не строит.
+    // Отказ здесь затем, что без него та же форма падала «имя `Key` не
+    // найдено» на типе операции - сообщение о параметре, написанном строкой
+    // выше.
+    if !params_of(within).is_empty() {
+        return Err(ElabError::ModuleMember {
+            name: Rc::clone(&effect.name.text),
+            what: "функторе",
+            why: "член функтора поднимается под его параметрами, а метка их не несёт",
+            span,
+        });
+    }
+    let mut elaborator = Elaborator::new(signature, metas, owned, fixities).within(within);
     let params = elaborator.telescope(&effect.params, false, Mult::Zero, Unwritten::Sort)?;
     let kind = elaborator.wrapped(&params, false, |_| Ok(Term::EffectKind))?;
     let names = Names::of_effect(
-        &effect.name.text,
+        &declared,
         effect
             .operations
             .iter()
-            .map(|operation| Rc::clone(&operation.name.text))
+            .map(|operation| qualify(within, &operation.name.text))
             .collect(),
     );
     let levels = self_levels(signature, metas, &kind).map_err(|error| ElabError::Core {
@@ -4182,14 +4213,14 @@ fn declare_effect(
         names: names.clone(),
     })?;
     let visible = Member {
-        name: Rc::clone(&effect.name.text),
+        name: Rc::clone(&declared),
         levels,
         // Формер метки оканчивается `Effect`, своей row у него нет.
         args: Args::none(),
         ty: Rc::new(kind.clone()),
     };
 
-    let label = own_label(effect);
+    let label = own_label(effect, &declared);
     // Подъём у операций и у элиминаторов - **одна** переменная (§10 вопрос 120).
     //
     // Собственный row-параметр операции есть окружающая места вызова, а под
@@ -4208,17 +4239,18 @@ fn declare_effect(
         // инстанцируется местом вызова, как всякое определение (§10 вопрос
         // 116). Считаются они тем же элаборатором, что строит тип.
         let mut it =
-            Elaborator::with_group(signature, metas, owned, fixities, vec![visible.clone()]);
+            Elaborator::with_group(signature, metas, owned, fixities, vec![visible.clone()])
+                .within(within);
         let lift = rho.clone();
         let ty = it.wrapped(&params, true, |it| {
             it.declaration_lifted(&written, Mult::Many, lift)
         })?;
         let grades = it.grade_arity();
         let ty = grounded(&zonk_term(metas, &ty), params.len(), true);
-        operations.push((&*operation.name.text, ty, suspended, grades));
+        operations.push((qualify(within, &operation.name.text), ty, suspended, grades));
     }
 
-    let handlers = eliminator_types(signature, metas, &kind, effect, &operations, &rho, span)?;
+    let handlers = eliminator_types(signature, metas, &kind, &declared, &operations, &rho, span)?;
     let handlers: Vec<(&str, Term)> = handlers
         .iter()
         .map(|(name, ty)| (name.as_str(), ty.clone()))
@@ -4226,18 +4258,11 @@ fn declare_effect(
 
     let written: Vec<(&str, Term, u32)> = operations
         .iter()
-        .map(|(name, ty, _, grades)| (*name, ty.clone(), *grades))
+        .map(|(name, ty, _, grades)| (&**name, ty.clone(), *grades))
         .collect();
     let parameters = u32::try_from(params.len()).unwrap_or(u32::MAX);
     signature
-        .declare_effect(
-            metas,
-            &effect.name.text,
-            parameters,
-            kind,
-            &written,
-            &handlers,
-        )
+        .declare_effect(metas, &declared, parameters, kind, &written, &handlers)
         .map_err(|error| ElabError::Core {
             span: route::locate(&Declared::Effect(effect), &error, span),
             error: Box::new(error),
@@ -4248,7 +4273,7 @@ fn declare_effect(
         metas,
         owned,
         fixities,
-        &effect.name.text,
+        &declared,
         &effect.params,
         Unwritten::Sort,
     )
@@ -4507,8 +4532,8 @@ fn eliminator_types(
     signature: &mut Signature,
     metas: &mut Metas,
     kind: &Term,
-    effect: &ast::EffectDecl,
-    operations: &[(&str, Term, bool, u32)],
+    declared: &Symbol,
+    operations: &[(Symbol, Term, bool, u32)],
     rho: &Row<Term>,
     span: Span,
 ) -> Result<Vec<(String, Term)>, ElabError> {
@@ -4524,18 +4549,18 @@ fn eliminator_types(
             metas,
             &Handled {
                 kind,
-                label: &effect.name.text,
+                label: declared,
                 operations,
                 resumed,
                 rho: rho.clone(),
             },
             span,
         )?;
-        handlers.push((format!("{prefix}.{}", effect.name.text), ty));
+        handlers.push((format!("{prefix}.{declared}"), ty));
     }
     handlers.push((
-        format!("{MASK}.{}", effect.name.text),
-        mask_type(signature, metas, kind, &effect.name.text, span)?,
+        format!("{MASK}.{declared}"),
+        mask_type(signature, metas, kind, declared, span)?,
     ));
     Ok(handlers)
 }
@@ -4546,7 +4571,7 @@ struct Handled<'a> {
     /// Имя метки.
     label: &'a str,
     /// Операции: имя, тип, синтезирован ли триггер сахаром, арность кратностей.
-    operations: &'a [(&'a str, Term, bool, u32)],
+    operations: &'a [(Symbol, Term, bool, u32)],
     /// Кратность резумпции - ею и различаются два элиминатора.
     resumed: Mult,
     /// Подъём, общий у элиминатора с операциями (§10 вопрос 120).
@@ -4657,7 +4682,11 @@ fn handler_type(
             trivial: &trivial,
             resumed,
         });
-        binders.push((Binder::explicit(Mult::Many), CoreName::from(*name), branch));
+        binders.push((
+            Binder::explicit(Mult::Many),
+            CoreName::from(&**name),
+            branch,
+        ));
         level += 1;
     }
 
@@ -4790,9 +4819,16 @@ fn branch_type(branch: Branch<'_>) -> Term {
 }
 
 /// Метка, применённая к собственным параметрам: `State s`.
-fn own_label(effect: &ast::EffectDecl) -> ast::EffectLabel {
+///
+/// Имя берётся объявленное, а не написанное: в теле модуля метка объявлена
+/// квалифицированной, и собственная row операции обязана назвать её так же -
+/// иначе операция ссылалась бы на несуществующее верхнеуровневое имя.
+fn own_label(effect: &ast::EffectDecl, declared: &Symbol) -> ast::EffectLabel {
     ast::EffectLabel {
-        name: effect.name.clone(),
+        name: ast::Name {
+            text: Rc::clone(declared),
+            span: effect.name.span,
+        },
         arguments: effect
             .params
             .iter()

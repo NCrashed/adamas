@@ -166,24 +166,29 @@ fn bind_as(name: ast::Name) -> ast::LamParam {
 /// Порядок написания значения не имеет - сопоставляются они по имени, - а
 /// элиминатор ждёт их в объявленном. Ветка `return` необязательна: без неё
 /// значение вычисления и есть ответ, то есть `b := a`.
+///
+/// Сопоставляются **объявленные** имена, а не написанные: операция эффекта из
+/// тела модуля объявлена квалифицированной, а ветка для неё пишется коротким
+/// именем - тем же, каким операция и зовётся (§4.8). `declared[i]` - то, во
+/// что разрешилось имя `branches[i]`.
 fn ordered_branches<'a>(
     operations: &[Symbol],
     branches: &'a [ast::HandlerBranch],
+    declared: &[Symbol],
     identity: &'a ast::HandlerBranch,
     span: Span,
 ) -> Result<Vec<&'a ast::HandlerBranch>, ElabError> {
     let mut seen: Vec<&Symbol> = Vec::new();
-    for branch in branches {
-        if seen.iter().any(|it| ***it == *branch.name.text) {
+    for (branch, name) in branches.iter().zip(declared) {
+        if seen.contains(&name) {
             return Err(ElabError::HandlerBranch {
                 name: Rc::clone(&branch.name.text),
                 why: "ветка написана дважды",
                 span: branch.span,
             });
         }
-        seen.push(&branch.name.text);
-        let known =
-            &*branch.name.text == RETURN || operations.iter().any(|it| **it == *branch.name.text);
+        seen.push(name);
+        let known = &**name == RETURN || operations.contains(name);
         if !known {
             return Err(ElabError::HandlerBranch {
                 name: Rc::clone(&branch.name.text),
@@ -192,7 +197,13 @@ fn ordered_branches<'a>(
             });
         }
     }
-    let named = |wanted: &str| branches.iter().find(|it| &*it.name.text == wanted);
+    let named = |wanted: &str| {
+        branches
+            .iter()
+            .zip(declared)
+            .find(|(_, name)| &***name == wanted)
+            .map(|(branch, _)| branch)
+    };
     let mut ordered = Vec::with_capacity(operations.len() + 1);
     ordered.push(named(RETURN).unwrap_or(identity));
     for operation in operations {
@@ -1916,6 +1927,23 @@ impl<'a> Elaborator<'a> {
         self.signature.lookup(data)?.opaque.then(|| Rc::clone(data))
     }
 
+    /// То же для эффекта: представление его - это его операции.
+    ///
+    /// Довод тот же, что у конструктора, и правило то же: оставь операции
+    /// видимыми - и `:>` над эффектом был бы фикцией, потому что снаружи
+    /// пишется своё погашение, и абстракция, на которой стоит неутечка региона
+    /// (§3.6), обходится в одну строку. Внутри тела операции поэтому видны,
+    /// снаружи нет, и второго флага не заводится.
+    fn sealed_operation(&self, name: &str) -> Option<Symbol> {
+        let DefinitionKind::Operation { effect } = &self.signature.lookup(name)?.kind else {
+            return None;
+        };
+        self.signature
+            .lookup(effect)?
+            .opaque
+            .then(|| Rc::from(&**effect))
+    }
+
     /// Индекс де Брёйна локального связывания.
     fn local(&self, name: &str) -> Option<u32> {
         self.scope
@@ -2183,8 +2211,11 @@ impl<'a> Elaborator<'a> {
         if let ExprKind::Mask(deeper) = &inner.kind {
             return self.masked_label(deeper);
         }
-        let performed = crate::own::head(inner)
-            .and_then(|head| self.signature.lookup(head))
+        // Голова вправе быть путём: операция эффекта из тела модуля снаружи
+        // иначе не называется (§4.8).
+        let performed = crate::own::head_path(inner)
+            .map(|head| self.declared_name(&head))
+            .and_then(|head| self.signature.lookup(&head))
             .and_then(|definition| match &definition.kind {
                 DefinitionKind::Operation { effect } => Some(Rc::from(&**effect)),
                 _ => None,
@@ -4009,7 +4040,12 @@ impl<'a> Elaborator<'a> {
         };
         let operations = self.operations_of(&effect);
         let identity = identity_return(span);
-        let ordered = ordered_branches(&operations, branches, &identity, span)?;
+        let written: Vec<Symbol> = branches
+            .iter()
+            .map(|branch| self.declared_name(&branch.name.text))
+            .collect();
+        self.unsealed_branches(branches, &written)?;
+        let ordered = ordered_branches(&operations, branches, &written, &identity, span)?;
 
         let initial = self.initial_state(state, &effect, multi, span)?;
 
@@ -4308,8 +4344,9 @@ impl<'a> Elaborator<'a> {
         span: Span,
     ) -> Result<Symbol, ElabError> {
         if let Some(label) = label {
-            return match self.signature.lookup(&label.name.text).map(|it| &it.kind) {
-                Some(DefinitionKind::Effect { .. }) => Ok(Rc::clone(&label.name.text)),
+            let name = self.declared_name(&label.name.text);
+            return match self.signature.lookup(&name).map(|it| &it.kind) {
+                Some(DefinitionKind::Effect { .. }) => Ok(name),
                 _ => Err(ElabError::HandlerLabel {
                     name: Rc::clone(&label.name.text),
                     why: "обязана быть эффектом",
@@ -4325,9 +4362,10 @@ impl<'a> Elaborator<'a> {
                 why: "хендлер без веток операций метки не называет",
                 span,
             })?;
+        let operation = self.declared_name(&named.name.text);
         match self
             .signature
-            .lookup(&named.name.text)
+            .lookup(&operation)
             .map(|definition| &definition.kind)
         {
             Some(DefinitionKind::Operation { effect }) => Ok(Rc::from(&**effect)),
@@ -4337,6 +4375,35 @@ impl<'a> Elaborator<'a> {
                 span: named.name.span,
             }),
         }
+    }
+
+    /// Имя, под которым объявлено написанное: лестница §4.8, а не найдётся -
+    /// само написанное.
+    fn declared_name(&self, name: &str) -> Symbol {
+        self.qualified(name).unwrap_or_else(|| Rc::from(name))
+    }
+
+    /// Ни одна ветка не называет операцию запечатанного эффекта (§4.8, §3.6).
+    ///
+    /// Спрашивается по **веткам**, а не по метке: метку `handle` берёт из
+    /// первой ветки-операции либо из написанной за `@`, и проверка на одном из
+    /// этих маршрутов оставляет второй открытым. Замерено: пока запрет стоял
+    /// на первом, `handle @Counter.Tick` с той же веткой проходил и считал.
+    fn unsealed_branches(
+        &self,
+        branches: &[ast::HandlerBranch],
+        declared: &[Symbol],
+    ) -> Result<(), ElabError> {
+        for (branch, name) in branches.iter().zip(declared) {
+            if let Some(effect) = self.sealed_operation(name) {
+                return Err(ElabError::SealedOperation {
+                    name: Rc::clone(&branch.name.text),
+                    effect,
+                    span: branch.name.span,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Операции эффекта в порядке объявления.

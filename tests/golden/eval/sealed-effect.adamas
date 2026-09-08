@@ -1,0 +1,61 @@
+-- Запечатанный эффект: погашает его только свой модуль (§4.8, §3.4, §3.6).
+--
+-- Представление эффекта - это его операции, ровно как представление семейства -
+-- его конструкторы. `:>` скрывает именно их: снаружи `Counter.Tick` есть метка
+-- без видимых операций, и написать по ней свой хендлер нечем.
+--
+-- Это половина гарантии неутечки региона (§3.6): `withRegion` держит её только
+-- пока он **единственный** погашающий `Alloc`. Здесь та же пара в миниатюре -
+-- `pending` отдаётся наружу вместе со своей меткой, как `allocIn`, а снять её
+-- умеют только `run` и `runZero`, и оба объявлены внутри.
+--
+-- Метка полем записи не становится - она не тип, - поэтому `Counting`
+-- перечисляет лишь то, что модуль отдаёт наружу. Абстрактный `Counted` стоит
+-- в сигнатуре потому, что назвать `{Tick} Nat` там больше нечем: сигнатура
+-- пишется раньше модуля и метки его ещё не знает.
+--
+-- Здесь показано **законное** употребление: вычисление берётся снаружи и
+-- гасится экспортированным погашающим, и значение считается - `[3, 0]`, по
+-- ответу каждого. Обратная сторона - `errors/sealed-operation.adamas`, где
+-- снаружи пытаются написать своё погашение над тем же `pending`.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+module type Counting where
+  type Counted
+  pending : Counted
+  run : Counted -> Nat
+  runZero : Counted -> Nat
+
+module Counter :> Counting where
+  effect Tick where
+    tick : Nat
+
+  type Counted = {Tick} Nat
+
+  -- Вычисление в собственной метке, отданное наружу: тип его метку называет,
+  -- а операцию, которой его построили, снаружи не назвать.
+  pending : {Tick} Nat
+  pending = tick
+
+  run : ({Tick} Nat) -> Nat
+  run c = handle c with
+    return v -> v
+    tick -> resume 3
+
+  runZero : ({Tick} Nat) -> Nat
+  runZero c = handle c with
+    return v -> v
+    tick -> resume 0
+
+main : List Nat
+main = [Counter.run Counter.pending, Counter.runZero Counter.pending]

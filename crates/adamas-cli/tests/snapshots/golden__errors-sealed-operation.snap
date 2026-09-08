@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: sealed-operation.adamas:54:3: `Counter.tick` не видна: `Counter.Tick` объявлен в запечатанном модуле, и гасит его только он сам
+    Counter.tick -> resume Zero
+    ^^^^^^^^^^^^

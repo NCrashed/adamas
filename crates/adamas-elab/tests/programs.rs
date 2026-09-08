@@ -5208,12 +5208,79 @@ wrap n = Succ n
         "запись",
         format!("{BASE}\n@noalloc\npair : Nat -> {{ x : Nat }}\npair n = {{ x = n }}\n"),
     );
-    // Постулат: тела нет, и обязательство проверить нечем. Через границу пакета
-    // §5.1 требует объявленного атрибута, но самой границы ещё нет.
-    refuse(
-        "постулат",
-        format!("{BASE}\n@noalloc\noutside : Nat -> Nat\n"),
+    // Постулат без атрибута: тела нет, и вывести вердикт не из чего. Отказ
+    // называет, чего не хватает, - написанного обязательства.
+    let boundary = refuse(
+        "постулат без атрибута",
+        format!(
+            "{BASE}\nforeign : Nat -> Nat\n\n@noalloc\nacross : Nat -> Nat\nacross n = foreign n\n"
+        ),
     );
+    assert!(
+        boundary.contains("`foreign`") && boundary.contains("`@noalloc`"),
+        "отказ обязан назвать, чего не написано: {boundary}"
+    );
+
+    // У метода класса атрибут был бы обещанием за каждый инстанс - тем же
+    // доводом, что и `@total`.
+    let method = refused(&format!(
+        "{BASE}\nclass C a where\n  @noalloc\n  size : a -> a\n"
+    ));
+    assert!(
+        matches!(method, ElabError::ModuleMember { .. }),
+        "получено {method:?}"
+    );
+}
+
+#[test]
+fn what_the_noalloc_attribute_still_allows() {
+    // Обратная сторона отказов: атрибут вынуждает стиль (§5.1), но не запрещает
+    // ни рекурсии, ни нульарного конструктора, ни вызова за объявленную границу.
+
+    // Конструктор без рантайм-полей объектом не становится: номер его живёт в
+    // самом указателе (ABI, лог 2026-09-08). Параметр семейства стёрт и полем
+    // не считается, поэтому `Leaf` ничем не отличается от `Zero`.
+    let signature = program(&format!(
+        "{BASE}
+data Tree (a : Type) where
+  Leaf : Tree a
+  Node : Tree a -> a -> Tree a -> Tree a
+
+@noalloc
+floor : Nat -> Nat
+floor Zero = Zero
+floor (Succ k) = Zero
+
+@noalloc
+empty : Tree Nat
+empty = Leaf
+"
+    ));
+    assert!(
+        signature
+            .lookup("Leaf")
+            .is_some_and(|it| it.allocates.is_none()),
+        "нульарный конструктор параметризованного семейства не аллоцирует"
+    );
+    assert!(
+        signature
+            .lookup("Node")
+            .is_some_and(|it| it.allocates.is_some()),
+        "три поля - это объект в куче"
+    );
+
+    // Постулат **с** атрибутом объявляет обязательство: через границу его
+    // объявляют, а не выводят (§5.1), и вызов его законен.
+    program(&format!(
+        "{BASE}
+@noalloc
+outside : Nat -> Nat
+
+@noalloc
+across : Nat -> Nat
+across n = outside n
+"
+    ));
 
     // Рекурсия под атрибутом законна: §5.1 запрещает кучу и о стеке не говорит.
     // Взаимная - тоже, и вердикт ей считает неподвижная точка сверху.
@@ -5231,16 +5298,6 @@ mutual
   oddly (Succ k) m = evenly k m
 "
     ));
-
-    // У метода класса атрибут был бы обещанием за каждый инстанс - тем же
-    // доводом, что и `@total`.
-    let method = refused(&format!(
-        "{BASE}\nclass C a where\n  @noalloc\n  size : a -> a\n"
-    ));
-    assert!(
-        matches!(method, ElabError::ModuleMember { .. }),
-        "получено {method:?}"
-    );
 }
 
 #[test]
@@ -5248,13 +5305,11 @@ fn an_unchecked_attribute_names_what_is_missing() {
     // Обязательств перед отсутствующим backend'ом в языке не осталось: все три
     // атрибута проверяются вердиктом ядра. Непроверяемым остаётся ненаписанный
     // - и отказ говорит именно это, а не «проверки под него нет».
-    for text in ["@fast\nf : Nat\nf = Zero\n"] {
-        let error = refused(&format!("{BASE}{text}"));
-        assert!(
-            matches!(error, ElabError::Attribute { .. }),
-            "для {text:?} получено {error:?}"
-        );
-    }
+    let error = refused(&format!("{BASE}@fast\nf : Nat\nf = Zero\n"));
+    assert!(
+        matches!(error, ElabError::Attribute { .. }),
+        "получено {error:?}"
+    );
 }
 
 /// Класс с двумя именованными инстансами на один тип - случай, ради которого

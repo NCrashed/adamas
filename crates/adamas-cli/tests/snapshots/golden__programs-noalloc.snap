@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-noalloc.adamas: проверено, объявлений 7
+noalloc.adamas: проверено, объявлений 14

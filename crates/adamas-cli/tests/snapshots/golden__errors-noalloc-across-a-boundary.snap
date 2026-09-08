@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: noalloc-across-a-boundary.adamas:19:1: `across` объявлена `@noalloc`, но зовёт `foreign`, у которой нет тела и не написан `@noalloc`: через границу обязательство объявляется, а не выводится из чужого кода (§5.1)
+  across : Nat -> Nat
+  ^^^^^^^^^^^^^^^^^^^

@@ -3133,9 +3133,19 @@ fn postulate(
                 names: Names::of(&pending.name, Vec::new()),
             }
         })?;
-    // Вердикты спрашиваются и у постулата: `@noalloc` без тела проверить нечем,
-    // а принятое молча обещание - обещание, которого никто не давал.
-    verdicts(signature, &pending.name, pending.required, None, pending.span)
+    // `@noalloc` на постулате - объявление обязательства, а не требование к
+    // вердикту: через границу его объявляют, потому что тела за ней нет (§5.1).
+    // Вердикты спрашиваются следом, как у всякого другого пути.
+    if pending.required.noalloc {
+        signature.promise_noalloc(&pending.name);
+    }
+    verdicts(
+        signature,
+        &pending.name,
+        pending.required,
+        None,
+        pending.span,
+    )
 }
 
 /// Определение: клаузы собираются в дерево разбора, дерево уходит в сигнатуру.

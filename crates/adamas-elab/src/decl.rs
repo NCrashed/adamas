@@ -3603,11 +3603,12 @@ fn mentions_depth(term: &Term, depth: u32) -> bool {
         Term::Pi(_, _, domain, row, codomain) => {
             recur(domain)
                 || under(codomain)
+                // Row стоит под связыванием стрелки наравне с кодоменом.
                 || row
                     .labels()
                     .iter()
                     .flat_map(|label| &label.arguments)
-                    .any(recur)
+                    .any(under)
         }
         Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || under(body),
         Term::Case(case) => {
@@ -4255,12 +4256,12 @@ fn mask_type(
         rho.clone(),
         Rc::new(answer.clone()),
     );
-    // Окружающая стоит на стрелке вычисления и читается в её **внешнем**
-    // контексте - там связаны параметры метки и `a`.
+    // Окружающая стоит на стрелке вычисления и читается **под** её
+    // связыванием - на той же глубине, что и кодомен.
     let ambient = Row::closing(
         [Label {
             name: CoreName::from(label),
-            arguments: (0..params).map(|param| at(param, params + 1)).collect(),
+            arguments: (0..params).map(|param| at(param, depth)).collect(),
         }],
         rho.tail(),
     );
@@ -4402,11 +4403,13 @@ fn handler_type(
         level += 1;
     }
 
-    // Вычисление: `{L p⃗ | ρ} a`, то есть нульместная функция от единицы.
+    // Вычисление: `{L p⃗ | ρ} a`, то есть нульместная функция от единицы. Row
+    // стоит под связыванием-единицей, поэтому её аргументы адресуются с той же
+    // глубины, что и кодомен.
     let performed = Row::closing(
         [Label {
             name: CoreName::from(label),
-            arguments: (0..params).map(|param| at(param, level)).collect(),
+            arguments: (0..params).map(|param| at(param, level + 1)).collect(),
         }],
         rho.tail(),
     );
@@ -4554,7 +4557,9 @@ fn branch_type(branch: Branch<'_>) -> Term {
             // сюда приходят только стрелки; ответ на всякий случай тот же.
             break quote(level, &current);
         };
-        let performing = !labels.labels().is_empty();
+        // Метки, а не row целиком: хвост есть у всякой стрелки, а производит
+        // операция там, где написана метка.
+        let performing = !labels.written().labels().is_empty();
         let (binder, name, domain) = (*binder, Rc::clone(name), quote(level, domain));
         let codomain = codomain.clone();
         let argument = if performing && suspended {

@@ -135,6 +135,35 @@ pub struct Closure {
     pub(crate) body: Rc<Term>,
 }
 
+/// Row стрелки, ждущая значения её же аргумента.
+///
+/// Row стоит **под** связыванием, потому что описывает применение, а применение
+/// аргумент уже знает: `(0 r : Region) -> {Alloc r} Nat` называет в эффекте
+/// именно тот регион, который передали. Отсюда замыкание, а не готовая row:
+/// вычислить метки до аргумента нечем, ровно как кодомен.
+#[derive(Clone, Debug)]
+pub struct RowClosure {
+    pub(crate) env: Env,
+    pub(crate) row: Row<Term>,
+}
+
+impl RowClosure {
+    /// Row при известном значении аргумента.
+    #[must_use]
+    pub fn apply(&self, value: Rc<Value>) -> Row<Rc<Value>> {
+        if self.row.is_empty() {
+            return Row::empty();
+        }
+        crate::eval::row_of(&self.env.extend(value), &self.row)
+    }
+
+    /// Метки как они написаны: имена видны без вычисления.
+    #[must_use]
+    pub fn written(&self) -> &Row<Term> {
+        &self.row
+    }
+}
+
 /// Голова застрявшего вычисления.
 ///
 /// Локальная переменная застревает всегда - её значение неизвестно по
@@ -241,7 +270,10 @@ pub enum Value {
     /// Функция.
     Lam(Mult, Name, Closure),
     /// Тип функции вместе с row того, что происходит при применении (§3.4).
-    Pi(Binder, Name, Rc<Value>, Row<Rc<Value>>, Closure),
+    ///
+    /// Row - замыкание по той же причине, что и кодомен: она стоит под
+    /// связыванием и вправе называть аргумент.
+    Pi(Binder, Name, Rc<Value>, RowClosure, Closure),
     /// Тип записи - телескоп полей вместе с окружением.
     ///
     /// Хранится термами, а не значениями: тип поля живёт под предыдущими
@@ -388,6 +420,7 @@ impl fmt::Display for Value {
             Self::Lam(mult, name, _) => write!(f, "\\({mult} {name}) -> …"),
             Self::Pi(binder, name, _, row, _) => {
                 let (open, close) = binder.visibility.brackets();
+                let row = row.written();
                 write!(f, "{open}{} {name} : …{close} -> {row}…", binder.mult)
             }
             Self::Record(telescope) => write!(f, "{{…{}}}", telescope.fields().len()),

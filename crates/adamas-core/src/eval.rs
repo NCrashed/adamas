@@ -24,7 +24,9 @@ use std::rc::Rc;
 
 use crate::row::{Row, Tail};
 use crate::term::{Args, Branch, Case, Field, Fields, Mults, Name, Term};
-use crate::value::{Closure, Elim, Env, Head, Lvl, StuckBranch, StuckCase, Telescope, Value};
+use crate::value::{
+    Closure, Elim, Env, Head, Lvl, RowClosure, StuckBranch, StuckCase, Telescope, Value,
+};
 
 impl Closure {
     /// Применяет замыкание к аргументу.
@@ -81,10 +83,13 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
             *binder,
             Rc::clone(name),
             eval(env, domain),
-            // Аргументы меток - обычные термы и вычисляются как всё прочее:
-            // `State s` под связыванием `s` без этого осталось бы термом с
-            // индексом, которому в значении не на что указывать.
-            row_of(env, row),
+            // Row стоит под связыванием наравне с кодоменом, поэтому и она
+            // замыкание: `{Alloc r}` у `(0 r : Region) -> {Alloc r} Nat`
+            // называет аргумент, а он станет известен только при применении.
+            RowClosure {
+                env: env.clone(),
+                row: row.clone(),
+            },
             Closure {
                 env: env.clone(),
                 body: Rc::clone(codomain),
@@ -488,11 +493,14 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
             Rc::new(quote(size + 1, &closure.apply(Value::var(Lvl(size))))),
         ),
 
+        // Row читается обратно под тем же свежим связыванием, что и кодомен:
+        // она стоит под ним и вправе его называть.
         Value::Pi(binder, name, domain, row, codomain) => Term::Pi(
             *binder,
             Rc::clone(name),
             Rc::new(quote(size, domain)),
-            row.map(|argument| quote(size, argument)),
+            row.apply(Value::var(Lvl(size)))
+                .map(|argument| quote(size + 1, argument)),
             Rc::new(quote(size + 1, &codomain.apply(Value::var(Lvl(size))))),
         ),
     }
@@ -538,6 +546,29 @@ mod tests {
         // (\x -> x) (Type 0)  ==>  Type 0
         let term = lam(Term::var(0)).apply([Term::universe(0)]);
         assert_eq!(normalize(&term).to_string(), "Type 0");
+    }
+
+    #[test]
+    fn a_row_names_the_binding_of_its_own_arrow() {
+        // Row стоит под связыванием стрелки, поэтому `#0` в метке - её же
+        // аргумент. Вычисление и обратное чтение обязаны это сохранить: читай
+        // `quote` метку на глубине домена, тот же индекс указывал бы наружу
+        // стрелки, и `(0 r : Region) -> {Alloc r} A` после нормализации значил
+        // бы не то, что написано.
+        let ty = Term::Pi(
+            Binder::explicit(Mult::Many),
+            "r".into(),
+            Rc::new(Term::universe(0)),
+            Row::new([crate::row::Label {
+                name: "Alloc".into(),
+                arguments: vec![Term::var(0)],
+            }]),
+            Rc::new(Term::universe(0)),
+        );
+        assert_eq!(
+            normalize(&ty).to_string(),
+            "(ω r : Type 0) -> {Alloc #0} Type 0"
+        );
     }
 
     #[test]

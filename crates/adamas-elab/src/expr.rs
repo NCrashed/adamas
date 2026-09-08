@@ -2547,14 +2547,17 @@ impl<'a> Elaborator<'a> {
     /// скажет он про имя, а не про форму, которая его позвала.
     fn suspended(&mut self, expr: &Expr, default: Mult) -> Result<Term, ElabError> {
         let (row, body) = split_row(expr);
-        let row = self.effects(row)?;
         let unit = self.name(&ast::Name {
             text: Rc::from("Unit"),
             span: expr.span,
         })?;
         let anonymous: Symbol = Rc::from("_");
         let bound = self.typed(&unit);
-        let body = self.under(&anonymous, Mult::Many, bound, |it| it.expr(body, default))?;
+        // Row элаборируется под связыванием наравне с телом: там она и стоит
+        // (§3.4). Единицу она не называет, но индексы у обеих одни.
+        let (row, body) = self.under(&anonymous, Mult::Many, bound, |it| {
+            Ok((it.effects(row)?, it.expr(body, default)?))
+        })?;
         Ok(Term::Pi(
             Binder::explicit(Mult::Many),
             CoreName::from("_"),
@@ -2642,11 +2645,11 @@ impl<'a> Elaborator<'a> {
         let anonymous: Symbol = Rc::from("_");
         let bound = self.typed(&domain);
         // Row снимается с кодомена и встаёт полем стрелки: написана она перед
-        // типом результата, а описывает применение (§3.4).
+        // типом результата, а описывает применение (§3.4). Элаборируется она
+        // под связыванием стрелки - там же, где стоит.
         let (row, codomain) = split_row(codomain);
-        let row = self.effects(row)?;
-        let codomain = self.under(&anonymous, mult, bound, |inner| {
-            inner.expr(codomain, default)
+        let (row, codomain) = self.under(&anonymous, mult, bound, |inner| {
+            Ok((inner.effects(row)?, inner.expr(codomain, default)?))
         })?;
         Ok(Term::Pi(
             // Стрелка пишется без скобок, поэтому связывание у неё явное:
@@ -3927,8 +3930,12 @@ impl<'a> Elaborator<'a> {
                 "написано значение, а не приостановленное вычисление",
             ));
         };
+        // Связывание приостановленного - единица, и метка её не называет:
+        // хендлер снимает эффект, а не аргумент-триггер. Подставляется поэтому
+        // стёртое - назвавшая его метка была бы видна, а не молча неверна.
+        let row = row.apply(Rc::new(Value::Erased));
         let Snatched { rest, arguments } =
-            without(row, effect).ok_or_else(|| refuse("вычисление этой метки не производит"))?;
+            without(&row, effect).ok_or_else(|| refuse("вычисление этой метки не производит"))?;
         Ok(Handling {
             value,
             rho: rest,
@@ -3958,7 +3965,12 @@ impl<'a> Elaborator<'a> {
         let row = Row::closing(
             [Label {
                 name: CoreName::from(&**effect),
-                arguments,
+                // Аргументы метки заведены снаружи связывания, а стоять им под
+                // ним - сдвиг тот же, что у ответа.
+                arguments: arguments
+                    .iter()
+                    .map(|argument| adamas_core::pattern::shift_free(argument, 1))
+                    .collect(),
             }],
             rho.tail(),
         );
@@ -3966,8 +3978,6 @@ impl<'a> Elaborator<'a> {
         let answer = self.fresh_meta(&Rc::new(Value::Universe(level)));
         // Дырка ответа заведена **снаружи** связывания, а стоять ей под ним:
         // спайн её считан на здешней глубине, и без сдвига индексы уезжают.
-        // Row сдвига не требует - она стоит на стрелке и читается в её внешнем
-        // контексте, там же, где заведены аргументы метки.
         Some(Term::Pi(
             Binder::explicit(Mult::Many),
             CoreName::from("_"),
@@ -4200,7 +4210,13 @@ impl<'a> Elaborator<'a> {
         // непогашенностью, то есть форма не делала того, ради чего заведена
         // (ревью 2026-09-05). Голден этого не видел: он состоит из хендлеров,
         // гасящих `State` в чистый результат.
-        let ambient = self.ctx.row().clone().map(|argument| quote(size, argument));
+        // Считана она снаружи связывания, а стоять ей под ним - сдвиг тот же,
+        // что у ответа.
+        let ambient = self
+            .ctx
+            .row()
+            .clone()
+            .map(|argument| adamas_core::pattern::shift_free(&quote(size, argument), 1));
         let arrow = Term::Pi(
             Binder::explicit(Mult::Many),
             CoreName::from(STATE),
@@ -4353,7 +4369,10 @@ impl<'a> Elaborator<'a> {
             *binder,
             Rc::clone(name),
             Rc::new(quote(depth, domain)),
-            row.map(|argument| quote(depth, argument)),
+            // Row стоит под связыванием, поэтому читается на глубину больше -
+            // как и кодомен.
+            row.apply(Value::var(Lvl(depth)))
+                .map(|argument| quote(depth + 1, argument)),
             Rc::new(self.unfolded_pi(&inner, depth + 1)),
         )
     }
@@ -4799,10 +4818,18 @@ impl<'a> Elaborator<'a> {
         } else {
             (None, codomain)
         };
-        let row = self.effects(written)?;
-        let body = self.binding(
+        // Row элаборируется **под** своим связыванием: она стоит там же, где
+        // кодомен, и вправе называть аргумент. Оттого `(0 r : Region) ->
+        // {Alloc r} Nat` пишется - имя связано к моменту, когда метка его
+        // спрашивает (§3.4, §3.6).
+        let (row, body) = self.binding(
             Bound::owning(&first.name, first.mult, bound, owns),
-            |inner| inner.pi_flat(rest, codomain, default),
+            |inner| {
+                Ok((
+                    inner.effects(written)?,
+                    inner.pi_flat(rest, codomain, default)?,
+                ))
+            },
         )?;
         let binder = match first.visibility {
             Visibility::Explicit => Binder::explicit(first.mult),
@@ -5632,18 +5659,27 @@ impl<'a> Elaborator<'a> {
         let mut current = self.declared_ty.clone();
         let mut ambient = Row::empty();
         for (source, pattern) in written {
-            let (mult, domain, codomain) = match current.as_deref() {
-                Some(Value::Pi(binder, _, domain, row, codomain)) => {
-                    // Окружающую row тела несёт последняя снятая стрелка
-                    // (§3.4): под связыванием работают уже в ней.
-                    ambient = row.clone();
-                    (binder.mult, Some(Rc::clone(domain)), Some(codomain.clone()))
-                }
-                _ => (Mult::Many, None, None),
+            let (mult, domain, codomain, written_row) = match current.as_deref() {
+                Some(Value::Pi(binder, _, domain, row, codomain)) => (
+                    binder.mult,
+                    Some(Rc::clone(domain)),
+                    Some(codomain.clone()),
+                    Some(row.clone()),
+                ),
+                _ => (Mult::Many, None, None, None),
             };
             let value = self.pattern_variables(
                 *source, pattern, mult, domain, body, &names, &mut found, &mut level,
             );
+            // Окружающую row тела несёт последняя снятая стрелка (§3.4): под
+            // связыванием работают уже в ней. Аргументом ей идёт разобранное -
+            // row стоит под связыванием и вправе его называть. Разобранного
+            // нет там, где нет и типа: тогда подставлять нечего, и метка,
+            // назвавшая аргумент, останется стёртой.
+            if let Some(row) = written_row {
+                let argument = value.clone().unwrap_or(Rc::new(Value::Erased));
+                ambient = row.apply(argument);
+            }
             current = match (codomain, value) {
                 (Some(codomain), Some(value)) => Some(codomain.apply(value)),
                 _ => None,

@@ -1,0 +1,49 @@
+-- Атрибут `@fbip`: что именно компилятор из обещания проверяет (§5.1).
+--
+-- Reuse срабатывает, когда разобранная ячейка переписывается структурой той же
+-- формы. Атрибут требует, чтобы так было везде, где ветвь строит; уникальности
+-- в момент вызова он не обещает - это свойство места вызова, а не функции.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Tree (a : Type) where
+  Leaf : Tree a
+  Node : Tree a -> a -> Tree a -> Tree a
+
+-- Каноническая механика §5.1: разобран `Node`, построен `Node`, форма та же -
+-- слоты переписываются, новых ячеек нет.
+@fbip
+map : (a -> b) -> Tree a -> Tree b
+map f Leaf = Leaf
+map f (Node l x r) = Node (map f l) (f x) (map f r)
+
+-- Перестановка полей - тот же случай: форма конструктора от порядка полей не
+-- зависит.
+@fbip
+mirror : Tree a -> Tree a
+mirror Leaf = Leaf
+mirror (Node l x r) = Node (mirror r) x (mirror l)
+
+-- Ветвь, которая ничего не строит, обязательства не нарушает: reuse в ней
+-- структурно невозможен, и требовать от неё нечего.
+@fbip
+label : Tree Nat -> Nat
+label Leaf = Zero
+label (Node l x r) = x
+
+-- Разобрано две ячейки, построена одна: слот занимает построенное, лишний
+-- слот просто освобождается. Обязательство - о построенном, а не о разобранном.
+@fbip
+graft : Tree a -> Tree a -> Tree a
+graft Leaf t = Leaf
+graft (Node l x r) Leaf = Node l x r
+graft (Node l x r) (Node a y b) = Node (graft l a) x (graft r b)
+
+-- Нульместный конструктор ячейки не занимает, и слота ему не нужно: `Leaf`
+-- есть константа, а не аллокация.
+@fbip
+prune : Tree a -> Tree a
+prune Leaf = Leaf
+prune (Node l x r) = Leaf

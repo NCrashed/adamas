@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: fbip-shape.adamas:25:43: `flatten` объявлено `@fbip`, но совместимости нет: разобран `Node` (полей: 3), а строится `Cons` (полей: 2): reuse переписывает слоты разобранного, и форма обязана совпасть
+  flatten (Node l x r) = append (flatten l) (Cons x (flatten r))
+                                            ^^^^^^^^^^^^^^^^^^^^

@@ -343,13 +343,14 @@ impl Naming {
                     naming.term(Rc::make_mut(body), bound, outer);
                 });
             }
-            // Аргументы меток row стоят под тем же контекстом, что домен:
-            // связывание `Pi` вводится только для кодомена.
+            // Аргументы меток row стоят под связыванием стрелки наравне с
+            // кодоменом, поэтому и имена им раздаются там же: иначе `{Alloc r}`
+            // печаталось бы чужим именем.
             Term::Pi(Binder { .. }, name, domain, row, codomain) => {
                 self.term(Rc::make_mut(domain), bound, outer);
-                *row = self.row(row, bound, outer);
                 let name = name.clone();
                 self.under(bound, name, |naming, bound| {
+                    *row = naming.row(row, bound, outer);
                     naming.term(Rc::make_mut(codomain), bound, outer);
                 });
             }

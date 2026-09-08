@@ -475,7 +475,10 @@ fn read(
             ))
         }
         Value::Pi(binder, name, domain, row, closure) => {
-            let row = read_row(metas, meta, renaming, outer, arity, depth, row)?;
+            // Row стоит под связыванием, поэтому читается на глубину больше -
+            // ровно как кодомен.
+            let row = row.apply(Value::var(Lvl(outer + depth)));
+            let row = read_row(metas, meta, renaming, outer, arity, depth + 1, &row)?;
             let codomain = closure.apply(Value::var(Lvl(outer + depth)));
             Some(Term::Pi(
                 *binder,

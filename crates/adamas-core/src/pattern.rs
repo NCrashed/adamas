@@ -305,9 +305,11 @@ pub fn compile_traced(
         };
         let bound = Lvl(ctx.size());
         telescope.push((*mult, Rc::clone(name), Rc::clone(domain)));
-        ctx = ctx
-            .within(row.clone())
-            .bind(Rc::clone(name), *mult, Rc::clone(domain));
+        ctx = ctx.within(row.apply(Value::var(bound))).bind(
+            Rc::clone(name),
+            *mult,
+            Rc::clone(domain),
+        );
         current = codomain.apply(Value::var(bound));
     }
     let arity = telescope.len();
@@ -1786,7 +1788,9 @@ fn goal(
         .enumerate()
         .rev()
         .fold(result, |codomain, (at, (mult, name, domain))| {
-            let row = ambient.map(|term| shift_at(term, 0, arity_u32(at)));
+            // Считана окружающая снаружи стрелок, а стоит row **под** своим
+            // связыванием: сдвиг на связывания над ней плюс её собственное.
+            let row = ambient.map(|term| shift_at(term, 0, arity_u32(at) + 1));
             Term::Pi(
                 Binder::explicit(mult),
                 name,
@@ -1886,11 +1890,12 @@ fn depends_term(term: &Term, depth: u32, size: u32, levels: &[u32]) -> bool {
         Term::Pi(_, _, domain, row, codomain) => {
             recur(domain)
                 || under(codomain)
+                // Row стоит под связыванием стрелки наравне с кодоменом.
                 || row
                     .labels()
                     .iter()
                     .flat_map(|label| &label.arguments)
-                    .any(|argument| depends_term(argument, depth, size, levels))
+                    .any(|argument| depends_term(argument, depth + 1, size, levels))
         }
         Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || under(body),
         Term::Case(case) => {
@@ -2045,11 +2050,12 @@ fn well_scoped(term: &Term, binders: u32) -> bool {
             Term::Pi(_, _, domain, row, codomain) => {
                 go(domain, depth, binders)
                     && go(codomain, depth + 1, binders)
+                    // Row стоит под связыванием стрелки наравне с кодоменом.
                     && row
                         .labels()
                         .iter()
                         .flat_map(|label| &label.arguments)
-                        .all(|argument| go(argument, depth, binders))
+                        .all(|argument| go(argument, depth + 1, binders))
             }
             Term::Let(_, _, ty, value, body) => {
                 go(ty, depth, binders) && go(value, depth, binders) && go(body, depth + 1, binders)
@@ -2133,11 +2139,12 @@ fn rewrite<F: Fn(u32) -> Term>(term: &Term, depth: u32, from: u32, map: &F) -> T
         | Term::Meta(_) => term.clone(),
         Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), under(body)),
         Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
+        // Row стоит под связыванием стрелки наравне с кодоменом.
         Term::Pi(binder, name, domain, row, codomain) => Term::Pi(
             *binder,
             Rc::clone(name),
             recur(domain),
-            row.map(|argument| rewrite(argument, depth, from, map)),
+            row.map(|argument| rewrite(argument, depth + 1, from, map)),
             under(codomain),
         ),
         Term::Let(mult, name, ty, value, body) => {
@@ -2234,11 +2241,12 @@ fn shift_at(term: &Term, depth: u32, by: u32) -> Term {
             Term::Project(record, name) => Term::Project(recur(record), Rc::clone(name)),
             Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), under(body)),
             Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
+            // Row стоит под связыванием стрелки наравне с кодоменом.
             Term::Pi(binder, name, domain, row, codomain) => Term::Pi(
                 *binder,
                 Rc::clone(name),
                 recur(domain),
-                row.map(|argument| go(argument, depth, by)),
+                row.map(|argument| go(argument, depth + 1, by)),
                 under(codomain),
             ),
             Term::Let(mult, name, ty, value, body) => {

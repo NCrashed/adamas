@@ -127,9 +127,10 @@ fn walk(signature: &Signature, owned: &Owned, term: &Term, depth: u32, found: &m
         Term::Project(record, _) => walk(signature, owned, record, depth, found),
         Term::Pi(_, _, domain, row, codomain) => {
             walk(signature, owned, domain, depth, found);
+            // Row стоит под связыванием стрелки наравне с кодоменом.
             for label in row.labels() {
                 for argument in &label.arguments {
-                    walk(signature, owned, argument, depth, found);
+                    walk(signature, owned, argument, depth + 1, found);
                 }
             }
             walk(signature, owned, codomain, depth + 1, found);

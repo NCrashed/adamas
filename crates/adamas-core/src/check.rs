@@ -390,9 +390,10 @@ fn check_lambda(
         ));
     }
     // Тело работает в row **своей** стрелки: лямбда и есть та функция, чей
-    // контракт эта row описывает (§3.4).
+    // контракт эта row описывает (§3.4). Аргументом для row служит связывание
+    // самой лямбды - она стоит под ним и вправе его называть.
     let inner = ctx
-        .within(row.clone())
+        .within(row.apply(ctx.fresh()))
         .bind(Rc::clone(name), *mult, Rc::clone(domain));
     let body_ty = codomain.apply(ctx.fresh());
     let usage = framed(check(&inner, metas, sigma, body, &body_ty), Frame::Body)?;
@@ -1612,13 +1613,13 @@ pub(crate) fn check_operation_shape(
                 .into());
             }
         }
-        // Метки стоят на глубине домена: связывание `Pi` вводится только для
-        // кодомена, поэтому аргументы метки адресуют то же, что и домен.
+        // Метки стоят **под** связыванием своей стрелки наравне с кодоменом,
+        // поэтому адресуют они на одно связывание глубже домена.
         if !field.row.labels().is_empty() {
             if performed.is_some() {
                 return Err(refused_row(name, effect, &field.row));
             }
-            performed = Some((ctx.size(), &field.row));
+            performed = Some((ctx.size() + 1, &field.row));
         }
         ctx = ctx.bind(
             Rc::clone(&field.name),
@@ -1960,6 +1961,11 @@ fn infer_app(
         ),
         Frame::Argument,
     )?;
+    // Row стоит под связыванием, поэтому гасится она при **этом** аргументе:
+    // `(0 r : Region) -> {Alloc r} Nat`, применённая к региону, требует его же
+    // в окружающей, а не переменную (§3.4).
+    let value = ctx.eval(argument);
+    let row = &row.apply(Rc::clone(&value));
     if !discharges(ctx.signature(), metas, ctx.size(), &ambient, row) {
         // Обе row печатаются **развёрнутыми** по решённым хвостам: правило
         // считает по развёрнутым, и без этого сообщение показывает `{Log | ?0}`
@@ -1979,7 +1985,7 @@ fn infer_app(
             },
         ));
     }
-    let result = codomain.apply(ctx.eval(argument));
+    let result = codomain.apply(value);
     // Кратность домена бывает дыркой - у полиморфного по кратности вызываемого
     // (§10 вопрос 41). Масштабировать ею нечего: полукольцо символьных значений
     // не считает, поэтому нерешённая доводится до наименьшей дозволенной -
@@ -2845,7 +2851,9 @@ fn branch_type(
     let result = telescope.into_iter().enumerate().rev().fold(
         result,
         |codomain, (at, (binder, name, domain))| {
-            let depth = u32::try_from(at).unwrap_or(u32::MAX);
+            // Считана окружающая снаружи стрелок, а стоит row **под** своим
+            // связыванием: сдвиг на связывания над ней плюс её собственное.
+            let depth = u32::try_from(at).unwrap_or(u32::MAX).saturating_add(1);
             Term::Pi(
                 Binder {
                     mult: binder.mult * case.consumed,

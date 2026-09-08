@@ -1028,9 +1028,19 @@ fn rigid(
             Value::Pi(binder_a, _, domain_a, row_a, codomain_a),
             Value::Pi(binder_b, _, domain_b, row_b, codomain_b),
         ) => {
+            // Row сравнивается под свежим связыванием: она стоит под ним
+            // наравне с кодоменом и вправе его называть.
+            let fresh = Value::var(Lvl(size));
             binder_a.visibility == binder_b.visibility
                 && unify_mults(metas, binder_a.mult, binder_b.mult)
-                && same_row(fuel, sig, metas, size, row_a, row_b)
+                && same_row(
+                    fuel,
+                    sig,
+                    metas,
+                    size + 1,
+                    &row_a.apply(Rc::clone(&fresh)),
+                    &row_b.apply(fresh),
+                )
                 && convertible_within(fuel, sig, metas, size, domain_a, domain_b)
                 && convertible_under(
                     fuel,
@@ -1349,6 +1359,7 @@ mod tests {
         let Value::Pi(_, _, _, row, _) = &*unfolded else {
             panic!("разворот даёт стрелку, получено {unfolded}");
         };
+        let row = row.apply(Value::var(Lvl(0)));
         assert_eq!(row.labels().len(), 1, "аргумент подставился");
         assert_eq!(row.tail(), None, "параметра не осталось");
     }

@@ -304,8 +304,9 @@ fn collect_calls(
         Term::Pi(_, _, domain, row, codomain) => {
             recur(depth, domain);
             recur(depth + 1, codomain);
+            // Row стоит под связыванием стрелки наравне с кодоменом.
             for argument in row.labels().iter().flat_map(|label| &label.arguments) {
-                recur(depth, argument);
+                recur(depth + 1, argument);
             }
         }
         Term::Let(_, _, ty, value, body) => {
@@ -457,11 +458,12 @@ fn closed_under(depth: usize, term: &Term) -> bool {
         Term::Pi(_, _, domain, row, codomain) => {
             recur(depth, domain)
                 && recur(depth + 1, codomain)
+                // Row стоит под связыванием стрелки наравне с кодоменом.
                 && row
                     .labels()
                     .iter()
                     .flat_map(|label| &label.arguments)
-                    .all(|argument| recur(depth, argument))
+                    .all(|argument| recur(depth + 1, argument))
         }
         Term::Let(_, _, ty, value, body) => {
             recur(depth, ty) && recur(depth, value) && recur(depth + 1, body)
@@ -660,10 +662,11 @@ impl Walk<'_> {
             Term::Pi(_, _, domain, row, codomain) => {
                 self.term(sizes, domain);
                 self.under(sizes, None, codomain);
-                // Аргументы меток стоят под тем же контекстом, что домен:
-                // связывание `Pi` вводится только для кодомена.
+                // Аргументы меток стоят под связыванием стрелки наравне с
+                // кодоменом: применение аргумент уже знает, и метка вправе его
+                // назвать.
                 for argument in row.labels().iter().flat_map(|label| &label.arguments) {
-                    self.term(sizes, argument);
+                    self.under(sizes, None, argument);
                 }
             }
 

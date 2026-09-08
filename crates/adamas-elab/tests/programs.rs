@@ -8951,3 +8951,81 @@ work = mask mixed
         "ожидалась неоднозначность, получено: {error}"
     );
 }
+
+#[test]
+fn a_family_empty_at_these_indices_needs_no_branches() {
+    // Пустым при разборе бывает не только семейство без конструкторов вовсе.
+    // `Eqv Nat Zero (Succ k)` конструктор имеет, но индекс `Refl` расходится с
+    // написанным, и ветви не бывает - разбор с нулём ветвей это и доказывает.
+    // Без этого отрицание (§3.7) не пишется ни в одном виде.
+    let head = format!(
+        "{BASE}data Void : Type
+
+data Eqv (a : Type) (x : a) : a -> Type where
+  Refl : Eqv a x x
+"
+    );
+    program(&format!(
+        "{head}
+zeroNotSucc : (k : Nat) -> Eqv Nat Zero (Succ k) -> Void
+zeroNotSucc k eq = case eq of
+"
+    ));
+    // А там, где ветвь бывает, нуль ветвей по-прежнему отказ.
+    let error = refused(&format!(
+        "{head}
+same : (k : Nat) -> Eqv Nat k k -> Void
+same k eq = case eq of
+"
+    ));
+    assert!(
+        matches!(error, ElabError::Clauses { .. } | ElabError::Core { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn refinement_reaches_under_a_constructor() {
+    // Инъективность: из `Succ n ≡ Succ m` следует `n ≡ m`. Уточнение живёт
+    // **под** конструктором, и прежде решалась только переменная переменной на
+    // верхнем уровне индекса - `Refl` в теле не сходился с целью.
+    // Значением правило показывает `eval/decidable.adamas`: здесь наблюдается
+    // сам факт, что тело сходится с целью, - до правки оно отвергалось.
+    program(&format!(
+        "{BASE}data Eqv (a : Type) (x : a) : a -> Type where
+  Refl : Eqv a x x
+
+unsucc : Eqv Nat (Succ n) (Succ m) -> Eqv Nat n m
+unsucc Refl = Refl
+
+witness : Eqv Nat Zero Zero
+witness = unsucc Refl
+"
+    ));
+}
+
+#[test]
+fn refinement_does_not_reach_under_a_definition() {
+    // Спуск идёт только под конструктор. `half n` и `half m` равны при разных
+    // `n` и `m`, уравнение из них не следует, и уточнять по ним нечего:
+    // программа отвергается, а не принимается с выдуманным равенством.
+    //
+    // Голова обязана быть застрявшей: развернись она, индексы стали бы
+    // переменными, и решило бы их обычное уточнение верхнего уровня.
+    let error = refused(&format!(
+        "{BASE}data Eqv (a : Type) (x : a) : a -> Type where
+  Refl : Eqv a x x
+
+half : Nat -> Nat
+half Zero = Zero
+half (Succ n) = n
+
+unhalf : Eqv Nat (half n) (half m) -> Eqv Nat n m
+unhalf Refl = Refl
+"
+    ));
+    assert!(
+        matches!(error, ElabError::Core { .. }),
+        "получено {error:?}"
+    );
+}

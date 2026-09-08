@@ -1,0 +1,39 @@
+-- Разбираемое обязано быть именем, если ветвь пользуется полем (§3.7).
+--
+-- Мотив разбора абстрагирует и разбираемое, и переменные его индексов, а
+-- решается он паттерновой унификацией: спайн дырки обязан состоять из
+-- **различных переменных**. `decEq n m` - вычисление, переменной оно не
+-- является, и решить мотив нечем.
+--
+-- Видно это не всегда: пока ветвь полем не пользуется, мотив постоянен и
+-- дырка решается тривиально - `errors/` этот случай не ловит намеренно, он
+-- проходит. Отказ приходит ровно тогда, когда тип ветви зависит от того, чем
+-- оказалось разбираемое.
+--
+-- Обход дешёвый и написан в `eval/decidable.adamas`: связать значение `let` с
+-- аннотацией, и спайн мотива станет переменной. Отдельного правила языку это
+-- не стоит - `let` и без того обязателен там, где написанного типа нет.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Void : Type
+
+data Eqv (a : Type) (x : a) : a -> Type where
+  Refl : Eqv a x x
+
+data Dec (p : Type) where
+  Yes : p -> Dec p
+  No : (p -> Void) -> Dec p
+
+cong : (f : (1 _ : a) -> b) -> Eqv a x y -> Eqv b (f x) (f y)
+cong f Refl = Refl
+
+decEq : (n : Nat) -> (m : Nat) -> Dec (Eqv Nat n m)
+decEq Zero Zero = Yes Refl
+decEq Zero (Succ k) = decEq Zero (Succ k)
+decEq (Succ k) Zero = decEq (Succ k) Zero
+decEq (Succ n) (Succ m) = case decEq n m of
+  Yes p -> Yes (cong Succ p)
+  No q -> decEq (Succ n) (Succ m)

@@ -1,0 +1,15 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: case-over-a-call.adamas:37:27: выводимый аргумент не укладывается в свой тип `(0 n : Nat) -> (0 m : Nat) -> (0 case : Dec{0} (Eqv{0} Nat n m)) -> Type ?0`: на его месте требуется `(?41) k m (decEq k m)`
+  decEq (Succ n) (Succ m) = case decEq n m of
+                            ^^^^^^^^^^^^^^^^^
+  в контексте:
+    (ω n : Nat)
+    (ω #4 : Nat)
+    (ω k : Nat)
+    (ω m : Nat)
+    (ω case : Dec{0} (Eqv{0} Nat k m))
+    (ω p : Eqv{0} Nat k m)
+  путь: тело `decEq` -> тело лямбды -> тело лямбды -> ветвь #1 -> тело лямбды -> ветвь #1 -> тело лямбды -> тело `let` -> ветвь #0 -> тело лямбды -> функция применения -> аргумент применения -> аргумент применения

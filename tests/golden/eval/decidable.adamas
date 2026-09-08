@@ -1,0 +1,89 @@
+-- Разрешимость равенства: `Dec` из §3.7, уровень 1.
+--
+-- Свойство выражено типом, решение - программой. `decEq` отдаёт либо
+-- доказательство равенства, либо доказательство его невозможности, и оба
+-- стираются: кратность у них нулевая, в ответе видно только `True`/`False`.
+--
+-- Держится это на двух вещах, которых до сегодняшнего дня не было.
+--
+-- **Пустота при данных индексах.** `zeroNotSucc` пишется разбором с нулём
+-- ветвей: `Eqv Nat Zero (Succ k)` конструктор имеет, но индекс `Refl`
+-- расходится с написанным, и ветви не бывает. Прежде пустым считалось только
+-- семейство без конструкторов вовсе (`Void`), поэтому отрицание не писалось.
+--
+-- **Инъективность конструктора.** `unsucc` разбирает `Eqv Nat (Succ n) (Succ
+-- m)`, и уточнение `m := n` живёт **под** конструктором: прежде уточнялась
+-- только переменная переменной на верхнем уровне индекса, и `Refl` в теле не
+-- сходился с целью.
+--
+-- **Названная граница, и она видна прямо здесь:** разбираемое обязано быть
+-- именем. `case decEq n m of` с ветвью, пользующейся полем, отвергается -
+-- мотиву нужен спайн из переменных, а `decEq n m` вычисление. Обход - связать
+-- значение `let`, что и написано ниже.
+--
+-- Проверяется значением: `[True, False]` - решение совпало с ответом на
+-- равных и на разных.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+data Void : Type
+
+-- Тождество §3.7: индекс третий, параметры - первые два.
+data Eqv (a : Type) (x : a) : a -> Type where
+  Refl : Eqv a x x
+
+data Dec (p : Type) where
+  Yes : p -> Dec p
+  No : (p -> Void) -> Dec p
+
+-- Конструктор поле потребляет однажды (§4.1), поэтому `f` пишется линейной:
+-- сабтайпинга на кратностях нет, и `Succ` под `a -> b` не подходит.
+cong : (f : (1 _ : a) -> b) -> Eqv a x y -> Eqv b (f x) (f y)
+cong f Refl = Refl
+
+compose : (b -> c) -> (a -> b) -> a -> c
+compose g f x = g (f x)
+
+-- Отрицание: разбор с нулём ветвей над невозможным индексом.
+zeroNotSucc : (k : Nat) -> Eqv Nat Zero (Succ k) -> Void
+zeroNotSucc k eq = case eq of
+
+succNotZero : (k : Nat) -> Eqv Nat (Succ k) Zero -> Void
+succNotZero k eq = case eq of
+
+-- Инъективность: уточнение приходит из-под конструктора.
+unsucc : Eqv Nat (Succ n) (Succ m) -> Eqv Nat n m
+unsucc Refl = Refl
+
+decEq : (n : Nat) -> (m : Nat) -> Dec (Eqv Nat n m)
+decEq Zero Zero = Yes Refl
+decEq Zero (Succ k) = No (zeroNotSucc k)
+decEq (Succ k) Zero = No (succNotZero k)
+decEq (Succ n) (Succ m) =
+  let d : Dec (Eqv Nat n m) = decEq n m
+  case d of
+    Yes p -> Yes (cong Succ p)
+    No q -> No (compose q unsucc)
+
+decides : Nat -> Nat -> Bool
+decides n m =
+  let d : Dec (Eqv Nat n m) = decEq n m
+  case d of
+    Yes p -> True
+    No q -> False
+
+two : Nat
+two = Succ (Succ Zero)
+
+main : List Bool
+main = Cons (decides two two) (Cons (decides two (Succ two)) Nil)

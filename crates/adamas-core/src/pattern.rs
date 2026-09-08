@@ -740,7 +740,7 @@ impl Compiler<'_> {
         // пустого семейства даёт ноль ветвей и служит доказательством, что
         // вызвать функцию на этом пути нечем.
         let Some(first) = rows.first() else {
-            return match self.empty_column(columns) {
+            return match self.empty_column(ctx, columns, rows) {
                 Some(split) => self.split(ctx, columns, rows, target, example, split),
                 None => Err(PatternError::NonExhaustive {
                     example: render(example),
@@ -766,16 +766,43 @@ impl Compiler<'_> {
         }
     }
 
-    /// Первая колонка-переменная, тип которой - семейство без конструкторов.
-    fn empty_column(&self, columns: &[Column]) -> Option<usize> {
-        columns.iter().position(|column| {
-            column.level().is_some()
-                && data_head(self.signature, &column.ty).is_some_and(|(data, ..)| {
-                    matches!(
-                        self.signature.lookup(&data).map(|found| &found.kind),
-                        Some(DefinitionKind::Data { constructors, .. }) if constructors.is_empty()
-                    )
-                })
+    /// Первая колонка-переменная, населить которую нечем.
+    ///
+    /// Таких две разновидности, и это **одно** свойство, а не два. Семейство
+    /// без конструкторов вовсе (`Void`) - вырожденный случай: ни один
+    /// конструктор не подходит, потому что их нет. Общий - семейство, пустое
+    /// **при этих индексах**: `Eqv Nat Zero (Succ k)` конструктор имеет, но
+    /// индексы его расходятся с написанными, и ветви не бывает. Ровно это и
+    /// нужно доказательству отрицания (§3.7): `zeroNotSucc` пишется разбором с
+    /// нулём ветвей, как и `absurd` над `Void`.
+    ///
+    /// Ответ даёт та же унификация, что и разбор с клаузами
+    /// ([`unify::matches`]), и другого источника у него нет: считай мы
+    /// пустоту как-то ещё, два ответа разъехались бы. `Stuck` пустотой не
+    /// является - там неизвестно, а не невозможно.
+    fn empty_column(&self, ctx: &Ctx<'_>, columns: &[Column], rows: &[Row]) -> Option<usize> {
+        columns
+            .iter()
+            .position(|column| column.level().is_some() && self.uninhabited(ctx, column, rows))
+    }
+
+    /// Расходятся ли индексы **всех** конструкторов с индексами разбираемого.
+    fn uninhabited(&self, ctx: &Ctx<'_>, column: &Column, rows: &[Row]) -> bool {
+        // Номер колонки нужен `family` только для сообщения о чужом
+        // конструкторе, а строк здесь нет вовсе - разбор идёт как раз потому,
+        // что клаузы кончились.
+        let Ok(family) = self.family(ctx, column, rows, 0) else {
+            return false;
+        };
+        family.constructors.iter().all(|constructor| {
+            let (_, result) = self.fields(ctx, constructor, &family.levels, &family.params);
+            let indices = family
+                .branch_indices(self.signature, &result)
+                .unwrap_or_default();
+            matches!(
+                unify::matches(self.signature, &family.shapes, &indices),
+                Match::Conflict { .. }
+            )
         })
     }
 

@@ -5834,26 +5834,65 @@ impl<'a> Elaborator<'a> {
         let theirs = arguments_of(scrutinee.map(std::convert::AsRef::as_ref));
         let mine = arguments_of(Some(result));
         for (position, their) in theirs.iter().enumerate().skip(params) {
-            let (Some(target), Some(source)) =
-                (variable(their), mine.get(position).and_then(variable))
-            else {
+            let Some(mine) = mine.get(position) else {
                 continue;
             };
+            self.solved_pair(their, mine, base, found);
+        }
+    }
+
+    /// Одна пара «индекс разбираемого - индекс конструктора».
+    ///
+    /// Спуск под общий конструктор - это **инъективность**: `Succ m` против
+    /// `Succ n` даёт `m := n` тем же уравнением, каким его читает унификация
+    /// разбора ([`adamas_core::unify`]), и без него не пишется ни одно
+    /// доказательство вида «из `Succ n ≡ Succ m` следует `n ≡ m`» (§3.7).
+    /// Головы разошлись - ветви не бывает вовсе, и решать там нечего: это
+    /// говорит та же унификация, ветвь до тела не доходит.
+    fn solved_pair(&self, their: &Rc<Value>, mine: &Rc<Value>, base: u32, found: &mut [BoundVar]) {
+        if let (Some(target), Some(source)) = (variable(their), variable(mine)) {
             // Раньше базы - связывание не этой клаузы, и трогать его нельзя:
             // область видимости у клауз общая.
             if target < base || source >= target {
-                continue;
+                return;
             }
             let Some(bound) = found.get_mut((target - base) as usize) else {
-                continue;
+                return;
             };
             if bound.value.is_some() {
-                continue;
+                return;
             }
             // Индекс на глубине связывания: переменная уровня `source` стоит от
             // него на `target - source - 1` связываний.
             bound.value = Some(Rc::new(Term::var(target - source - 1)));
+            return;
         }
+        let (Some(theirs), Some(ours)) = (
+            self.constructed(their),
+            self.constructed(mine).filter(|_| {
+                head_constant(their).is_some() && head_constant(their) == head_constant(mine)
+            }),
+        ) else {
+            return;
+        };
+        for (their, mine) in theirs.iter().zip(&ours) {
+            self.solved_pair(their, mine, base, found);
+        }
+    }
+
+    /// Аргументы применённого **конструктора**. `None` - в голове не он.
+    ///
+    /// Спускаться под определение нельзя: `f x` и `f y` равны при разных `x` и
+    /// `y`, и уравнение `x = y` из них не следует. Под тип-формер тоже: его
+    /// инъективность - метаправило унификатора, которое §10 вопрос 53 отвергает
+    /// прямо. У конструктора уравнение следует, и читает его та же унификация
+    /// разбора ([`adamas_core::unify`]) - шире её элаборация быть не вправе.
+    fn constructed(&self, value: &Rc<Value>) -> Option<Vec<Rc<Value>>> {
+        let name = head_constant(value)?;
+        let DefinitionKind::Constructor { .. } = &self.signature.lookup(name)?.kind else {
+            return None;
+        };
+        Some(arguments_of(Some(value)))
     }
 
     /// Оборачивает тело цепочкой вставленных `drop`.
@@ -6138,6 +6177,14 @@ fn arguments_of(ty: Option<&Value>) -> Vec<Rc<Value>> {
             })
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+/// Имя в голове нейтрали - им сверяются два индекса перед спуском.
+fn head_constant(value: &Rc<Value>) -> Option<&Symbol> {
+    match &**value {
+        Value::Neutral(Head::Global(name, ..), _) => Some(name),
+        _ => None,
     }
 }
 

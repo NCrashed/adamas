@@ -15,8 +15,8 @@ use adamas_runtime::ffi::{
     adamas_closure_set, adamas_drop, adamas_dup, adamas_evidence_drop, adamas_evidence_empty,
     adamas_evidence_extend, adamas_evidence_lookup, adamas_field, adamas_frame_env,
     adamas_frame_fields, adamas_frame_label, adamas_frame_mark, adamas_imm, adamas_imm_get,
-    adamas_kont_cut, adamas_kont_init, adamas_kont_push, adamas_kont_restore, adamas_kont_run,
-    adamas_rc, adamas_resumption_drop, adamas_segment_base, adamas_segment_copy,
+    adamas_kont_abort, adamas_kont_cut, adamas_kont_init, adamas_kont_push, adamas_kont_restore,
+    adamas_kont_run, adamas_rc, adamas_resumption_drop, adamas_segment_base, adamas_segment_copy,
     adamas_segment_depth, adamas_segment_unwind, adamas_segment_value, adamas_set_field,
     adamas_stat_live, adamas_stat_reset, adamas_unit,
 };
@@ -85,7 +85,12 @@ unsafe extern "C" fn release_resumption(frame: *mut Frame) {
 }
 
 /// Деструктор, отмечающийся в следе.
-unsafe extern "C" fn note(closure: Value, _evidence: *const Evidence, argument: Value) -> Value {
+unsafe extern "C" fn note(
+    closure: Value,
+    _evidence: *const Evidence,
+    _kont: *mut Kont,
+    argument: Value,
+) -> Value {
     unsafe {
         let mark = adamas_imm_get(adamas_closure_get(closure, 0));
         TRACE.with_borrow_mut(|trace| trace.push(mark));
@@ -103,24 +108,55 @@ unsafe fn closer(mark: isize) -> Value {
     }
 }
 
-/// Деструктор, производящий операцию, - то, что напишет понижение.
+/// Отложенная работа: при обрыве она **не** выполняется, в отличие от scope'а.
+unsafe extern "C" fn noting(frame: *mut Frame, incoming: Value) -> Value {
+    unsafe {
+        let mark = adamas_imm_get(*adamas_frame_env(frame));
+        TRACE.with_borrow_mut(|trace| trace.push(mark));
+        incoming
+    }
+}
+
+/// Деструктор второй формы, производящий операцию, - то, что напишет понижение.
 ///
-/// Спрашивает метки 7 и 9 у полученного вектора и записывает вердикты. На
-/// `SUPPRESSED` **обрывается**: ответа хендлеру нет, отметка о завершении не
-/// ставится, вместо неё отрицательная. Обрыв здесь возврат, потому что своих
-/// кадров у этого деструктора нет; у настоящего его порождает понижение.
-unsafe extern "C" fn probing(closure: Value, evidence: *const Evidence, argument: Value) -> Value {
+/// Откладывает работу (метка 77), открывает свой scope (метка 8), спрашивает
+/// метки 7 и 9 и записывает вердикты. На `SUPPRESSED` зовёт `adamas_kont_abort`
+/// со своим стеком и возвращает его ответ немедленно: своё завершение он не
+/// отмечает, вместо отметки идёт отрицательная. На `HANDLER` договаривает как
+/// обычно, и стек его доигрывается до конца.
+///
+/// Отложенная работа и scope различают обрыв и доигрывание: §3.3 обещает
+/// деструкторы у оборванного, но не обещает доделать то, ради чего он бежал.
+unsafe extern "C" fn probing(
+    closure: Value,
+    evidence: *const Evidence,
+    kont: *mut Kont,
+    argument: Value,
+) -> Value {
     unsafe {
         let mark = adamas_imm_get(adamas_closure_get(closure, 0));
         adamas_drop(argument, None);
-        let mut own: *mut Frame = ptr::null_mut();
-        let seven = adamas_evidence_lookup(evidence, 7, 0, &raw mut own);
+        let deferred = adamas_kont_push(
+            kont,
+            MARK_PLAIN,
+            0,
+            Some(noting),
+            None,
+            1,
+            evidence.cast_mut(),
+        );
+        *adamas_frame_env(deferred) = adamas_imm(77);
+        push_closing(kont, 8, evidence.cast_mut());
+
+        let seven = adamas_evidence_lookup(evidence, 7, 0, ptr::null_mut());
         let nine = adamas_evidence_lookup(evidence, 9, 0, ptr::null_mut());
         let outer = adamas_evidence_lookup(evidence, 7, 1, ptr::null_mut());
         VERDICTS.with_borrow_mut(|verdicts| verdicts.extend([seven, nine, outer]));
+
         if seven == LOOKUP_SUPPRESSED {
+            let answer = adamas_kont_abort(kont);
             TRACE.with_borrow_mut(|trace| trace.push(-mark));
-            return adamas_unit();
+            return answer;
         }
         TRACE.with_borrow_mut(|trace| trace.push(mark));
         adamas_unit()
@@ -426,9 +462,12 @@ fn unwinding_suppresses_the_handlers_that_already_answered() {
             VERDICTS.with_borrow(Clone::clone),
             vec![LOOKUP_SUPPRESSED, LOOKUP_SUPPRESSED, LOOKUP_HANDLER]
         );
-        // Деструктор оборвался - отметка отрицательная, - а раскрутка пошла
-        // дальше, и следующий scope закрылся как обычно.
-        assert_eq!(TRACE.with_borrow(Clone::clone), vec![-2, 1]);
+        // Обрыв закрыл scope, открытый самим деструктором (8), - §3.3 требует
+        // деструкторов и у оборванного, - но отложенную работу (77) не сделал:
+        // обрыв не есть доигрывание. Деструктор оборвался (отметка
+        // отрицательная), а раскрутка пошла дальше, и следующий scope закрылся
+        // как обычно.
+        assert_eq!(TRACE.with_borrow(Clone::clone), vec![8, -2, 1]);
         // Внешний хендлер на стеке цел: уйти к нему было куда, и не ушли.
         assert_eq!(kont.depth, 1);
         assert_eq!(kont.top, outer);
@@ -458,7 +497,9 @@ fn a_normal_exit_suppresses_nothing() {
             VERDICTS.with_borrow(Clone::clone),
             vec![LOOKUP_HANDLER, LOOKUP_HANDLER, LOOKUP_HANDLER]
         );
-        assert_eq!(TRACE.with_borrow(Clone::clone), vec![2, 1]);
+        // Деструктор договорил (2); обрыва не было, поэтому стек его доигран до
+        // конца - и scope закрылся (8), и отложенное сделано (77).
+        assert_eq!(TRACE.with_borrow(Clone::clone), vec![2, 8, 77, 1]);
 
         for evidence in vectors {
             adamas_evidence_drop(evidence);

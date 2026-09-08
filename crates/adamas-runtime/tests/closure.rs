@@ -5,15 +5,20 @@
 use std::ptr;
 
 use adamas_runtime::ffi::{
-    Evidence, TAG_CLOSURE, Value, adamas_alloc, adamas_apply, adamas_closure, adamas_closure_code,
-    adamas_closure_get, adamas_closure_missing, adamas_closure_release, adamas_closure_set,
-    adamas_drop, adamas_field, adamas_imm, adamas_imm_get, adamas_rc, adamas_set_field,
-    adamas_stat_live, adamas_stat_reset, adamas_tag,
+    Evidence, Kont, TAG_CLOSURE, Value, adamas_alloc, adamas_apply, adamas_closure,
+    adamas_closure_code, adamas_closure_get, adamas_closure_missing, adamas_closure_release,
+    adamas_closure_set, adamas_drop, adamas_field, adamas_imm, adamas_imm_get, adamas_rc,
+    adamas_set_field, adamas_stat_live, adamas_stat_reset, adamas_tag,
 };
 
 /// Трёхместная функция с одним захватом. Разряды разные, поэтому перепутанный
 /// порядок аргументов виден в ответе.
-unsafe extern "C" fn digits(closure: Value, _evidence: *const Evidence, last: Value) -> Value {
+unsafe extern "C" fn digits(
+    closure: Value,
+    _evidence: *const Evidence,
+    _kont: *mut Kont,
+    last: Value,
+) -> Value {
     unsafe {
         let captured = adamas_imm_get(adamas_field(adamas_closure_get(closure, 0), 0));
         let first = adamas_imm_get(adamas_closure_get(closure, 1));
@@ -60,7 +65,7 @@ fn partial_application_collects_the_arguments_in_order() {
         let first = digits_closure(7);
         let held = adamas_closure_get(first, 0);
 
-        let second = adamas_apply(first, ptr::null(), adamas_imm(1));
+        let second = adamas_apply(first, ptr::null(), ptr::null_mut(), adamas_imm(1));
         // Накопление копирует замыкание: исходное могло быть разделено.
         assert_ne!(second, first);
         assert_eq!(adamas_closure_missing(second), 2);
@@ -70,13 +75,13 @@ fn partial_application_collects_the_arguments_in_order() {
         assert_eq!(adamas_closure_get(second, 0), held);
         assert_eq!(adamas_imm_get(adamas_closure_get(second, 1)), 1);
 
-        let third = adamas_apply(second, ptr::null(), adamas_imm(2));
+        let third = adamas_apply(second, ptr::null(), ptr::null_mut(), adamas_imm(2));
         // Аргументов всё ещё не хватает - ответ снова замыкание, а не значение.
         assert_eq!(adamas_tag(third), TAG_CLOSURE);
         assert_eq!(adamas_closure_missing(third), 1);
         assert_eq!(adamas_rc(held), 2);
 
-        let answer = adamas_apply(third, ptr::null(), adamas_imm(3));
+        let answer = adamas_apply(third, ptr::null(), ptr::null_mut(), adamas_imm(3));
         assert_eq!(adamas_imm_get(answer), 7 + 10 + 200 + 3000);
 
         adamas_drop(third, Some(adamas_closure_release));
@@ -91,12 +96,12 @@ fn a_partially_applied_closure_stays_reusable() {
     unsafe {
         adamas_stat_reset();
         let first = digits_closure(7);
-        let second = adamas_apply(first, ptr::null(), adamas_imm(1));
+        let second = adamas_apply(first, ptr::null(), ptr::null_mut(), adamas_imm(1));
 
-        let left = adamas_apply(second, ptr::null(), adamas_imm(2));
-        let right = adamas_apply(second, ptr::null(), adamas_imm(4));
-        let one = adamas_apply(left, ptr::null(), adamas_imm(3));
-        let other = adamas_apply(right, ptr::null(), adamas_imm(3));
+        let left = adamas_apply(second, ptr::null(), ptr::null_mut(), adamas_imm(2));
+        let right = adamas_apply(second, ptr::null(), ptr::null_mut(), adamas_imm(4));
+        let one = adamas_apply(left, ptr::null(), ptr::null_mut(), adamas_imm(3));
+        let other = adamas_apply(right, ptr::null(), ptr::null_mut(), adamas_imm(3));
 
         assert_eq!(adamas_imm_get(one), 7 + 10 + 200 + 3000);
         assert_eq!(adamas_imm_get(other), 7 + 10 + 400 + 3000);
@@ -114,15 +119,15 @@ fn code_pointer_takes_the_closure_as_userdata() {
     unsafe {
         adamas_stat_reset();
         let first = digits_closure(7);
-        let second = adamas_apply(first, ptr::null(), adamas_imm(1));
-        let third = adamas_apply(second, ptr::null(), adamas_imm(2));
+        let second = adamas_apply(first, ptr::null(), ptr::null_mut(), adamas_imm(1));
+        let third = adamas_apply(second, ptr::null(), ptr::null_mut(), adamas_imm(2));
 
         // §5.3: замыкание со средой отдаётся трамплином плюс `userdata`, и
         // `userdata` тут - оно само. Вызов через голый указатель обязан дать то
         // же, что применение.
         let code = adamas_closure_code(third).expect("замыкание без кода не бывает");
-        let direct = code(third, ptr::null(), adamas_imm(3));
-        let applied = adamas_apply(third, ptr::null(), adamas_imm(3));
+        let direct = code(third, ptr::null(), ptr::null_mut(), adamas_imm(3));
+        let applied = adamas_apply(third, ptr::null(), ptr::null_mut(), adamas_imm(3));
         assert_eq!(adamas_imm_get(direct), adamas_imm_get(applied));
 
         adamas_drop(third, Some(adamas_closure_release));

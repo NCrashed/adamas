@@ -57,6 +57,26 @@ fn counter_holds_the_extra_references() {
 }
 
 #[test]
+fn a_block_is_aligned_enough_to_leave_the_tag_bit_free() {
+    unsafe {
+        adamas_stat_reset();
+        // Выравнивание блока - то, что даёт `malloc`: на целях §8 16 байт.
+        // Фаза 7 ставит по этому числу `align`, поэтому оно проверяется, а не
+        // предполагается.
+        for fields in 0..5 {
+            let value = adamas_alloc(0, fields);
+            let address = value as usize;
+            assert_eq!(address % 16, 0, "блок не выровнен под `max_align_t`");
+            // Восемь из шестнадцати - несущий инвариант: свободный младший бит
+            // и есть то, чем непосредственное значение отличается от объекта.
+            assert_eq!(adamas_is_imm(value), 0);
+            adamas_drop(value, None);
+        }
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+#[test]
 fn uniqueness_separates_the_shared_object() {
     unsafe {
         adamas_stat_reset();

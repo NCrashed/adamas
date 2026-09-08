@@ -30,6 +30,11 @@ struct adamas_segment {
     size_t depth;
 };
 
+/* Смещения закреплены: числа эти уезжают от перестановки полей молча, а Фаза 7
+ * ставит по ним `align` и `dereferenceable` (шапка `adamas.h`, «Выравнивание»). */
+_Static_assert(offsetof(struct adamas_frame, env) == 48, "среда кадра идёт с 48-го байта");
+_Static_assert(sizeof(struct adamas_segment) == 32, "сегмент - четыре слова");
+
 static adamas_frame *frame_alloc(uint16_t mark, uint32_t label, adamas_frame_code code,
                                  adamas_frame_release release, size_t fields,
                                  adamas_evidence *evidence) {

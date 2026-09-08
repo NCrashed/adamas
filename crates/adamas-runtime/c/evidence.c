@@ -28,6 +28,9 @@ struct adamas_evidence {
     adamas_ev_entry entries[];
 };
 
+_Static_assert(sizeof(adamas_ev_entry) == 16, "запись вектора - два слова");
+_Static_assert(offsetof(struct adamas_evidence, entries) == 16, "записи идут с 16-го байта");
+
 static adamas_evidence *evidence_alloc(size_t count) {
     adamas_evidence *evidence = (adamas_evidence *)adamas_block_alloc(
         sizeof(adamas_evidence) + count * sizeof(adamas_ev_entry));

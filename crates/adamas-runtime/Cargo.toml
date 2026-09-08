@@ -1,0 +1,22 @@
+[package]
+name = "adamas-runtime"
+description = "Adamas runtime in portable C: Perceus objects, frames, evidence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Ключ `links` объявляет натуральную библиотеку и заодно открывает потребителям
+# путь к заголовку: `build.rs` печатает `cargo::metadata=include=...`, и cargo
+# отдаёт его как `DEP_ADAMAS_RUNTIME_INCLUDE`. Понадобится это треку H.
+links = "adamas_runtime"
+
+[lints]
+workspace = true
+
+[lib]
+bench = false
+
+[build-dependencies]
+cc = "1"

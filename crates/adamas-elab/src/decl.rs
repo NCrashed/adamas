@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use adamas_core::alloc;
 use adamas_core::check::{TypeError, check_within, infer, is_type};
 use adamas_core::ctx::Ctx;
 use adamas_core::error::Frame;
@@ -245,7 +246,6 @@ struct Required {
     /// `@total` (§4.7).
     total: bool,
     /// `@noalloc` (§5.1).
-    #[allow(dead_code, reason = "заполняет соседний атрибут `@noalloc`")]
     noalloc: bool,
     /// `@fbip` (§5.1).
     fbip: bool,
@@ -253,24 +253,17 @@ struct Required {
 
 /// Разбирает атрибуты сигнатуры: что из них требует проверки (§4.7, §5.1).
 ///
-/// `@total` и `@fbip` компилятор проверяет: вердикт считает ядро
-/// ([`adamas_core::total`], [`adamas_core::fbip`]), а атрибут превращается в
-/// требование «ответ обязан быть да». `@noalloc` - обязательство перед
-/// backend'ом, а его нет; принять его молча значило бы обещать проверку,
-/// которой не будет.
+/// Все три вердикта считает ядро ([`adamas_core::total`],
+/// [`adamas_core::alloc`], [`adamas_core::fbip`]), а атрибут превращается в
+/// требование к ответу: «да» у `@total` и `@fbip`, «не аллоцирует» у
+/// `@noalloc`. Спрашивает их всех [`verdicts`].
 fn required(attributes: &[ast::Name]) -> Result<Required, ElabError> {
     let mut found = Required::default();
     for attribute in attributes {
         match &*attribute.text {
             "total" => found.total = true,
             "fbip" => found.fbip = true,
-            "noalloc" => {
-                return Err(ElabError::Attribute {
-                    name: Rc::clone(&attribute.text),
-                    why: "источники аллокации перечисляет backend (§5.1), а его ещё нет",
-                    span: attribute.span,
-                });
-            }
+            "noalloc" => found.noalloc = true,
             _ => {
                 return Err(ElabError::Attribute {
                     name: Rc::clone(&attribute.text),
@@ -1298,19 +1291,17 @@ fn class_members<'a>(
                 ty,
                 attributes,
             } => {
-                // Атрибуты у метода не выбрасываются молча. `@noalloc`
-                // отвергает общий разбор - проверки под него нет (§5.1);
-                // `@total` и `@fbip` отвергаются здесь, потому что у метода
-                // они были бы обещанием про **каждый** инстанс, а вердикт
-                // считается у определения, и определение это - член инстанса.
+                // Атрибуты у метода не выбрасываются молча: все три были бы
+                // обещанием про **каждый** инстанс, а вердикт считается у
+                // определения, и определение это - член инстанса.
                 let demanded = required(attributes)?;
-                if demanded.total || demanded.fbip {
+                if demanded.total || demanded.noalloc || demanded.fbip {
                     return Err(ElabError::ModuleMember {
                         name: Rc::clone(&name.text),
                         what: "классе",
-                        why: "`@total` и `@fbip` у метода обещали бы вердикт за каждый \
-                              инстанс, а считается он у определения - пишите атрибут \
-                              у члена инстанса",
+                        why: "`@total`, `@noalloc` и `@fbip` у метода обещали бы вердикт \
+                              за каждый инстанс, а считается он у определения - пишите \
+                              атрибут у члена инстанса",
                         span: member.span,
                     });
                 }
@@ -2278,34 +2269,79 @@ fn unnamed_siblings(planned: &[&Mutual<'_>]) -> Result<(), ElabError> {
     Ok(())
 }
 
-/// Требует положительного вердикта там, где написаны `@total` и `@fbip`
-/// (§4.7, §5.1).
+/// Собранное тело вместе с тем, чем перевести место отказа в спан.
 ///
-/// Спрашивается **после** объявления группы, и это существенно: у члена группы
-/// вердикт зависит от соседей, неподвижная точка понижает их вместе, и
-/// спросить раньше значило бы спросить не тот. До этой проверки атрибут внутри
+/// Нужно `@fbip`: его вердикт считается по телу и указывает **внутрь** него, а
+/// не на сигнатуру. У постулата тела нет, и передавать нечего.
+#[derive(Clone, Copy)]
+struct Assembled<'a> {
+    /// Дерево разбора, собранное из клауз.
+    term: &'a Term,
+    /// Объявление, по которому маршрут отказа станет спаном.
+    declared: &'a Declared<'a>,
+    /// Номер члена в группе; у одиночного определения нуль.
+    member: u32,
+}
+
+/// Требует от вердиктов ядра того, что обещано атрибутами (§4.7, §5.1).
+///
+/// Спрашивается **после** объявления: вердикты считает ядро, а атрибут только
+/// требует нужного ответа. У члена группы вердикт зависит от соседей -
+/// неподвижная точка понижает их вместе, - и спросить раньше значило бы
+/// спросить не тот.
+///
+/// Место у трёх атрибутов одно, и это существенно: путей тоже три -
+/// определение, член `mutual`, постулат, - и разойдись они, атрибут значил бы
+/// разное в зависимости от того, где написан. Ровно так он и терялся внутри
+/// `mutual`, пока проверка стояла в одном пути из трёх.
+fn verdicts(
+    signature: &Signature,
+    name: &Symbol,
+    demanded: Required,
+    written: Option<Assembled<'_>>,
+    span: Span,
+) -> Result<(), ElabError> {
+    if demanded.total && !signature.lookup(name).is_some_and(|it| it.total) {
+        return Err(ElabError::NotTotal {
+            name: Rc::clone(name),
+            span,
+        });
+    }
+    if demanded.noalloc {
+        if let Some(blame) = alloc::blame(signature, name) {
+            return Err(ElabError::Allocates {
+                name: Rc::clone(name),
+                blame,
+                span,
+            });
+        }
+    }
+    // Совместимость с FBIP - свойство тела, и у постулата спрашивать её не у
+    // чего: ветвей, которым не совпасть формой, там нет.
+    if demanded.fbip {
+        if let Some(written) = written {
+            fbip_verdict(
+                signature,
+                written.term,
+                written.declared,
+                written.member,
+                name,
+                span,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// То же по каждому члену группы.
+///
+/// Спрашивается **после** объявления группы: до этой проверки атрибут внутри
 /// `mutual` выбрасывался вместе с заголовком, то есть не значил ничего.
-///
-/// FBIP от соседей не зависит - совместимость есть свойство одного тела, - но
-/// спрашивается здесь же: место у обоих атрибутов одно, и разводить их значило
-/// бы заводить второй проход ради одной строки.
 fn required_verdicts(
     signature: &Signature,
     planned: &[&Mutual<'_>],
     trees: &[Compiled],
 ) -> Result<(), ElabError> {
-    for member in planned {
-        if member.required.total
-            && !signature
-                .lookup(&member.name.text)
-                .is_some_and(|it| it.total)
-        {
-            return Err(ElabError::NotTotal {
-                name: Rc::clone(&member.name.text),
-                span: member.span,
-            });
-        }
-    }
     let routed: Vec<route::Member<'_>> = planned
         .iter()
         .zip(trees)
@@ -2315,19 +2351,18 @@ fn required_verdicts(
             compiled: tree,
         })
         .collect();
+    let declared = Declared::Group(&routed);
     for (at, member) in planned.iter().enumerate() {
-        if !member.required.fbip {
-            continue;
-        }
-        let Some(tree) = trees.get(at) else {
-            continue;
-        };
-        fbip_verdict(
+        let written = trees.get(at).map(|tree| Assembled {
+            term: &tree.term,
+            declared: &declared,
+            member: u32::try_from(at).unwrap_or(u32::MAX),
+        });
+        verdicts(
             signature,
-            &tree.term,
-            &Declared::Group(&routed),
-            u32::try_from(at).unwrap_or(u32::MAX),
             &member.name.text,
+            member.required,
+            written,
             member.span,
         )?;
     }
@@ -3097,7 +3132,10 @@ fn postulate(
                 span,
                 names: Names::of(&pending.name, Vec::new()),
             }
-        })
+        })?;
+    // Вердикты спрашиваются и у постулата: `@noalloc` без тела проверить нечем,
+    // а принятое молча обещание - обещание, которого никто не давал.
+    verdicts(signature, &pending.name, pending.required, None, pending.span)
 }
 
 /// Определение: клаузы собираются в дерево разбора, дерево уходит в сигнатуру.
@@ -3196,30 +3234,24 @@ fn define(
             }
         })?;
 
-    // Вердикт читается после объявления: считает его ядро, а атрибут только
-    // требует, чтобы ответ был «да» (§4.7).
-    if declared.required.total && !signature.lookup(&declared.name).is_some_and(|it| it.total) {
-        return Err(ElabError::NotTotal {
-            name: Rc::clone(&declared.name),
-            span: declared.span,
-        });
-    }
-
-    if declared.required.fbip {
-        let source = Declared::Definition {
-            ty: declared.source,
-            clauses,
-            compiled: &tree,
-        };
-        fbip_verdict(
-            signature,
-            &tree.term,
-            &source,
-            0,
-            &declared.name,
-            declared.span,
-        )?;
-    }
+    // Вердикты читаются после объявления: считает их ядро, а атрибут только
+    // требует нужного ответа (§4.7, §5.1).
+    let source = Declared::Definition {
+        ty: declared.source,
+        clauses,
+        compiled: &tree,
+    };
+    verdicts(
+        signature,
+        &declared.name,
+        declared.required,
+        Some(Assembled {
+            term: &tree.term,
+            declared: &source,
+            member: 0,
+        }),
+        declared.span,
+    )?;
 
     // После объявления, а не до: дырки решены и подставлены, поэтому видно,
     // чем на самом деле стал каждый выводимый аргумент (§10 вопрос 76).
@@ -3557,6 +3589,7 @@ fn declare_resource(
         drop_ty.span,
     )?;
     let pending = Pending {
+        // Деструктор пишет компилятор: атрибутов на нём нет.
         required: Required::default(),
         name: drop_declared,
         ty: elaborated,

@@ -5134,14 +5134,121 @@ bad n = loop n
 }
 
 #[test]
+fn the_noalloc_attribute_requires_a_negative_verdict() {
+    // §5.1: вердикт ядро считает всегда, а атрибут - требование «не аллоцирует».
+    // Проверка идёт по телу и по графу вызовов, как у `@total`.
+    let signature = program(&format!(
+        "{BASE}
+@noalloc
+smaller : Nat -> Nat -> Nat
+smaller Zero m = m
+smaller (Succ k) m = k
+
+wrap : Nat -> Nat
+wrap n = Succ n
+"
+    ));
+    // Вердикт выводится и без атрибута: внутри пакета его требуют только там,
+    // где обязательство объявлено.
+    assert!(
+        signature
+            .lookup("smaller")
+            .is_some_and(|it| it.allocates.is_none()),
+        "разбор без конструирования не аллоцирует"
+    );
+    assert!(
+        signature
+            .lookup("wrap")
+            .is_some_and(|it| it.allocates.is_some()),
+        "конструктор строит значение в куче"
+    );
+
+    // Каждый источник, который проверка сегодня видит, - со своим отказом.
+    let refuse = |what: &str, text: String| {
+        let error = refused(&text);
+        assert!(
+            matches!(error, ElabError::Allocates { .. }),
+            "{what}: получено {error:?}"
+        );
+        error.to_string()
+    };
+    let constructs = refuse(
+        "конструктор",
+        format!("{BASE}\n@noalloc\nnext : Nat -> Nat\nnext n = Succ n\n"),
+    );
+    assert!(
+        constructs.contains("`Succ`") && constructs.contains("§5.1"),
+        "отказ обязан назвать источник и выход: {constructs}"
+    );
+    // Цепочка вызовов - до самого источника: «зовёт аллоцирующее» без
+    // продолжения не говорит, что чинить.
+    let through = refuse(
+        "вызов",
+        format!(
+            "{BASE}\nwrap : Nat -> Nat\nwrap n = Succ n\n\n@noalloc\ntwice : Nat -> Nat\ntwice n = wrap (wrap n)\n"
+        ),
+    );
+    assert!(
+        through.contains("`wrap`") && through.contains("`Succ`"),
+        "цепочка обязана дойти до конструктора: {through}"
+    );
+    refuse(
+        "замыкание",
+        format!(
+            "{BASE}\napply : (Nat -> Nat) -> Nat -> Nat\napply f n = f n\n\n@noalloc\nheld : Nat -> Nat\nheld n = apply (\\m -> m) n\n"
+        ),
+    );
+    refuse(
+        "частичное применение",
+        format!(
+            "{BASE}\npick : Nat -> Nat -> Nat\npick a b = a\n\n@noalloc\nlater : Nat -> Nat -> Nat\nlater a = pick a\n"
+        ),
+    );
+    refuse(
+        "запись",
+        format!("{BASE}\n@noalloc\npair : Nat -> {{ x : Nat }}\npair n = {{ x = n }}\n"),
+    );
+    // Постулат: тела нет, и обязательство проверить нечем. Через границу пакета
+    // §5.1 требует объявленного атрибута, но самой границы ещё нет.
+    refuse(
+        "постулат",
+        format!("{BASE}\n@noalloc\noutside : Nat -> Nat\n"),
+    );
+
+    // Рекурсия под атрибутом законна: §5.1 запрещает кучу и о стеке не говорит.
+    // Взаимная - тоже, и вердикт ей считает неподвижная точка сверху.
+    program(&format!(
+        "{BASE}
+mutual
+  @noalloc
+  evenly : Nat -> Nat -> Nat
+  evenly Zero m = m
+  evenly (Succ k) m = oddly k m
+
+  @noalloc
+  oddly : Nat -> Nat -> Nat
+  oddly Zero m = m
+  oddly (Succ k) m = evenly k m
+"
+    ));
+
+    // У метода класса атрибут был бы обещанием за каждый инстанс - тем же
+    // доводом, что и `@total`.
+    let method = refused(&format!(
+        "{BASE}\nclass C a where\n  @noalloc\n  size : a -> a\n"
+    ));
+    assert!(
+        matches!(method, ElabError::ModuleMember { .. }),
+        "получено {method:?}"
+    );
+}
+
+#[test]
 fn an_unchecked_attribute_names_what_is_missing() {
-    // `@noalloc` - обязательство перед backend'ом, а его нет. Принять его
-    // молча значило бы обещать проверку, которой не будет. `@fbip` рядом уже
-    // проверяется ([`adamas_core::fbip`]), и в этом списке его больше нет.
-    for text in [
-        "@noalloc\nf : Nat\nf = Zero\n",
-        "@fast\nf : Nat\nf = Zero\n",
-    ] {
+    // Обязательств перед отсутствующим backend'ом в языке не осталось: все три
+    // атрибута проверяются вердиктом ядра. Непроверяемым остаётся ненаписанный
+    // - и отказ говорит именно это, а не «проверки под него нет».
+    for text in ["@fast\nf : Nat\nf = Zero\n"] {
         let error = refused(&format!("{BASE}{text}"));
         assert!(
             matches!(error, ElabError::Attribute { .. }),

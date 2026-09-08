@@ -6,6 +6,7 @@
 //! вопрос 49б). Отсюда и правило для [`ElabError::Core`]: спан в нём - место
 //! подтерма, а объявление целиком остаётся только там, куда маршрут не дошёл.
 
+use adamas_core::alloc::Blame;
 use adamas_core::check::TypeError;
 use adamas_core::fbip::Fault;
 use adamas_core::mult::Mult;
@@ -1148,6 +1149,21 @@ pub enum ElabError {
         /// Где написано употребление.
         span: Span,
     },
+
+    /// `@noalloc` при отрицательном вердикте.
+    ///
+    /// Вердикт ядро считает всегда (§5.1, [`adamas_core::alloc`]), а атрибут -
+    /// это требование «ответ обязан быть нет». Отказ несёт источник, а не одно
+    /// имя: §5.1 требует назвать, что именно аллоцирует и какой выход остаётся.
+    #[error("`{name}` объявлена `@noalloc`, но {blame}")]
+    Allocates {
+        /// Имя определения.
+        name: Symbol,
+        /// Чем оно аллоцирует - вместе с цепочкой вызовов до этого места.
+        blame: Blame,
+        /// Где написан атрибут.
+        span: Span,
+    },
 }
 
 /// Имена, которых маршрут ядра не несёт.
@@ -1324,7 +1340,8 @@ impl ElabError {
             | Self::Clauses { span, .. }
             | Self::NotFbip { span, .. }
             | Self::FlatShape { span, .. }
-            | Self::NotFlat { span, .. } => *span,
+            | Self::NotFlat { span, .. }
+            | Self::Allocates { span, .. } => *span,
         }
     }
 }

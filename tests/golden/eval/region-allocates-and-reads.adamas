@@ -1,0 +1,62 @@
+-- Ссылка региона: производится операцией, читается дважды (§3.6, §4.8).
+--
+-- То, чего нет в `eval/signature-effect-parameterized`, миниатюре `withRegion`:
+-- у региона есть **ссылка**. `Ref (0 r : Region) (a : Type)` объявляется -
+-- стёртый параметр семейства полем не считается (§10 вопрос 122), - её
+-- производит `allocIn` и её же берёт `readRef`, поэтому аргумент метки стоит в
+-- типе обеих операций, а не только в row.
+--
+-- `Ref r Nat` - обычное ω-значение и копируется свободно (§3.6): `p` читается
+-- дважды, и переименований линейного токена это не требует. Итог 3 + 3; ответь
+-- `readRef` иначе - изменится и он, а снятая ветка роняет погашение.
+--
+-- Тело пишется **снаружи** модуля и зовёт операции путём: запечатывание
+-- закрывает погашение, а не вызов (§10 вопрос 146). Единственность погашающего
+-- - вторая нога гарантии §3.6, и парный ей отказ - в
+-- `errors/region-discharged-outside`.
+--
+-- Ограничение нагрузки `{Flat a}` здесь не стоит. §3.6 требует для безопасного
+-- смешения двух куч **оба** условия - ссылка не утекает и нагрузка плоская, -
+-- а второе стоит на представлении региона и в этот срез не входит.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data Region where
+  Home : Region
+
+data Ref (0 r : Region) (a : Type) where
+  MkRef : Ref r a
+
+infixl 6 +
+(+) : Nat -> Nat -> Nat
+(+) Zero m = m
+(+) (Succ k) m = Succ (k + m)
+
+module type Regions where
+  effect Alloc (0 r : Region)
+  withRegion : {a : Type} -> ((0 r : Region) -> (ω u : Unit) -> {Alloc r} a) -> a
+
+module Arena :> Regions where
+  effect Alloc (0 r : Region) where
+    allocIn : Nat -> Ref r Nat
+    readRef : Ref r Nat -> Nat
+
+  withRegion : {a : Type} -> ((0 r : Region) -> (ω u : Unit) -> {Alloc r} a) -> a
+  withRegion body = handle body Home with
+    return v -> v
+    allocIn n -> resume MkRef
+    readRef p -> resume (Succ (Succ (Succ Zero)))
+
+-- Пользователь региона: метку называет путём, операции зовёт путём.
+program : (0 r : Region) -> (ω u : Unit) -> {Arena.Alloc r} Nat
+program r u =
+  let p : Ref r Nat = Arena.allocIn (Succ Zero)
+  Arena.readRef p + Arena.readRef p
+
+main : Nat
+main = Arena.withRegion program

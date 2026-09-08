@@ -212,6 +212,20 @@ pub enum ParseError {
         span: Span,
     },
 
+    /// Точка в паттерне над строчным именем.
+    ///
+    /// Путь в паттерне называет конструктор (§4.8), и последнее звено его
+    /// поэтому заглавное. Проекции в паттерне не бывает, так что прочесть
+    /// `p.x` иначе нечем: молча собранное связывание с точкой в имени
+    /// отправляло отказ в тело - «имя `p` не найдено».
+    #[error("`{path}`: путь в паттерне называет конструктор, а он пишется с заглавной")]
+    PatternPath {
+        /// Написанный путь.
+        path: Symbol,
+        /// Где написан.
+        span: Span,
+    },
+
     /// Кратность записана не 0, 1 и не ω.
     ///
     /// Полукольцо §3.2 состоит ровно из трёх элементов, поэтому это не
@@ -302,6 +316,7 @@ impl ParseError {
             | Self::MixedRecord { span }
             | Self::Expected { span, .. }
             | Self::Multiplicity { span }
+            | Self::PatternPath { span, .. }
             | Self::SplitClauses { again: span, .. }
             | Self::Unsupported { span, .. }
             | Self::BlockNotLast { next: span, .. }
@@ -2296,6 +2311,13 @@ impl<'a> Parser<'a> {
 
     // --- паттерны --------------------------------------------------------
 
+    /// Ссылается ли имя на объявленное (§4.1). Копия правила `is_reference`
+    /// элаборации: разбор пути обязан решить это здесь, а элаборации к тому
+    /// времени досталось бы уже собранное связывание.
+    fn starts_upper(name: &str) -> bool {
+        name.chars().next().is_some_and(char::is_uppercase)
+    }
+
     /// Голова паттерна: имя, а за ним - примыкающий путь `M.Wrap`.
     ///
     /// Собирается в **одно** имя с точками - то самое, под которым член поднят
@@ -2317,13 +2339,22 @@ impl<'a> Parser<'a> {
             text.push_str(&field.text);
             span = span.merge(field.span);
         }
-        Ok(match path {
-            Some(text) => Name {
-                text: Rc::from(text.as_str()),
+        let Some(text) = path else {
+            return Ok(head);
+        };
+        // Путь называет конструктор, и последнее звено его заглавное. Проекции
+        // в паттерне не бывает, поэтому второго прочтения у `p.x` нет.
+        let name = Name {
+            text: Rc::from(text.as_str()),
+            span,
+        };
+        if !Self::starts_upper(name.text.rsplit('.').next().unwrap_or_default()) {
+            return Err(ParseError::PatternPath {
+                path: Rc::clone(&name.text),
                 span,
-            },
-            None => head,
-        })
+            });
+        }
+        Ok(name)
     }
 
     /// Паттерн с полями без скобок: так пишется ветка `case`.

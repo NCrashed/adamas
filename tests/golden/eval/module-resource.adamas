@@ -1,0 +1,71 @@
+-- Владение в теле модуля: `unique data` и `resource` (§3.3, §4.8).
+--
+-- Таблица владения ключуется **объявленным** именем, а спрашивается той же
+-- лестницей, какой разрешается сам тип. Ключуйся она написанным коротким -
+-- `A.Handle`, объявленный ресурсом, отвечал бы за одноимённый `B.Handle`, а
+-- снаружи тип и вовсе не находился бы: голова его там пишется путём, и
+-- разбирать путь правило владения не умело.
+--
+-- Отсюда же следствие: плоского пространства имён деструкторов больше нет.
+-- `A.close` и `B.close` живут рядом, и каждый закрывает своё; столкнуться два
+-- деструктора могут лишь внутри одного модуля, где имя действительно одно.
+--
+-- Проверяется значением: список отметок показывает, какой деструктор
+-- отработал и в каком порядке, а последним идёт сам ответ. Ждём `[2, 1, 3]` -
+-- порядок закрытия LIFO, как и требует §3.3, и отметки разных модулей
+-- различимы.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+module A where
+  resource Handle where
+    Open : Handle
+    close : (1 h : Handle) -> {Log} Bool
+    close h =
+      let a : Unit = note 1
+      True
+
+module B where
+  resource Handle where
+    Open : Handle
+    close : (1 h : Handle) -> {Log} Bool
+    close h =
+      let a : Unit = note 2
+      True
+
+-- Уникальное семейство в теле модуля: линейно, деструктора не имеет.
+module Cells where
+  unique data Cell where
+    MkCell : Nat -> Cell
+
+  open : (1 c : Cell) -> Nat
+  open (MkCell n) = n
+
+-- Оба ресурса берутся в одном scope, и каждый закрывается своим деструктором.
+-- Тип пишется путём - именно эту голову правило владения и обязано узнать.
+both : {Log} Nat
+both =
+  let h : A.Handle = A.Open
+      g : B.Handle = B.Open
+  Cells.open (Cells.MkCell (Succ (Succ (Succ Zero))))
+
+main : List Nat
+main = handle both with
+  return v -> Cons v Nil
+  note n -> Cons n (resume MkUnit)

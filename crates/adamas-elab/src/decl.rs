@@ -294,7 +294,7 @@ fn declared_signature<'a>(
     // (`sig.rs`: линейность на всю программу не считается), а §3.3 требует
     // `1`. Без этого отказа постулат ресурсного типа - обычное ω-имя, и `drop`
     // по нему зовётся сколько угодно раз.
-    if let Some(how) = owned.of(ty) {
+    if let Some(how) = owned_head(signature, owned, within, ty) {
         return Err(ElabError::OwnedTopLevel {
             owned: how,
             name: Rc::clone(&name.text),
@@ -447,6 +447,23 @@ fn only_at_top(
         why,
         span,
     })
+}
+
+/// Как объявлен тип, стоящий головой написанного (§3.3).
+///
+/// Лестница та же, какой разрешается сам тип: владение объявлено под
+/// квалифицированным именем, и спрашивать его написанным коротким значило бы
+/// принять за своё одноимённое из соседнего модуля.
+fn owned_head(
+    signature: &Signature,
+    owned: &Owned,
+    within: Option<&Enclosing>,
+    ty: &ast::Expr,
+) -> Option<Ownership> {
+    let head = crate::own::head_path(ty)?;
+    let name =
+        crate::expr::qualified_in(signature, within.map(|it| &*it.name), &head).unwrap_or(head);
+    owned.how(&name)
 }
 
 /// Параметры функтора, под которыми объявляется член. Пусто вне функтора.
@@ -604,15 +621,10 @@ fn declare_owned(
     resource: &ast::Resource,
     span: Span,
 ) -> Result<(), ElabError> {
-    only_at_top(
-        within,
-        &resource.name.text,
-        "ресурс объявляет конструкторы, а они пока квалифицированного \
-         имени не носят",
-        span,
-    )?;
-    owned.declare(&resource.name.text, Ownership::Resource);
-    declare_resource(signature, metas, owned, fixities, instances, resource, span)
+    owned.declare(&qualify(within, &resource.name.text), Ownership::Resource);
+    declare_resource(
+        signature, metas, owned, fixities, instances, within, resource, span,
+    )
 }
 
 /// Алиас типа: `type Point = { x : Nat }` (§4.2).
@@ -1933,7 +1945,7 @@ fn declare_mutual(
         // приходится повторить: `mutual` меняет **видимость**, и только её
         // (§4.8), а без этой строки `leaked : File` внутри блока принималось,
         // тогда как то же объявление снаружи отвергалось (ревью 2026-09-07).
-        if let Some(how) = owned.of(member.ty) {
+        if let Some(how) = owned_head(signature, owned, None, member.ty) {
             return Err(ElabError::OwnedTopLevel {
                 owned: how,
                 name: Rc::clone(&member.name.text),
@@ -3253,15 +3265,21 @@ struct Destructor<'a> {
 /// Семейство объявляется `unique`, деструктор - обычным определением следом за
 /// ним, и только после этого тип получает имя своего деструктора. Порядок
 /// существен во всех трёх шагах, и каждый отмечен по месту.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "прогон элаборации несёт своё состояние; складывать его в структуру значило бы прятать, что именно меняется"
+)]
 fn declare_resource(
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &mut Owned,
     fixities: &Fixities,
     instances: &Instances,
+    within: Option<&Enclosing>,
     resource: &ast::Resource,
     span: Span,
 ) -> Result<(), ElabError> {
+    let declared = qualify(within, &resource.name.text);
     // Элиминатор scope объявляется вместе с первым же ресурсом: раньше он
     // предмета не имеет, а позже его было бы негде взять - вставка идёт при
     // элаборации тел, когда объявления уже закончились.
@@ -3296,14 +3314,13 @@ fn declare_resource(
         });
     };
 
-    // Имя деструктора свободно, но пространство имён плоское: два ресурса,
-    // назвавшие деструктор одинаково, столкнутся (§4.8, Фаза 3). Отказ говорит
-    // об этом прямо - `DuplicateDefinition` от ядра назвал бы столкновение
-    // имён, не называя причины.
-    if let Some(first) = owned
-        .named(&drop_name.text)
-        .filter(|it| ***it != *resource.name.text)
-    {
+    // Имя деструктора свободно, но столкнуться два ресурса всё же могут -
+    // теперь лишь внутри одного модуля: квалификация развела `A.close` и
+    // `B.close`, и пространство имён плоским быть перестало. Отказ говорит об
+    // этом прямо - `DuplicateDefinition` от ядра назвал бы столкновение имён,
+    // не называя причины.
+    let drop_declared = qualify(within, &drop_name.text);
+    if let Some(first) = owned.named(&drop_declared).filter(|it| ***it != *declared) {
         return Err(ElabError::SharedDestructor {
             data: Rc::clone(&resource.name.text),
             name: Rc::clone(&drop_name.text),
@@ -3319,27 +3336,31 @@ fn declare_resource(
         kind: None,
         constructors,
     };
-    declare_data(signature, metas, owned, fixities, None, &data, span)?;
+    declare_data(signature, metas, owned, fixities, within, &data, span)?;
 
     // `drop` объявляется после семейства: его тип называет ресурс, а в
     // сигнатуре тот появляется только сейчас. Домен получает `1` тем же
     // правилом, что и всякое связывание ресурсного типа, - писать `(1 h : …)`
-    // руками не нужно и не требуется §3.3.
-    let elaborated =
-        Elaborator::new(signature, metas, owned, fixities).declaration(drop_ty, Mult::Many)?;
+    // руками не нужно и не требуется §3.3. Параметры функтора стоят у него
+    // implicit-связываниями, как у всякого члена.
+    let mut elaborator = Elaborator::new(signature, metas, owned, fixities).within(within);
+    let params = elaborator.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
+    let elaborated = elaborator.wrapped(&params, true, |it| it.declaration(drop_ty, Mult::Many))?;
     // Форма проверяется здесь, один раз, а не в каждой точке вставки: вызов
     // `drop` подставляется компилятором, и тип его результата обязан быть
-    // написан в области видимости, где ресурса уже нет.
+    // написан в области видимости, где ресурса уже нет. Параметры функтора
+    // стоят впереди домена и к форме отношения не имеют - их пропускают.
     destructor_shape(
         &elaborated,
-        &resource.name.text,
+        params.len(),
+        &declared,
         &drop_name.text,
         owned,
         drop_ty.span,
     )?;
-    let declared = Pending {
+    let pending = Pending {
         total: false,
-        name: Rc::clone(&drop_name.text),
+        name: drop_declared,
         ty: elaborated,
         // Деструктор ресурса кратностями не полиморфен: его домен - `1` по
         // правилу §3.3, а не по выбору автора.
@@ -3351,8 +3372,8 @@ fn declare_resource(
         signature,
         metas,
         known(owned, fixities, instances),
-        None,
-        &declared,
+        within,
+        &pending,
         clauses,
         drop_span,
     )?;
@@ -3362,7 +3383,7 @@ fn declare_resource(
     // тело `closeFile h = True` его не упоминает. Вставка полезла бы за типом
     // деструктора в сигнатуру, где его ещё нет, - то есть в `unreachable!`
     // (см. `destructor` в [`crate::expr`], чей инвариант это и есть).
-    owned.destroys(&resource.name.text, &declared.name);
+    owned.destroys(&declared, &pending.name);
     Ok(())
 }
 
@@ -3374,6 +3395,7 @@ fn declare_resource(
 /// после вызова уже нет.
 fn destructor_shape(
     ty: &Term,
+    leading: usize,
     data: &Symbol,
     name: &Symbol,
     owned: &Owned,
@@ -3384,6 +3406,15 @@ fn destructor_shape(
         name: Rc::clone(name),
         span,
     };
+    // Параметры функтора стоят впереди написанного домена: их подставляет
+    // вставка, и к форме деструктора они отношения не имеют.
+    let mut ty = ty;
+    for _ in 0..leading {
+        let Term::Pi(_, _, _, _, codomain) = ty else {
+            return Err(refuse());
+        };
+        ty = codomain;
+    }
     let Term::Pi(Binder { mult, .. }, _, domain, _, result) = ty else {
         return Err(refuse());
     };
@@ -3423,10 +3454,13 @@ fn destructor_shape(
 fn owned_field(
     ty: &Term,
     owned: &Owned,
+    declared: &Symbol,
     data: &ast::Data,
     constructor: &ast::Constructor,
 ) -> Result<(), ElabError> {
-    let holder = owned.how(&data.name.text);
+    // Держателя спрашивают под объявленным именем, а поля - под тем, что стоит
+    // головой их типа в **ядре**: оба квалифицированы, и разъехаться им негде.
+    let holder = owned.how(declared);
     let mut current = ty;
     while let Term::Pi(_, _, domain, _, codomain) = current {
         let field = name_head(domain).and_then(|name| owned.how(name).map(|how| (name, how)));
@@ -3786,7 +3820,7 @@ fn family_constructors(
             // уровни не пишутся (§3.2). Семейство встаёт над ним само: сорт
             // поднимается до полей.
             let ty = grounded(&zonk_term(metas, &ty), family.params.len(), false);
-            owned_field(&ty, owned, family.data, constructor)?;
+            owned_field(&ty, owned, &family.declared, family.data, constructor)?;
             Ok((qualify(within, &constructor.name.text), ty))
         })
         .collect()
@@ -3811,22 +3845,12 @@ fn declare_family(
     data: &ast::Data,
     span: Span,
 ) -> Result<(), ElabError> {
-    // Владение - названная граница: таблица `Owned` ключуется **написанным**
-    // именем головы, а оно короткое, и `A.Cell`, объявленное `unique`, делало
-    // уникальным и `B.Cell` из соседнего модуля. Измерено зондом. Заводится
-    // вместе с квалифицированным ключом таблицы.
+    // Маркер ставится **до** элаборации конструкторов: поле собственного типа
+    // получит `1` тем же правилом, что и всякое другое связывание, а не
+    // отдельным случаем. Имя - квалифицированное: под ним семейство объявлено,
+    // и под ним же его найдут по голове ядерного типа.
     if data.unique {
-        only_at_top(
-            within,
-            &data.name.text,
-            "таблица владения ключуется написанным именем, а оно короткое, \
-             и одноимённые семейства двух модулей столкнулись бы",
-            span,
-        )?;
-        // Маркер ставится **до** элаборации конструкторов: поле собственного
-        // типа получит `1` тем же правилом, что и всякое другое связывание, а
-        // не отдельным случаем.
-        owned.declare(&data.name.text, Ownership::Unique);
+        owned.declare(&qualify(within, &data.name.text), Ownership::Unique);
     }
     declare_data(signature, metas, owned, fixities, within, data, span)
 }

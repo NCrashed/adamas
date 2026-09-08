@@ -3621,21 +3621,139 @@ used = Hidden.start
 }
 
 #[test]
-fn a_unique_family_stays_at_the_top_level() {
-    // Названная граница, измеренная зондом: таблица владения ключуется
-    // написанным именем головы, а оно короткое, и `A.Cell`, объявленное
-    // `unique`, делало уникальным `B.Cell` из соседнего модуля.
-    let error = refused(&format!(
+fn ownership_is_keyed_by_the_qualified_name() {
+    // Таблица владения ключуется объявленным именем, а спрашивается той же
+    // лестницей, какой разрешается сам тип. Ключуйся она написанным коротким -
+    // `A.Cell`, объявленное `unique`, делало бы уникальным и `B.Cell`.
+    let head = format!(
         "{BASE}
-module Cells where
+data Pair where
+  MkPair : Nat -> Nat -> Pair
+
+module A where
   unique data Cell where
     MkCell : Nat -> Cell
+
+  open : Cell -> Nat
+  open (MkCell n) = n
+
+module B where
+  data Cell where
+    MkCell : Nat -> Cell
+
+  open : Cell -> Nat
+  open (MkCell n) = n
+"
+    );
+    // Обычное семейство соседнего модуля линейным не стало.
+    program(&format!(
+        "{head}
+twice : B.Cell -> Pair
+twice c = MkPair (B.open c) (B.open c)
+"
+    ));
+    // А уникальное осталось линейным.
+    let error = refused(&format!(
+        "{head}
+leaks : A.Cell -> Pair
+leaks c = MkPair (A.open c) (A.open c)
 "
     ));
     assert!(
-        matches!(error, ElabError::ModuleMember { .. }),
+        matches!(error, ElabError::Core { .. }),
         "получено {error:?}"
     );
+}
+
+#[test]
+fn a_resource_lives_in_a_module_and_its_destructor_is_qualified() {
+    // Ресурс поднимается как всякий член: и семейство, и конструкторы, и
+    // деструктор. Вставка закрытия при этом на месте - её и проверяем формой
+    // терма, потому что счёт вызовов её не видит.
+    // `Unit` объявлена намеренно: без неё `#closing` не объявляется вовсе и
+    // вставка идёт запасной формой (см. `declare_closing`).
+    let signature = program(&format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+module Files where
+  resource Handle where
+    Open : Bool -> Handle
+    close : Handle -> Bool
+    close (Open b) = b
+
+  use : Bool -> Bool
+  use b =
+    let h : Handle = Open b
+    True
+"
+    ));
+    assert!(
+        signature.lookup("Files.close").is_some(),
+        "деструктор обязан быть поднят под квалифицированным именем"
+    );
+    let shown = body(&signature, "Files.use");
+    assert!(
+        shown.contains("#closing") && shown.contains("Files.close"),
+        "закрытие обязано быть вставлено квалифицированным именем:\n{shown}"
+    );
+}
+
+#[test]
+fn two_modules_may_name_their_destructor_alike() {
+    // Плоского пространства имён деструкторов больше нет: квалификация развела
+    // `A.close` и `B.close`. Столкнуться они по-прежнему могут - но лишь внутри
+    // одного модуля, где имя действительно одно.
+    program(&format!(
+        "{BASE}
+module A where
+  resource Handle where
+    Open : Bool -> Handle
+    close : Handle -> Bool
+    close (Open b) = b
+
+module B where
+  resource Handle where
+    Open : Bool -> Handle
+    close : Handle -> Bool
+    close (Open b) = False
+
+both : Bool -> Bool
+both b =
+  let h : A.Handle = A.Open b
+      g : B.Handle = B.Open b
+  True
+"
+    ));
+}
+
+#[test]
+fn a_short_name_climbs_to_the_enclosing_module() {
+    // Ordered scoping §4.8: короткое имя ищется квалифицированным, и лестница
+    // идёт **до верхнего уровня**, а не на один шаг. Иначе сосед объемлющего
+    // был бы недостижим по короткому имени и требовал бы пути.
+    let signature = program(&format!(
+        "{BASE}
+module Outer where
+  base : Nat
+  base = Succ Zero
+
+  data Flag where
+    On : Flag
+    Off : Flag
+
+  module Mid where
+    module Deep where
+      read : Flag -> Nat
+      read On = base
+      read Off = Zero
+
+climbed : Nat
+climbed = Outer.Mid.Deep.read Outer.On
+"
+    ));
+    assert_eq!(value(&signature, "climbed"), "Succ Zero");
 }
 
 #[test]

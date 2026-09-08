@@ -32,7 +32,7 @@ use crate::decl::{CLOSING, MASK, NURSERY};
 use crate::error::{ElabError, Missing};
 use crate::fixity::Fixities;
 use crate::live;
-use crate::own::Owned;
+use crate::own::{Owned, Ownership};
 
 /// Умолчание кратности с поправкой на домен-универсум (§4.1).
 ///
@@ -352,6 +352,29 @@ fn remaining(params: &[ast::LamParam], body: &Expr, arguments: &[&Expr], span: S
 /// вопрос 102). Заводить всегда нельзя: параметр, которого не называет ни один
 /// член, в месте вызова метода не определяется ничем и доходит до границы
 /// объявления нерешённой дыркой.
+/// Имя, объявленное под квалификацией, - ближайшее из видимых из `enclosing`.
+///
+/// Лестница идёт от ближайшего модуля к верхнему и останавливается на первом
+/// объявленном: `base` внутри `Outer.Inner` есть сперва `Outer.Inner.base`,
+/// потом `Outer.base`. Не нашлось ничего - `None`, и звавший берёт написанное.
+///
+/// Свободной функцией, а не методом: тем же поиском пользуются объявления, у
+/// которых элаборатора под рукой нет.
+pub(crate) fn qualified_in(
+    signature: &Signature,
+    enclosing: Option<&str>,
+    name: &str,
+) -> Option<Symbol> {
+    let mut prefix = enclosing?;
+    loop {
+        let full: Symbol = Rc::from(format!("{prefix}.{name}").as_str());
+        if signature.lookup(&full).is_some() {
+            return Some(full);
+        }
+        prefix = &prefix[..prefix.rfind('.')?];
+    }
+}
+
 pub(crate) fn writes_effects(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::Effectful { labels, body, .. } => !labels.is_empty() || writes_effects(body),
@@ -1493,6 +1516,9 @@ impl<'a> Elaborator<'a> {
 
     /// Как имя члена выглядит на верхнем уровне: `T` внутри `IntOrd` есть
     /// `IntOrd.T`. `None` - элаборируется не тело модуля.
+    ///
+    /// Ближайшая квалификация, без лестницы: объявляют член **сюда**, а ищут
+    /// его [`Elaborator::qualified`], и подниматься нужно только поиску.
     fn qualified_name(&self, name: &str) -> Option<Symbol> {
         let enclosing = self.enclosing.as_ref()?;
         Some(Rc::from(format!("{}.{name}", enclosing.name).as_str()))
@@ -1526,10 +1552,52 @@ impl<'a> Elaborator<'a> {
         (term, ty)
     }
 
-    /// То же, но только если такой член уже объявлен.
+    /// То же, но только если такой член уже объявлен, - **на любом уровне
+    /// вложенности**.
+    ///
+    /// Лестница идёт от ближайшего модуля к верхнему: `base` внутри
+    /// `Outer.Inner` есть сперва `Outer.Inner.base`, потом `Outer.base`, и лишь
+    /// затем глобальное `base`. Это ordered scoping §4.8, а не особое правило:
+    /// ближний заслоняет дальнего ровно так же, как модуль заслоняет глобальное.
+    /// Один шаг вместо всей лестницы делал соседа объемлющего недостижимым по
+    /// короткому имени - писать приходилось путь, чего §4.8 не требует.
     fn qualified(&self, name: &str) -> Option<Symbol> {
-        let full = self.qualified_name(name)?;
-        self.signature.lookup(&full).is_some().then_some(full)
+        qualified_in(
+            self.signature,
+            self.enclosing.as_ref().map(|it| &*it.name),
+            name,
+        )
+    }
+
+    /// Имя головы написанного типа - такое, каким его объявили.
+    ///
+    /// Владение (§3.3) спрашивают по написанному, а объявлено оно под
+    /// квалифицированным именем, и лестница здесь обязана быть **той же**,
+    /// какой разрешается сам тип: иначе `Cell` соседнего модуля отвечал бы за
+    /// одноимённое своё.
+    /// Голова вправе быть путём (`Files.Handle`), и связывание её обрывает:
+    /// `p.field` при локальном `p` - проекция из записи, а не имя модуля.
+    fn owned_head(&self, ty: &Expr) -> Option<Symbol> {
+        let mut head = ty;
+        while let ExprKind::App(callee, _) = &head.kind {
+            head = callee;
+        }
+        let written: Symbol = match &head.kind {
+            ExprKind::Name(name) if self.local(&name.text).is_none() => Rc::clone(&name.text),
+            ExprKind::Project(..) => Rc::from(self.dotted(head)?.as_str()),
+            _ => return None,
+        };
+        Some(self.qualified(&written).unwrap_or(written))
+    }
+
+    /// Как объявлен тип, стоящий головой написанного.
+    fn owned_of(&self, ty: &Expr) -> Option<Ownership> {
+        self.owned.how(&self.owned_head(ty)?)
+    }
+
+    /// Деструктор типа, стоящего головой написанного.
+    fn owned_destructor(&self, ty: &Expr) -> Option<Symbol> {
+        self.owned.destructor_of(&self.owned_head(ty)?).cloned()
     }
 
     /// Член объявляемой группы под своим именем или под квалифицированным.
@@ -1893,7 +1961,7 @@ impl<'a> Elaborator<'a> {
         default: Mult,
         span: Span,
     ) -> Result<Mult, ElabError> {
-        let Some(owned) = self.owned.of(ty) else {
+        let Some(owned) = self.owned_of(ty) else {
             return Ok(Self::multiplicity(written, default));
         };
         match written.map(|ann| ann.mult) {
@@ -2891,7 +2959,7 @@ impl<'a> Elaborator<'a> {
         };
         Self::binds(&field.name)?;
         let ty = self.typing(|it| it.expr(&field.ty, Mult::Many))?;
-        if let Some(how) = self.owned.of(&field.ty) {
+        if let Some(how) = self.owned_of(&field.ty) {
             return Err(ElabError::OwnedRecordField {
                 field: Rc::clone(&field.name.text),
                 ty: crate::own::head(&field.ty)
@@ -4684,7 +4752,7 @@ impl<'a> Elaborator<'a> {
             return self.expr(codomain, default);
         };
         let domain = self.hiding(first.siblings, |inner| inner.expr(first.ty, Mult::Many))?;
-        let owns = self.owned.of(first.ty).is_some();
+        let owns = self.owned_of(first.ty).is_some();
         let bound = self.typed(&domain);
         // Row снимается с кодомена и у связывания с именем - тем же правилом,
         // что у безымянной стрелки: `(x : A) -> {IO} B` и `A -> {IO} B`
@@ -5041,9 +5109,9 @@ impl<'a> Elaborator<'a> {
         // стёртое связывание - нет, расходовать там нечего.
         let closes = mult != Mult::Zero
             && !self.mentioned_later(&binding.name.text, tail, rest)
-            && self.owned.destructor(ty).is_some();
-        let drop = closes.then(|| self.owned.destructor(ty).cloned()).flatten();
-        let owns = self.owned.of(ty).is_some();
+            && self.owned_destructor(ty).is_some();
+        let drop = closes.then(|| self.owned_destructor(ty)).flatten();
+        let owns = self.owned_of(ty).is_some();
         let ty = self.typing(|inner| inner.expr(ty, Mult::Many))?;
         // Аннотация `let` - тот же написанный тип, и лямбда значения берёт
         // кратности у него.

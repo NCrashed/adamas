@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Cons (Succ (Succ Zero)) (Cons (Succ Zero) (Cons (Succ (Succ (Succ Zero))) Nil))

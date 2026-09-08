@@ -86,16 +86,10 @@ impl Owned {
         self.drops.insert(name.clone(), drop.clone());
     }
 
-    /// Как объявлен тип, стоящий головой написанного.
-    #[must_use]
-    pub fn of(&self, ty: &Expr) -> Option<Ownership> {
-        self.types.get(head(ty)?).copied()
-    }
-
     /// Ресурс, деструктор которого уже назван так.
     ///
-    /// Имя деструктора одно на модуль: пространств имён ещё нет (§4.8), и
-    /// второй `drop` столкнулся бы с первым.
+    /// Спрашивается **объявленным** именем: квалификация развела `A.close` и
+    /// `B.close`, и столкнуться два деструктора могут лишь внутри одного модуля.
     #[must_use]
     pub fn named(&self, drop: &str) -> Option<&Symbol> {
         self.drops
@@ -120,13 +114,7 @@ impl Owned {
         self.types.get(name).copied()
     }
 
-    /// Деструктор типа, стоящего головой написанного.
-    #[must_use]
-    pub fn destructor(&self, ty: &Expr) -> Option<&Symbol> {
-        self.drops.get(head(ty)?)
-    }
-
-    /// То же по имени типа - для домена, снятого с уже собранного терма.
+    /// Деструктор типа по его имени.
     #[must_use]
     pub fn destructor_of(&self, data: &str) -> Option<&Symbol> {
         self.drops.get(data)
@@ -138,6 +126,29 @@ pub(crate) fn head(expr: &Expr) -> Option<&Symbol> {
     match &expr.kind {
         ExprKind::Name(name) => Some(&name.text),
         ExprKind::App(callee, _) => head(callee),
+        _ => None,
+    }
+}
+
+/// То же, но голова вправе быть **путём**: `Files.Handle n` - это `Files.Handle`.
+///
+/// Отдельно от [`head`] потому, что путь склеивается, а не заимствуется. Нужен
+/// он с тех пор, как ресурс и `unique data` пишутся в теле модуля: снаружи их
+/// тип иначе как путём не назвать, а правило владения смотрит на голову
+/// написанного - и не находило её вовсе (§3.3).
+pub(crate) fn head_path(expr: &Expr) -> Option<Symbol> {
+    let mut head = expr;
+    while let ExprKind::App(callee, _) = &head.kind {
+        head = callee;
+    }
+    dotted(head).map(|it| Symbol::from(it.as_str()))
+}
+
+/// Точечное имя целиком, если каждое его звено - имя.
+fn dotted(expr: &Expr) -> Option<String> {
+    match &expr.kind {
+        ExprKind::Name(name) => Some(name.text.to_string()),
+        ExprKind::Project(inner, field) => Some(format!("{}.{}", dotted(inner)?, field.text)),
         _ => None,
     }
 }

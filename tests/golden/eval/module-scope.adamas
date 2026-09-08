@@ -1,0 +1,59 @@
+-- Лестница имён внутри модуля (§4.8, ordered scoping).
+--
+-- Короткое имя внутри тела ищется квалифицированным и заслоняет одноимённое
+-- глобальное. Лестница при этом идёт **до верхнего уровня**, а не на один шаг:
+-- `base` внутри `Outer.Mid.Deep` есть сперва `Outer.Mid.Deep.base`, потом
+-- `Outer.Mid.base`, потом `Outer.base`, и лишь затем глобальное. Один шаг
+-- вместо всей лестницы делал соседа объемлющего недостижимым по короткому
+-- имени - писать приходилось путь, чего §4.8 не требует.
+--
+-- Правило одно и то же для определения, для семейства и для конструктора в
+-- паттерне: ищет их один и тот же поиск.
+--
+-- Проверяется значением: каждое звено лестницы отвечает своим числом, и
+-- ответ `[3, 2, 1]` показывает, что заслонение идёт от ближнего к дальнему.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+-- Глобальное имя - последнее в лестнице.
+mark : Nat
+mark = Zero
+
+module Outer where
+  mark : Nat
+  mark = Succ Zero
+
+  data Flag where
+    On : Flag
+    Off : Flag
+
+  -- Своё имя заслоняет глобальное.
+  here : Nat
+  here = mark
+
+  module Mid where
+    mark : Nat
+    mark = Succ (Succ Zero)
+
+    -- Своё заслоняет и объемлющее, и глобальное.
+    here : Nat
+    here = mark
+
+    module Deep where
+      mark : Nat
+      mark = Succ (Succ (Succ Zero))
+
+      -- Ближнее своё; а семейство и конструктор берутся через два уровня
+      -- вверх - по короткому имени, без пути.
+      read : Flag -> Nat
+      read On = mark
+      read Off = Zero
+
+main : List Nat
+main = Cons (Outer.Mid.Deep.read Outer.On) (Cons Outer.Mid.here (Cons Outer.here Nil))

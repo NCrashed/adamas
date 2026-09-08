@@ -858,10 +858,15 @@ fn declare_module(
     // является не он, а его применение.
     // Вложенный в функтор не идёт по тому же доводу: параметр он несёт, пусть и
     // не свой, поэтому реализацией сигнатуры является не он, а его применение.
-    if !module.sealed
-        && params.is_empty()
-        && let Some(written) = module.ascription.as_ref().and_then(ascription_name)
-    {
+    //
+    // Цепочкой `&&` с `let` это не пишется: та требует Rust 2024, а MSRV
+    // проекта 1.85 (джоба `msrv` его и ловит).
+    let ascribed = module
+        .ascription
+        .as_ref()
+        .filter(|_| !module.sealed && params.is_empty())
+        .and_then(ascription_name);
+    if let Some(written) = ascribed {
         instances.implements(&written, &declared);
     }
     Ok(())

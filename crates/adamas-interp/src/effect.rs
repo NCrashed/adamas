@@ -69,19 +69,29 @@ impl Machine<'_> {
         }
         // Питомник: постулат, чьё тело даёт машина. Тело у имени означает, что
         // так назвали своё - в питомник его превращать нечего.
-        if &**name == fiber::NURSERY
-            && let Some(definition) = self.signature().lookup(name)
-            && definition.body.is_none()
-        {
+        //
+        // Условие разнесено, а не собрано цепочкой `&&` с `let`: та требует
+        // Rust 2024, а MSRV проекта 1.85 (джоба `msrv` его и ловит).
+        let postulated = &**name == fiber::NURSERY
+            && self
+                .signature()
+                .lookup(name)
+                .is_some_and(|definition| definition.body.is_none());
+        if postulated {
             let arguments = applied(spine);
             let Some(body) = arguments.first() else {
                 return Ok(None);
             };
             return Ok(Some(self.nursing(body, kont)?));
         }
-        if let Some(definition) = self.signature().lookup(name)
-            && let DefinitionKind::Operation { effect } = &definition.kind
-        {
+        let operation =
+            self.signature()
+                .lookup(name)
+                .and_then(|definition| match &definition.kind {
+                    DefinitionKind::Operation { effect } => Some((definition, effect)),
+                    _ => None,
+                });
+        if let Some((definition, effect)) = operation {
             let Some(arity) = performing(&definition.ty) else {
                 return Ok(None);
             };

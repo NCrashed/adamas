@@ -466,9 +466,9 @@ fn track_bracket(
     }
     // Блоки, открытые под этой скобкой, закрываются ею: отступ внутри скобок
     // границы не задаёт, а парная её задаёт однозначно (§10 вопрос 55).
-    if token.kind.closes_bracket()
-        && let Some(&(_, depth)) = brackets.last()
-    {
+    // Условие разбито на два: `let` в цепочке `&&` требует Rust 2024, а MSRV
+    // проекта 1.85 (джоба `msrv` его и ловит).
+    if let Some(&(_, depth)) = brackets.last().filter(|_| token.kind.closes_bracket()) {
         while blocks.len() > depth {
             blocks.pop();
             out.push(virtual_token(TokenKind::Close, token));

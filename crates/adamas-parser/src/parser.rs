@@ -2331,9 +2331,16 @@ impl<'a> Parser<'a> {
         // Заводится он лишь тогда, когда точка действительно съедена, - у
         // обычного паттерна лишней аллокации не появляется.
         let mut path: Option<String> = None;
-        while span.end() == self.peek().span.start()
-            && let Some(field) = self.projected()
-        {
+        // `let` в цепочке `&&` требует Rust 2024, а MSRV проекта 1.85, поэтому
+        // условие разнесено. Порядок существен: `projected` **съедает**
+        // лексему, значит смежность спрашивается до неё, а не фильтром после.
+        loop {
+            if span.end() != self.peek().span.start() {
+                break;
+            }
+            let Some(field) = self.projected() else {
+                break;
+            };
             let text = path.get_or_insert_with(|| head.text.to_string());
             text.push('.');
             text.push_str(&field.text);

@@ -447,9 +447,12 @@ impl<'a> Machine<'a> {
         // отрабатывают, а тело не досчитывается: обрыв в suspend-точке.
         // Разбор возобновляется своим же кадром, когда раскрутка договорит;
         // второй заход файбера не находит и идёт по ветвям.
-        if let Some((home, fiber)) = crate::fiber::fiber_named(scrutinee)
-            && let Some(inner) = self.cancelled(home, fiber)
-        {
+        //
+        // Цепочкой `&&` с `let` это не пишется: та требует Rust 2024, а MSRV
+        // проекта 1.85 (джоба `msrv` его и ловит).
+        let abandoned = crate::fiber::fiber_named(scrutinee)
+            .and_then(|(home, fiber)| self.cancelled(home, fiber));
+        if let Some(inner) = abandoned {
             kont.push(Frame::Scrutinee(env.clone(), Rc::clone(case)));
             let length = inner.len();
             return self.unwinding(&inner, length, Rc::clone(scrutinee), kont);

@@ -1,0 +1,67 @@
+-- Метка со связыванием параметра в скобках: `effect Src (0 a : Type)` (§3.4,
+-- §4.1).
+--
+-- Форма `effect Yield a` в корпусе есть (`mask.adamas`), а форма с написанным
+-- связыванием - нет, хотя ровно ею пишутся канонические примеры §3.4 (`State
+-- s`, `Except IOError`) и вся типовая сторона регионов (`Alloc r`).
+--
+-- Аргумент метки здесь **несёт тип операции**: `next : a`, и написано это имя
+-- нигде больше. Тип приезжает из окружающей, а из типа - инстанс класса,
+-- который считает ответ. Позиционной программы (`next` берёт первую метку,
+-- `mask next` - вторую) для этого мало: без аргументов она считалась бы точно
+-- так же. Здесь же метки различаются аргументом, и ответы у них разные - 1 и 5.
+--
+-- Ответ `[1, 5]` списком, а не суммой: `1 + 5` и `5 + 1` дают одно и то же, и
+-- перестановка меток прошла бы незамеченной.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+-- Операция без аргументов объявляется как `Unit -> a`, и имя обязано быть.
+data Unit where
+  MkUnit : Unit
+
+-- Параметр стёрт: в рантайме метка аргумента не несёт, различает он типы.
+effect Src (0 a : Type) where
+  next : a
+
+class Tag a where
+  tag : a -> Nat
+
+instance Tag Nat where
+  tag n = Succ n
+
+instance Tag Bool where
+  tag False = Succ (Succ (Succ (Succ Zero)))
+  tag True = Succ (Succ (Succ (Succ (Succ Zero))))
+
+-- Тип `next` не написан ни здесь, ни в сигнатуре `tag`: его даёт аргумент
+-- метки, и он же выбирает инстанс. Первое вхождение - `Src Nat`, второе
+-- адресуется маской.
+pair : {Src Nat, Src Bool} List Nat
+pair =
+  let x : Nat = tag next
+  let y : Nat = tag (mask next)
+  Cons x (Cons y Nil)
+
+-- Ветка отвечает `Zero`, потому что снятая метка - `Src Nat`. Ответь она
+-- `True`, отказ пришёл бы сюда же.
+onNat : {Src Bool} List Nat
+onNat = handle pair with
+  return v -> v
+  next -> resume Zero
+
+-- Внешний хендлер снимает `Src Bool` и отвечает `True`: `tag True` даёт 5.
+main : List Nat
+main = handle onNat with
+  return v -> v
+  next -> resume True

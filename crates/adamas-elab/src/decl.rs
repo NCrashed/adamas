@@ -19,6 +19,7 @@ use std::rc::Rc;
 
 use adamas_core::check::{TypeError, check_within, infer, is_type};
 use adamas_core::ctx::Ctx;
+use adamas_core::error::Frame;
 use adamas_core::eval::{eval, quote};
 use adamas_core::level::{Level, LevelVar};
 use adamas_core::meta::{Generalization, Metas, zonk_term};
@@ -46,8 +47,8 @@ use crate::warn::{Warning, Warnings};
 /// Написанный тип хранится вместе с собранным: маршрут отказа пойдёт по нему
 /// обратно, чтобы стать спаном (§10 вопрос 49б).
 struct Pending<'a> {
-    /// Требует ли `@total` положительного вердикта (§4.7).
-    total: bool,
+    /// Каких вердиктов требуют написанные атрибуты (§4.7, §5.1).
+    required: Required,
     name: Symbol,
     ty: Term,
     /// Сколько параметров кратности написано (§10 вопрос 41).
@@ -238,25 +239,31 @@ struct Aliased<'a> {
     body: &'a ast::Expr,
 }
 
-/// Разбирает атрибуты сигнатуры: что из них требует проверки (§4.7).
+/// Что атрибуты сигнатуры требуют от вердиктов ядра (§4.7, §5.1).
+#[derive(Clone, Copy, Default)]
+struct Required {
+    /// `@total` (§4.7).
+    total: bool,
+    /// `@noalloc` (§5.1).
+    #[allow(dead_code, reason = "заполняет соседний атрибут `@noalloc`")]
+    noalloc: bool,
+    /// `@fbip` (§5.1).
+    fbip: bool,
+}
+
+/// Разбирает атрибуты сигнатуры: что из них требует проверки (§4.7, §5.1).
 ///
-/// `@total` - единственный, который компилятор сегодня проверяет: вердикт
-/// ядро считает всегда, и атрибут превращается в требование «ответ обязан
-/// быть да». `@fbip` и `@noalloc` - обязательства перед backend'ом, а его нет;
-/// принять их молча значило бы обещать проверку, которой не будет.
-fn required(attributes: &[ast::Name]) -> Result<bool, ElabError> {
-    let mut total = false;
+/// `@total` и `@fbip` компилятор проверяет: вердикт считает ядро
+/// ([`adamas_core::total`], [`adamas_core::fbip`]), а атрибут превращается в
+/// требование «ответ обязан быть да». `@noalloc` - обязательство перед
+/// backend'ом, а его нет; принять его молча значило бы обещать проверку,
+/// которой не будет.
+fn required(attributes: &[ast::Name]) -> Result<Required, ElabError> {
+    let mut found = Required::default();
     for attribute in attributes {
         match &*attribute.text {
-            "total" => total = true,
-            "fbip" => {
-                return Err(ElabError::Attribute {
-                    name: Rc::clone(&attribute.text),
-                    why: "совместимость с FBIP проверяется по коду backend'а (§5.1), \
-                          а его ещё нет",
-                    span: attribute.span,
-                });
-            }
+            "total" => found.total = true,
+            "fbip" => found.fbip = true,
             "noalloc" => {
                 return Err(ElabError::Attribute {
                     name: Rc::clone(&attribute.text),
@@ -273,7 +280,7 @@ fn required(attributes: &[ast::Name]) -> Result<bool, ElabError> {
             }
         }
     }
-    Ok(total)
+    Ok(found)
 }
 
 /// Написанная сигнатура - объявление, ждущее своих клауз.
@@ -289,7 +296,7 @@ fn declared_signature<'a>(
     attributes: &[ast::Name],
     span: Span,
 ) -> Result<Pending<'a>, ElabError> {
-    let total = required(attributes)?;
+    let demanded = required(attributes)?;
     // Владение верхнего уровня не выражается: определение всегда `ω`
     // (`sig.rs`: линейность на всю программу не считается), а §3.3 требует
     // `1`. Без этого отказа постулат ресурсного типа - обычное ω-имя, и `drop`
@@ -314,7 +321,7 @@ fn declared_signature<'a>(
     })?;
     let grades = elaborator.grade_arity();
     Ok(Pending {
-        total,
+        required: demanded,
         name: qualify(within, &name.text),
         ty: elaborated,
         grades,
@@ -677,6 +684,7 @@ fn alias(
         signature,
         metas,
         known.instances,
+        known.owned,
         None,
         &wrapped_body,
         &ty,
@@ -1031,6 +1039,7 @@ fn declare_class(
         });
     }
     class_members(class, &mut info, &mut members)?;
+    flat_shape(&name.text, class, &params, &mut info)?;
     let names = Names::of(&name.text, Vec::new());
     // Класс - **функция** от своих параметров в тип записи, а не сам тип:
     // `Eqv Nat` есть применение. Отсюда тело лямбдой, а тип - `Pi` над
@@ -1102,6 +1111,41 @@ fn declare_class(
     Ok(())
 }
 
+/// Класс `Flat` объявляется так, как написан в §4.11, - и когерентен.
+///
+/// Форма спрашивается потому, что компилятор знает это имя и **выводит** по
+/// нему инстансы: класс с тем же именем и другим содержимым сломал бы вывод
+/// молча. Когерентность же не объявляется автором, а следует из вывода: инстанс
+/// вычисляется по представлению, выбирать нечего. Отсюда и §4.8 - запрет на
+/// class-констрейнты в запечатывающей сигнатуре охраняет от осадки выбора и
+/// когерентные классы пропускает, а `Flat T` в сигнатуре модуля есть
+/// обязательство о представлении.
+fn flat_shape(
+    name: &Symbol,
+    class: &ast::ClassDecl,
+    params: &[ast::Binder],
+    info: &mut Class,
+) -> Result<(), ElabError> {
+    if &**name != crate::flat::FLAT {
+        return Ok(());
+    }
+    let written = params.iter().map(|it| it.names.len()).sum::<usize>();
+    let shaped = written == 1
+        && class.superclasses.is_empty()
+        && info.defaults.is_empty()
+        && info.methods.len() == 1
+        && &*info.methods[0] == crate::flat::LAYOUT;
+    if !shaped {
+        return Err(ElabError::FlatShape {
+            why: "класс `Flat` объявляется одним параметром и единственным методом \
+                  `layout : Layout` (§4.11)",
+            span: class.head.span,
+        });
+    }
+    info.coherent = true;
+    Ok(())
+}
+
 /// `instance Eqv Nat where …` - запись, проверенная против `Eqv Nat`.
 #[allow(clippy::too_many_arguments)]
 fn declare_instance(
@@ -1118,6 +1162,17 @@ fn declare_instance(
         return Err(ElabError::UnknownName {
             name: Rc::clone(&name.text),
             span: name.span,
+        });
+    }
+    // Инстанс `Flat` не пишется: его порождает компилятор структурно (§4.11).
+    // Отказ стоит здесь, а не в разрешении, потому что написанный инстанс
+    // молча заслонил бы выведенный - и объявил бы представление, которого у
+    // типа нет.
+    if &*name.text == crate::flat::FLAT {
+        return Err(ElabError::FlatShape {
+            why: "инстанс `Flat` руками не пишется: компилятор выводит его \
+                  структурно по представлению типа (§4.11)",
+            span,
         });
     }
     let names = Names::of(&name.text, Vec::new());
@@ -1214,7 +1269,9 @@ fn declare_instance(
     let object = abstracted(&prefix, Term::Object(object.into()));
     // Поля суперклассов заполняются поиском - до проверки, которой дырка
     // уже мешала бы.
-    class::resolve(signature, metas, instances, None, &object, &written, span)?;
+    class::resolve(
+        signature, metas, instances, owned, None, &object, &written, span,
+    )?;
     // `check_within`, а не `check_closed_with`: нерешённая дырка уровня здесь -
     // будущий параметр самого словаря, и запрет отвергал бы всякий
     // полиморфный инстанс. Окончательный запрет ставит объявление.
@@ -1241,17 +1298,19 @@ fn class_members<'a>(
                 ty,
                 attributes,
             } => {
-                // Атрибуты у метода не выбрасываются молча. `@fbip` и
-                // `@noalloc` отвергает общий разбор - проверки под них нет
-                // (§4.7); `@total` отвергается здесь, потому что у метода он
-                // был бы обещанием про **каждый** инстанс, а вердикт считается
-                // у определения, и определение это - член инстанса.
-                if required(attributes)? {
+                // Атрибуты у метода не выбрасываются молча. `@noalloc`
+                // отвергает общий разбор - проверки под него нет (§5.1);
+                // `@total` и `@fbip` отвергаются здесь, потому что у метода
+                // они были бы обещанием про **каждый** инстанс, а вердикт
+                // считается у определения, и определение это - член инстанса.
+                let demanded = required(attributes)?;
+                if demanded.total || demanded.fbip {
                     return Err(ElabError::ModuleMember {
                         name: Rc::clone(&name.text),
                         what: "классе",
-                        why: "`@total` у метода обещал бы вердикт за каждый инстанс, \
-                              а считается он у определения - пишите атрибут у члена инстанса",
+                        why: "`@total` и `@fbip` у метода обещали бы вердикт за каждый \
+                              инстанс, а считается он у определения - пишите атрибут \
+                              у члена инстанса",
                         span: member.span,
                     });
                 }
@@ -1754,6 +1813,10 @@ fn self_dictionary(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "объявление группы идёт одной последовательностью: типы членов, общее обобщение, тела, группа"
+)]
 fn declare_members(
     signature: &mut Signature,
     metas: &mut Metas,
@@ -1860,6 +1923,7 @@ fn declare_members(
             signature,
             metas,
             instances,
+            owned,
             Some(&declaring),
             &tree.term,
             &types[at],
@@ -2007,6 +2071,7 @@ fn declare_mutual(
             signature,
             metas,
             instances,
+            owned,
             None,
             &tree.term,
             &generalized[at],
@@ -2024,7 +2089,7 @@ fn declare_mutual(
         &trees,
         span,
     )?;
-    required_verdicts(signature, &planned)?;
+    required_verdicts(signature, &planned, &trees)?;
     for member in &planned {
         carrier::check(signature, owned, &member.name.text, member.span)?;
     }
@@ -2213,15 +2278,24 @@ fn unnamed_siblings(planned: &[&Mutual<'_>]) -> Result<(), ElabError> {
     Ok(())
 }
 
-/// Требует положительного вердикта там, где написан `@total` (§4.7).
+/// Требует положительного вердикта там, где написаны `@total` и `@fbip`
+/// (§4.7, §5.1).
 ///
 /// Спрашивается **после** объявления группы, и это существенно: у члена группы
 /// вердикт зависит от соседей, неподвижная точка понижает их вместе, и
 /// спросить раньше значило бы спросить не тот. До этой проверки атрибут внутри
 /// `mutual` выбрасывался вместе с заголовком, то есть не значил ничего.
-fn required_verdicts(signature: &Signature, planned: &[&Mutual<'_>]) -> Result<(), ElabError> {
+///
+/// FBIP от соседей не зависит - совместимость есть свойство одного тела, - но
+/// спрашивается здесь же: место у обоих атрибутов одно, и разводить их значило
+/// бы заводить второй проход ради одной строки.
+fn required_verdicts(
+    signature: &Signature,
+    planned: &[&Mutual<'_>],
+    trees: &[Compiled],
+) -> Result<(), ElabError> {
     for member in planned {
-        if member.total
+        if member.required.total
             && !signature
                 .lookup(&member.name.text)
                 .is_some_and(|it| it.total)
@@ -2232,7 +2306,57 @@ fn required_verdicts(signature: &Signature, planned: &[&Mutual<'_>]) -> Result<(
             });
         }
     }
+    let routed: Vec<route::Member<'_>> = planned
+        .iter()
+        .zip(trees)
+        .map(|(member, tree)| route::Member {
+            ty: member.ty,
+            clauses: member.clauses,
+            compiled: tree,
+        })
+        .collect();
+    for (at, member) in planned.iter().enumerate() {
+        if !member.required.fbip {
+            continue;
+        }
+        let Some(tree) = trees.get(at) else {
+            continue;
+        };
+        fbip_verdict(
+            signature,
+            &tree.term,
+            &Declared::Group(&routed),
+            u32::try_from(at).unwrap_or(u32::MAX),
+            &member.name.text,
+            member.span,
+        )?;
+    }
     Ok(())
+}
+
+/// Требует совместимости с FBIP там, где написан `@fbip` (§5.1).
+///
+/// Вердикт считает ядро по телу, а место отказа переводится в спан тем же
+/// маршрутом, каким переводится отказ проверки типов (§10 вопрос 49б): кадры
+/// ложатся на дерево разбора, дерево - на клаузу, клауза - на её текст.
+fn fbip_verdict(
+    signature: &Signature,
+    body: &Term,
+    declared: &Declared<'_>,
+    member: u32,
+    name: &Symbol,
+    span: Span,
+) -> Result<(), ElabError> {
+    let Err(refusal) = adamas_core::fbip::compatible(signature, body) else {
+        return Ok(());
+    };
+    let mut route = vec![Frame::MemberBody(member)];
+    route.extend(refusal.route);
+    Err(ElabError::NotFbip {
+        name: Rc::clone(name),
+        fault: Box::new(refusal.fault),
+        span: route::at(declared, &route, span),
+    })
 }
 
 /// Семейства блока - одной группой, конструкторы под нею целиком.
@@ -2355,8 +2479,8 @@ struct Mutual<'a> {
     ty: &'a ast::Expr,
     clauses: &'a [ast::Clause],
     span: Span,
-    /// Требует ли `@total` положительного вердикта (§4.7).
-    total: bool,
+    /// Каких вердиктов требуют написанные атрибуты (§4.7, §5.1).
+    required: Required,
 }
 
 /// Что написано членом группы.
@@ -2372,7 +2496,7 @@ enum Planned<'a> {
 /// это отсутствие тела, и объявлять его группой незачем.
 fn mutual_members(members: &[ast::Decl], span: Span) -> Result<Vec<Planned<'_>>, ElabError> {
     let mut found = Vec::with_capacity(members.len() / 2);
-    let mut pending: Option<(&ast::Name, &ast::Expr, Span, bool)> = None;
+    let mut pending: Option<(&ast::Name, &ast::Expr, Span, Required)> = None;
     for member in members {
         match &member.kind {
             DeclKind::Signature {
@@ -2393,7 +2517,7 @@ fn mutual_members(members: &[ast::Decl], span: Span) -> Result<Vec<Planned<'_>>,
                 pending = Some((name, ty, member.span, required(attributes)?));
             }
             DeclKind::Clauses { name, clauses } => {
-                let Some((declared, ty, at, total)) =
+                let Some((declared, ty, at, demanded)) =
                     pending.take().filter(|(it, ..)| it.text == name.text)
                 else {
                     return Err(ElabError::MissingSignature {
@@ -2406,7 +2530,7 @@ fn mutual_members(members: &[ast::Decl], span: Span) -> Result<Vec<Planned<'_>>,
                     ty,
                     clauses,
                     span: at.merge(member.span),
-                    total,
+                    required: demanded,
                 }));
             }
             // Семейство в группе - тот самый случай, ради которого `mutual` и
@@ -2566,7 +2690,7 @@ fn declare_module_value(
         .within(within)
         .wrapped(&params, true, |_| Ok(inner_ty))?;
     let term = abstracted(&params, term);
-    class::resolve(signature, metas, instances, None, &term, &ty, span)?;
+    class::resolve(signature, metas, instances, owned, None, &term, &ty, span)?;
     signature
         .define_opaque(metas, declared, Mult::Many, ty, Some(term), module.sealed)
         .map_err(|error| ElabError::Core {
@@ -3040,6 +3164,7 @@ fn define(
         signature,
         metas,
         known.instances,
+        known.owned,
         // Не объявляемый инстанс: сюда приходит обычное определение, а член
         // инстанса объявляется своим путём и `Declaring` получает там.
         None,
@@ -3073,11 +3198,27 @@ fn define(
 
     // Вердикт читается после объявления: считает его ядро, а атрибут только
     // требует, чтобы ответ был «да» (§4.7).
-    if declared.total && !signature.lookup(&declared.name).is_some_and(|it| it.total) {
+    if declared.required.total && !signature.lookup(&declared.name).is_some_and(|it| it.total) {
         return Err(ElabError::NotTotal {
             name: Rc::clone(&declared.name),
             span: declared.span,
         });
+    }
+
+    if declared.required.fbip {
+        let source = Declared::Definition {
+            ty: declared.source,
+            clauses,
+            compiled: &tree,
+        };
+        fbip_verdict(
+            signature,
+            &tree.term,
+            &source,
+            0,
+            &declared.name,
+            declared.span,
+        )?;
     }
 
     // После объявления, а не до: дырки решены и подставлены, поэтому видно,
@@ -3416,7 +3557,7 @@ fn declare_resource(
         drop_ty.span,
     )?;
     let pending = Pending {
-        total: false,
+        required: Required::default(),
         name: drop_declared,
         ty: elaborated,
         // Деструктор ресурса кратностями не полиморфен: его домен - `1` по
@@ -3520,6 +3661,16 @@ fn destructor_shape(
 ///
 /// Смотрит на голову написанного, как и всё правило владения, поэтому ресурс
 /// под переменной типа сюда не попадает - вопрос 76.
+///
+/// **Стёртое связывание полем не бывает** (вопрос 122). Телескоп конструктора
+/// начинается параметрами семейства, и `data Ref (0 r : Region) (a : Type)` с
+/// `MkRef : Ref r a` не берёт ни одного поля - но `r` стоит в телескопе, и
+/// правило читало его как поле типа `Region`. Кратность написана в сигнатуре, и
+/// правилу хватает того же взгляда на неё, каким на кратности параметров
+/// научили смотреть вставку `drop` (лог 2026-08-29): при `0` значения в
+/// рантайме не возникает, держать нечего, уничтожать нечего. Нестёртый параметр
+/// семейства ресурсного типа под правило по-прежнему попадает: он приходит
+/// конструктору настоящим аргументом и лежит в значении.
 fn owned_field(
     ty: &Term,
     owned: &Owned,
@@ -3531,8 +3682,10 @@ fn owned_field(
     // головой их типа в **ядре**: оба квалифицированы, и разъехаться им негде.
     let holder = owned.how(declared);
     let mut current = ty;
-    while let Term::Pi(_, _, domain, _, codomain) = current {
-        let field = name_head(domain).and_then(|name| owned.how(name).map(|how| (name, how)));
+    while let Term::Pi(binder, _, domain, _, codomain) = current {
+        let field = name_head(domain)
+            .filter(|_| binder.mult != Mult::Zero)
+            .and_then(|name| owned.how(name).map(|how| (name, how)));
         if let Some((name, field)) = field {
             let refuse = |needed| {
                 Err(ElabError::OwnedField {

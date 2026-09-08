@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: flat-pointer-field.adamas:33:1: `Flat` не выводится для `Row`: поле 2 конструктора `MkRow` имеет тип `List`, а он рекурсивен, и размер значения ничем не ограничен
+  main = layout @Row
+  ^^^^^^^^^^^^^^^^^^

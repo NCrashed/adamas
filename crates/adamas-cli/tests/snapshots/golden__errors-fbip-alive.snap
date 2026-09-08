@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: fbip-alive.adamas:20:10: `nest` объявлено `@fbip`, но совместимости нет: разобранное `Node` употребляется ещё раз, то есть остаётся живым: переписать его слоты нечем, и `Node` (полей: 3) аллоцируется заново
+  nest t = case t of
+           ^^^^^^^^^

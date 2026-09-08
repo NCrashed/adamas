@@ -1,0 +1,30 @@
+-- Инстанс `Flat` руками не пишется (§4.11).
+--
+-- Написанный инстанс объявляет представление, которого у типа нет: `Handle`
+-- ниже занимает два байта, а обещано четыре. Заслонить им выведенный - значит
+-- разойтись с укладкой, по которой этот же тип поедет в регион и в плоский
+-- массив, поэтому отказ стоит на объявлении, а не на употреблении.
+--
+-- Ближайший проходящий сосед - `eval/flat.adamas`: убрать `instance` целиком.
+-- Писать вместо него нечего - словарь и так выведется, и посчитает два байта.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+type Layout = { size : Nat, align : Nat }
+
+class Flat a where
+  layout : Layout
+
+data Bit where
+  Off : Bit
+  On : Bit
+
+type Handle = { index : Bit, generation : Bit }
+
+instance Flat Handle where
+  layout = { size = Succ (Succ (Succ (Succ Zero))), align = Succ Zero }
+
+main : Layout
+main = layout @Handle

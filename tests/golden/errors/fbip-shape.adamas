@@ -1,0 +1,25 @@
+-- `@fbip` на функции, у которой результат принципиально другой формы (§5.1).
+--
+-- Именно `flatten : Tree a -> List a` §5.1 называет примером несовместимой
+-- функции: ветвь разбирает `Node` о трёх полях, а строит `Cons` о двух, и
+-- переписать одну ячейку другой нечем.
+--
+-- Ближайший проходящий сосед - тот же `flatten` без атрибута: функция законна,
+-- обещание о reuse - нет.
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+data Tree (a : Type) where
+  Leaf : Tree a
+  Node : Tree a -> a -> Tree a -> Tree a
+
+append : List a -> List a -> List a
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+@fbip
+flatten : Tree a -> List a
+flatten Leaf = Nil
+flatten (Node l x r) = append (flatten l) (Cons x (flatten r))

@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: resource-field-in-family.adamas:23:11: `MkRef` берёт поле типа `Region` (resource), поэтому `Ref` обязан быть объявлен `resource Ref`
+    MkRef : Region -> Ref r a
+            ^^^^^^^^^^^^^^^^^

@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: live-parameter-holds-resource.adamas:22:11: `MkRef` берёт поле типа `Region` (resource), поэтому `Ref` обязан быть объявлен `resource Ref`
+    MkRef : Ref r a
+            ^^^^^^^

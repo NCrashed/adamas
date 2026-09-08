@@ -3520,6 +3520,16 @@ fn destructor_shape(
 ///
 /// Смотрит на голову написанного, как и всё правило владения, поэтому ресурс
 /// под переменной типа сюда не попадает - вопрос 76.
+///
+/// **Стёртое связывание полем не бывает** (вопрос 122). Телескоп конструктора
+/// начинается параметрами семейства, и `data Ref (0 r : Region) (a : Type)` с
+/// `MkRef : Ref r a` не берёт ни одного поля - но `r` стоит в телескопе, и
+/// правило читало его как поле типа `Region`. Кратность написана в сигнатуре, и
+/// правилу хватает того же взгляда на неё, каким на кратности параметров
+/// научили смотреть вставку `drop` (лог 2026-08-29): при `0` значения в
+/// рантайме не возникает, держать нечего, уничтожать нечего. Нестёртый параметр
+/// семейства ресурсного типа под правило по-прежнему попадает: он приходит
+/// конструктору настоящим аргументом и лежит в значении.
 fn owned_field(
     ty: &Term,
     owned: &Owned,
@@ -3531,8 +3541,10 @@ fn owned_field(
     // головой их типа в **ядре**: оба квалифицированы, и разъехаться им негде.
     let holder = owned.how(declared);
     let mut current = ty;
-    while let Term::Pi(_, _, domain, _, codomain) = current {
-        let field = name_head(domain).and_then(|name| owned.how(name).map(|how| (name, how)));
+    while let Term::Pi(binder, _, domain, _, codomain) = current {
+        let field = name_head(domain)
+            .filter(|_| binder.mult != Mult::Zero)
+            .and_then(|name| owned.how(name).map(|how| (name, how)));
         if let Some((name, field)) = field {
             let refuse = |needed| {
                 Err(ElabError::OwnedField {

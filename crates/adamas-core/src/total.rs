@@ -617,12 +617,21 @@ impl Walk<'_> {
                     .iter()
                     .map(|argument| Self::size(sizes, argument))
                     .collect();
-                match head {
-                    Term::Const(other, _, _)
-                        if let Some(callee) = self.group.iter().position(|it| it == other) =>
-                    {
-                        self.calls.push((callee, applied));
+                // Позиция члена группы считается **до** разбора, а не стражем
+                // `if let`: тот требует Rust 2024, а MSRV проекта 1.85, и CI
+                // ловит это отдельной джобой.
+                let callee = match head {
+                    Term::Const(other, _, _) => self.group.iter().position(|it| it == other),
+                    _ => None,
+                };
+                if let Some(callee) = callee {
+                    self.calls.push((callee, applied));
+                    for argument in arguments {
+                        self.term(sizes, argument);
                     }
+                    return;
+                }
+                match head {
                     // Convoy: аргументы применения - те самые соседи, которые
                     // ветвь связывает лямбдами сверх полей.
                     Term::Case(case) => self.case(sizes, case, &applied),

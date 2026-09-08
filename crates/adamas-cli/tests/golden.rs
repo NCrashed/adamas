@@ -62,6 +62,13 @@ fn driven(command: &str, path: &Path) -> (bool, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_adamas"))
         .arg(command)
         .arg(path)
+        // Backtrace выключается **явно**: снапшот записывает диагностику
+        // языка, а `anyhow` дописывает к ней трейс, когда переменная стоит в
+        // окружении. У CI она стоит, у разработчика обычно нет - и снапшот,
+        // снятый локально, там не сходился (2026-09-08). Наследовать
+        // окружение в этом месте нечего: ответ компилятора от него не зависит.
+        .env_remove("RUST_BACKTRACE")
+        .env_remove("RUST_LIB_BACKTRACE")
         .output()
         .unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();

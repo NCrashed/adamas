@@ -1,0 +1,49 @@
+-- `Flat` в сигнатурах: когерентность по построению и экспорт (§4.11, §4.8).
+--
+-- Инстанс `Flat` не выбирается, а вычисляется по представлению типа, поэтому
+-- словарь на программу один и осадка выбора он не оставляет. Отсюда и разница
+-- с §4.8: запрет на class-констрейнт у параметра запечатанного типа охраняет
+-- именно осадок выбора, а `Flat T` в сигнатуре модуля - обязательство о
+-- представлении. Модуль, его давший, теряет право сменить представление на
+-- указательное, не сломав пользователей; это его дело, и оно записано.
+--
+-- Ближайший отказ - `errors/coherent-context.adamas` и
+-- `errors/sealed-abstraction.adamas`: у некогерентного класса та же форма
+-- отвергается.
+--
+-- Числа укладки здесь не наблюдаются - это `eval/flat.adamas`.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+type Layout = { size : Nat, align : Nat }
+
+class Flat a where
+  layout : Layout
+
+data Bit where
+  Off : Bit
+  On : Bit
+
+type Handle = { index : Bit, generation : Bit }
+
+-- Констрейнт в сигнатуре: словарь передаётся в точке вызова, а находит его
+-- вывод по написанному типу аргумента.
+sized : {Flat a} => a -> Layout
+sized x = layout
+
+handleLayout : Layout
+handleLayout = sized { index = Off, generation = On }
+
+-- Экспорт через запечатывающую сигнатуру. Представление `Column` снаружи
+-- скрыто, а обязательство `Flat a` у нагрузки - нет: оно и есть то, ради чего
+-- сигнатура пишется.
+module type ColumnSig where
+  type Column (a : Type)
+  put : {a : Type} -> {Flat a} => a -> Column a -> Column a
+
+module Packed :> ColumnSig where
+  type Column (a : Type) = Bit
+  put : {a : Type} -> {Flat a} => a -> Column a -> Column a
+  put x c = c

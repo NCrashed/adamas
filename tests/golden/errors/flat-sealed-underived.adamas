@@ -1,0 +1,38 @@
+-- Без обязательства в сигнатуре `Flat` запечатанного не выводится (§4.11,
+-- §10 вопрос 137).
+--
+-- Это гарантия, а не изъян: вывод идёт по представлению, δ по запечатанному
+-- имени закрыт, и снаружи о представлении не известно ничего - модуль вправе
+-- его сменить. Право он теряет, дав обязательство членом `flat : Flat Handle`;
+-- ближайший проходящий сосед - `eval/flat-sealed-member.adamas`.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+type Layout = { size : Nat, align : Nat }
+
+class Flat a where
+  layout : Layout
+
+data Bit where
+  Off : Bit
+  On : Bit
+
+module type PackedSig where
+  type Handle
+  make : Handle
+
+module Packed :> PackedSig where
+  type Handle = { index : Bit, generation : Bit }
+  make : Handle
+  make = { index = Off, generation = On }
+
+sized : {Flat a} => a -> Layout
+sized x = layout
+
+probe : Layout
+probe = sized Packed.make
+
+main : Nat
+main = probe.size

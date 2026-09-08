@@ -1,0 +1,61 @@
+-- Обязательство `Flat` о запечатанном типе - обычный член сигнатуры (§4.11,
+-- §4.8, §10 вопрос 137).
+--
+-- Вывод `Flat` идёт по представлению, а δ по запечатанному имени закрыт -
+-- снаружи словаря не взять, и это не изъян, а сама гарантия: без обязательства
+-- в сигнатуре пользователь о представлении не знает ничего
+-- (`errors/flat-sealed-underived.adamas`). Обязательство пишется членом
+-- `flat : Flat Handle` - новой формы не нужно, словарь и так значение.
+--
+-- Модуль предъявляет словарь там, где представление прозрачно: `sized make`
+-- зовёт метод по выведенному инстансу, и запись словаря собирается из него.
+-- Это и есть цена обязательства: смени модуль представление на указательное -
+-- и его собственный `flat` падает «`Flat` не выводится: он рекурсивен»
+-- (мутант прогнан рекурсивным семейством).
+--
+-- Снаружи словарь берётся значением: связывание словарного типа в телескопе
+-- решает цель раньше вывода по представлению (`from_context` стоит первым).
+-- Названные границы: `let`-связанный словарь не ищется (named-решение
+-- `from_context`), `using` квалифицированного имени не берёт; идиома - явный
+-- параметр, как здесь.
+--
+-- Значение - `size` укладки двух битов: два.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+type Layout = { size : Nat, align : Nat }
+
+class Flat a where
+  layout : Layout
+
+data Bit where
+  Off : Bit
+  On : Bit
+
+sized : {Flat a} => a -> Layout
+sized x = layout
+
+module type PackedSig where
+  type Handle
+  make : Handle
+  flat : Flat Handle
+
+module Packed :> PackedSig where
+  type Handle = { index : Bit, generation : Bit }
+
+  make : Handle
+  make = { index = Off, generation = On }
+
+  flat : Flat Handle
+  flat = { layout = sized make }
+
+withFlat : Flat Packed.Handle -> Layout
+withFlat d = sized Packed.make
+
+probe : Layout
+probe = withFlat Packed.flat
+
+main : Nat
+main = probe.size

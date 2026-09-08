@@ -1,0 +1,30 @@
+[package]
+name = "adamas-codegen"
+description = "Adamas backend: core terms to backend IR to portable C"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+adamas-core.workspace = true
+# Ради заголовка и договора: генерируемый C собирается против этого рантайма, а
+# путь к `adamas.h` приходит через `DEP_ADAMAS_RUNTIME_INCLUDE` (ключ `links`).
+adamas-runtime.workspace = true
+thiserror = "2"
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+adamas-elab.workspace = true
+adamas-interp.workspace = true
+adamas-parser.workspace = true

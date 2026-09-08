@@ -247,7 +247,7 @@ pub fn infer(
         Term::Const(name, levels, args) => constant(ctx, metas, sigma, name, levels, args),
         // Мотив записан в самом разборе, поэтому тип синтезируется, а не
         // берётся из режима проверки.
-        Term::Case(case) => infer_case(ctx, metas, sigma, case),
+        Term::Case(case) => infer_case(ctx, metas, sigma, case, None),
 
         // Домена у лямбды в терме нет, синтезировать не из чего.
         Term::Lam(..) => Err(refuse(
@@ -312,6 +312,12 @@ pub fn check(
                 check(inner, metas, sigma, body, expected).map(|usage| ((), usage))
             })?;
             Ok(usage)
+        }
+
+        // Разбор синтезирует свой тип, но написанный доходит до ветвей: мотив
+        // сверяется с ожидаемым **до** них, а не после (см. `infer_case`).
+        (Term::Case(case), _) => {
+            infer_case(ctx, metas, sigma, case, Some(expected)).map(|(_, usage)| usage)
         }
 
         _ => {
@@ -2553,11 +2559,27 @@ fn project_with(
 /// полей, а телескоп ветви построен при `q · r` (§3.3), поэтому поле
 /// расходуется при `q · r · σ`. Ветви между собой соединяются
 /// **объединением**, а не суммой: выполняется ровно одна.
+///
+/// # `wanted` - написанный тип, и он приходит до ветвей
+///
+/// Тип разбора известен, как только проверен мотив: ветви на него не влияют.
+/// Поэтому написанный тип сверяется с ним **там же**, а не после ветвей, и
+/// ветвь проверяется против решённого мотива, а не против дырки.
+///
+/// Порядок здесь и есть правило. Мотив недепендентного разбора выражением -
+/// дырка, замкнутая по разбираемому: связывать его ей нельзя, мотив сам его
+/// перепишет. Ветвь же, строящая параметризованное семейство, приносит
+/// `Tree ?a`, где `?a` - параметр её конструктора, выведенный в контексте, куда
+/// разбираемое входит; замкнутой дырке такое решением не станет, и `copy t =
+/// case t of Leaf -> Leaf; …` отвергалось при проходящих клаузах. Написанный
+/// тип, пришедший первым, решает мотив в `Tree Nat`, и `?a` решается уже
+/// против него (§10 вопрос 136).
 fn infer_case(
     ctx: &Ctx<'_>,
     metas: &mut Metas,
     sigma: Mult,
     case: &Case,
+    wanted: Option<&Rc<Value>>,
 ) -> Result<(Rc<Value>, Usage), TypeError> {
     let signature = ctx.signature();
     let declaration = signature
@@ -2645,6 +2667,20 @@ fn infer_case(
     )?;
     let motive = ctx.eval(&case.motive);
 
+    // Тип разбора - `motive indices scrutinee`, и он готов уже здесь: ветви его
+    // не уточняют. Написанный сверяется с ним до ветвей - см. шапку.
+    let result = data_indices
+        .iter()
+        .fold(Rc::clone(&motive), |value, index| {
+            apply(&value, Rc::clone(index))
+        });
+    let result = apply(&result, ctx.eval(&case.scrutinee));
+    if let Some(wanted) = wanted {
+        if !convertible(ctx.signature(), metas, ctx.size(), wanted, &result) {
+            return Err(refuse(ctx, metas, misfit(ctx, metas, wanted, &result)));
+        }
+    }
+
     branch_shape(case, &constructors)?;
     let mut branches = Usage::zero(ctx.size());
     for (index, branch) in case.branches.iter().enumerate() {
@@ -2656,10 +2692,6 @@ fn infer_case(
         branches = branches.join(&usage);
     }
 
-    let result = data_indices
-        .iter()
-        .fold(motive, |value, index| apply(&value, Rc::clone(index)));
-    let result = apply(&result, ctx.eval(&case.scrutinee));
     // То же, что у применения: вектор разбираемого масштабируется кратностью,
     // с которой его потребляют, а ветви соединяются **объединением** -
     // выполняется ровно одна.

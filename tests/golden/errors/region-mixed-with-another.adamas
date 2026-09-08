@@ -1,0 +1,39 @@
+-- Ссылка одного региона под меткой другого (§3.6, §3.4).
+--
+-- Метка `Alloc r` параметризована **идентичностью** региона, а не типом
+-- нагрузки, поэтому регион читается по ссылке: аргумент метки у `readRef p`
+-- определяется типом `p`. Ссылка от `r` даёт `{Alloc r}`, а вокруг разрешено
+-- `{Alloc s}`, и отказ называет оба региона.
+--
+-- Ближайших проходящих соседа два, и каждый отличается одной буквой: `{Alloc
+-- r}` в сигнатуре - тогда метка называет тот регион, чья ссылка; `p : Ref s
+-- Nat` в связывании - тогда ссылка принадлежит той метке. Отсюда и мутант:
+-- перестань аргумент метки участвовать в различении - и два региона станут
+-- одним, а отказ пропадёт при обеих подстановках.
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Region where
+  Home : Region
+
+data Ref (0 r : Region) (a : Type) where
+  MkRef : Ref r a
+
+effect Alloc (0 r : Region) where
+  readRef : Ref r Nat -> Nat
+
+withRegion : ((0 r : Region) -> (ω u : Unit) -> {Alloc r} a) -> a
+withRegion k = handle k Home with
+  return v -> v
+  readRef p -> resume (Succ (Succ (Succ Zero)))
+
+-- Два региона в одной сигнатуре: ссылка от `r`, метка от `s`.
+crossed : (0 r : Region) -> (0 s : Region) -> (ω u : Unit) -> {Alloc s} Nat
+crossed r s u =
+  let p : Ref r Nat = MkRef
+  readRef p

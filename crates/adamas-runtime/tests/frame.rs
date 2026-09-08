@@ -26,6 +26,8 @@ thread_local! {
     static TRACE: RefCell<Vec<isize>> = const { RefCell::new(Vec::new()) };
     /// Вердикты поиска хендлера изнутри деструктора.
     static VERDICTS: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+    /// Глубины сегментов, вырезанных изнутри деструктора (§10 вопрос 144).
+    static SEIZED: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Пустой стек.
@@ -64,23 +66,24 @@ unsafe extern "C" fn scaling(frame: *mut Frame, incoming: Value) -> Value {
 }
 
 /// Дроп среды кадра: один слот с объектом.
-unsafe extern "C" fn release_held(frame: *mut Frame) {
+unsafe extern "C" fn release_held(frame: *mut Frame, _kont: *mut Kont) {
     unsafe {
         adamas_drop(*adamas_frame_env(frame), None);
     }
 }
 
 /// Дроп среды кадра: один слот с замыканием.
-unsafe extern "C" fn release_closer(frame: *mut Frame) {
+unsafe extern "C" fn release_closer(frame: *mut Frame, _kont: *mut Kont) {
     unsafe {
         adamas_drop(*adamas_frame_env(frame), Some(adamas_closure_release));
     }
 }
 
-/// Дроп среды кадра: один слот с резумпцией.
-unsafe extern "C" fn release_resumption(frame: *mut Frame) {
+/// Дроп среды кадра: один слот с резумпцией. Ручка стека - место, куда её
+/// дроп кладёт размотку кадром.
+unsafe extern "C" fn release_resumption(frame: *mut Frame, kont: *mut Kont) {
     unsafe {
-        adamas_resumption_drop(*adamas_frame_env(frame));
+        adamas_resumption_drop(kont, *adamas_frame_env(frame));
     }
 }
 
@@ -240,7 +243,7 @@ fn cut_takes_everything_up_to_the_handler() {
         assert_eq!(kont.depth, 1);
         assert_eq!(kont.top, bottom);
 
-        adamas_segment_unwind(segment);
+        adamas_segment_unwind(&raw mut kont, segment);
         adamas_kont_run(&raw mut kont, adamas_unit());
         adamas_evidence_drop(evidence);
         assert_eq!(adamas_stat_live(), 0);
@@ -307,7 +310,8 @@ fn a_copied_segment_resumes_twice_and_independently() {
 
         // Оригинал цел и после двух возобновлений.
         assert_eq!(adamas_segment_depth(segment), 2);
-        adamas_segment_unwind(segment);
+        adamas_segment_unwind(&raw mut kont, segment);
+        adamas_kont_run(&raw mut kont, adamas_unit());
         adamas_evidence_drop(evidence);
         assert_eq!(adamas_stat_live(), 0);
     }
@@ -327,7 +331,9 @@ fn unwinding_runs_the_destructors_lifo() {
         push_closing(&raw mut kont, 3, evidence);
 
         let segment = adamas_kont_cut(&raw mut kont, handler);
-        adamas_segment_unwind(segment);
+        adamas_segment_unwind(&raw mut kont, segment);
+        // Точка приостановки: деструкторы выполняет `adamas_kont_run`.
+        adamas_kont_run(&raw mut kont, adamas_unit());
         // Изнутри наружу: последний вошедший scope закрывается первым (§3.4).
         assert_eq!(TRACE.with_borrow(Clone::clone), vec![3, 2, 1]);
 
@@ -371,11 +377,12 @@ fn the_last_reference_to_a_resumption_unwinds_it() {
         let resumption = adamas_segment_value(adamas_kont_cut(&raw mut kont, handler));
 
         adamas_dup(resumption);
-        adamas_resumption_drop(resumption);
+        adamas_resumption_drop(&raw mut kont, resumption);
         // Ссылка была лишняя - сегмент жив, деструктор молчит.
         assert!(TRACE.with_borrow(Vec::is_empty));
 
-        adamas_resumption_drop(resumption);
+        adamas_resumption_drop(&raw mut kont, resumption);
+        adamas_kont_run(&raw mut kont, adamas_unit());
         assert_eq!(TRACE.with_borrow(Clone::clone), vec![1]);
 
         adamas_evidence_drop(evidence);
@@ -413,8 +420,10 @@ fn an_abandoned_resumption_inside_a_segment_unwinds_too() {
         push_closing(&raw mut kont, 1, evidence);
 
         let outer = adamas_kont_cut(&raw mut kont, outer_handler);
-        adamas_segment_unwind(outer);
-        // Сперва свой деструктор, затем брошенная резумпция под ним.
+        adamas_segment_unwind(&raw mut kont, outer);
+        adamas_kont_run(&raw mut kont, adamas_unit());
+        // Сперва свой деструктор, затем брошенная резумпция под ним: release
+        // резумпции кладёт её размотку кадром выше остатка, и она бежит первой.
         assert_eq!(TRACE.with_borrow(Clone::clone), vec![1, 9]);
 
         adamas_evidence_drop(evidence);
@@ -452,7 +461,12 @@ fn unwinding_suppresses_the_handlers_that_already_answered() {
         VERDICTS.with_borrow_mut(Vec::clear);
         let (mut kont, outer, base, vectors) = suppression_stack();
 
-        adamas_segment_unwind(adamas_kont_cut(&raw mut kont, base));
+        let doomed = adamas_kont_cut(&raw mut kont, base);
+        // До прогона внешний хендлер на стеке один: раскрутка ещё кадром.
+        assert_eq!(kont.depth, 1);
+        assert_eq!(kont.top, outer);
+        adamas_segment_unwind(&raw mut kont, doomed);
+        adamas_kont_run(&raw mut kont, adamas_unit());
 
         // Операция деструктора не достаётся ни своему хендлеру - тот ответ уже
         // дал, - ни хендлеру метки 9 под ним: оба брошены вместе с сегментом.
@@ -464,18 +478,167 @@ fn unwinding_suppresses_the_handlers_that_already_answered() {
         );
         // Обрыв закрыл scope, открытый самим деструктором (8), - §3.3 требует
         // деструкторов и у оборванного, - но отложенную работу (77) не сделал:
-        // обрыв не есть доигрывание. Деструктор оборвался (отметка
-        // отрицательная), а раскрутка пошла дальше, и следующий scope закрылся
-        // как обычно.
-        assert_eq!(TRACE.with_borrow(Clone::clone), vec![8, -2, 1]);
-        // Внешний хендлер на стеке цел: уйти к нему было куда, и не ушли.
-        assert_eq!(kont.depth, 1);
-        assert_eq!(kont.top, outer);
+        // обрыв не есть доигрывание. Отметка обрыва (-2) стоит раньше восьмёрки:
+        // обрыв - точка приостановки, его раскрутку выполняет `adamas_kont_run`
+        // после немедленного возврата, а у машины кода после обрыва нет вовсе -
+        // это мёртвое продолжение. Раскрутка пошла дальше, и следующий scope
+        // закрылся как обычно.
+        assert_eq!(TRACE.with_borrow(Clone::clone), vec![-2, 8, 1]);
 
-        adamas_kont_run(&raw mut kont, adamas_unit());
         for evidence in vectors {
             adamas_evidence_drop(evidence);
         }
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Деструктор, чья операция достаёт живой хендлер метки 7 **снаружи**
+/// раскручиваемого сегмента (§10 вопрос 144): режет один стек до его кадра и
+/// тут же возобновляет - эмуляция tail-resume ветки. Разрез забирает остаток
+/// раскрутки кадром `UNWINDING`, и возобновление продолжает обе.
+unsafe extern "C" fn reaching(
+    closure: Value,
+    evidence: *const Evidence,
+    kont: *mut Kont,
+    argument: Value,
+) -> Value {
+    unsafe {
+        let mark = adamas_imm_get(adamas_closure_get(closure, 0));
+        adamas_drop(argument, None);
+        let mut handler: *mut Frame = ptr::null_mut();
+        let verdict = adamas_evidence_lookup(evidence, 7, 0, &raw mut handler);
+        VERDICTS.with_borrow_mut(|verdicts| verdicts.push(verdict));
+        if verdict == LOOKUP_HANDLER {
+            let segment = adamas_kont_cut(kont, handler);
+            SEIZED.with_borrow_mut(|seized| seized.push(adamas_segment_depth(segment)));
+            adamas_kont_restore(kont, segment);
+            TRACE.with_borrow_mut(|trace| trace.push(mark));
+        }
+        adamas_unit()
+    }
+}
+
+/// Кадр scope'а, чей деструктор режет стек до живого внешнего хендлера.
+unsafe fn push_reaching(kont: *mut Kont, mark: isize, evidence: *mut Evidence) -> *mut Frame {
+    unsafe {
+        let frame = adamas_kont_push(
+            kont,
+            MARK_CLOSING,
+            0,
+            None,
+            Some(release_closer),
+            1,
+            evidence,
+        );
+        let closure = adamas_closure(Some(reaching), None, 1, 1);
+        adamas_closure_set(closure, 0, adamas_imm(mark));
+        *adamas_frame_env(frame) = closure;
+        frame
+    }
+}
+
+#[test]
+fn a_destructors_operation_reaches_a_live_outer_handler() {
+    unsafe {
+        adamas_stat_reset();
+        TRACE.with_borrow_mut(Vec::clear);
+        VERDICTS.with_borrow_mut(Vec::clear);
+        SEIZED.with_borrow_mut(Vec::clear);
+        let mut kont = kont();
+        let empty = adamas_evidence_empty();
+
+        // Живой хендлер метки 7 - снаружи будущего сегмента.
+        let outer = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, empty);
+        let with_outer = adamas_evidence_extend(empty, 7, outer);
+        // Основание сегмента - хендлер метки 9; над ним scope с деструктором.
+        let base = adamas_kont_push(&raw mut kont, MARK_HANDLER, 9, None, None, 0, with_outer);
+        push_reaching(&raw mut kont, 5, with_outer);
+
+        let doomed = adamas_kont_cut(&raw mut kont, base);
+        adamas_segment_unwind(&raw mut kont, doomed);
+        adamas_kont_run(&raw mut kont, adamas_unit());
+
+        // Хендлер жив и не в сегменте: вердикт обычный, а не подавленный.
+        assert_eq!(VERDICTS.with_borrow(Clone::clone), vec![LOOKUP_HANDLER]);
+        // Разрез прошёл по одному стеку и забрал остаток раскрутки кадром:
+        // хендлер плюс кадр `UNWINDING`. До правки §10 вопроса 144 здесь было
+        // «кадр хендлера не принадлежит этому стеку»: деструктор бежал на
+        // своём пустом стеке.
+        assert_eq!(SEIZED.with_borrow(Clone::clone), vec![2]);
+        // Деструктор договорил после возобновления.
+        assert_eq!(TRACE.with_borrow(Clone::clone), vec![5]);
+
+        adamas_evidence_drop(empty);
+        adamas_evidence_drop(with_outer);
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Резумпция, взятая деструктором и брошенная: остаток раскрутки лежит в её
+/// сегменте кадром и доигрывается дропом - возобновления не случается, но
+/// звенья ниже scope'а всё равно освобождаются.
+unsafe extern "C" fn seizing(
+    closure: Value,
+    evidence: *const Evidence,
+    kont: *mut Kont,
+    argument: Value,
+) -> Value {
+    unsafe {
+        let _ = adamas_imm_get(adamas_closure_get(closure, 0));
+        adamas_drop(argument, None);
+        let mut handler: *mut Frame = ptr::null_mut();
+        let verdict = adamas_evidence_lookup(evidence, 7, 0, &raw mut handler);
+        VERDICTS.with_borrow_mut(|verdicts| verdicts.push(verdict));
+        if verdict == LOOKUP_HANDLER {
+            let segment = adamas_kont_cut(kont, handler);
+            adamas_resumption_drop(kont, adamas_segment_value(segment));
+        }
+        // Контракт обрыва: после дропа своего продолжения - вернуться
+        // немедленно, у машины этого кода нет вовсе.
+        adamas_unit()
+    }
+}
+
+#[test]
+fn dropping_the_seized_resumption_finishes_the_unwinding() {
+    unsafe {
+        adamas_stat_reset();
+        TRACE.with_borrow_mut(Vec::clear);
+        VERDICTS.with_borrow_mut(Vec::clear);
+        let mut kont = kont();
+        let empty = adamas_evidence_empty();
+
+        let outer = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, empty);
+        let with_outer = adamas_evidence_extend(empty, 7, outer);
+        let base = adamas_kont_push(&raw mut kont, MARK_HANDLER, 9, None, None, 0, with_outer);
+        // Под сегментом - ещё один scope: его деструктор обязан сработать и
+        // тогда, когда резумпцию выбросили, - через вложенный кадр раскрутки.
+        push_closing(&raw mut kont, 3, with_outer);
+        let frame = adamas_kont_push(
+            &raw mut kont,
+            MARK_CLOSING,
+            0,
+            None,
+            Some(release_closer),
+            1,
+            with_outer,
+        );
+        let closure = adamas_closure(Some(seizing), None, 1, 1);
+        adamas_closure_set(closure, 0, adamas_imm(4));
+        *adamas_frame_env(frame) = closure;
+
+        let doomed = adamas_kont_cut(&raw mut kont, base);
+        adamas_segment_unwind(&raw mut kont, doomed);
+        adamas_kont_run(&raw mut kont, adamas_unit());
+
+        assert_eq!(VERDICTS.with_borrow(Clone::clone), vec![LOOKUP_HANDLER]);
+        // Дроп резумпции доиграл остаток: scope с меткой 3 закрылся, хотя
+        // возобновления не было. Хендлер снаружи при этом умер вместе со
+        // всем, что деструктор у него отрезал, - и утечки нет.
+        assert_eq!(TRACE.with_borrow(Clone::clone), vec![3]);
+
+        adamas_evidence_drop(empty);
+        adamas_evidence_drop(with_outer);
         assert_eq!(adamas_stat_live(), 0);
     }
 }

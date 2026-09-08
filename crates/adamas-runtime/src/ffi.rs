@@ -56,7 +56,7 @@ pub type LoweredSecond = Option<unsafe extern "C" fn(*const Evidence, *mut Kont,
 pub type FrameCode = Option<unsafe extern "C" fn(*mut Frame, Value) -> Value>;
 
 /// Дроп среды кадра; блок не освобождает.
-pub type FrameRelease = Option<unsafe extern "C" fn(*mut Frame)>;
+pub type FrameRelease = Option<unsafe extern "C" fn(*mut Frame, *mut Kont)>;
 
 /// Стек продолжения второй формы понижения.
 #[derive(Debug, Clone, Copy)]
@@ -80,6 +80,10 @@ pub const MARK_SUPPRESSING: u16 = 3;
 pub const MARK_NURSERY: u16 = 4;
 /// Scope, держащий ресурс: деструктор в слоте 0.
 pub const MARK_CLOSING: u16 = 5;
+/// Ответ scope, пережидающий деструктор: значение тела в слоте 0.
+pub const MARK_CLOSED: u16 = 6;
+/// Шаг раскрутки: held в слоте 0, остаток цепочки сегментом в слоте 1.
+pub const MARK_UNWINDING: u16 = 7;
 
 /// Хендлера метки нет вовсе.
 pub const LOOKUP_MISSING: c_int = 0;
@@ -216,7 +220,7 @@ unsafe extern "C" {
     pub fn adamas_kont_restore(kont: *mut Kont, segment: *mut Segment);
     /// Крутит стек, пока он не опустеет.
     pub fn adamas_kont_run(kont: *mut Kont, value: Value) -> Value;
-    /// Обрыв: раскручивает всё, что на стеке, и отдаёт `()`.
+    /// Обрыв: снимает всё до ближайшего кадра `UNWINDING` и отдаёт `()`.
     pub fn adamas_kont_abort(kont: *mut Kont) -> Value;
 
     /// Кадров в сегменте.
@@ -225,12 +229,13 @@ unsafe extern "C" {
     pub fn adamas_segment_base(segment: *mut Segment) -> *mut Frame;
     /// Копия сегмента: звенья свои, поля общие через `dup`.
     pub fn adamas_segment_copy(segment: *const Segment) -> *mut Segment;
-    /// Раскрутка: деструкторы LIFO, затем освобождение.
-    pub fn adamas_segment_unwind(segment: *mut Segment);
+    /// Раскрутка: кладётся кадром `UNWINDING`, деструкторы выполнит
+    /// `adamas_kont_run` в порядке LIFO.
+    pub fn adamas_segment_unwind(kont: *mut Kont, segment: *mut Segment);
     /// Сегмент как значение.
     pub fn adamas_segment_value(segment: *mut Segment) -> Value;
     /// Значение как сегмент.
     pub fn adamas_segment_of(value: Value) -> *mut Segment;
-    /// Дроп резумпции: последняя ссылка разматывает сегмент.
-    pub fn adamas_resumption_drop(value: Value);
+    /// Дроп резумпции: последняя ссылка кладёт размотку сегмента кадром.
+    pub fn adamas_resumption_drop(kont: *mut Kont, value: Value);
 }

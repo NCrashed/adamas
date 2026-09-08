@@ -57,9 +57,9 @@ static adamas_frame *frame_alloc(uint16_t mark, uint32_t label, adamas_frame_cod
  * которые уже ответили.
  *
  * Мертвы они все до одного: основание сегмента - хендлер, чья ветка ответ дала,
- * а хендлеры **между** ним и этим scope'ом брошены вместе с сегментом. Ходит
- * по ним рантайм и только рантайм: цепочку обходит он, и никто больше не знает,
- * какие записи мертвы. Ровно тот же ряд ставит машина кадрами `Suppressing`
+ * а хендлеры **между** ним и этим scope'ом брошены вместе с сегментом. `rest` -
+ * остаток раскручиваемой цепочки под scope'ом; ходит по нему рантайм и только
+ * рантайм. Ровно тот же ряд ставит машина кадрами `Suppressing`
  * (`adamas-interp/src/effect.rs`, `Machine::unwinding`); представление другое,
  * потому что поиск здесь ведёт вектор, а не обход стека.
  *
@@ -70,9 +70,9 @@ static adamas_frame *frame_alloc(uint16_t mark, uint32_t label, adamas_frame_cod
  * Цена - копия вектора на деструктор. Путь холодный (раскрутка), и другого
  * места у пометки нет: вектор общий с живым кодом, править его на месте нельзя.
  */
-static adamas_evidence *closing_evidence(adamas_frame *frame) {
+static adamas_evidence *closing_evidence(adamas_frame *frame, adamas_frame *rest) {
     adamas_evidence *evidence = adamas_evidence_copy(frame->evidence);
-    for (adamas_frame *below = frame->below; below != NULL; below = below->below) {
+    for (adamas_frame *below = rest; below != NULL; below = below->below) {
         if (adamas_frame_mark(below) == ADAMAS_MARK_HANDLER) {
             adamas_evidence_suppress(evidence, below);
         }
@@ -80,54 +80,97 @@ static adamas_evidence *closing_evidence(adamas_frame *frame) {
     return evidence;
 }
 
-/* Деструктор scope: §3.3 требует его и при нормальном выходе, и при обрыве.
- * Отвечает он `()`, поэтому ответ дропается непосредственным.
- *
- * `unwinding` различает два случая. При нормальном выходе хендлеры под scope'ом
- * живы, и операция деструктора обязана их достать. При раскрутке они мертвы, и
- * вектор деструктора говорит об этом каждому, кто спросит.
- *
- * Флаг явный, хотя нормальный путь и так отцепляет кадр до вызова, и
- * `closing_evidence` нашла бы под ним пустоту. Опираться на это значило бы
- * держать различие двух путей на порядке двух строк в третьем месте.
- */
-static void frame_close(adamas_frame *frame, int unwinding) {
-    adamas_value closer = frame->env[0];
-    adamas_evidence *evidence = unwinding ? closing_evidence(frame) : frame->evidence;
-    /* Деструктор идёт второй формой: он вправе открыть свой scope, произвести
-     * операцию и оборваться, - значит стек ему нужен, и стек этот **свой**.
-     * Обрыв тогда снимает ровно его кадры и до обхода снаружи не достаёт. */
-    adamas_kont inner;
-    adamas_kont_init(&inner);
-    adamas_value answer = adamas_apply(closer, evidence, &inner, adamas_unit());
-    /* Что деструктор отложил, доигрывается здесь же; после обрыва стек пуст. */
-    answer = adamas_kont_run(&inner, answer);
-    adamas_drop(answer, NULL);
-    if (unwinding) {
-        adamas_evidence_drop(evidence);
-    }
-}
-
-static void frame_free(adamas_frame *frame) {
+static void frame_free(adamas_frame *frame, adamas_kont *kont) {
     if (frame->release != NULL) {
-        frame->release(frame);
+        frame->release(frame, kont);
     }
     adamas_evidence_drop(frame->evidence);
     adamas_block_free(frame);
 }
 
-/* Раскрутка цепочки кадров сверху вниз - изнутри наружу, то есть LIFO (§3.4).
- * Тот же порядок, каким идёт `Machine::unwinding` в интерпретаторе. */
-static void unwind_chain(adamas_frame *frame) {
-    while (frame != NULL) {
-        adamas_frame *below = frame->below;
-        if (adamas_frame_mark(frame) == ADAMAS_MARK_CLOSING) {
-            /* Хендлеры под этим scope'ом свои ответы уже дали: подавлены. */
-            frame_close(frame, 1);
-        }
-        frame_free(frame);
-        frame = below;
+/* Среда кадра `UNWINDING`: слот 0 - значение, которым раскрутка кончится,
+ * слот 1 - остаток цепочки сегментом. `label` - захвачен ли слот 0: кадр
+ * ставится раньше, чем проточное значение существует, и первое пришедшее
+ * становится held - тем же, чем у машины служит аргумент `buried`. */
+static void unwind_push(adamas_kont *kont, adamas_segment *chain, adamas_value held,
+                        uint32_t captured);
+
+/* Дроп среды кадра раскрутки - на случай, когда кадр гибнет, не шагая:
+ * внутри оборванного куска. Остаток его цепочки кладётся раскруткой же. */
+static void unwinding_release(adamas_frame *frame, adamas_kont *kont) {
+    adamas_drop(frame->env[0], NULL);
+    adamas_value chain = frame->env[1];
+    if (!adamas_is_imm(chain) && adamas_tag(chain) == ADAMAS_TAG_SEGMENT) {
+        adamas_resumption_drop(kont, chain);
     }
+}
+
+/* Дроп среды кадра `CLOSED`: ответ scope, не дождавшийся своего деструктора. */
+static void closed_release(adamas_frame *frame, adamas_kont *kont) {
+    (void)kont;
+    adamas_drop(frame->env[0], NULL);
+}
+
+/* Один шаг раскрутки: снять одно звено остатка. Кадр потребляется, остаток
+ * перекладывается кадром заново - вершина между шагами открыта тому, что
+ * положили деструктор и release звеньев (вложенные раскрутки бегут первыми,
+ * LIFO). Порядок тот же, каким идёт `Machine::unwinding` (§10 вопрос 144). */
+static adamas_value unwind_step(adamas_kont *kont, adamas_frame *frame, adamas_value incoming) {
+    adamas_value held;
+    if (frame->label == 0) {
+        /* Первое пришедшее - то, что текло по стеку в момент смерти сегмента:
+         * оно и есть ответ раскрутки, машина получает его аргументом. */
+        held = incoming;
+    } else {
+        /* Ответ деструктора либо вложенной раскрутки: `()` по §3.3, дропается. */
+        adamas_drop(incoming, NULL);
+        held = frame->env[0];
+    }
+    adamas_segment *chain = adamas_segment_of(frame->env[1]);
+    frame->env[0] = adamas_unit();
+    frame->env[1] = adamas_unit();
+    frame_free(frame, kont);
+
+    adamas_frame *next = chain->top;
+    if (next == NULL) {
+        adamas_block_free(chain);
+        return held;
+    }
+    chain->top = next->below;
+    chain->depth -= 1;
+    next->below = NULL;
+
+    uint16_t mark = adamas_frame_mark(next);
+    if (mark == ADAMAS_MARK_UNWINDING) {
+        /* Вложенная раскрутка, чей контекст умер вместе с этим звеном: остаток
+         * внешней ложится ниже, вложенная продолжается первой. Её held придёт
+         * внешнему кадру и будет отброшен - как у машины, где held вложенного
+         * `Frame::Unwinding` гибнет при взятии. */
+        unwind_push(kont, chain, held, 1);
+        next->below = kont->top;
+        kont->top = next;
+        kont->depth += 1;
+        return adamas_unit();
+    }
+    if (mark == ADAMAS_MARK_CLOSING) {
+        /* Хендлеры в остатке цепочки свои ответы уже дали: подавлены. Остаток
+         * ложится кадром **до** деструктора: операция к живому хендлеру
+         * снаружи режет один стек, и раскрутка уезжает в сегмент резумпции
+         * вместе с ним - возобновление продолжит обе. */
+        adamas_evidence *evidence = closing_evidence(next, chain->top);
+        unwind_push(kont, chain, held, 1);
+        adamas_value closer = next->env[0];
+        adamas_value answer = adamas_apply(closer, evidence, kont, adamas_unit());
+        adamas_evidence_drop(evidence);
+        frame_free(next, kont);
+        return answer;
+    }
+    /* Прочее звено: работа брошена, среда дропается. Остаток кладётся до
+     * дропа: release резумпции в среде ставит вложенную раскрутку выше, и
+     * она бежит первой. */
+    unwind_push(kont, chain, held, 1);
+    frame_free(next, kont);
+    return adamas_unit();
 }
 
 static adamas_segment *segment_alloc(adamas_frame *top, adamas_frame *base, size_t depth) {
@@ -140,6 +183,14 @@ static adamas_segment *segment_alloc(adamas_frame *top, adamas_frame *base, size
     segment->base = base;
     segment->depth = depth;
     return segment;
+}
+
+static void unwind_push(adamas_kont *kont, adamas_segment *chain, adamas_value held,
+                        uint32_t captured) {
+    adamas_frame *frame =
+        adamas_kont_push(kont, ADAMAS_MARK_UNWINDING, captured, NULL, unwinding_release, 2, NULL);
+    frame->env[0] = held;
+    frame->env[1] = adamas_segment_value(chain);
 }
 
 /* ------------------------------------------------------------------ */
@@ -187,17 +238,39 @@ adamas_value adamas_kont_run(adamas_kont *kont, adamas_value value) {
         kont->top = frame->below;
         kont->depth -= 1;
         frame->below = NULL;
-        if (adamas_frame_mark(frame) == ADAMAS_MARK_CLOSING) {
-            /* Scope закончился нормально: деструктор срабатывает, а значение
-             * идёт мимо него дальше - оно и есть ответ scope'а. Подавления
-             * тут нет: хендлеры под scope'ом живы и ответа ещё не давали. */
-            frame_close(frame, 0);
-        } else if (frame->code != NULL) {
+        uint16_t mark = adamas_frame_mark(frame);
+        if (mark == ADAMAS_MARK_CLOSING) {
+            /* Scope закончился нормально: ответ тела пережидает кадром
+             * `CLOSED`, а деструктор бежит **на этом же стеке** - его операция
+             * достаёт живые хендлеры внизу (§10 вопрос 144). Подавления тут
+             * нет: хендлеры под scope'ом живы и ответа ещё не давали. */
+            adamas_frame *closed = adamas_kont_push(kont, ADAMAS_MARK_CLOSED, 0, NULL,
+                                                    closed_release, 1, NULL);
+            closed->env[0] = value;
+            adamas_value closer = frame->env[0];
+            value = adamas_apply(closer, frame->evidence, kont, adamas_unit());
+            frame_free(frame, kont);
+            continue;
+        }
+        if (mark == ADAMAS_MARK_CLOSED) {
+            /* Деструктор договорил: его `()` дропается, ответ scope идёт
+             * дальше - оно и есть значение тела. */
+            adamas_drop(value, NULL);
+            value = frame->env[0];
+            frame->env[0] = adamas_unit();
+            frame_free(frame, kont);
+            continue;
+        }
+        if (mark == ADAMAS_MARK_UNWINDING) {
+            value = unwind_step(kont, frame, value);
+            continue;
+        }
+        if (frame->code != NULL) {
             /* Код вправе положить новые кадры: они и станут вершиной, а ответ
              * пойдёт им. */
             value = frame->code(frame, value);
         }
-        frame_free(frame);
+        frame_free(frame, kont);
     }
     return value;
 }
@@ -251,6 +324,12 @@ adamas_segment *adamas_segment_copy(const adamas_segment *segment) {
     adamas_frame *previous = NULL;
     adamas_frame *first = NULL;
     while (source != NULL) {
+        /* Ресурсы под мультишотом запрещены статически (§10 вопрос 15), и кадр
+         * раскрутки в копируемый сегмент не попадает. Владение остатком
+         * цепочки при копии делить нечем, поэтому отказ здесь, а не молчание. */
+        if (adamas_frame_mark(source) == ADAMAS_MARK_UNWINDING) {
+            adamas_fail("сегмент раскрутки не копируется: ресурс под мультишотом");
+        }
         adamas_frame *copy = frame_alloc(adamas_frame_mark(source), source->label, source->code,
                                          source->release, source->fields, source->evidence);
         for (uint32_t index = 0; index < source->fields; index += 1) {
@@ -267,18 +346,32 @@ adamas_segment *adamas_segment_copy(const adamas_segment *segment) {
     return segment_alloc(first, previous, segment->depth);
 }
 
-void adamas_segment_unwind(adamas_segment *segment) {
-    unwind_chain(segment->top);
-    adamas_block_free(segment);
+void adamas_segment_unwind(adamas_kont *kont, adamas_segment *segment) {
+    unwind_push(kont, segment, adamas_unit(), 0);
 }
 
 adamas_value adamas_kont_abort(adamas_kont *kont) {
     /* Обрыв и раскрутка - одно и то же действие над разными цепочками: там
-     * вырезанный сегмент, здесь весь стек оборванного кода. Второго правила
-     * заводить не пришлось, и это то, ради чего ручка стека и появилась. */
-    unwind_chain(kont->top);
-    kont->top = NULL;
-    kont->depth = 0;
+     * вырезанный сегмент, здесь кадры оборванного кода. Граница - ближайший
+     * кадр `UNWINDING`: ниже стоит раскрутка, которая этот код и запустила, и
+     * она продолжится сама. Вне раскрутки границы нет, и снимается весь стек -
+     * прежнее правило как частный случай. */
+    adamas_frame *cursor = kont->top;
+    adamas_frame *last = NULL;
+    size_t depth = 0;
+    while (cursor != NULL && adamas_frame_mark(cursor) != ADAMAS_MARK_UNWINDING) {
+        last = cursor;
+        depth += 1;
+        cursor = cursor->below;
+    }
+    if (depth == 0) {
+        return adamas_unit();
+    }
+    adamas_segment *chain = segment_alloc(kont->top, last, depth);
+    kont->top = cursor;
+    kont->depth -= depth;
+    last->below = NULL;
+    unwind_push(kont, chain, adamas_unit(), 0);
     return adamas_unit();
 }
 
@@ -293,14 +386,15 @@ adamas_segment *adamas_segment_of(adamas_value value) {
     return (adamas_segment *)(void *)value;
 }
 
-void adamas_resumption_drop(adamas_value value) {
+void adamas_resumption_drop(adamas_kont *kont, adamas_value value) {
     adamas_segment *segment = adamas_segment_of(value);
     adamas_header *header = adamas_header_of(segment);
     if (header->rc == 0) {
         /* §3.4: дроп разматывает приостановленный сегмент, выполняя деструкторы
          * кадров внутри него. Резумпция аффинна, поэтому путь этот обычный, а
-         * не крайний. */
-        adamas_segment_unwind(segment);
+         * не крайний. Размотка кладётся кадром - точка приостановки (шапка
+         * `adamas.h`): деструкторы выполнит `adamas_kont_run`. */
+        adamas_segment_unwind(kont, segment);
         return;
     }
     header->rc -= 1;

@@ -3503,6 +3503,36 @@ impl<'a> Elaborator<'a> {
             // Ожидаемый тип аргумента - домен того связывания, к которому он
             // приписывается; исполнение по нему и решается (§3.4).
             let expected = ty.as_deref().and_then(domain_of);
+            // Обратное направление того же правила (§10 вопрос 121): против
+            // типа вычисления написанное **применение** приостанавливается.
+            // Row у `worker : Nat -> {Async} Unit` стоит на стрелке, поэтому
+            // `worker 5` производит на месте и вычислением не является -
+            // передать его в `spawn` было нечем, кроме замыкания руками.
+            // Обёртка та же, какой `mask` приостанавливает свой аргумент, и
+            // решение то же - по голове, без элаборации: применение, чей
+            // остаток типа сам ждёт единицу, уже приостановлено и идёт как
+            // есть. Цепочка операторов - то же применение (§4.4).
+            let suspending = matches!(argument.kind, ExprKind::App(..) | ExprKind::Chain(_))
+                && expected
+                    .as_ref()
+                    .is_some_and(|domain| self.computation(domain))
+                && !self.suspended_by_head(argument);
+            let wrapped;
+            let argument = if suspending {
+                wrapped = Expr {
+                    kind: ExprKind::Lam {
+                        params: vec![bind_as(ast::Name {
+                            text: Rc::from("_"),
+                            span: argument.span,
+                        })],
+                        body: Box::new(argument.clone()),
+                    },
+                    span: argument.span,
+                };
+                &wrapped
+            } else {
+                argument
+            };
             let argument =
                 self.aside(|it| it.placed(inside, |it| it.expr(argument, Mult::Many)))?;
             let argument = self.executed(argument, expected.as_ref());

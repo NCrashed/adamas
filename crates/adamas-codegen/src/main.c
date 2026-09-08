@@ -1,7 +1,7 @@
 int main(void) {
-    /* Вектор evidence пуст: хендлеров в чистом фрагменте нет. Пустой вектор -
-     * `NULL`, и рантайм принимает его всюду, где вектор читается. */
-    adamas_value answer = ADAMAS_ENTRY(NULL);
+    /* Скрытых аргументов у первой формы нет вовсе (`adamas_lowered_first`):
+     * хендлеров в чистом фрагменте не бывает, отчуждать нечего, искать некого. */
+    adamas_value answer = ADAMAS_ENTRY();
     adamas_print(answer, 0);
     printf("\n");
     /* Perceus (волна 3) ещё не вставлен: `dup` и `drop` не эмитятся ни одного,

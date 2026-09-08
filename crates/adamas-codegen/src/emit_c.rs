@@ -21,9 +21,10 @@
 //! обещаны §13 и Фазой 7, и одним файлом они даются даром.
 //!
 //! Функция понижается **первой формой** (§13, 2026-09-08): обычная C-функция,
-//! кадр на C-стеке. Скрытый первый аргумент - вектор evidence: §3.4 требует
-//! передавать его без смещения, и в чистом фрагменте он пуст. Пустой вектор
-//! есть `NULL` - рантайм принимает его всюду, где вектор читается.
+//! кадр на C-стеке, скрытых аргументов нет вовсе. Оба они - вектор evidence и
+//! ручка стека - появляются только на границе замыкания, потому что граница эта
+//! динамическая: какая из форм за указателем, место вызова не знает. Там они
+//! идут `NULL`, и рантайм принимает `NULL` всюду, где их читает.
 //!
 //! # Чего в выходе нет
 //!
@@ -218,24 +219,34 @@ fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
 
 /// Сигнатура функции: скрытые аргументы формы и живые связывания.
 ///
-/// Скрытых у первой формы один - вектор evidence. Второй формы здесь не бывает:
-/// [`emit`] отвергает её раньше.
+/// У первой формы скрытых нет **вовсе** (`adamas_lowered_first`): написанное и
+/// есть всё. Захваченная среда сюда приходит обычными параметрами - трамплин
+/// достаёт её из слотов замыкания и передаёт явно. Второй формы здесь не
+/// бывает: [`emit`] отвергает её раньше.
 fn signature(function: &Function) -> String {
-    let mut text = format!(
-        "static adamas_value fn_{}(const adamas_evidence *ev",
-        function.id.0
-    );
-    for binding in function.live_captured().chain(function.live_parameters()) {
-        let _ = write!(text, ", adamas_value v{}", binding.local.0);
-    }
-    text.push(')');
-    text
+    let live: Vec<String> = function
+        .live_captured()
+        .chain(function.live_parameters())
+        .map(|binding| format!("adamas_value v{}", binding.local.0))
+        .collect();
+    let taken = if live.is_empty() {
+        "void".to_owned()
+    } else {
+        live.join(", ")
+    };
+    format!("static adamas_value fn_{}({taken})", function.id.0)
 }
 
 /// Сигнатура трамплина: каноническая форма кода замыкания из `adamas.h`.
+///
+/// Скрытые аргументы у неё оба, потому что граница замыкания **динамическая**:
+/// какая из двух форм за указателем, место вызова не знает. Тело первой формы
+/// их не смотрит, и обещание «первая форма не платит ничего» держится там, где
+/// вызываемый известен статически, - на прямом вызове.
 fn trampoline(name: &str) -> String {
     format!(
-        "static adamas_value {name}(adamas_value self, const adamas_evidence *ev, adamas_value arg)"
+        "static adamas_value {name}(adamas_value self, const adamas_evidence *ev, \
+         adamas_kont *kont, adamas_value arg)"
     )
 }
 
@@ -275,11 +286,16 @@ fn wrapper(out: &mut String, function: &Function) {
         out.push_str("    adamas_fail(\"замыкание без параметров\");\n}\n\n");
         return;
     }
-    let mut call = format!("fn_{}(ev", function.id.0);
-    for slot in 0..captured.len() + parameters.len() - 1 {
-        let _ = write!(call, ", adamas_closure_get(self, {slot})");
-    }
-    let _ = writeln!(out, "    return {call}, arg);\n}}\n");
+    let mut taken: Vec<String> = (0..captured.len() + parameters.len() - 1)
+        .map(|slot| format!("adamas_closure_get(self, {slot})"))
+        .collect();
+    taken.push("arg".to_owned());
+    let _ = writeln!(
+        out,
+        "    return fn_{}({});\n}}\n",
+        function.id.0,
+        taken.join(", ")
+    );
 }
 
 /// Сборщик конструктора: замыкание копит аргументы, последний собирает объект.
@@ -364,9 +380,11 @@ impl Emitter<'_> {
                 let callee = self.value(callee, depth);
                 let argument = self.value(argument, depth);
                 let name = self.temp();
+                // Оба скрытых аргумента пусты: хендлеров в чистом фрагменте нет,
+                // а `NULL` рантайм принимает всюду, где их читает.
                 let _ = writeln!(
                     self.out,
-                    "{pad}adamas_value {name} = adamas_apply({callee}, ev, {argument});"
+                    "{pad}adamas_value {name} = adamas_apply({callee}, NULL, NULL, {argument});"
                 );
                 name
             }
@@ -449,13 +467,13 @@ impl Emitter<'_> {
             .map(|argument| self.value(argument, depth))
             .collect();
         let name = self.temp();
-        let mut call = format!("fn_{}(ev", function.0);
-        for argument in &given {
-            let _ = write!(call, ", {argument}");
-        }
+        // Вызываемый известен статически, поэтому зовётся прямо и скрытых
+        // аргументов не берёт вовсе (`adamas_lowered_first`).
         let _ = writeln!(
             self.out,
-            "{pad}adamas_value {name} = {call}); /* {title} */"
+            "{pad}adamas_value {name} = fn_{}({}); /* {title} */",
+            function.0,
+            given.join(", ")
         );
         name
     }

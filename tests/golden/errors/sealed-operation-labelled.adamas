@@ -1,0 +1,42 @@
+-- Тот же запрет вторым маршрутом: метка написана за `@` (§4.8, §3.6).
+--
+-- `handle` берёт метку двумя способами - из первой ветки-операции либо из
+-- написанной за `@`, - и проверка на одном из них оставляет второй открытым.
+-- Замерено: пока запрет стоял на первом, `handle @Counter.Tick` с той же
+-- веткой проходил и считал `0`. Поэтому спрашивается он по **веткам**, до
+-- того как маршруты расходятся, а корпус держит обе формы.
+--
+-- Ближайший проходящий сосед тот же, что у `errors/sealed-operation.adamas`:
+-- `module Counter : Counting` вместо `:>`.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+module type Counting where
+  type Counted
+  pending : Counted
+  run : Counted -> Nat
+
+module Counter :> Counting where
+  effect Tick where
+    tick : Nat
+
+  type Counted = {Tick} Nat
+
+  pending : {Tick} Nat
+  pending = tick
+
+  run : ({Tick} Nat) -> Nat
+  run c = handle c with
+    return v -> v
+    tick -> resume 3
+
+-- Метка написана за `@`: первой веткой её больше не выбирают, а запрет тот же.
+stolen : Nat
+stolen = handle @Counter.Tick Counter.pending with
+  return v -> v
+  Counter.tick -> resume Zero

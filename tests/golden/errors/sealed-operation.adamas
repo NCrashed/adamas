@@ -1,0 +1,54 @@
+-- Запечатанный эффект гасится только своим модулем (§4.8, §3.5, §3.6).
+--
+-- Представление эффекта - это его операции, и `:>` скрывает именно их. Оставь
+-- их видимыми - и запечатывание было бы фикцией: снаружи пишется своё
+-- погашение, и единственность погашающего, на которой стоит неутечка региона
+-- (§3.6, вопрос 142), не держится ничем.
+--
+-- Вычисление снаружи при этом **есть**: `Counter.pending` отдан вместе со
+-- своей меткой, и его тип - `{Counter.Tick} Nat`, обычная row. Отказ поэтому
+-- приходится ровно на операцию, а не на то, что гасить было нечего.
+--
+-- Ближайший проходящий сосед отличается одним знаком: `module Counter :
+-- Counting` вместо `:>` - при прозрачной аннотации операция видна, тот же
+-- `handle` проходит и считает `0`. Второй сосед - `eval/sealed-effect.adamas`:
+-- то же `pending`, погашенное экспортированным `run`.
+--
+-- Отдельного флага у правила нет: непрозрачность стоит на самой метке и
+-- ставится, когда модуль проверен целиком, - внутри тела операции поэтому
+-- видны, и `run` ниже написан именно ими.
+--
+-- Метку `handle` берёт здесь из первой ветки; второй маршрут - написанная за
+-- `@` - в `errors/sealed-operation-labelled.adamas`.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+module type Counting where
+  type Counted
+  pending : Counted
+  run : Counted -> Nat
+
+module Counter :> Counting where
+  effect Tick where
+    tick : Nat
+
+  type Counted = {Tick} Nat
+
+  pending : {Tick} Nat
+  pending = tick
+
+  run : ({Tick} Nat) -> Nat
+  run c = handle c with
+    return v -> v
+    tick -> resume 3
+
+-- Своё погашение снаружи: метка называется путём, а операция - нет.
+stolen : Nat
+stolen = handle Counter.pending with
+  return v -> v
+  Counter.tick -> resume Zero

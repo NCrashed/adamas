@@ -96,11 +96,11 @@ void adamas_closure_release(adamas_value closure) {
     }
 }
 
-adamas_value adamas_apply(adamas_value closure, const adamas_evidence *evidence,
+adamas_value adamas_apply(adamas_value closure, const adamas_evidence *evidence, adamas_kont *kont,
                           adamas_value argument) {
     struct closure_block *block = closure_of(closure);
     if (block->applied + 1 == block->arity) {
-        return block->code(closure, evidence, argument);
+        return block->code(closure, evidence, kont, argument);
     }
     adamas_value copy = adamas_closure(block->code, block->release, block->arity, block->captured);
     struct closure_block *fresh = (struct closure_block *)(void *)copy;

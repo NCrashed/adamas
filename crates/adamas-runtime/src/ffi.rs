@@ -43,8 +43,14 @@ pub type Value = *mut Object;
 /// Дроп детей объекта; блок не освобождает.
 pub type Release = Option<unsafe extern "C" fn(Value)>;
 
-/// Код замыкания: сам себе `userdata`, вектор evidence, последний аргумент.
-pub type Code = Option<unsafe extern "C" fn(Value, *const Evidence, Value) -> Value>;
+/// Код замыкания: сам себе `userdata`, оба скрытых аргумента, последний явный.
+pub type Code = Option<unsafe extern "C" fn(Value, *const Evidence, *mut Kont, Value) -> Value>;
+
+/// Первая форма понижения: скрытых аргументов нет вовсе.
+pub type LoweredFirst = Option<unsafe extern "C" fn(Value) -> Value>;
+
+/// Вторая форма: вектор evidence и ручка стека продолжения, рядом.
+pub type LoweredSecond = Option<unsafe extern "C" fn(*const Evidence, *mut Kont, Value) -> Value>;
 
 /// Чем занять место, когда придёт значение.
 pub type FrameCode = Option<unsafe extern "C" fn(*mut Frame, Value) -> Value>;
@@ -175,7 +181,12 @@ unsafe extern "C" {
     /// Дроп замыкания как `Release`.
     pub fn adamas_closure_release(closure: Value);
     /// Применение: аргумент берётся владением.
-    pub fn adamas_apply(closure: Value, evidence: *const Evidence, argument: Value) -> Value;
+    pub fn adamas_apply(
+        closure: Value,
+        evidence: *const Evidence,
+        kont: *mut Kont,
+        argument: Value,
+    ) -> Value;
 
     /// Пустой стек.
     pub fn adamas_kont_init(kont: *mut Kont);
@@ -205,6 +216,8 @@ unsafe extern "C" {
     pub fn adamas_kont_restore(kont: *mut Kont, segment: *mut Segment);
     /// Крутит стек, пока он не опустеет.
     pub fn adamas_kont_run(kont: *mut Kont, value: Value) -> Value;
+    /// Обрыв: раскручивает всё, что на стеке, и отдаёт `()`.
+    pub fn adamas_kont_abort(kont: *mut Kont) -> Value;
 
     /// Кадров в сегменте.
     pub fn adamas_segment_depth(segment: *const Segment) -> usize;

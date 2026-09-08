@@ -902,14 +902,12 @@ impl Signature {
                 })?;
             }
         }
-        // Вердикт тотальности считается **до** зонканья, и это названная
-        // граница, а не выбор: после него рекурсия метода инстанса приходит
-        // голым именем внутри подставленной записи-словаря, и структурная
-        // проверка видит вызов без аргументов, то есть отвергает всякий
-        // рекурсивный метод. До зонканья она не видит её вовсе - словарь стоит
-        // дыркой, а `Meta` здесь инертна. Обе половины неверны, и выбирается
-        // менее вредная; разбор - в §10 и ревью 2026-09-02.
-        self.settle_totality(group);
+        // Вердикт тотальности считается по **зонканным** телам: словарь метода
+        // инстанса стоит в теле дыркой, и до подстановки решения рекурсия
+        // через него не видна вовсе. Вызов, пришедший после подстановки
+        // спайном метода-проекции, восстанавливает ограниченная головная
+        // редукция в [`crate::total`] (§10 вопрос 134).
+        self.settle_totality(metas, group);
 
         for member in members {
             self.seal_member(metas, member)?;
@@ -1573,15 +1571,19 @@ impl Signature {
     ///
     /// Замыкание считается наивно, повторными проходами: членов в группе
     /// единицы, и заводить ради них Тарьяна не за что.
-    fn call_cycles(&self, group: &Group) -> HashMap<Name, Vec<Name>> {
+    fn call_cycles(&self, metas: &Metas, group: &Group) -> HashMap<Name, Vec<Name>> {
         let names: Vec<Name> = group_names(group).cloned().collect();
         let mut reaches: HashMap<Name, Vec<Name>> = HashMap::new();
         for name in &names {
+            // По зонканному телу - тем же, по которому считается вердикт:
+            // граф и проверка убывания обязаны видеть одни и те же вызовы.
             let direct = self
                 .definitions
                 .get(name)
                 .and_then(|it| it.body.as_ref())
-                .map_or_else(Vec::new, |body| crate::total::calls_within(&names, body));
+                .map_or_else(Vec::new, |body| {
+                    crate::total::calls_within(self, &names, &crate::meta::zonk_term(metas, body))
+                });
             reaches.insert(Rc::clone(name), direct);
         }
         loop {
@@ -1623,8 +1625,11 @@ impl Signature {
     /// и тот же ответ, что раньше; для взаимной рекурсии - единственный
     /// корректный способ, потому что вердикт члена зависит от вердиктов
     /// соседей.
-    fn settle_totality(&mut self, group: &Group) {
-        let cycles = self.call_cycles(group);
+    fn settle_totality(&mut self, metas: &Metas, group: &Group) {
+        let cycles = self.call_cycles(metas, group);
+        // Вся группа без вердикта: редукции в проверке нельзя разворачивать
+        // ни одного её члена, даже не лежащего на цикле проверяемого.
+        let undecided: Vec<Name> = group_names(group).cloned().collect();
         loop {
             let mut demoted = false;
             for member in group.members() {
@@ -1639,7 +1644,7 @@ impl Signature {
                 let cycle = cycles
                     .get(name)
                     .map_or_else(|| std::slice::from_ref(name), Vec::as_slice);
-                if !crate::total::is_total(self, name, cycle, &definition) {
+                if !crate::total::is_total(self, metas, name, cycle, &undecided, &definition) {
                     if let Some(stored) = self.definitions.get_mut(name) {
                         stored.total = false;
                     }

@@ -49,18 +49,32 @@
 //! Проверка консервативна: отвергает часть завершающихся определений, но не
 //! пропускает расходящиеся.
 //!
-//! **Названная граница: вердикт считается до зонканья тел.** Словарь метода
-//! инстанса стоит в теле дыркой, а `Meta` здесь инертна - ни вызовом, ни
-//! носителем размера, - поэтому рекурсия метода **через словарь** этой проверке
-//! не видна. Перенести вердикт за зонканье одним движением нельзя: там та же
-//! рекурсия приходит голым именем внутри подставленной записи-словаря, и
-//! спайна с аргументами у неё нет. См. ревью 2026-09-02 и §10.
+//! # Рекурсия через словарь
+//!
+//! Вердикт считается по **зонканному** телу: словарь метода инстанса стоит в
+//! теле дыркой, а `Meta` здесь инертна - ни вызовом, ни носителем размера, -
+//! поэтому до зонканья рекурсия метода через словарь не видна вовсе (§10
+//! вопрос 134). После зонканья она приходит спайном `spin {словарь} n`, где
+//! имя головы - метод-проекция, а не член группы. Связь «проекция → член»
+//! восстанавливает [`member_call`] - ограниченная головная редукция: δ только
+//! уже-тотальных определений вне группы, β, проекция из литерала записи. Ядру
+//! она видна как редукция, знания о классах не требует, а завершается по тому
+//! же инварианту, что δ-разворот в [`crate::conv`]: нетотальное не
+//! разворачивается, у членов группы вердикта ещё нет - и они не
+//! разворачиваются тоже.
+//!
+//! Запись-словарь, ушедшая аргументом в чужую функцию, редукцией не
+//! разбирается и остаётся голым именем члена - вызовом без позиций, то есть
+//! нетотальным. Это консервативно верно: свой словарь, отданный неизвестной
+//! функции, и есть незащищённый самовызов.
 
 use std::rc::Rc;
 
+use crate::meta::{Metas, zonk_term};
 use crate::mult::Mult;
 use crate::sig::{Definition, Signature};
 use crate::term::{Case, Index, Name, Term, spine};
+use crate::value::{Env, Head, Lvl, Value};
 
 /// Размер связывания относительно параметров определения.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,28 +100,33 @@ struct Size {
 #[must_use]
 pub fn is_total(
     signature: &Signature,
+    metas: &Metas,
     name: &Name,
     group: &[Name],
+    undecided: &[Name],
     definition: &Definition,
 ) -> bool {
     let Some(body) = &definition.body else {
         return true;
     };
+    // По зонканному: словарь метода инстанса стоит в теле дыркой, и до
+    // подстановки решения рекурсия через него не видна вовсе (§10 вопрос 134).
+    let body = zonk_term(metas, body);
 
     // Тотальность распространяется по графу вызовов (§4.7). Отдельного обхода
     // это не требует: определения добавляются по одному и каждое уже несёт свой
     // вердикт, поэтому достаточно посмотреть на непосредственно вызванные.
     // Внутри группы вердикта ещё нет ни у кого - его считает неподвижная точка
     // вызывающего, - и понижение соседа доедет сюда её следующим проходом.
-    if calls_a_partial_definition(signature, name, body) {
+    if calls_a_partial_definition(signature, name, &body) {
         return false;
     }
 
     if group.len() > 1 {
-        return cycle_decreases(signature, group);
+        return cycle_decreases(signature, metas, group, undecided);
     }
 
-    let (arity, calls) = collected(signature, group, body);
+    let (arity, calls) = collected(signature, group, undecided, &body);
     calls.is_empty()
         || (0..arity).any(|position| {
             calls.iter().all(|(_, sizes)| {
@@ -121,10 +140,16 @@ pub fn is_total(
 }
 
 /// Арность тела и рекурсивные вызовы в нём.
-fn collected(signature: &Signature, group: &[Name], body: &Term) -> (usize, Vec<Call>) {
+fn collected(
+    signature: &Signature,
+    group: &[Name],
+    undecided: &[Name],
+    body: &Term,
+) -> (usize, Vec<Call>) {
     let mut walk = Walk {
         signature,
         group,
+        undecided,
         calls: Vec::new(),
     };
     let mut sizes = Vec::new();
@@ -146,13 +171,23 @@ fn collected(signature: &Signature, group: &[Name], body: &Term) -> (usize, Vec<
 /// их незачем. Названная граница: перебор ограничен [`SEARCH_LIMIT`]
 /// сочетаниями, и группа, у которой их больше, отвергается как непроверенная.
 /// Вердикт один на весь цикл: завершаемость его членов - общее свойство.
-fn cycle_decreases(signature: &Signature, cycle: &[Name]) -> bool {
+fn cycle_decreases(
+    signature: &Signature,
+    metas: &Metas,
+    cycle: &[Name],
+    undecided: &[Name],
+) -> bool {
     let mut members = Vec::with_capacity(cycle.len());
     for name in cycle {
         let Some(body) = signature.lookup(name).and_then(|it| it.body.as_ref()) else {
             return false;
         };
-        members.push(collected(signature, cycle, body));
+        members.push(collected(
+            signature,
+            cycle,
+            undecided,
+            &zonk_term(metas, body),
+        ));
     }
     let combinations = members
         .iter()
@@ -199,14 +234,25 @@ const SEARCH_LIMIT: usize = 4096;
 /// считается вызов по **циклу**, а не всякое упоминание соседа. Словарь
 /// инстанса называет свои методы, методы словарь не зовут - цикла нет, и
 /// требовать от словаря убывания было бы отказом ни за что.
-pub(crate) fn calls_within(group: &[Name], term: &Term) -> Vec<Name> {
+///
+/// Терм ожидается **зонканным** - как и у [`is_total`]: вызов через словарь
+/// инстанса до подстановки решения не виден. Вызов через метод-проекцию
+/// восстанавливает та же редукция, что у обхода размеров, - [`member_call`];
+/// две половины проверки обязаны видеть один и тот же граф.
+pub(crate) fn calls_within(signature: &Signature, group: &[Name], term: &Term) -> Vec<Name> {
     let mut found = Vec::new();
-    collect_calls(group, term, &mut found);
+    collect_calls(signature, group, 0, term, &mut found);
     found
 }
 
-fn collect_calls(group: &[Name], term: &Term, found: &mut Vec<Name>) {
-    let mut recur = |inner| collect_calls(group, inner, found);
+fn collect_calls(
+    signature: &Signature,
+    group: &[Name],
+    depth: usize,
+    term: &Term,
+    found: &mut Vec<Name>,
+) {
+    let mut recur = |at: usize, inner: &Term| collect_calls(signature, group, at, inner, found);
     match term {
         Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::EffectKind | Term::Meta(_) => {}
         Term::Const(other, _, _) => {
@@ -214,49 +260,219 @@ fn collect_calls(group: &[Name], term: &Term, found: &mut Vec<Name>) {
                 found.push(Rc::clone(other));
             }
         }
+        // Поля закрытой записи - телескоп: тип поля живёт под связываниями
+        // предыдущих (§4.2), и глубина растёт по одному на поле.
         Term::Record(fields) | Term::Row(fields) => {
-            for field in fields.iter() {
-                recur(&field.ty);
+            for (at, field) in fields.iter().enumerate() {
+                recur(depth + at, &field.ty);
             }
             if let Some(tail) = fields.tail.as_ref() {
-                recur(tail);
+                recur(depth, tail);
             }
         }
         Term::Object(fields) => {
             for (_, value) in fields.iter() {
-                recur(value);
+                recur(depth, value);
             }
         }
         Term::With(base, fields) => {
-            recur(base);
+            recur(depth, base);
             for (_, value) in fields.iter() {
-                recur(value);
+                recur(depth, value);
             }
         }
-        Term::Project(record, _) => recur(record),
-        Term::Lam(_, _, body) => recur(body),
-        Term::App(callee, argument) => {
-            recur(callee);
-            recur(argument);
+        Term::Project(record, _) => recur(depth, record),
+        Term::Lam(_, _, body) => recur(depth + 1, body),
+        Term::App(..) => {
+            // Спайн разбирается целиком: вызов члена группы через
+            // метод-проекцию виден только редукции, а ей нужен весь спайн.
+            // У calls_within объявляемая группа и есть множество без
+            // вердикта: граф зовётся до неподвижной точки, когда не решён
+            // никто.
+            if let Some(reduced) = member_call(signature, group, group, depth, term) {
+                // Редукция потребила словарь: имена внутри съеденной записи
+                // стояли полями, а не вызовами, и в граф не идут.
+                recur(depth, &reduced);
+                return;
+            }
+            let (head, arguments) = spine(term);
+            recur(depth, head);
+            for argument in arguments {
+                recur(depth, argument);
+            }
         }
         Term::Pi(_, _, domain, row, codomain) => {
-            recur(domain);
-            recur(codomain);
+            recur(depth, domain);
+            recur(depth + 1, codomain);
             for argument in row.labels().iter().flat_map(|label| &label.arguments) {
-                recur(argument);
+                recur(depth, argument);
             }
         }
         Term::Let(_, _, ty, value, body) => {
-            recur(ty);
-            recur(value);
-            recur(body);
+            recur(depth, ty);
+            recur(depth, value);
+            recur(depth + 1, body);
         }
         Term::Case(case) => {
-            recur(&case.scrutinee);
-            recur(&case.motive);
+            recur(depth, &case.scrutinee);
+            recur(depth, &case.motive);
             for branch in &case.branches {
-                recur(&branch.body);
+                recur(depth, &branch.body);
             }
+        }
+    }
+}
+
+/// Спайн после редукции, годный на замену написанному, - или ничего.
+///
+/// Восстанавливает вызов члена инстанса из вызова метода-проекции: зонканное
+/// тело зовёт `spin {уровень} {словарь} n`, где словарь - β-редекс над
+/// литералом записи, и δ проекции, β и проекция из литерала дают
+/// `Loop#Nat.spin n` - имя **и позиции аргументов** одним движением (§10
+/// вопрос 134).
+///
+/// Редукция останавливается с ответом в двух случаях: голова редукта - имя из
+/// `group` (искомый вызов), либо имена группы из редукта **исчезли** - словарь
+/// потреблён проекцией, и полей-соседей, которые сырой обход счёл бы вызовами,
+/// в нём больше нет. Так дефолтный метод, зовущий соседа (`atMost x y = below
+/// x y`), не расплачивается за собственный словарь.
+///
+/// Шаги ограничены: δ разворачивает только тотальное (ворота - те же, что у
+/// [`crate::conv::unfold`]) и только вне `undecided` - у членов объявляемой
+/// группы вердикта ещё нет, и тело соседа разворачивать нельзя. β и проекцию
+/// делает само вычисление, а число δ-шагов режет топливо - как у `whnf`,
+/// потому что на открытых аргументах расходятся и тотальные определения. Не
+/// дошла редукция ни до одного из двух исходов - ответ пуст, и вызывающий
+/// обходит спайн как написан.
+fn member_call(
+    signature: &Signature,
+    group: &[Name],
+    undecided: &[Name],
+    depth: usize,
+    term: &Term,
+) -> Option<Term> {
+    // Голова уже из группы - вызов виден и без редукции.
+    let (head, _) = spine(term);
+    if matches!(head, Term::Const(name, _, _) if group.contains(name)) {
+        return None;
+    }
+    // Дёшево и почти всегда: редукция может обнажить только имя, уже стоящее
+    // в спайне синтаксически, - всё, что объявлено раньше группы, её имён не
+    // знает. Нет имени - нет и вызова.
+    if !mentions_group(group, term) {
+        return None;
+    }
+    // Вычисление паникует на индексе за пределами окружения, а глубина здесь
+    // считана обходом; расхождение - повод отступить, не упасть.
+    if !closed_under(depth, term) {
+        return None;
+    }
+    let width = u32::try_from(depth).ok()?;
+    let mut env = Env::default();
+    for level in 0..width {
+        env = env.extend(Value::var(Lvl(level)));
+    }
+    let mut current = crate::eval::eval(&env, term);
+    for _ in 0..REDUCTION_LIMIT {
+        let Value::Neutral(Head::Global(name, ..), _) = &*current else {
+            return None;
+        };
+        if group.iter().any(|it| it == name) {
+            return Some(crate::eval::quote(width, &current));
+        }
+        let quoted = crate::eval::quote(width, &current);
+        if !mentions_group(group, &quoted) {
+            return Some(quoted);
+        }
+        if undecided.iter().any(|it| it == name) {
+            return None;
+        }
+        current = crate::conv::unfold(signature, &current)?;
+    }
+    None
+}
+
+/// Сколько δ-шагов разрешено редукции одного спайна.
+const REDUCTION_LIMIT: u32 = 128;
+
+/// Стоит ли имя группы в терме синтаксически.
+fn mentions_group(group: &[Name], term: &Term) -> bool {
+    let recur = |inner: &Term| mentions_group(group, inner);
+    match term {
+        Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::EffectKind | Term::Meta(_) => {
+            false
+        }
+        Term::Const(other, _, _) => group.contains(other),
+        Term::Record(fields) | Term::Row(fields) => {
+            fields.iter().any(|field| recur(&field.ty))
+                || fields.tail.as_ref().is_some_and(|tail| recur(tail))
+        }
+        Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
+        Term::With(base, fields) => recur(base) || fields.iter().any(|(_, value)| recur(value)),
+        Term::Project(record, _) => recur(record),
+        Term::Lam(_, _, body) => recur(body),
+        Term::App(callee, argument) => recur(callee) || recur(argument),
+        Term::Pi(_, _, domain, row, codomain) => {
+            recur(domain)
+                || recur(codomain)
+                || row
+                    .labels()
+                    .iter()
+                    .flat_map(|label| &label.arguments)
+                    .any(recur)
+        }
+        Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || recur(body),
+        Term::Case(case) => {
+            recur(&case.scrutinee)
+                || recur(&case.motive)
+                || case.branches.iter().any(|branch| recur(&branch.body))
+        }
+    }
+}
+
+/// Указывают ли все индексы терма внутрь `depth` связываний.
+fn closed_under(depth: usize, term: &Term) -> bool {
+    let recur = |at: usize, inner: &Term| closed_under(at, inner);
+    match term {
+        Term::Var(Index(index)) => (*index as usize) < depth,
+        Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Meta(_)
+        | Term::Const(..) => true,
+        Term::Record(fields) | Term::Row(fields) => {
+            fields
+                .iter()
+                .enumerate()
+                .all(|(at, field)| recur(depth + at, &field.ty))
+                && fields.tail.as_ref().is_none_or(|tail| recur(depth, tail))
+        }
+        Term::Object(fields) => fields.iter().all(|(_, value)| recur(depth, value)),
+        Term::With(base, fields) => {
+            recur(depth, base) && fields.iter().all(|(_, value)| recur(depth, value))
+        }
+        Term::Project(record, _) => recur(depth, record),
+        Term::Lam(_, _, body) => recur(depth + 1, body),
+        Term::App(callee, argument) => recur(depth, callee) && recur(depth, argument),
+        Term::Pi(_, _, domain, row, codomain) => {
+            recur(depth, domain)
+                && recur(depth + 1, codomain)
+                && row
+                    .labels()
+                    .iter()
+                    .flat_map(|label| &label.arguments)
+                    .all(|argument| recur(depth, argument))
+        }
+        Term::Let(_, _, ty, value, body) => {
+            recur(depth, ty) && recur(depth, value) && recur(depth + 1, body)
+        }
+        Term::Case(case) => {
+            recur(depth, &case.scrutinee)
+                && recur(depth, &case.motive)
+                && case
+                    .branches
+                    .iter()
+                    .all(|branch| recur(depth, &branch.body))
         }
     }
 }
@@ -309,6 +525,8 @@ struct Walk<'a> {
     signature: &'a Signature,
     /// Имена, вызов которых считается рекурсивным: своё и соседи по циклу.
     group: &'a [Name],
+    /// Имена без вердикта - вся объявляемая группа; редукция их не трогает.
+    undecided: &'a [Name],
     /// Вызовы в порядке обхода.
     calls: Vec<Call>,
 }
@@ -355,9 +573,14 @@ impl Walk<'_> {
 
             // Запись размера не несёт: поля - типы и значения, а уменьшение
             // считается по разбору. Обход нужен, чтобы вызовы внутри нашлись.
+            // Поля - телескоп: тип поля живёт под связываниями предыдущих, и
+            // глубина растёт по одному на поле, размера не получая.
             Term::Record(fields) | Term::Row(fields) => {
-                for field in fields.iter() {
+                for (at, field) in fields.iter().enumerate() {
+                    let before = sizes.len();
+                    sizes.extend(std::iter::repeat_n(None, at));
                     self.term(sizes, &field.ty);
+                    sizes.truncate(before);
                 }
                 // Хвост - обычный терм на исходной глубине: вызов в нём
                 // обязан найтись так же, как в поле.
@@ -403,7 +626,22 @@ impl Walk<'_> {
                     // Convoy: аргументы применения - те самые соседи, которые
                     // ветвь связывает лямбдами сверх полей.
                     Term::Case(case) => self.case(sizes, case, &applied),
-                    other => self.term(sizes, other),
+                    other => {
+                        // Вызов члена группы через метод-проекцию видит
+                        // только редукция; удалась - обходится редукт, и
+                        // спайн с потреблённым словарём заново не читается.
+                        if let Some(reduced) = member_call(
+                            self.signature,
+                            self.group,
+                            self.undecided,
+                            sizes.len(),
+                            term,
+                        ) {
+                            self.term(sizes, &reduced);
+                            return;
+                        }
+                        self.term(sizes, other);
+                    }
                 }
                 for argument in arguments {
                     self.term(sizes, argument);

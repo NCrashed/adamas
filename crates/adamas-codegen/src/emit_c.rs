@@ -26,20 +26,31 @@
 //! динамическая: какая из форм за указателем, место вызова не знает. Там они
 //! идут `NULL`, и рантайм принимает `NULL` всюду, где их читает.
 //!
-//! # Чего в выходе нет
+//! # Что эмиттер знает о владении
 //!
-//! `dup` и `drop` не эмитятся ни одного: вставляет их Perceus (волна 3), и
-//! разовые `free` до него - работа, которую потом пришлось бы выковыривать.
-//! Пока их нет, программа не освобождает ничего; счётчики рантайма печатают
-//! это числом на stderr.
+//! `dup`, `drop` и переиспользование ячейки приходят **узлами IR** - их ставит
+//! [`perceus`](crate::perceus), и эмиттер их только печатает. Своего решения о
+//! владении у него ровно одно, и оно про C-ABI, а не про программу: трамплин
+//! замыкания достаёт среду из слотов, которыми владеет само замыкание, а функция
+//! берёт аргументы владением - значит на каждый слот идёт `adamas_dup`. В IR
+//! трамплина нет вовсе, поэтому и поставить это некому больше.
+//!
+//! Дроп детей порождается здесь же одной функцией на программу (`release.c`):
+//! `adamas.h` требует, чтобы release приходил от понижения, а какие у объекта
+//! дети - отвечает таблица по тегу, та же, по которой печатается ответ.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use crate::ir::{Arm, Binding, Constructor, CtorId, Expr, Form, FuncId, Function, Program};
+use crate::ir::{
+    Arm, Binding, Constructor, CtorId, Expr, Form, FuncId, Function, LocalId, Program,
+};
 
 /// Печать значения по таблице конструкторов.
 const PRINTER: &str = include_str!("print.c");
+
+/// Дроп детей по той же таблице.
+const RELEASE: &str = include_str!("release.c");
 
 /// Точка входа: печать ответа и счётчики блоков.
 const ENTRY: &str = include_str!("main.c");
@@ -75,6 +86,8 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     let mut out = String::new();
     preamble(&mut out);
     table(&mut out, program);
+    out.push_str(RELEASE);
+    out.push('\n');
     out.push_str(PRINTER);
     out.push('\n');
 
@@ -214,6 +227,9 @@ fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
                 walk(&arm.body, visit);
             }
         }
+        Expr::Dup { body, .. } | Expr::Drop { body, .. } | Expr::Reclaim { body, .. } => {
+            walk(body, visit);
+        }
     }
 }
 
@@ -273,6 +289,11 @@ fn body(out: &mut String, program: &Program, function: &Function) {
 }
 
 /// Трамплин: замыкание отдаёт слоты позиционно, функция берёт их аргументами.
+///
+/// Слоты принадлежат замыканию, а функция берёт аргументы **владением**, отсюда
+/// `adamas_dup` на каждый: своё замыкание дропает применение
+/// ([`perceus`](crate::perceus)), и без дублирования оно унесло бы слоты с
+/// собой. Последний аргумент приходит владением уже от `adamas_apply`.
 fn wrapper(out: &mut String, function: &Function) {
     let captured: Vec<&Binding> = function.live_captured().collect();
     let parameters: Vec<&Binding> = function.live_parameters().collect();
@@ -287,7 +308,7 @@ fn wrapper(out: &mut String, function: &Function) {
         return;
     }
     let mut taken: Vec<String> = (0..captured.len() + parameters.len() - 1)
-        .map(|slot| format!("adamas_closure_get(self, {slot})"))
+        .map(|slot| format!("adamas_dup(adamas_closure_get(self, {slot}))"))
         .collect();
     taken.push("arg".to_owned());
     let _ = writeln!(
@@ -299,6 +320,9 @@ fn wrapper(out: &mut String, function: &Function) {
 }
 
 /// Сборщик конструктора: замыкание копит аргументы, последний собирает объект.
+///
+/// `adamas_set_field` владение забирает, а слоты принадлежат замыканию, отсюда
+/// `adamas_dup` - тот же довод, что у [`wrapper`].
 fn builder(out: &mut String, constructor: &Constructor) {
     let slots = constructor.slots();
     let _ = writeln!(out, "/* `{}` значением. */", escaped(&constructor.name));
@@ -319,7 +343,7 @@ fn builder(out: &mut String, constructor: &Constructor) {
     for slot in 0..slots - 1 {
         let _ = writeln!(
             out,
-            "    adamas_set_field(value, {slot}, adamas_closure_get(self, {slot}));"
+            "    adamas_set_field(value, {slot}, adamas_dup(adamas_closure_get(self, {slot})));"
         );
     }
     let _ = writeln!(out, "    adamas_set_field(value, {}, arg);", slots - 1);
@@ -357,14 +381,16 @@ impl Emitter<'_> {
             Expr::Erased => "ADAMAS_ERASED".to_owned(),
             Expr::Construct {
                 constructor,
+                reuse,
                 arguments,
-            } => self.construct(*constructor, arguments, depth),
+            } => self.construct(*constructor, *reuse, arguments, depth),
             Expr::ConstructClosure { constructor } => {
                 let described = &self.program.constructors[usize::from(constructor.0)];
                 let name = self.temp();
                 let _ = writeln!(
                     self.out,
-                    "{pad}adamas_value {name} = adamas_closure(make_{}, NULL, {}u, 0u); /* {} */",
+                    "{pad}adamas_value {name} = adamas_closure(make_{}, \
+                     adamas_release_value, {}u, 0u); /* {} */",
                     constructor.0,
                     described.slots(),
                     escaped(&described.name)
@@ -405,11 +431,37 @@ impl Emitter<'_> {
             Expr::Match {
                 scrutinee, arms, ..
             } => self.analysis(scrutinee, arms, depth),
+            Expr::Dup { local, body } => {
+                let _ = writeln!(self.out, "{pad}adamas_dup(v{});", local.0);
+                self.value(body, depth)
+            }
+            Expr::Drop { local, body } => {
+                let _ = writeln!(self.out, "{pad}adamas_drop_value(v{});", local.0);
+                self.value(body, depth)
+            }
+            Expr::Reclaim { local, token, body } => {
+                let _ = writeln!(
+                    self.out,
+                    "{pad}adamas_value v{} = adamas_reclaim_value(v{});",
+                    token.0, local.0
+                );
+                self.value(body, depth)
+            }
         }
     }
 
     /// Объект конструктора: сперва аргументы, потом блок.
-    fn construct(&mut self, constructor: CtorId, arguments: &[Expr], depth: usize) -> String {
+    ///
+    /// Придержанная ячейка (§5.1) занимает место `adamas_alloc`: `adamas_reuse`
+    /// её переписывает, а на пустой ячейке аллоцирует сам - разделённое значение
+    /// переписывать нечем, и решается это в рантайме.
+    fn construct(
+        &mut self,
+        constructor: CtorId,
+        reuse: Option<LocalId>,
+        arguments: &[Expr],
+        depth: usize,
+    ) -> String {
         let pad = Self::pad(depth);
         let described = &self.program.constructors[usize::from(constructor.0)];
         let slots = described.slots();
@@ -435,11 +487,22 @@ impl Emitter<'_> {
             );
             return name;
         }
-        let _ = writeln!(
-            self.out,
-            "{pad}adamas_value {name} = adamas_alloc({}u, {slots}u); /* {title} */",
-            constructor.0
-        );
+        match reuse {
+            Some(token) => {
+                let _ = writeln!(
+                    self.out,
+                    "{pad}adamas_value {name} = adamas_reuse(v{}, {}u, {slots}u); /* {title} */",
+                    token.0, constructor.0
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    self.out,
+                    "{pad}adamas_value {name} = adamas_alloc({}u, {slots}u); /* {title} */",
+                    constructor.0
+                );
+            }
+        }
         for (slot, argument) in given.iter().enumerate() {
             let _ = writeln!(
                 self.out,
@@ -499,7 +562,8 @@ impl Emitter<'_> {
         let name = self.temp();
         let _ = writeln!(
             self.out,
-            "{pad}adamas_value {name} = adamas_closure(box_{}, NULL, {arity}u, {}u); /* {title} */",
+            "{pad}adamas_value {name} = adamas_closure(box_{}, adamas_release_value, \
+             {arity}u, {}u); /* {title} */",
             function.0,
             taken.len()
         );

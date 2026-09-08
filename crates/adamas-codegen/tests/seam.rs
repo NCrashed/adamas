@@ -15,6 +15,9 @@ const EMITTER: &str = include_str!("../src/emit_c.rs");
 /// Исходник представления целиком.
 const REPRESENTATION: &str = include_str!("../src/ir.rs");
 
+/// Исходник вставки RC целиком.
+const PERCEUS: &str = include_str!("../src/perceus.rs");
+
 /// Исходник печати целиком.
 const PRINTER: &str = include_str!("../src/print.c");
 
@@ -37,6 +40,53 @@ fn the_representation_does_not_read_core_terms() {
             !REPRESENTATION.contains(forbidden),
             "представление упоминает `{forbidden}`: оно копия ядра, а не шов"
         );
+    }
+}
+
+/// Вставка RC живёт по ту же сторону шва, что и представление.
+///
+/// Требование Фазы 7 прямое: LLVM-бэкенд обязан получить RC **вставленным**.
+/// Читай этот проход термы ядра - и вставлять пришлось бы дважды, каждому
+/// эмиттеру заново.
+#[test]
+fn the_reference_counting_pass_does_not_read_core_terms() {
+    for forbidden in ["adamas_core::term", "adamas_core::sig", "Term", "Signature"] {
+        assert!(
+            !PERCEUS.contains(forbidden),
+            "вставка RC упоминает `{forbidden}`: она по ту сторону шва"
+        );
+    }
+}
+
+/// Эмиттер RC не изобретает: он печатает узлы, а не решает, где считать.
+///
+/// Различить это чтением исходника всё-таки можно. Всякий вызов счётчика в
+/// эмиттере стоит либо на **связывании IR** (`v{…}` - значит его назвал узел),
+/// либо на **слоте замыкания** (`adamas_closure_get(self, …)` - трамплин, то
+/// есть C-ABI, которого в IR нет вовсе). Третьего места быть не должно: оно
+/// означало бы собственное мнение эмиттера о владении, и LLVM-эмиттер Фазы 7
+/// остался бы без него.
+///
+/// Граница у теста та же, что у соседей: он видит текст. Обойти его можно,
+/// собрав имя по кускам, - но не случайно.
+#[test]
+fn the_c_emitter_does_not_invent_reference_counting() {
+    let counting = [
+        "adamas_dup(",
+        "adamas_drop_value(",
+        "adamas_reclaim_value(",
+        "adamas_reuse(",
+    ];
+    for line in EMITTER.lines() {
+        for called in counting {
+            assert!(
+                !line.contains(called)
+                    || line.contains("(v{")
+                    || line.contains("adamas_closure_get(self"),
+                "`{called}` в эмиттере не на узле и не на слоте замыкания: {}",
+                line.trim()
+            );
+        }
     }
 }
 
@@ -67,6 +117,17 @@ fn the_representation_carries_the_facts() {
         assert!(
             REPRESENTATION.contains(required),
             "у представления нет поля `{required}`: Фазе 7 нечего будет прочитать"
+        );
+    }
+}
+
+/// RC - узлы представления, а не приём печати.
+#[test]
+fn the_representation_carries_the_reference_counting() {
+    for required in ["Dup {", "Drop {", "Reclaim {", "reuse:"] {
+        assert!(
+            REPRESENTATION.contains(required),
+            "у представления нет `{required}`: Фаза 7 получила бы понижение без RC"
         );
     }
 }

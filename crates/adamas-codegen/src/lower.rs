@@ -461,8 +461,11 @@ impl<'a> Lowerer<'a> {
             })?;
             built.push(self.expr(scope, argument)?);
         }
+        // Переиспользование ставит вставка RC ([`crate::perceus`]): понижение
+        // разобранного не помнит, а она помнит.
         let mut value = Expr::Construct {
             constructor,
+            reuse: None,
             arguments: built,
         };
         for argument in arguments.iter().skip(binders.len()) {

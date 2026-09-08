@@ -14,35 +14,81 @@
  * `Flat`-значение, у которого заголовка нет вовсе (§4.11), этой печати не
  * подлежит - оно придёт вместе с дескриптором layout.
  *
- * Рекурсия здесь по глубине **данных**, в отличие от нерекурсивной печати
- * интерпретатора (§10 вопрос 93): вырожденно глубокий ответ положит стек.
- * Срезом по глубине печать тоже не обрезается, тогда как `adamas eval` режет на
- * двухстах уровнях. И то, и другое - долг, а не решение.
+ * # Срез по глубине
+ *
+ * Режется там же и так же, как у `adamas eval`, - иначе договор держался бы не
+ * правилом, а тем, что ответы корпуса мельче среза.
+ *
+ * «Так же» стоит труда, потому что считают глубину эти двое по-разному. Там
+ * печатается **терм**, и `C a b` есть спайн `App (App C a) b`: тег уходит на два
+ * уровня вниз, последний аргумент - на один. Здесь печатается **значение**, у
+ * которого полей ровно столько, сколько слотов. Поэтому спайн разворачивается
+ * явно: конструктор арности n, стоящий на глубине d, кладёт поле i на глубину
+ * d + n - i, а само имя - на d + n. Считать всякое поле за «d + 1» было бы
+ * проще и разошлось бы с интерпретатором на первом же ветвлении.
+ *
+ * Срез стоит **до** скобок: `(…)` не сообщает больше, чем `…`. Это тоже оттуда.
+ *
+ * Побочно срез снял и долг про стек: рекурсия здесь по глубине данных, а
+ * глубина теперь ограничена срезом, и вырожденно глубокий ответ до дна не
+ * доходит. Нерекурсивной (§10 вопрос 93) печать от этого не стала - она стала
+ * ограниченной.
  */
-static void adamas_print(adamas_value value, int nested) {
-    uint16_t tag = adamas_tag(value);
+
+/* Предел вложенности. Число обязано совпадать с `adamas_core::term::PRINT_DEPTH`,
+ * и совпадение проверяется тестом, а не обещанием: тянуться за ним отсюда
+ * значило бы дать эмиттеру читать ядро, а шов ровно это и запрещает. */
+#define ADAMAS_PRINT_DEPTH 200L
+
+static void adamas_print_at(adamas_value value, int nested, long depth);
+
+/* Спайн `C a_0 … a_{k-1}`, стоящий на глубине depth. Рекурсия по арности - она
+ * мала и записана в программе, а не приходит с данными. */
+static void adamas_print_spine(uint16_t tag, adamas_value value, uint16_t k, long depth) {
+    if (depth > ADAMAS_PRINT_DEPTH) {
+        printf("…");
+        return;
+    }
+    if (k == 0) {
+        printf("%s", adamas_con_name[tag]);
+        return;
+    }
+    adamas_print_spine(tag, value, (uint16_t)(k - 1), depth + 1);
+    printf(" ");
+    adamas_print_at(adamas_field(value, (size_t)(k - 1)), 1, depth + 1);
+}
+
+static void adamas_print_at(adamas_value value, int nested, long depth) {
+    uint16_t tag;
+    uint16_t slots;
+    if (depth > ADAMAS_PRINT_DEPTH) {
+        printf("…");
+        return;
+    }
+    tag = adamas_tag(value);
     if ((size_t)tag >= ADAMAS_CONSTRUCTORS) {
         /* Замыкание, стёртое либо чужой тег. Печатать нечего, но и молчать
          * нельзя: расхождение обязано быть видно в ответе. */
         printf("?%u", (unsigned)tag);
         return;
     }
-    uint16_t slots = adamas_con_slots[tag];
+    slots = adamas_con_slots[tag];
     if (slots == 0) {
         /* Нульарный конструктор - непосредственное значение, полей у него нет
-         * и читать по указателю нечего. */
+         * и читать по указателю нечего. Терм здесь атомарный `Const`, и скобок
+         * он не требует ни в какой позиции. */
         printf("%s", adamas_con_name[tag]);
         return;
     }
     if (nested) {
         printf("(");
     }
-    printf("%s", adamas_con_name[tag]);
-    for (uint16_t index = 0; index < slots; index += 1) {
-        printf(" ");
-        adamas_print(adamas_field(value, index), 1);
-    }
+    adamas_print_spine(tag, value, slots, depth);
     if (nested) {
         printf(")");
     }
+}
+
+static void adamas_print(adamas_value value, int nested) {
+    adamas_print_at(value, nested, 0L);
 }

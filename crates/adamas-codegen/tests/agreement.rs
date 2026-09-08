@@ -81,6 +81,35 @@ main =
   runWith (\\n -> Cons first (Cons second (Cons n Nil))) Zero
 ";
 
+/// Ответ **глубже среза**: обе печати обязаны оборваться одинаково.
+///
+/// Без этого свидетеля договор «то же, что интерпретатор» держался бы не
+/// правилом, а тем, что ответы корпуса мельче двухсот уровней.
+///
+/// `times 16 16` даёт двести пятьдесят шесть `Succ` - глубину, на которой срез
+/// заведомо срабатывает. Числом, а не двумя сотнями `Succ` в исходнике: писать
+/// их руками значило бы вписать в тест ту самую глубину, которую он проверяет.
+///
+/// Совпадение здесь нетривиально, потому что глубину эти двое считают
+/// по-разному: там терм со спайном применений, здесь значение со слотами.
+/// Разойдись развёртка спайна на единицу - оборвётся на разном уровне.
+const TOWER: &str = "\
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+plus : Nat -> Nat -> Nat
+plus Zero m = m
+plus (Succ k) m = Succ (plus k m)
+
+times : Nat -> Nat -> Nat
+times Zero m = Zero
+times (Succ k) m = plus m (times k m)
+
+main : Nat
+main = times 16 16
+";
+
 /// Корпус `tests/golden/eval/`.
 fn corpus() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/eval")
@@ -145,13 +174,9 @@ fn body(signature: &Signature, name: &str) -> Term {
 )]
 fn ran(signature: &Signature, term: &Term) -> String {
     let answer = adamas_interp::run(signature, term).expect("операция обязана встретить хендлер");
-    let printed = answer.printed(Some(PRINT_DEPTH)).to_string();
-    assert_eq!(
-        printed,
-        answer.printed(None).to_string(),
-        "ответ обрезан по глубине: сравнивать его с печатью понижения нечем"
-    );
-    printed
+    // Со срезом, а не целиком: печать понижения режет на той же глубине, и
+    // сравнивать надо то, что человек увидит от `adamas eval`.
+    answer.printed(Some(PRINT_DEPTH)).to_string()
 }
 
 /// Объектные файлы рантайма: собираются однажды на весь прогон.
@@ -306,4 +331,15 @@ fn the_corpus_agrees_with_the_interpreter() {
 
     // Границы, которых корпус не покрывает, стоят рядом со своим утверждением.
     agreed("captures", CAPTURES).unwrap_or_else(|error| panic!("захваты: {error}"));
+
+    // Свидетель среза сперва обязан оказаться глубже среза: без этой проверки
+    // он молча выродился бы в ещё одну мелкую программу, а тест остался бы
+    // зелёным и пустым.
+    let (signature, _, _) = elaborated(TOWER);
+    let expected = ran(&signature, &body(&signature, "main"));
+    assert!(
+        expected.contains('…'),
+        "свидетель мельче среза: обрыва в ответе нет, и сверять нечего"
+    );
+    agreed("tower", TOWER).unwrap_or_else(|error| panic!("глубина: {error}"));
 }

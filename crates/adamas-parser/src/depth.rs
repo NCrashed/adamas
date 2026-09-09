@@ -45,8 +45,8 @@
 use adamas_core::source::Span;
 
 use crate::ast::{
-    Binder, Block, Chain, Clause, Decl, DeclKind, Expr, ExprKind, LamParam, LamParamKind, Lit,
-    LitKind, Module, Pattern, PatternKind, StmtKind,
+    Binder, Block, Chain, Clause, Decl, DeclKind, Expr, ExprKind, LamParam, LamParamKind, Module,
+    Pattern, PatternKind, StmtKind,
 };
 use crate::parser::{MAX_DEPTH, ParseError};
 

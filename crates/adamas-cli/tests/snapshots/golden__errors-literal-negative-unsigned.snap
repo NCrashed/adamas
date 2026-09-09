@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: literal-negative-unsigned.adamas:8:7: литерал не подходит типу `UInt8`: тип беззнаковый, а литерал отрицательный
+  low = -1
+        ^^

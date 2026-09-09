@@ -2135,7 +2135,7 @@ impl<'a> Elaborator<'a> {
             ExprKind::RecordType(fields, tail) => {
                 self.record_type(fields, tail.as_ref(), expr.span)
             }
-            ExprKind::Record(fields) => self.record(fields),
+            ExprKind::Record(fields) => self.record(fields, awaited),
             ExprKind::Project(record, name) => {
                 // Точечное имя, чей префикс называет объявленный модуль, есть
                 // ссылка на **поднятый член**, а не проекция из записи. Внутри
@@ -2758,7 +2758,7 @@ impl<'a> Elaborator<'a> {
     /// см. [`UNARY_LIMIT`].
     fn literal(&mut self, lit: &ast::Lit, awaited: Option<&Rc<Value>>) -> Result<Term, ElabError> {
         if let Some(ty) = awaited.and_then(|ty| self.primitive_type(ty)) {
-            return self.primitive_literal(lit, ty);
+            return Self::primitive_literal(lit, ty);
         }
         let refuse = || {
             Err(ElabError::Missing {
@@ -2813,7 +2813,7 @@ impl<'a> Elaborator<'a> {
     /// Haskell'я намеренно: там `1 :: Double` работает через `fromInteger`, а
     /// у нас класса нет, и молча превращать натуральное в дробное значило бы
     /// завести четвёртое правило вдобавок к трём написанным.
-    fn primitive_literal(&mut self, lit: &ast::Lit, ty: PrimTy) -> Result<Term, ElabError> {
+    fn primitive_literal(lit: &ast::Lit, ty: PrimTy) -> Result<Term, ElabError> {
         let refuse = |why: &'static str| {
             Err(ElabError::LiteralType {
                 ty: Rc::from(ty.name()),
@@ -3287,12 +3287,39 @@ impl<'a> Elaborator<'a> {
     }
 
     /// `{ x = a, y }` - значение записи.
-    fn record(&mut self, fields: &[(ast::Name, Expr)]) -> Result<Term, ElabError> {
+    fn record(
+        &mut self,
+        fields: &[(ast::Name, Expr)],
+        awaited: Option<&Rc<Value>>,
+    ) -> Result<Term, ElabError> {
+        // Написанный тип записи раздаётся полям: `{ x = 1.5 }` при
+        // `{ x : Float32 }` читает `Float32` отсюда, и другого места у него нет
+        // - значение записи собирается синтезом.
+        let telescope =
+            awaited.and_then(|ty| match &*whnf_solved(self.signature, self.metas, ty) {
+                Value::Record(telescope) => Some(telescope.clone()),
+                _ => None,
+            });
         let mut written = Vec::with_capacity(fields.len());
+        let mut earlier: Vec<Rc<Value>> = Vec::new();
         for (name, value) in fields {
+            // Тип поля живёт под предыдущими, поэтому телескоп читается по
+            // одному полю, а не разом. Порядок написанного при этом вправе
+            // расходиться с порядком типа, и тогда предыдущих не хватает -
+            // тип поля просто не берётся, и литерал в нём останется без
+            // ожидания. Это консервативно: отказ придёт от проверки типов,
+            // которая читает написанное целиком.
+            self.awaited = telescope.as_ref().and_then(|telescope| {
+                let at = telescope
+                    .fields()
+                    .iter()
+                    .position(|field| *field.name == *name.text)?;
+                (at == earlier.len()).then(|| telescope.at(at, &earlier))
+            });
             // Поле уезжает внутрь собранного - та же позиция, что у аргумента
             // конструктора (§3.3).
             let value = self.placed(Position::Field, |it| it.expr(value, Mult::One))?;
+            earlier.push(self.ctx.eval(&value));
             written.push((CoreName::from(&*name.text), Rc::new(value)));
         }
         self.produced = None;

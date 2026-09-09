@@ -789,13 +789,14 @@ mod tests {
         assert_eq!(tagged(2, payload), Layout { size: 16, align: 8 });
     }
 
-    /// Заполнитель перед payload считается по его границе, а не по ширине тега.
+    /// Ширина тега наблюдаема, и узкий payload её показывает.
     ///
-    /// `Int16` после однобайтового тега стоит со смещения 2, и `size` - 4, а не
-    /// 3. Числом это отличается от `Option Int64` только величиной, а правилом
-    /// - ничем, и без него `tagged` сходился бы с §4.11 случайно.
+    /// `Option Int16` - четыре байта при выравнивании 2. Соседний тест на
+    /// `Int64` этого не различает: там тег тонет в заполнителе до границы
+    /// восьми, и тег в байт неотличим от тега в четыре. Здесь отличим -
+    /// четырёхбайтовый дал бы 8.
     #[test]
-    fn a_tag_is_padded_up_to_the_payload_boundary() {
+    fn a_narrow_payload_shows_the_width_of_the_tag() {
         let payload = Layout::primitive(PrimTy::Int16);
         assert_eq!(tagged(2, payload), Layout { size: 4, align: 2 });
     }

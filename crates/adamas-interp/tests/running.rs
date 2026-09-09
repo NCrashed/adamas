@@ -141,6 +141,46 @@ matched = case Succ Zero of
     );
 }
 
+/// Примитивы считают оба вычислителя, и считают одинаково (§4.3, §4.11).
+///
+/// Договор тот же, что выше, и стоит он отдельным тестом потому, что путь у
+/// примитива свой: операция застревает головой спайна и сводится не разбором, а
+/// сложением. Второй реализации этого сложения нет нарочно - машина зовёт
+/// `eval::apply` ядра, - и тест сторожит именно это: заведись у неё своя, она
+/// разошлась бы первой же шириной типа.
+///
+/// Наблюдаемое - **значения**: заворачивание по ширине, порядок операндов,
+/// точность. Ответ, равный написанному литералу, не показал бы ничего.
+#[test]
+fn both_evaluators_fold_primitives_the_same_way() {
+    let source = format!(
+        "{BASE}
+wrapped : UInt8
+wrapped = addUInt8 200 100
+
+ordered : Int64
+ordered = subInt64 3 10
+
+narrow : Float32
+narrow = addFloat32 1.0 0.00000001
+
+wide : Float64
+wide = addFloat64 1.0 0.00000001
+"
+    );
+    for name in ["wrapped", "ordered", "narrow", "wide"] {
+        assert_eq!(
+            ran(&source, name),
+            normalized(&source, name),
+            "определение `{name}` посчиталось по-разному"
+        );
+    }
+    assert_eq!(ran(&source, "wrapped"), "44");
+    assert_eq!(ran(&source, "ordered"), "-7");
+    assert_eq!(ran(&source, "narrow"), "1.0");
+    assert_eq!(ran(&source, "wide"), "1.00000001");
+}
+
 /// Хендлер глубокий: операция после возобновления попадает ему же.
 #[test]
 fn a_handler_survives_its_own_resumption() {

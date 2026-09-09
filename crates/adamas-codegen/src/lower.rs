@@ -333,8 +333,8 @@ impl<'a> Lowerer<'a> {
             let Term::Lam(_, bound, inner) = &*step else {
                 break;
             };
-            let (mult, repr) =
-                binder_at(&definition.ty, parameters.len()).unwrap_or((Mult::Many, Repr::Boxed));
+            let (mult, repr) = binder_at(self.signature, &definition.ty, parameters.len())
+                .unwrap_or((Mult::Many, Repr::Boxed));
             parameters.push(Binding {
                 name: bound.to_string(),
                 local: LocalId(u32::try_from(parameters.len()).unwrap_or(u32::MAX)),
@@ -351,7 +351,7 @@ impl<'a> Lowerer<'a> {
             return Ok(*id);
         }
         let (parameters, _) = self.peeled(name)?;
-        let result = result_repr(&self.definition(name)?.ty, parameters.len());
+        let result = result_repr(self.signature, &self.definition(name)?.ty, parameters.len());
         let id = FuncId(self.functions.len());
         self.functions.push(Function {
             id,
@@ -391,7 +391,7 @@ impl<'a> Lowerer<'a> {
                 .ok()
                 .filter(|tag| *tag < TAGS)
                 .ok_or(LowerError::TooManyConstructors { limit: TAGS })?;
-            let binders = binders_of(&self.definition(name)?.ty);
+            let binders = binders_of(self.signature, &self.definition(name)?.ty);
             self.constructors.push(Constructor {
                 tag: CtorId(tag),
                 name: name.to_string(),
@@ -440,7 +440,7 @@ impl<'a> Lowerer<'a> {
                 self.application(scope, head, &arguments)
             }
             Term::Let(mult, name, ty, value, body) => {
-                let declared = repr_of(ty);
+                let declared = repr_of(self.signature, ty);
                 let value = self.shaped(scope, value, declared, "связанное значение")?;
                 let binding = Binding {
                     name: name.to_string(),
@@ -965,29 +965,60 @@ fn after(ty: &Term, at: usize) -> Option<&Term> {
     Some(current)
 }
 
+/// Сколько алиасов подряд разворачивается по дороге к примитиву.
+///
+/// Цепочка `type Int = Int64` конечна по построению - ordered scoping (§4.8)
+/// не даёт имени сослаться на себя, - но предел стоит: обход по чужой
+/// сигнатуре не должен зависать, если она окажется собрана иначе.
+const ALIASES: usize = 32;
+
 /// Представление значения написанного типа (§4.11).
 ///
 /// Плоским считается ровно примитив: `Flat` над записями и семействами
 /// (§4.11, укладка тегом) существует типовой стороной, а укладывать его в
 /// понижении нечем, пока нет дескриптора layout, - это следующая половина
-/// трека. Имя, за которым примитив спрятан алиасом, здесь тоже не плоское:
-/// понижение типов не считает, и разворачивать алиас ему нечем. Молча
-/// разойтись это не даёт - объявленное представление сверяется, и расхождение
-/// становится отказом.
-fn repr_of(ty: &Term) -> Repr {
-    match ty {
-        Term::Prim(Prim::Ty(prim)) => Repr::Flat(*prim),
-        _ => Repr::Boxed,
+/// трека.
+///
+/// **Алиас разворачивается.** `Int` и `Float` - прелюдные синонимы `Int64` и
+/// `Float64` (§4.3, лог 2026-09-09), то есть каноническое имя написанной
+/// программы, и представление есть свойство типа, а не его написания: типовая
+/// сторона `Flat` (`adamas-elab/src/flat.rs`) читает укладку у **значения**
+/// типа и потому синоним видит насквозь. Разворачивается только имя без
+/// аргументов и только у определения, чей тип - универсум: параметризованный
+/// алиас требует подстановки, которой понижение не делает, и остаётся
+/// указательным.
+fn repr_of(signature: &Signature, ty: &Term) -> Repr {
+    let mut current = ty;
+    for _ in 0..ALIASES {
+        match current {
+            Term::Prim(Prim::Ty(prim)) => return Repr::Flat(*prim),
+            Term::Const(name, ..) => {
+                let Some(definition) = signature.lookup(name) else {
+                    return Repr::Boxed;
+                };
+                if !matches!(definition.kind, DefinitionKind::Regular)
+                    || !matches!(definition.ty, Term::Universe(_))
+                {
+                    return Repr::Boxed;
+                }
+                let Some(body) = definition.body.as_ref() else {
+                    return Repr::Boxed;
+                };
+                current = body;
+            }
+            _ => return Repr::Boxed,
+        }
     }
+    Repr::Boxed
 }
 
 /// Кратность и представление `n`-го связывания типа.
 ///
 /// Ровно то же, что считает машина: `None` значит «не стёрто», потому что
 /// связывания на этом месте синтаксически не видно.
-fn binder_at(ty: &Term, at: usize) -> Option<(Mult, Repr)> {
+fn binder_at(signature: &Signature, ty: &Term, at: usize) -> Option<(Mult, Repr)> {
     match after(ty, at)? {
-        Term::Pi(binder, _, domain, _, _) => Some((binder.mult, repr_of(domain))),
+        Term::Pi(binder, _, domain, _, _) => Some((binder.mult, repr_of(signature, domain))),
         _ => None,
     }
 }
@@ -995,16 +1026,16 @@ fn binder_at(ty: &Term, at: usize) -> Option<(Mult, Repr)> {
 /// Представление ответа после `taken` снятых связываний.
 ///
 /// Снято меньше, чем стрелок в типе, - ответ функция, то есть указатель.
-fn result_repr(ty: &Term, taken: usize) -> Repr {
-    after(ty, taken).map_or(Repr::Boxed, repr_of)
+fn result_repr(signature: &Signature, ty: &Term, taken: usize) -> Repr {
+    after(ty, taken).map_or(Repr::Boxed, |result| repr_of(signature, result))
 }
 
 /// Факты о связываниях типа: телескоп до результата.
-fn binders_of(ty: &Term) -> Vec<Fact> {
+fn binders_of(signature: &Signature, ty: &Term) -> Vec<Fact> {
     let mut facts = Vec::new();
     let mut current = ty;
     while let Term::Pi(binder, _, domain, _, codomain) = current {
-        facts.push(Fact::declared(binder.mult).shaped(repr_of(domain)));
+        facts.push(Fact::declared(binder.mult).shaped(repr_of(signature, domain)));
         current = codomain;
     }
     facts

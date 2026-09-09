@@ -34,13 +34,14 @@ use std::path::PathBuf;
 /// рекурсия, `let`. Всё, что здесь стоит, обязано собраться и ответить как
 /// `adamas eval`; список сокращать нельзя, а пополнять - можно и нужно, когда
 /// фрагмент растёт.
-const TAKEN: [&str; 12] = [
+const TAKEN: [&str; 13] = [
     "arithmetic",
     "beta-redex",
     "case-family",
     "decidable",
     "erasure",
     "existential",
+    "flat-fields",
     "lists",
     "module-scope",
     "mutual-family",

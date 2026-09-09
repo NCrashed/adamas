@@ -198,6 +198,35 @@ pub(crate) fn agreed(name: &str, source: &str) -> Result<String, adamas_codegen:
     Ok(stderr)
 }
 
+/// Понижение `main` с вставленным RC - для свидетелей, которым нужен не текст,
+/// а узлы представления.
+///
+/// Идёт тем же путём, что [`agreed`], и до той же точки: специализация,
+/// понижение, [`adamas_codegen::perceus`]. Отличие одно - эмиссии нет, потому
+/// что утверждение про **отсутствие** узла в тексте C не прочитать.
+pub(crate) fn lowered(name: &str, source: &str) -> adamas_codegen::ir::Program {
+    let (mut signature, mut metas, instances) = elaborated(source);
+    let written = body(&signature, "main");
+    let made = mono::specialise(&mut signature, &mut metas, &instances, &written)
+        .unwrap_or_else(|error| panic!("{name}: специализация отказала: {error}"));
+    let program = adamas_codegen::lower::lower(&signature, &made.term)
+        .unwrap_or_else(|error| panic!("{name}: понижение отказало: {error}"));
+    adamas_codegen::perceus::insert(program)
+}
+
+/// Текст C либо отказ - для свидетелей названной границы.
+///
+/// # Errors
+///
+/// [`adamas_codegen::CompileError`] - ровно то, ради чего свидетель и написан.
+pub(crate) fn compiled(source: &str) -> Result<String, adamas_codegen::CompileError> {
+    let (mut signature, mut metas, instances) = elaborated(source);
+    let written = body(&signature, "main");
+    let made = mono::specialise(&mut signature, &mut metas, &instances, &written)
+        .unwrap_or_else(|error| panic!("специализация отказала: {error}"));
+    adamas_codegen::compile(&signature, &made.term)
+}
+
 /// Сколько блоков прогон выдал и сколько оставил живыми.
 ///
 /// Читается из строки счётчиков, которую печатает точка входа: своего вывода у

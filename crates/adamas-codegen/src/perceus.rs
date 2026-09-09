@@ -46,6 +46,15 @@
 //! занимает каждый путь через ветвь; путь, на котором занять некому, оставил бы
 //! блок висеть, и течь вернулась бы через reuse.
 //!
+//! # Плоское значение считать нечем
+//!
+//! Счётчик лежит в заголовке, а у плоского значения заголовка нет вовсе
+//! (§4.11, §13 от 2026-09-08). Поэтому связывание с представлением
+//! [`Repr::Flat`](crate::ir::Repr) в `owned` не входит и `dup` с `drop` по нему
+//! не эмитятся - не как оптимизация, а потому что эмитить нечего: `adamas_dup`
+//! от битов числа `42` есть запись по адресу `42`. Тем же правилом плоский слот
+//! не дропается при разборе и не дублируется при разделении.
+//!
 //! Уникальность спрашивается **в рантайме** (`rc == 0`), а не у
 //! [`Unique`](crate::ir::Unique): статически она есть только у производства -
 //! unique-тип либо локально свежий объект (§10 вопрос 149, закрыт), - а вывод
@@ -84,11 +93,13 @@ fn owned(constructors: &[Constructor], function: Function) -> Function {
     let scope: BTreeSet<LocalId> = function
         .live_captured()
         .chain(function.live_parameters())
+        .filter(|binding| binding.fact.repr.boxed())
         .map(|binding| binding.local)
         .collect();
     let mut pass = Pass {
         constructors,
         next: ceiling(&function),
+        flat: flat(&function),
     };
     let Function {
         id,
@@ -96,6 +107,7 @@ fn owned(constructors: &[Constructor], function: Function) -> Function {
         form,
         captured,
         parameters,
+        result,
         body,
     } = function;
     let body = pass.expr(body, &scope);
@@ -105,7 +117,75 @@ fn owned(constructors: &[Constructor], function: Function) -> Function {
         form,
         captured,
         parameters,
+        result,
         body,
+    }
+}
+
+/// Плоские связывания функции - те, по которым счёта не бывает вовсе.
+///
+/// Собираются заранее и все разом: `dup` ставится в месте употребления, а там
+/// объявления уже не видно.
+fn flat(function: &Function) -> BTreeSet<LocalId> {
+    let mut found = BTreeSet::new();
+    for binding in function.captured.iter().chain(&function.parameters) {
+        if !binding.fact.repr.boxed() {
+            found.insert(binding.local);
+        }
+    }
+    inner(&function.body, &mut found);
+    found
+}
+
+/// То же по телу: связывания `let` и поля ветвей.
+fn inner(expr: &Expr, out: &mut BTreeSet<LocalId>) {
+    match expr {
+        Expr::Local(_) | Expr::Erased | Expr::ConstructClosure { .. } | Expr::Literal { .. } => {}
+        Expr::Construct { arguments, .. } | Expr::Call { arguments, .. } => {
+            for argument in arguments {
+                inner(argument, out);
+            }
+        }
+        Expr::Closure { captured, .. } => {
+            for capture in captured {
+                inner(capture, out);
+            }
+        }
+        Expr::Primitive { left, right, .. } => {
+            inner(left, out);
+            inner(right, out);
+        }
+        Expr::Apply { callee, argument } => {
+            inner(callee, out);
+            inner(argument, out);
+        }
+        Expr::Bind {
+            binding,
+            value,
+            body,
+        } => {
+            if !binding.fact.repr.boxed() {
+                out.insert(binding.local);
+            }
+            inner(value, out);
+            inner(body, out);
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            inner(scrutinee, out);
+            for arm in arms {
+                for field in &arm.fields {
+                    if !field.fact.repr.boxed() {
+                        out.insert(field.local);
+                    }
+                }
+                inner(&arm.body, out);
+            }
+        }
+        Expr::Dup { body, .. } | Expr::Drop { body, .. } | Expr::Reclaim { body, .. } => {
+            inner(body, out);
+        }
     }
 }
 
@@ -126,7 +206,7 @@ fn ceiling(function: &Function) -> u32 {
 /// Все связывания, которые вводит выражение.
 fn bound(expr: &Expr, note: &mut impl FnMut(LocalId)) {
     match expr {
-        Expr::Local(_) | Expr::Erased | Expr::ConstructClosure { .. } => {}
+        Expr::Local(_) | Expr::Erased | Expr::ConstructClosure { .. } | Expr::Literal { .. } => {}
         Expr::Construct { arguments, .. } | Expr::Call { arguments, .. } => {
             for argument in arguments {
                 bound(argument, note);
@@ -136,6 +216,10 @@ fn bound(expr: &Expr, note: &mut impl FnMut(LocalId)) {
             for capture in captured {
                 bound(capture, note);
             }
+        }
+        Expr::Primitive { left, right, .. } => {
+            bound(left, note);
+            bound(right, note);
         }
         Expr::Apply { callee, argument } => {
             bound(callee, note);
@@ -182,7 +266,7 @@ fn named(expr: &Expr, out: &mut BTreeSet<LocalId>) {
         Expr::Local(local) => {
             out.insert(*local);
         }
-        Expr::Erased | Expr::ConstructClosure { .. } => {}
+        Expr::Erased | Expr::ConstructClosure { .. } | Expr::Literal { .. } => {}
         Expr::Construct { arguments, .. } | Expr::Call { arguments, .. } => {
             for argument in arguments {
                 named(argument, out);
@@ -192,6 +276,10 @@ fn named(expr: &Expr, out: &mut BTreeSet<LocalId>) {
             for capture in captured {
                 named(capture, out);
             }
+        }
+        Expr::Primitive { left, right, .. } => {
+            named(left, out);
+            named(right, out);
         }
         Expr::Apply { callee, argument } => {
             named(callee, out);
@@ -230,6 +318,8 @@ fn drops(locals: impl IntoIterator<Item = LocalId>, body: Expr) -> Expr {
 struct Pass<'a> {
     constructors: &'a [Constructor],
     next: u32,
+    /// Связывания без заголовка: счётчика у них нет (§4.11).
+    flat: BTreeSet<LocalId>,
 }
 
 impl Pass<'_> {
@@ -261,7 +351,9 @@ impl Pass<'_> {
         match expr {
             Expr::Local(local) => {
                 let rest = owned.iter().copied().filter(|it| *it != local);
-                let taken = if owned.contains(&local) {
+                // Плоское связывание не считается вовсе: счётчика у него нет,
+                // и лишняя ссылка на биты числа была бы записью по их адресу.
+                let taken = if owned.contains(&local) || self.flat.contains(&local) {
                     Expr::Local(local)
                 } else {
                     // Связывание принадлежит соседу, который потребит его
@@ -273,8 +365,27 @@ impl Pass<'_> {
                 };
                 drops(rest.collect::<Vec<_>>(), taken)
             }
-            Expr::Erased | Expr::ConstructClosure { .. } => {
+            Expr::Erased | Expr::ConstructClosure { .. } | Expr::Literal { .. } => {
                 drops(owned.iter().copied().collect::<Vec<_>>(), expr)
+            }
+            Expr::Primitive {
+                op,
+                ty,
+                left,
+                right,
+            } => {
+                let (mut parts, spare) = self.sequence(vec![*left, *right], owned);
+                let right = parts.pop().unwrap_or(Expr::Erased);
+                let left = parts.pop().unwrap_or(Expr::Erased);
+                drops(
+                    spare,
+                    Expr::Primitive {
+                        op,
+                        ty,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    },
+                )
             }
             Expr::Construct {
                 constructor,
@@ -410,7 +521,7 @@ impl Pass<'_> {
             .copied()
             .filter(|local| inside.contains(local))
             .collect();
-        if binding.fact.present {
+        if binding.fact.present && binding.fact.repr.boxed() {
             under.insert(binding.local);
         }
         let body = self.expr(body, &under);
@@ -470,9 +581,12 @@ impl Pass<'_> {
             body,
         } = arm;
         let called = mentions(&body);
+        // Плоское поле не дублируется: оно лежит в слоте по значению, и своей
+        // ссылки у него нет (§4.11).
         let kept: Vec<LocalId> = fields
             .iter()
-            .filter(|field| field.fact.present && called.contains(&field.local))
+            .filter(|field| field.fact.present && field.fact.repr.boxed())
+            .filter(|field| called.contains(&field.local))
             .map(|field| field.local)
             .collect();
         // Разобранное отдаёт эта ветвь, если владение у нас и назвать его в теле
@@ -541,6 +655,9 @@ impl Pass<'_> {
             Expr::Closure { captured, .. } => {
                 captured.iter().any(|capture| self.plans(capture, slots))
             }
+            Expr::Primitive { left, right, .. } => {
+                self.plans(left, slots) || self.plans(right, slots)
+            }
             Expr::Apply { callee, argument } => {
                 self.plans(callee, slots) || self.plans(argument, slots)
             }
@@ -552,7 +669,10 @@ impl Pass<'_> {
             Expr::Dup { body, .. } | Expr::Drop { body, .. } | Expr::Reclaim { body, .. } => {
                 self.plans(body, slots)
             }
-            Expr::Local(_) | Expr::Erased | Expr::ConstructClosure { .. } => false,
+            Expr::Local(_)
+            | Expr::Erased
+            | Expr::ConstructClosure { .. }
+            | Expr::Literal { .. } => false,
         }
     }
 
@@ -578,6 +698,9 @@ impl Pass<'_> {
             Expr::Closure { captured, .. } => captured
                 .iter_mut()
                 .any(|capture| self.attach(capture, slots, token)),
+            Expr::Primitive { left, right, .. } => {
+                self.attach(left, slots, token) || self.attach(right, slots, token)
+            }
             Expr::Apply { callee, argument } => {
                 self.attach(callee, slots, token) || self.attach(argument, slots, token)
             }
@@ -596,7 +719,10 @@ impl Pass<'_> {
             Expr::Dup { body, .. } | Expr::Drop { body, .. } | Expr::Reclaim { body, .. } => {
                 self.attach(body, slots, token)
             }
-            Expr::Local(_) | Expr::Erased | Expr::ConstructClosure { .. } => false,
+            Expr::Local(_)
+            | Expr::Erased
+            | Expr::ConstructClosure { .. }
+            | Expr::Literal { .. } => false,
         }
     }
 }

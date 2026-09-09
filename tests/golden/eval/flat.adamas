@@ -5,19 +5,15 @@
 -- выводе не говорит ничего: словарь, собранный не по тем полям, типизируется
 -- ровно так же.
 --
--- Примитивов в языке пока нет (§4.3, Фаза 6), поэтому базой служит тег: `Bit`
--- из двух пустых конструкторов занимает байт. Правила укладки от этого не
--- зависят - те же, что в §4.11.
-
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
+-- Базой здесь служит тег: `Bit` из двух пустых конструкторов занимает байт.
+-- Примитивная база - `eval/flat-primitives.adamas`; правила укладки общие,
+-- те же, что в §4.11.
 
 data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a
 
-type Layout = { size : Nat, align : Nat }
+type Layout = { size : UInt32, align : UInt32 }
 
 class Flat a where
   layout : Layout

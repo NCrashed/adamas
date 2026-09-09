@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: flat-sealed-underived.adamas:35:1: `Flat` не выводится для `Packed.Handle`: он объявлен без представления: тела нет либо оно запечатано; словарь запечатанного берётся значением - членом его сигнатуры вида `flat : Flat T` (§4.11)
+Error: flat-sealed-underived.adamas:31:1: `Flat` не выводится для `Packed.Handle`: он объявлен без представления: тела нет либо оно запечатано; словарь запечатанного берётся значением - членом его сигнатуры вида `flat : Flat T` (§4.11)
   probe = sized Packed.make
   ^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -9419,7 +9419,7 @@ wrong = VCons True (VCons True VNil)
 fn flatly(tail: &str) -> String {
     format!(
         "{BASE}
-type Layout = {{ size : Nat, align : Nat }}
+type Layout = {{ size : UInt32, align : UInt32 }}
 
 class Flat a where
   layout : Layout
@@ -9445,10 +9445,7 @@ size3 : Layout
 size3 = layout @Vec3
 ",
     ));
-    assert_eq!(
-        value(&signature, "size3"),
-        "{size = Succ (Succ (Succ Zero)), align = Succ Zero}"
-    );
+    assert_eq!(value(&signature, "size3"), "{size = 3, align = 1}");
 }
 
 #[test]
@@ -9530,10 +9527,7 @@ one : Layout
 one = sized Off
 ",
     ));
-    assert_eq!(
-        value(&signature, "one"),
-        "{size = Succ Zero, align = Succ Zero}"
-    );
+    assert_eq!(value(&signature, "one"), "{size = 1, align = 1}");
 }
 
 #[test]
@@ -9547,7 +9541,7 @@ fn the_flat_class_is_declared_as_written_in_the_design() {
     ] {
         let error = refused(&format!(
             "{BASE}
-type Layout = {{ size : Nat, align : Nat }}
+type Layout = {{ size : UInt32, align : UInt32 }}
 
 {tail}"
         ));

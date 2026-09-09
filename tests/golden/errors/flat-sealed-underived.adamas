@@ -6,11 +6,7 @@
 -- его сменить. Право он теряет, дав обязательство членом `flat : Flat Handle`;
 -- ближайший проходящий сосед - `eval/flat-sealed-member.adamas`.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
-type Layout = { size : Nat, align : Nat }
+type Layout = { size : UInt32, align : UInt32 }
 
 class Flat a where
   layout : Layout
@@ -34,5 +30,5 @@ sized x = layout
 probe : Layout
 probe = sized Packed.make
 
-main : Nat
+main : UInt32
 main = probe.size

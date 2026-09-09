@@ -42,7 +42,6 @@ use adamas_parser::ast::Symbol;
 
 use crate::class::{abstracted, binders_of};
 use crate::error::ElabError;
-use crate::expr::{SUCC, ZERO};
 use crate::own::Owned;
 
 /// Имя класса представления. Соглашение то же, каким `if` берёт `Bool`.
@@ -386,14 +385,15 @@ pub(crate) fn derive(
     let layout = walk
         .layout(metas, &subject)
         .map_err(|blame| blame.into_error(&asked, span))?;
-    let dictionary = descriptor(signature, metas, layout, span)?;
+    let dictionary = descriptor(layout);
     let solution = abstracted(&binders, dictionary);
-    // Проверка связывает аргументы уровня у `Zero` и `Succ`: цель полиморфна по
-    // уровню, а числа - нет, и решить их дырки может только это сравнение (тот
-    // же порядок, что у реализации сигнатуры в `class::implementing`).
+    // Проверка сверяет словарь с объявленной формой класса: цель может быть
+    // полиморфна по уровню, а словарь - нет, и решить её дырки может только
+    // это сравнение (тот же порядок, что у реализации сигнатуры в
+    // `class::implementing`).
     check_within(&Ctx::new(signature), metas, &solution, ty).map_err(|_| ElabError::FlatShape {
         why: "словарь `Flat` не сошёлся с объявленным классом: метод у него один - \
-              `layout : Layout`, а `Layout` есть `{ size : Nat, align : Nat }` (§4.11)",
+              `layout : Layout`, а `Layout` есть `{ size : UInt32, align : UInt32 }` (§4.11)",
         span,
     })?;
     Ok(eval(&Env::default(), &solution))
@@ -401,37 +401,16 @@ pub(crate) fn derive(
 
 /// Словарь `{ layout = { size = …, align = … } }` термом.
 ///
-/// Числа записываются `Zero` и `Succ` - тем же соглашением, каким
-/// разворачивается литерал (§4.3): примитивного числа в ядре нет.
-fn descriptor(
-    signature: &Signature,
-    metas: &mut Metas,
-    layout: Layout,
-    span: Span,
-) -> Result<Term, ElabError> {
-    let missing = ElabError::FlatShape {
-        why: "вывод `Flat` записывает размер числом, а `Zero` и `Succ` не объявлены (§4.3)",
-        span,
-    };
-    let (Some(zero), Some(successor)) = (
-        signature.instantiate(ZERO, metas),
-        signature.instantiate(SUCC, metas),
-    ) else {
-        return Err(missing);
-    };
-    let numeral = |value: u32| {
-        (0..value).fold(zero.clone(), |built, _| {
-            Term::App(Rc::new(successor.clone()), Rc::new(built))
-        })
-    };
+/// Числа записываются битами `UInt32` (§4.11, вопрос 152): поля дескриптора
+/// примитивны, укладка печатается числом, а объявленных `Zero` и `Succ` вывод
+/// больше не требует.
+fn descriptor(layout: Layout) -> Term {
+    let numeral = |value: u32| Term::Prim(Prim::literal(PrimTy::UInt32, u64::from(value)));
     let written = Term::Object(Rc::from([
         (Name::from(SIZE), Rc::new(numeral(layout.size))),
         (Name::from(ALIGN), Rc::new(numeral(layout.align))),
     ]));
-    Ok(Term::Object(Rc::from([(
-        Name::from(LAYOUT),
-        Rc::new(written),
-    )])))
+    Term::Object(Rc::from([(Name::from(LAYOUT), Rc::new(written))]))
 }
 
 /// Обход представления: тип в укладку либо в отказ.

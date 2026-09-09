@@ -13,11 +13,7 @@
 --
 -- Числа укладки здесь не наблюдаются - это `eval/flat.adamas`.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
-type Layout = { size : Nat, align : Nat }
+type Layout = { size : UInt32, align : UInt32 }
 
 class Flat a where
   layout : Layout

@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Cons ({size = Succ Zero, align = Succ Zero}) (Cons ({size = Succ (Succ Zero), align = Succ Zero}) (Cons ({size = Succ (Succ (Succ Zero)), align = Succ Zero}) (Cons ({size = Succ (Succ (Succ Zero)), align = Succ Zero}) (Cons ({size = Succ Zero, align = Succ Zero}) (Cons ({size = Succ (Succ (Succ Zero)), align = Succ Zero}) Nil)))))
+Cons ({size = 1, align = 1}) (Cons ({size = 2, align = 1}) (Cons ({size = 3, align = 1}) (Cons ({size = 3, align = 1}) (Cons ({size = 1, align = 1}) (Cons ({size = 3, align = 1}) Nil)))))

@@ -9,15 +9,11 @@
 -- заменить `List Bit` в `MkRow` на плоское поле (`Bit`, `Pair`), и вывод
 -- пройдёт, посчитав укладку.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a
 
-type Layout = { size : Nat, align : Nat }
+type Layout = { size : UInt32, align : UInt32 }
 
 class Flat a where
   layout : Layout

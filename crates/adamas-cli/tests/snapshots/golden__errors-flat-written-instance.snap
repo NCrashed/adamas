@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: flat-written-instance.adamas:26:1: инстанс `Flat` руками не пишется: компилятор выводит его структурно по представлению типа (§4.11)
+Error: flat-written-instance.adamas:22:1: инстанс `Flat` руками не пишется: компилятор выводит его структурно по представлению типа (§4.11)
   instance Flat Handle where
   ^^^^^^^^^^^^^^^^^^^^^^^^^^

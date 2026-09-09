@@ -8,11 +8,7 @@
 -- Ближайший проходящий сосед - `eval/flat.adamas`: убрать `instance` целиком.
 -- Писать вместо него нечего - словарь и так выведется, и посчитает два байта.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
-type Layout = { size : Nat, align : Nat }
+type Layout = { size : UInt32, align : UInt32 }
 
 class Flat a where
   layout : Layout
@@ -24,7 +20,7 @@ data Bit where
 type Handle = { index : Bit, generation : Bit }
 
 instance Flat Handle where
-  layout = { size = Succ (Succ (Succ (Succ Zero))), align = Succ Zero }
+  layout = { size = 4, align = 1 }
 
 main : Layout
 main = layout @Handle

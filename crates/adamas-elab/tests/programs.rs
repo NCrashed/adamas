@@ -731,6 +731,83 @@ inner f = Zero
     );
 }
 
+/// Программа с классом `Add` и инстансом на названном типе - для умолчания
+/// литерала (§4.3, §10 вопрос 150). Ни `Zero`, ни `Succ` не объявлены
+/// намеренно: унарного пути у литерала нет, и дырку решает только умолчание.
+fn defaulting(alias: &str, instance: &str) -> String {
+    format!(
+        "data Bool where
+  True : Bool
+  False : Bool
+
+type Int = {alias}
+
+class Add a where
+  add : a -> a -> a
+
+instance Add {instance} where
+  add = add{instance}
+
+ambiguous : {{Add a}} => a -> a -> Bool
+ambiguous x y = True
+
+chosen : Bool
+chosen = ambiguous 1 2
+"
+    )
+}
+
+#[test]
+fn an_ambiguous_literal_defaults_by_name_and_warns() {
+    // §4.3: контекст типа не задал - ожидание литерала осталось дыркой, - и
+    // умолчание берётся по имени `Int` с предупреждением. Программа принята:
+    // предупреждение не отказ. Предупреждение **одно на дырку**, а не на
+    // литерал: первый решает `?a`, и второй уже видит решённый тип.
+    let warnings = warned(&defaulting("Int64", "Int64"));
+    assert_eq!(warnings.len(), 1, "получено {warnings:?}");
+    assert!(
+        warnings
+            .iter()
+            .all(|it| it.to_string().contains("default Int")),
+        "получено {warnings:?}"
+    );
+}
+
+#[test]
+fn the_literal_default_follows_the_name_not_the_width() {
+    // Default идёт **по имени**, а не зашитым `Int64`: программа, назвавшая
+    // `Int` синонимом `Int32`, получает литералы в `Int32` - инстанс объявлен
+    // только там, и с умолчанием, зашитым шириной, она бы не элаборировалась.
+    program(&defaulting("Int32", "Int32"));
+}
+
+#[test]
+fn an_alias_typed_goal_finds_the_primitive_instance() {
+    // `type Int = Int64` обязан ключевать инстанс тем же именем, что `Int64`:
+    // иначе аннотированное `n : Int` не находит `instance Add Int64`, и
+    // синоним §4.3 половинчат - литерал под умолчанием проходит, а
+    // аннотация отказывает «инстанс `Add Int` не найден».
+    program(
+        "type Int = Int64
+
+class Add a where
+  add : a -> a -> a
+
+instance Add Int64 where
+  add = addInt64
+
+plus : {Add a} => a -> a -> a
+plus x y = add x y
+
+n : Int
+n = 1
+
+total : Int
+total = plus n n
+",
+    );
+}
+
 #[test]
 fn a_nullary_type_alias_names_a_type() {
     // §10 вопрос 106: определение, чей тип есть **голый универсум**, уровень в

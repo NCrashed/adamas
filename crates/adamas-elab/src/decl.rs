@@ -193,6 +193,7 @@ fn written_alias(
     owned: &Owned,
     fixities: &Fixities,
     instances: &Instances,
+    warnings: &mut Warnings,
     within: Option<&Enclosing>,
     written: &WrittenAlias<'_>,
     span: Span,
@@ -207,6 +208,7 @@ fn written_alias(
         signature,
         metas,
         known(owned, fixities, instances),
+        warnings,
         within,
         &Aliased {
             name: written.name,
@@ -285,6 +287,7 @@ fn declared_signature<'a>(
     metas: &mut Metas,
     owned: &Owned,
     fixities: &Fixities,
+    warnings: &mut Warnings,
     within: Option<&Enclosing>,
     name: &ast::Name,
     ty: &'a ast::Expr,
@@ -306,7 +309,8 @@ fn declared_signature<'a>(
     // Параметры функтора стоят у члена implicit-связываниями: компилятор
     // клауз связывает такие сам, а ссылка изнутри применяется к ним явно
     // (`Elaborator::specialized`).
-    let mut elaborator = Elaborator::new(signature, metas, owned, fixities).within(within);
+    let mut elaborator =
+        Elaborator::new(signature, metas, owned, fixities, warnings).within(within);
     let params = elaborator.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
     // Row-параметр функтора и подъём члена - одна переменная (§10 вопрос 107).
     // Порознь обобщение заводит две, а тело требует их равенства.
@@ -490,6 +494,7 @@ fn abstracted(params: &[Param], body: Term) -> Term {
 /// Объявления одного уровня: верхнего либо тела модуля.
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "прогон элаборации несёт своё состояние; складывать его в структуру значило бы прятать, что именно меняется"
 )]
 fn members_into(
@@ -517,7 +522,8 @@ fn members_into(
                 postulate(signature, metas, pending.take(), &mut postulated)?;
                 unused_implicits(ty, warnings);
                 pending = Some(declared_signature(
-                    signature, metas, owned, fixities, within, name, ty, attributes, decl.span,
+                    signature, metas, owned, fixities, warnings, within, name, ty, attributes,
+                    decl.span,
                 )?);
             }
             DeclKind::Clauses { name, clauses } => {
@@ -529,6 +535,7 @@ fn members_into(
                     signature,
                     metas,
                     known(owned, fixities, instances),
+                    warnings,
                     within,
                     &declared,
                     clauses,
@@ -546,6 +553,7 @@ fn members_into(
                     owned,
                     fixities,
                     instances,
+                    warnings,
                     within,
                     &WrittenAlias {
                         name,
@@ -571,7 +579,7 @@ fn members_into(
                     decl.span,
                 )?;
                 declare_mutual(
-                    signature, metas, owned, fixities, instances, members, decl.span,
+                    signature, metas, owned, fixities, instances, warnings, members, decl.span,
                 )?;
             }
             DeclKind::Class(class) => {
@@ -579,17 +587,20 @@ fn members_into(
                 let (what, why) = outside_a_module(class.instance);
                 only_at_top(within, &Rc::from(what), why, decl.span)?;
                 declare_class(
-                    signature, metas, owned, fixities, instances, class, decl.span,
+                    signature, metas, owned, fixities, instances, warnings, class, decl.span,
                 )?;
             }
             DeclKind::Data(data) => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
-                declare_family(signature, metas, owned, fixities, within, data, decl.span)?;
+                declare_family(
+                    signature, metas, owned, fixities, warnings, within, data, decl.span,
+                )?;
             }
             DeclKind::Resource(resource) => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
                 declare_owned(
-                    signature, metas, owned, fixities, instances, within, resource, decl.span,
+                    signature, metas, owned, fixities, instances, warnings, within, resource,
+                    decl.span,
                 )?;
             }
             // Фикситет ничего не объявляет: он говорит, как читать цепочку, и
@@ -597,7 +608,9 @@ fn members_into(
             DeclKind::Fixity(decl) => fixities.declare(decl)?,
             DeclKind::Effect(effect) => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
-                declare_effect(signature, metas, owned, fixities, within, effect, decl.span)?;
+                declare_effect(
+                    signature, metas, owned, fixities, warnings, within, effect, decl.span,
+                )?;
             }
         }
     }
@@ -612,13 +625,14 @@ fn declare_owned(
     owned: &mut Owned,
     fixities: &Fixities,
     instances: &mut Instances,
+    warnings: &mut Warnings,
     within: Option<&Enclosing>,
     resource: &ast::Resource,
     span: Span,
 ) -> Result<(), ElabError> {
     owned.declare(&qualify(within, &resource.name.text), Ownership::Resource);
     declare_resource(
-        signature, metas, owned, fixities, instances, within, resource, span,
+        signature, metas, owned, fixities, instances, warnings, within, resource, span,
     )
 }
 
@@ -631,6 +645,7 @@ fn alias(
     signature: &mut Signature,
     metas: &mut Metas,
     known: Known<'_>,
+    warnings: &mut Warnings,
     within: Option<&Enclosing>,
     written: &Aliased<'_>,
     span: Span,
@@ -639,7 +654,7 @@ fn alias(
     let declared = qualify(within, &name.text);
     let names = Names::of(&declared, Vec::new());
     let mut elaborator =
-        Elaborator::new(signature, metas, known.owned, known.fixities).within(within);
+        Elaborator::new(signature, metas, known.owned, known.fixities, warnings).within(within);
     // Связывания двух родов и в одном телескопе: сперва параметры функтора,
     // потом свои. Написанный параметр живёт под функторными - его тип вправе
     // их упоминать, - поэтому и элаборируются они одной последовательностью.
@@ -662,7 +677,7 @@ fn alias(
     let sort = Term::Universe(metas.zonk(&level));
     // Функторные связывания implicit - их подставляет вставка, - а свои
     // explicit: `Twice Nat` автор пишет сам.
-    let ty = Elaborator::new(signature, metas, known.owned, known.fixities)
+    let ty = Elaborator::new(signature, metas, known.owned, known.fixities, warnings)
         .within(within)
         .wrapped(&outer, true, |it| {
             it.wrapped(&owned_params, false, |_| Ok(sort))
@@ -702,6 +717,7 @@ fn alias(
         metas,
         known.owned,
         known.fixities,
+        warnings,
         &declared,
         written.params,
         Unwritten::Sort,
@@ -736,13 +752,14 @@ fn declare_module(
     sealable(instances, within, module, span)?;
     if module.signature {
         return declare_module_type(
-            signature, metas, owned, fixities, instances, within, &declared, module, span,
+            signature, metas, owned, fixities, instances, warnings, within, &declared, module, span,
         );
     }
     let names = Names::of(&declared, Vec::new());
     if let Some(body) = &module.body {
         return declare_module_value(
-            signature, metas, owned, fixities, instances, within, module, body, &declared, span,
+            signature, metas, owned, fixities, instances, warnings, within, module, body,
+            &declared, span,
         );
     }
     let inner = Enclosing::nested(within, Rc::clone(&declared), &module.params);
@@ -774,7 +791,8 @@ fn declare_module(
     // Связывания двух родов, как у всякого члена: объемлющие параметры, потом
     // свои. У вложенного модуля первые есть, и без них его запись не собрать -
     // члены подняты под ними.
-    let mut telescopes = Elaborator::new(signature, metas, owned, fixities).within(within);
+    let mut telescopes =
+        Elaborator::new(signature, metas, owned, fixities, warnings).within(within);
     let outer = telescopes.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
     let own = telescopes.beneath(&outer, |it| {
         it.telescope(&module.params, true, Mult::Many, Unwritten::Sort)
@@ -792,7 +810,7 @@ fn declare_module(
     // синтезируется по собранной записи, как и обещает §4.8. У функтора
     // аннотация относится к результату - к записи под параметрами.
     let inner_ty = if let Some(ascription) = &module.ascription {
-        let written = Elaborator::new(signature, metas, owned, fixities)
+        let written = Elaborator::new(signature, metas, owned, fixities, warnings)
             .within(within)
             .beneath(&params, |it| {
                 it.typing(|inner| inner.expr(ascription, Mult::Many))
@@ -1005,12 +1023,14 @@ fn spine_of(head: &ast::Expr) -> Option<(&ast::Name, Vec<&ast::Expr>)> {
 /// проверенная против `Eqv Nat`. Тип метода в нём не пишется: он **выводится**
 /// из класса проекцией словаря, иначе автор переписывал бы сигнатуру, уже
 /// написанную в классе.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn declare_class(
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &mut Owned,
     fixities: &Fixities,
     instances: &mut Instances,
+    warnings: &mut Warnings,
     class: &ast::ClassDecl,
     span: Span,
 ) -> Result<(), ElabError> {
@@ -1026,7 +1046,7 @@ fn declare_class(
     };
     if class.instance {
         return declare_instance(
-            signature, metas, owned, fixities, instances, class, name, span,
+            signature, metas, owned, fixities, instances, warnings, class, name, span,
         );
     }
     // Параметры класса разбирает парсер теми же формами, что у семейства.
@@ -1081,7 +1101,7 @@ fn declare_class(
         .filter_map(|it| it.ty)
         .any(crate::expr::writes_effects)
         .then(|| Row::closing([], Some(Tail::Var(RowVar(0)))));
-    let mut elaborator = Elaborator::new(signature, metas, owned, fixities);
+    let mut elaborator = Elaborator::new(signature, metas, owned, fixities, warnings);
     let telescope = elaborator.telescope(&params, false, Mult::Zero, Unwritten::Given(&kinds))?;
     let (record, level) = elaborator.beneath(&telescope, |it| {
         let fields = it.module_members(&members, rowed.as_ref())?;
@@ -1102,9 +1122,11 @@ fn declare_class(
         Ok((quote(it.depth(), &value), level))
     })?;
     let sort = Term::Universe(metas.zonk(&level));
-    let ty =
-        Elaborator::new(signature, metas, owned, fixities)
-            .wrapped(&telescope, false, |_| Ok(sort))?;
+    let ty = Elaborator::new(signature, metas, owned, fixities, warnings).wrapped(
+        &telescope,
+        false,
+        |_| Ok(sort),
+    )?;
     let body = abstracted(&telescope, record);
     signature
         .define_rowed(
@@ -1125,6 +1147,7 @@ fn declare_class(
         metas,
         owned,
         fixities,
+        warnings,
         &name.text,
         &params,
         Unwritten::Sort,
@@ -1181,6 +1204,7 @@ fn declare_instance(
     owned: &mut Owned,
     fixities: &Fixities,
     instances: &mut Instances,
+    warnings: &mut Warnings,
     class: &ast::ClassDecl,
     name: &ast::Name,
     span: Span,
@@ -1211,7 +1235,9 @@ fn declare_instance(
     // Голова элаборируется **один раз на всю группу**: члены инстанса
     // объявляются вместе, поэтому граница объявления одна, и дырки уровня
     // доживают до неё.
-    let written = written_head(signature, metas, owned, fixities, class, span, &names)?;
+    let written = written_head(
+        signature, metas, owned, fixities, warnings, class, span, &names,
+    )?;
     let prefix = leading(&written);
     let Some((_, arguments)) = applied_head(signature, under_prefix(&written), span)? else {
         return Err(ElabError::ClassHead { span });
@@ -1249,6 +1275,7 @@ fn declare_instance(
         owned,
         fixities,
         instances,
+        warnings,
         name,
         &arguments,
         &prefix,
@@ -1263,7 +1290,9 @@ fn declare_instance(
     // Словарь - запись из членов, применённых к своим же связываниям.
     // Заголовок считается заново: объявление группы освободило дырки, и
     // прежний уже не жив.
-    let written = written_head(signature, metas, owned, fixities, class, span, &names)?;
+    let written = written_head(
+        signature, metas, owned, fixities, warnings, class, span, &names,
+    )?;
     let prefix = leading(&written);
     let mut object = Vec::with_capacity(superclasses + members.len());
     // Поле суперкласса - дырка: разряжает его **разрешение**, а не автор
@@ -1425,17 +1454,19 @@ fn coherence(
 /// Считается заново на каждое объявление: граница объявления освобождает
 /// дырки, а у полиморфного инстанса уровень как раз и остаётся нерешённым до
 /// обобщения. Тот же порядок у функтора (лог 2026-08-31).
+#[allow(clippy::too_many_arguments)]
 fn written_head(
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &mut Owned,
     fixities: &Fixities,
+    warnings: &mut Warnings,
     class: &ast::ClassDecl,
     span: Span,
     names: &Names,
 ) -> Result<Term, ElabError> {
-    let written =
-        Elaborator::new(signature, metas, owned, fixities).declaration(&class.head, Mult::Many)?;
+    let written = Elaborator::new(signature, metas, owned, fixities, warnings)
+        .declaration(&class.head, Mult::Many)?;
     is_type(&Ctx::new(signature), metas, &written).map_err(|error| ElabError::Core {
         span,
         error: Box::new(error),
@@ -1869,6 +1900,7 @@ fn declare_members(
     owned: &mut Owned,
     fixities: &Fixities,
     instances: &Instances,
+    warnings: &mut Warnings,
     name: &ast::Name,
     arguments: &Rc<[Symbol]>,
     prefix: &[Param],
@@ -1951,9 +1983,15 @@ fn declare_members(
     let mut trees = Vec::with_capacity(members.len());
     for (at, (_, clauses, at_span)) in members.iter().enumerate() {
         let compiled = {
-            let mut elaborator =
-                Elaborator::with_group(signature, metas, owned, fixities, visible.clone())
-                    .declaring(&types[at]);
+            let mut elaborator = Elaborator::with_group(
+                signature,
+                metas,
+                owned,
+                fixities,
+                warnings,
+                visible.clone(),
+            )
+            .declaring(&types[at]);
             clauses
                 .iter()
                 .map(|clause| elaborator.clause(clause))
@@ -2014,12 +2052,14 @@ fn declare_members(
 /// дырками, как всякая ссылка на объявленное. Общая арность на группу дала бы
 /// фантомные параметры члену, которому уровни не нужны, и решать их в месте
 /// использования было бы нечем. Решение от 2026-08-31.
+#[allow(clippy::too_many_arguments)]
 fn declare_mutual(
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &mut Owned,
     fixities: &Fixities,
     instances: &Instances,
+    warnings: &mut Warnings,
     members: &[ast::Decl],
     span: Span,
 ) -> Result<(), ElabError> {
@@ -2030,7 +2070,7 @@ fn declare_mutual(
     // первая клауза. Взаимная рекурсия семейств от этого не страдает - она
     // внутри их группы, - а названная цена в том, что тип конструктора не
     // вправе назвать определение того же блока.
-    declare_families(signature, metas, owned, fixities, &planned, span)?;
+    declare_families(signature, metas, owned, fixities, warnings, &planned, span)?;
     let planned: Vec<&Mutual<'_>> = planned
         .iter()
         .filter_map(|member| match member {
@@ -2068,7 +2108,7 @@ fn declare_mutual(
             });
         }
         types.push(
-            Elaborator::new(signature, metas, owned, fixities)
+            Elaborator::new(signature, metas, owned, fixities, warnings)
                 .declaration(member.ty, Mult::Many)?,
         );
     }
@@ -2097,9 +2137,10 @@ fn declare_mutual(
     for (at, member) in planned.iter().enumerate() {
         let visible = siblings_of(metas, &planned, &arities, &generalized, at);
         let compiled = {
-            let mut elaborator = Elaborator::with_group(signature, metas, owned, fixities, visible)
-                .declaring(&generalized[at])
-                .suspending(suspends(member.ty));
+            let mut elaborator =
+                Elaborator::with_group(signature, metas, owned, fixities, warnings, visible)
+                    .declaring(&generalized[at])
+                    .suspending(suspends(member.ty));
             member
                 .clauses
                 .iter()
@@ -2459,6 +2500,7 @@ fn declare_families(
     metas: &mut Metas,
     owned: &Owned,
     fixities: &Fixities,
+    warnings: &mut Warnings,
     planned: &[Planned<'_>],
     span: Span,
 ) -> Result<(), ElabError> {
@@ -2499,7 +2541,7 @@ fn declare_families(
         }
         let known = scratch.as_ref().unwrap_or(signature);
         families.push(family_header(
-            known, metas, owned, fixities, None, data, *at,
+            known, metas, owned, fixities, warnings, None, data, *at,
         )?);
     }
     if families.is_empty() {
@@ -2525,8 +2567,9 @@ fn declare_families(
     let mut seen: Vec<Member> = families.iter().map(Family::visible).collect();
     let mut group: Option<Group> = None;
     for family in &families {
-        let constructors =
-            family_constructors(signature, metas, owned, fixities, None, family, &seen)?;
+        let constructors = family_constructors(
+            signature, metas, owned, fixities, warnings, None, family, &seen,
+        )?;
         seen.extend(constructors.iter().map(|(name, ty)| Member {
             name: Rc::clone(name),
             levels: Rc::clone(&family.levels),
@@ -2555,6 +2598,7 @@ fn declare_families(
             metas,
             owned,
             fixities,
+            warnings,
             &family.data.name.text,
             &family.data.params,
             Unwritten::Sort,
@@ -2734,6 +2778,7 @@ fn declare_module_value(
     owned: &mut Owned,
     fixities: &Fixities,
     instances: &Instances,
+    warnings: &mut Warnings,
     within: Option<&Enclosing>,
     module: &ast::ModuleDecl,
     body: &ast::Expr,
@@ -2752,12 +2797,13 @@ fn declare_module_value(
     // Внутри функтора выражение живёт **под его параметрами**: `Twice Key`
     // называет `Key`, а он связывание, а не имя. Телескоп поэтому тот же, что у
     // всякого члена, и вне функтора он пуст - тогда остаётся ровно прежнее.
-    let mut elaborator = Elaborator::new(signature, metas, owned, fixities).within(within);
+    let mut elaborator =
+        Elaborator::new(signature, metas, owned, fixities, warnings).within(within);
     let params = elaborator.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
     let term = elaborator.beneath(&params, |it| it.typing(|it| it.expr(body, Mult::Many)))?;
     let ctx = beneath_params(signature, &params);
     let inner_ty = if let Some(ascription) = &module.ascription {
-        let written = Elaborator::new(signature, metas, owned, fixities)
+        let written = Elaborator::new(signature, metas, owned, fixities, warnings)
             .within(within)
             .beneath(&params, |it| {
                 it.typing(|it| it.expr(ascription, Mult::Many))
@@ -2789,7 +2835,7 @@ fn declare_module_value(
         })?;
         quote(ctx.size(), &ty)
     };
-    let ty = Elaborator::new(signature, metas, owned, fixities)
+    let ty = Elaborator::new(signature, metas, owned, fixities, warnings)
         .within(within)
         .wrapped(&params, true, |_| Ok(inner_ty))?;
     let term = abstracted(&params, term);
@@ -3241,6 +3287,7 @@ fn declare_signature_effect(
     owned: &Owned,
     fixities: &Fixities,
     instances: &mut Instances,
+    warnings: &mut Warnings,
     inner: &Enclosing,
     declared: &Symbol,
     members: &[WrittenField<'_>],
@@ -3267,7 +3314,16 @@ fn declare_signature_effect(
             span: early.span,
         });
     }
-    declare_effect(signature, metas, owned, fixities, Some(inner), effect, span)?;
+    declare_effect(
+        signature,
+        metas,
+        owned,
+        fixities,
+        warnings,
+        Some(inner),
+        effect,
+        span,
+    )?;
     instances.declares_effect(
         declared,
         &effect.name.text,
@@ -3284,6 +3340,7 @@ fn declare_module_type(
     owned: &Owned,
     fixities: &Fixities,
     instances: &mut Instances,
+    warnings: &mut Warnings,
     within: Option<&Enclosing>,
     declared: &Symbol,
     module: &ast::ModuleDecl,
@@ -3309,6 +3366,7 @@ fn declare_module_type(
                 owned,
                 fixities,
                 instances,
+                warnings,
                 &inner,
                 declared,
                 &members,
@@ -3372,7 +3430,8 @@ fn declare_module_type(
     // Члены элаборируются под собственным объемлющим: короткое имя
     // эффекта-члена - лестница §4.8 к поднятой метке. Телескоп при этом тот
     // же: своих параметров у сигнатуры нет, и `params_of` обоих совпадает.
-    let mut elaborator = Elaborator::new(signature, metas, owned, fixities).within(Some(&inner));
+    let mut elaborator =
+        Elaborator::new(signature, metas, owned, fixities, warnings).within(Some(&inner));
     let params = elaborator.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
     let fields = elaborator.beneath(&params, |it| {
         it.typing(|it| it.module_members(&members, rowed.as_ref()))
@@ -3388,7 +3447,7 @@ fn declare_module_type(
         names: names.clone(),
     })?;
     let sort = Term::Universe(metas.zonk(&level));
-    let ty = Elaborator::new(signature, metas, owned, fixities)
+    let ty = Elaborator::new(signature, metas, owned, fixities, warnings)
         .within(within)
         .wrapped(&params, true, |_| Ok(sort))?;
     signature
@@ -3445,10 +3504,12 @@ fn postulate(
 }
 
 /// Определение: клаузы собираются в дерево разбора, дерево уходит в сигнатуру.
+#[allow(clippy::too_many_arguments)]
 fn define(
     signature: &mut Signature,
     metas: &mut Metas,
     known: Known<'_>,
+    warnings: &mut Warnings,
     within: Option<&Enclosing>,
     declared: &Pending<'_>,
     clauses: &[ast::Clause],
@@ -3481,11 +3542,17 @@ fn define(
         ty: Rc::new(declared.ty.clone()),
     }];
     let compiled = {
-        let mut elaborator =
-            Elaborator::with_group(signature, metas, known.owned, known.fixities, group)
-                .within(within)
-                .declaring(&declared.ty)
-                .suspending(suspends(declared.source));
+        let mut elaborator = Elaborator::with_group(
+            signature,
+            metas,
+            known.owned,
+            known.fixities,
+            warnings,
+            group,
+        )
+        .within(within)
+        .declaring(&declared.ty)
+        .suspending(suspends(declared.source));
         clauses
             .iter()
             .map(|clause| elaborator.clause(clause))
@@ -3811,6 +3878,7 @@ fn declare_resource(
     owned: &mut Owned,
     fixities: &Fixities,
     instances: &Instances,
+    warnings: &mut Warnings,
     within: Option<&Enclosing>,
     resource: &ast::Resource,
     span: Span,
@@ -3872,14 +3940,17 @@ fn declare_resource(
         kind: None,
         constructors,
     };
-    declare_data(signature, metas, owned, fixities, within, &data, span)?;
+    declare_data(
+        signature, metas, owned, fixities, warnings, within, &data, span,
+    )?;
 
     // `drop` объявляется после семейства: его тип называет ресурс, а в
     // сигнатуре тот появляется только сейчас. Домен получает `1` тем же
     // правилом, что и всякое связывание ресурсного типа, - писать `(1 h : …)`
     // руками не нужно и не требуется §3.3. Параметры функтора стоят у него
     // implicit-связываниями, как у всякого члена.
-    let mut elaborator = Elaborator::new(signature, metas, owned, fixities).within(within);
+    let mut elaborator =
+        Elaborator::new(signature, metas, owned, fixities, warnings).within(within);
     let params = elaborator.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
     let elaborated = elaborator.wrapped(&params, true, |it| it.declaration(drop_ty, Mult::Many))?;
     // Форма проверяется здесь, один раз, а не в каждой точке вставки: вызов
@@ -3909,6 +3980,7 @@ fn declare_resource(
         signature,
         metas,
         known(owned, fixities, instances),
+        warnings,
         within,
         &pending,
         clauses,
@@ -4170,11 +4242,13 @@ fn mentions_local(term: &Term) -> bool {
 ///
 /// Тело умолчания живёт под предшествующими параметрами: `(b = a)` есть
 /// `\a -> a`. Отсюда и правило 2 - упоминать оно вправе только их.
+#[allow(clippy::too_many_arguments)]
 fn declare_defaults(
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &Owned,
     fixities: &Fixities,
+    warnings: &mut Warnings,
     declared: &Symbol,
     written: &[ast::Binder],
     unwritten: Unwritten<'_>,
@@ -4196,7 +4270,7 @@ fn declare_defaults(
         // Телескоп считается заново на каждое умолчание: объявление
         // предыдущего освободило дырки уровня, и посчитанный один раз умер бы
         // на втором.
-        let mut elaborator = Elaborator::new(signature, metas, owned, fixities);
+        let mut elaborator = Elaborator::new(signature, metas, owned, fixities, warnings);
         let params = elaborator.telescope(&written[..=position], false, Mult::Zero, unwritten)?;
         let Some(param) = params.get(at) else {
             return Err(ElabError::TrailingDefault {
@@ -4276,11 +4350,13 @@ impl Family<'_> {
 }
 
 /// Телескоп, kind и арность уровней семейства.
+#[allow(clippy::too_many_arguments)]
 fn family_header<'a>(
     signature: &Signature,
     metas: &mut Metas,
     owned: &Owned,
     fixities: &Fixities,
+    warnings: &mut Warnings,
     within: Option<&Enclosing>,
     data: &'a ast::Data,
     span: Span,
@@ -4288,7 +4364,8 @@ fn family_header<'a>(
     // Телескоп параметров элаборируется один раз и переиспользуется: kind и
     // каждый конструктор обязаны нести **один и тот же** телескоп, иначе
     // `List` в результате и `List` в объявлении - два разных семейства.
-    let mut elaborator = Elaborator::new(signature, metas, owned, fixities).within(within);
+    let mut elaborator =
+        Elaborator::new(signature, metas, owned, fixities, warnings).within(within);
     // Связывания двух родов в одном телескопе, как у алиаса: сперва параметры
     // функтора, потом свои. Написанный параметр живёт под функторными - его тип
     // вправе их упоминать.
@@ -4364,11 +4441,13 @@ fn family_header<'a>(
 }
 
 /// Типы конструкторов - под группой, в которой семейство объявляется.
+#[allow(clippy::too_many_arguments)]
 fn family_constructors(
     signature: &Signature,
     metas: &mut Metas,
     owned: &Owned,
     fixities: &Fixities,
+    warnings: &mut Warnings,
     within: Option<&Enclosing>,
     family: &Family<'_>,
     visible: &[Member],
@@ -4386,11 +4465,18 @@ fn family_constructors(
             // а не `MkPair A B x y`. Свободные имена, оставшиеся сверх них,
             // поднимаются уже под ними - и потому стоят после, как того и ждёт
             // ядро от телескопа с параметрами.
-            let ty = Elaborator::with_group(signature, metas, owned, fixities, visible.to_vec())
-                .within(within)
-                .wrapped(&family.params, true, |it| {
-                    it.constructor_type(&constructor.ty, Mult::One)
-                })?;
+            let ty = Elaborator::with_group(
+                signature,
+                metas,
+                owned,
+                fixities,
+                warnings,
+                visible.to_vec(),
+            )
+            .within(within)
+            .wrapped(&family.params, true, |it| {
+                it.constructor_type(&constructor.ty, Mult::One)
+            })?;
             // Собственный типовой параметр конструктора живёт в нулевом
             // универсуме (§10 вопрос 109) - тем же доводом, что у операции
             // (вопрос 83): полиморфный по уровню он делает и само семейство
@@ -4414,11 +4500,13 @@ fn family_member(family: &Family<'_>, constructors: &[(Symbol, Term)]) -> SigMem
 }
 
 /// Семейство вместе с тем, что решается до его объявления.
+#[allow(clippy::too_many_arguments)]
 fn declare_family(
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &mut Owned,
     fixities: &Fixities,
+    warnings: &mut Warnings,
     within: Option<&Enclosing>,
     data: &ast::Data,
     span: Span,
@@ -4430,7 +4518,9 @@ fn declare_family(
     if data.unique {
         owned.declare(&qualify(within, &data.name.text), Ownership::Unique);
     }
-    declare_data(signature, metas, owned, fixities, within, data, span)
+    declare_data(
+        signature, metas, owned, fixities, warnings, within, data, span,
+    )
 }
 
 /// Объявление эффекта: формер метки плюс её операции (§3.4).
@@ -4453,6 +4543,7 @@ fn declare_effect(
     metas: &mut Metas,
     owned: &Owned,
     fixities: &Fixities,
+    warnings: &mut Warnings,
     within: Option<&Enclosing>,
     effect: &ast::EffectDecl,
     span: Span,
@@ -4493,7 +4584,8 @@ fn declare_effect(
             span,
         });
     }
-    let mut elaborator = Elaborator::new(signature, metas, owned, fixities).within(within);
+    let mut elaborator =
+        Elaborator::new(signature, metas, owned, fixities, warnings).within(within);
     let params = elaborator.telescope(&effect.params, false, Mult::Zero, Unwritten::Sort)?;
     let kind = elaborator.wrapped(&params, false, |_| Ok(Term::EffectKind))?;
     let names = Names::of_effect(
@@ -4535,9 +4627,15 @@ fn declare_effect(
         // Параметры кратности, написанные операцией, - её собственные: она
         // инстанцируется местом вызова, как всякое определение (§10 вопрос
         // 116). Считаются они тем же элаборатором, что строит тип.
-        let mut it =
-            Elaborator::with_group(signature, metas, owned, fixities, vec![visible.clone()])
-                .within(within);
+        let mut it = Elaborator::with_group(
+            signature,
+            metas,
+            owned,
+            fixities,
+            warnings,
+            vec![visible.clone()],
+        )
+        .within(within);
         let lift = rho.clone();
         let ty = it.wrapped(&params, true, |it| {
             it.declaration_lifted(&written, Mult::Many, lift)
@@ -4570,6 +4668,7 @@ fn declare_effect(
         metas,
         owned,
         fixities,
+        warnings,
         &declared,
         &effect.params,
         Unwritten::Sort,
@@ -5183,21 +5282,26 @@ fn suspends(written: &ast::Expr) -> bool {
     matches!(written.kind, ast::ExprKind::Effectful { .. })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn declare_data(
     signature: &mut Signature,
     metas: &mut Metas,
     owned: &Owned,
     fixities: &Fixities,
+    warnings: &mut Warnings,
     within: Option<&Enclosing>,
     data: &ast::Data,
     span: Span,
 ) -> Result<(), ElabError> {
-    let family = family_header(signature, metas, owned, fixities, within, data, span)?;
+    let family = family_header(
+        signature, metas, owned, fixities, warnings, within, data, span,
+    )?;
     let constructors = family_constructors(
         signature,
         metas,
         owned,
         fixities,
+        warnings,
         within,
         &family,
         &[family.visible()],
@@ -5227,6 +5331,7 @@ fn declare_data(
         metas,
         owned,
         fixities,
+        warnings,
         &family.declared,
         &data.params,
         Unwritten::Sort,

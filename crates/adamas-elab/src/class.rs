@@ -703,6 +703,10 @@ fn unfolded(signature: &Signature, name: &Symbol) -> Option<Symbol> {
         }
         match head {
             Term::Const(next, _, _) if *next != current => current = Rc::clone(next),
+            // Тело синонима - примитив: `type Int = Int64` (§4.3) обязан дать
+            // тот же ключ, что и `Int64`, - тем же правилом, что у синонима
+            // объявленного семейства строкой выше.
+            Term::Prim(adamas_core::prim::Prim::Ty(ty)) => return Some(Rc::from(ty.name())),
             // Синоним отдаёт свой параметр: голова у применения не своя, а
             // того аргумента, который подставят, и символом она не выражается.
             Term::Var(_) if abstracted => return None,

@@ -34,6 +34,7 @@ use crate::error::{ElabError, Missing};
 use crate::fixity::Fixities;
 use crate::live;
 use crate::own::{Owned, Ownership};
+use crate::warn::{Warning, Warnings};
 
 /// Умолчание кратности с поправкой на домен-универсум (§4.1).
 ///
@@ -232,6 +233,14 @@ pub(crate) const CONS: &str = "Cons";
 
 /// Преобразование литерала. Не объявлено - литерал есть само число.
 pub(crate) const FROM_NAT: &str = "fromNat";
+
+/// Имя умолчания целого литерала (§4.3): default идёт **по имени**, тем же
+/// соглашением, каким берётся `fromNat`. В prelude это синоним `Int64`, но
+/// заслонившее объявление меняет умолчание - так и записано.
+pub(crate) const DEFAULT_INT: &str = "Int";
+
+/// Имя умолчания дробного литерала (§4.3) - синоним `Float64` в prelude.
+pub(crate) const DEFAULT_FLOAT: &str = "Float";
 
 /// Наибольшее число, которое разворачивается унарно.
 ///
@@ -862,6 +871,10 @@ pub(crate) struct Elaborator<'a> {
     /// Объявленные фикситеты (§4.4). Приходит снаружи по тому же доводу:
     /// таблица собирается по ходу объявлений, а прогон элаборации - модуль.
     pub fixities: &'a Fixities,
+    /// Приёмник предупреждений (§10 вопрос 81) - один на прогон, как и
+    /// хранилище дырок. Первым сюда пишет умолчание литерала (§4.3): оно
+    /// случается глубоко в выражении, и наружу его иначе не донести.
+    warnings: &'a mut Warnings,
     /// Локальные связывания снаружи внутрь; индекс де Брёйна - расстояние от
     /// конца.
     scope: Vec<Bound>,
@@ -1016,8 +1029,9 @@ impl<'a> Elaborator<'a> {
         metas: &'a mut Metas,
         owned: &'a Owned,
         fixities: &'a Fixities,
+        warnings: &'a mut Warnings,
     ) -> Self {
-        Self::with_group(signature, metas, owned, fixities, Vec::new())
+        Self::with_group(signature, metas, owned, fixities, warnings, Vec::new())
     }
 
     /// То же, внутри тела модуля: короткое имя члена ищется квалифицированным.
@@ -1050,6 +1064,7 @@ impl<'a> Elaborator<'a> {
         metas: &'a mut Metas,
         owned: &'a Owned,
         fixities: &'a Fixities,
+        warnings: &'a mut Warnings,
         group: Vec<Member>,
     ) -> Self {
         Self {
@@ -1057,6 +1072,7 @@ impl<'a> Elaborator<'a> {
             metas,
             owned,
             fixities,
+            warnings,
             ctx: Ctx::new(signature),
             scope: Vec::new(),
             group,
@@ -2751,6 +2767,9 @@ impl<'a> Elaborator<'a> {
     /// примитивы появились (§4.11), и разворачивать унарно то, у чего есть
     /// представление, незачем.
     ///
+    /// **Ожидание осталось дыркой - умолчание по имени** (§4.3, вопрос 150):
+    /// [`Self::defaulted`].
+    ///
     /// **Иначе - как прежде.** `42` разворачивается унарно в `Succ`-цепочку над
     /// `Zero` и, если `fromNat` объявлена, применяется к ней. Имена берутся по
     /// соглашению - тем же, каким `if` берёт `Bool`. Цена этого пути названа:
@@ -2759,6 +2778,9 @@ impl<'a> Elaborator<'a> {
     fn literal(&mut self, lit: &ast::Lit, awaited: Option<&Rc<Value>>) -> Result<Term, ElabError> {
         if let Some(ty) = awaited.and_then(|ty| self.primitive_type(ty)) {
             return Self::primitive_literal(lit, ty);
+        }
+        if let Some(term) = self.defaulted(lit, awaited)? {
+            return Ok(term);
         }
         let refuse = || {
             Err(ElabError::Missing {
@@ -2794,6 +2816,63 @@ impl<'a> Elaborator<'a> {
             None => Ok(numeral),
             Some(_) => Ok(self.name(&named(FROM_NAT))?.apply([numeral])),
         }
+    }
+
+    /// Default литерала по имени (§4.3, §10 вопрос 150).
+    ///
+    /// Срабатывает, когда контекст типа не задал: ожидание есть, но это
+    /// нерешённая дырка - `1 + 2` под `(+) : {Add a} => …` ждёт `?a`. Умолчание
+    /// берётся **по имени** - `Int` для целых форм, `Float` для дробной, - тем
+    /// же соглашением, каким `fromNat` берётся по имени: заслонившее
+    /// объявление меняет умолчание, а без имени в области видимости умолчания
+    /// нет и путь прежний. Решённая дырка возвращается в [`Self::literal`], и
+    /// примитивен ли тип за именем - решает обычный разбор.
+    ///
+    /// Названная граница: литерал **без ожидания вовсе** (скрутини `case`,
+    /// голова спайна) умолчания не берёт и разворачивается унарно, как раньше.
+    fn defaulted(
+        &mut self,
+        lit: &ast::Lit,
+        awaited: Option<&Rc<Value>>,
+    ) -> Result<Option<Term>, ElabError> {
+        let Some(ty) = awaited else {
+            return Ok(None);
+        };
+        let flexible = {
+            let reduced = whnf_solved(self.signature, self.metas, ty);
+            matches!(&*reduced, Value::Neutral(Head::Meta(_), _))
+        };
+        if !flexible {
+            return Ok(None);
+        }
+        let name = match lit.kind {
+            ast::LitKind::Nat | ast::LitKind::Int => DEFAULT_INT,
+            ast::LitKind::Float => DEFAULT_FLOAT,
+            ast::LitKind::Str => return Ok(None),
+        };
+        if self.signature.lookup(name).is_none() {
+            return Ok(None);
+        }
+        let named = self.name(&ast::Name {
+            text: Rc::from(name),
+            span: lit.span,
+        })?;
+        // Дырка решается whnf-формой имени, а не самим именем: за прелюдным
+        // синонимом стоит примитив, и цель `Add ?a` обязана стать `Add Int64`,
+        // по которой инстанс и объявлен, - разрешение ключуется головой.
+        let value = whnf(self.signature, &self.ctx.eval(&named));
+        // Решение спекулятивно ровно до ответа: не сошлось - откат, и литерал
+        // идёт прежним путём, как будто умолчания не было.
+        let mark = self.metas.mark();
+        if !convertible(self.signature, self.metas, self.ctx.size(), ty, &value) {
+            self.metas.rollback(mark);
+            return Ok(None);
+        }
+        self.warnings.push(Warning::DefaultedLiteral {
+            name: Rc::from(name),
+            span: lit.span,
+        });
+        self.literal(lit, awaited).map(Some)
     }
 
     /// Ожидаемый тип, если он примитивный.

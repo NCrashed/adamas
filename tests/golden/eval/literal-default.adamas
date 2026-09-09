@@ -1,0 +1,40 @@
+-- Default литерала по имени (§4.3, §10 вопрос 150).
+--
+-- `ambiguous 1 2` не даёт литералу типа из контекста: параметр класса в
+-- результат не входит, и ожидание остаётся дыркой. §4.3 велит взять умолчание
+-- по имени - `Int` для целых форм, `Float` для дробной, - и здесь это
+-- прелюдные синонимы Int64/Float64. Наблюдаемо умолчание тем, что программа
+-- не объявляет ни Zero, ни Succ: унарного пути у литерала нет, и без
+-- умолчания дырку не решило бы ничто.
+--
+-- `summed` показывает второе: умолчание не мешает контексту, когда тот есть, -
+-- тип поля решает `a` раньше, и сложение идёт тем же инстансом.
+
+data Bool where
+  True : Bool
+  False : Bool
+
+type Int = Int64
+type Float = Float64
+
+class Add a where
+  add : a -> a -> a
+
+instance Add Int64 where
+  add = addInt64
+
+instance Add Float64 where
+  add = addFloat64
+
+plus : {Add a} => a -> a -> a
+plus x y = add x y
+
+-- Результат от `a` не зависит: контекст литералу не поможет ничем.
+ambiguous : {Add a} => a -> a -> Bool
+ambiguous x y = True
+
+type Answers = { summed : Int64, chosen : Bool, fraction : Bool, shifted : Int64 }
+
+main : Answers
+main = { summed = plus 1 2, chosen = ambiguous 1 2,
+         fraction = ambiguous 1.5 2.0, shifted = plus (-1) 2 }

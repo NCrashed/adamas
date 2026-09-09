@@ -35,6 +35,14 @@ pub enum Warning {
         /// Где написана группа.
         span: Span,
     },
+    /// Литерал без типа из контекста взял умолчание по имени (§4.3).
+    #[error("использую default {name}; для явного типа добавьте аннотацию (§4.3)")]
+    DefaultedLiteral {
+        /// Имя умолчания: `Int` либо `Float`.
+        name: Symbol,
+        /// Где стоит литерал.
+        span: Span,
+    },
 }
 
 impl Warning {
@@ -42,7 +50,7 @@ impl Warning {
     #[must_use]
     pub fn span(&self) -> Span {
         match self {
-            Self::UnusedImplicit { span, .. } => *span,
+            Self::UnusedImplicit { span, .. } | Self::DefaultedLiteral { span, .. } => *span,
         }
     }
 }

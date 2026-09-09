@@ -10,9 +10,15 @@
  * известен только вершине ответа, а ниже идут значения, чьи типы ответом не
  * названы, - порождать принтер пришлось бы по всему достижимому графу типов.
  * Тег же лежит в заголовке объекта (§13, 2026-09-08) и отвечает на тот же
- * вопрос одним чтением. Цена названа: имена конструкторов живут в бинаре, и
- * `Flat`-значение, у которого заголовка нет вовсе (§4.11), этой печати не
- * подлежит - оно придёт вместе с дескриптором layout.
+ * вопрос одним чтением. Цена названа: имена конструкторов живут в бинаре.
+ *
+ * # Плоский слот
+ *
+ * У плоского значения заголовка нет вовсе (§4.11), поэтому тегом его не
+ * узнать: в слоте лежат биты числа, а не указатель на объект. Отвечает на это
+ * вторая таблица - сорт каждого слота (`adamas_slot_kind`), который раздаёт
+ * понижение по типу поля. Прочитай слот с числом как указатель - и печать
+ * пошла бы по адресу этого числа.
  *
  * # Срез по глубине
  *
@@ -42,6 +48,20 @@
 
 static void adamas_print_at(adamas_value value, int nested, long depth);
 
+/* Один слот: число печатается по своему сорту, ссылка - обходом. */
+static void adamas_print_slot(uint16_t tag, adamas_value value, size_t index, long depth) {
+    uint8_t kind = adamas_slot_kind[adamas_con_slot0[tag] + index];
+    if (kind == ADAMAS_FLAT_BOXED) {
+        adamas_print_at(adamas_field(value, index), 1, depth);
+        return;
+    }
+    if (depth > ADAMAS_PRINT_DEPTH) {
+        printf("…");
+        return;
+    }
+    adamas_print_flat(kind, adamas_slot_bits(value, index), 1);
+}
+
 /* Спайн `C a_0 … a_{k-1}`, стоящий на глубине depth. Рекурсия по арности - она
  * мала и записана в программе, а не приходит с данными. */
 static void adamas_print_spine(uint16_t tag, adamas_value value, uint16_t k, long depth) {
@@ -55,7 +75,7 @@ static void adamas_print_spine(uint16_t tag, adamas_value value, uint16_t k, lon
     }
     adamas_print_spine(tag, value, (uint16_t)(k - 1), depth + 1);
     printf(" ");
-    adamas_print_at(adamas_field(value, (size_t)(k - 1)), 1, depth + 1);
+    adamas_print_slot(tag, value, (size_t)(k - 1), depth + 1);
 }
 
 static void adamas_print_at(adamas_value value, int nested, long depth) {

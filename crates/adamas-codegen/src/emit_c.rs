@@ -38,13 +38,27 @@
 //! Дроп детей порождается здесь же одной функцией на программу (`release.c`):
 //! `adamas.h` требует, чтобы release приходил от понижения, а какие у объекта
 //! дети - отвечает таблица по тегу, та же, по которой печатается ответ.
+//!
+//! # Плоское значение (§4.11)
+//!
+//! Представление приходит фактом ([`Repr`]), и эмиттер решает по нему три
+//! вещи: C-тип связывания (`int64_t` против `adamas_value`), запись поля
+//! (биты в слот по значению против `adamas_set_field` с владением) и сорт
+//! слота в таблице, по которой дроп с печатью узнают число от ссылки. Ничего
+//! из этого он не выдумывает - объявление читается в понижении, а здесь только
+//! печатается. Механика плоского слота живёт в `flat.c` вместе с доводами.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 
+use adamas_core::prim::{PrimOp, PrimTy};
+
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Expr, Form, FuncId, Function, LocalId, Program,
+    Arm, Binding, Constructor, CtorId, Expr, Form, FuncId, Function, LocalId, Program, Repr,
 };
+
+/// Плоское значение: биты слота, арифметика, печать.
+const FLAT: &str = include_str!("flat.c");
 
 /// Печать значения по таблице конструкторов.
 const PRINTER: &str = include_str!("print.c");
@@ -85,6 +99,8 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     }
     let mut out = String::new();
     preamble(&mut out);
+    out.push_str(FLAT);
+    out.push('\n');
     table(&mut out, program);
     out.push_str(RELEASE);
     out.push('\n');
@@ -118,9 +134,57 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
         }
     }
 
-    let _ = writeln!(out, "#define ADAMAS_ENTRY fn_{}\n", program.entry.0);
+    answer(&mut out, program);
     out.push_str(ENTRY);
     Ok(out)
+}
+
+/// Чем точка входа отвечает.
+///
+/// Печатью и дропом ответа занимается `main.c`; отсюда приходит только то, чего
+/// он знать не может: имя функции и представление её ответа (§4.11). Плоский
+/// ответ дропать нечем - счётчика у него нет, - и `main.c` разводит эти две
+/// формы препроцессором.
+fn answer(out: &mut String, program: &Program) {
+    let entry = &program.functions[program.entry.0];
+    let _ = writeln!(out, "#define ADAMAS_ENTRY fn_{}", program.entry.0);
+    if let Some(ty) = entry.result.primitive() {
+        let _ = writeln!(out, "#define ADAMAS_ANSWER_FLAT adamas_word_{}", ty.name());
+        let _ = writeln!(out, "#define ADAMAS_ANSWER_TYPE {}", c_type(entry.result));
+        let _ = writeln!(out, "#define ADAMAS_ANSWER_KIND {}u", kind(ty));
+    }
+    out.push('\n');
+}
+
+/// Номер сорта плоского значения: он же индекс в `flat.c`.
+///
+/// Порядок - §4.11 и [`PrimTy::ALL`], ноль занят указательным слотом. Совпадение
+/// с `flat.c` проверяется тестом, а не соглашением.
+fn kind(ty: PrimTy) -> u8 {
+    let at = PrimTy::ALL.iter().position(|it| *it == ty).unwrap_or(0);
+    u8::try_from(at + 1).unwrap_or(0)
+}
+
+/// Сорт слота: ноль у указательного.
+fn slot_kind(repr: Repr) -> u8 {
+    repr.primitive().map_or(0, kind)
+}
+
+/// C-тип связывания.
+fn c_type(repr: Repr) -> &'static str {
+    match repr {
+        Repr::Boxed => "adamas_value",
+        Repr::Flat(PrimTy::Int8) => "int8_t",
+        Repr::Flat(PrimTy::Int16) => "int16_t",
+        Repr::Flat(PrimTy::Int32) => "int32_t",
+        Repr::Flat(PrimTy::Int64) => "int64_t",
+        Repr::Flat(PrimTy::UInt8) => "uint8_t",
+        Repr::Flat(PrimTy::UInt16) => "uint16_t",
+        Repr::Flat(PrimTy::UInt32) => "uint32_t",
+        Repr::Flat(PrimTy::UInt64) => "uint64_t",
+        Repr::Flat(PrimTy::Float32) => "float",
+        Repr::Flat(PrimTy::Float64) => "double",
+    }
 }
 
 /// Заголовок единицы трансляции.
@@ -168,6 +232,33 @@ fn table(out: &mut String, program: &Program) {
         let _ = writeln!(out, "    {}u,", constructor.slots());
     }
     out.push_str("    0u\n};\n\n");
+
+    // Сорта слотов лежат подряд, у каждого конструктора своё начало: плоский
+    // слот дроп с печатью обязаны отличить от указательного (§4.11), а рваная
+    // таблица стоила бы максимума арности на каждый конструктор.
+    out.push_str(concat!(
+        "/* Сорт каждого слота: `ADAMAS_FLAT_BOXED` - ссылка, иначе примитив.\n",
+        " * Слоты конструкторов идут подряд, начало каждого - в `adamas_con_slot0`. */\n",
+        "static const uint16_t adamas_con_slot0[] = {\n"
+    ));
+    let mut first = 0usize;
+    for constructor in &program.constructors {
+        let _ = writeln!(out, "    {first}u,");
+        first += constructor.slots();
+    }
+    let _ = writeln!(out, "    {first}u\n}};\n");
+    out.push_str("static const uint8_t adamas_slot_kind[] = {\n");
+    for constructor in &program.constructors {
+        for repr in constructor.slot_reprs() {
+            let _ = writeln!(
+                out,
+                "    {}u, /* {} */",
+                slot_kind(repr),
+                escaped(&constructor.name)
+            );
+        }
+    }
+    out.push_str("    ADAMAS_FLAT_BOXED\n};\n\n");
 }
 
 /// Номера функций, которым нужен трамплин: они где-то стоят значением.
@@ -200,7 +291,7 @@ fn builders(program: &Program) -> BTreeSet<CtorId> {
 fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
     visit(expr);
     match expr {
-        Expr::Local(_) | Expr::Erased | Expr::ConstructClosure { .. } => {}
+        Expr::Local(_) | Expr::Erased | Expr::ConstructClosure { .. } | Expr::Literal { .. } => {}
         Expr::Construct { arguments, .. } | Expr::Call { arguments, .. } => {
             for argument in arguments {
                 walk(argument, visit);
@@ -210,6 +301,10 @@ fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
             for capture in captured {
                 walk(capture, visit);
             }
+        }
+        Expr::Primitive { left, right, .. } => {
+            walk(left, visit);
+            walk(right, visit);
         }
         Expr::Apply { callee, argument } => {
             walk(callee, visit);
@@ -243,14 +338,18 @@ fn signature(function: &Function) -> String {
     let live: Vec<String> = function
         .live_captured()
         .chain(function.live_parameters())
-        .map(|binding| format!("adamas_value v{}", binding.local.0))
+        .map(|binding| format!("{} v{}", c_type(binding.fact.repr), binding.local.0))
         .collect();
     let taken = if live.is_empty() {
         "void".to_owned()
     } else {
         live.join(", ")
     };
-    format!("static adamas_value fn_{}({taken})", function.id.0)
+    format!(
+        "static {} fn_{}({taken})",
+        c_type(function.result),
+        function.id.0
+    )
 }
 
 /// Сигнатура трамплина: каноническая форма кода замыкания из `adamas.h`.
@@ -282,6 +381,7 @@ fn body(out: &mut String, program: &Program, function: &Function) {
         program,
         out: String::new(),
         temps: 0,
+        reprs: shapes(function),
     };
     let answer = emitter.value(&function.body, 1);
     out.push_str(&emitter.out);
@@ -350,11 +450,42 @@ fn builder(out: &mut String, constructor: &Constructor) {
     out.push_str("    return value;\n}\n\n");
 }
 
+/// Представления всех связываний функции.
+///
+/// Собираются разом и заранее: C-тип временного имени зависит от того, что в
+/// нём лежит, а узнаётся это по связываниям, до которых обход ещё не дошёл.
+fn shapes(function: &Function) -> HashMap<LocalId, Repr> {
+    let mut found = HashMap::new();
+    for binding in function.captured.iter().chain(&function.parameters) {
+        found.insert(binding.local, binding.fact.repr);
+    }
+    walk(&function.body, &mut |expr| match expr {
+        Expr::Bind { binding, .. } => {
+            found.insert(binding.local, binding.fact.repr);
+        }
+        Expr::Match { arms, .. } => {
+            for arm in arms {
+                for field in &arm.fields {
+                    found.insert(field.local, field.fact.repr);
+                }
+            }
+        }
+        Expr::Reclaim { token, .. } => {
+            // Придержанный блок - сырая ячейка, представление у неё одно.
+            found.insert(*token, Repr::Boxed);
+        }
+        _ => {}
+    });
+    found
+}
+
 /// Состояние эмиссии одного тела.
 struct Emitter<'a> {
     program: &'a Program,
     out: String,
     temps: u32,
+    /// Что в каком связывании лежит: от этого C-тип временного имени.
+    reprs: HashMap<LocalId, Repr>,
 }
 
 impl Emitter<'_> {
@@ -363,6 +494,27 @@ impl Emitter<'_> {
         let name = format!("t{}", self.temps);
         self.temps += 1;
         name
+    }
+
+    /// Представление значения выражения.
+    fn shape(&self, expr: &Expr) -> Repr {
+        match expr {
+            Expr::Local(local) => self.reprs.get(local).copied().unwrap_or(Repr::Boxed),
+            Expr::Literal { ty, .. } | Expr::Primitive { ty, .. } => Repr::Flat(*ty),
+            Expr::Call { function, .. } => self.program.functions[function.0].result,
+            Expr::Bind { body, .. }
+            | Expr::Dup { body, .. }
+            | Expr::Drop { body, .. }
+            | Expr::Reclaim { body, .. } => self.shape(body),
+            Expr::Match { arms, .. } => arms
+                .first()
+                .map_or(Repr::Boxed, |arm| self.shape(&arm.body)),
+            Expr::Erased
+            | Expr::Construct { .. }
+            | Expr::ConstructClosure { .. }
+            | Expr::Closure { .. }
+            | Expr::Apply { .. } => Repr::Boxed,
+        }
     }
 
     /// Отступ уровня `depth`.
@@ -379,6 +531,37 @@ impl Emitter<'_> {
         match expr {
             Expr::Local(local) => format!("v{}", local.0),
             Expr::Erased => "ADAMAS_ERASED".to_owned(),
+            Expr::Literal { ty, bits } => {
+                let name = self.temp();
+                // Биты, а не написанное число: так литерал доезжает побитово, и
+                // ни `INT64_MIN` без суффикса, ни двойное округление
+                // `Float32` его не портят.
+                let _ = writeln!(
+                    self.out,
+                    "{pad}{} {name} = adamas_bits_{}({bits:#x}ULL);",
+                    c_type(Repr::Flat(*ty)),
+                    ty.name()
+                );
+                name
+            }
+            Expr::Primitive {
+                op,
+                ty,
+                left,
+                right,
+            } => {
+                let left = self.value(left, depth);
+                let right = self.value(right, depth);
+                let name = self.temp();
+                let _ = writeln!(
+                    self.out,
+                    "{pad}{} {name} = adamas_{}_{}({left}, {right});",
+                    c_type(Repr::Flat(*ty)),
+                    operation(*op),
+                    ty.name()
+                );
+                name
+            }
             Expr::Construct {
                 constructor,
                 reuse,
@@ -422,7 +605,8 @@ impl Emitter<'_> {
                 let value = self.value(value, depth);
                 let _ = writeln!(
                     self.out,
-                    "{pad}adamas_value v{} = {value}; /* {} */",
+                    "{pad}{} v{} = {value}; /* {} */",
+                    c_type(binding.fact.repr),
                     binding.local.0,
                     escaped(&binding.name)
                 );
@@ -446,6 +630,28 @@ impl Emitter<'_> {
                     token.0, local.0
                 );
                 self.value(body, depth)
+            }
+        }
+    }
+
+    /// Слоты объекта: плоское кладётся битами по значению, ссылка - владением.
+    fn fill(&mut self, object: &str, described: &Constructor, given: &[String], depth: usize) {
+        let pad = Self::pad(depth);
+        for (slot, (argument, repr)) in given.iter().zip(described.slot_reprs()).enumerate() {
+            match repr.primitive() {
+                Some(ty) => {
+                    let _ = writeln!(
+                        self.out,
+                        "{pad}adamas_slot_write({object}, {slot}, adamas_word_{}({argument}));",
+                        ty.name()
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        self.out,
+                        "{pad}adamas_set_field({object}, {slot}, {argument});"
+                    );
+                }
             }
         }
     }
@@ -503,12 +709,8 @@ impl Emitter<'_> {
                 );
             }
         }
-        for (slot, argument) in given.iter().enumerate() {
-            let _ = writeln!(
-                self.out,
-                "{pad}adamas_set_field({name}, {slot}, {argument});"
-            );
-        }
+        let described = self.program.constructors[usize::from(constructor.0)].clone();
+        self.fill(&name, &described, &given, depth);
         name
     }
 
@@ -529,12 +731,13 @@ impl Emitter<'_> {
             .filter_map(|position| arguments.get(*position))
             .map(|argument| self.value(argument, depth))
             .collect();
+        let result = c_type(called.result);
         let name = self.temp();
         // Вызываемый известен статически, поэтому зовётся прямо и скрытых
         // аргументов не берёт вовсе (`adamas_lowered_first`).
         let _ = writeln!(
             self.out,
-            "{pad}adamas_value {name} = fn_{}({}); /* {title} */",
+            "{pad}{result} {name} = fn_{}({}); /* {title} */",
             function.0,
             given.join(", ")
         );
@@ -579,9 +782,12 @@ impl Emitter<'_> {
     /// Разбор: `switch` по тегу заголовка.
     fn analysis(&mut self, scrutinee: &Expr, arms: &[Arm], depth: usize) -> String {
         let pad = Self::pad(depth);
+        let answer = arms
+            .first()
+            .map_or(Repr::Boxed, |arm| self.shape(&arm.body));
         let scrutinee = self.value(scrutinee, depth);
         let name = self.temp();
-        let _ = writeln!(self.out, "{pad}adamas_value {name};");
+        let _ = writeln!(self.out, "{pad}{} {name};", c_type(answer));
         let _ = writeln!(self.out, "{pad}switch (adamas_tag({scrutinee})) {{");
         for arm in arms {
             let described = &self.program.constructors[usize::from(arm.constructor.0)];
@@ -596,14 +802,23 @@ impl Emitter<'_> {
                 arm.constructor.0
             );
             for (binding, slot) in arm.fields.iter().zip(&slots) {
-                if let Some(slot) = slot {
-                    let _ = writeln!(
-                        self.out,
-                        "{pad}    adamas_value v{} = adamas_field({scrutinee}, {slot}); /* {} */",
-                        binding.local.0,
-                        escaped(&binding.name)
-                    );
-                }
+                let Some(slot) = slot else { continue };
+                // Плоское поле читается битами слота: заголовка у него нет, и
+                // указателем оно не бывает (§4.11).
+                let taken = match binding.fact.repr.primitive() {
+                    Some(ty) => format!(
+                        "adamas_bits_{}(adamas_slot_bits({scrutinee}, {slot}))",
+                        ty.name()
+                    ),
+                    None => format!("adamas_field({scrutinee}, {slot})"),
+                };
+                let _ = writeln!(
+                    self.out,
+                    "{pad}    {} v{} = {taken}; /* {} */",
+                    c_type(binding.fact.repr),
+                    binding.local.0,
+                    escaped(&binding.name)
+                );
             }
             let answer = self.value(&arm.body, depth + 1);
             let _ = writeln!(self.out, "{pad}    {name} = {answer};");
@@ -619,6 +834,15 @@ impl Emitter<'_> {
     }
 }
 
+/// Имя операции в `flat.c`: то же, что пишет `adamas_add_Int64`.
+fn operation(op: PrimOp) -> &'static str {
+    match op {
+        PrimOp::Add => "add",
+        PrimOp::Sub => "sub",
+        PrimOp::Mul => "mul",
+    }
+}
+
 /// Строка, годная внутрь C-литерала и комментария.
 ///
 /// Имена в Adamas бывают операторами и путями (`+`, `Boxes.Wrap`), и печатает
@@ -628,4 +852,53 @@ fn escaped(name: &str) -> String {
     name.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace("*/", "* /")
+}
+
+#[cfg(test)]
+mod tests {
+    use adamas_core::prim::{PrimOp, PrimTy};
+
+    use super::{FLAT, kind, operation};
+
+    /// Сорта слотов и имена операций у эмиттера и у `flat.c` одни.
+    ///
+    /// Печать и дроп различают число от ссылки **числом**, и разъехаться эти
+    /// два места могут молча: порождённый C соберётся, а слот прочитается не
+    /// тем. Тот же жанр, что `both_printers_cut_at_the_same_depth`, - вторая
+    /// запись числа названа и оплачена здесь.
+    #[test]
+    fn the_kinds_match_the_printer() {
+        assert!(FLAT.contains("#define ADAMAS_FLAT_BOXED 0u"));
+        for ty in PrimTy::ALL {
+            let written = format!(
+                "#define ADAMAS_FLAT_{} {}u",
+                ty.name().to_uppercase(),
+                kind(ty)
+            );
+            assert!(
+                FLAT.contains(&written),
+                "`flat.c` не объявляет `{written}`: сорт слота разъехался с эмиттером"
+            );
+            let instantiated = FLAT.lines().any(|line| {
+                line.starts_with("ADAMAS_FLAT_") && line.contains(&format!("({}, ", ty.name()))
+            });
+            assert!(
+                instantiated,
+                "`flat.c` не разворачивает макрос для `{}`: порождённый вызов не соберётся",
+                ty.name()
+            );
+        }
+        // Имена, которые эмиттер пишет в вызов, склеиваются макросом из
+        // приставки и имени типа: проверяется приставка.
+        for op in PrimOp::ALL {
+            let defined = format!("adamas_{}_##name", operation(op));
+            assert!(
+                FLAT.contains(&defined),
+                "`flat.c` не определяет `{defined}`: имя операции разъехалось с эмиттером"
+            );
+        }
+        for helper in ["adamas_bits_##name", "adamas_word_##name"] {
+            assert!(FLAT.contains(helper), "`flat.c` не определяет `{helper}`");
+        }
+    }
 }

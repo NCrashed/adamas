@@ -18,6 +18,26 @@
 //! **Поля ветви.** Ветвь получает связывания конструктора после параметров
 //! семейства - столько же и в том же порядке, включая стёртые.
 //!
+//! # Откуда берётся представление (§4.11)
+//!
+//! Плоское значение заголовка не имеет вовсе (§13, 2026-09-08), поэтому
+//! [`Repr`] обязан быть известен **до** эмиссии: от него зависят C-тип
+//! связывания, наличие RC-трафика и то, чем считает слот дроп с печатью.
+//!
+//! Читается он там, где тип **написан**: домен `Pi` даёт представление
+//! параметра и поля конструктора, аннотация `let` - своего связывания, а
+//! литерал и операция несут тип в себе. Дальше представление **синтезируется**
+//! снизу вверх - каждое выражение отдаёт своё вместе с собой, - и в объявленных
+//! позициях сверяется. Расхождение отвергается
+//! ([`LowerError::Representation`]), а не приводится молча: биты числа,
+//! принятые за указатель, суть чтение по адресу этого числа.
+//!
+//! Написан тип не везде: у связывания лямбды его нет в ядре вовсе. Поэтому
+//! связывание лямбды объявляется указательным, а плоское значение,
+//! пришедшее в такую позицию, отвергается. Граница названа и совпадает с
+//! §4.11: обобщённый код над `{Flat a}` получает дескриптор layout имплиситом,
+//! а дескрипторов в рантайме пока нет - это следующая половина трека.
+//!
 //! # Чего понижение не делает
 //!
 //! Не бета-редуцирует, не инлайнит, не кеширует значение определения без
@@ -28,11 +48,12 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
 
 use adamas_core::mult::Mult;
+use adamas_core::prim::Prim;
 use adamas_core::sig::{DefinitionKind, Signature};
 use adamas_core::term::{Case, Index, Name, Term};
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Expr, Fact, Form, FuncId, Function, LocalId, Program,
+    Arm, Binding, Constructor, CtorId, Expr, Fact, Form, FuncId, Function, LocalId, Program, Repr,
 };
 
 /// Почему понижение отказало.
@@ -99,6 +120,54 @@ pub enum LowerError {
         /// Какому связыванию.
         binder: usize,
     },
+
+    /// Представление значения разошлось с представлением позиции (§4.11).
+    ///
+    /// Отказ, а не приведение: заголовка у плоского значения нет вовсе, и
+    /// положить его туда, где ждут указатель, значит отдать биты числа
+    /// счётчику ссылок.
+    #[error("{at}: ожидалось {want}, а пришло {got} (§4.11)")]
+    Representation {
+        /// В какой позиции.
+        at: &'static str,
+        /// Что там объявлено.
+        want: String,
+        /// Что туда пришло.
+        got: String,
+    },
+
+    /// Примитивная операция без обоих аргументов.
+    ///
+    /// Значением она была бы замыканием, а замыкание принимает аргументы
+    /// указательными: плоскому нужен дескриптор layout (§4.11), и это
+    /// следующая половина трека.
+    #[error("`{name}` без обоих аргументов: примитив значением требует дескриптора layout (§4.11)")]
+    Partial {
+        /// Имя операции.
+        name: String,
+    },
+}
+
+/// Требует, чтобы все живые связывания были указательными.
+fn pointing(facts: &[Fact], at: &'static str) -> Result<(), LowerError> {
+    for fact in facts {
+        if fact.present && !fact.repr.boxed() {
+            return Err(LowerError::Representation {
+                at,
+                want: describe(Repr::Boxed),
+                got: describe(fact.repr),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Как представление называется в отказе.
+fn describe(repr: Repr) -> String {
+    match repr {
+        Repr::Boxed => "указательное значение".to_owned(),
+        Repr::Flat(ty) => format!("плоское `{ty}`"),
+    }
 }
 
 /// Верх диапазона тегов занят служебными объектами рантайма (`adamas.h`).
@@ -188,11 +257,15 @@ impl<'a> Lowerer<'a> {
             form: form(),
             captured: Vec::new(),
             parameters: Vec::new(),
+            result: Repr::Boxed,
             body: Expr::Erased,
         });
         let mut scope = Scope::default();
-        let body = self.expr(&mut scope, entry)?;
+        let (body, repr) = self.expr(&mut scope, entry)?;
         self.functions[entry_id.0].body = body;
+        // У точки входа объявленного типа нет - она уже инстанцирована, - и
+        // представление ответа берётся у самого ответа.
+        self.functions[entry_id.0].result = repr;
 
         // Очередь, а не рекурсия: имя получает номер до того, как понижено его
         // тело, поэтому рекурсия и взаимная рекурсия проходят сами собой.
@@ -203,7 +276,15 @@ impl<'a> Lowerer<'a> {
                 scope.locals += 1;
                 scope.env.push(Slot::Bound(parameter.local, parameter.fact));
             }
-            let body = self.expr(&mut scope, &inner)?;
+            let (body, repr) = self.expr(&mut scope, &inner)?;
+            let declared = self.functions[id.0].result;
+            if repr != declared {
+                return Err(LowerError::Representation {
+                    at: "ответ функции",
+                    want: describe(declared),
+                    got: describe(repr),
+                });
+            }
             self.functions[id.0].body = body;
         }
 
@@ -252,11 +333,12 @@ impl<'a> Lowerer<'a> {
             let Term::Lam(_, bound, inner) = &*step else {
                 break;
             };
-            let mult = binder_at(&definition.ty, parameters.len()).unwrap_or(Mult::Many);
+            let (mult, repr) =
+                binder_at(&definition.ty, parameters.len()).unwrap_or((Mult::Many, Repr::Boxed));
             parameters.push(Binding {
                 name: bound.to_string(),
                 local: LocalId(u32::try_from(parameters.len()).unwrap_or(u32::MAX)),
-                fact: Fact::declared(mult),
+                fact: Fact::declared(mult).shaped(repr),
             });
             current = Rc::clone(inner);
         }
@@ -269,6 +351,7 @@ impl<'a> Lowerer<'a> {
             return Ok(*id);
         }
         let (parameters, _) = self.peeled(name)?;
+        let result = result_repr(&self.definition(name)?.ty, parameters.len());
         let id = FuncId(self.functions.len());
         self.functions.push(Function {
             id,
@@ -276,6 +359,7 @@ impl<'a> Lowerer<'a> {
             form: form(),
             captured: Vec::new(),
             parameters,
+            result,
             body: Expr::Erased,
         });
         self.numbers.insert(Rc::clone(name), id);
@@ -339,36 +423,44 @@ impl<'a> Lowerer<'a> {
             })
     }
 
-    /// Понижает выражение.
-    fn expr(&mut self, scope: &mut Scope, term: &Term) -> Result<Expr, LowerError> {
+    /// Понижает выражение и отдаёт его представление (§4.11).
+    ///
+    /// Представление синтезируется, а не проверяется: у каждого узла оно своё,
+    /// и в объявленных позициях сверяется [`Lowerer::shaped`].
+    fn expr(&mut self, scope: &mut Scope, term: &Term) -> Result<(Expr, Repr), LowerError> {
         match term {
             Term::Var(index) => match scope.slot(*index)? {
-                Slot::Bound(local, fact) if fact.present => Ok(Expr::Local(*local)),
-                Slot::Bound(..) => Ok(Expr::Erased),
+                Slot::Bound(local, fact) if fact.present => Ok((Expr::Local(*local), fact.repr)),
+                Slot::Bound(..) => Ok((Expr::Erased, Repr::Boxed)),
                 Slot::Absent => Err(LowerError::Unbound { index: index.0 }),
             },
             Term::Lam(..) => self.closure(scope, term),
-            Term::App(..) | Term::Const(..) => {
+            Term::App(..) | Term::Const(..) | Term::Prim(_) => {
                 let (head, arguments) = spine(term);
                 self.application(scope, head, &arguments)
             }
-            Term::Let(mult, name, _, value, body) => {
-                let value = self.expr(scope, value)?;
+            Term::Let(mult, name, ty, value, body) => {
+                let declared = repr_of(ty);
+                let value = self.shaped(scope, value, declared, "связанное значение")?;
                 let binding = Binding {
                     name: name.to_string(),
                     local: scope.fresh(),
                     // Машина считает связанное значение, не спрашивая кратности:
                     // `let 0 x = …` вычисляется наравне с прочими.
-                    fact: Fact::present(*mult),
+                    fact: Fact::present(*mult).shaped(declared),
                 };
                 scope.env.push(Slot::Bound(binding.local, binding.fact));
                 let body = self.expr(scope, body);
                 scope.env.pop();
-                Ok(Expr::Bind {
-                    binding,
-                    value: Box::new(value),
-                    body: Box::new(body?),
-                })
+                let (body, repr) = body?;
+                Ok((
+                    Expr::Bind {
+                        binding,
+                        value: Box::new(value),
+                        body: Box::new(body),
+                    },
+                    repr,
+                ))
             }
             Term::Case(case) => self.analysis(scope, case),
             Term::Record(_) | Term::Object(_) | Term::With(..) | Term::Project(..) => {
@@ -386,15 +478,26 @@ impl<'a> Lowerer<'a> {
             Term::Meta(_) => Err(LowerError::Unsupported {
                 form: "неразрешённая дырка",
             }),
-            // Примитив требует представления без заголовка (§4.11): значение
-            // здесь боксировано, и класть в бокс восемь байт `Int64` значило бы
-            // выдумать раскладку раньше, чем её решит `Flat`-представление.
-            // Отказ, а не тихое приближение: договор трёх вычислителей держат
-            // тесты `agreement.rs`, и разойтись с ними молча нельзя.
-            Term::Prim(_) => Err(LowerError::Unsupported {
-                form: "примитив: представления без заголовка у понижения ещё нет (§4.11)",
-            }),
         }
+    }
+
+    /// Понижает подвыражение и требует от него объявленного представления.
+    fn shaped(
+        &mut self,
+        scope: &mut Scope,
+        term: &Term,
+        want: Repr,
+        at: &'static str,
+    ) -> Result<Expr, LowerError> {
+        let (value, got) = self.expr(scope, term)?;
+        if got == want {
+            return Ok(value);
+        }
+        Err(LowerError::Representation {
+            at,
+            want: describe(want),
+            got: describe(got),
+        })
     }
 
     /// Понижает применение с разложенным спайном.
@@ -403,17 +506,21 @@ impl<'a> Lowerer<'a> {
         scope: &mut Scope,
         head: &Term,
         arguments: &[&Term],
-    ) -> Result<Expr, LowerError> {
+    ) -> Result<(Expr, Repr), LowerError> {
+        if let Term::Prim(prim) = head {
+            return self.primitive(scope, *prim, arguments);
+        }
         let Term::Const(name, ..) = head else {
             // Голова - не имя: применяется значение, и стирания здесь не бывает.
-            let mut value = self.expr(scope, head)?;
+            let mut value = self.shaped(scope, head, Repr::Boxed, "применяемое значение")?;
             for argument in arguments {
+                let argument = self.shaped(scope, argument, Repr::Boxed, "аргумент замыкания")?;
                 value = Expr::Apply {
                     callee: Box::new(value),
-                    argument: Box::new(self.expr(scope, argument)?),
+                    argument: Box::new(argument),
                 };
             }
-            return Ok(value);
+            return Ok((value, Repr::Boxed));
         };
         match &self.definition(name)?.kind {
             DefinitionKind::Constructor { .. } => self.built(scope, name, arguments),
@@ -429,6 +536,51 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Понижает примитив: тип, литерал либо операцию (§4.3, §4.11).
+    ///
+    /// Ячейки кучи здесь не возникает ни на одной ветке - плоское значение
+    /// живёт в регистре, - и это то самое, что показывает счётчик блоков.
+    fn primitive(
+        &mut self,
+        scope: &mut Scope,
+        prim: Prim,
+        arguments: &[&Term],
+    ) -> Result<(Expr, Repr), LowerError> {
+        match prim {
+            Prim::Ty(ty) => Err(LowerError::TypeValue {
+                name: ty.name().to_owned(),
+            }),
+            Prim::Lit(ty, bits) => {
+                if arguments.is_empty() {
+                    Ok((Expr::Literal { ty, bits }, Repr::Flat(ty)))
+                } else {
+                    Err(LowerError::Unsupported {
+                        form: "литерал в позиции функции",
+                    })
+                }
+            }
+            Prim::Op(op, ty) => {
+                let [left, right] = arguments else {
+                    return Err(LowerError::Partial {
+                        name: format!("{op}{ty}"),
+                    });
+                };
+                let want = Repr::Flat(ty);
+                let left = self.shaped(scope, left, want, "левый аргумент операции")?;
+                let right = self.shaped(scope, right, want, "правый аргумент операции")?;
+                Ok((
+                    Expr::Primitive {
+                        op,
+                        ty,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    },
+                    want,
+                ))
+            }
+        }
+    }
+
     /// Применение конструктора: насыщенное собирает объект, недобранное -
     /// замыкание.
     fn built(
@@ -436,7 +588,7 @@ impl<'a> Lowerer<'a> {
         scope: &mut Scope,
         name: &Name,
         arguments: &[&Term],
-    ) -> Result<Expr, LowerError> {
+    ) -> Result<(Expr, Repr), LowerError> {
         let constructor = self.tag(name)?;
         let binders = self.constructors[usize::from(constructor.0)]
             .binders
@@ -445,17 +597,26 @@ impl<'a> Lowerer<'a> {
         let complete = arguments.len() >= binders.len()
             || binders[arguments.len()..].iter().all(|fact| !fact.present);
         if !complete {
+            // Недобранное собирается замыканием, а замыкание копит аргументы
+            // слотами указателей: плоскому полю там места нет (§4.11).
+            pointing(&binders, "поле недобранного конструктора")?;
             let mut value = Expr::ConstructClosure { constructor };
             for (position, argument) in arguments.iter().enumerate() {
                 if !binders[position].present {
                     continue;
                 }
+                let argument = self.shaped(
+                    scope,
+                    argument,
+                    Repr::Boxed,
+                    "аргумент недобранного конструктора",
+                )?;
                 value = Expr::Apply {
                     callee: Box::new(value),
-                    argument: Box::new(self.expr(scope, argument)?),
+                    argument: Box::new(argument),
                 };
             }
-            return Ok(value);
+            return Ok((value, Repr::Boxed));
         }
         let mut built = Vec::with_capacity(binders.len());
         for (position, fact) in binders.iter().enumerate() {
@@ -467,7 +628,7 @@ impl<'a> Lowerer<'a> {
                 name: name.to_string(),
                 binder: position,
             })?;
-            built.push(self.expr(scope, argument)?);
+            built.push(self.shaped(scope, argument, fact.repr, "поле конструктора")?);
         }
         // Переиспользование ставит вставка RC ([`crate::perceus`]): понижение
         // разобранного не помнит, а она помнит.
@@ -477,12 +638,13 @@ impl<'a> Lowerer<'a> {
             arguments: built,
         };
         for argument in arguments.iter().skip(binders.len()) {
+            let argument = self.shaped(scope, argument, Repr::Boxed, "аргумент замыкания")?;
             value = Expr::Apply {
                 callee: Box::new(value),
-                argument: Box::new(self.expr(scope, argument)?),
+                argument: Box::new(argument),
             };
         }
-        Ok(value)
+        Ok((value, Repr::Boxed))
     }
 
     /// Применение определения: насыщенное зовёт напрямую, недобранное -
@@ -492,18 +654,30 @@ impl<'a> Lowerer<'a> {
         scope: &mut Scope,
         name: &Name,
         arguments: &[&Term],
-    ) -> Result<Expr, LowerError> {
+    ) -> Result<(Expr, Repr), LowerError> {
         let function = self.function(name)?;
         let parameters: Vec<Fact> = self.functions[function.0]
             .parameters
             .iter()
             .map(|it| it.fact)
             .collect();
+        let result = self.functions[function.0].result;
         let complete = arguments.len() >= parameters.len()
             || parameters[arguments.len()..]
                 .iter()
                 .all(|fact| !fact.present);
         if !complete {
+            // Недобранный вызов уходит замыканием, а трамплин отдаёт слоты
+            // указателями: плоский параметр или плоский ответ через него не
+            // проходят (§4.11).
+            pointing(&parameters, "параметр недобранного вызова")?;
+            if !result.boxed() {
+                return Err(LowerError::Representation {
+                    at: "ответ недобранного вызова",
+                    want: describe(Repr::Boxed),
+                    got: describe(result),
+                });
+            }
             let mut value = Expr::Closure {
                 function,
                 captured: Vec::new(),
@@ -512,12 +686,14 @@ impl<'a> Lowerer<'a> {
                 if !parameters[position].present {
                     continue;
                 }
+                let argument =
+                    self.shaped(scope, argument, Repr::Boxed, "аргумент недобранного вызова")?;
                 value = Expr::Apply {
                     callee: Box::new(value),
-                    argument: Box::new(self.expr(scope, argument)?),
+                    argument: Box::new(argument),
                 };
             }
-            return Ok(value);
+            return Ok((value, Repr::Boxed));
         }
         let mut given = Vec::with_capacity(parameters.len());
         for (position, fact) in parameters.iter().enumerate() {
@@ -529,27 +705,43 @@ impl<'a> Lowerer<'a> {
                 name: name.to_string(),
                 binder: position,
             })?;
-            given.push(self.expr(scope, argument)?);
+            given.push(self.shaped(scope, argument, fact.repr, "аргумент вызова")?);
         }
         let mut value = Expr::Call {
             function,
             arguments: given,
         };
+        let extra = arguments.len().saturating_sub(parameters.len());
+        if extra == 0 {
+            return Ok((value, result));
+        }
         // Пересып: определение отдало функцию, и остаток спайна применяется к
         // ней. Стирания здесь уже нет - имени нет тоже.
+        if !result.boxed() {
+            return Err(LowerError::Representation {
+                at: "применяемое значение",
+                want: describe(Repr::Boxed),
+                got: describe(result),
+            });
+        }
         for argument in arguments.iter().skip(parameters.len()) {
+            let argument = self.shaped(scope, argument, Repr::Boxed, "аргумент замыкания")?;
             value = Expr::Apply {
                 callee: Box::new(value),
-                argument: Box::new(self.expr(scope, argument)?),
+                argument: Box::new(argument),
             };
         }
-        Ok(value)
+        Ok((value, Repr::Boxed))
     }
 
     /// Понижает разбор.
-    fn analysis(&mut self, scope: &mut Scope, case: &Case) -> Result<Expr, LowerError> {
+    fn analysis(&mut self, scope: &mut Scope, case: &Case) -> Result<(Expr, Repr), LowerError> {
         self.family(&case.data)?;
-        let scrutinee = self.expr(scope, &case.scrutinee)?;
+        // Разбирается объект: тег лежит в его заголовке, а у плоского значения
+        // заголовка нет вовсе (§4.11).
+        let scrutinee = self.shaped(scope, &case.scrutinee, Repr::Boxed, "разбираемое")?;
+        // Пустой разбор ответа не даёт: тип пуст, и до печати дело не дойдёт.
+        let mut answer = Repr::Boxed;
         let mut arms = Vec::with_capacity(case.branches.len());
         for branch in &case.branches {
             let constructor = self.tag(&branch.constructor)?;
@@ -584,8 +776,22 @@ impl<'a> Lowerer<'a> {
             }
             let body = self.expr(scope, &current);
             scope.env.truncate(scope.env.len() - taken);
-            let mut body = body?;
+            let (mut body, mut repr) = body?;
             for field in fields.iter().skip(taken) {
+                if !repr.boxed() {
+                    return Err(LowerError::Representation {
+                        at: "применяемое значение",
+                        want: describe(Repr::Boxed),
+                        got: describe(repr),
+                    });
+                }
+                if field.fact.present && !field.fact.repr.boxed() {
+                    return Err(LowerError::Representation {
+                        at: "неснятое поле ветви",
+                        want: describe(Repr::Boxed),
+                        got: describe(field.fact.repr),
+                    });
+                }
                 body = Expr::Apply {
                     callee: Box::new(body),
                     argument: Box::new(if field.fact.present {
@@ -594,6 +800,18 @@ impl<'a> Lowerer<'a> {
                         Expr::Erased
                     }),
                 };
+                repr = Repr::Boxed;
+            }
+            // Ветви отвечают одним значением, значит и представление у них
+            // одно: разойдись оно, у разбора не было бы C-типа.
+            if arms.is_empty() {
+                answer = repr;
+            } else if repr != answer {
+                return Err(LowerError::Representation {
+                    at: "ветвь разбора",
+                    want: describe(answer),
+                    got: describe(repr),
+                });
             }
             arms.push(Arm {
                 constructor,
@@ -601,15 +819,24 @@ impl<'a> Lowerer<'a> {
                 body,
             });
         }
-        Ok(Expr::Match {
-            scrutinee: Box::new(scrutinee),
-            consumed: case.consumed,
-            arms,
-        })
+        Ok((
+            Expr::Match {
+                scrutinee: Box::new(scrutinee),
+                consumed: case.consumed,
+                arms,
+            },
+            answer,
+        ))
     }
 
     /// Понижает лямбду в замыкание: своя функция плюс захваченная среда.
-    fn closure(&mut self, scope: &mut Scope, term: &Term) -> Result<Expr, LowerError> {
+    ///
+    /// Связывания лямбды объявляются указательными: типа у них в ядре нет, и
+    /// прочитать представление неоткуда. Плоское значение поэтому через
+    /// границу замыкания не проходит - ни захватом, ни аргументом, - и это
+    /// названная граница, а не упущение: §4.11 отдаёт этот случай дескриптору
+    /// layout, которого в рантайме ещё нет.
+    fn closure(&mut self, scope: &mut Scope, term: &Term) -> Result<(Expr, Repr), LowerError> {
         let mut parameters: Vec<(Mult, String)> = Vec::new();
         let mut current = Rc::new(term.clone());
         loop {
@@ -637,6 +864,13 @@ impl<'a> Lowerer<'a> {
             let Slot::Bound(local, fact) = slot else {
                 return Err(LowerError::Unbound { index });
             };
+            if fact.present && !fact.repr.boxed() {
+                return Err(LowerError::Representation {
+                    at: "захват замыкания",
+                    want: describe(Repr::Boxed),
+                    got: describe(fact.repr),
+                });
+            }
             let id = LocalId(u32::try_from(captured.len()).unwrap_or(u32::MAX));
             captured.push(Binding {
                 name: format!("захвачено{}", captured.len()),
@@ -676,14 +910,20 @@ impl<'a> Lowerer<'a> {
             form: form(),
             captured,
             parameters: bindings,
+            // Ответ замыкания приходит через `adamas_apply`, а он говорит
+            // указателями: плоский ответ ему не отдать.
+            result: Repr::Boxed,
             body: Expr::Erased,
         });
-        let body = self.expr(&mut nested, &current)?;
+        let body = self.shaped(&mut nested, &current, Repr::Boxed, "тело замыкания")?;
         self.functions[function.0].body = body;
-        Ok(Expr::Closure {
-            function,
-            captured: taken,
-        })
+        Ok((
+            Expr::Closure {
+                function,
+                captured: taken,
+            },
+            Repr::Boxed,
+        ))
     }
 }
 
@@ -713,11 +953,8 @@ fn spine(term: &Term) -> (&Term, Vec<&Term>) {
     (head, arguments)
 }
 
-/// Кратность `n`-го связывания типа. `None` - связываний столько нет.
-///
-/// Ровно то же, что считает машина: `None` значит «не стёрто», потому что
-/// связывания на этом месте синтаксически не видно.
-fn binder_at(ty: &Term, at: usize) -> Option<Mult> {
+/// Тип после `at` снятых связываний. `None` - связываний столько нет.
+fn after(ty: &Term, at: usize) -> Option<&Term> {
     let mut current = ty;
     for _ in 0..at {
         let Term::Pi(_, _, _, _, codomain) = current else {
@@ -725,18 +962,49 @@ fn binder_at(ty: &Term, at: usize) -> Option<Mult> {
         };
         current = codomain;
     }
-    match current {
-        Term::Pi(binder, ..) => Some(binder.mult),
+    Some(current)
+}
+
+/// Представление значения написанного типа (§4.11).
+///
+/// Плоским считается ровно примитив: `Flat` над записями и семействами
+/// (§4.11, укладка тегом) существует типовой стороной, а укладывать его в
+/// понижении нечем, пока нет дескриптора layout, - это следующая половина
+/// трека. Имя, за которым примитив спрятан алиасом, здесь тоже не плоское:
+/// понижение типов не считает, и разворачивать алиас ему нечем. Молча
+/// разойтись это не даёт - объявленное представление сверяется, и расхождение
+/// становится отказом.
+fn repr_of(ty: &Term) -> Repr {
+    match ty {
+        Term::Prim(Prim::Ty(prim)) => Repr::Flat(*prim),
+        _ => Repr::Boxed,
+    }
+}
+
+/// Кратность и представление `n`-го связывания типа.
+///
+/// Ровно то же, что считает машина: `None` значит «не стёрто», потому что
+/// связывания на этом месте синтаксически не видно.
+fn binder_at(ty: &Term, at: usize) -> Option<(Mult, Repr)> {
+    match after(ty, at)? {
+        Term::Pi(binder, _, domain, _, _) => Some((binder.mult, repr_of(domain))),
         _ => None,
     }
+}
+
+/// Представление ответа после `taken` снятых связываний.
+///
+/// Снято меньше, чем стрелок в типе, - ответ функция, то есть указатель.
+fn result_repr(ty: &Term, taken: usize) -> Repr {
+    after(ty, taken).map_or(Repr::Boxed, repr_of)
 }
 
 /// Факты о связываниях типа: телескоп до результата.
 fn binders_of(ty: &Term) -> Vec<Fact> {
     let mut facts = Vec::new();
     let mut current = ty;
-    while let Term::Pi(binder, _, _, _, codomain) = current {
-        facts.push(Fact::declared(binder.mult));
+    while let Term::Pi(binder, _, domain, _, codomain) = current {
+        facts.push(Fact::declared(binder.mult).shaped(repr_of(domain)));
         current = codomain;
     }
     facts

@@ -70,6 +70,14 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
 
         Term::Universe(level) => Rc::new(Value::Universe(level.clone())),
 
+        // Тип и литерал уже значения. Операция - голова: применение к ней
+        // копится спайном и сводится в `try_apply`, когда аргументов набралось
+        // два и оба оказались литералами.
+        Term::Prim(crate::prim::Prim::Op(op, ty)) => {
+            Rc::new(Value::Neutral(Head::Prim(*op, *ty), Vec::new()))
+        }
+        Term::Prim(prim) => Rc::new(Value::Prim(*prim)),
+
         Term::Lam(mult, name, body) => Rc::new(Value::Lam(
             *mult,
             Rc::clone(name),
@@ -403,10 +411,37 @@ pub fn try_apply(callee: &Rc<Value>, argument: Rc<Value>) -> Option<Rc<Value>> {
         Value::Neutral(head, spine) => {
             let mut spine = spine.clone();
             spine.push(Elim::App(argument));
+            if let Head::Prim(op, ty) = head {
+                if let Some(folded) = folded(*op, *ty, &spine) {
+                    return Some(folded);
+                }
+            }
             Some(Rc::new(Value::Neutral(head.clone(), spine)))
         }
         _ => None,
     }
+}
+
+/// δ-шаг примитивной операции: два литерала своего типа сводятся в один.
+///
+/// Аргумент не литерал - операция остаётся застрявшей, как всякий спайн над
+/// переменной. Тип аргумента сверяет проверка, здесь он лишь читается: чужой
+/// литерал в спайне означал бы, что проверка его пропустила.
+fn folded(op: crate::prim::PrimOp, ty: crate::prim::PrimTy, spine: &[Elim]) -> Option<Rc<Value>> {
+    let [Elim::App(left), Elim::App(right)] = spine else {
+        return None;
+    };
+    let (
+        Value::Prim(crate::prim::Prim::Lit(_, left)),
+        Value::Prim(crate::prim::Prim::Lit(_, right)),
+    ) = (&**left, &**right)
+    else {
+        return None;
+    };
+    Some(Rc::new(Value::Prim(crate::prim::Prim::literal(
+        ty,
+        op.fold(ty, *left, *right),
+    ))))
 }
 
 /// Читает значение обратно в терм.
@@ -430,6 +465,7 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
 
         Value::RowKind(level) => Term::RowKind(level.normalize()),
         Value::EffectKind => Term::EffectKind,
+        Value::Prim(prim) => Term::Prim(*prim),
 
         // Телескоп читается по одному полю: тип каждого следующего живёт под
         // предыдущими, и подставлять туда надо свежие переменные.
@@ -456,6 +492,7 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
                     ),
                 ),
                 Head::Meta(meta) => Term::Meta(*meta),
+                Head::Prim(op, ty) => Term::Prim(crate::prim::Prim::Op(*op, *ty)),
             };
             spine.iter().fold(base, |callee, elim| match elim {
                 Elim::App(argument) => Term::App(Rc::new(callee), Rc::new(quote(size, argument))),

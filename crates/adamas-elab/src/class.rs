@@ -652,6 +652,10 @@ pub(crate) fn applied(signature: &Signature, ty: &Term) -> Option<(Symbol, Head)
                 Some(found) => heads.push(found),
                 None => return Some((Rc::clone(class), Head::Projecting)),
             },
+            // Примитив - собственная голова: разворачивать его нечем и незачем,
+            // синонимом он не бывает, и `instance Add Int64` ключуется своим
+            // именем наравне с объявленным семейством (§4.3, §4.11).
+            Term::Prim(adamas_core::prim::Prim::Ty(ty)) => heads.push(Rc::from(ty.name())),
             Term::Var(_) => return Some((Rc::clone(class), Head::Rigid)),
             _ => return Some((Rc::clone(class), Head::Unknown)),
         }

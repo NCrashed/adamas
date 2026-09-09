@@ -1,0 +1,41 @@
+-- Укладка примитивов: числа §4.11 воспроизводятся правилом (§4.11, §4.3).
+--
+-- Сосед этой фикстуры - `flat.adamas`, где базой служит тег семейства. Здесь
+-- база другая - примитив, - и потому наблюдаемы ровно те числа, которые §4.11
+-- называет ценой своих решений: `Vec3` из трёх `Float32` в 12 байт при
+-- выравнивании 4, хендл из двух `UInt32` в 8, `Option Int64` в 16 байт, а не в
+-- 8. Последнее - цена отказа от niche-оптимизации, и подогнать её нечем:
+-- payload встаёт по своей границе, а перед ним стоит тег.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+type Layout = { size : Nat, align : Nat }
+
+class Flat a where
+  layout : Layout
+
+-- §4.11 дословно: `V3` - обычная пользовательская запись, а не встроенный тип.
+type V3 (a : Type) = { x : a, y : a, z : a }
+type Vec3 = V3 Float32
+
+-- Поколенческий хендл §4.11: два `UInt32`, восемь байт.
+type Handle = { index : UInt32, generation : UInt32 }
+
+data Option (a : Type) where
+  None : Option a
+  Some : a -> Option a
+
+-- [4/4, 12/4, 8/4, 16/8, 1/1]
+main : List Layout
+main =
+  Cons (layout @Float32)
+    (Cons (layout @Vec3)
+      (Cons (layout @Handle)
+        (Cons (layout @(Option Int64))
+          (Cons (layout @Int8) Nil))))

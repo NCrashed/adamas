@@ -448,6 +448,7 @@ fn read(
                 // Вхождение самой дырки: подстановка дала бы бесконечный терм.
                 Head::Meta(found) if *found == meta => return None,
                 Head::Meta(found) => Term::Meta(*found),
+                Head::Prim(op, ty) => Term::Prim(crate::prim::Prim::Op(*op, *ty)),
             };
             spine.iter().try_fold(base, |callee, elim| match elim {
                 Elim::Project(name) => Some(Term::Project(Rc::new(callee), Rc::clone(name))),
@@ -515,6 +516,8 @@ fn read(
         Value::Universe(level) => Some(Term::Universe(level.clone())),
         Value::RowKind(level) => Some(Term::RowKind(level.clone())),
         Value::EffectKind => Some(Term::EffectKind),
+        // Примитив замкнут: переименовывать в нём нечего.
+        Value::Prim(prim) => Some(Term::Prim(*prim)),
         // Стёртое обратно не читается: значения у него нет. Имя невыразимое -
         // написать его автор не может, а увидеть в отказе вправе.
         Value::Erased => Some(Term::constant(crate::value::ERASED)),
@@ -556,6 +559,8 @@ fn rigid(head: &Head, leading: &[Rc<Value>]) -> Option<Term> {
             let index = leading.len().checked_sub(position + 1)?;
             Some(Term::var(u32::try_from(index).ok()?))
         }
+        // Операция замкнута, как и константа.
+        Head::Prim(op, ty) => Some(Term::Prim(crate::prim::Prim::Op(*op, *ty))),
         Head::Meta(_) => None,
     }
 }

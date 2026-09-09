@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+{back = -7, mixed = 17, hexed = 255, wrapped = 44, blurred = 1.0, sharp = 1.00000001, area = -10.0, summed = 3}

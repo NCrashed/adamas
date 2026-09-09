@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: numeral-deeper-than-its-term.adamas:17:8: число больше 256: без примитивного типа литерал разворачивается унарно (§4.3), и терм у него глубиной в само число - напишите `Int64` или другой примитив
+  deep = 1000
+         ^^^^

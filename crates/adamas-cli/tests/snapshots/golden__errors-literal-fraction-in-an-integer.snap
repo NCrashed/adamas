@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: literal-fraction-in-an-integer.adamas:11:13: литерал не подходит типу `Int64`: тип целый, а литерал дробный
+  truncated = 1.5
+              ^^^

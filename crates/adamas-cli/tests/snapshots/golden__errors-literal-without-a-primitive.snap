@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: literal-without-a-primitive.adamas:15:11: отрицательный, дробный или строковый литерал пока не элаборируется: первые два пишутся там, где ожидается примитив (§4.11): `Int8`…`Int64`, `UInt8`…`UInt64`, `Float32`, `Float64`, - а здесь написанный тип их не принимает; строк нет вовсе (§4.5)
+  negated = -3
+            ^^

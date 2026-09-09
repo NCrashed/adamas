@@ -11,6 +11,7 @@ use std::rc::Rc;
 
 use crate::level::Level;
 use crate::mult::Mult;
+use crate::prim::{Prim, PrimOp, PrimTy};
 use crate::row::{Row, RowVar};
 use crate::term::{Binder, Field, Fields, Index, Mults, Name, Term, TermMeta};
 
@@ -194,6 +195,12 @@ pub enum Head {
     /// вычислять нечего, пока не известно, чем она окажется. Решённая головой
     /// не остаётся - её разворачивает `force` до того, как спайн понадобится.
     Meta(TermMeta),
+    /// Примитивная операция (§4.3).
+    ///
+    /// Голова, а не значение: `addInt64 x 1` под связыванием считать нечем, и
+    /// застревает оно ровно так же, как применение переменной. Сводится
+    /// [`crate::eval::try_apply`], когда спайн набрал два литерала.
+    Prim(PrimOp, PrimTy),
 }
 
 /// Элиминатор в спайне застрявшего вычисления.
@@ -291,6 +298,11 @@ pub enum Value {
     Row(Telescope),
     /// Универсум.
     Universe(Level),
+    /// Примитивный тип либо литерал (§4.3, §4.11).
+    ///
+    /// Операция сюда не попадает: она застревает головой спайна
+    /// ([`Head::Prim`]) и сводится, когда оба аргумента оказались литералами.
+    Prim(Prim),
 }
 
 /// Телескоп полей записи: термы вместе с окружением, в котором их вычислять.
@@ -417,6 +429,10 @@ impl fmt::Display for Value {
             Self::Neutral(Head::Meta(TermMeta(name)), spine) => {
                 write!(f, "?{name}·{}", spine.len())
             }
+            Self::Neutral(Head::Prim(op, ty), spine) => {
+                write!(f, "{op}{ty}·{}", spine.len())
+            }
+            Self::Prim(prim) => write!(f, "{prim}"),
             Self::Lam(mult, name, _) => write!(f, "\\({mult} {name}) -> …"),
             Self::Pi(binder, name, _, row, _) => {
                 let (open, close) = binder.visibility.brackets();

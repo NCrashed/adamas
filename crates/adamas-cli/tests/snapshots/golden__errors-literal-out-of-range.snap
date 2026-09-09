@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: literal-out-of-range.adamas:11:8: литерал не помещается в `Int8`
+  over = 128
+         ^^^

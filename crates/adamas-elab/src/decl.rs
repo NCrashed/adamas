@@ -27,6 +27,7 @@ use adamas_core::level::{Level, LevelVar};
 use adamas_core::meta::{Generalization, Metas, zonk_term};
 use adamas_core::mult::{Mult, MultVar};
 use adamas_core::pattern::{Compiled, PatternError, compile_traced};
+use adamas_core::prim::{PrimOp, PrimTy};
 use adamas_core::row::{Label, Row, RowVar, Tail};
 use adamas_core::sig::{DefinitionKind, Group, Member as SigMember, Signature};
 use adamas_core::source::Span;
@@ -506,6 +507,7 @@ fn members_into(
     let mut postulated: HashMap<Symbol, Span> = HashMap::new();
     let mut pending: Option<Pending<'_>> = None;
     for decl in decls {
+        reserved(decl)?;
         match &decl.kind {
             DeclKind::Signature {
                 name,
@@ -2799,6 +2801,55 @@ fn declare_module_value(
             error: Box::new(error),
             names,
         })
+}
+
+/// Отвергает объявление, чьё имя занято примитивом (§4.11).
+///
+/// Заслонить примитив объявление не может: имя разрешается тем же правилом, что
+/// `Type` и `Effect`. Без этого отказа `data Int64` доезжало до ядра, и то
+/// сообщало «конструктор обязан возвращать `Int64`, а возвращает `Int64`» -
+/// имя одно, типа два.
+///
+/// Конструкторы и операции проверяются наравне с головой: имя `addInt64`
+/// заслонялось бы так же молча.
+fn reserved(decl: &ast::Decl) -> Result<(), ElabError> {
+    let refuse = |name: &Symbol, span: Span| {
+        let what = if PrimTy::named(name).is_some() {
+            "это примитивный тип"
+        } else {
+            "это примитивная операция"
+        };
+        Err(ElabError::ReservedName {
+            name: Rc::clone(name),
+            what,
+            span,
+        })
+    };
+    let taken = |name: &Symbol| PrimTy::named(name).is_some() || PrimOp::named(name).is_some();
+    if let DeclKind::Mutual(members) = &decl.kind {
+        for member in members {
+            reserved(member)?;
+        }
+        return Ok(());
+    }
+    if let Some(name) = member_name(decl).filter(|it| taken(it)) {
+        return refuse(name, decl.span);
+    }
+    if let DeclKind::Data(data) = &decl.kind {
+        for constructor in &data.constructors {
+            if taken(&constructor.name.text) {
+                return refuse(&constructor.name.text, constructor.name.span);
+            }
+        }
+    }
+    if let DeclKind::Effect(effect) = &decl.kind {
+        for operation in &effect.operations {
+            if taken(&operation.name.text) {
+                return refuse(&operation.name.text, operation.name.span);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Имя, под которым член становится полем модуля.

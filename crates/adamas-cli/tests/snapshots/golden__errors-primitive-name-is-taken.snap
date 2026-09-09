@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: primitive-name-is-taken.adamas:12:1: имя `Int64` занято языком: это примитивный тип (§4.11), и объявить своё под ним нельзя
+  data Int64 where
+  ^^^^^^^^^^^^^^^^

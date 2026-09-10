@@ -156,24 +156,138 @@ fn sort(n: u32) -> Rc<Value> {
 /// Тип живёт в `Type 0`: содержимого, которое поднимало бы сорт, у него нет.
 /// Литерал типизируется своим типом, операция - двуместной стрелкой над ним.
 /// Кратность стрелки `ω`: сложить одно и то же число дважды - обычное дело.
-fn prim_type(prim: Prim) -> Rc<Value> {
+///
+/// # Длина массива - `UInt64`, а не `Nat`
+///
+/// §4.11 пишет `Array n a` с `(0 n : Nat)`, но `Nat` - имя, которое объявляет
+/// **программа**: соглашение это живёт в элаборации (`Zero`, `Succ`, `Bool`,
+/// `Int`), а ядро имён не знает вовсе, и тип примитива обязан строиться без
+/// сигнатуры. `UInt64` в этой роли ничего не теряет: индекс стёрт, а
+/// арифметика над ним - `addUInt64` - сводится дефиниционально тем же
+/// [`crate::eval`], тогда как `+` над `Nat` требует пользовательского
+/// определения. Прецедент прямой и записан в §4.11: поля `Layout` тоже стали
+/// `UInt32` вместо `Nat`, потому что зависимой роли у них нет.
+#[must_use]
+pub fn prim_type(prim: Prim) -> Rc<Value> {
+    crate::eval::eval(&Env::default(), &prim_scheme(prim))
+}
+
+/// Тип примитива термом: то же, что [`prim_type`], до вычисления.
+fn prim_scheme(prim: Prim) -> Term {
+    let word = Term::Prim(Prim::Ty(crate::prim::PrimTy::UInt64));
+    let universe = Term::universe(0);
     match prim {
-        Prim::Ty(_) => sort(0),
-        Prim::Lit(ty, _) => Rc::new(Value::Prim(Prim::Ty(ty))),
+        Prim::Ty(_) => universe,
+        Prim::Lit(ty, _) => Term::Prim(Prim::Ty(ty)),
         Prim::Op(_, ty) => {
             let over = Term::Prim(Prim::Ty(ty));
-            let arrow = |codomain| {
-                Term::Pi(
-                    Binder::explicit(Mult::Many),
-                    Name::from("_"),
-                    Rc::new(over.clone()),
-                    Row::empty(),
-                    Rc::new(codomain),
-                )
-            };
-            crate::eval::eval(&Env::default(), &arrow(arrow(over.clone())))
+            arrow(
+                Mult::Many,
+                over.clone(),
+                arrow(Mult::Many, over.clone(), over),
+            )
         }
+        // `Array : (0 n : UInt64) -> (0 a : Type 0) -> Type 0`. Оба связывания
+        // стёрты: тип в рантайме не живёт.
+        Prim::Array => bound(
+            Binder::explicit(Mult::Zero),
+            "n",
+            word,
+            bound(
+                Binder::explicit(Mult::Zero),
+                "a",
+                universe.clone(),
+                universe,
+            ),
+        ),
+        Prim::Over(op) => array_op_scheme(op, &word, &universe),
     }
+}
+
+/// Тип операции над массивом. Стёртые связывания имплиситны: длину и элемент
+/// восстанавливает унификация по типу самого массива.
+fn array_op_scheme(op: crate::prim::ArrayOp, word: &Term, universe: &Term) -> Term {
+    use crate::prim::ArrayOp;
+    let erased = Binder::implicit(Mult::Zero);
+    let given = Binder::explicit(Mult::Many);
+    // `Array n a`, где `n` и `a` - связывания на глубине `depth` и `depth - 1`
+    // от места употребления.
+    let array = |length: Term, element: Term| {
+        Term::App(
+            Rc::new(Term::App(Rc::new(Term::Prim(Prim::Array)), Rc::new(length))),
+            Rc::new(element),
+        )
+    };
+    match op {
+        // `arrayNew : {0 a} -> (ω n : UInt64) -> (ω x : a) -> Array n a`
+        ArrayOp::New => bound(
+            erased,
+            "a",
+            universe.clone(),
+            bound(
+                given,
+                "n",
+                word.clone(),
+                bound(given, "x", Term::var(1), array(Term::var(1), Term::var(2))),
+            ),
+        ),
+        // `arraySet : {0 n} -> {0 a} -> (ω xs : Array n a) -> (ω i : UInt64)
+        //           -> (ω x : a) -> Array n a`
+        ArrayOp::Set => bound(
+            erased,
+            "n",
+            word.clone(),
+            bound(
+                erased,
+                "a",
+                universe.clone(),
+                bound(
+                    given,
+                    "xs",
+                    array(Term::var(1), Term::var(0)),
+                    bound(
+                        given,
+                        "i",
+                        word.clone(),
+                        bound(given, "x", Term::var(2), array(Term::var(4), Term::var(3))),
+                    ),
+                ),
+            ),
+        ),
+        // `arrayIndex : {0 n} -> {0 a} -> (ω xs : Array n a) -> (ω i : UInt64) -> a`
+        ArrayOp::Index => bound(
+            erased,
+            "n",
+            word.clone(),
+            bound(
+                erased,
+                "a",
+                universe.clone(),
+                bound(
+                    given,
+                    "xs",
+                    array(Term::var(1), Term::var(0)),
+                    bound(given, "i", word.clone(), Term::var(2)),
+                ),
+            ),
+        ),
+    }
+}
+
+/// Связывание с именем: домен, пустая row, кодомен.
+fn bound(binder: Binder, name: &str, domain: Term, codomain: Term) -> Term {
+    Term::Pi(
+        binder,
+        Name::from(name),
+        Rc::new(domain),
+        Row::empty(),
+        Rc::new(codomain),
+    )
+}
+
+/// Стрелка без имени.
+fn arrow(mult: Mult, domain: Term, codomain: Term) -> Term {
+    bound(Binder::explicit(mult), "_", domain, codomain)
 }
 
 /// Синтезирует тип терма и считает использования.

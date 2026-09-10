@@ -93,7 +93,7 @@ fn owned(constructors: &[Constructor], function: Function) -> Function {
     let scope: BTreeSet<LocalId> = function
         .live_captured()
         .chain(function.live_parameters())
-        .filter(|binding| binding.fact.repr.boxed())
+        .filter(|binding| binding.fact.repr.counted())
         .map(|binding| binding.local)
         .collect();
     let mut pass = Pass {
@@ -129,7 +129,7 @@ fn owned(constructors: &[Constructor], function: Function) -> Function {
 fn flat(function: &Function) -> BTreeSet<LocalId> {
     let mut found = BTreeSet::new();
     for binding in function.captured.iter().chain(&function.parameters) {
-        if !binding.fact.repr.boxed() {
+        if !binding.fact.repr.counted() {
             found.insert(binding.local);
         }
     }
@@ -140,11 +140,30 @@ fn flat(function: &Function) -> BTreeSet<LocalId> {
 /// То же по телу: связывания `let` и поля ветвей.
 fn inner(expr: &Expr, out: &mut BTreeSet<LocalId>) {
     match expr {
-        Expr::Local(_) | Expr::Erased | Expr::ConstructClosure { .. } | Expr::Literal { .. } => {}
+        Expr::Local(_)
+        | Expr::Erased
+        | Expr::ConstructClosure { .. }
+        | Expr::Literal { .. }
+        | Expr::Layout { .. } => {}
         Expr::Construct { arguments, .. } | Expr::Call { arguments, .. } => {
             for argument in arguments {
                 inner(argument, out);
             }
+        }
+        Expr::ArrayNew { count, initial, .. } => {
+            inner(count, out);
+            inner(initial, out);
+        }
+        Expr::ArraySet {
+            array, at, value, ..
+        } => {
+            inner(array, out);
+            inner(at, out);
+            inner(value, out);
+        }
+        Expr::ArrayIndex { array, at, .. } => {
+            inner(array, out);
+            inner(at, out);
         }
         Expr::Closure { captured, .. } => {
             for capture in captured {
@@ -164,7 +183,7 @@ fn inner(expr: &Expr, out: &mut BTreeSet<LocalId>) {
             value,
             body,
         } => {
-            if !binding.fact.repr.boxed() {
+            if !binding.fact.repr.counted() {
                 out.insert(binding.local);
             }
             inner(value, out);
@@ -176,7 +195,7 @@ fn inner(expr: &Expr, out: &mut BTreeSet<LocalId>) {
             inner(scrutinee, out);
             for arm in arms {
                 for field in &arm.fields {
-                    if !field.fact.repr.boxed() {
+                    if !field.fact.repr.counted() {
                         out.insert(field.local);
                     }
                 }
@@ -206,11 +225,30 @@ fn ceiling(function: &Function) -> u32 {
 /// Все связывания, которые вводит выражение.
 fn bound(expr: &Expr, note: &mut impl FnMut(LocalId)) {
     match expr {
-        Expr::Local(_) | Expr::Erased | Expr::ConstructClosure { .. } | Expr::Literal { .. } => {}
+        Expr::Local(_)
+        | Expr::Erased
+        | Expr::ConstructClosure { .. }
+        | Expr::Literal { .. }
+        | Expr::Layout { .. } => {}
         Expr::Construct { arguments, .. } | Expr::Call { arguments, .. } => {
             for argument in arguments {
                 bound(argument, note);
             }
+        }
+        Expr::ArrayNew { count, initial, .. } => {
+            bound(count, note);
+            bound(initial, note);
+        }
+        Expr::ArraySet {
+            array, at, value, ..
+        } => {
+            bound(array, note);
+            bound(at, note);
+            bound(value, note);
+        }
+        Expr::ArrayIndex { array, at, .. } => {
+            bound(array, note);
+            bound(at, note);
         }
         Expr::Closure { captured, .. } => {
             for capture in captured {
@@ -266,11 +304,29 @@ fn named(expr: &Expr, out: &mut BTreeSet<LocalId>) {
         Expr::Local(local) => {
             out.insert(*local);
         }
-        Expr::Erased | Expr::ConstructClosure { .. } | Expr::Literal { .. } => {}
+        Expr::Erased
+        | Expr::ConstructClosure { .. }
+        | Expr::Literal { .. }
+        | Expr::Layout { .. } => {}
         Expr::Construct { arguments, .. } | Expr::Call { arguments, .. } => {
             for argument in arguments {
                 named(argument, out);
             }
+        }
+        Expr::ArrayNew { count, initial, .. } => {
+            named(count, out);
+            named(initial, out);
+        }
+        Expr::ArraySet {
+            array, at, value, ..
+        } => {
+            named(array, out);
+            named(at, out);
+            named(value, out);
+        }
+        Expr::ArrayIndex { array, at, .. } => {
+            named(array, out);
+            named(at, out);
         }
         Expr::Closure { captured, .. } => {
             for capture in captured {
@@ -365,8 +421,12 @@ impl Pass<'_> {
                 };
                 drops(rest.collect::<Vec<_>>(), taken)
             }
-            Expr::Erased | Expr::ConstructClosure { .. } | Expr::Literal { .. } => {
-                drops(owned.iter().copied().collect::<Vec<_>>(), expr)
+            Expr::Erased
+            | Expr::ConstructClosure { .. }
+            | Expr::Literal { .. }
+            | Expr::Layout { .. } => drops(owned.iter().copied().collect::<Vec<_>>(), expr),
+            Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. } => {
+                self.array(expr, owned)
             }
             Expr::Primitive {
                 op,
@@ -434,6 +494,73 @@ impl Pass<'_> {
             // он на входе не встречает.
             Expr::Dup { .. } | Expr::Drop { .. } | Expr::Reclaim { .. } => expr,
         }
+    }
+
+    /// Операция над массивом (§4.11).
+    ///
+    /// Массив - объект кучи с одним заголовком на всю длину (§5.1), и владение
+    /// по нему то же, что по всякому объекту: аргумент приходит владением,
+    /// ответ уходит владением. Поэлементного RC у плоского массива нет вовсе -
+    /// считать там нечего.
+    ///
+    /// Порядок подвыражений тот же, что у [`Pass::sequence`] везде, и он
+    /// **значим**: массив стоит первым, а читающее из него значение - последним,
+    /// поэтому к записи массив приходит со счётчиком, который чтение уже
+    /// вернуло, и запись идёт по месту.
+    fn array(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
+        /// Какая из трёх операций разобрана: узел собирается обратно тем же.
+        enum Shape {
+            New,
+            Set,
+            Index,
+        }
+        let (shape, stride, parts) = match expr {
+            Expr::ArrayNew {
+                stride,
+                count,
+                initial,
+            } => (Shape::New, stride, vec![*count, *initial]),
+            Expr::ArraySet {
+                stride,
+                array,
+                at,
+                value,
+            } => (Shape::Set, stride, vec![*array, *at, *value]),
+            Expr::ArrayIndex { stride, array, at } => (Shape::Index, stride, vec![*array, *at]),
+            other => return other,
+        };
+        let (mut done, spare) = self.sequence(parts, owned);
+        // Подвыражения снимаются с конца, поэтому и разбираются справа налево.
+        let mut next = || Box::new(done.pop().unwrap_or(Expr::Erased));
+        let node = match shape {
+            Shape::New => {
+                let initial = next();
+                Expr::ArrayNew {
+                    stride,
+                    count: next(),
+                    initial,
+                }
+            }
+            Shape::Set => {
+                let value = next();
+                let at = next();
+                Expr::ArraySet {
+                    stride,
+                    array: next(),
+                    at,
+                    value,
+                }
+            }
+            Shape::Index => {
+                let at = next();
+                Expr::ArrayIndex {
+                    stride,
+                    array: next(),
+                    at,
+                }
+            }
+        };
+        drops(spare, node)
     }
 
     /// Переводит подвыражения, вычисляемые по порядку.
@@ -521,7 +648,7 @@ impl Pass<'_> {
             .copied()
             .filter(|local| inside.contains(local))
             .collect();
-        if binding.fact.present && binding.fact.repr.boxed() {
+        if binding.fact.present && binding.fact.repr.counted() {
             under.insert(binding.local);
         }
         let body = self.expr(body, &under);
@@ -585,7 +712,7 @@ impl Pass<'_> {
         // ссылки у него нет (§4.11).
         let kept: Vec<LocalId> = fields
             .iter()
-            .filter(|field| field.fact.present && field.fact.repr.boxed())
+            .filter(|field| field.fact.present && field.fact.repr.counted())
             .filter(|field| called.contains(&field.local))
             .map(|field| field.local)
             .collect();
@@ -669,10 +796,20 @@ impl Pass<'_> {
             Expr::Dup { body, .. } | Expr::Drop { body, .. } | Expr::Reclaim { body, .. } => {
                 self.plans(body, slots)
             }
+            // Ячейка массива под переписывание не годится: придержанный блок
+            // размером в `slots` полей, а массив - в свою длину.
+            Expr::ArrayNew { count, initial, .. } => {
+                self.plans(count, slots) || self.plans(initial, slots)
+            }
+            Expr::ArraySet {
+                array, at, value, ..
+            } => self.plans(array, slots) || self.plans(at, slots) || self.plans(value, slots),
+            Expr::ArrayIndex { array, at, .. } => self.plans(array, slots) || self.plans(at, slots),
             Expr::Local(_)
             | Expr::Erased
             | Expr::ConstructClosure { .. }
-            | Expr::Literal { .. } => false,
+            | Expr::Literal { .. }
+            | Expr::Layout { .. } => false,
         }
     }
 
@@ -719,10 +856,24 @@ impl Pass<'_> {
             Expr::Dup { body, .. } | Expr::Drop { body, .. } | Expr::Reclaim { body, .. } => {
                 self.attach(body, slots, token)
             }
+            Expr::ArrayNew { count, initial, .. } => {
+                self.attach(count, slots, token) || self.attach(initial, slots, token)
+            }
+            Expr::ArraySet {
+                array, at, value, ..
+            } => {
+                self.attach(array, slots, token)
+                    || self.attach(at, slots, token)
+                    || self.attach(value, slots, token)
+            }
+            Expr::ArrayIndex { array, at, .. } => {
+                self.attach(array, slots, token) || self.attach(at, slots, token)
+            }
             Expr::Local(_)
             | Expr::Erased
             | Expr::ConstructClosure { .. }
-            | Expr::Literal { .. } => false,
+            | Expr::Literal { .. }
+            | Expr::Layout { .. } => false,
         }
     }
 }

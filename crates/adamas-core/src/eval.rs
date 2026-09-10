@@ -76,6 +76,13 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
         Term::Prim(crate::prim::Prim::Op(op, ty)) => {
             Rc::new(Value::Neutral(Head::Prim(*op, *ty), Vec::new()))
         }
+        // Массив и операции над ним - головы по той же причине: и тип
+        // применяется к длине с элементом, и операция копит аргументы спайном
+        // (§4.11).
+        Term::Prim(crate::prim::Prim::Array) => Rc::new(Value::Neutral(Head::Array, Vec::new())),
+        Term::Prim(crate::prim::Prim::Over(op)) => {
+            Rc::new(Value::Neutral(Head::ArrayOp(*op), Vec::new()))
+        }
         Term::Prim(prim) => Rc::new(Value::Prim(*prim)),
 
         Term::Lam(mult, name, body) => Rc::new(Value::Lam(
@@ -416,6 +423,11 @@ pub fn try_apply(callee: &Rc<Value>, argument: Rc<Value>) -> Option<Rc<Value>> {
                     return Some(folded);
                 }
             }
+            if let Head::ArrayOp(crate::prim::ArrayOp::Index) = head {
+                if let Some(read) = indexed(&spine) {
+                    return Some(read);
+                }
+            }
             Some(Rc::new(Value::Neutral(head.clone(), spine)))
         }
         _ => None,
@@ -442,6 +454,63 @@ fn folded(op: crate::prim::PrimOp, ty: crate::prim::PrimTy, spine: &[Elim]) -> O
         ty,
         op.fold(ty, *left, *right),
     ))))
+}
+
+/// Чтение ячейки массива (§4.11): последняя запись по этому номеру и выигрывает.
+///
+/// Массив здесь - **спайн**, а не отдельная форма значения: `arrayNew`
+/// заводит его, `arraySet` наращивает цепочку. Чтение идёт от вершины вниз и
+/// останавливается на первой записи в ту же ячейку; дно цепочки - `arrayNew`,
+/// и там лежит начальное значение. Порядок этот и есть семантика записи: она
+/// заслоняет прежнее.
+///
+/// Не сводится, когда номер не литерал, когда цепочка упирается не в
+/// `arrayNew` (массив пришёл переменной) либо когда номер вне длины.
+///
+/// Последнее - **названная граница**: у понижения тот же случай обрывает
+/// процесс (`adamas_fail`), и сходятся два вычислителя лишь в том, что оба не
+/// дают ответа. Корпус программ с выходом за длину не содержит.
+fn indexed(spine: &[Elim]) -> Option<Rc<Value>> {
+    use crate::prim::{ArrayOp, Prim};
+    let [Elim::App(_), Elim::App(_), Elim::App(array), Elim::App(at)] = spine else {
+        return None;
+    };
+    let Value::Prim(Prim::Lit(_, wanted)) = &**at else {
+        return None;
+    };
+    let mut current = Rc::clone(array);
+    loop {
+        let Value::Neutral(Head::ArrayOp(op), spine) = &*Rc::clone(&current) else {
+            return None;
+        };
+        match (op, spine.as_slice()) {
+            (
+                ArrayOp::Set,
+                [
+                    Elim::App(_),
+                    Elim::App(_),
+                    Elim::App(inner),
+                    Elim::App(slot),
+                    Elim::App(value),
+                ],
+            ) => {
+                let Value::Prim(Prim::Lit(_, slot)) = &**slot else {
+                    return None;
+                };
+                if slot == wanted {
+                    return Some(Rc::clone(value));
+                }
+                current = Rc::clone(inner);
+            }
+            (ArrayOp::New, [Elim::App(_), Elim::App(count), Elim::App(initial)]) => {
+                let Value::Prim(Prim::Lit(_, count)) = &**count else {
+                    return None;
+                };
+                return (wanted < count).then(|| Rc::clone(initial));
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// Читает значение обратно в терм.
@@ -493,6 +562,8 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
                 ),
                 Head::Meta(meta) => Term::Meta(*meta),
                 Head::Prim(op, ty) => Term::Prim(crate::prim::Prim::Op(*op, *ty)),
+                Head::Array => Term::Prim(crate::prim::Prim::Array),
+                Head::ArrayOp(op) => Term::Prim(crate::prim::Prim::Over(*op)),
             };
             spine.iter().fold(base, |callee, elim| match elim {
                 Elim::App(argument) => Term::App(Rc::new(callee), Rc::new(quote(size, argument))),

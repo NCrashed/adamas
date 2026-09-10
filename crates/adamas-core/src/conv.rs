@@ -685,6 +685,9 @@ fn same_head(
         (Head::Meta(a), Head::Meta(b)) => a == b,
         // Операция - имя, и различает её пара «что делает, над чем».
         (Head::Prim(op_a, ty_a), Head::Prim(op_b, ty_b)) => op_a == op_b && ty_a == ty_b,
+        // Массив и операции над ним - такие же имена (§4.11).
+        (Head::Array, Head::Array) => true,
+        (Head::ArrayOp(op_a), Head::ArrayOp(op_b)) => op_a == op_b,
         (
             Head::Global(name_a, levels_a, rows_a, mults_a),
             Head::Global(name_b, levels_b, rows_b, mults_b),

@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use crate::level::Level;
 use crate::mult::Mult;
-use crate::prim::{Prim, PrimOp, PrimTy};
+use crate::prim::{ArrayOp, Prim, PrimOp, PrimTy};
 use crate::row::{Row, RowVar};
 use crate::term::{Binder, Field, Fields, Index, Mults, Name, Term, TermMeta};
 
@@ -201,6 +201,16 @@ pub enum Head {
     /// застревает оно ровно так же, как применение переменной. Сводится
     /// [`crate::eval::try_apply`], когда спайн набрал два литерала.
     Prim(PrimOp, PrimTy),
+    /// Тип массива `Array n a` (§4.11): голова, применяемая к длине и элементу.
+    Array,
+    /// Операция над массивом (§4.11).
+    ///
+    /// Голова по тому же доводу, что и [`Head::Prim`], и с одной добавкой:
+    /// **значение массива и есть такой спайн**. `arrayNew` заводит цепочку,
+    /// `arraySet` наращивает, `arrayIndex` её читает
+    /// ([`crate::eval::try_apply`]). Отдельной формы значения массив поэтому не
+    /// требует - и обратное чтение с конвертируемостью достаются даром.
+    ArrayOp(ArrayOp),
 }
 
 /// Элиминатор в спайне застрявшего вычисления.
@@ -431,6 +441,12 @@ impl fmt::Display for Value {
             }
             Self::Neutral(Head::Prim(op, ty), spine) => {
                 write!(f, "{op}{ty}·{}", spine.len())
+            }
+            Self::Neutral(Head::Array, spine) => {
+                write!(f, "{}·{}", crate::prim::ARRAY, spine.len())
+            }
+            Self::Neutral(Head::ArrayOp(op), spine) => {
+                write!(f, "{op}·{}", spine.len())
             }
             Self::Prim(prim) => write!(f, "{prim}"),
             Self::Lam(mult, name, _) => write!(f, "\\({mult} {name}) -> …"),

@@ -7,7 +7,7 @@
 // `forbid` (корневой `Cargo.toml`): Perceus и FFI без него не пишутся.
 #![allow(unsafe_code)]
 
-use core::ffi::c_int;
+use core::ffi::{c_int, c_void};
 
 /// Объект кучи Perceus. Непрозрачен: форму задаёт заголовок.
 #[derive(Debug)]
@@ -140,6 +140,33 @@ unsafe extern "C" {
     pub fn adamas_field(value: Value, index: usize) -> Value;
     /// Записывает поле объекта.
     pub fn adamas_set_field(value: Value, index: usize, field: Value);
+
+    /// Массив на `count` ячеек по `stride` байт; `stride` 0 - указательный.
+    pub fn adamas_array_alloc(count: usize, stride: usize) -> Value;
+    /// Сколько ячеек.
+    pub fn adamas_array_count(array: Value) -> usize;
+    /// Байт на ячейку; 0 - массив указательный.
+    pub fn adamas_array_stride(array: Value) -> usize;
+    /// Адрес плоской ячейки.
+    pub fn adamas_array_at(array: Value, index: usize) -> *mut c_void;
+    /// Указательная ячейка.
+    pub fn adamas_array_get(array: Value, index: usize) -> Value;
+    /// Записывает указательную ячейку, прежнюю не дропая.
+    pub fn adamas_array_init(array: Value, index: usize, value: Value);
+    /// Переписывает указательную ячейку: прежняя дропается.
+    pub fn adamas_array_put(array: Value, index: usize, value: Value, release: Release);
+    /// Заполняет указательный массив одним значением, взятым владением.
+    pub fn adamas_array_fill(array: Value, value: Value, release: Release);
+    /// То же плоским: `stride` байт из `bits` в каждую ячейку.
+    pub fn adamas_array_fill_flat(array: Value, bits: *const c_void);
+    /// Читает указательную ячейку и отдаёт массив.
+    pub fn adamas_array_take(array: Value, index: usize, release: Release) -> Value;
+    /// То же для плоской ячейки: байты в `out`, массив отдаётся.
+    pub fn adamas_array_read(array: Value, index: usize, out: *mut c_void, release: Release);
+    /// Массив, готовый к записи; приходит владением.
+    pub fn adamas_array_writable(array: Value, release: Release) -> Value;
+    /// Дроп ячеек. У плоского не делает ничего.
+    pub fn adamas_array_release(array: Value, release: Release);
 
     /// Пустой вектор evidence.
     pub fn adamas_evidence_empty() -> *mut Evidence;

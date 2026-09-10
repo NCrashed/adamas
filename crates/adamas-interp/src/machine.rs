@@ -18,6 +18,7 @@ use std::rc::Rc;
 use adamas_core::eval;
 use adamas_core::level::Level;
 use adamas_core::mult::Mult;
+use adamas_core::prim::ArrayOp;
 use adamas_core::row::Row;
 use adamas_core::sig::{DefinitionKind, Signature};
 use adamas_core::term::{Case, Mults, Name, Term};
@@ -327,6 +328,16 @@ impl<'a> Machine<'a> {
                 let mut spine = spine.clone();
                 spine.push(Elim::App(argument));
                 self.dispatch(name, levels, rows, mults, spine, kont)
+            }
+            // Массив приходит аргументом и обязан быть **развёрнут**: сводит
+            // чтение ячейки цепочку `arrayNew`/`arraySet` (§4.11), а имя с
+            // телом до неё само не разворачивается - δ стоит у применения,
+            // разбора и проекции, и аргумент ни одним из них не является.
+            // Правила счёта второго здесь не заводится: считает всё та же
+            // `eval::apply`, ей лишь дают головную форму.
+            Value::Neutral(Head::ArrayOp(op), spine) if array_position(*op, spine) => {
+                let argument = self.forced(argument)?;
+                Ok(Step::Return(eval::apply(callee, argument)))
             }
             // Локальная переменная и дырка: применение копится в спайне, как и
             // в ядре.
@@ -675,6 +686,18 @@ struct Resumption {
     invoked: bool,
     multi: bool,
     stateful: bool,
+}
+
+/// Ждёт ли операция над массивом (§4.11) сам массив следующим аргументом.
+///
+/// Стоит он третьим у `arraySet` и `arrayIndex` - после стёртых длины и типа
+/// элемента; `arrayNew` массива не принимает вовсе.
+fn array_position(op: ArrayOp, spine: &[Elim]) -> bool {
+    let taken = spine
+        .iter()
+        .filter(|elim| matches!(elim, Elim::App(_)))
+        .count();
+    matches!(op, ArrayOp::Set | ArrayOp::Index) && taken == 2
 }
 
 /// Кратность `n`-го связывания типа. `None` - связываний столько нет.

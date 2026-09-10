@@ -158,7 +158,9 @@ fn inner(expr: &Expr, out: &mut BTreeSet<LocalId>) {
             inner(region, out);
             inner(value, out);
         }
-        Expr::RegionRead { region, at, .. } => {
+        Expr::RegionRead { region, at, .. }
+        | Expr::RegionRecycle { region, at }
+        | Expr::RegionPop { region, at } => {
             inner(region, out);
             inner(at, out);
         }
@@ -266,7 +268,9 @@ fn bound(expr: &Expr, note: &mut impl FnMut(LocalId)) {
             bound(region, note);
             bound(value, note);
         }
-        Expr::RegionRead { region, at, .. } => {
+        Expr::RegionRead { region, at, .. }
+        | Expr::RegionRecycle { region, at }
+        | Expr::RegionPop { region, at } => {
             bound(region, note);
             bound(at, note);
         }
@@ -372,7 +376,9 @@ fn named(expr: &Expr, out: &mut BTreeSet<LocalId>) {
             named(region, out);
             named(value, out);
         }
-        Expr::RegionRead { region, at, .. } => {
+        Expr::RegionRead { region, at, .. }
+        | Expr::RegionRecycle { region, at }
+        | Expr::RegionPop { region, at } => {
             named(region, out);
             named(at, out);
         }
@@ -514,7 +520,9 @@ impl Pass<'_> {
             Expr::RegionAlloc { .. }
             | Expr::RegionLast { .. }
             | Expr::RegionRead { .. }
-            | Expr::RegionWrite { .. } => self.region(expr, owned),
+            | Expr::RegionWrite { .. }
+            | Expr::RegionRecycle { .. }
+            | Expr::RegionPop { .. } => self.region(expr, owned),
             Expr::Pack { .. } | Expr::Unpack { .. } => self.aggregate(expr, owned),
             Expr::Primitive {
                 op,
@@ -705,22 +713,23 @@ impl Pass<'_> {
     /// читающее из него - последним, поэтому к записи блок приходит со
     /// счётчиком, который чтение уже вернуло, и запись идёт по месту.
     fn region(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
-        /// Какая из четырёх операций разобрана.
+        /// Какая из шести операций разобрана.
         enum Shape {
             Alloc,
             Last,
             Read,
             Write,
+            Recycle,
+            Pop,
         }
+        let word = Stride::Static(PrimTy::UInt64);
         let (shape, stride, parts) = match expr {
             Expr::RegionAlloc {
                 stride,
                 region,
                 value,
             } => (Shape::Alloc, stride, vec![*region, *value]),
-            Expr::RegionLast { region } => {
-                (Shape::Last, Stride::Static(PrimTy::UInt64), vec![*region])
-            }
+            Expr::RegionLast { region } => (Shape::Last, word, vec![*region]),
             Expr::RegionRead { stride, region, at } => (Shape::Read, stride, vec![*region, *at]),
             Expr::RegionWrite {
                 stride,
@@ -728,6 +737,10 @@ impl Pass<'_> {
                 at,
                 value,
             } => (Shape::Write, stride, vec![*region, *at, *value]),
+            // Нагрузки у возврата ячейки нет вовсе: шаг здесь - заглушка,
+            // которую не читает ни одна из двух ветвей ниже.
+            Expr::RegionRecycle { region, at } => (Shape::Recycle, word, vec![*region, *at]),
+            Expr::RegionPop { region, at } => (Shape::Pop, word, vec![*region, *at]),
             other => return other,
         };
         let (mut done, spare) = self.sequence(parts, owned);
@@ -759,6 +772,14 @@ impl Pass<'_> {
                     at,
                     value,
                 }
+            }
+            Shape::Recycle => {
+                let at = next();
+                Expr::RegionRecycle { region: next(), at }
+            }
+            Shape::Pop => {
+                let at = next();
+                Expr::RegionPop { region: next(), at }
             }
         };
         drops(spare, node)
@@ -1022,6 +1043,8 @@ impl Pass<'_> {
             | Expr::RegionLast { .. }
             | Expr::RegionRead { .. }
             | Expr::RegionWrite { .. }
+            | Expr::RegionRecycle { .. }
+            | Expr::RegionPop { .. }
             | Expr::Layout { .. } => false,
         }
     }
@@ -1098,6 +1121,8 @@ impl Pass<'_> {
             | Expr::RegionLast { .. }
             | Expr::RegionRead { .. }
             | Expr::RegionWrite { .. }
+            | Expr::RegionRecycle { .. }
+            | Expr::RegionPop { .. }
             | Expr::Layout { .. } => false,
         }
     }

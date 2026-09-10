@@ -297,7 +297,9 @@ pub(crate) fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
             walk(region, visit);
             walk(value, visit);
         }
-        Expr::RegionRead { region, at, .. } => {
+        Expr::RegionRead { region, at, .. }
+        | Expr::RegionRecycle { region, at }
+        | Expr::RegionPop { region, at } => {
             walk(region, visit);
             walk(at, visit);
         }

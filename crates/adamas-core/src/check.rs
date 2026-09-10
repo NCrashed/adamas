@@ -306,6 +306,18 @@ fn region_op_scheme(
                 bound(given, "x", Term::var(3), block),
             ),
         )),
+        // `regionRecycle`, `regionPop : (ω r : Block) -> (ω p : UInt64) -> Block`
+        //
+        // Нагрузки у них нет, и это не экономия: размер возвращаемой ячейки
+        // помнит сама область, а написанный тип его назвал бы вторым источником
+        // - соврать которым можно. Без нагрузки заодно решается `{Flat a}` у
+        // члена `free : Block -> Ptr -> Block`: решать нечего.
+        RegionOp::Recycle | RegionOp::Pop => bound(
+            given,
+            "r",
+            block.clone(),
+            bound(given, "p", word.clone(), block),
+        ),
     }
 }
 

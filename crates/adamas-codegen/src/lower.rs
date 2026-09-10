@@ -1876,6 +1876,7 @@ impl<'a> Lowerer<'a> {
         let wanted = match op {
             RegionOp::New => 0,
             RegionOp::Last => 1,
+            RegionOp::Recycle | RegionOp::Pop => 2,
             RegionOp::Alloc | RegionOp::Read => 4,
             RegionOp::Write => 5,
         };
@@ -1896,6 +1897,20 @@ impl<'a> Lowerer<'a> {
                 },
                 word,
             ));
+        }
+        // Возврат ячейки нагрузки не несёт: размер её помнит область, а не
+        // написанный тип. Отсюда и позиции - блок первым, хендл вторым.
+        if matches!(op, RegionOp::Recycle | RegionOp::Pop) {
+            let region = self.given(scope, &arguments[0], Repr::Region, "регион")?;
+            let at = self.given(scope, &arguments[1], word, "хендл региона")?;
+            let region = Box::new(region);
+            let at = Box::new(at);
+            let value = if op == RegionOp::Recycle {
+                Expr::RegionRecycle { region, at }
+            } else {
+                Expr::RegionPop { region, at }
+            };
+            return Ok((value, Repr::Region));
         }
         // Тип нагрузки - первый стёртый аргумент; второй стёртый есть словарь
         // `Flat`, и понижение его не читает: шаг оно берёт у типа, а словарь
@@ -1952,7 +1967,9 @@ impl<'a> Lowerer<'a> {
                     Repr::Region,
                 ))
             }
-            RegionOp::New | RegionOp::Last => unreachable!("разобраны выше"),
+            RegionOp::New | RegionOp::Last | RegionOp::Recycle | RegionOp::Pop => {
+                unreachable!("разобраны выше")
+            }
         }
     }
 

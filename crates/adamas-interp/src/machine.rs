@@ -720,7 +720,8 @@ fn array_position(op: ArrayOp, spine: &[Elim]) -> bool {
 /// Ждёт ли операция региона (§3.6) сам блок следующим аргументом.
 ///
 /// У несущих нагрузку он третий - после стёртых типа и словаря `Flat`, - у
-/// `regionLast` первый; `regionNew` блока не принимает вовсе.
+/// `regionLast` и операций возврата ячейки первый; `regionNew` блока не
+/// принимает вовсе.
 fn region_position(op: RegionOp, spine: &[Elim]) -> bool {
     let taken = spine
         .iter()
@@ -728,7 +729,7 @@ fn region_position(op: RegionOp, spine: &[Elim]) -> bool {
         .count();
     match op {
         RegionOp::New => false,
-        RegionOp::Last => taken == 0,
+        RegionOp::Last | RegionOp::Recycle | RegionOp::Pop => taken == 0,
         RegionOp::Alloc | RegionOp::Read | RegionOp::Write => taken == 2,
     }
 }

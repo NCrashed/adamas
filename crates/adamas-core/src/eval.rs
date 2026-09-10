@@ -545,7 +545,7 @@ fn region_answer(op: crate::prim::RegionOp, spine: &[Elim]) -> Option<Rc<Value>>
         )))
     };
     match (op, spine) {
-        (RegionOp::Last, [Elim::App(block)]) => region_bump(block)?.1.map(word),
+        (RegionOp::Last, [Elim::App(block)]) => region_area(block)?.last.map(word),
         (RegionOp::Read, [Elim::App(_), Elim::App(_), Elim::App(block), Elim::App(at)]) => {
             let Value::Prim(crate::prim::Prim::Lit(_, wanted)) = &**at else {
                 return None;
@@ -556,18 +556,38 @@ fn region_answer(op: crate::prim::RegionOp, spine: &[Elim]) -> Option<Rc<Value>>
     }
 }
 
-/// Сколько байт занято блоком и где лежит последняя аллокация.
+/// Одна аллокация в журнале области: где лежит, сколько занимает, отдана ли.
+#[derive(Clone, Copy)]
+struct Cell {
+    at: u64,
+    size: u64,
+    free: bool,
+}
+
+/// Раскладка области: курсор, хендл последней аллокации и журнал ячеек.
 ///
-/// Второе - `None` у пустого блока: аллокаций не было, и хендла не существует.
-/// Запись занятого не двигает: §3.6 называет `write` операцией над уже
+/// Журнал здесь - не второе представление, а прочтение того же спайна: цепочка
+/// операций и есть журнал. Рантайм держит его явно (`adamas.h`), потому что
+/// цепочки у него нет вовсе, и числа обоих обязаны сойтись.
+#[derive(Clone, Default)]
+struct Area {
+    used: u64,
+    last: Option<u64>,
+    cells: Vec<Cell>,
+}
+
+/// Раскладка области, посчитанная по спайну блока.
+///
+/// `last` - `None` у пустой области: аллокаций не было, и хендла не существует.
+/// Запись курсора не двигает: §3.6 называет `write` операцией над уже
 /// размещённым местом, а не аллокацией.
-fn region_bump(block: &Rc<Value>) -> Option<(u64, Option<u64>)> {
+fn region_area(block: &Rc<Value>) -> Option<Area> {
     use crate::prim::RegionOp;
     let Value::Neutral(Head::Region(op), spine) = &**block else {
         return None;
     };
     match (op, spine.as_slice()) {
-        (RegionOp::New, []) => Some((0, None)),
+        (RegionOp::New, []) => Some(Area::default()),
         (
             RegionOp::Alloc,
             [
@@ -577,10 +597,10 @@ fn region_bump(block: &Rc<Value>) -> Option<(u64, Option<u64>)> {
                 Elim::App(_),
             ],
         ) => {
-            let (used, _) = region_bump(inner)?;
+            let mut area = region_area(inner)?;
             let (size, align) = region_layout(dict)?;
-            let at = aligned(used, align);
-            Some((at.checked_add(size)?, Some(at)))
+            region_place(&mut area, size, align)?;
+            Some(area)
         }
         (
             RegionOp::Write,
@@ -591,7 +611,66 @@ fn region_bump(block: &Rc<Value>) -> Option<(u64, Option<u64>)> {
                 Elim::App(_),
                 Elim::App(_),
             ],
-        ) => region_bump(inner),
+        ) => region_area(inner),
+        (RegionOp::Recycle, [Elim::App(inner), Elim::App(at)]) => {
+            let mut area = region_area(inner)?;
+            let at = literal(at)?;
+            if let Some(cell) = area
+                .cells
+                .iter_mut()
+                .rev()
+                .find(|it| !it.free && it.at == at)
+            {
+                cell.free = true;
+            }
+            Some(area)
+        }
+        (RegionOp::Pop, [Elim::App(inner), Elim::App(at)]) => {
+            let mut area = region_area(inner)?;
+            let at = literal(at)?;
+            if area.cells.last().is_some_and(|it| !it.free && it.at == at) {
+                area.cells.pop();
+                area.used = at;
+                area.last = area.cells.last().map(|it| it.at);
+            }
+            Some(area)
+        }
+        _ => None,
+    }
+}
+
+/// Куда ляжет нагрузка размера `size` по границе `align`.
+///
+/// Правило одно на все стратегии, и политики в нём нет: **свободная ячейка
+/// равного размера, иначе подъём курсора**. Свободные ячейки заводит
+/// `regionRecycle`, и у Arena их не бывает вовсе - оттуда и «bump» её обещания.
+/// Ищется ячейка с конца: из равных подходит самая поздняя по размещению.
+fn region_place(area: &mut Area, size: u64, align: u64) -> Option<()> {
+    if let Some(cell) = area
+        .cells
+        .iter_mut()
+        .rev()
+        .find(|it| it.free && it.size == size && it.at % align.max(1) == 0)
+    {
+        cell.free = false;
+        area.last = Some(cell.at);
+        return Some(());
+    }
+    let at = aligned(area.used, align);
+    area.used = at.checked_add(size)?;
+    area.last = Some(at);
+    area.cells.push(Cell {
+        at,
+        size,
+        free: false,
+    });
+    Some(())
+}
+
+/// Биты литерала. `None` - значение литералом не является.
+fn literal(value: &Rc<Value>) -> Option<u64> {
+    match &**value {
+        Value::Prim(crate::prim::Prim::Lit(_, bits)) => Some(*bits),
         _ => None,
     }
 }
@@ -601,6 +680,11 @@ fn region_bump(block: &Rc<Value>) -> Option<(u64, Option<u64>)> {
 /// Обход идёт от вершины вниз, как у массива, и останавливается на первой
 /// операции, занявшей то же место. Дно цепочки - `regionNew`, где не лежит
 /// ничего: чтение неразмещённого места не сводится.
+///
+/// Возврат ячейки байт не трогает - ни `regionRecycle`, ни `regionPop`, - и
+/// обход через них проходит насквозь. Рантайм ведёт себя так же: возврат
+/// правит журнал, а не нагрузку. Отсюда общая на оба вычислителя граница:
+/// чтение отданной ячейки отдаёт то, что там лежало.
 fn region_stored(block: &Rc<Value>, wanted: u64) -> Option<Rc<Value>> {
     use crate::prim::RegionOp;
     let mut current = Rc::clone(block);
@@ -618,10 +702,12 @@ fn region_stored(block: &Rc<Value>, wanted: u64) -> Option<Rc<Value>> {
                     Elim::App(value),
                 ],
             ) => {
-                let (_, last) = region_bump(&current)?;
-                if last == Some(wanted) {
+                if region_area(&current)?.last == Some(wanted) {
                     return Some(Rc::clone(value));
                 }
+                current = Rc::clone(inner);
+            }
+            (RegionOp::Recycle | RegionOp::Pop, [Elim::App(inner), Elim::App(_)]) => {
                 current = Rc::clone(inner);
             }
             (
@@ -634,10 +720,7 @@ fn region_stored(block: &Rc<Value>, wanted: u64) -> Option<Rc<Value>> {
                     Elim::App(value),
                 ],
             ) => {
-                let Value::Prim(crate::prim::Prim::Lit(_, at)) = &**at else {
-                    return None;
-                };
-                if *at == wanted {
+                if literal(at)? == wanted {
                     return Some(Rc::clone(value));
                 }
                 current = Rc::clone(inner);

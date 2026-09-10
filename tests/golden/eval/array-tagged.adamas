@@ -1,0 +1,31 @@
+-- Колонка тегованных значений: семейство с Flat-полями уложено плотно
+-- (§4.11, §10 вопрос 157).
+--
+-- `OptInt` - мономорфный `Option Int64`: тег в байте, payload из восьми за
+-- дырой выравнивания, ячейка в шестнадцать байт. Цену - один блок на колонку
+-- против объекта на ячейку - считает `adamas-codegen/tests/packed.rs`; здесь
+-- наблюдаемо значение, и зависит оно от тега (нулевая ячейка - `None`), от
+-- payload'а (700 против 900) и от номера ячейки (множитель у последней).
+--
+-- Массив принимается параметром: определение без параметров пересчитывается
+-- на каждом упоминании.
+
+data OptInt where
+  None : OptInt
+  Some : Int64 -> OptInt
+
+take : OptInt -> Int64
+take None = 0
+take (Some n) = n
+
+built : Array 3 OptInt
+built = arraySet (arraySet (arrayNew 3 None) 1 (Some 700)) 2 (Some 900)
+
+read : Array 3 OptInt -> Int64
+read xs =
+  addInt64 (take (arrayIndex xs 0))
+    (addInt64 (take (arrayIndex xs 1)) (mulInt64 (take (arrayIndex xs 2)) 10))
+
+-- 0 + 700 + 9000 = 9700
+main : Int64
+main = read built

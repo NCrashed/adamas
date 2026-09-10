@@ -46,17 +46,20 @@ const CELLS: usize = 3;
 /// нулевой. Разошлись они только элементом - `Int64` против `Cell`, - и по
 /// этому же разошлись в цене.
 ///
-/// `Cell` завёрнут нарочно тонко: одно поле, и то плоское. Возьми элемент
-/// потолще - разница показывала бы вес элемента, а не наличие у него
-/// заголовка.
+/// `Cell` рекурсивен **нарочно**: рекурсивное семейство не плоское (§4.11), и
+/// это ближайший указательный элемент - семейство с одними `Flat`-полями
+/// теперь укладывается плотно само (§10 вопрос 157), и прежний тонкий
+/// `MkCell : Int64 -> Cell` показывал бы один блок наравне с плоским.
 const SHAPE: &str = "\
 type Int = Int64
 
 data Cell where
-  MkCell : Int64 -> Cell
+  Leaf : Cell
+  MkCell : Int64 -> Cell -> Cell
 
 peel : Cell -> Int64
-peel (MkCell n) = n
+peel Leaf = 0
+peel (MkCell n rest) = n
 ";
 
 /// Плоский массив: `n × size` байт подряд, одна аллокация на всю длину.
@@ -75,7 +78,9 @@ main = arrayIndex built 0
 /// Та же программа над не-`Flat` элементом.
 const BOXED: &str = "\
 built : Array 3 Cell
-built = arraySet (arraySet (arrayNew 3 (MkCell 7)) 1 (MkCell 8)) 2 (MkCell 9)
+built =
+  arraySet (arraySet (arrayNew 3 (MkCell 7 Leaf)) 1 (MkCell 8 Leaf)) 2
+    (MkCell 9 Leaf)
 
 main : Int64
 main = peel (arrayIndex built 0)

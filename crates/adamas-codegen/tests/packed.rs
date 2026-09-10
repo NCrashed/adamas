@@ -324,6 +324,159 @@ fn both_paths_agree_on_the_size_of_the_aggregate() {
     });
 }
 
+/// Семейство с тегом в колонке (§4.11, §10 вопрос 157): `Option Int64` в
+/// шестнадцать байт, только мономорфно - `OptInt`.
+///
+/// Ячейка несёт тег в байте и payload по своей границе: 1 + 7 дыры + 8. Ячейки
+/// различимы и по тегу (нулевая - `None`), и по payload'у (700 против 900), а
+/// множитель у последней делает порядок ячеек наблюдаемым.
+const TAGGED: &str = "\
+data OptInt where
+  None : OptInt
+  Some : Int64 -> OptInt
+
+take : OptInt -> Int64
+take None = 0
+take (Some n) = n
+
+built : Array 3 OptInt
+built = arraySet (arraySet (arrayNew 3 None) 1 (Some 700)) 2 (Some 900)
+
+-- Массив принимается параметром, а не читается трижды по имени: определение
+-- без параметров пересчитывается на каждом упоминании, и число блоков
+-- считало бы построения, а не ячейки.
+read : Array 3 OptInt -> Int64
+read xs =
+  addInt64 (take (arrayIndex xs 0))
+    (addInt64 (take (arrayIndex xs 1)) (mulInt64 (take (arrayIndex xs 2)) 10))
+
+-- 0 + 700 + 9000 = 9700
+main : Int64
+main = read built
+";
+
+/// Колонка тегованных значений - один блок, тег байтом, payload за дырой.
+#[test]
+fn a_tagged_column_is_one_block_of_sixteens() {
+    assert_eq!(
+        harness::printed(TAGGED),
+        "9700",
+        "свидетель перестал различать тег, payload и ячейку"
+    );
+    let stderr = harness::agreed("packed-tagged", TAGGED).unwrap_or_else(|error| {
+        panic!("тегованная колонка: {error}");
+    });
+    let (allocated, live) = harness::blocks("packed-tagged", &stderr);
+    // Один блок - колонка; ещё два - названная цена переклада на границе:
+    // `take` берёт указатель, и прочитанная ячейка `Some` боксируется
+    // (`None` непосредственен и не стоит ничего).
+    assert_eq!(allocated, 3, "цена колонки с тегом разошлась с §4.11");
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
+    let text = harness::text(TAGGED).unwrap_or_else(|error| panic!("тегованная колонка: {error}"));
+    for written in [
+        // Тип ячейки: тег в байте, payload из восьми за дырой выравнивания.
+        "_Alignas(8) unsigned char bytes[16];",
+        "_Static_assert(sizeof(adamas_pack_0) == 16u,",
+        // Шаг индексации - шестнадцать.
+        "adamas_array_alloc((size_t)t0, 16u)",
+        // Тег пишется байтом в начало...
+        ".bytes, &adamas_variant, 1u",
+        // ...а payload встаёт по своей границе.
+        ".bytes + 8, &",
+    ] {
+        assert!(
+            text.contains(written),
+            "в порождённом C нет `{written}`: укладка тега §4.11 разошлась"
+        );
+    }
+}
+
+/// Семейство из одних нульарных конструкторов: ячейка - один байт.
+///
+/// Это форма контрольных байт хеш-таблицы §4.11: сто значений - сто байт, а
+/// не сто объектов.
+const BYTES: &str = "\
+data Colour where
+  Red : Colour
+  Green : Colour
+  Blue : Colour
+
+built : Array 3 Colour
+built = arraySet (arraySet (arrayNew 3 Red) 1 Green) 2 Blue
+
+main : Colour
+main = arrayIndex built 2
+";
+
+/// Колонка нульарных тегов - байт на ячейку и один блок на всё.
+#[test]
+fn a_column_of_nullary_tags_is_a_byte_per_cell() {
+    assert_eq!(
+        harness::printed(BYTES),
+        "Blue",
+        "свидетель перестал различать ячейки"
+    );
+    let stderr = harness::agreed("packed-bytes", BYTES).unwrap_or_else(|error| {
+        panic!("колонка тегов: {error}");
+    });
+    let (allocated, live) = harness::blocks("packed-bytes", &stderr);
+    // Один блок - сама колонка; ответ - нульарный конструктор, он
+    // непосредственен и блока не стоит и после переклада под печать.
+    assert_eq!(allocated, 1, "колонка нульарных тегов стоила больше блока");
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
+    let text = harness::text(BYTES).unwrap_or_else(|error| panic!("колонка тегов: {error}"));
+    for written in [
+        "_Alignas(1) unsigned char bytes[1];",
+        "adamas_array_alloc((size_t)t0, 1u)",
+    ] {
+        assert!(
+            text.contains(written),
+            "в порождённом C нет `{written}`: ячейка теговой колонки не байт"
+        );
+    }
+}
+
+/// Семейство с одним конструктором укладывается как запись: тега нет.
+const SOLE: &str = "\
+data P where
+  MkP : Float32 -> Float32 -> P
+
+built : Array 3 P
+built = arraySet (arrayNew 3 (MkP 1.0 2.0)) 1 (MkP 10.0 20.0)
+
+main : P
+main = arrayIndex built 1
+";
+
+/// Один конструктор - как запись: восемь байт полей и ни байта тега.
+#[test]
+fn a_single_constructor_family_packs_like_a_record() {
+    assert_eq!(
+        harness::printed(SOLE),
+        "MkP 10.0 20.0",
+        "свидетель перестал различать ячейки и поля"
+    );
+    let stderr = harness::agreed("packed-sole", SOLE).unwrap_or_else(|error| {
+        panic!("один конструктор: {error}");
+    });
+    let (allocated, live) = harness::blocks("packed-sole", &stderr);
+    // Колонка плюс бокс ответа под печать: у плотного значения заголовка нет.
+    assert_eq!(
+        allocated, 2,
+        "колонка одноконструкторного семейства разошлась в цене"
+    );
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
+    let text = harness::text(SOLE).unwrap_or_else(|error| panic!("один конструктор: {error}"));
+    assert!(
+        text.contains("_Alignas(4) unsigned char bytes[8];"),
+        "поля MkP уложены не как запись §4.11"
+    );
+    assert!(
+        !text.contains("adamas_variant"),
+        "у единственного конструктора появился тег - различать ему нечего"
+    );
+}
+
 /// Две записи одного числа сошлись: понижение и типовая сторона.
 ///
 /// `adamas-codegen` элаборацию не читает - шов, - поэтому правило §4.11
@@ -349,18 +502,72 @@ type Vec3 = V3 Float32
 
 type Handle = { index : UInt32, generation : UInt32 }
 
-type Padded = { wide : Int64, tag : Int8 }",
+type Padded = { wide : Int64, tag : Int8 }
+
+data OptInt where
+  None : OptInt
+  Some : Int64 -> OptInt",
         "\
 main : List Layout
-main = Cons (layout @Vec3) (Cons (layout @Handle) (Cons (layout @Padded) Nil))"
+main =
+  Cons (layout @Vec3)
+    (Cons (layout @Handle) (Cons (layout @Padded) (Cons (layout @OptInt) Nil)))"
     );
     assert_eq!(
         harness::printed(&source),
         "Cons ({size = 12, align = 4}) (Cons ({size = 8, align = 4}) \
-         (Cons ({size = 16, align = 8}) Nil))",
+         (Cons ({size = 16, align = 8}) (Cons ({size = 16, align = 8}) Nil)))",
         "типовая сторона считает укладку иначе"
     );
     harness::agreed("packed-layout", &source).unwrap_or_else(|error| {
         panic!("укладка: {error}");
+    });
+}
+
+/// Размер тегованной ячейки один у обоих путей - дескриптора и константы.
+///
+/// Тот же жанр, что [`both_paths_agree_on_the_size_of_the_aggregate`]:
+/// `rotate` берёт шаг у дескриптора типовой стороны, `built` укладывает
+/// константой понижения. Тег - вторая запись правила §4.11, и разойтись ей
+/// есть где: типовая сторона считает его в `flat.rs`, понижение - у себя.
+const TAGGED_TWO_WAYS: &str = "\
+type Layout = { size : UInt32, align : UInt32 }
+
+class Flat a where
+  layout : Layout
+
+data OptInt where
+  None : OptInt
+  Some : Int64 -> OptInt
+
+take : OptInt -> Int64
+take None = 0
+take (Some n) = n
+
+rotate : {Flat a} => Array 3 a -> Array 3 a
+rotate xs = arraySet xs 0 (arrayIndex xs 1)
+
+built : Array 3 OptInt
+built = arraySet (arraySet (arrayNew 3 None) 1 (Some 700)) 2 (Some 900)
+
+-- 700: ячейка, приехавшая из первой. Разойдись шаг - байты взялись бы не
+-- с той ячейки, и тег с payload'ом перепутались бы.
+main : Int64
+main = take (arrayIndex (rotate built) 0)
+";
+
+/// Оба пути согласны о шаге тегованной ячейки.
+#[test]
+fn both_paths_agree_on_the_tagged_size() {
+    assert_eq!(
+        harness::printed(TAGGED_TWO_WAYS),
+        "700",
+        "печать машины изменилась - свидетель говорит не о том"
+    );
+    harness::agreed("packed-tagged-after", TAGGED_TWO_WAYS).unwrap_or_else(|error| {
+        panic!("после специализации: {error}");
+    });
+    harness::as_written("packed-tagged-before", TAGGED_TWO_WAYS).unwrap_or_else(|error| {
+        panic!("до специализации: {error}");
     });
 }

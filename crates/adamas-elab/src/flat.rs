@@ -40,7 +40,7 @@ use adamas_core::term::{Name, Term};
 use adamas_core::value::{Env, Head, Lvl, Telescope, Value};
 use adamas_parser::ast::Symbol;
 
-use crate::class::{abstracted, binders_of};
+use crate::class::{abstracted, abstracted_pi, binders_of, goal_of};
 use crate::error::ElabError;
 use crate::own::Owned;
 
@@ -397,10 +397,20 @@ pub(crate) fn derive(
     // полиморфна по уровню, а словарь - нет, и решить её дырки может только
     // это сравнение (тот же порядок, что у реализации сигнатуры в
     // `class::implementing`).
-    check_within(&Ctx::new(signature), metas, &solution, ty).map_err(|_| ElabError::FlatShape {
-        why: "словарь `Flat` не сошёлся с объявленным классом: метод у него один - \
-              `layout : Layout`, а `Layout` есть `{ size : UInt32, align : UInt32 }` (§4.11)",
-        span,
+    // Сверяется словарь с **приведённой** целью, а не с написанным типом дырки.
+    // Решение имплисита приезжает туда бета-редексом по контексту (`Flat
+    // ((\m -> Int64) #0)`), и у лямбды в позиции аргумента тип не выводится
+    // вовсе - проверка отказывала на форме словаря, которая ни при чём.
+    // Телескоп при этом тот же, по которому построено решение, и цель посчитана
+    // в его контексте.
+    let checked = abstracted_pi(&binders, goal_of(goal).clone());
+    check_within(&Ctx::new(signature), metas, &solution, &checked).map_err(|_| {
+        ElabError::FlatShape {
+            why: "словарь `Flat` не сошёлся с объявленным классом: метод у него один - \
+                  `layout : Layout`, а `Layout` есть `{ size : UInt32, align : UInt32 }` \
+                  (§4.11)",
+            span,
+        }
     })?;
     Ok(eval(&Env::default(), &solution))
 }

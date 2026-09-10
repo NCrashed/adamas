@@ -72,6 +72,58 @@ fn a_flat_cell_lies_at_its_own_stride() {
     }
 }
 
+/// Колонка `Array 3 Vec3` из §4.11: тридцать шесть байт данных, граница четыре.
+///
+/// Числа взяты у раздела дословно - «`Vec3` из трёх `Float32` - 12 байт при
+/// выравнивании 4» - и здесь они **адреса**, а не ответ программы. Шаг стоит
+/// отдельно от ширины слова нарочно: двенадцать не кратно восьми, и подмена
+/// шага словом сдвинула бы вторую ячейку на четыре байта.
+///
+/// Поле внутри ячейки проверяется тем же способом: `z` второй ячейки обязано
+/// лежать по смещению `12 + 8`, а не там, куда попало бы поле, занимающее
+/// слово.
+#[test]
+fn a_column_of_vectors_takes_thirty_six_bytes() {
+    unsafe {
+        adamas_stat_reset();
+        let array = adamas_array_alloc(3, 12);
+        assert_eq!(adamas_array_stride(array), 12);
+        let base = array.cast::<u8>();
+        let cell = |index: usize| adamas_array_at(array, index).cast::<u8>() as usize;
+        assert_eq!(cell(0) - base as usize, PAYLOAD);
+        assert_eq!(
+            cell(1) - cell(0),
+            12,
+            "вторая ячейка стоит не через 12 байт"
+        );
+        assert_eq!(
+            cell(2) - cell(0),
+            24,
+            "третья ячейка стоит не через 24 байта"
+        );
+        // Данных ровно `3 × 12`: конец последней ячейки - тридцать шестой байт.
+        assert_eq!(cell(2) + 12 - cell(0), 36, "колонка занимает не 36 байт");
+        // Граница четыре: начало нагрузки делится на неё, значит и всякая
+        // ячейка - шаг кратен четырём.
+        assert_eq!((cell(0)) % 4, 0, "нагрузка не выровнена по четырём байтам");
+        // Поле `z` второй ячейки - двенадцать плюс восемь от начала данных.
+        let written: f32 = 30.0;
+        std::ptr::copy_nonoverlapping(
+            std::ptr::from_ref(&written).cast::<u8>(),
+            (cell(1) + 8) as *mut u8,
+            4,
+        );
+        let read = std::ptr::read_unaligned((cell(0) + 12 + 8) as *const f32);
+        assert!(
+            (read - 30.0).abs() < f32::EPSILON,
+            "поле `z` второй ячейки лежит не по смещению 20"
+        );
+        assert_eq!(adamas_stat_allocated(), 1, "колонка стоила не одного блока");
+        adamas_drop(array, None);
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
 /// Заполнение кладёт байты в каждую ячейку и не залезает в соседнюю.
 #[test]
 fn filling_writes_every_cell_and_only_it() {

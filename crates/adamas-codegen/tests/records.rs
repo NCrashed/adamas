@@ -11,18 +11,24 @@
 
 mod harness;
 
-/// Построение и проекция: ответ зависит от каждого слота.
+/// Построение и проекция: ответ называет тот слот, который написан.
 ///
-/// Вычитание, а не сложение: перестановка слотов на сложении ненаблюдаема, а
-/// здесь `300 - 20 - 1 = 279` против `1 - 1 - 1` у проекции, всегда берущей
-/// нулевой слот, и против `-279` у перевёрнутого порядка слотов.
+/// Поля различны нарочно и все три: возьми проекция соседний слот - ответ
+/// сменится, и сменится он на любом из двух соседей. Поля не примитивны, и
+/// потому запись здесь **объект кучи**: плотная укладка примитивной записи -
+/// вторая половина трека (`packed.rs`).
 const FIELDS: &str = "\
-type Triple = { first : Int64, second : Int64, third : Int64 }
+data Colour where
+  Red : Colour
+  Green : Colour
+  Blue : Colour
 
-main : Int64
+type Triple = { first : Colour, second : Colour, third : Colour }
+
+main : Colour
 main =
-  let made : Triple = { first = 1, second = 20, third = 300 }
-  subInt64 (subInt64 made.third made.second) made.first
+  let made : Triple = { first = Red, second = Green, third = Blue }
+  made.third
 ";
 
 /// Печать: поля идут как написаны, значение поля скобок не требует.
@@ -129,12 +135,13 @@ fn a_projection_takes_the_named_slot_and_not_its_neighbour() {
     });
     assert_eq!(
         harness::printed(FIELDS),
-        "279",
+        "Blue",
         "свидетель перестал различать слоты"
     );
     let (allocated, live) = harness::blocks("record-fields", &stderr);
     // Одна запись - **один** блок: три поля лежат слотами внутри него, а не
-    // объектами. Заголовков у полей нет - они плоские (§4.11).
+    // тремя объектами. Значения полей ячеек не стоят - конструкторы нульарные
+    // и непосредственны.
     assert_eq!(allocated, 1, "запись стоила не одного блока");
     assert_eq!(live, 0, "прогон оставил блоки живыми");
 }

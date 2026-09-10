@@ -54,7 +54,8 @@ use std::fmt::Write as _;
 use adamas_core::prim::{PrimOp, PrimTy};
 
 use crate::ir::{
-    Arm, Constructor, CtorId, Elems, Expr, Form, FuncId, Function, LocalId, Program, Repr, Stride,
+    Arm, Constructor, CtorId, Elems, Expr, Form, FuncId, Function, LocalId, PackId, Program, Repr,
+    Stride,
 };
 
 /// Как уложены элементы массива с таким шагом.
@@ -109,6 +110,7 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     preamble(&mut out);
     out.push_str(FLAT);
     out.push('\n');
+    packings(&mut out, program);
     table(&mut out, program);
     out.push_str(RELEASE);
     out.push('\n');
@@ -179,7 +181,17 @@ fn slot_kind(repr: Repr) -> u8 {
 }
 
 /// C-тип связывания.
-fn c_type(repr: Repr) -> &'static str {
+fn c_type(repr: Repr) -> String {
+    match repr {
+        // Плоский агрегат - свой тип на укладку: байты по значению, и передаётся
+        // он как всякая структура C (§4.11).
+        Repr::Packed(pack) => format!("adamas_pack_{}", pack.0),
+        other => scalar(other).to_owned(),
+    }
+}
+
+/// C-тип всего, кроме плоского агрегата: имя у него постоянное.
+fn scalar(repr: Repr) -> &'static str {
     match repr {
         // Массив и запись - объекты кучи, и в C они такое же слово, как всякий
         // объект: различие плоского и указательного живёт **внутри** них.
@@ -198,6 +210,8 @@ fn c_type(repr: Repr) -> &'static str {
         Repr::Flat(PrimTy::UInt64) => "uint64_t",
         Repr::Flat(PrimTy::Float32) => "float",
         Repr::Flat(PrimTy::Float64) => "double",
+        // Имя зависит от номера укладки, и постоянным быть не может.
+        Repr::Packed(_) => "adamas_pack",
     }
 }
 
@@ -219,6 +233,50 @@ fn preamble(out: &mut String) {
         "#define ADAMAS_ERASED adamas_con0(0xFFFCu)\n",
         "\n",
     ));
+}
+
+/// Типы плоских агрегатов (§4.11): байты своей длины и своей границы.
+///
+/// Байтовый массив, а не структура из полей: укладку считает понижение по
+/// правилу §4.11, и структура C добавила бы к ней **своё** правило выравнивания.
+/// Совпади они сегодня - разошлись бы на первом же типе, где ABI платформы
+/// думает иначе, и разошлись бы молча. `_Alignas` при этом обязателен: без него
+/// массив байт стоял бы по единице, и `Float32` внутри массива читался бы
+/// невыровненным.
+fn packings(out: &mut String, program: &Program) {
+    if program.packings.is_empty() {
+        return;
+    }
+    out.push_str(concat!(
+        "/* Плоские агрегаты (§4.11): поля лежат подряд, поле адресуется\n",
+        " * смещением. Размер и граница посчитаны понижением, а не C. */\n"
+    ));
+    for (at, packing) in program.packings.iter().enumerate() {
+        let fields: Vec<String> = packing
+            .labels
+            .iter()
+            .zip(&packing.slots)
+            .map(|(label, slot)| format!("{}@{} {}", escaped(label), slot.offset, slot.ty.name()))
+            .collect();
+        let _ = writeln!(out, "/* {} */", fields.join(", "));
+        let _ = writeln!(
+            out,
+            "typedef struct adamas_pack_{at} {{ _Alignas({}) unsigned char bytes[{}]; }} \
+             adamas_pack_{at};",
+            packing.align, packing.size
+        );
+        let _ = writeln!(
+            out,
+            "_Static_assert(sizeof(adamas_pack_{at}) == {}u, \"размер агрегата разошёлся с §4.11\");",
+            packing.size
+        );
+        let _ = writeln!(
+            out,
+            "_Static_assert(_Alignof(adamas_pack_{at}) == {}u, \"граница агрегата разошлась с §4.11\");",
+            packing.align
+        );
+    }
+    out.push('\n');
 }
 
 /// Таблица конструкторов: имя и число полей по тегу.
@@ -361,7 +419,12 @@ fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
         | Expr::Literal { .. }
         | Expr::LayoutField { .. }
         | Expr::Layout { .. } => {}
-        Expr::Construct { arguments, .. } | Expr::Call { arguments, .. } => {
+        Expr::Unpack { value, .. } => walk(value, visit),
+        Expr::Construct { arguments, .. }
+        | Expr::Call { arguments, .. }
+        | Expr::Pack {
+            fields: arguments, ..
+        } => {
             for argument in arguments {
                 walk(argument, visit);
             }
@@ -618,6 +681,10 @@ impl Emitter<'_> {
                 .map_or(Repr::Boxed, |arm| self.shape(&arm.body)),
             Expr::Layout { .. } => Repr::Layout,
             Expr::LayoutField { .. } => Repr::Flat(PrimTy::UInt32),
+            Expr::Pack { packing, .. } => Repr::Packed(*packing),
+            Expr::Unpack { packing, field, .. } => {
+                Repr::Flat(self.program.packings[packing.0 as usize].slots[*field as usize].ty)
+            }
             Expr::ArrayNew { stride, .. } | Expr::ArraySet { stride, .. } => {
                 Repr::Array(elems(*stride))
             }
@@ -655,6 +722,12 @@ impl Emitter<'_> {
             Expr::LayoutField { descriptor, align } => {
                 self.descriptor_field(*descriptor, *align, depth)
             }
+            Expr::Pack { packing, fields } => self.pack(*packing, fields, depth),
+            Expr::Unpack {
+                packing,
+                field,
+                value,
+            } => self.unpack(*packing, *field, value, depth),
             Expr::ArrayNew {
                 stride,
                 count,
@@ -672,36 +745,13 @@ impl Emitter<'_> {
                 reuse,
                 arguments,
             } => self.construct(*constructor, *reuse, arguments, depth),
-            Expr::ConstructClosure { constructor } => {
-                let described = &self.program.constructors[usize::from(constructor.0)];
-                let name = self.temp();
-                let _ = writeln!(
-                    self.out,
-                    "{pad}adamas_value {name} = adamas_closure(make_{}, \
-                     adamas_release_value, {}u, 0u); /* {} */",
-                    constructor.0,
-                    described.binders.len(),
-                    escaped(&described.name)
-                );
-                name
-            }
+            Expr::ConstructClosure { constructor } => self.building(*constructor, depth),
             Expr::Call {
                 function,
                 arguments,
             } => self.call(*function, arguments, depth),
             Expr::Closure { function, captured } => self.closure(*function, captured, depth),
-            Expr::Apply { callee, argument } => {
-                let callee = self.value(callee, depth);
-                let argument = self.value(argument, depth);
-                let name = self.temp();
-                // Оба скрытых аргумента пусты: хендлеров в чистом фрагменте нет,
-                // а `NULL` рантайм принимает всюду, где их читает.
-                let _ = writeln!(
-                    self.out,
-                    "{pad}adamas_value {name} = adamas_apply({callee}, NULL, NULL, {argument});"
-                );
-                name
-            }
+            Expr::Apply { callee, argument } => self.applying(callee, argument, depth),
             Expr::Bind {
                 binding,
                 value,
@@ -763,6 +813,79 @@ impl Emitter<'_> {
         name
     }
 
+    /// Конструктор значением: замыкание, копящее аргументы.
+    fn building(&mut self, constructor: CtorId, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let described = &self.program.constructors[usize::from(constructor.0)];
+        let arity = described.binders.len();
+        let title = escaped(&described.name);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_value {name} = adamas_closure(make_{}, \
+             adamas_release_value, {arity}u, 0u); /* {title} */",
+            constructor.0
+        );
+        name
+    }
+
+    /// Применение значения к одному аргументу.
+    ///
+    /// Оба скрытых аргумента пусты: хендлеров в чистом фрагменте нет, а `NULL`
+    /// рантайм принимает всюду, где их читает.
+    fn applying(&mut self, callee: &Expr, argument: &Expr, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let callee = self.value(callee, depth);
+        let argument = self.value(argument, depth);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_value {name} = adamas_apply({callee}, NULL, NULL, {argument});"
+        );
+        name
+    }
+
+    /// Плоский агрегат: поля кладутся по своим смещениям (§4.11).
+    ///
+    /// `memcpy`, а не приведение указателя: поле стоит по своей границе внутри
+    /// байтового массива, и читать его как `float *` значило бы обещать
+    /// компилятору выравнивание, которого правило §4.11 не даёт.
+    fn pack(&mut self, packing: PackId, fields: &[Expr], depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let described = self.program.packings[packing.0 as usize].clone();
+        let given: Vec<String> = fields
+            .iter()
+            .map(|field| self.value(field, depth))
+            .collect();
+        let name = self.temp();
+        let _ = writeln!(self.out, "{pad}{} {name};", c_type(Repr::Packed(packing)));
+        for (slot, value) in described.slots.iter().zip(&given) {
+            let _ = writeln!(
+                self.out,
+                "{pad}memcpy({name}.bytes + {}, &{value}, {}u);",
+                slot.offset,
+                slot.ty.size()
+            );
+        }
+        name
+    }
+
+    /// Поле плоского агрегата: чтение по смещению.
+    fn unpack(&mut self, packing: PackId, field: u32, value: &Expr, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let slot = self.program.packings[packing.0 as usize].slots[field as usize];
+        let value = self.value(value, depth);
+        let name = self.temp();
+        let _ = writeln!(self.out, "{pad}{} {name};", c_type(Repr::Flat(slot.ty)));
+        let _ = writeln!(
+            self.out,
+            "{pad}memcpy(&{name}, {value}.bytes + {}, {}u);",
+            slot.offset,
+            slot.ty.size()
+        );
+        name
+    }
+
     /// Литерал: биты, а не написанное число.
     ///
     /// Так он доезжает побитово, и ни `INT64_MIN` без суффикса, ни двойное
@@ -807,9 +930,12 @@ impl Emitter<'_> {
     /// Константа - у мономорфизованного кода, поле дескриптора - у обобщённого
     /// (§4.11). Разница видна ровно здесь и больше нигде: остальной массив у
     /// обоих один.
-    fn step(stride: Stride) -> String {
+    fn step(&self, stride: Stride) -> String {
         match stride {
             Stride::Static(ty) => format!("{}u", ty.size()),
+            // Размер агрегата посчитан по §4.11 понижением, и здесь он
+            // константа наравне с шириной примитива.
+            Stride::Packed(pack) => format!("{}u", self.program.packings[pack.0 as usize].size),
             Stride::Dynamic(local) => format!("(size_t)v{}.size", local.0),
         }
     }
@@ -829,7 +955,7 @@ impl Emitter<'_> {
         let count = self.value(count, depth);
         let initial = self.value(initial, depth);
         let name = self.temp();
-        let step = stride.map_or_else(|| "0u".to_owned(), Self::step);
+        let step = stride.map_or_else(|| "0u".to_owned(), |it| self.step(it));
         let _ = writeln!(
             self.out,
             "{pad}adamas_value {name} = adamas_array_alloc((size_t){count}, {step});"
@@ -838,6 +964,13 @@ impl Emitter<'_> {
             // Известный тип лежит в переменной, неизвестный - уже буфером.
             Some(Stride::Static(_)) => {
                 let _ = writeln!(self.out, "{pad}adamas_array_fill_flat({name}, &{initial});");
+            }
+            // Агрегат - структура на кадре, и байты его начинаются с `bytes`.
+            Some(Stride::Packed(_)) => {
+                let _ = writeln!(
+                    self.out,
+                    "{pad}adamas_array_fill_flat({name}, {initial}.bytes);"
+                );
             }
             Some(Stride::Dynamic(_)) => {
                 let _ = writeln!(self.out, "{pad}adamas_array_fill_flat({name}, {initial});");
@@ -907,8 +1040,14 @@ impl Emitter<'_> {
                     c_type(Repr::Flat(ty))
                 );
             }
+            // Агрегат кладётся байтами: приведение к его C-типу обещало бы
+            // выравнивание ячейки, а ячейка стоит по шагу массива.
+            Stride::Packed(_) => {
+                let step = self.step(stride);
+                let _ = writeln!(self.out, "{pad}memcpy({cell}, {value}.bytes, {step});");
+            }
             Stride::Dynamic(_) => {
-                let step = Self::step(stride);
+                let step = self.step(stride);
                 let _ = writeln!(self.out, "{pad}memcpy({cell}, {value}, {step});");
             }
         }
@@ -939,8 +1078,16 @@ impl Emitter<'_> {
                      adamas_release_value);"
                 );
             }
+            Some(Stride::Packed(pack)) => {
+                let _ = writeln!(self.out, "{pad}{} {name};", c_type(Repr::Packed(pack)));
+                let _ = writeln!(
+                    self.out,
+                    "{pad}adamas_array_read({array}, (size_t){at}, {name}.bytes, \
+                     adamas_release_value);"
+                );
+            }
             Some(stride @ Stride::Dynamic(_)) => {
-                let step = Self::step(stride);
+                let step = self.step(stride);
                 let buffer = self.temp();
                 let _ = writeln!(self.out, "{pad}char {buffer}[{step}];");
                 let _ = writeln!(

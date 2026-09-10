@@ -100,8 +100,8 @@ use adamas_core::term::{Case, Index, Name, Term};
 use adamas_core::value::{Env, Lvl, Value};
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Elems, Expr, Fact, Form, FuncId, Function, LocalId, Program,
-    Repr, Stride,
+    Arm, Binding, Constructor, CtorId, Elems, Expr, Fact, Form, FuncId, Function, LocalId, PackId,
+    Packing, Program, Repr, Slot as PackSlot, Stride,
 };
 
 /// Почему понижение отказало.
@@ -213,6 +213,14 @@ pub enum LowerError {
     #[error("ответ программы - массив: печатать его нечем (§4.11)")]
     ArrayAnswer,
 
+    /// Ответ программы - плоский агрегат.
+    ///
+    /// Печать идёт по тегу заголовка, а у плоского агрегата заголовка нет
+    /// вовсе (§4.11): в ответе лежат байты. Названная граница того же жанра,
+    /// что массив в ответе.
+    #[error("ответ программы - плоский агрегат: заголовка у него нет, печатать нечем (§4.11)")]
+    PackedAnswer,
+
     /// Дескриптор укладки написан не той записью.
     #[error("дескриптор укладки ожидался записью `{{ layout = {{ size, align }} }}` (§4.11)")]
     Descriptor,
@@ -286,6 +294,7 @@ fn describe(repr: Repr) -> String {
         Repr::Array(Elems::Flat) => "плоский массив".to_owned(),
         Repr::Array(Elems::Boxed) => "указательный массив".to_owned(),
         Repr::Record(tag) => format!("запись формы #{}", tag.0),
+        Repr::Packed(pack) => format!("плоский агрегат укладки #{}", pack.0),
     }
 }
 
@@ -385,6 +394,7 @@ impl Scope {
 struct Lowerer<'a> {
     signature: &'a Signature,
     constructors: Vec<Constructor>,
+    packings: Vec<Packing>,
     tags: HashMap<Name, CtorId>,
     functions: Vec<Function>,
     numbers: HashMap<Name, FuncId>,
@@ -397,6 +407,7 @@ impl<'a> Lowerer<'a> {
         Self {
             signature,
             constructors: Vec::new(),
+            packings: Vec::new(),
             tags: HashMap::new(),
             functions: Vec::new(),
             numbers: HashMap::new(),
@@ -420,13 +431,21 @@ impl<'a> Lowerer<'a> {
             body: Expr::Erased,
         });
         let mut scope = Scope::default();
-        let (body, repr) = self.expr(&mut scope, entry)?;
-        self.functions[entry_id.0].body = body;
+        let (mut body, mut repr) = self.expr(&mut scope, entry)?;
         // У точки входа объявленного типа нет - она уже инстанцирована, - и
         // представление ответа берётся у самого ответа.
         if matches!(repr, Repr::Array(_)) {
             return Err(LowerError::ArrayAnswer);
         }
+        // Плотный агрегат печатается упакованным: печать идёт по тегу
+        // заголовка, а у плотного заголовка нет вовсе (§4.11). Упаковка тут не
+        // выбор представления, а цена печати, и она одна на весь ответ.
+        if let Repr::Packed(pack) = repr {
+            let tag = self.boxed_shape(pack)?;
+            body = self.boxing(&mut scope, body, pack, tag);
+            repr = Repr::Record(tag);
+        }
+        self.functions[entry_id.0].body = body;
         self.functions[entry_id.0].result = repr;
 
         // Очередь, а не рекурсия: имя получает номер до того, как понижено его
@@ -459,6 +478,7 @@ impl<'a> Lowerer<'a> {
 
         Ok(Program {
             constructors: self.constructors,
+            packings: self.packings,
             functions: self.functions,
             entry: entry_id,
         })
@@ -702,10 +722,134 @@ impl<'a> Lowerer<'a> {
         if fits(got, want) {
             return Ok(value);
         }
+        if let Some(moved) = self.moved(scope, &value, got, want)? {
+            return Ok(moved);
+        }
         Err(LowerError::Representation {
             at,
             want: describe(want),
             got: describe(got),
+        })
+    }
+
+    /// Перекладывает значение между плотной укладкой и объектом кучи (§4.11).
+    ///
+    /// Два перехода, и оба стоят копии полей, а не приведения. **Упаковка** -
+    /// плотный агрегат туда, где ждут указатель: объект кучи с заголовком,
+    /// слот на поле. **Распаковка** - обратно: слоты читаются, байты ложатся
+    /// подряд. `None` - перехода нет, и отвечать будет сверка представлений.
+    ///
+    /// Нужны они потому, что плоское и указательное встречаются в одной
+    /// программе по построению: `Array n Vec3` требует плотного элемента
+    /// (§4.11), а `Cons` и печать ответа говорят указателями. Цена названа и
+    /// она поэлементная; убрать её - работа специализации, а не понижения.
+    fn moved(
+        &mut self,
+        scope: &mut Scope,
+        value: &Expr,
+        got: Repr,
+        want: Repr,
+    ) -> Result<Option<Expr>, LowerError> {
+        match (got, want) {
+            (Repr::Packed(pack), Repr::Boxed | Repr::Record(_)) => {
+                let tag = self.boxed_shape(pack)?;
+                if !fits(Repr::Record(tag), want) {
+                    return Ok(None);
+                }
+                Ok(Some(self.boxing(scope, value.clone(), pack, tag)))
+            }
+            (Repr::Record(tag), Repr::Packed(pack)) => {
+                Ok(self.tightening(scope, value.clone(), tag, pack))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Форма объекта кучи, отвечающая плотной укладке.
+    fn boxed_shape(&mut self, pack: PackId) -> Result<CtorId, LowerError> {
+        let packing = self.packings[pack.0 as usize].clone();
+        let facts: Vec<Fact> = packing
+            .slots
+            .iter()
+            .map(|slot| Fact::declared(Mult::One).shaped(Repr::Flat(slot.ty)))
+            .collect();
+        self.shape(&packing.labels, &facts)
+    }
+
+    /// Плотный агрегат объектом кучи: поля читаются смещением, кладутся слотом.
+    fn boxing(&mut self, scope: &mut Scope, value: Expr, pack: PackId, tag: CtorId) -> Expr {
+        let count = self.packings[pack.0 as usize].slots.len();
+        let binding = Binding {
+            name: "агрегат".to_owned(),
+            local: scope.fresh(),
+            fact: Fact::present(Mult::Many).shaped(Repr::Packed(pack)),
+        };
+        let local = binding.local;
+        let fields = (0..count)
+            .map(|at| Expr::Unpack {
+                packing: pack,
+                field: u32::try_from(at).unwrap_or(u32::MAX),
+                value: Box::new(Expr::Local(local)),
+            })
+            .collect();
+        Expr::Bind {
+            binding,
+            value: Box::new(value),
+            body: Box::new(Expr::Construct {
+                constructor: tag,
+                reuse: None,
+                arguments: fields,
+            }),
+        }
+    }
+
+    /// Объект кучи плотным агрегатом: разбор в одну ветвь, поля - в байты.
+    ///
+    /// Разбором, а не отдельным узлом, по той же причине, что и проекция:
+    /// договор о владении у разбора уже есть, и разобранный объект отдаётся им.
+    /// `None` - формы не сходятся полями, и отвечать будет сверка.
+    fn tightening(
+        &mut self,
+        scope: &mut Scope,
+        value: Expr,
+        tag: CtorId,
+        pack: PackId,
+    ) -> Option<Expr> {
+        let described = self.constructors[usize::from(tag.0)].clone();
+        let packing = self.packings[pack.0 as usize].clone();
+        if described.labels.as_deref() != Some(&packing.labels) {
+            return None;
+        }
+        let matching = described
+            .binders
+            .iter()
+            .zip(&packing.slots)
+            .all(|(fact, slot)| fact.present && fact.repr == Repr::Flat(slot.ty));
+        if !matching || described.binders.len() != packing.slots.len() {
+            return None;
+        }
+        let fields: Vec<Binding> = packing
+            .labels
+            .iter()
+            .zip(&described.binders)
+            .map(|(label, fact)| Binding {
+                name: label.clone(),
+                local: scope.fresh(),
+                fact: *fact,
+            })
+            .collect();
+        let taken = fields.iter().map(|it| Expr::Local(it.local)).collect();
+        Some(Expr::Match {
+            scrutinee: Box::new(value),
+            consumed: Mult::One,
+            arms: vec![Arm {
+                constructor: tag,
+                fields,
+                body: Expr::Pack {
+                    packing: pack,
+                    fields: taken,
+                },
+            }],
         })
     }
 
@@ -722,9 +866,13 @@ impl<'a> Lowerer<'a> {
         term: &Term,
         want: Repr,
     ) -> Result<(Expr, Repr), LowerError> {
-        if let (Term::Object(fields), Repr::Record(tag)) = (term, want) {
+        if let Term::Object(fields) = term {
             if descriptor(fields).is_none() {
-                return Ok((self.object_as(scope, fields, tag)?, want));
+                match want {
+                    Repr::Record(tag) => return Ok((self.object_as(scope, fields, tag)?, want)),
+                    Repr::Packed(pack) => return Ok((self.pack_as(scope, fields, pack)?, want)),
+                    _ => {}
+                }
             }
         }
         self.expr(scope, term)
@@ -813,6 +961,47 @@ impl<'a> Lowerer<'a> {
         })
     }
 
+    /// Значение записи, уложенное **плоско** (§4.11).
+    ///
+    /// Отличается от [`Lowerer::object_as`] тем, куда ложатся поля: там слот
+    /// объекта кучи, здесь смещение внутри байтов. Метки сверяются так же -
+    /// позиция в позицию.
+    fn pack_as(
+        &mut self,
+        scope: &mut Scope,
+        fields: &[(Name, Rc<Term>)],
+        pack: PackId,
+    ) -> Result<Expr, LowerError> {
+        let packing = self.packings[pack.0 as usize].clone();
+        let mismatch = || LowerError::Representation {
+            at: "поля плоской записи",
+            want: format!("{{{}}}", packing.labels.join(", ")),
+            got: format!(
+                "{{{}}}",
+                fields
+                    .iter()
+                    .map(|(label, _)| label.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+        if packing.labels.len() != fields.len() {
+            return Err(mismatch());
+        }
+        let mut given = Vec::with_capacity(fields.len());
+        for (position, (label, value)) in fields.iter().enumerate() {
+            if **label != *packing.labels[position] {
+                return Err(mismatch());
+            }
+            let want = Repr::Flat(packing.slots[position].ty);
+            given.push(self.shaped(scope, value, want, "поле плоской записи")?);
+        }
+        Ok(Expr::Pack {
+            packing: pack,
+            fields: given,
+        })
+    }
+
     /// Проекция поля: чтение слота, найденного формой записи.
     ///
     /// Понижается **разбором в одну ветвь**, а не отдельным узлом, и это не
@@ -827,7 +1016,29 @@ impl<'a> Lowerer<'a> {
     ) -> Result<(Expr, Repr), LowerError> {
         let (value, repr) = self.expr(scope, record)?;
         if repr == Repr::Layout && &**label == METHOD {
-            return self.materialised(scope, value);
+            return Ok(self.materialised(scope, value));
+        }
+        if let Repr::Packed(pack) = repr {
+            // Плоский агрегат: поле адресуется **смещением**, а не слотом, - и
+            // это названная цена варианта (а) вопроса 154.
+            let packing = &self.packings[pack.0 as usize];
+            let at = packing
+                .labels
+                .iter()
+                .position(|it| **it == **label)
+                .ok_or_else(|| LowerError::NoField {
+                    label: label.to_string(),
+                    shape: format!("{{{}}}", packing.labels.join(", ")),
+                })?;
+            let ty = packing.slots[at].ty;
+            return Ok((
+                Expr::Unpack {
+                    packing: pack,
+                    field: u32::try_from(at).unwrap_or(u32::MAX),
+                    value: Box::new(value),
+                },
+                Repr::Flat(ty),
+            ));
         }
         let Repr::Record(tag) = repr else {
             return Err(LowerError::Shapeless {
@@ -885,18 +1096,9 @@ impl<'a> Lowerer<'a> {
     /// двух чисел. Порядок полей тот же, что требует [`descriptor`]: сперва
     /// размер, потом выравнивание. Напиши программа `Layout` в другом порядке -
     /// формы разойдутся, и сверка представлений скажет об этом по имени.
-    fn materialised(
-        &mut self,
-        scope: &mut Scope,
-        descriptor: Expr,
-    ) -> Result<(Expr, Repr), LowerError> {
-        let word = Repr::Flat(PrimTy::UInt32);
-        let facts = [
-            Fact::declared(Mult::One).shaped(word),
-            Fact::declared(Mult::One).shaped(word),
-        ];
+    fn materialised(&mut self, scope: &mut Scope, descriptor: Expr) -> (Expr, Repr) {
         let labels = [SIZE.to_owned(), ALIGN.to_owned()];
-        let tag = self.shape(&labels, &facts)?;
+        let pack = self.packing(&labels, &[PrimTy::UInt32, PrimTy::UInt32]);
         // Дескриптор связывается: полей у него два, а посчитан он однажды.
         let binding = Binding {
             name: "дескриптор".to_owned(),
@@ -904,14 +1106,13 @@ impl<'a> Lowerer<'a> {
             fact: Fact::present(Mult::Many).shaped(Repr::Layout),
         };
         let local = binding.local;
-        Ok((
+        (
             Expr::Bind {
                 binding,
                 value: Box::new(descriptor),
-                body: Box::new(Expr::Construct {
-                    constructor: tag,
-                    reuse: None,
-                    arguments: vec![
+                body: Box::new(Expr::Pack {
+                    packing: pack,
+                    fields: vec![
                         Expr::LayoutField {
                             descriptor: local,
                             align: false,
@@ -923,8 +1124,8 @@ impl<'a> Lowerer<'a> {
                     ],
                 }),
             },
-            Repr::Record(tag),
-        ))
+            Repr::Packed(pack),
+        )
     }
 
     /// Форма записи по меткам и представлениям полей; заводится однажды.
@@ -1168,8 +1369,15 @@ impl<'a> Lowerer<'a> {
         // сперва нормализуется: `((\m -> #2) …)` переменной не является, а
         // после нормализации является.
         let element = normalized(element, depth);
-        let stride = stride_of(self.signature, &element, depth, &scope.dicts);
-        let elements = stride.map_or(Repr::Boxed, Stride::element);
+        let dicts = scope.dicts.clone();
+        let stride = self.stride_of(&element, depth, &dicts);
+        // Представление ячейки: у плоского массива его даёт шаг, у
+        // указательного - сам тип элемента. Второе не «просто указатель»:
+        // `Array n Cell` держит записи, и форма их нужна проекции.
+        let elements = match stride {
+            Some(stride) => stride.element(),
+            None => self.repr_of(&element, depth, &dicts)?,
+        };
         let cells = stride.map_or(Elems::Boxed, |_| Elems::Flat);
         let word = Repr::Flat(PrimTy::UInt64);
         match op {
@@ -1517,7 +1725,7 @@ impl<'a> Lowerer<'a> {
             let Slot::Bound(local, fact) = slot else {
                 return Err(LowerError::Unbound { index });
             };
-            if fact.present && !fact.repr.boxed() {
+            if fact.present && !fact.repr.pointer() {
                 return Err(LowerError::Representation {
                     at: "захват замыкания",
                     want: describe(Repr::Boxed),
@@ -1707,12 +1915,11 @@ impl Lowerer<'_> {
         let (head, arguments) = spine(&current);
         match head {
             Term::Prim(Prim::Array) if arguments.len() == 2 => {
-                return Ok(
-                    match stride_of(self.signature, arguments[1], depth, dicts) {
-                        Some(_) => Repr::Array(Elems::Flat),
-                        None => Repr::Array(Elems::Boxed),
-                    },
-                );
+                let element = arguments[1].clone();
+                return Ok(match self.stride_of(&element, depth, dicts) {
+                    Some(_) => Repr::Array(Elems::Flat),
+                    None => Repr::Array(Elems::Boxed),
+                });
             }
             // `Flat` - единственный класс, чей словарь не объект кучи: у него
             // один метод, и метод этот сам есть укладка (§4.11). Проверяется он
@@ -1723,9 +1930,40 @@ impl Lowerer<'_> {
             _ => {}
         }
         match &unfolded(self.signature, &current, depth) {
-            Term::Record(fields) => self.record_shape(fields, depth, dicts),
+            // Запись из одних примитивов плоская - §4.11 говорит это дословно,
+            // - и потому уложена плотно, а не слотами объекта. Прочие записи
+            // остаются объектом кучи: поле-указатель в плотную укладку не
+            // ложится.
+            Term::Record(fields) => match self.packed_shape(fields) {
+                Some(packed) => Ok(packed),
+                None => self.record_shape(fields, depth, dicts),
+            },
             _ => Ok(Repr::Boxed),
         }
+    }
+
+    /// Плоская укладка записи, если все её поля примитивны (§4.11).
+    ///
+    /// `None` - хотя бы одно поле не примитив: указатель в плотную укладку не
+    /// ложится, вложенный агрегат требовал бы проекции путём, а стёртое поле
+    /// значения не имеет вовсе.
+    fn packed_shape(&mut self, fields: &adamas_core::term::Fields) -> Option<Repr> {
+        if fields.is_open() || fields.is_empty() {
+            return None;
+        }
+        let mut labels = Vec::with_capacity(fields.len());
+        let mut primitives = Vec::with_capacity(fields.len());
+        for field in fields.iter() {
+            let Term::Prim(Prim::Ty(prim)) = unaliased(self.signature, &field.ty) else {
+                return None;
+            };
+            if field.mult == Mult::Zero {
+                return None;
+            }
+            labels.push(field.name.to_string());
+            primitives.push(*prim);
+        }
+        Some(Repr::Packed(self.packing(&labels, &primitives)))
     }
 
     /// Форма записи, прочитанная у её типа.
@@ -1759,6 +1997,48 @@ impl Lowerer<'_> {
             facts.push(fact);
         }
         Ok(Repr::Record(self.shape(&labels, &facts)?))
+    }
+
+    /// Шаг индексации массива с таким элементом. `None` - элемент указательный.
+    ///
+    /// Плоским элемент бывает по трём причинам, и §4.11 называет все три.
+    /// Примитив - шаг известен типом. **Запись, все поля которой плоские** -
+    /// шаг есть её размер, посчитанный [`packing_of`]; это и есть колонка
+    /// `Vec3`, ради которой §4.11 писался. И переменная, о которой в
+    /// контексте есть словарь `Flat`, - шаг приходит дескриптором, а код один
+    /// на все плоские элементы.
+    ///
+    /// Названная граница: агрегат берётся записью из **примитивов**. Семейство
+    /// с тегом (§4.11, `Option Int64` в 16 байт) и вложенный агрегат сюда не
+    /// входят - у первого нет конструирования плоским значением, у второго
+    /// проекция шла бы путём, а не меткой.
+    fn stride_of(&mut self, ty: &Term, depth: u32, dicts: &Dicts) -> Option<Stride> {
+        let current = unaliased(self.signature, ty).clone();
+        if let Term::Prim(Prim::Ty(prim)) = current {
+            return Some(Stride::Static(prim));
+        }
+        if let Term::Var(Index(index)) = current {
+            let level = depth.checked_sub(index + 1)?;
+            return dicts.get(&level).copied().map(Stride::Dynamic);
+        }
+        let Term::Record(fields) = &unfolded(self.signature, &current, depth) else {
+            return None;
+        };
+        match self.packed_shape(fields) {
+            Some(Repr::Packed(pack)) => Some(Stride::Packed(pack)),
+            _ => None,
+        }
+    }
+
+    /// Укладка агрегата по меткам и полям; заводится однажды.
+    fn packing(&mut self, labels: &[String], fields: &[PrimTy]) -> PackId {
+        let made = packing_of(labels, fields);
+        if let Some(at) = self.packings.iter().position(|it| *it == made) {
+            return PackId(u32::try_from(at).unwrap_or(u32::MAX));
+        }
+        let id = PackId(u32::try_from(self.packings.len()).unwrap_or(u32::MAX));
+        self.packings.push(made);
+        id
     }
 
     /// Кратность и представление `n`-го связывания типа.
@@ -1878,25 +2158,38 @@ fn unaliased<'a>(signature: &'a Signature, ty: &'a Term) -> &'a Term {
     current
 }
 
-/// Шаг индексации массива с таким элементом. `None` - элемент указательный.
+/// Ближайшее сверху кратное `align`. То же правило, что в типовой стороне.
+fn aligned(offset: u32, align: u32) -> u32 {
+    offset.next_multiple_of(align.max(1))
+}
+
+/// Плоская укладка записи из примитивных полей (§4.11).
 ///
-/// Плоским элемент бывает по двум причинам, и §4.11 называет обе. Либо он
-/// примитив, и тогда шаг известен типом. Либо он **переменная, о которой в
-/// контексте есть словарь `Flat`**, и тогда шаг приходит дескриптором, а код
-/// один на все плоские элементы.
+/// «Укладка последовательная, выравнивание по максимальному `align` полей» -
+/// правило дословно, и числа отсюда обязаны совпасть с теми, что выводит
+/// типовая сторона (`adamas-elab/src/flat.rs`). Совпадение стоит теста
+/// (`tests/packed.rs`), потому что запись числа здесь вторая: `adamas-codegen`
+/// на элаборацию не смотрит.
 ///
-/// Названная граница: запись и семейство из плоских полей §4.11 считает
-/// плоскими, а понижение здесь - нет. Укладка агрегата у него не выражена
-/// вовсе ([`Repr::Flat`] несёт примитив), и объявить такой элемент плоским
-/// значило бы посчитать шаг наугад.
-fn stride_of(signature: &Signature, ty: &Term, depth: u32, dicts: &Dicts) -> Option<Stride> {
-    match unaliased(signature, ty) {
-        Term::Prim(Prim::Ty(prim)) => Some(Stride::Static(*prim)),
-        Term::Var(Index(index)) => {
-            let level = depth.checked_sub(index + 1)?;
-            dicts.get(&level).copied().map(Stride::Dynamic)
-        }
-        _ => None,
+/// Названная граница: поля только примитивные. Вложенный агрегат §4.11
+/// укладывает тем же правилом, но проекция сквозь него - путь, а не метка, и
+/// путей у этого среза нет.
+fn packing_of(labels: &[String], fields: &[PrimTy]) -> Packing {
+    let mut slots = Vec::with_capacity(fields.len());
+    let mut size = 0u32;
+    let mut align = 1u32;
+    for ty in fields {
+        let width = ty.size();
+        let offset = aligned(size, width);
+        slots.push(PackSlot { offset, ty: *ty });
+        size = offset.saturating_add(width);
+        align = align.max(width);
+    }
+    Packing {
+        labels: labels.to_vec(),
+        slots,
+        size: aligned(size, align),
+        align,
     }
 }
 

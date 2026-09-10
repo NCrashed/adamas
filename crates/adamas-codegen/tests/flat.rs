@@ -230,7 +230,12 @@ fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
         | Expr::Literal { .. }
         | Expr::LayoutField { .. }
         | Expr::Layout { .. } => {}
-        Expr::Construct { arguments, .. } | Expr::Call { arguments, .. } => {
+        Expr::Unpack { value, .. } => walk(value, visit),
+        Expr::Construct { arguments, .. }
+        | Expr::Call { arguments, .. }
+        | Expr::Pack {
+            fields: arguments, ..
+        } => {
             for argument in arguments {
                 walk(argument, visit);
             }

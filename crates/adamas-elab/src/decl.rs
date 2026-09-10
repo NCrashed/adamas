@@ -27,7 +27,8 @@ use adamas_core::level::{Level, LevelVar};
 use adamas_core::meta::{Generalization, Metas, zonk_term};
 use adamas_core::mult::{Mult, MultVar};
 use adamas_core::pattern::{Compiled, PatternError, compile_traced};
-use adamas_core::prim::{PrimOp, PrimTy};
+use adamas_core::prim;
+use adamas_core::prim::PrimTy;
 use adamas_core::row::{Label, Row, RowVar, Tail};
 use adamas_core::sig::{DefinitionKind, Group, Member as SigMember, Signature};
 use adamas_core::source::Span;
@@ -2862,6 +2863,8 @@ fn reserved(decl: &ast::Decl) -> Result<(), ElabError> {
     let refuse = |name: &Symbol, span: Span| {
         let what = if PrimTy::named(name).is_some() {
             "это примитивный тип"
+        } else if &**name == prim::ARRAY {
+            "это встроенный массив"
         } else {
             "это примитивная операция"
         };
@@ -2871,7 +2874,7 @@ fn reserved(decl: &ast::Decl) -> Result<(), ElabError> {
             span,
         })
     };
-    let taken = |name: &Symbol| PrimTy::named(name).is_some() || PrimOp::named(name).is_some();
+    let taken = |name: &Symbol| prim::Prim::taken(name);
     if let DeclKind::Mutual(members) = &decl.kind {
         for member in members {
             reserved(member)?;

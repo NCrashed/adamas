@@ -449,6 +449,8 @@ fn read(
                 Head::Meta(found) if *found == meta => return None,
                 Head::Meta(found) => Term::Meta(*found),
                 Head::Prim(op, ty) => Term::Prim(crate::prim::Prim::Op(*op, *ty)),
+                Head::Array => Term::Prim(crate::prim::Prim::Array),
+                Head::ArrayOp(op) => Term::Prim(crate::prim::Prim::Over(*op)),
             };
             spine.iter().try_fold(base, |callee, elim| match elim {
                 Elim::Project(name) => Some(Term::Project(Rc::new(callee), Rc::clone(name))),
@@ -559,8 +561,10 @@ fn rigid(head: &Head, leading: &[Rc<Value>]) -> Option<Term> {
             let index = leading.len().checked_sub(position + 1)?;
             Some(Term::var(u32::try_from(index).ok()?))
         }
-        // Операция замкнута, как и константа.
+        // Операция замкнута, как и константа. Массив с его операциями - тоже.
         Head::Prim(op, ty) => Some(Term::Prim(crate::prim::Prim::Op(*op, *ty))),
+        Head::Array => Some(Term::Prim(crate::prim::Prim::Array)),
+        Head::ArrayOp(op) => Some(Term::Prim(crate::prim::Prim::Over(*op))),
         Head::Meta(_) => None,
     }
 }

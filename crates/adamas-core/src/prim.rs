@@ -7,6 +7,21 @@
 //! сигнатуры не видит, поэтому сложение, спрятанное за именем, ей нечем было бы
 //! посчитать - а считать его обязаны все три вычислителя одинаково.
 //!
+//! # Массив входит сюда же
+//!
+//! `Array n a` (§4.11) и три операции над ним - узел ядра по тому же доводу и
+//! по тому же правилу имени. Довод: `arrayIndex` обязан **сводиться**, а
+//! сведение примитивов живёт в [`crate::eval`], которая сигнатуры не видит;
+//! имя, объявленное программой, потребовало бы второго правила счёта у машины,
+//! а три вычислителя обязаны считать одинаково. Правило имени: `Array`,
+//! `arrayNew`, `arraySet`, `arrayIndex` заняты языком - на имени стоит
+//! **представление**, а не значение, и переопределяемое имя дало бы два
+//! `Array` с разной укладкой.
+//!
+//! Имя `Vect` (§4.1, §4.11) при этом **не занято**: §4.1 пишет `data Vect` как
+//! пользовательское объявление, и корпус пишет тоже
+//! (`tests/golden/programs/vect.adamas`). Занять его значило бы отвергнуть оба.
+//!
 //! # Что взято
 //!
 //! Десять числовых типов из §4.11 и три операции. `Bool` и `Char` из того же
@@ -297,10 +312,61 @@ impl fmt::Display for PrimOp {
     }
 }
 
-/// Примитив в терме: тип, литерал либо операция.
+/// Операция над массивом (§4.11).
 ///
-/// Один узел на три формы, а не три узла: все три - листья, и различает их
-/// только то, чем они типизируются.
+/// Массив в языке один, представления у него два, и различает их наличие
+/// `Flat` у элемента. Операций три, и они ровно те, которых требует
+/// мутабельный `Array` §4.11: завести, переписать ячейку, прочесть ячейку.
+///
+/// `arraySet` **функционален по семантике и переписывает по исполнению**:
+/// значение он отдаёт новое, а перепишет ли он прежний блок, решает счётчик
+/// ссылок в рантайме (`rc == 0`, §5.1). Это тот же договор, что у reuse, и
+/// другого способа выразить `unique data` §3.3 у понижения нет (§10 вопрос
+/// 149: кратность про потребление, уникальность про производство).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ArrayOp {
+    /// `arrayNew n x` - массив длины `n`, все ячейки заняты `x`.
+    New,
+    /// `arraySet xs i x` - тот же массив с переписанной ячейкой `i`.
+    Set,
+    /// `arrayIndex xs i` - значение ячейки `i`.
+    Index,
+}
+
+impl ArrayOp {
+    /// Все операции.
+    pub const ALL: [Self; 3] = [Self::New, Self::Set, Self::Index];
+
+    /// Имя, которым операция пишется в программе.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::New => "arrayNew",
+            Self::Set => "arraySet",
+            Self::Index => "arrayIndex",
+        }
+    }
+
+    /// Операция по написанному имени.
+    #[must_use]
+    pub fn named(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|it| it.name() == text)
+    }
+}
+
+impl fmt::Display for ArrayOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Имя типа массива (§4.11).
+pub const ARRAY: &str = "Array";
+
+/// Примитив в терме: тип, литерал, операция, массив.
+///
+/// Один узел на все формы, а не узел на форму: все они - листья, и различает
+/// их только то, чем они типизируются.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Prim {
     /// Тип: `Int64`.
@@ -311,6 +377,10 @@ pub enum Prim {
     Lit(PrimTy, u64),
     /// Операция: `addInt64`.
     Op(PrimOp, PrimTy),
+    /// Тип массива `Array n a` (§4.11). Применяется к длине и элементу.
+    Array,
+    /// Операция над массивом: `arrayIndex`.
+    Over(ArrayOp),
 }
 
 impl Prim {
@@ -333,6 +403,8 @@ impl Prim {
         match self {
             Self::Ty(ty) => Some(ty.name().to_owned()),
             Self::Op(op, ty) => Some(format!("{op}{ty}")),
+            Self::Array => Some(ARRAY.to_owned()),
+            Self::Over(op) => Some(op.name().to_owned()),
             Self::Lit(..) => None,
         }
     }
@@ -343,8 +415,17 @@ impl Prim {
         match self {
             Self::Lit(ty, bits) if !ty.floating() => ty.as_signed(bits) < 0,
             Self::Lit(..) => self.to_string().starts_with('-'),
-            Self::Ty(_) | Self::Op(..) => false,
+            Self::Ty(_) | Self::Op(..) | Self::Array | Self::Over(_) => false,
         }
+    }
+
+    /// Занято ли имя языком (§4.11): примитив, массив либо операция над ним.
+    #[must_use]
+    pub fn taken(text: &str) -> bool {
+        PrimTy::named(text).is_some()
+            || PrimOp::named(text).is_some()
+            || ArrayOp::named(text).is_some()
+            || text == ARRAY
     }
 }
 
@@ -353,6 +434,8 @@ impl fmt::Display for Prim {
         match self {
             Self::Ty(ty) => write!(f, "{ty}"),
             Self::Op(op, ty) => write!(f, "{op}{ty}"),
+            Self::Array => f.write_str(ARRAY),
+            Self::Over(op) => write!(f, "{op}"),
             // Дробное печатается через `Debug`: `Display` у него сокращает
             // `1.0` до `1`, и литерал переставал бы отличаться от целого.
             #[expect(

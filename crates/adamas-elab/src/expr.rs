@@ -16,6 +16,7 @@ use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::mult::{Mult, MultProduct, MultSum, MultVar};
 use adamas_core::pattern::{Clause, Pattern as CorePattern, PatternError, compile_case};
+use adamas_core::prim;
 use adamas_core::prim::{Prim, PrimOp, PrimTy};
 use adamas_core::row::{Label, Row, Tail};
 use adamas_core::sig::{Definition, DefinitionKind, Signature};
@@ -3535,6 +3536,21 @@ impl<'a> Elaborator<'a> {
         }
         if let Some((op, prim)) = PrimOp::named(&name.text) {
             return Ok(Term::Prim(Prim::Op(op, prim)));
+        }
+        // Массив (§4.11) - тем же правилом: на имени стоит представление, и
+        // переопределяемое имя дало бы два `Array` с разной укладкой. Длину и
+        // тип элемента операции берут имплиситами: восстанавливает их
+        // унификация по типу самого массива, писать их незачем.
+        if &*name.text == prim::ARRAY {
+            return Ok(Term::Prim(Prim::Array));
+        }
+        if let Some(op) = prim::ArrayOp::named(&name.text) {
+            let term = Term::Prim(Prim::Over(op));
+            if self.bare {
+                return Ok(term);
+            }
+            let ty = adamas_core::check::prim_type(Prim::Over(op));
+            return Ok(self.implicits(term, ty));
         }
         // Член объявляемой группы: аргументы уровня - дырки, числом в арность,
         // посчитанную вызывающим. Тип его сигнатура ещё не знает (§10 вопрос

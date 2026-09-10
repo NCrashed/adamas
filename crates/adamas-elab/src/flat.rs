@@ -160,6 +160,8 @@ enum Why {
     Rigid,
     /// Открытая запись: полей у неё не перечислить.
     Open,
+    /// Массив (§4.11): один объект кучи, адресуемый указателем.
+    Pointing,
     /// Значений у этого нет вовсе - укладывать нечего.
     Alien,
     /// Вложенность кончилась раньше представления.
@@ -184,6 +186,10 @@ impl Why {
             }
             Self::Rigid => "ещё ничем не определена - напишите `{Flat …}` в контексте",
             Self::Open => "оставляет хвост открытым, и полей в нём не перечислить",
+            Self::Pointing => {
+                "массив (§4.11): один объект кучи, и в чужой укладке от него \
+                 лежит указатель"
+            }
             Self::Alien => "значений не имеет, и укладывать нечего",
             Self::Deep => "уходит глубже, чем вывод готов идти",
         }
@@ -435,6 +441,12 @@ impl Walk<'_> {
             Value::Pi(..) | Value::Lam(..) => Err(Blame::alone(shown, Why::Closure)),
             // Примитив - база вывода (§4.11): дальше него разбирать нечего.
             Value::Prim(Prim::Ty(ty)) => Ok(Layout::primitive(*ty)),
+            // Массив в перечне «не `Flat`» §4.11 стоит рядом с `List`: длина
+            // его в укладку не входит, а значение живёт в куче.
+            Value::Neutral(Head::Array, _) => Err(Blame::alone(
+                Shown::Named(Rc::from(adamas_core::prim::ARRAY)),
+                Why::Pointing,
+            )),
             Value::Record(telescope) => self.record(metas, &shown, telescope),
             Value::Neutral(Head::Global(name, ..), spine) => {
                 self.global(metas, &shown, name, spine)

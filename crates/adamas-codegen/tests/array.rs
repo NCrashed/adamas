@@ -149,6 +149,10 @@ fn generic_code_indexes_by_the_descriptor() {
 
     let text = harness::written_text(GENERIC).unwrap_or_else(|error| panic!("{error}"));
     let generic = body_of(&text, "rotate");
+    // Читается **текст**, и это единственный способ здесь: шаг, взятый у
+    // `align` вместо `size`, ни одним значением не отличим - у всякого
+    // примитива §4.11 размер равен выравниванию. Отличать их станет чем, когда
+    // плоским элементом станет агрегат.
     assert!(
         generic.contains(".size"),
         "обобщённая функция индексирует не по дескриптору:\n{generic}"
@@ -248,20 +252,24 @@ fn a_narrow_element_keeps_its_own_stride() {
 /// им стало чем ровно теперь: один и тот же написанный тип `Array 3 a`
 /// читается плоским там, где в контексте есть `Flat a`, и указательным там,
 /// где его нет.
+///
+/// Ответ у обеих сторон **не массив**, и это существенно: с массивом в ответе
+/// раньше сработала бы сверка результата, а страж аргумента остался бы без
+/// свидетеля - мутант это и показал.
 const FOLDED: &str = "\
 type Int = Int64
 
-same : Array 3 a -> Array 3 a
-same xs = xs
+size : Array 3 a -> UInt64
+size xs = 3
 
-through : Array 3 Int64 -> Array 3 Int64
-through = same
+through : Array 3 Int64 -> UInt64
+through = size
 
 built : Array 3 Int64
 built = arrayNew 3 7
 
-main : Int64
-main = arrayIndex (through built) 0
+main : UInt64
+main = through built
 ";
 
 /// Достроенный аргумент сверяется по представлению так же, как написанный.

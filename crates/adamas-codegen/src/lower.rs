@@ -103,7 +103,7 @@ use adamas_core::value::{Env, Lvl, Value};
 
 use crate::ir::{
     Arm, Binding, Constructor, CtorId, Elems, Expr, Fact, Form, FuncId, Function, LocalId, PackId,
-    Packing, Program, Repr, Slot as PackSlot, Stride, Variant,
+    Packing, Program, Repr, Slot as PackSlot, SlotTy, Stride, Variant,
 };
 
 /// Почему понижение отказало.
@@ -442,15 +442,12 @@ struct Lowerer<'a> {
     functions: Vec<Function>,
     numbers: HashMap<Name, FuncId>,
     /// Определения, чьи тела ещё не понижены.
-    pending: VecDeque<(FuncId, Name)>,
-    /// Семейства, чья плотная укладка считается прямо сейчас.
     ///
-    /// Страж повторного входа: `family_packing` заводит таблицу конструкторов
-    /// (`family`), та читает представления полей, а поле рекурсивного
-    /// семейства называет само семейство - без стража `Nat` разворачивался бы
-    /// в себя до дна стека. Имя в страже отвечает `None`, и это не потеря:
-    /// рекурсивное семейство не плоское (§4.11).
-    packing_guard: Vec<Name>,
+    /// Терминацию счёта укладок держит [`recursive`]: поле рекурсивного
+    /// семейства называет само семейство, и без проверки по объявлению
+    /// `family_packing` разворачивался бы через таблицу конструкторов в себя
+    /// до дна стека.
+    pending: VecDeque<(FuncId, Name)>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -463,7 +460,6 @@ impl<'a> Lowerer<'a> {
             functions: Vec::new(),
             numbers: HashMap::new(),
             pending: VecDeque::new(),
-            packing_guard: Vec::new(),
         }
     }
 
@@ -501,13 +497,15 @@ impl<'a> Lowerer<'a> {
                 .is_some_and(|variant| variant.ctor.is_none())
             {
                 let tag = self.boxed_shape(pack)?;
-                body = self.boxing(&mut scope, body, pack, tag);
+                body = self
+                    .boxing(&mut scope, body, pack, tag)?
+                    .ok_or(LowerError::PackedAnswer)?;
                 repr = Repr::Record(tag);
             } else {
                 // Семейство печатается собственным конструктором; не собрался
                 // объект - печатать нечем, и это названная граница.
                 body = self
-                    .loosening(&mut scope, body, pack)
+                    .loosening(&mut scope, body, pack)?
                     .ok_or(LowerError::PackedAnswer)?;
                 repr = Repr::Boxed;
             }
@@ -531,14 +529,19 @@ impl<'a> Lowerer<'a> {
                 scope.env.push(Slot::Bound(parameter.local, parameter.fact));
             }
             let declared = self.functions[id.0].result;
-            let (body, repr) =
+            let (mut body, repr) =
                 self.saturated(&mut scope, &inner, &parameters[taken..], declared)?;
             if !fits(repr, declared) {
-                return Err(LowerError::Representation {
-                    at: "ответ функции",
-                    want: describe(declared),
-                    got: describe(repr),
-                });
+                // Ответ перекладывается, как всякая объявленная позиция:
+                // проекция плотного поля отдаёт байты, а объявлен указатель.
+                let Some(moved) = self.moved(&mut scope, &body, repr, declared)? else {
+                    return Err(LowerError::Representation {
+                        at: "ответ функции",
+                        want: describe(declared),
+                        got: describe(repr),
+                    });
+                };
+                body = moved;
             }
             self.functions[id.0].body = body;
         }
@@ -827,24 +830,27 @@ impl<'a> Lowerer<'a> {
                     if !fits(Repr::Record(tag), want) {
                         return Ok(None);
                     }
-                    return Ok(Some(self.boxing(scope, value.clone(), pack, tag)));
+                    return self.boxing(scope, value.clone(), pack, tag);
                 }
                 // Семейство: боксированная его форма - обычный объект с тегом
                 // конструктора, записью она не бывает.
                 if !want.boxed() {
                     return Ok(None);
                 }
-                Ok(self.loosening(scope, value.clone(), pack))
+                self.loosening(scope, value.clone(), pack)
             }
             (Repr::Record(tag), Repr::Packed(pack)) => {
                 Ok(self.tightening(scope, value.clone(), tag, pack))
             }
-            (Repr::Boxed, Repr::Packed(pack)) => Ok(self.narrowing(scope, value.clone(), pack)),
+            (Repr::Boxed, Repr::Packed(pack)) => self.narrowing(scope, value.clone(), pack),
             _ => Ok(None),
         }
     }
 
     /// Форма объекта кучи, отвечающая плотной укладке записи.
+    ///
+    /// Слот-агрегат в форме указателен: слот объекта несёт указатель либо
+    /// биты примитива, и вложенный агрегат живёт в нём боксированным.
     fn boxed_shape(&mut self, pack: PackId) -> Result<CtorId, LowerError> {
         let packing = self.packings[pack.0 as usize].clone();
         let Some(variant) = packing.sole().filter(|variant| variant.ctor.is_none()) else {
@@ -855,31 +861,53 @@ impl<'a> Lowerer<'a> {
         let facts: Vec<Fact> = variant
             .slots
             .iter()
-            .map(|slot| Fact::declared(Mult::One).shaped(Repr::Flat(slot.ty)))
+            .map(|slot| Fact::declared(Mult::One).shaped(slotted(slot.ty.repr())))
             .collect();
         self.shape(&variant.labels.clone(), &facts)
     }
 
     /// Плотная запись объектом кучи: поля читаются смещением, кладутся слотом.
-    fn boxing(&mut self, scope: &mut Scope, value: Expr, pack: PackId, tag: CtorId) -> Expr {
-        let count = self.packings[pack.0 as usize]
+    ///
+    /// Вложенный агрегат боксируется тем же перекладом рекурсивно; `None` -
+    /// у вложенного боксированной формы нет, и переклада нет целиком.
+    fn boxing(
+        &mut self,
+        scope: &mut Scope,
+        value: Expr,
+        pack: PackId,
+        tag: CtorId,
+    ) -> Result<Option<Expr>, LowerError> {
+        let slots = self.packings[pack.0 as usize]
             .sole()
-            .map_or(0, |variant| variant.slots.len());
+            .map(|variant| variant.slots.clone())
+            .unwrap_or_default();
         let binding = Binding {
             name: "агрегат".to_owned(),
             local: scope.fresh(),
             fact: Fact::present(Mult::Many).shaped(Repr::Packed(pack)),
         };
         let local = binding.local;
-        let fields = (0..count)
-            .map(|at| Expr::Unpack {
+        let mut fields = Vec::with_capacity(slots.len());
+        for (at, slot) in slots.iter().enumerate() {
+            let taken = Expr::Unpack {
                 packing: pack,
                 variant: 0,
                 field: u32::try_from(at).unwrap_or(u32::MAX),
                 value: Box::new(Expr::Local(local)),
-            })
-            .collect();
-        Expr::Bind {
+            };
+            let field = match slot.ty {
+                SlotTy::Prim(_) => taken,
+                SlotTy::Pack(sub) => {
+                    let Some(boxed) = self.moved(scope, &taken, Repr::Packed(sub), Repr::Boxed)?
+                    else {
+                        return Ok(None);
+                    };
+                    boxed
+                }
+            };
+            fields.push(field);
+        }
+        Ok(Some(Expr::Bind {
             binding,
             value: Box::new(value),
             body: Box::new(Expr::Construct {
@@ -887,16 +915,17 @@ impl<'a> Lowerer<'a> {
                 reuse: None,
                 arguments: fields,
             }),
-        }
+        }))
     }
 
     /// Согласуются ли поля конструктора со слотами варианта.
     ///
     /// Требуется для обоих перекладов семейства: живое связывание отвечает
-    /// слоту тем же примитивом, стёртое слота не имеет. Расходятся они у
-    /// **параметрического** семейства - поле `a` в таблице конструкторов
-    /// указательное, а слот считался по подставленному типу, - и тогда
-    /// перекладывать нечем: боксированной формы у такого значения не бывает.
+    /// слоту тем же примитивом, агрегатному слоту - указателем (в таблице
+    /// конструкторов вложенный агрегат живёт боксированным), стёртое слота не
+    /// имеет. Расходятся они у **параметрического** семейства - поле `a` в
+    /// таблице указательное, а слот считался по подставленному примитиву, - и
+    /// тогда перекладывать нечем: боксированной формы у значения не бывает.
     fn variant_matches(described: &Constructor, variant: &Variant) -> bool {
         let fields: Vec<&Fact> = described
             .binders
@@ -908,52 +937,79 @@ impl<'a> Lowerer<'a> {
             if !fact.present {
                 return true;
             }
-            slots
-                .next()
-                .is_some_and(|slot| fact.repr == Repr::Flat(slot.ty))
+            slots.next().is_some_and(|slot| match slot.ty {
+                SlotTy::Prim(prim) => fact.repr == Repr::Flat(prim),
+                SlotTy::Pack(_) => fact.repr.boxed(),
+            })
         }) && slots.next().is_none()
+    }
+
+    /// Связывания полей ветви по фактам, с именами из варианта.
+    fn variant_fields(scope: &mut Scope, variant: &Variant, facts: &[Fact]) -> Vec<Binding> {
+        facts
+            .iter()
+            .enumerate()
+            .map(|(position, fact)| Binding {
+                name: variant
+                    .labels
+                    .get(position)
+                    .cloned()
+                    .unwrap_or_else(|| format!("поле{position}")),
+                local: scope.fresh(),
+                fact: *fact,
+            })
+            .collect()
     }
 
     /// Плотное семейство объектом кучи: разбор по тегу, ветвь строит объект.
     ///
-    /// `None` - переклада нет: у параметрического семейства таблица
-    /// конструкторов не знает подставленных полей, и объект под печать либо
-    /// слот собрать нечем.
-    fn loosening(&mut self, scope: &mut Scope, value: Expr, pack: PackId) -> Option<Expr> {
+    /// Вложенный агрегат в поле боксируется рекурсивно. `None` - переклада
+    /// нет: у параметрического семейства таблица конструкторов не знает
+    /// подставленных полей, и объект под печать либо слот собрать нечем.
+    fn loosening(
+        &mut self,
+        scope: &mut Scope,
+        value: Expr,
+        pack: PackId,
+    ) -> Result<Option<Expr>, LowerError> {
         let packing = self.packings[pack.0 as usize].clone();
         let mut arms = Vec::with_capacity(packing.variants.len());
         for variant in &packing.variants {
-            let tag = variant.ctor?;
+            let Some(tag) = variant.ctor else {
+                return Ok(None);
+            };
             let described = self.constructors[usize::from(tag.0)].clone();
             if !Self::variant_matches(&described, variant) {
-                return None;
+                return Ok(None);
             }
             let params = described.params as usize;
-            let fields: Vec<Binding> = described
-                .binders
-                .iter()
-                .skip(params)
-                .enumerate()
-                .map(|(position, fact)| Binding {
-                    name: variant
-                        .labels
-                        .get(position)
-                        .cloned()
-                        .unwrap_or_else(|| format!("поле{position}")),
-                    local: scope.fresh(),
-                    fact: *fact,
-                })
-                .collect();
-            let arguments: Vec<Expr> = (0..params)
-                .map(|_| Expr::Erased)
-                .chain(fields.iter().map(|field| {
-                    if field.fact.present {
-                        Expr::Local(field.local)
-                    } else {
-                        Expr::Erased
+            // Поля ветви связываются байтами своего варианта, объект строится
+            // из них - агрегатное поле по дороге боксируется.
+            let facts = self.branch_facts(Some(pack), tag);
+            let fields = Self::variant_fields(scope, variant, &facts);
+            let mut arguments: Vec<Expr> = (0..params).map(|_| Expr::Erased).collect();
+            for field in &fields {
+                if !field.fact.present {
+                    arguments.push(Expr::Erased);
+                    continue;
+                }
+                let argument = match field.fact.repr {
+                    Repr::Packed(sub) => {
+                        let Some(boxed) = self.moved(
+                            scope,
+                            &Expr::Local(field.local),
+                            Repr::Packed(sub),
+                            Repr::Boxed,
+                        )?
+                        else {
+                            return Ok(None);
+                        };
+                        boxed
                     }
-                }))
-                .collect();
+                    _ => Expr::Local(field.local),
+                };
+                arguments.push(argument);
+            }
             arms.push(Arm {
                 constructor: tag,
                 fields,
@@ -964,48 +1020,65 @@ impl<'a> Lowerer<'a> {
                 },
             });
         }
-        Some(Self::bound_match(
+        Ok(Some(Self::bound_match(
             scope,
             value,
             Repr::Packed(pack),
             Mult::One,
             arms,
-        ))
+        )))
     }
 
     /// Объект кучи плотным семейством: разбор по заголовку, ветвь пишет байты.
     ///
-    /// `None` - как у [`Lowerer::loosening`], и по той же причине.
-    fn narrowing(&mut self, scope: &mut Scope, value: Expr, pack: PackId) -> Option<Expr> {
+    /// Вложенный агрегат в поле пришёл бы указателем без формы, и сузить его
+    /// нечем ([`Lowerer::moved`] умеет это только для семейств) - тогда
+    /// переклада нет целиком, как и у [`Lowerer::loosening`].
+    fn narrowing(
+        &mut self,
+        scope: &mut Scope,
+        value: Expr,
+        pack: PackId,
+    ) -> Result<Option<Expr>, LowerError> {
         let packing = self.packings[pack.0 as usize].clone();
         let mut arms = Vec::with_capacity(packing.variants.len());
         for (at, variant) in packing.variants.iter().enumerate() {
-            let tag = variant.ctor?;
+            let Some(tag) = variant.ctor else {
+                return Ok(None);
+            };
             let described = self.constructors[usize::from(tag.0)].clone();
             if !Self::variant_matches(&described, variant) {
-                return None;
+                return Ok(None);
             }
             let params = described.params as usize;
-            let fields: Vec<Binding> = described
-                .binders
-                .iter()
-                .skip(params)
-                .enumerate()
-                .map(|(position, fact)| Binding {
-                    name: variant
-                        .labels
-                        .get(position)
-                        .cloned()
-                        .unwrap_or_else(|| format!("поле{position}")),
-                    local: scope.fresh(),
-                    fact: *fact,
-                })
-                .collect();
-            let taken = fields
-                .iter()
-                .filter(|field| field.fact.present)
-                .map(|field| Expr::Local(field.local))
-                .collect();
+            // Поля ветви приходят слотами объекта - фактами таблицы.
+            let facts: Vec<Fact> = described.binders.iter().skip(params).copied().collect();
+            let fields = Self::variant_fields(scope, variant, &facts);
+            let mut taken = Vec::with_capacity(variant.slots.len());
+            let mut slot = 0usize;
+            for field in &fields {
+                if !field.fact.present {
+                    continue;
+                }
+                let wanted = variant.slots[slot].ty;
+                slot += 1;
+                let argument = match wanted {
+                    SlotTy::Prim(_) => Expr::Local(field.local),
+                    SlotTy::Pack(sub) => {
+                        let Some(narrowed) = self.moved(
+                            scope,
+                            &Expr::Local(field.local),
+                            field.fact.repr,
+                            Repr::Packed(sub),
+                        )?
+                        else {
+                            return Ok(None);
+                        };
+                        narrowed
+                    }
+                };
+                taken.push(argument);
+            }
             arms.push(Arm {
                 constructor: tag,
                 fields,
@@ -1016,11 +1089,11 @@ impl<'a> Lowerer<'a> {
                 },
             });
         }
-        Some(Expr::Match {
+        Ok(Some(Expr::Match {
             scrutinee: Box::new(value),
             consumed: Mult::One,
             arms,
-        })
+        }))
     }
 
     /// Разбор со связанным разбираемым: плотному нужен свой C-тип у имени.
@@ -1074,7 +1147,7 @@ impl<'a> Lowerer<'a> {
             .binders
             .iter()
             .zip(&variant.slots)
-            .all(|(fact, slot)| fact.present && fact.repr == Repr::Flat(slot.ty));
+            .all(|(fact, slot)| fact.present && fact.repr == slot.ty.repr());
         if !matching || described.binders.len() != variant.slots.len() {
             return None;
         }
@@ -1182,7 +1255,7 @@ impl<'a> Lowerer<'a> {
             if !fact.present {
                 continue;
             }
-            let want = Repr::Flat(slots[slot].ty);
+            let want = slots[slot].ty.repr();
             slot += 1;
             let argument = arguments.get(position).ok_or_else(|| LowerError::Missing {
                 name: name.to_string(),
@@ -1333,7 +1406,7 @@ impl<'a> Lowerer<'a> {
             if **label != *labels[position] {
                 return Err(mismatch());
             }
-            let want = Repr::Flat(slots[position].ty);
+            let want = slots[position].ty.repr();
             given.push(self.shaped(scope, value, want, "поле плоской записи")?);
         }
         Ok(Expr::Pack {
@@ -1385,7 +1458,7 @@ impl<'a> Lowerer<'a> {
                     field: u32::try_from(at).unwrap_or(u32::MAX),
                     value: Box::new(value),
                 },
-                Repr::Flat(ty),
+                ty.repr(),
             ));
         }
         let Repr::Record(tag) = repr else {
@@ -2069,7 +2142,7 @@ impl<'a> Lowerer<'a> {
                         }
                         let ty = slots[slot].ty;
                         slot += 1;
-                        Fact::declared(fact.mult).shaped(Repr::Flat(ty))
+                        Fact::declared(fact.mult).shaped(ty.repr())
                     })
                     .collect()
             }
@@ -2449,11 +2522,11 @@ impl Lowerer<'_> {
             _ => {}
         }
         match &unfolded(self.signature, &current, depth) {
-            // Запись из одних примитивов плоская - §4.11 говорит это дословно,
-            // - и потому уложена плотно, а не слотами объекта. Прочие записи
-            // остаются объектом кучи: поле-указатель в плотную укладку не
-            // ложится.
-            Term::Record(fields) => match self.packed_shape(fields) {
+            // Запись из одних плоских полей плоская - §4.11 говорит это
+            // дословно, и вложенный агрегат ложится собственным слотом (§10
+            // вопрос 157). Прочие записи остаются объектом кучи:
+            // поле-указатель в плотную укладку не ложится.
+            Term::Record(fields) => match self.packed_shape(fields, depth, dicts)? {
                 Some(packed) => Ok(packed),
                 None => self.record_shape(fields, depth, dicts),
             },
@@ -2466,28 +2539,68 @@ impl Lowerer<'_> {
         }
     }
 
-    /// Плоская укладка записи, если все её поля примитивны (§4.11).
+    /// Плоская укладка записи, если все её поля плоски (§4.11).
     ///
-    /// `None` - хотя бы одно поле не примитив: указатель в плотную укладку не
-    /// ложится, вложенный агрегат требовал бы проекции путём, а стёртое поле
-    /// значения не имеет вовсе.
-    fn packed_shape(&mut self, fields: &adamas_core::term::Fields) -> Option<Repr> {
+    /// `None` - хотя бы одно поле указательно: указатель в плотную укладку не
+    /// ложится, а стёртое поле значения не имеет вовсе. Вложенный агрегат -
+    /// запись либо плотное семейство - ложится собственным слотом (§10
+    /// вопрос 157).
+    fn packed_shape(
+        &mut self,
+        fields: &adamas_core::term::Fields,
+        depth: u32,
+        dicts: &Dicts,
+    ) -> Result<Option<Repr>, LowerError> {
         if fields.is_open() || fields.is_empty() {
-            return None;
+            return Ok(None);
         }
         let mut labels = Vec::with_capacity(fields.len());
-        let mut primitives = Vec::with_capacity(fields.len());
-        for field in fields.iter() {
-            let Term::Prim(Prim::Ty(prim)) = unaliased(self.signature, &field.ty) else {
-                return None;
-            };
+        let mut slotted = Vec::with_capacity(fields.len());
+        for (position, field) in fields.iter().enumerate() {
             if field.mult == Mult::Zero {
-                return None;
+                return Ok(None);
             }
+            let under = depth + u32::try_from(position).unwrap_or(0);
+            let Some(slot) = self.packed_field(&field.ty, under, dicts)? else {
+                return Ok(None);
+            };
             labels.push(field.name.to_string());
-            primitives.push(*prim);
+            slotted.push(slot);
         }
-        Some(Repr::Packed(self.packing(&labels, &primitives)))
+        let made = packing_of_slots(&labels, &slotted, &self.packings);
+        if made.size == 0 {
+            return Ok(None);
+        }
+        Ok(Some(Repr::Packed(self.interned(made))))
+    }
+
+    /// Слот плоского агрегата для поля такого типа. `None` - поле указательно.
+    fn packed_field(
+        &mut self,
+        ty: &Term,
+        depth: u32,
+        dicts: &Dicts,
+    ) -> Result<Option<SlotTy>, LowerError> {
+        let current = unaliased(self.signature, ty).clone();
+        if let Term::Prim(Prim::Ty(prim)) = current {
+            return Ok(Some(SlotTy::Prim(prim)));
+        }
+        match &unfolded(self.signature, &current, depth) {
+            Term::Record(fields) => Ok(match self.packed_shape(fields, depth, dicts)? {
+                Some(Repr::Packed(pack)) => Some(SlotTy::Pack(pack)),
+                _ => None,
+            }),
+            expanded => {
+                let (head, arguments) = spine(expanded);
+                let Term::Const(name, ..) = head else {
+                    return Ok(None);
+                };
+                let name = Rc::clone(name);
+                Ok(self
+                    .family_packing(&name, &arguments, depth)?
+                    .map(SlotTy::Pack))
+            }
+        }
     }
 
     /// Форма записи, прочитанная у её типа.
@@ -2532,10 +2645,8 @@ impl Lowerer<'_> {
     /// контексте есть словарь `Flat`, - шаг приходит дескриптором, а код один
     /// на все плоские элементы.
     ///
-    /// Названная граница: агрегат берётся записью из **примитивов**. Семейство
-    /// с тегом (§4.11, `Option Int64` в 16 байт) и вложенный агрегат сюда не
-    /// входят - у первого нет конструирования плоским значением, у второго
-    /// проекция шла бы путём, а не меткой.
+    /// Названная граница: плоским агрегатом берётся запись из плоских полей
+    /// и семейство с ними же - вложенность в том числе (§10 вопрос 157).
     fn stride_of(&mut self, ty: &Term, depth: u32, dicts: &Dicts) -> Option<Stride> {
         let current = unaliased(self.signature, ty).clone();
         if let Term::Prim(Prim::Ty(prim)) = current {
@@ -2545,30 +2656,15 @@ impl Lowerer<'_> {
             let level = depth.checked_sub(index + 1)?;
             return dicts.get(&level).copied().map(Stride::Dynamic);
         }
-        match &unfolded(self.signature, &current, depth) {
-            Term::Record(fields) => match self.packed_shape(fields) {
-                Some(Repr::Packed(pack)) => Some(Stride::Packed(pack)),
-                _ => None,
-            },
-            // Семейство с Flat-полями - колонка тегованных значений (§4.11,
-            // §10 вопрос 157): `Option` и контрольные байты хеш-таблицы.
-            expanded => {
-                let (head, arguments) = spine(expanded);
-                let Term::Const(name, ..) = head else {
-                    return None;
-                };
-                let name = Rc::clone(name);
-                match self.family_packing(&name, &arguments, depth) {
-                    Ok(Some(pack)) => Some(Stride::Packed(pack)),
-                    _ => None,
-                }
-            }
+        match self.packed_field(&current, depth, dicts) {
+            Ok(Some(SlotTy::Pack(pack))) => Some(Stride::Packed(pack)),
+            _ => None,
         }
     }
 
     /// Укладка агрегата по меткам и полям; заводится однажды.
     fn packing(&mut self, labels: &[String], fields: &[PrimTy]) -> PackId {
-        let made = packing_of(labels, fields);
+        let made = packing_of(labels, fields, &self.packings);
         self.interned(made)
     }
 
@@ -2585,12 +2681,13 @@ impl Lowerer<'_> {
     /// Плотная укладка семейства при таких аргументах типа (§4.11, §10
     /// вопрос 157).
     ///
-    /// `None` - семейство не укладывается: конструкторов нет, живое поле не
-    /// примитив - в том числе параметр, оставшийся переменной в обобщённом
-    /// коде, - либо укладка пуста (единственный конструктор без полей - это
-    /// непосредственное значение, байтов ему не нужно). Рекурсивное семейство
-    /// отдельной проверки не требует: рекурсивное поле стоит именем, а не
-    /// примитивом, и не проходит по общему правилу.
+    /// `None` - семейство не укладывается: конструкторов нет, живое поле
+    /// указательно - в том числе параметр, оставшийся переменной в обобщённом
+    /// коде, - объявление рекурсивно, либо укладка пуста (единственный
+    /// конструктор без полей - непосредственное значение, байтов ему не
+    /// нужно). Рекурсия меряется по **объявлению**, а не по применению:
+    /// `Box (Box Int8)` вложен конечно и плоский, хотя имя в нём повторяется
+    /// (§4.11).
     fn family_packing(
         &mut self,
         data: &Name,
@@ -2611,59 +2708,45 @@ impl Lowerer<'_> {
             return Ok(None);
         };
         let (constructors, params) = (constructors.clone(), *params as usize);
-        if constructors.is_empty() || arguments.len() < params || self.packing_guard.contains(data)
-        {
+        if constructors.is_empty() || arguments.len() < params || recursive(self.signature, data) {
             return Ok(None);
         }
-        self.packing_guard.push(Rc::clone(data));
-        let counted = self.counted_family(data, &constructors, &arguments[..params], depth);
-        self.packing_guard.pop();
-        let Some(variants) = counted? else {
-            return Ok(None);
-        };
-        let made = family_packing_of(&variants);
+        self.family(data)?;
+        let mut variants = Vec::with_capacity(constructors.len());
+        for name in &constructors {
+            let tag = self.tag(name)?;
+            let Some((labels, fields)) =
+                self.instantiated_fields(name, &arguments[..params], depth)?
+            else {
+                return Ok(None);
+            };
+            variants.push((tag, labels, fields));
+        }
+        let made = family_packing_of(&variants, &self.packings);
         if made.size == 0 {
             return Ok(None);
         }
         Ok(Some(self.interned(made)))
     }
 
-    /// Варианты семейства с посчитанными полями; выделено ради стража.
-    #[expect(clippy::type_complexity, reason = "локальная тройка варианта")]
-    fn counted_family(
-        &mut self,
-        data: &Name,
-        constructors: &[Name],
-        params: &[&Term],
-        depth: u32,
-    ) -> Result<Option<Vec<(CtorId, Vec<String>, Vec<PrimTy>)>>, LowerError> {
-        self.family(data)?;
-        let mut variants = Vec::with_capacity(constructors.len());
-        for name in constructors {
-            let tag = self.tag(name)?;
-            let Some((labels, fields)) = self.instantiated_fields(name, params, depth) else {
-                return Ok(None);
-            };
-            variants.push((tag, labels, fields));
-        }
-        Ok(Some(variants))
-    }
-
     /// Поля конструктора при подставленных параметрах семейства: метки и
-    /// примитивы живых. `None` - живое поле не примитив.
+    /// слоты живых. `None` - живое поле указательно.
     ///
     /// Считает то же ядро, что типовая сторона (`adamas-elab/src/flat.rs`,
     /// `fields`): тип конструктора инстанцируется, параметры снимаются
     /// применением, стёртые связывания полями не считаются - байтов у них
     /// нет. Аргументы стёртых сортов не читаются: укладка от уровня, ряда и
     /// кратности не зависит, а подставить что-то обязан всякий берущий тип.
+    #[expect(clippy::type_complexity, reason = "локальная пара варианта")]
     fn instantiated_fields(
-        &self,
+        &mut self,
         constructor: &Name,
         params: &[&Term],
         depth: u32,
-    ) -> Option<(Vec<String>, Vec<PrimTy>)> {
-        let definition = self.signature.lookup(constructor)?;
+    ) -> Result<Option<(Vec<String>, Vec<SlotTy>)>, LowerError> {
+        let Some(definition) = self.signature.lookup(constructor) else {
+            return Ok(None);
+        };
         let levels: Vec<Level> = vec![Level::Zero; definition.level_arity as usize];
         let rows: Vec<Row<Term>> = vec![Row::empty(); definition.row_arity as usize];
         let mults: Vec<Mult> = definition
@@ -2678,26 +2761,27 @@ impl Lowerer<'_> {
         let mut current = definition.instantiate_type(&levels, &rows, &mults);
         for argument in params {
             let Value::Pi(_, _, _, _, codomain) = &*Rc::clone(&current) else {
-                return None;
+                return Ok(None);
             };
             current = codomain.apply(eval(&env, argument));
         }
         let mut level = depth;
         let mut labels = Vec::new();
         let mut fields = Vec::new();
+        let empty = Dicts::new();
         while let Value::Pi(binder, name, domain, _, codomain) = &*Rc::clone(&current) {
             if binder.mult != Mult::Zero {
                 let written = quote(level, domain);
-                let Term::Prim(Prim::Ty(prim)) = *unaliased(self.signature, &written) else {
-                    return None;
+                let Some(slot) = self.packed_field(&written, level, &empty)? else {
+                    return Ok(None);
                 };
                 labels.push(name.to_string());
-                fields.push(prim);
+                fields.push(slot);
             }
             current = codomain.apply(Value::var(Lvl(level)));
             level += 1;
         }
-        Some((labels, fields))
+        Ok(Some((labels, fields)))
     }
 
     /// Кратность и представление `n`-го связывания типа.
@@ -2833,8 +2917,14 @@ fn aligned(offset: u32, align: u32) -> u32 {
 /// Названная граница: поля только примитивные. Вложенный агрегат §4.11
 /// укладывает тем же правилом, но проекция сквозь него - путь, а не метка, и
 /// путей у этого среза нет.
-fn packing_of(labels: &[String], fields: &[PrimTy]) -> Packing {
-    let (slots, size, align) = sequential(fields, 0);
+fn packing_of(labels: &[String], fields: &[PrimTy], packings: &[Packing]) -> Packing {
+    let slotted: Vec<SlotTy> = fields.iter().map(|ty| SlotTy::Prim(*ty)).collect();
+    packing_of_slots(labels, &slotted, packings)
+}
+
+/// То же для полей любого плоского сорта - вложенный агрегат в том числе.
+fn packing_of_slots(labels: &[String], fields: &[SlotTy], packings: &[Packing]) -> Packing {
+    let (slots, size, align) = sequential(fields, 0, packings);
     Packing {
         tag: 0,
         variants: vec![Variant {
@@ -2848,16 +2938,16 @@ fn packing_of(labels: &[String], fields: &[PrimTy]) -> Packing {
 }
 
 /// Поля подряд от смещения `base`: слоты, конец и выравнивание.
-fn sequential(fields: &[PrimTy], base: u32) -> (Vec<PackSlot>, u32, u32) {
+fn sequential(fields: &[SlotTy], base: u32, packings: &[Packing]) -> (Vec<PackSlot>, u32, u32) {
     let mut slots = Vec::with_capacity(fields.len());
     let mut size = base;
     let mut align = 1u32;
     for ty in fields {
-        let width = ty.size();
-        let offset = aligned(size, width);
+        let (width, at) = (ty.width(packings), ty.align(packings));
+        let offset = aligned(size, at);
         slots.push(PackSlot { offset, ty: *ty });
         size = offset.saturating_add(width);
-        align = align.max(width);
+        align = align.max(at);
     }
     (slots, size, align)
 }
@@ -2883,18 +2973,21 @@ const fn tag_of(count: usize) -> (u32, u32) {
 /// сам payload начинается за тегом, выровненный по максимальной границе
 /// своих полей. `Option Int64` отсюда занимает 16 байт, а не 8, - названная
 /// §4.11 цена.
-fn family_packing_of(variants: &[(CtorId, Vec<String>, Vec<PrimTy>)]) -> Packing {
+fn family_packing_of(
+    variants: &[(CtorId, Vec<String>, Vec<SlotTy>)],
+    packings: &[Packing],
+) -> Packing {
     let (tag_size, tag_align) = tag_of(variants.len());
     let payload_align = variants
         .iter()
-        .flat_map(|(_, _, fields)| fields.iter().map(|ty| ty.size()))
+        .flat_map(|(_, _, fields)| fields.iter().map(|ty| ty.align(packings)))
         .max()
         .unwrap_or(1);
     let base = aligned(tag_size, payload_align);
     let mut made = Vec::with_capacity(variants.len());
     let mut end = tag_size;
     for (ctor, labels, fields) in variants {
-        let (slots, size, _) = sequential(fields, base);
+        let (slots, size, _) = sequential(fields, base, packings);
         end = end.max(size);
         made.push(Variant {
             ctor: Some(*ctor),
@@ -2908,6 +3001,124 @@ fn family_packing_of(variants: &[(CtorId, Vec<String>, Vec<PrimTy>)]) -> Packing
         variants: made,
         size: aligned(end, align),
         align,
+    }
+}
+
+/// Ссылается ли представление семейства на само себя (§4.11).
+///
+/// Свойство **объявления**, а не применения: §4.11 называет не плоским `List`
+/// как таковой, а не `List Nat` отдельно от `List Bit`, и ровно поэтому
+/// `Box (Box Int8)` плоский - имя повторяется применением, а не объявлением.
+/// Косвенная рекурсия ловится достижимостью по всем именам в полях - через
+/// соседа, синоним, запись; обход конечен, потому что имён в сигнатуре
+/// конечное число.
+///
+/// Зеркало типовой стороны (`adamas-elab/src/flat.rs`, `recursive`): понижение
+/// элаборацию не читает, и это вторая запись правила - цена шва, оплаченная
+/// тестом на совпадение укладок.
+fn recursive(signature: &Signature, of: &Name) -> bool {
+    let mut seen: Vec<Name> = Vec::new();
+    let mut queue = mentioned(signature, of);
+    while let Some(name) = queue.pop() {
+        if name == *of {
+            return true;
+        }
+        if seen.contains(&name) {
+            continue;
+        }
+        queue.extend(mentioned(signature, &name));
+        seen.push(name);
+    }
+    false
+}
+
+/// Имена, стоящие в представлении определения.
+///
+/// У семейства это поля конструкторов, у синонима и записи - тело. Стёртые
+/// связывания не считаются: индекс семейства в рантайме отсутствует (§3.3), а
+/// речь о представлении.
+fn mentioned(signature: &Signature, name: &Name) -> Vec<Name> {
+    let mut found = Vec::new();
+    let Some(definition) = signature.lookup(name) else {
+        return found;
+    };
+    if definition.data_shape().is_some() {
+        for constructor in signature.constructors(name).unwrap_or_default() {
+            let Some(declared) = signature.lookup(constructor) else {
+                continue;
+            };
+            let mut current = &declared.ty;
+            while let Term::Pi(binder, _, domain, _, codomain) = current {
+                if binder.mult != Mult::Zero {
+                    constants(domain, &mut found);
+                }
+                current = codomain;
+            }
+            // Заключение конструктора не читается: оно называет само
+            // семейство, и всякое семейство оказалось бы рекурсивным.
+        }
+    } else if let Some(body) = &definition.body {
+        constants(body, &mut found);
+    }
+    found
+}
+
+/// Имена определений, стоящие в терме.
+fn constants(term: &Term, into: &mut Vec<Name>) {
+    match term {
+        Term::Const(name, ..) => into.push(Rc::clone(name)),
+        Term::Var(_)
+        | Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Prim(_)
+        | Term::Meta(_) => {}
+        Term::Record(fields) | Term::Row(fields) => {
+            for field in fields.iter() {
+                constants(&field.ty, into);
+            }
+            if let Some(tail) = &fields.tail {
+                constants(tail, into);
+            }
+        }
+        Term::Object(fields) => {
+            for (_, value) in fields.iter() {
+                constants(value, into);
+            }
+        }
+        Term::With(base, fields) => {
+            constants(base, into);
+            for (_, value) in fields.iter() {
+                constants(value, into);
+            }
+        }
+        Term::Project(record, _) => constants(record, into),
+        Term::Lam(_, _, body) => constants(body, into),
+        Term::App(callee, argument) => {
+            constants(callee, into);
+            constants(argument, into);
+        }
+        Term::Pi(_, _, domain, row, codomain) => {
+            constants(domain, into);
+            constants(codomain, into);
+            for label in row.labels() {
+                for argument in &label.arguments {
+                    constants(argument, into);
+                }
+            }
+        }
+        Term::Let(_, _, ty, value, body) => {
+            constants(ty, into);
+            constants(value, into);
+            constants(body, into);
+        }
+        Term::Case(case) => {
+            constants(&case.scrutinee, into);
+            constants(&case.motive, into);
+            for branch in &case.branches {
+                constants(&branch.body, into);
+            }
+        }
     }
 }
 

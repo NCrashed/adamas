@@ -263,7 +263,11 @@ fn packings(out: &mut String, program: &Program) {
                     .iter()
                     .zip(&variant.slots)
                     .map(|(label, slot)| {
-                        format!("{}@{} {}", escaped(label), slot.offset, slot.ty.name())
+                        let ty = match slot.ty {
+                            crate::ir::SlotTy::Prim(prim) => prim.name().to_owned(),
+                            crate::ir::SlotTy::Pack(sub) => format!("pack#{}", sub.0),
+                        };
+                        format!("{}@{} {ty}", escaped(label), slot.offset)
                     })
                     .collect();
                 match variant.ctor {
@@ -723,11 +727,10 @@ impl Emitter<'_> {
                 variant,
                 field,
                 ..
-            } => Repr::Flat(
-                self.program.packings[packing.0 as usize].variants[*variant as usize].slots
-                    [*field as usize]
-                    .ty,
-            ),
+            } => self.program.packings[packing.0 as usize].variants[*variant as usize].slots
+                [*field as usize]
+                .ty
+                .repr(),
             Expr::ArrayNew { stride, .. } | Expr::ArraySet { stride, .. } => {
                 Repr::Array(elems(*stride))
             }
@@ -949,7 +952,7 @@ impl Emitter<'_> {
                 self.out,
                 "{pad}memcpy({name}.bytes + {}, &{value}, {}u);",
                 slot.offset,
-                slot.ty.size()
+                slot.ty.width(&self.program.packings)
             );
         }
         name
@@ -969,12 +972,12 @@ impl Emitter<'_> {
             [field as usize];
         let value = self.value(value, depth);
         let name = self.temp();
-        let _ = writeln!(self.out, "{pad}{} {name};", c_type(Repr::Flat(slot.ty)));
+        let _ = writeln!(self.out, "{pad}{} {name};", c_type(slot.ty.repr()));
         let _ = writeln!(
             self.out,
             "{pad}memcpy(&{name}, {value}.bytes + {}, {}u);",
             slot.offset,
-            slot.ty.size()
+            slot.ty.width(&self.program.packings)
         );
         name
     }
@@ -1616,7 +1619,7 @@ impl Emitter<'_> {
                 binding.local.0,
                 binding.local.0,
                 described.offset,
-                described.ty.size(),
+                described.ty.width(&self.program.packings),
                 escaped(&binding.name)
             );
         }

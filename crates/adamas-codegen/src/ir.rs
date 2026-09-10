@@ -73,13 +73,55 @@ pub struct RegionId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PackId(pub u32);
 
+/// Чем занято поле плоского агрегата.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotTy {
+    /// Примитив своей ширины.
+    Prim(PrimTy),
+    /// Вложенный агрегат: байты его укладки целиком (§4.11, §10 вопрос 157).
+    ///
+    /// Проекция сквозь него - композиция двух чтений по смещению, а не путь:
+    /// внешнее чтение отдаёт плотное значение вложенной укладки, внутреннее -
+    /// его поле.
+    Pack(PackId),
+}
+
+impl SlotTy {
+    /// Представление значения такого поля.
+    #[must_use]
+    pub const fn repr(self) -> Repr {
+        match self {
+            Self::Prim(ty) => Repr::Flat(ty),
+            Self::Pack(pack) => Repr::Packed(pack),
+        }
+    }
+
+    /// Ширина поля в байтах.
+    #[must_use]
+    pub fn width(self, packings: &[Packing]) -> u32 {
+        match self {
+            Self::Prim(ty) => ty.size(),
+            Self::Pack(pack) => packings[pack.0 as usize].size,
+        }
+    }
+
+    /// Граница поля в байтах.
+    #[must_use]
+    pub fn align(self, packings: &[Packing]) -> u32 {
+        match self {
+            Self::Prim(ty) => ty.size(),
+            Self::Pack(pack) => packings[pack.0 as usize].align,
+        }
+    }
+}
+
 /// Поле плоского агрегата: где лежит и чем является.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Slot {
     /// Смещение от начала агрегата в байтах.
     pub offset: u32,
-    /// Тип поля. Плоский агрегат состоит из примитивов - см. [`Packing`].
-    pub ty: PrimTy,
+    /// Тип поля.
+    pub ty: SlotTy,
 }
 
 /// Поля одного конструктора внутри плотной укладки (§4.11).

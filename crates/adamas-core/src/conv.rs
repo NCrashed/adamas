@@ -295,6 +295,11 @@ fn convertible_within(
 /// штатный исход - `convertible` обязана отвечать `false`, - а не поломка
 /// инварианта, поэтому здесь стоят `try_`-варианты, а не паникующие.
 pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
+    // Застрявший примитив сводится разворотом аргументов ([`refolded`]);
+    // аргументы приводятся воротным δ - сравнение обязано завершаться.
+    if let Some(folded) = refolded(value, &|argument| whnf(sig, argument)) {
+        return Some(folded);
+    }
     let Value::Neutral(Head::Global(name, levels, rows, mults), spine) = &**value else {
         return None;
     };
@@ -327,11 +332,45 @@ pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
 /// что снаружи его тело - обещание, а не представление (§3.5); исполнять
 /// обещание нечем, и тело у него то же самое.
 pub(crate) fn unfolded(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
+    // Застрявший примитив сводится и здесь - аргументы приводятся своим же δ,
+    // без ворот: исполнение нетотального обязано вести себя как программа.
+    if let Some(folded) = refolded(value, &|argument| forced(sig, argument)) {
+        return Some(folded);
+    }
     let Value::Neutral(Head::Global(name, levels, rows, mults), spine) = &**value else {
         return None;
     };
     let definition = sig.lookup(name)?;
     replayed(definition, levels, rows, mults, spine)
+}
+
+/// δ-шаг застрявшей примитивной операции: аргументы приводятся к головной
+/// форме, свёртка пробуется заново.
+///
+/// Голова примитива неразворачиваема, но δ живёт в аргументах: `addUInt64 one
+/// one` при `one = 1` застревает не потому, что считать нечего, а потому, что
+/// свёртка требует литералов ([`crate::eval`]), а `one` - глобальное имя.
+/// Разбор в том же положении сводится сам - его `case` стоит в спайне
+/// разбираемого, и разворот головы переигрывает его по ι, - поэтому без этого
+/// шага `plus one one` сводился бы, а `addUInt64 one one` нет, и арифметика
+/// над длиной массива не считалась бы на именованных константах (§10 вопрос
+/// 155).
+///
+/// `Some` - только когда свёртка состоялась: шаг, оставляющий примитив
+/// застрявшим, зациклил бы петли разворота у вызывающих.
+fn refolded(value: &Rc<Value>, normalized: &dyn Fn(&Rc<Value>) -> Rc<Value>) -> Option<Rc<Value>> {
+    let Value::Neutral(Head::Prim(op, ty), spine) = &**value else {
+        return None;
+    };
+    let [Elim::App(left), Elim::App(right)] = &spine[..] else {
+        return None;
+    };
+    let partial = Rc::new(Value::Neutral(
+        Head::Prim(*op, *ty),
+        vec![Elim::App(normalized(left))],
+    ));
+    let folded = try_apply(&partial, normalized(right))?;
+    matches!(&*folded, Value::Prim(_)).then_some(folded)
 }
 
 /// Тело определения с переигранным спайном - общее у обоих δ.

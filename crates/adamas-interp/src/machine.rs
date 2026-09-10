@@ -339,6 +339,15 @@ impl<'a> Machine<'a> {
                 let argument = self.forced(argument)?;
                 Ok(Step::Return(eval::apply(callee, argument)))
             }
+            // Аргумент примитивной операции - тем же правилом: свёртка требует
+            // литералов (`eval::folded`), а имя с телом само не
+            // разворачивается. Без разворота `addInt64 seven eighty` при
+            // определённых `seven` и `eighty` оставался бы застрявшим - в
+            // отличие от разбора, чей δ стоит на разбираемом (§10 вопрос 155).
+            Value::Neutral(Head::Prim(..), _) => {
+                let argument = self.forced(argument)?;
+                Ok(Step::Return(eval::apply(callee, argument)))
+            }
             // Локальная переменная и дырка: применение копится в спайне, как и
             // в ядре.
             _ => Ok(Step::Return(eval::apply(callee, argument))),

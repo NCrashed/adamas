@@ -34,36 +34,37 @@ fn column() -> String {
 
 /// Тот же код над **не-плоским** элементом.
 ///
-/// `Cell` несёт `Nat`, то есть указатель, и §4.11 велит компилировать такой
-/// массив в `n` указателей на объекты Perceus. Разница с колонкой - ровно
-/// числом блоков, и ради неё программы держатся одинаковыми во всём прочем.
+/// `Cell` несёт указатель, и §4.11 велит компилировать такой массив в `n`
+/// указателей на объекты Perceus. Разница с колонкой - ровно числом блоков, и
+/// ради неё программы держатся одинаковыми во всём прочем.
 const POINTING: &str = "\
--- Конструкторы нульарные нарочно: они непосредственны и ячеек не занимают,
--- поэтому в счёте блоков остаётся ровно то, ради чего он ведётся, - массив и
--- объект на элемент.
-data Colour where
-  Red : Colour
-  Green : Colour
-  Blue : Colour
+-- Wrap рекурсивен нарочно: рекурсивное семейство не плоское (§4.11), и
+-- запись с таким полем остаётся объектом кучи - семейство из одних плоских
+-- полей теперь укладывается плотно само (§10 вопрос 157). Нульарный Tip
+-- непосредственен и ячеек не занимает, поэтому в счёте блоков остаётся
+-- ровно то, ради чего он ведётся, - массив и объект-запись на элемент.
+data Wrap where
+  Tip : Wrap
+  W : Wrap -> Wrap
 
-type Cell = { it : Colour }
+type Cell = { it : Wrap }
 
 first : Cell
-first = { it = Red }
+first = { it = Tip }
 
 second : Cell
-second = { it = Green }
+second = { it = Tip }
 
 third : Cell
-third = { it = Blue }
+third = { it = Tip }
 
 built : Array 3 Cell
 built = arraySet (arraySet (arrayNew 3 first) 1 second) 2 third
 
-read : Array 3 Cell -> Colour
+read : Array 3 Cell -> Wrap
 read xs = (arrayIndex xs 2).it
 
-main : Colour
+main : Wrap
 main = read built
 ";
 
@@ -475,6 +476,107 @@ fn a_single_constructor_family_packs_like_a_record() {
         !text.contains("adamas_variant"),
         "у единственного конструктора появился тег - различать ему нечего"
     );
+}
+
+/// Вложенный агрегат: запись в записи, слот - байты укладки целиком
+/// (§4.11, §10 вопрос 157).
+///
+/// `Particle` - центральная запись §4.11: геометрия плюс скаляр. Проекция
+/// сквозь вложенность - композиция двух чтений по смещению, а не путь.
+const NESTED_COLUMN: &str = "\
+type V3 (a : Type) = { x : a, y : a, z : a }
+type Vec3 = V3 Float32
+
+type Particle = { pos : Vec3, hp : Float32 }
+
+first : Particle
+first = { pos = { x = 1.0, y = 2.0, z = 3.0 }, hp = 10.0 }
+
+second : Particle
+second = { pos = { x = 4.0, y = 5.0, z = 6.0 }, hp = 20.0 }
+
+built : Array 2 Particle
+built = arraySet (arrayNew 2 first) 1 second
+
+read : Array 2 Particle -> Float32
+read xs = addFloat32 (arrayIndex xs 1).pos.z (arrayIndex xs 0).hp
+
+-- 6.0 + 10.0 = 16.0: поле вложенного из одной ячейки, скаляр из другой.
+main : Float32
+main = read built
+";
+
+/// Колонка вложенных агрегатов - один блок, 16 байт на ячейку.
+#[test]
+fn a_nested_aggregate_packs_and_projects_by_composition() {
+    assert_eq!(
+        harness::printed(NESTED_COLUMN),
+        "16.0",
+        "свидетель перестал различать вложенность и ячейку"
+    );
+    let stderr = harness::agreed("packed-nested", NESTED_COLUMN).unwrap_or_else(|error| {
+        panic!("вложенная колонка: {error}");
+    });
+    let (allocated, live) = harness::blocks("packed-nested", &stderr);
+    assert_eq!(
+        allocated, 1,
+        "колонка вложенных агрегатов стоила не один блок"
+    );
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
+    let text =
+        harness::text(NESTED_COLUMN).unwrap_or_else(|error| panic!("вложенная колонка: {error}"));
+    for written in [
+        // Particle: Vec3 в 12 байт плюс Float32 - шестнадцать по границе 4.
+        "_Alignas(4) unsigned char bytes[16];",
+        "adamas_array_alloc((size_t)t0, 16u)",
+        // Вложенный агрегат копируется целиком: 12 байт одним memcpy.
+        ".bytes + 0, 12u",
+    ] {
+        assert!(
+            text.contains(written),
+            "в порождённом C нет `{written}`: вложенная укладка §4.11 разошлась"
+        );
+    }
+}
+
+/// Вложенность семейств: плотное семейство полем плотного семейства.
+///
+/// Мономорфно, потому что читаемо: у параметрического плоского payload'а
+/// боксированной формы нет по построению, и ячейка его не читается - см.
+/// границу в §13.
+const NESTED_FAMILY: &str = "\
+data Inner where
+  MkI : Int8 -> Inner
+
+data Outer where
+  MkO : Inner -> Int8 -> Outer
+
+built : Array 2 Outer
+built = arraySet (arrayNew 2 (MkO (MkI 7) 1)) 1 (MkO (MkI 9) 2)
+
+read : Array 2 Outer -> Outer
+read xs = arrayIndex xs 1
+
+main : Outer
+main = read built
+";
+
+/// Семейство в семействе укладывается и читается обратно объектом.
+#[test]
+fn a_family_nested_in_a_family_packs_and_unpacks() {
+    assert_eq!(
+        harness::printed(NESTED_FAMILY),
+        "MkO (MkI 9) 2",
+        "печать машины изменилась - свидетель говорит не о том"
+    );
+    let stderr = harness::agreed("packed-nested-family", NESTED_FAMILY).unwrap_or_else(|error| {
+        panic!("вложенное семейство: {error}");
+    });
+    let (allocated, live) = harness::blocks("packed-nested-family", &stderr);
+    // Колонка - один блок; ответ боксируется под печать: объект `MkO` и
+    // объект `MkI` в его поле.
+    assert_eq!(allocated, 3, "цена вложенного семейства разошлась");
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
 }
 
 /// Две записи одного числа сошлись: понижение и типовая сторона.

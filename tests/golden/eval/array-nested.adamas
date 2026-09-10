@@ -1,0 +1,28 @@
+-- Вложенный агрегат: запись в записи уложена плотно (§4.11, §10 вопрос 157).
+--
+-- `Particle` - центральная запись §4.11: геометрия плюс скаляр, 12 + 4 байта
+-- по границе четыре. Проекция сквозь вложенность - композиция двух чтений по
+-- смещению; цену - один блок на колонку и 16 байт на ячейку - считает
+-- `adamas-codegen/tests/packed.rs`. Наблюдаемое здесь - значение: слагаемые
+-- взяты из разных ячеек и с разных глубин вложенности.
+
+type V3 (a : Type) = { x : a, y : a, z : a }
+type Vec3 = V3 Float32
+
+type Particle = { pos : Vec3, hp : Float32 }
+
+first : Particle
+first = { pos = { x = 1.0, y = 2.0, z = 3.0 }, hp = 10.0 }
+
+second : Particle
+second = { pos = { x = 4.0, y = 5.0, z = 6.0 }, hp = 20.0 }
+
+built : Array 2 Particle
+built = arraySet (arrayNew 2 first) 1 second
+
+read : Array 2 Particle -> Float32
+read xs = addFloat32 (arrayIndex xs 1).pos.z (arrayIndex xs 0).hp
+
+-- 6.0 + 10.0 = 16.0
+main : Float32
+main = read built

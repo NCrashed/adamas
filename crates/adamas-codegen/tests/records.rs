@@ -14,14 +14,15 @@ mod harness;
 /// Построение и проекция: ответ называет тот слот, который написан.
 ///
 /// Поля различны нарочно и все три: возьми проекция соседний слот - ответ
-/// сменится, и сменится он на любом из двух соседей. Поля не примитивны, и
-/// потому запись здесь **объект кучи**: плотная укладка примитивной записи -
-/// вторая половина трека (`packed.rs`).
+/// сменится, и сменится он на любом из двух соседей. `Colour` рекурсивен
+/// нарочно - рекурсивное семейство не плоское (§4.11), - и потому запись
+/// здесь **объект кучи**: плотную укладку меряет `packed.rs`.
 const FIELDS: &str = "\
 data Colour where
   Red : Colour
   Green : Colour
   Blue : Colour
+  Deep : Colour -> Colour
 
 type Triple = { first : Colour, second : Colour, third : Colour }
 
@@ -196,8 +197,10 @@ fn a_projection_without_a_shape_is_refused_by_name() {
 fn a_record_written_out_of_its_declared_order_is_refused() {
     let refused = harness::compiled(REORDERED).expect_err("порядок полей разошёлся с объявленным");
     let said = refused.to_string();
+    // `Pair` из двух `Bit` укладывается плотно (§10 вопрос 157), и отказ
+    // приходит от плоской записи; правило то же - позиция в позицию.
     assert!(
-        said.contains("поля записи"),
+        said.contains("поля плоской записи") && said.contains("{right, left}"),
         "отказ назвал не ту причину: {said}"
     );
     // Сосед отличается одним - порядком написания, - и берёт то же поле.

@@ -4715,8 +4715,8 @@ fn arrows(binders: Vec<(Binder, CoreName, Term)>, row: &Row<Term>, result: Term)
 /// Невыразимое имя элиминатора маски (§3.4, §10 вопрос 72).
 pub(crate) const MASK: &str = "#mask";
 
-/// Невыразимое имя элиминатора scope (§3.3).
-pub(crate) const CLOSING: &str = "#closing";
+/// Невыразимое имя элиминатора scope (§3.3). Живёт в ядре: читают его трое.
+pub(crate) use adamas_core::sig::CLOSING;
 
 /// Имя постулата питомника (§5.2). Питомником его делает отсутствие тела -
 /// то же условие, каким машина решает давать тело сама.

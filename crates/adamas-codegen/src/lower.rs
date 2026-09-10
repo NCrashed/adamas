@@ -97,7 +97,7 @@ use adamas_core::level::Level;
 use adamas_core::mult::Mult;
 use adamas_core::prim::{ArrayOp, Prim, PrimTy};
 use adamas_core::row::Row;
-use adamas_core::sig::{DefinitionKind, Signature};
+use adamas_core::sig::{CLOSING, DefinitionKind, Signature};
 use adamas_core::term::{Case, Index, Name, Term};
 use adamas_core::value::{Env, Lvl, Value};
 
@@ -266,6 +266,14 @@ pub enum LowerError {
         /// Какое поле берут.
         label: String,
     },
+
+    /// Выход из scope пришёл не в той форме, в какой его ставит §3.3.
+    ///
+    /// `#closing` четырёхместен, и оба вычисления в нём приостановлены -
+    /// `(ω _ : Unit) ->`. Понижение снимает приостановку разом, а не строит
+    /// замыкание: замыкание стоило бы ячейки кучи на каждый scope.
+    #[error("выход из scope без обоих приостановленных вычислений (§3.3)")]
+    Scope,
 
     /// Проекция поля, которого в форме записи нет.
     #[error("`.{label}`: поля нет в форме `{shape}` (§4.2)")]
@@ -1680,6 +1688,11 @@ impl<'a> Lowerer<'a> {
         if let Term::Prim(prim) = head {
             return self.primitive(scope, *prim, arguments);
         }
+        if let Term::Const(name, ..) = head {
+            if &**name == CLOSING {
+                return self.closing(scope, arguments);
+            }
+        }
         let Term::Const(name, ..) = head else {
             // Голова - не имя: применяется значение, и стирания здесь не бывает.
             let mut value = self.shaped(scope, head, Repr::Boxed, "применяемое значение")?;
@@ -1704,6 +1717,86 @@ impl<'a> Lowerer<'a> {
                 })
             }
         }
+    }
+
+    /// Выход из scope, держащего ресурс: `#closing` (§3.3).
+    ///
+    /// # Что здесь повторяется, а что нет
+    ///
+    /// У машины scope овеществлён кадром (`Frame::Closing`), и это не
+    /// украшение: обрыв через эффект находит отложенное **в брошенном
+    /// сегменте**. Этот срез - **первая форма понижения** (§13, запись
+    /// 2026-09-08 про ABI): кадров у неё нет вовсе, чистый код идёт по
+    /// C-стеку, и обрываться в нём нечему. Остаётся то, что кадр делает на
+    /// нормальном выходе, - `Closing` со следующим за ним `Closed`: тело,
+    /// потом деструктор, потом ответ тела.
+    ///
+    /// Исключительные выходы - через эффект, не зовущий резумпцию, - вместе с
+    /// эффектами и приходят: их берёт вторая форма (§10 вопрос 161).
+    ///
+    /// # Почему связывания, а не свой узел
+    ///
+    /// Договор о владении у [`Expr::Bind`] уже есть, и второй узел потребовал
+    /// бы второй его копии - тот же довод, каким проекция §4.2 понижается
+    /// разбором в одну ветвь. Ответ деструктора связывается и не
+    /// употребляется, поэтому дропает его [`crate::perceus`] обычным правилом,
+    /// а не отдельным знанием про scope.
+    ///
+    /// LIFO выходит вложенностью и ничего к ней не добавляет: связывание,
+    /// стоящее ниже, обернуло при вставке меньший кусок
+    /// (`adamas-elab/src/expr.rs`), значит его `#closing` лежит **внутри**, а
+    /// внутренний деструктор зовётся раньше внешнего.
+    fn closing(
+        &mut self,
+        scope: &mut Scope,
+        arguments: &[Arg<'_>],
+    ) -> Result<(Expr, Repr), LowerError> {
+        let [_, _, Arg::Written(body), Arg::Written(close)] = arguments else {
+            return Err(LowerError::Scope);
+        };
+        let (body, repr) = self.resumed(scope, body)?;
+        let held = Binding {
+            name: "ответ_scope".to_owned(),
+            local: scope.fresh(),
+            fact: Fact::present(Mult::One).shaped(repr),
+        };
+        let answer = held.local;
+        let (close, closed) = self.resumed(scope, close)?;
+        let discarded = Binding {
+            name: "ответ_деструктора".to_owned(),
+            local: scope.fresh(),
+            fact: Fact::present(Mult::One).shaped(closed),
+        };
+        Ok((
+            Expr::Bind {
+                binding: held,
+                value: Box::new(body),
+                body: Box::new(Expr::Bind {
+                    binding: discarded,
+                    value: Box::new(close),
+                    body: Box::new(Expr::Local(answer)),
+                }),
+            },
+            repr,
+        ))
+    }
+
+    /// Приостановленное вычисление `(ω _ : Unit) -> {ρ} a`, снятое на месте.
+    ///
+    /// Снятое, а не применённое: `(\_ -> e) ()` через общий путь стоило бы
+    /// замыкания, то есть ячейки кучи на каждый scope с ресурсом.
+    ///
+    /// Триггер не связывается ничем. §3.3 строит приостановку сдвигом тела
+    /// (`Elaborator::closing`), поэтому назвать его тело не может по
+    /// построению; назови - придёт [`LowerError::Unbound`], а не тихий ответ.
+    fn resumed(&mut self, scope: &mut Scope, term: &Term) -> Result<(Expr, Repr), LowerError> {
+        let Term::Lam(_, _, inner) = term else {
+            return Err(LowerError::Scope);
+        };
+        scope.env.push(Slot::Absent);
+        let lowered = self.expr(scope, inner);
+        scope.env.pop();
+        lowered
     }
 
     /// Понижает примитив: тип, литерал либо операцию (§4.3, §4.11).

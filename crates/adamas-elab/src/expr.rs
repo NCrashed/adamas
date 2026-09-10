@@ -3556,7 +3556,26 @@ impl<'a> Elaborator<'a> {
             if self.bare {
                 return Ok(term);
             }
-            let ty = adamas_core::check::prim_type(Prim::Over(op));
+            let ty = adamas_core::check::prim_type(self.signature, Prim::Over(op));
+            return Ok(self.implicits(term, ty));
+        }
+        // Регион (§3.6) - тем же правилом имени, что массив: на `Block` стоит
+        // представление, а не значение, и переопределяемое имя дало бы два
+        // блока с разной укладкой. `Ptr` - хендл, то есть смещение внутри
+        // блока (§4.11), и пишется он `UInt64`; имя занято ровно затем, чтобы
+        // написанное `Ptr` значило это, а не чужое объявление.
+        if &*name.text == prim::BLOCK {
+            return Ok(Term::Prim(Prim::Block));
+        }
+        if &*name.text == prim::PTR {
+            return Ok(Term::Prim(Prim::Ty(prim::PrimTy::UInt64)));
+        }
+        if let Some(op) = prim::RegionOp::named(&name.text) {
+            let term = Term::Prim(Prim::In(op));
+            if self.bare {
+                return Ok(term);
+            }
+            let ty = adamas_core::check::prim_type(self.signature, Prim::In(op));
             return Ok(self.implicits(term, ty));
         }
         // Член объявляемой группы: аргументы уровня - дырки, числом в арность,

@@ -66,8 +66,11 @@
 use std::collections::BTreeSet;
 
 use adamas_core::mult::Mult;
+use adamas_core::prim::PrimTy;
 
-use crate::ir::{Arm, Binding, Constructor, CtorId, Expr, Fact, Function, LocalId, Program};
+use crate::ir::{
+    Arm, Binding, Constructor, CtorId, Expr, Fact, Function, LocalId, Program, Stride,
+};
 
 /// Вставляет RC и переиспользование во все функции программы.
 #[must_use]
@@ -147,8 +150,25 @@ fn inner(expr: &Expr, out: &mut BTreeSet<LocalId>) {
         | Expr::ConstructClosure { .. }
         | Expr::Literal { .. }
         | Expr::LayoutField { .. }
+        | Expr::RegionNew
         | Expr::Layout { .. } => {}
         Expr::Unpack { value, .. } => inner(value, out),
+        Expr::RegionLast { region } => inner(region, out),
+        Expr::RegionAlloc { region, value, .. } => {
+            inner(region, out);
+            inner(value, out);
+        }
+        Expr::RegionRead { region, at, .. } => {
+            inner(region, out);
+            inner(at, out);
+        }
+        Expr::RegionWrite {
+            region, at, value, ..
+        } => {
+            inner(region, out);
+            inner(at, out);
+            inner(value, out);
+        }
         Expr::Construct { arguments, .. }
         | Expr::Call { arguments, .. }
         | Expr::Pack {
@@ -238,8 +258,25 @@ fn bound(expr: &Expr, note: &mut impl FnMut(LocalId)) {
         | Expr::ConstructClosure { .. }
         | Expr::Literal { .. }
         | Expr::LayoutField { .. }
+        | Expr::RegionNew
         | Expr::Layout { .. } => {}
         Expr::Unpack { value, .. } => bound(value, note),
+        Expr::RegionLast { region } => bound(region, note),
+        Expr::RegionAlloc { region, value, .. } => {
+            bound(region, note);
+            bound(value, note);
+        }
+        Expr::RegionRead { region, at, .. } => {
+            bound(region, note);
+            bound(at, note);
+        }
+        Expr::RegionWrite {
+            region, at, value, ..
+        } => {
+            bound(region, note);
+            bound(at, note);
+            bound(value, note);
+        }
         Expr::Construct { arguments, .. }
         | Expr::Call { arguments, .. }
         | Expr::Pack {
@@ -327,8 +364,25 @@ fn named(expr: &Expr, out: &mut BTreeSet<LocalId>) {
         Expr::Erased
         | Expr::ConstructClosure { .. }
         | Expr::Literal { .. }
+        | Expr::RegionNew
         | Expr::Layout { .. } => {}
         Expr::Unpack { value, .. } => named(value, out),
+        Expr::RegionLast { region } => named(region, out),
+        Expr::RegionAlloc { region, value, .. } => {
+            named(region, out);
+            named(value, out);
+        }
+        Expr::RegionRead { region, at, .. } => {
+            named(region, out);
+            named(at, out);
+        }
+        Expr::RegionWrite {
+            region, at, value, ..
+        } => {
+            named(region, out);
+            named(at, out);
+            named(value, out);
+        }
         Expr::Construct { arguments, .. }
         | Expr::Call { arguments, .. }
         | Expr::Pack {
@@ -450,10 +504,17 @@ impl Pass<'_> {
             | Expr::ConstructClosure { .. }
             | Expr::Literal { .. }
             | Expr::LayoutField { .. }
+            // Пустая область блока ещё не занимает: аллокацию выдаст эмиттер,
+            // а считать по ней нечего до первого её употребления.
+            | Expr::RegionNew
             | Expr::Layout { .. } => drops(owned.iter().copied().collect::<Vec<_>>(), expr),
             Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. } => {
                 self.array(expr, owned)
             }
+            Expr::RegionAlloc { .. }
+            | Expr::RegionLast { .. }
+            | Expr::RegionRead { .. }
+            | Expr::RegionWrite { .. } => self.region(expr, owned),
             Expr::Pack { .. } | Expr::Unpack { .. } => self.aggregate(expr, owned),
             Expr::Primitive {
                 op,
@@ -614,6 +675,76 @@ impl Pass<'_> {
                     stride,
                     array: next(),
                     at,
+                }
+            }
+        };
+        drops(spare, node)
+    }
+
+    /// Операция над регионом (§3.6).
+    ///
+    /// Владение то же, что у массива, и по той же причине: блок - объект кучи
+    /// с одним заголовком на всю область. Нагрузка внутри области счёта не
+    /// платит вовсе - счётчика у неё нет (`{Flat a}`), - и это то самое, ради
+    /// чего §3.6 написан: «освобождение одно на всю область».
+    ///
+    /// Порядок подвыражений значим ровно как у массива: блок стоит первым, а
+    /// читающее из него - последним, поэтому к записи блок приходит со
+    /// счётчиком, который чтение уже вернуло, и запись идёт по месту.
+    fn region(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
+        /// Какая из четырёх операций разобрана.
+        enum Shape {
+            Alloc,
+            Last,
+            Read,
+            Write,
+        }
+        let (shape, stride, parts) = match expr {
+            Expr::RegionAlloc {
+                stride,
+                region,
+                value,
+            } => (Shape::Alloc, stride, vec![*region, *value]),
+            Expr::RegionLast { region } => {
+                (Shape::Last, Stride::Static(PrimTy::UInt64), vec![*region])
+            }
+            Expr::RegionRead { stride, region, at } => (Shape::Read, stride, vec![*region, *at]),
+            Expr::RegionWrite {
+                stride,
+                region,
+                at,
+                value,
+            } => (Shape::Write, stride, vec![*region, *at, *value]),
+            other => return other,
+        };
+        let (mut done, spare) = self.sequence(parts, owned);
+        let mut next = || Box::new(done.pop().unwrap_or(Expr::Erased));
+        let node = match shape {
+            Shape::Alloc => {
+                let value = next();
+                Expr::RegionAlloc {
+                    stride,
+                    region: next(),
+                    value,
+                }
+            }
+            Shape::Last => Expr::RegionLast { region: next() },
+            Shape::Read => {
+                let at = next();
+                Expr::RegionRead {
+                    stride,
+                    region: next(),
+                    at,
+                }
+            }
+            Shape::Write => {
+                let value = next();
+                let at = next();
+                Expr::RegionWrite {
+                    stride,
+                    region: next(),
+                    at,
+                    value,
                 }
             }
         };
@@ -871,6 +1002,13 @@ impl Pass<'_> {
             | Expr::LayoutField { .. }
             | Expr::Pack { .. }
             | Expr::Unpack { .. }
+            // Область региона под переписывание тоже не годится, и по тому же
+            // счёту: придержанный блок размером в `slots` полей.
+            | Expr::RegionNew
+            | Expr::RegionAlloc { .. }
+            | Expr::RegionLast { .. }
+            | Expr::RegionRead { .. }
+            | Expr::RegionWrite { .. }
             | Expr::Layout { .. } => false,
         }
     }
@@ -940,6 +1078,13 @@ impl Pass<'_> {
             | Expr::LayoutField { .. }
             | Expr::Pack { .. }
             | Expr::Unpack { .. }
+            // Область региона под переписывание тоже не годится, и по тому же
+            // счёту: придержанный блок размером в `slots` полей.
+            | Expr::RegionNew
+            | Expr::RegionAlloc { .. }
+            | Expr::RegionLast { .. }
+            | Expr::RegionRead { .. }
+            | Expr::RegionWrite { .. }
             | Expr::Layout { .. } => false,
         }
     }

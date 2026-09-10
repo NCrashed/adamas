@@ -83,6 +83,11 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
         Term::Prim(crate::prim::Prim::Over(op)) => {
             Rc::new(Value::Neutral(Head::ArrayOp(*op), Vec::new()))
         }
+        // Операции региона (§3.6) - головы по тому же доводу: значение блока и
+        // есть спайн `regionNew`/`regionAlloc`/`regionWrite`.
+        Term::Prim(crate::prim::Prim::In(op)) => {
+            Rc::new(Value::Neutral(Head::Region(*op), Vec::new()))
+        }
         Term::Prim(prim) => Rc::new(Value::Prim(*prim)),
 
         Term::Lam(mult, name, body) => Rc::new(Value::Lam(
@@ -428,6 +433,11 @@ pub fn try_apply(callee: &Rc<Value>, argument: Rc<Value>) -> Option<Rc<Value>> {
                     return Some(read);
                 }
             }
+            if let Head::Region(op) = head {
+                if let Some(answer) = region_answer(*op, &spine) {
+                    return Some(answer);
+                }
+            }
             Some(Rc::new(Value::Neutral(head.clone(), spine)))
         }
         _ => None,
@@ -513,6 +523,158 @@ fn indexed(spine: &[Elim]) -> Option<Rc<Value>> {
     }
 }
 
+/// Хендл и чтение региона (§3.6): δ-шаг [`Head::Region`].
+///
+/// Блок здесь - **спайн**, как и массив: `regionNew` заводит цепочку,
+/// `regionAlloc` и `regionWrite` её наращивают. Разница с массивом одна и она
+/// существенная: ячейки у региона нет, есть **смещение**, и считается оно по
+/// укладке нагрузки. Укладку приносит словарь `Flat`, стоящий вторым стёртым
+/// аргументом каждой из этих операций, - без него смещения не существует, и
+/// ограничение §3.6 держит здесь вторую свою работу помимо той, ради которой
+/// написано.
+///
+/// Не сводится, когда хендл не литерал, когда цепочка упирается не в
+/// `regionNew` (блок пришёл переменной) либо когда словарь ещё не решён -
+/// обобщённый код над `{Flat a}` считает смещение уже на месте вызова.
+fn region_answer(op: crate::prim::RegionOp, spine: &[Elim]) -> Option<Rc<Value>> {
+    use crate::prim::{PrimTy, RegionOp};
+    let word = |bits: u64| {
+        Rc::new(Value::Prim(crate::prim::Prim::literal(
+            PrimTy::UInt64,
+            bits,
+        )))
+    };
+    match (op, spine) {
+        (RegionOp::Last, [Elim::App(block)]) => region_bump(block)?.1.map(word),
+        (RegionOp::Read, [Elim::App(_), Elim::App(_), Elim::App(block), Elim::App(at)]) => {
+            let Value::Prim(crate::prim::Prim::Lit(_, wanted)) = &**at else {
+                return None;
+            };
+            region_stored(block, *wanted)
+        }
+        _ => None,
+    }
+}
+
+/// Сколько байт занято блоком и где лежит последняя аллокация.
+///
+/// Второе - `None` у пустого блока: аллокаций не было, и хендла не существует.
+/// Запись занятого не двигает: §3.6 называет `write` операцией над уже
+/// размещённым местом, а не аллокацией.
+fn region_bump(block: &Rc<Value>) -> Option<(u64, Option<u64>)> {
+    use crate::prim::RegionOp;
+    let Value::Neutral(Head::Region(op), spine) = &**block else {
+        return None;
+    };
+    match (op, spine.as_slice()) {
+        (RegionOp::New, []) => Some((0, None)),
+        (
+            RegionOp::Alloc,
+            [
+                Elim::App(_),
+                Elim::App(dict),
+                Elim::App(inner),
+                Elim::App(_),
+            ],
+        ) => {
+            let (used, _) = region_bump(inner)?;
+            let (size, align) = region_layout(dict)?;
+            let at = aligned(used, align);
+            Some((at.checked_add(size)?, Some(at)))
+        }
+        (
+            RegionOp::Write,
+            [
+                Elim::App(_),
+                Elim::App(_),
+                Elim::App(inner),
+                Elim::App(_),
+                Elim::App(_),
+            ],
+        ) => region_bump(inner),
+        _ => None,
+    }
+}
+
+/// Значение, лежащее по смещению `wanted`: последняя запись туда и выигрывает.
+///
+/// Обход идёт от вершины вниз, как у массива, и останавливается на первой
+/// операции, занявшей то же место. Дно цепочки - `regionNew`, где не лежит
+/// ничего: чтение неразмещённого места не сводится.
+fn region_stored(block: &Rc<Value>, wanted: u64) -> Option<Rc<Value>> {
+    use crate::prim::RegionOp;
+    let mut current = Rc::clone(block);
+    loop {
+        let Value::Neutral(Head::Region(op), spine) = &*Rc::clone(&current) else {
+            return None;
+        };
+        match (op, spine.as_slice()) {
+            (
+                RegionOp::Alloc,
+                [
+                    Elim::App(_),
+                    Elim::App(_),
+                    Elim::App(inner),
+                    Elim::App(value),
+                ],
+            ) => {
+                let (_, last) = region_bump(&current)?;
+                if last == Some(wanted) {
+                    return Some(Rc::clone(value));
+                }
+                current = Rc::clone(inner);
+            }
+            (
+                RegionOp::Write,
+                [
+                    Elim::App(_),
+                    Elim::App(_),
+                    Elim::App(inner),
+                    Elim::App(at),
+                    Elim::App(value),
+                ],
+            ) => {
+                let Value::Prim(crate::prim::Prim::Lit(_, at)) = &**at else {
+                    return None;
+                };
+                if *at == wanted {
+                    return Some(Rc::clone(value));
+                }
+                current = Rc::clone(inner);
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Размер и выравнивание из словаря `Flat` (§4.11).
+///
+/// Словарь есть запись с единственным методом `layout`, а тот - запись из
+/// `size` и `align`. Поля читаются **по имени**: порядок их - дело объявления
+/// класса, и считать его позицией значило бы завести второе правило.
+fn region_layout(dict: &Rc<Value>) -> Option<(u64, u64)> {
+    let field = |value: &Rc<Value>, name: &str| match &**value {
+        Value::Object(fields) => fields
+            .iter()
+            .find(|(label, _)| &**label == name)
+            .map(|(_, value)| Rc::clone(value)),
+        _ => None,
+    };
+    let bits = |value: &Rc<Value>| match &**value {
+        Value::Prim(crate::prim::Prim::Lit(_, bits)) => Some(*bits),
+        _ => None,
+    };
+    let layout = field(dict, "layout")?;
+    let size = bits(&field(&layout, "size")?)?;
+    let align = bits(&field(&layout, "align")?)?;
+    Some((size, align.max(1)))
+}
+
+/// Ближайшее сверху кратное `align`. То же правило, что у типовой стороны.
+fn aligned(offset: u64, align: u64) -> u64 {
+    offset.next_multiple_of(align.max(1))
+}
+
 /// Читает значение обратно в терм.
 ///
 /// `size` - число связываний в контексте: оно же уровень следующей свежей
@@ -564,6 +726,7 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
                 Head::Prim(op, ty) => Term::Prim(crate::prim::Prim::Op(*op, *ty)),
                 Head::Array => Term::Prim(crate::prim::Prim::Array),
                 Head::ArrayOp(op) => Term::Prim(crate::prim::Prim::Over(*op)),
+                Head::Region(op) => Term::Prim(crate::prim::Prim::In(*op)),
             };
             spine.iter().fold(base, |callee, elim| match elim {
                 Elim::App(argument) => Term::App(Rc::new(callee), Rc::new(quote(size, argument))),

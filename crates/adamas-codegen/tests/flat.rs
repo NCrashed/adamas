@@ -21,7 +21,7 @@ mod harness;
 
 use std::collections::BTreeSet;
 
-use adamas_codegen::ir::{Arm, Binding, Expr, Function, LocalId};
+use adamas_codegen::ir::{Binding, Function, LocalId};
 
 /// Сколько блоков выдал прогон. Ответ по дороге сверяется с `adamas eval`.
 fn allocated(name: &str, source: &str) -> usize {
@@ -160,7 +160,7 @@ fn flat_bindings_carry_no_reference_counting() {
     for function in &program.functions {
         let flat = flat_locals(function);
         let mut named = Vec::new();
-        rc_nodes(&function.body, &mut named);
+        harness::rc_nodes(&function.body, &mut named);
         counted += named.len();
         for local in named {
             assert!(
@@ -191,99 +191,8 @@ fn flat_locals(function: &Function) -> BTreeSet<LocalId> {
     for binding in function.captured.iter().chain(&function.parameters) {
         note(binding);
     }
-    bindings(&function.body, &mut note);
+    harness::bindings(&function.body, &mut note);
     found
-}
-
-/// Все связывания тела.
-fn bindings(expr: &Expr, note: &mut impl FnMut(&Binding)) {
-    walk(expr, &mut |inner| match inner {
-        Expr::Bind { binding, .. } => note(binding),
-        Expr::Match { arms, .. } => {
-            for Arm { fields, .. } in arms {
-                for field in fields {
-                    note(field);
-                }
-            }
-        }
-        _ => {}
-    });
-}
-
-/// Связывания, названные узлами `Dup`, `Drop` и `Reclaim`.
-fn rc_nodes(expr: &Expr, out: &mut Vec<LocalId>) {
-    walk(expr, &mut |inner| match inner {
-        Expr::Dup { local, .. } | Expr::Drop { local, .. } | Expr::Reclaim { local, .. } => {
-            out.push(*local);
-        }
-        _ => {}
-    });
-}
-
-/// Обход дерева сверху вниз.
-fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
-    visit(expr);
-    match expr {
-        Expr::Local(_)
-        | Expr::Erased
-        | Expr::ConstructClosure { .. }
-        | Expr::Literal { .. }
-        | Expr::LayoutField { .. }
-        | Expr::Layout { .. } => {}
-        Expr::Unpack { value, .. } => walk(value, visit),
-        Expr::Construct { arguments, .. }
-        | Expr::Call { arguments, .. }
-        | Expr::Pack {
-            fields: arguments, ..
-        } => {
-            for argument in arguments {
-                walk(argument, visit);
-            }
-        }
-        Expr::ArrayNew { count, initial, .. } => {
-            walk(count, visit);
-            walk(initial, visit);
-        }
-        Expr::ArraySet {
-            array, at, value, ..
-        } => {
-            walk(array, visit);
-            walk(at, visit);
-            walk(value, visit);
-        }
-        Expr::ArrayIndex { array, at, .. } => {
-            walk(array, visit);
-            walk(at, visit);
-        }
-        Expr::Closure { captured, .. } => {
-            for capture in captured {
-                walk(capture, visit);
-            }
-        }
-        Expr::Primitive { left, right, .. } => {
-            walk(left, visit);
-            walk(right, visit);
-        }
-        Expr::Apply { callee, argument } => {
-            walk(callee, visit);
-            walk(argument, visit);
-        }
-        Expr::Bind { value, body, .. } => {
-            walk(value, visit);
-            walk(body, visit);
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            walk(scrutinee, visit);
-            for arm in arms {
-                walk(&arm.body, visit);
-            }
-        }
-        Expr::Dup { body, .. } | Expr::Drop { body, .. } | Expr::Reclaim { body, .. } => {
-            walk(body, visit);
-        }
-    }
 }
 
 /// Плавающие всех форм печати: позиционной, экспоненциальной, со знаком.

@@ -40,12 +40,15 @@ use adamas_core::term::{Name, Term};
 use adamas_core::value::{Env, Head, Lvl, Telescope, Value};
 use adamas_parser::ast::Symbol;
 
-use crate::class::{abstracted, binders_of};
+use crate::class::{abstracted, abstracted_pi, binders_of, goal_of};
 use crate::error::ElabError;
 use crate::own::Owned;
 
 /// Имя класса представления. Соглашение то же, каким `if` берёт `Bool`.
-pub(crate) const FLAT: &str = "Flat";
+///
+/// Написано оно в ядре ([`adamas_core::prim::FLAT`]): тип операции региона
+/// (§3.6) называет тот же класс, и второе написание разошлось бы молча.
+pub(crate) const FLAT: &str = adamas_core::prim::FLAT;
 
 /// Единственный метод класса: дескриптор укладки.
 pub(crate) const LAYOUT: &str = "layout";
@@ -162,6 +165,8 @@ enum Why {
     Open,
     /// Массив (§4.11): один объект кучи, адресуемый указателем.
     Pointing,
+    /// Блок региона (§3.6): область в куче, и живёт она вне Perceus.
+    Regional,
     /// Значений у этого нет вовсе - укладывать нечего.
     Alien,
     /// Вложенность кончилась раньше представления.
@@ -189,6 +194,10 @@ impl Why {
             Self::Pointing => {
                 "массив (§4.11): один объект кучи, и в чужой укладке от него \
                  лежит указатель"
+            }
+            Self::Regional => {
+                "блок региона (§3.6): область целиком, и класть её нагрузкой в \
+                 регион значило бы вложить область в область"
             }
             Self::Alien => "значений не имеет, и укладывать нечего",
             Self::Deep => "уходит глубже, чем вывод готов идти",
@@ -397,10 +406,20 @@ pub(crate) fn derive(
     // полиморфна по уровню, а словарь - нет, и решить её дырки может только
     // это сравнение (тот же порядок, что у реализации сигнатуры в
     // `class::implementing`).
-    check_within(&Ctx::new(signature), metas, &solution, ty).map_err(|_| ElabError::FlatShape {
-        why: "словарь `Flat` не сошёлся с объявленным классом: метод у него один - \
-              `layout : Layout`, а `Layout` есть `{ size : UInt32, align : UInt32 }` (§4.11)",
-        span,
+    // Сверяется словарь с **приведённой** целью, а не с написанным типом дырки.
+    // Решение имплисита приезжает туда бета-редексом по контексту (`Flat
+    // ((\m -> Int64) #0)`), и у лямбды в позиции аргумента тип не выводится
+    // вовсе - проверка отказывала на форме словаря, которая ни при чём.
+    // Телескоп при этом тот же, по которому построено решение, и цель
+    // посчитана в его контексте.
+    let checked = abstracted_pi(&binders, goal_of(goal).clone());
+    check_within(&Ctx::new(signature), metas, &solution, &checked).map_err(|_| {
+        ElabError::FlatShape {
+            why: "словарь `Flat` не сошёлся с объявленным классом: метод у него один - \
+                  `layout : Layout`, а `Layout` есть `{ size : UInt32, align : UInt32 }` \
+                  (§4.11)",
+            span,
+        }
     })?;
     Ok(eval(&Env::default(), &solution))
 }
@@ -446,6 +465,13 @@ impl Walk<'_> {
             Value::Neutral(Head::Array, _) => Err(Blame::alone(
                 Shown::Named(Rc::from(adamas_core::prim::ARRAY)),
                 Why::Pointing,
+            )),
+            // Блок региона (§3.6) - объект кучи, и нагрузкой региона он не
+            // бывает: `Flat` для него не выводится, поэтому `regionAlloc`
+            // блока в блок не кладёт.
+            Value::Prim(Prim::Block) => Err(Blame::alone(
+                Shown::Named(Rc::from(adamas_core::prim::BLOCK)),
+                Why::Regional,
             )),
             Value::Record(telescope) => self.record(metas, &shown, telescope),
             Value::Neutral(Head::Global(name, ..), spine) => {

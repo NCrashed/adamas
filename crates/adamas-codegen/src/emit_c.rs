@@ -195,7 +195,9 @@ fn scalar(repr: Repr) -> &'static str {
     match repr {
         // Массив и запись - объекты кучи, и в C они такое же слово, как всякий
         // объект: различие плоского и указательного живёт **внутри** них.
-        Repr::Boxed | Repr::Array(_) | Repr::Record(_) => "adamas_value",
+        // Блок региона - такой же объект кучи, как массив: слово с заголовком,
+        // а байты нагрузки лежат внутри (§3.6).
+        Repr::Boxed | Repr::Array(_) | Repr::Region | Repr::Record(_) => "adamas_value",
         Repr::Layout => "adamas_layout",
         // Плоский элемент неизвестного типа - байты, чья ширина известна
         // только в рантайме. Буфер стоит на кадре и наружу не выходит.
@@ -418,8 +420,25 @@ fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
         | Expr::ConstructClosure { .. }
         | Expr::Literal { .. }
         | Expr::LayoutField { .. }
+        | Expr::RegionNew
         | Expr::Layout { .. } => {}
         Expr::Unpack { value, .. } => walk(value, visit),
+        Expr::RegionLast { region } => walk(region, visit),
+        Expr::RegionAlloc { region, value, .. } => {
+            walk(region, visit);
+            walk(value, visit);
+        }
+        Expr::RegionRead { region, at, .. } => {
+            walk(region, visit);
+            walk(at, visit);
+        }
+        Expr::RegionWrite {
+            region, at, value, ..
+        } => {
+            walk(region, visit);
+            walk(at, visit);
+            walk(value, visit);
+        }
         Expr::Construct { arguments, .. }
         | Expr::Call { arguments, .. }
         | Expr::Pack {
@@ -689,6 +708,9 @@ impl Emitter<'_> {
                 Repr::Array(elems(*stride))
             }
             Expr::ArrayIndex { stride, .. } => stride.map_or(Repr::Boxed, Stride::element),
+            Expr::RegionNew | Expr::RegionAlloc { .. } | Expr::RegionWrite { .. } => Repr::Region,
+            Expr::RegionLast { .. } => Repr::Flat(PrimTy::UInt64),
+            Expr::RegionRead { stride, .. } => stride.element(),
             Expr::Erased
             | Expr::Construct { .. }
             | Expr::ConstructClosure { .. }
@@ -740,6 +762,20 @@ impl Emitter<'_> {
                 value,
             } => self.array_set(*stride, array, at, value, depth),
             Expr::ArrayIndex { stride, array, at } => self.array_index(*stride, array, at, depth),
+            Expr::RegionNew => self.region_new(depth),
+            Expr::RegionAlloc {
+                stride,
+                region,
+                value,
+            } => self.region_alloc(*stride, region, value, depth),
+            Expr::RegionLast { region } => self.region_last(region, depth),
+            Expr::RegionRead { stride, region, at } => self.region_read(*stride, region, at, depth),
+            Expr::RegionWrite {
+                stride,
+                region,
+                at,
+                value,
+            } => self.region_write(*stride, region, at, value, depth),
             Expr::Construct {
                 constructor,
                 reuse,
@@ -1106,6 +1142,134 @@ impl Emitter<'_> {
             }
         }
         name
+    }
+
+    /// Граница нагрузки - вторая половина шага (§4.11).
+    ///
+    /// У примитива она равна ширине, у агрегата взята из его укладки, у
+    /// обобщённого кода приходит полем дескриптора - тем же, откуда приходит
+    /// размер. Отдельно от [`Self::step`] она нужна потому, что курсор региона
+    /// поднимается **до** границы, а потом уже на размер: сложи их в одно
+    /// число - и `Vec3` встал бы по 12 байт вместо 4.
+    fn bound(&self, stride: Stride) -> String {
+        match stride {
+            Stride::Static(ty) => format!("{}u", ty.size()),
+            Stride::Packed(pack) => format!("{}u", self.program.packings[pack.0 as usize].align),
+            Stride::Dynamic(local) => format!("(size_t)v{}.align", local.0),
+        }
+    }
+
+    /// Пустой регион: одна область, один блок кучи (§3.6).
+    fn region_new(&mut self, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let name = self.temp();
+        let _ = writeln!(self.out, "{pad}adamas_value {name} = adamas_region_new();");
+        name
+    }
+
+    /// Аллокация в регионе: курсор поднимается, байты ложатся внутрь области.
+    ///
+    /// Ячейки кучи под значение не выдаётся вовсе - в этом и состоит цена,
+    /// ради которой §3.6 написан. Блок сперва делается пригодным к записи, как
+    /// массив: уникальность спрашивается у рантайма (`rc == 0`), а не у
+    /// кратности (§10 вопрос 149).
+    fn region_alloc(
+        &mut self,
+        stride: Stride,
+        region: &Expr,
+        value: &Expr,
+        depth: usize,
+    ) -> String {
+        let pad = Self::pad(depth);
+        let region = self.value(region, depth);
+        let value = self.value(value, depth);
+        let (size, align) = (self.step(stride), self.bound(stride));
+        let bits = Self::bytes(stride, &value);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_value {name} = adamas_region_alloc({region}, {bits}, {size}, {align});"
+        );
+        name
+    }
+
+    /// Хендл последней аллокации. Блок приходит владением и отдаётся здесь же.
+    fn region_last(&mut self, region: &Expr, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let region = self.value(region, depth);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}uint64_t {name} = (uint64_t)adamas_region_last({region}, \
+             adamas_release_value);"
+        );
+        name
+    }
+
+    /// Чтение по хендлу. Байты копируются на кадр: указателем внутрь области
+    /// значение пережило бы её дроп - тот же довод, что у ячейки массива.
+    fn region_read(&mut self, stride: Stride, region: &Expr, at: &Expr, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let region = self.value(region, depth);
+        let at = self.value(at, depth);
+        let size = self.step(stride);
+        let name = self.temp();
+        let into = match stride {
+            Stride::Static(ty) => {
+                let _ = writeln!(self.out, "{pad}{} {name};", c_type(Repr::Flat(ty)));
+                format!("&{name}")
+            }
+            Stride::Packed(pack) => {
+                let _ = writeln!(self.out, "{pad}{} {name};", c_type(Repr::Packed(pack)));
+                format!("{name}.bytes")
+            }
+            Stride::Dynamic(_) => {
+                let buffer = self.temp();
+                let _ = writeln!(self.out, "{pad}char {buffer}[{size}];");
+                let _ = writeln!(self.out, "{pad}char *{name} = {buffer};");
+                name.clone()
+            }
+        };
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_region_read({region}, (size_t){at}, {into}, {size}, \
+             adamas_release_value);"
+        );
+        name
+    }
+
+    /// Запись по хендлу: курсор не двигается, место уже размещено (§3.6).
+    fn region_write(
+        &mut self,
+        stride: Stride,
+        region: &Expr,
+        at: &Expr,
+        value: &Expr,
+        depth: usize,
+    ) -> String {
+        let pad = Self::pad(depth);
+        let region = self.value(region, depth);
+        let at = self.value(at, depth);
+        let value = self.value(value, depth);
+        let size = self.step(stride);
+        let bits = Self::bytes(stride, &value);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_value {name} = adamas_region_write({region}, (size_t){at}, {bits}, \
+             {size});"
+        );
+        name
+    }
+
+    /// Адрес байтов плоского значения: у известного типа - его переменная, у
+    /// агрегата - поле `bytes`, у неизвестного - уже буфер.
+    fn bytes(stride: Stride, value: &str) -> String {
+        match stride {
+            Stride::Static(_) => format!("&{value}"),
+            Stride::Packed(_) => format!("{value}.bytes"),
+            Stride::Dynamic(_) => value.to_owned(),
+        }
     }
 
     /// Слоты объекта: плоское кладётся битами по значению, ссылка - владением.

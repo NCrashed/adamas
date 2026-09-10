@@ -168,6 +168,33 @@ unsafe extern "C" {
     /// Дроп ячеек. У плоского не делает ничего.
     pub fn adamas_array_release(array: Value, release: Release);
 
+    /// Пустая область региона (§3.6): один блок кучи.
+    pub fn adamas_region_new() -> Value;
+    /// Сколько байт области занято.
+    pub fn adamas_region_used(region: Value) -> usize;
+    /// Кладёт `size` байт по границе `align` в конец; область приходит владением.
+    pub fn adamas_region_alloc(
+        region: Value,
+        bits: *const c_void,
+        size: usize,
+        align: usize,
+    ) -> Value;
+    /// Хендл последней аллокации. Область отдаётся.
+    pub fn adamas_region_last(region: Value, release: Release) -> usize;
+    /// Читает `size` байт по хендлу. Область приходит владением.
+    pub fn adamas_region_read(
+        region: Value,
+        at: usize,
+        out: *mut c_void,
+        size: usize,
+        release: Release,
+    );
+    /// Переписывает `size` байт по хендлу; курсор не двигает.
+    pub fn adamas_region_write(region: Value, at: usize, bits: *const c_void, size: usize)
+    -> Value;
+    /// Дроп нагрузки области. Не делает ничего: нагрузка плоская.
+    pub fn adamas_region_release(region: Value);
+
     /// Пустой вектор evidence.
     pub fn adamas_evidence_empty() -> *mut Evidence;
     /// Вектор родителя плюс запись о хендлере метки.

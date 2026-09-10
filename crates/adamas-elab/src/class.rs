@@ -998,7 +998,7 @@ fn head_meta(term: &Term) -> Option<adamas_core::term::TermMeta> {
 }
 
 /// Телескоп `Pi` над написанным телом - тип дырки, стоящей в том же контексте.
-fn abstracted_pi(
+pub(crate) fn abstracted_pi(
     binders: &[(adamas_core::mult::Mult, adamas_core::term::Name, Rc<Term>)],
     body: Term,
 ) -> Term {

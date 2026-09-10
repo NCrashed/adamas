@@ -2865,6 +2865,10 @@ fn reserved(decl: &ast::Decl) -> Result<(), ElabError> {
             "это примитивный тип"
         } else if &**name == prim::ARRAY {
             "это встроенный массив"
+        } else if &**name == prim::BLOCK {
+            "это область региона (§3.6)"
+        } else if &**name == prim::PTR {
+            "это хендл внутри области (§3.6)"
         } else {
             "это примитивная операция"
         };

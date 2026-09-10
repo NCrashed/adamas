@@ -14,8 +14,9 @@ use std::ffi::c_void;
 
 use adamas_runtime::ffi::{
     Value, adamas_drop, adamas_dup, adamas_is_unique, adamas_region_alloc, adamas_region_last,
-    adamas_region_new, adamas_region_read, adamas_region_release, adamas_region_used,
-    adamas_region_write, adamas_stat_live, adamas_stat_reset,
+    adamas_region_new, adamas_region_pop, adamas_region_read, adamas_region_recycle,
+    adamas_region_release, adamas_region_used, adamas_region_write, adamas_stat_live,
+    adamas_stat_reset,
 };
 
 /// Дроп нагрузки области - тот, что порождает понижение: делать нечего.
@@ -166,5 +167,151 @@ fn a_shared_region_is_copied_whole() {
         adamas_drop(shared, Some(releasing));
         assert_eq!(adamas_stat_live(), 0);
         adamas_region_release(adamas_region_new());
+    }
+}
+
+/// Отданная ячейка достаётся равной по ширине, и курсор при этом стоит.
+///
+/// Курсор здесь и есть свидетель: **из языка он не виден**, программа видит
+/// только хендл. Совпади хендл случайно - например, вернись `recycle` не той
+/// ячейкой, а `alloc` тем же нулём просто потому, что область пуста, - число
+/// `used` разошлось бы, а ответ нет.
+#[test]
+fn a_recycled_cell_is_taken_by_the_same_width() {
+    unsafe {
+        adamas_stat_reset();
+        let region = adamas_region_new();
+        let (region, first) = placed(region, 20i64);
+        assert_eq!(adamas_region_used(region), 8);
+
+        let region = adamas_region_recycle(region, first);
+        assert_eq!(
+            adamas_region_used(region),
+            8,
+            "возврат ячейки курсора не двигает: занятое остаётся занятым"
+        );
+
+        let (region, again) = placed(region, 99i64);
+        assert_eq!(again, first, "равная по ширине обязана лечь в отданную");
+        assert_eq!(
+            adamas_region_used(region),
+            8,
+            "переиспользование не поднимает курсор: новых байт области не нужно"
+        );
+        assert_eq!(fetched::<i64>(region, again), 99, "байты легли по хендлу");
+
+        adamas_drop(region, Some(releasing));
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Узкая нагрузка отданной широкой ячейки не берёт (§3.6: «одинакового
+/// размера»).
+///
+/// Проверяется не только адресом узкой, но и **байтами широкой**: ляг она в
+/// чужую ячейку, прежние восемь байт были бы затёрты наполовину, и чтение по
+/// старому хендлу это показало бы.
+#[test]
+fn a_narrow_payload_does_not_take_a_wide_cell() {
+    unsafe {
+        adamas_stat_reset();
+        let region = adamas_region_new();
+        let (region, wide) = placed(region, 20i64);
+        let region = adamas_region_recycle(region, wide);
+
+        let (region, narrow) = placed(region, 0.25f32);
+        assert_eq!(narrow, 8, "четыре байта встают за широкой, а не в неё");
+        assert_eq!(adamas_region_used(region), 12);
+        assert_eq!(
+            fetched::<i64>(region, wide),
+            20,
+            "байты широкой ячейки не тронуты"
+        );
+
+        // Равная по ширине ту же ячейку берёт - иначе «одинакового размера»
+        // читалось бы как «никогда».
+        let (region, same) = placed(region, 7i64);
+        assert_eq!(same, wide);
+        assert_eq!(adamas_region_used(region), 12);
+
+        adamas_drop(region, Some(releasing));
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Курсор опускается только с вершины: LIFO (§3.6).
+///
+/// Два возврата подряд, и они отличаются лишь тем, вершину ли называет хендл.
+/// Число `used` показывает разницу прямо, не дожидаясь следующей аллокации.
+#[test]
+fn a_pop_lowers_the_cursor_only_from_the_top() {
+    unsafe {
+        adamas_stat_reset();
+        let region = adamas_region_new();
+        let (region, bottom) = placed(region, 20i64);
+        let (region, top) = placed(region, 7i64);
+        assert_eq!((bottom, top), (0, 8));
+        assert_eq!(adamas_region_used(region), 16);
+
+        let region = adamas_region_pop(region, bottom);
+        assert_eq!(
+            adamas_region_used(region),
+            16,
+            "возврат не с вершины обязан быть пуст: под ним лежит живая ячейка"
+        );
+
+        let region = adamas_region_pop(region, top);
+        assert_eq!(adamas_region_used(region), 8, "вершина отдана, курсор упал");
+        assert_eq!(
+            adamas_region_last(adamas_dup(region), Some(releasing)),
+            bottom,
+            "последней аллокацией стала предыдущая"
+        );
+
+        let (region, again) = placed(region, 99i64);
+        assert_eq!(again, top, "следующая легла на место отданной вершины");
+
+        adamas_drop(region, Some(releasing));
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Разделённая область уносит в копию и журнал, а не только нагрузку.
+///
+/// Из языка это не видно вовсе: обе ветви ответили бы одним хендлом и без
+/// журнала - у пустой области первая аллокация тоже нулевая. Различает их
+/// `used`: у копии с журналом свободная ячейка занимается **без** подъёма
+/// курсора, у копии без журнала - с подъёмом.
+#[test]
+fn a_shared_region_copies_its_journal() {
+    unsafe {
+        adamas_stat_reset();
+        let region = adamas_region_new();
+        let (region, at) = placed(region, 20i64);
+        let region = adamas_region_recycle(region, at);
+
+        let shared = adamas_dup(region);
+        assert_eq!(adamas_is_unique(region), 0);
+
+        let value = 99i64;
+        let copy = adamas_region_alloc(
+            region,
+            std::ptr::from_ref(&value).cast::<c_void>(),
+            size_of::<i64>(),
+            align_of::<i64>(),
+        );
+        assert_ne!(copy, shared, "разделённая область переписана по месту");
+        assert_eq!(adamas_region_used(copy), 8, "копия унесла свободную ячейку");
+        assert_eq!(fetched::<i64>(copy, at), 99);
+        assert_eq!(fetched::<i64>(shared, at), 20, "прежняя область не тронута");
+
+        // Журнал прежней тоже цел: её свободная ячейка на месте.
+        let (shared, mine) = placed(shared, 7i64);
+        assert_eq!(mine, at);
+        assert_eq!(adamas_region_used(shared), 8);
+
+        adamas_drop(copy, Some(releasing));
+        adamas_drop(shared, Some(releasing));
+        assert_eq!(adamas_stat_live(), 0);
     }
 }

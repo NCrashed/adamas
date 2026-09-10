@@ -172,13 +172,19 @@ unsafe extern "C" {
     pub fn adamas_region_new() -> Value;
     /// Сколько байт области занято.
     pub fn adamas_region_used(region: Value) -> usize;
-    /// Кладёт `size` байт по границе `align` в конец; область приходит владением.
+    /// Размещает `size` байт по границе `align`: свободная ячейка равного
+    /// размера, иначе подъём курсора. Область приходит владением.
     pub fn adamas_region_alloc(
         region: Value,
         bits: *const c_void,
         size: usize,
         align: usize,
     ) -> Value;
+    /// Ячейка по хендлу свободна: Pool (§3.6). Область приходит владением.
+    pub fn adamas_region_recycle(region: Value, at: usize) -> Value;
+    /// Курсор опускается до хендла, если тот назвал последнюю аллокацию:
+    /// `StackAlloc` (§3.6). Область приходит владением.
+    pub fn adamas_region_pop(region: Value, at: usize) -> Value;
     /// Хендл последней аллокации. Область отдаётся.
     pub fn adamas_region_last(region: Value, release: Release) -> usize;
     /// Читает `size` байт по хендлу. Область приходит владением.

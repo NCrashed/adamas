@@ -449,7 +449,9 @@ fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
             walk(region, visit);
             walk(value, visit);
         }
-        Expr::RegionRead { region, at, .. } => {
+        Expr::RegionRead { region, at, .. }
+        | Expr::RegionRecycle { region, at }
+        | Expr::RegionPop { region, at } => {
             walk(region, visit);
             walk(at, visit);
         }
@@ -735,7 +737,11 @@ impl Emitter<'_> {
                 Repr::Array(elems(*stride))
             }
             Expr::ArrayIndex { stride, .. } => stride.map_or(Repr::Boxed, Stride::element),
-            Expr::RegionNew | Expr::RegionAlloc { .. } | Expr::RegionWrite { .. } => Repr::Region,
+            Expr::RegionNew
+            | Expr::RegionAlloc { .. }
+            | Expr::RegionWrite { .. }
+            | Expr::RegionRecycle { .. }
+            | Expr::RegionPop { .. } => Repr::Region,
             Expr::RegionLast { .. } => Repr::Flat(PrimTy::UInt64),
             Expr::RegionRead { stride, .. } => stride.element(),
             Expr::Erased
@@ -794,20 +800,13 @@ impl Emitter<'_> {
                 value,
             } => self.array_set(*stride, array, at, value, depth),
             Expr::ArrayIndex { stride, array, at } => self.array_index(*stride, array, at, depth),
-            Expr::RegionNew => self.region_new(depth),
-            Expr::RegionAlloc {
-                stride,
-                region,
-                value,
-            } => self.region_alloc(*stride, region, value, depth),
-            Expr::RegionLast { region } => self.region_last(region, depth),
-            Expr::RegionRead { stride, region, at } => self.region_read(*stride, region, at, depth),
-            Expr::RegionWrite {
-                stride,
-                region,
-                at,
-                value,
-            } => self.region_write(*stride, region, at, value, depth),
+            Expr::RegionNew
+            | Expr::RegionAlloc { .. }
+            | Expr::RegionLast { .. }
+            | Expr::RegionRead { .. }
+            | Expr::RegionWrite { .. }
+            | Expr::RegionRecycle { .. }
+            | Expr::RegionPop { .. } => self.region(expr, depth),
             Expr::Construct {
                 constructor,
                 reuse,
@@ -1219,6 +1218,36 @@ impl Emitter<'_> {
         }
     }
 
+    /// Операция над регионом (§3.6): шесть форм одним разбором.
+    ///
+    /// Отдельным разбором, а не ветвями общего, потому что форм у региона
+    /// столько же, сколько у всего остального вместе.
+    fn region(&mut self, expr: &Expr, depth: usize) -> String {
+        match expr {
+            Expr::RegionNew => self.region_new(depth),
+            Expr::RegionAlloc {
+                stride,
+                region,
+                value,
+            } => self.region_alloc(*stride, region, value, depth),
+            Expr::RegionLast { region } => self.region_last(region, depth),
+            Expr::RegionRead { stride, region, at } => self.region_read(*stride, region, at, depth),
+            Expr::RegionWrite {
+                stride,
+                region,
+                at,
+                value,
+            } => self.region_write(*stride, region, at, value, depth),
+            Expr::RegionRecycle { region, at } => {
+                self.region_return("adamas_region_recycle", region, at, depth)
+            }
+            Expr::RegionPop { region, at } => {
+                self.region_return("adamas_region_pop", region, at, depth)
+            }
+            other => unreachable!("не операция региона: {other:?}"),
+        }
+    }
+
     /// Пустой регион: одна область, один блок кучи (§3.6).
     fn region_new(&mut self, depth: usize) -> String {
         let pad = Self::pad(depth);
@@ -1318,6 +1347,22 @@ impl Emitter<'_> {
             self.out,
             "{pad}adamas_value {name} = adamas_region_write({region}, (size_t){at}, {bits}, \
              {size});"
+        );
+        name
+    }
+
+    /// Возврат ячейки по хендлу: `regionRecycle` либо `regionPop` (§3.6).
+    ///
+    /// Обе идут одним текстом, потому что различает их только имя функции
+    /// рантайма: нагрузки у возврата нет, размер ячейки помнит область.
+    fn region_return(&mut self, call: &str, region: &Expr, at: &Expr, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let region = self.value(region, depth);
+        let at = self.value(at, depth);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_value {name} = {call}({region}, (size_t){at});"
         );
         name
     }

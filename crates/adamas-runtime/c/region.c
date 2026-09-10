@@ -20,6 +20,13 @@ static adamas_region *header_of(adamas_value region) {
     return (adamas_region *)region;
 }
 
+/* Ячейка журнала по номеру. Журнал растёт от конца области вниз: нулевая
+ * запись лежит последними байтами, первая - перед ней. */
+static adamas_cell *cell_at(adamas_value region, size_t index) {
+    char *end = payload(region) + ADAMAS_REGION_BYTES;
+    return (adamas_cell *)(void *)(end - (index + 1) * sizeof(adamas_cell));
+}
+
 /* Ближайшее сверху кратное `align`. То же правило, что у типовой стороны
  * (`adamas-elab/src/flat.rs`) и у машины (`adamas-core/src/eval.rs`): три
  * счёта одного смещения обязаны сойтись, иначе хендл поведёт не туда. */
@@ -38,6 +45,7 @@ adamas_value adamas_region_new(void) {
     head->header.flags = 0;
     head->used = 0;
     head->last = 0;
+    head->cells = 0;
     return region;
 }
 
@@ -47,8 +55,8 @@ size_t adamas_region_used(adamas_value region) {
 
 /* Область, готовая к записи. Тот же договор, что у `adamas_array_writable`:
  * уникальность спрашивается у рантайма (`rc == 0`), разделённая копируется
- * целиком - вместе с курсором, иначе хендлы прежних аллокаций указывали бы в
- * копии не туда. */
+ * целиком - вместе с курсором и журналом, иначе хендлы прежних аллокаций
+ * указывали бы в копии не туда. */
 static adamas_value writable(adamas_value region) {
     adamas_region *head = header_of(region);
     adamas_value copy;
@@ -60,7 +68,13 @@ static adamas_value writable(adamas_value region) {
     made = (adamas_region *)copy;
     made->used = head->used;
     made->last = head->last;
+    made->cells = head->cells;
+    /* Оба конца области: нагрузка снизу, журнал сверху. */
     memcpy(payload(copy), payload(region), head->used);
+    if (head->cells > 0) {
+        memcpy(cell_at(copy, head->cells - 1), cell_at(region, head->cells - 1),
+               head->cells * sizeof(adamas_cell));
+    }
     adamas_drop(region, adamas_region_release);
     return copy;
 }
@@ -69,15 +83,72 @@ adamas_value adamas_region_alloc(adamas_value region, const void *bits, size_t s
                                  size_t align) {
     adamas_value made = writable(region);
     adamas_region *head = (adamas_region *)made;
-    size_t at = aligned(head->used, align);
-    if (size > ADAMAS_REGION_BYTES || at > ADAMAS_REGION_BYTES - size) {
-        /* Роста области здесь нет: `AllocStrategy` §3.6 - следующий срез, и
-         * подмена стратегии заглушкой скрыла бы, что её ещё нет. */
-        adamas_fail("регион переполнен: ёмкость области фиксирована");
+    size_t bound = align == 0 ? 1 : align;
+    size_t index = head->cells;
+    size_t at;
+    adamas_cell *cell = NULL;
+    /* Свободная ячейка равного размера - самая поздняя по размещению. */
+    while (index-- > 0) {
+        adamas_cell *found = cell_at(made, index);
+        if (found->free && found->size == size && found->at % bound == 0) {
+            cell = found;
+            break;
+        }
+    }
+    if (cell != NULL) {
+        cell->free = 0;
+        at = cell->at;
+    } else {
+        at = aligned(head->used, align);
+        if (size > ADAMAS_REGION_BYTES || at > ADAMAS_REGION_BYTES - size
+            || at + size + (head->cells + 1) * sizeof(adamas_cell) > ADAMAS_REGION_BYTES) {
+            /* Роста области здесь нет: `AllocStrategy` §3.6 такого метода не
+             * называет, и молчаливый рост означал бы вторую аллокацию там, где
+             * обещана одна. */
+            adamas_fail("регион переполнен: ёмкость области фиксирована");
+        }
+        cell = cell_at(made, head->cells);
+        cell->at = (uint32_t)at;
+        cell->size = (uint32_t)size;
+        cell->free = 0;
+        head->cells += 1;
+        head->used = at + size;
     }
     memcpy(payload(made) + at, bits, size);
-    head->used = at + size;
     head->last = at;
+    return made;
+}
+
+adamas_value adamas_region_recycle(adamas_value region, size_t at) {
+    adamas_value made = writable(region);
+    adamas_region *head = (adamas_region *)made;
+    size_t index = head->cells;
+    while (index-- > 0) {
+        adamas_cell *cell = cell_at(made, index);
+        if (!cell->free && cell->at == at) {
+            cell->free = 1;
+            break;
+        }
+    }
+    return made;
+}
+
+adamas_value adamas_region_pop(adamas_value region, size_t at) {
+    adamas_value made = writable(region);
+    adamas_region *head = (adamas_region *)made;
+    adamas_cell *top;
+    if (head->cells == 0) {
+        return made;
+    }
+    top = cell_at(made, head->cells - 1);
+    if (top->free || top->at != at) {
+        /* Не вершина - LIFO не срабатывает, и область остаётся как есть.
+         * Ровно этим StackAlloc отличается от Pool наблюдаемо. */
+        return made;
+    }
+    head->cells -= 1;
+    head->used = at;
+    head->last = head->cells == 0 ? 0 : cell_at(made, head->cells - 1)->at;
     return made;
 }
 

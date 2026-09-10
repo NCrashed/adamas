@@ -1,0 +1,163 @@
+-- Пользовательская стратегия: политику выбирает хендлер (§3.6, вопрос 161).
+--
+-- §3.6 говорит про `AllocStrategy` прямо: «дополнительные стратегии -
+-- **пользовательские**; стандартная библиотека предоставляет минимальный набор,
+-- расширение - обычный библиотечный код, без специальных compiler-hooks».
+-- Вопрос 161 закрыт тем, что интерфейс **один**, а различает встроенное и
+-- пользовательское не язык, а понижение: операции стандартного набора сводятся
+-- к примитивам области и идут первой формой, пользовательская стратегия гасится
+-- хендлером и ждёт второй.
+--
+-- Здесь показана вторая половина этого утверждения - та, которую считает
+-- интерпретатор. `Chosen` объявлена тем же `module type AllocStrategy`, что и
+-- `Arena` рядом, и запечатана так же. Разница в том, откуда берётся её
+-- поведение: `store` докладывает хендлеру, а `free` **спрашивает** у него, что
+-- делать с ячейкой. Один и тот же модуль поэтому ведёт себя двумя способами -
+-- как Arena под одним хендлером и как Pool под другим, - и это видно числами:
+--
+--     хендлер          `Chosen`      `Arena`
+--     keep -> True      16, 24        0, 8
+--     keep -> False      0,  0        0, 8
+--
+-- Сама проба у обоих ответов одна, слово в слово; меняется только погашение.
+-- Правый столбец - тот же вопрос встроенной стратегии, и он показывает, что
+-- разница не в хендлере вообще, а в том, спрашивает ли его стратегия: тело
+-- `Arena` называет примитивы области, и от погашения её ответ не зависит.
+--
+-- **Понижением фикстура не берётся**, и это не изъян, а само решение 161:
+-- хендлер требует второй формы понижения (отчуждаемый кадр, вектор evidence,
+-- ручка стека - запись ABI от 2026-09-08), а второй формы нет. Отказ назван по
+-- имени операции, и ближайший проходящий сосед - `eval/region-strategies`, где
+-- те же три стратегии написаны без эффектов и доходят до C. Обе стороны стоят
+-- свидетелями в `crates/adamas-codegen/tests/strategy.rs`.
+--
+-- Строка `{IO}` здесь дословно из §3.6, как и `type Block` абстрактным членом
+-- (вопрос 160); прочие расхождения с процитированным перечислены в
+-- `eval/region-strategies`.
+
+type Layout = { size : UInt32, align : UInt32 }
+
+class Flat a where
+  layout : Layout
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  False : Bool
+  True : Bool
+
+effect IO where
+  trace : Unit
+  keep : Bool
+
+module type AllocStrategy where
+  type Block
+  new   : {IO} Block
+  store : {Flat a} => Block -> a -> {IO} Block
+  here  : Block -> {IO} Ptr
+  load  : {Flat a} => Block -> Ptr -> {IO} a
+  free  : Block -> Ptr -> {IO} Block
+
+-- Порядок вычисления пишется явно: доклад считается до размещения.
+after : Unit -> Block -> Block
+after u r = r
+
+-- Встроенная: тело называет примитивы области, и хендлеру решать нечего.
+module Arena :> AllocStrategy where
+  type Block = Block
+
+  new : {IO} Block
+  new = regionNew
+
+  store : {Flat a} => Block -> a -> {IO} Block
+  store r x = regionAlloc r x
+
+  here : Block -> {IO} Ptr
+  here r = regionLast r
+
+  load : {Flat a} => Block -> Ptr -> {IO} a
+  load r p = regionRead r p
+
+  free : Block -> Ptr -> {IO} Block
+  free r p = r
+
+-- Пользовательская: и доклад, и решение про ячейку уходят хендлеру.
+module Chosen :> AllocStrategy where
+  type Block = Block
+
+  new : {IO} Block
+  new = regionNew
+
+  store : {Flat a} => Block -> a -> {IO} Block
+  store r x = after (trace MkUnit) (regionAlloc r x)
+
+  here : Block -> {IO} Ptr
+  here r = regionLast r
+
+  load : {Flat a} => Block -> Ptr -> {IO} a
+  load r p = regionRead r p
+
+  free : Block -> Ptr -> {IO} Block
+  free r p = case keep MkUnit of
+    True -> r
+    False -> regionRecycle r p
+
+data Pair where
+  MkPair : Ptr -> Ptr -> Pair
+
+data Answer where
+  MkAnswer : Pair -> Pair -> Pair -> Pair -> Answer
+
+-- Проба та же, что у трёх встроенных стратегий: возврат не с вершины, потом с
+-- вершины.
+probe : (ω u : Unit) -> {IO} Pair
+probe u =
+  let a : Int64 = 1
+  let b : Int64 = 2
+  let c : Int64 = 4
+  let d : Int64 = 8
+  let r0 : Chosen.Block = Chosen.new
+  let r1 : Chosen.Block = Chosen.store r0 a
+  let h1 : Ptr = Chosen.here r1
+  let r2 : Chosen.Block = Chosen.store r1 b
+  let r3 : Chosen.Block = Chosen.free r2 h1
+  let r4 : Chosen.Block = Chosen.store r3 c
+  let h3 : Ptr = Chosen.here r4
+  let r5 : Chosen.Block = Chosen.free r4 h3
+  let r6 : Chosen.Block = Chosen.store r5 d
+  let h4 : Ptr = Chosen.here r6
+  MkPair h3 h4
+
+-- Та же форма встроенной стратегией: её тело называет примитивы области, и
+-- ответ поэтому от хендлера не зависит - 0 и 8 под обоими.
+plain : (ω u : Unit) -> {IO} Pair
+plain u =
+  let a : Int64 = 1
+  let b : Int64 = 2
+  let r0 : Arena.Block = Arena.new
+  let r1 : Arena.Block = Arena.store r0 a
+  let h1 : Ptr = Arena.here r1
+  let r2 : Arena.Block = Arena.free r1 h1
+  let r3 : Arena.Block = Arena.store r2 b
+  let h2 : Ptr = Arena.here r3
+  MkPair h1 h2
+
+-- Хендлер придерживает ячейки: стратегия ведёт себя как Arena.
+runKeeping : {a : Type} -> ((ω u : Unit) -> {IO} a) -> a
+runKeeping k = handle k with
+  return v -> v
+  trace -> resume MkUnit
+  keep -> resume True
+
+-- Хендлер отдаёт ячейки: та же стратегия ведёт себя как Pool.
+runReturning : {a : Type} -> ((ω u : Unit) -> {IO} a) -> a
+runReturning k = handle k with
+  return v -> v
+  trace -> resume MkUnit
+  keep -> resume False
+
+main : Answer
+main =
+  MkAnswer (runKeeping probe) (runReturning probe)
+    (runKeeping plain) (runReturning plain)

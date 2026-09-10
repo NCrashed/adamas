@@ -1688,11 +1688,6 @@ impl<'a> Lowerer<'a> {
         if let Term::Prim(prim) = head {
             return self.primitive(scope, *prim, arguments);
         }
-        if let Term::Const(name, ..) = head {
-            if &**name == CLOSING {
-                return self.closing(scope, arguments);
-            }
-        }
         let Term::Const(name, ..) = head else {
             // Голова - не имя: применяется значение, и стирания здесь не бывает.
             let mut value = self.shaped(scope, head, Repr::Boxed, "применяемое значение")?;
@@ -1705,6 +1700,11 @@ impl<'a> Lowerer<'a> {
             }
             return Ok((value, Repr::Boxed));
         };
+        // Выход из scope (§3.3) - обычное определение по виду, но тела у него
+        // нет: его даёт понижение. Спрашивается он до вида поэтому.
+        if &**name == CLOSING {
+            return self.closing(scope, arguments);
+        }
         match &self.definition(name)?.kind {
             DefinitionKind::Constructor { .. } => self.built(scope, name, arguments),
             DefinitionKind::Regular => self.called(scope, name, arguments),

@@ -228,6 +228,7 @@ fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
         | Expr::Erased
         | Expr::ConstructClosure { .. }
         | Expr::Literal { .. }
+        | Expr::LayoutField { .. }
         | Expr::Layout { .. } => {}
         Expr::Construct { arguments, .. } | Expr::Call { arguments, .. } => {
             for argument in arguments {

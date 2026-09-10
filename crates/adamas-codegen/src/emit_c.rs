@@ -54,8 +54,7 @@ use std::fmt::Write as _;
 use adamas_core::prim::{PrimOp, PrimTy};
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Elems, Expr, Form, FuncId, Function, LocalId, Program, Repr,
-    Stride,
+    Arm, Constructor, CtorId, Elems, Expr, Form, FuncId, Function, LocalId, Program, Repr, Stride,
 };
 
 /// Как уложены элементы массива с таким шагом.
@@ -182,9 +181,9 @@ fn slot_kind(repr: Repr) -> u8 {
 /// C-тип связывания.
 fn c_type(repr: Repr) -> &'static str {
     match repr {
-        // Массив - объект кучи, и в C он такое же слово, как всякий объект:
-        // различие плоского и указательного живёт **внутри** него.
-        Repr::Boxed | Repr::Array(_) => "adamas_value",
+        // Массив и запись - объекты кучи, и в C они такое же слово, как всякий
+        // объект: различие плоского и указательного живёт **внутри** них.
+        Repr::Boxed | Repr::Array(_) | Repr::Record(_) => "adamas_value",
         Repr::Layout => "adamas_layout",
         // Плоский элемент неизвестного типа - байты, чья ширина известна
         // только в рантайме. Буфер стоит на кадре и наружу не выходит.
@@ -274,6 +273,56 @@ fn table(out: &mut String, program: &Program) {
         }
     }
     out.push_str("    ADAMAS_FLAT_BOXED\n};\n\n");
+
+    // Метки записи (§4.2). Печать по ним отличается от печати конструктора и
+    // формой, и счётом глубины, поэтому таблица её и включает: `NULL` -
+    // конструктор семейства, иначе - имена полей в порядке слотов.
+    out.push_str(concat!(
+        "/* Метки полей записи по слотам; `NULL` у конструктора семейства.\n",
+        " * Слоты идут подряд, начало каждого - в `adamas_con_slot0`. */\n",
+        "static const char *const adamas_slot_label[] = {\n"
+    ));
+    for constructor in &program.constructors {
+        for slot in 0..constructor.slots() {
+            match label(constructor, slot) {
+                Some(name) => {
+                    let _ = writeln!(out, "    \"{}\",", escaped(name));
+                }
+                None => out.push_str("    NULL,\n"),
+            }
+        }
+    }
+    out.push_str("    NULL\n};\n\n");
+
+    // Сколько полей у записи **написано**: печать обязана назвать все, а слот
+    // достаётся не всякому - типовой член живёт только в типах (§4.8). Ноль -
+    // конструктор семейства либо пустая запись, у которой печать и так совпадает.
+    out.push_str(concat!(
+        "/* Сколько полей у записи написано; ноль - конструктор семейства.\n",
+        " * Больше числа слотов - печатать её нечем: часть полей стёрта. */\n",
+        "static const uint16_t adamas_con_labels[] = {\n"
+    ));
+    for constructor in &program.constructors {
+        let _ = writeln!(
+            out,
+            "    {}u,",
+            constructor.labels.as_ref().map_or(0, Vec::len)
+        );
+    }
+    out.push_str("    0u\n};\n\n");
+}
+
+/// Метка живого слота: стёртое поле слота не занимает.
+fn label(constructor: &Constructor, slot: usize) -> Option<&str> {
+    let labels = constructor.labels.as_ref()?;
+    let at = constructor
+        .binders
+        .iter()
+        .enumerate()
+        .filter(|(_, fact)| fact.present)
+        .nth(slot)
+        .map(|(position, _)| position)?;
+    labels.get(at).map(String::as_str)
 }
 
 /// Номера функций, которым нужен трамплин: они где-то стоят значением.
@@ -310,6 +359,7 @@ fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
         | Expr::Erased
         | Expr::ConstructClosure { .. }
         | Expr::Literal { .. }
+        | Expr::LayoutField { .. }
         | Expr::Layout { .. } => {}
         Expr::Construct { arguments, .. } | Expr::Call { arguments, .. } => {
             for argument in arguments {
@@ -429,22 +479,35 @@ fn body(out: &mut String, program: &Program, function: &Function) {
 /// ([`perceus`](crate::perceus)), и без дублирования оно унесло бы слоты с
 /// собой. Последний аргумент приходит владением уже от `adamas_apply`.
 fn wrapper(out: &mut String, function: &Function) {
-    let captured: Vec<&Binding> = function.live_captured().collect();
-    let parameters: Vec<&Binding> = function.live_parameters().collect();
+    let env = function.live_captured().count();
+    let arity = function.parameters.len();
     let _ = writeln!(
         out,
         "/* `{}` значением: слоты - среда, затем накопленные аргументы. */",
         escaped(&function.name)
     );
     let _ = writeln!(out, "{} {{", trampoline(&format!("box_{}", function.id.0)));
-    if parameters.is_empty() {
+    if arity == 0 {
         out.push_str("    adamas_fail(\"замыкание без параметров\");\n}\n\n");
         return;
     }
-    let mut taken: Vec<String> = (0..captured.len() + parameters.len() - 1)
+    // Слотов ровно столько, сколько связываний у ядра, - стёртые в том числе
+    // (см. правило позиционного применения в `lower`). Стёртый слот в вызов не
+    // идёт, и отдавать его не приходится: понижение кладёт туда `ADAMAS_ERASED`,
+    // значение непосредственное, ячейки за ним нет.
+    let mut taken: Vec<String> = (0..env)
         .map(|slot| format!("adamas_dup(adamas_closure_get(self, {slot}))"))
         .collect();
-    taken.push("arg".to_owned());
+    for (position, parameter) in function.parameters.iter().enumerate() {
+        if !parameter.fact.present {
+            continue;
+        }
+        taken.push(if position + 1 == arity {
+            "arg".to_owned()
+        } else {
+            format!("adamas_dup(adamas_closure_get(self, {}))", env + position)
+        });
+    }
     let _ = writeln!(
         out,
         "    return fn_{}({});\n}}\n",
@@ -459,13 +522,14 @@ fn wrapper(out: &mut String, function: &Function) {
 /// `adamas_dup` - тот же довод, что у [`wrapper`].
 fn builder(out: &mut String, constructor: &Constructor) {
     let slots = constructor.slots();
+    let arity = constructor.binders.len();
     let _ = writeln!(out, "/* `{}` значением. */", escaped(&constructor.name));
     let _ = writeln!(
         out,
         "{} {{",
         trampoline(&format!("make_{}", constructor.tag.0))
     );
-    if slots == 0 {
+    if arity == 0 {
         out.push_str("    adamas_fail(\"конструктор без полей значением\");\n}\n\n");
         return;
     }
@@ -474,13 +538,22 @@ fn builder(out: &mut String, constructor: &Constructor) {
         "    adamas_value value = adamas_alloc({}u, {slots}u);",
         constructor.tag.0
     );
-    for slot in 0..slots - 1 {
-        let _ = writeln!(
-            out,
-            "    adamas_set_field(value, {slot}, adamas_dup(adamas_closure_get(self, {slot})));"
-        );
+    // Аргументов накоплено по связыванию ядра - стёртые в том числе, - а слот
+    // объекта достался живым. Стёртый в объект не идёт и отдачи не требует:
+    // понижение кладёт туда `ADAMAS_ERASED`, ячейки за ним нет.
+    let mut slot = 0usize;
+    for (position, fact) in constructor.binders.iter().enumerate() {
+        if !fact.present {
+            continue;
+        }
+        let taken = if position + 1 == arity {
+            "arg".to_owned()
+        } else {
+            format!("adamas_dup(adamas_closure_get(self, {position}))")
+        };
+        let _ = writeln!(out, "    adamas_set_field(value, {slot}, {taken});");
+        slot += 1;
     }
-    let _ = writeln!(out, "    adamas_set_field(value, {}, arg);", slots - 1);
     out.push_str("    return value;\n}\n\n");
 }
 
@@ -544,6 +617,7 @@ impl Emitter<'_> {
                 .first()
                 .map_or(Repr::Boxed, |arm| self.shape(&arm.body)),
             Expr::Layout { .. } => Repr::Layout,
+            Expr::LayoutField { .. } => Repr::Flat(PrimTy::UInt32),
             Expr::ArrayNew { stride, .. } | Expr::ArraySet { stride, .. } => {
                 Repr::Array(elems(*stride))
             }
@@ -577,13 +651,9 @@ impl Emitter<'_> {
                 left,
                 right,
             } => self.arithmetic(*op, *ty, left, right, depth),
-            Expr::Layout { size, align } => {
-                let name = self.temp();
-                let _ = writeln!(
-                    self.out,
-                    "{pad}adamas_layout {name}; {name}.size = {size}u; {name}.align = {align}u;"
-                );
-                name
+            Expr::Layout { size, align } => self.descriptor(*size, *align, depth),
+            Expr::LayoutField { descriptor, align } => {
+                self.descriptor_field(*descriptor, *align, depth)
             }
             Expr::ArrayNew {
                 stride,
@@ -610,7 +680,7 @@ impl Emitter<'_> {
                     "{pad}adamas_value {name} = adamas_closure(make_{}, \
                      adamas_release_value, {}u, 0u); /* {} */",
                     constructor.0,
-                    described.slots(),
+                    described.binders.len(),
                     escaped(&described.name)
                 );
                 name
@@ -667,6 +737,30 @@ impl Emitter<'_> {
                 self.value(body, depth)
             }
         }
+    }
+
+    /// Дескриптор укладки значением (§4.11): два слова на кадре.
+    fn descriptor(&mut self, size: u32, align: u32, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_layout {name}; {name}.size = {size}u; {name}.align = {align}u;"
+        );
+        name
+    }
+
+    /// Число из дескриптора: размер либо выравнивание.
+    fn descriptor_field(&mut self, descriptor: LocalId, align: bool, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let name = self.temp();
+        let field = if align { "align" } else { "size" };
+        let _ = writeln!(
+            self.out,
+            "{pad}uint32_t {name} = v{}.{field};",
+            descriptor.0
+        );
+        name
     }
 
     /// Литерал: биты, а не написанное число.
@@ -982,7 +1076,9 @@ impl Emitter<'_> {
         let pad = Self::pad(depth);
         let described = &self.program.functions[function.0];
         let title = escaped(&described.name);
-        let arity = described.live_parameters().count();
+        // Арность замыкания - **все** связывания ядра, стёртые в том числе:
+        // применение к значению позиционно и типа вызываемого не знает.
+        let arity = described.parameters.len();
         let present: Vec<usize> = described
             .captured
             .iter()

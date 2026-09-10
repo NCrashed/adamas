@@ -144,6 +144,7 @@ fn inner(expr: &Expr, out: &mut BTreeSet<LocalId>) {
         | Expr::Erased
         | Expr::ConstructClosure { .. }
         | Expr::Literal { .. }
+        | Expr::LayoutField { .. }
         | Expr::Layout { .. } => {}
         Expr::Construct { arguments, .. } | Expr::Call { arguments, .. } => {
             for argument in arguments {
@@ -229,6 +230,7 @@ fn bound(expr: &Expr, note: &mut impl FnMut(LocalId)) {
         | Expr::Erased
         | Expr::ConstructClosure { .. }
         | Expr::Literal { .. }
+        | Expr::LayoutField { .. }
         | Expr::Layout { .. } => {}
         Expr::Construct { arguments, .. } | Expr::Call { arguments, .. } => {
             for argument in arguments {
@@ -303,6 +305,12 @@ fn named(expr: &Expr, out: &mut BTreeSet<LocalId>) {
     match expr {
         Expr::Local(local) => {
             out.insert(*local);
+        }
+        // Дескриптор укладки в `owned` не входит - счётчика у него нет
+        // ([`Repr::Layout`]), - но упомянут он именно здесь, и обходу дешевле
+        // это знать, чем полагаться на то, что дроп по нему не встанет.
+        Expr::LayoutField { descriptor, .. } => {
+            out.insert(*descriptor);
         }
         Expr::Erased
         | Expr::ConstructClosure { .. }
@@ -424,6 +432,7 @@ impl Pass<'_> {
             Expr::Erased
             | Expr::ConstructClosure { .. }
             | Expr::Literal { .. }
+            | Expr::LayoutField { .. }
             | Expr::Layout { .. } => drops(owned.iter().copied().collect::<Vec<_>>(), expr),
             Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. } => {
                 self.array(expr, owned)
@@ -809,6 +818,7 @@ impl Pass<'_> {
             | Expr::Erased
             | Expr::ConstructClosure { .. }
             | Expr::Literal { .. }
+            | Expr::LayoutField { .. }
             | Expr::Layout { .. } => false,
         }
     }
@@ -873,6 +883,7 @@ impl Pass<'_> {
             | Expr::Erased
             | Expr::ConstructClosure { .. }
             | Expr::Literal { .. }
+            | Expr::LayoutField { .. }
             | Expr::Layout { .. } => false,
         }
     }

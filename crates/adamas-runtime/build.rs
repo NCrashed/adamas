@@ -2,8 +2,15 @@
 
 use std::path::PathBuf;
 
-/// Исходники рантайма в порядке слоёв: объекты, вектор, замыкания, кадры.
-const SOURCES: [&str; 4] = ["c/object.c", "c/evidence.c", "c/closure.c", "c/frame.c"];
+/// Исходники рантайма в порядке слоёв: объекты, массивы, вектор, замыкания,
+/// кадры.
+const SOURCES: [&str; 5] = [
+    "c/object.c",
+    "c/array.c",
+    "c/evidence.c",
+    "c/closure.c",
+    "c/frame.c",
+];
 
 fn main() {
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default());

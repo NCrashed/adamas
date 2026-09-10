@@ -29,7 +29,7 @@
 use std::rc::Rc;
 
 use adamas_core::row::Row;
-use adamas_core::sig::DefinitionKind;
+use adamas_core::sig::{CLOSING, DefinitionKind};
 use adamas_core::term::{Mults, Name, Term};
 use adamas_core::value::{Elim, Value};
 
@@ -42,7 +42,6 @@ use crate::machine::{Machine, Step};
 const HANDLE: &str = "#handle.";
 const MULTI: &str = "#handleMulti.";
 const STATEFUL: &str = "#handleState.";
-const CLOSING: &str = "#closing";
 const MASK: &str = "#mask.";
 
 /// Имя единицы: приостановленное вычисление запускается её значением.

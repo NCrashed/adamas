@@ -1695,9 +1695,16 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Разрешается ли имя чем-то, кроме подъёма.
+    ///
+    /// Занятое языком имя (§4.11) сюда входит: `addUInt64` в сигнатуре -
+    /// примитив, а не свободная переменная. Без этого подъём связывал бы его
+    /// имплиситом раньше, чем [`Self::name`] дойдёт до примитивов, и операция
+    /// была бы ненаписуема в типе - в частности, арифметика над длиной
+    /// массива (§10 вопрос 155).
     fn resolves(&self, name: &ast::Name, bound: &[Symbol]) -> bool {
         is_reference(&name.text)
             || &*name.text == "Type"
+            || Prim::taken(&name.text)
             || bound.contains(&name.text)
             || self.local(&name.text).is_some()
             || self.member_of_group(&name.text).is_some()

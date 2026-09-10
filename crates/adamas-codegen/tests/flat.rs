@@ -224,11 +224,30 @@ fn rc_nodes(expr: &Expr, out: &mut Vec<LocalId>) {
 fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
     visit(expr);
     match expr {
-        Expr::Local(_) | Expr::Erased | Expr::ConstructClosure { .. } | Expr::Literal { .. } => {}
+        Expr::Local(_)
+        | Expr::Erased
+        | Expr::ConstructClosure { .. }
+        | Expr::Literal { .. }
+        | Expr::Layout { .. } => {}
         Expr::Construct { arguments, .. } | Expr::Call { arguments, .. } => {
             for argument in arguments {
                 walk(argument, visit);
             }
+        }
+        Expr::ArrayNew { count, initial, .. } => {
+            walk(count, visit);
+            walk(initial, visit);
+        }
+        Expr::ArraySet {
+            array, at, value, ..
+        } => {
+            walk(array, visit);
+            walk(at, visit);
+            walk(value, visit);
+        }
+        Expr::ArrayIndex { array, at, .. } => {
+            walk(array, visit);
+            walk(at, visit);
         }
         Expr::Closure { captured, .. } => {
             for capture in captured {

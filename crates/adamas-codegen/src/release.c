@@ -42,6 +42,13 @@ static void adamas_release_value(adamas_value value) {
         }
         return;
     }
+    if (tag == ADAMAS_TAG_ARRAY) {
+        /* Массив - один объект на всю длину (§5.1): дропает его рантайм, потому
+         * что длину знает он. У плоского дропать нечего вовсе - заголовков у
+         * ячеек нет. */
+        adamas_array_release(value, adamas_release_value);
+        return;
+    }
     if ((size_t)tag >= ADAMAS_CONSTRUCTORS) {
         /* Чужой тег: служебные объекты рантайма дропает он сам, а стёртая
          * позиция непосредственна и сюда не доходит вовсе. */

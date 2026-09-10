@@ -54,8 +54,17 @@ use std::fmt::Write as _;
 use adamas_core::prim::{PrimOp, PrimTy};
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Expr, Form, FuncId, Function, LocalId, Program, Repr,
+    Arm, Binding, Constructor, CtorId, Elems, Expr, Form, FuncId, Function, LocalId, Program, Repr,
+    Stride,
 };
+
+/// Как уложены элементы массива с таким шагом.
+const fn elems(stride: Option<Stride>) -> Elems {
+    match stride {
+        Some(_) => Elems::Flat,
+        None => Elems::Boxed,
+    }
+}
 
 /// Плоское значение: биты слота, арифметика, печать.
 const FLAT: &str = include_str!("flat.c");
@@ -173,7 +182,13 @@ fn slot_kind(repr: Repr) -> u8 {
 /// C-тип связывания.
 fn c_type(repr: Repr) -> &'static str {
     match repr {
-        Repr::Boxed => "adamas_value",
+        // Массив - объект кучи, и в C он такое же слово, как всякий объект:
+        // различие плоского и указательного живёт **внутри** него.
+        Repr::Boxed | Repr::Array(_) => "adamas_value",
+        Repr::Layout => "adamas_layout",
+        // Плоский элемент неизвестного типа - байты, чья ширина известна
+        // только в рантайме. Буфер стоит на кадре и наружу не выходит.
+        Repr::Opaque => "char *",
         Repr::Flat(PrimTy::Int8) => "int8_t",
         Repr::Flat(PrimTy::Int16) => "int16_t",
         Repr::Flat(PrimTy::Int32) => "int32_t",
@@ -291,11 +306,30 @@ fn builders(program: &Program) -> BTreeSet<CtorId> {
 fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
     visit(expr);
     match expr {
-        Expr::Local(_) | Expr::Erased | Expr::ConstructClosure { .. } | Expr::Literal { .. } => {}
+        Expr::Local(_)
+        | Expr::Erased
+        | Expr::ConstructClosure { .. }
+        | Expr::Literal { .. }
+        | Expr::Layout { .. } => {}
         Expr::Construct { arguments, .. } | Expr::Call { arguments, .. } => {
             for argument in arguments {
                 walk(argument, visit);
             }
+        }
+        Expr::ArrayNew { count, initial, .. } => {
+            walk(count, visit);
+            walk(initial, visit);
+        }
+        Expr::ArraySet {
+            array, at, value, ..
+        } => {
+            walk(array, visit);
+            walk(at, visit);
+            walk(value, visit);
+        }
+        Expr::ArrayIndex { array, at, .. } => {
+            walk(array, visit);
+            walk(at, visit);
         }
         Expr::Closure { captured, .. } => {
             for capture in captured {
@@ -509,6 +543,11 @@ impl Emitter<'_> {
             Expr::Match { arms, .. } => arms
                 .first()
                 .map_or(Repr::Boxed, |arm| self.shape(&arm.body)),
+            Expr::Layout { .. } => Repr::Layout,
+            Expr::ArrayNew { stride, .. } | Expr::ArraySet { stride, .. } => {
+                Repr::Array(elems(*stride))
+            }
+            Expr::ArrayIndex { stride, .. } => stride.map_or(Repr::Boxed, Stride::element),
             Expr::Erased
             | Expr::Construct { .. }
             | Expr::ConstructClosure { .. }
@@ -531,37 +570,33 @@ impl Emitter<'_> {
         match expr {
             Expr::Local(local) => format!("v{}", local.0),
             Expr::Erased => "ADAMAS_ERASED".to_owned(),
-            Expr::Literal { ty, bits } => {
-                let name = self.temp();
-                // Биты, а не написанное число: так литерал доезжает побитово, и
-                // ни `INT64_MIN` без суффикса, ни двойное округление
-                // `Float32` его не портят.
-                let _ = writeln!(
-                    self.out,
-                    "{pad}{} {name} = adamas_bits_{}({bits:#x}ULL);",
-                    c_type(Repr::Flat(*ty)),
-                    ty.name()
-                );
-                name
-            }
+            Expr::Literal { ty, bits } => self.literal(*ty, *bits, depth),
             Expr::Primitive {
                 op,
                 ty,
                 left,
                 right,
-            } => {
-                let left = self.value(left, depth);
-                let right = self.value(right, depth);
+            } => self.arithmetic(*op, *ty, left, right, depth),
+            Expr::Layout { size, align } => {
                 let name = self.temp();
                 let _ = writeln!(
                     self.out,
-                    "{pad}{} {name} = adamas_{}_{}({left}, {right});",
-                    c_type(Repr::Flat(*ty)),
-                    operation(*op),
-                    ty.name()
+                    "{pad}adamas_layout {name}; {name}.size = {size}u; {name}.align = {align}u;"
                 );
                 name
             }
+            Expr::ArrayNew {
+                stride,
+                count,
+                initial,
+            } => self.array_new(*stride, count, initial, depth),
+            Expr::ArraySet {
+                stride,
+                array,
+                at,
+                value,
+            } => self.array_set(*stride, array, at, value, depth),
+            Expr::ArrayIndex { stride, array, at } => self.array_index(*stride, array, at, depth),
             Expr::Construct {
                 constructor,
                 reuse,
@@ -632,6 +667,204 @@ impl Emitter<'_> {
                 self.value(body, depth)
             }
         }
+    }
+
+    /// Литерал: биты, а не написанное число.
+    ///
+    /// Так он доезжает побитово, и ни `INT64_MIN` без суффикса, ни двойное
+    /// округление `Float32` его не портят.
+    fn literal(&mut self, ty: PrimTy, bits: u64, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}{} {name} = adamas_bits_{}({bits:#x}ULL);",
+            c_type(Repr::Flat(ty)),
+            ty.name()
+        );
+        name
+    }
+
+    /// Примитивная операция над двумя плоскими значениями.
+    fn arithmetic(
+        &mut self,
+        op: PrimOp,
+        ty: PrimTy,
+        left: &Expr,
+        right: &Expr,
+        depth: usize,
+    ) -> String {
+        let pad = Self::pad(depth);
+        let left = self.value(left, depth);
+        let right = self.value(right, depth);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}{} {name} = adamas_{}_{}({left}, {right});",
+            c_type(Repr::Flat(ty)),
+            operation(op),
+            ty.name()
+        );
+        name
+    }
+
+    /// Шаг индексации выражением C.
+    ///
+    /// Константа - у мономорфизованного кода, поле дескриптора - у обобщённого
+    /// (§4.11). Разница видна ровно здесь и больше нигде: остальной массив у
+    /// обоих один.
+    fn step(stride: Stride) -> String {
+        match stride {
+            Stride::Static(ty) => format!("{}u", ty.size()),
+            Stride::Dynamic(local) => format!("(size_t)v{}.size", local.0),
+        }
+    }
+
+    /// Новый массив: одна аллокация на всю длину (§4.11).
+    ///
+    /// Заполняет его рантайм: ссылок на начальное значение нужно `count`, а
+    /// длина - величина рантайма, и вставке RC её не видно.
+    fn array_new(
+        &mut self,
+        stride: Option<Stride>,
+        count: &Expr,
+        initial: &Expr,
+        depth: usize,
+    ) -> String {
+        let pad = Self::pad(depth);
+        let count = self.value(count, depth);
+        let initial = self.value(initial, depth);
+        let name = self.temp();
+        let step = stride.map_or_else(|| "0u".to_owned(), Self::step);
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_value {name} = adamas_array_alloc((size_t){count}, {step});"
+        );
+        match stride {
+            // Известный тип лежит в переменной, неизвестный - уже буфером.
+            Some(Stride::Static(_)) => {
+                let _ = writeln!(self.out, "{pad}adamas_array_fill_flat({name}, &{initial});");
+            }
+            Some(Stride::Dynamic(_)) => {
+                let _ = writeln!(self.out, "{pad}adamas_array_fill_flat({name}, {initial});");
+            }
+            None => {
+                let _ = writeln!(
+                    self.out,
+                    "{pad}adamas_array_fill({name}, {initial}, adamas_release_value);"
+                );
+            }
+        }
+        name
+    }
+
+    /// Запись ячейки: массив сперва делается пригодным к записи.
+    ///
+    /// `adamas_array_writable` отдаёт тот же блок, когда он уникален (`rc ==
+    /// 0`), и копию иначе - это и есть переписывание по месту из §4.11.
+    /// Уникальность спрашивается **после** того, как посчитаны все аргументы:
+    /// чтение из того же массива успевает отдать свою ссылку, и `arraySet xs i
+    /// (arrayIndex xs j)` переписывает, а не копирует.
+    fn array_set(
+        &mut self,
+        stride: Option<Stride>,
+        array: &Expr,
+        at: &Expr,
+        value: &Expr,
+        depth: usize,
+    ) -> String {
+        let pad = Self::pad(depth);
+        let array = self.value(array, depth);
+        let at = self.value(at, depth);
+        let value = self.value(value, depth);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_value {name} = adamas_array_writable({array}, adamas_release_value);"
+        );
+        match stride {
+            Some(stride) => self.store(
+                &format!("adamas_array_at({name}, (size_t){at})"),
+                stride,
+                &value,
+                depth,
+            ),
+            None => {
+                let _ = writeln!(
+                    self.out,
+                    "{pad}adamas_array_put({name}, (size_t){at}, {value}, adamas_release_value);"
+                );
+            }
+        }
+        name
+    }
+
+    /// Кладёт плоское значение по адресу ячейки.
+    ///
+    /// Известный тип пишется своим C-типом, неизвестный - `memcpy` шагом:
+    /// байты есть, имени у них нет.
+    fn store(&mut self, cell: &str, stride: Stride, value: &str, depth: usize) {
+        let pad = Self::pad(depth);
+        match stride {
+            Stride::Static(ty) => {
+                let _ = writeln!(
+                    self.out,
+                    "{pad}*({} *)({cell}) = {value};",
+                    c_type(Repr::Flat(ty))
+                );
+            }
+            Stride::Dynamic(_) => {
+                let step = Self::step(stride);
+                let _ = writeln!(self.out, "{pad}memcpy({cell}, {value}, {step});");
+            }
+        }
+    }
+
+    /// Чтение ячейки. Массив приходит владением и отдаётся рантайму здесь же.
+    ///
+    /// Плоский элемент неизвестного типа копируется в буфер **на кадре**:
+    /// указателем внутрь массива он бы пережил его дроп. Буфер - массив
+    /// переменной длины, потому что длина известна только в рантайме.
+    fn array_index(
+        &mut self,
+        stride: Option<Stride>,
+        array: &Expr,
+        at: &Expr,
+        depth: usize,
+    ) -> String {
+        let pad = Self::pad(depth);
+        let array = self.value(array, depth);
+        let at = self.value(at, depth);
+        let name = self.temp();
+        match stride {
+            Some(Stride::Static(ty)) => {
+                let _ = writeln!(self.out, "{pad}{} {name};", c_type(Repr::Flat(ty)));
+                let _ = writeln!(
+                    self.out,
+                    "{pad}adamas_array_read({array}, (size_t){at}, &{name}, \
+                     adamas_release_value);"
+                );
+            }
+            Some(stride @ Stride::Dynamic(_)) => {
+                let step = Self::step(stride);
+                let buffer = self.temp();
+                let _ = writeln!(self.out, "{pad}char {buffer}[{step}];");
+                let _ = writeln!(
+                    self.out,
+                    "{pad}adamas_array_read({array}, (size_t){at}, {buffer}, \
+                     adamas_release_value);"
+                );
+                let _ = writeln!(self.out, "{pad}char *{name} = {buffer};");
+            }
+            None => {
+                let _ = writeln!(
+                    self.out,
+                    "{pad}adamas_value {name} = adamas_array_take({array}, (size_t){at}, \
+                     adamas_release_value);"
+                );
+            }
+        }
+        name
     }
 
     /// Слоты объекта: плоское кладётся битами по значению, ссылка - владением.

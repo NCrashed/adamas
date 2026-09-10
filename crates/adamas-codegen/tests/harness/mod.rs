@@ -105,7 +105,7 @@ fn runtime() -> &'static [PathBuf] {
     OBJECTS.get_or_init(|| {
         let sources = Path::new(env!("ADAMAS_RUNTIME_SOURCES"));
         let dir = scratch();
-        ["object.c", "evidence.c", "closure.c", "frame.c"]
+        ["object.c", "array.c", "evidence.c", "closure.c", "frame.c"]
             .iter()
             .map(|name| {
                 let object = dir.join(format!("{name}.o"));
@@ -196,6 +196,47 @@ pub(crate) fn agreed(name: &str, source: &str) -> Result<String, adamas_codegen:
         "{name}: понижение посчитало не то, что машина"
     );
     Ok(stderr)
+}
+
+/// То же **без специализации**: понижается терм, как он написан.
+///
+/// Нужно ровно одному свидетелю - обобщённому коду над `{Flat a}` (§4.11).
+/// Специализация подставляет тип элемента и превращает шаг индексации в
+/// константу; здесь она не зовётся, и шаг приходит дескриптором, который
+/// словарь класса и есть. Договор тот же, что у [`agreed`]: ответ обязан
+/// сойтись с `adamas eval`.
+pub(crate) fn as_written(name: &str, source: &str) -> Result<String, adamas_codegen::CompileError> {
+    let (signature, _, _) = elaborated(source);
+    let written = body(&signature, "main");
+    let expected = ran(&signature, &written);
+    let text = adamas_codegen::compile(&signature, &written)?;
+    let (stdout, stderr) = built(name, &text);
+    assert_eq!(
+        stdout.trim_end_matches('\n'),
+        expected,
+        "{name}: понижение посчитало не то, что машина"
+    );
+    Ok(stderr)
+}
+
+/// Текст порождённого C без специализации - для свидетелей формы кода.
+///
+/// # Errors
+///
+/// [`adamas_codegen::CompileError`] - отказ понижения либо эмиссии.
+pub(crate) fn written_text(source: &str) -> Result<String, adamas_codegen::CompileError> {
+    let (signature, _, _) = elaborated(source);
+    let written = body(&signature, "main");
+    adamas_codegen::compile(&signature, &written)
+}
+
+/// Он же после специализации: то, что собирает [`agreed`].
+///
+/// # Errors
+///
+/// [`adamas_codegen::CompileError`] - отказ понижения либо эмиссии.
+pub(crate) fn text(source: &str) -> Result<String, adamas_codegen::CompileError> {
+    compiled(source)
 }
 
 /// Понижение `main` с вставленным RC - для свидетелей, которым нужен не текст,

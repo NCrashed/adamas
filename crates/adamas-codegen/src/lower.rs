@@ -34,9 +34,34 @@
 //!
 //! Написан тип не везде: у связывания лямбды его нет в ядре вовсе. Поэтому
 //! связывание лямбды объявляется указательным, а плоское значение,
-//! пришедшее в такую позицию, отвергается. Граница названа и совпадает с
-//! §4.11: обобщённый код над `{Flat a}` получает дескриптор layout имплиситом,
-//! а дескрипторов в рантайме пока нет - это следующая половина трека.
+//! пришедшее в такую позицию, отвергается.
+//!
+//! **Дескриптор эту границу не снял, и это измерено.** План фазы ждал
+//! обратного: дескриптор даёт **шаг**, а замыканию нужен единообразный
+//! **слот**, и второе есть боксирование (§5.1, «боксирование при передаче
+//! значения в позицию, скомпилированную по указательному представлению»), а
+//! не индексация. Свидетель прежний и по-прежнему красный на попытке -
+//! `tests/flat.rs`, `a_flat_value_does_not_cross_a_closure`.
+//!
+//! # Массив: представление одно на два случая (§4.11)
+//!
+//! `Array n a` есть один объект кучи независимо от элемента; раздваивается
+//! **укладка ячеек**. При плоском элементе они лежат подряд по `stride` байт,
+//! иначе - слотами указателей ([`Elems`]). Шаг читается не у массива, а у
+//! **написанного типа элемента**, и приходит он двумя путями, которые §4.11
+//! называет обоими:
+//!
+//! - элемент - примитив, и шаг известен типом ([`Stride::Static`]);
+//! - элемент - переменная, о которой в телескопе функции есть словарь `Flat`,
+//!   и шаг приходит его полем ([`Stride::Dynamic`]).
+//!
+//! Второе и есть «функция с `{Flat a}` в контексте получает дескриптор обычным
+//! имплиситом». Мономорфизация (`adamas_elab::mono`) переводит второй путь в
+//! первый, и оба обязаны давать один ответ - свидетель `tests/array.rs`.
+//!
+//! Функция **без** `{Flat a}` компилируется по указательному представлению, как
+//! §4.11 и говорит, поэтому плоский массив в неё не проходит: это была бы
+//! передача в позицию другого представления, то есть снова боксирование.
 //!
 //! # Арность берётся у типа, а не у тела (§10 вопрос 153)
 //!
@@ -67,13 +92,16 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
 
+use adamas_core::eval::{eval, quote};
 use adamas_core::mult::Mult;
-use adamas_core::prim::Prim;
+use adamas_core::prim::{ArrayOp, Prim, PrimTy};
 use adamas_core::sig::{DefinitionKind, Signature};
 use adamas_core::term::{Case, Index, Name, Term};
+use adamas_core::value::{Env, Lvl, Value};
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Expr, Fact, Form, FuncId, Function, LocalId, Program, Repr,
+    Arm, Binding, Constructor, CtorId, Elems, Expr, Fact, Form, FuncId, Function, LocalId, Program,
+    Repr, Stride,
 };
 
 /// Почему понижение отказало.
@@ -166,6 +194,28 @@ pub enum LowerError {
         /// Имя операции.
         name: String,
     },
+
+    /// Операция над массивом без всех аргументов.
+    ///
+    /// Недобранной она была бы замыканием, а через замыкание не проходит ни
+    /// плоский элемент, ни дескриптор (§4.11).
+    #[error("`{name}` без всех аргументов: операция над массивом значением этим срезом не берётся")]
+    PartialArray {
+        /// Имя операции.
+        name: String,
+    },
+
+    /// Ответ программы - массив.
+    ///
+    /// Печатать его нечем, и это названная граница: `adamas eval` печатает
+    /// цепочку `arrayNew`/`arraySet` со стёртыми аргументами, понижение -
+    /// значение, и сводить эти две печати - работа не этого среза.
+    #[error("ответ программы - массив: печатать его нечем (§4.11)")]
+    ArrayAnswer,
+
+    /// Дескриптор укладки написан не той записью.
+    #[error("дескриптор укладки ожидался записью `{{ layout = {{ size, align }} }}` (§4.11)")]
+    Descriptor,
 }
 
 /// Требует, чтобы все живые связывания были указательными.
@@ -187,8 +237,29 @@ fn describe(repr: Repr) -> String {
     match repr {
         Repr::Boxed => "указательное значение".to_owned(),
         Repr::Flat(ty) => format!("плоское `{ty}`"),
+        Repr::Layout => "дескриптор укладки".to_owned(),
+        Repr::Opaque => "плоский элемент неизвестного типа".to_owned(),
+        Repr::Array(Elems::Flat) => "плоский массив".to_owned(),
+        Repr::Array(Elems::Boxed) => "указательный массив".to_owned(),
     }
 }
+
+/// Имя класса представления (§4.11).
+///
+/// Объявляет его программа - соглашение то же, каким `if` берёт `Bool`, - и
+/// понижение читает его по имени ровно там же, где элаборация
+/// (`adamas-elab/src/flat.rs`). Второго имени тут не заводится: словарь,
+/// пришедший имплиситом, и есть дескриптор.
+const FLAT: &str = "Flat";
+
+/// Где лежат дескрипторы укладки: уровень описанного связывания - словарь.
+///
+/// Ключ - **уровень** типового связывания, о котором словарь говорит.
+/// Значение - номер того связывания, в котором словарь лежит. Так и читается
+/// §4.11 «функция с `{Flat a}` в контексте получает дескриптор обычным
+/// имплиситом»: контекст - это телескоп, и найти в нём словарь по типу
+/// элемента можно только сравнив, о каком связывании он говорит.
+type Dicts = HashMap<u32, LocalId>;
 
 /// Верх диапазона тегов занят служебными объектами рантайма (`adamas.h`).
 const TAGS: u16 = 0xFFF0;
@@ -232,6 +303,8 @@ struct Scope {
     locals: u32,
     /// Связывания в порядке связывания: последнее - индекс 0.
     env: Vec<Slot>,
+    /// Дескрипторы укладки, пришедшие имплиситами этой функции (§4.11).
+    dicts: Dicts,
 }
 
 impl Scope {
@@ -296,18 +369,22 @@ impl<'a> Lowerer<'a> {
         self.functions[entry_id.0].body = body;
         // У точки входа объявленного типа нет - она уже инстанцирована, - и
         // представление ответа берётся у самого ответа.
+        if matches!(repr, Repr::Array(_)) {
+            return Err(LowerError::ArrayAnswer);
+        }
         self.functions[entry_id.0].result = repr;
 
         // Очередь, а не рекурсия: имя получает номер до того, как понижено его
         // тело, поэтому рекурсия и взаимная рекурсия проходят сами собой.
         while let Some((id, name)) = self.pending.pop_front() {
-            let (parameters, inner, taken) = self.peeled(&name)?;
+            let (parameters, inner, taken, dicts) = self.peeled(&name)?;
             let mut scope = Scope {
                 // Номера выданы всем параметрам, включая достроенные, а в среду
                 // де Брёйна попадают только снятые: на достроенные тело
                 // сослаться не может, их в нём нет.
                 locals: u32::try_from(parameters.len()).unwrap_or(u32::MAX),
                 env: Vec::with_capacity(taken),
+                dicts,
             };
             for parameter in &parameters[..taken] {
                 scope.env.push(Slot::Bound(parameter.local, parameter.fact));
@@ -352,7 +429,7 @@ impl<'a> Lowerer<'a> {
     /// тем же правилом, каким машина решает, стирать ли аргумент. Лямбд бывает
     /// и больше, чем стрелок (тип за синонимом): лишние остаются
     /// указательными при `ω`, как и прежде.
-    fn peeled(&self, name: &Name) -> Result<(Vec<Binding>, Rc<Term>, usize), LowerError> {
+    fn peeled(&self, name: &Name) -> Result<(Vec<Binding>, Rc<Term>, usize, Dicts), LowerError> {
         let definition = self.definition(name)?;
         let body = definition.body.as_ref().ok_or_else(|| {
             // Невыразимое имя без тела заводит элаборация эффектов: `#handle.L`,
@@ -369,6 +446,9 @@ impl<'a> Lowerer<'a> {
                 }
             }
         })?;
+        // Словари телескопа считаются **до** параметров: представление массива
+        // зависит от того, есть ли в контексте `Flat` на его элемент (§4.11).
+        let dicts = dicts_of(self.signature, &definition.ty);
         let mut parameters = Vec::new();
         let mut current = Rc::new(body.clone());
         loop {
@@ -376,7 +456,7 @@ impl<'a> Lowerer<'a> {
             let Term::Lam(_, bound, inner) = &*step else {
                 break;
             };
-            let (mult, repr) = binder_at(self.signature, &definition.ty, parameters.len())
+            let (mult, repr) = binder_at(self.signature, &definition.ty, parameters.len(), &dicts)
                 .unwrap_or((Mult::Many, Repr::Boxed));
             parameters.push(Binding {
                 name: bound.to_string(),
@@ -386,14 +466,16 @@ impl<'a> Lowerer<'a> {
             current = Rc::clone(inner);
         }
         let taken = parameters.len();
-        while let Some((mult, repr)) = binder_at(self.signature, &definition.ty, parameters.len()) {
+        while let Some((mult, repr)) =
+            binder_at(self.signature, &definition.ty, parameters.len(), &dicts)
+        {
             parameters.push(Binding {
                 name: format!("эта{}", parameters.len() - taken),
                 local: LocalId(u32::try_from(parameters.len()).unwrap_or(u32::MAX)),
                 fact: Fact::declared(mult).shaped(repr),
             });
         }
-        Ok((parameters, current, taken))
+        Ok((parameters, current, taken, dicts))
     }
 
     /// Номер функции определения; тело откладывается в очередь.
@@ -401,8 +483,13 @@ impl<'a> Lowerer<'a> {
         if let Some(id) = self.numbers.get(name) {
             return Ok(*id);
         }
-        let (parameters, ..) = self.peeled(name)?;
-        let result = result_repr(self.signature, &self.definition(name)?.ty, parameters.len());
+        let (parameters, _, _, dicts) = self.peeled(name)?;
+        let result = result_repr(
+            self.signature,
+            &self.definition(name)?.ty,
+            parameters.len(),
+            &dicts,
+        );
         let id = FuncId(self.functions.len());
         self.functions.push(Function {
             id,
@@ -492,7 +579,8 @@ impl<'a> Lowerer<'a> {
                 self.application(scope, head, &arguments)
             }
             Term::Let(mult, name, ty, value, body) => {
-                let declared = repr_of(self.signature, ty);
+                let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
+                let declared = repr_of(self.signature, ty, depth, &scope.dicts);
                 let value = self.shaped(scope, value, declared, "связанное значение")?;
                 let binding = Binding {
                     name: name.to_string(),
@@ -515,11 +603,17 @@ impl<'a> Lowerer<'a> {
                 ))
             }
             Term::Case(case) => self.analysis(scope, case),
-            Term::Record(_) | Term::Object(_) | Term::With(..) | Term::Project(..) => {
-                Err(LowerError::Unsupported {
+            // Записей понижение не берёт, и одна из них - исключение: словарь
+            // `Flat` порождает компилятор, форма его записана в §4.11, и
+            // читается он дескриптором, а не общим путём записей.
+            Term::Object(fields) => descriptor(fields)
+                .map(|(size, align)| (Expr::Layout { size, align }, Repr::Layout))
+                .ok_or(LowerError::Unsupported {
                     form: "записи"
-                })
-            }
+                }),
+            Term::Record(_) | Term::With(..) | Term::Project(..) => Err(LowerError::Unsupported {
+                form: "записи",
+            }),
             Term::Pi(..)
             | Term::Universe(_)
             | Term::RowKind(_)
@@ -560,20 +654,21 @@ impl<'a> Lowerer<'a> {
     /// обычным путём - через границу замыкания, где плоское по-прежнему
     /// отвергается.
     ///
-    /// # Два стража без свидетеля
+    /// # Из двух стражей свидетеля получил один
     ///
-    /// Сверка представления на этом пути - у применяемого значения здесь и у
-    /// достроенного аргумента в [`Lowerer::given`] - свидетелей не имеет, и это
-    /// **измерено**: сними обе, корпус и свидетели вопроса 153 останутся
-    /// зелёными. Причина в том, что представление достроенного и представление
-    /// позиции читаются из одного типа, а единственная пара мест, где один тип
-    /// читается по-разному (параметризованный алиас, [`repr_of`]), отвергается
-    /// раньше - `shaped` на месте вызова либо [`pointing`] на границе замыкания.
+    /// Сверка достроенного аргумента ([`Lowerer::given`]) свидетелем **обзавелась**
+    /// вместе с массивами: один и тот же написанный тип `Array 3 a` читается
+    /// плоским там, где в контексте есть `Flat a`, и указательным там, где его
+    /// нет, - и телескопы вызывающего и вызываемого расходятся по-настоящему
+    /// (`tests/array.rs`, `a_supplied_argument_is_checked_by_its_representation`).
+    /// Прежде разойтись им было нечем: оба читали один тип.
     ///
-    /// Стоят они потому, что нагрузку получит трек 3б: дескриптор layout снимет
-    /// [`pointing`], плоское начнёт проходить границу замыкания, и разойтись
-    /// позиции с аргументом станет чем. До тех пор это стражи, а не правила, и
-    /// звать их покрытыми нельзя.
+    /// Сверка **применяемого значения** здесь свидетеля не получила, и причина
+    /// теперь структурная, а не «пока нечем»: позиция эта - вызываемое, то есть
+    /// тип-стрелка, а стрелка указательна при любом представлении элементов.
+    /// Чтобы страж сработал, потребовалось бы плоское значение функционального
+    /// типа, а такого нет ни одного. Страж остаётся; звать его покрытым
+    /// по-прежнему нельзя.
     fn saturated(
         &mut self,
         scope: &mut Scope,
@@ -614,8 +709,8 @@ impl<'a> Lowerer<'a> {
 
     /// Понижает аргумент спайна и требует от него объявленного представления.
     ///
-    /// Написанный проверяет `shaped` и на нём стоят свидетели; достроенный -
-    /// страж без свидетеля, см. [`Lowerer::saturated`].
+    /// Написанный проверяет `shaped`, достроенный - сверка ниже; свидетели
+    /// стоят на обоих, см. [`Lowerer::saturated`].
     fn given(
         &mut self,
         scope: &mut Scope,
@@ -692,6 +787,10 @@ impl<'a> Lowerer<'a> {
             Prim::Ty(ty) => Err(LowerError::TypeValue {
                 name: ty.name().to_owned(),
             }),
+            Prim::Array => Err(LowerError::TypeValue {
+                name: adamas_core::prim::ARRAY.to_owned(),
+            }),
+            Prim::Over(op) => self.array(scope, op, arguments),
             Prim::Lit(ty, bits) => {
                 if arguments.is_empty() {
                     Ok((Expr::Literal { ty, bits }, Repr::Flat(ty)))
@@ -718,6 +817,94 @@ impl<'a> Lowerer<'a> {
                         right: Box::new(right),
                     },
                     want,
+                ))
+            }
+        }
+    }
+
+    /// Операция над массивом (§4.11).
+    ///
+    /// Шаг индексации читается у **написанного** типа элемента - у того самого
+    /// стёртого аргумента, который операция несёт вторым (у `arrayNew` -
+    /// первым). Читается он там, а не у представления массива, ровно потому,
+    /// что представление отвечает «плоский или указательный», а шаг - число, и
+    /// приходит оно либо типом, либо дескриптором из контекста.
+    fn array(
+        &mut self,
+        scope: &mut Scope,
+        op: ArrayOp,
+        arguments: &[Arg<'_>],
+    ) -> Result<(Expr, Repr), LowerError> {
+        let wanted = match op {
+            ArrayOp::New => 3,
+            ArrayOp::Index => 4,
+            ArrayOp::Set => 5,
+        };
+        if arguments.len() != wanted {
+            return Err(LowerError::PartialArray {
+                name: op.name().to_owned(),
+            });
+        }
+        // Тип элемента: у `arrayNew` он единственный стёртый аргумент, у
+        // прочих - второй, после длины.
+        let at = usize::from(op != ArrayOp::New);
+        let Arg::Written(element) = arguments[at] else {
+            return Err(LowerError::PartialArray {
+                name: op.name().to_owned(),
+            });
+        };
+        let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
+        // Решение имплисита приезжает бета-редексом по контексту, поэтому тип
+        // сперва нормализуется: `((\m -> #2) …)` переменной не является, а
+        // после нормализации является.
+        let element = normalized(element, depth);
+        let stride = stride_of(self.signature, &element, depth, &scope.dicts);
+        let elements = stride.map_or(Repr::Boxed, Stride::element);
+        let cells = stride.map_or(Elems::Boxed, |_| Elems::Flat);
+        let word = Repr::Flat(PrimTy::UInt64);
+        match op {
+            ArrayOp::New => {
+                let count = self.given(scope, &arguments[1], word, "длина массива")?;
+                let initial = self.given(scope, &arguments[2], elements, "ячейка массива")?;
+                Ok((
+                    Expr::ArrayNew {
+                        stride,
+                        count: Box::new(count),
+                        initial: Box::new(initial),
+                    },
+                    Repr::Array(cells),
+                ))
+            }
+            ArrayOp::Index => {
+                let array =
+                    self.given(scope, &arguments[2], Repr::Array(cells), "читаемый массив")?;
+                let at = self.given(scope, &arguments[3], word, "номер ячейки")?;
+                Ok((
+                    Expr::ArrayIndex {
+                        stride,
+                        array: Box::new(array),
+                        at: Box::new(at),
+                    },
+                    elements,
+                ))
+            }
+            ArrayOp::Set => {
+                let array = self.given(
+                    scope,
+                    &arguments[2],
+                    Repr::Array(cells),
+                    "переписываемый массив",
+                )?;
+                let at = self.given(scope, &arguments[3], word, "номер ячейки")?;
+                let value = self.given(scope, &arguments[4], elements, "ячейка массива")?;
+                Ok((
+                    Expr::ArraySet {
+                        stride,
+                        array: Box::new(array),
+                        at: Box::new(at),
+                        value: Box::new(value),
+                    },
+                    Repr::Array(cells),
                 ))
             }
         }
@@ -1030,6 +1217,10 @@ impl<'a> Lowerer<'a> {
         let mut nested = Scope {
             locals: u32::try_from(captured.len()).unwrap_or(u32::MAX),
             env: inner,
+            // Дескрипторы наружу не едут: захват объявлен указательным, а
+            // словарь им не является. Обобщённый код внутри лямбды поэтому
+            // считает элемент указательным - названная граница §4.11.
+            dicts: Dicts::new(),
         };
         // Лямбда получает значение всегда: стирает машина по типу глобального
         // имени, а здесь имени нет.
@@ -1083,6 +1274,51 @@ fn form() -> Form {
     Form::Stack
 }
 
+/// Дескриптор укладки, записанный по форме §4.11: `{ layout = { size, align } }`.
+///
+/// `None` - запись другой формы, и понижать её нечем: общего пути записей у
+/// этого среза нет.
+fn descriptor(fields: &[(Name, Rc<Term>)]) -> Option<(u32, u32)> {
+    let [(name, inner)] = fields else {
+        return None;
+    };
+    if &**name != "layout" {
+        return None;
+    }
+    let Term::Object(pair) = &**inner else {
+        return None;
+    };
+    let [(first, size), (second, align)] = &**pair else {
+        return None;
+    };
+    if &**first != "size" || &**second != "align" {
+        return None;
+    }
+    Some((number(size)?, number(align)?))
+}
+
+/// Литерал `UInt32` числом.
+fn number(term: &Term) -> Option<u32> {
+    match term {
+        Term::Prim(Prim::Lit(PrimTy::UInt32, bits)) => u32::try_from(*bits).ok(),
+        _ => None,
+    }
+}
+
+/// Нормализует терм под `depth` связываниями контекста.
+///
+/// Нужно ровно одному месту - типу элемента массива: решение имплисита
+/// приезжает бета-редексом `(\m₂ -> \m₁ -> \m₀ -> #2) #2 #1 #0`, и переменной
+/// такой терм не является, пока редекс не сведён. Считает то же ядро, которым
+/// считают все три вычислителя; своего правила здесь не заводится.
+fn normalized(term: &Term, depth: u32) -> Term {
+    let mut env = Env::default();
+    for level in 0..depth {
+        env = env.extend(Value::var(Lvl(level)));
+    }
+    quote(depth, &eval(&env, term))
+}
+
 /// Голова спайна и его аргументы слева направо.
 fn spine(term: &Term) -> (&Term, Vec<&Term>) {
     let mut arguments = Vec::new();
@@ -1129,38 +1365,107 @@ const ALIASES: usize = 32;
 /// аргументов и только у определения, чей тип - универсум: параметризованный
 /// алиас требует подстановки, которой понижение не делает, и остаётся
 /// указательным.
-fn repr_of(signature: &Signature, ty: &Term) -> Repr {
+fn repr_of(signature: &Signature, ty: &Term, depth: u32, dicts: &Dicts) -> Repr {
+    let current = unaliased(signature, ty);
+    if let Term::Prim(Prim::Ty(prim)) = current {
+        return Repr::Flat(*prim);
+    }
+    // Спайн: массив применён к длине и типу элемента, класс `Flat` - к типу.
+    let (head, arguments) = spine(current);
+    match head {
+        Term::Prim(Prim::Array) if arguments.len() == 2 => {
+            match stride_of(signature, arguments[1], depth, dicts) {
+                Some(_) => Repr::Array(Elems::Flat),
+                None => Repr::Array(Elems::Boxed),
+            }
+        }
+        Term::Const(name, ..) if &**name == FLAT && arguments.len() == 1 => Repr::Layout,
+        _ => Repr::Boxed,
+    }
+}
+
+/// Разворачивает цепочку синонимов до имени, у которого тела нет.
+fn unaliased<'a>(signature: &'a Signature, ty: &'a Term) -> &'a Term {
     let mut current = ty;
     for _ in 0..ALIASES {
-        match current {
-            Term::Prim(Prim::Ty(prim)) => return Repr::Flat(*prim),
-            Term::Const(name, ..) => {
-                let Some(definition) = signature.lookup(name) else {
-                    return Repr::Boxed;
-                };
-                if !matches!(definition.kind, DefinitionKind::Regular)
-                    || !matches!(definition.ty, Term::Universe(_))
-                {
-                    return Repr::Boxed;
-                }
-                let Some(body) = definition.body.as_ref() else {
-                    return Repr::Boxed;
-                };
-                current = body;
-            }
-            _ => return Repr::Boxed,
+        let Term::Const(name, ..) = current else {
+            return current;
+        };
+        let Some(definition) = signature.lookup(name) else {
+            return current;
+        };
+        if !matches!(definition.kind, DefinitionKind::Regular)
+            || !matches!(definition.ty, Term::Universe(_))
+        {
+            return current;
         }
+        let Some(body) = definition.body.as_ref() else {
+            return current;
+        };
+        current = body;
     }
-    Repr::Boxed
+    current
+}
+
+/// Шаг индексации массива с таким элементом. `None` - элемент указательный.
+///
+/// Плоским элемент бывает по двум причинам, и §4.11 называет обе. Либо он
+/// примитив, и тогда шаг известен типом. Либо он **переменная, о которой в
+/// контексте есть словарь `Flat`**, и тогда шаг приходит дескриптором, а код
+/// один на все плоские элементы.
+///
+/// Названная граница: запись и семейство из плоских полей §4.11 считает
+/// плоскими, а понижение здесь - нет. Укладка агрегата у него не выражена
+/// вовсе ([`Repr::Flat`] несёт примитив), и объявить такой элемент плоским
+/// значило бы посчитать шаг наугад.
+fn stride_of(signature: &Signature, ty: &Term, depth: u32, dicts: &Dicts) -> Option<Stride> {
+    match unaliased(signature, ty) {
+        Term::Prim(Prim::Ty(prim)) => Some(Stride::Static(*prim)),
+        Term::Var(Index(index)) => {
+            let level = depth.checked_sub(index + 1)?;
+            dicts.get(&level).copied().map(Stride::Dynamic)
+        }
+        _ => None,
+    }
+}
+
+/// Словари `Flat` телескопа: какое связывание о каком типе говорит.
+///
+/// Связывание `i` описывает тип, стоящий на уровне `i - 1 - d`, где `d` -
+/// индекс переменной внутри домена `Flat #d`. Номера связываний те же, что
+/// раздаёт [`Lowerer::peeled`], - позиция в телескопе.
+fn dicts_of(signature: &Signature, ty: &Term) -> Dicts {
+    let mut found = Dicts::new();
+    let mut current = ty;
+    let mut at = 0u32;
+    while let Term::Pi(binder, _, domain, _, codomain) = current {
+        if binder.mult != Mult::Zero {
+            let (head, arguments) = spine(unaliased(signature, domain));
+            if let (Term::Const(name, ..), [Term::Var(Index(index))]) = (head, arguments.as_slice())
+            {
+                if &**name == FLAT {
+                    if let Some(level) = at.checked_sub(index + 1) {
+                        found.insert(level, LocalId(at));
+                    }
+                }
+            }
+        }
+        at += 1;
+        current = codomain;
+    }
+    found
 }
 
 /// Кратность и представление `n`-го связывания типа.
 ///
 /// Ровно то же, что считает машина: `None` значит «не стёрто», потому что
 /// связывания на этом месте синтаксически не видно.
-fn binder_at(signature: &Signature, ty: &Term, at: usize) -> Option<(Mult, Repr)> {
+fn binder_at(signature: &Signature, ty: &Term, at: usize, dicts: &Dicts) -> Option<(Mult, Repr)> {
+    let depth = u32::try_from(at).unwrap_or(u32::MAX);
     match after(ty, at)? {
-        Term::Pi(binder, _, domain, _, _) => Some((binder.mult, repr_of(signature, domain))),
+        Term::Pi(binder, _, domain, _, _) => {
+            Some((binder.mult, repr_of(signature, domain, depth, dicts)))
+        }
         _ => None,
     }
 }
@@ -1168,16 +1473,26 @@ fn binder_at(signature: &Signature, ty: &Term, at: usize) -> Option<(Mult, Repr)
 /// Представление ответа после `taken` снятых связываний.
 ///
 /// Снято меньше, чем стрелок в типе, - ответ функция, то есть указатель.
-fn result_repr(signature: &Signature, ty: &Term, taken: usize) -> Repr {
-    after(ty, taken).map_or(Repr::Boxed, |result| repr_of(signature, result))
+fn result_repr(signature: &Signature, ty: &Term, taken: usize, dicts: &Dicts) -> Repr {
+    let depth = u32::try_from(taken).unwrap_or(u32::MAX);
+    after(ty, taken).map_or(Repr::Boxed, |result| {
+        repr_of(signature, result, depth, dicts)
+    })
 }
 
 /// Факты о связываниях типа: телескоп до результата.
+///
+/// Словарей здесь нет: телескоп этот принадлежит конструктору, а дескриптор
+/// приходит имплиситом **функции** (§4.11). Элемент-переменная в поле
+/// конструктора поэтому указательный.
 fn binders_of(signature: &Signature, ty: &Term) -> Vec<Fact> {
+    let empty = Dicts::new();
     let mut facts = Vec::new();
     let mut current = ty;
+    let mut at = 0u32;
     while let Term::Pi(binder, _, domain, _, codomain) = current {
-        facts.push(Fact::declared(binder.mult).shaped(repr_of(signature, domain)));
+        facts.push(Fact::declared(binder.mult).shaped(repr_of(signature, domain, at, &empty)));
+        at += 1;
         current = codomain;
     }
     facts

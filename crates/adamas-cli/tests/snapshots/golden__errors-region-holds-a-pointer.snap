@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: region-holds-a-pointer.adamas:30:1: `Flat` не выводится для `Nat`: он рекурсивен, и размер значения ничем не ограничен
+  main =
+  ^^^^^^

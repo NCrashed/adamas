@@ -360,8 +360,114 @@ impl fmt::Display for ArrayOp {
     }
 }
 
+/// Операция региона (§3.6).
+///
+/// Регион здесь - **представление**, а не типовая сторона: `Alloc r`, `Ref r a`
+/// и `withRegion` объявляются программой и стоят на эффектах (трек B). Ниже них
+/// лежит то, что §3.6 называет «primitive allocator-функции, привязанные к
+/// runtime backend'у», и вот они.
+///
+/// # Почему узел ядра, а не имя сигнатуры
+///
+/// Довод тот же, что у массива, и он тот же проверяемый: чтение обязано
+/// **сводиться**, а сведение живёт в [`crate::eval`], которая сигнатуры не
+/// видит. Второй довод сильнее: смещение внутри блока считается по укладке
+/// нагрузки, и считать его обязаны все три вычислителя одинаково.
+///
+/// # Блок один, операций пять
+///
+/// `AllocStrategy` §3.6 называет три метода - `new`, `alloc`, `deallocate`, - а
+/// эффект `Alloc r` ещё три - `allocIn`, `read`, `write`. Здесь их пять, и
+/// расхождение с обоими перечнями объяснимо построчно.
+///
+/// `alloc` и `allocIn` слиты в [`Self::Alloc`]: `alloc : Block -> Nat -> Ptr`
+/// отдаёт хендл **и** двигает блок, а ядро чисто - две вещи разом операция не
+/// отдаёт. Слитая форма заодно снимает возможность соврать: размер нагрузки
+/// приходит не числом от вызывающего, а укладкой её типа.
+///
+/// Хендл поэтому берётся у блока следом - [`Self::Last`]. Это тот же `Ptr`,
+/// что §3.6 возвращает из `alloc`, только спрошенный после, а не отданный
+/// вместе.
+///
+/// `deallocate` операцией **не является**: блок есть объект кучи Perceus, и
+/// освобождает его дроп - одним `free` на всю область, как §3.6 и требует
+/// («освобождение одно на всю область»). Отдельная операция позволила бы
+/// освободить живой регион.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RegionOp {
+    /// `regionNew` - пустой регион. `AllocStrategy.new` (§3.6).
+    New,
+    /// `regionAlloc r x` - тот же регион, в конце которого лежит `x`.
+    Alloc,
+    /// `regionLast r` - хендл последней аллокации.
+    Last,
+    /// `regionRead r p` - значение, лежащее по хендлу `p`.
+    Read,
+    /// `regionWrite r p x` - тот же регион с переписанным местом `p`.
+    Write,
+}
+
+impl RegionOp {
+    /// Все операции.
+    pub const ALL: [Self; 5] = [Self::New, Self::Alloc, Self::Last, Self::Read, Self::Write];
+
+    /// Имя, которым операция пишется в программе.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::New => "regionNew",
+            Self::Alloc => "regionAlloc",
+            Self::Last => "regionLast",
+            Self::Read => "regionRead",
+            Self::Write => "regionWrite",
+        }
+    }
+
+    /// Операция по написанному имени.
+    #[must_use]
+    pub fn named(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|it| it.name() == text)
+    }
+
+    /// Несёт ли операция нагрузку - то есть стоят ли перед блоком стёртые
+    /// связывания типа нагрузки и её словаря `Flat` (§3.6).
+    #[must_use]
+    pub const fn carries(self) -> bool {
+        matches!(self, Self::Alloc | Self::Read | Self::Write)
+    }
+}
+
+impl fmt::Display for RegionOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Имя класса представления (§4.11).
+///
+/// Класс объявляется программой - соглашение то же, каким `if` берёт `Bool`, -
+/// а имя его знают трое: вывод инстансов (`adamas-elab/src/flat.rs`), понижение
+/// (дескриптор укладки в телескопе) и тип операции региона (§3.6). Общая
+/// константа стоит здесь, потому что расхождение в написании было бы тихим.
+pub const FLAT: &str = "Flat";
+
 /// Имя типа массива (§4.11).
 pub const ARRAY: &str = "Array";
+
+/// Имя типа региона (§3.6): runtime-представление области.
+pub const BLOCK: &str = "Block";
+
+/// Имя типа хендла (§3.6).
+///
+/// Отдельного узла ядра у него нет: `Ptr` есть смещение внутри блока, то есть
+/// машинное слово, и написан он `UInt64`. §4.11 требует ровно этого - «ссылки
+/// внутри плоских данных - хендлы, а не указатели», - и хендл-смещение
+/// переживает всякое перемещение области, чего указатель не переживает.
+///
+/// Названная граница: типовой разницы с `UInt64` у `Ptr` нет, и читать по
+/// хендлу другим типом, чем писали, ядро не мешает. Типизирует ссылку `Ref r a`
+/// (§3.6, типовая сторона), а не `Ptr`.
+pub const PTR: &str = "Ptr";
 
 /// Примитив в терме: тип, литерал, операция, массив.
 ///
@@ -381,6 +487,10 @@ pub enum Prim {
     Array,
     /// Операция над массивом: `arrayIndex`.
     Over(ArrayOp),
+    /// Тип региона `Block` (§3.6).
+    Block,
+    /// Операция над регионом: `regionAlloc`.
+    In(RegionOp),
 }
 
 impl Prim {
@@ -405,6 +515,8 @@ impl Prim {
             Self::Op(op, ty) => Some(format!("{op}{ty}")),
             Self::Array => Some(ARRAY.to_owned()),
             Self::Over(op) => Some(op.name().to_owned()),
+            Self::Block => Some(BLOCK.to_owned()),
+            Self::In(op) => Some(op.name().to_owned()),
             Self::Lit(..) => None,
         }
     }
@@ -415,17 +527,26 @@ impl Prim {
         match self {
             Self::Lit(ty, bits) if !ty.floating() => ty.as_signed(bits) < 0,
             Self::Lit(..) => self.to_string().starts_with('-'),
-            Self::Ty(_) | Self::Op(..) | Self::Array | Self::Over(_) => false,
+            Self::Ty(_)
+            | Self::Op(..)
+            | Self::Array
+            | Self::Over(_)
+            | Self::Block
+            | Self::In(_) => false,
         }
     }
 
-    /// Занято ли имя языком (§4.11): примитив, массив либо операция над ним.
+    /// Занято ли имя языком (§4.11, §3.6): примитив, массив, регион и операции
+    /// над ними.
     #[must_use]
     pub fn taken(text: &str) -> bool {
         PrimTy::named(text).is_some()
             || PrimOp::named(text).is_some()
             || ArrayOp::named(text).is_some()
+            || RegionOp::named(text).is_some()
             || text == ARRAY
+            || text == BLOCK
+            || text == PTR
     }
 }
 
@@ -436,6 +557,8 @@ impl fmt::Display for Prim {
             Self::Op(op, ty) => write!(f, "{op}{ty}"),
             Self::Array => f.write_str(ARRAY),
             Self::Over(op) => write!(f, "{op}"),
+            Self::Block => f.write_str(BLOCK),
+            Self::In(op) => write!(f, "{op}"),
             // Дробное печатается через `Debug`: `Display` у него сокращает
             // `1.0` до `1`, и литерал переставал бы отличаться от целого.
             #[expect(

@@ -688,6 +688,8 @@ fn same_head(
         // Массив и операции над ним - такие же имена (§4.11).
         (Head::Array, Head::Array) => true,
         (Head::ArrayOp(op_a), Head::ArrayOp(op_b)) => op_a == op_b,
+        // Операции региона - тем же правилом (§3.6).
+        (Head::Region(op_a), Head::Region(op_b)) => op_a == op_b,
         (
             Head::Global(name_a, levels_a, rows_a, mults_a),
             Head::Global(name_b, levels_b, rows_b, mults_b),

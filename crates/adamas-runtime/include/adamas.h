@@ -467,6 +467,74 @@ adamas_value adamas_array_writable(adamas_value array, adamas_release release);
 void adamas_array_release(adamas_value array, adamas_release release);
 
 /* ------------------------------------------------------------------ */
+/* Регионы (§3.6)                                                      */
+/* ------------------------------------------------------------------ */
+
+/** Тег региона в заголовке. */
+#define ADAMAS_TAG_REGION 0xFFFAu
+
+/**
+ * Ёмкость области в байтах.
+ *
+ * Фиксирована, и это **названная граница**, а не выбор: рост области
+ * принадлежит стратегии (`AllocStrategy` §3.6 - Arena, Pool, StackAlloc), а её
+ * пока нет. Переполнение обрывает процесс, а не растит блок молча: молчаливый
+ * рост означал бы вторую аллокацию там, где §3.6 обещает одну.
+ */
+#define ADAMAS_REGION_BYTES 4096u
+
+/**
+ * Заголовок области: курсор и хендл последней аллокации.
+ *
+ * Нагрузка идёт следом байтами, а не слотами: она плоская по построению
+ * (`{Flat a}`, §3.6), заголовков у неё нет, и поэтому **число значений в
+ * области не влияет на число блоков** - их всегда один.
+ *
+ * `last` лежит здесь, потому что `alloc : Block -> Nat -> Ptr` (§3.6) отдаёт
+ * хендл вместе с подъёмом курсора, а ядро чисто: подъём возвращает область,
+ * хендл спрашивается у неё следом.
+ */
+typedef struct adamas_region {
+    adamas_header header;
+    /** Сколько байт занято. */
+    size_t used;
+    /** Смещение последней аллокации. */
+    size_t last;
+} adamas_region;
+
+_Static_assert(sizeof(adamas_region) == 24, "нагрузка региона идёт со смещения 24");
+
+/** Пустая область. `AllocStrategy.new` (§3.6): один блок кучи. */
+adamas_value adamas_region_new(void);
+
+/** Сколько байт области занято. Диагностика. */
+size_t adamas_region_used(adamas_value region);
+
+/**
+ * Кладёт `size` байт по границе `align` в конец области. Приходит **владением**.
+ *
+ * Уникальная область пишется по месту, разделённая копируется - тот же договор,
+ * что у [`adamas_array_writable`] (§5.1, §10 вопрос 149). Ячейки кучи под само
+ * значение не выдаётся вовсе.
+ */
+adamas_value adamas_region_alloc(adamas_value region, const void *bits, size_t size,
+                                 size_t align);
+
+/** Хендл последней аллокации: смещение внутри области. Область отдаётся. */
+size_t adamas_region_last(adamas_value region, adamas_release release);
+
+/** Читает `size` байт по хендлу в `out`. Область приходит владением. */
+void adamas_region_read(adamas_value region, size_t at, void *out, size_t size,
+                        adamas_release release);
+
+/** Переписывает `size` байт по хендлу. Курсор не двигает; приходит владением. */
+adamas_value adamas_region_write(adamas_value region, size_t at, const void *bits,
+                                 size_t size);
+
+/** Дроп нагрузки области. Не делает ничего: нагрузка плоская (§3.6). */
+void adamas_region_release(adamas_value region);
+
+/* ------------------------------------------------------------------ */
 /* Вектор evidence                                                     */
 /* ------------------------------------------------------------------ */
 

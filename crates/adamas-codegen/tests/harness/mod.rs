@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+use adamas_codegen::ir::{Arm, Binding, Expr, LocalId};
 use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::row::Row;
@@ -105,25 +106,32 @@ fn runtime() -> &'static [PathBuf] {
     OBJECTS.get_or_init(|| {
         let sources = Path::new(env!("ADAMAS_RUNTIME_SOURCES"));
         let dir = scratch();
-        ["object.c", "array.c", "evidence.c", "closure.c", "frame.c"]
-            .iter()
-            .map(|name| {
-                let object = dir.join(format!("{name}.o"));
-                let status = Command::new(env!("ADAMAS_CC"))
-                    .args(["-std=c11", "-O1", "-c"])
-                    .arg("-I")
-                    .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
-                    .arg(sources.join(name))
-                    .arg("-o")
-                    .arg(&object)
-                    .status();
-                assert!(
-                    status.is_ok_and(|status| status.success()),
-                    "рантайм не собрался: {name}"
-                );
-                object
-            })
-            .collect()
+        [
+            "object.c",
+            "array.c",
+            "region.c",
+            "evidence.c",
+            "closure.c",
+            "frame.c",
+        ]
+        .iter()
+        .map(|name| {
+            let object = dir.join(format!("{name}.o"));
+            let status = Command::new(env!("ADAMAS_CC"))
+                .args(["-std=c11", "-O1", "-c"])
+                .arg("-I")
+                .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
+                .arg(sources.join(name))
+                .arg("-o")
+                .arg(&object)
+                .status();
+            assert!(
+                status.is_ok_and(|status| status.success()),
+                "рантайм не собрался: {name}"
+            );
+            object
+        })
+        .collect()
     })
 }
 
@@ -266,6 +274,118 @@ pub(crate) fn compiled(source: &str) -> Result<String, adamas_codegen::CompileEr
     let made = mono::specialise(&mut signature, &mut metas, &instances, &written)
         .unwrap_or_else(|error| panic!("специализация отказала: {error}"));
     adamas_codegen::compile(&signature, &made.term)
+}
+
+/// Обход дерева выражения сверху вниз.
+///
+/// Живёт здесь, а не рядом со своим свидетелем, потому что читают его двое -
+/// плоское значение (`flat.rs`) и регион (`region.rs`), - и обход, забывший
+/// узел, молча делает утверждение об **отсутствии** зелёным.
+pub(crate) fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
+    visit(expr);
+    match expr {
+        Expr::Local(_)
+        | Expr::Erased
+        | Expr::ConstructClosure { .. }
+        | Expr::Literal { .. }
+        | Expr::LayoutField { .. }
+        | Expr::RegionNew
+        | Expr::Layout { .. } => {}
+        Expr::Unpack { value, .. } => walk(value, visit),
+        Expr::RegionLast { region } => walk(region, visit),
+        Expr::RegionAlloc { region, value, .. } => {
+            walk(region, visit);
+            walk(value, visit);
+        }
+        Expr::RegionRead { region, at, .. } => {
+            walk(region, visit);
+            walk(at, visit);
+        }
+        Expr::RegionWrite {
+            region, at, value, ..
+        } => {
+            walk(region, visit);
+            walk(at, visit);
+            walk(value, visit);
+        }
+        Expr::Construct { arguments, .. }
+        | Expr::Call { arguments, .. }
+        | Expr::Pack {
+            fields: arguments, ..
+        } => {
+            for argument in arguments {
+                walk(argument, visit);
+            }
+        }
+        Expr::ArrayNew { count, initial, .. } => {
+            walk(count, visit);
+            walk(initial, visit);
+        }
+        Expr::ArraySet {
+            array, at, value, ..
+        } => {
+            walk(array, visit);
+            walk(at, visit);
+            walk(value, visit);
+        }
+        Expr::ArrayIndex { array, at, .. } => {
+            walk(array, visit);
+            walk(at, visit);
+        }
+        Expr::Closure { captured, .. } => {
+            for capture in captured {
+                walk(capture, visit);
+            }
+        }
+        Expr::Primitive { left, right, .. } => {
+            walk(left, visit);
+            walk(right, visit);
+        }
+        Expr::Apply { callee, argument } => {
+            walk(callee, visit);
+            walk(argument, visit);
+        }
+        Expr::Bind { value, body, .. } => {
+            walk(value, visit);
+            walk(body, visit);
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            walk(scrutinee, visit);
+            for arm in arms {
+                walk(&arm.body, visit);
+            }
+        }
+        Expr::Dup { body, .. } | Expr::Drop { body, .. } | Expr::Reclaim { body, .. } => {
+            walk(body, visit);
+        }
+    }
+}
+
+/// Все связывания тела: `let` и поля ветвей.
+pub(crate) fn bindings(expr: &Expr, note: &mut impl FnMut(&Binding)) {
+    walk(expr, &mut |inner| match inner {
+        Expr::Bind { binding, .. } => note(binding),
+        Expr::Match { arms, .. } => {
+            for Arm { fields, .. } in arms {
+                for field in fields {
+                    note(field);
+                }
+            }
+        }
+        _ => {}
+    });
+}
+
+/// Связывания, названные узлами `Dup`, `Drop` и `Reclaim`.
+pub(crate) fn rc_nodes(expr: &Expr, out: &mut Vec<LocalId>) {
+    walk(expr, &mut |inner| match inner {
+        Expr::Dup { local, .. } | Expr::Drop { local, .. } | Expr::Reclaim { local, .. } => {
+            out.push(*local);
+        }
+        _ => {}
+    });
 }
 
 /// Сколько блоков прогон выдал и сколько оставил живыми.

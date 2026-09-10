@@ -34,7 +34,7 @@ use std::path::PathBuf;
 /// рекурсия, `let`, массивы (§4.11), записи (§4.2). Всё, что здесь стоит,
 /// обязано собраться и ответить как `adamas eval`; список сокращать нельзя, а
 /// пополнять - можно и нужно, когда фрагмент растёт.
-const TAKEN: [&str; 29] = [
+const TAKEN: [&str; 30] = [
     "arithmetic",
     "array-aggregate",
     "array-flat",
@@ -62,6 +62,7 @@ const TAKEN: [&str; 29] = [
     "operators",
     "primitives",
     "records",
+    "region-holds-flat-payload",
     "rose",
     "truncation",
 ];

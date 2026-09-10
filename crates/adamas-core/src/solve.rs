@@ -451,6 +451,7 @@ fn read(
                 Head::Prim(op, ty) => Term::Prim(crate::prim::Prim::Op(*op, *ty)),
                 Head::Array => Term::Prim(crate::prim::Prim::Array),
                 Head::ArrayOp(op) => Term::Prim(crate::prim::Prim::Over(*op)),
+                Head::Region(op) => Term::Prim(crate::prim::Prim::In(*op)),
             };
             spine.iter().try_fold(base, |callee, elim| match elim {
                 Elim::Project(name) => Some(Term::Project(Rc::new(callee), Rc::clone(name))),
@@ -565,6 +566,7 @@ fn rigid(head: &Head, leading: &[Rc<Value>]) -> Option<Term> {
         Head::Prim(op, ty) => Some(Term::Prim(crate::prim::Prim::Op(*op, *ty))),
         Head::Array => Some(Term::Prim(crate::prim::Prim::Array)),
         Head::ArrayOp(op) => Some(Term::Prim(crate::prim::Prim::Over(*op))),
+        Head::Region(op) => Some(Term::Prim(crate::prim::Prim::In(*op))),
         Head::Meta(_) => None,
     }
 }

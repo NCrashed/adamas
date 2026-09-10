@@ -211,6 +211,13 @@ pub enum Head {
     /// ([`crate::eval::try_apply`]). Отдельной формы значения массив поэтому не
     /// требует - и обратное чтение с конвертируемостью достаются даром.
     ArrayOp(ArrayOp),
+    /// Операция над регионом (§3.6).
+    ///
+    /// Голова по тому же доводу, что и [`Head::ArrayOp`], и с той же добавкой:
+    /// **значение блока и есть такой спайн**. `regionNew` заводит цепочку,
+    /// `regionAlloc` и `regionWrite` её наращивают, `regionLast` с `regionRead`
+    /// читают ([`crate::eval::try_apply`]).
+    Region(crate::prim::RegionOp),
 }
 
 /// Элиминатор в спайне застрявшего вычисления.
@@ -446,6 +453,9 @@ impl fmt::Display for Value {
                 write!(f, "{}·{}", crate::prim::ARRAY, spine.len())
             }
             Self::Neutral(Head::ArrayOp(op), spine) => {
+                write!(f, "{op}·{}", spine.len())
+            }
+            Self::Neutral(Head::Region(op), spine) => {
                 write!(f, "{op}·{}", spine.len())
             }
             Self::Prim(prim) => write!(f, "{prim}"),

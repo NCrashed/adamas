@@ -45,7 +45,10 @@ use crate::error::ElabError;
 use crate::own::Owned;
 
 /// Имя класса представления. Соглашение то же, каким `if` берёт `Bool`.
-pub(crate) const FLAT: &str = "Flat";
+///
+/// Написано оно в ядре ([`adamas_core::prim::FLAT`]): тип операции региона
+/// (§3.6) называет тот же класс, и второе написание разошлось бы молча.
+pub(crate) const FLAT: &str = adamas_core::prim::FLAT;
 
 /// Единственный метод класса: дескриптор укладки.
 pub(crate) const LAYOUT: &str = "layout";
@@ -162,6 +165,8 @@ enum Why {
     Open,
     /// Массив (§4.11): один объект кучи, адресуемый указателем.
     Pointing,
+    /// Блок региона (§3.6): область в куче, и живёт она вне Perceus.
+    Regional,
     /// Значений у этого нет вовсе - укладывать нечего.
     Alien,
     /// Вложенность кончилась раньше представления.
@@ -189,6 +194,10 @@ impl Why {
             Self::Pointing => {
                 "массив (§4.11): один объект кучи, и в чужой укладке от него \
                  лежит указатель"
+            }
+            Self::Regional => {
+                "блок региона (§3.6): область целиком, и класть её нагрузкой в \
+                 регион значило бы вложить область в область"
             }
             Self::Alien => "значений не имеет, и укладывать нечего",
             Self::Deep => "уходит глубже, чем вывод готов идти",
@@ -401,8 +410,8 @@ pub(crate) fn derive(
     // Решение имплисита приезжает туда бета-редексом по контексту (`Flat
     // ((\m -> Int64) #0)`), и у лямбды в позиции аргумента тип не выводится
     // вовсе - проверка отказывала на форме словаря, которая ни при чём.
-    // Телескоп при этом тот же, по которому построено решение, и цель посчитана
-    // в его контексте.
+    // Телескоп при этом тот же, по которому построено решение, и цель
+    // посчитана в его контексте.
     let checked = abstracted_pi(&binders, goal_of(goal).clone());
     check_within(&Ctx::new(signature), metas, &solution, &checked).map_err(|_| {
         ElabError::FlatShape {
@@ -456,6 +465,13 @@ impl Walk<'_> {
             Value::Neutral(Head::Array, _) => Err(Blame::alone(
                 Shown::Named(Rc::from(adamas_core::prim::ARRAY)),
                 Why::Pointing,
+            )),
+            // Блок региона (§3.6) - объект кучи, и нагрузкой региона он не
+            // бывает: `Flat` для него не выводится, поэтому `regionAlloc`
+            // блока в блок не кладёт.
+            Value::Prim(Prim::Block) => Err(Blame::alone(
+                Shown::Named(Rc::from(adamas_core::prim::BLOCK)),
+                Why::Regional,
             )),
             Value::Record(telescope) => self.record(metas, &shown, telescope),
             Value::Neutral(Head::Global(name, ..), spine) => {

@@ -9,7 +9,14 @@
 use std::path::{Path, PathBuf};
 
 /// Исходники рантайма - те же, что перечисляет его собственный `build.rs`.
-const SOURCES: [&str; 5] = ["object.c", "array.c", "evidence.c", "closure.c", "frame.c"];
+const SOURCES: [&str; 6] = [
+    "object.c",
+    "array.c",
+    "region.c",
+    "evidence.c",
+    "closure.c",
+    "frame.c",
+];
 
 fn main() {
     let Some(include) = std::env::var_os("DEP_ADAMAS_RUNTIME_INCLUDE") else {

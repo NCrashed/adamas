@@ -168,16 +168,48 @@ fn sort(n: u32) -> Rc<Value> {
 /// определения. Прецедент прямой и записан в §4.11: поля `Layout` тоже стали
 /// `UInt32` вместо `Nat`, потому что зависимой роли у них нет.
 #[must_use]
-pub fn prim_type(prim: Prim) -> Rc<Value> {
-    crate::eval::eval(&Env::default(), &prim_scheme(prim))
+pub fn prim_type(signature: &Signature, prim: Prim) -> Rc<Value> {
+    crate::eval::eval(&Env::default(), &prim_scheme(signature, prim))
+}
+
+/// Класс `Flat` термом - тот, которым §3.6 ограничивает нагрузку региона.
+///
+/// Имя берётся у сигнатуры тем же соглашением, каким `if` берёт `Bool`: класс
+/// объявляется программой (§4.11), а ядро имён не знает. Аргументы сортов
+/// стёрты нулями - укладка от уровня, ряда и кратности не зависит, и тот же
+/// счёт ведёт вывод инстансов (`adamas-elab/src/flat.rs`).
+///
+/// Класса нет в сигнатуре - имя строится всё равно, и отказывает **проверка**:
+/// «имя `Flat` не объявлено». Молча снять ограничение было бы хуже: регион
+/// принял бы указательную нагрузку, и §3.6 потерял бы второе из двух своих
+/// условий.
+fn flat_class(signature: &Signature, argument: Term) -> Term {
+    let arity = signature.lookup(crate::prim::FLAT);
+    let levels: Rc<[Level]> = (0..arity.map_or(0, |it| it.level_arity))
+        .map(|_| Level::Zero)
+        .collect();
+    let rows = (0..arity.map_or(0, |it| it.row_arity)).map(|_| Row::empty());
+    let mults = arity
+        .map(|it| it.mult_allowed.iter())
+        .into_iter()
+        .flatten()
+        .map(|allowed| allowed.first().copied().unwrap_or(Mult::Many))
+        .collect::<Vec<_>>();
+    let class = Term::Const(
+        Name::from(crate::prim::FLAT),
+        levels,
+        Args::new(rows, mults),
+    );
+    Term::App(Rc::new(class), Rc::new(argument))
 }
 
 /// Тип примитива термом: то же, что [`prim_type`], до вычисления.
-fn prim_scheme(prim: Prim) -> Term {
+fn prim_scheme(signature: &Signature, prim: Prim) -> Term {
     let word = Term::Prim(Prim::Ty(crate::prim::PrimTy::UInt64));
     let universe = Term::universe(0);
     match prim {
-        Prim::Ty(_) => universe,
+        Prim::Ty(_) | Prim::Block => universe,
+        Prim::In(op) => region_op_scheme(signature, op, &word, &universe),
         Prim::Lit(ty, _) => Term::Prim(Prim::Ty(ty)),
         Prim::Op(_, ty) => {
             let over = Term::Prim(Prim::Ty(ty));
@@ -201,6 +233,79 @@ fn prim_scheme(prim: Prim) -> Term {
             ),
         ),
         Prim::Over(op) => array_op_scheme(op, &word, &universe),
+    }
+}
+
+/// Тип операции над регионом (§3.6).
+///
+/// # Нагрузка ограничена `{Flat a}`, и ограничение это несущее
+///
+/// §3.6 требует его ради безопасного смешения двух куч: `read : Ref r a -> a`
+/// параметр `r` из типа стирает, и без плоскости наружу выходило бы содержимое.
+/// Здесь у него есть **вторая работа, наблюдаемая прогоном**: смещение
+/// следующей аллокации считается по укладке нагрузки, а укладку знает словарь.
+/// Сними словарь - и `regionLast` перестанет сводиться у машины, потому что
+/// считать смещение станет не по чему.
+///
+/// Словарь стёрт (`{0 …}`): понижение дескриптор находит само - у типа нагрузки
+/// либо у `{Flat a}` в телескопе функции (§4.11), - а машине он нужен как
+/// **терм**, и терм у неё есть при любой кратности.
+///
+/// # Хендл - `UInt64`
+///
+/// `Ptr` (§3.6) есть смещение внутри блока, то есть машинное слово; отдельного
+/// узла ядра у него нет - см. [`crate::prim::PTR`]. Тот же довод, каким длина
+/// массива стала `UInt64` вместо `Nat`.
+fn region_op_scheme(
+    signature: &Signature,
+    op: crate::prim::RegionOp,
+    word: &Term,
+    universe: &Term,
+) -> Term {
+    use crate::prim::RegionOp;
+    let erased = Binder::implicit(Mult::Zero);
+    let given = Binder::explicit(Mult::Many);
+    let block = Term::Prim(Prim::Block);
+    // Нагрузка и её словарь: два стёртых связывания перед всем прочим.
+    let carried = |inner: Term| {
+        bound(
+            erased,
+            "a",
+            universe.clone(),
+            bound(erased, "d", flat_class(signature, Term::var(0)), inner),
+        )
+    };
+    match op {
+        // `regionNew : Block`
+        RegionOp::New => block,
+        // `regionAlloc : {0 a} -> {0 d : Flat a} -> (ω r : Block) -> (ω x : a) -> Block`
+        RegionOp::Alloc => carried(bound(
+            given,
+            "r",
+            block.clone(),
+            bound(given, "x", Term::var(2), block),
+        )),
+        // `regionLast : (ω r : Block) -> UInt64`
+        RegionOp::Last => bound(given, "r", block, word.clone()),
+        // `regionRead : {0 a} -> {0 d : Flat a} -> (ω r : Block) -> (ω p : UInt64) -> a`
+        RegionOp::Read => carried(bound(
+            given,
+            "r",
+            block,
+            bound(given, "p", word.clone(), Term::var(3)),
+        )),
+        // `regionWrite : {0 a} -> {0 d} -> (ω r) -> (ω p : UInt64) -> (ω x : a) -> Block`
+        RegionOp::Write => carried(bound(
+            given,
+            "r",
+            block.clone(),
+            bound(
+                given,
+                "p",
+                word.clone(),
+                bound(given, "x", Term::var(3), block),
+            ),
+        )),
     }
 }
 
@@ -331,7 +436,7 @@ pub fn infer(
         Term::EffectKind => Ok((sort(1), Usage::zero(ctx.size()))),
 
         // Примитив замкнут: связываний не занимает, использований не порождает.
-        Term::Prim(prim) => Ok((prim_type(*prim), Usage::zero(ctx.size()))),
+        Term::Prim(prim) => Ok((prim_type(ctx.signature(), *prim), Usage::zero(ctx.size()))),
 
         // `Pi` сам является типом, поэтому и домен, и кодомен проверяются в
         // стёртом фрагменте, а использований он не порождает вовсе.

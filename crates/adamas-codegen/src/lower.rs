@@ -213,6 +213,34 @@ pub enum LowerError {
     #[error("ответ программы - массив: печатать его нечем (§4.11)")]
     ArrayAnswer,
 
+    /// Операция над регионом без всех аргументов.
+    ///
+    /// Тот же довод, что у массива: недобранная была бы замыканием, а через
+    /// границу замыкания не проходит ни блок, ни плоская нагрузка.
+    #[error("`{name}` без всех аргументов: операция над регионом значением этим срезом не берётся")]
+    PartialRegion {
+        /// Имя операции.
+        name: String,
+    },
+
+    /// Нагрузка региона не плоская (§3.6).
+    ///
+    /// Понижение спрашивает это **вторым**: первым спрашивает элаборация, и
+    /// отказ её называет поле. Сюда доходит то, чего типовая сторона не видит:
+    /// нагрузка, чью укладку понижение не выражает (§10 вопросы 157, 158).
+    #[error("нагрузка региона `{written}` плоской укладки в понижении не имеет (§3.6, §4.11)")]
+    RegionPayload {
+        /// Как названо представление нагрузки.
+        written: String,
+    },
+
+    /// Ответ программы - блок региона.
+    ///
+    /// Названная граница того же жанра, что массив в ответе: `adamas eval`
+    /// печатает цепочку `regionNew`/`regionAlloc`, понижение - область байт.
+    #[error("ответ программы - блок региона: печатать его нечем (§3.6)")]
+    RegionAnswer,
+
     /// Ответ программы - плоский агрегат.
     ///
     /// Печать идёт по тегу заголовка, а у плоского агрегата заголовка нет
@@ -293,6 +321,7 @@ fn describe(repr: Repr) -> String {
         Repr::Opaque => "плоский элемент неизвестного типа".to_owned(),
         Repr::Array(Elems::Flat) => "плоский массив".to_owned(),
         Repr::Array(Elems::Boxed) => "указательный массив".to_owned(),
+        Repr::Region => "блок региона".to_owned(),
         Repr::Record(tag) => format!("запись формы #{}", tag.0),
         Repr::Packed(pack) => format!("плоский агрегат укладки #{}", pack.0),
     }
@@ -436,6 +465,9 @@ impl<'a> Lowerer<'a> {
         // представление ответа берётся у самого ответа.
         if matches!(repr, Repr::Array(_)) {
             return Err(LowerError::ArrayAnswer);
+        }
+        if repr == Repr::Region {
+            return Err(LowerError::RegionAnswer);
         }
         // Плотный агрегат печатается упакованным: печать идёт по тегу
         // заголовка, а у плотного заголовка нет вовсе (§4.11). Упаковка тут не
@@ -1302,6 +1334,10 @@ impl<'a> Lowerer<'a> {
                 name: adamas_core::prim::ARRAY.to_owned(),
             }),
             Prim::Over(op) => self.array(scope, op, arguments),
+            Prim::Block => Err(LowerError::TypeValue {
+                name: adamas_core::prim::BLOCK.to_owned(),
+            }),
+            Prim::In(op) => self.region(scope, op, arguments),
             Prim::Lit(ty, bits) => {
                 if arguments.is_empty() {
                     Ok((Expr::Literal { ty, bits }, Repr::Flat(ty)))
@@ -1425,6 +1461,108 @@ impl<'a> Lowerer<'a> {
                     Repr::Array(cells),
                 ))
             }
+        }
+    }
+
+    /// Операция над регионом (§3.6).
+    ///
+    /// Ширина нагрузки читается у **написанного** её типа - того самого
+    /// стёртого аргумента, который операция несёт первым, - и тем же
+    /// [`Self::stride_of`], каким её читает массив. Иначе и быть не может:
+    /// плоская укладка одна на язык, и два её счёта разъехались бы молча.
+    ///
+    /// Нагрузка, у которой шага нет, отвергается здесь названной причиной.
+    /// Типовая сторона такую нагрузку обычно не пропускает - `{Flat a}` стоит
+    /// в типе операции, - но перечни расходятся: `Flat` выводится для
+    /// семейства с тегом и для вложенного агрегата, а плотной укладки в
+    /// понижении у них нет (§10 вопрос 157).
+    fn region(
+        &mut self,
+        scope: &mut Scope,
+        op: adamas_core::prim::RegionOp,
+        arguments: &[Arg<'_>],
+    ) -> Result<(Expr, Repr), LowerError> {
+        use adamas_core::prim::RegionOp;
+        let wanted = match op {
+            RegionOp::New => 0,
+            RegionOp::Last => 1,
+            RegionOp::Alloc | RegionOp::Read => 4,
+            RegionOp::Write => 5,
+        };
+        if arguments.len() != wanted {
+            return Err(LowerError::PartialRegion {
+                name: op.name().to_owned(),
+            });
+        }
+        let word = Repr::Flat(PrimTy::UInt64);
+        if op == RegionOp::New {
+            return Ok((Expr::RegionNew, Repr::Region));
+        }
+        if op == RegionOp::Last {
+            let region = self.given(scope, &arguments[0], Repr::Region, "регион")?;
+            return Ok((
+                Expr::RegionLast {
+                    region: Box::new(region),
+                },
+                word,
+            ));
+        }
+        // Тип нагрузки - первый стёртый аргумент; второй стёртый есть словарь
+        // `Flat`, и понижение его не читает: шаг оно берёт у типа, а словарь
+        // из телескопа находит [`Self::stride_of`] сам.
+        let Arg::Written(payload) = arguments[0] else {
+            return Err(LowerError::PartialRegion {
+                name: op.name().to_owned(),
+            });
+        };
+        let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
+        let payload = normalized(payload, depth);
+        let dicts = scope.dicts.clone();
+        let Some(stride) = self.stride_of(&payload, depth, &dicts) else {
+            let repr = self.repr_of(&payload, depth, &dicts)?;
+            return Err(LowerError::RegionPayload {
+                written: describe(repr),
+            });
+        };
+        let carried = stride.element();
+        let region = self.given(scope, &arguments[2], Repr::Region, "регион")?;
+        match op {
+            RegionOp::Alloc => {
+                let value = self.given(scope, &arguments[3], carried, "нагрузка региона")?;
+                Ok((
+                    Expr::RegionAlloc {
+                        stride,
+                        region: Box::new(region),
+                        value: Box::new(value),
+                    },
+                    Repr::Region,
+                ))
+            }
+            RegionOp::Read => {
+                let at = self.given(scope, &arguments[3], word, "хендл региона")?;
+                Ok((
+                    Expr::RegionRead {
+                        stride,
+                        region: Box::new(region),
+                        at: Box::new(at),
+                    },
+                    carried,
+                ))
+            }
+            RegionOp::Write => {
+                let at = self.given(scope, &arguments[3], word, "хендл региона")?;
+                let value = self.given(scope, &arguments[4], carried, "нагрузка региона")?;
+                Ok((
+                    Expr::RegionWrite {
+                        stride,
+                        region: Box::new(region),
+                        at: Box::new(at),
+                        value: Box::new(value),
+                    },
+                    Repr::Region,
+                ))
+            }
+            RegionOp::New | RegionOp::Last => unreachable!("разобраны выше"),
         }
     }
 
@@ -1910,6 +2048,10 @@ impl Lowerer<'_> {
         let current = unaliased(self.signature, ty).clone();
         if let Term::Prim(Prim::Ty(prim)) = current {
             return Ok(Repr::Flat(prim));
+        }
+        // Блок региона (§3.6) - объект кучи со своим дропом, как массив.
+        if let Term::Prim(Prim::Block) = current {
+            return Ok(Repr::Region);
         }
         // Спайн: массив применён к длине и типу элемента, класс `Flat` - к типу.
         let (head, arguments) = spine(&current);

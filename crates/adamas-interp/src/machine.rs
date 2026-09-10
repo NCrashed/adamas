@@ -18,7 +18,7 @@ use std::rc::Rc;
 use adamas_core::eval;
 use adamas_core::level::Level;
 use adamas_core::mult::Mult;
-use adamas_core::prim::ArrayOp;
+use adamas_core::prim::{ArrayOp, RegionOp};
 use adamas_core::row::Row;
 use adamas_core::sig::{DefinitionKind, Signature};
 use adamas_core::term::{Case, Mults, Name, Term};
@@ -336,6 +336,14 @@ impl<'a> Machine<'a> {
             // Правила счёта второго здесь не заводится: считает всё та же
             // `eval::apply`, ей лишь дают головную форму.
             Value::Neutral(Head::ArrayOp(op), spine) if array_position(*op, spine) => {
+                let argument = self.forced(argument)?;
+                Ok(Step::Return(eval::apply(callee, argument)))
+            }
+            // Блок региона (§3.6) - тем же правилом и по той же причине:
+            // цепочку `regionNew`/`regionAlloc`/`regionWrite` сводят
+            // `regionLast` и `regionRead`, а имя с телом до них не
+            // разворачивается.
+            Value::Neutral(Head::Region(op), spine) if region_position(*op, spine) => {
                 let argument = self.forced(argument)?;
                 Ok(Step::Return(eval::apply(callee, argument)))
             }
@@ -698,6 +706,22 @@ fn array_position(op: ArrayOp, spine: &[Elim]) -> bool {
         .filter(|elim| matches!(elim, Elim::App(_)))
         .count();
     matches!(op, ArrayOp::Set | ArrayOp::Index) && taken == 2
+}
+
+/// Ждёт ли операция региона (§3.6) сам блок следующим аргументом.
+///
+/// У несущих нагрузку он третий - после стёртых типа и словаря `Flat`, - у
+/// `regionLast` первый; `regionNew` блока не принимает вовсе.
+fn region_position(op: RegionOp, spine: &[Elim]) -> bool {
+    let taken = spine
+        .iter()
+        .filter(|elim| matches!(elim, Elim::App(_)))
+        .count();
+    match op {
+        RegionOp::New => false,
+        RegionOp::Last => taken == 0,
+        RegionOp::Alloc | RegionOp::Read | RegionOp::Write => taken == 2,
+    }
 }
 
 /// Кратность `n`-го связывания типа. `None` - связываний столько нет.

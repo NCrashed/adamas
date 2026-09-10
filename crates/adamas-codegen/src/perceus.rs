@@ -74,6 +74,7 @@ use crate::ir::{Arm, Binding, Constructor, CtorId, Expr, Fact, Function, LocalId
 pub fn insert(program: Program) -> Program {
     let Program {
         constructors,
+        packings,
         functions,
         entry,
     } = program;
@@ -83,6 +84,7 @@ pub fn insert(program: Program) -> Program {
         .collect();
     Program {
         constructors,
+        packings,
         functions,
         entry,
     }
@@ -144,8 +146,14 @@ fn inner(expr: &Expr, out: &mut BTreeSet<LocalId>) {
         | Expr::Erased
         | Expr::ConstructClosure { .. }
         | Expr::Literal { .. }
+        | Expr::LayoutField { .. }
         | Expr::Layout { .. } => {}
-        Expr::Construct { arguments, .. } | Expr::Call { arguments, .. } => {
+        Expr::Unpack { value, .. } => inner(value, out),
+        Expr::Construct { arguments, .. }
+        | Expr::Call { arguments, .. }
+        | Expr::Pack {
+            fields: arguments, ..
+        } => {
             for argument in arguments {
                 inner(argument, out);
             }
@@ -229,8 +237,14 @@ fn bound(expr: &Expr, note: &mut impl FnMut(LocalId)) {
         | Expr::Erased
         | Expr::ConstructClosure { .. }
         | Expr::Literal { .. }
+        | Expr::LayoutField { .. }
         | Expr::Layout { .. } => {}
-        Expr::Construct { arguments, .. } | Expr::Call { arguments, .. } => {
+        Expr::Unpack { value, .. } => bound(value, note),
+        Expr::Construct { arguments, .. }
+        | Expr::Call { arguments, .. }
+        | Expr::Pack {
+            fields: arguments, ..
+        } => {
             for argument in arguments {
                 bound(argument, note);
             }
@@ -304,11 +318,22 @@ fn named(expr: &Expr, out: &mut BTreeSet<LocalId>) {
         Expr::Local(local) => {
             out.insert(*local);
         }
+        // Дескриптор укладки в `owned` не входит - счётчика у него нет
+        // ([`Repr::Layout`]), - но упомянут он именно здесь, и обходу дешевле
+        // это знать, чем полагаться на то, что дроп по нему не встанет.
+        Expr::LayoutField { descriptor, .. } => {
+            out.insert(*descriptor);
+        }
         Expr::Erased
         | Expr::ConstructClosure { .. }
         | Expr::Literal { .. }
         | Expr::Layout { .. } => {}
-        Expr::Construct { arguments, .. } | Expr::Call { arguments, .. } => {
+        Expr::Unpack { value, .. } => named(value, out),
+        Expr::Construct { arguments, .. }
+        | Expr::Call { arguments, .. }
+        | Expr::Pack {
+            fields: arguments, ..
+        } => {
             for argument in arguments {
                 named(argument, out);
             }
@@ -424,10 +449,12 @@ impl Pass<'_> {
             Expr::Erased
             | Expr::ConstructClosure { .. }
             | Expr::Literal { .. }
+            | Expr::LayoutField { .. }
             | Expr::Layout { .. } => drops(owned.iter().copied().collect::<Vec<_>>(), expr),
             Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. } => {
                 self.array(expr, owned)
             }
+            Expr::Pack { .. } | Expr::Unpack { .. } => self.aggregate(expr, owned),
             Expr::Primitive {
                 op,
                 ty,
@@ -507,6 +534,36 @@ impl Pass<'_> {
     /// **значим**: массив стоит первым, а читающее из него значение - последним,
     /// поэтому к записи массив приходит со счётчиком, который чтение уже
     /// вернуло, и запись идёт по месту.
+    /// Сборка и разбор плоского агрегата (§4.11).
+    ///
+    /// Счётчика у агрегата нет вовсе, поэтому считать надо только то, что в нём
+    /// собрано либо из чего он прочитан.
+    fn aggregate(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
+        match expr {
+            Expr::Pack { packing, fields } => {
+                let (fields, spare) = self.sequence(fields, owned);
+                drops(spare, Expr::Pack { packing, fields })
+            }
+            Expr::Unpack {
+                packing,
+                field,
+                value,
+            } => {
+                let (mut parts, spare) = self.sequence(vec![*value], owned);
+                let value = parts.pop().unwrap_or(Expr::Erased);
+                drops(
+                    spare,
+                    Expr::Unpack {
+                        packing,
+                        field,
+                        value: Box::new(value),
+                    },
+                )
+            }
+            other => other,
+        }
+    }
+
     fn array(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
         /// Какая из трёх операций разобрана: узел собирается обратно тем же.
         enum Shape {
@@ -805,10 +862,15 @@ impl Pass<'_> {
                 array, at, value, ..
             } => self.plans(array, slots) || self.plans(at, slots) || self.plans(value, slots),
             Expr::ArrayIndex { array, at, .. } => self.plans(array, slots) || self.plans(at, slots),
+            // Плоский агрегат ячейки кучи не занимает вовсе (§4.11), и
+            // придержать её ему нечем.
             Expr::Local(_)
             | Expr::Erased
             | Expr::ConstructClosure { .. }
             | Expr::Literal { .. }
+            | Expr::LayoutField { .. }
+            | Expr::Pack { .. }
+            | Expr::Unpack { .. }
             | Expr::Layout { .. } => false,
         }
     }
@@ -869,10 +931,15 @@ impl Pass<'_> {
             Expr::ArrayIndex { array, at, .. } => {
                 self.attach(array, slots, token) || self.attach(at, slots, token)
             }
+            // Плоский агрегат ячейки кучи не занимает вовсе (§4.11), и
+            // придержать её ему нечем.
             Expr::Local(_)
             | Expr::Erased
             | Expr::ConstructClosure { .. }
             | Expr::Literal { .. }
+            | Expr::LayoutField { .. }
+            | Expr::Pack { .. }
+            | Expr::Unpack { .. }
             | Expr::Layout { .. } => false,
         }
     }

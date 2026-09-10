@@ -31,23 +31,36 @@ use std::path::PathBuf;
 /// Программы корпуса, которые срез берёт.
 ///
 /// Чистый фрагмент: семейства и конструкторы, функции и применение, разбор,
-/// рекурсия, `let`, массивы (§4.11). Всё, что здесь стоит, обязано собраться и
-/// ответить как `adamas eval`; список сокращать нельзя, а пополнять - можно и
-/// нужно, когда фрагмент растёт.
-const TAKEN: [&str; 15] = [
+/// рекурсия, `let`, массивы (§4.11), записи (§4.2). Всё, что здесь стоит,
+/// обязано собраться и ответить как `adamas eval`; список сокращать нельзя, а
+/// пополнять - можно и нужно, когда фрагмент растёт.
+const TAKEN: [&str; 28] = [
     "arithmetic",
+    "array-aggregate",
     "array-flat",
     "array-generic",
     "beta-redex",
     "case-family",
+    "case-over-a-computation",
+    "class-multiplicity",
+    "classes",
     "decidable",
     "erasure",
     "existential",
+    "flat",
     "flat-fields",
+    "flat-primitives",
+    "functor",
     "lists",
+    "literal-default",
+    "module-family",
     "module-scope",
     "mutual-family",
+    "nested-case-on-a-field",
+    "nested-functor",
     "operators",
+    "primitives",
+    "records",
     "rose",
     "truncation",
 ];

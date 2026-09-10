@@ -48,18 +48,42 @@
 
 static void adamas_print_at(adamas_value value, int nested, long depth);
 
-/* Один слот: число печатается по своему сорту, ссылка - обходом. */
-static void adamas_print_slot(uint16_t tag, adamas_value value, size_t index, long depth) {
+/* Один слот: число печатается по своему сорту, ссылка - обходом.
+ *
+ * `nested` идёт насквозь, потому что позиция слота у конструктора и у записи
+ * разная: аргумент конструктора берётся в скобки, значение поля - нет
+ * (`Pos::Atom` против `Pos::Free`, `adamas-core/src/term.rs`). Видно это на
+ * отрицательном числе и на составном значении: `C (-1)` против `{x = -1}`. */
+static void adamas_print_slot(uint16_t tag, adamas_value value, size_t index, long depth,
+                              int nested) {
     uint8_t kind = adamas_slot_kind[adamas_con_slot0[tag] + index];
     if (kind == ADAMAS_FLAT_BOXED) {
-        adamas_print_at(adamas_field(value, index), 1, depth);
+        adamas_print_at(adamas_field(value, index), nested, depth);
         return;
     }
     if (depth > ADAMAS_PRINT_DEPTH) {
         printf("…");
         return;
     }
-    adamas_print_flat(kind, adamas_slot_bits(value, index), 1);
+    adamas_print_flat(kind, adamas_slot_bits(value, index), nested);
+}
+
+/* Запись `{x = a, y = b}` (§4.2).
+ *
+ * Не спайн: у записи нет головы, поля стоят рядом, и глубина у всех одна -
+ * `depth + 1`. Печать терма считает её так же (`Term::Object` кладёт поля на
+ * `inner`), и совпадение это обязательно: сверяются две печати строкой. */
+static void adamas_print_record(uint16_t tag, adamas_value value, uint16_t slots, long depth) {
+    size_t index;
+    printf("{");
+    for (index = 0; index < (size_t)slots; index += 1) {
+        if (index > 0) {
+            printf(", ");
+        }
+        printf("%s = ", adamas_slot_label[adamas_con_slot0[tag] + index]);
+        adamas_print_slot(tag, value, index, depth + 1, 0);
+    }
+    printf("}");
 }
 
 /* Спайн `C a_0 … a_{k-1}`, стоящий на глубине depth. Рекурсия по арности - она
@@ -75,7 +99,7 @@ static void adamas_print_spine(uint16_t tag, adamas_value value, uint16_t k, lon
     }
     adamas_print_spine(tag, value, (uint16_t)(k - 1), depth + 1);
     printf(" ");
-    adamas_print_slot(tag, value, (size_t)(k - 1), depth + 1);
+    adamas_print_slot(tag, value, (size_t)(k - 1), depth + 1, 1);
 }
 
 static void adamas_print_at(adamas_value value, int nested, long depth) {
@@ -102,6 +126,26 @@ static void adamas_print_at(adamas_value value, int nested, long depth) {
         return;
     }
     slots = adamas_con_slots[tag];
+    if (adamas_con_labels[tag] > 0) {
+        /* Запись: скобки те же, что у составного терма, а форма своя. Пустая
+         * записи сюда не попадает - написанных полей у неё ноль, - и печатает
+         * её общая ветвь именем `{}`, тем же, что печатает `adamas eval`. */
+        if (adamas_con_labels[tag] != slots) {
+            /* Слот достался не всякому написанному полю: типовой член живёт
+             * только в типах (§4.8), значения у него нет. Напечатать такую
+             * запись значило бы разойтись с `adamas eval`, который печатает
+             * все поля, - поэтому обрыв, а не молча укороченный ответ. */
+            adamas_fail("печать записи со стёртым полем не сделана (§4.2)");
+        }
+        if (nested) {
+            printf("(");
+        }
+        adamas_print_record(tag, value, slots, depth);
+        if (nested) {
+            printf(")");
+        }
+        return;
+    }
     if (slots == 0) {
         /* Нульарный конструктор - непосредственное значение, полей у него нет
          * и читать по указателю нечего. Терм здесь атомарный `Const`, и скобок

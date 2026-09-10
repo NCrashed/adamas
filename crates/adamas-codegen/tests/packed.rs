@@ -1,0 +1,366 @@
+//! Плоский агрегат и колонка `Array n Vec3` (§4.11, §10 вопрос 154).
+//!
+//! Половина вторая трека: запись из плоских полей укладывается **плотно**, а не
+//! слотами объекта кучи, и массив из неё - один блок на всю длину. Первая
+//! половина - `records.rs`, и без неё эта не читалась бы: там запись понижается
+//! обычным объектом, здесь - становится байтами.
+//!
+//! # Чем это проверяется
+//!
+//! Тремя вещами, и все три - числа.
+//!
+//! *Ответ* сверяется с `adamas eval` и зависит **и от поля, и от номера
+//! ячейки**: массив одинаковых `Vec3` не различал бы ячеек, чтение одного поля
+//! - смещений.
+//!
+//! *Число блоков*: колонка из трёх `Vec3` стоит **один** блок, тот же код над
+//! не-плоским элементом - четыре.
+//!
+//! *Байты* видны в порождённом тексте и проверены `_Static_assert`'ом в нём же:
+//! `Vec3` - 12 байт при границе 4, шаг индексации 12, смещения 0/4/8. Числа
+//! эти - вторая запись правила §4.11 (первая - `adamas-elab/src/flat.rs`), и
+//! [`the_layout_matches_the_type_side`] требует, чтобы записи сошлись.
+
+mod harness;
+
+use std::path::Path;
+
+/// Колонка `Vec3`: та же программа, что в корпусе, но здесь считаются блоки.
+fn column() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/golden/eval/array-aggregate.adamas");
+    std::fs::read_to_string(path).unwrap_or_else(|error| panic!("корпус: {error}"))
+}
+
+/// Тот же код над **не-плоским** элементом.
+///
+/// `Cell` несёт `Nat`, то есть указатель, и §4.11 велит компилировать такой
+/// массив в `n` указателей на объекты Perceus. Разница с колонкой - ровно
+/// числом блоков, и ради неё программы держатся одинаковыми во всём прочем.
+const POINTING: &str = "\
+-- Конструкторы нульарные нарочно: они непосредственны и ячеек не занимают,
+-- поэтому в счёте блоков остаётся ровно то, ради чего он ведётся, - массив и
+-- объект на элемент.
+data Colour where
+  Red : Colour
+  Green : Colour
+  Blue : Colour
+
+type Cell = { it : Colour }
+
+first : Cell
+first = { it = Red }
+
+second : Cell
+second = { it = Green }
+
+third : Cell
+third = { it = Blue }
+
+built : Array 3 Cell
+built = arraySet (arraySet (arrayNew 3 first) 1 second) 2 third
+
+read : Array 3 Cell -> Colour
+read xs = (arrayIndex xs 2).it
+
+main : Colour
+main = read built
+";
+
+/// Плоский агрегат в поле конструктора: упаковка на границе указателя.
+///
+/// `Cons` берёт поле указателем, и агрегат туда не ложится байтами: §4.11
+/// требует плотной укладки от **массива**, а список говорит слотами. Значение
+/// печатается, и печать эта совпадает с `adamas eval` - то есть упаковка
+/// сохранила и поля, и их порядок.
+const BOXING: &str = "\
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+type Pair = { lo : Int32, hi : Int32 }
+
+low : Pair
+low = { lo = 1, hi = 2 }
+
+high : Pair
+high = { lo = 30, hi = 40 }
+
+main : List Pair
+main = Cons low (Cons high Nil)
+";
+
+/// Два пути к одному шагу: дескриптор из контекста и константа из укладки.
+///
+/// Свидетель нужен ровно **размеру** агрегата. Ошибка в нём сокращается, когда
+/// пишет и читает один и тот же путь: положи `Vec3` в 24 байта вместо
+/// двенадцати - и статический путь останется согласован сам с собой. Здесь
+/// путей два в одной программе: `built` укладывает ячейки константой понижения,
+/// а `rotate` индексирует полем дескриптора, который посчитала **типовая
+/// сторона**. Разойдись два числа - `rotate` возьмёт байты не с той ячейки.
+const TWO_WAYS: &str = "\
+type Layout = { size : UInt32, align : UInt32 }
+
+class Flat a where
+  layout : Layout
+
+type V3 (a : Type) = { x : a, y : a, z : a }
+type Vec3 = V3 Float32
+
+-- Ячейка 0 занимает то, что лежало в ячейке 1; ячейка 1 не трогается.
+rotate : {Flat a} => Array 3 a -> Array 3 a
+rotate xs = arraySet xs 0 (arrayIndex xs 1)
+
+first : Vec3
+first = { x = 1.0, y = 2.0, z = 3.0 }
+
+second : Vec3
+second = { x = 10.0, y = 20.0, z = 30.0 }
+
+third : Vec3
+third = { x = 100.0, y = 200.0, z = 300.0 }
+
+built : Array 3 Vec3
+built = arraySet (arraySet (arrayNew 3 first) 1 second) 2 third
+
+-- 30.0: поле `z` ячейки, приехавшей из первой.
+main : Float32
+main = (arrayIndex (rotate built) 0).z
+";
+
+/// Агрегат с **дырой**: поля разной ширины, размер округляется до границы.
+///
+/// `Vec3` для двух правил §4.11 слеп: три равных поля не показывают ни
+/// округления размера («выравнивание по максимальному `align` полей»), ни
+/// порядка полей в укладке - перестановка трёх `Float32` ненаблюдаема. Здесь
+/// поля разной ширины: `Int64` плюс `Int8` - это 9 байт, округлённых до 16, и
+/// перестановка обрезала бы широкое поле до байта.
+const PADDED: &str = "\
+type Layout = { size : UInt32, align : UInt32 }
+
+class Flat a where
+  layout : Layout
+
+type Padded = { wide : Int64, tag : Int8 }
+
+rotate : {Flat a} => Array 3 a -> Array 3 a
+rotate xs = arraySet xs 0 (arrayIndex xs 1)
+
+first : Padded
+first = { wide = 1, tag = 1 }
+
+second : Padded
+second = { wide = 700, tag = 7 }
+
+third : Padded
+third = { wide = 900, tag = 9 }
+
+built : Array 3 Padded
+built = arraySet (arraySet (arrayNew 3 first) 1 second) 2 third
+
+-- 700: широкое поле ячейки, приехавшей из первой. В байт оно не влезает, и
+-- перестановка полей укладки обрезала бы его до 188.
+main : Int64
+main = (arrayIndex (rotate built) 0).wide
+";
+
+/// Округление размера и порядок полей видны на агрегате с дырой.
+#[test]
+fn a_padded_aggregate_rounds_up_and_keeps_its_order() {
+    assert_eq!(
+        harness::printed(PADDED),
+        "700",
+        "печать машины изменилась - свидетель говорит не о том"
+    );
+    harness::agreed("packed-padded-after", PADDED).unwrap_or_else(|error| {
+        panic!("после специализации: {error}");
+    });
+    // Обобщённый путь берёт шаг у дескриптора типовой стороны - шестнадцать, -
+    // а `built` укладывает ячейки размером понижения. Не округли понижение
+    // девять до шестнадцати, и `rotate` возьмёт байты не с той ячейки.
+    harness::as_written("packed-padded-before", PADDED).unwrap_or_else(|error| {
+        panic!("до специализации: {error}");
+    });
+    let text = harness::text(PADDED).unwrap_or_else(|error| panic!("агрегат с дырой: {error}"));
+    for written in [
+        "_Alignas(8) unsigned char bytes[16];",
+        // Широкое поле стоит первым и читается восемью байтами, узкое - за ним,
+        // по восьмому байту. Сборка пишет `&значение`, чтение - ширину, отсюда
+        // две разные формы строки.
+        ".bytes + 0, 8u",
+        ".bytes + 8, &",
+    ] {
+        assert!(
+            text.contains(written),
+            "в порождённом C нет `{written}`: укладка §4.11 разошлась"
+        );
+    }
+}
+
+/// Запись из одних примитивов: ячейки кучи не стоит вовсе.
+const REGISTERS: &str = "\
+type Triple = { first : Int64, second : Int64, third : Int64 }
+
+main : Int64
+main =
+  let made : Triple = { first = 1, second = 20, third = 300 }
+  subInt64 (subInt64 made.third made.second) made.first
+";
+
+/// Запись из примитивов живёт в регистрах: ноль блоков (§4.11).
+///
+/// Вычитание, а не сложение: перестановка полей на сложении ненаблюдаема, а
+/// здесь `300 - 20 - 1 = 279` против `1 - 1 - 1` у проекции, всегда берущей
+/// нулевое смещение.
+#[test]
+fn a_record_of_primitives_costs_no_block() {
+    assert_eq!(
+        harness::printed(REGISTERS),
+        "279",
+        "свидетель перестал различать смещения"
+    );
+    let stderr = harness::agreed("packed-registers", REGISTERS).unwrap_or_else(|error| {
+        panic!("запись из примитивов: {error}");
+    });
+    let (allocated, live) = harness::blocks("packed-registers", &stderr);
+    assert_eq!(allocated, 0, "плотная запись выдала блок кучи");
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
+}
+
+/// Колонка считается плоской, и ответ её сходится с интерпретатором.
+#[test]
+fn a_column_of_aggregates_is_one_block() {
+    let source = column();
+    assert_eq!(
+        harness::printed(&source),
+        "123.0",
+        "свидетель перестал различать поле и ячейку"
+    );
+    let stderr = harness::agreed("packed-column", &source).unwrap_or_else(|error| {
+        panic!("колонка: {error}");
+    });
+    let (allocated, live) = harness::blocks("packed-column", &stderr);
+    // Один блок на всю колонку: три `Vec3` лежат в нём подряд, заголовков у них
+    // нет. Сами `Vec3` ячеек не стоят вовсе - они плотные значения на кадре.
+    assert_eq!(allocated, 1, "колонка стоила не одного блока");
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
+}
+
+/// Тот же код над указательным элементом стоит `n` объектов сверх массива.
+#[test]
+fn a_column_of_pointers_still_costs_an_object_per_cell() {
+    let stderr = harness::agreed("packed-pointing", POINTING).unwrap_or_else(|error| {
+        panic!("указательный массив: {error}");
+    });
+    let (allocated, live) = harness::blocks("packed-pointing", &stderr);
+    // Массив плюс объект на ячейку - четыре против одного у колонки. Это и
+    // есть та цена, которую §4.11 обещает снять плоской укладкой.
+    assert_eq!(
+        allocated, 4,
+        "указательный массив обошёлся не четырьмя блоками - он перестал быть указательным"
+    );
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
+}
+
+/// Упаковка на границе указателя сохраняет поля и порядок.
+#[test]
+fn an_aggregate_crossing_a_pointer_is_boxed() {
+    assert_eq!(
+        harness::printed(BOXING),
+        "Cons ({lo = 1, hi = 2}) (Cons ({lo = 30, hi = 40}) Nil)",
+        "печать машины изменилась - свидетель говорит не о том"
+    );
+    harness::agreed("packed-boxing", BOXING).unwrap_or_else(|error| {
+        panic!("упаковка: {error}");
+    });
+}
+
+/// Байты §4.11 видны числом: размер, граница, шаг, смещения.
+///
+/// Текстом, а не ответом, и это названо ценой: ошибка укладки **сокращается**,
+/// когда запись и чтение идут одним и тем же выражением, - на этом срезе такой
+/// мутант уже был (`docs/phase6-plan.md`, пункт 3б). Число, стоящее в тексте
+/// один раз, так не сокращается.
+#[test]
+fn the_layout_of_a_vector_is_twelve_bytes_at_four() {
+    let text = harness::text(&column()).unwrap_or_else(|error| panic!("колонка: {error}"));
+    for written in [
+        // Тип агрегата: двенадцать байт по границе четыре.
+        "_Alignas(4) unsigned char bytes[12];",
+        // И то же самое утверждает сам порождённый код - компилятору C.
+        "_Static_assert(sizeof(adamas_pack_0) == 12u,",
+        "_Static_assert(_Alignof(adamas_pack_0) == 4u,",
+        // Шаг индексации: три ячейки по двенадцать байт - тридцать шесть.
+        "adamas_array_alloc((size_t)t0, 12u)",
+        // Смещения полей: подряд, без дыр.
+        "bytes + 0, 4u",
+        "bytes + 4, 4u",
+        "bytes + 8, 4u",
+    ] {
+        assert!(
+            text.contains(written),
+            "в порождённом C нет `{written}`: укладка §4.11 разошлась"
+        );
+    }
+}
+
+/// Размер агрегата один у обоих путей - иначе `rotate` возьмёт не ту ячейку.
+#[test]
+fn both_paths_agree_on_the_size_of_the_aggregate() {
+    assert_eq!(
+        harness::printed(TWO_WAYS),
+        "30.0",
+        "печать машины изменилась - свидетель говорит не о том"
+    );
+    // Специализированный путь: шаг - константа понижения на всём протяжении.
+    harness::agreed("packed-two-ways-after", TWO_WAYS).unwrap_or_else(|error| {
+        panic!("после специализации: {error}");
+    });
+    // Обобщённый: `rotate` берёт шаг у дескриптора, посчитанного элаборацией, а
+    // `built` укладывает ячейки константой. Разойдись эти два числа - здесь и
+    // видно, и видно **ответом**, а не текстом.
+    harness::as_written("packed-two-ways-before", TWO_WAYS).unwrap_or_else(|error| {
+        panic!("до специализации: {error}");
+    });
+}
+
+/// Две записи одного числа сошлись: понижение и типовая сторона.
+///
+/// `adamas-codegen` элаборацию не читает - шов, - поэтому правило §4.11
+/// посчитано дважды. Совпадение поэтому проверяется, а не предполагается:
+/// разойдись они, `layout @Vec3` говорил бы одно, а колонка укладывалась бы
+/// иначе, и обе половины остались бы зелёными порознь.
+#[test]
+fn the_layout_matches_the_type_side() {
+    let source = format!(
+        "{}\n{}",
+        "\
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+type Layout = { size : UInt32, align : UInt32 }
+
+class Flat a where
+  layout : Layout
+
+type V3 (a : Type) = { x : a, y : a, z : a }
+type Vec3 = V3 Float32
+
+type Handle = { index : UInt32, generation : UInt32 }
+
+type Padded = { wide : Int64, tag : Int8 }",
+        "\
+main : List Layout
+main = Cons (layout @Vec3) (Cons (layout @Handle) (Cons (layout @Padded) Nil))"
+    );
+    assert_eq!(
+        harness::printed(&source),
+        "Cons ({size = 12, align = 4}) (Cons ({size = 8, align = 4}) \
+         (Cons ({size = 16, align = 8}) Nil))",
+        "типовая сторона считает укладку иначе"
+    );
+    harness::agreed("packed-layout", &source).unwrap_or_else(|error| {
+        panic!("укладка: {error}");
+    });
+}

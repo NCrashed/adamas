@@ -3519,6 +3519,53 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Имя: связывание, `Type` или ссылка на объявленное.
+    /// Член объявляемой группы либо сосед по модулю. `None` - ни тот, ни другой.
+    ///
+    /// У члена группы аргументы уровня - дырки, числом в арность, посчитанную
+    /// вызывающим: тип его сигнатура ещё не знает (§10 вопрос 50), поэтому
+    /// имплиситы вставляются по типу, принесённому в группе. Сосед по модулю
+    /// заслоняет глобальное имя: члены подняты на верхний уровень, но написаны
+    /// они внутри, и видеть автор обязан своего.
+    fn neighbouring(&mut self, name: &ast::Name) -> Result<Option<Term>, ElabError> {
+        if let Some(member) = self.member_of_group(&name.text) {
+            let term = Term::Const(
+                CoreName::from(&*member.name),
+                Rc::clone(&member.levels),
+                member.args.clone(),
+            );
+            let ty = eval(&Env::default(), &member.ty);
+            let (term, ty) = self.specialized(term, ty);
+            if self.bare {
+                return Ok(Some(term));
+            }
+            return Ok(Some(self.implicits(term, ty)));
+        }
+        let Some(full) = self.qualified(&name.text) else {
+            return Ok(None);
+        };
+        // Запечатанное представление не называется и в выражении: построить
+        // значение абстрактного типа его конструктором - тот же обход, что и
+        // разобрать им.
+        if let Some(data) = self.sealed_constructor(&full) {
+            return Err(ElabError::SealedConstructor {
+                name: Rc::clone(&name.text),
+                data,
+                span: name.span,
+            });
+        }
+        let Some(term) = self.signature.instantiate(&full, self.metas) else {
+            return Ok(None);
+        };
+        let Ok((ty, _)) = infer(&self.ctx.speculating(), self.metas, Mult::Zero, &term) else {
+            return Ok(Some(term));
+        };
+        let (term, ty) = self.specialized(term, ty);
+        if self.bare {
+            return Ok(Some(term));
+        }
+        Ok(Some(self.implicits(term, ty)))
+    }
+
     fn name(&mut self, name: &ast::Name) -> Result<Term, ElabError> {
         if let Some(index) = self.local(&name.text) {
             return Ok(Term::var(index));
@@ -3533,6 +3580,16 @@ impl<'a> Elaborator<'a> {
         // нет, поэтому и дырки заводить не под что (§3.4).
         if &*name.text == "Effect" {
             return Ok(Term::EffectKind);
+        }
+        // Член объявляемой группы и сосед по модулю - **раньше** имён, занятых
+        // языком (§10 вопрос 160): член вправе заслонить `Block` тем же
+        // правилом, каким локальное связывание заслоняет `Int64`. Видит
+        // заслонение только написанное внутри модуля - снаружи член достижим
+        // квалификацией, - поэтому якорь представления не задет. Для прочих
+        // имён перестановка ничего не меняет: занятое имя членом было не
+        // объявить.
+        if let Some(term) = self.neighbouring(name)? {
+            return Ok(term);
         }
         // Примитивы (§4.11) - тем же правилом, что `Type` и `Effect`: имя занято
         // языком, локальное связывание его заслоняет, объявление - нет.
@@ -3578,49 +3635,16 @@ impl<'a> Elaborator<'a> {
             let ty = adamas_core::check::prim_type(self.signature, Prim::In(op));
             return Ok(self.implicits(term, ty));
         }
-        // Член объявляемой группы: аргументы уровня - дырки, числом в арность,
-        // посчитанную вызывающим. Тип его сигнатура ещё не знает (§10 вопрос
-        // 50), поэтому имплиситы вставляются по типу, принесённому в группе.
-        if let Some(member) = self.member_of_group(&name.text) {
-            let term = Term::Const(
-                CoreName::from(&*member.name),
-                Rc::clone(&member.levels),
-                member.args.clone(),
-            );
-            let ty = eval(&Env::default(), &member.ty);
-            let (term, ty) = self.specialized(term, ty);
-            if self.bare {
-                return Ok(term);
-            }
-            return Ok(self.implicits(term, ty));
-        }
-        // Сосед по модулю заслоняет глобальное имя: члены подняты на верхний
-        // уровень, но написаны они внутри, и видеть автор обязан своего.
-        let qualified = self.qualified(&name.text);
         // Запечатанное представление не называется и в выражении: построить
         // значение абстрактного типа его конструктором - тот же обход, что и
-        // разобрать им. Стоит проверка здесь, а не выше, чтобы квалификация
-        // считалась один раз на имя: `Type` и сосед по группе до неё не доходят.
-        let candidate = qualified.as_ref().unwrap_or(&name.text);
-        if let Some(data) = self.sealed_constructor(candidate) {
+        // разобрать им. Квалифицированный кандидат проверен в
+        // [`Self::neighbouring`]; здесь остаётся голое имя.
+        if let Some(data) = self.sealed_constructor(&name.text) {
             return Err(ElabError::SealedConstructor {
                 name: Rc::clone(&name.text),
                 data,
                 span: name.span,
             });
-        }
-        if let Some(full) = qualified {
-            if let Some(term) = self.signature.instantiate(&full, self.metas) {
-                let Ok((ty, _)) = infer(&self.ctx.speculating(), self.metas, Mult::Zero, &term)
-                else {
-                    return Ok(term);
-                };
-                let (term, ty) = self.specialized(term, ty);
-                if self.bare {
-                    return Ok(term);
-                }
-                return Ok(self.implicits(term, ty));
-            }
         }
         // Аргументы уровня подставляются дырками - это implicit UP со стороны
         // места использования (§3.2), - и одному имени они выдаются один раз

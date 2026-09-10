@@ -513,7 +513,7 @@ fn members_into(
     let mut postulated: HashMap<Symbol, Span> = HashMap::new();
     let mut pending: Option<Pending<'_>> = None;
     for decl in decls {
-        reserved(decl)?;
+        reserved(decl, within.is_some())?;
         match &decl.kind {
             DeclKind::Signature {
                 name,
@@ -2852,14 +2852,23 @@ fn declare_module_value(
 
 /// Отвергает объявление, чьё имя занято примитивом (§4.11).
 ///
-/// Заслонить примитив объявление не может: имя разрешается тем же правилом, что
-/// `Type` и `Effect`. Без этого отказа `data Int64` доезжало до ядра, и то
-/// сообщало «конструктор обязан возвращать `Int64`, а возвращает `Int64`» -
-/// имя одно, типа два.
+/// Заслонить примитив **верхнеуровневое** объявление не может: имя разрешается
+/// тем же правилом, что `Type` и `Effect`. Без этого отказа `data Int64`
+/// доезжало до ядра, и то сообщало «конструктор обязан возвращать `Int64`, а
+/// возвращает `Int64`» - имя одно, типа два.
+///
+/// **Член модуля - вправе** (§10 вопрос 160, `sheltered`): его полное имя
+/// квалифицировано и с языком не сталкивается, а голое имя внутри модуля
+/// заслоняет язык тем же правилом, каким локальное связывание заслоняет
+/// `Int64`. Без этого `type Block` не писался абстрактным членом
+/// `AllocStrategy` (§3.6).
 ///
 /// Конструкторы и операции проверяются наравне с головой: имя `addInt64`
 /// заслонялось бы так же молча.
-fn reserved(decl: &ast::Decl) -> Result<(), ElabError> {
+fn reserved(decl: &ast::Decl, sheltered: bool) -> Result<(), ElabError> {
+    if sheltered {
+        return Ok(());
+    }
     let refuse = |name: &Symbol, span: Span| {
         let what = if PrimTy::named(name).is_some() {
             "это примитивный тип"
@@ -2881,7 +2890,7 @@ fn reserved(decl: &ast::Decl) -> Result<(), ElabError> {
     let taken = |name: &Symbol| prim::Prim::taken(name);
     if let DeclKind::Mutual(members) = &decl.kind {
         for member in members {
-            reserved(member)?;
+            reserved(member, sheltered)?;
         }
         return Ok(());
     }

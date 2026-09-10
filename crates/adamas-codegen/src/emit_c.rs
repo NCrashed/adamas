@@ -54,8 +54,8 @@ use std::fmt::Write as _;
 use adamas_core::prim::{PrimOp, PrimTy};
 
 use crate::ir::{
-    Arm, Constructor, CtorId, Elems, Expr, Form, FuncId, Function, LocalId, PackId, Program, Repr,
-    Stride,
+    Arm, Constructor, CtorId, Elems, Expr, Form, FuncId, Function, LocalId, PackId, Packing,
+    Program, Repr, Stride,
 };
 
 /// Как уложены элементы массива с таким шагом.
@@ -254,13 +254,30 @@ fn packings(out: &mut String, program: &Program) {
         " * смещением. Размер и граница посчитаны понижением, а не C. */\n"
     ));
     for (at, packing) in program.packings.iter().enumerate() {
-        let fields: Vec<String> = packing
-            .labels
+        let variants: Vec<String> = packing
+            .variants
             .iter()
-            .zip(&packing.slots)
-            .map(|(label, slot)| format!("{}@{} {}", escaped(label), slot.offset, slot.ty.name()))
+            .map(|variant| {
+                let fields: Vec<String> = variant
+                    .labels
+                    .iter()
+                    .zip(&variant.slots)
+                    .map(|(label, slot)| {
+                        format!("{}@{} {}", escaped(label), slot.offset, slot.ty.name())
+                    })
+                    .collect();
+                match variant.ctor {
+                    Some(tag) => format!("#{} {}", tag.0, fields.join(", ")),
+                    None => fields.join(", "),
+                }
+            })
             .collect();
-        let _ = writeln!(out, "/* {} */", fields.join(", "));
+        let described = if packing.tag == 0 {
+            variants.join(" ")
+        } else {
+            format!("тег {} байт; {}", packing.tag, variants.join(" | "))
+        };
+        let _ = writeln!(out, "/* {described} */");
         let _ = writeln!(
             out,
             "typedef struct adamas_pack_{at} {{ _Alignas({}) unsigned char bytes[{}]; }} \
@@ -701,9 +718,16 @@ impl Emitter<'_> {
             Expr::Layout { .. } => Repr::Layout,
             Expr::LayoutField { .. } => Repr::Flat(PrimTy::UInt32),
             Expr::Pack { packing, .. } => Repr::Packed(*packing),
-            Expr::Unpack { packing, field, .. } => {
-                Repr::Flat(self.program.packings[packing.0 as usize].slots[*field as usize].ty)
-            }
+            Expr::Unpack {
+                packing,
+                variant,
+                field,
+                ..
+            } => Repr::Flat(
+                self.program.packings[packing.0 as usize].variants[*variant as usize].slots
+                    [*field as usize]
+                    .ty,
+            ),
             Expr::ArrayNew { stride, .. } | Expr::ArraySet { stride, .. } => {
                 Repr::Array(elems(*stride))
             }
@@ -744,12 +768,17 @@ impl Emitter<'_> {
             Expr::LayoutField { descriptor, align } => {
                 self.descriptor_field(*descriptor, *align, depth)
             }
-            Expr::Pack { packing, fields } => self.pack(*packing, fields, depth),
+            Expr::Pack {
+                packing,
+                variant,
+                fields,
+            } => self.pack(*packing, *variant, fields, depth),
             Expr::Unpack {
                 packing,
+                variant,
                 field,
                 value,
-            } => self.unpack(*packing, *field, value, depth),
+            } => self.unpack(*packing, *variant, *field, value, depth),
             Expr::ArrayNew {
                 stride,
                 count,
@@ -886,7 +915,7 @@ impl Emitter<'_> {
     /// `memcpy`, а не приведение указателя: поле стоит по своей границе внутри
     /// байтового массива, и читать его как `float *` значило бы обещать
     /// компилятору выравнивание, которого правило §4.11 не даёт.
-    fn pack(&mut self, packing: PackId, fields: &[Expr], depth: usize) -> String {
+    fn pack(&mut self, packing: PackId, variant: u32, fields: &[Expr], depth: usize) -> String {
         let pad = Self::pad(depth);
         let described = self.program.packings[packing.0 as usize].clone();
         let given: Vec<String> = fields
@@ -894,8 +923,28 @@ impl Emitter<'_> {
             .map(|field| self.value(field, depth))
             .collect();
         let name = self.temp();
-        let _ = writeln!(self.out, "{pad}{} {name};", c_type(Repr::Packed(packing)));
-        for (slot, value) in described.slots.iter().zip(&given) {
+        // Теговая укладка зануляется: короткий вариант оставил бы хвост
+        // payload'а неинициализированным, а байты агрегата копируются целиком.
+        let seed = if described.tag == 0 { "" } else { " = {0}" };
+        let _ = writeln!(
+            self.out,
+            "{pad}{} {name}{seed};",
+            c_type(Repr::Packed(packing))
+        );
+        if described.tag > 0 {
+            let _ = writeln!(
+                self.out,
+                "{pad}{{ uint{}_t adamas_variant = {variant}u; \
+                 memcpy({name}.bytes, &adamas_variant, {}u); }}",
+                described.tag * 8,
+                described.tag
+            );
+        }
+        for (slot, value) in described.variants[variant as usize]
+            .slots
+            .iter()
+            .zip(&given)
+        {
             let _ = writeln!(
                 self.out,
                 "{pad}memcpy({name}.bytes + {}, &{value}, {}u);",
@@ -907,9 +956,17 @@ impl Emitter<'_> {
     }
 
     /// Поле плоского агрегата: чтение по смещению.
-    fn unpack(&mut self, packing: PackId, field: u32, value: &Expr, depth: usize) -> String {
+    fn unpack(
+        &mut self,
+        packing: PackId,
+        variant: u32,
+        field: u32,
+        value: &Expr,
+        depth: usize,
+    ) -> String {
         let pad = Self::pad(depth);
-        let slot = self.program.packings[packing.0 as usize].slots[field as usize];
+        let slot = self.program.packings[packing.0 as usize].variants[variant as usize].slots
+            [field as usize];
         let value = self.value(value, depth);
         let name = self.temp();
         let _ = writeln!(self.out, "{pad}{} {name};", c_type(Repr::Flat(slot.ty)));
@@ -1425,6 +1482,9 @@ impl Emitter<'_> {
         let answer = arms
             .first()
             .map_or(Repr::Boxed, |arm| self.shape(&arm.body));
+        if let Repr::Packed(pack) = self.shape(scrutinee) {
+            return self.packed_analysis(pack, scrutinee, arms, answer, depth);
+        }
         let scrutinee = self.value(scrutinee, depth);
         let name = self.temp();
         let _ = writeln!(self.out, "{pad}{} {name};", c_type(answer));
@@ -1471,6 +1531,97 @@ impl Emitter<'_> {
         );
         let _ = writeln!(self.out, "{pad}}}");
         name
+    }
+
+    /// Разбор плотного семейства: тег читается байтами, поля - смещением
+    /// своего варианта (§4.11, §10 вопрос 157).
+    ///
+    /// У бестегового - единственный конструктор - ветвь одна, и ни тега, ни
+    /// `switch` не нужно.
+    fn packed_analysis(
+        &mut self,
+        pack: PackId,
+        scrutinee: &Expr,
+        arms: &[Arm],
+        answer: Repr,
+        depth: usize,
+    ) -> String {
+        let pad = Self::pad(depth);
+        let packing = self.program.packings[pack.0 as usize].clone();
+        let scrutinee = self.value(scrutinee, depth);
+        let name = self.temp();
+        let _ = writeln!(self.out, "{pad}{} {name};", c_type(answer));
+        if packing.tag == 0 {
+            if let Some(arm) = arms.first() {
+                self.packed_arm(&packing, 0, &scrutinee, arm, &name, depth);
+            }
+            return name;
+        }
+        let tag = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}uint{}_t {tag} = 0; memcpy(&{tag}, {scrutinee}.bytes, {}u);",
+            packing.tag * 8,
+            packing.tag
+        );
+        let _ = writeln!(self.out, "{pad}switch ({tag}) {{");
+        for arm in arms {
+            let Some((at, _)) = packing.variant_of(arm.constructor) else {
+                continue;
+            };
+            let described = &self.program.constructors[usize::from(arm.constructor.0)];
+            let _ = writeln!(
+                self.out,
+                "{pad}case {at}u: {{ /* {} */",
+                escaped(&described.name)
+            );
+            self.packed_arm(&packing, at, &scrutinee, arm, &name, depth + 1);
+            let _ = writeln!(self.out, "{pad}    break;");
+            let _ = writeln!(self.out, "{pad}}}");
+        }
+        let _ = writeln!(
+            self.out,
+            "{pad}default: adamas_fail(\"разбор не знает тега\");"
+        );
+        let _ = writeln!(self.out, "{pad}}}");
+        name
+    }
+
+    /// Ветвь плотного разбора: связывания живых полей и тело.
+    ///
+    /// Стёртое поле связывания не получает - ссылок на него в теле нет по
+    /// построению понижения, - поэтому живые идут по слотам подряд.
+    fn packed_arm(
+        &mut self,
+        packing: &Packing,
+        variant: u32,
+        scrutinee: &str,
+        arm: &Arm,
+        name: &str,
+        depth: usize,
+    ) {
+        let pad = Self::pad(depth);
+        let slots = &packing.variants[variant as usize].slots;
+        let mut slot = 0usize;
+        for binding in &arm.fields {
+            if !binding.fact.present {
+                continue;
+            }
+            let described = slots[slot];
+            slot += 1;
+            let _ = writeln!(
+                self.out,
+                "{pad}{} v{}; memcpy(&v{}, {scrutinee}.bytes + {}, {}u); /* {} */",
+                c_type(binding.fact.repr),
+                binding.local.0,
+                binding.local.0,
+                described.offset,
+                described.ty.size(),
+                escaped(&binding.name)
+            );
+        }
+        let answer = self.value(&arm.body, depth);
+        let _ = writeln!(self.out, "{pad}{name} = {answer};");
     }
 }
 

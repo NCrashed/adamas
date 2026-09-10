@@ -601,12 +601,24 @@ impl Pass<'_> {
     /// собрано либо из чего он прочитан.
     fn aggregate(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
         match expr {
-            Expr::Pack { packing, fields } => {
+            Expr::Pack {
+                packing,
+                variant,
+                fields,
+            } => {
                 let (fields, spare) = self.sequence(fields, owned);
-                drops(spare, Expr::Pack { packing, fields })
+                drops(
+                    spare,
+                    Expr::Pack {
+                        packing,
+                        variant,
+                        fields,
+                    },
+                )
             }
             Expr::Unpack {
                 packing,
+                variant,
                 field,
                 value,
             } => {
@@ -616,6 +628,7 @@ impl Pass<'_> {
                     spare,
                     Expr::Unpack {
                         packing,
+                        variant,
                         field,
                         value: Box::new(value),
                     },

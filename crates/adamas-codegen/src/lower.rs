@@ -93,15 +93,17 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
 
 use adamas_core::eval::{eval, quote};
+use adamas_core::level::Level;
 use adamas_core::mult::Mult;
 use adamas_core::prim::{ArrayOp, Prim, PrimTy};
+use adamas_core::row::Row;
 use adamas_core::sig::{DefinitionKind, Signature};
 use adamas_core::term::{Case, Index, Name, Term};
 use adamas_core::value::{Env, Lvl, Value};
 
 use crate::ir::{
     Arm, Binding, Constructor, CtorId, Elems, Expr, Fact, Form, FuncId, Function, LocalId, PackId,
-    Packing, Program, Repr, Slot as PackSlot, Stride,
+    Packing, Program, Repr, Slot as PackSlot, Stride, Variant,
 };
 
 /// Почему понижение отказало.
@@ -289,6 +291,18 @@ fn pointing(facts: &[Fact], at: &'static str) -> Result<(), LowerError> {
     Ok(())
 }
 
+/// Представление поля в слоте объекта кучи.
+///
+/// Слот несёт указатель либо биты примитива; плоскому агрегату с его
+/// собственными байтами там места нет, и поле такого типа хранится
+/// боксированным (§4.11). Переклад ставят места построения ([`Lowerer::moved`]).
+fn slotted(repr: Repr) -> Repr {
+    match repr {
+        Repr::Packed(_) => Repr::Boxed,
+        other => other,
+    }
+}
+
 /// Годится ли пришедшее представление в объявленную позицию.
 ///
 /// Совпадение - обычный случай. Послаблений два, и оба про **запись**: у неё
@@ -429,6 +443,14 @@ struct Lowerer<'a> {
     numbers: HashMap<Name, FuncId>,
     /// Определения, чьи тела ещё не понижены.
     pending: VecDeque<(FuncId, Name)>,
+    /// Семейства, чья плотная укладка считается прямо сейчас.
+    ///
+    /// Страж повторного входа: `family_packing` заводит таблицу конструкторов
+    /// (`family`), та читает представления полей, а поле рекурсивного
+    /// семейства называет само семейство - без стража `Nat` разворачивался бы
+    /// в себя до дна стека. Имя в страже отвечает `None`, и это не потеря:
+    /// рекурсивное семейство не плоское (§4.11).
+    packing_guard: Vec<Name>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -441,6 +463,7 @@ impl<'a> Lowerer<'a> {
             functions: Vec::new(),
             numbers: HashMap::new(),
             pending: VecDeque::new(),
+            packing_guard: Vec::new(),
         }
     }
 
@@ -473,9 +496,21 @@ impl<'a> Lowerer<'a> {
         // заголовка, а у плотного заголовка нет вовсе (§4.11). Упаковка тут не
         // выбор представления, а цена печати, и она одна на весь ответ.
         if let Repr::Packed(pack) = repr {
-            let tag = self.boxed_shape(pack)?;
-            body = self.boxing(&mut scope, body, pack, tag);
-            repr = Repr::Record(tag);
+            if self.packings[pack.0 as usize]
+                .sole()
+                .is_some_and(|variant| variant.ctor.is_none())
+            {
+                let tag = self.boxed_shape(pack)?;
+                body = self.boxing(&mut scope, body, pack, tag);
+                repr = Repr::Record(tag);
+            } else {
+                // Семейство печатается собственным конструктором; не собрался
+                // объект - печатать нечем, и это названная граница.
+                body = self
+                    .loosening(&mut scope, body, pack)
+                    .ok_or(LowerError::PackedAnswer)?;
+                repr = Repr::Boxed;
+            }
         }
         self.functions[entry_id.0].body = body;
         self.functions[entry_id.0].result = repr;
@@ -784,33 +819,52 @@ impl<'a> Lowerer<'a> {
     ) -> Result<Option<Expr>, LowerError> {
         match (got, want) {
             (Repr::Packed(pack), Repr::Boxed | Repr::Record(_)) => {
-                let tag = self.boxed_shape(pack)?;
-                if !fits(Repr::Record(tag), want) {
+                if self.packings[pack.0 as usize]
+                    .sole()
+                    .is_some_and(|variant| variant.ctor.is_none())
+                {
+                    let tag = self.boxed_shape(pack)?;
+                    if !fits(Repr::Record(tag), want) {
+                        return Ok(None);
+                    }
+                    return Ok(Some(self.boxing(scope, value.clone(), pack, tag)));
+                }
+                // Семейство: боксированная его форма - обычный объект с тегом
+                // конструктора, записью она не бывает.
+                if !want.boxed() {
                     return Ok(None);
                 }
-                Ok(Some(self.boxing(scope, value.clone(), pack, tag)))
+                Ok(self.loosening(scope, value.clone(), pack))
             }
             (Repr::Record(tag), Repr::Packed(pack)) => {
                 Ok(self.tightening(scope, value.clone(), tag, pack))
             }
+            (Repr::Boxed, Repr::Packed(pack)) => Ok(self.narrowing(scope, value.clone(), pack)),
             _ => Ok(None),
         }
     }
 
-    /// Форма объекта кучи, отвечающая плотной укладке.
+    /// Форма объекта кучи, отвечающая плотной укладке записи.
     fn boxed_shape(&mut self, pack: PackId) -> Result<CtorId, LowerError> {
         let packing = self.packings[pack.0 as usize].clone();
-        let facts: Vec<Fact> = packing
+        let Some(variant) = packing.sole().filter(|variant| variant.ctor.is_none()) else {
+            // Семейной укладке отвечает не форма записи, а собственные
+            // конструкторы семейства - см. [`Lowerer::loosening`].
+            return Err(LowerError::PackedAnswer);
+        };
+        let facts: Vec<Fact> = variant
             .slots
             .iter()
             .map(|slot| Fact::declared(Mult::One).shaped(Repr::Flat(slot.ty)))
             .collect();
-        self.shape(&packing.labels, &facts)
+        self.shape(&variant.labels.clone(), &facts)
     }
 
-    /// Плотный агрегат объектом кучи: поля читаются смещением, кладутся слотом.
+    /// Плотная запись объектом кучи: поля читаются смещением, кладутся слотом.
     fn boxing(&mut self, scope: &mut Scope, value: Expr, pack: PackId, tag: CtorId) -> Expr {
-        let count = self.packings[pack.0 as usize].slots.len();
+        let count = self.packings[pack.0 as usize]
+            .sole()
+            .map_or(0, |variant| variant.slots.len());
         let binding = Binding {
             name: "агрегат".to_owned(),
             local: scope.fresh(),
@@ -820,6 +874,7 @@ impl<'a> Lowerer<'a> {
         let fields = (0..count)
             .map(|at| Expr::Unpack {
                 packing: pack,
+                variant: 0,
                 field: u32::try_from(at).unwrap_or(u32::MAX),
                 value: Box::new(Expr::Local(local)),
             })
@@ -831,6 +886,168 @@ impl<'a> Lowerer<'a> {
                 constructor: tag,
                 reuse: None,
                 arguments: fields,
+            }),
+        }
+    }
+
+    /// Согласуются ли поля конструктора со слотами варианта.
+    ///
+    /// Требуется для обоих перекладов семейства: живое связывание отвечает
+    /// слоту тем же примитивом, стёртое слота не имеет. Расходятся они у
+    /// **параметрического** семейства - поле `a` в таблице конструкторов
+    /// указательное, а слот считался по подставленному типу, - и тогда
+    /// перекладывать нечем: боксированной формы у такого значения не бывает.
+    fn variant_matches(described: &Constructor, variant: &Variant) -> bool {
+        let fields: Vec<&Fact> = described
+            .binders
+            .iter()
+            .skip(described.params as usize)
+            .collect();
+        let mut slots = variant.slots.iter();
+        fields.iter().all(|fact| {
+            if !fact.present {
+                return true;
+            }
+            slots
+                .next()
+                .is_some_and(|slot| fact.repr == Repr::Flat(slot.ty))
+        }) && slots.next().is_none()
+    }
+
+    /// Плотное семейство объектом кучи: разбор по тегу, ветвь строит объект.
+    ///
+    /// `None` - переклада нет: у параметрического семейства таблица
+    /// конструкторов не знает подставленных полей, и объект под печать либо
+    /// слот собрать нечем.
+    fn loosening(&mut self, scope: &mut Scope, value: Expr, pack: PackId) -> Option<Expr> {
+        let packing = self.packings[pack.0 as usize].clone();
+        let mut arms = Vec::with_capacity(packing.variants.len());
+        for variant in &packing.variants {
+            let tag = variant.ctor?;
+            let described = self.constructors[usize::from(tag.0)].clone();
+            if !Self::variant_matches(&described, variant) {
+                return None;
+            }
+            let params = described.params as usize;
+            let fields: Vec<Binding> = described
+                .binders
+                .iter()
+                .skip(params)
+                .enumerate()
+                .map(|(position, fact)| Binding {
+                    name: variant
+                        .labels
+                        .get(position)
+                        .cloned()
+                        .unwrap_or_else(|| format!("поле{position}")),
+                    local: scope.fresh(),
+                    fact: *fact,
+                })
+                .collect();
+            let arguments: Vec<Expr> = (0..params)
+                .map(|_| Expr::Erased)
+                .chain(fields.iter().map(|field| {
+                    if field.fact.present {
+                        Expr::Local(field.local)
+                    } else {
+                        Expr::Erased
+                    }
+                }))
+                .collect();
+            arms.push(Arm {
+                constructor: tag,
+                fields,
+                body: Expr::Construct {
+                    constructor: tag,
+                    reuse: None,
+                    arguments,
+                },
+            });
+        }
+        Some(Self::bound_match(
+            scope,
+            value,
+            Repr::Packed(pack),
+            Mult::One,
+            arms,
+        ))
+    }
+
+    /// Объект кучи плотным семейством: разбор по заголовку, ветвь пишет байты.
+    ///
+    /// `None` - как у [`Lowerer::loosening`], и по той же причине.
+    fn narrowing(&mut self, scope: &mut Scope, value: Expr, pack: PackId) -> Option<Expr> {
+        let packing = self.packings[pack.0 as usize].clone();
+        let mut arms = Vec::with_capacity(packing.variants.len());
+        for (at, variant) in packing.variants.iter().enumerate() {
+            let tag = variant.ctor?;
+            let described = self.constructors[usize::from(tag.0)].clone();
+            if !Self::variant_matches(&described, variant) {
+                return None;
+            }
+            let params = described.params as usize;
+            let fields: Vec<Binding> = described
+                .binders
+                .iter()
+                .skip(params)
+                .enumerate()
+                .map(|(position, fact)| Binding {
+                    name: variant
+                        .labels
+                        .get(position)
+                        .cloned()
+                        .unwrap_or_else(|| format!("поле{position}")),
+                    local: scope.fresh(),
+                    fact: *fact,
+                })
+                .collect();
+            let taken = fields
+                .iter()
+                .filter(|field| field.fact.present)
+                .map(|field| Expr::Local(field.local))
+                .collect();
+            arms.push(Arm {
+                constructor: tag,
+                fields,
+                body: Expr::Pack {
+                    packing: pack,
+                    variant: u32::try_from(at).unwrap_or(u32::MAX),
+                    fields: taken,
+                },
+            });
+        }
+        Some(Expr::Match {
+            scrutinee: Box::new(value),
+            consumed: Mult::One,
+            arms,
+        })
+    }
+
+    /// Разбор со связанным разбираемым: плотному нужен свой C-тип у имени.
+    ///
+    /// Вставка RC связывает не-переменную сама, но её временное имя
+    /// указательное ([`Fact::opaque`]); плотное разбираемое поэтому
+    /// связывается здесь, где представление известно.
+    fn bound_match(
+        scope: &mut Scope,
+        value: Expr,
+        repr: Repr,
+        consumed: Mult,
+        arms: Vec<Arm>,
+    ) -> Expr {
+        let binding = Binding {
+            name: "разбираемое".to_owned(),
+            local: scope.fresh(),
+            fact: Fact::present(Mult::Many).shaped(repr),
+        };
+        let local = binding.local;
+        Expr::Bind {
+            binding,
+            value: Box::new(value),
+            body: Box::new(Expr::Match {
+                scrutinee: Box::new(Expr::Local(local)),
+                consumed,
+                arms,
             }),
         }
     }
@@ -849,18 +1066,19 @@ impl<'a> Lowerer<'a> {
     ) -> Option<Expr> {
         let described = self.constructors[usize::from(tag.0)].clone();
         let packing = self.packings[pack.0 as usize].clone();
-        if described.labels.as_deref() != Some(&packing.labels) {
+        let variant = packing.sole().filter(|variant| variant.ctor.is_none())?;
+        if described.labels.as_deref() != Some(&variant.labels) {
             return None;
         }
         let matching = described
             .binders
             .iter()
-            .zip(&packing.slots)
+            .zip(&variant.slots)
             .all(|(fact, slot)| fact.present && fact.repr == Repr::Flat(slot.ty));
-        if !matching || described.binders.len() != packing.slots.len() {
+        if !matching || described.binders.len() != variant.slots.len() {
             return None;
         }
-        let fields: Vec<Binding> = packing
+        let fields: Vec<Binding> = variant
             .labels
             .iter()
             .zip(&described.binders)
@@ -879,6 +1097,7 @@ impl<'a> Lowerer<'a> {
                 fields,
                 body: Expr::Pack {
                     packing: pack,
+                    variant: 0,
                     fields: taken,
                 },
             }],
@@ -907,7 +1126,75 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
+        // Насыщенный конструктор плотного семейства строится сразу байтами
+        // (§10 вопрос 157): синтез дал бы объект, и семя колонки
+        // аллоцировалось бы, чтобы тут же переложиться и освободиться.
+        if let Repr::Packed(pack) = want {
+            let (head, arguments) = spine(term);
+            if let Term::Const(name, ..) = head {
+                let name = Rc::clone(name);
+                if let Some(built) = self.pack_ctor_as(scope, &name, &arguments, pack)? {
+                    return Ok((built, want));
+                }
+            }
+        }
         self.expr(scope, term)
+    }
+
+    /// Значение конструктора, уложенное плотно по своему варианту.
+    ///
+    /// `None` - форма не та, и отвечать будет обычный путь с перекладом:
+    /// имя не конструктор этого семейства, применение не насыщено, либо
+    /// вариант расходится полями.
+    fn pack_ctor_as(
+        &mut self,
+        scope: &mut Scope,
+        name: &Name,
+        arguments: &[&Term],
+        pack: PackId,
+    ) -> Result<Option<Expr>, LowerError> {
+        let Some(definition) = self.signature.lookup(name) else {
+            return Ok(None);
+        };
+        if !matches!(definition.kind, DefinitionKind::Constructor { .. }) {
+            return Ok(None);
+        }
+        let constructor = self.tag(name)?;
+        let Some((variant, slots)) = self.packings[pack.0 as usize]
+            .variant_of(constructor)
+            .map(|(at, variant)| (at, variant.slots.clone()))
+        else {
+            return Ok(None);
+        };
+        let binders = self.constructors[usize::from(constructor.0)]
+            .binders
+            .clone();
+        let params = self.constructors[usize::from(constructor.0)].params as usize;
+        let saturated = arguments.len() <= binders.len()
+            && (arguments.len() >= binders.len()
+                || binders[arguments.len()..].iter().all(|fact| !fact.present));
+        if !saturated {
+            return Ok(None);
+        }
+        let mut given = Vec::with_capacity(slots.len());
+        let mut slot = 0usize;
+        for (position, fact) in binders.iter().enumerate().skip(params) {
+            if !fact.present {
+                continue;
+            }
+            let want = Repr::Flat(slots[slot].ty);
+            slot += 1;
+            let argument = arguments.get(position).ok_or_else(|| LowerError::Missing {
+                name: name.to_string(),
+                binder: position,
+            })?;
+            given.push(self.shaped(scope, argument, want, "поле конструктора")?);
+        }
+        Ok(Some(Expr::Pack {
+            packing: pack,
+            variant,
+            fields: given,
+        }))
     }
 
     /// Значение записи: объект кучи со слотом на поле (§4.2).
@@ -928,6 +1215,20 @@ impl<'a> Lowerer<'a> {
         let mut values = Vec::with_capacity(fields.len());
         for (label, value) in fields {
             let (value, repr) = self.expr(scope, value)?;
+            // Плоский агрегат в слот объекта не ложится - слот несёт
+            // указатель либо биты примитива - и потому боксируется (§4.11).
+            let (value, repr) = if matches!(repr, Repr::Packed(_)) {
+                let boxed = self.moved(scope, &value, repr, Repr::Boxed)?.ok_or(
+                    LowerError::Representation {
+                        at: "поле записи",
+                        want: describe(Repr::Boxed),
+                        got: describe(repr),
+                    },
+                )?;
+                (boxed, Repr::Boxed)
+            } else {
+                (value, repr)
+            };
             labels.push(label.to_string());
             // Поле записи кладёт значение однажды - `check::infer_object`
             // объявляет его `1`, и другого источника кратности у значения нет.
@@ -1005,9 +1306,16 @@ impl<'a> Lowerer<'a> {
         pack: PackId,
     ) -> Result<Expr, LowerError> {
         let packing = self.packings[pack.0 as usize].clone();
+        // Записью укладывается только бестеговый вариант: значение записи
+        // семейной укладки не пишется, его отвергнет сверка меток.
+        let (labels, slots) = packing
+            .sole()
+            .filter(|variant| variant.ctor.is_none())
+            .map(|variant| (variant.labels.clone(), variant.slots.clone()))
+            .unwrap_or_default();
         let mismatch = || LowerError::Representation {
             at: "поля плоской записи",
-            want: format!("{{{}}}", packing.labels.join(", ")),
+            want: format!("{{{}}}", labels.join(", ")),
             got: format!(
                 "{{{}}}",
                 fields
@@ -1017,19 +1325,20 @@ impl<'a> Lowerer<'a> {
                     .join(", ")
             ),
         };
-        if packing.labels.len() != fields.len() {
+        if labels.len() != fields.len() || fields.is_empty() {
             return Err(mismatch());
         }
         let mut given = Vec::with_capacity(fields.len());
         for (position, (label, value)) in fields.iter().enumerate() {
-            if **label != *packing.labels[position] {
+            if **label != *labels[position] {
                 return Err(mismatch());
             }
-            let want = Repr::Flat(packing.slots[position].ty);
+            let want = Repr::Flat(slots[position].ty);
             given.push(self.shaped(scope, value, want, "поле плоской записи")?);
         }
         Ok(Expr::Pack {
             packing: pack,
+            variant: 0,
             fields: given,
         })
     }
@@ -1052,20 +1361,27 @@ impl<'a> Lowerer<'a> {
         }
         if let Repr::Packed(pack) = repr {
             // Плоский агрегат: поле адресуется **смещением**, а не слотом, - и
-            // это названная цена варианта (а) вопроса 154.
+            // это названная цена варианта (а) вопроса 154. Проецируется только
+            // запись: у семейной укладки полей без разбора нет.
             let packing = &self.packings[pack.0 as usize];
-            let at = packing
+            let Some(variant) = packing.sole().filter(|variant| variant.ctor.is_none()) else {
+                return Err(LowerError::Shapeless {
+                    label: label.to_string(),
+                });
+            };
+            let at = variant
                 .labels
                 .iter()
                 .position(|it| **it == **label)
                 .ok_or_else(|| LowerError::NoField {
                     label: label.to_string(),
-                    shape: format!("{{{}}}", packing.labels.join(", ")),
+                    shape: format!("{{{}}}", variant.labels.join(", ")),
                 })?;
-            let ty = packing.slots[at].ty;
+            let ty = variant.slots[at].ty;
             return Ok((
                 Expr::Unpack {
                     packing: pack,
+                    variant: 0,
                     field: u32::try_from(at).unwrap_or(u32::MAX),
                     value: Box::new(value),
                 },
@@ -1144,6 +1460,7 @@ impl<'a> Lowerer<'a> {
                 value: Box::new(descriptor),
                 body: Box::new(Expr::Pack {
                     packing: pack,
+                    variant: 0,
                     fields: vec![
                         Expr::LayoutField {
                             descriptor: local,
@@ -1728,19 +2045,79 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Понижает разбор.
+    /// Факты полей ветви разбора.
+    ///
+    /// У плотного разбираемого поля приходят байтами своего варианта: их
+    /// представления - подставленные примитивы слотов, а не факты таблицы, у
+    /// которой параметр семейства указателен.
+    fn branch_facts(&self, packed: Option<PackId>, constructor: CtorId) -> Vec<Fact> {
+        let described = &self.constructors[usize::from(constructor.0)];
+        let params = described.params as usize;
+        match packed
+            .and_then(|pack| self.packings[pack.0 as usize].variant_of(constructor))
+            .map(|(_, variant)| variant.slots.clone())
+        {
+            Some(slots) => {
+                let mut slot = 0usize;
+                described
+                    .binders
+                    .iter()
+                    .skip(params)
+                    .map(|fact| {
+                        if !fact.present {
+                            return *fact;
+                        }
+                        let ty = slots[slot].ty;
+                        slot += 1;
+                        Fact::declared(fact.mult).shaped(Repr::Flat(ty))
+                    })
+                    .collect()
+            }
+            None => described.binders.iter().skip(params).copied().collect(),
+        }
+    }
+
+    /// Разбираемое и его плотная укладка, когда она семейная.
+    ///
+    /// Плотное семейство разбирается по собственному тегу (§10 вопрос 157);
+    /// прочее приводится к объекту - тег лежит в его заголовке, а у плоской
+    /// записи заголовка нет вовсе (§4.11).
+    fn scrutinised(
+        &mut self,
+        scope: &mut Scope,
+        term: &Term,
+    ) -> Result<(Expr, Option<PackId>), LowerError> {
+        let (scrutinee, got) = self.expr(scope, term)?;
+        let packed = match got {
+            Repr::Packed(pack) => self.packings[pack.0 as usize]
+                .variants
+                .first()
+                .and_then(|variant| variant.ctor)
+                .map(|_| pack),
+            _ => None,
+        };
+        if packed.is_some() || fits(got, Repr::Boxed) {
+            return Ok((scrutinee, packed));
+        }
+        if let Some(moved) = self.moved(scope, &scrutinee, got, Repr::Boxed)? {
+            return Ok((moved, None));
+        }
+        Err(LowerError::Representation {
+            at: "разбираемое",
+            want: describe(Repr::Boxed),
+            got: describe(got),
+        })
+    }
+
     fn analysis(&mut self, scope: &mut Scope, case: &Case) -> Result<(Expr, Repr), LowerError> {
         self.family(&case.data)?;
-        // Разбирается объект: тег лежит в его заголовке, а у плоского значения
-        // заголовка нет вовсе (§4.11).
-        let scrutinee = self.shaped(scope, &case.scrutinee, Repr::Boxed, "разбираемое")?;
+        let (scrutinee, packed) = self.scrutinised(scope, &case.scrutinee)?;
         // Пустой разбор ответа не даёт: тип пуст, и до печати дело не дойдёт.
         let mut answer = Repr::Boxed;
         let mut arms = Vec::with_capacity(case.branches.len());
         for branch in &case.branches {
             let constructor = self.tag(&branch.constructor)?;
-            let described = &self.constructors[usize::from(constructor.0)];
-            let params = described.params as usize;
-            let facts: Vec<Fact> = described.binders.iter().skip(params).copied().collect();
+            let facts = self.branch_facts(packed, constructor);
             let mut fields: Vec<Binding> = facts
                 .iter()
                 .enumerate()
@@ -2080,6 +2457,11 @@ impl Lowerer<'_> {
                 Some(packed) => Ok(packed),
                 None => self.record_shape(fields, depth, dicts),
             },
+            // Семейство остаётся объектом и тогда, когда у него есть плотная
+            // укладка (§10 вопрос 157): плотная форма живёт в плоском
+            // хранилище - колонке и кадре, - а голое значение ходит через
+            // замыкания и слоты, где плоскому места нет. Перекладывают на
+            // границе [`Lowerer::moved`] и разбор.
             _ => Ok(Repr::Boxed),
         }
     }
@@ -2126,7 +2508,7 @@ impl Lowerer<'_> {
         let mut facts = Vec::with_capacity(fields.len());
         for (position, field) in fields.iter().enumerate() {
             let under = depth + u32::try_from(position).unwrap_or(0);
-            let repr = self.repr_of(&field.ty, under, dicts)?;
+            let repr = slotted(self.repr_of(&field.ty, under, dicts)?);
             labels.push(field.name.to_string());
             // Типовой член (`type T` в сигнатуре модуля, §4.8) значения в
             // рантайме не имеет: тип стёрт (§3.3), а кратность у него `1` -
@@ -2163,24 +2545,159 @@ impl Lowerer<'_> {
             let level = depth.checked_sub(index + 1)?;
             return dicts.get(&level).copied().map(Stride::Dynamic);
         }
-        let Term::Record(fields) = &unfolded(self.signature, &current, depth) else {
-            return None;
-        };
-        match self.packed_shape(fields) {
-            Some(Repr::Packed(pack)) => Some(Stride::Packed(pack)),
-            _ => None,
+        match &unfolded(self.signature, &current, depth) {
+            Term::Record(fields) => match self.packed_shape(fields) {
+                Some(Repr::Packed(pack)) => Some(Stride::Packed(pack)),
+                _ => None,
+            },
+            // Семейство с Flat-полями - колонка тегованных значений (§4.11,
+            // §10 вопрос 157): `Option` и контрольные байты хеш-таблицы.
+            expanded => {
+                let (head, arguments) = spine(expanded);
+                let Term::Const(name, ..) = head else {
+                    return None;
+                };
+                let name = Rc::clone(name);
+                match self.family_packing(&name, &arguments, depth) {
+                    Ok(Some(pack)) => Some(Stride::Packed(pack)),
+                    _ => None,
+                }
+            }
         }
     }
 
     /// Укладка агрегата по меткам и полям; заводится однажды.
     fn packing(&mut self, labels: &[String], fields: &[PrimTy]) -> PackId {
         let made = packing_of(labels, fields);
+        self.interned(made)
+    }
+
+    /// Номер укладки: одинаковая заводится однажды.
+    fn interned(&mut self, made: Packing) -> PackId {
         if let Some(at) = self.packings.iter().position(|it| *it == made) {
             return PackId(u32::try_from(at).unwrap_or(u32::MAX));
         }
         let id = PackId(u32::try_from(self.packings.len()).unwrap_or(u32::MAX));
         self.packings.push(made);
         id
+    }
+
+    /// Плотная укладка семейства при таких аргументах типа (§4.11, §10
+    /// вопрос 157).
+    ///
+    /// `None` - семейство не укладывается: конструкторов нет, живое поле не
+    /// примитив - в том числе параметр, оставшийся переменной в обобщённом
+    /// коде, - либо укладка пуста (единственный конструктор без полей - это
+    /// непосредственное значение, байтов ему не нужно). Рекурсивное семейство
+    /// отдельной проверки не требует: рекурсивное поле стоит именем, а не
+    /// примитивом, и не проходит по общему правилу.
+    fn family_packing(
+        &mut self,
+        data: &Name,
+        arguments: &[&Term],
+        depth: u32,
+    ) -> Result<Option<PackId>, LowerError> {
+        // Не-имя и не-семейство - не отказ, а обычное указательное значение:
+        // сюда приходит всякий написанный тип.
+        let Some(definition) = self.signature.lookup(data) else {
+            return Ok(None);
+        };
+        let DefinitionKind::Data {
+            constructors,
+            params,
+            ..
+        } = &definition.kind
+        else {
+            return Ok(None);
+        };
+        let (constructors, params) = (constructors.clone(), *params as usize);
+        if constructors.is_empty() || arguments.len() < params || self.packing_guard.contains(data)
+        {
+            return Ok(None);
+        }
+        self.packing_guard.push(Rc::clone(data));
+        let counted = self.counted_family(data, &constructors, &arguments[..params], depth);
+        self.packing_guard.pop();
+        let Some(variants) = counted? else {
+            return Ok(None);
+        };
+        let made = family_packing_of(&variants);
+        if made.size == 0 {
+            return Ok(None);
+        }
+        Ok(Some(self.interned(made)))
+    }
+
+    /// Варианты семейства с посчитанными полями; выделено ради стража.
+    #[expect(clippy::type_complexity, reason = "локальная тройка варианта")]
+    fn counted_family(
+        &mut self,
+        data: &Name,
+        constructors: &[Name],
+        params: &[&Term],
+        depth: u32,
+    ) -> Result<Option<Vec<(CtorId, Vec<String>, Vec<PrimTy>)>>, LowerError> {
+        self.family(data)?;
+        let mut variants = Vec::with_capacity(constructors.len());
+        for name in constructors {
+            let tag = self.tag(name)?;
+            let Some((labels, fields)) = self.instantiated_fields(name, params, depth) else {
+                return Ok(None);
+            };
+            variants.push((tag, labels, fields));
+        }
+        Ok(Some(variants))
+    }
+
+    /// Поля конструктора при подставленных параметрах семейства: метки и
+    /// примитивы живых. `None` - живое поле не примитив.
+    ///
+    /// Считает то же ядро, что типовая сторона (`adamas-elab/src/flat.rs`,
+    /// `fields`): тип конструктора инстанцируется, параметры снимаются
+    /// применением, стёртые связывания полями не считаются - байтов у них
+    /// нет. Аргументы стёртых сортов не читаются: укладка от уровня, ряда и
+    /// кратности не зависит, а подставить что-то обязан всякий берущий тип.
+    fn instantiated_fields(
+        &self,
+        constructor: &Name,
+        params: &[&Term],
+        depth: u32,
+    ) -> Option<(Vec<String>, Vec<PrimTy>)> {
+        let definition = self.signature.lookup(constructor)?;
+        let levels: Vec<Level> = vec![Level::Zero; definition.level_arity as usize];
+        let rows: Vec<Row<Term>> = vec![Row::empty(); definition.row_arity as usize];
+        let mults: Vec<Mult> = definition
+            .mult_allowed
+            .iter()
+            .map(|allowed| allowed.first().copied().unwrap_or(Mult::Many))
+            .collect();
+        let mut env = Env::default();
+        for level in 0..depth {
+            env = env.extend(Value::var(Lvl(level)));
+        }
+        let mut current = definition.instantiate_type(&levels, &rows, &mults);
+        for argument in params {
+            let Value::Pi(_, _, _, _, codomain) = &*Rc::clone(&current) else {
+                return None;
+            };
+            current = codomain.apply(eval(&env, argument));
+        }
+        let mut level = depth;
+        let mut labels = Vec::new();
+        let mut fields = Vec::new();
+        while let Value::Pi(binder, name, domain, _, codomain) = &*Rc::clone(&current) {
+            if binder.mult != Mult::Zero {
+                let written = quote(level, domain);
+                let Term::Prim(Prim::Ty(prim)) = *unaliased(self.signature, &written) else {
+                    return None;
+                };
+                labels.push(name.to_string());
+                fields.push(prim);
+            }
+            current = codomain.apply(Value::var(Lvl(level)));
+            level += 1;
+        }
+        Some((labels, fields))
     }
 
     /// Кратность и представление `n`-го связывания типа.
@@ -2223,7 +2740,7 @@ impl Lowerer<'_> {
         let mut current = ty;
         let mut at = 0u32;
         while let Term::Pi(binder, _, domain, _, codomain) = current {
-            let repr = self.repr_of(domain, at, &empty)?;
+            let repr = slotted(self.repr_of(domain, at, &empty)?);
             facts.push(Fact::declared(binder.mult).shaped(repr));
             at += 1;
             current = codomain;
@@ -2317,8 +2834,23 @@ fn aligned(offset: u32, align: u32) -> u32 {
 /// укладывает тем же правилом, но проекция сквозь него - путь, а не метка, и
 /// путей у этого среза нет.
 fn packing_of(labels: &[String], fields: &[PrimTy]) -> Packing {
+    let (slots, size, align) = sequential(fields, 0);
+    Packing {
+        tag: 0,
+        variants: vec![Variant {
+            ctor: None,
+            labels: labels.to_vec(),
+            slots,
+        }],
+        size: aligned(size, align),
+        align,
+    }
+}
+
+/// Поля подряд от смещения `base`: слоты, конец и выравнивание.
+fn sequential(fields: &[PrimTy], base: u32) -> (Vec<PackSlot>, u32, u32) {
     let mut slots = Vec::with_capacity(fields.len());
-    let mut size = 0u32;
+    let mut size = base;
     let mut align = 1u32;
     for ty in fields {
         let width = ty.size();
@@ -2327,10 +2859,54 @@ fn packing_of(labels: &[String], fields: &[PrimTy]) -> Packing {
         size = offset.saturating_add(width);
         align = align.max(width);
     }
+    (slots, size, align)
+}
+
+/// Ширина и граница тега на `count` конструкторов (§4.11).
+///
+/// Один конструктор тега не требует - различать нечего, и `data` с ним
+/// укладывается как запись. Ступени по степеням двойки - то же правило, что у
+/// типовой стороны (`adamas-elab/src/flat.rs`), и совпадение чисел стоит
+/// теста, а не обещания.
+const fn tag_of(count: usize) -> (u32, u32) {
+    match count {
+        0 | 1 => (0, 1),
+        2..=256 => (1, 1),
+        257..=65536 => (2, 2),
+        _ => (4, 4),
+    }
+}
+
+/// Плотная укладка семейства: тег плюс payload размера максимума (§4.11).
+///
+/// Вариант на конструктор, поля каждого - подряд от общей границы payload'а;
+/// сам payload начинается за тегом, выровненный по максимальной границе
+/// своих полей. `Option Int64` отсюда занимает 16 байт, а не 8, - названная
+/// §4.11 цена.
+fn family_packing_of(variants: &[(CtorId, Vec<String>, Vec<PrimTy>)]) -> Packing {
+    let (tag_size, tag_align) = tag_of(variants.len());
+    let payload_align = variants
+        .iter()
+        .flat_map(|(_, _, fields)| fields.iter().map(|ty| ty.size()))
+        .max()
+        .unwrap_or(1);
+    let base = aligned(tag_size, payload_align);
+    let mut made = Vec::with_capacity(variants.len());
+    let mut end = tag_size;
+    for (ctor, labels, fields) in variants {
+        let (slots, size, _) = sequential(fields, base);
+        end = end.max(size);
+        made.push(Variant {
+            ctor: Some(*ctor),
+            labels: labels.clone(),
+            slots,
+        });
+    }
+    let align = tag_align.max(payload_align);
     Packing {
-        labels: labels.to_vec(),
-        slots,
-        size: aligned(size, align),
+        tag: tag_size,
+        variants: made,
+        size: aligned(end, align),
         align,
     }
 }

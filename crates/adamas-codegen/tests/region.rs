@@ -23,10 +23,16 @@ use adamas_codegen::ir::{Binding, Function, LocalId, Repr};
 
 /// Сколько блоков выдал прогон. Ответ по дороге сверяется с `adamas eval`.
 fn allocated(name: &str, source: &str) -> usize {
+    named(name, source).1
+}
+
+/// Он же вместе с ответом - для свидетелей, которым нужно и то и другое.
+fn named(name: &str, source: &str) -> (String, usize) {
+    let answer = harness::printed(source);
     let stderr = harness::agreed(name, source).unwrap_or_else(|error| panic!("{name}: {error}"));
     let (allocated, live) = harness::blocks(name, &stderr);
     assert_eq!(live, 0, "{name}: прогон оставил блоки живыми");
-    allocated
+    (answer, allocated)
 }
 
 /// Общее начало: класс представления, дескриптор и ячейка кучи для сравнения.
@@ -232,6 +238,68 @@ fn a_tagged_payload_packs_like_a_primitive() {
         allocated("регион-примитив", &format!("{SHAPE}{UNTAGGED}")),
         1
     );
+}
+
+/// Возврат ячейки соблюдает договор о владении наравне с прочими операциями.
+///
+/// Область названа здесь трижды - хендлом, возвратом и чтением, - поэтому к
+/// возврату она приходит **разделённой**, и лишняя ссылка обязана быть взята
+/// именно в этом узле. Дальше срабатывает тот же договор, что у `regionAlloc` и
+/// у массива (§5.1, §10 вопрос 149): разделённая копируется целиком вместе с
+/// журналом, прежняя остаётся как была, и чтение по старому хендлу это
+/// показывает.
+///
+/// Свидетель написан **примитивами**, а не через стратегию, и это существенно.
+/// Через стратегию узел возврата лежит внутри её `free`, где область приходит
+/// параметром и называется один раз, - весь счёт достаётся месту вызова, и
+/// вставку RC в самом узле можно снять, не сломав ничего. Измерено мутантом.
+const SHARED_RETURN: &str = "\
+data Seen where
+  MkSeen : Ptr -> Int64 -> Seen
+
+main : Seen
+main =
+  let a : Int64 = 11
+  let b : Int64 = 22
+  let r0 : Block = regionNew
+  let r1 : Block = regionAlloc r0 a
+  let h1 : Ptr = regionLast r1
+  let r2 : Block = regionRecycle r1 h1
+  let r3 : Block = regionAlloc r2 b
+  MkSeen (regionLast r3) (regionRead r1 h1)
+";
+
+/// То же опусканием курсора: узел другой, договор тот же.
+const SHARED_POP: &str = "\
+data Seen where
+  MkSeen : Ptr -> Int64 -> Seen
+
+main : Seen
+main =
+  let a : Int64 = 11
+  let b : Int64 = 22
+  let r0 : Block = regionNew
+  let r1 : Block = regionAlloc r0 a
+  let h1 : Ptr = regionLast r1
+  let r2 : Block = regionPop r1 h1
+  let r3 : Block = regionAlloc r2 b
+  MkSeen (regionLast r3) (regionRead r1 h1)
+";
+
+#[test]
+fn a_returned_cell_keeps_the_ownership_contract() {
+    let (answer, allocated) = named("возврат-разделённой", &format!("{SHAPE}{SHARED_RETURN}"));
+    assert_eq!(
+        answer, "MkSeen 0 11",
+        "копия обязана унести свободную ячейку, а прежняя область - остаться целой"
+    );
+    assert_eq!(
+        allocated, 3,
+        "прежняя область, копия и ответ - три блока, выдано {allocated}"
+    );
+    let (answer, allocated) = named("вершина-разделённой", &format!("{SHAPE}{SHARED_POP}"));
+    assert_eq!(answer, "MkSeen 0 11");
+    assert_eq!(allocated, 3);
 }
 
 /// Связывания плоской нагрузки: примитив либо плотный агрегат.

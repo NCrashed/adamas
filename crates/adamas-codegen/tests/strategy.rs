@@ -276,6 +276,114 @@ fn a_pool_reuses_only_cells_of_the_same_size() {
     assert_eq!(allocated, 2);
 }
 
+/// Ячейка равного размера, но чужой границы, тоже не достаётся.
+///
+/// Сверка границ у примитива **ненаблюдаема**: у всякого из §4.11 размер равен
+/// выравниванию, поэтому равный по размеру всегда и выровнен - тот же случай,
+/// что у шага массива в 3б. Различающее значение появляется у **агрегата**:
+/// `Quad` - шестнадцать байт по границе четыре, `Padded` - те же шестнадцать по
+/// границе восемь (§4.11: граница агрегата есть максимум границ полей).
+///
+/// Ячейка `Quad` отводится по смещению 4 - её туда двигает `Float32` перед
+/// ней, - и отдаётся. `Padded` того же размера её не берёт: 4 на восемь не
+/// делится. Сними сверку границ, и хендл станет `4`, то есть `Padded` лёг бы
+/// по нечётному слову.
+const POOL_ALIGNED: &str = "\
+type Quad = { a : Float32, b : Float32, c : Float32, d : Float32 }
+
+type Padded = { wide : Int64, tag : Int8 }
+
+main : Pair
+main =
+  let edge : Float32 = 0.5
+  let quad : Quad = { a = 1.0, b = 2.0, c = 3.0, d = 4.0 }
+  let padded : Padded = { wide = 7, tag = 1 }
+  let r0 : Pool.Block = Pool.new MkUnit
+  let r1 : Pool.Block = Pool.store r0 edge
+  let r2 : Pool.Block = Pool.store r1 quad
+  let h1 : Ptr = Pool.here r2
+  let r3 : Pool.Block = Pool.free r2 h1
+  let r4 : Pool.Block = Pool.store r3 padded
+  let h2 : Ptr = Pool.here r4
+  MkPair h1 h2
+";
+
+#[test]
+fn a_pool_refuses_a_cell_of_the_wrong_bound() {
+    let (answer, allocated) = run("пул-граница", &format!("{SHAPE}{POOL_ALIGNED}"));
+    assert_eq!(
+        answer, "MkPair 4 24",
+        "равный по размеру, но не по границе, обязан лечь мимо отданной ячейки"
+    );
+    assert_eq!(allocated, 2);
+}
+
+/// Отданная ячейка выдаётся **однажды**: вторая нагрузка идёт подъёмом.
+///
+/// Утверждение про безопасность, а не про экономию: выдай ячейку дважды, и два
+/// живых значения легли бы в одни байты. Проба поэтому размещает после возврата
+/// **дважды** - все прочие размещают по разу, и на них ошибка ненаблюдаема, что
+/// и показал мутант.
+const POOL_ONCE: &str = "\
+main : Pair
+main =
+  let a : Int64 = 1
+  let b : Int64 = 2
+  let c : Int64 = 4
+  let d : Int64 = 8
+  let r0 : Pool.Block = Pool.new MkUnit
+  let r1 : Pool.Block = Pool.store r0 a
+  let h1 : Ptr = Pool.here r1
+  let r2 : Pool.Block = Pool.store r1 b
+  let r3 : Pool.Block = Pool.free r2 h1
+  let r4 : Pool.Block = Pool.store r3 c
+  let taken : Ptr = Pool.here r4
+  let r5 : Pool.Block = Pool.store r4 d
+  MkPair taken (Pool.here r5)
+";
+
+#[test]
+fn a_recycled_cell_is_handed_out_once() {
+    let (answer, allocated) = run("пул-однажды", &format!("{SHAPE}{POOL_ONCE}"));
+    assert_eq!(
+        answer, "MkPair 0 16",
+        "вторая нагрузка обязана пойти подъёмом: занятую ячейку второй раз не выдают"
+    );
+    assert_eq!(allocated, 2);
+}
+
+/// Из равных по размеру берётся **самая поздняя по размещению**.
+///
+/// Правило деталь, но деталь наблюдаемая, и записана она в двух местах сразу -
+/// в машине и в рантайме. Здесь свободных ячеек **две**, и обе подходят: обход
+/// с другого конца отдал бы `0` вместо `8`.
+const POOL_ORDER: &str = "\
+main : Pair
+main =
+  let a : Int64 = 1
+  let b : Int64 = 2
+  let c : Int64 = 4
+  let r0 : Pool.Block = Pool.new MkUnit
+  let r1 : Pool.Block = Pool.store r0 a
+  let lower : Ptr = Pool.here r1
+  let r2 : Pool.Block = Pool.store r1 b
+  let upper : Ptr = Pool.here r2
+  let r3 : Pool.Block = Pool.free r2 lower
+  let r4 : Pool.Block = Pool.free r3 upper
+  let r5 : Pool.Block = Pool.store r4 c
+  MkPair upper (Pool.here r5)
+";
+
+#[test]
+fn a_pool_takes_the_latest_free_cell() {
+    let (answer, allocated) = run("пул-порядок", &format!("{SHAPE}{POOL_ORDER}"));
+    assert_eq!(
+        answer, "MkPair 8 8",
+        "из двух свободных равных обязана достаться поздняя по размещению"
+    );
+    assert_eq!(allocated, 2);
+}
+
 /// `StackAlloc`: отдаётся только вершина.
 ///
 /// Две аллокации, возврат **нижней** - и он пуст: третья ложится за верхней,
@@ -306,6 +414,98 @@ fn a_stack_gives_back_the_top_only() {
         answer, "MkPair 16 16",
         "возврат не с вершины обязан быть пуст, возврат с вершины - опустить курсор"
     );
+    assert_eq!(allocated, 2);
+}
+
+/// После возврата вершины последней аллокацией становится предыдущая.
+///
+/// Хендл спрашивается **сразу после** возврата, а не после следующего
+/// размещения, - и в этом весь свидетель: спроси его позже, и подъём курсора
+/// поставил бы то же число сам. Правило записано дважды, в машине и в рантайме,
+/// и разойдись они, сверка с `adamas eval` это покажет.
+const STACK_BACK: &str = "\
+main : Pair
+main =
+  let a : Int64 = 1
+  let b : Int64 = 2
+  let r0 : StackAlloc.Block = StackAlloc.new MkUnit
+  let r1 : StackAlloc.Block = StackAlloc.store r0 a
+  let bottom : Ptr = StackAlloc.here r1
+  let r2 : StackAlloc.Block = StackAlloc.store r1 b
+  let top : Ptr = StackAlloc.here r2
+  let r3 : StackAlloc.Block = StackAlloc.free r2 top
+  MkPair top (StackAlloc.here r3)
+";
+
+#[test]
+fn a_pop_hands_the_handle_back_to_the_cell_below() {
+    let (answer, allocated) = run("стек-хендл", &format!("{SHAPE}{STACK_BACK}"));
+    assert_eq!(
+        answer, "MkPair 8 0",
+        "после возврата вершины последней аллокацией обязана стать нижняя"
+    );
+    assert_eq!(allocated, 2);
+}
+
+/// Возврат ячейки байт не трогает: живая нагрузка читается сквозь него.
+///
+/// Два чтения, и оба нужны. Первое - по хендлу **живой** ячейки, через возврат
+/// соседней: возврат правит журнал, а не нагрузку, и прежнее значение обязано
+/// дойти. Второе - по хендлу **переиспользованной**: там теперь новое значение,
+/// и выигрывает последняя запись, а не первая.
+///
+/// Свидетель нашёлся мутантом: без чтения после возврата обход машины мог не
+/// проходить сквозь `regionRecycle` вовсе, и корпус этого не замечал - `store`
+/// с `here` до нагрузки не добираются.
+const POOL_READS: &str = "\
+data Seen where
+  MkSeen : Int64 -> Int64 -> Seen
+
+main : Seen
+main =
+  let a : Int64 = 11
+  let b : Int64 = 22
+  let c : Int64 = 33
+  let r0 : Pool.Block = Pool.new MkUnit
+  let r1 : Pool.Block = Pool.store r0 a
+  let h1 : Ptr = Pool.here r1
+  let r2 : Pool.Block = Pool.store r1 b
+  let h2 : Ptr = Pool.here r2
+  let r3 : Pool.Block = Pool.free r2 h1
+  let r4 : Pool.Block = Pool.store r3 c
+  MkSeen (Pool.load r4 h2) (Pool.load r4 h1)
+";
+
+/// То же у `StackAlloc`: чтение проходит и сквозь опускание курсора.
+const STACK_READS: &str = "\
+data Seen where
+  MkSeen : Int64 -> Int64 -> Seen
+
+main : Seen
+main =
+  let a : Int64 = 11
+  let b : Int64 = 22
+  let c : Int64 = 33
+  let r0 : StackAlloc.Block = StackAlloc.new MkUnit
+  let r1 : StackAlloc.Block = StackAlloc.store r0 a
+  let h1 : Ptr = StackAlloc.here r1
+  let r2 : StackAlloc.Block = StackAlloc.store r1 b
+  let h2 : Ptr = StackAlloc.here r2
+  let r3 : StackAlloc.Block = StackAlloc.free r2 h2
+  let r4 : StackAlloc.Block = StackAlloc.store r3 c
+  MkSeen (StackAlloc.load r4 h1) (StackAlloc.load r4 h2)
+";
+
+#[test]
+fn a_returned_cell_leaves_the_bytes_alone() {
+    let (answer, allocated) = run("пул-чтение", &format!("{SHAPE}{POOL_READS}"));
+    assert_eq!(
+        answer, "MkSeen 22 33",
+        "живая ячейка обязана дожить до чтения, а переиспользованная - отдать новое"
+    );
+    assert_eq!(allocated, 2);
+    let (answer, allocated) = run("стек-чтение", &format!("{SHAPE}{STACK_READS}"));
+    assert_eq!(answer, "MkSeen 11 33");
     assert_eq!(allocated, 2);
 }
 

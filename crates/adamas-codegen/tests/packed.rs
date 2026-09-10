@@ -128,6 +128,75 @@ main : Float32
 main = (arrayIndex (rotate built) 0).z
 ";
 
+/// Агрегат с **дырой**: поля разной ширины, размер округляется до границы.
+///
+/// `Vec3` для двух правил §4.11 слеп: три равных поля не показывают ни
+/// округления размера («выравнивание по максимальному `align` полей»), ни
+/// порядка полей в укладке - перестановка трёх `Float32` ненаблюдаема. Здесь
+/// поля разной ширины: `Int64` плюс `Int8` - это 9 байт, округлённых до 16, и
+/// перестановка обрезала бы широкое поле до байта.
+const PADDED: &str = "\
+type Layout = { size : UInt32, align : UInt32 }
+
+class Flat a where
+  layout : Layout
+
+type Padded = { wide : Int64, tag : Int8 }
+
+rotate : {Flat a} => Array 3 a -> Array 3 a
+rotate xs = arraySet xs 0 (arrayIndex xs 1)
+
+first : Padded
+first = { wide = 1, tag = 1 }
+
+second : Padded
+second = { wide = 700, tag = 7 }
+
+third : Padded
+third = { wide = 900, tag = 9 }
+
+built : Array 3 Padded
+built = arraySet (arraySet (arrayNew 3 first) 1 second) 2 third
+
+-- 700: широкое поле ячейки, приехавшей из первой. В байт оно не влезает, и
+-- перестановка полей укладки обрезала бы его до 188.
+main : Int64
+main = (arrayIndex (rotate built) 0).wide
+";
+
+/// Округление размера и порядок полей видны на агрегате с дырой.
+#[test]
+fn a_padded_aggregate_rounds_up_and_keeps_its_order() {
+    assert_eq!(
+        harness::printed(PADDED),
+        "700",
+        "печать машины изменилась - свидетель говорит не о том"
+    );
+    harness::agreed("packed-padded-after", PADDED).unwrap_or_else(|error| {
+        panic!("после специализации: {error}");
+    });
+    // Обобщённый путь берёт шаг у дескриптора типовой стороны - шестнадцать, -
+    // а `built` укладывает ячейки размером понижения. Не округли понижение
+    // девять до шестнадцати, и `rotate` возьмёт байты не с той ячейки.
+    harness::as_written("packed-padded-before", PADDED).unwrap_or_else(|error| {
+        panic!("до специализации: {error}");
+    });
+    let text = harness::text(PADDED).unwrap_or_else(|error| panic!("агрегат с дырой: {error}"));
+    for written in [
+        "_Alignas(8) unsigned char bytes[16];",
+        // Широкое поле стоит первым и читается восемью байтами, узкое - за ним,
+        // по восьмому байту. Сборка пишет `&значение`, чтение - ширину, отсюда
+        // две разные формы строки.
+        ".bytes + 0, 8u",
+        ".bytes + 8, &",
+    ] {
+        assert!(
+            text.contains(written),
+            "в порождённом C нет `{written}`: укладка §4.11 разошлась"
+        );
+    }
+}
+
 /// Запись из одних примитивов: ячейки кучи не стоит вовсе.
 const REGISTERS: &str = "\
 type Triple = { first : Int64, second : Int64, third : Int64 }
@@ -278,14 +347,17 @@ class Flat a where
 type V3 (a : Type) = { x : a, y : a, z : a }
 type Vec3 = V3 Float32
 
-type Handle = { index : UInt32, generation : UInt32 }",
+type Handle = { index : UInt32, generation : UInt32 }
+
+type Padded = { wide : Int64, tag : Int8 }",
         "\
 main : List Layout
-main = Cons (layout @Vec3) (Cons (layout @Handle) Nil)"
+main = Cons (layout @Vec3) (Cons (layout @Handle) (Cons (layout @Padded) Nil))"
     );
     assert_eq!(
         harness::printed(&source),
-        "Cons ({size = 12, align = 4}) (Cons ({size = 8, align = 4}) Nil)",
+        "Cons ({size = 12, align = 4}) (Cons ({size = 8, align = 4}) \
+         (Cons ({size = 16, align = 8}) Nil))",
         "типовая сторона считает укладку иначе"
     );
     harness::agreed("packed-layout", &source).unwrap_or_else(|error| {

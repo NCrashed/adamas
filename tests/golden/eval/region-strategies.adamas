@@ -1,0 +1,219 @@
+-- Три базовые стратегии §3.6: Arena, Pool, StackAlloc.
+--
+-- §3.6 обещает три стратегии в стандартной библиотеке и говорит, чем каждая
+-- отличается: Arena - «bump allocator, освобождение всей области целиком при
+-- drop региона»; Pool - «pool с фиксированными chunk'ами одинакового размера»;
+-- StackAlloc - размещение стеком, то есть LIFO. Здесь они написаны, и
+-- различаются **числами в ответе**, а не именами.
+--
+-- Интерфейс один - `module type AllocStrategy`, - и это вопрос 161: встроенность
+-- есть свойство понижения, а не языка. Три тела ниже расходятся **одной
+-- строкой**: тем, что делает `free`.
+--
+--     Arena.free r p = r                 -- ничего: область отдаётся целиком
+--     Pool.free r p = regionRecycle r p  -- ячейка ждёт равную по размеру
+--     StackAlloc.free r p = regionPop r p -- курсор вниз, если это вершина
+--
+-- Размещение при этом у всех троих одно и то же (`regionAlloc`), и политики в
+-- нём нет: **свободная ячейка равного размера, иначе подъём курсора**.
+-- Свободные ячейки заводит только `regionRecycle`, поэтому у Arena их не бывает
+-- вовсе - её «bump» есть следствие её `free`, а не отдельное правило.
+--
+-- Проба одна на три стратегии, слово в слово, и устроена она так, чтобы
+-- различить всех троих сразу. Возврат в ней случается дважды: сперва **не с
+-- вершины** (отданная ячейка - первая, а последняя - вторая), потом **с
+-- вершины**. Первый различает Pool: только он умеет отдавать из середины.
+-- Второй различает Arena: только у неё курсор не опускается.
+--
+--     стратегия   хендл после первого возврата   после второго
+--     Arena                    16                      24
+--     Pool                      0                       0
+--     StackAlloc               16                      16
+--
+-- Четвёртая проба - обещание Pool про **равный размер**. Восьмибайтовая ячейка
+-- отдана; следом кладётся четырёхбайтовое, и ячейка ему не достаётся (хендл 8, а
+-- не 0), а следующее восьмибайтовое достаётся (хендл 0). Без сверки размеров оба
+-- числа стали бы нулями.
+--
+-- Три расхождения с §3.6 названы, и каждое имеет причину.
+--
+-- *`new` берёт `Unit`, а не живёт в `{IO}`.* `(ω u : Unit) ->` есть развёртка
+-- приостановленного вычисления (§3.4), и §3.6 пишет её сам - в типе
+-- `withRegion`. Нужна она здесь потому, что нульарный член типа `Block` был бы
+-- **значением** в записи модуля, а область есть объект кучи: слот записи её не
+-- принимает. Строка `{IO}` дословно написана в `eval/region-strategy-in-io`.
+--
+-- *`alloc` разрезан надвое.* `alloc : Block -> Nat -> Ptr` двигает область
+-- **и** отдаёт хендл, а ядро чисто: подъём возвращает область (`store`), хендл
+-- спрашивается у неё следом (`here`). Размер нагрузки при этом не пишется
+-- числом, а берётся у её укладки - соврать в нём нечем.
+--
+-- *`free` в §3.6 не назван, а здесь есть.* `deallocate : Block -> ()` §3.6
+-- освобождает область целиком, и такой операции у нас нет нарочно: освобождает
+-- дроп. Поячеечный возврат - другое, и без него Pool со StackAlloc пусты:
+-- «переиспользование ячеек равного размера» и LIFO не выражаются ничем иным.
+-- Размер возвращаемой ячейки при этом тоже не пишется числом - его помнит сама
+-- область.
+--
+-- Названная граница: стратегии аннотированы `:`, а не `:>`. Запечатанный член
+-- специализации не получает - специализация есть δ-разворот, а снаружи `:>` он
+-- запрещён (`adamas-elab/src/mono.rs`), - и обобщённый по нагрузке `store`
+-- понижением тогда не берётся. Запечатанный вариант считает интерпретатор:
+-- `eval/region-strategy-in-io`.
+
+type Layout = { size : UInt32, align : UInt32 }
+
+class Flat a where
+  layout : Layout
+
+data Unit where
+  MkUnit : Unit
+
+module type AllocStrategy where
+  type Block
+  new   : Unit -> Block
+  store : {Flat a} => Block -> a -> Block
+  here  : Block -> Ptr
+  load  : {Flat a} => Block -> Ptr -> a
+  free  : Block -> Ptr -> Block
+
+module Arena : AllocStrategy where
+  type Block = Block
+
+  new : Unit -> Block
+  new u = regionNew
+
+  store : {Flat a} => Block -> a -> Block
+  store r x = regionAlloc r x
+
+  here : Block -> Ptr
+  here r = regionLast r
+
+  load : {Flat a} => Block -> Ptr -> a
+  load r p = regionRead r p
+
+  -- Ячейка обратно не берётся вовсе: область отдаётся целиком, дропом.
+  free : Block -> Ptr -> Block
+  free r p = r
+
+module Pool : AllocStrategy where
+  type Block = Block
+
+  new : Unit -> Block
+  new u = regionNew
+
+  store : {Flat a} => Block -> a -> Block
+  store r x = regionAlloc r x
+
+  here : Block -> Ptr
+  here r = regionLast r
+
+  load : {Flat a} => Block -> Ptr -> a
+  load r p = regionRead r p
+
+  -- Ячейка ждёт следующую нагрузку **равного размера**, где бы ни лежала.
+  free : Block -> Ptr -> Block
+  free r p = regionRecycle r p
+
+module StackAlloc : AllocStrategy where
+  type Block = Block
+
+  new : Unit -> Block
+  new u = regionNew
+
+  store : {Flat a} => Block -> a -> Block
+  store r x = regionAlloc r x
+
+  here : Block -> Ptr
+  here r = regionLast r
+
+  load : {Flat a} => Block -> Ptr -> a
+  load r p = regionRead r p
+
+  -- Курсор опускается, и только с вершины: не вершину LIFO не отдаёт.
+  free : Block -> Ptr -> Block
+  free r p = regionPop r p
+
+data Pair where
+  MkPair : Ptr -> Ptr -> Pair
+
+data Answer where
+  MkAnswer : Pair -> Pair -> Pair -> Pair -> Answer
+
+-- 16 и 24: возврат ничего не освободил, курсор шёл вверх все четыре раза.
+arena : Pair
+arena =
+  let a : Int64 = 1
+  let b : Int64 = 2
+  let c : Int64 = 4
+  let d : Int64 = 8
+  let r0 : Arena.Block = Arena.new MkUnit
+  let r1 : Arena.Block = Arena.store r0 a
+  let h1 : Ptr = Arena.here r1
+  let r2 : Arena.Block = Arena.store r1 b
+  let r3 : Arena.Block = Arena.free r2 h1
+  let r4 : Arena.Block = Arena.store r3 c
+  let h3 : Ptr = Arena.here r4
+  let r5 : Arena.Block = Arena.free r4 h3
+  let r6 : Arena.Block = Arena.store r5 d
+  let h4 : Ptr = Arena.here r6
+  MkPair h3 h4
+
+-- 0 и 0: отданная ячейка достаётся следующей нагрузке того же размера, и
+-- отдать её можно из середины.
+pool : Pair
+pool =
+  let a : Int64 = 1
+  let b : Int64 = 2
+  let c : Int64 = 4
+  let d : Int64 = 8
+  let r0 : Pool.Block = Pool.new MkUnit
+  let r1 : Pool.Block = Pool.store r0 a
+  let h1 : Ptr = Pool.here r1
+  let r2 : Pool.Block = Pool.store r1 b
+  let r3 : Pool.Block = Pool.free r2 h1
+  let r4 : Pool.Block = Pool.store r3 c
+  let h3 : Ptr = Pool.here r4
+  let r5 : Pool.Block = Pool.free r4 h3
+  let r6 : Pool.Block = Pool.store r5 d
+  let h4 : Ptr = Pool.here r6
+  MkPair h3 h4
+
+-- 16 и 16: первый возврат не с вершины и потому пуст, второй - с вершины.
+stack : Pair
+stack =
+  let a : Int64 = 1
+  let b : Int64 = 2
+  let c : Int64 = 4
+  let d : Int64 = 8
+  let r0 : StackAlloc.Block = StackAlloc.new MkUnit
+  let r1 : StackAlloc.Block = StackAlloc.store r0 a
+  let h1 : Ptr = StackAlloc.here r1
+  let r2 : StackAlloc.Block = StackAlloc.store r1 b
+  let r3 : StackAlloc.Block = StackAlloc.free r2 h1
+  let r4 : StackAlloc.Block = StackAlloc.store r3 c
+  let h3 : Ptr = StackAlloc.here r4
+  let r5 : StackAlloc.Block = StackAlloc.free r4 h3
+  let r6 : StackAlloc.Block = StackAlloc.store r5 d
+  let h4 : Ptr = StackAlloc.here r6
+  MkPair h3 h4
+
+-- 8 и 0: восьмибайтовая ячейка отдана, четырёхбайтовому она не досталась, а
+-- следующему восьмибайтовому досталась. Это и есть «одинакового размера».
+sized : Pair
+sized =
+  let wide : Int64 = 1
+  let narrow : Float32 = 0.5
+  let again : Int64 = 2
+  let r0 : Pool.Block = Pool.new MkUnit
+  let r1 : Pool.Block = Pool.store r0 wide
+  let h1 : Ptr = Pool.here r1
+  let r2 : Pool.Block = Pool.free r1 h1
+  let r3 : Pool.Block = Pool.store r2 narrow
+  let h2 : Ptr = Pool.here r3
+  let r4 : Pool.Block = Pool.store r3 again
+  let h3 : Ptr = Pool.here r4
+  MkPair h2 h3
+
+main : Answer
+main = MkAnswer arena pool stack sized

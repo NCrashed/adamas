@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+MkAnswer (MkPair 16 24) (MkPair 0 0) (MkPair 0 8) (MkPair 0 8)

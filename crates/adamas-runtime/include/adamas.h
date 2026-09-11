@@ -865,16 +865,24 @@ typedef adamas_value (*adamas_handler_code)(adamas_frame *handler, adamas_kont *
  */
 typedef void (*adamas_frame_release)(adamas_frame *frame, adamas_kont *kont);
 
-/** Стек продолжения второй формы понижения - её второй скрытый аргумент. */
+/**
+ * Стек продолжения второй формы понижения - её второй скрытый аргумент.
+ *
+ * Поле одно, и длины среди них нет: разрез сегмента обязан идти за постоянное
+ * время, иначе операция под рекурсией стоит глубины, а прогон - квадрата
+ * (§10 вопрос 94). Длину спрашивают диагностика и свидетели, и она считается
+ * обходом - [`adamas_kont_depth`].
+ */
 struct adamas_kont {
     /** Вершина: ближайшая работа. `NULL` - стек пуст. */
     adamas_frame *top;
-    /** Кадров в стеке. */
-    size_t depth;
 };
 
 /** Пустой стек. */
 void adamas_kont_init(adamas_kont *kont);
+
+/** Кадров в стеке. Считается обходом; диагностика. */
+size_t adamas_kont_depth(const adamas_kont *kont);
 
 /**
  * Кладёт кадр на вершину и отдаёт его: среду заполняет вызывающий, а указатель
@@ -932,8 +940,12 @@ uint32_t adamas_frame_label(const adamas_frame *frame);
 adamas_evidence *adamas_frame_evidence(adamas_frame *frame);
 
 /**
- * Режет стек от вершины до `handler` включительно. Кадр хендлера приходит из
- * вектора evidence: поиска по стеку рантайм не ведёт.
+ * Режет стек от вершины до `handler` включительно **за постоянное время**.
+ *
+ * Кадр хендлера приходит из вектора evidence: поиска по стеку рантайм не ведёт,
+ * и проверки принадлежности - тоже. Проверка была бы обходом сегмента, а
+ * сегмент общей ветки растёт с глубиной рекурсии под хендлером: обход на каждой
+ * операции даёт квадрат. Мерено на ряде 3200/6400/12800/25600 операций.
  */
 adamas_segment *adamas_kont_cut(adamas_kont *kont, adamas_frame *handler);
 
@@ -991,7 +1003,7 @@ adamas_value adamas_kont_run_to(adamas_kont *kont, adamas_frame *floor, adamas_v
  */
 adamas_value adamas_kont_abort(adamas_kont *kont);
 
-/** Кадров в сегменте. */
+/** Кадров в сегменте. Считается обходом; диагностика. */
 size_t adamas_segment_depth(const adamas_segment *segment);
 
 /** Нижний кадр сегмента - им стоит хендлер. */

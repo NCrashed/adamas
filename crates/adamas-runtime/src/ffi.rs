@@ -71,8 +71,6 @@ pub const HANDLER_RETURN: u32 = 0xFFFF_FFFF;
 pub struct Kont {
     /// Вершина: ближайшая работа.
     pub top: *mut Frame,
-    /// Кадров в стеке.
-    pub depth: usize,
 }
 
 /// Обычная отложенная работа.
@@ -263,6 +261,8 @@ unsafe extern "C" {
 
     /// Пустой стек.
     pub fn adamas_kont_init(kont: *mut Kont);
+    /// Кадров в стеке: считается обходом.
+    pub fn adamas_kont_depth(kont: *const Kont) -> usize;
     /// Кладёт кадр на вершину и отдаёт его.
     pub fn adamas_kont_push(
         kont: *mut Kont,

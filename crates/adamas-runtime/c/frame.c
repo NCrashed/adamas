@@ -30,13 +30,12 @@ struct adamas_segment {
     adamas_header header;
     adamas_frame *top;
     adamas_frame *base;
-    size_t depth;
 };
 
 /* Смещения закреплены: числа эти уезжают от перестановки полей молча, а Фаза 7
  * ставит по ним `align` и `dereferenceable` (шапка `adamas.h`, «Выравнивание»). */
 _Static_assert(offsetof(struct adamas_frame, env) == 56, "среда кадра идёт с 56-го байта");
-_Static_assert(sizeof(struct adamas_segment) == 32, "сегмент - четыре слова");
+_Static_assert(sizeof(struct adamas_segment) == 24, "сегмент - три слова");
 
 static adamas_frame *frame_alloc(uint16_t mark, uint32_t label, adamas_frame_code code,
                                  adamas_handler_code branches, adamas_frame_release release,
@@ -82,6 +81,17 @@ static adamas_evidence *closing_evidence(adamas_frame *frame, adamas_frame *rest
         }
     }
     return evidence;
+}
+
+/* Длина цепочки. Считается обходом и **не хранится**: единственные её читатели
+ * - диагностика и свидетели, а разрез с возобновлением обязаны быть за
+ * постоянное время (см. `adamas_kont_cut`). */
+static size_t chain_depth(const adamas_frame *top) {
+    size_t depth = 0;
+    for (const adamas_frame *frame = top; frame != NULL; frame = frame->below) {
+        depth += 1;
+    }
+    return depth;
 }
 
 static void frame_free(adamas_frame *frame, adamas_kont *kont) {
@@ -141,7 +151,6 @@ static adamas_value unwind_step(adamas_kont *kont, adamas_frame *frame, adamas_v
         return held;
     }
     chain->top = next->below;
-    chain->depth -= 1;
     next->below = NULL;
 
     uint16_t mark = adamas_frame_mark(next);
@@ -153,7 +162,6 @@ static adamas_value unwind_step(adamas_kont *kont, adamas_frame *frame, adamas_v
         unwind_push(kont, chain, held, 1);
         next->below = kont->top;
         kont->top = next;
-        kont->depth += 1;
         return adamas_unit();
     }
     if (mark == ADAMAS_MARK_CLOSING) {
@@ -177,7 +185,7 @@ static adamas_value unwind_step(adamas_kont *kont, adamas_frame *frame, adamas_v
     return adamas_unit();
 }
 
-static adamas_segment *segment_alloc(adamas_frame *top, adamas_frame *base, size_t depth) {
+static adamas_segment *segment_alloc(adamas_frame *top, adamas_frame *base) {
     adamas_segment *segment = (adamas_segment *)adamas_block_alloc(sizeof(adamas_segment));
     adamas_header *header = adamas_header_of(segment);
     header->rc = 0;
@@ -185,7 +193,6 @@ static adamas_segment *segment_alloc(adamas_frame *top, adamas_frame *base, size
     header->flags = 0;
     segment->top = top;
     segment->base = base;
-    segment->depth = depth;
     return segment;
 }
 
@@ -203,7 +210,6 @@ static void unwind_push(adamas_kont *kont, adamas_segment *chain, adamas_value h
 
 void adamas_kont_init(adamas_kont *kont) {
     kont->top = NULL;
-    kont->depth = 0;
 }
 
 adamas_frame *adamas_kont_push(adamas_kont *kont, uint16_t mark, uint32_t label,
@@ -216,7 +222,6 @@ adamas_frame *adamas_kont_push(adamas_kont *kont, uint16_t mark, uint32_t label,
                                       (adamas_evidence *)(uintptr_t)evidence);
     frame->below = kont->top;
     kont->top = frame;
-    kont->depth += 1;
     return frame;
 }
 
@@ -230,7 +235,6 @@ adamas_frame *adamas_kont_handler(adamas_kont *kont, uint32_t label, adamas_hand
                                       (adamas_evidence *)(uintptr_t)evidence);
     frame->below = kont->top;
     kont->top = frame;
-    kont->depth += 1;
     return frame;
 }
 
@@ -269,7 +273,6 @@ adamas_frame *adamas_kont_closing(adamas_kont *kont, const adamas_evidence *evid
     frame->env[0] = closer;
     frame->below = kont->top;
     kont->top = frame;
-    kont->depth += 1;
     return frame;
 }
 
@@ -285,7 +288,6 @@ adamas_value adamas_kont_run_to(adamas_kont *kont, adamas_frame *floor, adamas_v
         }
         adamas_frame *frame = kont->top;
         kont->top = frame->below;
-        kont->depth -= 1;
         frame->below = NULL;
         uint16_t mark = adamas_frame_mark(frame);
         if (mark == ADAMAS_MARK_CLOSING) {
@@ -343,21 +345,19 @@ adamas_segment *adamas_kont_cut(adamas_kont *kont, adamas_frame *handler) {
     if (handler == NULL) {
         adamas_fail("резать нечего: кадр хендлера не назван");
     }
-    /* Обход идёт по будущему сегменту, а не по всему стеку, и нужен он только
-     * ради длины: копирование и раскрутка стоят столько же. Кадр хендлера
-     * приходит из вектора evidence, поэтому поиска здесь нет (§3.4). */
-    size_t depth = 1;
-    adamas_frame *frame = kont->top;
-    while (frame != NULL && frame != handler) {
-        frame = frame->below;
-        depth += 1;
-    }
-    if (frame == NULL) {
-        adamas_fail("кадр хендлера не принадлежит этому стеку");
-    }
-    adamas_segment *segment = segment_alloc(kont->top, handler, depth);
+    /* Разрез идёт за постоянное время, и это **несущее** свойство, а не
+     * экономия. Сегмент общей ветки растёт с глубиной рекурсии под хендлером;
+     * обход по нему на каждой операции давал бы квадрат, ровно тот, из-за
+     * которого у машины стек лежит звеньями (§10 вопрос 94). Прежняя редакция
+     * обходила сегмент ради его длины с доводом «копирование и раскрутка стоят
+     * столько же»; довод верен для мультишота и абортивной ветки и неверен для
+     * одношота общего вида, где возобновление есть перекладывание указателей.
+     * Мерено: 17/53/164/921 мс на 3200/6400/12800/25600 операций до правки.
+     *
+     * Кадр хендлера приходит из вектора evidence, поэтому поиска здесь нет
+     * (§3.4), а проверки принадлежности стеку - тоже: она и была тем обходом. */
+    adamas_segment *segment = segment_alloc(kont->top, handler);
     kont->top = handler->below;
-    kont->depth -= depth;
     handler->below = NULL;
     return segment;
 }
@@ -365,7 +365,6 @@ adamas_segment *adamas_kont_cut(adamas_kont *kont, adamas_frame *handler) {
 void adamas_kont_restore(adamas_kont *kont, adamas_segment *segment) {
     segment->base->below = kont->top;
     kont->top = segment->top;
-    kont->depth += segment->depth;
     /* Ручка потреблена: сегмент снова часть стека, и второго владельца у него
      * нет. Мультишот восстанавливает копию, а не этот же сегмент. */
     adamas_block_free(segment);
@@ -380,17 +379,19 @@ void adamas_kont_resume(adamas_kont *kont, adamas_value value) {
     }
     segment->base->below = kont->top;
     kont->top = segment->top;
-    kont->depth += segment->depth;
     /* Ручка **тратится**, а не освобождается: ссылок на неё бывает больше
      * одной - замыкание `\s -> resume v s` держит её наравне с вызывающим, - и
      * блок отдаст последняя. Пустая ручка раскручивать нечего. */
     segment->top = NULL;
     segment->base = NULL;
-    segment->depth = 0;
 }
 
 size_t adamas_segment_depth(const adamas_segment *segment) {
-    return segment->depth;
+    return chain_depth(segment->top);
+}
+
+size_t adamas_kont_depth(const adamas_kont *kont) {
+    return chain_depth(kont->top);
 }
 
 adamas_frame *adamas_segment_base(adamas_segment *segment) {
@@ -422,7 +423,7 @@ adamas_segment *adamas_segment_copy(const adamas_segment *segment) {
         previous = copy;
         source = source->below;
     }
-    return segment_alloc(first, previous, segment->depth);
+    return segment_alloc(first, previous);
 }
 
 void adamas_segment_unwind(adamas_kont *kont, adamas_segment *segment) {
@@ -437,18 +438,15 @@ adamas_value adamas_kont_abort(adamas_kont *kont) {
      * прежнее правило как частный случай. */
     adamas_frame *cursor = kont->top;
     adamas_frame *last = NULL;
-    size_t depth = 0;
     while (cursor != NULL && adamas_frame_mark(cursor) != ADAMAS_MARK_UNWINDING) {
         last = cursor;
-        depth += 1;
         cursor = cursor->below;
     }
-    if (depth == 0) {
+    if (last == NULL) {
         return adamas_unit();
     }
-    adamas_segment *chain = segment_alloc(kont->top, last, depth);
+    adamas_segment *chain = segment_alloc(kont->top, last);
     kont->top = cursor;
-    kont->depth -= depth;
     last->below = NULL;
     unwind_push(kont, chain, adamas_unit(), 0);
     return adamas_unit();
@@ -494,10 +492,9 @@ void adamas_segment_abandon(adamas_value value) {
      * приостановки у этого пути нет вовсе. */
     adamas_kont local;
     adamas_kont_init(&local);
-    adamas_segment *chain = segment_alloc(segment->top, segment->base, segment->depth);
+    adamas_segment *chain = segment_alloc(segment->top, segment->base);
     segment->top = NULL;
     segment->base = NULL;
-    segment->depth = 0;
     unwind_push(&local, chain, adamas_unit(), 0);
     adamas_drop(adamas_kont_run(&local, adamas_unit()), NULL);
 }

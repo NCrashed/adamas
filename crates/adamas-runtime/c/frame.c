@@ -204,6 +204,39 @@ static void unwind_push(adamas_kont *kont, adamas_segment *chain, adamas_value h
 void adamas_kont_init(adamas_kont *kont) {
     kont->top = NULL;
     kont->depth = 0;
+    kont->answer = adamas_unit();
+    kont->target = 0;
+    kont->aborting = 0;
+}
+
+void adamas_kont_arm(adamas_kont *kont, uintptr_t target, adamas_value answer) {
+    if (kont->aborting) {
+        /* Обрыв поверх обрыва: два ответа на одну ручку, и деть второй некуда.
+         * Отказ, а не молчание, - тот же довод, что у копии кадра раскрутки. */
+        adamas_fail("обрыв поверх обрыва: абортивная ветка внутри абортивной");
+    }
+    kont->aborting = 1;
+    kont->target = target;
+    kont->answer = answer;
+}
+
+int adamas_kont_aborting(const adamas_kont *kont) {
+    return kont->aborting;
+}
+
+uintptr_t adamas_kont_target(const adamas_kont *kont) {
+    return kont->target;
+}
+
+adamas_value adamas_kont_disarm(adamas_kont *kont) {
+    if (!kont->aborting) {
+        adamas_fail("ответ обрыва спрошен там, где обрыва нет");
+    }
+    adamas_value answer = kont->answer;
+    kont->aborting = 0;
+    kont->target = 0;
+    kont->answer = adamas_unit();
+    return answer;
 }
 
 adamas_frame *adamas_kont_push(adamas_kont *kont, uint16_t mark, uint32_t label,
@@ -275,8 +308,42 @@ adamas_evidence *adamas_frame_evidence(adamas_frame *frame) {
     return frame->evidence;
 }
 
+adamas_frame *adamas_kont_closing(adamas_kont *kont, const adamas_evidence *evidence,
+                                  adamas_frame_release release, adamas_value closer) {
+    adamas_frame *frame = frame_alloc(ADAMAS_MARK_CLOSING, 0, NULL, NULL, release, 1,
+                                      (adamas_evidence *)(uintptr_t)evidence);
+    frame->env[0] = closer;
+    frame->below = kont->top;
+    kont->top = frame;
+    kont->depth += 1;
+    return frame;
+}
+
+void adamas_kont_close(adamas_kont *kont, adamas_frame *scope, adamas_release release) {
+    if (kont->top != scope) {
+        adamas_fail("нормальный выход из scope не с вершины стека");
+    }
+    kont->top = scope->below;
+    kont->depth -= 1;
+    scope->below = NULL;
+    /* Деструктор бежит на этом же стеке и под вектором места scope: хендлеры
+     * под ним живы, ответа ещё не давали, подавления тут нет (шапка). */
+    adamas_value closer = scope->env[0];
+    adamas_value answer = adamas_apply(closer, scope->evidence, kont, adamas_unit());
+    adamas_drop(answer, release);
+    frame_free(scope, kont);
+}
+
 adamas_value adamas_kont_run(adamas_kont *kont, adamas_value value) {
-    while (kont->top != NULL) {
+    return adamas_kont_run_to(kont, NULL, value);
+}
+
+adamas_value adamas_kont_run_to(adamas_kont *kont, adamas_frame *floor, adamas_value value) {
+    while (kont->top != floor) {
+        if (kont->top == NULL) {
+            /* Пол не встретился: кадр, до которого крутили, сняли не мы. */
+            adamas_fail("пол раскрутки не принадлежит этому стеку");
+        }
         adamas_frame *frame = kont->top;
         kont->top = frame->below;
         kont->depth -= 1;

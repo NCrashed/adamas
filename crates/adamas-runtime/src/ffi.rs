@@ -73,6 +73,12 @@ pub struct Kont {
     pub top: *mut Frame,
     /// Кадров в стеке.
     pub depth: usize,
+    /// Ответ обрыва в полёте; смысл имеет при `aborting`.
+    pub answer: Value,
+    /// Чей кадр хендлера обрыв назвал: адрес до среза, числом.
+    pub target: usize,
+    /// Идёт ли обрыв.
+    pub aborting: core::ffi::c_int,
 }
 
 /// Обычная отложенная работа.

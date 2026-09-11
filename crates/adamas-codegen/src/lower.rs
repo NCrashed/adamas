@@ -546,6 +546,15 @@ struct Lowerer<'a> {
     /// `family_packing` разворачивался бы через таблицу конструкторов в себя
     /// до дна стека.
     pending: VecDeque<(FuncId, Name)>,
+    /// Идёт ли понижение под ручкой стека - то есть во второй форме.
+    ///
+    /// Решает это одно: ставить ли кадр `MARK_CLOSING` на выходе из scope
+    /// (§3.3). Кадр умеет только вторая форма - у первой стека нет вовсе, и
+    /// обрываться в ней нечему. Флаг повторяет `Emitter::hidden` местами
+    /// включения: тело второй формы, ветка хендлера, лямбда и **вычисление под
+    /// `handle`** - последнее потому, что хендлер в чистой функции заводит
+    /// корень своего стека, и scope под ним обязан быть кадром.
+    detached: bool,
 }
 
 impl<'a> Lowerer<'a> {
@@ -561,6 +570,7 @@ impl<'a> Lowerer<'a> {
             marks: HashMap::new(),
             handlers: Vec::new(),
             pending: VecDeque::new(),
+            detached: false,
         }
     }
 
@@ -636,6 +646,7 @@ impl<'a> Lowerer<'a> {
                 scope.env.push(Slot::Bound(parameter.local, parameter.fact));
             }
             let declared = self.functions[id.0].result;
+            self.detached = self.functions[id.0].form == Form::Detached;
             let (mut body, repr) =
                 self.saturated(&mut scope, &inner, &parameters[taken..], declared)?;
             if !fits(repr, declared) {
@@ -1954,19 +1965,21 @@ impl<'a> Lowerer<'a> {
 
     /// Выход из scope, держащего ресурс: `#closing` (§3.3).
     ///
-    /// # Что здесь повторяется, а что нет
+    /// # Формы две, и различает их ручка стека
     ///
     /// У машины scope овеществлён кадром (`Frame::Closing`), и это не
     /// украшение: обрыв через эффект находит отложенное **в брошенном
-    /// сегменте**. Здесь кадра нет, и обрываться нечему: сегмент снимает
-    /// абортивная ветка, а её этот срез отвергает по имени. Остаётся то, что
-    /// кадр делает на нормальном выходе, - `Closing` со следующим за ним
-    /// `Closed`: тело, потом деструктор, потом ответ тела.
+    /// сегменте**. Во **второй** форме тем же занят кадр `MARK_CLOSING`
+    /// (`adamas.h`), и ставится он здесь: [`Expr::Closing`]. В **первой** стека
+    /// нет вовсе, обрываться нечему, и остаётся то, что кадр делает на
+    /// нормальном выходе, - тело, потом деструктор, потом ответ тела.
     ///
-    /// Исключительные выходы приходят вместе с абортивной веткой - трек C
-    /// волны 4, - и кадр `MARK_CLOSING` ставит он же.
+    /// Цена второй формы названа: деструктор становится **замыканием**, то есть
+    /// ячейкой кучи на scope. Раскрутка ведёт его сама (`unwind_step`
+    /// применяет его к единице), а взять там нечего, кроме значения. Первая
+    /// форма за это по-прежнему не платит - тем и различаются две ветки ниже.
     ///
-    /// # Почему связывания, а не свой узел
+    /// # Почему у первой формы связывания, а не свой узел
     ///
     /// Договор о владении у [`Expr::Bind`] уже есть, и второй узел потребовал
     /// бы второй его копии - тот же довод, каким проекция §4.2 понижается
@@ -1974,10 +1987,11 @@ impl<'a> Lowerer<'a> {
     /// употребляется, поэтому дропает его [`crate::perceus`] обычным правилом,
     /// а не отдельным знанием про scope.
     ///
-    /// LIFO выходит вложенностью и ничего к ней не добавляет: связывание,
-    /// стоящее ниже, обернуло при вставке меньший кусок
+    /// LIFO выходит вложенностью у обеих форм и ничего к ней не добавляет:
+    /// связывание, стоящее ниже, обернуло при вставке меньший кусок
     /// (`adamas-elab/src/expr.rs`), значит его `#closing` лежит **внутри**, а
-    /// внутренний деструктор зовётся раньше внешнего.
+    /// внутренний деструктор зовётся раньше внешнего. У кадров то же выходит
+    /// порядком цепочки: внутренний лежит выше, раскрутка идёт от вершины.
     fn closing(
         &mut self,
         scope: &mut Scope,
@@ -1986,6 +2000,37 @@ impl<'a> Lowerer<'a> {
         let [_, _, Arg::Written(body), Arg::Written(close)] = arguments else {
             return Err(LowerError::Scope);
         };
+        if self.detached {
+            if !matches!(close, Term::Lam(..)) {
+                return Err(LowerError::Scope);
+            }
+            // Замыкание строится **до** тела: кадр стоит на стеке всё время,
+            // пока тело считается, иначе обрыв прошёл бы мимо деструктора.
+            // Ответ его отбрасывается внутри него самого - раскрутка о типе
+            // ответа не знает и дропнула бы его без детей.
+            let (closer, _) = self.discarding(scope, close)?;
+            let Expr::Closure {
+                function: closer,
+                captured,
+            } = closer
+            else {
+                return Err(LowerError::Scope);
+            };
+            // Имя деструктора в порождённом C: без него у кадра стоит номер
+            // лямбды, и порядок кадров читается только по номерам.
+            if let Some(named) = head(close) {
+                self.functions[closer.0].name = format!("деструктор {named}");
+            }
+            let (body, repr) = self.resumed(scope, body)?;
+            return Ok((
+                Expr::Closing {
+                    closer,
+                    captured,
+                    body: Box::new(body),
+                },
+                repr,
+            ));
+        }
         let (body, repr) = self.resumed(scope, body)?;
         let held = Binding {
             name: "ответ_scope".to_owned(),
@@ -2082,11 +2127,12 @@ impl<'a> Lowerer<'a> {
             let Arg::Written(term) = &arguments[params + 4 + slot] else {
                 unreachable!("написанность веток проверена выше")
             };
-            let function =
+            let (function, abortive) =
                 self.branch(&captured, &inner, term, written[slot], effect, operation)?;
             branches.push(Branch {
                 function,
                 written: written[slot],
+                abortive,
             });
         }
         let Arg::Written(returned) = &arguments[params + 3] else {
@@ -2112,19 +2158,28 @@ impl<'a> Lowerer<'a> {
                 why: "вычисление под хендлером пришло достроенным, а не написанным",
             });
         };
+        // Под хендлером ручка стека есть всегда - её заводит сам `handle`,
+        // включая корень в чистой функции, - поэтому scope с ресурсом здесь
+        // ставит кадр даже у первой формы снаружи.
+        let outer = std::mem::replace(&mut self.detached, true);
         let computation = if let Term::Lam(_, _, body) = computation {
             let body = Rc::clone(body);
             scope.env.push(Slot::Absent);
             let lowered = self.shaped(scope, &body, Repr::Boxed, "вычисление под хендлером");
             scope.env.pop();
-            lowered?
+            lowered
         } else {
-            let triggered = Term::App(
-                Rc::new((*computation).clone()),
-                Rc::new(Term::constant(&self.unit_name()?)),
-            );
-            self.shaped(scope, &triggered, Repr::Boxed, "вычисление под хендлером")?
+            let unit = self.unit_name();
+            unit.and_then(|unit| {
+                let triggered = Term::App(
+                    Rc::new((*computation).clone()),
+                    Rc::new(Term::constant(&unit)),
+                );
+                self.shaped(scope, &triggered, Repr::Boxed, "вычисление под хендлером")
+            })
         };
+        self.detached = outer;
+        let computation = computation?;
 
         Ok((
             Expr::Handle {
@@ -2146,12 +2201,17 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Ветка операции: своя функция, `resume` в хвосте снят.
+    /// Ветка операции: своя функция и вердикт при ней.
     ///
-    /// Снят, а не сохранён: хвостовая резумпция значит, что ответ ветки и есть
-    /// значение операции, - продолжение остаётся на C-стеке, сегмент не
-    /// режется. Это и есть «tail-resumptive → inline» §3.4 минус инлайнинг,
-    /// который придёт вопросом 74.
+    /// Вердиктов берётся два из трёх (§3.4). **Хвостово-резумптивная**: `resume`
+    /// в хвосте снят, а не сохранён, - ответ ветки и есть значение операции,
+    /// продолжение остаётся на C-стеке, сегмент не режется. Это «tail-resumptive
+    /// → inline» минус инлайнинг, который придёт вопросом 74. **Абортивная**:
+    /// `resume` не зовётся вовсе, и снимать нечего - связывание его остаётся
+    /// пустым слотом среды де Брёйна ровно так же. Ответ такой ветки есть ответ
+    /// хендлера, и сегмент до его кадра срезается на месте операции.
+    ///
+    /// Третий вердикт - общая ветка - отвергается по имени (трек D волны 4).
     fn branch(
         &mut self,
         captured: &[Binding],
@@ -2160,7 +2220,7 @@ impl<'a> Lowerer<'a> {
         written: usize,
         effect: &Name,
         operation: &Name,
-    ) -> Result<FuncId, LowerError> {
+    ) -> Result<(FuncId, bool), LowerError> {
         let mut nested = Scope {
             locals: u32::try_from(captured.len()).unwrap_or(u32::MAX),
             env: inner.to_vec(),
@@ -2197,30 +2257,49 @@ impl<'a> Lowerer<'a> {
         // Связываний под телом ветки: захваченная среда, аргументы операции и
         // сама резумпция. Число это нужно нормализации, а её - счёту вхождений.
         let context = u32::try_from(inner.len() + written + 1).unwrap_or(u32::MAX);
-        let Some(rewritten) = untail(&body, 0, context) else {
-            return Err(LowerError::Verdict {
-                effect: effect.to_string(),
-                operation: operation.to_string(),
-                why: if mentions(&body, 0, context) {
-                    "зовёт резумпцию не в хвосте: одношот общего вида, трек D волны 4"
+        // Хвостовая проверяется первой: `untail` спрашивает написанное, а
+        // `mentions` - нормализованное, и ветка с имплиситом в аргументе
+        // проходит только в этом порядке (измерено на
+        // `region-allocates-and-reads`).
+        let (rewritten, abortive) = match untail(&body, 0, context) {
+            Some(rewritten) => {
+                if mentions(&rewritten, 0, context) {
+                    return Err(LowerError::Verdict {
+                        effect: effect.to_string(),
+                        operation: operation.to_string(),
+                        why: "зовёт резумпцию и в хвосте, и до него: трек D волны 4",
+                    });
+                }
+                (rewritten, false)
+            }
+            None if !mentions(&body, 0, context) => {
+                // Абортивная. Резумпцию тело не зовёт, но **назвать** её редекс
+                // имплисита может, а слот её пуст: тогда понижается
+                // нормализованное - там имени уже нет.
+                let mut free = BTreeSet::new();
+                escaping(&body, 0, &mut free);
+                let taken = if free.contains(&0) {
+                    normalized(&body, context)
                 } else {
-                    "не зовёт резумпцию: снятие сегмента, трек C волны 4"
-                },
-            });
+                    (*body).clone()
+                };
+                (taken, true)
+            }
+            None => {
+                return Err(LowerError::Verdict {
+                    effect: effect.to_string(),
+                    operation: operation.to_string(),
+                    why: "зовёт резумпцию не в хвосте: одношот общего вида, трек D волны 4",
+                });
+            }
         };
-        if mentions(&rewritten, 0, context) {
-            return Err(LowerError::Verdict {
-                effect: effect.to_string(),
-                operation: operation.to_string(),
-                why: "зовёт резумпцию и в хвосте, и до него: трек D волны 4",
-            });
-        }
 
         for binding in &bindings {
             nested.env.push(Slot::Bound(binding.local, binding.fact));
         }
         // Связывание `resume` в среде де Брёйна остаётся - тело считало от него
-        // индексы, - но значения у него нет: хвостовая ветка его сняла.
+        // индексы, - но значения у него нет: хвостовая ветка его сняла, а
+        // абортивная не звала вовсе.
         nested.env.push(Slot::Absent);
 
         let function = FuncId(self.functions.len());
@@ -2235,9 +2314,11 @@ impl<'a> Lowerer<'a> {
             result: Repr::Boxed,
             body: Expr::Erased,
         });
-        let lowered = self.shaped(&mut nested, &rewritten, Repr::Boxed, "тело ветки хендлера")?;
-        self.functions[function.0].body = lowered;
-        Ok(function)
+        let outer = std::mem::replace(&mut self.detached, true);
+        let lowered = self.shaped(&mut nested, &rewritten, Repr::Boxed, "тело ветки хендлера");
+        self.detached = outer;
+        self.functions[function.0].body = lowered?;
+        Ok((function, abortive))
     }
 
     /// Ветка `return`: одноместная, ей идёт значение вычисления.
@@ -2278,8 +2359,10 @@ impl<'a> Lowerer<'a> {
             result: Repr::Boxed,
             body: Expr::Erased,
         });
-        let lowered = self.shaped(&mut nested, &body, Repr::Boxed, "тело ветки `return`")?;
-        self.functions[function.0].body = lowered;
+        let outer = std::mem::replace(&mut self.detached, true);
+        let lowered = self.shaped(&mut nested, &body, Repr::Boxed, "тело ветки `return`");
+        self.detached = outer;
+        self.functions[function.0].body = lowered?;
         Ok(function)
     }
 
@@ -2944,6 +3027,26 @@ impl<'a> Lowerer<'a> {
     /// названная граница, а не упущение: §4.11 отдаёт этот случай дескриптору
     /// layout, которого в рантайме ещё нет.
     fn closure(&mut self, scope: &mut Scope, term: &Term) -> Result<(Expr, Repr), LowerError> {
+        self.abstraction(scope, term, false)
+    }
+
+    /// Она же с отброшенным ответом: тело считается, значение уходит в дроп.
+    ///
+    /// Нужно деструктору scope'а. Ответ его §3.3 отбрасывает, а зовут его двое -
+    /// нормальный выход и раскрутка, - и раскрутка о типе ответа не знает
+    /// ничего: дропнуть его она может только мелко, без детей. Значит отдавать
+    /// его обязан сам деструктор, и отдаёт его обычное правило
+    /// [`crate::perceus`]: связывание есть, употребления нет.
+    fn discarding(&mut self, scope: &mut Scope, term: &Term) -> Result<(Expr, Repr), LowerError> {
+        self.abstraction(scope, term, true)
+    }
+
+    fn abstraction(
+        &mut self,
+        scope: &mut Scope,
+        term: &Term,
+        discard: bool,
+    ) -> Result<(Expr, Repr), LowerError> {
         let mut parameters: Vec<(Mult, String)> = Vec::new();
         let mut current = Rc::new(term.clone());
         loop {
@@ -3009,7 +3112,27 @@ impl<'a> Lowerer<'a> {
             result: Repr::Boxed,
             body: Expr::Erased,
         });
-        let body = self.shaped(&mut nested, &current, Repr::Boxed, "тело замыкания")?;
+        let outer = std::mem::replace(&mut self.detached, true);
+        let body = self.shaped(&mut nested, &current, Repr::Boxed, "тело замыкания");
+        self.detached = outer;
+        let mut body = body?;
+        if discard {
+            let held = Binding {
+                name: "ответ_деструктора".to_owned(),
+                local: nested.fresh(),
+                fact: Fact::present(Mult::One).shaped(Repr::Boxed),
+            };
+            let unit = self.tag(&self.unit_name()?)?;
+            body = Expr::Bind {
+                binding: held,
+                value: Box::new(body),
+                body: Box::new(Expr::Construct {
+                    constructor: unit,
+                    reuse: None,
+                    arguments: Vec::new(),
+                }),
+            };
+        }
         self.functions[function.0].body = body;
         Ok((
             Expr::Closure {
@@ -3018,6 +3141,18 @@ impl<'a> Lowerer<'a> {
             },
             Repr::Boxed,
         ))
+    }
+}
+
+/// Имя головы спайна под лямбдами. `None` - голова не имя.
+fn head(term: &Term) -> Option<String> {
+    let mut current = term;
+    loop {
+        match current {
+            Term::Lam(_, _, body) | Term::App(body, _) => current = body,
+            Term::Const(name, _, _) => return Some(name.to_string()),
+            _ => return None,
+        }
     }
 }
 

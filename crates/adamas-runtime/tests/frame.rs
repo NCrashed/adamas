@@ -36,6 +36,9 @@ fn kont() -> Kont {
     let mut kont = Kont {
         top: ptr::null_mut(),
         depth: 0,
+        answer: ptr::null_mut(),
+        target: 0,
+        aborting: 0,
     };
     unsafe { adamas_kont_init(&raw mut kont) };
     kont

@@ -1,0 +1,103 @@
+-- Очистка ресурса на **исключительном** выходе (§3.3 × §3.4).
+--
+-- `eval/resource-cleanup` показывает то же на нормальном выходе, и там сказано,
+-- почему свидетелем стоит договор с `adamas eval`, а не ответ: ответ
+-- деструктора §3.3 отбрасывает, и различающей по ответу программы в чистом
+-- фрагменте не существует. Здесь всё то же, но выход другой: тело обрывается
+-- веткой без резумпции, деструкторы бегут по раскрутке сегмента, а не по
+-- нормальному пути. Порядок и цену считает числом
+-- `adamas-codegen/tests/abortive.rs`.
+--
+-- Второй половиной идёт **обрыв самого деструктора**. `closeNote` производит
+-- `fail`, а его хендлер погиб вместе с сегментом: запись вектора подавлена, и
+-- операция обрывает остаток этого деструктора, а раскрутка ниже продолжается -
+-- `closeTag` отрабатывает. Это `SUPPRESSED` из `adamas.h` и §3.3 дословно;
+-- прецедент - suppressed exceptions в Java.
+--
+-- Третьей половиной - **нормальный** выход второй формы: кадр `MARK_CLOSING`
+-- ставится и там, и снимает его тот же код, что поставил. Без этого кадр
+-- пережил бы scope, и `handle` вышел бы не с вершины стека.
+--
+-- Ответ - `[9, 9, 3]`: две половины кончаются веткой `fail`, и её ответ есть
+-- ответ хендлера, третья доходит до конца. Наблюдаемое здесь не он, а согласие
+-- двух вычислителей при том, что деструкторы отрабатывают у обоих.
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Pair where
+  MkPair : Nat -> Nat -> Pair
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+flip : (1 p : Pair) -> Pair
+flip (MkPair a b) = MkPair b a
+
+fst : (1 p : Pair) -> Nat
+fst (MkPair a b) = a
+
+effect Fail where
+  fail : Nat -> Nat
+
+-- Деструкторы чистые: следы у них разные нарочно - один строит, другой
+-- разбирает. Два одинаковых не показали бы ни того, что они отработали, ни в
+-- каком порядке.
+resource Note where
+  Written : Pair -> Note
+  closeNote : (1 n : Note) -> Pair
+  closeNote (Written p) = flip p
+
+resource Tag where
+  Marked : Pair -> Tag
+  closeTag : (1 t : Tag) -> Nat
+  closeTag (Marked p) = fst p
+
+-- Оба ресурса закрываются на исключительном выходе: тело до конца не доходит.
+-- `t` связан последним, значит закрывается первым.
+broken : Note -> Tag -> {Fail} Nat
+broken n t = fail Zero
+
+-- Эффектный деструктор: его `fail` уходит к **своему** хендлеру, а тот уже
+-- ответил веткой. Остаток `closeLoud` обрывается, `closeQuiet` отрабатывает.
+resource Loud where
+  Shouted : Pair -> Loud
+  closeLoud : (1 l : Loud) -> {Fail} Pair
+  closeLoud (Shouted p) =
+    let heard : Nat = fail (Succ Zero)
+    flip p
+
+resource Quiet where
+  Hushed : Pair -> Quiet
+  closeQuiet : (1 q : Quiet) -> Nat
+  closeQuiet (Hushed p) = fst p
+
+-- `q` связан последним: закрывается первым и договаривает; `l` за ним, и его
+-- остаток обрывается подавленной меткой.
+suppressed : Loud -> Quiet -> {Fail} Nat
+suppressed l q = fail (Succ (Succ Zero))
+
+-- Нормальный выход **второй** формы: обрыва нет, а кадр `MARK_CLOSING` стоит и
+-- снимается тем, кто его поставил. Без этой половины кадр оставался бы на стеке
+-- и `handle` вышел бы не с вершины.
+quietly : Note -> {Fail} Nat
+quietly n = Succ (Succ (Succ Zero))
+
+runFail : ({Fail} Nat) -> Nat
+runFail act = handle act with
+  return v -> v
+  fail e -> 9
+
+main : List Nat
+main =
+  let p : Pair = MkPair Zero (Succ Zero)
+  let q : Pair = MkPair (Succ Zero) Zero
+  let r : Pair = MkPair Zero Zero
+  Cons (runFail (broken (Written p) (Marked p)))
+    (Cons (runFail (suppressed (Shouted q) (Hushed q)))
+      (Cons (runFail (quietly (Written r))) Nil))

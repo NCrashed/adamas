@@ -26,6 +26,7 @@ dependencies = [
  "adamas-parser",
  "adamas-runtime",
  "cc",
+ "criterion",
  "thiserror",
 ]
 

@@ -14,9 +14,13 @@
 -- `closeTag` отрабатывает. Это `SUPPRESSED` из `adamas.h` и §3.3 дословно;
 -- прецедент - suppressed exceptions в Java.
 --
--- Ответ - `[9, 9]`: обе половины кончаются веткой `fail`, и её ответ есть ответ
--- хендлера. Наблюдаемое здесь не он, а согласие двух вычислителей при том, что
--- деструкторы отрабатывают у обоих.
+-- Третьей половиной - **нормальный** выход второй формы: кадр `MARK_CLOSING`
+-- ставится и там, и снимает его тот же код, что поставил. Без этого кадр
+-- пережил бы scope, и `handle` вышел бы не с вершины стека.
+--
+-- Ответ - `[9, 9, 3]`: две половины кончаются веткой `fail`, и её ответ есть
+-- ответ хендлера, третья доходит до конца. Наблюдаемое здесь не он, а согласие
+-- двух вычислителей при том, что деструкторы отрабатывают у обоих.
 
 data Unit where
   MkUnit : Unit
@@ -78,6 +82,12 @@ resource Quiet where
 suppressed : Loud -> Quiet -> {Fail} Nat
 suppressed l q = fail (Succ (Succ Zero))
 
+-- Нормальный выход **второй** формы: обрыва нет, а кадр `MARK_CLOSING` стоит и
+-- снимается тем, кто его поставил. Без этой половины кадр оставался бы на стеке
+-- и `handle` вышел бы не с вершины.
+quietly : Note -> {Fail} Nat
+quietly n = Succ (Succ (Succ Zero))
+
 runFail : ({Fail} Nat) -> Nat
 runFail act = handle act with
   return v -> v
@@ -87,5 +97,7 @@ main : List Nat
 main =
   let p : Pair = MkPair Zero (Succ Zero)
   let q : Pair = MkPair (Succ Zero) Zero
+  let r : Pair = MkPair Zero Zero
   Cons (runFail (broken (Written p) (Marked p)))
-    (Cons (runFail (suppressed (Shouted q) (Hushed q))) Nil)
+    (Cons (runFail (suppressed (Shouted q) (Hushed q)))
+      (Cons (runFail (quietly (Written r))) Nil))

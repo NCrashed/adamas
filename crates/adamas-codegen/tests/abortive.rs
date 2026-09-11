@@ -9,6 +9,15 @@
 //! свою половину - его наблюдаемый след и есть то, чего **не** случилось, - и
 //! пробы здесь дифференциальные: отличаются одним словом, а сравнивается
 //! разница.
+//!
+//! **Чего здесь нет и почему.** Порядок «ветка, потом деструкторы» - тот же,
+//! что у машины (`adamas-interp/src/effect.rs`, `buried`), - свидетеля не имеет
+//! и назван таковым: мутант, раскручивающий сегмент до ветки, выжил. Каналов
+//! наблюдения два, ответ и число блоков, и ни один его не видит. Ответ - потому
+//! что деструкторы отвечают мимо (§3.3); число - потому что кадр хендлера жив
+//! до конца раскрутки и держит среду ветки, так что уникальным общее значение
+//! не достаётся ни тому, ни другому. Различающая программа появится с живой
+//! резумпцией (трек D), где вердикт становится динамическим.
 
 mod harness;
 
@@ -71,6 +80,97 @@ fn the_branch_answers_for_the_handler() {
     allocated("abortive-answer", &format!("{SHAPE}{ANSWER}"));
 }
 
+/// Обрыв проходит мимо чужого места `handle` и ловится своим.
+///
+/// Между операцией и её хендлером стоит второй, живой и хвостово-резумптивный:
+/// его кадр срезается тем же сегментом, но ответ обрыва не его. Ответ различает
+/// это по построению - ветка `return` внутреннего дописала бы к списку свой
+/// элемент, а ветка `return` внешнего свой. Ни один не дописан: обе не бежали.
+const NESTED: &str = "\
+effect Ask where
+  ask : Nat
+
+asked : {Ask, Fail} (List Nat)
+asked = Cons ask (Cons (fail Zero) Nil)
+
+nested : {Fail} (List Nat)
+nested = handle asked with
+  return v -> Cons (Succ Zero) v
+  ask -> resume Zero
+
+main : List Nat
+main = handle nested with
+  return v -> Cons (Succ (Succ Zero)) v
+  fail e -> Cons (Succ (Succ (Succ Zero))) Nil
+";
+
+#[test]
+fn an_alien_abort_passes_the_inner_handler() {
+    let source = format!("{SHAPE}{NESTED}");
+    assert_eq!(
+        harness::printed(&source),
+        "Cons (Succ (Succ (Succ Zero))) Nil",
+        "обрыв поймал не тот хендлер"
+    );
+    allocated("abortive-nested", &source);
+}
+
+/// Уход отдаёт и **временное**, посчитанное до операции.
+///
+/// Первый аргумент `Cons` построен, второй обрывается: ячейка первого живёт в
+/// C-кадре, узла в IR у неё нет вовсе, и отдать её обязан сам уход. Течь видна
+/// числом живых блоков.
+const HELD: &str = "\
+asked : {Fail} (List Nat)
+asked = Cons (Succ (Succ Zero)) (Cons (fail Zero) Nil)
+
+main : List Nat
+main = handle asked with
+  return v -> v
+  fail e -> Nil
+";
+
+#[test]
+fn the_escape_gives_back_what_it_holds() {
+    let source = format!("{SHAPE}{HELD}");
+    assert_eq!(harness::printed(&source), "Nil", "обрыв не унёс остаток");
+    allocated("abortive-held", &source);
+}
+
+/// Раскрутка кончается там, где стоял хендлер, а не на дне стека.
+///
+/// Под абортивным хендлером стоит второй, живой: его кадр лежит **ниже** и в
+/// срезанный сегмент не входит. Раскрути сегмент без пола - и она сняла бы
+/// заодно его, а выход из него оказался бы не с вершины.
+const FLOOR: &str = "\
+effect Ask where
+  ask : Nat
+
+inner : {Fail, Ask} Nat
+inner = fail ask
+
+middle : {Ask} Nat
+middle = handle inner with
+  return v -> v
+  fail e -> Succ e
+
+main : Nat
+main = handle middle with
+  return v -> Succ v
+  ask -> resume (Succ (Succ Zero))
+";
+
+#[test]
+fn the_unwinding_stops_where_the_handler_stood() {
+    let source = format!("{SHAPE}{FLOOR}");
+    assert_eq!(
+        harness::printed(&source),
+        "Succ (Succ (Succ (Succ Zero)))",
+        "живой хендлер под абортивным не пережил раскрутки"
+    );
+    allocated("abortive-floor", &source);
+}
+
 /// Деструктор на исключительном пути: работает и оплачен.
 ///
 /// Проба одна, подставляется тело деструктора - пустое против трёх ячеек.
@@ -116,6 +216,53 @@ fn the_destructor_runs_on_the_exceptional_path() {
     assert_eq!(
         empty, 13,
         "пустой деструктор на обрыве стоит не тринадцать блоков"
+    );
+}
+
+/// Нормальный выход второй формы: кадр снимает тот же код, что поставил.
+///
+/// Обрыва здесь нет вовсе, а кадр `MARK_CLOSING` стоит: его требует
+/// **исключительный** путь, и на нормальном он всё равно обязан быть снят.
+/// Числа те же дифференциальные - пустое тело деструктора против трёх ячеек.
+const NORMAL: &str = "\
+resource Opened where
+  Held : Nat -> Opened
+  closeOpened : (1 o : Opened) -> List Nat
+  closeOpened (Held n) = ТЕЛО
+
+quietly : Opened -> {Fail} Nat
+quietly o = Succ Zero
+
+runFail : ({Fail} Nat) -> Nat
+runFail act = handle act with
+  return v -> v
+  fail e -> Zero
+
+main : Nat
+main = runFail (quietly (Held Zero))
+";
+
+#[test]
+fn the_normal_exit_of_the_second_form_closes_its_frame() {
+    let empty = allocated(
+        "abortive-normal-empty",
+        &format!("{SHAPE}{}", NORMAL.replace("ТЕЛО", "Nil")),
+    );
+    let full = allocated(
+        "abortive-normal-full",
+        &format!(
+            "{SHAPE}{}",
+            NORMAL.replace("ТЕЛО", "Cons n (Cons Zero (Cons Zero Nil))")
+        ),
+    );
+    assert_eq!(
+        full - empty,
+        3,
+        "деструктор на нормальном выходе не отработал: {empty} против {full}"
+    );
+    assert_eq!(
+        empty, 8,
+        "пустой деструктор второй формы стоит не восемь блоков"
     );
 }
 

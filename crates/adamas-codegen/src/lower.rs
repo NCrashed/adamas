@@ -2006,11 +2006,26 @@ impl<'a> Lowerer<'a> {
             }
             // Замыкание строится **до** тела: кадр стоит на стеке всё время,
             // пока тело считается, иначе обрыв прошёл бы мимо деструктора.
-            let (closer, _) = self.closure(scope, close)?;
+            // Ответ его отбрасывается внутри него самого - раскрутка о типе
+            // ответа не знает и дропнула бы его без детей.
+            let (closer, _) = self.discarding(scope, close)?;
+            let Expr::Closure {
+                function: closer,
+                captured,
+            } = closer
+            else {
+                return Err(LowerError::Scope);
+            };
+            // Имя деструктора в порождённом C: без него у кадра стоит номер
+            // лямбды, и порядок кадров читается только по номерам.
+            if let Some(named) = head(close) {
+                self.functions[closer.0].name = format!("деструктор {named}");
+            }
             let (body, repr) = self.resumed(scope, body)?;
             return Ok((
                 Expr::Closing {
-                    closer: Box::new(closer),
+                    closer,
+                    captured,
                     body: Box::new(body),
                 },
                 repr,
@@ -3012,6 +3027,26 @@ impl<'a> Lowerer<'a> {
     /// названная граница, а не упущение: §4.11 отдаёт этот случай дескриптору
     /// layout, которого в рантайме ещё нет.
     fn closure(&mut self, scope: &mut Scope, term: &Term) -> Result<(Expr, Repr), LowerError> {
+        self.abstraction(scope, term, false)
+    }
+
+    /// Она же с отброшенным ответом: тело считается, значение уходит в дроп.
+    ///
+    /// Нужно деструктору scope'а. Ответ его §3.3 отбрасывает, а зовут его двое -
+    /// нормальный выход и раскрутка, - и раскрутка о типе ответа не знает
+    /// ничего: дропнуть его она может только мелко, без детей. Значит отдавать
+    /// его обязан сам деструктор, и отдаёт его обычное правило
+    /// [`crate::perceus`]: связывание есть, употребления нет.
+    fn discarding(&mut self, scope: &mut Scope, term: &Term) -> Result<(Expr, Repr), LowerError> {
+        self.abstraction(scope, term, true)
+    }
+
+    fn abstraction(
+        &mut self,
+        scope: &mut Scope,
+        term: &Term,
+        discard: bool,
+    ) -> Result<(Expr, Repr), LowerError> {
         let mut parameters: Vec<(Mult, String)> = Vec::new();
         let mut current = Rc::new(term.clone());
         loop {
@@ -3080,7 +3115,25 @@ impl<'a> Lowerer<'a> {
         let outer = std::mem::replace(&mut self.detached, true);
         let body = self.shaped(&mut nested, &current, Repr::Boxed, "тело замыкания");
         self.detached = outer;
-        self.functions[function.0].body = body?;
+        let mut body = body?;
+        if discard {
+            let held = Binding {
+                name: "ответ_деструктора".to_owned(),
+                local: nested.fresh(),
+                fact: Fact::present(Mult::One).shaped(Repr::Boxed),
+            };
+            let unit = self.tag(&self.unit_name()?)?;
+            body = Expr::Bind {
+                binding: held,
+                value: Box::new(body),
+                body: Box::new(Expr::Construct {
+                    constructor: unit,
+                    reuse: None,
+                    arguments: Vec::new(),
+                }),
+            };
+        }
+        self.functions[function.0].body = body;
         Ok((
             Expr::Closure {
                 function,
@@ -3088,6 +3141,18 @@ impl<'a> Lowerer<'a> {
             },
             Repr::Boxed,
         ))
+    }
+}
+
+/// Имя головы спайна под лямбдами. `None` - голова не имя.
+fn head(term: &Term) -> Option<String> {
+    let mut current = term;
+    loop {
+        match current {
+            Term::Lam(_, _, body) | Term::App(body, _) => current = body,
+            Term::Const(name, _, _) => return Some(name.to_string()),
+            _ => return None,
+        }
     }
 }
 

@@ -645,16 +645,22 @@ impl Pass<'_> {
                     },
                 )
             }
-            Expr::Closing { closer, body } => {
-                // Деструктор считается **до** тела: кадр стоит всё время, пока
-                // тело идёт, и владение им переходит кадру.
-                let (mut parts, spare) = self.sequence(vec![*closer, *body], owned);
-                let body = parts.pop().unwrap_or(Expr::Erased);
-                let closer = parts.pop().unwrap_or(Expr::Erased);
+            Expr::Closing {
+                closer,
+                captured,
+                body,
+            } => {
+                // Среда деструктора считается **до** тела: кадр стоит всё
+                // время, пока тело идёт, и владение ею переходит кадру.
+                let mut items = captured;
+                items.push(*body);
+                let (mut items, spare) = self.sequence(items, owned);
+                let body = items.pop().unwrap_or(Expr::Erased);
                 drops(
                     spare,
                     Expr::Closing {
-                        closer: Box::new(closer),
+                        closer,
+                        captured: items,
                         body: Box::new(body),
                     },
                 )

@@ -148,6 +148,7 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     out.push('\n');
 
     let boxed = wrapped(program);
+    let taken = moving(program);
     let built = builders(program);
 
     out.push_str("/* Объявления: рекурсия и взаимная рекурсия видят друг друга. */\n");
@@ -159,6 +160,9 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     }
     for id in &boxed {
         let _ = writeln!(out, "{};", trampoline(&format!("box_{}", id.0)));
+    }
+    for id in &taken {
+        let _ = writeln!(out, "{};", trampoline(&format!("take_{}", id.0)));
     }
     for (at, described) in program.handlers.iter().enumerate() {
         let _ = writeln!(out, "{};", branches_signature(at));
@@ -177,6 +181,9 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
         body(&mut out, program, function);
         if boxed.contains(&function.id) {
             wrapper(&mut out, function);
+        }
+        if taken.contains(&function.id) {
+            taker(&mut out, function);
         }
     }
     for at in 0..program.handlers.len() {
@@ -546,6 +553,19 @@ fn wrapped(program: &Program) -> BTreeSet<FuncId> {
     found
 }
 
+/// Деструкторы кадров `CLOSING`: им нужен забирающий трамплин [`taker`].
+fn moving(program: &Program) -> BTreeSet<FuncId> {
+    let mut found = BTreeSet::new();
+    for function in &program.functions {
+        walk(&function.body, &mut |expr| {
+            if let Expr::Closing { closer, .. } = expr {
+                found.insert(*closer);
+            }
+        });
+    }
+    found
+}
+
 /// Теги конструкторов, которые где-то стоят значением.
 fn builders(program: &Program) -> BTreeSet<CtorId> {
     let mut found = BTreeSet::new();
@@ -704,6 +724,7 @@ fn body(out: &mut String, program: &Program, function: &Function) {
             .map(|binding| (binding.local, 1))
             .collect(),
         regions: Vec::new(),
+        vectors: Vec::new(),
     };
     let answer = emitter.value(&function.body, 1);
     out.push_str(&emitter.out);
@@ -753,6 +774,43 @@ fn wrapper(out: &mut String, function: &Function) {
             format!("adamas_dup(adamas_closure_get(self, {}))", env + position)
         });
     }
+    let _ = writeln!(
+        out,
+        "    return fn_{}({});\n}}\n",
+        function.id.0,
+        taken.join(", ")
+    );
+}
+
+/// Трамплин деструктора scope'а: слоты **забираются**, а не дублируются.
+///
+/// Зовут такое замыкание ровно раз и тут же дропают - кадр `CLOSING` его
+/// единственный владелец (`adamas.h`). Дублируй слоты, как общий трамплин, - и
+/// ресурс достался бы деструктору **разделённым**: FBIP внутри него не
+/// сработал бы никогда, а порядок деструкторов перестал бы быть наблюдаемым
+/// ценой. Слот после взятия зануляется единицей, поэтому дроп замыкания следом
+/// отдаёт уже ничего.
+fn taker(out: &mut String, function: &Function) {
+    let env = function.live_captured().count();
+    let _ = writeln!(
+        out,
+        "/* `{}` кадром scope: слоты уходят владением. */",
+        escaped(&function.name)
+    );
+    let _ = writeln!(out, "{} {{", trampoline(&format!("take_{}", function.id.0)));
+    for slot in 0..env {
+        let _ = writeln!(
+            out,
+            "    adamas_value s{slot} = adamas_closure_get(self, {slot});"
+        );
+        let _ = writeln!(out, "    adamas_closure_set(self, {slot}, adamas_unit());");
+    }
+    let mut taken: Vec<String> = match function.form {
+        Form::Stack => Vec::new(),
+        Form::Detached => vec![FORWARD.to_owned()],
+    };
+    taken.extend((0..env).map(|slot| format!("s{slot}")));
+    taken.push("arg".to_owned());
     let _ = writeln!(
         out,
         "    return fn_{}({});\n}}\n",
@@ -1008,6 +1066,11 @@ struct Emitter<'a> {
     /// метку сразу за вычислением - а уборка тогда нужна ровно та, которую
     /// пропущенный кусок вычисления сделал бы сам.
     regions: Vec<Region>,
+    /// Векторы evidence, открытые местами `handle` вокруг этой точки.
+    ///
+    /// Уход по обрыву проходит мимо их дропа, поэтому отдаёт их сам. Держатся
+    /// отдельно от [`Emitter::pending`], потому что дроп у них свой.
+    vectors: Vec<String>,
 }
 
 /// Вычисление под `handle`: куда уходит обрыв и что он обязан прибрать.
@@ -1016,6 +1079,9 @@ struct Region {
     label: String,
     /// Длина [`Emitter::pending`] на входе: своё вычисление прибирает само.
     mark: usize,
+    /// Длина [`Emitter::vectors`] на входе: свой вектор место `handle` отдаёт
+    /// само, за меткой.
+    opened: usize,
     /// Счёт ссылок на входе.
     entry: HashMap<LocalId, u32>,
     /// Сколько ссылок вычисление потребляет целиком, по связываниям.
@@ -1081,11 +1147,26 @@ impl Emitter<'_> {
     /// ровно то, что отдал бы пропущенный кусок.
     fn escape(&mut self, depth: usize) {
         let pad = Self::pad(depth);
-        let inner = Self::pad(depth + 1);
-        let (from, exit) = match self.regions.last() {
-            Some(region) => (region.mark, format!("goto {};", region.label)),
-            None => (0, "return adamas_unit();".to_owned()),
+        let exit = match self.regions.last() {
+            Some(region) => format!("goto {};", region.label),
+            None => "return adamas_unit();".to_owned(),
         };
+        let _ = writeln!(self.out, "{pad}if (adamas_kont_aborting(kont)) {{");
+        self.abandoned(depth + 1, self.regions.last().is_none());
+        let _ = writeln!(self.out, "{}{exit}", Self::pad(depth + 1));
+        let _ = writeln!(self.out, "{pad}}}");
+    }
+
+    /// Уборка ухода: что кадр держит и не отдаст, если уйдёт отсюда.
+    ///
+    /// `whole` - уходим из функции целиком; тогда отдаётся всё. Иначе уход идёт
+    /// на метку за вычислением под `handle`, и отдаётся ровно то, что отдал бы
+    /// пропущенный кусок этого вычисления: разница между тем, сколько оно
+    /// потребляет целиком, и тем, сколько потреблено до обрыва.
+    fn abandoned(&mut self, depth: usize, whole: bool) {
+        let pad = Self::pad(depth);
+        let region = if whole { None } else { self.regions.last() };
+        let (from, opened) = region.map_or((0, 0), |it| (it.mark, it.opened));
         let mut cleanup: Vec<String> = self.pending[from..].iter().rev().cloned().collect();
         let mut counted: Vec<(LocalId, u32)> = self
             .refs
@@ -1094,7 +1175,7 @@ impl Emitter<'_> {
             .collect();
         counted.sort_unstable();
         for (local, count) in counted {
-            let owed = match self.regions.last() {
+            let owed = match region {
                 None => i64::from(count),
                 Some(region) => {
                     let entry = i64::from(region.entry.get(&local).copied().unwrap_or(0));
@@ -1106,12 +1187,13 @@ impl Emitter<'_> {
                 cleanup.push(format!("v{}", local.0));
             }
         }
-        let _ = writeln!(self.out, "{pad}if (adamas_kont_aborting(kont)) {{");
+        let vectors: Vec<String> = self.vectors[opened..].iter().rev().cloned().collect();
         for held in cleanup {
-            let _ = writeln!(self.out, "{inner}adamas_drop_value({held});");
+            let _ = writeln!(self.out, "{pad}adamas_drop_value({held});");
         }
-        let _ = writeln!(self.out, "{inner}{exit}");
-        let _ = writeln!(self.out, "{pad}}}");
+        for vector in vectors {
+            let _ = writeln!(self.out, "{pad}adamas_evidence_drop({vector});");
+        }
     }
 
     /// Представление значения выражения.
@@ -1255,7 +1337,11 @@ impl Emitter<'_> {
                 skip,
                 arguments,
             } => self.performing(*label, *operation, *skip, arguments, depth),
-            Expr::Closing { closer, body } => self.scoped(closer, body, depth),
+            Expr::Closing {
+                closer,
+                captured,
+                body,
+            } => self.scoped(*closer, captured, body, depth),
             Expr::Apply { callee, argument } => self.applying(callee, argument, depth),
             Expr::Match {
                 scrutinee, arms, ..
@@ -1978,6 +2064,11 @@ impl Emitter<'_> {
 
     /// Замыкание: код плюс среда по слотам.
     fn closure(&mut self, function: FuncId, captured: &[Expr], depth: usize) -> String {
+        self.holding(function, captured, "box", depth)
+    }
+
+    /// Она же с названным трамплином: общим (`box`) либо забирающим (`take`).
+    fn holding(&mut self, function: FuncId, captured: &[Expr], code: &str, depth: usize) -> String {
         let pad = Self::pad(depth);
         let described = &self.program.functions[function.0];
         let title = escaped(&described.name);
@@ -2001,7 +2092,7 @@ impl Emitter<'_> {
         let name = self.temp();
         let _ = writeln!(
             self.out,
-            "{pad}adamas_value {name} = adamas_closure(box_{}, adamas_release_value, \
+            "{pad}adamas_value {name} = adamas_closure({code}_{}, adamas_release_value, \
              {arity}u, {}u); /* {title} */",
             function.0,
             taken.len()
@@ -2070,16 +2161,7 @@ impl Emitter<'_> {
         let _ = writeln!(self.out, "{pad}{{");
         let outer = self.hidden;
         if !outer {
-            // Первая форма: своя row пуста, значит наружу ничего не уходит и
-            // корень стека здесь.
-            let _ = writeln!(self.out, "{inner}adamas_kont {root};");
-            let _ = writeln!(self.out, "{inner}adamas_kont_init(&{root});");
-            let _ = writeln!(self.out, "{inner}adamas_kont *kont = &{root};");
-            let _ = writeln!(
-                self.out,
-                "{inner}adamas_evidence *{root}_ev = adamas_evidence_empty();"
-            );
-            let _ = writeln!(self.out, "{inner}const adamas_evidence *ev = {root}_ev;");
+            self.rooted(&root, depth + 1);
         }
         let _ = writeln!(
             self.out,
@@ -2116,14 +2198,24 @@ impl Emitter<'_> {
         self.temps += 1;
         let mut net = HashMap::new();
         consumption(computation, &mut net);
+        if !outer {
+            self.vectors.push(format!("{root}_ev"));
+        }
+        self.vectors.push(vector.clone());
+        let opened = self.vectors.len();
         self.regions.push(Region {
             label: label.clone(),
             mark,
+            opened,
             entry: self.refs.clone(),
             net,
         });
         let answer = self.value(computation, depth + 2);
         self.regions.pop();
+        self.vectors.truncate(opened - 1);
+        if !outer {
+            self.vectors.pop();
+        }
         self.pending.truncate(mark);
         self.hidden = outer;
         let _ = writeln!(self.out, "{inner}    {body} = {answer};");
@@ -2136,6 +2228,23 @@ impl Emitter<'_> {
         }
         let _ = writeln!(self.out, "{pad}}}");
         name
+    }
+
+    /// Корень стека у первой формы: свой `kont` и пустой вектор.
+    ///
+    /// Законно это ровно потому, что row такой функции пуста: операции наружу
+    /// не уходит ни одной (§3.4, погашение расширением справа), и всё, что под
+    /// ней производится, гасится внутри неё же.
+    fn rooted(&mut self, root: &str, depth: usize) {
+        let pad = Self::pad(depth);
+        let _ = writeln!(self.out, "{pad}adamas_kont {root};");
+        let _ = writeln!(self.out, "{pad}adamas_kont_init(&{root});");
+        let _ = writeln!(self.out, "{pad}adamas_kont *kont = &{root};");
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_evidence *{root}_ev = adamas_evidence_empty();"
+        );
+        let _ = writeln!(self.out, "{pad}const adamas_evidence *ev = {root}_ev;");
     }
 
     /// Выход из хендлера: нормальный либо обрывом в полёте.
@@ -2189,10 +2298,13 @@ impl Emitter<'_> {
     ///
     /// LIFO выходит вложенностью кадров: внутренний scope лежит выше, а
     /// раскрутка идёт от вершины.
-    fn scoped(&mut self, closer: &Expr, body: &Expr, depth: usize) -> String {
+    fn scoped(&mut self, closer: FuncId, captured: &[Expr], body: &Expr, depth: usize) -> String {
         let pad = Self::pad(depth);
         let mark = self.pending.len();
-        let closer = self.value(closer, depth);
+        // Замыкание деструктора строится **забирающим** трамплином: кадр его
+        // единственный владелец, зовут его раз, и слоты уходят в деструктор
+        // владением. Общий трамплин отдал бы ресурс разделённым.
+        let closer = self.holding(closer, captured, "take", depth);
         self.pending.truncate(mark);
         let frame = self.temp();
         let _ = writeln!(
@@ -2216,12 +2328,13 @@ impl Emitter<'_> {
     /// некуда: `adamas_kont_abort` и **немедленный возврат** (`adamas.h`).
     /// `MISSING` - операция без хендлера.
     ///
-    /// Путь `SUPPRESSED` в этом срезе недостижим - подавление ставит раскрутка,
-    /// а её заводит абортивная ветка (трек C волны 4). Написан он не про запас:
-    /// сведи вердикт к двум, и операция деструктора ушла бы к одноимённому
-    /// хендлеру снаружи - ровно тот дефект, который ревью 2026-09-05 нашло у
-    /// машины. Владение на этом пути отдаёт только сама операция; локальные
-    /// связывания вокруг неё отдаст трек C вместе с исключительными выходами.
+    /// Сводить вердикт к двум нельзя: операция деструктора ушла бы к
+    /// одноимённому хендлеру снаружи - ровно тот дефект, который ревью
+    /// 2026-09-05 нашло у машины.
+    ///
+    /// Уборка на пути `SUPPRESSED` та же, что у обрыва в полёте, и полная:
+    /// уходит вся функция, а не кусок вычисления. Без неё деструктор, оборванный
+    /// на середине, уносит с собой всё, что держал.
     fn performing(
         &mut self,
         label: LabelId,
@@ -2281,6 +2394,7 @@ impl Emitter<'_> {
         for slot in 0..count {
             let _ = writeln!(self.out, "{inner}adamas_drop_value({operands}[{slot}]);");
         }
+        self.abandoned(depth + 1, true);
         let _ = writeln!(self.out, "{inner}return adamas_kont_abort(kont);");
         let _ = writeln!(self.out, "{pad}}} else {{");
         let _ = writeln!(

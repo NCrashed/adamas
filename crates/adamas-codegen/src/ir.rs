@@ -924,8 +924,10 @@ pub enum Expr {
     /// и позвать он умеет только значение. Это названная цена второй формы -
     /// ячейка кучи на scope с ресурсом.
     Closing {
-        /// Деструктор нульместным замыканием: кадр им владеет.
-        closer: Box<Expr>,
+        /// Код деструктора: своя функция, как у ветки хендлера.
+        closer: FuncId,
+        /// Среда деструктора - по одному на связывание в его `captured`.
+        captured: Vec<Expr>,
         /// Тело scope. Его значение и есть ответ.
         body: Box<Expr>,
     },
@@ -1028,7 +1030,7 @@ impl Expr {
                 computation,
                 ..
             } => captured.iter().chain([&**computation]).collect(),
-            Self::Closing { closer, body } => vec![closer, body],
+            Self::Closing { captured, body, .. } => captured.iter().chain([&**body]).collect(),
             Self::ArrayNew { count, initial, .. } => vec![count, initial],
             Self::ArraySet {
                 array, at, value, ..

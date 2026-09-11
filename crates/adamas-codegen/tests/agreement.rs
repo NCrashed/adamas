@@ -38,7 +38,8 @@ use std::path::PathBuf;
 /// исключительном выходе (трек C волны 4, §3.3, §3.4).
 /// Всё, что здесь стоит, обязано собраться и ответить как `adamas eval`; список
 /// сокращать нельзя, а пополнять - можно и нужно, когда фрагмент растёт.
-const TAKEN: [&str; 42] = [
+const TAKEN: [&str; 43] = [
+    "abortive-cleanup",
     "abortive-except",
     "alias-computation",
     "arithmetic",

@@ -30,9 +30,6 @@ fn search_goes_from_the_innermost_outwards() {
         let mut kont = Kont {
             top: ptr::null_mut(),
             depth: 0,
-            answer: ptr::null_mut(),
-            target: 0,
-            aborting: 0,
         };
         adamas_kont_init(&raw mut kont);
 
@@ -75,9 +72,6 @@ fn a_suppressed_entry_is_neither_missing_nor_live() {
         let mut kont = Kont {
             top: ptr::null_mut(),
             depth: 0,
-            answer: ptr::null_mut(),
-            target: 0,
-            aborting: 0,
         };
         adamas_kont_init(&raw mut kont);
 

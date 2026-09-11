@@ -204,39 +204,6 @@ static void unwind_push(adamas_kont *kont, adamas_segment *chain, adamas_value h
 void adamas_kont_init(adamas_kont *kont) {
     kont->top = NULL;
     kont->depth = 0;
-    kont->answer = adamas_unit();
-    kont->target = 0;
-    kont->aborting = 0;
-}
-
-void adamas_kont_arm(adamas_kont *kont, uintptr_t target, adamas_value answer) {
-    if (kont->aborting) {
-        /* Обрыв поверх обрыва: два ответа на одну ручку, и деть второй некуда.
-         * Отказ, а не молчание, - тот же довод, что у копии кадра раскрутки. */
-        adamas_fail("обрыв поверх обрыва: абортивная ветка внутри абортивной");
-    }
-    kont->aborting = 1;
-    kont->target = target;
-    kont->answer = answer;
-}
-
-int adamas_kont_aborting(const adamas_kont *kont) {
-    return kont->aborting;
-}
-
-uintptr_t adamas_kont_target(const adamas_kont *kont) {
-    return kont->target;
-}
-
-adamas_value adamas_kont_disarm(adamas_kont *kont) {
-    if (!kont->aborting) {
-        adamas_fail("ответ обрыва спрошен там, где обрыва нет");
-    }
-    adamas_value answer = kont->answer;
-    kont->aborting = 0;
-    kont->target = 0;
-    kont->answer = adamas_unit();
-    return answer;
 }
 
 adamas_frame *adamas_kont_push(adamas_kont *kont, uint16_t mark, uint32_t label,
@@ -271,23 +238,6 @@ adamas_value adamas_frame_perform(adamas_frame *handler, adamas_kont *kont, uint
     return handler->branches(handler, kont, operation, arguments, count);
 }
 
-adamas_value adamas_kont_leave(adamas_kont *kont, adamas_frame *handler, adamas_value value) {
-    if (kont->top != handler) {
-        /* Направленный стиль: под хендлером всё отработало до его выхода.
-         * Не вершина - значит кадр положили и не сняли, и ответ ушёл бы мимо. */
-        adamas_fail("нормальный выход из хендлера не с вершины стека");
-    }
-    kont->top = handler->below;
-    kont->depth -= 1;
-    handler->below = NULL;
-    adamas_value answer = value;
-    if (handler->branches != NULL) {
-        answer = handler->branches(handler, kont, ADAMAS_HANDLER_RETURN, &value, 1);
-    }
-    frame_free(handler, kont);
-    return answer;
-}
-
 adamas_value *adamas_frame_env(adamas_frame *frame) {
     return frame->env;
 }
@@ -317,21 +267,6 @@ adamas_frame *adamas_kont_closing(adamas_kont *kont, const adamas_evidence *evid
     kont->top = frame;
     kont->depth += 1;
     return frame;
-}
-
-void adamas_kont_close(adamas_kont *kont, adamas_frame *scope, adamas_release release) {
-    if (kont->top != scope) {
-        adamas_fail("нормальный выход из scope не с вершины стека");
-    }
-    kont->top = scope->below;
-    kont->depth -= 1;
-    scope->below = NULL;
-    /* Деструктор бежит на этом же стеке и под вектором места scope: хендлеры
-     * под ним живы, ответа ещё не давали, подавления тут нет (шапка). */
-    adamas_value closer = scope->env[0];
-    adamas_value answer = adamas_apply(closer, scope->evidence, kont, adamas_unit());
-    adamas_drop(answer, release);
-    frame_free(scope, kont);
 }
 
 adamas_value adamas_kont_run(adamas_kont *kont, adamas_value value) {
@@ -375,10 +310,21 @@ adamas_value adamas_kont_run_to(adamas_kont *kont, adamas_frame *floor, adamas_v
             value = unwind_step(kont, frame, value);
             continue;
         }
+        if (mark == ADAMAS_MARK_HANDLER) {
+            /* Нормальный выход из хендлера: вычисление под ним договорило, и
+             * его значение принимает ветка `return`. У дроблёного тела другого
+             * пути нет вовсе - кадр хендлера стоит ниже кадров вычисления, и
+             * значение доходит до него тем же трамплином, что и до прочих. */
+            if (frame->branches != NULL) {
+                value = frame->branches(frame, kont, ADAMAS_HANDLER_RETURN, &value, 1);
+            }
+            frame_free(frame, kont);
+            continue;
+        }
         if (frame->code != NULL) {
             /* Код вправе положить новые кадры: они и станут вершиной, а ответ
              * пойдёт им. */
-            value = frame->code(frame, value);
+            value = frame->code(frame, kont, value);
         }
         frame_free(frame, kont);
     }
@@ -419,6 +365,24 @@ void adamas_kont_restore(adamas_kont *kont, adamas_segment *segment) {
     /* Ручка потреблена: сегмент снова часть стека, и второго владельца у него
      * нет. Мультишот восстанавливает копию, а не этот же сегмент. */
     adamas_block_free(segment);
+}
+
+void adamas_kont_resume(adamas_kont *kont, adamas_value value) {
+    adamas_segment *segment = adamas_segment_of(value);
+    if (segment->top == NULL) {
+        /* Аффинность резумпции держат типы (§3.3): второе возобновление сюда
+         * попасть может только дефектом понижения, и молчать о нём нечем. */
+        adamas_fail("резумпция возобновлена дважды");
+    }
+    segment->base->below = kont->top;
+    kont->top = segment->top;
+    kont->depth += segment->depth;
+    /* Ручка **тратится**, а не освобождается: ссылок на неё бывает больше
+     * одной - замыкание `\s -> resume v s` держит её наравне с вызывающим, - и
+     * блок отдаст последняя. Пустая ручка раскручивать нечего. */
+    segment->top = NULL;
+    segment->base = NULL;
+    segment->depth = 0;
 }
 
 size_t adamas_segment_depth(const adamas_segment *segment) {
@@ -500,13 +464,36 @@ adamas_segment *adamas_segment_of(adamas_value value) {
 void adamas_resumption_drop(adamas_kont *kont, adamas_value value) {
     adamas_segment *segment = adamas_segment_of(value);
     adamas_header *header = adamas_header_of(segment);
-    if (header->rc == 0) {
-        /* §3.4: дроп разматывает приостановленный сегмент, выполняя деструкторы
-         * кадров внутри него. Резумпция аффинна, поэтому путь этот обычный, а
-         * не крайний. Размотка кладётся кадром - точка приостановки (шапка
-         * `adamas.h`): деструкторы выполнит `adamas_kont_run`. */
-        adamas_segment_unwind(kont, segment);
+    if (header->rc != 0) {
+        header->rc -= 1;
         return;
     }
-    header->rc -= 1;
+    if (segment->top == NULL) {
+        /* Потраченная: звенья уже стоят на стеке, раскручивать нечего. */
+        adamas_block_free(segment);
+        return;
+    }
+    /* §3.4: дроп разматывает приостановленный сегмент, выполняя деструкторы
+     * кадров внутри него. Резумпция аффинна, поэтому путь этот обычный, а не
+     * крайний. Размотка кладётся кадром - точка приостановки (шапка
+     * `adamas.h`): деструкторы выполнит `adamas_kont_run`. */
+    adamas_segment_unwind(kont, segment);
+}
+
+void adamas_segment_abandon(adamas_value value) {
+    adamas_segment *segment = adamas_segment_of(value);
+    if (segment->top == NULL) {
+        return;
+    }
+    /* Корень свой: `adamas_release` о стеке не знает по своей сигнатуре.
+     * Деструкторы поэтому бегут здесь же, а не откладываются кадром, - точки
+     * приостановки у этого пути нет вовсе. */
+    adamas_kont local;
+    adamas_kont_init(&local);
+    adamas_segment *chain = segment_alloc(segment->top, segment->base, segment->depth);
+    segment->top = NULL;
+    segment->base = NULL;
+    segment->depth = 0;
+    unwind_push(&local, chain, adamas_unit(), 0);
+    adamas_drop(adamas_kont_run(&local, adamas_unit()), NULL);
 }

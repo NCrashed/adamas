@@ -16,10 +16,11 @@ use adamas_runtime::ffi::{
     adamas_evidence_drop, adamas_evidence_empty, adamas_evidence_extend, adamas_evidence_lookup,
     adamas_field, adamas_frame_env, adamas_frame_evidence, adamas_frame_fields, adamas_frame_label,
     adamas_frame_mark, adamas_frame_perform, adamas_imm, adamas_imm_get, adamas_kont_abort,
-    adamas_kont_cut, adamas_kont_handler, adamas_kont_init, adamas_kont_leave, adamas_kont_push,
-    adamas_kont_restore, adamas_kont_run, adamas_rc, adamas_resumption_drop, adamas_segment_base,
-    adamas_segment_copy, adamas_segment_depth, adamas_segment_unwind, adamas_segment_value,
-    adamas_set_field, adamas_stat_live, adamas_stat_reset, adamas_unit,
+    adamas_kont_cut, adamas_kont_handler, adamas_kont_init, adamas_kont_push,
+    adamas_kont_restore, adamas_kont_resume, adamas_kont_run, adamas_rc, adamas_resumption_drop,
+    adamas_segment_abandon, adamas_segment_base, adamas_segment_copy, adamas_segment_depth,
+    adamas_segment_unwind, adamas_segment_value, adamas_set_field, adamas_stat_live,
+    adamas_stat_reset, adamas_unit,
 };
 
 thread_local! {
@@ -36,9 +37,6 @@ fn kont() -> Kont {
     let mut kont = Kont {
         top: ptr::null_mut(),
         depth: 0,
-        answer: ptr::null_mut(),
-        target: 0,
-        aborting: 0,
     };
     unsafe { adamas_kont_init(&raw mut kont) };
     kont
@@ -54,7 +52,7 @@ unsafe fn boxed(number: isize) -> Value {
 }
 
 /// Прибавляет к пришедшему число из среды.
-unsafe extern "C" fn adding(frame: *mut Frame, incoming: Value) -> Value {
+unsafe extern "C" fn adding(frame: *mut Frame, _kont: *mut Kont, incoming: Value) -> Value {
     unsafe {
         let held = *adamas_frame_env(frame);
         adamas_imm(adamas_imm_get(incoming) + adamas_imm_get(adamas_field(held, 0)))
@@ -62,7 +60,7 @@ unsafe extern "C" fn adding(frame: *mut Frame, incoming: Value) -> Value {
 }
 
 /// Умножает пришедшее на число из среды.
-unsafe extern "C" fn scaling(frame: *mut Frame, incoming: Value) -> Value {
+unsafe extern "C" fn scaling(frame: *mut Frame, _kont: *mut Kont, incoming: Value) -> Value {
     unsafe {
         let held = *adamas_frame_env(frame);
         adamas_imm(adamas_imm_get(incoming) * adamas_imm_get(adamas_field(held, 0)))
@@ -116,7 +114,7 @@ unsafe fn closer(mark: isize) -> Value {
 }
 
 /// Отложенная работа: при обрыве она **не** выполняется, в отличие от scope'а.
-unsafe extern "C" fn noting(frame: *mut Frame, incoming: Value) -> Value {
+unsafe extern "C" fn noting(frame: *mut Frame, _kont: *mut Kont, incoming: Value) -> Value {
     unsafe {
         let mark = adamas_imm_get(*adamas_frame_env(frame));
         TRACE.with_borrow_mut(|trace| trace.push(mark));
@@ -174,7 +172,7 @@ unsafe extern "C" fn probing(
 unsafe fn push_holding(
     kont: *mut Kont,
     mark: u16,
-    code: unsafe extern "C" fn(*mut Frame, Value) -> Value,
+    code: unsafe extern "C" fn(*mut Frame, *mut Kont, Value) -> Value,
     number: isize,
     evidence: *mut Evidence,
 ) -> *mut Frame {
@@ -261,8 +259,10 @@ fn work_goes_from_the_top_of_the_stack_down() {
         let mut kont = kont();
         let evidence = adamas_evidence_empty();
 
-        // Снизу вверх: прибавить 10, умножить на 2, прибавить 1.
-        push_holding(&raw mut kont, MARK_HANDLER, adding, 10, evidence);
+        // Снизу вверх: прибавить 10, умножить на 2, прибавить 1. Метки все
+        // обычные: у кадра хендлера работы нет вовсе - его дело быть найденным,
+        // а значение вычисления уходит ветке `return`, а не коду кадра.
+        push_holding(&raw mut kont, MARK_PLAIN, adding, 10, evidence);
         push_holding(&raw mut kont, MARK_PLAIN, scaling, 2, evidence);
         push_holding(&raw mut kont, MARK_PLAIN, adding, 1, evidence);
 
@@ -284,7 +284,9 @@ fn a_copied_segment_resumes_twice_and_independently() {
         let mut kont = kont();
         let evidence = adamas_evidence_empty();
 
-        let handler = push_holding(&raw mut kont, MARK_HANDLER, adding, 10, evidence);
+        // Основание сегмента - обычный кадр: резать `adamas_kont_cut` умеет по
+        // любому, а работа у кадра хендлера не своя, а веток.
+        let handler = push_holding(&raw mut kont, MARK_PLAIN, adding, 10, evidence);
         let scale = push_holding(&raw mut kont, MARK_PLAIN, scaling, 2, evidence);
         let ten = *adamas_frame_env(handler);
         let two = *adamas_frame_env(scale);
@@ -711,8 +713,9 @@ fn an_operation_reaches_the_branches_of_its_handler() {
         assert_eq!(kont.depth, 1);
         assert_eq!(kont.top, handler);
 
-        // Нормальный выход: кадр снимается, `return` получает значение тела.
-        let answer = adamas_kont_leave(&raw mut kont, handler, adamas_imm(3));
+        // Нормальный выход: значение вычисления доходит до кадра трамплином,
+        // кадр снимается, `return` получает это значение.
+        let answer = adamas_kont_run(&raw mut kont, adamas_imm(3));
         assert_eq!(adamas_imm_get(answer), 30, "ветка `return` не сработала");
         assert_eq!(kont.depth, 0);
         assert!(kont.top.is_null());
@@ -746,7 +749,7 @@ fn a_branch_sees_the_vector_of_its_handle_site() {
             LOOKUP_MISSING
         );
 
-        adamas_kont_leave(&raw mut kont, handler, adamas_unit());
+        adamas_drop(adamas_kont_run(&raw mut kont, adamas_unit()), None);
         adamas_evidence_drop(with_handler);
         adamas_evidence_drop(empty);
         assert_eq!(adamas_stat_live(), 0);
@@ -777,6 +780,70 @@ fn a_normal_exit_suppresses_nothing() {
         for evidence in vectors {
             adamas_evidence_drop(evidence);
         }
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Резумпция-значение: возобновление **тратит** ручку, а не отдаёт её блок.
+///
+/// Свидетель нужен потому, что ссылок на ручку бывает больше одной: замыкание
+/// `\s -> resume v s` параметризованного хендлера держит её наравне с
+/// вызывающим (§3.4, §10 вопрос 129). Освободи блок при возобновлении - и
+/// вторая ссылка читала бы освобождённое.
+#[test]
+fn a_resumption_is_a_value_with_its_own_count() {
+    unsafe {
+        adamas_stat_reset();
+        let mut kont = kont();
+        let empty = adamas_evidence_empty();
+
+        let handler = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, empty);
+        push_holding(&raw mut kont, MARK_PLAIN, adding, 3, empty);
+        let resumption = adamas_segment_value(adamas_kont_cut(&raw mut kont, handler));
+        assert_eq!(kont.depth, 0);
+
+        // Вторая ссылка: та, что уехала бы в замыкание.
+        adamas_dup(resumption);
+        adamas_kont_resume(&raw mut kont, resumption);
+        assert_eq!(kont.depth, 2, "звенья не вернулись на стек");
+        // Потраченную дропают дважды, и блок отдаёт последняя.
+        adamas_resumption_drop(&raw mut kont, resumption);
+        adamas_resumption_drop(&raw mut kont, resumption);
+
+        let answer = adamas_kont_run(&raw mut kont, adamas_imm(4));
+        assert_eq!(adamas_imm_get(answer), 7, "возобновление не досчитало");
+
+        adamas_evidence_drop(empty);
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Брошенная резумпция без ручки стека: деструкторы бегут на своём корне.
+///
+/// Путь этот принадлежит слоту замыкания и полю объекта - там, где дроп идёт
+/// через `adamas_release`, у которого ручки нет по сигнатуре. Ближайший
+/// проходящий сосед - `adamas_resumption_drop` с ручкой: там раскрутка
+/// откладывается кадром, здесь бежит немедленно.
+#[test]
+fn an_abandoned_resumption_unwinds_on_its_own_root() {
+    unsafe {
+        adamas_stat_reset();
+        TRACE.with_borrow_mut(Vec::clear);
+        let mut kont = kont();
+        let empty = adamas_evidence_empty();
+
+        let handler = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, empty);
+        push_closing(&raw mut kont, 5, empty);
+        let resumption = adamas_segment_value(adamas_kont_cut(&raw mut kont, handler));
+
+        adamas_segment_abandon(resumption);
+        // Немедленно, без трамплина: у этого пути точки приостановки нет вовсе.
+        assert_eq!(TRACE.with_borrow(Clone::clone), vec![5]);
+        assert!(kont.top.is_null(), "раскрутка ушла на чужой стек");
+        // Блок ручки отдаёт дроп: `adamas_release` его не освобождает.
+        adamas_resumption_drop(&raw mut kont, resumption);
+
+        adamas_evidence_drop(empty);
         assert_eq!(adamas_stat_live(), 0);
     }
 }

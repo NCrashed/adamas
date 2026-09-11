@@ -2522,9 +2522,8 @@ impl Emitter<'_> {
             Expr::Perform {
                 label,
                 operation,
-                skip,
                 arguments,
-            } => self.performing_tail(*label, *operation, *skip, arguments, depth),
+            } => self.performing_tail(*label, *operation, arguments, depth),
             Expr::Resume { resumption, value } => {
                 let pad = Self::pad(depth);
                 let resumption = self.value(resumption, depth);
@@ -2648,7 +2647,6 @@ impl Emitter<'_> {
         &mut self,
         label: LabelId,
         operation: u32,
-        skip: u32,
         arguments: &[Expr],
         depth: usize,
     ) {
@@ -2675,7 +2673,7 @@ impl Emitter<'_> {
         );
         let _ = writeln!(
             self.out,
-            "{pad}int {verdict} = adamas_evidence_lookup(ev, {}u, {skip}u, &{frame});",
+            "{pad}int {verdict} = adamas_evidence_lookup(ev, {}u, &{frame});",
             label.0
         );
         if count == 0 {

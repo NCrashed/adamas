@@ -14,13 +14,13 @@ use adamas_runtime::ffi::{
     MARK_CLOSING, MARK_HANDLER, MARK_PLAIN, Value, adamas_alloc, adamas_closure,
     adamas_closure_get, adamas_closure_release, adamas_closure_set, adamas_drop, adamas_dup,
     adamas_evidence_drop, adamas_evidence_empty, adamas_evidence_extend, adamas_evidence_lookup,
-    adamas_field, adamas_frame_env, adamas_frame_evidence, adamas_frame_fields, adamas_frame_label,
-    adamas_frame_mark, adamas_frame_perform, adamas_imm, adamas_imm_get, adamas_kont_abort,
-    adamas_kont_cut, adamas_kont_depth, adamas_kont_handler, adamas_kont_init, adamas_kont_push,
-    adamas_kont_restore, adamas_kont_resume, adamas_kont_run, adamas_rc, adamas_resumption_drop,
-    adamas_segment_abandon, adamas_segment_base, adamas_segment_copy, adamas_segment_depth,
-    adamas_segment_unwind, adamas_segment_value, adamas_set_field, adamas_stat_live,
-    adamas_stat_reset, adamas_unit,
+    adamas_evidence_mask, adamas_field, adamas_frame_env, adamas_frame_evidence,
+    adamas_frame_fields, adamas_frame_label, adamas_frame_mark, adamas_frame_perform, adamas_imm,
+    adamas_imm_get, adamas_kont_abort, adamas_kont_cut, adamas_kont_depth, adamas_kont_handler,
+    adamas_kont_init, adamas_kont_push, adamas_kont_restore, adamas_kont_resume, adamas_kont_run,
+    adamas_rc, adamas_resumption_drop, adamas_segment_abandon, adamas_segment_base,
+    adamas_segment_copy, adamas_segment_depth, adamas_segment_unwind, adamas_segment_value,
+    adamas_set_field, adamas_stat_live, adamas_stat_reset, adamas_unit,
 };
 
 thread_local! {
@@ -152,9 +152,13 @@ unsafe extern "C" fn probing(
         *adamas_frame_env(deferred) = adamas_imm(77);
         push_closing(kont, 8, evidence.cast_mut());
 
-        let seven = adamas_evidence_lookup(evidence, 7, 0, ptr::null_mut());
-        let nine = adamas_evidence_lookup(evidence, 9, 0, ptr::null_mut());
-        let outer = adamas_evidence_lookup(evidence, 7, 1, ptr::null_mut());
+        let seven = adamas_evidence_lookup(evidence, 7, ptr::null_mut());
+        let nine = adamas_evidence_lookup(evidence, 9, ptr::null_mut());
+        // Внешний одноимённый - за маской, то есть под вектором без ближайшей
+        // записи метки 7.
+        let past = adamas_evidence_mask(evidence, 7);
+        let outer = adamas_evidence_lookup(past, 7, ptr::null_mut());
+        adamas_evidence_drop(past);
         VERDICTS.with_borrow_mut(|verdicts| verdicts.extend([seven, nine, outer]));
 
         if seven == LOOKUP_SUPPRESSED {
@@ -511,7 +515,7 @@ unsafe extern "C" fn reaching(
         let mark = adamas_imm_get(adamas_closure_get(closure, 0));
         adamas_drop(argument, None);
         let mut handler: *mut Frame = ptr::null_mut();
-        let verdict = adamas_evidence_lookup(evidence, 7, 0, &raw mut handler);
+        let verdict = adamas_evidence_lookup(evidence, 7, &raw mut handler);
         VERDICTS.with_borrow_mut(|verdicts| verdicts.push(verdict));
         if verdict == LOOKUP_HANDLER {
             let segment = adamas_kont_cut(kont, handler);
@@ -592,7 +596,7 @@ unsafe extern "C" fn seizing(
         let _ = adamas_imm_get(adamas_closure_get(closure, 0));
         adamas_drop(argument, None);
         let mut handler: *mut Frame = ptr::null_mut();
-        let verdict = adamas_evidence_lookup(evidence, 7, 0, &raw mut handler);
+        let verdict = adamas_evidence_lookup(evidence, 7, &raw mut handler);
         VERDICTS.with_borrow_mut(|verdicts| verdicts.push(verdict));
         if verdict == LOOKUP_HANDLER {
             let segment = adamas_kont_cut(kont, handler);
@@ -703,7 +707,7 @@ fn an_operation_reaches_the_branches_of_its_handler() {
         // Операция находит кадр вектором и зовёт его ветку на месте - сегмента
         // при хвостовой резумпции не снимается.
         let mut found: *mut Frame = ptr::null_mut();
-        let verdict = adamas_evidence_lookup(with_handler, 7, 0, &raw mut found);
+        let verdict = adamas_evidence_lookup(with_handler, 7, &raw mut found);
         assert_eq!(verdict, LOOKUP_HANDLER);
         assert_eq!(found, handler);
         let mut arguments = [adamas_imm(5)];
@@ -740,11 +744,11 @@ fn a_branch_sees_the_vector_of_its_handle_site() {
         // Под хендлером своя метка находится, а у ветки её нет: кадр помнит
         // родительский вектор, и второго источника у него не бывает.
         assert_eq!(
-            adamas_evidence_lookup(with_handler, 7, 0, ptr::null_mut()),
+            adamas_evidence_lookup(with_handler, 7, ptr::null_mut()),
             LOOKUP_HANDLER
         );
         assert_eq!(
-            adamas_evidence_lookup(adamas_frame_evidence(handler), 7, 0, ptr::null_mut()),
+            adamas_evidence_lookup(adamas_frame_evidence(handler), 7, ptr::null_mut()),
             LOOKUP_MISSING
         );
 

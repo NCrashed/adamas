@@ -2007,11 +2007,6 @@ impl<'a> Lowerer<'a> {
         let mut value = Expr::Perform {
             label,
             operation: u32::try_from(slot).unwrap_or(u32::MAX),
-            // Маску считает вектор числом пропусков, а ставить её некому:
-            // `#mask.L` этим срезом не берётся. Ноль здесь - не умолчание, а
-            // то самое «внутреннее вхождение», которым §3.4 держит нулевое
-            // смещение вектора.
-            skip: 0,
             arguments: given,
         };
         for argument in arguments.iter().skip(arity) {

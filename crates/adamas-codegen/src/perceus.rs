@@ -622,7 +622,6 @@ impl Pass<'_> {
             Expr::Perform {
                 label,
                 operation,
-                skip,
                 arguments,
             } => {
                 let (arguments, spare) = self.sequence(arguments, owned);
@@ -631,7 +630,6 @@ impl Pass<'_> {
                     Expr::Perform {
                         label,
                         operation,
-                        skip,
                         arguments,
                     },
                 )

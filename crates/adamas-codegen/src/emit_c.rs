@@ -63,8 +63,8 @@ use std::fmt::Write as _;
 use adamas_core::prim::{PrimOp, PrimTy};
 
 use crate::ir::{
-    Arm, Constructor, CtorId, Elems, Expr, Form, FuncId, Function, LocalId, PackId, Packing,
-    Program, Repr, Stride,
+    Arm, Constructor, CtorId, Elems, Expr, Form, FuncId, Function, HandlerId, LabelId, LocalId,
+    PackId, Packing, Program, Repr, Stride,
 };
 
 /// Как уложены элементы массива с таким шагом.
@@ -105,6 +105,18 @@ pub enum EmitError {
         /// Кого она зовёт.
         callee: String,
     },
+
+    /// Операция в функции, чей ответ плоский.
+    ///
+    /// Вердикт `SUPPRESSED` требует вернуть ответ `adamas_kont_abort`
+    /// немедленно (`adamas.h`), а ответ этот - значение: у функции с плоским
+    /// ответом вернуть его нечем. Граница та же, что у прочего плоского на
+    /// границах (§4.11), и снимет её боксирование.
+    #[error("`{function}`: операция в функции с плоским ответом - обрыв вернуть нечем (§4.11)")]
+    Aborting {
+        /// Чья функция.
+        function: String,
+    },
 }
 
 /// Собирает единицу трансляции.
@@ -113,7 +125,7 @@ pub enum EmitError {
 ///
 /// [`EmitError`] - формы вызывающего и вызываемого не сходятся.
 pub fn emit(program: &Program) -> Result<String, EmitError> {
-    hidden_reaches_its_callee(program)?;
+    forms_agree(program)?;
     let mut out = String::new();
     preamble(&mut out);
     out.push_str(FLAT);
@@ -138,6 +150,12 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     for id in &boxed {
         let _ = writeln!(out, "{};", trampoline(&format!("box_{}", id.0)));
     }
+    for (at, described) in program.handlers.iter().enumerate() {
+        let _ = writeln!(out, "{};", branches_signature(at));
+        if described.captured.iter().any(|it| it.fact.present) {
+            let _ = writeln!(out, "{};", release_signature(at));
+        }
+    }
     out.push('\n');
 
     for constructor in &program.constructors {
@@ -151,43 +169,81 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
             wrapper(&mut out, function);
         }
     }
+    for at in 0..program.handlers.len() {
+        branches(&mut out, program, at);
+    }
 
     answer(&mut out, program);
     out.push_str(ENTRY);
     Ok(out)
 }
 
-/// Всякий прямой вызов второй формы стоит там, где скрытые аргументы есть.
+/// Скрытые аргументы стоят там, где их есть чем взять.
 ///
 /// Проверка, а не предположение: расхождение здесь молчаливо - `NULL` вместо
-/// вектора собирается и падает в рантайме. Замыкания она не касается: положить
-/// вторую форму значением из первой законно, скрытые аргументы там приходят от
-/// трамплина.
-fn hidden_reaches_its_callee(program: &Program) -> Result<(), EmitError> {
+/// вектора собирается и падает в рантайме. Утверждений два.
+///
+/// *Прямой вызов второй формы* идёт из места, где вектор и ручка есть. У первой
+/// формы их нет в сигнатуре, но **под `handle` они появляются**: хендлер в
+/// чистой функции заводит корень своего стека (см. [`Emitter::handling`]), и
+/// вычисление под ним второй формы зовёт законно. Замыкания это не касается
+/// вовсе: положить вторую форму значением законно откуда угодно, скрытые
+/// аргументы там приходят от трамплина.
+///
+/// *Операция* стоит только там, где обрыв можно вернуть: `SUPPRESSED` требует
+/// вернуть ответ `adamas_kont_abort` немедленно (`adamas.h`), а ответ этот -
+/// значение. Функция с плоским ответом вернуть его не может, и отказ здесь
+/// лучше, чем порождённый C, который не соберётся.
+fn forms_agree(program: &Program) -> Result<(), EmitError> {
     for function in &program.functions {
-        if function.form == Form::Detached {
-            continue;
-        }
-        let mut found = None;
-        walk(&function.body, &mut |expr| {
-            if let Expr::Call {
-                function: called, ..
-            } = expr
-            {
-                let called = &program.functions[called.0];
-                if called.form == Form::Detached && found.is_none() {
-                    found = Some(called.name.clone());
-                }
-            }
-        });
-        if let Some(callee) = found {
+        let hidden = function.form == Form::Detached;
+        if let Some(callee) = stranded(program, &function.body, hidden) {
             return Err(EmitError::Hidden {
                 caller: function.name.clone(),
                 callee,
             });
         }
+        // Спрашивается C-тип, а не `Repr::pointer`: массив и блок региона -
+        // такое же слово с заголовком, и обрыв вернуть ими можно.
+        if scalar(function.result) != "adamas_value" {
+            let mut performs = false;
+            walk(&function.body, &mut |expr| {
+                performs |= matches!(expr, Expr::Perform { .. });
+            });
+            if performs {
+                return Err(EmitError::Aborting {
+                    function: function.name.clone(),
+                });
+            }
+        }
     }
     Ok(())
+}
+
+/// Первый прямой вызов второй формы, которому скрытые аргументы взять неоткуда.
+fn stranded(program: &Program, expr: &Expr, hidden: bool) -> Option<String> {
+    match expr {
+        Expr::Call { function, .. } if !hidden => {
+            let called = &program.functions[function.0];
+            if called.form == Form::Detached {
+                return Some(called.name.clone());
+            }
+            None
+        }
+        // Под хендлером вектор и ручка есть всегда: их заводит сам `handle`.
+        Expr::Handle {
+            captured,
+            computation,
+            ..
+        } => captured
+            .iter()
+            .find_map(|capture| stranded(program, capture, hidden))
+            .or_else(|| stranded(program, computation, true)),
+        _ => expr
+            .children()
+            .into_iter()
+            .find_map(|child| stranded(program, child, hidden)),
+    }
 }
 
 /// Чем точка входа отвечает.
@@ -476,85 +532,8 @@ fn builders(program: &Program) -> BTreeSet<CtorId> {
 /// Обход дерева выражения сверху вниз.
 fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
     visit(expr);
-    match expr {
-        Expr::Local(_)
-        | Expr::Erased
-        | Expr::ConstructClosure { .. }
-        | Expr::Literal { .. }
-        | Expr::LayoutField { .. }
-        | Expr::RegionNew
-        | Expr::Layout { .. } => {}
-        Expr::Unpack { value, .. } => walk(value, visit),
-        Expr::RegionLast { region } => walk(region, visit),
-        Expr::RegionAlloc { region, value, .. } => {
-            walk(region, visit);
-            walk(value, visit);
-        }
-        Expr::RegionRead { region, at, .. }
-        | Expr::RegionRecycle { region, at }
-        | Expr::RegionPop { region, at } => {
-            walk(region, visit);
-            walk(at, visit);
-        }
-        Expr::RegionWrite {
-            region, at, value, ..
-        } => {
-            walk(region, visit);
-            walk(at, visit);
-            walk(value, visit);
-        }
-        Expr::Construct { arguments, .. }
-        | Expr::Call { arguments, .. }
-        | Expr::Pack {
-            fields: arguments, ..
-        } => {
-            for argument in arguments {
-                walk(argument, visit);
-            }
-        }
-        Expr::ArrayNew { count, initial, .. } => {
-            walk(count, visit);
-            walk(initial, visit);
-        }
-        Expr::ArraySet {
-            array, at, value, ..
-        } => {
-            walk(array, visit);
-            walk(at, visit);
-            walk(value, visit);
-        }
-        Expr::ArrayIndex { array, at, .. } => {
-            walk(array, visit);
-            walk(at, visit);
-        }
-        Expr::Closure { captured, .. } => {
-            for capture in captured {
-                walk(capture, visit);
-            }
-        }
-        Expr::Primitive { left, right, .. } => {
-            walk(left, visit);
-            walk(right, visit);
-        }
-        Expr::Apply { callee, argument } => {
-            walk(callee, visit);
-            walk(argument, visit);
-        }
-        Expr::Bind { value, body, .. } => {
-            walk(value, visit);
-            walk(body, visit);
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            walk(scrutinee, visit);
-            for arm in arms {
-                walk(&arm.body, visit);
-            }
-        }
-        Expr::Dup { body, .. } | Expr::Drop { body, .. } | Expr::Reclaim { body, .. } => {
-            walk(body, visit);
-        }
+    for child in expr.children() {
+        walk(child, visit);
     }
 }
 
@@ -686,6 +665,113 @@ fn wrapper(out: &mut String, function: &Function) {
         function.id.0,
         taken.join(", ")
     );
+}
+
+/// Сигнатура веток площадки: каноническая форма `adamas_handler_code`.
+fn branches_signature(at: usize) -> String {
+    format!(
+        "static adamas_value handler_{at}(adamas_frame *h, adamas_kont *kont, \
+         uint32_t op, adamas_value *args, size_t count)"
+    )
+}
+
+/// Сигнатура дропа среды кадра хендлера.
+fn release_signature(at: usize) -> String {
+    format!("static void release_{at}(adamas_frame *h, adamas_kont *kont)")
+}
+
+/// Ветки одной площадки `handle` одной функцией: их выбирает номер операции.
+///
+/// Одной, а не по функции на ветку, потому что выбирает их **рантайм**:
+/// операция приходит с кадром на руках и статически не знает, чьи это ветки
+/// (`adamas.h`, `adamas_handler_code`). Тела же веток - обычные функции
+/// понижения, и здесь только раздача аргументов.
+///
+/// Среда кадра принадлежит кадру, а функция берёт аргументы владением - отсюда
+/// `adamas_dup` на каждый слот, тот же довод, что у трамплина замыкания.
+/// Аргументы операции приходят владением и передаются как есть; лишние -
+/// синтезированный триггер приостановленного вычисления - дропаются здесь:
+/// сколько ветка связывает, знает эта площадка, а место операции не знает.
+fn branches(out: &mut String, program: &Program, at: usize) {
+    let described = &program.handlers[at];
+    let label = &program.labels[described.label.0 as usize];
+    let env = described
+        .captured
+        .iter()
+        .filter(|it| it.fact.present)
+        .count();
+    let _ = writeln!(out, "/* ветки `{}` */", escaped(&label.name));
+    let _ = writeln!(out, "{} {{", branches_signature(at));
+    let _ = writeln!(
+        out,
+        "    const adamas_evidence *ev = adamas_frame_evidence(h);"
+    );
+    if env > 0 {
+        let _ = writeln!(out, "    adamas_value *env = adamas_frame_env(h);");
+    }
+    let _ = writeln!(out, "    switch (op) {{");
+    let arm = |out: &mut String, case: &str, title: &str, function: FuncId, written: usize| {
+        let _ = writeln!(out, "    case {case}: {{ /* {title} */");
+        let _ = writeln!(
+            out,
+            "        if (count < {written}u) {{ adamas_fail(\"ветке `{title}` не хватило аргументов\"); }}"
+        );
+        let _ = writeln!(
+            out,
+            "        for (size_t extra = {written}u; extra < count; extra += 1) {{ \
+             adamas_drop_value(args[extra]); }}"
+        );
+        let mut given: Vec<String> = vec![FORWARD.to_owned()];
+        given.extend((0..env).map(|slot| format!("adamas_dup(env[{slot}])")));
+        given.extend((0..written).map(|slot| format!("args[{slot}]")));
+        let _ = writeln!(
+            out,
+            "        return fn_{}({});",
+            function.0,
+            given.join(", ")
+        );
+        let _ = writeln!(out, "    }}");
+    };
+    for (slot, branch) in described.branches.iter().enumerate() {
+        let title = label
+            .operations
+            .get(slot)
+            .map_or_else(|| format!("#{slot}"), |name| escaped(name));
+        arm(
+            out,
+            &format!("{slot}u"),
+            &title,
+            branch.function,
+            branch.written,
+        );
+    }
+    arm(
+        out,
+        "ADAMAS_HANDLER_RETURN",
+        "return",
+        described.returned,
+        1,
+    );
+    let _ = writeln!(out, "    default: break;");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(
+        out,
+        "    adamas_fail(\"у хендлера `{}` нет такой ветки\");",
+        escaped(&label.name)
+    );
+    let _ = writeln!(out, "}}\n");
+
+    if env == 0 {
+        return;
+    }
+    let _ = writeln!(out, "/* среда веток `{}` */", escaped(&label.name));
+    let _ = writeln!(out, "{} {{", release_signature(at));
+    let _ = writeln!(out, "    (void)kont;");
+    let _ = writeln!(out, "    adamas_value *env = adamas_frame_env(h);");
+    for slot in 0..env {
+        let _ = writeln!(out, "    adamas_drop_value(env[{slot}]);");
+    }
+    let _ = writeln!(out, "}}\n");
 }
 
 /// Сборщик конструктора: замыкание копит аргументы, последний собирает объект.
@@ -820,6 +906,11 @@ impl Emitter<'_> {
             | Expr::Construct { .. }
             | Expr::ConstructClosure { .. }
             | Expr::Closure { .. }
+            // Ответ хендлера даёт ветка `return`, ответ операции - ветка
+            // операции, и обе отвечают указателем: ветки идут через кадр, а
+            // слот кадра единообразен (§4.11).
+            | Expr::Handle { .. }
+            | Expr::Perform { .. }
             | Expr::Apply { .. } => Repr::Boxed,
         }
     }
@@ -834,7 +925,6 @@ impl Emitter<'_> {
     /// Каждый составной узел получает своё имя: порядок вычисления виден в
     /// тексте, а не выводится из правил C.
     fn value(&mut self, expr: &Expr, depth: usize) -> String {
-        let pad = Self::pad(depth);
         match expr {
             Expr::Local(local) => format!("v{}", local.0),
             Expr::Erased => "ADAMAS_ERASED".to_owned(),
@@ -890,7 +980,33 @@ impl Emitter<'_> {
                 arguments,
             } => self.call(*function, arguments, depth),
             Expr::Closure { function, captured } => self.closure(*function, captured, depth),
+            Expr::Handle {
+                handler,
+                captured,
+                computation,
+            } => self.handling(*handler, captured, computation, depth),
+            Expr::Perform {
+                label,
+                operation,
+                skip,
+                arguments,
+            } => self.performing(*label, *operation, *skip, arguments, depth),
             Expr::Apply { callee, argument } => self.applying(callee, argument, depth),
+            Expr::Match {
+                scrutinee, arms, ..
+            } => self.analysis(scrutinee, arms, depth),
+            Expr::Bind { .. } | Expr::Dup { .. } | Expr::Drop { .. } | Expr::Reclaim { .. } => {
+                self.bookkeeping(expr, depth)
+            }
+        }
+    }
+
+    /// Узлы, у которых своего значения нет: связывание и учёт ссылок (§5.1).
+    ///
+    /// Каждый печатает строку и уходит в тело - значением служит оно.
+    fn bookkeeping(&mut self, expr: &Expr, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let body = match expr {
             Expr::Bind {
                 binding,
                 value,
@@ -904,18 +1020,15 @@ impl Emitter<'_> {
                     binding.local.0,
                     escaped(&binding.name)
                 );
-                self.value(body, depth)
+                body
             }
-            Expr::Match {
-                scrutinee, arms, ..
-            } => self.analysis(scrutinee, arms, depth),
             Expr::Dup { local, body } => {
                 let _ = writeln!(self.out, "{pad}adamas_dup(v{});", local.0);
-                self.value(body, depth)
+                body
             }
             Expr::Drop { local, body } => {
                 let _ = writeln!(self.out, "{pad}adamas_drop_value(v{});", local.0);
-                self.value(body, depth)
+                body
             }
             Expr::Reclaim { local, token, body } => {
                 let _ = writeln!(
@@ -923,9 +1036,11 @@ impl Emitter<'_> {
                     "{pad}adamas_value v{} = adamas_reclaim_value(v{});",
                     token.0, local.0
                 );
-                self.value(body, depth)
+                body
             }
-        }
+            _ => return "ADAMAS_ERASED".to_owned(),
+        };
+        self.value(body, depth)
     }
 
     /// Дескриптор укладки значением (§4.11): два слова на кадре.
@@ -1607,6 +1722,196 @@ impl Emitter<'_> {
                 "{pad}adamas_closure_set({name}, {slot}, {capture});"
             );
         }
+        name
+    }
+
+    /// Хендлер: кадр `HANDLER`, вычисление под расширенным вектором, `return`.
+    ///
+    /// # Почему блок, а не три строки подряд
+    ///
+    /// Вычисление обязано идти под **своим** вектором - запись о хендлере видна
+    /// только ему, - а имя вектора у порождённого C одно (`ev`). Блок его и
+    /// затеняет: внутри `ev` есть расширенный, снаружи - прежний, и ветки,
+    /// стоящие снаружи хендлера, берут прежний у кадра.
+    ///
+    /// # Откуда стек у первой формы
+    ///
+    /// Ставить кадр нужно и той функции, чья собственная row пуста: `runIO`
+    /// гасит `IO` внутри себя и наружу его не отдаёт. Скрытых аргументов у неё
+    /// нет, и брать их неоткуда - значит она **корень**: заводит свой стек и
+    /// пустой вектор. Это законно ровно потому, что row её пуста: операции
+    /// наружу не уходит ни одной (§3.4, погашение расширением справа), и всё,
+    /// что под ней производится, гасится внутри неё же. «Стек один» (§10
+    /// вопрос 144) этим не нарушается - он один на всё, что друг друга видит.
+    fn handling(
+        &mut self,
+        handler: HandlerId,
+        captured: &[Expr],
+        computation: &Expr,
+        depth: usize,
+    ) -> String {
+        let pad = Self::pad(depth);
+        let inner = Self::pad(depth + 1);
+        let described = &self.program.handlers[handler.0 as usize];
+        let label = described.label;
+        let present: Vec<usize> = described
+            .captured
+            .iter()
+            .enumerate()
+            .filter(|(_, binding)| binding.fact.present)
+            .map(|(position, _)| position)
+            .collect();
+        let slots = present.len();
+        let title = escaped(&self.program.labels[label.0 as usize].name);
+        let taken: Vec<String> = present
+            .iter()
+            .filter_map(|position| captured.get(*position))
+            .map(|capture| self.value(capture, depth))
+            .collect();
+
+        let name = self.temp();
+        let root = self.temp();
+        let frame = self.temp();
+        let vector = self.temp();
+        let body = self.temp();
+        let _ = writeln!(self.out, "{pad}adamas_value {name}; /* handle {title} */");
+        let _ = writeln!(self.out, "{pad}{{");
+        let outer = self.hidden;
+        if !outer {
+            // Первая форма: своя row пуста, значит наружу ничего не уходит и
+            // корень стека здесь.
+            let _ = writeln!(self.out, "{inner}adamas_kont {root};");
+            let _ = writeln!(self.out, "{inner}adamas_kont_init(&{root});");
+            let _ = writeln!(self.out, "{inner}adamas_kont *kont = &{root};");
+            let _ = writeln!(
+                self.out,
+                "{inner}adamas_evidence *{root}_ev = adamas_evidence_empty();"
+            );
+            let _ = writeln!(self.out, "{inner}const adamas_evidence *ev = {root}_ev;");
+        }
+        let _ = writeln!(
+            self.out,
+            "{inner}adamas_frame *{frame} = adamas_kont_handler(kont, {}u, handler_{}, {}, {slots}u, ev);",
+            label.0,
+            handler.0,
+            if slots == 0 {
+                "NULL".to_owned()
+            } else {
+                format!("release_{}", handler.0)
+            }
+        );
+        if slots > 0 {
+            let _ = writeln!(
+                self.out,
+                "{inner}adamas_value *{frame}_env = adamas_frame_env({frame});"
+            );
+            for (slot, capture) in taken.iter().enumerate() {
+                let _ = writeln!(self.out, "{inner}{frame}_env[{slot}] = {capture};");
+            }
+        }
+        let _ = writeln!(
+            self.out,
+            "{inner}adamas_evidence *{vector} = adamas_evidence_extend(ev, {}u, {frame});",
+            label.0
+        );
+        let _ = writeln!(self.out, "{inner}adamas_value {body};");
+        let _ = writeln!(self.out, "{inner}{{");
+        let _ = writeln!(self.out, "{inner}    const adamas_evidence *ev = {vector};");
+        self.hidden = true;
+        let answer = self.value(computation, depth + 2);
+        self.hidden = outer;
+        let _ = writeln!(self.out, "{inner}    {body} = {answer};");
+        let _ = writeln!(self.out, "{inner}}}");
+        let _ = writeln!(self.out, "{inner}adamas_evidence_drop({vector});");
+        let _ = writeln!(
+            self.out,
+            "{inner}{name} = adamas_kont_leave(kont, {frame}, {body});"
+        );
+        if !outer {
+            let _ = writeln!(self.out, "{inner}adamas_evidence_drop({root}_ev);");
+        }
+        let _ = writeln!(self.out, "{pad}}}");
+        name
+    }
+
+    /// Операция: вердикт вектора трёхзначен, и все три ответа написаны.
+    ///
+    /// `HANDLER` - ветка на месте: хвостовая резумпция значит, что ответ ветки
+    /// и есть значение операции, поэтому продолжение остаётся на C-стеке, а
+    /// сегмент не режется. `SUPPRESSED` - хендлер ответ уже дал, деться второму
+    /// некуда: `adamas_kont_abort` и **немедленный возврат** (`adamas.h`).
+    /// `MISSING` - операция без хендлера.
+    ///
+    /// Путь `SUPPRESSED` в этом срезе недостижим - подавление ставит раскрутка,
+    /// а её заводит абортивная ветка (трек C волны 4). Написан он не про запас:
+    /// сведи вердикт к двум, и операция деструктора ушла бы к одноимённому
+    /// хендлеру снаружи - ровно тот дефект, который ревью 2026-09-05 нашло у
+    /// машины. Владение на этом пути отдаёт только сама операция; локальные
+    /// связывания вокруг неё отдаст трек C вместе с исключительными выходами.
+    fn performing(
+        &mut self,
+        label: LabelId,
+        operation: u32,
+        skip: u32,
+        arguments: &[Expr],
+        depth: usize,
+    ) -> String {
+        let pad = Self::pad(depth);
+        let inner = Self::pad(depth + 1);
+        let described = &self.program.labels[label.0 as usize];
+        let title = escaped(&described.name);
+        let operation_name = described
+            .operations
+            .get(operation as usize)
+            .map_or_else(|| format!("#{operation}"), |name| escaped(name));
+        let given: Vec<String> = arguments
+            .iter()
+            .map(|argument| self.value(argument, depth))
+            .collect();
+
+        let name = self.temp();
+        let frame = self.temp();
+        let verdict = self.temp();
+        let operands = self.temp();
+        let count = given.len();
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_frame *{frame} = NULL; /* {title}.{operation_name} */"
+        );
+        let _ = writeln!(
+            self.out,
+            "{pad}int {verdict} = adamas_evidence_lookup(ev, {}u, {skip}u, &{frame});",
+            label.0
+        );
+        if count == 0 {
+            let _ = writeln!(self.out, "{pad}adamas_value *{operands} = NULL;");
+        } else {
+            let _ = writeln!(
+                self.out,
+                "{pad}adamas_value {operands}[{count}] = {{ {} }};",
+                given.join(", ")
+            );
+        }
+        let _ = writeln!(self.out, "{pad}adamas_value {name};");
+        let _ = writeln!(self.out, "{pad}if ({verdict} == ADAMAS_LOOKUP_HANDLER) {{");
+        let _ = writeln!(
+            self.out,
+            "{inner}{name} = adamas_frame_perform({frame}, kont, {operation}u, {operands}, {count}u);"
+        );
+        let _ = writeln!(
+            self.out,
+            "{pad}}} else if ({verdict} == ADAMAS_LOOKUP_SUPPRESSED) {{"
+        );
+        for slot in 0..count {
+            let _ = writeln!(self.out, "{inner}adamas_drop_value({operands}[{slot}]);");
+        }
+        let _ = writeln!(self.out, "{inner}return adamas_kont_abort(kont);");
+        let _ = writeln!(self.out, "{pad}}} else {{");
+        let _ = writeln!(
+            self.out,
+            "{inner}adamas_fail(\"операция без хендлера: {title}.{operation_name}\");"
+        );
+        let _ = writeln!(self.out, "{pad}}}");
         name
     }
 

@@ -78,6 +78,8 @@ pub fn insert(program: Program) -> Program {
     let Program {
         constructors,
         packings,
+        labels,
+        handlers,
         functions,
         entry,
     } = program;
@@ -88,6 +90,8 @@ pub fn insert(program: Program) -> Program {
     Program {
         constructors,
         packings,
+        labels,
+        handlers,
         functions,
         entry,
     }
@@ -143,98 +147,27 @@ fn flat(function: &Function) -> BTreeSet<LocalId> {
 }
 
 /// То же по телу: связывания `let` и поля ветвей.
+///
+/// Обход по [`Expr::children`], а не свой: узел, забытый здесь, сделал бы
+/// плоское связывание считаемым - то есть отдал бы биты числа счётчику.
 fn inner(expr: &Expr, out: &mut BTreeSet<LocalId>) {
     match expr {
-        Expr::Local(_)
-        | Expr::Erased
-        | Expr::ConstructClosure { .. }
-        | Expr::Literal { .. }
-        | Expr::LayoutField { .. }
-        | Expr::RegionNew
-        | Expr::Layout { .. } => {}
-        Expr::Unpack { value, .. } => inner(value, out),
-        Expr::RegionLast { region } => inner(region, out),
-        Expr::RegionAlloc { region, value, .. } => {
-            inner(region, out);
-            inner(value, out);
-        }
-        Expr::RegionRead { region, at, .. }
-        | Expr::RegionRecycle { region, at }
-        | Expr::RegionPop { region, at } => {
-            inner(region, out);
-            inner(at, out);
-        }
-        Expr::RegionWrite {
-            region, at, value, ..
-        } => {
-            inner(region, out);
-            inner(at, out);
-            inner(value, out);
-        }
-        Expr::Construct { arguments, .. }
-        | Expr::Call { arguments, .. }
-        | Expr::Pack {
-            fields: arguments, ..
-        } => {
-            for argument in arguments {
-                inner(argument, out);
-            }
-        }
-        Expr::ArrayNew { count, initial, .. } => {
-            inner(count, out);
-            inner(initial, out);
-        }
-        Expr::ArraySet {
-            array, at, value, ..
-        } => {
-            inner(array, out);
-            inner(at, out);
-            inner(value, out);
-        }
-        Expr::ArrayIndex { array, at, .. } => {
-            inner(array, out);
-            inner(at, out);
-        }
-        Expr::Closure { captured, .. } => {
-            for capture in captured {
-                inner(capture, out);
-            }
-        }
-        Expr::Primitive { left, right, .. } => {
-            inner(left, out);
-            inner(right, out);
-        }
-        Expr::Apply { callee, argument } => {
-            inner(callee, out);
-            inner(argument, out);
-        }
-        Expr::Bind {
-            binding,
-            value,
-            body,
-        } => {
+        Expr::Bind { binding, .. } => {
             if !binding.fact.repr.counted() {
                 out.insert(binding.local);
             }
-            inner(value, out);
-            inner(body, out);
         }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            inner(scrutinee, out);
-            for arm in arms {
-                for field in &arm.fields {
-                    if !field.fact.repr.counted() {
-                        out.insert(field.local);
-                    }
+        Expr::Match { arms, .. } => {
+            for field in arms.iter().flat_map(|arm| &arm.fields) {
+                if !field.fact.repr.counted() {
+                    out.insert(field.local);
                 }
-                inner(&arm.body, out);
             }
         }
-        Expr::Dup { body, .. } | Expr::Drop { body, .. } | Expr::Reclaim { body, .. } => {
-            inner(body, out);
-        }
+        _ => {}
+    }
+    for child in expr.children() {
+        inner(child, out);
     }
 }
 
@@ -255,94 +188,17 @@ fn ceiling(function: &Function) -> u32 {
 /// Все связывания, которые вводит выражение.
 fn bound(expr: &Expr, note: &mut impl FnMut(LocalId)) {
     match expr {
-        Expr::Local(_)
-        | Expr::Erased
-        | Expr::ConstructClosure { .. }
-        | Expr::Literal { .. }
-        | Expr::LayoutField { .. }
-        | Expr::RegionNew
-        | Expr::Layout { .. } => {}
-        Expr::Unpack { value, .. } => bound(value, note),
-        Expr::RegionLast { region } => bound(region, note),
-        Expr::RegionAlloc { region, value, .. } => {
-            bound(region, note);
-            bound(value, note);
-        }
-        Expr::RegionRead { region, at, .. }
-        | Expr::RegionRecycle { region, at }
-        | Expr::RegionPop { region, at } => {
-            bound(region, note);
-            bound(at, note);
-        }
-        Expr::RegionWrite {
-            region, at, value, ..
-        } => {
-            bound(region, note);
-            bound(at, note);
-            bound(value, note);
-        }
-        Expr::Construct { arguments, .. }
-        | Expr::Call { arguments, .. }
-        | Expr::Pack {
-            fields: arguments, ..
-        } => {
-            for argument in arguments {
-                bound(argument, note);
+        Expr::Bind { binding, .. } => note(binding.local),
+        Expr::Match { arms, .. } => {
+            for field in arms.iter().flat_map(|arm| &arm.fields) {
+                note(field.local);
             }
         }
-        Expr::ArrayNew { count, initial, .. } => {
-            bound(count, note);
-            bound(initial, note);
-        }
-        Expr::ArraySet {
-            array, at, value, ..
-        } => {
-            bound(array, note);
-            bound(at, note);
-            bound(value, note);
-        }
-        Expr::ArrayIndex { array, at, .. } => {
-            bound(array, note);
-            bound(at, note);
-        }
-        Expr::Closure { captured, .. } => {
-            for capture in captured {
-                bound(capture, note);
-            }
-        }
-        Expr::Primitive { left, right, .. } => {
-            bound(left, note);
-            bound(right, note);
-        }
-        Expr::Apply { callee, argument } => {
-            bound(callee, note);
-            bound(argument, note);
-        }
-        Expr::Bind {
-            binding,
-            value,
-            body,
-        } => {
-            note(binding.local);
-            bound(value, note);
-            bound(body, note);
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            bound(scrutinee, note);
-            for arm in arms {
-                for field in &arm.fields {
-                    note(field.local);
-                }
-                bound(&arm.body, note);
-            }
-        }
-        Expr::Dup { body, .. } | Expr::Drop { body, .. } => bound(body, note),
-        Expr::Reclaim { token, body, .. } => {
-            note(*token);
-            bound(body, note);
-        }
+        Expr::Reclaim { token, .. } => note(*token),
+        _ => {}
+    }
+    for child in expr.children() {
+        bound(child, note);
     }
 }
 
@@ -356,94 +212,22 @@ fn mentions(expr: &Expr) -> BTreeSet<LocalId> {
 /// То же, накопителем.
 fn named(expr: &Expr, out: &mut BTreeSet<LocalId>) {
     match expr {
-        Expr::Local(local) => {
-            out.insert(*local);
-        }
+        Expr::Local(local)
         // Дескриптор укладки в `owned` не входит - счётчика у него нет
         // ([`Repr::Layout`]), - но упомянут он именно здесь, и обходу дешевле
         // это знать, чем полагаться на то, что дроп по нему не встанет.
-        Expr::LayoutField { descriptor, .. } => {
-            out.insert(*descriptor);
+        | Expr::LayoutField {
+            descriptor: local, ..
         }
-        Expr::Erased
-        | Expr::ConstructClosure { .. }
-        | Expr::Literal { .. }
-        | Expr::RegionNew
-        | Expr::Layout { .. } => {}
-        Expr::Unpack { value, .. } => named(value, out),
-        Expr::RegionLast { region } => named(region, out),
-        Expr::RegionAlloc { region, value, .. } => {
-            named(region, out);
-            named(value, out);
-        }
-        Expr::RegionRead { region, at, .. }
-        | Expr::RegionRecycle { region, at }
-        | Expr::RegionPop { region, at } => {
-            named(region, out);
-            named(at, out);
-        }
-        Expr::RegionWrite {
-            region, at, value, ..
-        } => {
-            named(region, out);
-            named(at, out);
-            named(value, out);
-        }
-        Expr::Construct { arguments, .. }
-        | Expr::Call { arguments, .. }
-        | Expr::Pack {
-            fields: arguments, ..
-        } => {
-            for argument in arguments {
-                named(argument, out);
-            }
-        }
-        Expr::ArrayNew { count, initial, .. } => {
-            named(count, out);
-            named(initial, out);
-        }
-        Expr::ArraySet {
-            array, at, value, ..
-        } => {
-            named(array, out);
-            named(at, out);
-            named(value, out);
-        }
-        Expr::ArrayIndex { array, at, .. } => {
-            named(array, out);
-            named(at, out);
-        }
-        Expr::Closure { captured, .. } => {
-            for capture in captured {
-                named(capture, out);
-            }
-        }
-        Expr::Primitive { left, right, .. } => {
-            named(left, out);
-            named(right, out);
-        }
-        Expr::Apply { callee, argument } => {
-            named(callee, out);
-            named(argument, out);
-        }
-        Expr::Bind { value, body, .. } => {
-            named(value, out);
-            named(body, out);
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            named(scrutinee, out);
-            for arm in arms {
-                named(&arm.body, out);
-            }
-        }
-        Expr::Dup { local, body }
-        | Expr::Drop { local, body }
-        | Expr::Reclaim { local, body, .. } => {
+        | Expr::Dup { local, .. }
+        | Expr::Drop { local, .. }
+        | Expr::Reclaim { local, .. } => {
             out.insert(*local);
-            named(body, out);
         }
+        _ => {}
+    }
+    for child in expr.children() {
+        named(child, out);
     }
 }
 
@@ -575,6 +359,7 @@ impl Pass<'_> {
                 let (captured, spare) = self.sequence(captured, owned);
                 drops(spare, Expr::Closure { function, captured })
             }
+            Expr::Perform { .. } | Expr::Handle { .. } => self.effectful(expr, owned),
             Expr::Apply { callee, argument } => self.applied(*callee, *argument, owned),
             Expr::Bind {
                 binding,
@@ -814,6 +599,54 @@ impl Pass<'_> {
         (done, spare)
     }
 
+    /// Хендлер и операция: владение по ним то же, что у прямого вызова.
+    ///
+    /// Аргументы операции уходят ветке владением, среда хендлера - кадру, и
+    /// порядок подвыражений значим: среда ложится в кадр **до** того, как под
+    /// ним считается вычисление. Хоронить её во временные связывания нельзя -
+    /// кадра тогда ещё нет, - поэтому здесь тот же [`Pass::sequence`], что у
+    /// конструктора, и ничего сверх него.
+    fn effectful(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
+        match expr {
+            Expr::Perform {
+                label,
+                operation,
+                skip,
+                arguments,
+            } => {
+                let (arguments, spare) = self.sequence(arguments, owned);
+                drops(
+                    spare,
+                    Expr::Perform {
+                        label,
+                        operation,
+                        skip,
+                        arguments,
+                    },
+                )
+            }
+            Expr::Handle {
+                handler,
+                captured,
+                computation,
+            } => {
+                let mut items = captured;
+                items.push(*computation);
+                let (mut items, spare) = self.sequence(items, owned);
+                let computation = items.pop().unwrap_or(Expr::Erased);
+                drops(
+                    spare,
+                    Expr::Handle {
+                        handler,
+                        captured: items,
+                        computation: Box::new(computation),
+                    },
+                )
+            }
+            other => other,
+        }
+    }
+
     /// Применение значения-функции.
     ///
     /// `adamas_apply` замыкание заимствует (`adamas.h`), поэтому дропает его
@@ -1045,6 +878,11 @@ impl Pass<'_> {
             | Expr::RegionWrite { .. }
             | Expr::RegionRecycle { .. }
             | Expr::RegionPop { .. }
+            // Хендлер и операция ячейку не придерживают, и это осознанный
+            // консерватизм: путь через ветку понижению отсюда не виден - её
+            // тело своя функция, - а ложное «да» вернуло бы течь.
+            | Expr::Handle { .. }
+            | Expr::Perform { .. }
             | Expr::Layout { .. } => false,
         }
     }
@@ -1123,6 +961,9 @@ impl Pass<'_> {
             | Expr::RegionWrite { .. }
             | Expr::RegionRecycle { .. }
             | Expr::RegionPop { .. }
+            // Обход тот же, что у [`Pass::plans`], и отвечает он то же.
+            | Expr::Handle { .. }
+            | Expr::Perform { .. }
             | Expr::Layout { .. } => false,
         }
     }

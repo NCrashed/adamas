@@ -280,7 +280,7 @@ unsafe extern "C" {
         branches: HandlerCode,
         release: FrameRelease,
         fields: usize,
-        evidence: *mut Evidence,
+        evidence: *const Evidence,
     ) -> *mut Frame;
     /// Зовёт ветку операции у найденного кадра хендлера.
     pub fn adamas_frame_perform(

@@ -109,8 +109,9 @@ use adamas_core::term::{Case, Index, Name, Term};
 use adamas_core::value::{Env, Lvl, Value};
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Elems, Expr, Fact, Form, FuncId, Function, LocalId, PackId,
-    Packing, Program, Repr, Slot as PackSlot, SlotTy, Stride, Variant,
+    Arm, Binding, Branch, Constructor, CtorId, Elems, Expr, Fact, Form, FuncId, Function, Handler,
+    HandlerId, Label, LabelId, LocalId, PackId, Packing, Program, Repr, Slot as PackSlot, SlotTy,
+    Stride, Variant,
 };
 
 /// Почему понижение отказало.
@@ -130,23 +131,42 @@ pub enum LowerError {
         name: String,
     },
 
-    /// Элиминатор хендлера: `#handle.L`, `#handleMulti.L`, `#handleState.L`,
-    /// `#mask.L`.
+    /// Элиминатор хендлера, которого этот срез не ставит.
     ///
     /// Отказ **не про форму функции**: форму каждое определение получает по
-    /// row своего типа, и эффектное получает вторую. Не поставлен кадр самого
-    /// хендлера - ветки, запись evidence, снятие сегмента.
-    #[error("`{name}` - элиминатор хендлера: кадра хендлера понижение ещё не ставит")]
+    /// row своего типа, и эффектное получает вторую. Не поставлен кадр
+    /// конкретно этого элиминатора.
+    #[error("`{name}` - {why}")]
     Handler {
         /// Имя элиминатора.
         name: String,
+        /// Чем именно он не берётся и чей это трек.
+        why: &'static str,
     },
 
-    /// Метка эффекта либо её операция.
-    #[error("`{name}` - операция эффекта: её понижение приходит вместе с хендлером")]
+    /// Ветка хендлера, которую этот срез не понижает.
+    ///
+    /// Вердикт ветки трёхзначный (§3.4): хвостово-резумптивная зовётся на
+    /// месте, абортивная снимает сегмент, общая режет его в резумпцию. Берётся
+    /// здесь первая, и отказ называет, чем оказались остальные, - молча
+    /// посчитать не то хуже, чем не посчитать.
+    #[error("ветка `{operation}` хендлера `{effect}` {why}")]
+    Verdict {
+        /// Метка хендлера.
+        effect: String,
+        /// Операция, чья ветка.
+        operation: String,
+        /// Каким вердикт вышел и чей это трек.
+        why: &'static str,
+    },
+
+    /// Метка эффекта либо её операция в позиции, где значения у неё нет.
+    #[error("`{name}` - {why}")]
     Operation {
         /// Имя метки или операции.
         name: String,
+        /// Почему не понижается.
+        why: &'static str,
     },
 
     /// Семейство в позиции значения.
@@ -398,6 +418,19 @@ type Dicts = HashMap<u32, LocalId>;
 /// Верх диапазона тегов занят служебными объектами рантайма (`adamas.h`).
 const TAGS: u16 = 0xFFF0;
 
+/// Невыразимые имена элиминаторов - те же, что ставит элаборация и читает
+/// машина (`adamas-interp/src/effect.rs`).
+const HANDLE: &str = "#handle.";
+/// Мультишот: копирование сегмента - трек E волны 4.
+const MULTI: &str = "#handleMulti.";
+/// Параметризованный хендлер: кадр `Settling` - трек D волны 4.
+const STATEFUL: &str = "#handleState.";
+/// Маска: пропуск одного одноимённого хендлера.
+const MASK: &str = "#mask.";
+
+/// Имя единицы: приостановленное вычисление запускается её значением.
+const UNIT: &str = "Unit";
+
 /// Понижает терм в программу.
 ///
 /// `entry` - тело `main` с подставленными аргументами уровня и row, то есть
@@ -420,6 +453,9 @@ enum Arg<'a> {
     /// Достроен по типу определения: связывания в терме нет.
     Supplied(&'a Binding),
 }
+
+/// Захват среды: связывания, их значения на месте и среда вложенного тела.
+type Captured = (Vec<Binding>, Vec<Expr>, Vec<Slot>);
 
 /// Где лежит связывание, видимое телу.
 #[derive(Clone, Debug)]
@@ -468,6 +504,12 @@ struct Lowerer<'a> {
     tags: HashMap<Name, CtorId>,
     functions: Vec<Function>,
     numbers: HashMap<Name, FuncId>,
+    /// Метки эффектов по номеру: номер и есть то, чем метку ищет вектор.
+    labels: Vec<Label>,
+    /// Номер метки по имени.
+    marks: HashMap<Name, LabelId>,
+    /// Площадки `handle`.
+    handlers: Vec<Handler>,
     /// Определения, чьи тела ещё не понижены.
     ///
     /// Терминацию счёта укладок держит [`recursive`]: поле рекурсивного
@@ -486,6 +528,9 @@ impl<'a> Lowerer<'a> {
             tags: HashMap::new(),
             functions: Vec::new(),
             numbers: HashMap::new(),
+            labels: Vec::new(),
+            marks: HashMap::new(),
+            handlers: Vec::new(),
             pending: VecDeque::new(),
         }
     }
@@ -582,6 +627,8 @@ impl<'a> Lowerer<'a> {
         Ok(Program {
             constructors: self.constructors,
             packings: self.packings,
+            labels: self.labels,
+            handlers: self.handlers,
             functions: self.functions,
             entry: entry_id,
         })
@@ -621,6 +668,7 @@ impl<'a> Lowerer<'a> {
             if name.starts_with('#') {
                 LowerError::Handler {
                     name: name.to_string(),
+                    why: "невыразимое имя без тела: понижение зовёт его формой, а не вызовом",
                 }
             } else {
                 LowerError::Postulate {
@@ -1731,18 +1779,144 @@ impl<'a> Lowerer<'a> {
         if &**name == CLOSING {
             return self.closing(scope, arguments);
         }
+        // Элиминаторы - невыразимые имена без тела, и спрашиваются они до вида
+        // по той же причине, что и выход из scope: тела у них нет, а смысл есть.
+        if let Some(effect) = name.strip_prefix(HANDLE) {
+            let effect: Name = Rc::from(effect);
+            return self.handled(scope, name, &effect, arguments);
+        }
+        for (prefix, why) in [
+            (
+                MULTI,
+                "мультишот: копирование звеньев сегмента, трек E волны 4",
+            ),
+            (
+                STATEFUL,
+                "параметризованный хендлер: кадр решения о смерти резумпции, трек D волны 4",
+            ),
+            (
+                MASK,
+                "маска: пропуск одноимённого хендлера, число пропусков вектору не считает никто",
+            ),
+        ] {
+            if name.starts_with(prefix) {
+                return Err(LowerError::Handler {
+                    name: name.to_string(),
+                    why,
+                });
+            }
+        }
         match &self.definition(name)?.kind {
             DefinitionKind::Constructor { .. } => self.built(scope, name, arguments),
             DefinitionKind::Regular => self.called(scope, name, arguments),
             DefinitionKind::Data { .. } => Err(LowerError::TypeValue {
                 name: name.to_string(),
             }),
-            DefinitionKind::Effect { .. } | DefinitionKind::Operation { .. } => {
-                Err(LowerError::Operation {
-                    name: name.to_string(),
-                })
+            DefinitionKind::Effect { .. } => Err(LowerError::Operation {
+                name: name.to_string(),
+                why: "метка эффекта: значения у неё в рантайме нет",
+            }),
+            DefinitionKind::Operation { effect } => {
+                let effect = Rc::clone(effect);
+                self.performed(scope, name, &effect, arguments)
             }
         }
+    }
+
+    /// Номер метки эффекта: им её находит `adamas_evidence_lookup`.
+    ///
+    /// Заводится по имени, потому что имя - единственное, что общего у места
+    /// `handle` и места операции: первое знает метку из имени элиминатора,
+    /// второе - из объявления операции.
+    fn label(&mut self, effect: &Name) -> Result<LabelId, LowerError> {
+        if let Some(id) = self.marks.get(effect) {
+            return Ok(*id);
+        }
+        let DefinitionKind::Effect { operations, .. } = &self.definition(effect)?.kind else {
+            return Err(LowerError::Operation {
+                name: effect.to_string(),
+                why: "не метка эффекта",
+            });
+        };
+        let id = LabelId(u32::try_from(self.labels.len()).unwrap_or(u32::MAX));
+        self.labels.push(Label {
+            name: effect.to_string(),
+            operations: operations.iter().map(ToString::to_string).collect(),
+        });
+        self.marks.insert(Rc::clone(effect), id);
+        Ok(id)
+    }
+
+    /// Операция эффекта: хендлер ищется вектором evidence (§3.4).
+    ///
+    /// Аргументы берутся так же, как их берёт машина: после параметров метки и
+    /// до арности, на которой операция производит (`performing`). Лишнее -
+    /// синтезированный триггер приостановленного вычисления - едет ветке и
+    /// дропается ею: сколько ветка связывает, знает место `handle`, а не это.
+    fn performed(
+        &mut self,
+        scope: &mut Scope,
+        name: &Name,
+        effect: &Name,
+        arguments: &[Arg<'_>],
+    ) -> Result<(Expr, Repr), LowerError> {
+        let label = self.label(effect)?;
+        let DefinitionKind::Effect { operations, params } = &self.definition(effect)?.kind else {
+            unreachable!("`label` уже проверил вид метки")
+        };
+        let params = *params as usize;
+        let slot =
+            operations
+                .iter()
+                .position(|it| it == name)
+                .ok_or_else(|| LowerError::Operation {
+                    name: name.to_string(),
+                    why: "операции нет среди операций своей метки",
+                })?;
+        let ty = &self.definition(name)?.ty;
+        let arity = performing(ty).ok_or_else(|| LowerError::Operation {
+            name: name.to_string(),
+            why: "у операции нет row ни на одной стрелке: производить нечем",
+        })?;
+        if arguments.len() < arity {
+            // Недобранная операция была бы замыканием, а замыкание отдаёт
+            // слоты указателями и хендлера не ищет вовсе.
+            return Err(LowerError::Operation {
+                name: name.to_string(),
+                why: "операция значением: этим срезом она не берётся",
+            });
+        }
+        let dicts = scope.dicts.clone();
+        let result = self.result_repr(ty, arity, &dicts)?;
+        if !result.pointer() {
+            return Err(LowerError::Representation {
+                at: "ответ операции",
+                want: describe(Repr::Boxed),
+                got: describe(result),
+            });
+        }
+        let mut given = Vec::with_capacity(arity - params);
+        for argument in &arguments[params..arity] {
+            given.push(self.given(scope, argument, Repr::Boxed, "аргумент операции")?);
+        }
+        let mut value = Expr::Perform {
+            label,
+            operation: u32::try_from(slot).unwrap_or(u32::MAX),
+            // Маску считает вектор числом пропусков, а ставить её некому:
+            // `#mask.L` этим срезом не берётся. Ноль здесь - не умолчание, а
+            // то самое «внутреннее вхождение», которым §3.4 держит нулевое
+            // смещение вектора.
+            skip: 0,
+            arguments: given,
+        };
+        for argument in arguments.iter().skip(arity) {
+            let argument = self.given(scope, argument, Repr::Boxed, "аргумент замыкания")?;
+            value = Expr::Apply {
+                callee: Box::new(value),
+                argument: Box::new(argument),
+            };
+        }
+        Ok((value, Repr::Boxed))
     }
 
     /// Выход из scope, держащего ресурс: `#closing` (§3.3).
@@ -1805,6 +1979,322 @@ impl<'a> Lowerer<'a> {
             },
             repr,
         ))
+    }
+
+    /// Хендлер: `#handle.L` (§3.4, решения 1, 2 и 5 волны 4).
+    ///
+    /// # Что ставится
+    ///
+    /// Кадр `HANDLER` со средой веток, вектор evidence копией родителя плюс
+    /// запись о нём, вычисление под этим вектором, ветка `return` на нормальном
+    /// выходе. Ветки - статические функции, и среда у них общая: лежит она в
+    /// кадре, а второй кадр ради экономии слота стоил бы дороже слота.
+    ///
+    /// # Что отвергается и чьё оно
+    ///
+    /// Вердикт ветки считается **по написанному**, а не по графу (решение 2):
+    /// хвостово-резумптивная - `resume` в хвосте, абортивная - `resume` не
+    /// зовётся, общая - всё прочее. Берётся первая; вторая уходит треку C
+    /// (снятие сегмента), третья - треку D (резумпция значением). Отказ
+    /// называет ветку по имени операции: молча посчитать не то хуже, чем не
+    /// посчитать.
+    fn handled(
+        &mut self,
+        scope: &mut Scope,
+        eliminator: &Name,
+        effect: &Name,
+        arguments: &[Arg<'_>],
+    ) -> Result<(Expr, Repr), LowerError> {
+        let label = self.label(effect)?;
+        let DefinitionKind::Effect { operations, params } = &self.definition(effect)?.kind else {
+            unreachable!("`label` уже проверил вид метки")
+        };
+        let operations: Vec<Name> = operations.clone();
+        let params = *params as usize;
+        // Параметры метки, `a`, `b`, вычисление, `return` и ветки.
+        let arity = params + 4 + operations.len();
+        if arguments.len() != arity {
+            return Err(LowerError::Handler {
+                name: eliminator.to_string(),
+                why: "элиминатор не насыщен: хендлер значением этим срезом не берётся",
+            });
+        }
+        let signature = self.definition(eliminator)?.ty.clone();
+        let written: Vec<usize> = (0..operations.len())
+            .map(|slot| {
+                domain(&signature, params + 4 + slot)
+                    .map(binders)
+                    .and_then(|count| count.checked_sub(1))
+                    .ok_or_else(|| LowerError::Handler {
+                        name: eliminator.to_string(),
+                        why: "у типа элиминатора нет ветки на объявленную операцию",
+                    })
+            })
+            .collect::<Result<_, _>>()?;
+
+        // Среда веток одна на все: она лежит в кадре, и делить её нечем.
+        let mut free = BTreeSet::new();
+        for argument in &arguments[params + 3..] {
+            let Arg::Written(term) = argument else {
+                return Err(LowerError::Handler {
+                    name: eliminator.to_string(),
+                    why: "ветка хендлера пришла достроенной, а не написанной",
+                });
+            };
+            escaping(term, 0, &mut free);
+        }
+        let (captured, taken, inner) = Self::capturing(scope, &free, "захват ветки хендлера")?;
+
+        let mut branches = Vec::with_capacity(operations.len());
+        for (slot, operation) in operations.iter().enumerate() {
+            let Arg::Written(term) = &arguments[params + 4 + slot] else {
+                unreachable!("написанность веток проверена выше")
+            };
+            let function =
+                self.branch(&captured, &inner, term, written[slot], effect, operation)?;
+            branches.push(Branch {
+                function,
+                written: written[slot],
+            });
+        }
+        let Arg::Written(returned) = &arguments[params + 3] else {
+            unreachable!("написанность веток проверена выше")
+        };
+        let returned = self.returning(&captured, &inner, returned, effect)?;
+
+        let handler = HandlerId(u32::try_from(self.handlers.len()).unwrap_or(u32::MAX));
+        self.handlers.push(Handler {
+            label,
+            captured,
+            branches,
+            returned,
+        });
+
+        // Вычисление приостановлено - `{ε} A` есть нульместная функция (§3.4),
+        // - и приостановка снимается здесь же. Написанной лямбде хватает снятия
+        // связывания; всему прочему дописывается применение к единице, и оно
+        // идёт обычным путём: имя зовётся прямо, значение - через трамплин.
+        let Arg::Written(computation) = &arguments[params + 2] else {
+            return Err(LowerError::Handler {
+                name: eliminator.to_string(),
+                why: "вычисление под хендлером пришло достроенным, а не написанным",
+            });
+        };
+        let computation = if let Term::Lam(_, _, body) = computation {
+            let body = Rc::clone(body);
+            scope.env.push(Slot::Absent);
+            let lowered = self.shaped(scope, &body, Repr::Boxed, "вычисление под хендлером");
+            scope.env.pop();
+            lowered?
+        } else {
+            let triggered = Term::App(
+                Rc::new((*computation).clone()),
+                Rc::new(Term::constant(&self.unit_name()?)),
+            );
+            self.shaped(scope, &triggered, Repr::Boxed, "вычисление под хендлером")?
+        };
+
+        Ok((
+            Expr::Handle {
+                handler,
+                captured: taken,
+                computation: Box::new(computation),
+            },
+            Repr::Boxed,
+        ))
+    }
+
+    /// Единственный конструктор `Unit`: им запускается приостановленное.
+    fn unit_name(&self) -> Result<Name, LowerError> {
+        match self.signature.constructors(UNIT) {
+            Some([only]) => Ok(Rc::clone(only)),
+            _ => Err(LowerError::Unknown {
+                name: UNIT.to_owned(),
+            }),
+        }
+    }
+
+    /// Ветка операции: своя функция, `resume` в хвосте снят.
+    ///
+    /// Снят, а не сохранён: хвостовая резумпция значит, что ответ ветки и есть
+    /// значение операции, - продолжение остаётся на C-стеке, сегмент не
+    /// режется. Это и есть «tail-resumptive → inline» §3.4 минус инлайнинг,
+    /// который придёт вопросом 74.
+    fn branch(
+        &mut self,
+        captured: &[Binding],
+        inner: &[Slot],
+        term: &Term,
+        written: usize,
+        effect: &Name,
+        operation: &Name,
+    ) -> Result<FuncId, LowerError> {
+        let mut nested = Scope {
+            locals: u32::try_from(captured.len()).unwrap_or(u32::MAX),
+            env: inner.to_vec(),
+            // Дескрипторы наружу не едут - тот же довод, что у замыкания.
+            dicts: Dicts::new(),
+        };
+        let mut bindings = Vec::with_capacity(written);
+        let mut current = Rc::new(term.clone());
+        for _ in 0..written {
+            let step = Rc::clone(&current);
+            let Term::Lam(mult, name, body) = &*step else {
+                return Err(LowerError::Verdict {
+                    effect: effect.to_string(),
+                    operation: operation.to_string(),
+                    why: "связывает меньше аргументов, чем объявила операция",
+                });
+            };
+            bindings.push(Binding {
+                name: name.to_string(),
+                local: nested.fresh(),
+                fact: Fact::present(*mult),
+            });
+            current = Rc::clone(body);
+        }
+        // Последнее связывание ветки - `resume`; имя вводит сама форма (§3.4).
+        let Term::Lam(_, _, body) = &*Rc::clone(&current) else {
+            return Err(LowerError::Verdict {
+                effect: effect.to_string(),
+                operation: operation.to_string(),
+                why: "не связывает резумпцию: форма ветки нарушена",
+            });
+        };
+        let body = Rc::clone(body);
+        // Связываний под телом ветки: захваченная среда, аргументы операции и
+        // сама резумпция. Число это нужно нормализации, а её - счёту вхождений.
+        let context = u32::try_from(inner.len() + written + 1).unwrap_or(u32::MAX);
+        let Some(rewritten) = untail(&body, 0, context) else {
+            return Err(LowerError::Verdict {
+                effect: effect.to_string(),
+                operation: operation.to_string(),
+                why: if mentions(&body, 0, context) {
+                    "зовёт резумпцию не в хвосте: одношот общего вида, трек D волны 4"
+                } else {
+                    "не зовёт резумпцию: снятие сегмента, трек C волны 4"
+                },
+            });
+        };
+        if mentions(&rewritten, 0, context) {
+            return Err(LowerError::Verdict {
+                effect: effect.to_string(),
+                operation: operation.to_string(),
+                why: "зовёт резумпцию и в хвосте, и до него: трек D волны 4",
+            });
+        }
+
+        for binding in &bindings {
+            nested.env.push(Slot::Bound(binding.local, binding.fact));
+        }
+        // Связывание `resume` в среде де Брёйна остаётся - тело считало от него
+        // индексы, - но значения у него нет: хвостовая ветка его сняла.
+        nested.env.push(Slot::Absent);
+
+        let function = FuncId(self.functions.len());
+        self.functions.push(Function {
+            id: function,
+            name: format!("ветка {effect}.{operation}"),
+            // Вторая форма: ветка вправе производить - её окружающая есть
+            // окружающая применения `handle` (§3.4).
+            form: Form::Detached,
+            captured: captured.to_vec(),
+            parameters: bindings,
+            result: Repr::Boxed,
+            body: Expr::Erased,
+        });
+        let lowered = self.shaped(&mut nested, &rewritten, Repr::Boxed, "тело ветки хендлера")?;
+        self.functions[function.0].body = lowered;
+        Ok(function)
+    }
+
+    /// Ветка `return`: одноместная, ей идёт значение вычисления.
+    fn returning(
+        &mut self,
+        captured: &[Binding],
+        inner: &[Slot],
+        term: &Term,
+        effect: &Name,
+    ) -> Result<FuncId, LowerError> {
+        let Term::Lam(mult, name, body) = term else {
+            return Err(LowerError::Verdict {
+                effect: effect.to_string(),
+                operation: "return".to_owned(),
+                why: "не связывает значения вычисления: форма ветки нарушена",
+            });
+        };
+        let mut nested = Scope {
+            locals: u32::try_from(captured.len()).unwrap_or(u32::MAX),
+            env: inner.to_vec(),
+            dicts: Dicts::new(),
+        };
+        let binding = Binding {
+            name: name.to_string(),
+            local: nested.fresh(),
+            fact: Fact::present(*mult),
+        };
+        nested.env.push(Slot::Bound(binding.local, binding.fact));
+        let body = Rc::clone(body);
+
+        let function = FuncId(self.functions.len());
+        self.functions.push(Function {
+            id: function,
+            name: format!("ветка {effect}.return"),
+            form: Form::Detached,
+            captured: captured.to_vec(),
+            parameters: vec![binding],
+            result: Repr::Boxed,
+            body: Expr::Erased,
+        });
+        let lowered = self.shaped(&mut nested, &body, Repr::Boxed, "тело ветки `return`")?;
+        self.functions[function.0].body = lowered;
+        Ok(function)
+    }
+
+    /// Захват среды: связывания, их значения на месте и среда вложенного тела.
+    ///
+    /// Общее у замыкания и у кадра хендлера, и общее не случайно: оба уносят
+    /// связывания наружу своего тела, оба кладут их слотами, и оба принимают
+    /// только указательное - слот у них единообразен (§4.11).
+    fn capturing(
+        scope: &Scope,
+        free: &BTreeSet<u32>,
+        at: &'static str,
+    ) -> Result<Captured, LowerError> {
+        let depth = scope.env.len();
+        let mut captured = Vec::new();
+        let mut taken = Vec::new();
+        let mut inner = Vec::with_capacity(depth);
+        for (position, slot) in scope.env.iter().enumerate() {
+            let index = u32::try_from(depth - position - 1).unwrap_or(u32::MAX);
+            if !free.contains(&index) {
+                inner.push(Slot::Absent);
+                continue;
+            }
+            let Slot::Bound(local, fact) = slot else {
+                return Err(LowerError::Unbound { index });
+            };
+            if fact.present && !fact.repr.pointer() {
+                return Err(LowerError::Representation {
+                    at,
+                    want: describe(Repr::Boxed),
+                    got: describe(fact.repr),
+                });
+            }
+            let id = LocalId(u32::try_from(captured.len()).unwrap_or(u32::MAX));
+            captured.push(Binding {
+                name: format!("захвачено{}", captured.len()),
+                local: id,
+                fact: *fact,
+            });
+            taken.push(if fact.present {
+                Expr::Local(*local)
+            } else {
+                Expr::Erased
+            });
+            inner.push(Slot::Bound(id, *fact));
+        }
+        Ok((captured, taken, inner))
     }
 
     /// Приостановленное вычисление `(ω _ : Unit) -> {ρ} a`, снятое на месте.
@@ -2436,39 +2926,7 @@ impl<'a> Lowerer<'a> {
         // Захватывается то, на что тело смотрит наружу.
         let mut free = BTreeSet::new();
         escaping(term, 0, &mut free);
-        let depth = scope.env.len();
-        let mut captured = Vec::new();
-        let mut taken = Vec::new();
-        let mut inner = Vec::with_capacity(depth + parameters.len());
-        for (position, slot) in scope.env.iter().enumerate() {
-            let index = u32::try_from(depth - position - 1).unwrap_or(u32::MAX);
-            if !free.contains(&index) {
-                inner.push(Slot::Absent);
-                continue;
-            }
-            let Slot::Bound(local, fact) = slot else {
-                return Err(LowerError::Unbound { index });
-            };
-            if fact.present && !fact.repr.pointer() {
-                return Err(LowerError::Representation {
-                    at: "захват замыкания",
-                    want: describe(Repr::Boxed),
-                    got: describe(fact.repr),
-                });
-            }
-            let id = LocalId(u32::try_from(captured.len()).unwrap_or(u32::MAX));
-            captured.push(Binding {
-                name: format!("захвачено{}", captured.len()),
-                local: id,
-                fact: *fact,
-            });
-            taken.push(if fact.present {
-                Expr::Local(*local)
-            } else {
-                Expr::Erased
-            });
-            inner.push(Slot::Bound(id, *fact));
-        }
+        let (captured, taken, inner) = Self::capturing(scope, &free, "захват замыкания")?;
 
         let mut nested = Scope {
             locals: u32::try_from(captured.len()).unwrap_or(u32::MAX),
@@ -2496,15 +2954,22 @@ impl<'a> Lowerer<'a> {
         self.functions.push(Function {
             id: function,
             name: format!("лямбда{}", function.0),
-            // Первая форма, и это **названная граница**, а не решение: row
-            // решает форму, а у связывания лямбды написанного типа в ядре нет
-            // вовсе - там же, где нет и его представления (см. шапку модуля).
-            // Row лямбды живёт в ожидаемом типе позиции, а типов понижение по
-            // выражениям не носит. Сегодня граница беспредметна: операцию
-            // лямбда произвести не может - её понижение отвергает, - поэтому
-            // второй формы ей и не нужно. Заведёт её тот, кому лямбда придёт
-            // вычислением под `handle`.
-            form: Form::Stack,
+            // Вторая форма у всякой лямбды, и это **не** обход решения 1
+            // волны 4, а его единственное применение к случаю без row: у
+            // связывания лямбды написанного типа в ядре нет вовсе - там же,
+            // где нет и его представления (см. шапку модуля). Row её живёт в
+            // ожидаемом типе позиции, а типов понижение по выражениям не
+            // носит; выбрать первую форму значило бы выбрать её **угадав**, и
+            // угаданная лямбда под `handle` операции произвести не может.
+            //
+            // Цена этого выбора - ноль, и это единственный довод, которым он
+            // отличается от произвола. Прямого вызова у лямбды не бывает: зовут
+            // её через `adamas_apply`, а граница замыкания несёт оба скрытых
+            // аргумента всегда - какая из форм за указателем, место вызова не
+            // знает (`adamas.h`, `adamas_code`). Первая форма поэтому не теряет
+            // ни одного прямого вызова, а вторая получает два аргумента, за
+            // которые уже заплачено трамплином.
+            form: Form::Detached,
             captured,
             parameters: bindings,
             // Ответ замыкания приходит через `adamas_apply`, а он говорит
@@ -2556,6 +3021,90 @@ fn form(ty: &Term) -> Form {
         current = codomain;
     }
     Form::Stack
+}
+
+/// На каком по счёту аргументе операция производит. `None` - row нигде нет.
+///
+/// То же правило, которым это решает машина (`adamas-interp/src/effect.rs`):
+/// позиция row в типе не соглашение, а место, где объявление проверило форму
+/// операции (§3.4).
+fn performing(ty: &Term) -> Option<usize> {
+    let mut current = ty;
+    let mut count = 0;
+    while let Term::Pi(_, _, _, row, codomain) = current {
+        count += 1;
+        if !row.labels().is_empty() {
+            return Some(count);
+        }
+        current = codomain;
+    }
+    None
+}
+
+/// Сколько связываний у типа подряд.
+fn binders(ty: &Term) -> usize {
+    let mut current = ty;
+    let mut count = 0;
+    while let Term::Pi(_, _, _, _, codomain) = current {
+        count += 1;
+        current = codomain;
+    }
+    count
+}
+
+/// Домен связывания под номером `index`.
+fn domain(ty: &Term, index: usize) -> Option<&Term> {
+    match after(ty, index)? {
+        Term::Pi(_, _, domain, _, _) => Some(domain),
+        _ => None,
+    }
+}
+
+/// Смотрит ли терм на связывание с индексом `index` под `context` связываниями.
+///
+/// Считает по **нормализованному** терму, и это не осторожность: решение
+/// имплисита приезжает бета-редексом по всему контексту - `((\m₂ -> \m₁ -> \m₀
+/// -> #2) #2 #1 #0)`, - то есть называет каждое связывание, включая резумпцию.
+/// Считай по написанному, и всякая ветка с имплиситом в аргументе оказалась бы
+/// «зовущей резумпцию и в хвосте, и до него»; измерено на
+/// `eval/region-allocates-and-reads`, где имплиситы у `MkRef`.
+fn mentions(term: &Term, index: u32, context: u32) -> bool {
+    let mut free = BTreeSet::new();
+    escaping(&normalized(term, context), 0, &mut free);
+    free.contains(&index)
+}
+
+/// Ветка, зовущая резумпцию **в хвосте**: `resume e` заменяется на `e`.
+///
+/// `depth` - индекс связывания `resume` в этой точке. `None` значит «вердикт
+/// не хвостово-резумптивный», и различить абортивную от общей вызывающему
+/// остаётся по тому, упоминается ли резумпция вообще.
+///
+/// Хвост считается **по написанному** (решение 2 волны 4), поэтому цепочка
+/// `let` сквозная - она вычисление, а не ветвление, - а всё прочее нет:
+/// разбор в хвосте дал бы по ответу на ветвь, и снимать резумпцию пришлось бы
+/// в каждой. Это не запрет, а граница среза: такая ветка уходит треку D
+/// названным вердиктом, а не молчанием.
+fn untail(term: &Term, depth: u32, context: u32) -> Option<Term> {
+    match term {
+        Term::App(callee, argument) => match &**callee {
+            Term::Var(Index(index)) if *index == depth => Some((**argument).clone()),
+            _ => None,
+        },
+        Term::Let(mult, name, ty, value, body) => {
+            if mentions(value, depth, context) {
+                return None;
+            }
+            Some(Term::Let(
+                *mult,
+                Rc::clone(name),
+                Rc::clone(ty),
+                Rc::clone(value),
+                Rc::new(untail(body, depth + 1, context + 1)?),
+            ))
+        }
+        _ => None,
+    }
 }
 
 /// Дескриптор укладки, записанный по форме §4.11: `{ layout = { size, align } }`.

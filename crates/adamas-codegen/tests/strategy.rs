@@ -509,14 +509,13 @@ fn a_returned_cell_leaves_the_bytes_alone() {
     assert_eq!(allocated, 2);
 }
 
-/// Пользовательская стратегия отвергается понижением названной причиной.
+/// Пользовательская стратегия, чью политику решает **хендлер** (§10 вопрос 161).
 ///
-/// Форма её - решение §10 вопроса 161: интерфейс один, и различает встроенное с
+/// Форма её - решение вопроса 161: интерфейс один, и различает встроенное с
 /// пользовательским понижение. Здесь `Chosen` спрашивает у хендлера, что делать
-/// с ячейкой, - то есть гасится хендлером, - а кадра хендлера понижение ещё не
-/// ставит. Отказ обязан назвать причину, а не молча выдать что-нибудь, и
-/// причина эта - **элиминатор**: форму `probe` получает по своей row наравне со
-/// всеми (`tests/forms.rs`).
+/// с ячейкой, то есть политика живёт снаружи стратегии. Ветка `keep`
+/// подставляется вызывающим, и в этом весь свидетель: одна и та же проба под
+/// двумя хендлерами обязана дать разные хендлы, иначе «различима» - слово.
 ///
 /// Считает эту программу интерпретатор, и её ответ стоит в
 /// `tests/golden/eval/region-strategy-handled.adamas`.
@@ -560,19 +559,27 @@ probe u =
 main : Pair
 main = handle probe with
   return v -> v
-  keep -> resume False
+  keep -> resume KEPT
 ";
 
 #[test]
-fn a_handled_strategy_is_refused_by_name() {
-    let source = format!("{SHAPE}{HANDLED}");
-    // Языком она принимается: интерфейс тот же, и машина её считает.
-    assert_eq!(harness::printed(&source), "MkPair 0 0");
-    let error = harness::compiled(&source).expect_err("кадра хендлера понижение не ставит");
-    let text = error.to_string();
-    assert!(
-        text.contains("#handle.IO") && text.contains("элиминатор хендлера"),
-        "отказ не назвал элиминатор: {text}"
+fn a_handled_strategy_is_distinguishable_by_its_handler() {
+    let mut answers = Vec::new();
+    for kept in ["True", "False"] {
+        let source = format!("{SHAPE}{}", HANDLED.replace("KEPT", kept));
+        let (answer, allocated) = run(&format!("хендлер-{kept}"), &source);
+        // Пять, и каждый назван: область, пара ответа, кадр хендлера и два
+        // вектора evidence - пустой корень чистой `main` и расширенный им.
+        // Это и есть цена второй формы, которую снимет вопрос 74.
+        assert_eq!(
+            allocated, 5,
+            "хендлер {kept}: выдано {allocated} блоков вместо пяти"
+        );
+        answers.push(answer);
+    }
+    assert_ne!(
+        answers[0], answers[1],
+        "хендлер ответа не поменял: политика стратегии снаружи не различима"
     );
 }
 

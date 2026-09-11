@@ -861,7 +861,7 @@ adamas_frame *adamas_kont_push(adamas_kont *kont, uint16_t mark, uint32_t label,
  */
 adamas_frame *adamas_kont_handler(adamas_kont *kont, uint32_t label, adamas_handler_code branches,
                                   adamas_frame_release release, size_t fields,
-                                  adamas_evidence *evidence);
+                                  const adamas_evidence *evidence);
 
 /**
  * Зовёт ветку операции у найденного кадра хендлера.

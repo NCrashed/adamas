@@ -32,10 +32,12 @@ use std::path::PathBuf;
 ///
 /// Чистый фрагмент: семейства и конструкторы, функции и применение, разбор,
 /// рекурсия, `let`, массивы (§4.11), записи (§4.2), очистка ресурса на
-/// нормальном выходе (§3.3). Всё, что здесь стоит, обязано собраться и
-/// ответить как `adamas eval`; список сокращать нельзя, а пополнять - можно и
-/// нужно, когда фрагмент растёт.
-const TAKEN: [&str; 32] = [
+/// нормальном выходе (§3.3). Плюс эффекты, гасимые **без снятия сегмента**
+/// (трек B волны 4): хендлер, чьи ветки все до одной зовут резумпцию в хвосте.
+/// Всё, что здесь стоит, обязано собраться и ответить как `adamas eval`; список
+/// сокращать нельзя, а пополнять - можно и нужно, когда фрагмент растёт.
+const TAKEN: [&str; 41] = [
+    "alias-computation",
     "arithmetic",
     "array-aggregate",
     "array-flat",
@@ -46,6 +48,7 @@ const TAKEN: [&str; 32] = [
     "class-multiplicity",
     "classes",
     "decidable",
+    "effect-multiplicity",
     "erasure",
     "existential",
     "flat",
@@ -53,20 +56,27 @@ const TAKEN: [&str; 32] = [
     "flat-primitives",
     "flat-under-a-parameter",
     "functor",
+    "label-names-its-binder",
     "lists",
     "literal-default",
+    "module-effect",
     "module-family",
     "module-scope",
     "mutual-family",
     "nested-case-on-a-field",
     "nested-functor",
+    "nested-rowed-signature",
     "operators",
     "primitives",
     "records",
+    "region-allocates-and-reads",
+    "region-bound-in-the-argument",
     "region-holds-flat-payload",
     "region-strategies",
     "resource-cleanup",
     "rose",
+    "signature-effect",
+    "signature-effect-parameterized",
     "truncation",
 ];
 

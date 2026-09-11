@@ -277,6 +277,7 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
             ..
         } => captured.iter_mut().chain([&mut **computation]).collect(),
         Expr::Closing { captured, body, .. } => captured.iter_mut().chain([&mut **body]).collect(),
+        Expr::Mask { computation, .. } => vec![computation],
         Expr::ArrayNew { count, initial, .. } => vec![count, initial],
         Expr::ArraySet {
             array, at, value, ..
@@ -469,6 +470,9 @@ impl Anf<'_> {
             | Expr::Handle { .. }
             | Expr::Perform { .. }
             | Expr::Resume { .. }
+            // Ответ маски есть ответ вычисления под ней, а понижение требует
+            // от него указательного (§4.11): маска стоит вокруг `{ρ} A`.
+            | Expr::Mask { .. }
             | Expr::Apply { .. } => Repr::Boxed,
         }
     }
@@ -567,6 +571,12 @@ impl Anf<'_> {
                     },
                 )
             }
+            // Вычисление под маской - тот же хвост: кадра маска не ставит, а
+            // вектор её живёт до конца куска и уходит его эпилогом.
+            Expr::Mask { label, computation } => Expr::Mask {
+                label,
+                computation: Box::new(self.tail(*computation)),
+            },
             other => self.stepped(other),
         }
     }
@@ -587,7 +597,8 @@ impl Anf<'_> {
             | Expr::Reclaim { .. }
             | Expr::Match { .. }
             | Expr::Handle { .. }
-            | Expr::Closing { .. } => self.tail(expr),
+            | Expr::Closing { .. }
+            | Expr::Mask { .. } => self.tail(expr),
             other => {
                 let mut binds = Vec::new();
                 let node = self.operands(other, &mut binds);

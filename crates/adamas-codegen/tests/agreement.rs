@@ -39,9 +39,11 @@ use std::path::PathBuf;
 /// Плюс **одношот общего вида и параметризованный хендлер** (трек D волны 4):
 /// тела второй формы дроблены кадрами по точкам приостановки, резумпция общей
 /// ветки есть значение, и её судьбу решает владение.
+/// Плюс **маска** (§3.4): вычисление под ней идёт под вектором без ближайшей
+/// записи своей метки, и capstone `interpreter` этим берётся целиком.
 /// Всё, что здесь стоит, обязано собраться и ответить как `adamas eval`; список
 /// сокращать нельзя, а пополнять - можно и нужно, когда фрагмент растёт.
-const TAKEN: [&str; 61] = [
+const TAKEN: [&str; 65] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -71,9 +73,12 @@ const TAKEN: [&str; 61] = [
     "general-frames",
     "general-order",
     "instance-context-effect",
+    "interpreter",
+    "label-argument",
     "label-names-its-binder",
     "lists",
     "literal-default",
+    "mask",
     "module-effect",
     "module-family",
     "module-resource",
@@ -94,6 +99,7 @@ const TAKEN: [&str; 61] = [
     "resource-cleanup",
     "rose",
     "rows",
+    "sequences",
     "shadowed-name",
     "signature-effect",
     "signature-effect-parameterized",

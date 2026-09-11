@@ -367,9 +367,10 @@ impl Pass<'_> {
                 let (captured, spare) = self.sequence(captured, owned);
                 drops(spare, Expr::Closure { function, captured })
             }
-            Expr::Perform { .. } | Expr::Handle { .. } | Expr::Closing { .. } => {
-                self.effectful(expr, owned)
-            }
+            Expr::Perform { .. }
+            | Expr::Handle { .. }
+            | Expr::Closing { .. }
+            | Expr::Mask { .. } => self.effectful(expr, owned),
             Expr::Resume { .. } => self.resumed(expr, owned),
             Expr::Apply { callee, argument } => self.applied(*callee, *argument, owned),
             Expr::Bind {
@@ -672,6 +673,19 @@ impl Pass<'_> {
                     },
                 )
             }
+            // У маски подвыражение одно, и владение по нему сквозное: вектор
+            // ей строит рантайм, а значений маска не потребляет ни одного.
+            Expr::Mask { label, computation } => {
+                let (mut items, spare) = self.sequence(vec![*computation], owned);
+                let computation = items.pop().unwrap_or(Expr::Erased);
+                drops(
+                    spare,
+                    Expr::Mask {
+                        label,
+                        computation: Box::new(computation),
+                    },
+                )
+            }
             other => other,
         }
     }
@@ -942,6 +956,7 @@ impl Pass<'_> {
             | Expr::Handle { .. }
             | Expr::Perform { .. }
             | Expr::Resume { .. }
+            | Expr::Mask { .. }
             | Expr::Layout { .. } => false,
         }
     }
@@ -1030,6 +1045,7 @@ impl Pass<'_> {
             | Expr::Handle { .. }
             | Expr::Perform { .. }
             | Expr::Resume { .. }
+            | Expr::Mask { .. }
             | Expr::Layout { .. } => false,
         }
     }

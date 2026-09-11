@@ -568,12 +568,14 @@ fn a_handled_strategy_is_distinguishable_by_its_handler() {
     for kept in ["True", "False"] {
         let source = format!("{SHAPE}{}", HANDLED.replace("KEPT", kept));
         let (answer, allocated) = run(&format!("хендлер-{kept}"), &source);
-        // Пять, и каждый назван: область, пара ответа, кадр хендлера и два
-        // вектора evidence - пустой корень чистой `main` и расширенный им.
-        // Это и есть цена второй формы, которую снимет вопрос 74.
+        // Семь, и каждый назван: область, пара ответа, кадр хендлера, два
+        // вектора evidence - пустой корень чистой `main` и расширенный им, - и
+        // два кадра продолжения: операция `keep` и вызов `asked`, обе точки
+        // приостановки (решение 3 волны 4). Это и есть цена второй формы,
+        // которую снимет вопрос 74.
         assert_eq!(
-            allocated, 5,
-            "хендлер {kept}: выдано {allocated} блоков вместо пяти"
+            allocated, 7,
+            "хендлер {kept}: выдано {allocated} блоков вместо семи"
         );
         answers.push(answer);
     }

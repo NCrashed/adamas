@@ -119,7 +119,7 @@ use adamas_core::value::{Env, Lvl, Value};
 use crate::ir::{
     Arm, Binding, Branch, Constructor, CtorId, Elems, Expr, Fact, Form, FuncId, Function, Handler,
     HandlerId, Label, LabelId, LocalId, PackId, Packing, Program, Repr, Slot as PackSlot, SlotTy,
-    Stride, Variant,
+    Stride, Variant, Verdict,
 };
 
 /// Почему понижение отказало.
@@ -404,6 +404,7 @@ fn describe(repr: Repr) -> String {
         Repr::Array(Elems::Boxed) => "указательный массив".to_owned(),
         Repr::Region => "блок региона".to_owned(),
         Repr::Record(tag) => format!("запись формы #{}", tag.0),
+        Repr::Resumption => "резумпция".to_owned(),
         Repr::Packed(pack) => format!("плоский агрегат укладки #{}", pack.0),
     }
 }
@@ -1806,6 +1807,17 @@ impl<'a> Lowerer<'a> {
         if let Term::Prim(prim) = head {
             return self.primitive(scope, *prim, arguments);
         }
+        // Голова - резумпция: применение к ней есть возобновление, а не вызов
+        // замыкания. Различить их обязано понижение: за резумпцией стоит ручка
+        // сегмента, а не код, и `adamas_apply` по ней оборвал бы процесс.
+        if let Term::Var(index) = head {
+            if let Slot::Bound(local, fact) = scope.slot(*index)? {
+                if fact.repr == Repr::Resumption {
+                    let (local, fact) = (*local, *fact);
+                    return self.resuming(scope, local, fact, arguments);
+                }
+            }
+        }
         let Term::Const(name, ..) = head else {
             // Голова - не имя: применяется значение, и стирания здесь не бывает.
             let mut value = self.shaped(scope, head, Repr::Boxed, "применяемое значение")?;
@@ -1829,14 +1841,20 @@ impl<'a> Lowerer<'a> {
             let effect: Name = Rc::from(effect);
             return self.handled(scope, name, &effect, arguments);
         }
+        // Параметризованный идёт тем же путём, что одношотный: тип у третьего
+        // элиминатора тот же, различие только в имени (§10 вопрос 129). Кадра
+        // решения о смерти резумпции понижению не нужно - её смерть здесь
+        // решает **владение**: нить состояния держит резумпцию в замыкании
+        // `\s -> resume v s`, а обрывающая ветка не держит нигде, и дроп
+        // ставит `perceus` обычным правилом.
+        if let Some(effect) = name.strip_prefix(STATEFUL) {
+            let effect: Name = Rc::from(effect);
+            return self.handled(scope, name, &effect, arguments);
+        }
         for (prefix, why) in [
             (
                 MULTI,
                 "мультишот: копирование звеньев сегмента, трек E волны 4",
-            ),
-            (
-                STATEFUL,
-                "параметризованный хендлер: кадр решения о смерти резумпции, трек D волны 4",
             ),
             (
                 MASK,
@@ -1865,6 +1883,39 @@ impl<'a> Lowerer<'a> {
                 self.performed(scope, name, &effect, arguments)
             }
         }
+    }
+
+    /// Возобновление: `resume v` ставит сегмент обратно и отдаёт ему `v`.
+    ///
+    /// Аргументов бывает больше одного, и лишние - обычные применения ответа:
+    /// у параметризованного хендлера `resume v s` есть `(resume v) s`, потому
+    /// что ответ такой резумпции сам функция от состояния (§3.4, сахар `state`).
+    fn resuming(
+        &mut self,
+        scope: &mut Scope,
+        local: LocalId,
+        fact: Fact,
+        arguments: &[Arg<'_>],
+    ) -> Result<(Expr, Repr), LowerError> {
+        let Some((first, rest)) = arguments.split_first() else {
+            // Резумпция значением: сохранить её ветка вправе (§3.4,
+            // овеществление), но `Resumption` - ресурс, и этим срезом он не
+            // берётся.
+            return Ok((Expr::Local(local), fact.repr));
+        };
+        let value = self.given(scope, first, Repr::Boxed, "аргумент резумпции")?;
+        let mut node = Expr::Resume {
+            resumption: Box::new(Expr::Local(local)),
+            value: Box::new(value),
+        };
+        for argument in rest {
+            let argument = self.given(scope, argument, Repr::Boxed, "аргумент замыкания")?;
+            node = Expr::Apply {
+                callee: Box::new(node),
+                argument: Box::new(argument),
+            };
+        }
+        Ok((node, Repr::Boxed))
     }
 
     /// Номер метки эффекта: им её находит `adamas_evidence_lookup`.
@@ -1939,8 +1990,18 @@ impl<'a> Lowerer<'a> {
                 got: describe(result),
             });
         }
+        // Стёртые связывания операции значения не имеют, и лезть в них нельзя:
+        // `fail : a` объявляет собственный `{0 a}` перед триггером, и это
+        // **тип**. Ветке они всё равно не достаются - `written` считается от
+        // `params`, - но место операции обязано отдать столько аргументов,
+        // сколько объявлено, иначе номера разъедутся с ветками.
+        let mults = multiplicities(ty, arity);
         let mut given = Vec::with_capacity(arity - params);
-        for argument in &arguments[params..arity] {
+        for (at, argument) in arguments[params..arity].iter().enumerate() {
+            if mults.get(params + at) == Some(&Mult::Zero) {
+                given.push(Expr::Erased);
+                continue;
+            }
             given.push(self.given(scope, argument, Repr::Boxed, "аргумент операции")?);
         }
         let mut value = Expr::Perform {
@@ -2090,7 +2151,7 @@ impl<'a> Lowerer<'a> {
         let params = *params as usize;
         // Параметры метки, `a`, `b`, вычисление, `return` и ветки.
         let arity = params + 4 + operations.len();
-        if arguments.len() != arity {
+        if arguments.len() < arity {
             return Err(LowerError::Handler {
                 name: eliminator.to_string(),
                 why: "элиминатор не насыщен: хендлер значением этим срезом не берётся",
@@ -2111,7 +2172,7 @@ impl<'a> Lowerer<'a> {
 
         // Среда веток одна на все: она лежит в кадре, и делить её нечем.
         let mut free = BTreeSet::new();
-        for argument in &arguments[params + 3..] {
+        for argument in &arguments[params + 3..arity] {
             let Arg::Written(term) = argument else {
                 return Err(LowerError::Handler {
                     name: eliminator.to_string(),
@@ -2127,12 +2188,12 @@ impl<'a> Lowerer<'a> {
             let Arg::Written(term) = &arguments[params + 4 + slot] else {
                 unreachable!("написанность веток проверена выше")
             };
-            let (function, abortive) =
+            let (function, verdict) =
                 self.branch(&captured, &inner, term, written[slot], effect, operation)?;
             branches.push(Branch {
                 function,
                 written: written[slot],
-                abortive,
+                verdict,
             });
         }
         let Arg::Written(returned) = &arguments[params + 3] else {
@@ -2181,14 +2242,22 @@ impl<'a> Lowerer<'a> {
         self.detached = outer;
         let computation = computation?;
 
-        Ok((
-            Expr::Handle {
-                handler,
-                captured: taken,
-                computation: Box::new(computation),
-            },
-            Repr::Boxed,
-        ))
+        let mut value = Expr::Handle {
+            handler,
+            captured: taken,
+            computation: Box::new(computation),
+        };
+        // Лишние аргументы - применение ответа хендлера. У параметризованного
+        // такой ровно один: начальное состояние, которое элаборация ставит
+        // снаружи элиминатора (`(#handleState … ) s0`, §3.4).
+        for argument in arguments.iter().skip(arity) {
+            let argument = self.given(scope, argument, Repr::Boxed, "аргумент замыкания")?;
+            value = Expr::Apply {
+                callee: Box::new(value),
+                argument: Box::new(argument),
+            };
+        }
+        Ok((value, Repr::Boxed))
     }
 
     /// Единственный конструктор `Unit`: им запускается приостановленное.
@@ -2211,7 +2280,9 @@ impl<'a> Lowerer<'a> {
     /// пустым слотом среды де Брёйна ровно так же. Ответ такой ветки есть ответ
     /// хендлера, и сегмент до его кадра срезается на месте операции.
     ///
-    /// Третий вердикт - общая ветка - отвергается по имени (трек D волны 4).
+    /// **Общая**: `resume` зовётся, но не в хвосте. Сегмент режется в значение
+    /// и приходит ветке лишним параметром; возобновление ставит его обратно
+    /// ([`Expr::Resume`]), а недожившая резумпция раскручивается своим дропом.
     fn branch(
         &mut self,
         captured: &[Binding],
@@ -2220,7 +2291,7 @@ impl<'a> Lowerer<'a> {
         written: usize,
         effect: &Name,
         operation: &Name,
-    ) -> Result<(FuncId, bool), LowerError> {
+    ) -> Result<(FuncId, Verdict), LowerError> {
         let mut nested = Scope {
             locals: u32::try_from(captured.len()).unwrap_or(u32::MAX),
             env: inner.to_vec(),
@@ -2261,21 +2332,13 @@ impl<'a> Lowerer<'a> {
         // `mentions` - нормализованное, и ветка с имплиситом в аргументе
         // проходит только в этом порядке (измерено на
         // `region-allocates-and-reads`).
-        let (rewritten, abortive) = match untail(&body, 0, context) {
-            Some(rewritten) => {
-                if mentions(&rewritten, 0, context) {
-                    return Err(LowerError::Verdict {
-                        effect: effect.to_string(),
-                        operation: operation.to_string(),
-                        why: "зовёт резумпцию и в хвосте, и до него: трек D волны 4",
-                    });
-                }
-                (rewritten, false)
-            }
+        let (rewritten, verdict) = match untail(&body, 0, context) {
+            // Хвост снят, и больше резумпция нигде не названа: сегмент цел.
+            Some(rewritten) if !mentions(&rewritten, 0, context) => (rewritten, Verdict::Tail),
+            // Резумпцию тело не зовёт, но **назвать** её редекс имплисита
+            // может, а слот её пуст: тогда понижается нормализованное - там
+            // имени уже нет.
             None if !mentions(&body, 0, context) => {
-                // Абортивная. Резумпцию тело не зовёт, но **назвать** её редекс
-                // имплисита может, а слот её пуст: тогда понижается
-                // нормализованное - там имени уже нет.
                 let mut free = BTreeSet::new();
                 escaping(&body, 0, &mut free);
                 let taken = if free.contains(&0) {
@@ -2283,24 +2346,34 @@ impl<'a> Lowerer<'a> {
                 } else {
                     (*body).clone()
                 };
-                (taken, true)
+                (taken, Verdict::Abortive)
             }
-            None => {
-                return Err(LowerError::Verdict {
-                    effect: effect.to_string(),
-                    operation: operation.to_string(),
-                    why: "зовёт резумпцию не в хвосте: одношот общего вида, трек D волны 4",
-                });
-            }
+            // Общая. Понижается **написанное** тело, как у двух прочих
+            // вердиктов: нормализация здесь сводила бы и `let`, то есть
+            // размножала бы вычисление по вхождениям связывания.
+            _ => ((*body).clone(), Verdict::General),
         };
 
         for binding in &bindings {
             nested.env.push(Slot::Bound(binding.local, binding.fact));
         }
-        // Связывание `resume` в среде де Брёйна остаётся - тело считало от него
-        // индексы, - но значения у него нет: хвостовая ветка его сняла, а
-        // абортивная не звала вовсе.
-        nested.env.push(Slot::Absent);
+        // Связывание `resume`. У хвостовой и абортивной значения у него нет:
+        // первая его сняла, вторая не звала вовсе. У общей оно есть - ручка
+        // сегмента приходит лишним параметром, - и связывание настоящее.
+        let mut parameters = bindings;
+        if verdict == Verdict::General {
+            let resumption = Binding {
+                name: "резумпция".to_owned(),
+                local: nested.fresh(),
+                fact: Fact::present(Mult::One).shaped(Repr::Resumption),
+            };
+            nested
+                .env
+                .push(Slot::Bound(resumption.local, resumption.fact));
+            parameters.push(resumption);
+        } else {
+            nested.env.push(Slot::Absent);
+        }
 
         let function = FuncId(self.functions.len());
         self.functions.push(Function {
@@ -2310,7 +2383,7 @@ impl<'a> Lowerer<'a> {
             // окружающая применения `handle` (§3.4).
             form: Form::Detached,
             captured: captured.to_vec(),
-            parameters: bindings,
+            parameters,
             result: Repr::Boxed,
             body: Expr::Erased,
         });
@@ -2318,7 +2391,7 @@ impl<'a> Lowerer<'a> {
         let lowered = self.shaped(&mut nested, &rewritten, Repr::Boxed, "тело ветки хендлера");
         self.detached = outer;
         self.functions[function.0].body = lowered?;
-        Ok((function, abortive))
+        Ok((function, verdict))
     }
 
     /// Ветка `return`: одноместная, ей идёт значение вычисления.
@@ -3206,6 +3279,20 @@ fn performing(ty: &Term) -> Option<usize> {
         current = codomain;
     }
     None
+}
+
+/// Кратности первых `count` связываний типа, в порядке объявления.
+fn multiplicities(ty: &Term, count: usize) -> Vec<Mult> {
+    let mut current = ty;
+    let mut found = Vec::with_capacity(count);
+    while found.len() < count {
+        let Term::Pi(mult, _, _, _, codomain) = current else {
+            break;
+        };
+        found.push(mult.mult);
+        current = codomain;
+    }
+    found
 }
 
 /// Сколько связываний у типа подряд.

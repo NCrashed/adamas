@@ -53,7 +53,7 @@ pub type LoweredFirst = Option<unsafe extern "C" fn(Value) -> Value>;
 pub type LoweredSecond = Option<unsafe extern "C" fn(*const Evidence, *mut Kont, Value) -> Value>;
 
 /// Чем занять место, когда придёт значение.
-pub type FrameCode = Option<unsafe extern "C" fn(*mut Frame, Value) -> Value>;
+pub type FrameCode = Option<unsafe extern "C" fn(*mut Frame, *mut Kont, Value) -> Value>;
 
 /// Дроп среды кадра; блок не освобождает.
 pub type FrameRelease = Option<unsafe extern "C" fn(*mut Frame, *mut Kont)>;
@@ -71,14 +71,6 @@ pub const HANDLER_RETURN: u32 = 0xFFFF_FFFF;
 pub struct Kont {
     /// Вершина: ближайшая работа.
     pub top: *mut Frame,
-    /// Кадров в стеке.
-    pub depth: usize,
-    /// Ответ обрыва в полёте; смысл имеет при `aborting`.
-    pub answer: Value,
-    /// Чей кадр хендлера обрыв назвал: адрес до среза, числом.
-    pub target: usize,
-    /// Идёт ли обрыв.
-    pub aborting: core::ffi::c_int,
 }
 
 /// Обычная отложенная работа.
@@ -269,6 +261,8 @@ unsafe extern "C" {
 
     /// Пустой стек.
     pub fn adamas_kont_init(kont: *mut Kont);
+    /// Кадров в стеке: считается обходом.
+    pub fn adamas_kont_depth(kont: *const Kont) -> usize;
     /// Кладёт кадр на вершину и отдаёт его.
     pub fn adamas_kont_push(
         kont: *mut Kont,
@@ -277,7 +271,7 @@ unsafe extern "C" {
         code: FrameCode,
         release: FrameRelease,
         fields: usize,
-        evidence: *mut Evidence,
+        evidence: *const Evidence,
     ) -> *mut Frame;
     /// Кадр `HANDLER` с ветками вместо кода отложенной работы.
     pub fn adamas_kont_handler(
@@ -296,8 +290,6 @@ unsafe extern "C" {
         arguments: *mut Value,
         count: usize,
     ) -> Value;
-    /// Нормальный выход из хендлера: кадр снимается, `return` получает значение.
-    pub fn adamas_kont_leave(kont: *mut Kont, handler: *mut Frame, value: Value) -> Value;
     /// Среда кадра.
     pub fn adamas_frame_env(frame: *mut Frame) -> *mut Value;
     /// Слотов в среде кадра.
@@ -312,6 +304,8 @@ unsafe extern "C" {
     pub fn adamas_kont_cut(kont: *mut Kont, handler: *mut Frame) -> *mut Segment;
     /// Ставит сегмент обратно на вершину.
     pub fn adamas_kont_restore(kont: *mut Kont, segment: *mut Segment);
+    /// Возобновление резумпции-значения: сегмент встаёт обратно, ручка тратится.
+    pub fn adamas_kont_resume(kont: *mut Kont, resumption: Value);
     /// Крутит стек, пока он не опустеет.
     pub fn adamas_kont_run(kont: *mut Kont, value: Value) -> Value;
     /// Обрыв: снимает всё до ближайшего кадра `UNWINDING` и отдаёт `()`.
@@ -332,4 +326,6 @@ unsafe extern "C" {
     pub fn adamas_segment_of(value: Value) -> *mut Segment;
     /// Дроп резумпции: последняя ссылка кладёт размотку сегмента кадром.
     pub fn adamas_resumption_drop(kont: *mut Kont, value: Value);
+    /// Он же там, где ручки стека нет: раскрутка идёт немедленно, на своём корне.
+    pub fn adamas_segment_abandon(value: Value);
 }

@@ -69,12 +69,13 @@ use adamas_core::mult::Mult;
 use adamas_core::prim::PrimTy;
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Expr, Fact, Function, LocalId, Program, Stride,
+    Arm, Binding, Constructor, CtorId, Expr, Fact, FuncId, Function, LocalId, Program, Stride,
 };
 
 /// Вставляет RC и переиспользование во все функции программы.
 #[must_use]
 pub fn insert(program: Program) -> Program {
+    let suspending = crate::split::suspending(&program);
     let Program {
         constructors,
         packings,
@@ -85,7 +86,7 @@ pub fn insert(program: Program) -> Program {
     } = program;
     let functions = functions
         .into_iter()
-        .map(|function| owned(&constructors, function))
+        .map(|function| owned(&constructors, &suspending, function))
         .collect();
     Program {
         constructors,
@@ -98,7 +99,11 @@ pub fn insert(program: Program) -> Program {
 }
 
 /// Переводит одну функцию в форму, где владение соблюдено.
-fn owned(constructors: &[Constructor], function: Function) -> Function {
+fn owned(
+    constructors: &[Constructor],
+    suspending: &BTreeSet<FuncId>,
+    function: Function,
+) -> Function {
     let scope: BTreeSet<LocalId> = function
         .live_captured()
         .chain(function.live_parameters())
@@ -107,6 +112,7 @@ fn owned(constructors: &[Constructor], function: Function) -> Function {
         .collect();
     let mut pass = Pass {
         constructors,
+        suspending,
         next: ceiling(&function),
         flat: flat(&function),
     };
@@ -242,6 +248,8 @@ fn drops(locals: impl IntoIterator<Item = LocalId>, body: Expr) -> Expr {
 /// Состояние прохода: таблица конструкторов и счётчик свежих связываний.
 struct Pass<'a> {
     constructors: &'a [Constructor],
+    /// Функции, чей вызов есть точка приостановки ([`crate::split`]).
+    suspending: &'a BTreeSet<FuncId>,
     next: u32,
     /// Связывания без заголовка: счётчика у них нет (§4.11).
     flat: BTreeSet<LocalId>,
@@ -362,6 +370,7 @@ impl Pass<'_> {
             Expr::Perform { .. } | Expr::Handle { .. } | Expr::Closing { .. } => {
                 self.effectful(expr, owned)
             }
+            Expr::Resume { .. } => self.resumed(expr, owned),
             Expr::Apply { callee, argument } => self.applied(*callee, *argument, owned),
             Expr::Bind {
                 binding,
@@ -669,6 +678,25 @@ impl Pass<'_> {
         }
     }
 
+    /// Возобновление потребляет обе стороны: резумпцию - потому что она аффинна
+    /// и второго вызова не имеет, значение - потому что уходит возобновлённому
+    /// вычислению владением.
+    fn resumed(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
+        let Expr::Resume { resumption, value } = expr else {
+            return expr;
+        };
+        let (mut parts, spare) = self.sequence(vec![*resumption, *value], owned);
+        let value = parts.pop().unwrap_or(Expr::Erased);
+        let resumption = parts.pop().unwrap_or(Expr::Erased);
+        drops(
+            spare,
+            Expr::Resume {
+                resumption: Box::new(resumption),
+                value: Box::new(value),
+            },
+        )
+    }
+
     /// Применение значения-функции.
     ///
     /// `adamas_apply` замыкание заимствует (`adamas.h`), поэтому дропает его
@@ -865,7 +893,14 @@ impl Pass<'_> {
             Expr::Apply { callee, argument } => {
                 self.plans(callee, slots) || self.plans(argument, slots)
             }
-            Expr::Bind { value, body, .. } => self.plans(value, slots) || self.plans(body, slots),
+            // Точку приостановки придержанный блок не переживает: он сырой -
+            // ни заголовка, ни счётчика, - а слот кадра держит **значения**.
+            // Тот же консерватизм, что у хендлера и операции ниже, и цена та
+            // же: одна аллокация там, где ячейка нашлась бы за кадром.
+            Expr::Bind { value, body, .. } => {
+                self.plans(value, slots)
+                    || (!crate::split::halts(value, self.suspending) && self.plans(body, slots))
+            }
             // Ветви исключают друг друга, поэтому «каждый путь» требует всех.
             Expr::Match { arms, .. } => {
                 !arms.is_empty() && arms.iter().all(|arm| self.plans(&arm.body, slots))
@@ -908,6 +943,7 @@ impl Pass<'_> {
             | Expr::Closing { .. }
             | Expr::Handle { .. }
             | Expr::Perform { .. }
+            | Expr::Resume { .. }
             | Expr::Layout { .. } => false,
         }
     }
@@ -940,8 +976,11 @@ impl Pass<'_> {
             Expr::Apply { callee, argument } => {
                 self.attach(callee, slots, token) || self.attach(argument, slots, token)
             }
+            // Обход тот же, что у [`Pass::plans`], и граница та же.
             Expr::Bind { value, body, .. } => {
-                self.attach(value, slots, token) || self.attach(body, slots, token)
+                self.attach(value, slots, token)
+                    || (!crate::split::halts(value, self.suspending)
+                        && self.attach(body, slots, token))
             }
             Expr::Match { arms, .. } => {
                 if arms.is_empty() || !arms.iter().all(|arm| self.plans(&arm.body, slots)) {
@@ -992,6 +1031,7 @@ impl Pass<'_> {
             | Expr::Closing { .. }
             | Expr::Handle { .. }
             | Expr::Perform { .. }
+            | Expr::Resume { .. }
             | Expr::Layout { .. } => false,
         }
     }

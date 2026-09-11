@@ -271,7 +271,7 @@ unsafe extern "C" {
         code: FrameCode,
         release: FrameRelease,
         fields: usize,
-        evidence: *mut Evidence,
+        evidence: *const Evidence,
     ) -> *mut Frame;
     /// Кадр `HANDLER` с ветками вместо кода отложенной работы.
     pub fn adamas_kont_handler(

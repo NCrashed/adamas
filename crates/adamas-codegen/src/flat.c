@@ -87,6 +87,22 @@ static void adamas_slot_write(adamas_value value, size_t index, uint64_t bits) {
     memcpy(&value->fields[index], &bits, sizeof bits);
 }
 
+/* Слот **кадра** тем же битам: среда кадра - массив слов, и плоское значение
+ * переживает точку приостановки в нём так же, как в слоте объекта. Счётчика у
+ * него нет, поэтому дроп среды такой слот не трогает - какие слоты
+ * указательные, кусок дроблёного тела знает по типам. */
+static adamas_value adamas_slot_of(uint64_t bits) {
+    adamas_value slot;
+    memcpy(&slot, &bits, sizeof slot);
+    return slot;
+}
+
+static uint64_t adamas_slot_word(adamas_value slot) {
+    uint64_t bits;
+    memcpy(&bits, &slot, sizeof bits);
+    return bits;
+}
+
 #define ADAMAS_FLAT_INTEGER(name, ctype, utype, wide, spec)                                        \
     static ctype adamas_bits_##name(uint64_t bits) { return (ctype)(utype)bits; }                  \
     static uint64_t adamas_word_##name(ctype value) { return (uint64_t)(utype)value; }             \

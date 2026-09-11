@@ -208,8 +208,12 @@ void adamas_kont_init(adamas_kont *kont) {
 
 adamas_frame *adamas_kont_push(adamas_kont *kont, uint16_t mark, uint32_t label,
                                adamas_frame_code code, adamas_frame_release release, size_t fields,
-                               adamas_evidence *evidence) {
-    adamas_frame *frame = frame_alloc(mark, label, code, NULL, release, fields, evidence);
+                               const adamas_evidence *evidence) {
+    /* Вектор здесь только берётся ссылкой, и `const` у входа - про место
+     * вызова: у порождённого C он `const adamas_evidence *`, а приводить его
+     * там значило бы писать приведение на каждой точке приостановки. */
+    adamas_frame *frame = frame_alloc(mark, label, code, NULL, release, fields,
+                                      (adamas_evidence *)(uintptr_t)evidence);
     frame->below = kont->top;
     kont->top = frame;
     kont->depth += 1;

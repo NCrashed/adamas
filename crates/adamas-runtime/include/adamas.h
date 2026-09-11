@@ -883,7 +883,7 @@ void adamas_kont_init(adamas_kont *kont);
  */
 adamas_frame *adamas_kont_push(adamas_kont *kont, uint16_t mark, uint32_t label,
                                adamas_frame_code code, adamas_frame_release release,
-                               size_t fields, adamas_evidence *evidence);
+                               size_t fields, const adamas_evidence *evidence);
 
 /**
  * То же кадром `HANDLER`: вместо кода отложенной работы он несёт ветки.

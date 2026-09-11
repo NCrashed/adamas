@@ -16,11 +16,10 @@ use adamas_runtime::ffi::{
     adamas_evidence_drop, adamas_evidence_empty, adamas_evidence_extend, adamas_evidence_lookup,
     adamas_field, adamas_frame_env, adamas_frame_evidence, adamas_frame_fields, adamas_frame_label,
     adamas_frame_mark, adamas_frame_perform, adamas_imm, adamas_imm_get, adamas_kont_abort,
-    adamas_kont_cut, adamas_kont_handler, adamas_kont_init, adamas_kont_push,
-    adamas_kont_restore, adamas_kont_resume, adamas_kont_run, adamas_rc, adamas_resumption_drop,
-    adamas_segment_abandon, adamas_segment_base, adamas_segment_copy, adamas_segment_depth,
-    adamas_segment_unwind, adamas_segment_value, adamas_set_field, adamas_stat_live,
-    adamas_stat_reset, adamas_unit,
+    adamas_kont_cut, adamas_kont_handler, adamas_kont_init, adamas_kont_push, adamas_kont_restore,
+    adamas_kont_resume, adamas_kont_run, adamas_rc, adamas_resumption_drop, adamas_segment_abandon,
+    adamas_segment_base, adamas_segment_copy, adamas_segment_depth, adamas_segment_unwind,
+    adamas_segment_value, adamas_set_field, adamas_stat_live, adamas_stat_reset, adamas_unit,
 };
 
 thread_local! {

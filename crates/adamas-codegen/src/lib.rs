@@ -78,6 +78,7 @@ pub mod emit_c;
 pub mod ir;
 pub mod lower;
 pub mod perceus;
+pub mod split;
 
 use adamas_core::sig::Signature;
 use adamas_core::term::Term;
@@ -110,6 +111,6 @@ pub enum CompileError {
 /// [`CompileError`] - форма вне чистого фрагмента, имя, которого не понизить,
 /// либо форма понижения, которой эмиттер не знает.
 pub fn compile(signature: &Signature, entry: &Term) -> Result<String, CompileError> {
-    let lowered = lower::lower(signature, entry)?;
+    let lowered = split::prepare(lower::lower(signature, entry)?);
     Ok(emit_c::emit(&perceus::insert(lowered))?)
 }

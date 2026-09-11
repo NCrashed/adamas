@@ -73,6 +73,15 @@ pub struct RegionId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PackId(pub u32);
 
+/// Номер метки эффекта в [`Program::labels`]. Он же то число, которым метку
+/// ищет `adamas_evidence_lookup`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LabelId(pub u32);
+
+/// Номер площадки `handle` в [`Program::handlers`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct HandlerId(pub u32);
+
 /// Чем занято поле плоского агрегата.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlotTy {
@@ -535,6 +544,12 @@ impl Constructor {
 ///
 /// Форма лежит **на функции**, а не угадывается эмиттером: от неё зависит
 /// сигнатура, и угадывать её на месте вызова значило бы угадывать дважды.
+///
+/// Лямбда получает вторую форму **всегда**, и это не послабление правила, а
+/// его единственное применение к случаю без написанного типа: у связывания
+/// лямбды типа в ядре нет вовсе. Стоит это ноль - прямого вызова у лямбды не
+/// бывает, зовут её через `adamas_apply`, а граница замыкания несёт оба
+/// скрытых аргумента при любой форме (`adamas.h`, `adamas_code`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Form {
     /// Первая: обычная C-функция, кадр на C-стеке.
@@ -549,10 +564,52 @@ pub enum Form {
     /// вектор - чтобы находить хендлер. Сигнатуру им задаёт
     /// `adamas_lowered_second`, и порядок в ней тот же.
     ///
-    /// Кадра она сегодня не отчуждает ни разу: ставить его некому, пока
-    /// понижения хендлера нет. Скрытые аргументы при этом настоящие - идут от
-    /// вызывающего к вызываемому и от трамплина внутрь.
+    /// Кадр она сегодня отчуждает ровно один - `HANDLER` на месте `handle`
+    /// ([`Expr::Handle`]). Кадров под приостановку не ставится ни одного: у
+    /// хвостовой резумпции точки приостановки нет вовсе, продолжение остаётся
+    /// на C-стеке. Их заведёт дробление тел (трек D волны 4).
     Detached,
+}
+
+/// Метка эффекта: имя для читаемости, операции - для номеров и отказов.
+#[derive(Clone, Debug)]
+pub struct Label {
+    /// Имя метки из исходника.
+    pub name: String,
+    /// Операции в порядке объявления - он же порядок веток хендлера (§3.4).
+    pub operations: Vec<String>,
+}
+
+/// Ветка хендлера: своя функция и сколько аргументов операции она связывает.
+///
+/// Связывает она **не всё**, что операция принимает: параметры метки ветке не
+/// достаются, а синтезированный триггер приостановленного вычисления - тем
+/// более (§3.4). Число это - у типа элиминатора, и оно же говорит ветке,
+/// сколько пришедших аргументов дропнуть.
+#[derive(Clone, Debug)]
+pub struct Branch {
+    /// Функция ветки.
+    pub function: FuncId,
+    /// Сколько аргументов операции она связывает.
+    pub written: usize,
+}
+
+/// Площадка `handle`: один кадр `HANDLER` в рантайме (§13, 2026-09-08).
+///
+/// Ветки - **статические функции со средой кадра** (решение 5 волны 4), а не
+/// замыкания: формы их известны месту `handle`. Среда у всех одна - объединение
+/// свободных переменных веток, - потому что лежит она в кадре, и второй кадр
+/// ради экономии слота стоил бы дороже слота.
+#[derive(Clone, Debug)]
+pub struct Handler {
+    /// Метка, которую площадка снимает.
+    pub label: LabelId,
+    /// Захваченная среда веток: её слоты лежат в кадре.
+    pub captured: Vec<Binding>,
+    /// Ветки в порядке операций метки.
+    pub branches: Vec<Branch>,
+    /// Ветка `return`: одноместная, ей идёт значение вычисления.
+    pub returned: FuncId,
 }
 
 /// Функция программы.
@@ -602,7 +659,9 @@ pub struct Arm {
 ///
 /// Дерево, а не последовательность: `Bind` и `Match` задают порядок сами, а
 /// линеаризация - работа эмиттера. Узлов ровно столько, сколько требует чистый
-/// фрагмент; эффектов, хендлеров и резумпций здесь нет.
+/// фрагмент, плюс два эффектных - [`Expr::Handle`] и [`Expr::Perform`].
+/// Резумпции среди них нет: хвостовая снимается понижением, а всякая другая
+/// отвергается по имени.
 #[derive(Clone, Debug)]
 pub enum Expr {
     /// Значение локального связывания.
@@ -818,6 +877,36 @@ pub enum Expr {
         /// Захваченное - по одному на связывание в [`Function::captured`].
         captured: Vec<Expr>,
     },
+    /// Хендлер: кадр `HANDLER`, вычисление под ним, ответ - ветка `return`.
+    ///
+    /// Вычисление стоит **под расширенным вектором evidence**, и это не деталь
+    /// печати: запись о хендлере видна только ему и тому, что он позовёт.
+    /// Ветки же работают под вектором **места `handle`** - окружающая ветки
+    /// есть окружающая применения хендлера (§3.4), - и берут его у кадра.
+    Handle {
+        /// Какая площадка.
+        handler: HandlerId,
+        /// Среда веток - по одному на связывание в [`Handler::captured`].
+        captured: Vec<Expr>,
+        /// Что под хендлером. Приостановка снята: `{ε} A` есть нульместная
+        /// функция (§3.4), и понижение применяет её здесь же.
+        computation: Box<Expr>,
+    },
+    /// Операция эффекта: хендлер ищется вектором evidence (§3.4).
+    ///
+    /// Вердикт трёхзначный, и сводить его к двум нельзя (`adamas.h`):
+    /// `HANDLER` - ветка на месте, `SUPPRESSED` - обрыв своего деструктора,
+    /// `MISSING` - операция без хендлера.
+    Perform {
+        /// Метка, чья операция.
+        label: LabelId,
+        /// Номер операции в метке - им ветка и выбирается.
+        operation: u32,
+        /// Сколько подходящих записей пропустить: маски (§3.4, вопрос 72).
+        skip: u32,
+        /// Аргументы операции без параметров метки.
+        arguments: Vec<Expr>,
+    },
     /// Применение значения-функции к одному аргументу.
     ///
     /// Стирания здесь не бывает: машина стирает аргумент по типу **глобального
@@ -880,6 +969,65 @@ pub enum Expr {
     },
 }
 
+impl Expr {
+    /// Прямые подвыражения в порядке вычисления.
+    ///
+    /// Живёт здесь, а не у каждого читателя своя копия, потому что читателей
+    /// пятеро - вставка RC тремя обходами, эмиттер и свидетели, - и обход,
+    /// забывший узел, делает утверждение об **отсутствии** молча зелёным. Узел
+    /// добавляется в одном месте.
+    #[must_use]
+    pub fn children(&self) -> Vec<&Self> {
+        match self {
+            Self::Local(_)
+            | Self::Erased
+            | Self::ConstructClosure { .. }
+            | Self::Literal { .. }
+            | Self::LayoutField { .. }
+            | Self::RegionNew
+            | Self::Layout { .. } => Vec::new(),
+            Self::Unpack { value, .. } => vec![value],
+            Self::RegionLast { region } => vec![region],
+            Self::RegionAlloc { region, value, .. } => vec![region, value],
+            Self::RegionRead { region, at, .. }
+            | Self::RegionRecycle { region, at }
+            | Self::RegionPop { region, at } => vec![region, at],
+            Self::RegionWrite {
+                region, at, value, ..
+            } => vec![region, at, value],
+            Self::Construct { arguments, .. }
+            | Self::Call { arguments, .. }
+            | Self::Perform { arguments, .. }
+            | Self::Pack {
+                fields: arguments, ..
+            } => arguments.iter().collect(),
+            Self::Handle {
+                captured,
+                computation,
+                ..
+            } => captured.iter().chain([&**computation]).collect(),
+            Self::ArrayNew { count, initial, .. } => vec![count, initial],
+            Self::ArraySet {
+                array, at, value, ..
+            } => vec![array, at, value],
+            Self::ArrayIndex { array, at, .. } => vec![array, at],
+            Self::Closure { captured, .. } => captured.iter().collect(),
+            Self::Primitive { left, right, .. } => vec![left, right],
+            Self::Apply { callee, argument } => vec![callee, argument],
+            Self::Bind { value, body, .. } => vec![value, body],
+            Self::Match {
+                scrutinee, arms, ..
+            } => [&**scrutinee]
+                .into_iter()
+                .chain(arms.iter().map(|arm| &arm.body))
+                .collect(),
+            Self::Dup { body, .. } | Self::Drop { body, .. } | Self::Reclaim { body, .. } => {
+                vec![body]
+            }
+        }
+    }
+}
+
 /// Программа целиком.
 #[derive(Clone, Debug)]
 pub struct Program {
@@ -887,6 +1035,10 @@ pub struct Program {
     pub constructors: Vec<Constructor>,
     /// Плоские укладки по номеру: индекс совпадает с [`PackId`].
     pub packings: Vec<Packing>,
+    /// Метки эффектов по номеру: индекс совпадает с [`LabelId`].
+    pub labels: Vec<Label>,
+    /// Площадки `handle` по номеру: индекс совпадает с [`HandlerId`].
+    pub handlers: Vec<Handler>,
     /// Функции по номеру: индекс совпадает с [`FuncId`].
     pub functions: Vec<Function>,
     /// Точка входа: функция без параметров, чьё значение печатается.

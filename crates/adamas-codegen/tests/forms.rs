@@ -103,7 +103,11 @@ main : Nat
 main = hold louder (relayed size)
 ";
 
-/// Хендлер над той же меткой: программа законна, а понижение её отвергает.
+/// Мультишот над той же меткой: программа законна, а понижение её отвергает.
+///
+/// Мультишот, а не `handle`: одношотный хвостово-резумптивный берётся (трек B
+/// волны 4, `tests/handlers.rs`), и отказ на нём означал бы уже не форму
+/// функции, а несделанную работу.
 const HANDLED: &str = "\
 data Unit where
   MkUnit : Unit
@@ -119,7 +123,7 @@ asked : {Ask} Nat
 asked = ask
 
 main : Nat
-main = handle asked with
+main = handleMulti asked with
   return v -> v
   ask -> resume Zero
 ";
@@ -295,6 +299,8 @@ fn the_first_form_cannot_call_the_second() {
     let program = Program {
         constructors: Vec::new(),
         packings: Vec::new(),
+        labels: Vec::new(),
+        handlers: Vec::new(),
         functions: vec![entry, callee],
         entry: FuncId(0),
     };
@@ -306,13 +312,13 @@ fn the_first_form_cannot_call_the_second() {
     );
 }
 
-/// Эффектная программа отвергается на `#handle.L`, а не на форме функции.
+/// Эффектная программа отвергается на элиминаторе, а не на форме функции.
 #[test]
 fn a_handler_is_refused_by_its_own_name() {
-    let error = harness::compiled(HANDLED).expect_err("хендлер понижением не берётся");
+    let error = harness::compiled(HANDLED).expect_err("мультишот понижением не берётся");
     let text = error.to_string();
     assert!(
-        text.contains("#handle.Ask"),
+        text.contains("#handleMulti.Ask"),
         "отказ не назвал элиминатор хендлера: {text}"
     );
     assert!(

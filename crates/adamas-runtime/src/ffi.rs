@@ -58,6 +58,13 @@ pub type FrameCode = Option<unsafe extern "C" fn(*mut Frame, Value) -> Value>;
 /// Дроп среды кадра; блок не освобождает.
 pub type FrameRelease = Option<unsafe extern "C" fn(*mut Frame, *mut Kont)>;
 
+/// Ветки хендлера одной функцией: их выбирает номер операции.
+pub type HandlerCode =
+    Option<unsafe extern "C" fn(*mut Frame, *mut Kont, u32, *mut Value, usize) -> Value>;
+
+/// Номер ветки `return`: она не операция, и своего номера у неё нет.
+pub const HANDLER_RETURN: u32 = 0xFFFF_FFFF;
+
 /// Стек продолжения второй формы понижения.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -266,6 +273,25 @@ unsafe extern "C" {
         fields: usize,
         evidence: *mut Evidence,
     ) -> *mut Frame;
+    /// Кадр `HANDLER` с ветками вместо кода отложенной работы.
+    pub fn adamas_kont_handler(
+        kont: *mut Kont,
+        label: u32,
+        branches: HandlerCode,
+        release: FrameRelease,
+        fields: usize,
+        evidence: *const Evidence,
+    ) -> *mut Frame;
+    /// Зовёт ветку операции у найденного кадра хендлера.
+    pub fn adamas_frame_perform(
+        handler: *mut Frame,
+        kont: *mut Kont,
+        operation: u32,
+        arguments: *mut Value,
+        count: usize,
+    ) -> Value;
+    /// Нормальный выход из хендлера: кадр снимается, `return` получает значение.
+    pub fn adamas_kont_leave(kont: *mut Kont, handler: *mut Frame, value: Value) -> Value;
     /// Среда кадра.
     pub fn adamas_frame_env(frame: *mut Frame) -> *mut Value;
     /// Слотов в среде кадра.

@@ -284,90 +284,13 @@ pub(crate) fn compiled(source: &str) -> Result<String, adamas_codegen::CompileEr
 
 /// Обход дерева выражения сверху вниз.
 ///
-/// Живёт здесь, а не рядом со своим свидетелем, потому что читают его двое -
-/// плоское значение (`flat.rs`) и регион (`region.rs`), - и обход, забывший
-/// узел, молча делает утверждение об **отсутствии** зелёным.
+/// Шаг берётся у самого представления ([`Expr::children`]): свой обход у
+/// свидетеля означал бы, что утверждение об **отсутствии** узла зеленеет молча,
+/// стоит представлению вырасти.
 pub(crate) fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
     visit(expr);
-    match expr {
-        Expr::Local(_)
-        | Expr::Erased
-        | Expr::ConstructClosure { .. }
-        | Expr::Literal { .. }
-        | Expr::LayoutField { .. }
-        | Expr::RegionNew
-        | Expr::Layout { .. } => {}
-        Expr::Unpack { value, .. } => walk(value, visit),
-        Expr::RegionLast { region } => walk(region, visit),
-        Expr::RegionAlloc { region, value, .. } => {
-            walk(region, visit);
-            walk(value, visit);
-        }
-        Expr::RegionRead { region, at, .. }
-        | Expr::RegionRecycle { region, at }
-        | Expr::RegionPop { region, at } => {
-            walk(region, visit);
-            walk(at, visit);
-        }
-        Expr::RegionWrite {
-            region, at, value, ..
-        } => {
-            walk(region, visit);
-            walk(at, visit);
-            walk(value, visit);
-        }
-        Expr::Construct { arguments, .. }
-        | Expr::Call { arguments, .. }
-        | Expr::Pack {
-            fields: arguments, ..
-        } => {
-            for argument in arguments {
-                walk(argument, visit);
-            }
-        }
-        Expr::ArrayNew { count, initial, .. } => {
-            walk(count, visit);
-            walk(initial, visit);
-        }
-        Expr::ArraySet {
-            array, at, value, ..
-        } => {
-            walk(array, visit);
-            walk(at, visit);
-            walk(value, visit);
-        }
-        Expr::ArrayIndex { array, at, .. } => {
-            walk(array, visit);
-            walk(at, visit);
-        }
-        Expr::Closure { captured, .. } => {
-            for capture in captured {
-                walk(capture, visit);
-            }
-        }
-        Expr::Primitive { left, right, .. } => {
-            walk(left, visit);
-            walk(right, visit);
-        }
-        Expr::Apply { callee, argument } => {
-            walk(callee, visit);
-            walk(argument, visit);
-        }
-        Expr::Bind { value, body, .. } => {
-            walk(value, visit);
-            walk(body, visit);
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            walk(scrutinee, visit);
-            for arm in arms {
-                walk(&arm.body, visit);
-            }
-        }
-        Expr::Dup { body, .. } | Expr::Drop { body, .. } | Expr::Reclaim { body, .. } => {
-            walk(body, visit);
-        }
+    for child in expr.children() {
+        walk(child, visit);
     }
 }
 

@@ -16,6 +16,9 @@ struct adamas_frame {
     adamas_header header; /* tag - метка кадра, `adamas_mark` */
     adamas_frame *below;
     adamas_frame_code code;
+    /* Ветки хендлера; у прочих кадров `NULL`. Отдельным полем, а не
+     * объединением с `code`: код спрашивает `adamas_kont_run` у всякого кадра. */
+    adamas_handler_code branches;
     adamas_frame_release release;
     adamas_evidence *evidence;
     uint32_t label;
@@ -32,12 +35,12 @@ struct adamas_segment {
 
 /* Смещения закреплены: числа эти уезжают от перестановки полей молча, а Фаза 7
  * ставит по ним `align` и `dereferenceable` (шапка `adamas.h`, «Выравнивание»). */
-_Static_assert(offsetof(struct adamas_frame, env) == 48, "среда кадра идёт с 48-го байта");
+_Static_assert(offsetof(struct adamas_frame, env) == 56, "среда кадра идёт с 56-го байта");
 _Static_assert(sizeof(struct adamas_segment) == 32, "сегмент - четыре слова");
 
 static adamas_frame *frame_alloc(uint16_t mark, uint32_t label, adamas_frame_code code,
-                                 adamas_frame_release release, size_t fields,
-                                 adamas_evidence *evidence) {
+                                 adamas_handler_code branches, adamas_frame_release release,
+                                 size_t fields, adamas_evidence *evidence) {
     adamas_frame *frame = (adamas_frame *)adamas_block_alloc(sizeof(adamas_frame) +
                                                              fields * sizeof(adamas_value));
     adamas_header *header = adamas_header_of(frame);
@@ -46,6 +49,7 @@ static adamas_frame *frame_alloc(uint16_t mark, uint32_t label, adamas_frame_cod
     header->flags = 0;
     frame->below = NULL;
     frame->code = code;
+    frame->branches = branches;
     frame->release = release;
     frame->evidence = adamas_evidence_dup(evidence);
     frame->label = label;
@@ -187,8 +191,8 @@ static adamas_segment *segment_alloc(adamas_frame *top, adamas_frame *base, size
 
 static void unwind_push(adamas_kont *kont, adamas_segment *chain, adamas_value held,
                         uint32_t captured) {
-    adamas_frame *frame =
-        adamas_kont_push(kont, ADAMAS_MARK_UNWINDING, captured, NULL, unwinding_release, 2, NULL);
+    adamas_frame *frame = adamas_kont_push(kont, ADAMAS_MARK_UNWINDING, captured, NULL,
+                                           unwinding_release, 2, NULL);
     frame->env[0] = held;
     frame->env[1] = adamas_segment_value(chain);
 }
@@ -205,11 +209,50 @@ void adamas_kont_init(adamas_kont *kont) {
 adamas_frame *adamas_kont_push(adamas_kont *kont, uint16_t mark, uint32_t label,
                                adamas_frame_code code, adamas_frame_release release, size_t fields,
                                adamas_evidence *evidence) {
-    adamas_frame *frame = frame_alloc(mark, label, code, release, fields, evidence);
+    adamas_frame *frame = frame_alloc(mark, label, code, NULL, release, fields, evidence);
     frame->below = kont->top;
     kont->top = frame;
     kont->depth += 1;
     return frame;
+}
+
+adamas_frame *adamas_kont_handler(adamas_kont *kont, uint32_t label, adamas_handler_code branches,
+                                  adamas_frame_release release, size_t fields,
+                                  const adamas_evidence *evidence) {
+    /* Вектор здесь только берётся ссылкой, и `const` у входа - про место
+     * вызова: у порождённого C он `const adamas_evidence *`, а приводить его
+     * там значило бы писать приведение в каждом хендлере. */
+    adamas_frame *frame = frame_alloc(ADAMAS_MARK_HANDLER, label, NULL, branches, release, fields,
+                                      (adamas_evidence *)(uintptr_t)evidence);
+    frame->below = kont->top;
+    kont->top = frame;
+    kont->depth += 1;
+    return frame;
+}
+
+adamas_value adamas_frame_perform(adamas_frame *handler, adamas_kont *kont, uint32_t operation,
+                                  adamas_value *arguments, size_t count) {
+    if (handler == NULL || handler->branches == NULL) {
+        adamas_fail("операция пришла к кадру без веток");
+    }
+    return handler->branches(handler, kont, operation, arguments, count);
+}
+
+adamas_value adamas_kont_leave(adamas_kont *kont, adamas_frame *handler, adamas_value value) {
+    if (kont->top != handler) {
+        /* Направленный стиль: под хендлером всё отработало до его выхода.
+         * Не вершина - значит кадр положили и не сняли, и ответ ушёл бы мимо. */
+        adamas_fail("нормальный выход из хендлера не с вершины стека");
+    }
+    kont->top = handler->below;
+    kont->depth -= 1;
+    handler->below = NULL;
+    adamas_value answer = value;
+    if (handler->branches != NULL) {
+        answer = handler->branches(handler, kont, ADAMAS_HANDLER_RETURN, &value, 1);
+    }
+    frame_free(handler, kont);
+    return answer;
 }
 
 adamas_value *adamas_frame_env(adamas_frame *frame) {
@@ -330,8 +373,9 @@ adamas_segment *adamas_segment_copy(const adamas_segment *segment) {
         if (adamas_frame_mark(source) == ADAMAS_MARK_UNWINDING) {
             adamas_fail("сегмент раскрутки не копируется: ресурс под мультишотом");
         }
-        adamas_frame *copy = frame_alloc(adamas_frame_mark(source), source->label, source->code,
-                                         source->release, source->fields, source->evidence);
+        adamas_frame *copy =
+            frame_alloc(adamas_frame_mark(source), source->label, source->code, source->branches,
+                        source->release, source->fields, source->evidence);
         for (uint32_t index = 0; index < source->fields; index += 1) {
             copy->env[index] = adamas_dup(source->env[index]);
         }

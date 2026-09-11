@@ -10,15 +10,16 @@ use std::cell::RefCell;
 use std::ptr;
 
 use adamas_runtime::ffi::{
-    Evidence, Frame, Kont, LOOKUP_HANDLER, LOOKUP_SUPPRESSED, MARK_CLOSING, MARK_HANDLER,
-    MARK_PLAIN, Value, adamas_alloc, adamas_closure, adamas_closure_get, adamas_closure_release,
-    adamas_closure_set, adamas_drop, adamas_dup, adamas_evidence_drop, adamas_evidence_empty,
-    adamas_evidence_extend, adamas_evidence_lookup, adamas_field, adamas_frame_env,
-    adamas_frame_fields, adamas_frame_label, adamas_frame_mark, adamas_imm, adamas_imm_get,
-    adamas_kont_abort, adamas_kont_cut, adamas_kont_init, adamas_kont_push, adamas_kont_restore,
-    adamas_kont_run, adamas_rc, adamas_resumption_drop, adamas_segment_base, adamas_segment_copy,
-    adamas_segment_depth, adamas_segment_unwind, adamas_segment_value, adamas_set_field,
-    adamas_stat_live, adamas_stat_reset, adamas_unit,
+    Evidence, Frame, HANDLER_RETURN, Kont, LOOKUP_HANDLER, LOOKUP_MISSING, LOOKUP_SUPPRESSED,
+    MARK_CLOSING, MARK_HANDLER, MARK_PLAIN, Value, adamas_alloc, adamas_closure,
+    adamas_closure_get, adamas_closure_release, adamas_closure_set, adamas_drop, adamas_dup,
+    adamas_evidence_drop, adamas_evidence_empty, adamas_evidence_extend, adamas_evidence_lookup,
+    adamas_field, adamas_frame_env, adamas_frame_evidence, adamas_frame_fields, adamas_frame_label,
+    adamas_frame_mark, adamas_frame_perform, adamas_imm, adamas_imm_get, adamas_kont_abort,
+    adamas_kont_cut, adamas_kont_handler, adamas_kont_init, adamas_kont_leave, adamas_kont_push,
+    adamas_kont_restore, adamas_kont_run, adamas_rc, adamas_resumption_drop, adamas_segment_base,
+    adamas_segment_copy, adamas_segment_depth, adamas_segment_unwind, adamas_segment_value,
+    adamas_set_field, adamas_stat_live, adamas_stat_reset, adamas_unit,
 };
 
 thread_local! {
@@ -639,6 +640,112 @@ fn dropping_the_seized_resumption_finishes_the_unwinding() {
 
         adamas_evidence_drop(empty);
         adamas_evidence_drop(with_outer);
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Ветки хендлера: номер операции выбирает ветку, `return` идёт своим номером.
+///
+/// Среда - один слот с числом; ветка операции прибавляет к нему аргумент, ветка
+/// `return` умножает. Различие ответов и есть свидетель выбора: сойдись номера,
+/// и одно число вышло бы вместо двух.
+unsafe extern "C" fn branching(
+    handler: *mut Frame,
+    _kont: *mut Kont,
+    operation: u32,
+    arguments: *mut Value,
+    count: usize,
+) -> Value {
+    unsafe {
+        assert_eq!(count, 1, "ветке передан не один аргумент");
+        let held = adamas_imm_get(adamas_field(*adamas_frame_env(handler), 0));
+        let incoming = adamas_imm_get(*arguments);
+        if operation == HANDLER_RETURN {
+            return adamas_imm(held * incoming);
+        }
+        adamas_imm(held + incoming)
+    }
+}
+
+/// Тот же хендлер без среды: ветки читают только вектор кадра.
+unsafe extern "C" fn silent(
+    _handler: *mut Frame,
+    _kont: *mut Kont,
+    _operation: u32,
+    arguments: *mut Value,
+    _count: usize,
+) -> Value {
+    unsafe { *arguments }
+}
+
+#[test]
+fn an_operation_reaches_the_branches_of_its_handler() {
+    unsafe {
+        adamas_stat_reset();
+        let mut kont = kont();
+        let empty = adamas_evidence_empty();
+
+        let handler = adamas_kont_handler(
+            &raw mut kont,
+            7,
+            Some(branching),
+            Some(release_held),
+            1,
+            empty,
+        );
+        *adamas_frame_env(handler) = boxed(10);
+        let with_handler = adamas_evidence_extend(empty, 7, handler);
+
+        // Операция находит кадр вектором и зовёт его ветку на месте - сегмента
+        // при хвостовой резумпции не снимается.
+        let mut found: *mut Frame = ptr::null_mut();
+        let verdict = adamas_evidence_lookup(with_handler, 7, 0, &raw mut found);
+        assert_eq!(verdict, LOOKUP_HANDLER);
+        assert_eq!(found, handler);
+        let mut arguments = [adamas_imm(5)];
+        let answer = adamas_frame_perform(found, &raw mut kont, 0, arguments.as_mut_ptr(), 1);
+        assert_eq!(adamas_imm_get(answer), 15, "ветка операции не сработала");
+        assert_eq!(kont.depth, 1);
+        assert_eq!(kont.top, handler);
+
+        // Нормальный выход: кадр снимается, `return` получает значение тела.
+        let answer = adamas_kont_leave(&raw mut kont, handler, adamas_imm(3));
+        assert_eq!(adamas_imm_get(answer), 30, "ветка `return` не сработала");
+        assert_eq!(kont.depth, 0);
+        assert!(kont.top.is_null());
+
+        adamas_evidence_drop(with_handler);
+        adamas_evidence_drop(empty);
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Окружающая ветки - вектор **на месте `handle`**, а не тот, под которым
+/// работала операция: ветка стоит снаружи своего хендлера (§3.4).
+#[test]
+fn a_branch_sees_the_vector_of_its_handle_site() {
+    unsafe {
+        adamas_stat_reset();
+        let mut kont = kont();
+        let empty = adamas_evidence_empty();
+
+        let handler = adamas_kont_handler(&raw mut kont, 7, Some(silent), None, 0, empty);
+        let with_handler = adamas_evidence_extend(empty, 7, handler);
+
+        // Под хендлером своя метка находится, а у ветки её нет: кадр помнит
+        // родительский вектор, и второго источника у него не бывает.
+        assert_eq!(
+            adamas_evidence_lookup(with_handler, 7, 0, ptr::null_mut()),
+            LOOKUP_HANDLER
+        );
+        assert_eq!(
+            adamas_evidence_lookup(adamas_frame_evidence(handler), 7, 0, ptr::null_mut()),
+            LOOKUP_MISSING
+        );
+
+        adamas_kont_leave(&raw mut kont, handler, adamas_unit());
+        adamas_evidence_drop(with_handler);
+        adamas_evidence_drop(empty);
         assert_eq!(adamas_stat_live(), 0);
     }
 }

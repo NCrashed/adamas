@@ -10,6 +10,11 @@
  * Запись бывает **подавленной**: хендлер уже ответил, и второго ответа деть
  * некуда. Это не «записи нет» и не «искать дальше наружу» - разница названа у
  * `adamas_evidence_lookup` и стоила ревью 2026-09-05.
+ *
+ * Маска - тоже правка вектора, и другой быть не может: `#mask.L` стоит вокруг
+ * **чужого** вычисления, а операции лежат внутри него, поэтому места, куда
+ * вписать число пропусков, у маски нет вовсе. Вектор же приходит маскируемому
+ * вычислению целиком - его и правит `adamas_evidence_mask`.
  */
 
 #include "adamas.h"
@@ -59,6 +64,30 @@ adamas_evidence *adamas_evidence_extend(const adamas_evidence *parent, uint32_t 
     return extended;
 }
 
+adamas_evidence *adamas_evidence_mask(const adamas_evidence *parent, uint32_t label) {
+    size_t count = parent == NULL ? 0 : parent->count;
+    size_t found = count; /* `count` значит «записи такой метки нет» */
+    for (size_t index = count; index > 0; index -= 1) {
+        /* Изнутри наружу, и подавленная запись подходит наравне с живой: у
+         * машины маску гасят и `Handler`, и `Suppressing` (`Kont::catching`). */
+        if (parent->entries[index - 1].label == label) {
+            found = index - 1;
+            break;
+        }
+    }
+    if (found == count) {
+        /* Снимать нечего, и это не ошибка: операция внутри упрётся в
+         * `MISSING` - ровно то же, чем кончает машина, у которой кадр маски
+         * стоит, а хендлера под ним нет. */
+        return adamas_evidence_copy(parent);
+    }
+    adamas_evidence *masked = evidence_alloc(count - 1);
+    memcpy(masked->entries, parent->entries, found * sizeof(adamas_ev_entry));
+    memcpy(masked->entries + found, parent->entries + found + 1,
+           (count - found - 1) * sizeof(adamas_ev_entry));
+    return masked;
+}
+
 adamas_evidence *adamas_evidence_copy(const adamas_evidence *evidence) {
     size_t count = evidence == NULL ? 0 : evidence->count;
     adamas_evidence *copy = evidence_alloc(count);
@@ -103,7 +132,7 @@ uint32_t adamas_evidence_label_at(const adamas_evidence *evidence, size_t index)
     return evidence->entries[index].label;
 }
 
-int adamas_evidence_lookup(const adamas_evidence *evidence, uint32_t label, size_t skip,
+int adamas_evidence_lookup(const adamas_evidence *evidence, uint32_t label,
                            adamas_frame **handler) {
     if (handler != NULL) {
         *handler = NULL;
@@ -111,18 +140,12 @@ int adamas_evidence_lookup(const adamas_evidence *evidence, uint32_t label, size
     if (evidence == NULL) {
         return ADAMAS_LOOKUP_MISSING;
     }
-    /* Изнутри наружу: последняя запись есть ближайший хендлер. Маски считаются
-     * по дороге - каждая пропускает один подходящий (§3.4, §10 вопрос 72).
-     * Подавленная запись подходящей считается наравне с живой: у машины маску
-     * гасят и `Handler`, и `Suppressing` (`Kont::catching`). */
+    /* Изнутри наружу: последняя запись есть ближайший хендлер. Пропусков поиск
+     * не считает - маски снимают записи до него (`adamas_evidence_mask`). */
     size_t index = evidence->count;
     while (index > 0) {
         index -= 1;
         if (evidence->entries[index].label != label) {
-            continue;
-        }
-        if (skip > 0) {
-            skip -= 1;
             continue;
         }
         if (handler != NULL) {

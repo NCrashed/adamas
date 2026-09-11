@@ -1,11 +1,11 @@
 //! Понижение термов ядра в [`ir`](crate::ir).
 //!
 //! Берётся **чистый фрагмент** - семейства и конструкторы, функции и
-//! применение, разбор, рекурсия, `let` - плюс **хендлер, гасимый без снятия
-//! сегмента**: тот, все ветки которого зовут резумпцию в хвосте
-//! ([`Lowerer::handled`]). Прочие вердикты ветки, мультишот, параметризованный
-//! хендлер и маска отвергаются каждый своим отказом: молча посчитать не то
-//! хуже, чем не посчитать.
+//! применение, разбор, рекурсия, `let` - плюс **эффекты одношотом целиком**:
+//! хендлер всех трёх вердиктов ветки ([`Lowerer::handled`]), параметризованный
+//! хендлер тем же путём (§10 вопрос 129) и маска ([`Lowerer::masked`]).
+//! Мультишот отвергается своим отказом: молча посчитать не то хуже, чем не
+//! посчитать.
 //!
 //! # Форма понижения выбрана, а не подразумевается
 //!
@@ -1851,22 +1851,17 @@ impl<'a> Lowerer<'a> {
             let effect: Name = Rc::from(effect);
             return self.handled(scope, name, &effect, arguments);
         }
-        for (prefix, why) in [
-            (
-                MULTI,
-                "мультишот: копирование звеньев сегмента, трек E волны 4",
-            ),
-            (
-                MASK,
-                "маска: пропуск одноимённого хендлера, число пропусков вектору не считает никто",
-            ),
-        ] {
-            if name.starts_with(prefix) {
-                return Err(LowerError::Handler {
-                    name: name.to_string(),
-                    why,
-                });
-            }
+        // Маска кадра не ставит вовсе: её понижение есть вектор без ближайшей
+        // записи своей метки, и вычисление под ним.
+        if let Some(effect) = name.strip_prefix(MASK) {
+            let effect: Name = Rc::from(effect);
+            return self.masked(scope, name, &effect, arguments);
+        }
+        if name.starts_with(MULTI) {
+            return Err(LowerError::Handler {
+                name: name.to_string(),
+                why: "мультишот: копирование звеньев сегмента, трек E волны 4",
+            });
         }
         match &self.definition(name)?.kind {
             DefinitionKind::Constructor { .. } => self.built(scope, name, arguments),
@@ -2007,11 +2002,6 @@ impl<'a> Lowerer<'a> {
         let mut value = Expr::Perform {
             label,
             operation: u32::try_from(slot).unwrap_or(u32::MAX),
-            // Маску считает вектор числом пропусков, а ставить её некому:
-            // `#mask.L` этим срезом не берётся. Ноль здесь - не умолчание, а
-            // то самое «внутреннее вхождение», которым §3.4 держит нулевое
-            // смещение вектора.
-            skip: 0,
             arguments: given,
         };
         for argument in arguments.iter().skip(arity) {
@@ -2209,10 +2199,6 @@ impl<'a> Lowerer<'a> {
             returned,
         });
 
-        // Вычисление приостановлено - `{ε} A` есть нульместная функция (§3.4),
-        // - и приостановка снимается здесь же. Написанной лямбде хватает снятия
-        // связывания; всему прочему дописывается применение к единице, и оно
-        // идёт обычным путём: имя зовётся прямо, значение - через трамплин.
         let Arg::Written(computation) = &arguments[params + 2] else {
             return Err(LowerError::Handler {
                 name: eliminator.to_string(),
@@ -2223,22 +2209,7 @@ impl<'a> Lowerer<'a> {
         // включая корень в чистой функции, - поэтому scope с ресурсом здесь
         // ставит кадр даже у первой формы снаружи.
         let outer = std::mem::replace(&mut self.detached, true);
-        let computation = if let Term::Lam(_, _, body) = computation {
-            let body = Rc::clone(body);
-            scope.env.push(Slot::Absent);
-            let lowered = self.shaped(scope, &body, Repr::Boxed, "вычисление под хендлером");
-            scope.env.pop();
-            lowered
-        } else {
-            let unit = self.unit_name();
-            unit.and_then(|unit| {
-                let triggered = Term::App(
-                    Rc::new((*computation).clone()),
-                    Rc::new(Term::constant(&unit)),
-                );
-                self.shaped(scope, &triggered, Repr::Boxed, "вычисление под хендлером")
-            })
-        };
+        let computation = self.triggered(scope, computation, "вычисление под хендлером");
         self.detached = outer;
         let computation = computation?;
 
@@ -2250,6 +2221,83 @@ impl<'a> Lowerer<'a> {
         // Лишние аргументы - применение ответа хендлера. У параметризованного
         // такой ровно один: начальное состояние, которое элаборация ставит
         // снаружи элиминатора (`(#handleState … ) s0`, §3.4).
+        for argument in arguments.iter().skip(arity) {
+            let argument = self.given(scope, argument, Repr::Boxed, "аргумент замыкания")?;
+            value = Expr::Apply {
+                callee: Box::new(value),
+                argument: Box::new(argument),
+            };
+        }
+        Ok((value, Repr::Boxed))
+    }
+
+    /// Приостановленное вычисление, запущенное на месте.
+    ///
+    /// `{ε} A` есть нульместная функция (§3.4), и приостановка снимается там,
+    /// где элиминатор её принял. Написанной лямбде хватает снятия связывания;
+    /// всему прочему дописывается применение к единице, и оно идёт обычным
+    /// путём: имя зовётся прямо, значение - через трамплин.
+    ///
+    /// Общее у хендлера и у маски: оба принимают вычисление и оба запускают его
+    /// сами. Ручку стека это не решает - её ставит вызывающий.
+    fn triggered(
+        &mut self,
+        scope: &mut Scope,
+        computation: &Term,
+        at: &'static str,
+    ) -> Result<Expr, LowerError> {
+        if let Term::Lam(_, _, body) = computation {
+            let body = Rc::clone(body);
+            scope.env.push(Slot::Absent);
+            let lowered = self.shaped(scope, &body, Repr::Boxed, at);
+            scope.env.pop();
+            return lowered;
+        }
+        let unit = self.unit_name()?;
+        let triggered = Term::App(Rc::new(computation.clone()), Rc::new(Term::constant(&unit)));
+        self.shaped(scope, &triggered, Repr::Boxed, at)
+    }
+
+    /// Маска: `#mask.L` (§3.4, §10 вопрос 72).
+    ///
+    /// Кадра маска не ставит. Всё её понижение - вектор без ближайшей записи
+    /// своей метки ([`Expr::Mask`]) и вычисление под ним. Счётчиком пропусков
+    /// это не выражается: `skip` нужен **месту операции**, а операции лежат
+    /// внутри маскируемого вычисления, то есть в чужой функции, и статического
+    /// счёта у них нет. Вектор же приходит этому вычислению целиком.
+    ///
+    /// Метку берёт **имя элиминатора**, а не окружающая: `#mask.L` её называет,
+    /// и второго источника у понижения нет.
+    fn masked(
+        &mut self,
+        scope: &mut Scope,
+        eliminator: &Name,
+        effect: &Name,
+        arguments: &[Arg<'_>],
+    ) -> Result<(Expr, Repr), LowerError> {
+        let label = self.label(effect)?;
+        let DefinitionKind::Effect { params, .. } = &self.definition(effect)?.kind else {
+            unreachable!("`label` уже проверил вид метки")
+        };
+        // Параметры метки, `a`, вычисление.
+        let arity = *params as usize + 2;
+        if arguments.len() < arity {
+            return Err(LowerError::Handler {
+                name: eliminator.to_string(),
+                why: "элиминатор не насыщен: маска значением этим срезом не берётся",
+            });
+        }
+        let Arg::Written(computation) = &arguments[arity - 1] else {
+            return Err(LowerError::Handler {
+                name: eliminator.to_string(),
+                why: "вычисление под маской пришло достроенным, а не написанным",
+            });
+        };
+        let computation = self.triggered(scope, computation, "вычисление под маской")?;
+        let mut value = Expr::Mask {
+            label,
+            computation: Box::new(computation),
+        };
         for argument in arguments.iter().skip(arity) {
             let argument = self.given(scope, argument, Repr::Boxed, "аргумент замыкания")?;
             value = Expr::Apply {

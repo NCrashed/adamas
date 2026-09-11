@@ -1144,6 +1144,9 @@ impl Emitter<'_> {
             // Ответ возобновления - ответ хендлера: возобновлённое вычисление
             // договаривает под ним же (§3.4, глубокий хендлер).
             | Expr::Resume { .. }
+            // Ответ маски есть ответ вычисления под ней, а оно указательное:
+            // маска стоит вокруг `{ρ} A` (§3.4).
+            | Expr::Mask { .. }
             | Expr::Apply { .. } => Repr::Boxed,
         }
     }
@@ -1226,6 +1229,7 @@ impl Emitter<'_> {
                 captured,
                 computation,
             } => self.handling(*handler, captured, computation, depth),
+            Expr::Mask { label, computation } => self.masking(*label, computation, depth),
             // Точки приостановки значением не бывают: их снимает дробление
             // ([`crate::split`]), и в чистый отрезок они не попадают.
             Expr::Perform { .. } | Expr::Closing { .. } | Expr::Resume { .. } => {
@@ -2043,6 +2047,32 @@ impl Emitter<'_> {
         name
     }
 
+    /// Маска в чистом отрезке: вектор без записи, вычисление под ним.
+    ///
+    /// Кадра здесь нет и быть не может - маска ничего не откладывает, - поэтому
+    /// ветка короче хендлерной ровно на кадр. Своя ссылка на вектор живёт до
+    /// конца вычисления: кадры, которые вычисление положит, берут свою.
+    fn masking(&mut self, label: LabelId, computation: &Expr, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let inner = Self::pad(depth + 1);
+        let title = escaped(&self.program.labels[label.0 as usize].name);
+        let vector = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_evidence *{vector} = adamas_evidence_mask(ev, {}u); /* mask {title} */",
+            label.0
+        );
+        let name = self.temp();
+        let _ = writeln!(self.out, "{pad}adamas_value {name};");
+        let _ = writeln!(self.out, "{pad}{{");
+        let _ = writeln!(self.out, "{inner}const adamas_evidence *ev = {vector};");
+        let answer = self.value(computation, depth + 1);
+        let _ = writeln!(self.out, "{inner}{name} = {answer};");
+        let _ = writeln!(self.out, "{pad}}}");
+        let _ = writeln!(self.out, "{pad}adamas_evidence_drop({vector});");
+        name
+    }
+
     /// Кадр `HANDLER` со средой веток и расширенный вектор под вычисление.
     ///
     /// Общее у обеих форм: у первой кадр стоит на своём корне, у второй - на
@@ -2519,12 +2549,12 @@ impl Emitter<'_> {
                 captured,
                 body,
             } => self.scoped_tail(*closer, captured, body, depth),
+            Expr::Mask { label, computation } => self.masking_tail(*label, computation, depth),
             Expr::Perform {
                 label,
                 operation,
-                skip,
                 arguments,
-            } => self.performing_tail(*label, *operation, *skip, arguments, depth),
+            } => self.performing_tail(*label, *operation, arguments, depth),
             Expr::Resume { resumption, value } => {
                 let pad = Self::pad(depth);
                 let resumption = self.value(resumption, depth);
@@ -2613,6 +2643,29 @@ impl Emitter<'_> {
         let _ = writeln!(self.out, "{pad}}}");
     }
 
+    /// Маска, под которой вычисление приостанавливается.
+    ///
+    /// Вектор её переживает кусок не своей ссылкой, а ссылками кадров: каждый
+    /// кадр, положенный вычислением, дупает вектор себе, и продолжение читает
+    /// его у кадра (`adamas_frame_evidence`). Своя ссылка уходит эпилогом на
+    /// возврате - тем же путём, что у расширенного вектора хендлера.
+    fn masking_tail(&mut self, label: LabelId, computation: &Expr, depth: usize) {
+        let pad = Self::pad(depth);
+        let title = escaped(&self.program.labels[label.0 as usize].name);
+        let vector = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_evidence *{vector} = adamas_evidence_mask(ev, {}u); /* mask {title} */",
+            label.0
+        );
+        let _ = writeln!(self.out, "{pad}{{");
+        let _ = writeln!(self.out, "{pad}    const adamas_evidence *ev = {vector};");
+        self.epilogue.push(vector);
+        self.tail(computation, depth + 1);
+        self.epilogue.pop();
+        let _ = writeln!(self.out, "{pad}}}");
+    }
+
     /// Выход из scope с ресурсом во второй форме: кадр `MARK_CLOSING` (§3.3).
     ///
     /// Тело идёт хвостом, а деструктор зовёт трамплин, дойдя до кадра, - и
@@ -2648,7 +2701,6 @@ impl Emitter<'_> {
         &mut self,
         label: LabelId,
         operation: u32,
-        skip: u32,
         arguments: &[Expr],
         depth: usize,
     ) {
@@ -2675,7 +2727,7 @@ impl Emitter<'_> {
         );
         let _ = writeln!(
             self.out,
-            "{pad}int {verdict} = adamas_evidence_lookup(ev, {}u, {skip}u, &{frame});",
+            "{pad}int {verdict} = adamas_evidence_lookup(ev, {}u, &{frame});",
             label.0
         );
         if count == 0 {

@@ -220,14 +220,14 @@ unsafe extern "C" {
     pub fn adamas_evidence_at(evidence: *const Evidence, index: usize) -> *mut Frame;
     /// Метка записи по позиции.
     pub fn adamas_evidence_label_at(evidence: *const Evidence, index: usize) -> u32;
-    /// Ближайший хендлер метки, пропустив `skip` подходящих.
     /// Ближайшая запись метки: вердикт трёхзначный, кадр идёт в `handler`.
     pub fn adamas_evidence_lookup(
         evidence: *const Evidence,
         label: u32,
-        skip: usize,
         handler: *mut *mut Frame,
     ) -> c_int;
+    /// Вектор родителя без ближайшей записи этой метки: маска (§3.4).
+    pub fn adamas_evidence_mask(parent: *const Evidence, label: u32) -> *mut Evidence;
     /// Копия вектора со своим счётчиком.
     pub fn adamas_evidence_copy(evidence: *const Evidence) -> *mut Evidence;
     /// Помечает подавленной запись этого кадра-хендлера.

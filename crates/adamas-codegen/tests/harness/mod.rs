@@ -158,6 +158,12 @@ fn built(name: &str, text: &str) -> (String, String) {
             // им ловится расхождение с заголовком рантайма.
             "-Wno-unused",
             "-Werror=implicit-function-declaration",
+            // Несовместимый указатель - тоже находка, и ловит она ровно ту
+            // ошибку, которая иначе сокращается: скрытые аргументы второй формы
+            // различаются **типами** (`const adamas_evidence *` против
+            // `adamas_kont *`), и перестановка их местами становится отсюда
+            // отказом сборки, а не молчанием.
+            "-Werror=incompatible-pointer-types",
         ])
         .arg("-I")
         .arg(env!("ADAMAS_RUNTIME_INCLUDE"))

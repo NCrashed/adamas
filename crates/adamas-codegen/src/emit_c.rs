@@ -20,11 +20,20 @@
 //! точка входа. Всё `static`, кроме `main`, - LTO и whole-program эмиссия
 //! обещаны §13 и Фазой 7, и одним файлом они даются даром.
 //!
-//! Функция понижается **первой формой** (§13, 2026-09-08): обычная C-функция,
-//! кадр на C-стеке, скрытых аргументов нет вовсе. Оба они - вектор evidence и
-//! ручка стека - появляются только на границе замыкания, потому что граница эта
-//! динамическая: какая из форм за указателем, место вызова не знает. Там они
-//! идут `NULL`, и рантайм принимает `NULL` всюду, где их читает.
+//! # Две формы понижения (§13, обе записи 2026-09-08)
+//!
+//! Форму приносит IR ([`Form`]), эмиттер её не угадывает. **Первая** - обычная
+//! C-функция, кадр на C-стеке, скрытых аргументов нет вовсе; написанное и есть
+//! вся её сигнатура. **Вторая** несёт два скрытых аргумента перед написанным -
+//! вектор evidence, затем ручку стека, - и порядок этот записан в одном месте
+//! ([`HIDDEN`], [`FORWARD`]), потому что печатают его четверо: объявление,
+//! определение, прямой вызов и трамплин.
+//!
+//! Дальше скрытые аргументы идут ровно туда, где их ждут: второй форме -
+//! свои, первой - никаких. На границе **замыкания** они есть всегда, потому
+//! что граница динамическая: какая из форм за указателем, место вызова не
+//! знает. Первая форма, применяя значение, кладёт там `NULL` - взять ей их
+//! неоткуда, - и рантайм принимает `NULL` всюду, где их читает.
 //!
 //! # Что эмиттер знает о владении
 //!
@@ -81,15 +90,20 @@ const ENTRY: &str = include_str!("main.c");
 /// Почему эмиссия отказала.
 #[derive(Debug, thiserror::Error)]
 pub enum EmitError {
-    /// Функция понижается второй формой.
+    /// Первая форма зовёт вторую прямым вызовом.
     ///
-    /// Скрытых аргумента у неё два - вектор evidence и ручка стека
-    /// продолжения, - а кадр живёт в куче. Эмиттер её не досочиняет: форма
-    /// приходит из IR, а кода под неё здесь нет.
-    #[error("`{function}` понижается второй формой: кадр в куче этим срезом не эмитится")]
-    Detached {
-        /// Чья функция.
-        function: String,
+    /// Скрытых аргументов у первой нет вовсе, и передать второй нечего.
+    /// Взяться такая пара не должна: прямой вызов насыщен, а применение
+    /// функции с непустой row требует непустой окружающей (§3.4, погашение
+    /// расширением справа), то есть второй формы у вызывающего. Поставить на
+    /// её месте `NULL` значило бы досочинить - вызываемый нашёл бы пустой
+    /// вектор там, где обязан найти хендлер.
+    #[error("`{caller}` первой формы зовёт `{callee}`: скрытых аргументов у неё нет")]
+    Hidden {
+        /// Чья первая форма.
+        caller: String,
+        /// Кого она зовёт.
+        callee: String,
     },
 }
 
@@ -97,15 +111,9 @@ pub enum EmitError {
 ///
 /// # Errors
 ///
-/// [`EmitError`] - форма понижения, которой эмиттер не знает.
+/// [`EmitError`] - формы вызывающего и вызываемого не сходятся.
 pub fn emit(program: &Program) -> Result<String, EmitError> {
-    for function in &program.functions {
-        if function.form == Form::Detached {
-            return Err(EmitError::Detached {
-                function: function.name.clone(),
-            });
-        }
-    }
+    hidden_reaches_its_callee(program)?;
     let mut out = String::new();
     preamble(&mut out);
     out.push_str(FLAT);
@@ -147,6 +155,39 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     answer(&mut out, program);
     out.push_str(ENTRY);
     Ok(out)
+}
+
+/// Всякий прямой вызов второй формы стоит там, где скрытые аргументы есть.
+///
+/// Проверка, а не предположение: расхождение здесь молчаливо - `NULL` вместо
+/// вектора собирается и падает в рантайме. Замыкания она не касается: положить
+/// вторую форму значением из первой законно, скрытые аргументы там приходят от
+/// трамплина.
+fn hidden_reaches_its_callee(program: &Program) -> Result<(), EmitError> {
+    for function in &program.functions {
+        if function.form == Form::Detached {
+            continue;
+        }
+        let mut found = None;
+        walk(&function.body, &mut |expr| {
+            if let Expr::Call {
+                function: called, ..
+            } = expr
+            {
+                let called = &program.functions[called.0];
+                if called.form == Form::Detached && found.is_none() {
+                    found = Some(called.name.clone());
+                }
+            }
+        });
+        if let Some(callee) = found {
+            return Err(EmitError::Hidden {
+                caller: function.name.clone(),
+                callee,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Чем точка входа отвечает.
@@ -517,18 +558,36 @@ fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
     }
 }
 
+/// Скрытые аргументы второй формы, в порядке `adamas_lowered_second`.
+///
+/// Порядок здесь **один на всё понижение**: объявление, определение, прямой
+/// вызов и трамплин печатаются отсюда же, и разъехаться им негде. Он же
+/// несимметричен по типам (`const adamas_evidence *` против `adamas_kont *`),
+/// поэтому перестановка молча не сокращается: порождённый C с ней не
+/// собирается вовсе (`-Werror=incompatible-pointer-types` в прогонах).
+const HIDDEN: &str = "const adamas_evidence *ev, adamas_kont *kont";
+
+/// Они же на месте вызова.
+const FORWARD: &str = "ev, kont";
+
 /// Сигнатура функции: скрытые аргументы формы и живые связывания.
 ///
 /// У первой формы скрытых нет **вовсе** (`adamas_lowered_first`): написанное и
-/// есть всё. Захваченная среда сюда приходит обычными параметрами - трамплин
-/// достаёт её из слотов замыкания и передаёт явно. Второй формы здесь не
-/// бывает: [`emit`] отвергает её раньше.
+/// есть всё. У второй их два, и стоят они перед написанным - вектор evidence,
+/// затем ручка стека, как в `adamas_lowered_second`. Захваченная среда сюда
+/// приходит обычными параметрами - трамплин достаёт её из слотов замыкания и
+/// передаёт явно.
 fn signature(function: &Function) -> String {
-    let live: Vec<String> = function
-        .live_captured()
-        .chain(function.live_parameters())
-        .map(|binding| format!("{} v{}", c_type(binding.fact.repr), binding.local.0))
-        .collect();
+    let mut live: Vec<String> = match function.form {
+        Form::Stack => Vec::new(),
+        Form::Detached => vec![HIDDEN.to_owned()],
+    };
+    live.extend(
+        function
+            .live_captured()
+            .chain(function.live_parameters())
+            .map(|binding| format!("{} v{}", c_type(binding.fact.repr), binding.local.0)),
+    );
     let taken = if live.is_empty() {
         "void".to_owned()
     } else {
@@ -571,6 +630,7 @@ fn body(out: &mut String, program: &Program, function: &Function) {
         out: String::new(),
         temps: 0,
         reprs: shapes(function),
+        hidden: function.form == Form::Detached,
     };
     let answer = emitter.value(&function.body, 1);
     out.push_str(&emitter.out);
@@ -583,6 +643,11 @@ fn body(out: &mut String, program: &Program, function: &Function) {
 /// `adamas_dup` на каждый: своё замыкание дропает применение
 /// ([`perceus`](crate::perceus)), и без дублирования оно унесло бы слоты с
 /// собой. Последний аргумент приходит владением уже от `adamas_apply`.
+///
+/// Скрытые аргументы у самого трамплина есть всегда - граница замыкания
+/// динамическая, - а дальше он передаёт их ровно второй форме. Первой они не
+/// передаются вовсе: у неё их нет в сигнатуре, и это ровно то, чем «первая
+/// форма не платит ничего» отличается от «платит и не смотрит».
 fn wrapper(out: &mut String, function: &Function) {
     let env = function.live_captured().count();
     let arity = function.parameters.len();
@@ -600,9 +665,11 @@ fn wrapper(out: &mut String, function: &Function) {
     // (см. правило позиционного применения в `lower`). Стёртый слот в вызов не
     // идёт, и отдавать его не приходится: понижение кладёт туда `ADAMAS_ERASED`,
     // значение непосредственное, ячейки за ним нет.
-    let mut taken: Vec<String> = (0..env)
-        .map(|slot| format!("adamas_dup(adamas_closure_get(self, {slot}))"))
-        .collect();
+    let mut taken: Vec<String> = match function.form {
+        Form::Stack => Vec::new(),
+        Form::Detached => vec![FORWARD.to_owned()],
+    };
+    taken.extend((0..env).map(|slot| format!("adamas_dup(adamas_closure_get(self, {slot}))")));
     for (position, parameter) in function.parameters.iter().enumerate() {
         if !parameter.fact.present {
             continue;
@@ -698,6 +765,11 @@ struct Emitter<'a> {
     temps: u32,
     /// Что в каком связывании лежит: от этого C-тип временного имени.
     reprs: HashMap<LocalId, Repr>,
+    /// Есть ли у эмитируемого тела скрытые аргументы - то есть вторая ли форма.
+    ///
+    /// От этого зависит, чем идут вектор и ручка на месте вызова: своими у
+    /// второй формы и `NULL` у первой, которой их взять негде.
+    hidden: bool,
 }
 
 impl Emitter<'_> {
@@ -898,16 +970,21 @@ impl Emitter<'_> {
 
     /// Применение значения к одному аргументу.
     ///
-    /// Оба скрытых аргумента пусты: хендлеров в чистом фрагменте нет, а `NULL`
-    /// рантайм принимает всюду, где их читает.
+    /// Скрытые аргументы идут **свои**, когда они есть, то есть из второй
+    /// формы. У первой их нет вовсе, и на их месте стоит `NULL`: за указателем
+    /// могла бы оказаться и вторая форма, но производить она не вправе -
+    /// применить её из чистой окружающей значило бы погасить непустую row
+    /// пустой (§3.4), а этого элаборация не пропускает. `NULL` рантайм
+    /// принимает всюду, где их читает.
     fn applying(&mut self, callee: &Expr, argument: &Expr, depth: usize) -> String {
         let pad = Self::pad(depth);
         let callee = self.value(callee, depth);
         let argument = self.value(argument, depth);
         let name = self.temp();
+        let hidden = if self.hidden { FORWARD } else { "NULL, NULL" };
         let _ = writeln!(
             self.out,
-            "{pad}adamas_value {name} = adamas_apply({callee}, NULL, NULL, {argument});"
+            "{pad}adamas_value {name} = adamas_apply({callee}, {hidden}, {argument});"
         );
         name
     }
@@ -1458,10 +1535,16 @@ impl Emitter<'_> {
     }
 
     /// Прямой вызов: стёртые позиции в вызов не идут.
+    ///
+    /// Вызываемый известен статически, поэтому известна и его форма: первая
+    /// зовётся голым написанным (`adamas_lowered_first`), второй передаются
+    /// свои вектор и ручка. Взять их первая форма не может ниоткуда, и такой
+    /// пары [`emit`] не пропускает вовсе ([`EmitError::Hidden`]).
     fn call(&mut self, function: FuncId, arguments: &[Expr], depth: usize) -> String {
         let pad = Self::pad(depth);
         let called = &self.program.functions[function.0];
         let title = escaped(&called.name);
+        let form = called.form;
         let present: Vec<usize> = called
             .parameters
             .iter()
@@ -1469,15 +1552,18 @@ impl Emitter<'_> {
             .filter(|(_, binding)| binding.fact.present)
             .map(|(position, _)| position)
             .collect();
-        let given: Vec<String> = present
-            .iter()
-            .filter_map(|position| arguments.get(*position))
-            .map(|argument| self.value(argument, depth))
-            .collect();
+        let mut given: Vec<String> = match form {
+            Form::Stack => Vec::new(),
+            Form::Detached => vec![FORWARD.to_owned()],
+        };
+        for position in &present {
+            let Some(argument) = arguments.get(*position) else {
+                continue;
+            };
+            given.push(self.value(argument, depth));
+        }
         let result = c_type(called.result);
         let name = self.temp();
-        // Вызываемый известен статически, поэтому зовётся прямо и скрытых
-        // аргументов не берёт вовсе (`adamas_lowered_first`).
         let _ = writeln!(
             self.out,
             "{pad}{result} {name} = fn_{}({}); /* {title} */",

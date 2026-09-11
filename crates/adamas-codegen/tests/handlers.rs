@@ -303,6 +303,47 @@ main = handleMulti asked with
     );
 }
 
+/// Операция в функции с плоским ответом отвергается: обрыв вернуть нечем.
+///
+/// Вердикт `SUPPRESSED` требует вернуть ответ `adamas_kont_abort` немедленно
+/// (`adamas.h`), а ответ этот - значение. Функция, отдающая `int64_t`, вернуть
+/// его не может, и отказ здесь лучше порождённого C, который не соберётся.
+/// Граница та же, что у прочего плоского на границах (§4.11), и снимет её
+/// боксирование (§5.1).
+///
+/// Свидетель обходит хендлер: под ним плоское вычисление отвергается раньше,
+/// на своём месте, а здесь плоский ответ уезжает через чистого соседа.
+#[test]
+fn an_operation_needs_a_pointer_answer_to_abort_through() {
+    let source = format!(
+        "{SHAPE}\
+widen : Nat -> Int64
+widen Zero = 0
+widen (Succ k) = addInt64 (widen k) 1
+
+sized : (ω u : Unit) -> {{Ask}} Int64
+sized u = widen ask
+
+narrow : Int64 -> Nat
+narrow n = Zero
+
+outer : (ω u : Unit) -> {{Ask}} Nat
+outer u = narrow (sized u)
+
+main : Nat
+main = handle outer with
+  return v -> v
+  ask -> resume (Succ Zero)
+"
+    );
+    let error = harness::compiled(&source).expect_err("обрыв плоским ответом не возвращается");
+    let text = error.to_string();
+    assert!(
+        text.contains("`sized`") && text.contains("плоским ответом"),
+        "отказ не назвал ни функции, ни причины: {text}"
+    );
+}
+
 /// Питомник отвергается **своим** отказом, а не чужим.
 ///
 /// Пока отказ был один на всё эффектное, остаток волны и остаток Фазы 7 стояли

@@ -1,0 +1,76 @@
+-- Порядок «ветка, потом деструкторы» - у общей ветки он наблюдаем (§3.4).
+--
+-- Трек C волны 4 назвал этот порядок свидетеля не имеющим и объяснил почему:
+-- у абортивной ветки кадр хендлера жив до конца раскрутки и держит среду
+-- ветки, поэтому уникальным общее значение не достаётся никому, а ответ
+-- деструктора отбрасывается. Различающая программа обещана с живой
+-- резумпцией - вот она.
+--
+-- Резумпция общей ветки есть **значение**, и решает её судьбу владение.
+-- Ветка `ask` резумпцию называет (поэтому вердикт общий), но на ветви `False`
+-- не зовёт - там она умирает, и её сегмент раскручивается. Между смертью и
+-- концом ветки стоит своя отметка: `note 7`. Порядок отметок и есть
+-- свидетель. Дроп резумпции - **точка приостановки** (`adamas.h`): раскрутка
+-- кладётся кадром и бежит после того, как ветка договорит. Побеги она на
+-- месте дропа - семёрка встала бы после девятки.
+--
+-- Ответ: `[1, 7, 9, 0]`. Отметка тела, отметка ветки, деструктор, ноль ветки.
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+effect Ask where
+  ask : Bool
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {Log} Bool
+  closeFile h =
+    let a : Unit = note 9
+    True
+
+keep : Unit -> (1 v : List Nat) -> List Nat
+keep u v = v
+
+-- Именем, а не литералом: вердикт ветки считается по нормализованному телу, и
+-- `if False` свелось бы к своей ветви - резумпция пропала бы из тела вместе с
+-- ветвью `True`, а вердикт вышел бы абортивным.
+flag : Bool
+flag = False
+
+-- Тело держит ресурс и спрашивает: сегмент резумпции содержит его `#closing`.
+worker : File -> {Ask, Log} (List Nat)
+worker h =
+  let u : Unit = note 1
+  let b : Bool = ask
+  Cons (Succ (Succ Zero)) Nil
+
+held : {Ask, Log} (List Nat)
+held = worker Open
+
+-- Ветка называет резумпцию и на одной ветви её бросает. Отметка семёркой
+-- стоит **после** броска и обязана выйти раньше девятки деструктора.
+answered : {Log} (List Nat)
+answered = handle held with
+  return v -> v
+  ask -> if flag then Cons Zero (resume True) else keep (note 7) (Cons Zero Nil)
+
+main : List Nat
+main = handle answered with
+  return v -> v
+  note n -> Cons n (resume MkUnit)

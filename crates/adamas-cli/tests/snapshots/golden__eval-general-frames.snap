@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Cons (MkAnswer 38 (Succ (Succ Zero))) Nil

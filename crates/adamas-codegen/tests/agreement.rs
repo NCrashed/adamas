@@ -36,9 +36,12 @@ use std::path::PathBuf;
 /// (трек B волны 4): хендлер, чьи ветки все до одной зовут резумпцию в хвосте.
 /// Плюс абортивная ветка со снятием сегмента и очисткой ресурса на
 /// исключительном выходе (трек C волны 4, §3.3, §3.4).
+/// Плюс **одношот общего вида и параметризованный хендлер** (трек D волны 4):
+/// тела второй формы дроблены кадрами по точкам приостановки, резумпция общей
+/// ветки есть значение, и её судьбу решает владение.
 /// Всё, что здесь стоит, обязано собраться и ответить как `adamas eval`; список
 /// сокращать нельзя, а пополнять - можно и нужно, когда фрагмент растёт.
-const TAKEN: [&str; 43] = [
+const TAKEN: [&str; 61] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -46,6 +49,9 @@ const TAKEN: [&str; 43] = [
     "array-aggregate",
     "array-flat",
     "array-generic",
+    "array-length-word",
+    "array-nested",
+    "array-tagged",
     "beta-redex",
     "case-family",
     "case-over-a-computation",
@@ -54,22 +60,29 @@ const TAKEN: [&str; 43] = [
     "decidable",
     "effect-multiplicity",
     "erasure",
+    "execution-positions",
     "existential",
+    "field-effect",
     "flat",
     "flat-fields",
     "flat-primitives",
     "flat-under-a-parameter",
     "functor",
+    "general-frames",
+    "general-order",
+    "instance-context-effect",
     "label-names-its-binder",
     "lists",
     "literal-default",
     "module-effect",
     "module-family",
+    "module-resource",
     "module-scope",
     "mutual-family",
     "nested-case-on-a-field",
     "nested-functor",
     "nested-rowed-signature",
+    "operation-higher-order",
     "operators",
     "primitives",
     "records",
@@ -77,11 +90,19 @@ const TAKEN: [&str; 43] = [
     "region-bound-in-the-argument",
     "region-holds-flat-payload",
     "region-strategies",
+    "resource",
     "resource-cleanup",
     "rose",
+    "rows",
+    "shadowed-name",
     "signature-effect",
     "signature-effect-parameterized",
+    "soa-record",
+    "state",
+    "state-resource",
     "truncation",
+    "unwind-inner-handler",
+    "unwind-live-outer",
 ];
 
 /// Замыкание над **несколькими** связываниями и порядок его среды.

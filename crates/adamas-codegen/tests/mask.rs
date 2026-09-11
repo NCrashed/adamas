@@ -17,8 +17,13 @@
 //!
 //! **Цена и место.** Маска стоит **вектора, а не кадра**, и это наблюдаемо
 //! числом блоков: разница масочной программы с безмасочной ровно одна ячейка на
-//! маску. Место же её - точка `mask`, а не точка операции, и различает эти два
-//! прочтения хендлер, поставленный **внутри** маскируемого вычисления.
+//! маску - у обеих форм эмиттера, и хвостовой, и значение-формы. Место же её -
+//! точка `mask`, а не точка операции, и различает эти два прочтения хендлер,
+//! поставленный **внутри** маскируемого вычисления.
+//!
+//! Последним стоит свидетель не маски, а того, что маску держало: резумпция в
+//! слоте замыкания. Нашёл его capstone, и место ему здесь - в файле того среза,
+//! который capstone взял.
 
 mod harness;
 
@@ -112,6 +117,95 @@ fn a_mask_reaches_the_outer_handler_and_costs_a_vector() {
         with_mask,
         without + 1,
         "маска стоит не одной ячейки: {with_mask} против {without}"
+    );
+}
+
+/// Маска над **чистым** вычислением: вектор строится и отдаётся на месте.
+///
+/// Форм у маски в эмиттере две, и различает их точка приостановки: под
+/// вычислением, которое не приостанавливается, маска остаётся значением и
+/// отдаёт свой вектор тут же, а не эпилогом куска. Ответ здесь не различает
+/// ничего - под маской операций нет вовсе, - и свидетельствуют цена и течь:
+/// одна ячейка сверх безмасочной программы и ноль живых блоков. Без этого
+/// свидетеля значение-форма не покрыта ни одним прогоном.
+fn quiet(written: &str) -> String {
+    format!(
+        "{SHAPE}\
+quietly : Nat
+quietly = Succ (Succ Zero)
+
+both : {{Ask, Ask}} List Nat
+both =
+  let a : Nat = ask
+  let b : Nat = {written} quietly
+  Cons a (Cons b Nil)
+
+near : {{Ask}} List Nat
+near = handle both with
+  return v -> v
+  ask -> resume Zero
+
+main : List Nat
+main = handle near with
+  return v -> v
+  ask -> resume (Succ Zero)
+"
+    )
+}
+
+#[test]
+fn a_mask_over_a_pure_computation_gives_its_vector_back() {
+    let (masked, with_mask) = run("маска-чистое", &quiet("mask"));
+    let (plain, without) = run("маска-чистое-нет", &quiet(""));
+    assert_eq!(masked, plain, "маска над чистым изменила ответ");
+    assert_eq!(
+        with_mask,
+        without + 1,
+        "значение-форма маски стоит не одной ячейки: {with_mask} против {without}"
+    );
+}
+
+/// Снимается запись **своей** метки, а не просто ближайшая.
+///
+/// Между маской и её хендлером стоит хендлер **чужой** метки, и в векторе его
+/// запись лежит последней. Мутант, снимающий последнюю запись без взгляда на
+/// метку, переживает и корпус, и три прочих свидетеля этого файла: во всех них
+/// последняя запись как раз своя, и различие сокращается. Здесь оно не
+/// сокращается - `other` отвечает пятёркой, и снятие его записи увело бы `far`
+/// обратно к внутреннему `Ask`.
+const ALIEN: &str = "\
+effect Other where
+  other : Nat
+
+inside : {Ask, Ask, Other} List Nat
+inside =
+  let o : Nat = other
+  let near : Nat = ask
+  let far : Nat = mask ask
+  Cons o (Cons near (Cons far Nil))
+
+withOther : {Ask, Ask} List Nat
+withOther = handle inside with
+  return v -> v
+  other -> resume (Succ (Succ (Succ (Succ (Succ Zero)))))
+
+nearAsk : {Ask} List Nat
+nearAsk = handle withOther with
+  return v -> v
+  ask -> resume Zero
+
+main : List Nat
+main = handle nearAsk with
+  return v -> v
+  ask -> resume (Succ Zero)
+";
+
+#[test]
+fn a_mask_takes_the_entry_of_its_own_label() {
+    let (answer, _) = run("маска-чужая-метка", &format!("{SHAPE}{ALIEN}"));
+    assert_eq!(
+        answer, "Cons (Succ (Succ (Succ (Succ (Succ Zero))))) (Cons Zero (Cons (Succ Zero) Nil))",
+        "маска сняла последнюю запись вектора, а не запись своей метки"
     );
 }
 

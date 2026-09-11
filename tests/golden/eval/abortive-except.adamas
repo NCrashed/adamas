@@ -1,0 +1,85 @@
+-- Абортивная ветка: `resume` не зовётся, вычисление обрывается (§3.4).
+--
+-- Три вопроса разом, и все три - об ответе, а не о форме.
+--
+-- *Обрыв уносит остаток.* Ответ ветки `fail` есть ответ **хендлера**, а не
+-- значение операции: `picked` за операцией ещё складывает, и на обрыве это
+-- сложение не происходит вовсе. Считай ответ ветки значением операции - и
+-- отказ отличался бы от 99 на длину списка.
+--
+-- *Глубина обрыва больше единицы.* `picked` зовёт `at`, `at` зовёт `fail`:
+-- между операцией и хендлером стоит не один C-кадр, а два. Свидетель на
+-- глубину один этого не показал бы.
+--
+-- *Живое по дороге отдаётся.* `picked` держит `xs` за вызовом `at` - длина
+-- нужна ему после, - и на обрыве эта ссылка обязана уйти. Наблюдаемо числом
+-- живых блоков: прогон обязан кончить нулём.
+--
+-- Значение - `[7, 4, 99, 99]`: `5 + 2`, `2 + 2`, отказ за границей списка и
+-- отказ на пустом.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+infixl 6 +
+(+) : Nat -> Nat -> Nat
+(+) Zero m = m
+(+) (Succ k) m = Succ (k + m)
+
+effect Fail where
+  fail : Nat -> Nat
+
+-- Элемент по позиции; за границей - обрыв.
+at : Nat -> List Nat -> {Fail} Nat
+at n Nil = fail n
+at Zero (Cons x xs) = x
+at (Succ k) (Cons x xs) = at k xs
+
+length : List Nat -> Nat
+length Nil = Zero
+length (Cons x xs) = Succ (length xs)
+
+-- `xs` живо **за** операцией: длина нужна после неё. Без отдачи этой ссылки
+-- на обрыве прогон кончил бы с живыми блоками.
+picked : Nat -> List Nat -> {Fail} Nat
+picked n xs = at n xs + length xs
+
+sample : List Nat
+sample = Cons 5 (Cons 2 Nil)
+
+guardedZero : {Fail} Nat
+guardedZero = picked 0 sample
+
+guardedOne : {Fail} Nat
+guardedOne = picked 1 sample
+
+guardedFar : {Fail} Nat
+guardedFar = picked 3 sample
+
+guardedEmpty : {Fail} Nat
+guardedEmpty = picked 0 Nil
+
+-- Ветка без резумпции: ответ её и есть ответ хендлера.
+runFail : ({Fail} Nat) -> Nat
+runFail act = handle act with
+  return v -> v
+  fail n -> 99
+
+main : List Nat
+main =
+  Cons (runFail guardedZero)
+    (Cons (runFail guardedOne)
+      (Cons (runFail guardedFar)
+        (Cons (runFail guardedEmpty) Nil)))

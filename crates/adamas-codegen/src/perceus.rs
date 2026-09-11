@@ -359,7 +359,9 @@ impl Pass<'_> {
                 let (captured, spare) = self.sequence(captured, owned);
                 drops(spare, Expr::Closure { function, captured })
             }
-            Expr::Perform { .. } | Expr::Handle { .. } => self.effectful(expr, owned),
+            Expr::Perform { .. } | Expr::Handle { .. } | Expr::Closing { .. } => {
+                self.effectful(expr, owned)
+            }
             Expr::Apply { callee, argument } => self.applied(*callee, *argument, owned),
             Expr::Bind {
                 binding,
@@ -643,6 +645,20 @@ impl Pass<'_> {
                     },
                 )
             }
+            Expr::Closing { closer, body } => {
+                // Деструктор считается **до** тела: кадр стоит всё время, пока
+                // тело идёт, и владение им переходит кадру.
+                let (mut parts, spare) = self.sequence(vec![*closer, *body], owned);
+                let body = parts.pop().unwrap_or(Expr::Erased);
+                let closer = parts.pop().unwrap_or(Expr::Erased);
+                drops(
+                    spare,
+                    Expr::Closing {
+                        closer: Box::new(closer),
+                        body: Box::new(body),
+                    },
+                )
+            }
             other => other,
         }
     }
@@ -881,6 +897,9 @@ impl Pass<'_> {
             // Хендлер и операция ячейку не придерживают, и это осознанный
             // консерватизм: путь через ветку понижению отсюда не виден - её
             // тело своя функция, - а ложное «да» вернуло бы течь.
+            // Выход из scope - тот же консерватизм: тело его вправе оборваться
+            // обрывом в полёте, и обещанная ячейка осталась бы висеть.
+            | Expr::Closing { .. }
             | Expr::Handle { .. }
             | Expr::Perform { .. }
             | Expr::Layout { .. } => false,
@@ -962,6 +981,9 @@ impl Pass<'_> {
             | Expr::RegionRecycle { .. }
             | Expr::RegionPop { .. }
             // Обход тот же, что у [`Pass::plans`], и отвечает он то же.
+            // Выход из scope - тот же консерватизм: тело его вправе оборваться
+            // обрывом в полёте, и обещанная ячейка осталась бы висеть.
+            | Expr::Closing { .. }
             | Expr::Handle { .. }
             | Expr::Perform { .. }
             | Expr::Layout { .. } => false,

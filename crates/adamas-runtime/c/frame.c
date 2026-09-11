@@ -308,8 +308,18 @@ adamas_evidence *adamas_frame_evidence(adamas_frame *frame) {
     return frame->evidence;
 }
 
-adamas_value adamas_kont_close(adamas_kont *kont, adamas_frame *scope, adamas_value value,
-                               adamas_release release) {
+adamas_frame *adamas_kont_closing(adamas_kont *kont, const adamas_evidence *evidence,
+                                  adamas_frame_release release, adamas_value closer) {
+    adamas_frame *frame = frame_alloc(ADAMAS_MARK_CLOSING, 0, NULL, NULL, release, 1,
+                                      (adamas_evidence *)(uintptr_t)evidence);
+    frame->env[0] = closer;
+    frame->below = kont->top;
+    kont->top = frame;
+    kont->depth += 1;
+    return frame;
+}
+
+void adamas_kont_close(adamas_kont *kont, adamas_frame *scope, adamas_release release) {
     if (kont->top != scope) {
         adamas_fail("нормальный выход из scope не с вершины стека");
     }
@@ -322,7 +332,6 @@ adamas_value adamas_kont_close(adamas_kont *kont, adamas_frame *scope, adamas_va
     adamas_value answer = adamas_apply(closer, scope->evidence, kont, adamas_unit());
     adamas_drop(answer, release);
     frame_free(scope, kont);
-    return value;
 }
 
 adamas_value adamas_kont_run(adamas_kont *kont, adamas_value value) {

@@ -134,6 +134,16 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     table(&mut out, program);
     out.push_str(RELEASE);
     out.push('\n');
+    if scoped(program) {
+        out.push_str(
+            "/* Дроп среды кадра scope: деструктор замыканием в слоте 0 (§3.3). */\n\
+             static void release_closing(adamas_frame *h, adamas_kont *kont) {\n\
+             \x20   (void)kont;\n\
+             \x20   adamas_value *env = adamas_frame_env(h);\n\
+             \x20   adamas_drop_value(env[0]);\n\
+             }\n\n",
+        );
+    }
     out.push_str(PRINTER);
     out.push('\n');
 
@@ -205,10 +215,19 @@ fn forms_agree(program: &Program) -> Result<(), EmitError> {
         }
         // Спрашивается C-тип, а не `Repr::pointer`: массив и блок региона -
         // такое же слово с заголовком, и обрыв вернуть ими можно.
-        if scalar(function.result) != "adamas_value" {
+        if hidden && scalar(function.result) != "adamas_value" {
             let mut performs = false;
             walk(&function.body, &mut |expr| {
-                performs |= matches!(expr, Expr::Perform { .. });
+                performs |= match expr {
+                    Expr::Perform { .. }
+                    | Expr::Apply { .. }
+                    | Expr::Handle { .. }
+                    | Expr::Closing { .. } => true,
+                    Expr::Call { function, .. } => {
+                        program.functions[function.0].form == Form::Detached
+                    }
+                    _ => false,
+                };
             });
             if performs {
                 return Err(EmitError::Aborting {
@@ -218,6 +237,17 @@ fn forms_agree(program: &Program) -> Result<(), EmitError> {
         }
     }
     Ok(())
+}
+
+/// Есть ли в программе выход из scope кадром: тогда нужен его дроп среды.
+fn scoped(program: &Program) -> bool {
+    program.functions.iter().any(|function| {
+        let mut found = false;
+        walk(&function.body, &mut |expr| {
+            found |= matches!(expr, Expr::Closing { .. });
+        });
+        found
+    })
 }
 
 /// Первый прямой вызов второй формы, которому скрытые аргументы взять неоткуда.
@@ -537,6 +567,61 @@ fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
     }
 }
 
+/// Сколько ссылок каждого связывания выражение потребляет целиком.
+///
+/// Вхождение и `Drop` отнимают ссылку, `Dup` и появление связывания добавляют.
+/// Заимствующие позиции - разбираемое и применяемое (`adamas.h`,
+/// `adamas_apply`) - не считаются: их отдаёт отдельный `Drop`.
+///
+/// Ветви разбора берутся **первой**: каждая обязана потребить одно и то же
+/// (`perceus::arm`), поэтому счёт у них общий.
+fn consumption(expr: &Expr, into: &mut HashMap<LocalId, i64>) {
+    match expr {
+        Expr::Local(local) => *into.entry(*local).or_default() += 1,
+        Expr::Dup { local, body } => {
+            *into.entry(*local).or_default() -= 1;
+            consumption(body, into);
+        }
+        Expr::Drop { local, body } | Expr::Reclaim { local, body, .. } => {
+            *into.entry(*local).or_default() += 1;
+            consumption(body, into);
+        }
+        Expr::Bind {
+            binding,
+            value,
+            body,
+        } => {
+            consumption(value, into);
+            if binding.fact.present && binding.fact.repr.counted() {
+                *into.entry(binding.local).or_default() -= 1;
+            }
+            consumption(body, into);
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            if !matches!(&**scrutinee, Expr::Local(_)) {
+                consumption(scrutinee, into);
+            }
+            if let Some(arm) = arms.first() {
+                // Поля владения не заводят: ссылку берёт `Dup` внутри ветви.
+                consumption(&arm.body, into);
+            }
+        }
+        Expr::Apply { callee, argument } => {
+            if !matches!(&**callee, Expr::Local(_)) {
+                consumption(callee, into);
+            }
+            consumption(argument, into);
+        }
+        other => {
+            for child in other.children() {
+                consumption(child, into);
+            }
+        }
+    }
+}
+
 /// Скрытые аргументы второй формы, в порядке `adamas_lowered_second`.
 ///
 /// Порядок здесь **один на всё понижение**: объявление, определение, прямой
@@ -610,6 +695,15 @@ fn body(out: &mut String, program: &Program, function: &Function) {
         temps: 0,
         reprs: shapes(function),
         hidden: function.form == Form::Detached,
+        pending: Vec::new(),
+        // Аргументы приходят владением: по ссылке на каждый.
+        refs: function
+            .live_captured()
+            .chain(function.live_parameters())
+            .filter(|binding| binding.fact.repr.counted())
+            .map(|binding| (binding.local, 1))
+            .collect(),
+        regions: Vec::new(),
     };
     let answer = emitter.value(&function.body, 1);
     out.push_str(&emitter.out);
@@ -692,6 +786,63 @@ fn release_signature(at: usize) -> String {
 /// Аргументы операции приходят владением и передаются как есть; лишние -
 /// синтезированный триггер приостановленного вычисления - дропаются здесь:
 /// сколько ветка связывает, знает эта площадка, а место операции не знает.
+/// Одна ветвь раздачи: аргументы ветке, а у абортивной - ещё и снятие сегмента.
+///
+/// Порядок у абортивной тот же, каким его держит машина
+/// (`adamas-interp/src/effect.rs`, `performed` и `buried`). Сперва режется
+/// сегмент - кадр хендлера в нём, - потом бежит **ветка**, и только потом
+/// раскрутка: деструкторы срабатывают после ответа ветки, а её ответ идёт
+/// раскрутке проточным значением и выходит из неё же. Перестань резать до
+/// ветки - и операция ветки нашла бы собственный хендлер живым.
+fn dispatch(
+    out: &mut String,
+    case: &str,
+    title: &str,
+    env: usize,
+    function: FuncId,
+    written: usize,
+    abortive: bool,
+) {
+    let _ = writeln!(out, "    case {case}: {{ /* {title} */");
+    let _ = writeln!(
+        out,
+        "        if (count < {written}u) {{ adamas_fail(\"ветке `{title}` не хватило аргументов\"); }}"
+    );
+    let _ = writeln!(
+        out,
+        "        for (size_t extra = {written}u; extra < count; extra += 1) {{ \
+         adamas_drop_value(args[extra]); }}"
+    );
+    let mut given: Vec<String> = vec![FORWARD.to_owned()];
+    given.extend((0..env).map(|slot| format!("adamas_dup(env[{slot}])")));
+    given.extend((0..written).map(|slot| format!("args[{slot}]")));
+    let given = given.join(", ");
+    if !abortive {
+        let _ = writeln!(out, "        return fn_{}({given});", function.0);
+        let _ = writeln!(out, "    }}");
+        return;
+    }
+    let _ = writeln!(out, "        uintptr_t target = (uintptr_t)h;");
+    let _ = writeln!(
+        out,
+        "        adamas_segment *seized = adamas_kont_cut(kont, h);"
+    );
+    let _ = writeln!(
+        out,
+        "        adamas_value given = fn_{}({given});",
+        function.0
+    );
+    let _ = writeln!(out, "        adamas_frame *floor = kont->top;");
+    let _ = writeln!(out, "        adamas_segment_unwind(kont, seized);");
+    let _ = writeln!(
+        out,
+        "        given = adamas_kont_run_to(kont, floor, given);"
+    );
+    let _ = writeln!(out, "        adamas_kont_arm(kont, target, given);");
+    let _ = writeln!(out, "        return adamas_unit();");
+    let _ = writeln!(out, "    }}");
+}
+
 fn branches(out: &mut String, program: &Program, at: usize) {
     let described = &program.handlers[at];
     let label = &program.labels[described.label.0 as usize];
@@ -710,47 +861,29 @@ fn branches(out: &mut String, program: &Program, at: usize) {
         let _ = writeln!(out, "    adamas_value *env = adamas_frame_env(h);");
     }
     let _ = writeln!(out, "    switch (op) {{");
-    let arm = |out: &mut String, case: &str, title: &str, function: FuncId, written: usize| {
-        let _ = writeln!(out, "    case {case}: {{ /* {title} */");
-        let _ = writeln!(
-            out,
-            "        if (count < {written}u) {{ adamas_fail(\"ветке `{title}` не хватило аргументов\"); }}"
-        );
-        let _ = writeln!(
-            out,
-            "        for (size_t extra = {written}u; extra < count; extra += 1) {{ \
-             adamas_drop_value(args[extra]); }}"
-        );
-        let mut given: Vec<String> = vec![FORWARD.to_owned()];
-        given.extend((0..env).map(|slot| format!("adamas_dup(env[{slot}])")));
-        given.extend((0..written).map(|slot| format!("args[{slot}]")));
-        let _ = writeln!(
-            out,
-            "        return fn_{}({});",
-            function.0,
-            given.join(", ")
-        );
-        let _ = writeln!(out, "    }}");
-    };
     for (slot, branch) in described.branches.iter().enumerate() {
         let title = label
             .operations
             .get(slot)
             .map_or_else(|| format!("#{slot}"), |name| escaped(name));
-        arm(
+        dispatch(
             out,
             &format!("{slot}u"),
             &title,
+            env,
             branch.function,
             branch.written,
+            branch.abortive,
         );
     }
-    arm(
+    dispatch(
         out,
         "ADAMAS_HANDLER_RETURN",
         "return",
+        env,
         described.returned,
         1,
+        false,
     );
     let _ = writeln!(out, "    default: break;");
     let _ = writeln!(out, "    }}");
@@ -856,6 +989,40 @@ struct Emitter<'a> {
     /// От этого зависит, чем идут вектор и ручка на месте вызова: своими у
     /// второй формы и `NULL` у первой, которой их взять негде.
     hidden: bool,
+    /// Что C-кадр держит владением: уборка перед возвратом по обрыву.
+    ///
+    /// Стек, а не множество: имена временных живут во вложенных блоках C, и
+    /// снимаются они в обратном порядке - тем же, каким уборка и печатается.
+    pending: Vec<String>,
+    /// Сколько ссылок связывания ещё не потреблено.
+    ///
+    /// Ровно тот же счёт, каким владение ведёт [`crate::perceus`]: связывание
+    /// приходит с одной, `Dup` добавляет, вхождение и `Drop` отнимают. Нужен он
+    /// одному - обрыву в полёте: возврат по нему обязан отдать всё, что кадр
+    /// держит, иначе Perceus перестаёт быть без течи на исключительном пути.
+    refs: HashMap<LocalId, u32>,
+    /// Вычисления под `handle`, внутри которых идёт эмиссия, снизу вверх.
+    ///
+    /// Обрыв изнутри такого вычисления **возвратом не уходит**: ответ его ловит
+    /// этот самый хендлер, и возврат унёс бы его мимо. Уходит он переходом на
+    /// метку сразу за вычислением - а уборка тогда нужна ровно та, которую
+    /// пропущенный кусок вычисления сделал бы сам.
+    regions: Vec<Region>,
+}
+
+/// Вычисление под `handle`: куда уходит обрыв и что он обязан прибрать.
+struct Region {
+    /// Метка сразу за вычислением.
+    label: String,
+    /// Длина [`Emitter::pending`] на входе: своё вычисление прибирает само.
+    mark: usize,
+    /// Счёт ссылок на входе.
+    entry: HashMap<LocalId, u32>,
+    /// Сколько ссылок вычисление потребляет целиком, по связываниям.
+    ///
+    /// Разница между потреблением целого и потреблённым до обрыва и есть
+    /// уборка: пропущенный кусок отдал бы ровно её.
+    net: HashMap<LocalId, i64>,
 }
 
 impl Emitter<'_> {
@@ -866,16 +1033,99 @@ impl Emitter<'_> {
         name
     }
 
+    /// Владение, которое кадр забрал себе: узел и имя, где оно лежит.
+    ///
+    /// Проходные узлы (связывание, учёт ссылок) своего владения не заводят -
+    /// значением им служит тело, и оно уже учтено.
+    fn parked(&mut self, expr: &Expr, name: &str) {
+        if matches!(
+            expr,
+            Expr::Erased
+                | Expr::Bind { .. }
+                | Expr::Dup { .. }
+                | Expr::Drop { .. }
+                | Expr::Reclaim { .. }
+        ) || !self.shape(expr).counted()
+        {
+            return;
+        }
+        if let Expr::Local(local) = expr {
+            let count = self.refs.entry(*local).or_default();
+            *count = count.saturating_sub(1);
+        }
+        self.pending.push(name.to_owned());
+    }
+
+    /// Способен ли узел оборвать вычисление обрывом в полёте.
+    fn aborts(&self, expr: &Expr) -> bool {
+        match expr {
+            // Выход из scope тоже: деструктор бежит здесь же и вправе
+            // производить (§3.3, раскрутка).
+            Expr::Perform { .. }
+            | Expr::Apply { .. }
+            | Expr::Handle { .. }
+            | Expr::Closing { .. } => true,
+            Expr::Call { function, .. } => {
+                self.program.functions[function.0].form == Form::Detached
+            }
+            _ => false,
+        }
+    }
+
+    /// Уход по обрыву в полёте: отдать пропущенное и уйти.
+    ///
+    /// Вне вычисления под `handle` уходят **возвратом**, и тогда кадр бросает
+    /// всё: ответ здесь единица, а настоящий лежит в ручке стека и достанется
+    /// месту `handle`, чей кадр обрыв назвал (`adamas.h`). Внутри вычисления
+    /// уходят **на метку** за ним - ловить обрыв этому хендлеру, - и отдаётся
+    /// ровно то, что отдал бы пропущенный кусок.
+    fn escape(&mut self, depth: usize) {
+        let pad = Self::pad(depth);
+        let inner = Self::pad(depth + 1);
+        let (from, exit) = match self.regions.last() {
+            Some(region) => (region.mark, format!("goto {};", region.label)),
+            None => (0, "return adamas_unit();".to_owned()),
+        };
+        let mut cleanup: Vec<String> = self.pending[from..].iter().rev().cloned().collect();
+        let mut counted: Vec<(LocalId, u32)> = self
+            .refs
+            .iter()
+            .map(|(local, count)| (*local, *count))
+            .collect();
+        counted.sort_unstable();
+        for (local, count) in counted {
+            let owed = match self.regions.last() {
+                None => i64::from(count),
+                Some(region) => {
+                    let entry = i64::from(region.entry.get(&local).copied().unwrap_or(0));
+                    let net = region.net.get(&local).copied().unwrap_or(0);
+                    net - (entry - i64::from(count))
+                }
+            };
+            for _ in 0..owed.max(0) {
+                cleanup.push(format!("v{}", local.0));
+            }
+        }
+        let _ = writeln!(self.out, "{pad}if (adamas_kont_aborting(kont)) {{");
+        for held in cleanup {
+            let _ = writeln!(self.out, "{inner}adamas_drop_value({held});");
+        }
+        let _ = writeln!(self.out, "{inner}{exit}");
+        let _ = writeln!(self.out, "{pad}}}");
+    }
+
     /// Представление значения выражения.
     fn shape(&self, expr: &Expr) -> Repr {
         match expr {
             Expr::Local(local) => self.reprs.get(local).copied().unwrap_or(Repr::Boxed),
             Expr::Literal { ty, .. } | Expr::Primitive { ty, .. } => Repr::Flat(*ty),
             Expr::Call { function, .. } => self.program.functions[function.0].result,
+            // Ответ scope'а есть ответ его тела: деструктор отвечает мимо.
             Expr::Bind { body, .. }
             | Expr::Dup { body, .. }
             | Expr::Drop { body, .. }
-            | Expr::Reclaim { body, .. } => self.shape(body),
+            | Expr::Reclaim { body, .. }
+            | Expr::Closing { body, .. } => self.shape(body),
             Expr::Match { arms, .. } => arms
                 .first()
                 .map_or(Repr::Boxed, |arm| self.shape(&arm.body)),
@@ -920,11 +1170,25 @@ impl Emitter<'_> {
         "    ".repeat(depth)
     }
 
+    /// Эмитит выражение, учитывает его владение и проверяет обрыв.
+    ///
+    /// Проверка стоит **после** узла, способного произвести операцию: ветка без
+    /// резумпции срезала сегмент и положила ответ в ручку стека, а C-кадры между
+    /// ней и хендлером снимает возврат (`adamas.h`, «Обрыв в полёте»).
+    fn value(&mut self, expr: &Expr, depth: usize) -> String {
+        let name = self.emitted(expr, depth);
+        self.parked(expr, &name);
+        if self.hidden && self.aborts(expr) {
+            self.escape(depth);
+        }
+        name
+    }
+
     /// Эмитит выражение и отдаёт имя, в котором лежит его значение.
     ///
     /// Каждый составной узел получает своё имя: порядок вычисления виден в
     /// тексте, а не выводится из правил C.
-    fn value(&mut self, expr: &Expr, depth: usize) -> String {
+    fn emitted(&mut self, expr: &Expr, depth: usize) -> String {
         match expr {
             Expr::Local(local) => format!("v{}", local.0),
             Expr::Erased => "ADAMAS_ERASED".to_owned(),
@@ -991,6 +1255,7 @@ impl Emitter<'_> {
                 skip,
                 arguments,
             } => self.performing(*label, *operation, *skip, arguments, depth),
+            Expr::Closing { closer, body } => self.scoped(closer, body, depth),
             Expr::Apply { callee, argument } => self.applying(callee, argument, depth),
             Expr::Match {
                 scrutinee, arms, ..
@@ -1012,7 +1277,12 @@ impl Emitter<'_> {
                 value,
                 body,
             } => {
+                let mark = self.pending.len();
                 let value = self.value(value, depth);
+                self.pending.truncate(mark);
+                if binding.fact.present && binding.fact.repr.counted() {
+                    self.refs.insert(binding.local, 1);
+                }
                 let _ = writeln!(
                     self.out,
                     "{pad}{} v{} = {value}; /* {} */",
@@ -1023,14 +1293,21 @@ impl Emitter<'_> {
                 body
             }
             Expr::Dup { local, body } => {
+                *self.refs.entry(*local).or_default() += 1;
                 let _ = writeln!(self.out, "{pad}adamas_dup(v{});", local.0);
                 body
             }
             Expr::Drop { local, body } => {
+                let count = self.refs.entry(*local).or_default();
+                *count = count.saturating_sub(1);
                 let _ = writeln!(self.out, "{pad}adamas_drop_value(v{});", local.0);
                 body
             }
             Expr::Reclaim { local, token, body } => {
+                let count = self.refs.entry(*local).or_default();
+                *count = count.saturating_sub(1);
+                // Блок под переписывание владением не считается: отдать его
+                // обрыву нечем, дропа у сырого блока нет. Названная граница.
                 let _ = writeln!(
                     self.out,
                     "{pad}adamas_value v{} = adamas_reclaim_value(v{});",
@@ -1093,8 +1370,15 @@ impl Emitter<'_> {
     /// принимает всюду, где их читает.
     fn applying(&mut self, callee: &Expr, argument: &Expr, depth: usize) -> String {
         let pad = Self::pad(depth);
+        // Замыкание **заимствуется** (`adamas.h`), отдаёт его отдельный `Drop`
+        // после применения; аргумент идёт владением.
+        let borrowed = self.refs.clone();
+        let mark = self.pending.len();
         let callee = self.value(callee, depth);
+        self.pending.truncate(mark);
+        self.refs = borrowed;
         let argument = self.value(argument, depth);
+        self.pending.truncate(mark);
         let name = self.temp();
         let hidden = if self.hidden { FORWARD } else { "NULL, NULL" };
         let _ = writeln!(
@@ -1614,11 +1898,13 @@ impl Emitter<'_> {
             .filter(|(_, fact)| fact.present)
             .map(|(position, _)| position)
             .collect();
+        let mark = self.pending.len();
         let given: Vec<String> = present
             .iter()
             .filter_map(|position| arguments.get(*position))
             .map(|argument| self.value(argument, depth))
             .collect();
+        self.pending.truncate(mark);
         let name = self.temp();
         if slots == 0 {
             let _ = writeln!(
@@ -1671,12 +1957,14 @@ impl Emitter<'_> {
             Form::Stack => Vec::new(),
             Form::Detached => vec![FORWARD.to_owned()],
         };
+        let mark = self.pending.len();
         for position in &present {
             let Some(argument) = arguments.get(*position) else {
                 continue;
             };
             given.push(self.value(argument, depth));
         }
+        self.pending.truncate(mark);
         let result = c_type(called.result);
         let name = self.temp();
         let _ = writeln!(
@@ -1703,11 +1991,13 @@ impl Emitter<'_> {
             .filter(|(_, binding)| binding.fact.present)
             .map(|(position, _)| position)
             .collect();
+        let mark = self.pending.len();
         let taken: Vec<String> = present
             .iter()
             .filter_map(|position| captured.get(*position))
             .map(|capture| self.value(capture, depth))
             .collect();
+        self.pending.truncate(mark);
         let name = self.temp();
         let _ = writeln!(
             self.out,
@@ -1763,11 +2053,13 @@ impl Emitter<'_> {
             .collect();
         let slots = present.len();
         let title = escaped(&self.program.labels[label.0 as usize].name);
+        let mark = self.pending.len();
         let taken: Vec<String> = present
             .iter()
             .filter_map(|position| captured.get(*position))
             .map(|capture| self.value(capture, depth))
             .collect();
+        self.pending.truncate(mark);
 
         let name = self.temp();
         let root = self.temp();
@@ -1814,24 +2106,106 @@ impl Emitter<'_> {
             "{inner}adamas_evidence *{vector} = adamas_evidence_extend(ev, {}u, {frame});",
             label.0
         );
-        let _ = writeln!(self.out, "{inner}adamas_value {body};");
+        // Единица, а не ничто: по обрыву вычисление до присваивания не дойдёт,
+        // а прочитать это имя чужой обрыв всё равно обязан.
+        let _ = writeln!(self.out, "{inner}adamas_value {body} = adamas_unit();");
         let _ = writeln!(self.out, "{inner}{{");
         let _ = writeln!(self.out, "{inner}    const adamas_evidence *ev = {vector};");
         self.hidden = true;
+        let label = format!("L{}", self.temps);
+        self.temps += 1;
+        let mut net = HashMap::new();
+        consumption(computation, &mut net);
+        self.regions.push(Region {
+            label: label.clone(),
+            mark,
+            entry: self.refs.clone(),
+            net,
+        });
         let answer = self.value(computation, depth + 2);
+        self.regions.pop();
+        self.pending.truncate(mark);
         self.hidden = outer;
         let _ = writeln!(self.out, "{inner}    {body} = {answer};");
         let _ = writeln!(self.out, "{inner}}}");
+        let _ = writeln!(self.out, "{inner}{label}: ;");
         let _ = writeln!(self.out, "{inner}adamas_evidence_drop({vector});");
-        let _ = writeln!(
-            self.out,
-            "{inner}{name} = adamas_kont_leave(kont, {frame}, {body});"
-        );
+        self.caught(&name, &frame, &body, &title, outer, depth + 1);
         if !outer {
             let _ = writeln!(self.out, "{inner}adamas_evidence_drop({root}_ev);");
         }
         let _ = writeln!(self.out, "{pad}}}");
         name
+    }
+
+    /// Выход из хендлера: нормальный либо обрывом в полёте.
+    ///
+    /// Чей обрыв - говорит адрес кадра, взятый числом **до** среза (`adamas.h`).
+    /// Наш: ответ забирается, а `adamas_kont_leave` звать нельзя - кадр уже снят
+    /// раскруткой. Чужой: ответ идёт дальше наружу, и снимать нечего по той же
+    /// причине. Корень стека чужого обрыва не пропускает вовсе: кадра-цели ниже
+    /// него нет.
+    fn caught(
+        &mut self,
+        name: &str,
+        frame: &str,
+        body: &str,
+        title: &str,
+        outer: bool,
+        depth: usize,
+    ) {
+        let pad = Self::pad(depth);
+        let _ = writeln!(self.out, "{pad}if (adamas_kont_aborting(kont)) {{");
+        let _ = writeln!(
+            self.out,
+            "{pad}    if (adamas_kont_target(kont) == (uintptr_t){frame}) {{"
+        );
+        let _ = writeln!(self.out, "{pad}        {name} = adamas_kont_disarm(kont);");
+        let _ = writeln!(self.out, "{pad}    }} else {{");
+        if outer {
+            let _ = writeln!(self.out, "{pad}        {name} = {body};");
+        } else {
+            let _ = writeln!(
+                self.out,
+                "{pad}        adamas_fail(\"обрыв мимо корня стека: хендлер `{title}` его не ловит\");"
+            );
+        }
+        let _ = writeln!(self.out, "{pad}    }}");
+        let _ = writeln!(self.out, "{pad}}} else {{");
+        let _ = writeln!(
+            self.out,
+            "{pad}    {name} = adamas_kont_leave(kont, {frame}, {body});"
+        );
+        let _ = writeln!(self.out, "{pad}}}");
+    }
+
+    /// Выход из scope с ресурсом: кадр `MARK_CLOSING` вокруг тела (§3.3).
+    ///
+    /// Кадр ставится **до** тела и снимается после: пока тело идёт, деструктор
+    /// виден раскрутке обходом цепочки, и обрыв через эффект его находит.
+    /// Нормальный выход зовёт его сам - `adamas_kont_close`, зеркало
+    /// `adamas_kont_leave`; исключительный не доходит сюда вовсе, потому что
+    /// обрыв возвращается из функции раньше.
+    ///
+    /// LIFO выходит вложенностью кадров: внутренний scope лежит выше, а
+    /// раскрутка идёт от вершины.
+    fn scoped(&mut self, closer: &Expr, body: &Expr, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let mark = self.pending.len();
+        let closer = self.value(closer, depth);
+        self.pending.truncate(mark);
+        let frame = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_frame *{frame} = adamas_kont_closing(kont, ev, release_closing, {closer});"
+        );
+        let held = self.value(body, depth);
+        self.pending.truncate(mark);
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_kont_close(kont, {frame}, adamas_release_value);"
+        );
+        held
     }
 
     /// Операция: вердикт вектора трёхзначен, и все три ответа написаны.
@@ -1864,10 +2238,12 @@ impl Emitter<'_> {
             .operations
             .get(operation as usize)
             .map_or_else(|| format!("#{operation}"), |name| escaped(name));
+        let mark = self.pending.len();
         let given: Vec<String> = arguments
             .iter()
             .map(|argument| self.value(argument, depth))
             .collect();
+        self.pending.truncate(mark);
 
         let name = self.temp();
         let frame = self.temp();
@@ -1924,11 +2300,22 @@ impl Emitter<'_> {
         if let Repr::Packed(pack) = self.shape(scrutinee) {
             return self.packed_analysis(pack, scrutinee, arms, answer, depth);
         }
+        // Разбираемое **заимствуется**: поля читаются по нему, а отдаёт его
+        // ветвь - `Drop` либо `Reclaim` внутри неё (см. `perceus::arm`).
+        let borrowed = self.refs.clone();
+        let outer = self.pending.len();
         let scrutinee = self.value(scrutinee, depth);
+        self.pending.truncate(outer);
+        self.refs = borrowed;
         let name = self.temp();
         let _ = writeln!(self.out, "{pad}{} {name};", c_type(answer));
         let _ = writeln!(self.out, "{pad}switch (adamas_tag({scrutinee})) {{");
+        let before = self.refs.clone();
         for arm in arms {
+            // Ветви - альтернативы: счёт одной другой не виден. Поля владения
+            // не заводят: ссылку на нужное берёт `Dup`, поставленный
+            // `perceus::arm`, а ненужное поле не читается вовсе.
+            self.refs.clone_from(&before);
             let described = &self.program.constructors[usize::from(arm.constructor.0)];
             let title = escaped(&described.name);
             let params = described.params as usize;
@@ -1959,11 +2346,15 @@ impl Emitter<'_> {
                     escaped(&binding.name)
                 );
             }
+            let inner = self.pending.len();
             let answer = self.value(&arm.body, depth + 1);
+            self.pending.truncate(inner);
             let _ = writeln!(self.out, "{pad}    {name} = {answer};");
             let _ = writeln!(self.out, "{pad}    break;");
             let _ = writeln!(self.out, "{pad}}}");
         }
+        // Счёт после разбора - счёт любой из ветвей: каждая обязана потребить
+        // одно и то же (`perceus::arm`), поэтому берётся последняя.
         let _ = writeln!(
             self.out,
             "{pad}default: adamas_fail(\"разбор не знает конструктора\");"

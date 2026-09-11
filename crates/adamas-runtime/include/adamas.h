@@ -911,19 +911,30 @@ adamas_value adamas_frame_perform(adamas_frame *handler, adamas_kont *kont, uint
 adamas_value adamas_kont_leave(adamas_kont *kont, adamas_frame *handler, adamas_value value);
 
 /**
+ * Кадр `CLOSING` вокруг scope, держащего ресурс (§3.3): деструктор в слоте 0.
+ *
+ * Отдельная точка входа, а не [`adamas_kont_push`], по той же причине, что и у
+ * хендлера: вектор здесь приходит `const` - у порождённого кода он такой, - а
+ * работы у кадра нет, его дело быть найденным раскруткой. Деструктор берётся
+ * **владением**; отдаёт его `release` кадра.
+ */
+adamas_frame *adamas_kont_closing(adamas_kont *kont, const adamas_evidence *evidence,
+                                  adamas_frame_release release, adamas_value closer);
+
+/**
  * Нормальный выход из scope, держащего ресурс: кадр снимается, деструктор
- * бежит, ответ scope идёт дальше (§3.3).
+ * бежит (§3.3).
  *
  * Кадр обязан быть вершиной - в направленном стиле он ею и остаётся, тот же
  * довод, что у [`adamas_kont_leave`]. Ровно то же сделает `adamas_kont_run`
- * парой `CLOSING`/`CLOSED`, когда дробление тел придёт.
+ * парой `CLOSING`/`CLOSED`, когда дробление тел придёт. Значение тела здесь не
+ * передаётся: пока тела не дроблены, оно лежит в C-кадре.
  *
  * Ответ деструктора отбрасывается (§3.3) и дропается пришедшим `release`:
  * здесь он у порождённого кода есть, в отличие от пути раскрутки, где кадр
  * дропает его сам и типа не знает.
  */
-adamas_value adamas_kont_close(adamas_kont *kont, adamas_frame *scope, adamas_value value,
-                               adamas_release release);
+void adamas_kont_close(adamas_kont *kont, adamas_frame *scope, adamas_release release);
 
 /** Среда кадра: массив на `adamas_frame_fields` слотов. */
 adamas_value *adamas_frame_env(adamas_frame *frame);

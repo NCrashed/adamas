@@ -303,6 +303,37 @@ main = handleMulti asked with
     );
 }
 
+/// Питомник отвергается **своим** отказом, а не чужим.
+///
+/// Пока отказ был один на всё эффектное, остаток волны и остаток Фазы 7 стояли
+/// под одним именем. `adamas.h` говорит прямо: метка `NURSERY` не обслуживается
+/// ничем, таблица файберов заводится вместе с ними. Значит и отказ у неё свой,
+/// иначе Фаза 7 замаскируется под недоделку понижения.
+#[test]
+fn a_nursery_is_refused_as_a_nursery() {
+    let source = format!(
+        "{SHAPE}\
+effect Async where
+  suspend : Unit
+
+-- Постулат: тело ему даёт машина, а рантайм C - нет.
+withNursery : ({{Async}} Nat) -> Nat
+
+quiet : {{Async}} Nat
+quiet = Zero
+
+main : Nat
+main = withNursery quiet
+"
+    );
+    let error = harness::compiled(&source).expect_err("питомник - Фаза 7");
+    let text = error.to_string();
+    assert!(
+        text.contains("питомник") && text.contains("Фаза 7"),
+        "отказ не назвал ни питомника, ни фазы: {text}"
+    );
+}
+
 /// Маска отвергается по имени: число пропусков вектору не считает никто.
 #[test]
 fn a_mask_is_refused_by_name() {

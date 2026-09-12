@@ -1,0 +1,34 @@
+-- Тот же поиск, что в `eval/polymorphic-recursion.adamas`, но элемент - тип
+-- (§10 вопросы 83 и 165).
+--
+-- Ближайший отвергаемый сосед свидетеля: от него `atType` отличается одним
+-- словом. Параметра уровня у определения нет по той же причине - `reject`
+-- заземляет свой собственный нулём, - но здесь его недостача видна: элементу
+-- нужен первый универсум, а нести его нечем.
+--
+-- Отказ приходит на вызов операции, а не на самоссылку, и это правильный
+-- адрес: уровень теряется там, где написан `reject`. Самоссылка же с арностью
+-- разойтись больше не может - её список строится по арности.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Reject where
+  reject : Nat -> a
+
+atType : Nat -> List Type -> {Reject} Type
+atType n Nil = reject n
+atType Zero (Cons x xs) = x
+atType (Succ k) (Cons x xs) = atType k xs

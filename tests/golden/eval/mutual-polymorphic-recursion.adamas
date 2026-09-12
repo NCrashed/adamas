@@ -1,0 +1,105 @@
+-- Член группы обобщается **после своего тела**, как одиночное определение
+-- (§4.8, §3.2, §10 вопросы 83, 165 и 167).
+--
+-- `atTop`/`afterTop` - тот же поиск, что в `eval/polymorphic-recursion.adamas`,
+-- разложенный на двух членов `mutual`: `atTop` снимает индекс, `afterTop`
+-- снимает элемент, поэтому позиция считается через два. Параметра уровня у
+-- пары нет вовсе: `reject` заземляет собственный параметр нулём, и `a` вместе
+-- с ним. Пока группа обобщалась до тел, `a` приезжал в тело готовым `Type u0`,
+-- заземлять было нечего, и пара отвергалась «выводимый аргумент не
+-- укладывается в свой тип».
+--
+-- **Члена должно быть два.** У группы из одного порядок обобщения
+-- ненаблюдаем: она проходила и до правки, поэтому свидетелем быть не может.
+-- Ссылку на соседа это и различает - её арность берётся у обобщения соседа, а
+-- не у подсчёта до тела.
+--
+-- **Операция нужна в теле каждого полиморфного члена.** Заземление приходит от
+-- своего тела и через ссылку на соседа не передаётся: член, зовущий соседа, но
+-- не зовущий операции, остаётся отвергнутым, и это записано программой -
+-- `errors/mutual-sibling-ungrounded.adamas`.
+--
+-- Пара без операции стоит рядом: у `lengthOf`/`tailOf` параметр уровня
+-- остаётся, и ссылки обязаны идти **с** ним. Нулём его не подменить и
+-- снаружи - `higher` считает список **типов**, то есть зовёт `lengthOf` в
+-- первом универсуме. Понижением `higher` не берётся (значения у семейства в
+-- рантайме нет), и `main` его не зовёт; различает он проверкой.
+--
+-- Полиморфизм проверяется двумя типами элемента: та же пара ищет и в списке
+-- чисел, и в списке булевых.
+--
+-- Значение - `[2, 99, 1, 3]`: элемент через два от начала, отказ за границей
+-- списка, тот же поиск на другом типе элемента, длина списка чисел.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Reject where
+  reject : Nat -> a
+
+-- Свидетель записи 167: полиморфизм, операция в теле, два члена.
+mutual
+  atTop : Nat -> List a -> {Reject} a
+  atTop n Nil = reject n
+  atTop Zero (Cons x xs) = x
+  atTop (Succ k) (Cons x xs) = afterTop k xs
+
+  afterTop : Nat -> List a -> {Reject} a
+  afterTop n Nil = reject n
+  afterTop n (Cons x xs) = atTop n xs
+
+-- Пара без операции: параметр уровня остаётся, и ссылки несут его.
+mutual
+  lengthOf : List a -> Nat
+  lengthOf Nil = Zero
+  lengthOf (Cons x xs) = Succ (tailOf xs)
+
+  tailOf : List a -> Nat
+  tailOf Nil = Zero
+  tailOf (Cons x xs) = Succ (lengthOf xs)
+
+sample : List Nat
+sample = Cons 5 (Cons 7 (Cons 2 Nil))
+
+flags : List Bool
+flags = Cons False (Cons True (Cons True Nil))
+
+-- Список в первом универсуме: заземлённым нулём параметром его не пройти.
+types : List Type
+types = Cons Nat (Cons Bool (Cons Unit Nil))
+
+higher : Nat
+higher = lengthOf types
+
+runNat : ({Reject} Nat) -> Nat
+runNat act = handle act with
+  return v -> v
+  reject n -> 99
+
+runBool : ({Reject} Bool) -> Bool
+runBool act = handle act with
+  return v -> v
+  reject n -> False
+
+toNat : Bool -> Nat
+toNat False = Zero
+toNat True = 1
+
+main : List Nat
+main =
+  Cons (runNat (atTop 1 sample))
+    (Cons (runNat (atTop 5 sample))
+      (Cons (toNat (runBool (atTop 1 flags)))
+        (Cons (lengthOf sample) Nil)))

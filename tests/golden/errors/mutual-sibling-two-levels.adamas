@@ -1,0 +1,48 @@
+-- Соседа по группе зовут два тела на **разных** уровнях (§4.8, §3.2, §10
+-- вопрос 167).
+--
+-- Это записанная цена решения «обобщать члена после его тела». Тип соседа
+-- приезжает в тело необобщённым, дырки уровня у группы поэтому общие, и `low`
+-- решает их нулём раньше, чем `high` попросит первый универсум. Отказ приходит
+-- на второе употребление - там, где уровень уже занят.
+--
+-- Ближайший проходящий сосед - `eval/mutual-polymorphic-recursion.adamas`: там
+-- члены зовут друг друга, но все на одном уровне, и монотипность ссылки
+-- ничего не отнимает.
+--
+-- Форма экзотическая, и это измерено: внутри **одного** тела сосед монотипен и
+-- без этого решения - кэш инстанциаций держит одну копию на имя, - поэтому
+-- `counting sample` рядом с `counting types` в теле `low` отвергался и до
+-- правки. Вне группы `counting` полиморфна как всякое объявленное имя.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+sample : List Nat
+sample = Cons 5 (Cons 2 Nil)
+
+types : List Type
+types = Cons Nat (Cons Bool (Cons Unit Nil))
+
+mutual
+  low : Nat
+  low = counting sample
+
+  high : Nat
+  high = counting types
+
+  counting : List a -> Nat
+  counting Nil = Zero
+  counting (Cons x xs) = Succ (counting xs)

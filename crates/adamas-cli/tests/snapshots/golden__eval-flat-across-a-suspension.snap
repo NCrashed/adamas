@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+MkAnswers (Node (Leaf 3) (Node (Leaf 6) (Leaf 9))) (MkWidths (-44) 4294967294 6.25)

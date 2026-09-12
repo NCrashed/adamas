@@ -2478,16 +2478,20 @@ impl Emitter<'_> {
         }
         for (slot, (local, repr)) in env.iter().enumerate() {
             let taken = from_word(*repr, &format!("env[{slot}]"));
-            if repr.primitive().is_some() {
-                let _ = writeln!(self.out, "    {} v{} = {taken};", c_type(*repr), local.0);
+            // Указательный слот **забирается**: значение уезжает в связывание
+            // владением, и дроп среды его больше не увидит. Плоский лежит
+            // битами, счётчика у него нет, и забирать нечего.
+            let cleared = if repr.primitive().is_some() {
+                String::new()
             } else {
-                let _ = writeln!(
-                    self.out,
-                    "    {} v{} = {taken}; env[{slot}] = ADAMAS_ERASED;",
-                    c_type(*repr),
-                    local.0
-                );
-            }
+                format!(" env[{slot}] = ADAMAS_ERASED;")
+            };
+            let _ = writeln!(
+                self.out,
+                "    {} v{} = {taken};{cleared}",
+                c_type(*repr),
+                local.0
+            );
         }
         assert!(
             binding.fact.present,

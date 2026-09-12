@@ -22,7 +22,11 @@ struct adamas_frame {
     adamas_frame_release release;
     adamas_evidence *evidence;
     uint32_t label;
-    uint32_t fields;
+    /* Слотов всего и сколько первых из них счётные. Двумя половинами слова, а
+     * не двумя словами: среда обязана остаться на 56-м байте, а плоский слот
+     * дупать нельзя - заголовка у него нет (§4.11). */
+    uint16_t fields;
+    uint16_t counted;
     adamas_value env[];
 };
 
@@ -39,7 +43,10 @@ _Static_assert(sizeof(struct adamas_segment) == 24, "сегмент - три с�
 
 static adamas_frame *frame_alloc(uint16_t mark, uint32_t label, adamas_frame_code code,
                                  adamas_handler_code branches, adamas_frame_release release,
-                                 size_t fields, adamas_evidence *evidence) {
+                                 size_t fields, size_t counted, adamas_evidence *evidence) {
+    if (fields > UINT16_MAX || counted > fields) {
+        adamas_fail("среда кадра: слотов больше, чем кадр умеет носить");
+    }
     adamas_frame *frame = (adamas_frame *)adamas_block_alloc(sizeof(adamas_frame) +
                                                              fields * sizeof(adamas_value));
     adamas_header *header = adamas_header_of(frame);
@@ -52,7 +59,8 @@ static adamas_frame *frame_alloc(uint16_t mark, uint32_t label, adamas_frame_cod
     frame->release = release;
     frame->evidence = adamas_evidence_dup(evidence);
     frame->label = label;
-    frame->fields = (uint32_t)fields;
+    frame->fields = (uint16_t)fields;
+    frame->counted = (uint16_t)counted;
     return frame;
 }
 
@@ -199,7 +207,7 @@ static adamas_segment *segment_alloc(adamas_frame *top, adamas_frame *base) {
 static void unwind_push(adamas_kont *kont, adamas_segment *chain, adamas_value held,
                         uint32_t captured) {
     adamas_frame *frame = adamas_kont_push(kont, ADAMAS_MARK_UNWINDING, captured, NULL,
-                                           unwinding_release, 2, NULL);
+                                           unwinding_release, 2, 2, NULL);
     frame->env[0] = held;
     frame->env[1] = adamas_segment_value(chain);
 }
@@ -214,11 +222,11 @@ void adamas_kont_init(adamas_kont *kont) {
 
 adamas_frame *adamas_kont_push(adamas_kont *kont, uint16_t mark, uint32_t label,
                                adamas_frame_code code, adamas_frame_release release, size_t fields,
-                               const adamas_evidence *evidence) {
+                               size_t counted, const adamas_evidence *evidence) {
     /* Вектор здесь только берётся ссылкой, и `const` у входа - про место
      * вызова: у порождённого C он `const adamas_evidence *`, а приводить его
      * там значило бы писать приведение на каждой точке приостановки. */
-    adamas_frame *frame = frame_alloc(mark, label, code, NULL, release, fields,
+    adamas_frame *frame = frame_alloc(mark, label, code, NULL, release, fields, counted,
                                       (adamas_evidence *)(uintptr_t)evidence);
     frame->below = kont->top;
     kont->top = frame;
@@ -231,8 +239,10 @@ adamas_frame *adamas_kont_handler(adamas_kont *kont, uint32_t label, adamas_hand
     /* Вектор здесь только берётся ссылкой, и `const` у входа - про место
      * вызова: у порождённого C он `const adamas_evidence *`, а приводить его
      * там значило бы писать приведение в каждом хендлере. */
+    /* Слоты хендлера все до одного указательные: среда веток есть захват, а
+     * плоское понижение захватывать отказывается (`Lowerer::capturing`). */
     adamas_frame *frame = frame_alloc(ADAMAS_MARK_HANDLER, label, NULL, branches, release, fields,
-                                      (adamas_evidence *)(uintptr_t)evidence);
+                                      fields, (adamas_evidence *)(uintptr_t)evidence);
     frame->below = kont->top;
     kont->top = frame;
     return frame;
@@ -254,6 +264,10 @@ size_t adamas_frame_fields(const adamas_frame *frame) {
     return frame->fields;
 }
 
+size_t adamas_frame_counted(const adamas_frame *frame) {
+    return frame->counted;
+}
+
 uint16_t adamas_frame_mark(const adamas_frame *frame) {
     return ((const adamas_header *)(const void *)frame)->tag;
 }
@@ -268,7 +282,7 @@ adamas_evidence *adamas_frame_evidence(adamas_frame *frame) {
 
 adamas_frame *adamas_kont_closing(adamas_kont *kont, const adamas_evidence *evidence,
                                   adamas_frame_release release, adamas_value closer) {
-    adamas_frame *frame = frame_alloc(ADAMAS_MARK_CLOSING, 0, NULL, NULL, release, 1,
+    adamas_frame *frame = frame_alloc(ADAMAS_MARK_CLOSING, 0, NULL, NULL, release, 1, 1,
                                       (adamas_evidence *)(uintptr_t)evidence);
     frame->env[0] = closer;
     frame->below = kont->top;
@@ -296,7 +310,7 @@ adamas_value adamas_kont_run_to(adamas_kont *kont, adamas_frame *floor, adamas_v
              * достаёт живые хендлеры внизу (§10 вопрос 144). Подавления тут
              * нет: хендлеры под scope'ом живы и ответа ещё не давали. */
             adamas_frame *closed = adamas_kont_push(kont, ADAMAS_MARK_CLOSED, 0, NULL,
-                                                    closed_release, 1, NULL);
+                                                    closed_release, 1, 1, NULL);
             closed->env[0] = value;
             adamas_value closer = frame->env[0];
             value = adamas_apply(closer, frame->evidence, kont, adamas_unit());
@@ -377,6 +391,16 @@ void adamas_kont_resume(adamas_kont *kont, adamas_value value) {
          * попасть может только дефектом понижения, и молчать о нём нечем. */
         adamas_fail("резумпция возобновлена дважды");
     }
+    adamas_header *header = adamas_header_of(segment);
+    if ((header->flags & ADAMAS_FLAG_MULTI) != 0 && header->rc != 0) {
+        /* Мультишот: на ручку есть ещё ссылки, значит второе возобновление
+         * впереди - ставится **копия**, и она же есть цена §3.4, O(глубины) на
+         * resume. Единственная ссылка копии не требует: возобновить сегмент
+         * второй раз некому, и он отдаётся сам - тот же договор об
+         * уникальности, что у reuse (§5.1). N возобновлений - N-1 копий. */
+        adamas_kont_restore(kont, adamas_segment_copy(segment));
+        return;
+    }
     segment->base->below = kont->top;
     kont->top = segment->top;
     /* Ручка **тратится**, а не освобождается: ссылок на неё бывает больше
@@ -398,10 +422,28 @@ adamas_frame *adamas_segment_base(adamas_segment *segment) {
     return segment->base;
 }
 
+/* Переписывает записи, называющие `from`, на `to` во всех копиях выше него.
+ *
+ * Вектор у копии свой (см. `adamas_segment_copy`), поэтому правка идёт по
+ * месту. Одного и того же вектора это касается один раз: второй проход не
+ * находит `from` уже ни в одной записи. */
+static void rebind_above(adamas_frame *top, const adamas_frame *until, const adamas_frame *from,
+                         adamas_frame *to) {
+    for (adamas_frame *frame = top; frame != until; frame = frame->below) {
+        adamas_evidence_rebind(frame->evidence, from, to);
+    }
+}
+
 adamas_segment *adamas_segment_copy(const adamas_segment *segment) {
     adamas_frame *source = segment->top;
     adamas_frame *previous = NULL;
     adamas_frame *first = NULL;
+    /* Общий вектор копируется один раз на всю цепочку звеньев, которые его
+     * делят: под одним хендлером у всех кадров он один и тот же указатель -
+     * вторая форма передаёт его по вызовам без изменений. Это и держит цену
+     * копии линейной по глубине, а не по глубине на длину вектора. */
+    adamas_evidence *shared_source = NULL;
+    adamas_evidence *shared_copy = NULL;
     while (source != NULL) {
         /* Ресурсы под мультишотом запрещены статически (§10 вопрос 15), и кадр
          * раскрутки в копируемый сегмент не попадает. Владение остатком
@@ -409,21 +451,56 @@ adamas_segment *adamas_segment_copy(const adamas_segment *segment) {
         if (adamas_frame_mark(source) == ADAMAS_MARK_UNWINDING) {
             adamas_fail("сегмент раскрутки не копируется: ресурс под мультишотом");
         }
+        adamas_evidence *evidence;
+        if (source->evidence != NULL && source->evidence == shared_source) {
+            evidence = adamas_evidence_dup(shared_copy);
+        } else {
+            /* Свой, а не общий с оригиналом: записи о скопированных хендлерах
+             * придётся переписать, и правка общего задела бы оригинал. */
+            evidence = adamas_evidence_copy(source->evidence);
+            shared_source = source->evidence;
+            shared_copy = evidence;
+        }
         adamas_frame *copy =
             frame_alloc(adamas_frame_mark(source), source->label, source->code, source->branches,
-                        source->release, source->fields, source->evidence);
-        for (uint32_t index = 0; index < source->fields; index += 1) {
-            copy->env[index] = adamas_dup(source->env[index]);
+                        source->release, source->fields, source->counted, NULL);
+        /* Вектор ставится своей ссылкой: `frame_alloc` дупнул бы чужой. */
+        copy->evidence = evidence;
+        for (uint16_t index = 0; index < source->counted; index += 1) {
+            adamas_value slot = adamas_dup(source->env[index]);
+            /* Одношотная резумпция внутри мультишотного участка достаётся
+             * каждому проходу: потратив её первым, второй получил бы пустой
+             * сегмент. Ровно этот дефект машина закрыла признаком `multishot`
+             * (`eval/multi-over-oneshot`). */
+            if (!adamas_is_imm(slot) && adamas_tag(slot) == ADAMAS_TAG_SEGMENT) {
+                adamas_header_of(slot)->flags |= ADAMAS_FLAG_MULTI;
+            }
+            copy->env[index] = slot;
+        }
+        for (uint16_t index = source->counted; index < source->fields; index += 1) {
+            /* Плоский слот - биты (§4.11): дупать в нём нечего. */
+            copy->env[index] = source->env[index];
         }
         if (previous == NULL) {
             first = copy;
         } else {
             previous->below = copy;
         }
+        if (adamas_frame_mark(source) == ADAMAS_MARK_HANDLER) {
+            /* Запись вектора называет кадр, а у копии он свой. Переписываются
+             * только копии **выше** хендлера: ниже его записи нет по построению
+             * - вектор с ней родился на входе в хендлер. */
+            rebind_above(first, copy, source, copy);
+        }
         previous = copy;
         source = source->below;
     }
     return segment_alloc(first, previous);
+}
+
+adamas_value adamas_segment_multi(adamas_value resumption) {
+    adamas_header_of(adamas_segment_of(resumption))->flags |= ADAMAS_FLAG_MULTI;
+    return resumption;
 }
 
 void adamas_segment_unwind(adamas_kont *kont, adamas_segment *segment) {

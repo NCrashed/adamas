@@ -41,9 +41,12 @@ use std::path::PathBuf;
 /// ветки есть значение, и её судьбу решает владение.
 /// Плюс **маска** (§3.4): вычисление под ней идёт под вектором без ближайшей
 /// записи своей метки, и capstone `interpreter` этим берётся целиком.
+/// Плюс **мультишот** (трек E волны 4): возобновление ставит копию сегмента,
+/// пока на ручку резумпции есть лишние ссылки, и планировщик файберов
+/// `fibers`, написанный на самом языке, этим берётся целиком.
 /// Всё, что здесь стоит, обязано собраться и ответить как `adamas eval`; список
 /// сокращать нельзя, а пополнять - можно и нужно, когда фрагмент растёт.
-const TAKEN: [&str; 65] = [
+const TAKEN: [&str; 68] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -61,9 +64,11 @@ const TAKEN: [&str; 65] = [
     "classes",
     "decidable",
     "effect-multiplicity",
+    "effects",
     "erasure",
     "execution-positions",
     "existential",
+    "fibers",
     "field-effect",
     "flat",
     "flat-fields",
@@ -83,6 +88,7 @@ const TAKEN: [&str; 65] = [
     "module-family",
     "module-resource",
     "module-scope",
+    "multi-over-oneshot",
     "mutual-family",
     "nested-case-on-a-field",
     "nested-functor",

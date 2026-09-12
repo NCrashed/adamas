@@ -62,6 +62,40 @@ fn elaborated(source: &str) -> (Signature, Metas, Instances) {
     (signature, metas, instances)
 }
 
+/// Отказ **элаборации**: текст ошибки у исходника, который до понижения не
+/// доходит вовсе.
+///
+/// Нужно свидетелям порядка: «проверка стоит раньше понижения» читается только
+/// так - программа обязана быть отвергнута там, где понижения ещё нет.
+///
+/// # Panics
+///
+/// Исходник не разобрался либо, вопреки ожиданию, прошёл проверку.
+#[expect(
+    clippy::expect_used,
+    reason = "заготовка теста: пройденная проверка означает сломанный свидетель, и падать он должен громко"
+)]
+pub(crate) fn rejected(source: &str) -> String {
+    let module = adamas_parser::parse(source).expect("исходник обязан разбираться");
+    let mut signature = Signature::default();
+    let mut metas = Metas::default();
+    let mut owned = Owned::default();
+    let mut fixities = Fixities::default();
+    let mut instances = Instances::default();
+    let mut warnings = Warnings::new();
+    let error = adamas_elab::elaborate_into(
+        &module,
+        &mut signature,
+        &mut metas,
+        &mut owned,
+        &mut fixities,
+        &mut instances,
+        &mut warnings,
+    )
+    .expect_err("исходник обязан быть отвергнут проверкой");
+    error.to_string()
+}
+
 /// Тело определения с подставленными аргументами уровня и row - ровно то, что
 /// инстанцирует драйвер перед вычислением.
 #[expect(

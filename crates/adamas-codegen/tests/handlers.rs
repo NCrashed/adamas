@@ -242,28 +242,6 @@ fn a_pure_function_roots_its_own_stack() {
     assert_eq!(allocated, 12, "цена хендлера в блоках изменилась");
 }
 
-/// Мультишот отвергается по имени, со ссылкой на трек E.
-#[test]
-fn a_multishot_handler_is_refused_by_name() {
-    let source = format!(
-        "{SHAPE}\
-asked : {{Ask}} Nat
-asked = ask
-
-main : Nat
-main = handleMulti asked with
-  return v -> v
-  ask -> resume Zero
-"
-    );
-    let error = harness::compiled(&source).expect_err("мультишот - трек E");
-    let text = error.to_string();
-    assert!(
-        text.contains("#handleMulti.Ask") && text.contains("трек E"),
-        "отказ не назвал ни элиминатор, ни трек: {text}"
-    );
-}
-
 /// Операция в функции с плоским ответом отвергается: обрыв вернуть нечем.
 ///
 /// Вердикт `SUPPRESSED` требует вернуть ответ `adamas_kont_abort` немедленно

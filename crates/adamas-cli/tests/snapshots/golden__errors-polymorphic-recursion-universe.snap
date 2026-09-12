@@ -1,0 +1,11 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: polymorphic-recursion-universe.adamas:32:16: выводимый аргумент не укладывается в свой тип `(0 n : Nat) -> Type 0`: на его месте требуется `Type ?0`
+  atType n Nil = reject n
+                 ^^^^^^^^
+  в контексте:
+    (ω n : Nat)
+    (ω #0 : List{u0+1} Type u0)
+  путь: тело `atType` -> тело лямбды -> тело лямбды -> ветвь #0

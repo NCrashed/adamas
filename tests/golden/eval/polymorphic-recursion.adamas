@@ -1,0 +1,85 @@
+-- Самоссылка идёт на собственных параметрах уровня, и сколько их - решает
+-- обобщение, а не подсчёт до тела (§3.2, §10 вопросы 83 и 165).
+--
+-- `atTop` - обычная библиотечная форма `index`: полиморфна, зовёт себя,
+-- отказывает эффектом. Параметра уровня у неё нет вовсе - `reject` заземляет
+-- собственный параметр нулём, и `a` вместе с ним, - а самоссылка строится
+-- раньше тела, когда уровень ещё дырка. Число аргументов у неё выходило на
+-- один больше арности, и рекурсивный вызов отвергался.
+--
+-- Фикстура различает **уровень**, а не успех проверки. `lengthOf` отличается
+-- от `atTop` ровно отсутствием операции: параметр уровня у неё остаётся, и
+-- самоссылка обязана идти **с** ним - `List{0} a` внутри тела не тот же тип,
+-- что `List{u} a`. Нулём его не подменить и снаружи: `higher` считает список
+-- **типов**, то есть зовёт `lengthOf` в первом универсуме. Понижением `higher`
+-- не берётся - значения у семейства в рантайме нет, - и `main` его не зовёт;
+-- различает он проверкой.
+--
+-- Полиморфизм проверяется двумя типами элемента: тот же `atTop` ищет и в
+-- списке чисел, и в списке булевых.
+--
+-- Значение - `[2, 99, 1, 2]`: элемент по позиции, отказ за границей списка,
+-- тот же поиск на другом типе элемента, длина списка чисел.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Reject where
+  reject : Nat -> a
+
+-- Свидетель записи 165 дословно.
+atTop : Nat -> List a -> {Reject} a
+atTop n Nil = reject n
+atTop Zero (Cons x xs) = x
+atTop (Succ k) (Cons x xs) = atTop k xs
+
+-- Соседка без операции: параметр уровня остаётся, и самоссылка несёт его.
+lengthOf : List a -> Nat
+lengthOf Nil = Zero
+lengthOf (Cons x xs) = Succ (lengthOf xs)
+
+sample : List Nat
+sample = Cons 5 (Cons 2 Nil)
+
+flags : List Bool
+flags = Cons False (Cons True Nil)
+
+-- Список в первом универсуме: заземлённым нулём параметром его не пройти.
+types : List Type
+types = Cons Nat (Cons Bool (Cons Unit Nil))
+
+higher : Nat
+higher = lengthOf types
+
+runNat : ({Reject} Nat) -> Nat
+runNat act = handle act with
+  return v -> v
+  reject n -> 99
+
+runBool : ({Reject} Bool) -> Bool
+runBool act = handle act with
+  return v -> v
+  reject n -> False
+
+toNat : Bool -> Nat
+toNat False = Zero
+toNat True = 1
+
+main : List Nat
+main =
+  Cons (runNat (atTop 1 sample))
+    (Cons (runNat (atTop 5 sample))
+      (Cons (toNat (runBool (atTop 1 flags)))
+        (Cons (lengthOf sample) Nil)))

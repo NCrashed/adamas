@@ -1099,7 +1099,6 @@ impl Signature {
         } else {
             generalize(metas, arity, draft, None)
         };
-
         if let Member::Data {
             name,
             params,
@@ -1302,6 +1301,24 @@ impl Signature {
             Some(generalization) => generalization.apply_term(metas, body),
             None => body.clone(),
         };
+        // Самоссылка инстанцируется собственными параметрами уровня, и сколько
+        // их - решает обобщение, то есть **эта** фаза. Элаборация же строит
+        // самоссылку раньше, чем проверено тело, и число берёт по дыркам
+        // сигнатуры, какими они были **до** тела (`self_levels` в
+        // `adamas-elab`). Тело вправе их решить: операция заземляет свой
+        // собственный параметр нулём (§10 вопрос 83, вариант (а)), и
+        // `atTop : Nat -> List a -> {Reject} a` теряет параметр уровня на
+        // вызове `reject`. Тогда посчитанное раньше расходится с обобщённым, и
+        // ядро отвечает `LevelArity` на месте рекурсивного вызова (§10
+        // вопрос 165). Число обязано браться отсюда - переписыванием.
+        //
+        // Рекурсия по уровню при этом монотипна, и не этой строкой: элаборация
+        // даёт всем самоссылкам **один** список аргументов, поэтому назвать
+        // себя на другом уровне определению нечем и до сих пор было нечем.
+        let levels: Rc<[Level]> = (0..checked.declaration.level_arity)
+            .map(|index| Level::Var(LevelVar(index)))
+            .collect();
+        let body = relevelled(&body, name, &levels);
         let definition = Definition {
             body: Some(body.clone()),
             ..checked.declaration.clone()
@@ -2210,12 +2227,53 @@ fn resorted(ty: &Term, sort: &Level) -> Term {
 /// До обобщения они инертны: подставлять их некуда, параметров у семейства
 /// ещё нет. После - обязаны быть ровно его параметрами, и число их обязано
 /// сойтись с арностью, иначе ядро ответит `LevelArity` на собственной ссылке.
+///
+/// Обход полный - по всем узлам, как у [`Term::substitute_levels`]. Частичный
+/// не годится телу: самоссылка стоит в ветви `case`, а тип семейства до неё не
+/// доходит вовсе.
 fn relevelled(term: &Term, name: &Name, levels: &Rc<[Level]>) -> Term {
     let recur = |inner: &Rc<Term>| Rc::new(relevelled(inner, name, levels));
+    let fields = |fields: &crate::term::Fields| crate::term::Fields {
+        fields: fields
+            .iter()
+            .map(|field| crate::term::Field {
+                name: Rc::clone(&field.name),
+                mult: field.mult,
+                shape: field.shape,
+                ty: recur(&field.ty),
+            })
+            .collect(),
+        tail: fields.tail.as_ref().map(recur),
+    };
+    let named = |pairs: &Rc<[(Name, Rc<Term>)]>| -> Rc<[(Name, Rc<Term>)]> {
+        pairs
+            .iter()
+            .map(|(name, value)| (Rc::clone(name), recur(value)))
+            .collect()
+    };
     match term {
-        Term::Const(found, _, args) if found == name => {
-            Term::Const(Rc::clone(found), Rc::clone(levels), args.clone())
-        }
+        // Собственных уровней эти узлы не носят, а если носят - те не про
+        // `name`: универсум ссылкой на определение не бывает.
+        Term::Var(_)
+        | Term::Meta(_)
+        | Term::EffectKind
+        | Term::Prim(_)
+        | Term::Universe(_)
+        | Term::RowKind(_) => term.clone(),
+        Term::Const(found, carried, args) => Term::Const(
+            Rc::clone(found),
+            if found == name {
+                Rc::clone(levels)
+            } else {
+                Rc::clone(carried)
+            },
+            Args::new(
+                args.row_args()
+                    .iter()
+                    .map(|row| row.map(|argument| relevelled(argument, name, levels))),
+                args.mult_args().iter().copied(),
+            ),
+        ),
         Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
         Term::Lam(mult, bound, body) => Term::Lam(*mult, Rc::clone(bound), recur(body)),
         Term::Pi(binder, bound, domain, row, codomain) => Term::Pi(
@@ -2232,7 +2290,31 @@ fn relevelled(term: &Term, name: &Name, levels: &Rc<[Level]>) -> Term {
             recur(value),
             recur(body),
         ),
-        other => other.clone(),
+        Term::Record(it) => Term::Record(fields(it)),
+        Term::Row(it) => Term::Row(fields(it)),
+        Term::Object(it) => Term::Object(named(it)),
+        Term::With(base, it) => Term::With(recur(base), named(it)),
+        Term::Project(record, field) => Term::Project(recur(record), Rc::clone(field)),
+        Term::Case(case) => Term::Case(Rc::new(crate::term::Case {
+            data: Rc::clone(&case.data),
+            levels: if case.data == *name {
+                Rc::clone(levels)
+            } else {
+                case.levels.clone()
+            },
+            params: case.params,
+            consumed: case.consumed,
+            scrutinee: recur(&case.scrutinee),
+            motive: recur(&case.motive),
+            branches: case
+                .branches
+                .iter()
+                .map(|branch| crate::term::Branch {
+                    constructor: Rc::clone(&branch.constructor),
+                    body: recur(&branch.body),
+                })
+                .collect(),
+        })),
     }
 }
 

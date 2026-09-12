@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: mutual-sibling-two-levels.adamas:44:19: несовпадение типов: ожидался `List{0} (?34)`, получен `List{1} Type 0`
+    high = counting types
+                    ^^^^^
+  путь: тело `high` -> аргумент применения

@@ -1,0 +1,38 @@
+-- Полиморфный член группы, зовущий соседа, но не зовущий операции (§3.2, §10
+-- вопросы 83 и 167).
+--
+-- Граница решения «обобщать члена после его тела»: заземление приходит члену
+-- **от своего тела**. `atTop` зовёт `reject`, и её собственный параметр
+-- заземляется нулём; `afterTop` не зовёт ничего, её уровень остаётся дыркой,
+-- обобщается в `u0` - и ссылка на `atTop` требует нулевого.
+--
+-- Через ссылку на соседа заземление не передаётся, и причина не в порядке
+-- обобщения: решение дырки терма отвергается **её собственным типом**, а
+-- уровень при этом не унифицируется. Порядок написания членов ответа не
+-- меняет - перемерено обеими перестановками.
+--
+-- Ближайший проходящий сосед - `eval/mutual-polymorphic-recursion.adamas`:
+-- там операция стоит в теле **каждого** члена, и заземляется каждый сам.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Reject where
+  reject : Nat -> a
+
+mutual
+  atTop : Nat -> List a -> {Reject} a
+  atTop n Nil = reject n
+  atTop n (Cons x xs) = afterTop n x xs
+
+  afterTop : Nat -> a -> List a -> {Reject} a
+  afterTop Zero x xs = x
+  afterTop (Succ k) x xs = atTop k xs

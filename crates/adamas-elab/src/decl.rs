@@ -2070,14 +2070,22 @@ fn declare_members(
 /// которой стоят `data` и члены инстанса: имена и типы известны до проверки
 /// любого тела, поэтому ссылка на соседа законна.
 ///
-/// # Уровни: своя арность у каждого члена (§10 вопрос 54)
+/// # Уровни: своя арность у каждого члена, обобщение - после тела
 ///
-/// Обобщение идёт по **написанному типу** члена и до проверки всех тел - то
-/// же правило, что у одиночного определения, только применённое ко всем
-/// сразу. Отсюда и ссылки: на себя - своими параметрами, на соседа - свежими
-/// дырками, как всякая ссылка на объявленное. Общая арность на группу дала бы
-/// фантомные параметры члену, которому уровни не нужны, и решать их в месте
-/// использования было бы нечем. Решение от 2026-08-31.
+/// Арность у каждого члена **своя** (§10 вопрос 54, решение от 2026-08-31):
+/// общая на группу дала бы фантомные параметры члену, которому уровни не
+/// нужны, и решать их в месте использования было бы нечем.
+///
+/// Обобщается член **после своего тела**, как одиночное определение (§10
+/// вопрос 167): тип едет в тело дырками, тело их решает, арность считает
+/// фаза A ядра. Обобщать раньше нельзя, и это измерено: `reject` заземляет
+/// собственный параметр нулём (§10 вопрос 83), а член, обобщённый до тела,
+/// приезжает туда с готовым `Type u0`, и заземлять телу уже нечего.
+///
+/// Цена названа программой - `errors/mutual-sibling-two-levels.adamas`:
+/// необобщённый тип соседа общий на всю группу, поэтому по уровню сосед
+/// монотипен, и два тела не вправе звать его на разных уровнях. Внутри одного
+/// тела он монотипен и без этого - кэш инстанциаций держит одну копию на имя.
 #[allow(clippy::too_many_arguments)]
 fn declare_mutual(
     signature: &mut Signature,
@@ -2138,8 +2146,12 @@ fn declare_mutual(
                 .declaration(member.ty, Mult::Many)?,
         );
     }
+    // Арность считается здесь и никуда не объявляется: столько аргументов
+    // получат внутригрупповые ссылки, которые элаборация строит сейчас. К
+    // концу тел число устареет - его перепишет фаза B2 ядра по обобщению
+    // (§10 вопросы 165 и 167).
     let mut arities = Vec::with_capacity(planned.len());
-    let mut generalized = Vec::with_capacity(planned.len());
+    let mut written = Vec::with_capacity(planned.len());
     for (member, ty) in planned.iter().zip(&types) {
         // Тип проверяется **до** обобщения: `is_type` решает дырки уровня, и
         // без него применённое семейство приезжает сюда нерешённым - `List
@@ -2153,19 +2165,22 @@ fn declare_mutual(
             names: Names::of(&member.name.text, Vec::new()),
         })?;
         let zonked = zonk_term(metas, ty);
-        let mut generalization = Generalization::default();
-        generalization.collect_term(metas, &zonked);
-        arities.push((generalization.arity(), generalization.row_arity()));
-        generalized.push(generalization.apply_term(metas, &zonked));
+        let mut counting = Generalization::default();
+        counting.collect_term(metas, &zonked);
+        arities.push((counting.arity(), counting.row_arity()));
+        // Обобщения здесь нет: тип едет в тело дырками, чтобы тело могло их
+        // решить. Обобщит его фаза A ядра - после тел, как у одиночного
+        // определения (§10 вопрос 167).
+        written.push(zonked);
     }
 
     let mut trees = Vec::with_capacity(planned.len());
     for (at, member) in planned.iter().enumerate() {
-        let visible = siblings_of(metas, &planned, &arities, &generalized, at);
+        let visible = siblings_of(metas, &planned, &arities, &written, at);
         let compiled = {
             let mut elaborator =
                 Elaborator::with_group(signature, metas, owned, fixities, warnings, visible)
-                    .declaring(&generalized[at])
+                    .declaring(&written[at])
                     .suspending(suspends(member.ty));
             member
                 .clauses
@@ -2173,13 +2188,12 @@ fn declare_mutual(
                 .map(|clause| elaborator.clause(clause))
                 .collect::<Result<Vec<_>, _>>()?
         };
-        let tree =
-            compile_traced(signature, metas, &generalized[at], &compiled).map_err(|error| {
-                ElabError::Clauses {
-                    span: member.span,
-                    error: Box::new(error),
-                }
-            })?;
+        let tree = compile_traced(signature, metas, &written[at], &compiled).map_err(|error| {
+            ElabError::Clauses {
+                span: member.span,
+                error: Box::new(error),
+            }
+        })?;
         class::resolve(
             signature,
             metas,
@@ -2187,21 +2201,13 @@ fn declare_mutual(
             owned,
             None,
             &tree.term,
-            &generalized[at],
+            &written[at],
             member.span,
         )?;
         trees.push(tree);
     }
 
-    declare_definitions(
-        signature,
-        metas,
-        &planned,
-        &generalized,
-        &arities,
-        &trees,
-        span,
-    )?;
+    declare_definitions(signature, metas, &planned, &written, &trees, span)?;
     required_verdicts(signature, &planned, &trees)?;
     for member in &planned {
         carrier::check(signature, owned, &member.name.text, member.span)?;
@@ -2214,21 +2220,26 @@ fn declare_mutual(
 /// Маршрут группы начинается **номером члена**, и по нему ищутся оба: текст для
 /// каретки и имя для пути. Без них отказ вставал на слово `mutual`, каким бы
 /// длинным блок ни был, и звал члена как «член группы #1».
+///
+/// Арность **не объявляется вовсе**: обе половины считает обобщение в ядре,
+/// после тел (§10 вопрос 167). Объявить её здесь значило бы записать число,
+/// снятое до тела, - ровно ту устаревшую копию, из-за которой закрывался
+/// вопрос 165. Row-половину объявить нельзя и технически: тип приезжает в
+/// ядро необобщённым, хвост в нём - дырка, а объявленная row-арность
+/// запрещает её собирать, и группа отвергается «остался неразрешённый хвост
+/// row» (измерено).
 fn declare_definitions(
     signature: &mut Signature,
     metas: &mut Metas,
     planned: &[&Mutual<'_>],
-    generalized: &[Term],
-    arities: &[(u32, u32)],
+    written: &[Term],
     trees: &[Compiled],
     span: Span,
 ) -> Result<(), ElabError> {
     let mut group: Option<Group> = None;
     for (at, member) in planned.iter().enumerate() {
-        let declared =
-            SigMember::definition(&member.name.text, Mult::Many, generalized[at].clone())
-                .with_body(trees[at].term.clone())
-                .with_arity(arities[at].0, arities[at].1);
+        let declared = SigMember::definition(&member.name.text, Mult::Many, written[at].clone())
+            .with_body(trees[at].term.clone());
         group = Some(match group {
             None => Group::of(declared),
             Some(group) => group.and(declared),
@@ -2269,11 +2280,18 @@ fn declare_definitions(
 /// тождественна, а ядро её не ловит. Параметры соседа читались после этого как
 /// свои, и `mutual` над двумя эффектными сигнатурами отвергался сообщением про
 /// переменную, которой в области видимости нет.
+///
+/// **По уровням списки инертны, и это намеренно** (§10 вопрос 167). Тип
+/// приходит сюда необобщённым - параметров в нём нет, подставлять некуда, - а
+/// сам список едет в `Term::Const` аргументами и устаревает вместе с арностью,
+/// которую тело решит. Переписывает его фаза B2 ядра по обобщению; здесь
+/// важно лишь, чтобы у каждой ссылки список **был**. Ряды - наоборот: их
+/// арность объявляется, значит подстановка настоящая.
 fn siblings_of(
     metas: &mut Metas,
     planned: &[&Mutual<'_>],
     arities: &[(u32, u32)],
-    generalized: &[Term],
+    written: &[Term],
     at: usize,
 ) -> Vec<Member> {
     let mut visible = Vec::with_capacity(planned.len());
@@ -2292,7 +2310,7 @@ fn siblings_of(
         } else {
             (0..arities[other].1).map(|_| metas.fresh_row()).collect()
         };
-        let ty = generalized[other]
+        let ty = written[other]
             .substitute_levels(&levels)
             .substitute_rows(&rows);
         visible.push(Member {

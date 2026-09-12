@@ -48,7 +48,7 @@ use std::path::PathBuf;
 /// после операции едет из куска в кусок словом, и ширина её наблюдаема.
 /// Всё, что здесь стоит, обязано собраться и ответить как `adamas eval`; список
 /// сокращать нельзя, а пополнять - можно и нужно, когда фрагмент растёт.
-const TAKEN: [&str; 70] = [
+const TAKEN: [&str; 71] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -93,6 +93,7 @@ const TAKEN: [&str; 70] = [
     "module-scope",
     "multi-over-oneshot",
     "mutual-family",
+    "mutual-polymorphic-recursion",
     "nested-case-on-a-field",
     "nested-functor",
     "nested-rowed-signature",

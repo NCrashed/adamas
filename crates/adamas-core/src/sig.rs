@@ -909,9 +909,10 @@ impl Signature {
 
         // (B2) тела определений - с полной таблицей конструкторов.
         let mut bodies = Vec::with_capacity(members.len());
-        for (index, (member, checked)) in members.iter().zip(&checked).enumerate() {
+        for (index, (member, at_checked)) in members.iter().zip(&checked).enumerate() {
+            let siblings = sibling_levels(metas, members, &checked, index);
             bodies.push(
-                self.check_member_body(metas, member, checked)
+                self.check_member_body(metas, member, at_checked, &siblings)
                     .map_err(|error| error.in_frame(Frame::MemberBody(at(index))))?,
             );
         }
@@ -1308,6 +1309,7 @@ impl Signature {
         metas: &mut Metas,
         member: &Member,
         checked: &Checked,
+        siblings: &[(Name, Rc<[Level]>)],
     ) -> Result<Option<CheckedBody>, TypeError> {
         let Member::Definition {
             name,
@@ -1338,10 +1340,23 @@ impl Signature {
         // Рекурсия по уровню при этом монотипна, и не этой строкой: элаборация
         // даёт всем самоссылкам **один** список аргументов, поэтому назвать
         // себя на другом уровне определению нечем и до сих пор было нечем.
+        //
+        // Ссылка на **соседа по группе** устаревает тем же способом и по той
+        // же причине, поэтому переписывается тем же ходом (§10 вопрос 167):
+        // список ей даёт [`sibling_levels`]. Самоссылка - его частный случай,
+        // но записана отдельно: у члена с объявленной арностью обобщения нет
+        // вовсе, а параметры уровня есть.
         let levels: Rc<[Level]> = (0..checked.declaration.level_arity)
             .map(|index| Level::Var(LevelVar(index)))
             .collect();
-        let body = relevelled(&body, name, &levels);
+        let mut targets: Vec<(Name, Rc<[Level]>)> = vec![(Rc::clone(name), levels)];
+        targets.extend(
+            siblings
+                .iter()
+                .filter(|(sibling, _)| sibling != name)
+                .map(|(sibling, levels)| (Rc::clone(sibling), Rc::clone(levels))),
+        );
+        let body = relevelled(&body, &targets);
         let definition = Definition {
             body: Some(body.clone()),
             ..checked.declaration.clone()
@@ -1387,7 +1402,8 @@ impl Signature {
         // они инертны - подставлять по ним нечего, параметров у семейства ещё
         // нет, - и собранные наравне с прочими дырками они стали бы лишними
         // параметрами, которых семейство не просило.
-        let stripped = |ty: &Term| relevelled(ty, name, &Rc::from([]));
+        let bare: Vec<(Name, Rc<[Level]>)> = vec![(Rc::clone(name), Rc::from([]))];
+        let stripped = |ty: &Term| relevelled(ty, &bare);
         let family = stripped(&family.ty);
         // Зонкать типы конструкторов здесь нельзя, и это измерено: решение
         // дырки терма разворачивается цепочкой лямбд, и на месте домена встаёт
@@ -1406,7 +1422,8 @@ impl Signature {
         let levels: Rc<[Level]> = (0..arity)
             .map(|index| Level::Var(LevelVar(index)))
             .collect();
-        let settle = |ty: &Term| relevelled(&generalization.apply_term(metas, ty), name, &levels);
+        let settled: Vec<(Name, Rc<[Level]>)> = vec![(Rc::clone(name), Rc::clone(&levels))];
+        let settle = |ty: &Term| relevelled(&generalization.apply_term(metas, ty), &settled);
         let ty = settle(&family);
         let sort = data_sort(name, *params, &ty)?;
         let Some(stored) = self.definitions.get_mut(name) else {
@@ -2247,7 +2264,50 @@ fn resorted(ty: &Term, sort: &Level) -> Term {
     }
 }
 
-/// Переписывает аргументы уровня у ссылок на `name`.
+/// Чем `index`-й член группы называет соседей по уровню.
+///
+/// Ссылка на соседа внутри группы **монотипна**: элаборация даёт члену
+/// необобщённый тип соседа, поэтому дырки у них общие. Значит и аргументы
+/// уровня у ссылки - те же дырки, только увиденные обобщением вызывающего.
+/// Число их берётся у обобщения **соседа**, а не у подсчёта до тела: тело
+/// вправе дырку решить, и посчитанное раньше расходится (§10 вопросы 165, 167).
+///
+/// Дырка, которой у вызывающего не оказалось, остаётся дыркой: `apply_level`
+/// её не отображает, и до границы группы она доживает нерешённой - там её и
+/// назовут. Молча подставленный чужой параметр был бы хуже.
+///
+/// Члены не-определения пропускаются: семейство своей группы объявляется
+/// раньше (`declare_families`), в теле инстанцируется как всякое объявленное
+/// имя и монотипным по уровню не становится.
+fn sibling_levels(
+    metas: &Metas,
+    members: &[Member],
+    checked: &[Checked],
+    index: usize,
+) -> Vec<(Name, Rc<[Level]>)> {
+    let Some(ours) = checked[index].generalization.as_ref() else {
+        return Vec::new();
+    };
+    members
+        .iter()
+        .zip(checked)
+        .enumerate()
+        .filter(|(other, (member, _))| {
+            *other != index && matches!(member, Member::Definition { .. })
+        })
+        .filter_map(|(_, (member, checked))| {
+            let theirs = checked.generalization.as_ref()?;
+            let levels: Rc<[Level]> = theirs
+                .collected()
+                .iter()
+                .map(|level| ours.apply_level(metas, level))
+                .collect();
+            Some((Rc::clone(member.name()), levels))
+        })
+        .collect()
+}
+
+/// Переписывает аргументы уровня у ссылок на имена из `targets`.
 ///
 /// До обобщения они инертны: подставлять их некуда, параметров у семейства
 /// ещё нет. После - обязаны быть ровно его параметрами, и число их обязано
@@ -2256,8 +2316,14 @@ fn resorted(ty: &Term, sort: &Level) -> Term {
 /// Обход полный - по всем узлам, как у [`Term::substitute_levels`]. Частичный
 /// не годится телу: самоссылка стоит в ветви `case`, а тип семейства до неё не
 /// доходит вовсе.
-fn relevelled(term: &Term, name: &Name, levels: &Rc<[Level]>) -> Term {
-    let recur = |inner: &Rc<Term>| Rc::new(relevelled(inner, name, levels));
+fn relevelled(term: &Term, targets: &[(Name, Rc<[Level]>)]) -> Term {
+    let found_levels = |found: &Name| {
+        targets
+            .iter()
+            .find(|(name, _)| name == found)
+            .map(|(_, levels)| Rc::clone(levels))
+    };
+    let recur = |inner: &Rc<Term>| Rc::new(relevelled(inner, targets));
     let fields = |fields: &crate::term::Fields| crate::term::Fields {
         fields: fields
             .iter()
@@ -2287,15 +2353,11 @@ fn relevelled(term: &Term, name: &Name, levels: &Rc<[Level]>) -> Term {
         | Term::RowKind(_) => term.clone(),
         Term::Const(found, carried, args) => Term::Const(
             Rc::clone(found),
-            if found == name {
-                Rc::clone(levels)
-            } else {
-                Rc::clone(carried)
-            },
+            found_levels(found).unwrap_or_else(|| Rc::clone(carried)),
             Args::new(
                 args.row_args()
                     .iter()
-                    .map(|row| row.map(|argument| relevelled(argument, name, levels))),
+                    .map(|row| row.map(|argument| relevelled(argument, targets))),
                 args.mult_args().iter().copied(),
             ),
         ),
@@ -2305,7 +2367,7 @@ fn relevelled(term: &Term, name: &Name, levels: &Rc<[Level]>) -> Term {
             *binder,
             Rc::clone(bound),
             recur(domain),
-            row.map(|argument| relevelled(argument, name, levels)),
+            row.map(|argument| relevelled(argument, targets)),
             recur(codomain),
         ),
         Term::Let(mult, bound, ty, value, body) => Term::Let(
@@ -2322,11 +2384,7 @@ fn relevelled(term: &Term, name: &Name, levels: &Rc<[Level]>) -> Term {
         Term::Project(record, field) => Term::Project(recur(record), Rc::clone(field)),
         Term::Case(case) => Term::Case(Rc::new(crate::term::Case {
             data: Rc::clone(&case.data),
-            levels: if case.data == *name {
-                Rc::clone(levels)
-            } else {
-                case.levels.clone()
-            },
+            levels: found_levels(&case.data).unwrap_or_else(|| case.levels.clone()),
             params: case.params,
             consumed: case.consumed,
             scrutinee: recur(&case.scrutinee),

@@ -487,6 +487,21 @@ enum Arg<'a> {
 /// Захват среды: связывания, их значения на месте и среда вложенного тела.
 type Captured = (Vec<Binding>, Vec<Expr>, Vec<Slot>);
 
+/// Площадка `handle` глазами одной ветки: всё, что у веток общее.
+///
+/// Одной записью, а не пятью аргументами: у каждой ветки эти четыре одни и те
+/// же, различают их только тело и число связываний.
+struct Site<'a> {
+    /// Захваченная среда веток - она лежит в кадре хендлера.
+    captured: &'a [Binding],
+    /// Среда вложенного тела: чем видны захваты изнутри ветки.
+    inner: &'a [Slot],
+    /// Метка площадки - её называет отказ по вердикту.
+    effect: &'a Name,
+    /// Мультишотна ли площадка: `#handleMulti.L` против `#handle.L` (§3.4).
+    multi: bool,
+}
+
 /// Где лежит связывание, видимое телу.
 #[derive(Clone, Debug)]
 enum Slot {
@@ -1839,7 +1854,14 @@ impl<'a> Lowerer<'a> {
         // по той же причине, что и выход из scope: тела у них нет, а смысл есть.
         if let Some(effect) = name.strip_prefix(HANDLE) {
             let effect: Name = Rc::from(effect);
-            return self.handled(scope, name, &effect, arguments);
+            return self.handled(scope, name, &effect, arguments, false);
+        }
+        // Мультишот идёт тем же путём, и различие ровно одно: ручка резумпции
+        // помечается мультишотной, а вердикт всех веток - общий. Сколько раз
+        // позовут ω-резумпцию, написанному телу не видно (§3.4).
+        if let Some(effect) = name.strip_prefix(MULTI) {
+            let effect: Name = Rc::from(effect);
+            return self.handled(scope, name, &effect, arguments, true);
         }
         // Параметризованный идёт тем же путём, что одношотный: тип у третьего
         // элиминатора тот же, различие только в имени (§10 вопрос 129). Кадра
@@ -1849,19 +1871,13 @@ impl<'a> Lowerer<'a> {
         // ставит `perceus` обычным правилом.
         if let Some(effect) = name.strip_prefix(STATEFUL) {
             let effect: Name = Rc::from(effect);
-            return self.handled(scope, name, &effect, arguments);
+            return self.handled(scope, name, &effect, arguments, false);
         }
         // Маска кадра не ставит вовсе: её понижение есть вектор без ближайшей
         // записи своей метки, и вычисление под ним.
         if let Some(effect) = name.strip_prefix(MASK) {
             let effect: Name = Rc::from(effect);
             return self.masked(scope, name, &effect, arguments);
-        }
-        if name.starts_with(MULTI) {
-            return Err(LowerError::Handler {
-                name: name.to_string(),
-                why: "мультишот: копирование звеньев сегмента, трек E волны 4",
-            });
         }
         match &self.definition(name)?.kind {
             DefinitionKind::Constructor { .. } => self.built(scope, name, arguments),
@@ -2122,16 +2138,22 @@ impl<'a> Lowerer<'a> {
     ///
     /// Вердикт ветки считается **по написанному**, а не по графу (решение 2):
     /// хвостово-резумптивная - `resume` в хвосте, абортивная - `resume` не
-    /// зовётся, общая - всё прочее. Берётся первая; вторая уходит треку C
-    /// (снятие сегмента), третья - треку D (резумпция значением). Отказ
-    /// называет ветку по имени операции: молча посчитать не то хуже, чем не
-    /// посчитать.
+    /// зовётся, общая - всё прочее.
+    ///
+    /// # Мультишот
+    ///
+    /// `#handleMulti.L` понижается тем же путём, и различий два. Вердикт всех
+    /// его веток - общий: «`resume` стоит в хвосте» у ω-резумпции не значит
+    /// «зовётся один раз», а по написанному телу число вызовов не считается
+    /// вовсе. И ручка резумпции помечается мультишотной - возобновление ставит
+    /// копию сегмента (§3.4, «Стоимость multi-shot»).
     fn handled(
         &mut self,
         scope: &mut Scope,
         eliminator: &Name,
         effect: &Name,
         arguments: &[Arg<'_>],
+        multi: bool,
     ) -> Result<(Expr, Repr), LowerError> {
         let label = self.label(effect)?;
         let DefinitionKind::Effect { operations, params } = &self.definition(effect)?.kind else {
@@ -2173,13 +2195,18 @@ impl<'a> Lowerer<'a> {
         }
         let (captured, taken, inner) = Self::capturing(scope, &free, "захват ветки хендлера")?;
 
+        let site = Site {
+            captured: &captured,
+            inner: &inner,
+            effect,
+            multi,
+        };
         let mut branches = Vec::with_capacity(operations.len());
         for (slot, operation) in operations.iter().enumerate() {
             let Arg::Written(term) = &arguments[params + 4 + slot] else {
                 unreachable!("написанность веток проверена выше")
             };
-            let (function, verdict) =
-                self.branch(&captured, &inner, term, written[slot], effect, operation)?;
+            let (function, verdict) = self.branch(&site, term, written[slot], operation)?;
             branches.push(Branch {
                 function,
                 written: written[slot],
@@ -2194,6 +2221,7 @@ impl<'a> Lowerer<'a> {
         let handler = HandlerId(u32::try_from(self.handlers.len()).unwrap_or(u32::MAX));
         self.handlers.push(Handler {
             label,
+            multi,
             captured,
             branches,
             returned,
@@ -2331,15 +2359,25 @@ impl<'a> Lowerer<'a> {
     /// **Общая**: `resume` зовётся, но не в хвосте. Сегмент режется в значение
     /// и приходит ветке лишним параметром; возобновление ставит его обратно
     /// ([`Expr::Resume`]), а недожившая резумпция раскручивается своим дропом.
+    ///
+    /// У мультишотного хендлера вердикт **не считается**, а берётся общим у
+    /// всех веток: две первые формы стоят на «резумпция зовётся не более
+    /// одного раза», а ω-резумпция этого не обещает (§3.4). Цена названа -
+    /// ветка `toss -> resume True` платит за разрез сегмента, которого
+    /// одношотная не платила; снимет её инлайнинг, вопрос 74.
     fn branch(
         &mut self,
-        captured: &[Binding],
-        inner: &[Slot],
+        site: &Site<'_>,
         term: &Term,
         written: usize,
-        effect: &Name,
         operation: &Name,
     ) -> Result<(FuncId, Verdict), LowerError> {
+        let Site {
+            captured,
+            inner,
+            effect,
+            multi,
+        } = *site;
         let mut nested = Scope {
             locals: u32::try_from(captured.len()).unwrap_or(u32::MAX),
             env: inner.to_vec(),
@@ -2380,26 +2418,30 @@ impl<'a> Lowerer<'a> {
         // `mentions` - нормализованное, и ветка с имплиситом в аргументе
         // проходит только в этом порядке (измерено на
         // `region-allocates-and-reads`).
-        let (rewritten, verdict) = match untail(&body, 0, context) {
-            // Хвост снят, и больше резумпция нигде не названа: сегмент цел.
-            Some(rewritten) if !mentions(&rewritten, 0, context) => (rewritten, Verdict::Tail),
-            // Резумпцию тело не зовёт, но **назвать** её редекс имплисита
-            // может, а слот её пуст: тогда понижается нормализованное - там
-            // имени уже нет.
-            None if !mentions(&body, 0, context) => {
-                let mut free = BTreeSet::new();
-                escaping(&body, 0, &mut free);
-                let taken = if free.contains(&0) {
-                    normalized(&body, context)
-                } else {
-                    (*body).clone()
-                };
-                (taken, Verdict::Abortive)
+        let (rewritten, verdict) = if multi {
+            ((*body).clone(), Verdict::General)
+        } else {
+            match untail(&body, 0, context) {
+                // Хвост снят, и больше резумпция нигде не названа: сегмент цел.
+                Some(rewritten) if !mentions(&rewritten, 0, context) => (rewritten, Verdict::Tail),
+                // Резумпцию тело не зовёт, но **назвать** её редекс имплисита
+                // может, а слот её пуст: тогда понижается нормализованное - там
+                // имени уже нет.
+                None if !mentions(&body, 0, context) => {
+                    let mut free = BTreeSet::new();
+                    escaping(&body, 0, &mut free);
+                    let taken = if free.contains(&0) {
+                        normalized(&body, context)
+                    } else {
+                        (*body).clone()
+                    };
+                    (taken, Verdict::Abortive)
+                }
+                // Общая. Понижается **написанное** тело, как у двух прочих
+                // вердиктов: нормализация здесь сводила бы и `let`, то есть
+                // размножала бы вычисление по вхождениям связывания.
+                _ => ((*body).clone(), Verdict::General),
             }
-            // Общая. Понижается **написанное** тело, как у двух прочих
-            // вердиктов: нормализация здесь сводила бы и `let`, то есть
-            // размножала бы вычисление по вхождениям связывания.
-            _ => ((*body).clone(), Verdict::General),
         };
 
         for binding in &bindings {
@@ -2413,7 +2455,11 @@ impl<'a> Lowerer<'a> {
             let resumption = Binding {
                 name: "резумпция".to_owned(),
                 local: nested.fresh(),
-                fact: Fact::present(Mult::One).shaped(Repr::Resumption),
+                // Кратность стоит на самой резумпции: `1` у `handle`, `ω` у
+                // `handleMulti` (§3.4). Вставке RC она безразлична - та считает
+                // вхождения, - но факт этот принадлежит связыванию.
+                fact: Fact::present(if multi { Mult::Many } else { Mult::One })
+                    .shaped(Repr::Resumption),
             };
             nested
                 .env

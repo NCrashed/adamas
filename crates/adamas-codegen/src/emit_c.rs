@@ -840,6 +840,24 @@ fn frame_release_signature(name: &str) -> String {
     format!("static void {name}(adamas_frame *h, adamas_kont *kont)")
 }
 
+/// Одна ветвь `switch`'а веток: всё, чем ветки различаются между собой.
+struct Dispatch<'a> {
+    /// Метка `case`: номер операции либо `ADAMAS_HANDLER_RETURN`.
+    case: &'a str,
+    /// Имя операции - им подписан порождённый C.
+    title: &'a str,
+    /// Слотов в среде кадра.
+    env: usize,
+    /// Функция тела ветки.
+    function: FuncId,
+    /// Сколько аргументов операции она связывает.
+    written: usize,
+    /// Её вердикт (§3.4).
+    verdict: Verdict,
+    /// Мультишотна ли площадка.
+    multi: bool,
+}
+
 /// Ветки одной площадки `handle` одной функцией: их выбирает номер операции.
 ///
 /// Одной, а не по функции на ветку, потому что выбирает их **рантайм**:
@@ -874,15 +892,20 @@ fn frame_release_signature(name: &str) -> String {
 /// резумпции здесь нет и не нужно (§10 вопрос 129): у машины его требовал
 /// признак «резумпцию не позвали», считаемый на возврате ветки, а владение
 /// отвечает на тот же вопрос точнее и без точки.
-fn dispatch(
-    out: &mut String,
-    case: &str,
-    title: &str,
-    env: usize,
-    function: FuncId,
-    written: usize,
-    verdict: Verdict,
-) {
+/// **Мультишотная** режет так же, но помечает ручку: возобновление будет
+/// ставить копию сегмента, пока на ручку есть лишние ссылки
+/// (`adamas_segment_multi`, §3.4 «Стоимость multi-shot»). Вердикт у всех её
+/// веток общий - сколько раз позовут ω-резумпцию, телу ветки не видно.
+fn dispatch(out: &mut String, arm: &Dispatch<'_>) {
+    let &Dispatch {
+        case,
+        title,
+        env,
+        function,
+        written,
+        verdict,
+        multi,
+    } = arm;
     let _ = writeln!(out, "    case {case}: {{ /* {title} */");
     let _ = writeln!(
         out,
@@ -903,10 +926,13 @@ fn dispatch(
     given.extend((0..env).map(|slot| format!("adamas_dup(env[{slot}])")));
     given.extend((0..written).map(|slot| format!("args[{slot}]")));
     if verdict == Verdict::General {
-        let _ = writeln!(
-            out,
-            "        adamas_value seized = adamas_segment_value(adamas_kont_cut(kont, h));"
-        );
+        let seized = "adamas_segment_value(adamas_kont_cut(kont, h))";
+        let seized = if multi {
+            format!("adamas_segment_multi({seized})")
+        } else {
+            seized.to_owned()
+        };
+        let _ = writeln!(out, "        adamas_value seized = {seized};");
         given.push("seized".to_owned());
     }
     let _ = writeln!(
@@ -943,23 +969,29 @@ fn branches(out: &mut String, program: &Program, at: usize) {
             .map_or_else(|| format!("#{slot}"), |name| escaped(name));
         dispatch(
             out,
-            &format!("{slot}u"),
-            &title,
-            env,
-            branch.function,
-            branch.written,
-            branch.verdict,
+            &Dispatch {
+                case: &format!("{slot}u"),
+                title: &title,
+                env,
+                function: branch.function,
+                written: branch.written,
+                verdict: branch.verdict,
+                multi: described.multi,
+            },
         );
     }
     dispatch(
         out,
-        "ADAMAS_HANDLER_RETURN",
-        "return",
-        env,
-        described.returned,
-        1,
-        // Резумпции у неё нет вовсе: вычисление договорило, снимать нечего.
-        Verdict::Tail,
+        &Dispatch {
+            case: "ADAMAS_HANDLER_RETURN",
+            title: "return",
+            env,
+            function: described.returned,
+            written: 1,
+            // Резумпции у неё нет вовсе: вычисление договорило, снимать нечего.
+            verdict: Verdict::Tail,
+            multi: false,
+        },
     );
     let _ = writeln!(out, "    default: break;");
     let _ = writeln!(out, "    }}");
@@ -2351,22 +2383,28 @@ impl Emitter<'_> {
         let mut inner = BTreeSet::new();
         crate::split::introduces(body, &mut inner);
         inner.insert(binding.local);
-        let env: Vec<(LocalId, Repr)> = called
+        let mut env: Vec<(LocalId, Repr)> = called
             .into_iter()
             .filter(|local| !inner.contains(local))
             .filter_map(|local| self.reprs.get(&local).map(|repr| (local, *repr)))
             .collect();
+        // Счётные слоты идут первыми, и это соглашение с рантаймом
+        // (`adamas_kont_push`): копия сегмента дупает ровно их, а плоский слот
+        // лежит битами - заголовка у него нет, и `adamas_dup` по нему написал
+        // бы счётчик по чужому адресу. Сортировка устойчивая, поэтому порядок
+        // внутри каждой половины прежний.
+        env.sort_by_key(|(_, repr)| !repr.counted());
+        let counted = env.iter().filter(|(_, repr)| repr.counted()).count();
         let at = self.chunks.len();
         self.chunks.push(String::new());
         let code = format!("fn_{}_k{at}", self.id.0);
-        let counted = env.iter().any(|(_, repr)| repr.counted());
-        let release = if counted {
+        let release = if counted > 0 {
             format!("release_{}_k{at}", self.id.0)
         } else {
             "NULL".to_owned()
         };
         self.forward.push(format!("{};", chunk_signature(&code)));
-        if counted {
+        if counted > 0 {
             self.forward
                 .push(format!("{};", frame_release_signature(&release)));
         }
@@ -2375,7 +2413,7 @@ impl Emitter<'_> {
         let _ = writeln!(
             self.out,
             "{pad}adamas_frame *{frame} = adamas_kont_push(kont, ADAMAS_MARK_PLAIN, 0u, {code}, \
-             {release}, {}u, ev); /* продолжение */",
+             {release}, {}u, {counted}u, ev); /* продолжение */",
             env.len()
         );
         if !env.is_empty() {
@@ -2401,7 +2439,7 @@ impl Emitter<'_> {
         // сюда он приходит от кадра - заимствованным.
         let epilogue = std::mem::take(&mut self.epilogue);
         self.chunk(&code, &env, binding, body);
-        if counted {
+        if counted > 0 {
             self.chunk_release(&release, &env);
         }
         self.chunks[at] = std::mem::replace(&mut self.out, held);

@@ -114,6 +114,30 @@ void adamas_evidence_suppress(adamas_evidence *evidence, const adamas_frame *han
     }
 }
 
+void adamas_evidence_rebind(adamas_evidence *evidence, const adamas_frame *from,
+                            adamas_frame *to) {
+    if (evidence == NULL) {
+        return;
+    }
+    for (size_t index = 0; index < evidence->count; index += 1) {
+        if (evidence->entries[index].handler == from) {
+            evidence->entries[index].handler = to;
+        }
+    }
+}
+
+int adamas_evidence_names(const adamas_evidence *evidence, const adamas_frame *handler) {
+    if (evidence == NULL) {
+        return 0;
+    }
+    for (size_t index = 0; index < evidence->count; index += 1) {
+        if (evidence->entries[index].handler == handler) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 size_t adamas_evidence_count(const adamas_evidence *evidence) {
     return evidence == NULL ? 0 : evidence->count;
 }

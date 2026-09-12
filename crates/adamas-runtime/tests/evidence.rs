@@ -30,11 +30,11 @@ fn search_goes_from_the_innermost_outwards() {
 
         // Два хендлера одной метки и один чужой между ними.
         let empty = adamas_evidence_empty();
-        let outer = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, empty);
+        let outer = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, 0, empty);
         let first = adamas_evidence_extend(empty, 7, outer);
-        let middle = adamas_kont_push(&raw mut kont, MARK_HANDLER, 9, None, None, 0, first);
+        let middle = adamas_kont_push(&raw mut kont, MARK_HANDLER, 9, None, None, 0, 0, first);
         let second = adamas_evidence_extend(first, 9, middle);
-        let inner = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, second);
+        let inner = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, 0, second);
         let third = adamas_evidence_extend(second, 7, inner);
 
         assert_eq!(adamas_evidence_count(third), 3);
@@ -68,9 +68,9 @@ fn a_suppressed_entry_is_neither_missing_nor_live() {
 
         // Две записи одной метки: внешняя жива, внутренняя ответ уже дала.
         let empty = adamas_evidence_empty();
-        let outer = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, empty);
+        let outer = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, 0, empty);
         let first = adamas_evidence_extend(empty, 7, outer);
-        let inner = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, first);
+        let inner = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, 0, first);
         let second = adamas_evidence_extend(first, 7, inner);
 
         let closing = adamas_evidence_copy(second);
@@ -114,13 +114,13 @@ fn a_mask_takes_the_nearest_entry_of_its_label() {
 
         // Три записи метки 7 и чужая между второй и третьей.
         let empty = adamas_evidence_empty();
-        let outer = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, empty);
+        let outer = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, 0, empty);
         let first = adamas_evidence_extend(empty, 7, outer);
-        let middle = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, first);
+        let middle = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, 0, first);
         let second = adamas_evidence_extend(first, 7, middle);
-        let alien = adamas_kont_push(&raw mut kont, MARK_HANDLER, 9, None, None, 0, second);
+        let alien = adamas_kont_push(&raw mut kont, MARK_HANDLER, 9, None, None, 0, 0, second);
         let third = adamas_evidence_extend(second, 9, alien);
-        let inner = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, third);
+        let inner = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, 0, third);
         let fourth = adamas_evidence_extend(third, 7, inner);
 
         let once = adamas_evidence_mask(fourth, 7);

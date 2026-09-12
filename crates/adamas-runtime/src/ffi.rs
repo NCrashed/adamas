@@ -232,6 +232,10 @@ unsafe extern "C" {
     pub fn adamas_evidence_copy(evidence: *const Evidence) -> *mut Evidence;
     /// Помечает подавленной запись этого кадра-хендлера.
     pub fn adamas_evidence_suppress(evidence: *mut Evidence, handler: *const Frame);
+    /// Переписывает записи, называющие `from`, на кадр `to`: копия сегмента.
+    pub fn adamas_evidence_rebind(evidence: *mut Evidence, from: *const Frame, to: *mut Frame);
+    /// Называет ли вектор этот кадр хоть одной записью.
+    pub fn adamas_evidence_names(evidence: *const Evidence, handler: *const Frame) -> c_int;
     /// Берёт лишнюю ссылку на вектор.
     pub fn adamas_evidence_dup(evidence: *mut Evidence) -> *mut Evidence;
     /// Отдаёт ссылку на вектор.
@@ -271,6 +275,7 @@ unsafe extern "C" {
         code: FrameCode,
         release: FrameRelease,
         fields: usize,
+        counted: usize,
         evidence: *const Evidence,
     ) -> *mut Frame;
     /// Кадр `HANDLER` с ветками вместо кода отложенной работы.
@@ -294,6 +299,8 @@ unsafe extern "C" {
     pub fn adamas_frame_env(frame: *mut Frame) -> *mut Value;
     /// Слотов в среде кадра.
     pub fn adamas_frame_fields(frame: *const Frame) -> usize;
+    /// Сколько первых слотов среды считаются RC.
+    pub fn adamas_frame_counted(frame: *const Frame) -> usize;
     /// Метка кадра.
     pub fn adamas_frame_mark(frame: *const Frame) -> u16;
     /// Метка эффекта у меченого кадра.
@@ -315,8 +322,10 @@ unsafe extern "C" {
     pub fn adamas_segment_depth(segment: *const Segment) -> usize;
     /// Нижний кадр сегмента.
     pub fn adamas_segment_base(segment: *mut Segment) -> *mut Frame;
-    /// Копия сегмента: звенья свои, поля общие через `dup`.
+    /// Копия сегмента: звенья и векторы свои, счётные поля общие через `dup`.
     pub fn adamas_segment_copy(segment: *const Segment) -> *mut Segment;
+    /// Помечает ручку мультишотной: возобновление будет копировать (§3.4).
+    pub fn adamas_segment_multi(resumption: Value) -> Value;
     /// Раскрутка: кладётся кадром `UNWINDING`, деструкторы выполнит
     /// `adamas_kont_run` в порядке LIFO.
     pub fn adamas_segment_unwind(kont: *mut Kont, segment: *mut Segment);

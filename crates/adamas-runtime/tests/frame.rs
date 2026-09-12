@@ -147,6 +147,7 @@ unsafe extern "C" fn probing(
             Some(noting),
             None,
             1,
+            1,
             evidence.cast_mut(),
         );
         *adamas_frame_env(deferred) = adamas_imm(77);
@@ -180,7 +181,16 @@ unsafe fn push_holding(
     evidence: *mut Evidence,
 ) -> *mut Frame {
     unsafe {
-        let frame = adamas_kont_push(kont, mark, 0, Some(code), Some(release_held), 1, evidence);
+        let frame = adamas_kont_push(
+            kont,
+            mark,
+            0,
+            Some(code),
+            Some(release_held),
+            1,
+            1,
+            evidence,
+        );
         *adamas_frame_env(frame) = boxed(number);
         frame
     }
@@ -195,6 +205,7 @@ unsafe fn push_closing(kont: *mut Kont, mark: isize, evidence: *mut Evidence) ->
             0,
             None,
             Some(release_closer),
+            1,
             1,
             evidence,
         );
@@ -213,6 +224,7 @@ unsafe fn push_probing(kont: *mut Kont, mark: isize, evidence: *mut Evidence) ->
             None,
             Some(release_closer),
             1,
+            1,
             evidence,
         );
         let closure = adamas_closure(Some(probing), None, 1, 1);
@@ -230,10 +242,10 @@ fn cut_takes_everything_up_to_the_handler() {
         let mut kont = kont();
         let evidence = adamas_evidence_empty();
 
-        let bottom = adamas_kont_push(&raw mut kont, MARK_PLAIN, 0, None, None, 0, evidence);
-        let handler = adamas_kont_push(&raw mut kont, MARK_HANDLER, 3, None, None, 0, evidence);
-        adamas_kont_push(&raw mut kont, MARK_PLAIN, 0, None, None, 0, evidence);
-        adamas_kont_push(&raw mut kont, MARK_PLAIN, 0, None, None, 0, evidence);
+        let bottom = adamas_kont_push(&raw mut kont, MARK_PLAIN, 0, None, None, 0, 0, evidence);
+        let handler = adamas_kont_push(&raw mut kont, MARK_HANDLER, 3, None, None, 0, 0, evidence);
+        adamas_kont_push(&raw mut kont, MARK_PLAIN, 0, None, None, 0, 0, evidence);
+        adamas_kont_push(&raw mut kont, MARK_PLAIN, 0, None, None, 0, 0, evidence);
         assert_eq!(adamas_kont_depth(&raw const kont), 4);
 
         let segment = adamas_kont_cut(&raw mut kont, handler);
@@ -334,7 +346,7 @@ fn unwinding_runs_the_destructors_lifo() {
         let mut kont = kont();
         let evidence = adamas_evidence_empty();
 
-        let handler = adamas_kont_push(&raw mut kont, MARK_HANDLER, 1, None, None, 0, evidence);
+        let handler = adamas_kont_push(&raw mut kont, MARK_HANDLER, 1, None, None, 0, 0, evidence);
         push_closing(&raw mut kont, 1, evidence);
         push_closing(&raw mut kont, 2, evidence);
         push_closing(&raw mut kont, 3, evidence);
@@ -381,7 +393,7 @@ fn the_last_reference_to_a_resumption_unwinds_it() {
         let mut kont = kont();
         let evidence = adamas_evidence_empty();
 
-        let handler = adamas_kont_push(&raw mut kont, MARK_HANDLER, 1, None, None, 0, evidence);
+        let handler = adamas_kont_push(&raw mut kont, MARK_HANDLER, 1, None, None, 0, 0, evidence);
         push_closing(&raw mut kont, 1, evidence);
         let resumption = adamas_segment_value(adamas_kont_cut(&raw mut kont, handler));
 
@@ -410,18 +422,19 @@ fn an_abandoned_resumption_inside_a_segment_unwinds_too() {
         // Ветка хендлера, не позвавшая резумпцию: её сегмент мертвеет вместе с
         // тем, в котором лежит (интерпретатор ловит это ветвью `Frame::Branch`).
         let inner_handler =
-            adamas_kont_push(&raw mut kont, MARK_HANDLER, 1, None, None, 0, evidence);
+            adamas_kont_push(&raw mut kont, MARK_HANDLER, 1, None, None, 0, 0, evidence);
         push_closing(&raw mut kont, 9, evidence);
         let inner = adamas_segment_value(adamas_kont_cut(&raw mut kont, inner_handler));
 
         let outer_handler =
-            adamas_kont_push(&raw mut kont, MARK_HANDLER, 2, None, None, 0, evidence);
+            adamas_kont_push(&raw mut kont, MARK_HANDLER, 2, None, None, 0, 0, evidence);
         let holder = adamas_kont_push(
             &raw mut kont,
             MARK_PLAIN,
             0,
             None,
             Some(release_resumption),
+            1,
             1,
             evidence,
         );
@@ -449,11 +462,11 @@ unsafe fn suppression_stack() -> (Kont, *mut Frame, *mut Frame, [*mut Evidence; 
     unsafe {
         let mut kont = kont();
         let empty = adamas_evidence_empty();
-        let outer = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, empty);
+        let outer = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, 0, empty);
         let with_outer = adamas_evidence_extend(empty, 7, outer);
-        let base = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, with_outer);
+        let base = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, 0, with_outer);
         let with_base = adamas_evidence_extend(with_outer, 7, base);
-        let nine = adamas_kont_push(&raw mut kont, MARK_HANDLER, 9, None, None, 0, with_base);
+        let nine = adamas_kont_push(&raw mut kont, MARK_HANDLER, 9, None, None, 0, 0, with_base);
         let with_nine = adamas_evidence_extend(with_base, 9, nine);
 
         push_closing(&raw mut kont, 1, with_nine);
@@ -537,6 +550,7 @@ unsafe fn push_reaching(kont: *mut Kont, mark: isize, evidence: *mut Evidence) -
             None,
             Some(release_closer),
             1,
+            1,
             evidence,
         );
         let closure = adamas_closure(Some(reaching), None, 1, 1);
@@ -557,10 +571,10 @@ fn a_destructors_operation_reaches_a_live_outer_handler() {
         let empty = adamas_evidence_empty();
 
         // Живой хендлер метки 7 - снаружи будущего сегмента.
-        let outer = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, empty);
+        let outer = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, 0, empty);
         let with_outer = adamas_evidence_extend(empty, 7, outer);
         // Основание сегмента - хендлер метки 9; над ним scope с деструктором.
-        let base = adamas_kont_push(&raw mut kont, MARK_HANDLER, 9, None, None, 0, with_outer);
+        let base = adamas_kont_push(&raw mut kont, MARK_HANDLER, 9, None, None, 0, 0, with_outer);
         push_reaching(&raw mut kont, 5, with_outer);
 
         let doomed = adamas_kont_cut(&raw mut kont, base);
@@ -617,9 +631,9 @@ fn dropping_the_seized_resumption_finishes_the_unwinding() {
         let mut kont = kont();
         let empty = adamas_evidence_empty();
 
-        let outer = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, empty);
+        let outer = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, 0, empty);
         let with_outer = adamas_evidence_extend(empty, 7, outer);
-        let base = adamas_kont_push(&raw mut kont, MARK_HANDLER, 9, None, None, 0, with_outer);
+        let base = adamas_kont_push(&raw mut kont, MARK_HANDLER, 9, None, None, 0, 0, with_outer);
         // Под сегментом - ещё один scope: его деструктор обязан сработать и
         // тогда, когда резумпцию выбросили, - через вложенный кадр раскрутки.
         push_closing(&raw mut kont, 3, with_outer);
@@ -629,6 +643,7 @@ fn dropping_the_seized_resumption_finishes_the_unwinding() {
             0,
             None,
             Some(release_closer),
+            1,
             1,
             with_outer,
         );
@@ -800,7 +815,7 @@ fn a_resumption_is_a_value_with_its_own_count() {
         let mut kont = kont();
         let empty = adamas_evidence_empty();
 
-        let handler = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, empty);
+        let handler = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, 0, empty);
         push_holding(&raw mut kont, MARK_PLAIN, adding, 3, empty);
         let resumption = adamas_segment_value(adamas_kont_cut(&raw mut kont, handler));
         assert_eq!(adamas_kont_depth(&raw const kont), 0);
@@ -839,7 +854,7 @@ fn an_abandoned_resumption_unwinds_on_its_own_root() {
         let mut kont = kont();
         let empty = adamas_evidence_empty();
 
-        let handler = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, empty);
+        let handler = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, 0, empty);
         push_closing(&raw mut kont, 5, empty);
         let resumption = adamas_segment_value(adamas_kont_cut(&raw mut kont, handler));
 

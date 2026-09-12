@@ -221,6 +221,18 @@ fn the_corpus_agrees_with_the_interpreter() {
         );
     }
 
+    // Мера корпуса печатается прогоном, а не переписывается руками: за волну 4
+    // её правили дважды, и оба раза правил прогон. Видно её под `--nocapture`.
+    eprintln!(
+        "корпус: взято {} из {}, отвергнуто {}",
+        taken.len(),
+        fixtures.len(),
+        refused.len()
+    );
+    for (name, why) in &refused {
+        eprintln!("  отвергнуто {name}: {why}");
+    }
+
     // Границы, которых корпус не покрывает, стоят рядом со своим утверждением.
     let captures = harness::agreed("captures", CAPTURES).unwrap_or_else(|error| {
         panic!("захваты: {error}");

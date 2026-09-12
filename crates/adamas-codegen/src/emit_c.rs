@@ -338,6 +338,29 @@ fn worded(repr: Repr) -> bool {
     repr.primitive().is_some() || scalar(repr) == "adamas_value"
 }
 
+/// Значение словом: плоское примитивное - битами, прочее - собой.
+///
+/// Граница куска дроблёного тела носит слово, и других форм у неё нет:
+/// `adamas_frame_code` берёт `adamas_value` и им же отвечает. Половин у границы
+/// три - слот среды кадра, пришедшее в кусок и ответ куска трамплину, - и мера
+/// у всех трёх одна. Ячейки кучи это не стоит: биты примитива ложатся в слово
+/// целиком. Счётчика у такого слова нет, поэтому дропу оно не показывается -
+/// какие позиции указательные, кусок знает по типам (§4.11, §5.1).
+fn into_word(repr: Repr, value: &str) -> String {
+    match repr.primitive() {
+        Some(ty) => format!("adamas_slot_of(adamas_word_{}({value}))", ty.name()),
+        None => value.to_owned(),
+    }
+}
+
+/// Обратно: слово границы в значение объявленного представления.
+fn from_word(repr: Repr, value: &str) -> String {
+    match repr.primitive() {
+        Some(ty) => format!("adamas_bits_{}(adamas_slot_word({value}))", ty.name()),
+        None => value.to_owned(),
+    }
+}
+
 /// C-тип связывания.
 fn c_type(repr: Repr) -> String {
     match repr {
@@ -2423,14 +2446,10 @@ impl Emitter<'_> {
             );
         }
         for (slot, (local, repr)) in env.iter().enumerate() {
-            let stored = if let Some(ty) = repr.primitive() {
-                format!("adamas_slot_of(adamas_word_{}(v{}))", ty.name(), local.0)
-            } else {
-                if !worded(*repr) {
-                    self.parked(*repr);
-                }
-                format!("v{}", local.0)
-            };
+            if !worded(*repr) {
+                self.parked(*repr);
+            }
+            let stored = into_word(*repr, &format!("v{}", local.0));
             let _ = writeln!(self.out, "{pad}{frame}_env[{slot}] = {stored};");
         }
 
@@ -2458,18 +2477,13 @@ impl Emitter<'_> {
             let _ = writeln!(self.out, "    adamas_value *env = adamas_frame_env(h);");
         }
         for (slot, (local, repr)) in env.iter().enumerate() {
-            if let Some(ty) = repr.primitive() {
-                let _ = writeln!(
-                    self.out,
-                    "    {} v{} = adamas_bits_{}(adamas_slot_word(env[{slot}]));",
-                    c_type(*repr),
-                    local.0,
-                    ty.name()
-                );
+            let taken = from_word(*repr, &format!("env[{slot}]"));
+            if repr.primitive().is_some() {
+                let _ = writeln!(self.out, "    {} v{} = {taken};", c_type(*repr), local.0);
             } else {
                 let _ = writeln!(
                     self.out,
-                    "    {} v{} = env[{slot}]; env[{slot}] = ADAMAS_ERASED;",
+                    "    {} v{} = {taken}; env[{slot}] = ADAMAS_ERASED;",
                     c_type(*repr),
                     local.0
                 );
@@ -2480,14 +2494,17 @@ impl Emitter<'_> {
             "стёртое связывание на точке приостановки: значение у неё есть по построению"
         );
         // Пришедшее приходит словом: `adamas_frame_code` другого не носит.
+        // Плоское значение поэтому едет битами - той же мерой, какой оно
+        // переживает точку приостановки в слоте среды (§10 вопрос 164).
         if !worded(binding.fact.repr) {
             self.parked(binding.fact.repr);
         }
         let _ = writeln!(
             self.out,
-            "    {} v{} = incoming; /* {} */",
+            "    {} v{} = {}; /* {} */",
             c_type(binding.fact.repr),
             binding.local.0,
+            from_word(binding.fact.repr, "incoming"),
             escaped(&binding.name)
         );
         self.tail(body, 1);
@@ -2541,8 +2558,16 @@ impl Emitter<'_> {
     /// читает ни тот, ни другой: ветка берёт вектор **своего** кадра.
     /// Различающая программа появится вместе с выражением, которому вектор
     /// передаётся, - её сегодня не строит ни один узел.
-    fn finish(&mut self, answer: &str, depth: usize) {
+    ///
+    /// `repr` - представление ответа. Оно тут значимо, потому что тип у границы
+    /// один: плоский ответ уходит трамплину словом (§10 вопрос 164), а не
+    /// собой, - иначе порождённый C не собрался бы.
+    fn finish(&mut self, answer: &str, repr: Repr, depth: usize) {
         let pad = Self::pad(depth);
+        if !worded(repr) {
+            self.parked(repr);
+        }
+        let answer = into_word(repr, answer);
         if self.epilogue.is_empty() {
             let _ = writeln!(self.out, "{pad}return {answer};");
             return;
@@ -2601,11 +2626,14 @@ impl Emitter<'_> {
                 // ответ возобновлённого вычисления дойдёт до него трамплином.
                 let _ = writeln!(self.out, "{pad}adamas_kont_resume(kont, {resumption});");
                 let _ = writeln!(self.out, "{pad}adamas_resumption_drop(kont, {resumption});");
-                self.finish(&value, depth);
+                // Аргумент резумпции указателен по договору понижения, и
+                // возобновлённое вычисление ждёт от границы ровно его.
+                self.finish(&value, Repr::Boxed, depth);
             }
             other => {
+                let repr = self.shape(other);
                 let answer = self.value(other, depth);
-                self.finish(&answer, depth);
+                self.finish(&answer, repr, depth);
             }
         }
     }
@@ -2780,7 +2808,7 @@ impl Emitter<'_> {
         let _ = writeln!(self.out, "{pad}if ({verdict} == ADAMAS_LOOKUP_HANDLER) {{");
         let call =
             format!("adamas_frame_perform({frame}, kont, {operation}u, {operands}, {count}u)");
-        self.finish(&call, depth + 1);
+        self.finish(&call, Repr::Boxed, depth + 1);
         let _ = writeln!(
             self.out,
             "{pad}}} else if ({verdict} == ADAMAS_LOOKUP_SUPPRESSED) {{"
@@ -2791,7 +2819,7 @@ impl Emitter<'_> {
         // Кадры, ради которых код бы продолжался, снимает сам обрыв - и кадр
         // продолжения этой операции в их числе. Прибирать здесь поэтому нечего:
         // владение уехало в среду кадра, а её отдаёт его дроп.
-        self.finish("adamas_kont_abort(kont)", depth + 1);
+        self.finish("adamas_kont_abort(kont)", Repr::Boxed, depth + 1);
         let _ = writeln!(self.out, "{pad}}}");
         let _ = writeln!(
             self.out,

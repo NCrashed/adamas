@@ -20,6 +20,10 @@
 --
 -- Метку `handle` берёт здесь из первой ветки; второй маршрут - написанная за
 -- `@` - в `errors/sealed-operation-labelled.adamas`.
+--
+-- Сигнатура объявляет `effect Tick` членом (вопрос 146): не назови она его -
+-- `:>` спрятал бы эффект целиком (вопрос 166), и отказ пришёлся бы на саму
+-- метку, а не на погашение; тот случай - `errors/hidden-effect.adamas`.
 
 data Nat where
   Zero : Nat
@@ -29,6 +33,7 @@ data Unit where
   MkUnit : Unit
 
 module type Counting where
+  effect Tick
   type Counted
   pending : Counted
   run : Counted -> Nat

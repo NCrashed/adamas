@@ -1,0 +1,42 @@
+-- Аннотация модуля принимает надмножество (§4.8, вопрос 166).
+--
+-- Запись модуля собирается по членам сигнатуры: лишний член полем не
+-- становится, и `полей записи N при M` на нём больше не возникает. Коэрция -
+-- свойство аннотации, `:` и `:>` здесь одинаковы; разнятся они сокрытием:
+-- с прозрачной `:` лишний член остаётся достижим поднятым именем (`outside`
+-- ниже), с `:>` он скрыт - тот случай в `errors/hidden-member.adamas`.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+module type Counter where
+  type T
+  zero : T
+  next : T -> T
+
+-- Прозрачная `:`: надмножество проходит, helper снаружи виден.
+module Nats : Counter where
+  type T = Nat
+  zero : T
+  zero = Zero
+  next : T -> T
+  next n = Succ n
+  helper : Nat -> Nat
+  helper n = Succ (Succ n)
+
+outside : Nat
+outside = Nats.helper Zero
+
+-- `:>`: надмножество проходит той же коэрцией, публичные члены зовутся.
+module Sealed :> Counter where
+  type T = Nat
+  zero : T
+  zero = Zero
+  next : T -> T
+  next n = Succ n
+  helper : Nat -> Nat
+  helper n = Succ (Succ n)
+
+stepped : Sealed.T
+stepped = Sealed.next Sealed.zero

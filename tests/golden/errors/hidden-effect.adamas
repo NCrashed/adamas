@@ -1,0 +1,28 @@
+-- Эффект сверх сигнатуры скрыт запечатыванием целиком (§4.8, вопрос 166).
+--
+-- Метка полем записи не становится (§3.4), поэтому ширину аннотации лишний
+-- эффект проходил всегда; сокрытие сверяет эффекты отдельным списком - тем,
+-- что объявила сигнатура. Не назвала - снаружи не пишется сама метка, не
+-- только погашение. Сосед, где сигнатура эффект **объявила** и отказ
+-- приходится ровно на погашение, - `errors/sealed-operation.adamas`.
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+module type Counter where
+  type T
+  zero : T
+
+module Nats :> Counter where
+  type T = Nat
+  effect Tick where
+    tick : Nat
+  zero : T
+  zero = Zero
+
+outside : {Nats.Tick} Nat
+outside = Zero

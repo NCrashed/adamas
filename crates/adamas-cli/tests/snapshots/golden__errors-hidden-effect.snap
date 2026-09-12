@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: hidden-effect.adamas:27:12: `Nats.Tick` скрыт запечатыванием: сигнатура модуля его не называет
+  outside : {Nats.Tick} Nat
+             ^^^^^^^^^

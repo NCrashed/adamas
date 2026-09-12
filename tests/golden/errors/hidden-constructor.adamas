@@ -1,0 +1,26 @@
+-- Конструктор скрытого семейства не пишется (§4.8, вопрос 166).
+--
+-- Семейство сверх сигнатуры скрыто поддеревом: формер, конструкторы, разбор.
+-- У конструктора истинны оба флага - семейство и непрозрачно, и скрыто, - а
+-- отвечает сокрытие: «сигнатура не называет» точнее, чем «представление
+-- скрыто». Сосед, где семейство сигнатурой объявлено и отказ говорит про
+-- представление, - `errors/sealed-constructor.adamas`.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+module type Counter where
+  type T
+  zero : T
+
+module Nats :> Counter where
+  type T = Nat
+  data Extra where
+    Wrap : Nat -> Extra
+  zero : T
+  zero = Zero
+
+outside : Nat
+outside = case Nats.Wrap Zero of
+  Nats.Wrap n -> n

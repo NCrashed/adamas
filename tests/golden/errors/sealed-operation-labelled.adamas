@@ -7,7 +7,9 @@
 -- того как маршруты расходятся, а корпус держит обе формы.
 --
 -- Ближайший проходящий сосед тот же, что у `errors/sealed-operation.adamas`:
--- `module Counter : Counting` вместо `:>`.
+-- `module Counter : Counting` вместо `:>`. Сигнатура объявляет `effect Tick`
+-- членом (вопрос 146): не назови она его - `:>` спрятал бы эффект целиком
+-- (вопрос 166), и отказ пришёлся бы на метку за `@`, а не на погашение.
 
 data Nat where
   Zero : Nat
@@ -17,6 +19,7 @@ data Unit where
   MkUnit : Unit
 
 module type Counting where
+  effect Tick
   type Counted
   pending : Counted
   run : Counted -> Nat

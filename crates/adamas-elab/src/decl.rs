@@ -19,7 +19,7 @@ use std::rc::Rc;
 
 use adamas_core::alloc;
 use adamas_core::check::{TypeError, check_within, infer, is_type};
-use adamas_core::conv::{convertible, whnf};
+use adamas_core::conv::{convertible, whnf, whnf_solved};
 use adamas_core::ctx::Ctx;
 use adamas_core::error::Frame;
 use adamas_core::eval::{eval, quote};
@@ -800,30 +800,35 @@ fn declare_module(
     })?;
     let params: Vec<Param> = outer.iter().chain(own.iter()).cloned().collect();
 
-    let object = module_object(signature, metas, &inner, &module.members, &params);
     // Контекст параметров: тип записи считается под ними, а `Pi` над ним
     // строится тем же телескопом.
     let ctx = beneath_params(signature, &params);
     // Аннотация - тип объявления; проверяет соответствие ей `declare`, тем же
     // правилом, что и всякое тело. Без аннотации тип **структурный**: он
-    // Аннотация - тип объявления; проверяет соответствие ей `declare`, тем же
-    // правилом, что и всякое тело. Без аннотации тип **структурный**: он
     // синтезируется по собранной записи, как и обещает §4.8. У функтора
     // аннотация относится к результату - к записи под параметрами.
-    let inner_ty = if let Some(ascription) = &module.ascription {
-        let written = Elaborator::new(signature, metas, owned, fixities, warnings)
-            .within(within)
-            .beneath(&params, |it| {
-                it.typing(|inner| inner.expr(ascription, Mult::Many))
-            })?;
-        // Сигнатура с эффектом-членом инстанцируется меткой модуля (§4.8,
-        // §10 вопрос 146): написанное имя разворачивается до записи, и
-        // поднятая метка сигнатуры переименовывается в одноимённую метку
-        // модуля. Без переименования проверка сравнила бы `{Counting.Tick}`
-        // с `{Counter.Tick}` и отвергла всякий модуль под такой сигнатурой:
-        // конвертируемость меток именная.
-        let written =
-            instantiated_ascription(signature, metas, instances, &ctx, &inner, &written, span)?;
+    //
+    // Элаборируется аннотация **до** сборки записи: запись собирается по
+    // членам сигнатуры (§4.8, вопрос 166), и надмножество законно - лишний
+    // член полем не становится. Коэрция - свойство аннотации, `:` и `:>`
+    // здесь одинаковы; сокрытие - отдельное свойство запечатывания.
+    let ascription = elaborated_ascription(
+        signature, metas, owned, fixities, instances, warnings, within, &inner, &ctx, &params,
+        module, span,
+    )?;
+    let allowed = ascription
+        .as_ref()
+        .and_then(|written| signature_fields(signature, written));
+    let labels = signature_labels(instances, ascription.as_ref());
+    let object = module_object(
+        signature,
+        metas,
+        &inner,
+        &module.members,
+        &params,
+        allowed.as_deref(),
+    );
+    let inner_ty = if let Some(written) = ascription {
         // Проверка **до** объявления, и это не дубль той, что сделает
         // `declare`. Аннотация написана именем, а у имени есть аргументы
         // уровня - дырки; не решив их сравнением с телом, обобщение примет их
@@ -843,27 +848,20 @@ fn declare_module(
         })?;
         quote(ctx.size(), &ty)
     };
+    // Скрывает `:>`, а не аннотация: с прозрачной `:` лишний член остаётся
+    // достижим поднятым именем - полем он просто не стал. Ставится флаг после
+    // проверки аннотации: `ctx` до неё держит сигнатуру, а проверке ядра
+    // сокрытие безразлично - оно отказывает поверхностному резолвингу.
+    if module.sealed {
+        if let Some(allowed) = &allowed {
+            hide_members(signature, &inner, &module.members, allowed, &labels);
+        }
+    }
     // Тип модуля-функтора - `Pi` по параметрам, тело - лямбда по ним же.
     // Видимость у своих **явная**: `OrderedMap IntOrd` пишется, в отличие от
     // параметров у членов, которые автор не пишет никогда. У объемлющих
     // обратное, и по той же причине: `Outer.Inner` изнутри `Outer` пишется без
     // `Key`, потому что писать эту позицию некому - её подставляет вставка.
-    let piled = |inner: Term, params: &[Param], implicit: bool| {
-        params.iter().rev().fold(inner, |codomain, param| {
-            let binder = if implicit {
-                Binder::implicit(param.mult)
-            } else {
-                Binder::explicit(param.mult)
-            };
-            Term::Pi(
-                binder,
-                CoreName::from(&*param.name),
-                Rc::clone(&param.ty),
-                adamas_core::row::Row::empty(),
-                Rc::new(codomain),
-            )
-        })
-    };
     let ty = piled(piled(inner_ty, &own, false), &outer, true);
     let body = abstracted(&params, object);
     // Запечатывание - свойство определения, а не значения (§3.5): тело
@@ -900,6 +898,24 @@ fn declare_module(
     Ok(())
 }
 
+/// `Pi` по телескопу поверх типа: параметры модуля в тип его записи.
+fn piled(inner: Term, params: &[Param], implicit: bool) -> Term {
+    params.iter().rev().fold(inner, |codomain, param| {
+        let binder = if implicit {
+            Binder::implicit(param.mult)
+        } else {
+            Binder::explicit(param.mult)
+        };
+        Term::Pi(
+            binder,
+            CoreName::from(&*param.name),
+            Rc::clone(&param.ty),
+            adamas_core::row::Row::empty(),
+            Rc::new(codomain),
+        )
+    })
+}
+
 /// Контекст, в котором стоят параметры: под ними живут и запись, и её тип.
 fn beneath_params<'a>(signature: &'a Signature, params: &[Param]) -> Ctx<'a> {
     params.iter().fold(Ctx::new(signature), |ctx, param| {
@@ -919,6 +935,7 @@ fn module_object(
     within: &Enclosing,
     members: &[ast::Decl],
     params: &[Param],
+    allowed: Option<&[Symbol]>,
 ) -> Term {
     let mut written = Vec::new();
     for member in members {
@@ -934,6 +951,14 @@ fn module_object(
         let Some(name) = member_name(member) else {
             continue;
         };
+        // Член сверх сигнатуры полем не становится (§4.8, вопрос 166):
+        // аннотация строит значение сигнатурного типа, а не сверяет ширину.
+        // Без аннотации списка нет, и запись собирается по всем членам.
+        if let Some(allowed) = allowed {
+            if !allowed.iter().any(|it| it == name) {
+                continue;
+            }
+        }
         let full = qualify(Some(within), name);
         let Some(mut term) = signature.instantiate(&full, metas) else {
             continue;
@@ -2803,7 +2828,7 @@ fn declare_module_value(
     let params = elaborator.telescope(params_of(within), true, Mult::Many, Unwritten::Sort)?;
     let term = elaborator.beneath(&params, |it| it.typing(|it| it.expr(body, Mult::Many)))?;
     let ctx = beneath_params(signature, &params);
-    let inner_ty = if let Some(ascription) = &module.ascription {
+    let (term, inner_ty) = if let Some(ascription) = &module.ascription {
         let written = Elaborator::new(signature, metas, owned, fixities, warnings)
             .within(within)
             .beneath(&params, |it| {
@@ -2822,19 +2847,25 @@ fn declare_module_value(
                 span,
             });
         }
+        // Тип тела шире сигнатуры - тело переупаковывается записью по её
+        // полям (§4.8, вопрос 166). Это и есть адаптер: `module Narrowed :
+        // Counter = Nats` подаёт богатый модуль туда, где ждут бедную
+        // сигнатуру, - само применение функтора остаётся точным.
+        let term = narrowed(signature, metas, &ctx, term, &written);
         check_within(&ctx, metas, &term, &written).map_err(|error| ElabError::Core {
             span,
             error: Box::new(error),
             names: names.clone(),
         })?;
-        zonk_term(metas, &written)
+        (term, zonk_term(metas, &written))
     } else {
         let (ty, _) = infer(&ctx, metas, Mult::Many, &term).map_err(|error| ElabError::Core {
             span,
             error: Box::new(error),
             names: names.clone(),
         })?;
-        quote(ctx.size(), &ty)
+        let ty = quote(ctx.size(), &ty);
+        (term, ty)
     };
     let ty = Elaborator::new(signature, metas, owned, fixities, warnings)
         .within(within)
@@ -2848,6 +2879,48 @@ fn declare_module_value(
             error: Box::new(error),
             names,
         })
+}
+
+/// Тело модуля-выражения, переупакованное по полям сигнатуры, - когда его
+/// тип строго шире (§4.8, вопрос 166).
+///
+/// Проекция берёт поле у самого тела, и значение её равно поднятому члену по
+/// построению записи модуля. Тип не запись, не надмножество или запись с
+/// хвостом - возвращается написанное, и соответствие меряется как прежде.
+fn narrowed(
+    signature: &Signature,
+    metas: &mut Metas,
+    ctx: &Ctx<'_>,
+    term: Term,
+    written: &Term,
+) -> Term {
+    let Some(expected) = signature_fields(signature, written) else {
+        return term;
+    };
+    let Ok((ty, _)) = infer(ctx, metas, Mult::Many, &term) else {
+        return term;
+    };
+    let forced = whnf_solved(signature, metas, &ty);
+    let Value::Record(telescope) = &*forced else {
+        return term;
+    };
+    let named = |name: &Symbol| telescope.fields().iter().any(|field| field.name == *name);
+    let superset = !telescope.is_open()
+        && telescope.fields().len() > expected.len()
+        && expected.iter().all(named);
+    if !superset {
+        return term;
+    }
+    let fields: Vec<(CoreName, Rc<Term>)> = expected
+        .iter()
+        .map(|field| {
+            (
+                CoreName::from(&**field),
+                Rc::new(Term::Project(Rc::new(term.clone()), Rc::clone(field))),
+            )
+        })
+        .collect();
+    Term::Object(fields.into())
 }
 
 /// Отвергает объявление, чьё имя занято примитивом (§4.11).
@@ -3060,6 +3133,148 @@ fn sealable(
 }
 
 /// Голова элаборированной аннотации - имя определения, если оно там стоит.
+/// Написанная аннотация модуля: элаборирована под параметрами и
+/// инстанцирована меткой модуля. `None` - модуль без аннотации.
+///
+/// Сигнатура с эффектом-членом инстанцируется меткой модуля (§4.8, §10 вопрос
+/// 146): написанное имя разворачивается до записи, и поднятая метка сигнатуры
+/// переименовывается в одноимённую метку модуля. Без переименования проверка
+/// сравнила бы `{Counting.Tick}` с `{Counter.Tick}` и отвергла всякий модуль
+/// под такой сигнатурой: конвертируемость меток именная.
+#[allow(clippy::too_many_arguments)]
+fn elaborated_ascription(
+    signature: &Signature,
+    metas: &mut Metas,
+    owned: &mut Owned,
+    fixities: &mut Fixities,
+    instances: &Instances,
+    warnings: &mut Warnings,
+    within: Option<&Enclosing>,
+    inner: &Enclosing,
+    ctx: &Ctx<'_>,
+    params: &[Param],
+    module: &ast::ModuleDecl,
+    span: Span,
+) -> Result<Option<Term>, ElabError> {
+    let Some(ascription) = &module.ascription else {
+        return Ok(None);
+    };
+    let written = Elaborator::new(signature, metas, owned, fixities, warnings)
+        .within(within)
+        .beneath(params, |it| {
+            it.typing(|inner| inner.expr(ascription, Mult::Many))
+        })?;
+    Ok(Some(instantiated_ascription(
+        signature, metas, instances, ctx, inner, &written, span,
+    )?))
+}
+
+/// Имена полей записи, которой определена написанная сигнатура.
+///
+/// По ним собирается запись модуля (§4.8, вопрос 166): член сверх сигнатуры
+/// полем не становится, и надмножество проходит аннотацию. `None` - голова
+/// аннотации не нашлась или определена не записью; тогда запись собирается по
+/// всем членам, и соответствие меряется как прежде.
+fn signature_fields(signature: &Signature, written: &Term) -> Option<Vec<Symbol>> {
+    let head = ascription_head(written)?;
+    let mut body = signature.lookup(head)?.body.as_ref()?;
+    loop {
+        match body {
+            Term::Lam(_, _, inner) => body = inner,
+            Term::Record(fields) => {
+                return Some(fields.iter().map(|field| Rc::clone(&field.name)).collect());
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Короткие имена эффектов-членов написанной сигнатуры.
+///
+/// Они не поля (§3.4), и сокрытие сверяет их отдельным списком: без него
+/// `:>` прятал бы и тот эффект, который сигнатура объявила.
+fn signature_labels(instances: &Instances, ascription: Option<&Term>) -> Vec<Symbol> {
+    ascription
+        .and_then(ascription_head)
+        .map(|head| {
+            instances
+                .signature_effects(head)
+                .iter()
+                .map(|(short, _)| Rc::clone(short))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Прячет членов сверх сигнатуры: `:>` скрывает то, чего она не называет
+/// (§4.8, вопрос 166).
+///
+/// Спуск глубже, чем у [`seal_members`]: скрытому семейству прячутся и
+/// конструкторы, эффекту - операции, вложенному модулю - поддерево целиком.
+/// Иначе `Nats.Wrap` строил бы значение типа, чьё имя не пишется. Членам,
+/// названным сигнатурой, не прячется ничего: их состав сверила проверка
+/// аннотации. Тайминг - как у запечатывания: флаг ставится, когда тело
+/// элаборировано, поэтому внутренние ссылки уже разрешены, а всякая поздняя -
+/// снаружи.
+fn hide_members(
+    signature: &mut Signature,
+    within: &Enclosing,
+    members: &[ast::Decl],
+    fields: &[Symbol],
+    labels: &[Symbol],
+) {
+    for member in members {
+        let Some(name) = member_name(member) else {
+            continue;
+        };
+        let named = fields.iter().any(|it| it == name)
+            || (matches!(member.kind, DeclKind::Effect(_)) && labels.iter().any(|it| it == name));
+        if !named {
+            hide_subtree(signature, within, member);
+        }
+    }
+}
+
+/// Прячет члена вместе со всем, что поднято под ним.
+fn hide_subtree(signature: &mut Signature, within: &Enclosing, member: &ast::Decl) {
+    let Some(name) = member_name(member) else {
+        return;
+    };
+    signature.hide(&qualify(Some(within), name));
+    match &member.kind {
+        // Конструкторы и операции подняты под модулем, а не под формером, -
+        // тем же правилом, что у подъёма (§4.8).
+        DeclKind::Data(data) => {
+            for constructor in &data.constructors {
+                signature.hide(&qualify(Some(within), &constructor.name.text));
+            }
+        }
+        DeclKind::Effect(effect) => {
+            for operation in &effect.operations {
+                signature.hide(&qualify(Some(within), &operation.name.text));
+            }
+        }
+        // Члены ресурса - конструкторы и `drop` - объявлены его телом.
+        DeclKind::Resource(resource) => {
+            for inner in &resource.members {
+                if let Some(name) = member_name(inner) {
+                    signature.hide(&qualify(Some(within), name));
+                }
+            }
+        }
+        DeclKind::Module(inner) => {
+            let deeper = Enclosing {
+                name: qualify(Some(within), &inner.name.text),
+                params: Rc::clone(&within.params),
+            };
+            for member in &inner.members {
+                hide_subtree(signature, &deeper, member);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn ascription_head(written: &Term) -> Option<&CoreName> {
     let mut current = written;
     loop {

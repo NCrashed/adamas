@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: hidden-constructor.adamas:25:21: `Nats.Wrap` скрыт запечатыванием: сигнатура модуля его не называет
+  outside = case Nats.Wrap Zero of
+                      ^^^^

@@ -1,0 +1,37 @@
+-- Адаптер: аннотация сужает богатый модуль до бедной сигнатуры (§4.8,
+-- вопрос 166).
+--
+-- Применение функтора остаётся точным - `Twice Nats` отвергается, свидетель в
+-- `errors/functor-argument-exact.adamas`, - а надмножество подаётся через
+-- module-выражение с аннотацией: тип тела шире сигнатуры, и тело
+-- переупаковывается записью по её полям. Так один модуль служит нескольким
+-- сигнатурам, не переписывая членов.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+module type Counter where
+  type T
+  zero : T
+  next : T -> T
+
+module Nats where
+  type T = Nat
+  zero : T
+  zero = Zero
+  next : T -> T
+  next n = Succ n
+  helper : Nat -> Nat
+  helper n = Succ (Succ n)
+
+module Narrowed : Counter = Nats
+
+module Twice (C : Counter) where
+  step : C.T -> C.T
+  step x = C.next (C.next x)
+
+module Applied = Twice Narrowed
+
+outside : Nats.T
+outside = Applied.step Nats.zero

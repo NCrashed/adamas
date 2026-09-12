@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: hidden-member.adamas:31:16: `Nats.helper` скрыт запечатыванием: сигнатура модуля его не называет
+  outside = Nats.helper Zero
+                 ^^^^^^

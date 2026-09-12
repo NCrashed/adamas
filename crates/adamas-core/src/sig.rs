@@ -196,6 +196,14 @@ pub struct Definition {
     /// Переход к полупрозрачным сигнатурам (уравнения прямо в сигнатуре,
     /// §10 вопрос 46) булево значение не ломает: оно его частный случай.
     pub opaque: bool,
+    /// Скрыто ли имя запечатыванием: член `:>`-модуля сверх сигнатуры (§4.8,
+    /// вопрос 166).
+    ///
+    /// Сильнее непрозрачности: непрозрачное имя пишется, но не
+    /// разворачивается, скрытое не пишется вовсе. Отказывает поверхностный
+    /// резолвинг, а не ядро: определение остаётся - тела публичных членов
+    /// зовут скрытых, и вычислению они нужны.
+    pub hidden: bool,
     /// Кратности носителей по позициям телескопа ([`crate::carrier`]).
     ///
     /// Выводятся из тела, как и [`Definition::total`], и по той же причине:
@@ -689,6 +697,19 @@ impl Signature {
         }
     }
 
+    /// Скрывает уже объявленное определение: член `:>`-модуля сверх сигнатуры
+    /// (§4.8, вопрос 166).
+    ///
+    /// Тайминг тот же, что у [`Signature::seal`], и по той же причине: флаг
+    /// ставится, когда модуль проверен целиком, поэтому внутренние ссылки уже
+    /// разрешены, а всякая поздняя - снаружи. Несуществующее имя игнорируется
+    /// тем же правилом.
+    pub fn hide(&mut self, name: &str) {
+        if let Some(definition) = self.definitions.get_mut(name) {
+            definition.hidden = true;
+        }
+    }
+
     /// Объявляет `@noalloc` у постулата (§5.1).
     ///
     /// Внутри пакета вердикт выводится по графу вызовов, но через границу
@@ -1028,6 +1049,7 @@ impl Signature {
         let mut draft = Definition {
             mult,
             opaque: matches!(member, Member::Definition { opaque: true, .. }),
+            hidden: false,
             level_arity: arity.level_count(),
             row_arity: arity.row_count(),
             // Дозволенное каждому параметру уточнит фаза B2 перебором: до
@@ -1224,6 +1246,7 @@ impl Signature {
             graded_carriers: Rc::from([]),
             carriers: crate::carrier::stored(&operation.ty),
             opaque: false,
+            hidden: false,
             ty: operation.ty.clone(),
             body: None,
             kind: DefinitionKind::Operation {
@@ -1474,6 +1497,7 @@ impl Signature {
             graded_carriers: Rc::from([]),
             carriers: crate::carrier::stored(&constructor.ty),
             opaque: false,
+            hidden: false,
             ty: constructor.ty.clone(),
             body: None,
             kind: DefinitionKind::Constructor {
@@ -1820,6 +1844,7 @@ impl Signature {
                 kind: DefinitionKind::Regular,
                 total: true,
                 opaque: false,
+                hidden: false,
                 carriers: Rc::from([] as [Mult; 0]),
                 // Кладётся тип-формер, а не значение: аллоцировать нечему.
                 allocates: None,

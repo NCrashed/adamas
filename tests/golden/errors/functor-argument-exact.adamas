@@ -1,0 +1,31 @@
+-- Применение функтора остаётся точным (§4.8, вопрос 166).
+--
+-- Коэрция надмножества - свойство аннотации, а не конверсии: ядро сравнивает
+-- типы записей структурно, и богатый модуль аргументом бедного функтора не
+-- проходит. Надмножество подаётся адаптером - module-выражением с аннотацией,
+-- - и это ближайший проходящий сосед: `module Narrowed : Counter = Nats`,
+-- затем `Twice Narrowed` (`programs/module-adapter.adamas`).
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+module type Counter where
+  type T
+  zero : T
+  next : T -> T
+
+module Nats where
+  type T = Nat
+  zero : T
+  zero = Zero
+  next : T -> T
+  next n = Succ n
+  helper : Nat -> Nat
+  helper n = Succ (Succ n)
+
+module Twice (C : Counter) where
+  step : C.T -> C.T
+  step x = C.next (C.next x)
+
+module Applied = Twice Nats

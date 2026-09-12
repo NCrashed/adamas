@@ -145,6 +145,19 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Член `:>`-модуля сверх сигнатуры (§4.8, вопрос 166).
+    ///
+    /// Сильнее [`ElabError::SealedConstructor`]: непрозрачное имя пишется, но
+    /// не разворачивается, скрытое не пишется вовсе. Внутри тела модуля член
+    /// виден - флаг ставится, когда модуль проверен целиком.
+    #[error("`{name}` скрыт запечатыванием: сигнатура модуля его не называет")]
+    HiddenMember {
+        /// Имя, как оно написано.
+        name: Symbol,
+        /// Где написано.
+        span: Span,
+    },
+
     /// Имя с заглавной буквы в позиции связывания.
     ///
     /// Обратная сторона [`ElabError::NotAConstructor`]: связать заглавным
@@ -1351,6 +1364,7 @@ impl ElabError {
             Self::UnknownName { span, .. }
             | Self::NotAConstructor { span, .. }
             | Self::SealedConstructor { span, .. }
+            | Self::HiddenMember { span, .. }
             | Self::UppercaseBinding { span, .. }
             | Self::RepeatedBinding { span, .. }
             | Self::GradedSort { span }

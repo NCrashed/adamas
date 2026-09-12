@@ -1,0 +1,31 @@
+-- Член сверх сигнатуры скрыт запечатыванием (§4.8, вопрос 166).
+--
+-- `:>` скрывает то, чего сигнатура не называет: helper прошёл аннотацию -
+-- запись собрана по членам сигнатуры, и полем он не стал, - но поднятое имя
+-- снаружи не пишется. Сильнее непрозрачности: непрозрачное имя пишется и не
+-- разворачивается, скрытое не пишется вовсе.
+--
+-- Ближайший проходящий сосед отличается одним знаком: `module Nats : Counter`
+-- вместо `:>` - прозрачная аннотация не прячет, и та же строка проходит
+-- (`programs/module-superset.adamas`).
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+module type Counter where
+  type T
+  zero : T
+  next : T -> T
+
+module Nats :> Counter where
+  type T = Nat
+  zero : T
+  zero = Zero
+  next : T -> T
+  next n = Succ n
+  helper : Nat -> Nat
+  helper n = Succ (Succ n)
+
+outside : Nat
+outside = Nats.helper Zero

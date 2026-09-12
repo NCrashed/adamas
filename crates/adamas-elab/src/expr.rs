@@ -1973,6 +1973,20 @@ impl<'a> Elaborator<'a> {
         (neighbour || self.signature.lookup(&full).is_some()).then_some(full)
     }
 
+    /// Скрыт ли член запечатыванием: `:>`-модуль не назвал его в сигнатуре
+    /// (§4.8, вопрос 166).
+    ///
+    /// Сильнее непрозрачности: непрозрачное имя пишется, но не
+    /// разворачивается, скрытое не пишется вовсе. Тайминг тот же, что у
+    /// [`Self::sealed_constructor`]: флаг ставится, когда модуль проверен
+    /// целиком, поэтому внутри тела член виден, а всякая поздняя ссылка -
+    /// снаружи.
+    fn hidden(&self, name: &str) -> bool {
+        self.signature
+            .lookup(name)
+            .is_some_and(|definition| definition.hidden)
+    }
+
     /// Скрыто ли имя запечатыванием: конструктор семейства из `:>`-модуля.
     ///
     /// Представление семейства - это его конструкторы, и запечатывание скрывает
@@ -3543,6 +3557,15 @@ impl<'a> Elaborator<'a> {
         let Some(full) = self.qualified(&name.text) else {
             return Ok(None);
         };
+        // Член сверх сигнатуры скрыт запечатыванием (§4.8, вопрос 166).
+        // Раньше проверки конструктора: у конструктора скрытого семейства
+        // истинны оба флага, а «сигнатура его не называет» точнее.
+        if self.hidden(&full) {
+            return Err(ElabError::HiddenMember {
+                name: Rc::clone(&name.text),
+                span: name.span,
+            });
+        }
         // Запечатанное представление не называется и в выражении: построить
         // значение абстрактного типа его конструктором - тот же обход, что и
         // разобрать им.
@@ -3639,6 +3662,17 @@ impl<'a> Elaborator<'a> {
         // значение абстрактного типа его конструктором - тот же обход, что и
         // разобрать им. Квалифицированный кандидат проверен в
         // [`Self::neighbouring`]; здесь остаётся голое имя.
+        // Член сверх сигнатуры скрыт запечатыванием (§4.8, вопрос 166).
+        // Раньше кэша инстанцирования: внутри тела член попадает в кэш
+        // законно, а поздняя ссылка не вправе пройти по нему мимо флага. И
+        // раньше проверки конструктора: у конструктора скрытого семейства
+        // истинны оба флага, а «сигнатура его не называет» точнее.
+        if self.hidden(&name.text) {
+            return Err(ElabError::HiddenMember {
+                name: Rc::clone(&name.text),
+                span: name.span,
+            });
+        }
         if let Some(data) = self.sealed_constructor(&name.text) {
             return Err(ElabError::SealedConstructor {
                 name: Rc::clone(&name.text),
@@ -4675,6 +4709,13 @@ impl<'a> Elaborator<'a> {
     ) -> Result<Symbol, ElabError> {
         if let Some(label) = label {
             let name = self.declared_name(&label.name.text);
+            // Скрытая метка не пишется и за `@` (§4.8, вопрос 166).
+            if self.hidden(&name) {
+                return Err(ElabError::HiddenMember {
+                    name: Rc::clone(&label.name.text),
+                    span: label.span,
+                });
+            }
             return match self.signature.lookup(&name).map(|it| &it.kind) {
                 Some(DefinitionKind::Effect { .. }) => Ok(name),
                 _ => Err(ElabError::HandlerLabel {
@@ -4725,6 +4766,16 @@ impl<'a> Elaborator<'a> {
         declared: &[Symbol],
     ) -> Result<(), ElabError> {
         for (branch, name) in branches.iter().zip(declared) {
+            // Операция скрытого эффекта не гасится (§4.8, вопрос 166) - как и
+            // не зовётся: скрыт он целиком. Раньше проверки запечатанного - у
+            // скрытой операции истинны оба флага, а «сигнатура не называет»
+            // точнее, и оба маршрута `handle` тогда отвечают одинаково.
+            if self.hidden(name) {
+                return Err(ElabError::HiddenMember {
+                    name: Rc::clone(&branch.name.text),
+                    span: branch.name.span,
+                });
+            }
             if let Some(effect) = self.sealed_operation(name) {
                 return Err(ElabError::SealedOperation {
                     name: Rc::clone(&branch.name.text),
@@ -5870,6 +5921,15 @@ impl<'a> Elaborator<'a> {
         let found = self
             .qualified(&name.text)
             .unwrap_or_else(|| Rc::clone(&name.text));
+        // Конструктор скрытого семейства не разбирает (§4.8, вопрос 166): чей
+        // тип не пишется, того и паттерном не взять. Раньше проверки
+        // запечатанного: истинны оба флага, а «сигнатура не называет» точнее.
+        if self.hidden(&found) {
+            return Err(ElabError::HiddenMember {
+                name: Rc::clone(&name.text),
+                span: name.span,
+            });
+        }
         if let Some(data) = self.sealed_constructor(&found) {
             return Err(ElabError::SealedConstructor {
                 name: Rc::clone(&name.text),

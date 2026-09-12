@@ -1,4 +1,4 @@
--- Мини-интерпретатор: capstone Фазы 5.
+-- Мини-интерпретатор: capstone Фаз 5 и 6.
 --
 -- Написан ради результата, а не ради форм. Ценность его в том, что формы здесь
 -- **встречаются друг с другом**: класс с эффектом в методе, окружение нитью
@@ -11,6 +11,46 @@
 -- Сценарий 18 целиком - разбор, типизация, вычисление. Разбор идёт по потоку
 -- лексем: текста в языке нет до примитивов (§4.9), а всё, что после лексера,
 -- пишется уже сегодня.
+--
+-- **Фаза 6 просит от demo target'а трёх вещей сверх сценария 18** (§9, Demo
+-- targets: «расширенный interpreter - с типизацией, модулями, стандартной
+-- библиотекой»):
+--
+--   * **библиотека** - `module Lists :> Listing`: работа со списком ведётся
+--     модулем под запечатывающей сигнатурой, и контракт её написан, а не
+--     подразумевается;
+--   * **модули** - функтор `Ctx (Cell : Slot)`, применённый **трижды**:
+--     контекст типизатора, среда вычислителя и поток лексем суть одна
+--     реализация при трёх разных `type T`, и разойтись они не могут по
+--     построению;
+--   * **вычисление объектного языка со замыканиями** - `evalTerm` идёт по тому
+--     же `Term`, что и типизатор, отвечает `Value`, а не числом, и лямбда несёт
+--     захваченную среду.
+--
+-- Сверх того здесь есть **нагрузка, масштабируемая одним числом** (`workload`):
+-- поток лексем растёт с ним линейно, и вместе с потоком растёт работа всех трёх
+-- частей - разбора, типизации и вычисления. Стенду довольно подставить в это
+-- определение другое число.
+--
+-- Ответ - **список**, а не сумма, и позиции в нём различны по построению: сумма
+-- скрывает перестановку, список не скрывает. Прежняя редакция capstone'а
+-- переживала шесть независимых поломок побайтово (ревью 2026-09-07), и всякая
+-- заметка «операнды входят по-разному» ниже стоит на месте одной из них.
+--
+-- **Различающая сила проверена мутантами, а не объявлена.** Двенадцать штук,
+-- по одному-двум на часть, прогнаны 2026-09-12, и всякий сдвинул ответ:
+--
+--   * разбор - `TmSub r l` в `binary` (69 → 83 и 11 → 0); перестановка `let`-ов
+--     в `grouped`, то есть другой поток лексем (пять позиций разом);
+--   * типизация - `sameTy a b = True` (три вердикта садятся на `1`);
+--   * вычисление - перестановка операндов `numSub` (четыре позиции обнуляются);
+--     замыкание, считаемое в пустой среде вместо захваченной (5 → 98);
+--   * библиотека - `reverse` тождеством (9 → 27); `weigh` суммой (27 → 9);
+--     `index`, отдающий голову на всякой глубине (5 → 1);
+--   * функтор - `at`, отдающий голову на всякой глубине (15 → 14, 5 → 0);
+--     `depth`, не считающий звено (54 → 53, 49 → 0);
+--   * нагрузка - `opAt`, никогда не дающий минуса (11 → 31);
+--   * маска - снятая с `fatal` (4 → 0).
 
 data Bool where
   False : Bool
@@ -27,6 +67,20 @@ data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a
 
+-- Ответ поиска по контексту. Контекст **не решает**, чем обернуть промах:
+-- типизатор и вычислитель отвечают на него разными номерами, и знать о них
+-- общему коду не нужно.
+--
+-- Второй довод за него - вынужденный. Определение, полиморфное по поднятому
+-- имени типа и зовущее само себя, не элаборируется, если в теле у него стоит
+-- операция с собственным параметром (`reject : Nat -> a`, §10 вопрос 83):
+-- «`Ctx.at` принимает 0 параметров уровня, передано 1». Нужны оба условия -
+-- без рекурсии проходит, без полиморфизма проходит; разобрано в
+-- `docs/phase6-wave4-plan.md`.
+data Found (a : Type) where
+  Missing : Found a
+  Got : a -> Found a
+
 infixl 6 +
 (+) : Nat -> Nat -> Nat
 (+) Zero m = m
@@ -37,7 +91,102 @@ infixl 7 *
 (*) Zero m = Zero
 (*) (Succ k) m = m + k * m
 
--- Синтаксис: выражения и последовательность связываний.
+-- Усечённое вычитание: `Nat` вычитается до нуля, ниже не уходит.
+monus : Nat -> Nat -> Nat
+monus Zero m = Zero
+monus (Succ k) Zero = Succ k
+monus (Succ k) (Succ m) = monus k m
+
+and : Bool -> Bool -> Bool
+and True b = b
+and False b = False
+
+-- Окружение и ошибки - эффекты, а не параметры.
+effect Fail where
+  fail : Nat -> Nat
+
+effect Env where
+  look : Nat -> Nat
+  bind : Nat -> Unit
+
+effect Trace where
+  note : Nat -> Unit
+
+-- Отказ типизации обрывает проверку, поэтому результат его - **собственный
+-- параметр операции** (§10 вопрос 83): годится на месте любого типа. Такой
+-- бывает только обрывающая операция - резюмирующая обязана была бы произвести
+-- значение произвольного типа, а взять его неоткуда.
+effect Reject where
+  reject : Nat -> a
+
+-- ---------------------------------------------------------------- библиотека
+--
+-- Список ведётся модулем под запечатывающей сигнатурой (§4.8): у библиотеки
+-- есть написанный контракт, и `:>` его проверяет. Членов у модуля ровно
+-- столько, сколько названо сигнатурой, - `:>` требует соответствия, а не
+-- надмножества.
+
+module type Listing where
+  append : List Nat -> List Nat -> List Nat
+  reverse : List Nat -> List Nat
+  weigh : List Nat -> Nat
+  index : Nat -> List Nat -> {Fail} Nat
+
+module Lists :> Listing where
+  append : List Nat -> List Nat -> List Nat
+  append Nil ys = ys
+  append (Cons x xs) ys = Cons x (append xs ys)
+
+  reverse : List Nat -> List Nat
+  reverse Nil = Nil
+  reverse (Cons x xs) = append (reverse xs) (Cons x Nil)
+
+  -- Свёртка **позиционная**, а не сумма: сумма перестановку скрывает, эта нет.
+  -- Ровно этим `weigh` в ответе и полезна - без неё поломанный `reverse` дал бы
+  -- то же число.
+  weigh : List Nat -> Nat
+  weigh Nil = Zero
+  weigh (Cons x xs) = x + 3 * weigh xs
+
+  index : Nat -> List Nat -> {Fail} Nat
+  index n Nil = fail n
+  index Zero (Cons x xs) = x
+  index (Succ k) (Cons x xs) = index k xs
+
+-- ------------------------------------------------------------------- контекст
+--
+-- Контекст объектного языка нужен дважды: типизатору - списком типов,
+-- вычислителю - списком значений. Реализация одна, функтор применяется к двум
+-- разным `type T` (§4.8), и разъехаться дисциплина связывания у двух проходов
+-- не может: код у них общий.
+
+module type Slot where
+  type T
+
+module Ctx (Cell : Slot) where
+  empty : List Cell.T
+  empty = Nil
+
+  -- Связывание кладётся **в голову**: индекс `Zero` есть ближайшее связывание.
+  -- Расти с хвоста было бы столь же «правильно» на симметричном примере, и
+  -- ровно поэтому все свидетели ниже несимметричны.
+  push : Cell.T -> List Cell.T -> List Cell.T
+  push x xs = Cons x xs
+
+  depth : List Cell.T -> Nat
+  depth Nil = Zero
+  depth (Cons x xs) = Succ (depth xs)
+
+  at : Nat -> List Cell.T -> Found Cell.T
+  at n Nil = Missing
+  at Zero (Cons x xs) = Got x
+  at (Succ k) (Cons x xs) = at k xs
+
+-- --------------------------------------------------------- вычисление, часть 1
+--
+-- Первый объектный язык - выражения и последовательность связываний. Окружение
+-- ему даёт хендлер, а не аргумент.
+
 data Expr where
   Lit : Nat -> Expr
   Var : Nat -> Expr
@@ -52,28 +201,6 @@ data Expr where
 data Stmt where
   Done : Expr -> Stmt
   Def : Expr -> Stmt -> Stmt
-
--- Окружение и ошибки - эффекты, а не параметры.
-effect Fail where
-  fail : Nat -> Nat
-
-effect Env where
-  look : Nat -> Nat
-  bind : Nat -> Unit
-
-effect Trace where
-  note : Nat -> Unit
-
--- Усечённое вычитание: `Nat` вычитается до нуля, ниже не уходит.
-monus : Nat -> Nat -> Nat
-monus Zero m = Zero
-monus (Succ k) Zero = Succ k
-monus (Succ k) (Succ m) = monus k m
-
-lookupAt : Nat -> List Nat -> {Fail} Nat
-lookupAt n Nil = fail n
-lookupAt Zero (Cons x xs) = x
-lookupAt (Succ k) (Cons x xs) = lookupAt k xs
 
 -- Один интерфейс на оба вида узлов; метод производит эффекты.
 class Eval a where
@@ -108,12 +235,13 @@ program : {Env, Fail} Nat
 program = run sample
 
 -- Окружение - нить хендлера, а `Fail` остаётся в остатке: это композиция, а не
--- хендлер, гасящий всё в чистый результат.
+-- хендлер, гасящий всё в чистый результат. Поиск по индексу берётся у
+-- библиотеки - `Lists.index` отказывает эффектом, и отказ уходит наружу.
 resolved : {Fail} Nat
 resolved = handle program with
   state Nil
   return v -> v
-  look i -> resume (lookupAt i state) state
+  look i -> resume (Lists.index i state) state
   bind n -> resume MkUnit (Cons n state)
 
 answer : Nat
@@ -149,7 +277,7 @@ broken : {Fail, Trace} Nat
 broken = handle opened with
   state Nil
   return v -> v
-  look i -> resume (lookupAt i state) state
+  look i -> resume (Lists.index i state) state
   bind n -> resume MkUnit (Cons n state)
 
 recovered : {Trace} Nat
@@ -208,43 +336,53 @@ data Ty where
   TyBool : Ty
   TyArr : Ty -> Ty -> Ty
 
-and : Bool -> Bool -> Bool
-and True b = b
-and False b = False
-
-append : List Nat -> List Nat -> List Nat
-append Nil ys = ys
-append (Cons x xs) ys = Cons x (append xs ys)
-
 sameTy : Ty -> Ty -> Bool
 sameTy TyNat TyNat = True
 sameTy TyBool TyBool = True
 sameTy (TyArr a b) (TyArr c d) = and (sameTy a c) (sameTy b d)
 sameTy a b = False
 
--- Отказ типизации обрывает проверку, поэтому результат его - **собственный
--- параметр операции** (§10 вопрос 83): годится на месте любого типа. Такой
--- бывает только обрывающая операция - резюмирующая обязана была бы произвести
--- значение произвольного типа, а взять его неоткуда.
-effect Reject where
-  reject : Nat -> a
-
--- Термы с аннотацией на связывании: вывод обходится без унификации.
+-- Термы с аннотацией на связывании: вывод обходится без унификации. `TmLet`
+-- аннотации не несёт - тип связываемого выводится, - и этим он от `TmLam`
+-- отличается не только формой.
 data Term where
   TmLit : Nat -> Term
+  TmBool : Bool -> Term
   TmVar : Nat -> Term
   TmAdd : Term -> Term -> Term
+  -- Некоммутативный узел, как `Sub` выше и по той же причине.
+  TmSub : Term -> Term -> Term
   TmLam : Ty -> Term -> Term
   TmApp : Term -> Term -> Term
+  TmIf : Term -> Term -> Term -> Term
+  TmLet : Term -> Term -> Term
 
-tyAt : Nat -> List Ty -> {Reject} Ty
-tyAt n Nil = reject n
-tyAt Zero (Cons t ts) = t
-tyAt (Succ k) (Cons t ts) = tyAt k ts
+module TyCell : Slot where
+  type T = Ty
 
+module TyCtx = Ctx TyCell
+
+-- Три отказа типизации носят **разные** номера, и это не косметика: пока
+-- несовпадение операнда, дурное условие и разошедшиеся ветви отвечали одним
+-- кодом, две проверки из трёх можно было выбросить незаметно.
 wanted : Bool -> Ty -> {Reject} Ty
 wanted True t = t
 wanted False t = reject (Succ Zero)
+
+demanded : Bool -> Ty -> {Reject} Ty
+demanded True t = t
+demanded False t = reject 3
+
+agreed : Bool -> Ty -> {Reject} Ty
+agreed True t = t
+agreed False t = reject 4
+
+-- Промах контекста типизатор называет **индексом**: видно не только «не
+-- найдено», но и что именно искали.
+tyAt : Nat -> List Ty -> {Reject} Ty
+tyAt i ctx = case TyCtx.at i ctx of
+  Missing -> reject i
+  Got t -> t
 
 applied : Ty -> Ty -> {Reject} Ty
 applied (TyArr d r) x = wanted (sameTy d x) r
@@ -257,12 +395,20 @@ applied TyBool x = reject (Succ (Succ Zero))
 -- другого в зависимости от того, кто ею распоряжается.
 infer : List Ty -> Term -> {Reject} Ty
 infer ctx (TmLit n) = TyNat
+infer ctx (TmBool b) = TyBool
 infer ctx (TmVar i) = tyAt i ctx
 infer ctx (TmAdd l r) =
   let lt : Ty = wanted (sameTy (infer ctx l) TyNat) TyNat
   wanted (sameTy (infer ctx r) TyNat) lt
-infer ctx (TmLam t body) = TyArr t (infer (Cons t ctx) body)
+infer ctx (TmSub l r) =
+  let lt : Ty = wanted (sameTy (infer ctx l) TyNat) TyNat
+  wanted (sameTy (infer ctx r) TyNat) lt
+infer ctx (TmLam t body) = TyArr t (infer (TyCtx.push t ctx) body)
 infer ctx (TmApp f x) = applied (infer ctx f) (infer ctx x)
+infer ctx (TmIf c t e) =
+  let tt : Ty = demanded (sameTy (infer ctx c) TyBool) (infer ctx t)
+  agreed (sameTy tt (infer ctx e)) tt
+infer ctx (TmLet v body) = infer (TyCtx.push (infer ctx v) ctx) body
 
 -- `(\x : Nat -> x + 1) 2` - хорошо типизировано, тип его `Nat`.
 wellTyped : Term
@@ -281,17 +427,34 @@ illTyped = TmApp (TmLit (Succ (Succ Zero))) (TmLit (Succ Zero))
 illDomain : Term
 illDomain = TmApp (TmLam TyBool (TmLit (Succ Zero))) (TmLit (Succ (Succ Zero)))
 
--- Свободная переменная: отказ от `tyAt`, единственный его свидетель.
+-- Свободная переменная: отказ от `Ctx.at`, единственный его свидетель.
 illFree : Term
 illFree = TmVar (Succ (Succ (Succ (Succ (Succ Zero)))))
+
+-- `if True then False else True` - ветви сошлись, тип `Bool`.
+wellIf : Term
+wellIf = TmIf (TmBool True) (TmBool False) (TmBool True)
+
+-- Ветви разошлись: `Nat` против `Bool`. Отказ от `agreed`.
+illBranches : Term
+illBranches = TmIf (TmBool True) (TmLit (Succ Zero)) (TmBool True)
+
+-- Условие не `Bool`. Отказ от `demanded`, и номер у него свой.
+illCondition : Term
+illCondition = TmIf (TmLit (Succ Zero)) (TmLit (Succ Zero)) (TmLit (Succ (Succ Zero)))
+
+-- `let x = True in \y : Nat -> x` - тип связываемого выведен, не написан, и
+-- виден он в кодомене стрелки: `TyArr TyNat TyBool`.
+wellLet : Term
+wellLet = TmLet (TmBool True) (TmLam TyNat (TmVar (Succ Zero)))
 
 -- Вердикт берёт **вычисление**, а не терм: аргументом оно передаётся, а не
 -- исполняется (§3.4), и хендлеру достаётся неисполненным. Само вычисление при
 -- этом называется определением - там его тип написан, и приостановка видна.
 -- Вердикт отвечает **кодом типа**, а не битом «принято». Пока он давал
 -- единицу на всякий типизирующийся терм, домен и кодомен были неразличимы, а
--- `sameTy`, отказ `wanted` и отказ `tyAt` не наблюдались ни в чём: сломай их -
--- ответ тот же (ревью 2026-09-07). Отказ несёт свой код, поэтому видно и
+-- `sameTy`, отказ `wanted` и отказ `Ctx.at` не наблюдались ни в чём: сломай
+-- их - ответ тот же (ревью 2026-09-07). Отказ несёт свой код, поэтому видно и
 -- **какой** именно.
 code : Ty -> Nat
 code TyNat = Succ Zero
@@ -307,19 +470,160 @@ verdict checked = handle checked with
   reject e -> 20 + e
 
 checkedWell : {Reject} Ty
-checkedWell = infer Nil wellTyped
+checkedWell = infer TyCtx.empty wellTyped
 
 checkedIll : {Reject} Ty
-checkedIll = infer Nil illTyped
+checkedIll = infer TyCtx.empty illTyped
 
 checkedArrow : {Reject} Ty
-checkedArrow = infer Nil wellArrow
+checkedArrow = infer TyCtx.empty wellArrow
 
 checkedDomain : {Reject} Ty
-checkedDomain = infer Nil illDomain
+checkedDomain = infer TyCtx.empty illDomain
 
 checkedFree : {Reject} Ty
-checkedFree = infer Nil illFree
+checkedFree = infer TyCtx.empty illFree
+
+checkedIf : {Reject} Ty
+checkedIf = infer TyCtx.empty wellIf
+
+checkedBranches : {Reject} Ty
+checkedBranches = infer TyCtx.empty illBranches
+
+checkedCondition : {Reject} Ty
+checkedCondition = infer TyCtx.empty illCondition
+
+checkedLet : {Reject} Ty
+checkedLet = infer TyCtx.empty wellLet
+
+-- ------------------------------------------------------ вычисление, часть 2
+--
+-- Тот же `Term`, что и у типизатора, но теперь он **исполняется**. Функция
+-- объектного языка становится замыканием: тело плюс среда на момент лямбды, -
+-- и без среды в значении `(\a -> \b -> a - b) 7 2` не сосчитать.
+
+data Value where
+  VNat : Nat -> Value
+  VBool : Bool -> Value
+  VClos : Term -> List Value -> Value
+
+module ValCell : Slot where
+  type T = Value
+
+module ValCtx = Ctx ValCell
+
+-- Промах среды вычислитель называет своим номером, а не индексом: у него уже
+-- есть номера для «применили не функцию» и «ветвление не по `Bool`», и промах
+-- обязан от них отличаться.
+valAt : Nat -> List Value -> {Reject} Value
+valAt i env = case ValCtx.at i env of
+  Missing -> reject 8
+  Got v -> v
+
+mutual
+  evalTerm : List Value -> Term -> {Reject} Value
+  evalTerm env (TmLit n) = VNat n
+  evalTerm env (TmBool b) = VBool b
+  evalTerm env (TmVar i) = valAt i env
+  evalTerm env (TmAdd l r) = numAdd (evalTerm env l) (evalTerm env r)
+  -- Операнды входят **по порядку**, и порядок наблюдаем: `monus` не
+  -- коммутативен, а на сложении перестановка была бы невидима.
+  evalTerm env (TmSub l r) = numSub (evalTerm env l) (evalTerm env r)
+  evalTerm env (TmLam t body) = VClos body env
+  evalTerm env (TmApp f x) = applyVal (evalTerm env f) (evalTerm env x)
+  evalTerm env (TmIf c t e) = branch (evalTerm env c) t e env
+  evalTerm env (TmLet v body) = evalTerm (ValCtx.push (evalTerm env v) env) body
+
+  -- Замыкание считается в **своей** среде, а не в среде места вызова: подставь
+  -- сюда `env` вызывающего - и `wellClosure` ниже ответит иначе.
+  applyVal : Value -> Value -> {Reject} Value
+  applyVal (VClos body captured) arg = evalTerm (ValCtx.push arg captured) body
+  applyVal (VNat n) arg = reject 5
+  applyVal (VBool b) arg = reject 5
+
+  branch : Value -> Term -> Term -> List Value -> {Reject} Value
+  branch (VBool True) t e env = evalTerm env t
+  branch (VBool False) t e env = evalTerm env e
+  branch (VNat n) t e env = reject 6
+  branch (VClos body captured) t e env = reject 6
+
+  numAdd : Value -> Value -> {Reject} Value
+  numAdd (VNat a) (VNat b) = VNat (a + b)
+  numAdd a b = reject 7
+
+  numSub : Value -> Value -> {Reject} Value
+  numSub (VNat a) (VNat b) = VNat (monus a b)
+  numSub a b = reject 7
+
+-- Форма разобранного и вычисленного входит в ответ числом. Пока результат
+-- наблюдался одним вердиктом типизации, вычислитель вправе был выбросить
+-- работу и подставить константу.
+--
+-- Операнды входят по-разному, иначе `TmAdd l r` неотличимо от `TmAdd r l`.
+shapeOf : Term -> Nat
+shapeOf (TmLit n) = Succ n
+shapeOf (TmBool True) = 6
+shapeOf (TmBool False) = 7
+shapeOf (TmVar i) = 20 + i
+shapeOf (TmAdd l r) = 40 + shapeOf l * 3 + shapeOf r
+shapeOf (TmSub l r) = 50 + shapeOf l + shapeOf r * 3
+shapeOf (TmLam t body) = 60 + shapeOf body
+shapeOf (TmApp f x) = 80 + shapeOf f + shapeOf x
+shapeOf (TmIf c t e) = 90 + shapeOf c + shapeOf t * 3 + shapeOf e
+shapeOf (TmLet v body) = 100 + shapeOf v + shapeOf body * 3
+
+-- Замыкание отвечает **своей формой и глубиной своей среды**: без второго
+-- слагаемого захват среды был бы ненаблюдаем - замыкание с пустой средой и
+-- замыкание с двумя связываниями давали бы одно число.
+valueCode : Value -> Nat
+valueCode (VNat n) = n
+valueCode (VBool True) = 30
+valueCode (VBool False) = 31
+valueCode (VClos body captured) = 32 + shapeOf body + ValCtx.depth captured
+
+judge : ({Reject} Value) -> Nat
+judge computed = handle computed with
+  return v -> valueCode v
+  reject e -> 90 + e
+
+-- `(\x : Nat -> x + 1) 2` даёт три.
+evaluatedWell : {Reject} Value
+evaluatedWell = evalTerm ValCtx.empty wellTyped
+
+-- `(\a -> \b -> a - b) 7 2` даёт пять. Тремя способами испортить его - считать
+-- замыкание в среде вызывающего, класть связывание в хвост, переставить
+-- операнды `TmSub` - и всякий даёт ноль или иное число, но не пять.
+wellClosure : Term
+wellClosure =
+  TmApp
+    (TmApp (TmLam TyNat (TmLam TyNat (TmSub (TmVar (Succ Zero)) (TmVar Zero))))
+      (TmLit 7))
+    (TmLit (Succ (Succ Zero)))
+
+evaluatedClosure : {Reject} Value
+evaluatedClosure = evalTerm ValCtx.empty wellClosure
+
+-- Замыкание, не применённое ни к чему: в ответ идёт его форма и глубина среды.
+evaluatedLambda : {Reject} Value
+evaluatedLambda =
+  evalTerm (ValCtx.push (VNat (Succ Zero)) ValCtx.empty) (TmLam TyNat (TmVar (Succ Zero)))
+
+-- `if False then 8 else 9 - 2` даёт семь: ветвь выбрана, и выбрана неверная
+-- ветвь дала бы восемь.
+evaluatedIf : {Reject} Value
+evaluatedIf =
+  evalTerm ValCtx.empty
+    (TmIf (TmBool False) (TmLit 8) (TmSub (TmLit 9) (TmLit (Succ (Succ Zero)))))
+
+-- `let x = 4 in 10 - x` даёт шесть.
+evaluatedLet : {Reject} Value
+evaluatedLet =
+  evalTerm ValCtx.empty (TmLet (TmLit 4) (TmSub (TmLit 10) (TmVar Zero)))
+
+-- `2 1` до вычисления не доходит по типам, но вычислитель обязан отказать сам:
+-- он идёт по нетипизированному терму и на чужую проверку не опирается.
+evaluatedStuck : {Reject} Value
+evaluatedStuck = evalTerm ValCtx.empty illTyped
 
 -- --------------------------------------------------------------- разбор
 --
@@ -331,9 +635,24 @@ checkedFree = infer Nil illFree
 data Token where
   TokNum : Nat -> Token
   TokVar : Nat -> Token
+  TokTrue : Token
+  TokFalse : Token
   TokPlus : Token
+  TokMinus : Token
+  -- `?` открывает условное: `( ? c t e )`. Префиксная форма выбрана потому,
+  -- что решение о ветвлении принимается по **первой** лексеме внутри скобки, и
+  -- заглядывать вперёд по-прежнему не нужно.
+  TokQuery : Token
   TokOpen : Token
   TokClose : Token
+
+-- Третье применение того же функтора: поток лексем - такой же список ячеек,
+-- как контекст типизатора и среда вычислителя, и длина ему считается тем же
+-- `depth`.
+module TokCell : Slot where
+  type T = Token
+
+module TokCtx = Ctx TokCell
 
 -- Поток - эффект: разбор его потребляет, наружу он не возвращается, и хендлер
 -- ведёт его состоянием.
@@ -354,18 +673,56 @@ mutual
   fromToken : Token -> {Stream, Reject} Term
   fromToken (TokNum n) = TmLit n
   fromToken (TokVar i) = TmVar i
+  fromToken TokTrue = TmBool True
+  fromToken TokFalse = TmBool False
   fromToken TokOpen =
-    let l : Term = parseTerm
-    let plus : Token = next
-    let r : Term = parseTerm
-    let close : Token = next
-    closed plus close (TmAdd l r)
+    let head : Token = next
+    grouped head
   fromToken TokPlus = reject Zero
+  fromToken TokMinus = reject Zero
+  fromToken TokQuery = reject Zero
   fromToken TokClose = reject Zero
 
-  closed : Token -> Token -> Term -> {Stream, Reject} Term
-  closed TokPlus TokClose t = t
-  closed p c t = reject (Succ Zero)
+  -- Первая лексема внутри скобки решает форму: `?` - условное, всё прочее -
+  -- левый операнд двуместного узла.
+  grouped : Token -> {Stream, Reject} Term
+  grouped TokQuery =
+    let c : Term = parseTerm
+    let t : Term = parseTerm
+    let e : Term = parseTerm
+    let close : Token = next
+    closed close (TmIf c t e)
+  grouped head =
+    let l : Term = fromToken head
+    let op : Token = next
+    let r : Term = parseTerm
+    let close : Token = next
+    binary op close l r
+
+  -- Операнды приходят **разобранными по порядку** и в узел кладутся тем же
+  -- порядком: `TmSub l r`, а не `TmSub r l`. Перестановка здесь видна ответом,
+  -- потому что `monus` не коммутативен.
+  binary : Token -> Token -> Term -> Term -> {Stream, Reject} Term
+  binary TokPlus TokClose l r = TmAdd l r
+  binary TokMinus TokClose l r = TmSub l r
+  binary p c l r = reject (Succ Zero)
+
+  closed : Token -> Term -> {Stream, Reject} Term
+  closed TokClose t = t
+  closed c t = reject (Succ Zero)
+
+-- Ветка снимает лексему разбором **по самой нити**: тип её виден, потому что
+-- ответ параметризованного хендлера закреплён до веток. На пустом потоке она
+-- отказывает, не возобновляя, - `Reject` здесь в окружающей.
+--
+-- Хендлер написан один на все потоки: начальное состояние приходит аргументом.
+parseAll : List Token -> {Reject} Term
+parseAll toks = handle parseTerm with
+  state toks
+  return t -> t
+  next -> case state of
+    Nil -> reject Zero
+    Cons t ts -> resume t ts
 
 -- `(x + 1)` в лексемах.
 source : List Token
@@ -376,31 +733,28 @@ source =
         (Cons (TokNum (Succ Zero))
           (Cons TokClose Nil))))
 
--- Ветка снимает лексему разбором **по самой нити**: тип её виден, потому что
--- ответ параметризованного хендлера закреплён до веток. На пустом потоке она
--- отказывает, не возобновляя, - `Reject` здесь в окружающей.
-running : {Reject} Term
-running = handle parseTerm with
-  state source
-  return t -> t
-  next -> case state of
-    Nil -> reject Zero
-    Cons t ts -> resume t ts
+-- `(9 - 2)`: тот же разбор на некоммутативном узле. Без него перестановка
+-- операндов в `binary` не наблюдалась бы на фиксированном потоке вовсе.
+sourceMinus : List Token
+sourceMinus =
+  Cons TokOpen
+    (Cons (TokNum (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ (Succ Zero))))))))))
+      (Cons TokMinus
+        (Cons (TokNum (Succ (Succ Zero)))
+          (Cons TokClose Nil))))
 
--- Разбор и типизация встречаются: разобранное проверяется под контекстом, где
--- свободная переменная имеет тип.
--- Форма разобранного терма входит в ответ числом. Пока разбор наблюдался одним
--- вердиктом типизации, парсер вправе был выбросить результат целиком и
--- подставить константу: `verdict parsedType` давал единицу при всяком терме,
--- который типизируется (ревью 2026-09-07).
---
--- Операнды входят по-разному, иначе `TmAdd l r` неотличимо от `TmAdd r l`.
-shapeOf : Term -> Nat
-shapeOf (TmLit n) = Succ n
-shapeOf (TmVar i) = 20 + i
-shapeOf (TmAdd l r) = 40 + shapeOf l * 3 + shapeOf r
-shapeOf (TmLam t body) = 60 + shapeOf body
-shapeOf (TmApp f x) = 80 + shapeOf f + shapeOf x
+-- `( ? True 4 7 )`: условное, разобранное префиксной формой.
+sourceIf : List Token
+sourceIf =
+  Cons TokOpen
+    (Cons TokQuery
+      (Cons TokTrue
+        (Cons (TokNum 4)
+          (Cons (TokNum 7)
+            (Cons TokClose Nil)))))
+
+running : {Reject} Term
+running = parseAll source
 
 shaped : {Reject} Nat
 shaped =
@@ -412,9 +766,95 @@ parsedShape = handle shaped with
   return n -> n
   reject e -> Zero
 
-parsedType : {Reject} Ty
-parsedType = infer (Cons TyNat Nil) running
+shapedMinus : {Reject} Nat
+shapedMinus =
+  let t : Term = parseAll sourceMinus
+  shapeOf t
 
+parsedShapeMinus : Nat
+parsedShapeMinus = handle shapedMinus with
+  return n -> n
+  reject e -> Zero
+
+-- Разбор и вычисление встречаются: разобранное условное исполняется, и ответ
+-- его - значение, а не форма.
+parsedIfValue : {Reject} Value
+parsedIfValue = evalTerm ValCtx.empty (parseAll sourceIf)
+
+-- Разбор и типизация встречаются: разобранное проверяется под контекстом, где
+-- свободная переменная имеет тип.
+parsedType : {Reject} Ty
+parsedType = infer (TyCtx.push TyNat TyCtx.empty) running
+
+-- ------------------------------------------------------------------ нагрузка
+--
+-- Работа программы масштабируется **одним числом**. Поток лексем длиной
+-- `4 * workload + 1` строится `chain`, разбирается тем же `parseAll`,
+-- типизируется тем же `infer` и исполняется тем же `evalTerm`: нагрузка - это
+-- те же три части на большем входе, а не четвёртая часть рядом.
+--
+-- Стенду (`crates/adamas-codegen/benches/native.rs`) довольно подставить сюда
+-- другое число: прочее в файле от него не зависит. Замерено 2026-09-12 под
+-- `adamas eval`: 12 - 46 мс, 96 - 66 мс, 384 - 275 мс, 1536 - 3.5 с. Рост
+-- сверхлинейный, и это не дефект стенда: значение цепочки растёт вместе с
+-- `workload`, а `Nat` унарен, поэтому арифметика вносит второй множитель.
+--
+-- **Литералом сюда пишется не больше 256** (§4.3: без примитивного типа литерал
+-- разворачивается унарно). Больший размер пишется произведением - `24 * 64`, -
+-- и на нём же прогнан сверх корпуса: при `6 * 64` понижение берёт программу и
+-- отвечает то же, что машина.
+workload : Nat
+workload = 12
+
+-- Операции чередуются с периодом три, литералы - с периодом четыре. Периоды
+-- взаимно просты, поэтому значение цепочки не зацикливается на первых же шагах
+-- и медленно растёт: `monus` до нуля не досчитывает, и насыщение ответ не
+-- съедает.
+opAt : Nat -> Token
+opAt Zero = TokPlus
+opAt (Succ Zero) = TokPlus
+opAt (Succ (Succ Zero)) = TokMinus
+opAt (Succ (Succ (Succ k))) = opAt k
+
+litAt : Nat -> Nat
+litAt Zero = Succ Zero
+litAt (Succ Zero) = Succ (Succ Zero)
+litAt (Succ (Succ Zero)) = Succ (Succ (Succ Zero))
+litAt (Succ (Succ (Succ Zero))) = Succ (Succ (Succ (Succ Zero)))
+litAt (Succ (Succ (Succ (Succ k)))) = litAt k
+
+-- `((((x op0 lit0) op1 lit1) …) opN litN)` - цепочка, растущая влево. Хвост
+-- накапливается аргументом, а не приписывается `append`: иначе построение
+-- потока стоило бы квадрата от `workload` и мерилось бы вместо разбора.
+chain : Nat -> List Token -> List Token
+chain Zero tail = TokCtx.push (TokVar Zero) tail
+chain (Succ k) tail =
+  TokCtx.push TokOpen
+    (chain k (TokCtx.push (opAt k) (TokCtx.push (TokNum (litAt k)) (TokCtx.push TokClose tail))))
+
+generated : List Token
+generated = chain workload TokCtx.empty
+
+-- Разбирается один раз на каждого потребителя: и типизатор, и вычислитель
+-- получают собственный прогон разбора, а не сохранённый терм.
+workloadTerm : {Reject} Term
+workloadTerm = parseAll generated
+
+workloadType : {Reject} Ty
+workloadType = infer (TyCtx.push TyNat TyCtx.empty) workloadTerm
+
+workloadValue : {Reject} Value
+workloadValue =
+  let t : Term = workloadTerm
+  evalTerm (ValCtx.push (VNat (Succ Zero)) ValCtx.empty) t
+
+-- Та же цепочка под **пустым** контекстом: свободная переменная обязана быть
+-- поймана типизатором и на большом терме тоже.
+workloadFree : {Reject} Ty
+workloadFree = infer TyCtx.empty workloadTerm
+
+-- ------------------------------------------------ внутренне типизированное
+--
 -- **Внутренне типизированное представление.** Здесь индекс - не код, а сам
 -- `Type` (§4.1), и семейство обобщается после своих конструкторов (§10 вопрос
 -- 53): `TNat` инстанцирует индекс и заземляет его уровень. Ветка `TPick`
@@ -448,26 +888,57 @@ intrinsic =
     (TSum (TNat (Succ (Succ Zero))) (TNat (Succ (Succ (Succ Zero)))))
     (TNat Zero)
 
--- `[5, 4, 0, 9, 1, 22, 17, 21, 25, 1, 102, 5]`: пять от вычисления, четыре от
--- фатальной ошибки, ушедшей мимо локального обработчика, отметки `[0, 9]` от
--- оборванного - вторая поставлена деструктором ресурса уже на исключительном
--- пути, - затем пять вердиктов типизации, вердикт разобранного, **форма**
--- разобранного и значение внутренне типизированного терма.
+-- ------------------------------------------------------------------- ответ
 --
--- Вердикты несут код типа, а отказы - свой номер: `1` есть `TyNat`, `17` есть
--- `TyArr TyBool TyNat`, `21` - несовпадение домена, `22` - применение не
--- функции, `25` - свободная переменная. Одним битом «принято» они были прежде,
--- и половина типизатора не проверялась ничем (ревью 2026-09-07).
+-- `[5, 4, 0, 9, 1, 22, 17, 21, 25, 2, 24, 23, 15, 1, 102, 69, 5, 3, 5, 54, 7,
+--   6, 95, 4, 49, 1, 20, 11, 27, 9]` - тридцать позиций, и каждая отвечает за
+-- свою часть.
+--
+-- Порядок: вычисление первого объектного языка и ошибка, ушедшая мимо
+-- локального обработчика; отметки оборванного прогона (вторая поставлена
+-- деструктором ресурса уже на исключительном пути); девять вердиктов
+-- типизации; вердикт и форма разобранного, форма разобранного вычитания;
+-- значение внутренне типизированного терма; семь ответов вычислителя
+-- объектного языка, последний - от разобранного условного; длина порождённого
+-- потока, два вердикта нагрузки и её значение; и две свёртки трассы
+-- библиотекой.
+--
+-- Вердикты несут код типа, а отказы - свой номер: `1` есть `TyNat`, `2` -
+-- `TyBool`, `17` - `TyArr TyBool TyNat`, `15` - `TyArr TyNat TyBool`, `21` -
+-- несовпадение домена, `22` - применение не функции, `23` - условие не `Bool`,
+-- `24` - разошедшиеся ветви, `25` - свободная переменная. Ответы вычислителя
+-- считает `valueCode`, отказы его - `90 + номер`. Одним битом «принято» они
+-- были прежде, и половина типизатора не проверялась ничем (ревью 2026-09-07).
 main : List Nat
 main =
-  append [answer, escaped]
-    (append traced
-      [ verdict checkedWell
-      , verdict checkedIll
-      , verdict checkedArrow
-      , verdict checkedDomain
-      , verdict checkedFree
-      , verdict parsedType
-      , parsedShape
-      , evalTyped Nat intrinsic
-      ])
+  Lists.append [answer, escaped]
+    (Lists.append traced
+      (Lists.append
+        [ verdict checkedWell
+        , verdict checkedIll
+        , verdict checkedArrow
+        , verdict checkedDomain
+        , verdict checkedFree
+        , verdict checkedIf
+        , verdict checkedBranches
+        , verdict checkedCondition
+        , verdict checkedLet
+        , verdict parsedType
+        , parsedShape
+        , parsedShapeMinus
+        , evalTyped Nat intrinsic
+        ]
+        [ judge evaluatedWell
+        , judge evaluatedClosure
+        , judge evaluatedLambda
+        , judge evaluatedIf
+        , judge evaluatedLet
+        , judge evaluatedStuck
+        , judge parsedIfValue
+        , TokCtx.depth generated
+        , verdict workloadType
+        , verdict workloadFree
+        , judge workloadValue
+        , Lists.weigh traced
+        , Lists.weigh (Lists.reverse traced)
+        ]))

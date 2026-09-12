@@ -258,3 +258,31 @@ fn leakless(name: &str, stderr: &str) {
     let (_, live) = harness::blocks(name, stderr);
     assert_eq!(live, 0, "{name}: прогон оставил блоки живыми");
 }
+
+/// Наименьший размер demo target'а Фазы 6 (§9): пятьсот строк.
+const DEMO_LINES: usize = 500;
+
+/// Milestone Фазы 6 арифметичен, и арифметика его проверяется прогоном.
+///
+/// «500-строчная программа компилируется в native» (§9, Demo targets) держится
+/// на двух фактах: программа такого размера есть, и [`TAKEN`] её берёт. Второе
+/// проверяет тест выше, первое - никто, и до 2026-09-12 самая большая взятая
+/// была на 473 строки. Утверждение, ничем не меряемое, тихо перестаёт быть
+/// правдой при первой же чистке фикстуры, поэтому размер стоит здесь числом.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отсутствие capstone'а означает сломанный корпус"
+)]
+#[test]
+fn the_demo_target_is_five_hundred_lines_long() {
+    let path = harness::corpus().join("interpreter.adamas");
+    let lines = std::fs::read_to_string(&path).unwrap().lines().count();
+    assert!(
+        lines >= DEMO_LINES,
+        "capstone усох до {lines} строк при {DEMO_LINES} по §9"
+    );
+    assert!(
+        TAKEN.contains(&"interpreter"),
+        "capstone выпал из TAKEN: размер без понижения milestone не закрывает"
+    );
+}

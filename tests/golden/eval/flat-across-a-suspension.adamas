@@ -1,0 +1,81 @@
+-- Плоское значение переживает точку приостановки (§4.11 × §3.4).
+--
+-- Дробление режет тело второй формы по точкам приостановки, и арифметика,
+-- написанная после операции, уезжает в следующий кусок. Кадр носит слово и
+-- ничего кроме, поэтому плоское значение едет через границу битами.
+--
+-- Ширина при этом наблюдаема, и наблюдаема нарочно: `Int8` заворачивается,
+-- `UInt32` отрицательного не знает, `Float64` в целое не влезает вовсе.
+-- Перевод в слово и обратно стоят рядом и сокращаются, поэтому ошибка в них
+-- видна не всяким ответом - только тем, у которого ширина значима.
+--
+-- Дробная часть у `Float64` - несущая, и это измерено мутантом: замени 2.5 на
+-- 3.0, и мутант «перевод всегда шириной Int64» проходит корпус целиком. У
+-- целых он проходит его всегда - C приводит число обратно.
+
+data Unit where
+  MkUnit : Unit
+
+data Mult where
+  Triple : Mult
+  Double : Mult
+
+effect Ask where
+  ask : Mult
+
+data Tree where
+  Leaf : Int64 -> Tree
+  Node : Tree -> Tree -> Tree
+
+factor : Mult -> Int64
+factor Triple = 3
+factor Double = 2
+
+narrow : Mult -> Int8
+narrow Triple = -100
+narrow Double = 7
+
+wide : Mult -> UInt32
+wide Triple = 3
+wide Double = 2
+
+real : Mult -> Float64
+real Triple = 2.5
+real Double = 1.5
+
+-- Свидетель §10 вопроса 164 дословно: умножение стоит **после** операции, и
+-- его плоский результат переживает границу куска.
+scaled : Tree -> {Ask} Tree
+scaled (Leaf x) = Leaf (mulInt64 x (factor ask))
+scaled (Node l r) = Node (scaled l) (scaled r)
+
+grown : {Ask} Tree
+grown = scaled (Node (Leaf 1) (Node (Leaf 2) (Leaf 3)))
+
+tripled : Tree
+tripled = handle grown with
+  return v -> v
+  ask -> resume Triple
+
+data Widths where
+  MkWidths : Int8 -> UInt32 -> Float64 -> Widths
+
+-- Три ширины через ту же границу: 3 * (-100) заворачивается в -44, 1 - 3 у
+-- беззнакового есть 4294967294, 2.5 * 2.5 - 6.25.
+measured : {Ask} Widths
+measured =
+  let small : Int8 = mulInt8 3 (narrow ask)
+  let big : UInt32 = subUInt32 1 (wide ask)
+  let fractional : Float64 = mulFloat64 2.5 (real ask)
+  MkWidths small big fractional
+
+widths : Widths
+widths = handle measured with
+  return v -> v
+  ask -> resume Triple
+
+data Answers where
+  MkAnswers : Tree -> Widths -> Answers
+
+main : Answers
+main = MkAnswers tripled widths

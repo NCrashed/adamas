@@ -13,14 +13,15 @@ use adamas_runtime::ffi::{
     Evidence, Frame, HANDLER_RETURN, Kont, LOOKUP_HANDLER, LOOKUP_MISSING, LOOKUP_SUPPRESSED,
     MARK_CLOSING, MARK_HANDLER, MARK_PLAIN, Value, adamas_alloc, adamas_closure,
     adamas_closure_get, adamas_closure_release, adamas_closure_set, adamas_drop, adamas_dup,
-    adamas_evidence_drop, adamas_evidence_empty, adamas_evidence_extend, adamas_evidence_lookup,
-    adamas_evidence_mask, adamas_field, adamas_frame_env, adamas_frame_evidence,
-    adamas_frame_fields, adamas_frame_label, adamas_frame_mark, adamas_frame_perform, adamas_imm,
-    adamas_imm_get, adamas_kont_abort, adamas_kont_cut, adamas_kont_depth, adamas_kont_handler,
-    adamas_kont_init, adamas_kont_push, adamas_kont_restore, adamas_kont_resume, adamas_kont_run,
-    adamas_rc, adamas_resumption_drop, adamas_segment_abandon, adamas_segment_base,
-    adamas_segment_copy, adamas_segment_depth, adamas_segment_unwind, adamas_segment_value,
-    adamas_set_field, adamas_stat_live, adamas_stat_reset, adamas_unit,
+    adamas_evidence_at, adamas_evidence_drop, adamas_evidence_empty, adamas_evidence_extend,
+    adamas_evidence_lookup, adamas_evidence_mask, adamas_field, adamas_frame_env,
+    adamas_frame_evidence, adamas_frame_fields, adamas_frame_label, adamas_frame_mark,
+    adamas_frame_perform, adamas_imm, adamas_imm_get, adamas_kont_abort, adamas_kont_cut,
+    adamas_kont_depth, adamas_kont_handler, adamas_kont_init, adamas_kont_push,
+    adamas_kont_restore, adamas_kont_resume, adamas_kont_run, adamas_rc, adamas_resumption_drop,
+    adamas_segment_abandon, adamas_segment_base, adamas_segment_copy, adamas_segment_depth,
+    adamas_segment_unwind, adamas_segment_value, adamas_set_field, adamas_stat_live,
+    adamas_stat_reset, adamas_unit,
 };
 
 thread_local! {
@@ -332,6 +333,164 @@ fn a_copied_segment_resumes_twice_and_independently() {
         // Оригинал цел и после двух возобновлений.
         assert_eq!(adamas_segment_depth(segment), 2);
         adamas_segment_unwind(&raw mut kont, segment);
+        adamas_kont_run(&raw mut kont, adamas_unit());
+        adamas_evidence_drop(evidence);
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Копия переписывает вектор: запись называет **её** кадр хендлера.
+///
+/// Иначе операция под возобновлённой копией резала бы стек по кадру оригинала,
+/// которого на стеке нет вовсе, - и снесла бы стек молча. Свидетель читает
+/// вектор скопированного звена и требует от него кадр копии.
+#[test]
+fn a_copy_names_its_own_handler_in_the_vector() {
+    unsafe {
+        adamas_stat_reset();
+        let mut kont = kont();
+        let empty = adamas_evidence_empty();
+
+        let handler = adamas_kont_push(&raw mut kont, MARK_HANDLER, 7, None, None, 0, 0, empty);
+        // Вектор вычисления под хендлером: запись называет его кадр.
+        let under = adamas_evidence_extend(empty, 7, handler);
+        let chunk = push_holding(&raw mut kont, MARK_PLAIN, adding, 10, under);
+        assert_eq!(adamas_frame_evidence(chunk), under);
+
+        let segment = adamas_kont_cut(&raw mut kont, handler);
+        let copy = adamas_segment_copy(segment);
+        let base = adamas_segment_base(copy);
+        assert_ne!(base, handler, "основание копии - кадр оригинала");
+
+        adamas_kont_restore(&raw mut kont, copy);
+        let top = kont.top;
+        let mut found: *mut Frame = ptr::null_mut();
+        let verdict = adamas_evidence_lookup(adamas_frame_evidence(top), 7, &raw mut found);
+        assert_eq!(verdict, LOOKUP_HANDLER);
+        assert_eq!(found, base, "вектор копии называет кадр оригинала");
+        // И вектор у копии свой: правка общего задела бы оригинал.
+        assert_ne!(adamas_frame_evidence(top), under);
+        assert_eq!(adamas_evidence_at(under, 0), handler);
+
+        adamas_kont_run(&raw mut kont, adamas_imm(1));
+        adamas_segment_unwind(&raw mut kont, segment);
+        adamas_kont_run(&raw mut kont, adamas_unit());
+        adamas_evidence_drop(under);
+        adamas_evidence_drop(empty);
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Плоский слот копия не дупает: счётчика у него нет вовсе (§4.11).
+///
+/// Кадр носит число **счётных** слотов рядом с числом слотов, счётные идут
+/// первыми. Дупни копия всё подряд - и биты `40` поехали бы указателем: младший
+/// бит нулевой, заголовка по этому адресу нет.
+#[test]
+fn a_copy_duplicates_only_the_counted_slots() {
+    unsafe {
+        adamas_stat_reset();
+        let mut kont = kont();
+        let evidence = adamas_evidence_empty();
+
+        let base = adamas_kont_push(&raw mut kont, MARK_PLAIN, 0, None, None, 0, 0, evidence);
+        // Два слота, счётный один: второй - биты плоского значения.
+        let frame = adamas_kont_push(
+            &raw mut kont,
+            MARK_PLAIN,
+            0,
+            None,
+            Some(release_held),
+            2,
+            1,
+            evidence,
+        );
+        let held = boxed(3);
+        // Биты плоского `Int64`, как их кладёт порождённый C: 40 - чётное, то
+        // есть непосредственным значением не притворяется и `adamas_dup` по нему
+        // полез бы в заголовок по адресу 40.
+        let bits: Value = std::ptr::without_provenance_mut(40);
+        *adamas_frame_env(frame) = held;
+        *adamas_frame_env(frame).add(1) = bits;
+        assert_eq!(adamas_frame_fields(frame), 2);
+
+        let segment = adamas_kont_cut(&raw mut kont, base);
+        let copy = adamas_segment_copy(segment);
+        // Счётный слот получил ссылку, плоский - те же биты и ни одной.
+        assert_eq!(adamas_rc(held), 1);
+
+        adamas_kont_restore(&raw mut kont, copy);
+        assert_eq!(*adamas_frame_env(kont.top), held);
+        assert_eq!((*adamas_frame_env(kont.top).add(1)).addr(), 40);
+
+        adamas_kont_run(&raw mut kont, adamas_unit());
+        assert_eq!(adamas_rc(held), 0);
+        adamas_segment_unwind(&raw mut kont, segment);
+        adamas_kont_run(&raw mut kont, adamas_unit());
+        adamas_evidence_drop(evidence);
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Одношотная ручка в слоте копируемого звена достаётся **каждому** ходу.
+///
+/// Копия дупает слот, и с этого мгновения у сегмента два независимых владельца:
+/// потрать его первый - второму досталась бы пустая ручка. Поэтому копия
+/// помечает такие ручки мультишотными. Тот же дефект машина закрыла признаком
+/// `multishot` (`eval/multi-over-oneshot`), и там он давал `[2, 2]` вместо
+/// `[2, 4]` - второй проход не исполнялся вовсе.
+///
+/// Ответы ходов различны по построению: `1` и `5` на входе дают `12` и `20`.
+#[test]
+fn a_copy_makes_the_resumptions_in_its_slots_multishot() {
+    unsafe {
+        adamas_stat_reset();
+        let mut kont = kont();
+        let evidence = adamas_evidence_empty();
+
+        // Внутренний сегмент: в основании прибавить 10, сверху умножить на 2.
+        let bottom = push_holding(&raw mut kont, MARK_PLAIN, adding, 10, evidence);
+        push_holding(&raw mut kont, MARK_PLAIN, scaling, 2, evidence);
+        let inner = adamas_segment_value(adamas_kont_cut(&raw mut kont, bottom));
+
+        // Внешнее звено держит её слотом - так её носит дроблёное тело.
+        let outer_base = adamas_kont_push(&raw mut kont, MARK_PLAIN, 0, None, None, 0, 0, evidence);
+        let holder = adamas_kont_push(
+            &raw mut kont,
+            MARK_PLAIN,
+            0,
+            None,
+            Some(release_resumption),
+            1,
+            1,
+            evidence,
+        );
+        *adamas_frame_env(holder) = inner;
+        let outer = adamas_kont_cut(&raw mut kont, outer_base);
+
+        let copy = adamas_segment_copy(outer);
+        assert_eq!(adamas_rc(inner), 1, "копия не взяла ссылки на ручку");
+
+        // Первый ход: владельцев двое, возобновление ставит копию сегмента.
+        adamas_kont_resume(&raw mut kont, inner);
+        assert_eq!(
+            adamas_imm_get(adamas_kont_run(&raw mut kont, adamas_imm(1))),
+            12
+        );
+
+        // Оригинал внешнего сегмента умирает, и с ним одна из двух ссылок.
+        adamas_segment_unwind(&raw mut kont, outer);
+        adamas_kont_run(&raw mut kont, adamas_unit());
+        assert_eq!(adamas_rc(inner), 0);
+
+        // Второй ход: ссылка последняя, копии не нужно - сегмент отдаётся сам.
+        adamas_kont_resume(&raw mut kont, inner);
+        assert_eq!(
+            adamas_imm_get(adamas_kont_run(&raw mut kont, adamas_imm(5))),
+            20
+        );
+
+        adamas_segment_unwind(&raw mut kont, copy);
         adamas_kont_run(&raw mut kont, adamas_unit());
         adamas_evidence_drop(evidence);
         assert_eq!(adamas_stat_live(), 0);

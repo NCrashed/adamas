@@ -1,0 +1,85 @@
+-- Заземление передаётся через ссылку на соседа по группе (§4.8, §3.2, §10
+-- вопрос 168).
+--
+-- Член группы, зовущий соседа, но **сам** не зовущий операции: `afterTop` не
+-- зовёт `reject`, и её уровень заземляет не собственное тело, а связь с телом
+-- соседа - `atTop` передаёт ей `x` своего уровня, её собственный вызов требует
+-- `atTop` на своём. Связь эта видна только проверке тел, поэтому обобщается
+-- член группы после тел **всей группы**: обобщённый раньше, он увозил
+-- нерешённую дырку в параметр, и ссылка на заземлённого соседа отвергалась
+-- жёстким «ожидался `Type 0`, получен `Type u0`».
+--
+-- **Оба направления в одном файле.** У `atTop`/`afterTop` операция стоит в
+-- первом члене, у `pickAt`/`stepDown` - во втором: заземление обязано доехать
+-- до соседа при любом порядке членов, порядконезависимость §4.8 - обещание, а
+-- не случайность.
+--
+-- **Свидетель тотален по построению**, как и у вопроса 167, и это условие
+-- жёстче, чем кажется: убывать обязан **каждый** вызов цикла, поэтому оба
+-- члена разбирают список сами. Форма вопроса, где сосед передаёт список
+-- неразобранным, проверке §4.7 не по зубам, а её ворота на нулевой кратности
+-- глотают вставку имплиситов (побочный дефект, названный логом 167) - и
+-- `main` отвергался бы «несовпадением типов» вовсе не из-за уровней. Цена
+-- тотальной формы: счёт идёт со второго элемента, за границей списка отвечает
+-- последний, `reject` остаётся пустому.
+--
+-- Ближайший сосед - `eval/mutual-polymorphic-recursion.adamas`: там операция
+-- в теле каждого члена, и каждый заземляется сам. Цена решения не здесь:
+-- сосед по группе монотипен по уровню между телами, и это записано программой
+-- `errors/mutual-sibling-two-levels.adamas`.
+--
+-- Значение - `[7, 99, 2]`: элемент за головой, отказ на пустом списке, тот же
+-- поиск группой с обратным порядком членов.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Reject where
+  reject : Nat -> a
+
+-- Операция в первом члене, сосед без операции - вторым.
+mutual
+  atTop : Nat -> List a -> {Reject} a
+  atTop n Nil = reject n
+  atTop n (Cons x xs) = afterTop n x xs
+
+  afterTop : Nat -> a -> List a -> {Reject} a
+  afterTop n d Nil = d
+  afterTop Zero d (Cons x xs) = x
+  afterTop (Succ k) d (Cons x xs) = atTop k xs
+
+sample : List Nat
+sample = Cons 5 (Cons 7 (Cons 2 Nil))
+
+empty : List Nat
+empty = Nil
+
+runNat : ({Reject} Nat) -> Nat
+runNat act = handle act with
+  return v -> v
+  reject n -> 99
+
+-- Тот же поиск, порядок членов обратный: без операции - первым.
+mutual
+  pickAt : Nat -> a -> List a -> {Reject} a
+  pickAt n d Nil = d
+  pickAt Zero d (Cons x xs) = x
+  pickAt (Succ k) d (Cons x xs) = stepDown k xs
+
+  stepDown : Nat -> List a -> {Reject} a
+  stepDown n Nil = reject n
+  stepDown n (Cons x xs) = pickAt n x xs
+
+main : List Nat
+main =
+  Cons (runNat (atTop Zero sample))
+    (Cons (runNat (atTop Zero empty))
+      (Cons (runNat (stepDown 1 sample)) Nil))

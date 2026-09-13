@@ -68,7 +68,7 @@ use crate::eval::eval;
 use crate::level::{Level, LevelMeta, LevelVar};
 use crate::meta::{Generalization, Metas, zonk_term};
 use crate::mult::Mult;
-use crate::row::Row;
+use crate::row::{Row, RowVar, Tail};
 use crate::term::{Args, Name, Term};
 use crate::value::{Env, Value};
 
@@ -850,10 +850,11 @@ impl Signature {
         // Значения так не объявляются: у них взаимная рекурсия симметрична, и
         // порядок сделал бы смысл группы зависящим от того, что написано выше.
         // Их типы вставляются после прохода, как и прежде.
+        let postponable = defers_definitions(members);
         let mut checked = Vec::with_capacity(members.len());
         for (index, member) in members.iter().enumerate() {
             let found = self
-                .check_member_type(metas, member)
+                .check_member_type(metas, member, postponable)
                 .map_err(|error| error.in_frame(Frame::MemberType(at(index))))?;
             if matches!(member, Member::Data { .. }) {
                 self.definitions
@@ -908,14 +909,29 @@ impl Signature {
         }
 
         // (B2) тела определений - с полной таблицей конструкторов.
+        //
+        // Отложенная группа проверяется против необобщённых типов: дырки
+        // общие на все тела, и заземление одного члена доезжает до другого
+        // обычной унификацией (§10 вопрос 168). Список у ссылок при этом -
+        // сами дырки, инертными аргументами: в необобщённом типе параметров
+        // нет, подставлять некуда.
         let mut bodies = Vec::with_capacity(members.len());
         for (index, (member, at_checked)) in members.iter().zip(&checked).enumerate() {
-            let siblings = sibling_levels(metas, members, &checked, index);
+            let siblings = if at_checked.postponed.is_some() {
+                postponed_levels(members, &checked)
+            } else {
+                sibling_levels(metas, members, &checked, index)
+            };
             bodies.push(
                 self.check_member_body(metas, member, at_checked, &siblings)
                     .map_err(|error| error.in_frame(Frame::MemberBody(at(index))))?,
             );
         }
+
+        // (B2½) обобщение отложенных определений - по телам всей группы
+        // (§10 вопрос 168): к этому месту всякое заземление, какое группа
+        // могла сообщить члену, уже решено в хранилище.
+        self.settle_definitions(metas, members, &mut checked, &mut bodies);
 
         // Тела - в сигнатуру до фазы C: позитивность смотрит сквозь
         // определения, и определение без тела она видит непрозрачным. Носители
@@ -1023,7 +1039,16 @@ impl Signature {
     }
 
     /// Фаза A для одного члена: проверить тип и обобщить арность.
-    fn check_member_type(&self, metas: &mut Metas, member: &Member) -> Result<Checked, TypeError> {
+    ///
+    /// `postpone` - группа из нескольких тел: обобщение определения
+    /// откладывается до фазы B2½ ([`Signature::settle_definitions`], §10
+    /// вопрос 168), потому что дырки его уровней решают и тела соседей.
+    fn check_member_type(
+        &self,
+        metas: &mut Metas,
+        member: &Member,
+        postpone: bool,
+    ) -> Result<Checked, TypeError> {
         let (name, mult, arity, ty) = match member {
             Member::Definition {
                 name,
@@ -1075,6 +1100,21 @@ impl Signature {
         // implicit-параметра (§4.1), а решается она универсумом, чей уровень
         // и обязан стать параметром.
         draft.ty = zonk_term(metas, &draft.ty);
+
+        // Определение в группе из нескольких тел не обобщается здесь вовсе
+        // (§10 вопрос 168): заземление собственного параметра приходит члену
+        // и от тела **соседа** - вызов передаёт аргумент его уровня, - а видит
+        // эту связь только фаза B2. Тип едет в тело дырками, арность
+        // объявляется их числом - под неё же перепишутся ссылки, - а обобщает
+        // члена фаза B2½ по телам всей группы. Тот же ход, что у семейства с
+        // конструкторами (`deferred`): обобщать нельзя раньше фазы, которая
+        // решает дырки.
+        if postpone
+            && matches!(member, Member::Definition { body: Some(_), .. })
+            && !arity.is_declared()
+        {
+            return Ok(postponed_definition(metas, draft));
+        }
 
         // Обобщение идёт **до** проверки тела: рекурсивная ссылка обязана знать
         // окончательную арность, иначе член в собственном теле пишется с
@@ -1165,6 +1205,7 @@ impl Signature {
             declaration,
             generalization,
             deferred,
+            postponed: None,
         })
     }
 
@@ -1346,16 +1387,27 @@ impl Signature {
         // список ей даёт [`sibling_levels`]. Самоссылка - его частный случай,
         // но записана отдельно: у члена с объявленной арностью обобщения нет
         // вовсе, а параметры уровня есть.
-        let levels: Rc<[Level]> = (0..checked.declaration.level_arity)
-            .map(|index| Level::Var(LevelVar(index)))
-            .collect();
-        let mut targets: Vec<(Name, Rc<[Level]>)> = vec![(Rc::clone(name), levels)];
-        targets.extend(
+        // У отложенного члена (§10 вопрос 168) собственных параметров ещё
+        // нет: и себя, и соседей он зовёт их дырками, и список этот пришёл
+        // готовым - `postponed_levels` кладёт туда и самого члена.
+        let targets: Vec<(Name, Rc<[Level]>)> = if checked.postponed.is_some() {
             siblings
                 .iter()
-                .filter(|(sibling, _)| sibling != name)
-                .map(|(sibling, levels)| (Rc::clone(sibling), Rc::clone(levels))),
-        );
+                .map(|(sibling, levels)| (Rc::clone(sibling), Rc::clone(levels)))
+                .collect()
+        } else {
+            let levels: Rc<[Level]> = (0..checked.declaration.level_arity)
+                .map(|index| Level::Var(LevelVar(index)))
+                .collect();
+            let mut targets: Vec<(Name, Rc<[Level]>)> = vec![(Rc::clone(name), levels)];
+            targets.extend(
+                siblings
+                    .iter()
+                    .filter(|(sibling, _)| sibling != name)
+                    .map(|(sibling, levels)| (Rc::clone(sibling), Rc::clone(levels))),
+            );
+            targets
+        };
         let body = relevelled(&body, &targets);
         let definition = Definition {
             body: Some(body.clone()),
@@ -1363,6 +1415,80 @@ impl Signature {
         };
         let report = check_body(self, metas, name, &definition)?;
         Ok(Some((body, report)))
+    }
+
+    /// Фаза B2½: обобщение определений, отложенное до тел всей группы
+    /// (§10 вопрос 168).
+    ///
+    /// Заземление собственного параметра приходит члену не только от его
+    /// тела: вызов из тела **соседа** передаёт аргумент этого же уровня, и
+    /// связь между дырками двух членов материализуется только проверкой тел -
+    /// решением дырки терма против её типа. Обобщённый в фазе A, член увозил
+    /// нерешённую дырку в параметр, и `Type 0 ~ Type u0` дальше не решалось
+    /// ничем: обе стороны уже жёсткие.
+    ///
+    /// Два прохода, и порядок обязателен: список ссылки на соседа строится по
+    /// **его** обобщению, увиденному своим, - значит, сперва обобщаются все,
+    /// потом переписываются тела.
+    fn settle_definitions(
+        &mut self,
+        metas: &mut Metas,
+        members: &[Member],
+        checked: &mut [Checked],
+        bodies: &mut [Option<CheckedBody>],
+    ) {
+        for (index, member) in members.iter().enumerate() {
+            if checked[index].postponed.is_none() {
+                continue;
+            }
+            let Member::Definition { arity, .. } = member else {
+                continue;
+            };
+            let draft = checked[index].declaration.clone();
+            // Алиас типа - тем же исключением, что в фазе A: дырка результата
+            // остаётся дыркой, её решает тело (§10 вопрос 106).
+            let released = alias_result(metas, &draft.ty);
+            let (declaration, generalization) = generalize(metas, *arity, draft, released);
+            self.definitions
+                .insert(Rc::clone(member.name()), declaration.clone());
+            checked[index].declaration = declaration;
+            checked[index].generalization = generalization;
+        }
+        for (index, member) in members.iter().enumerate() {
+            if checked[index].postponed.is_none() {
+                continue;
+            }
+            let Some((body, _)) = bodies[index].as_mut() else {
+                continue;
+            };
+            let Some(generalization) = checked[index].generalization.as_ref() else {
+                continue;
+            };
+            // Тем же отображением, что по типу, - и ссылки внутри группы
+            // получают параметры вместо дырок, как в обычной фазе B2.
+            //
+            // Зонканье идёт **до** отображения: проверка тела шла в
+            // необобщённом мире, и сырые дырки уровня и row сидят в решениях
+            // дырок терма, куда `apply_term` не заглядывает. В обычном пути
+            // решения строятся уже против параметров; здесь их приходится
+            // сперва подставить - иначе дырка доезжает до запечатывания живой,
+            // «остался неразрешённый хвост row» (измерено на свидетеле).
+            let mapped = generalization.apply_term(metas, &zonk_term(metas, body));
+            let levels: Rc<[Level]> = (0..checked[index].declaration.level_arity)
+                .map(|position| Level::Var(LevelVar(position)))
+                .collect();
+            let mut targets: Vec<(Name, Rc<[Level]>)> = vec![(Rc::clone(member.name()), levels)];
+            targets.extend(sibling_levels(metas, members, checked, index));
+            // Row-аргументы ссылок - тем же правилом: в отложенной группе они
+            // простояли B2 инертными дырками, решить их было нечем.
+            let own_rows: Rc<[Row<Term>]> = (0..checked[index].declaration.row_arity)
+                .map(|position| Row::closing([], Some(Tail::Var(RowVar(position)))))
+                .collect();
+            let mut row_targets: Vec<(Name, Rc<[Row<Term>]>)> =
+                vec![(Rc::clone(member.name()), own_rows)];
+            row_targets.extend(sibling_rows(metas, members, checked, index));
+            *body = rerowed(&relevelled(&mapped, &targets), &row_targets);
+        }
     }
 
     /// Фаза B1½: обобщение семейства, отложенное до его конструкторов.
@@ -2084,6 +2210,14 @@ struct Checked {
     /// 109). Решается один раз, в фазе A: дырки к фазе B1 успевают решиться,
     /// и пересчитанный там ответ разошёлся бы с принятым здесь.
     deferred: bool,
+    /// Подсчёт дырок члена, чьё обобщение отложено до тел **всей группы**
+    /// (§10 вопрос 168). `Some` - у определения в группе из нескольких тел:
+    /// заземление приходит члену и от тела соседа - вызов передаёт аргумент
+    /// его собственного уровня, - а материализуется эта связь только проверкой
+    /// тела ядром. Обобщённый раньше, член увозит нерешённую дырку в параметр,
+    /// и жёсткое `Type 0 ~ Type u0` дальше не решается ничем. Сам подсчёт
+    /// нужен ссылкам: их аргументы уровня до обобщения - эти же дырки.
+    postponed: Option<Generalization>,
 }
 
 /// Приводит черновик к окончательной арности.
@@ -2305,6 +2439,195 @@ fn sibling_levels(
             Some((Rc::clone(member.name()), levels))
         })
         .collect()
+}
+
+/// Откладывается ли обобщение определений группы до тел (§10 вопрос 168).
+///
+/// Да - когда тел в группе несколько: только тогда дырку члена решает и чужое
+/// тело. Одиночному определению источник заземления один - собственная
+/// элаборация, - и он уже отработал; его путь не меняется. Объявленная
+/// арность не в счёт: у неё дырок нет и обобщения не бывает вовсе.
+fn defers_definitions(members: &[Member]) -> bool {
+    members
+        .iter()
+        .filter(|member| {
+            matches!(member, Member::Definition { body: Some(_), arity, .. }
+                if !arity.is_declared())
+        })
+        .count()
+        >= 2
+}
+
+/// Фаза A отложенного определения: арность - числом дырок, тип - как есть.
+///
+/// Подсчёт уезжает в [`Checked::postponed`]: те же дырки станут аргументами
+/// ссылок на члена, пока обобщение не выпишет вместо них параметры.
+fn postponed_definition(metas: &Metas, draft: Definition) -> Checked {
+    let mut counting = Generalization::default();
+    counting.collect_term(metas, &draft.ty);
+    let declaration = Definition {
+        level_arity: counting.arity(),
+        row_arity: counting.row_arity(),
+        ..draft
+    };
+    Checked {
+        declaration,
+        generalization: None,
+        deferred: false,
+        postponed: Some(counting),
+    }
+}
+
+/// Чем члены отложенной группы называют друг друга по уровню **до**
+/// обобщения: собственными дырками, выписанными аргументами (§10 вопрос 168).
+///
+/// Список инертен - в необобщённом типе параметров нет, подставлять некуда, -
+/// и держит ровно длину, которую объявила фаза A; по обобщению его перепишет
+/// [`Signature::settle_definitions`]. Сосед, обобщённый фазой A (постулат,
+/// объявленная арность без обобщения не в счёт - у неё списка нет), отдаёт
+/// свои дырки тем же способом: обобщение их не решает, только отображает.
+fn postponed_levels(members: &[Member], checked: &[Checked]) -> Vec<(Name, Rc<[Level]>)> {
+    members
+        .iter()
+        .zip(checked)
+        .filter(|(member, _)| matches!(member, Member::Definition { .. }))
+        .filter_map(|(member, checked)| {
+            let counting = checked
+                .postponed
+                .as_ref()
+                .or(checked.generalization.as_ref())?;
+            Some((Rc::clone(member.name()), counting.collected().into()))
+        })
+        .collect()
+}
+
+/// Чем `index`-й член отложенной группы называет соседей по row - после
+/// обобщения (§10 вопрос 168).
+///
+/// Ссылка на соседа несёт row-аргументы **настоящей** подстановкой, но в
+/// отложенной группе тела проверялись против необобщённого типа: подставлять
+/// было некуда, аргументы простояли инертными свежими дырками, и решить их
+/// было нечем. Здесь они переписываются тем же правилом, что уровни в
+/// [`sibling_levels`]: параметры соседа, увиденные обобщением вызывающего.
+fn sibling_rows(
+    metas: &Metas,
+    members: &[Member],
+    checked: &[Checked],
+    index: usize,
+) -> Vec<(Name, Rc<[Row<Term>]>)> {
+    let Some(ours) = checked[index].generalization.as_ref() else {
+        return Vec::new();
+    };
+    members
+        .iter()
+        .zip(checked)
+        .enumerate()
+        .filter(|(other, (member, _))| {
+            *other != index && matches!(member, Member::Definition { .. })
+        })
+        .filter_map(|(_, (member, checked))| {
+            let theirs = checked.generalization.as_ref()?;
+            let rows: Rc<[Row<Term>]> = theirs
+                .rows()
+                .iter()
+                .map(|meta| ours.apply_row(metas, &Row::closing([], Some(Tail::Meta(*meta)))))
+                .collect();
+            Some((Rc::clone(member.name()), rows))
+        })
+        .collect()
+}
+
+/// Переписывает row-аргументы у ссылок на имена из `targets`.
+///
+/// Пара к [`relevelled`], и нужна только отложенной группе: в обычной row-
+/// аргументы ссылки решаются проверкой тела - подстановка в обобщённый тип
+/// настоящая. Обход тот же - полный.
+fn rerowed(term: &Term, targets: &[(Name, Rc<[Row<Term>]>)]) -> Term {
+    let found_rows = |found: &Name| {
+        targets
+            .iter()
+            .find(|(name, _)| name == found)
+            .map(|(_, rows)| Rc::clone(rows))
+    };
+    let recur = |inner: &Rc<Term>| Rc::new(rerowed(inner, targets));
+    let fields = |fields: &crate::term::Fields| crate::term::Fields {
+        fields: fields
+            .iter()
+            .map(|field| crate::term::Field {
+                name: Rc::clone(&field.name),
+                mult: field.mult,
+                shape: field.shape,
+                ty: recur(&field.ty),
+            })
+            .collect(),
+        tail: fields.tail.as_ref().map(recur),
+    };
+    let named = |pairs: &Rc<[(Name, Rc<Term>)]>| -> Rc<[(Name, Rc<Term>)]> {
+        pairs
+            .iter()
+            .map(|(name, value)| (Rc::clone(name), recur(value)))
+            .collect()
+    };
+    match term {
+        Term::Var(_)
+        | Term::Meta(_)
+        | Term::EffectKind
+        | Term::Prim(_)
+        | Term::Universe(_)
+        | Term::RowKind(_) => term.clone(),
+        Term::Const(found, carried, args) => {
+            let rows: Vec<Row<Term>> = match found_rows(found) {
+                Some(rows) => rows.iter().cloned().collect(),
+                None => args
+                    .row_args()
+                    .iter()
+                    .map(|row| row.map(|argument| rerowed(argument, targets)))
+                    .collect(),
+            };
+            Term::Const(
+                Rc::clone(found),
+                Rc::clone(carried),
+                Args::new(rows, args.mult_args().iter().copied()),
+            )
+        }
+        Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
+        Term::Lam(mult, bound, body) => Term::Lam(*mult, Rc::clone(bound), recur(body)),
+        Term::Pi(binder, bound, domain, row, codomain) => Term::Pi(
+            *binder,
+            Rc::clone(bound),
+            recur(domain),
+            row.map(|argument| rerowed(argument, targets)),
+            recur(codomain),
+        ),
+        Term::Let(mult, bound, ty, value, body) => Term::Let(
+            *mult,
+            Rc::clone(bound),
+            recur(ty),
+            recur(value),
+            recur(body),
+        ),
+        Term::Record(it) => Term::Record(fields(it)),
+        Term::Row(it) => Term::Row(fields(it)),
+        Term::Object(it) => Term::Object(named(it)),
+        Term::With(base, it) => Term::With(recur(base), named(it)),
+        Term::Project(record, field) => Term::Project(recur(record), Rc::clone(field)),
+        Term::Case(case) => Term::Case(Rc::new(crate::term::Case {
+            data: Rc::clone(&case.data),
+            levels: case.levels.clone(),
+            params: case.params,
+            consumed: case.consumed,
+            scrutinee: recur(&case.scrutinee),
+            motive: recur(&case.motive),
+            branches: case
+                .branches
+                .iter()
+                .map(|branch| crate::term::Branch {
+                    constructor: Rc::clone(&branch.constructor),
+                    body: recur(&branch.body),
+                })
+                .collect(),
+        })),
+    }
 }
 
 /// Переписывает аргументы уровня у ссылок на имена из `targets`.

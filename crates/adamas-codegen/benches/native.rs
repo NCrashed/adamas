@@ -1272,15 +1272,17 @@ fn paired(what: &str, base: &Path, with: &Path, depth: usize) {
     let spread = span(&differences);
     // Операций в программе: по одной на лист на каждый проход `scaled`.
     let operations = f64::from(u32::try_from(PASSES << depth).expect("глубина невелика"));
+    let beyond = dropped.last().map_or_else(
+        || "за чертой никого".to_owned(),
+        |(floor, _)| format!("за чертой осталось {} с полом до {floor:.3}", dropped.len()),
+    );
     eprintln!(
         "парно/{what}/{depth}: по {quiet} тишайшим блокам разность {median:.3} мс \
          (размах {spread:.3}), запас {:.1}x, на операцию {:.2} нс; пол базовой точки \
-         в них гулял на {:.3} мс, за чертой осталось {} с полом до {:.3}",
+         в них гулял на {:.3} мс, {beyond}",
         median / spread,
         median * 1e6 / operations,
         span(&floors),
-        dropped.len(),
-        dropped.last().map_or(f64::NAN, |(floor, _)| *floor)
     );
     if !measuring {
         return;

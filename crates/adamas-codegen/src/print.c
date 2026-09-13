@@ -126,6 +126,14 @@ static void adamas_print_at(adamas_value value, int nested, long depth) {
         return;
     }
     slots = adamas_con_slots[tag];
+    if (adamas_con_name[tag][0] == '\0' && slots == 1) {
+        /* Обёртка примитива (§4.11, §10 вопросы 158/159): у машины её в терме
+         * не существует, печатается сам payload. Пустое имя - сентинель,
+         * который раздаёт понижение; глубина проходит насквозь - payload
+         * стоит на месте обёртки. */
+        adamas_print_slot(tag, value, 0, depth, nested);
+        return;
+    }
     if (adamas_con_labels[tag] > 0) {
         /* Запись: скобки те же, что у составного терма, а форма своя. Пустая
          * записи сюда не попадает - написанных полей у неё ноль, - и печатает

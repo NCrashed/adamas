@@ -326,7 +326,8 @@ fn both_paths_agree_on_the_size_of_the_aggregate() {
 }
 
 /// Семейство с тегом в колонке (§4.11, §10 вопрос 157): `Option Int64` в
-/// шестнадцать байт, только мономорфно - `OptInt`.
+/// шестнадцать байт, мономорфной формой - `OptInt`. Параметрический близнец
+/// стоит рядом ([`a_parametric_column_reads_back`], §10 вопрос 159).
 ///
 /// Ячейка несёт тег в байте и payload по своей границе: 1 + 7 дыры + 8. Ячейки
 /// различимы и по тегу (нулевая - `None`), и по payload'у (700 против 900), а
@@ -541,9 +542,9 @@ fn a_nested_aggregate_packs_and_projects_by_composition() {
 
 /// Вложенность семейств: плотное семейство полем плотного семейства.
 ///
-/// Мономорфно, потому что читаемо: у параметрического плоского payload'а
-/// боксированной формы нет по построению, и ячейка его не читается - см.
-/// границу в §13.
+/// Мономорфно ради формы, а не поневоле: параметрическую ячейку читает
+/// обёртка примитива (§10 вопрос 159, [`a_parametric_column_reads_back`]),
+/// здесь же меряется сама вложенность.
 const NESTED_FAMILY: &str = "\
 data Inner where
   MkI : Int8 -> Inner
@@ -672,4 +673,99 @@ fn both_paths_agree_on_the_tagged_size() {
     harness::as_written("packed-tagged-before", TAGGED_TWO_WAYS).unwrap_or_else(|error| {
         panic!("до специализации: {error}");
     });
+}
+
+/// Колонка параметрического семейства - и её ячейка читается обратно
+/// (§4.11, §10 вопрос 159).
+///
+/// Близнец [`a_tagged_column_is_one_block_of_sixteens`]: та же укладка -
+/// шестнадцать байт, тег в байте, payload за дырой, - но семейство
+/// параметрическое, и поле `a` в таблице конструкторов указательно. Переклад
+/// сводит указательный факт с примитивным слотом **обёрткой примитива** -
+/// реализация решения §10 вопроса 158, прозрачная печать, обычный дроп.
+///
+/// Цена названа числом: девять блоков против трёх у мономорфного близнеца -
+/// обёртка на каждом пересечении границы. Снять её - работа специализации
+/// семейств по типовым аргументам, если §6 попросит, а не понижения.
+///
+/// Payload'ы связаны именованными: литерал под нерешённым параметром
+/// читается унарным (§4.3), и свидетель говорил бы не о колонке.
+const PARAMETRIC: &str = "\
+data Option (a : Type) where
+  None : Option a
+  Some : a -> Option a
+
+take : Option Int64 -> Int64
+take None = 0
+take (Some n) = n
+
+built : Array 3 (Option Int64)
+built =
+  let n70 : Int64 = 70
+  let n90 : Int64 = 90
+  let x : Option Int64 = Some n70
+  let y : Option Int64 = Some n90
+  arraySet (arraySet (arrayNew 3 None) 1 x) 2 y
+
+read : Array 3 (Option Int64) -> Int64
+read xs =
+  addInt64 (take (arrayIndex xs 0))
+    (addInt64 (take (arrayIndex xs 1)) (mulInt64 (take (arrayIndex xs 2)) 10))
+
+main : Int64
+main = read built
+";
+
+#[test]
+fn a_parametric_column_reads_back() {
+    assert_eq!(
+        harness::printed(PARAMETRIC),
+        "970",
+        "свидетель перестал различать тег, payload и ячейку"
+    );
+    let stderr = harness::agreed("packed-parametric", PARAMETRIC).unwrap_or_else(|error| {
+        panic!("параметрическая колонка: {error}");
+    });
+    let (allocated, live) = harness::blocks("packed-parametric", &stderr);
+    assert_eq!(
+        allocated, 9,
+        "цена параметрической колонки разошлась: колонка, две пары обёртка+объект на записи, две на чтении"
+    );
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
+    let text = harness::text(PARAMETRIC)
+        .unwrap_or_else(|error| panic!("параметрическая колонка: {error}"));
+    // Укладка та же, что у мономорфного близнеца: шаг шестнадцать. Номер
+    // временного имени в строку не входит - он зависит от числа связываний.
+    assert!(
+        text.lines()
+            .any(|line| line.contains("adamas_array_alloc") && line.contains(", 16u);")),
+        "шаг параметрической колонки разошёлся с мономорфным близнецом"
+    );
+}
+
+/// Голое параметрическое значение с плоским payload'ом печатается как у
+/// машины: обёртка прозрачна (§10 вопросы 158, 159).
+#[test]
+fn a_bare_parametric_value_prints_transparently() {
+    let source = "\
+data Option (a : Type) where
+  None : Option a
+  Some : a -> Option a
+
+main : Option Int64
+main =
+  let n70 : Int64 = 70
+  Some n70
+";
+    assert_eq!(harness::printed(source), "Some 70");
+    let stderr = harness::agreed("packed-parametric-bare", source).unwrap_or_else(|error| {
+        panic!("голое параметрическое: {error}");
+    });
+    let (allocated, live) = harness::blocks("packed-parametric-bare", &stderr);
+    // Объект и обёртка payload'а: обёртки в напечатанном ответе не видно.
+    assert_eq!(
+        allocated, 2,
+        "цена голого параметрического значения разошлась"
+    );
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
 }

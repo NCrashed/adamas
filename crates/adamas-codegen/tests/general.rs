@@ -144,6 +144,10 @@ main = handle asked with
 /// Граница названа отказом, а не молчанием: слот кадра - слово, и плотный
 /// агрегат §4.11 в него не влезает. Ближайший проходящий сосед - тот же
 /// агрегат, не переживающий точки приостановки; он в корпусе (`flat`).
+///
+/// Резумпция здесь **не** в хвосте намеренно: с хвостовой веткой программа
+/// тиха (§3.4, вопрос 74), операция перестаёт быть точкой приостановки, и
+/// границы кадра, которую стережёт свидетель, не возникает вовсе.
 #[test]
 fn a_packed_aggregate_does_not_survive_a_suspension() {
     let source = format!(
@@ -169,10 +173,10 @@ probe xs =
 held : {{Ask}} Boxed
 held = probe built
 
-main : Boxed
+main : List Boxed
 main = handle held with
-  return v -> v
-  ask -> resume Zero
+  return v -> Cons v Nil
+  ask -> Cons (MkBoxed 0.0 Zero) (resume Zero)
 "
     );
     let error = harness::compiled(&source).expect_err("агрегат в слоте кадра - названная граница");

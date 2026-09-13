@@ -15,6 +15,14 @@
 //! отрезок между двумя точками бежит обычным C. Мельче - плата трамплину на
 //! каждом шаге; крупнее - не приостановить.
 //!
+//! **Операция перестаёт быть точкой приостановки в тихой программе** (§3.4,
+//! вопрос 74): если все ветки всех площадок хвостовые и мультишота нет, ветка
+//! бежит на месте и возвращает значение операции немедленно, а обрыв
+//! невозможен по построению - разрезать сегмент некому. Тело с такими
+//! операциями не дробится вовсе и бежит обычным C; это и есть первая ступень
+//! инлайнинга хвостово-резумптивных хендлеров - снятие кадров, evidence-поиск
+//! остаётся.
+//!
 //! # Что делает проход
 //!
 //! *Считает, кто приостанавливается.* [`suspending`] - неподвижная точка по
@@ -41,18 +49,46 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{
-    Arm, Binding, Expr, Fact, Form, FuncId, Function, LocalId, Packing, Program, Repr,
+    Arm, Binding, Expr, Fact, Form, FuncId, Function, LocalId, Packing, Program, Repr, Verdict,
 };
+
+/// Итог анализа приостановок: кто приостанавливается и тиха ли программа.
+///
+/// Одной структурой, потому что читающих двое - проход и эмиттер, - и решение
+/// «эта позиция приостанавливается» обязано быть у них общим целиком, включая
+/// тишину: раздай её отдельным параметром, и один из двоих однажды забудет.
+#[derive(Debug)]
+pub struct Suspension {
+    /// Функции, чей вызов есть точка приостановки.
+    pub functions: BTreeSet<FuncId>,
+    /// Тихая ли программа: все ветки всех площадок хвостовые, мультишотных
+    /// площадок нет (§3.4, вопрос 74).
+    ///
+    /// В тихой программе операция - **не** точка приостановки: ветка бежит на
+    /// месте и возвращает значение операции, а обрыва не существует по
+    /// построению. `SUPPRESSED` требует разрезанного сегмента, резать его
+    /// умеют только абортивная ветка, общая ветка и дроп резумпции - в тихой
+    /// программе нет ни одного из трёх. Условие глобальное и целиком в руках
+    /// достижимой программы: один не-хвостовой хендлер гасит тишину везде.
+    pub quiet: bool,
+}
 
 /// Функции, чей вызов есть точка приостановки.
 ///
-/// Неподвижная точка: своя причина - операция, хендлер, scope с ресурсом,
-/// применение значения либо возобновление; наведённая - вызов такой же.
-/// Первая форма сюда не входит ни при каких обстоятельствах: хендлер она
-/// заводит на **своём** корне и наружу приостановки не отдаёт (§3.4, погашение
-/// расширением справа).
+/// Неподвижная точка: своя причина - операция (в нетихой программе), хендлер,
+/// scope с ресурсом, применение значения либо возобновление; наведённая -
+/// вызов такой же. Первая форма сюда не входит ни при каких обстоятельствах:
+/// хендлер она заводит на **своём** корне и наружу приостановки не отдаёт
+/// (§3.4, погашение расширением справа).
 #[must_use]
-pub fn suspending(program: &Program) -> BTreeSet<FuncId> {
+pub fn suspending(program: &Program) -> Suspension {
+    let quiet = program.handlers.iter().all(|handler| {
+        !handler.multi
+            && handler
+                .branches
+                .iter()
+                .all(|branch| branch.verdict == Verdict::Tail)
+    });
     let mut found = BTreeSet::new();
     loop {
         let mut grew = false;
@@ -60,13 +96,16 @@ pub fn suspending(program: &Program) -> BTreeSet<FuncId> {
             if function.form != Form::Detached || found.contains(&function.id) {
                 continue;
             }
-            if suspends(&function.body, &found) {
+            if suspends(&function.body, &found, quiet) {
                 found.insert(function.id);
                 grew = true;
             }
         }
         if !grew {
-            return found;
+            return Suspension {
+                functions: found,
+                quiet,
+            };
         }
     }
 }
@@ -77,8 +116,8 @@ pub fn suspending(program: &Program) -> BTreeSet<FuncId> {
 /// связывание, эмиттер ставит под него кадр. Разойдись они - кадр встал бы не
 /// там, где приостановка.
 #[must_use]
-pub fn halts(expr: &Expr, known: &BTreeSet<FuncId>) -> bool {
-    suspends(expr, known)
+pub fn halts(expr: &Expr, known: &Suspension) -> bool {
+    suspends(expr, &known.functions, known.quiet)
 }
 
 /// Связывания, которые выражение называет. Читает это эмиттер: среда кадра
@@ -93,15 +132,20 @@ pub(crate) fn introduces(expr: &Expr, out: &mut BTreeSet<LocalId>) {
 }
 
 /// Есть ли внутри выражения точка приостановки.
-fn suspends(expr: &Expr, known: &BTreeSet<FuncId>) -> bool {
+fn suspends(expr: &Expr, known: &BTreeSet<FuncId>, quiet: bool) -> bool {
     let here = match expr {
-        Expr::Perform { .. }
-        | Expr::Handle { .. }
+        // В тихой программе операция бежит на месте и не приостанавливает
+        // (вопрос 74): хвостовая ветка возвращает значение операции сразу, а
+        // оборваться некому. `Resume` при этом не встречается вовсе - его
+        // ставит только общая ветка, которых в тихой программе нет.
+        Expr::Perform { .. } => !quiet,
+        Expr::Handle { .. }
         | Expr::Closing { .. }
         | Expr::Resume { .. }
         // Граница замыкания динамическая: какая из форм за указателем, место
         // вызова не знает, поэтому применение значения приостанавливается
-        // всегда. Снимет это вопрос 74 вместе с инлайнингом.
+        // всегда. Снять это могла бы селекция по целям замыканий - следующая
+        // ступень вопроса 74.
         | Expr::Apply { .. } => true,
         Expr::Call { function, .. } => known.contains(function),
         _ => false,
@@ -109,7 +153,7 @@ fn suspends(expr: &Expr, known: &BTreeSet<FuncId>) -> bool {
     here || expr
         .children()
         .into_iter()
-        .any(|child| suspends(child, known))
+        .any(|child| suspends(child, known, quiet))
 }
 
 /// Готовит программу к дроблению: выносит вычисления и нормализует порядок.
@@ -127,7 +171,7 @@ pub fn prepare(program: Program) -> Program {
         entry,
     } = program;
     for function in &mut functions {
-        if !known.contains(&function.id) {
+        if !known.functions.contains(&function.id) {
             continue;
         }
         let mut pass = Anf {
@@ -394,7 +438,7 @@ fn ceiling(function: &Function) -> u32 {
 
 /// Приведение тела к форме, где точка приостановки стоит связыванием.
 struct Anf<'a> {
-    known: &'a BTreeSet<FuncId>,
+    known: &'a Suspension,
     results: &'a [Repr],
     packings: &'a [Packing],
     locals: BTreeMap<LocalId, Repr>,
@@ -416,7 +460,7 @@ impl Anf<'_> {
 
     /// Есть ли внутри точка приостановки.
     fn stops(&self, expr: &Expr) -> bool {
-        suspends(expr, self.known)
+        halts(expr, self.known)
     }
 
     /// Представление значения выражения.

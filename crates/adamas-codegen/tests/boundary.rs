@@ -43,6 +43,12 @@
 mod harness;
 
 /// Объявления, общие свидетелям: метка, множитель, дерево.
+///
+/// Операция `quit` - глушитель тишины, и ветка её в каждой площадке ниже
+/// абортивна намеренно: без неё программа тиха (все ветки хвостовые, §3.4,
+/// вопрос 74), операция перестаёт быть точкой приостановки, тело не дробится -
+/// и границы куска, которую стерегут эти свидетели, не возникает вовсе.
+/// Не зовёт её никто.
 const SHAPE: &str = "\
 data Unit where
   MkUnit : Unit
@@ -53,6 +59,7 @@ data Mult where
 
 effect Ask where
   ask : Mult
+  quit : Mult
 
 data Tree where
   Leaf : Int64 -> Tree
@@ -76,6 +83,7 @@ main : Tree
 main = handle grown with
   return v -> v
   ask -> resume Triple
+  quit -> Leaf 0
 ";
 
 /// Тот же алгоритм, но множитель приходит указательным.
@@ -99,6 +107,7 @@ main : Tree
 main = handle grown with
   return v -> v
   ask -> resume Triple
+  quit -> Leaf 0
 ";
 
 /// Две ширины через ту же границу: у одной значение в слове, у другой биты.
@@ -124,6 +133,7 @@ main : Widths
 main = handle measured with
   return v -> v
   ask -> resume Triple
+  quit -> MkWidths 0 0.0
 ";
 
 /// Плоское значение обеими половинами: пришедшее в кусок и ответ куска.
@@ -239,6 +249,7 @@ main : Tree
 main = handle grown with
   return v -> v
   ask -> resume Triple
+  quit -> Leaf 0
 "
     ))
     .expect_err("вторая форма с плоским ответом обязана быть отвергнута")
@@ -249,17 +260,51 @@ main = handle grown with
     );
 
     // Вычисление под хендлером: ответ его принимает ветка `return`.
-    let flat_computation = harness::text(&format!(
-        "{SHAPE}\
-weighed : {{Ask}} Int64
-weighed = factor ask
+    //
+    // Без общего `SHAPE` и с отдельным эффектом-глушителем: у площадки с
+    // ответом `Int64` всякая абортивная ветка обязана была бы ответить
+    // плоским, а тело ветки указательно по договору - отказ пришёл бы раньше
+    // меряемого. Тишину поэтому гасит `Halt` со своей площадкой.
+    let flat_computation = harness::text(
+        "\
+data Unit where
+  MkUnit : Unit
+
+data Mult where
+  Triple : Mult
+  Double : Mult
+
+effect Ask where
+  ask : Mult
+
+effect Halt where
+  halt : Mult
+
+factor : Mult -> Int64
+factor Triple = 3
+factor Double = 2
+
+muted : {Halt} Mult
+muted = halt
+
+noisy : Mult
+noisy = handle muted with
+  return v -> v
+  halt -> Triple
+
+pick : Mult -> Mult -> Mult
+pick Triple m = m
+pick Double m = m
+
+weighed : {Ask} Int64
+weighed = factor (pick noisy ask)
 
 main : Int64
 main = handle weighed with
   return v -> v
   ask -> resume Triple
-"
-    ))
+",
+    )
     .expect_err("плоское вычисление под хендлером обязано быть отвергнуто")
     .to_string();
     assert!(
@@ -279,6 +324,7 @@ main : Tree
 main = handle weighed with
   return v -> v
   ask -> resume Triple
+  quit -> Leaf 0
 "
         ),
     )

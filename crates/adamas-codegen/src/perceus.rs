@@ -69,8 +69,9 @@ use adamas_core::mult::Mult;
 use adamas_core::prim::PrimTy;
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Expr, Fact, FuncId, Function, LocalId, Program, Stride,
+    Arm, Binding, Constructor, CtorId, Expr, Fact, Function, LocalId, Program, Stride,
 };
+use crate::split::Suspension;
 
 /// Вставляет RC и переиспользование во все функции программы.
 #[must_use]
@@ -99,11 +100,7 @@ pub fn insert(program: Program) -> Program {
 }
 
 /// Переводит одну функцию в форму, где владение соблюдено.
-fn owned(
-    constructors: &[Constructor],
-    suspending: &BTreeSet<FuncId>,
-    function: Function,
-) -> Function {
+fn owned(constructors: &[Constructor], suspending: &Suspension, function: Function) -> Function {
     let scope: BTreeSet<LocalId> = function
         .live_captured()
         .chain(function.live_parameters())
@@ -249,7 +246,7 @@ fn drops(locals: impl IntoIterator<Item = LocalId>, body: Expr) -> Expr {
 struct Pass<'a> {
     constructors: &'a [Constructor],
     /// Функции, чей вызов есть точка приостановки ([`crate::split`]).
-    suspending: &'a BTreeSet<FuncId>,
+    suspending: &'a Suspension,
     next: u32,
     /// Связывания без заголовка: счётчика у них нет (§4.11).
     flat: BTreeSet<LocalId>,

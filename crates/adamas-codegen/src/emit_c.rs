@@ -66,6 +66,7 @@ use crate::ir::{
     Arm, Binding, Constructor, CtorId, Elems, Expr, Form, FuncId, Function, HandlerId, LabelId,
     LocalId, PackId, Packing, Program, Repr, Stride, Verdict,
 };
+use crate::split::Suspension;
 
 /// Как уложены элементы массива с таким шагом.
 const fn elems(stride: Option<Stride>) -> Elems {
@@ -240,7 +241,7 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
 /// вернуть ответ `adamas_kont_abort` немедленно (`adamas.h`), а ответ этот -
 /// значение. Функция с плоским ответом вернуть его не может, и отказ здесь
 /// лучше, чем порождённый C, который не соберётся.
-fn forms_agree(program: &Program, suspending: &BTreeSet<FuncId>) -> Result<(), EmitError> {
+fn forms_agree(program: &Program, suspending: &Suspension) -> Result<(), EmitError> {
     for function in &program.functions {
         let hidden = function.form == Form::Detached;
         if let Some(callee) = stranded(program, &function.body, hidden) {
@@ -251,7 +252,8 @@ fn forms_agree(program: &Program, suspending: &BTreeSet<FuncId>) -> Result<(), E
         }
         // Спрашивается C-тип, а не `Repr::pointer`: массив и блок региона -
         // такое же слово с заголовком, и ответ ими вернуть можно.
-        if suspending.contains(&function.id) && scalar(function.result) != "adamas_value" {
+        if suspending.functions.contains(&function.id) && scalar(function.result) != "adamas_value"
+        {
             return Err(EmitError::Aborting {
                 function: function.name.clone(),
             });
@@ -703,10 +705,10 @@ fn body(
     out: &mut String,
     program: &Program,
     function: &Function,
-    suspending: &BTreeSet<FuncId>,
+    suspending: &Suspension,
     forward: &mut Vec<String>,
 ) -> Option<EmitError> {
-    let split = suspending.contains(&function.id);
+    let split = suspending.functions.contains(&function.id);
     let mut emitter = Emitter {
         program,
         suspending,
@@ -1112,7 +1114,7 @@ fn shapes(function: &Function) -> HashMap<LocalId, Repr> {
 struct Emitter<'a> {
     program: &'a Program,
     /// Функции, чей вызов есть точка приостановки (§3.4, решение 3 волны 4).
-    suspending: &'a BTreeSet<FuncId>,
+    suspending: &'a Suspension,
     out: String,
     temps: u32,
     /// Что в каком связывании лежит: от этого C-тип временного имени.
@@ -1215,6 +1217,8 @@ impl Emitter<'_> {
     ///
     /// Точек приостановки здесь не бывает: их снимает дробление
     /// ([`crate::split`]), и приходят они сюда хвостом куска, а не значением.
+    /// Операция в тихой программе - не точка приостановки (вопрос 74) и
+    /// значением бывает; её берёт [`Emitter::performing`].
     fn value(&mut self, expr: &Expr, depth: usize) -> String {
         self.emitted(expr, depth)
     }
@@ -1285,9 +1289,16 @@ impl Emitter<'_> {
                 computation,
             } => self.handling(*handler, captured, computation, depth),
             Expr::Mask { label, computation } => self.masking(*label, computation, depth),
-            // Точки приостановки значением не бывают: их снимает дробление
-            // ([`crate::split`]), и в чистый отрезок они не попадают.
-            Expr::Perform { .. } | Expr::Closing { .. } | Expr::Resume { .. } => {
+            // Операция значением бывает только в тихой программе (вопрос 74):
+            // там она не точка приостановки, и дробление её не выносит.
+            Expr::Perform {
+                label,
+                operation,
+                arguments,
+            } => self.performing(*label, *operation, arguments, depth),
+            // Прочие точки приостановки значением не бывают: их снимает
+            // дробление ([`crate::split`]), и в чистый отрезок они не попадают.
+            Expr::Closing { .. } | Expr::Resume { .. } => {
                 unreachable!("точка приостановки в чистом отрезке: дробление её не сняло")
             }
             Expr::Apply { callee, argument } => self.applying(callee, argument, depth),
@@ -2754,6 +2765,79 @@ impl Emitter<'_> {
         );
         let _ = writeln!(self.out, "{pad}(void){frame};");
         self.tail(body, depth);
+    }
+
+    /// Операция значением: ветка бежит на месте, ответ - значение операции.
+    ///
+    /// Позиция не хвостовая, и это не пропуск дробления, а тихая программа
+    /// (вопрос 74): все ветки всех площадок хвостовые, и обрыв невозможен по
+    /// построению - `SUPPRESSED` требует разрезанного сегмента, а резать его
+    /// в тихой программе некому. Вердикта остаётся два: ветка на месте либо
+    /// операция без хендлера. Подавление здесь поэтому - нарушение инварианта
+    /// тишины, и отвечает ему немедленный `adamas_fail`, а не молчаливое
+    /// вычисление с чужим значением.
+    fn performing(
+        &mut self,
+        label: LabelId,
+        operation: u32,
+        arguments: &[Expr],
+        depth: usize,
+    ) -> String {
+        assert!(
+            self.suspending.quiet,
+            "операция значением в нетихой программе: дробление её не вынесло"
+        );
+        let pad = Self::pad(depth);
+        let described = &self.program.labels[label.0 as usize];
+        let title = escaped(&described.name);
+        let operation_name = described
+            .operations
+            .get(operation as usize)
+            .map_or_else(|| format!("#{operation}"), |name| escaped(name));
+        let given: Vec<String> = arguments
+            .iter()
+            .map(|argument| self.value(argument, depth))
+            .collect();
+
+        let frame = self.temp();
+        let verdict = self.temp();
+        let operands = self.temp();
+        let count = given.len();
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_frame *{frame} = NULL; /* {title}.{operation_name} */"
+        );
+        let _ = writeln!(
+            self.out,
+            "{pad}int {verdict} = adamas_evidence_lookup(ev, {}u, &{frame});",
+            label.0
+        );
+        if count == 0 {
+            let _ = writeln!(self.out, "{pad}adamas_value *{operands} = NULL;");
+        } else {
+            let _ = writeln!(
+                self.out,
+                "{pad}adamas_value {operands}[{count}] = {{ {} }};",
+                given.join(", ")
+            );
+        }
+        let _ = writeln!(
+            self.out,
+            "{pad}if ({verdict} == ADAMAS_LOOKUP_SUPPRESSED) {{ \
+             adamas_fail(\"подавленная операция в тихой программе: {title}.{operation_name}\"); }}"
+        );
+        let _ = writeln!(
+            self.out,
+            "{pad}if ({verdict} != ADAMAS_LOOKUP_HANDLER) {{ \
+             adamas_fail(\"операция без хендлера: {title}.{operation_name}\"); }}"
+        );
+        let answer = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_value {answer} = adamas_frame_perform({frame}, kont, {operation}u, \
+             {operands}, {count}u);"
+        );
+        answer
     }
 
     /// Операция: вердикт вектора трёхзначен, и все три ответа написаны.

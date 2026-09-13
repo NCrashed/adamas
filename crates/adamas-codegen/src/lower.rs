@@ -3943,6 +3943,30 @@ fn universal(ty: &Term) -> bool {
 fn unaliased<'a>(signature: &'a Signature, ty: &'a Term) -> &'a Term {
     let mut current = ty;
     for _ in 0..ALIASES {
+        // Ассоциированный тип модуля: `S.Block` после подстановки записи
+        // модуля - проекция из известного значения (§10 вопрос 163). Поле
+        // берётся из тела-записи и разворачивается дальше тем же циклом.
+        // Запечатанное остаётся собственной головой: δ снаружи `:>` запрещён
+        // и здесь.
+        if let Term::Project(record, label) = current {
+            let Term::Const(name, ..) = &**record else {
+                return current;
+            };
+            let Some(definition) = signature.lookup(name) else {
+                return current;
+            };
+            if definition.opaque {
+                return current;
+            }
+            let Some(Term::Object(fields)) = definition.body.as_ref() else {
+                return current;
+            };
+            let Some((_, found)) = fields.iter().find(|(it, _)| it == label) else {
+                return current;
+            };
+            current = found;
+            continue;
+        }
         let Term::Const(name, ..) = current else {
             return current;
         };

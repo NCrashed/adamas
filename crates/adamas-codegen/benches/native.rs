@@ -360,6 +360,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use adamas_core::level::Level;
 use adamas_core::meta::Metas;
@@ -370,11 +371,22 @@ use adamas_elab::class::Instances;
 use adamas_elab::fixity::Fixities;
 use adamas_elab::mono;
 use adamas_elab::{Owned, Warnings};
-use criterion::{Criterion, criterion_group};
+use criterion::{Criterion, SamplingMode, criterion_group};
 
 /// Глубины дерева: шаг удваивает работу, и все четверо считаются на одних и
 /// тех же трёх точках.
 const DEPTHS: [usize; 3] = [14, 16, 18];
+
+/// Сколько раз программа проходит дерево `scaled`.
+///
+/// Хендлер живёт в `scaled` и больше нигде, а `scaled` — меньшая из трёх фаз
+/// (пофазно на глубине 18: `grow` 9.40, `scaled` 2.90, `total` 5.35). При
+/// одном проходе спрашиваемое составляет проценты измеряемого, и разность
+/// точек тонет в разбросе окружения. Повтор прохода умножает **только** ту
+/// часть, где стоит операция: `grow` и `total` остаются по одному. §6 просит
+/// ровно этого — «цепочками функциональных преобразований», во множественном
+/// числе.
+const PASSES: usize = 4;
 
 /// Глубина, на которой мерится цена самого понижения.
 const CODEGEN_DEPTH: usize = 16;
@@ -454,6 +466,15 @@ factor Triple = 3
 factor Double = 2
 ";
 
+/// `scaled`, применённая к аргументу [`PASSES`] раз.
+fn chained(argument: &str) -> String {
+    let mut text = argument.to_owned();
+    for _ in 0..PASSES {
+        text = format!("scaled ({text})");
+    }
+    text
+}
+
 /// Программа: дерево глубины `depth`, построенное, умноженное и свёрнутое.
 fn source(shape: Shape, depth: usize) -> String {
     let mut nat = String::new();
@@ -500,24 +521,25 @@ fn source(shape: Shape, depth: usize) -> String {
     // `computed` названо связыванием верхнего уровня, а не написано в
     // `handle`: приостановленное вычисление хендлер берёт с написанным типом
     // (§3.4).
+    let chain = chained("grow depth 1");
     let tail = match shape {
-        Shape::Pure => {
+        Shape::Pure => format!(
             "computed : Int64\n\
-             computed = total (scaled (grow depth 1))\n\
+             computed = total ({chain})\n\
              \n\
              main : Int64\n\
              main = computed\n"
-        }
-        Shape::Boxed => {
+        ),
+        Shape::Boxed => format!(
             "computed : Tree\n\
-             computed = scaled (grow depth 1)\n\
+             computed = {chain}\n\
              \n\
              main : Int64\n\
              main = total computed\n"
-        }
-        Shape::TailResumptive | Shape::FlatHandled => {
-            "computed : {Ask} Tree\n\
-             computed = scaled (grow depth 1)\n\
+        ),
+        Shape::TailResumptive | Shape::FlatHandled => format!(
+            "computed : {{Ask}} Tree\n\
+             computed = {chain}\n\
              \n\
              answered : Tree\n\
              answered = handle computed with\n\
@@ -526,7 +548,7 @@ fn source(shape: Shape, depth: usize) -> String {
              \n\
              main : Int64\n\
              main = total answered\n"
-        }
+        ),
     };
 
     format!(
@@ -794,7 +816,15 @@ fn total(tree: Tree) -> i64 {
 }
 
 fn neighbour(depth: usize) -> i64 {
-    total(scaled(grow(depth, 1)))
+    total(chain(grow(depth, 1)))
+}
+
+/// [`scaled`] столько же раз, сколько её зовёт [`chained`] в исходнике Adamas.
+fn chain(mut tree: Tree) -> Tree {
+    for _ in 0..PASSES {
+        tree = scaled(tree);
+    }
+    tree
 }
 
 /// Размах адресов дерева, поделённый на число узлов, в байтах.
@@ -848,7 +878,7 @@ fn as_child() -> bool {
     if witness {
         let tree = grow(depth, 1);
         let spread = spread(&tree, depth);
-        let answer = total(scaled(tree));
+        let answer = total(chain(tree));
         eprintln!("{spread}");
         println!("{answer}");
     } else {
@@ -875,6 +905,43 @@ fn ran_neighbour(request: &str) -> (String, String) {
     )
 }
 
+// --- оценка: пол выборки, а не её среднее --------------------------------
+
+/// Наименьшее время из `runs` запусков.
+///
+/// Помеха может к времени процесса только **прибавить**: сосед по
+/// гиперпотоку, прерывание, вытеснение. Поэтому наименьшее из повторов —
+/// оценка того, чего программа стоит без помехи, а среднее — оценка того,
+/// сколько помехи досталось окну замера. Измерено 2026-09-13 на `boxed/18`,
+/// двенадцать блоков по сорок запусков: минимумы блоков легли в 19.94–20.23
+/// (размах 0.29 мс), медианы — в 20.56–21.54 (0.98 мс), максимумы — в
+/// 22.30–26.05 (3.75 мс). Хвост шире пола на порядок, и criterion по
+/// умолчанию читает именно хвост.
+fn least(runs: u64, mut run: impl FnMut()) -> Duration {
+    let mut best = Duration::MAX;
+    for _ in 0..runs {
+        let start = Instant::now();
+        run();
+        best = best.min(start.elapsed());
+    }
+    best
+}
+
+/// Сколько запусков берётся под один пол, сколько бы ни просил criterion.
+///
+/// На разогреве criterion зовёт замер с одним-двумя повторами, а пол по
+/// одному повтору — не пол. Число возвращается помноженным на `iters`, так
+/// что планирование criterion остаётся верным: он делит обратно и получает
+/// цену одного запуска.
+const FLOOR_RUNS: u64 = 8;
+
+/// Точка замера процесса: criterion получает пол, а не среднее.
+fn by_floor(bencher: &mut criterion::Bencher<'_>, mut run: impl FnMut()) {
+    bencher.iter_custom(|iters| {
+        least(iters.max(FLOOR_RUNS), &mut run) * u32::try_from(iters).unwrap_or(u32::MAX)
+    });
+}
+
 // --- замеры -------------------------------------------------------------
 
 fn symbolic(criterion: &mut Criterion) {
@@ -882,14 +949,18 @@ fn symbolic(criterion: &mut Criterion) {
     // Точка `native` — запуск процесса, точка `interp` — секунды: сотня
     // выборок по умолчанию превратила бы прогон в часы.
     group.sample_size(10);
+    // Выборки одного размера: оценка — пол ([`least`]), а его качество растёт
+    // с числом повторов в выборке. При линейной схеме первые выборки коротки,
+    // их пол завышен, и регрессия по разнородным полам ничего не значит.
+    group.sampling_mode(SamplingMode::Flat);
 
     // Цена запуска процесса и печати: та же программа без работы. У соседа
     // свой пол — двоичный файл другой, и его цену вычитать надо свою.
     let floor = Program::new(Shape::Pure, 0);
     let binary = checked(&floor, "floor");
-    group.bench_function("floor", |bencher| bencher.iter(|| ran(&binary)));
+    group.bench_function("floor", |bencher| by_floor(bencher, || drop(ran(&binary))));
     group.bench_function("rust/floor", |bencher| {
-        bencher.iter(|| ran_neighbour("0"));
+        by_floor(bencher, || drop(ran_neighbour("0")));
     });
 
     // Сосед на Rust — только у чистой формы: под хендлером сравнивать не с
@@ -914,11 +985,14 @@ fn symbolic(criterion: &mut Criterion) {
         );
         *answer = stdout.trim().parse().expect("ответ соседа — число");
         group.bench_function(format!("rust/{depth}"), |bencher| {
-            bencher.iter(|| ran_neighbour(&request));
+            by_floor(bencher, || drop(ran_neighbour(&request)));
         });
     }
 
     same_answer();
+
+    // Двоичные файлы переживают цикл: их берёт парный замер ([`paired`]).
+    let mut binaries: Vec<(Shape, usize, PathBuf)> = Vec::new();
 
     for shape in [
         Shape::Pure,
@@ -952,8 +1026,9 @@ fn symbolic(criterion: &mut Criterion) {
                 stderr.trim_end()
             );
             group.bench_function(format!("native/{name}/{depth}"), |bencher| {
-                bencher.iter(|| ran(&binary));
+                by_floor(bencher, || drop(ran(&binary)));
             });
+            binaries.push((shape, depth, binary));
         }
         for depth in DEPTHS {
             let program = Program::new(shape, depth);
@@ -964,6 +1039,125 @@ fn symbolic(criterion: &mut Criterion) {
     }
 
     group.finish();
+
+    let of = |wanted: Shape, depth: usize| {
+        binaries
+            .iter()
+            .find(|(shape, at, _)| *shape == wanted && *at == depth)
+            .map(|(_, _, binary)| binary.clone())
+            .expect("двоичный файл собран выше")
+    };
+    for depth in DEPTHS {
+        paired(
+            "хендлер",
+            &of(Shape::Boxed, depth),
+            &of(Shape::TailResumptive, depth),
+            depth,
+        );
+        paired(
+            "эффект над плоскими",
+            &of(Shape::Pure, depth),
+            &of(Shape::FlatHandled, depth),
+            depth,
+        );
+    }
+}
+
+// --- парный замер --------------------------------------------------------
+
+/// Блоков в парном замере и пар в блоке.
+///
+/// Разброс между блоками — то, против чего сравнивается разность точек, так
+/// что блоков нужно не меньше, чем «Методика» требует прогонов. Пар в блоке
+/// задают качество пола: при двенадцати запас на глубине 16 гулял между 2.0
+/// и 5.0 от прогона к прогону, при шестнадцати держится.
+const PAIRED_BLOCKS: usize = 7;
+const PAIRED_PAIRS: u64 = 16;
+
+/// Идёт ли настоящий замер, а не проверка собираемости.
+///
+/// `cargo bench -- --test` в CI зовёт каждую точку по разу; парный замер
+/// стоит десятки секунд и требует тихой машины, а разделяемый раннер CI ни
+/// тем, ни другим не является. В этом режиме блоков и пар берётся по паре,
+/// пороги не проверяются: проверяется, что код проходит.
+fn measuring() -> bool {
+    !std::env::args().any(|argument| argument == "--test")
+}
+
+/// Разность двух точек, померенная чередованием внутри одного окна.
+///
+/// Врозь эти две точки не разрешаются, и это измерено: пять прогонов стенда
+/// 2026-09-13 дали `boxed/18` 21.41–23.97 при разности точек 0.5 мс, и в
+/// одном из пяти `handled` вышел **быстрее** `boxed` — чего не может быть,
+/// `handled` есть `boxed` плюс хендлер. Причина в том, что окружение уводит
+/// обе точки на единицы процентов за минуты, а точки стоят в прогоне на
+/// расстоянии этих минут.
+///
+/// Чередование ставит их вплотную: в блоке пары идут подряд, и то, что
+/// увело блок, увело обе стороны. Свидетель — блоки 6 и 7 замера
+/// 2026-09-13: пол обеих точек упал на 3 мс разом, разность не шелохнулась.
+///
+/// Оценка стороны — пол блока ([`least`]), а не среднее: помеха прибавляет.
+fn paired(what: &str, base: &Path, with: &Path, depth: usize) {
+    let measuring = measuring();
+    let (blocks, pairs) = if measuring {
+        (PAIRED_BLOCKS, PAIRED_PAIRS)
+    } else {
+        (2, 2)
+    };
+    let mut differences = Vec::with_capacity(blocks);
+    let mut floors = Vec::with_capacity(blocks);
+    for block in 0..blocks {
+        let mut low = f64::MAX;
+        let mut high = f64::MAX;
+        for _ in 0..pairs {
+            low = low.min(least(1, || drop(ran(base))).as_secs_f64() * 1e3);
+            high = high.min(least(1, || drop(ran(with))).as_secs_f64() * 1e3);
+        }
+        assert!(
+            high > low || !measuring,
+            "{what}/{depth}: блок {block} дал {high:.3} мс против {low:.3} — точка с \
+             операцией вышла быстрее той же программы без неё, чего не может \
+             быть по построению; мерено окружение, а не программа"
+        );
+        eprintln!(
+            "парно/{what}/{depth}: блок {block}: {low:.3} против {high:.3} мс, \
+             разность {:.3}",
+            high - low
+        );
+        differences.push(high - low);
+        floors.push(low);
+    }
+    let median = middle(&mut differences);
+    let spread = span(&differences);
+    // Операций в программе: по одной на лист на каждый проход `scaled`.
+    let operations = f64::from(u32::try_from(PASSES << depth).expect("глубина невелика"));
+    eprintln!(
+        "парно/{what}/{depth}: разность {median:.3} мс (размах {spread:.3}), \
+         запас {:.1}x; пол базовой точки гулял на {:.3} мс, то есть в {:.1} раза \
+         шире разности; на операцию {:.2} нс",
+        median / spread,
+        span(&floors),
+        span(&floors) / median,
+        median * 1e6 / operations
+    );
+    assert!(
+        median > spread || !measuring,
+        "{what}/{depth}: разность {median:.3} мс не больше размаха {spread:.3} — \
+         стенд эти две точки не различает, и число недействительно"
+    );
+}
+
+/// Медиана выборки; портит порядок.
+fn middle(sample: &mut [f64]) -> f64 {
+    sample.sort_unstable_by(f64::total_cmp);
+    sample[sample.len() / 2]
+}
+
+/// Размах выборки.
+fn span(sample: &[f64]) -> f64 {
+    let low = sample.iter().copied().fold(f64::MAX, f64::min);
+    sample.iter().copied().fold(f64::MIN, f64::max) - low
 }
 
 /// Четыре формы обязаны считать одно число.

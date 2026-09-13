@@ -35,8 +35,18 @@
 //! рантайма в них нет, а с ним нет и словаря, который куда-то передаётся.
 //! Обход идёт по тем позициям, где значение доживает до исполнения.
 //!
-//! **Запечатанное** (§3.5). Специализация есть δ-разворот, а снаружи `:>` он
-//! запрещён; произвести определение из скрытого тела значило бы обойти запрет.
+//! **Запечатанное** (§3.5) проход **видит** (§10 вопрос 163): печать снимается
+//! на входе - [`Signature::unseal`]. Абстракция - договор проверки источника,
+//! и к понижению он исполнен; специализация есть δ-разворот, и запечатанное
+//! тело для целопрограммного прохода прозрачно. Прежний запрет здесь держал
+//! не абстракцию, а отказ: производное от `:>`-члена не типизировалось против
+//! абстрактного типа, и обобщённый по нагрузке `store` не понижался вовсе.
+//!
+//! **Запись модуля** проход видит наравне со словарём (§10 вопрос 163): жанр
+//! тот же - запись известных членов ведущим имплиситом, - и параметр функтора
+//! подставляется как словарь, а проекция из известного модуля сводится к
+//! имени. Без этого `S.new` применённого функтора оставался границей
+//! замыкания (§10 вопрос 158), и функтор над стратегией не понижался.
 //!
 //! **Не ground место вызова.** Аргументы уровня, row или кратности, несущие
 //! параметры вызывающего, оставляются как есть: производное определение живёт
@@ -141,6 +151,13 @@ pub fn specialise(
     instances: &Instances,
     term: &Term,
 ) -> Result<Specialised, MonoError> {
+    // Печать `:>` снимается на входе (§10 вопрос 163): абстракция - договор
+    // проверки источника, и он уже исполнен, а специализация есть δ-разворот,
+    // которому запечатанное тело обязано быть прозрачным. Производные
+    // определения проверяются той же сигнатурой - уже без печати, иначе тело,
+    // говорящее на языке представления, не сходится с абстрактным типом
+    // члена («ожидался `Block`, получен `Arena.Block`», измерено).
+    signature.unseal();
     let mut made: Vec<Special> = Vec::new();
     let term = {
         let mut pass = Pass {
@@ -262,15 +279,22 @@ impl Pass<'_> {
                 Rc::new(self.rewrite(base)?),
                 self.assignments(fields)?,
             )),
-            Term::Project(base, field) => match self.projected(base, field, PROJECTIONS) {
+            Term::Project(base, field) => {
                 // Развёрнутая проекция - другой терм со своей головой, и
                 // специализировать её обязан тот же проход.
-                Some(found) => self.rewrite(&found),
-                None => Ok(Term::Project(
-                    Rc::new(self.rewrite(base)?),
-                    Rc::clone(field),
-                )),
-            },
+                if let Some(found) = self.projected(base, field, PROJECTIONS) {
+                    return self.rewrite(&found);
+                }
+                let base = self.rewrite(base)?;
+                // Второй заход по переписанной базе: специализация могла
+                // заменить применение функтора ссылкой на производное
+                // (§10 вопрос 163), и проекция из него сводится только
+                // теперь - очередь произведённых видна `member`.
+                match self.projected(&base, field, PROJECTIONS) {
+                    Some(found) => self.rewrite(&found),
+                    None => Ok(Term::Project(Rc::new(base), Rc::clone(field))),
+                }
+            }
             Term::Case(case) => {
                 let mut branches = Vec::with_capacity(case.branches.len());
                 for branch in &case.branches {
@@ -306,7 +330,19 @@ impl Pass<'_> {
     fn call(&mut self, term: &Term) -> Result<Term, MonoError> {
         let (head, arguments) = spine(term);
         let Term::Const(name, levels, args) = head else {
-            let mut built = self.rewrite(head)?;
+            let built = self.rewrite(head)?;
+            // Голова свелась к ссылке: проекция из записи модуля стала именем
+            // (§10 вопрос 163), и место вызова планируется заново - вместе с
+            // аргументами. Иначе специализация видела голову без них и
+            // отвечала «подставлять нечего». Второго витка не бывает: у
+            // перепланированного головой стоит `Const`.
+            if !arguments.is_empty() && matches!(spine(&built).0, Term::Const(..)) {
+                let reassembled = arguments.iter().fold(built, |callee, argument| {
+                    Term::App(Rc::new(callee), Rc::new((*argument).clone()))
+                });
+                return self.call(&reassembled);
+            }
+            let mut built = built;
             for argument in arguments {
                 built = Term::App(Rc::new(built), Rc::new(self.rewrite(argument)?));
             }
@@ -349,7 +385,7 @@ impl Pass<'_> {
         if !matches!(definition.kind, DefinitionKind::Regular) {
             return Ok(None);
         }
-        if definition.opaque || definition.body.is_none() || !ground(definition, levels, args) {
+        if definition.body.is_none() || !ground(definition, levels, args) {
             return Ok(None);
         }
         // Параметр кратности не подставляется. Связь его с параметром **поля**
@@ -506,41 +542,103 @@ impl Pass<'_> {
             }
             _ => base,
         };
-        let found = self.member(base, field)?;
+        let found = self.member(base, field, fuel)?;
         match &found {
             Term::Project(inner, name) => self.projected(inner, name, fuel),
             _ => Some(found),
         }
     }
 
-    /// Один δ-шаг: поле словаря, чьё имя известно.
-    fn member(&self, base: &Term, field: &Name) -> Option<Term> {
+    /// Один δ-шаг: поле словаря или записи модуля, чьё имя известно.
+    ///
+    /// Имя разрешается сигнатурой **и** очередью произведённых: специализация
+    /// модульного значения (`Outer.Applied@NatEq`) объявлена ещё не будет, а
+    /// проекция из неё уже написана соседней специализацией, и оставить её
+    /// значило бы оставить границу замыкания (§10 вопрос 163).
+    fn member(&self, base: &Term, field: &Name, fuel: u32) -> Option<Term> {
+        let fuel = fuel.checked_sub(1)?;
         let (head, arguments) = spine(base);
         let Term::Const(name, levels, args) = head else {
             return None;
         };
-        let definition = self.signature.lookup(name)?;
-        if definition.opaque || !ground(definition, levels, args) {
-            return None;
-        }
-        if !dictionary(self.signature, self.instances, goal_of(&definition.ty)) {
-            return None;
-        }
+        let body = if let Some(definition) = self.signature.lookup(name) {
+            if definition.opaque || !ground(definition, levels, args) {
+                return None;
+            }
+            // Запись модуля - того же жанра, что словарь: запись известных
+            // членов, и проекция из известного значения статична (§10 вопрос
+            // 163). Без этой половины `P.run` у применённого функтора
+            // остаётся границей замыкания.
+            let goal = goal_of(&definition.ty);
+            if !dictionary(self.signature, self.instances, goal) && !modular(self.signature, goal) {
+                return None;
+            }
+            definition
+                .body
+                .as_ref()?
+                .substitute_levels(levels)
+                .substitute_rows(args.row_args())
+                .substitute_mults(args.mult_args())
+        } else {
+            let special = self.made.iter().find(|it| it.name == *name)?;
+            // Параметров у производного нет по построению - подставлять нечего;
+            // ворота цели те же, что у объявленного.
+            let goal = goal_of(&special.ty);
+            if !dictionary(self.signature, self.instances, goal) && !modular(self.signature, goal) {
+                return None;
+            }
+            special.body.clone()
+        };
         if arguments.iter().any(|it| open(it)) {
             return None;
         }
-        let body = definition
-            .body
-            .as_ref()?
-            .substitute_levels(levels)
-            .substitute_rows(args.row_args())
-            .substitute_mults(args.mult_args());
         let Term::Object(fields) = peeled(&body, arguments.len())? else {
-            return None;
+            // Тело - не запись, а ссылка дальше: у `module P = Probe Arena`
+            // телом стоит применение функтора. Шаг вглубь, тем же топливом;
+            // спайн у базы при этом обязан быть пуст - иначе аргументы двух
+            // слоёв пришлось бы сплетать, а такой формы модуль не порождает.
+            if !arguments.is_empty() {
+                return None;
+            }
+            return self.member(&body, field, fuel);
         };
         let (_, found) = fields.iter().find(|(it, _)| it == field)?;
         let given: Vec<Term> = arguments.iter().rev().map(|it| (*it).clone()).collect();
         Some(substituted(found, &Substitution::Closed(&given), 0))
+    }
+}
+
+/// Тип-запись: сигнатура модуля (`module type`) либо синоним записи.
+///
+/// Параметр функтора - того же жанра, что словарь класса (§10 вопрос 163):
+/// запись известных членов, и подстановка известного значения делает проекции
+/// статическими. Распознаётся формой, а не флагом: сигнатура объявляется
+/// определением, чьё тело - запись; параметризованная (внутри функтора)
+/// приходит применением, и голова у неё та же.
+fn modular(signature: &Signature, ty: &Term) -> bool {
+    match ty {
+        Term::Record(_) => true,
+        Term::Const(..) | Term::App(..) => {
+            let (head, _) = spine(ty);
+            let Term::Const(name, _, _) = head else {
+                return false;
+            };
+            let Some(definition) = signature.lookup(name) else {
+                return false;
+            };
+            if definition.opaque {
+                return false;
+            }
+            let Some(body) = &definition.body else {
+                return false;
+            };
+            let mut current = body;
+            while let Term::Lam(_, _, inner) = current {
+                current = inner;
+            }
+            matches!(current, Term::Record(_))
+        }
+        _ => false,
     }
 }
 
@@ -809,7 +907,9 @@ fn leading(signature: &Signature, instances: &Instances, ty: &Term) -> usize {
         if !binder.visibility.is_implicit() {
             break;
         }
-        if dictionary(signature, instances, domain) {
+        // Запись модуля наравне со словарём (§10 вопрос 163): параметр
+        // функтора приходит члену ведущим имплиситом ровно так же.
+        if dictionary(signature, instances, domain) || modular(signature, domain) {
             seen = true;
         }
         count += 1;
@@ -978,7 +1078,9 @@ fn scan(signature: &Signature, instances: &Instances, term: &Term, found: &mut F
                 if supplied == 0 {
                     break;
                 }
-                if binder.visibility.is_implicit() && dictionary(signature, instances, domain) {
+                if binder.visibility.is_implicit()
+                    && (dictionary(signature, instances, domain) || modular(signature, domain))
+                {
                     found.dictionaries.push(Rc::clone(name));
                     break;
                 }

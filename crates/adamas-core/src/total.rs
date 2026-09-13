@@ -384,7 +384,16 @@ fn member_call(
             return None;
         };
         if group.iter().any(|it| it == name) {
-            return Some(crate::eval::quote(width, &current));
+            let quoted = crate::eval::quote(width, &current);
+            // Прогресса нет - редукт совпал с написанным: имя группы стоит
+            // головой **под проекцией** (`член.same x`), и вычислению снять
+            // её нечем. Ответить таким редуктом значило бы зациклить обход:
+            // вызывающий пускает ответ тем же путём (§10 вопрос 163, найдено
+            // на специализации функтора). Спайн обходится как написан.
+            if quoted == *term {
+                return None;
+            }
+            return Some(quoted);
         }
         let quoted = crate::eval::quote(width, &current);
         if !mentions_group(group, &quoted) {

@@ -28,10 +28,11 @@ mod harness;
 
 /// Общее начало: класс представления, `Unit` и три стратегии одной сигнатурой.
 ///
-/// Аннотация `:`, а не `:>`, и это названная граница, а не небрежность:
-/// запечатанный член специализации не получает (`adamas-elab/src/mono.rs`), а
-/// без неё обобщённый по нагрузке `store` понижением не берётся. Запечатанный
-/// вариант считает интерпретатор - `eval/region-strategy-in-io`.
+/// Аннотация `:` здесь - произвол, а не граница (§10 вопрос 163): печать `:>`
+/// снимается понижением на входе специализации, и запечатанная стратегия
+/// берётся так же - свидетель [`a_sealed_strategy_lowers`]. Прежде это было
+/// названной границей: запечатанный член специализации не получал, и
+/// обобщённый по нагрузке `store` не понижался.
 const SHAPE: &str = "\
 type Layout = { size : UInt32, align : UInt32 }
 
@@ -608,4 +609,86 @@ main =
     let (answer, allocated) = run("сосед-без-хендлера", &format!("{SHAPE}{source}"));
     assert_eq!(answer, "MkPair 0 0");
     assert_eq!(allocated, 2);
+}
+
+/// Функтор над стратегией понижается (§10 вопрос 163).
+///
+/// Та же проба, что у [`three_strategies_answer_three_different_ways`], но
+/// тело живёт **в функторе**, и «одно тело, три подстановки» держит функтор,
+/// а не подстановка строки: подставляется только аргумент `Probe`.
+/// Специализация видит параметр модуля как словарь, и `S.new` перестаёт быть
+/// границей замыкания (§10 вопрос 158) - ответ обязан сойтись с прямой формой
+/// по всем трём стратегиям, а блоков остаться столько же.
+const FUNCTOR_PROBE: &str = "\
+module Probe (S : AllocStrategy) where
+  run : Unit -> Pair
+  run u =
+    let a : Int64 = 1
+    let b : Int64 = 2
+    let c : Int64 = 4
+    let d : Int64 = 8
+    let r0 : S.Block = S.new MkUnit
+    let r1 : S.Block = S.store r0 a
+    let h1 : Ptr = S.here r1
+    let r2 : S.Block = S.store r1 b
+    let r3 : S.Block = S.free r2 h1
+    let r4 : S.Block = S.store r3 c
+    let h3 : Ptr = S.here r4
+    let r5 : S.Block = S.free r4 h3
+    let r6 : S.Block = S.store r5 d
+    let h4 : Ptr = S.here r6
+    MkPair h3 h4
+
+module Applied = Probe STRATEGY
+
+main : Pair
+main = Applied.run MkUnit
+";
+
+#[test]
+fn a_functor_over_a_strategy_lowers() {
+    let expected = [
+        ("Arena", "MkPair 16 24"),
+        ("Pool", "MkPair 0 0"),
+        ("StackAlloc", "MkPair 16 16"),
+    ];
+    for (strategy, answer) in expected {
+        let source = format!("{SHAPE}{}", FUNCTOR_PROBE.replace("STRATEGY", strategy));
+        let (got, allocated) = run(&format!("функтор-{strategy}"), &source);
+        assert_eq!(
+            got, answer,
+            "{strategy} через функтор обязана отвечать как напрямую"
+        );
+        assert_eq!(
+            allocated, 2,
+            "{strategy}: функтор не вправе стоить блоков - область и пара ответа"
+        );
+    }
+}
+
+/// Запечатанная стратегия понижается (§10 вопрос 163).
+///
+/// Та же проба и те же три ответа, но все три стратегии аннотированы `:>`.
+/// Печать - договор проверки источника; специализация снимает её на входе
+/// ([`adamas_core::sig::Signature::unseal`]), и обобщённый по нагрузке
+/// `store` специализируется как открытый. Прежде это была названная граница:
+/// запечатанный вариант считал только интерпретатор.
+#[test]
+fn a_sealed_strategy_lowers() {
+    let sealed = SHAPE.replace(" : AllocStrategy where", " :> AllocStrategy where");
+    assert_ne!(sealed, SHAPE, "печать не поставилась - свидетель пуст");
+    let expected = [
+        ("Arena", "MkPair 16 24"),
+        ("Pool", "MkPair 0 0"),
+        ("StackAlloc", "MkPair 16 16"),
+    ];
+    for (strategy, answer) in expected {
+        let source = format!("{sealed}{}", PROBE.replace("S.", &format!("{strategy}.")));
+        let (got, allocated) = run(&format!("печать-{strategy}"), &source);
+        assert_eq!(
+            got, answer,
+            "{strategy} под печатью обязана отвечать как открытая"
+        );
+        assert_eq!(allocated, 2);
+    }
 }

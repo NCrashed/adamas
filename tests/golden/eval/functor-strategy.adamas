@@ -1,0 +1,94 @@
+-- Обобщённый код над стратегией: функтор, применённый к двум стратегиям
+-- (§3.6, §4.8, §10 вопрос 163).
+--
+-- «Интерфейс один» (вопрос 161) обещает, что библиотечная функция пишется
+-- один раз над `module type AllocStrategy` и работает с любой стратегией.
+-- Здесь это обещание записано программой: тело пробы одно - внутри функтора
+-- `Probe`, - а подставляются в него **функтором** две стратегии, и ответы
+-- расходятся ровно там, где расходятся их `free`.
+--
+-- `Arena` при этом запечатана `:>` - обе дыры вопроса 163 в одном файле:
+-- специализация обязана видеть и параметр функтора (иначе `S.new` - граница
+-- замыкания, §10 вопрос 158), и запечатанное тело (иначе обобщённый по
+-- нагрузке `store` не понижается). Печать снимает понижение, а не язык:
+-- снаружи `:>` представление `Arena.Block` по-прежнему не написать.
+--
+-- Проба: положить, отдать с вершины, положить снова. У Arena возврат пуст -
+-- второй хендл над первым (8); у StackAlloc курсор опускается - хендл тот же
+-- (0). Значение - `MkPair 8 0`.
+
+type Layout = { size : UInt32, align : UInt32 }
+
+class Flat a where
+  layout : Layout
+
+data Unit where
+  MkUnit : Unit
+
+data Pair where
+  MkPair : Ptr -> Ptr -> Pair
+
+module type AllocStrategy where
+  type Block
+  new   : Unit -> Block
+  store : {Flat a} => Block -> a -> Block
+  here  : Block -> Ptr
+  load  : {Flat a} => Block -> Ptr -> a
+  free  : Block -> Ptr -> Block
+
+module Arena :> AllocStrategy where
+  type Block = Block
+
+  new : Unit -> Block
+  new u = regionNew
+
+  store : {Flat a} => Block -> a -> Block
+  store r x = regionAlloc r x
+
+  here : Block -> Ptr
+  here r = regionLast r
+
+  load : {Flat a} => Block -> Ptr -> a
+  load r p = regionRead r p
+
+  -- Ячейка обратно не берётся вовсе: область отдаётся целиком, дропом.
+  free : Block -> Ptr -> Block
+  free r p = r
+
+module StackAlloc : AllocStrategy where
+  type Block = Block
+
+  new : Unit -> Block
+  new u = regionNew
+
+  store : {Flat a} => Block -> a -> Block
+  store r x = regionAlloc r x
+
+  here : Block -> Ptr
+  here r = regionLast r
+
+  load : {Flat a} => Block -> Ptr -> a
+  load r p = regionRead r p
+
+  -- Курсор вниз, если отдана вершина.
+  free : Block -> Ptr -> Block
+  free r p = regionPop r p
+
+-- Одно тело на все стратегии: проба живёт в функторе.
+module Probe (S : AllocStrategy) where
+  run : Unit -> Ptr
+  run u =
+    let a : Int64 = 1
+    let b : Int64 = 2
+    let r0 : S.Block = S.new MkUnit
+    let r1 : S.Block = S.store r0 a
+    let h1 : Ptr = S.here r1
+    let r2 : S.Block = S.free r1 h1
+    let r3 : S.Block = S.store r2 b
+    S.here r3
+
+module OnArena = Probe Arena
+module OnStack = Probe StackAlloc
+
+main : Pair
+main = MkPair (OnArena.run MkUnit) (OnStack.run MkUnit)

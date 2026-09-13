@@ -985,8 +985,72 @@ impl<'a> Lowerer<'a> {
                 Ok(self.tightening(scope, value.clone(), tag, pack))
             }
             (Repr::Boxed, Repr::Packed(pack)) => self.narrowing(scope, value.clone(), pack),
+            // Примитив в указательной позиции: обёртка с прозрачной печатью -
+            // реализация принятого решением §10 вопроса 158, заказчик - §10
+            // вопрос 159 (поле параметрического семейства указательно, а
+            // значение плоское). Цена - ячейка кучи на пересечение границы;
+            // §5.1 называет её источником боксирования, и `@noalloc` её видит.
+            (Repr::Flat(prim), Repr::Boxed) => {
+                let tag = self.prim_wrapper(prim)?;
+                Ok(Some(Expr::Construct {
+                    constructor: tag,
+                    reuse: None,
+                    arguments: vec![value.clone()],
+                }))
+            }
+            // Обратно: обёртка в позиции примитива - биты разбором. Кроме неё,
+            // здесь стоять некому: позиция типизирована примитивом, а
+            // единственная указательная форма примитива - обёртка.
+            (Repr::Boxed, Repr::Flat(prim)) => {
+                let tag = self.prim_wrapper(prim)?;
+                let binding = Binding {
+                    name: "биты".to_owned(),
+                    local: scope.fresh(),
+                    fact: Fact::present(Mult::Many).shaped(Repr::Flat(prim)),
+                };
+                let local = binding.local;
+                Ok(Some(Expr::Match {
+                    scrutinee: Box::new(value.clone()),
+                    consumed: Mult::One,
+                    arms: vec![Arm {
+                        constructor: tag,
+                        fields: vec![binding],
+                        body: Expr::Local(local),
+                    }],
+                }))
+            }
             _ => Ok(None),
         }
+    }
+
+    /// Обёртка примитива: объект кучи с одним плоским слотом и прозрачной
+    /// печатью (§10 вопросы 158, 159).
+    ///
+    /// Имя пустое, и это не пропуск, а сентинель печати: у машины обёртки в
+    /// терме не существует, поэтому печатается только payload - пустое имя
+    /// узнаёт `print.c`. Дроп обычный: слот плоский, следовать по нему некуда.
+    fn prim_wrapper(&mut self, prim: PrimTy) -> Result<CtorId, LowerError> {
+        let fact = Fact::declared(Mult::One).shaped(Repr::Flat(prim));
+        let found = self
+            .constructors
+            .iter()
+            .find(|it| it.name.is_empty() && it.binders == [fact]);
+        if let Some(constructor) = found {
+            return Ok(constructor.tag);
+        }
+        let tag = u16::try_from(self.constructors.len())
+            .ok()
+            .filter(|tag| *tag < TAGS)
+            .ok_or(LowerError::TooManyConstructors { limit: TAGS })?;
+        self.constructors.push(Constructor {
+            tag: CtorId(tag),
+            name: String::new(),
+            data: "#обёртка".to_owned(),
+            binders: vec![fact],
+            params: 0,
+            labels: None,
+        });
+        Ok(CtorId(tag))
     }
 
     /// Форма объекта кучи, отвечающая плотной укладке записи.
@@ -1080,7 +1144,11 @@ impl<'a> Lowerer<'a> {
                 return true;
             }
             slots.next().is_some_and(|slot| match slot.ty {
-                SlotTy::Prim(prim) => fact.repr == Repr::Flat(prim),
+                // Указательный факт над примитивным слотом - параметрическое
+                // семейство: поле `a` в таблице указательно, слот считался по
+                // подставленному примитиву. Переклад закрывает это обёрткой
+                // (§10 вопрос 159), поэтому форма согласуется.
+                SlotTy::Prim(prim) => fact.repr == Repr::Flat(prim) || fact.repr.boxed(),
                 SlotTy::Pack(_) => fact.repr.boxed(),
             })
         }) && slots.next().is_none()
@@ -1130,7 +1198,8 @@ impl<'a> Lowerer<'a> {
             let facts = self.branch_facts(Some(pack), tag);
             let fields = Self::variant_fields(scope, variant, &facts);
             let mut arguments: Vec<Expr> = (0..params).map(|_| Expr::Erased).collect();
-            for field in &fields {
+            for (field, described_fact) in fields.iter().zip(described.binders.iter().skip(params))
+            {
                 if !field.fact.present {
                     arguments.push(Expr::Erased);
                     continue;
@@ -1141,6 +1210,21 @@ impl<'a> Lowerer<'a> {
                             scope,
                             &Expr::Local(field.local),
                             Repr::Packed(sub),
+                            Repr::Boxed,
+                        )?
+                        else {
+                            return Ok(None);
+                        };
+                        boxed
+                    }
+                    // Слот таблицы указателен, байты варианта плоские -
+                    // параметрическое поле (§10 вопрос 159): payload
+                    // оборачивается.
+                    Repr::Flat(_) if described_fact.repr.boxed() => {
+                        let Some(boxed) = self.moved(
+                            scope,
+                            &Expr::Local(field.local),
+                            field.fact.repr,
                             Repr::Boxed,
                         )?
                         else {
@@ -1205,6 +1289,21 @@ impl<'a> Lowerer<'a> {
                 let wanted = variant.slots[slot].ty;
                 slot += 1;
                 let argument = match wanted {
+                    // Поле пришло указателем таблицы, а слот примитивен -
+                    // параметрическое поле (§10 вопрос 159): биты достаются
+                    // из обёртки разбором.
+                    SlotTy::Prim(prim) if field.fact.repr.boxed() => {
+                        let Some(narrowed) = self.moved(
+                            scope,
+                            &Expr::Local(field.local),
+                            field.fact.repr,
+                            Repr::Flat(prim),
+                        )?
+                        else {
+                            return Ok(None);
+                        };
+                        narrowed
+                    }
                     SlotTy::Prim(_) => Expr::Local(field.local),
                     SlotTy::Pack(sub) => {
                         let Some(narrowed) = self.moved(
@@ -3163,6 +3262,11 @@ impl<'a> Lowerer<'a> {
                 // Две записи разной формы либо запись с указателем: общее у них
                 // одно - указатель, и форма теряется.
                 answer = Repr::Boxed;
+            } else if let Some(moved) = self.moved(scope, &body, repr, answer)? {
+                // Поле параметрического семейства связано указателем таблицы,
+                // а соседняя ветвь ответила примитивом (§10 вопрос 159):
+                // ветви сводятся перекладом - обёртка примитива в обе стороны.
+                body = moved;
             } else {
                 return Err(LowerError::Representation {
                     at: "ветвь разбора",

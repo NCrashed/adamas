@@ -1,0 +1,39 @@
+-- Колонка параметрического семейства читается обратно (§4.11, §10 вопрос 159).
+--
+-- `Array 3 (Option Int64)` укладывается плотно - шестнадцать байт на ячейку,
+-- как у мономорфного соседа `eval/array-tagged.adamas`, - и прочитанная
+-- ячейка переходит в объект. Поле `a` в таблице конструкторов указательно,
+-- слот ячейки примитивен, и переклад сводит их **обёрткой примитива** с
+-- прозрачной печатью - реализацией решения §10 вопроса 158. Цена названа
+-- там же: ячейка кучи на пересечение границы, `@noalloc` её видит.
+--
+-- Payload'ы связываются именованными, а не литералами в аргументе `Some`:
+-- литерал под нерешённым параметром читается унарным (§4.3), и свидетель
+-- говорил бы о литералах, а не о колонке.
+--
+-- Значение - `970`: 0 + 70 + 90·10, пустая ячейка, две занятые, порядок
+-- ячеек наблюдаем множителем.
+
+data Option (a : Type) where
+  None : Option a
+  Some : a -> Option a
+
+take : Option Int64 -> Int64
+take None = 0
+take (Some n) = n
+
+built : Array 3 (Option Int64)
+built =
+  let n70 : Int64 = 70
+  let n90 : Int64 = 90
+  let x : Option Int64 = Some n70
+  let y : Option Int64 = Some n90
+  arraySet (arraySet (arrayNew 3 None) 1 x) 2 y
+
+read : Array 3 (Option Int64) -> Int64
+read xs =
+  addInt64 (take (arrayIndex xs 0))
+    (addInt64 (take (arrayIndex xs 1)) (mulInt64 (take (arrayIndex xs 2)) 10))
+
+main : Int64
+main = read built

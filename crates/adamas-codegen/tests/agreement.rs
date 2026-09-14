@@ -58,7 +58,7 @@ use std::path::PathBuf;
 /// evidence - те же имена без питомника остаются обычными операциями (`fibers`).
 /// Всё, что здесь стоит, обязано собраться и ответить как `adamas eval`; список
 /// сокращать нельзя, а пополнять - можно и нужно, когда фрагмент растёт.
-const TAKEN: [&str; 82] = [
+const TAKEN: [&str; 84] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -69,6 +69,7 @@ const TAKEN: [&str; 82] = [
     "array-length-word",
     "array-nested",
     "array-tagged",
+    "await-twice",
     "await-value",
     "beta-redex",
     "cancel",
@@ -114,6 +115,7 @@ const TAKEN: [&str; 82] = [
     "nested-rowed-signature",
     "nursery",
     "nursery-abort",
+    "nursery-abort-order",
     "operation-higher-order",
     "operators",
     "polymorphic-recursion",

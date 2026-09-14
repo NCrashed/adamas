@@ -257,7 +257,27 @@ static void done_push(adamas_nursery *nursery, uint32_t id, adamas_value value) 
     nursery->done = entry;
 }
 
-/* Ответ договорившего владением; `found` - нашёлся ли он вообще. */
+/* Ответ договорившего **лишней ссылкой**: запись остаётся на месте.
+ *
+ * Остаётся потому, что `await` его только читает - у машины там `find` с
+ * `Rc::clone`, а не изъятие (`Machine::awaiting`). Забери запись, и второе
+ * ожидание той же задачи ушло бы в круг ждать никого: с `data Task` кратность
+ * значения ω, и написать два `await` подряд ничто не мешает. Освобождает
+ * записи закрытие круга. */
+static adamas_value done_read(adamas_nursery *nursery, uint32_t id, int *found) {
+    adamas_done *entry = nursery->done;
+    *found = 0;
+    while (entry != NULL) {
+        if (entry->id == id) {
+            *found = 1;
+            return adamas_dup(entry->value);
+        }
+        entry = entry->next;
+    }
+    return adamas_unit();
+}
+
+/* Ответ договорившего владением; запись снимается. `found` - нашлась ли она. */
 static adamas_value done_take(adamas_nursery *nursery, uint32_t id, int *found) {
     adamas_done *before = NULL;
     adamas_done *entry = nursery->done;
@@ -530,7 +550,7 @@ adamas_value adamas_nursery_await(adamas_kont *kont, const adamas_evidence *evid
     /* Задача потреблена: `await : (1 t : Task) -> a` (§5.2). Разбора её
      * значения при этом нет, поэтому нет и отмены. */
     adamas_drop(task, nursery->release);
-    ready = done_take(nursery, awaited, &found);
+    ready = done_read(nursery, awaited, &found);
     if (found) {
         return ready;
     }
@@ -616,7 +636,16 @@ adamas_value adamas_nursery_cancel(adamas_kont *kont, adamas_value task, uint32_
         return task;
     }
     nursery = name->home;
-    /* Ответ договорившего никому не достанется: снимается с готовых. */
+    /* Ответ договорившего никому не достанется: снимается с готовых - тем же
+     * `retain`, каким снимает его машина.
+     *
+     * **Свидетеля у этой строки нет, и это измерено мутантом, а не пропущено.**
+     * Сними её - корпус остаётся зелёным целиком, включая ноль живых блоков:
+     * запись доживает до закрытия круга и освобождается вместе с ним.
+     * Различающая программа существует - `data Task` даёт значению кратность ω,
+     * и после отмены можно написать `await` по копии, - но кончается она
+     * взаимной блокировкой, то есть обрывом, а наблюдать обрыв ни один прогон
+     * здесь не умеет. */
     adamas_drop(done_take(nursery, name->id, &found), nursery->release);
     fiber = fiber_take(nursery, name->id);
     if (fiber == NULL) {

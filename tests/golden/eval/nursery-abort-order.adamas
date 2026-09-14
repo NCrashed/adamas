@@ -1,0 +1,98 @@
+-- Порядок раскрутки брошенного круга: с хвоста очереди (§5.2, §3.3).
+--
+-- `eval/nursery-abort.adamas` показывает, что деструктор уступившей задачи
+-- вообще отрабатывает, но держит **одного** брошенного файбера - а на одном
+-- порядок ненаблюдаем. Симметричный путь: возьми файберов с головы вместо
+-- хвоста, и та фикстура останется зелёной. Здесь их двое, и деструкторы у них
+-- разные.
+--
+-- След: 1 3 8 7.
+--
+--   1 - первая задача отметилась и уступила;
+--   3 - вторая отметилась и уступила;
+--   8 - её деструктор: раскрутка берёт с хвоста, поэтому она первая;
+--   7 - деструктор первой.
+--
+-- Двоек и четвёрок нет ни одной: тела оборваны, а не завершены.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+effect Fail where
+  fail : Bool
+
+effect Async where
+  suspend : Unit
+  spawnDetached : ({Async, Log} Unit) -> Unit
+
+withNursery : ({Async, Fail, Log} Unit) -> {Fail, Log} Unit
+
+resource First where
+  OpenFirst : First
+  closeFirst : (1 h : First) -> {Log} Bool
+  closeFirst h =
+    note 7
+    True
+
+resource Second where
+  OpenSecond : Second
+  closeSecond : (1 h : Second) -> {Log} Bool
+  closeSecond h =
+    note 8
+    True
+
+early : First -> {Async, Log} Unit
+early h =
+  note 1
+  let s : Unit = suspend
+  note 2
+
+late : Second -> {Async, Log} Unit
+late h =
+  note 3
+  let s : Unit = suspend
+  note 4
+
+heldEarly : {Async, Log} Unit
+heldEarly = early OpenFirst
+
+heldLate : {Async, Log} Unit
+heldLate = late OpenSecond
+
+-- Корневой порождает две задачи, уступает обеим и обрывается.
+root : {Async, Fail, Log} Unit
+root =
+  let u : Unit = spawnDetached heldEarly
+  let v : Unit = spawnDetached heldLate
+  let s : Unit = suspend
+  let n : Bool = fail
+  MkUnit
+
+nursed : {Fail, Log} Unit
+nursed = withNursery root
+
+-- Хендлер обрыва стоит снаружи питомника и резумпции не зовёт.
+aborted : {Log} Unit
+aborted = handle nursed with
+  return v -> v
+  fail -> MkUnit
+
+main : List Nat
+main = handle aborted with
+  return v -> Nil
+  note n -> Cons n (resume MkUnit)

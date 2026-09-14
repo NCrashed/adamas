@@ -52,9 +52,13 @@ use std::path::PathBuf;
 /// Плюс **цикл по примитиву** (тот же трек): литеральный паттерн есть разбор по
 /// `eqT x k`, счётчик остаётся плоским, и ячейки кучи на витке не возникает -
 /// это и есть первая из четырёх нагрузок трека Z, до сих пор невыразимая.
+/// Плюс **питомник и файберы** (§5.2, трек B волны 5): файбер есть сегмент того
+/// же стека, уступка режет его по кадру питомника, отмена задачи раскручивает
+/// сегмент отменённого, а «ближайший выигрывает» решает рантайм по вектору
+/// evidence - те же имена без питомника остаются обычными операциями (`fibers`).
 /// Всё, что здесь стоит, обязано собраться и ответить как `adamas eval`; список
 /// сокращать нельзя, а пополнять - можно и нужно, когда фрагмент растёт.
-const TAKEN: [&str; 73] = [
+const TAKEN: [&str; 84] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -65,7 +69,11 @@ const TAKEN: [&str; 73] = [
     "array-length-word",
     "array-nested",
     "array-tagged",
+    "await-twice",
+    "await-value",
     "beta-redex",
+    "cancel",
+    "cancel-bystander",
     "case-family",
     "case-over-a-computation",
     "class-multiplicity",
@@ -105,6 +113,9 @@ const TAKEN: [&str; 73] = [
     "nested-case-on-a-field",
     "nested-functor",
     "nested-rowed-signature",
+    "nursery",
+    "nursery-abort",
+    "nursery-abort-order",
     "operation-higher-order",
     "operators",
     "polymorphic-recursion",
@@ -123,8 +134,12 @@ const TAKEN: [&str; 73] = [
     "signature-effect",
     "signature-effect-parameterized",
     "soa-record",
+    "spawn-local",
     "state",
     "state-resource",
+    "task",
+    "task-handoff",
+    "task-typed",
     "truncation",
     "unwind-inner-handler",
     "unwind-live-outer",

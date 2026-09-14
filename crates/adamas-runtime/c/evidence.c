@@ -149,6 +149,13 @@ adamas_frame *adamas_evidence_at(const adamas_evidence *evidence, size_t index) 
     return evidence->entries[index].handler;
 }
 
+int adamas_evidence_suppressed_at(const adamas_evidence *evidence, size_t index) {
+    if (evidence == NULL || index >= evidence->count) {
+        adamas_fail("запись вектора evidence за его пределами");
+    }
+    return (evidence->entries[index].flags & ADAMAS_EV_SUPPRESSED) != 0;
+}
+
 uint32_t adamas_evidence_label_at(const adamas_evidence *evidence, size_t index) {
     if (evidence == NULL || index >= evidence->count) {
         adamas_fail("запись вектора evidence за его пределами");

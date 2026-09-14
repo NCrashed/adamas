@@ -1,0 +1,62 @@
+-- Ответ договорившей задачи **читается**, а не изымается (§5.2).
+--
+-- `await` над уже договорившей берёт её ответ из готовых - и оставляет запись
+-- на месте: снятая означала бы, что второе ожидание той же задачи уходит ждать
+-- никого. Проверить это можно только там, где `Task` объявлен обычным `data`:
+-- у ресурса кратность значения `1`, и второго `await` не написать.
+--
+-- Различающая сила - в паре ожиданий. Изымай `await` запись, и второе ушло бы
+-- в круг, а круг опустел бы при непустом списке ждущих - взаимная блокировка
+-- вместо ответа.
+--
+-- Ответ: 9 10 - отметка задачи и сумма двух её ответов, каждый по пять.
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+data Task where
+  MkTask : Nat -> Task
+
+effect Async where
+  suspend : Unit
+  spawn : ({Async, Log} Nat) -> Task
+  await : (t : Task) -> Nat
+
+withNursery : ({Async, Log} Nat) -> {Log} Nat
+
+plus : Nat -> Nat -> Nat
+plus Zero m = m
+plus (Succ k) m = Succ (plus k m)
+
+quick : {Async, Log} Nat
+quick =
+  let a : Unit = note 9
+  5
+
+-- Корневой уступает, пока задача не договорит, и ждёт её дважды.
+twice : {Async, Log} Nat
+twice =
+  let t : Task = spawn quick
+  let s : Unit = suspend
+  let first : Nat = await t
+  let second : Nat = await t
+  plus first second
+
+waited : {Log} Nat
+waited = withNursery twice
+
+main : List Nat
+main = handle waited with
+  return v -> Cons v Nil
+  note n -> Cons n (resume MkUnit)

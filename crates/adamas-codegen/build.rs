@@ -1,22 +1,13 @@
 //! Пути, без которых порождённый C не собрать: заголовок рантайма, его
 //! исходники и компилятор.
 //!
-//! Заголовок приходит от `adamas-runtime` через `links`-метаданные
-//! (`DEP_ADAMAS_RUNTIME_INCLUDE`). Исходники рядом с ним - и это единственное
+//! Заголовок и список единиц трансляции приходят от `adamas-runtime` через
+//! `links`-метаданные (`DEP_ADAMAS_RUNTIME_INCLUDE`, `DEP_ADAMAS_RUNTIME_UNITS`).
+//! Каталог исходников угадывается рядом с заголовком - и это единственное
 //! место, где раскладка чужого крейта угадывается; чтобы догадка не разъехалась
 //! молча, наличие файлов проверяется здесь же.
 
 use std::path::{Path, PathBuf};
-
-/// Исходники рантайма - те же, что перечисляет его собственный `build.rs`.
-const SOURCES: [&str; 6] = [
-    "object.c",
-    "array.c",
-    "region.c",
-    "evidence.c",
-    "closure.c",
-    "frame.c",
-];
 
 fn main() {
     let Some(include) = std::env::var_os("DEP_ADAMAS_RUNTIME_INCLUDE") else {
@@ -29,8 +20,16 @@ fn main() {
         include.display()
     );
 
+    // Список единиц трансляции приходит **от рантайма** тем же путём, что путь
+    // к заголовку: второй копией он разъезжался бы молча, и порождённый C
+    // переставал бы линковаться на первом же новом слое.
+    let Some(units) = std::env::var_os("DEP_ADAMAS_RUNTIME_UNITS") else {
+        panic!("список исходников приходит от `adamas-runtime`: он объявлен зависимостью");
+    };
+    let units = units.to_string_lossy().into_owned();
+
     let sources = include.parent().unwrap_or(Path::new(".")).join("c");
-    for source in SOURCES {
+    for source in units.split(',') {
         let path = sources.join(source);
         assert!(
             path.is_file(),
@@ -56,6 +55,7 @@ fn main() {
         "cargo::rustc-env=ADAMAS_RUNTIME_SOURCES={}",
         sources.display()
     );
+    println!("cargo::rustc-env=ADAMAS_RUNTIME_UNITS={units}");
     println!("cargo::rustc-env=ADAMAS_CC={}", compiler.path().display());
     println!("cargo::rerun-if-changed=build.rs");
 }

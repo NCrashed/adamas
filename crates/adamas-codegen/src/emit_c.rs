@@ -63,8 +63,8 @@ use std::fmt::Write as _;
 use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Elems, Expr, Form, FuncId, Function, HandlerId, LabelId,
-    LocalId, PackId, Packing, Program, Repr, Salvage, Stride, Verdict,
+    Arm, Binding, Constructor, CtorId, Elems, Expr, FiberOp, Form, FuncId, Function, HandlerId,
+    LabelId, LocalId, PackId, Packing, Program, Repr, Salvage, Stride, Verdict,
 };
 use crate::split::Suspension;
 
@@ -292,6 +292,9 @@ fn stranded(program: &Program, expr: &Expr, hidden: bool) -> Option<String> {
             .iter()
             .find_map(|capture| stranded(program, capture, hidden))
             .or_else(|| stranded(program, computation, true)),
+        // Под питомником - тоже: круг в чистой функции заводит свой корень
+        // (`Emitter::nursing`), и тело считается уже под ним.
+        Expr::Nursery { body } => stranded(program, body, true),
         _ => expr
             .children()
             .into_iter()
@@ -1201,6 +1204,11 @@ impl Emitter<'_> {
             // слот кадра единообразен (§4.11).
             | Expr::Handle { .. }
             | Expr::Perform { .. }
+            // Ответ питомника - значение корневого файбера, ответ его операции
+            // - значение ветки либо круга; отмена отдаёт то же разбираемое.
+            | Expr::Nursery { .. }
+            | Expr::Fiber { .. }
+            | Expr::Cancel { .. }
             // Ответ возобновления - ответ хендлера: возобновлённое вычисление
             // договаривает под ним же (§3.4, глубокий хендлер).
             | Expr::Resume { .. }
@@ -1300,6 +1308,11 @@ impl Emitter<'_> {
                 computation,
             } => self.handling(*handler, captured, computation, depth),
             Expr::Mask { label, computation } => self.masking(*label, computation, depth),
+            // Питомник в чистой функции - **корень своего стека**, тем же
+            // правом, каким его заводит хендлер: row у `withNursery` пуста, и
+            // наружу круга не уходит ни одной операции (§3.4, погашение
+            // расширением справа).
+            Expr::Nursery { body } => self.nursing(body, depth),
             // Операция значением бывает только в тихой программе (вопрос 74):
             // там она не точка приостановки, и дробление её не выносит.
             Expr::Perform {
@@ -1309,7 +1322,12 @@ impl Emitter<'_> {
             } => self.performing(*label, *operation, arguments, depth),
             // Прочие точки приостановки значением не бывают: их снимает
             // дробление ([`crate::split`]), и в чистый отрезок они не попадают.
-            Expr::Closing { .. } | Expr::Resume { .. } => {
+            // Операция питомника среди них безусловно: тишина её не касается -
+            // уступка режет сегмент по построению.
+            Expr::Closing { .. }
+            | Expr::Resume { .. }
+            | Expr::Fiber { .. }
+            | Expr::Cancel { .. } => {
                 unreachable!("точка приостановки в чистом отрезке: дробление её не сняло")
             }
             Expr::Apply { callee, argument } => self.applying(callee, argument, depth),
@@ -2737,6 +2755,22 @@ impl Emitter<'_> {
                 body,
             } => self.scoped_tail(*closer, captured, body, depth),
             Expr::Mask { label, computation } => self.masking_tail(*label, computation, depth),
+            Expr::Nursery { body } => {
+                let body = self.value(body, depth);
+                let call = format!("adamas_nursery_begin(kont, ev, {body}, adamas_release_value)");
+                self.finish(&call, Repr::Boxed, depth);
+            }
+            Expr::Cancel { at, value } => {
+                let value = self.value(value, depth);
+                let call = format!("adamas_nursery_cancel(kont, {value}, {at}u)");
+                self.finish(&call, Repr::Boxed, depth);
+            }
+            Expr::Fiber {
+                op,
+                label,
+                operation,
+                arguments,
+            } => self.fibering(*op, *label, *operation, arguments, depth),
             Expr::Perform {
                 label,
                 operation,
@@ -2967,6 +3001,152 @@ impl Emitter<'_> {
         arguments: &[Expr],
         depth: usize,
     ) {
+        let (operands, count) = self.operands(arguments, depth);
+        self.performed_tail(label, operation, &operands, count, depth);
+    }
+
+    /// Аргументы операции массивом: одно соглашение о вызове на оба пути.
+    ///
+    /// Массивом, а не именами по одному, потому что владельца у них в IR нет:
+    /// это соглашение о вызове ветки, а не узел. Отсюда и дроп на путях, где
+    /// ветка не побежит, идёт по слоту массива - тот же жанр, что у
+    /// подавленного вердикта.
+    fn operands(&mut self, arguments: &[Expr], depth: usize) -> (String, usize) {
+        let pad = Self::pad(depth);
+        let given: Vec<String> = arguments
+            .iter()
+            .map(|argument| self.value(argument, depth))
+            .collect();
+        let operands = self.temp();
+        if given.is_empty() {
+            let _ = writeln!(self.out, "{pad}adamas_value *{operands} = NULL;");
+        } else {
+            let _ = writeln!(
+                self.out,
+                "{pad}adamas_value {operands}[{}] = {{ {} }};",
+                given.len(),
+                given.join(", ")
+            );
+        }
+        (operands, given.len())
+    }
+
+    /// Питомник в **чистой** функции: корень своего стека, круг, трамплин до дна.
+    ///
+    /// Тот же приём, что у хендлера первой формы ([`Emitter::handling`]), и то
+    /// же основание: row у `withNursery` пуста, значит наружу круга не уходит
+    /// ни одной операции, и стек этот один на всё, что друг друга видит.
+    ///
+    /// Тело считается **внутри** корня: под ним уже есть и вектор, и ручка, а
+    /// снаружи первой формы их нет вовсе.
+    fn nursing(&mut self, body: &Expr, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let inner = Self::pad(depth + 1);
+        let name = self.temp();
+        let root = self.temp();
+        let _ = writeln!(self.out, "{pad}adamas_value {name}; /* withNursery */");
+        let _ = writeln!(self.out, "{pad}{{");
+        self.rooted(&root, depth + 1);
+        let body = self.value(body, depth + 1);
+        let seed = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{inner}adamas_value {seed} = \
+             adamas_nursery_begin(kont, ev, {body}, adamas_release_value);"
+        );
+        let _ = writeln!(self.out, "{inner}{name} = adamas_kont_run(kont, {seed});");
+        let _ = writeln!(self.out, "{inner}adamas_evidence_drop({root}_ev);");
+        let _ = writeln!(self.out, "{pad}}}");
+        name
+    }
+
+    /// Операция питомника: круг берёт её, только если он ближе хендлера (§5.2).
+    ///
+    /// Оба пути стоят рядом, и это не дублирование, а само правило: решает
+    /// между ними **рантайм**, потому что `eval/fibers.adamas` пишет те же
+    /// имена без всякого питомника, а написанный `handle` над той же меткой
+    /// значит написанное. Обычный путь идёт следом тем же кодом, что у всякой
+    /// операции: аргументы посчитаны однажды и годятся обоим.
+    ///
+    /// Свой аргумент у порождения и ожидания - **последний**: row стоит на
+    /// последней стрелке. Прочие (синтезированный триггер приостановленного
+    /// вычисления) на этом пути дропаются здесь: ветки, которая дропнула бы их
+    /// сама, у круга нет.
+    fn fibering(
+        &mut self,
+        op: FiberOp,
+        label: LabelId,
+        operation: u32,
+        arguments: &[Expr],
+        depth: usize,
+    ) {
+        let pad = Self::pad(depth);
+        let inner = Self::pad(depth + 1);
+        let (operands, count) = self.operands(arguments, depth);
+        let described = &self.program.labels[label.0 as usize];
+        let title = escaped(&described.name);
+        let operation_name = described
+            .operations
+            .get(operation as usize)
+            .map_or_else(|| format!("#{operation}"), |name| escaped(name));
+        let taken = match op {
+            FiberOp::Suspend => None,
+            _ => count.checked_sub(1),
+        };
+        let _ = writeln!(
+            self.out,
+            "{pad}if (adamas_nursery_serves(ev, {}u)) {{ /* питомник: {title}.{operation_name} */",
+            label.0
+        );
+        for slot in 0..count {
+            if taken == Some(slot) {
+                continue;
+            }
+            let _ = writeln!(self.out, "{inner}adamas_drop_value({operands}[{slot}]);");
+        }
+        let own = taken.map_or_else(
+            || "ADAMAS_ERASED".to_owned(),
+            |slot| format!("{operands}[{slot}]"),
+        );
+        let call = match op {
+            FiberOp::Suspend => Some("adamas_nursery_suspend(kont, ev)".to_owned()),
+            FiberOp::Detached => Some(format!(
+                "adamas_nursery_spawn(kont, ev, {own}, ADAMAS_NO_TASK, 0u, 0u)"
+            )),
+            FiberOp::Spawn(Some(task)) => Some(format!(
+                "adamas_nursery_spawn(kont, ev, {own}, {}u, {}u, {}u)",
+                task.constructor.0, task.slots, task.at
+            )),
+            FiberOp::Await(Some(at)) => {
+                Some(format!("adamas_nursery_await(kont, ev, {own}, {at}u)"))
+            }
+            // Форма задачи не сошлась: у машины это тот же отказ на месте, а не
+            // молча собранное не то (`Machine::handle_value`).
+            FiberOp::Spawn(None) | FiberOp::Await(None) => None,
+        };
+        match call {
+            Some(call) => self.finish(&call, Repr::Boxed, depth + 1),
+            None => {
+                let _ = writeln!(
+                    self.out,
+                    "{inner}adamas_fail(\"тип задачи не подошёл: нужен один конструктор с одним \
+                     полем (§5.2)\");"
+                );
+            }
+        }
+        let _ = writeln!(self.out, "{pad}}}");
+        self.performed_tail(label, operation, &operands, count, depth);
+    }
+
+    /// Обычный путь операции: вердикт вектора трёхзначен, аргументы посчитаны.
+    fn performed_tail(
+        &mut self,
+        label: LabelId,
+        operation: u32,
+        operands: &str,
+        count: usize,
+        depth: usize,
+    ) {
         let pad = Self::pad(depth);
         let inner = Self::pad(depth + 1);
         let described = &self.program.labels[label.0 as usize];
@@ -2975,15 +3155,9 @@ impl Emitter<'_> {
             .operations
             .get(operation as usize)
             .map_or_else(|| format!("#{operation}"), |name| escaped(name));
-        let given: Vec<String> = arguments
-            .iter()
-            .map(|argument| self.value(argument, depth))
-            .collect();
 
         let frame = self.temp();
         let verdict = self.temp();
-        let operands = self.temp();
-        let count = given.len();
         let _ = writeln!(
             self.out,
             "{pad}adamas_frame *{frame} = NULL; /* {title}.{operation_name} */"
@@ -2993,15 +3167,6 @@ impl Emitter<'_> {
             "{pad}int {verdict} = adamas_evidence_lookup(ev, {}u, &{frame});",
             label.0
         );
-        if count == 0 {
-            let _ = writeln!(self.out, "{pad}adamas_value *{operands} = NULL;");
-        } else {
-            let _ = writeln!(
-                self.out,
-                "{pad}adamas_value {operands}[{count}] = {{ {} }};",
-                given.join(", ")
-            );
-        }
         let _ = writeln!(self.out, "{pad}if ({verdict} == ADAMAS_LOOKUP_HANDLER) {{");
         let call =
             format!("adamas_frame_perform({frame}, kont, {operation}u, {operands}, {count}u)");

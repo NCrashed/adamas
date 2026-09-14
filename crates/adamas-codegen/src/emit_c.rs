@@ -64,7 +64,7 @@ use adamas_core::prim::{PrimOp, PrimTy};
 
 use crate::ir::{
     Arm, Binding, Constructor, CtorId, Elems, Expr, Form, FuncId, Function, HandlerId, LabelId,
-    LocalId, PackId, Packing, Program, Repr, Stride, Verdict,
+    LocalId, PackId, Packing, Program, Repr, Salvage, Stride, Verdict,
 };
 use crate::split::Suspension;
 
@@ -1344,20 +1344,88 @@ impl Emitter<'_> {
                 let _ = writeln!(self.out, "{pad}adamas_dup(v{});", local.0);
                 body.as_ref()
             }
-            Expr::Drop { local, body } => {
-                self.dropped(*local, depth);
+            Expr::Drop {
+                local,
+                salvage,
+                body,
+            } => {
+                if salvage.collapses() {
+                    self.salvaged(*local, salvage, None, depth);
+                } else {
+                    self.dropped(*local, depth);
+                }
                 body.as_ref()
             }
-            Expr::Reclaim { local, token, body } => {
-                let _ = writeln!(
-                    self.out,
-                    "{pad}adamas_value v{} = adamas_reclaim_value(v{});",
-                    token.0, local.0
-                );
+            Expr::Reclaim {
+                local,
+                token,
+                salvage,
+                body,
+            } => {
+                if salvage.collapses() {
+                    self.salvaged(*local, salvage, Some(*token), depth);
+                } else {
+                    let _ = writeln!(
+                        self.out,
+                        "{pad}adamas_value v{} = adamas_reclaim_value(v{});",
+                        token.0, local.0
+                    );
+                }
                 body.as_ref()
             }
             other => other,
         }
+    }
+
+    /// Дроп разобранного, схлопнутый с `dup` его полей (§5.1, [`Salvage`]).
+    ///
+    /// Две ветви, и различает их уникальность в рантайме - та же, на которой
+    /// стоит reuse (`adamas_is_unique`, §10 вопрос 149).
+    ///
+    /// **Уникальный.** Взятые поля переходят ветви даром: `dup` и обход release
+    /// вернули бы им ровно те ссылки, которые ветвь взяла. Невзятые дропаются
+    /// здесь же - блок освобождается без release, а тот их дропнул бы. Форма
+    /// освобождения зависит от того, придерживается ли блок: у дропа он идёт
+    /// куче, у [`Expr::Reclaim`] достаётся `token`.
+    ///
+    /// **Разделённый.** Всё как прежде: ссылка на каждое взятое поле, потом
+    /// счётчик родителя вниз. Придержать блок разделённого нечем - `NULL`.
+    ///
+    /// Общий `adamas_drop_value` здесь годится, а не свой у резумпции
+    /// ([`Emitter::dropped`]): разобранное - объект данных, резумпцию не
+    /// разбирает никакой конструктор.
+    fn salvaged(
+        &mut self,
+        local: LocalId,
+        salvage: &Salvage,
+        token: Option<LocalId>,
+        depth: usize,
+    ) {
+        let pad = Self::pad(depth);
+        if let Some(token) = token {
+            let _ = writeln!(self.out, "{pad}adamas_value v{};", token.0);
+        }
+        let _ = writeln!(self.out, "{pad}if (adamas_is_unique(v{})) {{", local.0);
+        for field in &salvage.spare {
+            let _ = writeln!(self.out, "{pad}    adamas_drop_value(v{});", field.0);
+        }
+        match token {
+            Some(token) => {
+                let _ = writeln!(self.out, "{pad}    v{} = v{};", token.0, local.0);
+            }
+            None => {
+                let _ = writeln!(self.out, "{pad}    adamas_free(v{});", local.0);
+            }
+        }
+        let _ = writeln!(self.out, "{pad}}} else {{");
+        for field in &salvage.taken {
+            let _ = writeln!(self.out, "{pad}    adamas_dup(v{});", field.0);
+        }
+        let _ = writeln!(self.out, "{pad}    adamas_drop_value(v{});", local.0);
+        if let Some(token) = token {
+            let _ = writeln!(self.out, "{pad}    v{} = NULL;", token.0);
+        }
+        let _ = writeln!(self.out, "{pad}}}");
     }
 
     /// Дескриптор укладки значением (§4.11): два слова на кадре.
@@ -2606,12 +2674,8 @@ impl Emitter<'_> {
                 self.reified(binding, body, depth);
                 self.tail(value, depth);
             }
-            Expr::Bind { .. } | Expr::Dup { .. } | Expr::Reclaim { .. } => {
+            Expr::Bind { .. } | Expr::Dup { .. } | Expr::Drop { .. } | Expr::Reclaim { .. } => {
                 let body = self.bookkept(expr, depth);
-                self.tail(body, depth);
-            }
-            Expr::Drop { local, body } => {
-                self.dropped(*local, depth);
                 self.tail(body, depth);
             }
             Expr::Match {

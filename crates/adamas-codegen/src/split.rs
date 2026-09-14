@@ -351,10 +351,14 @@ fn named(expr: &Expr, out: &mut BTreeSet<LocalId>) {
         | Expr::LayoutField {
             descriptor: local, ..
         }
-        | Expr::Dup { local, .. }
-        | Expr::Drop { local, .. }
-        | Expr::Reclaim { local, .. } => {
+        | Expr::Dup { local, .. } => {
             out.insert(*local);
+        }
+        // Схлопнутый дроп называет и поля разобранного: `dup` по ним уехал
+        // внутрь него ([`Salvage`]), и слот кадра им нужен наравне с прочими.
+        Expr::Drop { local, salvage, .. } | Expr::Reclaim { local, salvage, .. } => {
+            out.insert(*local);
+            out.extend(salvage.locals());
         }
         _ => {}
     }
@@ -521,6 +525,41 @@ impl Anf<'_> {
         }
     }
 
+    /// Учёт ссылок в хвостовой позиции: узел остаётся собой, тело идёт хвостом.
+    ///
+    /// Дробление RC не читает - его вставляют позже ([`crate::perceus`]), - но
+    /// пройти сквозь эти три узла обязано: приведение зовётся и вторым проходом
+    /// у эмиттера.
+    fn counting(&mut self, expr: Expr) -> Expr {
+        match expr {
+            Expr::Dup { local, body } => Expr::Dup {
+                local,
+                body: Box::new(self.tail(*body)),
+            },
+            Expr::Drop {
+                local,
+                salvage,
+                body,
+            } => Expr::Drop {
+                local,
+                salvage,
+                body: Box::new(self.tail(*body)),
+            },
+            Expr::Reclaim {
+                local,
+                token,
+                salvage,
+                body,
+            } => Expr::Reclaim {
+                local,
+                token,
+                salvage,
+                body: Box::new(self.tail(*body)),
+            },
+            other => other,
+        }
+    }
+
     /// Выражение в хвостовой позиции: продолжения у него нет.
     fn tail(&mut self, expr: Expr) -> Expr {
         match expr {
@@ -536,19 +575,7 @@ impl Anf<'_> {
                     body: Box::new(self.tail(*body)),
                 }
             }
-            Expr::Dup { local, body } => Expr::Dup {
-                local,
-                body: Box::new(self.tail(*body)),
-            },
-            Expr::Drop { local, body } => Expr::Drop {
-                local,
-                body: Box::new(self.tail(*body)),
-            },
-            Expr::Reclaim { local, token, body } => Expr::Reclaim {
-                local,
-                token,
-                body: Box::new(self.tail(*body)),
-            },
+            Expr::Dup { .. } | Expr::Drop { .. } | Expr::Reclaim { .. } => self.counting(expr),
             Expr::Match {
                 scrutinee,
                 consumed,

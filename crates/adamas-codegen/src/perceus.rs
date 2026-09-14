@@ -36,6 +36,24 @@
 //! не раньше: раннего дропа Perceus'а (Reinking et al. 2021, §2.3) здесь нет, и
 //! горячий путь от этого держит значения дольше оптимального.
 //!
+//! # Пара `dup`/`drop` на разборе схлопывается
+//!
+//! Ветвь берёт ссылку на каждое поле, которое называет, а дроп разобранного на
+//! последней ссылке обходит поля и возвращает эти же ссылки обратно. На
+//! **уникальном** родителе пара сокращается целиком: взятые поля переходят
+//! ветви даром, невзятые дропает сам дроп, блок освобождается, счётчиков никто
+//! не трогает. На разделённом не сокращается ничего - поля живут дальше в
+//! родителе, и ссылка каждому нужна своя.
+//!
+//! Различаются два случая в рантайме - `adamas_is_unique`, то есть `rc == 0`, -
+//! и это то же условие, на котором стоит reuse ниже. Узла под развилку не
+//! заведено: списки полей лежат на самом дропе
+//! ([`Salvage`](crate::ir::Salvage)), и различать схлопнутый дроп от обычного
+//! обязана одна печать.
+//!
+//! Мера - `benches/native.rs`: пара стоила 5% времени символьного замера, и
+//! платил их дроп разобранного в `total`.
+//!
 //! # Где срабатывает reuse
 //!
 //! Правило - §5.1 и [`adamas_core::fbip`]: ветвь, потребившая разобранное,
@@ -69,7 +87,7 @@ use adamas_core::mult::Mult;
 use adamas_core::prim::PrimTy;
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Expr, Fact, Function, LocalId, Program, Stride,
+    Arm, Binding, Constructor, CtorId, Expr, Fact, Function, LocalId, Program, Salvage, Stride,
 };
 use crate::split::Suspension;
 
@@ -222,10 +240,14 @@ fn named(expr: &Expr, out: &mut BTreeSet<LocalId>) {
         | Expr::LayoutField {
             descriptor: local, ..
         }
-        | Expr::Dup { local, .. }
-        | Expr::Drop { local, .. }
-        | Expr::Reclaim { local, .. } => {
+        | Expr::Dup { local, .. } => {
             out.insert(*local);
+        }
+        // Схлопнутый дроп называет сверх разобранного его поля: `dup` по ним
+        // уехал внутрь, и обход, не знающий этого, счёл бы их несчитанными.
+        Expr::Drop { local, salvage, .. } | Expr::Reclaim { local, salvage, .. } => {
+            out.insert(*local);
+            out.extend(salvage.locals());
         }
         _ => {}
     }
@@ -238,6 +260,7 @@ fn named(expr: &Expr, out: &mut BTreeSet<LocalId>) {
 fn drops(locals: impl IntoIterator<Item = LocalId>, body: Expr) -> Expr {
     locals.into_iter().fold(body, |body, local| Expr::Drop {
         local,
+        salvage: Salvage::default(),
         body: Box::new(body),
     })
 }
@@ -729,6 +752,7 @@ impl Pass<'_> {
                 }),
                 body: Box::new(Expr::Drop {
                     local: borrowed,
+                    salvage: Salvage::default(),
                     body: Box::new(Expr::Local(given)),
                 }),
             }),
@@ -824,9 +848,12 @@ impl Pass<'_> {
         let called = mentions(&body);
         // Плоское поле не дублируется: оно лежит в слоте по значению, и своей
         // ссылки у него нет (§4.11).
-        let kept: Vec<LocalId> = fields
-            .iter()
-            .filter(|field| field.fact.present && field.fact.repr.counted())
+        let counted = || {
+            fields
+                .iter()
+                .filter(|field| field.fact.present && field.fact.repr.counted())
+        };
+        let kept: Vec<LocalId> = counted()
             .filter(|field| called.contains(&field.local))
             .map(|field| field.local)
             .collect();
@@ -840,37 +867,84 @@ impl Pass<'_> {
         under.extend(kept.iter().copied());
         let mut body = self.expr(body, &under);
 
+        // Пара «`dup` поля, потом дроп родителя» схлопывается, если родитель
+        // достаётся этой ветви и хоть одно поле она берёт ([`Salvage`]).
+        let salvage =
+            (ours && !kept.is_empty() && self.covered(constructor, &fields)).then(|| Salvage {
+                taken: kept.clone(),
+                spare: counted()
+                    .filter(|field| !called.contains(&field.local))
+                    .map(|field| field.local)
+                    .collect(),
+            });
         if ours {
             let slots = self.shape(constructor);
             let cell = (slots > 0 && self.plans(&body, slots)).then(|| self.fresh());
+            let held = salvage.clone().unwrap_or_default();
             body = match cell {
                 Some(cell) => {
                     self.attach(&mut body, slots, cell);
                     Expr::Reclaim {
                         local: subject,
                         token: cell,
+                        salvage: held,
                         body: Box::new(body),
                     }
                 }
                 None => Expr::Drop {
                     local: subject,
+                    salvage: held,
                     body: Box::new(body),
                 },
             };
         }
         // `dup` полей ставится снаружи дропа разобранного: иначе дроп унёс бы их
-        // с собой.
-        for field in kept.into_iter().rev() {
-            body = Expr::Dup {
-                local: field,
-                body: Box::new(body),
-            };
+        // с собой. Схлопнутый дроп берёт их себе, и второй раз их дупать нечем.
+        if salvage.is_none() {
+            for field in kept.into_iter().rev() {
+                body = Expr::Dup {
+                    local: field,
+                    body: Box::new(body),
+                };
+            }
         }
         Arm {
             constructor,
             fields,
             body,
         }
+    }
+
+    /// Видит ли ветвь каждый слот, который дропнул бы release.
+    ///
+    /// Схлопнутый дроп освобождает блок минуя release и потому обязан дропнуть
+    /// невзятое своими силами - то есть знать его всё. Видит он только
+    /// связывания ветви, а слотов у объекта бывает больше, и оба случая
+    /// встречаются в корпусе.
+    ///
+    /// **Параметр семейства.** Ветвь его не связывает
+    /// ([`Constructor::params`]), а слот он занимает: модуль-аргумент функтора
+    /// доживает до рантайма записью (`tests/golden/eval/module-family.adamas`,
+    /// `Counting.Put`). Такую ветвь схлопывание не берёт.
+    ///
+    /// **Поле не счётное и не примитивное.** Release решает по сорту слота
+    /// (`release.c`), и этот счёт расходится с [`Repr::counted`] на плотном
+    /// агрегате и дескрипторе укладки: там оба ответа «дропать», а счётчика
+    /// нет. Расхождение принадлежит не схлопыванию, но полагаться на него
+    /// схлопывание не вправе.
+    fn covered(&self, constructor: CtorId, fields: &[Binding]) -> bool {
+        let Some(described) = self.constructors.get(usize::from(constructor.0)) else {
+            return false;
+        };
+        let params = (described.params as usize).min(described.binders.len());
+        if described.binders[..params].iter().any(|fact| fact.present) {
+            return false;
+        }
+        fields.iter().all(|field| {
+            !field.fact.present
+                || field.fact.repr.counted()
+                || field.fact.repr.primitive().is_some()
+        })
     }
 
     /// Займёт ли придержанную ячейку **каждый** путь через выражение.

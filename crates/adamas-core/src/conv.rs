@@ -359,18 +359,27 @@ pub(crate) fn unfolded(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> 
 /// `Some` - только когда свёртка состоялась: шаг, оставляющий примитив
 /// застрявшим, зациклил бы петли разворота у вызывающих.
 fn refolded(value: &Rc<Value>, normalized: &dyn Fn(&Rc<Value>) -> Rc<Value>) -> Option<Rc<Value>> {
-    let Value::Neutral(Head::Prim(op, ty), spine) = &**value else {
+    let Value::Neutral(head @ (Head::Prim(..) | Head::Cmp(..)), spine) = &**value else {
         return None;
     };
     let [Elim::App(left), Elim::App(right)] = &spine[..] else {
         return None;
     };
     let partial = Rc::new(Value::Neutral(
-        Head::Prim(*op, *ty),
+        head.clone(),
         vec![Elim::App(normalized(left))],
     ));
     let folded = try_apply(&partial, normalized(right))?;
-    matches!(&*folded, Value::Prim(_)).then_some(folded)
+    // Прогресс у арифметики - литерал, у сравнения - конструктор `Bool`:
+    // спайн после свёртки пуст, и головой стоит уже не сравнение. Общего
+    // «изменилось» тут мало - шаг, оставивший примитив застрявшим, зациклил
+    // бы петли разворота у вызывающих.
+    let progressed = match &*folded {
+        Value::Prim(_) => true,
+        Value::Neutral(Head::Global(..), spine) => spine.is_empty(),
+        _ => false,
+    };
+    progressed.then_some(folded)
 }
 
 /// Тело определения с переигранным спайном - общее у обоих δ.
@@ -724,6 +733,8 @@ fn same_head(
         (Head::Meta(a), Head::Meta(b)) => a == b,
         // Операция - имя, и различает её пара «что делает, над чем».
         (Head::Prim(op_a, ty_a), Head::Prim(op_b, ty_b)) => op_a == op_b && ty_a == ty_b,
+        // Сравнение - тем же правилом.
+        (Head::Cmp(op_a, ty_a), Head::Cmp(op_b, ty_b)) => op_a == op_b && ty_a == ty_b,
         // Массив и операции над ним - такие же имена (§4.11).
         (Head::Array, Head::Array) => true,
         (Head::ArrayOp(op_a), Head::ArrayOp(op_b)) => op_a == op_b,

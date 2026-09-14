@@ -60,7 +60,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 
-use adamas_core::prim::{PrimOp, PrimTy};
+use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
 
 use crate::ir::{
     Arm, Binding, Constructor, CtorId, Elems, Expr, Form, FuncId, Function, HandlerId, LabelId,
@@ -1192,6 +1192,9 @@ impl Emitter<'_> {
             Expr::Erased
             | Expr::Construct { .. }
             | Expr::ConstructClosure { .. }
+            // Ответ сравнения - конструктор `Bool` (§4.3), то есть
+            // непосредственное значение: аргументы плоские, ответ нет.
+            | Expr::Compare { .. }
             | Expr::Closure { .. }
             // Ответ хендлера даёт ветка `return`, ответ операции - ветка
             // операции, и обе отвечают указателем: ветки идут через кадр, а
@@ -1238,6 +1241,14 @@ impl Emitter<'_> {
                 left,
                 right,
             } => self.arithmetic(*op, *ty, left, right, depth),
+            Expr::Compare {
+                op,
+                ty,
+                left,
+                right,
+                yes,
+                no,
+            } => self.comparison(*op, *ty, left, right, (*yes, *no), depth),
             Expr::Layout { size, align } => self.descriptor(*size, *align, depth),
             Expr::LayoutField { descriptor, align } => {
                 self.descriptor_field(*descriptor, *align, depth)
@@ -1608,6 +1619,40 @@ impl Emitter<'_> {
             c_type(Repr::Flat(ty)),
             operation(op),
             ty.name()
+        );
+        name
+    }
+
+    /// Сравнение: плоские аргументы, ответ - конструктор `Bool` (§4.3).
+    ///
+    /// Порядок считает `flat.c` - ключом по ширине типа, тем же, каким его
+    /// считает свёртка ядра. Знаковость и `totalOrder` плавающих поэтому не
+    /// записаны здесь вторично: разъехаться двум записям было бы нечем
+    /// помешать, а сходятся они прогоном (`tests/agreement.rs`).
+    ///
+    /// Ячейки кучи не возникает: `True` и `False` полей не имеют, и рантайм
+    /// кладёт их непосредственным значением.
+    fn comparison(
+        &mut self,
+        op: PrimCmp,
+        ty: PrimTy,
+        left: &Expr,
+        right: &Expr,
+        verdict: (CtorId, CtorId),
+        depth: usize,
+    ) -> String {
+        let pad = Self::pad(depth);
+        let left = self.value(left, depth);
+        let right = self.value(right, depth);
+        let (yes, no) = verdict;
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_value {name} = adamas_{}_{}({left}, {right}) ? adamas_con0({}u) : adamas_con0({}u);",
+            comparison(op),
+            ty.name(),
+            yes.0,
+            no.0
         );
         name
     }
@@ -2989,6 +3034,18 @@ fn operation(op: PrimOp) -> &'static str {
     }
 }
 
+/// Имя сравнения в `flat.c`: то же, что пишет `adamas_lt_Int64`.
+fn comparison(op: PrimCmp) -> &'static str {
+    match op {
+        PrimCmp::Eq => "eq",
+        PrimCmp::Ne => "ne",
+        PrimCmp::Lt => "lt",
+        PrimCmp::Le => "le",
+        PrimCmp::Gt => "gt",
+        PrimCmp::Ge => "ge",
+    }
+}
+
 /// Строка, годная внутрь C-литерала и комментария.
 ///
 /// Имена в Adamas бывают операторами и путями (`+`, `Boxes.Wrap`), и печатает
@@ -3002,9 +3059,9 @@ fn escaped(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use adamas_core::prim::{PrimOp, PrimTy};
+    use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
 
-    use super::{FLAT, kind, operation};
+    use super::{FLAT, comparison, kind, operation};
 
     /// Сорта слотов и имена операций у эмиттера и у `flat.c` одни.
     ///
@@ -3041,6 +3098,17 @@ mod tests {
             assert!(
                 FLAT.contains(&defined),
                 "`flat.c` не определяет `{defined}`: имя операции разъехалось с эмиттером"
+            );
+        }
+        // Сравнений шесть, и определены они **дважды** - целым макросом и
+        // плавающим: пропуск в одном из двух собрал бы половину программ.
+        for op in PrimCmp::ALL {
+            let defined = format!("adamas_{}_##name", comparison(op));
+            assert_eq!(
+                FLAT.matches(&defined).count(),
+                2,
+                "`flat.c` определяет `{defined}` не в обоих макросах: \
+                 сравнение соберётся не над всяким примитивом"
             );
         }
         for helper in ["adamas_bits_##name", "adamas_word_##name"] {

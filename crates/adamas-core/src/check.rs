@@ -184,7 +184,23 @@ pub fn prim_type(signature: &Signature, prim: Prim) -> Rc<Value> {
 /// принял бы указательную нагрузку, и §3.6 потерял бы второе из двух своих
 /// условий.
 fn flat_class(signature: &Signature, argument: Term) -> Term {
-    let arity = signature.lookup(crate::prim::FLAT);
+    Term::App(
+        Rc::new(declared(signature, crate::prim::FLAT)),
+        Rc::new(argument),
+    )
+}
+
+/// Имя, объявленное программой, - термом со стёртыми аргументами сортов.
+///
+/// Ядро имён не знает, но два примитива их называют: ограничение `Flat` у
+/// нагрузки региона (§3.6) и ответ сравнения - `Bool` (§4.3). Аргументы сортов
+/// стёрты нулями: ни укладка, ни истинность от уровня, ряда и кратности не
+/// зависят.
+///
+/// Имя не объявлено - терм строится всё равно, и отказывает **проверка**.
+/// Молчать было бы хуже: сравнение получило бы ответ неизвестно чего.
+fn declared(signature: &Signature, name: &str) -> Term {
+    let arity = signature.lookup(name);
     let levels: Rc<[Level]> = (0..arity.map_or(0, |it| it.level_arity))
         .map(|_| Level::Zero)
         .collect();
@@ -195,12 +211,7 @@ fn flat_class(signature: &Signature, argument: Term) -> Term {
         .flatten()
         .map(|allowed| allowed.first().copied().unwrap_or(Mult::Many))
         .collect::<Vec<_>>();
-    let class = Term::Const(
-        Name::from(crate::prim::FLAT),
-        levels,
-        Args::new(rows, mults),
-    );
-    Term::App(Rc::new(class), Rc::new(argument))
+    Term::Const(Name::from(name), levels, Args::new(rows, mults))
 }
 
 /// Тип примитива термом: то же, что [`prim_type`], до вычисления.
@@ -217,6 +228,17 @@ fn prim_scheme(signature: &Signature, prim: Prim) -> Term {
                 Mult::Many,
                 over.clone(),
                 arrow(Mult::Many, over.clone(), over),
+            )
+        }
+        // Сравнение отвечает `Bool` - именем программы, взятым тем же
+        // соглашением, что `Flat` ниже. Не объявлено - тип строится всё равно,
+        // и отказывает проверка: «имя `Bool` не объявлено».
+        Prim::Cmp(_, ty) => {
+            let over = Term::Prim(Prim::Ty(ty));
+            arrow(
+                Mult::Many,
+                over.clone(),
+                arrow(Mult::Many, over, declared(signature, crate::prim::BOOL)),
             )
         }
         // `Array : (0 n : UInt64) -> (0 a : Type 0) -> Type 0`. Оба связывания

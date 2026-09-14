@@ -15,7 +15,7 @@ use adamas_core::eval::{apply, eval, quote};
 use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::mult::{Mult, MultProduct, MultSum, MultVar};
-use adamas_core::pattern::{Clause, Pattern as CorePattern, PatternError, compile_case};
+use adamas_core::pattern::{Clause, Literal, Pattern as CorePattern, PatternError, compile_case};
 use adamas_core::prim;
 use adamas_core::prim::{Prim, PrimOp, PrimTy};
 use adamas_core::row::{Label, Row, Tail};
@@ -3624,6 +3624,11 @@ impl<'a> Elaborator<'a> {
         if let Some((op, prim)) = PrimOp::named(&name.text) {
             return Ok(Term::Prim(Prim::Op(op, prim)));
         }
+        // Сравнения (§4.3) - тем же правилом имени, что арифметика. Ответ у них
+        // `Bool`, объявленный программой; не объявлен - откажет проверка типов.
+        if let Some((op, prim)) = prim::PrimCmp::named(&name.text) {
+            return Ok(Term::Prim(Prim::Cmp(op, prim)));
+        }
         // Массив (§4.11) - тем же правилом: на имени стоит представление, и
         // переопределяемое имя дало бы два `Array` с разной укладкой. Длину и
         // тип элемента операции берут имплиситами: восстанавливает их
@@ -3891,9 +3896,30 @@ impl<'a> Elaborator<'a> {
         // Тип не вывелся - применение собирается как раньше, без вставки:
         // голова бывает и лямбдой, выводить которую нечем. Сказать об этом
         // полагается `check`, а не этому проходу.
-        let mut ty = infer(&self.ctx.speculating(), self.metas, Mult::Zero, &term)
+        //
+        // Источников у типа три, и второй с третьим появились здесь: без них
+        // **голый литерал** аргументом терял ожидание и разворачивался унарно,
+        // жалуясь на ненайденное `Zero`. Две формы, обе замерены на 698b019 -
+        // то есть до литеральных паттернов, дефект пришёл с примитивами:
+        //
+        // - `g n = g (subUInt64 n 1)` при `g 5` - `σ = 0` отвергает
+        //   **нетотальное** имя (§4.7: стёртый фрагмент его не принимает), а
+        //   всякий цикл нетотален по построению;
+        // - `bounce 0 = bounce 5` - имени нет **в сигнатуре**: пока группа
+        //   объявляется, её там нет вовсе (§10 вопрос 50).
+        //
+        // Первое лечит второе `σ`, второе - тип от самой группы, и оба даёт
+        // `synthesized`: спросить тип и поставить в тип - разные вещи, и
+        // спайн он снимает по связыванию за аргумент, поэтому уже вставленные
+        // головой имплиситы считаются, а не задваиваются.
+        //
+        // Порядок «`0`, потом остальное» сохранён: при `ω` считается расход, и
+        // стёртая позиция отвергается кратностью. Ответ здесь best-effort -
+        // сказать, какое `σ` верно, дело настоящей проверки.
+        let zeroed = infer(&self.ctx.speculating(), self.metas, Mult::Zero, &term)
             .ok()
             .map(|(ty, _)| ty);
+        let mut ty = zeroed.or_else(|| self.synthesized(&term));
         for argument in arguments.iter().rev().copied() {
             if let Some(current) = ty.take() {
                 let (inserted, rest) = self.inserted(term, current);
@@ -5894,7 +5920,11 @@ impl<'a> Elaborator<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 self.constructor(head, fields)
             }
-            PatternKind::Lit(_) => Err(ElabError::Missing {
+            // Тип литерала берёт **колонка** разбора, а не элаборация: у
+            // вложенного паттерна (`f (Wrap 0)`) написанного типа рядом нет, а
+            // колонка знает его на любой глубине. Сюда доезжает написанное, и
+            // отсюда - `LiteralPattern`, если оно в тип не уложилось.
+            PatternKind::Lit(lit) => written_literal(lit).ok_or(ElabError::Missing {
                 what: Missing::Literal,
                 span: pattern.span,
             }),
@@ -6222,6 +6252,22 @@ impl<'a> Elaborator<'a> {
                 found,
                 level,
             ),
+            // Литерал связываний не вводит - он сравнивается, а не
+            // разбирается, - но **значение** разобранного даёт: в этой клаузе
+            // аргумент и есть написанное число. Телескопу оно и нужно, иначе
+            // тип тела остался бы неизвестен и `countdown 0 = 0` разворачивало
+            // бы ответ унарно.
+            CorePattern::Lit(literal) => {
+                let prim = self.primitive_type(ty.as_ref()?)?;
+                // Не уложился в тип - шагаем всё равно, стёртым. Отказ на нём
+                // выдаст сборка клауз, а телескоп, оборвавшийся здесь, увёл бы
+                // диагностику в тело: `narrow 200 = 1` жаловалось на литерал
+                // **ответа**, у которого типа не осталось.
+                Some(literal.bits(prim).map_or_else(
+                    || Rc::new(Value::Erased),
+                    |bits| Rc::new(Value::Prim(Prim::literal(prim, bits))),
+                ))
+            }
         }
     }
 
@@ -6502,6 +6548,22 @@ fn split_row(codomain: &Expr) -> (Option<&Expr>, &Expr) {
     }
 }
 
+/// Написанный литерал паттерном ядра - без типа, который решает колонка.
+///
+/// `None` - строка: строк в языке нет вовсе (§4.5), и отказ у них тот же, что
+/// в выражении.
+fn written_literal(lit: &ast::Lit) -> Option<CorePattern> {
+    let literal = match lit.kind {
+        ast::LitKind::Nat => Literal::Nat(digits(&lit.text)?),
+        ast::LitKind::Int => Literal::Neg(digits(lit.text.strip_prefix('-').unwrap_or(&lit.text))?),
+        ast::LitKind::Float => {
+            Literal::Fraction(lit.text.replace('_', "").parse::<f64>().ok()?.to_bits())
+        }
+        ast::LitKind::Str => return None,
+    };
+    Some(CorePattern::Lit(literal))
+}
+
 /// Имена переменных паттерна слева направо в глубину.
 fn variables_of(pattern: &CorePattern, names: &mut Vec<Symbol>) {
     match pattern {
@@ -6511,6 +6573,8 @@ fn variables_of(pattern: &CorePattern, names: &mut Vec<Symbol>) {
                 variables_of(field, names);
             }
         }
+        // Литерал ничего не связывает: он сравнивается, а не разбирается.
+        CorePattern::Lit(_) => {}
     }
 }
 

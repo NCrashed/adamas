@@ -24,11 +24,19 @@
 //!
 //! # Что взято
 //!
-//! Десять числовых типов из §4.11 и три операции. `Bool` и `Char` из того же
-//! перечня **не** взяты: `Bool` в корпусе объявляется программой и уже плоский
-//! тегом в байт, а литерала `Char` в поверхностном языке нет вовсе. Деления,
-//! сравнений и преобразований между примитивами тоже нет - §4.3 их формы не
-//! называет, а свидетель пишется без них.
+//! Десять числовых типов из §4.11, три арифметических операции и шесть
+//! сравнений. `Bool` и `Char` **узлом ядра не стали**: `Bool` в корпусе
+//! объявляется программой и уже плоский тегом в байт, а литерала `Char` в
+//! поверхностном языке нет вовсе. Деления, остатка, сдвигов и преобразований
+//! между примитивами нет - §4.3 их формы не называет.
+//!
+//! # Сравнение отвечает `Bool`, и оттого знает имя
+//!
+//! Арифметика замкнута в своём типе, сравнение - нет, а второго кандидата на
+//! ответ у него не бывает: беззнаковый ноль-или-один разбором не берётся, и
+//! `if` над ним не пишется. Поэтому [`BOOL`] с конструкторами - имена, взятые
+//! у программы тем же соглашением, каким их берут `if` и [`FLAT`]. Занятыми
+//! они не становятся: на имени `Bool` стоит не представление, а соглашение.
 //!
 //! # Переполнение
 //!
@@ -195,6 +203,34 @@ impl PrimTy {
         }
     }
 
+    /// Ключ, чей беззнаковый порядок и есть порядок значений этого типа (§4.3).
+    ///
+    /// Беззнаковому ключом служат сами биты. Знаковому - биты с перевёрнутым
+    /// старшим разрядом: дополнительный код становится монотонным. Плавающему -
+    /// `totalOrder` IEEE-754, который §4.3 и назначает `Eq`/`Ord`: отрицательное
+    /// инвертируется целиком, отчего `-0.0` меньше `0.0`, а NaN упорядочены
+    /// знаком и полезной нагрузкой.
+    ///
+    /// Один ключ на все шесть сравнений и на все десять типов: разъехаться
+    /// `lt` с `ge` тогда негде, они читают одно и то же число.
+    fn key(self, bits: u64) -> u64 {
+        if !self.floating() && !self.signed() {
+            return bits;
+        }
+        let top = 1u64 << (self.width() - 1);
+        // Одна маска на оба случая: знаковому целому и положительному
+        // плавающему переворачивается старший разряд, отрицательному
+        // плавающему - все. Записано исключающим ИЛИ, а не «либо приписать
+        // бит, либо инвертировать»: там половина мутантов оказывалась
+        // равносильной, потому что при снятом бите `|` и `^` не различаются.
+        let mask = if self.floating() && bits & top != 0 {
+            self.masked(u64::MAX)
+        } else {
+            top
+        };
+        bits ^ mask
+    }
+
     /// Прочитанное значение знаковым целым.
     ///
     /// Биты приходят обрезанными - см. [`Prim::literal`]; второй обрезки здесь
@@ -307,6 +343,85 @@ impl PrimOp {
 }
 
 impl fmt::Display for PrimOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.prefix())
+    }
+}
+
+/// Сравнение двух примитивов (§4.3).
+///
+/// Отдельное перечисление, а не шестёрка в [`PrimOp`]: у арифметики ответ того
+/// же типа, что аргументы, а здесь - `Bool`, и различие это проходит насквозь -
+/// через тип операции, через свёртку и через понижение, где арифметика живёт в
+/// регистре, а конструктор есть непосредственное значение.
+///
+/// # Порядок у плавающих - `totalOrder`, а не IEEE
+///
+/// §4.3 решает это прямо: `Eq`/`Ord` для `Float` побитовы по IEEE-754
+/// `totalOrder`, отчего `nan == nan` истинно, `0.0 /= -0.0`, а трихотомия
+/// восстановлена. IEEE-семантика сравнения живёт отдельно - `ieeeEq`/`ieeeLt`
+/// класса `Approximate`, - и примитивом здесь не является: класс без обещаний
+/// пишется поверх, а якорь представления нужен тому порядку, по которому
+/// `Float` годится ключом `Map`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PrimCmp {
+    /// Равно.
+    Eq,
+    /// Не равно.
+    Ne,
+    /// Строго меньше.
+    Lt,
+    /// Меньше либо равно.
+    Le,
+    /// Строго больше.
+    Gt,
+    /// Больше либо равно.
+    Ge,
+}
+
+impl PrimCmp {
+    /// Все сравнения.
+    pub const ALL: [Self; 6] = [Self::Eq, Self::Ne, Self::Lt, Self::Le, Self::Gt, Self::Ge];
+
+    /// Приставка имени: `lt` у `ltInt64`.
+    #[must_use]
+    pub const fn prefix(self) -> &'static str {
+        match self {
+            Self::Eq => "eq",
+            Self::Ne => "ne",
+            Self::Lt => "lt",
+            Self::Le => "le",
+            Self::Gt => "gt",
+            Self::Ge => "ge",
+        }
+    }
+
+    /// Сравнение и тип по написанному имени: `ltInt64`.
+    #[must_use]
+    pub fn named(text: &str) -> Option<(Self, PrimTy)> {
+        Self::ALL.into_iter().find_map(|op| {
+            text.strip_prefix(op.prefix())
+                .and_then(PrimTy::named)
+                .map(|ty| (op, ty))
+        })
+    }
+
+    /// Считает сравнение над двумя литералами одного типа.
+    #[must_use]
+    pub fn holds(self, ty: PrimTy, left: u64, right: u64) -> bool {
+        let order = ty.key(left).cmp(&ty.key(right));
+        match self {
+            Self::Eq => order.is_eq(),
+            Self::Ne => order.is_ne(),
+            Self::Lt => order.is_lt(),
+            Self::Le => order.is_le(),
+            Self::Gt => order.is_gt(),
+            Self::Ge => order.is_ge(),
+        }
+    }
+}
+
+impl fmt::Display for PrimCmp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.prefix())
     }
@@ -492,6 +607,27 @@ impl fmt::Display for RegionOp {
 /// константа стоит здесь, потому что расхождение в написании было бы тихим.
 pub const FLAT: &str = "Flat";
 
+/// Имя типа истинности и его конструкторов (§4.3).
+///
+/// Соглашение то же, каким `if` берёт `Bool`, и то же, каким `Flat` берётся по
+/// имени: тип объявляется программой, а компилятор знает имя. Занятым оно при
+/// этом **не** становится - в отличие от `Array` и `Block`, на которых стоит
+/// представление. `Bool` объявляют программы корпуса, и заняв имя, ядро
+/// отвергло бы их все.
+///
+/// Знают его трое, и все трое - следствие одного решения «сравнение отвечает
+/// `Bool`»: тип сравнения ([`crate::check::prim_type`]), его свёртка
+/// ([`crate::eval`]) и разбор литерального паттерна
+/// ([`crate::pattern`]). Расхождение в написании было бы тихим, поэтому
+/// константа одна.
+pub const BOOL: &str = "Bool";
+
+/// Конструктор истины.
+pub const TRUE: &str = "True";
+
+/// Конструктор лжи.
+pub const FALSE: &str = "False";
+
 /// Имя типа массива (§4.11).
 pub const ARRAY: &str = "Array";
 
@@ -524,6 +660,8 @@ pub enum Prim {
     Lit(PrimTy, u64),
     /// Операция: `addInt64`.
     Op(PrimOp, PrimTy),
+    /// Сравнение: `ltInt64`. Ответ - `Bool`, а не свой тип.
+    Cmp(PrimCmp, PrimTy),
     /// Тип массива `Array n a` (§4.11). Применяется к длине и элементу.
     Array,
     /// Операция над массивом: `arrayIndex`.
@@ -554,6 +692,7 @@ impl Prim {
         match self {
             Self::Ty(ty) => Some(ty.name().to_owned()),
             Self::Op(op, ty) => Some(format!("{op}{ty}")),
+            Self::Cmp(op, ty) => Some(format!("{op}{ty}")),
             Self::Array => Some(ARRAY.to_owned()),
             Self::Over(op) => Some(op.name().to_owned()),
             Self::Block => Some(BLOCK.to_owned()),
@@ -570,6 +709,7 @@ impl Prim {
             Self::Lit(..) => self.to_string().starts_with('-'),
             Self::Ty(_)
             | Self::Op(..)
+            | Self::Cmp(..)
             | Self::Array
             | Self::Over(_)
             | Self::Block
@@ -583,6 +723,7 @@ impl Prim {
     pub fn taken(text: &str) -> bool {
         PrimTy::named(text).is_some()
             || PrimOp::named(text).is_some()
+            || PrimCmp::named(text).is_some()
             || ArrayOp::named(text).is_some()
             || RegionOp::named(text).is_some()
             || text == ARRAY
@@ -596,6 +737,7 @@ impl fmt::Display for Prim {
         match self {
             Self::Ty(ty) => write!(f, "{ty}"),
             Self::Op(op, ty) => write!(f, "{op}{ty}"),
+            Self::Cmp(op, ty) => write!(f, "{op}{ty}"),
             Self::Array => f.write_str(ARRAY),
             Self::Over(op) => write!(f, "{op}"),
             Self::Block => f.write_str(BLOCK),
@@ -615,7 +757,7 @@ impl fmt::Display for Prim {
 
 #[cfg(test)]
 mod tests {
-    use super::{Prim, PrimOp, PrimTy};
+    use super::{Prim, PrimCmp, PrimOp, PrimTy};
 
     /// Размеры §4.11: примитив занимает свою ширину и по ней же выравнивается.
     #[test]
@@ -669,6 +811,7 @@ mod tests {
         assert_eq!(Prim::Lit(PrimTy::Float64, bits).to_string(), "1.0");
         assert_eq!(Prim::Ty(PrimTy::Int64).to_string(), "Int64");
         assert_eq!(Prim::Op(PrimOp::Mul, PrimTy::Int64).to_string(), "mulInt64");
+        assert_eq!(Prim::Cmp(PrimCmp::Lt, PrimTy::Int64).to_string(), "ltInt64");
     }
 
     /// Имя операции читается обратно вместе с типом.
@@ -680,5 +823,56 @@ mod tests {
         );
         assert_eq!(PrimOp::named("addNat"), None);
         assert_eq!(PrimOp::named("Int64"), None);
+        assert_eq!(
+            PrimCmp::named("ltUInt8"),
+            Some((PrimCmp::Lt, PrimTy::UInt8))
+        );
+        assert_eq!(PrimCmp::named("ltNat"), None);
+        assert_eq!(PrimOp::named("ltInt64"), None);
+    }
+
+    /// Знак читается знаковым типом и не читается беззнаковым.
+    ///
+    /// Одни и те же биты: `0xff` есть `-1` у `Int8` и `255` у `UInt8`, и
+    /// сравнение с нулём обязано разойтись. Мутант «сравнивать всегда как
+    /// беззнаковое» валится ровно здесь.
+    #[test]
+    fn a_comparison_reads_the_sign_of_its_type() {
+        let minus_one = PrimTy::Int8.from_negative(1).unwrap_or_default();
+        assert!(PrimCmp::Lt.holds(PrimTy::Int8, minus_one, 0));
+        assert!(PrimCmp::Gt.holds(PrimTy::UInt8, minus_one, 0));
+    }
+
+    /// Порядок плавающих - `totalOrder` §4.3, а не IEEE.
+    ///
+    /// Две точки расхождения названы разделом поимённо, и обе здесь: `nan`
+    /// равен себе, `-0.0` строго меньше `0.0`.
+    #[test]
+    fn floating_order_is_total_not_ieee() {
+        let nan = PrimTy::Float64.from_fraction(f64::NAN).unwrap_or_default();
+        let zero = PrimTy::Float64.from_fraction(0.0).unwrap_or_default();
+        let minus_zero = PrimTy::Float64.from_fraction(-0.0).unwrap_or_default();
+        let one = PrimTy::Float64.from_fraction(1.0).unwrap_or_default();
+        assert!(PrimCmp::Eq.holds(PrimTy::Float64, nan, nan));
+        assert!(PrimCmp::Lt.holds(PrimTy::Float64, minus_zero, zero));
+        assert!(PrimCmp::Lt.holds(PrimTy::Float64, zero, one));
+        assert!(PrimCmp::Lt.holds(
+            PrimTy::Float64,
+            PrimTy::Float64.from_fraction(-1.0).unwrap_or_default(),
+            minus_zero
+        ));
+    }
+
+    /// Одинарная точность сравнивается в своей ширине.
+    ///
+    /// Ключ строится по ширине **типа**: возьми он шестьдесят четыре бита у
+    /// `Float32`, и знаковый разряд оказался бы не на своём месте - `-1.0`
+    /// перестало бы быть меньше нуля.
+    #[test]
+    fn single_precision_compares_in_its_own_width() {
+        let minus_one = PrimTy::Float32.from_fraction(-1.0).unwrap_or_default();
+        let zero = PrimTy::Float32.from_fraction(0.0).unwrap_or_default();
+        assert!(PrimCmp::Lt.holds(PrimTy::Float32, minus_one, zero));
+        assert!(PrimCmp::Ge.holds(PrimTy::Float32, zero, minus_one));
     }
 }

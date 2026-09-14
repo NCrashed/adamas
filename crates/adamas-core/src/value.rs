@@ -201,6 +201,12 @@ pub enum Head {
     /// застревает оно ровно так же, как применение переменной. Сводится
     /// [`crate::eval::try_apply`], когда спайн набрал два литерала.
     Prim(PrimOp, PrimTy),
+    /// Сравнение примитивов (§4.3).
+    ///
+    /// Голова по тому же доводу, что и [`Head::Prim`]. Сводится не в литерал, а
+    /// в конструктор `Bool`, объявленный программой: ответа своего типа у
+    /// сравнения нет.
+    Cmp(crate::prim::PrimCmp, PrimTy),
     /// Тип массива `Array n a` (§4.11): голова, применяемая к длине и элементу.
     Array,
     /// Операция над массивом (§4.11).
@@ -447,6 +453,9 @@ impl fmt::Display for Value {
                 write!(f, "?{name}·{}", spine.len())
             }
             Self::Neutral(Head::Prim(op, ty), spine) => {
+                write!(f, "{op}{ty}·{}", spine.len())
+            }
+            Self::Neutral(Head::Cmp(op, ty), spine) => {
                 write!(f, "{op}{ty}·{}", spine.len())
             }
             Self::Neutral(Head::Array, spine) => {

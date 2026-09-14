@@ -76,6 +76,9 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
         Term::Prim(crate::prim::Prim::Op(op, ty)) => {
             Rc::new(Value::Neutral(Head::Prim(*op, *ty), Vec::new()))
         }
+        Term::Prim(crate::prim::Prim::Cmp(op, ty)) => {
+            Rc::new(Value::Neutral(Head::Cmp(*op, *ty), Vec::new()))
+        }
         // Массив и операции над ним - головы по той же причине: и тип
         // применяется к длине с элементом, и операция копит аргументы спайном
         // (§4.11).
@@ -428,6 +431,11 @@ pub fn try_apply(callee: &Rc<Value>, argument: Rc<Value>) -> Option<Rc<Value>> {
                     return Some(folded);
                 }
             }
+            if let Head::Cmp(op, ty) = head {
+                if let Some(verdict) = compared(*op, *ty, &spine) {
+                    return Some(verdict);
+                }
+            }
             if let Head::ArrayOp(crate::prim::ArrayOp::Index) = head {
                 if let Some(read) = indexed(&spine) {
                     return Some(read);
@@ -464,6 +472,40 @@ fn folded(op: crate::prim::PrimOp, ty: crate::prim::PrimTy, spine: &[Elim]) -> O
         ty,
         op.fold(ty, *left, *right),
     ))))
+}
+
+/// δ-шаг сравнения: два литерала своего типа сводятся в конструктор `Bool`.
+///
+/// Имя конструктора - соглашение (§4.3, [`crate::prim::BOOL`]), и сигнатура
+/// здесь не нужна: `True` и `False` аргументов не несут, поэтому спайн пуст, а
+/// списки уровней, рядов и кратностей - тоже. Объяви программа `Bool` иначе, и
+/// отказал бы её собственный разбор, а не эта свёртка.
+fn compared(
+    op: crate::prim::PrimCmp,
+    ty: crate::prim::PrimTy,
+    spine: &[Elim],
+) -> Option<Rc<Value>> {
+    let [Elim::App(left), Elim::App(right)] = spine else {
+        return None;
+    };
+    let (
+        Value::Prim(crate::prim::Prim::Lit(_, left)),
+        Value::Prim(crate::prim::Prim::Lit(_, right)),
+    ) = (&**left, &**right)
+    else {
+        return None;
+    };
+    let name = if op.holds(ty, *left, *right) {
+        crate::prim::TRUE
+    } else {
+        crate::prim::FALSE
+    };
+    Some(Value::constant(
+        crate::term::Name::from(name),
+        &[],
+        Rc::from([]),
+        crate::term::Mults::none(),
+    ))
 }
 
 /// Чтение ячейки массива (§4.11): последняя запись по этому номеру и выигрывает.
@@ -807,6 +849,7 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
                 ),
                 Head::Meta(meta) => Term::Meta(*meta),
                 Head::Prim(op, ty) => Term::Prim(crate::prim::Prim::Op(*op, *ty)),
+                Head::Cmp(op, ty) => Term::Prim(crate::prim::Prim::Cmp(*op, *ty)),
                 Head::Array => Term::Prim(crate::prim::Prim::Array),
                 Head::ArrayOp(op) => Term::Prim(crate::prim::Prim::Over(*op)),
                 Head::Region(op) => Term::Prim(crate::prim::Prim::In(*op)),

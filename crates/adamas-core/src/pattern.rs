@@ -72,6 +72,7 @@ use crate::eval::quote;
 use crate::level::Level;
 use crate::meta::Metas;
 use crate::mult::Mult;
+use crate::prim::{Prim, PrimCmp, PrimTy};
 // Строка задачи разбора тоже зовётся `Row`, поэтому row эффектов приходит
 // сюда под своим полным смыслом в имени.
 use crate::row::Row as EffectRow;
@@ -79,6 +80,46 @@ use crate::sig::{DefinitionKind, Signature};
 use crate::term::{Args, Binder, Branch, Case, Field as RecordField, Fields, Index, Name, Term};
 use crate::unify::{self, Match, Shape};
 use crate::value::{Elim, Head, Lvl, Value};
+
+/// Литерал в паттерне - до того, как стал известен его тип.
+///
+/// Тип приходит от **колонки**, а не от элаборации: у вложенного паттерна
+/// (`f (Wrap 0)`) написанного типа рядом нет вовсе, а колонка знает его на
+/// любой глубине. Поэтому сюда доезжает написанное, а биты считаются на
+/// разборе - [`PrimTy::from_unsigned`] и родня, те же три функции, которыми
+/// литерал типизируется в выражении.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Literal {
+    /// Натуральное: модуль написанного.
+    Nat(u128),
+    /// Отрицательное целое: модуль написанного.
+    Neg(u128),
+    /// Дробное, записанное битами `f64`. Битами, а не числом: равенство
+    /// паттернов побитово, как и равенство самих литералов (§4.3).
+    Fraction(u64),
+}
+
+impl Literal {
+    /// Биты этого литерала под таким типом - если он туда укладывается.
+    #[must_use]
+    pub fn bits(self, ty: PrimTy) -> Option<u64> {
+        match self {
+            Self::Nat(value) => ty.from_unsigned(value),
+            Self::Neg(value) => ty.from_negative(value),
+            Self::Fraction(bits) => ty.from_fraction(f64::from_bits(bits)),
+        }
+    }
+}
+
+impl fmt::Display for Literal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Nat(value) => write!(f, "{value}"),
+            Self::Neg(value) => write!(f, "-{value}"),
+            Self::Fraction(bits) => write!(f, "{:?}", f64::from_bits(*bits)),
+        }
+    }
+}
 
 /// Паттерн клаузы.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,12 +129,15 @@ pub enum Pattern {
     /// Конструктор и подпаттерны его полей - без параметров, как и в ветви
     /// [`Case`]: параметры определены типом, а не выбором конструктора.
     Constructor(Name, Vec<Pattern>),
+    /// Литерал примитива: `countdown 0 = 0` (§4.3).
+    Lit(Literal),
 }
 
 impl fmt::Display for Pattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Var(name) => write!(f, "{name}"),
+            Self::Lit(literal) => write!(f, "{literal}"),
             Self::Constructor(name, fields) if fields.is_empty() => write!(f, "{name}"),
             Self::Constructor(name, fields) => {
                 write!(f, "{name}")?;
@@ -226,6 +270,33 @@ pub enum PatternError {
     UnreachableClause {
         /// Номер клаузы.
         clause: usize,
+    },
+
+    /// Литерал в паттерне не укладывается в тип разбираемого.
+    ///
+    /// Три случая одним сообщением: тип не примитивен вовсе, литерал не той
+    /// формы (дробный под целым), литерал вне диапазона. Различает их `why` -
+    /// §4.3 требует сказать, что именно не сошлось.
+    #[error("литерал `{written}` не разбирает значение типа `{ty}`: {why}")]
+    LiteralPattern {
+        /// Как написан.
+        written: String,
+        /// Тип разбираемого.
+        ty: String,
+        /// Что не сошлось.
+        why: &'static str,
+    },
+
+    /// Литеральный паттерн написан, а `Bool` объявлен не так, как его знает
+    /// сравнение (§4.3).
+    ///
+    /// Отдельно от [`PatternError::LiteralPattern`]: там не сошлись литерал с
+    /// типом разбираемого, здесь - сам ответ сравнения, и указывать автору надо
+    /// на объявление `Bool`, а не на написанное число.
+    #[error("литеральный паттерн отвечает `Bool` (§4.3), а {why}")]
+    Verdict {
+        /// Что с ним не так.
+        why: &'static str,
     },
 }
 
@@ -649,6 +720,8 @@ enum Pat {
     Var(usize),
     /// Конструктор с подпаттернами.
     Ctor(Name, Vec<Pat>),
+    /// Литерал примитива.
+    Lit(Literal),
 }
 
 /// Нумерует переменные слева направо в глубину, попутно запоминая их имена.
@@ -671,6 +744,7 @@ fn number(pattern: &Pattern, next: &mut usize, names: &mut Vec<Name>) -> Pat {
                 .map(|field| number(field, next, names))
                 .collect(),
         ),
+        Pattern::Lit(literal) => Pat::Lit(*literal),
     }
 }
 
@@ -714,6 +788,110 @@ struct Row {
     body: Rc<Term>,
 }
 
+impl Row {
+    /// Та же строка с заменённым паттерном в колонке `at`.
+    ///
+    /// `None` - паттерн остаётся собой: переменная подходит под оба исхода
+    /// сравнения и в обоих связывает то же значение. Колонка при этом
+    /// **не убирается**: значение её не разложилось на поля, разбирать по ней
+    /// больше нечего, а переменной клаузы она по-прежнему нужна.
+    fn rebound(&self, at: usize, pattern: Option<Pat>) -> Self {
+        let mut patterns = self.patterns.clone();
+        if let Some(pattern) = pattern {
+            patterns[at] = pattern;
+        }
+        Self {
+            clause: self.clause,
+            patterns,
+            names: self.names.clone(),
+            assigned: self.assigned.clone(),
+            body: Rc::clone(&self.body),
+        }
+    }
+}
+
+/// Строки, разложенные по двум исходам сравнения.
+struct Sorted {
+    /// Все литералы колонки - по ним ищется пример непокрытого случая.
+    matched: Vec<Literal>,
+    /// Строки ветви `True`.
+    equal: Vec<Row>,
+    /// Строки ветви `False`.
+    apart: Vec<Row>,
+}
+
+/// Раскладывает строки по исходам сравнения колонки `at` с литералом `cut`.
+///
+/// Переменная подходит **обоим** исходам и в обоих связывает то же значение:
+/// колонка не разложилась на поля, и разбирать по ней больше нечего. Совпавший
+/// литерал становится `Any` - он сработал, - а несовпавший уезжает в `False`
+/// целиком и делится там снова.
+fn sorted(rows: &[Row], at: usize, ty: PrimTy, cut: u64) -> Sorted {
+    let mut found = Sorted {
+        matched: Vec::new(),
+        equal: Vec::new(),
+        apart: Vec::new(),
+    };
+    for row in rows {
+        let Pat::Lit(literal) = &row.patterns[at] else {
+            found.equal.push(row.rebound(at, None));
+            found.apart.push(row.rebound(at, None));
+            continue;
+        };
+        found.matched.push(*literal);
+        if literal.bits(ty) == Some(cut) {
+            found.equal.push(row.rebound(at, Some(Pat::Any)));
+        } else {
+            found.apart.push(row.rebound(at, None));
+        }
+    }
+    found
+}
+
+/// Литерал, уже стоящий в примере на этом пути, - если он там литерал.
+fn standing(example: &[Pattern], path: &[usize]) -> Option<Literal> {
+    let (first, rest) = path.split_first()?;
+    let mut current = example.get(*first)?;
+    for step in rest {
+        let Pattern::Constructor(_, fields) = current else {
+            return None;
+        };
+        current = fields.get(*step)?;
+    }
+    match current {
+        Pattern::Lit(literal) => Some(*literal),
+        _ => None,
+    }
+}
+
+/// Литерал, которого нет среди названных, - пример непокрытого случая.
+///
+/// Ищется перебором с нуля: названных конечное число, поэтому первый же
+/// свободный найдётся не дальше их количества. Дробному нулю с единицей хватает
+/// по той же причине.
+fn uncovered(ty: PrimTy, matched: &[Literal]) -> Literal {
+    let taken = |candidate: Literal| {
+        candidate
+            .bits(ty)
+            .is_some_and(|bits| matched.iter().any(|it| it.bits(ty) == Some(bits)))
+    };
+    let step = |value: u128| {
+        if ty.floating() {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "пример непокрытого случая - маленькое целое"
+            )]
+            Literal::Fraction((value as f64).to_bits())
+        } else {
+            Literal::Nat(value)
+        }
+    };
+    (0..=matched.len() as u128)
+        .map(step)
+        .find(|candidate| !taken(*candidate))
+        .unwrap_or_else(|| step(0))
+}
+
 struct Compiler<'a> {
     signature: &'a Signature,
     /// Нужны для уровня универсума цели: мотив, различающий индексы, пишет
@@ -755,10 +933,30 @@ impl Compiler<'_> {
         let Some(split) = first
             .patterns
             .iter()
-            .position(|pattern| matches!(pattern, Pat::Ctor(..)))
+            .position(|pattern| matches!(pattern, Pat::Ctor(..) | Pat::Lit(_)))
         else {
             return Ok(self.leaf(ctx, columns, first));
         };
+
+        // Литеральная колонка идёт своим путём: конструкторов у примитива нет,
+        // и разбор по ней - равенство, а не выбор ветви (§4.3).
+        if matches!(first.patterns[split], Pat::Lit(_)) {
+            return self.literal(ctx, columns, rows, target, example, split);
+        }
+        // Обратное смешение - литерал в конструкторной колонке - отвергается
+        // здесь, а не разбором ветви: у семейства своего примитивного типа нет,
+        // и сравнивать написанное число не с чем.
+        if let Some(Pat::Lit(literal)) = rows
+            .iter()
+            .map(|row| &row.patterns[split])
+            .find(|pattern| matches!(pattern, Pat::Lit(_)))
+        {
+            return Err(PatternError::LiteralPattern {
+                written: literal.to_string(),
+                ty: ctx.quote(&columns[split].ty).to_string(),
+                why: "литералом разбирается только примитив (§4.11)",
+            });
+        }
 
         match columns[split].level() {
             Some(_) => self.split(ctx, columns, rows, target, example, split),
@@ -911,6 +1109,179 @@ impl Compiler<'_> {
         );
 
         self.solve(ctx, &inner_columns, &inner_rows, target, &inner_example)
+    }
+
+    /// Разбор литеральной колонки: равенство вместо выбора ветви (§4.3).
+    ///
+    /// У примитива конструкторов нет, а `case` в ядре один и идёт по
+    /// конструкторам. Поэтому колонка становится **сравнением**: `countdown 0 =
+    /// 0` есть `case eqInt64 n 0 of True -> …; False -> …`. Второго узла ядру
+    /// это не стоит, а `Bool` берётся у программы тем же соглашением, каким его
+    /// берёт `if` ([`crate::prim::BOOL`]).
+    ///
+    /// Литералов в колонке бывает несколько, и разбираются они по одному:
+    /// ветвь `False` получает остаток и делится снова. Порядок - написанный,
+    /// отчего семантика первого совпадения достаётся даром.
+    ///
+    /// Названная граница: полноты по построению здесь нет. Значений у
+    /// примитива 2⁶⁴, перечислить их ветвями нельзя, и колонка без
+    /// переменной-паттерна отвергается непокрытым случаем - с литералом,
+    /// которого клаузы не назвали.
+    ///
+    /// Вторая граница: разбираемое обязано быть **ω**. Литерал связываний не
+    /// вводит, поэтому тело называет тот же аргумент, что и сравнение, - и
+    /// линейный расходуется дважды («`n` объявлена с кратностью 1, а
+    /// использована ω», замерено). У конструкторного разбора этого нет: там
+    /// тело пользуется полями, а не разобранным. Выход есть - вынести колонку
+    /// соседом в мотив, как делает [`Compiler::split`], - и он не сделан:
+    /// уточнять литералу нечего, а телескоп соседей стоил бы лямбды на витке.
+    fn literal(
+        &mut self,
+        ctx: &Ctx<'_>,
+        columns: &[Column],
+        rows: &[Row],
+        target: &Term,
+        example: &[Pattern],
+        at: usize,
+    ) -> Result<Tree, PatternError> {
+        let size = ctx.size();
+        let column = &columns[at];
+        let refuse = |literal: &Literal, why: &'static str| PatternError::LiteralPattern {
+            written: literal.to_string(),
+            ty: ctx.quote(&column.ty).to_string(),
+            why,
+        };
+        let Pat::Lit(wanted) = rows[0].patterns[at] else {
+            unreachable!("литеральная колонка выбрана не по литералу")
+        };
+        let Value::Prim(Prim::Ty(prim)) = &*crate::conv::whnf(self.signature, &column.ty) else {
+            return Err(refuse(
+                &wanted,
+                "литералом разбирается только примитив (§4.11)",
+            ));
+        };
+        let prim = *prim;
+        let bits = |literal: &Literal| literal.bits(prim);
+        let Some(cut) = bits(&wanted) else {
+            return Err(refuse(&wanted, "литерал не укладывается в этот тип (§4.3)"));
+        };
+        // Все литералы колонки проверяются здесь, а не по мере деления: клауза
+        // с непредставимым числом обязана отказать, даже если разбор до её
+        // ветви не дошёл бы. Заслонённая такая клауза иначе выходила бы
+        // недостижимой - причина верная, но не та, которую автор искал.
+        //
+        // Конструктор в этой же колонке своей проверки не имеет: отвергает его
+        // разбор ветви - `family` над примитивом отвечает тем же
+        // `NotMatchable`, - и вторая запись того же отказа ничего не добавляла,
+        // измерено мутантом.
+        for row in rows {
+            if let Pat::Lit(literal) = &row.patterns[at] {
+                if bits(literal).is_none() {
+                    return Err(refuse(literal, "литерал не укладывается в этот тип (§4.3)"));
+                }
+            }
+        }
+
+        let scrutinee = Term::Prim(Prim::Cmp(PrimCmp::Eq, prim)).apply([
+            quote(size, &column.value),
+            Term::Prim(Prim::literal(prim, cut)),
+        ]);
+        let verdict = self.verdict()?;
+        // Мотив постоянен: литерал ничего не уточняет, и цель под связыванием
+        // разбираемого - она же, сдвинутая на одно связывание.
+        let motive = Term::Lam(Mult::Zero, "x".into(), Rc::new(shift_at(target, 0, 1)));
+
+        let Sorted {
+            matched,
+            equal,
+            apart,
+        } = sorted(rows, at, prim, cut);
+
+        let mut taken = example.to_vec();
+        place(&mut taken, &column.path, Pattern::Lit(wanted));
+        // Пример непокрытого случая **наследуется**, а не пересчитывается:
+        // ветвь `False` уже стоит под чужими исключениями, и литералов своих
+        // строк ей мало. Пересчёт на каждом делении называл `0` там, где
+        // непокрыт был `2`: внутреннее деление нуля уже не видело.
+        let mut rest = example.to_vec();
+        let inherited = standing(&rest, &column.path)
+            .filter(|literal| !matched.iter().any(|it| it.bits(prim) == literal.bits(prim)));
+        place(
+            &mut rest,
+            &column.path,
+            Pattern::Lit(inherited.unwrap_or_else(|| uncovered(prim, &matched))),
+        );
+
+        let mut branches = Vec::with_capacity(verdict.constructors.len());
+        let mut sites = Vec::new();
+        for (index, constructor) in verdict.constructors.iter().enumerate() {
+            let (inner_rows, inner_example) = if constructor.as_ref() == crate::prim::TRUE {
+                (&equal, &taken)
+            } else {
+                (&apart, &rest)
+            };
+            let tree = self.solve(ctx, columns, inner_rows, target, inner_example)?;
+            branches.push(Branch {
+                constructor: Rc::clone(constructor),
+                body: Rc::new(tree.term),
+            });
+            let slot = Frame::Branch(arity_u32(index));
+            sites.extend(tree.sites.into_iter().map(|mut site| {
+                site.route.insert(0, slot);
+                site
+            }));
+        }
+
+        Ok(Tree {
+            term: Term::Case(Rc::new(Case {
+                data: Name::from(crate::prim::BOOL),
+                levels: Rc::clone(&verdict.levels),
+                params: 0,
+                // Сравнение строит свежее значение, и потребляется оно ровно
+                // однажды - самим разбором.
+                consumed: Mult::One,
+                scrutinee: Rc::new(scrutinee),
+                motive: Rc::new(motive),
+                branches,
+            })),
+            sites,
+        })
+    }
+
+    /// Тип истинности, каким его объявила программа (§4.3).
+    ///
+    /// Проверяется здесь же: два конструктора и ровно те имена, которых ждёт
+    /// сравнение. Объяви программа `Bool` иначе - и ветви строились бы не по
+    /// тому, чем отвечает `eqInt64`.
+    fn verdict(&self) -> Result<Family, PatternError> {
+        let Some(declaration) = self.signature.lookup(crate::prim::BOOL) else {
+            return Err(PatternError::Verdict {
+                why: "он не объявлен",
+            });
+        };
+        let DefinitionKind::Data { constructors, .. } = &declaration.kind else {
+            return Err(PatternError::Verdict {
+                why: "объявлен он не семейством",
+            });
+        };
+        // Сравнением множеств, а не тремя условиями подряд: свойство здесь
+        // одно - имена ровно те, которыми отвечает `eqT`, - и записать его
+        // один раз дешевле, чем свести три записи.
+        let mut named: Vec<&str> = constructors.iter().map(AsRef::as_ref).collect();
+        named.sort_unstable();
+        if named != [crate::prim::FALSE, crate::prim::TRUE] {
+            return Err(PatternError::Verdict {
+                why: "конструкторов у него обязано быть ровно два - `True` и `False`",
+            });
+        }
+        Ok(Family {
+            data: Name::from(crate::prim::BOOL),
+            levels: (0..declaration.level_arity).map(|_| Level::Zero).collect(),
+            parameters: 0,
+            params: Vec::new(),
+            constructors: constructors.clone(),
+            shapes: Vec::new(),
+        })
     }
 
     /// Разбор по колонке `at`.
@@ -1524,6 +1895,10 @@ fn specialise(
             vec![Pat::Any; fields]
         }
         Pat::Any => vec![Pat::Any; fields],
+        // Смешение отвергнуто выбором колонки ([`Compiler::solve`]) - сюда
+        // литерал не доезжает. Строка при этом ветви не подходит: сравнивать
+        // число с конструктором нечем.
+        Pat::Lit(_) => return Ok(None),
     };
 
     let mut patterns = Vec::with_capacity(row.patterns.len() + fields);

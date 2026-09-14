@@ -337,25 +337,7 @@ impl Pass<'_> {
             | Expr::RegionRecycle { .. }
             | Expr::RegionPop { .. } => self.region(expr, owned),
             Expr::Pack { .. } | Expr::Unpack { .. } => self.aggregate(expr, owned),
-            Expr::Primitive {
-                op,
-                ty,
-                left,
-                right,
-            } => {
-                let (mut parts, spare) = self.sequence(vec![*left, *right], owned);
-                let right = parts.pop().unwrap_or(Expr::Erased);
-                let left = parts.pop().unwrap_or(Expr::Erased);
-                drops(
-                    spare,
-                    Expr::Primitive {
-                        op,
-                        ty,
-                        left: Box::new(left),
-                        right: Box::new(right),
-                    },
-                )
-            }
+            Expr::Primitive { .. } | Expr::Compare { .. } => self.binary(expr, owned),
             Expr::Construct {
                 constructor,
                 reuse,
@@ -408,6 +390,53 @@ impl Pass<'_> {
             // он на входе не встречает.
             Expr::Dup { .. } | Expr::Drop { .. } | Expr::Reclaim { .. } => expr,
         }
+    }
+
+    /// Арифметика и сравнение (§4.3): два подвыражения, узел прежний.
+    ///
+    /// Считать в самом узле нечего - оба аргумента плоские, а ответ либо
+    /// плоский, либо непосредственный конструктор `Bool`, - но подвыражения
+    /// вправе называть связывания, и порядок их тот же, что у всех:
+    /// [`Pass::sequence`] решает, кто из двух потребляет.
+    fn binary(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
+        let (op, ty, left, right, verdict) = match expr {
+            Expr::Primitive {
+                op,
+                ty,
+                left,
+                right,
+            } => (Some(op), ty, *left, *right, None),
+            Expr::Compare {
+                op,
+                ty,
+                left,
+                right,
+                yes,
+                no,
+            } => (None, ty, *left, *right, Some((op, yes, no))),
+            other => return other,
+        };
+        let (mut parts, spare) = self.sequence(vec![left, right], owned);
+        let right = Box::new(parts.pop().unwrap_or(Expr::Erased));
+        let left = Box::new(parts.pop().unwrap_or(Expr::Erased));
+        let rebuilt = match (op, verdict) {
+            (_, Some((op, yes, no))) => Expr::Compare {
+                op,
+                ty,
+                left,
+                right,
+                yes,
+                no,
+            },
+            (Some(op), None) => Expr::Primitive {
+                op,
+                ty,
+                left,
+                right,
+            },
+            (None, None) => unreachable!("узел не арифметика и не сравнение"),
+        };
+        drops(spare, rebuilt)
     }
 
     /// Операция над массивом (§4.11).
@@ -974,7 +1003,7 @@ impl Pass<'_> {
             Expr::Closure { captured, .. } => {
                 captured.iter().any(|capture| self.plans(capture, slots))
             }
-            Expr::Primitive { left, right, .. } => {
+            Expr::Primitive { left, right, .. } | Expr::Compare { left, right, .. } => {
                 self.plans(left, slots) || self.plans(right, slots)
             }
             Expr::Apply { callee, argument } => {
@@ -1058,7 +1087,7 @@ impl Pass<'_> {
             Expr::Closure { captured, .. } => captured
                 .iter_mut()
                 .any(|capture| self.attach(capture, slots, token)),
-            Expr::Primitive { left, right, .. } => {
+            Expr::Primitive { left, right, .. } | Expr::Compare { left, right, .. } => {
                 self.attach(left, slots, token) || self.attach(right, slots, token)
             }
             Expr::Apply { callee, argument } => {

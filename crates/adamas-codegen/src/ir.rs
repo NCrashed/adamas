@@ -51,7 +51,7 @@
 //! объекта узнают по нему, какие слоты - числа, а какие - указатели.
 
 use adamas_core::mult::Mult;
-use adamas_core::prim::{PrimOp, PrimTy};
+use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
 
 /// Номер функции в программе.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -935,6 +935,27 @@ pub enum Expr {
         /// Правый аргумент.
         right: Box<Expr>,
     },
+    /// Сравнение двух плоских значений (§4.3).
+    ///
+    /// Отдельный узел от [`Expr::Primitive`], потому что ответ у него другого
+    /// сорта: аргументы плоские, а результат - конструктор `Bool`, то есть
+    /// указательное представление. Ячейки кучи при этом не возникает и здесь -
+    /// у `True` и `False` полей нет, и рантайм кладёт их непосредственным
+    /// значением (`adamas_con0`).
+    Compare {
+        /// Какое.
+        op: PrimCmp,
+        /// Над каким типом.
+        ty: PrimTy,
+        /// Левый аргумент.
+        left: Box<Expr>,
+        /// Правый аргумент.
+        right: Box<Expr>,
+        /// Конструктор истины.
+        yes: CtorId,
+        /// Конструктор лжи.
+        no: CtorId,
+    },
     /// Конструктор со всеми аргументами: по одному на связывание, стёртые
     /// [`Expr::Erased`].
     Construct {
@@ -1157,7 +1178,9 @@ impl Expr {
             Self::ArrayIndex { array, at, .. } => vec![array, at],
             Self::Resume { resumption, value } => vec![resumption, value],
             Self::Closure { captured, .. } => captured.iter().collect(),
-            Self::Primitive { left, right, .. } => vec![left, right],
+            Self::Primitive { left, right, .. } | Self::Compare { left, right, .. } => {
+                vec![left, right]
+            }
             Self::Apply { callee, argument } => vec![callee, argument],
             Self::Bind { value, body, .. } => vec![value, body],
             Self::Match {

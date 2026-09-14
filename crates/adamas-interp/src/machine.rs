@@ -344,7 +344,7 @@ impl<'a> Machine<'a> {
             // разворачивается. Без разворота `addInt64 seven eighty` при
             // определённых `seven` и `eighty` оставался бы застрявшим - в
             // отличие от разбора, чей δ стоит на разбираемом (§10 вопрос 155).
-            Value::Neutral(Head::Prim(..), _) => {
+            Value::Neutral(Head::Prim(..) | Head::Cmp(..), _) => {
                 let argument = self.forced(argument)?;
                 Ok(Step::Return(eval::apply(callee, argument)))
             }

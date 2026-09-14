@@ -329,7 +329,9 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         Expr::ArrayIndex { array, at, .. } => vec![array, at],
         Expr::Resume { resumption, value } => vec![resumption, value],
         Expr::Closure { captured, .. } => captured.iter_mut().collect(),
-        Expr::Primitive { left, right, .. } => vec![left, right],
+        Expr::Primitive { left, right, .. } | Expr::Compare { left, right, .. } => {
+            vec![left, right]
+        }
         Expr::Apply { callee, argument } => vec![callee, argument],
         Expr::Bind { value, body, .. } => vec![value, body],
         Expr::Match {
@@ -518,6 +520,9 @@ impl Anf<'_> {
             | Expr::Handle { .. }
             | Expr::Perform { .. }
             | Expr::Resume { .. }
+            // Ответ сравнения - конструктор `Bool` (§4.3): аргументы плоские,
+            // ответ указательный.
+            | Expr::Compare { .. }
             // Ответ маски есть ответ вычисления под ней, а понижение требует
             // от него указательного (§4.11): маска стоит вокруг `{ρ} A`.
             | Expr::Mask { .. }

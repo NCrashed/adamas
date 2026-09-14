@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: literal-pattern-mixed-with-a-constructor.adamas:20:1: разбирать нечего: значение имеет тип `Int64`
+  confused 0 = 0
+  ^^^^^^^^^^^^^^

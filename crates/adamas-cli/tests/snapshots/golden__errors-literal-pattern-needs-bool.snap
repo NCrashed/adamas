@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: literal-pattern-needs-bool.adamas:16:1: литеральный паттерн отвечает `Bool` (§4.3), а конструкторов у него обязано быть ровно два - `True` и `False`
+  parity 0 = 0
+  ^^^^^^^^^^^^

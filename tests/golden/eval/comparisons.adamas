@@ -43,16 +43,26 @@ negativeZeroIsLess = pick (ltFloat64 (-0.0) 0.0) 1 0
 singleIsNarrower : Int64
 singleIsNarrower = pick (ltFloat32 (-0.5) 0.5) 1 0
 
+-- Два положительных: ключ обязан расти вместе с числом. Знаковый ноль этого не
+-- показывает - там различаются знаки, а не величины.
+positiveGrows : Int64
+positiveGrows = pick (ltFloat64 1.0 2.0) 1 0
+
+-- Два отрицательных: у них ключ, наоборот, убывает вместе с числом.
+negativeShrinks : Int64
+negativeShrinks = pick (ltFloat64 (-2.0) (-1.0)) 1 0
+
 -- Шесть имён - шесть разных ответов на одной паре: `ne`, `gt`, `ge` не
 -- сводятся к трём остальным ошибкой копирования.
 type Answers = { signed : Int64, unsigned : Int64, strict : Int64, loose : Int64,
-                 ordered : Int64, single : Int64, notEqual : Int64,
-                 greater : Int64, atLeast : Int64 }
+                 ordered : Int64, single : Int64, rising : Int64, falling : Int64,
+                 notEqual : Int64, greater : Int64, atLeast : Int64 }
 
 main : Answers
 main = { signed = signedIsNegative, unsigned = unsignedIsNot,
          strict = strictOnEqual, loose = looseOnEqual,
          ordered = negativeZeroIsLess, single = singleIsNarrower,
+         rising = positiveGrows, falling = negativeShrinks,
          notEqual = pick (neInt64 2 3) 1 0,
          greater = pick (gtInt64 2 3) 1 0,
          atLeast = pick (geInt64 3 3) 1 0 }

@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: literal-pattern-out-of-range.adamas:19:1: литерал `200` не разбирает значение типа `Int8`: литерал не укладывается в этот тип (§4.3)
+  narrow 0 = 0
+  ^^^^^^^^^^^^

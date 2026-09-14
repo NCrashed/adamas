@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: literal-pattern-not-covered.adamas:16:1: не покрыто: `2`
+  parity 0 = 0
+  ^^^^^^^^^^^^

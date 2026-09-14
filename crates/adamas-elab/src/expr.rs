@@ -6250,8 +6250,14 @@ impl<'a> Elaborator<'a> {
             // бы ответ унарно.
             CorePattern::Lit(literal) => {
                 let prim = self.primitive_type(ty.as_ref()?)?;
-                let bits = literal.bits(prim)?;
-                Some(Rc::new(Value::Prim(Prim::literal(prim, bits))))
+                // Не уложился в тип - шагаем всё равно, стёртым. Отказ на нём
+                // выдаст сборка клауз, а телескоп, оборвавшийся здесь, увёл бы
+                // диагностику в тело: `narrow 200 = 1` жаловалось на литерал
+                // **ответа**, у которого типа не осталось.
+                Some(literal.bits(prim).map_or_else(
+                    || Rc::new(Value::Erased),
+                    |bits| Rc::new(Value::Prim(Prim::literal(prim, bits))),
+                ))
             }
         }
     }

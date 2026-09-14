@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: total-zero-step.adamas:20:1: `spin` объявлено `@total`, но вердикт отрицательный: рекурсия не структурна либо вызвано нетотальное
+  spin : UInt64 -> UInt64
+  ^^^^^^^^^^^^^^^^^^^^^^^

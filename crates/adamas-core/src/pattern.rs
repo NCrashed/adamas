@@ -848,6 +848,22 @@ fn sorted(rows: &[Row], at: usize, ty: PrimTy, cut: u64) -> Sorted {
     found
 }
 
+/// Литерал, уже стоящий в примере на этом пути, - если он там литерал.
+fn standing(example: &[Pattern], path: &[usize]) -> Option<Literal> {
+    let (first, rest) = path.split_first()?;
+    let mut current = example.get(*first)?;
+    for step in rest {
+        let Pattern::Constructor(_, fields) = current else {
+            return None;
+        };
+        current = fields.get(*step)?;
+    }
+    match current {
+        Pattern::Lit(literal) => Some(*literal),
+        _ => None,
+    }
+}
+
 /// Литерал, которого нет среди названных, - пример непокрытого случая.
 ///
 /// Ищется перебором с нуля: названных конечное число, поэтому первый же
@@ -1143,19 +1159,19 @@ impl Compiler<'_> {
             return Err(refuse(&wanted, "литерал не укладывается в этот тип (§4.3)"));
         };
         // Все литералы колонки проверяются здесь, а не по мере деления: клауза
-        // с непредставимым числом обязана отказать, даже если до её ветви
-        // разбор не дошёл бы.
+        // с непредставимым числом обязана отказать, даже если разбор до её
+        // ветви не дошёл бы. Заслонённая такая клауза иначе выходила бы
+        // недостижимой - причина верная, но не та, которую автор искал.
+        //
+        // Конструктор в этой же колонке своей проверки не имеет: отвергает его
+        // разбор ветви - `family` над примитивом отвечает тем же
+        // `NotMatchable`, - и вторая запись того же отказа ничего не добавляла,
+        // измерено мутантом.
         for row in rows {
-            match &row.patterns[at] {
-                Pat::Lit(literal) if bits(literal).is_none() => {
+            if let Pat::Lit(literal) = &row.patterns[at] {
+                if bits(literal).is_none() {
                     return Err(refuse(literal, "литерал не укладывается в этот тип (§4.3)"));
                 }
-                Pat::Ctor(..) => {
-                    return Err(PatternError::NotMatchable {
-                        ty: ctx.quote(&column.ty).to_string(),
-                    });
-                }
-                _ => {}
             }
         }
 
@@ -1176,11 +1192,17 @@ impl Compiler<'_> {
 
         let mut taken = example.to_vec();
         place(&mut taken, &column.path, Pattern::Lit(wanted));
+        // Пример непокрытого случая **наследуется**, а не пересчитывается:
+        // ветвь `False` уже стоит под чужими исключениями, и литералов своих
+        // строк ей мало. Пересчёт на каждом делении называл `0` там, где
+        // непокрыт был `2`: внутреннее деление нуля уже не видело.
         let mut rest = example.to_vec();
+        let inherited = standing(&rest, &column.path)
+            .filter(|literal| !matched.iter().any(|it| it.bits(prim) == literal.bits(prim)));
         place(
             &mut rest,
             &column.path,
-            Pattern::Lit(uncovered(prim, &matched)),
+            Pattern::Lit(inherited.unwrap_or_else(|| uncovered(prim, &matched))),
         );
 
         let mut branches = Vec::with_capacity(verdict.constructors.len());
@@ -1235,8 +1257,12 @@ impl Compiler<'_> {
                 why: "объявлен он не семейством",
             });
         };
-        let named = |name: &str| constructors.iter().any(|it| it.as_ref() == name);
-        if constructors.len() != 2 || !named(crate::prim::TRUE) || !named(crate::prim::FALSE) {
+        // Сравнением множеств, а не тремя условиями подряд: свойство здесь
+        // одно - имена ровно те, которыми отвечает `eqT`, - и записать его
+        // один раз дешевле, чем свести три записи.
+        let mut named: Vec<&str> = constructors.iter().map(AsRef::as_ref).collect();
+        named.sort_unstable();
+        if named != [crate::prim::FALSE, crate::prim::TRUE] {
             return Err(PatternError::Verdict {
                 why: "конструкторов у него обязано быть ровно два - `True` и `False`",
             });

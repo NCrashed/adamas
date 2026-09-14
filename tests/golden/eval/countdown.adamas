@@ -35,6 +35,15 @@ halve 0 = 0
 halve 1 = 1
 halve n = halve (subUInt64 n 2)
 
+-- Исключённых литералов больше, чем шаг, и это законно: пол требует покрыть
+-- `0 .. step`, а не совпасть с ним. Мутант «покрыто, когда шаг **меньше**
+-- числа исключённых» отвергает ровно эту форму и больше ни одну.
+@total
+tail : UInt64 -> UInt64
+tail 0 = 0
+tail 1 = 7
+tail n = tail (subUInt64 n 1)
+
 -- Ответ, зависящий от сравнения: до порога считаем сумму, после - остаток шага.
 pick : Bool -> UInt64 -> UInt64 -> UInt64
 pick True yes no = yes
@@ -43,9 +52,9 @@ pick False yes no = no
 guarded : UInt64 -> UInt64
 guarded n = pick (ltUInt64 n 10) (sum n 0) (halve n)
 
-type Answers = { back : Int64, total : UInt64, odd : UInt64,
+type Answers = { back : Int64, total : UInt64, odd : UInt64, last : UInt64,
                  below : UInt64, above : UInt64 }
 
 main : Answers
-main = { back = countdown 3, total = sum 10 0, odd = halve 7,
+main = { back = countdown 3, total = sum 10 0, odd = halve 7, last = tail 4,
          below = guarded 4, above = guarded 11 }

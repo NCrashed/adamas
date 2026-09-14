@@ -214,18 +214,21 @@ impl PrimTy {
     /// Один ключ на все шесть сравнений и на все десять типов: разъехаться
     /// `lt` с `ge` тогда негде, они читают одно и то же число.
     fn key(self, bits: u64) -> u64 {
-        let top = 1u64 << (self.width() - 1);
-        if self.floating() {
-            if bits & top == 0 {
-                bits | top
-            } else {
-                self.masked(!bits)
-            }
-        } else if self.signed() {
-            bits ^ top
-        } else {
-            bits
+        if !self.floating() && !self.signed() {
+            return bits;
         }
+        let top = 1u64 << (self.width() - 1);
+        // Одна маска на оба случая: знаковому целому и положительному
+        // плавающему переворачивается старший разряд, отрицательному
+        // плавающему - все. Записано исключающим ИЛИ, а не «либо приписать
+        // бит, либо инвертировать»: там половина мутантов оказывалась
+        // равносильной, потому что при снятом бите `|` и `^` не различаются.
+        let mask = if self.floating() && bits & top != 0 {
+            self.masked(u64::MAX)
+        } else {
+            top
+        };
+        bits ^ mask
     }
 
     /// Прочитанное значение знаковым целым.
@@ -808,6 +811,7 @@ mod tests {
         assert_eq!(Prim::Lit(PrimTy::Float64, bits).to_string(), "1.0");
         assert_eq!(Prim::Ty(PrimTy::Int64).to_string(), "Int64");
         assert_eq!(Prim::Op(PrimOp::Mul, PrimTy::Int64).to_string(), "mulInt64");
+        assert_eq!(Prim::Cmp(PrimCmp::Lt, PrimTy::Int64).to_string(), "ltInt64");
     }
 
     /// Имя операции читается обратно вместе с типом.

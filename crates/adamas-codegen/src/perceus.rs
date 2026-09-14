@@ -46,10 +46,10 @@
 //! родителе, и ссылка каждому нужна своя.
 //!
 //! Различаются два случая в рантайме - `adamas_is_unique`, то есть `rc == 0`, -
-//! и это то же условие, на котором стоит reuse ниже. Узла под развилку не
-//! заведено: списки полей лежат на самом дропе
-//! ([`Salvage`](crate::ir::Salvage)), и различать схлопнутый дроп от обычного
-//! обязана одна печать.
+//! и это то же условие, на котором стоит reuse ниже, и та же развилка, которую
+//! §5.1 описывает на месте разбора. Узла под неё не заведено: списки полей
+//! лежат на самом дропе ([`Salvage`](crate::ir::Salvage)), и различать
+//! схлопнутый дроп от обычного обязана одна печать.
 //!
 //! Мера - `benches/native.rs`: пара стоила **13%** времени символьного замера
 //! (3.54 мс из 26.92, размах 0.13 по пяти прогонам). Ветвь, чей конструктор
@@ -870,38 +870,41 @@ impl Pass<'_> {
 
         // Пара «`dup` поля, потом дроп родителя» схлопывается, если родитель
         // достаётся этой ветви и хоть одно поле она берёт ([`Salvage`]).
-        let salvage =
-            (ours && !kept.is_empty() && self.covered(constructor, &fields)).then(|| Salvage {
+        let collapsing = ours && !kept.is_empty() && self.covered(constructor, &fields);
+        let salvage = if collapsing {
+            Salvage {
                 taken: kept.clone(),
                 spare: counted()
                     .filter(|field| !called.contains(&field.local))
                     .map(|field| field.local)
                     .collect(),
-            });
+            }
+        } else {
+            Salvage::default()
+        };
         if ours {
             let slots = self.shape(constructor);
             let cell = (slots > 0 && self.plans(&body, slots)).then(|| self.fresh());
-            let held = salvage.clone().unwrap_or_default();
             body = match cell {
                 Some(cell) => {
                     self.attach(&mut body, slots, cell);
                     Expr::Reclaim {
                         local: subject,
                         token: cell,
-                        salvage: held,
+                        salvage,
                         body: Box::new(body),
                     }
                 }
                 None => Expr::Drop {
                     local: subject,
-                    salvage: held,
+                    salvage,
                     body: Box::new(body),
                 },
             };
         }
         // `dup` полей ставится снаружи дропа разобранного: иначе дроп унёс бы их
         // с собой. Схлопнутый дроп берёт их себе, и второй раз их дупать нечем.
-        if salvage.is_none() {
+        if !collapsing {
             for field in kept.into_iter().rev() {
                 body = Expr::Dup {
                     local: field,

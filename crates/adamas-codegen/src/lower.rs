@@ -567,6 +567,11 @@ struct Lowerer<'a> {
     marks: HashMap<Name, LabelId>,
     /// Площадки `handle`.
     handlers: Vec<Handler>,
+    /// Обёртки над определениями с плоским ответом ([`Lowerer::boxed_call`]).
+    ///
+    /// Ключ - обёрнутое определение: замыкание над одним и тем же именем
+    /// встречается не раз, а обёртка ему нужна одна.
+    wrapped: HashMap<FuncId, FuncId>,
     /// Определения, чьи тела ещё не понижены.
     ///
     /// Терминацию счёта укладок держит [`recursive`]: поле рекурсивного
@@ -597,6 +602,7 @@ impl<'a> Lowerer<'a> {
             labels: Vec::new(),
             marks: HashMap::new(),
             handlers: Vec::new(),
+            wrapped: HashMap::new(),
             pending: VecDeque::new(),
             detached: false,
         }
@@ -3123,6 +3129,86 @@ impl<'a> Lowerer<'a> {
         Ok((value, Repr::Boxed))
     }
 
+    /// Функция, которую замыкание отдаёт вместо той, чей ответ плоский.
+    ///
+    /// Граница замыкания говорит указателями - слот, аргумент и ответ
+    /// `adamas_apply`, - и §10 вопрос 158 закрыт тем, что она **боксирует**.
+    /// Плоский ответ - последняя из трёх половин: аргумент боксирует
+    /// [`Lowerer::moved`] обёрткой с прозрачной печатью, и ответ едет той же
+    /// обёрткой. Тут же названа цена: ячейка кучи на пересечение, и `@noalloc`
+    /// её видит как всякое применение значения-функции (§5.1).
+    ///
+    /// Слово вместо ячейки здесь не годится, и это измерено, а не предположено:
+    /// мера границы **куска** (§10 вопрос 164) кладёт биты в `adamas_value`
+    /// целиком, но такое слово - не указатель, счётчика у него нет, и дропу его
+    /// не показывают. Кусок это выдерживает - какие позиции указательные, он
+    /// знает по типам. Граница вызова не выдерживает: `runIO k = handle k with
+    /// …` полиморфна по ответу, значение приходит к ней указательным по
+    /// объявлению, и дроп по нему пойдёт.
+    ///
+    /// Ответ, плоский **не примитивно** - агрегат, блок региона, дескриптор, -
+    /// остаётся отказом: обёртки у них нет, и заводить её ради ненаписанной
+    /// программы волна не станет.
+    fn boxed_call(&mut self, function: FuncId, result: Repr) -> Result<FuncId, LowerError> {
+        if result.boxed() {
+            return Ok(function);
+        }
+        let Repr::Flat(prim) = result else {
+            return Err(LowerError::Representation {
+                at: "ответ недобранного вызова",
+                want: describe(Repr::Boxed),
+                got: describe(result),
+            });
+        };
+        if let Some(wrapped) = self.wrapped.get(&function) {
+            return Ok(*wrapped);
+        }
+        let tag = self.prim_wrapper(prim)?;
+        let described = &self.functions[function.0];
+        let parameters = described.parameters.clone();
+        let name = format!("{}#обёртка", described.name);
+        let form = described.form;
+        let held = Binding {
+            name: "ответ".to_owned(),
+            local: LocalId(u32::try_from(parameters.len()).unwrap_or(u32::MAX)),
+            fact: Fact::present(Mult::One).shaped(result),
+        };
+        let arguments = parameters
+            .iter()
+            .map(|it| {
+                if it.fact.present {
+                    Expr::Local(it.local)
+                } else {
+                    Expr::Erased
+                }
+            })
+            .collect();
+        let local = held.local;
+        let id = FuncId(self.functions.len());
+        self.functions.push(Function {
+            id,
+            name,
+            form,
+            captured: Vec::new(),
+            parameters,
+            result: Repr::Boxed,
+            body: Expr::Bind {
+                binding: held,
+                value: Box::new(Expr::Call {
+                    function,
+                    arguments,
+                }),
+                body: Box::new(Expr::Construct {
+                    constructor: tag,
+                    reuse: None,
+                    arguments: vec![Expr::Local(local)],
+                }),
+            },
+        });
+        self.wrapped.insert(function, id);
+        Ok(id)
+    }
+
     /// Применение определения: насыщенное зовёт напрямую, недобранное -
     /// замыкание.
     fn called(
@@ -3147,13 +3233,7 @@ impl<'a> Lowerer<'a> {
             // указателями: плоский параметр или плоский ответ через него не
             // проходят (§4.11).
             pointing(&parameters, "параметр недобранного вызова")?;
-            if !result.boxed() {
-                return Err(LowerError::Representation {
-                    at: "ответ недобранного вызова",
-                    want: describe(Repr::Boxed),
-                    got: describe(result),
-                });
-            }
+            let function = self.boxed_call(function, result)?;
             let mut value = Expr::Closure {
                 function,
                 captured: Vec::new(),

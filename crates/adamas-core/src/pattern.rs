@@ -1146,9 +1146,8 @@ impl Compiler<'_> {
     ) -> Result<Tree, PatternError> {
         let size = ctx.size();
         let column = &columns[at];
-        let written = |literal: &Literal| literal.to_string();
         let refuse = |literal: &Literal, why: &'static str| PatternError::LiteralPattern {
-            written: written(literal),
+            written: literal.to_string(),
             ty: ctx.quote(&column.ty).to_string(),
             why,
         };

@@ -52,11 +52,40 @@ positiveGrows = pick (ltFloat64 1.0 2.0) 1 0
 negativeShrinks : Int64
 negativeShrinks = pick (ltFloat64 (-2.0) (-1.0)) 1 0
 
+-- Сравнение **после** операции: операнд приходит из `ask`, а ответ - вердикт -
+-- переживает границу куска дроблёного тела (§10 вопрос 164). У арифметики через
+-- ту же границу едет слово, у сравнения - указательное значение, и путь этот
+-- корпус иначе не покрывает.
+data Unit where
+  MkUnit : Unit
+
+data Mult where
+  Triple : Mult
+  Double : Mult
+
+effect Ask where
+  ask : Mult
+
+factor : Mult -> Int64
+factor Triple = 3
+factor Double = 2
+
+compared : {Ask} Int64
+compared =
+  let over : Bool = ltInt64 2 (factor ask)
+  pick over 1 0
+
+suspended : Int64
+suspended = handle compared with
+  return v -> v
+  ask -> resume Triple
+
 -- Шесть имён - шесть разных ответов на одной паре: `ne`, `gt`, `ge` не
 -- сводятся к трём остальным ошибкой копирования.
 type Answers = { signed : Int64, unsigned : Int64, strict : Int64, loose : Int64,
                  ordered : Int64, single : Int64, rising : Int64, falling : Int64,
-                 notEqual : Int64, greater : Int64, atLeast : Int64 }
+                 notEqual : Int64, greater : Int64, atLeast : Int64,
+                 crossing : Int64 }
 
 main : Answers
 main = { signed = signedIsNegative, unsigned = unsignedIsNot,
@@ -65,4 +94,5 @@ main = { signed = signedIsNegative, unsigned = unsignedIsNot,
          rising = positiveGrows, falling = negativeShrinks,
          notEqual = pick (neInt64 2 3) 1 0,
          greater = pick (gtInt64 2 3) 1 0,
-         atLeast = pick (geInt64 3 3) 1 0 }
+         atLeast = pick (geInt64 3 3) 1 0,
+         crossing = suspended }

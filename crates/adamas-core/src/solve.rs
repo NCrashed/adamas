@@ -449,6 +449,7 @@ fn read(
                 Head::Meta(found) if *found == meta => return None,
                 Head::Meta(found) => Term::Meta(*found),
                 Head::Prim(op, ty) => Term::Prim(crate::prim::Prim::Op(*op, *ty)),
+                Head::Cmp(op, ty) => Term::Prim(crate::prim::Prim::Cmp(*op, *ty)),
                 Head::Array => Term::Prim(crate::prim::Prim::Array),
                 Head::ArrayOp(op) => Term::Prim(crate::prim::Prim::Over(*op)),
                 Head::Region(op) => Term::Prim(crate::prim::Prim::In(*op)),
@@ -564,6 +565,7 @@ fn rigid(head: &Head, leading: &[Rc<Value>]) -> Option<Term> {
         }
         // Операция замкнута, как и константа. Массив с его операциями - тоже.
         Head::Prim(op, ty) => Some(Term::Prim(crate::prim::Prim::Op(*op, *ty))),
+        Head::Cmp(op, ty) => Some(Term::Prim(crate::prim::Prim::Cmp(*op, *ty))),
         Head::Array => Some(Term::Prim(crate::prim::Prim::Array)),
         Head::ArrayOp(op) => Some(Term::Prim(crate::prim::Prim::Over(*op))),
         Head::Region(op) => Some(Term::Prim(crate::prim::Prim::In(*op))),

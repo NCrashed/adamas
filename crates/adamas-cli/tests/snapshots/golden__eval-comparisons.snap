@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+{signed = 1, unsigned = 0, strict = 0, loose = 1, ordered = 1, single = 1, notEqual = 1, greater = 0, atLeast = 1}

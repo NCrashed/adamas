@@ -1,0 +1,58 @@
+-- Сравнения примитивов (§4.3, §10 вопрос 152).
+--
+-- Наблюдаемое здесь - **ответ, который от сравнения зависит**: каждое поле
+-- выбирает одно из двух разных чисел, и переверни сравнение - ответ станет
+-- другим. Сравнение, отданное само по себе, показывало бы только то, что
+-- имя элаборируется.
+--
+-- Три вещи ловятся тремя полями, и ни одна не выводится из остальных.
+-- `signed` ловит знаковость: `0xff` есть `-1` у `Int8` и `255` у `UInt8`, биты
+-- одни и те же, а вердикт разный. `strict` ловит границу строгого и нестрогого:
+-- на равных `lt` и `le` расходятся. `ordered` ловит `totalOrder` §4.3 у
+-- плавающих: `-0.0` строго меньше `0.0`, и IEEE-сравнение здесь ответило бы
+-- «равны».
+
+data Bool where
+  True : Bool
+  False : Bool
+
+pick : Bool -> Int64 -> Int64 -> Int64
+pick True yes no = yes
+pick False yes no = no
+
+-- Знак читается у типа: те же биты `0xff`.
+signedIsNegative : Int64
+signedIsNegative = pick (ltInt8 (-1) 0) 1 0
+
+unsignedIsNot : Int64
+unsignedIsNot = pick (ltUInt8 255 0) 1 0
+
+-- Строгое и нестрогое расходятся ровно на равенстве.
+strictOnEqual : Int64
+strictOnEqual = pick (ltInt64 7 7) 1 0
+
+looseOnEqual : Int64
+looseOnEqual = pick (leInt64 7 7) 1 0
+
+-- `totalOrder`: знаковый ноль различим, и IEEE-сравнение ответило бы «равны».
+-- Вторая точка расхождения §4.3 - NaN - здесь не наблюдаема: написать его
+-- нечем, деления в языке нет. Она стоит unit-тестом в `adamas-core/src/prim.rs`.
+negativeZeroIsLess : Int64
+negativeZeroIsLess = pick (ltFloat64 (-0.0) 0.0) 1 0
+
+singleIsNarrower : Int64
+singleIsNarrower = pick (ltFloat32 (-0.5) 0.5) 1 0
+
+-- Шесть имён - шесть разных ответов на одной паре: `ne`, `gt`, `ge` не
+-- сводятся к трём остальным ошибкой копирования.
+type Answers = { signed : Int64, unsigned : Int64, strict : Int64, loose : Int64,
+                 ordered : Int64, single : Int64, notEqual : Int64,
+                 greater : Int64, atLeast : Int64 }
+
+main : Answers
+main = { signed = signedIsNegative, unsigned = unsignedIsNot,
+         strict = strictOnEqual, loose = looseOnEqual,
+         ordered = negativeZeroIsLess, single = singleIsNarrower,
+         notEqual = pick (neInt64 2 3) 1 0,
+         greater = pick (gtInt64 2 3) 1 0,
+         atLeast = pick (geInt64 3 3) 1 0 }

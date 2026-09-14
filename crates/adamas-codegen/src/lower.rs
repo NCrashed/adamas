@@ -2746,6 +2746,32 @@ impl<'a> Lowerer<'a> {
                     want,
                 ))
             }
+            // Ответ сравнения - конструктор `Bool` программы (§4.3), поэтому
+            // теги берутся у неё по имени. Не объявлен - сюда бы и не доехало:
+            // тип сравнения назвал `Bool` раньше, и отказала бы проверка.
+            Prim::Cmp(op, ty) => {
+                let [left, right] = arguments else {
+                    return Err(LowerError::Partial {
+                        name: format!("{op}{ty}"),
+                    });
+                };
+                let flat = Repr::Flat(ty);
+                let left = self.given(scope, left, flat, "левый аргумент сравнения")?;
+                let right = self.given(scope, right, flat, "правый аргумент сравнения")?;
+                let yes = self.tag(&Name::from(adamas_core::prim::TRUE))?;
+                let no = self.tag(&Name::from(adamas_core::prim::FALSE))?;
+                Ok((
+                    Expr::Compare {
+                        op,
+                        ty,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                        yes,
+                        no,
+                    },
+                    Repr::Boxed,
+                ))
+            }
         }
     }
 

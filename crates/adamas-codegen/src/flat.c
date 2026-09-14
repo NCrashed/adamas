@@ -118,6 +118,12 @@ static uint64_t adamas_slot_word(adamas_value slot) {
         unsigned long long folded = (unsigned long long)(utype)a * (unsigned long long)(utype)b;   \
         return (ctype)(utype)folded;                                                               \
     }                                                                                              \
+    static int adamas_eq_##name(ctype a, ctype b) { return a == b; }                               \
+    static int adamas_ne_##name(ctype a, ctype b) { return a != b; }                               \
+    static int adamas_lt_##name(ctype a, ctype b) { return a < b; }                                \
+    static int adamas_le_##name(ctype a, ctype b) { return a <= b; }                               \
+    static int adamas_gt_##name(ctype a, ctype b) { return a > b; }                                \
+    static int adamas_ge_##name(ctype a, ctype b) { return a >= b; }                               \
     static void adamas_show_##name(ctype value) { printf(spec, (wide)value); }
 
 static void adamas_show_real(double value, int width);
@@ -137,6 +143,34 @@ static void adamas_show_real(double value, int width);
     static ctype adamas_add_##name(ctype a, ctype b) { return a + b; }                             \
     static ctype adamas_sub_##name(ctype a, ctype b) { return a - b; }                             \
     static ctype adamas_mul_##name(ctype a, ctype b) { return a * b; }                             \
+    /* Порядок - `totalOrder` IEEE-754, которым §4.3 наделяет `Eq`/`Ord`:      \
+     * отрицательное инвертируется целиком, положительному ставится старший    \
+     * бит. Отсюда `-0.0 < 0.0` и `nan == nan`, а IEEE-сравнение живёт          \
+     * отдельно - `ieeeEq`/`ieeeLt` класса `Approximate`. */                   \
+    static utype adamas_order_##name(ctype value) {                                                \
+        utype bits;                                                                                \
+        utype top = (utype)1 << (sizeof(utype) * 8 - 1);                                           \
+        memcpy(&bits, &value, sizeof bits);                                                        \
+        return (bits & top) != 0 ? (utype)~bits : (utype)(bits | top);                             \
+    }                                                                                              \
+    static int adamas_eq_##name(ctype a, ctype b) {                                                \
+        return adamas_order_##name(a) == adamas_order_##name(b);                                   \
+    }                                                                                              \
+    static int adamas_ne_##name(ctype a, ctype b) {                                                \
+        return adamas_order_##name(a) != adamas_order_##name(b);                                   \
+    }                                                                                              \
+    static int adamas_lt_##name(ctype a, ctype b) {                                                \
+        return adamas_order_##name(a) < adamas_order_##name(b);                                    \
+    }                                                                                              \
+    static int adamas_le_##name(ctype a, ctype b) {                                                \
+        return adamas_order_##name(a) <= adamas_order_##name(b);                                   \
+    }                                                                                              \
+    static int adamas_gt_##name(ctype a, ctype b) {                                                \
+        return adamas_order_##name(a) > adamas_order_##name(b);                                    \
+    }                                                                                              \
+    static int adamas_ge_##name(ctype a, ctype b) {                                                \
+        return adamas_order_##name(a) >= adamas_order_##name(b);                                   \
+    }                                                                                              \
     static void adamas_show_##name(ctype value) { adamas_show_real((double)value, (int)sizeof value); }
 
 ADAMAS_FLAT_INTEGER(Int8, int8_t, uint8_t, long long, "%lld")

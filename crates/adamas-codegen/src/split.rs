@@ -139,7 +139,13 @@ fn suspends(expr: &Expr, known: &BTreeSet<FuncId>, quiet: bool) -> bool {
         // оборваться некому. `Resume` при этом не встречается вовсе - его
         // ставит только общая ветка, которых в тихой программе нет.
         Expr::Perform { .. } => !quiet,
-        Expr::Handle { .. }
+        // Питомник приостанавливает **всегда**, и тишина его не касается:
+        // уступка режет сегмент по построению (§5.2), а вопрос 74 стоит на
+        // том, что резать некому.
+        Expr::Nursery { .. }
+        | Expr::Fiber { .. }
+        | Expr::Cancel { .. }
+        | Expr::Handle { .. }
         | Expr::Closing { .. }
         | Expr::Resume { .. }
         // Граница замыкания динамическая: какая из форм за указателем, место
@@ -300,7 +306,7 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         | Expr::LayoutField { .. }
         | Expr::RegionNew
         | Expr::Layout { .. } => Vec::new(),
-        Expr::Unpack { value, .. } => vec![value],
+        Expr::Unpack { value, .. } | Expr::Cancel { value, .. } => vec![value],
         Expr::RegionLast { region } => vec![region],
         Expr::RegionAlloc { region, value, .. } => vec![region, value],
         Expr::RegionRead { region, at, .. }
@@ -312,9 +318,11 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         Expr::Construct { arguments, .. }
         | Expr::Call { arguments, .. }
         | Expr::Perform { arguments, .. }
+        | Expr::Fiber { arguments, .. }
         | Expr::Pack {
             fields: arguments, ..
         } => arguments.iter_mut().collect(),
+        Expr::Nursery { body } => vec![body],
         Expr::Handle {
             captured,
             computation,
@@ -520,6 +528,12 @@ impl Anf<'_> {
             | Expr::Handle { .. }
             | Expr::Perform { .. }
             | Expr::Resume { .. }
+            // Ответ питомника - значение корневого файбера, ответ операции его
+            // ветки; отмена отдаёт то же разбираемое. Все указательные: слот
+            // кадра единообразен (§4.11).
+            | Expr::Nursery { .. }
+            | Expr::Fiber { .. }
+            | Expr::Cancel { .. }
             // Ответ сравнения - конструктор `Bool` (§4.3): аргументы плоские,
             // ответ указательный.
             | Expr::Compare { .. }

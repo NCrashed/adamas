@@ -287,33 +287,46 @@ main = handle outer with
     );
 }
 
-/// Питомник отвергается **своим** отказом, а не чужим.
+/// Написанный `handle` **внутри** питомника значит написанное (§5.2).
 ///
-/// Пока отказ был один на всё эффектное, остаток волны и остаток Фазы 7 стояли
-/// под одним именем. `adamas.h` говорит прямо: метка `NURSERY` не обслуживается
-/// ничем, таблица файберов заводится вместе с ними. Значит и отказ у неё свой,
-/// иначе Фаза 7 замаскируется под недоделку понижения.
+/// Круг обслуживает уступку, только если он ближе хендлера её метки, - то же
+/// правило, по которому выбирается сам хендлер. Решает это рантайм по вектору
+/// evidence, потому что статически неразличимо: `eval/fibers.adamas` пишет те
+/// же имена вовсе без питомника.
+///
+/// Корпус эту точку не покрывает ни одной фикстурой - в девяти программах
+/// файберов своего `handle Async` нет ни у одной, - и различающая сила стоит
+/// здесь: хватай круг чужую операцию, и ответ был бы `Zero`, потому что
+/// уступка вернула бы файбер в собственный цикл, а `Succ` ветки не появился бы
+/// вовсе.
 #[test]
-fn a_nursery_is_refused_as_a_nursery() {
+fn a_written_handler_inside_a_nursery_wins_over_it() {
     let source = format!(
         "{SHAPE}\
 effect Async where
   suspend : Unit
 
--- Постулат: тело ему даёт машина, а рантайм C - нет.
+-- Постулат: тело ему даёт рантайм (§5.2).
 withNursery : ({{Async}} Nat) -> Nat
 
-quiet : {{Async}} Nat
-quiet = Zero
+body : {{Async}} Nat
+body =
+  let s : Unit = suspend
+  Zero
+
+-- Хендлер стоит внутри круга и ближе его: уступка достаётся ему.
+guarded : {{Async}} Nat
+guarded = handle body with
+  return v -> v
+  suspend -> Succ (resume MkUnit)
 
 main : Nat
-main = withNursery quiet
+main = withNursery guarded
 "
     );
-    let error = harness::compiled(&source).expect_err("питомник - Фаза 7");
-    let text = error.to_string();
-    assert!(
-        text.contains("питомник") && text.contains("Фаза 7"),
-        "отказ не назвал ни питомника, ни фазы: {text}"
+    let (answer, _) = run("nursery-inner-handler", &source);
+    assert_eq!(
+        answer, "Succ Zero",
+        "уступку взял круг, а ближе стоял написанный хендлер"
     );
 }

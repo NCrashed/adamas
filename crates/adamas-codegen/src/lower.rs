@@ -117,9 +117,9 @@ use adamas_core::term::{Case, Index, Name, Term};
 use adamas_core::value::{Env, Lvl, Value};
 
 use crate::ir::{
-    Arm, Binding, Branch, Constructor, CtorId, Elems, Expr, Fact, Form, FuncId, Function, Handler,
-    HandlerId, Label, LabelId, LocalId, PackId, Packing, Program, Repr, Slot as PackSlot, SlotTy,
-    Stride, Variant, Verdict,
+    Arm, Binding, Branch, Constructor, CtorId, Elems, Expr, Fact, FiberOp, Form, FuncId, Function,
+    Handler, HandlerId, Label, LabelId, LocalId, PackId, Packing, Program, Repr, Slot as PackSlot,
+    SlotTy, Stride, Task, Variant, Verdict,
 };
 
 /// Почему понижение отказало.
@@ -139,16 +139,18 @@ pub enum LowerError {
         name: String,
     },
 
-    /// Питомник и файберы (§5.2): своё имя у отказа, и не случайно.
+    /// Питомник в позиции, где круга не завести (§5.2).
     ///
-    /// Постулат по форме, но не по существу: тело ему даёт машина, а рантайм
-    /// C - нет. `adamas.h` говорит прямо: метка `NURSERY` не обслуживается
-    /// ничем, таблица файберов заводится вместе с ними, Фаза 7. Отказ назван
-    /// отдельно, чтобы остаток не замаскировался под недоделку понижения.
-    #[error("`{name}` - питомник (§5.2): таблицы файберов в рантайме нет, Фаза 7")]
+    /// Ненасыщенный `withNursery` был бы замыканием, а тело круга рантайм
+    /// принимает значением на месте. Отмена задачи в первой форме - тот же
+    /// жанр: раскрутка отменённого файбера кладётся кадром, а кадр умеет
+    /// только вторая форма.
+    #[error("`{name}` - питомник (§5.2): {why}")]
     Nursery {
-        /// Имя постулата.
+        /// Имя постулата либо операции.
         name: String,
+        /// Чем именно позиция не годится.
+        why: &'static str,
     },
 
     /// Элиминатор хендлера, которого этот срез не ставит.
@@ -452,14 +454,25 @@ const MASK: &str = "#mask.";
 /// Имя единицы: приостановленное вычисление запускается её значением.
 const UNIT: &str = "Unit";
 
-/// Имена питомника и файберов (§5.2).
+/// Имена питомника и файберов (§5.2) - те же пять, что знает машина.
 ///
-/// Постулаты по форме, и машина узнаёт их так же - по имени и по отсутствию
-/// тела (`adamas-interp/src/fiber.rs`). Тела им даёт она; рантайм C не даёт
-/// ничего - таблицы файберов в нём нет вовсе (`adamas.h`, метка `NURSERY`).
-/// Второй записи имён не завести: имена эти - соглашение прелюдии, и обе
-/// стороны читают одно.
-const FIBERS: [&str; 5] = ["withNursery", "suspend", "spawnDetached", "spawn", "await"];
+/// Читаются по имени, как их читает `adamas-interp/src/fiber.rs`. Постулатом
+/// стоит `withNursery` - тело ему даёт рантайм; остальные четыре суть операции,
+/// которые круг обслуживает сам. Второй записи имён не завести: имена эти
+/// соглашение прелюдии, и обе стороны читают одно.
+///
+/// Узнавание по имени **не** решает, кто операцию обслужит: решает это рантайм
+/// по вектору evidence, потому что ближайший выигрывает, а `eval/fibers.adamas`
+/// пишет те же имена без всякого питомника.
+const NURSERY: &str = "withNursery";
+/// Уступка: файбер уходит в хвост очереди.
+const SUSPEND: &str = "suspend";
+/// Порождение без ответа.
+const DETACHED: &str = "spawnDetached";
+/// Порождение задачи.
+const SPAWN: &str = "spawn";
+/// Ожидание чужого ответа.
+const AWAIT: &str = "await";
 
 /// Понижает терм в программу.
 ///
@@ -571,11 +584,15 @@ struct Lowerer<'a> {
     /// `handle`** - последнее потому, что хендлер в чистой функции заводит
     /// корень своего стека, и scope под ним обязан быть кадром.
     detached: bool,
+    /// Семейство, чей разбор есть отмена задачи (§5.2). `None` - питомника в
+    /// программе нет вовсе, и отменять нечего.
+    task_family: Option<Name>,
 }
 
 impl<'a> Lowerer<'a> {
     fn new(signature: &'a Signature) -> Self {
         Self {
+            task_family: nursed_family(signature),
             signature,
             constructors: Vec::new(),
             packings: Vec::new(),
@@ -725,10 +742,6 @@ impl<'a> Lowerer<'a> {
                 LowerError::Handler {
                     name: name.to_string(),
                     why: "невыразимое имя без тела: понижение зовёт его формой, а не вызовом",
-                }
-            } else if FIBERS.contains(&&**name) {
-                LowerError::Nursery {
-                    name: name.to_string(),
                 }
             } else {
                 LowerError::Postulate {
@@ -1949,6 +1962,12 @@ impl<'a> Lowerer<'a> {
         if &**name == CLOSING {
             return self.closing(scope, arguments);
         }
+        // Питомник (§5.2) - постулат, чьё тело даёт рантайм. Тело у имени
+        // означает, что так назвали своё, и в питомник его превращать нечего:
+        // то же правило, каким узнаёт его машина.
+        if &**name == NURSERY && self.definition(name)?.body.is_none() {
+            return self.nursing(scope, name, arguments);
+        }
         // Элиминаторы - невыразимые имена без тела, и спрашиваются они до вида
         // по той же причине, что и выход из scope: тела у них нет, а смысл есть.
         if let Some(effect) = name.strip_prefix(HANDLE) {
@@ -2114,10 +2133,19 @@ impl<'a> Lowerer<'a> {
             }
             given.push(self.given(scope, argument, Repr::Boxed, "аргумент операции")?);
         }
-        let mut value = Expr::Perform {
-            label,
-            operation: u32::try_from(slot).unwrap_or(u32::MAX),
-            arguments: given,
+        let operation = u32::try_from(slot).unwrap_or(u32::MAX);
+        let mut value = match self.fiber_op(name)? {
+            Some(op) => Expr::Fiber {
+                op,
+                label,
+                operation,
+                arguments: given,
+            },
+            None => Expr::Perform {
+                label,
+                operation,
+                arguments: given,
+            },
         };
         for argument in arguments.iter().skip(arity) {
             let argument = self.given(scope, argument, Repr::Boxed, "аргумент замыкания")?;
@@ -2127,6 +2155,102 @@ impl<'a> Lowerer<'a> {
             };
         }
         Ok((value, Repr::Boxed))
+    }
+
+    /// Питомник: `withNursery` (§5.2).
+    ///
+    /// Тело берётся **значением**, а не запускается здесь: приостановку с него
+    /// снимет круг, применив его к единице уже под своим кадром. Этим питомник
+    /// и отличается от хендлера с маской, которые вычисление под собой
+    /// запускают сами ([`Lowerer::triggered`]): у тех оно одно и идёт немедля, а
+    /// у круга их сколько угодно и порядок им задаёт очередь.
+    fn nursing(
+        &mut self,
+        scope: &mut Scope,
+        name: &Name,
+        arguments: &[Arg<'_>],
+    ) -> Result<(Expr, Repr), LowerError> {
+        let Some(body) = arguments.first() else {
+            return Err(LowerError::Nursery {
+                name: name.to_string(),
+                why: "постулат не насыщен, круг значением этим срезом не берётся",
+            });
+        };
+        let body = self.given(scope, body, Repr::Boxed, "тело питомника")?;
+        let mut value = Expr::Nursery {
+            body: Box::new(body),
+        };
+        for argument in arguments.iter().skip(1) {
+            let argument = self.given(scope, argument, Repr::Boxed, "аргумент замыкания")?;
+            value = Expr::Apply {
+                callee: Box::new(value),
+                argument: Box::new(argument),
+            };
+        }
+        Ok((value, Repr::Boxed))
+    }
+
+    /// Роль операции под питомником. `None` - обычная операция эффекта.
+    ///
+    /// Имя решает только **роль**; кто операцию обслужит, решает рантайм по
+    /// вектору evidence, потому что ближайший выигрывает.
+    fn fiber_op(&mut self, name: &Name) -> Result<Option<FiberOp>, LowerError> {
+        match &**name {
+            SUSPEND => Ok(Some(FiberOp::Suspend)),
+            DETACHED => Ok(Some(FiberOp::Detached)),
+            SPAWN => Ok(Some(FiberOp::Spawn(self.task_shape(name)?))),
+            // Форму задачи называет `spawn`, а не `await`: у второго в домене
+            // может стоять ведущий имплисит подъёма, и семейство читается
+            // оттуда неоднозначно.
+            AWAIT => {
+                let spawn: Name = Rc::from(SPAWN);
+                let at = match self.signature.lookup(&spawn) {
+                    Some(_) => self.task_shape(&spawn)?.map(|shape| shape.at),
+                    None => None,
+                };
+                Ok(Some(FiberOp::Await(at)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Чем назвать задачу: конструктор написанного результата `spawn` (§5.2).
+    ///
+    /// Требований два, и оба проверяются здесь, а не молча предполагаются, -
+    /// те же, что у машины: один конструктор и одно живое поле, куда встанет
+    /// невыразимое имя файбера. Не сошлось - `None`, и обслужить операцию круг
+    /// не сможет; отказа тут нет, потому что тот же `spawn` без питомника есть
+    /// обычная операция (`eval/fibers.adamas`).
+    fn task_shape(&mut self, name: &Name) -> Result<Option<Task>, LowerError> {
+        let Some(data) = result_head(&self.definition(name)?.ty) else {
+            return Ok(None);
+        };
+        let Some([only]) = self.signature.constructors(&data) else {
+            return Ok(None);
+        };
+        let only = Rc::clone(only);
+        self.family(&data)?;
+        let Some(&tag) = self.tags.get(&only) else {
+            return Ok(None);
+        };
+        let described = &self.constructors[usize::from(tag.0)];
+        let mut live = described
+            .binders
+            .iter()
+            .enumerate()
+            .filter(|(_, fact)| fact.present);
+        let Some((binder, fact)) = live.next() else {
+            return Ok(None);
+        };
+        if live.next().is_some() || !fact.repr.pointer() {
+            return Ok(None);
+        }
+        let at = described.slot(binder).unwrap_or(0);
+        Ok(Some(Task {
+            constructor: tag,
+            slots: 1,
+            at,
+        }))
     }
 
     /// Выход из scope, держащего ресурс: `#closing` (§3.3).
@@ -3188,6 +3312,39 @@ impl<'a> Lowerer<'a> {
     /// Плотное семейство разбирается по собственному тегу (§10 вопрос 157);
     /// прочее приводится к объекту - тег лежит в его заголовке, а у плоской
     /// записи заголовка нет вовсе (§4.11).
+    /// Оборачивает разбираемое отменой, если разбирается задача (§5.2).
+    ///
+    /// Потребить задачу мимо `await` можно одним способом - разобрать её
+    /// значение, и так написан всякий деструктор; отмена поэтому стоит на
+    /// **разборе**, а не на имени деструктора, которого сигнатура рантайма не
+    /// знает. Явный `case` автора - то же потребление и та же отмена.
+    ///
+    /// Семейство берётся у **написанного** результата `spawn`, как берёт его
+    /// машина, и без объявленного питомника отмены не бывает вовсе: разбор
+    /// одноимённого типа в программе без круга есть обычный разбор.
+    fn cancelling(&mut self, scrutinee: Expr, data: &Name) -> Result<Expr, LowerError> {
+        if self.task_family.as_deref() != Some(&**data) {
+            return Ok(scrutinee);
+        }
+        let spawn: Name = Rc::from(SPAWN);
+        let Some(shape) = self.task_shape(&spawn)? else {
+            return Ok(scrutinee);
+        };
+        if !self.detached {
+            // Раскрутка отменённого файбера кладётся кадром, а кадр умеет
+            // только вторая форма: у первой стека нет вовсе. Отказ, а не
+            // молчание, - молча не отменить значит не досчитать деструкторов.
+            return Err(LowerError::Nursery {
+                name: data.to_string(),
+                why: "отмена задачи в первой форме: ручки стека нет",
+            });
+        }
+        Ok(Expr::Cancel {
+            at: shape.at,
+            value: Box::new(scrutinee),
+        })
+    }
+
     fn scrutinised(
         &mut self,
         scope: &mut Scope,
@@ -3218,6 +3375,10 @@ impl<'a> Lowerer<'a> {
     fn analysis(&mut self, scope: &mut Scope, case: &Case) -> Result<(Expr, Repr), LowerError> {
         self.family(&case.data)?;
         let (scrutinee, packed) = self.scrutinised(scope, &case.scrutinee)?;
+        let scrutinee = match packed {
+            Some(_) => scrutinee,
+            None => self.cancelling(scrutinee, &case.data)?,
+        };
         // Пустой разбор ответа не даёт: тип пуст, и до печати дело не дойдёт.
         let mut answer = Repr::Boxed;
         let mut arms = Vec::with_capacity(case.branches.len());
@@ -3439,6 +3600,41 @@ impl<'a> Lowerer<'a> {
             Repr::Boxed,
         ))
     }
+}
+
+/// Голова написанного результата определения. `None` - результат не имя.
+///
+/// Читается так же, как её читает машина (`adamas-interp/src/fiber.rs`): тип
+/// задачи называет сам `spawn`, вшитого имени у него нет.
+fn result_head(ty: &Term) -> Option<Name> {
+    let mut current = ty;
+    while let Term::Pi(_, _, _, _, codomain) = current {
+        current = codomain;
+    }
+    let mut head = current;
+    while let Term::App(callee, _) = head {
+        head = callee;
+    }
+    match head {
+        Term::Const(name, ..) => Some(Rc::clone(name)),
+        _ => None,
+    }
+}
+
+/// Семейство, чей разбор есть отмена задачи. `None` - питомника в программе нет.
+///
+/// Без объявленного постулата круга не бывает, а без круга не бывает и файбера,
+/// который отмена сняла бы: разбор одноимённого типа тогда обычный.
+fn nursed_family(signature: &Signature) -> Option<Name> {
+    let nursery = signature.lookup(NURSERY)?;
+    if nursery.body.is_some() {
+        return None;
+    }
+    let spawn = signature.lookup(SPAWN)?;
+    if !matches!(spawn.kind, DefinitionKind::Operation { .. }) {
+        return None;
+    }
+    result_head(&spawn.ty)
 }
 
 /// Имя головы спайна под лямбдами. `None` - голова не имя.

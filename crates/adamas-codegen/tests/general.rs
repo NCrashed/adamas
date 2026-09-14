@@ -320,14 +320,8 @@ fn timed(name: &str, left: usize, right: usize) -> u128 {
         .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
         .arg(&file);
     let sources = Path::new(env!("ADAMAS_RUNTIME_SOURCES"));
-    for unit in [
-        "object.c",
-        "array.c",
-        "region.c",
-        "evidence.c",
-        "closure.c",
-        "frame.c",
-    ] {
+    // Список приходит от самого рантайма (`build.rs`), а не написан здесь.
+    for unit in env!("ADAMAS_RUNTIME_UNITS").split(',') {
         compile.arg(sources.join(unit));
     }
     let compiled = compile.arg("-o").arg(&binary).output().unwrap();

@@ -3,14 +3,15 @@
 use std::path::PathBuf;
 
 /// Исходники рантайма в порядке слоёв: объекты, массивы, регионы, вектор,
-/// замыкания, кадры.
-const SOURCES: [&str; 6] = [
+/// замыкания, кадры, файберы.
+const SOURCES: [&str; 7] = [
     "c/object.c",
     "c/array.c",
     "c/region.c",
     "c/evidence.c",
     "c/closure.c",
     "c/frame.c",
+    "c/fiber.c",
 ];
 
 fn main() {
@@ -49,4 +50,15 @@ fn main() {
     );
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::metadata=include={}", include.display());
+    // Список единиц трансляции - **отсюда**, а не второй копией у потребителя:
+    // порождённый C линкуется с теми же файлами, и разъехавшийся список даёт
+    // «undefined reference» на первом же новом слое рантайма.
+    println!(
+        "cargo::metadata=units={}",
+        SOURCES
+            .iter()
+            .map(|source| source.trim_start_matches("c/"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
 }

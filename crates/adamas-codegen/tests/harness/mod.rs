@@ -140,32 +140,28 @@ fn runtime() -> &'static [PathBuf] {
     OBJECTS.get_or_init(|| {
         let sources = Path::new(env!("ADAMAS_RUNTIME_SOURCES"));
         let dir = scratch();
-        [
-            "object.c",
-            "array.c",
-            "region.c",
-            "evidence.c",
-            "closure.c",
-            "frame.c",
-        ]
-        .iter()
-        .map(|name| {
-            let object = dir.join(format!("{name}.o"));
-            let status = Command::new(env!("ADAMAS_CC"))
-                .args(["-std=c11", "-O1", "-c"])
-                .arg("-I")
-                .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
-                .arg(sources.join(name))
-                .arg("-o")
-                .arg(&object)
-                .status();
-            assert!(
-                status.is_ok_and(|status| status.success()),
-                "рантайм не собрался: {name}"
-            );
-            object
-        })
-        .collect()
+        // Список приходит от самого рантайма (`build.rs`), а не написан здесь:
+        // вторая копия разъезжалась бы молча, и новый слой давал бы
+        // «undefined reference» вместо отказа сборки.
+        env!("ADAMAS_RUNTIME_UNITS")
+            .split(',')
+            .map(|name| {
+                let object = dir.join(format!("{name}.o"));
+                let status = Command::new(env!("ADAMAS_CC"))
+                    .args(["-std=c11", "-O1", "-c"])
+                    .arg("-I")
+                    .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
+                    .arg(sources.join(name))
+                    .arg("-o")
+                    .arg(&object)
+                    .status();
+                assert!(
+                    status.is_ok_and(|status| status.success()),
+                    "рантайм не собрался: {name}"
+                );
+                object
+            })
+            .collect()
     })
 }
 

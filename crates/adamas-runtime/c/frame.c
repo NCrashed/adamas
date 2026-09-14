@@ -84,7 +84,13 @@ static adamas_frame *frame_alloc(uint16_t mark, uint32_t label, adamas_frame_cod
 static adamas_evidence *closing_evidence(adamas_frame *frame, adamas_frame *rest) {
     adamas_evidence *evidence = adamas_evidence_copy(frame->evidence);
     for (adamas_frame *below = rest; below != NULL; below = below->below) {
-        if (adamas_frame_mark(below) == ADAMAS_MARK_HANDLER) {
+        uint16_t mark = adamas_frame_mark(below);
+        /* Кадр питомника подавляется наравне с хендлером, и по тому же счёту:
+         * деструктор бежит на стеке того, кто раскручивает, а брошенного кадра
+         * там нет - резать по нему уступку было бы разрезом чужого стека.
+         * Поиск питомника подавленную запись пропускает и идёт наружу
+         * (`adamas_nursery_serves`), то есть находит круг, который жив. */
+        if (mark == ADAMAS_MARK_HANDLER || mark == ADAMAS_MARK_NURSERY) {
             adamas_evidence_suppress(evidence, below);
         }
     }
@@ -170,6 +176,27 @@ static adamas_value unwind_step(adamas_kont *kont, adamas_frame *frame, adamas_v
         unwind_push(kont, chain, held, 1);
         next->below = kont->top;
         kont->top = next;
+        return adamas_unit();
+    }
+    if (mark == ADAMAS_MARK_NURSERY) {
+        /* Питомник внутри сегмента: его файберы брошены вместе с ним, а
+         * сегменты их лежат в круге и в эту цепочку не входят - поэтому
+         * `CLOSING` внутри уступившей задачи не отрабатывал бы никогда (у
+         * машины это ревью 2026-09-07: `[1]` вместо `[1, 7]`).
+         *
+         * Берётся по одному, и кадр возвращается в остаток: снятый из круга
+         * обратно не кладётся, поэтому обход конечен. Раскрутка брошенного
+         * бежит **первой** - её кадр ложится выше остатка. */
+        adamas_segment *parked = adamas_nursery_abandoned(next);
+        if (parked != NULL) {
+            next->below = chain->top;
+            chain->top = next;
+            unwind_push(kont, chain, held, 1);
+            unwind_push(kont, parked, adamas_unit(), 1);
+            return adamas_unit();
+        }
+        unwind_push(kont, chain, held, 1);
+        frame_free(next, kont);
         return adamas_unit();
     }
     if (mark == ADAMAS_MARK_CLOSING) {
@@ -328,6 +355,15 @@ adamas_value adamas_kont_run_to(adamas_kont *kont, adamas_frame *floor, adamas_v
         }
         if (mark == ADAMAS_MARK_UNWINDING) {
             value = unwind_step(kont, frame, value);
+            continue;
+        }
+        if (mark == ADAMAS_MARK_NURSERY) {
+            /* Файбер договорил: ответ его запоминается кругом, дальше идёт
+             * следующий из очереди. Пустая очередь означает, что дожидаться
+             * больше некого, и значение круга уходит вниз - тому, кто звал
+             * `withNursery` (§5.2). */
+            value = adamas_nursery_finished(kont, frame, value);
+            frame_free(frame, kont);
             continue;
         }
         if (mark == ADAMAS_MARK_HANDLER) {
@@ -507,6 +543,10 @@ void adamas_segment_unwind(adamas_kont *kont, adamas_segment *segment) {
     unwind_push(kont, segment, adamas_unit(), 0);
 }
 
+void adamas_segment_unwind_holding(adamas_kont *kont, adamas_segment *segment, adamas_value held) {
+    unwind_push(kont, segment, held, 1);
+}
+
 adamas_value adamas_kont_abort(adamas_kont *kont) {
     /* Обрыв и раскрутка - одно и то же действие над разными цепочками: там
      * вырезанный сегмент, здесь кадры оборванного кода. Граница - ближайший
@@ -527,6 +567,17 @@ adamas_value adamas_kont_abort(adamas_kont *kont) {
     last->below = NULL;
     unwind_push(kont, chain, adamas_unit(), 0);
     return adamas_unit();
+}
+
+void adamas_segment_disown_base(adamas_segment *segment) {
+    if (segment->base == NULL) {
+        return;
+    }
+    /* Метка снимается, кадр остаётся: вектор деструктора внутри сегмента его
+     * называет, и снятый оставил бы висячий указатель. Работы у кадра нет
+     * вовсе - раскрутка пройдёт его как обычное звено и освободит в свой
+     * черёд, отпустив вместе с ним и ссылку на круг. */
+    adamas_header_of(segment->base)->tag = ADAMAS_MARK_PLAIN;
 }
 
 adamas_value adamas_segment_value(adamas_segment *segment) {

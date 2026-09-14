@@ -373,6 +373,9 @@ impl Pass<'_> {
             Expr::Perform { .. }
             | Expr::Handle { .. }
             | Expr::Closing { .. }
+            | Expr::Nursery { .. }
+            | Expr::Fiber { .. }
+            | Expr::Cancel { .. }
             | Expr::Mask { .. } => self.effectful(expr, owned),
             Expr::Resume { .. } => self.resumed(expr, owned),
             Expr::Apply { callee, argument } => self.applied(*callee, *argument, owned),
@@ -736,6 +739,56 @@ impl Pass<'_> {
                     },
                 )
             }
+            other => self.fibered(other, owned),
+        }
+    }
+
+    /// Питомник и его операции (§5.2): владение то же, что у прочих эффектных.
+    ///
+    /// Тело круга уходит ему владением - применит его к единице он сам;
+    /// аргументы операции уходят владением ветке либо кругу; отмена берёт
+    /// разбираемое владением и им же отвечает - значение пережидает раскрутку в
+    /// кадре и выходит обратно.
+    fn fibered(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
+        match expr {
+            Expr::Fiber {
+                op,
+                label,
+                operation,
+                arguments,
+            } => {
+                let (arguments, spare) = self.sequence(arguments, owned);
+                drops(
+                    spare,
+                    Expr::Fiber {
+                        op,
+                        label,
+                        operation,
+                        arguments,
+                    },
+                )
+            }
+            Expr::Nursery { body } => {
+                let (mut items, spare) = self.sequence(vec![*body], owned);
+                let body = items.pop().unwrap_or(Expr::Erased);
+                drops(
+                    spare,
+                    Expr::Nursery {
+                        body: Box::new(body),
+                    },
+                )
+            }
+            Expr::Cancel { at, value } => {
+                let (mut items, spare) = self.sequence(vec![*value], owned);
+                let value = items.pop().unwrap_or(Expr::Erased);
+                drops(
+                    spare,
+                    Expr::Cancel {
+                        at,
+                        value: Box::new(value),
+                    },
+                )
+            }
             other => other,
         }
     }
@@ -1061,6 +1114,9 @@ impl Pass<'_> {
             | Expr::Perform { .. }
             | Expr::Resume { .. }
             | Expr::Mask { .. }
+            | Expr::Nursery { .. }
+            | Expr::Fiber { .. }
+            | Expr::Cancel { .. }
             | Expr::Layout { .. } => false,
         }
     }
@@ -1150,6 +1206,9 @@ impl Pass<'_> {
             | Expr::Perform { .. }
             | Expr::Resume { .. }
             | Expr::Mask { .. }
+            | Expr::Nursery { .. }
+            | Expr::Fiber { .. }
+            | Expr::Cancel { .. }
             | Expr::Layout { .. } => false,
         }
     }

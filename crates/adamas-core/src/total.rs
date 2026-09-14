@@ -24,6 +24,38 @@
 //! вызовы. Позиция ищется перебором - объявлять её, как `{struct n}` в Coq,
 //! незачем.
 //!
+//! # Убывание по примитиву, и почему ему нужен пол
+//!
+//! Цикл по числу (`countdown n = countdown (subUInt64 n 1)`) конструкторов не
+//! разбирает, и структурной меры у него нет вовсе. Мерой служит **само
+//! значение**, но одного «вычли - стало меньше» здесь мало, и это не
+//! осторожность: арифметика **заворачивается** по ширине типа (§4.3, §10 вопрос
+//! 151), поэтому `subUInt8 1 2` даёт 255, а не отказ. Числу поэтому нужен пол,
+//! и складывается он из двух источников сразу.
+//!
+//! **Тип** даёт нижнюю границу: беззнаковое значение есть натуральное число, и
+//! мера ограничена нулём снизу. У знакового такой границы нет.
+//!
+//! **Литеральные паттерны** не дают вычитанию пол перешагнуть: ветвь `False`
+//! разбора `eqT x k` знает `x != k` (в эту форму элаборация и переводит
+//! литеральный паттерн, [`crate::pattern`]), и когда исключены все `0 .. step`,
+//! верно `x >= step` - вычитание идёт без заворачивания, результат строго
+//! меньше, а число шагов не больше `x / step`.
+//!
+//! Ни один источник в одиночку не работает, и оба измерены прогоном
+//! 2026-09-14. Знаковый `countdown (subInt8 n 1)` при базе `0`
+//! **завершается** - 256 шагов через `-128` и `127` к нулю, - и всё равно
+//! отвергается: предъявимой меры у него нет, а оценка в 2⁶⁴ шагов для
+//! δ-разворота от расходимости неотличима. Беззнаковый `subUInt8 n 2` при базе
+//! `0` от нечётного `n` **расходится** по-настоящему - заворачивается и
+//! остаётся нечётным навсегда, - и его отвергает покрытие: исключён `0`, а
+//! нужны `0` и `1`.
+//!
+//! Названная граница: пол читается с **написанного** разбора. Тот же цикл,
+//! записанный через `if`, его не получает - `if` элаборируется разбором по
+//! связыванию, и сравнение уезжает в значение `let`, которого этот обход не
+//! читает.
+//!
 //! # Разбор под применением
 //!
 //! Ветвь связывает лямбдами не только поля: элаборация клауз выносит соседние
@@ -72,6 +104,7 @@ use std::rc::Rc;
 
 use crate::meta::{Metas, zonk_term};
 use crate::mult::Mult;
+use crate::prim::{Prim, PrimCmp, PrimOp, PrimTy};
 use crate::sig::{Definition, Signature};
 use crate::term::{Case, Index, Name, Term, spine};
 use crate::value::{Env, Head, Lvl, Value};
@@ -151,6 +184,7 @@ fn collected(
         group,
         undecided,
         calls: Vec::new(),
+        apart: Vec::new(),
     };
     let mut sizes = Vec::new();
     let arity = walk.parameters(&mut sizes, body);
@@ -544,6 +578,21 @@ fn calls_a_partial_definition(signature: &Signature, name: &Name, term: &Term) -
 /// Рекурсивный вызов: кого из цикла зовут и с какими размерами аргументов.
 type Call = (usize, Vec<Option<Size>>);
 
+/// Связывание, о котором известно, что оно **не равно** этому литералу.
+///
+/// Ставит такой факт ветвь `False` разбора по `eqT x k` - той самой форме, в
+/// которую элаборация переводит литеральный паттерн ([`crate::pattern`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Apart {
+    /// Уровень связывания. Уровень, а не индекс: под ветвью бывают свои
+    /// связывания, и индекс от них уехал бы, а уровень нет.
+    level: usize,
+    /// Тип, в котором записан литерал.
+    ty: PrimTy,
+    /// Биты литерала.
+    bits: u64,
+}
+
 struct Walk<'a> {
     signature: &'a Signature,
     /// Имена, вызов которых считается рекурсивным: своё и соседи по циклу.
@@ -552,6 +601,11 @@ struct Walk<'a> {
     undecided: &'a [Name],
     /// Вызовы в порядке обхода.
     calls: Vec<Call>,
+    /// Литералы, которых связывание заведомо не равно, - пол меры на примитиве.
+    ///
+    /// Стек: факт живёт ровно под своей ветвью. Соседняя ветвь его не видит, и
+    /// это существенно - в ветви `True` аргумент как раз **равен** литералу.
+    apart: Vec<Apart>,
 }
 
 impl Walk<'_> {
@@ -577,11 +631,116 @@ impl Walk<'_> {
 
     /// Размер связывания, на которое указывает индекс.
     fn size(sizes: &[Option<Size>], term: &Term) -> Option<Size> {
+        let level = Self::level(sizes, term)?;
+        *sizes.get(level)?
+    }
+
+    /// Уровень связывания, на которое указывает индекс.
+    fn level(sizes: &[Option<Size>], term: &Term) -> Option<usize> {
         let Term::Var(Index(index)) = term else {
             return None;
         };
-        let level = sizes.len().checked_sub(*index as usize + 1)?;
-        *sizes.get(level)?
+        sizes.len().checked_sub(*index as usize + 1)
+    }
+
+    /// Размер аргумента рекурсивного вызова: разбор либо убывание по примитиву.
+    fn measured(&self, sizes: &[Option<Size>], term: &Term) -> Option<Size> {
+        Self::size(sizes, term).or_else(|| self.descended(sizes, term))
+    }
+
+    /// Убывание по примитиву: `subT x k` при беззнаковом `T` и известном
+    /// `x >= k`.
+    ///
+    /// # Почему одного «стало меньше» мало
+    ///
+    /// Арифметика заворачивается по ширине типа (§4.3, §10 вопрос 151), а
+    /// значит «вычли - уменьшилось» на примитиве **неверно**: `subUInt8 1 2`
+    /// даёт 255. Структурному разбору такой оговорки не нужно - поле
+    /// конструктора меньше по построению и дна не имеет, - а числу нужен пол,
+    /// и берётся он из двух источников сразу.
+    ///
+    /// **Тип** даёт нижнюю границу: у беззнакового значение есть натуральное
+    /// число, и мера «само значение» ограничена нулём снизу. У знакового такой
+    /// границы нет, и потому знаковый здесь отвергается.
+    ///
+    /// **Литеральные паттерны** дают то, что вычитание пола не перешагнёт:
+    /// ветвь `False` каждого `eqT x k` знает `x != k`, и если исключены все
+    /// `0 .. step`, то `x >= step`, вычитание идёт без заворачивания, а
+    /// результат строго меньше. Мера убывает и снизу ограничена - это и есть
+    /// завершаемость, с оценкой в `x / step` шагов.
+    ///
+    /// # Что отвергается и почему именно так
+    ///
+    /// Знаковый `countdown n = countdown (subInt8 n 1)` при базе `0`
+    /// **завершается** - счёт проходит `-128`, заворачивается к `127` и
+    /// доходит до нуля за 256 шагов (замерено 2026-09-14). Отвергается он всё
+    /// равно, и это не осторожность впустую: у такого счёта нет предъявимой
+    /// меры, а оценка в 2⁶⁴ шагов для δ-разворота ([`crate::conv`]) от
+    /// расходимости неотличима - ради него вердикт и считается.
+    ///
+    /// Шаг мимо пола расходится по-настоящему: `countdown n = countdown
+    /// (subUInt8 n 2)` при базе `0` от нечётного `n` заворачивается и остаётся
+    /// нечётным навсегда (замерено тем же прогоном - зависает). Его отвергает
+    /// покрытие: исключён `0`, а нужны `0` и `1`.
+    fn descended(&self, sizes: &[Option<Size>], term: &Term) -> Option<Size> {
+        let (head, arguments) = spine(term);
+        let Term::Prim(Prim::Op(PrimOp::Sub, ty)) = head else {
+            return None;
+        };
+        if ty.signed() || ty.floating() {
+            return None;
+        }
+        let [subject, step] = arguments[..] else {
+            return None;
+        };
+        let Term::Prim(Prim::Lit(_, step)) = step else {
+            return None;
+        };
+        // Ноль не убывает, а шире исключённого пол не бывает: перебор снизу
+        // ограничен числом известных фактов, а не значением литерала.
+        if *step == 0 || *step > self.apart.len() as u64 {
+            return None;
+        }
+        let Size { argument, depth } = Self::size(sizes, subject)?;
+        let level = Self::level(sizes, subject)?;
+        let excluded = |bits| {
+            self.apart.contains(&Apart {
+                level,
+                ty: *ty,
+                bits,
+            })
+        };
+        if !(0..*step).all(excluded) {
+            return None;
+        }
+        Some(Size {
+            argument,
+            depth: depth + 1,
+        })
+    }
+
+    /// Факт «связывание не равно литералу», если разбираемое - сравнение с ним.
+    ///
+    /// Форма ровно та, которую строит элаборация литерального паттерна:
+    /// `eqT x k`. Порядок операндов берётся любой - равенство симметрично, а
+    /// написанное руками `case eqUInt64 0 n of` иначе теряло бы пол ни за что.
+    fn compared(sizes: &[Option<Size>], term: &Term) -> Option<Apart> {
+        let (head, arguments) = spine(term);
+        let Term::Prim(Prim::Cmp(PrimCmp::Eq, ty)) = head else {
+            return None;
+        };
+        let [left, right] = arguments[..] else {
+            return None;
+        };
+        let named = |subject: &Term, literal: &Term| match literal {
+            Term::Prim(Prim::Lit(_, bits)) => Some(Apart {
+                level: Self::level(sizes, subject)?,
+                ty: *ty,
+                bits: *bits,
+            }),
+            _ => None,
+        };
+        named(left, right).or_else(|| named(right, left))
     }
 
     fn term(&mut self, sizes: &mut Vec<Option<Size>>, term: &Term) {
@@ -639,7 +798,7 @@ impl Walk<'_> {
                 let (head, arguments) = spine(term);
                 let applied: Vec<Option<Size>> = arguments
                     .iter()
-                    .map(|argument| Self::size(sizes, argument))
+                    .map(|argument| self.measured(sizes, argument))
                     .collect();
                 // Позиция члена группы считается **до** разбора, а не стражем
                 // `if let`: тот требует Rust 2024, а MSRV проекта 1.85, и CI
@@ -715,9 +874,19 @@ impl Walk<'_> {
             argument: size.argument,
             depth: size.depth + 1,
         });
+        // Разбор по сравнению с литералом даёт ветви `False` пол: под ней
+        // разбираемое заведомо не равно этому числу (§4.3).
+        let apart = Self::compared(sizes, &case.scrutinee);
         for branch in &case.branches {
             let fields = self.fields(&branch.constructor, case.params);
+            let floored = apart.filter(|_| &*branch.constructor == crate::prim::FALSE);
+            if let Some(fact) = floored {
+                self.apart.push(fact);
+            }
             self.branch(sizes, fields, smaller, applied, &branch.body);
+            if floored.is_some() {
+                self.apart.pop();
+            }
         }
     }
 

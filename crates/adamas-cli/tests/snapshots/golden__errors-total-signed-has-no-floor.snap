@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: total-signed-has-no-floor.adamas:21:1: `signedDown` объявлено `@total`, но вердикт отрицательный: рекурсия не структурна либо вызвано нетотальное
+  signedDown : Int64 -> Int64
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^

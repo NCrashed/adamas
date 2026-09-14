@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+{back = 0, total = 55, odd = 1, below = 10, above = 1}

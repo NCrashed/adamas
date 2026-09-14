@@ -91,6 +91,11 @@
 //! её ноль, в третьем единица, а недоданные аргументы уходят применением к
 //! значению, то есть через границу замыкания, где плоскому места нет.
 //!
+//! Четвёртый источник - не свёртка тела, а **синоним в типе**: `pending :
+//! Counted` при `type Counted = {Tick} Nat` объявляет одноместную функцию, а
+//! стрелок не показывает ни одной. Поэтому тип разворачивается перед счётом
+//! ([`Lowerer::declared`]).
+//!
 //! Поэтому параметров у функции столько, сколько **стрелок у типа**;
 //! недостающие связывания достраиваются здесь и дописываются к спайну тела.
 //! Терм при этом не переписывается: снятые лямбды остаются в среде де Брёйна
@@ -103,9 +108,16 @@
 //!
 //! # Чего понижение не делает
 //!
-//! Не бета-редуцирует, не инлайнит, не кеширует значение определения без
-//! параметров: оптимизаций на этом срезе нет вовсе, и предсказуемость выхода
-//! дороже его длины.
+//! Не инлайнит, не кеширует значение определения без параметров: оптимизаций
+//! на этом срезе нет вовсе, и предсказуемость выхода дороже его длины.
+//!
+//! Одно исключение названо, и оно не оптимизация: **редекс с лямбдой в голове**
+//! сводится ([`Lowerer::application`]). Такой формой приезжает решение
+//! имплисита - `(\m₂ -> \m₁ -> \m₀ -> #2) #2 #1 #0`, - и лямбда в голове там не
+//! значение, которое кто-то применяет, а запись подстановки. Понижай её как
+//! есть - и решение уехало бы через границу замыкания, где плоскому и
+//! дескриптору места нет (§4.11). δ-разворота это по-прежнему не включает:
+//! считает `eval` ядра, а имя он не разворачивает.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
@@ -209,6 +221,20 @@ pub enum LowerError {
     },
 
     /// Ответ программы - функция.
+    ///
+    /// Граница **языка**, а не среза, и это измерено (волна 5, трек C). Машина
+    /// печатает функцию её телом: `main n = plus (Succ Zero) n` даёт
+    /// `\(ω n) -> plus (Succ Zero) #0` - терм со связыванием и индексом де
+    /// Брёйна, под связывание при этом не заходя. Повторить такое понижением
+    /// значит нести исходный терм в бинарь: у замыкания в рантайме есть
+    /// указатель на код и слоты захвата, и ни тега, ни полей, что-то значащих
+    /// читателю, у него нет. Напечатать вместо этого имя определения тоже
+    /// нельзя - договор корпуса требует **того же** ответа, что у `adamas
+    /// eval`, а он печатает не имя.
+    ///
+    /// Отличие от [`Self::ArrayAnswer`] и [`Self::RegionAnswer`] именно здесь:
+    /// там значение в рантайме есть, и сводить надо две печати одного;
+    /// тут сводить нечего.
     #[error("ответ программы - функция: печатать её нечем")]
     FunctionAnswer,
 
@@ -571,6 +597,11 @@ struct Lowerer<'a> {
     marks: HashMap<Name, LabelId>,
     /// Площадки `handle`.
     handlers: Vec<Handler>,
+    /// Обёртки над определениями с плоским ответом ([`Lowerer::boxed_call`]).
+    ///
+    /// Ключ - обёрнутое определение: замыкание над одним и тем же именем
+    /// встречается не раз, а обёртка ему нужна одна.
+    wrapped: HashMap<FuncId, FuncId>,
     /// Определения, чьи тела ещё не понижены.
     ///
     /// Терминацию счёта укладок держит [`recursive`]: поле рекурсивного
@@ -605,6 +636,7 @@ impl<'a> Lowerer<'a> {
             labels: Vec::new(),
             marks: HashMap::new(),
             handlers: Vec::new(),
+            wrapped: HashMap::new(),
             pending: VecDeque::new(),
             detached: false,
         }
@@ -719,6 +751,17 @@ impl<'a> Lowerer<'a> {
             })
     }
 
+    /// Объявленный тип определения с развёрнутыми синонимами.
+    ///
+    /// Арность понижения берётся у типа (§10 вопрос 153), а синоним стрелок не
+    /// показывает: `pending : Counted` при `type Counted = {Tick} Nat` - это
+    /// одноместная функция, записанная именем. Не разверни его - параметров
+    /// выйдет ноль, тело поедет значением, и операция в нём отвергнется
+    /// недобранной (`eval/sealed-effect`).
+    fn declared(&self, name: &Name) -> Result<&'a Term, LowerError> {
+        Ok(unaliased(self.signature, &self.definition(name)?.ty))
+    }
+
     /// Параметры определения, тело под снятыми лямбдами и сколько их снято.
     ///
     /// Параметров столько, сколько **стрелок у типа** (§10 вопрос 153): тело
@@ -752,9 +795,10 @@ impl<'a> Lowerer<'a> {
                 }
             }
         })?;
+        let ty = self.declared(name)?;
         // Словари телескопа считаются **до** параметров: представление массива
         // зависит от того, есть ли в контексте `Flat` на его элемент (§4.11).
-        let dicts = dicts_of(self.signature, &definition.ty);
+        let dicts = dicts_of(self.signature, ty);
         let mut parameters = Vec::new();
         let mut current = Rc::new(body.clone());
         loop {
@@ -763,7 +807,7 @@ impl<'a> Lowerer<'a> {
                 break;
             };
             let (mult, repr) = self
-                .binder_at(&definition.ty, parameters.len(), &dicts)?
+                .binder_at(ty, parameters.len(), &dicts)?
                 .unwrap_or((Mult::Many, Repr::Boxed));
             parameters.push(Binding {
                 name: bound.to_string(),
@@ -773,7 +817,7 @@ impl<'a> Lowerer<'a> {
             current = Rc::clone(inner);
         }
         let taken = parameters.len();
-        while let Some((mult, repr)) = self.binder_at(&definition.ty, parameters.len(), &dicts)? {
+        while let Some((mult, repr)) = self.binder_at(ty, parameters.len(), &dicts)? {
             parameters.push(Binding {
                 name: format!("эта{}", parameters.len() - taken),
                 local: LocalId(u32::try_from(parameters.len()).unwrap_or(u32::MAX)),
@@ -789,7 +833,7 @@ impl<'a> Lowerer<'a> {
             return Ok(*id);
         }
         let (parameters, _, _, dicts) = self.peeled(name)?;
-        let ty = &self.definition(name)?.ty;
+        let ty = self.declared(name)?;
         let result = self.result_repr(ty, parameters.len(), &dicts)?;
         let form = form(ty);
         let id = FuncId(self.functions.len());
@@ -1452,6 +1496,11 @@ impl<'a> Lowerer<'a> {
                 match want {
                     Repr::Record(tag) => return Ok((self.object_as(scope, fields, tag)?, want)),
                     Repr::Packed(pack) => return Ok((self.pack_as(scope, fields, pack)?, want)),
+                    Repr::Layout => {
+                        if let Some((size, align)) = self.folded_descriptor(term) {
+                            return Ok((Expr::Layout { size, align }, want));
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1469,6 +1518,33 @@ impl<'a> Lowerer<'a> {
             }
         }
         self.expr(scope, term)
+    }
+
+    /// Дескриптор укладки, собранный **вычислением**, а не парой литералов.
+    ///
+    /// Словарь `Flat` пишется руками там, где обязательство о представлении
+    /// стоит членом сигнатуры (§4.11, §10 вопрос 137), и пишется он через свой
+    /// же метод: `flat = { layout = sized make }`. Пара литералов из такого
+    /// тела не читается - её надо посчитать.
+    ///
+    /// Оптимизацией это не становится, и граница у неё узкая: считается только
+    /// то, что позиция объявила дескриптором ([`Repr::Layout`]), а дескриптор по
+    /// §4.11 есть два числа времени компиляции. Всё прочее идёт общим путём
+    /// записей, и δ-разворота понижение по-прежнему не делает.
+    ///
+    /// Замкнутость проверяется: `evaluated` считает в пустой среде, и свободное
+    /// связывание в теле уехало бы в неё чужим уровнем. Открытый терм - `None`,
+    /// то есть обычный отказ по представлению.
+    fn folded_descriptor(&self, term: &Term) -> Option<(u32, u32)> {
+        let mut free = BTreeSet::new();
+        escaping(term, 0, &mut free);
+        if !free.is_empty() {
+            return None;
+        }
+        match adamas_core::conv::evaluated(self.signature, term) {
+            Term::Object(ref fields) => descriptor(fields),
+            _ => None,
+        }
     }
 
     /// Значение конструктора, уложенное плотно по своему варианту.
@@ -1947,6 +2023,14 @@ impl<'a> Lowerer<'a> {
                     return self.resuming(scope, local, fact, arguments);
                 }
             }
+        }
+        // Голова - лямбда: это не применение значения, а редекс, и записью
+        // подстановки приезжает решение имплисита. Сводится он ядром, тем же
+        // `eval`, каким его сводят прочие вычислители; достроенных связываний
+        // среди аргументов при этом быть не может - в терме их нет вовсе.
+        if let Some(redex) = redex(head, arguments) {
+            let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
+            return self.expr(scope, &normalized(&redex, depth));
         }
         let Term::Const(name, ..) = head else {
             // Голова - не имя: применяется значение, и стирания здесь не бывает.
@@ -3186,6 +3270,86 @@ impl<'a> Lowerer<'a> {
         Ok((value, Repr::Boxed))
     }
 
+    /// Функция, которую замыкание отдаёт вместо той, чей ответ плоский.
+    ///
+    /// Граница замыкания говорит указателями - слот, аргумент и ответ
+    /// `adamas_apply`, - и §10 вопрос 158 закрыт тем, что она **боксирует**.
+    /// Плоский ответ - последняя из трёх половин: аргумент боксирует
+    /// [`Lowerer::moved`] обёрткой с прозрачной печатью, и ответ едет той же
+    /// обёрткой. Тут же названа цена: ячейка кучи на пересечение, и `@noalloc`
+    /// её видит как всякое применение значения-функции (§5.1).
+    ///
+    /// Слово вместо ячейки здесь не годится, и это измерено, а не предположено:
+    /// мера границы **куска** (§10 вопрос 164) кладёт биты в `adamas_value`
+    /// целиком, но такое слово - не указатель, счётчика у него нет, и дропу его
+    /// не показывают. Кусок это выдерживает - какие позиции указательные, он
+    /// знает по типам. Граница вызова не выдерживает: `runIO k = handle k with
+    /// …` полиморфна по ответу, значение приходит к ней указательным по
+    /// объявлению, и дроп по нему пойдёт.
+    ///
+    /// Ответ, плоский **не примитивно** - агрегат, блок региона, дескриптор, -
+    /// остаётся отказом: обёртки у них нет, и заводить её ради ненаписанной
+    /// программы волна не станет.
+    fn boxed_call(&mut self, function: FuncId, result: Repr) -> Result<FuncId, LowerError> {
+        if result.boxed() {
+            return Ok(function);
+        }
+        let Repr::Flat(prim) = result else {
+            return Err(LowerError::Representation {
+                at: "ответ недобранного вызова",
+                want: describe(Repr::Boxed),
+                got: describe(result),
+            });
+        };
+        if let Some(wrapped) = self.wrapped.get(&function) {
+            return Ok(*wrapped);
+        }
+        let tag = self.prim_wrapper(prim)?;
+        let described = &self.functions[function.0];
+        let parameters = described.parameters.clone();
+        let name = format!("{}#обёртка", described.name);
+        let form = described.form;
+        let held = Binding {
+            name: "ответ".to_owned(),
+            local: LocalId(u32::try_from(parameters.len()).unwrap_or(u32::MAX)),
+            fact: Fact::present(Mult::One).shaped(result),
+        };
+        let arguments = parameters
+            .iter()
+            .map(|it| {
+                if it.fact.present {
+                    Expr::Local(it.local)
+                } else {
+                    Expr::Erased
+                }
+            })
+            .collect();
+        let local = held.local;
+        let id = FuncId(self.functions.len());
+        self.functions.push(Function {
+            id,
+            name,
+            form,
+            captured: Vec::new(),
+            parameters,
+            result: Repr::Boxed,
+            body: Expr::Bind {
+                binding: held,
+                value: Box::new(Expr::Call {
+                    function,
+                    arguments,
+                }),
+                body: Box::new(Expr::Construct {
+                    constructor: tag,
+                    reuse: None,
+                    arguments: vec![Expr::Local(local)],
+                }),
+            },
+        });
+        self.wrapped.insert(function, id);
+        Ok(id)
+    }
+
     /// Применение определения: насыщенное зовёт напрямую, недобранное -
     /// замыкание.
     fn called(
@@ -3210,13 +3374,7 @@ impl<'a> Lowerer<'a> {
             // указателями: плоский параметр или плоский ответ через него не
             // проходят (§4.11).
             pointing(&parameters, "параметр недобранного вызова")?;
-            if !result.boxed() {
-                return Err(LowerError::Representation {
-                    at: "ответ недобранного вызова",
-                    want: describe(Repr::Boxed),
-                    got: describe(result),
-                });
-            }
+            let function = self.boxed_call(function, result)?;
             let mut value = Expr::Closure {
                 function,
                 captured: Vec::new(),
@@ -3827,6 +3985,26 @@ fn normalized(term: &Term, depth: u32) -> Term {
         env = env.extend(Value::var(Lvl(level)));
     }
     quote(depth, &eval(&env, term))
+}
+
+/// Собирает редекс обратно, если голова спайна - лямбда.
+///
+/// `None` - голова не лямбда либо среди аргументов есть достроенное связывание:
+/// достроенного в терме нет, и записать его обратно нечем. Второе сегодня не
+/// встречается - достроенные дописываются спайну с **именем** в голове, - но
+/// молча потерять аргумент дороже, чем отдать его прежнему пути.
+fn redex(head: &Term, arguments: &[Arg<'_>]) -> Option<Term> {
+    if !matches!(head, Term::Lam(..)) || arguments.is_empty() {
+        return None;
+    }
+    let mut built = head.clone();
+    for argument in arguments {
+        let Arg::Written(written) = argument else {
+            return None;
+        };
+        built = Term::App(Rc::new(built), Rc::new((*written).clone()));
+    }
+    Some(built)
 }
 
 /// Голова спайна и его аргументы слева направо.

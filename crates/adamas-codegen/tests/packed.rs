@@ -743,6 +743,94 @@ fn a_parametric_column_reads_back() {
     );
 }
 
+/// Словарь `Flat`, собранный **вычислением**, остаётся дескриптором.
+///
+/// Обязательство о представлении пишется членом сигнатуры (§4.11, §10 вопрос
+/// 137), и модуль предъявляет его через собственный метод: `flat = { layout =
+/// sized make }`. Пары литералов в таком теле нет, а дескриптор по §4.11 - два
+/// числа времени компиляции. Понижение их считает; общего пути записей у него
+/// по-прежнему нет.
+///
+/// Через `through` словарь едет **значением**, и внутри `sized` решение
+/// имплисита приезжает бета-редексом `(\a -> \_ -> \x -> #1) #2 #1 #0`.
+/// Понижай его как есть - и дескриптор уехал бы аргументом замыкания, где
+/// указателя ждут (§4.11).
+///
+/// Два размера рядом нарочно: `Narrow` есть два байта, `Wide` - шестнадцать.
+/// Спутай их - и ответ станет `16`.
+///
+/// Близнец с **литеральным** словарём отличается ровно телом `flatNarrow`, и
+/// цена у обоих обязана быть одна: словарь, собранный вычислением, своей
+/// ячейки не занимает. Одного числа тут мало - блок в ответе есть у обоих
+/// (запись `Layout`, которую отдаёт `sized`), и говорит о словаре только
+/// разница.
+fn computed_dict(dictionary: &str) -> String {
+    format!(
+        "\
+type Layout = {{ size : UInt32, align : UInt32 }}
+
+class Flat a where
+  layout : Layout
+
+type Narrow = {{ lo : Int8, hi : Int8 }}
+type Wide = {{ lo : Int64, hi : Int64 }}
+
+sized : {{Flat a}} => a -> Layout
+sized x = layout
+
+narrow : Narrow
+narrow = {{ lo = 1, hi = 2 }}
+
+wide : Wide
+wide = {{ lo = 1, hi = 2 }}
+
+flatNarrow : Flat Narrow
+flatNarrow = {dictionary}
+
+flatWide : Flat Wide
+flatWide = {{ layout = sized wide }}
+
+through : Flat Narrow -> Layout
+through d = sized narrow
+
+-- Обе половины дескриптора, и обе позиционно: `2 * 10 + 1`. Размер один не
+-- годился бы - мутант, портящий границу, на нём выживает (измерено).
+main : UInt32
+main =
+  let l : Layout = through flatNarrow
+  addUInt32 (mulUInt32 l.size 10) l.align
+"
+    )
+}
+
+/// Дескриптор, собранный вычислением, стоит ровно столько же, сколько
+/// написанный литералами.
+#[test]
+fn a_dictionary_built_by_computation_stays_a_descriptor() {
+    let computed = computed_dict("{ layout = sized narrow }");
+    let literal = computed_dict("{ layout = { size = 2, align = 1 } }");
+    assert_eq!(
+        harness::printed(&computed),
+        "21",
+        "печать машины изменилась - свидетель говорит не о том"
+    );
+    let mut costs = Vec::new();
+    for (name, source) in [
+        ("packed-dict-computed", &computed),
+        ("packed-dict-literal", &literal),
+    ] {
+        let stderr =
+            harness::agreed(name, source).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let (allocated, live) = harness::blocks(name, &stderr);
+        assert_eq!(live, 0, "{name}: прогон оставил блоки живыми");
+        costs.push(allocated);
+    }
+    assert_eq!(
+        costs[0], costs[1],
+        "словарь вычислением поехал объектом кучи: литеральный близнец платит меньше"
+    );
+}
+
 /// Голое параметрическое значение с плоским payload'ом печатается как у
 /// машины: обёртка прозрачна (§10 вопросы 158, 159).
 #[test]

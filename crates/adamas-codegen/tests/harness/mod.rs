@@ -344,10 +344,16 @@ pub(crate) fn bindings(expr: &Expr, note: &mut impl FnMut(&Binding)) {
 }
 
 /// Связывания, названные узлами `Dup`, `Drop` и `Reclaim`.
+///
+/// Поля схлопнутого дропа (`Salvage`) сюда входят наравне с прочими: `dup` по
+/// ним уехал внутрь узла, и обход, не спросивший его, объявил бы счёт по
+/// плоскому отсутствующим просто потому, что перестал его видеть.
 pub(crate) fn rc_nodes(expr: &Expr, out: &mut Vec<LocalId>) {
     walk(expr, &mut |inner| match inner {
-        Expr::Dup { local, .. } | Expr::Drop { local, .. } | Expr::Reclaim { local, .. } => {
+        Expr::Dup { local, .. } => out.push(*local),
+        Expr::Drop { local, salvage, .. } | Expr::Reclaim { local, salvage, .. } => {
             out.push(*local);
+            out.extend(salvage.locals());
         }
         _ => {}
     });

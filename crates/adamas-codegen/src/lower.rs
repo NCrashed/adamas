@@ -88,6 +88,11 @@
 //! её ноль, в третьем единица, а недоданные аргументы уходят применением к
 //! значению, то есть через границу замыкания, где плоскому места нет.
 //!
+//! Четвёртый источник - не свёртка тела, а **синоним в типе**: `pending :
+//! Counted` при `type Counted = {Tick} Nat` объявляет одноместную функцию, а
+//! стрелок не показывает ни одной. Поэтому тип разворачивается перед счётом
+//! ([`Lowerer::declared`]).
+//!
 //! Поэтому параметров у функции столько, сколько **стрелок у типа**;
 //! недостающие связывания достраиваются здесь и дописываются к спайну тела.
 //! Терм при этом не переписывается: снятые лямбды остаются в среде де Брёйна
@@ -699,6 +704,17 @@ impl<'a> Lowerer<'a> {
             })
     }
 
+    /// Объявленный тип определения с развёрнутыми синонимами.
+    ///
+    /// Арность понижения берётся у типа (§10 вопрос 153), а синоним стрелок не
+    /// показывает: `pending : Counted` при `type Counted = {Tick} Nat` - это
+    /// одноместная функция, записанная именем. Не разверни его - параметров
+    /// выйдет ноль, тело поедет значением, и операция в нём отвергнется
+    /// недобранной (`eval/sealed-effect`).
+    fn declared(&self, name: &Name) -> Result<&'a Term, LowerError> {
+        Ok(unaliased(self.signature, &self.definition(name)?.ty))
+    }
+
     /// Параметры определения, тело под снятыми лямбдами и сколько их снято.
     ///
     /// Параметров столько, сколько **стрелок у типа** (§10 вопрос 153): тело
@@ -736,9 +752,10 @@ impl<'a> Lowerer<'a> {
                 }
             }
         })?;
+        let ty = self.declared(name)?;
         // Словари телескопа считаются **до** параметров: представление массива
         // зависит от того, есть ли в контексте `Flat` на его элемент (§4.11).
-        let dicts = dicts_of(self.signature, &definition.ty);
+        let dicts = dicts_of(self.signature, ty);
         let mut parameters = Vec::new();
         let mut current = Rc::new(body.clone());
         loop {
@@ -747,7 +764,7 @@ impl<'a> Lowerer<'a> {
                 break;
             };
             let (mult, repr) = self
-                .binder_at(&definition.ty, parameters.len(), &dicts)?
+                .binder_at(ty, parameters.len(), &dicts)?
                 .unwrap_or((Mult::Many, Repr::Boxed));
             parameters.push(Binding {
                 name: bound.to_string(),
@@ -757,7 +774,7 @@ impl<'a> Lowerer<'a> {
             current = Rc::clone(inner);
         }
         let taken = parameters.len();
-        while let Some((mult, repr)) = self.binder_at(&definition.ty, parameters.len(), &dicts)? {
+        while let Some((mult, repr)) = self.binder_at(ty, parameters.len(), &dicts)? {
             parameters.push(Binding {
                 name: format!("эта{}", parameters.len() - taken),
                 local: LocalId(u32::try_from(parameters.len()).unwrap_or(u32::MAX)),
@@ -773,7 +790,7 @@ impl<'a> Lowerer<'a> {
             return Ok(*id);
         }
         let (parameters, _, _, dicts) = self.peeled(name)?;
-        let ty = &self.definition(name)?.ty;
+        let ty = self.declared(name)?;
         let result = self.result_repr(ty, parameters.len(), &dicts)?;
         let form = form(ty);
         let id = FuncId(self.functions.len());

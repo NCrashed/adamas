@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: total-signed-has-no-floor.adamas:21:1: `signedDown` объявлено `@total`, но вердикт отрицательный: рекурсия не структурна либо вызвано нетотальное
+Error: total-signed-has-no-floor.adamas:21:1: `signedDown` объявлено `@total`, но вердикт отрицательный: аргумент не убывает ни разбором, ни значением, либо вызвано нетотальное
   signedDown : Int64 -> Int64
   ^^^^^^^^^^^^^^^^^^^^^^^^^^^

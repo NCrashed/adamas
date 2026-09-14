@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: total-wraps-past-zero.adamas:21:1: `skipping` объявлено `@total`, но вердикт отрицательный: рекурсия не структурна либо вызвано нетотальное
+Error: total-wraps-past-zero.adamas:21:1: `skipping` объявлено `@total`, но вердикт отрицательный: аргумент не убывает ни разбором, ни значением, либо вызвано нетотальное
   skipping : UInt8 -> UInt8
   ^^^^^^^^^^^^^^^^^^^^^^^^^

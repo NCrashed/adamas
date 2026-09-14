@@ -45,6 +45,16 @@ tail 0 = 0
 tail 1 = 7
 tail n = tail (subUInt64 n 1)
 
+-- Голый литерал аргументом **само**рекурсивного вызова. Пока группа
+-- объявляется, в сигнатуре её нет (§10 вопрос 50), и тип аргумента приходится
+-- брать у самой группы; без этого литерал терял ожидание и разворачивался
+-- унарно, жалуясь на ненайденное `Zero`. Наблюдаемо: `reset` сбрасывает
+-- накопитель в ноль, поэтому ответ зависит от того, что литерал попал в
+-- аргумент, а не в накопитель.
+reset : UInt64 -> UInt64 -> UInt64
+reset 0 acc = acc
+reset n acc = reset (subUInt64 n 1) 0
+
 -- Ответ, зависящий от сравнения: до порога считаем сумму, после - остаток шага.
 pick : Bool -> UInt64 -> UInt64 -> UInt64
 pick True yes no = yes
@@ -54,8 +64,8 @@ guarded : UInt64 -> UInt64
 guarded n = pick (ltUInt64 n 10) (sum n 0) (halve n)
 
 type Answers = { back : Int64, total : UInt64, odd : UInt64, last : UInt64,
-                 below : UInt64, above : UInt64 }
+                 cleared : UInt64, below : UInt64, above : UInt64 }
 
 main : Answers
 main = { back = countdown 3, total = sum 10 0, odd = halve 7, last = tail 4,
-         below = guarded 4, above = guarded 11 }
+         cleared = reset 4 9, below = guarded 4, above = guarded 11 }

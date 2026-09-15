@@ -1,0 +1,957 @@
+//! Эмиттер LLVM: [`ir`](crate::ir) в текст `.ll` (§9 Фаза 7, волна 1, трек A).
+//!
+//! **Ядра этот модуль не читает** - ровно как [`emit_c`](crate::emit_c), и по
+//! той же проверяемой причине: шов между ядром и эмиттером существует затем,
+//! чтобы Фаза 7 добавила **второй эмиттер**, а не второй компилятор
+//! (`docs/phase7-plan.md`, «Что Фаза 7 требует от Фазы 6»). Свидетель -
+//! `tests/seam.rs`, читающий исходник этого файла.
+//!
+//! # Способ привязки - текст
+//!
+//! Не `inkwell` и не `llvm-sys`: решение 2026-09-15 на основании замеров
+//! 2026-09-08 - разбор `.ll` берёт 6% времени бэкенда, и доля падает с
+//! размером, а проверок текстовый путь не теряет, потому что делает их verifier
+//! на прогоне, а не система типов Rust.
+//!
+//! Цена решения - **правило консервативного подмножества**: новых
+//! необязательных атрибутов IR не использовать без причины. Проверяется правило
+//! прогоном на минимальной поддерживаемой версии
+//! ([`llvm::MINIMUM_MAJOR`](crate::llvm::MINIMUM_MAJOR)), а не грепом по
+//! формам, - той же дисциплиной, что MSRV, и заведена она так потому, что греп
+//! по формам врал трижды подряд.
+//!
+//! Что из правила следует построчно: у целочисленной арифметики **нет** `nsw` и
+//! `nuw`; `getelementptr` не эмитится вовсе - именно его необязательный флаг
+//! `nuw`, появившийся после 18, оказался единственным, ломающим чтение старой
+//! версией; ни `target datalayout`, ни `target triple` не пишется - цель берёт
+//! `llc` у хоста, и вписанная строка сделала бы `.ll` непереносимым между
+//! архитектурами.
+//!
+//! # Что берёт этот срез
+//!
+//! Скалярный фрагмент, узкий намеренно: каркас важнее охвата, потому что правят
+//! его пять треков волны. Берётся плоское **целое** (восемь типов §4.11 из
+//! десяти), арифметика, сравнение, прямой вызов первой формы, `let`, разбор по
+//! нульарному конструктору, `dup` и `drop`. Ответ программы обязан быть плоским
+//! целым.
+//!
+//! Не берётся - и отвергается **названным** отказом ([`LlvmError`]): плавающее,
+//! объекты с полями, замыкания, массивы, регионы, плотные агрегаты, вторая
+//! форма понижения и всё, что за ней стоит, - хендлеры, резумпции, питомник.
+//!
+//! # Где встанут треки B-F
+//!
+//! Каждый режет в **одном** месте, и место названо здесь, чтобы его не искали
+//! по тексту.
+//!
+//! - **B, алиасинг из QTT.** [`parameter_attributes`] получает [`Fact`]
+//!   целиком: `noalias`, `dereferenceable` и `align` ставятся оттуда по
+//!   [`Fact::unique`], а не по кратности (§10 вопрос 149). Scoped-метаданные
+//!   регионов идут через [`Notes`] на инструкции и [`Module::metadata`] на
+//!   модуле.
+//! - **C, схлопывание RC.** Конвейер - **данные**
+//!   ([`llvm::Pipeline`](crate::llvm::Pipeline)), список стадий; свой проход
+//!   встаёт стадией между инлайнингом и остальным, а не переписыванием
+//!   драйвера.
+//! - **D, `musttail`.** У каждого вызова есть сорт ([`Tail`]), и печатается он
+//!   одной приставкой; сегодня значение одно.
+//! - **E, DWARF.** [`Notes`] подписывает инструкцию, [`Module::metadata`] несёт
+//!   узлы модуля.
+//! - **F, строгий режим плавающей арифметики.** [`Builder::binary`] печатает
+//!   флаги инструкции отдельным полем; плавающее сегодня отвергается, и трек F
+//!   снимает отказ вместе с добавлением флагов.
+//!
+//! # Чем срез платит рантайму, и это измерено
+//!
+//! Сравнение (§4.3) отвечает конструктором `Bool`, а строит и разбирает его
+//! **рантайм** - `adamas_con0` и `adamas_tag`. Для `opt` они непрозрачны, и на
+//! `workload-scalar` после `-O2` остаётся цикл с двумя вызовами на виток
+//! (проверено 2026-09-15 чтением `opt`-выхода: `tailrecurse` со вставленными
+//! `fn_0`, `fn_1`, `fn_2`, и в нём `call @adamas_con0`, `call @adamas_tag`).
+//!
+//! У C-бэкенда та же пара вызовов есть в тексте и **исчезает на сборке**:
+//! строка стенда `-std=c11 -O2 -flto` даёт ноль вызовов обоих имён в готовом
+//! бинаре (проверено тем же днём, `objdump -d`). Разница не в качестве
+//! кодогенерации, а в том, что рантайм приезжает к C битовым кодом LTO, а к
+//! `.ll` - готовым объектником.
+//!
+//! Отсюда два следствия. Мерить LLVM против C сегодня нельзя: число мерило бы
+//! LTO, а не бэкенд. И снимается это стадией в конвейере
+//! ([`llvm::Pipeline`](crate::llvm::Pipeline)) - рантайм, собранный в
+//! `.bc` и приложенный `llvm-link` перед `opt`, - а не правкой эмиттера.
+//!
+//! # Что рядом с `.ll` и почему
+//!
+//! Спутник на C ([`Artefacts::support`]): печать ответа и точка входа. Он не
+//! уступка - это **те же** `flat.c` и `main.c`, что собирает C-бэкенд, взятые
+//! дословно теми же `include_str!`. Разъедься две печати - разошёлся бы и
+//! договор «печатает то же», а причина была бы не в вычислении. Программу
+//! считает `.ll` целиком; спутник её только печатает.
+
+use std::collections::HashMap;
+use std::fmt::Write as _;
+
+use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
+
+use crate::ir::{Arm, Expr, Fact, Form, FuncId, Function, LocalId, Program, Repr};
+
+/// Почему эмиссия в LLVM отказала.
+///
+/// Отказ **названный**, как у понижения: молча посчитать не то хуже, чем не
+/// посчитать. Мера среза читается прогоном по корпусу (`tests/llvm.rs`), а не
+/// оценкой, и каждая причина здесь - строка этой меры.
+#[derive(Debug, thiserror::Error)]
+pub enum LlvmError {
+    /// Узел представления, которого скалярный фрагмент не знает.
+    #[error("`{function}`: {node} - узел вне скалярного фрагмента")]
+    Node {
+        /// Чья функция.
+        function: String,
+        /// Какой узел.
+        node: &'static str,
+    },
+
+    /// Представление, которое в регистр целого не ложится.
+    #[error("`{function}`: {place} - {shape}, а срез берёт только плоское целое")]
+    Shape {
+        /// Чья функция.
+        function: String,
+        /// Что именно: параметр, ответ, промежуточное значение.
+        place: String,
+        /// Как оно представлено.
+        shape: String,
+    },
+
+    /// Плавающая арифметика: её берёт трек F вместе с флагами инструкций.
+    #[error("`{function}`: плавающее {ty} - флаги контракции ставит трек F")]
+    Real {
+        /// Чья функция.
+        function: String,
+        /// Какого типа.
+        ty: &'static str,
+    },
+
+    /// Вторая форма понижения: кадр отчуждается в кучу (§3.4).
+    #[error("`{function}`: вторая форма понижения - кадров этот срез не кладёт")]
+    Detached {
+        /// Чья функция.
+        function: String,
+    },
+
+    /// Разбор объекта с полями: за ним стоит весь объектный слой рантайма.
+    #[error("`{function}`: ветвь связывает поля `{constructor}` - объектов срез не читает")]
+    Fields {
+        /// Чья функция.
+        function: String,
+        /// Какого конструктора.
+        constructor: String,
+    },
+}
+
+/// Что даёт эмиссия: текст `.ll` и спутник на C.
+#[derive(Clone, Debug)]
+pub struct Artefacts {
+    /// Текст `.ll`: программа целиком.
+    pub ll: String,
+    /// Спутник на C: печать ответа и точка входа.
+    pub support: String,
+}
+
+/// Имя точки входа, которую спутник зовёт из `.ll`.
+const ENTRY_SYMBOL: &str = "adamas_entry";
+
+/// Имя константы с текстом обрыва по неизвестному тегу.
+const TAG_MESSAGE: &str = "@.str.tag";
+
+/// Имя константы с текстом обрыва в дропе детей.
+const RELEASE_MESSAGE: &str = "@.str.release";
+
+/// Атрибуты определения функции.
+///
+/// `nounwind` - утверждение о **нашем** коде: раскрутки в порождённом нет
+/// вовсе, обрыв идёт через `adamas_fail`. На объявления рантайма он не
+/// ставится: про чужой код это было бы обещанием, а не фактом.
+const DEFINITION_ATTRIBUTES: &str = "nounwind";
+
+/// Собирает `.ll` и спутник на C.
+///
+/// # Errors
+///
+/// [`LlvmError`] - форма понижения вне скалярного фрагмента.
+pub fn emit(program: &Program) -> Result<Artefacts, LlvmError> {
+    let entry = &program.functions[program.entry.0];
+    // Ответ обязан быть плоским целым: печатает его спутник, а печать плоского
+    // ответа - единственная, которую он знает. Граница здесь у **печати**, не у
+    // вычисления, и именно она отвергает большую часть корпуса.
+    let answer = integral(entry.result).ok_or_else(|| LlvmError::Shape {
+        function: entry.name.clone(),
+        place: "ответ программы".to_owned(),
+        shape: describe(entry.result),
+    })?;
+    // Точка входа зовётся без аргументов, и подать их было бы неоткуда: `main`
+    // с параметром есть функция значением, а её ответ печатать нечем и у
+    // C-бэкенда (`agreement.rs`, `LANGUAGE`).
+    if entry.live_parameters().next().is_some() {
+        return Err(LlvmError::Shape {
+            function: entry.name.clone(),
+            place: "точка входа".to_owned(),
+            shape: "функция с параметрами".to_owned(),
+        });
+    }
+
+    let mut module = Module::default();
+    for function in &program.functions {
+        module.function(program, function)?;
+    }
+    Ok(Artefacts {
+        ll: module.finish(program, answer),
+        support: support(answer),
+    })
+}
+
+/// Плоское **целое** представление. `None` - всё прочее, включая плавающее.
+fn integral(repr: Repr) -> Option<PrimTy> {
+    repr.primitive().filter(|ty| !ty.floating())
+}
+
+/// Как назвать представление в тексте отказа.
+fn describe(repr: Repr) -> String {
+    match repr {
+        Repr::Flat(ty) => format!("плоское {}", ty.name()),
+        Repr::Boxed => "объект кучи".to_owned(),
+        Repr::Packed(_) => "плотный агрегат".to_owned(),
+        Repr::Layout => "дескриптор укладки".to_owned(),
+        Repr::Opaque => "плоское неизвестной ширины".to_owned(),
+        Repr::Array(_) => "массив".to_owned(),
+        Repr::Region => "блок региона".to_owned(),
+        Repr::Record(_) => "запись".to_owned(),
+        Repr::Resumption => "резумпция".to_owned(),
+    }
+}
+
+/// Тип LLVM у плоского значения.
+///
+/// Знаковость типом не выражается вовсе - её несёт инструкция (`sdiv` против
+/// `udiv`, `slt` против `ult`), и это не потеря: §4.11 различает `Int64` и
+/// `UInt64` шириной и правилом сравнения, а ширина здесь та же.
+///
+/// Плавающие два ряда сегодня не достигаются - их отвергает [`integral`], - но
+/// названы верно: трек F снимает отказ, а не дописывает таблицу.
+const fn machine(ty: PrimTy) -> &'static str {
+    match ty {
+        PrimTy::Int8 | PrimTy::UInt8 => "i8",
+        PrimTy::Int16 | PrimTy::UInt16 => "i16",
+        PrimTy::Int32 | PrimTy::UInt32 => "i32",
+        PrimTy::Int64 | PrimTy::UInt64 => "i64",
+        PrimTy::Float32 => "float",
+        PrimTy::Float64 => "double",
+    }
+}
+
+/// Сорт вызова.
+///
+/// Значение сегодня одно, и это **шов трека D**: `musttail` есть свойство
+/// инструкции, а не ключей пользователя (§3.4, §5.3), и ставится оно здесь.
+/// Заводить сорт сейчас дешевле, чем потом искать все места печати вызова.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tail {
+    /// Обычный вызов: кадр вызывающего живёт дальше.
+    Plain,
+}
+
+impl Tail {
+    /// Приставка инструкции вызова.
+    const fn prefix(self) -> &'static str {
+        match self {
+            Self::Plain => "",
+        }
+    }
+}
+
+/// Метаданные, которыми подписывается инструкция.
+///
+/// Пусто сегодня и не пусто у треков B и E: scoped `!alias.scope`/`!noalias`
+/// приходят от регионов, `!dbg` - от `DIBuilder`. Печать инструкции **одна**
+/// ([`Builder::instruction`]), поэтому дописывать их придётся в одном месте, а
+/// не в двух десятках.
+#[derive(Clone, Debug, Default)]
+struct Notes {
+    /// Узлы в порядке печати.
+    items: Vec<String>,
+}
+
+impl Notes {
+    /// Хвост инструкции. Пустой список не печатает даже запятой.
+    fn suffix(&self) -> String {
+        if self.items.is_empty() {
+            return String::new();
+        }
+        format!(", {}", self.items.join(", "))
+    }
+}
+
+/// Атрибуты параметра: место `noalias`, `dereferenceable` и `align` (трек B).
+///
+/// [`Fact`] приходит целиком **намеренно**. Уникальность берётся из
+/// производства - `unique data`/`resource` и локально свежий объект, - а из
+/// кратности не берётся никогда (§10 вопрос 149, закрыт): `both shared shared`
+/// на кратности `1` принимается, и `noalias` там был бы UB. Поле
+/// [`Fact::unique`] сегодня не заполняет никто, и отсюда пусто по построению, а
+/// не по забывчивости.
+fn parameter_attributes(fact: &Fact) -> String {
+    let _ = fact;
+    String::new()
+}
+
+/// Модуль целиком.
+#[derive(Debug, Default)]
+struct Module {
+    /// Тела функций.
+    bodies: String,
+    /// Узлы метаданных модуля. Пусто сегодня; трек E кладёт сюда DWARF.
+    metadata: Vec<String>,
+}
+
+impl Module {
+    /// Эмитит одну функцию.
+    fn function(&mut self, program: &Program, function: &Function) -> Result<(), LlvmError> {
+        if function.form == Form::Detached {
+            return Err(LlvmError::Detached {
+                function: function.name.clone(),
+            });
+        }
+        if let Some(binding) = function.captured.first() {
+            return Err(LlvmError::Shape {
+                function: function.name.clone(),
+                place: format!("захват `{}`", binding.name),
+                shape: "среда замыкания".to_owned(),
+            });
+        }
+        let result = slot_or(function, "ответ", function.result)?;
+
+        let mut parameters = Vec::new();
+        for binding in function.live_parameters() {
+            let ty = slot_or(
+                function,
+                &format!("параметр `{}`", binding.name),
+                binding.fact.repr,
+            )?;
+            let attributes = parameter_attributes(&binding.fact);
+            let spaced = if attributes.is_empty() {
+                String::new()
+            } else {
+                format!("{attributes} ")
+            };
+            parameters.push(format!("{ty} {spaced}%v{}", binding.local.0));
+        }
+
+        let mut builder = Builder::new(program, function);
+        let answer = builder.value(&function.body)?;
+        builder.instruction(&format!("ret {result} {answer}"));
+
+        let _ = writeln!(self.bodies, "; {}", function.name);
+        let _ = writeln!(
+            self.bodies,
+            "define internal {result} @fn_{}({}) {DEFINITION_ATTRIBUTES} {{",
+            function.id.0,
+            parameters.join(", ")
+        );
+        self.bodies.push_str(&builder.body);
+        self.bodies.push_str("}\n\n");
+        Ok(())
+    }
+
+    /// Складывает модуль: шапка, объявления, константы, тела, метаданные.
+    fn finish(self, program: &Program, answer: PrimTy) -> String {
+        let mut out = String::new();
+        out.push_str(concat!(
+            "; Порождено понижением Adamas. Править нечего: правится тот, кто\n",
+            "; породил. Договор с рантаймом - `adamas.h`.\n",
+            ";\n",
+            "; Подмножество IR консервативное (`emit_llvm.rs`): ни `nsw`/`nuw` у\n",
+            "; арифметики, ни `getelementptr`, ни строк цели - её берёт `llc` у\n",
+            "; хоста. Проверяется прогоном на минимальной версии, а не грепом.\n",
+            "\n",
+            "; Рантайм: те же точки входа, что зовёт C-бэкенд.\n",
+            "declare ptr @adamas_con0(i16)\n",
+            "declare i16 @adamas_tag(ptr)\n",
+            "declare ptr @adamas_dup(ptr)\n",
+            "declare void @adamas_drop(ptr, ptr)\n",
+            "declare void @adamas_fail(ptr) noreturn\n",
+            "\n",
+        ));
+
+        let _ = writeln!(
+            out,
+            "{TAG_MESSAGE} = private unnamed_addr constant [{} x i8] c\"{}\"",
+            terminated(TAG_TEXT).len(),
+            escaped(&terminated(TAG_TEXT))
+        );
+        let _ = writeln!(
+            out,
+            "{RELEASE_MESSAGE} = private unnamed_addr constant [{} x i8] c\"{}\"\n",
+            terminated(RELEASE_TEXT).len(),
+            escaped(&terminated(RELEASE_TEXT))
+        );
+
+        out.push_str(concat!(
+            "; Дроп детей: срез берёт только нульарные конструкторы, а они\n",
+            "; непосредственны (`adamas_con0`) и до release не доходят вовсе.\n",
+            "; Не отказ, а обрыв: доехав сюда, срез считал бы не то, что обещал.\n"
+        ));
+        let _ = writeln!(
+            out,
+            "define internal void @adamas_release_none(ptr %value) {DEFINITION_ATTRIBUTES} {{"
+        );
+        out.push_str("entry:\n");
+        let _ = writeln!(out, "  call void @adamas_fail(ptr {RELEASE_MESSAGE})");
+        out.push_str("  unreachable\n}\n\n");
+
+        out.push_str(&self.bodies);
+
+        let _ = writeln!(out, "; Точка входа для спутника на C.");
+        let _ = writeln!(
+            out,
+            "define {} @{ENTRY_SYMBOL}() {DEFINITION_ATTRIBUTES} {{",
+            machine(answer)
+        );
+        out.push_str("entry:\n");
+        let _ = writeln!(
+            out,
+            "  %answer = call {} @fn_{}()",
+            machine(answer),
+            program.entry.0
+        );
+        let _ = writeln!(out, "  ret {} %answer", machine(answer));
+        out.push_str("}\n");
+
+        for (at, node) in self.metadata.iter().enumerate() {
+            let _ = writeln!(out, "!{at} = {node}");
+        }
+        out
+    }
+}
+
+/// Текст обрыва по неизвестному тегу.
+const TAG_TEXT: &str = "разбор не знает конструктора";
+
+/// Текст обрыва в дропе детей.
+const RELEASE_TEXT: &str = "release в скалярном фрагменте: у нульарного детей нет";
+
+/// Байты строки с завершающим нулём.
+fn terminated(text: &str) -> Vec<u8> {
+    let mut bytes = text.as_bytes().to_vec();
+    bytes.push(0);
+    bytes
+}
+
+/// Байты строковой константы в форме `.ll`.
+///
+/// Экранируется всё, кроме печатной латиницы и пробела: русский текст занимает
+/// два байта на букву, и печатать их сырыми значило бы полагаться на кодировку
+/// файла там, где `.ll` объявлен байтовым.
+fn escaped(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for byte in bytes {
+        if *byte == b' ' || (byte.is_ascii_graphic() && *byte != b'"' && *byte != b'\\') {
+            out.push(char::from(*byte));
+        } else {
+            let _ = write!(out, "\\{byte:02X}");
+        }
+    }
+    out
+}
+
+/// Тип регистра, в который представление ложится. `None` - не ложится.
+///
+/// Указательное здесь ровно одно - [`Repr::Boxed`], - и в срезе за ним стоит
+/// **только нульарный конструктор**: единственный узел, порождающий указатель
+/// без аллокации, - это [`Expr::Compare`] (§4.3, ответ `Bool`), а всё, что
+/// заводит объект с полями, срез отвергает узлом. Отсюда законность и `drop`
+/// через `@adamas_release_none`: у непосредственного значения детей нет.
+///
+/// Запись и резумпция сюда **не** входят, хотя в рантайме они тот же указатель:
+/// у первой есть поля, у второй - свой дроп, и обе означали бы объектный слой.
+fn slot(repr: Repr) -> Option<&'static str> {
+    match repr {
+        Repr::Boxed => Some("ptr"),
+        other => integral(other).map(machine),
+    }
+}
+
+/// Он же с названным отказом.
+fn slot_or(function: &Function, place: &str, repr: Repr) -> Result<&'static str, LlvmError> {
+    if let Some(ty) = repr.primitive().filter(|ty| ty.floating()) {
+        return Err(LlvmError::Real {
+            function: function.name.clone(),
+            ty: ty.name(),
+        });
+    }
+    slot(repr).ok_or_else(|| LlvmError::Shape {
+        function: function.name.clone(),
+        place: place.to_owned(),
+        shape: describe(repr),
+    })
+}
+
+/// Состояние эмиссии одного тела.
+struct Builder<'a> {
+    program: &'a Program,
+    function: &'a Function,
+    /// Что в каком связывании лежит: от этого тип регистра.
+    reprs: HashMap<LocalId, Repr>,
+    /// Чем связывание представлено в тексте.
+    ///
+    /// Подстановка, а не своё имя на связывание: `let` в IR - дерево, значение
+    /// у него единственное, и лишний регистр пришлось бы заводить инструкцией,
+    /// у которой для указателя нет формы (`add ptr` не бывает).
+    operands: HashMap<LocalId, String>,
+    /// Текст тела: блоки в порядке печати.
+    body: String,
+    /// Метаданные инструкций. Пусто сегодня (треки B и E).
+    notes: Notes,
+    /// Счётчик временных имён.
+    temps: u32,
+    /// Счётчик разборов: им нумеруются блоки.
+    matches: u32,
+    /// Имя блока, в который печатается инструкция.
+    ///
+    /// Нужно `phi`: предшественник ветви - блок, которым она **закончилась**, а
+    /// не тот, которым началась, и различаются они, как только внутри ветви
+    /// встал ещё один разбор.
+    block: String,
+}
+
+impl<'a> Builder<'a> {
+    fn new(program: &'a Program, function: &'a Function) -> Self {
+        let mut reprs = HashMap::new();
+        let mut operands = HashMap::new();
+        for binding in function.captured.iter().chain(&function.parameters) {
+            reprs.insert(binding.local, binding.fact.repr);
+        }
+        // Значение получают только **дожившие** (§3.3): стёртого в рантайме нет
+        // вовсе, и в сигнатуре его нет тоже. Упомяни его тело - и отказ придёт
+        // названным, а не неопределённым именем в `.ll`.
+        for binding in function.live_captured().chain(function.live_parameters()) {
+            operands.insert(binding.local, format!("%v{}", binding.local.0));
+        }
+        collect(&function.body, &mut reprs);
+        Self {
+            program,
+            function,
+            reprs,
+            operands,
+            body: "entry:\n".to_owned(),
+            notes: Notes::default(),
+            temps: 0,
+            matches: 0,
+            block: "entry".to_owned(),
+        }
+    }
+
+    /// Свежее временное имя.
+    fn temp(&mut self) -> String {
+        let name = format!("%t{}", self.temps);
+        self.temps += 1;
+        name
+    }
+
+    /// Единственная точка печати инструкции.
+    ///
+    /// Одна на весь эмиттер намеренно: метаданные треков B и E дописываются
+    /// суффиксом здесь, а не в двух десятках мест печати.
+    fn instruction(&mut self, text: &str) {
+        let _ = writeln!(self.body, "  {text}{}", self.notes.suffix());
+    }
+
+    /// Начинает новый блок.
+    fn start(&mut self, label: &str) {
+        let _ = writeln!(self.body, "\n{label}:");
+        label.clone_into(&mut self.block);
+    }
+
+    /// Отказ, названный этой функцией.
+    fn node(&self, node: &'static str) -> LlvmError {
+        LlvmError::Node {
+            function: self.function.name.clone(),
+            node,
+        }
+    }
+
+    /// Текст, которым связывание попадает в инструкцию.
+    fn operand(&self, local: LocalId) -> Result<String, LlvmError> {
+        self.operands
+            .get(&local)
+            .cloned()
+            .ok_or_else(|| self.node("связывание без значения"))
+    }
+
+    /// Представление значения выражения.
+    fn shape(&self, expr: &Expr) -> Repr {
+        match expr {
+            Expr::Local(local) => self.reprs.get(local).copied().unwrap_or(Repr::Boxed),
+            Expr::Literal { ty, .. } | Expr::Primitive { ty, .. } => Repr::Flat(*ty),
+            Expr::Call { function, .. } => self.program.functions[function.0].result,
+            Expr::Bind { body, .. } | Expr::Dup { body, .. } | Expr::Drop { body, .. } => {
+                self.shape(body)
+            }
+            Expr::Match { arms, .. } => arms
+                .first()
+                .map_or(Repr::Boxed, |arm| self.shape(&arm.body)),
+            // Ответ сравнения - конструктор `Bool` (§4.3): аргументы плоские,
+            // ответ указательный. Прочее срез отвергает, и представление его
+            // здесь не спрашивается.
+            _ => Repr::Boxed,
+        }
+    }
+
+    /// Тип регистра, в котором лежит значение выражения.
+    fn typed(&self, expr: &Expr) -> Result<&'static str, LlvmError> {
+        let repr = self.shape(expr);
+        slot(repr).ok_or_else(|| LlvmError::Shape {
+            function: self.function.name.clone(),
+            place: "промежуточное значение".to_owned(),
+            shape: describe(repr),
+        })
+    }
+
+    /// Эмитит выражение и отдаёт операнд, в котором лежит его значение.
+    fn value(&mut self, expr: &Expr) -> Result<String, LlvmError> {
+        match expr {
+            Expr::Local(local) => self.operand(*local),
+            Expr::Literal { ty, bits } => self.literal(*ty, *bits),
+            Expr::Primitive {
+                op,
+                ty,
+                left,
+                right,
+            } => self.arithmetic(*op, *ty, left, right),
+            Expr::Compare {
+                op,
+                ty,
+                left,
+                right,
+                yes,
+                no,
+            } => self.comparison(*op, *ty, left, right, (yes.0, no.0)),
+            Expr::Call {
+                function,
+                arguments,
+            } => self.call(*function, arguments),
+            Expr::Bind {
+                binding,
+                value,
+                body,
+            } => {
+                let computed = self.value(value)?;
+                let _ = writeln!(self.body, "  ; {computed} - {}", binding.name);
+                self.operands.insert(binding.local, computed);
+                self.value(body)
+            }
+            Expr::Dup { local, body } => {
+                let value = self.operand(*local)?;
+                let name = self.temp();
+                self.instruction(&format!("{name} = call ptr @adamas_dup(ptr {value})"));
+                self.value(body)
+            }
+            Expr::Drop {
+                local,
+                salvage,
+                body,
+            } => {
+                if salvage.collapses() {
+                    return Err(self.node("схлопнутый дроп разобранного"));
+                }
+                let value = self.operand(*local)?;
+                self.instruction(&format!(
+                    "call void @adamas_drop(ptr {value}, ptr @adamas_release_none)"
+                ));
+                self.value(body)
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => self.analysis(scrutinee, arms),
+            Expr::Erased => Err(self.node("стёртая позиция значением")),
+            Expr::Construct { .. } | Expr::ConstructClosure { .. } => Err(self.node("конструктор")),
+            Expr::Closure { .. } | Expr::Apply { .. } => Err(self.node("замыкание")),
+            Expr::Reclaim { .. } => Err(self.node("придержанная ячейка")),
+            Expr::Pack { .. } | Expr::Unpack { .. } => Err(self.node("плотный агрегат")),
+            Expr::Layout { .. } | Expr::LayoutField { .. } => Err(self.node("дескриптор укладки")),
+            Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. } => {
+                Err(self.node("массив"))
+            }
+            Expr::RegionNew
+            | Expr::RegionAlloc { .. }
+            | Expr::RegionLast { .. }
+            | Expr::RegionRead { .. }
+            | Expr::RegionWrite { .. }
+            | Expr::RegionRecycle { .. }
+            | Expr::RegionPop { .. } => Err(self.node("регион")),
+            Expr::Handle { .. } | Expr::Perform { .. } | Expr::Mask { .. } => {
+                Err(self.node("эффект"))
+            }
+            Expr::Resume { .. } => Err(self.node("резумпция")),
+            Expr::Closing { .. } => Err(self.node("выход из scope с ресурсом")),
+            Expr::Nursery { .. } | Expr::Fiber { .. } | Expr::Cancel { .. } => {
+                Err(self.node("питомник"))
+            }
+        }
+    }
+
+    /// Литерал: биты, обрезанные по ширине типа (§4.3).
+    ///
+    /// Беззнаковое десятичное: LLVM принимает всё, что укладывается в ширину, а
+    /// биты в представлении уже обрезаны понижением.
+    fn literal(&mut self, ty: PrimTy, bits: u64) -> Result<String, LlvmError> {
+        self.numeric(ty)?;
+        Ok(bits.to_string())
+    }
+
+    /// Отказ, если тип плавающий: это шов трека F, а не забытая ветвь.
+    fn numeric(&self, ty: PrimTy) -> Result<(), LlvmError> {
+        if ty.floating() {
+            return Err(LlvmError::Real {
+                function: self.function.name.clone(),
+                ty: ty.name(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Арифметика: `add`, `sub`, `mul` без `nsw` и `nuw`.
+    ///
+    /// Отсутствие флагов - не забывчивость: §4.3 требует **заворачивания**, то
+    /// есть определённого поведения, а `nsw`/`nuw` объявили бы переполнение
+    /// невозможным и отдали бы его оптимизатору как `poison`.
+    fn arithmetic(
+        &mut self,
+        op: PrimOp,
+        ty: PrimTy,
+        left: &Expr,
+        right: &Expr,
+    ) -> Result<String, LlvmError> {
+        self.numeric(ty)?;
+        let opcode = match op {
+            PrimOp::Add => "add",
+            PrimOp::Sub => "sub",
+            PrimOp::Mul => "mul",
+        };
+        let left = self.value(left)?;
+        let right = self.value(right)?;
+        Ok(self.binary(opcode, "", machine(ty), &left, &right))
+    }
+
+    /// Двуместная инструкция.
+    ///
+    /// `flags` - поле трека F: `fadd` и `fmul` получат там запрет контракции, и
+    /// запрет этот обязан стоять на **инструкции**, а не на ключах сборки.
+    fn binary(&mut self, opcode: &str, flags: &str, ty: &str, left: &str, right: &str) -> String {
+        let spaced = if flags.is_empty() {
+            String::new()
+        } else {
+            format!("{flags} ")
+        };
+        let name = self.temp();
+        self.instruction(&format!("{name} = {opcode} {spaced}{ty} {left}, {right}"));
+        name
+    }
+
+    /// Сравнение: `icmp`, затем нульарный конструктор `Bool` (§4.3).
+    ///
+    /// Тег выбирается `select`'ом, а значение строит **рантайм**
+    /// (`adamas_con0`): непосредственное представление принадлежит ему, и
+    /// вторая его запись здесь разъехалась бы с первой молча.
+    fn comparison(
+        &mut self,
+        op: PrimCmp,
+        ty: PrimTy,
+        left: &Expr,
+        right: &Expr,
+        verdict: (u16, u16),
+    ) -> Result<String, LlvmError> {
+        self.numeric(ty)?;
+        let predicate = match (op, ty.signed()) {
+            (PrimCmp::Eq, _) => "eq",
+            (PrimCmp::Ne, _) => "ne",
+            (PrimCmp::Lt, true) => "slt",
+            (PrimCmp::Lt, false) => "ult",
+            (PrimCmp::Le, true) => "sle",
+            (PrimCmp::Le, false) => "ule",
+            (PrimCmp::Gt, true) => "sgt",
+            (PrimCmp::Gt, false) => "ugt",
+            (PrimCmp::Ge, true) => "sge",
+            (PrimCmp::Ge, false) => "uge",
+        };
+        let left = self.value(left)?;
+        let right = self.value(right)?;
+        let verdicted = self.binary("icmp", predicate, machine(ty), &left, &right);
+        let (yes, no) = verdict;
+        let tag = self.temp();
+        self.instruction(&format!(
+            "{tag} = select i1 {verdicted}, i16 {yes}, i16 {no}"
+        ));
+        let name = self.temp();
+        self.instruction(&format!("{name} = call ptr @adamas_con0(i16 {tag})"));
+        Ok(name)
+    }
+
+    /// Прямой вызов: стёртые позиции в вызов не идут.
+    fn call(&mut self, function: FuncId, arguments: &[Expr]) -> Result<String, LlvmError> {
+        let called = &self.program.functions[function.0];
+        if called.form == Form::Detached {
+            return Err(LlvmError::Detached {
+                function: called.name.clone(),
+            });
+        }
+        let result = slot(called.result).ok_or_else(|| LlvmError::Shape {
+            function: self.function.name.clone(),
+            place: format!("ответ `{}`", called.name),
+            shape: describe(called.result),
+        })?;
+        let present: Vec<usize> = called
+            .parameters
+            .iter()
+            .enumerate()
+            .filter(|(_, binding)| binding.fact.present)
+            .map(|(position, _)| position)
+            .collect();
+        let mut given = Vec::new();
+        for position in present {
+            let Some(argument) = arguments.get(position) else {
+                continue;
+            };
+            let ty = self.typed(argument)?;
+            let operand = self.value(argument)?;
+            given.push(format!("{ty} {operand}"));
+        }
+        let name = self.temp();
+        self.instruction(&format!(
+            "{name} = {}call {result} @fn_{}({})",
+            Tail::Plain.prefix(),
+            function.0,
+            given.join(", ")
+        ));
+        Ok(name)
+    }
+
+    /// Разбор: `switch` по тегу, ветви - блоки, ответ - `phi`.
+    ///
+    /// Полей ветвь не связывает: за полем стоит объект кучи, а срез его не
+    /// читает. Нульарный конструктор непосредствен, и тег у него - он сам.
+    fn analysis(&mut self, scrutinee: &Expr, arms: &[Arm]) -> Result<String, LlvmError> {
+        if arms.is_empty() {
+            return Err(self.node("разбор пустого типа"));
+        }
+        for arm in arms {
+            if arm.fields.iter().any(|field| field.fact.present) {
+                return Err(LlvmError::Fields {
+                    function: self.function.name.clone(),
+                    constructor: self.program.constructors[usize::from(arm.constructor.0)]
+                        .name
+                        .clone(),
+                });
+            }
+        }
+        let answer = self.typed(&arms[0].body)?;
+
+        let scrutinised = self.value(scrutinee)?;
+        let at = self.matches;
+        self.matches += 1;
+        let tag = self.temp();
+        self.instruction(&format!("{tag} = call i16 @adamas_tag(ptr {scrutinised})"));
+
+        let labels: Vec<String> = (0..arms.len()).map(|it| format!("m{at}.a{it}")).collect();
+        let fail = format!("m{at}.fail");
+        let join = format!("m{at}.join");
+        let cases: Vec<String> = arms
+            .iter()
+            .zip(&labels)
+            .map(|(arm, label)| format!("i16 {}, label %{label}", arm.constructor.0))
+            .collect();
+        self.instruction(&format!(
+            "switch i16 {tag}, label %{fail} [ {} ]",
+            cases.join(" ")
+        ));
+
+        let mut incoming = Vec::new();
+        for (arm, label) in arms.iter().zip(&labels) {
+            self.start(label);
+            let value = self.value(&arm.body)?;
+            // Предшественник - блок, которым ветвь **закончилась**: вложенный
+            // разбор внутри неё сменил бы его.
+            incoming.push(format!("[ {value}, %{} ]", self.block));
+            self.instruction(&format!("br label %{join}"));
+        }
+
+        self.start(&fail);
+        self.instruction(&format!("call void @adamas_fail(ptr {TAG_MESSAGE})"));
+        self.instruction("unreachable");
+
+        self.start(&join);
+        let name = self.temp();
+        self.instruction(&format!("{name} = phi {answer} {}", incoming.join(", ")));
+        Ok(name)
+    }
+}
+
+/// Представления связываний, заведённых телом.
+fn collect(expr: &Expr, found: &mut HashMap<LocalId, Repr>) {
+    match expr {
+        Expr::Bind { binding, .. } => {
+            found.insert(binding.local, binding.fact.repr);
+        }
+        Expr::Match { arms, .. } => {
+            for arm in arms {
+                for field in &arm.fields {
+                    found.insert(field.local, field.fact.repr);
+                }
+            }
+        }
+        _ => {}
+    }
+    for child in expr.children() {
+        collect(child, found);
+    }
+}
+
+/// Спутник на C: печать ответа и точка входа.
+///
+/// `flat.c` и `main.c` берутся **дословно** теми же `include_str!`, какими их
+/// берёт C-бэкенд: печать у двух бэкендов обязана быть одной, иначе «печатает
+/// то же» держалось бы на совпадении двух печатей, а не на их тождестве.
+fn support(answer: PrimTy) -> String {
+    let mut out = String::new();
+    out.push_str(concat!(
+        "/* Порождено понижением Adamas: спутник `.ll`.\n",
+        " *\n",
+        " * Программу считает `.ll` целиком; здесь только печать её ответа и\n",
+        " * точка входа. `flat.c` и `main.c` - те же файлы, что собирает\n",
+        " * C-бэкенд, взятые дословно.\n",
+        " */\n",
+        "\n",
+        "#include \"adamas.h\"\n",
+        "\n",
+        "#include <stdio.h>\n",
+        "\n",
+    ));
+    out.push_str(crate::emit_c::FLAT);
+    out.push('\n');
+    let ctype = crate::emit_c::scalar(Repr::Flat(answer));
+    out.push_str("/* Ответ считает `.ll`, печатает `main.c` ниже. */\n");
+    let _ = writeln!(out, "{ctype} {ENTRY_SYMBOL}(void);");
+    let _ = writeln!(out, "#define ADAMAS_ENTRY {ENTRY_SYMBOL}");
+    let _ = writeln!(
+        out,
+        "#define ADAMAS_ANSWER_FLAT adamas_word_{}",
+        answer.name()
+    );
+    let _ = writeln!(out, "#define ADAMAS_ANSWER_TYPE {ctype}");
+    let _ = writeln!(
+        out,
+        "#define ADAMAS_ANSWER_KIND {}u",
+        crate::emit_c::kind(answer)
+    );
+    out.push('\n');
+    out.push_str(crate::emit_c::ENTRY);
+    out
+}

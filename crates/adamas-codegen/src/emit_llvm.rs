@@ -446,9 +446,9 @@ fn offset(slot: usize) -> u64 {
 /// «дроблёное тело»), и тип у этой границы один. Спрашивается это в трёх
 /// местах - у определения, у прямого вызова и у трамплинов, - и запись одна,
 /// потому что разъехаться им негде.
-fn crossing(program: &Program, suspending: &Suspension, id: FuncId) -> Option<&'static str> {
+fn crossing(program: &Program, suspending: &Suspension, id: FuncId) -> Option<String> {
     if suspending.functions.contains(&id) {
-        return Some("ptr");
+        return Some("ptr".to_owned());
     }
     slot(program.functions[id.0].result)
 }
@@ -481,7 +481,7 @@ fn boundaries(program: &Program, suspending: &Suspension) -> Result<(), LlvmErro
                 shape: "первая форма понижения".to_owned(),
             });
         }
-        if crossing(program, suspending, id) != Some("ptr") {
+        if crossing(program, suspending, id).as_deref() != Some("ptr") {
             return Err(LlvmError::Shape {
                 function: function.name.clone(),
                 place: format!("ответ: {place}"),
@@ -584,6 +584,7 @@ fn describe(repr: Repr) -> String {
         Repr::Region => "блок региона".to_owned(),
         Repr::Record(_) => "запись".to_owned(),
         Repr::Resumption => "резумпция".to_owned(),
+        Repr::Simd { lanes, lane } => format!("вектор `Simd {lanes} {lane}`"),
     }
 }
 
@@ -970,14 +971,14 @@ impl Module {
         // указателем, а вернуть его требуется немедленно. C-эмиттер проверяет то
         // же самое и тем же местом (`emit_c::forms_agree`, `EmitError::Aborting`).
         let result = if split {
-            if slot(function.result) != Some("ptr") {
+            if slot(function.result).as_deref() != Some("ptr") {
                 return Err(LlvmError::Shape {
                     function: function.name.clone(),
                     place: "ответ дроблёного тела".to_owned(),
                     shape: describe(function.result),
                 });
             }
-            "ptr"
+            "ptr".to_owned()
         } else {
             slot_or(function, "ответ", function.result)?
         };
@@ -1025,7 +1026,7 @@ impl Module {
         let mut builder = Builder::new(
             program,
             function,
-            result,
+            result.clone(),
             suspending,
             &mut self.metadata,
             self.dwarf.as_ref(),
@@ -1536,15 +1537,28 @@ fn escaped(bytes: &[u8]) -> String {
 /// с ручкой стека (§3.4), - и взять её типом значило бы дропнуть её как данные.
 /// Запрет снят вместе с приходом дропа: различает их [`Builder::dropped`] по
 /// представлению связывания, а тип у них и правда один.
-fn slot(repr: Repr) -> Option<&'static str> {
+fn slot(repr: Repr) -> Option<String> {
     match repr {
-        Repr::Boxed | Repr::Record(_) | Repr::Resumption => Some("ptr"),
-        other => other.primitive().map(machine),
+        Repr::Boxed | Repr::Record(_) | Repr::Resumption => Some("ptr".to_owned()),
+        // Вектор (§4.9) - единственное представление, чьё имя типа не
+        // постоянно: ширина есть часть имени. Ради него все эти имена и стали
+        // владеющими.
+        Repr::Simd { lanes, lane } => Some(vector(lanes, lane)),
+        other => other.primitive().map(|ty| machine(ty).to_owned()),
     }
 }
 
+/// Векторный тип LLVM: `<8 x float>` (§4.9).
+///
+/// Форма эта в LLVM с самого начала и между мажорами не двигалась - в отличие
+/// от `llvm.vector.*`-интринсиков, которых этот срез не эмитит ни одного.
+/// Проверяется правило треугольником версий (`tests/llvm.rs`), а не обещанием.
+fn vector(lanes: u32, lane: PrimTy) -> String {
+    format!("<{lanes} x {}>", machine(lane))
+}
+
 /// Он же с названным отказом.
-fn slot_or(function: &Function, place: &str, repr: Repr) -> Result<&'static str, LlvmError> {
+fn slot_or(function: &Function, place: &str, repr: Repr) -> Result<String, LlvmError> {
     slot(repr).ok_or_else(|| LlvmError::Shape {
         function: function.name.clone(),
         place: place.to_owned(),
@@ -1560,7 +1574,7 @@ struct Builder<'a> {
     ///
     /// Нужен обходу хвостовой позиции: `ret` печатает он, а не вызывающий, и
     /// печатей этих у разбора столько, сколько ветвей.
-    result: &'static str,
+    result: String,
     /// Что в каком связывании лежит: от этого тип регистра.
     reprs: HashMap<LocalId, Repr>,
     /// Связывания, чьё производство уникально ([`Unique::Certain`], трек B).
@@ -1638,7 +1652,7 @@ impl<'a> Builder<'a> {
     fn new(
         program: &'a Program,
         function: &'a Function,
-        result: &'static str,
+        result: String,
         suspending: &'a Suspension,
         metadata: &'a mut Metadata,
         dwarf: Option<&'a Dwarf>,
@@ -1704,7 +1718,7 @@ impl<'a> Builder<'a> {
             let Some(ty) = slot(binding.fact.repr) else {
                 continue;
             };
-            let cell = self.frame_cell(ty);
+            let cell = self.frame_cell(&ty);
             let prologue = self.synthetic();
             self.instruction(
                 &format!("store {ty} %v{}, ptr {cell}", binding.local.0),
@@ -1770,7 +1784,7 @@ impl<'a> Builder<'a> {
         let Some(ty) = slot(binding.fact.repr) else {
             return;
         };
-        let cell = self.frame_cell(ty);
+        let cell = self.frame_cell(&ty);
         self.instruction(&format!("store {ty} {value}, ptr {cell}"), self.here());
         self.declare(&binding.name, binding.fact.repr, None, &cell, self.here());
     }
@@ -1858,7 +1872,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Тип регистра, в котором лежит значение выражения.
-    fn typed(&self, expr: &Expr) -> Result<&'static str, LlvmError> {
+    fn typed(&self, expr: &Expr) -> Result<String, LlvmError> {
         let repr = self.shape(expr);
         slot(repr).ok_or_else(|| LlvmError::Shape {
             function: self.function.name.clone(),
@@ -1967,13 +1981,13 @@ impl<'a> Builder<'a> {
                     .is_some_and(|it| it == self.result);
                 let sort = if agreed { Tail::Must } else { Tail::Plain };
                 let name = self.call(*function, arguments, sort)?;
-                let result = self.result;
+                let result = self.result.clone();
                 self.instruction(&format!("ret {result} {name}"), self.here());
                 Ok(())
             }
             other => {
                 let value = self.value(other)?;
-                let result = self.result;
+                let result = self.result.clone();
                 self.instruction(&format!("ret {result} {value}"), self.here());
                 Ok(())
             }
@@ -2038,6 +2052,27 @@ impl<'a> Builder<'a> {
             Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. } => {
                 Err(self.node("массив"))
             }
+            Expr::SimdSplat { lanes, lane, value } => self.splat(*lanes, *lane, value),
+            Expr::SimdSet {
+                lanes,
+                lane,
+                vector,
+                at,
+                value,
+            } => self.insert(*lanes, *lane, vector, at, value),
+            Expr::SimdLane {
+                lanes,
+                lane,
+                vector,
+                at,
+            } => self.extract(*lanes, *lane, vector, at),
+            Expr::SimdArith {
+                op,
+                lanes,
+                lane,
+                left,
+                right,
+            } => self.lanewise(*op, *lanes, *lane, left, right),
             Expr::RegionNew
             | Expr::RegionAlloc { .. }
             | Expr::RegionLast { .. }
@@ -2123,6 +2158,117 @@ impl<'a> Builder<'a> {
         let left = self.value(left)?;
         let right = self.value(right)?;
         Ok(self.binary(opcode, "", machine(ty), &left, &right))
+    }
+
+    /// Вектор, все дорожки которого заняты одним значением (§4.9).
+    ///
+    /// Каноническая форма splat'а: `insertelement` в нулевую дорожку плюс
+    /// `shufflevector` нулевой маской. Так её пишет сам LLVM, и так её узнаёт
+    /// кодогенерация - `vbroadcastss` на x86, `dup` на ARM. Написать вместо
+    /// этого `n` подряд идущих `insertelement` было бы законно и дало бы тот же
+    /// ответ; узнавать splat при этом пришлось бы оптимизатору, а свидетель
+    /// трека H обязан различать вектор и поэлементный код, а не надеяться.
+    ///
+    /// `poison` в качестве исходного вектора - тоже канон: дорожки его все до
+    /// одной заменяются, и `zeroinitializer` дал бы лишнюю зависимость.
+    /// Разбирают `poison` обе поддерживаемые версии (проверено треугольником,
+    /// `tests/llvm.rs`): ключевое слово появилось в LLVM 12, минимум фазы - 18.
+    fn splat(&mut self, lanes: u32, lane: PrimTy, value: &Expr) -> Result<String, LlvmError> {
+        let value = self.value(value)?;
+        let ty = vector(lanes, lane);
+        let one = self.temp();
+        self.instruction(
+            &format!(
+                "{one} = insertelement {ty} poison, {} {value}, i64 0",
+                machine(lane)
+            ),
+            self.here(),
+        );
+        let name = self.temp();
+        self.instruction(
+            &format!(
+                "{name} = shufflevector {ty} {one}, {ty} poison, <{lanes} x i32> zeroinitializer"
+            ),
+            self.here(),
+        );
+        Ok(name)
+    }
+
+    /// Тот же вектор с переписанной дорожкой (§4.9): `insertelement`.
+    fn insert(
+        &mut self,
+        lanes: u32,
+        lane: PrimTy,
+        vector_expr: &Expr,
+        at: &Expr,
+        value: &Expr,
+    ) -> Result<String, LlvmError> {
+        let source = self.value(vector_expr)?;
+        let at = self.value(at)?;
+        let value = self.value(value)?;
+        let name = self.temp();
+        self.instruction(
+            &format!(
+                "{name} = insertelement {} {source}, {} {value}, i64 {at}",
+                vector(lanes, lane),
+                machine(lane)
+            ),
+            self.here(),
+        );
+        Ok(name)
+    }
+
+    /// Значение дорожки (§4.9): `extractelement`.
+    fn extract(
+        &mut self,
+        lanes: u32,
+        lane: PrimTy,
+        vector_expr: &Expr,
+        at: &Expr,
+    ) -> Result<String, LlvmError> {
+        let source = self.value(vector_expr)?;
+        let at = self.value(at)?;
+        let name = self.temp();
+        self.instruction(
+            &format!(
+                "{name} = extractelement {} {source}, i64 {at}",
+                vector(lanes, lane)
+            ),
+            self.here(),
+        );
+        Ok(name)
+    }
+
+    /// Подорожечная арифметика (§4.9).
+    ///
+    /// Те же коды операций, что у скаляра, и с тем же отсутствием флагов -
+    /// `add`/`sub`/`mul` у целого, `fadd`/`fsub`/`fmul` у плавающего. Отличает
+    /// векторную форму только тип операнда, и в этом весь §4.9: `fadd
+    /// <8 x float>` есть одна инструкция, а восемь `fadd float` - восемь.
+    ///
+    /// Про флаги см. [`Self::arithmetic`] - довод там один на обе формы, и
+    /// разделять его было бы верным способом их разъехать. У целого вектора
+    /// отсутствие `nsw`/`nuw` вдобавок несёт заворачивание §4.3, которое
+    /// C-сторона держит счётом в беззнаковом спутнике.
+    fn lanewise(
+        &mut self,
+        op: PrimOp,
+        lanes: u32,
+        lane: PrimTy,
+        left: &Expr,
+        right: &Expr,
+    ) -> Result<String, LlvmError> {
+        let opcode = match (op, lane.floating()) {
+            (PrimOp::Add, false) => "add",
+            (PrimOp::Sub, false) => "sub",
+            (PrimOp::Mul, false) => "mul",
+            (PrimOp::Add, true) => "fadd",
+            (PrimOp::Sub, true) => "fsub",
+            (PrimOp::Mul, true) => "fmul",
+        };
+        let left = self.value(left)?;
+        let right = self.value(right)?;
+        Ok(self.binary(opcode, "", &vector(lanes, lane), &left, &right))
     }
 
     /// Двуместная инструкция.
@@ -2592,7 +2738,7 @@ impl<'a> Builder<'a> {
         // Ответ дроблёной функции - значение вершине стека, а не её собственный:
         // тип у границы один, и это слово.
         let result = if self.suspending.functions.contains(&function) {
-            "ptr"
+            "ptr".to_owned()
         } else {
             slot(called.result).ok_or_else(|| LlvmError::Shape {
                 function: self.function.name.clone(),
@@ -2799,7 +2945,7 @@ impl<'a> Builder<'a> {
             self.instruction(&format!("{name} = inttoptr i64 {bits} to ptr"), self.here());
             return Ok(name);
         }
-        if slot(repr) == Some("ptr") {
+        if slot(repr).as_deref() == Some("ptr") {
             return Ok(value.to_owned());
         }
         Err(LlvmError::Shape {
@@ -2823,7 +2969,7 @@ impl<'a> Builder<'a> {
             );
             return Ok(self.narrow(ty, &bits));
         }
-        if slot(repr) == Some("ptr") {
+        if slot(repr).as_deref() == Some("ptr") {
             return Ok(value.to_owned());
         }
         Err(LlvmError::Shape {

@@ -343,6 +343,10 @@ impl Pass<'_> {
             | Expr::RegionRecycle { .. }
             | Expr::RegionPop { .. } => self.region(expr, owned),
             Expr::Pack { .. } | Expr::Unpack { .. } => self.aggregate(expr, owned),
+            Expr::SimdSplat { .. }
+            | Expr::SimdSet { .. }
+            | Expr::SimdLane { .. }
+            | Expr::SimdArith { .. } => self.vector(expr, owned),
             Expr::Primitive { .. } | Expr::Compare { .. } => self.binary(expr, owned),
             Expr::Construct {
                 constructor,
@@ -459,6 +463,76 @@ impl Pass<'_> {
     /// **значим**: массив стоит первым, а читающее из него значение - последним,
     /// поэтому к записи массив приходит со счётчиком, который чтение уже
     /// вернуло, и запись идёт по месту.
+    /// Операция над вектором (§4.9).
+    ///
+    /// Счётчика нет ни у одного участника: вектор плоский, дорожка плоская,
+    /// номер плоский. Поэтому вся работа прохода здесь - порядок подвыражений
+    /// ([`Pass::sequence`]), ровно как у [`Pass::binary`]: ни `dup`, ни `drop`
+    /// по вектору не эмитится, и это наблюдаемо счётчиком пар.
+    fn vector(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
+        /// Какая из четырёх операций разобрана.
+        enum Shape {
+            Splat,
+            Set,
+            Lane,
+            Arith(adamas_core::prim::PrimOp),
+        }
+        let (shape, lanes, lane, parts) = match expr {
+            Expr::SimdSplat { lanes, lane, value } => (Shape::Splat, lanes, lane, vec![*value]),
+            Expr::SimdSet {
+                lanes,
+                lane,
+                vector,
+                at,
+                value,
+            } => (Shape::Set, lanes, lane, vec![*vector, *at, *value]),
+            Expr::SimdLane {
+                lanes,
+                lane,
+                vector,
+                at,
+            } => (Shape::Lane, lanes, lane, vec![*vector, *at]),
+            Expr::SimdArith {
+                op,
+                lanes,
+                lane,
+                left,
+                right,
+            } => (Shape::Arith(op), lanes, lane, vec![*left, *right]),
+            other => return other,
+        };
+        let (mut done, spare) = self.sequence(parts, owned);
+        let mut next = || Box::new(done.remove(0));
+        let rebuilt = match shape {
+            Shape::Splat => Expr::SimdSplat {
+                lanes,
+                lane,
+                value: next(),
+            },
+            Shape::Set => Expr::SimdSet {
+                lanes,
+                lane,
+                vector: next(),
+                at: next(),
+                value: next(),
+            },
+            Shape::Lane => Expr::SimdLane {
+                lanes,
+                lane,
+                vector: next(),
+                at: next(),
+            },
+            Shape::Arith(op) => Expr::SimdArith {
+                op,
+                lanes,
+                lane,
+                left: next(),
+                right: next(),
+            },
+        };
+        drops(spare, rebuilt)
+    }
+
     /// Сборка и разбор плоского агрегата (§4.11).
     ///
     /// Счётчика у агрегата нет вовсе, поэтому считать надо только то, что в нём
@@ -1145,6 +1219,19 @@ impl Pass<'_> {
                 array, at, value, ..
             } => self.plans(array, slots) || self.plans(at, slots) || self.plans(value, slots),
             Expr::ArrayIndex { array, at, .. } => self.plans(array, slots) || self.plans(at, slots),
+            // Вектор (§4.9) ячейки не занимает - он плоский и живёт в регистре,
+            // - но подвыражения его обходятся тем же правилом, каким их обходит
+            // арифметика: под ними стоит `Bind`, а под ним что угодно.
+            Expr::SimdSplat { value, .. } => self.plans(value, slots),
+            Expr::SimdLane { vector, at, .. } => {
+                self.plans(vector, slots) || self.plans(at, slots)
+            }
+            Expr::SimdSet {
+                vector, at, value, ..
+            } => self.plans(vector, slots) || self.plans(at, slots) || self.plans(value, slots),
+            Expr::SimdArith { left, right, .. } => {
+                self.plans(left, slots) || self.plans(right, slots)
+            }
             // Плоский агрегат ячейки кучи не занимает вовсе (§4.11), и
             // придержать её ему нечем.
             Expr::Local(_)
@@ -1238,6 +1325,21 @@ impl Pass<'_> {
             }
             Expr::ArrayIndex { array, at, .. } => {
                 self.attach(array, slots, token) || self.attach(at, slots, token)
+            }
+            // Обход тот же, что у [`Pass::plans`] выше, и по тому же доводу.
+            Expr::SimdSplat { value, .. } => self.attach(value, slots, token),
+            Expr::SimdLane { vector, at, .. } => {
+                self.attach(vector, slots, token) || self.attach(at, slots, token)
+            }
+            Expr::SimdSet {
+                vector, at, value, ..
+            } => {
+                self.attach(vector, slots, token)
+                    || self.attach(at, slots, token)
+                    || self.attach(value, slots, token)
+            }
+            Expr::SimdArith { left, right, .. } => {
+                self.attach(left, slots, token) || self.attach(right, slots, token)
             }
             // Плоский агрегат ячейки кучи не занимает вовсе (§4.11), и
             // придержать её ему нечем.

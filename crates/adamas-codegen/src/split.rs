@@ -342,6 +342,12 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
             array, at, value, ..
         } => vec![array, at, value],
         Expr::ArrayIndex { array, at, .. } => vec![array, at],
+        Expr::SimdSplat { value, .. } => vec![value],
+        Expr::SimdLane { vector, at, .. } => vec![vector, at],
+        Expr::SimdSet {
+            vector, at, value, ..
+        } => vec![vector, at, value],
+        Expr::SimdArith { left, right, .. } => vec![left, right],
         Expr::Resume { resumption, value } => vec![resumption, value],
         Expr::Closure { captured, .. } => captured.iter_mut().collect(),
         Expr::Primitive { left, right, .. } | Expr::Compare { left, right, .. } => {
@@ -521,6 +527,16 @@ impl Anf<'_> {
             Expr::ArrayIndex { stride, .. } => {
                 stride.map_or(Repr::Boxed, crate::ir::Stride::element)
             }
+            // Вектор (§4.9): три узла отдают его, а чтение дорожки - саму
+            // дорожку. Различие несущее: слот кадра под вектор шириной в его
+            // тип, а под дорожку - в её.
+            Expr::SimdSplat { lanes, lane, .. }
+            | Expr::SimdSet { lanes, lane, .. }
+            | Expr::SimdArith { lanes, lane, .. } => Repr::Simd {
+                lanes: *lanes,
+                lane: *lane,
+            },
+            Expr::SimdLane { lane, .. } => Repr::Flat(*lane),
             Expr::RegionNew
             | Expr::RegionAlloc { .. }
             | Expr::RegionWrite { .. }

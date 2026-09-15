@@ -150,6 +150,7 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     out.push_str(FLAT);
     out.push('\n');
     packings(&mut out, program);
+    vectors(&mut out, program);
     table(&mut out, program);
     out.push_str(RELEASE);
     out.push('\n');
@@ -372,6 +373,9 @@ fn c_type(repr: Repr) -> String {
         // Плоский агрегат - свой тип на укладку: байты по значению, и передаётся
         // он как всякая структура C (§4.11).
         Repr::Packed(pack) => format!("adamas_pack_{}", pack.0),
+        // Вектор - свой тип на пару «ширина, дорожка»: у C он расширение
+        // `vector_size`, то есть тоже значение, передаваемое по значению.
+        Repr::Simd { lanes, lane } => vector_type(lanes, lane),
         other => scalar(other).to_owned(),
     }
 }
@@ -403,6 +407,34 @@ pub(crate) fn scalar(repr: Repr) -> &'static str {
         Repr::Flat(PrimTy::Float64) => "double",
         // Имя зависит от номера укладки, и постоянным быть не может.
         Repr::Packed(_) => "adamas_pack",
+        // Имя зависит от ширины и дорожки - см. [`vector_type`].
+        Repr::Simd { .. } => "adamas_simd",
+    }
+}
+
+/// Имя C-типа вектора (§4.9): `adamas_simd_8_Float32`.
+fn vector_type(lanes: u32, lane: PrimTy) -> String {
+    format!("adamas_simd_{lanes}_{}", lane.name())
+}
+
+/// Имя беззнакового спутника того же вектора - в нём считается целочисленная
+/// арифметика.
+///
+/// Заворачивание §4.3 держится ровно тем же ходом, каким его держит скаляр
+/// (`flat.c`, `ADAMAS_FLAT_INTEGER`): операция идёт в беззнаковом типе, где
+/// переполнение определено, и результат приводится обратно. У плавающего
+/// спутника нет - там заворачивать нечего.
+fn vector_word_type(lanes: u32, lane: PrimTy) -> String {
+    format!("adamas_usimd_{lanes}_{}", lane.name())
+}
+
+/// Беззнаковый тип той же ширины, что дорожка.
+const fn lane_word(lane: PrimTy) -> &'static str {
+    match lane {
+        PrimTy::Int8 | PrimTy::UInt8 => "uint8_t",
+        PrimTy::Int16 | PrimTy::UInt16 => "uint16_t",
+        PrimTy::Int32 | PrimTy::UInt32 | PrimTy::Float32 => "uint32_t",
+        PrimTy::Int64 | PrimTy::UInt64 | PrimTy::Float64 => "uint64_t",
     }
 }
 
@@ -424,6 +456,92 @@ fn preamble(out: &mut String) {
         "#define ADAMAS_ERASED adamas_con0(0xFFFCu)\n",
         "\n",
     ));
+}
+
+/// Типы векторов (§4.9): `vector_size`, а не массив и не структура.
+///
+/// **Расширение взято намеренно, и это то самое, ради чего §4.9 писался.**
+/// Структура из `n` полей либо массив на `n` ячеек дали бы тот же ответ и
+/// компилировались бы везде - и ровно поэтому не годятся: свидетель обязан
+/// различать вектор и поэлементный цикл, а они не различаются. `vector_size`
+/// - расширение gcc и clang; §4.9 разрешает «эквивалентные intrinsics либо
+/// scalar fallback» для non-LLVM бэкендов, и это первое из двух. Компилятор без
+/// расширения порождённый код не соберёт - названным отказом сборки, а не
+/// тихим скаляром.
+///
+/// Беззнаковый спутник заводится только у целых дорожек: в нём считается
+/// арифметика, чтобы заворачивание §4.3 держалось тем же ходом, каким его
+/// держит скаляр.
+fn vectors(out: &mut String, program: &Program) {
+    let mut shapes: Vec<(u32, PrimTy)> = Vec::new();
+    for function in &program.functions {
+        let mut note = |repr: Repr| {
+            if let Some(shape) = repr.vector() {
+                if !shapes.contains(&shape) {
+                    shapes.push(shape);
+                }
+            }
+        };
+        note(function.result);
+        for binding in function.parameters.iter().chain(&function.captured) {
+            note(binding.fact.repr);
+        }
+        walk(&function.body, &mut |expr: &Expr| {
+            if let Expr::Bind { binding, .. } = expr {
+                note(binding.fact.repr);
+            }
+            if let Expr::Match { arms, .. } = expr {
+                for arm in arms {
+                    for field in &arm.fields {
+                        note(field.fact.repr);
+                    }
+                }
+            }
+        });
+        walk(&function.body, &mut |expr: &Expr| match expr {
+            Expr::SimdSplat { lanes, lane, .. }
+            | Expr::SimdSet { lanes, lane, .. }
+            | Expr::SimdLane { lanes, lane, .. }
+            | Expr::SimdArith { lanes, lane, .. } => note(Repr::Simd {
+                lanes: *lanes,
+                lane: *lane,
+            }),
+            _ => {}
+        });
+    }
+    if shapes.is_empty() {
+        return;
+    }
+    // Порядок - по ширине, потом по имени дорожки: `PrimTy` сравнимого порядка
+    // не имеет, а текст единицы трансляции обязан быть воспроизводимым.
+    shapes.sort_by_key(|(lanes, lane)| (*lanes, lane.name()));
+    out.push_str(concat!(
+        "/* Векторы (§4.9): дорожки лежат подряд и обрабатываются одной\n",
+        " * инструкцией. `vector_size` - расширение gcc и clang; структура из\n",
+        " * полей дала бы тот же ответ и потому свидетелем не является. */\n"
+    ));
+    for (lanes, lane) in shapes {
+        let name = vector_type(lanes, lane);
+        let bytes = lanes * lane.size();
+        let _ = writeln!(
+            out,
+            "typedef {} {name} __attribute__((vector_size({bytes})));",
+            scalar(Repr::Flat(lane))
+        );
+        let _ = writeln!(
+            out,
+            "_Static_assert(sizeof({name}) == {bytes}u, \"ширина вектора разошлась с §4.9\");"
+        );
+        if !lane.floating() {
+            let _ = writeln!(
+                out,
+                "typedef {} {} __attribute__((vector_size({bytes})));",
+                lane_word(lane),
+                vector_word_type(lanes, lane)
+            );
+        }
+    }
+    out.push('\n');
 }
 
 /// Типы плоских агрегатов (§4.11): байты своей длины и своей границы.
@@ -1190,6 +1308,14 @@ impl Emitter<'_> {
                 Repr::Array(elems(*stride))
             }
             Expr::ArrayIndex { stride, .. } => stride.map_or(Repr::Boxed, Stride::element),
+            // Вектор (§4.9): три узла отдают его, чтение дорожки - дорожку.
+            Expr::SimdSplat { lanes, lane, .. }
+            | Expr::SimdSet { lanes, lane, .. }
+            | Expr::SimdArith { lanes, lane, .. } => Repr::Simd {
+                lanes: *lanes,
+                lane: *lane,
+            },
+            Expr::SimdLane { lane, .. } => Repr::Flat(*lane),
             Expr::RegionNew
             | Expr::RegionAlloc { .. }
             | Expr::RegionWrite { .. }
@@ -1294,6 +1420,27 @@ impl Emitter<'_> {
                 array,
                 at,
             } => self.array_index(*stride, *owned, array, at, depth),
+            Expr::SimdSplat { lanes, lane, value } => self.simd_splat(*lanes, *lane, value, depth),
+            Expr::SimdSet {
+                lanes,
+                lane,
+                vector,
+                at,
+                value,
+            } => self.simd_set(*lanes, *lane, vector, at, value, depth),
+            Expr::SimdLane {
+                lanes,
+                lane,
+                vector,
+                at,
+            } => self.simd_lane(*lanes, *lane, vector, at, depth),
+            Expr::SimdArith {
+                op,
+                lanes,
+                lane,
+                left,
+                right,
+            } => self.simd_arith(*op, *lanes, *lane, left, right, depth),
             Expr::RegionNew
             | Expr::RegionAlloc { .. }
             | Expr::RegionLast { .. }
@@ -1648,6 +1795,123 @@ impl Emitter<'_> {
             operation(op),
             ty.name()
         );
+        name
+    }
+
+    /// Вектор, все дорожки которого заняты одним значением (§4.9).
+    ///
+    /// Списковая инициализация, а не цикл: в ней gcc видит splat и кладёт
+    /// одну инструкцию широковещания, тогда как цикл пришлось бы ещё
+    /// векторизовать. Имя значения уже временное, поэтому повторение его
+    /// `lanes` раз вычисления не повторяет.
+    fn simd_splat(&mut self, lanes: u32, lane: PrimTy, value: &Expr, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let value = self.value(value, depth);
+        let name = self.temp();
+        let filled = vec![value; lanes as usize].join(", ");
+        let _ = writeln!(
+            self.out,
+            "{pad}{} {name} = ({}){{ {filled} }};",
+            vector_type(lanes, lane),
+            vector_type(lanes, lane)
+        );
+        name
+    }
+
+    /// Тот же вектор с переписанной дорожкой (§4.9).
+    ///
+    /// Копия плюс присваивание по индексу: вектор здесь значение, а не объект,
+    /// и `simdSet` функционален - прежний остаётся прежним. Копия эта живёт в
+    /// регистре и оптимизатором снимается, когда прежнее значение больше не
+    /// читается.
+    fn simd_set(
+        &mut self,
+        lanes: u32,
+        lane: PrimTy,
+        vector: &Expr,
+        at: &Expr,
+        value: &Expr,
+        depth: usize,
+    ) -> String {
+        let pad = Self::pad(depth);
+        let vector = self.value(vector, depth);
+        let at = self.value(at, depth);
+        let value = self.value(value, depth);
+        let name = self.temp();
+        let ty = vector_type(lanes, lane);
+        let _ = writeln!(self.out, "{pad}{ty} {name} = {vector};");
+        // Номер вне ширины - обрыв, а не тихая запись мимо: у машины тот же
+        // случай не сводится вовсе, и сходятся два вычислителя в том, что
+        // ответа не даёт ни один (§4.9, `eval::laned`).
+        let _ = writeln!(
+            self.out,
+            "{pad}if ({at} >= {lanes}u) {{ adamas_fail(\"номер дорожки вне ширины вектора\"); }}"
+        );
+        let _ = writeln!(self.out, "{pad}{name}[{at}] = {value};");
+        name
+    }
+
+    /// Значение дорожки (§4.9).
+    fn simd_lane(
+        &mut self,
+        lanes: u32,
+        lane: PrimTy,
+        vector: &Expr,
+        at: &Expr,
+        depth: usize,
+    ) -> String {
+        let pad = Self::pad(depth);
+        let vector = self.value(vector, depth);
+        let at = self.value(at, depth);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}if ({at} >= {lanes}u) {{ adamas_fail(\"номер дорожки вне ширины вектора\"); }}"
+        );
+        let _ = writeln!(
+            self.out,
+            "{pad}{} {name} = {vector}[{at}];",
+            scalar(Repr::Flat(lane))
+        );
+        name
+    }
+
+    /// Подорожечная арифметика (§4.9).
+    ///
+    /// Оператор прямо на векторе - это и есть расширение: `a + b` над
+    /// `vector_size` есть одна инструкция, а не цикл. Целое считается в
+    /// беззнаковом спутнике и приводится обратно, ровно как скаляр в
+    /// `ADAMAS_FLAT_INTEGER`: §4.3 требует заворачивания, а не UB. Плавающее
+    /// идёт как есть, без единого ключа быстрой математики - тот же строгий
+    /// режим, что у скаляра (трек F).
+    fn simd_arith(
+        &mut self,
+        op: PrimOp,
+        lanes: u32,
+        lane: PrimTy,
+        left: &Expr,
+        right: &Expr,
+        depth: usize,
+    ) -> String {
+        let pad = Self::pad(depth);
+        let left = self.value(left, depth);
+        let right = self.value(right, depth);
+        let name = self.temp();
+        let ty = vector_type(lanes, lane);
+        let sign = match op {
+            PrimOp::Add => '+',
+            PrimOp::Sub => '-',
+            PrimOp::Mul => '*',
+        };
+        if lane.floating() {
+            let _ = writeln!(self.out, "{pad}{ty} {name} = {left} {sign} {right};");
+        } else {
+            let word = vector_word_type(lanes, lane);
+            let _ = writeln!(
+                self.out,
+                "{pad}{ty} {name} = ({ty})(({word}){left} {sign} ({word}){right});"
+            );
+        }
         name
     }
 

@@ -273,8 +273,8 @@ use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
 use adamas_core::source::Location;
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Expr, Fact, Form, FuncId, Function, HandlerId, LabelId,
-    LocalId, Program, Repr, Salvage, Source, Unique, Verdict,
+    Arm, Binding, Constructor, CtorId, Expr, Fact, FiberOp, Form, FuncId, Function, HandlerId,
+    LabelId, LocalId, Program, Repr, Salvage, Source, Unique, Verdict,
 };
 use crate::split::Suspension;
 
@@ -425,6 +425,9 @@ pub fn emit(program: &Program) -> Result<Artefacts, LlvmError> {
     for function in taking(program) {
         module.taker(&program.functions[function.0]);
     }
+    for function in boxing(program) {
+        module.boxer(&program.functions[function.0]);
+    }
     Ok(Artefacts {
         ll: module.finish(program, answer),
         support: support(program, answer),
@@ -472,6 +475,18 @@ fn boundaries(program: &Program, suspending: &Suspension) -> Result<(), LlvmErro
     for closer in taking(program) {
         named.push((closer, "деструктор scope"));
     }
+    // Замыкание отвечает словом наравне с ними, но форма у него своя: значением
+    // бывает и первая - ей трамплин скрытых аргументов просто не передаёт.
+    for boxed in boxing(program) {
+        let function = &program.functions[boxed.0];
+        if crossing(program, suspending, boxed) != Some("ptr") {
+            return Err(LlvmError::Shape {
+                function: function.name.clone(),
+                place: "ответ: замыкание".to_owned(),
+                shape: describe(function.result),
+            });
+        }
+    }
     for (id, place) in named {
         let function = &program.functions[id.0];
         if function.form != Form::Detached {
@@ -515,6 +530,40 @@ fn scoped(program: &Program) -> bool {
         let mut found = false;
         walk(&function.body, &mut |expr| {
             found |= matches!(expr, Expr::Closing { .. });
+        });
+        found
+    })
+}
+
+/// Функции, стоящие значением: им нужен общий трамплин.
+///
+/// Тот же список, что собирает `emit_c::moving` под `box_`, и собран он здесь
+/// заново по той же причине, что и [`taking`].
+fn boxing(program: &Program) -> BTreeSet<FuncId> {
+    let mut found = BTreeSet::new();
+    for function in &program.functions {
+        walk(&function.body, &mut |expr| {
+            if let Expr::Closure { function: code, .. } = expr {
+                found.insert(*code);
+            }
+        });
+    }
+    found
+}
+
+/// Есть ли в программе питомник: круг, его операция либо отмена (§5.2).
+///
+/// Спрашивается ради объявлений: точки входа круга объявляются только там, где
+/// они зовутся, и выход на программе без питомника байт в байт тот же, что был
+/// до этого трека.
+fn nursed(program: &Program) -> bool {
+    program.functions.iter().any(|function| {
+        let mut found = false;
+        walk(&function.body, &mut |expr| {
+            found |= matches!(
+                expr,
+                Expr::Nursery { .. } | Expr::Fiber { .. } | Expr::Cancel { .. }
+            );
         });
         found
     })
@@ -1216,6 +1265,81 @@ impl Module {
         self.bodies.push_str("  ret ptr %answer\n}\n\n");
     }
 
+    /// Общий трамплин: замыкание отдаёт слоты позиционно, функция берёт их
+    /// аргументами.
+    ///
+    /// Слоты принадлежат замыканию, а функция берёт аргументы **владением**,
+    /// отсюда `adamas_dup` на каждый: своё замыкание дропает применение
+    /// ([`crate::perceus`]), и без дублирования оно унесло бы слоты с собой.
+    /// Последний аргумент приходит владением уже от `adamas_apply`.
+    ///
+    /// Скрытые аргументы у самого трамплина есть всегда - граница замыкания
+    /// динамическая, - а дальше он передаёт их ровно второй форме. Первой они не
+    /// передаются вовсе: у неё их нет в сигнатуре.
+    fn boxer(&mut self, function: &Function) {
+        let env = function.live_captured().count();
+        let arity = function.parameters.len();
+        let _ = writeln!(
+            self.bodies,
+            "; `{}` значением: слоты - среда, затем накопленные аргументы",
+            function.name
+        );
+        let _ = writeln!(
+            self.bodies,
+            "define internal ptr @box_{}(ptr %self, ptr %ev, ptr %kont, ptr %arg) \
+             {DEFINITION_ATTRIBUTES} {{",
+            function.id.0
+        );
+        self.bodies.push_str("entry:\n");
+        if arity == 0 {
+            let _ = writeln!(
+                self.bodies,
+                "  call void @adamas_fail(ptr {ARITYLESS_MESSAGE})"
+            );
+            self.bodies.push_str("  unreachable\n}\n\n");
+            return;
+        }
+        let mut given = match function.form {
+            Form::Stack => Vec::new(),
+            Form::Detached => vec!["ptr %ev".to_owned(), "ptr %kont".to_owned()],
+        };
+        // Слотов ровно столько, сколько связываний у ядра, - стёртые в том
+        // числе. Стёртый слот в вызов не идёт: понижение кладёт туда
+        // `ADAMAS_ERASED`, значение непосредственное, ячейки за ним нет.
+        let mut slots: Vec<usize> = (0..env).collect();
+        for (position, parameter) in function.parameters.iter().enumerate() {
+            if !parameter.fact.present || position + 1 == arity {
+                continue;
+            }
+            slots.push(env + position);
+        }
+        for slot in &slots {
+            let _ = writeln!(
+                self.bodies,
+                "  %s{slot} = call ptr @adamas_closure_get(ptr %self, i64 {slot})"
+            );
+            let _ = writeln!(
+                self.bodies,
+                "  %d{slot} = call ptr @adamas_dup(ptr %s{slot})"
+            );
+        }
+        given.extend(slots.iter().map(|slot| format!("ptr %d{slot}")));
+        if function
+            .parameters
+            .last()
+            .is_some_and(|parameter| parameter.fact.present)
+        {
+            given.push("ptr %arg".to_owned());
+        }
+        let _ = writeln!(
+            self.bodies,
+            "  %answer = call {CONVENTION} ptr @fn_{}({})",
+            function.id.0,
+            given.join(", ")
+        );
+        self.bodies.push_str("  ret ptr %answer\n}\n\n");
+    }
+
     /// Складывает модуль: шапка, объявления, константы, тела, метаданные.
     fn finish(self, program: &Program, answer: Answer) -> String {
         let mut out = String::new();
@@ -1260,6 +1384,8 @@ impl Module {
             (TAG_MESSAGE, TAG_TEXT),
             (BRANCH_MESSAGE, BRANCH_TEXT),
             (MISSING_MESSAGE, MISSING_TEXT),
+            (SHAPELESS_MESSAGE, SHAPELESS_TEXT),
+            (ARITYLESS_MESSAGE, ARITYLESS_TEXT),
         ] {
             let _ = writeln!(
                 out,
@@ -1291,10 +1417,12 @@ impl Module {
 /// куче, тот же сегмент, - и это решение, а не умолчание: см. раздел «Кадр
 /// берёт рантайм, а не `llvm.coro.*`» в шапке модуля.
 fn second_form(out: &mut String, program: &Program) {
-    if program
-        .functions
-        .iter()
-        .any(|function| function.form == Form::Detached)
+    let nursery = nursed(program);
+    if nursery
+        || program
+            .functions
+            .iter()
+            .any(|function| function.form == Form::Detached)
     {
         out.push_str(concat!(
             "; Вторая форма понижения: кадр в куче, вектор evidence, сегмент.\n",
@@ -1323,6 +1451,19 @@ fn second_form(out: &mut String, program: &Program) {
             "declare ptr @adamas_closure(ptr, ptr, i32, i32)\n",
             "declare void @adamas_closure_set(ptr, i64, ptr)\n",
             "declare ptr @adamas_closure_get(ptr, i64)\n",
+            "\n",
+        ));
+    }
+    if nursery {
+        out.push_str(concat!(
+            "; Питомник (§5.2): круг, его операции и отмена. Точки входа те же,\n",
+            "; что зовёт C-бэкенд, - новых под LLVM не заведено ни одной.\n",
+            "declare i32 @adamas_nursery_serves(ptr, i32)\n",
+            "declare ptr @adamas_nursery_begin(ptr, ptr, ptr, ptr)\n",
+            "declare ptr @adamas_nursery_suspend(ptr, ptr)\n",
+            "declare ptr @adamas_nursery_spawn(ptr, ptr, ptr, i32, i32, i32)\n",
+            "declare ptr @adamas_nursery_await(ptr, ptr, ptr, i32)\n",
+            "declare ptr @adamas_nursery_cancel(ptr, ptr, i32)\n",
             "\n",
         ));
     }
@@ -1496,6 +1637,25 @@ const MISSING_MESSAGE: &str = "@.str.missing";
 
 /// Текст обрыва по операции без хендлера.
 const MISSING_TEXT: &str = "операция без хендлера";
+
+/// Имя строки с текстом обрыва по замыканию без параметров.
+const ARITYLESS_MESSAGE: &str = "@.str.arityless";
+
+/// Текст обрыва по замыканию без параметров.
+const ARITYLESS_TEXT: &str = "замыкание без параметров";
+
+/// Имя строки с текстом обрыва по неподошедшей форме задачи.
+const SHAPELESS_MESSAGE: &str = "@.str.shapeless";
+
+/// Текст обрыва по неподошедшей форме задачи (§5.2).
+const SHAPELESS_TEXT: &str = "тип задачи не подошёл: нужен один конструктор с одним полем (§5.2)";
+
+/// `ADAMAS_NO_TASK`: порождение без задачи, то есть `spawnDetached`.
+///
+/// Печатается знаковым: `i32` у LLVM без знака, и `-1` тут те же биты, что
+/// `0xFFFFFFFF` в `adamas.h`. Совпадение проверяется прогоном - фикстура
+/// `spawn-local` зовёт `spawnDetached` и отвечает тем же, что машина.
+const NO_TASK: i32 = -1;
 
 /// Тег стёртого значения: тот же, что у `ADAMAS_ERASED` в спутнике.
 ///
@@ -2032,7 +2192,11 @@ impl<'a> Builder<'a> {
                 arguments,
             } => self.construct(*constructor, *reuse, arguments),
             Expr::ConstructClosure { .. } => Err(self.node("конструктор значением")),
-            Expr::Closure { .. } | Expr::Apply { .. } => Err(self.node("замыкание")),
+            Expr::Closure { function, captured } => self.closure(*function, captured),
+            // Применение - точка приостановки всегда: какая из двух форм за
+            // указателем, место вызова не знает (`crate::split`). Значит только
+            // хвостом куска ([`Self::applying`]).
+            Expr::Apply { .. } => Err(self.node("применение замыкания в чистом отрезке")),
             Expr::Pack { .. } | Expr::Unpack { .. } => Err(self.node("плотный агрегат")),
             Expr::Layout { .. } | Expr::LayoutField { .. } => Err(self.node("дескриптор укладки")),
             Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. } => {
@@ -2062,8 +2226,16 @@ impl<'a> Builder<'a> {
             // дробление ([`crate::split`]), и в чистый отрезок они не попадают.
             Expr::Resume { .. } => Err(self.node("резумпция в чистом отрезке")),
             Expr::Closing { .. } => Err(self.node("выход из scope в чистом отрезке")),
-            Expr::Nursery { .. } | Expr::Fiber { .. } | Expr::Cancel { .. } => {
-                Err(self.node("питомник"))
+            // Питомник в чистой функции - **корень своего стека**, тем же
+            // правом, каким его заводит хендлер: row у `withNursery` пуста, и
+            // наружу круга не уходит ни одной операции (§3.4, погашение
+            // расширением справа).
+            Expr::Nursery { body } => self.nursing(body),
+            // Операция питомника и отмена значением не бывают: тишина их не
+            // касается - уступка режет сегмент по построению, - и дробление
+            // выносит их хвостом куска.
+            Expr::Fiber { .. } | Expr::Cancel { .. } => {
+                Err(self.node("операция питомника в чистом отрезке"))
             }
         }
     }
@@ -2893,6 +3065,15 @@ impl<'a> Builder<'a> {
                 arguments,
             } => self.performing_tail(*label, *operation, arguments),
             Expr::Resume { resumption, value } => self.resuming(resumption, value),
+            Expr::Nursery { body } => self.nursery_tail(body),
+            Expr::Fiber {
+                op,
+                label,
+                operation,
+                arguments,
+            } => self.fibering_tail(*op, *label, *operation, arguments),
+            Expr::Cancel { at, value } => self.cancelling(*at, value),
+            Expr::Apply { callee, argument } => self.applying(callee, argument),
             other => {
                 let repr = self.shape(other);
                 let answer = self.value(other)?;
@@ -3315,8 +3496,44 @@ impl<'a> Builder<'a> {
         self.flowing(body)
     }
 
+    /// Замыкание значением: код общего трамплина плюс среда по слотам.
+    fn closure(&mut self, function: FuncId, captured: &[Expr]) -> Result<String, LlvmError> {
+        self.captured(function, captured, "box")
+    }
+
+    /// Применение значения-функции: форму за указателем решает рантайм.
+    ///
+    /// Точка приостановки по построению - вызываемое может оказаться второй
+    /// формы, - поэтому только в хвосте куска. Замыкание заимствуется,
+    /// аргумент уходит владением (`adamas.h`).
+    fn applying(&mut self, callee: &Expr, argument: &Expr) -> Result<(), LlvmError> {
+        let kont = self.kont()?;
+        let ev = self.ev()?;
+        let callee = self.value(callee)?;
+        let given = self.value(argument)?;
+        let answer = self.temp();
+        self.instruction(
+            &format!(
+                "{answer} = call ptr @adamas_apply(ptr {callee}, ptr {ev}, ptr {kont}, \
+                 ptr {given})"
+            ),
+            self.here(),
+        );
+        self.finish(&answer, Repr::Boxed)
+    }
+
     /// Замыкание деструктора: код забирающего трамплина плюс среда по слотам.
     fn holding(&mut self, function: FuncId, captured: &[Expr]) -> Result<String, LlvmError> {
+        self.captured(function, captured, "take")
+    }
+
+    /// Замыкание с названным трамплином: общим (`box`) либо забирающим (`take`).
+    fn captured(
+        &mut self,
+        function: FuncId,
+        captured: &[Expr],
+        code: &str,
+    ) -> Result<String, LlvmError> {
         let described = &self.program.functions[function.0];
         // Арность замыкания - **все** связывания ядра, стёртые в том числе:
         // применение к значению позиционно и типа вызываемого не знает.
@@ -3338,7 +3555,7 @@ impl<'a> Builder<'a> {
         let name = self.temp();
         self.instruction(
             &format!(
-                "{name} = call ptr @adamas_closure(ptr @take_{}, ptr @{RELEASE_SYMBOL}, \
+                "{name} = call ptr @adamas_closure(ptr @{code}_{}, ptr @{RELEASE_SYMBOL}, \
                  i32 {arity}, i32 {})",
                 function.0,
                 taken.len()
@@ -3397,8 +3614,23 @@ impl<'a> Builder<'a> {
         operation: u32,
         arguments: &[Expr],
     ) -> Result<(), LlvmError> {
-        let kont = self.kont()?;
         let (operands, count) = self.operands(arguments)?;
+        self.performed_tail(label, operation, &operands, count)
+    }
+
+    /// Он же с уже посчитанными аргументами.
+    ///
+    /// Отдельно от [`Self::performing_tail`] ради операции питомника: у неё
+    /// аргументы считаются **однажды** и годятся обоим путям - и кругу, и
+    /// хендлеру. Второй счёт был бы вторым вычислением аргументов.
+    fn performed_tail(
+        &mut self,
+        label: LabelId,
+        operation: u32,
+        operands: &str,
+        count: usize,
+    ) -> Result<(), LlvmError> {
+        let kont = self.kont()?;
         let (verdict, frame) = self.looked(label)?;
         let at = self.matches;
         self.matches += 1;
@@ -3526,6 +3758,208 @@ impl<'a> Builder<'a> {
             self.here(),
         );
         Ok(answer)
+    }
+
+    /// Питомник в **чистой** функции: корень своего стека, круг, трамплин до дна.
+    ///
+    /// Тот же приём, что у хендлера первой формы ([`Self::handling`]), и то же
+    /// основание: row у `withNursery` пуста, значит наружу круга не уходит ни
+    /// одной операции, и стек этот один на всё, что друг друга видит.
+    ///
+    /// Тело считается **внутри** корня: под ним уже есть и вектор, и ручка, а
+    /// снаружи первой формы их нет вовсе.
+    fn nursing(&mut self, body: &Expr) -> Result<String, LlvmError> {
+        if self.kont.is_some() {
+            // Внутри второй формы питомник значением не бывает: дробление
+            // выносит его хвостом куска ([`Self::nursery_tail`]).
+            return Err(self.node("питомник значением во второй форме"));
+        }
+        let root = format!("%k{}", self.frames);
+        self.frames += 1;
+        let _ = writeln!(self.head, "  {root} = alloca ptr");
+        self.instruction(
+            &format!("call void @adamas_kont_init(ptr {root})"),
+            self.here(),
+        );
+        let empty = self.temp();
+        self.instruction(
+            &format!("{empty} = call ptr @adamas_evidence_empty()"),
+            self.here(),
+        );
+        let held_kont = self.kont.replace(root.clone());
+        let held_ev = self.ev.replace(empty.clone());
+
+        let outcome = (|builder: &mut Self| {
+            let body = builder.value(body)?;
+            let seed = builder.temp();
+            builder.instruction(
+                &format!(
+                    "{seed} = call ptr @adamas_nursery_begin(ptr {root}, ptr {empty}, \
+                     ptr {body}, ptr @{RELEASE_SYMBOL})"
+                ),
+                builder.here(),
+            );
+            let answer = builder.temp();
+            builder.instruction(
+                &format!("{answer} = call ptr @adamas_kont_run(ptr {root}, ptr {seed})"),
+                builder.here(),
+            );
+            Ok(answer)
+        })(self);
+
+        self.kont = held_kont;
+        self.ev = held_ev;
+        let answer = outcome?;
+        self.instruction(
+            &format!("call void @adamas_evidence_drop(ptr {empty})"),
+            self.here(),
+        );
+        Ok(answer)
+    }
+
+    /// Питомник во **второй** форме: круг заводится на пришедшей ручке.
+    ///
+    /// Своего корня здесь нет и быть не может - кадр `NURSERY` встаёт над уже
+    /// стоящим продолжением, - а трамплин крутит тот, кто позвал кусок.
+    fn nursery_tail(&mut self, body: &Expr) -> Result<(), LlvmError> {
+        let kont = self.kont()?;
+        let ev = self.ev()?;
+        let body = self.value(body)?;
+        let seed = self.temp();
+        self.instruction(
+            &format!(
+                "{seed} = call ptr @adamas_nursery_begin(ptr {kont}, ptr {ev}, ptr {body}, \
+                 ptr @{RELEASE_SYMBOL})"
+            ),
+            self.here(),
+        );
+        self.finish(&seed, Repr::Boxed)
+    }
+
+    /// Отмена: разбор значения задачи потребил её мимо `await` (§5.2).
+    ///
+    /// Точка приостановки - раскрутка сегмента отменённого кладётся кадром, -
+    /// поэтому только в хвосте куска. Отдаёт она то же разбираемое.
+    fn cancelling(&mut self, at: u32, value: &Expr) -> Result<(), LlvmError> {
+        let kont = self.kont()?;
+        let value = self.value(value)?;
+        let answer = self.temp();
+        self.instruction(
+            &format!(
+                "{answer} = call ptr @adamas_nursery_cancel(ptr {kont}, ptr {value}, i32 {at})"
+            ),
+            self.here(),
+        );
+        self.finish(&answer, Repr::Boxed)
+    }
+
+    /// Операция питомника: круг берёт её, только если он ближе хендлера (§5.2).
+    ///
+    /// Оба пути стоят рядом, и это не дублирование, а само правило: решает
+    /// между ними **рантайм**, потому что `eval/fibers.adamas` пишет те же имена
+    /// без всякого питомника, а написанный `handle` над той же меткой значит
+    /// написанное. Обычный путь идёт следом тем же кодом, что у всякой операции:
+    /// аргументы посчитаны однажды и годятся обоим.
+    ///
+    /// Свой аргумент у порождения и ожидания - **последний**: row стоит на
+    /// последней стрелке. Прочие (синтезированный триггер приостановленного
+    /// вычисления) на этом пути дропаются здесь: ветки, которая дропнула бы их
+    /// сама, у круга нет.
+    fn fibering_tail(
+        &mut self,
+        op: FiberOp,
+        label: LabelId,
+        operation: u32,
+        arguments: &[Expr],
+    ) -> Result<(), LlvmError> {
+        let kont = self.kont()?;
+        let ev = self.ev()?;
+        let (operands, count) = self.operands(arguments)?;
+        let at = self.matches;
+        self.matches += 1;
+        let circle = format!("n{at}.nursery");
+        let elsewhere = format!("n{at}.elsewhere");
+
+        let title = &self.program.labels[label.0 as usize].name;
+        let serves = self.temp();
+        let text = format!(
+            "{serves} = call i32 @adamas_nursery_serves(ptr {ev}, i32 {}) ; питомник: {title}",
+            label.0
+        );
+        self.instruction(&text, self.here());
+        let nearest = self.temp();
+        self.instruction(&format!("{nearest} = icmp ne i32 {serves}, 0"), self.here());
+        self.instruction(
+            &format!("br i1 {nearest}, label %{circle}, label %{elsewhere}"),
+            self.here(),
+        );
+
+        self.start(&circle);
+        let taken = match op {
+            FiberOp::Suspend => None,
+            _ => count.checked_sub(1),
+        };
+        for slot in 0..count {
+            if taken == Some(slot) {
+                continue;
+            }
+            let dead = self.slot_of(&operands, slot);
+            self.instruction(
+                &format!("call void @adamas_drop(ptr {dead}, ptr @{RELEASE_SYMBOL})"),
+                self.here(),
+            );
+        }
+        let own = taken.map(|slot| self.slot_of(&operands, slot));
+        let call = match (op, own) {
+            (FiberOp::Suspend, _) => Some(format!(
+                "call ptr @adamas_nursery_suspend(ptr {kont}, ptr {ev})"
+            )),
+            (FiberOp::Detached, Some(own)) => Some(format!(
+                "call ptr @adamas_nursery_spawn(ptr {kont}, ptr {ev}, ptr {own}, \
+                 i32 {NO_TASK}, i32 0, i32 0)"
+            )),
+            (FiberOp::Spawn(Some(task)), Some(own)) => Some(format!(
+                "call ptr @adamas_nursery_spawn(ptr {kont}, ptr {ev}, ptr {own}, i32 {}, \
+                 i32 {}, i32 {})",
+                task.constructor.0, task.slots, task.at
+            )),
+            (FiberOp::Await(Some(slot)), Some(own)) => Some(format!(
+                "call ptr @adamas_nursery_await(ptr {kont}, ptr {ev}, ptr {own}, i32 {slot})"
+            )),
+            // Форма задачи не сошлась - либо своего аргумента у операции нет
+            // вовсе: у машины это тот же отказ на месте, а не молча собранное не
+            // то (`Machine::handle_value`).
+            _ => None,
+        };
+        match call {
+            Some(call) => {
+                let answer = self.temp();
+                self.instruction(&format!("{answer} = {call}"), self.here());
+                self.finish(&answer, Repr::Boxed)?;
+            }
+            None => {
+                self.instruction(
+                    &format!("call void @adamas_fail(ptr {SHAPELESS_MESSAGE})"),
+                    self.here(),
+                );
+                self.instruction("unreachable", self.here());
+            }
+        }
+
+        self.start(&elsewhere);
+        self.performed_tail(label, operation, &operands, count)
+    }
+
+    /// Значение в слоте массива аргументов операции.
+    fn slot_of(&mut self, operands: &str, slot: usize) -> String {
+        let address = self.temp();
+        self.instruction(
+            &format!("{address} = getelementptr ptr, ptr {operands}, i64 {slot}"),
+            self.here(),
+        );
+        let value = self.temp();
+        self.instruction(&format!("{value} = load ptr, ptr {address}"), self.here());
+        value
     }
 
     /// Поиск метки в векторе: вердикт числом и ячейка под найденный кадр.

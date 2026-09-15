@@ -48,9 +48,10 @@ use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 
 /// Программы корпуса, которые срез обязан взять.
 ///
-/// Список закрыт двумя стенами, и обе названы прогоном: за ним стоят эффекты
-/// (волна 2) и замыкания. Всё прочее отвергается названной причиной, и причины
-/// эти печатаются мерой ниже.
+/// Список закрыт **одной** стеной, и названа она прогоном: слой замыканий.
+/// Эффекты стояли второй стеной и сняты треком G волны 2; отказа «эффект» в
+/// остатке не осталось ни одного. Всё прочее отвергается названной причиной, и
+/// причины эти печатаются мерой ниже.
 ///
 /// Сокращать нельзя, пополнять - можно и нужно, когда фрагмент растёт: ровно то
 /// же правило, что у `agreement.rs`.
@@ -60,24 +61,44 @@ use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 /// плавающее (F) без объектного - две. `literal-default` и `primitives`
 /// отвечают записью с плавающим полем и требуют обоих сразу; это и есть
 /// довод, по которому список считается прогоном, а не разностью.
-const TAKEN: [&str; 21] = [
+///
+/// Четырнадцать добавил трек G - вторая форма понижения. Это ровно те
+/// эффектные фикстуры корпуса, которым замыкания не нужны; мера предсказана
+/// обходом узлов до реализации и прогоном подтверждена числом в число.
+/// Мультишотных среди них две - `effects` и `multi-over-oneshot`, - и они же
+/// критерий трека.
+const TAKEN: [&str; 35] = [
     "arithmetic",
     "case-family",
     "case-over-a-computation",
+    "comparisons",
     "countdown",
+    "effects",
     "erasure",
+    "flat-across-a-suspension",
     "flat-fields",
+    "general-frames",
+    "general-order",
+    "label-argument",
+    "label-names-its-binder",
     "lists",
     "literal-default",
+    "module-effect",
+    "module-resource",
     "module-scope",
+    "multi-over-oneshot",
     "mutual-family",
     "nested-case-on-a-field",
     "nested-functor",
+    "nested-rowed-signature",
     "operators",
     "primitives",
     "records",
+    "resource",
     "resource-cleanup",
     "rose",
+    "unwind-inner-handler",
+    "unwind-live-outer",
     "workload-fbip",
     "workload-scalar",
     "workload-scalar-affine",
@@ -331,6 +352,72 @@ fn the_minimum_llvm_reads_the_same_ir() {
             "{name}: LLVM {oldest} посчитала не то, что {current}"
         );
     }
+}
+
+/// Разбор **не** проверяет треугольник у интринсиков, и это измерено.
+///
+/// Свидетель выше гоняет `.ll` минимальной цепочкой до конца - объектник,
+/// линковка, прогон, - и правило «консервативное подмножество IR» держится
+/// ровно на этом «до конца». Здесь стоит причина, по которой короче нельзя.
+///
+/// Всякое имя с приставкой `llvm.`, которого версия не знает, её разбор
+/// принимает как **обычную внешнюю функцию**: ни `llvm-as`, ни `opt`, ни `llc`
+/// не возражают, и промах вылезает неопределённой ссылкой у компоновщика. То
+/// есть проверка «прочиталось - значит совместимо» на интринсиках слепа, а на
+/// необязательных флагах (`getelementptr inbounds nuw`) - нет: флаг ломает
+/// разбор сразу.
+///
+/// Измерено это на `llvm.coro.*` - семействе, которое план Фазы 7 предлагал
+/// треку G. Из тридцати шести имён, известных двадцать первой версии,
+/// восемнадцатая не знает четырёх (`coro.begin.custom.abi`,
+/// `coro.await.suspend.void`, `coro.await.suspend.bool`,
+/// `coro.await.suspend.handle`), и все четыре её разбор принимает. Отсюда цена
+/// варианта `llvm.coro.*`, названная числом, а не ощущением, - и отсюда же
+/// решение трека G взять модель кадра C-бэкенда (см. шапку `emit_llvm.rs`).
+///
+/// Различитель известного от неизвестного - **заведомо неверная арность**:
+/// известный интринсик ломает verifier, неизвестный проходит как внешняя
+/// функция. Обнаружь минимальная версия эти имена - тест упадёт, и это
+/// правильно: замер устарел, и решение стоит перемерить.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+#[test]
+fn the_reader_of_the_minimum_llvm_is_blind_to_an_unknown_intrinsic() {
+    let Some((tools, minimum)) = harness::llvm_toolchains() else {
+        return;
+    };
+    // Имя из `llvm.coro.*`, появившееся после восемнадцатой (LLVM 19).
+    let name = "llvm.coro.await.suspend.void";
+    let text = format!(
+        "declare void @{name}()\ndefine void @t() {{\n  call void @{name}()\n  ret void\n}}\n"
+    );
+    let source = harness::scratch().join("coro.probe.ll");
+    std::fs::write(&source, &text).unwrap();
+
+    let known = |chain: &adamas_codegen::llvm::Toolchain| {
+        std::process::Command::new(chain.tool("llvm-as"))
+            .arg(&source)
+            .arg("-o")
+            .arg(source.with_extension("bc"))
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    assert!(
+        !known(&tools),
+        "штатная цепочка приняла `{name}` с неверной арностью: различитель сломан"
+    );
+    assert!(
+        known(&minimum),
+        "минимальная цепочка знает `{name}`: замер устарел, развилку `llvm.coro.*` стоит перемерить"
+    );
+    eprintln!(
+        "`{name}`: штатная цепочка знает, минимальная принимает как внешнюю функцию - \
+         разбором этого не поймать"
+    );
 }
 
 /// Программы, на которых меряются оси среза: корпусные плюс углы фрагмента.

@@ -76,6 +76,22 @@
 //! рантаймом целиком: блок выдаёт `adamas_alloc`, придерживает
 //! `adamas_drop_reuse`, занимает `adamas_reuse`, освобождает `adamas_free`.
 //!
+//! # Уникальность производства: что берёт трек B
+//!
+//! [`Fact::unique`] приезжает на IR проходом [`crate::unique`] и читается в
+//! **одном** месте - [`Builder::salvaged_unique`]. Где производство уникально,
+//! вопроса `adamas_is_unique` не задаётся вовсе: печатается одна ветвь из двух,
+//! и вместе со второй уходят `dup` взятых полей, `adamas_drop` родителя, два
+//! блока, ветвление и `phi` придержанной ячейки.
+//!
+//! Мера - вызовы рантайма и инструкции, **не** счётчик блоков: на
+//! `resource-cleanup` вопросов 6 против 4, вызовов после `-O2` 61 против 55,
+//! инструкций 321 против 301 (штатный конвейер); выдано 17 в обоих случаях.
+//! Так и должно быть - рантайм принимал то же решение и без факта, а счётчик
+//! считает решения, а не цену их принятия.
+//!
+//! Метаданные алиасинга при этом не ставятся ни одни: замер в `tests/alias.rs`.
+//!
 //! # Плавающее: строгий режим (§4.3, трек F)
 //!
 //! Два обещания §4.3, и оба здесь исполняются формой инструкции, а не ключом.
@@ -96,11 +112,10 @@
 //! Каждый режет в **одном** месте, и место названо здесь, чтобы его не искали
 //! по тексту.
 //!
-//! - **B, алиасинг из QTT.** [`parameter_attributes`] получает [`Fact`]
-//!   целиком: `noalias`, `dereferenceable` и `align` ставятся оттуда по
-//!   [`Fact::unique`], а не по кратности (§10 вопрос 149). Scoped-метаданные
-//!   регионов идут [`Notes`] на инструкции - `self.here().and("noalias", "!7")`,
-//!   - а узлы модуля заводит [`Metadata::node`].
+//! - **B, алиасинг из QTT. Закрыт** 2026-09-15, и закрыт отрицательно по
+//!   метаданным: ни одно из них не ставится, потому что ни одно не меняет
+//!   инструкции (см. [`parameter_attributes`] и раздел про уникальность ниже).
+//!   Читается [`Fact::unique`] - ветвлением, а не атрибутом.
 //! - **C, схлопывание RC.** Конвейер - **данные**
 //!   ([`llvm::Pipeline`](crate::llvm::Pipeline)), список стадий; свой проход
 //!   встаёт стадией между инлайнингом и остальным, а не переписыванием
@@ -192,7 +207,7 @@
 //! объявляет дроп детей `static`, а зовёт его порождённый IR из **другой**
 //! единицы трансляции.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
@@ -201,7 +216,7 @@ use adamas_core::source::Location;
 
 use crate::ir::{
     Arm, Binding, Constructor, CtorId, Expr, Fact, Form, FuncId, Function, LocalId, Program, Repr,
-    Salvage, Source,
+    Salvage, Source, Unique,
 };
 
 /// Почему эмиссия в LLVM отказала.
@@ -489,9 +504,12 @@ impl Tail {
 /// Аргумент [`Builder::instruction`], а не поле билдера, и разница
 /// принципиальная: суффикс, лежащий полем, одинаков у всех инструкций подряд, а
 /// ни одни из требуемых метаданных таковыми не являются. `!dbg` различается от
-/// инструкции к инструкции - у пролога он свой (трек E, [`Builder::prologue`]);
-/// scoped `!alias.scope`/`!noalias` стоят на загрузке и записи, а не на
-/// арифметике рядом с ними (трек B).
+/// инструкции к инструкции - у пролога он свой (трек E, [`Builder::prologue`]).
+/// Под scoped `!alias.scope`/`!noalias` механизм заводился тоже, и они его не
+/// заняли: трек B их не поставил - регионов в IR нет, а на объектах они дают
+/// ноль инструкций (`tests/alias.rs`). Довод про аргумент от этого не слабеет,
+/// его держит `!dbg`: у пролога локация своя, у тела своя. Но других носителей
+/// у механизма нет, и второй ожидался отсюда.
 ///
 /// Собирается цепочкой: [`Notes::none`] плюс [`Notes::and`] на каждый узел.
 /// Окружающие метаданные - те, что несёт всякая инструкция тела, - отдаёт
@@ -524,14 +542,28 @@ impl Notes {
     }
 }
 
-/// Атрибуты параметра: место `noalias`, `dereferenceable` и `align` (трек B).
+/// Атрибуты параметра: пусто, и это результат замера (трек B).
 ///
-/// [`Fact`] приходит целиком **намеренно**. Уникальность берётся из
-/// производства - `unique data`/`resource` и локально свежий объект, - а из
-/// кратности не берётся никогда (§10 вопрос 149, закрыт): `both shared shared`
-/// на кратности `1` принимается, и `noalias` там был бы UB. Поле
-/// [`Fact::unique`] сегодня не заполняет никто, и отсюда пусто по построению, а
-/// не по забывчивости.
+/// Здесь стояли бы `noalias`, `dereferenceable` и `align`. Не стоит ни один, и
+/// у каждого своя причина.
+///
+/// *`noalias` ничего не даёт.* Поставленный **щедро** - на каждый указательный
+/// параметр - он меняет ноль инструкций на трёх нагрузках (`tests/alias.rs`).
+/// Причина видна в выходе: после инлайнинга `noalias` превращается в scoped
+/// `!noalias`, но горячий виток FBIP - это самохвостовая рекурсия, свёрнутая в
+/// **один** цикл внутри одной области видимости, и разные итерации попадают в
+/// одну и ту же scope. Различать им себя нечем.
+///
+/// *`dereferenceable` и `align` не просто бесполезны - на [`Repr::Boxed`] они
+/// неверны.* `adamas.h` говорит прямо: ставить их законно только там, где
+/// `adamas_is_imm` уже дал ложь, а `Boxed` покрывает и непосредственное
+/// значение - нульарный конструктор приезжает числом `1`. Обещание разрешает
+/// поднять чтение тега до проверки, и программа падает: свидетель
+/// `dereferenceable_on_a_boxed_parameter_is_a_fault`.
+///
+/// Уникальность при этом **есть** и читается - [`Fact::unique`], - но не здесь:
+/// её место [`Builder::salvaged_unique`], где она снимает вопрос рантайму, а не
+/// обещает что-то оптимизатору.
 fn parameter_attributes(fact: &Fact) -> String {
     let _ = fact;
     String::new()
@@ -955,6 +987,13 @@ struct Builder<'a> {
     result: &'static str,
     /// Что в каком связывании лежит: от этого тип регистра.
     reprs: HashMap<LocalId, Repr>,
+    /// Связывания, чьё производство уникально ([`Unique::Certain`], трек B).
+    ///
+    /// Заполняет его [`crate::unique`] на IR, а не эмиттер по виду выражения:
+    /// факт этот межпроцедурный - параметр уникален потому, что **каждое**
+    /// место вызова кладёт в позицию свежий объект, - и увидеть его из одного
+    /// тела нельзя.
+    certain: HashSet<LocalId>,
     /// Чем связывание представлено в тексте.
     ///
     /// Подстановка, а не своё имя на связывание: `let` в IR - дерево, значение
@@ -1002,8 +1041,12 @@ impl<'a> Builder<'a> {
     ) -> Self {
         let mut reprs = HashMap::new();
         let mut operands = HashMap::new();
+        let mut certain = HashSet::new();
         for binding in function.captured.iter().chain(&function.parameters) {
             reprs.insert(binding.local, binding.fact.repr);
+            if binding.fact.unique == Unique::Certain {
+                certain.insert(binding.local);
+            }
         }
         // Значение получают только **дожившие** (§3.3): стёртого в рантайме нет
         // вовсе, и в сигнатуре его нет тоже. Упомяни его тело - и отказ придёт
@@ -1011,12 +1054,13 @@ impl<'a> Builder<'a> {
         for binding in function.live_captured().chain(function.live_parameters()) {
             operands.insert(binding.local, format!("%v{}", binding.local.0));
         }
-        collect(&function.body, &mut reprs);
+        collect(&function.body, &mut reprs, &mut certain);
         Self {
             program,
             function,
             result,
             reprs,
+            certain,
             operands,
             head: String::new(),
             body: String::new(),
@@ -1770,6 +1814,9 @@ impl<'a> Builder<'a> {
         salvage: &Salvage,
         token: Option<LocalId>,
     ) -> Result<(), LlvmError> {
+        if self.certain.contains(&local) {
+            return self.salvaged_unique(local, salvage, token);
+        }
         let value = self.operand(local)?;
         let at = self.matches;
         self.matches += 1;
@@ -1827,6 +1874,41 @@ impl<'a> Builder<'a> {
                 self.here(),
             );
             self.operands.insert(token, name);
+        }
+        Ok(())
+    }
+
+    /// Тот же дроп, когда уникальность известна статически ([`crate::unique`]).
+    ///
+    /// Печатается **одна** ветвь из двух - та, которую взял бы рантайм, - и
+    /// вопроса `adamas_is_unique` не остаётся вовсе. Экономия не в одном вызове:
+    /// уходят `dup` каждого взятого поля, `adamas_drop` родителя, два блока,
+    /// ветвление и `phi` придержанной ячейки.
+    ///
+    /// Довод законности - у [`crate::unique`], и он проверяем: `rc` поднимает
+    /// только `adamas_dup`, а его на это связывание в программе нет. Довод
+    /// неверный виден **прогоном**: `tests/alias.rs` объявляет уникальным
+    /// разделённое и получает другой ответ.
+    fn salvaged_unique(
+        &mut self,
+        local: LocalId,
+        salvage: &Salvage,
+        token: Option<LocalId>,
+    ) -> Result<(), LlvmError> {
+        let value = self.operand(local)?;
+        for field in &salvage.spare {
+            let spare = self.operand(*field)?;
+            self.instruction(
+                &format!("call void @adamas_drop(ptr {spare}, ptr @{RELEASE_SYMBOL})"),
+                self.here(),
+            );
+        }
+        match token {
+            // Блок достаётся придержавшему: `phi` не нужен, второго исхода нет.
+            Some(token) => {
+                self.operands.insert(token, value);
+            }
+            None => self.instruction(&format!("call void @adamas_free(ptr {value})"), self.here()),
         }
         Ok(())
     }
@@ -1996,16 +2078,24 @@ impl<'a> Builder<'a> {
     }
 }
 
-/// Представления связываний, заведённых телом.
-fn collect(expr: &Expr, found: &mut HashMap<LocalId, Repr>) {
-    match expr {
-        Expr::Bind { binding, .. } => {
-            found.insert(binding.local, binding.fact.repr);
+/// Представления связываний, заведённых телом, и уникальность их производства.
+///
+/// Оба сразу, а не двумя обходами: собираются они из одного и того же
+/// [`Fact`], и второй обход разошёлся бы с первым молча - ровно тот жанр
+/// дефекта, ради которого [`Expr::children`] живёт одной штукой.
+fn collect(expr: &Expr, found: &mut HashMap<LocalId, Repr>, certain: &mut HashSet<LocalId>) {
+    let mut note = |binding: &Binding| {
+        found.insert(binding.local, binding.fact.repr);
+        if binding.fact.unique == Unique::Certain {
+            certain.insert(binding.local);
         }
+    };
+    match expr {
+        Expr::Bind { binding, .. } => note(binding),
         Expr::Match { arms, .. } => {
             for arm in arms {
                 for field in &arm.fields {
-                    found.insert(field.local, field.fact.repr);
+                    note(field);
                 }
             }
         }
@@ -2016,7 +2106,7 @@ fn collect(expr: &Expr, found: &mut HashMap<LocalId, Repr>) {
         _ => {}
     }
     for child in expr.children() {
-        collect(child, found);
+        collect(child, found, certain);
     }
 }
 

@@ -389,6 +389,59 @@ pub(crate) fn lowered(name: &str, source: &str) -> adamas_codegen::ir::Program {
     adamas_codegen::perceus::insert(program)
 }
 
+/// Представление ровно перед выводом уникальности (§9 Фаза 7, трек B).
+///
+/// От [`lowered`] отличается дроблением: путь тот же, каким идёт
+/// [`adamas_codegen::compile_llvm`], но без [`adamas_codegen::unique::infer`].
+/// Нужно ровно одному свидетелю - тому, который меряет, что вывод даёт: обе
+/// стороны замера обязаны выходить из **одной** точки, иначе разница считалась
+/// бы против другой программы.
+///
+/// # Errors
+///
+/// [`adamas_codegen::CompileError`] - форма вне чистого фрагмента.
+pub(crate) fn llvm_program(
+    name: &str,
+    source: &str,
+) -> Result<adamas_codegen::ir::Program, adamas_codegen::CompileError> {
+    let (mut signature, mut metas, instances) = elaborated(source);
+    let written = body(&signature, "main");
+    let made = mono::specialise(&mut signature, &mut metas, &instances, &written)
+        .unwrap_or_else(|error| panic!("{name}: специализация отказала: {error}"));
+    let lowered =
+        adamas_codegen::split::prepare(adamas_codegen::lower::lower(&signature, &made.term)?);
+    Ok(adamas_codegen::perceus::insert(lowered))
+}
+
+/// Сколько инструкций в объектнике: мера того, что метаданные дали.
+///
+/// Счёт по дизассемблеру, а не по тексту IR: метаданные видны в тексте всегда,
+/// а вопрос ровно в том, доехали ли они до **кода**.
+///
+/// # Panics
+///
+/// Дизассемблер не запустился.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+pub(crate) fn instructions(tools: &Toolchain, object: &Path) -> usize {
+    let shown = Command::new(tools.tool("llvm-objdump"))
+        .arg("-d")
+        .arg(object)
+        .output()
+        .unwrap();
+    assert!(
+        shown.status.success(),
+        "`{}` не дизассемблировался",
+        object.display()
+    );
+    String::from_utf8_lossy(&shown.stdout)
+        .lines()
+        .filter(|line| line.contains('\t'))
+        .count()
+}
+
 /// Текст C либо отказ - для свидетелей названной границы.
 ///
 /// # Errors
@@ -865,14 +918,16 @@ pub(crate) fn llvm_printed(
     assert!(compiled.status.success(), "{stem}: спутник не собрался");
 
     let binary = dir.join(format!("{stem}.bin"));
-    let linked = Command::new(env!("ADAMAS_CC"))
-        .arg(&object)
-        .arg(&support_object)
-        .args(runtime())
-        .arg("-o")
-        .arg(&binary)
-        .output()
-        .unwrap();
+    let mut link = Command::new(env!("ADAMAS_CC"));
+    link.arg(&object).arg(&support_object);
+    // Тот же вопрос конвейеру, что у [`llvm_binary`], и по той же причине:
+    // сквозной конвейер уже внёс рантайм в объектник, и вторая его копия -
+    // отказ компоновщика, а не дубликат. Без этого всякий мутант на сквозном
+    // конвейере «не линковался» бы, и наблюдение вышло бы про сборку.
+    if !carries_runtime(pipeline) {
+        link.args(runtime());
+    }
+    let linked = link.arg("-o").arg(&binary).output().unwrap();
     if !linked.status.success() {
         return Mutated {
             printed: "не слинковался".to_owned(),

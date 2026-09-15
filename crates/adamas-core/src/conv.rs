@@ -740,6 +740,9 @@ fn same_head(
         (Head::ArrayOp(op_a), Head::ArrayOp(op_b)) => op_a == op_b,
         // Операции региона - тем же правилом (§3.6).
         (Head::Region(op_a), Head::Region(op_b)) => op_a == op_b,
+        // Вектор и операции над ним - тем же правилом (§4.9).
+        (Head::Simd, Head::Simd) => true,
+        (Head::SimdOp(op_a), Head::SimdOp(op_b)) => op_a == op_b,
         (
             Head::Global(name_a, levels_a, rows_a, mults_a),
             Head::Global(name_b, levels_b, rows_b, mults_b),

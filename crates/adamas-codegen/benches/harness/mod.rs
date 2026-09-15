@@ -413,11 +413,13 @@ pub(crate) fn ratio(
             their_pit = their_pit.min(milliseconds(&mut their_floor));
         }
         let (us, them) = (us - our_pit, them - their_pit);
-        eprintln!(
-            "отношение/{what}: блок {block}: мы {us:.3} против соседа {them:.3} мс \
-             (полы {our_pit:.3} / {their_pit:.3}), отношение {:.4}",
-            us / them
-        );
+        if measuring() {
+            eprintln!(
+                "отношение/{what}: блок {block}: мы {us:.3} против соседа {them:.3} мс \
+                 (полы {our_pit:.3} / {their_pit:.3}), отношение {:.4}",
+                us / them
+            );
+        }
         measured.push((us, them, us / them));
     }
 
@@ -434,11 +436,26 @@ pub(crate) fn ratio(
         .iter()
         .map(|(_, them, _)| *them)
         .fold(f64::MAX, f64::min);
-    eprintln!(
-        "отношение/{what}: по {quiet} тишайшим блокам {median:.4} \
-         (размах {spread:.4}), запас {:.1}x; пол наш {ours:.3} мс, соседа {theirs:.3}",
-        median / spread
-    );
+    // Вне замера отношение печатать нельзя, и дело не в тишине машины.
+    // Наша сторона — двоичный файл, собранный строкой release всегда; сосед
+    // перезапускает **этот** стенд, а под `cargo test` он собран отладочным
+    // профилем (`target/debug`, против `target/release` под `cargo bench`).
+    // Стороны оказываются из разных сборок, и отношение не просто неточно, а
+    // перевёрнуто: колонное ядро даёт здесь 0.37 вместо 6.95. Строка итога в
+    // том же формате, что у настоящего замера, — свидетель обманчивый, и
+    // читателю лога `cargo test` отличить её нечем. Поэтому формат другой.
+    if measuring() {
+        eprintln!(
+            "отношение/{what}: по {quiet} тишайшим блокам {median:.4} \
+             (размах {spread:.4}), запас {:.1}x; пол наш {ours:.3} мс, соседа {theirs:.3}",
+            median / spread
+        );
+    } else {
+        eprintln!(
+            "отношение/{what}: проверка собираемости, не замер - сосед собран \
+             отладочным профилем, отношение недействительно"
+        );
+    }
     Ratio {
         median,
         spread,

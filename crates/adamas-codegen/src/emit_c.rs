@@ -77,7 +77,7 @@ const fn elems(stride: Option<Stride>) -> Elems {
 }
 
 /// Плоское значение: биты слота, арифметика, печать.
-const FLAT: &str = include_str!("flat.c");
+pub(crate) const FLAT: &str = include_str!("flat.c");
 
 /// Печать значения по таблице конструкторов.
 const PRINTER: &str = include_str!("print.c");
@@ -86,7 +86,7 @@ const PRINTER: &str = include_str!("print.c");
 const RELEASE: &str = include_str!("release.c");
 
 /// Точка входа: печать ответа и счётчики блоков.
-const ENTRY: &str = include_str!("main.c");
+pub(crate) const ENTRY: &str = include_str!("main.c");
 
 /// Почему эмиссия отказала.
 #[derive(Debug, thiserror::Error)]
@@ -323,7 +323,7 @@ fn answer(out: &mut String, program: &Program) {
 ///
 /// Порядок - §4.11 и [`PrimTy::ALL`], ноль занят указательным слотом. Совпадение
 /// с `flat.c` проверяется тестом, а не соглашением.
-fn kind(ty: PrimTy) -> u8 {
+pub(crate) fn kind(ty: PrimTy) -> u8 {
     let at = PrimTy::ALL.iter().position(|it| *it == ty).unwrap_or(0);
     u8::try_from(at + 1).unwrap_or(0)
 }
@@ -377,7 +377,7 @@ fn c_type(repr: Repr) -> String {
 }
 
 /// C-тип всего, кроме плоского агрегата: имя у него постоянное.
-fn scalar(repr: Repr) -> &'static str {
+pub(crate) fn scalar(repr: Repr) -> &'static str {
     match repr {
         // Массив и запись - объекты кучи, и в C они такое же слово, как всякий
         // объект: различие плоского и указательного живёт **внутри** них.

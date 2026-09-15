@@ -1,6 +1,6 @@
 [package]
 name = "adamas-codegen"
-description = "Adamas backend: core terms to backend IR to portable C"
+description = "Adamas backend: core terms to backend IR to portable C and LLVM IR"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

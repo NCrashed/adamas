@@ -503,6 +503,42 @@ impl Pass<'_> {
             Set,
             Index,
         }
+        // Плоское чтение с локала-невладельца **заимствует** (§10 вопрос 171):
+        // наружу уходят биты без заголовка, а сам массив потребит его владелец
+        // - позже по порядку исполнения, иначе владение было бы здесь. Ни
+        // `dup` перед чтением, ни дропа внутри: пара записей счётчика на
+        // каждой ячейке стоила 178.6 мс из 228.8 на колонном проходе и
+        // отнимала у gcc векторизацию - зависимость «запись - чтение» через
+        // одно поле заголовка сериализовала виток. Замер пробной правкой:
+        // 224 -> 91 мс, ответ тот же.
+        //
+        // Локал, которым владеет **это** место (последнее употребление), и
+        // составной операнд (своя временная ссылка) идут прежним владеющим
+        // путём: заимствовать там не у кого. Указательный массив тоже - его
+        // чтение дублирует ячейку, и это другой узел по построению.
+        let expr = match expr {
+            Expr::ArrayIndex {
+                stride,
+                owned: _,
+                array,
+                at,
+            } if stride.is_some()
+                && matches!(&*array, Expr::Local(local) if !owned.contains(local)) =>
+            {
+                let (mut done, spare) = self.sequence(vec![*at], owned);
+                let at = Box::new(done.pop().unwrap_or(Expr::Erased));
+                return drops(
+                    spare,
+                    Expr::ArrayIndex {
+                        stride,
+                        owned: false,
+                        array,
+                        at,
+                    },
+                );
+            }
+            other => other,
+        };
         let (shape, stride, parts) = match expr {
             Expr::ArrayNew {
                 stride,
@@ -515,7 +551,9 @@ impl Pass<'_> {
                 at,
                 value,
             } => (Shape::Set, stride, vec![*array, *at, *value]),
-            Expr::ArrayIndex { stride, array, at } => (Shape::Index, stride, vec![*array, *at]),
+            Expr::ArrayIndex {
+                stride, array, at, ..
+            } => (Shape::Index, stride, vec![*array, *at]),
             other => return other,
         };
         let (mut done, spare) = self.sequence(parts, owned);
@@ -544,6 +582,7 @@ impl Pass<'_> {
                 let at = next();
                 Expr::ArrayIndex {
                     stride,
+                    owned: true,
                     array: next(),
                     at,
                 }
@@ -646,21 +685,35 @@ impl Pass<'_> {
         owned: &BTreeSet<LocalId>,
     ) -> (Vec<Expr>, Vec<LocalId>) {
         let uses: Vec<BTreeSet<LocalId>> = items.iter().map(mentions).collect();
+        // Владельца каждого связывания выбирает не последнее упоминание, а
+        // **голое** - `Expr::Local` целой частью (§10 вопрос 171). Голую часть
+        // потребляет сам узел, и потребляет **после** вычисления всех частей:
+        // вызов забирает аргументы собранными, `arraySet` спрашивает
+        // уникальность после значения, конструктор кладёт поля готовыми.
+        // Позже голой части не исполняется ничего, поэтому владение у неё
+        // законно при любых дальнейших упоминаниях - те возьмут `dup`, как
+        // брала прежде она сама, счёт ссылок не меняется. Меняется одно:
+        // плоское чтение с невладеющего локала становится заимствованием
+        // ([`Pass::array`]), и в витке `x[i] := x[i]·g + b` не остаётся ни
+        // одной записи счётчика.
+        let mut mine: Vec<BTreeSet<LocalId>> = vec![BTreeSet::new(); uses.len()];
+        let mut spare = Vec::new();
+        for local in owned.iter().copied() {
+            let bare = items
+                .iter()
+                .rposition(|item| matches!(item, Expr::Local(it) if *it == local));
+            let holder = bare.or_else(|| uses.iter().rposition(|used| used.contains(&local)));
+            match holder {
+                Some(at) => {
+                    mine[at].insert(local);
+                }
+                None => spare.push(local),
+            }
+        }
         let mut done = Vec::with_capacity(items.len());
         for (at, item) in items.into_iter().enumerate() {
-            let mine: BTreeSet<LocalId> = owned
-                .iter()
-                .copied()
-                .filter(|local| uses[at].contains(local))
-                .filter(|local| !uses[at + 1..].iter().any(|later| later.contains(local)))
-                .collect();
-            done.push(self.expr(item, &mine));
+            done.push(self.expr(item, &mine[at]));
         }
-        let spare = owned
-            .iter()
-            .copied()
-            .filter(|local| !uses.iter().any(|used| used.contains(local)))
-            .collect();
         (done, spare)
     }
 

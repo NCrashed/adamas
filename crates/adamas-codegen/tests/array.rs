@@ -13,6 +13,10 @@
 //!   функция понижается двумя путями - специализированным и по дескриптору, -
 //!   и оба дают тот же ответ, что `adamas eval`
 //!   ([`generic_code_indexes_by_the_descriptor`]).
+//! - *Чтение с невладеющего локала заимствует* (§10 вопрос 171): счётчик не
+//!   тронут ни `dup`-ом, ни дропом, чтение - типизированный load, симметричный
+//!   записи; владеющее чтение отдаёт блок как отдавало
+//!   ([`a_borrowed_read_leaves_the_counter_alone`]).
 //!
 //! Ответ каждой программы по дороге сверяется с `adamas eval`
 //! ([`harness::agreed`]): счётчик показывает цену, а сверка - что цена
@@ -399,4 +403,61 @@ fn body_of<'a>(text: &'a str, name: &str) -> &'a str {
         return &rest[..end];
     }
     panic!("в порождённом C нет функции `{name}`");
+}
+
+/// Чтение с невладеющего локала **заимствует** (§10 вопрос 171).
+///
+/// `bump` читает и переписывает один массив: владение уходит голому `xs` в
+/// позиции `arraySet` - его потребит проверка уникальности после вычисления
+/// значения, - а чтение внутри значения заимствует: наружу уходят биты без
+/// заголовка, и счётчик не тронут ни `dup`-ом перед, ни дропом внутри. Пара
+/// записей счётчика на каждой ячейке стоила 178.6 мс из 228.8 на колонном
+/// проходе и отнимала у gcc векторизацию.
+///
+/// `peek` - контроль другой стороны: чтение последним употреблением владеет,
+/// и рантайм отдаёт блок как отдавал.
+const BORROWED: &str = "\
+type Int = Int64
+
+bump : Array 3 Int64 -> Array 3 Int64
+bump xs = arraySet xs 0 (arrayIndex xs 1)
+
+peek : Array 3 Int64 -> Int64
+peek xs = arrayIndex xs 2
+
+built : Array 3 Int64
+built = arraySet (arraySet (arrayNew 3 7) 1 8) 2 9
+
+main : Int64
+main = addInt64 (arrayIndex (bump built) 0) (peek built)
+";
+
+/// Заимствующее чтение не трогает счётчик; владеющее отдаёт блок как отдавало.
+#[test]
+fn a_borrowed_read_leaves_the_counter_alone() {
+    let text =
+        harness::text(BORROWED).unwrap_or_else(|error| panic!("`BORROWED` не понизился: {error}"));
+
+    let bump = body_of(&text, "bump");
+    assert!(
+        bump.contains("*(const int64_t *)adamas_array_at("),
+        "заимствованное чтение не стало типизированным load:\n{bump}"
+    );
+    assert!(
+        !bump.contains("adamas_dup(") && !bump.contains("adamas_array_read("),
+        "заимствованное чтение тронуло счётчик:\n{bump}"
+    );
+    assert!(
+        bump.contains("adamas_array_writable("),
+        "запись потеряла проверку уникальности:\n{bump}"
+    );
+
+    let peek = body_of(&text, "peek");
+    assert!(
+        peek.contains("adamas_array_read("),
+        "владеющее чтение перестало отдавать блок:\n{peek}"
+    );
+
+    // И всё это считается и не течёт.
+    let _ = allocated("массив-заимствование", BORROWED);
 }

@@ -3211,6 +3211,9 @@ impl<'a> Lowerer<'a> {
                 Ok((
                     Expr::ArrayIndex {
                         stride,
+                        // Владение снимет Perceus, когда массив потребит
+                        // позже кто-то другой (§10 вопрос 171).
+                        owned: true,
                         array: Box::new(array),
                         at: Box::new(at),
                     },

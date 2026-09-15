@@ -1283,7 +1283,12 @@ impl Emitter<'_> {
                 at,
                 value,
             } => self.array_set(*stride, array, at, value, depth),
-            Expr::ArrayIndex { stride, array, at } => self.array_index(*stride, array, at, depth),
+            Expr::ArrayIndex {
+                stride,
+                owned,
+                array,
+                at,
+            } => self.array_index(*stride, *owned, array, at, depth),
             Expr::RegionNew
             | Expr::RegionAlloc { .. }
             | Expr::RegionLast { .. }
@@ -1803,7 +1808,12 @@ impl Emitter<'_> {
         }
     }
 
-    /// Чтение ячейки. Массив приходит владением и отдаётся рантайму здесь же.
+    /// Чтение ячейки. Массив приходит владением и отдаётся рантайму здесь же -
+    /// либо **заимствуется** (§10 вопрос 171): наружу уходят биты без
+    /// заголовка, владелец потребит массив позже, и счётчик не трогается
+    /// вовсе. Заимствованное плоское чтение - прямой типизированный load,
+    /// симметричный записи (`Emitter::array_set` пишет тем же приведением);
+    /// проверку границы делает `adamas_array_at`, как и у записи.
     ///
     /// Плоский элемент неизвестного типа копируется в буфер **на кадре**:
     /// указателем внутрь массива он бы пережил его дроп. Буфер - массив
@@ -1811,6 +1821,7 @@ impl Emitter<'_> {
     fn array_index(
         &mut self,
         stride: Option<Stride>,
+        owned: bool,
         array: &Expr,
         at: &Expr,
         depth: usize,
@@ -1820,12 +1831,27 @@ impl Emitter<'_> {
         let at = self.value(at, depth);
         let name = self.temp();
         match stride {
+            Some(Stride::Static(ty)) if !owned => {
+                let _ = writeln!(
+                    self.out,
+                    "{pad}{c} {name} = *(const {c} *)adamas_array_at({array}, (size_t){at});",
+                    c = c_type(Repr::Flat(ty))
+                );
+            }
             Some(Stride::Static(ty)) => {
                 let _ = writeln!(self.out, "{pad}{} {name};", c_type(Repr::Flat(ty)));
                 let _ = writeln!(
                     self.out,
                     "{pad}adamas_array_read({array}, (size_t){at}, &{name}, \
                      adamas_release_value);"
+                );
+            }
+            Some(Stride::Packed(pack)) if !owned => {
+                let step = self.step(Stride::Packed(pack));
+                let _ = writeln!(self.out, "{pad}{} {name};", c_type(Repr::Packed(pack)));
+                let _ = writeln!(
+                    self.out,
+                    "{pad}memcpy({name}.bytes, adamas_array_at({array}, (size_t){at}), {step});"
                 );
             }
             Some(Stride::Packed(pack)) => {
@@ -1835,6 +1861,16 @@ impl Emitter<'_> {
                     "{pad}adamas_array_read({array}, (size_t){at}, {name}.bytes, \
                      adamas_release_value);"
                 );
+            }
+            Some(stride @ Stride::Dynamic(_)) if !owned => {
+                let step = self.step(stride);
+                let buffer = self.temp();
+                let _ = writeln!(self.out, "{pad}char {buffer}[{step}];");
+                let _ = writeln!(
+                    self.out,
+                    "{pad}memcpy({buffer}, adamas_array_at({array}, (size_t){at}), {step});"
+                );
+                let _ = writeln!(self.out, "{pad}char *{name} = {buffer};");
             }
             Some(stride @ Stride::Dynamic(_)) => {
                 let step = self.step(stride);

@@ -12,6 +12,9 @@
 /// Исходник эмиттера целиком.
 const EMITTER: &str = include_str!("../src/emit_c.rs");
 
+/// Исходник LLVM-эмиттера целиком.
+const LLVM: &str = include_str!("../src/emit_llvm.rs");
+
 /// Исходник представления целиком.
 const REPRESENTATION: &str = include_str!("../src/ir.rs");
 
@@ -28,6 +31,38 @@ fn the_c_emitter_does_not_read_core_terms() {
         assert!(
             !EMITTER.contains(forbidden),
             "эмиттер упоминает `{forbidden}`: шва между ядром и текстом C нет"
+        );
+    }
+}
+
+/// Эмиттер LLVM не читает термов ядра тоже.
+///
+/// Здесь утверждение сильнее, чем у соседа: у C-эмиттера шов был обещанием
+/// Фазе 7, а этот эмиттер **и есть** Фаза 7, и шов у него - выполненное
+/// обещание. Прочитай он ядро - вариант (а) волны 0 («общий backend IR, два
+/// эмиттера») оказался бы на деле вариантом (б), вторым понижением, и никакой
+/// прогон этого бы не заметил.
+#[test]
+fn the_llvm_emitter_does_not_read_core_terms() {
+    for forbidden in ["adamas_core::term", "adamas_core::sig", "Term", "Signature"] {
+        assert!(
+            !LLVM.contains(forbidden),
+            "LLVM-эмиттер упоминает `{forbidden}`: он второй компилятор, а не второй эмиттер"
+        );
+    }
+}
+
+/// Оба эмиттера читают **одно** представление.
+///
+/// Тот же текстовый жанр, что у соседей, и та же граница. Разойдись импорт - и
+/// «два эмиттера из одного IR» держалось бы на честном слове: узел, заведённый
+/// одним для себя, второй бы не увидел.
+#[test]
+fn both_emitters_read_the_same_representation() {
+    for emitter in [EMITTER, LLVM] {
+        assert!(
+            emitter.contains("use crate::ir::"),
+            "эмиттер не читает `crate::ir`: общего шва у двух бэкендов нет"
         );
     }
 }

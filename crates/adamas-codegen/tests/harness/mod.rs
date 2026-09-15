@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+use adamas_codegen::emit_llvm::Artefacts;
 use adamas_codegen::ir::{Arm, Binding, Expr, LocalId};
+use adamas_codegen::llvm::{Pipeline, Toolchain};
 use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::row::Row;
@@ -353,6 +355,219 @@ pub(crate) fn rc_nodes(expr: &Expr, out: &mut Vec<LocalId>) {
         }
         _ => {}
     });
+}
+
+/// Собирает `.ll` со спутником и запускает. Отдаёт stdout и stderr.
+///
+/// Путь ровно тот, что назван решением 2026-09-15: текст `.ll` -> `llvm-as` ->
+/// `opt` -> `llc` -> объектник -> линковка с рантаймом. Спутник на C собирается
+/// **тем же** компилятором, каким собран рантайм, и линкуется рядом.
+///
+/// `stem` отличает артефакты одной программы, прогнанной двумя цепочками:
+/// файлы иначе перезаписывали бы друг друга, и вторая проверка мерила бы
+/// объектник первой.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение, и падать он должен громко"
+)]
+pub(crate) fn llvm_built(
+    stem: &str,
+    artefacts: &Artefacts,
+    tools: &Toolchain,
+    pipeline: &Pipeline,
+) -> (String, String) {
+    let dir = scratch();
+    let text = dir.join(format!("{stem}.ll"));
+    std::fs::write(&text, &artefacts.ll).unwrap();
+    let object = pipeline
+        .run(tools, &text, stem)
+        .unwrap_or_else(|error| panic!("{stem}: конвейер LLVM отказал: {error}"));
+
+    let support = dir.join(format!("{stem}.support.c"));
+    let support_object = dir.join(format!("{stem}.support.o"));
+    std::fs::write(&support, &artefacts.support).unwrap();
+    let compiled = Command::new(env!("ADAMAS_CC"))
+        .args([
+            "-std=c11",
+            "-O1",
+            "-Wall",
+            "-Wno-unused",
+            "-Werror=implicit-function-declaration",
+            "-c",
+        ])
+        .arg("-I")
+        .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
+        .arg(&support)
+        .arg("-o")
+        .arg(&support_object)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{stem}: спутник не собрался:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let binary = dir.join(format!("{stem}.bin"));
+    let linked = Command::new(env!("ADAMAS_CC"))
+        .arg(&object)
+        .arg(&support_object)
+        .args(runtime())
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        linked.status.success(),
+        "{stem}: линковка отказала:\n{}",
+        String::from_utf8_lossy(&linked.stderr)
+    );
+
+    let run = Command::new(&binary).output().unwrap();
+    assert!(
+        run.status.success(),
+        "{stem}: прогон оборвался:\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    (
+        String::from_utf8(run.stdout).unwrap(),
+        String::from_utf8(run.stderr).unwrap(),
+    )
+}
+
+/// Понижение в LLVM, сборка, прогон и сверка с интерпретатором.
+///
+/// Свидетель - **машина**, а не записанное руками ожидание: тот же договор, в
+/// котором стоят первые два вычислителя (`agreement.rs`).
+///
+/// # Errors
+///
+/// [`adamas_codegen::CompileError`] - форма вне скалярного фрагмента.
+pub(crate) fn llvm_agreed(
+    name: &str,
+    source: &str,
+    tools: &Toolchain,
+    pipeline: &Pipeline,
+    stem: &str,
+) -> Result<(String, String), adamas_codegen::CompileError> {
+    let (mut signature, mut metas, instances) = elaborated(source);
+    let written = body(&signature, "main");
+    let expected = ran(&signature, &written);
+    let made = mono::specialise(&mut signature, &mut metas, &instances, &written)
+        .unwrap_or_else(|error| panic!("{name}: специализация отказала: {error}"));
+
+    let artefacts = adamas_codegen::compile_llvm(&signature, &made.term)?;
+    let (stdout, stderr) = llvm_built(stem, &artefacts, tools, pipeline);
+    let printed = stdout.trim_end_matches('\n').to_owned();
+    assert_eq!(printed, expected, "{name}: LLVM посчитал не то, что машина");
+    Ok((printed, stderr))
+}
+
+/// Прогон **мутанта**: тот же путь, но текст `.ll` подменён.
+///
+/// Отдаёт напечатанное. Обрыв здесь законен - сломанный код вправе сломаться, -
+/// и вместо ответа отдаётся слово с причиной: сравнивать довольно и его.
+///
+/// Прогон ограничен по времени. Не украшение: правка, оставляющая счётчик
+/// расти, превращает цикл в бесконечный, и без предела мутант вешал бы прогон
+/// вместо того, чтобы отличаться ответом. Вывод читается после ожидания -
+/// он короче трубы, и заполнить её не может.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+pub(crate) fn llvm_mutant(
+    stem: &str,
+    text: &str,
+    support: &str,
+    tools: &Toolchain,
+    pipeline: &Pipeline,
+) -> String {
+    let dir = scratch();
+    let source = dir.join(format!("{stem}.ll"));
+    std::fs::write(&source, text).unwrap();
+    let Ok(object) = pipeline.run(tools, &source, stem) else {
+        return "IR отвергнут".to_owned();
+    };
+
+    let support_source = dir.join(format!("{stem}.support.c"));
+    let support_object = dir.join(format!("{stem}.support.o"));
+    std::fs::write(&support_source, support).unwrap();
+    let compiled = Command::new(env!("ADAMAS_CC"))
+        .args(["-std=c11", "-O1", "-Wno-unused", "-c"])
+        .arg("-I")
+        .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
+        .arg(&support_source)
+        .arg("-o")
+        .arg(&support_object)
+        .output()
+        .unwrap();
+    assert!(compiled.status.success(), "{stem}: спутник не собрался");
+
+    let binary = dir.join(format!("{stem}.bin"));
+    let linked = Command::new(env!("ADAMAS_CC"))
+        .arg(&object)
+        .arg(&support_object)
+        .args(runtime())
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    if !linked.status.success() {
+        return "не слинковался".to_owned();
+    }
+    within(&binary, std::time::Duration::from_secs(20))
+}
+
+/// Прогон с пределом по времени. Отдаёт напечатанное либо причину.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+fn within(binary: &Path, limit: std::time::Duration) -> String {
+    let mut child = Command::new(binary)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match child.try_wait().unwrap() {
+            Some(status) => {
+                let mut printed = String::new();
+                if let Some(mut out) = child.stdout.take() {
+                    use std::io::Read as _;
+                    let _ = out.read_to_string(&mut printed);
+                }
+                if !status.success() {
+                    return "прогон оборвался".to_owned();
+                }
+                return printed.trim_end_matches('\n').to_owned();
+            }
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return "прогон не завершился".to_owned();
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+}
+
+/// Текст `.ll` без сборки - для свидетелей формы IR и для мутантов.
+///
+/// # Errors
+///
+/// [`adamas_codegen::CompileError`] - форма вне скалярного фрагмента.
+pub(crate) fn llvm_text(
+    name: &str,
+    source: &str,
+) -> Result<Artefacts, adamas_codegen::CompileError> {
+    let (mut signature, mut metas, instances) = elaborated(source);
+    let written = body(&signature, "main");
+    let made = mono::specialise(&mut signature, &mut metas, &instances, &written)
+        .unwrap_or_else(|error| panic!("{name}: специализация отказала: {error}"));
+    adamas_codegen::compile_llvm(&signature, &made.term)
 }
 
 /// Сколько блоков прогон выдал и сколько оставил живыми.

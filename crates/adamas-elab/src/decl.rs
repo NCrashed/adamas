@@ -1113,6 +1113,7 @@ fn declare_class(
     }
     class_members(class, &mut info, &mut members)?;
     flat_shape(&name.text, class, &params, &mut info)?;
+    primitive_shape(&name.text, class, &params, &mut info)?;
     let names = Names::of(&name.text, Vec::new());
     // Класс - **функция** от своих параметров в тип записи, а не сам тип:
     // `Eqv Nat` есть применение. Отсюда тело лямбдой, а тип - `Pi` над
@@ -1222,6 +1223,38 @@ fn flat_shape(
     Ok(())
 }
 
+/// Класс `Primitive` объявляется так, как написан в §4.9, - и когерентен.
+///
+/// Довод тот же, что у [`flat_shape`]: компилятор знает это имя и **выводит**
+/// по нему инстансы, поэтому класс с тем же именем и другим содержимым сломал
+/// бы вывод молча. Суперкласса `{Flat a}` §4.9 форма здесь не требует - см.
+/// шапку `crate::primitive`.
+fn primitive_shape(
+    name: &Symbol,
+    class: &ast::ClassDecl,
+    params: &[ast::Binder],
+    info: &mut Class,
+) -> Result<(), ElabError> {
+    if &**name != crate::primitive::PRIMITIVE {
+        return Ok(());
+    }
+    let written = params.iter().map(|it| it.names.len()).sum::<usize>();
+    let shaped = written == 1
+        && class.superclasses.is_empty()
+        && info.defaults.is_empty()
+        && info.methods.len() == 1
+        && &*info.methods[0] == crate::primitive::SIMD_LAYOUT;
+    if !shaped {
+        return Err(ElabError::PrimitiveShape {
+            why: "класс `Primitive` объявляется одним параметром и единственным методом \
+                  `simdLayout : Layout` (§4.9)",
+            span: class.head.span,
+        });
+    }
+    info.coherent = true;
+    Ok(())
+}
+
 /// `instance Eqv Nat where …` - запись, проверенная против `Eqv Nat`.
 #[allow(clippy::too_many_arguments)]
 fn declare_instance(
@@ -1249,6 +1282,15 @@ fn declare_instance(
         return Err(ElabError::FlatShape {
             why: "инстанс `Flat` руками не пишется: компилятор выводит его \
                   структурно по представлению типа (§4.11)",
+            span,
+        });
+    }
+    // `Primitive` - тем же правилом и по той же причине (§4.9): написанный
+    // инстанс объявил бы дорожкой то, что дорожкой быть не может.
+    if &*name.text == crate::primitive::PRIMITIVE {
+        return Err(ElabError::PrimitiveShape {
+            why: "инстанс `Primitive` руками не пишется: класс закрыт, и инстансы \
+                  его - ровно десять примитивов §4.11 (§4.9)",
             span,
         });
     }

@@ -224,6 +224,15 @@ pub enum Head {
     /// `regionAlloc` и `regionWrite` её наращивают, `regionLast` с `regionRead`
     /// читают ([`crate::eval::try_apply`]).
     Region(crate::prim::RegionOp),
+    /// Тип вектора `Simd n a` (§4.9): голова, применяемая к ширине и дорожке.
+    Simd,
+    /// Операция над вектором (§4.9).
+    ///
+    /// Голова по тому же доводу, что [`Head::ArrayOp`], и с той же добавкой:
+    /// **значение вектора и есть такой спайн**. `simdSplat` заводит цепочку,
+    /// `simdSet` наращивает её, арифметика надстраивает, а `simdLane` читает
+    /// ([`crate::eval::try_apply`]).
+    SimdOp(crate::prim::SimdOp),
 }
 
 /// Элиминатор в спайне застрявшего вычисления.
@@ -465,6 +474,12 @@ impl fmt::Display for Value {
                 write!(f, "{op}·{}", spine.len())
             }
             Self::Neutral(Head::Region(op), spine) => {
+                write!(f, "{op}·{}", spine.len())
+            }
+            Self::Neutral(Head::Simd, spine) => {
+                write!(f, "{}·{}", crate::prim::SIMD, spine.len())
+            }
+            Self::Neutral(Head::SimdOp(op), spine) => {
                 write!(f, "{op}·{}", spine.len())
             }
             Self::Prim(prim) => write!(f, "{prim}"),

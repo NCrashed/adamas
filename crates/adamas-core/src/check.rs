@@ -255,6 +255,22 @@ fn prim_scheme(signature: &Signature, prim: Prim) -> Term {
             ),
         ),
         Prim::Over(op) => array_op_scheme(op, &word, &universe),
+        // `Simd : (0 n : UInt64) -> (0 a : Type 0) -> Type 0`. Оба связывания
+        // стёрты, как у массива: ширина и дорожка живут в типе, а не в
+        // рантайме. Ограничения `{Primitive a}` здесь **нет**, и это названное
+        // расхождение с §4.9 - см. [`simd_op_scheme`].
+        Prim::Simd => bound(
+            Binder::explicit(Mult::Zero),
+            "n",
+            word,
+            bound(
+                Binder::explicit(Mult::Zero),
+                "a",
+                universe.clone(),
+                universe,
+            ),
+        ),
+        Prim::Across(op) => simd_op_scheme(signature, op, &word, &universe),
     }
 }
 
@@ -410,6 +426,137 @@ fn array_op_scheme(op: crate::prim::ArrayOp, word: &Term, universe: &Term) -> Te
                 ),
             ),
         ),
+    }
+}
+
+/// Класс `Primitive` термом - тот, которым §4.9 ограничивает дорожку вектора.
+///
+/// Имя берётся у сигнатуры тем же соглашением, каким его берут `Bool` и
+/// [`flat_class`]: класс объявляется программой, а ядро имён не знает. Не
+/// объявлен - терм строится всё равно, и отказывает проверка.
+fn primitive_class(signature: &Signature, argument: Term) -> Term {
+    Term::App(
+        Rc::new(declared(signature, crate::prim::PRIMITIVE)),
+        Rc::new(argument),
+    )
+}
+
+/// Тип операции над вектором (§4.9).
+///
+/// # Ограничение стоит на операциях, а не на самом `Simd`
+///
+/// §4.9 пишет `Simd : (n : Nat) -> (a : Type) -> {Primitive a} => Type`, то
+/// есть вешает словарь на **тип**. Здесь он висит на **операциях**, и это
+/// названное расхождение, а не упущение. Довод проверяемый: словарь в хвосте
+/// кайнда сделал бы `Simd 4 Float32` частично применённым термом, который
+/// типом становится лишь после вставки имплисита, - а вставка эта энергична и
+/// идёт по ведущим связываниям (`Elaborator::inserted`), то есть до хвоста не
+/// доходит. Наблюдаемое от переноса не меняется: `Simd 4 (Ref r Packet)`
+/// отвергается всё равно, потому что построить значение такого типа нечем -
+/// всякая операция требует `Primitive a`, и отказ приходит именованным
+/// «нет инстанса `Primitive`». Граница расхождения тоже названа: тип, который
+/// **только объявлен** и ни разу не построен, проверку проходит.
+///
+/// # Ширина у `simdSplat` написана, у прочих выведена
+///
+/// У `simdSplat` брать её неоткуда - аргумент один и он скаляр, - поэтому
+/// связывание `(0 n : UInt64)` явное и стёртое, ровно как `Array 3 Int64`
+/// пишет свою длину. У прочих операций вектор стоит в аргументе, и унификация
+/// восстанавливает ширину по его типу.
+///
+/// # Номер дорожки живёт в рантайме
+///
+/// `(ω i : UInt64)`, а не `(0 i)`: `extractelement`/`insertelement` принимают
+/// рантаймовый номер, и отдельного правила «только литерал» заводить не за что.
+/// Машина сводит только литеральный номер - ровно как `arrayIndex`, - и по той
+/// же причине: сводить неизвестную дорожку нечем.
+fn simd_op_scheme(
+    signature: &Signature,
+    op: crate::prim::SimdOp,
+    word: &Term,
+    universe: &Term,
+) -> Term {
+    use crate::prim::SimdOp;
+    let erased = Binder::implicit(Mult::Zero);
+    let given = Binder::explicit(Mult::Many);
+    let simd = |width: Term, lane: Term| {
+        Term::App(
+            Rc::new(Term::App(Rc::new(Term::Prim(Prim::Simd)), Rc::new(width))),
+            Rc::new(lane),
+        )
+    };
+    // Три стёртых связывания перед всем прочим: ширина, дорожка, словарь.
+    let over = |inner: Term| {
+        bound(
+            erased,
+            "n",
+            word.clone(),
+            bound(
+                erased,
+                "a",
+                universe.clone(),
+                bound(erased, "d", primitive_class(signature, Term::var(0)), inner),
+            ),
+        )
+    };
+    match op {
+        // `simdSplat : {0 a} -> {0 d : Primitive a} -> (0 n : UInt64)
+        //            -> (ω x : a) -> Simd n a`
+        SimdOp::Splat => bound(
+            erased,
+            "a",
+            universe.clone(),
+            bound(
+                erased,
+                "d",
+                primitive_class(signature, Term::var(0)),
+                bound(
+                    Binder::explicit(Mult::Zero),
+                    "n",
+                    word.clone(),
+                    bound(given, "x", Term::var(2), simd(Term::var(1), Term::var(3))),
+                ),
+            ),
+        ),
+        // `simdSet : {0 n} -> {0 a} -> {0 d} -> (ω v : Simd n a)
+        //          -> (ω i : UInt64) -> (ω x : a) -> Simd n a`
+        SimdOp::Set => over(bound(
+            given,
+            "v",
+            simd(Term::var(2), Term::var(1)),
+            bound(
+                given,
+                "i",
+                word.clone(),
+                bound(
+                    given,
+                    "x",
+                    Term::var(3),
+                    simd(Term::var(5), Term::var(4)),
+                ),
+            ),
+        )),
+        // `simdLane : {0 n} -> {0 a} -> {0 d} -> (ω v : Simd n a)
+        //           -> (ω i : UInt64) -> a`
+        SimdOp::Lane => over(bound(
+            given,
+            "v",
+            simd(Term::var(2), Term::var(1)),
+            bound(given, "i", word.clone(), Term::var(3)),
+        )),
+        // `simdAdd : {0 n} -> {0 a} -> {0 d} -> (ω u : Simd n a)
+        //          -> (ω w : Simd n a) -> Simd n a`
+        SimdOp::Add | SimdOp::Sub | SimdOp::Mul => over(bound(
+            given,
+            "u",
+            simd(Term::var(2), Term::var(1)),
+            bound(
+                given,
+                "w",
+                simd(Term::var(3), Term::var(2)),
+                simd(Term::var(4), Term::var(3)),
+            ),
+        )),
     }
 }
 

@@ -475,6 +475,110 @@ impl fmt::Display for ArrayOp {
     }
 }
 
+/// Операция над вектором (§4.9).
+///
+/// Узел ядра по тому же доводу, что массив: `simdLane` обязан **сводиться**, а
+/// сведение примитивов живёт в [`crate::eval`], которая сигнатуры не видит.
+/// Правило имени то же: на `Simd` стоит представление, и переопределяемое имя
+/// дало бы два вектора с разной шириной дорожки.
+///
+/// # Шесть операций, а не шестнадцать
+///
+/// §4.9 перечисляет `splat`, `fromVect`, `toVect`, `simdAdd`/`Sub`/`Mul`/`Div`,
+/// `simdEq`/`Lt`/`Gt`, `sum`, `horizMax`, `shuffle`, `permute`, `load`, `store`.
+/// Здесь взято шесть, и расхождение с перечнем объяснимо построчно.
+///
+/// `fromVect` и `toVect` **не взяты, и взяты быть не могут**: они названы через
+/// `Vect`, а имя `Vect` языком намеренно не занято - §4.1 пишет `data Vect`
+/// пользовательским объявлением, и корпус пишет тоже. Сводить конверсию было бы
+/// нечем: [`crate::eval`] конструкторов чужого семейства не знает. Их работу
+/// делают [`Self::Set`] и [`Self::Lane`] - вставка и чтение одной дорожки, то
+/// есть `insertelement`/`extractelement`, из которых конверсия и состоит.
+///
+/// Деления нет по той же причине, по какой его нет у [`PrimOp`]: §4.3 формы
+/// скалярного деления не называет, а вектор её опередить не вправе. Сравнений
+/// нет потому, что ответ у них - маска, то есть `Simd n Bool`, а `Bool` не
+/// примитив (§4.11 его среди десяти не перечисляет) и дорожкой быть не может.
+/// Свёрток (`sum`, `horizMax`) и перестановок (`shuffle`, `permute`) нет по
+/// цене: каждая - свой узел на всех трёх вычислителях, а выразимость от них не
+/// зависит. Все пять названы в отчёте трека H как невзятое.
+///
+/// # Приставка `simd` у всех шести
+///
+/// §4.9 пишет `splat`, `sum`, `load`, `store` голыми именами - «в prelude или
+/// `Data.SIMD`». Голыми они здесь быть не могут: имя примитива **занято**
+/// языком (см. [`Prim::taken`]), и занять `sum`, `load`, `store` значило бы
+/// отвергнуть всякую программу, которая их объявляет. Приставка - то же
+/// правило, каким `Array` зовётся `arrayNew`, а не `new`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SimdOp {
+    /// `simdSplat n x` - вектор ширины `n`, все дорожки заняты `x`.
+    Splat,
+    /// `simdSet v i x` - тот же вектор с переписанной дорожкой `i`.
+    Set,
+    /// `simdLane v i` - значение дорожки `i`.
+    Lane,
+    /// `simdAdd u v` - подорожечное сложение.
+    Add,
+    /// `simdSub u v` - подорожечное вычитание.
+    Sub,
+    /// `simdMul u v` - подорожечное умножение.
+    Mul,
+}
+
+impl SimdOp {
+    /// Все операции.
+    pub const ALL: [Self; 6] = [
+        Self::Splat,
+        Self::Set,
+        Self::Lane,
+        Self::Add,
+        Self::Sub,
+        Self::Mul,
+    ];
+
+    /// Имя, которым операция пишется в программе.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Splat => "simdSplat",
+            Self::Set => "simdSet",
+            Self::Lane => "simdLane",
+            Self::Add => "simdAdd",
+            Self::Sub => "simdSub",
+            Self::Mul => "simdMul",
+        }
+    }
+
+    /// Операция по написанному имени.
+    #[must_use]
+    pub fn named(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|it| it.name() == text)
+    }
+
+    /// Скалярная операция, которую эта повторяет по дорожкам.
+    ///
+    /// `None` у построения и чтения: работы над числами у них нет. Общая с
+    /// [`PrimOp`] она нарочно - §4.9 обещает element-wise семантику, и второй
+    /// счёт сложения разошёлся бы с первым молча, причём разошёлся бы у
+    /// плавающего, где `Float32` считается именно в одинарной точности.
+    #[must_use]
+    pub const fn arith(self) -> Option<PrimOp> {
+        match self {
+            Self::Add => Some(PrimOp::Add),
+            Self::Sub => Some(PrimOp::Sub),
+            Self::Mul => Some(PrimOp::Mul),
+            Self::Splat | Self::Set | Self::Lane => None,
+        }
+    }
+}
+
+impl fmt::Display for SimdOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// Операция региона (§3.6).
 ///
 /// Регион здесь - **представление**, а не типовая сторона: `Alloc r`, `Ref r a`
@@ -631,6 +735,21 @@ pub const FALSE: &str = "False";
 /// Имя типа массива (§4.11).
 pub const ARRAY: &str = "Array";
 
+/// Имя типа вектора (§4.9).
+pub const SIMD: &str = "Simd";
+
+/// Имя класса дорожки (§4.9).
+///
+/// Класс объявляется программой - соглашение то же, каким `if` берёт `Bool`, а
+/// регион берёт [`FLAT`], - а имя его знают двое: вывод инстансов
+/// (`adamas-elab/src/primitive.rs`) и тип операции над вектором. Занятым имя при
+/// этом **не** становится: на нём стоит соглашение, а не представление.
+///
+/// Перечень инстансов - те же десять §4.11, что перечисляет [`PrimTy`], и
+/// совпадение с `Flat` тут неполное намеренно: запись из трёх `Float32` плоская,
+/// но дорожкой быть не может (§4.9, «`Vec3` не `Simd`»).
+pub const PRIMITIVE: &str = "Primitive";
+
 /// Имя типа региона (§3.6): runtime-представление области.
 pub const BLOCK: &str = "Block";
 
@@ -670,6 +789,10 @@ pub enum Prim {
     Block,
     /// Операция над регионом: `regionAlloc`.
     In(RegionOp),
+    /// Тип вектора `Simd n a` (§4.9). Применяется к ширине и дорожке.
+    Simd,
+    /// Операция над вектором: `simdAdd`.
+    Across(SimdOp),
 }
 
 impl Prim {
@@ -697,6 +820,8 @@ impl Prim {
             Self::Over(op) => Some(op.name().to_owned()),
             Self::Block => Some(BLOCK.to_owned()),
             Self::In(op) => Some(op.name().to_owned()),
+            Self::Simd => Some(SIMD.to_owned()),
+            Self::Across(op) => Some(op.name().to_owned()),
             Self::Lit(..) => None,
         }
     }
@@ -713,7 +838,9 @@ impl Prim {
             | Self::Array
             | Self::Over(_)
             | Self::Block
-            | Self::In(_) => false,
+            | Self::In(_)
+            | Self::Simd
+            | Self::Across(_) => false,
         }
     }
 
@@ -726,9 +853,11 @@ impl Prim {
             || PrimCmp::named(text).is_some()
             || ArrayOp::named(text).is_some()
             || RegionOp::named(text).is_some()
+            || SimdOp::named(text).is_some()
             || text == ARRAY
             || text == BLOCK
             || text == PTR
+            || text == SIMD
     }
 }
 
@@ -742,6 +871,8 @@ impl fmt::Display for Prim {
             Self::Over(op) => write!(f, "{op}"),
             Self::Block => f.write_str(BLOCK),
             Self::In(op) => write!(f, "{op}"),
+            Self::Simd => f.write_str(SIMD),
+            Self::Across(op) => write!(f, "{op}"),
             // Дробное печатается через `Debug`: `Display` у него сокращает
             // `1.0` до `1`, и литерал переставал бы отличаться от целого.
             #[expect(

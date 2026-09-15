@@ -46,6 +46,7 @@
 
 mod harness;
 
+use adamas_codegen::ir::{Expr, Unique};
 use adamas_codegen::llvm::Pipeline;
 
 /// Общая шапка: единица, числа, списки, отметка.
@@ -375,6 +376,107 @@ fn a_destructor_of_an_abandoned_task_may_yield() {
     );
     assert_eq!(ran.live, Some(0), "прогон оставил блоки живыми");
     eprintln!("уступка из деструктора: {answer}");
+}
+
+/// Питомничные фикстуры корпуса: те, в которых круг есть.
+const NURSED: [&str; 11] = [
+    "await-twice",
+    "await-value",
+    "cancel",
+    "cancel-bystander",
+    "nursery",
+    "nursery-abort",
+    "nursery-abort-order",
+    "spawn-local",
+    "task",
+    "task-handoff",
+    "task-typed",
+];
+
+/// Вывод уникальности трека B не судит тела задач, и это **измерено**.
+///
+/// Вопрос стоит так: атомарный счётчик (§5.1) обязан не сломать
+/// [`Unique::Certain`], на котором стоит `crate::unique`. Сам счётчик его не
+/// трогает - `rc == 0` остаётся `rc == 0`, и это проверено рантаймом
+/// (`adamas-runtime/tests/atomic.rs`). Остаётся вторая половина: не судит ли
+/// проход **параметр, который под настоящими потоками окажется разделённым**.
+///
+/// Разделённым его сделал бы `spawn`, а тело задачи есть замыкание - такие
+/// функции проход кладёт в `escaping` и их параметры не судит вовсе. Считается
+/// это по **всему** корпусу LLVM-пути, а не по одним питомничным, и вот почему:
+/// на одиннадцати питомничных `Certain` не выдаётся **ни одного**, то есть
+/// утверждение о них было бы пустым. Первая редакция этого свидетеля считала
+/// только их и падала на собственной проверке непустоты - ровно то, ради чего
+/// та проверка и стоит.
+///
+/// Мутант у утверждения есть и он в самом проходе: сними
+/// `Expr::Closure => escaping.insert` - и счёт у целей замыканий перестанет
+/// быть нулевым.
+#[test]
+fn the_uniqueness_pass_judges_no_body_of_a_task() {
+    let mut judged = 0_usize;
+    let mut boxed = 0_usize;
+    let mut nursed = 0_usize;
+    let mut fixtures: Vec<std::path::PathBuf> = std::fs::read_dir(harness::corpus())
+        .expect("корпус обязан читаться")
+        .map(|entry| entry.expect("запись корпуса обязана читаться").path())
+        .filter(|path| path.extension().is_some_and(|it| it == "adamas"))
+        .collect();
+    fixtures.sort();
+
+    for path in &fixtures {
+        let name = path
+            .file_stem()
+            .expect("у фикстуры есть имя")
+            .to_string_lossy()
+            .into_owned();
+        let text = std::fs::read_to_string(path).expect("фикстура обязана читаться");
+        // Отвергнутые срезом пропускаются: судить их некому, и это не предмет.
+        let Ok(program) = harness::llvm_program(&name, &text) else {
+            continue;
+        };
+        let program = adamas_codegen::unique::infer(program);
+        let mut targets = std::collections::BTreeSet::new();
+        for function in &program.functions {
+            harness::walk(&function.body, &mut |expr| {
+                if let Expr::Closure { function: code, .. } = expr {
+                    targets.insert(*code);
+                }
+            });
+        }
+        boxed += targets.len();
+        for function in &program.functions {
+            let certain = function
+                .parameters
+                .iter()
+                .filter(|binding| binding.fact.unique == Unique::Certain)
+                .count();
+            assert!(
+                certain == 0 || !targets.contains(&function.id),
+                "{name}: `{}` стоит значением и всё же судима выводом уникальности",
+                function.name
+            );
+            judged += certain;
+            if NURSED.contains(&name.as_str()) {
+                nursed += certain;
+            }
+        }
+    }
+    // Ноль у всех - ответ пустой: проход обязан судить **хоть что-то**, иначе
+    // утверждение выше держалось бы на том, что он не работает вовсе.
+    assert!(
+        judged > 0,
+        "вывод уникальности не дал ни одного `Certain` на корпусе"
+    );
+    assert_eq!(
+        nursed, 0,
+        "на питомничных фикстурах появился `Certain`: утверждение выше стало нетривиальным, \
+         и его надо перечитать"
+    );
+    eprintln!(
+        "вывод уникальности: {judged} `Certain` на корпусе, {boxed} функций значением и \
+         ни одного `Certain` у них, {nursed} на одиннадцати питомничных"
+    );
 }
 
 /// Он же на LLVM-пути.

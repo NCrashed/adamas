@@ -1255,6 +1255,31 @@ fn primitive_shape(
     Ok(())
 }
 
+/// Инстанс выводимого класса руками не пишется.
+///
+/// Классов таких два - `Flat` (§4.11) и `Primitive` (§4.9), - и оба компилятор
+/// знает по имени. Отказ стоит на **объявлении**, а не в разрешении, потому что
+/// написанный инстанс молча заслонил бы выведенный: у `Flat` он объявил бы
+/// представление, которого у типа нет, у `Primitive` - дорожку из того, что
+/// дорожкой быть не может.
+fn derived_by_hand(name: &Symbol, span: Span) -> Result<(), ElabError> {
+    if &**name == crate::flat::FLAT {
+        return Err(ElabError::FlatShape {
+            why: "инстанс `Flat` руками не пишется: компилятор выводит его \
+                  структурно по представлению типа (§4.11)",
+            span,
+        });
+    }
+    if &**name == crate::primitive::PRIMITIVE {
+        return Err(ElabError::PrimitiveShape {
+            why: "инстанс `Primitive` руками не пишется: класс закрыт, и инстансы \
+                  его - ровно десять примитивов §4.11 (§4.9)",
+            span,
+        });
+    }
+    Ok(())
+}
+
 /// `instance Eqv Nat where …` - запись, проверенная против `Eqv Nat`.
 #[allow(clippy::too_many_arguments)]
 fn declare_instance(
@@ -1274,26 +1299,7 @@ fn declare_instance(
             span: name.span,
         });
     }
-    // Инстанс `Flat` не пишется: его порождает компилятор структурно (§4.11).
-    // Отказ стоит здесь, а не в разрешении, потому что написанный инстанс
-    // молча заслонил бы выведенный - и объявил бы представление, которого у
-    // типа нет.
-    if &*name.text == crate::flat::FLAT {
-        return Err(ElabError::FlatShape {
-            why: "инстанс `Flat` руками не пишется: компилятор выводит его \
-                  структурно по представлению типа (§4.11)",
-            span,
-        });
-    }
-    // `Primitive` - тем же правилом и по той же причине (§4.9): написанный
-    // инстанс объявил бы дорожкой то, что дорожкой быть не может.
-    if &*name.text == crate::primitive::PRIMITIVE {
-        return Err(ElabError::PrimitiveShape {
-            why: "инстанс `Primitive` руками не пишется: класс закрыт, и инстансы \
-                  его - ровно десять примитивов §4.11 (§4.9)",
-            span,
-        });
-    }
+    derived_by_hand(&name.text, span)?;
     let names = Names::of(&name.text, Vec::new());
     let fail = |error: TypeError| ElabError::Core {
         span,

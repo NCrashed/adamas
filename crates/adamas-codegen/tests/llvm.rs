@@ -67,7 +67,11 @@ use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 /// обходом узлов до реализации и прогоном подтверждена числом в число.
 /// Мультишотных среди них две - `effects` и `multi-over-oneshot`, - и они же
 /// критерий трека.
-const TAKEN: [&str; 35] = [
+///
+/// Ещё две добавил трек H - вектор (§4.9). Обе живут в регистре целиком, и
+/// оттого достались LLVM-пути даром: объектного слоя вектору не нужно, а до
+/// массива он не доходит.
+const TAKEN: [&str; 37] = [
     "arithmetic",
     "case-family",
     "case-over-a-computation",
@@ -97,6 +101,8 @@ const TAKEN: [&str; 35] = [
     "resource",
     "resource-cleanup",
     "rose",
+    "simd-lanes",
+    "simd-wrapping",
     "unwind-inner-handler",
     "unwind-live-outer",
     "workload-fbip",

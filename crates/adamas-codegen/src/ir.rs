@@ -1371,7 +1371,9 @@ impl Expr {
             | Self::LayoutField { .. }
             | Self::RegionNew
             | Self::Layout { .. } => Vec::new(),
-            Self::Unpack { value, .. } | Self::Cancel { value, .. } => vec![value],
+            Self::Unpack { value, .. }
+            | Self::Cancel { value, .. }
+            | Self::SimdSplat { value, .. } => vec![value],
             Self::RegionLast { region } => vec![region],
             Self::RegionAlloc { region, value, .. } => vec![region, value],
             Self::RegionRead { region, at, .. }
@@ -1379,6 +1381,12 @@ impl Expr {
             | Self::RegionPop { region, at } => vec![region, at],
             Self::RegionWrite {
                 region, at, value, ..
+            }
+            | Self::SimdSet {
+                vector: region,
+                at,
+                value,
+                ..
             } => vec![region, at, value],
             Self::Construct { arguments, .. }
             | Self::Call { arguments, .. }
@@ -1399,16 +1407,15 @@ impl Expr {
             Self::ArraySet {
                 array, at, value, ..
             } => vec![array, at, value],
-            Self::ArrayIndex { array, at, .. } => vec![array, at],
-            Self::SimdSplat { value, .. } => vec![value],
-            Self::SimdLane { vector, at, .. } => vec![vector, at],
-            Self::SimdSet {
-                vector, at, value, ..
-            } => vec![vector, at, value],
-            Self::SimdArith { left, right, .. } => vec![left, right],
+            Self::ArrayIndex { array, at, .. }
+            | Self::SimdLane {
+                vector: array, at, ..
+            } => vec![array, at],
             Self::Resume { resumption, value } => vec![resumption, value],
             Self::Closure { captured, .. } => captured.iter().collect(),
-            Self::Primitive { left, right, .. } | Self::Compare { left, right, .. } => {
+            Self::Primitive { left, right, .. }
+            | Self::Compare { left, right, .. }
+            | Self::SimdArith { left, right, .. } => {
                 vec![left, right]
             }
             Self::Apply { callee, argument } => vec![callee, argument],

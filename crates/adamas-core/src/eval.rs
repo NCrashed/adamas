@@ -452,9 +452,9 @@ pub fn try_apply(callee: &Rc<Value>, argument: Rc<Value>) -> Option<Rc<Value>> {
                     return Some(answer);
                 }
             }
-            if let Head::SimdOp(crate::prim::SimdOp::Lane) = head {
-                if let Some(read) = laned(&spine) {
-                    return Some(read);
+            if let Head::SimdOp(op) = head {
+                if let Some(answer) = vectored(*op, &spine) {
+                    return Some(answer);
                 }
             }
             Some(Rc::new(Value::Neutral(head.clone(), spine)))
@@ -576,7 +576,7 @@ fn indexed(spine: &[Elim]) -> Option<Rc<Value>> {
     }
 }
 
-/// Чтение дорожки вектора (§4.9): δ-шаг [`Head::SimdOp`] у `simdLane`.
+/// δ-шаг вектора (§4.9): чтение дорожки и подорожечная арифметика.
 ///
 /// # Машина считает `Simd` подорожечно, и это решение трека H
 ///
@@ -586,40 +586,137 @@ fn indexed(spine: &[Elim]) -> Option<Rc<Value>> {
 /// (`adamas-codegen/tests/agreement.rs`) требует, чтобы одна программа давала
 /// одно значение у машины, у C и у LLVM, а граница вывела бы всякую фикстуру с
 /// вектором из `eval/` и тем ослабила бы договор ровно там, где заводится новое
-/// представление. Цена первого названа и измерена: `simdAdd` **сам по себе не
-/// сводится** - вектора-значения у машины нет, есть спайн, - и сводит его
-/// чтение дорожки, проталкивая себя внутрь арифметики.
+/// представление.
 ///
-/// Отсюда правила, и они ровно правила element-wise семантики:
+/// # Значение вектора - спайн, и оттого арифметика сводится **сразу**
+///
+/// Отдельной формы значения у вектора нет: `simdSplat` заводит цепочку,
+/// `simdSet` её наращивает - ровно как `arrayNew` с `arraySet` (§4.11). Отсюда
+/// цена, и она **измерена**: пока `simdAdd` не сводился сам, а раскрывался
+/// только чтением дорожки, цепочка росла на два узла за операцию, и векторный
+/// цикл на 4096 витков ронял машину переполнением стека - `lane_of`
+/// проталкивала чтение вглубь рекурсией по числу операций, а не по ширине.
+///
+/// Поэтому арифметика сводится к **канонической форме** сразу, как только обе
+/// стороны читаются дорожками-литералами: ответ есть `simdSplat` с дорожкой
+/// нуль, надстроенный `simdSet`'ами по числу дорожек. Глубина цепочки тем самым
+/// ограничена **шириной вектора**, а не длиной программы, и виток перестаёт
+/// накапливать. Тот же ход, каким [`folded`] сводит два скалярных литерала в
+/// один.
+///
+/// Правила, и они ровно правила element-wise семантики:
 ///
 /// - `simdLane (simdSplat n x) i` → `x`;
 /// - `simdLane (simdSet v j x) i` → `x` при `i = j`, иначе `simdLane v i`;
-/// - `simdLane (simdAdd u w) i` → `addT (simdLane u i) (simdLane w i)`, и
-///   дальше сводит [`folded`] - тем же [`crate::prim::PrimOp::fold`], каким
-///   считается скаляр. Второго счёта сложения поэтому не существует, и
-///   разойтись `Float32` в одинарной точности с самим собой негде.
+/// - `simdAdd u w` → канон, чья дорожка `i` есть `addT (u[i]) (w[i])`,
+///   посчитанное тем же [`crate::prim::PrimOp::fold`], каким считается скаляр.
+///   Второго счёта сложения поэтому не существует, и разойтись `Float32` в
+///   одинарной точности с самим собой негде.
 ///
 /// Не сводится, когда номер дорожки не литерал, когда цепочка упирается не в
-/// `simdSplat` (вектор пришёл переменной) либо когда номер вне ширины.
-/// Последнее - **названная граница**, та же, что у массива: у понижения выход
-/// за ширину обрывает процесс, и сходятся два вычислителя лишь в том, что
-/// ответа не даёт ни один.
-fn laned(spine: &[Elim]) -> Option<Rc<Value>> {
-    use crate::prim::Prim;
-    let [
-        Elim::App(_),
-        Elim::App(_),
-        Elim::App(_),
-        Elim::App(vector),
-        Elim::App(at),
-    ] = spine
-    else {
-        return None;
+/// `simdSplat` (вектор пришёл переменной), когда ширина не литерал либо когда
+/// номер вне ширины. Последнее - **названная граница**, та же, что у массива: у
+/// понижения выход за ширину обрывает процесс, и сходятся два вычислителя лишь
+/// в том, что ответа не даёт ни один.
+fn vectored(op: crate::prim::SimdOp, spine: &[Elim]) -> Option<Rc<Value>> {
+    use crate::prim::{Prim, SimdOp};
+    match op {
+        SimdOp::Lane => {
+            let [
+                Elim::App(_),
+                Elim::App(_),
+                Elim::App(_),
+                Elim::App(vector),
+                Elim::App(at),
+            ] = spine
+            else {
+                return None;
+            };
+            let Value::Prim(Prim::Lit(_, wanted)) = &**at else {
+                return None;
+            };
+            lane_of(vector, *wanted)
+        }
+        SimdOp::Add | SimdOp::Sub | SimdOp::Mul => {
+            let [
+                Elim::App(width),
+                Elim::App(lane),
+                Elim::App(dict),
+                Elim::App(left),
+                Elim::App(right),
+            ] = spine
+            else {
+                return None;
+            };
+            let Value::Prim(Prim::Lit(_, lanes)) = &**width else {
+                return None;
+            };
+            let arith = op.arith()?;
+            let mut folded = Vec::with_capacity(usize::try_from(*lanes).ok()?);
+            for at in 0..*lanes {
+                let (left, right) = (lane_of(left, at)?, lane_of(right, at)?);
+                let (Value::Prim(Prim::Lit(ty, left)), Value::Prim(Prim::Lit(_, right))) =
+                    (&*left, &*right)
+                else {
+                    return None;
+                };
+                folded.push(Rc::new(Value::Prim(Prim::literal(
+                    *ty,
+                    arith.fold(*ty, *left, *right),
+                ))));
+            }
+            Some(canonical(width, lane, dict, &folded))
+        }
+        SimdOp::Splat | SimdOp::Set => None,
+    }
+}
+
+/// Каноническая форма вектора: `simdSplat` нулевой дорожкой плюс `simdSet` на
+/// каждую остальную.
+///
+/// Стёртые аргументы - ширина, дорожка, словарь - берутся у разобранного
+/// спайна, а не строятся заново: строить их было бы вторым местом, где тип
+/// вектора собирается, и разъехалось бы оно молча.
+fn canonical(
+    width: &Rc<Value>,
+    lane: &Rc<Value>,
+    dict: &Rc<Value>,
+    lanes: &[Rc<Value>],
+) -> Rc<Value> {
+    use crate::prim::{PrimTy, SimdOp};
+    let Some(first) = lanes.first() else {
+        // Вектора нулевой ширины не бывает: понижение отвергает его, а машина
+        // сюда не доходит - `simdSplat` с нулём не строится ни одной
+        // программой. Форма без дорожек всё равно обязана быть значением.
+        return Rc::new(Value::Neutral(Head::SimdOp(SimdOp::Splat), Vec::new()));
     };
-    let Value::Prim(Prim::Lit(_, wanted)) = &**at else {
-        return None;
-    };
-    lane_of(vector, *wanted)
+    let mut built = Rc::new(Value::Neutral(
+        Head::SimdOp(SimdOp::Splat),
+        vec![
+            Elim::App(Rc::clone(lane)),
+            Elim::App(Rc::clone(dict)),
+            Elim::App(Rc::clone(width)),
+            Elim::App(Rc::clone(first)),
+        ],
+    ));
+    for (at, value) in lanes.iter().enumerate().skip(1) {
+        let index = Rc::new(Value::Prim(crate::prim::Prim::literal(
+            PrimTy::UInt64,
+            u64::try_from(at).unwrap_or(u64::MAX),
+        )));
+        built = Rc::new(Value::Neutral(
+            Head::SimdOp(SimdOp::Set),
+            vec![
+                Elim::App(Rc::clone(width)),
+                Elim::App(Rc::clone(lane)),
+                Elim::App(Rc::clone(dict)),
+                Elim::App(built),
+                Elim::App(index),
+                Elim::App(Rc::clone(value)),
+            ],
+        ));
+    }
+    built
 }
 
 /// Значение дорожки `wanted` у вектора `vector`. См. [`laned`].

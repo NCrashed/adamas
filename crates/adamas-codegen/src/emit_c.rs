@@ -463,8 +463,8 @@ fn preamble(out: &mut String) {
 /// **Расширение взято намеренно, и это то самое, ради чего §4.9 писался.**
 /// Структура из `n` полей либо массив на `n` ячеек дали бы тот же ответ и
 /// компилировались бы везде - и ровно поэтому не годятся: свидетель обязан
-/// различать вектор и поэлементный цикл, а они не различаются. `vector_size`
-/// - расширение gcc и clang; §4.9 разрешает «эквивалентные intrinsics либо
+/// различать вектор и поэлементный цикл, а они не различаются. Расширение
+/// `vector_size` принимают gcc и clang; §4.9 разрешает «эквивалентные intrinsics либо
 /// scalar fallback» для non-LLVM бэкендов, и это первое из двух. Компилятор без
 /// расширения порождённый код не соберёт - названным отказом сборки, а не
 /// тихим скаляром.
@@ -1420,27 +1420,10 @@ impl Emitter<'_> {
                 array,
                 at,
             } => self.array_index(*stride, *owned, array, at, depth),
-            Expr::SimdSplat { lanes, lane, value } => self.simd_splat(*lanes, *lane, value, depth),
-            Expr::SimdSet {
-                lanes,
-                lane,
-                vector,
-                at,
-                value,
-            } => self.simd_set(*lanes, *lane, vector, at, value, depth),
-            Expr::SimdLane {
-                lanes,
-                lane,
-                vector,
-                at,
-            } => self.simd_lane(*lanes, *lane, vector, at, depth),
-            Expr::SimdArith {
-                op,
-                lanes,
-                lane,
-                left,
-                right,
-            } => self.simd_arith(*op, *lanes, *lane, left, right, depth),
+            Expr::SimdSplat { .. }
+            | Expr::SimdSet { .. }
+            | Expr::SimdLane { .. }
+            | Expr::SimdArith { .. } => self.vector(expr, depth),
             Expr::RegionNew
             | Expr::RegionAlloc { .. }
             | Expr::RegionLast { .. }
@@ -1796,6 +1779,37 @@ impl Emitter<'_> {
             ty.name()
         );
         name
+    }
+
+    /// Разбор четырёх узлов вектора (§4.9) по своим печатям.
+    ///
+    /// Отдельной ступенькой, а не четырьмя ветвями в [`Self::emitted`]: у той
+    /// длина уже на пределе, и пятая форма представления не повод её ломать.
+    fn vector(&mut self, expr: &Expr, depth: usize) -> String {
+        match expr {
+            Expr::SimdSplat { lanes, lane, value } => self.simd_splat(*lanes, *lane, value, depth),
+            Expr::SimdSet {
+                lanes,
+                lane,
+                vector,
+                at,
+                value,
+            } => self.simd_set(*lanes, *lane, vector, at, value, depth),
+            Expr::SimdLane {
+                lanes,
+                lane,
+                vector,
+                at,
+            } => self.simd_lane(*lanes, *lane, vector, at, depth),
+            Expr::SimdArith {
+                op,
+                lanes,
+                lane,
+                left,
+                right,
+            } => self.simd_arith(*op, *lanes, *lane, left, right, depth),
+            other => self.emitted(other, depth),
+        }
     }
 
     /// Вектор, все дорожки которого заняты одним значением (§4.9).

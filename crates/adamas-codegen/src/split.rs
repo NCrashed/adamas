@@ -313,7 +313,9 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         | Expr::LayoutField { .. }
         | Expr::RegionNew
         | Expr::Layout { .. } => Vec::new(),
-        Expr::Unpack { value, .. } | Expr::Cancel { value, .. } => vec![value],
+        Expr::Unpack { value, .. } | Expr::Cancel { value, .. } | Expr::SimdSplat { value, .. } => {
+            vec![value]
+        }
         Expr::RegionLast { region } => vec![region],
         Expr::RegionAlloc { region, value, .. } => vec![region, value],
         Expr::RegionRead { region, at, .. }
@@ -321,6 +323,12 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         | Expr::RegionPop { region, at } => vec![region, at],
         Expr::RegionWrite {
             region, at, value, ..
+        }
+        | Expr::SimdSet {
+            vector: region,
+            at,
+            value,
+            ..
         } => vec![region, at, value],
         Expr::Construct { arguments, .. }
         | Expr::Call { arguments, .. }
@@ -341,16 +349,15 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         Expr::ArraySet {
             array, at, value, ..
         } => vec![array, at, value],
-        Expr::ArrayIndex { array, at, .. } => vec![array, at],
-        Expr::SimdSplat { value, .. } => vec![value],
-        Expr::SimdLane { vector, at, .. } => vec![vector, at],
-        Expr::SimdSet {
-            vector, at, value, ..
-        } => vec![vector, at, value],
-        Expr::SimdArith { left, right, .. } => vec![left, right],
+        Expr::ArrayIndex { array, at, .. }
+        | Expr::SimdLane {
+            vector: array, at, ..
+        } => vec![array, at],
         Expr::Resume { resumption, value } => vec![resumption, value],
         Expr::Closure { captured, .. } => captured.iter_mut().collect(),
-        Expr::Primitive { left, right, .. } | Expr::Compare { left, right, .. } => {
+        Expr::Primitive { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::SimdArith { left, right, .. } => {
             vec![left, right]
         }
         Expr::Apply { callee, argument } => vec![callee, argument],

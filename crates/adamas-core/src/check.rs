@@ -241,9 +241,14 @@ fn prim_scheme(signature: &Signature, prim: Prim) -> Term {
                 arrow(Mult::Many, over, declared(signature, crate::prim::BOOL)),
             )
         }
-        // `Array : (0 n : UInt64) -> (0 a : Type 0) -> Type 0`. Оба связывания
-        // стёрты: тип в рантайме не живёт.
-        Prim::Array => bound(
+        // `Array : (0 n : UInt64) -> (0 a : Type 0) -> Type 0` (§4.11) и
+        // `Simd : (0 n : UInt64) -> (0 a : Type 0) -> Type 0` (§4.9) - кайнд у
+        // них один и тот же. Оба связывания стёрты: длина с элементом и ширина
+        // с дорожкой живут в типе, а не в рантайме.
+        //
+        // Ограничения `{Primitive a}` у кайнда `Simd` **нет**, и это названное
+        // расхождение с §4.9 - см. [`simd_op_scheme`].
+        Prim::Array | Prim::Simd => bound(
             Binder::explicit(Mult::Zero),
             "n",
             word,
@@ -255,21 +260,6 @@ fn prim_scheme(signature: &Signature, prim: Prim) -> Term {
             ),
         ),
         Prim::Over(op) => array_op_scheme(op, &word, &universe),
-        // `Simd : (0 n : UInt64) -> (0 a : Type 0) -> Type 0`. Оба связывания
-        // стёрты, как у массива: ширина и дорожка живут в типе, а не в
-        // рантайме. Ограничения `{Primitive a}` здесь **нет**, и это названное
-        // расхождение с §4.9 - см. [`simd_op_scheme`].
-        Prim::Simd => bound(
-            Binder::explicit(Mult::Zero),
-            "n",
-            word,
-            bound(
-                Binder::explicit(Mult::Zero),
-                "a",
-                universe.clone(),
-                universe,
-            ),
-        ),
         Prim::Across(op) => simd_op_scheme(signature, op, &word, &universe),
     }
 }

@@ -1189,7 +1189,9 @@ impl Pass<'_> {
             Expr::Closure { captured, .. } => {
                 captured.iter().any(|capture| self.plans(capture, slots))
             }
-            Expr::Primitive { left, right, .. } | Expr::Compare { left, right, .. } => {
+            Expr::Primitive { left, right, .. }
+            | Expr::Compare { left, right, .. }
+            | Expr::SimdArith { left, right, .. } => {
                 self.plans(left, slots) || self.plans(right, slots)
             }
             Expr::Apply { callee, argument } => {
@@ -1229,9 +1231,6 @@ impl Pass<'_> {
             Expr::SimdSet {
                 vector, at, value, ..
             } => self.plans(vector, slots) || self.plans(at, slots) || self.plans(value, slots),
-            Expr::SimdArith { left, right, .. } => {
-                self.plans(left, slots) || self.plans(right, slots)
-            }
             // Плоский агрегат ячейки кучи не занимает вовсе (§4.11), и
             // придержать её ему нечем.
             Expr::Local(_)
@@ -1289,7 +1288,9 @@ impl Pass<'_> {
             Expr::Closure { captured, .. } => captured
                 .iter_mut()
                 .any(|capture| self.attach(capture, slots, token)),
-            Expr::Primitive { left, right, .. } | Expr::Compare { left, right, .. } => {
+            Expr::Primitive { left, right, .. }
+            | Expr::Compare { left, right, .. }
+            | Expr::SimdArith { left, right, .. } => {
                 self.attach(left, slots, token) || self.attach(right, slots, token)
             }
             Expr::Apply { callee, argument } => {
@@ -1337,9 +1338,6 @@ impl Pass<'_> {
                 self.attach(vector, slots, token)
                     || self.attach(at, slots, token)
                     || self.attach(value, slots, token)
-            }
-            Expr::SimdArith { left, right, .. } => {
-                self.attach(left, slots, token) || self.attach(right, slots, token)
             }
             // Плоский агрегат ячейки кучи не занимает вовсе (§4.11), и
             // придержать её ему нечем.

@@ -4611,7 +4611,7 @@ impl Lowerer<'_> {
             // отказом ниже, в [`Lowerer::simd`], а здесь - обычное
             // «представления нет».
             Term::Prim(Prim::Simd) if arguments.len() == 2 => {
-                if let Some(shape) = self.vector_of(&arguments[0], &arguments[1], depth) {
+                if let Some(shape) = self.vector_of(arguments[0], arguments[1], depth) {
                     return Ok(shape);
                 }
             }

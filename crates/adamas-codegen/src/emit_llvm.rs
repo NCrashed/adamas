@@ -38,16 +38,61 @@
 //!
 //! # Что берёт этот срез
 //!
-//! Скалярный фрагмент плюс **объектный слой**. Скалярное: плоское значение (все
-//! десять типов §4.11), арифметика, сравнение, прямой вызов первой формы,
-//! `let`, разбор, `dup` и `drop`. Объектное: [`Expr::Construct`] через
-//! `adamas_alloc`, придержанная ячейка ([`Expr::Reclaim`], `adamas_reuse` и
-//! `adamas_drop_reuse`), поля в ветви разбора, схлопнутый дроп разобранного
-//! ([`Salvage`], §5.1) и ответ программы объектом кучи либо записью.
+//! Скалярный фрагмент, **объектный слой** и **вторая форма понижения**.
+//! Скалярное: плоское значение (все десять типов §4.11), арифметика, сравнение,
+//! прямой вызов, `let`, разбор, `dup` и `drop`. Объектное:
+//! [`Expr::Construct`] через `adamas_alloc`, придержанная ячейка
+//! ([`Expr::Reclaim`], `adamas_reuse` и `adamas_drop_reuse`), поля в ветви
+//! разбора, схлопнутый дроп разобранного ([`Salvage`], §5.1) и ответ программы
+//! объектом кучи либо записью. Эффектное (трек G): отчуждённый кадр, дроблёное
+//! тело кусками, [`Expr::Handle`], [`Expr::Perform`], [`Expr::Resume`],
+//! [`Expr::Mask`] и [`Expr::Closing`], одношот и мультишот.
 //!
 //! Не берётся - и отвергается **названным** отказом ([`LlvmError`]): замыкания,
-//! массивы, регионы, плотные агрегаты, вторая форма понижения и всё, что за ней
-//! стоит, - хендлеры, резумпции, питомник.
+//! массивы, регионы, плотные агрегаты и питомник (§5.2).
+//!
+//! # Кадр берёт рантайм, а не `llvm.coro.*`
+//!
+//! План Фазы 7 назвал трек G «мультишотная резумпция через `llvm.coro.*`».
+//! Писался он до того, как вторая форма была сделана на C, и «через
+//! `llvm.coro.*`» было в нём гипотезой. Взята не она: модель повторена за
+//! C-бэкендом дословно - те же точки входа рантайма, тот же кадр в куче, тот же
+//! вектор evidence, тот же сегмент. Правило фазы требует, чтобы крупный
+//! необязательный слой IR брался **по числу**, и числа нашлись только против
+//! него.
+//!
+//! *Треугольник версий у `llvm.coro.*` не проверяется разбором.* Из тридцати
+//! шести имён семейства, известных LLVM 21.1.8, восемнадцатая не знает
+//! четырёх - `coro.begin.custom.abi` и три `coro.await.suspend.*`, - и все
+//! четыре её разбор **принимает молча**, как обычную внешнюю функцию. Проверено
+//! до конца цепочки: `.ll`, порождённый clang 21 из сопрограммы C++20, читается
+//! восемнадцатой, проходит её `opt -O2` и `llc`, и промах вылезает
+//! неопределённой ссылкой у компоновщика. Свидетель -
+//! `tests/llvm.rs`, `the_reader_of_the_minimum_llvm_is_blind_to_an_unknown_intrinsic`.
+//! У необязательных флагов (`getelementptr inbounds nuw`) такого нет: флаг
+//! ломает разбор сразу.
+//!
+//! *Копировать кадр сопрограммы нечем.* Примитива клонирования у `llvm.coro.*`
+//! нет вовсе; копия - это `memcpy` на `llvm.coro.size` байт. Измерено: на
+//! сопрограмме без указателей внутрь своего кадра копия работает (кадр 24 байта
+//! на `-O1`, ходы дают 71 и 72), а стоит awaiter'у сохранить собственную ручку -
+//! обычная форма `await_suspend`, - и байтовая копия её не переносит: **оба
+//! хода возвращают 70**, то есть значение первого прохода. Это ровно тот жанр
+//! дефекта, ради которого мультишот и проверяется двумя разными ответами.
+//!
+//! *Сегмент - цепочка, а не кадр.* Резумпция §3.4 режется от вершины до кадра
+//! хендлера включительно, и длина её растёт с глубиной рекурсии под хендлером:
+//! измерено `tests/multi.rs` - **по одному блоку кучи на уровень**. Кадр
+//! `llvm.coro.*` принадлежит одной активации функции; копия цепочки из них
+//! потребовала бы своего обхода звеньев и переписывания записей evidence,
+//! называющих скопированные кадры, - то есть ровно того, что рантайм уже делает
+//! (`adamas_segment_copy`, `adamas_evidence_rebind`).
+//!
+//! Цена решения названа и она не нулевая: кадр наш, значит `opt` его не видит
+//! и не схлопывает - приостановка стоит блока кучи всегда, даже там, где LLVM
+//! обошёлся бы регистрами. Число этой цены не мерено: мерить его не с чем, пока
+//! второй реализации нет. Что зато не стоило ничего - **нового рантайма**: точек
+//! входа под кадры не добавлено ни одной, и `.bc` у двух бэкендов один.
 //!
 //! # Где стояла граница на самом деле
 //!
@@ -61,6 +106,12 @@
 //! Мера объектного слоя поэтому считается его собственным потолком, а не
 //! разностью: 21 из 100 при отвергнутом плавающем, и следующая стена названа -
 //! 43 эффект и 15 замыкание, то есть волна 2 и слой замыканий, а не этот трек.
+//!
+//! Вторая форма (трек G) довела меру до **35 из 100**, и остаток гистограммой:
+//! 36 замыкание, 11 питомник, 10 массив, 5 плотный агрегат, 2 регион, 1 граница
+//! языка. Прибавка - ровно те четырнадцать фикстур, которым эффект нужен без
+//! замыканий; отказа «эффект» в остатке не осталось ни одного, и следующая
+//! стена теперь одна: слой замыканий, а он не этот трек.
 //!
 //! # Что объектный слой знает о раскладке
 //!
@@ -129,6 +180,11 @@
 //! - **F, строгий режим плавающей арифметики. Закрыт** 2026-09-15; см. раздел
 //!   про плавающее выше. Тип DWARF плавающему ([`Dwarf::ty`]) выдан тем же
 //!   треком.
+//! - **G, вторая форма и мультишот. Закрыт** 2026-09-16: [`Builder::flowing`]
+//!   ведёт хвост дроблёного тела, [`Builder::reified`] кладёт кадр и печатает
+//!   кусок, [`Module::branches`] раздаёт ветки площадки. Развилка «модель
+//!   C-бэкенда против `llvm.coro.*`» решена в его пользу - разделом выше,
+//!   числами.
 //!
 //! # Отладочная информация: что взял трек E
 //!
@@ -209,7 +265,7 @@
 //! объявляет дроп детей `static`, а зовёт его порождённый IR из **другой**
 //! единицы трансляции.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
 use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
@@ -217,9 +273,10 @@ use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
 use adamas_core::source::Location;
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Expr, Fact, Form, FuncId, Function, LocalId, Program, Repr,
-    Salvage, Source, Unique,
+    Arm, Binding, Constructor, CtorId, Expr, Fact, Form, FuncId, Function, HandlerId, LabelId,
+    LocalId, Program, Repr, Salvage, Source, Unique, Verdict,
 };
+use crate::split::Suspension;
 
 /// Почему эмиссия в LLVM отказала.
 ///
@@ -248,11 +305,17 @@ pub enum LlvmError {
         shape: String,
     },
 
-    /// Вторая форма понижения: кадр отчуждается в кучу (§3.4).
-    #[error("`{function}`: вторая форма понижения - кадров этот срез не кладёт")]
-    Detached {
-        /// Чья функция.
-        function: String,
+    /// Вторая форма позвана оттуда, где скрытых аргументов взять неоткуда.
+    ///
+    /// Не предположение, а проверка: расхождение здесь молчаливо - `null`
+    /// вместо вектора собирается и падает в рантайме. То же утверждение и тем
+    /// же местом делает C-эмиттер (`emit_c::forms_agree`).
+    #[error("`{caller}`: `{callee}` второй формы позван без скрытых аргументов")]
+    Hidden {
+        /// Кто зовёт.
+        caller: String,
+        /// Кого.
+        callee: String,
     },
 }
 
@@ -333,7 +396,19 @@ pub fn emit(program: &Program) -> Result<Artefacts, LlvmError> {
             shape: "функция с параметрами".to_owned(),
         });
     }
+    // Вторая форма точкой входа быть не может: скрытых аргументов ей взять
+    // неоткуда, а корня стека у неё нет - его заводит `handle`, которого в ней
+    // нет по условию. Отказ здесь, а не арность в `.ll`: верификатор промолчал
+    // бы, а компоновщик назвал бы не то место.
+    if entry.form == Form::Detached {
+        return Err(LlvmError::Hidden {
+            caller: "точка входа".to_owned(),
+            callee: entry.name.clone(),
+        });
+    }
 
+    let suspending = crate::split::suspending(program);
+    boundaries(program, &suspending)?;
     let mut module = Module::default();
     // Отладочная информация появляется **от исходника**, а не от ключа сборки:
     // нет текста - нечего и называть отладчику, и выход тогда байт в байт тот
@@ -342,12 +417,119 @@ pub fn emit(program: &Program) -> Result<Artefacts, LlvmError> {
         module.dwarf = Some(Dwarf::new(&mut module.metadata, source));
     }
     for function in &program.functions {
-        module.function(program, function)?;
+        module.function(program, function, &suspending)?;
+    }
+    for at in 0..program.handlers.len() {
+        module.branches(program, at);
+    }
+    for function in taking(program) {
+        module.taker(&program.functions[function.0]);
     }
     Ok(Artefacts {
         ll: module.finish(program, answer),
         support: support(program, answer),
     })
+}
+
+/// Смещение слота среды кадра от её начала, в байтах.
+///
+/// Одной записью на всех, потому что читают её пятеро - раздача веток, дроп их
+/// среды, постановка кадра, код куска и дроп его среды, - и разъедься любые
+/// две, слот читался бы не тот, а сборка молчала бы: тип у всех слотов один.
+fn offset(slot: usize) -> u64 {
+    u64::try_from(slot).unwrap_or(u64::MAX) * u64::from(SLOT_BYTES)
+}
+
+/// Тип регистра, которым функция отдаёт ответ **через границу вызова**.
+///
+/// Дроблёная отдаёт слово вершине стека, а не свой ответ (`adamas.h`,
+/// «дроблёное тело»), и тип у этой границы один. Спрашивается это в трёх
+/// местах - у определения, у прямого вызова и у трамплинов, - и запись одна,
+/// потому что разъехаться им негде.
+fn crossing(program: &Program, suspending: &Suspension, id: FuncId) -> Option<&'static str> {
+    if suspending.functions.contains(&id) {
+        return Some("ptr");
+    }
+    slot(program.functions[id.0].result)
+}
+
+/// Границы, у которых форма функции задана рантаймом, а не понижением.
+///
+/// Ветка хендлера, ветка `return` и деструктор scope зовутся **через кадр**:
+/// сигнатуру им канонизирует `adamas.h` (`adamas_handler_code`, `adamas_code`),
+/// и отвечают они словом. Проверяется это здесь, до печати: несовпадение тут не
+/// отказ verifier'а, а вызов с другой арностью, который соберётся и упадёт в
+/// рантайме. То же утверждение и по тому же поводу делает C-эмиттер
+/// (`emit_c::forms_agree`).
+fn boundaries(program: &Program, suspending: &Suspension) -> Result<(), LlvmError> {
+    let mut named: Vec<(FuncId, &'static str)> = Vec::new();
+    for handler in &program.handlers {
+        for branch in &handler.branches {
+            named.push((branch.function, "ветка хендлера"));
+        }
+        named.push((handler.returned, "ветка `return`"));
+    }
+    for closer in taking(program) {
+        named.push((closer, "деструктор scope"));
+    }
+    for (id, place) in named {
+        let function = &program.functions[id.0];
+        if function.form != Form::Detached {
+            return Err(LlvmError::Shape {
+                function: function.name.clone(),
+                place: place.to_owned(),
+                shape: "первая форма понижения".to_owned(),
+            });
+        }
+        if crossing(program, suspending, id) != Some("ptr") {
+            return Err(LlvmError::Shape {
+                function: function.name.clone(),
+                place: format!("ответ: {place}"),
+                shape: describe(function.result),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Функции, стоящие деструктором кадра `CLOSING`: им нужен забирающий трамплин.
+///
+/// Тот же список, что собирает `emit_c::moving`, и собран он здесь заново по
+/// той же причине, по которой у двух эмиттеров два обхода: список этот -
+/// свойство печати, а не представления, и C-эмиттер держит свой приватным.
+fn taking(program: &Program) -> BTreeSet<FuncId> {
+    let mut found = BTreeSet::new();
+    for function in &program.functions {
+        walk(&function.body, &mut |expr| {
+            if let Expr::Closing { closer, .. } = expr {
+                found.insert(*closer);
+            }
+        });
+    }
+    found
+}
+
+/// Есть ли в программе выход из scope кадром: тогда нужен дроп его среды.
+fn scoped(program: &Program) -> bool {
+    program.functions.iter().any(|function| {
+        let mut found = false;
+        walk(&function.body, &mut |expr| {
+            found |= matches!(expr, Expr::Closing { .. });
+        });
+        found
+    })
+}
+
+/// Обход дерева выражения сверху вниз.
+///
+/// Шаг берётся у самого представления ([`Expr::children`]): свой обход означал
+/// бы, что утверждение об **отсутствии** узла зеленеет молча, стоит
+/// представлению вырасти.
+fn walk(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
+    visit(expr);
+    for child in expr.children() {
+        walk(child, visit);
+    }
 }
 
 /// Чем отвечает программа: тем и различаются две печати спутника.
@@ -775,23 +957,42 @@ struct Module {
 
 impl Module {
     /// Эмитит одну функцию.
-    fn function(&mut self, program: &Program, function: &Function) -> Result<(), LlvmError> {
-        if function.form == Form::Detached {
-            return Err(LlvmError::Detached {
-                function: function.name.clone(),
-            });
-        }
-        if let Some(binding) = function.captured.first() {
-            return Err(LlvmError::Shape {
-                function: function.name.clone(),
-                place: format!("захват `{}`", binding.name),
-                shape: "среда замыкания".to_owned(),
-            });
-        }
-        let result = slot_or(function, "ответ", function.result)?;
+    fn function(
+        &mut self,
+        program: &Program,
+        function: &Function,
+        suspending: &Suspension,
+    ) -> Result<(), LlvmError> {
+        let split = suspending.functions.contains(&function.id);
+        // Дроблёная функция возвращает **не свой ответ**, а значение вершине
+        // стека (`adamas.h`, «дроблёное тело»), и значение это - слово. Плоский
+        // ответ вернуть им нельзя: обрыв `adamas_kont_abort` отвечает
+        // указателем, а вернуть его требуется немедленно. C-эмиттер проверяет то
+        // же самое и тем же местом (`emit_c::forms_agree`, `EmitError::Aborting`).
+        let result = if split {
+            if slot(function.result) != Some("ptr") {
+                return Err(LlvmError::Shape {
+                    function: function.name.clone(),
+                    place: "ответ дроблёного тела".to_owned(),
+                    shape: describe(function.result),
+                });
+            }
+            "ptr"
+        } else {
+            slot_or(function, "ответ", function.result)?
+        };
 
         let mut parameters = Vec::new();
-        for binding in function.live_parameters() {
+        // Скрытые аргументы второй формы - вектор evidence и ручка стека, в том
+        // же порядке, что у `adamas_lowered_second`. Печатаются они здесь, у
+        // прямого вызова ([`Builder::call`]) и у трамплинов; порядок один.
+        if function.form == Form::Detached {
+            parameters.push("ptr %ev".to_owned());
+            parameters.push("ptr %kont".to_owned());
+        }
+        // Захваченная среда приходит обычными параметрами перед написанным - её
+        // раздаёт трамплин либо раздача веток, как и у C-эмиттера.
+        for binding in function.live_captured().chain(function.live_parameters()) {
             let ty = slot_or(
                 function,
                 &format!("параметр `{}`", binding.name),
@@ -825,18 +1026,28 @@ impl Module {
             program,
             function,
             result,
+            suspending,
             &mut self.metadata,
             self.dwarf.as_ref(),
             scope.clone(),
         );
         builder.parameters_in_frame(function);
-        // Тело стоит в **возвратной** позиции целиком, и обход её разносит:
-        // хвостовой вызов печатается `musttail`, всё прочее - `ret`. Печатает
-        // `ret` сам обход, потому что у разбора в хвосте их столько, сколько
-        // ветвей (трек D).
-        builder.tail(&function.body)?;
+        if split {
+            // Дроблёное тело возвратом не кончается: всякий его путь отдаёт
+            // значение вершине стека, а до кадра его доводит трамплин.
+            builder.flowing(&function.body)?;
+        } else {
+            // Тело стоит в **возвратной** позиции целиком, и обход её разносит:
+            // хвостовой вызов печатается `musttail`, всё прочее - `ret`.
+            // Печатает `ret` сам обход, потому что у разбора в хвосте их
+            // столько, сколько ветвей (трек D).
+            builder.tail(&function.body)?;
+        }
 
         let signed = scope.map_or_else(String::new, |scope| format!(" !dbg {}", scope.subprogram));
+        for chunk in std::mem::take(&mut builder.chunks) {
+            self.bodies.push_str(&chunk);
+        }
         let _ = writeln!(self.bodies, "; {}", function.name);
         let _ = writeln!(
             self.bodies,
@@ -849,6 +1060,160 @@ impl Module {
         self.bodies.push_str(&builder.body);
         self.bodies.push_str("}\n\n");
         Ok(())
+    }
+
+    /// Ветки одной площадки `handle` одной функцией: их выбирает номер операции.
+    ///
+    /// Одной, а не по функции на ветку, и довод тот же, что у C-эмиттера:
+    /// выбирает их **рантайм**, операция приходит с кадром на руках и
+    /// статически не знает, чьи это ветки (`adamas.h`, `adamas_handler_code`).
+    /// Соглашение о вызове здесь поэтому C, а не [`CONVENTION`]: зовёт её
+    /// рантайм по указателю на `adamas_handler_code`.
+    ///
+    /// Среда кадра принадлежит кадру, а функция берёт аргументы владением -
+    /// отсюда `adamas_dup` на каждый слот. Лишние аргументы операции -
+    /// синтезированный триггер приостановленного вычисления - дропаются здесь:
+    /// сколько ветка связывает, знает площадка, а место операции не знает.
+    ///
+    /// Вердиктов три, и различает их судьба сегмента: хвостовая его не трогает,
+    /// абортивная режет и кладёт раскрутку кадром **до** ветки, общая режет в
+    /// значение и отдаёт ветке лишним аргументом. Мультишотная режет как общая и
+    /// помечает ручку `adamas_segment_multi`: возобновление будет ставить копию,
+    /// пока на ручку есть лишние ссылки (§3.4, «Стоимость multi-shot»).
+    fn branches(&mut self, program: &Program, at: usize) {
+        let described = &program.handlers[at];
+        let label = &program.labels[described.label.0 as usize];
+        let env = described
+            .captured
+            .iter()
+            .filter(|it| it.fact.present)
+            .count();
+
+        let mut out = String::new();
+        let _ = writeln!(out, "; ветки `{}`", label.name);
+        let _ = writeln!(
+            out,
+            "define internal ptr @handler_{at}(ptr %h, ptr %kont, i32 %op, ptr %args, i64 %count) \
+             {DEFINITION_ATTRIBUTES} {{"
+        );
+        out.push_str("entry:\n");
+        // Окружающая ветки есть окружающая применения хендлера (§3.4), и взять
+        // её неоткуда, кроме кадра: вектор места `handle` лежит в нём.
+        let _ = writeln!(out, "  %ev = call ptr @adamas_frame_evidence(ptr %h)");
+        if env > 0 {
+            let _ = writeln!(out, "  %env = call ptr @adamas_frame_env(ptr %h)");
+        }
+        let mut cases = Vec::new();
+        let mut blocks = String::new();
+        for (slot, branch) in described.branches.iter().enumerate() {
+            let title = label
+                .operations
+                .get(slot)
+                .map_or_else(|| format!("#{slot}"), Clone::clone);
+            cases.push(format!("i32 {slot}, label %op{slot}"));
+            dispatch_arm(
+                &mut blocks,
+                &format!("op{slot}"),
+                &title,
+                env,
+                branch.function,
+                branch.written,
+                branch.verdict,
+                described.multi,
+            );
+        }
+        // Ветка `return` не операция, и номера у неё нет: рантайм зовёт её
+        // `ADAMAS_HANDLER_RETURN`. Резумпции у неё не бывает - вычисление
+        // договорило, снимать нечего.
+        cases.push("i32 -1, label %opret".to_owned());
+        dispatch_arm(
+            &mut blocks,
+            "opret",
+            "return",
+            env,
+            described.returned,
+            1,
+            Verdict::Tail,
+            false,
+        );
+        let _ = writeln!(
+            out,
+            "  switch i32 %op, label %missing [ {} ]",
+            cases.join(" ")
+        );
+        out.push_str(&blocks);
+        out.push_str("\nmissing:\n");
+        let _ = writeln!(out, "  call void @adamas_fail(ptr {BRANCH_MESSAGE})");
+        out.push_str("  unreachable\n}\n\n");
+        self.bodies.push_str(&out);
+
+        if env == 0 {
+            return;
+        }
+        let _ = writeln!(self.bodies, "; среда веток `{}`", label.name);
+        let _ = writeln!(
+            self.bodies,
+            "define internal void @relh_{at}(ptr %h, ptr %kont) {DEFINITION_ATTRIBUTES} {{"
+        );
+        self.bodies.push_str("entry:\n");
+        let _ = writeln!(self.bodies, "  %env = call ptr @adamas_frame_env(ptr %h)");
+        for slot in 0..env {
+            let _ = writeln!(
+                self.bodies,
+                "  %a{slot} = getelementptr i8, ptr %env, i64 {}",
+                offset(slot)
+            );
+            let _ = writeln!(self.bodies, "  %s{slot} = load ptr, ptr %a{slot}");
+            let _ = writeln!(
+                self.bodies,
+                "  call void @adamas_drop(ptr %s{slot}, ptr @{RELEASE_SYMBOL})"
+            );
+        }
+        self.bodies.push_str("  ret void\n}\n\n");
+    }
+
+    /// Трамплин деструктора scope'а: слоты **забираются**, а не дублируются.
+    ///
+    /// Зовут такое замыкание ровно раз и тут же дропают - кадр `CLOSING` его
+    /// единственный владелец (`adamas.h`). Дублируй слоты, как общий трамплин, -
+    /// и ресурс достался бы деструктору разделённым: FBIP внутри него не
+    /// сработал бы никогда, а порядок деструкторов перестал бы быть наблюдаемым
+    /// ценой. Слот после взятия зануляется единицей, поэтому дроп замыкания
+    /// следом отдаёт уже ничего.
+    fn taker(&mut self, function: &Function) {
+        let env = function.live_captured().count();
+        let _ = writeln!(self.bodies, "; `{}` кадром scope", function.name);
+        let _ = writeln!(
+            self.bodies,
+            "define internal ptr @take_{}(ptr %self, ptr %ev, ptr %kont, ptr %arg) \
+             {DEFINITION_ATTRIBUTES} {{",
+            function.id.0
+        );
+        self.bodies.push_str("entry:\n");
+        let mut given = match function.form {
+            Form::Stack => Vec::new(),
+            Form::Detached => vec!["ptr %ev".to_owned(), "ptr %kont".to_owned()],
+        };
+        for slot in 0..env {
+            let _ = writeln!(
+                self.bodies,
+                "  %s{slot} = call ptr @adamas_closure_get(ptr %self, i64 {slot})"
+            );
+            let _ = writeln!(self.bodies, "  %u{slot} = call ptr @adamas_unit()");
+            let _ = writeln!(
+                self.bodies,
+                "  call void @adamas_closure_set(ptr %self, i64 {slot}, ptr %u{slot})"
+            );
+            given.push(format!("ptr %s{slot}"));
+        }
+        given.push("ptr %arg".to_owned());
+        let _ = writeln!(
+            self.bodies,
+            "  %answer = call {CONVENTION} ptr @fn_{}({})",
+            function.id.0,
+            given.join(", ")
+        );
+        self.bodies.push_str("  ret ptr %answer\n}\n\n");
     }
 
     /// Складывает модуль: шапка, объявления, константы, тела, метаданные.
@@ -880,6 +1245,8 @@ impl Module {
         // идёт, - та же, по которой печатается ответ.
         let _ = writeln!(out, "declare void @{RELEASE_SYMBOL}(ptr)\n");
 
+        second_form(&mut out, program);
+
         if self.dwarf.is_some() {
             out.push_str(concat!(
                 "; Отладочная информация. Вызов интринсика, а не запись\n",
@@ -889,36 +1256,22 @@ impl Module {
                 "\n",
             ));
         }
-
-        let _ = writeln!(
-            out,
-            "{TAG_MESSAGE} = private unnamed_addr constant [{} x i8] c\"{}\"\n",
-            terminated(TAG_TEXT).len(),
-            escaped(&terminated(TAG_TEXT))
-        );
+        for (name, text) in [
+            (TAG_MESSAGE, TAG_TEXT),
+            (BRANCH_MESSAGE, BRANCH_TEXT),
+            (MISSING_MESSAGE, MISSING_TEXT),
+        ] {
+            let _ = writeln!(
+                out,
+                "{name} = private unnamed_addr constant [{} x i8] c\"{}\"",
+                terminated(text).len(),
+                escaped(&terminated(text))
+            );
+        }
+        out.push('\n');
 
         out.push_str(&self.bodies);
-
-        let _ = writeln!(out, "; Точка входа для спутника на C.");
-        let _ = writeln!(
-            out,
-            "; Соглашение здесь C - её зовёт спутник; порождённые между собой\n\
-             ; ходят по `{CONVENTION}` (трек D), и вызов ниже это называет."
-        );
-        let _ = writeln!(
-            out,
-            "define {} @{ENTRY_SYMBOL}() {DEFINITION_ATTRIBUTES} {{",
-            answer.machine()
-        );
-        out.push_str("entry:\n");
-        let _ = writeln!(
-            out,
-            "  %answer = call {CONVENTION} {} @fn_{}()",
-            answer.machine(),
-            program.entry.0
-        );
-        let _ = writeln!(out, "  ret {} %answer", answer.machine());
-        out.push_str("}\n");
+        entry_point(&mut out, program, answer);
 
         if !self.metadata.nodes.is_empty() {
             out.push('\n');
@@ -928,8 +1281,227 @@ impl Module {
     }
 }
 
+/// Объявления второй формы понижения и дроп среды кадра scope.
+///
+/// Отдельно от [`Module::finish`], потому что оба куска условны: точек входа
+/// рантайма под кадры не объявляется вовсе там, где второй формы в программе
+/// нет, и выход тогда байт в байт тот же, что был до трека G.
+///
+/// Модель повторена за C-бэкендом дословно - те же точки входа, тот же кадр в
+/// куче, тот же сегмент, - и это решение, а не умолчание: см. раздел «Кадр
+/// берёт рантайм, а не `llvm.coro.*`» в шапке модуля.
+fn second_form(out: &mut String, program: &Program) {
+    if program
+        .functions
+        .iter()
+        .any(|function| function.form == Form::Detached)
+    {
+        out.push_str(concat!(
+            "; Вторая форма понижения: кадр в куче, вектор evidence, сегмент.\n",
+            "declare ptr @adamas_unit()\n",
+            "declare i32 @adamas_is_imm(ptr)\n",
+            "declare ptr @adamas_evidence_empty()\n",
+            "declare ptr @adamas_evidence_extend(ptr, i32, ptr)\n",
+            "declare ptr @adamas_evidence_mask(ptr, i32)\n",
+            "declare i32 @adamas_evidence_lookup(ptr, i32, ptr)\n",
+            "declare void @adamas_evidence_drop(ptr)\n",
+            "declare void @adamas_kont_init(ptr)\n",
+            "declare ptr @adamas_kont_push(ptr, i16, i32, ptr, ptr, i64, i64, ptr)\n",
+            "declare ptr @adamas_kont_handler(ptr, i32, ptr, ptr, i64, ptr)\n",
+            "declare ptr @adamas_kont_closing(ptr, ptr, ptr, ptr)\n",
+            "declare ptr @adamas_kont_run(ptr, ptr)\n",
+            "declare ptr @adamas_kont_abort(ptr)\n",
+            "declare ptr @adamas_kont_cut(ptr, ptr)\n",
+            "declare void @adamas_kont_resume(ptr, ptr)\n",
+            "declare ptr @adamas_frame_env(ptr)\n",
+            "declare ptr @adamas_frame_evidence(ptr)\n",
+            "declare ptr @adamas_frame_perform(ptr, ptr, i32, ptr, i64)\n",
+            "declare void @adamas_segment_unwind(ptr, ptr)\n",
+            "declare ptr @adamas_segment_value(ptr)\n",
+            "declare ptr @adamas_segment_multi(ptr)\n",
+            "declare void @adamas_resumption_drop(ptr, ptr)\n",
+            "declare ptr @adamas_closure(ptr, ptr, i32, i32)\n",
+            "declare void @adamas_closure_set(ptr, i64, ptr)\n",
+            "declare ptr @adamas_closure_get(ptr, i64)\n",
+            "\n",
+        ));
+    }
+    if scoped(program) {
+        out.push_str(concat!(
+            "; Дроп среды кадра scope: деструктор замыканием в слоте 0 (§3.3).\n",
+            "define internal void @release_closing(ptr %h, ptr %kont) nounwind {\n",
+            "entry:\n",
+            "  %env = call ptr @adamas_frame_env(ptr %h)\n",
+            "  %closer = load ptr, ptr %env\n",
+        ));
+        let _ = writeln!(
+            out,
+            "  call void @adamas_drop(ptr %closer, ptr @{RELEASE_SYMBOL})"
+        );
+        out.push_str("  ret void\n}\n\n");
+    }
+}
+
+/// Точка входа для спутника на C.
+///
+/// Соглашение здесь C - её зовёт спутник; порождённые между собой ходят по
+/// [`CONVENTION`] (трек D), и вызов ниже это называет.
+fn entry_point(out: &mut String, program: &Program, answer: Answer) {
+    let _ = writeln!(out, "; Точка входа для спутника на C.");
+    let _ = writeln!(
+        out,
+        "define {} @{ENTRY_SYMBOL}() {DEFINITION_ATTRIBUTES} {{",
+        answer.machine()
+    );
+    out.push_str("entry:\n");
+    let _ = writeln!(
+        out,
+        "  %answer = call {CONVENTION} {} @fn_{}()",
+        answer.machine(),
+        program.entry.0
+    );
+    let _ = writeln!(out, "  ret {} %answer", answer.machine());
+    out.push_str("}\n");
+}
+
+/// Одна ветвь раздачи веток: аргументы ветке, а у нехвостовой - ещё и сегмент.
+///
+/// Имена регистров внутри ветви разведены её меткой: блоки лежат в одной
+/// функции, и `%d0` двух ветвей были бы переопределением.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "ровно то, чем ветки различаются между собой: меньше не различает"
+)]
+fn dispatch_arm(
+    out: &mut String,
+    label: &str,
+    title: &str,
+    env: usize,
+    function: FuncId,
+    written: usize,
+    verdict: Verdict,
+    multi: bool,
+) {
+    let _ = writeln!(out, "\n{label}: ; {title}");
+    // Лишние аргументы операции дропает раздача: сколько ветка связывает, знает
+    // площадка, а место операции не знает. Цикл, а не разворот: `count`
+    // приходит в рантайме.
+    let _ = writeln!(out, "  br label %{label}.spare");
+    let _ = writeln!(out, "\n{label}.spare:");
+    let _ = writeln!(
+        out,
+        "  %{label}.at = phi i64 [ {written}, %{label} ], [ %{label}.next, %{label}.free ]"
+    );
+    let _ = writeln!(out, "  %{label}.more = icmp ult i64 %{label}.at, %count");
+    let _ = writeln!(
+        out,
+        "  br i1 %{label}.more, label %{label}.free, label %{label}.run"
+    );
+    let _ = writeln!(out, "\n{label}.free:");
+    let _ = writeln!(
+        out,
+        "  %{label}.slot = getelementptr ptr, ptr %args, i64 %{label}.at"
+    );
+    let _ = writeln!(out, "  %{label}.dead = load ptr, ptr %{label}.slot");
+    let _ = writeln!(
+        out,
+        "  call void @adamas_drop(ptr %{label}.dead, ptr @{RELEASE_SYMBOL})"
+    );
+    let _ = writeln!(out, "  %{label}.next = add i64 %{label}.at, 1");
+    let _ = writeln!(out, "  br label %{label}.spare");
+    let _ = writeln!(out, "\n{label}.run:");
+
+    // Скрытые аргументы у ветки есть всегда: зовут её через кадр, и производить
+    // она вправе. Форма её - вторая по построению, и это проверено до печати
+    // ([`boundaries`]), а не предположено здесь.
+    let mut given = vec!["ptr %ev".to_owned(), "ptr %kont".to_owned()];
+    for slot in 0..env {
+        let _ = writeln!(
+            out,
+            "  %{label}.e{slot} = getelementptr i8, ptr %env, i64 {}",
+            offset(slot)
+        );
+        let _ = writeln!(out, "  %{label}.v{slot} = load ptr, ptr %{label}.e{slot}");
+        let _ = writeln!(
+            out,
+            "  %{label}.d{slot} = call ptr @adamas_dup(ptr %{label}.v{slot})"
+        );
+        given.push(format!("ptr %{label}.d{slot}"));
+    }
+    // Абортивная режет сегмент и кладёт его раскрутку кадром **до** ветки: кадр
+    // раскрутки лежит ниже всего, что ветка положит, и деструкторы срабатывают
+    // после её ответа. Перестань резать до ветки - и операция ветки нашла бы
+    // собственный хендлер живым.
+    if verdict == Verdict::Abortive {
+        let _ = writeln!(
+            out,
+            "  %{label}.cut = call ptr @adamas_kont_cut(ptr %kont, ptr %h)"
+        );
+        let _ = writeln!(
+            out,
+            "  call void @adamas_segment_unwind(ptr %kont, ptr %{label}.cut)"
+        );
+    }
+    for slot in 0..written {
+        let _ = writeln!(
+            out,
+            "  %{label}.a{slot} = getelementptr ptr, ptr %args, i64 {slot}"
+        );
+        let _ = writeln!(out, "  %{label}.g{slot} = load ptr, ptr %{label}.a{slot}");
+        given.push(format!("ptr %{label}.g{slot}"));
+    }
+    if verdict == Verdict::General {
+        let _ = writeln!(
+            out,
+            "  %{label}.seg = call ptr @adamas_kont_cut(ptr %kont, ptr %h)"
+        );
+        let _ = writeln!(
+            out,
+            "  %{label}.val = call ptr @adamas_segment_value(ptr %{label}.seg)"
+        );
+        // Мультишотная ручка помечается **здесь**, на разрезе, и только здесь:
+        // возобновление читает флаг и ставит копию, пока на ручку есть лишние
+        // ссылки. Не пометь - второй ход получил бы потраченный сегмент.
+        let seized = if multi {
+            let _ = writeln!(
+                out,
+                "  %{label}.seized = call ptr @adamas_segment_multi(ptr %{label}.val)"
+            );
+            format!("%{label}.seized")
+        } else {
+            format!("%{label}.val")
+        };
+        given.push(format!("ptr {seized}"));
+    }
+    let _ = writeln!(
+        out,
+        "  %{label}.answer = call {CONVENTION} ptr @fn_{}({})",
+        function.0,
+        given.join(", ")
+    );
+    let _ = writeln!(out, "  ret ptr %{label}.answer");
+}
+
 /// Текст обрыва по неизвестному тегу.
 const TAG_TEXT: &str = "разбор не знает конструктора";
+
+/// Текст обрыва по ветке, которой у хендлера нет.
+const BRANCH_TEXT: &str = "у хендлера нет такой ветки";
+
+/// Имя константы с текстом обрыва по отсутствующей ветке.
+const BRANCH_MESSAGE: &str = "@.str.branch";
+
+/// Имя константы с текстом обрыва по операции без хендлера.
+const MISSING_MESSAGE: &str = "@.str.missing";
+
+/// Текст обрыва по операции без хендлера.
+const MISSING_TEXT: &str = "операция без хендлера";
+
+/// Тег стёртого значения: тот же, что у `ADAMAS_ERASED` в спутнике.
+///
+/// Им зануляется забранный слот среды кадра: значение непосредственное, ячейки
+/// за ним нет, и дроп среды по нему отдаёт ничего.
+const ERASED_TAG: u16 = 0xFFFC;
 
 /// Байты строки с завершающим нулём.
 fn terminated(text: &str) -> Vec<u8> {
@@ -957,14 +1529,16 @@ fn escaped(bytes: &[u8]) -> String {
 
 /// Тип регистра, в который представление ложится. `None` - не ложится.
 ///
-/// Указательных два - [`Repr::Boxed`] и [`Repr::Record`]: в рантайме это один и
-/// тот же объект с заголовком, а различие форм живёт в понижении (`ir.rs`,
-/// [`Repr::pointer`]). Резумпция сюда **не** входит, хотя указатель тот же: у
-/// неё свой дроп с ручкой стека (§3.4), и взять её сюда значило бы дропать её
-/// как данные.
+/// Указательных три - [`Repr::Boxed`], [`Repr::Record`] и [`Repr::Resumption`]:
+/// в рантайме это один и тот же объект с заголовком, а различие форм живёт в
+/// понижении (`ir.rs`, [`Repr::pointer`]). Резумпция стояла здесь под запретом,
+/// пока второй формы не было вовсе: дроп у неё свой - `adamas_resumption_drop`
+/// с ручкой стека (§3.4), - и взять её типом значило бы дропнуть её как данные.
+/// Запрет снят вместе с приходом дропа: различает их [`Builder::dropped`] по
+/// представлению связывания, а тип у них и правда один.
 fn slot(repr: Repr) -> Option<&'static str> {
     match repr {
-        Repr::Boxed | Repr::Record(_) => Some("ptr"),
+        Repr::Boxed | Repr::Record(_) | Repr::Resumption => Some("ptr"),
         other => other.primitive().map(machine),
     }
 }
@@ -1030,6 +1604,34 @@ struct Builder<'a> {
     /// не тот, которым началась, и различаются они, как только внутри ветви
     /// встал ещё один разбор.
     block: String,
+    /// Кто приостанавливается (§3.4, решение 3 волны 4).
+    ///
+    /// Читают это двое - [`crate::split`] и эмиттер, - и запись у них одна:
+    /// проход выносит приостанавливающееся подвыражение в связывание, эмиттер
+    /// ставит под него кадр. Разойдись они - кадр встал бы не там.
+    suspending: &'a Suspension,
+    /// Регистр, в котором лежит вектор evidence. `None` - взять его негде.
+    ///
+    /// Полем, а не именем: под `handle` действует **расширенный** вектор, и
+    /// вычисление под ним идёт хвостом того же куска. В C это делает
+    /// затенение имени внутри блока; в `.ll` блоков-областей нет вовсе.
+    ///
+    /// `None` у первой формы вне хендлера: скрытых аргументов у неё нет вовсе,
+    /// и прямой вызов второй формы оттуда - названный отказ
+    /// ([`LlvmError::Hidden`]), а не `null` в аргументе.
+    ev: Option<String>,
+    /// Он же для ручки стека продолжения.
+    kont: Option<String>,
+    /// Что обязан отдать всякий возврат из этого куска.
+    ///
+    /// Живёт здесь один жанр - расширенный вектор evidence места `handle`:
+    /// вычисление под ним идёт хвостом того же куска, а дроп поставить после
+    /// `ret` нечем. Кадры, положенные вычислением, свою ссылку берут сами.
+    epilogue: Vec<String>,
+    /// Готовые куски дроблёного тела: каждый - своя функция модуля.
+    chunks: Vec<String>,
+    /// Счётчик кусков: им нумеруются их имена.
+    chunked: u32,
 }
 
 impl<'a> Builder<'a> {
@@ -1037,10 +1639,12 @@ impl<'a> Builder<'a> {
         program: &'a Program,
         function: &'a Function,
         result: &'static str,
+        suspending: &'a Suspension,
         metadata: &'a mut Metadata,
         dwarf: Option<&'a Dwarf>,
         scope: Option<Scope>,
     ) -> Self {
+        let hidden = function.form == Form::Detached;
         let mut reprs = HashMap::new();
         let mut operands = HashMap::new();
         let mut certain = HashSet::new();
@@ -1073,6 +1677,12 @@ impl<'a> Builder<'a> {
             temps: 0,
             matches: 0,
             block: "entry".to_owned(),
+            suspending,
+            ev: hidden.then(|| "%ev".to_owned()),
+            kont: hidden.then(|| "%kont".to_owned()),
+            epilogue: Vec::new(),
+            chunks: Vec::new(),
+            chunked: 0,
         }
     }
 
@@ -1274,46 +1884,61 @@ impl<'a> Builder<'a> {
     fn prologue<'e>(&mut self, expr: &'e Expr) -> Result<&'e Expr, LlvmError> {
         let mut at = expr;
         loop {
-            match at {
-                Expr::Bind {
-                    binding,
-                    value,
-                    body,
-                } => {
-                    let computed = self.value(value)?;
-                    let _ = writeln!(self.body, "  ; {computed} - {}", binding.name);
-                    self.in_frame(binding, &computed);
-                    self.operands.insert(binding.local, computed);
-                    at = body;
-                }
-                Expr::Dup { local, body } => {
-                    let value = self.operand(*local)?;
-                    let name = self.temp();
-                    self.instruction(
-                        &format!("{name} = call ptr @adamas_dup(ptr {value})"),
-                        self.here(),
-                    );
-                    at = body;
-                }
-                Expr::Drop {
-                    local,
-                    salvage,
-                    body,
-                } => {
-                    self.dropped(*local, salvage, None)?;
-                    at = body;
-                }
-                Expr::Reclaim {
-                    local,
-                    token,
-                    salvage,
-                    body,
-                } => {
-                    self.dropped(*local, salvage, Some(*token))?;
-                    at = body;
-                }
-                other => return Ok(other),
+            let next = self.bookkept(at)?;
+            if std::ptr::eq(next, at) {
+                return Ok(at);
             }
+            at = next;
+        }
+    }
+
+    /// Один шаг [`Self::prologue`]: печатает голову узла-приставки и отдаёт
+    /// тело. Узел, приставкой не являющийся, отдаётся собой.
+    ///
+    /// Шагом, а не только циклом, потому что обход дроблёного тела
+    /// ([`Self::flowing`]) обязан **прерваться** на связывании, чьё значение
+    /// приостанавливается: продолжение такого связывания уезжает кадром, а не
+    /// печатается следом.
+    fn bookkept<'e>(&mut self, expr: &'e Expr) -> Result<&'e Expr, LlvmError> {
+        match expr {
+            Expr::Bind {
+                binding,
+                value,
+                body,
+            } => {
+                let computed = self.value(value)?;
+                let _ = writeln!(self.body, "  ; {computed} - {}", binding.name);
+                self.in_frame(binding, &computed);
+                self.operands.insert(binding.local, computed);
+                Ok(body)
+            }
+            Expr::Dup { local, body } => {
+                let value = self.operand(*local)?;
+                let name = self.temp();
+                self.instruction(
+                    &format!("{name} = call ptr @adamas_dup(ptr {value})"),
+                    self.here(),
+                );
+                Ok(body)
+            }
+            Expr::Drop {
+                local,
+                salvage,
+                body,
+            } => {
+                self.dropped(*local, salvage, None)?;
+                Ok(body)
+            }
+            Expr::Reclaim {
+                local,
+                token,
+                salvage,
+                body,
+            } => {
+                self.dropped(*local, salvage, Some(*token))?;
+                Ok(body)
+            }
+            other => Ok(other),
         }
     }
 
@@ -1388,7 +2013,19 @@ impl<'a> Builder<'a> {
             Expr::Match {
                 scrutinee, arms, ..
             } => self.analysis(scrutinee, arms),
-            Expr::Erased => Err(self.node("стёртая позиция значением")),
+            // Стёртая позиция значением: то же `ADAMAS_ERASED`, что у
+            // C-эмиттера. Встречается она в одном месте - аргументах операции:
+            // раздача веток позиционна и типа операции не знает, поэтому
+            // стёртый аргумент едет непосредственным значением, а ветка его
+            // дропает наравне с лишними. Ячейки кучи за ним нет.
+            Expr::Erased => {
+                let name = self.temp();
+                self.instruction(
+                    &format!("{name} = call ptr @adamas_con0(i16 {ERASED_TAG})"),
+                    self.here(),
+                );
+                Ok(name)
+            }
             Expr::Construct {
                 constructor,
                 reuse,
@@ -1408,11 +2045,23 @@ impl<'a> Builder<'a> {
             | Expr::RegionWrite { .. }
             | Expr::RegionRecycle { .. }
             | Expr::RegionPop { .. } => Err(self.node("регион")),
-            Expr::Handle { .. } | Expr::Perform { .. } | Expr::Mask { .. } => {
-                Err(self.node("эффект"))
-            }
-            Expr::Resume { .. } => Err(self.node("резумпция")),
-            Expr::Closing { .. } => Err(self.node("выход из scope с ресурсом")),
+            Expr::Handle {
+                handler,
+                captured,
+                computation,
+            } => self.handling(*handler, captured, computation),
+            Expr::Mask { label, computation } => self.masking(*label, computation),
+            // Операция значением бывает только в тихой программе (вопрос 74):
+            // там она не точка приостановки, и дробление её не выносит.
+            Expr::Perform {
+                label,
+                operation,
+                arguments,
+            } => self.performing(*label, *operation, arguments),
+            // Прочие точки приостановки значением не бывают: их снимает
+            // дробление ([`crate::split`]), и в чистый отрезок они не попадают.
+            Expr::Resume { .. } => Err(self.node("резумпция в чистом отрезке")),
+            Expr::Closing { .. } => Err(self.node("выход из scope в чистом отрезке")),
             Expr::Nursery { .. } | Expr::Fiber { .. } | Expr::Cancel { .. } => {
                 Err(self.node("питомник"))
             }
@@ -1779,6 +2428,18 @@ impl<'a> Builder<'a> {
         if salvage.collapses() {
             return self.salvaged(local, salvage, token);
         }
+        // Отдать резумпцию значит **раскрутить** её сегмент, а раскрутке нужна
+        // ручка стека, которой у `adamas_release` нет (§3.4). Отсюда вторая
+        // точка дропа и различение по представлению связывания.
+        if self.reprs.get(&local) == Some(&Repr::Resumption) {
+            let value = self.operand(local)?;
+            let kont = self.kont()?;
+            self.instruction(
+                &format!("call void @adamas_resumption_drop(ptr {kont}, ptr {value})"),
+                self.here(),
+            );
+            return Ok(());
+        }
         let value = self.operand(local)?;
         match token {
             Some(token) => {
@@ -1928,16 +2589,25 @@ impl<'a> Builder<'a> {
         sort: Tail,
     ) -> Result<String, LlvmError> {
         let called = &self.program.functions[function.0];
+        // Ответ дроблёной функции - значение вершине стека, а не её собственный:
+        // тип у границы один, и это слово.
+        let result = if self.suspending.functions.contains(&function) {
+            "ptr"
+        } else {
+            slot(called.result).ok_or_else(|| LlvmError::Shape {
+                function: self.function.name.clone(),
+                place: format!("ответ `{}`", called.name),
+                shape: describe(called.result),
+            })?
+        };
+        // Скрытые аргументы идут ровно туда, где их ждут: второй форме - свои,
+        // первой - никаких.
+        let mut given = Vec::new();
         if called.form == Form::Detached {
-            return Err(LlvmError::Detached {
-                function: called.name.clone(),
-            });
+            let (ev, kont) = self.forwarded(&called.name)?;
+            given.push(format!("ptr {ev}"));
+            given.push(format!("ptr {kont}"));
         }
-        let result = slot(called.result).ok_or_else(|| LlvmError::Shape {
-            function: self.function.name.clone(),
-            place: format!("ответ `{}`", called.name),
-            shape: describe(called.result),
-        })?;
         let present: Vec<usize> = called
             .parameters
             .iter()
@@ -1945,7 +2615,6 @@ impl<'a> Builder<'a> {
             .filter(|(_, binding)| binding.fact.present)
             .map(|(position, _)| position)
             .collect();
-        let mut given = Vec::new();
         for position in present {
             let Some(argument) = arguments.get(position) else {
                 continue;
@@ -2077,6 +2746,885 @@ impl<'a> Builder<'a> {
             let _ = writeln!(self.body, "  ; {taken} - {}", binding.name);
             self.operands.insert(binding.local, taken);
         }
+    }
+
+    // --- Вторая форма понижения (§3.4, волна 2, трек G) ------------------
+
+    /// Вектор evidence, действующий здесь. Отказ - взять его негде.
+    fn ev(&self) -> Result<String, LlvmError> {
+        self.ev.clone().ok_or_else(|| LlvmError::Hidden {
+            caller: self.function.name.clone(),
+            callee: "вектор evidence".to_owned(),
+        })
+    }
+
+    /// Ручка стека продолжения. Отказ - взять её негде.
+    fn kont(&self) -> Result<String, LlvmError> {
+        self.kont.clone().ok_or_else(|| LlvmError::Hidden {
+            caller: self.function.name.clone(),
+            callee: "ручка стека".to_owned(),
+        })
+    }
+
+    /// Оба скрытых аргумента под прямой вызов названной второй формы.
+    fn forwarded(&self, callee: &str) -> Result<(String, String), LlvmError> {
+        match (self.ev.clone(), self.kont.clone()) {
+            (Some(ev), Some(kont)) => Ok((ev, kont)),
+            _ => Err(LlvmError::Hidden {
+                caller: self.function.name.clone(),
+                callee: callee.to_owned(),
+            }),
+        }
+    }
+
+    /// Точка ли приостановки: кадр ставится ровно на неё (решение 3 волны 4).
+    fn stops(&self, expr: &Expr) -> bool {
+        crate::split::halts(expr, self.suspending)
+    }
+
+    /// Значение словом: плоское - битами, указательное - собой.
+    ///
+    /// Граница куска носит слово, и других форм у неё нет: `adamas_frame_code`
+    /// берёт `adamas_value` и им же отвечает. Половин у границы три - слот среды
+    /// кадра, пришедшее в кусок и ответ куска трамплину, - и мера у всех трёх
+    /// одна. Ячейки кучи это не стоит: биты примитива ложатся в слово целиком.
+    #[expect(
+        clippy::wrong_self_convention,
+        reason = "перевод значения, а не самого билдера: инструкции печатает он"
+    )]
+    fn into_word(&mut self, repr: Repr, value: &str) -> Result<String, LlvmError> {
+        if let Some(ty) = repr.primitive() {
+            let bits = self.widen(ty, value);
+            let name = self.temp();
+            self.instruction(&format!("{name} = inttoptr i64 {bits} to ptr"), self.here());
+            return Ok(name);
+        }
+        if slot(repr) == Some("ptr") {
+            return Ok(value.to_owned());
+        }
+        Err(LlvmError::Shape {
+            function: self.function.name.clone(),
+            place: "значение через границу кадра".to_owned(),
+            shape: describe(repr),
+        })
+    }
+
+    /// Обратно: слово границы в значение объявленного представления.
+    #[expect(
+        clippy::wrong_self_convention,
+        reason = "перевод значения, а не самого билдера: инструкции печатает он"
+    )]
+    fn from_word(&mut self, repr: Repr, value: &str) -> Result<String, LlvmError> {
+        if let Some(ty) = repr.primitive() {
+            let bits = self.temp();
+            self.instruction(
+                &format!("{bits} = ptrtoint ptr {value} to i64"),
+                self.here(),
+            );
+            return Ok(self.narrow(ty, &bits));
+        }
+        if slot(repr) == Some("ptr") {
+            return Ok(value.to_owned());
+        }
+        Err(LlvmError::Shape {
+            function: self.function.name.clone(),
+            place: "значение через границу кадра".to_owned(),
+            shape: describe(repr),
+        })
+    }
+
+    /// Возврат из куска: ответ уходит вершине стека, а до кадра его доводит
+    /// трамплин.
+    ///
+    /// Эпилог печатается **после** вычисления ответа: в нём стоят дропы
+    /// расширенных векторов, а ответ бывает вызовом, которому вектор и
+    /// передаётся.
+    fn finish(&mut self, answer: &str, repr: Repr) -> Result<(), LlvmError> {
+        let word = self.into_word(repr, answer)?;
+        for vector in self.epilogue.clone().iter().rev() {
+            self.instruction(
+                &format!("call void @adamas_evidence_drop(ptr {vector})"),
+                self.here(),
+            );
+        }
+        self.instruction(&format!("ret ptr {word}"), self.here());
+        Ok(())
+    }
+
+    /// Хвост куска дроблёного тела: каждый путь отдаёт значение вершине стека.
+    ///
+    /// Отдельно от [`Self::tail`], и это не дубль: там позиция **возвратная** и
+    /// хвостовой вызов печатается `musttail`, здесь позиция проточная, и
+    /// возврат значит «отдай вершине». Свести их в одну печать нельзя - у них
+    /// разный договор возврата.
+    fn flowing(&mut self, expr: &Expr) -> Result<(), LlvmError> {
+        match expr {
+            // Связывание, чьё значение приостанавливается: продолжение уезжает
+            // кадром, а само значение идёт хвостом.
+            Expr::Bind {
+                binding,
+                value,
+                body,
+            } if self.stops(value) => {
+                self.reified(binding, body)?;
+                self.flowing(value)
+            }
+            Expr::Bind { .. } | Expr::Dup { .. } | Expr::Drop { .. } | Expr::Reclaim { .. } => {
+                let body = self.bookkept(expr)?;
+                self.flowing(body)
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } if self.stops(expr) => self.branching(scrutinee, arms),
+            Expr::Handle {
+                handler,
+                captured,
+                computation,
+            } => self.handling_tail(*handler, captured, computation),
+            Expr::Closing {
+                closer,
+                captured,
+                body,
+            } => self.scoped_tail(*closer, captured, body),
+            Expr::Mask { label, computation } => self.masking_tail(*label, computation),
+            Expr::Perform {
+                label,
+                operation,
+                arguments,
+            } => self.performing_tail(*label, *operation, arguments),
+            Expr::Resume { resumption, value } => self.resuming(resumption, value),
+            other => {
+                let repr = self.shape(other);
+                let answer = self.value(other)?;
+                self.finish(&answer, repr)
+            }
+        }
+    }
+
+    /// Разбор, у которого ветвь приостанавливается: каждая - свой хвост.
+    ///
+    /// Продолжение здесь уже лежит кадром - его поставило связывание, чьим
+    /// значением стоит разбор, - поэтому ветвь просто отдаёт своё.
+    fn branching(&mut self, scrutinee: &Expr, arms: &[Arm]) -> Result<(), LlvmError> {
+        let (scrutinised, _, labels) = self.dispatch(scrutinee, arms)?;
+        for (arm, label) in arms.iter().zip(&labels) {
+            self.start(label);
+            self.bind_fields(&scrutinised, arm);
+            self.flowing(&arm.body)?;
+        }
+        Ok(())
+    }
+
+    /// Возобновление: звенья встают **над** уже положенным кадром продолжения.
+    ///
+    /// Ответ возобновлённого вычисления дойдёт до него трамплином. Ручка
+    /// тратится возобновлением и дропается следом: мультишотная при этом
+    /// потраченной не становится, и её последняя ссылка раскручивает нетронутый
+    /// оригинал (`adamas.h`).
+    fn resuming(&mut self, resumption: &Expr, value: &Expr) -> Result<(), LlvmError> {
+        let kont = self.kont()?;
+        let handle = self.value(resumption)?;
+        let given = self.value(value)?;
+        self.instruction(
+            &format!("call void @adamas_kont_resume(ptr {kont}, ptr {handle})"),
+            self.here(),
+        );
+        self.instruction(
+            &format!("call void @adamas_resumption_drop(ptr {kont}, ptr {handle})"),
+            self.here(),
+        );
+        // Аргумент резумпции указателен по договору понижения, и возобновлённое
+        // вычисление ждёт от границы ровно его.
+        self.finish(&given, Repr::Boxed)
+    }
+
+    /// Продолжение `λbinding. body` кадром, а его код - отдельной функцией.
+    ///
+    /// # Что уезжает в среду кадра
+    ///
+    /// То, что продолжение называет и не вводит само. Владение переходит кадру,
+    /// и код куска забирает слоты **обратно**, зануляя их: кадр освобождается
+    /// сразу после кода (`adamas.h`), и `dup` с последующим дропом стоил бы пары
+    /// счётчику на каждый живой слот.
+    ///
+    /// # Плоское значение в слоте
+    ///
+    /// Слот кадра - слово, и плоское значение лежит в нём **битами**, ровно как
+    /// в слоте объекта (§4.11). Счётчика у него нет, поэтому дроп среды его не
+    /// трогает: какие слоты указательные, кусок знает по типам. Счётные слоты
+    /// идут первыми - это соглашение с `adamas_kont_push`, и копия сегмента
+    /// дупает ровно их.
+    fn reified(&mut self, binding: &Binding, body: &Expr) -> Result<(), LlvmError> {
+        let kont = self.kont()?;
+        let ev = self.ev()?;
+        let mut called = BTreeSet::new();
+        crate::split::mentioned(body, &mut called);
+        let mut inner = BTreeSet::new();
+        crate::split::introduces(body, &mut inner);
+        inner.insert(binding.local);
+        let mut env: Vec<(LocalId, Repr)> = called
+            .into_iter()
+            .filter(|local| !inner.contains(local))
+            .filter_map(|local| self.reprs.get(&local).map(|repr| (local, *repr)))
+            .collect();
+        env.sort_by_key(|(_, repr)| !repr.counted());
+        let counted = env.iter().filter(|(_, repr)| repr.counted()).count();
+
+        let at = self.chunked;
+        self.chunked += 1;
+        let code = format!("@fn_{}_k{at}", self.function.id.0);
+        let release = if counted > 0 {
+            format!("@release_{}_k{at}", self.function.id.0)
+        } else {
+            "null".to_owned()
+        };
+
+        let frame = self.temp();
+        self.instruction(
+            &format!(
+                "{frame} = call ptr @adamas_kont_push(ptr {kont}, i16 0, i32 0, ptr {code}, \
+                 ptr {release}, i64 {}, i64 {counted}, ptr {ev}) ; продолжение",
+                env.len()
+            ),
+            self.here(),
+        );
+        if !env.is_empty() {
+            let slots = self.temp();
+            self.instruction(
+                &format!("{slots} = call ptr @adamas_frame_env(ptr {frame})"),
+                self.here(),
+            );
+            for (at, (local, repr)) in env.clone().iter().enumerate() {
+                let value = self.operand(*local)?;
+                let word = self.into_word(*repr, &value)?;
+                let address = self.temp();
+                self.instruction(
+                    &format!(
+                        "{address} = getelementptr i8, ptr {slots}, i64 {}",
+                        offset(at)
+                    ),
+                    self.here(),
+                );
+                self.instruction(&format!("store ptr {word}, ptr {address}"), self.here());
+            }
+        }
+
+        self.chunk(&code[1..], &env, binding, body)?;
+        if counted > 0 {
+            self.chunk_release(&release[1..], &env);
+        }
+        Ok(())
+    }
+
+    /// Код куска: слоты забираются, пришедшее становится связыванием.
+    ///
+    /// Своя функция модуля, а не блок: кусок зовёт трамплин рантайма по
+    /// указателю, и соглашение о вызове у него C (`adamas_frame_code`), а не
+    /// [`CONVENTION`]. Отладочной подписи у куска нет вовсе - написанного
+    /// определения за ним не стоит, и `!DISubprogram` ему назвать нечем.
+    fn chunk(
+        &mut self,
+        code: &str,
+        env: &[(LocalId, Repr)],
+        binding: &Binding,
+        body: &Expr,
+    ) -> Result<(), LlvmError> {
+        let held_head = std::mem::take(&mut self.head);
+        let held_body = std::mem::take(&mut self.body);
+        let held_block = std::mem::replace(&mut self.block, "entry".to_owned());
+        // Свой вектор кусок не держит: его отдаёт тот кусок, что его завёл, а
+        // сюда он приходит от кадра - заимствованным.
+        let held_epilogue = std::mem::take(&mut self.epilogue);
+        let held_scope = self.scope.take();
+        let held_ev = self.ev.take();
+        let held_kont = self.kont.replace("%kont".to_owned());
+        // Имена связываний куска - свои: регистры внешнего тела здесь не видны.
+        let held_operands = std::mem::take(&mut self.operands);
+
+        let vector = self.temp();
+        self.instruction(
+            &format!("{vector} = call ptr @adamas_frame_evidence(ptr %h)"),
+            Notes::none(),
+        );
+        self.ev = Some(vector);
+        if !env.is_empty() {
+            let slots = self.temp();
+            self.instruction(
+                &format!("{slots} = call ptr @adamas_frame_env(ptr %h)"),
+                Notes::none(),
+            );
+            for (at, (local, repr)) in env.iter().enumerate() {
+                let address = self.temp();
+                self.instruction(
+                    &format!(
+                        "{address} = getelementptr i8, ptr {slots}, i64 {}",
+                        offset(at)
+                    ),
+                    Notes::none(),
+                );
+                let word = self.temp();
+                self.instruction(&format!("{word} = load ptr, ptr {address}"), Notes::none());
+                // Указательный слот **забирается**: значение уезжает в
+                // связывание владением, и дроп среды его больше не увидит.
+                // Плоский лежит битами, счётчика у него нет, забирать нечего.
+                if repr.primitive().is_none() {
+                    let erased = self.temp();
+                    self.instruction(
+                        &format!("{erased} = call ptr @adamas_con0(i16 {ERASED_TAG})"),
+                        Notes::none(),
+                    );
+                    self.instruction(&format!("store ptr {erased}, ptr {address}"), Notes::none());
+                }
+                let taken = self.from_word(*repr, &word)?;
+                self.operands.insert(*local, taken);
+            }
+        }
+        // Пришедшее приходит словом: `adamas_frame_code` другого не носит.
+        let incoming = self.from_word(binding.fact.repr, "%incoming")?;
+        self.operands.insert(binding.local, incoming);
+        self.flowing(body)?;
+
+        let mut text = String::new();
+        let _ = writeln!(text, "; продолжение точки приостановки");
+        let _ = writeln!(
+            text,
+            "define internal ptr @{code}(ptr %h, ptr %kont, ptr %incoming) \
+             {DEFINITION_ATTRIBUTES} {{"
+        );
+        text.push_str("entry:\n");
+        text.push_str(&self.head);
+        text.push_str(&self.body);
+        text.push_str("}\n\n");
+        self.chunks.push(text);
+
+        self.head = held_head;
+        self.body = held_body;
+        self.block = held_block;
+        self.epilogue = held_epilogue;
+        self.scope = held_scope;
+        self.ev = held_ev;
+        self.kont = held_kont;
+        self.operands = held_operands;
+        Ok(())
+    }
+
+    /// Дроп среды куска: то, чего он не забрал, потому что не побежал.
+    fn chunk_release(&mut self, release: &str, env: &[(LocalId, Repr)]) {
+        let mut text = String::new();
+        let _ = writeln!(text, "; среда продолжения");
+        let _ = writeln!(
+            text,
+            "define internal void @{release}(ptr %h, ptr %kont) {DEFINITION_ATTRIBUTES} {{"
+        );
+        text.push_str("entry:\n");
+        let _ = writeln!(text, "  %env = call ptr @adamas_frame_env(ptr %h)");
+        let mut block = 0_u32;
+        for (at, (_, repr)) in env.iter().enumerate() {
+            if !repr.counted() {
+                continue;
+            }
+            let _ = writeln!(
+                text,
+                "  %a{at} = getelementptr i8, ptr %env, i64 {}",
+                offset(at)
+            );
+            let _ = writeln!(text, "  %s{at} = load ptr, ptr %a{at}");
+            if *repr == Repr::Resumption {
+                // Забранный слот занят непосредственным значением, а резумпцией
+                // оно не бывает: ручка сегмента - объект кучи. Сравнение поэтому
+                // и есть «слот ещё не забрали».
+                let _ = writeln!(text, "  %i{at} = call i32 @adamas_is_imm(ptr %s{at})");
+                let _ = writeln!(text, "  %c{at} = icmp eq i32 %i{at}, 0");
+                let _ = writeln!(
+                    text,
+                    "  br i1 %c{at}, label %live{block}, label %skip{block}"
+                );
+                let _ = writeln!(text, "\nlive{block}:");
+                let _ = writeln!(
+                    text,
+                    "  call void @adamas_resumption_drop(ptr %kont, ptr %s{at})"
+                );
+                let _ = writeln!(text, "  br label %skip{block}");
+                let _ = writeln!(text, "\nskip{block}:");
+                block += 1;
+            } else {
+                let _ = writeln!(
+                    text,
+                    "  call void @adamas_drop(ptr %s{at}, ptr @{RELEASE_SYMBOL})"
+                );
+            }
+        }
+        text.push_str("  ret void\n}\n\n");
+        self.chunks.push(text);
+    }
+
+    /// Кадр `HANDLER` со средой веток и расширенный вектор под вычисление.
+    ///
+    /// Общее у обеих форм: у первой кадр стоит на своём корне, у второй - на
+    /// ручке, пришедшей аргументом, а сама постановка одна и та же.
+    fn installed(
+        &mut self,
+        handler: HandlerId,
+        taken: &[String],
+    ) -> Result<(String, String), LlvmError> {
+        let kont = self.kont()?;
+        let ev = self.ev()?;
+        let label = self.program.handlers[handler.0 as usize].label;
+        let slots = taken.len();
+        let release = if slots == 0 {
+            "null".to_owned()
+        } else {
+            format!("@relh_{}", handler.0)
+        };
+        let frame = self.temp();
+        self.instruction(
+            &format!(
+                "{frame} = call ptr @adamas_kont_handler(ptr {kont}, i32 {}, ptr @handler_{}, \
+                 ptr {release}, i64 {slots}, ptr {ev})",
+                label.0, handler.0
+            ),
+            self.here(),
+        );
+        if slots > 0 {
+            let env = self.temp();
+            self.instruction(
+                &format!("{env} = call ptr @adamas_frame_env(ptr {frame})"),
+                self.here(),
+            );
+            for (at, capture) in taken.iter().enumerate() {
+                let address = self.temp();
+                self.instruction(
+                    &format!(
+                        "{address} = getelementptr i8, ptr {env}, i64 {}",
+                        offset(at)
+                    ),
+                    self.here(),
+                );
+                self.instruction(&format!("store ptr {capture}, ptr {address}"), self.here());
+            }
+        }
+        let vector = self.temp();
+        self.instruction(
+            &format!(
+                "{vector} = call ptr @adamas_evidence_extend(ptr {ev}, i32 {}, ptr {frame})",
+                label.0
+            ),
+            self.here(),
+        );
+        Ok((frame, vector))
+    }
+
+    /// Среда веток по слотам кадра: живые захваты в порядке объявления.
+    fn environment(
+        &mut self,
+        handler: HandlerId,
+        captured: &[Expr],
+    ) -> Result<Vec<String>, LlvmError> {
+        let present: Vec<usize> = self.program.handlers[handler.0 as usize]
+            .captured
+            .iter()
+            .enumerate()
+            .filter(|(_, binding)| binding.fact.present)
+            .map(|(position, _)| position)
+            .collect();
+        let mut taken = Vec::new();
+        for position in present {
+            let Some(capture) = captured.get(position) else {
+                continue;
+            };
+            taken.push(self.value(capture)?);
+        }
+        Ok(taken)
+    }
+
+    /// Хендлер во **второй** форме: кадр под уже стоящим продолжением.
+    ///
+    /// Вычисление идёт хвостом того же куска и под своим вектором; ответ его
+    /// доходит до кадра `HANDLER` трамплином, и ветку `return` зовёт он же.
+    /// Своей ссылки на расширенный вектор кусок не переживает - её отдаёт
+    /// эпилог, - а кадры, положенные вычислением, берут свою.
+    fn handling_tail(
+        &mut self,
+        handler: HandlerId,
+        captured: &[Expr],
+        computation: &Expr,
+    ) -> Result<(), LlvmError> {
+        let taken = self.environment(handler, captured)?;
+        let (_, vector) = self.installed(handler, &taken)?;
+        let held = self.ev.replace(vector.clone());
+        self.epilogue.push(vector);
+        let outcome = self.flowing(computation);
+        self.epilogue.pop();
+        self.ev = held;
+        outcome
+    }
+
+    /// Маска, под которой вычисление приостанавливается.
+    ///
+    /// Вектор её переживает кусок не своей ссылкой, а ссылками кадров: каждый
+    /// кадр, положенный вычислением, дупает вектор себе, и продолжение читает
+    /// его у кадра. Своя ссылка уходит эпилогом на возврате.
+    fn masking_tail(&mut self, label: LabelId, computation: &Expr) -> Result<(), LlvmError> {
+        let vector = self.masked(label)?;
+        let held = self.ev.replace(vector.clone());
+        self.epilogue.push(vector);
+        let outcome = self.flowing(computation);
+        self.epilogue.pop();
+        self.ev = held;
+        outcome
+    }
+
+    /// Вектор без ближайшей записи метки: `#mask.L` (§3.4).
+    fn masked(&mut self, label: LabelId) -> Result<String, LlvmError> {
+        let ev = self.ev()?;
+        let title = &self.program.labels[label.0 as usize].name;
+        let vector = self.temp();
+        let text = format!(
+            "{vector} = call ptr @adamas_evidence_mask(ptr {ev}, i32 {}) ; mask {title}",
+            label.0
+        );
+        self.instruction(&text, self.here());
+        Ok(vector)
+    }
+
+    /// Выход из scope с ресурсом во второй форме: кадр `CLOSING` (§3.3).
+    ///
+    /// Тело идёт хвостом, а деструктор зовёт трамплин, дойдя до кадра, - и
+    /// нормальный выход, и раскрутка идут одним путём. LIFO выходит
+    /// вложенностью кадров: внутренний scope лежит выше, раскрутка идёт сверху.
+    fn scoped_tail(
+        &mut self,
+        closer: FuncId,
+        captured: &[Expr],
+        body: &Expr,
+    ) -> Result<(), LlvmError> {
+        let kont = self.kont()?;
+        let ev = self.ev()?;
+        // Замыкание деструктора строится **забирающим** трамплином: кадр его
+        // единственный владелец, зовут его раз, и слоты уходят в деструктор
+        // владением. Общий трамплин отдал бы ресурс разделённым.
+        let value = self.holding(closer, captured)?;
+        let frame = self.temp();
+        self.instruction(
+            &format!(
+                "{frame} = call ptr @adamas_kont_closing(ptr {kont}, ptr {ev}, \
+                 ptr @release_closing, ptr {value})"
+            ),
+            self.here(),
+        );
+        self.flowing(body)
+    }
+
+    /// Замыкание деструктора: код забирающего трамплина плюс среда по слотам.
+    fn holding(&mut self, function: FuncId, captured: &[Expr]) -> Result<String, LlvmError> {
+        let described = &self.program.functions[function.0];
+        // Арность замыкания - **все** связывания ядра, стёртые в том числе:
+        // применение к значению позиционно и типа вызываемого не знает.
+        let arity = described.parameters.len();
+        let present: Vec<usize> = described
+            .captured
+            .iter()
+            .enumerate()
+            .filter(|(_, binding)| binding.fact.present)
+            .map(|(position, _)| position)
+            .collect();
+        let mut taken = Vec::new();
+        for position in present {
+            let Some(capture) = captured.get(position) else {
+                continue;
+            };
+            taken.push(self.value(capture)?);
+        }
+        let name = self.temp();
+        self.instruction(
+            &format!(
+                "{name} = call ptr @adamas_closure(ptr @take_{}, ptr @{RELEASE_SYMBOL}, \
+                 i32 {arity}, i32 {})",
+                function.0,
+                taken.len()
+            ),
+            self.here(),
+        );
+        for (at, capture) in taken.iter().enumerate() {
+            self.instruction(
+                &format!("call void @adamas_closure_set(ptr {name}, i64 {at}, ptr {capture})"),
+                self.here(),
+            );
+        }
+        Ok(name)
+    }
+
+    /// Аргументы операции массивом: одно соглашение о вызове на оба пути.
+    ///
+    /// Массивом, а не именами по одному, потому что владельца у них в IR нет:
+    /// это соглашение о вызове ветки, а не узел. Отсюда и дроп на путях, где
+    /// ветка не побежит, идёт по слоту массива.
+    fn operands(&mut self, arguments: &[Expr]) -> Result<(String, usize), LlvmError> {
+        let mut given = Vec::new();
+        for argument in arguments {
+            given.push(self.value(argument)?);
+        }
+        if given.is_empty() {
+            return Ok(("null".to_owned(), 0));
+        }
+        let cell = format!("%o{}", self.frames);
+        self.frames += 1;
+        let _ = writeln!(self.head, "  {cell} = alloca ptr, i64 {}", given.len());
+        for (at, value) in given.iter().enumerate() {
+            let address = self.temp();
+            self.instruction(
+                &format!("{address} = getelementptr ptr, ptr {cell}, i64 {at}"),
+                self.here(),
+            );
+            self.instruction(&format!("store ptr {value}, ptr {address}"), self.here());
+        }
+        Ok((cell, given.len()))
+    }
+
+    /// Операция в хвосте куска: вердикт вектора трёхзначен, и все три написаны.
+    ///
+    /// `HANDLER` - ветка зовётся на месте; чем она ответит, решает её вердикт, а
+    /// сюда ответ приходит одинаково - возвратом вершине стека. `SUPPRESSED` -
+    /// хендлер ответ уже дал, деться второму некуда: `adamas_kont_abort` и
+    /// немедленный возврат. `MISSING` - операция без хендлера.
+    ///
+    /// Сводить вердикт к двум нельзя: операция деструктора ушла бы к
+    /// одноимённому хендлеру снаружи - ровно тот дефект, который ревью
+    /// 2026-09-05 нашло у машины.
+    fn performing_tail(
+        &mut self,
+        label: LabelId,
+        operation: u32,
+        arguments: &[Expr],
+    ) -> Result<(), LlvmError> {
+        let kont = self.kont()?;
+        let (operands, count) = self.operands(arguments)?;
+        let (verdict, frame) = self.looked(label)?;
+        let at = self.matches;
+        self.matches += 1;
+        let handled = format!("p{at}.handler");
+        let other = format!("p{at}.other");
+        let suppressed = format!("p{at}.suppressed");
+        let missing = format!("p{at}.missing");
+
+        let is_handler = self.temp();
+        self.instruction(
+            &format!("{is_handler} = icmp eq i32 {verdict}, 1"),
+            self.here(),
+        );
+        self.instruction(
+            &format!("br i1 {is_handler}, label %{handled}, label %{other}"),
+            self.here(),
+        );
+
+        self.start(&handled);
+        let found = self.temp();
+        self.instruction(&format!("{found} = load ptr, ptr {frame}"), self.here());
+        let answer = self.temp();
+        self.instruction(
+            &format!(
+                "{answer} = call ptr @adamas_frame_perform(ptr {found}, ptr {kont}, \
+                 i32 {operation}, ptr {operands}, i64 {count})"
+            ),
+            self.here(),
+        );
+        self.finish(&answer, Repr::Boxed)?;
+
+        self.start(&other);
+        let is_suppressed = self.temp();
+        self.instruction(
+            &format!("{is_suppressed} = icmp eq i32 {verdict}, 2"),
+            self.here(),
+        );
+        self.instruction(
+            &format!("br i1 {is_suppressed}, label %{suppressed}, label %{missing}"),
+            self.here(),
+        );
+
+        self.start(&suppressed);
+        for slot in 0..count {
+            let address = self.temp();
+            self.instruction(
+                &format!("{address} = getelementptr ptr, ptr {operands}, i64 {slot}"),
+                self.here(),
+            );
+            let dead = self.temp();
+            self.instruction(&format!("{dead} = load ptr, ptr {address}"), self.here());
+            self.instruction(
+                &format!("call void @adamas_drop(ptr {dead}, ptr @{RELEASE_SYMBOL})"),
+                self.here(),
+            );
+        }
+        // Кадры, ради которых код бы продолжался, снимает сам обрыв - и кадр
+        // продолжения этой операции в их числе. Прибирать здесь нечего: владение
+        // уехало в среду кадра, а её отдаёт его дроп.
+        let aborted = self.temp();
+        self.instruction(
+            &format!("{aborted} = call ptr @adamas_kont_abort(ptr {kont})"),
+            self.here(),
+        );
+        self.finish(&aborted, Repr::Boxed)?;
+
+        self.start(&missing);
+        self.instruction(
+            &format!("call void @adamas_fail(ptr {MISSING_MESSAGE})"),
+            self.here(),
+        );
+        self.instruction("unreachable", self.here());
+        Ok(())
+    }
+
+    /// Операция значением: ветка бежит на месте, ответ - значение операции.
+    ///
+    /// Позиция не хвостовая, и это не пропуск дробления, а **тихая программа**
+    /// (§3.4, вопрос 74): все ветки всех площадок хвостовые, и обрыв невозможен
+    /// по построению - `SUPPRESSED` требует разрезанного сегмента, а резать его
+    /// в тихой программе некому. Подавление здесь поэтому - нарушение инварианта
+    /// тишины, и отвечает ему немедленный `adamas_fail`.
+    fn performing(
+        &mut self,
+        label: LabelId,
+        operation: u32,
+        arguments: &[Expr],
+    ) -> Result<String, LlvmError> {
+        if !self.suspending.quiet {
+            return Err(self.node("операция значением в нетихой программе"));
+        }
+        let kont = self.kont()?;
+        let (operands, count) = self.operands(arguments)?;
+        let (verdict, frame) = self.looked(label)?;
+        let at = self.matches;
+        self.matches += 1;
+        let ready = format!("q{at}.handler");
+        let broken = format!("q{at}.broken");
+
+        let is_handler = self.temp();
+        self.instruction(
+            &format!("{is_handler} = icmp eq i32 {verdict}, 1"),
+            self.here(),
+        );
+        self.instruction(
+            &format!("br i1 {is_handler}, label %{ready}, label %{broken}"),
+            self.here(),
+        );
+        self.start(&broken);
+        self.instruction(
+            &format!("call void @adamas_fail(ptr {MISSING_MESSAGE})"),
+            self.here(),
+        );
+        self.instruction("unreachable", self.here());
+
+        self.start(&ready);
+        let found = self.temp();
+        self.instruction(&format!("{found} = load ptr, ptr {frame}"), self.here());
+        let answer = self.temp();
+        self.instruction(
+            &format!(
+                "{answer} = call ptr @adamas_frame_perform(ptr {found}, ptr {kont}, \
+                 i32 {operation}, ptr {operands}, i64 {count})"
+            ),
+            self.here(),
+        );
+        Ok(answer)
+    }
+
+    /// Поиск метки в векторе: вердикт числом и ячейка под найденный кадр.
+    fn looked(&mut self, label: LabelId) -> Result<(String, String), LlvmError> {
+        let ev = self.ev()?;
+        let title = self.program.labels[label.0 as usize].name.clone();
+        let cell = format!("%h{}", self.frames);
+        self.frames += 1;
+        let _ = writeln!(self.head, "  {cell} = alloca ptr");
+        self.instruction(&format!("store ptr null, ptr {cell}"), self.here());
+        let verdict = self.temp();
+        self.instruction(
+            &format!(
+                "{verdict} = call i32 @adamas_evidence_lookup(ptr {ev}, i32 {}, ptr {cell}) ; {title}",
+                label.0
+            ),
+            self.here(),
+        );
+        Ok((verdict, cell))
+    }
+
+    /// Хендлер в **первой** форме: корень стека, кадр, трамплин до дна.
+    ///
+    /// Ставить кадр нужно и той функции, чья собственная row пуста: `runIO`
+    /// гасит `IO` внутри себя и наружу его не отдаёт. Скрытых аргументов у неё
+    /// нет, и брать их неоткуда - значит она **корень**: заводит свой стек и
+    /// пустой вектор. Законно это ровно потому, что row её пуста: операции
+    /// наружу не уходит ни одной (§3.4, погашение расширением справа).
+    fn handling(
+        &mut self,
+        handler: HandlerId,
+        captured: &[Expr],
+        computation: &Expr,
+    ) -> Result<String, LlvmError> {
+        if self.kont.is_some() {
+            // Внутри второй формы `handle` значением не бывает: дробление
+            // выносит его хвостом куска.
+            return Err(self.node("хендлер значением во второй форме"));
+        }
+        let taken = self.environment(handler, captured)?;
+        let root = format!("%k{}", self.frames);
+        self.frames += 1;
+        let _ = writeln!(self.head, "  {root} = alloca ptr");
+        self.instruction(
+            &format!("call void @adamas_kont_init(ptr {root})"),
+            self.here(),
+        );
+        let empty = self.temp();
+        self.instruction(
+            &format!("{empty} = call ptr @adamas_evidence_empty()"),
+            self.here(),
+        );
+        let held_kont = self.kont.replace(root.clone());
+        let held_ev = self.ev.replace(empty.clone());
+
+        let outcome = (|builder: &mut Self| {
+            let (_, vector) = builder.installed(handler, &taken)?;
+            let inner = builder.ev.replace(vector.clone());
+            let seed = builder.value(computation);
+            builder.ev = inner;
+            let seed = seed?;
+            builder.instruction(
+                &format!("call void @adamas_evidence_drop(ptr {vector})"),
+                builder.here(),
+            );
+            let answer = builder.temp();
+            builder.instruction(
+                &format!("{answer} = call ptr @adamas_kont_run(ptr {root}, ptr {seed})"),
+                builder.here(),
+            );
+            Ok(answer)
+        })(self);
+
+        self.kont = held_kont;
+        self.ev = held_ev;
+        let answer = outcome?;
+        self.instruction(
+            &format!("call void @adamas_evidence_drop(ptr {empty})"),
+            self.here(),
+        );
+        Ok(answer)
+    }
+
+    /// Маска в чистом отрезке: вектор без записи, вычисление под ним.
+    ///
+    /// Кадра здесь нет и быть не может - маска ничего не откладывает. Своя
+    /// ссылка на вектор живёт до конца вычисления: кадры, которые вычисление
+    /// положит, берут свою.
+    fn masking(&mut self, label: LabelId, computation: &Expr) -> Result<String, LlvmError> {
+        let vector = self.masked(label)?;
+        let held = self.ev.replace(vector.clone());
+        let answer = self.value(computation);
+        self.ev = held;
+        let answer = answer?;
+        self.instruction(
+            &format!("call void @adamas_evidence_drop(ptr {vector})"),
+            self.here(),
+        );
+        Ok(answer)
     }
 }
 

@@ -663,6 +663,7 @@ impl Group {
 #[derive(Clone, Debug, Default)]
 pub struct Signature {
     definitions: HashMap<Name, Definition>,
+    origins: HashMap<Name, crate::source::Span>,
 }
 
 impl Signature {
@@ -670,6 +671,31 @@ impl Signature {
     #[must_use]
     pub fn lookup(&self, name: &str) -> Option<&Definition> {
         self.definitions.get(name)
+    }
+
+    /// Запоминает, где определение написано.
+    ///
+    /// Таблицей рядом, а не полем [`Definition`], по двум причинам, и первая не
+    /// про удобство. Позиция принадлежит **поверхностному объявлению**, а не
+    /// определению ядра: определение заводят и `check`, и тесты, и
+    /// мономорфизация, и написанного текста за ними нет вовсе. Вторая - цена:
+    /// поле пришлось бы дописать тринадцати литералам `Definition`, ни один из
+    /// которых о позиции не знает.
+    ///
+    /// Зовёт это элаборация, единственная, кто знает соответствие «имя ядра -
+    /// объявление в тексте». Без неё таблица пуста, и всё, что её читает,
+    /// обязано это переживать.
+    pub fn locate(&mut self, name: &str, span: crate::source::Span) {
+        self.origins.insert(name.into(), span);
+    }
+
+    /// Где определение написано. `None` - позиции никто не клал.
+    ///
+    /// Спрашивает это понижение (§9 Фаза 7, трек E): DWARF без строки исходника
+    /// показывал бы отладчику строки C, а не `.adamas`.
+    #[must_use]
+    pub fn origin(&self, name: &str) -> Option<crate::source::Span> {
+        self.origins.get(name).copied()
     }
 
     /// Имена всех определений - инвариантным тестам и инструментам.

@@ -53,13 +53,41 @@
 //!   ([`llvm::Pipeline`](crate::llvm::Pipeline)), список стадий; свой проход
 //!   встаёт стадией между инлайнингом и остальным, а не переписыванием
 //!   драйвера.
-//! - **D, `musttail`.** У каждого вызова есть сорт ([`Tail`]), и печатается он
-//!   одной приставкой; сегодня значение одно.
+//! - **D, `musttail`. Закрыт**: [`Tail`] получил второе значение, и как оно
+//!   выбирается, сказано ниже отдельным разделом.
 //! - **E, DWARF.** [`Notes`] подписывает инструкцию, [`Module::metadata`] несёт
 //!   узлы модуля.
 //! - **F, строгий режим плавающей арифметики.** [`Builder::binary`] печатает
 //!   флаги инструкции отдельным полем; плавающее сегодня отвергается, и трек F
 //!   снимает отказ вместе с добавлением флагов.
+//!
+//! # Хвостовой вызов - свойство инструкции (трек D)
+//!
+//! Обещание §3.4 и §5.3 - «хвостовой вызов не растит стек» - держится здесь, а
+//! не на ключах сборки. Три решения, и каждое взято замером.
+//!
+//! *Соглашение о вызове - [`CONVENTION`], а не C.* `musttail` при C-соглашении
+//! требует **совпадения прототипов** вызывающего и вызываемого, а первая же
+//! программа корпуса его ломает: `main` без параметров хвостом зовёт `mix`
+//! двух. Отсюда `tailcc` на всех порождённых определениях и на всех вызовах к
+//! ним. Точка входа [`ENTRY_SYMBOL`] остаётся с C-соглашением - её зовёт
+//! спутник, - и вызов из неё хвостовым не помечается.
+//!
+//! *Хвостовая позиция считается **анализом**, а не полем узла.* Признака
+//! хвоста у [`Expr::Call`] нет и заводить его не следует: хвост есть свойство
+//! **контекста**, а не вызова, и всякая правка представления его меняет. Ближе
+//! всего пример Perceus: дроп, вставленный **после** вызова, хвост отнимает, а
+//! вставленный до - оставляет; поле пришлось бы пересчитывать в проходе,
+//! который про хвосты ничего не знает. Обход [`Builder::tail`] это различает по
+//! построению - `Expr::Drop { body }` спускает хвост в тело, `Expr::Bind {
+//! value }` не спускает.
+//!
+//! *`phi` в хвостовой позиции не строится вовсе.* LLVM требует, чтобы за
+//! `musttail` немедленно шёл `ret`; ветвь разбора, кончающаяся `br label
+//! %join`, требование ломает. Поэтому разбор в хвостовой позиции печатается
+//! **без** блока стыковки: каждая ветвь возвращает сама
+//! ([`Builder::analysis_tail`]). Цена - вторая печать разбора рядом с
+//! [`Builder::analysis`]; выигрыш - на витке нет ни `phi`, ни лишнего блока.
 //!
 //! # Чем срез платит рантайму, и это измерено
 //!
@@ -173,6 +201,21 @@ const RELEASE_MESSAGE: &str = "@.str.release";
 /// ставится: про чужой код это было бы обещанием, а не фактом.
 const DEFINITION_ATTRIBUTES: &str = "nounwind";
 
+/// Соглашение о вызове порождённых функций (трек D).
+///
+/// `tailcc`, а не C-соглашение, и причина одна: при C-соглашении `musttail`
+/// требует совпадения прототипов вызывающего с вызываемым, а хвостовой вызов
+/// между разными сигнатурами в языке обычен - `main : UInt64` хвостом зовёт
+/// `mix : UInt64 -> UInt64 -> UInt64` в первой же программе корпуса. `tailcc`
+/// это требование снимает и разрешает вызываемому **больше** аргументов, чем у
+/// вызывающего; ровно этого не умеет и обычная оптимизация хвостового вызова в
+/// `llc` (измерено, `tests/tail.rs`).
+///
+/// Соглашение обязано совпадать у определения и у каждого вызова, поэтому
+/// печатается оно и там и там. Исключение одно - [`ENTRY_SYMBOL`]: его зовёт
+/// спутник на C, и C-соглашение у него не выбор, а договор.
+const CONVENTION: &str = "tailcc";
+
 /// Собирает `.ll` и спутник на C.
 ///
 /// # Errors
@@ -248,15 +291,22 @@ const fn machine(ty: PrimTy) -> &'static str {
     }
 }
 
-/// Сорт вызова.
+/// Сорт вызова (трек D).
 ///
-/// Значение сегодня одно, и это **шов трека D**: `musttail` есть свойство
-/// инструкции, а не ключей пользователя (§3.4, §5.3), и ставится оно здесь.
-/// Заводить сорт сейчас дешевле, чем потом искать все места печати вызова.
+/// `musttail` есть свойство **инструкции**, а не ключей пользователя (§3.4,
+/// §5.3): оптимизация хвостового вызова, которую `llc` делает сам, идёт только
+/// с `-O2` и только там, где кадру вызываемого хватает места вызывающего.
+/// Приставка снимает оба условия.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tail {
     /// Обычный вызов: кадр вызывающего живёт дальше.
     Plain,
+    /// Хвостовой: кадр вызывающего замещается кадром вызываемого.
+    ///
+    /// Требование LLVM к такому вызову одно, и его обязан выполнить эмиттер: за
+    /// инструкцией немедленно следует `ret` того же значения. Отсюда разбор без
+    /// `phi` в хвостовой позиции ([`Builder::analysis_tail`]).
+    Must,
 }
 
 impl Tail {
@@ -264,6 +314,7 @@ impl Tail {
     const fn prefix(self) -> &'static str {
         match self {
             Self::Plain => "",
+            Self::Must => "musttail ",
         }
     }
 }
@@ -345,14 +396,17 @@ impl Module {
             parameters.push(format!("{ty} {spaced}%v{}", binding.local.0));
         }
 
-        let mut builder = Builder::new(program, function);
-        let answer = builder.value(&function.body)?;
-        builder.instruction(&format!("ret {result} {answer}"));
+        let mut builder = Builder::new(program, function, result);
+        // Тело стоит в **возвратной** позиции целиком, и обход её разносит:
+        // хвостовой вызов печатается `musttail`, всё прочее - `ret`. Печатает
+        // `ret` сам обход, потому что у разбора в хвосте их столько, сколько
+        // ветвей (трек D).
+        builder.tail(&function.body)?;
 
         let _ = writeln!(self.bodies, "; {}", function.name);
         let _ = writeln!(
             self.bodies,
-            "define internal {result} @fn_{}({}) {DEFINITION_ATTRIBUTES} {{",
+            "define internal {CONVENTION} {result} @fn_{}({}) {DEFINITION_ATTRIBUTES} {{",
             function.id.0,
             parameters.join(", ")
         );
@@ -412,13 +466,18 @@ impl Module {
         let _ = writeln!(out, "; Точка входа для спутника на C.");
         let _ = writeln!(
             out,
+            "; Соглашение здесь C - её зовёт спутник; порождённые между собой\n\
+             ; ходят по `{CONVENTION}` (трек D), и вызов ниже это называет."
+        );
+        let _ = writeln!(
+            out,
             "define {} @{ENTRY_SYMBOL}() {DEFINITION_ATTRIBUTES} {{",
             machine(answer)
         );
         out.push_str("entry:\n");
         let _ = writeln!(
             out,
-            "  %answer = call {} @fn_{}()",
+            "  %answer = call {CONVENTION} {} @fn_{}()",
             machine(answer),
             program.entry.0
         );
@@ -498,6 +557,11 @@ fn slot_or(function: &Function, place: &str, repr: Repr) -> Result<&'static str,
 struct Builder<'a> {
     program: &'a Program,
     function: &'a Function,
+    /// Тип регистра, в котором функция отдаёт ответ.
+    ///
+    /// Нужен обходу хвостовой позиции: `ret` печатает он, а не вызывающий, и
+    /// печатей этих у разбора столько, сколько ветвей.
+    result: &'static str,
     /// Что в каком связывании лежит: от этого тип регистра.
     reprs: HashMap<LocalId, Repr>,
     /// Чем связывание представлено в тексте.
@@ -523,7 +587,7 @@ struct Builder<'a> {
 }
 
 impl<'a> Builder<'a> {
-    fn new(program: &'a Program, function: &'a Function) -> Self {
+    fn new(program: &'a Program, function: &'a Function, result: &'static str) -> Self {
         let mut reprs = HashMap::new();
         let mut operands = HashMap::new();
         for binding in function.captured.iter().chain(&function.parameters) {
@@ -539,6 +603,7 @@ impl<'a> Builder<'a> {
         Self {
             program,
             function,
+            result,
             reprs,
             operands,
             body: "entry:\n".to_owned(),
@@ -615,8 +680,100 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// Печатает узлы-приставки до упора и отдаёт то, что под ними.
+    ///
+    /// Приставка - `let`, `dup` и `drop`: узел печатает голову и передаёт
+    /// позицию телу. Одна печать на **обе** позиции намеренно: разъедься они -
+    /// хвостовой путь потерял бы счётчик молча, а расхождение вылезло бы
+    /// течью, а не отказом.
+    ///
+    /// Отсюда же и то, что хвост считается контекстом, а не полем узла: дроп,
+    /// вставленный Perceus **после** вызова, попадает в `value` и хвоста не
+    /// получает; вставленный до - остаётся здесь, и хвост уезжает дальше в
+    /// тело. Ни одного признака в представлении для этого не нужно.
+    ///
+    /// Цикл, а не рекурсия: цепочка `let` в понижении бывает длинной, и
+    /// рекурсия по ней клала бы стек компилятора на ровном месте.
+    fn prologue<'e>(&mut self, expr: &'e Expr) -> Result<&'e Expr, LlvmError> {
+        let mut at = expr;
+        loop {
+            match at {
+                Expr::Bind {
+                    binding,
+                    value,
+                    body,
+                } => {
+                    let computed = self.value(value)?;
+                    let _ = writeln!(self.body, "  ; {computed} - {}", binding.name);
+                    self.operands.insert(binding.local, computed);
+                    at = body;
+                }
+                Expr::Dup { local, body } => {
+                    let value = self.operand(*local)?;
+                    let name = self.temp();
+                    self.instruction(&format!("{name} = call ptr @adamas_dup(ptr {value})"));
+                    at = body;
+                }
+                Expr::Drop {
+                    local,
+                    salvage,
+                    body,
+                } => {
+                    if salvage.collapses() {
+                        return Err(self.node("схлопнутый дроп разобранного"));
+                    }
+                    let value = self.operand(*local)?;
+                    self.instruction(&format!(
+                        "call void @adamas_drop(ptr {value}, ptr @adamas_release_none)"
+                    ));
+                    at = body;
+                }
+                other => return Ok(other),
+            }
+        }
+    }
+
+    /// Эмитит выражение в **возвратной** позиции: блок кончается `ret`.
+    ///
+    /// Хвостовой вызов печатается `musttail` с `ret` следом - этого и требует
+    /// LLVM, - а разбор раздаёт возвратную позицию своим ветвям, вместо того
+    /// чтобы сводить их `phi` (трек D). `ret` печатает поэтому обход, а не
+    /// вызывающий: у разбора их столько, сколько ветвей.
+    fn tail(&mut self, expr: &Expr) -> Result<(), LlvmError> {
+        let expr = self.prologue(expr)?;
+        match expr {
+            Expr::Match {
+                scrutinee, arms, ..
+            } => self.analysis_tail(scrutinee, arms),
+            Expr::Call {
+                function,
+                arguments,
+            } => {
+                // `musttail` требует, чтобы `ret` вернул **значение вызова**, а
+                // значит чтобы типы сошлись. У нашего понижения они сходятся по
+                // построению - ответ функции и есть ответ хвостового вызова, -
+                // но полагаться на это нечем: разойдись они, verifier отверг бы
+                // модуль целиком. Обычный вызов в этом случае честнее отказа.
+                let agreed = slot(self.program.functions[function.0].result)
+                    .is_some_and(|it| it == self.result);
+                let sort = if agreed { Tail::Must } else { Tail::Plain };
+                let name = self.call(*function, arguments, sort)?;
+                let result = self.result;
+                self.instruction(&format!("ret {result} {name}"));
+                Ok(())
+            }
+            other => {
+                let value = self.value(other)?;
+                let result = self.result;
+                self.instruction(&format!("ret {result} {value}"));
+                Ok(())
+            }
+        }
+    }
+
     /// Эмитит выражение и отдаёт операнд, в котором лежит его значение.
     fn value(&mut self, expr: &Expr) -> Result<String, LlvmError> {
+        let expr = self.prologue(expr)?;
         match expr {
             Expr::Local(local) => self.operand(*local),
             Expr::Literal { ty, bits } => self.literal(*ty, *bits),
@@ -637,36 +794,12 @@ impl<'a> Builder<'a> {
             Expr::Call {
                 function,
                 arguments,
-            } => self.call(*function, arguments),
-            Expr::Bind {
-                binding,
-                value,
-                body,
-            } => {
-                let computed = self.value(value)?;
-                let _ = writeln!(self.body, "  ; {computed} - {}", binding.name);
-                self.operands.insert(binding.local, computed);
-                self.value(body)
-            }
-            Expr::Dup { local, body } => {
-                let value = self.operand(*local)?;
-                let name = self.temp();
-                self.instruction(&format!("{name} = call ptr @adamas_dup(ptr {value})"));
-                self.value(body)
-            }
-            Expr::Drop {
-                local,
-                salvage,
-                body,
-            } => {
-                if salvage.collapses() {
-                    return Err(self.node("схлопнутый дроп разобранного"));
-                }
-                let value = self.operand(*local)?;
-                self.instruction(&format!(
-                    "call void @adamas_drop(ptr {value}, ptr @adamas_release_none)"
-                ));
-                self.value(body)
+            } => self.call(*function, arguments, Tail::Plain),
+            // Приставки сняты `prologue` выше, и досюда узел не доезжает.
+            // Ветвь стоит ради исчерпывающего разбора: пропади она, новый
+            // узел-приставка ушёл бы в тихий отказ вместо ошибки сборки.
+            Expr::Bind { .. } | Expr::Dup { .. } | Expr::Drop { .. } => {
+                Err(self.node("узел-приставка после снятия приставок"))
             }
             Expr::Match {
                 scrutinee, arms, ..
@@ -796,7 +929,17 @@ impl<'a> Builder<'a> {
     }
 
     /// Прямой вызов: стёртые позиции в вызов не идут.
-    fn call(&mut self, function: FuncId, arguments: &[Expr]) -> Result<String, LlvmError> {
+    ///
+    /// `sort` - шов трека D: [`Tail::Must`] печатает `musttail`, и следом за
+    /// такой инструкцией обязан идти `ret` - его ставит [`Self::tail`].
+    /// Соглашение [`CONVENTION`] печатается **всегда**, и не для красоты: оно
+    /// объявлено у определения, и вызов, не назвавший его, звал бы по другому.
+    fn call(
+        &mut self,
+        function: FuncId,
+        arguments: &[Expr],
+        sort: Tail,
+    ) -> Result<String, LlvmError> {
         let called = &self.program.functions[function.0];
         if called.form == Form::Detached {
             return Err(LlvmError::Detached {
@@ -826,19 +969,28 @@ impl<'a> Builder<'a> {
         }
         let name = self.temp();
         self.instruction(&format!(
-            "{name} = {}call {result} @fn_{}({})",
-            Tail::Plain.prefix(),
+            "{name} = {}call {CONVENTION} {result} @fn_{}({})",
+            sort.prefix(),
             function.0,
             given.join(", ")
         ));
         Ok(name)
     }
 
-    /// Разбор: `switch` по тегу, ветви - блоки, ответ - `phi`.
+    /// Голова разбора: отказ по полям, тег, `switch` и блок обрыва.
     ///
     /// Полей ветвь не связывает: за полем стоит объект кучи, а срез его не
     /// читает. Нульарный конструктор непосредствен, и тег у него - он сам.
-    fn analysis(&mut self, scrutinee: &Expr, arms: &[Arm]) -> Result<String, LlvmError> {
+    ///
+    /// Одна на обе позиции намеренно: разъедься головы - хвостовой разбор
+    /// поехал бы по другому тегу, и заметить это было бы нечем. Отдаёт номер
+    /// разбора и метки ветвей; ветви печатает вызывающий, потому что позиция у
+    /// них его.
+    fn dispatch(
+        &mut self,
+        scrutinee: &Expr,
+        arms: &[Arm],
+    ) -> Result<(u32, Vec<String>), LlvmError> {
         if arms.is_empty() {
             return Err(self.node("разбор пустого типа"));
         }
@@ -852,7 +1004,6 @@ impl<'a> Builder<'a> {
                 });
             }
         }
-        let answer = self.typed(&arms[0].body)?;
 
         let scrutinised = self.value(scrutinee)?;
         let at = self.matches;
@@ -862,7 +1013,6 @@ impl<'a> Builder<'a> {
 
         let labels: Vec<String> = (0..arms.len()).map(|it| format!("m{at}.a{it}")).collect();
         let fail = format!("m{at}.fail");
-        let join = format!("m{at}.join");
         let cases: Vec<String> = arms
             .iter()
             .zip(&labels)
@@ -872,6 +1022,18 @@ impl<'a> Builder<'a> {
             "switch i16 {tag}, label %{fail} [ {} ]",
             cases.join(" ")
         ));
+
+        self.start(&fail);
+        self.instruction(&format!("call void @adamas_fail(ptr {TAG_MESSAGE})"));
+        self.instruction("unreachable");
+        Ok((at, labels))
+    }
+
+    /// Разбор значением: ветви сводятся `phi` в блоке стыковки.
+    fn analysis(&mut self, scrutinee: &Expr, arms: &[Arm]) -> Result<String, LlvmError> {
+        let (at, labels) = self.dispatch(scrutinee, arms)?;
+        let answer = self.typed(&arms[0].body)?;
+        let join = format!("m{at}.join");
 
         let mut incoming = Vec::new();
         for (arm, label) in arms.iter().zip(&labels) {
@@ -883,14 +1045,24 @@ impl<'a> Builder<'a> {
             self.instruction(&format!("br label %{join}"));
         }
 
-        self.start(&fail);
-        self.instruction(&format!("call void @adamas_fail(ptr {TAG_MESSAGE})"));
-        self.instruction("unreachable");
-
         self.start(&join);
         let name = self.temp();
         self.instruction(&format!("{name} = phi {answer} {}", incoming.join(", ")));
         Ok(name)
+    }
+
+    /// Разбор в хвостовой позиции: ветвь возвращает сама, `phi` не строится.
+    ///
+    /// Так и снимается препятствие трека D. `musttail` требует `ret` **в том же
+    /// блоке**, а ветвь, кончающаяся `br label %join`, его не даёт; блока
+    /// стыковки здесь нет вовсе, и хвост уезжает в каждую ветвь целым.
+    fn analysis_tail(&mut self, scrutinee: &Expr, arms: &[Arm]) -> Result<(), LlvmError> {
+        let (_, labels) = self.dispatch(scrutinee, arms)?;
+        for (arm, label) in arms.iter().zip(&labels) {
+            self.start(label);
+            self.tail(&arm.body)?;
+        }
+        Ok(())
     }
 }
 

@@ -35,14 +35,14 @@
 //! зелёный тест здесь был бы обманчивым свидетелем. Единственное объявленное
 //! исключение - `ADAMAS_LLVM=absent`, и стоит оно в одном месте
 //! (`.github/workflows/ci.yml`, нога macOS), где LLVM в образе раннера нет.
+//! Само правило живёт в [`harness::llvm_toolchains`] - одной записью на всех
+//! свидетелей LLVM-пути, потому что вторая разъехалась бы с первой молча.
 
 mod harness;
 
 use std::path::PathBuf;
 
-use adamas_codegen::llvm::{
-    MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline, TOOLS_VARIABLE, Toolchain,
-};
+use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 
 /// Программы корпуса, которые скалярный фрагмент обязан взять.
 ///
@@ -118,21 +118,6 @@ main =
   addInt64 k (mulInt64 (pair (ltInt64 1 2) (ltInt64 2 1)) 2048)
 ";
 
-/// Цепочки инструментов, либо объявленное отсутствие LLVM.
-///
-/// `None` только при `ADAMAS_LLVM=absent`. Всё остальное - отказ: инструмент,
-/// которого нет, обязан ронять прогон, а не молчать.
-fn toolchains() -> Option<(Toolchain, Toolchain)> {
-    if std::env::var("ADAMAS_LLVM").is_ok_and(|it| it == "absent") {
-        eprintln!("LLVM объявлен отсутствующим (ADAMAS_LLVM=absent): договор не проверялся");
-        return None;
-    }
-    Some((
-        Toolchain::from_variable(TOOLS_VARIABLE),
-        Toolchain::from_variable(MINIMUM_TOOLS_VARIABLE),
-    ))
-}
-
 /// Мера среза: что эмиттер берёт и чем отвергает остальное.
 ///
 /// Инструментов не спрашивает вовсе - тут только эмиссия, - и потому идёт
@@ -198,7 +183,7 @@ fn the_scalar_fragment_takes_what_it_declares() {
 /// соседним тестом, которому инструменты не нужны.
 #[test]
 fn the_corpus_agrees_across_three_evaluators() {
-    let Some((tools, _)) = toolchains() else {
+    let Some((tools, _)) = harness::llvm_toolchains() else {
         return;
     };
     let major = tools
@@ -236,7 +221,7 @@ fn the_corpus_agrees_across_three_evaluators() {
 )]
 #[test]
 fn the_two_workloads_do_not_answer_the_same() {
-    let Some((tools, _)) = toolchains() else {
+    let Some((tools, _)) = harness::llvm_toolchains() else {
         return;
     };
     let pipeline = Pipeline::optimised();
@@ -276,7 +261,7 @@ fn the_two_workloads_do_not_answer_the_same() {
 )]
 #[test]
 fn the_minimum_llvm_reads_the_same_ir() {
-    let Some((tools, minimum)) = toolchains() else {
+    let Some((tools, minimum)) = harness::llvm_toolchains() else {
         return;
     };
     let current = tools
@@ -340,7 +325,7 @@ fn taken_sources() -> Vec<(String, String)> {
 )]
 #[test]
 fn the_answer_does_not_come_from_the_optimiser() {
-    let Some((tools, _)) = toolchains() else {
+    let Some((tools, _)) = harness::llvm_toolchains() else {
         return;
     };
     for (name, source) in taken_sources() {
@@ -387,7 +372,7 @@ fn the_answer_does_not_come_from_the_optimiser() {
 ///   считается другая, а число витков то же.
 ///
 /// Все три завершаются - это проверено прогоном, а не рассуждением, - но
-/// предел по времени в [`harness::llvm_mutant`] стоит всё равно: соседняя
+/// предел по времени в [`harness::llvm_printed`] стоит всё равно: соседняя
 /// правка того же жанра (`sub` счётчика в `add`) цикл не завершает вовсе, и
 /// повесить прогон дешевле, чем кажется.
 #[allow(
@@ -396,7 +381,7 @@ fn the_answer_does_not_come_from_the_optimiser() {
 )]
 #[test]
 fn a_broken_emitter_changes_the_printed_answer() {
-    let Some((tools, _)) = toolchains() else {
+    let Some((tools, _)) = harness::llvm_toolchains() else {
         return;
     };
     let name = "workload-scalar";
@@ -422,8 +407,8 @@ fn a_broken_emitter_changes_the_printed_answer() {
             "переставленные аргументы вызова",
             swapped(
                 &artefacts.ll,
-                "call i64 @fn_1(i64 %t0, i64 0)",
-                "call i64 @fn_1(i64 0, i64 %t0)",
+                "call tailcc i64 @fn_1(i64 %t0, i64 0)",
+                "call tailcc i64 @fn_1(i64 0, i64 %t0)",
             ),
         ),
         (
@@ -434,7 +419,7 @@ fn a_broken_emitter_changes_the_printed_answer() {
     ];
 
     for (stem, why, mutant) in mutants {
-        let printed = harness::llvm_mutant(
+        let printed = harness::llvm_printed(
             &format!("mutant.{stem}"),
             &mutant,
             &artefacts.support,

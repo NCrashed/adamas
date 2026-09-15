@@ -39,11 +39,36 @@ pub(crate) fn scratch() -> PathBuf {
     dir
 }
 
-/// Понижение с исходником: программа с позициями (§9 Фаза 7, трек E).
+/// Кладёт исходник на диск **атомарно** и отдаёт путь к нему.
 ///
-/// Исходник кладётся на диск, потому что читать его будет **отладчик**: DWARF
-/// называет каталог и имя, и без файла по этому пути gdb показал бы номер
-/// строки без самой строки.
+/// Читать его будет отладчик: DWARF называет каталог и имя, и без файла по
+/// этому пути gdb показал бы номер строки без самой строки.
+///
+/// Через переименование, а не записью на месте: тесты одного крейта идут
+/// параллельно, кладут они **один и тот же** файл, и обычная запись усекает его
+/// на время. Отладчик, прочитавший файл в этот момент, показал бы пустую
+/// строку - и виноват оказался бы DWARF.
+///
+/// # Panics
+///
+/// Файл не записался либо не переименовался.
+#[expect(
+    clippy::expect_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+fn fixture(stem: &str, text: &str) -> PathBuf {
+    // Черновик свой у каждого вызова: тесты крейта - потоки одного процесса, и
+    // общее имя черновика вернуло бы ту же гонку, от которой он заведён.
+    static DRAFTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let at = DRAFTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = scratch().join(format!("{stem}.adamas"));
+    let draft = scratch().join(format!("{stem}.{at}.adamas.part"));
+    std::fs::write(&draft, text).expect("исходник обязан записываться");
+    std::fs::rename(&draft, &path).expect("исходник обязан переименовываться");
+    path
+}
+
+/// Понижение с исходником: программа с позициями (§9 Фаза 7, трек E).
 ///
 /// # Panics
 ///
@@ -53,8 +78,7 @@ pub(crate) fn scratch() -> PathBuf {
     reason = "заготовка теста: отказ здесь означает сломанный корпус"
 )]
 pub(crate) fn located(stem: &str, text: &str) -> (PathBuf, adamas_codegen::ir::Program) {
-    let path = scratch().join(format!("{stem}.adamas"));
-    std::fs::write(&path, text).expect("исходник обязан записываться");
+    let path = fixture(stem, text);
     let (mut signature, mut metas, instances) = elaborated(text);
     let written = body(&signature, "main");
     let made = mono::specialise(&mut signature, &mut metas, &instances, &written)
@@ -75,8 +99,7 @@ pub(crate) fn located(stem: &str, text: &str) -> (PathBuf, adamas_codegen::ir::P
     reason = "заготовка теста: отказ здесь означает сломанный корпус"
 )]
 pub(crate) fn llvm_located(stem: &str, text: &str) -> (PathBuf, Artefacts) {
-    let path = scratch().join(format!("{stem}.adamas"));
-    std::fs::write(&path, text).expect("исходник обязан записываться");
+    let path = fixture(stem, text);
     let (mut signature, mut metas, instances) = elaborated(text);
     let written = body(&signature, "main");
     let made = mono::specialise(&mut signature, &mut metas, &instances, &written)

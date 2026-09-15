@@ -341,6 +341,9 @@ pub const RELEASE_SYMBOL: &str = "adamas_release_extern";
 /// Имя константы с текстом обрыва по неизвестному тегу.
 const TAG_MESSAGE: &str = "@.str.tag";
 
+/// Имя константы с текстом обрыва по номеру дорожки (§4.9).
+const LANE_MESSAGE: &str = "@.str.lane";
+
 /// Смещение первого слота от начала объекта, в байтах (`adamas.h`).
 ///
 /// Не догадка и не соглашение этого файла: `adamas.h` держит на нём
@@ -1261,6 +1264,7 @@ impl Module {
             (TAG_MESSAGE, TAG_TEXT),
             (BRANCH_MESSAGE, BRANCH_TEXT),
             (MISSING_MESSAGE, MISSING_TEXT),
+            (LANE_MESSAGE, LANE_TEXT),
         ] {
             let _ = writeln!(
                 out,
@@ -1497,6 +1501,12 @@ const MISSING_MESSAGE: &str = "@.str.missing";
 
 /// Текст обрыва по операции без хендлера.
 const MISSING_TEXT: &str = "операция без хендлера";
+
+/// Текст обрыва по номеру дорожки вне ширины (§4.9).
+///
+/// Берётся у представления, а не пишется здесь: C-бэкенд печатает **этот же**
+/// текст, и второй его записи не заводится - см. [`crate::ir::LANE_OUTSIDE`].
+const LANE_TEXT: &str = crate::ir::LANE_OUTSIDE;
 
 /// Тег стёртого значения: тот же, что у `ADAMAS_ERASED` в спутнике.
 ///
@@ -2194,6 +2204,43 @@ impl<'a> Builder<'a> {
         Ok(name)
     }
 
+    /// Обрыв, если номер дорожки вышел за ширину (§4.9).
+    ///
+    /// **Не украшение, а сведение двух бэкендов.** `extractelement` с номером
+    /// вне ширины отдаёт `poison`, то есть молча неверный ответ; C-сторона в
+    /// том же случае зовёт `adamas_fail`. Разойдись они - и договор трёх
+    /// вычислителей держался бы только на программах, которые за ширину не
+    /// выходят, а обещание «одна программа - одно значение» перестало бы быть
+    /// про все программы. Машина третьей стороной не сводит такое чтение
+    /// вовсе, и сходятся все трое в том, что ответа не даёт никто.
+    ///
+    /// Цена нулевая на обычном случае: номер там литерал, и `opt` сворачивает
+    /// сравнение с константой вместе с веткой. Измерено на ядре свидетеля
+    /// (`tests/simd.rs`, 2026-09-16, LLVM 21.1.8): **51 инструкция** в штатном
+    /// выходе и до проверки, и после, пакетных те же четыре. На рантаймовом
+    /// номере проверка остаётся и стоит сравнение с переходом - столько же,
+    /// сколько стоит она же у массива (`adamas_array_at`).
+    fn lane_in_range(&mut self, lanes: u32, at: &str) {
+        let verdict = self.temp();
+        self.instruction(
+            &format!("{verdict} = icmp uge i64 {at}, {lanes}"),
+            self.here(),
+        );
+        let bad = format!("lane{}.out", self.temps);
+        let good = format!("lane{}.in", self.temps);
+        self.instruction(
+            &format!("br i1 {verdict}, label %{bad}, label %{good}"),
+            self.here(),
+        );
+        self.start(&bad);
+        self.instruction(
+            &format!("call void @adamas_fail(ptr {LANE_MESSAGE})"),
+            self.here(),
+        );
+        self.instruction("unreachable", self.here());
+        self.start(&good);
+    }
+
     /// Тот же вектор с переписанной дорожкой (§4.9): `insertelement`.
     fn insert(
         &mut self,
@@ -2206,6 +2253,7 @@ impl<'a> Builder<'a> {
         let source = self.value(vector_expr)?;
         let at = self.value(at)?;
         let value = self.value(value)?;
+        self.lane_in_range(lanes, &at);
         let name = self.temp();
         self.instruction(
             &format!(
@@ -2228,6 +2276,7 @@ impl<'a> Builder<'a> {
     ) -> Result<String, LlvmError> {
         let source = self.value(vector_expr)?;
         let at = self.value(at)?;
+        self.lane_in_range(lanes, &at);
         let name = self.temp();
         self.instruction(
             &format!(

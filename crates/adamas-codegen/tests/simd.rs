@@ -203,7 +203,26 @@ fn the_emitter_prints_a_vector_instruction_not_eight_scalar_ones() {
         "скалярных плавающих {scalar}: часть дорожек поехала скаляром, \
          а ответ этого не покажет"
     );
-    eprintln!("LLVM без `opt`: пакетных {packed}, скалярных {scalar}");
+
+    // Проверка номера дорожки на литеральном номере обязана **исчезнуть**:
+    // `Builder::lane_in_range` эмитит её всегда, а стоить она должна ноль.
+    // Обрыва в штатном выходе поэтому не остаётся ни одного, и ветки тоже.
+    let optimised = harness::llvm_object(
+        "simd-kernel.opt",
+        &artefacts,
+        &tools,
+        &Pipeline::optimised(),
+    );
+    let (fast, fast_scalar) = packed_and_scalar(&tools, &optimised);
+    let total = harness::instructions(&tools, &optimised);
+    assert!(
+        fast > 0 && fast_scalar == 0,
+        "после `-O2` вектор пропал: пакетных {fast}, скалярных {fast_scalar}"
+    );
+    eprintln!(
+        "LLVM без `opt`: пакетных {packed}, скалярных {scalar}; \
+         с `-O2`: пакетных {fast}, инструкций всего {total}"
+    );
 }
 
 /// То же на C-бэкенде: `vector_size` доезжает до пакетной инструкции.
@@ -467,5 +486,70 @@ main = taken held
     assert!(
         why.contains("поле конструктора") && why.contains("Simd 4 Float32"),
         "отказ не называет ни позицию, ни вектор: {why}"
+    );
+}
+
+/// Номер дорожки вне ширины обрывает прогон, и одинаково у обоих бэкендов.
+///
+/// Свидетель написан по **измеренному** расхождению. `extractelement` с
+/// номером вне ширины отдаёт `poison`, то есть молча неверный ответ, тогда как
+/// C-сторона зовёт `adamas_fail`; до правки два бэкенда на такой программе
+/// расходились, а договор трёх вычислителей обещает одно значение на всех.
+/// Машина третьей стороной не сводит такое чтение вовсе - `simdLane` остаётся
+/// застрявшим спайном, - и сходятся все трое в том, что **ответа не даёт
+/// никто**. Та же форма границы, что у выхода за длину массива (§4.11).
+///
+/// Номер здесь написан литералом нарочно: на нём `opt` вправе свернуть проверку
+/// вместе с веткой, и свидетель показывает, что свернулось **ветвление**, а не
+/// обрыв.
+#[test]
+fn a_lane_beyond_the_width_stops_both_backends() {
+    const OUTSIDE: &str = "\
+type Layout = { size : UInt32, align : UInt32 }
+
+class Primitive a where
+  simdLayout : Layout
+
+one : Float32
+one = 1.0
+
+main : Float32
+main = simdLane (simdSplat 4 one) 9
+";
+    // Машина ответа не даёт: чтение остаётся спайном, и печатается он.
+    let machine = harness::printed(OUTSIDE);
+    assert!(
+        machine.contains("simdLane"),
+        "машина свела чтение вне ширины до значения: {machine}"
+    );
+
+    let Some((tools, _)) = harness::llvm_toolchains() else {
+        return;
+    };
+    let artefacts = harness::llvm_text("simd-outside", OUTSIDE)
+        .unwrap_or_else(|error| panic!("программа не понизилась: {error}"));
+    let binary = harness::llvm_binary("simd.outside", &artefacts, &tools, &Pipeline::optimised());
+    let run = Command::new(&binary)
+        .output()
+        .unwrap_or_else(|error| panic!("прогон не запустился: {error}"));
+    assert!(
+        !run.status.success(),
+        "LLVM ответила на дорожку вне ширины: `{}`",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    let said = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        said.contains(adamas_codegen::ir::LANE_OUTSIDE),
+        "оборвалось не тем и не там: {said}"
+    );
+
+    // C-сторона обязана оборваться **тем же** текстом. Проверяется он, а не
+    // сам факт обрыва: текст один на два эмиттера по построению
+    // (`ir::LANE_OUTSIDE`), и свидетель здесь стережёт как раз то, что
+    // построение не разошлось с прогоном.
+    let printed = harness::text(OUTSIDE).unwrap_or_else(|error| panic!("C не собрался: {error}"));
+    assert!(
+        printed.contains(adamas_codegen::ir::LANE_OUTSIDE),
+        "порождённый C не несёт проверки номера дорожки"
     );
 }

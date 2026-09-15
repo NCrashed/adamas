@@ -1854,12 +1854,13 @@ impl Emitter<'_> {
         let name = self.temp();
         let ty = vector_type(lanes, lane);
         let _ = writeln!(self.out, "{pad}{ty} {name} = {vector};");
-        // Номер вне ширины - обрыв, а не тихая запись мимо: у машины тот же
-        // случай не сводится вовсе, и сходятся два вычислителя в том, что
-        // ответа не даёт ни один (§4.9, `eval::laned`).
+        // Номер вне ширины - обрыв, а не тихая запись мимо. Текст берётся у
+        // представления: LLVM-сторона печатает тот же, и второй записи не
+        // заводится (§4.9, `ir::LANE_OUTSIDE`).
         let _ = writeln!(
             self.out,
-            "{pad}if ({at} >= {lanes}u) {{ adamas_fail(\"номер дорожки вне ширины вектора\"); }}"
+            "{pad}if ({at} >= {lanes}u) {{ adamas_fail(\"{}\"); }}",
+            crate::ir::LANE_OUTSIDE
         );
         let _ = writeln!(self.out, "{pad}{name}[{at}] = {value};");
         name
@@ -1880,7 +1881,8 @@ impl Emitter<'_> {
         let name = self.temp();
         let _ = writeln!(
             self.out,
-            "{pad}if ({at} >= {lanes}u) {{ adamas_fail(\"номер дорожки вне ширины вектора\"); }}"
+            "{pad}if ({at} >= {lanes}u) {{ adamas_fail(\"{}\"); }}",
+            crate::ir::LANE_OUTSIDE
         );
         let _ = writeln!(
             self.out,

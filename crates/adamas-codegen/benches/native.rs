@@ -62,7 +62,7 @@
 //! замера ([`checked`], [`same_answer`]):
 //!
 //! - `interp` — машина, то есть `adamas eval`;
-//! - `native` — порождённый C, собранный строкой release ([`RELEASE`]) и
+//! - `native` — порождённый C, собранный строкой release ([`harness::RELEASE`]) и
 //!   запущенный процессом;
 //! - `rust` — тот же алгоритм на Rust, теми же формами данных
 //!   (`Box`-рекурсия), запущенный **тоже процессом**: стенд зовёт сам себя
@@ -129,7 +129,7 @@
 //!   при разности точек 3.51 — то есть врозь точки не разрешаются даже
 //!   сейчас, когда разность выросла вшестеро. Чередование их разрешает:
 //!   разность 3.10 мс при размахе между прогонами 0.58.
-//! - **Оценка — пол выборки** ([`least`]), а не среднее и не медиана. Помеха
+//! - **Оценка — пол выборки** ([`harness::least`]), а не среднее и не медиана. Помеха
 //!   ко времени процесса только прибавляет.
 //! - **Привязка к одному P-ядру:** `taskset -c <ядро>`. Машина гибридная,
 //!   E-ядро идёт вдвое медленнее (`boxed/18`: 39.5 мс против 22.2 на P), а
@@ -156,7 +156,7 @@
 //! Число **недействительно**, если:
 //!
 //! - стороны собраны разными строками: у соседа профиль `release` этого
-//!   репозитория, то есть `lto = "thin"`, и без [`RELEASE`] здесь сравнивалось
+//!   репозитория, то есть `lto = "thin"`, и без [`harness::RELEASE`] здесь сравнивалось
 //!   бы собранное межмодульно с собранным по частям. Замер 2026-09-13: одна эта
 //!   асимметрия стоила **99%** разрыва;
 //! - сосед померен не отдельным процессом — тогда меряется куча стенда;
@@ -169,7 +169,7 @@
 //!
 //! ## Откуда берётся разброс: измерено 2026-09-13
 //!
-//! Правка сборки ([`RELEASE`]) ускорила понижение втрое и тем **исчерпала
+//! Правка сборки ([`harness::RELEASE`]) ускорила понижение втрое и тем **исчерпала
 //! запас** методики: разность `boxed`/`handled` упала с 25 мс до 3.4 при
 //! разбросе около 2.8. Пять прогонов подтвердили отказ — `boxed/18` лёг в
 //! 21.41–23.97 при разности точек 0.5 мс, и в одном прогоне из пяти
@@ -230,7 +230,7 @@
 //! недооценивает.
 //!
 //! **Паритет: 0.99 (0.99–1.01).** Пять прогонов подряд, привязка к одному
-//! P-ядру, оценка — пол ([`least`]), медианы за вычетом своего пола (0.196 мс
+//! P-ядру, оценка — пол ([`harness::least`]), медианы за вычетом своего пола (0.196 мс
 //! у `native`, 0.434 мс у соседа), глубина 18:
 //!
 //! | прогон | сосед на Rust | понижение | отношение |
@@ -267,7 +267,7 @@
 //! | сосед на Rust | 9.20 | 4.56 | 3.79 | 17.55 |
 //! | тот же алгоритм руками на C | 10.04 | 3.89 | 3.04 | 16.97 |
 //! | понижение, как собиралось утром | 16.20 | 12.08 | 14.06 | **42.34** |
-//! | оно же с [`RELEASE`] | 9.40 | 2.90 | 5.35 | **17.65** |
+//! | оно же с [`harness::RELEASE`] | 9.40 | 2.90 | 5.35 | **17.65** |
 //!
 //! - **Невстроенные вызовы в рантайм — 24.7 мс из 24.8 мс разрыва.** Горячий
 //!   путь состоит из `adamas_tag`, `adamas_field`, `adamas_dup`, `adamas_drop`;
@@ -296,7 +296,7 @@
 //!
 //! **3.54 мс из 26.92, то есть 13%.** Мерено между двумя сборками самого
 //! компилятора: тот же исходник Adamas (`pure`, глубина 18), тот же
-//! [`RELEASE`], тот же рантайм, — понижен до и после правки. Ответ у обеих
+//! [`harness::RELEASE`], тот же рантайм, — понижен до и после правки. Ответ у обеих
 //! сторон 8349405806592, блоков выдано 524305 обеими: схлопывание трогает
 //! счётчики, а не аллокации, и это условие годности замера, а не наблюдение.
 //!
@@ -512,21 +512,22 @@
     reason = "заготовка бенчмарка: отказ здесь означает сломанный стенд, и падать он должен громко"
 )]
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+mod harness;
 
-use adamas_core::level::Level;
-use adamas_core::meta::Metas;
-use adamas_core::row::Row;
+use std::path::{Path, PathBuf};
+
 use adamas_core::sig::Signature;
 use adamas_core::term::{PRINT_DEPTH, Term};
-use adamas_elab::class::Instances;
-use adamas_elab::fixity::Fixities;
 use adamas_elab::mono;
-use adamas_elab::{Owned, Warnings};
 use criterion::{Criterion, SamplingMode, criterion_group};
+
+use harness::{
+    NEIGHBOUR, built, by_floor, compiled, elaborated, entry, least, measuring, middle, ran,
+    ran_neighbour, span,
+};
+
+/// Место под порождённый C и его сборку — своё у стенда.
+const STAND: &str = "bench-native";
 
 /// Глубины дерева: шаг удваивает работу, и все четверо считаются на одних и
 /// тех же трёх точках.
@@ -742,40 +743,6 @@ depth = {nat}
 
 // --- машина -------------------------------------------------------------
 
-/// Элаборированная программа вместе с тем, что о ней знает разрешение.
-fn elaborated(source: &str) -> (Signature, Metas, Instances) {
-    let module = adamas_parser::parse(source).expect("исходник обязан разбираться");
-    let mut signature = Signature::default();
-    let mut metas = Metas::default();
-    let mut owned = Owned::default();
-    let mut fixities = Fixities::default();
-    let mut instances = Instances::default();
-    let mut warnings = Warnings::new();
-    adamas_elab::elaborate_into(
-        &module,
-        &mut signature,
-        &mut metas,
-        &mut owned,
-        &mut fixities,
-        &mut instances,
-        &mut warnings,
-    )
-    .expect("исходник обязан проходить проверку");
-    (signature, metas, instances)
-}
-
-/// Тело `main` с подставленными аргументами уровня и row — то, что вычисляет
-/// `adamas eval`.
-fn entry(signature: &Signature) -> Term {
-    let definition = signature.lookup("main").expect("`main` объявлен");
-    let body = definition.body.as_ref().expect("у `main` есть тело");
-    let levels: Vec<Level> = (0..definition.level_arity)
-        .map(|_| Level::number(0))
-        .collect();
-    let rows: Vec<Row<Term>> = (0..definition.row_arity).map(|_| Row::empty()).collect();
-    body.substitute_levels(&levels).substitute_rows(&rows)
-}
-
 /// Программа, готовая к замеру обоими путями.
 struct Program {
     signature: Signature,
@@ -815,109 +782,10 @@ impl Program {
 
 // --- порождённый C ------------------------------------------------------
 
-/// Место под порождённый C и его сборку.
-fn scratch() -> PathBuf {
-    let dir = Path::new(env!("OUT_DIR")).join("bench-native");
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-/// Строка сборки release: уровень оптимизации и межмодульная оптимизация.
-///
-/// `-O2`, а не `-O1` тестового харнесса: замер говорит о том, что получит
-/// пользователь release-сборкой, и уровень оптимизации — часть окружения,
-/// которое число обязано нести рядом с собой.
-///
-/// `-flto` здесь по той же причине и ещё по одной. Порождённый C и рантайм —
-/// разные единицы трансляции, а горячий путь состоит из вызовов в рантайм:
-/// `adamas_tag`, `adamas_field`, `adamas_dup`, `adamas_drop`. Каждый из них —
-/// несколько инструкций, и без межмодульной оптимизации вызов дороже тела.
-/// `adamas.h` называет это прямо: «Функции не `static inline`: горячий путь
-/// ждёт LTO». Сосед на Rust собирается профилем `release` этого репозитория, а
-/// он — `lto = "thin"`; без флага здесь сравнивались бы не два понижения, а
-/// собранное межмодульно с собранным по отдельности. Измерено 2026-09-13:
-/// флаг снимает **99% разрыва** с соседом (пофазно в процессе на глубине 18:
-/// 42.3 мс против 17.7 при 17.6 у соседа).
-const RELEASE: [&str; 3] = ["-std=c11", "-O2", "-flto"];
-
-/// Объектные файлы рантайма: собираются однажды на весь прогон.
-fn runtime() -> &'static [PathBuf] {
-    static OBJECTS: OnceLock<Vec<PathBuf>> = OnceLock::new();
-    OBJECTS.get_or_init(|| {
-        let sources = Path::new(env!("ADAMAS_RUNTIME_SOURCES"));
-        let dir = scratch();
-        // Список приходит от самого рантайма (`build.rs`), а не написан здесь.
-        env!("ADAMAS_RUNTIME_UNITS")
-            .split(',')
-            .map(|name| {
-                let object = dir.join(format!("{name}.o"));
-                let status = Command::new(env!("ADAMAS_CC"))
-                    .args(RELEASE)
-                    .arg("-c")
-                    .arg("-I")
-                    .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
-                    .arg(sources.join(name))
-                    .arg("-o")
-                    .arg(&object)
-                    .status();
-                assert!(
-                    status.is_ok_and(|status| status.success()),
-                    "рантайм не собрался: {name}"
-                );
-                object
-            })
-            .collect()
-    })
-}
-
-/// Собирает порождённый C в исполняемый файл.
-fn built(name: &str, text: &str) -> PathBuf {
-    let dir = scratch();
-    let source = dir.join(format!("{name}.c"));
-    let binary = dir.join(name);
-    std::fs::write(&source, text).unwrap();
-    compiled(&source, &binary);
-    binary
-}
-
-/// Вызов компилятора C — отдельно, потому что он же и мерится.
-fn compiled(source: &Path, binary: &Path) {
-    let output = Command::new(env!("ADAMAS_CC"))
-        .args(RELEASE)
-        .args(["-fwrapv", "-w"])
-        .arg("-I")
-        .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
-        .arg(source)
-        .args(runtime())
-        .arg("-o")
-        .arg(binary)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "порождённый C не собрался:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-/// Прогон собранной программы: ответ на stdout, счётчики блоков на stderr.
-fn ran(binary: &Path) -> (String, String) {
-    let output = Command::new(binary).output().unwrap();
-    assert!(
-        output.status.success(),
-        "прогон оборвался: {}",
-        output.status
-    );
-    (
-        String::from_utf8(output.stdout).unwrap(),
-        String::from_utf8(output.stderr).unwrap(),
-    )
-}
-
 /// Собранная программа, чей ответ уже сверен с машиной.
 fn checked(program: &Program, name: &str) -> PathBuf {
     let text = program.lowered().expect("чистая форма обязана понижаться");
-    let binary = built(name, &text);
+    let binary = built(&harness::scratch(STAND), name, &text);
     let (stdout, stderr) = ran(&binary);
     assert_eq!(
         stdout.trim_end_matches('\n'),
@@ -1004,17 +872,14 @@ fn spread(tree: &Tree, depth: usize) -> usize {
     (high - low) / ((1usize << (depth + 1)) - 2)
 }
 
-/// Переменная, которой стенд зовёт сам себя дочерним процессом.
-///
-/// Значение — глубина; с суффиксом `:witness` дочерний процесс сверх ответа
-/// печатает на stderr [`spread`] своего дерева.
-const NEIGHBOUR: &str = "ADAMAS_BENCH_NEIGHBOUR";
-
 /// Дочерний прогон соседа, если стенд запущен им.
 ///
 /// Сосед мерится **тем же протоколом**, что и порождённый C: свежий процесс,
 /// свежая куча, ответ на stdout. Иначе его цену задаёт не алгоритм, а то,
 /// сколько успел выделить и освободить сам стенд — см. «Методика» в шапке.
+///
+/// Запрос в [`NEIGHBOUR`] — глубина; с суффиксом `:witness` дочерний процесс
+/// сверх ответа печатает на stderr [`spread`] своего дерева.
 fn as_child() -> bool {
     let Ok(request) = std::env::var(NEIGHBOUR) else {
         return false;
@@ -1036,61 +901,6 @@ fn as_child() -> bool {
     true
 }
 
-/// Прогон соседа отдельным процессом: ответ на stdout, свидетель на stderr.
-fn ran_neighbour(request: &str) -> (String, String) {
-    let executable = std::env::current_exe().expect("стенд знает путь к себе");
-    let output = Command::new(executable)
-        .env(NEIGHBOUR, request)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "прогон соседа оборвался: {}",
-        output.status
-    );
-    (
-        String::from_utf8(output.stdout).unwrap(),
-        String::from_utf8(output.stderr).unwrap(),
-    )
-}
-
-// --- оценка: пол выборки, а не её среднее --------------------------------
-
-/// Наименьшее время из `runs` запусков.
-///
-/// Помеха может к времени процесса только **прибавить**: сосед по
-/// гиперпотоку, прерывание, вытеснение. Поэтому наименьшее из повторов —
-/// оценка того, чего программа стоит без помехи, а среднее — оценка того,
-/// сколько помехи досталось окну замера. Измерено 2026-09-13 на `boxed/18`,
-/// двенадцать блоков по сорок запусков: минимумы блоков легли в 19.94–20.23
-/// (размах 0.29 мс), медианы — в 20.56–21.54 (0.98 мс), максимумы — в
-/// 22.30–26.05 (3.75 мс). Хвост шире пола на порядок, и criterion по
-/// умолчанию читает именно хвост.
-fn least(runs: u64, mut run: impl FnMut()) -> Duration {
-    let mut best = Duration::MAX;
-    for _ in 0..runs {
-        let start = Instant::now();
-        run();
-        best = best.min(start.elapsed());
-    }
-    best
-}
-
-/// Сколько запусков берётся под один пол, сколько бы ни просил criterion.
-///
-/// На разогреве criterion зовёт замер с одним-двумя повторами, а пол по
-/// одному повтору — не пол. Число возвращается помноженным на `iters`, так
-/// что планирование criterion остаётся верным: он делит обратно и получает
-/// цену одного запуска.
-const FLOOR_RUNS: u64 = 8;
-
-/// Точка замера процесса: criterion получает пол, а не среднее.
-fn by_floor(bencher: &mut criterion::Bencher<'_>, mut run: impl FnMut()) {
-    bencher.iter_custom(|iters| {
-        least(iters.max(FLOOR_RUNS), &mut run) * u32::try_from(iters).unwrap_or(u32::MAX)
-    });
-}
-
 // --- замеры -------------------------------------------------------------
 
 fn symbolic(criterion: &mut Criterion) {
@@ -1098,7 +908,7 @@ fn symbolic(criterion: &mut Criterion) {
     // Точка `native` — запуск процесса, точка `interp` — секунды: сотня
     // выборок по умолчанию превратила бы прогон в часы.
     group.sample_size(10);
-    // Выборки одного размера: оценка — пол ([`least`]), а его качество растёт
+    // Выборки одного размера: оценка — пол ([`harness::least`]), а его качество растёт
     // с числом повторов в выборке. При линейной схеме первые выборки коротки,
     // их пол завышен, и регрессия по разнородным полам ничего не значит.
     group.sampling_mode(SamplingMode::Flat);
@@ -1162,7 +972,7 @@ fn symbolic(criterion: &mut Criterion) {
             let text = program
                 .lowered()
                 .unwrap_or_else(|error| panic!("{name}/{depth}: понижение отвергает: {error}"));
-            let binary = built(&format!("{name}{depth}"), &text);
+            let binary = built(&harness::scratch(STAND), &format!("{name}{depth}"), &text);
             let (stdout, stderr) = ran(&binary);
             assert_eq!(
                 stdout.trim_end_matches('\n'),
@@ -1233,26 +1043,6 @@ const PAIRED_BLOCKS: usize = 7;
 const PAIRED_QUIET: usize = 4;
 const PAIRED_PAIRS: u64 = 16;
 
-/// Идёт ли настоящий замер, а не проверка собираемости.
-///
-/// `cargo bench -- --test` в CI и `cargo test --all-targets` локально зовут
-/// каждую точку по разу; парный замер стоит десятки секунд и требует тихой
-/// машины, а ни разделяемый раннер CI, ни машина под `cargo test` тихими не
-/// являются. В этом режиме блоков и пар берётся по паре, пороги не
-/// проверяются: проверяется, что код проходит.
-///
-/// Правило — то же, каким его читает сам criterion: замер идёт, когда есть
-/// `--bench` и нет `--test`. Под `cargo test` флага `--bench` не бывает.
-fn measuring() -> bool {
-    let mut bench = false;
-    let mut test = false;
-    for argument in std::env::args() {
-        bench |= argument == "--bench";
-        test |= argument == "--test";
-    }
-    bench && !test
-}
-
 /// Разность двух точек, померенная чередованием внутри одного окна.
 ///
 /// Врозь эти две точки не разрешаются, и это измерено: пять прогонов стенда
@@ -1266,7 +1056,7 @@ fn measuring() -> bool {
 /// увело блок, увело обе стороны. Свидетель — блоки 6 и 7 замера
 /// 2026-09-13: пол обеих точек упал на 3 мс разом, разность не шелохнулась.
 ///
-/// Оценка стороны — пол блока ([`least`]), а не среднее: помеха прибавляет.
+/// Оценка стороны — пол блока ([`harness::least`]), а не среднее: помеха прибавляет.
 fn paired(what: &str, base: &Path, with: &Path, depth: usize) {
     let measuring = measuring();
     let (blocks, pairs) = if measuring {
@@ -1334,18 +1124,6 @@ fn paired(what: &str, base: &Path, with: &Path, depth: usize) {
     );
 }
 
-/// Медиана выборки; портит порядок.
-fn middle(sample: &mut [f64]) -> f64 {
-    sample.sort_unstable_by(f64::total_cmp);
-    sample[sample.len() / 2]
-}
-
-/// Размах выборки.
-fn span(sample: &[f64]) -> f64 {
-    let low = sample.iter().copied().fold(f64::MAX, f64::min);
-    sample.iter().copied().fold(f64::MIN, f64::max) - low
-}
-
 /// Четыре формы обязаны считать одно число.
 ///
 /// Иначе «тот же алгоритм под хендлером» было бы неправдой, и разность точек
@@ -1384,12 +1162,14 @@ fn codegen(criterion: &mut Criterion) {
 
     // §6 время сборки не ограничивает — точка стоит затем, чтобы доля
     // понижения в общем пути читалась, а не угадывалась.
-    let dir = scratch();
+    let dir = harness::scratch(STAND);
     let source = dir.join("codegen.c");
     let binary = dir.join("codegen");
     std::fs::write(&source, &text).unwrap();
     group.sample_size(10);
-    group.bench_function("cc", |bencher| bencher.iter(|| compiled(&source, &binary)));
+    group.bench_function("cc", |bencher| {
+        bencher.iter(|| compiled(&dir, &source, &binary));
+    });
     group.finish();
 }
 

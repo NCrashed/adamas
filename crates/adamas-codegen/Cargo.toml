@@ -18,6 +18,13 @@ bench = false
 name = "native"
 harness = false
 
+# Нагрузки трека Z, кроме символьной. Отдельной целью, а не группами в
+# `native`: строка таблицы обязана воспроизводиться одной командой, а фильтр
+# criterion гасит точки, но не парный замер вокруг них.
+[[bench]]
+name = "workloads"
+harness = false
+
 [dependencies]
 adamas-core.workspace = true
 # Ради заголовка и договора: генерируемый C собирается против этого рантайма, а

@@ -463,10 +463,13 @@ pub(crate) fn llvm_agreed(
     Ok((printed, stderr))
 }
 
-/// Прогон **мутанта**: тот же путь, но текст `.ll` подменён.
+/// Прогон **названного текста** `.ll`: тот же путь, но обрыв - ответ.
 ///
-/// Отдаёт напечатанное. Обрыв здесь законен - сломанный код вправе сломаться, -
-/// и вместо ответа отдаётся слово с причиной: сравнивать довольно и его.
+/// Отличие от [`llvm_built`] одно и существенное: там неудача прогона роняет
+/// тест, здесь она **наблюдение**. Нужно это двум свидетелям. Мутанту:
+/// сломанный код вправе сломаться, и сравнивать довольно слова с причиной.
+/// И свидетелю хвостовых вызовов (`tail.rs`): переполнение стека там и есть
+/// то, что мерится, а не поломка окружения.
 ///
 /// Прогон ограничен по времени. Не украшение: правка, оставляющая счётчик
 /// расти, превращает цикл в бесконечный, и без предела мутант вешал бы прогон
@@ -476,7 +479,7 @@ pub(crate) fn llvm_agreed(
     clippy::unwrap_used,
     reason = "заготовка теста: отказ здесь означает сломанное окружение"
 )]
-pub(crate) fn llvm_mutant(
+pub(crate) fn llvm_printed(
     stem: &str,
     text: &str,
     support: &str,
@@ -568,6 +571,24 @@ pub(crate) fn llvm_text(
     let made = mono::specialise(&mut signature, &mut metas, &instances, &written)
         .unwrap_or_else(|error| panic!("{name}: специализация отказала: {error}"));
     adamas_codegen::compile_llvm(&signature, &made.term)
+}
+
+/// Цепочки инструментов - штатная и минимальная, - либо объявленное отсутствие.
+///
+/// `None` только при `ADAMAS_LLVM=absent`. Всё остальное - отказ: инструмент,
+/// которого нет, обязан ронять прогон, а не молчать. Исключение объявлено в
+/// одном месте (`.github/workflows/ci.yml`, нога macOS), где LLVM в образе
+/// раннера нет; и правило это - **одно** на всех свидетелей LLVM-пути, потому
+/// что вторая его запись разъехалась бы с первой молча.
+pub(crate) fn llvm_toolchains() -> Option<(Toolchain, Toolchain)> {
+    if std::env::var("ADAMAS_LLVM").is_ok_and(|it| it == "absent") {
+        eprintln!("LLVM объявлен отсутствующим (ADAMAS_LLVM=absent): договор не проверялся");
+        return None;
+    }
+    Some((
+        Toolchain::from_variable(adamas_codegen::llvm::TOOLS_VARIABLE),
+        Toolchain::from_variable(adamas_codegen::llvm::MINIMUM_TOOLS_VARIABLE),
+    ))
 }
 
 /// Сколько блоков прогон выдал и сколько оставил живыми.

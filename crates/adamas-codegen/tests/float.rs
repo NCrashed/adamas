@@ -354,7 +354,8 @@ fn allowing_contraction_moves_the_answer() {
         &artefacts.support,
         &tools,
         &pipeline("-O2", &[FMA_LLC]),
-    );
+    )
+    .printed;
     assert_ne!(
         printed, honest,
         "IR с `contract` ответил то же: свидетель не о контракции"
@@ -473,7 +474,8 @@ fn breaking_the_order_key_changes_the_answer() {
             &artefacts.support,
             &tools,
             &pipeline("-O2", &[]),
-        );
+        )
+        .printed;
         assert_ne!(
             printed, honest,
             "{why}: ответ не изменился, и проверка не различает"

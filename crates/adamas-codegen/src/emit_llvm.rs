@@ -1586,26 +1586,50 @@ impl<'a> Builder<'a> {
     }
 
     /// Плоское значение в слово слота.
+    ///
+    /// Плавающее сперва **переливается** в целое своей ширины ([`word`]), и это
+    /// не украшение: `zext` от `float` LLVM отвергает разбором, а перелив через
+    /// `bitcast` есть ровно то, что делает `adamas_word_Float32` в `flat.c` -
+    /// `memcpy` в `uint32_t` и расширение. Расхождение здесь было бы не
+    /// отказом, а другими байтами в слоте.
     fn widen(&mut self, ty: PrimTy, value: &str) -> String {
+        let mut current = value.to_owned();
+        if ty.floating() {
+            let bits = self.temp();
+            self.instruction(
+                &format!("{bits} = bitcast {} {current} to {}", machine(ty), word(ty)),
+                self.here(),
+            );
+            current = bits;
+        }
         if ty.size() * 8 == 64 {
-            return value.to_owned();
+            return current;
         }
         let name = self.temp();
         self.instruction(
-            &format!("{name} = zext {} {value} to i64", machine(ty)),
+            &format!("{name} = zext {} {current} to i64", word(ty)),
             self.here(),
         );
         name
     }
 
     /// Слово слота обратно в плоское значение.
-    fn narrow(&mut self, ty: PrimTy, word: &str) -> String {
-        if ty.size() * 8 == 64 {
-            return word.to_owned();
+    fn narrow(&mut self, ty: PrimTy, slot: &str) -> String {
+        let mut current = slot.to_owned();
+        if ty.size() * 8 != 64 {
+            let cut = self.temp();
+            self.instruction(
+                &format!("{cut} = trunc i64 {current} to {}", word(ty)),
+                self.here(),
+            );
+            current = cut;
+        }
+        if !ty.floating() {
+            return current;
         }
         let name = self.temp();
         self.instruction(
-            &format!("{name} = trunc i64 {word} to {}", machine(ty)),
+            &format!("{name} = bitcast {} {current} to {}", word(ty), machine(ty)),
             self.here(),
         );
         name

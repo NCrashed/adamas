@@ -445,6 +445,183 @@ pub(crate) fn rc_nodes(expr: &Expr, out: &mut Vec<LocalId>) {
     });
 }
 
+/// Несёт ли конвейер рантайм в себе - то есть есть ли в нём `llvm-link`.
+///
+/// Читается у самого конвейера, потому что это его свойство: приложенный `.bc`
+/// приносит определения рантайма в объектник, и вторая их копия с компоновщика
+/// - ошибка, а не дубликат.
+pub(crate) fn carries_runtime(pipeline: &Pipeline) -> bool {
+    pipeline
+        .stages
+        .iter()
+        .any(|stage| stage.tool == "llvm-link")
+}
+
+/// Переменная, называющая clang той же версии, что `ADAMAS_LLVM_BIN`.
+///
+/// Не `ADAMAS_CC`: тот приходит от `cc`-крейта и в dev-shell есть gcc, а
+/// битового кода LLVM gcc не выдаёт. Путём, а не каталогом в `PATH`, - обёртка
+/// clang кладёт рядом с собой `cc`, и попади она в `PATH`, весь порождённый C
+/// собирался бы ею молча.
+pub(crate) const CLANG_VARIABLE: &str = "ADAMAS_CLANG";
+
+/// Рантайм целиком одним `.bc`: собирается однажды на весь прогон.
+///
+/// Нужен стадии `llvm-link` ([`Pipeline::whole_program`]), и без него `opt` не
+/// видит сквозь `adamas_dup`.
+///
+/// # Host-атрибуты снимаются, и это не косметика
+///
+/// clang вешает на каждую функцию `target-cpu` и `target-features` хоста.
+/// Порождённый `.ll` не несёт ни того, ни другого - строк цели в нём нет
+/// намеренно, - а инлайнер требует, чтобы набор возможностей **вызываемого**
+/// был подмножеством набора **вызывающего**. Пустой набор у вызывающего делает
+/// подмножеством только пустой, и рантайм не инлайнится ни разу: измерено
+/// 2026-09-15, со стадией и без неё вызовов остаётся поровну.
+///
+/// Снимаются они здесь, а не дописываются там: `.bc` рантайма собран под хост и
+/// им же компилируется дальше, а `.ll` обязан остаться переносимым. Цена
+/// названная - рантайм оптимизируется под базовую линию архитектуры, а не под
+/// хост; на восьми функциях счётчика это не наблюдаемо, и наблюдаемым станет,
+/// когда в рантайме появится что-то векторизуемое.
+///
+/// # Panics
+///
+/// Нет clang либо не собралось: молчаливый пропуск здесь был бы обманчивым
+/// свидетелем ровно так же, как отсутствие LLVM.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+pub(crate) fn runtime_bitcode(tools: &Toolchain) -> PathBuf {
+    static BITCODE: OnceLock<PathBuf> = OnceLock::new();
+    BITCODE
+        .get_or_init(|| {
+            let clang = std::env::var_os(CLANG_VARIABLE)
+                .filter(|it| !it.is_empty())
+                .unwrap_or_else(|| {
+                    panic!("`{CLANG_VARIABLE}` не задан, а в dev-shell он есть: рантайм в `.bc` собрать нечем")
+                });
+            let sources = Path::new(env!("ADAMAS_RUNTIME_SOURCES"));
+            let dir = scratch();
+            let mut parts = Vec::new();
+            for name in env!("ADAMAS_RUNTIME_UNITS").split(',') {
+                let raw = dir.join(format!("{name}.raw.bc"));
+                let made = Command::new(&clang)
+                    .args(["-std=c11", "-O1", "-emit-llvm", "-c"])
+                    .arg("-I")
+                    .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
+                    .arg(sources.join(name))
+                    .arg("-o")
+                    .arg(&raw)
+                    .output()
+                    .unwrap();
+                assert!(
+                    made.status.success(),
+                    "рантайм не собрался в `.bc`: {name}\n{}",
+                    String::from_utf8_lossy(&made.stderr)
+                );
+                parts.push(stripped(tools, &dir, name, &raw));
+            }
+            let linked = dir.join("runtime.bc");
+            let done = Command::new(tools.tool("llvm-link"))
+                .args(&parts)
+                .arg("-o")
+                .arg(&linked)
+                .output()
+                .unwrap();
+            assert!(
+                done.status.success(),
+                "рантайм не слинковался в один `.bc`:\n{}",
+                String::from_utf8_lossy(&done.stderr)
+            );
+            linked
+        })
+        .clone()
+}
+
+/// Тот же `.bc` без host-атрибутов: через текст, потому что паса под это нет.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+fn stripped(tools: &Toolchain, dir: &Path, name: &str, raw: &Path) -> PathBuf {
+    let text = dir.join(format!("{name}.raw.ll"));
+    let shown = Command::new(tools.tool("llvm-dis"))
+        .arg(raw)
+        .arg("-o")
+        .arg(&text)
+        .output()
+        .unwrap();
+    assert!(shown.status.success(), "`{name}.bc` не разобрался обратно");
+    let plain = without_host_attributes(&std::fs::read_to_string(&text).unwrap());
+    let cleaned = dir.join(format!("{name}.plain.ll"));
+    std::fs::write(&cleaned, plain).unwrap();
+    let object = dir.join(format!("{name}.bc"));
+    let back = Command::new(tools.tool("llvm-as"))
+        .arg(&cleaned)
+        .arg("-o")
+        .arg(&object)
+        .output()
+        .unwrap();
+    assert!(
+        back.status.success(),
+        "`{name}` без host-атрибутов не собрался:\n{}",
+        String::from_utf8_lossy(&back.stderr)
+    );
+    object
+}
+
+/// Текст IR без `target-cpu`, `target-features` и `tune-cpu`.
+pub(crate) fn without_host_attributes(text: &str) -> String {
+    let mut out = text.to_owned();
+    for key in [
+        "\"target-cpu\"=\"",
+        "\"target-features\"=\"",
+        "\"tune-cpu\"=\"",
+    ] {
+        while let Some(at) = out.find(key) {
+            let value = at + key.len();
+            let Some(end) = out[value..].find('"') else {
+                break;
+            };
+            let stop = value + end + 1;
+            let start = usize::from(at > 0 && out.as_bytes()[at - 1] == b' ');
+            out.replace_range(at - start..stop, "");
+        }
+    }
+    out
+}
+
+/// Сколько раз IR зовёт названную точку входа рантайма.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+pub(crate) fn calls(tools: &Toolchain, bitcode: &Path, names: &[&str]) -> Vec<usize> {
+    let text = bitcode.with_extension("shown.ll");
+    let shown = Command::new(tools.tool("llvm-dis"))
+        .arg(bitcode)
+        .arg("-o")
+        .arg(&text)
+        .output()
+        .unwrap();
+    assert!(
+        shown.status.success(),
+        "`{}` не разобрался обратно",
+        bitcode.display()
+    );
+    let read = std::fs::read_to_string(&text).unwrap();
+    names
+        .iter()
+        .map(|name| {
+            read.lines()
+                .filter(|line| line.contains("call ") && line.contains(&format!("@{name}(")))
+                .count()
+        })
+        .collect()
+}
+
 /// Собирает `.ll` со спутником и запускает. Отдаёт stdout и stderr.
 ///
 /// Путь ровно тот, что назван решением 2026-09-15: текст `.ll` -> `llvm-as` ->
@@ -454,6 +631,12 @@ pub(crate) fn rc_nodes(expr: &Expr, out: &mut Vec<LocalId>) {
 /// `stem` отличает артефакты одной программы, прогнанной двумя цепочками:
 /// файлы иначе перезаписывали бы друг друга, и вторая проверка мерила бы
 /// объектник первой.
+///
+/// Объектники рантайма прикладываются, **если конвейер их ещё не приложил**.
+/// Спрашивается это у самого конвейера ([`carries_runtime`]), а не флагом с
+/// места вызова: приложи их дважды - и компоновщик отвергнет программу
+/// дублирующимися определениями, то есть проверка сломалась бы там, где о
+/// рантайме речи нет.
 #[allow(
     clippy::unwrap_used,
     reason = "заготовка теста: отказ здесь означает сломанное окружение, и падать он должен громко"
@@ -522,10 +705,20 @@ pub(crate) fn llvm_binary(
     pipeline: &Pipeline,
 ) -> PathBuf {
     let object = llvm_object(stem, artefacts, tools, pipeline);
-    llvm_linked(stem, &object, &artefacts.support)
+    // Объектники рантайма прикладываются, **если конвейер их ещё не приложил**.
+    // Спрашивается это у самого конвейера ([`carries_runtime`]), а не флагом с
+    // места вызова: приложи их дважды - и компоновщик отвергнет программу
+    // дублирующимися определениями, то есть проверка сломалась бы там, где о
+    // рантайме речи нет.
+    llvm_linked(
+        stem,
+        &object,
+        &artefacts.support,
+        !carries_runtime(pipeline),
+    )
 }
 
-/// Линкует готовый объектник со спутником и рантаймом.
+/// Линкует готовый объектник со спутником и, если просят, с рантаймом.
 ///
 /// # Panics
 ///
@@ -534,7 +727,12 @@ pub(crate) fn llvm_binary(
     clippy::unwrap_used,
     reason = "заготовка теста: отказ здесь означает сломанное окружение"
 )]
-pub(crate) fn llvm_linked(stem: &str, object: &Path, support_text: &str) -> PathBuf {
+pub(crate) fn llvm_linked(
+    stem: &str,
+    object: &Path,
+    support_text: &str,
+    with_runtime: bool,
+) -> PathBuf {
     let dir = scratch();
     let support = dir.join(format!("{stem}.support.c"));
     let support_object = dir.join(format!("{stem}.support.o"));
@@ -562,14 +760,12 @@ pub(crate) fn llvm_linked(stem: &str, object: &Path, support_text: &str) -> Path
     );
 
     let binary = dir.join(format!("{stem}.bin"));
-    let linked = Command::new(env!("ADAMAS_CC"))
-        .arg(object)
-        .arg(&support_object)
-        .args(runtime())
-        .arg("-o")
-        .arg(&binary)
-        .output()
-        .unwrap();
+    let mut link = Command::new(env!("ADAMAS_CC"));
+    link.arg(object).arg(&support_object);
+    if with_runtime {
+        link.args(runtime());
+    }
+    let linked = link.arg("-o").arg(&binary).output().unwrap();
     assert!(
         linked.status.success(),
         "{stem}: линковка отказала:\n{}",
@@ -606,6 +802,20 @@ pub(crate) fn llvm_agreed(
     Ok((printed, stderr))
 }
 
+/// Что дал прогон названного текста: ответ и счётчики блоков.
+///
+/// Счётчики здесь **обязательны**, а не для полноты: правка, ломающая владение,
+/// оставляет ответ тем же и видна только числом выданного и живого. Мутант,
+/// которого не отличить ни ответом, ни счётчиком, ничего и не проверяет.
+pub(crate) struct Mutated {
+    /// Что ушло в stdout - ответ либо слово с причиной обрыва.
+    pub(crate) printed: String,
+    /// Сколько блоков выдано; `None` - строки счётчиков не было.
+    pub(crate) allocated: Option<usize>,
+    /// Сколько осталось живыми.
+    pub(crate) live: Option<usize>,
+}
+
 /// Прогон **названного текста** `.ll`: тот же путь, но обрыв - ответ.
 ///
 /// Отличие от [`llvm_built`] одно и существенное: там неудача прогона роняет
@@ -628,12 +838,16 @@ pub(crate) fn llvm_printed(
     support: &str,
     tools: &Toolchain,
     pipeline: &Pipeline,
-) -> String {
+) -> Mutated {
     let dir = scratch();
     let source = dir.join(format!("{stem}.ll"));
     std::fs::write(&source, text).unwrap();
     let Ok(object) = pipeline.run(tools, &source, stem) else {
-        return "IR отвергнут".to_owned();
+        return Mutated {
+            printed: "IR отвергнут".to_owned(),
+            allocated: None,
+            live: None,
+        };
     };
 
     let support_source = dir.join(format!("{stem}.support.c"));
@@ -660,40 +874,62 @@ pub(crate) fn llvm_printed(
         .output()
         .unwrap();
     if !linked.status.success() {
-        return "не слинковался".to_owned();
+        return Mutated {
+            printed: "не слинковался".to_owned(),
+            allocated: None,
+            live: None,
+        };
     }
     within(&binary, std::time::Duration::from_secs(20))
 }
 
-/// Прогон с пределом по времени. Отдаёт напечатанное либо причину.
+/// Прогон с пределом по времени. Отдаёт напечатанное, причину и счётчики.
 #[allow(
     clippy::unwrap_used,
     reason = "заготовка теста: отказ здесь означает сломанное окружение"
 )]
-fn within(binary: &Path, limit: std::time::Duration) -> String {
+fn within(binary: &Path, limit: std::time::Duration) -> Mutated {
     let mut child = Command::new(binary)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
     let deadline = std::time::Instant::now() + limit;
     loop {
         match child.try_wait().unwrap() {
             Some(status) => {
+                use std::io::Read as _;
                 let mut printed = String::new();
                 if let Some(mut out) = child.stdout.take() {
-                    use std::io::Read as _;
                     let _ = out.read_to_string(&mut printed);
                 }
-                if !status.success() {
-                    return "прогон оборвался".to_owned();
+                let mut counted = String::new();
+                if let Some(mut err) = child.stderr.take() {
+                    let _ = err.read_to_string(&mut counted);
                 }
-                return printed.trim_end_matches('\n').to_owned();
+                let numbers: Vec<usize> = counted
+                    .split_whitespace()
+                    .filter_map(|word| word.trim_end_matches(',').parse().ok())
+                    .collect();
+                let printed = if status.success() {
+                    printed.trim_end_matches('\n').to_owned()
+                } else {
+                    "прогон оборвался".to_owned()
+                };
+                return Mutated {
+                    printed,
+                    allocated: numbers.first().copied(),
+                    live: numbers.get(1).copied(),
+                };
             }
             None if std::time::Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return "прогон не завершился".to_owned();
+                return Mutated {
+                    printed: "прогон не завершился".to_owned(),
+                    allocated: None,
+                    live: None,
+                };
             }
             None => std::thread::sleep(std::time::Duration::from_millis(20)),
         }

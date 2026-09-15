@@ -21,6 +21,9 @@ const REPRESENTATION: &str = include_str!("../src/ir.rs");
 /// Исходник вставки RC целиком.
 const PERCEUS: &str = include_str!("../src/perceus.rs");
 
+/// Исходник вывода уникальности целиком.
+const UNIQUE: &str = include_str!("../src/unique.rs");
+
 /// Исходник печати целиком.
 const PRINTER: &str = include_str!("../src/print.c");
 
@@ -89,6 +92,23 @@ fn the_reference_counting_pass_does_not_read_core_terms() {
         assert!(
             !PERCEUS.contains(forbidden),
             "вставка RC упоминает `{forbidden}`: она по ту сторону шва"
+        );
+    }
+}
+
+/// Вывод уникальности - тоже по эту сторону шва (§9 Фаза 7, трек B).
+///
+/// Требование плана дословно: «`Unique` обязан приехать в IR понижением, а не
+/// чтением ядра из эмиттера». Проход судит по узлам представления - по
+/// отсутствию `Dup` и по тому, что кладут места вызова, - и типов ядра ему для
+/// этого не нужно. Понадобись они, вывод переехал бы на **эту** сторону шва, и
+/// второй эмиттер получил бы факт не готовым, а заново.
+#[test]
+fn the_uniqueness_pass_does_not_read_core_terms() {
+    for forbidden in ["adamas_core::term", "adamas_core::sig", "Term", "Signature"] {
+        assert!(
+            !UNIQUE.contains(forbidden),
+            "вывод уникальности упоминает `{forbidden}`: факт берётся из ядра, а не из IR"
         );
     }
 }

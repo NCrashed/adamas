@@ -107,8 +107,10 @@ pub const TAG_SEGMENT: u16 = 0xFFFD;
 unsafe extern "C" {
     /// Сколько блоков выдано с начала потока.
     pub fn adamas_stat_allocated() -> usize;
-    /// Сколько блоков живо сейчас.
+    /// Сколько блоков живо у этого потока.
     pub fn adamas_stat_live() -> usize;
+    /// Сколько блоков живо по всем потокам.
+    pub fn adamas_stat_live_everywhere() -> usize;
     /// Обнуляет счётчики потока.
     pub fn adamas_stat_reset();
 
@@ -135,6 +137,10 @@ unsafe extern "C" {
     pub fn adamas_dup(value: Value) -> Value;
     /// Объект без лишних ссылок.
     pub fn adamas_is_unique(value: Value) -> c_int;
+    /// Переводит объект в разделяемый режим: счётчик считается атомарно.
+    pub fn adamas_share(value: Value);
+    /// Разделяемый ли объект.
+    pub fn adamas_is_shared(value: Value) -> c_int;
     /// Отдаёт ссылку; на последней зовёт `release` и освобождает блок.
     pub fn adamas_drop(value: Value, release: Release);
     /// Дроп, отдающий блок под переиспользование.

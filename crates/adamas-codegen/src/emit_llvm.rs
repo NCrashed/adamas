@@ -3940,19 +3940,16 @@ impl<'a> Builder<'a> {
             // то (`Machine::handle_value`).
             _ => None,
         };
-        match call {
-            Some(call) => {
-                let answer = self.temp();
-                self.instruction(&format!("{answer} = {call}"), self.here());
-                self.finish(&answer, Repr::Boxed)?;
-            }
-            None => {
-                self.instruction(
-                    &format!("call void @adamas_fail(ptr {SHAPELESS_MESSAGE})"),
-                    self.here(),
-                );
-                self.instruction("unreachable", self.here());
-            }
+        if let Some(call) = call {
+            let answer = self.temp();
+            self.instruction(&format!("{answer} = {call}"), self.here());
+            self.finish(&answer, Repr::Boxed)?;
+        } else {
+            self.instruction(
+                &format!("call void @adamas_fail(ptr {SHAPELESS_MESSAGE})"),
+                self.here(),
+            );
+            self.instruction("unreachable", self.here());
         }
 
         self.start(&elsewhere);

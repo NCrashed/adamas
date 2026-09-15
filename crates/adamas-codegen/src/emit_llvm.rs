@@ -121,7 +121,9 @@ use std::fmt::Write as _;
 
 use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
 
-use crate::ir::{Arm, Expr, Fact, Form, FuncId, Function, LocalId, Program, Repr};
+use adamas_core::source::Location;
+
+use crate::ir::{Arm, Binding, Expr, Fact, Form, FuncId, Function, LocalId, Program, Repr, Source};
 
 /// Почему эмиссия в LLVM отказала.
 ///
@@ -243,6 +245,12 @@ pub fn emit(program: &Program) -> Result<Artefacts, LlvmError> {
     }
 
     let mut module = Module::default();
+    // Отладочная информация появляется **от исходника**, а не от ключа сборки:
+    // нет текста - нечего и называть отладчику, и выход тогда байт в байт тот
+    // же, что был до трека E.
+    if let Some(source) = &program.source {
+        module.dwarf = Some(Dwarf::new(&mut module.metadata, source));
+    }
     for function in &program.functions {
         module.function(program, function)?;
     }
@@ -319,12 +327,19 @@ impl Tail {
     }
 }
 
-/// Метаданные, которыми подписывается инструкция.
+/// Метаданные **одной** инструкции.
 ///
-/// Пусто сегодня и не пусто у треков B и E: scoped `!alias.scope`/`!noalias`
-/// приходят от регионов, `!dbg` - от `DIBuilder`. Печать инструкции **одна**
-/// ([`Builder::instruction`]), поэтому дописывать их придётся в одном месте, а
-/// не в двух десятках.
+/// Аргумент [`Builder::instruction`], а не поле билдера, и разница
+/// принципиальная: суффикс, лежащий полем, одинаков у всех инструкций подряд, а
+/// ни одни из требуемых метаданных таковыми не являются. `!dbg` различается от
+/// инструкции к инструкции - у пролога он свой (трек E, [`Builder::prologue`]);
+/// scoped `!alias.scope`/`!noalias` стоят на загрузке и записи, а не на
+/// арифметике рядом с ними (трек B).
+///
+/// Собирается цепочкой: [`Notes::none`] плюс [`Notes::and`] на каждый узел.
+/// Окружающие метаданные - те, что несёт всякая инструкция тела, - отдаёт
+/// [`Builder::here`], и своё дописывается к ним:
+/// `self.here().and("alias.scope", "!7")`.
 #[derive(Clone, Debug, Default)]
 struct Notes {
     /// Узлы в порядке печати.
@@ -332,8 +347,19 @@ struct Notes {
 }
 
 impl Notes {
+    /// Ни одной.
+    const fn none() -> Self {
+        Self { items: Vec::new() }
+    }
+
+    /// Дописывает узел: `!kind !N`.
+    fn and(mut self, kind: &str, node: &str) -> Self {
+        self.items.push(format!("!{kind} {node}"));
+        self
+    }
+
     /// Хвост инструкции. Пустой список не печатает даже запятой.
-    fn suffix(&self) -> String {
+    fn suffix(self) -> String {
         if self.items.is_empty() {
             return String::new();
         }
@@ -354,13 +380,200 @@ fn parameter_attributes(fact: &Fact) -> String {
     String::new()
 }
 
+/// Узлы метаданных модуля, нумерованные порядком заведения.
+///
+/// Номер выдаётся при записи и возвращается ссылкой `!N`: узлы DWARF ссылаются
+/// друг на друга, и держать номер в голове пришлось бы иначе на каждом.
+#[derive(Debug, Default)]
+struct Metadata {
+    /// Узлы по номеру.
+    nodes: Vec<String>,
+    /// Уже заведённые узлы: текст к ссылке.
+    ///
+    /// LLVM уникализирует неразличимые узлы сама, поэтому вторая копия
+    /// `!DIBasicType(name: "Int64", ...)` не ошибка - она просто занимает место
+    /// в тексте. Копий выходит по одной на каждое упоминание типа, и на
+    /// программе из сотни функций это сотни строк ни о чём. `distinct` в кеш не
+    /// идёт: он затем и написан, чтобы копии различались.
+    seen: HashMap<String, String>,
+    /// Именованные метаданные: имя и список ссылок.
+    named: Vec<(String, Vec<String>)>,
+}
+
+impl Metadata {
+    /// Заводит узел и отдаёт ссылку на него.
+    fn node(&mut self, text: &str) -> String {
+        if let Some(known) = self.seen.get(text) {
+            return known.clone();
+        }
+        let at = self.nodes.len();
+        self.nodes.push(text.to_owned());
+        let reference = format!("!{at}");
+        if !text.starts_with("distinct ") {
+            self.seen.insert(text.to_owned(), reference.clone());
+        }
+        reference
+    }
+
+    /// Заводит именованный список: `!имя = !{...}`.
+    fn name(&mut self, name: &str, refs: Vec<String>) {
+        self.named.push((name.to_owned(), refs));
+    }
+
+    /// Печатает всё: сперва именованные, потом нумерованные.
+    fn print(&self, out: &mut String) {
+        for (name, refs) in &self.named {
+            let _ = writeln!(out, "!{name} = !{{{}}}", refs.join(", "));
+        }
+        for (at, node) in self.nodes.iter().enumerate() {
+            let _ = writeln!(out, "!{at} = {node}");
+        }
+    }
+}
+
+/// Общие узлы DWARF: файл, единица трансляции, пустой список.
+///
+/// Заводится ровно тогда, когда у программы назван исходник
+/// ([`Program::source`](crate::ir::Program::source)). Нет исходника - нет и
+/// отладочной информации, а выход байт в байт тот, что был до трека E.
+///
+/// `DW_LANG_C99`, а не `DW_LANG_Haskell` или свой код: язык в DWARF выбирает,
+/// **каким синтаксисом отладчик разбирает выражения**, и на C-режиме `print x`
+/// работает как ожидается. Кода Adamas в DWARF нет, а Haskell-режим включил бы
+/// чужие правила печати. Цена названа: имя Adamas, не являющееся идентификатором
+/// C (`f'`), отладчику придётся квотировать.
+#[derive(Debug)]
+struct Dwarf {
+    /// Ссылка на `!DIFile`.
+    file: String,
+    /// Ссылка на `!DICompileUnit`.
+    unit: String,
+}
+
+impl Dwarf {
+    /// Заводит шапку DWARF: флаги модуля, файл, единицу трансляции.
+    fn new(metadata: &mut Metadata, source: &Source) -> Self {
+        let empty = metadata.node("!{}");
+        let file = metadata.node(&format!(
+            "!DIFile(filename: \"{}\", directory: \"{}\")",
+            source.file, source.directory
+        ));
+        let unit = metadata.node(&format!(
+            "distinct !DICompileUnit(language: DW_LANG_C99, file: {file}, \
+             producer: \"adamas\", isOptimized: false, runtimeVersion: 0, \
+             emissionKind: FullDebug, enums: {empty})"
+        ));
+        // Обе версии обязательны, и вторая - не украшение: без «Debug Info
+        // Version» verifier выбрасывает метаданные целиком, и `.ll` собирается
+        // молча без DWARF. Пятая версия читается и восемнадцатой, и двадцать
+        // первой - проверено прогоном, а не таблицей совместимости.
+        let dwarf_version = metadata.node("!{i32 7, !\"Dwarf Version\", i32 5}");
+        let info_version = metadata.node("!{i32 2, !\"Debug Info Version\", i32 3}");
+        metadata.name("llvm.dbg.cu", vec![unit.clone()]);
+        metadata.name("llvm.module.flags", vec![dwarf_version, info_version]);
+        Self { file, unit }
+    }
+
+    /// Тип DWARF под представление слота.
+    ///
+    /// Имя берётся у **Adamas** (§4.11), а не у машинного типа: `UInt64`, а не
+    /// `i64`. Ради этого трек и заведён - отладчик показывает типы языка, а не
+    /// типы бэкенда. Знаковость несёт кодировка, ширину - размер.
+    fn ty(metadata: &mut Metadata, repr: Repr) -> String {
+        match integral(repr) {
+            Some(prim) => {
+                let encoding = if prim.signed() {
+                    "DW_ATE_signed"
+                } else {
+                    "DW_ATE_unsigned"
+                };
+                metadata.node(&format!(
+                    "!DIBasicType(name: \"{}\", size: {}, encoding: {encoding})",
+                    prim.name(),
+                    prim.size() * 8
+                ))
+            }
+            // Объект кучи: своего имени у него в IR нет - представление знает
+            // только, что это указатель. Показать «указатель» честнее, чем
+            // выдумать имя типа, которого представление не несёт.
+            None => metadata.node(
+                "!DIDerivedType(tag: DW_TAG_pointer_type, name: \"объект\", \
+                 baseType: null, size: 64)",
+            ),
+        }
+    }
+
+    /// Заводит `!DISubprogram` функции и её локацию тела.
+    ///
+    /// `linkageName` **не пишется**, и это измерено: с ним gdb показывает в
+    /// кадре `fn_3`, без него - имя Adamas. Ради имени трек и существует, а
+    /// связь с символом отладчик всё равно берёт по адресам.
+    fn subprogram(
+        &self,
+        metadata: &mut Metadata,
+        function: &Function,
+        at: Location,
+        signature: &[String],
+    ) -> Scope {
+        let types = metadata.node(&format!("!{{{}}}", signature.join(", ")));
+        let subroutine = metadata.node(&format!("!DISubroutineType(types: {types})"));
+        let subprogram = metadata.node(&format!(
+            "distinct !DISubprogram(name: \"{}\", scope: {}, file: {}, line: {}, \
+             type: {subroutine}, scopeLine: {}, \
+             spFlags: DISPFlagDefinition | DISPFlagLocalToUnit, unit: {})",
+            escaped_name(&function.name),
+            self.file,
+            self.file,
+            at.line,
+            at.line,
+            self.unit
+        ));
+        let here = metadata.node(&format!(
+            "!DILocation(line: {}, column: {}, scope: {subprogram})",
+            at.line, at.column
+        ));
+        // Строка нуль - «код написан не человеком», и она здесь не заглушка, а
+        // требование: `llc` ставит `prologue_end` на первую инструкцию с
+        // ненулевой строкой, и без нулевого пролога точка останова вставала бы
+        // **до** записи параметра в кадр. Измерено сеансом: параметр печатался
+        // нулём вместо своего значения.
+        let prologue = metadata.node(&format!("!DILocation(line: 0, scope: {subprogram})"));
+        Scope {
+            subprogram,
+            here,
+            prologue,
+            at,
+        }
+    }
+}
+
+/// Отладочная подпись одной функции.
+#[derive(Clone, Debug)]
+struct Scope {
+    /// Ссылка на `!DISubprogram`.
+    subprogram: String,
+    /// Локация тела: строка определения.
+    here: String,
+    /// Локация пролога: строка нуль.
+    prologue: String,
+    /// Где определение написано - им же датируются локальные переменные.
+    at: Location,
+}
+
+/// Имя в кавычках метаданных: обратный слеш и кавычка экранируются.
+fn escaped_name(name: &str) -> String {
+    name.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Модуль целиком.
 #[derive(Debug, Default)]
 struct Module {
     /// Тела функций.
     bodies: String,
-    /// Узлы метаданных модуля. Пусто сегодня; трек E кладёт сюда DWARF.
-    metadata: Vec<String>,
+    /// Узлы метаданных модуля.
+    metadata: Metadata,
+    /// Шапка DWARF. `None` - исходника у программы нет.
+    dwarf: Option<Dwarf>,
 }
 
 impl Module {
@@ -396,20 +609,46 @@ impl Module {
             parameters.push(format!("{ty} {spaced}%v{}", binding.local.0));
         }
 
-        let mut builder = Builder::new(program, function, result);
+        // Подпись функции для DWARF собирается **до** тела: `!DISubprogram`
+        // обязан существовать раньше, чем на него сошлётся первая локация.
+        let scope = match (&self.dwarf, function.position) {
+            (Some(dwarf), Some(at)) => {
+                let mut signature = vec![Dwarf::ty(&mut self.metadata, function.result)];
+                signature.extend(
+                    function
+                        .live_parameters()
+                        .map(|binding| Dwarf::ty(&mut self.metadata, binding.fact.repr)),
+                );
+                Some(dwarf.subprogram(&mut self.metadata, function, at, &signature))
+            }
+            _ => None,
+        };
+
+        let mut builder = Builder::new(
+            program,
+            function,
+            result,
+            &mut self.metadata,
+            self.dwarf.as_ref(),
+            scope.clone(),
+        );
+        builder.parameters_in_frame(function);
         // Тело стоит в **возвратной** позиции целиком, и обход её разносит:
         // хвостовой вызов печатается `musttail`, всё прочее - `ret`. Печатает
         // `ret` сам обход, потому что у разбора в хвосте их столько, сколько
         // ветвей (трек D).
         builder.tail(&function.body)?;
 
+        let signed = scope.map_or_else(String::new, |scope| format!(" !dbg {}", scope.subprogram));
         let _ = writeln!(self.bodies, "; {}", function.name);
         let _ = writeln!(
             self.bodies,
-            "define internal {CONVENTION} {result} @fn_{}({}) {DEFINITION_ATTRIBUTES} {{",
+            "define internal {CONVENTION} {result} @fn_{}({}) {DEFINITION_ATTRIBUTES}{signed} {{",
             function.id.0,
             parameters.join(", ")
         );
+        self.bodies.push_str("entry:\n");
+        self.bodies.push_str(&builder.head);
         self.bodies.push_str(&builder.body);
         self.bodies.push_str("}\n\n");
         Ok(())
@@ -434,6 +673,16 @@ impl Module {
             "declare void @adamas_fail(ptr) noreturn\n",
             "\n",
         ));
+
+        if self.dwarf.is_some() {
+            out.push_str(concat!(
+                "; Отладочная информация. Вызов интринсика, а не запись\n",
+                "; `#dbg_declare`: записи не читает восемнадцатая версия, а\n",
+                "; вызов читают обе.\n",
+                "declare void @llvm.dbg.declare(metadata, metadata, metadata)\n",
+                "\n",
+            ));
+        }
 
         let _ = writeln!(
             out,
@@ -484,8 +733,9 @@ impl Module {
         let _ = writeln!(out, "  ret {} %answer", machine(answer));
         out.push_str("}\n");
 
-        for (at, node) in self.metadata.iter().enumerate() {
-            let _ = writeln!(out, "!{at} = {node}");
+        if !self.metadata.nodes.is_empty() {
+            out.push('\n');
+            self.metadata.print(&mut out);
         }
         out
     }
@@ -570,10 +820,24 @@ struct Builder<'a> {
     /// у него единственное, и лишний регистр пришлось бы заводить инструкцией,
     /// у которой для указателя нет формы (`add ptr` не бывает).
     operands: HashMap<LocalId, String>,
+    /// Начало блока `entry`: только `alloca`.
+    ///
+    /// Отдельно от тела, потому что ячейка кадра обязана лежать в `entry`:
+    /// `alloca` в блоке разбора была бы динамической, а по динамической
+    /// `llvm.dbg.declare` не даёт постоянного смещения в кадре, и отладчик
+    /// показал бы переменную не там. Запись в ячейку остаётся на месте, где
+    /// значение посчитано, - так же делает всякий компилятор на `-O0`.
+    head: String,
     /// Текст тела: блоки в порядке печати.
     body: String,
-    /// Метаданные инструкций. Пусто сегодня (треки B и E).
-    notes: Notes,
+    /// Узлы метаданных модуля: сюда идут переменные и локации.
+    metadata: &'a mut Metadata,
+    /// Шапка DWARF, если исходник назван.
+    dwarf: Option<&'a Dwarf>,
+    /// Подпись этой функции. `None` - позиции у неё нет, и DWARF ей не пишется.
+    scope: Option<Scope>,
+    /// Счётчик ячеек кадра, заведённых ради отладчика.
+    frames: u32,
     /// Счётчик временных имён.
     temps: u32,
     /// Счётчик разборов: им нумеруются блоки.
@@ -587,7 +851,14 @@ struct Builder<'a> {
 }
 
 impl<'a> Builder<'a> {
-    fn new(program: &'a Program, function: &'a Function, result: &'static str) -> Self {
+    fn new(
+        program: &'a Program,
+        function: &'a Function,
+        result: &'static str,
+        metadata: &'a mut Metadata,
+        dwarf: Option<&'a Dwarf>,
+        scope: Option<Scope>,
+    ) -> Self {
         let mut reprs = HashMap::new();
         let mut operands = HashMap::new();
         for binding in function.captured.iter().chain(&function.parameters) {
@@ -606,11 +877,116 @@ impl<'a> Builder<'a> {
             result,
             reprs,
             operands,
-            body: "entry:\n".to_owned(),
-            notes: Notes::default(),
+            head: String::new(),
+            body: String::new(),
+            metadata,
+            dwarf,
+            scope,
+            frames: 0,
             temps: 0,
             matches: 0,
             block: "entry".to_owned(),
+        }
+    }
+
+    /// Кладёт параметры в кадр, чтобы отладчик их видел.
+    ///
+    /// Ячейка **сверх** регистра, а не вместо него: вычисление по-прежнему идёт
+    /// по `%vN`, а ячейка существует ровно ради `llvm.dbg.declare`. Переписывать
+    /// тело на чтение из ячейки незачем - параметр в Adamas не переприсваивается,
+    /// и записанное в прологе остаётся верным до конца.
+    ///
+    /// Цена названа: на `-O0` это лишняя запись в кадр на параметр. На `-O2`
+    /// ячейка исчезает вместе с `mem2reg`, а вместе с ней и наблюдаемость - тот
+    /// же размен, что у всякого компилятора.
+    fn parameters_in_frame(&mut self, function: &Function) {
+        if self.scope.is_none() {
+            return;
+        }
+        for (at, binding) in function.live_parameters().enumerate() {
+            let Some(ty) = slot(binding.fact.repr) else {
+                continue;
+            };
+            let cell = self.frame_cell(ty);
+            let prologue = self.synthetic();
+            self.instruction(
+                &format!("store {ty} %v{}, ptr {cell}", binding.local.0),
+                prologue.clone(),
+            );
+            let argument = u32::try_from(at + 1).unwrap_or(u32::MAX);
+            self.declare(
+                &binding.name,
+                binding.fact.repr,
+                Some(argument),
+                &cell,
+                prologue,
+            );
+        }
+    }
+
+    /// Заводит ячейку кадра и отдаёт её имя.
+    fn frame_cell(&mut self, ty: &str) -> String {
+        let cell = format!("%f{}", self.frames);
+        self.frames += 1;
+        let _ = writeln!(self.head, "  {cell} = alloca {ty}");
+        cell
+    }
+
+    /// Объявляет отладчику переменную, лежащую в названной ячейке.
+    ///
+    /// `llvm.dbg.declare`, а не `llvm.dbg.value`: восемнадцатая версия печатает
+    /// отладочные записи вызовами интринсиков, двадцать первая - записями
+    /// `#dbg_declare`, и **общий** у них ровно вызов: новая читает старую форму
+    /// и поднимает её, старая новую не читает вовсе. Проверено прогоном обеих
+    /// цепочек, а не таблицей совместимости.
+    fn declare(&mut self, name: &str, repr: Repr, argument: Option<u32>, cell: &str, notes: Notes) {
+        let (Some(dwarf), Some(scope)) = (self.dwarf, self.scope.clone()) else {
+            return;
+        };
+        let ty = Dwarf::ty(self.metadata, repr);
+        let arg = argument.map_or_else(String::new, |at| format!("arg: {at}, "));
+        let variable = self.metadata.node(&format!(
+            "!DILocalVariable(name: \"{}\", {arg}scope: {}, file: {}, line: {}, type: {ty})",
+            escaped_name(name),
+            scope.subprogram,
+            dwarf.file,
+            scope.at.line
+        ));
+        self.instruction(
+            &format!(
+                "call void @llvm.dbg.declare(metadata ptr {cell}, \
+                 metadata {variable}, metadata !DIExpression())"
+            ),
+            notes,
+        );
+    }
+
+    /// Кладёт связывание `let` в кадр - ради отладчика, как и параметры.
+    ///
+    /// Ячейка в `entry`, запись здесь: до этой записи значения ещё нет, и
+    /// отладчик, остановленный раньше, покажет мусор. Так же ведёт себя всякая
+    /// неинициализированная переменная на `-O0`, и врать об этом нечем.
+    fn in_frame(&mut self, binding: &Binding, value: &str) {
+        if self.scope.is_none() || !binding.fact.present {
+            return;
+        }
+        let Some(ty) = slot(binding.fact.repr) else {
+            return;
+        };
+        let cell = self.frame_cell(ty);
+        self.instruction(&format!("store {ty} {value}, ptr {cell}"), self.here());
+        self.declare(&binding.name, binding.fact.repr, None, &cell, self.here());
+    }
+
+    /// Локация ненаписанного кода: строка нуль. Пусто без отладочной
+    /// информации.
+    ///
+    /// Не путать с `Builder::prologue` трека D: тот снимает узлы-приставки, а
+    /// это - подпись инструкций, которых в исходнике нет.
+    fn synthetic(&self) -> Notes {
+        match &self.scope {
+            Some(scope) => Notes::none().and("dbg", &scope.prologue),
+            None => Notes::none(),
         }
     }
 
@@ -623,10 +999,22 @@ impl<'a> Builder<'a> {
 
     /// Единственная точка печати инструкции.
     ///
-    /// Одна на весь эмиттер намеренно: метаданные треков B и E дописываются
-    /// суффиксом здесь, а не в двух десятках мест печати.
-    fn instruction(&mut self, text: &str) {
-        let _ = writeln!(self.body, "  {text}{}", self.notes.suffix());
+    /// Одна на весь эмиттер намеренно: форма суффикса метаданных живёт здесь, а
+    /// не в двух десятках мест печати. Сами метаданные приходят **аргументом** -
+    /// почему, сказано у [`Notes`].
+    fn instruction(&mut self, text: &str, notes: Notes) {
+        let _ = writeln!(self.body, "  {text}{}", notes.suffix());
+    }
+
+    /// Метаданные, которые несёт всякая инструкция тела.
+    ///
+    /// Сегодня это `!dbg` - строка определения. Своё дописывается поверх:
+    /// `self.here().and("noalias", "!7")`.
+    fn here(&self) -> Notes {
+        match &self.scope {
+            Some(scope) => Notes::none().and("dbg", &scope.here),
+            None => Notes::none(),
+        }
     }
 
     /// Начинает новый блок.
@@ -705,13 +1093,17 @@ impl<'a> Builder<'a> {
                 } => {
                     let computed = self.value(value)?;
                     let _ = writeln!(self.body, "  ; {computed} - {}", binding.name);
+                    self.in_frame(binding, &computed);
                     self.operands.insert(binding.local, computed);
                     at = body;
                 }
                 Expr::Dup { local, body } => {
                     let value = self.operand(*local)?;
                     let name = self.temp();
-                    self.instruction(&format!("{name} = call ptr @adamas_dup(ptr {value})"));
+                    self.instruction(
+                        &format!("{name} = call ptr @adamas_dup(ptr {value})"),
+                        self.here(),
+                    );
                     at = body;
                 }
                 Expr::Drop {
@@ -723,9 +1115,10 @@ impl<'a> Builder<'a> {
                         return Err(self.node("схлопнутый дроп разобранного"));
                     }
                     let value = self.operand(*local)?;
-                    self.instruction(&format!(
-                        "call void @adamas_drop(ptr {value}, ptr @adamas_release_none)"
-                    ));
+                    self.instruction(
+                        &format!("call void @adamas_drop(ptr {value}, ptr @adamas_release_none)"),
+                        self.here(),
+                    );
                     at = body;
                 }
                 other => return Ok(other),
@@ -759,13 +1152,13 @@ impl<'a> Builder<'a> {
                 let sort = if agreed { Tail::Must } else { Tail::Plain };
                 let name = self.call(*function, arguments, sort)?;
                 let result = self.result;
-                self.instruction(&format!("ret {result} {name}"));
+                self.instruction(&format!("ret {result} {name}"), self.here());
                 Ok(())
             }
             other => {
                 let value = self.value(other)?;
                 let result = self.result;
-                self.instruction(&format!("ret {result} {value}"));
+                self.instruction(&format!("ret {result} {value}"), self.here());
                 Ok(())
             }
         }
@@ -795,9 +1188,9 @@ impl<'a> Builder<'a> {
                 function,
                 arguments,
             } => self.call(*function, arguments, Tail::Plain),
-            // Приставки сняты `prologue` выше, и досюда узел не доезжает.
-            // Ветвь стоит ради исчерпывающего разбора: пропади она, новый
-            // узел-приставка ушёл бы в тихий отказ вместо ошибки сборки.
+            // Приставки сняты `prologue` выше, и досюда узел не
+            // доезжает. Ветвь стоит ради исчерпывающего разбора: пропади она,
+            // новый узел-приставка ушёл бы в тихий отказ вместо ошибки сборки.
             Expr::Bind { .. } | Expr::Dup { .. } | Expr::Drop { .. } => {
                 Err(self.node("узел-приставка после снятия приставок"))
             }
@@ -885,7 +1278,10 @@ impl<'a> Builder<'a> {
             format!("{flags} ")
         };
         let name = self.temp();
-        self.instruction(&format!("{name} = {opcode} {spaced}{ty} {left}, {right}"));
+        self.instruction(
+            &format!("{name} = {opcode} {spaced}{ty} {left}, {right}"),
+            self.here(),
+        );
         name
     }
 
@@ -920,11 +1316,15 @@ impl<'a> Builder<'a> {
         let verdicted = self.binary("icmp", predicate, machine(ty), &left, &right);
         let (yes, no) = verdict;
         let tag = self.temp();
-        self.instruction(&format!(
-            "{tag} = select i1 {verdicted}, i16 {yes}, i16 {no}"
-        ));
+        self.instruction(
+            &format!("{tag} = select i1 {verdicted}, i16 {yes}, i16 {no}"),
+            self.here(),
+        );
         let name = self.temp();
-        self.instruction(&format!("{name} = call ptr @adamas_con0(i16 {tag})"));
+        self.instruction(
+            &format!("{name} = call ptr @adamas_con0(i16 {tag})"),
+            self.here(),
+        );
         Ok(name)
     }
 
@@ -968,12 +1368,15 @@ impl<'a> Builder<'a> {
             given.push(format!("{ty} {operand}"));
         }
         let name = self.temp();
-        self.instruction(&format!(
-            "{name} = {}call {CONVENTION} {result} @fn_{}({})",
-            sort.prefix(),
-            function.0,
-            given.join(", ")
-        ));
+        self.instruction(
+            &format!(
+                "{name} = {}call {CONVENTION} {result} @fn_{}({})",
+                sort.prefix(),
+                function.0,
+                given.join(", ")
+            ),
+            self.here(),
+        );
         Ok(name)
     }
 
@@ -1009,7 +1412,10 @@ impl<'a> Builder<'a> {
         let at = self.matches;
         self.matches += 1;
         let tag = self.temp();
-        self.instruction(&format!("{tag} = call i16 @adamas_tag(ptr {scrutinised})"));
+        self.instruction(
+            &format!("{tag} = call i16 @adamas_tag(ptr {scrutinised})"),
+            self.here(),
+        );
 
         let labels: Vec<String> = (0..arms.len()).map(|it| format!("m{at}.a{it}")).collect();
         let fail = format!("m{at}.fail");
@@ -1018,14 +1424,17 @@ impl<'a> Builder<'a> {
             .zip(&labels)
             .map(|(arm, label)| format!("i16 {}, label %{label}", arm.constructor.0))
             .collect();
-        self.instruction(&format!(
-            "switch i16 {tag}, label %{fail} [ {} ]",
-            cases.join(" ")
-        ));
+        self.instruction(
+            &format!("switch i16 {tag}, label %{fail} [ {} ]", cases.join(" ")),
+            self.here(),
+        );
 
         self.start(&fail);
-        self.instruction(&format!("call void @adamas_fail(ptr {TAG_MESSAGE})"));
-        self.instruction("unreachable");
+        self.instruction(
+            &format!("call void @adamas_fail(ptr {TAG_MESSAGE})"),
+            self.here(),
+        );
+        self.instruction("unreachable", self.here());
         Ok((at, labels))
     }
 
@@ -1042,12 +1451,15 @@ impl<'a> Builder<'a> {
             // Предшественник - блок, которым ветвь **закончилась**: вложенный
             // разбор внутри неё сменил бы его.
             incoming.push(format!("[ {value}, %{} ]", self.block));
-            self.instruction(&format!("br label %{join}"));
+            self.instruction(&format!("br label %{join}"), self.here());
         }
 
         self.start(&join);
         let name = self.temp();
-        self.instruction(&format!("{name} = phi {answer} {}", incoming.join(", ")));
+        self.instruction(
+            &format!("{name} = phi {answer} {}", incoming.join(", ")),
+            self.here(),
+        );
         Ok(name)
     }
 

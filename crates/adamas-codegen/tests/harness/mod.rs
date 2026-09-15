@@ -65,6 +65,28 @@ pub(crate) fn located(stem: &str, text: &str) -> (PathBuf, adamas_codegen::ir::P
     (path, program)
 }
 
+/// Эмиссия с исходником: `.ll` с DWARF плюс спутник.
+///
+/// # Panics
+///
+/// Исходник не разобрался, не проверился либо форма вне скалярного фрагмента.
+#[expect(
+    clippy::expect_used,
+    reason = "заготовка теста: отказ здесь означает сломанный корпус"
+)]
+pub(crate) fn llvm_located(stem: &str, text: &str) -> (PathBuf, Artefacts) {
+    let path = scratch().join(format!("{stem}.adamas"));
+    std::fs::write(&path, text).expect("исходник обязан записываться");
+    let (mut signature, mut metas, instances) = elaborated(text);
+    let written = body(&signature, "main");
+    let made = mono::specialise(&mut signature, &mut metas, &instances, &written)
+        .expect("специализация обязана проходить");
+    let file = SourceFile::new(path.display().to_string(), text);
+    let artefacts = adamas_codegen::compile_llvm_located(&signature, &made.term, &file)
+        .expect("скалярный фрагмент обязан брать фикстуру");
+    (path, artefacts)
+}
+
 /// Элаборированная программа вместе с тем, что о ней знает разрешение.
 #[expect(
     clippy::expect_used,

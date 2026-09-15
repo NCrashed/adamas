@@ -91,6 +91,12 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
         Term::Prim(crate::prim::Prim::In(op)) => {
             Rc::new(Value::Neutral(Head::Region(*op), Vec::new()))
         }
+        // Вектор (§4.9) - голова по тому же доводу: значение его есть спайн
+        // `simdSplat`/`simdSet`, надстроенный арифметикой.
+        Term::Prim(crate::prim::Prim::Simd) => Rc::new(Value::Neutral(Head::Simd, Vec::new())),
+        Term::Prim(crate::prim::Prim::Across(op)) => {
+            Rc::new(Value::Neutral(Head::SimdOp(*op), Vec::new()))
+        }
         Term::Prim(prim) => Rc::new(Value::Prim(*prim)),
 
         Term::Lam(mult, name, body) => Rc::new(Value::Lam(
@@ -446,6 +452,11 @@ pub fn try_apply(callee: &Rc<Value>, argument: Rc<Value>) -> Option<Rc<Value>> {
                     return Some(answer);
                 }
             }
+            if let Head::SimdOp(op) = head {
+                if let Some(answer) = vectored(*op, &spine) {
+                    return Some(answer);
+                }
+            }
             Some(Rc::new(Value::Neutral(head.clone(), spine)))
         }
         _ => None,
@@ -559,6 +570,223 @@ fn indexed(spine: &[Elim]) -> Option<Rc<Value>> {
                     return None;
                 };
                 return (wanted < count).then(|| Rc::clone(initial));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// δ-шаг вектора (§4.9): чтение дорожки и подорожечная арифметика.
+///
+/// # Машина считает `Simd` подорожечно, и это решение трека H
+///
+/// §4.9 обещает, что операции над `Simd` лоуэрятся в инструкции напрямую.
+/// Машина инструкций не имеет, и вариантов у неё два: считать подорожечно либо
+/// объявить вектор своей границей. Взят первый - договор трёх вычислителей
+/// (`adamas-codegen/tests/agreement.rs`) требует, чтобы одна программа давала
+/// одно значение у машины, у C и у LLVM, а граница вывела бы всякую фикстуру с
+/// вектором из `eval/` и тем ослабила бы договор ровно там, где заводится новое
+/// представление.
+///
+/// # Значение вектора - спайн, и оттого арифметика сводится **сразу**
+///
+/// Отдельной формы значения у вектора нет: `simdSplat` заводит цепочку,
+/// `simdSet` её наращивает - ровно как `arrayNew` с `arraySet` (§4.11). Отсюда
+/// цена, и она **измерена**: пока `simdAdd` не сводился сам, а раскрывался
+/// только чтением дорожки, цепочка росла на два узла за операцию, и векторный
+/// цикл на 4096 витков ронял машину переполнением стека - `lane_of`
+/// проталкивала чтение вглубь рекурсией по числу операций, а не по ширине.
+///
+/// Поэтому арифметика сводится к **канонической форме** сразу, как только обе
+/// стороны читаются дорожками-литералами: ответ есть `simdSplat` с дорожкой
+/// нуль, надстроенный `simdSet`'ами по числу дорожек. Глубина цепочки тем самым
+/// ограничена **шириной вектора**, а не длиной программы, и виток перестаёт
+/// накапливать. Тот же ход, каким [`folded`] сводит два скалярных литерала в
+/// один.
+///
+/// Правила, и они ровно правила element-wise семантики:
+///
+/// - `simdLane (simdSplat n x) i` → `x`;
+/// - `simdLane (simdSet v j x) i` → `x` при `i = j`, иначе `simdLane v i`;
+/// - `simdAdd u w` → канон, чья дорожка `i` есть `addT (u[i]) (w[i])`,
+///   посчитанное тем же [`crate::prim::PrimOp::fold`], каким считается скаляр.
+///   Второго счёта сложения поэтому не существует, и разойтись `Float32` в
+///   одинарной точности с самим собой негде.
+///
+/// Не сводится, когда номер дорожки не литерал, когда цепочка упирается не в
+/// `simdSplat` (вектор пришёл переменной), когда ширина не литерал либо когда
+/// номер вне ширины. Последнее - **названная граница**, та же, что у массива: у
+/// понижения выход за ширину обрывает процесс, и сходятся два вычислителя лишь
+/// в том, что ответа не даёт ни один.
+fn vectored(op: crate::prim::SimdOp, spine: &[Elim]) -> Option<Rc<Value>> {
+    use crate::prim::{Prim, SimdOp};
+    match op {
+        SimdOp::Lane => {
+            let [
+                Elim::App(_),
+                Elim::App(_),
+                Elim::App(_),
+                Elim::App(vector),
+                Elim::App(at),
+            ] = spine
+            else {
+                return None;
+            };
+            let Value::Prim(Prim::Lit(_, wanted)) = &**at else {
+                return None;
+            };
+            lane_of(vector, *wanted)
+        }
+        SimdOp::Add | SimdOp::Sub | SimdOp::Mul => {
+            let [
+                Elim::App(width),
+                Elim::App(lane),
+                Elim::App(dict),
+                Elim::App(left),
+                Elim::App(right),
+            ] = spine
+            else {
+                return None;
+            };
+            let Value::Prim(Prim::Lit(_, lanes)) = &**width else {
+                return None;
+            };
+            let arith = op.arith()?;
+            let mut folded = Vec::with_capacity(usize::try_from(*lanes).ok()?);
+            for at in 0..*lanes {
+                let (left, right) = (lane_of(left, at)?, lane_of(right, at)?);
+                let (Value::Prim(Prim::Lit(ty, left)), Value::Prim(Prim::Lit(_, right))) =
+                    (&*left, &*right)
+                else {
+                    return None;
+                };
+                folded.push(Rc::new(Value::Prim(Prim::literal(
+                    *ty,
+                    arith.fold(*ty, *left, *right),
+                ))));
+            }
+            Some(canonical(width, lane, dict, &folded))
+        }
+        SimdOp::Splat | SimdOp::Set => None,
+    }
+}
+
+/// Каноническая форма вектора: `simdSplat` нулевой дорожкой плюс `simdSet` на
+/// каждую остальную.
+///
+/// Стёртые аргументы - ширина, дорожка, словарь - берутся у разобранного
+/// спайна, а не строятся заново: строить их было бы вторым местом, где тип
+/// вектора собирается, и разъехалось бы оно молча.
+fn canonical(
+    width: &Rc<Value>,
+    lane: &Rc<Value>,
+    dict: &Rc<Value>,
+    lanes: &[Rc<Value>],
+) -> Rc<Value> {
+    use crate::prim::{PrimTy, SimdOp};
+    let Some(first) = lanes.first() else {
+        // Вектора нулевой ширины не бывает: понижение отвергает его, а машина
+        // сюда не доходит - `simdSplat` с нулём не строится ни одной
+        // программой. Форма без дорожек всё равно обязана быть значением.
+        return Rc::new(Value::Neutral(Head::SimdOp(SimdOp::Splat), Vec::new()));
+    };
+    let mut built = Rc::new(Value::Neutral(
+        Head::SimdOp(SimdOp::Splat),
+        vec![
+            Elim::App(Rc::clone(lane)),
+            Elim::App(Rc::clone(dict)),
+            Elim::App(Rc::clone(width)),
+            Elim::App(Rc::clone(first)),
+        ],
+    ));
+    for (at, value) in lanes.iter().enumerate().skip(1) {
+        let index = Rc::new(Value::Prim(crate::prim::Prim::literal(
+            PrimTy::UInt64,
+            u64::try_from(at).unwrap_or(u64::MAX),
+        )));
+        built = Rc::new(Value::Neutral(
+            Head::SimdOp(SimdOp::Set),
+            vec![
+                Elim::App(Rc::clone(width)),
+                Elim::App(Rc::clone(lane)),
+                Elim::App(Rc::clone(dict)),
+                Elim::App(built),
+                Elim::App(index),
+                Elim::App(Rc::clone(value)),
+            ],
+        ));
+    }
+    built
+}
+
+/// Значение дорожки `wanted` у вектора `vector`. См. [`laned`].
+fn lane_of(vector: &Rc<Value>, wanted: u64) -> Option<Rc<Value>> {
+    use crate::prim::{Prim, SimdOp};
+    let mut current = Rc::clone(vector);
+    loop {
+        let Value::Neutral(Head::SimdOp(op), spine) = &*Rc::clone(&current) else {
+            return None;
+        };
+        match (op, spine.as_slice()) {
+            (
+                SimdOp::Set,
+                [
+                    Elim::App(_),
+                    Elim::App(_),
+                    Elim::App(_),
+                    Elim::App(inner),
+                    Elim::App(slot),
+                    Elim::App(value),
+                ],
+            ) => {
+                let Value::Prim(Prim::Lit(_, slot)) = &**slot else {
+                    return None;
+                };
+                if *slot == wanted {
+                    return Some(Rc::clone(value));
+                }
+                current = Rc::clone(inner);
+            }
+            (
+                SimdOp::Splat,
+                [
+                    Elim::App(_),
+                    Elim::App(_),
+                    Elim::App(width),
+                    Elim::App(initial),
+                ],
+            ) => {
+                let Value::Prim(Prim::Lit(_, width)) = &**width else {
+                    return None;
+                };
+                return (wanted < *width).then(|| Rc::clone(initial));
+            }
+            // Арифметика: чтение проталкивается внутрь обеих сторон, и дальше
+            // работает обычная свёртка примитива. Ширина здесь не сверяется -
+            // её уже сверил `simdSplat` на дне обеих цепочек.
+            (SimdOp::Add | SimdOp::Sub | SimdOp::Mul, spine) => {
+                let [
+                    Elim::App(_),
+                    Elim::App(_),
+                    Elim::App(_),
+                    Elim::App(left),
+                    Elim::App(right),
+                ] = spine
+                else {
+                    return None;
+                };
+                let arith = op.arith()?;
+                let left = lane_of(left, wanted)?;
+                let right = lane_of(right, wanted)?;
+                let (Value::Prim(Prim::Lit(ty, left)), Value::Prim(Prim::Lit(_, right))) =
+                    (&*left, &*right)
+                else {
+                    return None;
+                };
+                return Some(Rc::new(Value::Prim(Prim::literal(
+                    *ty,
+                    arith.fold(*ty, *left, *right),
+                ))));
             }
             _ => return None,
         }
@@ -853,6 +1081,8 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
                 Head::Array => Term::Prim(crate::prim::Prim::Array),
                 Head::ArrayOp(op) => Term::Prim(crate::prim::Prim::Over(*op)),
                 Head::Region(op) => Term::Prim(crate::prim::Prim::In(*op)),
+                Head::Simd => Term::Prim(crate::prim::Prim::Simd),
+                Head::SimdOp(op) => Term::Prim(crate::prim::Prim::Across(*op)),
             };
             spine.iter().fold(base, |callee, elim| match elim {
                 Elim::App(argument) => Term::App(Rc::new(callee), Rc::new(quote(size, argument))),

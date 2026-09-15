@@ -1,0 +1,58 @@
+-- Целые дорожки заворачиваются по ширине, как и скаляр (§4.9, §4.3).
+--
+-- §4.3 требует от переполнения **определённого** поведения, а не UB, и §4.9 не
+-- делает вектору исключения: `simdMul` над `Simd 4 UInt8` обязан завернуть тем
+-- же правилом, каким заворачивает `mulUInt8`. Три вычислителя приходят к этому
+-- тремя разными путями, и сходятся они здесь ответом:
+--
+--   машина - общей свёрткой `PrimOp::fold`, той же, что у скаляра;
+--   C - счётом в беззнаковом спутнике `adamas_usimd_4_UInt8`;
+--   LLVM - инструкцией `mul <4 x i8>` **без** `nsw` и `nuw`, потому что флаги
+--     объявили бы переполнение невозможным и отдали бы его оптимизатору
+--     как `poison`.
+--
+-- Дорожки подобраны так, чтобы завернуло **три из четырёх**, и каждая своим
+-- остатком: 200·3 = 600 → 88, 100·3 = 300 → 44, 50·3 = 150 не заворачивает,
+-- 250·3 = 750 → 238. Вектор из одинаковых дорожек показал бы одно
+-- заворачивание, и подмена ширины типа осталась бы незамеченной.
+--
+-- Свёртка вычитанием и здесь: 238 - (150 - (44 - 88)) = 44 в беззнаковом
+-- байте, то есть 238 - 194 = 44. Знак чередуется, и перепутанная дорожка видна
+-- ответом.
+
+type Layout = { size : UInt32, align : UInt32 }
+
+class Primitive a where
+  simdLayout : Layout
+
+zero : UInt8
+zero = 0
+
+first : UInt8
+first = 200
+
+second : UInt8
+second = 100
+
+third : UInt8
+third = 50
+
+fourth : UInt8
+fourth = 250
+
+thrice : UInt8
+thrice = 3
+
+seeded : Simd 4 UInt8
+seeded =
+  simdSet (simdSet (simdSet (simdSet (simdSplat 4 zero) 0 first) 1 second) 2 third)
+    3 fourth
+
+scaled : Simd 4 UInt8
+scaled = simdMul seeded (simdSplat 4 thrice)
+
+main : UInt8
+main =
+  subUInt8 (simdLane scaled 3)
+    (subUInt8 (simdLane scaled 2)
+      (subUInt8 (simdLane scaled 1) (simdLane scaled 0)))

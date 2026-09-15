@@ -88,7 +88,7 @@ use std::path::PathBuf;
 /// (`workload-symbolic`) сверяется со стендовой дословно.
 /// Всё, что здесь стоит, обязано собраться и ответить как `adamas eval`; список
 /// сокращать нельзя, а пополнять - можно и нужно, когда фрагмент растёт.
-const TAKEN: [&str; 95] = [
+const TAKEN: [&str; 97] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -169,6 +169,8 @@ const TAKEN: [&str; 95] = [
     "shadowed-name",
     "signature-effect",
     "signature-effect-parameterized",
+    "simd-lanes",
+    "simd-wrapping",
     "soa-record",
     "spawn-local",
     "state",

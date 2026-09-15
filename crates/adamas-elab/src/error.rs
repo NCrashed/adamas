@@ -1152,6 +1152,19 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// `Primitive` объявлен или употреблён не так, как написано в §4.9.
+    ///
+    /// Довод тот же, что у [`Self::FlatShape`]: класс компилятор знает по
+    /// имени и потому вправе требовать от него объявленной формы - один
+    /// параметр, единственный метод `simdLayout : Layout`, инстансы не руками.
+    #[error("{why}")]
+    PrimitiveShape {
+        /// Что именно разошлось с §4.9.
+        why: &'static str,
+        /// Где написано.
+        span: Span,
+    },
+
     /// Тип не плоский (§4.11).
     ///
     /// Причина приходит собранной, а не полями: §4.11 требует указать на
@@ -1436,6 +1449,7 @@ impl ElabError {
             | Self::Clauses { span, .. }
             | Self::NotFbip { span, .. }
             | Self::FlatShape { span, .. }
+            | Self::PrimitiveShape { span, .. }
             | Self::NotFlat { span, .. }
             | Self::Allocates { span, .. }
             | Self::ReservedName { span, .. }

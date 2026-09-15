@@ -18,7 +18,7 @@ use std::rc::Rc;
 use adamas_core::eval;
 use adamas_core::level::Level;
 use adamas_core::mult::Mult;
-use adamas_core::prim::{ArrayOp, RegionOp};
+use adamas_core::prim::{ArrayOp, RegionOp, SimdOp};
 use adamas_core::row::Row;
 use adamas_core::sig::{DefinitionKind, Signature};
 use adamas_core::term::{Case, Mults, Name, Term};
@@ -353,6 +353,17 @@ impl<'a> Machine<'a> {
             // `regionLast` и `regionRead`, а имя с телом до них не
             // разворачивается.
             Value::Neutral(Head::Region(op), spine) if region_position(*op, spine) => {
+                let argument = self.forced(argument)?;
+                Ok(Step::Return(eval::apply(callee, argument)))
+            }
+            // Вектор (§4.9) - тем же правилом и по той же причине: цепочку
+            // `simdSplat`/`simdSet`, надстроенную арифметикой, сводит чтение
+            // дорожки (`eval::laned`), а имя с телом до неё само не
+            // разворачивается. Разворачиваются **все** живые аргументы, а не
+            // один: свёртке нужны и вектор, и номер дорожки, и само значение
+            // дорожки - без последнего `simdLane (simdSplat 4 one) 0` отдавал
+            // бы неразвёрнутое имя `one` вместо числа.
+            Value::Neutral(Head::SimdOp(op), spine) if simd_position(*op, spine) => {
                 let argument = self.forced(argument)?;
                 Ok(Step::Return(eval::apply(callee, argument)))
             }
@@ -715,6 +726,19 @@ fn array_position(op: ArrayOp, spine: &[Elim]) -> bool {
         .filter(|elim| matches!(elim, Elim::App(_)))
         .count();
     matches!(op, ArrayOp::Set | ArrayOp::Index) && taken == 2
+}
+
+/// Живой ли аргумент ждёт операция над вектором (§4.9) следующим.
+///
+/// Стёртых у `simdSplat` два - дорожка и словарь, - у прочих три: ширина,
+/// дорожка, словарь. Всё, что после них, свёртке нужно развёрнутым.
+fn simd_position(op: SimdOp, spine: &[Elim]) -> bool {
+    let taken = spine
+        .iter()
+        .filter(|elim| matches!(elim, Elim::App(_)))
+        .count();
+    let erased = if op == SimdOp::Splat { 2 } else { 3 };
+    taken >= erased
 }
 
 /// Ждёт ли операция региона (§3.6) сам блок следующим аргументом.

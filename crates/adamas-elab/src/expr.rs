@@ -3663,6 +3663,22 @@ impl<'a> Elaborator<'a> {
             let ty = adamas_core::check::prim_type(self.signature, Prim::In(op));
             return Ok(self.implicits(term, ty));
         }
+        // Вектор (§4.9) - тем же правилом имени, что массив: на `Simd` стоит
+        // представление, и переопределяемое имя дало бы два вектора с разной
+        // шириной дорожки. Ширину и дорожку операции берут имплиситами;
+        // `simdSplat` - исключение, у него ширина написана, потому что вывести
+        // её не из чего.
+        if &*name.text == prim::SIMD {
+            return Ok(Term::Prim(Prim::Simd));
+        }
+        if let Some(op) = prim::SimdOp::named(&name.text) {
+            let term = Term::Prim(Prim::Across(op));
+            if self.bare {
+                return Ok(term);
+            }
+            let ty = adamas_core::check::prim_type(self.signature, Prim::Across(op));
+            return Ok(self.implicits(term, ty));
+        }
         // Запечатанное представление не называется и в выражении: построить
         // значение абстрактного типа его конструктором - тот же обход, что и
         // разобрать им. Квалифицированный кандидат проверен в

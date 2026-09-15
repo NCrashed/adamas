@@ -125,7 +125,7 @@ use std::rc::Rc;
 use adamas_core::eval::{eval, quote};
 use adamas_core::level::Level;
 use adamas_core::mult::Mult;
-use adamas_core::prim::{ArrayOp, Prim, PrimTy};
+use adamas_core::prim::{ArrayOp, Prim, PrimTy, SimdOp};
 use adamas_core::row::{Row, RowVar, Tail};
 use adamas_core::sig::{CLOSING, DefinitionKind, Signature};
 use adamas_core::source::{Location, SourceFile};
@@ -306,6 +306,40 @@ pub enum LowerError {
     #[error("ответ программы - массив: печатать его нечем (§4.11)")]
     ArrayAnswer,
 
+    /// Операция над вектором без всех аргументов.
+    #[error("`{name}` без всех аргументов: операция над вектором значением не берётся (§4.9)")]
+    PartialSimd {
+        /// Имя операции.
+        name: String,
+    },
+
+    /// Ширина вектора либо его дорожка не написаны (§4.9).
+    ///
+    /// **Названная граница понижения, а не языка.** `<n x float>` у LLVM и
+    /// `vector_size` у C - формы **типа**: ширина в них есть часть имени типа,
+    /// и рантаймовым числом её не подменить. Обобщённый код над
+    /// `{Primitive a}` со свободной шириной поэтому не понижается - его
+    /// снимает специализация (`adamas_elab::mono`), ровно как она снимает
+    /// дескриптор шага у обобщённого массива.
+    #[error("`Simd {width} {lane}`: {why} (§4.9)")]
+    SimdShape {
+        /// Что написано шириной.
+        width: String,
+        /// Что написано дорожкой.
+        lane: String,
+        /// Что именно не понижается.
+        why: &'static str,
+    },
+
+    /// Ответ программы - вектор.
+    ///
+    /// Та же граница и та же причина, что у [`Self::ArrayAnswer`]: машина
+    /// печатает цепочку `simdSplat`/`simdSet`, понижение - значение, и сводить
+    /// две печати - работа не этого трека. Наружу вектор выходит дорожкой
+    /// (`simdLane`), и корпус так и написан.
+    #[error("ответ программы - вектор: печатать его нечем (§4.9)")]
+    SimdAnswer,
+
     /// Операция над регионом без всех аргументов.
     ///
     /// Тот же довод, что у массива: недобранная была бы замыканием, а через
@@ -402,6 +436,30 @@ fn slotted(repr: Repr) -> Repr {
     }
 }
 
+/// То же у позиции, чей тип **написан**, - с отказом на векторе (§4.9).
+///
+/// Слот объекта - одно машинное слово (`adamas.h`, «поле `i` лежит по смещению
+/// `8 + 8i`»), а вектор занимает своё: `Simd 4 Float32` - шестнадцать байт,
+/// `Simd 8 Float32` - тридцать два. Плоский агрегат из той же беды выходит
+/// боксированием ([`Lowerer::moved`]), у вектора же боксированной формы нет: у
+/// него нет ни укладки в дескрипторе (`Flat` для него не выводится), ни
+/// конструктора-обёртки.
+///
+/// Отказ **названный**, и он здесь не для красоты. До него понижение печатало
+/// `adamas_set_field(t, 0, v)` с вектором третьим аргументом, и ловил это
+/// компилятор C - «несовместимый тип аргумента 3», - то есть компилятор Adamas
+/// порождал не собирающийся код на валидной программе. Замер 2026-09-16.
+fn boxable(repr: Repr, at: &'static str) -> Result<Repr, LowerError> {
+    if repr.vector().is_some() {
+        return Err(LowerError::Representation {
+            at,
+            want: describe(Repr::Boxed),
+            got: describe(repr),
+        });
+    }
+    Ok(slotted(repr))
+}
+
 /// Годится ли пришедшее представление в объявленную позицию.
 ///
 /// Совпадение - обычный случай. Послаблений два, и оба про **запись**: у неё
@@ -437,6 +495,7 @@ fn describe(repr: Repr) -> String {
         Repr::Region => "блок региона".to_owned(),
         Repr::Record(tag) => format!("запись формы #{}", tag.0),
         Repr::Resumption => "резумпция".to_owned(),
+        Repr::Simd { lanes, lane } => format!("вектор `Simd {lanes} {lane}`"),
         Repr::Packed(pack) => format!("плоский агрегат укладки #{}", pack.0),
     }
 }
@@ -448,6 +507,9 @@ fn describe(repr: Repr) -> String {
 /// (`adamas-elab/src/flat.rs`). Второго имени тут не заводится: словарь,
 /// пришедший имплиситом, и есть дескриптор.
 const FLAT: &str = "Flat";
+
+/// Имя класса дорожки (§4.9). Читается тем же правилом, что [`FLAT`].
+const PRIMITIVE: &str = adamas_core::prim::PRIMITIVE;
 
 /// Имя единственного метода `Flat` и полей его укладки (§4.11).
 ///
@@ -3149,6 +3211,10 @@ impl<'a> Lowerer<'a> {
                 name: adamas_core::prim::ARRAY.to_owned(),
             }),
             Prim::Over(op) => self.array(scope, op, arguments),
+            Prim::Simd => Err(LowerError::TypeValue {
+                name: adamas_core::prim::SIMD.to_owned(),
+            }),
+            Prim::Across(op) => self.simd(scope, op, arguments),
             Prim::Block => Err(LowerError::TypeValue {
                 name: adamas_core::prim::BLOCK.to_owned(),
             }),
@@ -3303,6 +3369,122 @@ impl<'a> Lowerer<'a> {
                         value: Box::new(value),
                     },
                     Repr::Array(cells),
+                ))
+            }
+        }
+    }
+
+    /// Операция над вектором (§4.9).
+    ///
+    /// Ширина и дорожка читаются у **написанных** стёртых аргументов - тех
+    /// самых, что операция несёт первыми, - тем же правилом, каким массив
+    /// читает шаг у своего стёртого элемента. Ячейки кучи здесь не возникает ни
+    /// на одной ветке: вектор плоский и живёт в регистре.
+    ///
+    /// # Ширина вектора против ширины дорожки
+    ///
+    /// `simdLane` отдаёт **дорожку**, а не вектор, и представление ответа у
+    /// него поэтому `Repr::Flat(lane)`; `simdSplat` принимает дорожку и отдаёт
+    /// вектор. Перепутать их значило бы отдать четыре байта туда, где ждут
+    /// тридцать два, и поймала бы это уже сверка представлений
+    /// ([`LowerError::Representation`]), а не прогон.
+    fn simd(
+        &mut self,
+        scope: &mut Scope,
+        op: SimdOp,
+        arguments: &[Arg<'_>],
+    ) -> Result<(Expr, Repr), LowerError> {
+        let wanted = match op {
+            SimdOp::Splat => 4,
+            SimdOp::Lane | SimdOp::Add | SimdOp::Sub | SimdOp::Mul => 5,
+            SimdOp::Set => 6,
+        };
+        if arguments.len() != wanted {
+            return Err(LowerError::PartialSimd {
+                name: op.name().to_owned(),
+            });
+        }
+        // У `simdSplat` порядок стёртых - дорожка, словарь, ширина; у прочих -
+        // ширина, дорожка, словарь. Расхождение не случайно: ширину `simdSplat`
+        // выводить не из чего, и она написана явно (§4.9, `simd_op_scheme`).
+        let (at_width, at_lane) = match op {
+            SimdOp::Splat => (2, 0),
+            SimdOp::Set | SimdOp::Lane | SimdOp::Add | SimdOp::Sub | SimdOp::Mul => (0, 1),
+        };
+        let partial = || LowerError::PartialSimd {
+            name: op.name().to_owned(),
+        };
+        let (Arg::Written(width), Arg::Written(lane)) = (&arguments[at_width], &arguments[at_lane])
+        else {
+            return Err(partial());
+        };
+        let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
+        let shape = self
+            .vector_of(width, lane, depth)
+            .ok_or_else(|| LowerError::SimdShape {
+                width: normalized(width, depth).to_string(),
+                lane: normalized(lane, depth).to_string(),
+                why: "ширина обязана быть литералом, а дорожка - примитивом: у обоих \
+                      эмиттеров ширина есть часть типа, а не число в рантайме",
+            })?;
+        let Repr::Simd { lanes, lane } = shape else {
+            return Err(partial());
+        };
+        let cell = Repr::Flat(lane);
+        let word = Repr::Flat(PrimTy::UInt64);
+        match op {
+            SimdOp::Splat => {
+                let value = self.given(scope, &arguments[3], cell, "дорожка вектора")?;
+                Ok((
+                    Expr::SimdSplat {
+                        lanes,
+                        lane,
+                        value: Box::new(value),
+                    },
+                    shape,
+                ))
+            }
+            SimdOp::Lane => {
+                let vector = self.given(scope, &arguments[3], shape, "читаемый вектор")?;
+                let at = self.given(scope, &arguments[4], word, "номер дорожки")?;
+                Ok((
+                    Expr::SimdLane {
+                        lanes,
+                        lane,
+                        vector: Box::new(vector),
+                        at: Box::new(at),
+                    },
+                    cell,
+                ))
+            }
+            SimdOp::Set => {
+                let vector = self.given(scope, &arguments[3], shape, "переписываемый вектор")?;
+                let at = self.given(scope, &arguments[4], word, "номер дорожки")?;
+                let value = self.given(scope, &arguments[5], cell, "дорожка вектора")?;
+                Ok((
+                    Expr::SimdSet {
+                        lanes,
+                        lane,
+                        vector: Box::new(vector),
+                        at: Box::new(at),
+                        value: Box::new(value),
+                    },
+                    shape,
+                ))
+            }
+            SimdOp::Add | SimdOp::Sub | SimdOp::Mul => {
+                let arith = op.arith().ok_or_else(partial)?;
+                let left = self.given(scope, &arguments[3], shape, "левый вектор")?;
+                let right = self.given(scope, &arguments[4], shape, "правый вектор")?;
+                Ok((
+                    Expr::SimdArith {
+                        op: arith,
+                        lanes,
+                        lane,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    },
+                    shape,
                 ))
             }
         }
@@ -4445,10 +4627,27 @@ impl Lowerer<'_> {
                     None => Repr::Array(Elems::Boxed),
                 });
             }
+            // Вектор (§4.9): применён к ширине и дорожке, и обе обязаны быть
+            // написаны - ширина литералом, дорожка примитивом. Обобщённого
+            // вектора над `{Primitive a}` понижение не берёт: ширина
+            // векторного типа у обоих эмиттеров есть часть **типа**, а не
+            // число в рантайме, и дескриптором её не подменить. Названо это
+            // отказом ниже, в [`Lowerer::simd`], а здесь - обычное
+            // «представления нет».
+            Term::Prim(Prim::Simd) if arguments.len() == 2 => {
+                if let Some(shape) = self.vector_of(arguments[0], arguments[1], depth) {
+                    return Ok(shape);
+                }
+            }
             // `Flat` - единственный класс, чей словарь не объект кучи: у него
             // один метод, и метод этот сам есть укладка (§4.11). Проверяется он
             // **до** разворота, иначе развернулся бы в обычную запись.
             Term::Const(name, ..) if &**name == FLAT && arguments.len() == 1 => {
+                return Ok(Repr::Layout);
+            }
+            // Словарь `Primitive` (§4.9) - тот же дескриптор укладки, что у
+            // `Flat`: метод у класса один, и метод этот есть `simdLayout`.
+            Term::Const(name, ..) if &**name == PRIMITIVE && arguments.len() == 1 => {
                 return Ok(Repr::Layout);
             }
             _ => {}
@@ -4553,7 +4752,7 @@ impl Lowerer<'_> {
         let mut facts = Vec::with_capacity(fields.len());
         for (position, field) in fields.iter().enumerate() {
             let under = depth + u32::try_from(position).unwrap_or(0);
-            let repr = slotted(self.repr_of(&field.ty, under, dicts)?);
+            let repr = boxable(self.repr_of(&field.ty, under, dicts)?, "поле записи")?;
             labels.push(field.name.to_string());
             // Типовой член (`type T` в сигнатуре модуля, §4.8) значения в
             // рантайме не имеет: тип стёрт (§3.3), а кратность у него `1` -
@@ -4592,6 +4791,29 @@ impl Lowerer<'_> {
             Ok(Some(SlotTy::Pack(pack))) => Some(Stride::Packed(pack)),
             _ => None,
         }
+    }
+
+    /// Представление вектора по написанным ширине и дорожке (§4.9).
+    ///
+    /// `None` - одно из двух не написано: ширина пришла не литералом либо
+    /// дорожка не примитив. Обобщённый вектор понижение не берёт, и граница
+    /// эта у обоих эмиттеров одна: `<n x float>` и `vector_size(4n)` - формы
+    /// **типа**, а тип в рантайме не считается.
+    ///
+    /// Ширина нормализуется тем же [`normalized`], каким её нормализует
+    /// массив: решение имплисита приезжает бета-редексом по контексту, и до
+    /// нормализации литералом не является.
+    fn vector_of(&mut self, width: &Term, lane: &Term, depth: u32) -> Option<Repr> {
+        let width = normalized(width, depth);
+        let Term::Prim(Prim::Lit(_, lanes)) = unaliased(self.signature, &width) else {
+            return None;
+        };
+        let lanes = u32::try_from(*lanes).ok()?;
+        let lane = normalized(lane, depth);
+        let Term::Prim(Prim::Ty(lane)) = unaliased(self.signature, &lane) else {
+            return None;
+        };
+        (lanes > 0).then_some(Repr::Simd { lanes, lane: *lane })
     }
 
     /// Укладка агрегата по меткам и полям; заводится однажды.
@@ -4756,7 +4978,7 @@ impl Lowerer<'_> {
         let mut current = ty;
         let mut at = 0u32;
         while let Term::Pi(binder, _, domain, _, codomain) = current {
-            let repr = slotted(self.repr_of(domain, at, &empty)?);
+            let repr = boxable(self.repr_of(domain, at, &empty)?, "поле конструктора")?;
             facts.push(Fact::declared(binder.mult).shaped(repr));
             at += 1;
             current = codomain;

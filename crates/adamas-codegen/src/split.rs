@@ -313,7 +313,9 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         | Expr::LayoutField { .. }
         | Expr::RegionNew
         | Expr::Layout { .. } => Vec::new(),
-        Expr::Unpack { value, .. } | Expr::Cancel { value, .. } => vec![value],
+        Expr::Unpack { value, .. } | Expr::Cancel { value, .. } | Expr::SimdSplat { value, .. } => {
+            vec![value]
+        }
         Expr::RegionLast { region } => vec![region],
         Expr::RegionAlloc { region, value, .. } => vec![region, value],
         Expr::RegionRead { region, at, .. }
@@ -321,6 +323,12 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         | Expr::RegionPop { region, at } => vec![region, at],
         Expr::RegionWrite {
             region, at, value, ..
+        }
+        | Expr::SimdSet {
+            vector: region,
+            at,
+            value,
+            ..
         } => vec![region, at, value],
         Expr::Construct { arguments, .. }
         | Expr::Call { arguments, .. }
@@ -341,10 +349,15 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         Expr::ArraySet {
             array, at, value, ..
         } => vec![array, at, value],
-        Expr::ArrayIndex { array, at, .. } => vec![array, at],
+        Expr::ArrayIndex { array, at, .. }
+        | Expr::SimdLane {
+            vector: array, at, ..
+        } => vec![array, at],
         Expr::Resume { resumption, value } => vec![resumption, value],
         Expr::Closure { captured, .. } => captured.iter_mut().collect(),
-        Expr::Primitive { left, right, .. } | Expr::Compare { left, right, .. } => {
+        Expr::Primitive { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::SimdArith { left, right, .. } => {
             vec![left, right]
         }
         Expr::Apply { callee, argument } => vec![callee, argument],
@@ -521,6 +534,16 @@ impl Anf<'_> {
             Expr::ArrayIndex { stride, .. } => {
                 stride.map_or(Repr::Boxed, crate::ir::Stride::element)
             }
+            // Вектор (§4.9): три узла отдают его, а чтение дорожки - саму
+            // дорожку. Различие несущее: слот кадра под вектор шириной в его
+            // тип, а под дорожку - в её.
+            Expr::SimdSplat { lanes, lane, .. }
+            | Expr::SimdSet { lanes, lane, .. }
+            | Expr::SimdArith { lanes, lane, .. } => Repr::Simd {
+                lanes: *lanes,
+                lane: *lane,
+            },
+            Expr::SimdLane { lane, .. } => Repr::Flat(*lane),
             Expr::RegionNew
             | Expr::RegionAlloc { .. }
             | Expr::RegionWrite { .. }

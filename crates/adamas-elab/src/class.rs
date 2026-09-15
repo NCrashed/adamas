@@ -409,6 +409,13 @@ fn settle(
             metas.solve_term(meta, solution);
             continue;
         }
+        // `Primitive` - там же и по той же причине (§4.9): инстанс его тоже не
+        // выбирается, а вычисляется по типу, и кандидатов у него нет.
+        if &*class == crate::primitive::PRIMITIVE {
+            let solution = crate::primitive::derive(signature, metas, &ty, &goal, span)?;
+            metas.solve_term(meta, solution);
+            continue;
+        }
         let heads = match head {
             Head::Named(heads) => heads,
             // Голова-переменная: инстанса для неё нет и быть не может, а

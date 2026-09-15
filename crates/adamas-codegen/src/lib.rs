@@ -179,6 +179,25 @@ pub fn compile_llvm(
     Ok(emit_llvm::emit(&prepared(signature, entry)?)?)
 }
 
+/// То же с исходником: `.ll` получает DWARF (§9 Фаза 7, трек E).
+///
+/// Отладочная информация появляется **от исходника**, а не от ключа: нет
+/// текста - нечего и называть отладчику, и выход тогда байт в байт тот же, что
+/// у [`compile_llvm`]. Отсюда и отсутствие флага «собрать с `-g`»: флаг
+/// пришлось бы сверять с наличием позиций, а сверять нечего.
+///
+/// # Errors
+///
+/// [`CompileError`] - то же, что у [`compile_llvm`].
+pub fn compile_llvm_located(
+    signature: &Signature,
+    entry: &Term,
+    file: &adamas_core::source::SourceFile,
+) -> Result<emit_llvm::Artefacts, CompileError> {
+    let lowered = split::prepare(lower::located(signature, entry, file)?);
+    Ok(emit_llvm::emit(&perceus::insert(lowered))?)
+}
+
 /// Общая для обоих эмиттеров половина пути: понижение, дробление, вставка RC.
 fn prepared(signature: &Signature, entry: &Term) -> Result<ir::Program, CompileError> {
     let lowered = split::prepare(lower::lower(signature, entry)?);

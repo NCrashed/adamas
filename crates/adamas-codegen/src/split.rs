@@ -175,6 +175,7 @@ pub fn prepare(program: Program) -> Program {
         handlers,
         mut functions,
         entry,
+        source,
     } = program;
     for function in &mut functions {
         if !known.functions.contains(&function.id) {
@@ -197,6 +198,7 @@ pub fn prepare(program: Program) -> Program {
         handlers,
         functions,
         entry,
+        source,
     }
 }
 
@@ -212,6 +214,7 @@ fn extracted(program: Program) -> Program {
         handlers,
         mut functions,
         entry,
+        source,
     } = program;
     let written = functions.len();
     let mut next = written;
@@ -233,6 +236,7 @@ fn extracted(program: Program) -> Program {
         handlers,
         functions,
         entry,
+        source,
     }
 }
 
@@ -275,6 +279,9 @@ fn hoist_handles(
         made.push(Function {
             id,
             name: "вычисление под хендлером".to_owned(),
+            // Дробление режет тело, а не пишет своё: спана у куска нет, и
+            // строка окружающего тут была бы чужой.
+            position: None,
             form: Form::Detached,
             captured: Vec::new(),
             parameters,

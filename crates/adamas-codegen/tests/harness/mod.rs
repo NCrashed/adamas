@@ -20,6 +20,7 @@ use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::row::Row;
 use adamas_core::sig::Signature;
+use adamas_core::source::SourceFile;
 use adamas_core::term::{PRINT_DEPTH, Term};
 use adamas_elab::class::Instances;
 use adamas_elab::fixity::Fixities;
@@ -32,10 +33,36 @@ pub(crate) fn corpus() -> PathBuf {
 }
 
 /// Место под порождённый C и его сборку - своё у каждого тестового крейта.
-fn scratch() -> PathBuf {
+pub(crate) fn scratch() -> PathBuf {
     let dir = Path::new(env!("OUT_DIR")).join(env!("CARGO_CRATE_NAME"));
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+/// Понижение с исходником: программа с позициями (§9 Фаза 7, трек E).
+///
+/// Исходник кладётся на диск, потому что читать его будет **отладчик**: DWARF
+/// называет каталог и имя, и без файла по этому пути gdb показал бы номер
+/// строки без самой строки.
+///
+/// # Panics
+///
+/// Исходник не разобрался, не проверился либо не понизился.
+#[expect(
+    clippy::expect_used,
+    reason = "заготовка теста: отказ здесь означает сломанный корпус"
+)]
+pub(crate) fn located(stem: &str, text: &str) -> (PathBuf, adamas_codegen::ir::Program) {
+    let path = scratch().join(format!("{stem}.adamas"));
+    std::fs::write(&path, text).expect("исходник обязан записываться");
+    let (mut signature, mut metas, instances) = elaborated(text);
+    let written = body(&signature, "main");
+    let made = mono::specialise(&mut signature, &mut metas, &instances, &written)
+        .expect("специализация обязана проходить");
+    let file = SourceFile::new(path.display().to_string(), text);
+    let program = adamas_codegen::lower::located(&signature, &made.term, &file)
+        .expect("понижение обязано проходить");
+    (path, program)
 }
 
 /// Элаборированная программа вместе с тем, что о ней знает разрешение.

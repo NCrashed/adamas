@@ -240,11 +240,21 @@ fn runtime() -> &'static [PathBuf] {
 }
 
 /// Собирает порождённый C и запускает его. Отдаёт stdout и stderr.
+fn built(name: &str, text: &str) -> (String, String) {
+    built_with(name, text, &[])
+}
+
+/// Он же с дописанными ключами компилятора.
+///
+/// Ключи идут **после** штатных, поэтому спорящий ключ побеждает: `-O2` после
+/// `-O1`, `-ffp-contract=fast` после `-ffp-contract=off`. Нужно это ровно
+/// одному свидетелю - строгому режиму плавающей арифметики (`tests/float.rs`),
+/// который обязан перебрать уровни оптимизации, а не поверить одному.
 #[allow(
     clippy::unwrap_used,
     reason = "заготовка теста: отказ здесь означает сломанное окружение, и падать он должен громко"
 )]
-fn built(name: &str, text: &str) -> (String, String) {
+pub(crate) fn built_with(name: &str, text: &str, extra: &[&str]) -> (String, String) {
     let dir = scratch();
     let source = dir.join(format!("{name}.c"));
     let binary = dir.join(name);
@@ -255,6 +265,11 @@ fn built(name: &str, text: &str) -> (String, String) {
         .args([
             "-std=c11",
             "-O1",
+            // §4.3 требует ключ явно, и требует не зря: у clang для C
+            // умолчание `on`, а `on` контрактит `a * b + c` в пределах
+            // выражения. Умолчание gcc под `-std=c11` совпадает с нашим
+            // выбором, но обещание не должно держаться на чужом умолчании.
+            "-ffp-contract=off",
             "-Wall",
             // Порождённый код связывает поля, которых тело не смотрит, и берёт
             // вектор evidence, которого чистый фрагмент не читает: неиспользуемое
@@ -269,6 +284,7 @@ fn built(name: &str, text: &str) -> (String, String) {
             // отказом сборки, а не молчанием.
             "-Werror=incompatible-pointer-types",
         ])
+        .args(extra)
         .arg("-I")
         .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
         .arg(&source)

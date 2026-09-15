@@ -202,7 +202,11 @@ pub(crate) fn built(dir: &Path, name: &str, text: &str) -> PathBuf {
 pub(crate) fn compiled(dir: &Path, source: &Path, binary: &Path) {
     let output = Command::new(env!("ADAMAS_CC"))
         .args(RELEASE)
-        .args(["-fwrapv", "-w"])
+        // `-ffp-contract=off` — требование §4.3, а не осторожность стенда:
+        // `workload-column` считает ровно `x·gain + bias`, и разрешённая
+        // контракция дала бы другие числа. Умолчание gcc под `-std=c11`
+        // совпадает, но обещание не должно держаться на чужом умолчании.
+        .args(["-fwrapv", "-ffp-contract=off", "-w"])
         .arg("-I")
         .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
         .arg(source)

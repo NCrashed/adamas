@@ -67,36 +67,68 @@ use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 /// обходом узлов до реализации и прогоном подтверждена числом в число.
 /// Мультишотных среди них две - `effects` и `multi-over-oneshot`, - и они же
 /// критерий трека.
-const TAKEN: [&str; 35] = [
+const TAKEN: [&str; 67] = [
+    "abortive-cleanup",
+    "abortive-except",
     "arithmetic",
+    "await-twice",
+    "await-value",
+    "cancel",
+    "cancel-bystander",
     "case-family",
     "case-over-a-computation",
     "comparisons",
     "countdown",
+    "effect-multiplicity",
     "effects",
     "erasure",
+    "execution-positions",
+    "field-effect",
     "flat-across-a-suspension",
     "flat-fields",
     "general-frames",
     "general-order",
+    "instance-context-effect",
     "label-argument",
     "label-names-its-binder",
     "lists",
     "literal-default",
+    "mask",
     "module-effect",
+    "module-family",
     "module-resource",
     "module-scope",
     "multi-over-oneshot",
     "mutual-family",
+    "mutual-polymorphic-recursion",
+    "mutual-sibling-grounded",
     "nested-case-on-a-field",
     "nested-functor",
     "nested-rowed-signature",
+    "nursery",
+    "nursery-abort",
+    "nursery-abort-order",
+    "operation-higher-order",
     "operators",
+    "polymorphic-recursion",
     "primitives",
     "records",
+    "region-allocates-and-reads",
+    "region-bound-in-the-argument",
     "resource",
     "resource-cleanup",
     "rose",
+    "rows",
+    "sealed-effect",
+    "sequences",
+    "signature-effect",
+    "signature-effect-parameterized",
+    "spawn-local",
+    "state-resource",
+    "task",
+    "task-handoff",
+    "task-typed",
+    "truncation",
     "unwind-inner-handler",
     "unwind-live-outer",
     "workload-fbip",
@@ -229,6 +261,11 @@ fn the_scalar_fragment_takes_what_it_declares() {
     );
     for (name, why) in &refused {
         eprintln!("  отвергнуто {name}: {why}");
+    }
+    // Взятое печатается **списком**, а не только числом: список [`TAKEN`]
+    // пополняется руками, и сверять его глазами с числом нечем.
+    for name in &taken {
+        eprintln!("  взято {name}");
     }
 }
 

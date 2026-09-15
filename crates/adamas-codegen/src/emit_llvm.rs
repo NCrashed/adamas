@@ -1418,15 +1418,27 @@ impl Module {
 /// берёт рантайм, а не `llvm.coro.*`» в шапке модуля.
 fn second_form(out: &mut String, program: &Program) {
     let nursery = nursed(program);
-    if nursery
+    let framed = nursery
         || program
             .functions
             .iter()
-            .any(|function| function.form == Form::Detached)
-    {
+            .any(|function| function.form == Form::Detached);
+    // Замыкание бывает и без второй формы: `module-family` строит значение
+    // первой формы и ни одного кадра не отчуждает. Объявления поэтому свои.
+    if framed || !boxing(program).is_empty() || !taking(program).is_empty() {
+        out.push_str(concat!(
+            "; Замыкание: объект с кодом и средой, применение через рантайм.\n",
+            "declare ptr @adamas_unit()\n",
+            "declare ptr @adamas_closure(ptr, ptr, i32, i32)\n",
+            "declare void @adamas_closure_set(ptr, i64, ptr)\n",
+            "declare ptr @adamas_closure_get(ptr, i64)\n",
+            "declare ptr @adamas_apply(ptr, ptr, ptr, ptr)\n",
+            "\n",
+        ));
+    }
+    if framed {
         out.push_str(concat!(
             "; Вторая форма понижения: кадр в куче, вектор evidence, сегмент.\n",
-            "declare ptr @adamas_unit()\n",
             "declare i32 @adamas_is_imm(ptr)\n",
             "declare ptr @adamas_evidence_empty()\n",
             "declare ptr @adamas_evidence_extend(ptr, i32, ptr)\n",
@@ -1448,9 +1460,6 @@ fn second_form(out: &mut String, program: &Program) {
             "declare ptr @adamas_segment_value(ptr)\n",
             "declare ptr @adamas_segment_multi(ptr)\n",
             "declare void @adamas_resumption_drop(ptr, ptr)\n",
-            "declare ptr @adamas_closure(ptr, ptr, i32, i32)\n",
-            "declare void @adamas_closure_set(ptr, i64, ptr)\n",
-            "declare ptr @adamas_closure_get(ptr, i64)\n",
             "\n",
         ));
     }

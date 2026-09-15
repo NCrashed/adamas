@@ -436,6 +436,30 @@ fn slotted(repr: Repr) -> Repr {
     }
 }
 
+/// То же у позиции, чей тип **написан**, - с отказом на векторе (§4.9).
+///
+/// Слот объекта - одно машинное слово (`adamas.h`, «поле `i` лежит по смещению
+/// `8 + 8i`»), а вектор занимает своё: `Simd 4 Float32` - шестнадцать байт,
+/// `Simd 8 Float32` - тридцать два. Плоский агрегат из той же беды выходит
+/// боксированием ([`Lowerer::moved`]), у вектора же боксированной формы нет: у
+/// него нет ни укладки в дескрипторе (`Flat` для него не выводится), ни
+/// конструктора-обёртки.
+///
+/// Отказ **названный**, и он здесь не для красоты. До него понижение печатало
+/// `adamas_set_field(t, 0, v)` с вектором третьим аргументом, и ловил это
+/// компилятор C - «несовместимый тип аргумента 3», - то есть компилятор Adamas
+/// порождал не собирающийся код на валидной программе. Замер 2026-09-16.
+fn boxable(repr: Repr, at: &'static str) -> Result<Repr, LowerError> {
+    if repr.vector().is_some() {
+        return Err(LowerError::Representation {
+            at,
+            want: describe(Repr::Boxed),
+            got: describe(repr),
+        });
+    }
+    Ok(slotted(repr))
+}
+
 /// Годится ли пришедшее представление в объявленную позицию.
 ///
 /// Совпадение - обычный случай. Послаблений два, и оба про **запись**: у неё
@@ -4728,7 +4752,7 @@ impl Lowerer<'_> {
         let mut facts = Vec::with_capacity(fields.len());
         for (position, field) in fields.iter().enumerate() {
             let under = depth + u32::try_from(position).unwrap_or(0);
-            let repr = slotted(self.repr_of(&field.ty, under, dicts)?);
+            let repr = boxable(self.repr_of(&field.ty, under, dicts)?, "поле записи")?;
             labels.push(field.name.to_string());
             // Типовой член (`type T` в сигнатуре модуля, §4.8) значения в
             // рантайме не имеет: тип стёрт (§3.3), а кратность у него `1` -
@@ -4954,7 +4978,7 @@ impl Lowerer<'_> {
         let mut current = ty;
         let mut at = 0u32;
         while let Term::Pi(binder, _, domain, _, codomain) = current {
-            let repr = slotted(self.repr_of(domain, at, &empty)?);
+            let repr = boxable(self.repr_of(domain, at, &empty)?, "поле конструктора")?;
             facts.push(Fact::declared(binder.mult).shaped(repr));
             at += 1;
             current = codomain;

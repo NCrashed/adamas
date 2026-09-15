@@ -18,16 +18,28 @@
 //! воспроизвести одну строку, тянула бы за собой весь символьный стенд.
 //! Общее у двух стендов вынесено в `harness`, а не скопировано.
 //!
-//! # Первая нагрузка: скалярная арифметика
+//! # Первая нагрузка: скалярная арифметика, и почему у неё две формы
 //!
-//! `mix n acc = mix (n − 1) (acc · K + n)`, где `K` — множитель LCG
-//! ([`MIX`]). Цепочка зависима по данным: каждый виток ждёт `acc` предыдущего,
-//! и замкнутой формы у неё нет — важное свойство, потому что сумму или сумму
-//! квадратов gcc и LLVM сворачивают в формулу, и мерился бы не цикл, а
-//! наличие у бэкенда SCEV.
+//! `mix n acc = mix (n − 1) (f acc n)`, счётчик и накопитель плоские. Форм
+//! цепочки две ([`Chain`]), и вторая заведена **замером**, а не для полноты.
 //!
-//! До трека A волны 5 нагрузка не выражалась: счётчик обязан был быть
-//! индуктивным. Теперь он плоский, и это наблюдаемо — прогон печатает
+//! Естественная запись — `acc · K + n` с множителем-литералом. Она даёт разрыв
+//! с соседом в **шесть раз**, и ни одна его доля нам не принадлежит:
+//! развёрнутая на `U` витков, аффинная цепочка с постоянным `K` складывается
+//! обратно в одно умножение на `K^U` плюс член, линейный по счётчику. LLVM это
+//! делает, gcc нет. Проверено тремя способами, и все три говорят одно: тот же
+//! цикл руками на C стоит столько же, сколько наш; тот же цикл на Rust с
+//! множителем **из аргумента** стоит столько же, сколько наш; а цепочка
+//! `acc · acc · K + n`, которую разворачивать нечем, ставит отношение на
+//! **1.08**. Первые два свидетеля — `scalar-decomposition.sh`, третий — точка
+//! [`Chain::Squaring`] рядом.
+//!
+//! Мерятся поэтому обе, и в таблице стоят обе. Выкинуть аффинную значило бы
+//! спрятать шестикратный разрыв, который существует; выкинуть нелинейную —
+//! выдать одну оптимизацию LLVM за качество понижения.
+//!
+//! До трека A волны 5 нагрузка не выражалась ни в одной форме: счётчик обязан
+//! был быть индуктивным. Теперь он плоский, и это наблюдаемо — прогон печатает
 //! **ноль** выданных блоков, то есть на витке нет ни ячейки кучи (проверяется
 //! ниже, а не предполагается).
 //!
@@ -78,6 +90,26 @@
 //!   [`SCALAR_TURNS`] витках означает, что заворачивание, порядок и знаковость
 //!   у них одни.
 //! - **Счётчики блоков** — у обеих нагрузок, утверждением.
+//!
+//! # Чем проверено, что строки мерят названное
+//!
+//! Обеим подсунуто замедление, и обе на него ответили (2026-09-15).
+//!
+//! - **Скалярной** — лишнее умножение в цепочке, у обеих сторон разом
+//!   (`acc · K + n` → `acc · acc · K + n`). Наша сторона 47.1 → 77.7 мс, и это
+//!   ровно то, чего стоит второе умножение в зависимой цепочке. Заодно
+//!   выяснилось главное про эту нагрузку: сосед на том же шаге идёт 7.6 → 72.5,
+//!   то есть в **девять с половиной раз**, и шестикратный разрыв аффинной
+//!   формы обращается в паритет. Отсюда две цепочки в таблице, а не одна.
+//! - **FBIP** — выключенный reuse: одна строка [`adamas_codegen::perceus`]
+//!   (`Reclaim` не заводится никогда), и всё остальное как было. Блоков стало
+//!   6 500 000 вместо 100 000 — ровно ячейка на элемент на проход, — время
+//!   14.1 → 36.9 мс, отношение 0.45 → **1.22**. То есть строка мерит именно
+//!   переписывание на месте: без него понижение оказывается **медленнее**
+//!   соседа, платя ту же аллокацию плюс счётчик ссылок.
+//!
+//!   Утверждение о счётчике этот мутант ловит первым и без всякого времени:
+//!   прогон падает на «проход выдал ячейки».
 
 #![allow(
     missing_docs,
@@ -102,12 +134,64 @@ use harness::{NEIGHBOUR, blocks, built, by_floor, elaborated, entry, ran, ran_ne
 /// Место под порождённый C и его сборку — своё у стенда.
 const STAND: &str = "bench-workloads";
 
-/// Множитель LCG в скалярном цикле.
-///
-/// Тот же, что у `PCG`/`java.util.Random`-семейства, и взят не за качество
-/// случайности, а за то, что цепочка `acc · K + n` замкнутой формы не имеет:
-/// свернуть цикл в формулу компилятору нечем, и мерится цикл.
+/// Множитель скалярной цепочки: тот же, что у `PCG`-семейства.
 const MIX: u64 = 6_364_136_223_846_793_005;
+
+/// Форма скалярной цепочки. Различаются они одним умножением, а числом — в
+/// шесть раз, и вся разница принадлежит **соседу**, не нам.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Chain {
+    /// `acc := acc · acc · K + n`. По `acc` нелинейна, разворачивать нечего.
+    Squaring,
+    /// `acc := acc · K + n` — аффинная, и множитель у неё **литерал**.
+    ///
+    /// Развёрнутая на `U` витков, такая цепочка складывается обратно: `K^U`
+    /// считается на компиляции, а сумма `Σ K^j · b_j` линейна по счётчику.
+    /// LLVM это делает, gcc нет, и отсюда шестикратный разрыв, к понижению
+    /// отношения не имеющий. Свидетели — `scalar-decomposition.sh` и точка
+    /// [`Chain::Squaring`] рядом.
+    Affine,
+}
+
+impl Chain {
+    const ALL: [Self; 2] = [Self::Squaring, Self::Affine];
+
+    /// Имя группы замера и запроса к соседу.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Squaring => "scalar",
+            Self::Affine => "scalar-affine",
+        }
+    }
+
+    /// Тело витка на Adamas.
+    fn step(self) -> String {
+        match self {
+            Self::Squaring => format!("addUInt64 (mulUInt64 (mulUInt64 acc acc) {MIX}) n"),
+            Self::Affine => format!("addUInt64 (mulUInt64 acc {MIX}) n"),
+        }
+    }
+
+    /// Он же на Rust — те же операции в том же порядке.
+    fn mix(self, n: u64) -> u64 {
+        let (mut acc, mut left): (u64, u64) = (0, n);
+        match self {
+            Self::Squaring => {
+                while left != 0 {
+                    acc = acc.wrapping_mul(acc).wrapping_mul(MIX).wrapping_add(left);
+                    left -= 1;
+                }
+            }
+            Self::Affine => {
+                while left != 0 {
+                    acc = acc.wrapping_mul(MIX).wrapping_add(left);
+                    left -= 1;
+                }
+            }
+        }
+        acc
+    }
+}
 
 /// Витков скалярного цикла.
 ///
@@ -139,12 +223,13 @@ data Bool where
 ";
 
 /// Скалярный цикл: плоский счётчик, плоский накопитель, ноль ячеек кучи.
-fn scalar_source(turns: u64) -> String {
+fn scalar_source(chain: Chain, turns: u64) -> String {
+    let step = chain.step();
     format!(
         "{BOOL}
 mix : UInt64 -> UInt64 -> UInt64
 mix 0 acc = acc
-mix n acc = mix (subUInt64 n 1) (addUInt64 (mulUInt64 acc {MIX}) n)
+mix n acc = mix (subUInt64 n 1) ({step})
 
 main : UInt64
 main = mix {turns} 0
@@ -259,17 +344,6 @@ fn agrees(name: &str, source: &str) {
 // ровно та вещь, ради которой строка и мерится, — у соседа ячейка на элемент
 // прохода, у понижения ноль.
 
-/// Скалярный цикл эквивалентным кодом: та же арифметика, то же заворачивание.
-fn mix(n: u64, acc: u64) -> u64 {
-    let mut left = n;
-    let mut acc = acc;
-    while left != 0 {
-        acc = acc.wrapping_mul(MIX).wrapping_add(left);
-        left -= 1;
-    }
-    acc
-}
-
 /// Список эквивалентными формами данных: те же конструкторы, владение через
 /// `Box`.
 enum List {
@@ -324,7 +398,7 @@ fn total(xs: List, acc: i64) -> i64 {
 /// Дочерний прогон соседа, если стенд запущен им.
 ///
 /// Запрос — имя нагрузки и её размеры через двоеточие: `scalar:<витков>`,
-/// `fbip:<ячеек>:<проходов>`.
+/// `scalar-affine:<витков>`, `fbip:<ячеек>:<проходов>`.
 fn as_child() -> bool {
     let Ok(request) = std::env::var(NEIGHBOUR) else {
         return false;
@@ -337,14 +411,15 @@ fn as_child() -> bool {
             .parse()
             .expect("размер нагрузки — число")
     };
+    if let Some(chain) = Chain::ALL.into_iter().find(|chain| chain.name() == kind) {
+        let turns = number(field.next());
+        println!(
+            "{}",
+            chain.mix(u64::try_from(turns).expect("витков не меньше нуля"))
+        );
+        return true;
+    }
     match kind {
-        "scalar" => {
-            let turns = number(field.next());
-            println!(
-                "{}",
-                mix(u64::try_from(turns).expect("витков не меньше нуля"), 0)
-            );
-        }
         "fbip" => {
             let cells = number(field.next());
             let passes = number(field.next());
@@ -357,36 +432,49 @@ fn as_child() -> bool {
 
 // --- замеры --------------------------------------------------------------
 
-/// Скалярная арифметика: первая нагрузка трека Z.
+/// Скалярная арифметика: первая нагрузка трека Z, обеими цепочками.
 fn scalar(criterion: &mut Criterion) {
-    let mut group = criterion.benchmark_group("scalar");
+    for chain in Chain::ALL {
+        one_chain(criterion, chain);
+    }
+}
+
+/// Одна форма цепочки: пол, работа, сосед, отношение.
+fn one_chain(criterion: &mut Criterion, chain: Chain) {
+    let name = chain.name();
+    let mut group = criterion.benchmark_group(name);
     group.sample_size(10);
     group.sampling_mode(SamplingMode::Flat);
 
-    agrees("scalar-small", &scalar_source(SCALAR_SMALL));
+    agrees(
+        &format!("{name}-small"),
+        &scalar_source(chain, SCALAR_SMALL),
+    );
 
     // Пол — та же программа без работы; свой у каждой стороны, потому что
     // двоичных файлов два.
-    let floor = Load::new("scalar-floor", &scalar_source(0));
+    let floor = Load::new(&format!("{name}-floor"), &scalar_source(chain, 0));
+    let idle = format!("{name}:0");
     group.bench_function("floor", |bencher| {
         by_floor(bencher, || drop(ran(&floor.binary)));
     });
     group.bench_function("rust/floor", |bencher| {
-        by_floor(bencher, || drop(ran_neighbour("scalar:0")));
+        by_floor(bencher, || drop(ran_neighbour(&idle)));
     });
 
-    let load = Load::new("scalar", &scalar_source(SCALAR_TURNS));
+    let load = Load::new(name, &scalar_source(chain, SCALAR_TURNS));
     // Плоский счётчик наблюдаем здесь: индуктивный дал бы ячейку на виток.
     assert_eq!(
         load.allocated, 0,
-        "скалярный цикл выдал блоки — счётчик или накопитель перестал быть плоским"
+        "{name}: скалярный цикл выдал блоки — счётчик или накопитель перестал \
+         быть плоским"
     );
-    let request = format!("scalar:{SCALAR_TURNS}");
+    let request = format!("{name}:{SCALAR_TURNS}");
     let (stdout, _) = ran_neighbour(&request);
     assert_eq!(
         stdout.trim(),
         load.answer,
-        "сосед на Rust считает не тот же цикл"
+        "{name}: сосед на Rust считает не тот же цикл"
     );
 
     group.bench_function("native", |bencher| {
@@ -399,11 +487,11 @@ fn scalar(criterion: &mut Criterion) {
 
     // Число строки таблицы берётся здесь, а не у отчёта: см. [`ratio`].
     ratio(
-        "скалярная арифметика",
+        name,
         || drop(ran(&load.binary)),
         || drop(ran(&floor.binary)),
         || drop(ran_neighbour(&request)),
-        || drop(ran_neighbour("scalar:0")),
+        || drop(ran_neighbour(&idle)),
     );
 }
 

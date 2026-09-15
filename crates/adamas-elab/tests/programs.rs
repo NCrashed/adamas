@@ -7315,6 +7315,49 @@ silent b = put b
 }
 
 #[test]
+fn eta_expansion_does_not_change_discharge() {
+    // §10 вопрос 170 (закрыт 2026-09-15): `forEach emit xs` и
+    // `forEach (\n -> emit n) xs` типизируются одинаково. Имя операции идёт
+    // унификацией - метка уезжает в хвост-дырку ожидаемой row, - а тело
+    // лямбды идёт погашением, и до правки погашение меток в дырку не клало:
+    // эта-разворот менял типизируемость. Теперь окружающая с дыркой в хвосте
+    // принимает недостающее расширением - но только дырка **моложе
+    // водораздела**, то есть инстанциация текущего тела; дырки написанного
+    // типа не расширяются, и чистая сигнатура эффекта не выводит - это
+    // держит контроль в `an_operation_without_arrows_is_a_computation`.
+    let both = |argument: &str| {
+        format!(
+            "{BASE}
+data Unit where
+  MkUnit : Unit
+
+effect Emit where
+  emit : Nat -> Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+forEach : (f : a -> Unit) -> List a -> Unit
+forEach f Nil = MkUnit
+forEach f (Cons x xs) =
+  let 1 u : Unit = f x
+  forEach f xs
+
+collected : List Nat -> Nat
+collected xs =
+  let 1 c : {{Emit}} Unit = \\u -> forEach {argument} xs
+  handle c with
+    return v -> Zero
+    emit n -> resume MkUnit
+"
+        )
+    };
+    program(&both("emit"));
+    program(&both("(\\n -> emit n)"));
+}
+
+#[test]
 fn a_signature_without_a_written_row_is_row_polymorphic() {
     // Auto-lift (§3.4): позиция без написанной `{}` получает ту же свежую
     // переменную, что и прочие позиции сигнатуры, и при вызове она

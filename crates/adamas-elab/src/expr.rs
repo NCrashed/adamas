@@ -5998,6 +5998,10 @@ impl<'a> Elaborator<'a> {
     /// Порядок переменных - слева направо в глубину: этого ждёт
     /// [`adamas_core::pattern::compile`], и другого тело видеть не может.
     pub(crate) fn clause(&mut self, clause: &ast::Clause) -> Result<Clause, ElabError> {
+        // Водораздел расширяемости хвостов row (§10 вопрос 170): всё, что
+        // заведено до тела, - дырки написанного типа, и погашение их не
+        // расширяет; дырки самого тела - инстанциации мест вызова - расширяет.
+        self.metas.mark_row_floor();
         if !clause.wheres.is_empty() {
             return Err(ElabError::Missing {
                 what: Missing::LocalDefinitions,

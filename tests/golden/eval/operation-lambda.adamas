@@ -1,0 +1,62 @@
+-- Эта-разворот не меняет типизируемости (§10 вопрос 170).
+--
+-- Тот же сбор, что в `operation-value.adamas`, но операция обёрнута лямбдой:
+-- `forEach (\n -> emit n) xs`. Тело лямбды идёт погашением, и до вопроса 170
+-- эта форма отвергалась «Undischarged» там, где имя операции проходило:
+-- погашение не клало метку в хвост-дырку ожидаемой row, а унификация на
+-- имени - клала. Теперь окружающая с дыркой в хвосте принимает недостающее
+-- расширением, и обе формы стоят рядом в одном файле.
+--
+-- Ответ различает порядок по построению: сбор без разворота отдаёт [2, 1] и
+-- [3, 1] - перепутай хендлер порядок, и списки развернутся.
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Emit where
+  emit : Nat -> Unit
+
+forEach : (ω f : a -> Unit) -> List a -> Unit
+forEach f Nil = MkUnit
+forEach f (Cons x xs) =
+  let 1 u : Unit = f x
+  forEach f xs
+
+pair : Nat -> Nat -> List Nat
+pair a b = Cons a (Cons b Nil)
+
+-- Лямбда: тело идёт погашением, метка приезжает расширением дырки.
+wrapped : List Nat -> List Nat
+wrapped xs =
+  let 1 c : {Emit} Unit = \u -> forEach (\n -> emit n) xs
+  handle c with
+    state Nil
+    return v -> state
+    emit n -> resume MkUnit (Cons n state)
+
+-- Имя: та же метка приезжает унификацией аргумента.
+named : List Nat -> List Nat
+named xs =
+  let 1 c : {Emit} Unit = \u -> forEach emit xs
+  handle c with
+    state Nil
+    return v -> state
+    emit n -> resume MkUnit (Cons n state)
+
+append : List a -> (1 ys : List a) -> List a
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+main : List Nat
+main =
+  append
+    (wrapped (pair (Succ Zero) (Succ (Succ Zero))))
+    (named (pair (Succ Zero) (Succ (Succ (Succ Zero)))))

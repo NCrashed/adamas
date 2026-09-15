@@ -946,7 +946,7 @@ fn same_row(
 /// регионами. Поглощение с локальным аргументом метки поэтому отказывает:
 /// отказ конвертируемости честен, равенство таких рядов зависело бы от
 /// глубины читателя.
-fn closed_labels(labels: &[Label<Term>]) -> bool {
+pub(crate) fn closed_labels(labels: &[Label<Term>]) -> bool {
     labels.iter().all(|label| {
         label
             .arguments

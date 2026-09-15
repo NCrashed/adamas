@@ -2313,6 +2313,15 @@ fn discharges(
     // Взяв row неразвёрнутой, правило считало бы Λ по устаревшему набору.
     let ambient = &crate::conv::expanded(metas, size, ambient);
     let wanted = &crate::conv::expanded(metas, size, wanted);
+    // Окружающая с **дыркой** в хвосте недостающие метки принимает
+    // расширением (§10 вопрос 170): `?m := {недостающее | ?новый}` - тот же
+    // ход, каким унификация scoped labels решает `{| ?m}` против `{Emit | e}`
+    // на **имени** операции аргументом. Без него эта-разворот менял
+    // типизируемость: тело лямбды идёт погашением, и `forEach (\n -> emit n)
+    // xs` отвергалось там, где `forEach emit xs` проходил. Написанные
+    // сигнатуры это не трогает: их row обобщена до тела, хвост у неё -
+    // жёсткая переменная, а жёсткое расширение не принимает и не принимало.
+    let ambient = &widened(sig, metas, size, ambient, wanted);
     // У **открытой** row вызываемого хвост тот же, что у окружающей: Λ замкнута,
     // значит продолжаются они одинаково, и открытая row при закрытой окружающей
     // означала бы эффекты, о которых окружение не знает. Дырка в хвосте
@@ -2367,6 +2376,97 @@ fn discharges(
         }
     }
     true
+}
+
+/// Окружающая, принявшая недостающие метки вызываемого в хвост-дырку (§10
+/// вопрос 170).
+///
+/// Возвращается развёрнутая окружающая; не изменилась - когда расширению не
+/// место, и тогда отказ (или согласие) выносит обычный префиксный цикл:
+///
+/// - хвост окружающей жёсткий или отсутствует - расширять нечего, отказ
+///   честен: написанная row меток не давала;
+/// - хвост вызываемого - **та же** дырка: решение содержало бы её саму;
+/// - недостающих меток нет - расширять нечем;
+/// - незамкнутый аргумент метки - решение row-дырки обязано быть замкнутым
+///   (§10 вопрос 143), и отказ конвертируемости честен;
+/// - общие вхождения не сходятся аргументами - решать дырку рано: сравнение
+///   ниже откажет, а записанное решение не откатывается.
+///
+/// Аргументы недостающих меток разворачиваются по решённым дыркам перед
+/// квотированием - тем же ходом, что у [`quote_row`]: без него решение несло
+/// бы сырую дырку туда, где она уже решена.
+fn widened(
+    sig: &Signature,
+    metas: &mut Metas,
+    size: u32,
+    ambient: &Row<Rc<Value>>,
+    wanted: &Row<Rc<Value>>,
+) -> Row<Rc<Value>> {
+    use crate::row::Tail;
+    let Some(Tail::Meta(meta)) = metas.zonk_tail(ambient.tail()) else {
+        return ambient.clone();
+    };
+    // Дырка старше водораздела принадлежит написанному типу объявления, и её
+    // расширение молча вписывало бы эффект в сигнатуру: `silent : Bool ->
+    // Unit` с телом `put b` обязан остаться отказом. Возраст различает её от
+    // инстанциации места вызова, потому что тип элаборируется до тела.
+    if !metas.row_extendable(meta) {
+        return ambient.clone();
+    }
+    if metas.zonk_tail(wanted.tail()) == Some(Tail::Meta(meta)) {
+        return ambient.clone();
+    }
+    let mut missing: Vec<Label<Term>> = Vec::new();
+    let mut names: Vec<&Name> = Vec::new();
+    for label in wanted.labels() {
+        if !names.contains(&&label.name) {
+            names.push(&label.name);
+        }
+    }
+    for name in names {
+        let mine: Vec<&Label<Rc<Value>>> = wanted
+            .labels()
+            .iter()
+            .filter(|it| it.name == *name)
+            .collect();
+        let theirs: Vec<&Label<Rc<Value>>> = ambient
+            .labels()
+            .iter()
+            .filter(|it| it.name == *name)
+            .collect();
+        let common = mine.len().min(theirs.len());
+        for (a, b) in mine.iter().zip(&theirs).take(common) {
+            if a.arguments.len() != b.arguments.len() {
+                return ambient.clone();
+            }
+            for (x, y) in a.arguments.iter().zip(&b.arguments) {
+                if !convertible(sig, metas, size, x, y) {
+                    return ambient.clone();
+                }
+            }
+        }
+        for label in mine.into_iter().skip(common) {
+            missing.push(Label {
+                name: Rc::clone(&label.name),
+                arguments: label
+                    .arguments
+                    .iter()
+                    .map(|argument| {
+                        let argument = crate::solve::force(metas, argument)
+                            .unwrap_or_else(|| Rc::clone(argument));
+                        quote(size, &argument)
+                    })
+                    .collect(),
+            });
+        }
+    }
+    if missing.is_empty() || !crate::conv::closed_labels(&missing) {
+        return ambient.clone();
+    }
+    let fresh = metas.fresh_row();
+    metas.solve_row(meta, Row::closing(missing, fresh.tail()));
+    crate::conv::expanded(metas, size, ambient)
 }
 
 /// Row обратным чтением - для сообщения.

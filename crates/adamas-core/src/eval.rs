@@ -606,7 +606,14 @@ fn indexed(spine: &[Elim]) -> Option<Rc<Value>> {
 /// ответа не даёт ни один.
 fn laned(spine: &[Elim]) -> Option<Rc<Value>> {
     use crate::prim::Prim;
-    let [Elim::App(_), Elim::App(_), Elim::App(_), Elim::App(vector), Elim::App(at)] = spine else {
+    let [
+        Elim::App(_),
+        Elim::App(_),
+        Elim::App(_),
+        Elim::App(vector),
+        Elim::App(at),
+    ] = spine
+    else {
         return None;
     };
     let Value::Prim(Prim::Lit(_, wanted)) = &**at else {
@@ -645,7 +652,12 @@ fn lane_of(vector: &Rc<Value>, wanted: u64) -> Option<Rc<Value>> {
             }
             (
                 SimdOp::Splat,
-                [Elim::App(_), Elim::App(_), Elim::App(width), Elim::App(initial)],
+                [
+                    Elim::App(_),
+                    Elim::App(_),
+                    Elim::App(width),
+                    Elim::App(initial),
+                ],
             ) => {
                 let Value::Prim(Prim::Lit(_, width)) = &**width else {
                     return None;

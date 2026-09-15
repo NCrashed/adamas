@@ -528,12 +528,7 @@ fn simd_op_scheme(
                 given,
                 "i",
                 word.clone(),
-                bound(
-                    given,
-                    "x",
-                    Term::var(3),
-                    simd(Term::var(5), Term::var(4)),
-                ),
+                bound(given, "x", Term::var(3), simd(Term::var(5), Term::var(4))),
             ),
         )),
         // `simdLane : {0 n} -> {0 a} -> {0 d} -> (ω v : Simd n a)

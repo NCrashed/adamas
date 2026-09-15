@@ -141,8 +141,5 @@ fn descriptor(lane: PrimTy) -> Term {
         (Name::from(SIZE), Rc::new(numeral(lane.size()))),
         (Name::from(ALIGN), Rc::new(numeral(lane.size()))),
     ]));
-    Term::Object(Rc::from([(
-        Name::from(SIMD_LAYOUT),
-        Rc::new(written),
-    )]))
+    Term::Object(Rc::from([(Name::from(SIMD_LAYOUT), Rc::new(written))]))
 }

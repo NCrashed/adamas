@@ -80,10 +80,10 @@ const fn elems(stride: Option<Stride>) -> Elems {
 pub(crate) const FLAT: &str = include_str!("flat.c");
 
 /// Печать значения по таблице конструкторов.
-const PRINTER: &str = include_str!("print.c");
+pub(crate) const PRINTER: &str = include_str!("print.c");
 
 /// Дроп детей по той же таблице.
-const RELEASE: &str = include_str!("release.c");
+pub(crate) const RELEASE: &str = include_str!("release.c");
 
 /// Точка входа: печать ответа и счётчики блоков.
 pub(crate) const ENTRY: &str = include_str!("main.c");
@@ -492,7 +492,12 @@ fn packings(out: &mut String, program: &Program) {
 }
 
 /// Таблица конструкторов: имя и число полей по тегу.
-fn table(out: &mut String, program: &Program) {
+///
+/// Видна LLVM-эмиттеру ([`crate::emit_llvm`]) намеренно: печать и дроп детей у
+/// двух бэкендов **одни** - те же `print.c` и `release.c`, - а читают они эту
+/// таблицу. Вторая её сборка разъехалась бы с первой молча, и первым бы это
+/// увидел не прогон, а пользователь с перепутанным именем конструктора.
+pub(crate) fn table(out: &mut String, program: &Program) {
     out.push_str(concat!(
         "/* Конструкторы программы по тегу. Хвостовой элемент - чтобы массив не\n",
         " * оказался пустым у программы без единого конструктора. */\n",

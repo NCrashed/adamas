@@ -1,4 +1,5 @@
-//! Эмиттер LLVM: [`ir`](crate::ir) в текст `.ll` (§9 Фаза 7, волна 1, трек A).
+//! Эмиттер LLVM: [`ir`](crate::ir) в текст `.ll` (§9 Фаза 7, волна 1, треки
+//! A и A′).
 //!
 //! **Ядра этот модуль не читает** - ровно как [`emit_c`](crate::emit_c), и по
 //! той же проверяемой причине: шов между ядром и эмиттером существует затем,
@@ -21,22 +22,59 @@
 //! по формам врал трижды подряд.
 //!
 //! Что из правила следует построчно: у целочисленной арифметики **нет** `nsw` и
-//! `nuw`; `getelementptr` не эмитится вовсе - именно его необязательный флаг
-//! `nuw`, появившийся после 18, оказался единственным, ломающим чтение старой
-//! версией; ни `target datalayout`, ни `target triple` не пишется - цель берёт
+//! `nuw`; у [`getelementptr`](Builder::slot_pointer) нет ни `inbounds`, ни
+//! `nuw`; ни `target datalayout`, ни `target triple` не пишется - цель берёт
 //! `llc` у хоста, и вписанная строка сделала бы `.ll` непереносимым между
 //! архитектурами.
 //!
+//! GEP - первая форма, которой правило коснулось, и треугольник версий на ней
+//! **перемерен** (2026-09-15, трек A′, обе цепочки dev-shell): 18.1.8 отвергает
+//! `getelementptr inbounds nuw` разбором (`error: expected type`) и принимает
+//! как голый `getelementptr`, так и `getelementptr inbounds`. То есть ломает
+//! чтение ровно `nuw`, как и записано в плане, а не `inbounds`. Голый выбран
+//! всё равно: `inbounds` здесь законен - слот лежит внутри блока, - но правило
+//! говорит «без причины не использовать», а причины, которую можно предъявить
+//! числом, у него нет.
+//!
 //! # Что берёт этот срез
 //!
-//! Скалярный фрагмент, узкий намеренно: каркас важнее охвата, потому что правят
-//! его пять треков волны. Берётся плоское значение (все десять типов §4.11),
-//! арифметика, сравнение, прямой вызов первой формы, `let`, разбор по
-//! нульарному конструктору, `dup` и `drop`. Ответ программы обязан быть плоским.
+//! Скалярный фрагмент плюс **объектный слой**. Скалярное: плоское значение (все
+//! десять типов §4.11), арифметика, сравнение, прямой вызов первой формы,
+//! `let`, разбор, `dup` и `drop`. Объектное: [`Expr::Construct`] через
+//! `adamas_alloc`, придержанная ячейка ([`Expr::Reclaim`], `adamas_reuse` и
+//! `adamas_drop_reuse`), поля в ветви разбора, схлопнутый дроп разобранного
+//! ([`Salvage`], §5.1) и ответ программы объектом кучи либо записью.
 //!
-//! Не берётся - и отвергается **названным** отказом ([`LlvmError`]): объекты с
-//! полями, замыкания, массивы, регионы, плотные агрегаты, вторая форма
-//! понижения и всё, что за ней стоит, - хендлеры, резумпции, питомник.
+//! Не берётся - и отвергается **названным** отказом ([`LlvmError`]): замыкания,
+//! массивы, регионы, плотные агрегаты, вторая форма понижения и всё, что за ней
+//! стоит, - хендлеры, резумпции, питомник.
+//!
+//! # Где стояла граница на самом деле
+//!
+//! Трек A измерил корпус в 2 из 100 и назвал причину у 79 отказов одну: ответ
+//! программы - объект кучи, а спутник печати берёт только плоское целое. Отсюда
+//! читалось, что граница узкая и стоит у **печати**. Трек A′ это проверил
+//! пробной правкой, и **не подтвердилось**: снятая в одиночку, печать даёт
+//! те же 2 из 100. Гистограмма за ней другая - 45 конструктор, 17 эффект, 11
+//! поля в ветви, - потому что отказ печатью стоял первым и заслонял второй ряд.
+//!
+//! Мера объектного слоя поэтому считается его собственным потолком, а не
+//! разностью: 21 из 100 при отвергнутом плавающем, и следующая стена названа -
+//! 43 эффект и 15 замыкание, то есть волна 2 и слой замыканий, а не этот трек.
+//!
+//! # Что объектный слой знает о раскладке
+//!
+//! Ровно два числа - [`HEADER_BYTES`] и [`SLOT_BYTES`], - и обязаны они совпасть
+//! с `adamas.h`. Совпадение **проверяется сборкой**: спутник несёт
+//! `_Static_assert` с этими же числами, подставленными отсюда, и разъедься они
+//! с рантаймом - не соберётся спутник, а не разойдётся ответ.
+//!
+//! Знать их приходится потому, что слот читается и пишется **инструкцией**, а
+//! не вызовом `adamas_field`/`adamas_set_field`. Довод - трек C: вызов в чужую
+//! единицу трансляции непрозрачен для `opt`, и «RC-трафик на объектах» через
+//! него не увидеть ни до, ни после инлайнинга. Куча при этом остаётся за
+//! рантаймом целиком: блок выдаёт `adamas_alloc`, придерживает
+//! `adamas_drop_reuse`, занимает `adamas_reuse`, освобождает `adamas_free`.
 //!
 //! # Плавающее: строгий режим (§4.3, трек F)
 //!
@@ -118,32 +156,41 @@
 //! ([`Builder::analysis_tail`]). Цена - вторая печать разбора рядом с
 //! [`Builder::analysis`]; выигрыш - на витке нет ни `phi`, ни лишнего блока.
 //!
-//! # Чем срез платит рантайму, и это измерено
+//! # Чем срез платил рантайму, и это снято
 //!
 //! Сравнение (§4.3) отвечает конструктором `Bool`, а строит и разбирает его
-//! **рантайм** - `adamas_con0` и `adamas_tag`. Для `opt` они непрозрачны, и на
-//! `workload-scalar` после `-O2` остаётся цикл с двумя вызовами на виток
-//! (проверено 2026-09-15 чтением `opt`-выхода: `tailrecurse` со вставленными
-//! `fn_0`, `fn_1`, `fn_2`, и в нём `call @adamas_con0`, `call @adamas_tag`).
+//! **рантайм** - `adamas_con0` и `adamas_tag`. Для `opt` они непрозрачны, и
+//! трек A измерил цену: на `workload-scalar` после `-O2` оставался цикл с двумя
+//! вызовами на виток, тогда как у C-бэкенда та же пара исчезала на сборке
+//! (`-std=c11 -O2 -flto`, ноль вызовов в бинаре по `objdump -d`). Разница была
+//! не в качестве кодогенерации, а в том, что рантайм приезжает к C битовым
+//! кодом LTO, а к `.ll` - готовым объектником.
 //!
-//! У C-бэкенда та же пара вызовов есть в тексте и **исчезает на сборке**:
-//! строка стенда `-std=c11 -O2 -flto` даёт ноль вызовов обоих имён в готовом
-//! бинаре (проверено тем же днём, `objdump -d`). Разница не в качестве
-//! кодогенерации, а в том, что рантайм приезжает к C битовым кодом LTO, а к
-//! `.ll` - готовым объектником.
+//! Снято это **не правкой эмиттера**, а стадией конвейера
+//! ([`Pipeline::whole_program`](crate::llvm::Pipeline::whole_program), трек A′):
+//! рантайм собирается в `.bc` и прикладывается `llvm-link` перед `opt`. Замер
+//! 2026-09-15: на `workload-fbip` вызовов рантайма после `-O2` было 22, стало
+//! 0; на `workload-symbolic` 29 и 0; на `workload-scalar` 4 и 0, то есть та
+//! самая пара ушла. Ответ и счётчик блоков те же, переиспользование ячейки
+//! инлайнинг переживает. Свидетель - `tests/llvm.rs`.
 //!
-//! Отсюда два следствия. Мерить LLVM против C сегодня нельзя: число мерило бы
-//! LTO, а не бэкенд. И снимается это стадией в конвейере
-//! ([`llvm::Pipeline`](crate::llvm::Pipeline)) - рантайм, собранный в
-//! `.bc` и приложенный `llvm-link` перед `opt`, - а не правкой эмиттера.
+//! Штатный конвейер стадии не несёт, и это решение, а не недоделка: `.bc`
+//! рантайма собран под хост, а `.ll` переносим - подробности там же, в
+//! [`Pipeline::whole_program`](crate::llvm::Pipeline::whole_program).
 //!
 //! # Что рядом с `.ll` и почему
 //!
-//! Спутник на C ([`Artefacts::support`]): печать ответа и точка входа. Он не
-//! уступка - это **те же** `flat.c` и `main.c`, что собирает C-бэкенд, взятые
-//! дословно теми же `include_str!`. Разъедься две печати - разошёлся бы и
-//! договор «печатает то же», а причина была бы не в вычислении. Программу
-//! считает `.ll` целиком; спутник её только печатает.
+//! Спутник на C ([`Artefacts::support`]): печать ответа, дроп его детей и точка
+//! входа. Он не уступка - это **те же** `flat.c`, `print.c`, `release.c` и
+//! `main.c`, что собирает C-бэкенд, взятые дословно теми же `include_str!`, над
+//! той же таблицей конструкторов ([`emit_c::table`](crate::emit_c::table)).
+//! Разъедься две печати - разошёлся бы и договор «печатает то же», а причина
+//! была бы не в вычислении. Программу считает `.ll` целиком; спутник её только
+//! печатает и дропает.
+//!
+//! Одну строку спутник добавляет от себя - [`RELEASE_SYMBOL`]: `release.c`
+//! объявляет дроп детей `static`, а зовёт его порождённый IR из **другой**
+//! единицы трансляции.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -152,7 +199,10 @@ use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
 
 use adamas_core::source::Location;
 
-use crate::ir::{Arm, Binding, Expr, Fact, Form, FuncId, Function, LocalId, Program, Repr, Source};
+use crate::ir::{
+    Arm, Binding, Constructor, CtorId, Expr, Fact, Form, FuncId, Function, LocalId, Program, Repr,
+    Salvage, Source,
+};
 
 /// Почему эмиссия в LLVM отказала.
 ///
@@ -187,15 +237,6 @@ pub enum LlvmError {
         /// Чья функция.
         function: String,
     },
-
-    /// Разбор объекта с полями: за ним стоит весь объектный слой рантайма.
-    #[error("`{function}`: ветвь связывает поля `{constructor}` - объектов срез не читает")]
-    Fields {
-        /// Чья функция.
-        function: String,
-        /// Какого конструктора.
-        constructor: String,
-    },
 }
 
 /// Что даёт эмиссия: текст `.ll` и спутник на C.
@@ -210,11 +251,30 @@ pub struct Artefacts {
 /// Имя точки входа, которую спутник зовёт из `.ll`.
 const ENTRY_SYMBOL: &str = "adamas_entry";
 
+/// Имя дропа детей, видимого из `.ll`.
+///
+/// Своё, а не `adamas_release_value`: `release.c` объявляет тот `static`, и
+/// линковать его из другой единицы трансляции нечем. Обёртка стоит в спутнике,
+/// то есть **одна** на программу, и дроп за ней тот же самый, что у C-бэкенда.
+pub const RELEASE_SYMBOL: &str = "adamas_release_extern";
+
 /// Имя константы с текстом обрыва по неизвестному тегу.
 const TAG_MESSAGE: &str = "@.str.tag";
 
-/// Имя константы с текстом обрыва в дропе детей.
-const RELEASE_MESSAGE: &str = "@.str.release";
+/// Смещение первого слота от начала объекта, в байтах (`adamas.h`).
+///
+/// Не догадка и не соглашение этого файла: `adamas.h` держит на нём
+/// `_Static_assert(offsetof(adamas_object, fields) == 8)`, и спутник повторяет
+/// проверку **этим** числом ([`support`]). Разъехавшись, они уронят сборку, а
+/// не ответ.
+pub const HEADER_BYTES: u32 = 8;
+
+/// Ширина слота объекта, в байтах.
+///
+/// Слово на слот, а не упакованные байты: плотная укладка §4.11 принадлежит
+/// плоским массивам и агрегатам, а слот объекта Perceus носит либо указатель,
+/// либо биты числа в целом слове (`flat.c`).
+pub const SLOT_BYTES: u32 = 8;
 
 /// Атрибуты определения функции.
 ///
@@ -245,14 +305,7 @@ const CONVENTION: &str = "tailcc";
 /// [`LlvmError`] - форма понижения вне скалярного фрагмента.
 pub fn emit(program: &Program) -> Result<Artefacts, LlvmError> {
     let entry = &program.functions[program.entry.0];
-    // Ответ обязан быть плоским: печатает его спутник, а печать плоского
-    // ответа - единственная, которую он знает. Граница здесь у **печати**, не у
-    // вычисления, и именно она отвергает большую часть корпуса.
-    let answer = entry.result.primitive().ok_or_else(|| LlvmError::Shape {
-        function: entry.name.clone(),
-        place: "ответ программы".to_owned(),
-        shape: describe(entry.result),
-    })?;
+    let answer = Answer::of(entry)?;
     // Точка входа зовётся без аргументов, и подать их было бы неоткуда: `main`
     // с параметром есть функция значением, а её ответ печатать нечем и у
     // C-бэкенда (`agreement.rs`, `LANGUAGE`).
@@ -276,8 +329,48 @@ pub fn emit(program: &Program) -> Result<Artefacts, LlvmError> {
     }
     Ok(Artefacts {
         ll: module.finish(program, answer),
-        support: support(answer),
+        support: support(program, answer),
     })
+}
+
+/// Чем отвечает программа: тем и различаются две печати спутника.
+///
+/// Форм две, потому что их две у `main.c`, взятого дословно: плоское лежит в
+/// регистре и печатается по сорту, объект приходит владением и после печати
+/// дропается. Третьей формы нет и у C-бэкенда.
+#[derive(Clone, Copy, Debug)]
+enum Answer {
+    /// Плоское: печатается сортом, дропать нечего.
+    Flat(PrimTy),
+    /// Объект кучи либо запись: печатается таблицей, дропается спутником.
+    Boxed,
+}
+
+impl Answer {
+    /// Чем отвечает точка входа. Прочее - названный отказ.
+    fn of(entry: &Function) -> Result<Self, LlvmError> {
+        if let Some(ty) = entry.result.primitive() {
+            return Ok(Self::Flat(ty));
+        }
+        // Запись сюда входит, резумпция - нет: печатать её нечем и у
+        // C-бэкенда (`print.c` ответил бы `?tag`), а дроп у неё свой.
+        if matches!(entry.result, Repr::Boxed | Repr::Record(_)) {
+            return Ok(Self::Boxed);
+        }
+        Err(LlvmError::Shape {
+            function: entry.name.clone(),
+            place: "ответ программы".to_owned(),
+            shape: describe(entry.result),
+        })
+    }
+
+    /// Тип регистра, которым ответ уходит из `.ll`.
+    const fn machine(self) -> &'static str {
+        match self {
+            Self::Flat(ty) => machine(ty),
+            Self::Boxed => "ptr",
+        }
+    }
 }
 
 /// Как назвать представление в тексте отказа.
@@ -725,24 +818,33 @@ impl Module {
     }
 
     /// Складывает модуль: шапка, объявления, константы, тела, метаданные.
-    fn finish(self, program: &Program, answer: PrimTy) -> String {
+    fn finish(self, program: &Program, answer: Answer) -> String {
         let mut out = String::new();
         out.push_str(concat!(
             "; Порождено понижением Adamas. Править нечего: правится тот, кто\n",
             "; породил. Договор с рантаймом - `adamas.h`.\n",
             ";\n",
             "; Подмножество IR консервативное (`emit_llvm.rs`): ни `nsw`/`nuw` у\n",
-            "; арифметики, ни `getelementptr`, ни строк цели - её берёт `llc` у\n",
-            "; хоста. Проверяется прогоном на минимальной версии, а не грепом.\n",
+            "; арифметики, ни `inbounds`/`nuw` у `getelementptr`, ни строк цели -\n",
+            "; её берёт `llc` у хоста. Проверяется прогоном на минимальной\n",
+            "; версии, а не грепом.\n",
             "\n",
-            "; Рантайм: те же точки входа, что зовёт C-бэкенд.\n",
+            "; Рантайм: те же точки входа, что зовёт C-бэкенд. Куча целиком за\n",
+            "; ним; слот объекта читает и пишет сам IR (`emit_llvm.rs`).\n",
             "declare ptr @adamas_con0(i16)\n",
+            "declare ptr @adamas_alloc(i16, i64)\n",
+            "declare ptr @adamas_reuse(ptr, i16, i64)\n",
+            "declare void @adamas_free(ptr)\n",
             "declare i16 @adamas_tag(ptr)\n",
+            "declare i32 @adamas_is_unique(ptr)\n",
             "declare ptr @adamas_dup(ptr)\n",
             "declare void @adamas_drop(ptr, ptr)\n",
+            "declare ptr @adamas_drop_reuse(ptr, ptr)\n",
             "declare void @adamas_fail(ptr) noreturn\n",
-            "\n",
         ));
+        // Дроп детей живёт в спутнике: таблица конструкторов, по которой он
+        // идёт, - та же, по которой печатается ответ.
+        let _ = writeln!(out, "declare void @{RELEASE_SYMBOL}(ptr)\n");
 
         if self.dwarf.is_some() {
             out.push_str(concat!(
@@ -756,29 +858,10 @@ impl Module {
 
         let _ = writeln!(
             out,
-            "{TAG_MESSAGE} = private unnamed_addr constant [{} x i8] c\"{}\"",
+            "{TAG_MESSAGE} = private unnamed_addr constant [{} x i8] c\"{}\"\n",
             terminated(TAG_TEXT).len(),
             escaped(&terminated(TAG_TEXT))
         );
-        let _ = writeln!(
-            out,
-            "{RELEASE_MESSAGE} = private unnamed_addr constant [{} x i8] c\"{}\"\n",
-            terminated(RELEASE_TEXT).len(),
-            escaped(&terminated(RELEASE_TEXT))
-        );
-
-        out.push_str(concat!(
-            "; Дроп детей: срез берёт только нульарные конструкторы, а они\n",
-            "; непосредственны (`adamas_con0`) и до release не доходят вовсе.\n",
-            "; Не отказ, а обрыв: доехав сюда, срез считал бы не то, что обещал.\n"
-        ));
-        let _ = writeln!(
-            out,
-            "define internal void @adamas_release_none(ptr %value) {DEFINITION_ATTRIBUTES} {{"
-        );
-        out.push_str("entry:\n");
-        let _ = writeln!(out, "  call void @adamas_fail(ptr {RELEASE_MESSAGE})");
-        out.push_str("  unreachable\n}\n\n");
 
         out.push_str(&self.bodies);
 
@@ -791,16 +874,16 @@ impl Module {
         let _ = writeln!(
             out,
             "define {} @{ENTRY_SYMBOL}() {DEFINITION_ATTRIBUTES} {{",
-            machine(answer)
+            answer.machine()
         );
         out.push_str("entry:\n");
         let _ = writeln!(
             out,
             "  %answer = call {CONVENTION} {} @fn_{}()",
-            machine(answer),
+            answer.machine(),
             program.entry.0
         );
-        let _ = writeln!(out, "  ret {} %answer", machine(answer));
+        let _ = writeln!(out, "  ret {} %answer", answer.machine());
         out.push_str("}\n");
 
         if !self.metadata.nodes.is_empty() {
@@ -813,9 +896,6 @@ impl Module {
 
 /// Текст обрыва по неизвестному тегу.
 const TAG_TEXT: &str = "разбор не знает конструктора";
-
-/// Текст обрыва в дропе детей.
-const RELEASE_TEXT: &str = "release в скалярном фрагменте: у нульарного детей нет";
 
 /// Байты строки с завершающим нулём.
 fn terminated(text: &str) -> Vec<u8> {
@@ -843,17 +923,14 @@ fn escaped(bytes: &[u8]) -> String {
 
 /// Тип регистра, в который представление ложится. `None` - не ложится.
 ///
-/// Указательное здесь ровно одно - [`Repr::Boxed`], - и в срезе за ним стоит
-/// **только нульарный конструктор**: единственный узел, порождающий указатель
-/// без аллокации, - это [`Expr::Compare`] (§4.3, ответ `Bool`), а всё, что
-/// заводит объект с полями, срез отвергает узлом. Отсюда законность и `drop`
-/// через `@adamas_release_none`: у непосредственного значения детей нет.
-///
-/// Запись и резумпция сюда **не** входят, хотя в рантайме они тот же указатель:
-/// у первой есть поля, у второй - свой дроп, и обе означали бы объектный слой.
+/// Указательных два - [`Repr::Boxed`] и [`Repr::Record`]: в рантайме это один и
+/// тот же объект с заголовком, а различие форм живёт в понижении (`ir.rs`,
+/// [`Repr::pointer`]). Резумпция сюда **не** входит, хотя указатель тот же: у
+/// неё свой дроп с ручкой стека (§3.4), и взять её сюда значило бы дропать её
+/// как данные.
 fn slot(repr: Repr) -> Option<&'static str> {
     match repr {
-        Repr::Boxed => Some("ptr"),
+        Repr::Boxed | Repr::Record(_) => Some("ptr"),
         other => other.primitive().map(machine),
     }
 }
@@ -1109,15 +1186,17 @@ impl<'a> Builder<'a> {
             Expr::Local(local) => self.reprs.get(local).copied().unwrap_or(Repr::Boxed),
             Expr::Literal { ty, .. } | Expr::Primitive { ty, .. } => Repr::Flat(*ty),
             Expr::Call { function, .. } => self.program.functions[function.0].result,
-            Expr::Bind { body, .. } | Expr::Dup { body, .. } | Expr::Drop { body, .. } => {
-                self.shape(body)
-            }
+            Expr::Bind { body, .. }
+            | Expr::Dup { body, .. }
+            | Expr::Drop { body, .. }
+            | Expr::Reclaim { body, .. } => self.shape(body),
             Expr::Match { arms, .. } => arms
                 .first()
                 .map_or(Repr::Boxed, |arm| self.shape(&arm.body)),
             // Ответ сравнения - конструктор `Bool` (§4.3): аргументы плоские,
-            // ответ указательный. Прочее срез отвергает, и представление его
-            // здесь не спрашивается.
+            // ответ указательный. Ответ конструктора указателен по построению -
+            // и объект, и форма записи в рантайме одно и то же. Прочее срез
+            // отвергает, и представление его здесь не спрашивается.
             _ => Repr::Boxed,
         }
     }
@@ -1175,14 +1254,16 @@ impl<'a> Builder<'a> {
                     salvage,
                     body,
                 } => {
-                    if salvage.collapses() {
-                        return Err(self.node("схлопнутый дроп разобранного"));
-                    }
-                    let value = self.operand(*local)?;
-                    self.instruction(
-                        &format!("call void @adamas_drop(ptr {value}, ptr @adamas_release_none)"),
-                        self.here(),
-                    );
+                    self.dropped(*local, salvage, None)?;
+                    at = body;
+                }
+                Expr::Reclaim {
+                    local,
+                    token,
+                    salvage,
+                    body,
+                } => {
+                    self.dropped(*local, salvage, Some(*token))?;
                     at = body;
                 }
                 other => return Ok(other),
@@ -1255,16 +1336,20 @@ impl<'a> Builder<'a> {
             // Приставки сняты `prologue` выше, и досюда узел не
             // доезжает. Ветвь стоит ради исчерпывающего разбора: пропади она,
             // новый узел-приставка ушёл бы в тихий отказ вместо ошибки сборки.
-            Expr::Bind { .. } | Expr::Dup { .. } | Expr::Drop { .. } => {
+            Expr::Bind { .. } | Expr::Dup { .. } | Expr::Drop { .. } | Expr::Reclaim { .. } => {
                 Err(self.node("узел-приставка после снятия приставок"))
             }
             Expr::Match {
                 scrutinee, arms, ..
             } => self.analysis(scrutinee, arms),
             Expr::Erased => Err(self.node("стёртая позиция значением")),
-            Expr::Construct { .. } | Expr::ConstructClosure { .. } => Err(self.node("конструктор")),
+            Expr::Construct {
+                constructor,
+                reuse,
+                arguments,
+            } => self.construct(*constructor, *reuse, arguments),
+            Expr::ConstructClosure { .. } => Err(self.node("конструктор значением")),
             Expr::Closure { .. } | Expr::Apply { .. } => Err(self.node("замыкание")),
-            Expr::Reclaim { .. } => Err(self.node("придержанная ячейка")),
             Expr::Pack { .. } | Expr::Unpack { .. } => Err(self.node("плотный агрегат")),
             Expr::Layout { .. } | Expr::LayoutField { .. } => Err(self.node("дескриптор укладки")),
             Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. } => {
@@ -1448,6 +1533,280 @@ impl<'a> Builder<'a> {
         self.binary("xor", "", word, &bits, &mask)
     }
 
+    /// Адрес слота: заголовок плюс номер слота на его ширину.
+    ///
+    /// `getelementptr i8` без `inbounds` и без `nuw` - правило консервативного
+    /// подмножества. Разбор 18.1.8 ломает ровно `nuw` (перемерено 2026-09-15,
+    /// см. шапку модуля); `inbounds` она читает, но причины ставить его,
+    /// предъявимой числом, нет.
+    ///
+    /// Байтовый шаг, а не `getelementptr ptr`: слот носит и указатель, и биты
+    /// числа в целом слове, а смещение у обоих одно (`flat.c`). Считать его
+    /// типом элемента значило бы завести два разных GEP там, где адрес один.
+    fn slot_pointer(&mut self, object: &str, slot: u32) -> String {
+        let offset = HEADER_BYTES + slot * SLOT_BYTES;
+        let name = self.temp();
+        self.instruction(
+            &format!("{name} = getelementptr i8, ptr {object}, i64 {offset}"),
+            self.here(),
+        );
+        name
+    }
+
+    /// Пишет слот: плоское - битами в целое слово, ссылка - собой.
+    ///
+    /// Расширение беззнаковое, потому что таким его считает `adamas_word_*`
+    /// (`flat.c`): биты типа берутся как есть и доливаются нулями. Читающая
+    /// сторона - и здесь, и в печати - слово обрезает, поэтому верх не наблюдаем;
+    /// но разойтись с C-бэкендом в **записанных байтах** незачем.
+    fn store_slot(&mut self, object: &str, slot: u32, repr: Repr, value: &str) {
+        let address = self.slot_pointer(object, slot);
+        match repr.primitive() {
+            Some(ty) => {
+                let word = self.widen(ty, value);
+                self.instruction(&format!("store i64 {word}, ptr {address}"), self.here());
+            }
+            None => {
+                self.instruction(&format!("store ptr {value}, ptr {address}"), self.here());
+            }
+        }
+    }
+
+    /// Читает слот: обратная сторона [`Builder::store_slot`].
+    fn load_slot(&mut self, object: &str, slot: u32, repr: Repr) -> String {
+        let address = self.slot_pointer(object, slot);
+        if let Some(ty) = repr.primitive() {
+            let word = self.temp();
+            self.instruction(&format!("{word} = load i64, ptr {address}"), self.here());
+            return self.narrow(ty, &word);
+        }
+        let name = self.temp();
+        self.instruction(&format!("{name} = load ptr, ptr {address}"), self.here());
+        name
+    }
+
+    /// Плоское значение в слово слота.
+    fn widen(&mut self, ty: PrimTy, value: &str) -> String {
+        if ty.size() * 8 == 64 {
+            return value.to_owned();
+        }
+        let name = self.temp();
+        self.instruction(
+            &format!("{name} = zext {} {value} to i64", machine(ty)),
+            self.here(),
+        );
+        name
+    }
+
+    /// Слово слота обратно в плоское значение.
+    fn narrow(&mut self, ty: PrimTy, word: &str) -> String {
+        if ty.size() * 8 == 64 {
+            return word.to_owned();
+        }
+        let name = self.temp();
+        self.instruction(
+            &format!("{name} = trunc i64 {word} to {}", machine(ty)),
+            self.here(),
+        );
+        name
+    }
+
+    /// Объект конструктора: сперва аргументы, потом блок, потом слоты.
+    ///
+    /// Порядок тот же, что у C-бэкенда ([`crate::emit_c`]), и он не косметика:
+    /// аргумент вправе сам аллоцировать, и посчитай его после `adamas_alloc` -
+    /// счётчик выданных блоков разошёлся бы между двумя бэкендами при том же
+    /// ответе.
+    ///
+    /// Придержанная ячейка (§5.1) занимает место `adamas_alloc`: `adamas_reuse`
+    /// её переписывает, а на пустой аллоцирует сам - решается это в рантайме,
+    /// потому что уникальность разобранного известна только там.
+    fn construct(
+        &mut self,
+        constructor: CtorId,
+        reuse: Option<LocalId>,
+        arguments: &[Expr],
+    ) -> Result<String, LlvmError> {
+        let described = self.program.constructors[usize::from(constructor.0)].clone();
+        let slots = described.slots();
+        if slots == 0 {
+            // Нульарный непосредствен: блока под него не выдаётся вовсе, и это
+            // видно счётчиком (`main.c` печатает выданные и живые).
+            let name = self.temp();
+            self.instruction(
+                &format!(
+                    "{name} = call ptr @adamas_con0(i16 {}) ; {}",
+                    constructor.0, described.name
+                ),
+                self.here(),
+            );
+            return Ok(name);
+        }
+        let given = self.given(&described, arguments)?;
+        let object = self.temp();
+        match reuse {
+            Some(token) => {
+                let block = self.operand(token)?;
+                self.instruction(
+                    &format!(
+                        "{object} = call ptr @adamas_reuse(ptr {block}, i16 {}, i64 {slots}) ; {}",
+                        constructor.0, described.name
+                    ),
+                    self.here(),
+                );
+            }
+            None => {
+                self.instruction(
+                    &format!(
+                        "{object} = call ptr @adamas_alloc(i16 {}, i64 {slots}) ; {}",
+                        constructor.0, described.name
+                    ),
+                    self.here(),
+                );
+            }
+        }
+        for (slot, (argument, repr)) in given.into_iter().zip(described.slot_reprs()).enumerate() {
+            let at = u32::try_from(slot).unwrap_or(u32::MAX);
+            self.store_slot(&object, at, repr, &argument);
+        }
+        Ok(object)
+    }
+
+    /// Аргументы дожившим связываниям конструктора, в порядке слотов.
+    fn given(
+        &mut self,
+        described: &Constructor,
+        arguments: &[Expr],
+    ) -> Result<Vec<String>, LlvmError> {
+        let present: Vec<usize> = described
+            .binders
+            .iter()
+            .enumerate()
+            .filter(|(_, fact)| fact.present)
+            .map(|(position, _)| position)
+            .collect();
+        let mut given = Vec::new();
+        for position in present {
+            let Some(argument) = arguments.get(position) else {
+                continue;
+            };
+            given.push(self.value(argument)?);
+        }
+        Ok(given)
+    }
+
+    /// Отданная ссылка: [`Expr::Drop`] и [`Expr::Reclaim`] одной печатью.
+    ///
+    /// Различаются они одним - достаётся ли блок `token`, - и в схлопнутой
+    /// форме тем же одним. Печатать их порознь значило бы завести четыре места,
+    /// где стоит имя дропа детей.
+    fn dropped(
+        &mut self,
+        local: LocalId,
+        salvage: &Salvage,
+        token: Option<LocalId>,
+    ) -> Result<(), LlvmError> {
+        if salvage.collapses() {
+            return self.salvaged(local, salvage, token);
+        }
+        let value = self.operand(local)?;
+        match token {
+            Some(token) => {
+                let name = self.temp();
+                self.instruction(
+                    &format!(
+                        "{name} = call ptr @adamas_drop_reuse(ptr {value}, ptr @{RELEASE_SYMBOL})"
+                    ),
+                    self.here(),
+                );
+                self.operands.insert(token, name);
+            }
+            None => self.instruction(
+                &format!("call void @adamas_drop(ptr {value}, ptr @{RELEASE_SYMBOL})"),
+                self.here(),
+            ),
+        }
+        Ok(())
+    }
+
+    /// Дроп разобранного, схлопнутый с `dup` его полей (§5.1, [`Salvage`]).
+    ///
+    /// Форма та же, что у C-бэкенда, и различает ветви та же уникальность в
+    /// рантайме (`adamas_is_unique`, §10 вопрос 149): у уникального взятые поля
+    /// достаются ветви даром, невзятые дропаются здесь, блок либо освобождается,
+    /// либо достаётся `token`; у разделённого берётся ссылка на каждое взятое,
+    /// счётчик родителя идёт вниз, придержать нечего.
+    ///
+    /// Ветвление здесь, а не `select`: у ветвей разные **побочные действия**, и
+    /// посчитать обе значило бы дропнуть невзятые поля разделённого родителя,
+    /// который их держит.
+    fn salvaged(
+        &mut self,
+        local: LocalId,
+        salvage: &Salvage,
+        token: Option<LocalId>,
+    ) -> Result<(), LlvmError> {
+        let value = self.operand(local)?;
+        let at = self.matches;
+        self.matches += 1;
+        let unique = format!("s{at}.unique");
+        let shared = format!("s{at}.shared");
+        let join = format!("s{at}.join");
+
+        let answer = self.temp();
+        self.instruction(
+            &format!("{answer} = call i32 @adamas_is_unique(ptr {value})"),
+            self.here(),
+        );
+        let verdict = self.temp();
+        self.instruction(&format!("{verdict} = icmp ne i32 {answer}, 0"), self.here());
+        self.instruction(
+            &format!("br i1 {verdict}, label %{unique}, label %{shared}"),
+            self.here(),
+        );
+
+        self.start(&unique);
+        for field in &salvage.spare {
+            let spare = self.operand(*field)?;
+            self.instruction(
+                &format!("call void @adamas_drop(ptr {spare}, ptr @{RELEASE_SYMBOL})"),
+                self.here(),
+            );
+        }
+        if token.is_none() {
+            self.instruction(&format!("call void @adamas_free(ptr {value})"), self.here());
+        }
+        let from_unique = self.block.clone();
+        self.instruction(&format!("br label %{join}"), self.here());
+
+        self.start(&shared);
+        for field in &salvage.taken {
+            let named = self.operand(*field)?;
+            let name = self.temp();
+            self.instruction(
+                &format!("{name} = call ptr @adamas_dup(ptr {named})"),
+                self.here(),
+            );
+        }
+        self.instruction(
+            &format!("call void @adamas_drop(ptr {value}, ptr @{RELEASE_SYMBOL})"),
+            self.here(),
+        );
+        let from_shared = self.block.clone();
+        self.instruction(&format!("br label %{join}"), self.here());
+
+        self.start(&join);
+        if let Some(token) = token {
+            let name = self.temp();
+            self.instruction(
+                &format!("{name} = phi ptr [ {value}, %{from_unique} ], [ null, %{from_shared} ]"),
+                self.here(),
+            );
+            self.operands.insert(token, name);
+        }
+        Ok(())
+    }
+
     /// Прямой вызов: стёртые позиции в вызов не идут.
     ///
     /// `sort` - шов трека D: [`Tail::Must`] печатает `musttail`, и следом за
@@ -1500,32 +1859,26 @@ impl<'a> Builder<'a> {
         Ok(name)
     }
 
-    /// Голова разбора: отказ по полям, тег, `switch` и блок обрыва.
+    /// Голова разбора: тег, `switch` и блок обрыва.
     ///
-    /// Полей ветвь не связывает: за полем стоит объект кучи, а срез его не
-    /// читает. Нульарный конструктор непосредствен, и тег у него - он сам.
+    /// Разбираемое **заимствуется**: поля читаются по нему, а отдаёт его сама
+    /// ветвь - [`Expr::Drop`] либо [`Expr::Reclaim`] внутри неё
+    /// (`perceus::arm`). Владения поля не заводят: ссылку на нужное берёт
+    /// `Dup`, поставленный тем же проходом, а ненужное не читается вовсе.
+    /// Нульарный конструктор непосредствен, и тег у него - он сам.
     ///
     /// Одна на обе позиции намеренно: разъедься головы - хвостовой разбор
-    /// поехал бы по другому тегу, и заметить это было бы нечем. Отдаёт номер
-    /// разбора и метки ветвей; ветви печатает вызывающий, потому что позиция у
-    /// них его.
+    /// поехал бы по другому тегу, и заметить это было бы нечем. Отдаёт
+    /// разбираемое, номер разбора и метки ветвей; ветви печатает вызывающий,
+    /// потому что позиция у них его. Разбираемое ему нужно затем же, зачем и
+    /// голове: по нему читаются поля.
     fn dispatch(
         &mut self,
         scrutinee: &Expr,
         arms: &[Arm],
-    ) -> Result<(u32, Vec<String>), LlvmError> {
+    ) -> Result<(String, u32, Vec<String>), LlvmError> {
         if arms.is_empty() {
             return Err(self.node("разбор пустого типа"));
-        }
-        for arm in arms {
-            if arm.fields.iter().any(|field| field.fact.present) {
-                return Err(LlvmError::Fields {
-                    function: self.function.name.clone(),
-                    constructor: self.program.constructors[usize::from(arm.constructor.0)]
-                        .name
-                        .clone(),
-                });
-            }
         }
 
         let scrutinised = self.value(scrutinee)?;
@@ -1555,18 +1908,19 @@ impl<'a> Builder<'a> {
             self.here(),
         );
         self.instruction("unreachable", self.here());
-        Ok((at, labels))
+        Ok((scrutinised, at, labels))
     }
 
     /// Разбор значением: ветви сводятся `phi` в блоке стыковки.
     fn analysis(&mut self, scrutinee: &Expr, arms: &[Arm]) -> Result<String, LlvmError> {
-        let (at, labels) = self.dispatch(scrutinee, arms)?;
+        let (scrutinised, at, labels) = self.dispatch(scrutinee, arms)?;
         let answer = self.typed(&arms[0].body)?;
         let join = format!("m{at}.join");
 
         let mut incoming = Vec::new();
         for (arm, label) in arms.iter().zip(&labels) {
             self.start(label);
+            self.bind_fields(&scrutinised, arm);
             let value = self.value(&arm.body)?;
             // Предшественник - блок, которым ветвь **закончилась**: вложенный
             // разбор внутри неё сменил бы его.
@@ -1589,12 +1943,32 @@ impl<'a> Builder<'a> {
     /// блоке**, а ветвь, кончающаяся `br label %join`, его не даёт; блока
     /// стыковки здесь нет вовсе, и хвост уезжает в каждую ветвь целым.
     fn analysis_tail(&mut self, scrutinee: &Expr, arms: &[Arm]) -> Result<(), LlvmError> {
-        let (_, labels) = self.dispatch(scrutinee, arms)?;
+        let (scrutinised, _, labels) = self.dispatch(scrutinee, arms)?;
         for (arm, label) in arms.iter().zip(&labels) {
             self.start(label);
+            self.bind_fields(&scrutinised, arm);
             self.tail(&arm.body)?;
         }
         Ok(())
+    }
+
+    /// Поля ветви: слот у каждого свой, стёртое слота не занимает.
+    ///
+    /// Номер слота спрашивается у [`Constructor::slot`], а не считается здесь
+    /// заново: стёртые связывания в объекте отсутствуют, и вторая арифметика
+    /// нумерации разошлась бы с первой на первом же стёртом поле - молча и с
+    /// перепутанными значениями, а не отказом.
+    fn bind_fields(&mut self, object: &str, arm: &Arm) {
+        let described = self.program.constructors[usize::from(arm.constructor.0)].clone();
+        let params = described.params as usize;
+        for (position, binding) in arm.fields.iter().enumerate() {
+            let Some(slot) = described.slot(params + position) else {
+                continue;
+            };
+            let taken = self.load_slot(object, slot, binding.fact.repr);
+            let _ = writeln!(self.body, "  ; {taken} - {}", binding.name);
+            self.operands.insert(binding.local, taken);
+        }
     }
 }
 
@@ -1611,6 +1985,10 @@ fn collect(expr: &Expr, found: &mut HashMap<LocalId, Repr>) {
                 }
             }
         }
+        Expr::Reclaim { token, .. } => {
+            // Придержанный блок - сырая ячейка, представление у неё одно.
+            found.insert(*token, Repr::Boxed);
+        }
         _ => {}
     }
     for child in expr.children() {
@@ -1618,19 +1996,21 @@ fn collect(expr: &Expr, found: &mut HashMap<LocalId, Repr>) {
     }
 }
 
-/// Спутник на C: печать ответа и точка входа.
+/// Спутник на C: таблица конструкторов, печать, дроп детей и точка входа.
 ///
-/// `flat.c` и `main.c` берутся **дословно** теми же `include_str!`, какими их
-/// берёт C-бэкенд: печать у двух бэкендов обязана быть одной, иначе «печатает
-/// то же» держалось бы на совпадении двух печатей, а не на их тождестве.
-fn support(answer: PrimTy) -> String {
+/// `flat.c`, `print.c`, `release.c` и `main.c` берутся **дословно** теми же
+/// `include_str!`, какими их берёт C-бэкенд, и над той же таблицей: печать и
+/// дроп у двух бэкендов обязаны быть одними, иначе «печатает то же» держалось
+/// бы на совпадении двух печатей, а не на их тождестве.
+fn support(program: &Program, answer: Answer) -> String {
     let mut out = String::new();
     out.push_str(concat!(
         "/* Порождено понижением Adamas: спутник `.ll`.\n",
         " *\n",
-        " * Программу считает `.ll` целиком; здесь только печать её ответа и\n",
-        " * точка входа. `flat.c` и `main.c` - те же файлы, что собирает\n",
-        " * C-бэкенд, взятые дословно.\n",
+        " * Программу считает `.ll` целиком; здесь только таблица конструкторов,\n",
+        " * печать ответа, дроп его детей и точка входа. `flat.c`, `print.c`,\n",
+        " * `release.c` и `main.c` - те же файлы, что собирает C-бэкенд, взятые\n",
+        " * дословно.\n",
         " */\n",
         "\n",
         "#include \"adamas.h\"\n",
@@ -1640,21 +2020,61 @@ fn support(answer: PrimTy) -> String {
     ));
     out.push_str(crate::emit_c::FLAT);
     out.push('\n');
-    let ctype = crate::emit_c::scalar(Repr::Flat(answer));
+    crate::emit_c::table(&mut out, program);
+    out.push_str(crate::emit_c::RELEASE);
+    out.push('\n');
+    out.push_str(crate::emit_c::PRINTER);
+    out.push('\n');
+
+    // Раскладка объекта записана дважды - здесь и в `emit_llvm.rs`, - потому
+    // что слот `.ll` читает инструкцией. Расхождение обязано ронять **сборку**,
+    // а не ответ: числа подставлены отсюда, а не написаны в файле руками.
+    out.push_str(concat!(
+        "/* Раскладка объекта: те же числа, по которым `.ll` считает адрес\n",
+        " * слота. Разъедься они с рантаймом - не соберётся спутник. */\n"
+    ));
+    let _ = writeln!(
+        out,
+        "_Static_assert(offsetof(adamas_object, fields) == {HEADER_BYTES}u, \
+         \"заголовок объекта разошёлся с `emit_llvm.rs`\");"
+    );
+    let _ = writeln!(
+        out,
+        "_Static_assert(sizeof(adamas_value) == {SLOT_BYTES}u, \
+         \"слот объекта разошёлся с `emit_llvm.rs`\");\n"
+    );
+
+    out.push_str(concat!(
+        "/* Дроп детей, видимый из `.ll`: тот же `adamas_release_value`, только\n",
+        " * не `static` - порождённый IR лежит в другой единице трансляции. */\n"
+    ));
+    let _ = writeln!(
+        out,
+        "void {RELEASE_SYMBOL}(adamas_value value) {{ adamas_release_value(value); }}\n"
+    );
+
     out.push_str("/* Ответ считает `.ll`, печатает `main.c` ниже. */\n");
-    let _ = writeln!(out, "{ctype} {ENTRY_SYMBOL}(void);");
-    let _ = writeln!(out, "#define ADAMAS_ENTRY {ENTRY_SYMBOL}");
-    let _ = writeln!(
-        out,
-        "#define ADAMAS_ANSWER_FLAT adamas_word_{}",
-        answer.name()
-    );
-    let _ = writeln!(out, "#define ADAMAS_ANSWER_TYPE {ctype}");
-    let _ = writeln!(
-        out,
-        "#define ADAMAS_ANSWER_KIND {}u",
-        crate::emit_c::kind(answer)
-    );
+    match answer {
+        Answer::Flat(ty) => {
+            let ctype = crate::emit_c::scalar(Repr::Flat(ty));
+            let _ = writeln!(out, "{ctype} {ENTRY_SYMBOL}(void);");
+            let _ = writeln!(out, "#define ADAMAS_ENTRY {ENTRY_SYMBOL}");
+            let _ = writeln!(out, "#define ADAMAS_ANSWER_FLAT adamas_word_{}", ty.name());
+            let _ = writeln!(out, "#define ADAMAS_ANSWER_TYPE {ctype}");
+            let _ = writeln!(
+                out,
+                "#define ADAMAS_ANSWER_KIND {}u",
+                crate::emit_c::kind(ty)
+            );
+        }
+        // Без `ADAMAS_ANSWER_FLAT`: `main.c` разводит две формы ответа
+        // препроцессором, и объектная - его же вторая ветка, с печатью по
+        // таблице и дропом после.
+        Answer::Boxed => {
+            let _ = writeln!(out, "adamas_value {ENTRY_SYMBOL}(void);");
+            let _ = writeln!(out, "#define ADAMAS_ENTRY {ENTRY_SYMBOL}");
+        }
+    }
     out.push('\n');
     out.push_str(crate::emit_c::ENTRY);
     out

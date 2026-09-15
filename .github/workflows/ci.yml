@@ -34,11 +34,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14]
+        include:
+          - os: ubuntu-latest
+            llvm: "18"
+          # LLVM в образе macOS не гарантирован, и договор третьего вычислителя
+          # там объявлен непроверяемым — единственное место, где это объявлено.
+          # Молчаливый пропуск был бы обманчивым свидетелем: тест без
+          # инструментов падает, а не зеленеет.
+          - os: macos-14
+            llvm: ""
+    env:
+      ADAMAS_LLVM: ${{ matrix.llvm == '' && 'absent' || '' }}
+      ADAMAS_LLVM_BIN: ${{ matrix.llvm != '' && format('/usr/lib/llvm-{0}/bin', matrix.llvm) || '' }}
+      ADAMAS_LLVM_MIN_BIN: ${{ matrix.llvm != '' && format('/usr/lib/llvm-{0}/bin', matrix.llvm) || '' }}
     steps:
       - uses: actions/checkout@v4
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      # Минимальная поддерживаемая версия (adamas-codegen::llvm::MINIMUM_MAJOR).
+      # Обе переменные указывают на неё: треугольник чтения `.ll` этим прогоном
+      # не проверяется, и тест печатает об этом сам.
+      - if: matrix.llvm != ''
+        run: sudo apt-get update && sudo apt-get install -y llvm-${{ matrix.llvm }}
       - run: cargo test --locked --workspace --all-targets
       # --all-targets не включает doc-tests, поэтому отдельным шагом.
       - run: cargo test --locked --workspace --doc

@@ -1,0 +1,61 @@
+-- Операция значением и форма по спросу (§10 вопрос 169).
+--
+-- `forEach` меток в типе не имеет - форму понижения его row не просит. Но
+-- `collected` кладёт в его row-параметр `{Emit}`, и применение `f` внутри
+-- обязано нести вектор evidence: спрос места вызова заводит второй экземпляр
+-- со скрытыми аргументами, а чистое употребление ниже остаётся при первом.
+--
+-- `through` - ступень графа вызовов: сам он ни операции не называет, ни метки
+-- не пишет, и спрос доезжает до `forEach` только распространением - хвост
+-- needy-инстанциации внутри тела второй формы читается спросом.
+--
+-- Ответ различает порядок по построению: сбор без разворота отдаёт `[3, 2, 1]`,
+-- а чистый обход стоит рядом и держит первую форму тем, что вообще проходит.
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Emit where
+  emit : Nat -> Unit
+
+forEach : (ω f : a -> Unit) -> List a -> Unit
+forEach f Nil = MkUnit
+forEach f (Cons x xs) =
+  let 1 u : Unit = f x
+  forEach f xs
+
+-- Сам не производит и меток не называет: спрос едет по графу вызовов.
+through : (ω f : Nat -> Unit) -> List Nat -> Unit
+through f xs = forEach f xs
+
+digits : List Nat
+digits = Cons (Succ Zero) (Cons (Succ (Succ Zero)) (Cons (Succ (Succ (Succ Zero))) Nil))
+
+collected : List Nat -> List Nat
+collected xs =
+  let 1 c : {Emit} Unit = \u -> through emit xs
+  handle c with
+    state Nil
+    return v -> state
+    emit n -> resume MkUnit (Cons n state)
+
+length : List a -> Nat
+length Nil = Zero
+length (Cons x xs) = Succ (length xs)
+
+-- Чистое употребление того же обхода: первая форма остаётся первой.
+untouched : List Nat -> Nat
+untouched xs =
+  let 1 u : Unit = forEach (\n -> MkUnit) xs
+  length xs
+
+main : List Nat
+main = Cons (untouched digits) (collected digits)

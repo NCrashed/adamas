@@ -126,9 +126,9 @@ use adamas_core::eval::{eval, quote};
 use adamas_core::level::Level;
 use adamas_core::mult::Mult;
 use adamas_core::prim::{ArrayOp, Prim, PrimTy};
-use adamas_core::row::Row;
+use adamas_core::row::{Row, RowVar, Tail};
 use adamas_core::sig::{CLOSING, DefinitionKind, Signature};
-use adamas_core::term::{Case, Index, Name, Term};
+use adamas_core::term::{Args, Case, Index, Name, Term};
 use adamas_core::value::{Env, Lvl, Value};
 
 use crate::ir::{
@@ -591,6 +591,16 @@ struct Lowerer<'a> {
     tags: HashMap<Name, CtorId>,
     functions: Vec<Function>,
     numbers: HashMap<Name, FuncId>,
+    /// Вторые формы **по спросу** (§10 вопрос 169): функция первой формы,
+    /// которой место вызова кладёт метку в needy-инстанциацию, получает
+    /// отдельный экземпляр со скрытыми аргументами. Ключ тот же, что у
+    /// [`Lowerer::numbers`], - имя; экземпляра два, и живут они рядом.
+    evidenced: HashMap<Name, FuncId>,
+    /// Операции значением: замыкание над синтетическим телом-`Perform`.
+    ///
+    /// Ключ - имя операции; замыканию из него нужен один экземпляр, как
+    /// обёртке из [`Lowerer::wrapped`].
+    performers: HashMap<Name, FuncId>,
     /// Метки эффектов по номеру: номер и есть то, чем метку ищет вектор.
     labels: Vec<Label>,
     /// Номер метки по имени.
@@ -618,6 +628,21 @@ struct Lowerer<'a> {
     /// `handle`** - последнее потому, что хендлер в чистой функции заводит
     /// корень своего стека, и scope под ним обязан быть кадром.
     detached: bool,
+    /// Могут ли row-параметры понижаемого определения нести метки (§10
+    /// вопрос 169).
+    ///
+    /// Истина у всякого тела второй формы - и по типу, и по спросу: её вызывают
+    /// места, где метки есть, и инстанциация row-параметра меткой оттуда
+    /// законна. Тогда хвост-переменная в needy-инстанциации вызываемого - тот
+    /// же спрос, что метка, и спрос едет по графу вызовов дальше. У первой
+    /// формы ложь: её row-параметры пусты у всякого вызывающего, иначе
+    /// вызывающий сам просил бы вторую.
+    ///
+    /// Отличие от [`Lowerer::detached`] - зерно: `detached` меняется местами
+    /// включения внутри тела (лямбда, ветка, вычисление под `handle`), а
+    /// таинт - свойство **определения**, потому что row-переменные всех этих
+    /// мест принадлежат одному обобщению.
+    tainted: bool,
     /// Семейство, чей разбор есть отмена задачи (§5.2). `None` - питомника в
     /// программе нет вовсе, и отменять нечего.
     task_family: Option<Name>,
@@ -633,12 +658,15 @@ impl<'a> Lowerer<'a> {
             tags: HashMap::new(),
             functions: Vec::new(),
             numbers: HashMap::new(),
+            evidenced: HashMap::new(),
+            performers: HashMap::new(),
             labels: Vec::new(),
             marks: HashMap::new(),
             handlers: Vec::new(),
             wrapped: HashMap::new(),
             pending: VecDeque::new(),
             detached: false,
+            tainted: false,
         }
     }
 
@@ -715,6 +743,7 @@ impl<'a> Lowerer<'a> {
             }
             let declared = self.functions[id.0].result;
             self.detached = self.functions[id.0].form == Form::Detached;
+            self.tainted = self.detached;
             let (mut body, repr) =
                 self.saturated(&mut scope, &inner, &parameters[taken..], declared)?;
             if !fits(repr, declared) {
@@ -828,25 +857,45 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Номер функции определения; тело откладывается в очередь.
-    fn function(&mut self, name: &Name) -> Result<FuncId, LowerError> {
-        if let Some(id) = self.numbers.get(name) {
+    ///
+    /// `demanded` - место вызова просит вторую форму у функции, чей написанный
+    /// тип даёт первую (§10 вопрос 169): такой заводится **отдельный**
+    /// экземпляр со скрытыми аргументами, а экземпляр первой формы остаётся
+    /// чистым вызывающим. У функции, чей тип и так даёт вторую форму, спрос
+    /// не меняет ничего - экземпляр один.
+    fn function(&mut self, name: &Name, demanded: bool) -> Result<FuncId, LowerError> {
+        let ty = self.declared(name)?;
+        let demanded = demanded && form(ty) == Form::Stack;
+        if let Some(id) = if demanded {
+            self.evidenced.get(name)
+        } else {
+            self.numbers.get(name)
+        } {
             return Ok(*id);
         }
         let (parameters, _, _, dicts) = self.peeled(name)?;
         let ty = self.declared(name)?;
         let result = self.result_repr(ty, parameters.len(), &dicts)?;
-        let form = form(ty);
+        let form = if demanded { Form::Detached } else { form(ty) };
         let id = FuncId(self.functions.len());
         self.functions.push(Function {
             id,
-            name: name.to_string(),
+            name: if demanded {
+                format!("{name}#ev")
+            } else {
+                name.to_string()
+            },
             form,
             captured: Vec::new(),
             parameters,
             result,
             body: Expr::Erased,
         });
-        self.numbers.insert(Rc::clone(name), id);
+        if demanded {
+            self.evidenced.insert(Rc::clone(name), id);
+        } else {
+            self.numbers.insert(Rc::clone(name), id);
+        }
         self.pending.push_back((id, Rc::clone(name)));
         Ok(id)
     }
@@ -2032,7 +2081,7 @@ impl<'a> Lowerer<'a> {
             let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
             return self.expr(scope, &normalized(&redex, depth));
         }
-        let Term::Const(name, ..) = head else {
+        let Term::Const(name, _, instance) = head else {
             // Голова - не имя: применяется значение, и стирания здесь не бывает.
             let mut value = self.shaped(scope, head, Repr::Boxed, "применяемое значение")?;
             for argument in arguments {
@@ -2086,7 +2135,7 @@ impl<'a> Lowerer<'a> {
         }
         match &self.definition(name)?.kind {
             DefinitionKind::Constructor { .. } => self.built(scope, name, arguments),
-            DefinitionKind::Regular => self.called(scope, name, arguments),
+            DefinitionKind::Regular => self.called(scope, name, instance, arguments),
             DefinitionKind::Data { .. } => Err(LowerError::TypeValue {
                 name: name.to_string(),
             }),
@@ -2190,12 +2239,38 @@ impl<'a> Lowerer<'a> {
             why: "у операции нет row ни на одной стрелке: производить нечем",
         })?;
         if arguments.len() < arity {
-            // Недобранная операция была бы замыканием, а замыкание отдаёт
-            // слоты указателями и хендлера не ищет вовсе.
-            return Err(LowerError::Operation {
-                name: name.to_string(),
-                why: "операция значением: этим срезом она не берётся",
-            });
+            // Недобранная операция едет замыканием над синтетическим телом,
+            // чьё единственное дело - произвести (§10 вопрос 169): вектор
+            // evidence оно берёт из скрытых аргументов трамплина, как всякая
+            // вторая форма за границей замыкания. Применяющая сторона обязана
+            // этот вектор нести - за это отвечает спрос ([`Lowerer::demanded`]).
+            //
+            // Операции круга (§5.2) значением не берутся: их понижение
+            // ([`Lowerer::fiber_op`]) - формы места, а не вызов.
+            if self.fiber_op(name)?.is_some() {
+                return Err(LowerError::Nursery {
+                    name: name.to_string(),
+                    why: "операция круга значением этим срезом не берётся",
+                });
+            }
+            let function = self.performer(scope, name, effect)?;
+            let mults = multiplicities(ty, arity);
+            let mut value = Expr::Closure {
+                function,
+                captured: Vec::new(),
+            };
+            for (position, argument) in arguments.iter().enumerate() {
+                let argument = if mults.get(position) == Some(&Mult::Zero) {
+                    Expr::Erased
+                } else {
+                    self.given(scope, argument, Repr::Boxed, "аргумент операции")?
+                };
+                value = Expr::Apply {
+                    callee: Box::new(value),
+                    argument: Box::new(argument),
+                };
+            }
+            return Ok((value, Repr::Boxed));
         }
         let dicts = scope.dicts.clone();
         let result = self.result_repr(ty, arity, &dicts)?;
@@ -2242,6 +2317,89 @@ impl<'a> Lowerer<'a> {
             };
         }
         Ok((value, Repr::Boxed))
+    }
+
+    /// Синтетическое тело операции значением: связывания - параметрами,
+    /// `Perform` - телом (§10 вопрос 169).
+    ///
+    /// Вторая форма: произвести без вектора evidence нельзя, а замыканию оба
+    /// скрытых аргумента приносит трамплин. Стёртые связывания операции
+    /// применяются наравне с живыми - замыкание берёт все связывания ядра
+    /// позиционно, тем же правилом, что у конструктора значением, - но в
+    /// `Perform` едут только связывания после параметров метки: столько же
+    /// отдаёт насыщенное место операции, иначе номера разъехались бы с
+    /// ветками.
+    fn performer(
+        &mut self,
+        scope: &mut Scope,
+        name: &Name,
+        effect: &Name,
+    ) -> Result<FuncId, LowerError> {
+        if let Some(id) = self.performers.get(name) {
+            return Ok(*id);
+        }
+        let label = self.label(effect)?;
+        let DefinitionKind::Effect { operations, params } = &self.definition(effect)?.kind else {
+            unreachable!("`label` уже проверил вид метки")
+        };
+        let params = *params as usize;
+        let slot =
+            operations
+                .iter()
+                .position(|it| it == name)
+                .ok_or_else(|| LowerError::Operation {
+                    name: name.to_string(),
+                    why: "операции нет среди операций своей метки",
+                })?;
+        let ty = &self.definition(name)?.ty;
+        let arity = performing(ty).ok_or_else(|| LowerError::Operation {
+            name: name.to_string(),
+            why: "у операции нет row ни на одной стрелке: производить нечем",
+        })?;
+        let result = self.result_repr(ty, arity, &scope.dicts.clone())?;
+        if !result.pointer() {
+            return Err(LowerError::Representation {
+                at: "ответ операции",
+                want: describe(Repr::Boxed),
+                got: describe(result),
+            });
+        }
+        let mults = multiplicities(ty, arity);
+        let parameters: Vec<Binding> = (0..arity)
+            .map(|at| Binding {
+                name: format!("арг{at}"),
+                local: LocalId(u32::try_from(at).unwrap_or(u32::MAX)),
+                fact: Fact::declared(mults.get(at).copied().unwrap_or(Mult::Many))
+                    .shaped(Repr::Boxed),
+            })
+            .collect();
+        let given = parameters[params..]
+            .iter()
+            .map(|parameter| {
+                if parameter.fact.present {
+                    Expr::Local(parameter.local)
+                } else {
+                    Expr::Erased
+                }
+            })
+            .collect();
+        let operation = u32::try_from(slot).unwrap_or(u32::MAX);
+        let id = FuncId(self.functions.len());
+        self.functions.push(Function {
+            id,
+            name: format!("{name}#значением"),
+            form: Form::Detached,
+            captured: Vec::new(),
+            parameters,
+            result: Repr::Boxed,
+            body: Expr::Perform {
+                label,
+                operation,
+                arguments: given,
+            },
+        });
+        self.performers.insert(Rc::clone(name), id);
+        Ok(id)
     }
 
     /// Питомник: `withNursery` (§5.2).
@@ -3350,15 +3508,62 @@ impl<'a> Lowerer<'a> {
         Ok(id)
     }
 
+    /// Просит ли место вызова вторую форму у функции первой (§10 вопрос 169).
+    ///
+    /// Форма считается по написанному типу, а row-полиморфная функция
+    /// производит через параметр: `forEach : (ω f : a -> Unit) -> List a ->
+    /// Unit` меток не имеет, но `forEach emit xs` кладёт `{Emit}` в
+    /// инстанциацию её row-параметра, и применение `f` внутри обязано нести
+    /// вектор evidence. Спрос читается с needy-инстанциаций - row-параметров,
+    /// стоящих в row стрелки **внутри домена** ([`needy_rows`]): метка там -
+    /// спрос всегда; хвост-переменная - спрос, когда row-параметры понижаемого
+    /// определения сами могут нести метки ([`Lowerer::tainted`]), - так спрос
+    /// едет по графу вызовов. Верхние row и row-параметры вне доменов спроса
+    /// не дают: они едут суффиксом вектора и производить не заставляют (§3.4).
+    fn demanded(&self, name: &Name, instance: &Args) -> Result<bool, LowerError> {
+        let ty = self.declared(name)?;
+        if form(ty) == Form::Detached {
+            return Ok(false);
+        }
+        let rows = instance.row_args();
+        let mut asked = false;
+        for index in needy_rows(ty) {
+            let Some(row) = rows.get(index as usize) else {
+                // Ссылка без инстанциации - идентичность: самовызов (и ссылка
+                // внутри своей группы) разделяет row-параметры определения, а
+                // не гасит их. Хвост тогда стоит в каждой needy-позиции.
+                asked |= self.tainted;
+                continue;
+            };
+            if !row.labels().is_empty() || (row.tail().is_some() && self.tainted) {
+                asked = true;
+            }
+        }
+        if asked && !self.detached {
+            // Не случается у программы, прошедшей элаборацию: метка в
+            // needy-инстанциации означает производящее применение, а его row
+            // элаборация гасит хендлером - и вычисление под `handle` уже идёт
+            // второй формой. Отказ здесь - страховка от молчаливого `NULL`
+            // вместо вектора.
+            return Err(LowerError::Operation {
+                name: name.to_string(),
+                why: "метка в row-аргументе вызова из первой формы: вектора evidence здесь нет",
+            });
+        }
+        Ok(asked)
+    }
+
     /// Применение определения: насыщенное зовёт напрямую, недобранное -
     /// замыкание.
     fn called(
         &mut self,
         scope: &mut Scope,
         name: &Name,
+        instance: &Args,
         arguments: &[Arg<'_>],
     ) -> Result<(Expr, Repr), LowerError> {
-        let function = self.function(name)?;
+        let demanded = self.demanded(name, instance)?;
+        let function = self.function(name, demanded)?;
         let parameters: Vec<Fact> = self.functions[function.0]
             .parameters
             .iter()
@@ -3842,6 +4047,87 @@ fn form(ty: &Term) -> Form {
         current = codomain;
     }
     Form::Stack
+}
+
+/// Row-параметры типа, стоящие в row стрелки **внутри домена**, - needy (§10
+/// вопрос 169).
+///
+/// Инстанциация такого параметра меткой означает, что функция производит
+/// **через аргумент**: применение параметра с этой row обязано нести вектор
+/// evidence, хотя собственные row телескопа меток не имеют и [`form`] даёт
+/// первую. Верхние row телескопа сюда не входят намеренно - метка в них и так
+/// даёт вторую форму, а хвост говорит «что угодно сверх у вызывающего» и
+/// производить не заставляет.
+///
+/// Row за хвостом открытой записи не видна и не считается: функциональное
+/// поле, приехавшее хвостом записи, - граница этого правила.
+fn needy_rows(ty: &Term) -> BTreeSet<u32> {
+    let mut found = BTreeSet::new();
+    let mut current = ty;
+    while let Term::Pi(_, _, domain, _, codomain) = current {
+        nested_rows(domain, &mut found);
+        current = codomain;
+    }
+    found
+}
+
+/// Хвосты-параметры row всех стрелок внутри терма.
+fn nested_rows(term: &Term, into: &mut BTreeSet<u32>) {
+    match term {
+        Term::Var(_)
+        | Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Prim(_)
+        | Term::Meta(_)
+        | Term::Const(..) => {}
+        Term::Record(fields) | Term::Row(fields) => {
+            for field in fields.iter() {
+                nested_rows(&field.ty, into);
+            }
+        }
+        Term::Object(fields) => {
+            for (_, value) in fields.iter() {
+                nested_rows(value, into);
+            }
+        }
+        Term::With(base, fields) => {
+            nested_rows(base, into);
+            for (_, value) in fields.iter() {
+                nested_rows(value, into);
+            }
+        }
+        Term::Project(record, _) => nested_rows(record, into),
+        Term::Lam(_, _, body) => nested_rows(body, into),
+        Term::App(callee, argument) => {
+            nested_rows(callee, into);
+            nested_rows(argument, into);
+        }
+        Term::Pi(_, _, domain, row, codomain) => {
+            if let Some(Tail::Var(RowVar(index))) = row.tail() {
+                into.insert(index);
+            }
+            for label in row.labels() {
+                for argument in &label.arguments {
+                    nested_rows(argument, into);
+                }
+            }
+            nested_rows(domain, into);
+            nested_rows(codomain, into);
+        }
+        Term::Let(_, _, ty, value, body) => {
+            nested_rows(ty, into);
+            nested_rows(value, into);
+            nested_rows(body, into);
+        }
+        Term::Case(case) => {
+            nested_rows(&case.scrutinee, into);
+            nested_rows(&case.motive, into);
+            for branch in &case.branches {
+                nested_rows(&branch.body, into);
+            }
+        }
+    }
 }
 
 /// На каком по счёту аргументе операция производит. `None` - row нигде нет.

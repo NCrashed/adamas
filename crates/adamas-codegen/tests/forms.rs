@@ -1,7 +1,8 @@
 //! Форма понижения выбирается по row написанного типа (§13, обе записи
-//! 2026-09-08; решение 1 волны 4).
+//! 2026-09-08; решение 1 волны 4) - и по спросу места вызова, когда метка
+//! приезжает инстанциацией row-параметра (§10 вопрос 169).
 //!
-//! Утверждений здесь четыре, и каждое читает **текст** порождённого C либо
+//! Утверждений здесь пять, и каждое читает **текст** порождённого C либо
 //! отказ, а не число блоков: форма живёт в сигнатуре, и по числам она не видна.
 //!
 //! - *Непустая row даёт два скрытых аргумента, и они стоят в каноническом
@@ -19,6 +20,10 @@
 //! - *Элиминатор хендлера форму не решает* ([`a_handler_does_not_decide_the_form`]):
 //!   вычисление под `handleMulti` получает вторую форму по своей row, как и под
 //!   одношотным.
+//! - *Спрос места вызова заводит второй экземпляр, не отнимая первого*
+//!   ([`a_demanded_site_gets_its_own_second_form`], §10 вопрос 169): метка в
+//!   needy-инстанциации row-полиморфной функции даёт ей отдельное тело со
+//!   скрытыми аргументами, а чистое употребление зовёт прежнее без них.
 
 mod harness;
 
@@ -315,6 +320,108 @@ fn the_first_form_cannot_call_the_second() {
         text.contains("main") && text.contains("эффектная"),
         "отказ не назвал ни зовущего, ни званого: {text}"
     );
+}
+
+/// Обе формы одного имени: спрос места вызова против написанного типа.
+///
+/// `forEach` меток в типе не имеет - его row просит первую форму. Но
+/// `collected` кладёт `{Emit}` в инстанциацию его row-параметра, стоящего в
+/// row домена `f`, и применение `f` внутри обязано нести вектор evidence.
+/// Экземпляра выходит два, и различие читается текстом: у второго скрытые
+/// аргументы в сигнатуре и в применении, у первого - `NULL` и свой корень,
+/// как у всякой первой формы. Операция значением едет замыканием над
+/// синтетическим телом, и хендлер оно ищет вектором.
+const DEMANDED: &str = "\
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Emit where
+  emit : Nat -> Unit
+
+forEach : (ω f : a -> Unit) -> List a -> Unit
+forEach f Nil = MkUnit
+forEach f (Cons x xs) =
+  let 1 u : Unit = f x
+  forEach f xs
+
+collected : List Nat -> List Nat
+collected xs =
+  let 1 c : {Emit} Unit = \\u -> forEach emit xs
+  handle c with
+    state Nil
+    return v -> state
+    emit n -> resume MkUnit (Cons n state)
+
+pureLen : List Nat -> Nat
+pureLen xs =
+  let 1 u : Unit = forEach (\\n -> MkUnit) xs
+  Succ Zero
+
+main : List Nat
+main = Cons (pureLen (collected (Cons Zero Nil))) (collected (Cons (Succ Zero) Nil))
+";
+
+/// Спрос места вызова заводит второй экземпляр, не отнимая первого.
+#[test]
+fn a_demanded_site_gets_its_own_second_form() {
+    let text =
+        harness::text(DEMANDED).unwrap_or_else(|error| panic!("`DEMANDED` не понизился: {error}"));
+
+    // Экземпляр по спросу: скрытые аргументы в сигнатуре и в применении `f`.
+    let demanded = signature(&text, "forEach#ev");
+    assert!(
+        demanded.contains("(const adamas_evidence *ev, adamas_kont *kont, adamas_value"),
+        "экземпляр по спросу не получил скрытых аргументов: {demanded}"
+    );
+    let ev_body = body(&text, "forEach#ev");
+    assert!(
+        applied(&ev_body).contains(", ev, kont, "),
+        "экземпляр по спросу применяет параметр без вектора:\n{ev_body}"
+    );
+
+    // Экземпляр по типу остался первой формой: `NULL` и свой корень.
+    let written = signature(&text, "forEach");
+    assert!(
+        !written.contains("adamas_evidence"),
+        "чистый экземпляр получил скрытые аргументы: {written}"
+    );
+    let pure_body = body(&text, "forEach");
+    assert!(
+        applied(&pure_body).contains(", NULL, &"),
+        "чистый экземпляр применяет параметр не своим корнем:\n{pure_body}"
+    );
+
+    // Чистое употребление зовёт первый экземпляр, спрошенное - второй.
+    assert!(
+        body(&text, "pureLen").contains(&format!("fn_{}(", number(&text, "forEach"))),
+        "чистое употребление ушло не в первую форму:\n{}",
+        body(&text, "pureLen")
+    );
+    assert!(
+        text.contains(&format!("fn_{}(ev, kont, ", number(&text, "forEach#ev"))),
+        "спрошенного вызова со скрытыми аргументами нет:\n{text}"
+    );
+
+    // Операция значением ищет хендлер вектором из скрытых аргументов.
+    let performer = body(&text, "emit#значением");
+    assert!(
+        performer.contains("adamas_evidence_lookup"),
+        "операция значением не ищет хендлер вектором:\n{performer}"
+    );
+
+    // И всё это собирается, считается и не течёт.
+    let stderr =
+        harness::agreed("спрос", DEMANDED).unwrap_or_else(|error| panic!("прогон: {error}"));
+    let (_, live) = harness::blocks("спрос", &stderr);
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
 }
 
 /// Форму выбирает row, а не элиминатор: под мультишотом она та же.

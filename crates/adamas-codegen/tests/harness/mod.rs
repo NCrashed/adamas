@@ -867,6 +867,12 @@ pub(crate) struct Mutated {
     pub(crate) allocated: Option<usize>,
     /// Сколько осталось живыми.
     pub(crate) live: Option<usize>,
+    /// Что ушло в stderr сверх счётчиков: рантайм пишет туда причину обрыва.
+    ///
+    /// Читается это одним свидетелем - мультишотным (`multi.rs`), - и читается
+    /// не для полноты: «прогон оборвался» не говорит, на каком проходе. Имя
+    /// нарушенного инварианта говорит.
+    pub(crate) reason: String,
 }
 
 /// Прогон **названного текста** `.ll`: тот же путь, но обрыв - ответ.
@@ -900,6 +906,7 @@ pub(crate) fn llvm_printed(
             printed: "IR отвергнут".to_owned(),
             allocated: None,
             live: None,
+            reason: String::new(),
         };
     };
 
@@ -933,9 +940,34 @@ pub(crate) fn llvm_printed(
             printed: "не слинковался".to_owned(),
             allocated: None,
             live: None,
+            reason: String::new(),
         };
     }
     within(&binary, std::time::Duration::from_secs(20))
+}
+
+/// Бинарь из названного текста `.ll`: то же, что [`llvm_printed`], но без
+/// прогона - его ведёт вызывающий сам.
+///
+/// # Panics
+///
+/// Конвейер, спутник либо линковка отказали.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+pub(crate) fn llvm_mutant_binary(
+    stem: &str,
+    text: &str,
+    support: &str,
+    tools: &Toolchain,
+) -> PathBuf {
+    let dir = scratch();
+    let source = dir.join(format!("{stem}.ll"));
+    std::fs::write(&source, text).unwrap();
+    let pipeline = Pipeline::optimised();
+    let object = pipeline.run(tools, &source, stem).unwrap();
+    llvm_linked(stem, &object, support, true)
 }
 
 /// Прогон с пределом по времени. Отдаёт напечатанное, причину и счётчики.
@@ -975,6 +1007,7 @@ fn within(binary: &Path, limit: std::time::Duration) -> Mutated {
                     printed,
                     allocated: numbers.first().copied(),
                     live: numbers.get(1).copied(),
+                    reason: counted,
                 };
             }
             None if std::time::Instant::now() >= deadline => {
@@ -984,6 +1017,7 @@ fn within(binary: &Path, limit: std::time::Duration) -> Mutated {
                     printed: "прогон не завершился".to_owned(),
                     allocated: None,
                     live: None,
+                    reason: String::new(),
                 };
             }
             None => std::thread::sleep(std::time::Duration::from_millis(20)),

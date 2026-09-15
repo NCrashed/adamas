@@ -123,6 +123,7 @@ pub mod llvm;
 pub mod lower;
 pub mod perceus;
 pub mod split;
+pub mod unique;
 
 use adamas_core::sig::Signature;
 use adamas_core::term::Term;
@@ -195,11 +196,18 @@ pub fn compile_llvm_located(
     file: &adamas_core::source::SourceFile,
 ) -> Result<emit_llvm::Artefacts, CompileError> {
     let lowered = split::prepare(lower::located(signature, entry, file)?);
-    Ok(emit_llvm::emit(&perceus::insert(lowered))?)
+    Ok(emit_llvm::emit(&unique::infer(perceus::insert(lowered)))?)
 }
 
-/// Общая для обоих эмиттеров половина пути: понижение, дробление, вставка RC.
+/// Общая для обоих эмиттеров половина пути: понижение, дробление, вставка RC,
+/// вывод уникальности.
+///
+/// [`unique::infer`] стоит **после** вставки RC и не раньше: судит он по
+/// отсутствию узлов [`ir::Expr::Dup`], а ставит их она. Общая половина, а не
+/// половина LLVM-пути, потому что уникальность - факт представления, а не приём
+/// печати; C-эмиттер её игнорирует наравне с кратностью, и это записано у
+/// [`ir::Fact`].
 fn prepared(signature: &Signature, entry: &Term) -> Result<ir::Program, CompileError> {
     let lowered = split::prepare(lower::lower(signature, entry)?);
-    Ok(perceus::insert(lowered))
+    Ok(unique::infer(perceus::insert(lowered)))
 }

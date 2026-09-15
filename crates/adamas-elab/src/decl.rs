@@ -2268,7 +2268,11 @@ fn declare_definitions(
                     .iter()
                     .map(|it| (Rc::clone(&it.name.text), Vec::new())),
             ),
-        })
+        })?;
+    for member in planned {
+        signature.locate(&member.name.text, written_at(member.clauses, member.span));
+    }
+    Ok(())
 }
 
 /// Чем члены группы видят друг друга при проверке тела `at`-го.
@@ -3856,6 +3860,8 @@ fn define(
             }
         })?;
 
+    signature.locate(&declared.name, written_at(clauses, span));
+
     // Вердикты читаются после объявления: считает их ядро, а атрибут только
     // требует нужного ответа (§4.7, §5.1).
     let source = Declared::Definition {
@@ -4004,6 +4010,16 @@ fn raised(kind: &Term, params: &[Param]) -> Term {
 /// Отказы сборки делятся на два вида, и указывают они в разные места: тип
 /// написан в сигнатуре, а всё остальное - в конкретной клаузе, номер которой
 /// сборка и носит.
+/// Где определение написано - то, что запомнит [`Signature::locate`].
+///
+/// Первая клауза, а не сигнатура и не объявление целиком: DWARF показывает
+/// **исполняемую** строку, и остановка на `f : Int64 -> Int64` называла бы
+/// строку, которой в коде нет ни одной инструкции. Клауз нет - остаётся
+/// объявление, и это постулат, до понижения не доезжающий.
+fn written_at(clauses: &[ast::Clause], fallback: Span) -> Span {
+    clauses.first().map_or(fallback, |clause| clause.span)
+}
+
 fn clause_span(
     error: &PatternError,
     declared: &Pending<'_>,

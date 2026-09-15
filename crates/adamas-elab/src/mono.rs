@@ -894,7 +894,17 @@ fn declare(
         .declare(metas, &group)
         .map_err(|error| MonoError::Refused {
             error: Box::new(error),
-        })
+        })?;
+    // Позиция наследуется от того, от кого произведено: написанного текста у
+    // специализации нет вовсе, а показать отладчику её строку надо - ту же,
+    // что у `origin`. Не унаследуй её - и `.adamas`-строки исчезали бы ровно у
+    // обобщённого кода, то есть там, где отладка нужнее (§9 Фаза 7, трек E).
+    for special in made {
+        if let Some(span) = signature.origin(&special.origin) {
+            signature.locate(&special.name, span);
+        }
+    }
+    Ok(())
 }
 
 /// Сколько ведущих имплиситных связываний подставляется. `0` - ни одного либо

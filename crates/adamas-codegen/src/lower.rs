@@ -128,13 +128,14 @@ use adamas_core::mult::Mult;
 use adamas_core::prim::{ArrayOp, Prim, PrimTy};
 use adamas_core::row::{Row, RowVar, Tail};
 use adamas_core::sig::{CLOSING, DefinitionKind, Signature};
+use adamas_core::source::{Location, SourceFile};
 use adamas_core::term::{Args, Case, Index, Name, Term};
 use adamas_core::value::{Env, Lvl, Value};
 
 use crate::ir::{
     Arm, Binding, Branch, Constructor, CtorId, Elems, Expr, Fact, FiberOp, Form, FuncId, Function,
     Handler, HandlerId, Label, LabelId, LocalId, PackId, Packing, Program, Repr, Slot as PackSlot,
-    SlotTy, Stride, Task, Variant, Verdict,
+    SlotTy, Source, Stride, Task, Variant, Verdict,
 };
 
 /// Почему понижение отказало.
@@ -512,7 +513,46 @@ const AWAIT: &str = "await";
 ///
 /// [`LowerError`] - форма вне чистого фрагмента либо имя, которого не понизить.
 pub fn lower(signature: &Signature, entry: &Term) -> Result<Program, LowerError> {
-    Lowerer::new(signature).program(entry)
+    Lowerer::new(signature, None).program(entry)
+}
+
+/// То же, но с исходником: программа получает позиции (§9 Фаза 7, трек E).
+///
+/// Отдельная дверь, а не второй аргумент у [`lower`], потому что исходник есть
+/// не у всякого вызывающего: корпус понижения строит терм руками, а стенды -
+/// генератором. Заводить им пустой `SourceFile` значило бы называть исходником
+/// то, чего нет.
+///
+/// Позиции приезжают **понижением**, а не чтением ядра из эмиттера: шов
+/// (`tests/seam.rs`) стоит именно на этом, и позиции его не обходят.
+///
+/// # Errors
+///
+/// [`LowerError`] - то же, что у [`lower`]: исходник на приём формы не влияет.
+pub fn located(
+    signature: &Signature,
+    entry: &Term,
+    file: &SourceFile,
+) -> Result<Program, LowerError> {
+    Lowerer::new(signature, Some(file)).program(entry)
+}
+
+/// Имя файла и каталог для [`Source`] - врозь, как их просит DWARF.
+///
+/// Разделителем считается `/`: имя приходит от того, кто открыл файл, и путь в
+/// нём - тот, что показывает диагностика. Разделителя нет - каталог пуст, и
+/// отладчик ищет файл рядом с собой.
+fn split_path(name: &str) -> Source {
+    match name.rsplit_once('/') {
+        Some((directory, file)) => Source {
+            file: file.to_owned(),
+            directory: directory.to_owned(),
+        },
+        None => Source {
+            file: name.to_owned(),
+            directory: String::new(),
+        },
+    }
 }
 
 /// Аргумент спайна.
@@ -586,6 +626,8 @@ impl Scope {
 /// Понижение: сигнатура на входе, программа на выходе.
 struct Lowerer<'a> {
     signature: &'a Signature,
+    /// Исходник, если он назван: им спан определения переводится в строку.
+    file: Option<&'a SourceFile>,
     constructors: Vec<Constructor>,
     packings: Vec<Packing>,
     tags: HashMap<Name, CtorId>,
@@ -649,10 +691,11 @@ struct Lowerer<'a> {
 }
 
 impl<'a> Lowerer<'a> {
-    fn new(signature: &'a Signature) -> Self {
+    fn new(signature: &'a Signature, file: Option<&'a SourceFile>) -> Self {
         Self {
             task_family: nursed_family(signature),
             signature,
+            file,
             constructors: Vec::new(),
             packings: Vec::new(),
             tags: HashMap::new(),
@@ -685,6 +728,11 @@ impl<'a> Lowerer<'a> {
             // волной не решается. Скрытые аргументы ей и передать некому:
             // зовёт её `main` рантайма, а не понижение.
             name: "main".to_owned(),
+            // Спрашивается имя `main`, а не терм: `entry` приходит уже
+            // инстанцированным, и своего имени у него нет. Совпадение это
+            // держится на драйвере, который берёт тело именно `main`; не
+            // совпади оно - позиции просто не будет.
+            position: self.position("main"),
             form: Form::Stack,
             captured: Vec::new(),
             parameters: Vec::new(),
@@ -768,7 +816,17 @@ impl<'a> Lowerer<'a> {
             handlers: self.handlers,
             functions: self.functions,
             entry: entry_id,
+            source: self.file.map(|file| split_path(file.name())),
         })
+    }
+
+    /// Где определение написано. `None` - исходника не дали либо позиции нет.
+    ///
+    /// Спан лежит **рядом** с определением, а не в терме: узел терма держится
+    /// на 48 байтах, и спан в нём обрывал бы лестницу исполнения. Отсюда и
+    /// потолок мелкости - определение целиком (§9 Фаза 7, трек E).
+    fn position(&self, name: &str) -> Option<Location> {
+        self.file?.location(self.signature.origin(name)?.start())
     }
 
     /// Определение по имени.
@@ -885,6 +943,7 @@ impl<'a> Lowerer<'a> {
             } else {
                 name.to_string()
             },
+            position: self.position(name),
             form,
             captured: Vec::new(),
             parameters,
@@ -2388,6 +2447,9 @@ impl<'a> Lowerer<'a> {
         self.functions.push(Function {
             id,
             name: format!("{name}#значением"),
+            // Синтетическое тело: написанного определения за ним нет, и
+            // называть отладчику чью-то чужую строку было бы враньём.
+            position: None,
             form: Form::Detached,
             captured: Vec::new(),
             parameters,
@@ -2941,6 +3003,9 @@ impl<'a> Lowerer<'a> {
         self.functions.push(Function {
             id: function,
             name: format!("ветка {effect}.{operation}"),
+            // Написанного определения за веткой нет: она вырезана из тела
+            // `handle`, и спан на неё ядро не носит.
+            position: None,
             // Вторая форма: ветка вправе производить - её окружающая есть
             // окружающая применения `handle` (§3.4).
             form: Form::Detached,
@@ -2988,6 +3053,7 @@ impl<'a> Lowerer<'a> {
         self.functions.push(Function {
             id: function,
             name: format!("ветка {effect}.return"),
+            position: None,
             form: Form::Detached,
             captured: captured.to_vec(),
             parameters: vec![binding],
@@ -3470,6 +3536,10 @@ impl<'a> Lowerer<'a> {
         let parameters = described.parameters.clone();
         let name = format!("{}#обёртка", described.name);
         let form = described.form;
+        // Позиция берётся у обёрнутого: своей у обёртки нет, а показывать
+        // отладчику ту, где написан обёрнутый, честнее, чем не показывать
+        // ничего - шаг войдёт в обёртку и тут же выйдет в неё же.
+        let position = described.position;
         let held = Binding {
             name: "ответ".to_owned(),
             local: LocalId(u32::try_from(parameters.len()).unwrap_or(u32::MAX)),
@@ -3490,6 +3560,7 @@ impl<'a> Lowerer<'a> {
         self.functions.push(Function {
             id,
             name,
+            position,
             form,
             captured: Vec::new(),
             parameters,
@@ -3916,6 +3987,10 @@ impl<'a> Lowerer<'a> {
         self.functions.push(Function {
             id: function,
             name: format!("лямбда{}", function.0),
+            // У лямбды написанного определения нет - как нет у неё в ядре и
+            // написанного типа. Свой спан был бы у выражения, а спанов на
+            // выражениях ядро не носит вовсе.
+            position: None,
             // Вторая форма у всякой лямбды, и это **не** обход решения 1
             // волны 4, а его единственное применение к случаю без row: у
             // связывания лямбды написанного типа в ядре нет вовсе - там же,

@@ -103,6 +103,7 @@ pub fn insert(program: Program) -> Program {
         handlers,
         functions,
         entry,
+        source,
     } = program;
     let functions = functions
         .into_iter()
@@ -115,6 +116,7 @@ pub fn insert(program: Program) -> Program {
         handlers,
         functions,
         entry,
+        source,
     }
 }
 
@@ -135,6 +137,7 @@ fn owned(constructors: &[Constructor], suspending: &Suspension, function: Functi
     let Function {
         id,
         name,
+        position,
         form,
         captured,
         parameters,
@@ -145,6 +148,7 @@ fn owned(constructors: &[Constructor], suspending: &Suspension, function: Functi
     Function {
         id,
         name,
+        position,
         form,
         captured,
         parameters,

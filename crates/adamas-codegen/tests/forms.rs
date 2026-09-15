@@ -280,6 +280,7 @@ fn the_first_form_cannot_call_the_second() {
     let callee = Function {
         id: FuncId(1),
         name: "эффектная".to_owned(),
+        position: None,
         form: Form::Detached,
         captured: Vec::new(),
         parameters: vec![Binding {
@@ -293,6 +294,7 @@ fn the_first_form_cannot_call_the_second() {
     let entry = Function {
         id: FuncId(0),
         name: "main".to_owned(),
+        position: None,
         form: Form::Stack,
         captured: Vec::new(),
         parameters: Vec::new(),
@@ -313,6 +315,7 @@ fn the_first_form_cannot_call_the_second() {
         handlers: Vec::new(),
         functions: vec![entry, callee],
         entry: FuncId(0),
+        source: None,
     };
     let error = emit_c::emit(&program).expect_err("первой форме передать скрытые нечем");
     let text = error.to_string();

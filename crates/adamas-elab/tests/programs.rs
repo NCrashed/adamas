@@ -9671,3 +9671,86 @@ type Layout = {{ size : UInt32, align : UInt32 }}
         );
     }
 }
+
+/// Позиция определения доезжает до сигнатуры - и это первая клауза, а не
+/// сигнатура типа.
+///
+/// Свидетель понижения (§9 Фаза 7, трек E): DWARF берёт строку отсюда, и
+/// поедь она на строку с `f : ...`, отладчик останавливался бы там, где
+/// инструкций нет ни одной. Проверяется **текстом строки** под спаном, а не
+/// числом: число пришлось бы править при всякой правке фикстуры, и правка
+/// зеленела бы вместе с ним.
+#[test]
+fn a_definition_remembers_where_it_was_written() {
+    let text = "\
+data Bool where
+  True : Bool
+  False : Bool
+
+twice : Int64 -> Int64
+twice x = mulInt64 x 2
+
+mutual
+  odd : Int64 -> Bool
+  odd 0 = False
+  odd n = even (subInt64 n 1)
+
+  even : Int64 -> Bool
+  even 0 = True
+  even n = odd (subInt64 n 1)
+
+main : Int64
+main = twice 21
+";
+    let module = match parse(text) {
+        Ok(module) => module,
+        Err(error) => panic!("не разобралось: {error}"),
+    };
+    let (signature, _) = match elaborate(&module) {
+        Ok(pair) => pair,
+        Err(error) => panic!("не элаборировалось: {error}"),
+    };
+    let file = adamas_core::source::SourceFile::new("t.adamas", text);
+    // `mutual` здесь не для полноты: его член несёт спан **от сигнатуры**, и
+    // без первой клаузы позиция уехала бы на строку `odd : Int64 -> Bool`, где
+    // инструкций нет. Одиночное определение этой разницы не показывает - его
+    // спан и так начинается с клаузы.
+    for (name, written) in [
+        ("twice", "twice x = mulInt64 x 2"),
+        ("odd", "  odd 0 = False"),
+        ("even", "  even 0 = True"),
+        ("main", "main = twice 21"),
+    ] {
+        let span = signature
+            .origin(name)
+            .unwrap_or_else(|| panic!("`{name}` не помнит, где написан"));
+        let line = file
+            .location(span.start())
+            .unwrap_or_else(|| panic!("`{name}`: спан не переводится в позицию"))
+            .line;
+        assert_eq!(
+            file.line_text(line),
+            Some(written),
+            "`{name}` показывает не свою клаузу"
+        );
+    }
+}
+
+/// Постулат позиции не получает, и это не забывчивость.
+///
+/// Клауз у него нет вовсе, а до понижения он не доезжает - отвергается
+/// названным отказом. Запиши сюда строку сигнатуры, и DWARF называл бы строку,
+/// за которой нет кода.
+#[test]
+fn a_postulate_has_no_clause_to_point_at() {
+    let signature = program(
+        "\
+data Bool where
+  True : Bool
+  False : Bool
+
+opaque : Bool
+",
+    );
+    assert_eq!(signature.origin("opaque"), None);
+}

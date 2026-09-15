@@ -20,6 +20,7 @@ use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::row::Row;
 use adamas_core::sig::Signature;
+use adamas_core::source::SourceFile;
 use adamas_core::term::{PRINT_DEPTH, Term};
 use adamas_elab::class::Instances;
 use adamas_elab::fixity::Fixities;
@@ -32,10 +33,81 @@ pub(crate) fn corpus() -> PathBuf {
 }
 
 /// Место под порождённый C и его сборку - своё у каждого тестового крейта.
-fn scratch() -> PathBuf {
+pub(crate) fn scratch() -> PathBuf {
     let dir = Path::new(env!("OUT_DIR")).join(env!("CARGO_CRATE_NAME"));
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+/// Кладёт исходник на диск **атомарно** и отдаёт путь к нему.
+///
+/// Читать его будет отладчик: DWARF называет каталог и имя, и без файла по
+/// этому пути gdb показал бы номер строки без самой строки.
+///
+/// Через переименование, а не записью на месте: тесты одного крейта идут
+/// параллельно, кладут они **один и тот же** файл, и обычная запись усекает его
+/// на время. Отладчик, прочитавший файл в этот момент, показал бы пустую
+/// строку - и виноват оказался бы DWARF.
+///
+/// # Panics
+///
+/// Файл не записался либо не переименовался.
+#[expect(
+    clippy::expect_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+fn fixture(stem: &str, text: &str) -> PathBuf {
+    // Черновик свой у каждого вызова: тесты крейта - потоки одного процесса, и
+    // общее имя черновика вернуло бы ту же гонку, от которой он заведён.
+    static DRAFTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let at = DRAFTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = scratch().join(format!("{stem}.adamas"));
+    let draft = scratch().join(format!("{stem}.{at}.adamas.part"));
+    std::fs::write(&draft, text).expect("исходник обязан записываться");
+    std::fs::rename(&draft, &path).expect("исходник обязан переименовываться");
+    path
+}
+
+/// Понижение с исходником: программа с позициями (§9 Фаза 7, трек E).
+///
+/// # Panics
+///
+/// Исходник не разобрался, не проверился либо не понизился.
+#[expect(
+    clippy::expect_used,
+    reason = "заготовка теста: отказ здесь означает сломанный корпус"
+)]
+pub(crate) fn located(stem: &str, text: &str) -> (PathBuf, adamas_codegen::ir::Program) {
+    let path = fixture(stem, text);
+    let (mut signature, mut metas, instances) = elaborated(text);
+    let written = body(&signature, "main");
+    let made = mono::specialise(&mut signature, &mut metas, &instances, &written)
+        .expect("специализация обязана проходить");
+    let file = SourceFile::new(path.display().to_string(), text);
+    let program = adamas_codegen::lower::located(&signature, &made.term, &file)
+        .expect("понижение обязано проходить");
+    (path, program)
+}
+
+/// Эмиссия с исходником: `.ll` с DWARF плюс спутник.
+///
+/// # Panics
+///
+/// Исходник не разобрался, не проверился либо форма вне скалярного фрагмента.
+#[expect(
+    clippy::expect_used,
+    reason = "заготовка теста: отказ здесь означает сломанный корпус"
+)]
+pub(crate) fn llvm_located(stem: &str, text: &str) -> (PathBuf, Artefacts) {
+    let path = fixture(stem, text);
+    let (mut signature, mut metas, instances) = elaborated(text);
+    let written = body(&signature, "main");
+    let made = mono::specialise(&mut signature, &mut metas, &instances, &written)
+        .expect("специализация обязана проходить");
+    let file = SourceFile::new(path.display().to_string(), text);
+    let artefacts = adamas_codegen::compile_llvm_located(&signature, &made.term, &file)
+        .expect("скалярный фрагмент обязан брать фикстуру");
+    (path, artefacts)
 }
 
 /// Элаборированная программа вместе с тем, что о ней знает разрешение.
@@ -376,16 +448,81 @@ pub(crate) fn llvm_built(
     tools: &Toolchain,
     pipeline: &Pipeline,
 ) -> (String, String) {
-    let dir = scratch();
-    let text = dir.join(format!("{stem}.ll"));
-    std::fs::write(&text, &artefacts.ll).unwrap();
-    let object = pipeline
-        .run(tools, &text, stem)
-        .unwrap_or_else(|error| panic!("{stem}: конвейер LLVM отказал: {error}"));
+    let binary = llvm_binary(stem, artefacts, tools, pipeline);
+    let run = Command::new(&binary).output().unwrap();
+    assert!(
+        run.status.success(),
+        "{stem}: прогон оборвался:\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    (
+        String::from_utf8(run.stdout).unwrap(),
+        String::from_utf8(run.stderr).unwrap(),
+    )
+}
 
+/// Объектник из текста `.ll` названным конвейером.
+///
+/// Отдельно от [`llvm_built`], потому что отладочная информация читается
+/// **из объектника** (`llvm-dwarfdump`), а не из прогона: сборка, потерявшая
+/// метаданные, считает то же самое и молчит об этом.
+///
+/// # Panics
+///
+/// Конвейер отказал либо файл не записался.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+pub(crate) fn llvm_object(
+    stem: &str,
+    artefacts: &Artefacts,
+    tools: &Toolchain,
+    pipeline: &Pipeline,
+) -> PathBuf {
+    let text = scratch().join(format!("{stem}.ll"));
+    std::fs::write(&text, &artefacts.ll).unwrap();
+    pipeline
+        .run(tools, &text, stem)
+        .unwrap_or_else(|error| panic!("{stem}: конвейер LLVM отказал: {error}"))
+}
+
+/// Собранный и слинкованный бинарь: объектник, спутник, рантайм.
+///
+/// Отдельно от прогона ради отладчика: сеанс запускает программу сам, и
+/// запущенная дважды она печатала бы счётчики блоков в чужой лог.
+///
+/// # Panics
+///
+/// Спутник не собрался либо линковка отказала.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+pub(crate) fn llvm_binary(
+    stem: &str,
+    artefacts: &Artefacts,
+    tools: &Toolchain,
+    pipeline: &Pipeline,
+) -> PathBuf {
+    let object = llvm_object(stem, artefacts, tools, pipeline);
+    llvm_linked(stem, &object, &artefacts.support)
+}
+
+/// Линкует готовый объектник со спутником и рантаймом.
+///
+/// # Panics
+///
+/// Спутник не собрался либо линковка отказала.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+pub(crate) fn llvm_linked(stem: &str, object: &Path, support_text: &str) -> PathBuf {
+    let dir = scratch();
     let support = dir.join(format!("{stem}.support.c"));
     let support_object = dir.join(format!("{stem}.support.o"));
-    std::fs::write(&support, &artefacts.support).unwrap();
+    std::fs::write(&support, support_text).unwrap();
     let compiled = Command::new(env!("ADAMAS_CC"))
         .args([
             "-std=c11",
@@ -410,7 +547,7 @@ pub(crate) fn llvm_built(
 
     let binary = dir.join(format!("{stem}.bin"));
     let linked = Command::new(env!("ADAMAS_CC"))
-        .arg(&object)
+        .arg(object)
         .arg(&support_object)
         .args(runtime())
         .arg("-o")
@@ -422,17 +559,7 @@ pub(crate) fn llvm_built(
         "{stem}: линковка отказала:\n{}",
         String::from_utf8_lossy(&linked.stderr)
     );
-
-    let run = Command::new(&binary).output().unwrap();
-    assert!(
-        run.status.success(),
-        "{stem}: прогон оборвался:\n{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
-    (
-        String::from_utf8(run.stdout).unwrap(),
-        String::from_utf8(run.stderr).unwrap(),
-    )
+    binary
 }
 
 /// Понижение в LLVM, сборка, прогон и сверка с интерпретатором.

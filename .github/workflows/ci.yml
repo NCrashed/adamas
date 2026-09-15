@@ -54,8 +54,11 @@ jobs:
       # Минимальная поддерживаемая версия (adamas-codegen::llvm::MINIMUM_MAJOR).
       # Обе переменные указывают на неё: треугольник чтения `.ll` этим прогоном
       # не проверяется, и тест печатает об этом сам.
+      # gdb рядом с LLVM: критерий трека E - утверждение про сеанс отладчика, и
+      # проверяет его `gdb --batch`. Отсутствие отладчика роняет прогон, а не
+      # пропускает проверку, - поэтому он ставится там же, где инструменты.
       - if: matrix.llvm != ''
-        run: sudo apt-get update && sudo apt-get install -y llvm-${{ matrix.llvm }}
+        run: sudo apt-get update && sudo apt-get install -y llvm-${{ matrix.llvm }} gdb
       - run: cargo test --locked --workspace --all-targets
       # --all-targets не включает doc-tests, поэтому отдельным шагом.
       - run: cargo test --locked --workspace --doc

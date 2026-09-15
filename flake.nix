@@ -42,6 +42,14 @@
         # `adamas-codegen::llvm::MINIMUM_MAJOR`, и совпадение двух записей
         # проверяет `crates/adamas-codegen/tests/llvm.rs`.
         llvmMinimum = pkgs.llvmPackages_18.llvm;
+
+        # Отладчик Фазы 7 (§9, волна 1, трек E). Критерий трека - утверждение
+        # про сеанс («в отладчике видно имя и значение»), и проверяется он
+        # пакетным `gdb --batch`, а не чтением метаданных: узел в тексте `.ll`
+        # доказывает, что он написан, и молчит о том, найдёт ли отладчик по
+        # нему значение. gdb, а не lldb: скриптуется одинаково, но в nixpkgs
+        # приезжает без сборки всего LLVM-стека второй раз.
+        debugger = pkgs.gdb;
       in
       {
         packages.default = rustPlatform.buildRustPackage {
@@ -67,6 +75,7 @@
             pkgs.cargo-insta
             pkgs.cargo-mutants
             llvmCurrent
+            debugger
           ];
 
           # Каталогами, а не именами: цепочка инструментов обязана быть одной

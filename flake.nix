@@ -50,6 +50,14 @@
         # нему значение. gdb, а не lldb: скриптуется одинаково, но в nixpkgs
         # приезжает без сборки всего LLVM-стека второй раз.
         debugger = pkgs.gdb;
+
+        # Рантайм битовым кодом (§9 Фаза 7, трек A′, вторая половина). Нужен
+        # ровно тем, что `opt` не видит сквозь `adamas_dup`, пока рантайм
+        # приезжает готовым объектником: `llvm-link` с `.bc` это снимает, а
+        # собрать `.bc` из C нечем, кроме clang - gcc битового кода LLVM не
+        # выдаёт. Версия обязана совпасть с `llvmCurrent`: `llvm-link` читает
+        # битовый код своего мажора.
+        clangCurrent = pkgs.llvmPackages.clang;
       in
       {
         packages.default = rustPlatform.buildRustPackage {
@@ -81,9 +89,15 @@
           # Каталогами, а не именами: цепочка инструментов обязана быть одной
           # версии целиком, иначе стадии конвейера читали бы разный IR. Обе
           # переменные читает `adamas-codegen::llvm`.
+          #
+          # clang - **путём**, а не через `nativeBuildInputs`, и это не стиль:
+          # обёртка clang в nixpkgs кладёт в `bin` ещё и `cc`, а `cc`-крейт
+          # берёт компилятор из `PATH`. Попади он туда - рантайм и порождённый C
+          # собирались бы clang'ом вместо gcc, молча и во всех замерах разом.
           env = {
             ADAMAS_LLVM_BIN = "${llvmCurrent}/bin";
             ADAMAS_LLVM_MIN_BIN = "${llvmMinimum}/bin";
+            ADAMAS_CLANG = "${clangCurrent}/bin/clang";
           };
         };
 

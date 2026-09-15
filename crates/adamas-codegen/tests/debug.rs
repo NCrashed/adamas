@@ -392,6 +392,7 @@ fn the_minimum_llvm_reads_the_debug_metadata() {
             &format!("dwarf.triangle.{stem}"),
             &object,
             &artefacts.support,
+            true,
         );
         let run = Command::new(&binary).output().unwrap();
         assert!(run.status.success(), "LLVM {stem}: прогон оборвался");

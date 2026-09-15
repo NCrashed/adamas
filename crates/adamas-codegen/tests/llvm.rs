@@ -30,11 +30,13 @@
 //!
 //! # Чем инструменты берутся
 //!
-//! Каталогами из `ADAMAS_LLVM_BIN` и `ADAMAS_LLVM_MIN_BIN`; обе выставляет
-//! dev-shell (`flake.nix`). Их отсутствие - **отказ**, а не пропуск: молчаливо
-//! зелёный тест здесь был бы обманчивым свидетелем. Единственное объявленное
-//! исключение - `ADAMAS_LLVM=absent`, и стоит оно в одном месте
-//! (`.github/workflows/ci.yml`, нога macOS), где LLVM в образе раннера нет.
+//! Каталогами из `ADAMAS_LLVM_BIN` и `ADAMAS_LLVM_MIN_BIN`, плюс путь к clang в
+//! `ADAMAS_CLANG` для рантайма в `.bc`; все три выставляет dev-shell
+//! (`flake.nix`). Их отсутствие - **отказ**, а не пропуск: молчаливо зелёный
+//! тест здесь был бы обманчивым свидетелем. Единственное объявленное исключение
+//! называется `ADAMAS_LLVM=absent` и стоит в одном месте
+//! (`.github/workflows/ci.yml`, нога macOS), где LLVM в образе раннера нет;
+//! второго исключения под clang не заводится, потому что гасит он то же самое.
 //! Само правило живёт в [`harness::llvm_toolchains`] - одной записью на всех
 //! свидетелей LLVM-пути, потому что вторая разъехалась бы с первой молча.
 
@@ -44,22 +46,49 @@ use std::path::PathBuf;
 
 use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 
-/// Программы корпуса, которые скалярный фрагмент обязан взять.
+/// Программы корпуса, которые срез обязан взять.
 ///
-/// Список короткий по построению: фрагмент берёт плоское значение, арифметику,
-/// сравнение, прямой вызов, `let` и разбор по нульарному конструктору - и
-/// ответ программы обязан быть плоским. Всё прочее отвергается названной
-/// причиной, и причины эти печатаются мерой ниже.
+/// Список закрыт двумя стенами, и обе названы прогоном: за ним стоят эффекты
+/// (волна 2) и замыкания. Всё прочее отвергается названной причиной, и причины
+/// эти печатаются мерой ниже.
 ///
 /// Сокращать нельзя, пополнять - можно и нужно, когда фрагмент растёт: ровно то
 /// же правило, что у `agreement.rs`.
 ///
-/// Трек F (плавающее, 2026-09-15) фрагмент растил, а список - нет, и это
-/// проверено прогоном, а не решено: четыре программы, отвергнутые прежде
-/// ответом `Float32`, отвергаются теперь **своей** причиной - массивом
-/// (`array-aggregate`, `array-nested`, `workload-column`) и записью
-/// (`soa-record`). Плавающее у них было не единственной границей.
-const TAKEN: [&str; 2] = ["workload-scalar", "workload-scalar-affine"];
+/// Двадцать одна из них - **сумма двух треков**, и слагаемые не складываются
+/// поодиночке: объектный слой (A′) без плавающего давал девятнадцать,
+/// плавающее (F) без объектного - две. `literal-default` и `primitives`
+/// отвечают записью с плавающим полем и требуют обоих сразу; это и есть
+/// довод, по которому список считается прогоном, а не разностью.
+const TAKEN: [&str; 21] = [
+    "arithmetic",
+    "case-family",
+    "case-over-a-computation",
+    "countdown",
+    "erasure",
+    "flat-fields",
+    "lists",
+    "literal-default",
+    "module-scope",
+    "mutual-family",
+    "nested-case-on-a-field",
+    "nested-functor",
+    "operators",
+    "primitives",
+    "records",
+    "resource-cleanup",
+    "rose",
+    "workload-fbip",
+    "workload-scalar",
+    "workload-scalar-affine",
+    "workload-symbolic",
+];
+
+/// Две нагрузки, отличающиеся **одной** строкой тела витка.
+///
+/// Стоят отдельно от [`TAKEN`], потому что о них утверждается своё: их ответы
+/// обязаны **различаться**. Порядок здесь значим, порядок в [`TAKEN`] - нет.
+const WORKLOADS: [&str; 2] = ["workload-scalar", "workload-scalar-affine"];
 
 /// Углы фрагмента, которых корпус не покрывает ни одной фикстурой.
 ///
@@ -231,7 +260,7 @@ fn the_two_workloads_do_not_answer_the_same() {
         return;
     };
     let pipeline = Pipeline::optimised();
-    let answers: Vec<String> = TAKEN
+    let answers: Vec<String> = WORKLOADS
         .iter()
         .map(|name| {
             let source =
@@ -247,7 +276,7 @@ fn the_two_workloads_do_not_answer_the_same() {
     );
     // И ни один из ответов не «ноль по построению»: нулём отвечает и цикл,
     // который не крутился ни разу.
-    for (name, answer) in TAKEN.iter().zip(&answers) {
+    for (name, answer) in WORKLOADS.iter().zip(&answers) {
         assert_ne!(answer, "0", "{name}: ответ ноль - крутиться было незачем");
     }
 }
@@ -431,12 +460,317 @@ fn a_broken_emitter_changes_the_printed_answer() {
             &artefacts.support,
             &tools,
             &pipeline,
-        );
+        )
+        .printed;
         assert_ne!(
             printed, honest,
             "{why}: ответ не изменился, и проверка не различает"
         );
         eprintln!("мутант «{why}»: {printed} вместо {honest}");
+    }
+}
+
+/// Мутанты **объектного слоя**: сломанная правка обязана быть наблюдаема.
+///
+/// Сосед выше ломает скалярный путь и мерит ответом. Здесь мера шире, и это
+/// требование самого слоя: половина его правок ответа не меняет вовсе. Ячейка,
+/// не возвращённая куче, печатает то же число; переиспользование, подменённое
+/// аллокацией, - тоже. Различает их счётчик блоков, который печатает `main.c`
+/// (выдано и живо), и потому мутант здесь сверяется с **тройкой**.
+///
+/// Четыре правки - четыре разных пути объектного слоя.
+///
+/// - **Слоты конструктора.** `MkAnswer` кладёт `Int64` рядом с `UInt8`
+///   (`flat-fields`, фикстура заведена ровно под это); перепутанные смещения
+///   меняют оба напечатанных числа, потому что ширины у слотов разные.
+/// - **Тег конструктора.** `Cons` строится тегом `Nil`; свёртка `total`
+///   видит пустой список на первом же элементе.
+/// - **Возврат ячейки.** Из ветви уникального убран `adamas_free`: ответ тот
+///   же, живых блоков - ячейка на элемент.
+/// - **Переиспользование.** `adamas_reuse` придержанной ячейки заменён на
+///   `adamas_alloc`: ответ тот же, выдано больше, а придержанное некому вернуть.
+///
+/// Последние две - и есть свидетель того, что «собралось и напечатало» ловит
+/// меньше, чем кажется: обе печатают **честное** число.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+#[test]
+fn a_broken_object_layer_is_observable() {
+    let Some((tools, _)) = harness::llvm_toolchains() else {
+        return;
+    };
+    let pipeline = Pipeline::optimised();
+
+    for (name, stem, why, from, to, verdict) in object_mutants() {
+        let source =
+            std::fs::read_to_string(harness::corpus().join(format!("{name}.adamas"))).unwrap();
+        let (honest, stderr) = harness::llvm_agreed(
+            name,
+            &source,
+            &tools,
+            &pipeline,
+            &format!("object.honest.{stem}"),
+        )
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let (allocated, live) = harness::blocks(name, &stderr);
+        assert_eq!(live, 0, "{name}: честный прогон оставил блоки живыми");
+
+        let artefacts = harness::llvm_text(name, &source).unwrap();
+        let mutant = swapped(&artefacts.ll, from, to);
+        let broken = harness::llvm_printed(
+            &format!("object.{stem}"),
+            &mutant,
+            &artefacts.support,
+            &tools,
+            &pipeline,
+        );
+        let differs = match verdict {
+            Verdict::Answer => broken.printed != honest,
+            Verdict::Leak => broken.live.is_none_or(|it| it != 0),
+            Verdict::Allocations => broken.allocated.is_none_or(|it| it != allocated),
+        };
+        assert!(
+            differs,
+            "{why}: наблюдаемое не изменилось - ответ `{}`, выдано {:?}, живо {:?}; \
+             честные были `{honest}`, {allocated} и {live}",
+            broken.printed, broken.allocated, broken.live
+        );
+        eprintln!(
+            "мутант «{why}»: ответ `{}`, выдано {:?}, живо {:?} (честные `{honest}`, {allocated}, {live})",
+            broken.printed, broken.allocated, broken.live
+        );
+    }
+}
+
+/// Чем мутант обязан отличиться. Не украшение: правка, которую ловит только
+/// счётчик, ответом не ловится вовсе, и наоборот.
+#[derive(Clone, Copy)]
+enum Verdict {
+    /// Напечатанным ответом.
+    Answer,
+    /// Живыми блоками в конце прогона.
+    Leak,
+    /// Числом выданных блоков.
+    Allocations,
+}
+
+/// Правки объектного слоя: фикстура, имя, причина, что на что, чем ловится.
+fn object_mutants() -> [(
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    Verdict,
+); 4] {
+    [
+        (
+            "flat-fields",
+            "slots",
+            "перепутанные слоты конструктора",
+            "  %t17 = getelementptr i8, ptr %t16, i64 8\n  \
+             store i64 %t11, ptr %t17\n  \
+             %t18 = getelementptr i8, ptr %t16, i64 16\n",
+            "  %t17 = getelementptr i8, ptr %t16, i64 16\n  \
+             store i64 %t11, ptr %t17\n  \
+             %t18 = getelementptr i8, ptr %t16, i64 8\n",
+            Verdict::Answer,
+        ),
+        (
+            "workload-fbip",
+            "tag",
+            "перепутанный тег конструктора",
+            "%t5 = call ptr @adamas_alloc(i16 1, i64 2) ; Cons",
+            "%t5 = call ptr @adamas_alloc(i16 0, i64 2) ; Cons",
+            Verdict::Answer,
+        ),
+        (
+            "workload-fbip",
+            "free",
+            "невозвращённая ячейка разобранного",
+            "s1.unique:\n  call void @adamas_free(ptr %v0)\n",
+            "s1.unique:\n",
+            Verdict::Leak,
+        ),
+        (
+            "workload-fbip",
+            "reuse",
+            "аллокация вместо переиспользования",
+            "%t10 = call ptr @adamas_reuse(ptr %t8, i16 1, i64 2) ; Cons",
+            "%t10 = call ptr @adamas_alloc(i16 1, i64 2) ; Cons",
+            Verdict::Allocations,
+        ),
+    ]
+}
+
+/// Потерянный `dup` наблюдаем: RC-трафик на объектах не декорация.
+///
+/// Мутант тут один на весь корпус, потому что вопрос один: **бежит** ли счёт
+/// ссылок, или он только напечатан. Убираются все строки с `adamas_dup` разом -
+/// значение вызова эмиттер и так не читает, поэтому IR остаётся законным, - и
+/// программа, которой `dup` был нужен, обязана это заметить: ответом,
+/// оборвавшимся прогоном либо счётчиком блоков.
+///
+/// Утверждается **существование**, а не поголовность: на нагрузке, где всякое
+/// разобранное уникально, `dup` стоит в ветви разделённого и не бежит ни разу,
+/// и требовать от неё расхождения значило бы требовать неверного. Список
+/// заметивших печатается прогоном - усохни он, и это будет видно.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+#[test]
+fn a_lost_dup_is_observable_on_the_object_path() {
+    let Some((tools, _)) = harness::llvm_toolchains() else {
+        return;
+    };
+    let pipeline = Pipeline::optimised();
+    let mut noticed = Vec::new();
+    let mut indifferent = Vec::new();
+
+    for name in TAKEN {
+        let source =
+            std::fs::read_to_string(harness::corpus().join(format!("{name}.adamas"))).unwrap();
+        let artefacts = harness::llvm_text(name, &source).unwrap();
+        if !artefacts.ll.contains("@adamas_dup(") {
+            continue;
+        }
+        let (honest, stderr) =
+            harness::llvm_agreed(name, &source, &tools, &pipeline, &format!("{name}.kept"))
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let (allocated, live) = harness::blocks(name, &stderr);
+
+        let kept: Vec<&str> = artefacts
+            .ll
+            .lines()
+            .filter(|line| !line.contains("@adamas_dup("))
+            .collect();
+        let mutant = kept.join("\n");
+        let broken = harness::llvm_printed(
+            &format!("{name}.nodup"),
+            &mutant,
+            &artefacts.support,
+            &tools,
+            &pipeline,
+        );
+        if broken.printed == honest
+            && broken.allocated == Some(allocated)
+            && broken.live == Some(live)
+        {
+            indifferent.push(name);
+        } else {
+            noticed.push(format!(
+                "{name}: `{}` вместо `{honest}`, выдано {:?} против {allocated}, живо {:?} против {live}",
+                broken.printed, broken.allocated, broken.live
+            ));
+        }
+    }
+
+    for line in &noticed {
+        eprintln!("потерянный dup заметили - {line}");
+    }
+    eprintln!("не заметили: {}", indifferent.join(", "));
+    assert!(
+        !noticed.is_empty(),
+        "потерянный `dup` не заметил никто: счёт ссылок на объектах не бежит вовсе"
+    );
+}
+
+/// Точки входа рантайма, которые эмиттер зовёт на объектном пути.
+const RUNTIME_CALLS: [&str; 8] = [
+    "adamas_con0",
+    "adamas_alloc",
+    "adamas_reuse",
+    "adamas_free",
+    "adamas_tag",
+    "adamas_is_unique",
+    "adamas_dup",
+    "adamas_drop",
+];
+
+/// Рантайм битовым кодом: `opt` начинает видеть сквозь него (трек A′, вторая
+/// половина; шов оставлен треком A, `docs/phase7-plan.md`).
+///
+/// Это то, без чего трек C не запускается: пока рантайм приезжает готовым
+/// объектником, `adamas_dup` для оптимизатора непрозрачен, и «схлопнуть пару
+/// `dup`/`drop`» не к чему применить. Проверяется **разницей**, а не наличием
+/// стадии, - четвёртое правило фазы.
+///
+/// Утверждений три, и каждое своё.
+///
+/// *Ответ не меняется.* Инлайнинг рантайма - оптимизация, а не другое
+/// вычисление; разойдись здесь ответ, и разошёлся бы договор трёх
+/// вычислителей.
+///
+/// *Вызовов становится меньше, а `adamas_dup` не остаётся вовсе.* Второе
+/// сильнее первого и названо отдельно: `adamas_dup` - самая маленькая функция
+/// рантайма, и не инлайнься она, инлайнинга нет вовсе.
+///
+/// *Счётчик блоков тот же.* Переиспользование ячейки обязано пережить
+/// инлайнинг: `adamas_reuse` внутри цикла - ровно то, ради чего трек B будет
+/// ставить метаданные, и растворись оно тут в `malloc`, мерить было бы нечего.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+#[test]
+fn the_runtime_in_bitcode_lets_the_optimiser_see_through_it() {
+    let Some((tools, _)) = harness::llvm_toolchains() else {
+        return;
+    };
+    let runtime = harness::runtime_bitcode(&tools);
+    let plain = Pipeline::optimised();
+    let whole = Pipeline::whole_program(&runtime);
+
+    for name in ["workload-fbip", "workload-symbolic", "workload-scalar"] {
+        let source =
+            std::fs::read_to_string(harness::corpus().join(format!("{name}.adamas"))).unwrap();
+        let (apart, apart_err) =
+            harness::llvm_agreed(name, &source, &tools, &plain, &format!("{name}.apart"))
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let (together, together_err) =
+            harness::llvm_agreed(name, &source, &tools, &whole, &format!("{name}.together"))
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(
+            apart, together,
+            "{name}: `llvm-link` с рантаймом изменил ответ"
+        );
+        assert_eq!(
+            harness::blocks(name, &apart_err),
+            harness::blocks(name, &together_err),
+            "{name}: счётчик блоков разошёлся - переиспользование не пережило инлайнинг"
+        );
+
+        // Промежуточные файлы конвейер оставляет намеренно: считать вызовы
+        // после `opt` больше негде, а до `llc` они ещё видны.
+        let directory = harness::scratch();
+        let before = harness::calls(
+            &tools,
+            &directory.join(format!("{name}.apart.opt.bc")),
+            &RUNTIME_CALLS,
+        );
+        let after = harness::calls(
+            &tools,
+            &directory.join(format!("{name}.together.opt.bc")),
+            &RUNTIME_CALLS,
+        );
+        let (was, now): (usize, usize) = (before.iter().sum(), after.iter().sum());
+        eprintln!("{name}: вызовов рантайма после `-O2` было {was}, стало {now}");
+        for (call, (had, has)) in RUNTIME_CALLS.iter().zip(before.iter().zip(&after)) {
+            eprintln!("  @{call}: {had} -> {has}");
+        }
+        assert!(
+            now < was,
+            "{name}: рантайм приложен, а вызовов столько же ({was}) - `opt` его не видит"
+        );
+        let dup = RUNTIME_CALLS.iter().position(|it| *it == "adamas_dup");
+        assert_eq!(
+            dup.map(|at| after[at]),
+            Some(0),
+            "{name}: `adamas_dup` не заинлайнился, а он самый маленький в рантайме"
+        );
     }
 }
 

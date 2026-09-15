@@ -178,7 +178,8 @@ fn ten_million_tail_calls_finish_at_every_optimisation_level() {
             // проверка мерит объектник первой.
             let stem = format!("tail.deep.{tag}.{level}");
             let printed =
-                harness::llvm_printed(&stem, &artefacts.ll, &artefacts.support, tools, &pipeline);
+                harness::llvm_printed(&stem, &artefacts.ll, &artefacts.support, tools, &pipeline)
+                    .printed;
             assert!(
                 printed.parse::<u64>().is_ok(),
                 "{version} цепочка, {level}: 10⁷ хвостовых вызовов не дошли до конца ({printed})"
@@ -246,7 +247,8 @@ fn taking_the_guarantee_off_overflows_the_stack() {
                 &artefacts.support,
                 &tools,
                 &pipeline,
-            );
+            )
+            .printed;
             let finished = printed.parse::<u64>().is_ok();
             eprintln!("мутант «{why}», {level}: {printed}");
             if everywhere || level == "-O0" {

@@ -47,6 +47,9 @@ jobs:
       ADAMAS_LLVM: ${{ matrix.llvm == '' && 'absent' || '' }}
       ADAMAS_LLVM_BIN: ${{ matrix.llvm != '' && format('/usr/lib/llvm-{0}/bin', matrix.llvm) || '' }}
       ADAMAS_LLVM_MIN_BIN: ${{ matrix.llvm != '' && format('/usr/lib/llvm-{0}/bin', matrix.llvm) || '' }}
+      # Рантайм битовым кодом (трек A′): gcc его не выдаёт, а версия обязана
+      # совпасть с той, чей `llvm-link` его читает.
+      ADAMAS_CLANG: ${{ matrix.llvm != '' && format('/usr/lib/llvm-{0}/bin/clang', matrix.llvm) || '' }}
     steps:
       - uses: actions/checkout@v4
       - run: rustup show active-toolchain || rustup toolchain install
@@ -58,7 +61,7 @@ jobs:
       # проверяет его `gdb --batch`. Отсутствие отладчика роняет прогон, а не
       # пропускает проверку, - поэтому он ставится там же, где инструменты.
       - if: matrix.llvm != ''
-        run: sudo apt-get update && sudo apt-get install -y llvm-${{ matrix.llvm }} gdb
+        run: sudo apt-get update && sudo apt-get install -y llvm-${{ matrix.llvm }} clang-${{ matrix.llvm }} gdb
       - run: cargo test --locked --workspace --all-targets
       # --all-targets не включает doc-tests, поэтому отдельным шагом.
       - run: cargo test --locked --workspace --doc

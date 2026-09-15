@@ -97,7 +97,7 @@ use adamas_core::term::PRINT_DEPTH;
 use adamas_elab::mono;
 use criterion::{Criterion, SamplingMode, criterion_group};
 
-use harness::{NEIGHBOUR, blocks, built, by_floor, elaborated, entry, ran, ran_neighbour};
+use harness::{NEIGHBOUR, blocks, built, by_floor, elaborated, entry, ran, ran_neighbour, ratio};
 
 /// Место под порождённый C и его сборку — своё у стенда.
 const STAND: &str = "bench-workloads";
@@ -396,6 +396,15 @@ fn scalar(criterion: &mut Criterion) {
         by_floor(bencher, || drop(ran_neighbour(&request)));
     });
     group.finish();
+
+    // Число строки таблицы берётся здесь, а не у отчёта: см. [`ratio`].
+    ratio(
+        "скалярная арифметика",
+        || drop(ran(&load.binary)),
+        || drop(ran(&floor.binary)),
+        || drop(ran_neighbour(&request)),
+        || drop(ran_neighbour("scalar:0")),
+    );
 }
 
 /// FBIP-цикл: третья нагрузка трека Z.
@@ -439,6 +448,14 @@ fn fbip(criterion: &mut Criterion) {
         by_floor(bencher, || drop(ran_neighbour(&request)));
     });
     group.finish();
+
+    ratio(
+        "FBIP-цикл",
+        || drop(ran(&load.binary)),
+        || drop(ran(&floor.binary)),
+        || drop(ran_neighbour(&request)),
+        || drop(ran_neighbour("fbip:0:0")),
+    );
 }
 
 criterion_group!(benches, scalar, fbip);

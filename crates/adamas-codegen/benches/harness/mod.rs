@@ -287,3 +287,101 @@ pub(crate) fn span(sample: &[f64]) -> f64 {
     let low = sample.iter().copied().fold(f64::MAX, f64::min);
     sample.iter().copied().fold(f64::MIN, f64::max) - low
 }
+
+// --- отношение двух сторон, померенное чередованием ----------------------
+
+/// Блоков в замере отношения, пар в блоке и сколько блоков идёт в число.
+///
+/// Те же роли, что у `PAIRED_*` в `native.rs`, и та же причина: помеха
+/// длится десятки секунд, поэтому две стороны нельзя мерить в разных окнах, а
+/// блок, накрытый помехой целиком, отбрасывается по свидетелю пола.
+const RATIO_BLOCKS: usize = 7;
+const RATIO_QUIET: usize = 4;
+const RATIO_PAIRS: u64 = 8;
+
+/// Отношение двух сторон и то, из чего оно сложилось.
+pub(crate) struct Ratio {
+    /// Медиана отношения по тишайшим блокам.
+    pub(crate) median: f64,
+    /// Размах отношения между ними.
+    pub(crate) spread: f64,
+    /// Пол своей стороны, за вычетом своего пола запуска, мс.
+    pub(crate) ours: f64,
+    /// То же у соседа.
+    pub(crate) theirs: f64,
+}
+
+/// Отношение «мы против соседа», померенное чередованием внутри одного окна.
+///
+/// Зачем не хватает точек criterion. Отношение берётся у двух точек, которые
+/// в отчёте стоят на расстоянии десятков секунд, а окружение уводит их за это
+/// время на единицы процентов — и не всегда вместе. Замер 2026-09-15 на
+/// занятой машине дал по символьной строке одиннадцать прогонов в размахе
+/// 0.75–1.57 при медиане около 0.90: отношение из отчёта там не читается
+/// вовсе. Тот же довод, каким `native.rs` завёл свой парный замер, только там
+/// он о разности, а здесь об отношении.
+///
+/// Что делает чередование. В блоке стороны идут подряд, оценка каждой — пол
+/// блока (помеха прибавляет), пол запуска процесса вычитается **свой** у
+/// каждой и меряется в том же блоке. Помеха, накрывшая блок, поднимает обе
+/// стороны разом и из отношения уходит; блок, накрытый ею целиком, отсеивается
+/// по полу нашей стороны — свидетелю, который о самом отношении ничего не
+/// знает.
+pub(crate) fn ratio(
+    what: &str,
+    mut ours: impl FnMut(),
+    mut our_floor: impl FnMut(),
+    mut theirs: impl FnMut(),
+    mut their_floor: impl FnMut(),
+) -> Ratio {
+    let (blocks, pairs) = if measuring() {
+        (RATIO_BLOCKS, RATIO_PAIRS)
+    } else {
+        (2, 2)
+    };
+    let milliseconds = |run: &mut dyn FnMut()| least(1, run).as_secs_f64() * 1e3;
+    // Блок: пол каждой из четырёх точек, померенный чередованием.
+    let mut measured: Vec<(f64, f64, f64)> = Vec::with_capacity(blocks);
+    for block in 0..blocks {
+        let (mut us, mut them) = (f64::MAX, f64::MAX);
+        let (mut our_pit, mut their_pit) = (f64::MAX, f64::MAX);
+        for _ in 0..pairs {
+            us = us.min(milliseconds(&mut ours));
+            them = them.min(milliseconds(&mut theirs));
+            our_pit = our_pit.min(milliseconds(&mut our_floor));
+            their_pit = their_pit.min(milliseconds(&mut their_floor));
+        }
+        let (us, them) = (us - our_pit, them - their_pit);
+        eprintln!(
+            "отношение/{what}: блок {block}: мы {us:.3} против соседа {them:.3} мс \
+             (полы {our_pit:.3} / {their_pit:.3}), отношение {:.4}",
+            us / them
+        );
+        measured.push((us, them, us / them));
+    }
+
+    // Тишайшие блоки вперёд, шумные — за черту. Свидетель тишины — пол нашей
+    // стороны: он о самом отношении ничего не знает.
+    measured.sort_unstable_by(|left, right| left.0.total_cmp(&right.0));
+    let quiet = RATIO_QUIET.min(measured.len());
+    let kept = &measured[..quiet];
+    let mut ratios: Vec<f64> = kept.iter().map(|(_, _, ratio)| *ratio).collect();
+    let median = middle(&mut ratios);
+    let spread = span(&ratios);
+    let ours = kept.iter().map(|(us, _, _)| *us).fold(f64::MAX, f64::min);
+    let theirs = kept
+        .iter()
+        .map(|(_, them, _)| *them)
+        .fold(f64::MAX, f64::min);
+    eprintln!(
+        "отношение/{what}: по {quiet} тишайшим блокам {median:.4} \
+         (размах {spread:.4}), запас {:.1}x; пол наш {ours:.3} мс, соседа {theirs:.3}",
+        median / spread
+    );
+    Ratio {
+        median,
+        spread,
+        ours,
+        theirs,
+    }
+}

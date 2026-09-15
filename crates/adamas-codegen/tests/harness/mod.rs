@@ -425,16 +425,81 @@ pub(crate) fn llvm_built(
     tools: &Toolchain,
     pipeline: &Pipeline,
 ) -> (String, String) {
-    let dir = scratch();
-    let text = dir.join(format!("{stem}.ll"));
-    std::fs::write(&text, &artefacts.ll).unwrap();
-    let object = pipeline
-        .run(tools, &text, stem)
-        .unwrap_or_else(|error| panic!("{stem}: конвейер LLVM отказал: {error}"));
+    let binary = llvm_binary(stem, artefacts, tools, pipeline);
+    let run = Command::new(&binary).output().unwrap();
+    assert!(
+        run.status.success(),
+        "{stem}: прогон оборвался:\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    (
+        String::from_utf8(run.stdout).unwrap(),
+        String::from_utf8(run.stderr).unwrap(),
+    )
+}
 
+/// Объектник из текста `.ll` названным конвейером.
+///
+/// Отдельно от [`llvm_built`], потому что отладочная информация читается
+/// **из объектника** (`llvm-dwarfdump`), а не из прогона: сборка, потерявшая
+/// метаданные, считает то же самое и молчит об этом.
+///
+/// # Panics
+///
+/// Конвейер отказал либо файл не записался.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+pub(crate) fn llvm_object(
+    stem: &str,
+    artefacts: &Artefacts,
+    tools: &Toolchain,
+    pipeline: &Pipeline,
+) -> PathBuf {
+    let text = scratch().join(format!("{stem}.ll"));
+    std::fs::write(&text, &artefacts.ll).unwrap();
+    pipeline
+        .run(tools, &text, stem)
+        .unwrap_or_else(|error| panic!("{stem}: конвейер LLVM отказал: {error}"))
+}
+
+/// Собранный и слинкованный бинарь: объектник, спутник, рантайм.
+///
+/// Отдельно от прогона ради отладчика: сеанс запускает программу сам, и
+/// запущенная дважды она печатала бы счётчики блоков в чужой лог.
+///
+/// # Panics
+///
+/// Спутник не собрался либо линковка отказала.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+pub(crate) fn llvm_binary(
+    stem: &str,
+    artefacts: &Artefacts,
+    tools: &Toolchain,
+    pipeline: &Pipeline,
+) -> PathBuf {
+    let object = llvm_object(stem, artefacts, tools, pipeline);
+    llvm_linked(stem, &object, &artefacts.support)
+}
+
+/// Линкует готовый объектник со спутником и рантаймом.
+///
+/// # Panics
+///
+/// Спутник не собрался либо линковка отказала.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+pub(crate) fn llvm_linked(stem: &str, object: &Path, support_text: &str) -> PathBuf {
+    let dir = scratch();
     let support = dir.join(format!("{stem}.support.c"));
     let support_object = dir.join(format!("{stem}.support.o"));
-    std::fs::write(&support, &artefacts.support).unwrap();
+    std::fs::write(&support, support_text).unwrap();
     let compiled = Command::new(env!("ADAMAS_CC"))
         .args([
             "-std=c11",
@@ -459,7 +524,7 @@ pub(crate) fn llvm_built(
 
     let binary = dir.join(format!("{stem}.bin"));
     let linked = Command::new(env!("ADAMAS_CC"))
-        .arg(&object)
+        .arg(object)
         .arg(&support_object)
         .args(runtime())
         .arg("-o")
@@ -471,17 +536,7 @@ pub(crate) fn llvm_built(
         "{stem}: линковка отказала:\n{}",
         String::from_utf8_lossy(&linked.stderr)
     );
-
-    let run = Command::new(&binary).output().unwrap();
-    assert!(
-        run.status.success(),
-        "{stem}: прогон оборвался:\n{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
-    (
-        String::from_utf8(run.stdout).unwrap(),
-        String::from_utf8(run.stderr).unwrap(),
-    )
+    binary
 }
 
 /// Понижение в LLVM, сборка, прогон и сверка с интерпретатором.

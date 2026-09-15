@@ -30,6 +30,18 @@
           cargo = rustToolchain;
           rustc = rustToolchain;
         };
+
+        # LLVM Фазы 7 (§9). Привязка текстовая (решение 2026-09-15), поэтому
+        # нужны бинари, а не библиотека: `llvm-as`, `opt`, `llc` - все три
+        # лежат в `llvm`.
+        llvmCurrent = pkgs.llvmPackages.llvm;
+
+        # Минимальная поддерживаемая версия. Правило «консервативное
+        # подмножество IR» проверяется прогоном на ней, а не грепом по формам:
+        # тот же порядок, что у MSRV. Число продублировано в
+        # `adamas-codegen::llvm::MINIMUM_MAJOR`, и совпадение двух записей
+        # проверяет `crates/adamas-codegen/tests/llvm.rs`.
+        llvmMinimum = pkgs.llvmPackages_18.llvm;
       in
       {
         packages.default = rustPlatform.buildRustPackage {
@@ -54,7 +66,16 @@
             rustToolchain
             pkgs.cargo-insta
             pkgs.cargo-mutants
+            llvmCurrent
           ];
+
+          # Каталогами, а не именами: цепочка инструментов обязана быть одной
+          # версии целиком, иначе стадии конвейера читали бы разный IR. Обе
+          # переменные читает `adamas-codegen::llvm`.
+          env = {
+            ADAMAS_LLVM_BIN = "${llvmCurrent}/bin";
+            ADAMAS_LLVM_MIN_BIN = "${llvmMinimum}/bin";
+          };
         };
 
         # nixfmt-tree, а не голый nixfmt: последний на `nix fmt` без аргументов

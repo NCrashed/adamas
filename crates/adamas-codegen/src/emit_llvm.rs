@@ -4287,16 +4287,23 @@ impl<'a> Builder<'a> {
     /// докручивает [`adamas_kont_run`], и до кучи это не доходит: первая форма
     /// за указателем отвечает сразу, кадров не положив ни одного.
     ///
-    /// Вектор evidence берётся свой, если он есть: под [`Self::masking`] в
-    /// чистом отрезке он ненулевой, и `null` там потерял бы маску молча.
-    /// Снаружи маски его нет вовсе, и `null` - то же, что печатает
-    /// C-эмиттер: у первой формы вектора не бывает по записи ABI.
+    /// Вектор идёт `null`, и это **проверяемое** утверждение, а не умолчание:
+    /// у первой формы вектора нет по записи ABI, а единственное, что кладёт его
+    /// в чистом отрезке, - маска ([`Self::masking`]). Окажись применение под
+    /// ней, `null` потерял бы маску **молча**, поэтому здесь отказ по имени, а
+    /// не тихая печать. Корпус такой пары не порождает (замерено зондом
+    /// 2026-09-16: маска в чистом отрезке встречается, применение под ней -
+    /// нет), и мимо строки этой пройти нечем. C-эмиттер в том же месте печатает
+    /// `NULL` без проверки.
     fn applied(&mut self, callee: &Expr, argument: &Expr) -> Result<String, LlvmError> {
         if self.kont.is_some() {
             // Внутри второй формы применение значением не бывает: дробление
             // выносит его хвостом куска ([`Self::applying`]). Отказ, а не
             // свой корень: чужую ручку докрутил бы не тот, кто её завёл.
             return Err(self.node("применение значением во второй форме"));
+        }
+        if self.ev.is_some() {
+            return Err(self.node("применение под маской в чистом отрезке"));
         }
         let callee = self.value(callee)?;
         let given = self.value(argument)?;
@@ -4307,11 +4314,10 @@ impl<'a> Builder<'a> {
             &format!("call void @adamas_kont_init(ptr {root})"),
             self.here(),
         );
-        let vector = self.ev.clone().unwrap_or_else(|| "null".to_owned());
         let answer = self.temp();
         self.instruction(
             &format!(
-                "{answer} = call ptr @adamas_apply(ptr {callee}, ptr {vector}, ptr {root}, \
+                "{answer} = call ptr @adamas_apply(ptr {callee}, ptr null, ptr {root}, \
                  ptr {given})"
             ),
             self.here(),

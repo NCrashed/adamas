@@ -387,6 +387,228 @@ fn inbounds(text: &str) -> String {
     text.replace("getelementptr i8", "getelementptr inbounds i8")
 }
 
+/// Приговор перемерен там, где у алиасинга **есть предмет**: на памяти.
+///
+/// Трёх нагрузок соседнего свидетеля для этого мало, и это не придирка. FBIP
+/// ходит по списку ячеек, символьная строит дерево, `resource-cleanup`
+/// разбирает объект - у всех трёх обращения идут через точки входа рантайма, и
+/// ни одна не делает в витке ни `load`, ни `store` по своему адресу. Колонное
+/// ядро (§4.11) делает оба, и оно единственное такое в корпусе; приговор волны
+/// 1 снимался без него, потому что массивов LLVM-путь тогда не брал.
+///
+/// Правки здесь **свои**, а не соседские, и различие не косметическое.
+///
+/// - `align 4`, а не `align 8`. Ячейка `Array n Float32` лежит по смещению
+///   `24 + 4i` от блока: восьми байт ей никто не обещал, и соседская правка
+///   была бы здесь не строгой, а **неверной**.
+/// - `!tbaa` на чтении и записи ячейки - то, чего у соседа нет вовсе. Узлы
+///   взяты те же, что печатает clang для рантайма (`Simple C/C++ TBAA`,
+///   `float` под `omnipotent char`): `llvm-link` сводит одинаковые узлы в один,
+///   и тег про `float` встаёт в то же дерево, где лежат теги про `long` полей
+///   заголовка массива. Законно это потому, что ячейка плоского массива держит
+///   только элементы, а `count` и `stride` - только слова.
+/// - `inbounds` **не проверяется, и это названный пропуск**: у колонного ядра в
+///   порождённом IR нет ни одного `getelementptr` - адрес ячейки считает
+///   `adamas_array_at`. Померено оно на варианте, где адрес считает сам IR
+///   (отчёт трека B волны 3): те же 153 инструкции с `inbounds` и без.
+///
+/// Прогон 2026-09-16: **ноль** у всех трёх, то есть приговор волны 1
+/// подтверждается и на памяти. Причина видна в оптимизированном IR: холодная
+/// половина `adamas_array_writable` зовётся **из витка**, и для `opt` этот
+/// вызов пишет куда угодно - ни `noalias`, ни тег типа его не ограничивают.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+#[test]
+fn alias_metadata_earns_nothing_on_memory_either() {
+    let Some((tools, _)) = harness::llvm_toolchains() else {
+        return;
+    };
+    let runtime = harness::runtime_bitcode(&tools);
+    let pipeline = Pipeline::whole_program(&runtime);
+
+    let name = "workload-column";
+    let text = source(name);
+    let artefacts = harness::llvm_text(name, &text).unwrap();
+    // По инструкции, а не по слову: слово `getelementptr` стоит и в шапке
+    // порождённого текста, где оно описывает правило, а не адрес.
+    assert!(
+        !artefacts.ll.contains("= getelementptr"),
+        "у колонного ядра появился `getelementptr`: `inbounds` стало что мерить, \
+         и пропуск выше перестал быть названным"
+    );
+    let untouched = harness::llvm_object(&format!("{name}.bare"), &artefacts, &tools, &pipeline);
+    let base = harness::instructions(&tools, &untouched);
+
+    for (what, marked) in [
+        ("noalias", noalias(&artefacts.ll)),
+        ("align 4", cells_aligned(&artefacts.ll)),
+        ("tbaa", cells_typed(&artefacts.ll)),
+    ] {
+        assert_ne!(
+            marked, artefacts.ll,
+            "{name}: правка `{what}` не применилась"
+        );
+        let with = adamas_codegen::emit_llvm::Artefacts {
+            ll: marked,
+            support: artefacts.support.clone(),
+        };
+        let stem = format!("{name}.{}", what.replace(' ', ""));
+        let object = harness::llvm_object(&stem, &with, &tools, &pipeline);
+        let count = harness::instructions(&tools, &object);
+        eprintln!("{name}: `{what}` - инструкций {base} против {count}");
+        assert_eq!(
+            count, base,
+            "{name}: `{what}` изменило код - метаданное перестало быть даровым на \
+             памяти, и его надо ставить"
+        );
+    }
+
+    // Положительный контроль: прежде чем поверить трём нулям, надо знать, что
+    // счётчик вообще двигается на **этой** программе. Двигает его не
+    // метаданное, а другая форма адресации ячейки - и это же есть названная
+    // числом возможность, оставленная следующему треку.
+    assert!(
+        artefacts
+            .ll
+            .lines()
+            .filter(|line| line.contains("call ptr @adamas_array_alloc("))
+            .all(|line| line.trim_end().ends_with(", i64 4)")),
+        "{name}: шаг колонки не четыре байта - контроль считает адрес не тем шагом"
+    );
+    let addressed = adamas_codegen::emit_llvm::Artefacts {
+        ll: cells_addressed(&artefacts.ll),
+        support: artefacts.support.clone(),
+    };
+    let object = harness::llvm_object(&format!("{name}.addressed"), &addressed, &tools, &pipeline);
+    let count = harness::instructions(&tools, &object);
+    eprintln!("{name}: контроль (адрес считает сам IR) - инструкций {base} против {count}");
+    assert!(
+        count < base,
+        "{name}: контроль не изменил кода - значит и три нуля выше ничего не значат"
+    );
+    // И он обязан считать то же: форма другая, ответ тот же, блок тот же.
+    let honest = ran(
+        &format!("{name}.plain"),
+        &artefacts.ll,
+        &artefacts.support,
+        &tools,
+        &pipeline,
+    );
+    let control = ran(
+        &format!("{name}.control"),
+        &addressed.ll,
+        &addressed.support,
+        &tools,
+        &pipeline,
+    );
+    assert_eq!(
+        honest, control,
+        "{name}: контроль посчитал не то - сравнивать было бы нечего"
+    );
+}
+
+/// Адрес ячейки, посчитанный **самим IR**: шаг константой, граница по месту.
+///
+/// Не кандидат на эмиссию, а мера возможности, и мера эта снята треком B волны
+/// 3 Фазы 7 на колонке в 8 388 608 ячеек: **1.230 раза** (91.4 против 74.3 мс,
+/// пять блоков чередованием; в другом окне 1.233 при 82.3 и 66.7 -
+/// `docs/measurements/workload-gap/column-addressing.sh`). Разница вся в том, что
+/// `adamas_array_at` непрозрачен для `opt`: за ним прячутся чтение `stride` из
+/// заголовка, проверка `stride != 0` и умножение на рантаймовое число - по два
+/// комплекта на виток, потому что обращений к ячейке в витке два.
+///
+/// Почему это не сделано здесь же: эмиттеру пришлось бы знать раскладку
+/// заголовка массива (длина по смещению 8, нагрузка с 24) и текст обрыва по
+/// выходу за длину - то есть завести вторую копию того и другого. У слота
+/// объекта такая копия есть и стережётся `_Static_assert` в спутнике; у массива
+/// её пришлось бы заводить, и это решение, а не следствие.
+fn cells_addressed(text: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut at = 0_u32;
+    for line in text.lines() {
+        let taken = line
+            .trim_start()
+            .strip_prefix('%')
+            .and_then(|rest| rest.split_once(" = call ptr @adamas_array_at(ptr "))
+            .and_then(|(name, rest)| {
+                let (array, rest) = rest.split_once(", i64 ")?;
+                Some((name, array, rest.strip_suffix(')')?))
+            });
+        let Some((name, array, index)) = taken else {
+            out.push(line.to_owned());
+            continue;
+        };
+        at += 1;
+        out.push(format!("  %c{at}.p = getelementptr i8, ptr {array}, i64 8"));
+        out.push(format!("  %c{at}.n = load i64, ptr %c{at}.p"));
+        out.push(format!("  %c{at}.ok = icmp ult i64 {index}, %c{at}.n"));
+        out.push(format!(
+            "  br i1 %c{at}.ok, label %cell{at}.in, label %cell{at}.out"
+        ));
+        out.push(String::new());
+        out.push(format!("cell{at}.out:"));
+        out.push("  call void @adamas_fail(ptr @.str.tag)".to_owned());
+        out.push("  unreachable".to_owned());
+        out.push(String::new());
+        out.push(format!("cell{at}.in:"));
+        out.push(format!("  %c{at}.off = mul i64 {index}, 4"));
+        out.push(format!(
+            "  %c{at}.pay = getelementptr i8, ptr {array}, i64 24"
+        ));
+        out.push(format!(
+            "  %{name} = getelementptr i8, ptr %c{at}.pay, i64 %c{at}.off"
+        ));
+    }
+    out.join("\n")
+}
+
+/// Строки чтения и записи **ячейки массива**: плоское значение по указателю.
+///
+/// Узнаются по типу: слот объекта носит `i64` и `ptr`, ячейка - тип элемента.
+fn cell(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    (trimmed.contains("= load ") || trimmed.starts_with("store "))
+        && trimmed.contains(", ptr %t")
+        && !trimmed.contains(" i64 ")
+        && !trimmed.contains(" ptr ")
+}
+
+/// `align 4` на ячейке колонки `Float32`.
+fn cells_aligned(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            if cell(line) && !line.contains("align") {
+                format!("{line}, align 4")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Тег типа на ячейке: `float` против слов заголовка.
+fn cells_typed(text: &str) -> String {
+    let mut out: Vec<String> = text
+        .lines()
+        .map(|line| {
+            if cell(line) {
+                format!("{line}, !tbaa !9003")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect();
+    out.push(String::new());
+    out.push("!9000 = !{!\"Simple C/C++ TBAA\"}".to_owned());
+    out.push("!9001 = !{!\"omnipotent char\", !9000, i64 0}".to_owned());
+    out.push("!9002 = !{!\"float\", !9001, i64 0}".to_owned());
+    out.push("!9003 = !{!9002, !9002, i64 0}".to_owned());
+    out.join("\n")
+}
+
 /// `dereferenceable` на параметре представления `Boxed` роняет прогон.
 ///
 /// Довод законности `dereferenceable` и `align` записан в `adamas.h` прямо:

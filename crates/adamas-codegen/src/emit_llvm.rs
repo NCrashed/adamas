@@ -54,9 +54,14 @@
 //! круг, уступка, порождение, ожидание и отмена (§5.2); плюс минимальный срез
 //! слоя замыканий, которого питомник потребовал, - [`Expr::Closure`] и
 //! [`Expr::Apply`].
+//! Массив (§4.11, трек B волны 3): [`Expr::ArrayNew`], [`Expr::ArraySet`],
+//! [`Expr::ArrayIndex`] - плоская укладка и укладка слотами, ячейка читается и
+//! пишется инструкцией, адрес её с проверкой границы берётся у рантайма.
 //!
-//! Не берётся - и отвергается **названным** отказом ([`LlvmError`]): массивы,
-//! регионы, плотные агрегаты, конструктор значением и частичное применение.
+//! Не берётся - и отвергается **названным** отказом ([`LlvmError`]): регионы,
+//! плотные агрегаты, дескриптор укладки, конструктор значением и частичное
+//! применение. Ячейка массива поэтому плоская **примитивом**: агрегатная
+//! отвергается тем же отказом, что агрегат где угодно.
 //! Вектор при этом живёт **только** в регистре: в поле объекта его не пускает
 //! понижение (слот - слово), а до кучи он не доходит вовсе, потому что
 //! `load`/`store` §4.9 над колонкой не заведены - см. отчёт трека H.
@@ -140,6 +145,16 @@
 //! требует. Место дефекта - разметка форм, а не эмиссия, и разбирать его этот
 //! трек не брался.
 //!
+//! Массив (трек B волны 3) довёл меру до **75 из 102**, и прибавка вышла
+//! **меньше** отказа, который снимала: отвергнутых массивом было десять, взято
+//! шесть. У четырёх остальных - `array-aggregate`, `array-nested`,
+//! `array-tagged`, `array-parametric` - ячейка колонки есть **плотный
+//! агрегат**, и отказ у них теперь этот, то есть трек C. Гистограмма остатка:
+//! 13 применение замыкания в чистом отрезке, **9** плотный агрегат (было 5), 4
+//! регион, 1 граница языка. Постановка трека ждала десяти; расхождение в том,
+//! что отказ массивом стоял **первым** и заслонял агрегат, - ровно тем же
+//! порядком, каким печать заслоняла конструктор у трека A.
+//!
 //! # Что объектный слой знает о раскладке
 //!
 //! Ровно два числа - [`HEADER_BYTES`] и [`SLOT_BYTES`], - и обязаны они совпасть
@@ -220,6 +235,11 @@
 //!   [`Builder::splat`], [`Builder::insert`], [`Builder::extract`],
 //!   [`Builder::lanewise`]. Флаги у последней те же, что у скаляра, и по тому
 //!   же доводу; разделять его было бы верным способом их разъехать.
+//! - **B волны 3, массивы (§4.11). Закрыт** 2026-09-16: [`Builder::array`] с
+//!   тремя печатями под ним. Режет он в трёх местах - [`slot`] пускает
+//!   [`Repr::Array`] в регистр, [`Builder::shape`] называет представление трёх
+//!   узлов, [`arrays`] объявляет точки входа, - и ни одна из трёх не новая по
+//!   жанру: модель взята у C-бэкенда дословно.
 //!
 //! # Отладочная информация: что взял трек E
 //!
@@ -308,10 +328,22 @@ use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
 use adamas_core::source::Location;
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Expr, Fact, FiberOp, Form, FuncId, Function, HandlerId,
-    LabelId, LocalId, Program, Repr, Salvage, Source, Unique, Verdict,
+    Arm, Binding, Constructor, CtorId, Elems, Expr, Fact, FiberOp, Form, FuncId, Function,
+    HandlerId, LabelId, LocalId, Program, Repr, Salvage, Source, Stride, Unique, Verdict,
 };
 use crate::split::Suspension;
+
+/// Указательный массив или плоский: различает их наличие шага (§4.11).
+///
+/// Та же запись, что у C-эмиттера, и она там же однострочная: шаг есть
+/// **единственное**, чем два представления массива различаются, - ровно как в
+/// рантайме, где их различает `stride == 0`.
+const fn elems(stride: Option<Stride>) -> Elems {
+    match stride {
+        Some(_) => Elems::Flat,
+        None => Elems::Boxed,
+    }
+}
 
 /// Почему эмиссия в LLVM отказала.
 ///
@@ -543,6 +575,46 @@ fn boundaries(program: &Program, suspending: &Suspension) -> Result<(), LlvmErro
         }
     }
     Ok(())
+}
+
+/// Объявления массива (§4.11): точки входа те же, что зовёт C-бэкенд.
+///
+/// Условны, как и объявления второй формы, и по той же причине: на программе
+/// без массива выход байт в байт тот же, что был до этого трека. Куча за
+/// рантаймом целиком - блок выдаёт `adamas_array_alloc`, копию под запись
+/// решает `adamas_array_writable`, адрес ячейки с проверкой границы отдаёт
+/// `adamas_array_at`; сама ячейка при этом читается и пишется **инструкцией**
+/// (см. [`Builder::array_set`]).
+fn arrays(out: &mut String, program: &Program) {
+    if !arrayed(program) {
+        return;
+    }
+    out.push_str(concat!(
+        "; Массив (§4.11): один блок на всю длину, укладка плоская либо слотами.\n",
+        "; Ячейку читает и пишет сам IR; адрес её с проверкой границы - рантайм.\n",
+        "declare ptr @adamas_array_alloc(i64, i64)\n",
+        "declare ptr @adamas_array_at(ptr, i64)\n",
+        "declare void @adamas_array_fill_flat(ptr, ptr)\n",
+        "declare void @adamas_array_fill(ptr, ptr, ptr)\n",
+        "declare void @adamas_array_put(ptr, i64, ptr, ptr)\n",
+        "declare ptr @adamas_array_take(ptr, i64, ptr)\n",
+        "declare ptr @adamas_array_writable(ptr, ptr)\n",
+        "\n",
+    ));
+}
+
+/// Есть ли в программе массив: постройка, запись либо чтение ячейки.
+fn arrayed(program: &Program) -> bool {
+    program.functions.iter().any(|function| {
+        let mut found = false;
+        walk(&function.body, &mut |expr| {
+            found |= matches!(
+                expr,
+                Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. }
+            );
+        });
+        found
+    })
 }
 
 /// Функции, стоящие деструктором кадра `CLOSING`: им нужен забирающий трамплин.
@@ -1409,6 +1481,7 @@ impl Module {
         let _ = writeln!(out, "declare void @{RELEASE_SYMBOL}(ptr)\n");
 
         second_form(&mut out, program);
+        arrays(&mut out, program);
 
         if self.dwarf.is_some() {
             out.push_str(concat!(
@@ -1753,7 +1826,11 @@ fn escaped(bytes: &[u8]) -> String {
 /// представлению связывания, а тип у них и правда один.
 fn slot(repr: Repr) -> Option<String> {
     match repr {
-        Repr::Boxed | Repr::Record(_) | Repr::Resumption => Some("ptr".to_owned()),
+        // Массив (§4.11) стоит здесь наравне с прочим указательным: один блок
+        // кучи на всю длину, заголовок один, счётчик один. Различие с
+        // [`Repr::Boxed`] живёт в понижении ([`Repr::pointer`]) - оно помнит,
+        // что за объект за указателем, - и в регистре не наблюдаемо.
+        Repr::Boxed | Repr::Record(_) | Repr::Resumption | Repr::Array(_) => Some("ptr".to_owned()),
         // Вектор (§4.9) - единственное представление, чьё имя типа не
         // постоянно: ширина есть часть имени. Ради него все эти имена и стали
         // владеющими.
@@ -2077,6 +2154,14 @@ impl<'a> Builder<'a> {
             Expr::Match { arms, .. } => arms
                 .first()
                 .map_or(Repr::Boxed, |arm| self.shape(&arm.body)),
+            // Массив (§4.11): постройка и запись отдают его же, чтение - ячейку.
+            // Те же три строки, что у C-эмиттера, и это не совпадение: обход
+            // один, и разъедься они - два бэкенда назвали бы одному узлу разные
+            // представления.
+            Expr::ArrayNew { stride, .. } | Expr::ArraySet { stride, .. } => {
+                Repr::Array(elems(*stride))
+            }
+            Expr::ArrayIndex { stride, .. } => stride.map_or(Repr::Boxed, Stride::element),
             // Ответ сравнения - конструктор `Bool` (§4.3): аргументы плоские,
             // ответ указательный. Ответ конструктора указателен по построению -
             // и объект, и форма записи в рантайме одно и то же. Прочее срез
@@ -2279,7 +2364,7 @@ impl<'a> Builder<'a> {
             Expr::Pack { .. } | Expr::Unpack { .. } => Err(self.node("плотный агрегат")),
             Expr::Layout { .. } | Expr::LayoutField { .. } => Err(self.node("дескриптор укладки")),
             Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. } => {
-                Err(self.node("массив"))
+                self.array(expr)
             }
             Expr::SimdSplat { lanes, lane, value } => self.splat(*lanes, *lane, value),
             Expr::SimdSet {
@@ -2545,6 +2630,236 @@ impl<'a> Builder<'a> {
         let left = self.value(left)?;
         let right = self.value(right)?;
         Ok(self.binary(opcode, "", &vector(lanes, lane), &left, &right))
+    }
+
+    /// Операция над массивом (§4.11): три формы одним разбором.
+    ///
+    /// Отдельным разбором, а не ветвями общего, по той же причине, по которой
+    /// свой разбор у региона в C-эмиттере: у [`Self::value`] и без того сто
+    /// строк, а формы эти разбираются только вместе.
+    fn array(&mut self, expr: &Expr) -> Result<String, LlvmError> {
+        match expr {
+            Expr::ArrayNew {
+                stride,
+                count,
+                initial,
+            } => self.array_new(*stride, count, initial),
+            Expr::ArraySet {
+                stride,
+                array,
+                at,
+                value,
+            } => self.array_set(*stride, array, at, value),
+            Expr::ArrayIndex {
+                stride,
+                owned,
+                array,
+                at,
+            } => self.array_index(*stride, *owned, array, at),
+            _ => Err(self.node("массив")),
+        }
+    }
+
+    /// Ячейка плоского массива: ширина шага и тип значения в ней (§4.11).
+    ///
+    /// Отказ здесь **названный**, и оба его случая принадлежат чужим трекам:
+    /// плотный агрегат ячейкой - трек C, дескриптор укладки - обобщённый код над
+    /// `{Flat a}`. Молча положить в ячейку не тот тип было бы хуже: длина ячейки
+    /// живёт в заголовке массива, и запись не той ширины уехала бы в соседнюю.
+    fn cell(&self, stride: Stride) -> Result<(u64, PrimTy), LlvmError> {
+        match stride {
+            Stride::Static(ty) => Ok((u64::from(ty.size()), ty)),
+            Stride::Packed(_) | Stride::Dynamic(_) => Err(LlvmError::Shape {
+                function: self.function.name.clone(),
+                place: "ячейка массива".to_owned(),
+                shape: describe(stride.element()),
+            }),
+        }
+    }
+
+    /// Значение в целом слове: длина массива и номер ячейки - `size_t` (§4.11).
+    ///
+    /// Расширение беззнаковое, потому что таким его делает и C-сторона -
+    /// `(size_t){at}`. Плавающее сюда не приходит вовсе, но отказ на него
+    /// назван: `widen` перелил бы его биты и получил бы номер ячейки из мантиссы.
+    fn word_operand(&mut self, expr: &Expr) -> Result<String, LlvmError> {
+        let repr = self.shape(expr);
+        let value = self.value(expr)?;
+        match repr.primitive() {
+            Some(ty) if !ty.floating() => Ok(self.widen(ty, &value)),
+            _ => Err(LlvmError::Shape {
+                function: self.function.name.clone(),
+                place: "длина либо номер ячейки массива".to_owned(),
+                shape: describe(repr),
+            }),
+        }
+    }
+
+    /// Новый массив: одна аллокация на всю длину (§4.11).
+    ///
+    /// Заполняет его **рантайм**, а не порождённый цикл, и это не уступка:
+    /// ссылок на начальное значение нужно `count`, а длина есть величина
+    /// рантайма - вставке RC (§5.1) её не видно. Та же точка входа, что зовёт
+    /// C-бэкенд, и то же число выданных блоков.
+    ///
+    /// Плоское начальное значение уезжает в рантайм **байтами через ячейку
+    /// кадра**: `adamas_array_fill_flat` берёт указатель, а не слово, потому что
+    /// ширина ячейки бывает меньше слова. Ячейка стоит в `entry` наравне с
+    /// прочими (см. [`Builder::frame_cell`]), и `alloca` внутри витка не растёт.
+    fn array_new(
+        &mut self,
+        stride: Option<Stride>,
+        count: &Expr,
+        initial: &Expr,
+    ) -> Result<String, LlvmError> {
+        // Порядок тот же, что у C-бэкенда и у [`Self::construct`]: аргументы
+        // считаются **до** аллокации, потому что аргумент вправе аллоцировать
+        // сам, и переставь их - счётчик выданных блоков разошёлся бы между
+        // бэкендами при том же ответе.
+        let count = self.word_operand(count)?;
+        let cell = stride.map(|it| self.cell(it)).transpose()?;
+        let initial = self.value(initial)?;
+        let step = cell.map_or(0, |(step, _)| step);
+        let array = self.temp();
+        self.instruction(
+            &format!("{array} = call ptr @adamas_array_alloc(i64 {count}, i64 {step})"),
+            self.here(),
+        );
+        match cell {
+            Some((_, ty)) => {
+                let bits = self.frame_cell(machine(ty));
+                self.instruction(
+                    &format!("store {} {initial}, ptr {bits}", machine(ty)),
+                    self.here(),
+                );
+                self.instruction(
+                    &format!("call void @adamas_array_fill_flat(ptr {array}, ptr {bits})"),
+                    self.here(),
+                );
+            }
+            None => self.instruction(
+                &format!(
+                    "call void @adamas_array_fill(ptr {array}, ptr {initial}, \
+                     ptr @{RELEASE_SYMBOL})"
+                ),
+                self.here(),
+            ),
+        }
+        Ok(array)
+    }
+
+    /// Тот же массив с переписанной ячейкой (§4.11).
+    ///
+    /// `adamas_array_writable` отдаёт тот же блок, когда он уникален, и копию
+    /// иначе - переписывание по месту из §4.11, и решает его рантайм, а не
+    /// кратность (§10 вопрос 149). Уникальность спрашивается **после** того, как
+    /// посчитаны все аргументы: чтение из того же массива успевает отдать свою
+    /// ссылку, и `arraySet xs i (arrayIndex xs j)` переписывает, а не копирует.
+    /// Порядок этот тот же, что у C-эмиттера, и разъехаться ему нельзя - счётчик
+    /// выданных блоков у двух бэкендов сверяется числом (`harness::same_work`).
+    ///
+    /// Плоская ячейка пишется **инструкцией**, а адрес её берётся у рантайма.
+    /// Довод тот же, по которому слот объекта читает сам IR (см. шапку модуля):
+    /// `store` прозрачен для `opt`, а вызов в чужую единицу трансляции нет.
+    /// Проверку границы при этом делает `adamas_array_at` - одна на два бэкенда,
+    /// потому что обрыв виден пользователю и входит в наблюдаемое поведение.
+    fn array_set(
+        &mut self,
+        stride: Option<Stride>,
+        array: &Expr,
+        at: &Expr,
+        value: &Expr,
+    ) -> Result<String, LlvmError> {
+        let source = self.value(array)?;
+        let at = self.word_operand(at)?;
+        let cell = stride.map(|it| self.cell(it)).transpose()?;
+        let value = self.value(value)?;
+        let writable = self.temp();
+        self.instruction(
+            &format!(
+                "{writable} = call ptr @adamas_array_writable(ptr {source}, ptr @{RELEASE_SYMBOL})"
+            ),
+            self.here(),
+        );
+        match cell {
+            Some((_, ty)) => {
+                let address = self.array_cell(&writable, &at);
+                self.instruction(
+                    &format!("store {} {value}, ptr {address}", machine(ty)),
+                    self.here(),
+                );
+            }
+            None => self.instruction(
+                &format!(
+                    "call void @adamas_array_put(ptr {writable}, i64 {at}, ptr {value}, \
+                     ptr @{RELEASE_SYMBOL})"
+                ),
+                self.here(),
+            ),
+        }
+        Ok(writable)
+    }
+
+    /// Чтение ячейки (§4.11).
+    ///
+    /// Массив приходит владением и отдаётся здесь же - либо **заимствуется**
+    /// (§10 вопрос 171): наружу уходят биты без заголовка, владелец потребит
+    /// массив позже, и счётчик не трогается вовсе. Пара записей счётчика на
+    /// каждом чтении стоила вчетверо дороже самой работы и отнимала
+    /// векторизацию, поэтому различие это не украшение, а горячий путь строки 4а.
+    ///
+    /// Владеющее чтение печатается `load` плюс `adamas_drop`, а не вызовом
+    /// `adamas_array_read`: тот делает ровно это - `memcpy` шагом и дроп, - а
+    /// через буфер по указателю оно потребовало бы ячейки кадра и осталось бы
+    /// непрозрачным для `opt` там, где рантайм не приложен битовым кодом.
+    fn array_index(
+        &mut self,
+        stride: Option<Stride>,
+        owned: bool,
+        array: &Expr,
+        at: &Expr,
+    ) -> Result<String, LlvmError> {
+        let source = self.value(array)?;
+        let at = self.word_operand(at)?;
+        let Some((_, ty)) = stride.map(|it| self.cell(it)).transpose()? else {
+            // Указательная ячейка: `dup` взятой и дроп массива держит рантайм -
+            // решением о владении это быть не должно.
+            let name = self.temp();
+            self.instruction(
+                &format!(
+                    "{name} = call ptr @adamas_array_take(ptr {source}, i64 {at}, \
+                     ptr @{RELEASE_SYMBOL})"
+                ),
+                self.here(),
+            );
+            return Ok(name);
+        };
+        let address = self.array_cell(&source, &at);
+        let name = self.temp();
+        self.instruction(
+            &format!("{name} = load {}, ptr {address}", machine(ty)),
+            self.here(),
+        );
+        if owned {
+            self.instruction(
+                &format!("call void @adamas_drop(ptr {source}, ptr @{RELEASE_SYMBOL})"),
+                self.here(),
+            );
+        }
+        Ok(name)
+    }
+
+    /// Адрес плоской ячейки: `base + i * stride` с проверкой границы.
+    ///
+    /// Одной записью на чтение и запись, потому что у двух сторон адрес один:
+    /// разъедься они - запись шла бы не туда, куда чтение, а сборка молчала бы.
+    fn array_cell(&mut self, array: &str, at: &str) -> String {
+        let name = self.temp();
+        self.instruction(
+            &format!("{name} = call ptr @adamas_array_at(ptr {array}, i64 {at})"),
+            self.here(),
+        );
+        name
     }
 
     /// Двуместная инструкция.

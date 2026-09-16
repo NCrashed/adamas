@@ -733,14 +733,116 @@ pub(crate) fn calls(tools: &Toolchain, bitcode: &Path, names: &[&str]) -> Vec<us
         bitcode.display()
     );
     let read = std::fs::read_to_string(&text).unwrap();
-    names
-        .iter()
-        .map(|name| {
-            read.lines()
-                .filter(|line| line.contains("call ") && line.contains(&format!("@{name}(")))
-                .count()
-        })
-        .collect()
+    counted(read.lines(), names)
+}
+
+/// То же, но считая только код, **достижимый** из названной функции.
+///
+/// Отличие не строгость ради строгости, и поймано оно прогоном. Модуль после
+/// `llvm-link` несёт рантайм **целиком**, включая функции, которых программа не
+/// зовёт ни разу; их тела остаются в тексте, и счёт по модулю принимает их за
+/// «рантайм не проинлайнился». Хуже того, в холодную половину
+/// (`__attribute__((noinline, cold))`) инлайнер не вносит ничего **намеренно** -
+/// порог у неё свой, - так что вынос холодной половины делает такой счётчик
+/// красным, ничего не сломав. Ровно это случилось с `copied` из `array.c`
+/// (трек B волны 3 Фазы 7): `workload-fbip` массивов не касается, а счётчик
+/// насчитал в нём `adamas_dup`.
+///
+/// Достижимость считается по тексту: у `define` берётся имя, у строк тела -
+/// упомянутые `@имена`. Перебор здесь безопасен - лишнее имя только расширит
+/// множество, то есть сделает счёт строже, а не мягче.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+pub(crate) fn reachable_calls(
+    tools: &Toolchain,
+    bitcode: &Path,
+    names: &[&str],
+    root: &str,
+) -> Vec<usize> {
+    let text = bitcode.with_extension("shown.ll");
+    let shown = Command::new(tools.tool("llvm-dis"))
+        .arg(bitcode)
+        .arg("-o")
+        .arg(&text)
+        .output()
+        .unwrap();
+    assert!(
+        shown.status.success(),
+        "`{}` не разобрался обратно",
+        bitcode.display()
+    );
+    let read = std::fs::read_to_string(&text).unwrap();
+
+    let mut bodies: std::collections::HashMap<String, Vec<&str>> = std::collections::HashMap::new();
+    let mut current: Option<String> = None;
+    for line in read.lines() {
+        if line.starts_with("define") {
+            current = symbol(line).map(str::to_owned);
+            continue;
+        }
+        if line == "}" {
+            current = None;
+            continue;
+        }
+        if let Some(name) = &current {
+            bodies.entry(name.clone()).or_default().push(line);
+        }
+    }
+    assert!(
+        bodies.contains_key(root),
+        "`{root}` в модуле не определена: считать достижимое не от чего"
+    );
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue = vec![root.to_owned()];
+    let mut lines: Vec<&str> = Vec::new();
+    while let Some(name) = queue.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let Some(body) = bodies.get(&name) else {
+            continue;
+        };
+        lines.extend(body.iter().copied());
+        for line in body {
+            for mention in line.split('@').skip(1) {
+                let called: String = mention
+                    .chars()
+                    .take_while(|it| it.is_alphanumeric() || *it == '_' || *it == '.')
+                    .collect();
+                if !called.is_empty() && !seen.contains(&called) {
+                    queue.push(called);
+                }
+            }
+        }
+    }
+    counted(lines.into_iter(), names)
+}
+
+/// Имя функции у строки `define`: первый токен после `@` до скобки.
+fn symbol(line: &str) -> Option<&str> {
+    let at = line.find('@')? + 1;
+    let rest = &line[at..];
+    let end = rest.find('(')?;
+    Some(&rest[..end])
+}
+
+/// Сколько раз названные точки входа зовутся в данных строках.
+fn counted<'a>(lines: impl Iterator<Item = &'a str>, names: &[&str]) -> Vec<usize> {
+    let mut found = vec![0; names.len()];
+    for line in lines {
+        if !line.contains("call ") {
+            continue;
+        }
+        for (at, name) in names.iter().enumerate() {
+            if line.contains(&format!("@{name}(")) {
+                found[at] += 1;
+            }
+        }
+    }
+    found
 }
 
 /// Собирает `.ll` со спутником и запускает. Отдаёт stdout и stderr.

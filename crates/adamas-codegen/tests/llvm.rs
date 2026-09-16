@@ -72,14 +72,24 @@ use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 /// оттого достались LLVM-пути даром: объектного слоя вектору не нужно, а до
 /// массива он не доходит.
 ///
-/// Остальное добавил трек I волны 2: питомник и минимальный срез слоя
+/// Двадцать шесть добавил трек I волны 2: питомник и минимальный срез слоя
 /// замыканий. Взяты они вместе не по удобству - тело `withNursery` есть
 /// нульместное замыкание, и без этого среза все одиннадцать питомничных
 /// упираются во второй блокиратор.
-const TAKEN: [&str; 69] = [
+///
+/// Шесть последних добавил трек B волны 3 - массивы (§4.11). Из десяти
+/// отвергнутых массивом это те, чья ячейка плоская примитивом; у остальных
+/// четырёх ячейка - **плотный агрегат**, и отказ у них теперь этот, то есть
+/// трек C. `array-generic` и `flat-under-a-parameter` взяты потому, что
+/// специализация (`mono`) обращает рантаймовый шаг дескриптора в константу; без
+/// неё они остались бы за дескриптором укладки.
+const TAKEN: [&str; 75] = [
     "abortive-cleanup",
     "abortive-except",
     "arithmetic",
+    "array-flat",
+    "array-generic",
+    "array-length-word",
     "await-twice",
     "await-value",
     "cancel",
@@ -95,6 +105,7 @@ const TAKEN: [&str; 69] = [
     "field-effect",
     "flat-across-a-suspension",
     "flat-fields",
+    "flat-under-a-parameter",
     "general-frames",
     "general-order",
     "instance-context-effect",
@@ -130,6 +141,7 @@ const TAKEN: [&str; 69] = [
     "rows",
     "sealed-effect",
     "sequences",
+    "shadowed-name",
     "signature-effect",
     "signature-effect-parameterized",
     "simd-lanes",
@@ -142,6 +154,7 @@ const TAKEN: [&str; 69] = [
     "truncation",
     "unwind-inner-handler",
     "unwind-live-outer",
+    "workload-column",
     "workload-fbip",
     "workload-scalar",
     "workload-scalar-affine",
@@ -215,6 +228,43 @@ main =
   let j : Int64 = weigh i (eqUInt32 (subUInt32 0 1) 4294967295) 512
   let k : Int64 = weigh j (eqInt64 (subInt64 3 10) (-7)) 1024
   addInt64 k (mulInt64 (pair (ltInt64 1 2) (ltInt64 2 1)) 2048)
+";
+
+/// Ещё один угол, которого корпус не покрывает: **указательный** массив.
+///
+/// У массива два представления (§4.11, [`Elems`](adamas_codegen::ir::Elems)), и
+/// различает их наличие `Flat` у элемента. Все семь корпусных `array-*` -
+/// плоские либо плотные; указательного нет ни одного, потому что семейство с
+/// одними `Flat`-полями укладывается плотно само (§10 вопрос 157). Значит три
+/// точки входа рантайма - `adamas_array_fill`, `adamas_array_put`,
+/// `adamas_array_take` - на LLVM-пути не исполнялись бы ни разу, а печатались
+/// бы. Рекурсивное семейство плоским не бывает, и `Cell` здесь именно поэтому
+/// рекурсивен - тот же ход, что у `adamas-codegen/tests/array.rs`.
+///
+/// Наблюдаемое - число, и зависит оно от номера ячейки: `7 + 8 + 90`.
+/// Множитель у последней затем, чтобы перепутанный номер менял сумму, а не
+/// переставлял слагаемые.
+const POINTER_ARRAY: &str = "\
+data Cell where
+  Leaf : Cell
+  MkCell : Int64 -> Cell -> Cell
+
+peel : Cell -> Int64
+peel Leaf = 0
+peel (MkCell n rest) = n
+
+built : Array 3 Cell
+built =
+  arraySet (arraySet (arrayNew 3 (MkCell 7 Leaf)) 1 (MkCell 8 Leaf)) 2
+    (MkCell 9 Leaf)
+
+read : Array 3 Cell -> Int64
+read xs =
+  addInt64 (peel (arrayIndex xs 0))
+    (addInt64 (peel (arrayIndex xs 1)) (mulInt64 (peel (arrayIndex xs 2)) 10))
+
+main : Int64
+main = read built
 ";
 
 /// Мера среза: что эмиттер берёт и чем отвергает остальное.
@@ -468,7 +518,8 @@ fn the_reader_of_the_minimum_llvm_is_blind_to_an_unknown_intrinsic() {
     );
 }
 
-/// Программы, на которых меряются оси среза: корпусные плюс углы фрагмента.
+/// Программы, на которых меряются оси среза: корпусные плюс [`VERDICTS`] с
+/// [`POINTER_ARRAY`].
 #[allow(
     clippy::unwrap_used,
     reason = "заготовка теста: отсутствие фикстуры означает сломанный корпус"
@@ -482,6 +533,7 @@ fn taken_sources() -> Vec<(String, String)> {
         })
         .collect();
     all.push(("verdicts".to_owned(), VERDICTS.to_owned()));
+    all.push(("pointer-array".to_owned(), POINTER_ARRAY.to_owned()));
     all
 }
 
@@ -627,35 +679,124 @@ fn a_broken_emitter_changes_the_printed_answer() {
 ///
 /// Последние две - и есть свидетель того, что «собралось и напечатало» ловит
 /// меньше, чем кажется: обе печатают **честное** число.
+#[test]
+fn a_broken_object_layer_is_observable() {
+    observable(&object_mutants());
+}
+
+/// Мутанты **массива** (§4.11): перепутанный номер ячейки обязан быть виден.
+///
+/// Ловушка названа в шапке самой фикстуры (`eval/array-flat.adamas`): у массива
+/// из трёх одинаковых чисел чтение по номеру неотличимо от чтения первой
+/// ячейки, и свидетель показывал бы ноль. Ячейки поэтому различны, а у
+/// последней ещё и множитель - так наблюдаем и номер, и порядок.
+///
+/// Четыре правки - четыре разных места массива.
+///
+/// - **Номер ячейки.** Чтения первой и второй переставлены: `7 + 9 + 80`
+///   вместо `7 + 8 + 90`. Веса разные, поэтому перестановка меняет сумму, а не
+///   переставляет слагаемые.
+/// - **Запись ячейки.** `store` восьмёрки снят: ячейка остаётся заполненной
+///   начальным значением, и сумма падает на единицу.
+/// - **Шаг укладки.** Плоская колонка объявлена указательной (`stride` 0):
+///   рантайм обрывает прогон на заполнении. Это и есть свидетель того, что шаг
+///   доезжает до рантайма, а не остаётся числом в тексте.
+/// - **Отданный массив.** Дроп массива после владеющего чтения снят: ответ тот
+///   же, живых блоков - один. Правка эта ответом не ловится вовсе, и стоит она
+///   здесь ровно поэтому.
+#[test]
+fn a_broken_array_is_observable() {
+    observable(&array_mutants());
+}
+
+/// Правки массива: фикстура, имя, причина, что на что, чем ловится.
+fn array_mutants() -> [(
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    Verdict,
+); 4] {
+    [
+        (
+            "array-flat",
+            "array.index",
+            "перепутанный номер ячейки",
+            "  %t2 = call ptr @adamas_array_at(ptr %v0, i64 1)\n  \
+             %t3 = load i64, ptr %t2\n  \
+             %t4 = call ptr @adamas_array_at(ptr %v0, i64 2)\n",
+            "  %t2 = call ptr @adamas_array_at(ptr %v0, i64 2)\n  \
+             %t3 = load i64, ptr %t2\n  \
+             %t4 = call ptr @adamas_array_at(ptr %v0, i64 1)\n",
+            Verdict::Answer,
+        ),
+        (
+            "array-flat",
+            "array.store",
+            "потерянная запись ячейки",
+            "  store i64 8, ptr %t2\n",
+            "",
+            Verdict::Answer,
+        ),
+        (
+            "workload-column",
+            "array.stride",
+            "плоская колонка объявлена указательной",
+            "call ptr @adamas_array_alloc(i64 %t0, i64 4)",
+            "call ptr @adamas_array_alloc(i64 %t0, i64 0)",
+            Verdict::Answer,
+        ),
+        (
+            "array-flat",
+            "array.drop",
+            "неотданный массив после владеющего чтения",
+            "  call void @adamas_drop(ptr %v0, ptr @adamas_release_extern)\n  \
+             %t6 = mul i64 %t5, 10\n",
+            "  %t6 = mul i64 %t5, 10\n",
+            Verdict::Leak,
+        ),
+    ]
+}
+
+/// Прогоняет список правок: каждая обязана изменить то, чем её ловят.
+///
+/// Общая двум свидетелям - объектного слоя и массива (§4.11), - потому что
+/// вопрос у них один: правка, которую не ловит **ни** ответ, **ни** счётчик,
+/// ничего и не проверяет. Вторая копия этого цикла разъехалась бы с первой
+/// молча: тройка сверяется в трёх местах.
 #[allow(
     clippy::unwrap_used,
     reason = "заготовка теста: отказ здесь означает сломанное окружение"
 )]
-#[test]
-fn a_broken_object_layer_is_observable() {
+fn observable(
+    mutants: &[(
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        Verdict,
+    )],
+) {
     let Some((tools, _)) = harness::llvm_toolchains() else {
         return;
     };
     let pipeline = Pipeline::optimised();
 
-    for (name, stem, why, from, to, verdict) in object_mutants() {
+    for &(name, stem, why, from, to, verdict) in mutants {
         let source =
             std::fs::read_to_string(harness::corpus().join(format!("{name}.adamas"))).unwrap();
-        let (honest, stderr) = harness::llvm_agreed(
-            name,
-            &source,
-            &tools,
-            &pipeline,
-            &format!("object.honest.{stem}"),
-        )
-        .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let (honest, stderr) =
+            harness::llvm_agreed(name, &source, &tools, &pipeline, &format!("{stem}.honest"))
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
         let (allocated, live) = harness::blocks(name, &stderr);
         assert_eq!(live, 0, "{name}: честный прогон оставил блоки живыми");
 
         let artefacts = harness::llvm_text(name, &source).unwrap();
         let mutant = swapped(&artefacts.ll, from, to);
         let broken = harness::llvm_printed(
-            &format!("object.{stem}"),
+            &format!("{stem}.broken"),
             &mutant,
             &artefacts.support,
             &tools,
@@ -843,6 +984,12 @@ const RUNTIME_CALLS: [&str; 8] = [
 /// сильнее первого и названо отдельно: `adamas_dup` - самая маленькая функция
 /// рантайма, и не инлайнься она, инлайнинга нет вовсе.
 ///
+/// Считается это по коду, **достижимому** из [`ENTRY`], а не по модулю целиком
+/// ([`harness::reachable_calls`]). Причина измерена треком B волны 3: модуль
+/// после `llvm-link` несёт рантайм весь, и холодная половина, в которую
+/// инлайнер намеренно ничего не вносит, делала счётчик красным на программе,
+/// которая этой половины не зовёт ни разу.
+///
 /// *Счётчик блоков тот же.* Переиспользование ячейки обязано пережить
 /// инлайнинг: `adamas_reuse` внутри цикла - то, на чём трек B меряет
 /// уникальность, и растворись оно тут в `malloc`, мерить было бы нечего.
@@ -883,15 +1030,17 @@ fn the_runtime_in_bitcode_lets_the_optimiser_see_through_it() {
         // Промежуточные файлы конвейер оставляет намеренно: считать вызовы
         // после `opt` больше негде, а до `llc` они ещё видны.
         let directory = harness::scratch();
-        let before = harness::calls(
+        let before = harness::reachable_calls(
             &tools,
             &directory.join(format!("{name}.apart.opt.bc")),
             &RUNTIME_CALLS,
+            ENTRY,
         );
-        let after = harness::calls(
+        let after = harness::reachable_calls(
             &tools,
             &directory.join(format!("{name}.together.opt.bc")),
             &RUNTIME_CALLS,
+            ENTRY,
         );
         let (was, now): (usize, usize) = (before.iter().sum(), after.iter().sum());
         eprintln!("{name}: вызовов рантайма после `-O2` было {was}, стало {now}");
@@ -909,6 +1058,48 @@ fn the_runtime_in_bitcode_lets_the_optimiser_see_through_it() {
             "{name}: `adamas_dup` не заинлайнился, а он самый маленький в рантайме"
         );
     }
+}
+
+/// Точка входа, от которой считается достижимое: всё, что программа зовёт.
+const ENTRY: &str = "adamas_entry";
+
+/// Указательный массив идёт **указательным** путём, а не плоским.
+///
+/// Без этого [`POINTER_ARRAY`] был бы обманчивым свидетелем своего жанра:
+/// договор трёх вычислителей он прошёл бы и в том случае, если понижение
+/// втихую уложило бы `Cell` плоско, - ответ у обоих путей один по построению.
+/// Различает их **какие точки входа зовутся**, и этих трёх плоский путь не
+/// зовёт ни одной.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+#[test]
+fn a_pointer_array_takes_the_pointer_path() {
+    let artefacts = harness::llvm_text("pointer-array", POINTER_ARRAY).unwrap();
+    for entry in [
+        "@adamas_array_fill(",
+        "@adamas_array_put(",
+        "@adamas_array_take(",
+    ] {
+        assert!(
+            artefacts
+                .ll
+                .lines()
+                .any(|line| line.contains("call ") && line.contains(entry)),
+            "`{entry}` не зовётся: указательный массив уехал плоским путём"
+        );
+    }
+    // И обратно: плоских обращений у него нет ни одного. По **вызову**, а не по
+    // имени: объявления печатаются все семь разом, и по имени плоский путь
+    // «находился» бы у любой программы с массивом.
+    assert!(
+        !artefacts
+            .ll
+            .lines()
+            .any(|line| line.contains("call ") && line.contains("@adamas_array_at(")),
+        "указательный массив спрашивает адрес плоской ячейки"
+    );
 }
 
 /// Текст с единственной заменой. Не найденная подстрока роняет тест.

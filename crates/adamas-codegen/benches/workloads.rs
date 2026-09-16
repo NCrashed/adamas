@@ -906,78 +906,77 @@ fn second_column_witnesses(what: &str, backend: Option<&Backend>, load: &Sides, 
     );
 }
 
-/// Строка 4а второго столбца пуста, и пуста она **массивом**.
-///
-/// Утверждение, а не примечание к таблице. LLVM-эмиттер массивов не берёт
-/// (названная граница треков A и A′), и колонное ядро на нём не собирается ни в
-/// скалярном виде, ни в векторном. Начни он их брать — утверждение упадёт, и
-/// дыру придётся закрывать числом, а не строкой в документе. Отсутствие
-/// строки, оставленное молча, — тот самый обманчивый свидетель: читателю
-/// таблицы его не отличить от «разрыва нет».
-fn the_llvm_path_has_no_arrays() {
-    let program = both(&column_source(8, 3));
-    let why = program
-        .llvm
-        .err()
-        .map(|error| error.to_string())
-        .expect("колонное ядро на LLVM-пути не собирается: массивов у эмиттера нет");
-    assert!(
-        why.contains("массив"),
-        "колонное ядро отвергнуто не массивом, а «{why}»: строка 4а пуста по \
-         другой причине, чем записано"
-    );
-    eprintln!("колонное ядро: LLVM-столбец пуст — {why}");
-}
-
 /// Скалярное ядро над колонкой: четвёртая нагрузка трека Z без самой `Simd`.
+///
+/// Второй столбец у этой строки был **дырой**, и дыра проверялась прогоном:
+/// эмиттер отвергал ядро словами «промежуточное значение — массив». Трек B
+/// волны 3 массивы взял, и дыра закрывается числом — тем же способом, каким
+/// сняты три остальные строки. Отдельного утверждения про отсутствие строки
+/// поэтому больше нет: место его заняло [`second_column`], которое печатает
+/// отказ, если эмиттер нагрузку снова перестанет брать.
 fn column_kernel(criterion: &mut Criterion) {
+    let backend = Backend::new(STAND);
     let mut group = criterion.benchmark_group("column");
     group.sample_size(10);
     group.sampling_mode(SamplingMode::Flat);
 
     agrees("column-small", &corpus("workload-column"));
-    the_llvm_path_has_no_arrays();
 
-    let floor = load("column-floor", &column_source(0, 0));
+    let floor = sides("column-floor", &column_source(0, 0), backend.as_ref());
     group.bench_function("floor", |bencher| {
-        by_floor(bencher, || drop(ran(&floor.binary)));
+        by_floor(bencher, || drop(ran(&floor.c.binary)));
     });
     group.bench_function("rust/floor", |bencher| {
         by_floor(bencher, || drop(ran_neighbour("column:0:0")));
     });
 
-    let load = load("column", &column_source(COLUMN_CELLS, COLUMN_PASSES));
+    let load = sides(
+        "column",
+        &column_source(COLUMN_CELLS, COLUMN_PASSES),
+        backend.as_ref(),
+    );
     // Блок **один** на всю программу, сколько бы проходов ни было: колонка
     // плоская (§4.11), а `arraySet` переписывает уникальный блок по месту.
     // Утверждение, а не наблюдение: скопируй ядро колонку на каждом витке — и
-    // строка мерила бы аллокатор, а не проход.
+    // строка мерила бы аллокатор, а не проход. У LLVM-стороны то же утверждение
+    // делает [`same_work`]: счётчики двух бэкендов обязаны совпасть поштучно.
     assert_eq!(
-        load.allocated, 1,
+        load.c.allocated, 1,
         "колонное ядро выдало не один блок: `arraySet` перестал писать по месту"
     );
     let request = format!("column:{COLUMN_CELLS}:{COLUMN_PASSES}");
     let (stdout, _) = ran_neighbour(&request);
     assert_eq!(
         stdout.trim(),
-        load.answer,
+        load.c.answer,
         "сосед на Rust считает не то же ядро"
     );
 
     group.bench_function("native", |bencher| {
-        by_floor(bencher, || drop(ran(&load.binary)));
+        by_floor(bencher, || drop(ran(&load.c.binary)));
     });
     group.bench_function("rust", |bencher| {
         by_floor(bencher, || drop(ran_neighbour(&request)));
     });
+    if let (Some(llvm), Some(llvm_floor)) = (&load.llvm, &floor.llvm) {
+        group.bench_function("llvm", |bencher| {
+            by_floor(bencher, || drop(ran(&llvm.binary)));
+        });
+        group.bench_function("llvm/floor", |bencher| {
+            by_floor(bencher, || drop(ran(&llvm_floor.binary)));
+        });
+    }
     group.finish();
 
     ratio(
         "колонное ядро",
-        || drop(ran(&load.binary)),
-        || drop(ran(&floor.binary)),
+        || drop(ran(&load.c.binary)),
+        || drop(ran(&floor.c.binary)),
         || drop(ran_neighbour(&request)),
         || drop(ran_neighbour("column:0:0")),
     );
+    second_column("колонное ядро", &load, &floor);
+    second_column_witnesses("колонное ядро", backend.as_ref(), &load, &floor);
 }
 
 criterion_group!(benches, scalar, fbip, column_kernel);

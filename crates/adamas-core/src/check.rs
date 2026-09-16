@@ -447,12 +447,20 @@ fn primitive_class(signature: &Signature, argument: Term) -> Term {
 /// «нет инстанса `Primitive`». Граница расхождения тоже названа: тип, который
 /// **только объявлен** и ни разу не построен, проверку проходит.
 ///
-/// # Ширина у `simdSplat` написана, у прочих выведена
+/// # Ширина у `simdSplat`, `simdLoad` и `simdStore` написана, у прочих выведена
 ///
 /// У `simdSplat` брать её неоткуда - аргумент один и он скаляр, - поэтому
 /// связывание `(0 n : UInt64)` явное и стёртое, ровно как `Array 3 Int64`
-/// пишет свою длину. У прочих операций вектор стоит в аргументе, и унификация
-/// восстанавливает ширину по его типу.
+/// пишет свою длину. У `simdLoad` её неоткуда взять по той же причине, и
+/// причина эта существеннее: длина колонки `m` и ширина регистра `n` -
+/// **разные** числа, и выведи мы второе из первого, `Simd 8 Float32` над
+/// колонкой в восемь миллионов ячеек стал бы вектором в восемь миллионов
+/// дорожек. У `simdStore` ширина выводима из вектора, и написана она всё
+/// равно: пара `load`/`store` в одном витке читается только когда ширина у
+/// обоих на виду, а стоит эта симметрия одного стёртого связывания.
+///
+/// У прочих операций вектор стоит в аргументе, и унификация восстанавливает
+/// ширину по его типу.
 ///
 /// # Номер дорожки живёт в рантайме
 ///
@@ -475,6 +483,13 @@ fn simd_op_scheme(
             Rc::new(lane),
         )
     };
+    // `Array m a` - тот же терм, каким его строит `array_op_scheme`.
+    let array = |length: Term, element: Term| {
+        Term::App(
+            Rc::new(Term::App(Rc::new(Term::Prim(Prim::Array)), Rc::new(length))),
+            Rc::new(element),
+        )
+    };
     // Три стёртых связывания перед всем прочим: ширина, дорожка, словарь.
     let over = |inner: Term| {
         bound(
@@ -486,6 +501,27 @@ fn simd_op_scheme(
                 "a",
                 universe.clone(),
                 bound(erased, "d", primitive_class(signature, Term::var(0)), inner),
+            ),
+        )
+    };
+    // Четыре связывания у операций над колонкой: длина колонки, дорожка,
+    // словарь, **написанная** ширина. Первые три стёрты и имплицитны, ширина
+    // стёрта и явна - выводить её не из чего (см. шапку).
+    let along = |inner: Term| {
+        bound(
+            erased,
+            "m",
+            word.clone(),
+            bound(
+                erased,
+                "a",
+                universe.clone(),
+                bound(
+                    erased,
+                    "d",
+                    primitive_class(signature, Term::var(0)),
+                    bound(Binder::explicit(Mult::Zero), "n", word.clone(), inner),
+                ),
             ),
         )
     };
@@ -540,6 +576,33 @@ fn simd_op_scheme(
                 "w",
                 simd(Term::var(3), Term::var(2)),
                 simd(Term::var(4), Term::var(3)),
+            ),
+        )),
+        // `simdLoad : {0 m} -> {0 a} -> {0 d} -> (0 n : UInt64)
+        //           -> (ω xs : Array m a) -> (ω i : UInt64) -> Simd n a`
+        SimdOp::Load => along(bound(
+            given,
+            "xs",
+            array(Term::var(3), Term::var(2)),
+            bound(given, "i", word.clone(), simd(Term::var(2), Term::var(4))),
+        )),
+        // `simdStore : {0 m} -> {0 a} -> {0 d} -> (0 n : UInt64)
+        //            -> (ω xs : Array m a) -> (ω i : UInt64) -> (ω v : Simd n a)
+        //            -> Array m a`
+        SimdOp::Store => along(bound(
+            given,
+            "xs",
+            array(Term::var(3), Term::var(2)),
+            bound(
+                given,
+                "i",
+                word.clone(),
+                bound(
+                    given,
+                    "v",
+                    simd(Term::var(2), Term::var(4)),
+                    array(Term::var(6), Term::var(5)),
+                ),
             ),
         )),
     }

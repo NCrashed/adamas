@@ -59,12 +59,14 @@
 //! пишется инструкцией, адрес её с проверкой границы берётся у рантайма.
 //! Замыкание целиком (трек A волны 3): [`Expr::Apply`] в **чистом** отрезке со
 //! своим корнем трамплина и [`Expr::ConstructClosure`] - конструктор значением.
+//! Плотный агрегат (§4.11) и регион (§3.6, трек C волны 3): [`Expr::Pack`],
+//! [`Expr::Unpack`], дескриптор укладки и семь операций области. Ячейка массива
+//! поэтому бывает и агрегатной.
 //!
-//! Не берётся - и отвергается **названным** отказом ([`LlvmError`]): регионы,
-//! плотные агрегаты и дескриптор укладки. Ячейка массива поэтому плоская
-//! **примитивом**: агрегатная отвергается тем же отказом, что агрегат где
-//! угодно. У конструктора значением названы два своих отказа - плоское поле и
-//! все поля стёртые; оба расхождение с C-эмиттером намеренное, см.
+//! Не берётся - и отвергается **названным** отказом ([`LlvmError`]): плоское
+//! неизвестной ширины, то есть обобщённый код над `{Flat a}`, чей шаг приходит
+//! рантаймом. У конструктора значением названы два своих отказа - плоское поле
+//! и все поля стёртые; оба расхождение с C-эмиттером намеренное, см.
 //! [`Builder::building`].
 //! Вектор при этом живёт **только** в регистре: в поле объекта его не пускает
 //! понижение (слот - слово), а до кучи он не доходит вовсе, потому что
@@ -177,6 +179,13 @@
 //!
 //! Остаток гистограммой: 9 плотный агрегат, 4 регион (обе строки - трек C), 1
 //! граница языка. Отказа «замыкание» в остатке не осталось ни одного.
+//!
+//! Плотный агрегат и регион (трек C волны 3) сняли обе оставшиеся строки, и
+//! второй ряд открылся в третий раз подряд: из девяти агрегатных отказов шесть
+//! ушли целиком, а у трёх (`flat`, `flat-primitives`, `flat-sealed-member`) под
+//! агрегатом стоял **дескриптор укладки** - словарь `Flat a` значением. Взят и
+//! он. Региональных отказов не осталось ни одного, и в остатке корпуса стоит
+//! одна граница языка.
 //!
 //! # Что объектный слой знает о раскладке
 //!
@@ -352,7 +361,8 @@ use adamas_core::source::Location;
 
 use crate::ir::{
     Arm, Binding, Constructor, CtorId, Elems, Expr, Fact, FiberOp, Form, FuncId, Function,
-    HandlerId, LabelId, LocalId, Program, Repr, Salvage, Source, Stride, Unique, Verdict,
+    HandlerId, LabelId, LocalId, PackId, Packing, Program, Repr, Salvage, Slot, SlotTy, Source,
+    Stride, Unique, Verdict,
 };
 use crate::split::Suspension;
 
@@ -551,7 +561,7 @@ fn crossing(program: &Program, suspending: &Suspension, id: FuncId) -> Option<St
     if suspending.functions.contains(&id) {
         return Some("ptr".to_owned());
     }
-    slot(program.functions[id.0].result)
+    slot(program.functions[id.0].result, &program.packings)
 }
 
 /// Границы, у которых форма функции задана рантаймом, а не понижением.
@@ -639,6 +649,54 @@ fn arrayed(program: &Program) -> bool {
             found |= matches!(
                 expr,
                 Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. }
+            );
+        });
+        found
+    })
+}
+
+/// Объявления региона (§3.6): точки входа те же, что зовёт C-бэкенд.
+///
+/// Условны по тому же правилу, что и объявления массива: на программе без
+/// области выход байт в байт тот же, что был до этого трека.
+///
+/// Область целиком за рантаймом, и слот её содержимого сам IR **не** читает -
+/// в отличие от ячейки массива. Довод измерен, а не выбран по вкусу: журнал
+/// свободных ячеек и курсор живут в заголовке области, адрес нагрузки считается
+/// по ним, и вторая запись этого счёта в эмиттере разъехалась бы с первой при
+/// первой же правке политики размещения. Ценой идёт непрозрачность `memcpy`
+/// внутри рантайма для `opt` - ровно та, которую снимает `llvm-link` с `.bc`.
+fn regions(out: &mut String, program: &Program) {
+    if !regioned(program) {
+        return;
+    }
+    out.push_str(concat!(
+        "; Регион (§3.6): один блок кучи на всю область, нагрузка внутри плоская.\n",
+        "declare ptr @adamas_region_new()\n",
+        "declare ptr @adamas_region_alloc(ptr, ptr, i64, i64)\n",
+        "declare i64 @adamas_region_last(ptr, ptr)\n",
+        "declare void @adamas_region_read(ptr, i64, ptr, i64, ptr)\n",
+        "declare ptr @adamas_region_write(ptr, i64, ptr, i64)\n",
+        "declare ptr @adamas_region_recycle(ptr, i64)\n",
+        "declare ptr @adamas_region_pop(ptr, i64)\n",
+        "\n",
+    ));
+}
+
+/// Есть ли в программе область: любая из семи её операций.
+fn regioned(program: &Program) -> bool {
+    program.functions.iter().any(|function| {
+        let mut found = false;
+        walk(&function.body, &mut |expr| {
+            found |= matches!(
+                expr,
+                Expr::RegionNew
+                    | Expr::RegionAlloc { .. }
+                    | Expr::RegionLast { .. }
+                    | Expr::RegionRead { .. }
+                    | Expr::RegionWrite { .. }
+                    | Expr::RegionRecycle { .. }
+                    | Expr::RegionPop { .. }
             );
         });
         found
@@ -1174,7 +1232,7 @@ impl Module {
         // указателем, а вернуть его требуется немедленно. C-эмиттер проверяет то
         // же самое и тем же местом (`emit_c::forms_agree`, `EmitError::Aborting`).
         let result = if split {
-            if slot(function.result).as_deref() != Some("ptr") {
+            if slot(function.result, &program.packings).as_deref() != Some("ptr") {
                 return Err(LlvmError::Shape {
                     function: function.name.clone(),
                     place: "ответ дроблёного тела".to_owned(),
@@ -1183,7 +1241,7 @@ impl Module {
             }
             "ptr".to_owned()
         } else {
-            slot_or(function, "ответ", function.result)?
+            slot_or(function, "ответ", function.result, &program.packings)?
         };
 
         let mut parameters = Vec::new();
@@ -1201,6 +1259,7 @@ impl Module {
                 function,
                 &format!("параметр `{}`", binding.name),
                 binding.fact.repr,
+                &program.packings,
             )?;
             let attributes = parameter_attributes(&binding.fact);
             let spaced = if attributes.is_empty() {
@@ -1598,6 +1657,7 @@ impl Module {
 
         second_form(&mut out, program);
         arrays(&mut out, program);
+        regions(&mut out, program);
 
         if self.dwarf.is_some() {
             out.push_str(concat!(
@@ -1956,18 +2016,100 @@ fn escaped(bytes: &[u8]) -> String {
 /// с ручкой стека (§3.4), - и взять её типом значило бы дропнуть её как данные.
 /// Запрет снят вместе с приходом дропа: различает их [`Builder::dropped`] по
 /// представлению связывания, а тип у них и правда один.
-fn slot(repr: Repr) -> Option<String> {
+fn slot(repr: Repr, packings: &[Packing]) -> Option<String> {
     match repr {
         // Массив (§4.11) стоит здесь наравне с прочим указательным: один блок
         // кучи на всю длину, заголовок один, счётчик один. Различие с
         // [`Repr::Boxed`] живёт в понижении ([`Repr::pointer`]) - оно помнит,
         // что за объект за указателем, - и в регистре не наблюдаемо.
-        Repr::Boxed | Repr::Record(_) | Repr::Resumption | Repr::Array(_) => Some("ptr".to_owned()),
+        //
+        // Блок региона (§3.6) - там же и по той же причине: один объект кучи на
+        // всю область, заголовок один, детей нет.
+        Repr::Boxed | Repr::Record(_) | Repr::Resumption | Repr::Array(_) | Repr::Region => {
+            Some("ptr".to_owned())
+        }
         // Вектор (§4.9) - единственное представление, чьё имя типа не
         // постоянно: ширина есть часть имени. Ради него все эти имена и стали
         // владеющими.
         Repr::Simd { lanes, lane } => Some(vector(lanes, lane)),
+        // Плотный агрегат (§4.11) - целое **ровно своей ширины**: байты его
+        // лежат плотно, заголовка нет, и `i96` у `Vec3` из трёх `Float32`
+        // переносит те же двенадцать байт, что `adamas_pack_N` у C-бэкенда.
+        //
+        // Целое, а не `[N x i8]` и не структура полей, по трём причинам.
+        // Структура не выражает **теговую** укладку: у варианта свои поля по
+        // своим смещениям, и одного набора на все варианты не существует.
+        // Байтовый массив первоклассным значением проходит через `insertvalue`
+        // побайтно, то есть заводит двенадцать инструкций там, где нужен один
+        // регистр. А целое `opt` умеет легализовать сам - i96 разъезжается на
+        // i64 плюс i32, и это ровно то, что делает ABI со структурой.
+        //
+        // **Порядок байтов при этом ниоткуда не спрашивается**: значение это
+        // непрозрачный носитель, поля кладутся и читаются через ячейку кадра
+        // типизированными `store`/`load` по смещению (см. [`Builder::packed`]),
+        // а не сдвигами. Сдвиг связал бы укладку с порядком байтов хоста, чего
+        // `.ll` без `target datalayout` себе позволить не может.
+        Repr::Packed(pack) => Some(format!("i{}", packings[pack.0 as usize].size * 8)),
+        // Дескриптор укладки (§4.11) - два `UInt32` по значению, и в регистре он
+        // одно слово: размер младшей половиной, граница старшей. Рантайм его не
+        // читает вовсе (`flat.c`: «живёт он здесь, а не в `adamas.h`»), в память
+        // он не ложится, и оттого половины можно разложить сдвигом - порядок
+        // байтов хоста тут ни при чём.
+        Repr::Layout => Some("i64".to_owned()),
         other => other.primitive().map(|ty| machine(ty).to_owned()),
+    }
+}
+
+/// Дескриптор укладки константой (§4.11): размер младшей половиной слова.
+///
+/// Константа, а не инструкция: место вызова знает представление целиком, и
+/// рантаймовым дескриптор становится лишь **внутри** обобщённой функции, где
+/// приходит параметром. Порядок половин - тот же, что у полей `Layout`
+/// (`lower::materialised`: сперва размер, потом граница); разъедься они -
+/// программа прочла бы границу вместо размера, и `.ll` собрался бы молча.
+fn descriptor(size: u32, align: u32) -> String {
+    (u64::from(size) | (u64::from(align) << 32)).to_string()
+}
+
+/// Откуда ветвь разбора берёт свои поля.
+///
+/// Формы две, потому что их две у самого разбираемого: объект кучи с заголовком
+/// и плотный агрегат без него (§4.11). Различие это не косметическое - у
+/// первого поле есть **слот**, у второго **смещение**, - и одна запись на обе
+/// формы нужна затем, чтобы голова разбора и чтение полей не разъехались:
+/// голова уже решила, как читался тег, а поля обязаны читаться оттуда же.
+enum Fields {
+    /// Объект кучи: поле по номеру слота.
+    Object(String),
+    /// Плотный агрегат: поле по смещению внутри ячейки кадра.
+    Packed {
+        /// Ячейка кадра, в которой лежат байты агрегата.
+        cell: String,
+        /// По какой укладке.
+        pack: PackId,
+    },
+}
+
+/// Плоская нагрузка в памяти рантайма: ячейка массива либо место в области.
+///
+/// Три числа вместе, потому что порознь они разъезжаются: ширина решает шаг
+/// индексации, тип - что читает `load`, а граница - что при этом обещано
+/// оптимизатору. Соври в третьем - и `store` уедет мимо на второй же ячейке
+/// двенадцатибайтовой колонки.
+struct Payload {
+    /// Ширина в байтах - она же шаг индексации.
+    step: u64,
+    /// Тип регистра, которым значение живёт.
+    ty: String,
+    /// Что обещать о границе. `None` - естественную для типа.
+    align: Option<u32>,
+}
+
+impl Payload {
+    /// Хвост инструкции доступа: пусто либо `, align N`.
+    fn suffix(&self) -> String {
+        self.align
+            .map_or_else(String::new, |it| format!(", align {it}"))
     }
 }
 
@@ -1981,8 +2123,13 @@ fn vector(lanes: u32, lane: PrimTy) -> String {
 }
 
 /// Он же с названным отказом.
-fn slot_or(function: &Function, place: &str, repr: Repr) -> Result<String, LlvmError> {
-    slot(repr).ok_or_else(|| LlvmError::Shape {
+fn slot_or(
+    function: &Function,
+    place: &str,
+    repr: Repr,
+    packings: &[Packing],
+) -> Result<String, LlvmError> {
+    slot(repr, packings).ok_or_else(|| LlvmError::Shape {
         function: function.name.clone(),
         place: place.to_owned(),
         shape: describe(repr),
@@ -2138,7 +2285,7 @@ impl<'a> Builder<'a> {
             return;
         }
         for (at, binding) in function.live_parameters().enumerate() {
-            let Some(ty) = slot(binding.fact.repr) else {
+            let Some(ty) = slot(binding.fact.repr, &self.program.packings) else {
                 continue;
             };
             let cell = self.frame_cell(&ty);
@@ -2204,7 +2351,7 @@ impl<'a> Builder<'a> {
         if self.scope.is_none() || !binding.fact.present {
             return;
         }
-        let Some(ty) = slot(binding.fact.repr) else {
+        let Some(ty) = slot(binding.fact.repr, &self.program.packings) else {
             return;
         };
         let cell = self.frame_cell(&ty);
@@ -2294,6 +2441,26 @@ impl<'a> Builder<'a> {
                 Repr::Array(elems(*stride))
             }
             Expr::ArrayIndex { stride, .. } => stride.map_or(Repr::Boxed, Stride::element),
+            Expr::Layout { .. } => Repr::Layout,
+            Expr::LayoutField { .. } => Repr::Flat(PrimTy::UInt32),
+            // Плотный агрегат (§4.11) и регион (§3.6) - те же строки, что у
+            // C-эмиттера, и по той же причине, что у массива: обход один, и
+            // разъедься они, два бэкенда назвали бы одному узлу разные
+            // представления.
+            Expr::Pack { packing, .. } => Repr::Packed(*packing),
+            Expr::Unpack {
+                packing,
+                variant,
+                field,
+                ..
+            } => self.packed_slot(*packing, *variant, *field).ty.repr(),
+            Expr::RegionNew
+            | Expr::RegionAlloc { .. }
+            | Expr::RegionWrite { .. }
+            | Expr::RegionRecycle { .. }
+            | Expr::RegionPop { .. } => Repr::Region,
+            Expr::RegionLast { .. } => Repr::Flat(PrimTy::UInt64),
+            Expr::RegionRead { stride, .. } => stride.element(),
             // Ответ сравнения - конструктор `Bool` (§4.3): аргументы плоские,
             // ответ указательный. Ответ конструктора указателен по построению -
             // и объект, и форма записи в рантайме одно и то же. Прочее срез
@@ -2305,7 +2472,7 @@ impl<'a> Builder<'a> {
     /// Тип регистра, в котором лежит значение выражения.
     fn typed(&self, expr: &Expr) -> Result<String, LlvmError> {
         let repr = self.shape(expr);
-        slot(repr).ok_or_else(|| LlvmError::Shape {
+        slot(repr, &self.program.packings).ok_or_else(|| LlvmError::Shape {
             function: self.function.name.clone(),
             place: "промежуточное значение".to_owned(),
             shape: describe(repr),
@@ -2417,8 +2584,11 @@ impl<'a> Builder<'a> {
                 // построению - ответ функции и есть ответ хвостового вызова, -
                 // но полагаться на это нечем: разойдись они, verifier отверг бы
                 // модуль целиком. Обычный вызов в этом случае честнее отказа.
-                let agreed = slot(self.program.functions[function.0].result)
-                    .is_some_and(|it| it == self.result);
+                let agreed = slot(
+                    self.program.functions[function.0].result,
+                    &self.program.packings,
+                )
+                .is_some_and(|it| it == self.result);
                 let sort = if agreed { Tail::Must } else { Tail::Plain };
                 let name = self.call(*function, arguments, sort)?;
                 let result = self.result.clone();
@@ -2495,8 +2665,9 @@ impl<'a> Builder<'a> {
             // ([`Self::applied`]); во второй форме её выносит дробление и
             // печатает [`Self::applying`].
             Expr::Apply { callee, argument } => self.applied(callee, argument),
-            Expr::Pack { .. } | Expr::Unpack { .. } => Err(self.node("плотный агрегат")),
-            Expr::Layout { .. } | Expr::LayoutField { .. } => Err(self.node("дескриптор укладки")),
+            Expr::Pack { .. } | Expr::Unpack { .. } => self.packed(expr),
+            Expr::Layout { size, align } => Ok(descriptor(*size, *align)),
+            Expr::LayoutField { descriptor, align } => self.descriptor_field(*descriptor, *align),
             Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. } => {
                 self.array(expr)
             }
@@ -2527,7 +2698,7 @@ impl<'a> Builder<'a> {
             | Expr::RegionRead { .. }
             | Expr::RegionWrite { .. }
             | Expr::RegionRecycle { .. }
-            | Expr::RegionPop { .. } => Err(self.node("регион")),
+            | Expr::RegionPop { .. } => self.region(expr),
             Expr::Handle {
                 handler,
                 captured,
@@ -2794,18 +2965,37 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Ячейка плоского массива: ширина шага и тип значения в ней (§4.11).
+    /// Плоская нагрузка: ширина шага, тип значения и что обещать о границе.
     ///
-    /// Отказ здесь **названный**, и оба его случая принадлежат чужим трекам:
-    /// плотный агрегат ячейкой - трек C, дескриптор укладки - обобщённый код над
-    /// `{Flat a}`. Молча положить в ячейку не тот тип было бы хуже: длина ячейки
-    /// живёт в заголовке массива, и запись не той ширины уехала бы в соседнюю.
-    fn cell(&self, stride: Stride) -> Result<(u64, PrimTy), LlvmError> {
+    /// Одна на ячейку массива (§4.11) и на значение в области (§3.6): шаг у них
+    /// считается одним и тем же правилом, и вторая запись разъехалась бы с
+    /// первой молча.
+    ///
+    /// Отказ здесь **названный** и остался один: дескриптор укладки, то есть
+    /// обобщённый код над `{Flat a}`, чей шаг приходит рантаймом. Молча положить
+    /// в ячейку не ту ширину было бы хуже: длина ячейки живёт в заголовке
+    /// массива, и запись не той ширины уехала бы в соседнюю.
+    fn payload(&self, stride: Stride, place: &str) -> Result<Payload, LlvmError> {
         match stride {
-            Stride::Static(ty) => Ok((u64::from(ty.size()), ty)),
-            Stride::Packed(_) | Stride::Dynamic(_) => Err(LlvmError::Shape {
+            Stride::Static(ty) => Ok(Payload {
+                step: u64::from(ty.size()),
+                ty: machine(ty).to_owned(),
+                // Граница естественная - та же, что была до плотного агрегата:
+                // ячейка примитива стоит по своей ширине.
+                align: None,
+            }),
+            // Плотный агрегат границы не обещает вовсе, и это не осторожность, а
+            // §4.11: C-сторона копирует его поля `memcpy`, то есть обещанием
+            // `align 1`. Ячейка колонки шириной 12 байт стоит по адресам 0, 12,
+            // 24, и естественная граница `i96` соврала бы про вторую же.
+            Stride::Packed(pack) => Ok(Payload {
+                step: u64::from(self.program.packings[pack.0 as usize].size),
+                ty: self.packed_ty(pack),
+                align: Some(1),
+            }),
+            Stride::Dynamic(_) => Err(LlvmError::Shape {
                 function: self.function.name.clone(),
-                place: "ячейка массива".to_owned(),
+                place: place.to_owned(),
                 shape: describe(stride.element()),
             }),
         }
@@ -2851,19 +3041,21 @@ impl<'a> Builder<'a> {
         // сам, и переставь их - счётчик выданных блоков разошёлся бы между
         // бэкендами при том же ответе.
         let count = self.word_operand(count)?;
-        let cell = stride.map(|it| self.cell(it)).transpose()?;
+        let cell = stride
+            .map(|it| self.payload(it, "ячейка массива"))
+            .transpose()?;
         let initial = self.value(initial)?;
-        let step = cell.map_or(0, |(step, _)| step);
+        let step = cell.as_ref().map_or(0, |it| it.step);
         let array = self.temp();
         self.instruction(
             &format!("{array} = call ptr @adamas_array_alloc(i64 {count}, i64 {step})"),
             self.here(),
         );
         match cell {
-            Some((_, ty)) => {
-                let bits = self.frame_cell(machine(ty));
+            Some(cell) => {
+                let bits = self.frame_cell(&cell.ty);
                 self.instruction(
-                    &format!("store {} {initial}, ptr {bits}", machine(ty)),
+                    &format!("store {} {initial}, ptr {bits}{}", cell.ty, cell.suffix()),
                     self.here(),
                 );
                 self.instruction(
@@ -2906,7 +3098,9 @@ impl<'a> Builder<'a> {
     ) -> Result<String, LlvmError> {
         let source = self.value(array)?;
         let at = self.word_operand(at)?;
-        let cell = stride.map(|it| self.cell(it)).transpose()?;
+        let cell = stride
+            .map(|it| self.payload(it, "ячейка массива"))
+            .transpose()?;
         let value = self.value(value)?;
         let writable = self.temp();
         self.instruction(
@@ -2916,10 +3110,10 @@ impl<'a> Builder<'a> {
             self.here(),
         );
         match cell {
-            Some((_, ty)) => {
+            Some(cell) => {
                 let address = self.array_cell(&writable, &at);
                 self.instruction(
-                    &format!("store {} {value}, ptr {address}", machine(ty)),
+                    &format!("store {} {value}, ptr {address}{}", cell.ty, cell.suffix()),
                     self.here(),
                 );
             }
@@ -2955,7 +3149,10 @@ impl<'a> Builder<'a> {
     ) -> Result<String, LlvmError> {
         let source = self.value(array)?;
         let at = self.word_operand(at)?;
-        let Some((_, ty)) = stride.map(|it| self.cell(it)).transpose()? else {
+        let Some(cell) = stride
+            .map(|it| self.payload(it, "ячейка массива"))
+            .transpose()?
+        else {
             // Указательная ячейка: `dup` взятой и дроп массива держит рантайм -
             // решением о владении это быть не должно.
             let name = self.temp();
@@ -2971,7 +3168,7 @@ impl<'a> Builder<'a> {
         let address = self.array_cell(&source, &at);
         let name = self.temp();
         self.instruction(
-            &format!("{name} = load {}, ptr {address}", machine(ty)),
+            &format!("{name} = load {}, ptr {address}{}", cell.ty, cell.suffix()),
             self.here(),
         );
         if owned {
@@ -2994,6 +3191,354 @@ impl<'a> Builder<'a> {
             self.here(),
         );
         name
+    }
+
+    /// Поле варианта укладки: где лежит и чем является (§4.11).
+    fn packed_slot(&self, packing: PackId, variant: u32, field: u32) -> Slot {
+        self.program.packings[packing.0 as usize].variants[variant as usize].slots[field as usize]
+    }
+
+    /// Тип регистра, которым живёт плотный агрегат: целое своей ширины.
+    fn packed_ty(&self, pack: PackId) -> String {
+        format!("i{}", self.program.packings[pack.0 as usize].size * 8)
+    }
+
+    /// Тип регистра поля: примитив собой, вложенный агрегат - своей шириной.
+    fn field_ty(&self, ty: SlotTy) -> String {
+        match ty {
+            SlotTy::Prim(prim) => machine(prim).to_owned(),
+            SlotTy::Pack(pack) => self.packed_ty(pack),
+        }
+    }
+
+    /// Число из дескриптора укладки: размер либо граница (§4.11).
+    ///
+    /// Половины слова разбираются сдвигом, а не чтением из памяти: дескриптор
+    /// живёт в регистре и в память не ложится вовсе - см. [`slot`].
+    fn descriptor_field(&mut self, descriptor: LocalId, align: bool) -> Result<String, LlvmError> {
+        let value = self.operand(descriptor)?;
+        let half = if align {
+            self.binary("lshr", "", "i64", &value, "32")
+        } else {
+            value
+        };
+        let name = self.temp();
+        self.instruction(&format!("{name} = trunc i64 {half} to i32"), self.here());
+        Ok(name)
+    }
+
+    /// Плотный агрегат (§4.11): сборка и разбор одним разбором.
+    ///
+    /// Отдельным разбором, а не ветвями общего, по тому же доводу, что у
+    /// массива и у региона: у [`Self::value`] длина на пределе, а формы эти
+    /// разбираются только вместе.
+    fn packed(&mut self, expr: &Expr) -> Result<String, LlvmError> {
+        match expr {
+            Expr::Pack {
+                packing,
+                variant,
+                fields,
+            } => self.pack(*packing, *variant, fields),
+            Expr::Unpack {
+                packing,
+                variant,
+                field,
+                value,
+            } => self.unpack(*packing, *variant, *field, value),
+            _ => Err(self.node("плотный агрегат")),
+        }
+    }
+
+    /// Плотный агрегат, собранный из полей (§4.11).
+    ///
+    /// Поля кладутся в **ячейку кадра** по своим смещениям, и оттуда значение
+    /// читается целиком. Через память, а не сдвигами по регистру, и это не
+    /// лишний шаг: сдвиг связал бы укладку с порядком байтов хоста, а `.ll`
+    /// пишется без `target datalayout` именно затем, чтобы такой связи не было.
+    /// Ячейка при этом лежит в `entry` наравне с прочими, и `alloca` внутри
+    /// витка не растёт; `opt` её разбирает `SROA` там, где агрегат не уходит в
+    /// память рантайма.
+    ///
+    /// `align 1` у каждого доступа - то же обещание, каким пользуется
+    /// C-сторона: она копирует поля `memcpy`, потому что «поле стоит по своей
+    /// границе внутри байтового массива», и большего §4.11 не обещает.
+    ///
+    /// Зануление у теговой укладки - дословно за C-бэкендом (`= {0}`): короткий
+    /// вариант оставил бы хвост payload'а неопределённым, а байты агрегата
+    /// уходят в область и в ячейку колонки целиком.
+    fn pack(
+        &mut self,
+        packing: PackId,
+        variant: u32,
+        fields: &[Expr],
+    ) -> Result<String, LlvmError> {
+        let described = self.program.packings[packing.0 as usize].clone();
+        // Порядок тот же, что у C-эмиттера: поля считаются до записи.
+        let given = fields
+            .iter()
+            .map(|field| self.value(field))
+            .collect::<Result<Vec<_>, _>>()?;
+        let whole = self.packed_ty(packing);
+        let cell = self.frame_cell(&whole);
+        if described.tag > 0 {
+            self.instruction(
+                &format!("store {whole} 0, ptr {cell}, align 1"),
+                self.here(),
+            );
+            self.instruction(
+                &format!(
+                    "store i{} {variant}, ptr {cell}, align 1",
+                    described.tag * 8
+                ),
+                self.here(),
+            );
+        }
+        let slots = described.variants[variant as usize].slots.clone();
+        for (slot, value) in slots.iter().zip(&given) {
+            let address = self.at_offset(&cell, slot.offset);
+            let ty = self.field_ty(slot.ty);
+            self.instruction(
+                &format!("store {ty} {value}, ptr {address}, align 1"),
+                self.here(),
+            );
+        }
+        let name = self.temp();
+        self.instruction(
+            &format!("{name} = load {whole}, ptr {cell}, align 1"),
+            self.here(),
+        );
+        Ok(name)
+    }
+
+    /// Поле плотного агрегата: чтение по смещению, а не по слоту (§4.11).
+    fn unpack(
+        &mut self,
+        packing: PackId,
+        variant: u32,
+        field: u32,
+        value: &Expr,
+    ) -> Result<String, LlvmError> {
+        let slot = self.packed_slot(packing, variant, field);
+        let source = self.value(value)?;
+        let whole = self.packed_ty(packing);
+        let cell = self.frame_cell(&whole);
+        self.instruction(
+            &format!("store {whole} {source}, ptr {cell}, align 1"),
+            self.here(),
+        );
+        let address = self.at_offset(&cell, slot.offset);
+        let ty = self.field_ty(slot.ty);
+        let name = self.temp();
+        self.instruction(
+            &format!("{name} = load {ty}, ptr {address}, align 1"),
+            self.here(),
+        );
+        Ok(name)
+    }
+
+    /// Адрес со смещением в байтах. Нулевое смещение адреса не меняет.
+    ///
+    /// `getelementptr i8` без `inbounds`: правило консервативного подмножества -
+    /// тот же довод, что у слота объекта (см. шапку модуля).
+    fn at_offset(&mut self, base: &str, offset: u32) -> String {
+        if offset == 0 {
+            return base.to_owned();
+        }
+        let name = self.temp();
+        self.instruction(
+            &format!("{name} = getelementptr i8, ptr {base}, i64 {offset}"),
+            self.here(),
+        );
+        name
+    }
+
+    /// Операция над регионом (§3.6): семь форм одним разбором.
+    ///
+    /// Отдельным разбором, а не ветвями общего, ровно по тому же доводу, по
+    /// которому свой разбор у региона в C-эмиттере: форм у региона столько же,
+    /// сколько у всего остального вместе.
+    ///
+    /// Модель повторена за C-бэкендом дословно - те же семь точек входа
+    /// рантайма, тот же порядок вычисления аргументов, - и это не экономия
+    /// усилия: число выданных блоков у двух бэкендов сверяется поштучно
+    /// (`harness::same_work`), и разойдись порядок, оно разошлось бы при том же
+    /// ответе.
+    fn region(&mut self, expr: &Expr) -> Result<String, LlvmError> {
+        match expr {
+            Expr::RegionNew => {
+                let name = self.temp();
+                self.instruction(
+                    &format!("{name} = call ptr @adamas_region_new()"),
+                    self.here(),
+                );
+                Ok(name)
+            }
+            Expr::RegionAlloc {
+                stride,
+                region,
+                value,
+            } => self.region_alloc(*stride, region, value),
+            Expr::RegionLast { region } => {
+                let region = self.value(region)?;
+                let name = self.temp();
+                self.instruction(
+                    &format!(
+                        "{name} = call i64 @adamas_region_last(ptr {region}, \
+                         ptr @{RELEASE_SYMBOL})"
+                    ),
+                    self.here(),
+                );
+                Ok(name)
+            }
+            Expr::RegionRead { stride, region, at } => self.region_read(*stride, region, at),
+            Expr::RegionWrite {
+                stride,
+                region,
+                at,
+                value,
+            } => self.region_write(*stride, region, at, value),
+            Expr::RegionRecycle { region, at } => {
+                self.region_return("adamas_region_recycle", region, at)
+            }
+            Expr::RegionPop { region, at } => self.region_return("adamas_region_pop", region, at),
+            _ => Err(self.node("регион")),
+        }
+    }
+
+    /// Аллокация в области: курсор поднимается, байты ложатся внутрь (§3.6).
+    ///
+    /// Ячейки кучи под значение не выдаётся вовсе - в этом и состоит цена, ради
+    /// которой §3.6 написан, и наблюдаема она счётчиком блоков.
+    ///
+    /// Нагрузка уезжает в рантайм **байтами через ячейку кадра**, а не словом:
+    /// ширина её бывает и меньше слова, и больше - плотный агрегат из трёх
+    /// `Float32` занимает двенадцать байт.
+    fn region_alloc(
+        &mut self,
+        stride: Stride,
+        region: &Expr,
+        value: &Expr,
+    ) -> Result<String, LlvmError> {
+        let region = self.value(region)?;
+        let value = self.value(value)?;
+        let payload = self.payload(stride, "нагрузка региона")?;
+        let align = self.bound(stride)?;
+        let bits = self.payload_cell(&payload, &value);
+        let name = self.temp();
+        self.instruction(
+            &format!(
+                "{name} = call ptr @adamas_region_alloc(ptr {region}, ptr {bits}, i64 {}, \
+                 i64 {align})",
+                payload.step
+            ),
+            self.here(),
+        );
+        Ok(name)
+    }
+
+    /// Значение, лежащее по хендлу (§3.6).
+    ///
+    /// Байты копируются на кадр: указателем внутрь области значение пережило бы
+    /// её дроп - тот же довод, что у ячейки массива.
+    fn region_read(
+        &mut self,
+        stride: Stride,
+        region: &Expr,
+        at: &Expr,
+    ) -> Result<String, LlvmError> {
+        let region = self.value(region)?;
+        let at = self.word_operand(at)?;
+        let payload = self.payload(stride, "нагрузка региона")?;
+        let cell = self.frame_cell(&payload.ty);
+        self.instruction(
+            &format!(
+                "call void @adamas_region_read(ptr {region}, i64 {at}, ptr {cell}, i64 {}, \
+                 ptr @{RELEASE_SYMBOL})",
+                payload.step
+            ),
+            self.here(),
+        );
+        let name = self.temp();
+        self.instruction(
+            &format!(
+                "{name} = load {}, ptr {cell}{}",
+                payload.ty,
+                payload.suffix()
+            ),
+            self.here(),
+        );
+        Ok(name)
+    }
+
+    /// Запись по хендлу: курсор не двигается, место уже размещено (§3.6).
+    fn region_write(
+        &mut self,
+        stride: Stride,
+        region: &Expr,
+        at: &Expr,
+        value: &Expr,
+    ) -> Result<String, LlvmError> {
+        let region = self.value(region)?;
+        let at = self.word_operand(at)?;
+        let value = self.value(value)?;
+        let payload = self.payload(stride, "нагрузка региона")?;
+        let bits = self.payload_cell(&payload, &value);
+        let name = self.temp();
+        self.instruction(
+            &format!(
+                "{name} = call ptr @adamas_region_write(ptr {region}, i64 {at}, ptr {bits}, \
+                 i64 {})",
+                payload.step
+            ),
+            self.here(),
+        );
+        Ok(name)
+    }
+
+    /// Возврат ячейки по хендлу: `regionRecycle` либо `regionPop` (§3.6).
+    ///
+    /// Обе идут одним текстом, потому что различает их только имя точки входа:
+    /// нагрузки у возврата нет, размер ячейки помнит сама область.
+    fn region_return(&mut self, call: &str, region: &Expr, at: &Expr) -> Result<String, LlvmError> {
+        let region = self.value(region)?;
+        let at = self.word_operand(at)?;
+        let name = self.temp();
+        self.instruction(
+            &format!("{name} = call ptr @{call}(ptr {region}, i64 {at})"),
+            self.here(),
+        );
+        Ok(name)
+    }
+
+    /// Ячейка кадра с байтами нагрузки: её адрес и берёт рантайм.
+    fn payload_cell(&mut self, payload: &Payload, value: &str) -> String {
+        let cell = self.frame_cell(&payload.ty);
+        self.instruction(
+            &format!(
+                "store {} {value}, ptr {cell}{}",
+                payload.ty,
+                payload.suffix()
+            ),
+            self.here(),
+        );
+        cell
+    }
+
+    /// Граница нагрузки - вторая половина шага (§4.11).
+    ///
+    /// Отдельно от ширины она нужна потому, что курсор области поднимается
+    /// **до** границы, а потом уже на размер: сложи их в одно число - и `Vec3`
+    /// встал бы по 12 байт вместо 4. Та же запись, что у C-эмиттера.
+    fn bound(&self, stride: Stride) -> Result<u32, LlvmError> {
+        match stride {
+            Stride::Static(ty) => Ok(ty.size()),
+            Stride::Packed(pack) => Ok(self.program.packings[pack.0 as usize].align),
+            Stride::Dynamic(_) => Err(LlvmError::Shape {
+                function: self.function.name.clone(),
+                place: "граница нагрузки региона".to_owned(),
+                shape: describe(stride.element()),
+            }),
+        }
     }
 
     /// Двуместная инструкция.
@@ -3500,7 +4045,7 @@ impl<'a> Builder<'a> {
         let result = if self.suspending.functions.contains(&function) {
             "ptr".to_owned()
         } else {
-            slot(called.result).ok_or_else(|| LlvmError::Shape {
+            slot(called.result, &self.program.packings).ok_or_else(|| LlvmError::Shape {
                 function: self.function.name.clone(),
                 place: format!("ответ `{}`", called.name),
                 shape: describe(called.result),
@@ -3559,9 +4104,12 @@ impl<'a> Builder<'a> {
         &mut self,
         scrutinee: &Expr,
         arms: &[Arm],
-    ) -> Result<(String, u32, Vec<String>), LlvmError> {
+    ) -> Result<(Fields, u32, Vec<String>), LlvmError> {
         if arms.is_empty() {
             return Err(self.node("разбор пустого типа"));
+        }
+        if let Repr::Packed(pack) = self.shape(scrutinee) {
+            return self.packed_dispatch(pack, scrutinee, arms);
         }
 
         let scrutinised = self.value(scrutinee)?;
@@ -3591,7 +4139,76 @@ impl<'a> Builder<'a> {
             self.here(),
         );
         self.instruction("unreachable", self.here());
-        Ok((scrutinised, at, labels))
+        Ok((Fields::Object(scrutinised), at, labels))
+    }
+
+    /// Голова разбора плотного семейства: тег читается **байтами** (§4.11).
+    ///
+    /// Заголовка у агрегата нет вовсе, и `adamas_tag` над ним читал бы число как
+    /// указатель. Тег лежит первыми байтами укладки, шириной [`Packing::tag`], и
+    /// значение его - номер варианта, а не общий [`CtorId`]: последний нумерует
+    /// таблицу всей программы. Ровно та же голова, что у C-эмиттера
+    /// (`emit_c::packed_analysis`); разъедься они - два бэкенда пошли бы по
+    /// разным ветвям одной программы.
+    ///
+    /// У бестеговой укладки - запись либо единственный конструктор - различать
+    /// нечего, и `switch`'а нет: ветвь одна, переход к ней безусловный.
+    fn packed_dispatch(
+        &mut self,
+        pack: PackId,
+        scrutinee: &Expr,
+        arms: &[Arm],
+    ) -> Result<(Fields, u32, Vec<String>), LlvmError> {
+        let packing = self.program.packings[pack.0 as usize].clone();
+        let scrutinised = self.value(scrutinee)?;
+        let whole = self.packed_ty(pack);
+        let cell = self.frame_cell(&whole);
+        self.instruction(
+            &format!("store {whole} {scrutinised}, ptr {cell}, align 1"),
+            self.here(),
+        );
+        let at = self.matches;
+        self.matches += 1;
+        let source = Fields::Packed { cell, pack };
+
+        if packing.tag == 0 {
+            let label = format!("m{at}.a0");
+            self.instruction(&format!("br label %{label}"), self.here());
+            return Ok((source, at, vec![label]));
+        }
+
+        let Fields::Packed { cell, .. } = &source else {
+            unreachable!("голова плотного разбора завела не плотное разбираемое")
+        };
+        let width = format!("i{}", packing.tag * 8);
+        let tag = self.temp();
+        self.instruction(
+            &format!("{tag} = load {width}, ptr {cell}, align 1"),
+            self.here(),
+        );
+        let labels: Vec<String> = (0..arms.len()).map(|it| format!("m{at}.a{it}")).collect();
+        let mut cases = Vec::new();
+        for (arm, label) in arms.iter().zip(&labels) {
+            let Some((number, _)) = packing.variant_of(arm.constructor) else {
+                return Err(self.node("ветвь без варианта в плотной укладке"));
+            };
+            cases.push(format!("{width} {number}, label %{label}"));
+        }
+        let fail = format!("m{at}.fail");
+        self.instruction(
+            &format!(
+                "switch {width} {tag}, label %{fail} [ {} ]",
+                cases.join(" ")
+            ),
+            self.here(),
+        );
+        self.start(&fail);
+        self.instruction(
+            &format!("call void @adamas_fail(ptr {TAG_MESSAGE})"),
+            self.here(),
+        );
+        self.instruction("unreachable", self.here());
+        Ok((source, at, labels))
     }
 
     /// Разбор значением: ветви сводятся `phi` в блоке стыковки.
@@ -3641,7 +4258,15 @@ impl<'a> Builder<'a> {
     /// заново: стёртые связывания в объекте отсутствуют, и вторая арифметика
     /// нумерации разошлась бы с первой на первом же стёртом поле - молча и с
     /// перепутанными значениями, а не отказом.
-    fn bind_fields(&mut self, object: &str, arm: &Arm) {
+    fn bind_fields(&mut self, source: &Fields, arm: &Arm) {
+        match source {
+            Fields::Object(object) => self.object_fields(&object.clone(), arm),
+            Fields::Packed { cell, pack } => self.packed_fields(&cell.clone(), *pack, arm),
+        }
+    }
+
+    /// Поля ветви объекта кучи.
+    fn object_fields(&mut self, object: &str, arm: &Arm) {
         let described = self.program.constructors[usize::from(arm.constructor.0)].clone();
         let params = described.params as usize;
         for (position, binding) in arm.fields.iter().enumerate() {
@@ -3649,6 +4274,41 @@ impl<'a> Builder<'a> {
                 continue;
             };
             let taken = self.load_slot(object, slot, binding.fact.repr);
+            let _ = writeln!(self.body, "  ; {taken} - {}", binding.name);
+            self.operands.insert(binding.local, taken);
+        }
+    }
+
+    /// Поля ветви плотного агрегата: смещение своего варианта (§4.11).
+    ///
+    /// Стёртое поле связывания не получает - ссылок на него в теле нет по
+    /// построению понижения, - поэтому живые идут по слотам подряд. Тот же ход,
+    /// что у `emit_c::packed_arm`, и мера у него та же: сбейся счёт слотов, поле
+    /// прочиталось бы с чужого смещения молча.
+    fn packed_fields(&mut self, cell: &str, pack: PackId, arm: &Arm) {
+        let packing = self.program.packings[pack.0 as usize].clone();
+        let variant = if packing.sole().is_some() {
+            0
+        } else {
+            packing.variant_of(arm.constructor).map_or(0, |(at, _)| at)
+        };
+        let slots = packing.variants[variant as usize].slots.clone();
+        let mut slot = 0usize;
+        for binding in &arm.fields {
+            if !binding.fact.present {
+                continue;
+            }
+            let Some(described) = slots.get(slot).copied() else {
+                break;
+            };
+            slot += 1;
+            let address = self.at_offset(cell, described.offset);
+            let ty = self.field_ty(described.ty);
+            let taken = self.temp();
+            self.instruction(
+                &format!("{taken} = load {ty}, ptr {address}, align 1"),
+                self.here(),
+            );
             let _ = writeln!(self.body, "  ; {taken} - {}", binding.name);
             self.operands.insert(binding.local, taken);
         }
@@ -3705,7 +4365,7 @@ impl<'a> Builder<'a> {
             self.instruction(&format!("{name} = inttoptr i64 {bits} to ptr"), self.here());
             return Ok(name);
         }
-        if slot(repr).as_deref() == Some("ptr") {
+        if slot(repr, &self.program.packings).as_deref() == Some("ptr") {
             return Ok(value.to_owned());
         }
         Err(LlvmError::Shape {
@@ -3729,7 +4389,7 @@ impl<'a> Builder<'a> {
             );
             return Ok(self.narrow(ty, &bits));
         }
-        if slot(repr).as_deref() == Some("ptr") {
+        if slot(repr, &self.program.packings).as_deref() == Some("ptr") {
             return Ok(value.to_owned());
         }
         Err(LlvmError::Shape {

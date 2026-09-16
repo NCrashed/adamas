@@ -47,25 +47,19 @@
 //! разбора, схлопнутый дроп разобранного ([`Salvage`], §5.1) и ответ программы
 //! объектом кучи либо записью. Эффектное (трек G): отчуждённый кадр, дроблёное
 //! тело кусками, [`Expr::Handle`], [`Expr::Perform`], [`Expr::Resume`],
-<<<<<<< HEAD
 //! [`Expr::Mask`] и [`Expr::Closing`], одношот и мультишот. Векторное (§4.9,
 //! трек H): `<n x T>` в регистре и в сигнатуре, `insertelement`,
 //! `extractelement`, splat парой с `shufflevector`, подорожечная арифметика.
-//!
-//! Не берётся - и отвергается **названным** отказом ([`LlvmError`]): замыкания,
-//! массивы, регионы, плотные агрегаты и питомник (§5.2). Вектор при этом живёт
-//! **только** в регистре: в поле объекта его не пускает понижение (слот -
-//! слово), а до кучи он не доходит вовсе, потому что `load`/`store` §4.9 над
-//! колонкой не заведены - см. отчёт трека H.
-=======
-//! [`Expr::Mask`] и [`Expr::Closing`], одношот и мультишот. Питомник (трек I):
-//! [`Expr::Nursery`], [`Expr::Fiber`], [`Expr::Cancel`] - круг, уступка,
-//! порождение, ожидание и отмена (§5.2); плюс минимальный срез слоя замыканий,
-//! которого питомник потребовал, - [`Expr::Closure`] и [`Expr::Apply`].
+//! Питомник (трек I): [`Expr::Nursery`], [`Expr::Fiber`], [`Expr::Cancel`] -
+//! круг, уступка, порождение, ожидание и отмена (§5.2); плюс минимальный срез
+//! слоя замыканий, которого питомник потребовал, - [`Expr::Closure`] и
+//! [`Expr::Apply`].
 //!
 //! Не берётся - и отвергается **названным** отказом ([`LlvmError`]): массивы,
 //! регионы, плотные агрегаты, конструктор значением и частичное применение.
->>>>>>> worktree-agent-a507398ffbecd5b53
+//! Вектор при этом живёт **только** в регистре: в поле объекта его не пускает
+//! понижение (слот - слово), а до кучи он не доходит вовсе, потому что
+//! `load`/`store` §4.9 над колонкой не заведены - см. отчёт трека H.
 //!
 //! # Кадр берёт рантайм, а не `llvm.coro.*`
 //!
@@ -521,7 +515,7 @@ fn boundaries(program: &Program, suspending: &Suspension) -> Result<(), LlvmErro
     // бывает и первая - ей трамплин скрытых аргументов просто не передаёт.
     for boxed in boxing(program) {
         let function = &program.functions[boxed.0];
-        if crossing(program, suspending, boxed) != Some("ptr") {
+        if crossing(program, suspending, boxed).as_deref() != Some("ptr") {
             return Err(LlvmError::Shape {
                 function: function.name.clone(),
                 place: "ответ: замыкание".to_owned(),
@@ -1427,12 +1421,9 @@ impl Module {
             (TAG_MESSAGE, TAG_TEXT),
             (BRANCH_MESSAGE, BRANCH_TEXT),
             (MISSING_MESSAGE, MISSING_TEXT),
-<<<<<<< HEAD
             (LANE_MESSAGE, LANE_TEXT),
-=======
             (SHAPELESS_MESSAGE, SHAPELESS_TEXT),
             (ARITYLESS_MESSAGE, ARITYLESS_TEXT),
->>>>>>> worktree-agent-a507398ffbecd5b53
         ] {
             let _ = writeln!(
                 out,
@@ -1694,13 +1685,12 @@ const MISSING_MESSAGE: &str = "@.str.missing";
 /// Текст обрыва по операции без хендлера.
 const MISSING_TEXT: &str = "операция без хендлера";
 
-<<<<<<< HEAD
 /// Текст обрыва по номеру дорожки вне ширины (§4.9).
 ///
 /// Берётся у представления, а не пишется здесь: C-бэкенд печатает **этот же**
 /// текст, и второй его записи не заводится - см. [`crate::ir::LANE_OUTSIDE`].
 const LANE_TEXT: &str = crate::ir::LANE_OUTSIDE;
-=======
+
 /// Имя строки с текстом обрыва по замыканию без параметров.
 const ARITYLESS_MESSAGE: &str = "@.str.arityless";
 
@@ -1719,7 +1709,6 @@ const SHAPELESS_TEXT: &str = "тип задачи не подошёл: нуже�
 /// `0xFFFFFFFF` в `adamas.h`. Совпадение проверяется прогоном - фикстура
 /// `spawn-local` зовёт `spawnDetached` и отвечает тем же, что машина.
 const NO_TASK: i32 = -1;
->>>>>>> worktree-agent-a507398ffbecd5b53
 
 /// Тег стёртого значения: тот же, что у `ADAMAS_ERASED` в спутнике.
 ///

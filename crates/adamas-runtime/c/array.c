@@ -76,10 +76,55 @@ void adamas_array_init(adamas_value array, size_t index, adamas_value value) {
     *slot(array, index) = value;
 }
 
+/* Разделённый массив, которому переписывают ячейку: холодная половина.
+ *
+ * Вынесена по тому же правилу, что и `copied`, и по тому же замеру: на горячем
+ * витке пометки нет ни разу, а тело её обработки делает функцию крупнее. */
+__attribute__((noinline, cold)) static void localised(adamas_value array) {
+    if (!adamas_is_unique(array)) {
+        /* Владелец не один: снять пометку нельзя - другой поток держит тот же
+         * массив, - а положить в него локального постояльца тем более. В
+         * порождённом коде сюда не попасть (`adamas_array_writable` разделённый
+         * копирует), поэтому это отказ, а не ветка. */
+        adamas_fail("запись в разделённый массив мимо `adamas_array_writable` (§5.2)");
+    }
+    adamas_header_of(array)->flags = 0;
+}
+
 void adamas_array_put(adamas_value array, size_t index, adamas_value value,
                       adamas_release release) {
     adamas_value *cell = slot(array, index);
     adamas_value displaced = *cell;
+    /* **Здесь закрывается граница, названная §5.2**: «запись в уже разделённый
+     * объект обходом второй раз не покрывается».
+     *
+     * Ячейка указательного массива - единственное место, где она достижима.
+     * Поля конструктора пишутся при постройке, когда объект ещё локален, а
+     * `adamas_reuse` пометку снимает; ячейку же переписывают когда угодно.
+     * Разделённый массив с локальным постояльцем в слоте и есть та дыра:
+     * второй `adamas_share` увидел бы пометку на самом массиве, остановился и
+     * до нового ребёнка не дошёл.
+     *
+     * Снимается пометка тем же доводом, каким её снимает `adamas_reuse`:
+     * `rc == 0` значит, что владелец один, - достаться массив никому не может.
+     * Локальным он и становится, пока его снова не разделят; разделят - обход
+     * пройдёт по новым детям.
+     *
+     * *Место выбрано замером, а не вкусом.* Первая редакция снимала пометку в
+     * `adamas_array_writable`, то есть на **общем** пути записи, - и колонная
+     * строка 4а таблицы разрыва замедлилась в **1.497 раза** (два независимых
+     * парных замера дали 1.4974 и 1.4984; пол девяти чередующихся прогонов в
+     * одном окне, потому что тихой машины не было). Тот же жанр, что нашёл
+     * трек B волны 3 Фазы 7: лишний код в точке входа переворачивает решение
+     * инлайнера. Здесь его нет вовсе - плоский массив идёт через
+     * `adamas_array_at` и до `adamas_array_put` не доходит, - и тот же парный
+     * замер дал **1.021** и **0.998**, то есть ноль в пределах разброса окна.
+     *
+     * Плоскому массиву граница и не нужна: заголовков у ячеек нет (§4.11),
+     * значит нет и детей, которых обход мог бы не пометить. */
+    if (adamas_header_of(array)->flags != 0) {
+        localised(array);
+    }
     *cell = value;
     adamas_drop(displaced, release);
 }
@@ -154,10 +199,25 @@ __attribute__((noinline, cold)) static adamas_value copied(adamas_value array,
 }
 
 adamas_value adamas_array_writable(adamas_value array, adamas_release release) {
+    /* Пометка разделяемости снимается **не здесь**, а в `adamas_array_put`, и
+     * это измерено: лишняя ветвь на общем пути записи стоила колонной строке
+     * 4а 1.497 раза. Довод и замер - там же. */
     if (adamas_is_unique(array)) {
         return array;
     }
     return copied(array, release);
+}
+
+void adamas_array_promote(adamas_value array, adamas_promote children) {
+    adamas_array *head = header_of(array);
+    size_t index;
+    if (head->stride != 0) {
+        /* Плоские ячейки заголовков не имеют вовсе (§4.11): метить нечего. */
+        return;
+    }
+    for (index = 0; index < head->count; index += 1) {
+        adamas_share(adamas_array_get(array, index), children);
+    }
 }
 
 void adamas_array_release(adamas_value array, adamas_release release) {

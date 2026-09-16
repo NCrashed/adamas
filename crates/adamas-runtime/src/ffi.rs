@@ -181,6 +181,8 @@ unsafe extern "C" {
     pub fn adamas_array_writable(array: Value, release: Release) -> Value;
     /// Дроп ячеек. У плоского не делает ничего.
     pub fn adamas_array_release(array: Value, release: Release);
+    /// Промоушен ячеек (§5.2): близнец `adamas_array_release`.
+    pub fn adamas_array_promote(array: Value, children: Promote);
 
     /// Пустая область региона (§3.6): один блок кучи.
     pub fn adamas_region_new() -> Value;
@@ -346,4 +348,6 @@ unsafe extern "C" {
     pub fn adamas_resumption_drop(kont: *mut Kont, value: Value);
     /// Он же там, где ручки стека нет: раскрутка идёт немедленно, на своём корне.
     pub fn adamas_segment_abandon(value: Value);
+    /// Промоушен захваченной резумпции (§5.2): значения в средах её кадров.
+    pub fn adamas_segment_promote(resumption: Value, children: Promote);
 }

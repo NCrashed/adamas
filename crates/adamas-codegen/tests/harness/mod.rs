@@ -349,6 +349,24 @@ pub(crate) fn built_by(name: &str, text: &str, cc: &str, extra: &[&str]) -> (Str
     reason = "заготовка теста: отказ здесь означает сломанное окружение"
 )]
 pub(crate) fn c_printed(name: &str, source: &str) -> Mutated {
+    c_printed_with(name, source, &[])
+}
+
+/// Он же с переменными окружения у **прогона**, а не у сборки.
+///
+/// Заведено треком E волны 3 Фазы 7 под `ADAMAS_THREADS`: сколько потоков у
+/// круга, рантайм читает из окружения (§5.2), и включать это на весь процесс
+/// теста нельзя - тесты крейта идут параллельно, и переменная досталась бы
+/// соседям.
+///
+/// # Panics
+///
+/// Та же, что у [`c_printed`].
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+pub(crate) fn c_printed_with(name: &str, source: &str, env: &[(&str, &str)]) -> Mutated {
     let (mut signature, mut metas, instances) = elaborated(source);
     let written = body(&signature, "main");
     let made = mono::specialise(&mut signature, &mut metas, &instances, &written)
@@ -375,7 +393,7 @@ pub(crate) fn c_printed(name: &str, source: &str) -> Mutated {
         "{name}: порождённый C не собрался:\n{}",
         String::from_utf8_lossy(&compiled.stderr)
     );
-    within(&binary, std::time::Duration::from_secs(20))
+    within_env(&binary, std::time::Duration::from_secs(20), env)
 }
 
 /// Что сказала **машина** о программе, чей ответ не обязан существовать.
@@ -1146,7 +1164,20 @@ pub(crate) fn llvm_mutant_binary(
     reason = "заготовка теста: отказ здесь означает сломанное окружение"
 )]
 fn within(binary: &Path, limit: std::time::Duration) -> Mutated {
-    let mut child = Command::new(binary)
+    within_env(binary, limit, &[])
+}
+
+/// Он же с переменными окружения у прогона.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+fn within_env(binary: &Path, limit: std::time::Duration, env: &[(&str, &str)]) -> Mutated {
+    let mut started = Command::new(binary);
+    for (name, value) in env {
+        started.env(name, value);
+    }
+    let mut child = started
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()

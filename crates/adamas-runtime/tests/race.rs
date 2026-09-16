@@ -28,6 +28,15 @@
 //! `spawn`, - взятие, отдачу и вопрос об уникальности, - на одном разделяемом
 //! объекте из нескольких потоков.
 //!
+//! **Граница эта не умозрительная, и трек E волны 3 Фазы 7 заплатил за неё
+//! дефектом.** Настоящий круг на потоках трогает счётчик вектора evidence -
+//! пути, которого здешние стенды не проходят ни одним, - и тот считался
+//! неатомарно. Санитайзер молчал, потому что молчать ему было о чём: пары
+//! доступов в стендах не было. Нашлось это счётом живых блоков на **программе
+//! корпуса**, и свидетель стоит теперь там же
+//! (`adamas-codegen/tests/threads.rs`). Стенд полезен тем, что дёшев и точен;
+//! покрытием он не является.
+//!
 //! # Второй стенд: транзитивность промоушена
 //!
 //! Тот же инструмент отвечает и на вопрос §5.2 - доходит ли пометка до
@@ -43,6 +52,14 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Сколько прогонов даётся санитайзеру на каждую половину стенда.
+///
+/// Шесть, а не один, и число это от **упавшего прогона**, а не от осторожности:
+/// ломаная половина стенда ячейки промолчала в полных воротах, промолчав перед
+/// тем ни разу на десятке одиночных прогонов. Санитайзер видит исполненные пары
+/// доступов, а сводит их планировщик, и на занятой машине сводит не всегда.
+const TRIES: usize = 6;
 
 /// Общая шапка стенда: объект, потоки, ход.
 const HARNESS: &str = r#"
@@ -144,6 +161,134 @@ int main(void) {
 }
 "#;
 
+/// Граница §5.2: **запись в уже разделённый объект**.
+///
+/// Единственное место, где она достижима, - ячейка указательного массива. Поля
+/// конструктора пишутся при постройке, когда объект ещё локален, а
+/// `adamas_reuse` пометку снимает; ячейку же переписывают когда угодно.
+///
+/// Ход стенда - ровно тот, которым граница ломается:
+///
+/// 1. массив разделяется обходом: пометка встаёт на нём и на первом постояльце;
+/// 2. второго владельца не остаётся - массив снова уникален;
+/// 3. ячейка переписывается **локальным** значением;
+/// 4. массив разделяется второй раз.
+///
+/// Без правки четвёртый шаг видит пометку на самом массиве, останавливается - и
+/// до нового постояльца не доходит. Он и есть тот, чей счётчик потоки правят
+/// голым `+=`.
+///
+/// Свидетеля у границы не было потому, что массив разделяемым не становился
+/// нигде: круг был однопоточным. Здесь его разделяет `pthread_create` - то же,
+/// что сделает `spawn` (§5.2).
+const CELL: &str = r#"
+#include "adamas.h"
+#include <pthread.h>
+#include <stdio.h>
+
+#define THREADS 4
+#define ROUNDS 20000
+
+static adamas_value tenant;
+
+/* Обход детей: массив спрашивает рантайм, звено - одно поле. */
+static void children(adamas_value value) {
+    if (adamas_tag(value) == ADAMAS_TAG_ARRAY) {
+        adamas_array_promote(value, children);
+        return;
+    }
+    adamas_share(adamas_field(value, 0), children);
+}
+
+static void children_release(adamas_value value) {
+    if (adamas_tag(value) == ADAMAS_TAG_ARRAY) {
+        adamas_array_release(value, children_release);
+        return;
+    }
+    adamas_drop(adamas_field(value, 0), children_release);
+}
+
+static adamas_value link(intptr_t number) {
+    adamas_value made = adamas_alloc(0, 1);
+    adamas_set_field(made, 0, adamas_imm(number));
+    return made;
+}
+
+static void *walk(void *arg) {
+    (void)arg;
+    for (int round = 0; round < ROUNDS; round += 1) {
+        adamas_dup(tenant);
+    }
+    return NULL;
+}
+
+int main(void) {
+    pthread_t threads[THREADS];
+    unsigned taken;
+    adamas_value array = adamas_array_alloc(1, 0);
+    adamas_value writable;
+    adamas_array_init(array, 0, link(1));
+
+    /* 1-2: разделён, потом снова единственному владельцу. */
+    adamas_share(array, children);
+
+    /* 3: ячейка переписывается локальным постояльцем. */
+    writable = adamas_array_writable(array, children_release);
+    tenant = link(2);
+    adamas_array_put(writable, 0, tenant, children_release);
+
+    /* Мутант стоит **после** записи, а не до неё, и место это выбрано
+     * упавшим прогоном: правка живёт в `adamas_array_put`, и пометка,
+     * возвращённая до вызова, снимается им же. Такой мутант перестаёт быть
+     * мутантом - обе половины считают одно и то же. Здесь он возвращает
+     * ровно то состояние, в котором массив оставался до правки. */
+    KEEP;
+
+    /* 4: второй промоушен обязан дойти до нового постояльца. */
+    adamas_share(writable, children);
+
+    for (int at = 0; at < THREADS; at += 1) {
+        pthread_create(&threads[at], NULL, walk, NULL);
+    }
+    for (int at = 0; at < THREADS; at += 1) {
+        pthread_join(threads[at], NULL);
+    }
+    taken = adamas_rc(tenant);
+    printf("tenant rc=%u shared=%d\n", taken, adamas_is_shared(tenant));
+    for (unsigned at = 0; at < taken; at += 1) {
+        adamas_drop(tenant, NULL);
+    }
+    adamas_drop(writable, children_release);
+    printf("live=%zu\n", adamas_stat_live_everywhere());
+    return 0;
+}
+"#;
+
+/// Честная ячейка: запись снимает пометку, второй обход доходит до постояльца.
+fn honest_cell() -> String {
+    CELL.replace("KEEP;", "(void)0;")
+}
+
+/// Ломаная - **прежний рантайм** дословно: пометка переживает запись.
+///
+/// Мутант возвращает ровно то состояние, в котором массив оставался до этого
+/// трека: разделённым, с локальным постояльцем в слоте. Заголовок открыт в
+/// `adamas.h`, поэтому написать это можно в стенде, не трогая рантайм.
+///
+/// *Стоит он после записи, и это исправление.* Первая редакция ставила его
+/// перед `adamas_array_put` - тогда правка жила в `adamas_array_writable`, и
+/// место было верным. После переноса правки в `adamas_array_put` (замер: та
+/// стояла на общем пути записи и стоила колонной строке 1.497 раза) мутант
+/// молча перестал быть мутантом: пометку, поставленную до вызова, тот же вызов
+/// и снимал. Поймал это полный прогон ворот, а не одиночный: обе половины
+/// считали одно и то же, и падение выглядело как «санитайзер не назвал гонку».
+fn broken_cell() -> String {
+    CELL.replace(
+        "KEEP;",
+        "adamas_header_of(writable)->flags |= ADAMAS_FLAG_SHARED;",
+    )
+}
+
 /// Честный стенд: счётчик трогает только рантайм, объект помечен разделяемым.
 fn honest() -> String {
     HARNESS
@@ -237,14 +382,30 @@ fn watched(stem: &str, text: &str) -> Watched {
         };
     }
 
-    let ran = Command::new(&binary)
-        .output()
-        .expect("стенд обязан запускаться");
-    let complained = String::from_utf8_lossy(&ran.stderr).into_owned();
+    // Прогонов [`TRIES`], а не один, и это **измерено**: санитайзер видит
+    // только исполненные пары доступов, а планировщик их сводит не каждый раз.
+    // Стенд ячейки (`CELL`) промолчал на ломаной половине в полном прогоне
+    // ворот и уронил его - при том, что на десятке одиночных прогонов молчал ни
+    // разу. Ранний выход у ломаной, полный ряд у честной: «хоть раз назвал» и
+    // «не назвал ни разу» - разные утверждения, и второе сильнее.
+    let mut raced = false;
+    let mut printed = String::new();
+    for _ in 0..TRIES {
+        let ran = Command::new(&binary)
+            .output()
+            .expect("стенд обязан запускаться");
+        if String::from_utf8_lossy(&ran.stderr).contains("data race") {
+            raced = true;
+            break;
+        }
+        String::from_utf8_lossy(&ran.stdout)
+            .trim_end()
+            .clone_into(&mut printed);
+    }
     Watched {
         built: true,
-        raced: complained.contains("data race"),
-        printed: String::from_utf8_lossy(&ran.stdout).trim_end().to_owned(),
+        raced,
+        printed,
     }
 }
 
@@ -338,6 +499,50 @@ fn the_sanitizer_names_the_race_on_a_child_of_a_shared_value() {
     );
     eprintln!(
         "санитайзер: промоушен одного объекта - гонка на ребёнке, обход - тишина, {}",
+        honest.printed.replace('\n', ", ")
+    );
+}
+
+/// Запись в уже разделённый массив: граница §5.2 закрыта, и это различимо.
+///
+/// Свидетеля у неё не было вовсе - массив разделяемым не становился нигде, -
+/// и держалась она **чтением**. Здесь её различает тот же инструмент и тем же
+/// способом, что и транзитивность: значение пересекает поток
+/// `pthread_create`'ом, ровно как его пересечёт `spawn`.
+///
+/// Ломаная половина - прежний рантайм дословно: пометка переживает запись.
+#[test]
+fn the_sanitizer_names_the_race_on_a_tenant_written_into_a_shared_array() {
+    let broken = watched("broken-cell", &broken_cell());
+    if !broken.built {
+        eprintln!(
+            "ThreadSanitizer недоступен у `ADAMAS_CC`, граница §5.2 этим прогоном не проверялась:\n{}",
+            broken.printed
+        );
+        return;
+    }
+    assert!(
+        broken.raced,
+        "санитайзер не назвал гонку на постояльце, до которого второй обход не дошёл: \
+         инструмент не ловит ничего, и молчание на честном стенде ничего не значит"
+    );
+
+    let honest = watched("honest-cell", &honest_cell());
+    assert!(
+        honest.built,
+        "честный стенд не собрался:\n{}",
+        honest.printed
+    );
+    assert!(
+        !honest.raced,
+        "санитайзер назвал гонку на постояльце разделённого массива: запись пометку не сняла"
+    );
+    assert_eq!(
+        honest.printed, "tenant rc=80000 shared=1\nlive=0",
+        "честный стенд посчитал не то"
+    );
+    eprintln!(
+        "санитайзер: пометка, пережившая запись, - гонка на постояльце; снятая - тишина, {}",
         honest.printed.replace('\n', ", ")
     );
 }

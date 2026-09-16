@@ -438,6 +438,13 @@ const ENTRY_SYMBOL: &str = "adamas_entry";
 /// то есть **одна** на программу, и дроп за ней тот же самый, что у C-бэкенда.
 pub const RELEASE_SYMBOL: &str = "adamas_release_extern";
 
+/// Имя промоушена детей, видимого из `.ll` (§5.2).
+///
+/// Та же обёртка и по той же причине, что у [`RELEASE_SYMBOL`]: `promote.c`
+/// объявляет обход `static`. Печатается она только программе с питомником -
+/// без круга значение никуда не уезжает.
+pub const PROMOTE_SYMBOL: &str = "adamas_promote_extern";
+
 /// Имя константы с текстом обрыва по неизвестному тегу.
 const TAG_MESSAGE: &str = "@.str.tag";
 
@@ -1773,7 +1780,8 @@ fn second_form(out: &mut String, program: &Program) {
             "; Питомник (§5.2): круг, его операции и отмена. Точки входа те же,\n",
             "; что зовёт C-бэкенд, - новых под LLVM не заведено ни одной.\n",
             "declare i32 @adamas_nursery_serves(ptr, i32)\n",
-            "declare ptr @adamas_nursery_begin(ptr, ptr, ptr, ptr)\n",
+            "declare void @adamas_promote_extern(ptr)\n",
+            "declare ptr @adamas_nursery_begin(ptr, ptr, ptr, ptr, ptr)\n",
             "declare ptr @adamas_nursery_suspend(ptr, ptr)\n",
             "declare ptr @adamas_nursery_spawn(ptr, ptr, ptr, i32, i32, i32)\n",
             "declare ptr @adamas_nursery_await(ptr, ptr, ptr, i32)\n",
@@ -5295,7 +5303,7 @@ impl<'a> Builder<'a> {
             builder.instruction(
                 &format!(
                     "{seed} = call ptr @adamas_nursery_begin(ptr {root}, ptr {empty}, \
-                     ptr {body}, ptr @{RELEASE_SYMBOL})"
+                     ptr {body}, ptr @{RELEASE_SYMBOL}, ptr @{PROMOTE_SYMBOL})"
                 ),
                 builder.here(),
             );
@@ -5329,7 +5337,7 @@ impl<'a> Builder<'a> {
         self.instruction(
             &format!(
                 "{seed} = call ptr @adamas_nursery_begin(ptr {kont}, ptr {ev}, ptr {body}, \
-                 ptr @{RELEASE_SYMBOL})"
+                 ptr @{RELEASE_SYMBOL}, ptr @{PROMOTE_SYMBOL})"
             ),
             self.here(),
         );
@@ -5618,6 +5626,10 @@ fn support(program: &Program, answer: Answer) -> String {
     crate::emit_c::table(&mut out, program);
     out.push_str(crate::emit_c::RELEASE);
     out.push('\n');
+    if crate::emit_c::nursed(program) {
+        out.push_str(crate::emit_c::PROMOTE);
+        out.push('\n');
+    }
     out.push_str(crate::emit_c::PRINTER);
     out.push('\n');
 
@@ -5647,6 +5659,17 @@ fn support(program: &Program, answer: Answer) -> String {
         out,
         "void {RELEASE_SYMBOL}(adamas_value value) {{ adamas_release_value(value); }}\n"
     );
+
+    if crate::emit_c::nursed(program) {
+        out.push_str(concat!(
+            "/* Промоушен детей, видимый из `.ll` (§5.2): та же обёртка и по той\n",
+            " * же причине, что у дропа выше. */\n"
+        ));
+        let _ = writeln!(
+            out,
+            "void {PROMOTE_SYMBOL}(adamas_value value) {{ adamas_promote_value(value); }}\n"
+        );
+    }
 
     out.push_str("/* Ответ считает `.ll`, печатает `main.c` ниже. */\n");
     match answer {

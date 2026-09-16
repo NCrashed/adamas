@@ -125,6 +125,24 @@ size_t adamas_stat_live(void) {
     return (size_t)ours()->live;
 }
 
+size_t adamas_stat_threads(void) {
+    size_t rows = 0;
+    for (const adamas_counters *at = __atomic_load_n(&registry, __ATOMIC_ACQUIRE); at != NULL;
+         at = at->next) {
+        rows += 1;
+    }
+    return rows;
+}
+
+size_t adamas_stat_allocated_everywhere(void) {
+    ptrdiff_t total = 0;
+    for (const adamas_counters *at = __atomic_load_n(&registry, __ATOMIC_ACQUIRE); at != NULL;
+         at = at->next) {
+        total += at->allocated;
+    }
+    return (size_t)total;
+}
+
 size_t adamas_stat_live_everywhere(void) {
     ptrdiff_t total = 0;
     /* `acquire` парен `acq_rel` у вставки: узлы, положенные другими потоками,

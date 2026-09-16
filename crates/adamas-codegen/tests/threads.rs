@@ -259,6 +259,15 @@ main = unsum (withNursery eight)
 /// процесса только прибавляет, та же методика, что у таблицы разрыва.
 const TIMED: usize = 7;
 
+/// Сколько прогонов даётся санитайзеру на каждую половину стенда.
+///
+/// Восемь, и число это **измерено**: ломаная половина корпусной программы
+/// называет гонку 29 прогонов из 40, то есть одиночный прогон молчит примерно в
+/// четверти случаев. Восемь оставляют этой четверти 0.27^8, около полутора
+/// сотых процента. Честная половина проходит все восемь: «не назвал ни разу»
+/// сильнее, чем «не назвал».
+const TRIES: usize = 8;
+
 /// Ветвь, которой промоушен спрашивает «а уезжает ли вообще что-нибудь».
 ///
 /// Снять её - значит звать промоушен **всегда**, в том числе на однопоточном
@@ -712,38 +721,54 @@ fn watched(stem: &str, text: &str, runtime: Option<(&str, &str)>) -> Option<Watc
         );
         return None;
     }
-    // `halt_on_error` - не украшение, а условие завершимости, и это измерено:
-    // ломаная половина считает **испорченный** список, и однажды она провисела
-    // больше десяти минут, не договорив. Санитайзеру довольно первой найденной
-    // гонки; честной половине останавливаться не на чем, и она идёт до конца.
-    let mut child = std::process::Command::new(&binary)
-        .env("ADAMAS_THREADS", THREADS)
-        .env("TSAN_OPTIONS", "halt_on_error=1")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("стенд обязан запускаться");
-    // Второй предел, на случай если санитайзер до гонки не доберётся: без него
-    // зависший стенд вешал бы прогон вместо того, чтобы отличаться.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while child
-        .try_wait()
-        .expect("ожидание обязано работать")
-        .is_none()
-    {
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
+    // Прогонов [`TRIES`], а не один, и это **измерено**: санитайзер видит
+    // только **исполненные** пары доступов, а планировщик их сводит не каждый
+    // раз. Ломаная половина корпусной программы называла гонку 29 прогонов из
+    // 40, то есть одиночный прогон падал бы примерно в четверти случаев - и
+    // падал, в первом же полном прогоне ворот.
+    //
+    // Ранний выход у ломаной, полный ряд у честной: «хоть раз назвал» и «не
+    // назвал ни разу» - разные утверждения, и второе сильнее.
+    let mut raced = false;
+    let mut printed = String::new();
+    for _ in 0..TRIES {
+        // `halt_on_error` - не украшение, а условие завершимости, и это
+        // измерено: ломаная половина считает **испорченный** список, и однажды
+        // она провисела больше десяти минут, не договорив. Санитайзеру довольно
+        // первой найденной гонки; честной останавливаться не на чем.
+        let mut child = std::process::Command::new(&binary)
+            .env("ADAMAS_THREADS", THREADS)
+            .env("TSAN_OPTIONS", "halt_on_error=1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("стенд обязан запускаться");
+        // Второй предел, на случай если санитайзер до гонки не доберётся: без
+        // него зависший стенд вешал бы прогон вместо того, чтобы отличаться.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while child
+            .try_wait()
+            .expect("ожидание обязано работать")
+            .is_none()
+        {
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let ran = child
+            .wait_with_output()
+            .expect("вывод стенда обязан читаться");
+        if String::from_utf8_lossy(&ran.stderr).contains("data race") {
+            raced = true;
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        String::from_utf8_lossy(&ran.stdout)
+            .trim_end()
+            .clone_into(&mut printed);
     }
-    let ran = child
-        .wait_with_output()
-        .expect("вывод стенда обязан читаться");
-    Some(Watched {
-        raced: String::from_utf8_lossy(&ran.stderr).contains("data race"),
-        printed: String::from_utf8_lossy(&ran.stdout).trim_end().to_owned(),
-    })
+    Some(Watched { raced, printed })
 }
 
 /// Санитайзер молчит на промоушене и кричит без него.

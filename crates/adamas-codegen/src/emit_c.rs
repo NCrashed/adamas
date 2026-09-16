@@ -1288,6 +1288,7 @@ impl Emitter<'_> {
             | Expr::Dup { body, .. }
             | Expr::Drop { body, .. }
             | Expr::Reclaim { body, .. }
+            | Expr::Discard { body, .. }
             | Expr::Closing { body, .. } => self.shape(body),
             Expr::Match { arms, .. } => arms
                 .first()
@@ -1474,9 +1475,11 @@ impl Emitter<'_> {
             Expr::Match {
                 scrutinee, arms, ..
             } => self.analysis(scrutinee, arms, depth),
-            Expr::Bind { .. } | Expr::Dup { .. } | Expr::Drop { .. } | Expr::Reclaim { .. } => {
-                self.bookkeeping(expr, depth)
-            }
+            Expr::Bind { .. }
+            | Expr::Dup { .. }
+            | Expr::Drop { .. }
+            | Expr::Reclaim { .. }
+            | Expr::Discard { .. } => self.bookkeeping(expr, depth),
         }
     }
 
@@ -1540,6 +1543,14 @@ impl Emitter<'_> {
                         token.0, local.0
                     );
                 }
+                body.as_ref()
+            }
+            // Придержанный блок, которому постояльца не нашлось (§10 вопрос
+            // 173). `adamas_free`, а не `adamas_drop_value`: счётчик он уже
+            // отдал, а поля release обошёл на месте придержания. `NULL` -
+            // разделённое разобранное, и отдавать нечего.
+            Expr::Discard { token, body } => {
+                let _ = writeln!(self.out, "{pad}adamas_free(v{});", token.0);
                 body.as_ref()
             }
             other => other,
@@ -3058,7 +3069,11 @@ impl Emitter<'_> {
                 self.reified(binding, body, depth);
                 self.tail(value, depth);
             }
-            Expr::Bind { .. } | Expr::Dup { .. } | Expr::Drop { .. } | Expr::Reclaim { .. } => {
+            Expr::Bind { .. }
+            | Expr::Dup { .. }
+            | Expr::Drop { .. }
+            | Expr::Reclaim { .. }
+            | Expr::Discard { .. } => {
                 let body = self.bookkept(expr, depth);
                 self.tail(body, depth);
             }

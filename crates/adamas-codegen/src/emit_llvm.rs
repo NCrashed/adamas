@@ -2164,6 +2164,15 @@ impl<'a> Builder<'a> {
                 self.dropped(*local, salvage, Some(*token))?;
                 Ok(body)
             }
+            // Придержанный блок, которому постояльца не нашлось (§10 вопрос
+            // 173). `adamas_free`, а не `adamas_drop`: счётчик он уже отдал, а
+            // поля release обошёл на месте придержания. `null` - разделённое
+            // разобранное, и отдавать нечего.
+            Expr::Discard { token, body } => {
+                let value = self.operand(*token)?;
+                self.instruction(&format!("call void @adamas_free(ptr {value})"), self.here());
+                Ok(body)
+            }
             other => Ok(other),
         }
     }
@@ -2233,9 +2242,11 @@ impl<'a> Builder<'a> {
             // Приставки сняты `prologue` выше, и досюда узел не
             // доезжает. Ветвь стоит ради исчерпывающего разбора: пропади она,
             // новый узел-приставка ушёл бы в тихий отказ вместо ошибки сборки.
-            Expr::Bind { .. } | Expr::Dup { .. } | Expr::Drop { .. } | Expr::Reclaim { .. } => {
-                Err(self.node("узел-приставка после снятия приставок"))
-            }
+            Expr::Bind { .. }
+            | Expr::Dup { .. }
+            | Expr::Drop { .. }
+            | Expr::Reclaim { .. }
+            | Expr::Discard { .. } => Err(self.node("узел-приставка после снятия приставок")),
             Expr::Match {
                 scrutinee, arms, ..
             } => self.analysis(scrutinee, arms),
@@ -3278,7 +3289,11 @@ impl<'a> Builder<'a> {
                 self.reified(binding, body)?;
                 self.flowing(value)
             }
-            Expr::Bind { .. } | Expr::Dup { .. } | Expr::Drop { .. } | Expr::Reclaim { .. } => {
+            Expr::Bind { .. }
+            | Expr::Dup { .. }
+            | Expr::Drop { .. }
+            | Expr::Reclaim { .. }
+            | Expr::Discard { .. } => {
                 let body = self.bookkept(expr)?;
                 self.flowing(body)
             }

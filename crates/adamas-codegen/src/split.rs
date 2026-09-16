@@ -368,7 +368,10 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
             .into_iter()
             .chain(arms.iter_mut().map(|arm| &mut arm.body))
             .collect(),
-        Expr::Dup { body, .. } | Expr::Drop { body, .. } | Expr::Reclaim { body, .. } => {
+        Expr::Dup { body, .. }
+        | Expr::Drop { body, .. }
+        | Expr::Reclaim { body, .. }
+        | Expr::Discard { body, .. } => {
             vec![body]
         }
     }
@@ -509,6 +512,7 @@ impl Anf<'_> {
             | Expr::Dup { body, .. }
             | Expr::Drop { body, .. }
             | Expr::Reclaim { body, .. }
+            | Expr::Discard { body, .. }
             | Expr::Closing { body, .. } => self.shape(body),
             Expr::Match { arms, .. } => arms
                 .first()

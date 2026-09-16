@@ -43,6 +43,9 @@ pub type Value = *mut Object;
 /// Дроп детей объекта; блок не освобождает.
 pub type Release = Option<unsafe extern "C" fn(Value)>;
 
+/// Промоушен детей объекта: `adamas_share` на каждом боксированном поле.
+pub type Promote = Option<unsafe extern "C" fn(Value)>;
+
 /// Код замыкания: сам себе `userdata`, оба скрытых аргумента, последний явный.
 pub type Code = Option<unsafe extern "C" fn(Value, *const Evidence, *mut Kont, Value) -> Value>;
 
@@ -137,8 +140,8 @@ unsafe extern "C" {
     pub fn adamas_dup(value: Value) -> Value;
     /// Объект без лишних ссылок.
     pub fn adamas_is_unique(value: Value) -> c_int;
-    /// Переводит объект в разделяемый режим: счётчик считается атомарно.
-    pub fn adamas_share(value: Value);
+    /// Переводит достижимое в разделяемый режим: счётчики считаются атомарно.
+    pub fn adamas_share(value: Value, children: Promote);
     /// Разделяемый ли объект.
     pub fn adamas_is_shared(value: Value) -> c_int;
     /// Отдаёт ссылку; на последней зовёт `release` и освобождает блок.

@@ -221,11 +221,30 @@ static int shared(const adamas_header *header) {
     return (header->flags & ADAMAS_FLAG_SHARED) != 0;
 }
 
-void adamas_share(adamas_value value) {
+/* Промоушен транзитивно достижимого (§5.2).
+ *
+ * Форма выбрана симметрией с `adamas_drop`, и симметрия эта не косметическая:
+ * обход детей рантайму **неоткуда взять** - числа полей в заголовке нет, сорт
+ * слота (боксированный против плоского, §4.11) тем более, - а понижение и то и
+ * другое знает и уже порождает ровно такой обход для дропа (`release.c`).
+ * Поэтому здесь то же разделение труда: рантайм держит пометку, остановку и
+ * рекурсию, вызывающий даёт `children`.
+ *
+ * Пометка ставится **до** обхода: иначе цикл в графе не заканчивался бы, а
+ * общий подграф обходился бы по разу на каждый путь к нему. */
+void adamas_share(adamas_value value, adamas_promote children) {
+    adamas_header *header;
     if (adamas_is_imm(value)) {
         return;
     }
-    adamas_header_of(value)->flags |= ADAMAS_FLAG_SHARED;
+    header = adamas_header_of(value);
+    if (shared(header)) {
+        return;
+    }
+    header->flags |= ADAMAS_FLAG_SHARED;
+    if (children != NULL) {
+        children(value);
+    }
 }
 
 int adamas_is_shared(adamas_value value) {

@@ -22,10 +22,11 @@
 //! # Что здесь проверено и что нет
 //!
 //! Проверен **счётчик**: `dup`, `drop`, `is_unique` на объекте, помеченном
-//! `adamas_share`. Не проверены - потому что их нет - настоящие потоки в
-//! питомнике: круг этой стадии однопоточен (`fiber.c`), и значение пересекает
-//! поток только здесь, в стенде. Стенд поэтому делает ровно то, что делал бы
-//! `spawn`, и ни на шаг больше.
+//! `adamas_share`, и **транзитивность** пометки (§5.2): ребёнок разделяемого
+//! родителя считается атомарно так же, как сам родитель. Не проверены - потому
+//! что их нет - настоящие потоки в питомнике: круг этой стадии однопоточен
+//! (`fiber.c`), и значение пересекает поток только здесь, в стенде. Стенд
+//! поэтому делает ровно то, что делал бы `spawn`, и ни на шаг больше.
 
 // Рантайм и есть тот случай, ради которого `unsafe_code` объявлен `deny`.
 #![allow(unsafe_code)]
@@ -33,8 +34,8 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use adamas_runtime::ffi::{
-    Value, adamas_alloc, adamas_drop, adamas_dup, adamas_imm, adamas_is_shared, adamas_is_unique,
-    adamas_rc, adamas_set_field, adamas_share,
+    Value, adamas_alloc, adamas_drop, adamas_dup, adamas_field, adamas_imm, adamas_is_shared,
+    adamas_is_unique, adamas_rc, adamas_set_field, adamas_share,
 };
 
 /// Сколько потоков и сколько ходов каждый.
@@ -67,13 +68,42 @@ impl Shared {
     }
 }
 
+/// Обход детей, какой порождало бы понижение (`release.c`, но для промоушена).
+///
+/// Тип стенда - звено списка: единственное поле либо следующее звено, либо
+/// число. Непосредственное `adamas_share` отбрасывает сама, поэтому развилки
+/// здесь нет, как её нет и у порождённого дропа.
+unsafe extern "C" fn spine(value: Value) {
+    unsafe { adamas_share(adamas_field(value, 0), Some(spine)) }
+}
+
+/// Дроп детей того же типа: тот `release`, которому промоушен симметричен.
+unsafe extern "C" fn spine_release(value: Value) {
+    unsafe { adamas_drop(adamas_field(value, 0), Some(spine_release)) }
+}
+
 /// Объект с одним полем-числом, сразу помеченный разделяемым.
 unsafe fn shared_object(number: isize) -> Shared {
     unsafe {
         let value = adamas_alloc(0, 1);
         adamas_set_field(value, 0, adamas_imm(number));
-        adamas_share(value);
+        adamas_share(value, None);
         Shared(value)
+    }
+}
+
+/// Звено, за которым лежит ещё одно: голова разделяется, ребёнок достижим.
+///
+/// Это и есть форма захвата, о которой говорит §5.2: `spawn` получает **одно**
+/// значение, а поток трогает всё, до чего из него доходит.
+unsafe fn shared_pair() -> (Shared, Shared) {
+    unsafe {
+        let tail = adamas_alloc(0, 1);
+        adamas_set_field(tail, 0, adamas_imm(2));
+        let head = adamas_alloc(0, 1);
+        adamas_set_field(head, 0, tail);
+        adamas_share(head, Some(spine));
+        (Shared(head), Shared(tail))
     }
 }
 
@@ -104,6 +134,26 @@ fn sharing_does_not_move_the_zero() {
         adamas_drop(value, None);
         assert_eq!(adamas_is_unique(value), 1, "уникальность не вернулась");
         adamas_drop(value, None);
+    }
+}
+
+/// Пометка доходит до достижимого, а не встаёт на одном объекте (§5.2).
+///
+/// Наблюдаемое здесь - сам флаг, и стоит оно первым, потому что дёшево и
+/// детерминированно. Чего оно **не** показывает - цены: что ребёнок без флага
+/// считается неатомарно и второй поток правит его счётчик голым `+=`,
+/// показывают соседний стенд под нагрузкой и санитайзер (`tests/race.rs`).
+#[test]
+fn promotion_reaches_the_children() {
+    unsafe {
+        let (Shared(head), Shared(tail)) = shared_pair();
+        assert_eq!(adamas_is_shared(head), 1, "пометка не встала на голове");
+        assert_eq!(
+            adamas_is_shared(tail),
+            1,
+            "пометка не дошла до ребёнка: обещание §5.2 шире сделанного"
+        );
+        adamas_drop(head, Some(spine_release));
     }
 }
 
@@ -170,6 +220,51 @@ fn no_increment_is_lost_under_contention() {
         }
         assert_eq!(adamas_rc(value), 0, "счётчик не вернулся к уникальности");
         adamas_drop(value, None);
+    }
+}
+
+/// То же потерянное обновление, но на **ребёнке** разделяемого значения.
+///
+/// Свидетель расхождения §5.2 с рантаймом, и он единственный из двух, который
+/// виден числом. Потоки получают одну голову - ровно то, что получил бы
+/// `spawn` от захвата замыкания, - и трогают счётчик **достижимого** из неё:
+/// так делает всякий разбор списка, дупающий хвост.
+///
+/// Разница измерена. С промоушеном одного объекта (`None` вместо обхода)
+/// счётчик хвоста после 160 000 взятий показывал 32 764, 52 284, 54 805,
+/// 66 136, 81 617 - пять прогонов, и ни в одном не уцелело даже половины.
+/// Стенд с перемешанными взятиями и отдачами того же хвоста не доживал до
+/// ответа вовсе: двадцать прогонов дали **шестнадцать** обрывов в `malloc`
+/// («double free», «unaligned tcache chunk») и четыре утёкших блока.
+#[test]
+fn no_increment_is_lost_on_a_child_of_a_shared_value() {
+    unsafe {
+        let (head, tail) = shared_pair();
+        let taken = AtomicU32::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                let taken = &taken;
+                scope.spawn(move || {
+                    // SAFETY: голова разделена обходом, значит и хвост тоже, -
+                    // счётчик достижимого атомарен ровно поэтому.
+                    let value = adamas_field(head.value(), 0);
+                    for _ in 0..ROUNDS {
+                        adamas_dup(value);
+                    }
+                    taken.fetch_add(ROUNDS, Ordering::Relaxed);
+                });
+            }
+        });
+        let Shared(value) = tail;
+        assert_eq!(
+            adamas_rc(value),
+            taken.load(Ordering::Relaxed),
+            "счётчик ребёнка потерял взятия: промоушен до него не дошёл"
+        );
+        for _ in 0..THREADS * ROUNDS {
+            adamas_drop(value, None);
+        }
+        adamas_drop(head.value(), Some(spine_release));
     }
 }
 

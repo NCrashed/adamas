@@ -28,6 +28,14 @@
 //! `spawn`, - взятие, отдачу и вопрос об уникальности, - на одном разделяемом
 //! объекте из нескольких потоков.
 //!
+//! # Второй стенд: транзитивность промоушена
+//!
+//! Тот же инструмент отвечает и на вопрос §5.2 - доходит ли пометка до
+//! **достижимого**. Потоки там трогают ребёнка разделяемой головы, а ломаная
+//! половина есть прежняя реализация дословно: помечен один объект. Настоящих
+//! потоков для этого не понадобилось, и это главное, что стенд показывает:
+//! различать транзитивный промоушен умеет уже `pthread_create`.
+//!
 //! Собирается стенд `ADAMAS_CC`; если он не умеет `-fsanitize=thread`, тест
 //! говорит об этом и не проверяет ничего. Молчаливого пропуска нет.
 
@@ -74,12 +82,88 @@ int main(void) {
 }
 "#;
 
+/// Стенд транзитивного промоушена: потоки трогают **ребёнка** разделяемого.
+///
+/// Форма захвата взята из §5.2 дословно: `spawn` получает одно значение, а
+/// поток работает со всем, до чего из него доходит, - так делает всякий разбор
+/// списка, дупающий хвост. Ходы здесь только взятия: отдай их поток тут же, и
+/// счётчик ломаного стенда уводил бы объект в смерть посреди чужой ссылки, то
+/// есть стенд падал бы в `malloc` прежде, чем санитайзер договорит.
+const NESTED: &str = r#"
+#include "adamas.h"
+#include <pthread.h>
+#include <stdio.h>
+
+#define THREADS 4
+#define ROUNDS 20000
+
+static adamas_value head;
+
+/* Обход детей звена - тот, что порождало бы понижение по типу (`release.c`). */
+static void spine(adamas_value value) {
+    adamas_share(adamas_field(value, 0), spine);
+}
+
+static void spine_release(adamas_value value) {
+    adamas_drop(adamas_field(value, 0), spine_release);
+}
+
+static void *walk(void *arg) {
+    (void)arg;
+    adamas_value tail = adamas_field(head, 0);
+    for (int round = 0; round < ROUNDS; round += 1) {
+        adamas_dup(tail);
+    }
+    return NULL;
+}
+
+int main(void) {
+    pthread_t threads[THREADS];
+    unsigned taken;
+    adamas_value tail = adamas_alloc(0, 1);
+    adamas_set_field(tail, 0, adamas_imm(2));
+    head = adamas_alloc(0, 1);
+    adamas_set_field(head, 0, tail);
+    MARK;
+    for (int at = 0; at < THREADS; at += 1) {
+        pthread_create(&threads[at], NULL, walk, NULL);
+    }
+    for (int at = 0; at < THREADS; at += 1) {
+        pthread_join(threads[at], NULL);
+    }
+    taken = adamas_rc(tail);
+    printf("tail rc=%u shared=%d\n", taken, adamas_is_shared(tail));
+    /* Отдаётся ровно столько, сколько счётчик показал: иначе ломаный стенд,
+     * потерявший инкрементации, уводил бы счётчик ниже нуля и падал. */
+    for (unsigned at = 0; at < taken; at += 1) {
+        adamas_drop(tail, NULL);
+    }
+    adamas_drop(head, spine_release);
+    printf("live=%zu\n", adamas_stat_live_everywhere());
+    return 0;
+}
+"#;
+
 /// Честный стенд: счётчик трогает только рантайм, объект помечен разделяемым.
 fn honest() -> String {
     HARNESS
-        .replace("MARK;", "adamas_share(target);")
+        .replace("MARK;", "adamas_share(target, NULL);")
         .replace("TAKE;", "adamas_dup(target);")
         .replace("GIVE;", "adamas_drop(target, NULL);")
+}
+
+/// Честный вложенный: промоушен идёт обходом, значит доходит до хвоста.
+fn honest_nested() -> String {
+    NESTED.replace("MARK;", "adamas_share(head, spine);")
+}
+
+/// Ломаный вложенный - **прежний рантайм** дословно: помечен один объект.
+///
+/// Мутант здесь не выдуман, а взят из истории: до этой правки `adamas_share`
+/// принимала одно значение и метила его одного, тогда как §5.2 обещает
+/// транзитивно достижимое. `NULL` вместо обхода и есть та реализация.
+fn broken_nested() -> String {
+    NESTED.replace("MARK;", "adamas_share(head, NULL);")
 }
 
 /// Ломаный: тот же ряд операций голым счётчиком, мимо рантайма.
@@ -205,6 +289,55 @@ fn the_sanitizer_names_the_race_the_runtime_does_not_have() {
     );
     eprintln!(
         "санитайзер: ломаный стенд - гонка, честный - тишина, {}",
+        honest.printed.replace('\n', ", ")
+    );
+}
+
+/// Промоушен одного объекта оставляет гонку на его ребёнке (§5.2).
+///
+/// Свидетель расхождения, которое до этого держалось **чтением**: §5.2 обещает
+/// транзитивно достижимое, а рантайм метил один объект, и различить это было
+/// нечем - настоящих потоков у питомника нет. Различает вот этот стенд, и
+/// настоящих потоков ему не понадобилось: значение пересекает поток тем же
+/// `pthread_create`, каким его пересекает соседний стенд атомарности, - это и
+/// есть ровно то, что сделает `spawn`, когда круг станет многопоточным.
+///
+/// Обе половины обязательны, как и у соседа. Ломаная - **прежняя реализация**
+/// дословно, и она обязана дать гонку; честная обязана молчать.
+#[test]
+fn the_sanitizer_names_the_race_on_a_child_of_a_shared_value() {
+    let broken = watched("broken-nested", &broken_nested());
+    if !broken.built {
+        eprintln!(
+            "ThreadSanitizer недоступен у `ADAMAS_CC`, договор §5.2 этим прогоном не проверялся:\n{}",
+            broken.printed
+        );
+        return;
+    }
+    assert!(
+        broken.raced,
+        "санитайзер не назвал гонку на ребёнке, которого промоушен одного объекта не пометил: \
+         инструмент не ловит ничего, и молчание на честном стенде ничего не значит"
+    );
+
+    let honest = watched("honest-nested", &honest_nested());
+    assert!(
+        honest.built,
+        "честный стенд не собрался:\n{}",
+        honest.printed
+    );
+    assert!(
+        !honest.raced,
+        "санитайзер назвал гонку на счётчике ребёнка: промоушен до него не дошёл"
+    );
+    // 4 потока по 20 000 взятий: ни одно не потеряно, пометка на хвосте стоит,
+    // и после отданных ссылок блоков не остаётся.
+    assert_eq!(
+        honest.printed, "tail rc=80000 shared=1\nlive=0",
+        "честный стенд посчитал не то"
+    );
+    eprintln!(
+        "санитайзер: промоушен одного объекта - гонка на ребёнке, обход - тишина, {}",
         honest.printed.replace('\n', ", ")
     );
 }

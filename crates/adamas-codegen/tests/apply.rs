@@ -203,8 +203,10 @@ fn the_second_form_does_not_spread() {
         programs += 1;
         // Положительный контроль: кадры в корпусе есть, и ищет их **та же**
         // строка. Без него «ноль кадров в первой форме» зеленело бы и от
-        // опечатки в имени точки входа.
-        framed_second += artefacts.ll.matches("@adamas_kont_push").count();
+        // опечатки в имени точки входа. Считаются **вызовы**, не объявление:
+        // `declare` стоит в каждом модуле со второй формой и дал бы больше
+        // нуля даже там, где кадров не кладётся ни одного.
+        framed_second += artefacts.ll.matches("call ptr @adamas_kont_push").count();
         for function in &program.functions {
             if function.form == Form::Detached {
                 detached += 1;

@@ -157,16 +157,17 @@ fn a_scrutinee_named_again_keeps_its_cell() {
     assert_eq!(live, 0, "живое: прогон оставил блоки живыми");
 }
 
-/// Ячейка придерживается только там, где её занимает **каждый** путь.
+/// Ячейка придерживается и на том пути, которому занять её нечем.
 ///
 /// Ветвь `MkTwo` разбирает ячейку на два слота, а дальше ветвится: `Zero`
 /// отвечает `L b` и ничего двухслотового не строит, `Succ k` строит `MkTwo k b`.
-/// Придержи ячейку - и на первом пути занять её будет некому: она не вернётся
-/// куче, потому что `adamas_drop_reuse` её не освобождает, и течь вернётся через
-/// reuse.
+/// Занимающий путь ячейку переписывает, незанимающий **возвращает** её куче
+/// ([`Expr::Discard`](adamas_codegen::ir::Expr::Discard), §10 вопрос 173).
+/// Забудь проход этот возврат - и блок повис бы: `adamas_drop_reuse` куче его
+/// не отдаёт, и течь вернулась бы через reuse.
 ///
-/// Прогон идёт именно первым путём (`a = Zero`): свидетель, не заходящий на
-/// пустой путь, не показал бы ничего.
+/// Прогон идёт именно незанимающим путём (`a = Zero`): свидетель, не заходящий
+/// на него, не показал бы ничего.
 const PARTIAL: &str = "\
 data Nat where
   Zero : Nat
@@ -188,13 +189,156 @@ main : Or
 main = branch (MkTwo Zero (Succ Zero))
 ";
 
-/// Путь, которому ячейку занять нечем, оставил бы её висеть.
+/// Путь, которому ячейку занять нечем, обязан её вернуть.
 #[test]
-fn a_cell_is_held_only_when_every_path_takes_it() {
+fn a_path_with_nothing_to_take_gives_the_cell_back() {
     let stderr =
         harness::agreed("partial", PARTIAL).unwrap_or_else(|error| panic!("ветвление: {error}"));
     let (_, live) = harness::blocks("partial", &stderr);
     assert_eq!(live, 0, "ветвление: прогон оставил блоки живыми");
+}
+
+/// Ячеек в списке свидетеля односторонней ветви.
+const CELLS: usize = 32;
+
+/// Общая часть свидетеля: список, построение, свёртка и сама односторонняя
+/// ветвь.
+///
+/// `sift` разбирает `Cons` и строит `Cons` **только на одном из двух путей**:
+/// оставленный элемент переписывает разобранную ячейку, отброшенный её
+/// возвращает. Порог решает, каким путём пойдёт каждая ячейка, и подставляется
+/// он числом - свидетель обязан пройти оба пути и смесь из них.
+fn sift(threshold: i64) -> String {
+    format!(
+        "\
+data Bool where
+  True : Bool
+  False : Bool
+
+data List where
+  Nil : List
+  Cons : Int64 -> List -> List
+
+build : Int64 -> List -> List
+build 0 xs = xs
+build n xs = build (subInt64 n 1) (Cons n xs)
+
+keep : Int64 -> Bool
+keep x = ltInt64 {threshold} x
+
+sift : List -> List -> List
+sift Nil acc = acc
+sift (Cons x xs) acc = case keep x of
+  True -> sift xs (Cons x acc)
+  False -> sift xs acc
+
+total : List -> Int64 -> Int64
+total Nil acc = acc
+total (Cons x xs) acc = total xs (addInt64 (mulInt64 acc 3) x)
+
+main : Int64
+main = total (sift (build {CELLS} Nil) Nil) 0
+"
+    )
+}
+
+/// База: тот же список построен и свёрнут, а `sift` не звана.
+const UNSIFTED: &str = "\
+data Bool where
+  True : Bool
+  False : Bool
+
+data List where
+  Nil : List
+  Cons : Int64 -> List -> List
+
+build : Int64 -> List -> List
+build 0 xs = xs
+build n xs = build (subInt64 n 1) (Cons n xs)
+
+total : List -> Int64 -> Int64
+total Nil acc = acc
+total (Cons x xs) acc = total xs (addInt64 (mulInt64 acc 3) x)
+
+main : Int64
+main = total (build 32 Nil) 0
+";
+
+/// Ветвь с односторонним построением переиспользует ячейку (§10 вопрос 173).
+///
+/// Свидетельствует **счётчик**, и иначе нельзя: ответ у обеих редакций прохода
+/// один и тот же. Мера - три порога, и каждый свой:
+///
+/// - `0` - каждая ячейка идёт занимающим путём; до закрытия вопроса `sift`
+///   платил здесь по аллокации на ячейку, потому что ветвь не придерживала
+///   ничего;
+/// - `32` - каждая идёт незанимающим; придержанная ячейка возвращается куче, и
+///   ноль живых блоков - единственное, чем эта сторона свидетельствует;
+/// - `16` - половина туда, половина сюда; без неё прогон не прошёл бы оба пути
+///   **в одной** программе, а ошибка живёт именно на их стыке.
+///
+/// Ни один из трёх не вправе выдать ни одного блока сверх базы.
+#[test]
+fn a_one_sided_branch_reuses_the_cell_it_took_apart() {
+    let base = allocated("unsifted", UNSIFTED);
+    // Свидетель сперва обязан быть непустым: список короче собственного счёта
+    // не показал бы ни переиспользования, ни течи.
+    assert!(
+        base >= CELLS,
+        "список мельче собственного счёта: выдано {base}, ячеек {CELLS}"
+    );
+    for (name, threshold) in [("sift-all", 0), ("sift-none", 32), ("sift-half", 16)] {
+        let sifted = allocated(name, &sift(threshold));
+        assert_eq!(
+            sifted, base,
+            "{name}: односторонняя ветвь выдала блоки сверх базы {base}, \
+             хотя разобранную ячейку занимает сама"
+        );
+    }
+}
+
+/// То же самое на LLVM-пути: вставка RC общая, и счётчик обязан сойтись.
+///
+/// Свидетель здесь **второй**, а не дубль первого: §5.1 и сам проход стоят до
+/// эмиттеров (`tests/seam.rs`), но раздаёт придержанную ячейку каждый эмиттер
+/// своими печатями - у C это `adamas_free` по имени связывания, у LLVM
+/// `phi` и вызов по SSA-значению. Промахнись один из двух - счётчик разойдётся
+/// только у него.
+#[test]
+fn the_llvm_path_reuses_the_same_cell() {
+    let Some((tools, _)) = harness::llvm_toolchains() else {
+        return;
+    };
+    let pipeline = adamas_codegen::llvm::Pipeline::optimised();
+    let counted = |name: &str, source: &str| {
+        let (_, stderr) = harness::llvm_agreed(
+            name,
+            source,
+            &tools,
+            &pipeline,
+            &format!("{name}.reuse-173.llvm"),
+        )
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let (allocated, live) = harness::blocks(name, &stderr);
+        assert_eq!(live, 0, "{name}: прогон LLVM оставил блоки живыми");
+        allocated
+    };
+    let base = counted("unsifted-llvm", UNSIFTED);
+    assert!(
+        base >= CELLS,
+        "список мельче собственного счёта: выдано {base}, ячеек {CELLS}"
+    );
+    for (name, threshold) in [
+        ("sift-all-llvm", 0),
+        ("sift-none-llvm", 32),
+        ("sift-half-llvm", 16),
+    ] {
+        let sifted = counted(name, &sift(threshold));
+        assert_eq!(
+            sifted, base,
+            "{name}: односторонняя ветвь выдала блоки сверх базы {base}"
+        );
+    }
 }
 
 /// Общая часть замера кратности: у `swap` параметр объявлен единицей.

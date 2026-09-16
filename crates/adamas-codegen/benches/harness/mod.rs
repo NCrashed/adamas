@@ -462,71 +462,156 @@ fn plain_bitcode(tools: &Toolchain, dir: &Path, name: &str, raw: &Path) -> PathB
     object
 }
 
-/// Собирает `.ll` со спутником в исполняемый файл.
+/// Как приезжает спутник на C: печать ответа, дроп его детей, точка входа.
 ///
-/// `support_level` - уровень оптимизации спутника. Штатно [`RELEASE`], то есть
-/// тот же, каким собран порождённый C; отдельным аргументом он стоит ради
-/// свидетеля, показывающего, что горячий виток о спутнике ничего не знает.
-pub(crate) fn llvm_built(
-    dir: &Path,
-    name: &str,
-    artefacts: &Artefacts,
-    tools: &Toolchain,
-    pipeline: &Pipeline,
-    support_level: &str,
-) -> PathBuf {
-    let text = dir.join(format!("{name}.ll"));
-    std::fs::write(&text, &artefacts.ll).unwrap();
-    let object = pipeline
-        .run(tools, &text, name)
-        .unwrap_or_else(|error| panic!("{name}: конвейер LLVM отказал: {error}"));
+/// Развилка не косметическая, и это измерено. У C-стороны `print.c`,
+/// `release.c` и `main.c` лежат **в том же файле**, что и программа
+/// (`include_str!` в эмиттере), то есть попадают в ту же единицу оптимизации.
+/// У LLVM-стороны спутник исходно приезжал отдельной единицей трансляции, и
+/// `adamas_release_extern` в ней оставался непрозрачным для `opt` - названный
+/// долг трека A′. На FBIP-нагрузке дроп зовётся на ячейку, так что граница
+/// стоит времени, и оно ушло бы в столбец под видом качества бэкенда.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Support {
+    /// Штатно: битовым кодом в ту же стадию `llvm-link`, что и рантайм.
+    ///
+    /// Это и уравнивает LLVM-сторону с C-стороной: программа и спутник
+    /// оптимизируются вместе у обоих.
+    Bitcode,
+    /// Свидетель: отдельной единицей трансляции названного уровня.
+    Object(&'static str),
+}
 
-    let support = dir.join(format!("{name}.support.c"));
-    let support_object = dir.join(format!("{name}.support.o"));
-    std::fs::write(&support, &artefacts.support).unwrap();
-    let compiled = Command::new(env!("ADAMAS_CC"))
-        .args([
-            "-std=c11",
-            support_level,
-            "-fwrapv",
-            "-ffp-contract=off",
-            "-w",
-        ])
-        .arg("-I")
-        .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
-        .arg("-c")
-        .arg(&support)
-        .arg("-o")
-        .arg(&support_object)
-        .output()
-        .unwrap();
-    assert!(
-        compiled.status.success(),
-        "{name}: спутник не собрался:\n{}",
-        String::from_utf8_lossy(&compiled.stderr)
-    );
+impl Backend {
+    /// Собирает `.ll` со спутником в исполняемый файл.
+    fn built(
+        &self,
+        name: &str,
+        artefacts: &Artefacts,
+        pipeline: &Pipeline,
+        support: Support,
+    ) -> PathBuf {
+        let dir = scratch(self.stand);
+        let text = dir.join(format!("{name}.ll"));
+        std::fs::write(&text, &artefacts.ll).unwrap();
 
-    let binary = dir.join(format!("{name}.llvm"));
-    let mut link = Command::new(env!("ADAMAS_CC"));
-    link.arg(&object).arg(&support_object);
-    // Объектники рантайма прикладываются, **если конвейер их ещё не приложил**:
-    // приложи их дважды - и компоновщик отвергнет программу дублирующимися
-    // определениями. Спрашивается это у самого конвейера, а не флагом с места
-    // вызова.
-    if !pipeline
-        .stages
-        .iter()
-        .any(|stage| stage.tool == "llvm-link")
-    {
-        link.args(runtime(dir));
+        // Спутник битовым кодом уезжает **внутрь** конвейера, объектником -
+        // на линковку. Отсюда и ветвление: конвейер у двух форм разный.
+        let mut pipeline = pipeline.clone();
+        let mut support_object = None;
+        match support {
+            Support::Bitcode => {
+                let bitcode = self.support_bitcode(&dir, name, &artefacts.support);
+                let at = pipeline
+                    .stages
+                    .iter()
+                    .position(|stage| stage.tool == "llvm-link")
+                    .unwrap_or_else(|| {
+                        pipeline
+                            .stages
+                            .insert(1, Stage::new("llvm-link", &[], "linked.bc"));
+                        1
+                    });
+                pipeline.stages[at]
+                    .arguments
+                    .push(bitcode.display().to_string());
+            }
+            Support::Object(level) => {
+                support_object = Some(Self::support_object(&dir, name, &artefacts.support, level));
+            }
+        }
+
+        let object = pipeline
+            .run(&self.tools, &text, name)
+            .unwrap_or_else(|error| panic!("{name}: конвейер LLVM отказал: {error}"));
+
+        let binary = dir.join(format!("{name}.llvm"));
+        let mut link = Command::new(env!("ADAMAS_CC"));
+        link.arg(&object);
+        if let Some(support_object) = &support_object {
+            link.arg(support_object);
+        }
+        // Объектники рантайма прикладываются, **если конвейер их ещё не
+        // приложил**: приложи их дважды - и компоновщик отвергнет программу
+        // дублирующимися определениями. Спрашивается это у самого конвейера, а
+        // не флагом с места вызова, и спрашивается про **рантайм**, а не про
+        // стадию: стадия бывает заведена одним спутником.
+        let carried = pipeline.stages.iter().any(|stage| {
+            stage
+                .arguments
+                .iter()
+                .any(|argument| argument == &self.runtime.display().to_string())
+        });
+        if !carried {
+            link.args(runtime(&dir));
+        }
+        let linked = link.args(RELEASE).arg("-o").arg(&binary).output().unwrap();
+        assert!(
+            linked.status.success(),
+            "{name}: линковка отказала:\n{}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
+        binary
     }
-    let linked = link.args(RELEASE).arg("-o").arg(&binary).output().unwrap();
-    assert!(
-        linked.status.success(),
-        "{name}: линковка отказала:\n{}",
-        String::from_utf8_lossy(&linked.stderr)
-    );
-    binary
+
+    /// Спутник битовым кодом, без host-атрибутов - по тому же доводу, что и
+    /// рантайм: инлайнер требует подмножества возможностей.
+    fn support_bitcode(&self, dir: &Path, name: &str, text: &str) -> PathBuf {
+        let clang = std::env::var_os(CLANG_VARIABLE)
+            .filter(|it| !it.is_empty())
+            .unwrap_or_else(|| {
+                panic!("`{CLANG_VARIABLE}` не задан: спутник в `.bc` собрать нечем")
+            });
+        let source = dir.join(format!("{name}.support.c"));
+        let raw = dir.join(format!("{name}.support.raw.bc"));
+        std::fs::write(&source, text).unwrap();
+        let made = Command::new(&clang)
+            .args([
+                "-std=c11",
+                "-O2",
+                "-fwrapv",
+                "-ffp-contract=off",
+                "-w",
+                "-emit-llvm",
+                "-c",
+            ])
+            .arg("-I")
+            .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
+            .arg(&source)
+            .arg("-o")
+            .arg(&raw)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "{name}: спутник не собрался в `.bc`:\n{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        plain_bitcode(&self.tools, dir, &format!("{name}.support"), &raw)
+    }
+
+    /// Он же отдельной единицей трансляции названного уровня.
+    fn support_object(dir: &Path, name: &str, text: &str, level: &str) -> PathBuf {
+        let source = dir.join(format!("{name}.support.c"));
+        let object = dir.join(format!("{name}.support.o"));
+        std::fs::write(&source, text).unwrap();
+        let compiled = Command::new(env!("ADAMAS_CC"))
+            .args(["-std=c11", level, "-fwrapv", "-ffp-contract=off", "-w"])
+            .arg("-I")
+            .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
+            .arg("-c")
+            .arg(&source)
+            .arg("-o")
+            .arg(&object)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{name}: спутник не собрался:\n{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        object
+    }
 }
 
 /// Собранная нагрузка: двоичный файл, ответ, счётчики блоков.
@@ -592,24 +677,11 @@ impl Backend {
         name: &str,
         artefacts: &Artefacts,
         pipeline: &Pipeline,
-        level: &str,
+        support: Support,
     ) -> Load {
-        Load::measured(
-            name,
-            llvm_built(
-                &scratch(self.stand),
-                name,
-                artefacts,
-                &self.tools,
-                pipeline,
-                level,
-            ),
-        )
+        Load::measured(name, self.built(name, artefacts, pipeline, support))
     }
 }
-
-/// Уровень оптимизации спутника: тот же, каким собран порождённый C.
-pub(crate) const SUPPORT_LEVEL: &str = "-O2";
 
 /// Переменная, включающая свидетелей второго столбца.
 ///
@@ -681,12 +753,14 @@ pub(crate) fn llvm_against_c(what: &str, column: &Column<'_>) -> Ratio {
 /// квадрате, потому что цепочки двух бэкендов различаются по построению.
 /// Свидетелей четыре: счёт вызовов в горячей функции обеих сторон, цена
 /// отнятой стадии `llvm-link` у LLVM-стороны, цена отнятого `-flto` у
-/// C-стороны и цена уровня, каким собран спутник.
+/// C-стороны и цена отдельной единицы трансляции у спутника.
 ///
 /// **Отвечает ли строка на подсунутое замедление.** Замедление подсовывается
-/// **одной** стороне - LLVM-пути, у которого `llc` идёт `-O0` вместо `-O2`, -
-/// потому что строка называет сравнение двух бэкендов, а не программу. Строка,
-/// не сдвинувшаяся от испорченного бэкенда, мерит не бэкенд.
+/// **одной** стороне - LLVM-пути, - потому что строка называет сравнение двух
+/// бэкендов, а не программу. Замедлений два, слабое и сильное: `llc -O0` при
+/// целом `opt` и снятый `opt` целиком. Второе заведено потому, что первое на
+/// скалярных нагрузках **не отвечает**, и молчащий свидетель тут был бы хуже
+/// отсутствующего.
 ///
 /// Пересборка обеих сторон приходит **замыканиями**: у двух стендов программа
 /// берётся по-разному (один читает корпусный файл, другой строит из скелета), а
@@ -695,7 +769,7 @@ pub(crate) fn witnesses(
     what: &str,
     backend: &Backend,
     column: &Column<'_>,
-    mut rebuilt: impl FnMut(&str, &Pipeline, &str) -> (Load, Load),
+    mut rebuilt: impl FnMut(&str, &Pipeline, Support) -> (Load, Load),
     mut apart: impl FnMut(&str) -> (Load, Load),
 ) {
     let (llvm, llvm_floor, c, c_floor) = (column.llvm, column.llvm_floor, column.c, column.c_floor);
@@ -711,7 +785,7 @@ pub(crate) fn witnesses(
     }
     let stem = sanitised(what);
 
-    let mut variant = |name: &str, pipeline: &Pipeline, support: &str| {
+    let mut variant = |name: &str, pipeline: &Pipeline, support: Support| {
         let (side, side_floor) = rebuilt(&format!("{stem}-{}", sanitised(name)), pipeline, support);
         same_work(what, c, &side);
         ratio(
@@ -723,7 +797,7 @@ pub(crate) fn witnesses(
         );
     };
 
-    // (1) Чувствительность: `llc -O0` у LLVM-стороны, всё прочее как было.
+    // (1) Слабое замедление: `llc -O0` при целом `opt`.
     let blunt = Pipeline {
         stages: backend
             .pipeline()
@@ -742,15 +816,32 @@ pub(crate) fn witnesses(
             })
             .collect(),
     };
-    variant("llc -O0", &blunt, SUPPORT_LEVEL);
+    variant("llc -O0", &blunt, Support::Bitcode);
 
-    // (2) Строка сборки, LLVM-сторона: рантайм объектником, а не битовым кодом.
-    variant("без llvm-link", &Pipeline::optimised(), SUPPORT_LEVEL);
+    // (2) Сильное замедление: `opt` снят целиком, `llc -O2` на месте.
+    let raw = Pipeline {
+        stages: backend
+            .pipeline()
+            .stages
+            .into_iter()
+            .filter(|stage| stage.tool != "opt")
+            .collect(),
+    };
+    variant("без opt", &raw, Support::Bitcode);
 
-    // (3) Спутник собран `-O0`: горячий виток о нём знать ничего не должен.
-    variant("спутник -O0", &backend.pipeline(), "-O0");
+    // (3) Строка сборки, LLVM-сторона: ничего битовым кодом - ни рантайм, ни
+    // спутник. Это состояние пути до трека A′.
+    variant(
+        "без llvm-link",
+        &Pipeline::optimised(),
+        Support::Object("-O2"),
+    );
 
-    // (4) Строка сборки, C-сторона: та же программа без `-flto`.
+    // (4) Спутник отдельной единицей трансляции: граница, которой у C-стороны
+    // нет вовсе - там печать и дроп лежат в одном файле с программой.
+    variant("спутник врозь", &backend.pipeline(), Support::Object("-O2"));
+
+    // (5) Строка сборки, C-сторона: та же программа без `-flto`.
     let (side, side_floor) = apart(&format!("{stem}-apart"));
     same_work(what, c, &side);
     ratio(

@@ -65,7 +65,7 @@ static void *cell(size_t index) {
 }
 
 static float readable(size_t index) {
-#if MODE >= 3
+#if MODE == 3
     float out;
     rc += 1;                       /* adamas_dup */
     memcpy(&out, cell(index), stride);

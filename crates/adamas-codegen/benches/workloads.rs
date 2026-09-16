@@ -204,7 +204,7 @@ use adamas_elab::mono;
 use criterion::{Criterion, SamplingMode, criterion_group};
 
 use harness::{
-    Backend, Column, Load, NEIGHBOUR, SUPPORT_LEVEL, built, by_floor, corpus, elaborated, entry,
+    Backend, Column, Load, NEIGHBOUR, Support, built, by_floor, corpus, elaborated, entry,
     llvm_against_c, ran, ran_neighbour, ratio, resized, same_work,
 };
 
@@ -423,10 +423,10 @@ fn llvm_load(
     name: &str,
     program: &Both,
     pipeline: &Pipeline,
-    level: &str,
+    support: Support,
 ) -> Option<Load> {
     match &program.llvm {
-        Ok(artefacts) => Some(backend.load(name, artefacts, pipeline, level)),
+        Ok(artefacts) => Some(backend.load(name, artefacts, pipeline, support)),
         Err(error) => {
             eprintln!("{name}: LLVM-эмиттер нагрузку не берёт: {error}");
             None
@@ -459,7 +459,7 @@ fn sides(name: &str, source: &str, backend: Option<&Backend>) -> Sides {
             &format!("{name}-llvm"),
             &program,
             &backend.pipeline(),
-            SUPPORT_LEVEL,
+            Support::Bitcode,
         )
     });
     if let Some(llvm) = &llvm {

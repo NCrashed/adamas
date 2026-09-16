@@ -539,8 +539,8 @@ use criterion::{Criterion, SamplingMode, criterion_group};
 use adamas_codegen::emit_llvm::Artefacts;
 use adamas_codegen::llvm::Pipeline;
 use harness::{
-    Backend, Column, Load, NEIGHBOUR, SUPPORT_LEVEL, built, by_floor, compiled, elaborated, entry,
-    least, llvm_against_c, measuring, middle, ran, ran_neighbour, span,
+    Backend, Column, Load, NEIGHBOUR, Support, built, by_floor, compiled, elaborated, entry, least,
+    llvm_against_c, measuring, middle, ran, ran_neighbour, span,
 };
 
 /// Место под порождённый C и его сборку — своё у стенда.
@@ -1143,13 +1143,17 @@ fn against_the_c_backend(depth: usize, c: &Path, c_floor: &Path) {
 
     let what = format!("символьная строка/{depth}");
     let pipeline = backend.pipeline();
-    let build = |stem: &str, pipeline: &Pipeline, support: &str| {
+    let build = |stem: &str, pipeline: &Pipeline, support: Support| {
         (
             backend.load(stem, &artefacts, pipeline, support),
             backend.load(&format!("{stem}-floor"), &idle_artefacts, pipeline, support),
         )
     };
-    let (llvm, llvm_floor) = build(&format!("symbolic{depth}-llvm"), &pipeline, SUPPORT_LEVEL);
+    let (llvm, llvm_floor) = build(
+        &format!("symbolic{depth}-llvm"),
+        &pipeline,
+        Support::Bitcode,
+    );
     let c = Load::measured(&format!("symbolic{depth}"), c.to_path_buf());
     let c_floor = Load::measured("symbolic0", c_floor.to_path_buf());
     let column = Column {

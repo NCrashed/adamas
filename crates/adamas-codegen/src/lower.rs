@@ -3397,19 +3397,24 @@ impl<'a> Lowerer<'a> {
         let wanted = match op {
             SimdOp::Splat => 4,
             SimdOp::Lane | SimdOp::Add | SimdOp::Sub | SimdOp::Mul => 5,
-            SimdOp::Set => 6,
+            SimdOp::Set | SimdOp::Load => 6,
+            SimdOp::Store => 7,
         };
         if arguments.len() != wanted {
             return Err(LowerError::PartialSimd {
                 name: op.name().to_owned(),
             });
         }
-        // У `simdSplat` порядок стёртых - дорожка, словарь, ширина; у прочих -
-        // ширина, дорожка, словарь. Расхождение не случайно: ширину `simdSplat`
-        // выводить не из чего, и она написана явно (§4.9, `simd_op_scheme`).
+        // У `simdSplat` порядок стёртых - дорожка, словарь, ширина; у операций
+        // над колонкой - длина колонки, дорожка, словарь, ширина; у прочих -
+        // ширина, дорожка, словарь. Расхождение не случайно: ширину выводить
+        // не из чего там, где вектора в аргументе нет (§4.9,
+        // `simd_op_scheme`), а длина колонки к ширине регистра отношения не
+        // имеет и стоит поэтому отдельным связыванием.
         let (at_width, at_lane) = match op {
             SimdOp::Splat => (2, 0),
             SimdOp::Set | SimdOp::Lane | SimdOp::Add | SimdOp::Sub | SimdOp::Mul => (0, 1),
+            SimdOp::Load | SimdOp::Store => (3, 1),
         };
         let partial = || LowerError::PartialSimd {
             name: op.name().to_owned(),
@@ -3485,6 +3490,47 @@ impl<'a> Lowerer<'a> {
                         right: Box::new(right),
                     },
                     shape,
+                ))
+            }
+            // Шаг колонки берётся у **дорожки**, а не считается вторым разом
+            // по типу элемента: тип элемента и есть `a` из `Simd n a` - схема
+            // (`simd_op_scheme`) связывает их одним связыванием, - а
+            // [`Self::vector_of`] уже установила, что `a` примитивен. Второй
+            // счёт шага был бы вторым местом, где укладка колонки считается, и
+            // разъехался бы молча.
+            SimdOp::Load => {
+                let column = Repr::Array(Elems::Flat);
+                let array = self.given(scope, &arguments[4], column, "читаемая колонка")?;
+                let at = self.given(scope, &arguments[5], word, "номер ячейки")?;
+                Ok((
+                    Expr::SimdLoad {
+                        stride: Stride::Static(lane),
+                        lanes,
+                        lane,
+                        // Владение снимет Perceus - тем же правилом, каким он
+                        // снимает его у `arrayIndex` (§10 вопрос 171).
+                        owned: true,
+                        array: Box::new(array),
+                        at: Box::new(at),
+                    },
+                    shape,
+                ))
+            }
+            SimdOp::Store => {
+                let column = Repr::Array(Elems::Flat);
+                let array = self.given(scope, &arguments[4], column, "переписываемая колонка")?;
+                let at = self.given(scope, &arguments[5], word, "номер ячейки")?;
+                let value = self.given(scope, &arguments[6], shape, "записываемый вектор")?;
+                Ok((
+                    Expr::SimdStore {
+                        stride: Stride::Static(lane),
+                        lanes,
+                        lane,
+                        array: Box::new(array),
+                        at: Box::new(at),
+                        value: Box::new(value),
+                    },
+                    column,
                 ))
             }
         }

@@ -350,9 +350,15 @@ impl Pass<'_> {
             // а считать по ней нечего до первого её употребления.
             | Expr::RegionNew
             | Expr::Layout { .. } => drops(owned.iter().copied().collect::<Vec<_>>(), expr),
-            Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. } => {
-                self.array(expr, owned)
-            }
+            // Векторные `load`/`store` (§4.9) идут тем же путём, что скалярные
+            // чтение и запись: колонка у них та же, владение то же, и
+            // заимствование чтения - тоже то же (§10 вопрос 171). Второй
+            // разбор был бы вторым правилом владения колонкой.
+            Expr::ArrayNew { .. }
+            | Expr::ArraySet { .. }
+            | Expr::ArrayIndex { .. }
+            | Expr::SimdLoad { .. }
+            | Expr::SimdStore { .. } => self.array(expr, owned),
             Expr::RegionAlloc { .. }
             | Expr::RegionLast { .. }
             | Expr::RegionRead { .. }
@@ -596,11 +602,15 @@ impl Pass<'_> {
     }
 
     fn array(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
-        /// Какая из трёх операций разобрана: узел собирается обратно тем же.
+        /// Какая из пяти операций разобрана: узел собирается обратно тем же.
         enum Shape {
             New,
             Set,
             Index,
+            /// Векторная загрузка окна (§4.9): ширина и дорожка при ней.
+            Load(u32, PrimTy),
+            /// Векторная запись окна (§4.9).
+            Store(u32, PrimTy),
         }
         // Плоское чтение с локала-невладельца **заимствует** (§10 вопрос 171):
         // наружу уходят биты без заголовка, а сам массив потребит его владелец
@@ -636,6 +646,32 @@ impl Pass<'_> {
                     },
                 );
             }
+            // Векторное чтение заимствует по тому же правилу и с тем же
+            // условием: колонка пришла локалом, которым это место не владеет.
+            // Шага-`Option` у него нет - дорожкой бывает только примитив, - и
+            // проверять на плоскость нечего.
+            Expr::SimdLoad {
+                stride,
+                lanes,
+                lane,
+                owned: _,
+                array,
+                at,
+            } if matches!(&*array, Expr::Local(local) if !owned.contains(local)) => {
+                let (mut done, spare) = self.sequence(vec![*at], owned);
+                let at = Box::new(done.pop().unwrap_or(Expr::Erased));
+                return drops(
+                    spare,
+                    Expr::SimdLoad {
+                        stride,
+                        lanes,
+                        lane,
+                        owned: false,
+                        array,
+                        at,
+                    },
+                );
+            }
             other => other,
         };
         let (shape, stride, parts) = match expr {
@@ -653,6 +689,26 @@ impl Pass<'_> {
             Expr::ArrayIndex {
                 stride, array, at, ..
             } => (Shape::Index, stride, vec![*array, *at]),
+            Expr::SimdLoad {
+                stride,
+                lanes,
+                lane,
+                array,
+                at,
+                ..
+            } => (Shape::Load(lanes, lane), Some(stride), vec![*array, *at]),
+            Expr::SimdStore {
+                stride,
+                lanes,
+                lane,
+                array,
+                at,
+                value,
+            } => (
+                Shape::Store(lanes, lane),
+                Some(stride),
+                vec![*array, *at, *value],
+            ),
             other => return other,
         };
         let (mut done, spare) = self.sequence(parts, owned);
@@ -684,6 +740,29 @@ impl Pass<'_> {
                     owned: true,
                     array: next(),
                     at,
+                }
+            }
+            Shape::Load(lanes, lane) => {
+                let at = next();
+                Expr::SimdLoad {
+                    stride: stride.unwrap_or(Stride::Static(lane)),
+                    lanes,
+                    lane,
+                    owned: true,
+                    array: next(),
+                    at,
+                }
+            }
+            Shape::Store(lanes, lane) => {
+                let value = next();
+                let at = next();
+                Expr::SimdStore {
+                    stride: stride.unwrap_or(Stride::Static(lane)),
+                    lanes,
+                    lane,
+                    array: next(),
+                    at,
+                    value,
                 }
             }
         };
@@ -1246,7 +1325,12 @@ impl Pass<'_> {
             Expr::ArraySet {
                 array, at, value, ..
             } => self.plans(array, slots) || self.plans(at, slots) || self.plans(value, slots),
-            Expr::ArrayIndex { array, at, .. } => self.plans(array, slots) || self.plans(at, slots),
+            Expr::ArrayIndex { array, at, .. } | Expr::SimdLoad { array, at, .. } => {
+                self.plans(array, slots) || self.plans(at, slots)
+            }
+            Expr::SimdStore {
+                array, at, value, ..
+            } => self.plans(array, slots) || self.plans(at, slots) || self.plans(value, slots),
             // Вектор (§4.9) ячейки не занимает - он плоский и живёт в регистре,
             // - но подвыражения его обходятся тем же правилом, каким их обходит
             // арифметика: под ними стоит `Bind`, а под ним что угодно.
@@ -1371,8 +1455,15 @@ impl Pass<'_> {
                     || self.attach(at, slots, token)
                     || self.attach(value, slots, token)
             }
-            Expr::ArrayIndex { array, at, .. } => {
+            Expr::ArrayIndex { array, at, .. } | Expr::SimdLoad { array, at, .. } => {
                 self.attach(array, slots, token) || self.attach(at, slots, token)
+            }
+            Expr::SimdStore {
+                array, at, value, ..
+            } => {
+                self.attach(array, slots, token)
+                    || self.attach(at, slots, token)
+                    || self.attach(value, slots, token)
             }
             // Обход тот же, что у [`Pass::plans`] выше, и по тому же доводу.
             Expr::SimdSplat { value, .. } => self.attach(value, slots, token),

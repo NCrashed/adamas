@@ -88,7 +88,7 @@ use std::path::PathBuf;
 /// (`workload-symbolic`) сверяется со стендовой дословно.
 /// Всё, что здесь стоит, обязано собраться и ответить как `adamas eval`; список
 /// сокращать нельзя, а пополнять - можно и нужно, когда фрагмент растёт.
-const TAKEN: [&str; 97] = [
+const TAKEN: [&str; 98] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -182,6 +182,7 @@ const TAKEN: [&str; 97] = [
     "unwind-inner-handler",
     "unwind-live-outer",
     "workload-column",
+    "workload-vector",
     "workload-fbip",
     "workload-scalar",
     "workload-scalar-affine",

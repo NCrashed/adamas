@@ -108,12 +108,20 @@
 //! то, что §5.1 обещает выиграть: «без FBIP каждое преобразование = O(n)
 //! аллокаций; с FBIP на уникальных инпутах — 0».
 //!
-//! # Четвёртая нагрузка: скалярный эквивалент SIMD-ядра
+//! # Четвёртая нагрузка: скалярный эквивалент SIMD-ядра, и он же вектором
 //!
-//! Самой `Simd n a` (§4.9) в языке нет — ни типа, ни класса `Primitive`, ни
-//! операций, ни выравненных буферов; проверено прогоном (`adamas check` на
-//! `lane : Simd 4 Float32` отвечает «имя `Simd` не найдено»), и это трек H Фазы
-//! 7. Скалярная половина ядра доступна сегодня, и она здесь.
+//! Строк у неё две, и до волны 3 Фазы 7 была одна. **4а** - скалярный
+//! эквивалент, то есть тот же проход по одной дорожке; **4б** - он же
+//! вектором, `Simd 8 Float32` над окном колонки. Разделены они не для полноты:
+//! милестоун волны 5 просил у четвёртой нагрузки именно скалярную половину
+//! («SIMD-ядро - за вычетом самой SIMD»), потому что векторной в языке тогда
+//! не было вовсе, а частное двух строк и есть то, что §4.9 обещает.
+//!
+//! Прежняя запись здесь говорила, что `Simd n a` в языке нет ни типа, ни
+//! класса, ни операций. Неверно с 2026-09-16 (трек H: тип, класс `Primitive`,
+//! шесть операций в регистре) и тем более с 2026-09-17 (трек D: `simdLoad` и
+//! `simdStore` над колонкой). Проверено прогоном - строка 4б ниже и есть та
+//! проверка.
 //!
 //! **Форма ядра взята у §4.9, а не выбрана.** Там сказано дословно: «ширина
 //! `Simd` есть число обрабатываемых сущностей, а не число компонент величины»,
@@ -361,6 +369,14 @@ fn fbip_source(cells: i64, passes: i64) -> String {
 fn column_source(cells: u64, passes: u64) -> String {
     resized(
         &corpus("workload-column"),
+        &[("cells", cells), ("passes", passes)],
+    )
+}
+
+/// То же ядро **вектором**: окно `Simd 8 Float32` над той же колонкой (§4.9).
+fn vector_source(cells: u64, passes: u64) -> String {
+    resized(
+        &corpus("workload-vector"),
         &[("cells", cells), ("passes", passes)],
     )
 }
@@ -979,7 +995,146 @@ fn column_kernel(criterion: &mut Criterion) {
     second_column_witnesses("колонное ядро", backend.as_ref(), &load, &floor);
 }
 
-criterion_group!(benches, scalar, fbip, column_kernel);
+/// То же ядро вектором: строка 4б таблицы разрыва (§4.9, трек D волны 3).
+///
+/// # Что здесь мерится, и почему чисел три, а не одно
+///
+/// Строка 4б таблицы - «сама `Simd`», и до этого трека она была пуста у обоих
+/// столбцов. Заполняют её два первых числа; третье - то, ради чего §4.9
+/// вообще писан, и в таблицу оно не помещается.
+///
+/// **Столбец «против соседа»** - наш C-путь против того же соседа, что у
+/// строки 4а. Сосед у двух строк **один нарочно**: §6 требует эквивалентного
+/// кода, а эквивалент векторного ядра на Rust - это тот же проход по колонке,
+/// который пишет всякий, кто его пишет. Держать два соседа значило бы
+/// сравнивать две строки таблицы с разными мерками, и тогда их частное не
+/// читалось бы вовсе.
+///
+/// **Столбец «LLVM против C»** - обычный второй столбец, чередованием.
+///
+/// **Вектор против скаляра** - потолок §4.9, померенный на **нашей** стороне и
+/// на каждом бэкенде отдельно. Берётся он своим чередованием, а не частным
+/// двух столбцов: частное складывало бы два окна замера, и на этом уже
+/// обжигались (шапка `native.rs`, «Методика»).
+///
+/// # Обе программы обязаны отвечать одно
+///
+/// `workload-vector` и `workload-column` считают **одно ядро** разной ширины,
+/// и ответ у них обязан совпасть побитово. Сверяется это здесь, до всякого
+/// замера: разойдись они - отношение мерило бы две разные работы. Тот же
+/// договор, что между двумя бэкендами ([`harness::same_work`]), только поперёк
+/// программ.
+fn vector_kernel(criterion: &mut Criterion) {
+    let backend = Backend::new(STAND);
+    let mut group = criterion.benchmark_group("vector");
+    group.sample_size(10);
+    group.sampling_mode(SamplingMode::Flat);
+
+    agrees("vector-small", &corpus("workload-vector"));
+
+    let floor = sides("vector-floor", &vector_source(0, 0), backend.as_ref());
+    let load = sides(
+        "vector",
+        &vector_source(COLUMN_CELLS, COLUMN_PASSES),
+        backend.as_ref(),
+    );
+    // Блок **один**, сколько бы окон по колонке ни прошло: `simdStore`
+    // переписывает уникальную колонку по месту тем же договором, что
+    // `arraySet`. Скопируй он её на витке - строка мерила бы аллокатор.
+    assert_eq!(
+        load.c.allocated, 1,
+        "векторное ядро выдало не один блок: `simdStore` перестал писать по месту"
+    );
+
+    // Скалярный близнец: он же вторая сторона потолка. Строится здесь, а не
+    // берётся у группы `column`, потому что чередовать можно только то, что
+    // стоит в одном окне.
+    let scalar_floor = sides(
+        "vector-scalar-floor",
+        &column_source(0, 0),
+        backend.as_ref(),
+    );
+    let scalar = sides(
+        "vector-scalar",
+        &column_source(COLUMN_CELLS, COLUMN_PASSES),
+        backend.as_ref(),
+    );
+    assert_eq!(
+        scalar.c.answer, load.c.answer,
+        "вектор и скаляр посчитали разное: сравнивались бы две разные работы"
+    );
+
+    let request = format!("column:{COLUMN_CELLS}:{COLUMN_PASSES}");
+    let (stdout, _) = ran_neighbour(&request);
+    assert_eq!(
+        stdout.trim(),
+        load.c.answer,
+        "сосед на Rust считает не то же ядро"
+    );
+
+    group.bench_function("native", |bencher| {
+        by_floor(bencher, || drop(ran(&load.c.binary)));
+    });
+    group.bench_function("floor", |bencher| {
+        by_floor(bencher, || drop(ran(&floor.c.binary)));
+    });
+    group.bench_function("rust", |bencher| {
+        by_floor(bencher, || drop(ran_neighbour(&request)));
+    });
+    if let (Some(llvm), Some(llvm_floor)) = (&load.llvm, &floor.llvm) {
+        group.bench_function("llvm", |bencher| {
+            by_floor(bencher, || drop(ran(&llvm.binary)));
+        });
+        group.bench_function("llvm/floor", |bencher| {
+            by_floor(bencher, || drop(ran(&llvm_floor.binary)));
+        });
+    }
+    group.finish();
+
+    ratio(
+        "векторное ядро",
+        || drop(ran(&load.c.binary)),
+        || drop(ran(&floor.c.binary)),
+        || drop(ran_neighbour(&request)),
+        || drop(ran_neighbour("column:0:0")),
+    );
+    second_column("векторное ядро", &load, &floor);
+    second_column_witnesses("векторное ядро", backend.as_ref(), &load, &floor);
+    ceiling("C-путь", &scalar.c, &scalar_floor.c, &load.c, &floor.c);
+    if let (Some(llvm), Some(llvm_floor), Some(scalar_llvm), Some(scalar_llvm_floor)) =
+        (&load.llvm, &floor.llvm, &scalar.llvm, &scalar_floor.llvm)
+    {
+        ceiling(
+            "LLVM-путь",
+            scalar_llvm,
+            scalar_llvm_floor,
+            llvm,
+            llvm_floor,
+        );
+    }
+}
+
+/// Потолок §4.9 на нашей стороне: скаляр против вектора на одном бэкенде.
+///
+/// Больше единицы значит «вектор быстрее», то есть число читается ровно как
+/// измеренный руками потолок (`docs/measurements/simd/`): **2.7 раза** на
+/// колонке в кэше и 1.26 за пределами L3. Обе стороны - наши двоичные файлы,
+/// оба пола свои, чередование одно.
+fn ceiling(what: &str, scalar: &Load, scalar_floor: &Load, vector: &Load, vector_floor: &Load) {
+    assert_eq!(
+        scalar.answer, vector.answer,
+        "потолок/{what}: стороны посчитали разное"
+    );
+    ratio(
+        &format!("вектор против скаляра, {what}"),
+        || drop(ran(&scalar.binary)),
+        || drop(ran(&scalar_floor.binary)),
+        || drop(ran(&vector.binary)),
+        || drop(ran(&vector_floor.binary)),
+    );
+}
+
+criterion_group!(benches, scalar, fbip, column_kernel, vector_kernel);
 
 /// `main` написан руками, а не взят у `criterion_main!`: дочерний прогон
 /// соседа ([`as_child`]) обязан отвечать раньше, чем criterion разберёт

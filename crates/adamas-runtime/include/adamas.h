@@ -561,6 +561,15 @@ size_t adamas_array_stride(adamas_value array);
 /** Адрес плоской ячейки: `base + index * stride`. Номер вне длины обрывает. */
 void *adamas_array_at(adamas_value array, size_t index);
 
+/** Адрес окна из `lanes` ячеек подряд (§4.9, `simdLoad`/`simdStore`).
+ *
+ * Отдельно от `adamas_array_at` затем, что проверять надо **хвост** окна:
+ * `index < count` пропустил бы чтение семи ячеек за концом блока, и ответ
+ * при этом был бы верен. Выход обрывает; выравнивания адресу не обещается -
+ * ячейка стоит по шагу массива, и грузить его надо невыровненной формой.
+ */
+void *adamas_array_window(adamas_value array, size_t index, size_t lanes);
+
 /** Указательная ячейка. Заимствуется. */
 adamas_value adamas_array_get(adamas_value array, size_t index);
 

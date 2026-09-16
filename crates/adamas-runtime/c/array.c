@@ -55,6 +55,22 @@ void *adamas_array_at(adamas_value array, size_t index) {
     return payload(array) + index * head->stride;
 }
 
+void *adamas_array_window(adamas_value array, size_t index, size_t lanes) {
+    adamas_array *head = header_of(array);
+    /* Проверяется **хвост** окна, а не его начало: вектор читает `lanes`
+     * ячеек подряд, и `index < count` пропустил бы чтение семи ячеек за
+     * концом блока при верном ответе. Сложение считается вычитанием, чтобы
+     * не завернуть: `count - lanes` определено ровно тогда, когда окно вообще
+     * может поместиться. */
+    if (lanes > head->count || index > head->count - lanes) {
+        adamas_fail("окно вектора вне длины массива");
+    }
+    if (head->stride == 0) {
+        adamas_fail("окно вектора спрошено у указательного массива");
+    }
+    return payload(array) + index * head->stride;
+}
+
 /* Слот указательного массива. Проверки те же и по той же причине. */
 static adamas_value *slot(adamas_value array, size_t index) {
     adamas_array *head = header_of(array);

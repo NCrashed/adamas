@@ -18,8 +18,8 @@ use adamas_runtime::ffi::{
     Value, adamas_array_alloc, adamas_array_at, adamas_array_count, adamas_array_fill,
     adamas_array_fill_flat, adamas_array_get, adamas_array_init, adamas_array_put,
     adamas_array_read, adamas_array_release, adamas_array_stride, adamas_array_take,
-    adamas_array_writable, adamas_drop, adamas_dup, adamas_imm, adamas_is_unique,
-    adamas_stat_allocated, adamas_stat_live, adamas_stat_reset,
+    adamas_array_window, adamas_array_writable, adamas_drop, adamas_dup, adamas_imm,
+    adamas_is_unique, adamas_stat_allocated, adamas_stat_live, adamas_stat_reset,
 };
 
 thread_local! {
@@ -119,6 +119,50 @@ fn a_column_of_vectors_takes_thirty_six_bytes() {
             "поле `z` второй ячейки лежит не по смещению 20"
         );
         assert_eq!(adamas_stat_allocated(), 1, "колонка стоила не одного блока");
+        adamas_drop(array, None);
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Окно вектора (§4.9) начинается там же, где ячейка, и кончается в блоке.
+///
+/// Два утверждения, и второе несущее. Адрес окна обязан совпасть с адресом
+/// ячейки - иначе `simdLoad` и `arrayIndex` читали бы одну колонку по разным
+/// правилам. Последнее окно обязано **уместиться**: у колонки из восьми ячеек
+/// окно ширины восемь начинается с нуля и ровно кончается концом нагрузки, а
+/// начнись оно с единицы - хвост ушёл бы за блок. Проверить это ответом
+/// нельзя: за концом блока лежат чужие байты, а не отказ.
+#[test]
+fn a_vector_window_ends_inside_the_block() {
+    unsafe {
+        adamas_stat_reset();
+        let array = adamas_array_alloc(8, 4);
+        let base = array.cast::<u8>() as usize;
+        for index in 0..8usize {
+            assert_eq!(
+                adamas_array_window(array, index, 1).cast::<u8>() as usize,
+                adamas_array_at(array, index).cast::<u8>() as usize,
+                "окно ширины один встало не туда, куда ячейка {index}"
+            );
+        }
+        // Самое широкое окно, какое колонка вмещает, - вся она целиком.
+        let whole = adamas_array_window(array, 0, 8).cast::<u8>() as usize;
+        assert_eq!(whole - base, PAYLOAD);
+        assert_eq!(
+            whole + 8 * 4 - base,
+            PAYLOAD + 32,
+            "хвост самого широкого окна вышел за нагрузку"
+        );
+        // Окно ширины четыре укладывается двумя половинами и никак иначе:
+        // третья позиция (номер 5) хвостом ушла бы за конец, и её отвергает
+        // `adamas_array_window` обрывом - проверяется он прогоном программы
+        // (`adamas-codegen/tests/simd.rs`), потому что обрыв кладёт процесс.
+        for index in [0usize, 4] {
+            let window = adamas_array_window(array, index, 4).cast::<u8>() as usize;
+            assert_eq!(window - base, PAYLOAD + index * 4);
+            assert!(window + 16 - base <= PAYLOAD + 32);
+        }
+        assert_eq!(adamas_stat_allocated(), 1);
         adamas_drop(array, None);
         assert_eq!(adamas_stat_live(), 0);
     }

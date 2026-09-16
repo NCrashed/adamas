@@ -72,14 +72,24 @@ use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 /// оттого достались LLVM-пути даром: объектного слоя вектору не нужно, а до
 /// массива он не доходит.
 ///
-/// Остальное добавил трек I волны 2: питомник и минимальный срез слоя
+/// Двадцать шесть добавил трек I волны 2: питомник и минимальный срез слоя
 /// замыканий. Взяты они вместе не по удобству - тело `withNursery` есть
 /// нульместное замыкание, и без этого среза все одиннадцать питомничных
 /// упираются во второй блокиратор.
-const TAKEN: [&str; 69] = [
+///
+/// Шесть последних добавил трек B волны 3 - массивы (§4.11). Из десяти
+/// отвергнутых массивом это те, чья ячейка плоская примитивом; у остальных
+/// четырёх ячейка - **плотный агрегат**, и отказ у них теперь этот, то есть
+/// трек C. `array-generic` и `flat-under-a-parameter` взяты потому, что
+/// специализация (`mono`) обращает рантаймовый шаг дескриптора в константу; без
+/// неё они остались бы за дескриптором укладки.
+const TAKEN: [&str; 75] = [
     "abortive-cleanup",
     "abortive-except",
     "arithmetic",
+    "array-flat",
+    "array-generic",
+    "array-length-word",
     "await-twice",
     "await-value",
     "cancel",
@@ -95,6 +105,7 @@ const TAKEN: [&str; 69] = [
     "field-effect",
     "flat-across-a-suspension",
     "flat-fields",
+    "flat-under-a-parameter",
     "general-frames",
     "general-order",
     "instance-context-effect",
@@ -130,6 +141,7 @@ const TAKEN: [&str; 69] = [
     "rows",
     "sealed-effect",
     "sequences",
+    "shadowed-name",
     "signature-effect",
     "signature-effect-parameterized",
     "simd-lanes",
@@ -142,6 +154,7 @@ const TAKEN: [&str; 69] = [
     "truncation",
     "unwind-inner-handler",
     "unwind-live-outer",
+    "workload-column",
     "workload-fbip",
     "workload-scalar",
     "workload-scalar-affine",

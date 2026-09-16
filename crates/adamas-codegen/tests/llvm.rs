@@ -48,10 +48,10 @@ use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 
 /// Программы корпуса, которые срез обязан взять.
 ///
-/// Список закрыт **одной** стеной, и названа она прогоном: слой замыканий.
-/// Эффекты стояли второй стеной и сняты треком G волны 2; отказа «эффект» в
-/// остатке не осталось ни одного. Всё прочее отвергается названной причиной, и
-/// причины эти печатаются мерой ниже.
+/// Стен у списка больше **нет**: после треков A и C волны 3 в нём весь корпус
+/// за вычетом одной программы, и та отвергается границей языка, а не эмиттером
+/// (`function`: ответ программы есть функция, печатать её нечем). Причина
+/// остатка печатается мерой ниже и сверяется ею же.
 ///
 /// Сокращать нельзя, пополнять - можно и нужно, когда фрагмент растёт: ровно то
 /// же правило, что у `agreement.rs`.
@@ -77,20 +77,33 @@ use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 /// нульместное замыкание, и без этого среза все одиннадцать питомничных
 /// упираются во второй блокиратор.
 ///
-/// Шесть последних добавил трек B волны 3 - массивы (§4.11). Из десяти
+/// Шесть добавил трек B волны 3 - массивы (§4.11). Из десяти
 /// отвергнутых массивом это те, чья ячейка плоская примитивом; у остальных
 /// четырёх ячейка - **плотный агрегат**, и отказ у них теперь этот, то есть
 /// трек C. `array-generic` и `flat-under-a-parameter` взяты потому, что
 /// специализация (`mono`) обращает рантаймовый шаг дескриптора в константу; без
 /// неё они остались бы за дескриптором укладки.
-const TAKEN: [&str; 88] = [
+///
+/// Тринадцать последних добавил трек C волны 3 - плотные агрегаты (§4.11) и
+/// регионы (§3.6). Четыре из них те самые `array-*` с агрегатной ячейкой;
+/// четыре - стратегии размещения (`region-strategies`,
+/// `region-strategy-handled`, `region-strategy-in-io`, `functor-strategy`), и
+/// это все региональные отказы, какие были. Оставшиеся три агрегатных -
+/// `flat`, `flat-primitives`, `flat-sealed-member` - под снятым отказом
+/// показали **дескриптор укладки**, то есть словарь `Flat a` значением; взят
+/// и он.
+const TAKEN: [&str; 101] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
     "arithmetic",
+    "array-aggregate",
     "array-flat",
     "array-generic",
     "array-length-word",
+    "array-nested",
+    "array-parametric",
+    "array-tagged",
     "await-twice",
     "await-value",
     "beta-redex",
@@ -110,10 +123,14 @@ const TAKEN: [&str; 88] = [
     "existential",
     "fibers",
     "field-effect",
+    "flat",
     "flat-across-a-suspension",
     "flat-fields",
+    "flat-primitives",
+    "flat-sealed-member",
     "flat-under-a-parameter",
     "functor",
+    "functor-strategy",
     "general-frames",
     "general-order",
     "instance-context-effect",
@@ -147,6 +164,10 @@ const TAKEN: [&str; 88] = [
     "records",
     "region-allocates-and-reads",
     "region-bound-in-the-argument",
+    "region-holds-flat-payload",
+    "region-strategies",
+    "region-strategy-handled",
+    "region-strategy-in-io",
     "resource",
     "resource-cleanup",
     "rose",
@@ -158,6 +179,7 @@ const TAKEN: [&str; 88] = [
     "signature-effect-parameterized",
     "simd-lanes",
     "simd-wrapping",
+    "soa-record",
     "spawn-local",
     "state",
     "state-resource",
@@ -772,6 +794,143 @@ fn array_mutants() -> [(
     ]
 }
 
+/// Мутанты **плотного агрегата** (§4.11) и дескриптора укладки.
+///
+/// Агрегат отличается от объекта кучи ровно тем, что заголовка у него нет:
+/// поле адресуется смещением, тег лежит первыми байтами укладки, а не в
+/// заголовке. Значит и ломаться он умеет по-своему, и все четыре правки ниже -
+/// про смещение либо про тег, а не про общий объектный путь.
+///
+/// - **Смещение поля.** `(arrayIndex ps.pos 0).z` читается с чужого смещения:
+///   `.y` вместо `.z`, то есть 2.0 вместо 3.0. У `Vec3` три поля одной ширины,
+///   и различить их можно только смещением - ровно то, что проверяется.
+/// - **Тег варианта при сборке.** `Some 700` собирается тегом `None`: ячейка
+///   становится пустой, и сумма падает на семьсот. Наблюдаемо это потому, что
+///   у фикстуры значения ячеек различны.
+/// - **Смещение payload'а при разборе.** Поле варианта `Some` читается с
+///   нулевого смещения, то есть поверх тега и дыры выравнивания. `Option Int64`
+///   занимает шестнадцать байт именно из-за этой дыры (§4.11), и мутант
+///   показывает, что дыра не декорация.
+/// - **Половины дескриптора укладки.** `layout @Vec3` есть 12/4; переставь
+///   половины слова - и получится 4/12. Обе половины живут в одном регистре
+///   (см. [`slot`](adamas_codegen) в `emit_llvm.rs`), и перепутать их местами -
+///   единственный способ ошибиться в дескрипторе, который не ломает сборку.
+#[test]
+fn a_broken_dense_aggregate_is_observable() {
+    observable(&packed_mutants());
+}
+
+/// Правки плотного агрегата: фикстура, имя, причина, что на что, чем ловится.
+fn packed_mutants() -> [(
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    Verdict,
+); 4] {
+    [
+        (
+            "soa-record",
+            "packed.offset",
+            "поле агрегата прочитано с чужого смещения",
+            "  %t9 = getelementptr i8, ptr %f0, i64 8\n",
+            "  %t9 = getelementptr i8, ptr %f0, i64 4\n",
+            Verdict::Answer,
+        ),
+        (
+            "array-tagged",
+            "packed.tag",
+            "вариант собран чужим тегом",
+            "  store i8 1, ptr %f2, align 1\n",
+            "  store i8 0, ptr %f2, align 1\n",
+            Verdict::Answer,
+        ),
+        (
+            "array-tagged",
+            "packed.payload",
+            "payload варианта прочитан поверх тега",
+            "  %t14 = getelementptr i8, ptr %f1, i64 8\n",
+            "  %t14 = getelementptr i8, ptr %f1, i64 0\n",
+            Verdict::Answer,
+        ),
+        (
+            "flat-primitives",
+            "packed.descriptor",
+            "половины дескриптора укладки переставлены",
+            "  %t0 = trunc i64 17179869196 to i32\n  \
+             %t1 = lshr i64 17179869196, 32\n  \
+             %t2 = trunc i64 %t1 to i32\n",
+            "  %t1 = lshr i64 17179869196, 32\n  \
+             %t0 = trunc i64 %t1 to i32\n  \
+             %t2 = trunc i64 17179869196 to i32\n",
+            Verdict::Answer,
+        ),
+    ]
+}
+
+/// Мутанты **региона** (§3.6): три правки, и третью ловит только счётчик.
+///
+/// - **LIFO подменён возвратом ячейки.** `StackAlloc.free` зовёт
+///   `adamas_region_recycle` вместо `adamas_region_pop`, то есть становится
+///   `Pool`. Различает их сама фикстура - у `StackAlloc` хендлы 16 и 16, у
+///   `Pool` 0 и 0, - и это единственная строка, которой три стратегии §3.6
+///   расходятся.
+/// - **Размер нагрузки подменён её границей.** `regionAlloc` агрегата в
+///   двенадцать байт при границе четыре зовётся с переставленными числами.
+///   Ловушка названа в шапке фикстуры дословно: «подмена размера нагрузки её
+///   границей проходила корпус целиком, пока хендл не печатался».
+/// - **Чтение заимствует область вместо владения.** Перед последним
+///   `adamas_region_read` встаёт лишний `adamas_dup`: рантайм отдаёт ссылку,
+///   которую никто не брал, и блок области остаётся живым. Ответ при этом
+///   **честный** - двадцать, 0.25, 2.0 и хендл 32, - и поймать эту правку
+///   нечем, кроме счётчика живых блоков. Ради неё мутант здесь и стоит:
+///   программа, печатающая верное число, ещё не значит, что область отдана.
+#[test]
+fn a_broken_region_is_observable() {
+    observable(&region_mutants());
+}
+
+/// Правки региона: фикстура, имя, причина, что на что, чем ловится.
+fn region_mutants() -> [(
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    Verdict,
+); 3] {
+    [
+        (
+            "region-strategies",
+            "region.pop",
+            "LIFO подменён возвратом ячейки",
+            "@adamas_region_pop(ptr %v0, i64 %v1)",
+            "@adamas_region_recycle(ptr %v0, i64 %v1)",
+            Verdict::Answer,
+        ),
+        (
+            "region-holds-flat-payload",
+            "region.stride",
+            "размер нагрузки подменён её границей",
+            "@adamas_region_alloc(ptr %t7, ptr %f3, i64 12, i64 4)",
+            "@adamas_region_alloc(ptr %t7, ptr %f3, i64 4, i64 12)",
+            Verdict::Answer,
+        ),
+        (
+            "region-holds-flat-payload",
+            "region.borrow",
+            "чтение заимствует область вместо владения",
+            "  call void @adamas_region_read(ptr %t14, i64 %t6, ptr %f8, i64 4, \
+             ptr @adamas_release_extern)\n",
+            "  %tleak = call ptr @adamas_dup(ptr %t14)\n  \
+             call void @adamas_region_read(ptr %t14, i64 %t6, ptr %f8, i64 4, \
+             ptr @adamas_release_extern)\n",
+            Verdict::Leak,
+        ),
+    ]
+}
+
 /// Прогоняет список правок: каждая обязана изменить то, чем её ловят.
 ///
 /// Общая двум свидетелям - объектного слоя и массива (§4.11), - потому что
@@ -820,6 +979,16 @@ fn observable(
             Verdict::Leak => broken.live.is_none_or(|it| it != 0),
             Verdict::Allocations => broken.allocated.is_none_or(|it| it != allocated),
         };
+        // Утечка обязана быть **невидимой ответом**: в этом весь её смысл.
+        // Совпади она с расхождением ответа - и счётчик живых блоков перестал
+        // бы быть единственным, что её ловит, а свидетель доказывал бы меньше,
+        // чем читается.
+        if matches!(verdict, Verdict::Leak) {
+            assert_eq!(
+                broken.printed, honest,
+                "{why}: ответ разошёлся, то есть утечку ловит не только счётчик"
+            );
+        }
         assert!(
             differs,
             "{why}: наблюдаемое не изменилось - ответ `{}`, выдано {:?}, живо {:?}; \

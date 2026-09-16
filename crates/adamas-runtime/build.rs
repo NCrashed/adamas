@@ -18,6 +18,12 @@ fn main() {
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default());
     let include = manifest.join("include");
 
+    let units = SOURCES
+        .iter()
+        .map(|source| source.trim_start_matches("c/"))
+        .collect::<Vec<_>>()
+        .join(",");
+
     let mut build = cc::Build::new();
     build.std("c11").warnings(true).include(&include);
     // Обёртки gcc, добавляющие `-D_FORTIFY_SOURCE` (Nix и дистрибутивные),
@@ -32,6 +38,20 @@ fn main() {
     for source in SOURCES {
         build.file(manifest.join(source));
     }
+    let compiler = build.get_compiler();
+    // Те же три имени, что печатает `adamas-codegen`, - но **себе**: свидетель
+    // атомарного счётчика (`tests/race.rs`) собирает свой стенд санитайзером и
+    // линкует его с этим же рантаймом, а `DEP_*` виден только зависимым.
+    println!(
+        "cargo::rustc-env=ADAMAS_RUNTIME_INCLUDE={}",
+        include.display()
+    );
+    println!(
+        "cargo::rustc-env=ADAMAS_RUNTIME_SOURCES={}",
+        manifest.join("c").display()
+    );
+    println!("cargo::rustc-env=ADAMAS_RUNTIME_UNITS={units}");
+    println!("cargo::rustc-env=ADAMAS_CC={}", compiler.path().display());
     build.compile("adamas_runtime");
 
     // Пересборка просится **на каждый** исходник поимённо. Первая же порция
@@ -53,12 +73,5 @@ fn main() {
     // Список единиц трансляции - **отсюда**, а не второй копией у потребителя:
     // порождённый C линкуется с теми же файлами, и разъехавшийся список даёт
     // «undefined reference» на первом же новом слое рантайма.
-    println!(
-        "cargo::metadata=units={}",
-        SOURCES
-            .iter()
-            .map(|source| source.trim_start_matches("c/"))
-            .collect::<Vec<_>>()
-            .join(",")
-    );
+    println!("cargo::metadata=units={units}");
 }

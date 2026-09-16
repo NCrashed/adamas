@@ -71,38 +71,75 @@ use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 /// Ещё две добавил трек H - вектор (§4.9). Обе живут в регистре целиком, и
 /// оттого достались LLVM-пути даром: объектного слоя вектору не нужно, а до
 /// массива он не доходит.
-const TAKEN: [&str; 37] = [
+///
+/// Остальное добавил трек I волны 2: питомник и минимальный срез слоя
+/// замыканий. Взяты они вместе не по удобству - тело `withNursery` есть
+/// нульместное замыкание, и без этого среза все одиннадцать питомничных
+/// упираются во второй блокиратор.
+const TAKEN: [&str; 69] = [
+    "abortive-cleanup",
+    "abortive-except",
     "arithmetic",
+    "await-twice",
+    "await-value",
+    "cancel",
+    "cancel-bystander",
     "case-family",
     "case-over-a-computation",
     "comparisons",
     "countdown",
+    "effect-multiplicity",
     "effects",
     "erasure",
+    "execution-positions",
+    "field-effect",
     "flat-across-a-suspension",
     "flat-fields",
     "general-frames",
     "general-order",
+    "instance-context-effect",
     "label-argument",
     "label-names-its-binder",
     "lists",
     "literal-default",
+    "mask",
     "module-effect",
+    "module-family",
     "module-resource",
     "module-scope",
     "multi-over-oneshot",
     "mutual-family",
+    "mutual-polymorphic-recursion",
+    "mutual-sibling-grounded",
     "nested-case-on-a-field",
     "nested-functor",
     "nested-rowed-signature",
+    "nursery",
+    "nursery-abort",
+    "nursery-abort-order",
+    "operation-higher-order",
     "operators",
+    "polymorphic-recursion",
     "primitives",
     "records",
+    "region-allocates-and-reads",
+    "region-bound-in-the-argument",
     "resource",
     "resource-cleanup",
     "rose",
+    "rows",
+    "sealed-effect",
+    "sequences",
+    "signature-effect",
+    "signature-effect-parameterized",
     "simd-lanes",
     "simd-wrapping",
+    "spawn-local",
+    "state-resource",
+    "task",
+    "task-handoff",
+    "task-typed",
+    "truncation",
     "unwind-inner-handler",
     "unwind-live-outer",
     "workload-fbip",
@@ -235,6 +272,11 @@ fn the_scalar_fragment_takes_what_it_declares() {
     );
     for (name, why) in &refused {
         eprintln!("  отвергнуто {name}: {why}");
+    }
+    // Взятое печатается **списком**, а не только числом: список [`TAKEN`]
+    // пополняется руками, и сверять его глазами с числом нечем.
+    for name in &taken {
+        eprintln!("  взято {name}");
     }
 }
 

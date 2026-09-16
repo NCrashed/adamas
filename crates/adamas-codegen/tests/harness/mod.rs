@@ -310,6 +310,69 @@ pub(crate) fn built_with(name: &str, text: &str, extra: &[&str]) -> (String, Str
     )
 }
 
+/// Прогон C-бэкенда, у которого **обрыв - наблюдение**, а не поломка.
+///
+/// Отличие от [`built`] то же и по той же причине, что у [`llvm_printed`] от
+/// [`llvm_built`]: программа, чей смысл в обрыве, там роняла бы тест вместо
+/// того, чтобы отличаться. Нужно это свидетелям питомника: у взаимной
+/// блокировки ответа нет по построению, и наблюдать её можно только словом с
+/// причиной.
+///
+/// Предел по времени обязателен: правка, снимающая обрыв, оставила бы прогон
+/// крутиться, и мутант вешал бы прогон вместо того, чтобы отличаться.
+///
+/// # Panics
+///
+/// Понижение, эмиссия либо сборка отказали - это сломанное окружение, а не
+/// наблюдение.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+pub(crate) fn c_printed(name: &str, source: &str) -> Mutated {
+    let (mut signature, mut metas, instances) = elaborated(source);
+    let written = body(&signature, "main");
+    let made = mono::specialise(&mut signature, &mut metas, &instances, &written)
+        .unwrap_or_else(|error| panic!("{name}: специализация отказала: {error}"));
+    let text = adamas_codegen::compile(&signature, &made.term)
+        .unwrap_or_else(|error| panic!("{name}: эмиссия отказала: {error}"));
+
+    let dir = scratch();
+    let source_path = dir.join(format!("{name}.c"));
+    let binary = dir.join(name);
+    std::fs::write(&source_path, &text).unwrap();
+    let compiled = Command::new(env!("ADAMAS_CC"))
+        .args(["-std=c11", "-O1", "-ffp-contract=off", "-Wno-unused"])
+        .arg("-I")
+        .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
+        .arg(&source_path)
+        .args(runtime())
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{name}: порождённый C не собрался:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    within(&binary, std::time::Duration::from_secs(20))
+}
+
+/// Что сказала **машина** о программе, чей ответ не обязан существовать.
+///
+/// Отдаёт либо напечатанное значение, либо текст ошибки. Нужно тем же
+/// свидетелям, что и [`c_printed`]: «оба вычислителя обрываются, и по одному
+/// поводу» - утверждение о паре, а не об одном из них.
+pub(crate) fn machine_printed(source: &str) -> Result<String, String> {
+    let (signature, _, _) = elaborated(source);
+    let written = body(&signature, "main");
+    match adamas_interp::run(&signature, &written) {
+        Ok(answer) => Ok(answer.printed(Some(PRINT_DEPTH)).to_string()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Понижение, сборка, прогон и сверка с интерпретатором. Отдаёт stderr прогона.
 ///
 /// Понижается **специализированный** терм (трек E): §4.11 требует специализации

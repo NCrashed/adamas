@@ -247,6 +247,40 @@ fn a_column_of_aggregates_is_one_block() {
     assert_eq!(live, 0, "прогон оставил блоки живыми");
 }
 
+/// Те же три числа на **LLVM-пути** (трек C волны 3 Фазы 7).
+///
+/// Отдельным свидетелем, а не строкой в корпусном договоре: договор сверяет
+/// ответ, а «плотная запись ячейки кучи не стоит» ответом не наблюдаемо вовсе.
+/// Эмиттер, положивший `Vec3` в объект со слотами, посчитал бы то же самое и
+/// прошёл бы договор целиком, отличаясь только тремя лишними блоками.
+///
+/// Программы берутся **те же**, что у C-половины: колонка - из корпуса,
+/// остальные две - соседние константы. Вторая их копия разъехалась бы с первой
+/// молча.
+#[test]
+fn the_llvm_path_pays_the_same_for_density() {
+    let Some((tools, _)) = harness::llvm_toolchains() else {
+        return;
+    };
+    let pipeline = adamas_codegen::llvm::Pipeline::optimised();
+    let column = column();
+    for (name, source, expected) in [
+        ("packed-registers", REGISTERS, 0),
+        ("packed-column", column.as_str(), 1),
+        ("packed-pointing", POINTING, 4),
+    ] {
+        let (_, stderr) =
+            harness::llvm_agreed(name, source, &tools, &pipeline, &format!("llvm-{name}"))
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let (allocated, live) = harness::blocks(name, &stderr);
+        assert_eq!(
+            allocated, expected,
+            "{name}: LLVM-путь выдал {allocated} блоков вместо {expected}"
+        );
+        assert_eq!(live, 0, "{name}: прогон LLVM оставил блоки живыми");
+    }
+}
+
 /// Тот же код над указательным элементом стоит `n` объектов сверх массива.
 #[test]
 fn a_column_of_pointers_still_costs_an_object_per_cell() {

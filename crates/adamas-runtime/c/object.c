@@ -221,6 +221,30 @@ static int shared(const adamas_header *header) {
     return (header->flags & ADAMAS_FLAG_SHARED) != 0;
 }
 
+/* Разделяемая половина гибридного режима живёт **вне** тела точки входа.
+ *
+ * Измерено, а не выбрано (§10 вопрос 175, 2026-09-16). Ветвь по флагу сама по
+ * себе не стоит ничего: `__builtin_expect` на ней меняет колонное ядро с 181.4
+ * мс на 180.6, то есть ни на что. Стоит **атомарная операция, оставленная в
+ * теле**: с ней gcc отказывается делить `adamas_array_writable` на горячую
+ * половину и холодную, и виток зовёт всю функцию целиком. Унеси её за
+ * `noinline` - деление возвращается, и то же ядро идёт 117.6 мс. Потолок, где
+ * ветви нет вовсе, - 109.6, но эти 7% чередованием не воспроизводятся: два
+ * двоичных файла расходятся раскладкой сильнее, чем этой ветвью.
+ *
+ * `cold` здесь не украшение к `noinline`: он же метит место вызова
+ * маловероятным, и горячая половина остаётся в прямом пути.
+ *
+ * Атомарность от переноса не меняется ничем: операция та же, ноты те же,
+ * вызов их не ослабляет. Проверяется это двумя механизмами, и оба стоят в
+ * дереве: потерянное обновление (`tests/atomic.rs`) и ThreadSanitizer
+ * (`tests/race.rs`).
+ *
+ * Что половина осталась вынесенной, стережёт счётный свидетель -
+ * `adamas-codegen/tests/hybrid.rs`: он считает атомарные операции в теле
+ * точки входа и падает, когда их становится больше нуля. */
+#define ADAMAS_SHARED_HALF __attribute__((noinline, cold))
+
 /* Промоушен транзитивно достижимого (§5.2).
  *
  * Форма выбрана симметрией с `adamas_drop`, и симметрия эта не косметическая:
@@ -254,15 +278,28 @@ int adamas_is_shared(adamas_value value) {
     return shared(adamas_header_of(value));
 }
 
+/* `acquire`: счётчик разделяемого объекта читается тем же порядком, каким его
+ * пишут ушедшие ссылки. */
+ADAMAS_SHARED_HALF static uint32_t adamas_rc_shared(const adamas_header *header) {
+    return __atomic_load_n(&header->rc, __ATOMIC_ACQUIRE);
+}
+
 uint32_t adamas_rc(adamas_value value) {
     if (adamas_is_imm(value)) {
         return 0;
     }
     adamas_header *header = adamas_header_of(value);
     if (shared(header)) {
-        return __atomic_load_n(&header->rc, __ATOMIC_ACQUIRE);
+        return adamas_rc_shared(header);
     }
     return header->rc;
+}
+
+/* `relaxed` довольно: взятие ссылки ничего не упорядочивает - у того, кто
+ * дупает, ссылка уже есть, значит объект уже виден ему целиком. Та же нота,
+ * что у `Arc::clone` в Rust и у `shared_ptr` в libstdc++. */
+ADAMAS_SHARED_HALF static void adamas_dup_shared(adamas_header *header) {
+    __atomic_fetch_add(&header->rc, 1u, __ATOMIC_RELAXED);
 }
 
 adamas_value adamas_dup(adamas_value value) {
@@ -273,14 +310,18 @@ adamas_value adamas_dup(adamas_value value) {
      * один объект - не тот режим, который эта стадия обслуживает. */
     adamas_header *header = adamas_header_of(value);
     if (shared(header)) {
-        /* `relaxed` довольно: взятие ссылки ничего не упорядочивает - у того,
-         * кто дупает, ссылка уже есть, значит объект уже виден ему целиком.
-         * Та же нота, что у `Arc::clone` в Rust и у `shared_ptr` в libstdc++. */
-        __atomic_fetch_add(&header->rc, 1u, __ATOMIC_RELAXED);
+        adamas_dup_shared(header);
         return value;
     }
     header->rc += 1;
     return value;
+}
+
+/* `acquire`: ответ «уникален» есть право переписать слоты на месте (FBIP,
+ * §5.1), и переписывающий обязан увидеть всё, что писал в них прежний
+ * владелец. */
+ADAMAS_SHARED_HALF static int adamas_unique_shared(const adamas_header *header) {
+    return __atomic_load_n(&header->rc, __ATOMIC_ACQUIRE) == 0;
 }
 
 int adamas_is_unique(adamas_value value) {
@@ -289,10 +330,7 @@ int adamas_is_unique(adamas_value value) {
     }
     adamas_header *header = adamas_header_of(value);
     if (shared(header)) {
-        /* `acquire`: ответ «уникален» есть право переписать слоты на месте
-         * (FBIP, §5.1), и переписывающий обязан увидеть всё, что писал в них
-         * прежний владелец. */
-        return __atomic_load_n(&header->rc, __ATOMIC_ACQUIRE) == 0;
+        return adamas_unique_shared(header);
     }
     return header->rc == 0;
 }
@@ -308,9 +346,13 @@ int adamas_is_unique(adamas_value value) {
  *
  * `acq_rel`: `release` - чтобы записи уходящего были видны тому, кто будет
  * освобождать, `acquire` - чтобы освобождающий увидел записи всех ушедших. */
+ADAMAS_SHARED_HALF static int adamas_released_shared(adamas_header *header) {
+    return __atomic_fetch_sub(&header->rc, 1u, __ATOMIC_ACQ_REL) == 0;
+}
+
 static int released(adamas_header *header) {
     if (shared(header)) {
-        return __atomic_fetch_sub(&header->rc, 1u, __ATOMIC_ACQ_REL) == 0;
+        return adamas_released_shared(header);
     }
     if (header->rc == 0) {
         return 1;

@@ -1548,6 +1548,18 @@ fn second_form(out: &mut String, program: &Program) {
             "declare ptr @adamas_apply(ptr, ptr, ptr, ptr)\n",
             "\n",
         ));
+        // Применение в чистом отрезке заводит **свой** корень трамплина
+        // ([`Builder::applied`]), и обе точки входа под него лежат в блоке
+        // второй формы. Нет его - объявить их надо здесь: замыкание бывает и
+        // без второй формы, а докрутить трамплин всё равно обязан кто-то.
+        if !framed {
+            out.push_str(concat!(
+                "; Корень трамплина у применения в чистом отрезке.\n",
+                "declare void @adamas_kont_init(ptr)\n",
+                "declare ptr @adamas_kont_run(ptr, ptr)\n",
+                "\n",
+            ));
+        }
     }
     if framed {
         out.push_str(concat!(
@@ -2358,9 +2370,11 @@ impl<'a> Builder<'a> {
             Expr::ConstructClosure { .. } => Err(self.node("конструктор значением")),
             Expr::Closure { function, captured } => self.closure(*function, captured),
             // Применение - точка приостановки всегда: какая из двух форм за
-            // указателем, место вызова не знает (`crate::split`). Значит только
-            // хвостом куска ([`Self::applying`]).
-            Expr::Apply { .. } => Err(self.node("применение замыкания в чистом отрезке")),
+            // указателем, место вызова не знает (`crate::split`). В чистом
+            // отрезке трамплин под неё заводится **свой**
+            // ([`Self::applied`]); во второй форме её выносит дробление и
+            // печатает [`Self::applying`].
+            Expr::Apply { callee, argument } => self.applied(callee, argument),
             Expr::Pack { .. } | Expr::Unpack { .. } => Err(self.node("плотный агрегат")),
             Expr::Layout { .. } | Expr::LayoutField { .. } => Err(self.node("дескриптор укладки")),
             Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. } => {
@@ -4124,6 +4138,52 @@ impl<'a> Builder<'a> {
             self.here(),
         );
         self.finish(&answer, Repr::Boxed)
+    }
+
+    /// Применение значения-функции в **чистом** отрезке: корень трамплина свой.
+    ///
+    /// Тем же правом, каким его заводят [`Self::handling`] и [`Self::nursing`]:
+    /// ручки стека у первой формы нет, а применению она нужна - за указателем
+    /// может оказаться вторая форма, и кадр ей положить некуда. Корень стоит на
+    /// C-стеке (`alloca ptr`, `adamas_kont` есть одна вершина), трамплин
+    /// докручивает [`adamas_kont_run`], и до кучи это не доходит: первая форма
+    /// за указателем отвечает сразу, кадров не положив ни одного.
+    ///
+    /// Вектор evidence берётся свой, если он есть: под [`Self::masking`] в
+    /// чистом отрезке он ненулевой, и `null` там потерял бы маску молча.
+    /// Снаружи маски его нет вовсе, и `null` - то же, что печатает
+    /// C-эмиттер: у первой формы вектора не бывает по записи ABI.
+    fn applied(&mut self, callee: &Expr, argument: &Expr) -> Result<String, LlvmError> {
+        if self.kont.is_some() {
+            // Внутри второй формы применение значением не бывает: дробление
+            // выносит его хвостом куска ([`Self::applying`]). Отказ, а не
+            // свой корень: чужую ручку докрутил бы не тот, кто её завёл.
+            return Err(self.node("применение значением во второй форме"));
+        }
+        let callee = self.value(callee)?;
+        let given = self.value(argument)?;
+        let root = format!("%k{}", self.frames);
+        self.frames += 1;
+        let _ = writeln!(self.head, "  {root} = alloca ptr");
+        self.instruction(
+            &format!("call void @adamas_kont_init(ptr {root})"),
+            self.here(),
+        );
+        let vector = self.ev.clone().unwrap_or_else(|| "null".to_owned());
+        let answer = self.temp();
+        self.instruction(
+            &format!(
+                "{answer} = call ptr @adamas_apply(ptr {callee}, ptr {vector}, ptr {root}, \
+                 ptr {given})"
+            ),
+            self.here(),
+        );
+        let driven = self.temp();
+        self.instruction(
+            &format!("{driven} = call ptr @adamas_kont_run(ptr {root}, ptr {answer})"),
+            self.here(),
+        );
+        Ok(driven)
     }
 
     /// Замыкание деструктора: код забирающего трамплина плюс среда по слотам.

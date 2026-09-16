@@ -83,7 +83,7 @@ use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 /// трек C. `array-generic` и `flat-under-a-parameter` взяты потому, что
 /// специализация (`mono`) обращает рантаймовый шаг дескриптора в константу; без
 /// неё они остались бы за дескриптором укладки.
-const TAKEN: [&str; 86] = [
+const TAKEN: [&str; 88] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -102,6 +102,7 @@ const TAKEN: [&str; 86] = [
     "classes",
     "comparisons",
     "countdown",
+    "decidable",
     "effect-multiplicity",
     "effects",
     "erasure",
@@ -141,6 +142,7 @@ const TAKEN: [&str; 86] = [
     "operation-value",
     "operators",
     "polymorphic-recursion",
+    "prelude",
     "primitives",
     "records",
     "region-allocates-and-reads",

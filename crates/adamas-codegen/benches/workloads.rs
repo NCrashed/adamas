@@ -197,15 +197,15 @@
 
 mod harness;
 
-use std::path::PathBuf;
-
+use adamas_codegen::emit_llvm::Artefacts;
+use adamas_codegen::llvm::Pipeline;
 use adamas_core::term::PRINT_DEPTH;
 use adamas_elab::mono;
 use criterion::{Criterion, SamplingMode, criterion_group};
 
 use harness::{
-    NEIGHBOUR, blocks, built, by_floor, corpus, elaborated, entry, ran, ran_neighbour, ratio,
-    resized,
+    Backend, Column, Load, NEIGHBOUR, SUPPORT_LEVEL, built, by_floor, corpus, elaborated, entry,
+    llvm_against_c, ran, ran_neighbour, ratio, resized, same_work,
 };
 
 /// Место под порождённый C и его сборку — своё у стенда.
@@ -351,14 +351,35 @@ fn column_source(cells: u64, passes: u64) -> String {
 
 // --- понижение и машина --------------------------------------------------
 
-/// Порождённый C: специализация, понижение, эмиссия.
-fn lowered(source: &str) -> String {
+/// Одна программа, два бэкенда: элаборация и специализация **общие**.
+///
+/// Так требует решение волны 0, вариант (а): второй эмиттер, а не второй
+/// компилятор. Для замера это не архитектурная красота, а условие годности
+/// числа — понизь стенд две программы, и отношение мерило бы расхождение
+/// специализаций пополам с расхождением эмиттеров, а разделить их было бы
+/// нечем.
+struct Both {
+    /// Порождённый C — единица трансляции целиком.
+    c: String,
+    /// `.ll` со спутником, либо названный отказ скалярного фрагмента.
+    llvm: Result<Artefacts, adamas_codegen::CompileError>,
+}
+
+fn both(source: &str) -> Both {
     let (mut signature, mut metas, instances) = elaborated(source);
     let written = entry(&signature);
     let made = mono::specialise(&mut signature, &mut metas, &instances, &written)
         .expect("специализация обязана пройти")
         .term;
-    adamas_codegen::compile(&signature, &made).expect("нагрузка обязана понижаться")
+    Both {
+        c: adamas_codegen::compile(&signature, &made).expect("нагрузка обязана понижаться"),
+        llvm: adamas_codegen::compile_llvm(&signature, &made),
+    }
+}
+
+/// Порождённый C: специализация, понижение, эмиссия.
+fn lowered(source: &str) -> String {
+    both(source).c
 }
 
 /// Ответ машины, то есть `adamas eval`.
@@ -371,38 +392,103 @@ fn machine(source: &str) -> String {
         .to_string()
 }
 
-/// Собранная нагрузка: двоичный файл, ответ, счётчики блоков.
-struct Load {
-    binary: PathBuf,
-    answer: String,
-    allocated: usize,
-    live: usize,
-}
-
-impl Load {
-    fn new(name: &str, source: &str) -> Self {
-        let binary = built(&harness::scratch(STAND), name, &lowered(source));
-        let (stdout, stderr) = ran(&binary);
-        let (allocated, live) = blocks(&stderr);
-        eprintln!("{name}: ответ {}, {}", stdout.trim_end(), stderr.trim_end());
-        Self {
-            binary,
-            answer: stdout.trim_end_matches('\n').to_owned(),
-            allocated,
-            live,
-        }
-    }
+/// Собранная нагрузка из исходника: понижение, сборка, прогон.
+fn load(name: &str, source: &str) -> Load {
+    Load::measured(
+        name,
+        built(&harness::scratch(STAND), name, &lowered(source)),
+    )
 }
 
 /// Понижение отвечает то же, что машина, — на размере, который машине по силам.
 fn agrees(name: &str, source: &str) {
     let expected = machine(source);
-    let load = Load::new(name, source);
+    let load = load(name, source);
     assert_eq!(
         load.answer, expected,
         "{name}: понижение посчитало не то, что машина"
     );
     assert_eq!(load.live, 0, "{name}: прогон оставил живые блоки");
+}
+
+// --- второй столбец: LLVM против C ----------------------------------------
+
+/// Та же нагрузка LLVM-путём, либо названный отказ эмиттера.
+///
+/// Отказ **не** молчаливый пропуск: причина печатается, и строка таблицы
+/// объявляется дырой. Скрыть её значило бы выдать отсутствие программы за
+/// отсутствие разрыва.
+fn llvm_load(
+    backend: &Backend,
+    name: &str,
+    program: &Both,
+    pipeline: &Pipeline,
+    level: &str,
+) -> Option<Load> {
+    match &program.llvm {
+        Ok(artefacts) => Some(backend.load(name, artefacts, pipeline, level)),
+        Err(error) => {
+            eprintln!("{name}: LLVM-эмиттер нагрузку не берёт: {error}");
+            None
+        }
+    }
+}
+
+/// Нагрузка, собранная обоими бэкендами из **одного** понижения.
+struct Sides {
+    /// Исходник: свидетелям он нужен, чтобы пересобрать ту же программу иначе.
+    source: String,
+    c: Load,
+    /// `None` — LLVM-эмиттер нагрузку не берёт, и причина напечатана.
+    llvm: Option<Load>,
+    /// Текст `.ll`: его читает свидетель схлопывания RC.
+    ll: String,
+}
+
+fn sides(name: &str, source: &str, backend: Option<&Backend>) -> Sides {
+    let program = both(source);
+    let c = Load::measured(name, built(&harness::scratch(STAND), name, &program.c));
+    let ll = program
+        .llvm
+        .as_ref()
+        .map(|artefacts| artefacts.ll.clone())
+        .unwrap_or_default();
+    let llvm = backend.and_then(|backend| {
+        llvm_load(
+            backend,
+            &format!("{name}-llvm"),
+            &program,
+            &backend.pipeline(),
+            SUPPORT_LEVEL,
+        )
+    });
+    if let Some(llvm) = &llvm {
+        same_work(name, &c, llvm);
+    }
+    Sides {
+        source: source.to_owned(),
+        c,
+        llvm,
+        ll,
+    }
+}
+
+/// Строка второго столбца, если LLVM-путь нагрузку берёт.
+fn second_column(what: &str, load: &Sides, floor: &Sides) {
+    let (Some(llvm), Some(llvm_floor)) = (&load.llvm, &floor.llvm) else {
+        eprintln!("отношение/{what}: LLVM против C — строка не снята, нагрузку эмиттер не берёт");
+        return;
+    };
+    llvm_against_c(
+        what,
+        &Column {
+            llvm,
+            llvm_floor,
+            c: &load.c,
+            c_floor: &floor.c,
+            ll: &load.ll,
+        },
+    );
 }
 
 // --- сосед на Rust -------------------------------------------------------
@@ -582,8 +668,9 @@ fn as_child() -> bool {
 /// Скалярная арифметика: первая нагрузка трека Z, обеими цепочками.
 fn scalar(criterion: &mut Criterion) {
     two_chains_differ_by_one_line();
+    let backend = Backend::new(STAND);
     for chain in Chain::ALL {
-        one_chain(criterion, chain);
+        one_chain(criterion, chain, backend.as_ref());
     }
 }
 
@@ -626,7 +713,7 @@ fn two_chains_differ_by_one_line() {
 }
 
 /// Одна форма цепочки: пол, работа, сосед, отношение.
-fn one_chain(criterion: &mut Criterion, chain: Chain) {
+fn one_chain(criterion: &mut Criterion, chain: Chain, backend: Option<&Backend>) {
     let name = chain.name();
     let mut group = criterion.benchmark_group(name);
     group.sample_size(10);
@@ -637,20 +724,20 @@ fn one_chain(criterion: &mut Criterion, chain: Chain) {
     agrees(&format!("{name}-small"), &corpus(chain.fixture()));
 
     // Пол — та же программа без работы; свой у каждой стороны, потому что
-    // двоичных файлов два.
-    let floor = Load::new(&format!("{name}-floor"), &scalar_source(chain, 0));
+    // двоичных файлов два (а с LLVM-столбцом — три).
+    let floor = sides(&format!("{name}-floor"), &scalar_source(chain, 0), backend);
     let idle = format!("{name}:0");
     group.bench_function("floor", |bencher| {
-        by_floor(bencher, || drop(ran(&floor.binary)));
+        by_floor(bencher, || drop(ran(&floor.c.binary)));
     });
     group.bench_function("rust/floor", |bencher| {
         by_floor(bencher, || drop(ran_neighbour(&idle)));
     });
 
-    let load = Load::new(name, &scalar_source(chain, SCALAR_TURNS));
+    let load = sides(name, &scalar_source(chain, SCALAR_TURNS), backend);
     // Плоский счётчик наблюдаем здесь: индуктивный дал бы ячейку на виток.
     assert_eq!(
-        load.allocated, 0,
+        load.c.allocated, 0,
         "{name}: скалярный цикл выдал блоки — счётчик или накопитель перестал \
          быть плоским"
     );
@@ -658,50 +745,66 @@ fn one_chain(criterion: &mut Criterion, chain: Chain) {
     let (stdout, _) = ran_neighbour(&request);
     assert_eq!(
         stdout.trim(),
-        load.answer,
+        load.c.answer,
         "{name}: сосед на Rust считает не тот же цикл"
     );
 
     group.bench_function("native", |bencher| {
-        by_floor(bencher, || drop(ran(&load.binary)));
+        by_floor(bencher, || drop(ran(&load.c.binary)));
     });
     group.bench_function("rust", |bencher| {
         by_floor(bencher, || drop(ran_neighbour(&request)));
     });
+    if let (Some(llvm), Some(llvm_floor)) = (&load.llvm, &floor.llvm) {
+        group.bench_function("llvm", |bencher| {
+            by_floor(bencher, || drop(ran(&llvm.binary)));
+        });
+        group.bench_function("llvm/floor", |bencher| {
+            by_floor(bencher, || drop(ran(&llvm_floor.binary)));
+        });
+    }
     group.finish();
 
     // Число строки таблицы берётся здесь, а не у отчёта: см. [`ratio`].
     ratio(
         name,
-        || drop(ran(&load.binary)),
-        || drop(ran(&floor.binary)),
+        || drop(ran(&load.c.binary)),
+        || drop(ran(&floor.c.binary)),
         || drop(ran_neighbour(&request)),
         || drop(ran_neighbour(&idle)),
     );
+    second_column(name, &load, &floor);
+    second_column_witnesses(name, backend, &load, &floor);
 }
 
 /// FBIP-цикл: третья нагрузка трека Z.
 fn fbip(criterion: &mut Criterion) {
+    let backend = Backend::new(STAND);
     let mut group = criterion.benchmark_group("fbip");
     group.sample_size(10);
     group.sampling_mode(SamplingMode::Flat);
 
     agrees("fbip-small", &corpus("workload-fbip"));
 
-    let floor = Load::new("fbip-floor", &fbip_source(0, 0));
+    let floor = sides("fbip-floor", &fbip_source(0, 0), backend.as_ref());
     group.bench_function("floor", |bencher| {
-        by_floor(bencher, || drop(ran(&floor.binary)));
+        by_floor(bencher, || drop(ran(&floor.c.binary)));
     });
     group.bench_function("rust/floor", |bencher| {
         by_floor(bencher, || drop(ran_neighbour("fbip:0:0")));
     });
 
-    let load = Load::new("fbip", &fbip_source(FBIP_CELLS, FBIP_PASSES));
+    let load = sides(
+        "fbip",
+        &fbip_source(FBIP_CELLS, FBIP_PASSES),
+        backend.as_ref(),
+    );
     // Единственные выданные ячейки — те, что построил `build`. Все проходы
     // переписывают их на месте, и это утверждение, а не наблюдение: сломанный
-    // reuse уронит стенд здесь.
+    // reuse уронит стенд здесь. Для LLVM-стороны то же утверждение делает
+    // [`same_work`]: счётчики двух бэкендов обязаны совпасть поштучно.
     assert_eq!(
-        load.allocated,
+        load.c.allocated,
         usize::try_from(FBIP_CELLS).expect("ячеек не меньше нуля"),
         "проход выдал ячейки — reuse §5.1 не сработал"
     );
@@ -709,25 +812,105 @@ fn fbip(criterion: &mut Criterion) {
     let (stdout, _) = ran_neighbour(&request);
     assert_eq!(
         stdout.trim(),
-        load.answer,
+        load.c.answer,
         "сосед на Rust считает не тот же цикл"
     );
 
     group.bench_function("native", |bencher| {
-        by_floor(bencher, || drop(ran(&load.binary)));
+        by_floor(bencher, || drop(ran(&load.c.binary)));
     });
     group.bench_function("rust", |bencher| {
         by_floor(bencher, || drop(ran_neighbour(&request)));
     });
+    if let (Some(llvm), Some(llvm_floor)) = (&load.llvm, &floor.llvm) {
+        group.bench_function("llvm", |bencher| {
+            by_floor(bencher, || drop(ran(&llvm.binary)));
+        });
+        group.bench_function("llvm/floor", |bencher| {
+            by_floor(bencher, || drop(ran(&llvm_floor.binary)));
+        });
+    }
     group.finish();
 
     ratio(
         "FBIP-цикл",
-        || drop(ran(&load.binary)),
-        || drop(ran(&floor.binary)),
+        || drop(ran(&load.c.binary)),
+        || drop(ran(&floor.c.binary)),
         || drop(ran_neighbour(&request)),
         || drop(ran_neighbour("fbip:0:0")),
     );
+    second_column("FBIP-цикл", &load, &floor);
+    second_column_witnesses("FBIP-цикл", backend.as_ref(), &load, &floor);
+}
+
+// --- свидетели второго столбца --------------------------------------------
+
+/// Свидетели строки второго столбца: сами свидетели живут в заготовке, здесь
+/// только пересборка той же программы — она у стендов своя.
+fn second_column_witnesses(what: &str, backend: Option<&Backend>, load: &Sides, floor: &Sides) {
+    let (Some(backend), Some(llvm), Some(llvm_floor)) = (backend, &load.llvm, &floor.llvm) else {
+        return;
+    };
+    harness::witnesses(
+        what,
+        backend,
+        &Column {
+            llvm,
+            llvm_floor,
+            c: &load.c,
+            c_floor: &floor.c,
+            ll: &load.ll,
+        },
+        |stem, pipeline, support| {
+            let side = llvm_load(backend, stem, &both(&load.source), pipeline, support)
+                .expect("нагрузку эмиттер уже взял выше");
+            let side_floor = llvm_load(
+                backend,
+                &format!("{stem}-floor"),
+                &both(&floor.source),
+                pipeline,
+                support,
+            )
+            .expect("пол эмиттер уже взял выше");
+            (side, side_floor)
+        },
+        |stem| {
+            let dir = harness::scratch(STAND);
+            (
+                Load::measured(
+                    stem,
+                    harness::built_apart(&dir, stem, &both(&load.source).c),
+                ),
+                Load::measured(
+                    &format!("{stem}-floor"),
+                    harness::built_apart(&dir, &format!("{stem}-floor"), &both(&floor.source).c),
+                ),
+            )
+        },
+    );
+}
+
+/// Строка 4а второго столбца пуста, и пуста она **массивом**.
+///
+/// Утверждение, а не примечание к таблице. LLVM-эмиттер массивов не берёт
+/// (названная граница треков A и A′), и колонное ядро на нём не собирается ни в
+/// скалярном виде, ни в векторном. Начни он их брать — утверждение упадёт, и
+/// дыру придётся закрывать числом, а не строкой в документе. Отсутствие
+/// строки, оставленное молча, — тот самый обманчивый свидетель: читателю
+/// таблицы его не отличить от «разрыва нет».
+fn the_llvm_path_has_no_arrays() {
+    let program = both(&column_source(8, 3));
+    let why = program
+        .llvm
+        .err()
+        .map(|error| error.to_string())
+        .expect("колонное ядро на LLVM-пути не собирается: массивов у эмиттера нет");
+    assert!(
+        why.contains("массив"),
+        "колонное ядро отвергнуто не массивом, а «{why}»: строка 4а пуста по \
+         другой причине, чем записано"
+    );
+    eprintln!("колонное ядро: LLVM-столбец пуст — {why}");
 }
 
 /// Скалярное ядро над колонкой: четвёртая нагрузка трека Z без самой `Simd`.
@@ -737,8 +920,9 @@ fn column_kernel(criterion: &mut Criterion) {
     group.sampling_mode(SamplingMode::Flat);
 
     agrees("column-small", &corpus("workload-column"));
+    the_llvm_path_has_no_arrays();
 
-    let floor = Load::new("column-floor", &column_source(0, 0));
+    let floor = load("column-floor", &column_source(0, 0));
     group.bench_function("floor", |bencher| {
         by_floor(bencher, || drop(ran(&floor.binary)));
     });
@@ -746,7 +930,7 @@ fn column_kernel(criterion: &mut Criterion) {
         by_floor(bencher, || drop(ran_neighbour("column:0:0")));
     });
 
-    let load = Load::new("column", &column_source(COLUMN_CELLS, COLUMN_PASSES));
+    let load = load("column", &column_source(COLUMN_CELLS, COLUMN_PASSES));
     // Блок **один** на всю программу, сколько бы проходов ни было: колонка
     // плоская (§4.11), а `arraySet` переписывает уникальный блок по месту.
     // Утверждение, а не наблюдение: скопируй ядро колонку на каждом витке — и

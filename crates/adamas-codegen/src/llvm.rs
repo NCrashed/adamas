@@ -439,9 +439,54 @@ impl Pipeline {
     }
 }
 
+/// Текст IR без `target-cpu`, `target-features` и `tune-cpu`.
+///
+/// Нужно тому, кто прикладывает рантайм битовым кодом ([`Pipeline::whole_program`]):
+/// clang вешает host-атрибуты на каждую функцию, порождённый `.ll` не несёт
+/// ничего, а инлайнер требует, чтобы набор возможностей **вызываемого** был
+/// подмножеством набора **вызывающего**. Пустой набор у вызывающего делает
+/// подмножеством только пустой, и рантайм не инлайнится ни разу: измерено
+/// 2026-09-15 треком A′, со стадией `llvm-link` и без неё вызовов остаётся
+/// поровну.
+///
+/// Живёт здесь, а не в заготовке тестов, потому что заготовок **две** -
+/// тестовая и бенчевая, - и обе готовят один и тот же `.bc`. Вторая копия
+/// разъехалась бы молча, а цена расхождения названа: инлайнер отказывает всем,
+/// и число мерит границу единиц трансляции вместо бэкенда.
+#[must_use]
+pub fn without_host_attributes(text: &str) -> String {
+    let mut out = text.to_owned();
+    for key in [
+        "\"target-cpu\"=\"",
+        "\"target-features\"=\"",
+        "\"tune-cpu\"=\"",
+    ] {
+        while let Some(at) = out.find(key) {
+            let value = at + key.len();
+            let Some(end) = out[value..].find('"') else {
+                break;
+            };
+            let stop = value + end + 1;
+            let start = usize::from(at > 0 && out.as_bytes()[at - 1] == b' ');
+            out.replace_range(at - start..stop, "");
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_major;
+    use super::{parse_major, without_host_attributes};
+
+    #[test]
+    fn host_attributes_leave_and_the_rest_stays() {
+        let written = "attributes #0 = { nounwind \"target-cpu\"=\"alderlake\" \
+                        \"target-features\"=\"+avx2,+fma\" \"tune-cpu\"=\"generic\" }\n";
+        assert_eq!(
+            without_host_attributes(written),
+            "attributes #0 = { nounwind }\n"
+        );
+    }
 
     #[test]
     fn the_major_is_read_from_what_llvm_as_prints() {

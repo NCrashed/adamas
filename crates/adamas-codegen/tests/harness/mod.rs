@@ -688,26 +688,12 @@ fn stripped(tools: &Toolchain, dir: &Path, name: &str, raw: &Path) -> PathBuf {
     object
 }
 
-/// Текст IR без `target-cpu`, `target-features` и `tune-cpu`.
-pub(crate) fn without_host_attributes(text: &str) -> String {
-    let mut out = text.to_owned();
-    for key in [
-        "\"target-cpu\"=\"",
-        "\"target-features\"=\"",
-        "\"tune-cpu\"=\"",
-    ] {
-        while let Some(at) = out.find(key) {
-            let value = at + key.len();
-            let Some(end) = out[value..].find('"') else {
-                break;
-            };
-            let stop = value + end + 1;
-            let start = usize::from(at > 0 && out.as_bytes()[at - 1] == b' ');
-            out.replace_range(at - start..stop, "");
-        }
-    }
-    out
-}
+/// Текст IR без host-атрибутов; живёт в крейте, потому что заготовок две.
+///
+/// Вторая копия тут стояла и была снята: бенчевая заготовка готовит тот же
+/// `.bc` тем же способом, и разъезд двух копий дал бы инлайнер, отказывающий
+/// всем, — то есть число, мерящее границу единиц трансляции вместо бэкенда.
+pub(crate) use adamas_codegen::llvm::without_host_attributes;
 
 /// Сколько раз IR зовёт названную точку входа рантайма.
 #[allow(

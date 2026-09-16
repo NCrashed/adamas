@@ -536,9 +536,11 @@ use adamas_core::term::{PRINT_DEPTH, Term};
 use adamas_elab::mono;
 use criterion::{Criterion, SamplingMode, criterion_group};
 
+use adamas_codegen::emit_llvm::Artefacts;
+use adamas_codegen::llvm::Pipeline;
 use harness::{
-    NEIGHBOUR, built, by_floor, compiled, elaborated, entry, least, measuring, middle, ran,
-    ran_neighbour, span,
+    Backend, Column, Load, NEIGHBOUR, Support, built, by_floor, compiled, elaborated, entry, least,
+    llvm_against_c, measuring, middle, ran, ran_neighbour, span,
 };
 
 /// Место под порождённый C и его сборку — своё у стенда.
@@ -840,6 +842,16 @@ impl Program {
     fn lowered(&self) -> Result<String, adamas_codegen::CompileError> {
         adamas_codegen::compile(&self.signature, &self.made)
     }
+
+    /// `.ll` со спутником либо названный отказ скалярного фрагмента.
+    ///
+    /// Из **того же** специализированного терма, что и C: решение волны 0,
+    /// вариант (а) — второй эмиттер, а не второй компилятор. Для замера это
+    /// условие годности числа: понизь стенд две программы, и отношение мерило
+    /// бы расхождение специализаций пополам с расхождением эмиттеров.
+    fn llvm(&self) -> Result<Artefacts, adamas_codegen::CompileError> {
+        adamas_codegen::compile_llvm(&self.signature, &self.made)
+    }
 }
 
 // --- порождённый C ------------------------------------------------------
@@ -1072,6 +1084,7 @@ fn symbolic(criterion: &mut Criterion) {
 
     let deepest = DEPTHS[DEPTHS.len() - 1];
     against_the_neighbour(&of(Shape::Pure, deepest), &binary, deepest);
+    against_the_c_backend(deepest, &of(Shape::Pure, deepest), &binary);
 
     for depth in DEPTHS {
         paired(
@@ -1105,6 +1118,64 @@ fn against_the_neighbour(pure: &Path, floor: &Path, depth: usize) {
         || drop(ran_neighbour(&request)),
         || drop(ran_neighbour("0")),
     );
+}
+
+// --- второй столбец таблицы трека Z: LLVM против C ------------------------
+
+/// Символьная строка вторым столбцом: LLVM-путь против C-пути.
+///
+/// Обе стороны выходят из **одного** специализированного терма и собираются
+/// уравненными строками сборки; чем именно уравненными — в заготовке, разделом
+/// «LLVM-путь». Свидетели там же, и включает их [`harness::WITNESS`].
+fn against_the_c_backend(depth: usize, c: &Path, c_floor: &Path) {
+    let Some(backend) = Backend::new(STAND) else {
+        return;
+    };
+    let program = Program::new(Shape::Pure, depth);
+    let idle = Program::new(Shape::Pure, 0);
+    let (artefacts, idle_artefacts) = match (program.llvm(), idle.llvm()) {
+        (Ok(artefacts), Ok(idle_artefacts)) => (artefacts, idle_artefacts),
+        (Err(error), _) | (_, Err(error)) => {
+            eprintln!("символьная строка/{depth}: LLVM-эмиттер нагрузку не берёт: {error}");
+            return;
+        }
+    };
+
+    let what = format!("символьная строка/{depth}");
+    let pipeline = backend.pipeline();
+    let build = |stem: &str, pipeline: &Pipeline, support: Support| {
+        (
+            backend.load(stem, &artefacts, pipeline, support),
+            backend.load(&format!("{stem}-floor"), &idle_artefacts, pipeline, support),
+        )
+    };
+    let (llvm, llvm_floor) = build(
+        &format!("symbolic{depth}-llvm"),
+        &pipeline,
+        Support::Bitcode,
+    );
+    let c = Load::measured(&format!("symbolic{depth}"), c.to_path_buf());
+    let c_floor = Load::measured("symbolic0", c_floor.to_path_buf());
+    let column = Column {
+        llvm: &llvm,
+        llvm_floor: &llvm_floor,
+        c: &c,
+        c_floor: &c_floor,
+        ll: &artefacts.ll,
+    };
+    llvm_against_c(&what, &column);
+
+    harness::witnesses(&what, &backend, &column, build, |stem| {
+        let dir = harness::scratch(STAND);
+        let text = |program: &Program| program.lowered().expect("чистая форма обязана понижаться");
+        (
+            Load::measured(stem, harness::built_apart(&dir, stem, &text(&program))),
+            Load::measured(
+                &format!("{stem}-floor"),
+                harness::built_apart(&dir, &format!("{stem}-floor"), &text(&idle)),
+            ),
+        )
+    });
 }
 
 // --- парный замер --------------------------------------------------------

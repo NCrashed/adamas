@@ -2049,7 +2049,7 @@ fn slot(repr: Repr, packings: &[Packing]) -> Option<String> {
         // типизированными `store`/`load` по смещению (см. [`Builder::packed`]),
         // а не сдвигами. Сдвиг связал бы укладку с порядком байтов хоста, чего
         // `.ll` без `target datalayout` себе позволить не может.
-        Repr::Packed(pack) => Some(format!("i{}", packings[pack.0 as usize].size * 8)),
+        Repr::Packed(pack) => Some(packed_ty(pack, packings)),
         // Дескриптор укладки (§4.11) - два `UInt32` по значению, и в регистре он
         // одно слово: размер младшей половиной, граница старшей. Рантайм его не
         // читает вовсе (`flat.c`: «живёт он здесь, а не в `adamas.h`»), в память
@@ -2058,6 +2058,15 @@ fn slot(repr: Repr, packings: &[Packing]) -> Option<String> {
         Repr::Layout => Some("i64".to_owned()),
         other => other.primitive().map(|ty| machine(ty).to_owned()),
     }
+}
+
+/// Тип регистра плотного агрегата: целое ровно своей ширины (§4.11).
+///
+/// Одной записью на два места - позицию ([`slot`]) и тело
+/// ([`Builder::packed_ty`]), - потому что вторая разъехалась бы с первой молча:
+/// типы сошлись бы у verifier'а на любой ширине, а байты уехали бы.
+fn packed_ty(pack: PackId, packings: &[Packing]) -> String {
+    format!("i{}", packings[pack.0 as usize].size * 8)
 }
 
 /// Дескриптор укладки константой (§4.11): размер младшей половиной слова.
@@ -3200,7 +3209,7 @@ impl<'a> Builder<'a> {
 
     /// Тип регистра, которым живёт плотный агрегат: целое своей ширины.
     fn packed_ty(&self, pack: PackId) -> String {
-        format!("i{}", self.program.packings[pack.0 as usize].size * 8)
+        packed_ty(pack, &self.program.packings)
     }
 
     /// Тип регистра поля: примитив собой, вложенный агрегат - своей шириной.

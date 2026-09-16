@@ -120,10 +120,25 @@ void adamas_array_read(adamas_value array, size_t index, void *out, adamas_relea
     adamas_drop(array, release);
 }
 
-adamas_value adamas_array_writable(adamas_value array, adamas_release release) {
-    if (adamas_is_unique(array)) {
-        return array;
-    }
+/* Копия разделённого массива: холодная половина `adamas_array_writable`.
+ *
+ * Вынесена по тому же правилу и тем же замером, каким вынесена разделяемая
+ * половина счётчика (`object.c`, `ADAMAS_SHARED_HALF`, §10 вопрос 175): на
+ * горячем витке §4.11 `arraySet` уникален всегда, копия не случается ни разу,
+ * а её тело - аллокация, цикл и `memcpy` - делает функцию слишком крупной для
+ * инлайнинга целиком.
+ *
+ * До выноса деление делал **сам компилятор, и только один из двух**: gcc
+ * разбивал функцию частичным инлайнингом (`adamas_array_writable.part.0`),
+ * конвейер LLVM - нет, потому что `PartialInlinerPass` в его `-O2` по
+ * умолчанию выключен. Стоило это строке 4а таблицы разрыва 1.757 против
+ * C-бэкенда; замер - в отчёте трека B волны 3 Фазы 7. То есть строка мерила не
+ * качество бэкендов, а наличие одного паса у одного из них.
+ *
+ * `cold` здесь не украшение к `noinline`: он метит место вызова
+ * маловероятным, и горячая половина остаётся в прямом пути. */
+__attribute__((noinline, cold)) static adamas_value copied(adamas_value array,
+                                                           adamas_release release) {
     adamas_array *head = header_of(array);
     adamas_value copy = adamas_array_alloc(head->count, head->stride);
     if (head->stride == 0) {
@@ -136,6 +151,13 @@ adamas_value adamas_array_writable(adamas_value array, adamas_release release) {
     }
     adamas_drop(array, release);
     return copy;
+}
+
+adamas_value adamas_array_writable(adamas_value array, adamas_release release) {
+    if (adamas_is_unique(array)) {
+        return array;
+    }
+    return copied(array, release);
 }
 
 void adamas_array_release(adamas_value array, adamas_release release) {

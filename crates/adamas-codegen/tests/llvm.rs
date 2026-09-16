@@ -945,6 +945,12 @@ const RUNTIME_CALLS: [&str; 8] = [
 /// сильнее первого и названо отдельно: `adamas_dup` - самая маленькая функция
 /// рантайма, и не инлайнься она, инлайнинга нет вовсе.
 ///
+/// Считается это по коду, **достижимому** из [`ENTRY`], а не по модулю целиком
+/// ([`harness::reachable_calls`]). Причина измерена треком B волны 3: модуль
+/// после `llvm-link` несёт рантайм весь, и холодная половина, в которую
+/// инлайнер намеренно ничего не вносит, делала счётчик красным на программе,
+/// которая этой половины не зовёт ни разу.
+///
 /// *Счётчик блоков тот же.* Переиспользование ячейки обязано пережить
 /// инлайнинг: `adamas_reuse` внутри цикла - то, на чём трек B меряет
 /// уникальность, и растворись оно тут в `malloc`, мерить было бы нечего.
@@ -985,15 +991,17 @@ fn the_runtime_in_bitcode_lets_the_optimiser_see_through_it() {
         // Промежуточные файлы конвейер оставляет намеренно: считать вызовы
         // после `opt` больше негде, а до `llc` они ещё видны.
         let directory = harness::scratch();
-        let before = harness::calls(
+        let before = harness::reachable_calls(
             &tools,
             &directory.join(format!("{name}.apart.opt.bc")),
             &RUNTIME_CALLS,
+            ENTRY,
         );
-        let after = harness::calls(
+        let after = harness::reachable_calls(
             &tools,
             &directory.join(format!("{name}.together.opt.bc")),
             &RUNTIME_CALLS,
+            ENTRY,
         );
         let (was, now): (usize, usize) = (before.iter().sum(), after.iter().sum());
         eprintln!("{name}: вызовов рантайма после `-O2` было {was}, стало {now}");
@@ -1012,6 +1020,9 @@ fn the_runtime_in_bitcode_lets_the_optimiser_see_through_it() {
         );
     }
 }
+
+/// Точка входа, от которой считается достижимое: всё, что программа зовёт.
+const ENTRY: &str = "adamas_entry";
 
 /// Текст с единственной заменой. Не найденная подстрока роняет тест.
 fn swapped(text: &str, from: &str, to: &str) -> String {

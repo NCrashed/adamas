@@ -34,8 +34,11 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use adamas_runtime::ffi::{
-    Value, adamas_alloc, adamas_drop, adamas_dup, adamas_field, adamas_imm, adamas_is_shared,
-    adamas_is_unique, adamas_rc, adamas_set_field, adamas_share,
+    Frame, Kont, MARK_HANDLER, MARK_PLAIN, TAG_SEGMENT, Value, adamas_alloc, adamas_drop,
+    adamas_dup, adamas_evidence_drop, adamas_evidence_empty, adamas_field, adamas_frame_env,
+    adamas_imm, adamas_is_shared, adamas_is_unique, adamas_kont_cut, adamas_kont_init,
+    adamas_kont_push, adamas_rc, adamas_segment_abandon, adamas_segment_promote,
+    adamas_segment_value, adamas_set_field, adamas_share, adamas_tag,
 };
 
 /// Сколько потоков и сколько ходов каждый.
@@ -177,6 +180,87 @@ fn a_local_object_is_not_shared() {
         assert_eq!(adamas_rc(value), 1);
         adamas_drop(value, None);
         adamas_drop(value, None);
+    }
+}
+
+/// Промоушен доходит до значений внутри **захваченной резумпции** (§5.2).
+///
+/// Резумпция есть обычное значение: `\s -> resume v s` держит её в слоте
+/// замыкания, а замыкание бывает телом `spawn`. Значения в средах её кадров
+/// уезжают в чужой поток вместе с ней, и без обхода считались бы неатомарно.
+///
+/// Наблюдаемое - сам флаг, и мутант у него в `frame.c`: сними цикл по
+/// `counted`, и пометка встанет на ручке сегмента, а до звена не дойдёт.
+/// Проверено снятием: `shared=0` у обоих звеньев.
+///
+/// **Чего этот свидетель не показывает:** гонки. Гонка на значении внутри
+/// резумпции требует программы, порождающей задачу из тела
+/// параметризованного хендлера, - её в корпусе нет, и трек её не написал.
+/// Сказано это здесь, а не подразумевается.
+#[test]
+fn promotion_reaches_inside_a_captured_resumption() {
+    /// Обход детей, разводящий сегмент и звено: то, что порождает понижение
+    /// (`promote.c`). Здесь он написан руками, потому что стенд - рантаймовый.
+    unsafe extern "C" fn walk(value: Value) {
+        unsafe {
+            if adamas_tag(value) == TAG_SEGMENT {
+                adamas_segment_promote(value, Some(walk));
+                return;
+            }
+            adamas_share(adamas_field(value, 0), Some(walk));
+        }
+    }
+
+    /// Дроп среды кадра: без него значение в счётном слоте утекло бы -
+    /// `frame_free` зовёт release и только его.
+    unsafe extern "C" fn drops_env(frame: *mut Frame, _kont: *mut Kont) {
+        unsafe { adamas_drop(*adamas_frame_env(frame), Some(spine_release)) }
+    }
+
+    unsafe {
+        let mut kont = Kont {
+            top: std::ptr::null_mut(),
+        };
+        adamas_kont_init(&raw mut kont);
+        let evidence = adamas_evidence_empty();
+
+        // Голова списка в счётном слоте кадра - то, что несёт с собой
+        // приостановленное вычисление.
+        let tail = adamas_alloc(0, 1);
+        adamas_set_field(tail, 0, adamas_imm(2));
+        let head = adamas_alloc(0, 1);
+        adamas_set_field(head, 0, tail);
+
+        let base = adamas_kont_push(&raw mut kont, MARK_HANDLER, 1, None, None, 0, 0, evidence);
+        let frame = adamas_kont_push(
+            &raw mut kont,
+            MARK_PLAIN,
+            0,
+            None,
+            Some(drops_env),
+            1,
+            1,
+            evidence,
+        );
+        *adamas_frame_env(frame) = head;
+        let segment = adamas_segment_value(adamas_kont_cut(&raw mut kont, base));
+
+        adamas_share(segment, Some(walk));
+        assert_eq!(adamas_is_shared(segment), 1, "ручка сегмента не помечена");
+        assert_eq!(
+            adamas_is_shared(head),
+            1,
+            "пометка не дошла до среды кадра: резумпция уехала бы с локальным счётчиком"
+        );
+        assert_eq!(
+            adamas_is_shared(tail),
+            1,
+            "пометка не дошла до ребёнка внутри среды кадра"
+        );
+
+        adamas_segment_abandon(segment);
+        adamas_drop(segment, None);
+        adamas_evidence_drop(evidence);
     }
 }
 

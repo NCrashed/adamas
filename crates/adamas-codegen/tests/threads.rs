@@ -141,6 +141,283 @@ main : Nat
 main = withNursery eight
 ";
 
+/// Нагрузка под цену промоушена: восемь задач гоняют **разделённый** список.
+///
+/// Форма взята у `workload-fbip` дословно - `Int64`, хвостовая свёртка, размеры
+/// двумя строками, - потому что мерить надо RC-трафик, а не арифметику. Каждый
+/// проход `total` разбирает `cells` звеньев, то есть дупает и дропает их: после
+/// промоушена все эти пары атомарны, до него - нет. Это и есть то, что стоит
+/// 4.2 раза (§5.2), и вот на чём оно видно.
+///
+/// Уступка стоит **между** проходами: без неё файбер не переезжает, и половина
+/// многопоточности не задействована.
+const GRIND: &str = "\
+data Unit where
+  MkUnit : Unit
+
+-- Литеральный паттерн отвечает `Bool` (§4.3): без объявления `build 0` не
+-- проверяется. Тот же довод и в `workload-fbip`.
+data Bool where
+  True : Bool
+  False : Bool
+
+data List where
+  Nil : List
+  Cons : Int64 -> List -> List
+
+data Sum where
+  MkSum : Int64 -> Sum
+
+-- Поле задачи **указательное**: туда встаёт невыразимое имя файбера, а плоский
+-- `Int64` слотом для него не годится - рантайм отвергает такой тип на месте
+-- («нужен один конструктор с одним полем»).
+data Task where
+  MkTask : Sum -> Task
+
+-- Ответ операции обязан быть указательным: плоский `Int64` понижение отвергает
+-- на месте («ответ операции: указательное значение, а не плоское `Int64`»), и
+-- по тому же счёту его отвергает приостанавливающаяся функция. Число поэтому
+-- ездит через задачу в обёртке `Sum`; арифметика внутри остаётся плоской.
+effect Async where
+  suspend : Unit
+  spawn : ({Async} Sum) -> Task
+  await : (1 t : Task) -> Sum
+
+withNursery : ({Async} Sum) -> Sum
+
+cells : Int64
+cells = 4096
+
+passes : Int64
+passes = 96
+
+build : Int64 -> List -> List
+build 0 xs = xs
+build n xs = build (subInt64 n 1) (Cons n xs)
+
+total : List -> Int64 -> Int64
+total Nil acc = acc
+total (Cons x xs) acc = total xs (addInt64 acc x)
+
+unsum : Sum -> Int64
+unsum (MkSum n) = n
+
+grind : Int64 -> List -> Int64 -> {Async} Sum
+grind 0 xs acc = MkSum acc
+grind n xs acc =
+  let s : Unit = suspend
+  grind (subInt64 n 1) xs (addInt64 acc (total xs 0))
+
+work : List -> {Async} Sum
+work xs = grind passes xs 0
+
+eight : {Async} Sum
+eight =
+  let xs : List = build cells Nil
+  let t1 : Task = spawn (work xs)
+  let t2 : Task = spawn (work xs)
+  let t3 : Task = spawn (work xs)
+  let t4 : Task = spawn (work xs)
+  let t5 : Task = spawn (work xs)
+  let t6 : Task = spawn (work xs)
+  let t7 : Task = spawn (work xs)
+  let t8 : Task = spawn (work xs)
+  let a1 : Sum = await t1
+  let a2 : Sum = await t2
+  let a3 : Sum = await t3
+  let a4 : Sum = await t4
+  let a5 : Sum = await t5
+  let a6 : Sum = await t6
+  let a7 : Sum = await t7
+  let a8 : Sum = await t8
+  MkSum (addInt64
+    (addInt64 (addInt64 (unsum a1) (unsum a2)) (addInt64 (unsum a3) (unsum a4)))
+    (addInt64 (addInt64 (unsum a5) (unsum a6)) (addInt64 (unsum a7) (unsum a8))))
+
+main : Int64
+main = unsum (withNursery eight)
+";
+
+/// Сколько прогонов под замер. Оценка - **пол** выборки: помеха ко времени
+/// процесса только прибавляет, та же методика, что у таблицы разрыва.
+const TIMED: usize = 7;
+
+/// Ветвь, которой промоушен спрашивает «а уезжает ли вообще что-нибудь».
+///
+/// Снять её - значит звать промоушен **всегда**, в том числе на однопоточном
+/// круге. Программа от этого остаётся верной (лишняя пометка безвредна), и
+/// ровно это делает её годным вторым концом замера: обе стороны считают одно и
+/// то же, различие ровно одно - платится промоушен или нет.
+const GUARD: [&str; 2] = [
+    "    if (nursery->hands != 0) {\n        adamas_share(body, nursery->promote);\n    }\n",
+    "    if (nursery->hands != 0) {\n        adamas_share(value, nursery->promote);\n    }\n",
+];
+
+/// Те же строки без ветви.
+const ALWAYS: [&str; 2] = [
+    "    adamas_share(body, nursery->promote);\n",
+    "    adamas_share(value, nursery->promote);\n",
+];
+
+/// Собирает порождённый C с `-O2` и отдаёт путь к бинарю.
+///
+/// `forced` - собрать рантайм с промоушеном **без ветви**: мера ниже сравнивает
+/// два рантайма, а не два режима одного.
+#[allow(
+    clippy::expect_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+fn optimised(stem: &str, text: &str, forced: bool) -> std::path::PathBuf {
+    let dir = harness::scratch().join("timed");
+    let _ = std::fs::create_dir_all(&dir);
+    let source = dir.join(format!("{stem}.c"));
+    let binary = dir.join(stem);
+    std::fs::write(&source, text).expect("стенд обязан записываться");
+    let sources = std::path::Path::new(env!("ADAMAS_RUNTIME_SOURCES"));
+    let units: Vec<std::path::PathBuf> = env!("ADAMAS_RUNTIME_UNITS")
+        .split(',')
+        .map(|unit| {
+            let at = sources.join(unit);
+            if !forced || unit != "fiber.c" {
+                return at;
+            }
+            let mut fiber =
+                std::fs::read_to_string(&at).expect("исходник рантайма обязан читаться");
+            for (guard, always) in GUARD.iter().zip(ALWAYS) {
+                assert!(
+                    fiber.contains(guard),
+                    "ветвь промоушена не нашлась в `fiber.c`: замер перестал измерять"
+                );
+                fiber = fiber.replace(guard, always);
+            }
+            let copy = dir.join("fiber.forced.c");
+            std::fs::write(&copy, fiber).expect("копия рантайма обязана записываться");
+            copy
+        })
+        .collect();
+    let compiled = std::process::Command::new(env!("ADAMAS_CC"))
+        .args(["-std=c11", "-O2", "-fwrapv", "-ffp-contract=off", "-w"])
+        .arg("-I")
+        .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
+        .arg(&source)
+        .args(&units)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("компилятор обязан запускаться");
+    assert!(
+        compiled.status.success(),
+        "стенд не собрался:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    binary
+}
+
+/// Пол выборки из [`TIMED`] прогонов, в миллисекундах, плюс напечатанный ответ.
+#[allow(
+    clippy::expect_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+fn floor_ms(binary: &std::path::Path, threads: Option<&str>) -> (u128, String) {
+    let mut best = u128::MAX;
+    let mut printed = String::new();
+    for _ in 0..TIMED {
+        let mut started = std::process::Command::new(binary);
+        if let Some(many) = threads {
+            started.env("ADAMAS_THREADS", many);
+        }
+        let at = std::time::Instant::now();
+        let ran = started.output().expect("стенд обязан запускаться");
+        let took = at.elapsed().as_micros();
+        best = best.min(took);
+        String::from_utf8_lossy(&ran.stdout)
+            .trim_end()
+            .clone_into(&mut printed);
+    }
+    (best / 1000, printed)
+}
+
+/// **Цена места вызова промоушена**, измеренная, а не рассуждённая.
+///
+/// # Почему не нагрузкой из таблицы разрыва
+///
+/// Правило вопроса 175 требует мерить правку горячего пути нагрузкой оттуда, и
+/// здесь оно **не применимо**, а не обойдено: ни одна из пяти программ таблицы
+/// не заводит питомника вовсе, поэтому места вызова промоушена ни одна из них
+/// не проходит. Проверено грепом по порождённому C: `adamas_nursery_` в них
+/// ноль вхождений. Мерится поэтому нагрузка того же жанра - RC-трафик по
+/// разделённому списку, форма взята у строки 3 (FBIP-цикл).
+///
+/// Прочие правки трека таблицу задевают, и там правило применено: см. отчёт.
+///
+/// # Что с чем сравнивается, и чем **не** годится очевидный второй конец
+///
+/// Очевидный второй конец - обезврежить обход ([`defused`]) и сравнить при
+/// четырёх воркерах - **измеряет не то**, и это замерено, а не предположено:
+/// 22 мс с промоушеном против 137 без него, то есть промоушен как будто
+/// ускоряет в шесть раз. Причина в том, что обезвреженная половина считает
+/// **другую программу**: без пометки счётчики разделённого списка правятся
+/// голым `+=` из четырёх потоков, звенья гибнут не вовремя, и обход идёт по
+/// тому, чего уже нет. Как свидетель гонки эта половина годна (санитайзер
+/// выше), как второй конец замера - нет.
+///
+/// Годный второй конец - тот, где **обе** стороны верны. Берётся он так: круг
+/// однопоточный в обоих случаях, а рантайм собирается дважды - со ветвью
+/// `hands != 0` перед промоушеном и без неё. Лишняя пометка программу не
+/// ломает, она только стоит; разница и есть цена места вызова.
+///
+/// Третьим числом печатается то, ради чего всё затевалось: та же программа на
+/// четырёх воркерах против однопоточной.
+///
+/// # Что вышло
+///
+/// Четыре прогона: **1.440, 1.407, 1.404, 1.283** - цена промоушена на этой
+/// нагрузке, и **0.400, 0.407, 0.442, 0.400** - что дают четыре воркера против
+/// одного. Последний прогон шёл вперемежку с соседними тестами, оттого и
+/// меньше; медиана 1.41. То есть налог 1.4 раза окупается ускорением 2.5 раза;
+/// чистый выигрыш 20-24 мс против 50-60.
+///
+/// Записанные 4.2 раза (§5.2) - **потолок на микронагрузке**, где кроме пары
+/// `dup`/`drop` не происходит ничего. На нагрузке, где счётчик - часть обхода,
+/// а не весь он, выходит 1.41. Расхождение названо здесь, а не в отчёте, потому
+/// что число 4.2 читается как цена промоушена и ею не является.
+///
+/// Утверждения о времени тест не делает: машина под прогоном не тихая. Он
+/// печатает числа и проверяет, что **все три** стороны считают верно.
+#[test]
+fn the_promotion_at_spawn_costs_this_much() {
+    // Ответ считан, а не спрошен у машины, и это не небрежность: три миллиона
+    // обходов звена тому же тайл-уокеру не по силам - тем же доводом, каким
+    // `workload-fbip` объясняет, почему стенд подставляет размеры сам. Согласие
+    // с машиной несут свидетели выше, на корпусном размере.
+    //
+    // Сумма `1..cells` на `passes` проходов на восемь задач.
+    let expected = (8_i64 * 96 * 4096 * 4097 / 2).to_string();
+    let text = harness::compiled(GRIND).expect("нагрузка обязана браться C-эмиттером");
+    let guarded = optimised("grind.guarded", &text, false);
+    let forced = optimised("grind.forced", &text, true);
+
+    let (alone, answer) = floor_ms(&guarded, None);
+    assert_eq!(answer, expected, "однопоточный круг посчитал не то");
+    let (always, answer) = floor_ms(&forced, None);
+    assert_eq!(
+        answer, expected,
+        "однопоточный круг с промоушеном посчитал не то"
+    );
+    let (spread, answer) = floor_ms(&guarded, Some(THREADS));
+    assert_eq!(answer, expected, "круг на потоках посчитал не то");
+
+    #[allow(clippy::cast_precision_loss, reason = "миллисекунды, не деньги")]
+    let ratio = always as f64 / alone.max(1) as f64;
+    #[allow(clippy::cast_precision_loss, reason = "миллисекунды, не деньги")]
+    let gain = spread as f64 / alone.max(1) as f64;
+    eprintln!(
+        "цена промоушена: {always} мс с ним против {alone} без, оба однопоточные и оба верны, \
+         то есть {ratio:.3} раза; та же программа на {THREADS} воркерах {spread} мс, \
+         то есть {gain:.3} от однопоточной; пол {TIMED} прогонов"
+    );
+}
+
 /// Обрыв наружу круга из мигрировавшего файбера: рантайм говорит об этом вслух.
 ///
 /// Задача производит операцию, чей хендлер стоит **снаружи** `withNursery`, и
@@ -356,10 +633,34 @@ fn watched(stem: &str, text: &str) -> Option<Watched> {
         );
         return None;
     }
-    let ran = std::process::Command::new(&binary)
+    // `halt_on_error` - не украшение, а условие завершимости, и это измерено:
+    // ломаная половина считает **испорченный** список, и однажды она провисела
+    // больше десяти минут, не договорив. Санитайзеру довольно первой найденной
+    // гонки; честной половине останавливаться не на чем, и она идёт до конца.
+    let mut child = std::process::Command::new(&binary)
         .env("ADAMAS_THREADS", THREADS)
-        .output()
+        .env("TSAN_OPTIONS", "halt_on_error=1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .expect("стенд обязан запускаться");
+    // Второй предел, на случай если санитайзер до гонки не доберётся: без него
+    // зависший стенд вешал бы прогон вместо того, чтобы отличаться.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while child
+        .try_wait()
+        .expect("ожидание обязано работать")
+        .is_none()
+    {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let ran = child
+        .wait_with_output()
+        .expect("вывод стенда обязан читаться");
     Some(Watched {
         raced: String::from_utf8_lossy(&ran.stderr).contains("data race"),
         printed: String::from_utf8_lossy(&ran.stdout).trim_end().to_owned(),

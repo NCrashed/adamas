@@ -20,6 +20,23 @@
 //! свидетель без второго проверял бы, что питомник не сломан, а не что он
 //! поехал на потоках.
 //!
+//! # Счёт живых блоков на **каждом** прогоне - не украшение
+//!
+//! Он и нашёл единственный настоящий дефект трека, и нашёл его тем, что ответ
+//! был **верен**. Вектор evidence файбера считался неатомарно: пометить один
+//! `nursery->base` мало, потомки её не наследовали. Проявлялось это как
+//! «живо 1» примерно раз в трёхстах прогонов, и только на занятой машине; под
+//! шестью копиями стенда разом - как `malloc_consolidate(): unaligned fastbin
+//! chunk`, то есть порча кучи.
+//!
+//! Санитайзер назвал место сразу, как только его позвали на **эту** программу:
+//! 29 гонок из 40 прогонов, `adamas_evidence_dup` против `adamas_evidence_drop`
+//! из двух воркеров. После наследования пометки - 0 из 40 и 0 живых из 1500
+//! прогонов под шестью копиями.
+//!
+//! Мораль, которая стоила трека: санитайзер над **стендом** не покрывает
+//! программу корпуса. Гонка была на пути, которого стенд не проходил.
+//!
 //! # Чего здесь нет
 //!
 //! *Программ со следом.* Порядок файберов под потоками не определён, и всякая
@@ -30,10 +47,10 @@
 //! *Обрыва наружу круга.* Под кадром питомника у воркера пусто, и раскручивать
 //! оттуда нечего; рантайм говорит об этом вслух. Свидетель этому - ниже.
 //!
-//! *LLVM-пути.* Различий у него здесь нет ни одного: обе стороны зовут те же
-//! `adamas_nursery_*`, а потоки живут целиком в рантайме, общем у двух
-//! бэкендов. Проверяется поэтому C-сторона, и сказано это здесь, чтобы молчание
-//! не читалось как «не поехало».
+//! LLVM-путь при этом **проверяется наравне** с C-стороной, хотя различий у
+//! них здесь нет ни одного: потоки живут целиком в рантайме, общем у двух
+//! бэкендов. Проверяется потому, что линковка у него своя - обёртка
+//! `adamas_promote_extern` видна только из спутника.
 
 mod harness;
 
@@ -517,6 +534,50 @@ fn a_corpus_program_computes_on_several_threads() {
     );
 }
 
+/// Он же на LLVM-пути: тот же текст, те же потоки, тот же ответ.
+///
+/// Стоит здесь не для полноты. Различий у двух бэкендов в этом месте нет ни
+/// одного - потоки живут целиком в рантайме, общем у обоих, - но сказать это и
+/// показать это разные вещи, а линковка у LLVM-пути своя: `promote.c` печатает
+/// понижение, и обёртка `adamas_promote_extern` видна только из спутника.
+#[test]
+fn the_llvm_path_computes_on_several_threads_too() {
+    let Some((tools, _)) = harness::llvm_toolchains() else {
+        return;
+    };
+    let pipeline = adamas_codegen::llvm::Pipeline::optimised();
+    let source = corpus_program();
+    let expected = harness::machine_printed(&source).expect("машина обязана отвечать");
+    let artefacts =
+        harness::llvm_text("потоки-корпус", &source).expect("питомник обязан браться эмиттером");
+    let binary = harness::llvm_binary("threads.await-value.llvm", &artefacts, &tools, &pipeline);
+
+    let mut spread = 0;
+    for run in 0..RUNS {
+        let ran = std::process::Command::new(&binary)
+            .env("ADAMAS_THREADS", THREADS)
+            .output()
+            .expect("бинарь обязан запускаться");
+        let printed = String::from_utf8_lossy(&ran.stdout).trim_end().to_owned();
+        let counted = String::from_utf8_lossy(&ran.stderr).into_owned();
+        assert_eq!(
+            printed,
+            expected,
+            "LLVM-путь: прогон {run} на потоках ответил не то; stderr `{}`",
+            counted.trim_end()
+        );
+        let (_, live) =
+            harness::blocks("потоки-корпус", counted.lines().next().unwrap_or_default());
+        assert_eq!(live, 0, "LLVM-путь: прогон {run} оставил блоки живыми");
+        if counted.contains("потоков выдавало") {
+            spread += 1;
+        }
+    }
+    eprintln!(
+        "LLVM-путь на {THREADS} потоках: {RUNS} прогонов, ответ тот же, {spread} с работой на воркере"
+    );
+}
+
 /// Восемь задач: файберы **обязаны** разъехаться, и это видно числом.
 #[test]
 fn eight_tasks_spread_across_the_workers() {
@@ -597,13 +658,35 @@ struct Watched {
     clippy::expect_used,
     reason = "заготовка теста: отказ здесь означает сломанное окружение"
 )]
-fn watched(stem: &str, text: &str) -> Option<Watched> {
+fn watched(stem: &str, text: &str, runtime: Option<(&str, &str)>) -> Option<Watched> {
     let dir = harness::scratch().join("tsan");
     let _ = std::fs::create_dir_all(&dir);
     let source = dir.join(format!("{stem}.c"));
     let binary = dir.join(stem);
     std::fs::write(&source, text).expect("стенд обязан записываться");
     let sources = std::path::Path::new(env!("ADAMAS_RUNTIME_SOURCES"));
+    let units: Vec<std::path::PathBuf> = env!("ADAMAS_RUNTIME_UNITS")
+        .split(',')
+        .map(|unit| {
+            let at = sources.join(unit);
+            let Some((from, to)) = runtime else {
+                return at;
+            };
+            let read = std::fs::read_to_string(&at).expect("исходник рантайма обязан читаться");
+            if !read.contains(from) {
+                return at;
+            }
+            let copy = dir.join(format!("{stem}.{unit}"));
+            std::fs::write(&copy, read.replace(from, to)).expect("копия обязана записываться");
+            copy
+        })
+        .collect();
+    if let Some((from, _)) = runtime {
+        assert!(
+            units.iter().any(|at| at.starts_with(&dir)),
+            "правка рантайма не нашла места: `{from}` перестало быть мутантом"
+        );
+    }
     let compiled = std::process::Command::new(env!("ADAMAS_CC"))
         .args([
             "-std=c11",
@@ -616,11 +699,7 @@ fn watched(stem: &str, text: &str) -> Option<Watched> {
         .arg("-I")
         .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
         .arg(&source)
-        .args(
-            env!("ADAMAS_RUNTIME_UNITS")
-                .split(',')
-                .map(|unit| sources.join(unit)),
-        )
+        .args(&units)
         .arg("-o")
         .arg(&binary)
         .output()
@@ -681,7 +760,7 @@ fn the_sanitizer_names_the_race_the_promotion_at_spawn_removes() {
     let source = format!("{SHAPE}{MANY}");
     let text = harness::compiled(&source).expect("программа обязана браться C-эмиттером");
 
-    let Some(broken) = watched("threads.broken", &defused(&text)) else {
+    let Some(broken) = watched("threads.broken", &defused(&text), None) else {
         return;
     };
     assert!(
@@ -690,7 +769,8 @@ fn the_sanitizer_names_the_race_the_promotion_at_spawn_removes() {
          инструмент не ловит ничего, и молчание на честной половине ничего не значит"
     );
 
-    let honest = watched("threads.honest", &text).expect("честная половина обязана собираться");
+    let honest =
+        watched("threads.honest", &text, None).expect("честная половина обязана собираться");
     assert!(
         !honest.raced,
         "санитайзер назвал гонку на круге с промоушеном: место вызова не закрывает того, \
@@ -702,6 +782,50 @@ fn the_sanitizer_names_the_race_the_promotion_at_spawn_removes() {
         "честная половина под санитайзером посчитала не то"
     );
     eprintln!("санитайзер: без промоушена - гонка, с промоушеном - тишина, ответ {expected}");
+}
+
+/// Санитайзер над **программой корпуса**, а не над стендом.
+///
+/// Заведён находкой, а не полнотой, и находка эта - единственный настоящий
+/// дефект трека. Счётчик вектора evidence правился голым `+=`: пометить один
+/// `nursery->base` оказалось мало, потомки её не наследовали, а вектор файбера
+/// как раз потомок - его дупает `frame_alloc` и дропает `frame_free` **на
+/// разных воркерах**. Стенд соседнего теста этого пути не проходит вовсе, и
+/// санитайзер над ним молчал.
+///
+/// Видно это было только числом живых блоков: «живо 1» примерно раз в трёхстах
+/// прогонах, а под шестью копиями разом - `malloc_consolidate(): unaligned
+/// fastbin chunk`. Ответ при этом каждый раз был верен.
+///
+/// Мутант - снятое наследование, то есть рантайм дословно до правки: 29 гонок
+/// из 40 прогонов. С наследованием - 0 из 40.
+#[test]
+fn the_sanitizer_is_silent_on_a_corpus_program_too() {
+    const INHERIT: &str = "    inherit_shared(extended, parent);\n";
+    let source = corpus_program();
+    let text = harness::compiled(&source).expect("фикстура обязана браться C-эмиттером");
+
+    let Some(broken) = watched("threads.corpus.broken", &text, Some((INHERIT, ""))) else {
+        return;
+    };
+    assert!(
+        broken.raced,
+        "санитайзер не назвал гонку на счётчике вектора файбера без наследования пометки: \
+         инструмент не ловит ничего, и молчание на честной половине ничего не значит"
+    );
+
+    let honest =
+        watched("threads.corpus.honest", &text, None).expect("честная половина обязана собираться");
+    assert!(
+        !honest.raced,
+        "санитайзер назвал гонку на корпусной программе: счётчик чего-то остался локальным"
+    );
+    let expected = harness::machine_printed(&source).expect("машина обязана отвечать");
+    assert_eq!(
+        honest.printed, expected,
+        "честная половина под санитайзером посчитала не то"
+    );
+    eprintln!("санитайзер над корпусной: без наследования - гонка, с ним - тишина");
 }
 
 /// Обрыв наружу круга из мигрировавшего файбера **не выражается**, и это сказано.

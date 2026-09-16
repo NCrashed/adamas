@@ -133,6 +133,54 @@ fn a_region_costs_one_block_whatever_it_holds() {
     );
 }
 
+/// То же обещание на **LLVM-пути** (трек C волны 3 Фазы 7).
+///
+/// Отдельным свидетелем, а не строкой в корпусном договоре, и довод тот же, по
+/// которому этот файл существует: договор сверяет **ответ**, а «одна область -
+/// один блок» ответом не наблюдаемо вовсе. Программа, выдающая блок на значение
+/// и честно их отдающая, пройдёт и договор, и счётчик живых блоков.
+///
+/// Программы берутся **те же** константы, что у C-половины выше: вторая их
+/// копия разъехалась бы с первой молча, и два бэкенда мерили бы разные
+/// программы под одним именем.
+#[test]
+fn a_region_costs_one_block_on_the_llvm_path_too() {
+    let Some((tools, _)) = harness::llvm_toolchains() else {
+        return;
+    };
+    let pipeline = adamas_codegen::llvm::Pipeline::optimised();
+    let mut measured = Vec::new();
+    for (name, program) in [("три", THREE), ("шесть", SIX), ("ячейки", BOXED)] {
+        let source = format!("{SHAPE}{program}");
+        let (_, stderr) = harness::llvm_agreed(
+            name,
+            &source,
+            &tools,
+            &pipeline,
+            &format!("регион-llvm-{name}"),
+        )
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let (allocated, live) = harness::blocks(name, &stderr);
+        assert_eq!(live, 0, "{name}: прогон LLVM оставил блоки живыми");
+        measured.push(allocated);
+    }
+    assert_eq!(
+        measured[0], 1,
+        "область на три значения обошлась не в один блок: выдано {}",
+        measured[0]
+    );
+    assert_eq!(
+        measured[1], measured[0],
+        "цена области выросла с числом значений: три - {}, шесть - {}",
+        measured[0], measured[1]
+    );
+    assert_eq!(
+        measured[2], MANY,
+        "ячейка кучи обязана стоить блок: значений {MANY}, выдано {}",
+        measured[2]
+    );
+}
+
 /// Нагрузка разной ширины: смещения расходятся, и хендл это показывает.
 const MIXED: &str = "\
 type Vec3 = { x : Float32, y : Float32, z : Float32 }

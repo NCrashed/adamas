@@ -96,7 +96,9 @@ const HALVES: [&str; 4] = [
 /// Тело точки входа не содержит атомарной операции ни одной.
 #[test]
 fn the_shared_half_stays_out_of_the_body() {
-    let Some(text) = ir("object", &source()) else {
+    // Стебель свой у каждого теста: они идут потоками одного двоичного файла, а
+    // артефакт лежит на диске - общий стебель дал бы гонку двух `clang`.
+    let Some(text) = ir("object-body", &source()) else {
         return;
     };
     for name in HOT {
@@ -125,7 +127,7 @@ fn the_shared_half_stays_out_of_the_body() {
 /// атомарности нет вовсе, - то есть охранял бы скорость ценой корректности.
 #[test]
 fn the_flag_branch_is_moved_and_not_dropped() {
-    let Some(text) = ir("object", &source()) else {
+    let Some(text) = ir("object-halves", &source()) else {
         return;
     };
     for (entry, half) in PAIRS {

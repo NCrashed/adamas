@@ -230,6 +230,43 @@ main =
   addInt64 k (mulInt64 (pair (ltInt64 1 2) (ltInt64 2 1)) 2048)
 ";
 
+/// Ещё один угол, которого корпус не покрывает: **указательный** массив.
+///
+/// У массива два представления (§4.11, [`Elems`](adamas_codegen::ir::Elems)), и
+/// различает их наличие `Flat` у элемента. Все семь корпусных `array-*` -
+/// плоские либо плотные; указательного нет ни одного, потому что семейство с
+/// одними `Flat`-полями укладывается плотно само (§10 вопрос 157). Значит три
+/// точки входа рантайма - `adamas_array_fill`, `adamas_array_put`,
+/// `adamas_array_take` - на LLVM-пути не исполнялись бы ни разу, а печатались
+/// бы. Рекурсивное семейство плоским не бывает, и `Cell` здесь именно поэтому
+/// рекурсивен - тот же ход, что у `adamas-codegen/tests/array.rs`.
+///
+/// Наблюдаемое - число, и зависит оно от номера ячейки: `7 + 8 + 90`.
+/// Множитель у последней затем, чтобы перепутанный номер менял сумму, а не
+/// переставлял слагаемые.
+const POINTER_ARRAY: &str = "\
+data Cell where
+  Leaf : Cell
+  MkCell : Int64 -> Cell -> Cell
+
+peel : Cell -> Int64
+peel Leaf = 0
+peel (MkCell n rest) = n
+
+built : Array 3 Cell
+built =
+  arraySet (arraySet (arrayNew 3 (MkCell 7 Leaf)) 1 (MkCell 8 Leaf)) 2
+    (MkCell 9 Leaf)
+
+read : Array 3 Cell -> Int64
+read xs =
+  addInt64 (peel (arrayIndex xs 0))
+    (addInt64 (peel (arrayIndex xs 1)) (mulInt64 (peel (arrayIndex xs 2)) 10))
+
+main : Int64
+main = read built
+";
+
 /// Мера среза: что эмиттер берёт и чем отвергает остальное.
 ///
 /// Инструментов не спрашивает вовсе - тут только эмиссия, - и потому идёт
@@ -481,7 +518,8 @@ fn the_reader_of_the_minimum_llvm_is_blind_to_an_unknown_intrinsic() {
     );
 }
 
-/// Программы, на которых меряются оси среза: корпусные плюс углы фрагмента.
+/// Программы, на которых меряются оси среза: корпусные плюс [`VERDICTS`] с
+/// [`POINTER_ARRAY`].
 #[allow(
     clippy::unwrap_used,
     reason = "заготовка теста: отсутствие фикстуры означает сломанный корпус"
@@ -495,6 +533,7 @@ fn taken_sources() -> Vec<(String, String)> {
         })
         .collect();
     all.push(("verdicts".to_owned(), VERDICTS.to_owned()));
+    all.push(("pointer-array".to_owned(), POINTER_ARRAY.to_owned()));
     all
 }
 
@@ -1023,6 +1062,45 @@ fn the_runtime_in_bitcode_lets_the_optimiser_see_through_it() {
 
 /// Точка входа, от которой считается достижимое: всё, что программа зовёт.
 const ENTRY: &str = "adamas_entry";
+
+/// Указательный массив идёт **указательным** путём, а не плоским.
+///
+/// Без этого [`POINTER_ARRAY`] был бы обманчивым свидетелем своего жанра:
+/// договор трёх вычислителей он прошёл бы и в том случае, если понижение
+/// втихую уложило бы `Cell` плоско, - ответ у обоих путей один по построению.
+/// Различает их **какие точки входа зовутся**, и этих трёх плоский путь не
+/// зовёт ни одной.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+#[test]
+fn a_pointer_array_takes_the_pointer_path() {
+    let artefacts = harness::llvm_text("pointer-array", POINTER_ARRAY).unwrap();
+    for entry in [
+        "@adamas_array_fill(",
+        "@adamas_array_put(",
+        "@adamas_array_take(",
+    ] {
+        assert!(
+            artefacts
+                .ll
+                .lines()
+                .any(|line| line.contains("call ") && line.contains(entry)),
+            "`{entry}` не зовётся: указательный массив уехал плоским путём"
+        );
+    }
+    // И обратно: плоских обращений у него нет ни одного. По **вызову**, а не по
+    // имени: объявления печатаются все семь разом, и по имени плоский путь
+    // «находился» бы у любой программы с массивом.
+    assert!(
+        !artefacts
+            .ll
+            .lines()
+            .any(|line| line.contains("call ") && line.contains("@adamas_array_at(")),
+        "указательный массив спрашивает адрес плоской ячейки"
+    );
+}
 
 /// Текст с единственной заменой. Не найденная подстрока роняет тест.
 fn swapped(text: &str, from: &str, to: &str) -> String {

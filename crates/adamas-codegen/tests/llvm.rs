@@ -640,35 +640,124 @@ fn a_broken_emitter_changes_the_printed_answer() {
 ///
 /// Последние две - и есть свидетель того, что «собралось и напечатало» ловит
 /// меньше, чем кажется: обе печатают **честное** число.
+#[test]
+fn a_broken_object_layer_is_observable() {
+    observable(&object_mutants());
+}
+
+/// Мутанты **массива** (§4.11): перепутанный номер ячейки обязан быть виден.
+///
+/// Ловушка названа в шапке самой фикстуры (`eval/array-flat.adamas`): у массива
+/// из трёх одинаковых чисел чтение по номеру неотличимо от чтения первой
+/// ячейки, и свидетель показывал бы ноль. Ячейки поэтому различны, а у
+/// последней ещё и множитель - так наблюдаем и номер, и порядок.
+///
+/// Четыре правки - четыре разных места массива.
+///
+/// - **Номер ячейки.** Чтения первой и второй переставлены: `7 + 9 + 80`
+///   вместо `7 + 8 + 90`. Веса разные, поэтому перестановка меняет сумму, а не
+///   переставляет слагаемые.
+/// - **Запись ячейки.** `store` восьмёрки снят: ячейка остаётся заполненной
+///   начальным значением, и сумма падает на единицу.
+/// - **Шаг укладки.** Плоская колонка объявлена указательной (`stride` 0):
+///   рантайм обрывает прогон на заполнении. Это и есть свидетель того, что шаг
+///   доезжает до рантайма, а не остаётся числом в тексте.
+/// - **Отданный массив.** Дроп массива после владеющего чтения снят: ответ тот
+///   же, живых блоков - один. Правка эта ответом не ловится вовсе, и стоит она
+///   здесь ровно поэтому.
+#[test]
+fn a_broken_array_is_observable() {
+    observable(&array_mutants());
+}
+
+/// Правки массива: фикстура, имя, причина, что на что, чем ловится.
+fn array_mutants() -> [(
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    Verdict,
+); 4] {
+    [
+        (
+            "array-flat",
+            "array.index",
+            "перепутанный номер ячейки",
+            "  %t2 = call ptr @adamas_array_at(ptr %v0, i64 1)\n  \
+             %t3 = load i64, ptr %t2\n  \
+             %t4 = call ptr @adamas_array_at(ptr %v0, i64 2)\n",
+            "  %t2 = call ptr @adamas_array_at(ptr %v0, i64 2)\n  \
+             %t3 = load i64, ptr %t2\n  \
+             %t4 = call ptr @adamas_array_at(ptr %v0, i64 1)\n",
+            Verdict::Answer,
+        ),
+        (
+            "array-flat",
+            "array.store",
+            "потерянная запись ячейки",
+            "  store i64 8, ptr %t2\n",
+            "",
+            Verdict::Answer,
+        ),
+        (
+            "workload-column",
+            "array.stride",
+            "плоская колонка объявлена указательной",
+            "call ptr @adamas_array_alloc(i64 %t0, i64 4)",
+            "call ptr @adamas_array_alloc(i64 %t0, i64 0)",
+            Verdict::Answer,
+        ),
+        (
+            "array-flat",
+            "array.drop",
+            "неотданный массив после владеющего чтения",
+            "  call void @adamas_drop(ptr %v0, ptr @adamas_release_extern)\n  \
+             %t6 = mul i64 %t5, 10\n",
+            "  %t6 = mul i64 %t5, 10\n",
+            Verdict::Leak,
+        ),
+    ]
+}
+
+/// Прогоняет список правок: каждая обязана изменить то, чем её ловят.
+///
+/// Общая двум свидетелям - объектного слоя и массива (§4.11), - потому что
+/// вопрос у них один: правка, которую не ловит **ни** ответ, **ни** счётчик,
+/// ничего и не проверяет. Вторая копия этого цикла разъехалась бы с первой
+/// молча: тройка сверяется в трёх местах.
 #[allow(
     clippy::unwrap_used,
     reason = "заготовка теста: отказ здесь означает сломанное окружение"
 )]
-#[test]
-fn a_broken_object_layer_is_observable() {
+fn observable(
+    mutants: &[(
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        Verdict,
+    )],
+) {
     let Some((tools, _)) = harness::llvm_toolchains() else {
         return;
     };
     let pipeline = Pipeline::optimised();
 
-    for (name, stem, why, from, to, verdict) in object_mutants() {
+    for &(name, stem, why, from, to, verdict) in mutants {
         let source =
             std::fs::read_to_string(harness::corpus().join(format!("{name}.adamas"))).unwrap();
-        let (honest, stderr) = harness::llvm_agreed(
-            name,
-            &source,
-            &tools,
-            &pipeline,
-            &format!("object.honest.{stem}"),
-        )
-        .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let (honest, stderr) =
+            harness::llvm_agreed(name, &source, &tools, &pipeline, &format!("{stem}.honest"))
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
         let (allocated, live) = harness::blocks(name, &stderr);
         assert_eq!(live, 0, "{name}: честный прогон оставил блоки живыми");
 
         let artefacts = harness::llvm_text(name, &source).unwrap();
         let mutant = swapped(&artefacts.ll, from, to);
         let broken = harness::llvm_printed(
-            &format!("object.{stem}"),
+            &format!("{stem}.broken"),
             &mutant,
             &artefacts.support,
             &tools,

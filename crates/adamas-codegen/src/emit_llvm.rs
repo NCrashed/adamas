@@ -53,15 +53,19 @@
 //! Питомник (трек I): [`Expr::Nursery`], [`Expr::Fiber`], [`Expr::Cancel`] -
 //! круг, уступка, порождение, ожидание и отмена (§5.2); плюс минимальный срез
 //! слоя замыканий, которого питомник потребовал, - [`Expr::Closure`] и
-//! [`Expr::Apply`].
+//! [`Expr::Apply`] хвостом куска.
 //! Массив (§4.11, трек B волны 3): [`Expr::ArrayNew`], [`Expr::ArraySet`],
 //! [`Expr::ArrayIndex`] - плоская укладка и укладка слотами, ячейка читается и
 //! пишется инструкцией, адрес её с проверкой границы берётся у рантайма.
+//! Замыкание целиком (трек A волны 3): [`Expr::Apply`] в **чистом** отрезке со
+//! своим корнем трамплина и [`Expr::ConstructClosure`] - конструктор значением.
 //!
 //! Не берётся - и отвергается **названным** отказом ([`LlvmError`]): регионы,
-//! плотные агрегаты, дескриптор укладки, конструктор значением и частичное
-//! применение. Ячейка массива поэтому плоская **примитивом**: агрегатная
-//! отвергается тем же отказом, что агрегат где угодно.
+//! плотные агрегаты и дескриптор укладки. Ячейка массива поэтому плоская
+//! **примитивом**: агрегатная отвергается тем же отказом, что агрегат где
+//! угодно. У конструктора значением названы два своих отказа - плоское поле и
+//! все поля стёртые; оба расхождение с C-эмиттером намеренное, см.
+//! [`Builder::building`].
 //! Вектор при этом живёт **только** в регистре: в поле объекта его не пускает
 //! понижение (слот - слово), а до кучи он не доходит вовсе, потому что
 //! `load`/`store` §4.9 над колонкой не заведены - см. отчёт трека H.
@@ -154,6 +158,25 @@
 //! регион, 1 граница языка. Постановка трека ждала десяти; расхождение в том,
 //! что отказ массивом стоял **первым** и заслонял агрегат, - ровно тем же
 //! порядком, каким печать заслоняла конструктор у трека A.
+//!
+//! Замыкание (трек A волны 3) довело меру до **88 из 102**, и стена, стоявшая
+//! перед ним, оказалась не той, которой её звали. План волны назвал средством
+//! **селекцию по целям замыканий**; селекции не понадобилось вовсе. Какая из
+//! двух форм за указателем, решает трамплин замыкания ([`Module::boxer`]), и
+//! решает **статически** - номер функции ему известен в момент печати. Место
+//! вызова про цель не знает и знать не обязано; недоставало ему **ручки
+//! стека**, и та стоит `alloca ptr` ([`Builder::applied`]) - ровно то же, что
+//! печатает C-эмиттер с волны 4 Фазы 6. Кадра в куче чистый отрезок не платит:
+//! блоков выдано столько же, сколько у C-бэкенда, - 5728 на тринадцати снятых
+//! программах (`tests/apply.rs`).
+//!
+//! Из тринадцати взято одиннадцать: у `decidable` и `prelude` за первым отказом
+//! стоял второй - [`Expr::ConstructClosure`], конструктор значением, - и взят
+//! он тем же треком ([`Module::maker`]). Жанр промаха тот же, что у трека B
+//! волны 3 и у трека A волны 1: первый отказ заслоняет второй ряд.
+//!
+//! Остаток гистограммой: 9 плотный агрегат, 4 регион (обе строки - трек C), 1
+//! граница языка. Отказа «замыкание» в остатке не осталось ни одного.
 //!
 //! # Что объектный слой знает о раскладке
 //!
@@ -498,6 +521,11 @@ pub fn emit(program: &Program) -> Result<Artefacts, LlvmError> {
     for function in boxing(program) {
         module.boxer(&program.functions[function.0]);
     }
+    // Сборщики - последними: отвергнуть конструктор значением обязано тело
+    // ([`Builder::building`]), и до этой строки отказ уже вернулся бы.
+    for constructor in builders(program) {
+        module.maker(&program.constructors[usize::from(constructor.0)]);
+    }
     Ok(Artefacts {
         ll: module.finish(program, answer),
         support: support(program, answer),
@@ -655,6 +683,22 @@ fn boxing(program: &Program) -> BTreeSet<FuncId> {
         walk(&function.body, &mut |expr| {
             if let Expr::Closure { function: code, .. } = expr {
                 found.insert(*code);
+            }
+        });
+    }
+    found
+}
+
+/// Конструкторы, стоящие значением: им нужен свой сборщик.
+///
+/// Тот же список, что собирает `emit_c::builders`, и собран он здесь заново по
+/// той же причине, что и [`taking`].
+fn builders(program: &Program) -> BTreeSet<CtorId> {
+    let mut found = BTreeSet::new();
+    for function in &program.functions {
+        walk(&function.body, &mut |expr| {
+            if let Expr::ConstructClosure { constructor } = expr {
+                found.insert(*constructor);
             }
         });
     }
@@ -1376,6 +1420,78 @@ impl Module {
         self.bodies.push_str("  ret ptr %answer\n}\n\n");
     }
 
+    /// Сборщик конструктора: замыкание копит аргументы, последний собирает
+    /// объект.
+    ///
+    /// Тот же трамплин, что у функции значением ([`Self::boxer`]), и та же
+    /// причина `adamas_dup` на слот: слоты принадлежат замыканию, а поле
+    /// объекта берёт значение владением. Последний аргумент приходит владением
+    /// уже от `adamas_apply` и дублирования не требует.
+    ///
+    /// Скрытые аргументы трамплин берёт и не смотрит: сборка объекта не
+    /// приостанавливается ничем.
+    ///
+    /// Поля здесь **только указательные**: плоское и стёртое отвергает
+    /// [`Builder::building`] до того, как сюда дойдёт.
+    fn maker(&mut self, constructor: &Constructor) {
+        let arity = constructor.binders.len();
+        let slots = constructor.slots();
+        let _ = writeln!(
+            self.bodies,
+            "; `{}` значением: слоты копят аргументы, последний собирает объект",
+            constructor.name
+        );
+        let _ = writeln!(
+            self.bodies,
+            "define internal ptr @make_{}(ptr %self, ptr %ev, ptr %kont, ptr %arg) \
+             {DEFINITION_ATTRIBUTES} {{",
+            constructor.tag.0
+        );
+        self.bodies.push_str("entry:\n");
+        if arity == 0 {
+            let _ = writeln!(
+                self.bodies,
+                "  call void @adamas_fail(ptr {ARITYLESS_MESSAGE})"
+            );
+            self.bodies.push_str("  unreachable\n}\n\n");
+            return;
+        }
+        let _ = writeln!(
+            self.bodies,
+            "  %value = call ptr @adamas_alloc(i16 {}, i64 {slots})",
+            constructor.tag.0
+        );
+        let mut slot = 0u32;
+        for (position, fact) in constructor.binders.iter().enumerate() {
+            if !fact.present {
+                continue;
+            }
+            // Номер слота замыкания - номер **связывания** ядра, а не слота
+            // объекта: применение позиционно и о стёртых полях не знает.
+            let taken = if position + 1 == arity {
+                "%arg".to_owned()
+            } else {
+                let _ = writeln!(
+                    self.bodies,
+                    "  %s{position} = call ptr @adamas_closure_get(ptr %self, i64 {position})"
+                );
+                let _ = writeln!(
+                    self.bodies,
+                    "  %d{position} = call ptr @adamas_dup(ptr %s{position})"
+                );
+                format!("%d{position}")
+            };
+            let _ = writeln!(
+                self.bodies,
+                "  %p{slot} = getelementptr i8, ptr %value, i64 {}",
+                HEADER_BYTES + slot * SLOT_BYTES
+            );
+            let _ = writeln!(self.bodies, "  store ptr {taken}, ptr %p{slot}");
+            slot += 1;
+        }
+        self.bodies.push_str("  ret ptr %value\n}\n\n");
+    }
+
     /// Общий трамплин: замыкание отдаёт слоты позиционно, функция берёт их
     /// аргументами.
     ///
@@ -1538,7 +1654,11 @@ fn second_form(out: &mut String, program: &Program) {
             .any(|function| function.form == Form::Detached);
     // Замыкание бывает и без второй формы: `module-family` строит значение
     // первой формы и ни одного кадра не отчуждает. Объявления поэтому свои.
-    if framed || !boxing(program).is_empty() || !taking(program).is_empty() {
+    if framed
+        || !boxing(program).is_empty()
+        || !taking(program).is_empty()
+        || !builders(program).is_empty()
+    {
         out.push_str(concat!(
             "; Замыкание: объект с кодом и средой, применение через рантайм.\n",
             "declare ptr @adamas_unit()\n",
@@ -1548,6 +1668,18 @@ fn second_form(out: &mut String, program: &Program) {
             "declare ptr @adamas_apply(ptr, ptr, ptr, ptr)\n",
             "\n",
         ));
+        // Применение в чистом отрезке заводит **свой** корень трамплина
+        // ([`Builder::applied`]), и обе точки входа под него лежат в блоке
+        // второй формы. Нет его - объявить их надо здесь: замыкание бывает и
+        // без второй формы, а докрутить трамплин всё равно обязан кто-то.
+        if !framed {
+            out.push_str(concat!(
+                "; Корень трамплина у применения в чистом отрезке.\n",
+                "declare void @adamas_kont_init(ptr)\n",
+                "declare ptr @adamas_kont_run(ptr, ptr)\n",
+                "\n",
+            ));
+        }
     }
     if framed {
         out.push_str(concat!(
@@ -2355,12 +2487,14 @@ impl<'a> Builder<'a> {
                 reuse,
                 arguments,
             } => self.construct(*constructor, *reuse, arguments),
-            Expr::ConstructClosure { .. } => Err(self.node("конструктор значением")),
+            Expr::ConstructClosure { constructor } => self.building(*constructor),
             Expr::Closure { function, captured } => self.closure(*function, captured),
             // Применение - точка приостановки всегда: какая из двух форм за
-            // указателем, место вызова не знает (`crate::split`). Значит только
-            // хвостом куска ([`Self::applying`]).
-            Expr::Apply { .. } => Err(self.node("применение замыкания в чистом отрезке")),
+            // указателем, место вызова не знает (`crate::split`). В чистом
+            // отрезке трамплин под неё заводится **свой**
+            // ([`Self::applied`]); во второй форме её выносит дробление и
+            // печатает [`Self::applying`].
+            Expr::Apply { callee, argument } => self.applied(callee, argument),
             Expr::Pack { .. } | Expr::Unpack { .. } => Err(self.node("плотный агрегат")),
             Expr::Layout { .. } | Expr::LayoutField { .. } => Err(self.node("дескриптор укладки")),
             Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. } => {
@@ -4124,6 +4258,99 @@ impl<'a> Builder<'a> {
             self.here(),
         );
         self.finish(&answer, Repr::Boxed)
+    }
+
+    /// Конструктор значением: замыкание над его сборщиком ([`Module::maker`]).
+    ///
+    /// Арность - **все** связывания ядра, стёртые в том числе: применение
+    /// позиционно и о стёртых полях не знает. Накопленных аргументов ноль -
+    /// частичного применения понижение здесь не порождает, а доберёт их
+    /// `adamas_apply`.
+    ///
+    /// Два вида поля отвергаются названно, и оба - расхождение с C-эмиттером,
+    /// сделанное намеренно. Его сборщик кладёт всякое поле `adamas_set_field`,
+    /// то есть указателем, и на **плоском** поле это записало бы в слот адрес
+    /// вместо битов: читающая сторона берёт слот как биты (§4.11), и ответ
+    /// разошёлся бы молча. **Стёртые все** дают объект о нуле слотов, а прямая
+    /// постройка отдаёт на нуле `adamas_con0`, то есть непосредственное
+    /// значение, - два разных представления одного конструктора в одной
+    /// программе. Ни того, ни другого корпус не порождает; отказ здесь -
+    /// страховка, а не граница языка.
+    fn building(&mut self, constructor: CtorId) -> Result<String, LlvmError> {
+        let described = &self.program.constructors[usize::from(constructor.0)];
+        let arity = described.binders.len();
+        let slots = described.slots();
+        if described
+            .slot_reprs()
+            .any(|repr| repr.primitive().is_some())
+        {
+            return Err(self.node("конструктор с плоским полем значением"));
+        }
+        if arity > 0 && slots == 0 {
+            return Err(self.node("конструктор со стёртыми полями значением"));
+        }
+        let name = self.temp();
+        self.instruction(
+            &format!(
+                "{name} = call ptr @adamas_closure(ptr @make_{}, ptr @{RELEASE_SYMBOL}, \
+                 i32 {arity}, i32 0) ; {}",
+                constructor.0, described.name
+            ),
+            self.here(),
+        );
+        Ok(name)
+    }
+
+    /// Применение значения-функции в **чистом** отрезке: корень трамплина свой.
+    ///
+    /// Тем же правом, каким его заводят [`Self::handling`] и [`Self::nursing`]:
+    /// ручки стека у первой формы нет, а применению она нужна - за указателем
+    /// может оказаться вторая форма, и кадр ей положить некуда. Корень стоит на
+    /// C-стеке (`alloca ptr`, `adamas_kont` есть одна вершина), трамплин
+    /// докручивает [`adamas_kont_run`], и до кучи это не доходит: первая форма
+    /// за указателем отвечает сразу, кадров не положив ни одного.
+    ///
+    /// Вектор идёт `null`, и это **проверяемое** утверждение, а не умолчание:
+    /// у первой формы вектора нет по записи ABI, а единственное, что кладёт его
+    /// в чистом отрезке, - маска ([`Self::masking`]). Окажись применение под
+    /// ней, `null` потерял бы маску **молча**, поэтому здесь отказ по имени, а
+    /// не тихая печать. Корпус такой пары не порождает (замерено зондом
+    /// 2026-09-16: маска в чистом отрезке встречается, применение под ней -
+    /// нет), и мимо строки этой пройти нечем. C-эмиттер в том же месте печатает
+    /// `NULL` без проверки.
+    fn applied(&mut self, callee: &Expr, argument: &Expr) -> Result<String, LlvmError> {
+        if self.kont.is_some() {
+            // Внутри второй формы применение значением не бывает: дробление
+            // выносит его хвостом куска ([`Self::applying`]). Отказ, а не
+            // свой корень: чужую ручку докрутил бы не тот, кто её завёл.
+            return Err(self.node("применение значением во второй форме"));
+        }
+        if self.ev.is_some() {
+            return Err(self.node("применение под маской в чистом отрезке"));
+        }
+        let callee = self.value(callee)?;
+        let given = self.value(argument)?;
+        let root = format!("%k{}", self.frames);
+        self.frames += 1;
+        let _ = writeln!(self.head, "  {root} = alloca ptr");
+        self.instruction(
+            &format!("call void @adamas_kont_init(ptr {root})"),
+            self.here(),
+        );
+        let answer = self.temp();
+        self.instruction(
+            &format!(
+                "{answer} = call ptr @adamas_apply(ptr {callee}, ptr null, ptr {root}, \
+                 ptr {given})"
+            ),
+            self.here(),
+        );
+        let driven = self.temp();
+        self.instruction(
+            &format!("{driven} = call ptr @adamas_kont_run(ptr {root}, ptr {answer})"),
+            self.here(),
+        );
+        Ok(driven)
     }
 
     /// Замыкание деструктора: код забирающего трамплина плюс среда по слотам.

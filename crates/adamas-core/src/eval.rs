@@ -675,84 +675,87 @@ fn vectored(op: crate::prim::SimdOp, spine: &[Elim]) -> Option<Rc<Value>> {
             }
             Some(canonical(width, lane, dict, &folded))
         }
-        // `simdLoad n xs i` → канон из `n` соседних ячеек колонки.
-        //
-        // Ячейка читается тем же [`cell_of`], каким её читает `arrayIndex`:
-        // второй счёт «что лежит в ячейке» разошёлся бы с первым молча. Не
-        // сводится по тем же трём причинам - номер не литерал, ширина не
-        // литерал, цепочка не упирается в `arrayNew`, - плюс четвёртая:
-        // хвост окна вышел за длину. Последнее и есть **названная граница**,
-        // та же, что у выхода за длину у `arrayIndex`: понижение там обрывает
-        // процесс, а машина не отвечает вовсе.
-        SimdOp::Load => {
-            let [
-                Elim::App(_),
-                Elim::App(lane),
-                Elim::App(dict),
-                Elim::App(width),
-                Elim::App(array),
-                Elim::App(at),
-            ] = spine
-            else {
-                return None;
-            };
-            let (Value::Prim(Prim::Lit(_, lanes)), Value::Prim(Prim::Lit(_, first))) =
-                (&**width, &**at)
-            else {
-                return None;
-            };
-            let mut cells = Vec::with_capacity(usize::try_from(*lanes).ok()?);
-            for step in 0..*lanes {
-                cells.push(cell_of(array, first.checked_add(step)?)?);
-            }
-            Some(canonical(width, lane, dict, &cells))
-        }
-        // `simdStore n xs i v` → цепочка из `n` записей `arraySet`.
-        //
-        // Строится она **тем же** спайном, каким `arraySet` строится сам, и
-        // потому читается потом обычным [`cell_of`]: окно из восьми записей
-        // неотличимо от восьми записей, написанных руками, и это ровно то, что
-        // element-wise семантика §4.9 и обещает.
-        SimdOp::Store => {
-            let [
-                Elim::App(length),
-                Elim::App(lane),
-                Elim::App(_),
-                Elim::App(width),
-                Elim::App(array),
-                Elim::App(at),
-                Elim::App(vector),
-            ] = spine
-            else {
-                return None;
-            };
-            let (Value::Prim(Prim::Lit(_, lanes)), Value::Prim(Prim::Lit(_, first))) =
-                (&**width, &**at)
-            else {
-                return None;
-            };
-            let mut built = Rc::clone(array);
-            for step in 0..*lanes {
-                let value = lane_of(vector, step)?;
-                let index = Rc::new(Value::Prim(crate::prim::Prim::literal(
-                    crate::prim::PrimTy::UInt64,
-                    first.checked_add(step)?,
-                )));
-                built = Rc::new(Value::Neutral(
-                    Head::ArrayOp(crate::prim::ArrayOp::Set),
-                    vec![
-                        Elim::App(Rc::clone(length)),
-                        Elim::App(Rc::clone(lane)),
-                        Elim::App(built),
-                        Elim::App(index),
-                        Elim::App(value),
-                    ],
-                ));
-            }
-            Some(built)
-        }
+        SimdOp::Load => loaded(spine),
+        SimdOp::Store => stored(spine),
         SimdOp::Splat | SimdOp::Set => None,
     }
+}
+
+/// δ-шаг векторной загрузки (§4.9): `simdLoad n xs i` → канон из `n` ячеек.
+///
+/// Ячейка читается тем же [`cell_of`], каким её читает `arrayIndex`: второй
+/// счёт «что лежит в ячейке» разошёлся бы с первым молча. Не сводится по тем
+/// же трём причинам, что чтение ячейки - номер не литерал, ширина не литерал,
+/// цепочка не упирается в `arrayNew`, - плюс четвёртая: хвост окна вышел за
+/// длину. Последнее и есть **названная граница**, та же, что у выхода за длину
+/// у `arrayIndex`: понижение там обрывает процесс, а машина не отвечает вовсе.
+fn loaded(spine: &[Elim]) -> Option<Rc<Value>> {
+    use crate::prim::Prim;
+    let [
+        Elim::App(_),
+        Elim::App(lane),
+        Elim::App(dict),
+        Elim::App(width),
+        Elim::App(array),
+        Elim::App(at),
+    ] = spine
+    else {
+        return None;
+    };
+    let (Value::Prim(Prim::Lit(_, lanes)), Value::Prim(Prim::Lit(_, first))) = (&**width, &**at)
+    else {
+        return None;
+    };
+    let mut cells = Vec::with_capacity(usize::try_from(*lanes).ok()?);
+    for step in 0..*lanes {
+        cells.push(cell_of(array, first.checked_add(step)?)?);
+    }
+    Some(canonical(width, lane, dict, &cells))
+}
+
+/// δ-шаг векторной записи (§4.9): `simdStore n xs i v` → цепочка `arraySet`.
+///
+/// Строится она **тем же** спайном, каким `arraySet` строится сам, и потому
+/// читается потом обычным [`cell_of`]: окно из восьми записей неотличимо от
+/// восьми записей, написанных руками, и это ровно то, что element-wise
+/// семантика §4.9 и обещает.
+fn stored(spine: &[Elim]) -> Option<Rc<Value>> {
+    use crate::prim::Prim;
+    let [
+        Elim::App(length),
+        Elim::App(lane),
+        Elim::App(_),
+        Elim::App(width),
+        Elim::App(array),
+        Elim::App(at),
+        Elim::App(vector),
+    ] = spine
+    else {
+        return None;
+    };
+    let (Value::Prim(Prim::Lit(_, lanes)), Value::Prim(Prim::Lit(_, first))) = (&**width, &**at)
+    else {
+        return None;
+    };
+    let mut built = Rc::clone(array);
+    for step in 0..*lanes {
+        let value = lane_of(vector, step)?;
+        let index = Rc::new(Value::Prim(Prim::literal(
+            crate::prim::PrimTy::UInt64,
+            first.checked_add(step)?,
+        )));
+        built = Rc::new(Value::Neutral(
+            Head::ArrayOp(crate::prim::ArrayOp::Set),
+            vec![
+                Elim::App(Rc::clone(length)),
+                Elim::App(Rc::clone(lane)),
+                Elim::App(built),
+                Elim::App(index),
+                Elim::App(value),
+            ],
+        ));
+    }
+    Some(built)
 }
 
 /// Каноническая форма вектора: `simdSplat` нулевой дорожкой плюс `simdSet` на

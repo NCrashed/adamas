@@ -1483,23 +1483,9 @@ impl Emitter<'_> {
                 field,
                 value,
             } => self.unpack(*packing, *variant, *field, value, depth),
-            Expr::ArrayNew {
-                stride,
-                count,
-                initial,
-            } => self.array_new(*stride, count, initial, depth),
-            Expr::ArraySet {
-                stride,
-                array,
-                at,
-                value,
-            } => self.array_set(*stride, array, at, value, depth),
-            Expr::ArrayIndex {
-                stride,
-                owned,
-                array,
-                at,
-            } => self.array_index(*stride, *owned, array, at, depth),
+            Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. } => {
+                self.array(expr, depth)
+            }
             Expr::SimdSplat { .. }
             | Expr::SimdSet { .. }
             | Expr::SimdLane { .. }
@@ -1873,9 +1859,37 @@ impl Emitter<'_> {
         name
     }
 
-    /// Разбор четырёх узлов вектора (§4.9) по своим печатям.
+    /// Разбор трёх узлов массива (§4.11) по своим печатям.
     ///
-    /// Отдельной ступенькой, а не четырьмя ветвями в [`Self::emitted`]: у той
+    /// Отдельной ступенькой по тому же доводу, что у [`Self::vector`]: у
+    /// [`Self::emitted`] длина на пределе, и разбирать эти три врозь от
+    /// остальных незачем - они разбираются только вместе.
+    fn array(&mut self, expr: &Expr, depth: usize) -> String {
+        match expr {
+            Expr::ArrayNew {
+                stride,
+                count,
+                initial,
+            } => self.array_new(*stride, count, initial, depth),
+            Expr::ArraySet {
+                stride,
+                array,
+                at,
+                value,
+            } => self.array_set(*stride, array, at, value, depth),
+            Expr::ArrayIndex {
+                stride,
+                owned,
+                array,
+                at,
+            } => self.array_index(*stride, *owned, array, at, depth),
+            other => self.emitted(other, depth),
+        }
+    }
+
+    /// Разбор шести узлов вектора (§4.9) по своим печатям.
+    ///
+    /// Отдельной ступенькой, а не шестью ветвями в [`Self::emitted`]: у той
     /// длина уже на пределе, и пятая форма представления не повод её ломать.
     fn vector(&mut self, expr: &Expr, depth: usize) -> String {
         match expr {

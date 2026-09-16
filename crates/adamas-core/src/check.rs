@@ -483,13 +483,6 @@ fn simd_op_scheme(
             Rc::new(lane),
         )
     };
-    // `Array m a` - тот же терм, каким его строит `array_op_scheme`.
-    let array = |length: Term, element: Term| {
-        Term::App(
-            Rc::new(Term::App(Rc::new(Term::Prim(Prim::Array)), Rc::new(length))),
-            Rc::new(element),
-        )
-    };
     // Три стёртых связывания перед всем прочим: ширина, дорожка, словарь.
     let over = |inner: Term| {
         bound(
@@ -501,27 +494,6 @@ fn simd_op_scheme(
                 "a",
                 universe.clone(),
                 bound(erased, "d", primitive_class(signature, Term::var(0)), inner),
-            ),
-        )
-    };
-    // Четыре связывания у операций над колонкой: длина колонки, дорожка,
-    // словарь, **написанная** ширина. Первые три стёрты и имплицитны, ширина
-    // стёрта и явна - выводить её не из чего (см. шапку).
-    let along = |inner: Term| {
-        bound(
-            erased,
-            "m",
-            word.clone(),
-            bound(
-                erased,
-                "a",
-                universe.clone(),
-                bound(
-                    erased,
-                    "d",
-                    primitive_class(signature, Term::var(0)),
-                    bound(Binder::explicit(Mult::Zero), "n", word.clone(), inner),
-                ),
             ),
         )
     };
@@ -578,6 +550,60 @@ fn simd_op_scheme(
                 simd(Term::var(4), Term::var(3)),
             ),
         )),
+        // Операции над колонкой разобраны отдельно: у них своя четвёрка
+        // связываний и свой аргумент-массив.
+        SimdOp::Load | SimdOp::Store => simd_memory_scheme(signature, op, word, universe),
+    }
+}
+
+/// Тип операции над **колонкой** (§4.9): `simdLoad` и `simdStore`.
+///
+/// Отдельно от [`simd_op_scheme`] потому, что связываний у них четыре, а не
+/// три - длина колонки к ширине регистра отношения не имеет и стоит своим, -
+/// и потому, что в аргументе у них массив, которого прочие шесть не видят.
+fn simd_memory_scheme(
+    signature: &Signature,
+    op: crate::prim::SimdOp,
+    word: &Term,
+    universe: &Term,
+) -> Term {
+    use crate::prim::SimdOp;
+    let erased = Binder::implicit(Mult::Zero);
+    let given = Binder::explicit(Mult::Many);
+    let simd = |width: Term, lane: Term| {
+        Term::App(
+            Rc::new(Term::App(Rc::new(Term::Prim(Prim::Simd)), Rc::new(width))),
+            Rc::new(lane),
+        )
+    };
+    // `Array m a` - тот же терм, каким его строит `array_op_scheme`.
+    let array = |length: Term, element: Term| {
+        Term::App(
+            Rc::new(Term::App(Rc::new(Term::Prim(Prim::Array)), Rc::new(length))),
+            Rc::new(element),
+        )
+    };
+    // Длина колонки, дорожка, словарь, **написанная** ширина. Первые три
+    // стёрты и имплицитны, ширина стёрта и явна - выводить её не из чего.
+    let along = |inner: Term| {
+        bound(
+            erased,
+            "m",
+            word.clone(),
+            bound(
+                erased,
+                "a",
+                universe.clone(),
+                bound(
+                    erased,
+                    "d",
+                    primitive_class(signature, Term::var(0)),
+                    bound(Binder::explicit(Mult::Zero), "n", word.clone(), inner),
+                ),
+            ),
+        )
+    };
+    match op {
         // `simdLoad : {0 m} -> {0 a} -> {0 d} -> (0 n : UInt64)
         //           -> (ω xs : Array m a) -> (ω i : UInt64) -> Simd n a`
         SimdOp::Load => along(bound(
@@ -605,6 +631,11 @@ fn simd_op_scheme(
                 ),
             ),
         )),
+        // Прочие шесть разбирает [`simd_op_scheme`], и сюда они не доезжают:
+        // единственный вход сюда - его ветвь по [`SimdOp::memory`].
+        SimdOp::Splat | SimdOp::Set | SimdOp::Lane | SimdOp::Add | SimdOp::Sub | SimdOp::Mul => {
+            unreachable!("операция без памяти в схеме колонки: {op}")
+        }
     }
 }
 

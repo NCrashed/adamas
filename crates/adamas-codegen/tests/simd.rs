@@ -596,7 +596,7 @@ fn window_symbol(ll: &str) -> String {
                 .map(str::to_owned);
         }
         if line.contains("load <8 x float>") {
-            return current.expect("загрузка окна стоит внутри функции");
+            return current.unwrap_or_else(|| panic!("загрузка окна стоит вне функции"));
         }
     }
     panic!("в порождённом IR нет загрузки окна - мерить нечего");

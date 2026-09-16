@@ -190,11 +190,23 @@ int adamas_evidence_lookup(const adamas_evidence *evidence, uint32_t label,
     return ADAMAS_LOOKUP_MISSING;
 }
 
+/* Счётчик вектора идёт через общий, гибридный (§5.1), а не правится здесь.
+ *
+ * Прежде он правился здесь голым `+=`, и однопоточному кругу этого хватало. С
+ * настоящими потоками (§5.2) не хватает: вектор места `withNursery` называет
+ * **каждый** кадр питомника, а кадры эти ставят и снимают разные воркеры -
+ * счётчик его правится ими вперемежку. Помечает его разделяемым
+ * `adamas_nursery_begin`, и с этой минуты та же ветвь по флагу, что у объектов,
+ * уводит его в атомарный режим.
+ *
+ * Детей у вектора нет: записи называют кадры, но ими не владеют (см. шапку), -
+ * поэтому `release` здесь `NULL`, и `adamas_drop` на последней ссылке просто
+ * отдаёт блок. */
 adamas_evidence *adamas_evidence_dup(adamas_evidence *evidence) {
     if (evidence == NULL) {
         return NULL;
     }
-    adamas_header_of(evidence)->rc += 1;
+    adamas_dup((adamas_value)(void *)evidence);
     return evidence;
 }
 
@@ -202,10 +214,5 @@ void adamas_evidence_drop(adamas_evidence *evidence) {
     if (evidence == NULL) {
         return;
     }
-    adamas_header *header = adamas_header_of(evidence);
-    if (header->rc == 0) {
-        adamas_block_free(evidence);
-        return;
-    }
-    header->rc -= 1;
+    adamas_drop((adamas_value)(void *)evidence, NULL);
 }

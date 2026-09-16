@@ -625,6 +625,30 @@ void adamas_resumption_drop(adamas_kont *kont, adamas_value value) {
     adamas_segment_unwind(kont, segment);
 }
 
+void adamas_segment_promote(adamas_value value, adamas_promote children) {
+    /* Обход **сегмента** держит рантайм, обход **данных** приходит параметром -
+     * то же разделение труда, что у `adamas_share` вообще (§5.2). Близнеца
+     * `promote` у кадра заводить не пришлось: сколько слотов среды счётные,
+     * знает сам кадр (`counted`), а какие у значения дети - знает только тип.
+     *
+     * Зовётся это, когда в чужой поток уезжает **захваченная резумпция**:
+     * `\s -> resume v s` держит её в слоте замыкания, и без обхода значения
+     * внутри её кадров остались бы локальными, пересекая поток.
+     *
+     * Сама цепочка кадров разделяемой не метится и не считается: кадр уникален
+     * по построению (`frame.c`, шапка), счётчик его неизменно нуль. Метится
+     * ручка сегмента - её ставит `adamas_share` до этого вызова. */
+    adamas_segment *segment = adamas_segment_of(value);
+    for (adamas_frame *frame = segment->top; frame != NULL; frame = frame->below) {
+        for (size_t slot = 0; slot < frame->counted; slot += 1) {
+            adamas_share(frame->env[slot], children);
+        }
+        if (frame == segment->base) {
+            break;
+        }
+    }
+}
+
 void adamas_segment_abandon(adamas_value value) {
     adamas_segment *segment = adamas_segment_of(value);
     if (segment->top == NULL) {

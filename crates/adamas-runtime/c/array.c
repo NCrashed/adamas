@@ -155,9 +155,47 @@ __attribute__((noinline, cold)) static adamas_value copied(adamas_value array,
 
 adamas_value adamas_array_writable(adamas_value array, adamas_release release) {
     if (adamas_is_unique(array)) {
+        /* **Здесь закрывается граница, названная §5.2**: «запись в уже
+         * разделённый объект обходом второй раз не покрывается».
+         *
+         * Массив - единственное место, где она достижима: поля конструктора
+         * пишутся при постройке, когда объект ещё локален, а `adamas_reuse`
+         * пометку снимает. Ячейку же переписывают когда угодно, и разделённый
+         * массив с локальным постояльцем в слоте - ровно та дыра: второй
+         * `adamas_share` увидел бы пометку на самом массиве, остановился и до
+         * нового ребёнка не дошёл.
+         *
+         * Снимается пометка тем же доводом, каким её снимает `adamas_reuse`:
+         * `rc == 0` значит, что владелец один, - второго держателя у массива
+         * нет, и достаться он никому не может. Локальным он и становится,
+         * пока его снова не разделят; разделят - обход пройдёт по новым детям.
+         *
+         * Копия этого не требует: `copied` выдаёт свежий блок, а у свежего
+         * флагов нет.
+         *
+         * Записывается это **под проверкой**, а не всякий раз: у локального
+         * массива флагов нет, и безусловная запись пачкала бы строку кэша на
+         * каждом витке §4.11. Ветвь же не стоит ничего - измерено треком B
+         * волны 3 Фазы 7 на том же ядре (181.4 против 180.6 мс). */
+        adamas_header *head = adamas_header_of(array);
+        if (head->flags != 0) {
+            head->flags = 0;
+        }
         return array;
     }
     return copied(array, release);
+}
+
+void adamas_array_promote(adamas_value array, adamas_promote children) {
+    adamas_array *head = header_of(array);
+    size_t index;
+    if (head->stride != 0) {
+        /* Плоские ячейки заголовков не имеют вовсе (§4.11): метить нечего. */
+        return;
+    }
+    for (index = 0; index < head->count; index += 1) {
+        adamas_share(adamas_array_get(array, index), children);
+    }
 }
 
 void adamas_array_release(adamas_value array, adamas_release release) {

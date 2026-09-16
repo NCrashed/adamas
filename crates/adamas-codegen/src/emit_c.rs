@@ -85,6 +85,9 @@ pub(crate) const PRINTER: &str = include_str!("print.c");
 /// Дроп детей по той же таблице.
 pub(crate) const RELEASE: &str = include_str!("release.c");
 
+/// Промоушен детей по ней же (§5.2). Печатается только программе с питомником.
+pub(crate) const PROMOTE: &str = include_str!("promote.c");
+
 /// Точка входа: печать ответа и счётчики блоков.
 pub(crate) const ENTRY: &str = include_str!("main.c");
 
@@ -154,6 +157,10 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     table(&mut out, program);
     out.push_str(RELEASE);
     out.push('\n');
+    if nursed(program) {
+        out.push_str(PROMOTE);
+        out.push('\n');
+    }
     if scoped(program) {
         out.push_str(
             "/* Дроп среды кадра scope: деструктор замыканием в слоте 0 (§3.3). */\n\
@@ -261,6 +268,20 @@ fn forms_agree(program: &Program, suspending: &Suspension) -> Result<(), EmitErr
         }
     }
     Ok(())
+}
+
+/// Есть ли в программе круг: тогда нужен обход промоушена (§5.2).
+///
+/// Печатать его всегда нельзя - без питомника он остаётся неиспользованным, и
+/// `-Wunused-function` называет это по имени.
+pub(crate) fn nursed(program: &Program) -> bool {
+    program.functions.iter().any(|function| {
+        let mut found = false;
+        walk(&function.body, &mut |expr| {
+            found |= matches!(expr, Expr::Nursery { .. });
+        });
+        found
+    })
 }
 
 /// Есть ли в программе выход из scope кадром: тогда нужен его дроп среды.
@@ -3093,7 +3114,10 @@ impl Emitter<'_> {
             Expr::Mask { label, computation } => self.masking_tail(*label, computation, depth),
             Expr::Nursery { body } => {
                 let body = self.value(body, depth);
-                let call = format!("adamas_nursery_begin(kont, ev, {body}, adamas_release_value)");
+                let call = format!(
+                    "adamas_nursery_begin(kont, ev, {body}, adamas_release_value, \
+                     adamas_promote_value)"
+                );
                 self.finish(&call, Repr::Boxed, depth);
             }
             Expr::Cancel { at, value } => {
@@ -3388,7 +3412,7 @@ impl Emitter<'_> {
         let _ = writeln!(
             self.out,
             "{inner}adamas_value {seed} = \
-             adamas_nursery_begin(kont, ev, {body}, adamas_release_value);"
+             adamas_nursery_begin(kont, ev, {body}, adamas_release_value, adamas_promote_value);"
         );
         let _ = writeln!(self.out, "{inner}{name} = adamas_kont_run(kont, {seed});");
         let _ = writeln!(self.out, "{inner}adamas_evidence_drop({root}_ev);");

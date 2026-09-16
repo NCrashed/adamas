@@ -53,19 +53,27 @@ size_t adamas_region_used(adamas_value region) {
     return header_of(region)->used;
 }
 
-/* Область, готовая к записи. Тот же договор, что у `adamas_array_writable`:
- * уникальность спрашивается у рантайма (`rc == 0`), разделённая копируется
- * целиком - вместе с курсором и журналом, иначе хендлы прежних аллокаций
- * указывали бы в копии не туда. */
-static adamas_value writable(adamas_value region) {
+/* Копия разделённой области: холодная половина `writable`.
+ *
+ * Вынесена по тому же правилу и тем же замером, каким вынесены холодная
+ * половина `adamas_array_writable` (`array.c`, `copied`) и разделяемая половина
+ * счётчика (`object.c`, `ADAMAS_SHARED_HALF`, §10 вопрос 175): на витке,
+ * который кладёт значения в свою область, она уникальна всегда, копия не
+ * случается ни разу, а её тело - аллокация и два `memcpy` - делает `writable`
+ * слишком крупной, чтобы встать в место вызова целиком.
+ *
+ * Делить приходится **в исходнике**, а не отдавать компилятору: gcc разбивает
+ * такую функцию частичным инлайнингом сам (`.part.0`), а конвейер LLVM нет -
+ * `PartialInlinerPass` в его `-O2` выключен по умолчанию. На `adamas_array_writable`
+ * это стоило 72% строки 4а таблицы разрыва (трек B волны 3 Фазы 7), то есть
+ * строка мерила наличие одного паса у одного бэкенда.
+ *
+ * Копируется область **целиком** - вместе с курсором и журналом, - иначе хендлы
+ * прежних аллокаций указывали бы в копии не туда. */
+__attribute__((noinline, cold)) static adamas_value copied(adamas_value region) {
     adamas_region *head = header_of(region);
-    adamas_value copy;
-    adamas_region *made;
-    if (adamas_is_unique(region)) {
-        return region;
-    }
-    copy = adamas_region_new();
-    made = (adamas_region *)copy;
+    adamas_value copy = adamas_region_new();
+    adamas_region *made = (adamas_region *)copy;
     made->used = head->used;
     made->last = head->last;
     made->cells = head->cells;
@@ -77,6 +85,21 @@ static adamas_value writable(adamas_value region) {
     }
     adamas_drop(region, adamas_region_release);
     return copy;
+}
+
+/* Область, готовая к записи. Тот же договор, что у `adamas_array_writable`:
+ * уникальность спрашивается у рантайма (`rc == 0`), разделённая копируется
+ * целиком.
+ *
+ * Проверка тега остаётся **здесь**, а не уезжает в холодную половину: она
+ * стояла на этом пути до выноса, и убрать её значило бы разменять диагностику
+ * на скорость молча. Вынос делит функцию, а не меняет то, что она делает. */
+static adamas_value writable(adamas_value region) {
+    adamas_region *head = header_of(region);
+    if (adamas_is_unique(region)) {
+        return (adamas_value)head;
+    }
+    return copied(region);
 }
 
 adamas_value adamas_region_alloc(adamas_value region, const void *bits, size_t size,

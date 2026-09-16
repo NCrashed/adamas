@@ -255,12 +255,31 @@ fn built(name: &str, text: &str) -> (String, String) {
     reason = "заготовка теста: отказ здесь означает сломанное окружение, и падать он должен громко"
 )]
 pub(crate) fn built_with(name: &str, text: &str, extra: &[&str]) -> (String, String) {
+    built_by(name, text, env!("ADAMAS_CC"), extra)
+}
+
+/// Он же названным компилятором.
+///
+/// Нужен одному свидетелю - строгому режиму (`tests/float.rs`), - и нужен
+/// **замером**: обещание §4.3 не должно держаться на том, какой сишный
+/// компилятор нашёлся у сборки. Замер 2026-09-16 показал, что до вопроса 172
+/// оно держалось именно на этом: `gcc` отвечал одно на всех четырёх уровнях, а
+/// `clang` - другое на `-O1` и выше.
+///
+/// Объектники рантайма приезжают собранные `ADAMAS_CC`; линковать их чужим
+/// компилятором законно - ABI платформы один, - и мерится здесь именно
+/// порождённый код, а не рантайм.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение, и падать он должен громко"
+)]
+pub(crate) fn built_by(name: &str, text: &str, cc: &str, extra: &[&str]) -> (String, String) {
     let dir = scratch();
     let source = dir.join(format!("{name}.c"));
     let binary = dir.join(name);
     std::fs::write(&source, text).unwrap();
 
-    let mut compile = Command::new(env!("ADAMAS_CC"));
+    let mut compile = Command::new(cc);
     compile
         .args([
             "-std=c11",
@@ -1106,6 +1125,22 @@ pub(crate) fn llvm_toolchains() -> Option<(Toolchain, Toolchain)> {
         Toolchain::from_variable(adamas_codegen::llvm::TOOLS_VARIABLE),
         Toolchain::from_variable(adamas_codegen::llvm::MINIMUM_TOOLS_VARIABLE),
     ))
+}
+
+/// Второй сишный компилятор - тот же clang, которым собирается `.bc` рантайма.
+///
+/// `None` там же, где `None` у [`llvm_toolchains`]: clang приезжает из той же
+/// поставки LLVM, и объявленное её отсутствие снимает и его.
+pub(crate) fn clang() -> Option<String> {
+    llvm_toolchains()?;
+    let path = std::env::var(CLANG_VARIABLE)
+        .ok()
+        .filter(|it| !it.is_empty());
+    Some(path.unwrap_or_else(|| {
+        panic!(
+            "`{CLANG_VARIABLE}` не задан, а в dev-shell он есть: второй компилятор взять неоткуда"
+        )
+    }))
 }
 
 /// Сколько блоков прогон выдал и сколько оставил живыми.

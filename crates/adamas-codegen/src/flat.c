@@ -128,7 +128,10 @@ static uint64_t adamas_slot_word(adamas_value slot) {
 
 static void adamas_show_real(double value, int width);
 
-#define ADAMAS_FLAT_REAL(name, ctype, utype)                                                       \
+/* `infinity` - биты `+inf`, `canon` - биты канонического тихого NaN: экспонента
+ * из одних единиц при нулевой и при старшей мантиссе. Пишутся числами, а не
+ * считаются из `sizeof`: то же делает `PrimTy::special` в ядре. */
+#define ADAMAS_FLAT_REAL(name, ctype, utype, infinity, canon)                                      \
     static ctype adamas_bits_##name(uint64_t bits) {                                               \
         utype word = (utype)bits;                                                                  \
         ctype value;                                                                               \
@@ -143,15 +146,27 @@ static void adamas_show_real(double value, int width);
     static ctype adamas_add_##name(ctype a, ctype b) { return a + b; }                             \
     static ctype adamas_sub_##name(ctype a, ctype b) { return a - b; }                             \
     static ctype adamas_mul_##name(ctype a, ctype b) { return a * b; }                             \
-    /* Порядок - `totalOrder` IEEE-754, которым §4.3 наделяет `Eq`/`Ord`:      \
-     * отрицательное инвертируется целиком, положительному ставится старший    \
-     * бит. Отсюда `-0.0 < 0.0` и `nan == nan`, а IEEE-сравнение живёт          \
-     * отдельно - `ieeeEq`/`ieeeLt` класса `Approximate`. */                   \
+    /* Порядок - `totalOrder` IEEE-754, которым §4.3 наделяет `Eq`/`Ord`, по    \
+     * канонизированному значению: отрицательное инвертируется целиком,         \
+     * положительному ставится старший бит, а всякий NaN становится одним       \
+     * элементом порядка выше `+inf` (вопрос 172 - знак и нагрузку              \
+     * порождённого NaN IEEE-754 не задаёт, и наблюдать их значило бы отдать    \
+     * ответ программы железу). Отсюда `-0.0 < 0.0` и `nan == nan`, а           \
+     * IEEE-сравнение живёт отдельно - `ieeeEq`/`ieeeLt` класса `Approximate`.  \
+     *                                                                          \
+     * Проверка на NaN идёт по битам, а не `value != value`: та гоняла бы       \
+     * число обратно в регистр с плавающей точкой, а здесь биты уже под рукой.  \
+     * Ровно та же форма - в `PrimTy::key` ядра и в ключе LLVM-эмиттера. */     \
     static utype adamas_order_##name(ctype value) {                                                \
         utype bits;                                                                                \
+        utype key;                                                                                 \
         utype top = (utype)1 << (sizeof(utype) * 8 - 1);                                           \
         memcpy(&bits, &value, sizeof bits);                                                        \
-        return (bits & top) != 0 ? (utype)~bits : (utype)(bits | top);                             \
+        key = (bits & top) != 0 ? (utype)~bits : (utype)(bits | top);                              \
+        if ((utype)(bits & (utype)(top - 1)) > (utype)(infinity)) {                                \
+            key = (utype)((canon) | top);                                                          \
+        }                                                                                          \
+        return key;                                                                                \
     }                                                                                              \
     static int adamas_eq_##name(ctype a, ctype b) {                                                \
         return adamas_order_##name(a) == adamas_order_##name(b);                                   \
@@ -181,8 +196,8 @@ ADAMAS_FLAT_INTEGER(UInt8, uint8_t, uint8_t, unsigned long long, "%llu")
 ADAMAS_FLAT_INTEGER(UInt16, uint16_t, uint16_t, unsigned long long, "%llu")
 ADAMAS_FLAT_INTEGER(UInt32, uint32_t, uint32_t, unsigned long long, "%llu")
 ADAMAS_FLAT_INTEGER(UInt64, uint64_t, uint64_t, unsigned long long, "%llu")
-ADAMAS_FLAT_REAL(Float32, float, uint32_t)
-ADAMAS_FLAT_REAL(Float64, double, uint64_t)
+ADAMAS_FLAT_REAL(Float32, float, uint32_t, 0x7F800000u, 0x7FC00000u)
+ADAMAS_FLAT_REAL(Float64, double, uint64_t, 0x7FF0000000000000u, 0x7FF8000000000000u)
 
 /* Кратчайшая запись плавающего в форме Rust'а. `width` - 4 либо 8: сужение до
  * `float` решает и точность записи, и границы позиционной формы. */

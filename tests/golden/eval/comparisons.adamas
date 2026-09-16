@@ -36,7 +36,9 @@ looseOnEqual = pick (leInt64 7 7) 1 0
 
 -- `totalOrder`: знаковый ноль различим, и IEEE-сравнение ответило бы «равны».
 -- Вторая точка расхождения §4.3 - NaN - здесь не наблюдаема: написать его
--- нечем, деления в языке нет. Она стоит unit-тестом в `adamas-core/src/prim.rs`.
+-- нечем, деления в языке нет. Она стоит unit-тестом в `adamas-core/src/prim.rs`
+-- (`every_nan_is_one_element_of_the_order`, вопрос 172) и прогоном по обоим
+-- бэкендам в `adamas-codegen/tests/float.rs`.
 negativeZeroIsLess : Int64
 negativeZeroIsLess = pick (ltFloat64 (-0.0) 0.0) 1 0
 

@@ -304,8 +304,13 @@ fn region_op_scheme(
         )
     };
     match op {
-        // `regionNew : Block`
-        RegionOp::New => block,
+        // `regionNew`, `sharedNew : Block`
+        //
+        // Тип у них один, и это существенно: §3.6 объявляет
+        // `SharedAllocStrategy when AllocStrategy`, то есть те же члены с теми
+        // же типами. Различает две области рантайм по тегу, а типовая сторона
+        // - запечатывание стратегии (§4.8).
+        RegionOp::New | RegionOp::SharedNew => block,
         // `regionAlloc : {0 a} -> {0 d : Flat a} -> (ω r : Block) -> (ω x : a) -> Block`
         RegionOp::Alloc => carried(bound(
             given,

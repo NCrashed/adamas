@@ -92,7 +92,12 @@ use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 /// `flat`, `flat-primitives`, `flat-sealed-member` - под снятым отказом
 /// показали **дескриптор укладки**, то есть словарь `Flat a` значением; взят
 /// и он.
-const TAKEN: [&str; 102] = [
+///
+/// Последняя - `shared-strategies`, разделяемые стратегии §3.6 (трек B волны
+/// 4). Даром: операция у неё одна новая (`sharedNew`), а прочие шесть те же,
+/// что у обычной области, - §3.6 объявляет `SharedAllocStrategy when
+/// AllocStrategy`, то есть те же члены, и расходятся стратегии в `new`.
+const TAKEN: [&str; 103] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -175,6 +180,7 @@ const TAKEN: [&str; 102] = [
     "sealed-effect",
     "sequences",
     "shadowed-name",
+    "shared-strategies",
     "signature-effect",
     "signature-effect-parameterized",
     "simd-lanes",

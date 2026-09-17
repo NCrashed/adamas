@@ -706,6 +706,7 @@ fn regions(out: &mut String, program: &Program) {
     out.push_str(concat!(
         "; Регион (§3.6): один блок кучи на всю область, нагрузка внутри плоская.\n",
         "declare ptr @adamas_region_new()\n",
+        "declare ptr @adamas_shared_new()\n",
         "declare ptr @adamas_region_alloc(ptr, ptr, i64, i64)\n",
         "declare i64 @adamas_region_last(ptr, ptr)\n",
         "declare void @adamas_region_read(ptr, i64, ptr, i64, ptr)\n",
@@ -716,7 +717,7 @@ fn regions(out: &mut String, program: &Program) {
     ));
 }
 
-/// Есть ли в программе область: любая из семи её операций.
+/// Есть ли в программе область: любая из восьми её операций.
 fn regioned(program: &Program) -> bool {
     program.functions.iter().any(|function| {
         let mut found = false;
@@ -724,6 +725,7 @@ fn regioned(program: &Program) -> bool {
             found |= matches!(
                 expr,
                 Expr::RegionNew
+                    | Expr::SharedNew
                     | Expr::RegionAlloc { .. }
                     | Expr::RegionLast { .. }
                     | Expr::RegionRead { .. }
@@ -2504,6 +2506,7 @@ impl<'a> Builder<'a> {
                 ..
             } => self.packed_slot(*packing, *variant, *field).ty.repr(),
             Expr::RegionNew
+            | Expr::SharedNew
             | Expr::RegionAlloc { .. }
             | Expr::RegionWrite { .. }
             | Expr::RegionRecycle { .. }
@@ -2654,6 +2657,21 @@ impl<'a> Builder<'a> {
     }
 
     /// Эмитит выражение и отдаёт операнд, в котором лежит его значение.
+    /// Стёртая позиция значением: то же `ADAMAS_ERASED`, что у C-эмиттера.
+    ///
+    /// Встречается она в одном месте - аргументах операции: раздача веток
+    /// позиционна и типа операции не знает, поэтому стёртый аргумент едет
+    /// непосредственным значением, а ветка его дропает наравне с лишними.
+    /// Ячейки кучи за ним нет.
+    fn erased(&mut self) -> String {
+        let name = self.temp();
+        self.instruction(
+            &format!("{name} = call ptr @adamas_con0(i16 {ERASED_TAG})"),
+            self.here(),
+        );
+        name
+    }
+
     fn value(&mut self, expr: &Expr) -> Result<String, LlvmError> {
         let expr = self.prologue(expr)?;
         match expr {
@@ -2688,19 +2706,7 @@ impl<'a> Builder<'a> {
             Expr::Match {
                 scrutinee, arms, ..
             } => self.analysis(scrutinee, arms),
-            // Стёртая позиция значением: то же `ADAMAS_ERASED`, что у
-            // C-эмиттера. Встречается она в одном месте - аргументах операции:
-            // раздача веток позиционна и типа операции не знает, поэтому
-            // стёртый аргумент едет непосредственным значением, а ветка его
-            // дропает наравне с лишними. Ячейки кучи за ним нет.
-            Expr::Erased => {
-                let name = self.temp();
-                self.instruction(
-                    &format!("{name} = call ptr @adamas_con0(i16 {ERASED_TAG})"),
-                    self.here(),
-                );
-                Ok(name)
-            }
+            Expr::Erased => Ok(self.erased()),
             Expr::Construct {
                 constructor,
                 reuse,
@@ -2744,6 +2750,7 @@ impl<'a> Builder<'a> {
                 right,
             } => self.lanewise(*op, *lanes, *lane, left, right),
             Expr::RegionNew
+            | Expr::SharedNew
             | Expr::RegionAlloc { .. }
             | Expr::RegionLast { .. }
             | Expr::RegionRead { .. }
@@ -3529,6 +3536,17 @@ impl<'a> Builder<'a> {
                 let name = self.temp();
                 self.instruction(
                     &format!("{name} = call ptr @adamas_region_new()"),
+                    self.here(),
+                );
+                Ok(name)
+            }
+            // Разделяемая область расходится с обычной **только здесь**:
+            // дальше её ведут те же шесть операций, и различает их рантайм по
+            // тегу (§3.6, `SharedAllocStrategy when AllocStrategy`).
+            Expr::SharedNew => {
+                let name = self.temp();
+                self.instruction(
+                    &format!("{name} = call ptr @adamas_shared_new()"),
                     self.here(),
                 );
                 Ok(name)

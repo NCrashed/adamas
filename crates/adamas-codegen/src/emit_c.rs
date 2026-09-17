@@ -1397,6 +1397,7 @@ impl Emitter<'_> {
             Expr::SimdLane { lane, .. } => Repr::Flat(*lane),
             Expr::SimdStore { .. } => Repr::Array(Elems::Flat),
             Expr::RegionNew
+            | Expr::SharedNew
             | Expr::RegionAlloc { .. }
             | Expr::RegionWrite { .. }
             | Expr::RegionRecycle { .. }
@@ -1493,6 +1494,7 @@ impl Emitter<'_> {
             | Expr::SimdLoad { .. }
             | Expr::SimdStore { .. } => self.vector(expr, depth),
             Expr::RegionNew
+            | Expr::SharedNew
             | Expr::RegionAlloc { .. }
             | Expr::RegionLast { .. }
             | Expr::RegionRead { .. }
@@ -2383,13 +2385,17 @@ impl Emitter<'_> {
         }
     }
 
-    /// Операция над регионом (§3.6): шесть форм одним разбором.
+    /// Операция над регионом (§3.6): семь форм одним разбором.
     ///
     /// Отдельным разбором, а не ветвями общего, потому что форм у региона
     /// столько же, сколько у всего остального вместе.
     fn region(&mut self, expr: &Expr, depth: usize) -> String {
         match expr {
-            Expr::RegionNew => self.region_new(depth),
+            Expr::RegionNew => self.region_new("adamas_region_new", depth),
+            // Разделяемая область расходится с обычной **только здесь**:
+            // дальше её ведут те же шесть операций, и различает их рантайм по
+            // тегу (§3.6, `SharedAllocStrategy when AllocStrategy`).
+            Expr::SharedNew => self.region_new("adamas_shared_new", depth),
             Expr::RegionAlloc {
                 stride,
                 region,
@@ -2413,11 +2419,12 @@ impl Emitter<'_> {
         }
     }
 
-    /// Пустой регион: одна область, один блок кучи (§3.6).
-    fn region_new(&mut self, depth: usize) -> String {
+    /// Пустая область: один блок кучи (§3.6). `call` различает обычную и
+    /// разделяемую - и это единственное место, где они различаются.
+    fn region_new(&mut self, call: &str, depth: usize) -> String {
         let pad = Self::pad(depth);
         let name = self.temp();
-        let _ = writeln!(self.out, "{pad}adamas_value {name} = adamas_region_new();");
+        let _ = writeln!(self.out, "{pad}adamas_value {name} = {call}();");
         name
     }
 

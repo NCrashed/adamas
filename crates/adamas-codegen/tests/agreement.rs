@@ -102,7 +102,7 @@ use std::path::PathBuf;
 /// отвергался представлением - см. `Repr::pointer`.
 /// Всё, что здесь стоит, обязано собраться и ответить как `adamas eval`; список
 /// сокращать нельзя, а пополнять - можно и нужно, когда фрагмент растёт.
-const TAKEN: [&str; 100] = [
+const TAKEN: [&str; 102] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",

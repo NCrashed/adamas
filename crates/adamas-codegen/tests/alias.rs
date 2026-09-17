@@ -29,6 +29,9 @@
 
 mod harness;
 
+use std::path::Path;
+use std::process::Command;
+
 use adamas_codegen::ir::{Program, Unique};
 use adamas_codegen::llvm::{Pipeline, Toolchain};
 
@@ -606,6 +609,310 @@ fn cells_typed(text: &str) -> String {
     out.push("!9001 = !{!\"omnipotent char\", !9000, i64 0}".to_owned());
     out.push("!9002 = !{!\"float\", !9001, i64 0}".to_owned());
     out.push("!9003 = !{!9002, !9002, i64 0}".to_owned());
+    out.join("\n")
+}
+
+/// `align` на векторном обращении - **единственное метаданное фазы, которое
+/// меняет инструкцию**, и купить им нечего (§4.9).
+///
+/// Это третий перемер приговора волны 1, и он единственный, где приговор
+/// частично **отменяется**. У скалярной колонки `align` был украшением по
+/// построению: `load float` и без метаданного знает, что четыре байта стоят по
+/// четырём, и счётчик инструкций это подтвердил нулём. У векторного обращения
+/// метаданное решает **вид перемещения**: с `align 4` выходит `movups`, с
+/// `align 32` - `movaps`. Счётчик инструкций этого не видит - их поровну, - и
+/// поймать разницу можно только мнемоникой и прогоном.
+///
+/// Замер 2026-09-17, LLVM 21.1.8, x86-64 baseline. Инструкции - по всему
+/// объектнику ([`harness::instructions`]), невыровненные перемещения - по телу
+/// `adamas_entry`; прогон - `docs/measurements/simd/window-addressing.sh`,
+/// где те же варианты собраны ещё и с привязкой к ядру:
+///
+/// | обещано | инструкций | невыровненных | прогон |
+/// |---|---|---|---|
+/// | `align 4` (как эмитит) | 7396 | **8** | ответ |
+/// | `align 8` (правда) | 7396 | **8** | ответ |
+/// | `align 32` (ложь) | 7396 | **0** | **SIGSEGV** |
+///
+/// Счёт инструкций у всех трёх один. Будь он единственной мерой, вывод был бы
+/// «метаданное инертно» - а оно кладёт процесс. Это и есть тот случай, когда
+/// проверку надо было сломать прежде, чем ей поверить.
+///
+/// Читается это так, и в три хода.
+///
+/// *Правда ничего не покупает.* Нагрузка массива лежит по смещению 24 от блока
+/// `malloc`, выровненного по 16 (`adamas.h`), то есть по **восьми** и ни по
+/// чему больше. Восемь меньше шестнадцати, перемещение остаётся невыровненным,
+/// и ни одна инструкция не двигается. Чередованием то же самое: `align 8`
+/// против `align 4` даёт 1.0064 (пять блоков, размах 0.035), то есть ноль.
+///
+/// *Ложь фатальна, и это предъявлено прогоном.* `24 + 16k` не бывает кратно
+/// тридцати двум ни при каком `k`, поэтому окно шириной в регистр по такому
+/// адресу не стоит никогда, и `movaps` по нему кладёт процесс.
+///
+/// *Отсюда судьба `AlignedBuffer` §4.9, и она структурная.* Канал, через
+/// который ресурсный тип мог бы что-то купить, **найден и назван** - это выбор
+/// `movaps`/`movups`. Но добыть границу ресурсным типом нельзя: её раздаёт
+/// раскладка блока §4.11, и чтобы окно встало по тридцати двум, заголовок
+/// массива обязан стать тридцатидвухбайтовым, а `adamas_block_alloc` -
+/// пере-выравнивающим. То есть §4.9 просит ресурс там, где нужна правка §4.11.
+/// Чего стоит сама аппаратная разница между выровненным и невыровненным
+/// перемещением, померено треком H (`docs/measurements/simd/`) и оказалось
+/// **неизмеримым**: разброс шире эффекта.
+///
+/// `noalias` здесь для контраста - та же щедрая правка, что у соседних
+/// свидетелей, и на векторной программе она по-прежнему даёт ноль.
+///
+/// Положительный контроль тот же по смыслу, что у скалярного близнеца, и
+/// другой по форме: счётчик двигает не метаданное, а адрес окна, посчитанный
+/// самим IR. Без контроля нули означали бы только, что смотреть было не на что.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+#[test]
+fn alignment_beyond_the_truth_earns_nothing_on_a_vector_load() {
+    let Some((tools, _)) = harness::llvm_toolchains() else {
+        return;
+    };
+    let runtime = harness::runtime_bitcode(&tools);
+    let pipeline = Pipeline::whole_program(&runtime);
+
+    let name = "workload-vector";
+    let text = source(name);
+    let artefacts = harness::llvm_text(name, &text).unwrap();
+    // Обязательное `align 4` проверяется **по форме**, а не по имени
+    // временного: номера у них зависят от порядка понижения, и прибитый
+    // гвоздями `%t5` разъехался бы с первой же правкой фикстуры.
+    let touches: Vec<&str> = artefacts
+        .ll
+        .lines()
+        .filter(|line| line.contains("<8 x float>") && line.contains(", ptr %"))
+        .collect();
+    assert_eq!(
+        touches.len(),
+        2,
+        "{name}: обращений к окну не два, а {}: мерится не то",
+        touches.len()
+    );
+    assert!(
+        touches.iter().all(|line| line.ends_with(", align 4")),
+        "{name}: обращение к окну обещает не ту границу: {touches:?}"
+    );
+    let untouched = harness::llvm_object(&format!("{name}.bare"), &artefacts, &tools, &pipeline);
+    let base = harness::instructions(&tools, &untouched);
+
+    // Сколько их - зависит от того, насколько конвейер развернул виток, и
+    // числа тут прибивать не за что. Несущее - что они **есть**: окно стоит по
+    // шагу колонки, и перемещение обязано быть невыровненным.
+    let loose = unaligned_moves(&tools, &untouched);
+    assert!(
+        loose > 0,
+        "{name}: невыровненных перемещений ноль - окно уже грузится выровненным, \
+         и мерить разницу нечем"
+    );
+
+    // Правда и щедрость - ноль и по инструкциям, и по мнемонике.
+    for (what, marked) in [
+        ("align 8", promised(&artefacts.ll, 8)),
+        ("noalias", noalias(&artefacts.ll)),
+    ] {
+        assert_ne!(
+            marked, artefacts.ll,
+            "{name}: правка `{what}` не применилась"
+        );
+        let with = adamas_codegen::emit_llvm::Artefacts {
+            ll: marked,
+            support: artefacts.support.clone(),
+        };
+        let stem = format!("{name}.{}", what.replace(' ', ""));
+        let object = harness::llvm_object(&stem, &with, &tools, &pipeline);
+        let count = harness::instructions(&tools, &object);
+        let moves = unaligned_moves(&tools, &object);
+        eprintln!("{name}: `{what}` - инструкций {base}/{count}, невыровненных {loose}/{moves}");
+        assert_eq!(
+            (count, moves),
+            (base, loose),
+            "{name}: `{what}` изменило код - правдивое обещание перестало быть \
+             даровым, и его надо ставить"
+        );
+    }
+
+    // А ложь - меняет, и счётчик инструкций этого **не видит**. Это и есть та
+    // проверка, которую надо было сломать, прежде чем ей верить: поверь мы
+    // одному счёту инструкций, вывод был бы «метаданное инертно», а оно
+    // кладёт процесс.
+    let lie = adamas_codegen::emit_llvm::Artefacts {
+        ll: promised(&artefacts.ll, 32),
+        support: artefacts.support.clone(),
+    };
+    assert_ne!(lie.ll, artefacts.ll, "{name}: ложь не применилась");
+    let object = harness::llvm_object(&format!("{name}.align32"), &lie, &tools, &pipeline);
+    let count = harness::instructions(&tools, &object);
+    let moves = unaligned_moves(&tools, &object);
+    eprintln!("{name}: `align 32` - инструкций {base}/{count}, невыровненных {loose}/{moves}");
+    assert_eq!(
+        count, base,
+        "{name}: `align 32` сдвинуло счётчик инструкций - разбор ниже написан \
+         по тому, что не сдвигало"
+    );
+    assert_eq!(
+        moves, 0,
+        "{name}: `align 32` не сделало перемещения выровненными - канал, \
+         которым `AlignedBuffer` §4.9 мог бы платить, закрылся, и это надо \
+         перемерить"
+    );
+
+    window_control(name, &artefacts, base, &tools, &pipeline);
+}
+
+/// Положительный контроль: счётчик двигает **адрес окна**, а не метаданное.
+///
+/// Без него нули выше означали бы только, что смотреть было не на что. Форма
+/// контроля - та же, что у скалярного близнеца, и она же есть мера развилки,
+/// оставленной треком B: адрес, посчитанный самим IR константным шагом.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+fn window_control(
+    name: &str,
+    artefacts: &adamas_codegen::emit_llvm::Artefacts,
+    base: usize,
+    tools: &Toolchain,
+    pipeline: &Pipeline,
+) {
+    let addressed = adamas_codegen::emit_llvm::Artefacts {
+        ll: window_addressed(&artefacts.ll),
+        support: artefacts.support.clone(),
+    };
+    assert_ne!(addressed.ll, artefacts.ll, "{name}: контроль не применился");
+    let object = harness::llvm_object(&format!("{name}.addressed"), &addressed, tools, pipeline);
+    let count = harness::instructions(tools, &object);
+    eprintln!("{name}: контроль (адрес окна считает сам IR) - {base} против {count}");
+    assert!(
+        count < base,
+        "{name}: контроль не изменил кода - значит и нули выше ничего не значат"
+    );
+    let honest = ran(
+        &format!("{name}.plain"),
+        &artefacts.ll,
+        &artefacts.support,
+        tools,
+        pipeline,
+    );
+    let control = ran(
+        &format!("{name}.control"),
+        &addressed.ll,
+        &addressed.support,
+        tools,
+        pipeline,
+    );
+    assert_eq!(
+        honest, control,
+        "{name}: контроль посчитал не то - сравнивать было бы нечего"
+    );
+}
+
+/// Сколько **невыровненных** пакетных перемещений в горячей функции.
+///
+/// Счёт инструкций эту разницу не берёт: `movups` и `movaps` весят по одной, и
+/// подмена одной другой оставляет счётчик на месте. Мерится поэтому мнемоника,
+/// а неизвестная архитектура - отказ, по тому же правилу, что у соседних
+/// свидетелей: посчитать ноль там, где мнемоник не узнал, значило бы соврать.
+fn unaligned_moves(tools: &Toolchain, object: &Path) -> usize {
+    let shown = Command::new(tools.tool("llvm-objdump"))
+        .arg("-d")
+        .arg("--disassemble-symbols=adamas_entry")
+        .arg(object)
+        .output()
+        .unwrap_or_else(|error| panic!("дизассемблер не запустился: {error}"));
+    let text = String::from_utf8_lossy(&shown.stdout);
+    assert!(
+        text.contains("adamas_entry"),
+        "дизассемблер не нашёл `adamas_entry`: счёт по пустому выводу дал бы ноль"
+    );
+    let needles: &[&str] = if cfg!(target_arch = "x86_64") {
+        &["movups", "movupd", "vmovups", "vmovupd"]
+    } else if cfg!(target_arch = "aarch64") {
+        // У ARM64 выровненного и невыровненного перемещения врозь нет: `ldr q`
+        // берёт любой адрес. Мерить здесь нечего, и ноль тут честный.
+        &[]
+    } else {
+        panic!(
+            "мнемоник этой архитектуры свидетель не знает: посчитать ноль \
+             значило бы соврать - допишите её в `unaligned_moves`"
+        );
+    };
+    text.lines()
+        .filter(|line| needles.iter().any(|it| line.contains(it)))
+        .count()
+}
+
+/// Обещанная граница у векторного обращения: `align 4` меняется на названную.
+fn promised(text: &str, align: u32) -> String {
+    text.lines()
+        .map(|line| {
+            if line.contains("<8 x float>") && line.ends_with(", align 4") {
+                line.replace(", align 4", &format!(", align {align}"))
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Адрес **окна**, посчитанный самим IR: шаг константой, проверка хвоста.
+///
+/// Близнец [`cells_addressed`], и отличий два. Проверяется хвост окна, а не его
+/// начало: `at < count` пропустил бы семь ячеек за концом блока. И проверок
+/// поэтому две - сперва `lanes <= count`, иначе вычитание завернулось бы.
+fn window_addressed(text: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut at = 0_u32;
+    for line in text.lines() {
+        let taken = line
+            .trim_start()
+            .strip_prefix('%')
+            .and_then(|rest| rest.split_once(" = call ptr @adamas_array_window(ptr "))
+            .and_then(|(name, rest)| {
+                let (array, rest) = rest.split_once(", i64 ")?;
+                let (index, lanes) = rest.split_once(", i64 ")?;
+                Some((name, array, index, lanes.strip_suffix(')')?))
+            });
+        let Some((name, array, index, lanes)) = taken else {
+            out.push(line.to_owned());
+            continue;
+        };
+        at += 1;
+        out.push(format!("  %w{at}.p = getelementptr i8, ptr {array}, i64 8"));
+        out.push(format!("  %w{at}.n = load i64, ptr %w{at}.p"));
+        out.push(format!("  %w{at}.wide = icmp uge i64 %w{at}.n, {lanes}"));
+        out.push(format!(
+            "  br i1 %w{at}.wide, label %win{at}.fits, label %win{at}.out"
+        ));
+        out.push(String::new());
+        out.push(format!("win{at}.fits:"));
+        out.push(format!("  %w{at}.lim = sub i64 %w{at}.n, {lanes}"));
+        out.push(format!("  %w{at}.ok = icmp ule i64 {index}, %w{at}.lim"));
+        out.push(format!(
+            "  br i1 %w{at}.ok, label %win{at}.in, label %win{at}.out"
+        ));
+        out.push(String::new());
+        out.push(format!("win{at}.out:"));
+        out.push("  call void @adamas_fail(ptr @.str.tag)".to_owned());
+        out.push("  unreachable".to_owned());
+        out.push(String::new());
+        out.push(format!("win{at}.in:"));
+        out.push(format!("  %w{at}.off = mul i64 {index}, 4"));
+        out.push(format!(
+            "  %w{at}.pay = getelementptr i8, ptr {array}, i64 24"
+        ));
+        out.push(format!(
+            "  %{name} = getelementptr i8, ptr %w{at}.pay, i64 %w{at}.off"
+        ));
+    }
     out.join("\n")
 }
 

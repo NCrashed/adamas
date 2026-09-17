@@ -649,29 +649,50 @@ fn window_moves(tools: &Toolchain, object: &Path, symbol: &str) -> (usize, usize
 /// выбор инструкций.
 fn per_lane_through_runtime(ll: &str) -> String {
     let mut out = String::new();
+    let mut window: Option<(String, String)> = None;
     let mut hit = false;
     for line in ll.lines() {
-        if line
+        // Колонку и номер ячейки мутант берёт **у самого модуля**: имена
+        // временных зависят от порядка понижения, и прибитые гвоздями
+        // разъехались бы молча, оставив свидетеля мерить нетронутую программу.
+        if let Some((array, index)) = line
             .trim_start()
-            .starts_with("%t6 = load <8 x float>, ptr ")
+            .split_once(" = call ptr @adamas_array_window(ptr ")
+            .and_then(|(_, rest)| rest.split_once(", i64 "))
+            .and_then(|(array, rest)| rest.split_once(", i64 ").map(|(index, _)| (array, index)))
         {
+            window = Some((array.to_owned(), index.to_owned()));
+        }
+        let loaded = line
+            .trim_start()
+            .split_once(" = load <8 x float>, ptr ")
+            .map(|(name, _)| name.to_owned());
+        if let (Some(name), Some((array, index))) = (loaded, window.clone()) {
             hit = true;
-            out.push_str("  %p0 = call ptr @adamas_array_at(ptr %v0, i64 %t4)\n");
-            out.push_str("  %l0 = load float, ptr %p0, align 4\n");
-            out.push_str("  %w0 = insertelement <8 x float> poison, float %l0, i64 0\n");
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    "  %p0 = call ptr @adamas_array_at(ptr {array}, i64 {index})\n  \
+                     %l0 = load float, ptr %p0, align 4\n  \
+                     %w0 = insertelement <8 x float> poison, float %l0, i64 0\n"
+                ),
+            );
             for lane in 1..8u32 {
                 let _ = std::fmt::Write::write_fmt(
                     &mut out,
                     format_args!(
-                        "  %k{lane} = add i64 %t4, {lane}\n  \
-                         %p{lane} = call ptr @adamas_array_at(ptr %v0, i64 %k{lane})\n  \
+                        "  %k{lane} = add i64 {index}, {lane}\n  \
+                         %p{lane} = call ptr @adamas_array_at(ptr {array}, i64 %k{lane})\n  \
                          %l{lane} = load float, ptr %p{lane}, align 4\n  \
                          %w{lane} = insertelement <8 x float> %w{}, float %l{lane}, i64 {lane}\n",
                         lane - 1
                     ),
                 );
             }
-            out.push_str("  %t6 = fadd <8 x float> %w7, zeroinitializer\n");
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!("  {name} = fadd <8 x float> %w7, zeroinitializer\n"),
+            );
             continue;
         }
         out.push_str(line);
@@ -710,12 +731,17 @@ fn a_window_is_one_vector_access_not_eight_scalar_ones() {
     );
     // Граница обещана **дорожкой**, а не типом вектора: ячейка стоит по шагу
     // колонки. `align 32` здесь был бы обещанием, которого никто не давал.
+    // Проверяется по **форме**, а не по имени временного: номера зависят от
+    // порядка понижения, и прибитый гвоздями `%t5` разъехался бы молча.
+    let touches: Vec<&str> = artefacts
+        .ll
+        .lines()
+        .filter(|line| line.contains("<8 x float>") && line.contains(", ptr %"))
+        .collect();
+    assert_eq!(touches.len(), 2, "обращений к окну не два: {touches:?}");
     assert!(
-        artefacts.ll.contains("load <8 x float>, ptr %t5, align 4")
-            && artefacts
-                .ll
-                .contains("store <8 x float> %t14, ptr %t16, align 4"),
-        "обращение к окну обещает не ту границу: ячейка `Float32` стоит по четырём"
+        touches.iter().all(|line| line.ends_with(", align 4")),
+        "обращение к окну обещает не ту границу: {touches:?}"
     );
     let symbol = window_symbol(&artefacts.ll);
 
@@ -810,11 +836,16 @@ class Primitive a where
 zero : Float32
 zero = 0.0
 
-cells : UInt64
-cells = 4
+one : Float32
+one = 1.0
 
-column : Array cells Float32
-column = arrayNew cells zero
+-- Колонка из четырёх, заполненная вся: машина застревает здесь **из-за
+-- окна**, а не из-за нелитеральной длины. Разница существенна - свидетель
+-- утверждает, что ответа не даёт никто, и застрять он обязан по той причине,
+-- которую называет.
+column : Array 4 Float32
+column =
+  arraySet (arraySet (arraySet (arraySet (arrayNew 4 zero) 0 one) 1 one) 2 one) 3 one
 
 main : Float32
 main = simdLane (simdLoad 4 column 1) 0
@@ -854,6 +885,92 @@ main = simdLane (simdLoad 4 column 1) 0
         "C-сторона окно за длиной пропустила: `{}` / `{}`",
         c.printed,
         c.reason
+    );
+}
+
+/// Владеющая загрузка окна отдаёт колонку: блоков живых ноль.
+///
+/// У чтения окна две формы, как и у чтения ячейки (§10 вопрос 171):
+/// заимствующая - её ставит Perceus, когда колонку потребит кто-то позже, - и
+/// **владеющая**, когда потреблять больше некому. Корпусное ядро проходит
+/// только первую: `simdStore` там потребляет ту же колонку следом. Вторая
+/// поэтому проверяется здесь, и проверяется счётчиком: потеряй она дроп, ответ
+/// остался бы верен, а блок повис бы.
+#[test]
+fn an_owning_window_gives_the_column_back() {
+    const OWNED: &str = "\
+type Layout = { size : UInt32, align : UInt32 }
+
+class Primitive a where
+  simdLayout : Layout
+
+zero : Float32
+zero = 0.0
+
+one : Float32
+one = 1.0
+
+-- Длина написана литералом, и все четыре ячейки заполнены: машина сводит
+-- окно, лишь когда каждая дорожка находится в цепочке записей, а до дна
+-- (`arrayNew`) она доходит только с литеральной длиной.
+column : Array 4 Float32
+column =
+  arraySet (arraySet (arraySet (arraySet (arrayNew 4 zero) 0 zero) 1 zero) 2 one) 3 zero
+
+main : Float32
+main = simdLane (simdLoad 4 column 0) 2
+";
+    assert_eq!(
+        harness::printed(OWNED),
+        "1.0",
+        "машина прочитала окно не так"
+    );
+    let blocks = harness::agreed("window-owned", OWNED)
+        .unwrap_or_else(|error| panic!("программа не понизилась: {error}"));
+    assert!(
+        blocks.contains("живо 0"),
+        "владеющая загрузка окна не отдала колонку: {blocks}"
+    );
+}
+
+/// Вектор ответом программы отвергается **именем**, а не чужим компилятором.
+///
+/// Свидетель написан по найденному дефекту, а не по замыслу: отказ
+/// [`LowerError::SimdAnswer`] был объявлен треком H и **ни разу не строился** -
+/// проверка ответа точки входа знала массив и регион, а вектор не знала.
+/// Программа уходила в печать по тегу заголовка, которого у плоского вектора
+/// нет вовсе.
+///
+/// Машина при этом такую программу считает и печатает - цепочкой
+/// `simdSplat`/`simdSet`, - так что расхождение названное, того же жанра, что
+/// у `LowerError::ArrayAnswer`: два вычислителя сходятся лишь в том, что
+/// понижение отвечать отказывается вслух.
+#[test]
+fn a_vector_answer_is_refused() {
+    const ANSWER: &str = "\
+type Layout = { size : UInt32, align : UInt32 }
+
+class Primitive a where
+  simdLayout : Layout
+
+one : Float32
+one = 1.0
+
+main : Simd 4 Float32
+main = simdSplat 4 one
+";
+    let machine = harness::printed(ANSWER);
+    assert!(
+        machine.contains("simdSplat"),
+        "машина вектор ответом не напечатала: {machine}"
+    );
+    let why = harness::text(ANSWER).err().map_or_else(
+        || panic!("вектор ответом взят понижением: печатать его нечем"),
+        |error| error.to_string(),
+    );
+    assert!(
+        why.contains("печатать его нечем") && why.contains("§4.9"),
+        "вектор ответом отвергнут не тем: {why}"
     );
 }
 

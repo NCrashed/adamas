@@ -2657,12 +2657,28 @@ impl<'a> Builder<'a> {
                 // построению - ответ функции и есть ответ хвостового вызова, -
                 // но полагаться на это нечем: разойдись они, verifier отверг бы
                 // модуль целиком. Обычный вызов в этом случае честнее отказа.
-                let agreed = slot(
-                    self.program.functions[function.0].result,
-                    &self.program.packings,
-                )
-                .is_some_and(|it| it == self.result);
-                let sort = if agreed { Tail::Must } else { Tail::Plain };
+                let result = self.program.functions[function.0].result;
+                let agreed =
+                    slot(result, &self.program.packings).is_some_and(|it| it == self.result);
+                // Плотный агрегат ответом снимает `musttail`, и это не
+                // осторожность, а измеренная граница: целое шире трёх слов
+                // возвращается через скрытый указатель, а хвостовой вызов в
+                // чужой `sret` писать не вправе. `llc -O0` отвечает на такую
+                // пару не отказом разбора, а «failed to perform tail call
+                // elimination on a call site marked musttail» и роняет сборку
+                // целиком. Порог мерян (`tests/tail.rs`): три поля проходят,
+                // четыре нет, - но сам порог принадлежит ABI хоста, а
+                // порождённый `.ll` обязан оставаться переносимым, поэтому
+                // снимается приставка у **всякого** агрегатного ответа.
+                //
+                // Цена названа: у такой функции обещание §3.4 и §5.3 держится
+                // на `tailrecurse` и sibling call, то есть с `-O2`, а не
+                // безусловно. Сборка, которая идёт, лучше сборки, которой нет.
+                let sort = if agreed && !matches!(result, Repr::Packed(_)) {
+                    Tail::Must
+                } else {
+                    Tail::Plain
+                };
                 let name = self.call(*function, arguments, sort)?;
                 let result = self.result.clone();
                 self.instruction(&format!("ret {result} {name}"), self.here());

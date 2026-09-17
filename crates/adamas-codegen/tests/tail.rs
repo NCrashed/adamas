@@ -261,6 +261,101 @@ fn taking_the_guarantee_off_overflows_the_stack() {
     }
 }
 
+/// Плотный агрегат ответом снимает `musttail`, и порог у этого мерян.
+///
+/// Свидетель написан по дефекту, найденному капстоуном (`eval/packets`), а не
+/// по замыслу. Целое шире трёх слов возвращается через скрытый указатель, и
+/// хвостовой вызов в чужой `sret` писать не вправе; `llc -O0` отвечает на такую
+/// пару не отказом разбора, а `LLVM ERROR: failed to perform tail call
+/// elimination on a call site marked musttail` и роняет **сборку целиком**.
+/// Штатный конвейер её проходит - `opt` поднимает поля агрегата в регистры
+/// раньше, чем дело доходит до легализации, - поэтому ловится дефект только
+/// вторым конвейером.
+///
+/// Порог измерен, а не предположен: запись из **трёх** полей (`i192`)
+/// проходила обе цепочки, из **четырёх** (`i256`) роняла вторую. Ловит это
+/// ответ, а не аргумент - тот же четырёхполевой агрегат **параметром** при
+/// скалярном ответе проходит; проверено тем же прогоном. Сам порог при этом
+/// принадлежит ABI хоста, а порождённый `.ll` обязан оставаться переносимым,
+/// поэтому приставка снимается у всякого агрегатного ответа, а не у широкого.
+///
+/// Цена решения названа там же, где оно принято (`emit_llvm::tail`): у такой
+/// функции обещание §3.4 и §5.3 держится на `tailrecurse` и sibling call, то
+/// есть с `-O2`, а не безусловно.
+#[test]
+fn a_dense_aggregate_answer_drops_the_prefix() {
+    const WIDE: &str = "\
+data Bool where
+  True : Bool
+  False : Bool
+
+type Tally = { a : UInt64, b : UInt64, c : UInt64, d : UInt64 }
+
+step : UInt64 -> Tally -> Tally
+step 0 t = t
+step k t =
+  step (subUInt64 k 1) { a = addUInt64 t.a k, b = xorUInt64 t.b k, c = mulUInt64 t.c 3,
+                         d = t.d }
+
+main : UInt64
+main =
+  let t : Tally = step 5 { a = 0, b = 0, c = 1, d = 2 }
+  addUInt64 t.a (addUInt64 t.b (addUInt64 t.c t.d))
+";
+    // Тот же агрегат в **параметре** при скалярном ответе: приставка остаётся,
+    // и вторая цепочка её принимает. Без этой половины «снимаем у агрегата»
+    // читалось бы как «агрегат с `musttail` несовместим вовсе».
+    const NARROW: &str = "\
+data Bool where
+  True : Bool
+  False : Bool
+
+type Tally = { a : UInt64, b : UInt64, c : UInt64, d : UInt64 }
+
+step : UInt64 -> Tally -> UInt64
+step 0 t = addUInt64 t.a (addUInt64 t.b (addUInt64 t.c t.d))
+step k t =
+  step (subUInt64 k 1) { a = addUInt64 t.a k, b = xorUInt64 t.b k, c = mulUInt64 t.c 3,
+                         d = t.d }
+
+main : UInt64
+main = step 5 { a = 0, b = 0, c = 1, d = 2 }
+";
+    let wide = harness::llvm_text("tail-wide", WIDE)
+        .unwrap_or_else(|error| panic!("широкий ответ не понизился: {error}"));
+    assert!(
+        !wide.ll.contains("musttail"),
+        "приставка осталась у агрегатного ответа: `llc -O0` уронит сборку"
+    );
+    let narrow = harness::llvm_text("tail-narrow", NARROW)
+        .unwrap_or_else(|error| panic!("узкий ответ не понизился: {error}"));
+    assert!(
+        narrow.ll.contains("musttail"),
+        "приставка снята и там, где она законна: агрегат в параметре её не трогает"
+    );
+
+    let Some((tools, _)) = harness::llvm_toolchains() else {
+        return;
+    };
+    for (name, source) in [("tail-wide", WIDE), ("tail-narrow", NARROW)] {
+        for (level, pipeline) in [
+            ("-O2", Pipeline::optimised()),
+            ("-O0", Pipeline::plain()),
+        ] {
+            let printed = harness::llvm_agreed(
+                name,
+                source,
+                &tools,
+                &pipeline,
+                &format!("{name}{level}"),
+            )
+            .unwrap_or_else(|error| panic!("{name} на {level}: {error}"))
+            .0;
+            assert_eq!(printed, "261", "{name} на {level} посчитал не то");
+        }
+    }
+}
+
 /// Текст без названной подстроки. Не найденная подстрока роняет тест.
 fn without(text: &str, marker: &str) -> String {
     assert!(

@@ -2496,11 +2496,22 @@ impl<'a> Builder<'a> {
                 Repr::Array(elems(*stride))
             }
             Expr::ArrayIndex { stride, .. } => stride.map_or(Repr::Boxed, Stride::element),
-            // Окно колонки (§4.9): загрузка отдаёт вектор, запись - колонку.
-            Expr::SimdLoad { lanes, lane, .. } => Repr::Simd {
+            // Вектор (§4.9): четыре узла отдают его, чтение дорожки - дорожку,
+            // а запись окна - саму колонку. Перечень тот же, что у C-эмиттера и
+            // у разметки форм (`emit_c.rs`, `split.rs`), и это требование, а не
+            // сходство: здесь стояли только `SimdLoad` и `SimdStore`, остальные
+            // четыре падали в `_ => Boxed`, и вектор, попавший **прямо** в
+            // типизированную позицию, печатался `ptr`. Видно это не было,
+            // потому что во всех фикстурах вектор приезжал туда связыванием, а
+            // у связывания представление берётся у его факта.
+            Expr::SimdSplat { lanes, lane, .. }
+            | Expr::SimdSet { lanes, lane, .. }
+            | Expr::SimdArith { lanes, lane, .. }
+            | Expr::SimdLoad { lanes, lane, .. } => Repr::Simd {
                 lanes: *lanes,
                 lane: *lane,
             },
+            Expr::SimdLane { lane, .. } => Repr::Flat(*lane),
             Expr::SimdStore { .. } => Repr::Array(Elems::Flat),
             Expr::Layout { .. } => Repr::Layout,
             Expr::LayoutField { .. } => Repr::Flat(PrimTy::UInt32),

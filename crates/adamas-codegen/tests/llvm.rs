@@ -92,7 +92,7 @@ use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 /// `flat`, `flat-primitives`, `flat-sealed-member` - под снятым отказом
 /// показали **дескриптор укладки**, то есть словарь `Flat a` значением; взят
 /// и он.
-const TAKEN: [&str; 102] = [
+const TAKEN: [&str; 104] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -107,6 +107,8 @@ const TAKEN: [&str; 102] = [
     "await-twice",
     "await-value",
     "beta-redex",
+    "bitwise",
+    "bitwise-widths",
     "cancel",
     "cancel-bystander",
     "case-family",

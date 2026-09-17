@@ -1,0 +1,170 @@
+-- Побитовые операции, сдвиги и деление (§4.3, §10 вопрос 152).
+--
+-- Наблюдаемое здесь - **ответ, который от операции зависит**, и значения
+-- подобраны так, чтобы перепутанная операция меняла его. Маска из одних
+-- единиц, сдвиг на ноль и `xor` с нулём этого свойства не имеют: они дают
+-- исходное значение при любой поломке, и свидетель на них зелен всегда.
+--
+-- Что ловится и чем.
+--
+-- *Три битовые различаются между собой.* Один и тот же аргумент `0xF0F0`
+-- против `0xBEEF`: `and` даёт `0xB0E0`, `or` - `0xFEFF`, `xor` - `0x4E1F`.
+-- Ни одно из трёх не выводится из остальных.
+--
+-- *Знаковость правого сдвига.* Одни и те же биты `0xF0000000`: у `Int32` это
+-- отрицательное, и сдвиг доливает знак, у `UInt32` - положительное, и сдвиг
+-- доливает ноль. На малых неотрицательных числах `ashr` и `lshr`
+-- неразличимы, поэтому оба свидетеля здесь отрицательны по построению.
+--
+-- *Насыщение счётчика.* Сдвиг на ширину типа и больше даёт предел, а не то,
+-- что сделало бы железо: x86 и `wrapping_shl` Rust'а берут счётчик по модулю
+-- ширины и вернули бы исходное значение.
+--
+-- *Усечение деления к нулю.* `-7 / 2` есть `-3`, а не `-4`; остаток тогда
+-- `-1`, а не `1`. На неотрицательных обе формы совпадают.
+--
+-- *Знаковость деления.* `0xFFFFFFFFFFFFFFFF / 3` у беззнакового есть
+-- `0x5555555555555555`, у знакового было бы нулём: те же биты, разный ответ.
+--
+-- *Единственное переполнение деления.* `MIN / -1` в тип не помещается, и
+-- `idiv` на x86 отвечает на него сигналом. Здесь он заворачивается наравне с
+-- умножением (§4.3, `-fwrapv`).
+--
+-- *Деление плавающего.* §4.3 отдаёт `Div` типу `Float`, и нулевой делитель
+-- там не обрыв, а `inf` - наблюдаемое значение `Approximate`.
+--
+-- *Безопасное лицо целого деления.* §4.3 назначает его библиотеке -
+-- `divMod`/`quotRem`, отвечающие `Option`. Здесь оно написано на самом языке
+-- поверх примитива: одна строка, и делить на ноль незачем.
+
+data Bool where
+  True : Bool
+  False : Bool
+
+data Maybe (a : Type) where
+  Nothing : Maybe a
+  Just : a -> Maybe a
+
+-- Целое деление, каким §4.3 велит его показывать наружу.
+--
+-- Разбор написан клаузами, а не `if`: `if` над `Maybe UInt32` отвергается
+-- несовпадением типов (мотив разбора остаётся дыркой), и это граница
+-- элаборации, а не деления - тот же `if` над `UInt32` проходит.
+chosen : Bool -> UInt32 -> UInt32 -> Maybe UInt32
+chosen True x y = Nothing
+chosen False x y = Just (divUInt32 x y)
+
+safeQuotient : UInt32 -> UInt32 -> Maybe UInt32
+safeQuotient x y = chosen (eqUInt32 y 0) x y
+
+orElse : UInt32 -> Maybe UInt32 -> UInt32
+orElse fallback Nothing = fallback
+orElse fallback (Just value) = value
+
+-- Три битовые на одной паре: ответы различны все три.
+conjoined : UInt32
+conjoined = andUInt32 0xF0F0 0xBEEF
+
+disjoined : UInt32
+disjoined = orUInt32 0xF0F0 0xBEEF
+
+exclusive : UInt32
+exclusive = xorUInt32 0xF0F0 0xBEEF
+
+-- Дополнение: своей операции у него нет, это `xor` со всеми единицами.
+complemented : UInt16
+complemented = notUInt16 0xF0F0
+
+-- Сдвиг влево теряет старшие разряды по ширине типа, а не по ширине слова.
+raised : UInt16
+raised = shlUInt16 0xBEEF 8
+
+-- Знаковость правого сдвига: биты одни, ответы разные.
+filled : Int32
+filled = shrInt32 (-268435456) 4
+
+emptied : UInt32
+emptied = shrUInt32 4026531840 4
+
+deeplyFilled : Int64
+deeplyFilled = shrInt64 (-1000000000000) 8
+
+-- Насыщение: маскирование счётчика вернуло бы исходное значение.
+overshotLeft : UInt32
+overshotLeft = shlUInt32 0xBEEF 32
+
+overshotRight : UInt8
+overshotRight = shrUInt8 200 8
+
+overshotSign : Int32
+overshotSign = shrInt32 (-5) 32
+
+-- Счётчик читается беззнаково: у `Int16` записанное `-1` есть `65535`.
+negativeCount : Int16
+negativeCount = shlInt16 3 (-1)
+
+-- Деление усекает к нулю, и остаток берёт знак делимого.
+quotient : Int32
+quotient = divInt32 (-7) 2
+
+rest : Int32
+rest = remInt32 (-7) 2
+
+-- Знаковость деления: знаковое дало бы ноль на тех же битах.
+wideQuotient : UInt64
+wideQuotient = divUInt64 18446744073709551615 3
+
+-- Единственное переполнение знакового деления.
+wrappedQuotient : Int8
+wrappedQuotient = divInt8 (-128) (-1)
+
+wrappedRest : Int8
+wrappedRest = remInt8 (-128) (-1)
+
+-- Плавающее делится без ограждений.
+ratio : Float64
+ratio = divFloat64 1.0 4.0
+
+unbounded : Float32
+unbounded = divFloat32 1.0 0.0
+
+-- Разбор заголовка, ради которого всё это и заводилось: поле вынимается
+-- сдвигом и маской, собирается обратно сдвигом и `or`.
+field : UInt32 -> UInt32 -> UInt32 -> UInt32
+field word at width = andUInt32 (shrUInt32 word at) (notUInt32 (shlUInt32 4294967295 width))
+
+header : UInt32
+header = 0x45000234
+
+version : UInt32
+version = field header 28 4
+
+length : UInt32
+length = field header 0 16
+
+repacked : UInt32
+repacked = orUInt32 (shlUInt32 version 28) length
+
+type Answers = { conjoined : UInt32, disjoined : UInt32, exclusive : UInt32,
+                 complemented : UInt16, raised : UInt16,
+                 filled : Int32, emptied : UInt32, deeplyFilled : Int64,
+                 overshotLeft : UInt32, overshotRight : UInt8,
+                 overshotSign : Int32, negativeCount : Int16,
+                 quotient : Int32, rest : Int32, wideQuotient : UInt64,
+                 wrappedQuotient : Int8, wrappedRest : Int8,
+                 ratio : Float64, unbounded : Float32,
+                 version : UInt32, length : UInt32, repacked : UInt32,
+                 divided : UInt32, guarded : UInt32 }
+
+main : Answers
+main = { conjoined = conjoined, disjoined = disjoined, exclusive = exclusive,
+         complemented = complemented, raised = raised,
+         filled = filled, emptied = emptied, deeplyFilled = deeplyFilled,
+         overshotLeft = overshotLeft, overshotRight = overshotRight,
+         overshotSign = overshotSign, negativeCount = negativeCount,
+         quotient = quotient, rest = rest, wideQuotient = wideQuotient,
+         wrappedQuotient = wrappedQuotient, wrappedRest = wrappedRest,
+         ratio = ratio, unbounded = unbounded,
+         version = version, length = length, repacked = repacked,
+         divided = orElse 7 (safeQuotient 100 8),
+         guarded = orElse 7 (safeQuotient 100 0) }

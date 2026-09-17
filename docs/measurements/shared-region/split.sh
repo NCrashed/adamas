@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Разделяемая область: чего стоит холодная половина и чего стоит кусок (§3.6).
+# Разделяемая область: холодная половина, кусок, сосед §6 и разложение (§3.6).
 #
-# Две точки замера, и вопросы у них разные.
+# Четыре точки замера, и вопросы у них разные. Числа - в README рядом.
 #
 # **1. Делит ли атрибут.** Правило трека B волны 3 Фазы 7: точку входа с редкой
 # тяжёлой ветвью обязан делить исходник, а не компилятор - у gcc частичный
@@ -34,7 +34,7 @@ CPU="${CPU:-8}"
 BLOCKS="${BLOCKS:-5}"
 RUNS="${RUNS:-5}"
 TURNS="${TURNS:-10000000}"
-ROUNDS="${ROUNDS:-300}"
+ROUNDS="${ROUNDS:-2000}"
 
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 work="${TMPDIR:-/tmp}/adamas-shared-region"
@@ -153,6 +153,101 @@ int main(int argc, char **argv) {
 }
 CROWD
 
+# --- точка 3: сосед §6 ------------------------------------------------------
+#
+# §6 держит строку «Multi-core shared-mempool workloads (§3.6) - паритет с
+# DPDK/tcmalloc», и **референсом** в ней стоит не библиотека, а «C с lock-free
+# mempool», то есть сосед, написанный руками, - ровно как у строки SIMD стоит
+# «C с intrinsics». Здесь он и написан: тот же ход, что у нашего аллокатора, и
+# ничего сверх - per-thread кусок, атомарная прибавка к общему курсору, копия
+# нагрузки.
+#
+# Мерится этим **половина** строки §6, и вторая половина отсюда не берётся.
+# Аллокатор - да: цена наша против цены ручной. Нагрузка - нет: строка §6 про
+# multi-core mempool-**нагрузку**, а её нет вовсе, пока не написан капстоун
+# (трек C). Сказано это здесь, чтобы число не читалось шире сделанного.
+
+cat > "$work/rival.c" <<'RIVAL'
+/* Ручной lock-free mempool на C: референс строки §6.
+ *
+ * Тот же ход, что у `shared.c`, и ничего сверх: кусок у потока, атомарная
+ * прибавка к общему курсору, копия нагрузки на место. Чего у него нет -
+ * журнала (то есть возврата ячейки), тега, номера области и проверки границ. */
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define PLACES 32000
+#define BYTES 262144u
+#define CHUNK 512u
+
+typedef struct pool {
+    size_t cursor;
+    char bytes[BYTES];
+} pool;
+
+static pool *area;
+static size_t share;
+static _Thread_local size_t at;
+static _Thread_local size_t edge;
+
+static void *place(size_t size) {
+    void *out;
+    if (at + size > edge) {
+        size_t taken = __atomic_fetch_add(&area->cursor, CHUNK, __ATOMIC_ACQ_REL);
+        if (taken + CHUNK > BYTES) {
+            fprintf(stderr, "сосед: пул переполнен\n");
+            abort();
+        }
+        at = taken;
+        edge = taken + CHUNK;
+    }
+    out = area->bytes + at;
+    at += size;
+    return out;
+}
+
+static void *hand(void *arg) {
+    uint64_t seed = (uint64_t)(uintptr_t)arg;
+    size_t turn;
+    at = 0;
+    edge = 0;
+    for (turn = 0; turn < share; turn += 1) {
+        memcpy(place(sizeof(seed)), &seed, sizeof(seed));
+        seed += 1;
+    }
+    return NULL;
+}
+
+int main(int argc, char **argv) {
+    size_t hands = argc > 1 ? (size_t)atol(argv[1]) : 1;
+    size_t rounds = argc > 2 ? (size_t)atol(argv[2]) : 1;
+    pthread_t *crew = calloc(hands, sizeof(pthread_t));
+    size_t round;
+    size_t index;
+    unsigned long long given = 0;
+    share = PLACES / hands;
+    for (round = 0; round < rounds; round += 1) {
+        area = calloc(1, sizeof(pool));
+        for (index = 1; index < hands; index += 1) {
+            pthread_create(&crew[index], NULL, hand, (void *)(uintptr_t)index);
+        }
+        hand((void *)(uintptr_t)0);
+        for (index = 1; index < hands; index += 1) {
+            pthread_join(crew[index], NULL);
+        }
+        given = (unsigned long long)area->cursor;
+        free(area);
+    }
+    free(crew);
+    printf("%llu 0\n", given);
+    return 0;
+}
+RIVAL
+
 # --- сборка -----------------------------------------------------------------
 
 # Точка 1 собирается обеими цепочками: правило «делит атрибут» проверялось на
@@ -182,6 +277,25 @@ done
 "${ADAMAS_CC:-cc}" -std=c11 -O2 -flto -fwrapv -fno-strict-aliasing -ffp-contract=off \
     -pthread -I "$work/include-every" "$work/every"/*.c "$work/crowd.c" -o "$work/every.bin"
 
+# Сосед - той же строкой, чтобы различие не оказалось в ключах.
+"${ADAMAS_CC:-cc}" -std=c11 -O2 -flto -fwrapv -fno-strict-aliasing -ffp-contract=off \
+    -pthread "$work/rival.c" -o "$work/rival.bin"
+
+# Точка 4: та же наша область **без журнала**. Разложение разрыва с соседом по
+# статьям: журнал есть единственное, чего у соседа нет вовсе, и без него
+# `SharedPool` перестаёт быть выразимым - «переиспользование ячеек равного
+# размера» §3.6 не выражается ничем иным. Цена его поэтому не дефект, а цена
+# члена `free` у общего `AllocStrategy`; здесь она названа числом.
+mkdir -p "$work/bare"
+cp "$root"/crates/adamas-runtime/c/*.c "$work/bare/"
+sed -i 's|^        record(own, at, size);$|        (void)0; /* журнала нет */|' "$work/bare/shared.c"
+if cmp -s "$work/bare/shared.c" "$work/chunk/shared.c"; then
+    echo "точки не разошлись: вызова record в shared.c не нашлось" >&2
+    exit 1
+fi
+"${ADAMAS_CC:-cc}" -std=c11 -O2 -flto -fwrapv -fno-strict-aliasing -ffp-contract=off \
+    -pthread -I "$work/include" "$work/bare"/*.c "$work/crowd.c" -o "$work/bare.bin"
+
 echo "== точка 1: ответ и что осталось от половин в символах"
 for point in plain split; do
     for chain in gcc llvm; do
@@ -195,8 +309,8 @@ for point in plain split; do
 done
 
 echo
-echo "== точка 2: ответ обеих ширин куска (розданное и живые блоки)"
-for point in chunk every; do
+echo "== точки 2 и 3: ответ (розданное и живые блоки)"
+for point in chunk every rival bare; do
     for hands in 1 2 4; do
         printf '%-6s %d воркер(ов): %s\n' "$point" "$hands" "$("$work/$point.bin" "$hands" 2)"
     done
@@ -238,6 +352,31 @@ crowd() {
     done
 }
 
+rival() {
+    echo
+    echo "== точка 3: наша область против ручного mempool на C, чередованием"
+    for hands in 1 2 4; do
+        for block in $(seq 1 "$BLOCKS"); do
+            a=$(floor "$work/chunk.bin" "$hands" "$ROUNDS")
+            b=$(floor "$work/rival.bin" "$hands" "$ROUNDS")
+            awk -v a="$a" -v b="$b" -v n="$block" -v h="$hands" \
+                'BEGIN { printf "воркеров %d, блок %d: наши %.3f против соседа %.3f мс, отношение %.4f\n", h, n, a/1000, b/1000, a/b }'
+        done
+    done
+}
+
+journal() {
+    echo
+    echo "== точка 4: наша область с журналом и без него, чередованием"
+    for block in $(seq 1 "$BLOCKS"); do
+        a=$(floor "$work/chunk.bin" 1 "$ROUNDS")
+        b=$(floor "$work/bare.bin" 1 "$ROUNDS")
+        c=$(floor "$work/rival.bin" 1 "$ROUNDS")
+        awk -v a="$a" -v b="$b" -v c="$c" -v n="$block" \
+            'BEGIN { printf "блок %d: с журналом %.3f, без %.3f, сосед %.3f мс; журнал %.4f, остаток к соседу %.4f\n", n, a/1000, b/1000, c/1000, a/b, b/c }'
+    done
+}
+
 # Привязка к одному логическому процессору годится только точке 1: точка 2
 # мерит контеншен, и на одном ядре его не бывает.
 if [ "$CPU" = "-" ]; then
@@ -248,3 +387,5 @@ else
         "$(declare -f floor race); work=$work; TURNS=$TURNS; RUNS=$RUNS; BLOCKS=$BLOCKS; race gcc; race llvm"
 fi
 crowd
+rival
+journal

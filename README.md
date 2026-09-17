@@ -10,10 +10,15 @@ The goal is to show that systems-friendly semantics is reachable without
 "dropping down to C": one language for applied functional code, systems
 programming, and type-heavy research.
 
-**Stage: phases 0–5 are done.** A program travels the whole path — text, tree,
-core terms, type checking, execution: `adamas check` type-checks it and `adamas
-eval` runs it, effects and all. Phase 6 is codegen through C with Perceus. See
-the [roadmap](adamas-design.md#9-roadmap) — 10 phases, ~3–5 years to a
+**Stage: phases 0–7 are done.** A program travels the whole path — text, tree,
+core terms, type checking — and then runs three ways: `adamas eval` interprets
+it, the C backend compiles it, the LLVM backend compiles it. All three must
+answer the *same thing*, and a disagreement fails the build: that contract is
+checked on every gate run over 102 of the 103 corpus programs. The one program
+neither backend takes returns a function, and printing one is a question about
+the language, not about a backend.
+
+See the [roadmap](adamas-design.md#9-roadmap) — 10 phases, ~3–5 years to a
 research-grade prototype.
 
 Note on language: the design document, the code comments and the compiler's
@@ -146,15 +151,18 @@ crates/adamas-core        QTT core: terms, evaluation, type checking,
 crates/adamas-parser      lexer, significant indentation, parser, printer
 crates/adamas-elab        surface language into core terms; outside the TCB
 crates/adamas-interp      execution with effect handlers, resources, fibers
+crates/adamas-codegen     backend IR carrying multiplicity and uniqueness,
+                          Perceus insertion, and two emitters: C and LLVM
+crates/adamas-runtime     the C runtime: objects, regions, fibers, atomic RC
 crates/adamas-cli         the `adamas` driver: `check` and `eval`
 crates/adamas-lsp         a stub; the language server is a later phase
 crates/adamas-warmup-stlc a phase-0 exercise: STLC + HM, standalone
 ```
 
-Roughly 70k lines of Rust and 900 tests. What the language accepts is visible
-in [`tests/golden/`](tests/golden/): 118 fixtures — programs that must be
-accepted, programs that must be refused with a recorded message, and programs
-whose value is recorded too.
+Roughly 125k lines of Rust, 5k lines of C, and 1244 tests. What the language
+accepts is visible in [`tests/golden/`](tests/golden/): 229 fixtures — programs
+that must be accepted, programs that must be refused with a recorded message,
+and programs whose value is recorded too.
 
 Beyond the examples above: type classes with superclasses, defaults and
 multiplicity-polymorphic methods; modules, signatures, functors, sealing and
@@ -165,6 +173,41 @@ run by `adamas eval`.
 
 Elaboration is a separate crate because it is not in the trusted base: it
 produces an ordinary core term, and `check` establishes its correctness.
+
+## Two backends, and what measuring them showed
+
+Between the core and either emitter sits one representation that carries
+multiplicity and uniqueness explicitly, so the LLVM backend is a second
+*emitter*, not a second compiler — a test reads both emitters and fails if
+either reaches for a core term. The C backend goes through gcc; the LLVM one
+writes textual `.ll` and hands it to `llvm-as`, `opt` and `llc`, which keeps the
+toolchain unpinned to an LLVM major at the cost of about 6% of backend time.
+
+Both take the same 102 of 103 corpus programs. Where they differ is speed, and
+the numbers are in [`docs/measurements/`](docs/measurements/) with the command
+that reproduces each row:
+
+| workload | LLVM against C |
+|---|---|
+| scalar arithmetic | 1.00 |
+| allocation-heavy symbolic code | 0.98 |
+| FBIP loop | 0.92 |
+| pass over a flat `Float32` column | 0.87 |
+| the same pass, `Simd 8 Float32` window | **0.61** |
+
+The phase was argued for on two mechanisms — aliasing facts from QTT, and
+collapsing reference-count traffic after inlining. **Measurement rejected both.**
+Six aliasing metadata were tried and every one earned zero instructions; the
+only exception found later was `align` on a vector access, which changes the
+instruction (`movaps` for `movups`) without changing the time. The RC pass finds
+no collapsible pair at all on these workloads. What the gap above comes from is
+inlining and, on the last two rows, the freedom a backend has when a program
+touches memory — not from the representation being richer.
+
+What the phase did buy is guarantees rather than speed: `musttail` makes the
+tail-call promise a property of the backend instead of a build flag, DWARF steps
+through `.adamas` lines, floating-point contraction is forbidden in the IR
+itself, and `Simd` reaches memory.
 
 The warm-up is an exercise from phase 0, not part of the compiler — the core
 does not depend on it. What it taught is in
@@ -181,6 +224,7 @@ does not depend on it. What it taught is in
 | [`docs/examples/`](docs/examples/) | Illustrations of forms the implementation has not reached yet. |
 | [`docs/phase6-plan.md`](docs/phase6-plan.md) | How phase 6 is cut into tracks: what parallelises, what does not, and what counts as done. |
 | [`docs/phase7-plan.md`](docs/phase7-plan.md) | Why the LLVM backend is worth its cost, measured against what a C backend cannot express. |
+| [`docs/measurements/`](docs/measurements/) | Every performance claim in this README, with its conditions, its spread, and one command per row. Where a number was retracted, the retraction is there too. |
 
 A quick way into the design: §1–2 (vision and principles) → §3 (semantic core)
 → §4.1 (syntax). Contested details live in §10.

@@ -102,7 +102,17 @@ use std::path::PathBuf;
 /// отвергался представлением - см. `Repr::pointer`.
 /// Всё, что здесь стоит, обязано собраться и ответить как `adamas eval`; список
 /// сокращать нельзя, а пополнять - можно и нужно, когда фрагмент растёт.
-const TAKEN: [&str; 102] = [
+///
+/// # Список сверяется с прогоном в обе стороны
+///
+/// Прежде сверялась одна: названное обязано браться. Взятое, но не названное,
+/// не говорило ничего - и список усыхал молча. Так и вышло: 2026-09-17 в нём
+/// стояло 102 имени при 106 берущихся, недоставало `array-parametric`,
+/// `functor-strategy`, `mutual-sibling-grounded` и `region-strategy-handled`.
+/// Механизм известен - два трека дописывают в **отсортированный** массив, git
+/// сливает обе стороны молча, а объявленная длина остаётся от одной, - и
+/// чинится он второй половиной проверки ниже, а не внимательностью.
+const TAKEN: [&str; 107] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -112,6 +122,7 @@ const TAKEN: [&str; 102] = [
     "array-generic",
     "array-length-word",
     "array-nested",
+    "array-parametric",
     "array-tagged",
     "await-twice",
     "await-value",
@@ -141,6 +152,7 @@ const TAKEN: [&str; 102] = [
     "flat-sealed-member",
     "flat-under-a-parameter",
     "functor",
+    "functor-strategy",
     "general-frames",
     "general-order",
     "instance-context-effect",
@@ -157,6 +169,7 @@ const TAKEN: [&str; 102] = [
     "multi-over-oneshot",
     "mutual-family",
     "mutual-polymorphic-recursion",
+    "mutual-sibling-grounded",
     "nested-case-on-a-field",
     "nested-functor",
     "nested-rowed-signature",
@@ -167,6 +180,7 @@ const TAKEN: [&str; 102] = [
     "operation-lambda",
     "operation-value",
     "operators",
+    "packets",
     "polymorphic-recursion",
     "prelude",
     "primitives",
@@ -175,6 +189,7 @@ const TAKEN: [&str; 102] = [
     "region-bound-in-the-argument",
     "region-holds-flat-payload",
     "region-strategies",
+    "region-strategy-handled",
     "region-strategy-in-io",
     "resource",
     "resource-cleanup",
@@ -326,6 +341,16 @@ fn the_corpus_agrees_with_the_interpreter() {
                 .iter()
                 .find(|(it, _)| it == name)
                 .map_or_else(|| "фикстуры нет вовсе".to_owned(), |(_, why)| why.clone())
+        );
+    }
+
+    // Вторая половина сверки: взятое обязано быть названо. Без неё усохший
+    // список оставался бы зелёным, и мера считалась бы по меньшему корпусу, не
+    // сказав об этом.
+    for name in &taken {
+        assert!(
+            TAKEN.contains(&name.as_str()),
+            "{name} берётся, но в TAKEN не назван: список усох молча"
         );
     }
 

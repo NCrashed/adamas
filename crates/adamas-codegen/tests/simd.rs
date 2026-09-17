@@ -981,3 +981,77 @@ main = simdSplat 4 one
 /// оба зовут `adamas_array_window`, - а здесь стоит ожидание свидетеля.
 /// Разъехавшись, оно уронит прогон, а не пропустит его.
 const WINDOW_OUTSIDE: &str = "окно вектора вне длины массива";
+
+/// Вектор **прямо** в аргументе вызова: тип у него векторный, а не `ptr`.
+///
+/// Свидетель написан по дефекту, найденному капстоуном (`eval/packets`), а не
+/// по замыслу. Разметка представлений LLVM-эмиттера (`emit_llvm::shape`) знала
+/// из векторных узлов **два** - `simdLoad` и `simdStore`, - а `simdSplat`,
+/// `simdSet`, `simdAdd`/`Sub`/`Mul` и `simdLane` падали в общую ветвь
+/// `_ => Boxed`. C-эмиттер и разметка форм (`emit_c::shape`, `split::shape`)
+/// знали все; расхождение двух бэкендов на одном узле - ровно то, чего
+/// комментарий в самом эмиттере обещал не допускать.
+///
+/// Не видно его было потому, что во всех фикстурах корпуса вектор приезжает в
+/// типизированную позицию **связыванием**, а у связывания представление берётся
+/// у факта, а не у этой разметки. Нужен узел, стоящий в позиции аргумента
+/// непосредственно, - и до капстоуна такой программы не было ни одной.
+///
+/// Ловится это `llvm-as`, а не ответом: порождённый текст писал
+/// `call tailcc <4 x i64> @fn_N(..., ptr %t)`, где `%t` определён как
+/// `<4 x i64>`. C-бэкенд ту же программу собирал и считал верно, то есть
+/// свидетелем расхождения ответ быть не мог.
+#[test]
+fn a_vector_node_in_an_argument_keeps_its_type() {
+    const DIRECT: &str = "\
+data Bool where
+  True : Bool
+  False : Bool
+
+type Layout = { size : UInt32, align : UInt32 }
+
+class Primitive a where
+  simdLayout : Layout
+
+zero : UInt64
+zero = 0
+
+-- Складывает две дорожки, прочитанные **прямо** в аргументах: `simdLane`
+-- отдаёт дорожку, а не указатель.
+plus : UInt64 -> UInt64 -> UInt64
+plus a b = addUInt64 a b
+
+-- Вектор приезжает аргументом рекурсии; внутри он назван `let`-связыванием -
+-- обход дефекта вопроса 50, к разметке отношения не имеющего.
+step : UInt64 -> Simd 4 UInt64 -> UInt64
+step 0 v = plus (simdLane v 0) (simdLane v 3)
+step k v =
+  let next : Simd 4 UInt64 = simdAdd v (simdSplat 4 k)
+  step (subUInt64 k 1) next
+
+-- Здесь узел `simdSplat` стоит в аргументе вызова без связывания.
+main : UInt64
+main = step 3 (simdSplat 4 zero)
+";
+    // 0 + 3 + 2 + 1 = 6 в каждой дорожке, и обе прочитанные дорожки равны.
+    assert_eq!(harness::printed(DIRECT), "12", "машина посчитала не то");
+    harness::agreed("simd-direct", DIRECT)
+        .unwrap_or_else(|error| panic!("C-бэкенд отказал: {error}"));
+    let Some((tools, minimum)) = harness::llvm_toolchains() else {
+        return;
+    };
+    let pipeline = Pipeline::optimised();
+    let new = harness::llvm_agreed("simd-direct", DIRECT, &tools, &pipeline, "simd.direct.new")
+        .unwrap_or_else(|error| panic!("штатная цепочка: {error}"))
+        .0;
+    let old = harness::llvm_agreed(
+        "simd-direct",
+        DIRECT,
+        &minimum,
+        &pipeline,
+        "simd.direct.old",
+    )
+    .unwrap_or_else(|error| panic!("минимальная цепочка: {error}"))
+    .0;
+    assert_eq!(new, old, "минимальная LLVM посчитала вектор не так");
+}

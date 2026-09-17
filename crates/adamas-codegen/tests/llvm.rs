@@ -100,7 +100,13 @@ use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 /// стратегии в `new`. `shared-workers` даром **не** досталась: захват области
 /// замыканием (`spawn (worker r)`) отвергался представлением, и без него
 /// разделяемая арена до воркера не доходит вовсе (см. `Repr::pointer`).
-const TAKEN: [&str; 106] = [
+///
+/// Сверяется список с прогоном **в обе стороны**: названное обязано браться, а
+/// взятое - быть названным. Вторая половина стоит здесь потому, что на
+/// C-стороне её отсутствие уже стоило четырёх молча потерянных имён
+/// (`agreement.rs`, шапка `TAKEN`); печать списка её не заменяет - глазами её
+/// никто не сверял.
+const TAKEN: [&str; 107] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -168,6 +174,7 @@ const TAKEN: [&str; 106] = [
     "operation-lambda",
     "operation-value",
     "operators",
+    "packets",
     "polymorphic-recursion",
     "prelude",
     "primitives",
@@ -357,6 +364,15 @@ fn the_scalar_fragment_takes_what_it_declares() {
                 .iter()
                 .find(|(it, _)| it == name)
                 .map_or_else(|| "фикстуры нет вовсе".to_owned(), |(_, why)| why.clone())
+        );
+    }
+
+    // Взятое обязано быть названо: иначе список усыхает молча, а мера считается
+    // по меньшему корпусу. Печать ниже этого не ловит - её никто не сверяет.
+    for name in &taken {
+        assert!(
+            TAKEN.contains(&name.as_str()),
+            "{name} берётся LLVM-эмиттером, но в TAKEN не назван: список усох молча"
         );
     }
 

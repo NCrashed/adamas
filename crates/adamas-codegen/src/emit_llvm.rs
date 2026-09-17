@@ -2496,11 +2496,22 @@ impl<'a> Builder<'a> {
                 Repr::Array(elems(*stride))
             }
             Expr::ArrayIndex { stride, .. } => stride.map_or(Repr::Boxed, Stride::element),
-            // Окно колонки (§4.9): загрузка отдаёт вектор, запись - колонку.
-            Expr::SimdLoad { lanes, lane, .. } => Repr::Simd {
+            // Вектор (§4.9): четыре узла отдают его, чтение дорожки - дорожку,
+            // а запись окна - саму колонку. Перечень тот же, что у C-эмиттера и
+            // у разметки форм (`emit_c.rs`, `split.rs`), и это требование, а не
+            // сходство: здесь стояли только `SimdLoad` и `SimdStore`, остальные
+            // четыре падали в `_ => Boxed`, и вектор, попавший **прямо** в
+            // типизированную позицию, печатался `ptr`. Видно это не было,
+            // потому что во всех фикстурах вектор приезжал туда связыванием, а
+            // у связывания представление берётся у его факта.
+            Expr::SimdSplat { lanes, lane, .. }
+            | Expr::SimdSet { lanes, lane, .. }
+            | Expr::SimdArith { lanes, lane, .. }
+            | Expr::SimdLoad { lanes, lane, .. } => Repr::Simd {
                 lanes: *lanes,
                 lane: *lane,
             },
+            Expr::SimdLane { lane, .. } => Repr::Flat(*lane),
             Expr::SimdStore { .. } => Repr::Array(Elems::Flat),
             Expr::Layout { .. } => Repr::Layout,
             Expr::LayoutField { .. } => Repr::Flat(PrimTy::UInt32),
@@ -2646,12 +2657,28 @@ impl<'a> Builder<'a> {
                 // построению - ответ функции и есть ответ хвостового вызова, -
                 // но полагаться на это нечем: разойдись они, verifier отверг бы
                 // модуль целиком. Обычный вызов в этом случае честнее отказа.
-                let agreed = slot(
-                    self.program.functions[function.0].result,
-                    &self.program.packings,
-                )
-                .is_some_and(|it| it == self.result);
-                let sort = if agreed { Tail::Must } else { Tail::Plain };
+                let result = self.program.functions[function.0].result;
+                let agreed =
+                    slot(result, &self.program.packings).is_some_and(|it| it == self.result);
+                // Плотный агрегат ответом снимает `musttail`, и это не
+                // осторожность, а измеренная граница: целое шире трёх слов
+                // возвращается через скрытый указатель, а хвостовой вызов в
+                // чужой `sret` писать не вправе. `llc -O0` отвечает на такую
+                // пару не отказом разбора, а «failed to perform tail call
+                // elimination on a call site marked musttail» и роняет сборку
+                // целиком. Порог мерян (`tests/tail.rs`): три поля проходят,
+                // четыре нет, - но сам порог принадлежит ABI хоста, а
+                // порождённый `.ll` обязан оставаться переносимым, поэтому
+                // снимается приставка у **всякого** агрегатного ответа.
+                //
+                // Цена названа: у такой функции обещание §3.4 и §5.3 держится
+                // на `tailrecurse` и sibling call, то есть с `-O2`, а не
+                // безусловно. Сборка, которая идёт, лучше сборки, которой нет.
+                let sort = if agreed && !matches!(result, Repr::Packed(_)) {
+                    Tail::Must
+                } else {
+                    Tail::Plain
+                };
                 let name = self.call(*function, arguments, sort)?;
                 let result = self.result.clone();
                 self.instruction(&format!("ret {result} {name}"), self.here());

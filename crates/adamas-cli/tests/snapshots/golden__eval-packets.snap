@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+MkAnswer ({accepted = 4, dropped = 2, bytes = 1596, hops = 186, flows = 17448456604866490436, weight = 14, churned = 6801441032525817023, pooled = 0, shared = 0, average = 399, guarded = 999}) (MkDigest 14 10 6931 1483182460501986661 11165427112702976304) 16 0

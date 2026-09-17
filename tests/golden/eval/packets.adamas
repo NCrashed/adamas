@@ -1,0 +1,772 @@
+-- Капстоун Фазы 7: обработчик пакетов (§9, милестоун фазы).
+--
+-- §9 записывает милестоун фазы одной строкой: «systems capstone (packet
+-- processor) достигает near-C performance на SIMD-нагрузках». Волны 0-3 дали
+-- предпосылки по отдельности - плоские массивы (§4.11), вектор над колонкой
+-- (§4.9), регионы и стратегии размещения (§3.6), настоящие потоки (§5.2), -
+-- и ни одна программа не трогала их вместе. Эта трогает.
+--
+-- # Что с чем здесь встречается
+--
+-- Порядок - от дна к крыше, и каждая строка есть **пара**, а не пункт.
+--
+--   *Сдвиги и маски встречаются с колонкой.* Пакет лежит колонкой `UInt64`, а
+--   поля заголовка вынимаются сдвигом и маской внутри слова. Колонка байтов
+--   для этого не годится: преобразований между ширинами язык не называет
+--   (§4.3), и из `Array n UInt8` тридцатидвухразрядное поле не собрать.
+--   Байтовая колонка в программе всё же есть - `policy`, - и роль у неё ровно
+--   та, какую граница оставляет байту: байт решает ветвь и выбирает вес,
+--   но в шестидесятичетырёхразрядный счётчик не складывается.
+--
+--   *Вектор встречается с колонкой региона.* `simdLoad`/`simdStore` ходят
+--   окном в четыре ячейки по нагрузке пакета, и та же колонка переписывается
+--   по месту: блок уникален, счётчик показывает **один** блок на буфер.
+--
+--   *Регион встречается с пакетом.* На каждый разобранный пакет заводится своя
+--   область, в неё кладётся сводка (поток и длина), читается обратно по хендлу
+--   и умирает вместе с пакетом. Две стратегии размещения (§3.6) дают на этом
+--   один и тот же ответ и **разные** хендлы: Arena поднимает курсор, Pool
+--   возвращает ячейку.
+--
+--   *Функтор встречается с запечатыванием.* Тело пробы написано один раз над
+--   `module type AllocStrategy` и применено к трём стратегиям, из которых одна
+--   запечатана `:>`, а одна разделяемая. Раскладка заголовка тоже живёт за
+--   запечатывающей сигнатурой (`Decode :> HeaderView`), и `scan` зовёт её из
+--   рекурсии.
+--
+--   *Воркеры встречаются с mempool'ом.* Четыре задачи порождают каждая свой
+--   буфер по своему зерну, разбирают его, считают вектором и кладут итог в
+--   **одну** разделяемую область. Между укладкой и чтением стоит уступка - то
+--   есть файбер вправе доехать до другого воркера.
+--
+--   *Деление встречается с данными пакета.* Средняя длина принятого пакета
+--   есть частное от двух чисел, посчитанных по содержимому, и делитель бывает
+--   нулём законно. Лицо деления здесь тотальное, `Option` (§4.3), и второе
+--   частное - `bytes / expired` - делит на ноль **на этих данных**.
+--
+-- # Раскладка пакета
+--
+-- Восемь ячеек `UInt64` на пакет, то есть 64 байта - минимальный кадр. Первые
+-- три несут заголовок, четвёртая порядковый номер, последние четыре нагрузку,
+-- и ровно они образуют одно окно `Simd 4 UInt64`.
+--
+--   ячейка 0: версия 60:4, длина IHL 56:4, класс 48:8, полная длина 32:16,
+--             идентификатор 16:16, флаги 13:3, смещение 0:13
+--   ячейка 1: время жизни 56:8, протокол 48:8, контрольная сумма 32:16,
+--             адрес отправителя 0:32
+--   ячейка 2: адрес получателя 32:32, порт отправителя 16:16,
+--             порт получателя 0:16
+--   ячейка 3: порядковый номер целиком
+--   ячейки 4-7: нагрузка
+--
+-- Контрольная сумма - настоящая, интернетовская: сумма шестнадцати половин
+-- четырёх слов с обнулённым полем суммы, дважды свёрнутая переносом и взятая
+-- дополнением. Порождение её считает и кладёт, разбор считает заново и
+-- сравнивает; каждому пятому пакету сумма портится на один бит, каждый седьмой
+-- объявляется шестой версией. Оттого принимаются не все.
+--
+-- # Чем ответ различает
+--
+-- Ответ обязан зависеть от содержимого так, чтобы перепутанное поле,
+-- потерянный байт и переставленные полосы его меняли. Что за это отвечает:
+--
+--   `accepted`/`dropped` - вердикт по версии, сумме и политике;
+--   `bytes` - поле полной длины, то есть смещение 32:16 ячейки 0;
+--   `hops` - время жизни **после** пересылки, то есть чтение-правка-запись
+--     по маске 56:8 ячейки 1;
+--   `flows` - исключающее ИЛИ хешей пятёрки, то есть все четыре адресных поля
+--     и протокол разом;
+--   `weight` - вес политики, прочитанный из байтовой колонки по номеру
+--     корзины;
+--   `churned` - свёртка вектора **чередованием знака**, поэтому перестановка
+--     любых двух дорожек её меняет; тот же довод, каким свёртку выбрал
+--     `workload-column`, и там он проверен замером;
+--   `pooled` и `shared` - разности, обязанные быть нулём: одно тело пробы над
+--     тремя стратегиями обязано дать одно число;
+--   `average` и `guarded` - два лица деления, второе на нулевом делителе;
+--   `MkDigest` - то же самое, посчитанное четырьмя воркерами по четырём
+--     зёрнам и сложенное сложением и исключающим ИЛИ, то есть независимо от
+--     порядка, в котором воркеры договорили.
+--
+-- Хендлы в ответе стоят **значением**, а не сверкой: `Ptr` есть смещение
+-- (§3.6), и у двух стратегий оно разное - 16 у Arena, 0 у Pool.
+--
+-- # Разделяемая область и договор трёх вычислителей
+--
+-- Область ядра есть **значение**: разделённая копируется целиком. Разделяемая
+-- есть **тождество**. Программа, которая их различает, есть ровно программа, на
+-- которой машина и рантайм обязаны разойтись, - и машина на ней не
+-- обрывается, а застревает. Поэтому у капстоуна **ни один воркер не читает
+-- чужую ячейку**: каждый кладёт своё и читает своё по своему хендлу.
+--
+-- Это не ослабление договора, а признание того, чего mempool и не требует:
+-- ячейка пакета принадлежит тому, кто её занял. Утверждение «область одна»
+-- капстоун поэтому **не** доказывает - его доказывает различающая программа
+-- трека B, живущая там, где машины нет (`adamas-codegen/tests/shared.rs`).
+-- Что капстоун доказывает про разделяемую область: она работает из нескольких
+-- воркеров, не течёт и даёт тот же ответ, что обычная
+-- (`adamas-codegen/tests/capstone.rs`).
+--
+-- # Границы, в которые упёрлась эта программа
+--
+-- Каждая названа отказом, а не молчанием, и каждая стоит рядом с местом,
+-- которое её обходит.
+--
+--   *Преобразований между ширинами нет* (§4.3) - отсюда колонка `UInt64` и
+--   роль байтовой колонки.
+--   *Член функтора за рекурсией не понижается* - отсюда пробег по колонке,
+--   написанный примитивами, и функтор, зовомый из `main`.
+--   *Плотный агрегат не переживает точку приостановки* - отсюда четыре
+--   связывания в воркере вместо одного.
+--   *Плотный агрегат ответом снимал `musttail` и ронял `llc -O0`* - это был
+--   дефект, и он починен (`adamas-codegen/tests/tail.rs`).
+--   *Векторный узел прямо в аргументе вызова печатался `ptr`* - тоже дефект,
+--   тоже починен (`adamas-codegen/tests/simd.rs`).
+--
+-- # Размеры
+--
+-- Шесть пакетов на буфер, четыре воркера, пять буферов за прогон. Машине этого
+-- по силам, а стенду замера (трек D волны 4) размеры подставляются, как их
+-- подставляет стенд `workload-column`: правятся две строки с числами, ядро
+-- остаётся это.
+
+data Bool where
+  True : Bool
+  False : Bool
+
+data Unit where
+  MkUnit : Unit
+
+data Maybe (a : Type) where
+  Nothing : Maybe a
+  Just : a -> Maybe a
+
+type Layout = { size : UInt32, align : UInt32 }
+
+class Flat a where
+  layout : Layout
+
+class Primitive a where
+  simdLayout : Layout
+
+-- Слов в пакете: три заголовочных, одно порядковое, четыре нагрузки.
+stride : UInt64
+stride = 8
+
+-- Пакетов в буфере. Стенд замера подставляет сюда своё число тем же ходом,
+-- каким подставляет его `workload-column`: правится строка `packets = <число>`
+-- целиком, а ядро остаётся это.
+packets : UInt64
+packets = 6
+
+cells : UInt64
+cells = mulUInt64 packets stride
+
+-- Проходов вектора по колонке. Вторая строка, которую подставляет стенд: на
+-- одном проходе меряется цена обращения, на многих - цена самого ядра.
+rounds : UInt64
+rounds = 1
+
+buckets : UInt64
+buckets = 8
+
+zero : UInt64
+zero = 0
+
+allOnes : UInt64
+allOnes = 18446744073709551615
+
+lowMask : UInt64 -> UInt64
+lowMask width = notUInt64 (shlUInt64 allOnes width)
+
+field : UInt64 -> UInt64 -> UInt64 -> UInt64
+field word at width = andUInt64 (shrUInt64 word at) (lowMask width)
+
+poke : UInt64 -> UInt64 -> UInt64 -> UInt64 -> UInt64
+poke word at width value =
+  let hole : UInt64 = andUInt64 word (notUInt64 (shlUInt64 (lowMask width) at))
+  orUInt64 hole (shlUInt64 (andUInt64 value (lowMask width)) at)
+
+both : Bool -> Bool -> Bool
+both True b = b
+both False b = False
+
+-- Контрольная сумма: шестнадцать половин четырёх слов, свёрнутые переносом.
+half : UInt64 -> UInt64 -> UInt64
+half word i = field word (mulUInt64 i 16) 16
+
+wordSum : UInt64 -> UInt64
+wordSum w = addUInt64 (addUInt64 (half w 0) (half w 1)) (addUInt64 (half w 2) (half w 3))
+
+carry : UInt64 -> UInt64
+carry s = addUInt64 (andUInt64 s 65535) (shrUInt64 s 16)
+
+checksumOver : UInt64 -> UInt64 -> UInt64 -> UInt64 -> UInt64
+checksumOver c0 c1 c2 c3 =
+  let bare : UInt64 = poke c1 32 16 0
+  let raw : UInt64 = addUInt64 (addUInt64 (wordSum c0) (wordSum bare)) (addUInt64 (wordSum c2) (wordSum c3))
+  andUInt64 (xorUInt64 (carry (carry raw)) 65535) 65535
+
+-- Порождённый буфер: xorshift64 поверх номера ячейки.
+mix : UInt64 -> UInt64
+mix x =
+  let a : UInt64 = xorUInt64 x (shlUInt64 x 13)
+  let b : UInt64 = xorUInt64 a (shrUInt64 a 7)
+  xorUInt64 b (shlUInt64 b 17)
+
+grain : UInt64 -> UInt64 -> UInt64
+grain seed k = mix (addUInt64 (mulUInt64 seed 2654435761) (mulUInt64 (addUInt64 k 1) 40503))
+
+protoOf : UInt64 -> UInt64
+protoOf 0 = 1
+protoOf 1 = 6
+protoOf 2 = 17
+protoOf k = 47
+
+pickVersion : Bool -> UInt64
+pickVersion True = 6
+pickVersion False = 4
+
+madeHead0 : UInt64 -> UInt64 -> UInt64
+madeHead0 seed p =
+  let r : UInt64 = grain seed (mulUInt64 p stride)
+  let ver : UInt64 = pickVersion (eqUInt64 (remUInt64 p 7) 3)
+  let dscp : UInt64 = field r 3 8
+  let len : UInt64 = addUInt64 (field r 11 10) 40
+  let ident : UInt64 = field r 21 16
+  let flags : UInt64 = field r 37 3
+  let frag : UInt64 = field r 40 13
+  orUInt64
+    (orUInt64 (shlUInt64 ver 60) (orUInt64 (shlUInt64 5 56) (shlUInt64 dscp 48)))
+    (orUInt64 (shlUInt64 len 32) (orUInt64 (shlUInt64 ident 16) (orUInt64 (shlUInt64 flags 13) frag)))
+
+madeHead1 : UInt64 -> UInt64 -> UInt64
+madeHead1 seed p =
+  let r : UInt64 = grain seed (addUInt64 (mulUInt64 p stride) 1)
+  let ttl : UInt64 = addUInt64 (field r 0 6) 2
+  let proto : UInt64 = protoOf (field r 6 2)
+  let src : UInt64 = field r 8 32
+  orUInt64 (orUInt64 (shlUInt64 ttl 56) (shlUInt64 proto 48)) src
+
+madeHead2 : UInt64 -> UInt64 -> UInt64
+madeHead2 seed p =
+  let r : UInt64 = grain seed (addUInt64 (mulUInt64 p stride) 2)
+  orUInt64 (shlUInt64 (field r 0 32) 32)
+    (orUInt64 (shlUInt64 (field r 32 16) 16) (field r 48 16))
+
+damaged : Bool -> UInt64 -> UInt64
+damaged True s = xorUInt64 s 1
+damaged False s = s
+
+writePacket : Array cells UInt64 -> UInt64 -> UInt64 -> Array cells UInt64
+writePacket xs seed p =
+  let base : UInt64 = mulUInt64 p stride
+  let c0 : UInt64 = madeHead0 seed p
+  let bare : UInt64 = madeHead1 seed p
+  let c2 : UInt64 = madeHead2 seed p
+  let c3 : UInt64 = grain seed (addUInt64 base 3)
+  let sum : UInt64 = checksumOver c0 bare c2 c3
+  let c1 : UInt64 = poke bare 32 16 (damaged (eqUInt64 (remUInt64 p 5) 2) sum)
+  let a0 : Array cells UInt64 = arraySet xs base c0
+  let a1 : Array cells UInt64 = arraySet a0 (addUInt64 base 1) c1
+  let a2 : Array cells UInt64 = arraySet a1 (addUInt64 base 2) c2
+  let a3 : Array cells UInt64 = arraySet a2 (addUInt64 base 3) c3
+  let a4 : Array cells UInt64 = arraySet a3 (addUInt64 base 4) (grain seed (addUInt64 base 4))
+  let a5 : Array cells UInt64 = arraySet a4 (addUInt64 base 5) (grain seed (addUInt64 base 5))
+  let a6 : Array cells UInt64 = arraySet a5 (addUInt64 base 6) (grain seed (addUInt64 base 6))
+  arraySet a6 (addUInt64 base 7) (grain seed (addUInt64 base 7))
+
+generate : Array cells UInt64 -> UInt64 -> UInt64 -> Array cells UInt64
+generate xs seed 0 = xs
+generate xs seed k =
+  let p : UInt64 = subUInt64 k 1
+  generate (writePacket xs seed p) seed p
+
+-- Плоская таблица политик: колонка **байтов**, индекс - номер корзины потока.
+--
+-- Байт здесь делает ровно то, что ему оставляет отсутствие преобразований
+-- ширин (§4.3): решает ветвь (`neUInt8 code deny`) и выбирает вес
+-- (`weightOf`, разбор по литеральным паттернам `UInt8`). Сложить его в
+-- шестидесятичетырёхразрядный счётчик нечем - `UInt8` в `UInt64` не
+-- переводится, - и вес поэтому назначается клаузами, а не арифметикой над
+-- байтом. Индекс при этом `UInt64`, как его требует `arrayIndex`, и приезжает
+-- он из хеша потока: колонка байтов читается по числу, посчитанному из
+-- содержимого пакета.
+deny : UInt8
+deny = 0
+
+keep : UInt8
+keep = 1
+
+meter : UInt8
+meter = 2
+
+audit : UInt8
+audit = 3
+
+policy : Array buckets UInt8
+policy =
+  let t0 : Array buckets UInt8 = arrayNew buckets deny
+  let t1 : Array buckets UInt8 = arraySet t0 0 keep
+  let t2 : Array buckets UInt8 = arraySet t1 1 meter
+  let t3 : Array buckets UInt8 = arraySet t2 2 keep
+  let t4 : Array buckets UInt8 = arraySet t3 3 audit
+  let t5 : Array buckets UInt8 = arraySet t4 4 meter
+  let t6 : Array buckets UInt8 = arraySet t5 5 deny
+  let t7 : Array buckets UInt8 = arraySet t6 6 audit
+  arraySet t7 7 keep
+
+weightOf : UInt8 -> UInt64
+weightOf 0 = 0
+weightOf 1 = 1
+weightOf 2 = 3
+weightOf c = 7
+
+flowHash : UInt64 -> UInt64 -> UInt64 -> UInt64 -> UInt64 -> UInt64
+flowHash src dst sp dp proto =
+  mix (xorUInt64 (mulUInt64 src 2246822519)
+        (xorUInt64 (mulUInt64 dst 3266489917)
+          (xorUInt64 (orUInt64 (shlUInt64 sp 16) dp) (mulUInt64 proto 668265263))))
+
+-- Раскладка заголовка - за запечатывающей сигнатурой (§4.2, §4.8). Наружу
+-- видны имена полей, а не смещения: `:>` снимает представление, и разбор,
+-- написанный мимо `Decode`, пришлось бы писать сдвигами заново.
+--
+-- Члены здесь мономорфны нарочно. Обобщённый член (`{Flat a} =>`) за рекурсией
+-- не понижается - специализация есть δ-разворот от терма `main`, а рекурсию
+-- развернуть нечем, - и `scan`, зовущая `Decode.version` на каждом пакете, с
+-- обобщённым членом не собралась бы. Мономорфный член это переживает: ему
+-- нечего подставлять.
+module type HeaderView where
+  version  : UInt64 -> UInt64
+  length   : UInt64 -> UInt64
+  ttl      : UInt64 -> UInt64
+  protocol : UInt64 -> UInt64
+  checksum : UInt64 -> UInt64
+  source   : UInt64 -> UInt64
+  dest     : UInt64 -> UInt64
+  sport    : UInt64 -> UInt64
+  dport    : UInt64 -> UInt64
+
+module Decode :> HeaderView where
+  version : UInt64 -> UInt64
+  version c0 = field c0 60 4
+
+  length : UInt64 -> UInt64
+  length c0 = field c0 32 16
+
+  ttl : UInt64 -> UInt64
+  ttl c1 = field c1 56 8
+
+  protocol : UInt64 -> UInt64
+  protocol c1 = field c1 48 8
+
+  checksum : UInt64 -> UInt64
+  checksum c1 = field c1 32 16
+
+  source : UInt64 -> UInt64
+  source c1 = field c1 0 32
+
+  dest : UInt64 -> UInt64
+  dest c2 = field c2 32 32
+
+  sport : UInt64 -> UInt64
+  sport c2 = field c2 16 16
+
+  dport : UInt64 -> UInt64
+  dport c2 = field c2 0 16
+
+oneIf : Bool -> UInt64
+oneIf True = 1
+oneIf False = 0
+
+type Tally = { accepted : UInt64, dropped : UInt64, bytes : UInt64,
+               hops : UInt64, flows : UInt64, weight : UInt64,
+               expired : UInt64 }
+
+empty : Tally
+empty = { accepted = 0, dropped = 0, bytes = 0, hops = 0, flows = 0, weight = 0,
+          expired = 0 }
+
+verdict : Bool -> Tally -> UInt64 -> UInt64 -> UInt64 -> UInt64 -> Tally
+verdict True t len ttl flow w =
+  { accepted = addUInt64 t.accepted 1, dropped = t.dropped,
+    bytes = addUInt64 t.bytes len, hops = addUInt64 t.hops ttl,
+    flows = xorUInt64 t.flows flow, weight = addUInt64 t.weight w,
+    expired = addUInt64 t.expired (oneIf (leUInt64 ttl 1)) }
+verdict False t len ttl flow w =
+  { accepted = t.accepted, dropped = addUInt64 t.dropped 1,
+    bytes = t.bytes, hops = t.hops, flows = t.flows, weight = t.weight,
+    expired = t.expired }
+
+scan : Array cells UInt64 -> Array buckets UInt8 -> UInt64 -> Tally -> Tally
+scan xs pol 0 t = t
+scan xs pol k t =
+  let p : UInt64 = subUInt64 k 1
+  let base : UInt64 = mulUInt64 p stride
+  let c0 : UInt64 = arrayIndex xs base
+  let c1 : UInt64 = arrayIndex xs (addUInt64 base 1)
+  let c2 : UInt64 = arrayIndex xs (addUInt64 base 2)
+  let c3 : UInt64 = arrayIndex xs (addUInt64 base 3)
+  let ver : UInt64 = Decode.version c0
+  let len : UInt64 = Decode.length c0
+  let ttl : UInt64 = Decode.ttl c1
+  let proto : UInt64 = Decode.protocol c1
+  let stored : UInt64 = Decode.checksum c1
+  let src : UInt64 = Decode.source c1
+  let dst : UInt64 = Decode.dest c2
+  let sp : UInt64 = Decode.sport c2
+  let dp : UInt64 = Decode.dport c2
+  let want : UInt64 = checksumOver c0 c1 c2 c3
+  let flow : UInt64 = flowHash src dst sp dp proto
+  let code : UInt8 = arrayIndex pol (andUInt64 flow 7)
+  let ok : Bool = both (eqUInt64 ver 4) (both (eqUInt64 stored want) (neUInt8 code deny))
+  scan xs pol p (verdict ok t len ttl flow (weightOf code))
+
+-- Векторная половина: окно из четырёх слов нагрузки, одна пара инструкций.
+spice : UInt64
+spice = 6364136223846793005
+
+pepper : UInt64
+pepper = 1442695040888963407
+
+thirtyOne : UInt64
+thirtyOne = 31
+
+churn : Array cells UInt64 -> UInt64 -> Array cells UInt64
+churn xs 0 = xs
+churn xs k =
+  let p : UInt64 = subUInt64 k 1
+  let at : UInt64 = addUInt64 (mulUInt64 p stride) 4
+  let window : Simd 4 UInt64 = simdLoad 4 xs at
+  let next : Simd 4 UInt64 = simdAdd (simdMul window (simdSplat 4 spice)) (simdSplat 4 pepper)
+  let put : Array cells UInt64 = simdStore 4 xs at next
+  churn put p
+
+-- Столько проходов, сколько сказано. Колонка переписывается по месту, поэтому
+-- блок на всю программу остаётся один, сколько бы проходов ни было.
+churning : Array cells UInt64 -> UInt64 -> Array cells UInt64
+churning xs 0 = xs
+churning xs r = churning (churn xs packets) (subUInt64 r 1)
+
+digest : Array cells UInt64 -> UInt64 -> Simd 4 UInt64 -> Simd 4 UInt64
+digest xs 0 acc = acc
+digest xs k acc =
+  let p : UInt64 = subUInt64 k 1
+  let at : UInt64 = addUInt64 (mulUInt64 p stride) 4
+  let window : Simd 4 UInt64 = simdLoad 4 xs at
+  let sown : Simd 4 UInt64 = simdAdd (simdMul acc (simdSplat 4 thirtyOne)) window
+  digest xs p sown
+
+foldLanes : Simd 4 UInt64 -> UInt64
+foldLanes v =
+  subUInt64 (simdLane v 3)
+    (subUInt64 (simdLane v 2) (subUInt64 (simdLane v 1) (simdLane v 0)))
+
+-- Пересылка: у пакета четвёртой версии убывает время жизни, у прочих нет.
+aged : Bool -> UInt64 -> UInt64
+aged True c1 = poke c1 56 8 (subUInt64 (field c1 56 8) 1)
+aged False c1 = c1
+
+forward : Array cells UInt64 -> UInt64 -> Array cells UInt64
+forward xs 0 = xs
+forward xs k =
+  let p : UInt64 = subUInt64 k 1
+  let base : UInt64 = mulUInt64 p stride
+  let c0 : UInt64 = arrayIndex xs base
+  let at : UInt64 = addUInt64 base 1
+  let c1 : UInt64 = arrayIndex xs at
+  forward (arraySet xs at (aged (eqUInt64 (field c0 60 4) 4) c1)) p
+
+hops : Array cells UInt64 -> UInt64 -> UInt64 -> UInt64
+hops xs 0 acc = acc
+hops xs k acc =
+  let p : UInt64 = subUInt64 k 1
+  let c1 : UInt64 = arrayIndex xs (addUInt64 (mulUInt64 p stride) 1)
+  hops xs p (addUInt64 acc (field c1 56 8))
+
+-- Тотальное лицо деления (§4.3): делитель приезжает из данных пакета, и нулём
+-- он бывает законно - принятых пакетов с истёкшим временем жизни на этих
+-- данных нет ни одного. Обрыв (§10 вопрос 176, вариант «а») здесь не годится:
+-- программа обязана ответить числом, а не упасть на входе, который сеть
+-- вправе прислать.
+--
+-- Разбор написан клаузами, а не `if`: `if` над `Maybe UInt64` отвергается
+-- несовпадением типов - мотив разбора остаётся дыркой, - и это граница
+-- элаборации, к делению отношения не имеющая. Обход тот же, что в
+-- `eval/bitwise`.
+chosen : Bool -> UInt64 -> UInt64 -> Maybe UInt64
+chosen True x y = Nothing
+chosen False x y = Just (divUInt64 x y)
+
+safeDiv : UInt64 -> UInt64 -> Maybe UInt64
+safeDiv x y = chosen (eqUInt64 y 0) x y
+
+orElse : UInt64 -> Maybe UInt64 -> UInt64
+orElse fallback Nothing = fallback
+orElse fallback (Just v) = v
+
+-- Регион под пакет (§3.6): стратегия размещения есть модуль, а проба над ней -
+-- функтор. Стратегий три, и расходятся они ровно в двух членах: `new` (обычная
+-- область против разделяемой) и `free` (ячейка не берётся против ячейки,
+-- ждущей равную по размеру). Прочие пять у всех одни - §3.6 объявляет
+-- `SharedAllocStrategy when AllocStrategy`, то есть те же члены.
+module type AllocStrategy where
+  type Block
+  new   : Unit -> Block
+  store : {Flat a} => Block -> a -> Block
+  here  : Block -> Ptr
+  load  : {Flat a} => Block -> Ptr -> a
+  free  : Block -> Ptr -> Block
+
+module Arena :> AllocStrategy where
+  type Block = Block
+
+  new : Unit -> Block
+  new u = regionNew
+
+  store : {Flat a} => Block -> a -> Block
+  store r x = regionAlloc r x
+
+  here : Block -> Ptr
+  here r = regionLast r
+
+  load : {Flat a} => Block -> Ptr -> a
+  load r p = regionRead r p
+
+  -- Ячейка обратно не берётся: область отдаётся целиком, дропом.
+  free : Block -> Ptr -> Block
+  free r p = r
+
+module Pool : AllocStrategy where
+  type Block = Block
+
+  new : Unit -> Block
+  new u = regionNew
+
+  store : {Flat a} => Block -> a -> Block
+  store r x = regionAlloc r x
+
+  here : Block -> Ptr
+  here r = regionLast r
+
+  load : {Flat a} => Block -> Ptr -> a
+  load r p = regionRead r p
+
+  -- Ячейка ждёт равную по размеру: mempool.
+  free : Block -> Ptr -> Block
+  free r p = regionRecycle r p
+
+type Cell = { flow : UInt64, bytes : UInt64 }
+
+cellAt : Array cells UInt64 -> UInt64 -> Cell
+cellAt xs p =
+  let base : UInt64 = mulUInt64 p stride
+  let c0 : UInt64 = arrayIndex xs base
+  let c1 : UInt64 = arrayIndex xs (addUInt64 base 1)
+  let c2 : UInt64 = arrayIndex xs (addUInt64 base 2)
+  { flow = flowHash (field c1 0 32) (field c2 32 32) (field c2 16 16) (field c2 0 16) (field c1 48 8),
+    bytes = field c0 32 16 }
+
+-- Члены функтора берут **два числа**, а не сложенную из них запись, и это
+-- вторая граница того же шва. Запись есть плотный агрегат (§4.11), а к члену
+-- функтора место вызова обращается как к значению-функции - и понижение
+-- отвечает «параметр недобранного вызова: ожидалось указательное значение, а
+-- пришло плоский агрегат укладки». Складывается запись поэтому **внутри**
+-- функтора, где она обычное локальное значение.
+module Scratch (S : AllocStrategy) where
+  -- Область живёт ровно столько, сколько пакет: завести, уложить, прочесть.
+  once : UInt64 -> UInt64 -> UInt64
+  once flow bytes =
+    let d : Cell = { flow = flow, bytes = bytes }
+    let r0 : S.Block = S.new MkUnit
+    let r1 : S.Block = S.store r0 d
+    let h : Ptr = S.here r1
+    let got : Cell = S.load r1 h
+    xorUInt64 got.flow got.bytes
+
+  -- Та же область, но ячейку возвращают: Arena её не берёт, Pool берёт.
+  again : UInt64 -> UInt64 -> Ptr
+  again flow bytes =
+    let d : Cell = { flow = flow, bytes = bytes }
+    let r0 : S.Block = S.new MkUnit
+    let r1 : S.Block = S.store r0 d
+    let h : Ptr = S.here r1
+    let r2 : S.Block = S.free r1 h
+    let r3 : S.Block = S.store r2 d
+    S.here r3
+
+module OnArena = Scratch Arena
+module OnPool = Scratch Pool
+
+-- Пробег по колонке зовёт **модуль напрямую**, а не член функтора, и это не
+-- вкус: за рекурсией член функтора не понижается ни одним бэкендом.
+--
+-- Специализация есть δ-разворот от терма `main` (§10 вопрос 163), а рекурсию
+-- развернуть нечем: проекция `OnArena.once` доходит до понижения неснятой, с
+-- модулем ведущим имплиситом, и вызов оказывается недобранным - «параметр
+-- недобранного вызова: ожидалось указательное значение, а пришло плоское
+-- `UInt64`». Достаточно рекурсии **на пути** от `main` к члену: тот же член,
+-- позванный из нерекурсивной обёртки, проходит. Рекурсивный член **внутри**
+-- функтора даёт тот же отказ в другом обличье - «ответ недобранного вызова…
+-- блок региона», - и корень у обоих один. Свидетель -
+-- `adamas-codegen/tests/functor.rs`.
+--
+-- Того же корня вторая половина: **обобщённый член обычного модуля** за
+-- рекурсией тоже не понижается. `Arena.load` с ограничением `{Flat a}`
+-- отвечает здесь «связанное значение: ожидалось плоский агрегат укладки, а
+-- пришло указательное значение» - словарь не подставлен, ответ остался
+-- обобщённым. Мономорфный член это переживает: подставлять ему нечего, и
+-- `Decode :> HeaderView` из `scan` зовётся без единой оговорки.
+--
+-- Цена названа: обещание вопроса 161 («функция пишется один раз над
+-- `module type` и работает с любой стратегией») держится ровно до первого
+-- цикла. Функтор здесь поэтому показывает то, что ему доступно, - одно тело на
+-- три стратегии, - а зовут его из `main`.
+sweepArena : Array cells UInt64 -> UInt64 -> UInt64 -> UInt64
+sweepArena xs 0 acc = acc
+sweepArena xs k acc =
+  let p : UInt64 = subUInt64 k 1
+  let d : Cell = cellAt xs p
+  let r0 : Block = regionNew
+  let r1 : Block = regionAlloc r0 d
+  let h : Ptr = regionLast r1
+  let got : Cell = regionRead r1 h
+  sweepArena xs p (addUInt64 acc (xorUInt64 got.flow got.bytes))
+
+sweepPool : Array cells UInt64 -> UInt64 -> UInt64 -> UInt64
+sweepPool xs 0 acc = acc
+sweepPool xs k acc =
+  let p : UInt64 = subUInt64 k 1
+  let d : Cell = cellAt xs p
+  let r0 : Block = regionNew
+  let r1 : Block = regionAlloc r0 d
+  let h : Ptr = regionLast r1
+  let got : Cell = regionRead r1 h
+  let r2 : Block = regionRecycle r1 h
+  let r3 : Block = regionAlloc r2 d
+  sweepPool xs p (addUInt64 acc (xorUInt64 got.flow got.bytes))
+
+-- Несколько воркеров над одной разделяемой областью (§3.6, §5.2).
+--
+-- Каждая задача порождает **свой** буфер по своему зерну, разбирает его,
+-- считает вектором и кладёт свой итог в общий mempool. Соседской ячейки не
+-- читает никто, и это не осторожность, а условие того, чтобы программа
+-- осталась программой корпуса: область ядра есть **значение** (разделённая
+-- копируется целиком), разделяемая есть **тождество**, и различающую их
+-- программу договор трёх вычислителей не выражает вовсе - машина на ней
+-- застревает. Mempool различения и не требует: ячейка пакета принадлежит тому,
+-- кто её занял.
+--
+-- Уступка стоит **после** `here` и до `load`: хендл последней укладки у
+-- разделяемой области принадлежит воркеру, а не файберу, и файбер, уступивший
+-- между `store` и `here`, вправе проснуться на чужом воркере и спросить хендл
+-- не свой.
+module Mempool : AllocStrategy where
+  type Block = Block
+
+  new : Unit -> Block
+  new u = sharedNew
+
+  store : {Flat a} => Block -> a -> Block
+  store r x = regionAlloc r x
+
+  here : Block -> Ptr
+  here r = regionLast r
+
+  load : {Flat a} => Block -> Ptr -> a
+  load r p = regionRead r p
+
+  free : Block -> Ptr -> Block
+  free r p = r
+
+module OnShared = Scratch Mempool
+
+data Digest where
+  MkDigest : UInt64 -> UInt64 -> UInt64 -> UInt64 -> UInt64 -> Digest
+
+data Task where
+  MkTask : Digest -> Task
+
+effect Async where
+  suspend : Unit
+  spawn : ({Async} Digest) -> Task
+  await : (1 t : Task) -> Digest
+
+withNursery : ({Async} Digest) -> Digest
+
+-- Слагаемые складываются, подписи складываются исключающим ИЛИ: и то, и другое
+-- не зависит от порядка, в котором воркеры договорили. Порядок под настоящими
+-- потоками не определён (§5.2), и ответ, от него зависящий, разошёлся бы между
+-- прогонами, а не между вычислителями.
+merge : Digest -> Digest -> Digest
+merge (MkDigest a1 d1 b1 s1 f1) (MkDigest a2 d2 b2 s2 f2) =
+  MkDigest (addUInt64 a1 a2) (addUInt64 d1 d2) (addUInt64 b1 b2)
+    (xorUInt64 s1 s2) (xorUInt64 f1 f2)
+
+-- Воркер: свой буфер, свой разбор, свой вектор, своя ячейка mempool'а.
+--
+-- Итог разбора разбирается на числа **до** уступки, и это не стиль. Плотный
+-- агрегат (§4.11) точку приостановки не переживает - «`adamas_pack_0`
+-- переживает точку приостановки: слот кадра шире не бывает», - тогда как
+-- плоское примитивное её переживает (§10 вопрос 164,
+-- `eval/flat-across-a-suspension`). Граница названа отказом у обоих бэкендов;
+-- цена ей - четыре связывания вместо одного.
+worker : Mempool.Block -> UInt64 -> {Async} Digest
+worker r seed =
+  let raw : Array cells UInt64 = generate (arrayNew cells zero) seed packets
+  let t : Tally = scan raw policy packets empty
+  let took : UInt64 = t.accepted
+  let lost : UInt64 = t.dropped
+  let size : UInt64 = t.bytes
+  let sign : UInt64 = t.flows
+  let mixed : Array cells UInt64 = churning raw rounds
+  let sealed : UInt64 = foldLanes (digest mixed packets (simdSplat 4 zero))
+  let r1 : Mempool.Block = Mempool.store r size
+  let at : Ptr = Mempool.here r1
+  let s : Unit = suspend
+  let got : UInt64 = Mempool.load r1 at
+  MkDigest took lost got sealed sign
+
+crew : Mempool.Block -> {Async} Digest
+crew r =
+  let t1 : Task = spawn (worker r 7)
+  let t2 : Task = spawn (worker r 11)
+  let t3 : Task = spawn (worker r 13)
+  let t4 : Task = spawn (worker r 17)
+  let a1 : Digest = await t1
+  let a2 : Digest = await t2
+  let a3 : Digest = await t3
+  let a4 : Digest = await t4
+  merge (merge a1 a2) (merge a3 a4)
+
+type Report = { accepted : UInt64, dropped : UInt64, bytes : UInt64,
+                hops : UInt64, flows : UInt64, weight : UInt64,
+                churned : UInt64, pooled : UInt64, shared : UInt64,
+                average : UInt64, guarded : UInt64 }
+
+data Answer where
+  MkAnswer : Report -> Digest -> Ptr -> Ptr -> Answer
+
+main : Answer
+main =
+  let raw : Array cells UInt64 = generate (arrayNew cells zero) 7 packets
+  let pol : Array buckets UInt8 = policy
+  let t : Tally = scan raw pol packets empty
+  let churned : Array cells UInt64 = churning raw rounds
+  let sealed : UInt64 = foldLanes (digest churned packets (simdSplat 4 zero))
+  let scratched : UInt64 = sweepArena churned packets zero
+  let mempooled : UInt64 = sweepPool churned packets zero
+  let first : Cell = cellAt churned 0
+  let moved : Array cells UInt64 = forward churned packets
+  let left : UInt64 = hops moved packets zero
+  let alone : UInt64 = OnArena.once first.flow first.bytes
+  let joint : UInt64 = OnShared.once first.flow first.bytes
+  let report : Report = { accepted = t.accepted, dropped = t.dropped, bytes = t.bytes,
+                          hops = left, flows = t.flows, weight = t.weight,
+                          churned = sealed, pooled = subUInt64 mempooled scratched,
+                          shared = subUInt64 joint alone,
+                          average = orElse 0 (safeDiv t.bytes t.accepted),
+                          guarded = orElse 999 (safeDiv t.bytes t.expired) }
+  MkAnswer report (withNursery (crew (Mempool.new MkUnit)))
+    (OnArena.again first.flow first.bytes) (OnPool.again first.flow first.bytes)

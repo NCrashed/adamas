@@ -355,8 +355,12 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         Expr::ArrayNew { count, initial, .. } => vec![count, initial],
         Expr::ArraySet {
             array, at, value, ..
+        }
+        | Expr::SimdStore {
+            array, at, value, ..
         } => vec![array, at, value],
         Expr::ArrayIndex { array, at, .. }
+        | Expr::SimdLoad { array, at, .. }
         | Expr::SimdLane {
             vector: array, at, ..
         } => vec![array, at],
@@ -550,11 +554,15 @@ impl Anf<'_> {
             // тип, а под дорожку - в её.
             Expr::SimdSplat { lanes, lane, .. }
             | Expr::SimdSet { lanes, lane, .. }
-            | Expr::SimdArith { lanes, lane, .. } => Repr::Simd {
+            | Expr::SimdArith { lanes, lane, .. }
+            | Expr::SimdLoad { lanes, lane, .. } => Repr::Simd {
                 lanes: *lanes,
                 lane: *lane,
             },
             Expr::SimdLane { lane, .. } => Repr::Flat(*lane),
+            // Запись окна отдаёт **колонку**, а не вектор: пара к `arraySet`,
+            // и представление у неё то же.
+            Expr::SimdStore { .. } => Repr::Array(crate::ir::Elems::Flat),
             Expr::RegionNew
             | Expr::RegionAlloc { .. }
             | Expr::RegionWrite { .. }

@@ -553,3 +553,431 @@ main = simdLane (simdSplat 4 one) 9
         "порождённый C не несёт проверки номера дорожки"
     );
 }
+
+// --- окно колонки: `load`/`store` §4.9 над памятью (трек D волны 3) --------
+//
+// Свидетель векторности у памяти **другой**, чем у арифметики, и это измерено,
+// а не предположено. Трек H поймал поэлементную арифметику счётом инструкций
+// на неоптимизированном конвейере: `opt -O2` собирал вектор обратно (SLP), а
+// без него мутант расходился с эмиттером дословно. У памяти правило это
+// работает **наполовину**, и вторая половина названа ниже: поэлементное
+// чтение по соседним `getelementptr` неотличимо от векторного даже без `opt`,
+// потому что сводит его SelectionDAG, а он не пас `opt` и снять его нечем.
+//
+// Замер 2026-09-17 на `workload-vector`, LLVM 21.1.8, x86-64 baseline, счёт по
+// телу ядра (`llc -O0`, без `opt`):
+//
+// | что понижает эмиттер | movups | movss |
+// |---|---|---|
+// | окно вектором (штатно) | **4** | **0** |
+// | по дорожке через `adamas_array_at` | **2** | **8** |
+// | по дорожке по соседним `getelementptr` | 4 | 0 - **не отличается** |
+//
+// Отсюда форма свидетеля: он ловит ту подделку, которая наблюдаема, и
+// **называет** ту, которая нет. Вторая при этом и не подделка по существу:
+// адрес там считает сам IR теми же байтами, и машинный код у неё честно
+// векторный. Различались бы они только текстом IR, а измеряется здесь
+// объектник - как того и требует правило «свидетель обязан различать».
+
+/// Имя функции, в теле которой стоит окно: `fn_N` у порождённого `.ll`.
+///
+/// Ищется по тексту, а не пишется числом: номер функции зависит от порядка
+/// понижения, и прибитый гвоздями `fn_8` разъехался бы с первой же правкой
+/// фикстуры - молча, потому что несуществующий символ дизассемблер просто не
+/// печатает, а счёт по пустому выводу даёт ноль.
+fn window_symbol(ll: &str) -> String {
+    let mut current = None;
+    for line in ll.lines() {
+        if let Some(rest) = line.strip_prefix("define ") {
+            current = rest
+                .split('@')
+                .nth(1)
+                .and_then(|tail| tail.split('(').next())
+                .map(str::to_owned);
+        }
+        if line.contains("load <8 x float>") {
+            return current.unwrap_or_else(|| panic!("загрузка окна стоит вне функции"));
+        }
+    }
+    panic!("в порождённом IR нет загрузки окна - мерить нечего");
+}
+
+/// Сколько пакетных и сколько скалярных перемещений в теле названной функции.
+///
+/// Мнемоники перечислены по архитектурам, а неизвестная - **отказ**, по тому
+/// же правилу, что у [`packed_and_scalar`]: свидетель, молча считающий ноль
+/// там, где инструкций не узнал, обманчив.
+fn window_moves(tools: &Toolchain, object: &Path, symbol: &str) -> (usize, usize) {
+    let shown = Command::new(tools.tool("llvm-objdump"))
+        .arg("-d")
+        .arg(format!("--disassemble-symbols={symbol}"))
+        .arg(object)
+        .output()
+        .unwrap_or_else(|error| panic!("дизассемблер не запустился: {error}"));
+    assert!(shown.status.success(), "`{symbol}` не дизассемблировался");
+    let text = String::from_utf8_lossy(&shown.stdout);
+    assert!(
+        text.contains(symbol),
+        "дизассемблер не нашёл `{symbol}`: счёт по пустому выводу дал бы ноль"
+    );
+    let (packed, scalar): (&[&str], &[&str]) = if cfg!(target_arch = "x86_64") {
+        // `movups`, а не `movaps`: окно стоит по шагу колонки, и выровненного
+        // перемещения у него быть не должно. `movaps` в теле - пролог и
+        // разливы регистров, к окну отношения не имеющие.
+        (&["movups"], &["movss"])
+    } else if cfg!(target_arch = "aarch64") {
+        // У ARM64 форму несёт операнд, как и у арифметики.
+        (&["ldr\tq", "str\tq"], &["ldr\ts", "str\ts"])
+    } else {
+        panic!(
+            "мнемоник этой архитектуры свидетель не знает: посчитать ноль \
+             значило бы соврать - допишите её в `window_moves`"
+        );
+    };
+    let count = |needles: &[&str]| {
+        text.lines()
+            .filter(|line| needles.iter().any(|it| line.contains(it)))
+            .count()
+    };
+    (count(packed), count(scalar))
+}
+
+/// Поэлементное понижение окна **через рантайм** - та подделка, что наблюдаема.
+///
+/// Восемь `adamas_array_at` вместо одного `adamas_array_window`: вызов
+/// непрозрачен, и свести восемь чтений обратно в одно не вправе ни `opt`, ни
+/// выбор инструкций.
+fn per_lane_through_runtime(ll: &str) -> String {
+    let mut out = String::new();
+    let mut window: Option<(String, String)> = None;
+    let mut hit = false;
+    for line in ll.lines() {
+        // Колонку и номер ячейки мутант берёт **у самого модуля**: имена
+        // временных зависят от порядка понижения, и прибитые гвоздями
+        // разъехались бы молча, оставив свидетеля мерить нетронутую программу.
+        if let Some((array, index)) = line
+            .trim_start()
+            .split_once(" = call ptr @adamas_array_window(ptr ")
+            .and_then(|(_, rest)| rest.split_once(", i64 "))
+            .and_then(|(array, rest)| rest.split_once(", i64 ").map(|(index, _)| (array, index)))
+        {
+            window = Some((array.to_owned(), index.to_owned()));
+        }
+        let loaded = line
+            .trim_start()
+            .split_once(" = load <8 x float>, ptr ")
+            .map(|(name, _)| name.to_owned());
+        if let (Some(name), Some((array, index))) = (loaded, window.clone()) {
+            hit = true;
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    "  %p0 = call ptr @adamas_array_at(ptr {array}, i64 {index})\n  \
+                     %l0 = load float, ptr %p0, align 4\n  \
+                     %w0 = insertelement <8 x float> poison, float %l0, i64 0\n"
+                ),
+            );
+            for lane in 1..8u32 {
+                let _ = std::fmt::Write::write_fmt(
+                    &mut out,
+                    format_args!(
+                        "  %k{lane} = add i64 {index}, {lane}\n  \
+                         %p{lane} = call ptr @adamas_array_at(ptr {array}, i64 %k{lane})\n  \
+                         %l{lane} = load float, ptr %p{lane}, align 4\n  \
+                         %w{lane} = insertelement <8 x float> %w{}, float %l{lane}, i64 {lane}\n",
+                        lane - 1
+                    ),
+                );
+            }
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!("  {name} = fadd <8 x float> %w7, zeroinitializer\n"),
+            );
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    assert!(
+        hit,
+        "мутант не нашёл загрузку окна: форма эмиттера уехала, и свидетель \
+         мерил бы нетронутую программу"
+    );
+    out
+}
+
+/// Корпусная программа векторного ядра, как она лежит в `tests/golden/eval`.
+fn vector_corpus() -> String {
+    std::fs::read_to_string(harness::corpus().join("workload-vector.adamas"))
+        .unwrap_or_else(|error| panic!("фикстура векторного ядра не читается: {error}"))
+}
+
+/// Окно колонки - одно векторное обращение, а не восемь скалярных (§4.9).
+///
+/// Свидетель несёт **свой мутант**, а не описание мутанта: проверка, которую
+/// не ломали, за фазу трижды оказывалась ложной. Ломается здесь ровно то, что
+/// проверяется, - форма обращения к окну, - и числа обеих половин печатаются.
+#[test]
+fn a_window_is_one_vector_access_not_eight_scalar_ones() {
+    let Some((tools, _)) = harness::llvm_toolchains() else {
+        return;
+    };
+    let source = vector_corpus();
+    let mut artefacts = harness::llvm_text("window-kernel", &source)
+        .unwrap_or_else(|error| panic!("векторное ядро не понизилось: {error}"));
+    assert!(
+        artefacts.ll.contains("load <8 x float>") && artefacts.ll.contains("store <8 x float>"),
+        "в IR нет векторного обращения к окну - дизассемблировать нечего"
+    );
+    // Граница обещана **дорожкой**, а не типом вектора: ячейка стоит по шагу
+    // колонки. `align 32` здесь был бы обещанием, которого никто не давал.
+    // Проверяется по **форме**, а не по имени временного: номера зависят от
+    // порядка понижения, и прибитый гвоздями `%t5` разъехался бы молча.
+    let touches: Vec<&str> = artefacts
+        .ll
+        .lines()
+        .filter(|line| line.contains("<8 x float>") && line.contains(", ptr %"))
+        .collect();
+    assert_eq!(touches.len(), 2, "обращений к окну не два: {touches:?}");
+    assert!(
+        touches.iter().all(|line| line.ends_with(", align 4")),
+        "обращение к окну обещает не ту границу: {touches:?}"
+    );
+    let symbol = window_symbol(&artefacts.ll);
+
+    let object = harness::llvm_object("window.plain", &artefacts, &tools, &Pipeline::plain());
+    let (packed, scalar) = window_moves(&tools, &object, &symbol);
+    assert!(
+        packed > 0,
+        "пакетных перемещений ноль: окно до объектника не доехало"
+    );
+    assert_eq!(
+        scalar, 0,
+        "скалярных перемещений {scalar}: часть окна поехала по дорожке, \
+         а ответ этого не покажет"
+    );
+
+    artefacts.ll = per_lane_through_runtime(&artefacts.ll);
+    let mutant = harness::llvm_object("window.mutant", &artefacts, &tools, &Pipeline::plain());
+    let (fake_packed, fake_scalar) = window_moves(&tools, &mutant, &symbol);
+    assert!(
+        fake_scalar > 0 && fake_packed < packed,
+        "мутант «по дорожке через рантайм» неотличим от эмиттера: \
+         пакетных {fake_packed} против {packed}, скалярных {fake_scalar} против {scalar} - \
+         свидетель перестал различать"
+    );
+    eprintln!(
+        "окно: пакетных {packed}, скалярных {scalar}; \
+         по дорожке через рантайм: пакетных {fake_packed}, скалярных {fake_scalar}"
+    );
+}
+
+/// Векторная колонка отвечает то же, что скалярная, - побитово.
+///
+/// Две **разные программы** корпуса считают одно ядро: `workload-column`
+/// по ячейке, `workload-vector` окном в восемь дорожек. Element-wise проход от
+/// ширины не зависит, значит числа обязаны совпасть - и совпадение это ловит
+/// то, чего не ловит ни один свидетель внутри одной программы: перепутанное
+/// окно, перепутанную дорожку внутри окна и потерянный хвост колонки. У каждой
+/// из двух за спиной договор трёх вычислителей, так что сверяются здесь шесть
+/// ответов, а не два.
+#[test]
+fn the_vector_column_answers_what_the_scalar_column_answers() {
+    let vector = vector_corpus();
+    let scalar = std::fs::read_to_string(harness::corpus().join("workload-column.adamas"))
+        .unwrap_or_else(|error| panic!("скалярная фикстура не читается: {error}"));
+    // Размеры у двух фикстур обязаны совпасть, иначе сравнивались бы две
+    // разные работы. Проверяется это по тексту: обе несут `cells` и `passes`
+    // именованными строками, и стенд подставляет в них одно и то же.
+    for size in ["cells = 8", "passes = 3"] {
+        assert!(
+            vector.contains(size) && scalar.contains(size),
+            "фикстуры разошлись размером `{size}` - сравнивались бы разные работы"
+        );
+    }
+    let expected = harness::printed(&scalar);
+    assert_eq!(
+        harness::printed(&vector),
+        expected,
+        "машина считает вектором не то, что считает скаляром"
+    );
+    // `agreed` сверяет понижение с машиной сам и падает при расхождении; здесь
+    // читается его **счётчик**: колонка обязана стоить один блок, сколько бы
+    // окон по ней ни прошло. Перепиши `simdStore` колонку копией - и число
+    // выросло бы, а ответ остался бы тем же.
+    let blocks = harness::agreed("window-agrees", &vector)
+        .unwrap_or_else(|error| panic!("векторная колонка не понизилась: {error}"));
+    assert!(
+        blocks.contains("блоков выдано 1, живо 0"),
+        "векторное ядро выдало не один блок: `simdStore` перестал писать по месту ({blocks})"
+    );
+}
+
+/// Окно, чей хвост вышел за колонку, обрывает прогон - у обоих бэкендов.
+///
+/// Граница у окна **своя**, и проверять её обязана своя точка входа:
+/// `adamas_array_at` спрашивает про начало, а за конец блока уходит хвост. На
+/// колонке из четырёх ячеек окно ширины четыре с номера один читало бы четыре
+/// чужих байта **при верном ответе на первые три дорожки** - то есть молча.
+/// Свидетель написан по этой форме дефекта, а не по факту обрыва.
+///
+/// Машина третьей стороной ответа тоже не даёт: `simdLoad` за длиной не
+/// сводится и остаётся застрявшим спайном. Сходятся все трое в том, что
+/// ответа не даёт никто, - та же форма границы, что у номера дорожки вне
+/// ширины и у номера ячейки вне длины.
+#[test]
+fn a_window_past_the_end_stops_both_backends() {
+    const OUTSIDE: &str = "\
+type Layout = { size : UInt32, align : UInt32 }
+
+class Primitive a where
+  simdLayout : Layout
+
+zero : Float32
+zero = 0.0
+
+one : Float32
+one = 1.0
+
+-- Колонка из четырёх, заполненная вся: машина застревает здесь **из-за
+-- окна**, а не из-за нелитеральной длины. Разница существенна - свидетель
+-- утверждает, что ответа не даёт никто, и застрять он обязан по той причине,
+-- которую называет.
+column : Array 4 Float32
+column =
+  arraySet (arraySet (arraySet (arraySet (arrayNew 4 zero) 0 one) 1 one) 2 one) 3 one
+
+main : Float32
+main = simdLane (simdLoad 4 column 1) 0
+";
+    let machine = harness::printed(OUTSIDE);
+    assert!(
+        machine.contains("simdLoad"),
+        "машина свела окно за длиной до значения: {machine}"
+    );
+
+    let Some((tools, _)) = harness::llvm_toolchains() else {
+        return;
+    };
+    let artefacts = harness::llvm_text("window-outside", OUTSIDE)
+        .unwrap_or_else(|error| panic!("программа не понизилась: {error}"));
+    let binary = harness::llvm_binary("window.outside", &artefacts, &tools, &Pipeline::optimised());
+    let run = Command::new(&binary)
+        .output()
+        .unwrap_or_else(|error| panic!("прогон не запустился: {error}"));
+    assert!(
+        !run.status.success(),
+        "LLVM ответила на окно за длиной: `{}`",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    let said = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        said.contains(WINDOW_OUTSIDE),
+        "оборвалось не тем и не там: {said}"
+    );
+
+    // C-сторона обязана оборваться тем же текстом, и текст этот один на два
+    // бэкенда потому, что живёт в рантайме: обе стороны зовут
+    // `adamas_array_window`, и второй записи сообщения не существует.
+    let c = harness::c_printed("window-outside-c", OUTSIDE);
+    assert!(
+        c.reason.contains(WINDOW_OUTSIDE),
+        "C-сторона окно за длиной пропустила: `{}` / `{}`",
+        c.printed,
+        c.reason
+    );
+}
+
+/// Владеющая загрузка окна отдаёт колонку: блоков живых ноль.
+///
+/// У чтения окна две формы, как и у чтения ячейки (§10 вопрос 171):
+/// заимствующая - её ставит Perceus, когда колонку потребит кто-то позже, - и
+/// **владеющая**, когда потреблять больше некому. Корпусное ядро проходит
+/// только первую: `simdStore` там потребляет ту же колонку следом. Вторая
+/// поэтому проверяется здесь, и проверяется счётчиком: потеряй она дроп, ответ
+/// остался бы верен, а блок повис бы.
+#[test]
+fn an_owning_window_gives_the_column_back() {
+    const OWNED: &str = "\
+type Layout = { size : UInt32, align : UInt32 }
+
+class Primitive a where
+  simdLayout : Layout
+
+zero : Float32
+zero = 0.0
+
+one : Float32
+one = 1.0
+
+-- Длина написана литералом, и все четыре ячейки заполнены: машина сводит
+-- окно, лишь когда каждая дорожка находится в цепочке записей, а до дна
+-- (`arrayNew`) она доходит только с литеральной длиной.
+column : Array 4 Float32
+column =
+  arraySet (arraySet (arraySet (arraySet (arrayNew 4 zero) 0 zero) 1 zero) 2 one) 3 zero
+
+main : Float32
+main = simdLane (simdLoad 4 column 0) 2
+";
+    assert_eq!(
+        harness::printed(OWNED),
+        "1.0",
+        "машина прочитала окно не так"
+    );
+    let blocks = harness::agreed("window-owned", OWNED)
+        .unwrap_or_else(|error| panic!("программа не понизилась: {error}"));
+    assert!(
+        blocks.contains("живо 0"),
+        "владеющая загрузка окна не отдала колонку: {blocks}"
+    );
+}
+
+/// Вектор ответом программы отвергается **именем**, а не чужим компилятором.
+///
+/// Свидетель написан по найденному дефекту, а не по замыслу: отказ
+/// [`LowerError::SimdAnswer`] был объявлен треком H и **ни разу не строился** -
+/// проверка ответа точки входа знала массив и регион, а вектор не знала.
+/// Программа уходила в печать по тегу заголовка, которого у плоского вектора
+/// нет вовсе.
+///
+/// Машина при этом такую программу считает и печатает - цепочкой
+/// `simdSplat`/`simdSet`, - так что расхождение названное, того же жанра, что
+/// у `LowerError::ArrayAnswer`: два вычислителя сходятся лишь в том, что
+/// понижение отвечать отказывается вслух.
+#[test]
+fn a_vector_answer_is_refused() {
+    const ANSWER: &str = "\
+type Layout = { size : UInt32, align : UInt32 }
+
+class Primitive a where
+  simdLayout : Layout
+
+one : Float32
+one = 1.0
+
+main : Simd 4 Float32
+main = simdSplat 4 one
+";
+    let machine = harness::printed(ANSWER);
+    assert!(
+        machine.contains("simdSplat"),
+        "машина вектор ответом не напечатала: {machine}"
+    );
+    let why = harness::text(ANSWER).err().map_or_else(
+        || panic!("вектор ответом взят понижением: печатать его нечем"),
+        |error| error.to_string(),
+    );
+    assert!(
+        why.contains("печатать его нечем") && why.contains("§4.9"),
+        "вектор ответом отвергнут не тем: {why}"
+    );
+}
+
+/// Текст обрыва по выходу окна за колонку - как его пишет рантайм.
+///
+/// Записан здесь **второй** раз (первый - `adamas-runtime/c/array.c`), и это
+/// не та копия, которой стоит бояться: у обоих эмиттеров записи нет вовсе -
+/// оба зовут `adamas_array_window`, - а здесь стоит ожидание свидетеля.
+/// Разъехавшись, оно уронит прогон, а не пропустит его.
+const WINDOW_OUTSIDE: &str = "окно вектора вне длины массива";

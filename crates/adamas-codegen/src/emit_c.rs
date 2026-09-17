@@ -438,6 +438,23 @@ fn vector_type(lanes: u32, lane: PrimTy) -> String {
     format!("adamas_simd_{lanes}_{}", lane.name())
 }
 
+/// Имя **невыровненного** близнеца того же вектора: `adamas_loose_8_Float32`.
+///
+/// Нужен он ровно одному месту - обращению к окну колонки (§4.9,
+/// `simdLoad`/`simdStore`), - и не украшением, а условием верности. `gcc`
+/// выравнивает `vector_size(32)` по шестнадцати (замерено: `_Alignof` даёт 16
+/// на baseline x86-64), а ячейка колонки стоит по **шагу массива**: у
+/// `Float32` это четыре байта. Разыменуй окно выровненным типом - и компилятор
+/// вправе поставить `movaps`, то есть обрыв по невыровненному адресу на первой
+/// же колонке, чьё начало не кратно шестнадцати.
+///
+/// Граница у близнеца - ширина дорожки, то есть ровно та, которую массив
+/// обещает (§4.11: `n × size(a)` байт подряд). Обещать больше нечем: §4.9
+/// заводит под это `AlignedBuffer`, а его здесь нет - см. `SimdOp::Load`.
+fn vector_loose_type(lanes: u32, lane: PrimTy) -> String {
+    format!("adamas_loose_{lanes}_{}", lane.name())
+}
+
 /// Имя беззнакового спутника того же вектора - в нём считается целочисленная
 /// арифметика.
 ///
@@ -495,6 +512,10 @@ fn preamble(out: &mut String) {
 /// держит скаляр.
 fn vectors(out: &mut String, program: &Program) {
     let mut shapes: Vec<(u32, PrimTy)> = Vec::new();
+    // Невыровненный близнец заводится только тем формам, которые ходят в
+    // память: он нужен обращению к окну колонки и больше ничему, а лишний
+    // typedef в тексте программы - лишняя вещь, которую читателю надо понять.
+    let mut loose: Vec<(u32, PrimTy)> = Vec::new();
     for function in &program.functions {
         let mut note = |repr: Repr| {
             if let Some(shape) = repr.vector() {
@@ -527,12 +548,22 @@ fn vectors(out: &mut String, program: &Program) {
                 lanes: *lanes,
                 lane: *lane,
             }),
+            Expr::SimdLoad { lanes, lane, .. } | Expr::SimdStore { lanes, lane, .. } => {
+                note(Repr::Simd {
+                    lanes: *lanes,
+                    lane: *lane,
+                });
+                if !loose.contains(&(*lanes, *lane)) {
+                    loose.push((*lanes, *lane));
+                }
+            }
             _ => {}
         });
     }
     if shapes.is_empty() {
         return;
     }
+    loose.sort_by_key(|(lanes, lane)| (*lanes, lane.name()));
     // Порядок - по ширине, потом по имени дорожки: `PrimTy` сравнимого порядка
     // не имеет, а текст единицы трансляции обязан быть воспроизводимым.
     shapes.sort_by_key(|(lanes, lane)| (*lanes, lane.name()));
@@ -559,6 +590,30 @@ fn vectors(out: &mut String, program: &Program) {
                 "typedef {} {} __attribute__((vector_size({bytes})));",
                 lane_word(lane),
                 vector_word_type(lanes, lane)
+            );
+        }
+    }
+    if !loose.is_empty() {
+        out.push_str(concat!(
+            "/* Невыровненные близнецы (§4.9): ими читается и пишется окно\n",
+            " * колонки. Граница у них - ширина дорожки, то есть ровно та,\n",
+            " * которую обещает плоская укладка §4.11; выровненный тип дал бы\n",
+            " * компилятору право на `movaps` и обрыв на первой же колонке,\n",
+            " * чьё начало не кратно ширине регистра. */\n"
+        ));
+        for (lanes, lane) in loose {
+            let name = vector_loose_type(lanes, lane);
+            let bytes = lanes * lane.size();
+            let align = lane.size();
+            let _ = writeln!(
+                out,
+                "typedef {} {name} __attribute__((vector_size({bytes}), aligned({align})));",
+                scalar(Repr::Flat(lane))
+            );
+            let _ = writeln!(
+                out,
+                "_Static_assert(_Alignof({name}) == {align}u, \
+                 \"граница окна разошлась с шагом колонки (§4.11)\");"
             );
         }
     }
@@ -1330,14 +1385,17 @@ impl Emitter<'_> {
                 Repr::Array(elems(*stride))
             }
             Expr::ArrayIndex { stride, .. } => stride.map_or(Repr::Boxed, Stride::element),
-            // Вектор (§4.9): три узла отдают его, чтение дорожки - дорожку.
+            // Вектор (§4.9): четыре узла отдают его, чтение дорожки - дорожку,
+            // а запись окна - саму колонку.
             Expr::SimdSplat { lanes, lane, .. }
             | Expr::SimdSet { lanes, lane, .. }
-            | Expr::SimdArith { lanes, lane, .. } => Repr::Simd {
+            | Expr::SimdArith { lanes, lane, .. }
+            | Expr::SimdLoad { lanes, lane, .. } => Repr::Simd {
                 lanes: *lanes,
                 lane: *lane,
             },
             Expr::SimdLane { lane, .. } => Repr::Flat(*lane),
+            Expr::SimdStore { .. } => Repr::Array(Elems::Flat),
             Expr::RegionNew
             | Expr::RegionAlloc { .. }
             | Expr::RegionWrite { .. }
@@ -1425,27 +1483,15 @@ impl Emitter<'_> {
                 field,
                 value,
             } => self.unpack(*packing, *variant, *field, value, depth),
-            Expr::ArrayNew {
-                stride,
-                count,
-                initial,
-            } => self.array_new(*stride, count, initial, depth),
-            Expr::ArraySet {
-                stride,
-                array,
-                at,
-                value,
-            } => self.array_set(*stride, array, at, value, depth),
-            Expr::ArrayIndex {
-                stride,
-                owned,
-                array,
-                at,
-            } => self.array_index(*stride, *owned, array, at, depth),
+            Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. } => {
+                self.array(expr, depth)
+            }
             Expr::SimdSplat { .. }
             | Expr::SimdSet { .. }
             | Expr::SimdLane { .. }
-            | Expr::SimdArith { .. } => self.vector(expr, depth),
+            | Expr::SimdArith { .. }
+            | Expr::SimdLoad { .. }
+            | Expr::SimdStore { .. } => self.vector(expr, depth),
             Expr::RegionNew
             | Expr::RegionAlloc { .. }
             | Expr::RegionLast { .. }
@@ -1813,9 +1859,37 @@ impl Emitter<'_> {
         name
     }
 
-    /// Разбор четырёх узлов вектора (§4.9) по своим печатям.
+    /// Разбор трёх узлов массива (§4.11) по своим печатям.
     ///
-    /// Отдельной ступенькой, а не четырьмя ветвями в [`Self::emitted`]: у той
+    /// Отдельной ступенькой по тому же доводу, что у [`Self::vector`]: у
+    /// [`Self::emitted`] длина на пределе, и разбирать эти три врозь от
+    /// остальных незачем - они разбираются только вместе.
+    fn array(&mut self, expr: &Expr, depth: usize) -> String {
+        match expr {
+            Expr::ArrayNew {
+                stride,
+                count,
+                initial,
+            } => self.array_new(*stride, count, initial, depth),
+            Expr::ArraySet {
+                stride,
+                array,
+                at,
+                value,
+            } => self.array_set(*stride, array, at, value, depth),
+            Expr::ArrayIndex {
+                stride,
+                owned,
+                array,
+                at,
+            } => self.array_index(*stride, *owned, array, at, depth),
+            other => self.emitted(other, depth),
+        }
+    }
+
+    /// Разбор шести узлов вектора (§4.9) по своим печатям.
+    ///
+    /// Отдельной ступенькой, а не шестью ветвями в [`Self::emitted`]: у той
     /// длина уже на пределе, и пятая форма представления не повод её ломать.
     fn vector(&mut self, expr: &Expr, depth: usize) -> String {
         match expr {
@@ -1840,8 +1914,91 @@ impl Emitter<'_> {
                 left,
                 right,
             } => self.simd_arith(*op, *lanes, *lane, left, right, depth),
+            Expr::SimdLoad {
+                lanes,
+                lane,
+                owned,
+                array,
+                at,
+                ..
+            } => self.simd_load(*lanes, *lane, *owned, array, at, depth),
+            Expr::SimdStore {
+                lanes,
+                lane,
+                array,
+                at,
+                value,
+                ..
+            } => self.simd_store(*lanes, *lane, array, at, value, depth),
             other => self.emitted(other, depth),
         }
+    }
+
+    /// Окно колонки вектором (§4.9): `lanes` ячеек подряд одной загрузкой.
+    ///
+    /// Пара к [`Self::array_index`], и решения те же: адрес берёт рантайм,
+    /// байты читает **сама программа**, владение снимает Perceus (§10 вопрос
+    /// 171). Отличий два, и оба названы. Адрес даёт `adamas_array_window`, а
+    /// не `adamas_array_at`: проверять надо хвост окна, и `at` этого не
+    /// делает. Приведение идёт к **невыровненному** близнецу
+    /// ([`vector_loose_type`]) - ячейка стоит по шагу колонки, и выровненный
+    /// тип разрешил бы `movaps`.
+    fn simd_load(
+        &mut self,
+        lanes: u32,
+        lane: PrimTy,
+        owned: bool,
+        array: &Expr,
+        at: &Expr,
+        depth: usize,
+    ) -> String {
+        let pad = Self::pad(depth);
+        let array = self.value(array, depth);
+        let at = self.value(at, depth);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}{} {name} = *(const {} *)adamas_array_window({array}, (size_t){at}, {lanes}u);",
+            vector_type(lanes, lane),
+            vector_loose_type(lanes, lane)
+        );
+        if owned {
+            let _ = writeln!(self.out, "{pad}adamas_drop({array}, adamas_release_value);");
+        }
+        name
+    }
+
+    /// Запись окна колонки (§4.9): пара к [`Self::array_set`].
+    ///
+    /// Уникальность спрашивается **после** того, как посчитаны все аргументы,
+    /// тем же `adamas_array_writable` и по той же причине: чтение из той же
+    /// колонки успевает отдать свою ссылку, и `simdStore xs i (simdLoad xs i)`
+    /// переписывает, а не копирует. Разъехаться с LLVM-эмиттером тут нельзя -
+    /// счётчик выданных блоков у двух бэкендов сверяется числом.
+    fn simd_store(
+        &mut self,
+        lanes: u32,
+        lane: PrimTy,
+        array: &Expr,
+        at: &Expr,
+        value: &Expr,
+        depth: usize,
+    ) -> String {
+        let pad = Self::pad(depth);
+        let array = self.value(array, depth);
+        let at = self.value(at, depth);
+        let value = self.value(value, depth);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_value {name} = adamas_array_writable({array}, adamas_release_value);"
+        );
+        let _ = writeln!(
+            self.out,
+            "{pad}*({} *)adamas_array_window({name}, (size_t){at}, {lanes}u) = {value};",
+            vector_loose_type(lanes, lane)
+        );
+        name
     }
 
     /// Вектор, все дорожки которого заняты одним значением (§4.9).

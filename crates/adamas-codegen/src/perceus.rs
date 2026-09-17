@@ -289,6 +289,21 @@ fn drops(locals: impl IntoIterator<Item = LocalId>, body: Expr) -> Expr {
     })
 }
 
+/// Какая из пяти операций над колонкой разобрана (§4.11, §4.9).
+///
+/// Узел собирается обратно ею же: подвыражения у всех пяти проходят через одну
+/// [`Pass::sequence`], и разбирать их врозь значило бы завести пять правил
+/// владения колонкой вместо одного.
+enum Shape {
+    New,
+    Set,
+    Index,
+    /// Векторная загрузка окна (§4.9): ширина и дорожка при ней.
+    Load(u32, PrimTy),
+    /// Векторная запись окна (§4.9).
+    Store(u32, PrimTy),
+}
+
 /// Состояние прохода: таблица конструкторов и счётчик свежих связываний.
 struct Pass<'a> {
     constructors: &'a [Constructor],
@@ -350,9 +365,15 @@ impl Pass<'_> {
             // а считать по ней нечего до первого её употребления.
             | Expr::RegionNew
             | Expr::Layout { .. } => drops(owned.iter().copied().collect::<Vec<_>>(), expr),
-            Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. } => {
-                self.array(expr, owned)
-            }
+            // Векторные `load`/`store` (§4.9) идут тем же путём, что скалярные
+            // чтение и запись: колонка у них та же, владение то же, и
+            // заимствование чтения - тоже то же (§10 вопрос 171). Второй
+            // разбор был бы вторым правилом владения колонкой.
+            Expr::ArrayNew { .. }
+            | Expr::ArraySet { .. }
+            | Expr::ArrayIndex { .. }
+            | Expr::SimdLoad { .. }
+            | Expr::SimdStore { .. } => self.array(expr, owned),
             Expr::RegionAlloc { .. }
             | Expr::RegionLast { .. }
             | Expr::RegionRead { .. }
@@ -595,13 +616,60 @@ impl Pass<'_> {
         }
     }
 
-    fn array(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
-        /// Какая из трёх операций разобрана: узел собирается обратно тем же.
-        enum Shape {
-            New,
-            Set,
-            Index,
+    /// Заимствующее чтение колонки, если оно здесь возможно (§10 вопрос 171).
+    ///
+    /// `Ok` - узел переписан и владение снято; `Err` - тот же узел обратно.
+    /// Формы две - ячейка и окно (§4.9), - и условие у них одно: колонка
+    /// пришла локалом, которым это место не владеет. Шага-`Option` у окна нет:
+    /// дорожкой бывает только примитив, и проверять на плоскость нечего.
+    fn borrowed(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Result<Expr, Expr> {
+        let lent = |array: &Expr| matches!(array, Expr::Local(local) if !owned.contains(local));
+        match expr {
+            Expr::ArrayIndex {
+                stride,
+                owned: _,
+                array,
+                at,
+            } if stride.is_some() && lent(&array) => {
+                let (mut done, spare) = self.sequence(vec![*at], owned);
+                let at = Box::new(done.pop().unwrap_or(Expr::Erased));
+                Ok(drops(
+                    spare,
+                    Expr::ArrayIndex {
+                        stride,
+                        owned: false,
+                        array,
+                        at,
+                    },
+                ))
+            }
+            Expr::SimdLoad {
+                stride,
+                lanes,
+                lane,
+                owned: _,
+                array,
+                at,
+            } if lent(&array) => {
+                let (mut done, spare) = self.sequence(vec![*at], owned);
+                let at = Box::new(done.pop().unwrap_or(Expr::Erased));
+                Ok(drops(
+                    spare,
+                    Expr::SimdLoad {
+                        stride,
+                        lanes,
+                        lane,
+                        owned: false,
+                        array,
+                        at,
+                    },
+                ))
+            }
+            other => Err(other),
         }
+    }
+
+    fn array(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
         // Плоское чтение с локала-невладельца **заимствует** (§10 вопрос 171):
         // наружу уходят биты без заголовка, а сам массив потребит его владелец
         // - позже по порядку исполнения, иначе владение было бы здесь. Ни
@@ -615,28 +683,9 @@ impl Pass<'_> {
         // составной операнд (своя временная ссылка) идут прежним владеющим
         // путём: заимствовать там не у кого. Указательный массив тоже - его
         // чтение дублирует ячейку, и это другой узел по построению.
-        let expr = match expr {
-            Expr::ArrayIndex {
-                stride,
-                owned: _,
-                array,
-                at,
-            } if stride.is_some()
-                && matches!(&*array, Expr::Local(local) if !owned.contains(local)) =>
-            {
-                let (mut done, spare) = self.sequence(vec![*at], owned);
-                let at = Box::new(done.pop().unwrap_or(Expr::Erased));
-                return drops(
-                    spare,
-                    Expr::ArrayIndex {
-                        stride,
-                        owned: false,
-                        array,
-                        at,
-                    },
-                );
-            }
-            other => other,
+        let expr = match self.borrowed(expr, owned) {
+            Ok(done) => return done,
+            Err(same) => same,
         };
         let (shape, stride, parts) = match expr {
             Expr::ArrayNew {
@@ -653,6 +702,26 @@ impl Pass<'_> {
             Expr::ArrayIndex {
                 stride, array, at, ..
             } => (Shape::Index, stride, vec![*array, *at]),
+            Expr::SimdLoad {
+                stride,
+                lanes,
+                lane,
+                array,
+                at,
+                ..
+            } => (Shape::Load(lanes, lane), Some(stride), vec![*array, *at]),
+            Expr::SimdStore {
+                stride,
+                lanes,
+                lane,
+                array,
+                at,
+                value,
+            } => (
+                Shape::Store(lanes, lane),
+                Some(stride),
+                vec![*array, *at, *value],
+            ),
             other => return other,
         };
         let (mut done, spare) = self.sequence(parts, owned);
@@ -684,6 +753,29 @@ impl Pass<'_> {
                     owned: true,
                     array: next(),
                     at,
+                }
+            }
+            Shape::Load(lanes, lane) => {
+                let at = next();
+                Expr::SimdLoad {
+                    stride: stride.unwrap_or(Stride::Static(lane)),
+                    lanes,
+                    lane,
+                    owned: true,
+                    array: next(),
+                    at,
+                }
+            }
+            Shape::Store(lanes, lane) => {
+                let value = next();
+                let at = next();
+                Expr::SimdStore {
+                    stride: stride.unwrap_or(Stride::Static(lane)),
+                    lanes,
+                    lane,
+                    array: next(),
+                    at,
+                    value,
                 }
             }
         };
@@ -1245,8 +1337,13 @@ impl Pass<'_> {
             }
             Expr::ArraySet {
                 array, at, value, ..
+            }
+            | Expr::SimdStore {
+                array, at, value, ..
             } => self.plans(array, slots) || self.plans(at, slots) || self.plans(value, slots),
-            Expr::ArrayIndex { array, at, .. } => self.plans(array, slots) || self.plans(at, slots),
+            Expr::ArrayIndex { array, at, .. } | Expr::SimdLoad { array, at, .. } => {
+                self.plans(array, slots) || self.plans(at, slots)
+            }
             // Вектор (§4.9) ячейки не занимает - он плоский и живёт в регистре,
             // - но подвыражения его обходятся тем же правилом, каким их обходит
             // арифметика: под ними стоит `Bind`, а под ним что угодно.
@@ -1366,12 +1463,15 @@ impl Pass<'_> {
             }
             Expr::ArraySet {
                 array, at, value, ..
+            }
+            | Expr::SimdStore {
+                array, at, value, ..
             } => {
                 self.attach(array, slots, token)
                     || self.attach(at, slots, token)
                     || self.attach(value, slots, token)
             }
-            Expr::ArrayIndex { array, at, .. } => {
+            Expr::ArrayIndex { array, at, .. } | Expr::SimdLoad { array, at, .. } => {
                 self.attach(array, slots, token) || self.attach(at, slots, token)
             }
             // Обход тот же, что у [`Pass::plans`] выше, и по тому же доводу.

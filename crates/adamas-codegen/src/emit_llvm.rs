@@ -646,17 +646,43 @@ fn arrays(out: &mut String, program: &Program) {
         "declare ptr @adamas_array_writable(ptr, ptr)\n",
         "\n",
     ));
+    if windowed(program) {
+        out.push_str(concat!(
+            "; Окно вектора (§4.9): адрес `lanes` ячеек подряд с проверкой хвоста.\n",
+            "declare ptr @adamas_array_window(ptr, i64, i64)\n",
+            "\n",
+        ));
+    }
 }
 
-/// Есть ли в программе массив: постройка, запись либо чтение ячейки.
+/// Есть ли в программе массив: постройка, запись, чтение ячейки либо окно.
 fn arrayed(program: &Program) -> bool {
     program.functions.iter().any(|function| {
         let mut found = false;
         walk(&function.body, &mut |expr| {
             found |= matches!(
                 expr,
-                Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. }
+                Expr::ArrayNew { .. }
+                    | Expr::ArraySet { .. }
+                    | Expr::ArrayIndex { .. }
+                    | Expr::SimdLoad { .. }
+                    | Expr::SimdStore { .. }
             );
+        });
+        found
+    })
+}
+
+/// Ходит ли программа в колонку **окном** (§4.9).
+///
+/// Врозь от [`arrayed`] ровно затем, чтобы программа с массивом, но без
+/// вектора, давала байт в байт прежний текст: объявление, которое никто не
+/// зовёт, читается как «здесь что-то умеют», а умеют ровно там, где зовут.
+fn windowed(program: &Program) -> bool {
+    program.functions.iter().any(|function| {
+        let mut found = false;
+        walk(&function.body, &mut |expr| {
+            found |= matches!(expr, Expr::SimdLoad { .. } | Expr::SimdStore { .. });
         });
         found
     })
@@ -2458,6 +2484,12 @@ impl<'a> Builder<'a> {
                 Repr::Array(elems(*stride))
             }
             Expr::ArrayIndex { stride, .. } => stride.map_or(Repr::Boxed, Stride::element),
+            // Окно колонки (§4.9): загрузка отдаёт вектор, запись - колонку.
+            Expr::SimdLoad { lanes, lane, .. } => Repr::Simd {
+                lanes: *lanes,
+                lane: *lane,
+            },
+            Expr::SimdStore { .. } => Repr::Array(Elems::Flat),
             Expr::Layout { .. } => Repr::Layout,
             Expr::LayoutField { .. } => Repr::Flat(PrimTy::UInt32),
             // Плотный агрегат (§4.11) и регион (§3.6) - те же строки, что у
@@ -2685,9 +2717,11 @@ impl<'a> Builder<'a> {
             Expr::Pack { .. } | Expr::Unpack { .. } => self.packed(expr),
             Expr::Layout { size, align } => Ok(descriptor(*size, *align)),
             Expr::LayoutField { descriptor, align } => self.descriptor_field(*descriptor, *align),
-            Expr::ArrayNew { .. } | Expr::ArraySet { .. } | Expr::ArrayIndex { .. } => {
-                self.array(expr)
-            }
+            Expr::ArrayNew { .. }
+            | Expr::ArraySet { .. }
+            | Expr::ArrayIndex { .. }
+            | Expr::SimdLoad { .. }
+            | Expr::SimdStore { .. } => self.array(expr),
             Expr::SimdSplat { lanes, lane, value } => self.splat(*lanes, *lane, value),
             Expr::SimdSet {
                 lanes,
@@ -2978,6 +3012,22 @@ impl<'a> Builder<'a> {
                 array,
                 at,
             } => self.array_index(*stride, *owned, array, at),
+            Expr::SimdLoad {
+                lanes,
+                lane,
+                owned,
+                array,
+                at,
+                ..
+            } => self.window_load(*lanes, *lane, *owned, array, at),
+            Expr::SimdStore {
+                lanes,
+                lane,
+                array,
+                at,
+                value,
+                ..
+            } => self.window_store(*lanes, *lane, array, at, value),
             _ => Err(self.node("массив")),
         }
     }
@@ -3208,6 +3258,99 @@ impl<'a> Builder<'a> {
             self.here(),
         );
         name
+    }
+
+    /// Адрес окна из `lanes` ячеек с проверкой **хвоста** (§4.9).
+    ///
+    /// Своя точка входа, а не `adamas_array_at`: та проверяет начало окна, а
+    /// за концом колонки оказался бы его хвост - при верном ответе и без
+    /// единого признака. Запись одна на загрузку и на запись, по тому же
+    /// доводу, что у [`Self::array_cell`].
+    fn window_cell(&mut self, array: &str, at: &str, lanes: u32) -> String {
+        let name = self.temp();
+        self.instruction(
+            &format!("{name} = call ptr @adamas_array_window(ptr {array}, i64 {at}, i64 {lanes})"),
+            self.here(),
+        );
+        name
+    }
+
+    /// Окно колонки вектором (§4.9): `load <n x T>` по адресу окна.
+    ///
+    /// **`align` здесь не украшение, а условие верности,** и это то самое
+    /// место, где приговор метаданным волн 1-3 перестаёт применяться дословно.
+    /// Без суффикса `opt` берёт границу у типа - у `<8 x float>` она
+    /// тридцать два, - а ячейка колонки стоит по шагу массива, то есть по
+    /// четырём. Обещание, которого никто не давал, разрешило бы выровненную
+    /// загрузку и обрыв на первой же колонке, чьё начало не кратно ширине
+    /// регистра. Пишется поэтому граница **дорожки**: ровно та, которую
+    /// обещает §4.11.
+    ///
+    /// То же самое `align` **сверх** обещанного - другой вопрос, и он
+    /// измеряется, а не решается здесь: §4.9 заводит под это `AlignedBuffer`,
+    /// а числа ему нет (`docs/measurements/simd/`).
+    fn window_load(
+        &mut self,
+        lanes: u32,
+        lane: PrimTy,
+        owned: bool,
+        array: &Expr,
+        at: &Expr,
+    ) -> Result<String, LlvmError> {
+        let source = self.value(array)?;
+        let at = self.word_operand(at)?;
+        let address = self.window_cell(&source, &at, lanes);
+        let name = self.temp();
+        self.instruction(
+            &format!(
+                "{name} = load {}, ptr {address}, align {}",
+                vector(lanes, lane),
+                lane.size()
+            ),
+            self.here(),
+        );
+        if owned {
+            self.instruction(
+                &format!("call void @adamas_drop(ptr {source}, ptr @{RELEASE_SYMBOL})"),
+                self.here(),
+            );
+        }
+        Ok(name)
+    }
+
+    /// Запись окна колонки (§4.9): пара к [`Self::array_set`].
+    ///
+    /// Уникальность спрашивается после того, как посчитаны все аргументы, -
+    /// тот же порядок, что у скалярной записи и у C-эмиттера, и разъехаться
+    /// ему нельзя: счётчик выданных блоков сверяется поштучно.
+    fn window_store(
+        &mut self,
+        lanes: u32,
+        lane: PrimTy,
+        array: &Expr,
+        at: &Expr,
+        value: &Expr,
+    ) -> Result<String, LlvmError> {
+        let source = self.value(array)?;
+        let at = self.word_operand(at)?;
+        let value = self.value(value)?;
+        let writable = self.temp();
+        self.instruction(
+            &format!(
+                "{writable} = call ptr @adamas_array_writable(ptr {source}, ptr @{RELEASE_SYMBOL})"
+            ),
+            self.here(),
+        );
+        let address = self.window_cell(&writable, &at, lanes);
+        self.instruction(
+            &format!(
+                "store {} {value}, ptr {address}, align {}",
+                vector(lanes, lane),
+                lane.size()
+            ),
+            self.here(),
+        );
+        Ok(writable)
     }
 
     /// Поле варианта укладки: где лежит и чем является (§4.11).

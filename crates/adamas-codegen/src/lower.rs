@@ -337,6 +337,14 @@ pub enum LowerError {
     /// печатает цепочку `simdSplat`/`simdSet`, понижение - значение, и сводить
     /// две печати - работа не этого трека. Наружу вектор выходит дорожкой
     /// (`simdLane`), и корпус так и написан.
+    ///
+    /// **Отказ этот был объявлен и не строился ни разу** - найдено чтением
+    /// карты трека D волны 3 и проверено грепом: проверка ответа точки входа
+    /// (`Lowering::entry`) знала `Repr::Array` и `Repr::Region`, а `Repr::Simd`
+    /// не знала. Программа с вектором в ответе уходила поэтому в печать по
+    /// тегу заголовка, которого у вектора нет; поймал бы её в лучшем случае
+    /// чужой компилятор - тот же жанр дефекта, по которому написан свидетель
+    /// `a_vector_does_not_fit_an_object_slot`.
     #[error("ответ программы - вектор: печатать его нечем (§4.9)")]
     SimdAnswer,
 
@@ -810,6 +818,9 @@ impl<'a> Lowerer<'a> {
         }
         if repr == Repr::Region {
             return Err(LowerError::RegionAnswer);
+        }
+        if repr.vector().is_some() {
+            return Err(LowerError::SimdAnswer);
         }
         // Плотный агрегат печатается упакованным: печать идёт по тегу
         // заголовка, а у плотного заголовка нет вовсе (§4.11). Упаковка тут не
@@ -3397,19 +3408,24 @@ impl<'a> Lowerer<'a> {
         let wanted = match op {
             SimdOp::Splat => 4,
             SimdOp::Lane | SimdOp::Add | SimdOp::Sub | SimdOp::Mul => 5,
-            SimdOp::Set => 6,
+            SimdOp::Set | SimdOp::Load => 6,
+            SimdOp::Store => 7,
         };
         if arguments.len() != wanted {
             return Err(LowerError::PartialSimd {
                 name: op.name().to_owned(),
             });
         }
-        // У `simdSplat` порядок стёртых - дорожка, словарь, ширина; у прочих -
-        // ширина, дорожка, словарь. Расхождение не случайно: ширину `simdSplat`
-        // выводить не из чего, и она написана явно (§4.9, `simd_op_scheme`).
+        // У `simdSplat` порядок стёртых - дорожка, словарь, ширина; у операций
+        // над колонкой - длина колонки, дорожка, словарь, ширина; у прочих -
+        // ширина, дорожка, словарь. Расхождение не случайно: ширину выводить
+        // не из чего там, где вектора в аргументе нет (§4.9,
+        // `simd_op_scheme`), а длина колонки к ширине регистра отношения не
+        // имеет и стоит поэтому отдельным связыванием.
         let (at_width, at_lane) = match op {
             SimdOp::Splat => (2, 0),
             SimdOp::Set | SimdOp::Lane | SimdOp::Add | SimdOp::Sub | SimdOp::Mul => (0, 1),
+            SimdOp::Load | SimdOp::Store => (3, 1),
         };
         let partial = || LowerError::PartialSimd {
             name: op.name().to_owned(),
@@ -3487,7 +3503,57 @@ impl<'a> Lowerer<'a> {
                     shape,
                 ))
             }
+            SimdOp::Load | SimdOp::Store => self.window(scope, op, arguments, (lanes, lane), shape),
         }
+    }
+
+    /// Окно колонки (§4.9): `simdLoad` и `simdStore`.
+    ///
+    /// Шаг колонки берётся у **дорожки**, а не считается вторым разом по типу
+    /// элемента: тип элемента и есть `a` из `Simd n a` - схема связывает их
+    /// одним связыванием, - а [`Self::vector_of`] уже установила, что `a`
+    /// примитивен. Второй счёт шага был бы вторым местом, где укладка колонки
+    /// считается, и разъехался бы молча.
+    fn window(
+        &mut self,
+        scope: &mut Scope,
+        op: SimdOp,
+        arguments: &[Arg<'_>],
+        (lanes, lane): (u32, PrimTy),
+        shape: Repr,
+    ) -> Result<(Expr, Repr), LowerError> {
+        let column = Repr::Array(Elems::Flat);
+        let word = Repr::Flat(PrimTy::UInt64);
+        let stride = Stride::Static(lane);
+        let array = self.given(scope, &arguments[4], column, "колонка окна")?;
+        let at = self.given(scope, &arguments[5], word, "номер ячейки")?;
+        if op == SimdOp::Load {
+            return Ok((
+                Expr::SimdLoad {
+                    stride,
+                    lanes,
+                    lane,
+                    // Владение снимет Perceus - тем же правилом, каким он
+                    // снимает его у `arrayIndex` (§10 вопрос 171).
+                    owned: true,
+                    array: Box::new(array),
+                    at: Box::new(at),
+                },
+                shape,
+            ));
+        }
+        let value = self.given(scope, &arguments[6], shape, "записываемый вектор")?;
+        Ok((
+            Expr::SimdStore {
+                stride,
+                lanes,
+                lane,
+                array: Box::new(array),
+                at: Box::new(at),
+                value: Box::new(value),
+            },
+            column,
+        ))
     }
 
     /// Операция над регионом (§3.6).

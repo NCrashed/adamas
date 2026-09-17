@@ -468,6 +468,11 @@ pub fn try_apply(callee: &Rc<Value>, argument: Rc<Value>) -> Option<Rc<Value>> {
 /// Аргумент не литерал - операция остаётся застрявшей, как всякий спайн над
 /// переменной. Тип аргумента сверяет проверка, здесь он лишь читается: чужой
 /// литерал в спайне означал бы, что проверка его пропустила.
+///
+/// **Целое деление на ноль тоже остаётся застрявшим** - [`crate::prim::PrimOp::fold`]
+/// не отдаёт ему ответа. Это та же названная граница, что у чтения вне длины
+/// массива: понижение обрывает прогон, машина не отвечает вовсе, и сходятся
+/// два вычислителя в том, что ответа не даёт ни один.
 fn folded(op: crate::prim::PrimOp, ty: crate::prim::PrimTy, spine: &[Elim]) -> Option<Rc<Value>> {
     let [Elim::App(left), Elim::App(right)] = spine else {
         return None;
@@ -481,7 +486,7 @@ fn folded(op: crate::prim::PrimOp, ty: crate::prim::PrimTy, spine: &[Elim]) -> O
     };
     Some(Rc::new(Value::Prim(crate::prim::Prim::literal(
         ty,
-        op.fold(ty, *left, *right),
+        op.fold(ty, *left, *right)?,
     ))))
 }
 
@@ -670,7 +675,7 @@ fn vectored(op: crate::prim::SimdOp, spine: &[Elim]) -> Option<Rc<Value>> {
                 };
                 folded.push(Rc::new(Value::Prim(Prim::literal(
                     *ty,
-                    arith.fold(*ty, *left, *right),
+                    arith.fold(*ty, *left, *right)?,
                 ))));
             }
             Some(canonical(width, lane, dict, &folded))
@@ -872,7 +877,7 @@ fn lane_of(vector: &Rc<Value>, wanted: u64) -> Option<Rc<Value>> {
                 };
                 return Some(Rc::new(Value::Prim(Prim::literal(
                     *ty,
-                    arith.fold(*ty, *left, *right),
+                    arith.fold(*ty, *left, *right)?,
                 ))));
             }
             _ => return None,

@@ -103,7 +103,13 @@ static uint64_t adamas_slot_word(adamas_value slot) {
     return bits;
 }
 
-#define ADAMAS_FLAT_INTEGER(name, ctype, utype, wide, spec)                                        \
+/* Текст обрыва по нулевому делителю. Тот же, что печатает LLVM-эмиттер, и
+ * тот же, что стоит в `ir::DIVISION_BY_ZERO`: обрыв виден пользователю, то
+ * есть входит в наблюдаемое поведение наравне с ответом. Совпадение сверяется
+ * тестом (`emit_c`, `the_division_message_matches_the_helpers`). */
+#define ADAMAS_DIVISION_BY_ZERO "деление на ноль"
+
+#define ADAMAS_FLAT_INTEGER(name, ctype, utype, width, wide, spec)                                 \
     static ctype adamas_bits_##name(uint64_t bits) { return (ctype)(utype)bits; }                  \
     static uint64_t adamas_word_##name(ctype value) { return (uint64_t)(utype)value; }             \
     static ctype adamas_add_##name(ctype a, ctype b) {                                             \
@@ -118,6 +124,28 @@ static uint64_t adamas_slot_word(adamas_value slot) {
         unsigned long long folded = (unsigned long long)(utype)a * (unsigned long long)(utype)b;   \
         return (ctype)(utype)folded;                                                               \
     }                                                                                              \
+    static ctype adamas_and_##name(ctype a, ctype b) {                                             \
+        return (ctype)(utype)((utype)a & (utype)b);                                                \
+    }                                                                                              \
+    static ctype adamas_or_##name(ctype a, ctype b) {                                              \
+        return (ctype)(utype)((utype)a | (utype)b);                                                \
+    }                                                                                              \
+    static ctype adamas_xor_##name(ctype a, ctype b) {                                             \
+        return (ctype)(utype)((utype)a ^ (utype)b);                                                \
+    }                                                                                              \
+    /* Сдвиг влево с насыщением. Счётчик читается **беззнаково** - у `Int8`  \
+     * записанное `-1` есть `255`, - и от ширины типа и выше ответ ноль, а   \
+     * не то, что сделало бы железо (x86 берёт счётчик по модулю ширины, C   \
+     * зовёт такой сдвиг неопределённым). Довод в `adamas_core::prim`:       \
+     * `shl x n` есть `mul x 2^n`, а `2^w mod 2^w` есть ноль.                \
+     *                                                                       \
+     * Считается в `unsigned long long`: продвижение к `int` дало бы         \
+     * переполнение знакового на `UInt32`, ровно как у умножения выше. */    \
+    static ctype adamas_shl_##name(ctype a, ctype b) {                                             \
+        unsigned long long count = (unsigned long long)(utype)b;                                   \
+        if (count >= (width)) { return (ctype)0; }                                                 \
+        return (ctype)(utype)(((unsigned long long)(utype)a) << count);                            \
+    }                                                                                              \
     static int adamas_eq_##name(ctype a, ctype b) { return a == b; }                               \
     static int adamas_ne_##name(ctype a, ctype b) { return a != b; }                               \
     static int adamas_lt_##name(ctype a, ctype b) { return a < b; }                                \
@@ -125,6 +153,53 @@ static uint64_t adamas_slot_word(adamas_value slot) {
     static int adamas_gt_##name(ctype a, ctype b) { return a > b; }                                \
     static int adamas_ge_##name(ctype a, ctype b) { return a >= b; }                               \
     static void adamas_show_##name(ctype value) { printf(spec, (wide)value); }
+
+/* Знаковая половина: правый сдвиг арифметический, деление усекает к нулю.
+ *
+ * Правый сдвиг опирается на то, что `>>` у знакового арифметичен. До C23 это
+ * реализационно определено, gcc и clang это документируют, C23 требует; та же
+ * опора, что у обратного приведения к знаковому выше.
+ *
+ * Деление стережёт **два** случая, и второй теряется чаще первого. Ноль
+ * обрывает прогон - ответа у него нет ни у одного из трёх вычислителей.
+ * `MIN / -1` в тип не помещается, и `idiv` на x86 отвечает на него сигналом;
+ * здесь он заворачивается по ширине наравне с умножением (§4.3, `-fwrapv`),
+ * то есть даёт `MIN`. Остаток от `-1` при этом ноль всегда. */
+#define ADAMAS_FLAT_SIGNED(name, ctype, utype, width)                                              \
+    static ctype adamas_shr_##name(ctype a, ctype b) {                                             \
+        unsigned long long count = (unsigned long long)(utype)b;                                   \
+        unsigned place = (unsigned)(count >= (width) ? (width) - 1 : count);                       \
+        return (ctype)(a >> place);                                                                \
+    }                                                                                              \
+    static ctype adamas_div_##name(ctype a, ctype b) {                                             \
+        if (b == 0) { adamas_fail(ADAMAS_DIVISION_BY_ZERO); }                                      \
+        if (b == (ctype)-1) {                                                                      \
+            return (ctype)(utype)(0ULL - (unsigned long long)(utype)a);                            \
+        }                                                                                          \
+        return (ctype)(a / b);                                                                     \
+    }                                                                                              \
+    static ctype adamas_rem_##name(ctype a, ctype b) {                                             \
+        if (b == 0) { adamas_fail(ADAMAS_DIVISION_BY_ZERO); }                                      \
+        if (b == (ctype)-1) { return (ctype)0; }                                                   \
+        return (ctype)(a % b);                                                                     \
+    }
+
+/* Беззнаковая половина: правый сдвиг логический, `-1` делителем ничем не
+ * особенный - это наибольшее значение типа, и делить на него законно. */
+#define ADAMAS_FLAT_UNSIGNED(name, ctype, utype, width)                                            \
+    static ctype adamas_shr_##name(ctype a, ctype b) {                                             \
+        unsigned long long count = (unsigned long long)(utype)b;                                   \
+        if (count >= (width)) { return (ctype)0; }                                                 \
+        return (ctype)(utype)(((unsigned long long)(utype)a) >> count);                            \
+    }                                                                                              \
+    static ctype adamas_div_##name(ctype a, ctype b) {                                             \
+        if (b == 0) { adamas_fail(ADAMAS_DIVISION_BY_ZERO); }                                      \
+        return (ctype)(a / b);                                                                     \
+    }                                                                                              \
+    static ctype adamas_rem_##name(ctype a, ctype b) {                                             \
+        if (b == 0) { adamas_fail(ADAMAS_DIVISION_BY_ZERO); }                                      \
+        return (ctype)(a % b);                                                                     \
+    }
 
 static void adamas_show_real(double value, int width);
 
@@ -146,6 +221,11 @@ static void adamas_show_real(double value, int width);
     static ctype adamas_add_##name(ctype a, ctype b) { return a + b; }                             \
     static ctype adamas_sub_##name(ctype a, ctype b) { return a - b; }                             \
     static ctype adamas_mul_##name(ctype a, ctype b) { return a * b; }                             \
+    /* Деление у плавающего ограждений не имеет: §4.3 отдаёт `Div` типу       \
+     * `Float` операторным классом, а нулевой делитель даёт `inf` либо        \
+     * `nan` - наблюдаемые значения `Approximate`, а не обрыв. Остатка у      \
+     * плавающего нет вовсе: его не называет ни `Div`, ни `Approximate`. */   \
+    static ctype adamas_div_##name(ctype a, ctype b) { return a / b; }                             \
     /* Порядок - `totalOrder` IEEE-754, которым §4.3 наделяет `Eq`/`Ord`, по    \
      * канонизированному значению: отрицательное инвертируется целиком,         \
      * положительному ставится старший бит, а всякий NaN становится одним       \
@@ -188,14 +268,22 @@ static void adamas_show_real(double value, int width);
     }                                                                                              \
     static void adamas_show_##name(ctype value) { adamas_show_real((double)value, (int)sizeof value); }
 
-ADAMAS_FLAT_INTEGER(Int8, int8_t, uint8_t, long long, "%lld")
-ADAMAS_FLAT_INTEGER(Int16, int16_t, uint16_t, long long, "%lld")
-ADAMAS_FLAT_INTEGER(Int32, int32_t, uint32_t, long long, "%lld")
-ADAMAS_FLAT_INTEGER(Int64, int64_t, uint64_t, long long, "%lld")
-ADAMAS_FLAT_INTEGER(UInt8, uint8_t, uint8_t, unsigned long long, "%llu")
-ADAMAS_FLAT_INTEGER(UInt16, uint16_t, uint16_t, unsigned long long, "%llu")
-ADAMAS_FLAT_INTEGER(UInt32, uint32_t, uint32_t, unsigned long long, "%llu")
-ADAMAS_FLAT_INTEGER(UInt64, uint64_t, uint64_t, unsigned long long, "%llu")
+ADAMAS_FLAT_INTEGER(Int8, int8_t, uint8_t, 8, long long, "%lld")
+ADAMAS_FLAT_SIGNED(Int8, int8_t, uint8_t, 8)
+ADAMAS_FLAT_INTEGER(Int16, int16_t, uint16_t, 16, long long, "%lld")
+ADAMAS_FLAT_SIGNED(Int16, int16_t, uint16_t, 16)
+ADAMAS_FLAT_INTEGER(Int32, int32_t, uint32_t, 32, long long, "%lld")
+ADAMAS_FLAT_SIGNED(Int32, int32_t, uint32_t, 32)
+ADAMAS_FLAT_INTEGER(Int64, int64_t, uint64_t, 64, long long, "%lld")
+ADAMAS_FLAT_SIGNED(Int64, int64_t, uint64_t, 64)
+ADAMAS_FLAT_INTEGER(UInt8, uint8_t, uint8_t, 8, unsigned long long, "%llu")
+ADAMAS_FLAT_UNSIGNED(UInt8, uint8_t, uint8_t, 8)
+ADAMAS_FLAT_INTEGER(UInt16, uint16_t, uint16_t, 16, unsigned long long, "%llu")
+ADAMAS_FLAT_UNSIGNED(UInt16, uint16_t, uint16_t, 16)
+ADAMAS_FLAT_INTEGER(UInt32, uint32_t, uint32_t, 32, unsigned long long, "%llu")
+ADAMAS_FLAT_UNSIGNED(UInt32, uint32_t, uint32_t, 32)
+ADAMAS_FLAT_INTEGER(UInt64, uint64_t, uint64_t, 64, unsigned long long, "%llu")
+ADAMAS_FLAT_UNSIGNED(UInt64, uint64_t, uint64_t, 64)
 ADAMAS_FLAT_REAL(Float32, float, uint32_t, 0x7F800000u, 0x7FC00000u)
 ADAMAS_FLAT_REAL(Float64, double, uint64_t, 0x7FF0000000000000u, 0x7FF8000000000000u)
 

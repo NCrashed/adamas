@@ -92,7 +92,15 @@ use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 /// `flat`, `flat-primitives`, `flat-sealed-member` - под снятым отказом
 /// показали **дескриптор укладки**, то есть словарь `Flat a` значением; взят
 /// и он.
-const TAKEN: [&str; 102] = [
+///
+/// Две последние добавил трек B волны 4 - разделяемая область (§3.6, §5.2).
+/// `shared-strategies` досталась даром: операция у неё одна новая
+/// (`sharedNew`), а прочие шесть те же, что у обычной области - §3.6 объявляет
+/// `SharedAllocStrategy when AllocStrategy`, то есть те же члены, и расходятся
+/// стратегии в `new`. `shared-workers` даром **не** досталась: захват области
+/// замыканием (`spawn (worker r)`) отвергался представлением, и без него
+/// разделяемая арена до воркера не доходит вовсе (см. `Repr::pointer`).
+const TAKEN: [&str; 104] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -175,6 +183,8 @@ const TAKEN: [&str; 102] = [
     "sealed-effect",
     "sequences",
     "shadowed-name",
+    "shared-strategies",
+    "shared-workers",
     "signature-effect",
     "signature-effect-parameterized",
     "simd-lanes",

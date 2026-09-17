@@ -1,0 +1,170 @@
+-- Разделяемые стратегии §3.6: `SharedArena` и `SharedPool`.
+--
+-- §3.6 объявляет их отдельным уровнем - `module type SharedAllocStrategy when
+-- AllocStrategy`, - и слово `when` здесь несущее: **членов у них тех же**, а
+-- добавляется гарантия («все методы thread-safe»). Поэтому ниже они написаны
+-- тем же `AllocStrategy`, что Arena и Pool в `eval/region-strategies`, и
+-- расходятся с ними ровно одной строкой:
+--
+--     Arena.new       u = regionNew
+--     SharedArena.new u = sharedNew
+--
+-- Это дословно то, что §3.6 и говорит: «программист выбирает уровень при
+-- создании региона (`withArena` для local, `withSharedArena` для shared)».
+-- Между собой SharedArena и SharedPool расходятся той же одной строкой, что
+-- Arena и Pool, - тем, что делает `free`.
+--
+-- Третьей стандартной разделяемой стратегии нет, и это не пропуск: §3.6
+-- называет две. `StackAlloc` есть размещение на C-стеке, а стек у каждого
+-- потока свой. Операция LIFO (`regionPop`) над разделяемой областью при этом
+-- обслуживается наравне с прочими - вершина у неё воркерская, - и стратегия
+-- поверх неё пишется обычным библиотечным кодом, как §3.6 и обещает
+-- пользовательским стратегиям.
+--
+-- # Чего эта фикстура **не** проверяет, и это сказано прямо
+--
+-- Она не различает разделяемую область от обычной, и различить не может ни
+-- одна корпусная программа. Договор трёх вычислителей сверяет ответ с машиной,
+-- а область машины есть **значение** (`adamas-core/src/eval.rs`): `store`
+-- отдаёт новую область, прежняя остаётся прежней. Разделяемость же есть
+-- **тождество**: `store` правит ту же область и отдаёт её саму. Программа,
+-- которая это различает, - ровно та, на которой машина и рантайм обязаны
+-- разойтись; ответы у них расходятся по построению, а не по дефекту.
+--
+-- Линейно протянутая область - `r0`, `r1`, ... `r6`, каждая употреблена раз -
+-- их не различает, и здесь она такая. Отсюда и требование к рантайму: правило
+-- размещения у разделяемой области обязано совпадать с обычным до числа
+-- (свидетель - `adamas-runtime/tests/shared.rs`,
+-- `a_shared_area_places_like_an_ordinary_one`). Различие наблюдают там, где
+-- машины нет: несколько воркеров над одной областью
+-- (`adamas-codegen/tests/shared.rs`) и лишняя ссылка без копии
+-- (`adamas-runtime/tests/shared.rs`).
+--
+-- Числа поэтому те же, что у `eval/region-strategies`, и это проверяемое
+-- утверждение, а не совпадение.
+--
+--     стратегия     хендл после первого возврата   после второго
+--     SharedArena                 16                      24
+--     SharedPool                   0                       0
+
+type Layout = { size : UInt32, align : UInt32 }
+
+class Flat a where
+  layout : Layout
+
+data Unit where
+  MkUnit : Unit
+
+module type AllocStrategy where
+  type Block
+  new   : Unit -> Block
+  store : {Flat a} => Block -> a -> Block
+  here  : Block -> Ptr
+  load  : {Flat a} => Block -> Ptr -> a
+  free  : Block -> Ptr -> Block
+
+module SharedArena : AllocStrategy where
+  type Block = Block
+
+  -- Единственная строка, которой разделяемая стратегия отличается от обычной.
+  new : Unit -> Block
+  new u = sharedNew
+
+  store : {Flat a} => Block -> a -> Block
+  store r x = regionAlloc r x
+
+  here : Block -> Ptr
+  here r = regionLast r
+
+  load : {Flat a} => Block -> Ptr -> a
+  load r p = regionRead r p
+
+  -- Ячейка обратно не берётся: область отдаётся целиком, дропом.
+  free : Block -> Ptr -> Block
+  free r p = r
+
+module SharedPool : AllocStrategy where
+  type Block = Block
+
+  new : Unit -> Block
+  new u = sharedNew
+
+  store : {Flat a} => Block -> a -> Block
+  store r x = regionAlloc r x
+
+  here : Block -> Ptr
+  here r = regionLast r
+
+  load : {Flat a} => Block -> Ptr -> a
+  load r p = regionRead r p
+
+  -- Ячейка ждёт следующую нагрузку равного размера. У разделяемой области
+  -- ждёт она **у своего воркера**: общий список свободных пришлось бы держать
+  -- под замком, и «per-thread caches» §3.6 перестало бы значить написанное.
+  free : Block -> Ptr -> Block
+  free r p = regionRecycle r p
+
+data Pair where
+  MkPair : Ptr -> Ptr -> Pair
+
+data Answer where
+  MkAnswer : Pair -> Pair -> Pair -> Answer
+
+-- 16 и 24: возврат ничего не освободил, курсор шёл вверх все четыре раза.
+arena : Pair
+arena =
+  let a : Int64 = 1
+  let b : Int64 = 2
+  let c : Int64 = 4
+  let d : Int64 = 8
+  let r0 : SharedArena.Block = SharedArena.new MkUnit
+  let r1 : SharedArena.Block = SharedArena.store r0 a
+  let h1 : Ptr = SharedArena.here r1
+  let r2 : SharedArena.Block = SharedArena.store r1 b
+  let r3 : SharedArena.Block = SharedArena.free r2 h1
+  let r4 : SharedArena.Block = SharedArena.store r3 c
+  let h3 : Ptr = SharedArena.here r4
+  let r5 : SharedArena.Block = SharedArena.free r4 h3
+  let r6 : SharedArena.Block = SharedArena.store r5 d
+  let h4 : Ptr = SharedArena.here r6
+  MkPair h3 h4
+
+-- 0 и 0: отданная ячейка достаётся следующей нагрузке того же размера.
+pool : Pair
+pool =
+  let a : Int64 = 1
+  let b : Int64 = 2
+  let c : Int64 = 4
+  let d : Int64 = 8
+  let r0 : SharedPool.Block = SharedPool.new MkUnit
+  let r1 : SharedPool.Block = SharedPool.store r0 a
+  let h1 : Ptr = SharedPool.here r1
+  let r2 : SharedPool.Block = SharedPool.store r1 b
+  let r3 : SharedPool.Block = SharedPool.free r2 h1
+  let r4 : SharedPool.Block = SharedPool.store r3 c
+  let h3 : Ptr = SharedPool.here r4
+  let r5 : SharedPool.Block = SharedPool.free r4 h3
+  let r6 : SharedPool.Block = SharedPool.store r5 d
+  let h4 : Ptr = SharedPool.here r6
+  MkPair h3 h4
+
+-- 8 и 0: восьмибайтовая ячейка отдана, четырёхбайтовому она не досталась, а
+-- следующему восьмибайтовому досталась. Обещание «одинакового размера» у
+-- воркерского списка свободных то же, что у журнала области.
+sized : Pair
+sized =
+  let wide : Int64 = 1
+  let narrow : Float32 = 0.5
+  let again : Int64 = 2
+  let r0 : SharedPool.Block = SharedPool.new MkUnit
+  let r1 : SharedPool.Block = SharedPool.store r0 wide
+  let h1 : Ptr = SharedPool.here r1
+  let r2 : SharedPool.Block = SharedPool.free r1 h1
+  let r3 : SharedPool.Block = SharedPool.store r2 narrow
+  let h2 : Ptr = SharedPool.here r3
+  let r4 : SharedPool.Block = SharedPool.store r3 again
+  let h3 : Ptr = SharedPool.here r4
+  MkPair h2 h3
+
+main : Answer
+main = MkAnswer arena pool sized

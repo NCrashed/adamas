@@ -765,7 +765,7 @@ fn region_position(op: RegionOp, spine: &[Elim]) -> bool {
         .filter(|elim| matches!(elim, Elim::App(_)))
         .count();
     match op {
-        RegionOp::New => false,
+        RegionOp::New | RegionOp::SharedNew => false,
         RegionOp::Last | RegionOp::Recycle | RegionOp::Pop => taken == 0,
         RegionOp::Alloc | RegionOp::Read | RegionOp::Write => taken == 2,
     }

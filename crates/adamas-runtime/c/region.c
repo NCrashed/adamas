@@ -20,6 +20,22 @@ static adamas_region *header_of(adamas_value region) {
     return (adamas_region *)region;
 }
 
+/* Разделяемая ли область (§3.6, `shared.c`).
+ *
+ * Развилка стоит **здесь**, а не в понижении, и это следствие того, что
+ * различает две области: у них один `AllocStrategy` и потому одни имена
+ * операций. §3.6 говорит это прямо - «программист выбирает уровень при
+ * создании региона», - то есть расходятся стратегии в `new`, а `store`,
+ * `here`, `load` и `free` у них дословно одни.
+ *
+ * Тег уже читается на этом пути (`header_of` им же и отличает регион от
+ * прочего), поэтому развилка стоит одно сравнение; цена её измерена на том же
+ * витке, каким мерена холодная половина (`docs/measurements/shared-region/`).
+ */
+static int is_shared(adamas_value region) {
+    return adamas_tag(region) == ADAMAS_TAG_SHARED;
+}
+
 /* Ячейка журнала по номеру. Журнал растёт от конца области вниз: нулевая
  * запись лежит последними байтами, первая - перед ней. */
 static adamas_cell *cell_at(adamas_value region, size_t index) {
@@ -50,6 +66,9 @@ adamas_value adamas_region_new(void) {
 }
 
 size_t adamas_region_used(adamas_value region) {
+    if (is_shared(region)) {
+        return adamas_shared_used(region);
+    }
     return header_of(region)->used;
 }
 
@@ -110,9 +129,14 @@ static adamas_value writable(adamas_value region) {
 
 adamas_value adamas_region_alloc(adamas_value region, const void *bits, size_t size,
                                  size_t align) {
-    adamas_value made = writable(region);
-    adamas_region *head = (adamas_region *)made;
+    adamas_value made;
+    adamas_region *head;
     size_t bound = align == 0 ? 1 : align;
+    if (is_shared(region)) {
+        return adamas_shared_alloc(region, bits, size, align);
+    }
+    made = writable(region);
+    head = (adamas_region *)made;
     size_t index = head->cells;
     size_t at;
     adamas_cell *cell = NULL;
@@ -149,9 +173,15 @@ adamas_value adamas_region_alloc(adamas_value region, const void *bits, size_t s
 }
 
 adamas_value adamas_region_recycle(adamas_value region, size_t at) {
-    adamas_value made = writable(region);
-    adamas_region *head = (adamas_region *)made;
-    size_t index = head->cells;
+    adamas_value made;
+    adamas_region *head;
+    size_t index;
+    if (is_shared(region)) {
+        return adamas_shared_recycle(region, at);
+    }
+    made = writable(region);
+    head = (adamas_region *)made;
+    index = head->cells;
     while (index-- > 0) {
         adamas_cell *cell = cell_at(made, index);
         if (!cell->free && cell->at == at) {
@@ -163,9 +193,14 @@ adamas_value adamas_region_recycle(adamas_value region, size_t at) {
 }
 
 adamas_value adamas_region_pop(adamas_value region, size_t at) {
-    adamas_value made = writable(region);
-    adamas_region *head = (adamas_region *)made;
+    adamas_value made;
+    adamas_region *head;
     adamas_cell *top;
+    if (is_shared(region)) {
+        return adamas_shared_pop(region, at);
+    }
+    made = writable(region);
+    head = (adamas_region *)made;
     if (head->cells == 0) {
         return made;
     }
@@ -182,14 +217,23 @@ adamas_value adamas_region_pop(adamas_value region, size_t at) {
 }
 
 size_t adamas_region_last(adamas_value region, adamas_release release) {
-    size_t at = header_of(region)->last;
+    size_t at;
+    if (is_shared(region)) {
+        return adamas_shared_last(region, release);
+    }
+    at = header_of(region)->last;
     adamas_drop(region, release);
     return at;
 }
 
 void adamas_region_read(adamas_value region, size_t at, void *out, size_t size,
                         adamas_release release) {
-    adamas_region *head = header_of(region);
+    adamas_region *head;
+    if (is_shared(region)) {
+        adamas_shared_read(region, at, out, size, release);
+        return;
+    }
+    head = header_of(region);
     if (size > head->used || at > head->used - size) {
         adamas_fail("чтение региона за пределами занятого");
     }
@@ -199,8 +243,13 @@ void adamas_region_read(adamas_value region, size_t at, void *out, size_t size,
 
 adamas_value adamas_region_write(adamas_value region, size_t at, const void *bits,
                                  size_t size) {
-    adamas_value made = writable(region);
-    adamas_region *head = (adamas_region *)made;
+    adamas_value made;
+    adamas_region *head;
+    if (is_shared(region)) {
+        return adamas_shared_write(region, at, bits, size);
+    }
+    made = writable(region);
+    head = (adamas_region *)made;
     if (size > head->used || at > head->used - size) {
         adamas_fail("запись в регион за пределами занятого");
     }
@@ -211,7 +260,8 @@ adamas_value adamas_region_write(adamas_value region, size_t at, const void *bit
 }
 
 void adamas_region_release(adamas_value region) {
-    /* Детей у области нет вовсе: нагрузка плоская (§3.6), заголовков внутри
+    /* Разделяемой она бывает тоже, и ответ у обеих один - развилки поэтому
+     * здесь нет. Детей у области нет вовсе: нагрузка плоская (§3.6), заголовков внутри
      * нет, и освобождение всей области - это `free` её единственного блока,
      * который делает `adamas_drop` следом. */
     (void)region;

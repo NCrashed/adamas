@@ -364,6 +364,7 @@ impl Pass<'_> {
             // Пустая область блока ещё не занимает: аллокацию выдаст эмиттер,
             // а считать по ней нечего до первого её употребления.
             | Expr::RegionNew
+            | Expr::SharedNew
             | Expr::Layout { .. } => drops(owned.iter().copied().collect::<Vec<_>>(), expr),
             // Векторные `load`/`store` (§4.9) идут тем же путём, что скалярные
             // чтение и запись: колонка у них та же, владение то же, и
@@ -1366,6 +1367,7 @@ impl Pass<'_> {
             // Область региона под переписывание тоже не годится, и по тому же
             // счёту: придержанный блок размером в `slots` полей.
             | Expr::RegionNew
+            | Expr::SharedNew
             | Expr::RegionAlloc { .. }
             | Expr::RegionLast { .. }
             | Expr::RegionRead { .. }
@@ -1498,6 +1500,7 @@ impl Pass<'_> {
             // Область региона под переписывание тоже не годится, и по тому же
             // счёту: придержанный блок размером в `slots` полей.
             | Expr::RegionNew
+            | Expr::SharedNew
             | Expr::RegionAlloc { .. }
             | Expr::RegionLast { .. }
             | Expr::RegionRead { .. }

@@ -1,0 +1,113 @@
+-- Разделяемая область из нескольких воркеров (§3.6, §5.2).
+--
+-- Здесь `SharedArena` встречается с питомником: четыре задачи укладывают в
+-- **одну** область, уступают - то есть вправе доехать до другого воркера, - и
+-- читают уложенное обратно. Ответ 15 складывается из четырёх слагаемых, и
+-- совпади хоть два хендла, он стал бы другим.
+--
+-- # Почему ответ не зависит от порядка файберов
+--
+-- Порядок под настоящими потоками не определён (§5.2), и всякая программа со
+-- следом отвечает иначе. Здесь следа нет: задача читает **свою** ячейку и
+-- складывает ответы `await` в написанном порядке.
+--
+-- # Почему задача читает свою, а не соседскую
+--
+-- Потому что соседскую она прочитать могла бы только у разделяемой области, а
+-- машина разделяемых не знает: область ядра есть **значение** (`store` отдаёт
+-- новую, прежняя остаётся прежней), разделяемая есть **тождество**. Программа,
+-- в которой корень читает ячейку задачи, договором трёх вычислителей не
+-- берётся по построению - машина и рантайм обязаны разойтись на ней, и это
+-- свойство модели, а не дефект. Такая программа стоит в
+-- `adamas-codegen/tests/shared.rs`, где сверяются два бэкенда между собой.
+--
+-- Эта же берётся всеми тремя: у машины каждый файбер получает свою копию
+-- области и кладёт в неё по нулевому смещению, у рантайма - свой кусок общей,
+-- и читает каждый **своё** уложенное. Слагаемые оттого совпадают, а хендлы
+-- нет, и в ответ хендлы не попадают.
+--
+-- # Уступка стоит после `here`, и это не случайность
+--
+-- Хендл последней укладки у разделяемой области принадлежит **воркеру**, а не
+-- файберу: «последняя» у общей области не определена, между `store` одного
+-- воркера и его `here` встаёт `store` другого. Файбер, уступивший **между**
+-- `store` и `here`, вправе проснуться на чужом воркере и спросить хендл не
+-- свой. Чтение и запись по хендлу от воркера не зависят вовсе - смещение
+-- абсолютное, - поэтому уступка здесь стоит после `here` и до `load`, и
+-- миграция ей не мешает.
+
+data Unit where
+  MkUnit : Unit
+
+type Layout = { size : UInt32, align : UInt32 }
+
+class Flat a where
+  layout : Layout
+
+module type AllocStrategy where
+  type Block
+  new   : Unit -> Block
+  store : {Flat a} => Block -> a -> Block
+  here  : Block -> Ptr
+  load  : {Flat a} => Block -> Ptr -> a
+  free  : Block -> Ptr -> Block
+
+module SharedArena : AllocStrategy where
+  type Block = Block
+
+  new : Unit -> Block
+  new u = sharedNew
+
+  store : {Flat a} => Block -> a -> Block
+  store r x = regionAlloc r x
+
+  here : Block -> Ptr
+  here r = regionLast r
+
+  load : {Flat a} => Block -> Ptr -> a
+  load r p = regionRead r p
+
+  free : Block -> Ptr -> Block
+  free r p = r
+
+data Sum where
+  MkSum : Int64 -> Sum
+
+data Task where
+  MkTask : Sum -> Task
+
+effect Async where
+  suspend : Unit
+  spawn : ({Async} Sum) -> Task
+  await : (1 t : Task) -> Sum
+
+withNursery : ({Async} Sum) -> Sum
+
+unsum : Sum -> Int64
+unsum (MkSum n) = n
+
+-- Уложить своё, уступить, прочитать своё обратно.
+worker : SharedArena.Block -> Int64 -> {Async} Sum
+worker r n =
+  let r1 : SharedArena.Block = SharedArena.store r n
+  let at : Ptr = SharedArena.here r1
+  let s : Unit = suspend
+  let got : Int64 = SharedArena.load r1 at
+  MkSum got
+
+-- Слагаемые степенями двойки: столкнись два хендла, сумма назвала бы, какие.
+workers : SharedArena.Block -> {Async} Sum
+workers r =
+  let t1 : Task = spawn (worker r 1)
+  let t2 : Task = spawn (worker r 2)
+  let t3 : Task = spawn (worker r 4)
+  let t4 : Task = spawn (worker r 8)
+  let a1 : Sum = await t1
+  let a2 : Sum = await t2
+  let a3 : Sum = await t3
+  let a4 : Sum = await t4
+  MkSum (addInt64 (addInt64 (unsum a1) (unsum a2)) (addInt64 (unsum a3) (unsum a4)))
+
+-- 15: четыре задачи уложили и прочитали каждая своё.
+main : Int64
+main = unsum (withNursery (workers (SharedArena.new MkUnit)))

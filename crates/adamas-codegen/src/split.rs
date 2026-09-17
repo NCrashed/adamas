@@ -319,6 +319,7 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         | Expr::Literal { .. }
         | Expr::LayoutField { .. }
         | Expr::RegionNew
+        | Expr::SharedNew
         | Expr::Layout { .. } => Vec::new(),
         Expr::Unpack { value, .. } | Expr::Cancel { value, .. } | Expr::SimdSplat { value, .. } => {
             vec![value]
@@ -564,6 +565,7 @@ impl Anf<'_> {
             // и представление у неё то же.
             Expr::SimdStore { .. } => Repr::Array(crate::ir::Elems::Flat),
             Expr::RegionNew
+            | Expr::SharedNew
             | Expr::RegionAlloc { .. }
             | Expr::RegionWrite { .. }
             | Expr::RegionRecycle { .. }

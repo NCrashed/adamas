@@ -3576,7 +3576,7 @@ impl<'a> Lowerer<'a> {
     ) -> Result<(Expr, Repr), LowerError> {
         use adamas_core::prim::RegionOp;
         let wanted = match op {
-            RegionOp::New => 0,
+            RegionOp::New | RegionOp::SharedNew => 0,
             RegionOp::Last => 1,
             RegionOp::Recycle | RegionOp::Pop => 2,
             RegionOp::Alloc | RegionOp::Read => 4,
@@ -3588,17 +3588,18 @@ impl<'a> Lowerer<'a> {
             });
         }
         let word = Repr::Flat(PrimTy::UInt64);
-        if op == RegionOp::New {
-            return Ok((Expr::RegionNew, Repr::Region));
+        // Обычная область и разделяемая расходятся **только здесь**: дальше их
+        // ведут те же шесть операций, и различает их рантайм по тегу. §3.6
+        // объявляет `SharedAllocStrategy when AllocStrategy`, то есть те же
+        // члены, а «уровень программист выбирает при создании региона».
+        match op {
+            RegionOp::New => return Ok((Expr::RegionNew, Repr::Region)),
+            RegionOp::SharedNew => return Ok((Expr::SharedNew, Repr::Region)),
+            _ => {}
         }
         if op == RegionOp::Last {
-            let region = self.given(scope, &arguments[0], Repr::Region, "регион")?;
-            return Ok((
-                Expr::RegionLast {
-                    region: Box::new(region),
-                },
-                word,
-            ));
+            let region = Box::new(self.given(scope, &arguments[0], Repr::Region, "регион")?);
+            return Ok((Expr::RegionLast { region }, word));
         }
         // Возврат ячейки нагрузки не несёт: размер её помнит область, а не
         // написанный тип. Отсюда и позиции - блок первым, хендл вторым.
@@ -3669,7 +3670,11 @@ impl<'a> Lowerer<'a> {
                     Repr::Region,
                 ))
             }
-            RegionOp::New | RegionOp::Last | RegionOp::Recycle | RegionOp::Pop => {
+            RegionOp::New
+            | RegionOp::SharedNew
+            | RegionOp::Last
+            | RegionOp::Recycle
+            | RegionOp::Pop => {
                 unreachable!("разобраны выше")
             }
         }

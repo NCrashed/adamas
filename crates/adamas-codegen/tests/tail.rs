@@ -338,19 +338,11 @@ main = step 5 { a = 0, b = 0, c = 1, d = 2 }
         return;
     };
     for (name, source) in [("tail-wide", WIDE), ("tail-narrow", NARROW)] {
-        for (level, pipeline) in [
-            ("-O2", Pipeline::optimised()),
-            ("-O0", Pipeline::plain()),
-        ] {
-            let printed = harness::llvm_agreed(
-                name,
-                source,
-                &tools,
-                &pipeline,
-                &format!("{name}{level}"),
-            )
-            .unwrap_or_else(|error| panic!("{name} на {level}: {error}"))
-            .0;
+        for (level, pipeline) in [("-O2", Pipeline::optimised()), ("-O0", Pipeline::plain())] {
+            let printed =
+                harness::llvm_agreed(name, source, &tools, &pipeline, &format!("{name}{level}"))
+                    .unwrap_or_else(|error| panic!("{name} на {level}: {error}"))
+                    .0;
             assert_eq!(printed, "261", "{name} на {level} посчитал не то");
         }
     }

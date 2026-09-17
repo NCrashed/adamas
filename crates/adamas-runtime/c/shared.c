@@ -100,6 +100,8 @@ static size_t aligned(size_t offset, size_t align) {
 typedef struct adamas_hand {
     /** Чья это рука. `NULL` - ничьей области ещё не касались. */
     const void *area;
+    /** Её номер: адреса мало, освобождённый блок `malloc` выдаёт снова. */
+    size_t birth;
     /** Хендл последней укладки **этого** воркера. */
     size_t last;
     /** Его курсор внутри своего куска. */
@@ -109,21 +111,41 @@ typedef struct adamas_hand {
     /** Сколько ячеек помнит журнал, и куда писать следующую. */
     uint32_t cells;
     uint32_t next;
+    /**
+     * Сколько среди них отдано обратно.
+     *
+     * Держится числом, а не считается обходом, ради **`SharedArena`**: её
+     * `free` не делает ничего, свободных ячеек у неё не бывает вовсе, и без
+     * этого счётчика всякая её укладка перебирала бы весь журнал впустую -
+     * сто двадцать восемь записей на виток. Цена обхода измерена
+     * (`docs/measurements/shared-region/`).
+     */
+    uint32_t frees;
     /** Журнал: последние `ADAMAS_SHARED_CELLS` укладок этого воркера. */
     adamas_cell journal[ADAMAS_SHARED_CELLS];
 } adamas_hand;
 
 static _Thread_local adamas_hand hand;
 
-/* Рука, настроенная на эту область. Смена области бросает прежний кусок. */
+/* Рука, настроенная на эту область. Смена области бросает прежний кусок.
+ *
+ * Сверяются **адрес и номер**, и второго не выкинуть: область есть блок
+ * `malloc`, а освобождённый блок той же ширины `malloc` выдаёт снова. Рука по
+ * одному адресу продолжила бы укладывать в кусок, которого новая область
+ * никому не раздавала, - и два воркера получили бы одни байты при верном на
+ * вид курсоре. Свидетель - `tests/shared.rs`,
+ * `a_new_area_at_a_reused_address_is_not_the_old_one`. */
 static adamas_hand *handed(adamas_value area) {
-    if (hand.area != (const void *)area) {
+    size_t birth = ((const adamas_shared *)area)->birth;
+    if (hand.area != (const void *)area || hand.birth != birth) {
         hand.area = (const void *)area;
+        hand.birth = birth;
         hand.last = 0;
         hand.at = 0;
         hand.edge = 0;
         hand.cells = 0;
         hand.next = 0;
+        hand.frees = 0;
     }
     return &hand;
 }
@@ -134,10 +156,17 @@ static adamas_hand *handed(adamas_value area) {
  * `adamas_region_alloc`): равный размер плюс годная граница. Совпадать они
  * обязаны - иначе однопоточная программа над разделяемой областью отвечала бы
  * не то, что над обычной, и договор трёх вычислителей разошёлся бы на ровном
- * месте. */
+ * месте.
+ *
+ * Обход не помечен `cold`, и это не упущение: у `SharedPool` он и есть
+ * горячий путь. Холодным его делает не атрибут, а **счётчик отданных** -
+ * `SharedArena` до сюда не доходит вовсе. */
 static adamas_cell *vacant(adamas_hand *own, size_t size, size_t bound) {
     adamas_cell *best = NULL;
     uint32_t index;
+    if (own->frees == 0) {
+        return NULL;
+    }
     for (index = 0; index < own->cells; index += 1) {
         adamas_cell *cell = &own->journal[index];
         if (cell->free && cell->size == size && cell->at % bound == 0) {
@@ -170,6 +199,11 @@ static adamas_cell *recorded(adamas_hand *own, size_t at) {
  * оставляет область как есть, ровно как хендл, не называющий занятой ячейки. */
 static void record(adamas_hand *own, size_t at, size_t size) {
     adamas_cell *cell = &own->journal[own->next];
+    if (own->cells == ADAMAS_SHARED_CELLS && cell->free) {
+        /* Затирается отданная ячейка: она перестаёт ждать, и счёт отданных
+         * обязан за этим следить - иначе `vacant` искала бы то, чего нет. */
+        own->frees -= 1;
+    }
     cell->at = (uint32_t)at;
     cell->size = (uint32_t)size;
     cell->free = 0;
@@ -198,10 +232,17 @@ ADAMAS_CONTESTED static void refill(adamas_shared *area, adamas_hand *own, size_
     own->edge = taken + want;
 }
 
+/* Сколько областей заведено с начала процесса: он же номер следующей.
+ *
+ * Атомарен, потому что заводить область вправе любой воркер; на витке укладки
+ * не стоит - трогается он раз на область. */
+static size_t born = 0;
+
 adamas_value adamas_shared_new(void) {
     adamas_value area =
         (adamas_value)adamas_block_alloc(sizeof(adamas_shared) + ADAMAS_SHARED_BYTES);
     adamas_shared *head = (adamas_shared *)area;
+    head->birth = __atomic_add_fetch(&born, 1, __ATOMIC_ACQ_REL);
     head->header.rc = 0;
     head->header.tag = ADAMAS_TAG_SHARED;
     /* Область рождается разделяемой: счётчик её обязан быть атомарным с первой
@@ -224,6 +265,7 @@ adamas_value adamas_shared_alloc(adamas_value area, const void *bits, size_t siz
     size_t at;
     if (cell != NULL) {
         cell->free = 0;
+        own->frees -= 1;
         at = cell->at;
     } else {
         at = aligned(own->at, bound);
@@ -249,6 +291,7 @@ adamas_value adamas_shared_recycle(adamas_value area, size_t at) {
     cell = recorded(own, at);
     if (cell != NULL) {
         cell->free = 1;
+        own->frees += 1;
     }
     return area;
 }

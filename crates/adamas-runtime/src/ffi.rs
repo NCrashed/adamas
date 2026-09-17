@@ -219,6 +219,38 @@ unsafe extern "C" {
     /// Дроп нагрузки области. Не делает ничего: нагрузка плоская.
     pub fn adamas_region_release(region: Value);
 
+    /// Пустая **разделяемая** область (§3.6): один блок, счётчик атомарен с
+    /// рождения. Всё, что делают операции выше, над ней делается тождеством:
+    /// копии нет ни при каком счётчике.
+    pub fn adamas_shared_new() -> Value;
+    /// Сколько байт области роздано под куски воркеров.
+    pub fn adamas_shared_used(area: Value) -> usize;
+    /// Укладка в разделяемую область; область возвращается **собой**.
+    pub fn adamas_shared_alloc(
+        area: Value,
+        bits: *const c_void,
+        size: usize,
+        align: usize,
+    ) -> Value;
+    /// Ячейка по хендлу свободна: `SharedPool`. Ячейка воркерская.
+    pub fn adamas_shared_recycle(area: Value, at: usize) -> Value;
+    /// Курсор воркера опускается до хендла с его вершины: `SharedStack`.
+    pub fn adamas_shared_pop(area: Value, at: usize) -> Value;
+    /// Хендл последней укладки **спрашивающего**. Область отдаётся.
+    pub fn adamas_shared_last(area: Value, release: Release) -> usize;
+    /// Читает `size` байт по хендлу. Область приходит владением.
+    pub fn adamas_shared_read(
+        area: Value,
+        at: usize,
+        out: *mut c_void,
+        size: usize,
+        release: Release,
+    );
+    /// Переписывает `size` байт по хендлу. Гонка ячейки не закрыта: вопрос 40.
+    pub fn adamas_shared_write(area: Value, at: usize, bits: *const c_void, size: usize) -> Value;
+    /// Дроп нагрузки. Не делает ничего: нагрузка плоская.
+    pub fn adamas_shared_release(area: Value);
+
     /// Пустой вектор evidence.
     pub fn adamas_evidence_empty() -> *mut Evidence;
     /// Вектор родителя плюс запись о хендлере метки.

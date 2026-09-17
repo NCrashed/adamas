@@ -3624,6 +3624,15 @@ impl<'a> Elaborator<'a> {
         if let Some((op, prim)) = PrimOp::named(&name.text) {
             return Ok(Term::Prim(Prim::Op(op, prim)));
         }
+        // Дополнение (§4.3, трек A волны 4 Фазы 7) - тем же правилом имени, но
+        // **не своей операцией**: `notT x` есть `xorT` со всеми единицами.
+        // Инструкции `not` у LLVM нет вовсе, и унарный узел в ядре пришлось бы
+        // нести всем трём вычислителям ради формы, которую второй бэкенд
+        // перепишет обратно. Имя при этом занято (`Prim::taken`).
+        if let Some(prim) = prim::complement(&name.text) {
+            return Ok(Term::Prim(Prim::Op(PrimOp::Xor, prim))
+                .apply([Term::Prim(Prim::literal(prim, prim.ones()))]));
+        }
         // Сравнения (§4.3) - тем же правилом имени, что арифметика. Ответ у них
         // `Bool`, объявленный программой; не объявлен - откажет проверка типов.
         if let Some((op, prim)) = prim::PrimCmp::named(&name.text) {

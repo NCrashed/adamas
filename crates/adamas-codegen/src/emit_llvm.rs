@@ -451,6 +451,9 @@ const TAG_MESSAGE: &str = "@.str.tag";
 /// Имя константы с текстом обрыва по номеру дорожки (§4.9).
 const LANE_MESSAGE: &str = "@.str.lane";
 
+/// Имя константы с текстом обрыва по нулевому делителю (§4.3).
+const DIVZERO_MESSAGE: &str = "@.str.divzero";
+
 /// Смещение первого слота от начала объекта, в байтах (`adamas.h`).
 ///
 /// Не догадка и не соглашение этого файла: `adamas.h` держит на нём
@@ -1708,6 +1711,7 @@ impl Module {
             (BRANCH_MESSAGE, BRANCH_TEXT),
             (MISSING_MESSAGE, MISSING_TEXT),
             (LANE_MESSAGE, LANE_TEXT),
+            (DIVZERO_MESSAGE, DIVZERO_TEXT),
             (SHAPELESS_MESSAGE, SHAPELESS_TEXT),
             (ARITYLESS_MESSAGE, ARITYLESS_TEXT),
         ] {
@@ -1993,6 +1997,12 @@ const MISSING_TEXT: &str = "операция без хендлера";
 /// Берётся у представления, а не пишется здесь: C-бэкенд печатает **этот же**
 /// текст, и второй его записи не заводится - см. [`crate::ir::LANE_OUTSIDE`].
 const LANE_TEXT: &str = crate::ir::LANE_OUTSIDE;
+
+/// Текст обрыва по нулевому делителю (§4.3).
+///
+/// Берётся у представления по той же причине, что и предыдущий: C-сторона
+/// печатает **этот же** текст из `flat.c` - см. [`crate::ir::DIVISION_BY_ZERO`].
+const DIVZERO_TEXT: &str = crate::ir::DIVISION_BY_ZERO;
 
 /// Имя строки с текстом обрыва по замыканию без параметров.
 const ARITYLESS_MESSAGE: &str = "@.str.arityless";
@@ -2832,17 +2842,134 @@ impl<'a> Builder<'a> {
         left: &Expr,
         right: &Expr,
     ) -> Result<String, LlvmError> {
+        let left = self.value(left)?;
+        let right = self.value(right)?;
         let opcode = match (op, ty.floating()) {
             (PrimOp::Add, false) => "add",
             (PrimOp::Sub, false) => "sub",
             (PrimOp::Mul, false) => "mul",
+            (PrimOp::And, _) => "and",
+            (PrimOp::Or, _) => "or",
+            (PrimOp::Xor, _) => "xor",
             (PrimOp::Add, true) => "fadd",
             (PrimOp::Sub, true) => "fsub",
             (PrimOp::Mul, true) => "fmul",
+            (PrimOp::Div, true) => "fdiv",
+            // Остатка у плавающего нет (`PrimOp::over`), поэтому `frem` не
+            // эмитится ни разу: он к тому же не инструкция по существу -
+            // `llc` разворачивает его в вызов `fmod` из libm.
+            (PrimOp::Rem, true) => return Err(self.node("остаток плавающего")),
+            (PrimOp::Shl | PrimOp::Shr, _) => return Ok(self.shift(op, ty, &left, &right)),
+            (PrimOp::Div | PrimOp::Rem, false) => {
+                return Ok(self.division(op, ty, &left, &right));
+            }
         };
-        let left = self.value(left)?;
-        let right = self.value(right)?;
         Ok(self.binary(opcode, "", machine(ty), &left, &right))
+    }
+
+    /// Сдвиг с насыщением (§4.3).
+    ///
+    /// **Не украшение, а сведение трёх вычислителей.** `shl`/`lshr`/`ashr` со
+    /// счётчиком от ширины и выше отдают у LLVM `poison`, то есть молча
+    /// неверный ответ; C зовёт такой сдвиг неопределённым; Rust паникует в
+    /// отладочной сборке. Ответа, общего всем трём, поэтому не существует, и
+    /// он назначается: ноль у левого и у беззнакового правого, знак у
+    /// знакового правого. Довод записан в `adamas_core::prim`.
+    ///
+    /// Три инструкции сверх самого сдвига, и на литеральном счётчике - а он
+    /// обычный случай разбора заголовка - `opt` сворачивает все три вместе с
+    /// ветвлением, которого тут нет вовсе. Ветвления нет намеренно: `select`
+    /// не рвёт базовый блок, и проход схлопывания RC (трек C волны 1),
+    /// работающий в пределах блока, от сдвига не слепнет.
+    ///
+    /// Счётчик перед самим сдвигом **зажимается** в `w-1`: инструкция с
+    /// заведомо допустимым счётчиком определена при любом входе, и `poison`
+    /// не возникает даже как невыбранная ветвь `select`.
+    fn shift(&mut self, op: PrimOp, ty: PrimTy, value: &str, count: &str) -> String {
+        let machine = machine(ty);
+        let width = u64::from(ty.size()) * 8;
+        let opcode = match (op, ty.signed()) {
+            (PrimOp::Shl, _) => "shl",
+            (_, true) => "ashr",
+            (_, false) => "lshr",
+        };
+        let big = self.binary("icmp", "uge", machine, count, &width.to_string());
+        let place = self.temp();
+        self.instruction(
+            &format!(
+                "{place} = select i1 {big}, {machine} {}, {machine} {count}",
+                width - 1
+            ),
+            self.here(),
+        );
+        let shifted = self.binary(opcode, "", machine, value, &place);
+        if opcode == "ashr" {
+            // Знаковый правый уже насыщен: сдвиг на `w-1` есть знак, растянутый
+            // на всю ширину, то есть ровно предел арифметического сдвига.
+            return shifted;
+        }
+        let name = self.temp();
+        self.instruction(
+            &format!("{name} = select i1 {big}, {machine} 0, {machine} {shifted}"),
+            self.here(),
+        );
+        name
+    }
+
+    /// Целое деление и остаток (§4.3).
+    ///
+    /// Стережёт **два** случая, и оба у LLVM неопределённое поведение, а не
+    /// `poison`: нулевой делитель и, у знакового, `MIN / -1`.
+    ///
+    /// Ноль обрывает прогон текстом [`crate::ir::DIVISION_BY_ZERO`] - тем же,
+    /// что печатает C-сторона из `flat.c`. Довод тот же, что у номера дорожки
+    /// вне ширины: ответа у этого случая нет ни у одного из трёх вычислителей,
+    /// и молчаливое умолчание сделало бы третий частичный примитив языка
+    /// непохожим на два первых.
+    ///
+    /// `MIN / -1` **заворачивается** наравне с умножением: делитель `-1`
+    /// подменяется единицей, а частное после этого отрицается - `0 - MIN` даёт
+    /// `MIN`. Остаток от `-1` при этом ноль всегда, и `x % 1` его даёт сам,
+    /// поэтому второго `select` у остатка нет.
+    fn division(&mut self, op: PrimOp, ty: PrimTy, left: &str, right: &str) -> String {
+        let machine = machine(ty);
+        let zero = self.binary("icmp", "eq", machine, right, "0");
+        let bad = format!("div{}.zero", self.temps);
+        let good = format!("div{}.ok", self.temps);
+        self.instruction(
+            &format!("br i1 {zero}, label %{bad}, label %{good}"),
+            self.here(),
+        );
+        self.start(&bad);
+        self.instruction(
+            &format!("call void @adamas_fail(ptr {DIVZERO_MESSAGE})"),
+            self.here(),
+        );
+        self.instruction("unreachable", self.here());
+        self.start(&good);
+
+        if !ty.signed() {
+            let opcode = if op == PrimOp::Div { "udiv" } else { "urem" };
+            return self.binary(opcode, "", machine, left, right);
+        }
+        let minus_one = self.binary("icmp", "eq", machine, right, "-1");
+        let safe = self.temp();
+        self.instruction(
+            &format!("{safe} = select i1 {minus_one}, {machine} 1, {machine} {right}"),
+            self.here(),
+        );
+        if op == PrimOp::Rem {
+            // `x % 1` есть ноль, а ноль и есть верный ответ на `x % -1`.
+            return self.binary("srem", "", machine, left, &safe);
+        }
+        let quotient = self.binary("sdiv", "", machine, left, &safe);
+        let negated = self.binary("sub", "", machine, "0", &quotient);
+        let name = self.temp();
+        self.instruction(
+            &format!("{name} = select i1 {minus_one}, {machine} {negated}, {machine} {quotient}"),
+            self.here(),
+        );
+        name
     }
 
     /// Вектор, все дорожки которого заняты одним значением (§4.9).
@@ -2989,6 +3116,22 @@ impl<'a> Builder<'a> {
             (PrimOp::Add, true) => "fadd",
             (PrimOp::Sub, true) => "fsub",
             (PrimOp::Mul, true) => "fmul",
+            // §4.9 подорожечными называет три операции, и `SimdOp::arith`
+            // других не отдаёт. Отказ стоит **вместо** молчаливой печати
+            // `sdiv <4 x i32>`: у сдвига и деления свои ограждения, и
+            // подорожечной формы у них нет ни у одного из бэкендов.
+            (
+                PrimOp::Div
+                | PrimOp::Rem
+                | PrimOp::And
+                | PrimOp::Or
+                | PrimOp::Xor
+                | PrimOp::Shl
+                | PrimOp::Shr,
+                _,
+            ) => {
+                return Err(self.node("подорожечная небазовая операция"));
+            }
         };
         let left = self.value(left)?;
         let right = self.value(right)?;

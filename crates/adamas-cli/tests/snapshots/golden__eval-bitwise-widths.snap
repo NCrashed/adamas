@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+{eightU = 173, sixteenU = 51373, thirtyTwoU = 3221276845, sixtyFourU = 13835058058503440557, eightS = 43, sixteenS = -16597, thirtyTwoS = -1073692885, sixtyFourS = -4611686015206113493, single = 3.141593, double = 3.1415929203539825}

@@ -138,6 +138,21 @@ pub enum EmitError {
         /// Что именно не влезло.
         shape: String,
     },
+
+    /// Подорожечной эта операция не бывает (§4.9).
+    ///
+    /// Приехать сюда она не может: `SimdOp::arith` отдаёт только три
+    /// арифметические, и [`PrimOp::lanewise`] говорит то же. Отказ стоит
+    /// **вместо** молчаливой печати `a / b` по дорожкам: у сдвига и деления
+    /// свои ограждения (насыщение счётчика, нулевой делитель), подорожечной
+    /// формы у них нет, и напечатанный без них вектор считал бы не то.
+    #[error("`{function}`: `{op}` подорожечной не бывает - ограждений у неё нет (§4.9)")]
+    Lanewise {
+        /// Чья функция.
+        function: String,
+        /// Какая операция.
+        op: PrimOp,
+    },
 }
 
 /// Собирает единицу трансляции.
@@ -2109,6 +2124,16 @@ impl Emitter<'_> {
             PrimOp::Add => '+',
             PrimOp::Sub => '-',
             PrimOp::Mul => '*',
+            PrimOp::Div
+            | PrimOp::Rem
+            | PrimOp::And
+            | PrimOp::Or
+            | PrimOp::Xor
+            | PrimOp::Shl
+            | PrimOp::Shr => {
+                self.lanewise_refused(op);
+                '+'
+            }
         };
         if lane.floating() {
             let _ = writeln!(self.out, "{pad}{ty} {name} = {left} {sign} {right};");
@@ -3196,6 +3221,16 @@ impl Emitter<'_> {
         let _ = writeln!(self.out, "}}\n");
     }
 
+    /// Операция, подорожечной формы не имеющая (§4.9).
+    fn lanewise_refused(&mut self, op: PrimOp) {
+        if self.failure.is_none() {
+            self.failure = Some(EmitError::Lanewise {
+                function: self.program.functions[self.id.0].name.clone(),
+                op,
+            });
+        }
+    }
+
     /// Связывание, пережившее точку приостановки, но не влезающее в слот кадра.
     fn parked(&mut self, repr: Repr) {
         if self.failure.is_none() {
@@ -3715,12 +3750,12 @@ impl Emitter<'_> {
 }
 
 /// Имя операции в `flat.c`: то же, что пишет `adamas_add_Int64`.
+///
+/// Берётся у [`PrimOp::prefix`], а не пишется вторым списком: имя примитива в
+/// программе и имя спутника в `flat.c` обязаны совпадать буква в букву, и
+/// разъехаться двум спискам было бы нечем помешать.
 fn operation(op: PrimOp) -> &'static str {
-    match op {
-        PrimOp::Add => "add",
-        PrimOp::Sub => "sub",
-        PrimOp::Mul => "mul",
-    }
+    op.prefix()
 }
 
 /// Имя сравнения в `flat.c`: то же, что пишет `adamas_lt_Int64`.
@@ -3803,5 +3838,91 @@ mod tests {
         for helper in ["adamas_bits_##name", "adamas_word_##name"] {
             assert!(FLAT.contains(helper), "`flat.c` не определяет `{helper}`");
         }
+    }
+
+    /// У каждого типа есть спутник каждой операции, которая у него бывает.
+    ///
+    /// Предыдущий тест проверяет, что имя определено **хоть где-то**, и до
+    /// трека A волны 4 этого хватало: три операции стояли в одном макросе на
+    /// все восемь целых. Теперь макросов четыре - общий целый, знаковый,
+    /// беззнаковый и плавающий, - и «определено хоть где-то» перестало значить
+    /// «соберётся». Пропусти `adamas_shr_##name` знаковая половина, и первый
+    /// тест остался бы зелёным: беззнаковая её определяет.
+    ///
+    /// Перечень «какая операция у какого типа бывает» берётся у
+    /// [`PrimOp::over`], то есть у той же записи, по которой элаборация решает,
+    /// существует ли имя. Разъехаться им негде.
+    /// Разворот макроса: имя макроса и тип, которому он развёрнут.
+    ///
+    /// Отдельной функцией, а не цепочкой `&& let` внутри условия: цепочка
+    /// принимается clippy, но отвергается MSRV 1.85 - `let` в этой позиции там
+    /// ещё нестабилен, и проверяется это прогоном, а не грепом.
+    fn expansion(line: &str) -> Option<(String, String)> {
+        let rest = line.strip_prefix("ADAMAS_FLAT_")?;
+        let (name, arguments) = rest.split_once('(')?;
+        let ty = arguments.split(',').next()?;
+        Some((name.to_owned(), ty.trim().to_owned()))
+    }
+
+    #[test]
+    fn every_type_has_a_helper_for_every_operation_it_has() {
+        // Макрос -> что он определяет; макрос -> для каких типов развёрнут.
+        let mut defines: Vec<(String, String)> = Vec::new();
+        let mut expands: Vec<(String, String)> = Vec::new();
+        let mut current = String::new();
+        let mut inside = false;
+        for line in FLAT.lines() {
+            if let Some(rest) = line.strip_prefix("#define ADAMAS_FLAT_") {
+                current = rest.split('(').next().unwrap_or_default().to_owned();
+                inside = true;
+            } else if !inside {
+                expands.extend(expansion(line));
+            }
+            if inside {
+                for piece in line.split("adamas_").skip(1) {
+                    if let Some((op, _)) = piece.split_once("_##name") {
+                        defines.push((current.clone(), op.to_owned()));
+                    }
+                }
+                inside = line.trim_end().ends_with('\\');
+            }
+        }
+        assert!(!expands.is_empty(), "разворотов макросов не нашлось вовсе");
+
+        for ty in PrimTy::ALL {
+            for op in PrimOp::ALL.into_iter().filter(|op| op.over(ty)) {
+                let found = expands.iter().filter(|(_, named)| named == ty.name()).any(
+                    |(macro_name, _)| {
+                        defines
+                            .iter()
+                            .any(|(owner, prefix)| owner == macro_name && prefix == op.prefix())
+                    },
+                );
+                assert!(
+                    found,
+                    "`flat.c` не даёт `adamas_{}_{}`: порождённый вызов не соберётся",
+                    op.prefix(),
+                    ty.name()
+                );
+            }
+        }
+    }
+
+    /// Текст обрыва по нулевому делителю у двух эмиттеров один.
+    ///
+    /// У LLVM-стороны он берётся из `ir::DIVISION_BY_ZERO` прямо, у C-стороны
+    /// живёт в `flat.c`: проверка стоит внутри `adamas_div_*`, а `flat.c` -
+    /// текст, а не печать. Вторая запись разошлась бы с первой молча, и здесь
+    /// она оплачена.
+    #[test]
+    fn the_division_message_matches_the_helpers() {
+        let written = format!(
+            "#define ADAMAS_DIVISION_BY_ZERO \"{}\"",
+            crate::ir::DIVISION_BY_ZERO
+        );
+        assert!(
+            FLAT.contains(&written),
+            "`flat.c` не объявляет `{written}`: текст обрыва разъехался с эмиттером"
+        );
     }
 }

@@ -116,6 +116,8 @@ const TAKEN: [&str; 100] = [
     "await-twice",
     "await-value",
     "beta-redex",
+    "bitwise",
+    "bitwise-widths",
     "cancel",
     "cancel-bystander",
     "case-family",

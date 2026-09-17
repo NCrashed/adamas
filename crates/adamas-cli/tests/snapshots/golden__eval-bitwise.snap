@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+{conjoined = 45280, disjoined = 65279, exclusive = 19999, complemented = 3855, raised = 61184, filled = -16777216, emptied = 251658240, deeplyFilled = -3906250000, overshotLeft = 0, overshotRight = 0, overshotSign = -1, negativeCount = 0, quotient = -3, rest = -1, wideQuotient = 6148914691236517205, wrappedQuotient = -128, wrappedRest = 0, ratio = 0.25, unbounded = inf, version = 4, length = 564, repacked = 1073742388, divided = 12, guarded = 7}

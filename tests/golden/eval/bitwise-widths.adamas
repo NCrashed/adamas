@@ -1,0 +1,129 @@
+-- Каждая операция на каждой ширине (§4.3, трек A волны 4 Фазы 7).
+--
+-- Сосед `bitwise.adamas` проверяет **углы** семантики - знаковость сдвига,
+-- насыщение счётчика, усечение деления, заворачивание `MIN / -1` - и делает
+-- это на одной-двух ширинах. Здесь проверяется другое и по-другому: что все
+-- восемь операций считаются **одинаково тремя вычислителями на всех восьми
+-- целых типах**.
+--
+-- Различие не косметическое. Ширина у каждого бэкенда своя запись: у C -
+-- разворот макроса `ADAMAS_FLAT_INTEGER`/`SIGNED`/`UNSIGNED` по имени типа, у
+-- LLVM - `iN` в тексте инструкции, у машины - обрезка битов по `PrimTy::masked`.
+-- Пропуск ширины у любого из трёх ловится **только** программой этой ширины.
+--
+-- Ответ - сумма по типу, а не цепочка. У цепочки промежуточное значение
+-- съедает предыдущее (сдвиг вправо после деления теряет разряды, и ошибка в
+-- начале не доезжает до конца); у суммы каждая операция даёт своё слагаемое, и
+-- перепутанная меняет ответ.
+--
+-- **Первая редакция суммы ширины не различала, и это измерено, а не
+-- предположено.** Восемь операций над общими константами дают `2221` у
+-- `UInt16`, `UInt32` и `UInt64` разом: единственное слагаемое, зависящее от
+-- ширины, - `not 240`, то есть `2^w - 241`, а `2^w` в сумме заворачивается в
+-- ноль. Мутант «печатать `i32` там, где написано `i64`» такую сумму пережил
+-- бы. Отсюда вторая половина ответа: три сдвига на 14, 30 и 62 разряда. Каждый
+-- насыщается у всех типов **уже** этой ширины и не насыщается у более широких,
+-- поэтому четыре суммы различны все четыре - и тем же движением проверено, что
+-- порог насыщения берётся у ширины типа, а не у слова.
+
+-- Беззнаковая восьмёрка операций. Константы одни на все четыре ширины.
+eightUOps : UInt8
+eightUOps = addUInt8 (addUInt8 (addUInt8 (andUInt8 240 60) (orUInt8 48 133))
+                               (addUInt8 (xorUInt8 181 90) (notUInt8 240)))
+                     (addUInt8 (addUInt8 (shlUInt8 239 3) (shrUInt8 200 2))
+                               (addUInt8 (divUInt8 200 7) (remUInt8 200 7)))
+
+sixteenUOps : UInt16
+sixteenUOps = addUInt16 (addUInt16 (addUInt16 (andUInt16 240 60) (orUInt16 48 133))
+                                   (addUInt16 (xorUInt16 181 90) (notUInt16 240)))
+                        (addUInt16 (addUInt16 (shlUInt16 239 3) (shrUInt16 200 2))
+                                   (addUInt16 (divUInt16 200 7) (remUInt16 200 7)))
+
+thirtyTwoUOps : UInt32
+thirtyTwoUOps = addUInt32 (addUInt32 (addUInt32 (andUInt32 240 60) (orUInt32 48 133))
+                                     (addUInt32 (xorUInt32 181 90) (notUInt32 240)))
+                          (addUInt32 (addUInt32 (shlUInt32 239 3) (shrUInt32 200 2))
+                                     (addUInt32 (divUInt32 200 7) (remUInt32 200 7)))
+
+sixtyFourUOps : UInt64
+sixtyFourUOps = addUInt64 (addUInt64 (addUInt64 (andUInt64 240 60) (orUInt64 48 133))
+                                     (addUInt64 (xorUInt64 181 90) (notUInt64 240)))
+                          (addUInt64 (addUInt64 (shlUInt64 239 3) (shrUInt64 200 2))
+                                     (addUInt64 (divUInt64 200 7) (remUInt64 200 7)))
+
+-- Три сдвига, чей порог насыщения приходится между ширинами.
+eightUWide : UInt8
+eightUWide = addUInt8 (addUInt8 (shlUInt8 3 14) (shlUInt8 3 30)) (shlUInt8 3 62)
+
+sixteenUWide : UInt16
+sixteenUWide = addUInt16 (addUInt16 (shlUInt16 3 14) (shlUInt16 3 30)) (shlUInt16 3 62)
+
+thirtyTwoUWide : UInt32
+thirtyTwoUWide = addUInt32 (addUInt32 (shlUInt32 3 14) (shlUInt32 3 30)) (shlUInt32 3 62)
+
+sixtyFourUWide : UInt64
+sixtyFourUWide = addUInt64 (addUInt64 (shlUInt64 3 14) (shlUInt64 3 30)) (shlUInt64 3 62)
+
+-- Знаковая восьмёрка. Операнды отрицательны там, где знаковость наблюдаема:
+-- `shr` (арифметический против логического), `div` и `rem` (усечение к нулю).
+eightSOps : Int8
+eightSOps = addInt8 (addInt8 (addInt8 (andInt8 (-16) 60) (orInt8 48 (-123)))
+                             (addInt8 (xorInt8 (-75) 90) (notInt8 (-16))))
+                    (addInt8 (addInt8 (shlInt8 (-17) 3) (shrInt8 (-120) 2))
+                             (addInt8 (divInt8 (-120) 7) (remInt8 (-120) 7)))
+
+sixteenSOps : Int16
+sixteenSOps = addInt16 (addInt16 (addInt16 (andInt16 (-16) 60) (orInt16 48 (-123)))
+                                 (addInt16 (xorInt16 (-75) 90) (notInt16 (-16))))
+                       (addInt16 (addInt16 (shlInt16 (-17) 3) (shrInt16 (-120) 2))
+                                 (addInt16 (divInt16 (-120) 7) (remInt16 (-120) 7)))
+
+thirtyTwoSOps : Int32
+thirtyTwoSOps = addInt32 (addInt32 (addInt32 (andInt32 (-16) 60) (orInt32 48 (-123)))
+                                   (addInt32 (xorInt32 (-75) 90) (notInt32 (-16))))
+                         (addInt32 (addInt32 (shlInt32 (-17) 3) (shrInt32 (-120) 2))
+                                   (addInt32 (divInt32 (-120) 7) (remInt32 (-120) 7)))
+
+sixtyFourSOps : Int64
+sixtyFourSOps = addInt64 (addInt64 (addInt64 (andInt64 (-16) 60) (orInt64 48 (-123)))
+                                   (addInt64 (xorInt64 (-75) 90) (notInt64 (-16))))
+                         (addInt64 (addInt64 (shlInt64 (-17) 3) (shrInt64 (-120) 2))
+                                   (addInt64 (divInt64 (-120) 7) (remInt64 (-120) 7)))
+
+eightSWide : Int8
+eightSWide = addInt8 (addInt8 (shlInt8 3 14) (shlInt8 3 30)) (shlInt8 3 62)
+
+sixteenSWide : Int16
+sixteenSWide = addInt16 (addInt16 (shlInt16 3 14) (shlInt16 3 30)) (shlInt16 3 62)
+
+thirtyTwoSWide : Int32
+thirtyTwoSWide = addInt32 (addInt32 (shlInt32 3 14) (shlInt32 3 30)) (shlInt32 3 62)
+
+sixtyFourSWide : Int64
+sixtyFourSWide = addInt64 (addInt64 (shlInt64 3 14) (shlInt64 3 30)) (shlInt64 3 62)
+
+-- Плавающее берёт из восьмёрки одно деление: остатка и битовых у него нет
+-- вовсе (§4.3 их не называет ни в `Div`, ни в `Approximate`), и имён
+-- `remFloat64`, `andFloat32` язык не даёт.
+single : Float32
+single = divFloat32 355.0 113.0
+
+double : Float64
+double = divFloat64 355.0 113.0
+
+type Widths = { eightU : UInt8, sixteenU : UInt16, thirtyTwoU : UInt32,
+                sixtyFourU : UInt64,
+                eightS : Int8, sixteenS : Int16, thirtyTwoS : Int32,
+                sixtyFourS : Int64,
+                single : Float32, double : Float64 }
+
+main : Widths
+main = { eightU = addUInt8 eightUOps eightUWide,
+         sixteenU = addUInt16 sixteenUOps sixteenUWide,
+         thirtyTwoU = addUInt32 thirtyTwoUOps thirtyTwoUWide,
+         sixtyFourU = addUInt64 sixtyFourUOps sixtyFourUWide,
+         eightS = addInt8 eightSOps eightSWide,
+         sixteenS = addInt16 sixteenSOps sixteenSWide,
+         thirtyTwoS = addInt32 thirtyTwoSOps thirtyTwoSWide,
+         sixtyFourS = addInt64 sixtyFourSOps sixtyFourSWide,
+         single = single, double = double }

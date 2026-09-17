@@ -24,11 +24,79 @@
 //!
 //! # Что взято
 //!
-//! Десять числовых типов из §4.11, три арифметических операции и шесть
+//! Десять числовых типов из §4.11, десять арифметических операций и шесть
 //! сравнений. `Bool` и `Char` **узлом ядра не стали**: `Bool` в корпусе
 //! объявляется программой и уже плоский тегом в байт, а литерала `Char` в
-//! поверхностном языке нет вовсе. Деления, остатка, сдвигов и преобразований
-//! между примитивами нет - §4.3 их формы не называет.
+//! поверхностном языке нет вовсе. Преобразований между примитивами нет - §4.3
+//! их формы не называет, и разбор байтового массива в слово оттого не пишется
+//! (названная граница, трек A волны 4 Фазы 7).
+//!
+//! # Деление, остаток, сдвиги и побитовые (§4.3)
+//!
+//! §4.3 называет `Div` операторным классом и отдаёт его `Float` и `Rational`,
+//! а `Int` его **не получает**: «целочисленное деление усекает, что при `/` в
+//! выражении читается неверно, и частично (деление на ноль)». Безопасное лицо
+//! целого деления §4.3 назначает библиотеке - `divMod`, `quotRem` в
+//! `Data.Int`, отвечающие `Option`. Примитив здесь и есть то, на чём эта
+//! библиотека стоит, поэтому:
+//!
+//! - `div` берётся у всех десяти типов: у плавающего это `Div Float` §4.3, и
+//!   деление на ноль там даёт `inf`/`nan` - наблюдаемые значения `Approximate`;
+//! - `rem` - у восьми целых: остатка плавающих §4.3 не называет нигде, ни
+//!   `Div`, ни `Approximate`;
+//! - `and`, `or`, `xor`, `not`, `shl`, `shr` - у восьми целых: у плавающего
+//!   битовых операций §4.3 не называет, и имени `andFloat64` язык не даёт
+//!   вовсе ([`PrimOp::over`]).
+//!
+//! **Целое деление на ноль обрывает прогон** (§10, трек A волны 4 Фазы 7).
+//! Довод - не удобство, а уже принятые решения того же слоя: выход за длину
+//! массива (§4.11) и номер дорожки вне ширины (§4.9) обрывают прогон, а не
+//! отвечают умолчанием, и третий частичный примитив, отвечающий молча, сделал
+//! бы правило непредсказуемым. Машина обрыва не печатает - у неё деление на
+//! ноль просто **не сводится**, - и сходятся все трое в том, что ответа не даёт
+//! никто.
+//!
+//! Решающим при этом оказался не довод, а мера: безопасное лицо `divMod`
+//! пишется на самом языке и стоит **одинаково** при любом выборе внутри
+//! (`adamas-codegen/tests/bitwise.rs`). Значит выбор решает единственный
+//! случай - когда обёртку обошли, - и там обрыв говорит, а умолчание молчит.
+//!
+//! Возражение §10 вопроса 151 («паника вводит частичность, которую §4.7
+//! считает, не имея ответа для стёртого фрагмента») проверено прогоном и к
+//! этому случаю не относится: `@total` над `arrayIndex xs 99` **принимается**
+//! сегодня, то есть вердикт тотальности обрыва не считает уже дважды. Для
+//! своего предмета довод 151 остаётся верным - у переполнения есть бесплатная
+//! тотальная замена, заворачивание, а у нулевого делителя её нет.
+//!
+//! # Сдвиг на ширину и дальше насыщает, а не заворачивается
+//!
+//! Счётчик читается **беззнаково** (у `Int8` `-1` есть `255`), и от ширины
+//! типа и выше ответ есть предел: ноль у `shl` и у беззнакового `shr`, знак у
+//! знакового. Соседи решают иначе - x86 и Rust'овский `wrapping_shl` берут
+//! счётчик по модулю ширины, C зовёт это неопределённым, LLVM отдаёт `poison`,
+//! - и взято насыщение по двум доводам.
+//!
+//! Первый: `shl x n` есть `mul x 2^n`, а умножение §4.3 заворачивает, и
+//! `2^w mod 2^w` есть ноль. Маскирование счётчика этому противоречит: оно даёт
+//! `shl x w == x`, то есть сдвиг на целую ширину, не потерявший ни бита, между
+//! сдвигом на `w-1`, теряющим почти всё, и сдвигом на `w+1`, теряющим всё.
+//!
+//! Второй: любой из вариантов надо проверять, потому что ни один из трёх
+//! вычислителей не даёт нужного поведения даром (в Rust это паника, в C UB, в
+//! LLVM `poison`), и цена проверки у маскирования и у насыщения одна и та же
+//! константная свёртка - на литеральном счётчике обе исчезают целиком.
+//!
+//! # Переполнение
+//!
+//! Целочисленные операции **заворачиваются** по ширине типа. §4.3 прямо не
+//! говорит про переполнение, но требует от сгенерированного C ключ `-fwrapv`,
+//! то есть определённое поведение вместо неопределённого; заворачивание - это
+//! оно и есть, и оно же детерминировано на всех бэкендах.
+//!
+//! Деление знакового своё переполнение имеет ровно одно - `MIN / -1`, - и оно
+//! **заворачивается тем же правилом**: ответ есть `MIN`. Молчать об этом
+//! случае нельзя: `idiv` на x86 отвечает на него сигналом, а LLVM и C зовут
+//! его неопределённым поведением.
 //!
 //! # Сравнение отвечает `Bool`, и оттого знает имя
 //!
@@ -37,13 +105,6 @@
 //! `if` над ним не пишется. Поэтому [`BOOL`] с конструкторами - имена, взятые
 //! у программы тем же соглашением, каким их берут `if` и [`FLAT`]. Занятыми
 //! они не становятся: на имени `Bool` стоит не представление, а соглашение.
-//!
-//! # Переполнение
-//!
-//! Целочисленные операции **заворачиваются** по ширине типа. §4.3 прямо не
-//! говорит про переполнение, но требует от сгенерированного C ключ `-fwrapv`,
-//! то есть определённое поведение вместо неопределённого; заворачивание - это
-//! оно и есть, и оно же детерминировано на всех бэкендах.
 
 use std::fmt;
 
@@ -277,6 +338,129 @@ impl PrimTy {
             value
         }
     }
+
+    /// Все единицы по ширине типа: `notT x` есть `xorT` с ними.
+    #[must_use]
+    pub const fn ones(self) -> u64 {
+        self.masked(u64::MAX)
+    }
+
+    /// На сколько разрядов сдвинуть, чтобы инструкция осталась определённой.
+    ///
+    /// Счётчик читается **беззнаково**: биты приходят обрезанными, поэтому у
+    /// `Int8` записанное `-1` есть `255`. От ширины и выше берётся `w-1` - у
+    /// знакового правого сдвига это и есть насыщение (доливается знак), а
+    /// остальным двум ответ подменяется нулём отдельно.
+    const fn place(self, count: u64) -> u32 {
+        let width = self.width();
+        if count >= width as u64 {
+            width - 1
+        } else {
+            // Счётчик меньше ширины, то есть меньше 64: обрезка точна.
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "ветвь взята при count < width <= 64"
+            )]
+            let place = count as u32;
+            place
+        }
+    }
+
+    /// Насыщает ли счётчик: ширина и больше.
+    const fn saturates(self, count: u64) -> bool {
+        count >= self.width() as u64
+    }
+
+    /// Сдвиг влево с насыщением в ноль.
+    fn shifted_left(self, bits: u64, count: u64) -> u64 {
+        if self.saturates(count) {
+            0
+        } else {
+            bits << self.place(count)
+        }
+    }
+
+    /// Сдвиг вправо: арифметический у знакового, логический у беззнакового.
+    ///
+    /// Различие не косметическое и на малых числах невидимо: у `Int8` от
+    /// `-8 >> 1` знаковый даёт `-4`, а логический `124`.
+    fn shifted_right(self, bits: u64, count: u64) -> u64 {
+        if self.signed() {
+            // `as_signed` расширяет до `i128`, поэтому знак доливается сам, а
+            // насыщение на `w-1` оставляет либо ноль, либо все единицы.
+            #[expect(
+                clippy::cast_sign_loss,
+                clippy::cast_possible_truncation,
+                reason = "обрезка по ширине ниже возвращает биты в норму"
+            )]
+            let shifted = (self.as_signed(bits) >> self.place(count)) as u64;
+            self.masked(shifted)
+        } else if self.saturates(count) {
+            0
+        } else {
+            bits >> self.place(count)
+        }
+    }
+
+    /// Частное с усечением к нулю. `None` - деление на ноль.
+    ///
+    /// Переполнение у знакового ровно одно, `MIN / -1`, и оно заворачивается
+    /// по ширине типа наравне с умножением: счёт идёт в `i128`, где `MIN / -1`
+    /// помещается, а обрезка возвращает `MIN`.
+    fn quotient(self, left: u64, right: u64) -> Option<u64> {
+        if right == 0 {
+            return None;
+        }
+        if self.signed() {
+            #[expect(
+                clippy::cast_sign_loss,
+                clippy::cast_possible_truncation,
+                reason = "обрезка по ширине возвращает биты в норму"
+            )]
+            let folded = (self.as_signed(left) / self.as_signed(right)) as u64;
+            Some(self.masked(folded))
+        } else {
+            Some(left / right)
+        }
+    }
+
+    /// Остаток от того же деления: знак у него - знак делимого. `None` - ноль.
+    fn remainder(self, left: u64, right: u64) -> Option<u64> {
+        if right == 0 {
+            return None;
+        }
+        if self.signed() {
+            #[expect(
+                clippy::cast_sign_loss,
+                clippy::cast_possible_truncation,
+                reason = "обрезка по ширине возвращает биты в норму"
+            )]
+            let folded = (self.as_signed(left) % self.as_signed(right)) as u64;
+            Some(self.masked(folded))
+        } else {
+            Some(left % right)
+        }
+    }
+}
+
+/// Приставка имени дополнения: `notUInt32`.
+pub const COMPLEMENT: &str = "not";
+
+/// Тип у написанного дополнения: `notUInt32` - [`PrimTy::UInt32`].
+///
+/// Отдельной операции у дополнения **нет**, и это решение, а не пропуск:
+/// `not x` есть `xor x` со всеми единицами, то есть ровно та форма, в которую
+/// LLVM канонизирует `not` сам - инструкции `not` у него не существует вовсе.
+/// Заводить ради него унарный узел значило бы платить арностью во всех трёх
+/// вычислителях за то, что второй вычислитель и так перепишет.
+///
+/// Имя при этом **занято** языком наравне с `xorUInt32` ([`Prim::taken`]):
+/// на нём стоит представление, и переопределяемое имя дало бы два дополнения.
+#[must_use]
+pub fn complement(text: &str) -> Option<PrimTy> {
+    text.strip_prefix(COMPLEMENT)
+        .and_then(PrimTy::named)
+        .filter(|ty| !ty.floating())
 }
 
 impl fmt::Display for PrimTy {
@@ -298,11 +482,36 @@ pub enum PrimOp {
     Sub,
     /// Умножение.
     Mul,
+    /// Деление: усекает к нулю у целого, IEEE-754 у плавающего.
+    Div,
+    /// Остаток от того же деления. Только у целых.
+    Rem,
+    /// Побитовое И. Только у целых.
+    And,
+    /// Побитовое ИЛИ. Только у целых.
+    Or,
+    /// Побитовое исключающее ИЛИ. Только у целых.
+    Xor,
+    /// Сдвиг влево. Только у целых.
+    Shl,
+    /// Сдвиг вправо: арифметический у знакового, логический у беззнакового.
+    Shr,
 }
 
 impl PrimOp {
     /// Все операции.
-    pub const ALL: [Self; 3] = [Self::Add, Self::Sub, Self::Mul];
+    pub const ALL: [Self; 10] = [
+        Self::Add,
+        Self::Sub,
+        Self::Mul,
+        Self::Div,
+        Self::Rem,
+        Self::And,
+        Self::Or,
+        Self::Xor,
+        Self::Shl,
+        Self::Shr,
+    ];
 
     /// Приставка имени: `add` у `addInt64`.
     #[must_use]
@@ -311,15 +520,50 @@ impl PrimOp {
             Self::Add => "add",
             Self::Sub => "sub",
             Self::Mul => "mul",
+            Self::Div => "div",
+            Self::Rem => "rem",
+            Self::And => "and",
+            Self::Or => "or",
+            Self::Xor => "xor",
+            Self::Shl => "shl",
+            Self::Shr => "shr",
         }
     }
 
+    /// Есть ли операция у этого типа (§4.3).
+    ///
+    /// Четыре арифметические - у всех десяти: `Div` §4.3 отдаёт `Float`
+    /// операторным классом. Остаток и шесть битовых - только у восьми целых:
+    /// ни `Div`, ни `Approximate` их у плавающего не называют, а имя, которого
+    /// нет, разрешается обычным путём и отвергается как необъявленное.
+    #[must_use]
+    pub const fn over(self, ty: PrimTy) -> bool {
+        match self {
+            Self::Add | Self::Sub | Self::Mul | Self::Div => true,
+            Self::Rem | Self::And | Self::Or | Self::Xor | Self::Shl | Self::Shr => !ty.floating(),
+        }
+    }
+
+    /// Повторяется ли операция по дорожкам (§4.9).
+    ///
+    /// Три из десяти, и это перечень [`SimdOp`], а не вкус: сдвиг и деление
+    /// несут свои ограждения (насыщение счётчика, нулевой делитель), и
+    /// подорожечной формы у этих ограждений нет ни у одного из бэкендов.
+    #[must_use]
+    pub const fn lanewise(self) -> bool {
+        matches!(self, Self::Add | Self::Sub | Self::Mul)
+    }
+
     /// Операция и тип по написанному имени: `mulFloat32`.
+    ///
+    /// Имени, которого у типа нет (`andFloat64`), не отдаёт: [`Self::over`]
+    /// решает это раньше, и такое имя остаётся обычным необъявленным.
     #[must_use]
     pub fn named(text: &str) -> Option<(Self, PrimTy)> {
         Self::ALL.into_iter().find_map(|op| {
             text.strip_prefix(op.prefix())
                 .and_then(PrimTy::named)
+                .filter(|ty| op.over(*ty))
                 .map(|ty| (op, ty))
         })
     }
@@ -329,48 +573,67 @@ impl PrimOp {
     /// Целые заворачиваются по ширине типа; плавающие считаются в своей
     /// точности - `Float32` именно в одинарной, а не в двойной с округлением
     /// после.
+    ///
+    /// `None` - ответа **нет**, и случая таких два: целое деление на ноль
+    /// (см. заголовок модуля) и операция, которой у этого типа не бывает. Оба
+    /// оставляют спайн застрявшим, как оставляет его чтение вне длины массива.
     #[must_use]
     #[expect(
         clippy::cast_possible_truncation,
         reason = "биты `Float32` лежат в младшей половине слова по построению"
     )]
-    pub fn fold(self, ty: PrimTy, left: u64, right: u64) -> u64 {
+    pub fn fold(self, ty: PrimTy, left: u64, right: u64) -> Option<u64> {
         match ty {
-            PrimTy::Float32 => {
-                let single = self.single(f32::from_bits(left as u32), f32::from_bits(right as u32));
-                u64::from(single.to_bits())
-            }
+            PrimTy::Float32 => self
+                .single(f32::from_bits(left as u32), f32::from_bits(right as u32))
+                .map(|it| u64::from(it.to_bits())),
             PrimTy::Float64 => self
                 .double(f64::from_bits(left), f64::from_bits(right))
-                .to_bits(),
-            _ => {
-                let folded = match self {
-                    Self::Add => left.wrapping_add(right),
-                    Self::Sub => left.wrapping_sub(right),
-                    Self::Mul => left.wrapping_mul(right),
-                };
-                ty.masked(folded)
-            }
+                .map(f64::to_bits),
+            _ => self.integer(ty, left, right),
+        }
+    }
+
+    /// Целая половина [`Self::fold`]: биты уже обрезаны по ширине типа.
+    fn integer(self, ty: PrimTy, left: u64, right: u64) -> Option<u64> {
+        match self {
+            Self::Add => Some(ty.masked(left.wrapping_add(right))),
+            Self::Sub => Some(ty.masked(left.wrapping_sub(right))),
+            Self::Mul => Some(ty.masked(left.wrapping_mul(right))),
+            Self::And => Some(left & right),
+            Self::Or => Some(left | right),
+            Self::Xor => Some(left ^ right),
+            Self::Shl => Some(ty.masked(ty.shifted_left(left, right))),
+            Self::Shr => Some(ty.shifted_right(left, right)),
+            Self::Div => ty.quotient(left, right),
+            Self::Rem => ty.remainder(left, right),
         }
     }
 
     /// Арифметика одинарной точности - именно в `f32`, а не в `f64` с
     /// округлением после: §4.3 обещает воспроизводимость основных операций, а
     /// двойное округление её ломает.
-    fn single(self, left: f32, right: f32) -> f32 {
+    ///
+    /// Деление на ноль здесь **не особый случай**: IEEE-754 отвечает на него
+    /// `inf` либо `nan`, и оба - наблюдаемые значения `Approximate` §4.3.
+    fn single(self, left: f32, right: f32) -> Option<f32> {
         match self {
-            Self::Add => left + right,
-            Self::Sub => left - right,
-            Self::Mul => left * right,
+            Self::Add => Some(left + right),
+            Self::Sub => Some(left - right),
+            Self::Mul => Some(left * right),
+            Self::Div => Some(left / right),
+            Self::Rem | Self::And | Self::Or | Self::Xor | Self::Shl | Self::Shr => None,
         }
     }
 
     /// То же в двойной точности.
-    fn double(self, left: f64, right: f64) -> f64 {
+    fn double(self, left: f64, right: f64) -> Option<f64> {
         match self {
-            Self::Add => left + right,
-            Self::Sub => left - right,
-            Self::Mul => left * right,
+            Self::Add => Some(left + right),
+            Self::Sub => Some(left - right),
+            Self::Mul => Some(left * right),
+            Self::Div => Some(left / right),
+            Self::Rem | Self::And | Self::Or | Self::Xor | Self::Shl | Self::Shr => None,
         }
     }
 }
@@ -947,6 +1210,7 @@ impl Prim {
     pub fn taken(text: &str) -> bool {
         PrimTy::named(text).is_some()
             || PrimOp::named(text).is_some()
+            || complement(text).is_some()
             || PrimCmp::named(text).is_some()
             || ArrayOp::named(text).is_some()
             || RegionOp::named(text).is_some()
@@ -1017,9 +1281,141 @@ mod tests {
     #[test]
     fn integer_arithmetic_wraps_within_its_width() {
         let bits = PrimOp::Add.fold(PrimTy::UInt8, 200, 100);
-        assert_eq!(bits, 44);
-        let bits = PrimOp::Sub.fold(PrimTy::Int8, 0, 1);
+        assert_eq!(bits, Some(44));
+        let bits = PrimOp::Sub.fold(PrimTy::Int8, 0, 1).unwrap_or_default();
         assert_eq!(Prim::Lit(PrimTy::Int8, bits).to_string(), "-1");
+    }
+
+    /// Сдвиг вправо читает знак **типа**, а не величину числа.
+    ///
+    /// Одни и те же биты `0xf8`: у `Int8` это `-8`, и сдвиг на разряд даёт
+    /// `-4`; у `UInt8` это `248`, и тот же сдвиг даёт `124`. Мутант
+    /// «арифметический вместо логического» (и обратный) валится ровно здесь, а
+    /// на неотрицательных числах оба неразличимы.
+    #[test]
+    fn a_right_shift_reads_the_sign_of_its_type() {
+        let bits = PrimTy::Int8.from_negative(8).unwrap_or_default();
+        assert_eq!(bits, 0xf8);
+        let signed = PrimOp::Shr.fold(PrimTy::Int8, bits, 1).unwrap_or_default();
+        assert_eq!(Prim::Lit(PrimTy::Int8, signed).to_string(), "-4");
+        assert_eq!(PrimOp::Shr.fold(PrimTy::UInt8, bits, 1), Some(124));
+    }
+
+    /// Сдвиг на ширину и дальше насыщает, а не заворачивает счётчик.
+    ///
+    /// Маскирование счётчика - то, что делают x86 и `wrapping_shl` Rust'а, -
+    /// дало бы `shl x 8 == x` у `Int8`, то есть сдвиг на целую ширину, не
+    /// потерявший ни бита. Здесь проверяется, что не даёт: ноль у сдвига
+    /// влево, ноль у беззнакового вправо, знак у знакового вправо.
+    ///
+    /// Счётчик читается беззнаково, поэтому `-1` у знакового типа тоже
+    /// насыщает: записанное `-1` есть `255`.
+    #[test]
+    fn a_shift_past_the_width_saturates() {
+        assert_eq!(PrimOp::Shl.fold(PrimTy::UInt8, 3, 8), Some(0));
+        assert_eq!(PrimOp::Shl.fold(PrimTy::UInt8, 3, 200), Some(0));
+        assert_eq!(PrimOp::Shr.fold(PrimTy::UInt8, 200, 8), Some(0));
+        let minus_one = PrimTy::Int8.from_negative(1).unwrap_or_default();
+        let filled = PrimOp::Shr
+            .fold(
+                PrimTy::Int8,
+                PrimTy::Int8.from_negative(8).unwrap_or_default(),
+                8,
+            )
+            .unwrap_or_default();
+        assert_eq!(Prim::Lit(PrimTy::Int8, filled).to_string(), "-1");
+        let positive = PrimOp::Shr.fold(PrimTy::Int8, 100, 8);
+        assert_eq!(positive, Some(0));
+        // Счётчик `-1` есть `255`: насыщает так же, как `8`.
+        assert_eq!(PrimOp::Shl.fold(PrimTy::Int8, 3, minus_one), Some(0));
+    }
+
+    /// Деление усекает к нулю, а не к минус бесконечности.
+    ///
+    /// `-7 / 2` есть `-3`, а не `-4`; остаток тогда `-1`, а не `1`. §4.3
+    /// пишет про усечение прямо, и на положительных числах обе формы совпадают.
+    #[test]
+    fn integer_division_truncates_towards_zero() {
+        let minus_seven = PrimTy::Int8.from_negative(7).unwrap_or_default();
+        let quotient = PrimOp::Div
+            .fold(PrimTy::Int8, minus_seven, 2)
+            .unwrap_or_default();
+        assert_eq!(Prim::Lit(PrimTy::Int8, quotient).to_string(), "-3");
+        let rest = PrimOp::Rem
+            .fold(PrimTy::Int8, minus_seven, 2)
+            .unwrap_or_default();
+        assert_eq!(Prim::Lit(PrimTy::Int8, rest).to_string(), "-1");
+    }
+
+    /// Единственное переполнение деления заворачивается наравне с умножением.
+    ///
+    /// `MIN / -1` не помещается в тип, и на x86 `idiv` отвечает на него
+    /// сигналом. Здесь ответ - `MIN`, тот же, что даёт `0 - MIN` (§4.3,
+    /// `-fwrapv`); остаток при этом ноль.
+    #[test]
+    fn the_one_overflow_of_division_wraps() {
+        let min = PrimTy::Int8.from_negative(128).unwrap_or_default();
+        let minus_one = PrimTy::Int8.from_negative(1).unwrap_or_default();
+        let quotient = PrimOp::Div
+            .fold(PrimTy::Int8, min, minus_one)
+            .unwrap_or_default();
+        assert_eq!(Prim::Lit(PrimTy::Int8, quotient).to_string(), "-128");
+        assert_eq!(PrimOp::Rem.fold(PrimTy::Int8, min, minus_one), Some(0));
+    }
+
+    /// Целое деление на ноль ответа не имеет; плавающее - имеет.
+    ///
+    /// У целого это застрявший спайн у машины и обрыв прогона у обоих
+    /// бэкендов; у плавающего - `inf`, наблюдаемое значение `Approximate`.
+    #[test]
+    fn dividing_by_zero_has_no_answer_only_for_integers() {
+        assert_eq!(PrimOp::Div.fold(PrimTy::Int64, 7, 0), None);
+        assert_eq!(PrimOp::Rem.fold(PrimTy::UInt32, 7, 0), None);
+        let one = PrimTy::Float64.from_fraction(1.0).unwrap_or_default();
+        let zero = PrimTy::Float64.from_fraction(0.0).unwrap_or_default();
+        let divided = PrimOp::Div
+            .fold(PrimTy::Float64, one, zero)
+            .unwrap_or_default();
+        assert_eq!(Prim::Lit(PrimTy::Float64, divided).to_string(), "inf");
+    }
+
+    /// Битовых операций у плавающего нет, и это видно по имени.
+    ///
+    /// Не «есть и отвергается проверкой», а **имени нет**: `andFloat64`
+    /// разрешается обычным путём и отвергается как необъявленное, поэтому и
+    /// занятым это имя не становится.
+    #[test]
+    fn a_floating_type_has_no_bitwise_names() {
+        assert_eq!(PrimOp::named("andFloat64"), None);
+        assert_eq!(PrimOp::named("shlFloat32"), None);
+        assert_eq!(PrimOp::named("remFloat64"), None);
+        assert_eq!(super::complement("notFloat64"), None);
+        assert!(!Prim::taken("andFloat64"));
+        assert_eq!(
+            PrimOp::named("divFloat64"),
+            Some((PrimOp::Div, PrimTy::Float64))
+        );
+        assert_eq!(
+            PrimOp::named("andUInt8"),
+            Some((PrimOp::And, PrimTy::UInt8))
+        );
+        assert_eq!(super::complement("notUInt8"), Some(PrimTy::UInt8));
+        assert!(Prim::taken("notUInt8"));
+    }
+
+    /// Дополнение есть `xor` со всеми единицами - у всех восьми целых.
+    #[test]
+    fn a_complement_is_a_xor_with_all_ones() {
+        for ty in PrimTy::ALL.into_iter().filter(|it| !it.floating()) {
+            let complemented = PrimOp::Xor.fold(ty, 0, ty.ones());
+            assert_eq!(
+                complemented,
+                Some(ty.ones()),
+                "{ty}: `not 0` не все единицы"
+            );
+            let back = PrimOp::Xor.fold(ty, ty.ones(), ty.ones());
+            assert_eq!(back, Some(0), "{ty}: дополнение не обратно себе");
+        }
     }
 
     /// Одинарная точность считается в одинарной: сумма, которую `f64`
@@ -1029,7 +1425,7 @@ mod tests {
         let one = PrimTy::Float32.from_fraction(1.0).unwrap_or_default();
         let tiny = PrimTy::Float32.from_fraction(1e-9_f64).unwrap_or_default();
         let sum = PrimOp::Add.fold(PrimTy::Float32, one, tiny);
-        assert_eq!(sum, one, "1.0 + 1e-9 в одинарной точности есть 1.0");
+        assert_eq!(sum, Some(one), "1.0 + 1e-9 в одинарной точности есть 1.0");
     }
 
     /// Печать литерала возвращает написанное: дробное со знаком после точки.

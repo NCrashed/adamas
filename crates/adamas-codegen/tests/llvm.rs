@@ -100,7 +100,7 @@ use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 /// стратегии в `new`. `shared-workers` даром **не** досталась: захват области
 /// замыканием (`spawn (worker r)`) отвергался представлением, и без него
 /// разделяемая арена до воркера не доходит вовсе (см. `Repr::pointer`).
-const TAKEN: [&str; 104] = [
+const TAKEN: [&str; 106] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -115,6 +115,8 @@ const TAKEN: [&str; 104] = [
     "await-twice",
     "await-value",
     "beta-redex",
+    "bitwise",
+    "bitwise-widths",
     "cancel",
     "cancel-bystander",
     "case-family",

@@ -264,6 +264,96 @@ int main(void) {
 }
 "#;
 
+/// Стенд разделяемой области: четыре воркера укладывают в **одну** область.
+///
+/// Нагрузка шириной в кусок минус выравнивание, поэтому встреча у курсора
+/// области случается на **каждой** укладке. Это не подгонка под санитайзер, а
+/// то же требование, каким мерена различающая сила счётного свидетеля
+/// (`tests/shared.rs`): узкая укладка идёт в свой кусок и общего курсора не
+/// касается вовсе, то есть per-thread cache прячет гонку от инструмента так же
+/// хорошо, как от контеншена.
+///
+/// Число витков упирается в ёмкость области: она фиксирована (§3.6), и
+/// `THREADS * ROUNDS * 512` обязано в неё уместиться.
+const AREA: &str = r#"
+#include "adamas.h"
+#include <pthread.h>
+#include <stdio.h>
+#include <string.h>
+
+#define THREADS 4
+#define ROUNDS 120
+#define WIDE 504
+#define SLOT 512
+
+static adamas_value area;
+
+static char *payload(void) {
+    return (char *)area + sizeof(adamas_shared);
+}
+
+static void *walk(void *arg) {
+    long mine = (long)(intptr_t)arg;
+    char bits[WIDE];
+    memset(bits, 0, sizeof bits);
+    for (int round = 0; round < ROUNDS; round += 1) {
+        long value = mine * ROUNDS + round + 1;
+        memcpy(bits, &value, sizeof value);
+        PLACE;
+    }
+    return NULL;
+}
+
+int main(void) {
+    pthread_t threads[THREADS];
+    size_t at;
+    long total = 0;
+    size_t given;
+    area = adamas_shared_new();
+    for (long hand = 0; hand < THREADS; hand += 1) {
+        pthread_create(&threads[hand], NULL, walk, (void *)(intptr_t)hand);
+    }
+    for (int hand = 0; hand < THREADS; hand += 1) {
+        pthread_join(threads[hand], NULL);
+    }
+    given = adamas_shared_used(area);
+    for (at = 0; at + WIDE <= given; at += SLOT) {
+        long got;
+        memcpy(&got, payload() + at, sizeof got);
+        total += got;
+    }
+    printf("cells=%zu sum=%ld\n", given / SLOT, total);
+    adamas_drop(area, NULL);
+    printf("live=%zu\n", adamas_stat_live_everywhere());
+    return 0;
+}
+"#;
+
+/// Честная область: укладка идёт рантаймом, курсор двигает атомарная прибавка.
+fn honest_area() -> String {
+    AREA.replace(
+        "PLACE;",
+        "adamas_region_alloc(area, bits, WIDE, sizeof(long));",
+    )
+}
+
+/// Ломаная - область **без синхронизации** дословно: курсор правится обычной
+/// прибавкой, мимо рантайма.
+///
+/// Мутант написан в стенде, а не в рантайме, по тому же праву, по какому там
+/// написан голый `rc += 1`: заголовок области открыт в `adamas.h`, и «курсор
+/// без атомарности» есть ровно то, чем область вышла бы, не будь у неё
+/// синхронизации вовсе.
+fn broken_area() -> String {
+    AREA.replace(
+        "PLACE;",
+        "{ adamas_shared *head = (adamas_shared *)area;\n\
+         \x20         size_t taken = head->cursor;\n\
+         \x20         head->cursor = taken + SLOT;\n\
+         \x20         memcpy(payload() + taken, bits, WIDE); }",
+    )
+}
+
 /// Честная ячейка: запись снимает пометку, второй обход доходит до постояльца.
 fn honest_cell() -> String {
     CELL.replace("KEEP;", "(void)0;")
@@ -543,6 +633,60 @@ fn the_sanitizer_names_the_race_on_a_tenant_written_into_a_shared_array() {
     );
     eprintln!(
         "санитайзер: пометка, пережившая запись, - гонка на постояльце; снятая - тишина, {}",
+        honest.printed.replace('\n', ", ")
+    );
+}
+
+/// Разделяемая область: аллокатор синхронизирован, и это различимо (§3.6).
+///
+/// Стенд четвёртый, и заведён он потому, что три прежних разделяемой области не
+/// проходят вовсе: они про счётчик ссылок, а здесь синхронизируется **курсор
+/// розданных кусков** - единственное поле, которое воркеры правят вместе.
+///
+/// Обе половины обязательны по тому же правилу, что у соседей. Ломаная -
+/// область без синхронизации дословно; честная обязана молчать, и молчать ей
+/// помогает не удача, а форма: кусок воркера лежит в его `_Thread_local`,
+/// поэтому пары доступов у самой укладки нет по построению.
+///
+/// Счётный свидетель того же дефекта живёт рядом
+/// (`tests/shared.rs::no_placement_is_lost_when_workers_share_one_area`), и он
+/// не избыточен: санитайзер называет пару доступов, а счёт - последствие.
+#[test]
+fn the_sanitizer_names_the_race_on_an_unsynchronised_shared_area() {
+    let broken = watched("broken-area", &broken_area());
+    if !broken.built {
+        eprintln!(
+            "ThreadSanitizer недоступен у `ADAMAS_CC`, договор §3.6 этим прогоном не проверялся:\n{}",
+            broken.printed
+        );
+        return;
+    }
+    assert!(
+        broken.raced,
+        "санитайзер не назвал гонку там, где курсор области правится голой \
+         прибавкой: инструмент не ловит ничего, и молчание на честном стенде \
+         ничего не значит"
+    );
+
+    let honest = watched("honest-area", &honest_area());
+    assert!(
+        honest.built,
+        "честный стенд не собрался:\n{}",
+        honest.printed
+    );
+    assert!(
+        !honest.raced,
+        "санитайзер назвал гонку на разделяемой области: укладка не синхронизирована"
+    );
+    // 4 воркера по 120 укладок: ни один кусок не достался двоим (ячеек ровно
+    // 480), каждая ячейка держит своё (сумма 1..480), и область освободилась
+    // одним блоком.
+    assert_eq!(
+        honest.printed, "cells=480 sum=115440\nlive=0",
+        "честный стенд посчитал не то"
+    );
+    eprintln!(
+        "санитайзер: курсор без атомарности - гонка, с атомарной прибавкой - тишина, {}",
         honest.printed.replace('\n', ", ")
     );
 }

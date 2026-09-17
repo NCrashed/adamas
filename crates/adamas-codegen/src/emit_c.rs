@@ -3845,6 +3845,18 @@ mod tests {
     /// Перечень «какая операция у какого типа бывает» берётся у
     /// [`PrimOp::over`], то есть у той же записи, по которой элаборация решает,
     /// существует ли имя. Разъехаться им негде.
+    /// Разворот макроса: имя макроса и тип, которому он развёрнут.
+    ///
+    /// Отдельной функцией, а не цепочкой `&& let` внутри условия: цепочка
+    /// принимается clippy, но отвергается MSRV 1.85 - `let` в этой позиции там
+    /// ещё нестабилен, и проверяется это прогоном, а не грепом.
+    fn expansion(line: &str) -> Option<(String, String)> {
+        let rest = line.strip_prefix("ADAMAS_FLAT_")?;
+        let (name, arguments) = rest.split_once('(')?;
+        let ty = arguments.split(',').next()?;
+        Some((name.to_owned(), ty.trim().to_owned()))
+    }
+
     #[test]
     fn every_type_has_a_helper_for_every_operation_it_has() {
         // Макрос -> что он определяет; макрос -> для каких типов развёрнут.
@@ -3856,12 +3868,8 @@ mod tests {
             if let Some(rest) = line.strip_prefix("#define ADAMAS_FLAT_") {
                 current = rest.split('(').next().unwrap_or_default().to_owned();
                 inside = true;
-            } else if !inside
-                && let Some(rest) = line.strip_prefix("ADAMAS_FLAT_")
-                && let Some((name, arguments)) = rest.split_once('(')
-                && let Some(ty) = arguments.split(',').next()
-            {
-                expands.push((name.to_owned(), ty.trim().to_owned()));
+            } else if !inside {
+                expands.extend(expansion(line));
             }
             if inside {
                 for piece in line.split("adamas_").skip(1) {

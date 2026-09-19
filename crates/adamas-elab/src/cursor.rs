@@ -724,3 +724,64 @@ impl Search<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Bound, at, resolved, shown};
+
+    /// Курсор на первом вхождении подстроки.
+    fn found(source: &str, needle: &str) -> super::Cursor {
+        let module = adamas_parser::parse(source).expect("фикстура разбирается");
+        let offset = source.find(needle).expect("подстрока в фикстуре есть");
+        at(source, &module, offset).expect("под курсором имя")
+    }
+
+    const NAT: &str = "data Nat where\n  Zero : Nat\n  Succ : Nat -> Nat\n";
+
+    /// §4.1: заглавное имя в паттерне разбирает, строчное связывает. Правило
+    /// лексическое, и берётся оно у той же функции, что и у элаборации.
+    #[test]
+    fn case_distinguishes_a_pattern_binding_from_a_constructor() {
+        let source = format!("{NAT}\nf : Nat -> Nat\nf (Succ n) = n\n");
+        assert_eq!(found(&source, "Succ n)").bound, Bound::Free, "конструктор");
+        assert_eq!(found(&source, "n) = n").bound, Bound::Local, "связывание");
+    }
+
+    /// Член модуля, названный коротким именем изнутри, разрешается в то же
+    /// имя, под которым его знает сигнатура (§4.8).
+    #[test]
+    fn a_member_resolves_through_its_module() {
+        let source = format!(
+            "{NAT}\nmodule M where\n  один : Nat\n  один = Succ Zero\n\n  два : Nat\n  два = Succ один\n"
+        );
+        let cursor = found(&source, "один\n");
+        assert_eq!(cursor.within.len(), 1, "курсор внутри модуля");
+        let signature = crate::analyze(&source)
+            .signature
+            .expect("программа принята");
+        assert_eq!(
+            resolved(&signature, &cursor).as_deref(),
+            Some("M.один"),
+            "короткое имя изнутри модуля - это `M.один`"
+        );
+        assert_eq!(shown(&signature, &cursor).as_deref(), Some("M.один : Nat"));
+    }
+
+    /// Резумпция связана формой хендлера, а не текстом (§3.4): имени `resume`
+    /// в ветке не написано, но связано оно.
+    #[test]
+    fn a_handler_branch_binds_its_resumption() {
+        let source = format!(
+            "{NAT}\neffect Ask where\n  ask : Nat\n\n\
+             спросить : Nat\nспросить = handle ask with\n  ask -> resume Zero\n"
+        );
+        assert_eq!(found(&source, "resume Zero").bound, Bound::Local);
+    }
+
+    /// Поле типа записи видно следующим полям, но не наружу (§4.2).
+    #[test]
+    fn a_record_field_scopes_over_the_later_fields() {
+        let source = "type Пара = { первое : Type, второе : первое }\n";
+        assert_eq!(found(source, "первое }").bound, Bound::Local);
+    }
+}

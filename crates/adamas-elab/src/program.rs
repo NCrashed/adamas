@@ -189,9 +189,16 @@ impl Program {
 
     /// Текст диагностики для терминала - вместе с исходником того файла, к
     /// которому она относится.
+    ///
+    /// Диагностика чужой программы даёт текст без исходника: указывать спаном в
+    /// чужой файл значило бы подчеркнуть случайную строку, а падать на этом -
+    /// ронять компилятор ради печати.
     #[must_use]
     pub fn rendered(&self, located: &Located) -> String {
-        located.diagnostic.rendered(&self.units[located.unit].file)
+        self.units.get(located.unit).map_or_else(
+            || located.diagnostic.message(),
+            |unit| located.diagnostic.rendered(&unit.file),
+        )
     }
 }
 

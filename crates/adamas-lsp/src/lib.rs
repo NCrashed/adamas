@@ -60,10 +60,13 @@ const SOURCE: &str = "adamas";
 /// Обрыв канала, неразбираемые параметры `initialize`, отказ потоков ввода.
 pub fn run() -> anyhow::Result<()> {
     let (connection, threads) = Connection::stdio();
-    let encoding = handshake(&connection)?;
-    serve(&connection, encoding)?;
+    let served = handshake(&connection).and_then(|encoding| serve(&connection, encoding));
+    // Соединение закрывается **до** ожидания потоков: поток записи живёт,
+    // пока жив отправитель, и `join` при живом соединении не вернётся никогда.
+    // Измерено: девять прогонов протокола висли на `wait` ровно здесь.
+    drop(connection);
     threads.join()?;
-    Ok(())
+    served
 }
 
 /// Рукопожатие: читает `initialize`, договаривается о кодировке, отвечает

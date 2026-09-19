@@ -369,6 +369,205 @@ fn closing_clears_the_diagnostics() {
     client.stop();
 }
 
+/// Токены ответа в читаемом виде: `строка:знак+длина вид`.
+///
+/// Ответ - плоский список пятёрок с **дельтами**, и разворачивается он здесь
+/// вручную: тем же кодом, каким собирается, проверять нечего.
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение, и падать он должен громко"
+)]
+fn unpack(legend: &Value, answer: &Value) -> Vec<String> {
+    let data = answer["data"].as_array().expect("список пятёрок");
+    assert_eq!(data.len() % 5, 0, "пятёрки не сошлись: {}", data.len());
+    let names = legend["tokenTypes"].as_array().expect("легенда");
+    let (mut line, mut start) = (0u64, 0u64);
+    let mut out = Vec::new();
+    for chunk in data.chunks_exact(5) {
+        let numbers: Vec<u64> = chunk.iter().map(|it| it.as_u64().unwrap()).collect();
+        line += numbers[0];
+        start = if numbers[0] == 0 {
+            start + numbers[1]
+        } else {
+            numbers[1]
+        };
+        let face = names[usize::try_from(numbers[3]).unwrap()]
+            .as_str()
+            .unwrap();
+        out.push(format!("{line}:{start}+{} {face}", numbers[2]));
+    }
+    out
+}
+
+/// Сервер объявляет подсветку и называет свою легенду.
+#[test]
+fn initialize_announces_the_legend() {
+    let (client, result) = Client::start(None);
+    let provider = &result["capabilities"]["semanticTokensProvider"];
+    assert_eq!(provider["full"], json!(true), "{provider}");
+    assert_eq!(provider["range"], json!(false));
+    let types = provider["legend"]["tokenTypes"]
+        .as_array()
+        .expect("легенда - список");
+    for face in ["keyword", "comment", "type", "enumMember", "function"] {
+        assert!(types.contains(&json!(face)), "{face} нет в {types:?}");
+    }
+    assert_eq!(
+        provider["legend"]["tokenModifiers"],
+        json!(["declaration"]),
+        "признак объявления - бит 0"
+    );
+    client.stop();
+}
+
+/// Подсветка приходит от разбора, и разные конструкции получают разные виды.
+///
+/// Числа записаны руками. Дельты считаются **разностями** колонок, поэтому
+/// многобайтовый текст между двумя токенами одной строки их и различает:
+/// `{- 😀 -}` занимает 8 единиц UTF-16 при 10 байтах, и `Succ` за ним стоит на
+/// 18-й единице при 26-м байте.
+#[test]
+fn semantic_tokens_come_from_the_parse() {
+    let (mut client, result) = Client::start(None);
+    let legend = result["capabilities"]["semanticTokensProvider"]["legend"].clone();
+    client.open(URI, &fixture(FIXTURE));
+    let answer = client.request(
+        "textDocument/semanticTokens/full",
+        &json!({ "textDocument": { "uri": URI } }),
+    );
+    let tokens = unpack(&legend, &answer);
+    assert_eq!(
+        tokens[tokens.len() - 6..],
+        [
+            format!("{LINE}:0+6 function"),
+            format!("{LINE}:7+1 operator"),
+            format!("{LINE}:9+8 comment"),
+            format!("{LINE}:18+4 enumMember"),
+            format!("{LINE}:23+4 enumMember"),
+            format!("{LINE}:28+4 enumMember"),
+        ],
+        "последняя строка фикстуры"
+    );
+    // Различение, а не наличие: ответ из одних `variable` был бы ответом.
+    let faces: std::collections::BTreeSet<&str> = tokens
+        .iter()
+        .map(|it| it.rsplit(' ').next().unwrap_or_default())
+        .collect();
+    assert!(
+        faces.len() >= 5,
+        "видов в ответе слишком мало: {faces:?} - подсветка одного цвета не подсветка"
+    );
+    client.stop();
+}
+
+/// Та же подсветка в байтах, когда клиент попросил UTF-8: колонка и длина
+/// меряются одной единицей, и обе уезжают вместе.
+#[test]
+fn utf8_moves_the_token_columns() {
+    let (mut client, result) = Client::start(Some(&["utf-8"]));
+    let legend = result["capabilities"]["semanticTokensProvider"]["legend"].clone();
+    client.open(URI, &fixture(FIXTURE));
+    let answer = client.request(
+        "textDocument/semanticTokens/full",
+        &json!({ "textDocument": { "uri": URI } }),
+    );
+    let tokens = unpack(&legend, &answer);
+    assert_eq!(
+        tokens[tokens.len() - 6..],
+        [
+            format!("{LINE}:0+12 function"),
+            format!("{LINE}:13+1 operator"),
+            format!("{LINE}:15+10 comment"),
+            format!("{LINE}:26+4 enumMember"),
+            format!("{LINE}:31+4 enumMember"),
+            format!("{LINE}:36+4 enumMember"),
+        ]
+    );
+    client.stop();
+}
+
+/// Правка перекрашивает: сломанный текст отдаёт только слой лексики, и имена
+/// возвращаются, когда текст снова разбирается.
+///
+/// Это же свидетель того, что сервер не отдаёт дерево прошлой правки: он его
+/// хранит, чтобы не проверять файл дважды.
+#[test]
+fn a_change_repaints_the_buffer() {
+    let (mut client, result) = Client::start(None);
+    let legend = result["capabilities"]["semanticTokensProvider"]["legend"].clone();
+    let whole = "data Nat where\n  Zero : Nat\n\nnil : Nat\nnil = Zero\n";
+    let broken = "data Nat where\n  Zero : Nat\n\nnil : Nat\nnil = (Zero\n";
+
+    client.open(URI, whole);
+    let painted = unpack(
+        &legend,
+        &client.request(
+            "textDocument/semanticTokens/full",
+            &json!({ "textDocument": { "uri": URI } }),
+        ),
+    );
+    assert_eq!(
+        painted[painted.len() - 3..],
+        ["4:0+3 function", "4:4+1 operator", "4:6+4 enumMember"]
+    );
+
+    client.change(URI, 2, broken);
+    let bare = unpack(
+        &legend,
+        &client.request(
+            "textDocument/semanticTokens/full",
+            &json!({ "textDocument": { "uri": URI } }),
+        ),
+    );
+    assert_eq!(
+        bare,
+        [
+            "0:0+4 keyword",
+            "0:9+5 keyword",
+            "1:7+1 operator",
+            "3:4+1 operator",
+            "4:4+1 operator"
+        ],
+        "разбора нет - имён нет, а ключевые слова и знаки на месте"
+    );
+
+    client.change(URI, 3, whole);
+    let again = unpack(
+        &legend,
+        &client.request(
+            "textDocument/semanticTokens/full",
+            &json!({ "textDocument": { "uri": URI } }),
+        ),
+    );
+    assert_eq!(again, painted, "починенный текст красится как прежде");
+    client.stop();
+}
+
+/// Подсветка буфера, о котором сервер не знает, пуста, а не отказ.
+#[test]
+fn tokens_of_an_unknown_buffer_are_empty() {
+    let (mut client, _) = Client::start(None);
+    let answer = client.request(
+        "textDocument/semanticTokens/full",
+        &json!({ "textDocument": { "uri": "file:///corpus/never-opened.adamas" } }),
+    );
+    assert_eq!(answer["data"], json!([]));
+    client.stop();
+}
+
+/// Кривой URI - отказ с `InvalidParams`, а не молчание и не паника.
+#[test]
+fn a_malformed_request_is_refused() {
+    let (mut client, _) = Client::start(None);
+    let answer = client.raw_request(
+        "textDocument/semanticTokens/full",
+        &json!({ "textDocument": { "uri": "не URI" } }),
+    );
+    assert_eq!(answer["error"]["code"], json!(-32602), "{answer}");
+    client.stop();
+}
+
 /// Непонятый запрос получает отказ, а не молчание: молчание вешает клиента,
 /// а объявлено сервером пока только то, что он умеет.
 #[test]

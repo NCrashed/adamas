@@ -44,6 +44,7 @@
 mod carrier;
 pub mod class;
 mod decl;
+mod diag;
 mod error;
 mod expr;
 pub mod fixity;
@@ -57,6 +58,7 @@ mod route;
 mod warn;
 
 pub use decl::{elaborate, elaborate_into};
+pub use diag::{Analysis, Diagnostic, Related, Severity, analyze};
 pub use error::{ElabError, Missing, Names};
 pub use expr::is_reference;
 pub use own::{Owned, Ownership};

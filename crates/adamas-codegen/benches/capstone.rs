@@ -347,7 +347,8 @@ fn window_symbol(tools: &Toolchain, binary: &Path) -> String {
     for line in text.lines() {
         if let Some(rest) = line.strip_suffix(">:") {
             if let Some(open) = rest.rfind('<') {
-                symbol = rest[open + 1..].to_owned();
+                symbol.clear();
+                symbol.push_str(&rest[open + 1..]);
             }
             continue;
         }
@@ -463,9 +464,12 @@ fn stand(backend: Option<&Backend>) -> Stand {
     }
 }
 
-fn capstone(criterion: &mut Criterion) {
-    let backend = Backend::new(STAND);
-    let it = stand(backend.as_ref());
+/// Абсолютные времена точек: то, что печатает отчёт criterion.
+///
+/// Врозь от [`capstone`] потому, что жанр другой: здесь выборка criterion, а
+/// ниже — чередование [`ratio`], которое отчёта не читает вовсе. Числа таблицы
+/// берутся оттуда, а не отсюда.
+fn timings(criterion: &mut Criterion, it: &Stand) {
     let mut group = criterion.benchmark_group("capstone");
     group.sample_size(10);
     group.sampling_mode(SamplingMode::Flat);
@@ -491,6 +495,12 @@ fn capstone(criterion: &mut Criterion) {
         });
     }
     group.finish();
+}
+
+fn capstone(criterion: &mut Criterion) {
+    let backend = Backend::new(STAND);
+    let it = stand(backend.as_ref());
+    timings(criterion, &it);
 
     // Строка милестоуна: капстоун целиком, обоими бэкендами.
     ratio(

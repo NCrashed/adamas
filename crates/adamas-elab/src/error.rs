@@ -647,6 +647,42 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Импортированного модуля нет там, где его ищут (§4.8).
+    #[error("модуль `{path}` не найден: искали `{file}`")]
+    UnknownModule {
+        /// Написанный путь.
+        path: Symbol,
+        /// Где его искали - путь к файлу либо «программа из одного файла».
+        file: String,
+        /// Где написан импорт.
+        span: Span,
+    },
+
+    /// Импорты замкнулись в кольцо (§4.8, §10 вопрос 178).
+    ///
+    /// Порядок между файлами - тот же ordered scoping, что внутри файла:
+    /// импортированное объявляется целиком **до** того, что написано ниже
+    /// импорта. Кольцо такого порядка не имеет, и объявить его нечем:
+    /// взаимная видимость выражается `mutual`-блоком, а он живёт внутри файла.
+    #[error("цикл импортов: {through}")]
+    ImportCycle {
+        /// Кольцо путей в порядке подключения, через стрелку.
+        through: String,
+        /// Где написан импорт, замкнувший кольцо.
+        span: Span,
+    },
+
+    /// Открытое имя, которого импортированный модуль не объявляет (§4.8).
+    #[error("модуль `{module}` не объявляет `{name}`")]
+    NotExported {
+        /// Путь модуля.
+        module: Symbol,
+        /// Имя из списка открытых.
+        name: Symbol,
+        /// Где написано.
+        span: Span,
+    },
+
     /// Разбираемое, тип которого не синтезируется.
     #[error("тип разбираемого не выводится: укажите его")]
     NotMatchable {
@@ -1415,6 +1451,9 @@ impl ElabError {
             | Self::Attribute { span, .. }
             | Self::NotTotal { span, .. }
             | Self::ModuleMember { span, .. }
+            | Self::UnknownModule { span, .. }
+            | Self::ImportCycle { span, .. }
+            | Self::NotExported { span, .. }
             | Self::NotUpdatable { span }
             | Self::NoImplicitParameter { span }
             | Self::BlockWithoutValue { span }

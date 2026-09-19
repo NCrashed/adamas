@@ -223,6 +223,21 @@ impl Printer {
             }
             DeclKind::Data(data) => self.data(data),
             DeclKind::Module(module) => self.module_decl(module),
+            DeclKind::Import(import) => {
+                self.push("import ");
+                self.push(&import.written());
+                if let Some(alias) = &import.alias {
+                    self.push(" as ");
+                    self.push(&alias.text);
+                }
+                for (index, name) in import.open.iter().enumerate() {
+                    self.push(if index == 0 { " (" } else { ", " });
+                    self.decl_name(name);
+                }
+                if !import.open.is_empty() {
+                    self.push(")");
+                }
+            }
             DeclKind::Mutual(members) => {
                 self.push("mutual");
                 self.block_of(members, Self::decl);

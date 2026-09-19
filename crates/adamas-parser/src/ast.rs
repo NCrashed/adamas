@@ -515,6 +515,8 @@ pub enum DeclKind {
     Data(Data),
     /// Модуль или его сигнатура: `module M where …` (§4.8).
     Module(ModuleDecl),
+    /// Импорт другого файла: `import Data.Map as Map` (§4.8, §4.4).
+    Import(ImportDecl),
     /// Класс или инстанс: `class Ord a where …` (§4.1, §3.5).
     Class(ClassDecl),
     /// Группа взаимной рекурсии: `mutual` и блок объявлений (§4.8).
@@ -566,6 +568,61 @@ pub struct ClassDecl {
     pub superclasses: Vec<Expr>,
     /// Члены: сигнатуры методов у класса, клаузы у инстанса.
     pub members: Vec<Decl>,
+}
+
+/// Импорт: чужой файл, подключённый к этому (§4.8, §4.4).
+///
+/// Путь хранится сегментами, а не строкой: точку лексер в именах не порождает,
+/// и `Data.Map` приезжает сюда двумя именами со своими спанами - иначе
+/// диагностика указывала бы на путь целиком там, где виноват один сегмент.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportDecl {
+    /// Сегменты пути в порядке написания: `Data.Map` - `Data` и `Map`.
+    pub path: Vec<Name>,
+    /// `as Map` - под каким префиксом пишется квалифицированный доступ.
+    /// `None` - префикс есть сам путь: `Data.Map.insert`.
+    pub alias: Option<Name>,
+    /// Явный список открытых имён: `import Concurrent (spawn, await)`.
+    ///
+    /// Пуст - список не написан, и доступ только квалифицированный.
+    /// Wildcard'а (`import M (..)`) нет намеренно (§4.4), и отвергает его
+    /// разбор: пустым списком он здесь не притворяется.
+    pub open: Vec<Name>,
+}
+
+impl ImportDecl {
+    /// Путь одной строкой - тем написанием, под которым модуль объявлен.
+    #[must_use]
+    pub fn written(&self) -> String {
+        let mut out = String::new();
+        for (at, segment) in self.path.iter().enumerate() {
+            if at > 0 {
+                out.push('.');
+            }
+            out.push_str(&segment.text);
+        }
+        out
+    }
+
+    /// Префикс, которым пишется квалифицированный доступ: `as`-имя или путь.
+    #[must_use]
+    pub fn prefix(&self) -> String {
+        self.alias
+            .as_ref()
+            .map_or_else(|| self.written(), |it| it.text.to_string())
+    }
+
+    /// Весь импорт целиком - от `import` до последнего открытого имени.
+    #[must_use]
+    pub fn span(&self, keyword: Span) -> Span {
+        let end = self
+            .open
+            .last()
+            .or(self.alias.as_ref())
+            .or_else(|| self.path.last())
+            .map_or(keyword, |it| it.span);
+        keyword.merge(end)
+    }
 }
 
 /// Модуль или сигнатура модуля.
@@ -1102,20 +1159,39 @@ fn dump_decl(out: &mut String, decl: &Decl, depth: usize) {
             }
             out.push(')');
         }
-        DeclKind::Resource(resource) => {
-            out.push_str("(resource ");
-            out.push_str(&resource.name.text);
-            for param in &resource.params {
-                out.push(' ');
-                dump_binder(out, param);
-            }
-            for member in &resource.members {
-                line(out, depth + 1);
-                dump_decl(out, member, depth + 1);
-            }
-            out.push(')');
-        }
+        DeclKind::Resource(resource) => dump_resource(out, resource, depth),
+        DeclKind::Import(import) => dump_import(out, import),
     }
+}
+
+/// Печатает ресурсный тип: имя, параметры и члены.
+fn dump_resource(out: &mut String, resource: &Resource, depth: usize) {
+    out.push_str("(resource ");
+    out.push_str(&resource.name.text);
+    for param in &resource.params {
+        out.push(' ');
+        dump_binder(out, param);
+    }
+    for member in &resource.members {
+        line(out, depth + 1);
+        dump_decl(out, member, depth + 1);
+    }
+    out.push(')');
+}
+
+/// Печатает импорт: путь, префикс и открытые имена.
+fn dump_import(out: &mut String, import: &ImportDecl) {
+    out.push_str("(import ");
+    out.push_str(&import.written());
+    if let Some(alias) = &import.alias {
+        out.push_str(" as ");
+        out.push_str(&alias.text);
+    }
+    for name in &import.open {
+        out.push(' ');
+        out.push_str(&name.text);
+    }
+    out.push(')');
 }
 
 /// Печатает элементы через пробел.

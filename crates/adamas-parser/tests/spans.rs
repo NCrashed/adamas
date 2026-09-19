@@ -112,6 +112,17 @@ impl Spans<'_> {
                     self.name(at, operator);
                 }
             }
+            DeclKind::Import(import) => {
+                for segment in &import.path {
+                    self.name(at, segment);
+                }
+                if let Some(alias) = &import.alias {
+                    self.name(at, alias);
+                }
+                for opened in &import.open {
+                    self.name(at, opened);
+                }
+            }
         }
     }
 

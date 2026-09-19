@@ -60,9 +60,10 @@ use adamas_core::source::Span;
 
 use crate::ast::{
     Alt, Assoc, Binder, Binding, Block, Chain, ClassDecl, Clause, Constructor, Data, Decl,
-    DeclKind, EffectDecl, EffectLabel, Expr, ExprKind, FixityDecl, Grade, HandlerBranch, LamParam,
-    LamParamKind, Lit, LitKind, Module, ModuleDecl, Mult, MultAnn, Name, Operation, Pattern,
-    PatternKind, RecordField, Resource, Stmt, StmtKind, Symbol, Visibility, contains_block,
+    DeclKind, EffectDecl, EffectLabel, Expr, ExprKind, FixityDecl, Grade, HandlerBranch,
+    ImportDecl, LamParam, LamParamKind, Lit, LitKind, Module, ModuleDecl, Mult, MultAnn, Name,
+    Operation, Pattern, PatternKind, RecordField, Resource, Stmt, StmtKind, Symbol, Visibility,
+    contains_block,
 };
 use crate::token::{Token, TokenKind};
 
@@ -108,8 +109,6 @@ pub enum Unsupported {
     NamedInstance,
     /// `module`.
     Module,
-    /// `import`.
-    Import,
     /// `mutual`.
     Mutual,
     /// `effect`.
@@ -148,7 +147,6 @@ impl Unsupported {
             Self::Instance => form("инстансы (§4.1)", "Фазе 3"),
             Self::NamedInstance => form("именованные инстансы (§4.1)", "Фазе 3"),
             Self::Module => form("модули (§4.8)", "Фазе 3"),
-            Self::Import => form("импорты (§4.8)", "Фазе 3"),
             Self::Mutual => form("блоки `mutual` (§4.8)", "Фазе 3"),
             Self::Effect => form("объявления эффектов (§3.4)", "Фазе 4"),
             Self::Handler => form("handler'ы (§3.4)", "Фазе 4"),
@@ -287,6 +285,29 @@ pub enum ParseError {
         next: Span,
     },
 
+    /// `import Module (..)` - wildcard, которого в языке нет.
+    ///
+    /// §4.4 отказывает ему не по недосмотру: все имена в scope пишутся явно,
+    /// иначе навигация по коду требует знания всей библиотеки. Отказ поэтому
+    /// стоит здесь названной формой, а не общим «ожидается имя»: без него
+    /// решение §4.4 держалось бы на том, что `(..)` никто не написал.
+    #[error("wildcard-импорта нет (§4.4): открытые имена перечисляются по одному")]
+    Wildcard {
+        /// Где написан.
+        span: Span,
+    },
+
+    /// `import` написан не на верхнем уровне файла.
+    ///
+    /// Импорт подключает файл к файлу, а не член к модулю: подключённое видно
+    /// всему, что написано ниже, и вложить его внутрь `module` или `where`
+    /// значило бы спросить, что это подключение означает для объемлющего.
+    #[error("`import` пишется на верхнем уровне файла (§4.8)")]
+    NestedImport {
+        /// Где написан.
+        span: Span,
+    },
+
     /// Вложенность глубже предела.
     ///
     /// Меряется дважды и с разных сторон. Спуск рекурсивен, поэтому глубина
@@ -319,6 +340,8 @@ impl ParseError {
             | Self::PatternPath { span, .. }
             | Self::SplitClauses { again: span, .. }
             | Self::Unsupported { span, .. }
+            | Self::Wildcard { span }
+            | Self::NestedImport { span }
             | Self::BlockNotLast { next: span, .. }
             | Self::TooDeep { span, .. } => *span,
         }
@@ -506,7 +529,6 @@ impl<'a> Parser<'a> {
         let what = match token.kind {
             TokenKind::When => Unsupported::Class,
             TokenKind::Using => Unsupported::NamedInstance,
-            TokenKind::Import => Unsupported::Import,
             TokenKind::LBrace => Unsupported::Braces,
             _ => return None,
         };
@@ -531,7 +553,7 @@ impl<'a> Parser<'a> {
 
     fn module(&mut self) -> Result<Module, ParseError> {
         let open = self.expect(TokenKind::Open)?;
-        let decls = self.members(TokenKind::Close, Self::decl)?;
+        let decls = self.members(TokenKind::Close, Self::top_decl)?;
         self.expect(TokenKind::Close)?;
         self.expect(TokenKind::Eof)?;
         // По объявлениям, а не по границам блока файла: `Close` стоит на
@@ -581,6 +603,80 @@ impl<'a> Parser<'a> {
         self.nested(Self::decl_inner)
     }
 
+    /// Объявление верхнего уровня файла: то же, что [`Self::decl`], плюс
+    /// `import`.
+    ///
+    /// Отдельная точка входа, а не флаг в состоянии: блок `where`, тело модуля
+    /// и `mutual` разбираются той же [`Self::decl`], и разрешить импорт в
+    /// одном из них значило бы разрешить во всех.
+    fn top_decl(&mut self) -> Result<Decl, ParseError> {
+        if self.at(TokenKind::Import) {
+            return self.nested(Self::import_decl);
+        }
+        self.decl()
+    }
+
+    /// `import Data.Map as Map` и `import Concurrent (spawn, await)` (§4.8).
+    fn import_decl(&mut self) -> Result<Decl, ParseError> {
+        let keyword = self.expect(TokenKind::Import)?;
+        let mut path = vec![self.ident()?];
+        // Точка в пути - обычный операторный знак, примыкающий с обеих сторон:
+        // тот же разбор, что у проекции, и по той же причине (§4.8 - точку
+        // лексер в именах не порождает).
+        while self.peek().span.start() == path[path.len() - 1].span.end() {
+            let Some(segment) = self.projected() else {
+                break;
+            };
+            path.push(segment);
+        }
+        let alias = self.imported_as()?;
+        let open = self.opened()?;
+        let import = ImportDecl { path, alias, open };
+        let span = import.span(keyword.span);
+        Ok(Decl {
+            kind: DeclKind::Import(import),
+            span,
+        })
+    }
+
+    /// `as Map`, если написано.
+    ///
+    /// `as` - не ключевое слово: имя `as` законно везде, где законно всякое
+    /// другое, и занимать его ради одной формы значило бы отвергнуть его во
+    /// всех прочих. Отличает его позиция - сразу за путём импорта, до границы
+    /// объявления, которую ставит layout.
+    fn imported_as(&mut self) -> Result<Option<Name>, ParseError> {
+        let token = self.peek();
+        if token.kind != TokenKind::Ident || token.text(self.text) != "as" {
+            return Ok(None);
+        }
+        self.bump();
+        self.ident().map(Some)
+    }
+
+    /// Список открытых имён `(Nursery, spawn, (<>))`, если написан.
+    fn opened(&mut self) -> Result<Vec<Name>, ParseError> {
+        if self.eat(TokenKind::LParen).is_none() {
+            return Ok(Vec::new());
+        }
+        let mut open = Vec::new();
+        loop {
+            // `(..)` - wildcard. Отвергается здесь и названной причиной: до
+            // этой строки он разбирался бы как «ожидается имя», то есть как
+            // опечатка, тогда как §4.4 отказывает ему решением.
+            let token = self.peek();
+            if token.kind == TokenKind::Operator && token.text(self.text) == ".." {
+                return Err(ParseError::Wildcard { span: token.span });
+            }
+            open.push(self.decl_name()?);
+            if self.eat(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        Ok(open)
+    }
+
     fn decl_inner(&mut self) -> Result<Decl, ParseError> {
         match self.kind() {
             TokenKind::Data => self.data(false),
@@ -598,6 +694,11 @@ impl<'a> Parser<'a> {
             // своей формы объявления не заводит: он помечает уже имеющуюся.
             TokenKind::Coherent => self.coherent_class(),
             TokenKind::Mutual => self.mutual(),
+            // Форма есть, но не здесь: [`Self::top_decl`] разбирает её на
+            // верхнем уровне файла, а сюда доходит только вложенная.
+            TokenKind::Import => Err(ParseError::NestedImport {
+                span: self.peek().span,
+            }),
             TokenKind::At => self.attributed(),
             TokenKind::Ident | TokenKind::LParen => self.signature_or_clause(Vec::new()),
             _ => Err(self

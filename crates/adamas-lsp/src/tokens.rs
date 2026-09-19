@@ -562,7 +562,10 @@ impl<'a> Names<'a> {
                         self.declare(&operation.name, Face::Function);
                     }
                 }
-                DeclKind::Fixity(_) => {}
+                // Открытое имя объявлено не здесь, а в подключённом файле;
+                // подсветка одного буфера туда не ходит, и покрасить его
+                // объявлением значило бы соврать про место.
+                DeclKind::Fixity(_) | DeclKind::Import(_) => {}
             }
         }
     }
@@ -643,6 +646,19 @@ impl<'a> Names<'a> {
             DeclKind::Fixity(fixity) => {
                 for operator in &fixity.operators {
                     self.mark(operator.span, Face::Operator, DECLARATION);
+                }
+            }
+            // Путь - пространство имён, открытое имя - ссылка на чужой член:
+            // объявления здесь нет ни одного.
+            DeclKind::Import(import) => {
+                for segment in &import.path {
+                    self.mark(segment.span, Face::Namespace, 0);
+                }
+                if let Some(alias) = &import.alias {
+                    self.mark(alias.span, Face::Namespace, DECLARATION);
+                }
+                for opened in &import.open {
+                    self.mark(opened.span, Face::Function, 0);
                 }
             }
         }

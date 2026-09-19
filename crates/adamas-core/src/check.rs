@@ -215,7 +215,12 @@ fn declared(signature: &Signature, name: &str) -> Term {
 }
 
 /// Тип примитива термом: то же, что [`prim_type`], до вычисления.
-fn prim_scheme(signature: &Signature, prim: Prim) -> Term {
+///
+/// Публична ради hover'а (§7.2): показать тип имени, занятого языком, нужно
+/// **термом** - его печатает тот же принтер, которым типы показывают сообщения
+/// об отказе. Обратное чтение значения дало бы вторую запись того же типа.
+#[must_use]
+pub fn prim_scheme(signature: &Signature, prim: Prim) -> Term {
     let word = Term::Prim(Prim::Ty(crate::prim::PrimTy::UInt64));
     let universe = Term::universe(0);
     match prim {

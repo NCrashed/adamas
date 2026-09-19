@@ -69,6 +69,21 @@ async function run() {
 
   report("", document, await settle(uri, (found) => found.length > 0));
 
+  // Ненаписанный на диск буфер: схема `untitled`, файла нет вовсе. Сервер
+  // путей не знает, текст получает уведомлением - значит, диагностика обязана
+  // прийти и сюда. Текст тот же, поэтому и позиции те же.
+  const fresh = await vscode.workspace.openTextDocument({
+    language: "adamas",
+    content: document.getText(),
+  });
+  await vscode.window.showTextDocument(fresh);
+  say("UNTITLED_SCHEME", fresh.uri.scheme);
+  report(
+    "UNTITLED_",
+    fresh,
+    await settle(fresh.uri, (found) => found.length > 0),
+  );
+
   // Круг «правка -> диагностика». Правка идёт через API редактора, то есть тем
   // же путём, что правка руками: `didChange` уходит серверу, ответ гасит
   // подчёркивание.

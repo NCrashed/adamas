@@ -398,6 +398,13 @@ fn vscode_underlines_the_offending_expression() {
     // 0 - `DiagnosticSeverity.Error` в нумерации VS Code (в LSP это 1).
     check(&said.all("DIAG")[0], UTF16, 0);
 
+    // Буфер без файла на диске. Схема `untitled` объявлена в
+    // `documentSelector` расширения, и объявление без свидетеля ничего не
+    // стоит: сервер путей не знает, и проверить это дёшево.
+    assert_eq!(said.get("UNTITLED_SCHEME"), "untitled");
+    assert_eq!(said.get("UNTITLED_COUNT"), "1", "{}", said.dump());
+    check(&said.all("UNTITLED_DIAG")[0], UTF16, 0);
+
     assert_eq!(said.get("EDITED"), "true", "правка не применилась");
     assert_eq!(
         said.get("AFTER_COUNT"),

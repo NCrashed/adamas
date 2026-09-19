@@ -61,7 +61,11 @@ mod warn;
 pub use decl::{elaborate, elaborate_into, elaborated};
 pub use diag::{Analysis, Diagnostic, Related, Severity, analyze};
 pub use error::{ElabError, Missing, Names};
-pub use expr::is_reference;
+// Имена, которые связывает или занимает сама форма языка. Наружу они выведены
+// ради подсветки (`adamas-lsp/src/tokens.rs`): она обязана знать, что `resume`
+// в ветке хендлера - связывание, а `Mult` - тип, и вторая запись этих имён
+// разъехалась бы с первой молча.
+pub use expr::{GRADE, RESUME, STATE, UNIT, is_reference};
 pub use own::{Owned, Ownership};
 pub use render::{located, report};
 pub use warn::{Warning, Warnings};

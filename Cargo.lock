@@ -69,6 +69,7 @@ version = "0.0.0"
 dependencies = [
  "adamas-core",
  "adamas-elab",
+ "adamas-parser",
  "anyhow",
  "lsp-server",
  "lsp-types",

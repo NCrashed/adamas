@@ -37,12 +37,19 @@ jobs:
         include:
           - os: ubuntu-latest
             llvm: "18"
+            editors: "yes"
           # LLVM в образе macOS не гарантирован, и договор третьего вычислителя
           # там объявлен непроверяемым — единственное место, где это объявлено.
           # Молчаливый пропуск был бы обманчивым свидетелем: тест без
           # инструментов падает, а не зеленеет.
+          #
+          # Редакторы объявлены отсутствующими там же, и это не «они работают
+          # и так»: на macOS плагины не проверяются вовсе. Цена второй ноги —
+          # Electron и Neovim на каждый прогон; находка неизвестна. Объявлено,
+          # чтобы молчания не было, и названо в плане волны.
           - os: macos-14
             llvm: ""
+            editors: ""
     env:
       ADAMAS_LLVM: ${{ matrix.llvm == '' && 'absent' || '' }}
       ADAMAS_LLVM_BIN: ${{ matrix.llvm != '' && format('/usr/lib/llvm-{0}/bin', matrix.llvm) || '' }}
@@ -50,6 +57,15 @@ jobs:
       # Рантайм битовым кодом (трек A′): gcc его не выдаёт, а версия обязана
       # совпасть с той, чей `llvm-link` его читает.
       ADAMAS_CLANG: ${{ matrix.llvm != '' && format('/usr/lib/llvm-{0}/bin/clang', matrix.llvm) || '' }}
+      # Редакторы Фазы 9 (трек C). `absent` — то же объявленное отсутствие, что
+      # у LLVM. Пути ubuntu берутся из раскладки пакетов, поставленных ниже:
+      # у VSCodium это Electron `/usr/share/codium/codium` и CLI
+      # `/usr/share/codium/bin/codium` — разные бинари с разными обязанностями,
+      # подмена в любую сторону измерена и не работает.
+      ADAMAS_NVIM: ${{ matrix.editors == '' && 'absent' || 'nvim' }}
+      ADAMAS_VSCODE: ${{ matrix.editors == '' && 'absent' || '/usr/share/codium/codium' }}
+      ADAMAS_VSCODE_CLI: ${{ matrix.editors == '' && 'absent' || '/usr/share/codium/bin/codium' }}
+      ADAMAS_VSCE: ${{ matrix.editors == '' && 'absent' || 'vsce' }}
     steps:
       - uses: actions/checkout@v4
       - run: rustup show active-toolchain || rustup toolchain install
@@ -62,6 +78,32 @@ jobs:
       # пропускает проверку, - поэтому он ставится там же, где инструменты.
       - if: matrix.llvm != ''
         run: sudo apt-get update && sudo apt-get install -y llvm-${{ matrix.llvm }} clang-${{ matrix.llvm }} gdb
+      # Редакторы трека C. Версии прибиты и совпадают с теми, что даёт флейк:
+      # в CI Nix не поднимается (закачка dev-shell дороже всего прогона), и
+      # второй записи версий избежать нечем — как у LLVM, где мажор назван и в
+      # `flake.nix`, и в матрице.
+      #
+      # Neovim архивом, а не `apt`: в образе ubuntu-24.04 он 0.9.x, а
+      # проверяется свидетель на 0.12.4, и разъехаться этим двум нечем, кроме
+      # как молча.
+      - if: matrix.editors != ''
+        name: редакторы для свидетелей трека C
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          curl -fsSL -o /tmp/nvim.tar.gz \
+            https://github.com/neovim/neovim/releases/download/v0.12.4/nvim-linux-x86_64.tar.gz
+          sudo tar -C /opt -xzf /tmp/nvim.tar.gz
+          sudo ln -sf /opt/nvim-linux-x86_64/bin/nvim /usr/local/bin/nvim
+          curl -fsSL -o /tmp/codium.deb \
+            https://github.com/VSCodium/vscodium/releases/download/1.126.04524/codium_1.126.04524_amd64.deb
+          sudo apt-get install -y /tmp/codium.deb
+          npm install -g @vscode/vsce@3.9.2
+          npm ci --prefix editors/vscode
+          nvim --version | head -1
+          test -x /usr/share/codium/codium
+          test -x /usr/share/codium/bin/codium
       - run: cargo test --locked --workspace --all-targets
       # --all-targets не включает doc-tests, поэтому отдельным шагом.
       - run: cargo test --locked --workspace --doc

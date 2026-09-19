@@ -20,6 +20,15 @@ nix develop
 (`crates/adamas-codegen/tests/llvm.rs`). Без Nix обе переменные надо выставить
 руками, иначе инструменты ищутся в `PATH`, а их отсутствие роняет тест.
 
+Плюс **два редактора**, и они там по той же причине, что вторая цепочка LLVM:
+свидетель «файл `.adamas` открывается и подчёркивание стоит на месте» — это
+прогон настоящего редактора headless, а не скриншот. `ADAMAS_NVIM` называет
+`nvim`, `ADAMAS_VSCODE` — Electron VSCodium, `ADAMAS_VSCODE_CLI` — его же
+CLI-обёртку (ставит `.vsix`), `ADAMAS_VSCE` — упаковщик. Зависимости
+расширения ставит `npm ci` в `editors/vscode`; вход в dev-shell делает это
+сам. Инструмента нет — переменной присваивается `absent`, и прогон об этом
+говорит; переменная, не заданная вовсе, роняет тест (`crates/adamas-lsp/tests/editors.rs`).
+
 `nix build` собирает оба бинаря в release и прогоняет тесты в изолированном
 sandbox'е. **CI этот путь не проверяет** — там Nix не участвует вообще, — так
 что прогонять его руками: перед публикацией и всякий раз, когда добавляется
@@ -57,6 +66,8 @@ crates/adamas-core/           ядро: core language, elaborator, type checker
 crates/adamas-cli/            драйвер `adamas`
 crates/adamas-lsp/            LSP-сервер: диагностика поверх stdio
 crates/adamas-warmup-stlc/    учебный STLC+HM Фазы 0; ядро от него не зависит
+editors/nvim/                 плагин Neovim
+editors/vscode/               расширение VS Code
 docs/reading-notes/           конспекты статей
 docs/examples/                примеры кода на Adamas
 docs/warmup-retrospective.md  что вынесено из warm-up'а

@@ -672,6 +672,21 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Отказ случился **внутри** подключённого модуля (§4.8).
+    ///
+    /// Сам отказ отдаётся отдельно - со спаном и текстом того файла, которому
+    /// принадлежит ([`crate::program::Program::diagnostics`]). Этот вариант
+    /// поднимается по стеку подключений вместо него и нужен на случай, когда
+    /// читатель до диагностики не добрался: сказать «модуль не найден» там, где
+    /// он найден и отвергнут, значило бы отправить искать не то.
+    #[error("модуль `{path}` не проходит проверку")]
+    InModule {
+        /// Путь модуля.
+        path: Symbol,
+        /// Где написан импорт.
+        span: Span,
+    },
+
     /// Открытое имя, которого импортированный модуль не объявляет (§4.8).
     #[error("модуль `{module}` не объявляет `{name}`")]
     NotExported {
@@ -1453,6 +1468,7 @@ impl ElabError {
             | Self::ModuleMember { span, .. }
             | Self::UnknownModule { span, .. }
             | Self::ImportCycle { span, .. }
+            | Self::InModule { span, .. }
             | Self::NotExported { span, .. }
             | Self::NotUpdatable { span }
             | Self::NoImplicitParameter { span }

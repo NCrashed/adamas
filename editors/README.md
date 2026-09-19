@@ -25,7 +25,10 @@ set runtimepath+=/путь/к/adamas/editors/nvim
 vim.g.adamas_lsp_cmd = { '/путь/к/adamas-lsp' }
 ```
 
-Минимальная версия - Neovim 0.8 (`vim.lsp.start`). Прогон идёт на 0.12.4.
+Прогон идёт на **0.12.4**, и это единственная проверенная версия. Плагин
+пользуется API, появившимся к 0.8 (`vim.lsp.start`, `vim.filetype.add`,
+`nvim_create_autocmd`), то есть вероятно работает и там, - но замера на
+версиях ниже 0.12.4 нет.
 
 ## VS Code
 

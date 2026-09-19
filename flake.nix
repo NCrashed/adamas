@@ -58,6 +58,32 @@
         # выдаёт. Версия обязана совпасть с `llvmCurrent`: `llvm-link` читает
         # битовый код своего мажора.
         clangCurrent = pkgs.llvmPackages.clang;
+
+        # Редакторы Фазы 9 (§9, волна 1, трек C). В dev-shell их не было вовсе,
+        # и заводятся они тем же порядком, что LLVM Фазы 7: инструмент, которым
+        # проверяется утверждение, приезжает флейком, а не «есть у меня в
+        # системе».
+        #
+        # Обе стороны гоняются **headless**, и обе - целым редактором, а не его
+        # подобием: nvim пишет диагностику в буфер сам, VSCodium поднимает
+        # расширение в настоящем extension host'е. Цена замерена докачкой
+        # поверх прежнего shell'а: neovim с node вместе - 74,8 MiB, vscodium -
+        # 421 MiB (1,3 GiB распакованного), vsce - 28 MiB.
+        #
+        # VSCodium, а не `vscode`: сборка та же самая, API расширений то же
+        # самое, а unfree-лицензии нет - иначе флейк требовал бы
+        # `allowUnfree` от каждого, кто его открывает.
+        editorNvim = pkgs.neovim;
+        editorVscode = pkgs.vscodium;
+
+        # `node` нужен не сборке расширения (её нет: расширение - обычный JS без
+        # шага компиляции), а `npm ci`, которым приезжает `vscode-languageclient`.
+        nodejs = pkgs.nodejs;
+
+        # Упаковка `.vsix`. Из nixpkgs, а не из `devDependencies`: тот же `vsce`
+        # через npm - 239 пакетов и 134 MiB с нативной сборкой keytar, здесь -
+        # 28 MiB готовым замыканием.
+        vsce = pkgs.vsce;
       in
       {
         packages.default = rustPlatform.buildRustPackage {
@@ -84,6 +110,12 @@
             pkgs.cargo-mutants
             llvmCurrent
             debugger
+            editorNvim
+            nodejs
+            vsce
+            # Экранный сервер для VSCodium: Electron без дисплея не поднимается,
+            # а `xvfb-run` даёт его на время одного прогона.
+            pkgs.xvfb-run
           ];
 
           # Каталогами, а не именами: цепочка инструментов обязана быть одной
@@ -94,11 +126,49 @@
           # обёртка clang в nixpkgs кладёт в `bin` ещё и `cc`, а `cc`-крейт
           # берёт компилятор из `PATH`. Попади он туда - рантайм и порождённый C
           # собирались бы clang'ом вместо gcc, молча и во всех замерах разом.
+          #
+          # Редакторы - тоже путями, и по своим причинам.
+          #
+          # У VS Code переменных две, и это не дублирование - это два разных
+          # бинаря с разными обязанностями.
+          #
+          # `ADAMAS_VSCODE` - **Electron**. Он ждёт конца
+          # `--extensionTestsPath` и отдаёт его код возврата. CLI-обёртка
+          # `bin/codium` на том же аргументе возвращается сразу: прогон с ней
+          # зелен за секунду и не проверяет ничего (измерено: `EXIT=0
+          # ELAPSED=1s`, ни строчки вывода сюиты). Обёртка окружения nixpkgs
+          # при этом не нужна - голый Electron под Xvfb поднимается и без неё.
+          #
+          # `ADAMAS_VSCODE_CLI` - та самая обёртка, и она нужна ровно на
+          # `--install-extension`: это работа CLI, и Electron её не делает.
+          # Измерено: Electron с `--install-extension` открывает окно и висит
+          # (девять минут до убийства), обёртка ставит `.vsix` меньше чем за
+          # секунду и дисплея не просит.
+          #
+          # Значение `absent` у любой из четырёх - объявленное отсутствие
+          # инструмента (правило `ADAMAS_LLVM=absent`, `.github/workflows/ci.yml`).
+          # Переменная **не заданная** - отказ, а не пропуск.
           env = {
             ADAMAS_LLVM_BIN = "${llvmCurrent}/bin";
             ADAMAS_LLVM_MIN_BIN = "${llvmMinimum}/bin";
             ADAMAS_CLANG = "${clangCurrent}/bin/clang";
+            ADAMAS_NVIM = "${editorNvim}/bin/nvim";
+            ADAMAS_VSCODE = "${editorVscode}/lib/vscode/codium";
+            ADAMAS_VSCODE_CLI = "${editorVscode}/bin/codium";
+            ADAMAS_VSCE = "${vsce}/bin/vsce";
           };
+
+          # Зависимости расширения ставятся npm'ом, а не Nix'ом, и причина
+          # внешняя: CI Nix не поднимает, там всё равно будет `npm ci`. Второй
+          # способ поставить те же восемь пакетов не окупается - пин у них один
+          # и тот же, `editors/vscode/package-lock.json`.
+          shellHook = ''
+            if [ -f editors/vscode/package-lock.json ] && [ ! -d editors/vscode/node_modules ]; then
+              echo "adamas: ставлю зависимости расширения VS Code (npm ci)..." >&2
+              (cd editors/vscode && npm ci --no-audit --no-fund) || \
+                echo "adamas: npm ci не прошёл; свидетель VS Code скажет об этом внятно" >&2
+            fi
+          '';
         };
 
         # nixfmt-tree, а не голый nixfmt: последний на `nix fmt` без аргументов

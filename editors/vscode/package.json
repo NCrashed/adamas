@@ -1,0 +1,49 @@
+{
+  "name": "adamas",
+  "displayName": "Adamas",
+  "description": "Adamas language support: diagnostics from the Adamas language server",
+  "version": "0.0.0",
+  "publisher": "adamas-lang",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NCrashed/adamas.git"
+  },
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./src/extension.js",
+  "activationEvents": [
+    "onLanguage:adamas"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "adamas",
+        "aliases": [
+          "Adamas"
+        ],
+        "extensions": [
+          ".adamas"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "configuration": {
+      "title": "Adamas",
+      "properties": {
+        "adamas.server.path": {
+          "type": "string",
+          "default": "adamas-lsp",
+          "markdownDescription": "Путь к бинарю `adamas-lsp`. Пустая строка и значение по умолчанию означают поиск в `PATH`."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

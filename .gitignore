@@ -15,3 +15,8 @@
 .idea/
 .vscode/
 *.swp
+
+# Расширение VS Code: зависимости ставит `npm ci` по package-lock.json,
+# упаковка кладёт `.vsix` рядом.
+/editors/vscode/node_modules/
+/editors/vscode/*.vsix

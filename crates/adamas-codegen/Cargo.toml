@@ -25,6 +25,11 @@ harness = false
 name = "workloads"
 harness = false
 
+# Капстоун против соседа на C с intrinsics: милестоун Фазы 7.
+[[bench]]
+name = "capstone"
+harness = false
+
 [dependencies]
 adamas-core.workspace = true
 # Ради заголовка и договора: генерируемый C собирается против этого рантайма, а

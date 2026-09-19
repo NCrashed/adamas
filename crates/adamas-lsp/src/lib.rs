@@ -4,7 +4,9 @@
 //!
 //! `initialize`, `textDocument/didOpen`, `didChange`, `didClose` и
 //! `textDocument/publishDiagnostics` - те же отказы и предупреждения, что
-//! печатает `adamas check`, на тех же местах.
+//! печатает `adamas check`, на тех же местах. Сверх того `textDocument/hover`
+//! - тип имени под курсором, первая из возможностей §7.2, - и
+//! `textDocument/definition` внутри файла.
 //!
 //! # Проход целиком, без инкрементального ядра
 //!

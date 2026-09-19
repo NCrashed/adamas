@@ -286,10 +286,10 @@ fn a_mutual_block_is_refused_inside_an_imported_file() {
         "\
 mutual
   data Tick where
-    Tick : Tock -> Tick
+    Wind : Tock -> Tick
 
   data Tock where
-    Tock : Tick -> Tock
+    Turn : Tick -> Tock
 ",
     );
     let why = refused("import Grouped (Tick)\n", &modules);
@@ -304,10 +304,10 @@ mutual
         "\
 mutual
   data Tick where
-    Tick : Tock -> Tick
+    Wind : Tock -> Tick
 
   data Tock where
-    Tock : Tick -> Tock
+    Turn : Tick -> Tock
 ",
         &Memory::new(),
     );

@@ -70,13 +70,24 @@ struct Pending<'a> {
 ///
 /// Любой отказ элаборации, сборки клауз или проверки типов.
 pub fn elaborate(module: &Module) -> Result<(Signature, Warnings), ElabError> {
+    let (signature, outcome) = elaborated(module);
+    outcome.map(|warnings| (signature, warnings))
+}
+
+/// То же, но сигнатура отдаётся и при отказе - такой, какой её застал отказ.
+///
+/// Нужна редактору (§7.2): буфер, в котором дописывают слово, не проверяется,
+/// а типы имён, объявленных выше места отказа, известны. Отдельная функция, а
+/// не `Result<(Signature, …), (Signature, …)>`: `?` у второй формы не
+/// работает, и все её вызывающие писали бы `match` ради одного случая.
+pub fn elaborated(module: &Module) -> (Signature, Result<Warnings, ElabError>) {
     let mut signature = Signature::default();
     let mut metas = Metas::default();
     let mut owned = Owned::default();
     let mut instances = Instances::default();
     let mut fixities = Fixities::default();
     let mut warnings = Warnings::new();
-    elaborate_into(
+    let outcome = elaborate_into(
         module,
         &mut signature,
         &mut metas,
@@ -84,8 +95,8 @@ pub fn elaborate(module: &Module) -> Result<(Signature, Warnings), ElabError> {
         &mut fixities,
         &mut instances,
         &mut warnings,
-    )?;
-    Ok((signature, warnings))
+    );
+    (signature, outcome.map(|()| warnings))
 }
 
 /// То же, но поверх уже собранной сигнатуры - так к модулю приставляется

@@ -23,9 +23,7 @@ use adamas_core::sig::Signature;
 use adamas_core::source::SourceFile;
 use adamas_core::term::{PRINT_DEPTH, Term};
 use adamas_elab::class::Instances;
-use adamas_elab::fixity::Fixities;
 use adamas_elab::mono;
-use adamas_elab::{Owned, Warnings};
 
 /// Корпус `tests/golden/eval/`.
 pub(crate) fn corpus() -> PathBuf {
@@ -116,24 +114,26 @@ pub(crate) fn llvm_located(stem: &str, text: &str) -> (PathBuf, Artefacts) {
     reason = "заготовка теста: отвергнутый исходник означает сломанный корпус, и падать он должен громко"
 )]
 fn elaborated(source: &str) -> (Signature, Metas, Instances) {
-    let module = adamas_parser::parse(source).expect("исходник обязан разбираться");
-    let mut signature = Signature::default();
-    let mut metas = Metas::default();
-    let mut owned = Owned::default();
-    let mut fixities = Fixities::default();
-    let mut instances = Instances::default();
-    let mut warnings = Warnings::new();
-    adamas_elab::elaborate_into(
-        &module,
-        &mut signature,
-        &mut metas,
-        &mut owned,
-        &mut fixities,
-        &mut instances,
-        &mut warnings,
-    )
-    .expect("исходник обязан проходить проверку");
-    (signature, metas, instances)
+    let program = analyzed(source);
+    if let Some(located) = program.error() {
+        panic!(
+            "исходник обязан проходить проверку: {}",
+            program.rendered(located)
+        );
+    }
+    let signature = program.signature.expect("проход обязан отдать сигнатуру");
+    (signature, program.metas, program.instances)
+}
+
+/// Проход по **программе**, а не по тексту: фикстура корпуса вправе подключать
+/// соседа (§4.8), и корень поиска модулей у неё - сам корпус.
+///
+/// Исходник, написанный строкой в тесте, идёт тем же путём: импортов у него
+/// нет, и подключать нечего.
+fn analyzed(source: &str) -> adamas_elab::program::Program {
+    let sources = adamas_elab::program::Directory::new(corpus());
+    let entry = SourceFile::new("фикстура", source.to_owned());
+    adamas_elab::program::analyze(entry, &sources)
 }
 
 /// Отказ **элаборации**: текст ошибки у исходника, который до понижения не
@@ -150,24 +150,11 @@ fn elaborated(source: &str) -> (Signature, Metas, Instances) {
     reason = "заготовка теста: пройденная проверка означает сломанный свидетель, и падать он должен громко"
 )]
 pub(crate) fn rejected(source: &str) -> String {
-    let module = adamas_parser::parse(source).expect("исходник обязан разбираться");
-    let mut signature = Signature::default();
-    let mut metas = Metas::default();
-    let mut owned = Owned::default();
-    let mut fixities = Fixities::default();
-    let mut instances = Instances::default();
-    let mut warnings = Warnings::new();
-    let error = adamas_elab::elaborate_into(
-        &module,
-        &mut signature,
-        &mut metas,
-        &mut owned,
-        &mut fixities,
-        &mut instances,
-        &mut warnings,
-    )
-    .expect_err("исходник обязан быть отвергнут проверкой");
-    error.to_string()
+    let program = analyzed(source);
+    let located = program
+        .error()
+        .expect("исходник обязан быть отвергнут проверкой");
+    located.diagnostic.message()
 }
 
 /// Тело определения с подставленными аргументами уровня и row - ровно то, что

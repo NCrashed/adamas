@@ -34,9 +34,11 @@
 //!
 //! # Чего слой дерева не решает
 //!
-//! Имя, не объявленное в файле и не занятое языком, остаётся без цвета:
-//! многофайловых проектов сегодня нет (§9, волна 1 Фазы 9), и prelude чужого
-//! файла сервер не видит.
+//! Имя, не объявленное в файле и не занятое языком, остаётся без цвета.
+//! С волны 2 Фазы 9 это уже ограничение **сервера**, а не языка: `import`
+//! подключает чужой файл (§4.8), но буфер сервер разбирает по одному, и того
+//! файла не видит. Открытые имена поэтому красятся как ссылки, а объявлены они
+//! там, куда сервер не ходит. Связать буферы - трек B той же волны.
 
 use std::collections::HashMap;
 
@@ -562,7 +564,10 @@ impl<'a> Names<'a> {
                         self.declare(&operation.name, Face::Function);
                     }
                 }
-                DeclKind::Fixity(_) => {}
+                // Открытое имя объявлено не здесь, а в подключённом файле;
+                // подсветка одного буфера туда не ходит, и покрасить его
+                // объявлением значило бы соврать про место.
+                DeclKind::Fixity(_) | DeclKind::Import(_) => {}
             }
         }
     }
@@ -643,6 +648,19 @@ impl<'a> Names<'a> {
             DeclKind::Fixity(fixity) => {
                 for operator in &fixity.operators {
                     self.mark(operator.span, Face::Operator, DECLARATION);
+                }
+            }
+            // Путь - пространство имён, открытое имя - ссылка на чужой член:
+            // объявления здесь нет ни одного.
+            DeclKind::Import(import) => {
+                for segment in &import.path {
+                    self.mark(segment.span, Face::Namespace, 0);
+                }
+                if let Some(alias) = &import.alias {
+                    self.mark(alias.span, Face::Namespace, DECLARATION);
+                }
+                for opened in &import.open {
+                    self.mark(opened.span, Face::Function, 0);
                 }
             }
         }

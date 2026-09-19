@@ -61,6 +61,79 @@ struct Pending<'a> {
     span: Span,
 }
 
+/// Шесть изменяемых частей прохода, сложенные вместе.
+///
+/// Заведены ради одного места - обработчика `import`: он передаёт их вглубь, в
+/// элаборацию подключаемого файла, и семь отдельных `&mut` в сигнатуре
+/// колбэка читались бы хуже, чем одна. Остальной `decl` по-прежнему носит их
+/// порознь: там видно, что именно меняется, и прятать это незачем.
+pub(crate) struct Pass<'a> {
+    pub signature: &'a mut Signature,
+    pub metas: &'a mut Metas,
+    pub owned: &'a mut Owned,
+    pub fixities: &'a mut Fixities,
+    pub instances: &'a mut Instances,
+    pub warnings: &'a mut Warnings,
+}
+
+impl Pass<'_> {
+    /// Тот же проход с более коротким временем жизни.
+    pub(crate) fn reborrow(&mut self) -> Pass<'_> {
+        Pass {
+            signature: self.signature,
+            metas: self.metas,
+            owned: self.owned,
+            fixities: self.fixities,
+            instances: self.instances,
+            warnings: self.warnings,
+        }
+    }
+}
+
+/// Кто подключает импортированный файл (§4.8).
+///
+/// Отдельный шов, а не часть элаборации: чтение файлов - работа драйвера, а не
+/// проверки типов, и `adamas-elab` знать о диске не обязан. Проходу нужно от
+/// импорта ровно одно - чтобы к моменту, когда разбор дойдёт до следующего
+/// объявления, члены подключённого файла уже стояли в сигнатуре, а его имена -
+/// в области видимости.
+pub(crate) trait Importer {
+    /// Подключает написанное. Ошибка - отказ всего прохода.
+    ///
+    /// # Errors
+    ///
+    /// Модуль не найден, кольцо импортов, открытое имя не объявлено, а также
+    /// всякий отказ внутри подключаемого файла.
+    fn import(
+        &mut self,
+        decl: &ast::ImportDecl,
+        span: Span,
+        pass: Pass<'_>,
+    ) -> Result<(), ElabError>;
+}
+
+/// Импортов нет: программа собрана из одного текста.
+///
+/// Этим ходит всякий, кто зовёт [`elaborate`] или [`elaborate_into`] - тесты,
+/// бенчмарки, старый путь драйвера. Отказ называет причину, а не форму: сама
+/// форма языком принята.
+pub(crate) struct Alone;
+
+impl Importer for Alone {
+    fn import(
+        &mut self,
+        decl: &ast::ImportDecl,
+        span: Span,
+        _pass: Pass<'_>,
+    ) -> Result<(), ElabError> {
+        Err(ElabError::UnknownModule {
+            path: Rc::from(decl.written().as_str()),
+            file: "программа собрана из одного текста, искать негде".to_owned(),
+            span,
+        })
+    }
+}
+
 /// Элаборирует модуль в новую сигнатуру.
 ///
 /// Хранилище дырок заводится здесь: прогон элаборации - это модуль целиком
@@ -99,8 +172,13 @@ pub fn elaborated(module: &Module) -> (Signature, Result<Warnings, ElabError>) {
     (signature, outcome.map(|()| warnings))
 }
 
-/// То же, но поверх уже собранной сигнатуры - так к модулю приставляется
-/// prelude, когда он появится.
+/// То же, но поверх уже собранной сигнатуры.
+///
+/// Импорты этим путём не разрешаются: программа здесь - один текст, и
+/// подключать нечего. Prelude приставляется не так, а `import`'ом
+/// ([`crate::program`]): подключённый файл получает квалификацию, а
+/// приставленный этой функцией лёг бы в те же неквалифицированные имена, что и
+/// сам модуль.
 ///
 /// # Errors
 ///
@@ -114,23 +192,49 @@ pub fn elaborate_into(
     instances: &mut Instances,
     warnings: &mut Warnings,
 ) -> Result<(), ElabError> {
-    // Есть ли в модуле ресурсы, спрашивается **до** объявлений: иначе тот же
-    // `handleMulti` принимался бы или отвергался в зависимости от того, выше
-    // или ниже него написан `resource`, - а гарантия §3.4 от порядка записи не
-    // зависит. Само владение по-прежнему объявляется по ходу: ordered scoping
-    // §4.8 - решение, и трогать его тут незачем.
-    if declares_resource(&module.decls) {
-        owned.expect_resources();
-    }
-    members_into(
-        &module.decls,
-        None,
+    let pass = Pass {
         signature,
         metas,
         owned,
         fixities,
         instances,
         warnings,
+    };
+    elaborate_file(&module.decls, None, pass, &mut Alone)
+}
+
+/// Объявления одного файла: подготовка владения и проход по членам.
+///
+/// Общая точка входа у входного файла и у подключённого: правила у них одни, а
+/// разнятся они только квалификацией (`within`).
+///
+/// # Errors
+///
+/// То же, что у [`elaborate`].
+pub(crate) fn elaborate_file(
+    decls: &[ast::Decl],
+    within: Option<&Enclosing>,
+    mut pass: Pass<'_>,
+    importer: &mut dyn Importer,
+) -> Result<(), ElabError> {
+    // Есть ли в модуле ресурсы, спрашивается **до** объявлений: иначе тот же
+    // `handleMulti` принимался бы или отвергался в зависимости от того, выше
+    // или ниже него написан `resource`, - а гарантия §3.4 от порядка записи не
+    // зависит. Само владение по-прежнему объявляется по ходу: ordered scoping
+    // §4.8 - решение, и трогать его тут незачем.
+    if declares_resource(decls) {
+        pass.owned.expect_resources();
+    }
+    let Pass {
+        signature,
+        metas,
+        owned,
+        fixities,
+        instances,
+        warnings,
+    } = pass.reborrow();
+    members_into(
+        decls, within, signature, metas, owned, fixities, instances, warnings, importer,
     )
 }
 
@@ -450,13 +554,18 @@ fn outside_a_module(instance: bool) -> (&'static str, &'static str) {
 }
 
 /// Отвергает форму, законную только на верхнем уровне.
+///
+/// Файл, подключённый импортом, - верхний уровень (§4.8): квалификация у него
+/// та же, что у блока `module`, а вложенности, ради которой запрет написан, -
+/// нет. Класс и инстанс от этого остаются именами **программы**, а не членами
+/// файла, и §4.4 говорит о них то же: prelude-классы доступны без импорта.
 fn only_at_top(
     within: Option<&Enclosing>,
     name: &Symbol,
     why: &'static str,
     span: Span,
 ) -> Result<(), ElabError> {
-    if within.is_none() {
+    if within.is_none_or(|it| it.file) {
         return Ok(());
     }
     Err(ElabError::ModuleMember {
@@ -518,13 +627,18 @@ fn members_into(
     fixities: &mut Fixities,
     instances: &mut Instances,
     warnings: &mut Warnings,
+    importer: &mut dyn Importer,
 ) -> Result<(), ElabError> {
     // Сигнатуры, ставшие постулатами по ходу прогона: клаузы, пришедшие за
     // ними, - не «нет сигнатуры», а сигнатура не рядом.
     let mut postulated: HashMap<Symbol, Span> = HashMap::new();
     let mut pending: Option<Pending<'_>> = None;
     for decl in decls {
-        reserved(decl, within.is_some())?;
+        // Занятое языком имя член модуля заслонять вправе (§10 вопрос 160), а
+        // файл - нет: его члены квалифицированы, но короткое имя внутри файла
+        // читается там же, где и всюду, и `data Int64` в библиотеке молча
+        // менял бы смысл примитива у всякого, кто её подключил.
+        reserved(decl, within.is_some_and(|it| !it.file))?;
         match &decl.kind {
             DeclKind::Signature {
                 name,
@@ -584,12 +698,22 @@ fn members_into(
             }
             DeclKind::Mutual(members) => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
-                only_at_top(
-                    within,
-                    &Rc::from("mutual"),
-                    "члены группы объявляются одним вызовом, а модуль их квалифицирует",
-                    decl.span,
-                )?;
+                // Причина одна на блок и на файл: члены группы объявляются
+                // одним вызовом, а квалификация у этого вызова не написана.
+                // Разнятся они только тем, как об этом сказать.
+                if let Some(enclosing) = within {
+                    return Err(ElabError::ModuleMember {
+                        name: Rc::from("mutual"),
+                        what: if enclosing.file {
+                            "импортированном файле"
+                        } else {
+                            "модуле"
+                        },
+                        why: "члены группы объявляются одним вызовом, \
+                              а квалифицировать их он не умеет",
+                        span: decl.span,
+                    });
+                }
                 declare_mutual(
                     signature, metas, owned, fixities, instances, warnings, members, decl.span,
                 )?;
@@ -618,6 +742,21 @@ fn members_into(
             // Фикситет ничего не объявляет: он говорит, как читать цепочку, и
             // действует на всё, что написано ниже (§4.8).
             DeclKind::Fixity(decl) => fixities.declare(decl)?,
+            // Импорт входит в порядок файла наравне с прочими объявлениями
+            // (§4.8, §10 вопрос 178): подключённое видно тому, что написано
+            // ниже, и не видно тому, что выше.
+            DeclKind::Import(import) => {
+                postulate(signature, metas, pending.take(), &mut postulated)?;
+                let pass = Pass {
+                    signature,
+                    metas,
+                    owned,
+                    fixities,
+                    instances,
+                    warnings,
+                };
+                importer.import(import, decl.span, pass)?;
+            }
             DeclKind::Effect(effect) => {
                 postulate(signature, metas, pending.take(), &mut postulated)?;
                 declare_effect(
@@ -775,6 +914,8 @@ fn declare_module(
         );
     }
     let inner = Enclosing::nested(within, Rc::clone(&declared), &module.params);
+    // `Alone`, а не переданный подключатель: `import` в теле модуля отвергает
+    // разбор (§4.8), и досюда он не доезжает вовсе.
     members_into(
         &module.members,
         Some(&inner),
@@ -784,6 +925,7 @@ fn declare_module(
         fixities,
         instances,
         warnings,
+        &mut Alone,
     )?;
     // Запечатываются **поднятые члены**, и ставится флаг до проверки
     // аннотации (§10 вопрос 148): соответствие сигнатуре обязано мерить
@@ -1018,6 +1160,7 @@ fn seal_members(signature: &mut Signature, within: &Enclosing, members: &[ast::D
             let deeper = Enclosing {
                 name: qualify(Some(within), &inner.name.text),
                 params: Rc::clone(&within.params),
+                file: false,
             };
             seal_members(signature, &deeper, &inner.members);
         }
@@ -3078,9 +3221,11 @@ fn member_name(member: &ast::Decl) -> Option<&Symbol> {
         DeclKind::Data(data) => Some(&data.name.text),
         DeclKind::Effect(effect) => Some(&effect.name.text),
         DeclKind::Resource(resource) => Some(&resource.name.text),
-        // Фикситет имени не заводит: он говорит про уже написанное.
+        // Ни фикситет, ни импорт имени не заводят: первый говорит про уже
+        // написанное, второй приносит чужое.
         DeclKind::Clauses { .. }
         | DeclKind::Class(_)
+        | DeclKind::Import(_)
         | DeclKind::Mutual(_)
         | DeclKind::Fixity(_) => None,
     }
@@ -3347,6 +3492,7 @@ fn hide_subtree(signature: &mut Signature, within: &Enclosing, member: &ast::Dec
             let deeper = Enclosing {
                 name: qualify(Some(within), &inner.name.text),
                 params: Rc::clone(&within.params),
+                file: false,
             };
             for member in &inner.members {
                 hide_subtree(signature, &deeper, member);
@@ -4172,6 +4318,9 @@ fn resource_members(
             ast::DeclKind::Fixity(_) => {
                 return Err(refuse(&Rc::from("фикситет"), member.span));
             }
+            ast::DeclKind::Import(_) => {
+                return Err(refuse(&Rc::from("импорт"), member.span));
+            }
             ast::DeclKind::Resource(inner) => return Err(refuse(&inner.name.text, member.span)),
         }
     }
@@ -4844,7 +4993,15 @@ fn declare_family(
     }
     declare_data(
         signature, metas, owned, fixities, warnings, within, data, span,
-    )
+    )?;
+    // Единица - имя, которое язык берёт по соглашению, а объявляет программа
+    // (§3.4). Записывается оно здесь и один раз: после элаборации написанного
+    // имени уже не найти - подключённый файл объявил свою под путём, а термы
+    // живут дольше его области видимости.
+    if &*data.name.text == prim::UNIT {
+        signature.name_unit(&qualify(within, &data.name.text));
+    }
+    Ok(())
 }
 
 /// Объявление эффекта: формер метки плюс её операции (§3.4).
@@ -5063,10 +5220,10 @@ fn declare_closing(
     // устраивает. Пока здесь стояла объявленность, `data Unit` с двумя
     // конструкторами вместе с любым ресурсом давал принятую проверкой
     // программу, которая роняла исполнение на `unreachable!` в раскрутке.
-    let Some([_]) = signature.constructors(UNIT) else {
+    let Some([_]) = signature.constructors(signature.unit()) else {
         return Ok(());
     };
-    let Some(unit) = signature.instantiate(UNIT, metas) else {
+    let Some(unit) = signature.instantiate(signature.unit(), metas) else {
         return Ok(());
     };
     let rho = metas.fresh_row();
@@ -5170,7 +5327,7 @@ fn mask_type(
     span: Span,
 ) -> Result<Term, ElabError> {
     let unit = signature
-        .instantiate(UNIT, metas)
+        .instantiate(signature.unit(), metas)
         .ok_or_else(|| ElabError::UnknownName {
             name: Rc::from(UNIT),
             span,
@@ -5317,8 +5474,13 @@ fn handler_type(
         name: Rc::from(UNIT),
         span,
     };
-    let unit = signature.instantiate(UNIT, metas).ok_or_else(missing)?;
-    let [only] = signature.constructors(UNIT).ok_or_else(missing)? else {
+    let unit = signature
+        .instantiate(signature.unit(), metas)
+        .ok_or_else(missing)?;
+    let [only] = signature
+        .constructors(signature.unit())
+        .ok_or_else(missing)?
+    else {
         return Err(missing());
     };
     let only = Rc::clone(only);

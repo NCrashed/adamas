@@ -299,13 +299,62 @@ fn a_multiplicity_is_zero_one_or_omega() {
 fn forms_of_later_phases_name_their_phase() {
     // Лексема зарезервирована и опечаткой быть не может, поэтому честнее
     // назвать фазу, чем перечислять, что бывает здесь вместо неё.
-    let cases = [("import Prelude\n", Unsupported::Import)];
+    let cases = [("when Eqv a\n", Unsupported::Class)];
     for (text, expected) in cases {
         let error = parse_error(text);
         let ParseError::Unsupported { what, .. } = error else {
             panic!("для {text:?} ожидалась Unsupported, получено {error:?}");
         };
         assert_eq!(what, expected, "для {text:?}");
+    }
+}
+
+#[test]
+fn an_import_is_a_path_with_an_optional_prefix_and_an_open_list() {
+    // §4.8 показывает обе формы дословно, и обе разбираются в путь сегментами:
+    // точку лексер в именах не порождает.
+    let dumped = tree("import Data.Map as Map\n").expect("форма §4.8");
+    assert!(
+        dumped.contains("(import Data.Map as Map)"),
+        "получено {dumped}"
+    );
+    let dumped = tree("import Concurrent (Nursery, spawn, await, withNursery)\n")
+        .expect("вторая форма §4.8");
+    assert!(
+        dumped.contains("(import Concurrent Nursery spawn await withNursery)"),
+        "получено {dumped}"
+    );
+    // Оператор в списке открытых имён пишется в скобках - тем же разбором,
+    // каким пишется его определение (`(++) : …`, §4.4).
+    let dumped = tree("import Prelude ((++))\n").expect("оператор в списке");
+    assert!(dumped.contains("(import Prelude ++)"), "получено {dumped}");
+}
+
+#[test]
+fn a_wildcard_import_is_refused_by_name() {
+    // §4.4 отказывает `(..)` решением, а не недосмотром: без названного отказа
+    // решение держалось бы на том, что эту форму никто не написал.
+    let error = parse_error("import Data.Map (..)\n");
+    assert!(
+        matches!(error, ParseError::Wildcard { .. }),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn an_import_is_written_at_the_top_level_of_a_file() {
+    // Импорт подключает файл к файлу: внутри `module`, `mutual` или `where`
+    // его смысл не определён, и разбор отвечает названным отказом.
+    for text in [
+        "module M where\n  import Prelude\n",
+        "mutual\n  import Prelude\n",
+        "f : Nat\nf = zero where\n  import Prelude\n",
+    ] {
+        let error = parse_error(text);
+        assert!(
+            matches!(error, ParseError::NestedImport { .. }),
+            "для {text:?} получено {error:?}"
+        );
     }
 }
 

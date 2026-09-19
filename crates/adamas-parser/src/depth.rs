@@ -454,8 +454,9 @@ fn decl_at<'a>(decl: &'a Decl, depth: u32, pending: &mut Pending<'a>) -> Result<
                 pending.push((Node::Expr(&operation.ty), at));
             }
         }
-        // Фикситет подтермов не несёт: имена операторов и число.
-        DeclKind::Fixity(_) => {}
+        // Фикситет подтермов не несёт: имена операторов и число. Импорт - тоже:
+        // путь, префикс и список открытых имён.
+        DeclKind::Fixity(_) | DeclKind::Import(_) => {}
         DeclKind::Resource(resource) => {
             binder_terms(&resource.params, depth, pending);
             pending.extend(

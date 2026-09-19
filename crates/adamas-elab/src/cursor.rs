@@ -275,7 +275,9 @@ fn collect(decls: &[Decl], within: &mut Vec<Symbol>, out: &mut Vec<Site>) {
                 }
             }
             DeclKind::Mutual(inner) => collect(inner, within, out),
-            DeclKind::Fixity(_) => {}
+            // Импорт своих имён не объявляет: он приносит чужие, и объявлены
+            // они в том файле, откуда пришли.
+            DeclKind::Fixity(_) | DeclKind::Import(_) => {}
         }
     }
 }
@@ -474,6 +476,13 @@ impl Search<'_> {
             DeclKind::Fixity(fixity) => {
                 for operator in &fixity.operators {
                     self.refer(operator);
+                }
+            }
+            // Имена импорта - ссылки: путь называет чужой файл, открытое имя -
+            // его член, и связывания здесь нет ни одного.
+            DeclKind::Import(import) => {
+                for opened in &import.open {
+                    self.refer(opened);
                 }
             }
         }

@@ -297,10 +297,10 @@ fn domain_of(ty: &Value) -> Option<Rc<Value>> {
 ///
 /// Приближение сверху для [`Elaborator::suspends`]: имплиситы у имени ещё не
 /// вставлены, поэтому какое именно связывание окажется первым, здесь неизвестно.
-fn awaits_unit(ty: &Term) -> bool {
+fn awaits_unit(ty: &Term, unit: &str) -> bool {
     let mut current = ty;
     while let Term::Pi(_, _, domain, _, codomain) = current {
-        if matches!(&**domain, Term::Const(name, ..) if &**name == UNIT) {
+        if matches!(&**domain, Term::Const(name, ..) if &**name == unit) {
             return true;
         }
         current = codomain;
@@ -412,14 +412,24 @@ pub(crate) fn qualified_in(
     enclosing: Option<&str>,
     name: &str,
 ) -> Option<Symbol> {
-    let mut prefix = enclosing?;
-    loop {
-        let full: Symbol = Rc::from(format!("{prefix}.{name}").as_str());
-        if signature.lookup(&full).is_some() {
-            return Some(full);
+    if let Some(prefix) = enclosing {
+        let mut prefix = prefix;
+        loop {
+            let full: Symbol = Rc::from(format!("{prefix}.{name}").as_str());
+            if signature.lookup(&full).is_some() {
+                return Some(full);
+            }
+            let Some(cut) = prefix.rfind('.') else {
+                break;
+            };
+            prefix = &prefix[..cut];
         }
-        prefix = &prefix[..prefix.rfind('.')?];
     }
+    // Последняя ступень лестницы - имя, открытое импортом (§4.8): своё
+    // заслоняет открытое тем же правилом, каким член модуля заслоняет
+    // глобальное. Отдаётся **объявленное** имя, а не написанное: дальше по нему
+    // собирается терм, и написанное умерло бы вместе с файлом.
+    signature.written(name).map(Rc::clone)
 }
 
 pub(crate) fn writes_effects(expr: &Expr) -> bool {
@@ -652,6 +662,15 @@ pub(crate) struct Enclosing {
     /// `Rc` затем, что `Enclosing` копируется на каждый элаборатор, а копия
     /// связываний вместе с их типами - обход дерева.
     pub params: Rc<[ast::Binder]>,
+    /// Модуль - это **файл**, подключённый импортом, а не блок `module … where`
+    /// (§4.8).
+    ///
+    /// Квалификация у них одна, а правила разные: у блока §4.8 называет формы,
+    /// которые в нём не пишутся (класс, инстанс, `mutual`), и причины у запрета
+    /// от вложенности, а не от квалификации. Файл ничем не объемлется, поэтому
+    /// разделяющий флаг здесь, а не два разных типа: имя, телескоп и подъём
+    /// членов у них буквально одни.
+    pub file: bool,
 }
 
 impl Enclosing {
@@ -669,7 +688,20 @@ impl Enclosing {
                 .collect::<Rc<[_]>>(),
             _ => Rc::from(own),
         };
-        Self { name, params }
+        Self {
+            name,
+            params,
+            file: false,
+        }
+    }
+
+    /// Файл, подключённый импортом: его члены квалифицируются написанным путём.
+    pub(crate) fn file(path: Symbol) -> Self {
+        Self {
+            name: path,
+            params: Rc::from(&[][..]),
+            file: true,
+        }
     }
 
     /// Имена параметров в порядке написания.
@@ -1973,7 +2005,20 @@ impl<'a> Elaborator<'a> {
         let neighbour = self
             .qualified_name(&full)
             .is_some_and(|it| self.signature.lookup(&it).is_some());
-        (neighbour || self.signature.lookup(&full).is_some()).then_some(full)
+        if neighbour {
+            return Some(full);
+        }
+        // Префикс, данный импортом: `Map.insert` при `import Data.Map as Map`
+        // есть `Data.Map.insert`. Читается той же таблицей, что и открытое имя,
+        // - псевдоним ставится на каждого члена, а не на префикс, потому что
+        // поиск идёт по полному имени.
+        if let Some(declared) = self.signature.written(&full) {
+            return Some(Rc::clone(declared));
+        }
+        // Написанный путь целиком (`Data.Map.insert`) - только к модулю,
+        // который этот файл импортировал: иначе зависимость между файлами
+        // держалась бы соглашением, а не отказом (§7.3, «явные зависимости»).
+        (self.signature.writable(&full) && self.signature.lookup(&full).is_some()).then_some(full)
     }
 
     /// Скрыт ли член запечатыванием: `:>`-модуль не назвал его в сигнатуре
@@ -2367,7 +2412,7 @@ impl<'a> Elaborator<'a> {
             }
             current = codomain;
         }
-        awaits_unit(current)
+        awaits_unit(current, self.signature.unit())
     }
 
     /// Кладёт в кэш элиминатор маски с **заданной** ρ.
@@ -4398,7 +4443,9 @@ impl<'a> Elaborator<'a> {
     /// написаны, а сколько их - решает он же. `None` - единицы или самой метки
     /// в сигнатуре нет, и тогда ожидаемого типа не существует.
     fn suspension(&mut self, effect: &Symbol) -> Option<Term> {
-        let unit = self.signature.instantiate(UNIT, self.metas)?;
+        let unit = self
+            .signature
+            .instantiate(self.signature.unit(), self.metas)?;
         let former = self.signature.instantiate(effect, self.metas)?;
         let mut kind = self.synthesized(&former)?;
         let mut arguments = Vec::new();
@@ -5008,7 +5055,7 @@ impl<'a> Elaborator<'a> {
         else {
             return false;
         };
-        spine.is_empty() && &**name == UNIT && self.unit_value().is_some()
+        spine.is_empty() && &**name == self.signature.unit() && self.unit_value().is_some()
     }
 
     /// Значение единицы - её единственный конструктор.
@@ -5016,7 +5063,7 @@ impl<'a> Elaborator<'a> {
     /// Второго имени по соглашению не заводится: тип назван, а какой у него
     /// конструктор, знает сигнатура.
     fn unit_value(&mut self) -> Option<Term> {
-        let [only] = self.signature.constructors(UNIT)? else {
+        let [only] = self.signature.constructors(self.signature.unit())? else {
             return None;
         };
         let only = Rc::clone(only);
@@ -5049,7 +5096,7 @@ impl<'a> Elaborator<'a> {
                     },
                     |definition| Some(Rc::new(definition.ty.clone())),
                 )
-                .is_some_and(|ty| awaits_unit(&ty)),
+                .is_some_and(|ty| awaits_unit(&ty, self.signature.unit())),
             Term::Var(Index(index)) => self
                 .scope
                 .len()

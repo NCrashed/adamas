@@ -2,6 +2,13 @@
 source: crates/adamas-parser/tests/printing.rs
 expression: printed
 ---
+=== imports
+import Data.Map as Map
+import Concurrent (Nursery, spawn, await, withNursery)
+import Prelude ((++))
+import Bare
+example : Map.Map String
+example = Map.empty
 === signature_and_clauses
 map : (a -> b) -> Vect n a -> Vect n b
 map f Nil = Nil

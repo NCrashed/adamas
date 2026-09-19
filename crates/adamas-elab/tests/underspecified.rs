@@ -13,37 +13,34 @@
 //! (специализация §6) такие места читать не по чему.
 
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
-use adamas_core::meta::Metas;
 use adamas_core::sig::Signature;
+use adamas_core::source::SourceFile;
 use adamas_core::term::Term;
-use adamas_elab::class::Instances;
-use adamas_elab::fixity::Fixities;
-use adamas_elab::{Owned, Warnings};
 
+/// Корпус `tests/golden/eval/` - он же корень поиска подключаемых модулей.
+fn corpus() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/eval")
+}
+
+/// Фикстура целиком - **вместе с тем, что она подключает** (§4.8).
 #[expect(
     clippy::expect_used,
     reason = "заготовка теста: отказ означает сломанный корпус, и падать он должен громко"
 )]
-fn elaborated(source: &str) -> Signature {
-    let module = adamas_parser::parse(source).expect("исходник обязан разбираться");
-    let mut signature = Signature::default();
-    let mut metas = Metas::default();
-    let mut owned = Owned::default();
-    let mut fixities = Fixities::default();
-    let mut instances = Instances::default();
-    let mut warnings = Warnings::new();
-    adamas_elab::elaborate_into(
-        &module,
-        &mut signature,
-        &mut metas,
-        &mut owned,
-        &mut fixities,
-        &mut instances,
-        &mut warnings,
-    )
-    .expect("исходник обязан проходить проверку");
-    signature
+fn elaborated(path: &Path) -> Signature {
+    let text = std::fs::read_to_string(path).expect("файл корпуса обязан читаться");
+    let entry = SourceFile::new(path.display().to_string(), text);
+    let sources = adamas_elab::program::Directory::new(corpus());
+    let program = adamas_elab::program::analyze(entry, &sources);
+    if let Some(located) = program.error() {
+        panic!(
+            "исходник обязан проходить проверку: {}",
+            program.rendered(located)
+        );
+    }
+    program.signature.expect("проход обязан отдать сигнатуру")
 }
 
 /// Собирает недописанные ссылки терма: имя цели при объемлющем `at`.
@@ -116,12 +113,8 @@ fn own_group(enclosing: &str, target: &str) -> bool {
 )]
 fn an_underspecified_reference_points_into_its_own_group() {
     for file in ["interpreter", "prelude", "functor"] {
-        let path = format!(
-            "{}/../../tests/golden/eval/{file}.adamas",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let source = std::fs::read_to_string(&path).expect("файл корпуса обязан читаться");
-        let signature = elaborated(&source);
+        let path = corpus().join(format!("{file}.adamas"));
+        let signature = elaborated(&path);
         let mut found = BTreeSet::new();
         let mut names = signature.names();
         names.sort();

@@ -714,13 +714,6 @@ impl Scope {
             .map(|it| format!("{it}.").into())
             .collect();
     }
-
-    /// Есть ли в области хоть что-нибудь: у программы из одного файла - нет,
-    /// и все проверки по ней вырождаются в проверку пустоты.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.own.is_none() && self.written.is_empty() && self.hidden.is_empty()
-    }
 }
 
 /// Набор определений, доступных терму.
@@ -748,13 +741,8 @@ impl Signature {
         std::mem::replace(&mut self.scope, scope)
     }
 
-    /// Область видимости текущего файла.
-    #[must_use]
-    pub fn scope(&self) -> &Scope {
-        &self.scope
-    }
-
-    /// Она же на правку: импорт дописывает в неё псевдонимы по ходу файла.
+    /// Область видимости текущего файла на правку: импорт дописывает в неё
+    /// псевдонимы по ходу файла.
     pub fn scope_mut(&mut self) -> &mut Scope {
         &mut self.scope
     }

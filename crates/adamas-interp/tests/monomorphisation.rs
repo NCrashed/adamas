@@ -16,11 +16,10 @@ use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::row::Row;
 use adamas_core::sig::Signature;
+use adamas_core::source::SourceFile;
 use adamas_core::term::Term;
 use adamas_elab::class::Instances;
-use adamas_elab::fixity::Fixities;
 use adamas_elab::mono;
-use adamas_elab::{Owned, Warnings};
 
 /// `Bool`, `Nat`, `List` и `Unit` - база, без которой не пишется ни один пример.
 const BASE: &str = "\
@@ -127,31 +126,33 @@ main = handle logged with
 
 /// Элаборированная программа вместе с тем, что о ней знает разрешение.
 ///
-/// `elaborate_into`, а не `elaborate`: проходу нужны инстансы, а короткая
-/// форма их не отдаёт - словарь она про них не спрашивает.
+/// Проход по **программе**, а не по тексту: фикстура корпуса вправе подключать
+/// соседа (§4.8), и корень поиска модулей у неё - сам корпус. Исходник,
+/// написанный строкой в тесте, идёт тем же путём - подключать нечего.
+///
+/// Инстансы и дырки отдаются наружу затем же, зачем их отдавал
+/// `elaborate_into`: специализации нужны и те и другие.
 #[expect(
     clippy::expect_used,
     reason = "заготовка теста: отвергнутый исходник означает сломанный тест, и падать он должен громко"
 )]
 fn elaborated(source: &str) -> (Signature, Metas, Instances) {
-    let module = adamas_parser::parse(source).expect("исходник обязан разбираться");
-    let mut signature = Signature::default();
-    let mut metas = Metas::default();
-    let mut owned = Owned::default();
-    let mut fixities = Fixities::default();
-    let mut instances = Instances::default();
-    let mut warnings = Warnings::new();
-    adamas_elab::elaborate_into(
-        &module,
-        &mut signature,
-        &mut metas,
-        &mut owned,
-        &mut fixities,
-        &mut instances,
-        &mut warnings,
-    )
-    .expect("исходник обязан проходить проверку");
-    (signature, metas, instances)
+    let entry = SourceFile::new("фикстура", source.to_owned());
+    let sources = adamas_elab::program::Directory::new(corpus());
+    let program = adamas_elab::program::analyze(entry, &sources);
+    if let Some(located) = program.error() {
+        panic!(
+            "исходник обязан проходить проверку: {}",
+            program.rendered(located)
+        );
+    }
+    let signature = program.signature.expect("проход обязан отдать сигнатуру");
+    (signature, program.metas, program.instances)
+}
+
+/// Корпус `tests/golden/eval/` - он же корень поиска подключаемых модулей.
+fn corpus() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/eval")
 }
 
 /// Тело определения с подставленными аргументами уровня и row - ровно то, что
@@ -253,7 +254,7 @@ fn nothing_passes_a_dictionary_after_specialising() {
 )]
 #[test]
 fn no_golden_program_changes_its_value() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/eval");
+    let dir = corpus();
     let mut fixtures: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|entry| entry.unwrap().path())

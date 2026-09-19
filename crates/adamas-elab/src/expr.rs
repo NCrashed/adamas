@@ -61,13 +61,13 @@ fn kinded(written: Option<ast::MultAnn>, ty: &Expr, default: Mult) -> Mult {
 /// Проверка синтаксическая, и это не приближение: конкретный универсум в
 /// поверхностном языке не пишется (§3.2), поэтому иных записей у него нет.
 fn universe(ty: &Expr) -> bool {
-    matches!(&ty.kind, ExprKind::Name(name) if &*name.text == "Type")
+    matches!(&ty.kind, ExprKind::Name(name) if &*name.text == prim::TYPE)
 }
 
 /// Имя единицы. Соглашение то же, каким `if` берёт `Bool` (§3.4): типа этого
 /// ядро не знает, а сахар `{ε} A` без него не разворачивается.
-pub(crate) const GRADE: &str = "Mult";
-pub(crate) const UNIT: &str = "Unit";
+pub const GRADE: &str = "Mult";
+pub const UNIT: &str = "Unit";
 
 /// Имя ветки, принимающей значение вычисления.
 pub(crate) const RETURN: &str = "return";
@@ -267,11 +267,11 @@ fn digits(text: &str) -> Option<u128> {
 
 /// Имя резумпции. Связывает его сама форма хендлера (§3.4), поэтому оно и
 /// единственное в языке магическое: вложенный хендлер его затеняет.
-pub(crate) const RESUME: &str = "resume";
+pub const RESUME: &str = "resume";
 
 /// Имя состояния параметризованного хендлера. Связывает его та же форма и по
 /// той же причине - см. [`RESUME`] (§10 вопрос 86).
-pub(crate) const STATE: &str = "state";
+pub const STATE: &str = "state";
 
 /// Что написанный тип говорит о теле клаузы - после того, как паттерны сняли
 /// свои связывания.
@@ -1703,7 +1703,7 @@ impl<'a> Elaborator<'a> {
     /// массива (§10 вопрос 155).
     fn resolves(&self, name: &ast::Name, bound: &[Symbol]) -> bool {
         is_reference(&name.text)
-            || &*name.text == "Type"
+            || &*name.text == prim::TYPE
             || Prim::taken(&name.text)
             || bound.contains(&name.text)
             || self.local(&name.text).is_some()
@@ -3595,13 +3595,13 @@ impl<'a> Elaborator<'a> {
         }
         // `Type` заслоняется локальным связыванием, но не определением: имя
         // занято языком, и переопределить его нечем.
-        if &*name.text == "Type" {
+        if &*name.text == prim::TYPE {
             return Ok(Term::Universe(self.metas.fresh_level()));
         }
         // Сорт `Effect` пишется именем и заслоняется тем же правилом, что и
         // `Type`: локальным связыванием - да, определением - нет. Уровня у него
         // нет, поэтому и дырки заводить не под что (§3.4).
-        if &*name.text == "Effect" {
+        if &*name.text == prim::EFFECT {
             return Ok(Term::EffectKind);
         }
         // Член объявляемой группы и сосед по модулю - **раньше** имён, занятых

@@ -55,7 +55,7 @@ cargo test --workspace --doc
 adamas-design.md              source of truth по дизайну
 crates/adamas-core/           ядро: core language, elaborator, type checker
 crates/adamas-cli/            драйвер `adamas`
-crates/adamas-lsp/            LSP-сервер (заглушка до Фазы 3)
+crates/adamas-lsp/            LSP-сервер: диагностика поверх stdio
 crates/adamas-warmup-stlc/    учебный STLC+HM Фазы 0; ядро от него не зависит
 docs/reading-notes/           конспекты статей
 docs/examples/                примеры кода на Adamas

@@ -33,7 +33,7 @@ use crate::error::{ElabError, Names};
 /// путь до места отказа.
 ///
 /// Части собирает [`Diagnostic`], печатает - [`Diagnostic::rendered`]: тот же
-/// текст уходит в редактор, и собран он обязан быть один раз ([`crate::diag`]).
+/// текст уходит в редактор, и собран он обязан быть один раз.
 #[must_use]
 pub fn report(file: &SourceFile, error: &ElabError) -> String {
     Diagnostic::of_error(error).rendered(file)

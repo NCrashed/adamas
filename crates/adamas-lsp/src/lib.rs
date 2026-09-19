@@ -4,9 +4,9 @@
 //!
 //! `initialize`, `textDocument/didOpen`, `didChange`, `didClose` и
 //! `textDocument/publishDiagnostics` - те же отказы и предупреждения, что
-//! печатает `adamas check`, на тех же местах. Сверх того `textDocument/hover`
-//! - тип имени под курсором, первая из возможностей §7.2, -
-//! `textDocument/definition` внутри файла и `semanticTokens/full` - подсветка
+//! печатает `adamas check`, на тех же местах. Сверх того три возможности:
+//! `textDocument/hover` — тип имени под курсором, первая из названных §7.2;
+//! `textDocument/definition` внутри файла; `semanticTokens/full` — подсветка
 //! от настоящего разбора, без второй грамматики ([`tokens`]).
 //!
 //! # Проход целиком, без инкрементального ядра

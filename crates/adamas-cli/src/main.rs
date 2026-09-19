@@ -2,6 +2,15 @@
 //!
 //! Полный набор команд (`new`, `build`, `test`, `run`, `check`, `fmt`, `doc`) —
 //! §7.1. Пока есть только `check`.
+//!
+//! # `check --type`
+//!
+//! §7.2 обещает, что в редакторе видно то же, что в терминале, и трек A волны 1
+//! Фазы 9 это исполнил для диагностики. У hover'а обещание то же, но проверить
+//! его было нечем: типов `adamas check` не печатал вовсе, а типы в сообщениях
+//! об отказе — инстанцированные местом использования, то есть не те. `--type`
+//! печатает объявленный тип тем же вызовом, каким его отдаёт hover, и тем
+//! самым переводит обещание из слов в прогон (`tests/hover.rs`).
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +34,9 @@ enum Command {
     Check {
         /// Путь к файлу `.adamas`.
         path: PathBuf,
+        /// Напечатать тип имени вместо счёта объявлений (§7.2). Можно повторять.
+        #[arg(long, value_name = "ИМЯ")]
+        r#type: Vec<String>,
     },
     /// Проверить и исполнить определение (§9 Фаза 5).
     Eval {
@@ -41,9 +53,18 @@ enum Command {
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
-        Command::Check { path } => {
+        Command::Check { path, r#type } => {
             let (file, signature) = checked(&path)?;
-            println!("{}: проверено, объявлений {}", file.name(), signature.len());
+            if r#type.is_empty() {
+                println!("{}: проверено, объявлений {}", file.name(), signature.len());
+                return Ok(());
+            }
+            for name in &r#type {
+                let Some(shown) = adamas_elab::cursor::described(&signature, name) else {
+                    anyhow::bail!("имя `{name}` сигнатуре неизвестно");
+                };
+                println!("{shown}");
+            }
             Ok(())
         }
         Command::Eval { path, name, full } => evaluate(&path, &name, full),

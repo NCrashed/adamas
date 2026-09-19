@@ -9,6 +9,21 @@ use proptest::prelude::*;
 /// одних примерах, а печать проверялась на других.
 const PROGRAMS: &[(&str, &str)] = &[
     (
+        // Обе формы §4.8 плюс оператор в списке: печать импорта - единственная
+        // форма, которой в корпусе печати не было, а `adamas fmt` (§7.1) ходит
+        // по тому же коду, что и круг ниже.
+        "imports",
+        "\
+import Data.Map as Map
+import Concurrent (Nursery, spawn, await, withNursery)
+import Prelude ((++))
+import Bare
+
+example : Map.Map String
+example = Map.empty
+",
+    ),
+    (
         "signature_and_clauses",
         "\
 map : (a -> b) -> Vect n a -> Vect n b

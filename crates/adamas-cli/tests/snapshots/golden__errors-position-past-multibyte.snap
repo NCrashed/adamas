@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: position-past-multibyte.adamas:20:18: ожидалась функция, получено значение типа `Nat`
+  двойка = {- 😀 -} Succ Zero Zero
+                   ^^^^^^^^^^^^^^
+  путь: тело `двойка`

@@ -26,21 +26,36 @@ use adamas_core::row::{Row, RowMeta, Tail};
 use adamas_core::source::{Location, SourceFile, Span};
 use adamas_core::term::{Args, Binder, Case, Fields, Index, Name, Term};
 
+use crate::diag::{Diagnostic, Related};
 use crate::error::{ElabError, Names};
 
 /// Сообщение целиком: позиция, строка исходника с подчёркиванием, телескоп и
 /// путь до места отказа.
+///
+/// Части собирает [`Diagnostic`], печатает - [`Diagnostic::rendered`]: тот же
+/// текст уходит в редактор, и собран он обязан быть один раз.
 #[must_use]
 pub fn report(file: &SourceFile, error: &ElabError) -> String {
-    let mut out = located(file, error.span(), &message(error));
-    if let ElabError::DetachedSignature { signature, .. } = error {
-        out.push('\n');
-        out.push_str(&located(file, *signature, "сигнатура написана здесь"));
+    Diagnostic::of_error(error).rendered(file)
+}
+
+/// Хвост сообщения: телескоп точки отказа и пройденный путь. Пуст, если
+/// отказало не ядро.
+pub(crate) fn detail(error: &ElabError) -> String {
+    error.core().map_or_else(String::new, |core| {
+        explain(core, error.names().unwrap_or(&Names::default()))
+    })
+}
+
+/// Прочие места того же отказа.
+pub(crate) fn related(error: &ElabError) -> Vec<Related> {
+    match error {
+        ElabError::DetachedSignature { signature, .. } => vec![Related {
+            span: *signature,
+            message: "сигнатура написана здесь".to_owned(),
+        }],
+        _ => Vec::new(),
     }
-    if let Some(core) = error.core() {
-        out.push_str(&explain(core, error.names().unwrap_or(&Names::default())));
-    }
-    out
 }
 
 /// Позиция, строка исходника и подчёркивание под фрагментом.
@@ -69,9 +84,9 @@ pub fn located(file: &SourceFile, span: Span, message: &str) -> String {
     )
 }
 
-/// Текст отказа. У отказа ядра он собирается заново - с именами и локальными
-/// номерами дырок.
-fn message(error: &ElabError) -> String {
+/// Первая строка сообщения - та, что стоит после позиции. У отказа ядра она
+/// собирается заново: с именами и локальными номерами дырок.
+pub(crate) fn headline(error: &ElabError) -> String {
     match error.core() {
         Some(core) => {
             let mut kind = core.kind.clone();

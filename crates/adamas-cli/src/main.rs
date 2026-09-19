@@ -83,33 +83,26 @@ fn evaluate(path: &Path, name: &str, full: bool) -> anyhow::Result<()> {
 }
 
 /// Разбор, элаборация и проверка типов - общая половина обеих команд.
+///
+/// Сам проход делает [`adamas_elab::analyze`], и делает его же LSP-сервер:
+/// текст в редакторе обязан совпадать с текстом в терминале, а держится это
+/// тем, что путь один, а не тем, что две записи сообщения совпали.
+/// Элаборация при этом не в TCB - она отдаёт терм, корректность его
+/// устанавливает `check` (§3).
 fn checked(path: &Path) -> anyhow::Result<(SourceFile, adamas_core::sig::Signature)> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("не удалось прочитать {}", path.display()))?;
     let file = SourceFile::new(path.display().to_string(), text);
 
-    // Текст → дерево. Ошибка лексики, layout'а и разбора несёт спан.
-    let module = match adamas_parser::parse(file.text()) {
-        Ok(module) => module,
-        Err(error) => anyhow::bail!(
-            "{}",
-            adamas_elab::located(&file, error.span(), &error.to_string())
-        ),
-    };
-
-    // Дерево → термы ядра и следом проверка типов: элаборация не в TCB, она
-    // отдаёт терм, а корректность его устанавливает `check` (§3).
-    let signature = match adamas_elab::elaborate(&module) {
-        Ok(signature) => signature,
-        Err(error) => anyhow::bail!("{}", adamas_elab::report(&file, &error)),
-    };
-
-    let (signature, warnings) = signature;
-    for warning in &warnings {
-        eprintln!(
-            "{}",
-            adamas_elab::located(&file, warning.span(), &warning.to_string())
-        );
+    let analysis = adamas_elab::analyze(file.text());
+    if let Some(error) = analysis.error() {
+        anyhow::bail!("{}", error.rendered(&file));
     }
+    for diagnostic in &analysis.diagnostics {
+        eprintln!("{}", diagnostic.rendered(&file));
+    }
+    let signature = analysis
+        .signature
+        .ok_or_else(|| anyhow::anyhow!("{}: проход не отдал сигнатуры", file.name()))?;
     Ok((file, signature))
 }

@@ -1,0 +1,18 @@
+-- Комбинаторы. Кратности написаны, потому что `flip` и `comp` их переставляют.
+
+import Std.Base (Pair, MkPair)
+
+identity : {q : Mult} -> (q x : a) -> a
+identity x = x
+
+konst : {q : Mult} -> (q x : a) -> (0 y : b) -> a
+konst x y = x
+
+flip : {q r : Mult} -> (ω f : (q x : a) -> (r y : b) -> c) -> (r v : b) -> (q u : a) -> c
+flip f v u = f u v
+
+comp : {q r : Mult} -> (ω f : (q y : b) -> c) -> (ω g : (r x : a) -> b) -> (q * r z : a) -> c
+comp f g x = f (g x)
+
+both : {q r : Mult} -> (ω f : (q x : a) -> b) -> (ω g : (r y : a) -> c) -> (q + r z : a) -> Pair b c
+both f g z = MkPair (f z) (g z)

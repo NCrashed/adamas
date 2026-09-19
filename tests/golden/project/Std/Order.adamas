@@ -1,0 +1,28 @@
+-- Порядок: суперкласс пишется `when`, и `Eqv` для него приходит из другого
+-- файла. `import Std.Classes` без списка - модуль нужен объявлением, а имена
+-- классов и так имена программы.
+
+import Std.Base (Bool, False, True, Nat, Zero, Succ, List, Nil, Cons)
+import Std.Classes
+
+class Ord a when Eqv a where
+  lte : a -> a -> Bool
+
+instance Ord Nat where
+  lte Zero m = True
+  lte (Succ k) Zero = False
+  lte (Succ k) (Succ m) = lte k m
+
+-- Рекурсия под констрейнтом: словарь на ссылке к себе берётся из связывания
+-- сигнатуры, а не ищется среди инстансов - `a` тут переменная.
+maximum : {Ord a} => a -> List a -> a
+maximum best Nil = best
+maximum best (Cons x xs) = if lte best x then maximum x xs else maximum best xs
+
+elem : {Eqv a} => a -> List a -> Bool
+elem x Nil = False
+elem x (Cons y ys) = if eq x y then True else elem x ys
+
+nub : {Eqv a} => List a -> List a
+nub Nil = Nil
+nub (Cons x xs) = if elem x xs then nub xs else Cons x (nub xs)

@@ -1,0 +1,46 @@
+-- Списки. Подключает три модуля - свёртки зовут `plus`, `reverse` зовёт `flip`,
+-- `filterList` разбирает `Bool`.
+
+import Std.Base (Bool, False, True, Nat, Zero, Succ, List, Nil, Cons)
+import Std.Arith (plus)
+import Std.Combinator (flip)
+
+foldr : {q : Mult} -> (ω f : (q x : a) -> (1 acc : b) -> b) -> (1 z : b) -> (q xs : List a) -> b
+foldr f z Nil = z
+foldr f z (Cons x xs) = f x (foldr f z xs)
+
+foldl : {q : Mult} -> (ω f : (1 acc : b) -> (q x : a) -> b) -> (1 z : b) -> (q xs : List a) -> b
+foldl f z Nil = z
+foldl f z (Cons x xs) = foldl f (f z x) xs
+
+append : List a -> (1 ys : List a) -> List a
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+mapList : {q : Mult} -> (ω f : (q x : a) -> b) -> (q xs : List a) -> List b
+mapList f Nil = Nil
+mapList f (Cons x xs) = Cons (f x) (mapList f xs)
+
+filterList : (ω p : a -> Bool) -> List a -> List a
+filterList p Nil = Nil
+filterList p (Cons x xs) = if p x then Cons x (filterList p xs) else filterList p xs
+
+length : List a -> Nat
+length Nil = Zero
+length (Cons x xs) = Succ (length xs)
+
+reverse : List a -> List a
+reverse xs = foldl (flip Cons) Nil xs
+
+sum : List Nat -> Nat
+sum xs = foldr plus Zero xs
+
+digits : List Nat
+digits = Cons (Succ Zero) (Cons (Succ (Succ Zero)) (Cons (Succ (Succ (Succ Zero))) Nil))
+
+succOf : Nat -> Nat
+succOf n = Succ n
+
+-- Линейная функция: `Functor.map` берёт `{q : Mult}`, и с такой он работает.
+onceOf : (1 n : Nat) -> Nat
+onceOf n = Succ (Succ n)

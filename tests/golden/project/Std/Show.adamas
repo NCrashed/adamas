@@ -1,0 +1,28 @@
+-- Алиас, экзистенциал и `Maybe` как монада.
+
+import Std.Base (Bool, False, True, Nat, Zero, Succ, Maybe, Nothing, Just)
+import Std.Classes
+
+Pred : Type -> Type
+Pred a = a -> Bool
+
+isZero : Pred Nat
+isZero Zero = True
+isZero (Succ k) = False
+
+-- Экзистенциал поднятым именем: носитель спрятан, свидетель рядом.
+data Showable where
+  MkShowable : a -> (a -> Bool) -> Showable
+
+runShowable : Showable -> Bool
+runShowable (MkShowable x f) = f x
+
+zeroInside : Showable
+zeroInside = MkShowable Zero isZero
+
+nextJust : Maybe Nat -> Maybe Nat
+nextJust m = bind m (\n -> Just (Succ n))
+
+fromMaybe : (1 d : a) -> Maybe a -> a
+fromMaybe d Nothing = d
+fromMaybe d (Just x) = x

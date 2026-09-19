@@ -24,6 +24,7 @@ bench = false
 [dependencies]
 adamas-core.workspace = true
 adamas-elab.workspace = true
+adamas-parser.workspace = true
 anyhow = "1"
 # Каркас JSON-RPC от rust-analyzer: рамка сообщений, потоки чтения и записи,
 # рукопожатие `initialize`/`shutdown`. Синхронный и крошечный - ровно под

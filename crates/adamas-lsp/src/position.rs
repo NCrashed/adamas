@@ -64,7 +64,12 @@ impl Encoding {
     }
 
     /// Сколько единиц занимает кусок текста.
-    fn units(self, text: &str) -> usize {
+    ///
+    /// Публична ради длины семантического токена ([`crate::tokens`]): она
+    /// меряется той же единицей, что и колонка, и считать её вторым способом
+    /// значило бы завести вторую арифметику той же кодировки.
+    #[must_use]
+    pub fn units(self, text: &str) -> usize {
         match self {
             Self::Utf8 => text.len(),
             Self::Utf16 => text.chars().map(char::len_utf16).sum(),

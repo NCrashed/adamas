@@ -42,13 +42,16 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
+use lsp_types::request::{Request as _, SemanticTokensFullRequest};
 use lsp_types::{
     DiagnosticRelatedInformation, DiagnosticSeverity, InitializeParams, InitializeResult, Location,
-    PositionEncodingKind, PublishDiagnosticsParams, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    PositionEncodingKind, PublishDiagnosticsParams, SemanticTokens, SemanticTokensFullOptions,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensServerCapabilities,
+    ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 
 pub mod position;
+pub mod tokens;
 
 /// Типы протокола. Ре-экспорт, чтобы у тех, кто зовёт [`diagnostics`], не
 /// заводилась вторая запись версии `lsp-types` в своём манифесте.
@@ -121,8 +124,32 @@ pub fn capabilities(encoding: Encoding) -> ServerCapabilities {
     ServerCapabilities {
         position_encoding: Some(encoding.kind()),
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        // Подсветка приходит от разбора, а не от второй грамматики
+        // ([`tokens`]). Только `full`: весь файл красится за 1,2 мс на
+        // капстоуне в 944 строки, и ни диапазон, ни дельта за такие деньги не
+        // покупаются - у обоих своя арифметика, то есть своё место разойтись.
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
+                legend: tokens::legend(),
+                full: Some(SemanticTokensFullOptions::Bool(true)),
+                range: Some(false),
+                work_done_progress_options: lsp_types::WorkDoneProgressOptions::default(),
+            },
+        )),
         ..ServerCapabilities::default()
     }
+}
+
+/// Семантические токены файла.
+///
+/// Публичная по той же причине, что [`diagnostics`]: цикл сервера зовёт её же,
+/// и второго пути к подсветке нет.
+#[must_use]
+pub fn semantic_tokens(file: &SourceFile, encoding: Encoding) -> Vec<lsp_types::SemanticToken> {
+    // Тот же вызов, что даёт диагностику: дерево и отказы приходят разом, и
+    // разойтись подсветке с подчёркиванием негде.
+    let analysis = adamas_elab::analyze(file.text());
+    tokens::tokens(file, analysis.module.as_ref(), encoding)
 }
 
 /// Диагностика файла в виде протокола.
@@ -183,13 +210,19 @@ fn serve(connection: &Connection, encoding: Encoding) -> anyhow::Result<()> {
                 if connection.handle_shutdown(&request)? {
                     return Ok(());
                 }
-                // Возможности сервера объявлены в `initialize`; всё, чего там
-                // нет, честнее отклонить, чем оставить клиента ждать.
-                connection.sender.send(Message::Response(Response::new_err(
-                    request.id,
-                    ErrorCode::MethodNotFound as i32,
-                    format!("метод `{}` сервером не поддержан", request.method),
-                )))?;
+                let answer = match request.method.as_str() {
+                    SemanticTokensFullRequest::METHOD => {
+                        highlight(encoding, &documents, request.id.clone(), &request.params)
+                    }
+                    // Возможности сервера объявлены в `initialize`; всё, чего
+                    // там нет, честнее отклонить, чем оставить клиента ждать.
+                    method => Response::new_err(
+                        request.id.clone(),
+                        ErrorCode::MethodNotFound as i32,
+                        format!("метод `{method}` сервером не поддержан"),
+                    ),
+                };
+                connection.sender.send(Message::Response(answer))?;
             }
             Message::Notification(note) => {
                 // Уведомление, которое не разобралось, сервер не роняет:
@@ -208,6 +241,37 @@ fn serve(connection: &Connection, encoding: Encoding) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Ответ на `textDocument/semanticTokens/full`.
+///
+/// Буфер неизвестен - ответ пустой, а не отказ: клиент вправе спросить
+/// подсветку у файла, уведомления о котором сервер ещё не получил, и отказ на
+/// этом рисовался бы человеку ошибкой там, где её нет.
+fn highlight(
+    encoding: Encoding,
+    documents: &HashMap<String, String>,
+    id: lsp_server::RequestId,
+    params: &serde_json::Value,
+) -> Response {
+    let params: SemanticTokensParams = match serde_json::from_value(params.clone()) {
+        Ok(params) => params,
+        Err(error) => {
+            return Response::new_err(id, ErrorCode::InvalidParams as i32, error.to_string());
+        }
+    };
+    let uri = params.text_document.uri;
+    let data = documents
+        .get(uri.as_str())
+        .map(|text| semantic_tokens(&SourceFile::new(uri.as_str(), text.as_str()), encoding))
+        .unwrap_or_default();
+    Response::new_ok(
+        id,
+        SemanticTokens {
+            result_id: None,
+            data,
+        },
+    )
 }
 
 /// Одно уведомление.

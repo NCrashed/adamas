@@ -94,6 +94,7 @@ name = "adamas-pkg"
 version = "0.0.0"
 dependencies = [
  "adamas-elab",
+ "tempfile",
  "thiserror",
  "toml",
 ]

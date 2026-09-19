@@ -169,11 +169,19 @@ impl Lock {
     /// оптимизация: перезапись без изменений трогает mtime и сбивает всякого,
     /// кто по нему судит о работе.
     ///
+    /// Проекту без зависимостей файл не заводится: запирать в нём нечего, а
+    /// лишний файл в каталоге всякого, кто просто проверил программу, -
+    /// мусор. Уже заведённый при этом обновляется и пустым: последняя
+    /// зависимость, убранная из манифеста, обязана уйти и отсюда.
+    ///
     /// # Errors
     ///
     /// Файл не пишется.
     pub fn save(&self, dir: &Path) -> Result<bool, PkgError> {
         let path = dir.join(LOCKFILE);
+        if self.packages.is_empty() && !path.exists() {
+            return Ok(false);
+        }
         let text = self.rendered();
         if std::fs::read_to_string(&path).is_ok_and(|old| old == text) {
             return Ok(false);
@@ -237,6 +245,26 @@ mod tests {
         let mut expected = lock.packages;
         expected.sort_by(|left, right| left.prefix.cmp(&right.prefix));
         assert_eq!(back.packages, expected);
+    }
+
+    /// Пустой замок не заводится, а заведённый - опустошается.
+    #[test]
+    fn an_empty_lock_is_written_only_over_an_existing_one() {
+        let scratch = tempfile::tempdir().expect("каталог");
+        let dir = scratch.path();
+
+        assert!(!Lock::default().save(dir).expect("запись"));
+        assert!(!dir.join(LOCKFILE).exists(), "файл заведён на пустом месте");
+
+        let filled = Lock {
+            packages: vec![pinned("Std", "file:///std", &"d".repeat(40))],
+        };
+        assert!(filled.save(dir).expect("запись"));
+        assert!(Lock::default().save(dir).expect("запись"));
+        assert!(
+            Lock::open(dir).expect("чтение").packages.is_empty(),
+            "убранная зависимость осталась в замке"
+        );
     }
 
     #[test]

@@ -21,3 +21,8 @@ thiserror = "2"
 # крейтов вместе с `serde`, `serde_spanned` и выводом `derive`; `DeTable`
 # из parse-only даёт то же дерево за пять и без proc-macro.
 toml = { version = "1", default-features = false, features = ["parse"] }
+
+[dev-dependencies]
+# Уже в дереве через `criterion`: своего каталога `tests/` у этого крейта нет,
+# а `CARGO_TARGET_TMPDIR` виден только оттуда.
+tempfile = "3"

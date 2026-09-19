@@ -64,9 +64,12 @@ fn universe(ty: &Expr) -> bool {
     matches!(&ty.kind, ExprKind::Name(name) if &*name.text == prim::TYPE)
 }
 
+/// Имя типа кратностей: `{q : Mult} -> (q x : a) -> a` (§10 вопрос 41).
+/// Занято языком - параметр кратности иначе не написать.
+pub const GRADE: &str = "Mult";
+
 /// Имя единицы. Соглашение то же, каким `if` берёт `Bool` (§3.4): типа этого
 /// ядро не знает, а сахар `{ε} A` без него не разворачивается.
-pub const GRADE: &str = "Mult";
 pub const UNIT: &str = "Unit";
 
 /// Имя ветки, принимающей значение вычисления.

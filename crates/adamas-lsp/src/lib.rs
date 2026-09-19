@@ -125,9 +125,10 @@ pub fn capabilities(encoding: Encoding) -> ServerCapabilities {
         position_encoding: Some(encoding.kind()),
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         // Подсветка приходит от разбора, а не от второй грамматики
-        // ([`tokens`]). Только `full`: весь файл красится за 1,2 мс на
-        // капстоуне в 944 строки, и ни диапазон, ни дельта за такие деньги не
-        // покупаются - у обоих своя арифметика, то есть своё место разойтись.
+        // ([`tokens`]). Только `full`: по готовому дереву капстоун в 944
+        // строки красится за 0,7 мс, и ни диапазон, ни дельта за такие деньги
+        // не покупаются - у обоих своя арифметика, то есть своё место
+        // разойтись.
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
                 legend: tokens::legend(),
@@ -142,8 +143,8 @@ pub fn capabilities(encoding: Encoding) -> ServerCapabilities {
 
 /// Семантические токены файла.
 ///
-/// Публичная по той же причине, что [`diagnostics`]: цикл сервера зовёт её же,
-/// и второго пути к подсветке нет.
+/// Публичная по той же причине, что [`diagnostics`]: цикл сервера красит тем
+/// же, и второго пути к подсветке нет.
 #[must_use]
 pub fn semantic_tokens(file: &SourceFile, encoding: Encoding) -> Vec<lsp_types::SemanticToken> {
     // Тот же вызов, что даёт диагностику: дерево и отказы приходят разом, и
@@ -159,7 +160,24 @@ pub fn semantic_tokens(file: &SourceFile, encoding: Encoding) -> Vec<lsp_types::
 /// сообщению нет.
 #[must_use]
 pub fn diagnostics(uri: &Uri, file: &SourceFile, encoding: Encoding) -> Vec<lsp_types::Diagnostic> {
-    adamas_elab::analyze(file.text())
+    found_in(uri, file, &adamas_elab::analyze(file.text()), encoding)
+}
+
+/// Диагностика по уже сделанному проходу.
+///
+/// Проход отделён от перевода в протокол ровно затем, чтобы сервер делал его
+/// **один раз** на правку: подчёркивание и подсветка берутся из одного
+/// [`adamas_elab::Analysis`]. Порознь они стоили бы двух проверок типов - 46
+/// мс вместо 46 на капстоуне в 944 строки, - и вторая уходила бы в ту же
+/// правку.
+#[must_use]
+pub fn found_in(
+    uri: &Uri,
+    file: &SourceFile,
+    analysis: &adamas_elab::Analysis,
+    encoding: Encoding,
+) -> Vec<lsp_types::Diagnostic> {
+    analysis
         .diagnostics
         .iter()
         .map(|found| translate(uri, file, found, encoding))
@@ -197,13 +215,27 @@ fn translate(
     }
 }
 
+/// Открытый буфер: текст и то, что из него вышло на последней проверке.
+///
+/// Дерево хранится, потому что за правку его строят **один раз**: проверка
+/// идёт на уведомлении, а запрос подсветки приходит следом и берёт готовое.
+/// Иначе тот же капстоун проверялся бы дважды - 46 мс на подчёркивание и ещё
+/// 46 на цвет, - при том, что сама покраска стоит 0,7 мс.
+#[derive(Debug, Default)]
+struct Document {
+    /// Текст, как его прислал клиент.
+    text: String,
+    /// Дерево последней проверки. `None` - текст не разобрался.
+    module: Option<adamas_parser::ast::Module>,
+}
+
 /// Главный цикл: уведомления меняют буфер и вызывают проверку, запросы пока
 /// только закрывают сервер.
 fn serve(connection: &Connection, encoding: Encoding) -> anyhow::Result<()> {
     // Ключ - текст URI, а не сам `Uri`: в `lsp-types` он несёт `Cell` с
     // разбором, то есть внутреннюю изменяемость, и ключом хеш-таблицы быть не
     // должен.
-    let mut documents: HashMap<String, String> = HashMap::new();
+    let mut documents: HashMap<String, Document> = HashMap::new();
     for message in &connection.receiver {
         match message {
             Message::Request(request) => {
@@ -250,7 +282,7 @@ fn serve(connection: &Connection, encoding: Encoding) -> anyhow::Result<()> {
 /// этом рисовался бы человеку ошибкой там, где её нет.
 fn highlight(
     encoding: Encoding,
-    documents: &HashMap<String, String>,
+    documents: &HashMap<String, Document>,
     id: lsp_server::RequestId,
     params: &serde_json::Value,
 ) -> Response {
@@ -263,7 +295,10 @@ fn highlight(
     let uri = params.text_document.uri;
     let data = documents
         .get(uri.as_str())
-        .map(|text| semantic_tokens(&SourceFile::new(uri.as_str(), text.as_str()), encoding))
+        .map(|document| {
+            let file = SourceFile::new(uri.as_str(), document.text.as_str());
+            tokens::tokens(&file, document.module.as_ref(), encoding)
+        })
         .unwrap_or_default();
     Response::new_ok(
         id,
@@ -278,7 +313,7 @@ fn highlight(
 fn handle(
     connection: &Connection,
     encoding: Encoding,
-    documents: &mut HashMap<String, String>,
+    documents: &mut HashMap<String, Document>,
     note: &Notification,
 ) -> anyhow::Result<()> {
     match note.method.as_str() {
@@ -286,7 +321,13 @@ fn handle(
             let params: lsp_types::DidOpenTextDocumentParams =
                 serde_json::from_value(note.params.clone())?;
             let document = params.text_document;
-            documents.insert(document.uri.as_str().to_owned(), document.text);
+            documents.insert(
+                document.uri.as_str().to_owned(),
+                Document {
+                    text: document.text,
+                    module: None,
+                },
+            );
             publish(
                 connection,
                 encoding,
@@ -301,7 +342,13 @@ fn handle(
             // Синхронизация полная, поэтому правка ровно одна и она - весь
             // текст. Пустой список правок оставляет буфер как был.
             if let Some(change) = params.content_changes.into_iter().next_back() {
-                documents.insert(params.text_document.uri.as_str().to_owned(), change.text);
+                documents.insert(
+                    params.text_document.uri.as_str().to_owned(),
+                    Document {
+                        text: change.text,
+                        module: None,
+                    },
+                );
             }
             publish(
                 connection,
@@ -331,23 +378,26 @@ fn handle(
     Ok(())
 }
 
-/// Проверяет буфер и шлёт его диагностику.
+/// Проверяет буфер, запоминает дерево и шлёт диагностику.
 fn publish(
     connection: &Connection,
     encoding: Encoding,
-    documents: &HashMap<String, String>,
+    documents: &mut HashMap<String, Document>,
     uri: &Uri,
     version: Option<i32>,
 ) -> anyhow::Result<()> {
-    let Some(text) = documents.get(uri.as_str()) else {
+    let Some(document) = documents.get_mut(uri.as_str()) else {
         return Ok(());
     };
-    let file = SourceFile::new(uri.as_str(), text.as_str());
+    let file = SourceFile::new(uri.as_str(), document.text.as_str());
+    let analysis = adamas_elab::analyze(document.text.as_str());
+    let found = found_in(uri, &file, &analysis, encoding);
+    document.module = analysis.module;
     send(
         connection,
         &PublishDiagnosticsParams {
             uri: uri.clone(),
-            diagnostics: diagnostics(uri, &file, encoding),
+            diagnostics: found,
             version,
         },
     )

@@ -1204,21 +1204,49 @@ impl Prim {
         }
     }
 
+    /// Примитив по написанному имени.
+    ///
+    /// Порядок разбора - тот же, каким читает имя элаборация
+    /// (`adamas-elab/src/expr.rs`), и список тот же: [`Prim::taken`] построена
+    /// отсюда, поэтому «имя занято» и «вот что за ним стоит» не разъезжаются.
+    /// Исключение одно - дополнение (`notT`): за ним стоит не примитив, а
+    /// применение `xorT` к единицам, и вернуть его этой функцией нечем.
+    #[must_use]
+    pub fn named(text: &str) -> Option<Self> {
+        if let Some(ty) = PrimTy::named(text) {
+            return Some(Self::Ty(ty));
+        }
+        if let Some((op, ty)) = PrimOp::named(text) {
+            return Some(Self::Op(op, ty));
+        }
+        if let Some((op, ty)) = PrimCmp::named(text) {
+            return Some(Self::Cmp(op, ty));
+        }
+        if let Some(op) = ArrayOp::named(text) {
+            return Some(Self::Over(op));
+        }
+        if let Some(op) = RegionOp::named(text) {
+            return Some(Self::In(op));
+        }
+        if let Some(op) = SimdOp::named(text) {
+            return Some(Self::Across(op));
+        }
+        match text {
+            ARRAY => Some(Self::Array),
+            BLOCK => Some(Self::Block),
+            // Хендл региона пишется `UInt64` (§4.11): имя занято затем, чтобы
+            // написанное `Ptr` значило это, а не чужое объявление.
+            PTR => Some(Self::Ty(PrimTy::UInt64)),
+            SIMD => Some(Self::Simd),
+            _ => None,
+        }
+    }
+
     /// Занято ли имя языком (§4.11, §3.6): примитив, массив, регион и операции
     /// над ними.
     #[must_use]
     pub fn taken(text: &str) -> bool {
-        PrimTy::named(text).is_some()
-            || PrimOp::named(text).is_some()
-            || complement(text).is_some()
-            || PrimCmp::named(text).is_some()
-            || ArrayOp::named(text).is_some()
-            || RegionOp::named(text).is_some()
-            || SimdOp::named(text).is_some()
-            || text == ARRAY
-            || text == BLOCK
-            || text == PTR
-            || text == SIMD
+        Self::named(text).is_some() || complement(text).is_some()
     }
 }
 

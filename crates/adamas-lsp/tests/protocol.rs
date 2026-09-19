@@ -153,6 +153,23 @@ mod client {
             self.diagnostics(uri)
         }
 
+        /// Подсказка над позицией.
+        pub(crate) fn hover(&mut self, uri: &str, line: u64, character: u64) -> Value {
+            self.request("textDocument/hover", &Self::at(uri, line, character))
+        }
+
+        /// Переход к определению с позиции.
+        pub(crate) fn definition(&mut self, uri: &str, line: u64, character: u64) -> Value {
+            self.request("textDocument/definition", &Self::at(uri, line, character))
+        }
+
+        fn at(uri: &str, line: u64, character: u64) -> Value {
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+            })
+        }
+
         /// Ближайший `publishDiagnostics` для этого URI.
         pub(crate) fn diagnostics(&mut self, uri: &str) -> Value {
             loop {
@@ -237,6 +254,8 @@ fn initialize_answers_with_capabilities() {
         json!(1),
         "1 - синхронизация целым текстом"
     );
+    assert_eq!(result["capabilities"]["hoverProvider"], json!(true));
+    assert_eq!(result["capabilities"]["definitionProvider"], json!(true));
     assert_eq!(result["serverInfo"]["name"], json!("adamas-lsp"));
     client.stop();
 }
@@ -374,11 +393,212 @@ fn closing_clears_the_diagnostics() {
 #[test]
 fn an_unsupported_request_is_refused() {
     let (mut client, _) = Client::start(None);
-    let answer = client.raw_request("textDocument/hover", &json!({}));
+    let answer = client.raw_request("textDocument/completion", &json!({}));
     assert_eq!(
         answer["error"]["code"],
         json!(-32601),
         "MethodNotFound: {answer}"
+    );
+    client.stop();
+}
+
+/// Запрос с негодными параметрами получает отказ, а не молчание и не падение.
+#[test]
+fn a_malformed_request_is_refused() {
+    let (mut client, _) = Client::start(None);
+    let answer = client.raw_request("textDocument/hover", &json!({ "position": 7 }));
+    assert_eq!(answer["error"]["code"], json!(-32601), "{answer}");
+    // Сервер жив: следующий запрос обслуживается.
+    client.open(URI, &fixture(FIXTURE));
+    assert_eq!(
+        client.hover(URI, LINE, 18)["contents"]["value"],
+        json!(SUCC)
+    );
+    client.stop();
+}
+
+/// Тип конструктора, как его печатает компилятор.
+const SUCC: &str = "Succ : (1 _ : Nat) -> Nat";
+
+/// Подсказка стоит **после** неASCII-текста на своей строке.
+///
+/// 18 - номер знака `Succ` в кодовых единицах UTF-16; байтами он 26, знаками
+/// 17. Числа записаны руками: сервер, считающий колонку байтами, на этом
+/// запросе покажет не `Succ`, а то, что стоит на 26-й единице, - и это `Zero`
+/// ниже. Обе половины перевода проверяются здесь сразу: колонка запроса идёт
+/// в смещение, а `range` ответа - обратно.
+#[test]
+fn a_hover_lands_past_multibyte_text() {
+    let (mut client, _) = Client::start(None);
+    client.open(URI, &fixture(FIXTURE));
+
+    let hover = client.hover(URI, LINE, 18);
+    assert_eq!(hover["contents"]["kind"], json!("plaintext"));
+    assert_eq!(hover["contents"]["value"], json!(SUCC));
+    assert_eq!(
+        hover["range"],
+        json!({
+            "start": { "line": LINE, "character": 18 },
+            "end": { "line": LINE, "character": 22 },
+        }),
+        "подсвечивается само имя"
+    );
+
+    // 26 - та самая колонка, которую байтовый счёт принял бы за `Succ`.
+    assert_eq!(
+        client.hover(URI, LINE, 26)["contents"]["value"],
+        json!("Zero : Nat"),
+        "на 26-й единице UTF-16 стоит `Zero`, а байтами там было бы `Succ`"
+    );
+    client.stop();
+}
+
+/// Два разных имени дают два разных ответа, а пустое место - никакого.
+#[test]
+fn a_hover_answers_by_what_is_under_it() {
+    let (mut client, _) = Client::start(None);
+    client.open(URI, &fixture(FIXTURE));
+
+    // 14,5 - имя семейства в `data Nat where`.
+    assert_eq!(
+        client.hover(URI, 14, 5)["contents"]["value"],
+        json!("Nat : Type 0")
+    );
+    // 15,2 - конструктор `Zero`.
+    assert_eq!(
+        client.hover(URI, 15, 2)["contents"]["value"],
+        json!("Zero : Nat")
+    );
+    assert_ne!(
+        client.hover(URI, 15, 2)["contents"]["value"],
+        client.hover(URI, 16, 2)["contents"]["value"],
+        "`Zero` и `Succ` не могут отвечать одинаково"
+    );
+    // 19,6 - пробел за `двойка`: под курсором имени нет.
+    assert_eq!(client.hover(URI, LINE, 6), json!(null), "пустое место");
+    // Строка комментария целиком - тоже пустое место.
+    assert_eq!(client.hover(URI, 0, 10), json!(null), "комментарий");
+    client.stop();
+}
+
+/// Тип приходит и с буфера, который проверку **не проходит**.
+///
+/// Это и есть обычное состояние окна: слово дописывается посередине. `Succ`
+/// объявлен выше места отказа, и показать его тип нечему помешать; `двойка`,
+/// на которой проход остановился, типа не имеет.
+#[test]
+fn a_hover_survives_a_refusal() {
+    let (mut client, _) = Client::start(None);
+    let diagnostics = client.open(URI, &fixture(FIXTURE));
+    assert_eq!(
+        diagnostics.as_array().map(Vec::len),
+        Some(1),
+        "буфер сломан"
+    );
+    assert_eq!(
+        client.hover(URI, LINE, 18)["contents"]["value"],
+        json!(SUCC)
+    );
+    assert_eq!(
+        client.hover(URI, LINE, 0),
+        json!(null),
+        "`двойка` не объявилась: типа у неё нет"
+    );
+    client.stop();
+}
+
+/// Переход к определению внутри файла: имя ведёт к своему объявлению.
+#[test]
+fn a_definition_points_inside_the_file() {
+    let (mut client, _) = Client::start(None);
+    client.open(URI, &fixture(FIXTURE));
+
+    // `Succ` в теле -> строка конструктора, 16,2..16,6.
+    assert_eq!(
+        client.definition(URI, LINE, 18),
+        json!({
+            "uri": URI,
+            "range": {
+                "start": { "line": 16, "character": 2 },
+                "end": { "line": 16, "character": 6 },
+            },
+        })
+    );
+    // `двойка` клаузы -> её сигнатура строкой выше. Отказ переходу не помеха:
+    // место объявления знает дерево, а не сигнатура.
+    assert_eq!(
+        client.definition(URI, LINE, 0)["range"],
+        json!({
+            "start": { "line": 18, "character": 0 },
+            "end": { "line": 18, "character": 6 },
+        })
+    );
+    // `Nat` в типе конструктора -> строка `data Nat where`.
+    assert_eq!(
+        client.definition(URI, 16, 9)["range"]["start"],
+        json!({ "line": 14, "character": 5 })
+    );
+    assert_eq!(
+        client.definition(URI, LINE, 6),
+        json!(null),
+        "с пустого места идти некуда"
+    );
+    client.stop();
+}
+
+/// Связывание, **заслоняющее** определение того же имени.
+///
+/// Это и есть случай, на котором врёт дешёвый hover, «посмотреть имя в
+/// сигнатуре»: на корпусе таких заслонений 37. Здесь параметр клаузы назван
+/// так же, как определение выше, и над ним не должно быть ни типа
+/// определения, ни перехода к нему.
+///
+/// Имена кириллические намеренно: у них байт вдвое больше, чем единиц UTF-16,
+/// и колонка, записанная руками, различает счёт.
+#[test]
+fn a_local_binding_shadows_a_definition_of_the_same_name() {
+    const SOURCE: &str = "data Nat where\n  Zero : Nat\n  Succ : Nat -> Nat\n\n\
+                          один : Nat\nодин = Succ Zero\n\n\
+                          повтор : Nat -> Nat\nповтор Zero = Zero\nповтор один = Succ один\n";
+    let (mut client, _) = Client::start(None);
+    assert_eq!(client.open(URI, SOURCE), json!([]), "программа принята");
+
+    // 4,0 - определение `один`; 9,7 - одноимённый параметр клаузы; 9,19 - его
+    // использование.
+    assert_eq!(
+        client.hover(URI, 4, 0)["contents"]["value"],
+        json!("один : Nat")
+    );
+    assert_eq!(client.hover(URI, 9, 7), json!(null), "связывание, не имя");
+    assert_eq!(
+        client.hover(URI, 9, 19),
+        json!(null),
+        "заслонённое имя не отдаёт чужой тип"
+    );
+    let binder = json!({
+        "start": { "line": 9, "character": 7 },
+        "end": { "line": 9, "character": 11 },
+    });
+    assert_eq!(
+        client.definition(URI, 9, 19)["range"],
+        binder,
+        "переход ведёт к связыванию, а не к определению выше"
+    );
+    assert_eq!(client.definition(URI, 9, 7)["range"], binder);
+
+    // Имя группы клауз написано на каждой, а в дереве лежит однажды.
+    assert_eq!(
+        client.hover(URI, 9, 0)["contents"]["value"],
+        json!("повтор : (ω _ : Nat) -> {| e0} Nat"),
+        "имя второй клаузы - то же определение"
+    );
+    assert_eq!(
+        client.definition(URI, 9, 0)["range"],
+        json!({
+            "start": { "line": 7, "character": 0 },
+            "end": { "line": 7, "character": 6 },
+        }),
+        "вторая клауза ведёт к сигнатуре"
     );
     client.stop();
 }

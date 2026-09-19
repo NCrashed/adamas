@@ -43,6 +43,7 @@
 
 mod carrier;
 pub mod class;
+pub mod cursor;
 mod decl;
 mod diag;
 mod error;
@@ -57,7 +58,7 @@ mod render;
 mod route;
 mod warn;
 
-pub use decl::{elaborate, elaborate_into};
+pub use decl::{elaborate, elaborate_into, elaborated};
 pub use diag::{Analysis, Diagnostic, Related, Severity, analyze};
 pub use error::{ElabError, Missing, Names};
 pub use expr::is_reference;

@@ -145,7 +145,15 @@ impl Diagnostic {
 pub struct Analysis {
     /// Дерево поверхностного языка. Есть, если текст разобрался.
     pub module: Option<Module>,
-    /// Сигнатура. Есть, если программа принята.
+    /// Что успело объявиться. Есть, если текст разобрался; полна, если
+    /// программа принята.
+    ///
+    /// Частичная сигнатура нужна редактору (§7.2): буфер под курсором не
+    /// проверяется почти никогда - слово дописывается посередине, - а тип
+    /// имени, объявленного **выше** места отказа, известен и показывать его
+    /// нечему помешать. Содержимое её от этого не портится: `declare`
+    /// добавляет группу целиком и только проверенную, а та, на которой проход
+    /// остановился, в сигнатуру не попадает.
     pub signature: Option<Signature>,
     /// Отказы и предупреждения в порядке появления.
     pub diagnostics: Vec<Diagnostic>,
@@ -181,16 +189,13 @@ pub fn analyze(text: &str) -> Analysis {
             };
         }
     };
-    match crate::elaborate(&module) {
-        Ok((signature, warnings)) => Analysis {
-            module: Some(module),
-            signature: Some(signature),
-            diagnostics: warnings.iter().map(Diagnostic::of_warning).collect(),
-        },
-        Err(error) => Analysis {
-            module: Some(module),
-            signature: None,
-            diagnostics: vec![Diagnostic::of_error(&error)],
+    let (signature, outcome) = crate::elaborated(&module);
+    Analysis {
+        module: Some(module),
+        signature: Some(signature),
+        diagnostics: match outcome {
+            Ok(warnings) => warnings.iter().map(Diagnostic::of_warning).collect(),
+            Err(error) => vec![Diagnostic::of_error(&error)],
         },
     }
 }

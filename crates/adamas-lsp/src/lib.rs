@@ -4,7 +4,9 @@
 //!
 //! `initialize`, `textDocument/didOpen`, `didChange`, `didClose` и
 //! `textDocument/publishDiagnostics` - те же отказы и предупреждения, что
-//! печатает `adamas check`, на тех же местах.
+//! печатает `adamas check`, на тех же местах. Сверх того `textDocument/hover`
+//! - тип имени под курсором, первая из возможностей §7.2, - и
+//! `textDocument/definition` внутри файла.
 //!
 //! # Проход целиком, без инкрементального ядра
 //!
@@ -42,10 +44,13 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
+use lsp_types::request::{GotoDefinition, HoverRequest, Request as _};
 use lsp_types::{
-    DiagnosticRelatedInformation, DiagnosticSeverity, InitializeParams, InitializeResult, Location,
-    PositionEncodingKind, PublishDiagnosticsParams, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    DiagnosticRelatedInformation, DiagnosticSeverity, GotoDefinitionResponse, Hover, HoverContents,
+    HoverProviderCapability, InitializeParams, InitializeResult, Location, MarkupContent,
+    MarkupKind, OneOf, Position, PositionEncodingKind, PublishDiagnosticsParams,
+    ServerCapabilities, ServerInfo, TextDocumentPositionParams, TextDocumentSyncCapability,
+    TextDocumentSyncKind, Uri,
 };
 
 pub mod position;
@@ -121,8 +126,66 @@ pub fn capabilities(encoding: Encoding) -> ServerCapabilities {
     ServerCapabilities {
         position_encoding: Some(encoding.kind()),
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
+        definition_provider: Some(OneOf::Left(true)),
         ..ServerCapabilities::default()
     }
+}
+
+/// Тип имени под курсором (§7.2, первая из названных там возможностей).
+///
+/// Текст ответа собирает [`adamas_elab::cursor::shown`] - та же функция, что
+/// печатает `adamas check --type`. Второй записи типа нет, и это проверяется
+/// прогоном: `crates/adamas-cli/tests/hover.rs` запускает драйвер процессом.
+///
+/// `None` - курсор не на имени либо типа у имени сегодня нет (локальное
+/// связывание). Пустую подсказку слать нельзя: редактор нарисует пустое окно.
+#[must_use]
+pub fn hover(file: &SourceFile, position: Position, encoding: Encoding) -> Option<Hover> {
+    let offset = position::offset(file, position, encoding)?;
+    let analysis = adamas_elab::analyze(file.text());
+    let module = analysis.module.as_ref()?;
+    let found = adamas_elab::cursor::at(file.text(), module, offset)?;
+    let value = adamas_elab::cursor::shown(analysis.signature.as_ref()?, &found)?;
+    Some(Hover {
+        // Простым текстом, а не разметкой: подсказка есть одна строка
+        // `имя : тип`, и разметка в ней ничего не размечает. Ограждение кодом
+        // потребовало бы договариваться о `contentFormat` с клиентом.
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::PlainText,
+            value,
+        }),
+        range: Some(position::range(file, found.span, encoding)),
+    })
+}
+
+/// Где объявлено имя под курсором - внутри этого же файла.
+///
+/// Ищется по **дереву**, а не по [`adamas_core::sig::Signature::origin`]:
+/// таблица позиций заведена под DWARF и знает только определения с клаузами
+/// (1230 имён из 3436 на корпусе), а дерево знает каждое объявление и живёт с
+/// момента, когда текст разобрался. Отсюда же второе: переход работает на
+/// буфере, который проверку типов не проходит.
+///
+/// Многофайловых проектов сегодня нет (§7.3, следующая волна), поэтому ответ
+/// всегда указывает в тот же документ.
+#[must_use]
+pub fn definition(
+    uri: &Uri,
+    file: &SourceFile,
+    position: Position,
+    encoding: Encoding,
+) -> Option<Location> {
+    let offset = position::offset(file, position, encoding)?;
+    let module = adamas_elab::analyze(file.text()).module?;
+    let found = adamas_elab::cursor::at(file.text(), &module, offset)?;
+    let span = found
+        .binder
+        .or_else(|| adamas_elab::cursor::declaration(&module, &found.text, &found.within))?;
+    Some(Location {
+        uri: uri.clone(),
+        range: position::range(file, span, encoding),
+    })
 }
 
 /// Диагностика файла в виде протокола.
@@ -183,13 +246,9 @@ fn serve(connection: &Connection, encoding: Encoding) -> anyhow::Result<()> {
                 if connection.handle_shutdown(&request)? {
                     return Ok(());
                 }
-                // Возможности сервера объявлены в `initialize`; всё, чего там
-                // нет, честнее отклонить, чем оставить клиента ждать.
-                connection.sender.send(Message::Response(Response::new_err(
-                    request.id,
-                    ErrorCode::MethodNotFound as i32,
-                    format!("метод `{}` сервером не поддержан", request.method),
-                )))?;
+                connection
+                    .sender
+                    .send(Message::Response(answer(encoding, &documents, request)))?;
             }
             Message::Notification(note) => {
                 // Уведомление, которое не разобралось, сервер не роняет:
@@ -208,6 +267,52 @@ fn serve(connection: &Connection, encoding: Encoding) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Ответ на один запрос.
+///
+/// Запрос, которого нет среди объявленных возможностей, получает отказ, а не
+/// молчание: молчание вешает клиента. Кривые параметры - тот же отказ по той
+/// же причине, что кривое уведомление не роняет сервер.
+fn answer(
+    encoding: Encoding,
+    documents: &HashMap<String, String>,
+    request: lsp_server::Request,
+) -> Response {
+    let refuse = |message: String| {
+        Response::new_err(
+            request.id.clone(),
+            ErrorCode::MethodNotFound as i32,
+            message,
+        )
+    };
+    let asked: Option<TextDocumentPositionParams> = match request.method.as_str() {
+        HoverRequest::METHOD | GotoDefinition::METHOD => {
+            match serde_json::from_value(request.params.clone()) {
+                Ok(params) => Some(params),
+                Err(error) => return refuse(format!("параметры не разобраны: {error}")),
+            }
+        }
+        _ => None,
+    };
+    let Some(asked) = asked else {
+        return refuse(format!("метод `{}` сервером не поддержан", request.method));
+    };
+    let uri = asked.text_document.uri;
+    let Some(text) = documents.get(uri.as_str()) else {
+        // Буфер не открыт: ответ «нечего показать», а не отказ - файл могли
+        // закрыть, пока запрос летел.
+        return Response::new_ok(request.id, serde_json::Value::Null);
+    };
+    let file = SourceFile::new(uri.as_str(), text.as_str());
+    if request.method == HoverRequest::METHOD {
+        Response::new_ok(request.id, hover(&file, asked.position, encoding))
+    } else {
+        Response::new_ok(
+            request.id,
+            definition(&uri, &file, asked.position, encoding).map(GotoDefinitionResponse::Scalar),
+        )
+    }
 }
 
 /// Одно уведомление.

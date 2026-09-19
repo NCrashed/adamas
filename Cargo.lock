@@ -9,6 +9,7 @@ dependencies = [
  "adamas-core",
  "adamas-elab",
  "adamas-interp",
+ "adamas-lsp",
  "adamas-parser",
  "anyhow",
  "clap",

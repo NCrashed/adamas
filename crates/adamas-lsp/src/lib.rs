@@ -48,6 +48,9 @@ use lsp_types::{
 
 pub mod position;
 
+/// Типы протокола. Ре-экспорт, чтобы у тех, кто зовёт [`diagnostics`], не
+/// заводилась вторая запись версии `lsp-types` в своём манифесте.
+pub use lsp_types;
 pub use position::Encoding;
 
 /// Имя, под которым диагностика показывается в редакторе.

@@ -30,5 +30,8 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
+# Только ради `tests/lsp.rs`: сверка «текст в редакторе = текст в терминале»
+# живёт здесь, потому что путь к бинарю `adamas` знают лишь тесты его пакета.
+adamas-lsp.workspace = true
 criterion = "0.7"
 insta = "1"

@@ -26,6 +26,7 @@ adamas-core.workspace = true
 adamas-elab.workspace = true
 adamas-interp.workspace = true
 adamas-parser.workspace = true
+adamas-pkg.workspace = true
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 

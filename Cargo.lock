@@ -11,6 +11,7 @@ dependencies = [
  "adamas-interp",
  "adamas-lsp",
  "adamas-parser",
+ "adamas-pkg",
  "anyhow",
  "clap",
  "criterion",

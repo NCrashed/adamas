@@ -382,3 +382,29 @@ fn an_unsupported_request_is_refused() {
     );
     client.stop();
 }
+
+/// Кривое уведомление не уносит с собой открытые файлы.
+///
+/// Сервер держит буферы всех окон сразу; упасть на одном кадре значит погасить
+/// подчёркивания везде. Проверяется тем, что после негодного `didOpen` сервер
+/// отвечает на годный.
+#[test]
+fn a_malformed_notification_does_not_kill_the_server() {
+    let (mut client, _) = Client::start(None);
+    // `version` строкой вместо числа: клиент так писать не должен, но сервер
+    // живёт не потому, что клиент безупречен.
+    client.notify(
+        "textDocument/didOpen",
+        &json!({
+            "textDocument": {
+                "uri": URI,
+                "languageId": "adamas",
+                "version": "не число",
+                "text": "",
+            }
+        }),
+    );
+    let diagnostics = client.open(URI, &fixture(FIXTURE));
+    assert_eq!(diagnostics[0]["range"]["start"]["character"], json!(18));
+    client.stop();
+}

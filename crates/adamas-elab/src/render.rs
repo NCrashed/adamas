@@ -39,11 +39,6 @@ pub fn report(file: &SourceFile, error: &ElabError) -> String {
     Diagnostic::of_error(error).rendered(file)
 }
 
-/// Первая строка сообщения - та, что стоит после позиции.
-pub(crate) fn headline(error: &ElabError) -> String {
-    message(error)
-}
-
 /// Хвост сообщения: телескоп точки отказа и пройденный путь. Пуст, если
 /// отказало не ядро.
 pub(crate) fn detail(error: &ElabError) -> String {
@@ -89,9 +84,9 @@ pub fn located(file: &SourceFile, span: Span, message: &str) -> String {
     )
 }
 
-/// Текст отказа. У отказа ядра он собирается заново - с именами и локальными
-/// номерами дырок.
-fn message(error: &ElabError) -> String {
+/// Первая строка сообщения - та, что стоит после позиции. У отказа ядра она
+/// собирается заново: с именами и локальными номерами дырок.
+pub(crate) fn headline(error: &ElabError) -> String {
     match error.core() {
         Some(core) => {
             let mut kind = core.kind.clone();

@@ -551,9 +551,6 @@ const STATEFUL: &str = "#handleState.";
 /// Маска: пропуск одного одноимённого хендлера.
 const MASK: &str = "#mask.";
 
-/// Имя единицы: приостановленное вычисление запускается её значением.
-const UNIT: &str = "Unit";
-
 /// Имена питомника и файберов (§5.2) - те же пять, что знает машина.
 ///
 /// Читаются по имени, как их читает `adamas-interp/src/fiber.rs`. Постулатом
@@ -2940,11 +2937,14 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Единственный конструктор `Unit`: им запускается приостановленное.
+    ///
+    /// Имя единицы спрашивается у сигнатуры: подключённый файл объявляет её под
+    /// своим путём (§4.8), и написанное `Unit` после элаборации не находится.
     fn unit_name(&self) -> Result<Name, LowerError> {
-        match self.signature.constructors(UNIT) {
+        match self.signature.constructors(self.signature.unit()) {
             Some([only]) => Ok(Rc::clone(only)),
             _ => Err(LowerError::Unknown {
-                name: UNIT.to_owned(),
+                name: self.signature.unit().to_owned(),
             }),
         }
     }

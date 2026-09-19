@@ -4991,7 +4991,15 @@ fn declare_family(
     }
     declare_data(
         signature, metas, owned, fixities, warnings, within, data, span,
-    )
+    )?;
+    // Единица - имя, которое язык берёт по соглашению, а объявляет программа
+    // (§3.4). Записывается оно здесь и один раз: после элаборации написанного
+    // имени уже не найти - подключённый файл объявил свою под путём, а термы
+    // живут дольше его области видимости.
+    if &*data.name.text == prim::UNIT {
+        signature.name_unit(&qualify(within, &data.name.text));
+    }
+    Ok(())
 }
 
 /// Объявление эффекта: формер метки плюс её операции (§3.4).
@@ -5210,10 +5218,10 @@ fn declare_closing(
     // устраивает. Пока здесь стояла объявленность, `data Unit` с двумя
     // конструкторами вместе с любым ресурсом давал принятую проверкой
     // программу, которая роняла исполнение на `unreachable!` в раскрутке.
-    let Some([_]) = signature.constructors(UNIT) else {
+    let Some([_]) = signature.constructors(signature.unit()) else {
         return Ok(());
     };
-    let Some(unit) = signature.instantiate(UNIT, metas) else {
+    let Some(unit) = signature.instantiate(signature.unit(), metas) else {
         return Ok(());
     };
     let rho = metas.fresh_row();
@@ -5317,7 +5325,7 @@ fn mask_type(
     span: Span,
 ) -> Result<Term, ElabError> {
     let unit = signature
-        .instantiate(UNIT, metas)
+        .instantiate(signature.unit(), metas)
         .ok_or_else(|| ElabError::UnknownName {
             name: Rc::from(UNIT),
             span,
@@ -5464,8 +5472,13 @@ fn handler_type(
         name: Rc::from(UNIT),
         span,
     };
-    let unit = signature.instantiate(UNIT, metas).ok_or_else(missing)?;
-    let [only] = signature.constructors(UNIT).ok_or_else(missing)? else {
+    let unit = signature
+        .instantiate(signature.unit(), metas)
+        .ok_or_else(missing)?;
+    let [only] = signature
+        .constructors(signature.unit())
+        .ok_or_else(missing)?
+    else {
         return Err(missing());
     };
     let only = Rc::clone(only);

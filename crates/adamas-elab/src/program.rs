@@ -162,6 +162,12 @@ pub struct Program {
     pub signature: Option<Signature>,
     /// Отказы и предупреждения в порядке появления.
     pub diagnostics: Vec<Located>,
+    /// Дырки прохода. Отдаются наружу затем же, зачем их принимает
+    /// [`crate::elaborate_into`]: мономорфизация (§6) читает решения, а
+    /// хранилище одно на прогон (§10 вопрос 51).
+    pub metas: Metas,
+    /// Что знает разрешение инстансов (§3.5) - оно общее на программу.
+    pub instances: Instances,
 }
 
 impl Program {
@@ -213,6 +219,8 @@ pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
                     unit: 0,
                     diagnostic: Diagnostic::of_parse(&error),
                 }],
+                metas: Metas::default(),
+                instances: Instances::default(),
             };
         }
     };
@@ -257,6 +265,8 @@ pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
         units,
         signature: Some(signature),
         diagnostics,
+        metas,
+        instances,
     }
 }
 

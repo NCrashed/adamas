@@ -1,261 +1,47 @@
--- Прелюдия одним файлом (§9 Фаза 5).
+-- Программа из двух файлов: библиотека и счёт по ней (§4.8, §9 Фаза 5).
 --
--- Не голден на форму, а **библиотека ради результата**: типы, комбинаторы,
--- списки, классы с суперклассами, эффекты, экзистенциал и алиас встречаются
--- здесь друг с другом, а не стоят порознь. `main` считает число, и считает его
--- через всё сразу - сбор параметризованным хендлером, отказ эффектом, поиск
--- максимума по классу.
+-- До волны 2 Фазы 9 прелюдия была копией внутри этой программы - 297 строк,
+-- переписываемых всяким, кому они нужны. Теперь она подключается, и ни одного
+-- её имени здесь не написано: всё, что зовёт `main`, приходит из
+-- `Std/Prelude.adamas` открытым списком.
 --
--- Многофайловой прелюдии нет: `import` есть лексемой и больше нигде.
+-- Отсюда и свидетельство: сломай разрешение имён между файлами - и эта
+-- программа перестанет проверяться, потому что своих `maximum`, `collected`
+-- или `digits` у неё нет. Ответ при этом прежний, тот же позиционный список,
+-- и сверяют его все три вычислителя.
 --
--- Границы, найденные сборкой этого файла:
---
---   * **рекурсия под констрейнтом** не писалась вовсе (§10 вопрос 114,
---     закрыт логом 2026-09-07): `elem`, `maximum` и `nub` написаны здесь
---     прямо, и они же были свидетелем правки.
---   * **метод класса не бывал полиморфным по кратности** (§10 вопрос 115,
---     закрыт логом 2026-09-07): `Functor.map` берёт `{q : Mult}` и работает с
---     линейной функцией. Параметр связывается у поля словаря, а не у класса,
---     и живёт в своём пространстве индексов.
-
-data Unit where
-  MkUnit : Unit
-
-data Bool where
-  False : Bool
-  True : Bool
-
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
-data Maybe (a : Type) where
-  Nothing : Maybe a
-  Just : a -> Maybe a
-
-data Either (e : Type) (a : Type) where
-  Left : e -> Either e a
-  Right : a -> Either e a
-
-data Pair (a : Type) (b : Type) where
-  MkPair : a -> b -> Pair a b
-
-data List (a : Type) where
-  Nil : List a
-  Cons : a -> List a -> List a
-
--- Комбинаторы.
-identity : {q : Mult} -> (q x : a) -> a
-identity x = x
-
-konst : {q : Mult} -> (q x : a) -> (0 y : b) -> a
-konst x y = x
-
-flip : {q r : Mult} -> (ω f : (q x : a) -> (r y : b) -> c) -> (r v : b) -> (q u : a) -> c
-flip f v u = f u v
-
-comp : {q r : Mult} -> (ω f : (q y : b) -> c) -> (ω g : (r x : a) -> b) -> (q * r z : a) -> c
-comp f g x = f (g x)
-
-both : {q r : Mult} -> (ω f : (q x : a) -> b) -> (ω g : (r y : a) -> c) -> (q + r z : a) -> Pair b c
-both f g z = MkPair (f z) (g z)
-
--- Логика.
-not : Bool -> Bool
-not False = True
-not True = False
-
-and : Bool -> Bool -> Bool
-and False b = False
-and True b = b
-
-or : Bool -> Bool -> Bool
-or False b = b
-or True b = True
-
--- Арифметика.
-plus : Nat -> (1 m : Nat) -> Nat
-plus Zero m = m
-plus (Succ k) m = Succ (plus k m)
-
-times : Nat -> Nat -> Nat
-times Zero m = Zero
-times (Succ k) m = plus m (times k m)
--- Списки.
-foldr : {q : Mult} -> (ω f : (q x : a) -> (1 acc : b) -> b) -> (1 z : b) -> (q xs : List a) -> b
-foldr f z Nil = z
-foldr f z (Cons x xs) = f x (foldr f z xs)
-
-foldl : {q : Mult} -> (ω f : (1 acc : b) -> (q x : a) -> b) -> (1 z : b) -> (q xs : List a) -> b
-foldl f z Nil = z
-foldl f z (Cons x xs) = foldl f (f z x) xs
-
-append : List a -> (1 ys : List a) -> List a
-append Nil ys = ys
-append (Cons x xs) ys = Cons x (append xs ys)
-
-mapList : {q : Mult} -> (ω f : (q x : a) -> b) -> (q xs : List a) -> List b
-mapList f Nil = Nil
-mapList f (Cons x xs) = Cons (f x) (mapList f xs)
-
-filterList : (ω p : a -> Bool) -> List a -> List a
-filterList p Nil = Nil
-filterList p (Cons x xs) = if p x then Cons x (filterList p xs) else filterList p xs
-
-length : List a -> Nat
-length Nil = Zero
-length (Cons x xs) = Succ (length xs)
-
-reverse : List a -> List a
-reverse xs = foldl (flip Cons) Nil xs
-
-sum : List Nat -> Nat
-sum xs = foldr plus Zero xs
-
-digits : List Nat
-digits = Cons (Succ Zero) (Cons (Succ (Succ Zero)) (Cons (Succ (Succ (Succ Zero))) Nil))
-succOf : Nat -> Nat
-succOf n = Succ n
-
--- Линейная функция: `map` берёт `{q : Mult}`, и шапка обещает, что с такой он
--- **работает**. Обещание держалось словом - единственное применение `map`
--- стояло в `ap`, где функция при ω, а сам `ap` не исполнялся (ревью
--- 2026-09-07).
-onceOf : (1 n : Nat) -> Nat
-onceOf n = Succ (Succ n)
-
--- Классы.
-class Eqv a where
-  eq : a -> a -> Bool
-
-instance Eqv Bool where
-  eq False False = True
-  eq True True = True
-  eq x y = False
-
-instance Eqv Nat where
-  eq Zero Zero = True
-  eq (Succ k) (Succ m) = eq k m
-  eq x y = False
-
-instance {Eqv a} => Eqv (List a) where
-  eq Nil Nil = True
-  eq (Cons x xs) (Cons y ys) = and (eq x y) (eq xs ys)
-  eq x y = False
-
-class Functor (f : Type -> Type) where
-  map : {q : Mult} -> (ω g : (q x : a) -> b) -> f a -> f b
-
-instance Functor Maybe where
-  map g Nothing = Nothing
-  map g (Just x) = Just (g x)
-
-instance Functor List where
-  map g Nil = Nil
-  map g (Cons x xs) = Cons (g x) (map g xs)
-
-class Applicative f when Functor f where
-  pure : a -> f a
-  ap : f (a -> b) -> f a -> f b
-
-instance Applicative Maybe where
-  pure x = Just x
-  ap Nothing m = Nothing
-  ap (Just f) m = map f m
-
-class Monad f when Applicative f where
-  bind : f a -> (a -> f b) -> f b
-
-instance Monad Maybe where
-  bind Nothing k = Nothing
-  bind (Just x) k = k x
--- Эффекты.
-effect Fail where
-  bail : a
-
-effect Emit where
-  emit : Nat -> Unit
-
--- Проход по списку, производящий эффекты.
-mapEff : (ω f : a -> b) -> List a -> List b
-mapEff f Nil = Nil
-mapEff f (Cons x xs) = Cons (f x) (mapEff f xs)
-
-forEach : (ω f : a -> Unit) -> List a -> Unit
-forEach f Nil = MkUnit
-forEach f (Cons x xs) =
-  let 1 u : Unit = f x
-  forEach f xs
-
--- Отказ эффектом вместо `Maybe`.
-headOr : List Nat -> {Fail} Nat
-headOr Nil = bail
-headOr (Cons x xs) = x
-
-safeHead : List Nat -> Maybe Nat
-safeHead xs =
-  let 1 c : {Fail} Nat = \u -> headOr xs
-  handle c with
-    return v -> Just v
-    bail -> Nothing
-
--- Сбор в список параметризованным хендлером.
-collected : List Nat -> List Nat
-collected xs =
-  let 1 c : {Emit} Unit = \u -> forEach emit xs
-  handle c with
-    state Nil
-    return v -> reverse state
-    emit n -> resume MkUnit (Cons n state)
--- Порядок: суперкласс пишется `when`.
-class Ord a when Eqv a where
-  lte : a -> a -> Bool
-
-instance Ord Nat where
-  lte Zero m = True
-  lte (Succ k) Zero = False
-  lte (Succ k) (Succ m) = lte k m
-
--- Рекурсия под констрейнтом: словарь на ссылке к себе берётся из связывания
--- сигнатуры, а не ищется среди инстансов - искать его там негде, `a` тут
--- переменная.
-maximum : {Ord a} => a -> List a -> a
-maximum best Nil = best
-maximum best (Cons x xs) = if lte best x then maximum x xs else maximum best xs
-
-elem : {Eqv a} => a -> List a -> Bool
-elem x Nil = False
-elem x (Cons y ys) = if eq x y then True else elem x ys
-
-nub : {Eqv a} => List a -> List a
-nub Nil = Nil
-nub (Cons x xs) = if elem x xs then nub xs else Cons x (nub xs)
-
--- Алиас-определение: параметризованный.
-Pred : Type -> Type
-Pred a = a -> Bool
-
-isZero : Pred Nat
-isZero Zero = True
-isZero (Succ k) = False
-
--- Экзистенциал поднятым именем: носитель спрятан, свидетель рядом.
-data Showable where
-  MkShowable : a -> (a -> Bool) -> Showable
-
-runShowable : Showable -> Bool
-runShowable (MkShowable x f) = f x
-
-zeroInside : Showable
-zeroInside = MkShowable Zero isZero
-
--- Maybe как монада.
-nextJust : Maybe Nat -> Maybe Nat
-nextJust m = bind m (\n -> Just (Succ n))
-
-fromMaybe : (1 d : a) -> Maybe a -> a
-fromMaybe d Nothing = d
-fromMaybe d (Just x) = x
+-- Семейство открывается вместе с конструкторами (`Nat` даёт `Zero` и `Succ`) -
+-- тем же правилом, каким §4.8 поднимает их из тела модуля. Методов классов в
+-- списке нет и быть не может: класс - имя программы, а не член файла (§4.4).
+import Std.Prelude
+  ( Bool
+  , Nat
+  , List
+  , Maybe
+  , Showable
+  , append
+  , collected
+  , digits
+  , filterList
+  , flip
+  , foldl
+  , fromMaybe
+  , isZero
+  , length
+  , mapList
+  , maximum
+  , nextJust
+  , not
+  , nub
+  , onceOf
+  , or
+  , plus
+  , runShowable
+  , safeHead
+  , succOf
+  , sum
+  , times
+  )
 
 -- Повтор в списке: без `nub` длина была бы три, с ним - два. Свидетель
 -- обязан различать, иначе он проверяет форму, а не результат.
@@ -265,7 +51,7 @@ repeated = Cons (Succ Zero) (Cons (Succ (Succ Zero)) (Cons (Succ Zero) Nil))
 -- Ответ **позиционный**, и это не украшение: суммой `plus (plus top head) kept`
 -- любая перестановка давала те же 6, а семнадцать членов библиотеки не
 -- участвовали в ответе вовсе - сломать их можно было незаметно (ревью
--- 2026-09-07). Каждый элемент ниже держит своё правило.
+-- 2026-09-07).  Каждый элемент ниже держит своё правило.
 mark : Bool -> Nat
 mark False = Zero
 mark True = Succ Zero

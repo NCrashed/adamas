@@ -54,9 +54,18 @@ enum Command {
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Check { path, r#type } => {
-            let (file, signature) = checked(&path)?;
+            let (name, files, signature) = checked(&path)?;
             if r#type.is_empty() {
-                println!("{}: проверено, объявлений {}", file.name(), signature.len());
+                // Файлов больше одного - у программы есть импорты, и счёт
+                // объявлений без счёта файлов говорил бы про неё неправду.
+                if files > 1 {
+                    println!(
+                        "{name}: проверено, файлов {files}, объявлений {}",
+                        signature.len()
+                    );
+                } else {
+                    println!("{name}: проверено, объявлений {}", signature.len());
+                }
                 return Ok(());
             }
             for name in &r#type {
@@ -81,7 +90,7 @@ fn main() -> anyhow::Result<()> {
 /// сотни килобайт текста, которых никто не читает. `--full` его снимает, и
 /// снимает по-настоящему - печать не рекурсивна (§10 вопрос 93).
 fn evaluate(path: &Path, name: &str, full: bool) -> anyhow::Result<()> {
-    let (_, signature) = checked(path)?;
+    let (_, _, signature) = checked(path)?;
     let Some(definition) = signature.lookup(name) else {
         anyhow::bail!("определение `{name}` не найдено");
     };
@@ -105,25 +114,35 @@ fn evaluate(path: &Path, name: &str, full: bool) -> anyhow::Result<()> {
 
 /// Разбор, элаборация и проверка типов - общая половина обеих команд.
 ///
-/// Сам проход делает [`adamas_elab::analyze`], и делает его же LSP-сервер:
-/// текст в редакторе обязан совпадать с текстом в терминале, а держится это
-/// тем, что путь один, а не тем, что две записи сообщения совпали.
+/// Проход идёт по **программе**, а не по файлу: `import` подключает соседние
+/// файлы, и корень их поиска - каталог входного файла (§4.8, §7.3). Программа
+/// из одного файла проходит тем же путём: подключать нечего, и область
+/// видимости у неё пуста.
+///
+/// Отказ печатается вместе с исходником **того** файла, которому принадлежит
+/// его спан: позиция в чужом файле, нарисованная по входному, указывала бы на
+/// случайную строку.
+///
 /// Элаборация при этом не в TCB - она отдаёт терм, корректность его
 /// устанавливает `check` (§3).
-fn checked(path: &Path) -> anyhow::Result<(SourceFile, adamas_core::sig::Signature)> {
+fn checked(path: &Path) -> anyhow::Result<(String, usize, adamas_core::sig::Signature)> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("не удалось прочитать {}", path.display()))?;
     let file = SourceFile::new(path.display().to_string(), text);
+    let name = file.name().to_owned();
+    let root = path.parent().unwrap_or_else(|| Path::new("."));
+    let sources = adamas_elab::program::Directory::new(root);
 
-    let analysis = adamas_elab::analyze(file.text());
-    if let Some(error) = analysis.error() {
-        anyhow::bail!("{}", error.rendered(&file));
+    let program = adamas_elab::program::analyze(file, &sources);
+    if let Some(located) = program.error() {
+        anyhow::bail!("{}", program.rendered(located));
     }
-    for diagnostic in &analysis.diagnostics {
-        eprintln!("{}", diagnostic.rendered(&file));
+    for diagnostic in &program.diagnostics {
+        eprintln!("{}", program.rendered(diagnostic));
     }
-    let signature = analysis
+    let files = program.units.len();
+    let signature = program
         .signature
-        .ok_or_else(|| anyhow::anyhow!("{}: проход не отдал сигнатуры", file.name()))?;
-    Ok((file, signature))
+        .ok_or_else(|| anyhow::anyhow!("{name}: проход не отдал сигнатуры"))?;
+    Ok((name, files, signature))
 }

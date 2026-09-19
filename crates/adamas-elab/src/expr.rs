@@ -297,10 +297,10 @@ fn domain_of(ty: &Value) -> Option<Rc<Value>> {
 ///
 /// Приближение сверху для [`Elaborator::suspends`]: имплиситы у имени ещё не
 /// вставлены, поэтому какое именно связывание окажется первым, здесь неизвестно.
-fn awaits_unit(ty: &Term) -> bool {
+fn awaits_unit(ty: &Term, unit: &str) -> bool {
     let mut current = ty;
     while let Term::Pi(_, _, domain, _, codomain) = current {
-        if matches!(&**domain, Term::Const(name, ..) if &**name == UNIT) {
+        if matches!(&**domain, Term::Const(name, ..) if &**name == unit) {
             return true;
         }
         current = codomain;
@@ -2412,7 +2412,7 @@ impl<'a> Elaborator<'a> {
             }
             current = codomain;
         }
-        awaits_unit(current)
+        awaits_unit(current, self.signature.unit())
     }
 
     /// Кладёт в кэш элиминатор маски с **заданной** ρ.
@@ -4443,7 +4443,9 @@ impl<'a> Elaborator<'a> {
     /// написаны, а сколько их - решает он же. `None` - единицы или самой метки
     /// в сигнатуре нет, и тогда ожидаемого типа не существует.
     fn suspension(&mut self, effect: &Symbol) -> Option<Term> {
-        let unit = self.signature.instantiate(UNIT, self.metas)?;
+        let unit = self
+            .signature
+            .instantiate(self.signature.unit(), self.metas)?;
         let former = self.signature.instantiate(effect, self.metas)?;
         let mut kind = self.synthesized(&former)?;
         let mut arguments = Vec::new();
@@ -5053,7 +5055,7 @@ impl<'a> Elaborator<'a> {
         else {
             return false;
         };
-        spine.is_empty() && &**name == UNIT && self.unit_value().is_some()
+        spine.is_empty() && &**name == self.signature.unit() && self.unit_value().is_some()
     }
 
     /// Значение единицы - её единственный конструктор.
@@ -5061,7 +5063,7 @@ impl<'a> Elaborator<'a> {
     /// Второго имени по соглашению не заводится: тип назван, а какой у него
     /// конструктор, знает сигнатура.
     fn unit_value(&mut self) -> Option<Term> {
-        let [only] = self.signature.constructors(UNIT)? else {
+        let [only] = self.signature.constructors(self.signature.unit())? else {
             return None;
         };
         let only = Rc::clone(only);
@@ -5094,7 +5096,7 @@ impl<'a> Elaborator<'a> {
                     },
                     |definition| Some(Rc::new(definition.ty.clone())),
                 )
-                .is_some_and(|ty| awaits_unit(&ty)),
+                .is_some_and(|ty| awaits_unit(&ty, self.signature.unit())),
             Term::Var(Index(index)) => self
                 .scope
                 .len()

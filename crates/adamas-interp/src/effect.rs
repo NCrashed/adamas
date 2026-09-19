@@ -44,9 +44,6 @@ const MULTI: &str = "#handleMulti.";
 const STATEFUL: &str = "#handleState.";
 const MASK: &str = "#mask.";
 
-/// Имя единицы: приостановленное вычисление запускается её значением.
-const UNIT: &str = "Unit";
-
 impl Machine<'_> {
     /// Насыщенное имя, у которого есть эффектный смысл. `None` - обычное.
     ///
@@ -391,12 +388,16 @@ impl Machine<'_> {
 
     /// Значение единицы - единственный конструктор `Unit`.
     ///
+    /// Имя берётся у сигнатуры, а не пишется здесь строкой: подключённый файл
+    /// объявляет единицу под своим путём (§4.8), и написанное имя после
+    /// элаборации уже не разрешается.
+    ///
     /// # Errors
     ///
     /// Единицы в сигнатуре нет либо конструктор у неё не один: без неё
     /// приостановленного вычисления не существует, а значит и звать было нечего.
     pub(crate) fn unit(&self) -> Result<Rc<Value>, RunError> {
-        let Some([only]) = self.signature().constructors(UNIT) else {
+        let Some([only]) = self.signature().constructors(self.signature().unit()) else {
             return Err(RunError::NoUnit);
         };
         Ok(Value::constant(

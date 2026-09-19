@@ -273,3 +273,42 @@ main = eq True True
         "метод класса - имя программы, а не член файла"
     );
 }
+
+#[test]
+fn a_mutual_block_is_refused_inside_an_imported_file() {
+    // Названная граница, а не умолчание: члены группы объявляются одним
+    // вызовом, а квалифицировать их он не умеет. Объяви их неквалифицированно -
+    // и `M.eval` снаружи не нашлось бы, а два файла с одноимённой группой
+    // столкнулись бы. Отказ поэтому стоит здесь, и пока он стоит, взаимная
+    // рекурсия между файлами невыразима - отсюда и отказ кольцу выше.
+    let modules = Memory::new().with(
+        "Grouped",
+        "\
+mutual
+  data Tick where
+    Tick : Tock -> Tick
+
+  data Tock where
+    Tock : Tick -> Tock
+",
+    );
+    let why = refused("import Grouped (Tick)\n", &modules);
+    assert!(
+        why.contains("mutual") && why.contains("импортированном файле"),
+        "сказано: {why}"
+    );
+
+    // Тот же блок на верхнем уровне входного файла законен: квалификации там
+    // нет, и объявлять члены группы нечем мешать.
+    accepted(
+        "\
+mutual
+  data Tick where
+    Tick : Tock -> Tick
+
+  data Tock where
+    Tock : Tick -> Tock
+",
+        &Memory::new(),
+    );
+}

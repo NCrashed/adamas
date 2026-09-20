@@ -1,0 +1,7 @@
+# Манифест этого проекта (§7.3). Зависимостей у него нет - в корпусе не на что
+# ссылаться, - и он всё равно нужен: без него драйвер не знает корня, и
+# `adamas check project/Std/Order.adamas` ищет `Std.Base` в `Std/Std/`.
+[package]
+name = "project"
+root = "."
+entry = "main"

@@ -1,0 +1,28 @@
+[package]
+name = "adamas-pkg"
+description = "Adamas project manifest, git dependencies and lockfile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+adamas-elab.workspace = true
+thiserror = "2"
+# Только разбор: `serde` выключен намеренно. Полный `toml` тянет девять
+# крейтов вместе с `serde`, `serde_spanned` и выводом `derive`; `DeTable`
+# из parse-only даёт то же дерево за пять и без proc-macro.
+toml = { version = "1", default-features = false, features = ["parse"] }
+
+[dev-dependencies]
+# Уже в дереве через `criterion`: своего каталога `tests/` у этого крейта нет,
+# а `CARGO_TARGET_TMPDIR` виден только оттуда.
+tempfile = "3"

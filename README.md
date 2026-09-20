@@ -154,13 +154,15 @@ crates/adamas-interp      execution with effect handlers, resources, fibers
 crates/adamas-codegen     backend IR carrying multiplicity and uniqueness,
                           Perceus insertion, and two emitters: C and LLVM
 crates/adamas-runtime     the C runtime: objects, regions, fibers, atomic RC
-crates/adamas-cli         the `adamas` driver: `check` and `eval`
+crates/adamas-pkg         the project manifest, git dependencies, lockfile
+crates/adamas-cli         the `adamas` driver: `check` and `eval`, over a
+                          single file or a whole project
 crates/adamas-lsp         the language server: diagnostics over stdio
 crates/adamas-warmup-stlc a phase-0 exercise: STLC + HM, standalone
 ```
 
-Roughly 125k lines of Rust, 5k lines of C, and 1306 tests. What the language
-accepts is visible in [`tests/golden/`](tests/golden/): 235 fixtures — programs
+Roughly 138k lines of Rust, 6k lines of C, and 1391 tests. What the language
+accepts is visible in [`tests/golden/`](tests/golden/): 246 fixtures — programs
 that must be accepted, programs that must be refused with a recorded message,
 and programs whose value is recorded too.
 

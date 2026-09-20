@@ -5,6 +5,7 @@ members = [
     "crates/adamas-parser",
     "crates/adamas-elab",
     "crates/adamas-interp",
+    "crates/adamas-pkg",
     "crates/adamas-cli",
     "crates/adamas-lsp",
     # Учебный крейт Фазы 0 (§9). Удаляется вместе с этой строкой.
@@ -28,6 +29,7 @@ adamas-core = { path = "crates/adamas-core", version = "0.0.0" }
 adamas-parser = { path = "crates/adamas-parser", version = "0.0.0" }
 adamas-elab = { path = "crates/adamas-elab", version = "0.0.0" }
 adamas-interp = { path = "crates/adamas-interp", version = "0.0.0" }
+adamas-pkg = { path = "crates/adamas-pkg", version = "0.0.0" }
 adamas-lsp = { path = "crates/adamas-lsp", version = "0.0.0" }
 adamas-runtime = { path = "crates/adamas-runtime", version = "0.0.0" }
 

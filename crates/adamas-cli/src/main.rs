@@ -7,8 +7,23 @@
 //!
 //! Обе команды берут **входной** файл и разрешают его `import`'ы (§4.8):
 //! корень поиска модулей — каталог этого файла, `Data.Map` — это
-//! `<каталог>/Data/Map.adamas`. Манифест (§7.3) заменит этот корень собой;
-//! пока его нет, соглашение о раскладке и есть весь проект.
+//! `<каталог>/Data/Map.adamas`.
+//!
+//! # Проект, а не файл
+//!
+//! Тем же аргументом принимается **каталог** проекта или путь к его
+//! `adamas.toml`: тогда корни поиска берутся из манифеста, а git-зависимости
+//! достаются и подключаются (§7.3, `adamas-pkg`).
+//!
+//! Написанный **файл** тоже ищет манифест - вверх по дереву, до ближайшего.
+//! Решение это переигранное: сперва вверх не искалось вовсе, доводом «чужой
+//! `adamas.toml` этажом выше молча меняет смысл проверки». Довод не выдержал
+//! замера трека B: `adamas check tests/golden/project/Std/Order.adamas`
+//! отвечал «модуль `Std.Base` не найден: искали `…/Std/Std/Base.adamas`», то
+//! есть инструмент не проверял файл **собственного** проекта. Редактор тот же
+//! корень берёт из `rootUri`; у терминала его взять неоткуда, кроме как из
+//! манифеста. Корни при этом манифестные, а входом остаётся написанный файл -
+//! спрашивали про него.
 //!
 //! # `check --type`
 //!
@@ -39,7 +54,7 @@ struct Cli {
 enum Command {
     /// Разобрать исходник, элаборировать и проверить типы (§7.1).
     Check {
-        /// Путь к файлу `.adamas`.
+        /// Путь к файлу `.adamas`, каталогу проекта или его `adamas.toml`.
         path: PathBuf,
         /// Напечатать тип имени вместо счёта объявлений (§7.2). Можно повторять.
         #[arg(long, value_name = "ИМЯ")]
@@ -47,7 +62,7 @@ enum Command {
     },
     /// Проверить и исполнить определение (§9 Фаза 5).
     Eval {
-        /// Путь к файлу `.adamas`.
+        /// Путь к файлу `.adamas`, каталогу проекта или его `adamas.toml`.
         path: PathBuf,
         /// Что вычислять. По умолчанию `main`.
         #[arg(default_value = "main")]
@@ -119,12 +134,80 @@ fn evaluate(path: &Path, name: &str, full: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Откуда берутся входной файл и корни поиска модулей.
+///
+/// Три случая. Каталог или сам `adamas.toml` - проект целиком, и вход берётся
+/// из манифеста. Файл **внутри** проекта - корни из манифеста, а входом
+/// остаётся написанный файл. Файл вне всякого проекта - как раньше: корень
+/// поиска есть его каталог.
+///
+/// # Errors
+///
+/// Манифест собран не так или зависимость не достаётся.
+fn opened(path: &Path) -> anyhow::Result<(PathBuf, Box<dyn adamas_elab::program::Sources>)> {
+    let named = if path.is_dir() {
+        Some(path.to_path_buf())
+    } else if path
+        .file_name()
+        .is_some_and(|it| it == adamas_pkg::manifest::MANIFEST)
+    {
+        Some(
+            path.parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
+        )
+    } else {
+        None
+    };
+    let entry = named.is_none().then(|| path.to_path_buf());
+    let Some(dir) = named.or_else(|| enclosing(path)) else {
+        let root = path.parent().unwrap_or_else(|| Path::new("."));
+        return Ok((
+            path.to_path_buf(),
+            Box::new(adamas_elab::program::Directory::new(root)),
+        ));
+    };
+
+    let project = adamas_pkg::Project::open(&dir)?;
+    // Достача - действие, и молчать о нём нельзя: сборка, впервые клонирующая
+    // репозиторий, отличается от той, что взяла готовый чекаут, только
+    // временем, и человеку это надо видеть.
+    for dependency in &project.resolved {
+        if dependency.refreshed {
+            eprintln!("{}: достаю {}", dependency.prefix, dependency.rev);
+        }
+    }
+    if project.relocked {
+        eprintln!("{}: обновлён", adamas_pkg::lock::LOCKFILE);
+    }
+    Ok((
+        entry.unwrap_or_else(|| project.entry_file()),
+        Box::new(project.sources),
+    ))
+}
+
+/// Проект, внутри которого лежит файл: ближайший `adamas.toml` вверх по дереву.
+///
+/// Путь приводится к абсолютному: без этого `adamas check main.adamas` смотрел
+/// бы ровно в текущий каталог и никуда выше. Файла нет - искать нечего, и
+/// отказ «не удалось прочитать» скажет об этом лучше.
+fn enclosing(file: &Path) -> Option<PathBuf> {
+    let full = std::fs::canonicalize(file).ok()?;
+    let mut at = full.parent()?;
+    loop {
+        if at.join(adamas_pkg::manifest::MANIFEST).is_file() {
+            return Some(at.to_path_buf());
+        }
+        at = at.parent()?;
+    }
+}
+
 /// Разбор, элаборация и проверка типов - общая половина обеих команд.
 ///
 /// Проход идёт по **программе**, а не по файлу: `import` подключает соседние
-/// файлы, и корень их поиска - каталог входного файла (§4.8, §7.3). Программа
-/// из одного файла проходит тем же путём: подключать нечего, и область
-/// видимости у неё пуста.
+/// файлы, и корень их поиска даёт [`opened`] - каталог входного файла или
+/// манифест проекта (§4.8, §7.3). Программа из одного файла проходит тем же
+/// путём: подключать нечего, и область видимости у неё пуста.
 ///
 /// Отказ печатается вместе с исходником **того** файла, которому принадлежит
 /// его спан: позиция в чужом файле, нарисованная по входному, указывала бы на
@@ -133,14 +216,13 @@ fn evaluate(path: &Path, name: &str, full: bool) -> anyhow::Result<()> {
 /// Элаборация при этом не в TCB - она отдаёт терм, корректность его
 /// устанавливает `check` (§3).
 fn checked(path: &Path) -> anyhow::Result<(String, usize, adamas_core::sig::Signature)> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("не удалось прочитать {}", path.display()))?;
-    let file = SourceFile::new(path.display().to_string(), text);
+    let (entry, sources) = opened(path)?;
+    let text = std::fs::read_to_string(&entry)
+        .with_context(|| format!("не удалось прочитать {}", entry.display()))?;
+    let file = SourceFile::new(entry.display().to_string(), text);
     let name = file.name().to_owned();
-    let root = path.parent().unwrap_or_else(|| Path::new("."));
-    let sources = adamas_elab::program::Directory::new(root);
 
-    let program = adamas_elab::program::analyze(file, &sources);
+    let program = adamas_elab::program::analyze(file, sources.as_ref());
     if let Some(located) = program.error() {
         anyhow::bail!("{}", program.rendered(located));
     }

@@ -282,6 +282,11 @@ pub(crate) fn built_by(name: &str, text: &str, cc: &str, extra: &[&str]) -> (Str
             // здесь - норма, а не находка. Неявное объявление функции - находка:
             // им ловится расхождение с заголовком рантайма.
             "-Wno-unused",
+            // Свёртка чужого вызова - расхождение понижений, а не оптимизация
+            // (§5.3; довод целиком - `native.rs`, `PROGRAM_FLAGS`). Ключ тот
+            // же, каким собирает `adamas build`: разойдись они, корпус мерил бы
+            // не то, что собирает драйвер.
+            "-fno-builtin",
             "-Werror=implicit-function-declaration",
             // Несовместимый указатель - тоже находка, и ловит она ровно ту
             // ошибку, которая иначе сокращается: скрытые аргументы второй формы
@@ -295,6 +300,10 @@ pub(crate) fn built_by(name: &str, text: &str, cc: &str, extra: &[&str]) -> (Str
         .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
         .arg(&source)
         .args(runtime())
+        // Стандартная библиотека C у glibc разложена по двум файлам, и за
+        // вторым компоновщик требует ключ (`native.rs`, `C_MATH`). Тот же ключ
+        // ставит `adamas build`.
+        .arg("-lm")
         .arg("-o")
         .arg(&binary);
     let compiled = compile.output().unwrap();
@@ -993,7 +1002,7 @@ pub(crate) fn llvm_linked(
     if with_runtime {
         link.args(runtime());
     }
-    let linked = link.arg("-o").arg(&binary).output().unwrap();
+    let linked = link.arg("-lm").arg("-o").arg(&binary).output().unwrap();
     assert!(
         linked.status.success(),
         "{stem}: линковка отказала:\n{}",

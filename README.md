@@ -221,6 +221,7 @@ does not depend on it. What it taught is in
 |---|---|
 | [`adamas-design.md`](adamas-design.md) | The design document — the single source of truth for design decisions, together with the open questions and the decision log. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to build, how to run the checks, the rules for code and commits. |
+| [`docs/getting-started.md`](docs/getting-started.md) | From nothing to a running program: `adamas new`, every driver command, a second module, the prelude, diagnostics in the editor. In Russian, like the rest of `docs/`. |
 | [`docs/reading-notes/`](docs/reading-notes/) | Notes on the key papers (QTT, Perceus, effect handlers). |
 | [`tests/golden/`](tests/golden/) | Adamas programs the compiler accepts today, with their expected output. |
 | [`docs/examples/`](docs/examples/) | Illustrations of forms the implementation has not reached yet. |
@@ -253,6 +254,9 @@ Try an example:
 cargo run -p adamas-cli -- check tests/golden/eval/state.adamas
 cargo run -p adamas-cli -- eval tests/golden/eval/state.adamas main
 ```
+
+To start a project of your own instead, see
+[`docs/getting-started.md`](docs/getting-started.md).
 
 ## License
 

@@ -161,7 +161,7 @@ crates/adamas-lsp         the language server: diagnostics over stdio
 crates/adamas-warmup-stlc a phase-0 exercise: STLC + HM, standalone
 ```
 
-Roughly 137k lines of Rust, 6k lines of C, and 1380 tests. What the language
+Roughly 137k lines of Rust, 6k lines of C, and 1381 tests. What the language
 accepts is visible in [`tests/golden/`](tests/golden/): 236 fixtures — programs
 that must be accepted, programs that must be refused with a recorded message,
 and programs whose value is recorded too.

@@ -84,9 +84,17 @@ mod harness {
 
     /// Диагностика того же файла в виде протокола - тем же вызовом, каким её
     /// шлёт сервер.
-    pub(crate) fn published(file: &SourceFile) -> Vec<adamas_lsp::lsp_types::Diagnostic> {
+    ///
+    /// Корень поиска модулей - каталог фикстуры, как у драйвера: иначе
+    /// многофайловая фикстура проверялась бы не тем деревом.
+    pub(crate) fn published(
+        path: &Path,
+        file: &SourceFile,
+    ) -> Vec<adamas_lsp::lsp_types::Diagnostic> {
         let uri = Uri::from_str("file:///corpus.adamas").unwrap();
-        adamas_lsp::diagnostics(&uri, file, Encoding::Utf16)
+        let sources =
+            adamas_lsp::project::Buffers::on_disk(path.parent().unwrap_or_else(|| Path::new(".")));
+        adamas_lsp::diagnostics(&uri, file, Encoding::Utf16, &sources)
     }
 }
 
@@ -131,7 +139,7 @@ fn every_refusal_reaches_the_editor_unchanged() {
         assert!(!passed, "{} прошла, а не должна была", path.display());
 
         let file = source(&path);
-        let found = published(&file);
+        let found = published(&path, &file);
         assert_eq!(
             found.len(),
             1,
@@ -158,7 +166,7 @@ fn an_accepted_program_says_nothing() {
         let (passed, terminal) = driven(&path);
         assert!(passed, "{} отвергнута:\n{terminal}", path.display());
         let file = source(&path);
-        let found = published(&file);
+        let found = published(&path, &file);
         let mut expected = String::new();
         for it in &found {
             expected.push_str(&rebuilt(&file, it));
@@ -187,7 +195,7 @@ fn a_warning_reaches_the_editor_too() {
     assert!(passed, "программа обязана быть принята:\n{terminal}");
 
     let file = source(&path);
-    let found = published(&file);
+    let found = published(&path, &file);
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].severity, Some(DiagnosticSeverity::WARNING));
     assert_eq!(
@@ -203,7 +211,8 @@ fn a_warning_reaches_the_editor_too() {
 fn a_refusal_and_a_warning_do_not_mix() {
     let uri = Uri::from_str("file:///probe.adamas").expect("URI разбирается");
     let file = SourceFile::new("probe.adamas", "f = (\n");
-    let found = adamas_lsp::diagnostics(&uri, &file, Encoding::Utf16);
+    let sources = adamas_lsp::project::Buffers::on_disk(".");
+    let found = adamas_lsp::diagnostics(&uri, &file, Encoding::Utf16, &sources);
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].severity, Some(DiagnosticSeverity::ERROR));
 }

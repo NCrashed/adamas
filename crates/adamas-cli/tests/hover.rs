@@ -7,9 +7,19 @@
 //! пары четырежды за две волны.
 //!
 //! Поэтому драйвер **запускается процессом** на всём принятом корпусе, и
-//! спрашивают у него ровно те имена, на которые ответила подсказка: **3322
-//! имени в 137 фикстурах**. Совпало - значит в редакторе нет ни лишнего знака,
-//! ни потерянного.
+//! спрашивают у него ровно те имена, на которые ответила подсказка: **3290
+//! имён в 137 фикстурах**. Совпало - значит в редакторе нет ни лишнего знака,
+//! ни потерянного. (Было 3322: имена ищутся по тексту фикстуры, а
+//! `eval/prelude.adamas` после выноса прелюдии в модуль пишет из неё только то,
+//! чем считает.)
+//!
+//! # Программа, а не файл
+//!
+//! Проход здесь идёт по [`adamas_elab::program`] - тем же, каким идёт драйвер.
+//! Иначе многофайловая фикстура выпадала бы из сверки целиком: имена, которые
+//! `prelude.adamas` берёт из `Std/Prelude.adamas`, однофайловому проходу
+//! неизвестны, и подсказка над ними молчит. Волна 2 Фазы 9 приспускала порог
+//! корпуса со 137 до 136 ровно за это; здесь он вернулся.
 //!
 //! # Чего этот прогон **не** ловит
 //!
@@ -32,6 +42,7 @@ use std::str::FromStr as _;
 
 use adamas_core::sig::DefinitionKind;
 use adamas_core::source::SourceFile;
+use adamas_elab::program::Program;
 use adamas_lsp::Encoding;
 use adamas_lsp::lsp_types::{HoverContents, Position, Uri};
 
@@ -45,7 +56,8 @@ fn corpus() -> PathBuf {
     reason = "заготовка теста: отказ здесь означает сломанный корпус либо окружение, и падать он должен громко"
 )]
 mod harness {
-    use super::{Command, HoverContents, Path, PathBuf, Position, SourceFile, corpus};
+    use super::{Command, HoverContents, Path, PathBuf, Position, Program, SourceFile, corpus};
+    use adamas_lsp::project::Buffers;
 
     pub(crate) fn fixtures(kind: &str) -> Vec<PathBuf> {
         let dir = corpus().join(kind);
@@ -62,6 +74,17 @@ mod harness {
     pub(crate) fn source(path: &Path) -> SourceFile {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         SourceFile::new(name, std::fs::read_to_string(path).unwrap())
+    }
+
+    /// Проект фикстуры: корень поиска модулей - её каталог, как у драйвера.
+    pub(crate) fn project(path: &Path) -> Buffers<'static> {
+        Buffers::on_disk(path.parent().unwrap_or_else(|| Path::new(".")))
+    }
+
+    /// Проход по программе фикстуры - тот же, каким идёт `adamas check`.
+    pub(crate) fn analysed(path: &Path, file: &SourceFile) -> Program {
+        let entry = SourceFile::new(file.name(), file.text());
+        adamas_elab::program::analyze(entry, &project(path))
     }
 
     /// Запрашивает у драйвера типы перечисленных имён - процессом.
@@ -97,8 +120,8 @@ mod harness {
     /// сервера к тексту ничего не добавляет, проверяется на каждой фикстуре
     /// отдельно (`the_server_adds_nothing_to_the_text`) и на записанных руками
     /// позициях в `crates/adamas-lsp/tests/protocol.rs`.
-    pub(crate) fn hovered(file: &SourceFile, at: Position) -> Option<String> {
-        let hover = adamas_lsp::hover(file, at, super::Encoding::Utf16)?;
+    pub(crate) fn hovered(path: &Path, file: &SourceFile, at: Position) -> Option<String> {
+        let hover = adamas_lsp::hover(file, at, super::Encoding::Utf16, &project(path))?;
         match hover.contents {
             HoverContents::Markup(markup) => Some(markup.value),
             other => panic!("подсказка обязана быть разметкой: {other:?}"),
@@ -110,10 +133,13 @@ mod harness {
     /// Имена, которых драйверу не назвать, отсеиваются здесь же: сорт
     /// объявления не имеет, а поднятый имплисит живёт внутри чужого телескопа,
     /// и одноимённые в разных телескопах значат разное.
-    pub(crate) fn everything(file: &SourceFile) -> super::BTreeMap<String, String> {
-        let analysis = adamas_elab::analyze(file.text());
-        let (Some(module), Some(signature)) = (&analysis.module, &analysis.signature) else {
+    pub(crate) fn everything(path: &Path, file: &SourceFile) -> super::BTreeMap<String, String> {
+        let program = analysed(path, file);
+        let (Some(unit), Some(signature)) = (program.units.first(), &program.signature) else {
             panic!("принятая фикстура отдаёт и дерево, и сигнатуру");
+        };
+        let Some(module) = &unit.module else {
+            panic!("принятая фикстура разбирается");
         };
         let tokens = adamas_parser::tokenize(file.text()).expect("фикстура разбирается");
         let mut shown = super::BTreeMap::new();
@@ -137,7 +163,7 @@ mod harness {
     }
 }
 
-use harness::{driven, everything, fixtures, hovered, source};
+use harness::{analysed, driven, everything, fixtures, hovered, source};
 
 /// Всё, что подсказка сказала о корпусе, терминал повторяет дословно.
 #[test]
@@ -147,7 +173,7 @@ fn every_hover_matches_the_driver() {
     for kind in ["programs", "eval"] {
         for path in fixtures(kind) {
             let file = source(&path);
-            let shown = everything(&file);
+            let shown = everything(&path, &file);
             let asked: Vec<String> = shown.keys().cloned().collect();
             if asked.is_empty() {
                 continue;
@@ -166,15 +192,11 @@ fn every_hover_matches_the_driver() {
             files += 1;
         }
     }
-    // Сто тридцать шесть, а не сто тридцать семь: `eval/prelude.adamas` стал
-    // программой **из двух файлов** (волна 2 Фазы 9), а подсказка идёт по
-    // одному тексту - `adamas_elab::analyze` импортов не разрешает. Драйвер
-    // их разрешает, поэтому расходятся здесь не ответы, а охват: фикстура
-    // выпадает из сверки целиком. Вернуть её - треку B, который учит сервер
-    // многофайловости; до тех пор порог назван вместе с причиной, а не тихо
-    // приспущен.
-    assert!(files >= 136, "корпус принятых усох до {files}");
-    assert!(names >= 3200, "сверено имён всего {names}, а было 3260");
+    // Сто тридцать семь: многофайловая `eval/prelude.adamas` вернулась в
+    // сверку вместе с проходом по программе. Приспущен порог был ровно на ней
+    // и ровно на одну фикстуру.
+    assert!(files >= 137, "корпус принятых усох до {files}");
+    assert!(names >= 3260, "сверено имён всего {names}, а было 3290");
 }
 
 /// Тип в подсказке - **тот самый**, а не какой-нибудь.
@@ -191,8 +213,8 @@ fn a_constructor_names_its_family_in_its_type() {
     for kind in ["programs", "eval"] {
         for path in fixtures(kind) {
             let file = source(&path);
-            let shown = everything(&file);
-            let signature = adamas_elab::analyze(file.text())
+            let shown = everything(&path, &file);
+            let signature = analysed(&path, &file)
                 .signature
                 .expect("принятая фикстура отдаёт сигнатуру");
             for name in signature.names() {
@@ -230,9 +252,12 @@ fn the_server_adds_nothing_to_the_text() {
     for kind in ["programs", "eval"] {
         for path in fixtures(kind) {
             let file = source(&path);
-            let analysis = adamas_elab::analyze(file.text());
-            let (Some(module), Some(signature)) = (&analysis.module, &analysis.signature) else {
+            let program = analysed(&path, &file);
+            let (Some(unit), Some(signature)) = (program.units.first(), &program.signature) else {
                 panic!("{}: принятая фикстура молчит", path.display());
+            };
+            let Some(module) = &unit.module else {
+                panic!("{}: принятая фикстура разбирается", path.display());
             };
             let tokens = adamas_parser::tokenize(file.text()).expect("фикстура разбирается");
             let first = tokens.tokens.iter().find_map(|token| {
@@ -246,7 +271,7 @@ fn the_server_adds_nothing_to_the_text() {
             let at = adamas_lsp::position::position(&file, offset, Encoding::Utf16)
                 .expect("граница знака переводится");
             assert_eq!(
-                hovered(&file, at).as_deref(),
+                hovered(&path, &file, at).as_deref(),
                 Some(value.as_str()),
                 "{}",
                 path.display()
@@ -254,24 +279,54 @@ fn the_server_adds_nothing_to_the_text() {
             checked += 1;
         }
     }
-    // Та же фикстура и та же причина, что у порога выше.
-    assert!(checked >= 136, "фикстур сверено всего {checked}");
+    // Та же фикстура и тот же счёт, что у порога выше.
+    assert!(checked >= 137, "фикстур сверено всего {checked}");
 }
 
 /// Подсказка на пустом месте молчит, а не отвечает пустой строкой.
 #[test]
 fn a_hover_off_a_name_says_nothing() {
+    let path = Path::new("t.adamas");
     let file = SourceFile::new("t.adamas", "data Nat where\n  Zero : Nat\n");
-    assert_eq!(hovered(&file, Position::new(0, 4)), None, "пробел");
-    assert_eq!(hovered(&file, Position::new(0, 0)), None, "ключевое слово");
+    assert_eq!(hovered(path, &file, Position::new(0, 4)), None, "пробел");
     assert_eq!(
-        hovered(&file, Position::new(9, 9)),
+        hovered(path, &file, Position::new(0, 0)),
+        None,
+        "ключевое слово"
+    );
+    assert_eq!(
+        hovered(path, &file, Position::new(9, 9)),
         None,
         "позиция за концом файла"
     );
     assert_eq!(
-        hovered(&file, Position::new(1, 2)).as_deref(),
+        hovered(path, &file, Position::new(1, 2)).as_deref(),
         Some("Zero : Nat")
+    );
+}
+
+/// Подсказка над именем из **другого** файла называет его тип.
+///
+/// Свидетель различает по построению: ни `maximum`, ни `collected` в
+/// `prelude.adamas` не объявлены - они приходят из `Std/Prelude.adamas`, и
+/// однофайловый проход о них молчал (порог сверки выше был из-за этого
+/// приспущен со 137 до 136).
+#[test]
+fn a_hover_reads_a_name_from_another_file() {
+    let path = corpus().join("eval").join("prelude.adamas");
+    let file = source(&path);
+    let offset = file
+        .text()
+        .find("maximum Zero")
+        .expect("`maximum` в фикстуре написан");
+    let at = adamas_lsp::position::position(&file, offset, Encoding::Utf16)
+        .expect("граница знака переводится");
+    assert_eq!(
+        hovered(&path, &file, at).as_deref(),
+        Some(
+            "Std.Prelude.maximum : {0 a : Type u0} -> {ω _ : Ord{u0} #0} -> \
+             {| e0} (ω _ : #1) -> {| e0} (ω _ : Std.Prelude.List{u0} #2) -> {| e0} #3"
+        )
     );
 }
 

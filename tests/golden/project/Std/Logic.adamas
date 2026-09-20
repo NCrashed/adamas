@@ -1,0 +1,15 @@
+-- Логика над `Bool`.
+
+import Std.Base (Bool, False, True)
+
+not : Bool -> Bool
+not False = True
+not True = False
+
+and : Bool -> Bool -> Bool
+and False b = False
+and True b = b
+
+or : Bool -> Bool -> Bool
+or False b = b
+or True b = True

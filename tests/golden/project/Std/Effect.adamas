@@ -1,0 +1,41 @@
+-- Эффекты и хендлеры. `collected` собирает список параметризованным хендлером,
+-- а разворачивает его `reverse` - из третьего файла.
+
+import Std.Base (Unit, MkUnit, Nat, Zero, Succ, Maybe, Nothing, Just, List, Nil, Cons)
+import Std.ListOps (reverse)
+
+effect Fail where
+  bail : a
+
+effect Emit where
+  emit : Nat -> Unit
+
+mapEff : (ω f : a -> b) -> List a -> List b
+mapEff f Nil = Nil
+mapEff f (Cons x xs) = Cons (f x) (mapEff f xs)
+
+forEach : (ω f : a -> Unit) -> List a -> Unit
+forEach f Nil = MkUnit
+forEach f (Cons x xs) =
+  let 1 u : Unit = f x
+  forEach f xs
+
+-- Отказ эффектом вместо `Maybe`.
+headOr : List Nat -> {Fail} Nat
+headOr Nil = bail
+headOr (Cons x xs) = x
+
+safeHead : List Nat -> Maybe Nat
+safeHead xs =
+  let 1 c : {Fail} Nat = \u -> headOr xs
+  handle c with
+    return v -> Just v
+    bail -> Nothing
+
+collected : List Nat -> List Nat
+collected xs =
+  let 1 c : {Emit} Unit = \u -> forEach emit xs
+  handle c with
+    state Nil
+    return v -> reverse state
+    emit n -> resume MkUnit (Cons n state)

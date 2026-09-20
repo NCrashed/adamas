@@ -9,15 +9,38 @@
 //! `textDocument/definition` внутри файла; `semanticTokens/full` — подсветка
 //! от настоящего разбора, без второй грамматики ([`tokens`]).
 //!
+//! # Проект, а не файл
+//!
+//! Проверяется **программа**: буфер берётся входным файлом, его `import`'ы
+//! разрешаются [`adamas_elab::program::analyze`], а тексты подключённых модулей
+//! даёт [`project::Buffers`] - открытый буфер главнее диска. Отсюда и связь
+//! между файлами: правка одного буфера перепроверяет всякий открытый буфер,
+//! который его подключил. Кого подключил - видно из прошлого прохода
+//! (`Document::depends`), нового обхода за этим не делается.
+//!
 //! # Проход целиком, без инкрементального ядра
 //!
-//! §7.2 называет Salsa-подход, и на горизонте многофайловых проектов он
-//! остаётся верным. Сегодня его не покупают: круг «правка -> диагностика» на
-//! капстоуне в 944 строки идёт **42 мс** (release, лучшее из десяти) при
-//! бюджете интерактивности порядка 100 мс. Сам `adamas check` на том же файле
-//! идёт 36-41 мс, то есть весь счёт - это проверка типов, а протокол не стоит
-//! ничего. Граф зависимостей за такие деньги не берут, и синхронный сервер на
-//! потоках здесь ровно к месту - отменять нечего.
+//! §7.2 называет Salsa-подход, и на горизонте больших проектов он остаётся
+//! верным. Сегодня его не покупают, и обоснование - замер **на проекте**, а не
+//! на файле (`docs/measurements/project-recheck/`). Круг «правка ->
+//! диагностика» на `tests/golden/project` - 10 файлов, 328 строк, - release,
+//! пол десяти кругов:
+//!
+//! | что правится | открыто буферов | круг |
+//! |---|---|---|
+//! | входной файл | 2 | **15,6 мс** |
+//! | `Std/Base` (его подключают все) | 2 | 15,8 мс |
+//! | `Std/Base` | 10 | 40,7 мс |
+//!
+//! Цена идёт с **кода**, а не с файлов: та же библиотека в двух файлах и в
+//! десяти перепроверяется за одно и то же время с точностью до разброса.
+//! Сто миллисекунд бюджета интерактивности набираются к ~2350 строкам проекта,
+//! а самая большая программа языка сегодня - 944 строки. Кэш готовых сигнатур
+//! за такие деньги не берут.
+//!
+//! Множитель у правки библиотечного модуля есть и назван: перепроверяется
+//! каждый открытый буфер, который его подключил. При десяти окнах он даёт 2,6
+//! прохода вместо одного - то есть в бюджет укладывается и он.
 //!
 //! Отсюда же `TextDocumentSyncKind::FULL`: клиент шлёт текст целиком, сервер
 //! не ведёт инкрементальных правок буфера. Протокол это разрешает, а второй
@@ -30,10 +53,11 @@
 //!
 //! # Текст сообщения берётся у драйвера
 //!
-//! Сообщение собирает [`adamas_elab::analyze`] - тот же вызов, что делает
-//! `adamas check`. Свидетель совпадения - `crates/adamas-cli/tests/lsp.rs`: он
-//! запускает драйвер процессом на всём корпусе отказов и собирает его вывод
-//! обратно из того, что ушло бы в редактор.
+//! Сообщение собирает [`adamas_elab::program::analyze`] - тот же вызов, что
+//! делает `adamas check`. Свидетель совпадения -
+//! `crates/adamas-cli/tests/lsp.rs`: он запускает драйвер процессом на всём
+//! корпусе отказов и собирает его вывод обратно из того, что ушло бы в
+//! редактор.
 //!
 //! # Позиции
 //!
@@ -41,9 +65,12 @@
 //! единица - предмет договорённости ([`position`]). Умолчание протокола -
 //! UTF-16, и оно работает без всяких `general.positionEncodings` у клиента.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::str::FromStr as _;
 
 use adamas_core::source::SourceFile;
+use adamas_elab::program::{Program, Sources};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
@@ -60,6 +87,7 @@ use lsp_types::{
 };
 
 pub mod position;
+pub mod project;
 pub mod tokens;
 
 /// Типы протокола. Ре-экспорт, чтобы у тех, кто зовёт [`diagnostics`], не
@@ -77,7 +105,8 @@ const SOURCE: &str = "adamas";
 /// Обрыв канала, неразбираемые параметры `initialize`, отказ потоков ввода.
 pub fn run() -> anyhow::Result<()> {
     let (connection, threads) = Connection::stdio();
-    let served = handshake(&connection).and_then(|encoding| serve(&connection, encoding));
+    let served =
+        handshake(&connection).and_then(|(encoding, roots)| serve(&connection, encoding, &roots));
     // Соединение закрывается **до** ожидания потоков: поток записи живёт,
     // пока жив отправитель, и `join` при живом соединении не вернётся никогда.
     // Измерено: девять прогонов протокола висли на `wait` ровно здесь.
@@ -86,11 +115,12 @@ pub fn run() -> anyhow::Result<()> {
     served
 }
 
-/// Рукопожатие: читает `initialize`, договаривается о кодировке, отвечает
-/// возможностями.
-fn handshake(connection: &Connection) -> anyhow::Result<Encoding> {
+/// Рукопожатие: читает `initialize`, договаривается о кодировке и корнях,
+/// отвечает возможностями.
+fn handshake(connection: &Connection) -> anyhow::Result<(Encoding, Vec<PathBuf>)> {
     let (id, params) = connection.initialize_start()?;
     let params: InitializeParams = serde_json::from_value(params)?;
+    let roots = workspace(&params);
     let encoding = negotiate(
         params
             .capabilities
@@ -106,7 +136,31 @@ fn handshake(connection: &Connection) -> anyhow::Result<Encoding> {
         }),
     };
     connection.initialize_finish(id, serde_json::to_value(result)?)?;
-    Ok(encoding)
+    Ok((encoding, roots))
+}
+
+/// Корни проекта, названные клиентом.
+///
+/// Нужны затем, что путь модуля пишется **от корня проекта**: `import Std.Base`
+/// внутри `Std/Arith.adamas` указывает на `<корень>/Std/Base.adamas`, а не на
+/// `<каталог буфера>/Std/Base.adamas`. Драйверу это не мешает - он берёт
+/// корнем каталог входного файла, и входной файл лежит в корне, - а редактор
+/// открывает **любой** файл проекта, в том числе лежащий глубже.
+///
+/// Корня нет - корнем становится каталог самого буфера: то же правило, что у
+/// драйвера. Манифест (§7.3) заменит и то и другое собой.
+fn workspace(params: &InitializeParams) -> Vec<PathBuf> {
+    let folders = params
+        .workspace_folders
+        .iter()
+        .flatten()
+        .filter_map(|folder| project::path_of(&folder.uri));
+    // `rootUri` спецификация объявила устаревшим в пользу `workspaceFolders`,
+    // но шлют его до сих пор оба наших клиента, и читать его дешевле, чем
+    // объяснять человеку, почему модуль не нашёлся.
+    #[allow(deprecated, reason = "клиенты шлют `rootUri` и в 2026 году")]
+    let legacy = params.root_uri.as_ref().and_then(project::path_of);
+    folders.chain(legacy).collect()
 }
 
 /// Кодировка позиций по списку, объявленному клиентом.
@@ -158,15 +212,26 @@ pub fn capabilities(encoding: Encoding) -> ServerCapabilities {
 /// печатает `adamas check --type`. Второй записи типа нет, и это проверяется
 /// прогоном: `crates/adamas-cli/tests/hover.rs` запускает драйвер процессом.
 ///
+/// Проход идёт по **программе**: без разрешения импортов имя, пришедшее из
+/// другого файла, сигнатуре неизвестно, и подсказка над ним молчала бы там, где
+/// терминал печатает тип. Волна 2 Фазы 9 завела этим 137-ю фикстуру обратно в
+/// корпусную сверку - `eval/prelude.adamas` выпадала из неё целиком.
+///
 /// `None` - курсор не на имени либо типа у имени сегодня нет (локальное
 /// связывание). Пустую подсказку слать нельзя: редактор нарисует пустое окно.
 #[must_use]
-pub fn hover(file: &SourceFile, position: Position, encoding: Encoding) -> Option<Hover> {
+pub fn hover(
+    file: &SourceFile,
+    position: Position,
+    encoding: Encoding,
+    sources: &dyn Sources,
+) -> Option<Hover> {
     let offset = position::offset(file, position, encoding)?;
-    let analysis = adamas_elab::analyze(file.text());
-    let module = analysis.module.as_ref()?;
+    let text = file.text().to_owned();
+    let program = adamas_elab::program::analyze(SourceFile::new(file.name(), text), sources);
+    let module = program.units.first()?.module.as_ref()?;
     let found = adamas_elab::cursor::at(file.text(), module, offset)?;
-    let value = adamas_elab::cursor::shown(analysis.signature.as_ref()?, &found)?;
+    let value = adamas_elab::cursor::shown(program.signature.as_ref()?, &found)?;
     Some(Hover {
         // Простым текстом, а не разметкой: подсказка есть одна строка
         // `имя : тип`, и разметка в ней ничего не размечает. Ограждение кодом
@@ -187,8 +252,9 @@ pub fn hover(file: &SourceFile, position: Position, encoding: Encoding) -> Optio
 /// момента, когда текст разобрался. Отсюда же второе: переход работает на
 /// буфере, который проверку типов не проходит.
 ///
-/// Многофайловых проектов сегодня нет (§7.3, следующая волна), поэтому ответ
-/// всегда указывает в тот же документ.
+/// Ответ указывает в **тот же** документ: имя, пришедшее из другого файла,
+/// перехода сегодня не даёт. Проход поэтому только разбор - сигнатура здесь не
+/// нужна, а стоила бы проверки типов всей программы.
 #[must_use]
 pub fn definition(
     uri: &Uri,
@@ -197,7 +263,7 @@ pub fn definition(
     encoding: Encoding,
 ) -> Option<Location> {
     let offset = position::offset(file, position, encoding)?;
-    let module = adamas_elab::analyze(file.text()).module?;
+    let module = adamas_parser::parse(file.text()).ok()?;
     let found = adamas_elab::cursor::at(file.text(), &module, offset)?;
     let span = found
         .binder
@@ -208,35 +274,79 @@ pub fn definition(
     })
 }
 
-/// Диагностика файла в виде протокола.
+/// Диагностика файла в виде протокола - та, что относится к **нему самому**.
 ///
-/// Публичная, потому что это **та же** функция, которую зовёт цикл сервера:
+/// Публичная, потому что это **тот же** путь, каким идёт цикл сервера:
 /// проверять по ней и проверять сервер - одно и то же, и второго пути к
 /// сообщению нет.
-#[must_use]
-pub fn diagnostics(uri: &Uri, file: &SourceFile, encoding: Encoding) -> Vec<lsp_types::Diagnostic> {
-    found_in(uri, file, &adamas_elab::analyze(file.text()), encoding)
-}
-
-/// Диагностика по уже сделанному проходу.
 ///
-/// Проход отделён от перевода в протокол ровно затем, чтобы сервер делал его
-/// **один раз** на правку: подчёркивание и подсветка берутся из одного
-/// [`adamas_elab::Analysis`]. Порознь они стоили бы двух проверок типов - 46
-/// мс вместо 46 на капстоуне в 944 строки, - и вторая уходила бы в ту же
-/// правку.
+/// Отказ, случившийся внутри подключённого модуля, сюда не попадает: его спан
+/// живёт в чужом тексте, и нарисованный по этому файлу он подчеркнул бы
+/// случайную строку. Сервер шлёт его под URI того файла (`publish_one` и рядом).
 #[must_use]
-pub fn found_in(
+pub fn diagnostics(
     uri: &Uri,
     file: &SourceFile,
-    analysis: &adamas_elab::Analysis,
+    encoding: Encoding,
+    sources: &dyn Sources,
+) -> Vec<lsp_types::Diagnostic> {
+    let text = file.text().to_owned();
+    let program = adamas_elab::program::analyze(SourceFile::new(file.name(), text), sources);
+    mine(uri, file, &program, encoding)
+}
+
+/// Диагностика входного файла по уже сделанному проходу.
+///
+/// Проход отделён от перевода в протокол ровно затем, чтобы сервер делал его
+/// **один раз** на правку: подчёркивание и подсветка берутся из одной
+/// [`Program`]. Порознь они стоили бы двух проверок типов.
+#[must_use]
+fn mine(
+    uri: &Uri,
+    file: &SourceFile,
+    program: &Program,
     encoding: Encoding,
 ) -> Vec<lsp_types::Diagnostic> {
-    analysis
+    program
         .diagnostics
         .iter()
-        .map(|found| translate(uri, file, found, encoding))
+        .filter(|located| located.unit == 0)
+        .map(|located| translate(uri, file, &located.diagnostic, encoding))
         .collect()
+}
+
+/// Диагностика **подключённых** файлов, разложенная по их URI.
+///
+/// Файл, открытый в редакторе, сюда не попадает: у него есть свой проход, и он
+/// же владеет своими подчёркиваниями. Иначе два прохода писали бы в один URI по
+/// очереди, и подчёркивание мигало бы от того, какой из них был последним.
+fn elsewhere(
+    program: &Program,
+    open: &HashMap<String, Document>,
+    encoding: Encoding,
+) -> BTreeMap<String, (Uri, Vec<lsp_types::Diagnostic>)> {
+    let mut out: BTreeMap<String, (Uri, Vec<lsp_types::Diagnostic>)> = BTreeMap::new();
+    for located in &program.diagnostics {
+        if located.unit == 0 {
+            continue;
+        }
+        let Some(unit) = program.units.get(located.unit) else {
+            continue;
+        };
+        let file = Path::new(unit.file.name());
+        if open.values().any(|it| it.path.as_deref() == Some(file)) {
+            continue;
+        }
+        let Some(target) = project::uri_of(file) else {
+            continue;
+        };
+        let found = translate(&target, &unit.file, &located.diagnostic, encoding);
+        out.entry(target.as_str().to_owned())
+            .or_insert_with(|| (target, Vec::new()))
+            .1
+            .push(found);
+    }
+    out
 }
 
 /// Диагностика компилятора в диагностику протокола.
@@ -280,13 +390,50 @@ fn translate(
 struct Document {
     /// Текст, как его прислал клиент.
     text: String,
+    /// Файл, которым буфер лежит на диске. `None` - URI не про файл, и
+    /// подключать такой буфер неоткуда.
+    path: Option<PathBuf>,
     /// Дерево последней проверки. `None` - текст не разобрался.
     module: Option<adamas_parser::ast::Module>,
+    /// Файлы, которые подтянул последний проход, - граф зависимостей, как его
+    /// увидел компилятор. Правка любого из них меняет диагностику **этого**
+    /// буфера, и отсюда сервер знает, кого перепроверять.
+    ///
+    /// Второго обхода за этим не делается: рёбра лежат в [`Program::units`],
+    /// то есть в том же ответе, из которого берётся диагностика.
+    depends: Vec<PathBuf>,
+    /// URI, под которыми прошлый проход этого буфера опубликовал диагностику
+    /// **чужого** файла. Хранятся, чтобы погасить их, когда отказ уйдёт:
+    /// подчёркивание в файле, которого никто не открывал, само не исчезнет.
+    published: Vec<String>,
+}
+
+impl Document {
+    /// Буфер с этим текстом под этим URI.
+    fn of(uri: &Uri, text: String) -> Self {
+        Self {
+            text,
+            path: project::path_of(uri),
+            module: None,
+            depends: Vec::new(),
+            published: Vec::new(),
+        }
+    }
+
+    /// Новый текст в тот же буфер.
+    ///
+    /// Именно правка, а не замена: [`Self::published`] переживает её нарочно -
+    /// это список чужих файлов, в которых прошлый проход поставил
+    /// подчёркивание, и потеряв его, сервер уже не погасит их никогда.
+    fn retext(&mut self, text: String) {
+        self.text = text;
+        self.module = None;
+    }
 }
 
 /// Главный цикл: уведомления меняют буфер и вызывают проверку, запросы пока
 /// только закрывают сервер.
-fn serve(connection: &Connection, encoding: Encoding) -> anyhow::Result<()> {
+fn serve(connection: &Connection, encoding: Encoding, roots: &[PathBuf]) -> anyhow::Result<()> {
     // Ключ - текст URI, а не сам `Uri`: в `lsp-types` он несёт `Cell` с
     // разбором, то есть внутреннюю изменяемость, и ключом хеш-таблицы быть не
     // должен.
@@ -304,7 +451,7 @@ fn serve(connection: &Connection, encoding: Encoding) -> anyhow::Result<()> {
                 let reply = if request.method == SemanticTokensFullRequest::METHOD {
                     highlight(encoding, &documents, request.id.clone(), &request.params)
                 } else {
-                    answer(encoding, &documents, request)
+                    answer(encoding, roots, &documents, request)
                 };
                 connection.sender.send(Message::Response(reply))?;
             }
@@ -313,7 +460,7 @@ fn serve(connection: &Connection, encoding: Encoding) -> anyhow::Result<()> {
                 // упавший сервер уносит с собой подчёркивания во всех
                 // открытых файлах, а причина - один кривой кадр. Обрыв канала
                 // при этом всё равно закончит цикл: получатель закроется.
-                if let Err(error) = handle(connection, encoding, &mut documents, &note) {
+                if let Err(error) = handle(connection, encoding, roots, &mut documents, &note) {
                     eprintln!(
                         "adamas-lsp: уведомление `{}` не обработано: {error}",
                         note.method
@@ -334,6 +481,7 @@ fn serve(connection: &Connection, encoding: Encoding) -> anyhow::Result<()> {
 /// же причине, что кривое уведомление не роняет сервер.
 fn answer(
     encoding: Encoding,
+    roots: &[PathBuf],
     documents: &HashMap<String, Document>,
     request: lsp_server::Request,
 ) -> Response {
@@ -364,7 +512,8 @@ fn answer(
     };
     let file = SourceFile::new(uri.as_str(), document.text.as_str());
     if request.method == HoverRequest::METHOD {
-        Response::new_ok(request.id, hover(&file, asked.position, encoding))
+        let sources = opened(document, documents, roots);
+        Response::new_ok(request.id, hover(&file, asked.position, encoding, &sources))
     } else {
         Response::new_ok(
             request.id,
@@ -411,6 +560,7 @@ fn highlight(
 fn handle(
     connection: &Connection,
     encoding: Encoding,
+    roots: &[PathBuf],
     documents: &mut HashMap<String, Document>,
     note: &Notification,
 ) -> anyhow::Result<()> {
@@ -421,14 +571,12 @@ fn handle(
             let document = params.text_document;
             documents.insert(
                 document.uri.as_str().to_owned(),
-                Document {
-                    text: document.text,
-                    module: None,
-                },
+                Document::of(&document.uri, document.text),
             );
-            publish(
+            refresh(
                 connection,
                 encoding,
+                roots,
                 documents,
                 &document.uri,
                 Some(document.version),
@@ -437,66 +585,219 @@ fn handle(
         DidChangeTextDocument::METHOD => {
             let params: lsp_types::DidChangeTextDocumentParams =
                 serde_json::from_value(note.params.clone())?;
+            let uri = params.text_document.uri;
             // Синхронизация полная, поэтому правка ровно одна и она - весь
             // текст. Пустой список правок оставляет буфер как был.
             if let Some(change) = params.content_changes.into_iter().next_back() {
-                documents.insert(
-                    params.text_document.uri.as_str().to_owned(),
-                    Document {
-                        text: change.text,
-                        module: None,
-                    },
-                );
+                documents
+                    .entry(uri.as_str().to_owned())
+                    .and_modify(|document| document.retext(change.text.clone()))
+                    .or_insert_with(|| Document::of(&uri, change.text));
             }
-            publish(
+            refresh(
                 connection,
                 encoding,
+                roots,
                 documents,
-                &params.text_document.uri,
+                &uri,
                 Some(params.text_document.version),
             )?;
         }
         DidCloseTextDocument::METHOD => {
             let params: lsp_types::DidCloseTextDocumentParams =
                 serde_json::from_value(note.params.clone())?;
-            documents.remove(params.text_document.uri.as_str());
+            let uri = params.text_document.uri;
+            let gone = documents.remove(uri.as_str());
             // Закрытый файл оставил бы за собой подчёркивания в списке
             // проблем: очищает их пустой список, а не отсутствие сообщения.
             send(
                 connection,
                 &PublishDiagnosticsParams {
-                    uri: params.text_document.uri,
+                    uri: uri.clone(),
                     diagnostics: Vec::new(),
                     version: None,
                 },
             )?;
+            for stale in gone.iter().flat_map(|it| &it.published) {
+                if let Ok(target) = Uri::from_str(stale) {
+                    clear(connection, &target)?;
+                }
+            }
+            // Буфер закрыт - подключившие его теперь читают файл с диска, и
+            // он мог разойтись с тем, что было в буфере.
+            depending(documents, uri.as_str(), gone.and_then(|it| it.path))
+                .into_iter()
+                .try_for_each(|key| {
+                    publish_one(connection, encoding, roots, documents, &key, None)
+                })?;
         }
         _ => {}
     }
     Ok(())
 }
 
-/// Проверяет буфер, запоминает дерево и шлёт диагностику.
-fn publish(
+/// Перепроверяет буфер и всех, кто его подключил.
+///
+/// Связь между файлами именно здесь: без второго прохода правка `Std/Base`
+/// оставляла бы в зависящем буфере подчёркивание, снятое минуту назад, - или,
+/// хуже, не ставила бы нового. Список зависящих известен из прошлых проходов
+/// (`Document::depends`), а не из нового обхода.
+fn refresh(
     connection: &Connection,
     encoding: Encoding,
+    roots: &[PathBuf],
     documents: &mut HashMap<String, Document>,
     uri: &Uri,
     version: Option<i32>,
 ) -> anyhow::Result<()> {
-    let Some(document) = documents.get_mut(uri.as_str()) else {
+    publish_one(
+        connection,
+        encoding,
+        roots,
+        documents,
+        uri.as_str(),
+        version,
+    )?;
+    let changed = documents.get(uri.as_str()).and_then(|it| it.path.clone());
+    for key in depending(documents, uri.as_str(), changed) {
+        // Версия у зависящего своя и не менялась: протокол разрешает её не
+        // называть, а назвать чужую значило бы соврать клиенту.
+        publish_one(connection, encoding, roots, documents, &key, None)?;
+    }
+    Ok(())
+}
+
+/// Открытые буферы, чей прошлый проход подтянул этот файл.
+fn depending(
+    documents: &HashMap<String, Document>,
+    skip: &str,
+    changed: Option<PathBuf>,
+) -> Vec<String> {
+    let Some(changed) = changed else {
+        return Vec::new();
+    };
+    let mut found: Vec<String> = documents
+        .iter()
+        .filter(|(key, document)| key.as_str() != skip && document.depends.contains(&changed))
+        .map(|(key, _)| key.clone())
+        .collect();
+    // Порядок буферов в хеш-таблице случаен, а порядок уведомлений виден
+    // клиенту и прогону.
+    found.sort();
+    found
+}
+
+/// Тексты модулей для этого буфера: открытые буферы поверх диска.
+///
+/// Корень поиска - тот корень рабочего пространства, внутри которого лежит
+/// буфер; самый **длинный** из подходящих, потому что вложенный проект
+/// главнее объемлющего. Не назвал клиент ни одного - корнем становится каталог
+/// буфера, как у драйвера.
+fn opened<'a>(
+    document: &Document,
+    documents: &'a HashMap<String, Document>,
+    roots: &[PathBuf],
+) -> project::Buffers<'a> {
+    let here = document.path.as_deref();
+    let inside = here.and_then(|path| {
+        roots
+            .iter()
+            .filter(|root| path.starts_with(root))
+            .max_by_key(|root| root.as_os_str().len())
+            .map(PathBuf::as_path)
+    });
+    let root = inside
+        .or_else(|| here.and_then(Path::parent))
+        .unwrap_or(Path::new("."));
+    let open = documents
+        .values()
+        .filter_map(|it| Some((it.path.clone()?, it.text.as_str())))
+        .collect();
+    project::Buffers::new(root, open)
+}
+
+/// Проверяет один буфер, запоминает дерево с зависимостями и шлёт диагностику.
+fn publish_one(
+    connection: &Connection,
+    encoding: Encoding,
+    roots: &[PathBuf],
+    documents: &mut HashMap<String, Document>,
+    key: &str,
+    version: Option<i32>,
+) -> anyhow::Result<()> {
+    let Ok(uri) = Uri::from_str(key) else {
         return Ok(());
     };
-    let file = SourceFile::new(uri.as_str(), document.text.as_str());
-    let analysis = adamas_elab::analyze(document.text.as_str());
-    let found = found_in(uri, &file, &analysis, encoding);
-    document.module = analysis.module;
+    let (program, found, foreign) = {
+        let Some(document) = documents.get(key) else {
+            return Ok(());
+        };
+        let file = SourceFile::new(key, document.text.as_str());
+        let sources = opened(document, documents, roots);
+        let program = adamas_elab::program::analyze(file, &sources);
+        let file = SourceFile::new(key, document.text.as_str());
+        let found = mine(&uri, &file, &program, encoding);
+        let foreign = elsewhere(&program, documents, encoding);
+        (program, found, foreign)
+    };
+
+    let depends: Vec<PathBuf> = program
+        .units
+        .iter()
+        .skip(1)
+        .map(|unit| PathBuf::from(unit.file.name()))
+        .collect();
+    let mut units = program.units;
+    let module = units.first_mut().and_then(|unit| unit.module.take());
+    let fresh: Vec<String> = foreign.keys().cloned().collect();
+
+    let stale: Vec<String> = documents.get(key).map_or_else(Vec::new, |document| {
+        document
+            .published
+            .iter()
+            .filter(|it| !fresh.contains(it))
+            .cloned()
+            .collect()
+    });
+    if let Some(document) = documents.get_mut(key) {
+        document.module = module;
+        document.depends = depends;
+        document.published = fresh;
+    }
+
+    for gone in &stale {
+        if let Ok(target) = Uri::from_str(gone) {
+            clear(connection, &target)?;
+        }
+    }
+    for (target, diagnostics) in foreign.into_values() {
+        send(
+            connection,
+            &PublishDiagnosticsParams {
+                uri: target,
+                diagnostics,
+                version: None,
+            },
+        )?;
+    }
+    send(
+        connection,
+        &PublishDiagnosticsParams {
+            uri,
+            diagnostics: found,
+            version,
+        },
+    )
+}
+
+/// Гасит подчёркивания в файле: пустой список, а не молчание.
+fn clear(connection: &Connection, uri: &Uri) -> anyhow::Result<()> {
     send(
         connection,
         &PublishDiagnosticsParams {
             uri: uri.clone(),
-            diagnostics: found,
-            version,
+            diagnostics: Vec::new(),
+            version: None,
         },
     )
 }

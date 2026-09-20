@@ -1,0 +1,11 @@
+-- Арифметика на унарных числах.
+
+import Std.Base (Nat, Zero, Succ)
+
+plus : Nat -> (1 m : Nat) -> Nat
+plus Zero m = m
+plus (Succ k) m = Succ (plus k m)
+
+times : Nat -> Nat -> Nat
+times Zero m = Zero
+times (Succ k) m = plus m (times k m)

@@ -12,6 +12,7 @@
 //! знака и текст, а числа записаны руками. Перевод позиций, ошибочный
 //! одинаково в обе стороны, круговой проверке не виден - эти числа видят его.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -50,6 +51,8 @@ mod client {
         stdin: ChildStdin,
         stdout: BufReader<ChildStdout>,
         next: i64,
+        /// Диагностика, прочитанная по пути к ответам на запросы, по URI.
+        seen: super::BTreeMap<String, Value>,
     }
 
     impl Client {
@@ -58,6 +61,15 @@ mod client {
         /// `encodings` - список из `general.positionEncodings`; `None` значит,
         /// что клиент возможности не объявил вовсе, и это умолчание протокола.
         pub(crate) fn start(encodings: Option<&[&str]>) -> (Self, Value) {
+            Self::start_in(None, encodings)
+        }
+
+        /// То же, но клиент называет корень рабочего пространства.
+        ///
+        /// Корень нужен, когда буфер лежит **глубже** входного файла: путь
+        /// модуля пишется от корня проекта, и `import Std.Base` внутри
+        /// `Std/Arith.adamas` без корня искался бы в `Std/Std/`.
+        pub(crate) fn start_in(root: Option<&str>, encodings: Option<&[&str]>) -> (Self, Value) {
             let mut child = Command::new(env!("CARGO_BIN_EXE_adamas-lsp"))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -71,6 +83,7 @@ mod client {
                 stdin,
                 stdout,
                 next: 0,
+                seen: super::BTreeMap::new(),
             };
             let general = match encodings {
                 Some(list) => json!({ "positionEncodings": list }),
@@ -80,7 +93,7 @@ mod client {
                 "initialize",
                 &json!({
                     "processId": Value::Null,
-                    "rootUri": Value::Null,
+                    "rootUri": root.map_or(Value::Null, |it| json!(it)),
                     "capabilities": { "general": general },
                 }),
             );
@@ -143,6 +156,13 @@ mod client {
 
         /// Переписывает буфер целиком и ждёт его диагностику.
         pub(crate) fn change(&mut self, uri: &str, version: i64, text: &str) -> Value {
+            self.edit(uri, version, text);
+            self.diagnostics(uri)
+        }
+
+        /// Переписывает буфер целиком и **не** ждёт ничего: правка одного
+        /// файла шлёт диагностику нескольких, и ждать её надо [`Self::settled`].
+        pub(crate) fn edit(&mut self, uri: &str, version: i64, text: &str) {
             self.notify(
                 "textDocument/didChange",
                 &json!({
@@ -150,7 +170,6 @@ mod client {
                     "contentChanges": [{ "text": text }],
                 }),
             );
-            self.diagnostics(uri)
         }
 
         /// Подсказка над позицией.
@@ -168,6 +187,23 @@ mod client {
                 "textDocument": { "uri": uri },
                 "position": { "line": line, "character": character },
             })
+        }
+
+        /// Вся диагностика, посланная сервером **до сих пор**, по URI.
+        ///
+        /// Сервер синхронен и однопоточен: всё, что он послал из-за
+        /// уведомления, лежит в потоке раньше ответа на следующий запрос.
+        /// Отсюда прогон, который **не виснет**: не пришедшая диагностика
+        /// видна отсутствием ключа, а не молчанием потока. Ждать её в цикле
+        /// значило бы получить вместо провала висящий тест - проверено
+        /// мутантом, снимающим перепроверку зависящих.
+        pub(crate) fn settled(&mut self) -> super::BTreeMap<String, Value> {
+            let answer = self.raw_request(
+                "textDocument/semanticTokens/full",
+                &json!({ "textDocument": { "uri": "file:///settle.adamas" } }),
+            );
+            assert!(answer.get("error").is_none(), "{answer}");
+            std::mem::take(&mut self.seen)
         }
 
         /// Ближайший `publishDiagnostics` для этого URI.
@@ -218,7 +254,18 @@ mod client {
             let length = length.expect("в заголовке обязана быть длина");
             let mut body = vec![0u8; length];
             self.stdout.read_exact(&mut body).unwrap();
-            serde_json::from_slice(&body).unwrap()
+            let message: Value = serde_json::from_slice(&body).unwrap();
+            // Диагностика запоминается **здесь**, а не там, где её ждут: одна
+            // правка шлёт её сразу по нескольким файлам, и та, которой в этот
+            // раз не ждали, иначе пропадала бы из виду.
+            if message.get("method").and_then(Value::as_str)
+                == Some("textDocument/publishDiagnostics")
+            {
+                let uri = message["params"]["uri"].as_str().unwrap_or_default();
+                self.seen
+                    .insert(uri.to_owned(), message["params"]["diagnostics"].clone());
+            }
+            message
         }
     }
 
@@ -803,6 +850,284 @@ fn a_local_binding_shadows_a_definition_of_the_same_name() {
         }),
         "вторая клауза ведёт к сигнатуре"
     );
+    client.stop();
+}
+
+/// Копия корпусного проекта во временном каталоге.
+///
+/// Копия, а не сам корпус: прогон правит файлы, а файлы репозитория ему не
+/// принадлежат. Правятся при этом **буферы**, и на диск после копирования не
+/// пишется ничего - иначе свидетель «правка буфера видна зависящему» держался
+/// бы на файловой системе, а не на сервере.
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение, и падать он должен громко"
+)]
+fn copied(name: &str) -> PathBuf {
+    let from = corpus().join("project");
+    let to = std::env::temp_dir().join(format!("adamas-lsp-{name}"));
+    let _ = std::fs::remove_dir_all(&to);
+    std::fs::create_dir_all(to.join("Std")).unwrap();
+    for entry in std::fs::read_dir(&from).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            std::fs::copy(&path, to.join(path.file_name().unwrap())).unwrap();
+        }
+    }
+    for entry in std::fs::read_dir(from.join("Std")).unwrap() {
+        let path = entry.unwrap().path();
+        std::fs::copy(&path, to.join("Std").join(path.file_name().unwrap())).unwrap();
+    }
+    to
+}
+
+/// URI файла проекта. Пустой `relative` даёт URI самого корня.
+#[allow(
+    clippy::expect_used,
+    reason = "заготовка теста: путь без URI означает сломанное окружение"
+)]
+fn addressed(root: &Path, relative: &str) -> String {
+    let path = if relative.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(relative)
+    };
+    adamas_lsp::project::uri_of(&path)
+        .expect("путь проекта переводится в URI")
+        .as_str()
+        .to_owned()
+}
+
+/// Правка одного файла меняет диагностику того, кто его подключил.
+///
+/// Свидетель различает по построению: `times` в `main.adamas` **не объявлен**,
+/// он берётся из `Std/Arith.adamas`, и без разрешения имён между файлами эта
+/// программа не проверяется вовсе. Правится при этом буфер, а не файл: на
+/// диске всё время лежит исходный текст, поэтому подчёркивание в `main` может
+/// прийти только от того, что сервер читает открытые буферы.
+///
+/// Проверяется **содержание**, а не факт прихода: «диагностика пришла» зелено
+/// и когда пришла не та. Сверяются текст сообщения и место, а после отката -
+/// что список стал пуст.
+///
+/// Правок две, потому что через границу файлов идут две разные вещи. Первая
+/// уносит имя из экспортируемых - её ловит разрешение имён. Вторая меняет
+/// **тип**: модуль остаётся цел, а тело зависящего перестаёт сходиться, и в
+/// сообщении стоит тип из чужого файла.
+#[test]
+fn an_edit_in_a_module_moves_the_dependents_diagnostic() {
+    let root = copied("dependents");
+    let main = addressed(&root, "main.adamas");
+    let arith = addressed(&root, "Std/Arith.adamas");
+    let main_text = std::fs::read_to_string(root.join("main.adamas")).expect("вход читается");
+    let arith_text =
+        std::fs::read_to_string(root.join("Std/Arith.adamas")).expect("модуль читается");
+
+    let (mut client, _) = Client::start_in(Some(&addressed(&root, "")), None);
+    assert_eq!(client.open(&main, &main_text), json!([]), "проект принят");
+    assert_eq!(client.open(&arith, &arith_text), json!([]), "модуль принят");
+    client.settled();
+
+    // Имя уезжает из подключённого модуля. Сам модуль от этого в порядке -
+    // ломается **зависящий**, и в этом весь смысл прогона.
+    let renamed = arith_text.replace("times", "multiply");
+    assert_ne!(renamed, arith_text, "правка обязана что-то менять");
+    client.edit(&arith, 2, &renamed);
+    let after = client.settled();
+    assert_eq!(after.get(&arith), Some(&json!([])), "сам модуль цел");
+
+    let broken = after
+        .get(&main)
+        .expect("правка модуля обязана перепроверить зависящий буфер");
+    assert_eq!(broken.as_array().map(Vec::len), Some(1), "{broken}");
+    assert_eq!(
+        broken[0]["message"],
+        json!("модуль `Std.Arith` не объявляет `times`"),
+        "{broken}"
+    );
+    assert_eq!(
+        broken[0]["range"],
+        json!({
+            "start": { "line": 13, "character": 24 },
+            "end": { "line": 13, "character": 29 },
+        }),
+        "подчёркнуто `times` в списке открытых имён входного файла"
+    );
+
+    // Вторая правка - **типом**, а не списком имён: у `times` появляется
+    // третий параметр, модуль от этого цел, а тело зависящего перестаёт
+    // сходиться. Через границу файлов идёт, стало быть, не только перечень
+    // экспортируемых имён, но и сам тип.
+    let widened = arith_text.replace(
+        "times : Nat -> Nat -> Nat\ntimes Zero m = Zero\ntimes (Succ k) m = plus m (times k m)",
+        "times : Nat -> Nat -> Nat -> Nat\ntimes Zero m k = Zero\n\
+         times (Succ j) m k = plus m (times j m k)",
+    );
+    assert_ne!(widened, arith_text, "правка обязана что-то менять");
+    client.edit(&arith, 3, &widened);
+    let typed = client.settled();
+    assert_eq!(typed.get(&arith), Some(&json!([])), "сам модуль цел");
+    let mismatch = typed
+        .get(&main)
+        .expect("правка типа обязана перепроверить зависящий буфер");
+    assert_eq!(mismatch.as_array().map(Vec::len), Some(1), "{mismatch}");
+    assert!(
+        mismatch[0]["message"].as_str().is_some_and(|it| {
+            it.starts_with(
+                "несовпадение типов: ожидался `Std.Base.Nat`, \
+                 получен `(ω _ : Std.Base.Nat) -> Std.Base.Nat`",
+            )
+        }),
+        "{mismatch}"
+    );
+    assert_eq!(
+        mismatch[0]["range"]["start"]["line"],
+        json!(41),
+        "подчёркнут список `main`, а не строка импорта"
+    );
+
+    // Откат буфера гасит подчёркивание там же.
+    client.edit(&arith, 4, &arith_text);
+    let back = client.settled();
+    assert_eq!(
+        back.get(&main),
+        Some(&json!([])),
+        "откат правки обязан снимать подчёркивание с зависящего: {back:?}"
+    );
+    client.stop();
+}
+
+/// Отказ внутри подключённого модуля подчёркивается **в нём**, а не во входном
+/// файле: спан живёт в чужом тексте, и нарисованный по входному он указал бы на
+/// случайную строку.
+#[test]
+fn a_refusal_inside_a_module_is_underlined_in_that_module() {
+    let root = copied("inside");
+    let main = addressed(&root, "main.adamas");
+    let logic = addressed(&root, "Std/Logic.adamas");
+    let main_text = std::fs::read_to_string(root.join("main.adamas")).expect("вход читается");
+
+    // Модуль ломается **на диске** и открытым буфером не является: иначе его
+    // диагностику публиковал бы его собственный проход.
+    let path = root.join("Std/Logic.adamas");
+    let text = std::fs::read_to_string(&path).expect("модуль читается");
+    std::fs::write(&path, text.replace("not True = False", "not True = Zero"))
+        .expect("модуль пишется");
+
+    let (mut client, _) = Client::start_in(Some(&addressed(&root, "")), None);
+    assert_eq!(
+        client.open(&main, &main_text),
+        json!([]),
+        "во входном файле подчёркивать нечего: отказ живёт в чужом тексте"
+    );
+
+    let sent = client.settled();
+    let there = sent
+        .get(&logic)
+        .expect("отказ подключённого модуля обязан дойти до его файла");
+    assert_eq!(there.as_array().map(Vec::len), Some(1), "{there}");
+    assert_eq!(
+        there[0]["range"],
+        json!({
+            "start": { "line": 6, "character": 11 },
+            "end": { "line": 6, "character": 15 },
+        }),
+        "подчёркнут `Zero` в `Std/Logic.adamas`, а не строка входного файла"
+    );
+    assert_eq!(
+        there[0]["message"],
+        json!("имя `Zero` не найдено"),
+        "{there}"
+    );
+
+    // Починка гасит подчёркивание в файле, которого никто не открывал: само
+    // оно не исчезнет.
+    std::fs::write(&path, &text).expect("модуль пишется");
+    client.edit(&main, 2, &format!("{main_text}-- правка\n"));
+    let fixed = client.settled();
+    assert_eq!(fixed.get(&main), Some(&json!([])));
+    assert_eq!(fixed.get(&logic), Some(&json!([])), "{fixed:?}");
+    client.stop();
+}
+
+/// Пол десяти кругов «правка -> диагностика всех, кого она касается».
+#[allow(
+    clippy::expect_used,
+    reason = "заготовка стенда: отказ здесь означает сломанное окружение"
+)]
+fn floor(client: &mut Client, uri: &str, text: &str, from: i64, expect: &[&str]) -> u128 {
+    let mut best = std::time::Duration::MAX;
+    for round in 0..10 {
+        let written = format!("{text}-- {round}\n");
+        let started = std::time::Instant::now();
+        client.edit(uri, from + round, &written);
+        let sent = client.settled();
+        best = best.min(started.elapsed());
+        for awaited in expect {
+            assert_eq!(
+                sent.get(*awaited),
+                Some(&json!([])),
+                "не дождались буфера {awaited} - мерится половина круга"
+            );
+        }
+    }
+    best.as_micros()
+}
+
+/// Круг «правка -> диагностика» на проекте. Зовётся руками: величина требует
+/// тихой машины.
+///
+/// ```text
+/// cargo test --release -p adamas-lsp --test protocol -- --ignored --nocapture
+/// ```
+///
+/// Мерится то, чего ждёт человек: от `didChange` до `publishDiagnostics`
+/// последнего буфера, которого правка касается. Три точки, потому что цена у
+/// них разная: правка входного файла стоит одного прохода по программе, а
+/// правка библиотечного модуля - по проходу на **каждый** открытый буфер,
+/// который его подключил, и множитель растёт с числом открытых окон.
+#[test]
+#[ignore = "стенд времени: величина требует тихой машины"]
+#[allow(
+    clippy::expect_used,
+    reason = "заготовка стенда: отказ здесь означает сломанное окружение"
+)]
+fn what_a_round_costs_on_a_project() {
+    let root = copied("round");
+    let main = addressed(&root, "main.adamas");
+    let base = addressed(&root, "Std/Base.adamas");
+    let main_text = std::fs::read_to_string(root.join("main.adamas")).expect("вход читается");
+    let base_text = std::fs::read_to_string(root.join("Std/Base.adamas")).expect("модуль читается");
+
+    let (mut client, _) = Client::start_in(Some(&addressed(&root, "")), None);
+    assert_eq!(client.open(&main, &main_text), json!([]));
+    assert_eq!(client.open(&base, &base_text), json!([]));
+    client.settled();
+
+    let alone = floor(&mut client, &main, &main_text, 100, &[&main]);
+    eprintln!("правка входного файла, два буфера: {alone} мкс");
+
+    let pair = floor(&mut client, &base, &base_text, 200, &[&base, &main]);
+    eprintln!("правка `Std/Base`, два буфера: {pair} мкс");
+
+    // Все десять окон разом - худший случай: `Std/Base` подключён всеми, и
+    // каждый из них перепроверяется целиком.
+    let mut awaited = vec![main.clone(), base.clone()];
+    for entry in std::fs::read_dir(root.join("Std")).expect("каталог библиотеки") {
+        let path = entry.expect("файл библиотеки").path();
+        let uri = adamas_lsp::project::uri_of(&path).expect("путь переводится в URI");
+        if uri.as_str() == base {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("модуль читается");
+        client.open(uri.as_str(), &text);
+        awaited.push(uri.as_str().to_owned());
+    }
+    client.settled();
+    let borrowed: Vec<&str> = awaited.iter().map(String::as_str).collect();
+    let all = floor(&mut client, &base, &base_text, 300, &borrowed);
+    eprintln!("правка `Std/Base`, десять буферов: {all} мкс");
     client.stop();
 }
 

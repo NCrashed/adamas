@@ -1,0 +1,50 @@
+-- Классы и инстансы. Класс - имя **программы**, а не член файла (§4.4): всякий,
+-- кто этот модуль подключил, зовёт `eq` и `map` без квалификации.
+
+import Std.Base (Bool, False, True, Nat, Zero, Succ, Maybe, Nothing, Just, List, Nil, Cons)
+import Std.Logic (and)
+
+class Eqv a where
+  eq : a -> a -> Bool
+
+instance Eqv Bool where
+  eq False False = True
+  eq True True = True
+  eq x y = False
+
+instance Eqv Nat where
+  eq Zero Zero = True
+  eq (Succ k) (Succ m) = eq k m
+  eq x y = False
+
+instance {Eqv a} => Eqv (List a) where
+  eq Nil Nil = True
+  eq (Cons x xs) (Cons y ys) = and (eq x y) (eq xs ys)
+  eq x y = False
+
+class Functor (f : Type -> Type) where
+  map : {q : Mult} -> (ω g : (q x : a) -> b) -> f a -> f b
+
+instance Functor Maybe where
+  map g Nothing = Nothing
+  map g (Just x) = Just (g x)
+
+instance Functor List where
+  map g Nil = Nil
+  map g (Cons x xs) = Cons (g x) (map g xs)
+
+class Applicative f when Functor f where
+  pure : a -> f a
+  ap : f (a -> b) -> f a -> f b
+
+instance Applicative Maybe where
+  pure x = Just x
+  ap Nothing m = Nothing
+  ap (Just f) m = map f m
+
+class Monad f when Applicative f where
+  bind : f a -> (a -> f b) -> f b
+
+instance Monad Maybe where
+  bind Nothing k = Nothing
+  bind (Just x) k = k x

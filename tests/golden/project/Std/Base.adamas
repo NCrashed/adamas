@@ -1,0 +1,27 @@
+-- Данные, на которых стоит вся библиотека. Ничего не подключает: корень графа.
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Maybe (a : Type) where
+  Nothing : Maybe a
+  Just : a -> Maybe a
+
+data Either (e : Type) (a : Type) where
+  Left : e -> Either e a
+  Right : a -> Either e a
+
+data Pair (a : Type) (b : Type) where
+  MkPair : a -> b -> Pair a b
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a

@@ -1,0 +1,64 @@
+-- Вход проекта из десяти файлов (§4.8, §7.2).
+--
+-- Библиотека разложена по девяти модулям `Std/*`, и они подключают друг друга:
+-- `ListOps` зовёт `Arith` и `Combinator`, `Order` - `Classes`, `Effect` -
+-- `ListOps`, а `Base` не подключает никого. Здесь не объявлено ни одного имени
+-- счёта: сломай разрешение имён между файлами - и эта программа перестанет
+-- проверяться целиком.
+--
+-- Ответ **позиционный**: суммой любая перестановка давала бы то же число, и
+-- половина библиотеки не участвовала бы в ответе вовсе.
+
+import Std.Base (Bool, False, True, Nat, Zero, Succ, Maybe, Nothing, Just, List, Nil, Cons)
+import Std.Logic (not, or)
+import Std.Arith (plus, times)
+import Std.Combinator (flip)
+import Std.ListOps
+  ( append
+  , digits
+  , filterList
+  , foldl
+  , length
+  , mapList
+  , onceOf
+  , succOf
+  , sum
+  )
+import Std.Classes
+import Std.Order (maximum, nub)
+import Std.Effect (collected, safeHead)
+import Std.Show (Showable, MkShowable, fromMaybe, isZero, nextJust, runShowable)
+
+-- Повтор в списке: без `nub` длина была бы три, с ним - два.
+repeated : List Nat
+repeated = Cons (Succ Zero) (Cons (Succ (Succ Zero)) (Cons (Succ Zero) Nil))
+
+mark : Bool -> Nat
+mark False = Zero
+mark True = Succ Zero
+
+main : List Nat
+main =
+  [ maximum Zero (collected digits)
+  , fromMaybe Zero (safeHead digits)
+  , length (nub repeated)
+  , fromMaybe 4 (safeHead Nil)
+  , length (collected digits)
+  , fromMaybe Zero (safeHead (collected digits))
+  , length (append digits digits)
+  , length (filterList isZero digits)
+  , sum (mapList succOf digits)
+  , times 2 3
+  , mark (eq True True)
+  , mark (eq digits repeated)
+  , fromMaybe Zero (nextJust (Just (Succ Zero)))
+  , sum (map succOf digits)
+  , sum (map onceOf digits)
+  , fromMaybe Zero (map succOf (Just (Succ Zero)))
+  , fromMaybe Zero (ap (pure succOf) (Just (Succ Zero)))
+  , mark (not False)
+  , mark (not True)
+  , mark (or False True)
+  , foldl (flip plus) Zero digits
+  , mark (runShowable (MkShowable Zero isZero))
+  ]

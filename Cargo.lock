@@ -6,6 +6,7 @@ version = 4
 name = "adamas-cli"
 version = "0.0.0"
 dependencies = [
+ "adamas-codegen",
  "adamas-core",
  "adamas-elab",
  "adamas-interp",

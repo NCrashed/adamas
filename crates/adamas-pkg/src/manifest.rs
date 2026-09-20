@@ -29,6 +29,7 @@
 //! name = "example"
 //! root = "src"    # каталог модулей, по умолчанию `src`
 //! entry = "Main"  # модуль-вход, по умолчанию `Main`
+//! test = "Test"   # модуль с тестами, по умолчанию `Test`
 //!
 //! [dependencies]
 //! Std = { git = "https://example.invalid/std.git", tag = "v0.1.0" }
@@ -95,6 +96,12 @@ pub struct Manifest {
     pub root: PathBuf,
     /// Путь модуля-входа: `Main` - это `<root>/Main.adamas`.
     pub entry: String,
+    /// Путь модуля с тестами: `Test` - это `<root>/Test.adamas`.
+    ///
+    /// Отдельный модуль, а не тесты во входном: программа и её тесты - две
+    /// разные программы, и у второй свой вход. Иначе тестовое определение
+    /// уезжало бы в собранный бинарь.
+    pub test: String,
     /// Зависимости в порядке написания.
     pub dependencies: Vec<Dependency>,
 }
@@ -137,9 +144,14 @@ impl Manifest {
 
         let name = string(path, package, "package", "name")?
             .ok_or_else(|| PkgError::shape(path, "в `[package]` нет `name`"))?;
+        // Имя стало **именем файла**: `adamas build` кладёт под ним артефакт.
+        // Слеш и `..` в нём поэтому отсекаются здесь же, где и в путях модулей.
+        file_name(path, "package.name", &name)?;
         let root = string(path, package, "package", "root")?.unwrap_or_else(|| "src".to_owned());
         let entry = string(path, package, "package", "entry")?.unwrap_or_else(|| "Main".to_owned());
         module_path(path, "package.entry", &entry)?;
+        let suite = string(path, package, "package", "test")?.unwrap_or_else(|| "Test".to_owned());
+        module_path(path, "package.test", &suite)?;
 
         let dependencies = match document.get("dependencies") {
             None => Vec::new(),
@@ -161,6 +173,7 @@ impl Manifest {
             name,
             root: dir.join(inside(path, "package.root", &root)?),
             entry,
+            test: suite,
             dependencies,
         })
     }
@@ -168,7 +181,18 @@ impl Manifest {
     /// Файл модуля-входа.
     #[must_use]
     pub fn entry_file(&self) -> PathBuf {
-        adamas_elab::program::Directory::new(&self.root).file_of(&self.entry)
+        self.file_of(&self.entry)
+    }
+
+    /// Файл модуля с тестами.
+    #[must_use]
+    pub fn test_file(&self) -> PathBuf {
+        self.file_of(&self.test)
+    }
+
+    /// Файл, в котором лежал бы модуль этого проекта.
+    fn file_of(&self, module: &str) -> PathBuf {
+        adamas_elab::program::Directory::new(&self.root).file_of(module)
     }
 }
 
@@ -263,6 +287,24 @@ fn module_path(path: &Path, field: &str, written: &str) -> Result<(), PkgError> 
     ))
 }
 
+/// Проверяет, что строка годится в имя файла: буквы, цифры, `_`, `-`.
+///
+/// Требование пришло от `adamas build`: артефакт кладётся под именем пакета, и
+/// `name = "../../bin/sh"` в чужом манифесте писал бы файл вне проекта.
+fn file_name(path: &Path, field: &str, written: &str) -> Result<(), PkgError> {
+    let ok = !written.is_empty()
+        && written
+            .chars()
+            .all(|it| it.is_alphanumeric() || it == '_' || it == '-');
+    if ok {
+        return Ok(());
+    }
+    Err(PkgError::shape(
+        path,
+        format!("`{field}` = `{written}` - не имя файла: буквы, цифры, `_` и `-`"),
+    ))
+}
+
 /// Проверяет, что относительный путь не выводит за каталог манифеста.
 ///
 /// `root = "../.."` в чужом репозитории открыл бы чтение файлов вне чекаута.
@@ -295,7 +337,16 @@ mod tests {
         assert_eq!(manifest.root, Path::new("/проект/src"));
         assert_eq!(manifest.entry, "Main");
         assert_eq!(manifest.entry_file(), Path::new("/проект/src/Main.adamas"));
+        assert_eq!(manifest.test_file(), Path::new("/проект/src/Test.adamas"));
         assert!(manifest.dependencies.is_empty());
+    }
+
+    /// Имя пакета называет файл артефакта, поэтому путём быть не вправе.
+    #[test]
+    fn a_package_name_that_is_a_path_is_refused() {
+        let error = parsed("[package]\nname = \"../../bin/sh\"\n")
+            .expect_err("путь в имени обязан быть отвергнут");
+        assert!(format!("{error}").contains("не имя файла"), "{error}");
     }
 
     #[test]

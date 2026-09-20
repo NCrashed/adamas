@@ -1,29 +1,14 @@
 //! Драйвер компилятора Adamas.
 //!
-//! Полный набор команд (`new`, `build`, `test`, `run`, `check`, `fmt`, `doc`) —
-//! §7.1. Пока есть только `check`.
+//! §7.1 называет семь команд: `new`, `build`, `test`, `run`, `check`, `fmt`,
+//! `doc`. Здесь пять - шестая и седьмая суть отдельные машины (форматтер языка
+//! и генератор документации из doc-комментариев), и ни одной из них в проекте
+//! нет. Сверх семи есть `eval`: он старше `run` и отличается от него
+//! вычислителем - считает машина (`adamas-interp`), а не собранный код.
 //!
-//! # Программа, а не файл
-//!
-//! Обе команды берут **входной** файл и разрешают его `import`'ы (§4.8):
-//! корень поиска модулей — каталог этого файла, `Data.Map` — это
-//! `<каталог>/Data/Map.adamas`.
-//!
-//! # Проект, а не файл
-//!
-//! Тем же аргументом принимается **каталог** проекта или путь к его
-//! `adamas.toml`: тогда корни поиска берутся из манифеста, а git-зависимости
-//! достаются и подключаются (§7.3, `adamas-pkg`).
-//!
-//! Написанный **файл** тоже ищет манифест - вверх по дереву, до ближайшего.
-//! Решение это переигранное: сперва вверх не искалось вовсе, доводом «чужой
-//! `adamas.toml` этажом выше молча меняет смысл проверки». Довод не выдержал
-//! замера трека B: `adamas check tests/golden/project/Std/Order.adamas`
-//! отвечал «модуль `Std.Base` не найден: искали `…/Std/Std/Base.adamas`», то
-//! есть инструмент не проверял файл **собственного** проекта. Редактор тот же
-//! корень берёт из `rootUri`; у терминала его взять неоткуда, кроме как из
-//! манифеста. Корни при этом манифестные, а входом остаётся написанный файл -
-//! спрашивали про него.
+//! Что где: [`project`] - какая это программа (вход, корни модулей, каталог
+//! артефактов), [`scaffold`] - `new`, [`compile`] - `build` и `run`,
+//! [`suite`] - `test`.
 //!
 //! # `check --type`
 //!
@@ -34,14 +19,18 @@
 //! печатает объявленный тип тем же вызовом, каким его отдаёт hover, и тем
 //! самым переводит обещание из слов в прогон (`tests/hover.rs`).
 
-use std::path::{Path, PathBuf};
+mod compile;
+mod project;
+mod scaffold;
+mod suite;
 
-use adamas_core::level::Level;
-use adamas_core::row::Row;
-use adamas_core::source::SourceFile;
-use adamas_core::term::{PRINT_DEPTH, Term};
-use anyhow::Context as _;
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use adamas_core::term::PRINT_DEPTH;
 use clap::{Parser, Subcommand};
+
+use compile::Backend;
 
 #[derive(Debug, Parser)]
 #[command(name = "adamas", version, about = "Adamas compiler driver", long_about = None)]
@@ -52,6 +41,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Завести проект: манифест, вход и тесты (§7.1).
+    New {
+        /// Каталог под проект. Создаётся, если его нет.
+        path: PathBuf,
+        /// Имя пакета. По умолчанию - последний сегмент пути.
+        #[arg(long, value_name = "ИМЯ")]
+        name: Option<String>,
+    },
     /// Разобрать исходник, элаборировать и проверить типы (§7.1).
     Check {
         /// Путь к файлу `.adamas`, каталогу проекта или его `adamas.toml`.
@@ -60,7 +57,31 @@ enum Command {
         #[arg(long, value_name = "ИМЯ")]
         r#type: Vec<String>,
     },
-    /// Проверить и исполнить определение (§9 Фаза 5).
+    /// Собрать программу в исполняемый файл (§7.1).
+    Build {
+        /// Путь к проекту, его `adamas.toml` или файлу `.adamas`.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Чем идти от IR до объектника.
+        #[arg(long, value_enum, default_value_t = Backend::default())]
+        backend: Backend,
+    },
+    /// Собрать и запустить (§7.1).
+    Run {
+        /// Путь к проекту, его `adamas.toml` или файлу `.adamas`.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Чем идти от IR до объектника.
+        #[arg(long, value_enum, default_value_t = Backend::default())]
+        backend: Backend,
+    },
+    /// Прогнать тесты проекта (§7.1).
+    Test {
+        /// Путь к проекту или его `adamas.toml`.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Проверить и исполнить определение машиной (§9 Фаза 5).
     Eval {
         /// Путь к файлу `.adamas`, каталогу проекта или его `adamas.toml`.
         path: PathBuf,
@@ -73,33 +94,88 @@ enum Command {
     },
 }
 
-fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
-        Command::Check { path, r#type } => {
-            let (name, files, signature) = checked(&path)?;
-            if r#type.is_empty() {
-                // Файлов больше одного - у программы есть импорты, и счёт
-                // объявлений без счёта файлов говорил бы про неё неправду.
-                if files > 1 {
-                    println!(
-                        "{name}: проверено, файлов {files}, объявлений {}",
-                        signature.len()
-                    );
-                } else {
-                    println!("{name}: проверено, объявлений {}", signature.len());
-                }
-                return Ok(());
-            }
-            for name in &r#type {
-                let Some(shown) = adamas_elab::cursor::described(&signature, name) else {
-                    anyhow::bail!("имя `{name}` сигнатуре неизвестно");
-                };
-                println!("{shown}");
-            }
-            Ok(())
+/// Код возврата, а не `anyhow::Result`: у `run` он приходит от запущенной
+/// программы, а у `test` - от вердикта сюиты, и подменять их нулём значило бы
+/// отвечать успехом на неуспех.
+///
+/// Печать отказа - **дословно** та, которой отвечал `Termination` у
+/// `anyhow::Result`: `Error:` и отладочное представление с цепочкой причин.
+/// Своя короче, и первый же прогон показал, чего она стоит: 98 записанных
+/// отказов корпуса и сверка «редактор видит то же, что терминал» сверяются с
+/// текстом целиком, вместе с этим словом.
+fn main() -> ExitCode {
+    match dispatch(Cli::parse().command) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("Error: {error:?}");
+            ExitCode::FAILURE
         }
-        Command::Eval { path, name, full } => evaluate(&path, &name, full),
     }
+}
+
+fn dispatch(command: Command) -> anyhow::Result<ExitCode> {
+    match command {
+        Command::New { path, name } => {
+            scaffold::create(&path, name.as_deref())?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Check { path, r#type } => {
+            check(&path, &r#type)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Build { path, backend } => {
+            compile::build(&path, backend)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Run { path, backend } => {
+            let code = compile::run(&path, backend)?;
+            Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
+        }
+        Command::Test { path } => {
+            let green = suite::run(&path)?;
+            Ok(if green {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        Command::Eval { path, name, full } => {
+            evaluate(&path, &name, full)?;
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+/// Проверка типов: счёт объявлений либо тип названного имени.
+fn check(path: &std::path::Path, wanted: &[String]) -> anyhow::Result<()> {
+    let opened = project::opened(path)?;
+    let checked = project::checked(&opened.entry, opened.sources.as_ref())?;
+    if wanted.is_empty() {
+        // Файлов больше одного - у программы есть импорты, и счёт объявлений
+        // без счёта файлов говорил бы про неё неправду.
+        if checked.files > 1 {
+            println!(
+                "{}: проверено, файлов {}, объявлений {}",
+                checked.name,
+                checked.files,
+                checked.signature.len()
+            );
+        } else {
+            println!(
+                "{}: проверено, объявлений {}",
+                checked.name,
+                checked.signature.len()
+            );
+        }
+        return Ok(());
+    }
+    for name in wanted {
+        let Some(shown) = adamas_elab::cursor::described(&checked.signature, name) else {
+            anyhow::bail!("имя `{name}` сигнатуре неизвестно");
+        };
+        println!("{shown}");
+    }
+    Ok(())
 }
 
 /// Исполняет определение и печатает значение.
@@ -111,127 +187,12 @@ fn main() -> anyhow::Result<()> {
 /// Ответ печатается со срезом по глубине: вырожденно глубокое значение даёт
 /// сотни килобайт текста, которых никто не читает. `--full` его снимает, и
 /// снимает по-настоящему - печать не рекурсивна (§10 вопрос 93).
-fn evaluate(path: &Path, name: &str, full: bool) -> anyhow::Result<()> {
-    let (_, _, signature) = checked(path)?;
-    let Some(definition) = signature.lookup(name) else {
-        anyhow::bail!("определение `{name}` не найдено");
-    };
-    let Some(body) = &definition.body else {
-        anyhow::bail!("у `{name}` нет тела: постулат вычислять нечем");
-    };
-    // Параметры подставляются нулём и пустой row. Выбор назван: подъём даёт
-    // row-параметр всякой написанной сигнатуре, поэтому требовать нулевой
-    // арности значило бы не вычислять почти ничего, а вычисление идёт над
-    // одним экземпляром - что и требуется, чтобы посмотреть на терм.
-    let levels: Vec<Level> = (0..definition.level_arity)
-        .map(|_| Level::number(0))
-        .collect();
-    let rows: Vec<Row<Term>> = (0..definition.row_arity).map(|_| Row::empty()).collect();
-    let body = body.substitute_levels(&levels).substitute_rows(&rows);
-    let answer = adamas_interp::run(&signature, &body)?;
+fn evaluate(path: &std::path::Path, name: &str, full: bool) -> anyhow::Result<()> {
+    let opened = project::opened(path)?;
+    let checked = project::checked(&opened.entry, opened.sources.as_ref())?;
+    let body = project::body(&checked.signature, name)?;
+    let answer = adamas_interp::run(&checked.signature, &body)?;
     let depth = if full { None } else { Some(PRINT_DEPTH) };
     println!("{}", answer.printed(depth));
     Ok(())
-}
-
-/// Откуда берутся входной файл и корни поиска модулей.
-///
-/// Три случая. Каталог или сам `adamas.toml` - проект целиком, и вход берётся
-/// из манифеста. Файл **внутри** проекта - корни из манифеста, а входом
-/// остаётся написанный файл. Файл вне всякого проекта - как раньше: корень
-/// поиска есть его каталог.
-///
-/// # Errors
-///
-/// Манифест собран не так или зависимость не достаётся.
-fn opened(path: &Path) -> anyhow::Result<(PathBuf, Box<dyn adamas_elab::program::Sources>)> {
-    let named = if path.is_dir() {
-        Some(path.to_path_buf())
-    } else if path
-        .file_name()
-        .is_some_and(|it| it == adamas_pkg::manifest::MANIFEST)
-    {
-        Some(
-            path.parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf(),
-        )
-    } else {
-        None
-    };
-    let entry = named.is_none().then(|| path.to_path_buf());
-    let Some(dir) = named.or_else(|| enclosing(path)) else {
-        let root = path.parent().unwrap_or_else(|| Path::new("."));
-        return Ok((
-            path.to_path_buf(),
-            Box::new(adamas_elab::program::Directory::new(root)),
-        ));
-    };
-
-    let project = adamas_pkg::Project::open(&dir)?;
-    // Достача - действие, и молчать о нём нельзя: сборка, впервые клонирующая
-    // репозиторий, отличается от той, что взяла готовый чекаут, только
-    // временем, и человеку это надо видеть.
-    for dependency in &project.resolved {
-        if dependency.refreshed {
-            eprintln!("{}: достаю {}", dependency.prefix, dependency.rev);
-        }
-    }
-    if project.relocked {
-        eprintln!("{}: обновлён", adamas_pkg::lock::LOCKFILE);
-    }
-    Ok((
-        entry.unwrap_or_else(|| project.entry_file()),
-        Box::new(project.sources),
-    ))
-}
-
-/// Проект, внутри которого лежит файл: ближайший `adamas.toml` вверх по дереву.
-///
-/// Путь приводится к абсолютному: без этого `adamas check main.adamas` смотрел
-/// бы ровно в текущий каталог и никуда выше. Файла нет - искать нечего, и
-/// отказ «не удалось прочитать» скажет об этом лучше.
-fn enclosing(file: &Path) -> Option<PathBuf> {
-    let full = std::fs::canonicalize(file).ok()?;
-    let mut at = full.parent()?;
-    loop {
-        if at.join(adamas_pkg::manifest::MANIFEST).is_file() {
-            return Some(at.to_path_buf());
-        }
-        at = at.parent()?;
-    }
-}
-
-/// Разбор, элаборация и проверка типов - общая половина обеих команд.
-///
-/// Проход идёт по **программе**, а не по файлу: `import` подключает соседние
-/// файлы, и корень их поиска даёт [`opened`] - каталог входного файла или
-/// манифест проекта (§4.8, §7.3). Программа из одного файла проходит тем же
-/// путём: подключать нечего, и область видимости у неё пуста.
-///
-/// Отказ печатается вместе с исходником **того** файла, которому принадлежит
-/// его спан: позиция в чужом файле, нарисованная по входному, указывала бы на
-/// случайную строку.
-///
-/// Элаборация при этом не в TCB - она отдаёт терм, корректность его
-/// устанавливает `check` (§3).
-fn checked(path: &Path) -> anyhow::Result<(String, usize, adamas_core::sig::Signature)> {
-    let (entry, sources) = opened(path)?;
-    let text = std::fs::read_to_string(&entry)
-        .with_context(|| format!("не удалось прочитать {}", entry.display()))?;
-    let file = SourceFile::new(entry.display().to_string(), text);
-    let name = file.name().to_owned();
-
-    let program = adamas_elab::program::analyze(file, sources.as_ref());
-    if let Some(located) = program.error() {
-        anyhow::bail!("{}", program.rendered(located));
-    }
-    for diagnostic in &program.diagnostics {
-        eprintln!("{}", program.rendered(diagnostic));
-    }
-    let files = program.units.len();
-    let signature = program
-        .signature
-        .ok_or_else(|| anyhow::anyhow!("{name}: проход не отдал сигнатуры"))?;
-    Ok((name, files, signature))
 }

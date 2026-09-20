@@ -377,6 +377,16 @@ pub(crate) fn llvm_tools() -> Option<Toolchain> {
         eprintln!("LLVM объявлен отсутствующим ({LLVM_ABSENT}=absent): второй столбец не мерился");
         return None;
     }
+    // Без clang'а столбец не мерится: рантайм в `.bc` собрать нечем. Решается
+    // это здесь, а не у [`runtime_bitcode`], чтобы «столбец измерим» решало
+    // одно место; иначе стенд доходит до сборки и падает - так и упал
+    // `bench compiles` на CI, где у джобы переменных нет вовсе.
+    if std::env::var_os(CLANG_VARIABLE).is_none_or(|it| it.is_empty()) {
+        eprintln!(
+            "`{CLANG_VARIABLE}` не задан: рантайм в `.bc` собрать нечем, второй столбец не мерился"
+        );
+        return None;
+    }
     Some(Toolchain::from_variable(
         adamas_codegen::llvm::TOOLS_VARIABLE,
     ))

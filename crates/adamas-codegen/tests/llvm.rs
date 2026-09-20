@@ -552,6 +552,30 @@ fn the_reader_of_the_minimum_llvm_is_blind_to_an_unknown_intrinsic() {
     let Some((tools, minimum)) = harness::llvm_toolchains() else {
         return;
     };
+    // Различитель меряет **разницу** двух версий, поэтому первым делом её и
+    // спрашивает. На CI обеим ролям отдан один каталог (`ADAMAS_LLVM_BIN` и
+    // `ADAMAS_LLVM_MIN_BIN` совпадают), и тогда мерить нечего: что принимает
+    // минимальная, принимает и штатная. Молча зеленеть здесь нельзя - причина
+    // печатается, - но и падать не на чем: отсутствие второй версии есть факт
+    // окружения, а не регресс. Имя ниже появилось в LLVM 19, поэтому штатной
+    // цепочке ниже девятнадцатой его тоже не узнать.
+    let (Ok(current), Ok(least)) = (tools.major(), minimum.major()) else {
+        eprintln!("версия цепочки не читается: различитель не строился");
+        return;
+    };
+    if current == least {
+        eprintln!(
+            "обеим ролям отдана одна цепочка (LLVM {current}): различителя нет, замер не делался"
+        );
+        return;
+    }
+    if current < 19 {
+        eprintln!(
+            "штатная цепочка - LLVM {current}, а имя появилось в девятнадцатой: \
+             различитель не строился"
+        );
+        return;
+    }
     // Имя из `llvm.coro.*`, появившееся после восемнадцатой (LLVM 19).
     let name = "llvm.coro.await.suspend.void";
     let text = format!(

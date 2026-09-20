@@ -1,0 +1,31 @@
+-- Точка разложения займа: тот же виток, тем же символом, но словом (§5.3).
+--
+-- Отличие от `outward-lend.adamas` ровно одно - тип первого аргумента. Чужая
+-- функция та же самая, её арность и тело те же; значит разность прогонов есть
+-- цена **займа**, а не цена вызова, которую мерит пара `lean`.
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  True : Bool
+  False : Bool
+
+effect Foreign
+
+extern "C" fn adamas_bench_calls : UInt64
+
+extern "C" fn adamas_bench_stir : UInt64 -> UInt64 -> UInt64
+
+turn : UInt64 -> UInt64 -> UInt64 -> {Foreign} UInt64
+turn p 0 acc = acc
+turn p n acc = turn p (subUInt64 n 1) (adamas_bench_stir p acc)
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let calls : UInt64 = adamas_bench_calls
+  turn 0 calls 1
+
+main : UInt64
+main = handle @Foreign body with
+  return v -> v

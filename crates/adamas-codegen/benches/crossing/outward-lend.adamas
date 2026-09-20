@@ -1,0 +1,42 @@
+-- Виток за границей, аргументом - **одолженный буфер** (§5.3, волна 2).
+--
+-- Пара к `outward-word.adamas`, и отличаются они ровно одной вещью: здесь
+-- первый аргумент чужой функции есть `Array 1 UInt64`, там - `UInt64`. Чужая
+-- сторона у обеих **одна и та же** - `adamas_bench_stir` с той же сигнатурой,
+-- той же арностью и тем же телом, - поэтому разность двух прогонов есть цена
+-- займа и ничего сверх: вызов `adamas_array_data` плюс пара `dup`/`drop`,
+-- которой массив держится живым на время вызова.
+--
+-- Массив употреблён в витке дважды - в займе и в рекурсивном вызове, - поэтому
+-- едет он лишней ссылкой. Это **дорогой** из двух случаев: у массива, чьё
+-- последнее употребление и есть заём, пары счётчика нет вовсе.
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  True : Bool
+  False : Bool
+
+effect Foreign
+
+extern "C" fn adamas_bench_calls : UInt64
+
+extern "C" fn adamas_bench_stir : Array n UInt64 -> UInt64 -> UInt64
+
+blank : UInt64
+blank = 0
+
+turn : Array 1 UInt64 -> UInt64 -> UInt64 -> {Foreign} UInt64
+turn xs 0 acc = acc
+turn xs n acc = turn xs (subUInt64 n 1) (adamas_bench_stir xs acc)
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let calls : UInt64 = adamas_bench_calls
+  let xs : Array 1 UInt64 = arrayNew 1 blank
+  turn xs calls 1
+
+main : UInt64
+main = handle @Foreign body with
+  return v -> v

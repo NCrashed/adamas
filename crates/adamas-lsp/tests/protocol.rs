@@ -950,8 +950,40 @@ fn an_edit_in_a_module_moves_the_dependents_diagnostic() {
         "подчёркнуто `times` в списке открытых имён входного файла"
     );
 
+    // Вторая правка - **типом**, а не списком имён: у `times` появляется
+    // третий параметр, модуль от этого цел, а тело зависящего перестаёт
+    // сходиться. Через границу файлов идёт, стало быть, не только перечень
+    // экспортируемых имён, но и сам тип.
+    let widened = arith_text.replace(
+        "times : Nat -> Nat -> Nat\ntimes Zero m = Zero\ntimes (Succ k) m = plus m (times k m)",
+        "times : Nat -> Nat -> Nat -> Nat\ntimes Zero m k = Zero\n\
+         times (Succ j) m k = plus m (times j m k)",
+    );
+    assert_ne!(widened, arith_text, "правка обязана что-то менять");
+    client.edit(&arith, 3, &widened);
+    let typed = client.settled();
+    assert_eq!(typed.get(&arith), Some(&json!([])), "сам модуль цел");
+    let mismatch = typed
+        .get(&main)
+        .expect("правка типа обязана перепроверить зависящий буфер");
+    assert_eq!(mismatch.as_array().map(Vec::len), Some(1), "{mismatch}");
+    assert!(
+        mismatch[0]["message"].as_str().is_some_and(|it| {
+            it.starts_with(
+                "несовпадение типов: ожидался `Std.Base.Nat`, \
+                 получен `(ω _ : Std.Base.Nat) -> Std.Base.Nat`",
+            )
+        }),
+        "{mismatch}"
+    );
+    assert_eq!(
+        mismatch[0]["range"]["start"]["line"],
+        json!(41),
+        "подчёркнут список `main`, а не строка импорта"
+    );
+
     // Откат буфера гасит подчёркивание там же.
-    client.edit(&arith, 3, &arith_text);
+    client.edit(&arith, 4, &arith_text);
     let back = client.settled();
     assert_eq!(
         back.get(&main),

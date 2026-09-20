@@ -1643,3 +1643,45 @@ held = adamas_probe_twice
         "чужой символ значением обязан печататься именем, а не отказом"
     );
 }
+
+/// Буфер машине одолжить нечем, и отказ это говорит прямо (§5.3, §4.11).
+///
+/// Не изъян заготовки, а свойство значения. Массив у машины есть **спайн**
+/// `arrayNew`/`arraySet` (`adamas_core::eval::cell_of`) - цепочка значений, по
+/// которой чтение ячейки идёт поиском, - а не байты подряд. Адреса у такой
+/// цепочки нет, и вычислить его неоткуда: одолжить чужой стороне нечего.
+///
+/// Свидетель обязателен потому, что альтернатива отказу здесь - **тихое
+/// расхождение трёх вычислителей**: понижения считают одно, а машина, сделай
+/// она вид, что посчитала, - другое.
+#[test]
+fn the_machine_refuses_to_lend_a_buffer() {
+    let source = format!(
+        "{BASE}
+effect Foreign
+
+blank : UInt8
+blank = 0
+
+extern \"C\" fn adamas_probe_sum : Array n UInt8 -> UInt64 -> UInt64
+
+body : (ω u : Unit) -> {{Foreign}} UInt64
+body u =
+  let bytes : Array 4 UInt8 = arrayNew 4 blank
+  adamas_probe_sum bytes 4
+
+main : UInt64
+main = handle @Foreign body with
+  return v -> v
+"
+    );
+    let error = refused(&source, "main");
+    assert!(
+        matches!(&error, adamas_interp::RunError::ForeignBuffer { symbol } if symbol == "adamas_probe_sum"),
+        "отказ обязан называть символ: {error}"
+    );
+    assert!(
+        error.to_string().contains("спайн"),
+        "отказ обязан называть причину, а не только символ: {error}"
+    );
+}

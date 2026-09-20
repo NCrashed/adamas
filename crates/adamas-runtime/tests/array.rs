@@ -15,11 +15,12 @@ use std::cell::Cell;
 use std::ffi::c_void;
 
 use adamas_runtime::ffi::{
-    Value, adamas_array_alloc, adamas_array_at, adamas_array_count, adamas_array_fill,
-    adamas_array_fill_flat, adamas_array_get, adamas_array_init, adamas_array_put,
-    adamas_array_read, adamas_array_release, adamas_array_stride, adamas_array_take,
-    adamas_array_window, adamas_array_writable, adamas_drop, adamas_dup, adamas_imm,
-    adamas_is_unique, adamas_stat_allocated, adamas_stat_live, adamas_stat_reset,
+    Value, adamas_array_alloc, adamas_array_at, adamas_array_count, adamas_array_data,
+    adamas_array_fill, adamas_array_fill_flat, adamas_array_get, adamas_array_init,
+    adamas_array_put, adamas_array_read, adamas_array_release, adamas_array_stride,
+    adamas_array_take, adamas_array_window, adamas_array_writable, adamas_drop, adamas_dup,
+    adamas_imm, adamas_is_unique, adamas_share, adamas_stat_allocated, adamas_stat_live,
+    adamas_stat_reset,
 };
 
 thread_local! {
@@ -289,6 +290,75 @@ fn a_unique_array_is_written_in_place() {
         assert_eq!(adamas_stat_allocated(), 2);
         adamas_drop(copy, None);
         adamas_drop(same, None);
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Адрес нагрузки одолжен без единой записи счётчика (§5.3).
+///
+/// Три утверждения в одном свидетеле, и все три несущие. Адрес есть ровно
+/// `(char *)array + 24` - то же, что даёт нулевая ячейка, - значит заём есть
+/// вычисление адреса, а не копия. Счётчик после займа тот же, значит заём
+/// **заимствует**. И нулевая длина законна: `adamas_array_at` на ней обрывает
+/// процесс, а пустой буфер чужой стороне отдать надо - `compress2` с нулевым
+/// входом обычное дело.
+#[test]
+fn lending_the_payload_writes_no_counter() {
+    unsafe {
+        adamas_stat_reset();
+        let array = adamas_array_alloc(4, 2);
+        assert_eq!(adamas_is_unique(array), 1);
+        let data = adamas_array_data(array);
+        assert_eq!(data, adamas_array_at(array, 0), "заём не адрес нагрузки");
+        assert_eq!(adamas_is_unique(array), 1, "заём тронул счётчик");
+
+        let empty = adamas_array_alloc(0, 2);
+        let nothing = adamas_array_data(empty);
+        assert_eq!(nothing.cast::<u8>(), empty.cast::<u8>().add(24));
+
+        adamas_drop(array, None);
+        adamas_drop(empty, None);
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Разделяемый массив одалживается **тем же адресом**, и копии не возникает.
+///
+/// Это названная дыра, а не свойство. §5.2 обещает, что запись в разделяемое
+/// идёт через `adamas_array_writable`, то есть разделённый блок копируется, и
+/// пишущий остаётся один. Заём эту развилку **обходит по построению** - он
+/// отдаёт адрес до всякой проверки уникальности, - поэтому чужая сторона пишет
+/// в ту самую память, которую читает другой поток. Ни отказа, ни копии.
+///
+/// Сегодня дыра недостижима из языка: массив разделяемым не становится нигде
+/// (§5.2, названная граница - `adamas_share` места вызова не имеет). Свидетель
+/// стоит на уровне рантайма ровно затем, чтобы к моменту, когда место вызова
+/// появится, это было написано числом, а не вспомнилось.
+#[test]
+fn a_shared_array_is_lent_without_a_copy() {
+    unsafe {
+        adamas_stat_reset();
+        let array = adamas_array_alloc(4, 2);
+        adamas_share(array, None);
+        adamas_dup(array);
+        assert_eq!(adamas_is_unique(array), 0, "массив не стал разделённым");
+
+        // Заём не копирует ничего и отдаёт адрес исходного блока.
+        let data = adamas_array_data(array);
+        assert_eq!(data, adamas_array_at(array, 0));
+        assert_eq!(adamas_is_unique(array), 0, "заём снял пометку разделения");
+        assert_eq!(adamas_stat_allocated(), 1, "заём выдал блок");
+
+        // А путь записи тот же блок **копирует**: другой поток остаётся при
+        // своём. Лишняя ссылка берётся затем, что копия отдаёт нашу.
+        adamas_dup(array);
+        let copy = adamas_array_writable(array, None);
+        assert_ne!(copy, array, "разделённый массив не скопирован под запись");
+        assert_eq!(adamas_stat_allocated(), 2);
+
+        adamas_drop(copy, None);
+        adamas_drop(array, None);
+        adamas_drop(array, None);
         assert_eq!(adamas_stat_live(), 0);
     }
 }

@@ -1,0 +1,67 @@
+-- Владение одолженным буфером, наблюдаемое **с той стороны** границы
+-- (§5.3, §5.1, §10 вопрос 149).
+--
+-- Фикстура отвечает на три вопроса числами, а не словами, и числа эти чужая
+-- сторона читает у нашего заголовка: спутник `adamas-codegen/tests/shim/ownership.c`
+-- про смещение нагрузки и про заголовок знает нарочно, иначе счётчик ссылок
+-- из-за границы не увидеть вовсе.
+--
+--   * **Что со счётчиком, пока чужая сторона держит указатель.** Ответов два, и
+--     они разные. Массив, который нужен и после займа, приезжает туда лишней
+--     ссылкой: `rc` на время вызова равен единице, то есть `adamas_is_unique`
+--     о нём лжёт в безопасную сторону - «не уникален». Массив, чьё последнее
+--     употребление и есть заём, приезжает владением: `rc` равен нулю, то есть
+--     рантайм считает его **уникальным**, пока чужая сторона в него пишет.
+--     Второе и есть названная граница: «владелец один» на время займа неверно.
+--   * **Тот ли это адрес.** Тег блока, прочитанный по одолженному адресу минус
+--     двадцать четыре, обязан быть теговым словом массива. Без этой сверки
+--     счётчик читался бы неизвестно откуда и врал бы правдоподобно.
+--   * **Вправе ли чужая сторона удержать указатель дольше вызова.** Вправе, и
+--     не держит это ничего: чужая сторона кладёт адрес в свою статическую
+--     переменную, наша отдаёт массив сразу после возврата, а следующий
+--     `arrayNew` той же длины получает **тот же блок**. Удержанный указатель
+--     после этого адресует другое значение Adamas, и язык об этом не знает.
+--
+-- Символы свои, поэтому корпус - `programs/`. Свидетель -
+-- `adamas-codegen/tests/ownership.rs`.
+
+data Unit where
+  MkUnit : Unit
+
+effect Foreign
+
+extern "C" fn adamas_probe_counter : Array n UInt8 -> UInt64
+
+extern "C" fn adamas_probe_tag : Array n UInt8 -> UInt64
+
+extern "C" fn adamas_probe_keep : Array n UInt8 -> UInt64
+
+extern "C" fn adamas_probe_revisits : Array n UInt8 -> UInt64
+
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+blank : UInt8
+blank = 0
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let bytes : Array 8 UInt8 = arrayNew 8 blank
+  -- `bytes` нужен и ниже, поэтому едет лишней ссылкой.
+  let held : UInt64 = adamas_probe_counter bytes
+  -- А здесь последнее употребление: едет владением.
+  let tagged : UInt64 = adamas_probe_tag bytes
+  let lone : Array 8 UInt8 = arrayNew 8 blank
+  let moved : UInt64 = adamas_probe_counter lone
+  let first : Array 8 UInt8 = arrayNew 8 blank
+  let kept : UInt64 = adamas_probe_keep first
+  let second : Array 8 UInt8 = arrayNew 8 blank
+  let again : UInt64 = adamas_probe_revisits second
+  addUInt64 held
+    (addUInt64 (mulUInt64 tagged 10)
+      (addUInt64 (mulUInt64 moved 100)
+        (addUInt64 (mulUInt64 kept 1000) (mulUInt64 again 10000))))
+
+main : UInt64
+main = runForeign body

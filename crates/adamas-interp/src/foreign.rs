@@ -24,9 +24,9 @@
 //! библиотеку. Отказ открыть неявную - не ошибка автора: он её не писал, и
 //! поиск идёт дальше. Отказ открыть **написанную** - ошибка, и она названа.
 //!
-//! Нет **таблицы сигнатур**. Поддержаны ровно три формы, и у каждой есть
-//! свидетель (`tests/outward.rs`); всё прочее - отказ с названной причиной, а
-//! не догадка. Причина, по которой таблица не полна, - арифметика, а не лень:
+//! Нет **таблицы сигнатур**. Поддержаны ровно шесть форм, и у каждой есть
+//! свидетель (`tests/outward.rs`, `adamas-cli/tests/linking.rs`); всё прочее -
+//! отказ с названной причиной, а не догадка. Причина, по которой таблица не полна, - арифметика, а не лень:
 //! `dlsym` отдаёт нетипизированный указатель, звать по нему можно только
 //! **точной** сигнатурой, и у арности `k` над десятью плоскими типами (§4.11)
 //! таких сигнатур `10^(k+1)`. Для `k <= 2` это 1110 ветвей по три строки
@@ -255,7 +255,10 @@ impl Foreign {
             reason = "вызов по нетипизированному адресу: содержание уровня 1 FFI (§5.3)"
         )]
         let answer = unsafe { invoke(address, &shape, result, args) };
-        answer.ok_or_else(|| self.outside())
+        match answer.ok_or_else(|| self.outside())? {
+            Answer::Word(word) => Ok(Some(word)),
+            Answer::Nothing => Ok(None),
+        }
     }
 
     /// Литерал не того типа, каким объявлен аргумент.
@@ -411,8 +414,20 @@ fn within(name: &str, symbol: &str) -> Result<Address, RunError> {
     Ok(found)
 }
 
-/// Вызов по классам регистров; внешний `None` - формы нет в таблице, внутренний
-/// - ответа нет (`void`).
+/// Чем ответил чужой вызов.
+///
+/// Отдельным типом, а не `Option<Option<u64>>`: два вложенных `None` значат
+/// разное - «формы нет в таблице» снаружи и «ответа нет» внутри, - и различать
+/// их вложенностью значило бы читать одно слово в двух смыслах.
+#[derive(Clone, Copy, Debug)]
+enum Answer {
+    /// Слово.
+    Word(u64),
+    /// Ничего: `void`.
+    Nothing,
+}
+
+/// Вызов по классам регистров; `None` - формы нет в таблице.
 ///
 /// Шесть форм, и у каждой свидетель: три первых - `tests/outward.rs`, три
 /// добавленных треком D - корпус (`eval/extern-c` даёт `() -> long`,
@@ -429,12 +444,7 @@ fn within(name: &str, symbol: &str) -> Result<Address, RunError> {
     unsafe_code,
     reason = "приписывание сигнатуры чужому адресу: содержание уровня 1 FFI (§5.3)"
 )]
-unsafe fn invoke(
-    address: Address,
-    shape: &[Class],
-    result: Class,
-    args: &[u64],
-) -> Option<Option<u64>> {
+unsafe fn invoke(address: Address, shape: &[Class], result: Class, args: &[u64]) -> Option<Answer> {
     // Перекладка битов в аргумент и обратно - тот же уклад, каким литерал
     // живёт в ядре: `Float64` битами, целое значением.
     let double = |at: usize| f64::from_bits(args[at]);
@@ -443,23 +453,23 @@ unsafe fn invoke(
         // libm.
         ([Class::Double], Class::Double) => {
             let call: extern "C" fn(f64) -> f64 = unsafe { std::mem::transmute(address) };
-            Some(Some(call(double(0)).to_bits()))
+            Some(Answer::Word(call(double(0)).to_bits()))
         }
         // `long -> long`: `labs`, `malloc` и спутники libc.
         ([Class::Word], Class::Word) => {
             let call: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(address) };
-            Some(Some(call(args[0])))
+            Some(Answer::Word(call(args[0])))
         }
         // `(double, double) -> double`: `pow`, `hypot`, `fmod`.
         ([Class::Double, Class::Double], Class::Double) => {
             let call: extern "C" fn(f64, f64) -> f64 = unsafe { std::mem::transmute(address) };
-            Some(Some(call(double(0), double(1)).to_bits()))
+            Some(Answer::Word(call(double(0), double(1)).to_bits()))
         }
         // `(long, long) -> long`: двухсловная половина libc и всякая чужая
         // библиотека, берущая указатель со счётом.
         ([Class::Word, Class::Word], Class::Word) => {
             let call: extern "C" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(address) };
-            Some(Some(call(args[0], args[1])))
+            Some(Answer::Word(call(args[0], args[1])))
         }
         // `long -> void`: `free` и всё, что отдаёт объект обратно. Без этой
         // формы `resource` над чужим объектом (§5.3) машине не считается:
@@ -467,13 +477,13 @@ unsafe fn invoke(
         ([Class::Word], Class::Void) => {
             let call: extern "C" fn(u64) = unsafe { std::mem::transmute(address) };
             call(args[0]);
-            Some(None)
+            Some(Answer::Nothing)
         }
         // `void -> long`: `clock` и спутники. В Adamas это функция от единицы
         // (§3.4), и единица до сюда не доезжает.
         ([], Class::Word) => {
             let call: extern "C" fn() -> u64 = unsafe { std::mem::transmute(address) };
-            Some(Some(call()))
+            Some(Answer::Word(call()))
         }
         _ => None,
     }

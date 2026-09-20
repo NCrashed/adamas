@@ -35,14 +35,17 @@
 //! # Мутанты
 //!
 //! Сняты на каждой правке порознь, с возвратом между ними. Счёт - упавших
-//! тестов набора `adamas-codegen --test folding --test agreement`; контроль на
-//! чистом дереве - ноль. Полная таблица - `docs/phase8-trackD-notes.md`.
+//! тестов набора `adamas-codegen --test folding --test agreement --test
+//! foreign_call`, `adamas-interp --test running`, `adamas-cli --test linking
+//! --test golden`; контроль на чистом дереве - ноль. Полная таблица -
+//! `docs/phase8-trackD-notes.md`.
 //!
 //! | Мутант | Красных |
 //! |---|---|
-//! | `emit_c::local`: отдавать символ как есть, без переименования | 3 |
+//! | `emit_c::local`: отдавать символ как есть, без переименования | 2 |
 //! | `emit_llvm::foreigns`: снять `nobuiltin` у объявления | 1 |
 //! | `native.rs`: снять `-fno-builtin` из `PROGRAM_FLAGS` | **0** |
+//! | `harness`: снять `-fno-builtin` из ключей сборки | **0** |
 
 #![allow(
     clippy::unwrap_used,
@@ -154,6 +157,9 @@ fn a_renamed_symbol_is_not_folded_even_with_builtins_allowed() {
 /// видно ровно то, о чём вопрос. Сверяются биты, а не печать: у C и у машины
 /// форматы плавающего разные по построению.
 fn probe_bits(declaration: &str, call: &str, flags: &[&str]) -> u64 {
+    // Имя своё у каждой сборки: тесты крейта идут параллельно, а файл один.
+    static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let at = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let source = format!(
         "#include <stdint.h>\n\
          #include <stdio.h>\n\
@@ -167,9 +173,6 @@ fn probe_bits(declaration: &str, call: &str, flags: &[&str]) -> u64 {
          \x20   return 0;\n\
          }}\n"
     );
-    // Имя своё у каждой сборки: тесты крейта идут параллельно, а файл один.
-    static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let at = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let printed = built_and_run(&format!("folding-probe-{at}"), &source, flags);
     u64::from_str_radix(printed.trim(), 16).unwrap_or_else(|why| panic!("{printed:?}: {why}"))
 }

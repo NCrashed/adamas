@@ -42,12 +42,26 @@ use std::process::Command;
 const PROBE: &str = "\
 #include <stdint.h>
 
+static uint64_t stashed = 0u;
+
 uint64_t adamas_probe_scale(uint64_t value) {
     return value * 7u + 3u;
 }
 
 uint64_t adamas_probe_blend(uint64_t left, uint64_t right) {
     return left * 100u + right;
+}
+
+/* Пара, которой наблюдается **`void`-символ**. Иначе он не наблюдаем ничем:
+ * значения у него нет по построению, и пропущенный вызов молчит. Измерено
+ * мутантом: ветвь `(long) -> void`, не зовущая ничего, не роняла ни одного
+ * свидетеля, пока этой пары не было. */
+void adamas_probe_stash(uint64_t value) {
+    stashed = value;
+}
+
+uint64_t adamas_probe_fetch(void) {
+    return stashed;
 }
 ";
 
@@ -57,9 +71,12 @@ const LIBRARY: &str = "adamasprobe";
 /// Каталог библиотеки внутри проекта - относительный, как его пишет манифест.
 const VENDOR: &str = "vendor/lib";
 
-/// Программа: два чужих вызова, ответ - их арифметика.
+/// Программа: четыре чужих вызова четырёх разных форм, ответ - их арифметика.
 ///
-/// `scale 6` даёт 45, `blend 45 2` даёт 4502.
+/// `scale 6` даёт 45; `stash 45` кладёт его на чужой стороне, `fetch` достаёт
+/// обратно; `blend 45 2` даёт 4502. Пропущенный `stash` - единственный из
+/// четырёх, чьё отсутствие не видно **в нём самом**: значения у `void`-символа
+/// нет. Видно оно в `fetch`, и потому пара стоит здесь целиком.
 const MAIN: &str = "\
 data Unit where
   MkUnit : Unit
@@ -70,10 +87,16 @@ extern \"C\" fn adamas_probe_scale : UInt64 -> UInt64
 
 extern \"C\" fn adamas_probe_blend : UInt64 -> UInt64 -> UInt64
 
+extern \"C\" fn adamas_probe_stash : UInt64 -> Unit
+
+extern \"C\" fn adamas_probe_fetch : UInt64
+
 body : (ω u : Unit) -> {Foreign} UInt64
 body u =
   let scaled : UInt64 = adamas_probe_scale 6
-  adamas_probe_blend scaled 2
+  let kept : Unit = adamas_probe_stash scaled
+  let back : UInt64 = adamas_probe_fetch
+  adamas_probe_blend back 2
 
 main : UInt64
 main = handle @Foreign body with

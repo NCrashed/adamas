@@ -1407,6 +1407,87 @@ mod tests {
         )
     }
 
+    /// Плоский блок читается обратно теми записями, которыми он сделан (§4.11).
+    ///
+    /// Форма ответа здесь не косметика. Блока в терме **нет**, и всё, что о нём
+    /// знают печать, понижение и проверка типов, приходит через это обратное
+    /// чтение; напечатай оно `arrayNew` без надстройки - и `arraySet`,
+    /// изменивший ячейку, исчез бы из нормальной формы молча.
+    ///
+    /// Записи печатаются только для ячеек, отличных от нулевой: `arrayNew 3 7`
+    /// уже кладёт семёрку во все три, и `arraySet` той же семёркой был бы
+    /// записью, ничего не меняющей. Оттого вторая половина проверки.
+    #[test]
+    fn a_flat_block_reads_back_as_the_writes_that_made_it() {
+        use crate::prim::{ArrayOp, Prim, PrimTy};
+        let byte = |bits: u64| Term::Prim(Prim::literal(PrimTy::UInt8, bits));
+        let length = Term::Prim(Prim::literal(PrimTy::UInt64, 3));
+        let index = |at: u64| Term::Prim(Prim::literal(PrimTy::UInt64, at));
+        let elem = Term::Prim(Prim::Ty(PrimTy::UInt8));
+        let made =
+            Term::Prim(Prim::Over(ArrayOp::New)).apply([elem.clone(), length.clone(), byte(7)]);
+        let written = |array: Term, at: u64, bits: u64| {
+            Term::Prim(Prim::Over(ArrayOp::Set)).apply([
+                length.clone(),
+                elem.clone(),
+                array,
+                index(at),
+                byte(bits),
+            ])
+        };
+        assert_eq!(
+            normalize(&written(made.clone(), 1, 8)).to_string(),
+            "arraySet 3 UInt8 (arrayNew UInt8 3 7) 1 8"
+        );
+        assert_eq!(
+            normalize(&written(made, 1, 7)).to_string(),
+            "arrayNew UInt8 3 7",
+            "запись, ничего не меняющая, в нормальной форме не остаётся"
+        );
+    }
+
+    /// Векторная запись оставляет **блок**, а не спайн над ним (§4.9, §4.11).
+    ///
+    /// Наблюдаемое выбрано формой нормальной формы, и это не косметика: у
+    /// спайна над блоком нет адреса, и колонка, записанная `simdStore`, молча
+    /// перестала бы одалживаться чужой стороне (§5.3). Ответ у обеих форм
+    /// одинаковый - [`cell_of`] читает и ту и другую, - поэтому поймать разницу
+    /// можно только здесь.
+    ///
+    /// До правки трека B волны 2 `simdStore` строил цепочку `arraySet` своими
+    /// руками, мимо δ-шага; тогда нормальная форма была бы двумя `arraySet`
+    /// поверх `arrayNew`.
+    #[test]
+    fn a_vector_write_leaves_a_flat_block() {
+        use crate::prim::{Prim, PrimTy, SimdOp};
+        let word = |bits: u64| Term::Prim(Prim::literal(PrimTy::UInt64, bits));
+        let elem = Term::Prim(Prim::Ty(PrimTy::UInt64));
+        // Стёртые аргументы - тип дорожки и словарь `Primitive`: ни того ни
+        // другого шаг не читает, и здесь на их месте стоит любое значение.
+        let erased = || Term::Prim(Prim::Ty(PrimTy::UInt64));
+        let array = Term::Prim(Prim::Over(crate::prim::ArrayOp::New)).apply([
+            elem.clone(),
+            word(2),
+            word(0),
+        ]);
+        let vector =
+            Term::Prim(Prim::Across(SimdOp::Splat)).apply([erased(), erased(), word(2), word(7)]);
+        let stored = Term::Prim(Prim::Across(SimdOp::Store)).apply([
+            word(2),
+            elem,
+            erased(),
+            word(2),
+            array,
+            word(0),
+            vector,
+        ]);
+        assert_eq!(
+            normalize(&stored).to_string(),
+            "arrayNew UInt64 2 7",
+            "векторная запись обязана идти тем же шагом, что `arraySet`"
+        );
+    }
+
     #[test]
     fn beta_reduction_happens() {
         // (\x -> x) (Type 0)  ==>  Type 0

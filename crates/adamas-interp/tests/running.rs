@@ -1713,7 +1713,15 @@ main = handle @Foreign body with
 /// бы незамеченным.
 #[test]
 fn a_buffer_past_the_limit_is_refused_by_name() {
-    let cells = adamas_core::value::Block::LIMIT + 1;
+    // Число написано, а не выведено из предела: `LIMIT + 1` двигался бы вместе
+    // с пределом и остался бы зелёным при любом его значении. Связь двух
+    // сторожит проверка ниже.
+    let cells = 2_000_000usize;
+    assert!(
+        cells > adamas_core::value::Block::LIMIT,
+        "предел вырос до {}: свидетель перестал говорить о пределе",
+        adamas_core::value::Block::LIMIT
+    );
     let source = format!(
         "{BASE}
 effect Foreign

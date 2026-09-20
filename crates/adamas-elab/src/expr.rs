@@ -255,53 +255,6 @@ pub(crate) const DEFAULT_FLOAT: &str = "Float";
 /// вложенности разбора: терм унарного числа глубиной ровно в него.
 pub(crate) const UNARY_LIMIT: u32 = 256;
 
-/// ПРОБА (а): байты строкового литерала в UTF-8 вместе с завершающим нулём.
-///
-/// Текст приходит с кавычками и нераскрытыми escape'ами - лексер их только
-/// проверил. Юникод едет байтами UTF-8: исходник и так UTF-8, `Char` в ядро не
-/// взят, и кодовым точкам в `Array n UInt8` места нет.
-fn string_bytes(text: &str) -> Option<Vec<u8>> {
-    let inner = text.strip_prefix('"')?.strip_suffix('"')?;
-    let mut bytes = Vec::new();
-    let mut rest = inner.chars();
-    let push = |ch: char, into: &mut Vec<u8>| {
-        let mut buffer = [0u8; 4];
-        into.extend_from_slice(ch.encode_utf8(&mut buffer).as_bytes());
-    };
-    while let Some(ch) = rest.next() {
-        if ch != '\\' {
-            push(ch, &mut bytes);
-            continue;
-        }
-        let decoded = match rest.next()? {
-            'n' => '\n',
-            't' => '\t',
-            'r' => '\r',
-            '0' => '\0',
-            '\\' => '\\',
-            '"' => '"',
-            '\'' => '\'',
-            'u' => {
-                if rest.next() != Some('{') {
-                    return None;
-                }
-                let mut digits = String::new();
-                loop {
-                    match rest.next()? {
-                        '}' => break,
-                        digit => digits.push(digit),
-                    }
-                }
-                char::from_u32(u32::from_str_radix(&digits, 16).ok()?)?
-            }
-            _ => return None,
-        };
-        push(decoded, &mut bytes);
-    }
-    bytes.push(0);
-    Some(bytes)
-}
-
 /// Читает цифры литерала: десятичные либо шестнадцатеричные, `_` игнорируются.
 ///
 /// `None` - не разобралось либо не поместилось в `u128`. Шире `u128` не бывает
@@ -2323,7 +2276,7 @@ impl<'a> Elaborator<'a> {
             ExprKind::Mask(inner) => self.masked(inner, expr.span),
             ExprKind::Tuple(items) if items.is_empty() => missing(Missing::Unit),
             ExprKind::Tuple(_) => missing(Missing::Tuple),
-            ExprKind::List(items) => self.list(items, expr.span),
+            ExprKind::List(items) => self.list(items, expr.span, awaited),
         }
     }
 
@@ -2893,10 +2846,6 @@ impl<'a> Elaborator<'a> {
     /// терм литерала размером с само число, и потому величина его ограничена -
     /// см. [`UNARY_LIMIT`].
     fn literal(&mut self, lit: &ast::Lit, awaited: Option<&Rc<Value>>) -> Result<Term, ElabError> {
-        // ПРОБА (а) трека C волны 2: строка едет `Array (n+1) UInt8`.
-        if lit.kind == ast::LitKind::Str {
-            return Self::string_literal(lit);
-        }
         if let Some(ty) = awaited.and_then(|ty| self.primitive_type(ty)) {
             return Self::primitive_literal(lit, ty);
         }
@@ -2996,43 +2945,6 @@ impl<'a> Elaborator<'a> {
         self.literal(lit, awaited).map(Some)
     }
 
-    /// ПРОБА (а): строковый литерал есть `Array (n+1) UInt8` с нулём в хвосте.
-    ///
-    /// Ожидаемый тип не читается вовсе: у строки он один, и длина выводится из
-    /// самого литерала. Терм собирается спайном `arraySet` над `arrayNew`, то
-    /// есть ровно тем, что автор написал бы руками; нулевые байты пропущены -
-    /// `arrayNew` уже залил ими весь блок.
-    fn string_literal(lit: &ast::Lit) -> Result<Term, ElabError> {
-        let Some(bytes) = string_bytes(&lit.text) else {
-            return Err(ElabError::Missing {
-                what: Missing::Literal,
-                span: lit.span,
-            });
-        };
-        let length = bytes.len() as u64;
-        let element = Term::Prim(Prim::Ty(PrimTy::UInt8));
-        let word = |value: u64| Term::Prim(Prim::literal(PrimTy::UInt64, value));
-        let byte = |value: u8| Term::Prim(Prim::literal(PrimTy::UInt8, u64::from(value)));
-        let mut built = Term::Prim(Prim::Over(prim::ArrayOp::New)).apply([
-            element.clone(),
-            word(length),
-            byte(0),
-        ]);
-        for (index, value) in bytes.iter().enumerate() {
-            if *value == 0 {
-                continue;
-            }
-            built = Term::Prim(Prim::Over(prim::ArrayOp::Set)).apply([
-                word(length),
-                element.clone(),
-                built,
-                word(index as u64),
-                byte(*value),
-            ]);
-        }
-        Ok(built)
-    }
-
     /// Ожидаемый тип, если он примитивный.
     fn primitive_type(&mut self, ty: &Rc<Value>) -> Option<PrimTy> {
         let reduced = whnf_solved(self.signature, self.metas, ty);
@@ -3120,7 +3032,20 @@ impl<'a> Elaborator<'a> {
     /// Имена берутся по соглашению, как `Bool` у `if` и `Unit` у сахара
     /// `{ε} A`. Собирается справа налево - список правоассоциативен по
     /// построению, и хвост его есть список же.
-    fn list(&mut self, items: &[Expr], span: Span) -> Result<Term, ElabError> {
+    fn list(
+        &mut self,
+        items: &[Expr],
+        span: Span,
+        awaited: Option<&Rc<Value>>,
+    ) -> Result<Term, ElabError> {
+        // ПРОБА (б) трека C волны 2: под написанным `Array n t` та же скобка
+        // есть массив, а не `Cons`/`Nil`. Форма выбирается ожидаемым типом -
+        // тем же правилом, каким его выбирает числовой литерал (§4.3).
+        if !items.is_empty() {
+            if let Some(element) = awaited.and_then(|ty| self.array_element(ty)) {
+                return self.array_literal(items, &element);
+            }
+        }
         let named = |text: &str| ast::Name {
             text: Rc::from(text),
             span,
@@ -3133,6 +3058,55 @@ impl<'a> Elaborator<'a> {
             // конструктора: позиция у него та же (§3.3).
             let item = self.placed(Position::Field, |it| it.expr(item, Mult::Many))?;
             built = cons.clone().apply([item, built]);
+        }
+        self.produced = None;
+        Ok(built)
+    }
+
+    /// ПРОБА (б): ячейка написанного `Array n t`, если написан именно он.
+    fn array_element(&mut self, ty: &Rc<Value>) -> Option<Rc<Value>> {
+        let reduced = whnf_solved(self.signature, self.metas, ty);
+        let Value::Neutral(Head::Array, spine) = &*reduced else {
+            return None;
+        };
+        let [Elim::App(_length), Elim::App(element)] = spine.as_slice() else {
+            return None;
+        };
+        Some(Rc::clone(element))
+    }
+
+    /// ПРОБА (б): `[a, b]` под `Array n t` есть спайн `arraySet` над `arrayNew`.
+    ///
+    /// Длина берётся из числа написанных элементов, а не из написанного типа:
+    /// разойдутся - скажет проверка типов, и скажет обоими числами. Заполнителем
+    /// `arrayNew` служит **первый** элемент: значения у ячейки произвольного
+    /// типа взять больше неоткуда, и по той же причине пустая скобка сюда не
+    /// доходит вовсе.
+    fn array_literal(&mut self, items: &[Expr], element: &Rc<Value>) -> Result<Term, ElabError> {
+        let length = items.len() as u64;
+        let written = quote(self.ctx.size(), element);
+        let word = |value: u64| Term::Prim(Prim::literal(PrimTy::UInt64, value));
+        let cell = |it: &mut Self, item: &Expr| {
+            it.awaited = Some(Rc::clone(element));
+            // Элемент уезжает внутрь собранного - та же позиция, что у поля
+            // конструктора (§3.3), и та же, что у элемента списка.
+            it.placed(Position::Field, |it| it.expr(item, Mult::Many))
+        };
+        let first = cell(self, &items[0])?;
+        let mut built = Term::Prim(Prim::Over(prim::ArrayOp::New)).apply([
+            written.clone(),
+            word(length),
+            first,
+        ]);
+        for (index, item) in items.iter().enumerate().skip(1) {
+            let value = cell(self, item)?;
+            built = Term::Prim(Prim::Over(prim::ArrayOp::Set)).apply([
+                word(length),
+                written.clone(),
+                built,
+                word(index as u64),
+                value,
+            ]);
         }
         self.produced = None;
         Ok(built)

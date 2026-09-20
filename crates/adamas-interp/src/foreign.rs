@@ -268,7 +268,7 @@ impl Foreign {
         }
     }
 
-    /// Буфер в домене: машине его одолжить нечем (§4.11).
+    /// Буфер в домене, а массив плоским блоком не оказался (§4.11).
     pub(crate) fn unlendable(&self) -> RunError {
         RunError::ForeignBuffer {
             symbol: self.symbol.clone(),
@@ -498,6 +498,14 @@ unsafe fn invoke(address: Address, shape: &[Class], result: Class, args: &[u64])
         ([], Class::Word) => {
             let call: extern "C" fn() -> u64 = unsafe { std::mem::transmute(address) };
             Some(Answer::Word(call()))
+        }
+        // `(long, long, long) -> void`: два одолженных буфера со счётом длины -
+        // `swab`, `memcpy` и вся половина libc, читающая один наш блок и пишущая
+        // в другой. Свидетель - `eval/extern-buffer` корпуса (трек B волны 2).
+        ([Class::Word, Class::Word, Class::Word], Class::Void) => {
+            let call: extern "C" fn(u64, u64, u64) = unsafe { std::mem::transmute(address) };
+            call(args[0], args[1], args[2]);
+            Some(Answer::Nothing)
         }
         _ => None,
     }

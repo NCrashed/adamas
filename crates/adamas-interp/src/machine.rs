@@ -464,10 +464,22 @@ impl<'a> Machine<'a> {
     /// насыщение считается по нему наравне с прочими - ровно как у понижения
     /// (`lower::crossing`).
     ///
+    /// # Буфер едет адресом нагрузки
+    ///
+    /// `Array n T` (§4.11) одалживается чужой стороне на время вызова - адресом
+    /// байт [`Block`], а не копией. Оттого чужая запись наблюдаема **тем же**
+    /// `arrayIndex`, каким её наблюдает понижение: байты одни и те же.
+    ///
+    /// Развёрнутые аргументы живут до конца вызова нарочно
+    /// (`forced` ниже не даёт им умереть внутри витка): адрес указывает в
+    /// нагрузку блока, и умри блок раньше возврата - чужая сторона писала бы в
+    /// освобождённую память.
+    ///
     /// # Errors
     ///
-    /// Библиотека не загрузилась, символа нет, сигнатура вне таблицы либо
-    /// литерал не того типа, каким объявлен аргумент.
+    /// Библиотека не загрузилась, символа нет, сигнатура вне таблицы, литерал
+    /// не того типа, каким объявлен аргумент, либо массив в позиции буфера
+    /// плоским блоком не оказался ([`RunError::ForeignBuffer`]).
     fn outward(&self, name: &Name, spine: &[Elim]) -> Result<Option<Step>, RunError> {
         let Some(it) = self.crossing(name) else {
             return Ok(None);
@@ -483,26 +495,44 @@ impl<'a> Machine<'a> {
             return Ok(None);
         }
         let mut bits = Vec::with_capacity(arguments.len());
+        // Держит развёрнутые значения живыми до конца вызова: адрес буфера
+        // указывает внутрь одного из них.
+        let mut forced = Vec::with_capacity(arguments.len());
         for (at, argument) in arguments.into_iter().enumerate() {
             let want = match it.params[at] {
                 Cross::Word(ty) => ty,
                 Cross::Nothing | Cross::Erased => continue,
-                // Массив в машине есть **спайн** `arrayNew`/`arraySet`
-                // (`core::eval::cell_of`), а не байты подряд: адреса, который
-                // можно было бы одолжить, у него нет вовсе. Отказ назван, а не
-                // угадан; чего он стоит, записано в
-                // `docs/phase8-w2-trackA-notes.md`.
-                Cross::Buffer(_) => return Err(it.unlendable()),
+                Cross::Buffer(cell) => {
+                    let array = self.forced(argument)?;
+                    let Value::Neutral(Head::Block(block), empty) = &*array else {
+                        return Err(it.unlendable());
+                    };
+                    if !empty.is_empty() {
+                        return Err(it.unlendable());
+                    }
+                    if block.ty() != cell {
+                        return Err(it.mismatched(at, cell, block.ty()));
+                    }
+                    let address = block
+                        .lend(|payload| payload as usize as u64)
+                        .ok_or_else(|| it.unlendable())?;
+                    bits.push(address);
+                    forced.push(Rc::clone(&array));
+                    continue;
+                }
             };
-            let Value::Prim(Prim::Lit(ty, word)) = &*self.forced(argument)? else {
+            let value = self.forced(argument)?;
+            let Value::Prim(Prim::Lit(ty, word)) = &*value else {
                 return Ok(None);
             };
             if *ty != want {
                 return Err(it.mismatched(at, want, *ty));
             }
             bits.push(*word);
+            forced.push(Rc::clone(&value));
         }
         let answer = it.call(&self.linkage, &bits)?;
+        drop(forced);
         let Some((ty, word)) = it.result.zip(answer) else {
             return Ok(Some(Step::Return(self.unit()?)));
         };
@@ -842,7 +872,8 @@ struct Resumption {
 
 /// Живой ли аргумент ждёт операция над массивом (§4.11) следующим.
 ///
-/// Стёртых два - длина и тип элемента; `arrayNew` массива не принимает вовсе.
+/// Стёртых у `arraySet` с `arrayIndex` два - длина и тип элемента, - у
+/// `arrayNew` один: массива он не принимает вовсе.
 /// Развёрнутыми нужны **все** живые, а не только сам массив, и это измерено
 /// треком D волны 3: пока `arraySet` клал ячейку неразвёрнутой, колонка,
 /// заполненная именем (`fill xs cells one`), держала в ячейке имя `one`, а не
@@ -852,6 +883,12 @@ struct Resumption {
 /// требует от дорожки литерала. Расхождение было наблюдаемо ответом: машина
 /// застревала там, где оба понижения считали.
 ///
+/// `arrayNew` попал сюда треком B волны 2 Фазы 8, и по тому же доводу на шаг
+/// дальше: плоский блок (`adamas_core::value::Block`) заводится, только когда
+/// длина и начальная ячейка - **литералы**. Начальная ячейка в корпусе почти
+/// всегда именованная константа (`arrayNew 8 blank`), и неразвёрнутой она
+/// оставляла бы массив спайном, то есть без адреса, то есть неодалживаемым.
+///
 /// Довод тот же, которым [`simd_position`] разворачивает все свои живые, и
 /// то же правило: развёртка до WHNF значения не меняет, а неразвёрнутое имя в
 /// ячейке меняет — тем, что сводить его потом уже некому.
@@ -860,7 +897,8 @@ fn array_position(op: ArrayOp, spine: &[Elim]) -> bool {
         .iter()
         .filter(|elim| matches!(elim, Elim::App(_)))
         .count();
-    matches!(op, ArrayOp::Set | ArrayOp::Index) && taken >= 2
+    let erased = if matches!(op, ArrayOp::New) { 1 } else { 2 };
+    taken >= erased
 }
 
 /// Живой ли аргумент ждёт операция над вектором (§4.9) следующим.

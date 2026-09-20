@@ -1644,18 +1644,27 @@ held = adamas_probe_twice
     );
 }
 
-/// Буфер машине одолжить нечем, и отказ это говорит прямо (§5.3, §4.11).
+/// Машина одалживает буфер, и чужая запись видна **тем же** чтением (§5.3, §4.11).
 ///
-/// Не изъян заготовки, а свойство значения. Массив у машины есть **спайн**
-/// `arrayNew`/`arraySet` (`adamas_core::eval::cell_of`) - цепочка значений, по
-/// которой чтение ячейки идёт поиском, - а не байты подряд. Адреса у такой
-/// цепочки нет, и вычислить его неоткуда: одолжить чужой стороне нечего.
+/// До блоков (трек B волны 2 Фазы 8) здесь стоял отказ: массив у машины был
+/// спайном `arrayNew`/`arraySet`, то есть цепочкой значений, и адреса у него не
+/// было вовсе. Свидетель перевёрнут, потому что перевёрнуто утверждение.
 ///
-/// Свидетель обязателен потому, что альтернатива отказу здесь - **тихое
-/// расхождение трёх вычислителей**: понижения считают одно, а машина, сделай
-/// она вид, что посчитала, - другое.
+/// Наблюдаемое выбрано так, чтобы копией его подделать было нельзя. `memfrob`
+/// складывает каждый байт по модулю два с сорока двумя **на месте** и отдаёт тот
+/// же указатель. Значит:
+///
+/// 1. ноль, прочитанный после займа обычным `arrayIndex`, стал бы сорока двумя
+///    только если чужая сторона писала в наши байты;
+/// 2. второй заём того же массива обязан дать **тот же адрес** - копия дала бы
+///    новый;
+/// 3. третий заём складывает обратно, и байт снова ноль - то есть первый заём
+///    не был ни случайностью чтения, ни мусором.
+///
+/// Символ настоящий и лежит в libc: свой потребовал бы собранной библиотеки,
+/// которой у `adamas eval` нет (`tests/golden/programs/extern-buffer-probe.adamas`).
 #[test]
-fn the_machine_refuses_to_lend_a_buffer() {
+fn the_machine_lends_a_buffer_and_reads_what_was_written() {
     let source = format!(
         "{BASE}
 effect Foreign
@@ -1663,25 +1672,74 @@ effect Foreign
 blank : UInt8
 blank = 0
 
-extern \"C\" fn adamas_probe_sum : Array n UInt8 -> UInt64 -> UInt64
+frobbed : UInt8
+frobbed = 42
 
-body : (ω u : Unit) -> {{Foreign}} UInt64
+extern \"C\" fn memfrob : Array n UInt8 -> UInt64 -> CPtr
+
+pick : Bool -> Nat -> Nat -> Nat
+pick True yes no = yes
+pick False yes no = no
+
+body : (ω u : Unit) -> {{Foreign}} Nat
 body u =
   let bytes : Array 4 UInt8 = arrayNew 4 blank
-  adamas_probe_sum bytes 4
+  let first : CPtr = memfrob bytes 4
+  let written : UInt8 = arrayIndex bytes 0
+  let again : CPtr = memfrob bytes 0
+  let restored : CPtr = memfrob bytes 4
+  let back : UInt8 = arrayIndex bytes 0
+  pick (eqUInt8 written frobbed)
+    (pick (eqUInt64 first again) (pick (eqUInt8 back blank) 3 0) 0)
+    0
 
-main : UInt64
+main : Nat
+main = handle @Foreign body with
+  return v -> v
+"
+    );
+    assert_eq!(
+        ran(&source, "main"),
+        "Succ (Succ (Succ Zero))",
+        "чужая запись обязана быть видна тем же `arrayIndex`, и адрес - тем же"
+    );
+}
+
+/// Что машина одолжить по-прежнему не может, она говорит **отказом** (§4.11).
+///
+/// Блок заводится до [`adamas_core::value::Block::LIMIT`] байт; выше остаётся
+/// спайн, у которого адреса нет. Молчание здесь было бы хуже отказа: застрявший
+/// вызов отдал бы вместо ответа нейтраль, и расхождение с понижением осталось
+/// бы незамеченным.
+#[test]
+fn a_buffer_past_the_limit_is_refused_by_name() {
+    let cells = adamas_core::value::Block::LIMIT + 1;
+    let source = format!(
+        "{BASE}
+effect Foreign
+
+blank : UInt8
+blank = 0
+
+extern \"C\" fn memfrob : Array n UInt8 -> UInt64 -> CPtr
+
+body : (ω u : Unit) -> {{Foreign}} CPtr
+body u =
+  let bytes : Array {cells} UInt8 = arrayNew {cells} blank
+  memfrob bytes 4
+
+main : CPtr
 main = handle @Foreign body with
   return v -> v
 "
     );
     let error = refused(&source, "main");
     assert!(
-        matches!(&error, adamas_interp::RunError::ForeignBuffer { symbol } if symbol == "adamas_probe_sum"),
+        matches!(&error, adamas_interp::RunError::ForeignBuffer { symbol } if symbol == "memfrob"),
         "отказ обязан называть символ: {error}"
     );
     assert!(
-        error.to_string().contains("спайн"),
+        error.to_string().contains("плоский блок"),
         "отказ обязан называть причину, а не только символ: {error}"
     );
 }

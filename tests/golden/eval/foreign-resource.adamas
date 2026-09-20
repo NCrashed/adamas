@@ -1,0 +1,149 @@
+-- `resource` над чужим объектом: деструктор зовёт чужой символ (§5.3 × §3.3).
+--
+-- Идиома §5.3 дословно: конструктор берёт `CPtr`, названный деструктор
+-- потребляет обёртку линейно и отдаёт объект чужой стороне. Обёртка и есть то,
+-- чем уровень 1 закрывает свою названную цену: сигнатура `free : CPtr -> Unit`
+-- позвать себя дважды не мешает (кратность на границе - `ω`, §4.1), а
+-- `resource` мешает - ресурс потребляется ровно однажды на всех путях.
+--
+-- **Кратность у `free` написана, и без неё блок `resource` не проходит вовсе.**
+-- Поле конструктора имеет умолчание `1` (§4.1), разбор ресурса отдаёт поля
+-- линейными (§3.3), а `ω`-параметр границы масштабирует аргумент до `ω`, -
+-- значит `closeBuffer (Owned p) = free p` при `free : CPtr -> Unit`
+-- отвергается: «`p` объявлена с кратностью 1, а использована ω». Годных форм
+-- две, и выбрана та, что говорит правду: `free` **потребляет** аргумент, и
+-- сказано это там, где автор это знает. Вторая - объявить поле `(ω p : CPtr)` -
+-- работает тоже, но принимает `free p` дважды в одном деструкторе, то есть
+-- двойное освобождение внутри той самой обёртки, которая заведена его
+-- предотвращать (измерено прогоном обеих).
+--
+-- Половин три, и все три - обещания §3.3, проверенные прогоном.
+--
+--   * **Нормальный выход** (`plainly`): деструктор бежит на выходе из scope.
+--   * **Исключительный** (`abruptly`): тело обрывается веткой без резумпции, а
+--     деструктор всё равно бежит по раскрутке сегмента. Образец -
+--     `eval/abortive-cleanup`.
+--   * **LIFO** (`paired`): связанный позже закрывается раньше.
+--
+-- Наблюдается это меткой `Log`, а не счётчиком чужих байт: счётчика чужой
+-- памяти у рантайма нет и быть не может - её берёт `malloc` мимо кучи Perceus.
+-- `free p` стоит **до** `note`, поэтому дошедшая отметка означает, что чужой
+-- вызов уже случился; порядок обратный этого бы не показал (§3.3: эффектный
+-- деструктор на исключительном пути работает до первой операции, чей хендлер
+-- погиб вместе с сегментом).
+--
+-- `CBuffer` написан ровно так, как его пишет §5.3, - без `Log` и без единой
+-- лишней строки. Он в ответ не попадает: наблюдать в нём нечего, и стоит он
+-- затем, чтобы записанная в разделе форма проверялась прогоном.
+
+data Unit where
+  MkUnit : Unit
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+append : List Nat -> List Nat -> List Nat
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+effect Foreign
+
+effect Log where
+  note : Nat -> Unit
+
+effect Fail where
+  fail : Nat
+
+type Size = UInt64
+
+-- Литерал в ветке хендлера умолчание типа не читает и уезжает в `Nat`;
+-- именованная константа его прижимает.
+nine : Nat
+nine = 9
+
+extern "C" fn malloc : Size -> CPtr
+
+extern "C" fn free : (1 p : CPtr) -> Unit
+
+-- Идиома §5.3 дословно.
+resource CBuffer where
+  Owned : CPtr -> CBuffer
+  closeBuffer : (1 b : CBuffer) -> {Foreign} Unit
+  closeBuffer (Owned p) = free p
+
+-- Она же с отметкой: `free` первым, отметка за ним.
+resource CBlock where
+  Held : CPtr -> CBlock
+  closeBlock : (1 b : CBlock) -> {Foreign, Log} Unit
+  closeBlock (Held p) =
+    let 1 closed : Unit = free p
+    note 9
+
+resource CSlab where
+  Slab : CPtr -> CSlab
+  closeSlab : (1 s : CSlab) -> {Foreign, Log} Unit
+  closeSlab (Slab p) =
+    let 1 closed : Unit = free p
+    note 8
+
+-- Нормальный выход: тело отмечается, потом закрывается ресурс.
+keeping : CBlock -> {Foreign, Log} Nat
+keeping b =
+  note 1
+  7
+
+-- Исключительный: тело обрывается операцией после своей отметки, продолжение
+-- выбрасывается веткой `fail` - а деструктор стоял в нём.
+losing : CBlock -> {Fail, Foreign, Log} Nat
+losing b =
+  note 1
+  fail
+
+-- LIFO: `s` связан позже `b`, значит закрывается раньше - `[1, 8, 9]`.
+pairing : CBlock -> CSlab -> {Foreign, Log} Nat
+pairing b s =
+  note 1
+  7
+
+-- Чужой объект, взятый и отданный без обёртки вовсе: идиома §5.3 этим и
+-- заменяется, но `CBuffer` обязан работать, а не только объявляться.
+bare : (ω u : Unit) -> {Foreign} Unit
+bare u = closeBuffer (Owned (malloc 64))
+
+plainly : {Foreign, Log} Nat
+plainly = keeping (Held (malloc 32))
+
+broken : {Fail, Foreign, Log} Nat
+broken = losing (Held (malloc 32))
+
+abruptly : {Foreign, Log} Nat
+abruptly = handle broken with
+  return v -> v
+  fail -> nine
+
+paired : {Foreign, Log} Nat
+paired = pairing (Held (malloc 32)) (Slab (malloc 48))
+
+traced : ((ω u : Unit) -> {Foreign, Log} Nat) -> {Foreign} List Nat
+traced act = handle act with
+  return v -> Cons v Nil
+  note n -> Cons n (resume MkUnit)
+
+body : (ω u : Unit) -> {Foreign} List Nat
+body u =
+  let dropped : Unit = bare MkUnit
+  let first : List Nat = traced plainly
+  let second : List Nat = traced abruptly
+  let third : List Nat = traced paired
+  append first (append second third)
+
+-- `[1, 9, 7]` - тело, деструктор, ответ; `[1, 9, 9]` - то же на обрыве, ответ
+-- от ветки; `[1, 8, 9, 7]` - LIFO на двух ресурсах.
+main : List Nat
+main = handle @Foreign body with
+  return v -> v

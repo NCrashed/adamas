@@ -16,7 +16,7 @@
 //! в нём разбор не может по построению - ошибиться может только линковка и
 //! ABI.
 //!
-//! Программа - фикстура корпуса `tests/golden/programs/extern-c.adamas`, а не
+//! Программа - фикстура корпуса `tests/golden/programs/extern-c-probe.adamas`, а не
 //! строка здесь: вторая копия разъехалась бы с первой молча. Чужая сторона -
 //! `tests/shim/probe.c`, и про Adamas она не знает ничего.
 //!
@@ -84,7 +84,7 @@ const CROSSINGS: usize = 6;
 /// Программа корпуса, а не строка здесь.
 fn source() -> String {
     let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/programs/extern-c.adamas");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/programs/extern-c-probe.adamas");
     std::fs::read_to_string(&path)
         .unwrap_or_else(|why| panic!("фикстуры {} нет: {why}", path.display()))
 }

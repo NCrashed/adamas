@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-extern-c.adamas: проверено, объявлений 16
+MkAnswers 3.0000000000000004 1024.0 7 1

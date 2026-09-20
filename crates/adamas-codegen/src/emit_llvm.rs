@@ -656,9 +656,27 @@ fn arrays(out: &mut String, program: &Program) {
             "\n",
         ));
     }
+    if lending(program) {
+        out.push_str(concat!(
+            "; Буфер чужой стороне (§5.3): адрес нагрузки целиком, без проверки длины.\n",
+            "declare ptr @adamas_array_data(ptr)\n",
+            "\n",
+        ));
+    }
 }
 
-/// Есть ли в программе массив: постройка, запись, чтение ячейки либо окно.
+/// Одалживает ли программа буфер чужой стороне (§5.3).
+fn lending(program: &Program) -> bool {
+    program.functions.iter().any(|function| {
+        let mut found = false;
+        walk(&function.body, &mut |expr| {
+            found |= matches!(expr, Expr::ArrayData { .. });
+        });
+        found
+    })
+}
+
+/// Есть ли в программе массив: постройка, запись, чтение ячейки, окно, заём.
 fn arrayed(program: &Program) -> bool {
     program.functions.iter().any(|function| {
         let mut found = false;
@@ -668,6 +686,7 @@ fn arrayed(program: &Program) -> bool {
                 Expr::ArrayNew { .. }
                     | Expr::ArraySet { .. }
                     | Expr::ArrayIndex { .. }
+                    | Expr::ArrayData { .. }
                     | Expr::SimdLoad { .. }
                     | Expr::SimdStore { .. }
             );
@@ -2592,7 +2611,10 @@ impl<'a> Builder<'a> {
             | Expr::RegionWrite { .. }
             | Expr::RegionRecycle { .. }
             | Expr::RegionPop { .. } => Repr::Region,
-            Expr::RegionLast { .. } => Repr::Flat(PrimTy::UInt64),
+            // Смещение внутри области (§3.6) и адрес нагрузки одолженного массива
+            // (§5.3) - оба плоское слово ширины указателя, то есть ровно то, чем
+            // уровень 1 считает `CPtr`.
+            Expr::ArrayData { .. } | Expr::RegionLast { .. } => Repr::Flat(PrimTy::UInt64),
             Expr::RegionRead { stride, .. } => stride.element(),
             // Ответ сравнения - конструктор `Bool` (§4.3): аргументы плоские,
             // ответ указательный. Ответ конструктора указателен по построению -
@@ -2796,6 +2818,7 @@ impl<'a> Builder<'a> {
                 function,
                 arguments,
             } => self.foreign(*function, arguments),
+            Expr::ArrayData { array } => self.lending(array),
             // Приставки сняты `prologue` выше, и досюда узел не
             // доезжает. Ветвь стоит ради исчерпывающего разбора: пропади она,
             // новый узел-приставка ушёл бы в тихий отказ вместо ошибки сборки.
@@ -4507,6 +4530,28 @@ impl<'a> Builder<'a> {
     /// («правило чужого кадра») требует от границы **нормального возврата**, а
     /// хвостовой вызов кадр вызывающего снимает. И скрытых аргументов у неё
     /// нет: вектор evidence с ручкой стека - наше внутреннее дело.
+    /// Буфер, одолженный чужой стороне (§5.3): адрес нагрузки словом.
+    ///
+    /// Адрес берёт **рантайм**, а не `getelementptr` на месте: смещение
+    /// нагрузки - 24 байта - записано `_Static_assert`'ом в `adamas.h`, и
+    /// второе его написание здесь разъехалось бы с первым молча. Тот же довод,
+    /// по которому адрес ячейки даёт `adamas_array_at`, а не инструкция.
+    ///
+    /// `ptrtoint` печатается тут же: через границу уровня 1 едет слово, и
+    /// прототип чужого символа объявлен `i64` (см. [`foreigns`]). Пара
+    /// `ptrtoint`/`inttoptr` у эмиттера не новая - ею живёт граница кадра.
+    fn lending(&mut self, array: &Expr) -> Result<String, LlvmError> {
+        let array = self.value(array)?;
+        let data = self.temp();
+        self.instruction(
+            &format!("{data} = call ptr @adamas_array_data(ptr {array})"),
+            self.here(),
+        );
+        let name = self.temp();
+        self.instruction(&format!("{name} = ptrtoint ptr {data} to i64"), self.here());
+        Ok(name)
+    }
+
     fn foreign(&mut self, function: ForeignId, arguments: &[Expr]) -> Result<String, LlvmError> {
         let described = self.program.foreigns[function.0].clone();
         let mut given = Vec::with_capacity(arguments.len());

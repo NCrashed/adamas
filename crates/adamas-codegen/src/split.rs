@@ -326,7 +326,10 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         | Expr::RegionNew
         | Expr::SharedNew
         | Expr::Layout { .. } => Vec::new(),
-        Expr::Unpack { value, .. } | Expr::Cancel { value, .. } | Expr::SimdSplat { value, .. } => {
+        Expr::ArrayData { array: value }
+        | Expr::Unpack { value, .. }
+        | Expr::Cancel { value, .. }
+        | Expr::SimdSplat { value, .. } => {
             vec![value]
         }
         Expr::RegionLast { region } => vec![region],
@@ -584,7 +587,10 @@ impl Anf<'_> {
             | Expr::RegionWrite { .. }
             | Expr::RegionRecycle { .. }
             | Expr::RegionPop { .. } => Repr::Region,
-            Expr::RegionLast { .. } => Repr::Flat(adamas_core::prim::PrimTy::UInt64),
+            // Смещение внутри области (§3.6) и адрес нагрузки одолженного массива
+            // (§5.3) - оба плоское слово ширины указателя.
+            Expr::ArrayData { .. }
+            | Expr::RegionLast { .. } => Repr::Flat(adamas_core::prim::PrimTy::UInt64),
             Expr::RegionRead { stride, .. } => stride.element(),
             Expr::Erased
             | Expr::Construct { .. }

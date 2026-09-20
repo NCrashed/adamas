@@ -30,7 +30,7 @@ use adamas_core::pattern::{Compiled, PatternError, compile_traced};
 use adamas_core::prim;
 use adamas_core::prim::PrimTy;
 use adamas_core::row::{Label, Row, RowVar, Tail};
-use adamas_core::sig::{Crossing, DefinitionKind, Group, Member as SigMember, Signature};
+use adamas_core::sig::{Cross, Crossing, DefinitionKind, Group, Member as SigMember, Signature};
 use adamas_core::source::Span;
 use adamas_core::term::{Args, Binder, Fields, Name as CoreName, Term};
 use adamas_parser::ast::{self, DeclKind, Module, Symbol};
@@ -4074,22 +4074,38 @@ fn foreign_label_missing(error: ElabError, span: Span) -> ElabError {
 /// Отдаёт **форму границы**, а не одно только «да»: ту же форму потом читают
 /// понижение и машина, и считать её второй раз значило бы завести вторую копию
 /// этого обхода (см. [`Crossing`]).
-type Shape = (Vec<Option<PrimTy>>, Option<PrimTy>);
+type Shape = (Vec<Cross>, Option<PrimTy>);
 
 fn crossing(ty: &Term, signature: &Signature, span: Span) -> Result<Shape, ElabError> {
     let refuse = |why: &'static str| Err(ElabError::ForeignType { why, span });
-    let mut params: Vec<Option<PrimTy>> = Vec::new();
+    let mut params: Vec<Cross> = Vec::new();
     let mut rest = ty;
     while let Term::Pi(binder, _, written, row, codomain) = rest {
         let domain = unaliased(signature, written);
-        // Стёртый параметр через границу не идёт и идти не может: значения у
-        // него в рантайме нет вовсе (§3.3). Поднятый имплисит попадает сюда же
-        // - `extern "C" fn f : a -> a` отвергается здесь, на `{0 a : Type}`.
+        // Стёртое связывание значения в рантайме не имеет (§3.3), и через
+        // границу поэтому не едет. Два случая, и они разные.
+        //
+        // Стёртый **индекс** - длина буфера. `Array n UInt8` после auto-lift
+        // §4.1 есть `{0 n : UInt64} -> Array n UInt8 -> …`, то есть стёртое
+        // связывание стоит **перед** массивом, и отвергать его значило бы
+        // отвергнуть всякий буфер переменной длины, то есть всякий буфер.
+        //
+        // Стёртый **тип** переносить нечем: `extern "C" fn f : a -> a`
+        // отвергается здесь, на `{0 a : Type}`.
         if binder.mult == Mult::Zero {
-            return refuse(
-                "имплисит через границу C не идёт: значения в рантайме у него нет, \
-                 а полиморфный аргумент уровню 1 переносить нечем",
-            );
+            // Тип отвергается по **сорту** домена, а не по тому, слово ли он:
+            // тип длины auto-lift оставляет метапеременной до самого решения,
+            // и спрашивать у неё `UInt64` в этой точке нечего.
+            if matches!(domain, Term::Universe(_)) {
+                return refuse(
+                    "имплисит через границу C не идёт: значения в рантайме у него нет, \
+                     а полиморфный аргумент уровню 1 переносить нечем",
+                );
+            }
+            params.push(Cross::Erased);
+            intermediate(row, codomain, span)?;
+            rest = codomain;
+            continue;
         }
         if matches!(domain, Term::Pi(..)) {
             return refuse(
@@ -4097,29 +4113,21 @@ fn crossing(ty: &Term, signature: &Signature, span: Span) -> Result<Shape, ElabE
                  а колбэки вынесены из уровня 1 отдельной работой",
             );
         }
-        let carried = word(domain);
-        if carried.is_none() && !unit_type(domain, signature) {
+        let carried = if let Some(ty) = word(domain) {
+            Cross::Word(ty)
+        } else if let Some(cell) = lent(signature, domain, span)? {
+            Cross::Buffer(cell)
+        } else if unit_type(domain, signature) {
+            Cross::Nothing
+        } else {
             return refuse(
                 "параметр через границу C не идёт: уровень 1 переносит машинное слово - \
-                 примитив §4.11, `CPtr` или единицу; структуры по значению и varargs \
-                 требуют знания ABI платформы",
+                 примитив §4.11, `CPtr`, плоский `Array n T` либо единицу; структуры по \
+                 значению и varargs требуют знания ABI платформы",
             );
-        }
+        };
         params.push(carried);
-        // Row стоит на стрелке и описывает её **применение** (§3.4), поэтому
-        // метке положено стоять ровно на последней: там и лежит `Foreign`.
-        // Метка на промежуточной означала бы, что чужая функция производит
-        // эффект от недобранных аргументов, а этого C не умеет.
-        //
-        // Спрашиваются именно **метки**, а не пустота: auto-lift §4.1 кладёт
-        // общую свежую переменную-хвост на каждую стрелку сигнатуры, и пустых
-        // строк в элаборированном типе поэтому нет ни одной.
-        if !row.labels().is_empty() && matches!(&**codomain, Term::Pi(..)) {
-            return refuse(
-                "эффект на промежуточной стрелке: чужая функция производит `Foreign` целиком, \
-                 когда применена целиком",
-            );
-        }
+        intermediate(row, codomain, span)?;
         rest = codomain;
     }
     let answer = unaliased(signature, rest);
@@ -4132,11 +4140,69 @@ fn crossing(ty: &Term, signature: &Signature, span: Span) -> Result<Shape, ElabE
     Ok((params, result))
 }
 
+/// Эффект на промежуточной стрелке объявления (§3.4).
+///
+/// Row стоит на стрелке и описывает её **применение**, поэтому метке положено
+/// стоять ровно на последней: там и лежит `Foreign`. Метка на промежуточной
+/// означала бы, что чужая функция производит эффект от недобранных аргументов,
+/// а этого C не умеет.
+///
+/// Спрашиваются именно **метки**, а не пустота: auto-lift §4.1 кладёт общую
+/// свежую переменную-хвост на каждую стрелку сигнатуры, и пустых строк в
+/// элаборированном типе поэтому нет ни одной.
+fn intermediate(
+    row: &adamas_core::row::Row<Term>,
+    codomain: &Term,
+    span: Span,
+) -> Result<(), ElabError> {
+    if !row.labels().is_empty() && matches!(codomain, Term::Pi(..)) {
+        return Err(ElabError::ForeignType {
+            why: "эффект на промежуточной стрелке: чужая функция производит `Foreign` целиком, \
+                  когда применена целиком",
+            span,
+        });
+    }
+    Ok(())
+}
+
 /// Машинное слово: примитивный тип §4.11. `CPtr` приходит сюда `UInt64`.
 fn word(ty: &Term) -> Option<PrimTy> {
     match ty {
         Term::Prim(prim::Prim::Ty(it)) => Some(*it),
         _ => None,
+    }
+}
+
+/// Плоский массив, одолженный чужой стороне на время вызова (§4.11, §5.3).
+///
+/// `Some(cell)` - буфер с ячейкой такого типа; `None` - это не массив вовсе.
+/// Отказ - массив, чья ячейка не плоская: у такого ячейки суть слоты
+/// `adamas_value`, то есть указатели на объекты Perceus с заголовками, и чужая
+/// сторона не поймёт ни одного из них.
+///
+/// Длина в расчёт не берётся: одалживается **адрес нагрузки**, а не длина, и
+/// сколько ячеек читать, чужая сторона узнаёт из соседнего аргумента - ровно
+/// как в C, где `void *` и `size_t` идут парой. Обещать больше уровень 1 не
+/// может: своего счёта длины у сишной сигнатуры нет.
+fn lent(signature: &Signature, ty: &Term, span: Span) -> Result<Option<PrimTy>, ElabError> {
+    let mut arguments = Vec::new();
+    let mut current = ty;
+    while let Term::App(callee, argument) = current {
+        arguments.push(argument.as_ref());
+        current = callee;
+    }
+    if !matches!(current, Term::Prim(prim::Prim::Array)) || arguments.len() != 2 {
+        return Ok(None);
+    }
+    // Спайн собран с конца: элемент написан вторым, значит лежит первым.
+    let element = unaliased(signature, arguments[0]);
+    match word(element) {
+        Some(cell) => Ok(Some(cell)),
+        None => Err(ElabError::ForeignType {
+            why: "массив через границу C идёт только плоский (§4.11): ячейки указательного \
+                  суть объекты Perceus с заголовками, и чужая сторона не поймёт ни одного",
+            span,
+        }),
     }
 }
 

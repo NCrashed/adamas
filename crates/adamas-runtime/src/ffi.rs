@@ -163,6 +163,8 @@ unsafe extern "C" {
     pub fn adamas_array_stride(array: Value) -> usize;
     /// Адрес плоской ячейки.
     pub fn adamas_array_at(array: Value, index: usize) -> *mut c_void;
+    /// Адрес нагрузки целиком: то, что одалживается чужой стороне (§5.3).
+    pub fn adamas_array_data(array: Value) -> *mut c_void;
     /// Адрес окна из `lanes` ячеек подряд (§4.9): проверяется хвост окна.
     pub fn adamas_array_window(array: Value, index: usize, lanes: usize) -> *mut c_void;
     /// Указательная ячейка.

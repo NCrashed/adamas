@@ -107,7 +107,8 @@ use adamas_core::mult::Mult;
 use adamas_core::prim::PrimTy;
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Expr, Fact, Function, LocalId, Program, Salvage, Stride,
+    Arm, Binding, Constructor, CtorId, Expr, Fact, Foreign, ForeignId, Function, LocalId, Program,
+    Repr, Salvage, Stride,
 };
 use crate::split::Suspension;
 
@@ -127,7 +128,7 @@ pub fn insert(program: Program) -> Program {
     } = program;
     let functions = functions
         .into_iter()
-        .map(|function| owned(&constructors, &suspending, function))
+        .map(|function| owned(&constructors, &foreigns, &suspending, function))
         .collect();
     Program {
         constructors,
@@ -142,7 +143,12 @@ pub fn insert(program: Program) -> Program {
 }
 
 /// Переводит одну функцию в форму, где владение соблюдено.
-fn owned(constructors: &[Constructor], suspending: &Suspension, function: Function) -> Function {
+fn owned(
+    constructors: &[Constructor],
+    foreigns: &[Foreign],
+    suspending: &Suspension,
+    function: Function,
+) -> Function {
     let scope: BTreeSet<LocalId> = function
         .live_captured()
         .chain(function.live_parameters())
@@ -151,6 +157,7 @@ fn owned(constructors: &[Constructor], suspending: &Suspension, function: Functi
         .collect();
     let mut pass = Pass {
         constructors,
+        foreigns,
         suspending,
         next: ceiling(&function),
         flat: flat(&function),
@@ -282,6 +289,23 @@ fn named(expr: &Expr, out: &mut BTreeSet<LocalId>) {
     }
 }
 
+/// Связывание, чей массив одолжен чужой стороне этим аргументом (§5.3).
+///
+/// Голый локал и только он: понижение связывает массив **до** узла
+/// ([`crate::lower`], `crossing`), и другой формы под [`Expr::ArrayData`] не
+/// бывает. Составное выражение здесь означало бы временную ссылку, отдать
+/// которую после чужого вызова было бы некому, - и её этот обход не найдёт,
+/// а значит и не соврёт о ней.
+fn borrowed_array(argument: &Expr) -> Option<LocalId> {
+    match argument {
+        Expr::ArrayData { array } => match &**array {
+            Expr::Local(local) => Some(*local),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Оборачивает выражение дропами: они срабатывают до него.
 fn drops(locals: impl IntoIterator<Item = LocalId>, body: Expr) -> Expr {
     locals.into_iter().fold(body, |body, local| Expr::Drop {
@@ -309,6 +333,9 @@ enum Shape {
 /// Состояние прохода: таблица конструкторов и счётчик свежих связываний.
 struct Pass<'a> {
     constructors: &'a [Constructor],
+    /// Чужие символы: чем отвечает каждый (§5.3). Спрашивает это один -
+    /// связывание ответа, заводимое ради дропа одолженных буферов.
+    foreigns: &'a [Foreign],
     /// Функции, чей вызов есть точка приостановки ([`crate::split`]).
     suspending: &'a Suspension,
     next: u32,
@@ -331,6 +358,13 @@ impl Pass<'_> {
             local: self.fresh(),
             fact: Fact::opaque(),
         }
+    }
+
+    /// Чем отвечает чужой символ: представление его ответа (§5.3).
+    fn program_result(&self, function: ForeignId) -> Repr {
+        self.foreigns
+            .get(function.0)
+            .map_or(Repr::Boxed, |it| it.result.repr())
     }
 
     /// Сколько слотов у объекта конструктора.
@@ -367,6 +401,13 @@ impl Pass<'_> {
             // а считать по ней нечего до первого её употребления.
             | Expr::RegionNew
             | Expr::SharedNew
+            // Одолженный буфер (§5.3) **заимствует**: ни `dup` перед, ни дропа
+            // внутри. Массив под ним стоит голым локалом по построению -
+            // понижение связывает его до узла, - и трогать его нельзя вовсе:
+            // `dup` здесь был бы лишней ссылкой, а дроп - записью в блок,
+            // который чужая сторона ещё читает. Отдаёт массив
+            // [`Pass::applied_to`], и отдаёт **после** чужого вызова.
+            | Expr::ArrayData { .. }
             | Expr::Layout { .. } => drops(owned.iter().copied().collect::<Vec<_>>(), expr),
             // Векторные `load`/`store` (§4.9) идут тем же путём, что скалярные
             // чтение и запись: колонка у них та же, владение то же, и
@@ -459,10 +500,47 @@ impl Pass<'_> {
                 function,
                 arguments,
             } => {
-                let (arguments, spare) = self.sequence(arguments, owned);
+                // Одолженные буферы (§5.3) считаются **не как аргументы**.
+                // Чужая сторона пишет в блок до самого возврата, поэтому
+                // массив обязан пережить вызов: владение им снимается после
+                // узла, а не подвыражением. Тот же приём, каким
+                // [`Pass::applied`] отдаёт заимствованное замыкание, и заведён
+                // он по той же причине.
+                let lent: Vec<LocalId> = arguments.iter().filter_map(borrowed_array).collect();
+                let rest: BTreeSet<LocalId> = owned
+                    .iter()
+                    .copied()
+                    .filter(|it| !lent.contains(it))
+                    .collect();
+                let (arguments, spare) = self.sequence(arguments, &rest);
                 let called = Expr::Foreign {
                     function,
                     arguments,
+                };
+                let mut held: Vec<LocalId> = lent
+                    .into_iter()
+                    .filter(|it| owned.contains(it))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                let called = if held.is_empty() {
+                    called
+                } else {
+                    let repr = self.program_result(function);
+                    let mut answer = self.temporary("ответ чужого вызова");
+                    answer.fact = answer.fact.shaped(repr);
+                    let given = answer.local;
+                    if !repr.counted() {
+                        self.flat.insert(given);
+                    }
+                    // Дропы срабатывают **до** тела связывания, то есть после
+                    // значения: вызов - дроп буферов - ответ.
+                    held.reverse();
+                    Expr::Bind {
+                        binding: answer,
+                        value: Box::new(called),
+                        body: Box::new(drops(held, Expr::Local(given))),
+                    }
                 };
                 drops(spare, called)
             }
@@ -1386,6 +1464,7 @@ impl Pass<'_> {
             | Expr::ConstructClosure { .. }
             | Expr::Literal { .. }
             | Expr::LayoutField { .. }
+            | Expr::ArrayData { .. }
             | Expr::Pack { .. }
             | Expr::Unpack { .. }
             // Область региона под переписывание тоже не годится, и по тому же
@@ -1519,6 +1598,7 @@ impl Pass<'_> {
             | Expr::ConstructClosure { .. }
             | Expr::Literal { .. }
             | Expr::LayoutField { .. }
+            | Expr::ArrayData { .. }
             | Expr::Pack { .. }
             | Expr::Unpack { .. }
             // Область региона под переписывание тоже не годится, и по тому же

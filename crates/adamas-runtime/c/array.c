@@ -55,6 +55,17 @@ void *adamas_array_at(adamas_value array, size_t index) {
     return payload(array) + index * head->stride;
 }
 
+void *adamas_array_data(adamas_value array) {
+    adamas_array *head = header_of(array);
+    if (head->stride == 0) {
+        adamas_fail("нагрузка одолжена у указательного массива (§5.3)");
+    }
+    /* Длина не проверяется: одалживается начало, а сколько ячеек прочтёт чужая
+     * сторона, знает только она. Нулевая длина законна и даёт адрес за
+     * заголовком - читать по нему нечего, и это верно. */
+    return payload(array);
+}
+
 void *adamas_array_window(adamas_value array, size_t index, size_t lanes) {
     adamas_array *head = header_of(array);
     /* Проверяется **хвост** окна, а не его начало: вектор читает `lanes`

@@ -1491,7 +1491,11 @@ impl Emitter<'_> {
             | Expr::RegionWrite { .. }
             | Expr::RegionRecycle { .. }
             | Expr::RegionPop { .. } => Repr::Region,
-            Expr::RegionLast { .. } => Repr::Flat(PrimTy::UInt64),
+            // Смещение внутри области (§3.6) и адрес нагрузки одолженного массива
+            // (§5.3) - оба плоское слово ширины указателя, то есть ровно то, чем
+            // уровень 1 считает `CPtr`.
+            Expr::ArrayData { .. }
+            | Expr::RegionLast { .. } => Repr::Flat(PrimTy::UInt64),
             Expr::RegionRead { stride, .. } => stride.element(),
             Expr::Erased
             | Expr::Construct { .. }
@@ -1604,6 +1608,7 @@ impl Emitter<'_> {
                 function,
                 arguments,
             } => self.foreign(*function, arguments, depth),
+            Expr::ArrayData { array } => self.lending(array, depth),
             Expr::Closure { function, captured } => self.closure(*function, captured, depth),
             Expr::Handle {
                 handler,
@@ -2779,6 +2784,29 @@ impl Emitter<'_> {
     /// между: ни распаковки, ни упаковки, ни касания счётчика. Это и есть та
     /// «нулевая» сторона §6, за которую отвечает поверхность: слово едет
     /// словом.
+    /// Буфер, одолженный чужой стороне (§5.3): адрес нагрузки словом.
+    ///
+    /// Словом, а не `void *`, и это то же решение, каким живёт `CPtr`: через
+    /// границу уровня 1 едет машинное слово, прототип чужого символа печатается
+    /// `uint64_t`, и сойтись с написанием системного заголовка он не может по
+    /// построению (за это отвечает `__asm__`-метка, см. [`prototypes`]). Два
+    /// приведения подряд - `uintptr_t` и потом `uint64_t` - пишутся затем, что
+    /// прямое приведение указателя к целому иной ширины есть предупреждение, а
+    /// `uintptr_t` его ширину и означает.
+    ///
+    /// Счётчика не трогает: узел заимствует, а массив отдаёт вставка RC после
+    /// чужого вызова (`perceus::applied_to`).
+    fn lending(&mut self, array: &Expr, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let array = self.value(array, depth);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}uint64_t {name} = (uint64_t)(uintptr_t)adamas_array_data({array});"
+        );
+        name
+    }
+
     fn foreign(&mut self, function: ForeignId, arguments: &[Expr], depth: usize) -> String {
         let pad = Self::pad(depth);
         let described = self.program.foreigns[function.0].clone();

@@ -127,7 +127,7 @@ use adamas_core::level::Level;
 use adamas_core::mult::Mult;
 use adamas_core::prim::{ArrayOp, Prim, PrimTy, SimdOp};
 use adamas_core::row::{Row, RowVar, Tail};
-use adamas_core::sig::{CLOSING, DefinitionKind, Signature};
+use adamas_core::sig::{CLOSING, Cross, DefinitionKind, Signature};
 use adamas_core::source::{Location, SourceFile};
 use adamas_core::term::{Args, Case, Index, Name, Term};
 use adamas_core::value::{Env, Lvl, Value};
@@ -2644,11 +2644,17 @@ impl<'a> Lowerer<'a> {
                     binder: position,
                 });
             };
-            let repr = carried.map_or(Repr::Boxed, Repr::Flat);
-            let at = if carried.is_some() {
-                "аргумент чужого вызова"
-            } else {
-                "единица у границы C"
+            // Стёртое связывание не понижается вовсе: значения у него нет, а
+            // стоять там может имя типа либо длина буфера. Тот же ход, каким
+            // стёртую позицию пропускает обычный вызов ([`Lowerer::called`]).
+            if !carried.present() {
+                continue;
+            }
+            let (repr, at) = match carried {
+                Cross::Word(ty) => (Repr::Flat(*ty), "аргумент чужого вызова"),
+                Cross::Buffer(_) => (Repr::Array(Elems::Flat), "буфер у границы C"),
+                Cross::Nothing => (Repr::Boxed, "единица у границы C"),
+                Cross::Erased => unreachable!("стёртое отсеяно выше"),
             };
             let value = self.given(scope, argument, repr, at)?;
             let local = scope.fresh();
@@ -2660,8 +2666,15 @@ impl<'a> Lowerer<'a> {
                 },
                 value,
             ));
-            if carried.is_some() {
-                given.push(Expr::Local(local));
+            match carried {
+                Cross::Word(_) => given.push(Expr::Local(local)),
+                // Едет **адрес нагрузки**, а не сам массив. Связывание при
+                // этом остаётся массивом: держать его живым до конца вызова -
+                // дело вставки RC, и держит она именно связывание.
+                Cross::Buffer(_) => given.push(Expr::ArrayData {
+                    array: Box::new(Expr::Local(local)),
+                }),
+                Cross::Nothing | Cross::Erased => {}
             }
         }
         let result = self.foreigns[function.0].result;
@@ -2700,16 +2713,16 @@ impl<'a> Lowerer<'a> {
         Ok(id)
     }
 
-    /// Связывания чужого символа: `Some(ty)` - слово, `None` - единица.
+    /// Связывания чужого символа: что каждое даёт чужой стороне.
     ///
-    /// Длина - арность **адамасова** имени, а не сишного: единица связывание
-    /// занимает, а аргумента не даёт.
+    /// Длина - арность **адамасова** имени, а не сишного: единица и стёртое
+    /// связывание занимают, а аргумента не дают.
     ///
     /// Читается у сигнатуры, а не считается обходом типа: форму границы считает
     /// элаборация, и она же решает, пускать ли её (`decl::crossing`). Свой
     /// обход здесь был второй копией того же правила, а копии уже расходились -
     /// см. [`adamas_core::sig::Crossing`].
-    fn foreign_binders(&self, name: &Name) -> Result<Vec<Option<PrimTy>>, LowerError> {
+    fn foreign_binders(&self, name: &Name) -> Result<Vec<Cross>, LowerError> {
         Ok(self.foreign_shape(name)?.params.clone())
     }
 

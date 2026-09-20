@@ -1,0 +1,98 @@
+-- Буфер пересекает границу: `Array n a` одалживается чужой стороне (§5.3).
+--
+-- Одалживается **адрес нагрузки**, а не копия: у плоского массива ячейки лежат
+-- подряд со смещения 24 (`adamas.h`, `_Static_assert`), и заём есть вычисление
+-- адреса. Наблюдается это тремя разными способами, и все три обязательны.
+--
+--   * Чужая сторона **пишет** в наш блок (`fill`), и наша сторона читает
+--     написанное обычным `arrayIndex`. Копией это объяснить нельзя.
+--   * Чужая сторона **читает** наш блок (`digest`) и кладёт ответ в другой наш
+--     блок - out-параметр, то есть ровно `uLongf *destLen` у zlib. Два
+--     одолженных буфера в одном вызове.
+--   * Чужая сторона запоминает адрес (`note`) и сверяет его со вторым займом
+--     того же массива (`same`). Отдай заём копию - адреса разошлись бы.
+--
+-- Длина буфера чужой стороне не сообщается сама: она едет **соседним
+-- аргументом**, ровно как `size_t` в C. Обещать больше уровень 1 не может -
+-- своего счёта длины у сишной сигнатуры нет, - и это названная граница, а не
+-- недоделка.
+--
+-- Стёртая длина массива (`{0 n : UInt64}` после auto-lift §4.1) связывание
+-- занимает, а аргумента чужой стороне не даёт: значения у неё в рантайме нет
+-- вовсе (§3.3). Без этого буфер переменной длины не объявить ни один.
+--
+-- Байт в слово здесь не расширяется: конверсий ширины в языке нет ни одной
+-- (§4.3 их формы не называет), и прочитанный `UInt8` наблюдается **сравнением**,
+-- как наблюдается всякий не-словесный примитив.
+--
+-- Символы **свои** и лежат в спутнике теста (`adamas-codegen/tests/shim/buffer.c`),
+-- поэтому корпус - `programs/`, а не `eval/`. Машина эту программу не считает и
+-- по второй причине: массив у неё есть спайн `arrayNew`/`arraySet`, а не байты
+-- подряд, и адреса у него нет. Отказ назван - `RunError::ForeignBuffer`.
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  True : Bool
+  False : Bool
+
+pick : Bool -> UInt64 -> UInt64 -> UInt64
+pick True yes no = yes
+pick False yes no = no
+
+effect Foreign
+
+-- Заполняет `count` байт последовательностью `seed + i`.
+extern "C" fn adamas_probe_fill : Array n UInt8 -> UInt64 -> UInt64 -> Unit
+
+-- Читает `count` байт и кладёт сумму в `out[0]`, максимум в `out[1]`.
+extern "C" fn adamas_probe_digest : Array n UInt8 -> UInt64 -> Array m UInt64 -> Unit
+
+-- Запоминает адрес нагрузки и отдаёт его же.
+extern "C" fn adamas_probe_note : Array n UInt8 -> UInt64
+
+-- Тот же ли адрес одолжен во второй раз.
+extern "C" fn adamas_probe_same : Array n UInt8 -> UInt64
+
+extern "C" fn adamas_probe_crossings : UInt64
+
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+-- Литерал в аргументе `arrayNew` умолчания типа не читает и уезжает в `Nat`;
+-- именованная константа его прижимает - тот же приём, что в `array-parametric`.
+blank : UInt8
+blank = 0
+
+empty : UInt64
+empty = 0
+
+seven : UInt8
+seven = 7
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let bytes : Array 8 UInt8 = arrayNew 8 blank
+  let out : Array 2 UInt64 = arrayNew 2 empty
+  -- Байты становятся 5, 6, …, 12.
+  let filled : Unit = adamas_probe_fill bytes 8 5
+  -- Сумма 5+6+…+12 = 68, максимум 12.
+  let digested : Unit = adamas_probe_digest bytes 8 out
+  let sum : UInt64 = arrayIndex out 0
+  let top : UInt64 = arrayIndex out 1
+  -- Третий байт наш: чужая сторона положила туда 7.
+  let third : UInt8 = arrayIndex bytes 2
+  let seventh : UInt64 = pick (eqUInt8 third seven) 1 0
+  let noted : UInt64 = adamas_probe_note bytes
+  let again : UInt64 = adamas_probe_same bytes
+  let went : UInt64 = adamas_probe_crossings
+  -- 68 + 12·1000 + 1·100000 + 1·1000000 + 5·10000000
+  addUInt64 sum
+    (addUInt64 (mulUInt64 top 1000)
+      (addUInt64 (mulUInt64 seventh 100000)
+        (addUInt64 (mulUInt64 again 1000000) (mulUInt64 went 10000000))))
+
+main : UInt64
+main = runForeign body

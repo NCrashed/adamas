@@ -45,7 +45,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use adamas_core::prim::PrimTy;
-use adamas_core::sig::Crossing;
+use adamas_core::sig::{Cross, Crossing};
 
 use crate::RunError;
 
@@ -158,8 +158,7 @@ fn classify(ty: PrimTy) -> Option<Class> {
 /// есть ширина значения (трек A). Чужой указатель сюда входит как `UInt64` и
 /// отдельного типа не требует - это и есть решение трека A.
 ///
-/// `None` в [`Self::params`] и в [`Self::result`] есть **единица**: связывание
-/// без аргумента в домене (сишное `(void)`) и отсутствие ответа в кодомене
+/// `None` в [`Self::result`] есть **единица**: отсутствие ответа в кодомене
 /// (`void`). То же соглашение, что у [`Crossing`] и у понижения.
 #[derive(Clone, Debug)]
 pub struct Foreign {
@@ -169,7 +168,7 @@ pub struct Foreign {
     /// Имя символа.
     pub symbol: String,
     /// Связывания по порядку.
-    pub params: Vec<Option<PrimTy>>,
+    pub params: Vec<Cross>,
     /// Тип ответа.
     pub result: Option<PrimTy>,
 }
@@ -181,7 +180,7 @@ impl Foreign {
         Self {
             library: Some(library.to_owned()),
             symbol: symbol.to_owned(),
-            params: params.iter().copied().map(Some).collect(),
+            params: params.iter().copied().map(Cross::Word).collect(),
             result: Some(result),
         }
     }
@@ -199,9 +198,18 @@ impl Foreign {
 
     /// Сигнатура словами - для текста отказа.
     fn written(&self) -> String {
-        let name = |it: Option<PrimTy>| it.map_or("Unit", PrimTy::name);
-        let params: Vec<&str> = self.params.iter().copied().map(name).collect();
-        format!("({}) -> {}", params.join(", "), name(self.result))
+        let written = |it: Cross| match it {
+            Cross::Word(ty) => ty.name().to_owned(),
+            Cross::Nothing => "Unit".to_owned(),
+            Cross::Erased => "0".to_owned(),
+            Cross::Buffer(cell) => format!("Array _ {}", cell.name()),
+        };
+        let params: Vec<String> = self.params.iter().copied().map(written).collect();
+        format!(
+            "({}) -> {}",
+            params.join(", "),
+            self.result.map_or("Unit", PrimTy::name)
+        )
     }
 
     /// Загружает библиотеку и разрешает символ, ничего не вызывая.
@@ -235,8 +243,7 @@ impl Foreign {
         let shape: Option<Vec<Class>> = self
             .params
             .iter()
-            .copied()
-            .flatten()
+            .filter_map(|it| it.carried())
             .map(classify)
             .collect();
         let (Some(shape), Some(result)) = (shape, self.result.map_or(Some(Class::Void), classify))
@@ -258,6 +265,13 @@ impl Foreign {
         match answer.ok_or_else(|| self.outside())? {
             Answer::Word(word) => Ok(Some(word)),
             Answer::Nothing => Ok(None),
+        }
+    }
+
+    /// Буфер в домене: машине его одолжить нечем (§4.11).
+    pub(crate) fn unlendable(&self) -> RunError {
+        RunError::ForeignBuffer {
+            symbol: self.symbol.clone(),
         }
     }
 

@@ -21,7 +21,7 @@ use adamas_core::level::Level;
 use adamas_core::mult::Mult;
 use adamas_core::prim::{ArrayOp, Prim, RegionOp, SimdOp};
 use adamas_core::row::Row;
-use adamas_core::sig::{DefinitionKind, Signature};
+use adamas_core::sig::{Cross, DefinitionKind, Signature};
 use adamas_core::term::{Case, Mults, Name, Term};
 use adamas_core::value::{Elim, Env, Head, StuckBranch, StuckCase, Value};
 
@@ -484,8 +484,15 @@ impl<'a> Machine<'a> {
         }
         let mut bits = Vec::with_capacity(arguments.len());
         for (at, argument) in arguments.into_iter().enumerate() {
-            let Some(want) = it.params[at] else {
-                continue;
+            let want = match it.params[at] {
+                Cross::Word(ty) => ty,
+                Cross::Nothing | Cross::Erased => continue,
+                // Массив в машине есть **спайн** `arrayNew`/`arraySet`
+                // (`core::eval::cell_of`), а не байты подряд: адреса, который
+                // можно было бы одолжить, у него нет вовсе. Отказ назван, а не
+                // угадан; чего он стоит, записано в
+                // `docs/phase8-w2-trackA-notes.md`.
+                Cross::Buffer(_) => return Err(it.unlendable()),
             };
             let Value::Prim(Prim::Lit(ty, word)) = &*self.forced(argument)? else {
                 return Ok(None);

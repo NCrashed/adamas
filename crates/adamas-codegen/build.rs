@@ -6,6 +6,12 @@
 //! Каталог исходников угадывается рядом с заголовком - и это единственное
 //! место, где раскладка чужого крейта угадывается; чтобы догадка не разъехалась
 //! молча, наличие файлов проверяется здесь же.
+//!
+//! Сверх путей отсюда же приезжает **текст** рантайма: таблица «имя файла -
+//! содержимое», которую читает [`native`](../adamas_codegen/native/index.html).
+//! Пути годятся тестам крейта - они и так бегут в дереве исходников, - а
+//! драйверу `adamas build` нужен рантайм у **установленного** бинаря, где
+//! дерева нет.
 
 use std::path::{Path, PathBuf};
 
@@ -58,4 +64,34 @@ fn main() {
     println!("cargo::rustc-env=ADAMAS_RUNTIME_UNITS={units}");
     println!("cargo::rustc-env=ADAMAS_CC={}", compiler.path().display());
     println!("cargo::rerun-if-changed=build.rs");
+
+    embed(&include, &sources, &units);
+}
+
+/// Пишет в `OUT_DIR` литерал таблицы «имя - текст» со всем рантаймом.
+///
+/// `include_str!`, а не чтение с диска на прогоне: путь, записанный сборкой,
+/// указывает в дерево исходников, а установленный `adamas` живёт от него
+/// отдельно. Заголовок идёт первым - без него не соберётся ни одна единица.
+fn embed(include: &Path, sources: &Path, units: &str) {
+    let entry = |name: &str, path: &Path| {
+        format!(
+            "    ({name:?}, include_str!({:?})),\n",
+            path.display().to_string()
+        )
+    };
+    let mut text = String::from("&[\n");
+    text.push_str(&entry("adamas.h", &include.join("adamas.h")));
+    for source in units.split(',') {
+        text.push_str(&entry(source, &sources.join(source)));
+    }
+    text.push_str("]\n");
+
+    let Some(out) = std::env::var_os("OUT_DIR") else {
+        panic!("`OUT_DIR` ставит cargo: без него таблицу рантайма некуда писать");
+    };
+    let path = PathBuf::from(out).join("runtime.rs");
+    if let Err(why) = std::fs::write(&path, text) {
+        panic!("таблица рантайма не записалась в {}: {why}", path.display());
+    }
 }

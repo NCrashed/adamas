@@ -1,0 +1,31 @@
+-- Виток за границей: `Expr::Foreign` на каждом обороте (§5.3, §6).
+--
+-- Пара этой программе - `inward.adamas`, и отличается она **одной строкой**:
+-- там виток считает своя арифметика, здесь - чужая функция. Разность двух
+-- прогонов, делённая на число витков, и есть строка §6 «Direct C FFI overhead».
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  True : Bool
+  False : Bool
+
+effect Foreign
+
+extern "C" fn adamas_bench_calls : UInt64
+
+extern "C" fn adamas_bench_step : UInt64 -> UInt64
+
+turn : UInt64 -> UInt64 -> {Foreign} UInt64
+turn 0 acc = acc
+turn n acc = turn (subUInt64 n 1) (adamas_bench_step acc)
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let calls : UInt64 = adamas_bench_calls
+  turn calls 1
+
+main : UInt64
+main = handle @Foreign body with
+  return v -> v

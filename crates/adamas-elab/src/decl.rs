@@ -4026,7 +4026,14 @@ fn declare_extern(
                 names: Names::of(&name, Vec::new()),
             }
         })?;
-    signature.name_foreign(&name, Crossing { symbol, params, result });
+    signature.name_foreign(
+        &name,
+        Crossing {
+            symbol,
+            params,
+            result,
+        },
+    );
     // `@noalloc` через границу - объявление обязательства, а не вердикт: тела
     // за ней нет, и считать нечего (§5.1). Тот же ход, что у постулата.
     if demanded.noalloc {

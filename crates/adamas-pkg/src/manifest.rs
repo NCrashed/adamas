@@ -286,10 +286,9 @@ fn strings(
     items
         .iter()
         .map(|item| {
-            item.get_ref()
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| PkgError::shape(path, format!("`{section}.{key}` - не список строк")))
+            item.get_ref().as_str().map(str::to_owned).ok_or_else(|| {
+                PkgError::shape(path, format!("`{section}.{key}` - не список строк"))
+            })
         })
         .collect()
 }
@@ -549,8 +548,9 @@ mod tests {
     /// Adamas оно не проходило.
     #[test]
     fn a_library_name_that_is_not_a_name_is_refused() {
-        let error = parsed("[package]\nname = \"e\"\n\n[link]\nlibraries = [\"m -o /etc/passwd\"]\n")
-            .expect_err("ключ в имени обязан быть отвергнут");
+        let error =
+            parsed("[package]\nname = \"e\"\n\n[link]\nlibraries = [\"m -o /etc/passwd\"]\n")
+                .expect_err("ключ в имени обязан быть отвергнут");
         assert!(format!("{error}").contains("не имя библиотеки"), "{error}");
     }
 

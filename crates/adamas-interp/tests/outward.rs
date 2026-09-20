@@ -458,9 +458,11 @@ fn resolving_twice_answers_the_same() {
         .expect("первое разрешение обязано проходить");
     it.resolve(&Linkage::default())
         .expect("второе разрешение обязано проходить");
-    let first = it.call(&Linkage::default(), &[27.0_f64.to_bits()])
+    let first = it
+        .call(&Linkage::default(), &[27.0_f64.to_bits()])
         .expect("первый вызов");
-    let second = it.call(&Linkage::default(), &[27.0_f64.to_bits()])
+    let second = it
+        .call(&Linkage::default(), &[27.0_f64.to_bits()])
         .expect("второй вызов");
     assert_eq!(first, second, "второй вызов ответил не то же, что первый");
 }

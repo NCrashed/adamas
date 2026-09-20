@@ -5592,4 +5592,3 @@ fn escaping(term: &Term, depth: u32, out: &mut BTreeSet<u32>) {
         _ => {}
     }
 }
-

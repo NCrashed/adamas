@@ -83,8 +83,8 @@ const CROSSINGS: usize = 6;
 
 /// Программа корпуса, а не строка здесь.
 fn source() -> String {
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/programs/extern-c-probe.adamas");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/golden/programs/extern-c-probe.adamas");
     std::fs::read_to_string(&path)
         .unwrap_or_else(|why| panic!("фикстуры {} нет: {why}", path.display()))
 }

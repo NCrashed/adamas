@@ -41,6 +41,10 @@ pub(crate) struct Opened {
     pub(crate) store: PathBuf,
     /// Имя, под которым кладётся собранный файл.
     pub(crate) artefact: String,
+    /// С чем линковать: секция `[link]` манифеста (§5.3). У программы без
+    /// манифеста пуста - остаётся стандартная библиотека C, и её подключают
+    /// сами обе стороны.
+    pub(crate) link: adamas_pkg::manifest::Link,
 }
 
 /// Что известно о программе после прохода.
@@ -91,6 +95,7 @@ pub(crate) fn opened(path: &Path) -> anyhow::Result<Opened> {
             sources: Box::new(adamas_elab::program::Directory::new(root)),
             store: root.join(adamas_pkg::fetch::STORE),
             artefact: stem(path),
+            link: adamas_pkg::manifest::Link::default(),
         });
     };
 
@@ -111,6 +116,7 @@ pub(crate) fn opened(path: &Path) -> anyhow::Result<Opened> {
         tests: Some(project.manifest.test_file()),
         store: dir.join(adamas_pkg::fetch::STORE),
         artefact: project.manifest.name.clone(),
+        link: project.manifest.link.clone(),
         sources: Box::new(project.sources),
     })
 }

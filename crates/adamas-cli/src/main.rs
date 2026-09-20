@@ -191,7 +191,14 @@ fn evaluate(path: &std::path::Path, name: &str, full: bool) -> anyhow::Result<()
     let opened = project::opened(path)?;
     let checked = project::checked(&opened.entry, opened.sources.as_ref())?;
     let body = project::body(&checked.signature, name)?;
-    let answer = adamas_interp::run(&checked.signature, &body)?;
+    // Машина ищет чужой символ по тем же библиотекам, по которым его ищет
+    // компоновщик (§5.3): секция `[link]` плюс стандартная C. Иначе `adamas
+    // eval` и `adamas run` отвечали бы по-разному на одной и той же программе.
+    let answer = adamas_interp::run_linked(
+        &checked.signature,
+        &body,
+        adamas_interp::Linkage::new(&opened.link.libraries, &opened.link.paths),
+    )?;
     let depth = if full { None } else { Some(PRINT_DEPTH) };
     println!("{}", answer.printed(depth));
     Ok(())

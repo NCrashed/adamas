@@ -81,10 +81,12 @@ pub(crate) fn run(path: &Path) -> anyhow::Result<bool> {
     }
     let checked = project::checked(&entry, opened.sources.as_ref())?;
     let named = collected(&checked.signature)?;
+    // Тесты ходят наружу теми же библиотеками, что и программа (§5.3).
+    let linkage = adamas_interp::Linkage::new(&opened.link.libraries, &opened.link.paths);
 
     let mut failed = 0_usize;
     for name in &named {
-        match verdict(&checked.signature, name) {
+        match verdict(&checked.signature, name, &linkage) {
             Ok(()) => println!("{name}: ok"),
             Err(why) => {
                 failed += 1;
@@ -150,9 +152,14 @@ fn short(name: &str) -> &str {
 }
 
 /// Считает тест и говорит, чем он не прошёл.
-fn verdict(signature: &Signature, name: &str) -> Result<(), String> {
+fn verdict(
+    signature: &Signature,
+    name: &str,
+    linkage: &adamas_interp::Linkage,
+) -> Result<(), String> {
     let body = project::body(signature, name).map_err(|why| why.to_string())?;
-    let answer = adamas_interp::run(signature, &body).map_err(|why| why.to_string())?;
+    let answer = adamas_interp::run_linked(signature, &body, linkage.clone())
+        .map_err(|why| why.to_string())?;
     match &answer {
         Term::Const(constructor, _, _) if short(constructor) == adamas_core::prim::TRUE => Ok(()),
         other => Err(format!(

@@ -75,7 +75,13 @@ pub(crate) fn build(path: &Path, backend: Backend) -> anyhow::Result<PathBuf> {
             .map_err(|why| anyhow::anyhow!("{}: специализация отказала: {why}", checked.name))?;
 
     let dir = opened.store.join("build");
-    let native = Native::new(&dir);
+    // Чужие библиотеки едут в обе сборки одинаково: `-L`/`-l` у `cc` и у
+    // линковки объектника `.ll`. Разойдись они, `--backend llvm` переставал бы
+    // собирать ровно те программы, ради которых секция и заведена.
+    let native = Native::new(&dir).linking(adamas_codegen::native::Linking {
+        paths: opened.link.paths.clone(),
+        libraries: opened.link.libraries.clone(),
+    });
     let name = &opened.artefact;
     let binary = match backend {
         Backend::C => {

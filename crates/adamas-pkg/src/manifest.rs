@@ -34,6 +34,10 @@
 //! [dependencies]
 //! Std = { git = "https://example.invalid/std.git", tag = "v0.1.0" }
 //! Data = { git = "https://example.invalid/data.git", rev = "0123abc…" }
+//!
+//! [link]
+//! libraries = ["curl"]   # -lcurl, он же libcurl.so у `dlopen`
+//! paths = ["vendor/lib"] # -Lvendor/lib, относительно каталога манифеста
 //! ```
 //!
 //! **Ключ в `[dependencies]` - это префикс путей модулей, а не имя пакета.**
@@ -42,6 +46,23 @@
 //! глядя в манифест, видно, какой репозиторий отвечает за какое имя, без
 //! поиска по диску. Цена выбора названа: два пакета не могут делить префикс,
 //! и переименование префикса переписывает `import`'ы.
+//!
+//! # Почему `[link]` - отдельная секция
+//!
+//! Зависимость-**пакет** и зависимость-**библиотека** разные по всем трём
+//! своим полям, и §7.3 говорит только про первую. Пакет приносит **модули**: у
+//! него есть префикс путей, git URL и коммит, и достаёт его `adamas-pkg`.
+//! Библиотека приносит **символы**: префикса у неё нет - `extern "C"` называет
+//! символ, а не модуль (§5.3); доставать её нечем - она либо стоит в системе,
+//! либо её кладёт чужая система сборки; а «версия» у неё soname, а не тег.
+//! Записанные одной таблицей, они заставили бы половину полей каждой стороны
+//! быть бессмысленными, и `Std = { git = … }` рядом с `curl = { }` читалось бы
+//! как одно и то же.
+//!
+//! Написание взято у компоновщика (`-l`, `-L`), и взято **ради машины**:
+//! `-lname` компоновщик разрешает в файл `libname.so`, и он же открывается
+//! `dlopen`'ом. То есть `adamas build` и `adamas eval` требуют от системы
+//! одного и того же файла, а не двух разных написаний одного.
 
 use std::path::{Path, PathBuf};
 
@@ -85,6 +106,17 @@ pub struct Dependency {
     pub want: Requirement,
 }
 
+/// Секция `[link]`: с чем связывать программу сверх рантайма (§5.3, §7.1).
+///
+/// Довод в пользу отдельной секции - в шапке модуля.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Link {
+    /// Библиотеки в написании `-l`: без `lib` и без расширения.
+    pub libraries: Vec<String>,
+    /// Каталоги поиска - абсолютные, уже склеенные с каталогом манифеста.
+    pub paths: Vec<PathBuf>,
+}
+
 /// Разобранный `adamas.toml`.
 #[derive(Clone, Debug)]
 pub struct Manifest {
@@ -104,6 +136,8 @@ pub struct Manifest {
     pub test: String,
     /// Зависимости в порядке написания.
     pub dependencies: Vec<Dependency>,
+    /// С чем линковать: секция `[link]` (§5.3).
+    pub link: Link,
 }
 
 impl Manifest {
@@ -175,6 +209,7 @@ impl Manifest {
             entry,
             test: suite,
             dependencies,
+            link: link(path, dir, document)?,
         })
     }
 
@@ -211,6 +246,75 @@ fn string(
             .map(|it| Some(it.to_owned()))
             .ok_or_else(|| PkgError::shape(path, format!("`{section}.{key}` - не строка"))),
     }
+}
+
+/// Секция `[link]`. Её нет - связывать нечего сверх стандартной библиотеки C.
+fn link(path: &Path, dir: &Path, document: &DeTable<'_>) -> Result<Link, PkgError> {
+    let Some(value) = document.get("link") else {
+        return Ok(Link::default());
+    };
+    let table = value
+        .get_ref()
+        .as_table()
+        .ok_or_else(|| PkgError::shape(path, "`link` - не таблица"))?;
+    let mut libraries = Vec::new();
+    for written in strings(path, table, "link", "libraries")? {
+        library_name(path, &written)?;
+        libraries.push(written);
+    }
+    let mut paths = Vec::new();
+    for written in strings(path, table, "link", "paths")? {
+        paths.push(dir.join(inside(path, "link.paths", &written)?));
+    }
+    Ok(Link { libraries, paths })
+}
+
+/// Массив строк. Поля нет - пустой список.
+fn strings(
+    path: &Path,
+    table: &DeTable<'_>,
+    section: &str,
+    key: &str,
+) -> Result<Vec<String>, PkgError> {
+    let Some(value) = table.get(key) else {
+        return Ok(Vec::new());
+    };
+    let items = value
+        .get_ref()
+        .as_array()
+        .ok_or_else(|| PkgError::shape(path, format!("`{section}.{key}` - не список строк")))?;
+    items
+        .iter()
+        .map(|item| {
+            item.get_ref()
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| PkgError::shape(path, format!("`{section}.{key}` - не список строк")))
+        })
+        .collect()
+}
+
+/// Проверяет, что строка годится в `-l`: буквы, цифры, `_`, `-`, `.`, `+`.
+///
+/// Проверка не косметическая, и жанр её тот же, что у [`file_name`]: имя
+/// уезжает в командную строку компилятора **и** в `dlopen`, а написанное в
+/// манифесте разбора Adamas не проходило. `libraries = ["m -o /etc/passwd"]`
+/// отсекается здесь.
+fn library_name(path: &Path, written: &str) -> Result<(), PkgError> {
+    let ok = !written.is_empty()
+        && written
+            .chars()
+            .all(|it| it.is_alphanumeric() || matches!(it, '_' | '-' | '.' | '+'));
+    if ok {
+        return Ok(());
+    }
+    Err(PkgError::shape(
+        path,
+        format!(
+            "`link.libraries` = `{written}` - не имя библиотеки: пишется оно как у `-l`, \
+             без `lib` и без расширения"
+        ),
+    ))
 }
 
 /// Одна запись `[dependencies]`.
@@ -419,6 +523,43 @@ mod tests {
         )
         .expect_err("слеш в префиксе обязан быть отвергнут");
         assert!(format!("{error}").contains("не путь модуля"), "{error}");
+    }
+
+    /// Секции нет - список пуст, и стандартную библиотеку C в него писать не
+    /// надо: её подключают сами обе стороны.
+    #[test]
+    fn without_a_link_section_nothing_is_linked() {
+        let manifest = parsed("[package]\nname = \"e\"\n").expect("манифест");
+        assert_eq!(manifest.link, Link::default());
+    }
+
+    /// Каталоги склеиваются с каталогом манифеста: `dlopen` относительного пути
+    /// от каталога запуска не поймёт.
+    #[test]
+    fn a_link_section_carries_libraries_and_paths() {
+        let manifest = parsed(
+            "[package]\nname = \"e\"\n\n[link]\nlibraries = [\"curl\", \"z\"]\npaths = [\"vendor/lib\"]\n",
+        )
+        .expect("манифест");
+        assert_eq!(manifest.link.libraries, ["curl", "z"]);
+        assert_eq!(manifest.link.paths, [PathBuf::from("/проект/vendor/lib")]);
+    }
+
+    /// Имя уезжает в командную строку компилятора и в `dlopen`, а разбора
+    /// Adamas оно не проходило.
+    #[test]
+    fn a_library_name_that_is_not_a_name_is_refused() {
+        let error = parsed("[package]\nname = \"e\"\n\n[link]\nlibraries = [\"m -o /etc/passwd\"]\n")
+            .expect_err("ключ в имени обязан быть отвергнут");
+        assert!(format!("{error}").contains("не имя библиотеки"), "{error}");
+    }
+
+    /// Тот же запрет на выход за каталог, что у `package.root`.
+    #[test]
+    fn a_link_path_outside_the_manifest_directory_is_refused() {
+        let error = parsed("[package]\nname = \"e\"\n\n[link]\npaths = [\"../../lib\"]\n")
+            .expect_err("выход за каталог обязан быть отвергнут");
+        assert!(format!("{error}").contains("выводит за каталог"), "{error}");
     }
 
     #[test]

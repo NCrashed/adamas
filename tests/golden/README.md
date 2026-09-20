@@ -21,6 +21,7 @@ tests/golden/
   eval/       <name>.adamas   — считается: машиной и обоими бэкендами
   eval/Std/   <Name>.adamas   — подключаемые модули (§4.8), не фикстуры
   project/                    — один проект из десяти файлов, не корпус
+  project/adamas.toml         — его манифест (§7.3)
 ```
 
 Обходы корпуса берут `*.adamas` **одного уровня**, поэтому `eval/Std/` в счёт
@@ -34,6 +35,12 @@ tests/golden/
 `crates/adamas-lsp/tests/protocol.rs` (правка модуля обновляет диагностику
 зависящего буфера) и стенд `docs/measurements/project-recheck/` — цену
 интерактивности называют на проекте, который существует.
+
+При ней лежит `adamas.toml` — единственный файл корпуса, который не на Adamas.
+Он там не для украшения: без манифеста драйвер берёт корнем поиска каталог
+написанного файла, и `adamas check project/Std/Order.adamas` ищет `Std.Base` в
+`project/Std/Std/`. Зависимостей у проекта нет, поэтому `adamas.lock` не
+заводится и `.adamas/` не создаётся.
 
 Ожидаемый вывод ведётся через `insta` (`cargo insta review`), а не правится
 руками: снапшоты лежат в `crates/adamas-cli/tests/snapshots/`.

@@ -13,10 +13,17 @@
 //!
 //! Тем же аргументом принимается **каталог** проекта или путь к его
 //! `adamas.toml`: тогда корни поиска берутся из манифеста, а git-зависимости
-//! достаются и подключаются (§7.3, `adamas-pkg`). Вверх по дереву манифест
-//! **не ищется**: проект называется явно, как и зависимость в нём. Поиск
-//! вверх стоил бы того, что чужой `adamas.toml` этажом выше молча менял бы
-//! смысл проверки одного файла.
+//! достаются и подключаются (§7.3, `adamas-pkg`).
+//!
+//! Написанный **файл** тоже ищет манифест - вверх по дереву, до ближайшего.
+//! Решение это переигранное: сперва вверх не искалось вовсе, доводом «чужой
+//! `adamas.toml` этажом выше молча меняет смысл проверки». Довод не выдержал
+//! замера трека B: `adamas check tests/golden/project/Std/Order.adamas`
+//! отвечал «модуль `Std.Base` не найден: искали `…/Std/Std/Base.adamas`», то
+//! есть инструмент не проверял файл **собственного** проекта. Редактор тот же
+//! корень берёт из `rootUri`; у терминала его взять неоткуда, кроме как из
+//! манифеста. Корни при этом манифестные, а входом остаётся написанный файл -
+//! спрашивали про него.
 //!
 //! # `check --type`
 //!
@@ -129,14 +136,16 @@ fn evaluate(path: &Path, name: &str, full: bool) -> anyhow::Result<()> {
 
 /// Откуда берутся входной файл и корни поиска модулей.
 ///
-/// Каталог проекта открывается целиком: манифест, зависимости, замок. Один
-/// файл открывается как раньше - корень поиска есть его каталог.
+/// Три случая. Каталог или сам `adamas.toml` - проект целиком, и вход берётся
+/// из манифеста. Файл **внутри** проекта - корни из манифеста, а входом
+/// остаётся написанный файл. Файл вне всякого проекта - как раньше: корень
+/// поиска есть его каталог.
 ///
 /// # Errors
 ///
 /// Манифест собран не так или зависимость не достаётся.
 fn opened(path: &Path) -> anyhow::Result<(PathBuf, Box<dyn adamas_elab::program::Sources>)> {
-    let project = if path.is_dir() {
+    let named = if path.is_dir() {
         Some(path.to_path_buf())
     } else if path
         .file_name()
@@ -150,7 +159,8 @@ fn opened(path: &Path) -> anyhow::Result<(PathBuf, Box<dyn adamas_elab::program:
     } else {
         None
     };
-    let Some(dir) = project else {
+    let entry = named.is_none().then(|| path.to_path_buf());
+    let Some(dir) = named.or_else(|| enclosing(path)) else {
         let root = path.parent().unwrap_or_else(|| Path::new("."));
         return Ok((
             path.to_path_buf(),
@@ -170,7 +180,26 @@ fn opened(path: &Path) -> anyhow::Result<(PathBuf, Box<dyn adamas_elab::program:
     if project.relocked {
         eprintln!("{}: обновлён", adamas_pkg::lock::LOCKFILE);
     }
-    Ok((project.entry_file(), Box::new(project.sources)))
+    Ok((
+        entry.unwrap_or_else(|| project.entry_file()),
+        Box::new(project.sources),
+    ))
+}
+
+/// Проект, внутри которого лежит файл: ближайший `adamas.toml` вверх по дереву.
+///
+/// Путь приводится к абсолютному: без этого `adamas check main.adamas` смотрел
+/// бы ровно в текущий каталог и никуда выше. Файла нет - искать нечего, и
+/// отказ «не удалось прочитать» скажет об этом лучше.
+fn enclosing(file: &Path) -> Option<PathBuf> {
+    let full = std::fs::canonicalize(file).ok()?;
+    let mut at = full.parent()?;
+    loop {
+        if at.join(adamas_pkg::manifest::MANIFEST).is_file() {
+            return Some(at.to_path_buf());
+        }
+        at = at.parent()?;
+    }
 }
 
 /// Разбор, элаборация и проверка типов - общая половина обеих команд.

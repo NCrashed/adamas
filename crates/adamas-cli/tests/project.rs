@@ -159,9 +159,17 @@ mod fixture {
     pub(crate) fn lock(app: &Path) -> String {
         std::fs::read_to_string(app.join("adamas.lock")).unwrap_or_default()
     }
+
+    /// Корпус: `crates/adamas-cli` - два уровня от корня дерева.
+    pub(crate) fn corpus() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/golden")
+            .canonicalize()
+            .unwrap()
+    }
 }
 
-use fixture::{adamas, commit, git, lock, project, run, scratch, source, write};
+use fixture::{adamas, commit, corpus, git, lock, project, run, scratch, source, write};
 
 /// Зависимость по URL и коммиту достаётся, собирается и подключается.
 ///
@@ -281,6 +289,56 @@ fn an_unknown_tag_is_refused_by_name() {
     assert!(
         stderr.contains("refs/tags/v9"),
         "отказ обязан назвать тег: {stderr}"
+    );
+}
+
+/// Файл **внутри** проекта проверяется по манифесту, а не по своему каталогу.
+///
+/// Трек B померил, что этого не было: `adamas check <проект>/Std/Order.adamas`
+/// отвечал «модуль `Std.Base` не найден: искали `…/Std/Std/Base.adamas`» -
+/// инструмент не проверял файл собственного проекта. Свидетель парный: убери
+/// манифест, и тот же файл перестаёт проверяться.
+#[test]
+fn a_file_inside_a_project_is_checked_against_the_manifest() {
+    let case = scratch("inside");
+    let repository = case.join("std");
+    let rev = source(&repository, "Succ Zero");
+    let app = case.join("app");
+    project(&app, &repository, &format!("rev = \"{rev}\""), MAIN);
+    // Модуль лежит глубже входа: его каталог корнем поиска не годится.
+    write(
+        &app.join("src/App/Inner.adamas"),
+        "import Std.Prelude (Nat, answer)\n\ntwice : Nat\ntwice = answer\n",
+    );
+
+    let inner = app.join("src/App/Inner.adamas");
+    let (ok, stdout, stderr) = run(adamas().arg("check").arg(&inner));
+    assert!(ok, "файл своего проекта не проверился: {stderr}");
+    assert!(stdout.contains("файлов 2"), "неожиданный вывод: {stdout}");
+
+    std::fs::remove_file(app.join("adamas.toml")).expect("манифест");
+    let (ok, _, stderr) = run(adamas().arg("check").arg(&inner));
+    assert!(!ok, "без манифеста модуль зависимости всё равно нашёлся");
+    assert!(
+        stderr.contains("Std.Prelude"),
+        "отказ обязан назвать модуль: {stderr}"
+    );
+}
+
+/// То же на корпусном проекте - ровно та команда, которую померил трек B.
+///
+/// Свидетель во временном каталоге проверяет правило; этот - что правило дошло
+/// до программы, которая в дереве уже лежит. `Std/Order.adamas` подключает
+/// `Std.Base`, и без манифеста драйвер искал его в `project/Std/Std/`.
+#[test]
+fn a_module_of_the_corpus_project_checks_by_itself() {
+    let deep = corpus().join("project/Std/Order.adamas");
+    let (ok, stdout, stderr) = run(adamas().arg("check").arg(&deep));
+    assert!(ok, "модуль корпусного проекта не проверился: {stderr}");
+    assert!(stdout.contains("файлов"), "неожиданный вывод: {stdout}");
+    assert!(
+        !corpus().join("project/adamas.lock").exists(),
+        "замок заведён проекту без зависимостей"
     );
 }
 

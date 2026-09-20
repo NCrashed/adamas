@@ -13,18 +13,20 @@
 //! где `Pi` превращается в значение.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use adamas_core::eval;
 use adamas_core::level::Level;
 use adamas_core::mult::Mult;
-use adamas_core::prim::{ArrayOp, RegionOp, SimdOp};
+use adamas_core::prim::{ArrayOp, Prim, RegionOp, SimdOp};
 use adamas_core::row::Row;
 use adamas_core::sig::{DefinitionKind, Signature};
 use adamas_core::term::{Case, Mults, Name, Term};
 use adamas_core::value::{Elim, Env, Head, StuckBranch, StuckCase, Value};
 
 use crate::RunError;
+use crate::foreign::Foreign;
 use crate::frame::{Frame, Kont, Segment};
 
 /// Машина: сигнатура и таблица живых резумпций.
@@ -61,6 +63,13 @@ pub struct Machine<'a> {
     /// вопроса 94 в программах, где мультишот есть; программ таких мало, и
     /// платят они только за себя.
     multishot: std::cell::Cell<bool>,
+    /// Имена, за которыми стоит чужой символ, а не тело (§5.3).
+    ///
+    /// Таблицей рядом, а не признаком в сигнатуре: слова `extern` в языке нет,
+    /// узла ядра под внешнее объявление тоже нет, и заводит их трек B. Машине
+    /// довольно знать, что у имени тела не будет **никогда** и что вместо тела
+    /// есть адрес в чужой библиотеке.
+    foreign: HashMap<Name, Foreign>,
 }
 
 impl std::fmt::Debug for Machine<'_> {
@@ -93,6 +102,7 @@ impl<'a> Machine<'a> {
             resumptions: RefCell::new(Vec::new()),
             multishot: std::cell::Cell::new(false),
             nurseries: RefCell::new(Vec::new()),
+            foreign: HashMap::new(),
         }
     }
 
@@ -100,6 +110,18 @@ impl<'a> Machine<'a> {
     #[must_use]
     pub fn signature(&self) -> &'a Signature {
         self.signature
+    }
+
+    /// Ставит за именем чужой символ (§5.3, §10 вопрос 182).
+    ///
+    /// Имя обязано быть **постулатом**: тело развернулось бы раньше, чем машина
+    /// дошла бы до внешнего вызова, и объявление осталось бы немым. Проверять
+    /// это здесь нечем и не нужно - проверяет δ-шаг, который тело развернёт.
+    ///
+    /// Приходит объявление в обход поверхностного языка нарочно: `extern` в
+    /// грамматике заводит трек B, а мерить цену хождения наружу надо до него.
+    pub fn declare_foreign(&mut self, name: &str, it: Foreign) {
+        self.foreign.insert(Name::from(name), it);
     }
 
     /// Считает терм до значения.
@@ -389,6 +411,9 @@ impl<'a> Machine<'a> {
         if let Some(step) = self.effectful(name, &spine, kont)? {
             return Ok(step);
         }
+        if let Some(step) = self.outward(name, &spine)? {
+            return Ok(step);
+        }
         Ok(Step::Return(Rc::new(Value::Neutral(
             Head::Global(
                 Rc::clone(name),
@@ -398,6 +423,58 @@ impl<'a> Machine<'a> {
             ),
             spine,
         ))))
+    }
+
+    /// Насыщенное имя с чужим символом за ним: машина идёт наружу (§5.3).
+    ///
+    /// `None` - имя не объявлено чужим либо спайн ещё не насыщен: тогда оно
+    /// остаётся нейтралью ровно так же, как недобранный конструктор. Недобор
+    /// поэтому не отказ, а застревание - то же, что у всякого частичного
+    /// применения.
+    ///
+    /// Аргументы разворачиваются [`Machine::forced`] по тому же доводу, каким
+    /// разворачивает их примитивная операция: свёртка требует литерала, а имя с
+    /// телом само до него не разворачивается. Не развернувшийся в литерал
+    /// аргумент оставляет вызов застрявшим - звать чужой код с неизвестным
+    /// значением нечем.
+    ///
+    /// # Errors
+    ///
+    /// Библиотека не загрузилась, символа нет, сигнатура вне таблицы либо
+    /// литерал не того типа, каким объявлен аргумент.
+    fn outward(&self, name: &Name, spine: &[Elim]) -> Result<Option<Step>, RunError> {
+        let Some(it) = self.foreign.get(&**name) else {
+            return Ok(None);
+        };
+        let arguments: Vec<Rc<Value>> = spine
+            .iter()
+            .filter_map(|elim| match elim {
+                Elim::App(argument) => Some(Rc::clone(argument)),
+                _ => None,
+            })
+            .collect();
+        if arguments.len() != it.params.len() {
+            return Ok(None);
+        }
+        let mut bits = Vec::with_capacity(arguments.len());
+        for (at, argument) in arguments.into_iter().enumerate() {
+            let Value::Prim(Prim::Lit(ty, word)) = &*self.forced(argument)? else {
+                return Ok(None);
+            };
+            if *ty != it.params[at] {
+                return Err(RunError::ForeignArgument {
+                    symbol: it.symbol.clone(),
+                    at,
+                    want: it.params[at].name(),
+                    got: ty.name(),
+                });
+            }
+            bits.push(*word);
+        }
+        let word = it.call(&bits)?;
+        Ok(Some(Step::Return(Rc::new(Value::Prim(Prim::literal(
+            it.result, word,
+        ))))))
     }
 
     /// Шаг по кадру, которому пришло значение.

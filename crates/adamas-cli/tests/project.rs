@@ -64,8 +64,15 @@ mod fixture {
     }
 
     /// Настоящий `git` - им строится фикстура, а не проверяется поведение.
+    ///
+    /// Конфигурация машины отключена целиком, и это не перестраховка. Первый
+    /// прогон без этого упал на `commit.gpgsign = true` из `~/.gitconfig`:
+    /// фикстура полезла подписывать коммит ключом разработчика, pinentry не
+    /// ответил, и шесть тестов покраснели по причине, к пакетному менеджеру
+    /// отношения не имеющей. Той же дорогой пришли бы `init.defaultBranch`,
+    /// `core.hooksPath` и `url.insteadOf`.
     pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let output = hermetic("git")
             .arg("-C")
             .arg(dir)
             .args([
@@ -118,12 +125,25 @@ mod fixture {
         write(&dir.join("src/Main.adamas"), main);
     }
 
-    /// Драйвер. `GIT_ALLOW_PROTOCOL=file` - запрет выходить наружу, а не
+    /// Команда, которой ничего не достаётся от машины.
+    ///
+    /// `GIT_CONFIG_GLOBAL` и `GIT_CONFIG_SYSTEM` в `/dev/null` - `~/.gitconfig`
+    /// и `/etc/gitconfig` не читаются ни фикстурой, ни `git`, которого зовёт
+    /// драйвер. `GIT_ALLOW_PROTOCOL=file` - запрет выходить наружу, а не
     /// пожелание: транспорт, которого нет в списке, git отвергает сам.
-    pub(crate) fn adamas() -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_adamas"));
-        command.env("GIT_ALLOW_PROTOCOL", "file");
+    fn hermetic(program: &str) -> Command {
+        let mut command = Command::new(program);
         command
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_ALLOW_PROTOCOL", "file")
+            .env("GIT_TERMINAL_PROMPT", "0");
+        command
+    }
+
+    /// Драйвер.
+    pub(crate) fn adamas() -> Command {
+        hermetic(env!("CARGO_BIN_EXE_adamas"))
     }
 
     /// Запускает команду и отдаёт `(успех, stdout, stderr)`.
@@ -261,6 +281,37 @@ fn an_unknown_tag_is_refused_by_name() {
     assert!(
         stderr.contains("refs/tags/v9"),
         "отказ обязан назвать тег: {stderr}"
+    );
+}
+
+/// Зависимость со своими зависимостями отвергается названной причиной.
+///
+/// Транзитивный граф требует правила «какой из двух коммитов одного
+/// репозитория взять», а версий у git-зависимости нет (§7.3: реестра нет).
+/// Молчаливое игнорирование чужого `[dependencies]` дало бы вместо этого
+/// «модуль не найден» посреди чужого файла.
+#[test]
+fn a_transitive_dependency_is_refused_by_name() {
+    let case = scratch("transitive");
+    let repository = case.join("std");
+    write(
+        &repository.join("adamas.toml"),
+        "[package]\nname = \"std\"\n\n[dependencies]\nOther = { git = \"file:///нет\", tag = \"v1\" }\n",
+    );
+    write(
+        &repository.join("src/Std/Prelude.adamas"),
+        &library("Succ Zero"),
+    );
+    git(&repository, &["init", "-q", "."]);
+    let rev = commit(&repository, "первый");
+    let app = case.join("app");
+    project(&app, &repository, &format!("rev = \"{rev}\""), MAIN);
+
+    let (ok, _, stderr) = run(adamas().arg("check").arg(&app));
+    assert!(!ok, "транзитивная зависимость прошла молча");
+    assert!(
+        stderr.contains("транзитивные не поддержаны"),
+        "отказ обязан назвать причину: {stderr}"
     );
 }
 

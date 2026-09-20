@@ -12,11 +12,11 @@ programming, and type-heavy research.
 
 **Stage: phases 0–7 are done.** A program travels the whole path — text, tree,
 core terms, type checking — and then runs three ways: `adamas eval` interprets
-it, the C backend compiles it, the LLVM backend compiles it. All three must
-answer the *same thing*, and a disagreement fails the build: that contract is
-checked on every gate run over 102 of the 103 corpus programs. The one program
-neither backend takes returns a function, and printing one is a question about
-the language, not about a backend.
+it, and `adamas build` compiles it through either backend, C or LLVM. All
+three must answer the *same thing*, and a disagreement fails the build: that
+contract is checked on every gate run over 102 of the 103 corpus programs.
+The one program neither backend takes returns a function, and printing one is
+a question about the language, not about a backend.
 
 See the [roadmap](adamas-design.md#9-roadmap) — 10 phases, ~3–5 years to a
 research-grade prototype.
@@ -155,13 +155,13 @@ crates/adamas-codegen     backend IR carrying multiplicity and uniqueness,
                           Perceus insertion, and two emitters: C and LLVM
 crates/adamas-runtime     the C runtime: objects, regions, fibers, atomic RC
 crates/adamas-pkg         the project manifest, git dependencies, lockfile
-crates/adamas-cli         the `adamas` driver: `check` and `eval`, over a
-                          single file or a whole project
+crates/adamas-cli         the `adamas` driver: `new`, `check`, `build`, `run`,
+                          `test` and `eval`, over a single file or a project
 crates/adamas-lsp         the language server: diagnostics over stdio
 crates/adamas-warmup-stlc a phase-0 exercise: STLC + HM, standalone
 ```
 
-Roughly 138k lines of Rust, 6k lines of C, and 1391 tests. What the language
+Roughly 138k lines of Rust, 6k lines of C, and 1404 tests. What the language
 accepts is visible in [`tests/golden/`](tests/golden/): 246 fixtures — programs
 that must be accepted, programs that must be refused with a recorded message,
 and programs whose value is recorded too.

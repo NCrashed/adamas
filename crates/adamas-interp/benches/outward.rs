@@ -55,7 +55,7 @@ use adamas_core::term::{Binder, Term};
 use adamas_core::value::Env;
 use criterion::{Criterion, criterion_group};
 
-use adamas_interp::{Foreign, Machine};
+use adamas_interp::{Foreign, Linkage, Machine};
 
 /// Библиотека и символ: обоснование выбора - в `docs/phase8-trackC-notes.md`.
 const LIBRARY: &str = "libm.so.6";
@@ -132,7 +132,8 @@ fn decomposition() -> (Signature, Term) {
 fn cold() {
     let it = declared();
     let started = Instant::now();
-    it.resolve().expect("libm обязана загружаться");
+    it.resolve(&Linkage::default())
+        .expect("libm обязана загружаться");
     let took = started.elapsed();
     eprintln!("холодная загрузка {LIBRARY} + dlsym {SYMBOL}: {took:?} (одна выборка)");
 }
@@ -150,19 +151,22 @@ fn outward(criterion: &mut Criterion) {
     // подключает вовсе, а на 27 две реализации расходятся на один ULP
     // (`tests/outward.rs`, `the_answer_comes_from_glibc_and_not_from_rust`).
     assert_eq!(
-        it.call(&[1000.0_f64.to_bits()])
+        it.call(&Linkage::default(), &[1000.0_f64.to_bits()])
             .expect("вызов обязан проходить"),
-        10.0_f64.to_bits(),
+        Some(10.0_f64.to_bits()),
         "чужой вызов ответил не кубический корень"
     );
 
     let mut group = criterion.benchmark_group("outward");
 
     group.bench_function("resolve", |bencher| {
-        bencher.iter(|| it.resolve().unwrap());
+        bencher.iter(|| it.resolve(&Linkage::default()).unwrap());
     });
     group.bench_function("bare", |bencher| {
-        bencher.iter(|| it.call(std::hint::black_box(&[bits])).unwrap());
+        bencher.iter(|| {
+            it.call(&Linkage::default(), std::hint::black_box(&[bits]))
+                .unwrap()
+        });
     });
 
     let (signature, term) = program(SYMBOL);

@@ -24,12 +24,12 @@
 
 mod effect;
 mod fiber;
-mod foreign;
+pub mod foreign;
 mod frame;
 mod machine;
 mod read;
 
-pub use foreign::Foreign;
+pub use foreign::{Foreign, Linkage};
 pub use machine::Machine;
 
 use adamas_core::sig::Signature;
@@ -98,20 +98,6 @@ pub enum RunError {
     TaskShape {
         /// Операция, чей результат не подошёл.
         operation: String,
-    },
-
-    /// Насыщенный вызов чужого символа (§5.3).
-    ///
-    /// **Граница машины, а не языка.** Программа верна: проверка типов её
-    /// приняла, и оба понижения её берут и считают. Позвать чужую функцию
-    /// нечем именно машине - у неё нет ни загрузчика библиотек, ни договора о
-    /// том, чем оказывается значение за её пределами. Отказ поэтому говорит
-    /// про машину, а не про программу, и механизм для него ставит свой трек
-    /// (§10 вопрос 182).
-    #[error("`{name}` объявлена `extern \"C\"` (§5.3): машина наружу не ходит")]
-    Foreign {
-        /// Имя чужого символа, как он объявлен.
-        name: String,
     },
 
     /// Все живые файберы ждут друг друга.
@@ -186,7 +172,21 @@ pub enum RunError {
 ///
 /// [`RunError`] - операция без хендлера либо отсутствующая единица.
 pub fn run(signature: &Signature, term: &Term) -> Result<Term, RunError> {
-    let machine = Machine::new(signature);
+    run_linked(signature, term, Linkage::default())
+}
+
+/// Он же с библиотеками, с которыми связана программа (§5.3, §7.1).
+///
+/// Список приходит из `[link]` манифеста и есть тот же, который уезжает в
+/// `cc`. Стандартная библиотека C ([`foreign::C_LIBRARY`]) дописывается сама:
+/// её и `cc` подключает без единого ключа.
+///
+/// # Errors
+///
+/// [`RunError`] - операция без хендлера, отсутствующая единица либо отказ
+/// чужого вызова.
+pub fn run_linked(signature: &Signature, term: &Term, linkage: Linkage) -> Result<Term, RunError> {
+    let machine = Machine::linked(signature, linkage);
     let value = machine.evaluate(&Env::default(), term)?;
     machine.read(value)
 }

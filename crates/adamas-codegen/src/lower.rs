@@ -2686,14 +2686,9 @@ impl<'a> Lowerer<'a> {
         if let Some(id) = self.externs.get(name) {
             return Ok(*id);
         }
-        let symbol = self
-            .signature
-            .foreign(name)
-            .ok_or_else(|| LowerError::Unknown {
-                name: name.to_string(),
-            })?
-            .to_string();
-        let parameters: Vec<PrimTy> = self.foreign_binders(name)?.into_iter().flatten().collect();
+        let crossing = self.foreign_shape(name)?;
+        let symbol = crossing.symbol.to_string();
+        let parameters = crossing.carried();
         let result = self.foreign_result(name)?;
         let id = ForeignId(self.foreigns.len());
         self.foreigns.push(Foreign {
@@ -2709,27 +2704,31 @@ impl<'a> Lowerer<'a> {
     ///
     /// Длина - арность **адамасова** имени, а не сишного: единица связывание
     /// занимает, а аргумента не даёт.
+    ///
+    /// Читается у сигнатуры, а не считается обходом типа: форму границы считает
+    /// элаборация, и она же решает, пускать ли её (`decl::crossing`). Свой
+    /// обход здесь был второй копией того же правила, а копии уже расходились -
+    /// см. [`adamas_core::sig::Crossing`].
     fn foreign_binders(&self, name: &Name) -> Result<Vec<Option<PrimTy>>, LowerError> {
-        let mut carried = Vec::new();
-        let mut rest = self.declared(name)?;
-        while let Term::Pi(_, _, domain, _, codomain) = rest {
-            carried.push(flat_prim(self.signature, domain));
-            rest = codomain;
-        }
-        Ok(carried)
+        Ok(self.foreign_shape(name)?.params.clone())
     }
 
     /// Чем отвечает чужой символ.
     fn foreign_result(&mut self, name: &Name) -> Result<ForeignResult, LowerError> {
-        let mut rest = self.declared(name)?;
-        while let Term::Pi(_, _, _, _, codomain) = rest {
-            rest = codomain;
-        }
-        if let Some(ty) = flat_prim(self.signature, rest) {
+        if let Some(ty) = self.foreign_shape(name)?.result {
             return Ok(ForeignResult::Flat(ty));
         }
         let unit = self.unit_name()?;
         Ok(ForeignResult::Unit(self.tag(&unit)?))
+    }
+
+    /// Форма границы, записанная элаборацией.
+    fn foreign_shape(&self, name: &Name) -> Result<&'a adamas_core::sig::Crossing, LowerError> {
+        self.signature
+            .foreign(name)
+            .ok_or_else(|| LowerError::Unknown {
+                name: name.to_string(),
+            })
     }
 
     /// Роль операции под питомником. `None` - обычная операция эффекта.
@@ -5594,13 +5593,3 @@ fn escaping(term: &Term, depth: u32, out: &mut BTreeSet<u32>) {
     }
 }
 
-/// Плоское слово написанного типа. `None` - всё прочее, включая единицу.
-///
-/// Синоним разворачивается: `Int` есть `Int64` (§4.3), а `CPtr` есть `UInt64`
-/// (§5.3) - представление принадлежит типу, а не его написанию.
-fn flat_prim(signature: &Signature, ty: &Term) -> Option<PrimTy> {
-    match unaliased(signature, ty) {
-        Term::Prim(Prim::Ty(it)) => Some(*it),
-        _ => None,
-    }
-}

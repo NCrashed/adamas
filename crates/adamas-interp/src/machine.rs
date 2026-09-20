@@ -26,7 +26,7 @@ use adamas_core::term::{Case, Mults, Name, Term};
 use adamas_core::value::{Elim, Env, Head, StuckBranch, StuckCase, Value};
 
 use crate::RunError;
-use crate::foreign::Foreign;
+use crate::foreign::{Foreign, Linkage};
 use crate::frame::{Frame, Kont, Segment};
 
 /// Машина: сигнатура и таблица живых резумпций.
@@ -65,11 +65,15 @@ pub struct Machine<'a> {
     multishot: std::cell::Cell<bool>,
     /// Имена, за которыми стоит чужой символ, а не тело (§5.3).
     ///
-    /// Таблицей рядом, а не признаком в сигнатуре: слова `extern` в языке нет,
-    /// узла ядра под внешнее объявление тоже нет, и заводит их трек B. Машине
-    /// довольно знать, что у имени тела не будет **никогда** и что вместо тела
-    /// есть адрес в чужой библиотеке.
-    foreign: HashMap<Name, Foreign>,
+    /// Наполняется с двух сторон. Объявление `extern "C"` приходит **из
+    /// сигнатуры** ([`adamas_core::sig::Crossing`]) и кладётся сюда при первом
+    /// вызове: строить его заново на каждом пересечении значило бы отвести
+    /// границе две аллокации строк. [`Machine::declare_foreign`] ставит символ
+    /// руками вместе с именем библиотеки - это путь стенда и свидетелей ABI,
+    /// которым нужен файл, а не поиск.
+    foreign: RefCell<HashMap<Name, Rc<Foreign>>>,
+    /// С чем связана программа: `[link]` манифеста плюс стандартная C (§7.1).
+    linkage: Linkage,
 }
 
 impl std::fmt::Debug for Machine<'_> {
@@ -102,7 +106,20 @@ impl<'a> Machine<'a> {
             resumptions: RefCell::new(Vec::new()),
             multishot: std::cell::Cell::new(false),
             nurseries: RefCell::new(Vec::new()),
-            foreign: HashMap::new(),
+            foreign: RefCell::new(HashMap::new()),
+            linkage: Linkage::default(),
+        }
+    }
+
+    /// Машина, связанная с названными библиотеками (§5.3, §7.1).
+    ///
+    /// Список - тот же, что уезжает в `cc`: `[link]` манифеста. Стандартная
+    /// библиотека C дописывается сама, потому что её сам дописывает и `cc`.
+    #[must_use]
+    pub fn linked(signature: &'a Signature, linkage: Linkage) -> Self {
+        Self {
+            linkage,
+            ..Self::new(signature)
         }
     }
 
@@ -112,16 +129,20 @@ impl<'a> Machine<'a> {
         self.signature
     }
 
-    /// Ставит за именем чужой символ (§5.3, §10 вопрос 182).
+    /// Ставит за именем чужой символ в **названной** библиотеке (§5.3).
     ///
     /// Имя обязано быть **постулатом**: тело развернулось бы раньше, чем машина
     /// дошла бы до внешнего вызова, и объявление осталось бы немым. Проверять
     /// это здесь нечем и не нужно - проверяет δ-шаг, который тело развернёт.
     ///
-    /// Приходит объявление в обход поверхностного языка нарочно: `extern` в
-    /// грамматике заводит трек B, а мерить цену хождения наружу надо до него.
+    /// Путь в обход поверхностного языка остаётся: свидетелям ABI и стенду
+    /// нужен **файл**, а не поиск по связанным библиотекам, - иначе они меряли
+    /// бы порядок поиска вместо цены вызова. Программе на Adamas этот путь не
+    /// нужен: её объявление приезжает из сигнатуры само.
     pub fn declare_foreign(&mut self, name: &str, it: Foreign) {
-        self.foreign.insert(Name::from(name), it);
+        self.foreign
+            .borrow_mut()
+            .insert(Name::from(name), Rc::new(it));
     }
 
     /// Считает терм до значения.
@@ -405,17 +426,6 @@ impl<'a> Machine<'a> {
         spine: Vec<Elim>,
         kont: &mut Kont,
     ) -> Result<Step, RunError> {
-        // Чужой символ (§5.3). Отказ стоит у **применения**, а не у чтения
-        // имени: значением чужая функция быть вправе - её кладут в поле, ею
-        // параметризуют, - а выйти наружу машине нечем. Механизм похода
-        // наружу ставит свой трек (§10 вопрос 182); здесь только названная
-        // граница вместо молчаливой нейтрали, которая печаталась именем и
-        // выглядела как посчитанный ответ.
-        if self.signature.foreign(name).is_some() {
-            return Err(RunError::Foreign {
-                name: name.to_string(),
-            });
-        }
         if let Some(index) = name.strip_prefix(RESUME).and_then(|it| it.parse().ok()) {
             return Ok(self.resumed(index, &spine, kont));
         }
@@ -449,12 +459,17 @@ impl<'a> Machine<'a> {
     /// аргумент оставляет вызов застрявшим - звать чужой код с неизвестным
     /// значением нечем.
     ///
+    /// Аргумент-единица через границу **не едет** и литералом не бывает: в
+    /// домене он есть сишное `(void)`. Связывание он при этом занимает, и
+    /// насыщение считается по нему наравне с прочими - ровно как у понижения
+    /// (`lower::crossing`).
+    ///
     /// # Errors
     ///
     /// Библиотека не загрузилась, символа нет, сигнатура вне таблицы либо
     /// литерал не того типа, каким объявлен аргумент.
     fn outward(&self, name: &Name, spine: &[Elim]) -> Result<Option<Step>, RunError> {
-        let Some(it) = self.foreign.get(&**name) else {
+        let Some(it) = self.crossing(name) else {
             return Ok(None);
         };
         let arguments: Vec<Rc<Value>> = spine
@@ -469,23 +484,37 @@ impl<'a> Machine<'a> {
         }
         let mut bits = Vec::with_capacity(arguments.len());
         for (at, argument) in arguments.into_iter().enumerate() {
+            let Some(want) = it.params[at] else {
+                continue;
+            };
             let Value::Prim(Prim::Lit(ty, word)) = &*self.forced(argument)? else {
                 return Ok(None);
             };
-            if *ty != it.params[at] {
-                return Err(RunError::ForeignArgument {
-                    symbol: it.symbol.clone(),
-                    at,
-                    want: it.params[at].name(),
-                    got: ty.name(),
-                });
+            if *ty != want {
+                return Err(it.mismatched(at, want, *ty));
             }
             bits.push(*word);
         }
-        let word = it.call(&bits)?;
+        let answer = it.call(&self.linkage, &bits)?;
+        let Some((ty, word)) = it.result.zip(answer) else {
+            return Ok(Some(Step::Return(self.unit()?)));
+        };
         Ok(Some(Step::Return(Rc::new(Value::Prim(Prim::literal(
-            it.result, word,
+            ty, word,
         ))))))
+    }
+
+    /// Чужой символ за именем. Объявление из сигнатуры кладётся в таблицу при
+    /// первом вызове, руками поставленное берётся оттуда же.
+    fn crossing(&self, name: &Name) -> Option<Rc<Foreign>> {
+        if let Some(found) = self.foreign.borrow().get(&**name) {
+            return Some(Rc::clone(found));
+        }
+        let it = Rc::new(Foreign::crossing(self.signature.foreign(name)?));
+        self.foreign
+            .borrow_mut()
+            .insert(Rc::clone(name), Rc::clone(&it));
+        Some(it)
     }
 
     /// Шаг по кадру, которому пришло значение.

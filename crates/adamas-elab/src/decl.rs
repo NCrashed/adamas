@@ -30,7 +30,7 @@ use adamas_core::pattern::{Compiled, PatternError, compile_traced};
 use adamas_core::prim;
 use adamas_core::prim::PrimTy;
 use adamas_core::row::{Label, Row, RowVar, Tail};
-use adamas_core::sig::{DefinitionKind, Group, Member as SigMember, Signature};
+use adamas_core::sig::{Crossing, DefinitionKind, Group, Member as SigMember, Signature};
 use adamas_core::source::Span;
 use adamas_core::term::{Args, Binder, Fields, Name as CoreName, Term};
 use adamas_parser::ast::{self, DeclKind, Module, Symbol};
@@ -4012,7 +4012,7 @@ fn declare_extern(
         span,
     )
     .map_err(|error| foreign_label_missing(error, span))?;
-    crossing(&pending.ty, signature, span)?;
+    let (params, result) = crossing(&pending.ty, signature, span)?;
     let symbol: CoreName = Rc::clone(&declared.name.text);
     let name = Rc::clone(&pending.name);
     let demanded = pending.required;
@@ -4026,7 +4026,7 @@ fn declare_extern(
                 names: Names::of(&name, Vec::new()),
             }
         })?;
-    signature.name_foreign(&name, &symbol);
+    signature.name_foreign(&name, Crossing { symbol, params, result });
     // `@noalloc` через границу - объявление обязательства, а не вердикт: тела
     // за ней нет, и считать нечего (§5.1). Тот же ход, что у постулата.
     if demanded.noalloc {
@@ -4063,8 +4063,15 @@ fn foreign_label_missing(error: ElabError, span: Span) -> ElabError {
 /// приостановленная форма `{Foreign} UInt64` после сахара §3.4 и есть функция
 /// от единицы. Названная цена: аргумент-единица через границу **не едет** -
 /// чужая функция о нём не узнает.
-fn crossing(ty: &Term, signature: &Signature, span: Span) -> Result<(), ElabError> {
+///
+/// Отдаёт **форму границы**, а не одно только «да»: ту же форму потом читают
+/// понижение и машина, и считать её второй раз значило бы завести вторую копию
+/// этого обхода (см. [`Crossing`]).
+type Shape = (Vec<Option<PrimTy>>, Option<PrimTy>);
+
+fn crossing(ty: &Term, signature: &Signature, span: Span) -> Result<Shape, ElabError> {
     let refuse = |why: &'static str| Err(ElabError::ForeignType { why, span });
+    let mut params: Vec<Option<PrimTy>> = Vec::new();
     let mut rest = ty;
     while let Term::Pi(binder, _, written, row, codomain) = rest {
         let domain = unaliased(signature, written);
@@ -4083,13 +4090,15 @@ fn crossing(ty: &Term, signature: &Signature, span: Span) -> Result<(), ElabErro
                  а колбэки вынесены из уровня 1 отдельной работой",
             );
         }
-        if word(domain).is_none() && !unit_type(domain, signature) {
+        let carried = word(domain);
+        if carried.is_none() && !unit_type(domain, signature) {
             return refuse(
                 "параметр через границу C не идёт: уровень 1 переносит машинное слово - \
                  примитив §4.11, `CPtr` или единицу; структуры по значению и varargs \
                  требуют знания ABI платформы",
             );
         }
+        params.push(carried);
         // Row стоит на стрелке и описывает её **применение** (§3.4), поэтому
         // метке положено стоять ровно на последней: там и лежит `Foreign`.
         // Метка на промежуточной означала бы, что чужая функция производит
@@ -4107,12 +4116,13 @@ fn crossing(ty: &Term, signature: &Signature, span: Span) -> Result<(), ElabErro
         rest = codomain;
     }
     let answer = unaliased(signature, rest);
-    if word(answer).is_none() && !unit_type(answer, signature) {
+    let result = word(answer);
+    if result.is_none() && !unit_type(answer, signature) {
         return refuse(
             "ответ через границу C не идёт: уровень 1 берёт машинное слово либо единицу (`void`)",
         );
     }
-    Ok(())
+    Ok((params, result))
 }
 
 /// Машинное слово: примитивный тип §4.11. `CPtr` приходит сюда `UInt64`.

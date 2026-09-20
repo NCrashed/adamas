@@ -56,7 +56,7 @@ use adamas_core::sig::Signature;
 use adamas_core::term::{Binder, Term};
 use adamas_core::value::Env;
 
-use adamas_interp::{Foreign, Machine, RunError};
+use adamas_interp::{Foreign, Linkage, Machine, RunError};
 
 /// Математическая библиотека glibc.
 const LIBM: &str = "libm.so.6";
@@ -454,9 +454,13 @@ fn an_over_declared_arity_is_diagnosed_by_nothing() {
 #[test]
 fn resolving_twice_answers_the_same() {
     let it = Foreign::new(LIBM, "cbrt", &[PrimTy::Float64], PrimTy::Float64);
-    it.resolve().expect("первое разрешение обязано проходить");
-    it.resolve().expect("второе разрешение обязано проходить");
-    let first = it.call(&[27.0_f64.to_bits()]).expect("первый вызов");
-    let second = it.call(&[27.0_f64.to_bits()]).expect("второй вызов");
+    it.resolve(&Linkage::default())
+        .expect("первое разрешение обязано проходить");
+    it.resolve(&Linkage::default())
+        .expect("второе разрешение обязано проходить");
+    let first = it.call(&Linkage::default(), &[27.0_f64.to_bits()])
+        .expect("первый вызов");
+    let second = it.call(&Linkage::default(), &[27.0_f64.to_bits()])
+        .expect("второй вызов");
     assert_eq!(first, second, "второй вызов ответил не то же, что первый");
 }

@@ -2276,7 +2276,7 @@ impl<'a> Elaborator<'a> {
             ExprKind::Mask(inner) => self.masked(inner, expr.span),
             ExprKind::Tuple(items) if items.is_empty() => missing(Missing::Unit),
             ExprKind::Tuple(_) => missing(Missing::Tuple),
-            ExprKind::List(items) => self.list(items, expr.span, awaited),
+            ExprKind::List(items) => self.list(items, expr.span),
         }
     }
 
@@ -3032,20 +3032,7 @@ impl<'a> Elaborator<'a> {
     /// Имена берутся по соглашению, как `Bool` у `if` и `Unit` у сахара
     /// `{ε} A`. Собирается справа налево - список правоассоциативен по
     /// построению, и хвост его есть список же.
-    fn list(
-        &mut self,
-        items: &[Expr],
-        span: Span,
-        awaited: Option<&Rc<Value>>,
-    ) -> Result<Term, ElabError> {
-        // ПРОБА (б) трека C волны 2: под написанным `Array n t` та же скобка
-        // есть массив, а не `Cons`/`Nil`. Форма выбирается ожидаемым типом -
-        // тем же правилом, каким его выбирает числовой литерал (§4.3).
-        if !items.is_empty() {
-            if let Some(element) = awaited.and_then(|ty| self.array_element(ty)) {
-                return self.array_literal(items, &element);
-            }
-        }
+    fn list(&mut self, items: &[Expr], span: Span) -> Result<Term, ElabError> {
         let named = |text: &str| ast::Name {
             text: Rc::from(text),
             span,
@@ -3058,55 +3045,6 @@ impl<'a> Elaborator<'a> {
             // конструктора: позиция у него та же (§3.3).
             let item = self.placed(Position::Field, |it| it.expr(item, Mult::Many))?;
             built = cons.clone().apply([item, built]);
-        }
-        self.produced = None;
-        Ok(built)
-    }
-
-    /// ПРОБА (б): ячейка написанного `Array n t`, если написан именно он.
-    fn array_element(&mut self, ty: &Rc<Value>) -> Option<Rc<Value>> {
-        let reduced = whnf_solved(self.signature, self.metas, ty);
-        let Value::Neutral(Head::Array, spine) = &*reduced else {
-            return None;
-        };
-        let [Elim::App(_length), Elim::App(element)] = spine.as_slice() else {
-            return None;
-        };
-        Some(Rc::clone(element))
-    }
-
-    /// ПРОБА (б): `[a, b]` под `Array n t` есть спайн `arraySet` над `arrayNew`.
-    ///
-    /// Длина берётся из числа написанных элементов, а не из написанного типа:
-    /// разойдутся - скажет проверка типов, и скажет обоими числами. Заполнителем
-    /// `arrayNew` служит **первый** элемент: значения у ячейки произвольного
-    /// типа взять больше неоткуда, и по той же причине пустая скобка сюда не
-    /// доходит вовсе.
-    fn array_literal(&mut self, items: &[Expr], element: &Rc<Value>) -> Result<Term, ElabError> {
-        let length = items.len() as u64;
-        let written = quote(self.ctx.size(), element);
-        let word = |value: u64| Term::Prim(Prim::literal(PrimTy::UInt64, value));
-        let cell = |it: &mut Self, item: &Expr| {
-            it.awaited = Some(Rc::clone(element));
-            // Элемент уезжает внутрь собранного - та же позиция, что у поля
-            // конструктора (§3.3), и та же, что у элемента списка.
-            it.placed(Position::Field, |it| it.expr(item, Mult::Many))
-        };
-        let first = cell(self, &items[0])?;
-        let mut built = Term::Prim(Prim::Over(prim::ArrayOp::New)).apply([
-            written.clone(),
-            word(length),
-            first,
-        ]);
-        for (index, item) in items.iter().enumerate().skip(1) {
-            let value = cell(self, item)?;
-            built = Term::Prim(Prim::Over(prim::ArrayOp::Set)).apply([
-                word(length),
-                written.clone(),
-                built,
-                word(index as u64),
-                value,
-            ]);
         }
         self.produced = None;
         Ok(built)

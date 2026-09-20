@@ -150,8 +150,8 @@ impl Manifest {
         let root = string(path, package, "package", "root")?.unwrap_or_else(|| "src".to_owned());
         let entry = string(path, package, "package", "entry")?.unwrap_or_else(|| "Main".to_owned());
         module_path(path, "package.entry", &entry)?;
-        let test = string(path, package, "package", "test")?.unwrap_or_else(|| "Test".to_owned());
-        module_path(path, "package.test", &test)?;
+        let suite = string(path, package, "package", "test")?.unwrap_or_else(|| "Test".to_owned());
+        module_path(path, "package.test", &suite)?;
 
         let dependencies = match document.get("dependencies") {
             None => Vec::new(),
@@ -173,7 +173,7 @@ impl Manifest {
             name,
             root: dir.join(inside(path, "package.root", &root)?),
             entry,
-            test,
+            test: suite,
             dependencies,
         })
     }

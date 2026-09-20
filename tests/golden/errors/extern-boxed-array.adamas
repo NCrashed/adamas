@@ -1,0 +1,24 @@
+-- Указательный массив чужой стороне не одалживается (§5.3, §4.11).
+--
+-- Раздваивается у `Array n a` **представление**, а не тип: при `Flat a` ячейки
+-- лежат подряд, иначе там слоты `adamas_value` - указатели на объекты Perceus
+-- с заголовками и счётчиками. Отдать их наружу значило бы отдать чужой стороне
+-- нашу кучу: она не знает ни заголовка, ни счётчика, а `Option Int64` в ячейке
+-- - это тег с полезной нагрузкой, а не число.
+--
+-- Отказ поэтому смотрит на **ячейку**, а не на массив: `Array n UInt8`
+-- проходит, `Array n (Option UInt64)` нет.
+
+data Unit where
+  MkUnit : Unit
+
+data Option (a : Type) where
+  None : Option a
+  Some : a -> Option a
+
+effect Foreign
+
+extern "C" fn adamas_probe_sum : Array n (Option UInt64) -> UInt64 -> UInt64
+
+main : Unit
+main = MkUnit

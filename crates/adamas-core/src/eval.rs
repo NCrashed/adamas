@@ -25,7 +25,7 @@ use std::rc::Rc;
 use crate::row::{Row, Tail};
 use crate::term::{Args, Branch, Case, Field, Fields, Mults, Name, Term};
 use crate::value::{
-    Closure, Elim, Env, Head, Lvl, RowClosure, StuckBranch, StuckCase, Telescope, Value,
+    Block, Closure, Elim, Env, Head, Lvl, RowClosure, StuckBranch, StuckCase, Telescope, Value,
 };
 
 impl Closure {
@@ -248,6 +248,52 @@ fn quote_fields(size: u32, telescope: &Telescope) -> Fields {
     }
 }
 
+/// Читает плоский блок обратно - в `arrayNew` с надстройкой из `arraySet`.
+///
+/// Формы своей у блока в терме **нет** и заводить её нечем: `arrayNew` с
+/// `arraySet` выражают всякое его содержимое, а второй способ написать массив
+/// пришлось бы разбирать понижению, проверке типов и печати - трём местам,
+/// которым блок не нужен вовсе.
+///
+/// Записи печатаются только для ячеек, отличных от нулевой: `arrayNew n c0`
+/// уже кладёт `c0` во все, и повторять её значило бы печатать `arraySet`,
+/// ничего не меняющий.
+pub(crate) fn quote_block(size: u32, block: &crate::value::Block) -> Term {
+    use crate::prim::{ArrayOp, Prim, PrimTy};
+    let elem = Rc::new(quote(size, block.elem()));
+    let length = Rc::new(Term::Prim(Prim::literal(PrimTy::UInt64, block.count())));
+    let first = block.read(0).unwrap_or_default();
+    let literal = |bits: u64| Rc::new(Term::Prim(Prim::literal(block.ty(), bits)));
+    let apply = |callee: Term, argument: Rc<Term>| Term::App(Rc::new(callee), argument);
+    let mut built = apply(
+        apply(
+            apply(Term::Prim(Prim::Over(ArrayOp::New)), Rc::clone(&elem)),
+            Rc::clone(&length),
+        ),
+        literal(first),
+    );
+    for at in 1..block.count() {
+        let Some(bits) = block.read(at) else { break };
+        if bits == first {
+            continue;
+        }
+        built = apply(
+            apply(
+                apply(
+                    apply(
+                        apply(Term::Prim(Prim::Over(ArrayOp::Set)), Rc::clone(&length)),
+                        Rc::clone(&elem),
+                    ),
+                    Rc::new(built),
+                ),
+                Rc::new(Term::Prim(Prim::literal(PrimTy::UInt64, at))),
+            ),
+            literal(bits),
+        );
+    }
+    built
+}
+
 /// Телескоп полей вместе с окружением, в котором их вычислять.
 fn telescope(env: &Env, fields: &Fields) -> Telescope {
     Telescope {
@@ -442,9 +488,9 @@ pub fn try_apply(callee: &Rc<Value>, argument: Rc<Value>) -> Option<Rc<Value>> {
                     return Some(verdict);
                 }
             }
-            if let Head::ArrayOp(crate::prim::ArrayOp::Index) = head {
-                if let Some(read) = indexed(&spine) {
-                    return Some(read);
+            if let Head::ArrayOp(op) = head {
+                if let Some(answer) = arrayed(*op, &spine) {
+                    return Some(answer);
                 }
             }
             if let Head::Region(op) = head {
@@ -524,39 +570,125 @@ fn compared(
     ))
 }
 
-/// Чтение ячейки массива (§4.11): последняя запись по этому номеру и выигрывает.
+/// δ-шаг операции над массивом (§4.11).
 ///
-/// Массив здесь - **спайн**, а не отдельная форма значения: `arrayNew`
-/// заводит его, `arraySet` наращивает цепочку. Чтение идёт от вершины вниз и
-/// останавливается на первой записи в ту же ячейку; дно цепочки - `arrayNew`,
-/// и там лежит начальное значение. Порядок этот и есть семантика записи: она
-/// заслоняет прежнее.
+/// # Представлений два, и заводится первое из них
 ///
-/// Не сводится, когда номер не литерал, когда цепочка упирается не в
-/// `arrayNew` (массив пришёл переменной) либо когда номер вне длины.
+/// `arrayNew` с литеральной длиной и **примитивной литеральной** ячейкой даёт
+/// [`Block`] - байты подряд с идентичностью. Всё прочее - непримитивная ячейка
+/// (`Array 3 (Option Int64)`), нелитеральная длина, блок сверх
+/// [`Block::LIMIT`] - остаётся спайном, ровно как было до блоков.
+///
+/// Почему первое вообще заведено: у спайна **нет адреса**, и машина оттого не
+/// могла одолжить буфер чужой стороне (§5.3). Цена названа у [`Block`].
+///
+/// `arraySet` над блоком даёт **новый** блок: запись функциональна, и это то же
+/// правило, каким спайн заслонял прежнюю ячейку новой записью. Не сложившийся
+/// шаг (нелитеральный номер, нелитеральное значение, номер вне длины) оставляет
+/// спайн **над копией** блока - не над ним самим: иначе чужая запись по
+/// одолженному адресу исходного протекла бы в производный массив, которого у
+/// рантайма не бывает (`adamas_array_writable` копирует разделённое).
+fn arrayed(op: crate::prim::ArrayOp, spine: &[Elim]) -> Option<Rc<Value>> {
+    use crate::prim::{ArrayOp, Prim};
+    match op {
+        ArrayOp::New => {
+            let [Elim::App(elem), Elim::App(count), Elim::App(initial)] = spine else {
+                return None;
+            };
+            let (Value::Prim(Prim::Lit(_, count)), Value::Prim(Prim::Lit(ty, init))) =
+                (&**count, &**initial)
+            else {
+                return None;
+            };
+            let block = Block::new(*ty, Rc::clone(elem), *count, *init)?;
+            Some(Rc::new(Value::Neutral(Head::Block(block), Vec::new())))
+        }
+        ArrayOp::Set => {
+            let [
+                Elim::App(_),
+                Elim::App(_),
+                Elim::App(array),
+                Elim::App(slot),
+                Elim::App(value),
+            ] = spine
+            else {
+                return None;
+            };
+            let Value::Neutral(Head::Block(block), empty) = &**array else {
+                return None;
+            };
+            if !empty.is_empty() {
+                return None;
+            }
+            let (Value::Prim(Prim::Lit(_, slot)), Value::Prim(Prim::Lit(ty, bits))) =
+                (&**slot, &**value)
+            else {
+                return Some(copied(block, spine));
+            };
+            if *ty != block.ty() {
+                return Some(copied(block, spine));
+            }
+            let written = block.with_cell(*slot, *bits)?;
+            Some(Rc::new(Value::Neutral(Head::Block(written), Vec::new())))
+        }
+        ArrayOp::Index => {
+            let [Elim::App(_), Elim::App(_), Elim::App(array), Elim::App(at)] = spine else {
+                return None;
+            };
+            let Value::Prim(Prim::Lit(_, wanted)) = &**at else {
+                return None;
+            };
+            cell_of(array, *wanted)
+        }
+    }
+}
+
+/// Спайн `arraySet` над **копией** блока: шаг не сложился, а делить байты с
+/// исходным нельзя. См. [`arrayed`].
+fn copied(block: &Rc<crate::value::Block>, spine: &[Elim]) -> Rc<Value> {
+    let mut spine = spine.to_vec();
+    if let Some(copy) = block.with_cell(0, block.read(0).unwrap_or_default()) {
+        spine[2] = Elim::App(Rc::new(Value::Neutral(Head::Block(copy), Vec::new())));
+    }
+    Rc::new(Value::Neutral(
+        Head::ArrayOp(crate::prim::ArrayOp::Set),
+        spine,
+    ))
+}
+
+/// Значение ячейки `wanted` (§4.11): последняя запись по этому номеру и
+/// выигрывает.
+///
+/// Представлений массива два, и читаются оба одним обходом. **Блок** отвечает
+/// сразу - байты лежат подряд, и ячейка берётся по смещению. **Спайн** читается
+/// от вершины вниз: чтение останавливается на первой записи в ту же ячейку, а
+/// дно цепочки - `arrayNew` либо блок, если запись над ним не сложилась.
+///
+/// Не сводится, когда номер не литерал, когда цепочка упирается в переменную
+/// либо когда номер вне длины.
 ///
 /// Последнее - **названная граница**: у понижения тот же случай обрывает
 /// процесс (`adamas_fail`), и сходятся два вычислителя лишь в том, что оба не
 /// дают ответа. Корпус программ с выходом за длину не содержит.
-fn indexed(spine: &[Elim]) -> Option<Rc<Value>> {
-    use crate::prim::Prim;
-    let [Elim::App(_), Elim::App(_), Elim::App(array), Elim::App(at)] = spine else {
-        return None;
-    };
-    let Value::Prim(Prim::Lit(_, wanted)) = &**at else {
-        return None;
-    };
-    cell_of(array, *wanted)
-}
-
-/// Значение ячейки `wanted`. См. [`indexed`]; вынесено потому, что векторная
-/// загрузка (§4.9) читает по этому же правилу `n` соседних ячеек.
+///
+/// Вынесено отдельно потому, что векторная загрузка (§4.9) читает по этому же
+/// правилу `n` соседних ячеек.
 fn cell_of(array: &Rc<Value>, wanted: u64) -> Option<Rc<Value>> {
     use crate::prim::{ArrayOp, Prim};
     let wanted = &wanted;
     let mut current = Rc::clone(array);
     loop {
-        let Value::Neutral(Head::ArrayOp(op), spine) = &*Rc::clone(&current) else {
+        let Value::Neutral(head, spine) = &*Rc::clone(&current) else {
+            return None;
+        };
+        if let Head::Block(block) = head {
+            if !spine.is_empty() {
+                return None;
+            }
+            let bits = block.read(*wanted)?;
+            return Some(Rc::new(Value::Prim(Prim::literal(block.ty(), bits))));
+        }
+        let Head::ArrayOp(op) = head else {
             return None;
         };
         match (op, spine.as_slice()) {
@@ -604,7 +736,9 @@ fn cell_of(array: &Rc<Value>, wanted: u64) -> Option<Rc<Value>> {
 /// # Значение вектора - спайн, и оттого арифметика сводится **сразу**
 ///
 /// Отдельной формы значения у вектора нет: `simdSplat` заводит цепочку,
-/// `simdSet` её наращивает - ровно как `arrayNew` с `arraySet` (§4.11). Отсюда
+/// `simdSet` её наращивает - ровно как это делал массив до плоского блока
+/// (§4.11, [`crate::value::Block`]; вектору блок не заведён, потому что адреса
+/// у него никто не просит). Отсюда
 /// цена, и она **измерена**: пока `simdAdd` не сводился сам, а раскрывался
 /// только чтением дорожки, цепочка росла на два узла за операцию, и векторный
 /// цикл на 4096 витков ронял машину переполнением стека - `lane_of`
@@ -691,7 +825,8 @@ fn vectored(op: crate::prim::SimdOp, spine: &[Elim]) -> Option<Rc<Value>> {
 /// Ячейка читается тем же [`cell_of`], каким её читает `arrayIndex`: второй
 /// счёт «что лежит в ячейке» разошёлся бы с первым молча. Не сводится по тем
 /// же трём причинам, что чтение ячейки - номер не литерал, ширина не литерал,
-/// цепочка не упирается в `arrayNew`, - плюс четвёртая: хвост окна вышел за
+/// массив не блок и цепочка не упирается в `arrayNew`, - плюс четвёртая: хвост
+/// окна вышел за
 /// длину. Последнее и есть **названная граница**, та же, что у выхода за длину
 /// у `arrayIndex`: понижение там обрывает процесс, а машина не отвечает вовсе.
 fn loaded(spine: &[Elim]) -> Option<Rc<Value>> {
@@ -720,10 +855,12 @@ fn loaded(spine: &[Elim]) -> Option<Rc<Value>> {
 
 /// δ-шаг векторной записи (§4.9): `simdStore n xs i v` → цепочка `arraySet`.
 ///
-/// Строится она **тем же** спайном, каким `arraySet` строится сам, и потому
-/// читается потом обычным [`cell_of`]: окно из восьми записей неотличимо от
-/// восьми записей, написанных руками, и это ровно то, что element-wise
-/// семантика §4.9 и обещает.
+/// Каждая запись идёт **тем же** δ-шагом, каким идёт написанный руками
+/// `arraySet` ([`arrayed`]): окно из восьми записей неотличимо от восьми
+/// записей, написанных руками, и это ровно то, что element-wise семантика §4.9
+/// и обещает. Второй счёт «что делает запись» разошёлся бы с первым молча -
+/// и разошёлся бы прежде всего на блоке: спайн, построенный здесь **мимо**
+/// шага, оставил бы над блоком цепочку, у которой адреса уже нет.
 fn stored(spine: &[Elim]) -> Option<Rc<Value>> {
     use crate::prim::Prim;
     let [
@@ -749,16 +886,19 @@ fn stored(spine: &[Elim]) -> Option<Rc<Value>> {
             crate::prim::PrimTy::UInt64,
             first.checked_add(step)?,
         )));
-        built = Rc::new(Value::Neutral(
-            Head::ArrayOp(crate::prim::ArrayOp::Set),
-            vec![
-                Elim::App(Rc::clone(length)),
-                Elim::App(Rc::clone(lane)),
-                Elim::App(built),
-                Elim::App(index),
-                Elim::App(value),
-            ],
-        ));
+        let written = vec![
+            Elim::App(Rc::clone(length)),
+            Elim::App(Rc::clone(lane)),
+            Elim::App(built),
+            Elim::App(index),
+            Elim::App(value),
+        ];
+        built = arrayed(crate::prim::ArrayOp::Set, &written).unwrap_or_else(|| {
+            Rc::new(Value::Neutral(
+                Head::ArrayOp(crate::prim::ArrayOp::Set),
+                written,
+            ))
+        });
     }
     Some(built)
 }
@@ -1178,6 +1318,7 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
                 Head::Cmp(op, ty) => Term::Prim(crate::prim::Prim::Cmp(*op, *ty)),
                 Head::Array => Term::Prim(crate::prim::Prim::Array),
                 Head::ArrayOp(op) => Term::Prim(crate::prim::Prim::Over(*op)),
+                Head::Block(block) => quote_block(size, block),
                 Head::Region(op) => Term::Prim(crate::prim::Prim::In(*op)),
                 Head::Simd => Term::Prim(crate::prim::Prim::Simd),
                 Head::SimdOp(op) => Term::Prim(crate::prim::Prim::Across(*op)),

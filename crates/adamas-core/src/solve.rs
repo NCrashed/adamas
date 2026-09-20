@@ -452,6 +452,10 @@ fn read(
                 Head::Cmp(op, ty) => Term::Prim(crate::prim::Prim::Cmp(*op, *ty)),
                 Head::Array => Term::Prim(crate::prim::Prim::Array),
                 Head::ArrayOp(op) => Term::Prim(crate::prim::Prim::Over(*op)),
+                // Блок замкнут: ячейки его - литералы, а тип элемента -
+                // примитив (§4.11, [`crate::value::Block`]). Переименовывать в
+                // нём нечего, и читается он тем же обходом, что в [`crate::eval`].
+                Head::Block(block) => crate::eval::quote_block(size, block),
                 Head::Region(op) => Term::Prim(crate::prim::Prim::In(*op)),
                 Head::Simd => Term::Prim(crate::prim::Prim::Simd),
                 Head::SimdOp(op) => Term::Prim(crate::prim::Prim::Across(*op)),
@@ -570,6 +574,7 @@ fn rigid(head: &Head, leading: &[Rc<Value>]) -> Option<Term> {
         Head::Cmp(op, ty) => Some(Term::Prim(crate::prim::Prim::Cmp(*op, *ty))),
         Head::Array => Some(Term::Prim(crate::prim::Prim::Array)),
         Head::ArrayOp(op) => Some(Term::Prim(crate::prim::Prim::Over(*op))),
+        Head::Block(block) => Some(crate::eval::quote_block(0, block)),
         Head::Region(op) => Some(Term::Prim(crate::prim::Prim::In(*op))),
         Head::Simd => Some(Term::Prim(crate::prim::Prim::Simd)),
         Head::SimdOp(op) => Some(Term::Prim(crate::prim::Prim::Across(*op))),

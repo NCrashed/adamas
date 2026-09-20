@@ -123,6 +123,7 @@ pub(crate) fn classify(signature: &Signature, value: &Rc<Value>) -> Shape {
         | Head::Cmp(..)
         | Head::Array
         | Head::ArrayOp(_)
+        | Head::Block(_)
         | Head::Region(_)
         | Head::Simd
         | Head::SimdOp(_) => Shape::Opaque,

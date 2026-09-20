@@ -18,8 +18,17 @@ bench = false
 name = "handlers"
 harness = false
 
+# Цена хождения машины наружу: трек C волны 1 Фазы 8, §10 вопрос 182.
+[[bench]]
+name = "outward"
+harness = false
+
 [dependencies]
 adamas-core.workspace = true
+# `dlopen`/`dlsym` под машиной (§5.3, уровень 1 FFI). Голый `dlopen` через
+# объявления `extern "C"` дешевле по зависимостям и дороже по коду; счёт обеих
+# сторон - в `docs/phase8-trackC-notes.md`.
+libloading = "0.8"
 thiserror = "2"
 
 [dev-dependencies]

@@ -383,6 +383,17 @@ impl<'a> Machine<'a> {
         spine: Vec<Elim>,
         kont: &mut Kont,
     ) -> Result<Step, RunError> {
+        // Чужой символ (§5.3). Отказ стоит у **применения**, а не у чтения
+        // имени: значением чужая функция быть вправе - её кладут в поле, ею
+        // параметризуют, - а выйти наружу машине нечем. Механизм похода
+        // наружу ставит свой трек (§10 вопрос 182); здесь только названная
+        // граница вместо молчаливой нейтрали, которая печаталась именем и
+        // выглядела как посчитанный ответ.
+        if self.signature.foreign(name).is_some() {
+            return Err(RunError::Foreign {
+                name: name.to_string(),
+            });
+        }
         if let Some(index) = name.strip_prefix(RESUME).and_then(|it| it.parse().ok()) {
             return Ok(self.resumed(index, &spine, kont));
         }

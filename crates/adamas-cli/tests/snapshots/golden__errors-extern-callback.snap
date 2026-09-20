@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: extern-callback.adamas:21:1: функциональный параметр через границу C не идёт: это колбэк, а колбэки вынесены из уровня 1 отдельной работой (§5.3)
+  extern "C" fn adamas_probe_apply : (Nat -> Nat) -> Nat
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -68,6 +68,10 @@ impl Spans<'_> {
                 self.name(at, name);
                 self.expr(at, ty);
             }
+            DeclKind::Extern(declared) => {
+                self.name(at, &declared.name);
+                self.expr(at, &declared.ty);
+            }
             DeclKind::Clauses { name, clauses } => {
                 self.name(at, name);
                 for clause in clauses {

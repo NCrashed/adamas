@@ -313,6 +313,7 @@ fn the_first_form_cannot_call_the_second() {
         packings: Vec::new(),
         labels: Vec::new(),
         handlers: Vec::new(),
+        foreigns: Vec::new(),
         functions: vec![entry, callee],
         entry: FuncId(0),
         source: None,

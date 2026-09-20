@@ -63,8 +63,9 @@ use std::fmt::Write as _;
 use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Elems, Expr, FiberOp, Form, FuncId, Function, HandlerId,
-    LabelId, LocalId, PackId, Packing, Program, Repr, Salvage, Stride, Verdict,
+    Arm, Binding, Constructor, CtorId, Elems, Expr, FiberOp, ForeignId, ForeignResult, Form,
+    FuncId, Function, HandlerId, LabelId, LocalId, PackId, Packing, Program, Repr, Salvage, Stride,
+    Verdict,
 };
 use crate::split::Suspension;
 
@@ -169,6 +170,7 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     out.push('\n');
     packings(&mut out, program);
     vectors(&mut out, program);
+    prototypes(&mut out, program);
     table(&mut out, program);
     out.push_str(RELEASE);
     out.push('\n');
@@ -509,6 +511,42 @@ fn preamble(out: &mut String) {
         "#define ADAMAS_ERASED adamas_con0(0xFFFCu)\n",
         "\n",
     ));
+}
+
+/// Прототипы чужих символов (§5.3, уровень 1).
+///
+/// Печатаются **своим** объявлением, а не через заголовок библиотеки: заголовка
+/// у нас нет, а сигнатура написана автором в `extern "C"`, и в ней вся правда,
+/// какая у компилятора есть. Расхождение с настоящей библиотекой поэтому ловит
+/// линкер и ABI, а не мы, - это и есть названная цена уровня 1 (§5.3, «полный
+/// контроль над сигнатурами»).
+///
+/// `(void)` у бессловесной функции пишется дословно: пустые скобки в C
+/// объявляют функцию с **неизвестным** списком аргументов, а не без них, и под
+/// `-Wstrict-prototypes` это предупреждение, под C23 - другое значение.
+fn prototypes(out: &mut String, program: &Program) {
+    if program.foreigns.is_empty() {
+        return;
+    }
+    out.push_str("/* Чужие символы (§5.3): объявлены по написанным сигнатурам. */\n");
+    for foreign in &program.foreigns {
+        let result = match foreign.result {
+            ForeignResult::Flat(ty) => scalar(Repr::Flat(ty)),
+            ForeignResult::Unit(_) => "void",
+        };
+        let parameters = if foreign.parameters.is_empty() {
+            "void".to_owned()
+        } else {
+            foreign
+                .parameters
+                .iter()
+                .map(|it| scalar(Repr::Flat(*it)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let _ = writeln!(out, "extern {result} {}({parameters});", foreign.symbol);
+    }
+    out.push('\n');
 }
 
 /// Типы векторов (§4.9): `vector_size`, а не массив и не структура.
@@ -1374,6 +1412,8 @@ impl Emitter<'_> {
             Expr::Local(local) => self.reprs.get(local).copied().unwrap_or(Repr::Boxed),
             Expr::Literal { ty, .. } | Expr::Primitive { ty, .. } => Repr::Flat(*ty),
             Expr::Call { function, .. } => self.program.functions[function.0].result,
+            // Чужой вызов (§5.3): ответ его берётся из таблицы символов.
+            Expr::Foreign { function, .. } => self.program.foreigns[function.0].result.repr(),
             // Ответ scope'а есть ответ его тела: деструктор отвечает мимо.
             Expr::Bind { body, .. }
             | Expr::Dup { body, .. }
@@ -1526,6 +1566,10 @@ impl Emitter<'_> {
                 function,
                 arguments,
             } => self.call(*function, arguments, depth),
+            Expr::Foreign {
+                function,
+                arguments,
+            } => self.foreign(*function, arguments, depth),
             Expr::Closure { function, captured } => self.closure(*function, captured, depth),
             Expr::Handle {
                 handler,
@@ -2690,6 +2734,50 @@ impl Emitter<'_> {
             function.0,
             given.join(", ")
         );
+        name
+    }
+
+    /// Вызов чужой функции (§5.3, уровень 1).
+    ///
+    /// Символ зовётся своим именем, а не `fn_N`: у линкера он под ним и лежит.
+    /// Прототип напечатан шапкой единицы ([`prototypes`]), поэтому здесь -
+    /// ровно применение, и ничего между: ни распаковки, ни упаковки, ни
+    /// касания счётчика. Это и есть та «нулевая» сторона §6, за которую
+    /// отвечает поверхность: слово едет словом.
+    fn foreign(&mut self, function: ForeignId, arguments: &[Expr], depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let described = self.program.foreigns[function.0].clone();
+        let given: Vec<String> = arguments
+            .iter()
+            .map(|argument| self.value(argument, depth))
+            .collect();
+        let symbol = &described.symbol;
+        let name = self.temp();
+        match described.result {
+            ForeignResult::Flat(ty) => {
+                let result = scalar(Repr::Flat(ty));
+                let _ = writeln!(
+                    self.out,
+                    "{pad}{result} {name} = {symbol}({}); /* extern \"C\" */",
+                    given.join(", ")
+                );
+            }
+            // `void`-символ значения не отдаёт, а выражению оно нужно: узел
+            // отвечает единицей, собранной тут же. Ячейки кучи она не стоит -
+            // нульарный конструктор рантайм кладёт непосредственным значением.
+            ForeignResult::Unit(unit) => {
+                let _ = writeln!(
+                    self.out,
+                    "{pad}{symbol}({}); /* extern \"C\" */",
+                    given.join(", ")
+                );
+                let _ = writeln!(
+                    self.out,
+                    "{pad}adamas_value {name} = adamas_con0({}u);",
+                    unit.0
+                );
+            }
+        }
         name
     }
 

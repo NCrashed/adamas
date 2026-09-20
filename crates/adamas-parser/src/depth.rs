@@ -379,6 +379,11 @@ fn decl_at<'a>(decl: &'a Decl, depth: u32, pending: &mut Pending<'a>) -> Result<
         DeclKind::Signature { ty: body, .. } => {
             pending.push((Node::Expr(body), depth));
         }
+        // Чужой символ несёт ровно один подтерм - свой тип, - и меряется он
+        // тем же, чем тип сигнатуры: глубина у них одна и та же величина.
+        DeclKind::Extern(declared) => {
+            pending.push((Node::Expr(&declared.ty), depth));
+        }
         DeclKind::Clauses { clauses, .. } => {
             for clause in clauses {
                 clause_at(clause, depth, pending)?;

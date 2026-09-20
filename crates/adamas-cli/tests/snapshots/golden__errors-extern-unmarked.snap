@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: extern-unmarked.adamas:20:8: эффекты `{Foreign}` не погашены: вокруг разрешено `{}`
+  main = adamas_probe_mix 14 2
+         ^^^^^^^^^^^^^^^^^^^^^
+  путь: тело `main`

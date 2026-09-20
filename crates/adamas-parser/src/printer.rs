@@ -51,9 +51,9 @@
 
 use crate::ast::{
     Alt, Binder, Binding, Block, Chain, Clause, Constructor, Data, Decl, DeclKind, EffectDecl,
-    EffectLabel, Expr, ExprKind, Grade, HandlerBranch, LamParam, LamParamKind, Lit, Module,
-    ModuleDecl, Name, Operation, Pattern, PatternKind, Resource, Stmt, StmtKind, Visibility,
-    contains_block,
+    EffectLabel, Expr, ExprKind, ExternDecl, Grade, HandlerBranch, LamParam, LamParamKind, Lit,
+    Module, ModuleDecl, Name, Operation, Pattern, PatternKind, Resource, Stmt, StmtKind,
+    Visibility, contains_block,
 };
 use crate::lexer::is_operator;
 
@@ -267,6 +267,7 @@ impl Printer {
                 self.push(" where");
                 self.block_of(&class.members, Self::decl);
             }
+            DeclKind::Extern(declared) => self.extern_decl(declared),
             DeclKind::Resource(resource) => self.resource(resource),
             DeclKind::Effect(effect) => self.effect_decl(effect),
             DeclKind::Fixity(fixity) => {
@@ -279,6 +280,21 @@ impl Printer {
                 }
             }
         }
+    }
+
+    /// Чужой символ (§5.3): атрибуты строкой выше, дальше ABI, `fn` и тип.
+    fn extern_decl(&mut self, declared: &ExternDecl) {
+        for attribute in &declared.attributes {
+            self.push("@");
+            self.push(&attribute.text);
+            self.line();
+        }
+        self.push("extern ");
+        self.push(&declared.abi.text);
+        self.push(" fn ");
+        self.decl_name(&declared.name);
+        self.push(" : ");
+        self.expr(&declared.ty, Prec::Lowest);
     }
 
     fn clause(&mut self, name: &Name, clause: &Clause) {

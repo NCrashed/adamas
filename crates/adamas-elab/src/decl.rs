@@ -763,6 +763,16 @@ fn members_into(
                     signature, metas, owned, fixities, warnings, within, effect, decl.span,
                 )?;
             }
+            // Чужой символ (§5.3, уровень 1). Клауз за ним не бывает по
+            // построению, поэтому предыдущая сигнатура закрывается здесь же,
+            // как перед всяким другим объявлением.
+            DeclKind::Extern(declared) => {
+                postulate(signature, metas, pending.take(), &mut postulated)?;
+                unused_implicits(&declared.ty, warnings);
+                declare_extern(
+                    signature, metas, owned, fixities, warnings, within, declared, decl.span,
+                )?;
+            }
         }
     }
     postulate(signature, metas, pending, &mut postulated)
@@ -3175,6 +3185,8 @@ fn reserved(decl: &ast::Decl, sheltered: bool) -> Result<(), ElabError> {
             "это область региона (§3.6)"
         } else if &**name == prim::PTR {
             "это хендл внутри области (§3.6)"
+        } else if &**name == prim::CPTR {
+            "это чужой указатель (§5.3)"
         } else {
             "это примитивная операция"
         };
@@ -3221,6 +3233,7 @@ fn member_name(member: &ast::Decl) -> Option<&Symbol> {
         DeclKind::Data(data) => Some(&data.name.text),
         DeclKind::Effect(effect) => Some(&effect.name.text),
         DeclKind::Resource(resource) => Some(&resource.name.text),
+        DeclKind::Extern(declared) => Some(&declared.name.text),
         // Ни фикситет, ни импорт имени не заводят: первый говорит про уже
         // написанное, второй приносит чужое.
         DeclKind::Clauses { .. }
@@ -3924,6 +3937,238 @@ fn declare_module_type(
         })
 }
 
+/// ABI, который уровень 1 умеет (§5.3): прямой C.
+const C_ABI: &str = "\"C\"";
+
+/// Метка, которой помечен всякий внешний вызов (§5.3).
+///
+/// Написанное имя, а не объявленное: разрешается оно обычным путём - своё,
+/// соседское или открытое импортом, - ровно как `Unit` и `Bool`.
+const FOREIGN: &str = "Foreign";
+
+/// Чужой символ: `extern "C" fn malloc : UInt64 -> CPtr` (§5.3, уровень 1).
+///
+/// Три решения этой формы, и все три записаны здесь, потому что проверяются
+/// они здесь.
+///
+/// **Эффект.** §5.3 говорит «внешние вызовы помечаются эффектом `Foreign`», и
+/// метка дописывается в **последний** кодомен тем же ходом и той же функцией
+/// ([`performed`]), каким объявление эффекта дописывает свою метку операции
+/// (§3.4, «row либо пишут, либо нет, и обе записи законны»). Отсюда и ответ
+/// про auto-lift: хвост у дописанной row - общая свежая переменная
+/// сигнатуры (§4.1), то есть чужая функция зовётся под любой окружающей,
+/// которая её метку содержит, а гасится правилом расширения справа (§3.4).
+/// Написанную row не трогаем: её проверит ядро.
+///
+/// **Кратность.** Умолчание §4.1 - `ω` у параметра функции - остаётся и на
+/// границе. Своего умолчания граница не заводит: `1` означало бы, что чужая
+/// функция аргумент **потребляет**, а сишная сигнатура об этом не говорит
+/// ничего - `free` потребляет, `strlen` нет, и различить их по типу нечем.
+/// Кратность пишется, когда автор её знает.
+///
+/// **Подмножество типов.** Уровень 1 пускает через границу машинное слово и
+/// ничего больше ([`crossing`]): всякий параметр и ответ - примитивный тип
+/// §4.11 либо `CPtr`, ответом сверх того законна единица (`void`). Всё прочее
+/// отвергается названной причиной, а не паникой и не молчанием.
+#[allow(clippy::too_many_arguments)]
+fn declare_extern(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    owned: &Owned,
+    fixities: &Fixities,
+    warnings: &mut Warnings,
+    within: Option<&Enclosing>,
+    declared: &ast::ExternDecl,
+    span: Span,
+) -> Result<(), ElabError> {
+    if &*declared.abi.text != C_ABI {
+        return Err(ElabError::ForeignAbi {
+            abi: Rc::clone(&declared.abi.text),
+            span: declared.abi.span,
+        });
+    }
+    // Метка дописывается **до** элаборации, по написанному дереву: так же
+    // поступает объявление эффекта со своими операциями, и правило «написанную
+    // row не трогаем» достаётся даром.
+    let label = ast::EffectLabel {
+        name: ast::Name {
+            text: Rc::from(FOREIGN),
+            span: declared.name.span,
+        },
+        arguments: Vec::new(),
+        span: declared.name.span,
+    };
+    let marked = performed(&declared.ty, &label);
+    let pending = declared_signature(
+        signature,
+        metas,
+        owned,
+        fixities,
+        warnings,
+        within,
+        &declared.name,
+        &marked,
+        &declared.attributes,
+        span,
+    )
+    .map_err(|error| foreign_label_missing(error, span))?;
+    crossing(&pending.ty, signature, span)?;
+    let symbol: CoreName = Rc::clone(&declared.name.text);
+    let name = Rc::clone(&pending.name);
+    let demanded = pending.required;
+    signature
+        .postulate_inferred(metas, &pending.name, Mult::Many, pending.ty, pending.grades)
+        .map_err(|error| {
+            let span = route::locate(&Declared::Postulate(&marked), &error, span);
+            ElabError::Core {
+                error: Box::new(error),
+                span,
+                names: Names::of(&name, Vec::new()),
+            }
+        })?;
+    signature.name_foreign(&name, &symbol);
+    // `@noalloc` через границу - объявление обязательства, а не вердикт: тела
+    // за ней нет, и считать нечего (§5.1). Тот же ход, что у постулата.
+    if demanded.noalloc {
+        signature.promise_noalloc(&name);
+    }
+    verdicts(signature, &name, demanded, None, span)
+}
+
+/// Отказ разрешения имени `Foreign` превращается в названную причину.
+///
+/// Без этого программа без объявленной метки получает «имя `Foreign` не
+/// найдено» на объявлении, где `Foreign` не написан вовсе, - сообщение,
+/// указывающее на то, чего в исходнике нет.
+fn foreign_label_missing(error: ElabError, span: Span) -> ElabError {
+    match &error {
+        ElabError::UnknownName { name, .. } if &**name == FOREIGN => {
+            ElabError::ForeignLabel { span }
+        }
+        _ => error,
+    }
+}
+
+/// Тип, которому уровень 1 разрешает перейти границу (§5.3).
+///
+/// Правило одно на обе стороны стрелки: **граница несёт слово**. Это то же
+/// правило, каким живёт граница кадра (трек A волны 1 Фазы 8), и уровень 1
+/// сверх него не обещает ничего: структуры по значению и varargs требуют
+/// знания ABI платформы, колбэки вынесены из волны, а обобщённое значение
+/// пришло бы указателем на объект Perceus, которого чужая сторона не понимает.
+///
+/// Единица - единственное исключение, и она **не значение, а его отсутствие**:
+/// в домене она есть сишное `(void)`, в кодомене - `void`. Без неё не пишется
+/// ни `free : CPtr -> ()` из самого §5.3, ни бессловесный `clock`, чья
+/// приостановленная форма `{Foreign} UInt64` после сахара §3.4 и есть функция
+/// от единицы. Названная цена: аргумент-единица через границу **не едет** -
+/// чужая функция о нём не узнает.
+fn crossing(ty: &Term, signature: &Signature, span: Span) -> Result<(), ElabError> {
+    let refuse = |why: &'static str| Err(ElabError::ForeignType { why, span });
+    let mut rest = ty;
+    while let Term::Pi(binder, _, written, row, codomain) = rest {
+        let domain = unaliased(signature, written);
+        // Стёртый параметр через границу не идёт и идти не может: значения у
+        // него в рантайме нет вовсе (§3.3). Поднятый имплисит попадает сюда же
+        // - `extern "C" fn f : a -> a` отвергается здесь, на `{0 a : Type}`.
+        if binder.mult == Mult::Zero {
+            return refuse(
+                "имплисит через границу C не идёт: значения в рантайме у него нет, \
+                 а полиморфный аргумент уровню 1 переносить нечем",
+            );
+        }
+        if matches!(domain, Term::Pi(..)) {
+            return refuse(
+                "функциональный параметр через границу C не идёт: это колбэк, \
+                 а колбэки вынесены из уровня 1 отдельной работой",
+            );
+        }
+        if word(domain).is_none() && !unit_type(domain, signature) {
+            return refuse(
+                "параметр через границу C не идёт: уровень 1 переносит машинное слово - \
+                 примитив §4.11, `CPtr` или единицу; структуры по значению и varargs \
+                 требуют знания ABI платформы",
+            );
+        }
+        // Row стоит на стрелке и описывает её **применение** (§3.4), поэтому
+        // метке положено стоять ровно на последней: там и лежит `Foreign`.
+        // Метка на промежуточной означала бы, что чужая функция производит
+        // эффект от недобранных аргументов, а этого C не умеет.
+        //
+        // Спрашиваются именно **метки**, а не пустота: auto-lift §4.1 кладёт
+        // общую свежую переменную-хвост на каждую стрелку сигнатуры, и пустых
+        // строк в элаборированном типе поэтому нет ни одной.
+        if !row.labels().is_empty() && matches!(&**codomain, Term::Pi(..)) {
+            return refuse(
+                "эффект на промежуточной стрелке: чужая функция производит `Foreign` целиком, \
+                 когда применена целиком",
+            );
+        }
+        rest = codomain;
+    }
+    let answer = unaliased(signature, rest);
+    if word(answer).is_none() && !unit_type(answer, signature) {
+        return refuse(
+            "ответ через границу C не идёт: уровень 1 берёт машинное слово либо единицу (`void`)",
+        );
+    }
+    Ok(())
+}
+
+/// Машинное слово: примитивный тип §4.11. `CPtr` приходит сюда `UInt64`.
+fn word(ty: &Term) -> Option<PrimTy> {
+    match ty {
+        Term::Prim(prim::Prim::Ty(it)) => Some(*it),
+        _ => None,
+    }
+}
+
+/// Единица, как она объявлена программой (§3.4): ответ `void`-символа.
+fn unit_type(ty: &Term, signature: &Signature) -> bool {
+    matches!(ty, Term::Const(name, ..) if &**name == signature.unit())
+}
+
+/// Сколько синонимов разворачивается подряд, прежде чем сдаться.
+///
+/// Предел, а не проверка на цикл: `type A = B` и `type B = A` объявляются
+/// ordered scoping'ом (§4.8) только в `mutual`, а тела там уже проверены
+/// ядром. Число то же, что у понижения.
+const ALIASES: usize = 16;
+
+/// Разворачивает цепочку синонимов до имени, у которого тела нет.
+///
+/// Нужно затем, что представление есть свойство **типа**, а не его написания:
+/// `Int` есть прелюдный синоним `Int64` (§4.3), и отвергать `extern "C" fn f :
+/// Int -> Int` значило бы отвергать имя, которым числа в языке и зовут. Правило
+/// повторено за понижением (`lower::unaliased`) и повторено сознательно:
+/// разъедься они, элаборация пустила бы через границу то, чего понижение не
+/// берёт, либо наоборот.
+fn unaliased<'a>(signature: &'a Signature, ty: &'a Term) -> &'a Term {
+    let mut current = ty;
+    for _ in 0..ALIASES {
+        let Term::Const(name, ..) = current else {
+            return current;
+        };
+        let Some(definition) = signature.lookup(name) else {
+            return current;
+        };
+        // Только имя без аргументов и только у определения, чей тип -
+        // универсум: параметризованный синоним требует подстановки, а
+        // запечатанное снаружи не разворачивается (§3.5).
+        if definition.opaque
+            || !matches!(definition.kind, DefinitionKind::Regular)
+            || !matches!(definition.ty, Term::Universe(_))
+        {
+            return current;
+        }
+        let Some(body) = definition.body.as_ref() else {
+            return current;
+        };
+        current = body;
+    }
+    current
+}
+
 /// Сигнатура, за которой не последовало клауз, - постулат.
 fn postulate(
     signature: &mut Signature,
@@ -4280,7 +4525,9 @@ fn resource_members(
             }
             // Ни алиас, ни модуль телом ресурса не бывают: layout их туда
             // пускает, а смысла у них там нет - конструктор либо деструктор.
-            ast::DeclKind::Class(_) | ast::DeclKind::Mutual(_) => {
+            // Чужой символ - того же рода: объявляется он верхним уровнем, а
+            // `drop` зовёт его оттуда (§5.3, идиома `resource CBuffer`).
+            ast::DeclKind::Class(_) | ast::DeclKind::Mutual(_) | ast::DeclKind::Extern(_) => {
                 return Err(ElabError::ResourceMember {
                     data: Rc::clone(&resource.name.text),
                     name: Rc::from("группа"),

@@ -60,10 +60,10 @@ use adamas_core::source::Span;
 
 use crate::ast::{
     Alt, Assoc, Binder, Binding, Block, Chain, ClassDecl, Clause, Constructor, Data, Decl,
-    DeclKind, EffectDecl, EffectLabel, Expr, ExprKind, FixityDecl, Grade, HandlerBranch,
-    ImportDecl, LamParam, LamParamKind, Lit, LitKind, Module, ModuleDecl, Mult, MultAnn, Name,
-    Operation, Pattern, PatternKind, RecordField, Resource, Stmt, StmtKind, Symbol, Visibility,
-    contains_block,
+    DeclKind, EffectDecl, EffectLabel, Expr, ExprKind, ExternDecl, FixityDecl, Grade,
+    HandlerBranch, ImportDecl, LamParam, LamParamKind, Lit, LitKind, Module, ModuleDecl, Mult,
+    MultAnn, Name, Operation, Pattern, PatternKind, RecordField, Resource, Stmt, StmtKind, Symbol,
+    Visibility, contains_block,
 };
 use crate::token::{Token, TokenKind};
 
@@ -210,6 +210,17 @@ pub enum ParseError {
         span: Span,
     },
 
+    /// `extern "C"` без `fn` (§5.3).
+    ///
+    /// Своя ошибка, а не «ожидается имя»: имя здесь как раз и написано, просто
+    /// не то. `fn` в этой форме - контекстное слово, и сказать про него надо
+    /// прямо, иначе отказ указывает на имя символа и молчит о причине.
+    #[error("после ABI в `extern` пишется `fn` (§5.3)")]
+    ExpectedFn {
+        /// Что написано вместо `fn`.
+        span: Span,
+    },
+
     /// Точка в паттерне над строчным именем.
     ///
     /// Путь в паттерне называет конструктор (§4.8), и последнее звено его
@@ -336,6 +347,7 @@ impl ParseError {
             | Self::Precedence { span }
             | Self::MixedRecord { span }
             | Self::Expected { span, .. }
+            | Self::ExpectedFn { span }
             | Self::Multiplicity { span }
             | Self::PatternPath { span, .. }
             | Self::SplitClauses { again: span, .. }
@@ -402,6 +414,9 @@ pub(crate) const MAX_DEPTH: u32 = 256;
 
 /// Имя члена, объявляющего начальное состояние параметризованного хендлера.
 const STATE: &str = "state";
+
+/// Контекстное слово между ABI и именем чужого символа (§5.3).
+const FOREIGN_FN: &str = "fn";
 
 /// Член блока хендлера.
 enum Member {
@@ -700,6 +715,7 @@ impl<'a> Parser<'a> {
                 span: self.peek().span,
             }),
             TokenKind::At => self.attributed(),
+            TokenKind::Extern => self.extern_decl(Vec::new()),
             TokenKind::Ident | TokenKind::LParen => self.signature_or_clause(Vec::new()),
             _ => Err(self
                 .unsupported_here()
@@ -719,10 +735,47 @@ impl<'a> Parser<'a> {
             attributes.push(self.name_of(name));
             self.expect(TokenKind::Sep)?;
         }
+        if self.at(TokenKind::Extern) {
+            return self.extern_decl(attributes);
+        }
         if !matches!(self.kind(), TokenKind::Ident | TokenKind::LParen) {
             return Err(self.expected(Expected::Declaration));
         }
         self.signature_or_clause(attributes)
+    }
+
+    /// `extern "C" fn malloc : UInt64 -> CPtr` (§5.3, уровень 1).
+    ///
+    /// `fn` здесь **не ключевое слово**, а имя в названной позиции - тем же
+    /// правилом, каким `as` пишется после пути импорта ([`Self::imported_as`]).
+    /// Занять `fn` под одну форму значило бы отвергнуть `apply fn x = fn x` во
+    /// всех прочих, а позиция сразу за ABI неоднозначности не оставляет.
+    /// Названная цена: `fn` остаётся законным именем везде, включая само это
+    /// объявление (`extern "C" fn fn : …` пишется).
+    fn extern_decl(&mut self, attributes: Vec<Name>) -> Result<Decl, ParseError> {
+        let keyword = self.expect(TokenKind::Extern)?;
+        if !self.at(TokenKind::Str) {
+            return Err(self.expected(Expected::Token(TokenKind::Str)));
+        }
+        let abi = self.literal()?;
+        let token = self.peek();
+        if token.kind != TokenKind::Ident || token.text(self.text) != FOREIGN_FN {
+            return Err(ParseError::ExpectedFn { span: token.span });
+        }
+        self.bump();
+        let name = self.decl_name()?;
+        self.expect(TokenKind::Colon)?;
+        let ty = self.expr()?;
+        let span = keyword.span.merge(ty.span);
+        Ok(Decl {
+            kind: DeclKind::Extern(ExternDecl {
+                abi,
+                name,
+                ty,
+                attributes,
+            }),
+            span,
+        })
     }
 
     /// `name : ty` или `name pat* = body [where …]` - решает лексема после

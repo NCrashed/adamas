@@ -83,6 +83,10 @@ pub struct Source {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FuncId(pub usize);
 
+/// Номер чужого символа в [`Program::foreigns`] (§5.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ForeignId(pub usize);
+
 /// Номер конструктора. Он же тег в заголовке объекта рантайма.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CtorId(pub u16);
@@ -797,6 +801,50 @@ pub struct Handler {
     pub returned: FuncId,
 }
 
+/// Чужой символ, объявленный `extern "C"` (§5.3, уровень 1).
+///
+/// Отдельной таблицей, а не полем узла, и ровно по той же причине, по какой
+/// своя функция живёт в [`Program::functions`]: **прототип печатается один раз
+/// на символ**, сколько бы мест его ни звало. У C это `extern`-объявление в
+/// шапке единицы трансляции, у LLVM - строка `declare`; собери их по узлам - и
+/// один символ, позванный дважды, объявился бы дважды.
+#[derive(Clone, Debug)]
+pub struct Foreign {
+    /// Имя у линкера.
+    pub symbol: String,
+    /// Типы аргументов, которые **едут** через границу.
+    ///
+    /// Единица среди них не стоит: в домене она означает сишное `(void)`, то
+    /// есть отсутствие аргумента, и понижение её сюда не кладёт. Поэтому длина
+    /// этого списка - арность **сишной** функции, а не адамасовой.
+    pub parameters: Vec<PrimTy>,
+    /// Чем чужая функция отвечает.
+    pub result: ForeignResult,
+}
+
+/// Ответ чужой функции (§5.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForeignResult {
+    /// Плоское значение названного типа: тем же словом, что `UInt64`.
+    Flat(PrimTy),
+    /// `void`. Значением узла служит единица, собранная этим конструктором:
+    /// выражению нужно значение, а у чужой функции его нет.
+    Unit(CtorId),
+}
+
+impl ForeignResult {
+    /// Представление значения узла.
+    #[must_use]
+    pub const fn repr(self) -> Repr {
+        match self {
+            Self::Flat(ty) => Repr::Flat(ty),
+            // Единица - обычный нульарный конструктор, то есть указательное
+            // представление: рантайм кладёт её непосредственным значением.
+            Self::Unit(_) => Repr::Boxed,
+        }
+    }
+}
+
 /// Функция программы.
 #[derive(Clone, Debug)]
 pub struct Function {
@@ -1264,6 +1312,25 @@ pub enum Expr {
         /// Аргументы по параметрам, стёртые [`Expr::Erased`].
         arguments: Vec<Expr>,
     },
+    /// Вызов чужой функции через границу C (§5.3, уровень 1).
+    ///
+    /// Узел свой, а не [`Expr::Call`], и различие не в имени. У своей функции
+    /// известны форма кадра, владение и представление каждого слота; у чужой
+    /// не известно ничего, кроме прототипа, и ровно поэтому через границу
+    /// ходит **только плоское слово**: заголовка у него нет, счётчика нет, и
+    /// RC по нему не идёт ([`Repr::Flat`]). Ячейки кучи узел не выдаёт вовсе -
+    /// это и есть то, что трек A волны 1 Фазы 8 замерил счётчиком.
+    ///
+    /// Точкой приостановки узел **не** является: чужой кадр раскрутить нечем,
+    /// и §5.3 («правило чужого кадра») требует от границы нормального
+    /// возврата. Поэтому дробление его не режет, и он законен в чистом
+    /// отрезке наравне с арифметикой.
+    Foreign {
+        /// Кого зовут: номер в [`Program::foreigns`].
+        function: ForeignId,
+        /// Аргументы по [`Foreign::parameters`] - только те, что едут.
+        arguments: Vec<Expr>,
+    },
     /// Функция как значение: код плюс захваченная среда.
     Closure {
         /// Чей код.
@@ -1511,6 +1578,7 @@ impl Expr {
             } => vec![region, at, value],
             Self::Construct { arguments, .. }
             | Self::Call { arguments, .. }
+            | Self::Foreign { arguments, .. }
             | Self::Perform { arguments, .. }
             | Self::Fiber { arguments, .. }
             | Self::Pack {
@@ -1574,6 +1642,8 @@ pub struct Program {
     pub handlers: Vec<Handler>,
     /// Функции по номеру: индекс совпадает с [`FuncId`].
     pub functions: Vec<Function>,
+    /// Чужие символы по номеру: индекс совпадает с [`ForeignId`] (§5.3).
+    pub foreigns: Vec<Foreign>,
     /// Точка входа: функция без параметров, чьё значение печатается.
     pub entry: FuncId,
     /// Исходник, к которому относятся [`Function::position`]. `None` - понижение

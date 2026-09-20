@@ -3712,6 +3712,12 @@ impl<'a> Elaborator<'a> {
         if &*name.text == prim::PTR {
             return Ok(Term::Prim(Prim::Ty(prim::PrimTy::UInt64)));
         }
+        // Чужой указатель (§5.3) - то же слово и то же представление, что
+        // хендл, а имя своё: `Ptr` роздан §3.6, и два смысла на одном имени
+        // закрыты вопросом 181.
+        if &*name.text == prim::CPTR {
+            return Ok(Term::Prim(Prim::Ty(prim::PrimTy::UInt64)));
+        }
         if let Some(op) = prim::RegionOp::named(&name.text) {
             let term = Term::Prim(Prim::In(op));
             if self.bare {

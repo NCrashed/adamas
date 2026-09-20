@@ -1,0 +1,62 @@
+-- Чужой символ уровня 1: `extern "C"` (§5.3).
+--
+-- Показаны все четыре формы границы, какие уровень 1 берёт, и все они стоят
+-- здесь потому, что печатаются они по-разному:
+--
+--   * два машинных аргумента и машинный ответ (`mix`);
+--   * ни одного аргумента (`crossings`) - приостановленная запись `{Foreign} T`
+--     после сахара §3.4 есть функция от единицы, а единица через границу не
+--     едет: чужой стороне это `(void)`;
+--   * чужой указатель ответом (`alloc`) и аргументом (`read`) - `CPtr`, и это
+--     плоское слово ширины указателя (§10 вопрос 181, §4.11); аргумент там
+--     написан **синонимом** (`Size`), потому что представление есть свойство
+--     типа, а не его написания (§4.3: `Int` - синоним `Int64`);
+--   * `void` ответом (`free`) - значения у такого символа нет, и значением
+--     вызова служит единица.
+--
+-- Эффект `Foreign` дописывается в последний кодомен объявления - тем же ходом,
+-- каким объявление эффекта дописывает свою метку операции (§3.4). Метка своих
+-- операций не имеет, поэтому хендлер называет её через `@` (§4.1): веток, по
+-- которым её узнать, у него нет.
+--
+-- Машина эту программу не считает и говорит об этом словом: «машина наружу не
+-- ходит» (§10 вопрос 182). Понижения считают оба - свидетель
+-- `crates/adamas-codegen/tests/foreign_call.rs`.
+
+data Unit where
+  MkUnit : Unit
+
+effect Foreign
+
+extern "C" fn adamas_probe_mix : UInt64 -> UInt64 -> UInt64
+
+extern "C" fn adamas_probe_crossings : UInt64
+
+type Size = UInt64
+
+extern "C" fn adamas_probe_alloc : Size -> CPtr
+
+extern "C" fn adamas_probe_read : CPtr -> UInt64
+
+extern "C" fn adamas_probe_free : CPtr -> Unit
+
+-- Метка без операций гасится веткой `return` и только ею: гасить больше нечего.
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+-- Открыть - использовать - закрыть, ровно идиома §5.3, только без `resource`:
+-- ресурсную обёртку над чужим объектом ставит свой трек.
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let mixed : UInt64 = adamas_probe_mix 14 2
+  let cell : CPtr = adamas_probe_alloc mixed
+  let back : UInt64 = adamas_probe_read cell
+  let closed : Unit = adamas_probe_free cell
+  let went : UInt64 = adamas_probe_crossings
+  adamas_probe_mix back went
+
+-- 137: `mix 14 2` даёт 44, ячейка отдаёт его обратно, походов к этой минуте
+-- пять, и `mix 44 5` даёт 137.
+main : UInt64
+main = runForeign body

@@ -23,6 +23,11 @@ harness = false
 name = "outward"
 harness = false
 
+# Цена второго представления массива: трек B волны 2 Фазы 8, §4.11.
+[[bench]]
+name = "arrays"
+harness = false
+
 [dependencies]
 adamas-core.workspace = true
 # `dlopen`/`dlsym` под машиной (§5.3, уровень 1 FFI). Голый `dlopen` через

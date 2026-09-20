@@ -22,6 +22,7 @@ name = "startup"
 harness = false
 
 [dependencies]
+adamas-codegen.workspace = true
 adamas-core.workspace = true
 adamas-elab.workspace = true
 adamas-interp.workspace = true

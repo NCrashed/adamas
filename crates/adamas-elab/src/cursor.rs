@@ -239,6 +239,7 @@ fn collect(decls: &[Decl], within: &mut Vec<Symbol>, out: &mut Vec<Site>) {
         };
         match &decl.kind {
             DeclKind::Alias { name, .. } | DeclKind::Signature { name, .. } => put(name, true),
+            DeclKind::Extern(declared) => put(&declared.name, true),
             DeclKind::Clauses { name, .. } => put(name, false),
             DeclKind::Data(data) => {
                 put(&data.name, true);
@@ -422,6 +423,13 @@ impl Search<'_> {
                     self.refer(attribute);
                 }
                 self.typed(name, ty);
+            }
+            DeclKind::Extern(declared) => {
+                self.declare(&declared.name);
+                for attribute in &declared.attributes {
+                    self.refer(attribute);
+                }
+                self.typed(&declared.name, &declared.ty);
             }
             DeclKind::Clauses { name, clauses } => self.clauses(name, clauses),
             DeclKind::Data(data) => {

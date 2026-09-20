@@ -530,6 +530,31 @@ pub enum DeclKind {
     Effect(EffectDecl),
     /// Фикситет: `infixl 6 +, -` (§4.4).
     Fixity(FixityDecl),
+    /// Чужой символ: `extern "C" fn malloc : UInt64 -> CPtr` (§5.3, уровень 1).
+    ///
+    /// Своя форма, а не сигнатура с атрибутом, и различие не косметическое:
+    /// объявление несёт **имя у линкера** и договор о том, что тела не будет
+    /// никогда. Постулат (сигнатура без клауз) говорит «тела здесь нет», а это
+    /// говорит «тело за границей», и второе проверяется строже: тип обязан
+    /// лежать в подмножестве, которое уровень 1 умеет переложить (§5.3).
+    Extern(ExternDecl),
+}
+
+/// Объявление чужого символа (§5.3, уровень 1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternDecl {
+    /// ABI, как написан: литерал вместе с кавычками (`"C"`).
+    ///
+    /// Хранится литералом, а не разобранным перечислением: разбирать его -
+    /// работа элаборации, и отказ «ABI `"stdcall"` не поддержан» обязан
+    /// назвать написанное дословно.
+    pub abi: Lit,
+    /// Имя, которым символ зовётся в программе. Оно же имя символа у линкера.
+    pub name: Name,
+    /// Тип, как написан: без ряда эффектов, его дописывает элаборация.
+    pub ty: Expr,
+    /// Атрибуты, написанные перед объявлением (§4.7, §5.1).
+    pub attributes: Vec<Name>,
 }
 
 /// Класс или его инстанс.
@@ -1161,7 +1186,24 @@ fn dump_decl(out: &mut String, decl: &Decl, depth: usize) {
         }
         DeclKind::Resource(resource) => dump_resource(out, resource, depth),
         DeclKind::Import(import) => dump_import(out, import),
+        DeclKind::Extern(declared) => dump_extern(out, declared),
     }
+}
+
+/// Печатает чужой символ: ABI, атрибуты, имя и тип.
+fn dump_extern(out: &mut String, declared: &ExternDecl) {
+    out.push_str("(extern ");
+    out.push_str(&declared.abi.text);
+    out.push(' ');
+    for attribute in &declared.attributes {
+        out.push('@');
+        out.push_str(&attribute.text);
+        out.push(' ');
+    }
+    out.push_str(&declared.name.text);
+    out.push(' ');
+    dump_expr(out, &declared.ty);
+    out.push(')');
 }
 
 /// Печатает ресурсный тип: имя, параметры и члены.

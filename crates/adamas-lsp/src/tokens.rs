@@ -218,6 +218,7 @@ impl Slot {
             | TokenKind::Mutual
             | TokenKind::Using
             | TokenKind::Import
+            | TokenKind::Extern
             | TokenKind::Coherent
             | TokenKind::Infix
             | TokenKind::Infixl
@@ -534,6 +535,7 @@ impl<'a> Names<'a> {
                 DeclKind::Signature { name, .. } | DeclKind::Clauses { name, .. } => {
                     self.declare(name, Face::Function);
                 }
+                DeclKind::Extern(declared) => self.declare(&declared.name, Face::Function),
                 DeclKind::Data(data) => {
                     self.declare(&data.name, Face::Type);
                     for constructor in &data.constructors {
@@ -605,6 +607,15 @@ impl<'a> Names<'a> {
                 self.mark(name.span, Face::Function, DECLARATION);
                 let scope = self.locals.len();
                 self.typed(ty);
+                self.locals.truncate(scope);
+            }
+            DeclKind::Extern(declared) => {
+                for attribute in &declared.attributes {
+                    self.mark(attribute.span, Face::Attribute, 0);
+                }
+                self.mark(declared.name.span, Face::Function, DECLARATION);
+                let scope = self.locals.len();
+                self.typed(&declared.ty);
                 self.locals.truncate(scope);
             }
             DeclKind::Clauses { clauses, .. } => {

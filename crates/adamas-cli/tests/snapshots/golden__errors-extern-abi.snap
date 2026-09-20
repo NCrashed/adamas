@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: extern-abi.adamas:12:8: ABI "stdcall" не поддержан: уровень 1 FFI знает только "C" (§5.3)
+  extern "stdcall" fn adamas_probe_mix : UInt64 -> UInt64
+         ^^^^^^^^^

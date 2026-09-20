@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: extern-cptr-reserved.adamas:12:1: имя `CPtr` занято языком: это чужой указатель (§5.3) (§4.11), и объявить своё под ним нельзя
+  data CPtr where
+  ^^^^^^^^^^^^^^^

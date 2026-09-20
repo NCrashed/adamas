@@ -121,6 +121,7 @@ pub fn insert(program: Program) -> Program {
         labels,
         handlers,
         functions,
+        foreigns,
         entry,
         source,
     } = program;
@@ -134,6 +135,7 @@ pub fn insert(program: Program) -> Program {
         labels,
         handlers,
         functions,
+        foreigns,
         entry,
         source,
     }
@@ -402,19 +404,9 @@ impl Pass<'_> {
                     },
                 )
             }
-            Expr::Call {
-                function,
-                arguments,
-            } => {
-                let (arguments, spare) = self.sequence(arguments, owned);
-                drops(
-                    spare,
-                    Expr::Call {
-                        function,
-                        arguments,
-                    },
-                )
-            }
+            // Чужой вызов (§5.3) идёт тем же путём, что свой; едущие аргументы
+            // плоские, и RC по ним не идёт сам собой - см. `self.flat`.
+            Expr::Call { .. } | Expr::Foreign { .. } => self.applied_to(expr, owned),
             Expr::Closure { function, captured } => {
                 let (captured, spare) = self.sequence(captured, owned);
                 drops(spare, Expr::Closure { function, captured })
@@ -443,6 +435,38 @@ impl Pass<'_> {
             Expr::Dup { .. } | Expr::Drop { .. } | Expr::Reclaim { .. } | Expr::Discard { .. } => {
                 expr
             }
+        }
+    }
+
+    /// Вызов - свой либо чужой (§5.3): аргументы по порядку, лишнее дропается.
+    ///
+    /// Одна запись на оба узла, потому что владение у них одно и то же: чужой
+    /// вызов отличается тем, **кого** зовут, а не тем, как считаются аргументы.
+    fn applied_to(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
+        match expr {
+            Expr::Call {
+                function,
+                arguments,
+            } => {
+                let (arguments, spare) = self.sequence(arguments, owned);
+                let called = Expr::Call {
+                    function,
+                    arguments,
+                };
+                drops(spare, called)
+            }
+            Expr::Foreign {
+                function,
+                arguments,
+            } => {
+                let (arguments, spare) = self.sequence(arguments, owned);
+                let called = Expr::Foreign {
+                    function,
+                    arguments,
+                };
+                drops(spare, called)
+            }
+            other => other,
         }
     }
 
@@ -1302,7 +1326,7 @@ impl Pass<'_> {
                 }
                 arguments.iter().any(|argument| self.plans(argument, slots))
             }
-            Expr::Call { arguments, .. } => {
+            Expr::Call { arguments, .. } | Expr::Foreign { arguments, .. } => {
                 arguments.iter().any(|argument| self.plans(argument, slots))
             }
             Expr::Closure { captured, .. } => {
@@ -1435,7 +1459,7 @@ impl Pass<'_> {
                     .iter_mut()
                     .any(|argument| self.attach(argument, slots, token))
             }
-            Expr::Call { arguments, .. } => arguments
+            Expr::Call { arguments, .. } | Expr::Foreign { arguments, .. } => arguments
                 .iter_mut()
                 .any(|argument| self.attach(argument, slots, token)),
             Expr::Closure { captured, .. } => captured

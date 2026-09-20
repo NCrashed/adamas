@@ -360,9 +360,9 @@ use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
 use adamas_core::source::Location;
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Elems, Expr, Fact, FiberOp, Form, FuncId, Function,
-    HandlerId, LabelId, LocalId, PackId, Packing, Program, Repr, Salvage, Slot, SlotTy, Source,
-    Stride, Unique, Verdict,
+    Arm, Binding, Constructor, CtorId, Elems, Expr, Fact, FiberOp, ForeignId, ForeignResult, Form,
+    FuncId, Function, HandlerId, LabelId, LocalId, PackId, Packing, Program, Repr, Salvage, Slot,
+    SlotTy, Source, Stride, Unique, Verdict,
 };
 use crate::split::Suspension;
 
@@ -718,6 +718,45 @@ fn regions(out: &mut String, program: &Program) {
         "declare ptr @adamas_region_pop(ptr, i64)\n",
         "\n",
     ));
+}
+
+/// Объявления чужих символов (§5.3, уровень 1).
+///
+/// Соглашение о вызове здесь **не** [`CONVENTION`], а C, и это не забывчивость:
+/// `tailcc` есть внутреннее соглашение порождённого кода, а по ту сторону
+/// границы стоит настоящая библиотека, собранная своим компилятором. Ровно тем
+/// же исключением живёт [`ENTRY_SYMBOL`].
+///
+/// Атрибутов у объявления нет ни одного - ни `nounwind`, ни `readnone`: что
+/// чужая функция делает, компилятору неизвестно, и обещать за неё нечего.
+fn foreigns(out: &mut String, program: &Program) {
+    if program.foreigns.is_empty() {
+        return;
+    }
+    out.push_str("; Чужие символы (§5.3): C-соглашение, атрибутов нет.\n");
+    for foreign in &program.foreigns {
+        let parameters = foreign
+            .parameters
+            .iter()
+            .map(|it| machine(*it))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(
+            out,
+            "declare {} @{}({parameters})",
+            foreign_result(foreign.result),
+            foreign.symbol
+        );
+    }
+    out.push('\n');
+}
+
+/// Тип ответа чужого символа в `.ll`: `void` у бессловесного.
+fn foreign_result(result: ForeignResult) -> &'static str {
+    match result {
+        ForeignResult::Flat(ty) => machine(ty),
+        ForeignResult::Unit(_) => "void",
+    }
 }
 
 /// Есть ли в программе область: любая из восьми её операций.
@@ -1696,6 +1735,7 @@ impl Module {
         second_form(&mut out, program);
         arrays(&mut out, program);
         regions(&mut out, program);
+        foreigns(&mut out, program);
 
         if self.dwarf.is_some() {
             out.push_str(concat!(
@@ -2481,6 +2521,8 @@ impl<'a> Builder<'a> {
             Expr::Local(local) => self.reprs.get(local).copied().unwrap_or(Repr::Boxed),
             Expr::Literal { ty, .. } | Expr::Primitive { ty, .. } => Repr::Flat(*ty),
             Expr::Call { function, .. } => self.program.functions[function.0].result,
+            // Чужой вызов (§5.3): ответ его берётся из таблицы символов.
+            Expr::Foreign { function, .. } => self.program.foreigns[function.0].result.repr(),
             Expr::Bind { body, .. }
             | Expr::Dup { body, .. }
             | Expr::Drop { body, .. }
@@ -2732,6 +2774,10 @@ impl<'a> Builder<'a> {
                 function,
                 arguments,
             } => self.call(*function, arguments, Tail::Plain),
+            Expr::Foreign {
+                function,
+                arguments,
+            } => self.foreign(*function, arguments),
             // Приставки сняты `prologue` выше, и досюда узел не
             // доезжает. Ветвь стоит ради исчерпывающего разбора: пропади она,
             // новый узел-приставка ушёл бы в тихий отказ вместо ошибки сборки.
@@ -4433,6 +4479,47 @@ impl<'a> Builder<'a> {
             self.here(),
         );
         Ok(name)
+    }
+
+    /// Вызов чужой функции (§5.3, уровень 1).
+    ///
+    /// Три отличия от [`Builder::call`], и все три - свойства границы.
+    /// Соглашение C, а не [`CONVENTION`]: по ту сторону стоит библиотека,
+    /// собранная своим компилятором. `musttail` не ставится никогда - §5.3
+    /// («правило чужого кадра») требует от границы **нормального возврата**, а
+    /// хвостовой вызов кадр вызывающего снимает. И скрытых аргументов у неё
+    /// нет: вектор evidence с ручкой стека - наше внутреннее дело.
+    fn foreign(&mut self, function: ForeignId, arguments: &[Expr]) -> Result<String, LlvmError> {
+        let described = self.program.foreigns[function.0].clone();
+        let mut given = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            let ty = self.typed(argument)?;
+            let operand = self.value(argument)?;
+            given.push(format!("{ty} {operand}"));
+        }
+        let symbol = &described.symbol;
+        let arguments = given.join(", ");
+        match described.result {
+            ForeignResult::Flat(ty) => {
+                let name = self.temp();
+                self.instruction(
+                    &format!("{name} = call {} @{symbol}({arguments})", machine(ty)),
+                    self.here(),
+                );
+                Ok(name)
+            }
+            // `void`-символ значения не отдаёт; узел отвечает единицей, и она
+            // собирается той же точкой входа, которой собрано стёртое.
+            ForeignResult::Unit(unit) => {
+                self.instruction(&format!("call void @{symbol}({arguments})"), self.here());
+                let name = self.temp();
+                self.instruction(
+                    &format!("{name} = call ptr @adamas_con0(i16 {})", unit.0),
+                    self.here(),
+                );
+                Ok(name)
+            }
+        }
     }
 
     /// Голова разбора: тег, `switch` и блок обрыва.

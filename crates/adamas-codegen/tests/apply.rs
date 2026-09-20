@@ -374,6 +374,7 @@ fn a_second_form_behind_the_pointer_fails_loudly() {
             operations: vec!["ask".to_owned()],
         }],
         handlers: Vec::new(),
+        foreigns: Vec::new(),
         functions: vec![entry, produces],
         entry: FuncId(0),
         source: None,

@@ -133,9 +133,9 @@ use adamas_core::term::{Args, Case, Index, Name, Term};
 use adamas_core::value::{Env, Lvl, Value};
 
 use crate::ir::{
-    Arm, Binding, Branch, Constructor, CtorId, Elems, Expr, Fact, FiberOp, Form, FuncId, Function,
-    Handler, HandlerId, Label, LabelId, LocalId, PackId, Packing, Program, Repr, Slot as PackSlot,
-    SlotTy, Source, Stride, Task, Variant, Verdict,
+    Arm, Binding, Branch, Constructor, CtorId, Elems, Expr, Fact, FiberOp, Foreign, ForeignId,
+    ForeignResult, Form, FuncId, Function, Handler, HandlerId, Label, LabelId, LocalId, PackId,
+    Packing, Program, Repr, Slot as PackSlot, SlotTy, Source, Stride, Task, Variant, Verdict,
 };
 
 /// Почему понижение отказало.
@@ -164,6 +164,18 @@ pub enum LowerError {
     #[error("`{name}` - питомник (§5.2): {why}")]
     Nursery {
         /// Имя постулата либо операции.
+        name: String,
+        /// Чем именно позиция не годится.
+        why: &'static str,
+    },
+
+    /// Чужой символ в позиции, где вызова не выходит (§5.3).
+    ///
+    /// Граница **среза**, а не языка: чужой вызов как значение выразим -
+    /// обёртка над ним есть обычная функция, - и заводить её никто не стал.
+    #[error("`{name}` - чужой символ (§5.3): {why}")]
+    Foreign {
+        /// Имя объявленного символа.
         name: String,
         /// Чем именно позиция не годится.
         why: &'static str,
@@ -755,6 +767,11 @@ struct Lowerer<'a> {
     /// Семейство, чей разбор есть отмена задачи (§5.2). `None` - питомника в
     /// программе нет вовсе, и отменять нечего.
     task_family: Option<Name>,
+    /// Чужие символы (§5.3): прототип заводится на символ, а не на место
+    /// вызова, - иначе дважды позванный объявился бы дважды.
+    foreigns: Vec<Foreign>,
+    /// Номер чужого символа по имени определения.
+    externs: HashMap<Name, ForeignId>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -777,6 +794,8 @@ impl<'a> Lowerer<'a> {
             pending: VecDeque::new(),
             detached: false,
             tainted: false,
+            foreigns: Vec::new(),
+            externs: HashMap::new(),
         }
     }
 
@@ -885,6 +904,7 @@ impl<'a> Lowerer<'a> {
             labels: self.labels,
             handlers: self.handlers,
             functions: self.functions,
+            foreigns: self.foreigns,
             entry: entry_id,
             source: self.file.map(|file| split_path(file.name())),
         })
@@ -2233,6 +2253,11 @@ impl<'a> Lowerer<'a> {
         if &**name == NURSERY && self.definition(name)?.body.is_none() {
             return self.nursing(scope, name, arguments);
         }
+        // Чужой символ (§5.3). Спрашивается до вида по той же причине, что
+        // выход из scope: вид у него `Regular`, тела нет, а смысл есть.
+        if self.signature.foreign(name).is_some() {
+            return self.crossing(scope, name, arguments);
+        }
         // Элиминаторы - невыразимые имена без тела, и спрашиваются они до вида
         // по той же причине, что и выход из scope: тела у них нет, а смысл есть.
         if let Some(effect) = name.strip_prefix(HANDLE) {
@@ -2565,6 +2590,146 @@ impl<'a> Lowerer<'a> {
             };
         }
         Ok((value, Repr::Boxed))
+    }
+
+    /// Вызов чужого символа: `extern "C"` (§5.3, уровень 1).
+    ///
+    /// Насыщенный и только: недобранный чужой символ был бы замыканием над
+    /// трамплином, а трамплин отдаёт слоты указателями - через границу же
+    /// ходит плоское слово (§4.11, трек A). Отказ здесь названный, потому что
+    /// граница эта у среза, а не у языка: замыкание над чужим вызовом
+    /// выразимо, его просто никто не заводил.
+    ///
+    /// Пересыпа не бывает тоже: ответ чужой функции есть слово либо ничего,
+    /// применить его не к чему, и до понижения такое не доходит - это отказ
+    /// ради исчерпанности, а не ради случая.
+    ///
+    /// Единица среди аргументов **не едет**: в домене она есть сишное
+    /// `(void)`, то есть отсутствие аргумента (§5.3, `crossing` элаборации).
+    fn crossing(
+        &mut self,
+        scope: &mut Scope,
+        name: &Name,
+        arguments: &[Arg<'_>],
+    ) -> Result<(Expr, Repr), LowerError> {
+        let function = self.foreign(name)?;
+        let parameters = self.foreign_binders(name)?;
+        if arguments.len() < parameters.len() {
+            return Err(LowerError::Foreign {
+                name: name.to_string(),
+                why: "вызов не насыщен: чужая функция значением этим срезом не берётся",
+            });
+        }
+        // Пересып через границу не проходит по типам: чужая функция отдаёт
+        // слово либо ничего, и применить её ответ не к чему. Отказ стоит здесь
+        // ради исчерпанности - молча отбросить лишние аргументы хуже.
+        if arguments.len() > parameters.len() {
+            return Err(LowerError::Foreign {
+                name: name.to_string(),
+                why: "аргументов больше, чем связываний: ответ чужой функции есть слово",
+            });
+        }
+        // Связываются **все** аргументы, а не одни только едущие, и порядок
+        // связывания есть порядок написания. Иначе аргумент-единица, стоящий
+        // между словами, считался бы не на своём месте: узел его не несёт, и
+        // положить его было бы некуда, кроме как снаружи всего вызова. Строгий
+        // порядок §3.1 наблюдаем - соседний аргумент вправе ходить за ту же
+        // границу, - и разъехаться ему тут нечем.
+        let mut prelude: Vec<(Binding, Expr)> = Vec::new();
+        let mut given = Vec::with_capacity(self.foreigns[function.0].parameters.len());
+        for (position, carried) in parameters.iter().enumerate() {
+            let Some(argument) = arguments.get(position) else {
+                return Err(LowerError::Missing {
+                    name: name.to_string(),
+                    binder: position,
+                });
+            };
+            let repr = carried.map_or(Repr::Boxed, Repr::Flat);
+            let at = if carried.is_some() {
+                "аргумент чужого вызова"
+            } else {
+                "единица у границы C"
+            };
+            let value = self.given(scope, argument, repr, at)?;
+            let local = scope.fresh();
+            prelude.push((
+                Binding {
+                    name: format!("чужой аргумент #{position}"),
+                    local,
+                    fact: Fact::present(Mult::Many).shaped(repr),
+                },
+                value,
+            ));
+            if carried.is_some() {
+                given.push(Expr::Local(local));
+            }
+        }
+        let result = self.foreigns[function.0].result;
+        let mut value = Expr::Foreign {
+            function,
+            arguments: given,
+        };
+        // Единица-аргумент остаётся связыванием без употребления: ссылку её
+        // отдаст вставка RC обычным правилом, а чужая сторона о ней не узнает.
+        for (binding, bound) in prelude.into_iter().rev() {
+            value = Expr::Bind {
+                binding,
+                value: Box::new(bound),
+                body: Box::new(value),
+            };
+        }
+        Ok((value, result.repr()))
+    }
+
+    /// Номер чужого символа: заводится один раз на символ.
+    fn foreign(&mut self, name: &Name) -> Result<ForeignId, LowerError> {
+        if let Some(id) = self.externs.get(name) {
+            return Ok(*id);
+        }
+        let symbol = self
+            .signature
+            .foreign(name)
+            .ok_or_else(|| LowerError::Unknown {
+                name: name.to_string(),
+            })?
+            .to_string();
+        let parameters: Vec<PrimTy> = self.foreign_binders(name)?.into_iter().flatten().collect();
+        let result = self.foreign_result(name)?;
+        let id = ForeignId(self.foreigns.len());
+        self.foreigns.push(Foreign {
+            symbol,
+            parameters,
+            result,
+        });
+        self.externs.insert(Rc::clone(name), id);
+        Ok(id)
+    }
+
+    /// Связывания чужого символа: `Some(ty)` - слово, `None` - единица.
+    ///
+    /// Длина - арность **адамасова** имени, а не сишного: единица связывание
+    /// занимает, а аргумента не даёт.
+    fn foreign_binders(&self, name: &Name) -> Result<Vec<Option<PrimTy>>, LowerError> {
+        let mut carried = Vec::new();
+        let mut rest = self.declared(name)?;
+        while let Term::Pi(_, _, domain, _, codomain) = rest {
+            carried.push(flat_prim(self.signature, domain));
+            rest = codomain;
+        }
+        Ok(carried)
+    }
+
+    /// Чем отвечает чужой символ.
+    fn foreign_result(&mut self, name: &Name) -> Result<ForeignResult, LowerError> {
+        let mut rest = self.declared(name)?;
+        while let Term::Pi(_, _, _, _, codomain) = rest {
+            rest = codomain;
+        }
+        if let Some(ty) = flat_prim(self.signature, rest) {
+            return Ok(ForeignResult::Flat(ty));
+        }
+        let unit = self.unit_name()?;
+        Ok(ForeignResult::Unit(self.tag(&unit)?))
     }
 
     /// Роль операции под питомником. `None` - обычная операция эффекта.
@@ -5426,5 +5591,16 @@ fn escaping(term: &Term, depth: u32, out: &mut BTreeSet<u32>) {
             }
         }
         _ => {}
+    }
+}
+
+/// Плоское слово написанного типа. `None` - всё прочее, включая единицу.
+///
+/// Синоним разворачивается: `Int` есть `Int64` (§4.3), а `CPtr` есть `UInt64`
+/// (§5.3) - представление принадлежит типу, а не его написанию.
+fn flat_prim(signature: &Signature, ty: &Term) -> Option<PrimTy> {
+    match unaliased(signature, ty) {
+        Term::Prim(Prim::Ty(it)) => Some(*it),
+        _ => None,
     }
 }

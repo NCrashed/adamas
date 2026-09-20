@@ -181,6 +181,7 @@ pub fn prepare(program: Program) -> Program {
         labels,
         handlers,
         mut functions,
+        foreigns,
         entry,
         source,
     } = program;
@@ -191,6 +192,7 @@ pub fn prepare(program: Program) -> Program {
         let mut pass = Anf {
             known: &known,
             results: &results,
+            foreigns: &foreigns,
             packings: &packings,
             locals: shapes(function),
             next: ceiling(function),
@@ -204,6 +206,7 @@ pub fn prepare(program: Program) -> Program {
         labels,
         handlers,
         functions,
+        foreigns,
         entry,
         source,
     }
@@ -220,6 +223,7 @@ fn extracted(program: Program) -> Program {
         labels,
         handlers,
         mut functions,
+        foreigns,
         entry,
         source,
     } = program;
@@ -242,6 +246,7 @@ fn extracted(program: Program) -> Program {
         labels,
         handlers,
         functions,
+        foreigns,
         entry,
         source,
     }
@@ -340,6 +345,7 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         } => vec![region, at, value],
         Expr::Construct { arguments, .. }
         | Expr::Call { arguments, .. }
+        | Expr::Foreign { arguments, .. }
         | Expr::Perform { arguments, .. }
         | Expr::Fiber { arguments, .. }
         | Expr::Pack {
@@ -489,6 +495,8 @@ fn ceiling(function: &Function) -> u32 {
 struct Anf<'a> {
     known: &'a Suspension,
     results: &'a [Repr],
+    /// Чужие символы (§5.3): их ответы лежат не в [`Anf::results`].
+    foreigns: &'a [crate::ir::Foreign],
     packings: &'a [Packing],
     locals: BTreeMap<LocalId, Repr>,
     next: u32,
@@ -520,6 +528,12 @@ impl Anf<'_> {
             Expr::Call { function, .. } => {
                 self.results.get(function.0).copied().unwrap_or(Repr::Boxed)
             }
+            // Чужой вызов (§5.3): ответ его берётся из таблицы символов, а не
+            // из таблицы функций - своей функции за ним нет.
+            Expr::Foreign { function, .. } => self
+                .foreigns
+                .get(function.0)
+                .map_or(Repr::Boxed, |it| it.result.repr()),
             Expr::Bind { body, .. }
             | Expr::Dup { body, .. }
             | Expr::Drop { body, .. }

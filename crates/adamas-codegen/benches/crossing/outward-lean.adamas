@@ -1,0 +1,34 @@
+-- Виток за границей, тело лёгкое (§5.3, §6).
+--
+-- То же, что `outward.adamas`, с одной разницей: чужая функция делает
+-- поворот на бит вместо умножения со сложением. Разница существенна и в ней
+-- весь смысл пары. У умножения цепочка зависимости по данным в три такта, и
+-- вызов прячется в её тени целиком; у поворота она в один такт, и цена вызова
+-- видна. Первая пара говорит, чего пересечение стоит на настоящем теле, вторая
+-- - чего оно стоит само по себе.
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  True : Bool
+  False : Bool
+
+effect Foreign
+
+extern "C" fn adamas_bench_calls : UInt64
+
+extern "C" fn adamas_bench_turn : UInt64 -> UInt64
+
+turn : UInt64 -> UInt64 -> {Foreign} UInt64
+turn 0 acc = acc
+turn n acc = turn (subUInt64 n 1) (adamas_bench_turn acc)
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let calls : UInt64 = adamas_bench_calls
+  turn calls 1
+
+main : UInt64
+main = handle @Foreign body with
+  return v -> v

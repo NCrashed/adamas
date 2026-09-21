@@ -301,7 +301,25 @@ fn answered(args: &[u64], env: Option<u64>) -> Result<u64, RunError> {
             Rc::new(Term::Prim(Prim::Lit(PrimTy::UInt64, *word))),
         );
     }
-    let answer = crate::run_linked(signature, &term, linkage.clone())?;
+    // Операция, оставшаяся без хендлера **внутри** колбэка, - не то же, что
+    // операция без хендлера вообще, и говорить об этом надо прямо. Площадка у
+    // неё есть: она стоит в месте регистрации. Не видит её машина, потому что
+    // считает колбэк отдельным прогоном - стек хендлеров в `run_linked` не
+    // передаётся. Понижения ту же программу считают: вектор evidence едет им
+    // в `userdata` (§5.3), а у машины вектора нет вовсе.
+    let answer =
+        crate::run_linked(signature, &term, linkage.clone()).map_err(|error| match error {
+            RunError::Unhandled { operation, effect } => RunError::Callback {
+                symbol: shown.clone(),
+                why: format!(
+                    "операция `{operation}` метки `{effect}` внутри колбэка осталась без \
+                     хендлера: машина считает колбэк отдельным прогоном, и площадка места \
+                     регистрации ему не видна. Понижения эту программу считают - вектор \
+                     evidence едет им в `userdata` (§5.3, уровень 2)"
+                ),
+            },
+            other => other,
+        })?;
     match answer {
         Term::Prim(Prim::Lit(_, word)) => Ok(word),
         other => Err(RunError::Callback {

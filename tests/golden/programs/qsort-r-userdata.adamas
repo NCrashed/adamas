@@ -1,0 +1,99 @@
+-- Колбэк уровня 2: замыкание уходит в C через `userdata` (§5.3).
+--
+-- `qsort_r` - ровно тот API, который §5.3 называет своим доводом: «почти
+-- всякий вменяемый C API принимает `void*` рядом с указателем на функцию».
+-- Наружу уходит статический трамплин, а среда замыкания вместе с вектором
+-- evidence едет пятым словом.
+--
+-- **Фикстура стоит здесь, а не в `eval/`, и причина платформенная.** У glibc
+-- `qsort_r(base, nmemb, size, compar, arg)`, у Darwin - `qsort_r(base, nmemb,
+-- size, thunk, compar)`: четвёртое и пятое слова переставлены, а компаратор
+-- там получает `userdata` **первым** аргументом, а не последним. Выразить оба
+-- порядка одним файлом нечем - условной компиляции язык не имеет, - а корпус
+-- `eval/` идёт обеими ногами CI. Зависимость поэтому объявлена явно:
+-- свидетель (`adamas-codegen/tests/userdata.rs`) стоит под
+-- `cfg(target_os = "linux")` и об этом говорит.
+--
+-- Портируемой замены нет, и это проверено перебором: в libc пара
+-- «указатель на функцию плюс `void *`» встречается ровно у `qsort_r` и у
+-- `pthread_create`, а второй заводит поток - колбэк побежал бы не на том
+-- стеке, и машина, однопоточная по построению, его не посчитала бы вовсе.
+--
+-- Наблюдений два, и оба ломаются от потерянной среды.
+--
+--   * Массив **переставлен**: `[3, 1, 4, 2]` уезжает наружу и приезжает
+--     `[1, 2, 3, 4]`. Ширину сравнения компаратор берёт из **захваченного**
+--     массива; потеряйся среда - ширина стала бы мусором, а при нуле `memcmp`
+--     отвечает нулём всегда, и порядок остался бы прежним (`3142`).
+--   * Захваченный массив жив и **после** вызова: младший разряд ответа читает
+--     его обычным `arrayIndex`.
+--
+-- Row компаратора - `{Foreign}`: он сам ходит за границу. Метка проходит
+-- правило чужого кадра, а операций у неё нет, поэтому вектор evidence здесь
+-- пуст. Что он едет и работает, показывает отдельный свидетель с настоящей
+-- операцией (`qsort-r-evidence.adamas`).
+
+data Unit where
+  MkUnit : Unit
+
+effect Foreign
+
+-- Слот `userdata` чужого API (§5.3, уровень 2). Тела у него нет: значение
+-- подставляет понижение - средой того колбэка, что стоит в этом же вызове.
+-- Встроенным имя не бывает, как не бывает встроенной ни одна метка: объявляет
+-- его программа, а компилятор узнаёт по написанному имени.
+callbackEnv : CPtr
+
+extern "C" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
+
+-- Пятое слово - `userdata`, и написано оно обычным `CPtr`: объявление
+-- повторяет C дословно, а какое из слов чем является, говорит место
+-- `callbackEnv` в вызове.
+extern "C" fn qsort_r : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> CPtr -> {Foreign} Int32) -> CPtr -> Unit
+
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+-- Литерал в ячейке `arrayNew` умолчания типа не читает и уезжает в `Nat`;
+-- именованная константа его прижимает - тот же приём, что в `extern-buffer`.
+blank : UInt64
+blank = 0
+
+three : UInt64
+three = 3
+
+one : UInt64
+one = 1
+
+four : UInt64
+four = 4
+
+two : UInt64
+two = 2
+
+eight : UInt64
+eight = 8
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let zeroed : Array 4 UInt64 = arrayNew 4 blank
+  let first : Array 4 UInt64 = arraySet zeroed 0 three
+  let second : Array 4 UInt64 = arraySet first 1 one
+  let third : Array 4 UInt64 = arraySet second 2 four
+  let xs : Array 4 UInt64 = arraySet third 3 two
+  -- Среда колбэка: ширина сравнения лежит в массиве, а не в слове. Плоский
+  -- скаляр в среду замыкания сегодня не проходит (§10 вопрос 191), массив
+  -- проходит с трека B этой же волны.
+  let widths : Array 1 UInt64 = arrayNew 1 eight
+  let done : Unit = qsort_r xs 4 8 (\a b -> memcmp a b (arrayIndex widths 0)) callbackEnv
+  let a : UInt64 = arrayIndex xs 0
+  let b : UInt64 = arrayIndex xs 1
+  let c : UInt64 = arrayIndex xs 2
+  let d : UInt64 = arrayIndex xs 3
+  let w : UInt64 = arrayIndex widths 0
+  let order : UInt64 = addUInt64 (mulUInt64 a 1000) (addUInt64 (mulUInt64 b 100) (addUInt64 (mulUInt64 c 10) d))
+  addUInt64 (mulUInt64 order 10) w
+
+main : UInt64
+main = runForeign body

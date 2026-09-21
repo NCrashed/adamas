@@ -1,0 +1,87 @@
+-- Колбэк уровня 2 с **настоящим** эффектом: evidence едет вместе со средой.
+--
+-- Это и есть довод §5.3, проверяемый прогоном, а не принимаемый на слово:
+-- «работает это именно потому, что evidence translation делает evidence
+-- значением, а не позицией в стеке». Компаратор здесь производит операцию
+-- `width` метки `Width`; площадка её стоит **снаружи** чужого вызова, и найти
+-- её изнутри колбэка можно только по вектору, приехавшему в `userdata`.
+--
+-- Отними вектор - и операция останется без хендлера: мутант
+-- «`environment` кладёт пустой вектор» роняет ответ обоих понижений
+-- (`adamas-codegen/tests/userdata.rs`).
+--
+-- **Машина эту программу не считает, и отказ у неё названный.** Колбэк у неё
+-- идёт отдельным прогоном (`callback::answered` зовёт `run_linked`), и стек
+-- хендлеров места регистрации тому прогону не виден. Расхождение объявлено
+-- здесь и повторено свидетелем: понижения отвечают `1234`, машина отказывает.
+--
+-- Платформенная зависимость - та же, что у `qsort-r-userdata.adamas`, и по той
+-- же причине: у Darwin порядок аргументов `qsort_r` другой.
+--
+-- Ответ `1234` есть перестановка нашего массива чужой стороной. Ширина
+-- сравнения приходит **операцией**: восемь байт - числовой порядок на выбранных
+-- значениях, ноль - порядок прежний (`3142`).
+
+data Unit where
+  MkUnit : Unit
+
+effect Foreign
+
+-- Ответ операции указателен: плоское слово в этой позиции понижение не берёт
+-- («ответ операции: ожидалось указательное значение»), и массив здесь - тот же
+-- обход, каким обходится захват плоского скаляра (§10 вопрос 191).
+effect Width where
+  width : Array 1 UInt64
+
+callbackEnv : CPtr
+
+extern "C" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
+
+extern "C" fn qsort_r : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> CPtr -> {Width, Foreign} Int32) -> CPtr -> Unit
+
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+blank : UInt64
+blank = 0
+
+three : UInt64
+three = 3
+
+one : UInt64
+one = 1
+
+four : UInt64
+four = 4
+
+two : UInt64
+two = 2
+
+eight : UInt64
+eight = 8
+
+sorting : (ω u : Unit) -> {Width, Foreign} UInt64
+sorting u =
+  let zeroed : Array 4 UInt64 = arrayNew 4 blank
+  let first : Array 4 UInt64 = arraySet zeroed 0 three
+  let second : Array 4 UInt64 = arraySet first 1 one
+  let third : Array 4 UInt64 = arraySet second 2 four
+  let xs : Array 4 UInt64 = arraySet third 3 two
+  let done : Unit = qsort_r xs 4 8 (\a b -> memcmp a b (arrayIndex width 0)) callbackEnv
+  let a : UInt64 = arrayIndex xs 0
+  let b : UInt64 = arrayIndex xs 1
+  let c : UInt64 = arrayIndex xs 2
+  let d : UInt64 = arrayIndex xs 3
+  addUInt64 (mulUInt64 a 1000) (addUInt64 (mulUInt64 b 100) (addUInt64 (mulUInt64 c 10) d))
+
+-- Хендлер хвостово-резумптивный, и это не удобство: правило чужого кадра §5.3
+-- другого в позиции колбэка не пропускает, и проверяет это объявление
+-- `qsort_r` выше (`errors/callback-frame.adamas`).
+body : (ω u : Unit) -> {Foreign} UInt64
+body u = handle @Width sorting with
+  return v -> v
+  width -> resume (arrayNew 1 eight)
+
+main : UInt64
+main = runForeign body

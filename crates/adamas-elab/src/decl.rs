@@ -261,17 +261,52 @@ fn exports(
     within: Option<&Enclosing>,
     signature: &mut Signature,
 ) -> Result<(), ElabError> {
-    if !decls
+    let crossings: Vec<(Span, CoreName)> = decls
         .iter()
-        .any(|decl| matches!(decl.kind, DeclKind::Export(_)))
-    {
+        .filter_map(|decl| match &decl.kind {
+            DeclKind::Extern(written) => Some((decl.span, qualify(within, &written.name.text))),
+            _ => None,
+        })
+        .collect();
+    let exported: Vec<(Span, &ast::ExportDecl)> = decls
+        .iter()
+        .filter_map(|decl| match &decl.kind {
+            DeclKind::Export(written) => Some((decl.span, written)),
+            _ => None,
+        })
+        .collect();
+    if crossings.is_empty() && exported.is_empty() {
         return Ok(());
     }
     let known = adamas_core::resume::labels(signature);
-    for decl in decls {
-        if let DeclKind::Export(exported) = &decl.kind {
-            exported_symbol(signature, &known, within, exported, decl.span)?;
+    // Правило чужого кадра у **колбэка в объявлении** (§5.3): row его написана
+    // здесь, и она же есть контракт с чужой стороной. Спрашивается она на том
+    // же проходе и по тому же доводу, что у экспорта: карта площадок полна
+    // только после файла.
+    //
+    // Экспорта у такого колбэка может не быть вовсе - уровень 2 отдаёт наружу
+    // трамплин, а не символ, - поэтому проверка экспорта его не покрывает.
+    for (span, name) in crossings {
+        let forms: Vec<CallbackForm> = signature
+            .foreign(&name)
+            .into_iter()
+            .flat_map(|it| it.params.iter())
+            .filter_map(|it| match it {
+                Cross::Callback(form) => Some(form.clone()),
+                _ => None,
+            })
+            .collect();
+        for form in forms {
+            if let Some(blocked) = adamas_core::resume::crossing(&known, &form.row) {
+                return Err(ElabError::ExportBlocked {
+                    said: blocked.to_string(),
+                    span,
+                });
+            }
         }
+    }
+    for (span, written) in exported {
+        exported_symbol(signature, &known, within, written, span)?;
     }
     Ok(())
 }
@@ -4402,15 +4437,27 @@ fn outward(signature: &Signature, ty: &Term, span: Span) -> Result<Outward, Elab
 fn flat_callback(signature: &Signature, ty: &Term) -> Option<CallbackForm> {
     let mut rest = ty;
     let mut params: Vec<PrimTy> = Vec::new();
-    while let Term::Pi(binder, _, domain, _, codomain) = rest {
+    let mut produced = Row::empty();
+    while let Term::Pi(binder, _, domain, row, codomain) = rest {
         if binder.mult == Mult::Zero || binder.visibility != Visibility::Explicit {
             return None;
         }
         params.push(word(unaliased(signature, domain))?);
+        // Row стоит на **последней** стрелке: там и лежит то, что колбэк
+        // производит, будучи применённым целиком (§3.4).
+        produced = row.clone();
         rest = codomain;
     }
     let result = word(unaliased(signature, rest))?;
-    (!params.is_empty()).then_some(CallbackForm { params, result })
+    // Хвост снимается здесь, а не у читателя: auto-lift §4.1 ставит переменную
+    // на каждую стрелку, и в точке регистрации окружающих эффектов нет - зовёт
+    // колбэк чужая сторона. Тот же ход и тот же довод, что у экспорта.
+    let row: Row<Term> = Row::new(produced.labels().iter().cloned());
+    (!params.is_empty()).then_some(CallbackForm {
+        params,
+        result,
+        row,
+    })
 }
 
 /// Эффект на промежуточной стрелке объявления (§3.4).

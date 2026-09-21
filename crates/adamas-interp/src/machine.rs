@@ -502,14 +502,14 @@ impl<'a> Machine<'a> {
         // трамплина без записи о том, кого он зовёт, - вызов в никуда.
         let mut registered = Vec::new();
         for (at, argument) in arguments.into_iter().enumerate() {
-            let want = match it.params[at] {
-                Cross::Word(ty) => ty,
+            let want = match &it.params[at] {
+                Cross::Word(ty) => *ty,
                 Cross::Nothing | Cross::Erased => continue,
                 // Колбэк уровня 1 - **имя**, а не значение: у указателя на
                 // функцию среды нет, и всё, у чего она есть, сюда не годится.
                 // Смотрится значение **до** разворота: разверни его, и
                 // определение стало бы замыканием, у которого имени уже нет.
-                Cross::Callback => {
+                Cross::Callback(_) => {
                     // Второй колбэк в одном вызове - **отказ**, а не второй
                     // адрес. Трамплин статический, и кого он зовёт, помнит одна
                     // переменная потока: две регистрации подряд оставили бы
@@ -543,6 +543,7 @@ impl<'a> Machine<'a> {
                     continue;
                 }
                 Cross::Buffer(cell) => {
+                    let cell = *cell;
                     let array = self.forced(argument)?;
                     let Value::Neutral(Head::Block(block), empty) = &*array else {
                         return Err(it.unlendable());

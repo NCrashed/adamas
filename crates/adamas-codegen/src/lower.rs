@@ -2681,7 +2681,7 @@ impl<'a> Lowerer<'a> {
             // Колбэк едет адресом символа, и связывать его нечем: адрес есть
             // константа компоновщика, вычисления за ней нет никакого, и
             // порядок §3.1 он не наблюдает.
-            if matches!(carried, Cross::Callback) {
+            if matches!(carried, Cross::Callback(_)) {
                 let id = self.callback(name, argument)?;
                 given.push(Expr::Exported(id));
                 continue;
@@ -2690,7 +2690,7 @@ impl<'a> Lowerer<'a> {
                 Cross::Word(ty) => (Repr::Flat(*ty), "аргумент чужого вызова"),
                 Cross::Buffer(_) => (Repr::Array(Elems::Flat), "буфер у границы C"),
                 Cross::Nothing => (Repr::Boxed, "единица у границы C"),
-                Cross::Erased | Cross::Callback => unreachable!("отсеяно выше"),
+                Cross::Erased | Cross::Callback(_) => unreachable!("отсеяно выше"),
             };
             let value = self.given(scope, argument, repr, at)?;
             let local = scope.fresh();
@@ -2710,7 +2710,7 @@ impl<'a> Lowerer<'a> {
                 Cross::Buffer(_) => given.push(Expr::ArrayData {
                     array: Box::new(Expr::Local(local)),
                 }),
-                Cross::Nothing | Cross::Erased | Cross::Callback => {}
+                Cross::Nothing | Cross::Erased | Cross::Callback(_) => {}
             }
         }
         let result = self.foreigns[function.0].result;

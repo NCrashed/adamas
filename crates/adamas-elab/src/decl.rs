@@ -30,7 +30,10 @@ use adamas_core::pattern::{Compiled, PatternError, compile_traced};
 use adamas_core::prim;
 use adamas_core::prim::PrimTy;
 use adamas_core::row::{Label, Row, RowVar, Tail};
-use adamas_core::sig::{Cross, Crossing, DefinitionKind, Group, Member as SigMember, Signature};
+use adamas_core::sig::{
+    Callback as CallbackForm, Cross, Crossing, DefinitionKind, Group, Member as SigMember,
+    Signature,
+};
 use adamas_core::source::Span;
 use adamas_core::term::{Args, Binder, Fields, Name as CoreName, Term};
 use adamas_core::visibility::Visibility;
@@ -4176,14 +4179,14 @@ fn crossing(ty: &Term, signature: &Signature, span: Span) -> Result<Shape, ElabE
             continue;
         }
         if matches!(domain, Term::Pi(..)) {
-            if !flat_callback(signature, domain) {
+            let Some(shape) = flat_callback(signature, domain) else {
                 return refuse(
                     "колбэк через границу C идёт указателем на экспортированное определение: \
                      параметры и ответ его обязаны быть машинным словом, а вложенного \
                      колбэка, буфера, единицы и стёртого связывания у него не бывает",
                 );
-            }
-            params.push(Cross::Callback);
+            };
+            params.push(Cross::Callback(shape));
             intermediate(row, codomain, span)?;
             rest = codomain;
             continue;
@@ -4396,20 +4399,18 @@ fn outward(signature: &Signature, ty: &Term, span: Span) -> Result<Outward, Elab
 /// стрелку, и спросить её здесь значило бы отвергнуть всякую написуемую форму.
 /// Что row колбэка проходит через чужой кадр, решается **на экспорте**
 /// ([`exported`]), где есть готовая программа и её площадки.
-fn flat_callback(signature: &Signature, ty: &Term) -> bool {
+fn flat_callback(signature: &Signature, ty: &Term) -> Option<CallbackForm> {
     let mut rest = ty;
-    let mut written = 0;
+    let mut params: Vec<PrimTy> = Vec::new();
     while let Term::Pi(binder, _, domain, _, codomain) = rest {
         if binder.mult == Mult::Zero || binder.visibility != Visibility::Explicit {
-            return false;
+            return None;
         }
-        if word(unaliased(signature, domain)).is_none() {
-            return false;
-        }
-        written += 1;
+        params.push(word(unaliased(signature, domain))?);
         rest = codomain;
     }
-    written > 0 && word(unaliased(signature, rest)).is_some()
+    let result = word(unaliased(signature, rest))?;
+    (!params.is_empty()).then_some(CallbackForm { params, result })
 }
 
 /// Эффект на промежуточной стрелке объявления (§3.4).

@@ -230,14 +230,14 @@ impl Foreign {
 
     /// Сигнатура словами - для текста отказа.
     fn written(&self) -> String {
-        let written = |it: Cross| match it {
+        let written = |it: &Cross| match it {
             Cross::Word(ty) => ty.name().to_owned(),
             Cross::Nothing => "Unit".to_owned(),
             Cross::Erased => "0".to_owned(),
             Cross::Buffer(cell) => format!("Array _ {}", cell.name()),
-            Cross::Callback => "колбэк".to_owned(),
+            Cross::Callback(_) => "колбэк".to_owned(),
         };
-        let params: Vec<String> = self.params.iter().copied().map(written).collect();
+        let params: Vec<String> = self.params.iter().map(written).collect();
         format!(
             "({}) -> {}",
             params.join(", "),

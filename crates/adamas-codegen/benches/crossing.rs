@@ -410,7 +410,10 @@ fn table(it: &Stand) {
                 } else {
                     "пересечение стоит"
                 };
-                eprintln!("{side}/{outward}: {what} {:.3} нс сверх витка", crossed - kept);
+                eprintln!(
+                    "{side}/{outward}: {what} {:.3} нс сверх витка",
+                    crossed - kept
+                );
             }
         }
     }

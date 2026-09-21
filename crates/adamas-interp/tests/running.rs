@@ -1862,6 +1862,51 @@ main = handle @Foreign body with
     );
 }
 
+/// Второй колбэк в одном вызове - отказ, а не второй адрес (§5.3).
+///
+/// Трамплин у машины статический, и кого он зовёт, помнит одна переменная
+/// потока: две регистрации подряд оставили бы живой последнюю, чужая сторона
+/// получила бы один и тот же адрес дважды и позвала бы не то, что написано.
+/// Понижения так не ошибаются - у них обёртка на символ, - поэтому молчание
+/// здесь было бы **расхождением вычислителей**, то есть ровно тем, ради чего
+/// договор корпуса и заведён.
+#[test]
+fn two_callbacks_in_one_call_are_refused_by_name() {
+    let source = format!(
+        "{BASE}
+effect Foreign
+
+extern \"C\" fn adamas_probe_pair : (CPtr -> CPtr -> {{Foreign}} Int32) -> (CPtr -> CPtr -> {{Foreign}} Int32) -> Unit
+
+first : CPtr -> CPtr -> {{Foreign}} Int32
+first a b = 0
+
+second : CPtr -> CPtr -> {{Foreign}} Int32
+second a b = 0
+
+export \"C\" fn first
+
+export \"C\" fn second
+
+body : (ω u : Unit) -> {{Foreign}} Unit
+body u = adamas_probe_pair first second
+
+main : Unit
+main = handle @Foreign body with
+  return v -> v
+"
+    );
+    let error = refused(&source, "main");
+    assert!(
+        matches!(&error, adamas_interp::RunError::Callback { symbol, .. } if symbol == "adamas_probe_pair"),
+        "отказ обязан называть символ чужой функции: {error}"
+    );
+    assert!(
+        error.to_string().contains("больше одного"),
+        "отказ обязан назвать причину: {error}"
+    );
+}
+
 /// Значение со средой в позиции колбэка - отказ той же машины (§5.3).
 ///
 /// Понижение ловит это формой узла, машина - формой значения, и причина у обоих

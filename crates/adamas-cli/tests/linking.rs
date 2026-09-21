@@ -137,7 +137,10 @@ fn cc() -> Command {
 fn probe(dir: &Path) {
     let source = dir.join("probe.c");
     write(&source, PROBE);
-    let object = dir.join(VENDOR).join(format!("lib{LIBRARY}.so"));
+    let object = dir.join(VENDOR).join(format!(
+        "lib{LIBRARY}.{}",
+        adamas_interp::foreign::SHARED_SUFFIX
+    ));
     std::fs::create_dir_all(object.parent().unwrap()).unwrap();
     let built = cc()
         .args(["-std=c11", "-O1", "-Wall", "-fPIC", "-shared"])

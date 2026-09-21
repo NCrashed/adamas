@@ -1614,7 +1614,9 @@ main = handle @Foreign body with
         "отказ обязан называть символ: {error}"
     );
     assert!(
-        error.to_string().contains("libm.so.6"),
+        error
+            .to_string()
+            .contains(adamas_interp::foreign::C_LIBRARY[0]),
         "отказ обязан называть, где искали: {error}"
     );
 }

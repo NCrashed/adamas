@@ -61,8 +61,13 @@ use adamas_core::term::{Binder, Term};
 use adamas_core::value::Env;
 use adamas_interp::{Foreign, Machine};
 
-/// Библиотека: glibc держит её отдельным файлом, и `cbrt` есть только в ней.
-const LIBRARY: &str = "libm.so.6";
+/// Библиотека, в которой лежит `cbrt`, - платформенная.
+///
+/// У glibc это отдельный файл, у Darwin - тот же `libSystem`, что и libc.
+/// Берётся она у машины, а не пишется здесь второй раз: разъехавшись, свидетель
+/// искал бы не там, куда ходит рантайм.
+const LIBRARY: &str =
+    adamas_interp::foreign::C_LIBRARY[adamas_interp::foreign::C_LIBRARY.len() - 1];
 /// Символ: `double cbrt(double)`.
 const SYMBOL: &str = "cbrt";
 /// Аргумент: куб, на котором glibc **не** точен, - расхождение наблюдаемо.

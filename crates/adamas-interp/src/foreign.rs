@@ -56,10 +56,30 @@ use crate::RunError;
 /// делить её надвое в манифесте значило бы заставить автора знать, в каком из
 /// двух файлов у его libc лежит `cbrt`.
 ///
-/// Названная граница: имена платформенные. §8 backend targets сегодня все
-/// 64-битные и все Linux/glibc; на другой платформе список другой, и это
-/// обязательство, а не умолчание.
-pub const C_LIBRARY: [&str; 2] = ["libc.so.6", "libm.so.6"];
+/// Имена платформенные, и платформа выбирается здесь, а не подразумевается.
+/// Обязательство это было названо волной 1 и оставлено умолчанием - после чего
+/// macOS-нога CI упала на `extern-c` ровно им: «в библиотеке `libc.so.6,
+/// libm.so.6` нет символа `malloc`». У Darwin libc и libm лежат в одном
+/// `libSystem`, деления надвое там нет вовсе, и [`SHARED_SUFFIX`] отличается
+/// тоже.
+#[cfg(target_os = "macos")]
+pub const C_LIBRARY: &[&str] = &["libSystem.B.dylib"];
+
+/// Стандартная библиотека C на Linux/glibc - см. [`C_LIBRARY`] выше.
+#[cfg(not(target_os = "macos"))]
+pub const C_LIBRARY: &[&str] = &["libc.so.6", "libm.so.6"];
+
+/// Расширение разделяемой библиотеки: `-lz` разрешается в файл этим именем.
+///
+/// Вторая половина того же платформенного обязательства: компоновщик ищет
+/// `libz.dylib` на Darwin и `libz.so` на Linux, и `dlopen` машины обязан искать
+/// **тот же файл**, иначе собравшаяся программа не посчитается.
+#[cfg(target_os = "macos")]
+pub const SHARED_SUFFIX: &str = "dylib";
+
+/// Расширение разделяемой библиотеки на Linux - см. [`SHARED_SUFFIX`] выше.
+#[cfg(not(target_os = "macos"))]
+pub const SHARED_SUFFIX: &str = "so";
 
 /// С чем связана программа: секция `[link]` манифеста плюс [`C_LIBRARY`].
 ///
@@ -92,7 +112,7 @@ impl Linkage {
 
     /// Файлы, которыми может оказаться `-l<library>`.
     fn candidates(&self, library: &str) -> Vec<String> {
-        let file = format!("lib{library}.so");
+        let file = format!("lib{library}.{SHARED_SUFFIX}");
         let mut found: Vec<String> = self
             .paths
             .iter()
@@ -385,12 +405,12 @@ fn address(it: &Foreign, linkage: &Linkage) -> Result<Address, RunError> {
         // «нет символа» там, где нет файла.
         if !opened {
             return Err(missing.unwrap_or_else(|| RunError::NoLibrary {
-                library: format!("lib{library}.so"),
+                library: format!("lib{library}.{SHARED_SUFFIX}"),
                 why: "кандидатов не нашлось".to_owned(),
             }));
         }
     }
-    for name in C_LIBRARY {
+    for &name in C_LIBRARY {
         match within(name, &it.symbol) {
             Ok(found) => return Ok(found),
             Err(RunError::NoLibrary { .. }) => {}

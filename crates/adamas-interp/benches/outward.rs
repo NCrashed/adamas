@@ -58,7 +58,11 @@ use criterion::{Criterion, criterion_group};
 use adamas_interp::{Foreign, Linkage, Machine};
 
 /// Библиотека и символ: обоснование выбора - в `docs/phase8-trackC-notes.md`.
-const LIBRARY: &str = "libm.so.6";
+///
+/// Имя платформенное и берётся у машины, а не пишется здесь второй раз: у
+/// Darwin libm лежит в общем `libSystem`.
+const LIBRARY: &str =
+    adamas_interp::foreign::C_LIBRARY[adamas_interp::foreign::C_LIBRARY.len() - 1];
 /// Символ: `double cbrt(double)`.
 const SYMBOL: &str = "cbrt";
 /// Аргумент: 27 - куб, на котором `cbrt` glibc **не** точен, и это наблюдаемо.

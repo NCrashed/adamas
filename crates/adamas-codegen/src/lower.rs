@@ -500,7 +500,10 @@ fn boxable(repr: Repr, at: &'static str) -> Result<Repr, LowerError> {
 fn fits(got: Repr, want: Repr) -> bool {
     got == want
         || (want.boxed() && got.pointer())
-        || matches!((got, want), (Repr::Boxed, Repr::Record(_)))
+        || matches!(
+            (got, want),
+            (Repr::Boxed, Repr::Record(_)) | (Repr::Boxed, Repr::Array(_))
+        )
 }
 
 /// Как представление называется в отказе.

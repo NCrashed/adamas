@@ -1,0 +1,16 @@
+-- ABI, которого уровень 1 не знает (§5.3).
+--
+-- Тот же отказ и та же причина, что у `extern` (`errors/extern-abi.adamas`):
+-- ABI хранится **как написан**, вместе с кавычками, и отказ показывает
+-- прочитанное, а не своё представление о нём. Спутать `"C"` с `"c"` легко.
+
+data Unit where
+  MkUnit : Unit
+
+twice : UInt64 -> UInt64
+twice n = addUInt64 n n
+
+export "stdcall" fn twice
+
+main : UInt64
+main = twice 2

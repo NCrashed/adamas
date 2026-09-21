@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: export-missing.adamas:13:1: `export` над `missing`: определения с таким именем выше нет (§4.8: объявляют раньше, чем зовут) (§5.3)
+  export "C" fn missing
+  ^^^^^^^^^^^^^^^^^^^^^

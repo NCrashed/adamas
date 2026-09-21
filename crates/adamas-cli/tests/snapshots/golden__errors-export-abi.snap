@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: export-abi.adamas:13:8: ABI "stdcall" не поддержан: уровень 1 FFI знает только "C" (§5.3)
+  export "stdcall" fn twice
+         ^^^^^^^^^

@@ -341,6 +341,44 @@ fn a_wildcard_import_is_refused_by_name() {
     );
 }
 
+/// `fn` после ABI пишется у обеих форм границы, и отказ у них один.
+///
+/// Слово это **контекстное**: занять его ключевым значило бы отвергнуть
+/// `apply fn x = fn x` во всех прочих местах ради двух форм. Цена названа тем
+/// же свидетелем - `export "C" fn fn` законен и стоит в круге печати.
+#[test]
+fn the_word_fn_is_written_after_the_abi_in_both_forms() {
+    for text in [
+        "extern \"C\" fn malloc : UInt64 -> CPtr\n",
+        "export \"C\" fn twice\n",
+    ] {
+        parse(text).unwrap_or_else(|error| panic!("для {text:?} получено {error:?}"));
+    }
+    for text in ["extern \"C\" malloc : UInt64\n", "export \"C\" twice\n"] {
+        let error = parse_error(text);
+        assert!(
+            matches!(error, ParseError::ExpectedFn { .. }),
+            "для {text:?} получено {error:?}"
+        );
+    }
+}
+
+/// Атрибут при `export` - отказ (§4.7).
+///
+/// Обязательство берёт на себя определение, а объявляет его сигнатура; `export`
+/// сигнатуры не несёт, и второе место для обязательства означало бы два ответа
+/// на один вопрос. У `extern` наоборот: там сигнатура и есть объявление.
+#[test]
+fn an_attribute_is_written_at_the_signature_not_at_the_export() {
+    let error = parse_error("@noalloc\nexport \"C\" fn twice\n");
+    assert!(
+        matches!(error, ParseError::AttributedExport { .. }),
+        "получено {error:?}"
+    );
+    parse("@noalloc\nextern \"C\" fn strlen : CPtr -> UInt64\n")
+        .expect("у `extern` атрибут законен: сигнатура тут же");
+}
+
 #[test]
 fn an_import_is_written_at_the_top_level_of_a_file() {
     // Импорт подключает файл к файлу: внутри `module`, `mutual` или `where`

@@ -1652,16 +1652,18 @@ held = adamas_probe_twice
 /// спайном `arrayNew`/`arraySet`, то есть цепочкой значений, и адреса у него не
 /// было вовсе. Свидетель перевёрнут, потому что перевёрнуто утверждение.
 ///
-/// Наблюдаемое выбрано так, чтобы копией его подделать было нельзя. `memfrob`
-/// складывает каждый байт по модулю два с сорока двумя **на месте** и отдаёт тот
-/// же указатель. Значит:
+/// Наблюдаемое выбрано так, чтобы копией его подделать было нельзя. `memset`
+/// заливает `n` байт **на месте** и отдаёт тот же указатель. Значит:
 ///
 /// 1. ноль, прочитанный после займа обычным `arrayIndex`, стал бы сорока двумя
 ///    только если чужая сторона писала в наши байты;
 /// 2. второй заём того же массива обязан дать **тот же адрес** - копия дала бы
 ///    новый;
-/// 3. третий заём складывает обратно, и байт снова ноль - то есть первый заём
-///    не был ни случайностью чтения, ни мусором.
+/// 3. третий заём заливает нулём, и байт снова ноль - то есть первый заём не был
+///    ни случайностью чтения, ни мусором. Прежняя редакция брала здесь
+///    `memfrob` и опиралась на его инволютивность; символ этот есть расширение
+///    glibc, и на macOS его нет - восстановление поэтому сделано вторым заливом,
+///    а не повторным применением.
 ///
 /// Символ настоящий и лежит в libc: свой потребовал бы собранной библиотеки,
 /// которой у `adamas eval` нет (`tests/golden/programs/extern-buffer-probe.adamas`).
@@ -1677,7 +1679,13 @@ blank = 0
 frobbed : UInt8
 frobbed = 42
 
-extern \"C\" fn memfrob : Array n UInt8 -> UInt64 -> CPtr
+filler : Int64
+filler = 42
+
+erase : Int64
+erase = 0
+
+extern \"C\" fn memset : Array n UInt8 -> Int64 -> UInt64 -> CPtr
 
 pick : Bool -> Nat -> Nat -> Nat
 pick True yes no = yes
@@ -1686,10 +1694,10 @@ pick False yes no = no
 body : (ω u : Unit) -> {{Foreign}} Nat
 body u =
   let bytes : Array 4 UInt8 = arrayNew 4 blank
-  let first : CPtr = memfrob bytes 4
+  let first : CPtr = memset bytes filler 4
   let written : UInt8 = arrayIndex bytes 0
-  let again : CPtr = memfrob bytes 0
-  let restored : CPtr = memfrob bytes 4
+  let again : CPtr = memset bytes filler 0
+  let restored : CPtr = memset bytes erase 4
   let back : UInt8 = arrayIndex bytes 0
   pick (eqUInt8 written frobbed)
     (pick (eqUInt64 first again) (pick (eqUInt8 back blank) 3 0) 0)
@@ -1731,12 +1739,15 @@ effect Foreign
 blank : UInt8
 blank = 0
 
-extern \"C\" fn memfrob : Array n UInt8 -> UInt64 -> CPtr
+erase : Int64
+erase = 0
+
+extern \"C\" fn memset : Array n UInt8 -> Int64 -> UInt64 -> CPtr
 
 body : (ω u : Unit) -> {{Foreign}} CPtr
 body u =
   let bytes : Array {cells} UInt8 = arrayNew {cells} blank
-  memfrob bytes 4
+  memset bytes erase 4
 
 main : CPtr
 main = handle @Foreign body with
@@ -1745,7 +1756,7 @@ main = handle @Foreign body with
     );
     let error = refused(&source, "main");
     assert!(
-        matches!(&error, adamas_interp::RunError::ForeignBuffer { symbol } if symbol == "memfrob"),
+        matches!(&error, adamas_interp::RunError::ForeignBuffer { symbol } if symbol == "memset"),
         "отказ обязан называть символ: {error}"
     );
     assert!(

@@ -59,4 +59,8 @@ cc = "1"
 adamas-elab.workspace = true
 adamas-interp.workspace = true
 adamas-parser.workspace = true
+# Манифест корпуса (`tests/golden/eval/adamas.toml`): секцию `[link]` читают и
+# машина, и обе сборки свидетеля. Второй список библиотек здесь разъехался бы с
+# первым молча - и разошёлся бы «символ не найден» у одного из трёх.
+adamas-pkg.workspace = true
 criterion = "0.7"

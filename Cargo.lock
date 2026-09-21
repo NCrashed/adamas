@@ -27,6 +27,7 @@ dependencies = [
  "adamas-elab",
  "adamas-interp",
  "adamas-parser",
+ "adamas-pkg",
  "adamas-runtime",
  "cc",
  "criterion",

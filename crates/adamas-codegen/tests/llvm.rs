@@ -106,7 +106,7 @@ use adamas_codegen::llvm::{MINIMUM_MAJOR, MINIMUM_TOOLS_VARIABLE, Pipeline};
 /// C-стороне её отсутствие уже стоило четырёх молча потерянных имён
 /// (`agreement.rs`, шапка `TAKEN`); печать списка её не заменяет - глазами её
 /// никто не сверял.
-const TAKEN: [&str; 111] = [
+const TAKEN: [&str; 112] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -218,6 +218,7 @@ const TAKEN: [&str; 111] = [
     "workload-scalar",
     "workload-scalar-affine",
     "workload-symbolic",
+    "zlib",
 ];
 
 /// Две нагрузки, отличающиеся **одной** строкой тела витка.

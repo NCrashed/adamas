@@ -30,6 +30,44 @@ pub(crate) fn corpus() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/eval")
 }
 
+/// Секция `[link]` манифеста корпуса (§7.1, §5.3).
+///
+/// Читается **тот же** файл, который читает `adamas eval` через
+/// `project::opened`. Второй список библиотек здесь был бы не дублированием, а
+/// расхождением: договор трёх вычислителей держится на том, что все трое ищут
+/// символ в одном и том же наборе, и разъедься они - один отвечал бы «символ не
+/// найден» там, где двое считают.
+#[allow(
+    clippy::expect_used,
+    reason = "заготовка теста: манифест корпуса лежит в репозитории, и его отсутствие есть сломанный корпус"
+)]
+fn linked() -> &'static adamas_pkg::manifest::Link {
+    static LINK: OnceLock<adamas_pkg::manifest::Link> = OnceLock::new();
+    LINK.get_or_init(|| {
+        adamas_pkg::manifest::Manifest::open(&corpus())
+            .expect("манифест корпуса обязан читаться")
+            .link
+    })
+}
+
+/// Ключи компоновщика корпуса: `-l` и `-L` в написании манифеста.
+fn link_flags() -> Vec<String> {
+    let link = linked();
+    let mut flags: Vec<String> = link
+        .paths
+        .iter()
+        .map(|path| format!("-L{}", path.display()))
+        .collect();
+    flags.extend(link.libraries.iter().map(|name| format!("-l{name}")));
+    flags
+}
+
+/// Связывание, каким его видит машина: тот же список, что у компоновщика.
+fn linkage() -> adamas_interp::Linkage {
+    let link = linked();
+    adamas_interp::Linkage::new(&link.libraries, &link.paths)
+}
+
 /// Место под порождённый C и его сборку - своё у каждого тестового крейта.
 pub(crate) fn scratch() -> PathBuf {
     let dir = Path::new(env!("OUT_DIR")).join(env!("CARGO_CRATE_NAME"));
@@ -182,7 +220,8 @@ fn body(signature: &Signature, name: &str) -> Term {
     reason = "заготовка теста: непогашенная операция означает сломанный корпус"
 )]
 fn ran(signature: &Signature, term: &Term) -> String {
-    let answer = adamas_interp::run(signature, term).expect("операция обязана встретить хендлер");
+    let answer = adamas_interp::run_linked(signature, term, linkage())
+        .expect("операция обязана встретить хендлер");
     // Со срезом, а не целиком: печать понижения режет на той же глубине, и
     // сравнивать надо то, что человек увидит от `adamas eval`.
     answer.printed(Some(PRINT_DEPTH)).to_string()
@@ -304,6 +343,9 @@ pub(crate) fn built_by(name: &str, text: &str, cc: &str, extra: &[&str]) -> (Str
         // вторым компоновщик требует ключ (`native.rs`, `C_MATH`). Тот же ключ
         // ставит `adamas build`.
         .arg("-lm")
+        // Написанные библиотеки корпуса - из его же манифеста, тем же списком,
+        // каким их ищет машина.
+        .args(link_flags())
         .arg("-o")
         .arg(&binary);
     let compiled = compile.output().unwrap();
@@ -1002,7 +1044,13 @@ pub(crate) fn llvm_linked(
     if with_runtime {
         link.args(runtime());
     }
-    let linked = link.arg("-lm").arg("-o").arg(&binary).output().unwrap();
+    let linked = link
+        .arg("-lm")
+        .args(link_flags())
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
     assert!(
         linked.status.success(),
         "{stem}: линковка отказала:\n{}",
@@ -1118,7 +1166,12 @@ pub(crate) fn llvm_printed(
     if !carries_runtime(pipeline) {
         link.args(runtime());
     }
-    let linked = link.arg("-o").arg(&binary).output().unwrap();
+    let linked = link
+        .args(link_flags())
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
     if !linked.status.success() {
         return Mutated {
             printed: "не слинковался".to_owned(),

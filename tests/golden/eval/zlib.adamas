@@ -1,0 +1,100 @@
+-- Обёртка над настоящей библиотекой: сжать, разжать, сверить с исходным
+-- (§5.3, §9 «layered wrapping»; милестоун волны 2 Фазы 8, пункт 2).
+--
+-- Библиотека настоящая - `zlib`, - и приезжает она секцией `[link]` манифеста
+-- корпуса (`tests/golden/eval/adamas.toml`). Тот же список читают все трое:
+-- машина ищет по нему символ `dlopen`'ом, оба понижения получают `-lz`.
+--
+-- Обёртка **слоистая**, и слоёв два отдельными файлами:
+--
+--   * `Zlib/Raw.adamas` - чужие символы дословно по `zlib.h` и ничего больше;
+--   * `Zlib/Bytes.adamas` - идиоматический слой: статус именем вместо `int`,
+--     начальное значение контрольной суммы внутри, имена у аргументов.
+--
+-- Здесь не написано ни одного `extern`: программа корпуса зовёт обёртку, а не
+-- библиотеку, и это и есть то, что §9 просит показать.
+--
+-- Наблюдений шесть, и каждое отвечает своей ошибкой.
+--
+--   * `compress2` ответила `Z_OK`. Ошибись длина места - был бы
+--     `Z_BUF_ERROR` (-5), и разряд погас бы.
+--   * Сжатое **короче** исходного: 21 байт против 35. Отдай обёртка буфер, в
+--     который никто не писал, длина осталась бы равной месту (128).
+--   * `uncompress` ответила `Z_OK`.
+--   * Разжатое той же длины, что исходное.
+--   * Контрольная сумма разжатого **равна** сумме исходного - это и есть
+--     «сверить с исходным».
+--   * Сумма исходного равна известному числу. Без этого разряда предыдущий
+--     был бы зелен и у двух одинаково пустых буферов.
+--
+-- Имя `crc32` наблюдаемо числом нарочно: контрольная сумма, посчитанная не
+-- zlib, а чем угодно другим, дала бы другое. 4187283075 - это
+-- `crc32(0, "abracadabra abracadabra abracadabra", 35)`.
+--
+-- Названная граница: буфер под сжатое автор заводит **сам**, и запас пишет
+-- руками. `compressBound` не выражается, пока длина массива стоит в типе
+-- (§4.11), - обёртка не вправе завести буфер, размер которого узнала в
+-- рантайме. Написано 128 при настоящих 48.
+
+import Zlib.Raw (Unit, MkUnit, Foreign)
+
+import Zlib.Bytes (zOk, zBest, checksum, deflate, inflate, roomLeft)
+
+-- `Bool` объявлен **здесь**, а не в слое, и это не выбор: сравнение отвечает им
+-- по неквалифицированному имени, а объявления подключаемого файла
+-- квалифицированы (см. шапку `Zlib/Bytes.adamas`).
+data Bool where
+  True : Bool
+  False : Bool
+
+pick : Bool -> UInt64 -> UInt64 -> UInt64
+pick True yes no = yes
+pick False yes no = no
+
+-- Литерал в ячейке `arrayNew` умолчания типа не читает и уезжает в `Nat`;
+-- именованная константа его прижимает - тот же приём, что в `extern-buffer`.
+blank : UInt8
+blank = 0
+
+packedRoom : UInt64
+packedRoom = 128
+
+restoredRoom : UInt64
+restoredRoom = 64
+
+-- Тридцать пять букв; тридцать шестая - завершающий ноль, и сжимается он тоже.
+sourceLength : UInt64
+sourceLength = 35
+
+known : UInt64
+known = 4187283075
+
+source : Array 36 UInt8
+source = "abracadabra abracadabra abracadabra"
+
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let packed : Array 128 UInt8 = arrayNew 128 blank
+  let room : Array 1 UInt64 = arrayNew 1 packedRoom
+  let deflated : Int32 = deflate packed room source sourceLength zBest
+  let packedLength : UInt64 = roomLeft room
+  let restored : Array 64 UInt8 = arrayNew 64 blank
+  let back : Array 1 UInt64 = arrayNew 1 restoredRoom
+  let inflated : Int32 = inflate restored back packed packedLength
+  let restoredLength : UInt64 = roomLeft back
+  let sourceSum : UInt64 = checksum source sourceLength
+  let restoredSum : UInt64 = checksum restored restoredLength
+  addUInt64 (pick (eqInt32 deflated zOk) 1 0)
+    (addUInt64 (mulUInt64 (pick (ltUInt64 packedLength sourceLength) 1 0) 10)
+      (addUInt64 (mulUInt64 (pick (eqInt32 inflated zOk) 1 0) 100)
+        (addUInt64 (mulUInt64 (pick (eqUInt64 restoredLength sourceLength) 1 0) 1000)
+          (addUInt64 (mulUInt64 (pick (eqUInt64 restoredSum sourceSum) 1 0) 10000)
+            (mulUInt64 (pick (eqUInt64 sourceSum known) 1 0) 100000)))))
+
+-- 111111.
+main : UInt64
+main = runForeign body

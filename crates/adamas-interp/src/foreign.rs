@@ -122,14 +122,27 @@ type Address = unsafe extern "C" fn();
 
 /// Класс регистра, которым значение переходит границу C.
 ///
-/// Два, а не десять: `SysV` x86-64 делит скаляры на целые и плавающие, и внутри
-/// класса разнятся они только шириной. Этого деления довольно, **пока** ширина
-/// ровно слово; узкий тип пришлось бы звать своей точной сигнатурой, потому что
-/// старшие биты регистра у него не определены.
+/// `SysV` x86-64 делит скаляры на целые и плавающие, и внутри класса разнятся
+/// они только шириной. Этого деления довольно, **пока** ширина ровно слово;
+/// узкий тип приходится звать своей точной сигнатурой, потому что старшие биты
+/// регистра у него не определены.
+///
+/// Отсюда четвёртый класс - [`Class::Half`]. Возвращаемый `int` у чужой стороны
+/// лежит в `EAX`, а что в верхней половине `RAX`, не обещает никто: прочитай
+/// его словом - и статус `Z_OK` окажется числом, зависящим от того, что в
+/// регистре осталось. Он же и есть **половина** zlib: `compress2`,
+/// `uncompress`, `gzread`, `gzwrite`, `gzclose` - все пять отдают `int`.
+///
+/// В позиции **аргумента** узкий тип объявляется словом и правильно: `SysV`
+/// передаёт `int` младшей половиной регистра, и вызываемый читает `EDI`
+/// независимо от того, что мы положили выше. Ровно так живёт и понижение,
+/// печатающее прототип словом (§10 вопрос 183).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Class {
     /// Целый регистр шириной в слово.
     Word,
+    /// Целый регистр шириной в половину слова: сишный `int`. Только в ответе.
+    Half,
     /// Регистр SSE, двойная точность.
     Double,
     /// Регистра нет вовсе: `void`. В позиции аргумента не встречается -
@@ -138,17 +151,16 @@ enum Class {
 }
 
 /// Класс плоского типа; `None` - тип, которым звать нечем.
+///
+/// Тридцатидвухбитные целые классифицируются, но ветви таблицы у них есть
+/// только в позиции ответа: аргументом такой тип даёт форму, которой в таблице
+/// нет, и отказ у неё тот же названный [`RunError::ForeignShape`].
 fn classify(ty: PrimTy) -> Option<Class> {
     match ty {
         PrimTy::Int64 | PrimTy::UInt64 => Some(Class::Word),
+        PrimTy::Int32 | PrimTy::UInt32 => Some(Class::Half),
         PrimTy::Float64 => Some(Class::Double),
-        PrimTy::Int8
-        | PrimTy::Int16
-        | PrimTy::Int32
-        | PrimTy::UInt8
-        | PrimTy::UInt16
-        | PrimTy::UInt32
-        | PrimTy::Float32 => None,
+        PrimTy::Int8 | PrimTy::Int16 | PrimTy::UInt8 | PrimTy::UInt16 | PrimTy::Float32 => None,
     }
 }
 
@@ -264,6 +276,12 @@ impl Foreign {
         let answer = unsafe { invoke(address, &shape, result, args) };
         match answer.ok_or_else(|| self.outside())? {
             Answer::Word(word) => Ok(Some(word)),
+            // Биты литерала ядра нормализованы шириной типа
+            // ([`PrimTy::from_unsigned`]), и у тридцатидвухбитного это младшая
+            // половина: `-1 : Int32` есть `0x0000_0000_FFFF_FFFF`. Знаковое
+            // расширение здесь дало бы другое число и разошлось бы с
+            // понижением на первом же отрицательном статусе zlib.
+            Answer::Half(half) => Ok(Some(u64::from(u32::from_ne_bytes(half.to_ne_bytes())))),
             Answer::Nothing => Ok(None),
         }
     }
@@ -437,18 +455,22 @@ fn within(name: &str, symbol: &str) -> Result<Address, RunError> {
 enum Answer {
     /// Слово.
     Word(u64),
+    /// Сишный `int`. Отдельно от слова, потому что верхняя половина регистра
+    /// у него не определена и биты литерала ядра берутся из младшей.
+    Half(i32),
     /// Ничего: `void`.
     Nothing,
 }
 
 /// Вызов по классам регистров; `None` - формы нет в таблице.
 ///
-/// Шесть форм, и у каждой свидетель: три первых - `tests/outward.rs`, три
-/// добавленных треком D - корпус (`eval/extern-c` даёт `() -> long`,
+/// Двенадцать форм, и у каждой свидетель: три первых - `tests/outward.rs`, три
+/// добавленных треком D волны 1 - корпус (`eval/extern-c` даёт `() -> long`,
 /// `eval/foreign-resource` даёт `long -> void`, `adamas-cli/tests/linking.rs`
-/// даёт `(long, long) -> long`). Седьмая добавляется тремя строками и обязана
-/// приходить со своим свидетелем - молча растущая таблица здесь означала бы
-/// непроверенный ABI.
+/// даёт `(long, long) -> long`), седьмая - `eval/extern-buffer` (трек B волны
+/// 2), последние пять - `eval/zlib` и `eval/zlib-stream` (трек D волны 2).
+/// Тринадцатая добавляется тремя строками и обязана приходить со своим
+/// свидетелем - молча растущая таблица здесь означала бы непроверенный ABI.
 ///
 /// # Safety
 ///
@@ -506,6 +528,56 @@ unsafe fn invoke(address: Address, shape: &[Class], result: Class, args: &[u64])
             let call: extern "C" fn(u64, u64, u64) = unsafe { std::mem::transmute(address) };
             call(args[0], args[1], args[2]);
             Some(Answer::Nothing)
+        }
+        // Дальше - формы обёртки над zlib (§9, «layered wrapping», волна 2).
+        // Ставятся поимённо, а не семейством: таблица перечислима по построению
+        // (арность `k` над плоскими типами даёт `10^(k+1)` сигнатур), и решение
+        // в пользу libffi этим треком не принимается. Пять форм - ровно пять
+        // функций, которых просит обёртка, и ни одной про запас.
+
+        // `(long, long, long) -> long`: `crc32(crc, buf, len)` - одолженный
+        // буфер со счётом длины и **широким** ответом (`uLong`).
+        ([Class::Word, Class::Word, Class::Word], Class::Word) => {
+            let call: extern "C" fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(address) };
+            Some(Answer::Word(call(args[0], args[1], args[2])))
+        }
+        // `long -> int`: `gzclose`. Деструктор ресурса, отдающий статус.
+        ([Class::Word], Class::Half) => {
+            let call: extern "C" fn(u64) -> i32 = unsafe { std::mem::transmute(address) };
+            Some(Answer::Half(call(args[0])))
+        }
+        // `(long, long, long) -> int`: `gzread`, `gzwrite` - хендл, наш буфер,
+        // длина.
+        ([Class::Word, Class::Word, Class::Word], Class::Half) => {
+            let call: extern "C" fn(u64, u64, u64) -> i32 = unsafe { std::mem::transmute(address) };
+            Some(Answer::Half(call(args[0], args[1], args[2])))
+        }
+        // `(long, long, long, long) -> int`: `uncompress(dest, destLen, src,
+        // srcLen)` - два одолженных буфера и out-параметр длины.
+        ([Class::Word, Class::Word, Class::Word, Class::Word], Class::Half) => {
+            let call: extern "C" fn(u64, u64, u64, u64) -> i32 =
+                unsafe { std::mem::transmute(address) };
+            Some(Answer::Half(call(args[0], args[1], args[2], args[3])))
+        }
+        // `(long, long, long, long, long) -> int`: `compress2(dest, destLen,
+        // src, srcLen, level)`. Уровень сжатия у C есть `int`, и объявляется он
+        // словом: младшая половина регистра у аргумента и есть то, что
+        // вызываемый прочтёт.
+        (
+            [
+                Class::Word,
+                Class::Word,
+                Class::Word,
+                Class::Word,
+                Class::Word,
+            ],
+            Class::Half,
+        ) => {
+            let call: extern "C" fn(u64, u64, u64, u64, u64) -> i32 =
+                unsafe { std::mem::transmute(address) };
+            Some(Answer::Half(call(
+                args[0], args[1], args[2], args[3], args[4],
+            )))
         }
         _ => None,
     }

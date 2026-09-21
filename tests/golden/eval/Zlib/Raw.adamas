@@ -1,0 +1,57 @@
+-- Сырой слой обёртки над zlib: чужие символы и больше ничего (§5.3, §9).
+--
+-- §9 называет это «layered wrapping», и деление здесь не украшение. В этом
+-- файле нет ни одного решения: типы списаны с `zlib.h` дословно, имена -
+-- настоящие имена символов, и всё, что сюда можно внести неправильно, есть
+-- расхождение с заголовком. Всё, что **решается** - что считать успехом, откуда
+-- берётся начальное значение контрольной суммы, кто закрывает хендл, - живёт
+-- слоем выше (`Zlib/Bytes.adamas`, `Zlib/Stream.adamas`).
+--
+-- Как читаются типы `zlib.h` уровнем 1 (§5.3):
+--
+--   * `Bytef *` есть `Array n UInt8` - одолженный буфер (трек A волны 2).
+--   * `uLongf *destLen` есть `Array 1 UInt64`: out-параметр - буфер на одну
+--     ячейку, и чужая сторона пишет в него слово.
+--   * `uLong` есть `UInt64`, `gzFile` есть `CPtr` - оба машинное слово.
+--   * `uInt` и `int` в **аргументе** объявляются словом: `SysV` передаёт их
+--     младшей половиной регистра, и вызываемый читает её независимо от того,
+--     что лежит выше. В **ответе** так нельзя, и потому статус объявлен
+--     `Int32`: верхняя половина `RAX` у сишного `int` не определена никем.
+--
+-- Длина буфера чужой стороне не сообщается сама - она едет соседним
+-- аргументом, ровно как в C. Сверить объявленное с настоящим нечем ни на каком
+-- этапе (§10 вопрос 183): `dlsym` типа не несёт, заголовка компилятор не
+-- читает.
+
+-- Единица нужна самой метке: объявление эффекта строит её элиминатор, и
+-- кодомен ветки `return` у него есть `Unit`. Встроенной она не бывает (§5.3),
+-- поэтому стоит здесь и уезжает вместе с меткой.
+data Unit where
+  MkUnit : Unit
+
+effect Foreign
+
+-- `int compress2(Bytef *dest, uLongf *destLen, const Bytef *source,
+--                uLong sourceLen, int level)`
+extern "C" fn compress2
+  : Array n UInt8 -> Array m UInt64 -> Array k UInt8 -> UInt64 -> UInt64 -> Int32
+
+-- `int uncompress(Bytef *dest, uLongf *destLen, const Bytef *source,
+--                 uLong sourceLen)`
+extern "C" fn uncompress
+  : Array n UInt8 -> Array m UInt64 -> Array k UInt8 -> UInt64 -> Int32
+
+-- `uLong crc32(uLong crc, const Bytef *buf, uInt len)`
+extern "C" fn crc32 : UInt64 -> Array n UInt8 -> UInt64 -> UInt64
+
+-- `gzFile gzopen(const char *path, const char *mode)`
+extern "C" fn gzopen : Array n UInt8 -> Array m UInt8 -> CPtr
+
+-- `int gzwrite(gzFile file, voidpc buf, unsigned len)`
+extern "C" fn gzwrite : CPtr -> Array n UInt8 -> UInt64 -> Int32
+
+-- `int gzread(gzFile file, voidp buf, unsigned len)`
+extern "C" fn gzread : CPtr -> Array n UInt8 -> UInt64 -> Int32
+
+-- `int gzclose(gzFile file)`
+extern "C" fn gzclose : CPtr -> Int32

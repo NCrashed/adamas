@@ -120,7 +120,7 @@ use std::path::PathBuf;
 /// Механизм известен - два трека дописывают в **отсортированный** массив, git
 /// сливает обе стороны молча, а объявленная длина остаётся от одной, - и
 /// чинится он второй половиной проверки ниже, а не внимательностью.
-const TAKEN: [&str; 111] = [
+const TAKEN: [&str; 112] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -232,6 +232,7 @@ const TAKEN: [&str; 111] = [
     "workload-scalar",
     "workload-scalar-affine",
     "workload-symbolic",
+    "zlib",
 ];
 
 /// Программы, чей отказ - свойство языка, и потому в знаменателе они не стоят.

@@ -49,3 +49,29 @@ uint64_t adamas_bench_stir(uint64_t buffer, uint64_t accumulator) {
     (void)buffer;
     return (accumulator << 1) | (accumulator >> 63);
 }
+
+/* Цикл индиректных вызовов: чужая сторона зовёт колбэк на каждом витке.
+ *
+ * `noinline` стоит **ради симметрии замера**, а не ради строгости. Без него
+ * компилятор вправе развернуть этот цикл внутрь `adamas_bench_native`, увидеть
+ * там указатель константой, девиртуализовать вызов и встроить тело - и стенд
+ * померил бы инлайнинг, а не цену колбэка. С ним обе половины пары ходят одним
+ * и тем же индиректным вызовом, и разность есть ровно разница вызываемых. */
+__attribute__((noinline)) uint64_t adamas_bench_through(uint64_t turns,
+                                                        uint64_t (*step)(uint64_t)) {
+    uint64_t accumulator = 1u;
+    for (uint64_t at = 0; at < turns; at++) {
+        accumulator = step(accumulator);
+    }
+    return accumulator;
+}
+
+/* Тот же поворот, что у `adamas_bench_turn`, но своей стороны границы. */
+static uint64_t adamas_bench_local(uint64_t accumulator) {
+    return (accumulator << 1) | (accumulator >> 63);
+}
+
+/* Тот же цикл со **своим** вызываемым: точка сравнения для колбэка. */
+uint64_t adamas_bench_native(uint64_t turns) {
+    return adamas_bench_through(turns, adamas_bench_local);
+}

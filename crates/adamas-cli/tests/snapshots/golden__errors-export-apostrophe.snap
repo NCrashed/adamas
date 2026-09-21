@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: export-apostrophe.adamas:16:1: `export` над `twice'`: символом у линкера служит написанное имя, а сишный идентификатор состоит из букв, цифр и подчёркиваний и не начинается с цифры (§5.3)
+  export "C" fn twice'
+  ^^^^^^^^^^^^^^^^^^^^

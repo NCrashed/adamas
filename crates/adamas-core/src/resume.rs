@@ -760,6 +760,18 @@ mod tests {
     }
 
     #[test]
+    fn untailing_stops_at_a_let_whose_value_resumes() {
+        // `let a = resume Zero in resume a`. Вердикт тут общий в любом случае -
+        // резумпцию зовут дважды, - но спрашивается здесь не он, а контракт
+        // самой `untailed`: снятое ею применение обязано быть **единственным**.
+        // Отдай она `Some`, и всякий читатель, у которого нет проверки на
+        // повторное упоминание, принял бы эту ветку за хвостовую.
+        let value = Term::App(Rc::new(Term::var(0)), Rc::new(Term::constant("Zero")));
+        let body = Term::App(Rc::new(Term::var(1)), Rc::new(Term::var(0)));
+        assert_eq!(super::untailed(&bound(value, body), 0), None);
+    }
+
+    #[test]
     fn resuming_twice_is_general_even_when_the_outer_call_is_tail() {
         // `resume (resume Zero)`: хвост снят, а имя осталось - значит зовут её
         // дважды, и сегмент режется.

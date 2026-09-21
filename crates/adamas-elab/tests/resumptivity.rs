@@ -129,6 +129,18 @@ runBoxed act = handle act with
   return v -> {{ got = v }}
   boxed -> {{ got = (resume MkUnit).got }}
 
+-- Две ветки с разными вердиктами: площадка отвечает за худший, а не за
+-- последний. Порядок веток тут - порядок объявления операций.
+effect Mixed where
+  kept : Unit
+  dropped : Unit
+
+runMixed : ({{Mixed}} Nat) -> Nat
+runMixed act = handle act with
+  return v -> v
+  kept -> bump (resume MkUnit)
+  dropped -> resume MkUnit
+
 -- Мультишот: вердикт не считается вовсе, ω-резумпция ничего не обещает.
 effect Tossed where
   tossed : Bool
@@ -157,6 +169,7 @@ runCounted act = handle act with
         ("Chosen", Verdict::General),
         ("Wrapped", Verdict::General),
         ("Boxed", Verdict::General),
+        ("Mixed", Verdict::General),
         ("Tossed", Verdict::General),
         ("Counted", Verdict::General),
     ] {

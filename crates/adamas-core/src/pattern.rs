@@ -1215,13 +1215,12 @@ impl Compiler<'_> {
         let mut branches = Vec::with_capacity(verdict.constructors.len());
         let mut sites = Vec::new();
         for (index, constructor) in verdict.constructors.iter().enumerate() {
-            let (inner_rows, inner_example) = if crate::term::short(constructor)
-                == crate::prim::TRUE
-            {
-                (&equal, &taken)
-            } else {
-                (&apart, &rest)
-            };
+            let (inner_rows, inner_example) =
+                if crate::term::short(constructor) == crate::prim::TRUE {
+                    (&equal, &taken)
+                } else {
+                    (&apart, &rest)
+                };
             let tree = self.solve(ctx, columns, inner_rows, target, inner_example)?;
             branches.push(Branch {
                 constructor: Rc::clone(constructor),

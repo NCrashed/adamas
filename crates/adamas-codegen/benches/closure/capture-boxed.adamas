@@ -1,0 +1,61 @@
+-- Виток: массив лежит в среде **в коробке** - развилка (б) вопроса 189.
+--
+-- Пара к `capture-array.adamas`. Коробка заводится один раз, до цикла, - на
+-- захвате пересечение одно, - а разворачивается она на каждом применении,
+-- потому что разбор стоит в теле замыкания. Разность двух прогонов есть цена
+-- (б) в среде: тег плюс загрузка поля сверх той же загрузки ячейки.
+--
+-- Написана руками по той же причине, что `apply-boxed.adamas`: компилятор (б)
+-- не делает, и мерить её иначе нечем.
+--
+-- **Заодно это единственный доступный здесь базис.** Слово средой замыкание не
+-- несёт вовсе - `\acc -> mixed w acc` при `w : UInt64` отвергается «захват
+-- замыкания: ожидалось указательное значение, а пришло плоское `UInt64`», -
+-- то есть плоский скаляр через захват сегодня не проходит там, где проходит
+-- плоский массив.
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  True : Bool
+  False : Bool
+
+data Box where
+  MkBox : Array 1 UInt64 -> Box
+
+effect Foreign
+
+extern "C" fn adamas_bench_calls : UInt64
+
+blank : UInt64
+blank = 1
+
+block : UInt64
+block = 1000
+
+mixed : UInt64 -> UInt64 -> UInt64
+mixed v acc = addUInt64 (mulUInt64 acc 3) v
+
+opened : Box -> UInt64
+opened (MkBox ys) = arrayIndex ys 0
+
+inner : (UInt64 -> UInt64) -> UInt64 -> UInt64 -> UInt64
+inner f 0 acc = acc
+inner f n acc = inner f (subUInt64 n 1) (f acc)
+
+outer : (UInt64 -> UInt64) -> UInt64 -> UInt64 -> UInt64
+outer f 0 acc = acc
+outer f n acc = outer f (subUInt64 n 1) (inner f block acc)
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let xs : Array 1 UInt64 = arrayNew 1 blank
+  let b : Box = MkBox xs
+  let f : UInt64 -> UInt64 = \acc -> mixed (opened b) acc
+  let calls : UInt64 = adamas_bench_calls
+  outer f calls 1
+
+main : UInt64
+main = handle @Foreign body with
+  return v -> v

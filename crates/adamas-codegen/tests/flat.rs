@@ -275,6 +275,152 @@ fn a_flat_value_crosses_a_closure_at_a_named_price() {
     assert_eq!(live, 0, "прогон оставил блоки живыми");
 }
 
+/// Плоский **массив** через ту же границу, и обеими позициями (вопрос 189).
+///
+/// Отличается он от плоского скаляра выше не льготой, а сортом: `Array n a`
+/// при `Flat a` есть один объект кучи с заголовком на всю длину (§4.11), и
+/// наружу он ходит указателем всегда - плоская у него нагрузка внутри.
+/// Поэтому обёртки ему не заводится, и счётчик это называет числом.
+///
+/// Считается так: массив - ячейка, два замыкания - две, плоский **ответ**
+/// каждого боксируется решением 158 - ещё две, и плоский аргумент `10` у
+/// второго - шестая. Итого шесть, и **ни одной** на сам массив: боксируйся он
+/// наравне со скаляром, их было бы семь.
+const ARRAY_THROUGH: &str = "\
+type Int = Int64
+
+applying : Array 2 Int64 -> (Array 2 Int64 -> Int64) -> Int64
+applying xs f = f xs
+
+calling : Int64 -> (Int64 -> Int64) -> Int64
+calling x f = f x
+
+main : Int64
+main =
+  let xs : Array 2 Int64 = arraySet (arrayNew 2 3) 1 4
+  addInt64
+    (applying xs (\\ys -> arrayIndex ys 1))
+    (calling 10 (\\k -> mulInt64 k (arrayIndex xs 0)))
+";
+
+/// Плоский массив проходит замыкание аргументом и захватом, без обёртки.
+#[test]
+fn a_flat_array_crosses_a_closure_by_both_positions() {
+    assert_eq!(
+        harness::printed(ARRAY_THROUGH),
+        "34",
+        "печать машины изменилась - свидетель говорит не о том"
+    );
+    let stderr = harness::agreed("массив-через-замыкание", ARRAY_THROUGH)
+        .unwrap_or_else(|error| panic!("массив через замыкание: {error}"));
+    let (allocated, live) = harness::blocks("массив-через-замыкание", &stderr);
+    assert_eq!(
+        allocated, 6,
+        "цена разошлась: массив, два замыкания, две обёртки ответа и одна \
+         обёртка плоского аргумента - боксируйся сам массив, их было бы семь"
+    );
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
+}
+
+/// Вектор (§4.9) не проходит **ни одной** из тех же двух позиций.
+///
+/// Свидетель написан прогоном и стоит здесь ровно затем, чтобы опровержение
+/// вопроса 189 - «та же правка нужна вектору» - держалось тестом, а не
+/// памятью. Массив пускать было нечего чинить: он уже указатель. Вектор
+/// указателем не бывает - заголовка нет, счётчика нет, а `Simd 4 Float32`
+/// занимает шестнадцать байт при слоте в слово (`adamas.h`), и боксированной
+/// формы у него нет ни одной: ни укладки в дескрипторе (`Flat` для него не
+/// выводится, `adamas-elab/src/flat.rs`), ни конструктора-обёртки
+/// (`simd.rs::a_vector_does_not_fit_an_object_slot`).
+const VECTOR_LANE: &str = "\
+type Layout = { size : UInt32, align : UInt32 }
+
+class Primitive a where
+  simdLayout : Layout
+
+one : Float32
+one = 1.0
+
+two : Float32
+two = 2.0
+
+seeded : Simd 4 Float32
+seeded = simdSet (simdSplat 4 one) 1 two
+";
+
+#[test]
+fn a_vector_crosses_a_closure_by_neither_position() {
+    let refused = |what: &str, source: &str| -> String {
+        harness::text(source)
+            .err()
+            .unwrap_or_else(|| panic!("{what}: вектор прошёл границу замыкания"))
+            .to_string()
+    };
+
+    let argument = refused(
+        "аргументом",
+        &format!(
+            "{VECTOR_LANE}
+applying : Simd 4 Float32 -> (Simd 4 Float32 -> Float32) -> Float32
+applying v f = f v
+
+main : Float32
+main = applying seeded (\\w -> simdLane w 1)
+"
+        ),
+    );
+    assert!(
+        argument.contains("Simd 4 Float32"),
+        "отказ в позиции аргумента не называет вектор: {argument}"
+    );
+
+    let capture = refused(
+        "захватом",
+        &format!(
+            "{VECTOR_LANE}
+calling : Float32 -> (Float32 -> Float32) -> Float32
+calling x f = f x
+
+main : Float32
+main =
+  let v : Simd 4 Float32 = seeded
+  calling one (\\k -> addFloat32 k (simdLane v 1))
+"
+        ),
+    );
+    assert!(
+        capture.contains("захват замыкания") && capture.contains("Simd 4 Float32"),
+        "отказ в позиции захвата не называет ни позицию, ни вектор: {capture}"
+    );
+}
+
+/// Плоский **скаляр** проходит аргументом и не проходит захватом.
+///
+/// Половина решения 158, которой в коде нет: аргумент боксируется
+/// ([`a_flat_value_crosses_a_closure_at_a_named_price`]), а захват
+/// отвергается. Названо здесь потому, что без этого свидетеля разница между
+/// массивом и словом читалась бы наоборот - будто слово в среде дешевле.
+#[test]
+fn a_flat_scalar_is_still_not_captured() {
+    let error = harness::text(
+        "\
+calling : Int64 -> (Int64 -> Int64) -> Int64
+calling x f = f x
+
+main : Int64
+main =
+  let w : Int64 = 1
+  calling 41 (\\k -> addInt64 k w)
+",
+    )
+    .expect_err("плоский скаляр в среде замыкания не проходит");
+    let text = error.to_string();
+    assert!(
+        text.contains("захват замыкания") && text.contains("плоское `Int64`"),
+        "отказ назван иначе: {text}"
+    );
+}
+
 /// Плоский **ответ** через границу вызова: имя значением (§10 вопрос 158).
 ///
 /// Третья половина решения 158, и до этого трека её не было: аргумент боксирует

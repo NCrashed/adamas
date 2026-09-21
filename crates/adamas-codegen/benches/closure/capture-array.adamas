@@ -1,0 +1,47 @@
+-- Виток: замыкание несёт **плоский массив** средой - форма `userdata` (§5.3).
+--
+-- §5.3 кладёт в `userdata` среду замыкания, а буфер - типичнейшее её
+-- содержимое. Пара к `capture-boxed.adamas`: там та же среда, но массив в ней
+-- лежит в коробке, как поручила бы развилка (б) вопроса 189.
+--
+-- До трека B волны 3 эта программа не понижалась вовсе: «захват замыкания:
+-- ожидалось указательное значение, а пришло плоский массив».
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  True : Bool
+  False : Bool
+
+effect Foreign
+
+extern "C" fn adamas_bench_calls : UInt64
+
+blank : UInt64
+blank = 1
+
+block : UInt64
+block = 1000
+
+mixed : UInt64 -> UInt64 -> UInt64
+mixed v acc = addUInt64 (mulUInt64 acc 3) v
+
+inner : (UInt64 -> UInt64) -> UInt64 -> UInt64 -> UInt64
+inner f 0 acc = acc
+inner f n acc = inner f (subUInt64 n 1) (f acc)
+
+outer : (UInt64 -> UInt64) -> UInt64 -> UInt64 -> UInt64
+outer f 0 acc = acc
+outer f n acc = outer f (subUInt64 n 1) (inner f block acc)
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let xs : Array 1 UInt64 = arrayNew 1 blank
+  let f : UInt64 -> UInt64 = \acc -> mixed (arrayIndex xs 0) acc
+  let calls : UInt64 = adamas_bench_calls
+  outer f calls 1
+
+main : UInt64
+main = handle @Foreign body with
+  return v -> v

@@ -59,6 +59,7 @@ pub mod meta;
 pub mod mult;
 pub mod pattern;
 pub mod prim;
+pub mod resume;
 pub mod row;
 pub mod sig;
 pub mod solve;

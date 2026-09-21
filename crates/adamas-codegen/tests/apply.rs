@@ -376,6 +376,7 @@ fn a_second_form_behind_the_pointer_fails_loudly() {
         handlers: Vec::new(),
         foreigns: Vec::new(),
         exports: Vec::new(),
+        callbacks: Vec::new(),
         functions: vec![entry, produces],
         entry: FuncId(0),
         source: None,

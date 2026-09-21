@@ -63,9 +63,9 @@ use std::fmt::Write as _;
 use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Elems, Export, ExportId, Expr, FiberOp, ForeignId,
-    ForeignResult, Form, FuncId, Function, HandlerId, LabelId, LocalId, PackId, Packing, Program,
-    Repr, Salvage, Stride, Verdict,
+    Arm, Binding, Callback, CallbackId, Constructor, CtorId, Elems, Export, ExportId, Expr,
+    FiberOp, ForeignId, ForeignResult, Form, FuncId, Function, HandlerId, LabelId, LocalId, PackId,
+    Packing, Program, Repr, Salvage, Stride, Verdict,
 };
 use crate::split::Suspension;
 
@@ -230,6 +230,15 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     for id in &taken {
         let _ = writeln!(out, "{};", trampoline(&format!("take_{}", id.0)));
     }
+    // Трамплины колбэка объявляются здесь по тому же доводу, что и обёртки
+    // экспорта: адрес трамплина берёт тело функции, стоящей выше него.
+    for (at, described) in program.callbacks.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "{};",
+            trampoline_signature(CallbackId(at), described, true)
+        );
+    }
     for (at, described) in program.handlers.iter().enumerate() {
         let _ = writeln!(out, "{};", branches_signature(at));
         if described.captured.iter().any(|it| it.fact.present) {
@@ -246,6 +255,7 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
         branches(&mut out, program, at);
     }
     exported_bodies(&mut out, program);
+    callbacks(&mut out, program, true);
 
     answer(&mut out, program);
     out.push_str(ENTRY);
@@ -648,6 +658,111 @@ fn exported_bodies(out: &mut String, program: &Program) {
             export.function.0,
             given.join(", ")
         );
+    }
+}
+
+/// Имя трамплина колбэка уровня 2 (§5.3).
+///
+/// Ключ - номер формы, а не имя определения: два колбэка одной формы
+/// различаются только средой, а среда едет вторым словом.
+pub(crate) fn trampoline_symbol(id: CallbackId) -> String {
+    format!("adamas_callback_{}", id.0)
+}
+
+/// Заголовок трамплина: сишное соглашение, последним аргументом - `userdata`.
+///
+/// Позиция `userdata` **последняя**, и это названная граница, а не умолчание:
+/// так её кладут GNU `qsort_r`, GLib и `CURLOPT_WRITEFUNCTION`, а API,
+/// кладущий `void *` первым (BSD `qsort_r`), уровнем 2 не покрыт.
+fn trampoline_signature(id: CallbackId, described: &Callback, statics: bool) -> String {
+    let taken: Vec<String> = described
+        .parameters
+        .iter()
+        .enumerate()
+        .map(|(at, (ty, _))| format!("{} a{at}", scalar(Repr::Flat(*ty))))
+        .collect();
+    format!(
+        "{}{} {}({}, void *userdata)",
+        if statics { "static " } else { "" },
+        scalar(Repr::Flat(described.result.0)),
+        trampoline_symbol(id),
+        taken.join(", ")
+    )
+}
+
+/// Тела трамплинов колбэка уровня 2 (§5.3).
+///
+/// Печатается это **текстом**, а не понижением, и довод записан у
+/// [`crate::ir::Callback`]: трамплин вносит вектор evidence снаружи, из
+/// `userdata`, а ни одна форма понижения такого не выражает - у первой вектора
+/// нет вовсе, вторая берёт его скрытым аргументом от своего вызывающего.
+///
+/// Тот же текст берут оба бэкенда: у C он `static` в той же единице, у LLVM -
+/// внешний в спутнике (`emit_llvm::support`), где лежат те же `flat.c` и
+/// `release.c`. Названная цена: на пути `.ll` трамплин собран сишным
+/// компилятором, а не `llc`; наблюдаемо это ничем, кроме имени в дизассемблере,
+/// потому что соглашение вызова у обоих одно - сишное.
+///
+/// Владение расписано построчно, потому что ошибка здесь - течь либо
+/// use-after-free, а не неверный ответ:
+///
+/// * замыкание в слоте 0 **одолжено** - `adamas_apply` его заимствует
+///   (`adamas.h`), и дропает его дроп самой среды после чужого вызова;
+/// * промежуточное частичное применение приходит **владением** (копия
+///   замыкания) и дропается тут же;
+/// * аргументы уходят владением, ровно как их ждёт `adamas_apply`;
+/// * ответ приходит владением, и биты из него читаются до дропа.
+pub(crate) fn callbacks(out: &mut String, program: &Program, statics: bool) {
+    for (at, described) in program.callbacks.iter().enumerate() {
+        let id = CallbackId(at);
+        let _ = writeln!(
+            out,
+            "/* Трамплин колбэка уровня 2 (§5.3): `userdata` несёт замыкание и вектор evidence. */"
+        );
+        let _ = writeln!(out, "{} {{", trampoline_signature(id, described, statics));
+        out.push_str(
+            "    adamas_value pack = (adamas_value)userdata;\n\
+             \x20   const adamas_evidence *ev = (const adamas_evidence *)adamas_field(pack, 1);\n\
+             \x20   adamas_kont kont;\n\
+             \x20   adamas_kont_init(&kont);\n\
+             \x20   adamas_value held = adamas_field(pack, 0);\n",
+        );
+        for (position, (ty, wrapper)) in described.parameters.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "    adamas_value w{position} = adamas_alloc({}u, 1u);",
+                wrapper.0
+            );
+            let _ = writeln!(
+                out,
+                "    adamas_slot_write(w{position}, 0, adamas_word_{}(a{position}));",
+                ty.name()
+            );
+            let callee = if position == 0 {
+                "held".to_owned()
+            } else {
+                format!("t{}", position - 1)
+            };
+            let _ = writeln!(
+                out,
+                "    adamas_value t{position} = adamas_apply({callee}, ev, &kont, w{position});"
+            );
+            if position > 0 {
+                let _ = writeln!(out, "    adamas_drop_value({callee});");
+            }
+        }
+        let last = described.parameters.len().saturating_sub(1);
+        let _ = writeln!(
+            out,
+            "    adamas_value answer = adamas_kont_run(&kont, t{last});"
+        );
+        let _ = writeln!(
+            out,
+            "    {} bits = adamas_bits_{}(adamas_slot_bits(answer, 0));",
+            scalar(Repr::Flat(described.result.0)),
+            described.result.0.name()
+        );
+        out.push_str("    adamas_drop_value(answer);\n    return bits;\n}\n\n");
     }
 }
 
@@ -1564,10 +1679,15 @@ impl Emitter<'_> {
             // ширины указателя, то есть ровно то, чем уровень 1 считает `CPtr`.
             Expr::ArrayData { .. }
             | Expr::Exported(_)
+            // Адрес трамплина (§5.3, уровень 2) - то же слово.
+            | Expr::Trampoline(_)
+            | Expr::Userdata(_)
             | Expr::RegionLast { .. } => Repr::Flat(PrimTy::UInt64),
             Expr::RegionRead { stride, .. } => stride.element(),
             Expr::Erased
             | Expr::Construct { .. }
+            // Среда колбэка (§5.3) - объект с двумя указательными слотами.
+            | Expr::Environment { .. }
             | Expr::ConstructClosure { .. }
             // Ответ сравнения - конструктор `Bool` (§4.3), то есть
             // непосредственное значение: аргументы плоские, ответ нет.
@@ -1678,6 +1798,23 @@ impl Emitter<'_> {
                 arguments,
             } => self.foreign(*function, arguments, depth),
             Expr::Exported(id) => self.exported(*id, depth),
+            Expr::Trampoline(id) => self.trampolined(*id, depth),
+            // Адрес среды словом: сам объект остаётся связыванием, и дропает
+            // его вставка RC после чужого вызова - та же пара, что у буфера.
+            Expr::Userdata(local) => {
+                let pad = Self::pad(depth);
+                let name = self.temp();
+                let _ = writeln!(
+                    self.out,
+                    "{pad}uint64_t {name} = (uint64_t)(uintptr_t)v{}; /* userdata */",
+                    local.0
+                );
+                name
+            }
+            Expr::Environment {
+                constructor,
+                closure,
+            } => self.userdata(*constructor, closure, depth),
             Expr::ArrayData { array } => self.lending(array, depth),
             Expr::Closure { function, captured } => self.closure(*function, captured, depth),
             Expr::Handle {
@@ -2891,6 +3028,54 @@ impl Emitter<'_> {
         let _ = writeln!(
             self.out,
             "{pad}uint64_t {name} = (uint64_t)(uintptr_t)&{symbol}; /* export \"C\" */"
+        );
+        name
+    }
+
+    /// Адрес трамплина колбэка уровня 2 (§5.3).
+    ///
+    /// Тем же ходом, что [`Emitter::exported`], и различие названо там же:
+    /// адрес называет не обёртку определения, а трамплин, чья среда приезжает
+    /// вторым словом.
+    fn trampolined(&mut self, id: CallbackId, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}uint64_t {name} = (uint64_t)(uintptr_t)&{}; /* колбэк уровня 2 */",
+            trampoline_symbol(id)
+        );
+        name
+    }
+
+    /// Среда колбэка уровня 2: замыкание и вектор evidence в одном объекте.
+    ///
+    /// Вектор берётся **у кадра**, а не приходит выражением: в порождённом коде
+    /// он зовётся `ev` и живёт скрытым аргументом второй формы. У первой формы
+    /// его нет вовсе, и там ставится пустой - ровно тем же ходом, каким его
+    /// заводит площадка хендлера в чистом отрезке ([`Emitter::rooted`]).
+    ///
+    /// Ссылка своя: в слоте объекта вектор живёт наравне с прочими детьми, и
+    /// дропает его `adamas_release_value` - `ADAMAS_TAG_EVIDENCE` идёт там
+    /// чужим тегом, то есть блок отдаётся рантайму целиком.
+    fn userdata(&mut self, constructor: CtorId, closure: &Expr, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let taken = self.value(closure, depth);
+        let name = self.temp();
+        let vector = if self.hidden {
+            "adamas_evidence_dup((adamas_evidence *)ev)".to_owned()
+        } else {
+            "adamas_evidence_empty()".to_owned()
+        };
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_value {name} = adamas_alloc({}u, 2u); /* userdata колбэка */",
+            constructor.0
+        );
+        let _ = writeln!(self.out, "{pad}adamas_set_field({name}, 0, {taken});");
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_set_field({name}, 1, (adamas_value){vector});"
         );
         name
     }

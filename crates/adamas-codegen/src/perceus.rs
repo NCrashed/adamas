@@ -124,6 +124,7 @@ pub fn insert(program: Program) -> Program {
         functions,
         foreigns,
         exports,
+        callbacks,
         entry,
         source,
     } = program;
@@ -139,6 +140,7 @@ pub fn insert(program: Program) -> Program {
         functions,
         foreigns,
         exports,
+        callbacks,
         entry,
         source,
     }
@@ -304,6 +306,11 @@ fn borrowed_array(argument: &Expr) -> Option<LocalId> {
             Expr::Local(local) => Some(*local),
             _ => None,
         },
+        // Среда колбэка (§5.3, уровень 2) одалживается ровно тем же порядком и
+        // по той же причине: наружу едет её адрес, а сам объект обязан
+        // пережить чужой вызов - внутри него чужая сторона зовёт трамплин, и
+        // трамплин берёт из среды и замыкание, и вектор evidence.
+        Expr::Userdata(local) => Some(*local),
         _ => None,
     }
 }
@@ -413,6 +420,10 @@ impl Pass<'_> {
             // Адрес экспортированного символа (§5.3) - константа компоновщика:
             // блока за ней нет, счётчика нет, и считать по ней нечего.
             | Expr::Exported(_)
+            // Адрес трамплина (§5.3, уровень 2) - тем же доводом: статическая
+            // функция, среда её едет отдельным словом.
+            | Expr::Trampoline(_)
+            | Expr::Userdata(_)
             | Expr::Layout { .. } => drops(owned.iter().copied().collect::<Vec<_>>(), expr),
             // Векторные `load`/`store` (§4.9) идут тем же путём, что скалярные
             // чтение и запись: колонка у них та же, владение то же, и
@@ -456,6 +467,24 @@ impl Pass<'_> {
             Expr::Closure { function, captured } => {
                 let (captured, spare) = self.sequence(captured, owned);
                 drops(spare, Expr::Closure { function, captured })
+            }
+            // Среда колбэка (§5.3, уровень 2) - объект с двумя слотами, и
+            // считается он как конструктор с одним аргументом: замыкание уходит
+            // в слот владением, а вектор evidence узел дублирует сам - он
+            // выражением не приходит, его берёт эмиттер у кадра.
+            Expr::Environment {
+                constructor,
+                closure,
+            } => {
+                let (mut taken, spare) = self.sequence(vec![*closure], owned);
+                let closure = Box::new(taken.pop().unwrap_or(Expr::Erased));
+                drops(
+                    spare,
+                    Expr::Environment {
+                        constructor,
+                        closure,
+                    },
+                )
             }
             Expr::Perform { .. }
             | Expr::Handle { .. }
@@ -1479,6 +1508,12 @@ impl Pass<'_> {
             | Expr::LayoutField { .. }
             | Expr::ArrayData { .. }
             | Expr::Exported(_)
+            // Среда колбэка (§5.3, уровень 2) ячейку не придерживает, и это тот
+            // же консерватизм, что у хендлера ниже: блок её живёт ровно чужой
+            // вызов, а ложное «да» вернуло бы течь.
+            | Expr::Trampoline(_)
+            | Expr::Userdata(_)
+            | Expr::Environment { .. }
             | Expr::Pack { .. }
             | Expr::Unpack { .. }
             // Область региона под переписывание тоже не годится, и по тому же
@@ -1614,6 +1649,12 @@ impl Pass<'_> {
             | Expr::LayoutField { .. }
             | Expr::ArrayData { .. }
             | Expr::Exported(_)
+            // Среда колбэка (§5.3, уровень 2) ячейку не придерживает, и это тот
+            // же консерватизм, что у хендлера ниже: блок её живёт ровно чужой
+            // вызов, а ложное «да» вернуло бы течь.
+            | Expr::Trampoline(_)
+            | Expr::Userdata(_)
+            | Expr::Environment { .. }
             | Expr::Pack { .. }
             | Expr::Unpack { .. }
             // Область региона под переписывание тоже не годится, и по тому же

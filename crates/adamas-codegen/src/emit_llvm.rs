@@ -360,7 +360,7 @@ use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
 use adamas_core::source::Location;
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Elems, ExportId, Expr, Fact, FiberOp, ForeignId,
+    Arm, Binding, CallbackId, Constructor, CtorId, Elems, ExportId, Expr, Fact, FiberOp, ForeignId,
     ForeignResult, Form, FuncId, Function, HandlerId, LabelId, LocalId, PackId, Packing, Program,
     Repr, Salvage, Slot, SlotTy, Source, Stride, Unique, Verdict,
 };
@@ -1899,6 +1899,21 @@ fn second_form(out: &mut String, program: &Program) {
             "\n",
         ));
     }
+    if !program.callbacks.is_empty() {
+        out.push_str(concat!(
+            "; Трамплины колбэка уровня 2 (§5.3): тела их лежат в спутнике, где\n",
+            "; уже есть `flat.c` и `release.c`. Здесь берётся только адрес.\n",
+            "declare ptr @adamas_evidence_dup(ptr)\n",
+        ));
+        for at in 0..program.callbacks.len() {
+            let _ = writeln!(
+                out,
+                "declare void @{}()",
+                crate::emit_c::trampoline_symbol(crate::ir::CallbackId(at))
+            );
+        }
+        out.push('\n');
+    }
     if scoped(program) {
         out.push_str(concat!(
             "; Дроп среды кадра scope: деструктор замыканием в слоте 0 (§3.3).\n",
@@ -2660,9 +2675,13 @@ impl<'a> Builder<'a> {
             // Смещение внутри области (§3.6), адрес нагрузки одолженного массива
             // и адрес своей функции, видимой C (§5.3), - все три плоское слово
             // ширины указателя, то есть ровно то, чем уровень 1 считает `CPtr`.
-            Expr::ArrayData { .. } | Expr::Exported(_) | Expr::RegionLast { .. } => {
-                Repr::Flat(PrimTy::UInt64)
-            }
+            // Туда же адрес трамплина и адрес среды колбэка (§5.3, уровень 2):
+            // наружу едет слово, и прототип чужого символа объявлен `i64`.
+            Expr::ArrayData { .. }
+            | Expr::Exported(_)
+            | Expr::Trampoline(_)
+            | Expr::Userdata(_)
+            | Expr::RegionLast { .. } => Repr::Flat(PrimTy::UInt64),
             Expr::RegionRead { stride, .. } => stride.element(),
             // Ответ сравнения - конструктор `Bool` (§4.3): аргументы плоские,
             // ответ указательный. Ответ конструктора указателен по построению -
@@ -2867,6 +2886,21 @@ impl<'a> Builder<'a> {
                 arguments,
             } => self.foreign(*function, arguments),
             Expr::Exported(id) => Ok(self.exported(*id)),
+            Expr::Trampoline(id) => Ok(self.trampolined(*id)),
+            // Адрес среды словом: `ptrtoint` тем же доводом, что у буфера.
+            Expr::Userdata(local) => {
+                let object = self.operand(*local)?;
+                let name = self.temp();
+                self.instruction(
+                    &format!("{name} = ptrtoint ptr {object} to i64"),
+                    self.here(),
+                );
+                Ok(name)
+            }
+            Expr::Environment {
+                constructor,
+                closure,
+            } => self.userdata(*constructor, closure),
             Expr::ArrayData { array } => self.lending(array),
             // Приставки сняты `prologue` выше, и досюда узел не
             // доезжает. Ветвь стоит ради исчерпывающего разбора: пропади она,
@@ -4616,6 +4650,50 @@ impl<'a> Builder<'a> {
         name
     }
 
+    /// Адрес трамплина колбэка уровня 2 (§5.3).
+    ///
+    /// Тем же `ptrtoint`, что [`Body::exported`]. Сам трамплин лежит в
+    /// спутнике, а не в `.ll`: см. [`crate::emit_c::callbacks`].
+    fn trampolined(&mut self, id: CallbackId) -> String {
+        let symbol = crate::emit_c::trampoline_symbol(id);
+        let name = self.temp();
+        self.instruction(
+            &format!("{name} = ptrtoint ptr @{symbol} to i64"),
+            self.here(),
+        );
+        name
+    }
+
+    /// Среда колбэка уровня 2: замыкание и вектор evidence в одном объекте.
+    ///
+    /// Зеркало [`crate::emit_c::Emitter::environment`], и расхождение здесь
+    /// стоило бы разного ответа у двух понижений на одной программе.
+    fn userdata(&mut self, constructor: CtorId, closure: &Expr) -> Result<String, LlvmError> {
+        let taken = self.value(closure)?;
+        let vector = self.temp();
+        match self.ev.clone() {
+            Some(ev) => self.instruction(
+                &format!("{vector} = call ptr @adamas_evidence_dup(ptr {ev})"),
+                self.here(),
+            ),
+            None => self.instruction(
+                &format!("{vector} = call ptr @adamas_evidence_empty()"),
+                self.here(),
+            ),
+        }
+        let object = self.temp();
+        self.instruction(
+            &format!(
+                "{object} = call ptr @adamas_alloc(i16 {}, i64 2) ; userdata",
+                constructor.0
+            ),
+            self.here(),
+        );
+        self.store_slot(&object, 0, Repr::Boxed, &taken);
+        self.store_slot(&object, 1, Repr::Boxed, &vector);
+        Ok(object)
+    }
+
     fn foreign(&mut self, function: ForeignId, arguments: &[Expr]) -> Result<String, LlvmError> {
         let described = self.program.foreigns[function.0].clone();
         let mut given = Vec::with_capacity(arguments.len());
@@ -6177,6 +6255,11 @@ fn support(program: &Program, answer: Answer) -> String {
     }
     out.push_str(crate::emit_c::PRINTER);
     out.push('\n');
+
+    // Трамплины колбэка (§5.3) - тот же текст, что у C-бэкенда, и внешние: их
+    // адрес берёт `.ll`, лежащий в другой единице трансляции. Место выбрано
+    // после `release.c`: трамплин зовёт `adamas_drop_value`.
+    crate::emit_c::callbacks(&mut out, program, false);
 
     // Раскладка объекта записана дважды - здесь и в `emit_llvm.rs`, - потому
     // что слот `.ll` читает инструкцией. Расхождение обязано ронять **сборку**,

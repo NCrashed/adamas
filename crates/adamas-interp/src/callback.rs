@@ -51,7 +51,16 @@ use crate::foreign::Linkage;
 struct Registered {
     signature: *const Signature,
     linkage: *const Linkage,
-    name: Name,
+    code: Code,
+}
+
+/// Кого зовёт трамплин: имя экспорта либо замыкание, приехавшее `userdata`.
+enum Code {
+    /// Уровень 1: имя определения, видимого C.
+    Named(Name),
+    /// Уровень 2: терм замыкания. Держит его сама регистрация - иначе адрес,
+    /// розданный чужой стороне, указывал бы в освобождённое.
+    Closed(Rc<Term>),
 }
 
 thread_local! {
@@ -116,7 +125,7 @@ pub(crate) fn registered(
         it.borrow_mut().replace(Registered {
             signature: std::ptr::from_ref(signature),
             linkage: std::ptr::from_ref(linkage),
-            name: Rc::clone(name),
+            code: Code::Named(Rc::clone(name)),
         })
     });
     // Через тип указателя, а не прямым приведением: приведение элемента
@@ -125,6 +134,49 @@ pub(crate) fn registered(
     let trampoline: extern "C" fn(u64, u64) -> i32 = comparing;
     let address = trampoline as usize as u64;
     Ok((Registration { previous }, address))
+}
+
+/// Регистрирует **замыкание** и отдаёт пару «адрес трамплина, `userdata`»
+/// (§5.3, уровень 2).
+///
+/// Отличие от [`registered`] одно и оно несущее: среда едет **вторым словом**,
+/// а не остаётся в переменной потока. Переменная потока держит то, чему у
+/// чужой стороны соответствия нет вовсе - сигнатуру и список библиотек; сам же
+/// колбэк трамплин берёт из `userdata`, ровно как его берёт понижение. Иначе
+/// договор трёх вычислителей про `userdata` не говорил бы ничего.
+///
+/// # Errors
+///
+/// [`RunError::Callback`] - формы колбэка нет среди трамплинов машины.
+pub(crate) fn enclosed(
+    signature: &Signature,
+    linkage: &Linkage,
+    closure: &Rc<Term>,
+    form: &adamas_core::sig::Callback,
+    symbol: &str,
+) -> Result<(Registration, u64, u64), RunError> {
+    if form.params != [PrimTy::UInt64, PrimTy::UInt64] || form.result != PrimTy::Int32 {
+        return Err(RunError::Callback {
+            symbol: symbol.to_owned(),
+            why: "формы нет среди трамплинов машины: поддержан `(UInt64, UInt64) -> Int32`, \
+                  то есть компаратор `qsort_r`"
+                .to_owned(),
+        });
+    }
+    let held = Rc::clone(closure);
+    // Адрес терма и есть `userdata`: живым его держит регистрация, а снимается
+    // она раньше, чем кончится чужой вызов.
+    let data = Rc::as_ptr(&held) as usize as u64;
+    let previous = CURRENT.with(|it| {
+        it.borrow_mut().replace(Registered {
+            signature: std::ptr::from_ref(signature),
+            linkage: std::ptr::from_ref(linkage),
+            code: Code::Closed(held),
+        })
+    });
+    let trampoline: extern "C" fn(u64, u64, u64) -> i32 = comparing_env;
+    let address = trampoline as usize as u64;
+    Ok((Registration { previous }, address, data))
 }
 
 /// Отказ, случившийся внутри колбэка, - если он был.
@@ -147,7 +199,7 @@ pub(crate) fn taken() -> Option<RunError> {
 /// отказа. Внутренний инвариант компилятора, сломавшийся под чужим кадром,
 /// обязан доехать до автора названным отказом, а не сигналом.
 extern "C" fn comparing(left: u64, right: u64) -> i32 {
-    let answer = std::panic::catch_unwind(|| answered(&[left, right])).unwrap_or_else(|_| {
+    let answer = std::panic::catch_unwind(|| answered(&[left, right], None)).unwrap_or_else(|_| {
         Err(RunError::Callback {
             symbol: "?".to_owned(),
             why: "внутри колбэка сломался инвариант машины: раскрутить панику через \
@@ -155,6 +207,30 @@ extern "C" fn comparing(left: u64, right: u64) -> i32 {
                 .to_owned(),
         })
     });
+    landed(answer)
+}
+
+/// Трамплин формы `int (*)(const void *, const void *, void *)` - уровень 2.
+///
+/// Третьим словом приезжает `userdata`, и в нём лежит **адрес замыкания**: не
+/// сигнатура, не имя, а сам колбэк. Сверяется он с тем, что держит
+/// регистрация, и расхождение - отказ: чужая сторона вправе позвать трамплин с
+/// чужим словом, и считать по нему было бы чтением по произвольному адресу.
+extern "C" fn comparing_env(left: u64, right: u64, env: u64) -> i32 {
+    let answer =
+        std::panic::catch_unwind(|| answered(&[left, right], Some(env))).unwrap_or_else(|_| {
+            Err(RunError::Callback {
+                symbol: "?".to_owned(),
+                why: "внутри колбэка сломался инвариант машины: раскрутить панику через \
+                      чужой кадр нечем (§5.3), и она переведена в отказ"
+                    .to_owned(),
+            })
+        });
+    landed(answer)
+}
+
+/// Ответ трамплина чужой стороне: число либо ноль при отказе.
+fn landed(answer: Result<u64, RunError>) -> i32 {
     match answer {
         Ok(word) => {
             i32::from_ne_bytes(u32::try_from(word & 0xffff_ffff).unwrap_or(0).to_ne_bytes())
@@ -173,9 +249,11 @@ extern "C" fn comparing(left: u64, right: u64) -> i32 {
     }
 }
 
-/// Считает зарегистрированное определение на пришедших словах.
-fn answered(args: &[u64]) -> Result<u64, RunError> {
-    let (signature, linkage, name) = CURRENT.with(|it| {
+/// Считает зарегистрированный колбэк на пришедших словах.
+///
+/// `env` - слово `userdata`, если чужая сторона его передала (уровень 2).
+fn answered(args: &[u64], env: Option<u64>) -> Result<u64, RunError> {
+    let (signature, linkage, code, closed) = CURRENT.with(|it| {
         let slot = it.borrow();
         let found = slot.as_ref().ok_or_else(|| RunError::Callback {
             symbol: "?".to_owned(),
@@ -183,18 +261,40 @@ fn answered(args: &[u64]) -> Result<u64, RunError> {
                   возврата из чужого вызова уровень 1 не обещает - это уровень 3"
                 .to_owned(),
         })?;
-        Ok::<_, RunError>((found.signature, found.linkage, Rc::clone(&found.name)))
+        let (code, closed) = match &found.code {
+            Code::Named(name) => (Either::Named(Rc::clone(name)), None),
+            Code::Closed(term) => (
+                Either::Closed(Rc::clone(term)),
+                Some(Rc::as_ptr(term) as usize as u64),
+            ),
+        };
+        Ok::<_, RunError>((found.signature, found.linkage, code, closed))
     })?;
-    // SAFETY: оба указателя поставлены [`registered`] из живых заимствований
-    // машины, а снимает запись [`Registration`] - дропом, до того как
-    // заимствования кончатся. Чужая сторона зовёт трамплин **внутри** того
-    // самого вызова, на время которого регистрация и стоит.
+    // Слово `userdata` сверяется с тем, что зарегистрировано. Чужая сторона
+    // вправе передать своё - и тогда это не наш колбэк.
+    if let (Some(given), Some(held)) = (env, closed) {
+        if given != held {
+            return Err(RunError::Callback {
+                symbol: "?".to_owned(),
+                why: "`userdata` трамплина не тот, что зарегистрирован: чужая сторона \
+                      передала чужое слово, и считать по нему нечего (§5.3, уровень 2)"
+                    .to_owned(),
+            });
+        }
+    }
+    // SAFETY: оба указателя поставлены [`registered`] либо [`enclosed`] из
+    // живых заимствований машины, а снимает запись [`Registration`] - дропом,
+    // до того как заимствования кончатся. Чужая сторона зовёт трамплин
+    // **внутри** того самого вызова, на время которого регистрация и стоит.
     #[allow(
         unsafe_code,
         reason = "переменная потока вместо среды: у указателя на функцию среды нет (§5.3)"
     )]
     let (signature, linkage) = unsafe { (&*signature, &*linkage) };
-    let mut term = reference(signature, &name)?;
+    let (mut term, shown) = match &code {
+        Either::Named(name) => (reference(signature, name)?, name.to_string()),
+        Either::Closed(closure) => ((**closure).clone(), "замыкание".to_owned()),
+    };
     for word in args {
         term = Term::App(
             Rc::new(term),
@@ -205,10 +305,16 @@ fn answered(args: &[u64]) -> Result<u64, RunError> {
     match answer {
         Term::Prim(Prim::Lit(_, word)) => Ok(word),
         other => Err(RunError::Callback {
-            symbol: name.to_string(),
+            symbol: shown,
             why: format!("ответ колбэка не литерал: {other}"),
         }),
     }
+}
+
+/// Кого зовём, вынутое из-под заимствования переменной потока.
+enum Either {
+    Named(Name),
+    Closed(Rc<Term>),
 }
 
 /// Ссылка на определение с **заземлёнными** аргументами обобщения.

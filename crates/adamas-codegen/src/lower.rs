@@ -127,16 +127,16 @@ use adamas_core::level::Level;
 use adamas_core::mult::Mult;
 use adamas_core::prim::{ArrayOp, Prim, PrimTy, SimdOp};
 use adamas_core::row::{Row, RowVar, Tail};
-use adamas_core::sig::{CLOSING, Cross, DefinitionKind, Signature};
+use adamas_core::sig::{CLOSING, Callback as CallbackForm, Cross, DefinitionKind, Signature};
 use adamas_core::source::{Location, SourceFile};
 use adamas_core::term::{Args, Case, Index, Name, Term};
 use adamas_core::value::{Env, Lvl, Value};
 
 use crate::ir::{
-    Arm, Binding, Branch, Constructor, CtorId, Elems, Export, ExportId, Expr, Fact, FiberOp,
-    Foreign, ForeignId, ForeignResult, Form, FuncId, Function, Handler, HandlerId, Label, LabelId,
-    LocalId, PackId, Packing, Program, Repr, Slot as PackSlot, SlotTy, Source, Stride, Task,
-    Variant, Verdict,
+    Arm, Binding, Branch, Callback, CallbackId, Constructor, CtorId, Elems, Export, ExportId, Expr,
+    Fact, FiberOp, Foreign, ForeignId, ForeignResult, Form, FuncId, Function, Handler, HandlerId,
+    Label, LabelId, LocalId, PackId, Packing, Program, Repr, Slot as PackSlot, SlotTy, Source,
+    Stride, Task, Variant, Verdict,
 };
 
 /// Почему понижение отказало.
@@ -583,6 +583,17 @@ const MASK: &str = "#mask.";
 /// по вектору evidence, потому что ближайший выигрывает, а `eval/fibers.adamas`
 /// пишет те же имена без всякого питомника.
 const NURSERY: &str = "withNursery";
+/// Слот `userdata` чужого API (§5.3, уровень 2).
+///
+/// Читается по имени, тем же соглашением прелюдии, что [`NURSERY`]: встроенных
+/// имён в языке нет ни одного, поэтому объявляет его программа - постулатом
+/// типа `CPtr`, - а понижение подставляет на его место среду колбэка. Позицию
+/// в объявлении пишет автор, и это не косметика: у GNU `qsort_r` `void *`
+/// стоит пятым, у BSD - четвёртым, и оба порядка выражаются написанием, а не
+/// правилом компилятора.
+const CALLBACK_ENV: &str = "callbackEnv";
+/// Имя конструктора среды колбэка в порождённом коде.
+const USERDATA: &str = "#среда";
 /// Уступка: файбер уходит в хвост очереди.
 const SUSPEND: &str = "suspend";
 /// Порождение без ответа.
@@ -785,6 +796,16 @@ struct Lowerer<'a> {
     exports: Vec<Export>,
     /// Номер своего символа по имени определения.
     exported: HashMap<Name, ExportId>,
+    /// Трамплины колбэков уровня 2 (§5.3): трамплин на форму, а не на место.
+    callbacks: Vec<Callback>,
+}
+
+/// Куда целит колбэк в аргументе чужого вызова (§5.3).
+enum Aimed {
+    /// Уровень 1: адрес обёртки экспортированного определения, среды нет.
+    Symbol(ExportId),
+    /// Уровень 2: замыкание, чья среда поедет в `userdata`.
+    Closure(Expr),
 }
 
 impl<'a> Lowerer<'a> {
@@ -811,6 +832,7 @@ impl<'a> Lowerer<'a> {
             externs: HashMap::new(),
             exports: Vec::new(),
             exported: HashMap::new(),
+            callbacks: Vec::new(),
         }
     }
 
@@ -929,6 +951,7 @@ impl<'a> Lowerer<'a> {
             functions: self.functions,
             foreigns: self.foreigns,
             exports: self.exports,
+            callbacks: self.callbacks,
             entry: entry_id,
             source: self.file.map(|file| split_path(file.name())),
         })
@@ -2665,6 +2688,12 @@ impl<'a> Lowerer<'a> {
         // границу, - и разъехаться ему тут нечем.
         let mut prelude: Vec<(Binding, Expr)> = Vec::new();
         let mut given = Vec::with_capacity(self.foreigns[function.0].parameters.len());
+        // Среда колбэка уровня 2 (§5.3) и места, куда её кладут. Мест может не
+        // быть вовсе (уровень 1), а `callbackEnv` вправе стоять и **раньше**
+        // самого колбэка - так пишет BSD, - поэтому слот заполняется после
+        // обхода, а не по ходу.
+        let mut pack: Option<LocalId> = None;
+        let mut slots: Vec<usize> = Vec::new();
         for (position, carried) in parameters.iter().enumerate() {
             let Some(argument) = arguments.get(position) else {
                 return Err(LowerError::Missing {
@@ -2681,9 +2710,42 @@ impl<'a> Lowerer<'a> {
             // Колбэк едет адресом символа, и связывать его нечем: адрес есть
             // константа компоновщика, вычисления за ней нет никакого, и
             // порядок §3.1 он не наблюдает.
-            if matches!(carried, Cross::Callback(_)) {
-                let id = self.callback(name, argument)?;
-                given.push(Expr::Exported(id));
+            if let Cross::Callback(form) = carried {
+                match self.callback(scope, name, argument)? {
+                    Aimed::Symbol(id) => given.push(Expr::Exported(id)),
+                    Aimed::Closure(closure) => {
+                        if pack.is_some() {
+                            return Err(LowerError::Foreign {
+                                name: name.to_string(),
+                                why: "колбэков со средой в одном вызове больше одного: \
+                                      `callbackEnv` называет один, и какой - не написано",
+                            });
+                        }
+                        let id = self.trampoline(form)?;
+                        let constructor = self.userdata_tag()?;
+                        let binding = Binding {
+                            name: "среда колбэка".to_owned(),
+                            local: scope.fresh(),
+                            fact: Fact::present(Mult::Many).shaped(Repr::Boxed),
+                        };
+                        pack = Some(binding.local);
+                        prelude.push((
+                            binding,
+                            Expr::Environment {
+                                constructor,
+                                closure: Box::new(closure),
+                            },
+                        ));
+                        given.push(Expr::Trampoline(id));
+                    }
+                }
+                continue;
+            }
+            // Слот `userdata`: сюда понижение кладёт среду, а не значение
+            // постулата - тела у него нет вовсе.
+            if self.userdata_slot(argument) {
+                slots.push(given.len());
+                given.push(Expr::Erased);
                 continue;
             }
             let (repr, at) = match carried {
@@ -2714,6 +2776,32 @@ impl<'a> Lowerer<'a> {
             }
         }
         let result = self.foreigns[function.0].result;
+        // Среда и место под неё - парой, и парой же проверяются. Одна половина
+        // без другой есть либо трамплин без среды (вызов в никуда), либо слово
+        // без значения (постулат без тела).
+        match (pack, slots.is_empty()) {
+            (Some(local), false) => {
+                for slot in slots {
+                    given[slot] = Expr::Userdata(local);
+                }
+            }
+            (Some(_), true) => {
+                return Err(LowerError::Foreign {
+                    name: name.to_string(),
+                    why: "у колбэка есть среда, а класть её некуда: чужая функция обязана \
+                          принимать `userdata`, и позицию его пишет автор - `callbackEnv` \
+                          в аргументе (§5.3, уровень 2)",
+                });
+            }
+            (None, false) => {
+                return Err(LowerError::Foreign {
+                    name: name.to_string(),
+                    why: "`callbackEnv` написан, а колбэка со средой в этом вызове нет: \
+                          уровень 1 среды не несёт, и класть в `userdata` нечего",
+                });
+            }
+            (None, true) => {}
+        }
         let mut value = Expr::Foreign {
             function,
             arguments: given,
@@ -2730,36 +2818,129 @@ impl<'a> Lowerer<'a> {
         Ok((value, result.repr()))
     }
 
-    /// Колбэк в аргументе чужого вызова: имя экспортированного определения.
+    /// Колбэк в аргументе чужого вызова: имя экспорта либо замыкание (§5.3).
     ///
-    /// Форма проверяется **здесь**, а не типами, и граница названа: тип
-    /// пропускает в эту позицию всякую функцию нужной формы - лямбду, частичное
-    /// применение, параметр, - а уровень 1 берёт голый указатель, при котором
-    /// среды нет вовсе. Тому, у кого среда есть, здесь отказ, и §5.3 называет
-    /// его место: `userdata` уровня 2.
-    fn callback(&mut self, callee: &Name, argument: &Arg<'_>) -> Result<ExportId, LowerError> {
+    /// Уровень решается **написанным**, а не догадкой. Имя, объявленное
+    /// `export "C"`, - уровень 1: указатель без среды. Всё прочее, у чего среда
+    /// есть, - уровень 2: наружу едет трамплин, среда его в `userdata`.
+    ///
+    /// Достроенный по типу колбэк отвергается на обоих уровнях: и адреса у
+    /// него нет, и написанного замыкания тоже.
+    fn callback(
+        &mut self,
+        scope: &mut Scope,
+        callee: &Name,
+        argument: &Arg<'_>,
+    ) -> Result<Aimed, LowerError> {
         let Arg::Written(term) = argument else {
             return Err(LowerError::Foreign {
                 name: callee.to_string(),
-                why: "колбэк достроен по типу, а не написан: адреса у него нет",
+                why: "колбэк достроен по типу, а не написан: ни адреса, ни среды у него нет",
             });
         };
-        let Term::Const(name, _, _) = term else {
-            return Err(LowerError::Foreign {
-                name: callee.to_string(),
-                why: "в позиции колбэка стоит не имя: уровень 1 берёт указатель на \
-                      определение, а у лямбды, частичного применения и параметра есть \
-                      среда, и она едет в `userdata` на уровне 2",
-            });
-        };
-        if self.signature.export(name).is_none() {
+        // Имя решается до уровня 2 целиком, и обоими исходами: экспортированное
+        // едет указателем, неэкспортированное **отвергается здесь**. Пусти его
+        // дальше - и отказ пришёл бы от представления недобранного вызова, то
+        // есть сказал бы про слоты вместо того, чего у имени нет.
+        if let Term::Const(name, _, _) = term {
+            if self.signature.export(name).is_some() {
+                return self.export(name).map(Aimed::Symbol);
+            }
             return Err(LowerError::Foreign {
                 name: name.to_string(),
                 why: "в позиции колбэка стоит имя, не объявленное `export \"C\"`: \
-                      символа у линкера у него нет",
+                      символа у линкера у него нет, а среды - у имени",
             });
         }
-        self.export(name)
+        let closure = self.given(scope, argument, Repr::Boxed, "колбэк уровня 2")?;
+        let Expr::Closure { function, .. } = &closure else {
+            return Err(LowerError::Foreign {
+                name: callee.to_string(),
+                why: "в позиции колбэка стоит не замыкание и не имя, объявленное \
+                      `export \"C\"`: уровень 1 берёт указатель на определение, уровень 2 - \
+                      замыкание, чья среда едет в `userdata`",
+            });
+        };
+        // Слоты трамплина - указательные, и это не выбор трамплина, а
+        // договор `adamas_apply` (`adamas.h`): через границу замыкания едет
+        // указатель. Функция, понизившаяся иначе, приняла бы от трамплина
+        // объект там, где ждёт биты, и поймал бы это сишный компилятор, а не
+        // мы.
+        let lowered = &self.functions[function.0];
+        let straight = lowered.result == Repr::Boxed
+            && lowered
+                .parameters
+                .iter()
+                .all(|it| !it.fact.present || it.fact.repr.pointer());
+        if !straight {
+            return Err(LowerError::Foreign {
+                name: callee.to_string(),
+                why: "замыкание в позиции колбэка понизилось плоскими слотами: через \
+                      границу замыкания едет указатель (§4.11, решение 158), и трамплину \
+                      такое не отдать",
+            });
+        }
+        Ok(Aimed::Closure(closure))
+    }
+
+    /// Стоит ли в этой позиции метка `userdata` (§5.3, уровень 2).
+    ///
+    /// Узнаётся по **имени**, и это то же соглашение прелюдии, каким узнаются
+    /// `withNursery` и его операции: встроенных имён в языке нет ни одного,
+    /// поэтому `callbackEnv` объявляет сама программа - постулатом типа `CPtr`,
+    /// - а понижение подставляет на его место среду. Тела у постулата нет, и
+    /// всякое другое его употребление остаётся застрявшим термом.
+    fn userdata_slot(&self, argument: &Arg<'_>) -> bool {
+        let Arg::Written(Term::Const(name, _, _)) = argument else {
+            return false;
+        };
+        &**name == CALLBACK_ENV
+    }
+
+    /// Номер трамплина по форме колбэка: трамплин заводится один раз на форму.
+    fn trampoline(&mut self, form: &CallbackForm) -> Result<CallbackId, LowerError> {
+        let mut parameters = Vec::with_capacity(form.params.len());
+        for ty in &form.params {
+            let wrapper = self.prim_wrapper(*ty)?;
+            parameters.push((*ty, wrapper));
+        }
+        let result = (form.result, self.prim_wrapper(form.result)?);
+        let described = Callback { parameters, result };
+        if let Some(at) = self.callbacks.iter().position(|it| *it == described) {
+            return Ok(CallbackId(at));
+        }
+        self.callbacks.push(described);
+        Ok(CallbackId(self.callbacks.len() - 1))
+    }
+
+    /// Конструктор среды колбэка: два указательных слота - замыкание и вектор.
+    ///
+    /// Заводится тем же приёмом, что обёртка примитива ([`Lowerer::prim_wrapper`]),
+    /// и по тому же доводу: дроп, печать и таблица слотов достаются ему даром,
+    /// а второй механизм объектов кучи ради двух слотов заводить незачем.
+    fn userdata_tag(&mut self) -> Result<CtorId, LowerError> {
+        let fact = Fact::declared(Mult::One).shaped(Repr::Boxed);
+        let binders = vec![fact, fact];
+        let found = self
+            .constructors
+            .iter()
+            .find(|it| it.data == USERDATA && it.binders == binders);
+        if let Some(constructor) = found {
+            return Ok(constructor.tag);
+        }
+        let tag = u16::try_from(self.constructors.len())
+            .ok()
+            .filter(|tag| *tag < TAGS)
+            .ok_or(LowerError::TooManyConstructors { limit: TAGS })?;
+        self.constructors.push(Constructor {
+            tag: CtorId(tag),
+            name: USERDATA.to_owned(),
+            data: USERDATA.to_owned(),
+            binders,
+            params: 0,
+            labels: None,
+        });
+        Ok(CtorId(tag))
     }
 
     /// Номер своего символа, видимого C: обёртка заводится один раз на символ.

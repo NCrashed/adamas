@@ -29,6 +29,13 @@ use crate::RunError;
 use crate::foreign::{Foreign, Linkage};
 use crate::frame::{Frame, Kont, Segment};
 
+/// Слот `userdata` чужого API (§5.3, уровень 2).
+///
+/// То же соглашение прелюдии, каким живут `withNursery` и его операции, и то
+/// же имя, которое читает понижение (`adamas-codegen/src/lower.rs`): вторая
+/// запись имени здесь разошлась бы с первой молча.
+const CALLBACK_ENV: &str = "callbackEnv";
+
 /// Машина: сигнатура и таблица живых резумпций.
 pub struct Machine<'a> {
     signature: &'a Signature,
@@ -501,7 +508,22 @@ impl<'a> Machine<'a> {
         // Регистрации колбэков живут до конца вызова по тому же доводу: адрес
         // трамплина без записи о том, кого он зовёт, - вызов в никуда.
         let mut registered = Vec::new();
+        // Среда колбэка уровня 2 и места, куда её кладут (§5.3). Как и у
+        // понижения, `callbackEnv` вправе стоять раньше самого колбэка,
+        // поэтому слот заполняется после обхода.
+        let mut userdata: Option<u64> = None;
+        let mut slots: Vec<usize> = Vec::new();
         for (at, argument) in arguments.into_iter().enumerate() {
+            // Слот `userdata`: постулат, чьё значение подставляет не машина, а
+            // регистрация. То же соглашение об имени, каким его читает
+            // понижение (`lower::userdata_slot`).
+            if let Value::Neutral(Head::Global(name, ..), empty) = &*argument {
+                if &**name == CALLBACK_ENV && empty.is_empty() {
+                    slots.push(bits.len());
+                    bits.push(0);
+                    continue;
+                }
+            }
             let want = match &it.params[at] {
                 Cross::Word(ty) => *ty,
                 Cross::Nothing | Cross::Erased => continue,
@@ -509,7 +531,7 @@ impl<'a> Machine<'a> {
                 // функцию среды нет, и всё, у чего она есть, сюда не годится.
                 // Смотрится значение **до** разворота: разверни его, и
                 // определение стало бы замыканием, у которого имени уже нет.
-                Cross::Callback(_) => {
+                Cross::Callback(form) => {
                     // Второй колбэк в одном вызове - **отказ**, а не второй
                     // адрес. Трамплин статический, и кого он зовёт, помнит одна
                     // переменная потока: две регистрации подряд оставили бы
@@ -523,23 +545,41 @@ impl<'a> Machine<'a> {
                              статический и помнит одного",
                         ));
                     }
-                    let Value::Neutral(Head::Global(exported, ..), empty) = &*argument else {
-                        return Err(it.uncallable("в позиции колбэка стоит не имя"));
-                    };
-                    if !empty.is_empty() {
-                        return Err(it.uncallable("имя в позиции колбэка уже применено"));
+                    // Уровень решается тем же, чем его решает понижение:
+                    // именем экспорта против всего остального. Смотрится
+                    // значение **до** разворота: разверни его, и определение
+                    // стало бы замыканием, у которого имени уже нет.
+                    if let Value::Neutral(Head::Global(exported, ..), empty) = &*argument {
+                        if let Some(shape) = self.signature.export(exported) {
+                            if !empty.is_empty() {
+                                return Err(it.uncallable("имя в позиции колбэка уже применено"));
+                            }
+                            let (guard, address) = crate::callback::registered(
+                                self.signature,
+                                &self.linkage,
+                                exported,
+                                shape,
+                            )?;
+                            registered.push(guard);
+                            bits.push(address);
+                            continue;
+                        }
                     }
-                    let Some(shape) = self.signature.export(exported) else {
-                        return Err(it.uncallable("имя в позиции колбэка не объявлено `export`"));
-                    };
-                    let (guard, address) = crate::callback::registered(
+                    // Уровень 2: наружу едет трамплин, среда его - вторым
+                    // словом. Замыкание читается обратно в терм, потому что
+                    // считает машина термы, а не значения; захваченное в нём
+                    // уже подставлено, и это и есть среда.
+                    let closure = Rc::new(adamas_core::eval::quote(0, &argument));
+                    let (guard, address, data) = crate::callback::enclosed(
                         self.signature,
                         &self.linkage,
-                        exported,
-                        shape,
+                        &closure,
+                        form,
+                        &it.symbol,
                     )?;
                     registered.push(guard);
                     bits.push(address);
+                    userdata = Some(data);
                     continue;
                 }
                 Cross::Buffer(cell) => {
@@ -571,6 +611,29 @@ impl<'a> Machine<'a> {
             }
             bits.push(*word);
             forced.push(Rc::clone(&value));
+        }
+        // Среда и место под неё - парой, и парой же проверяются. Отказы те же
+        // и теми же словами, что у понижения (`lower::crossing`): расхождение
+        // здесь было бы расхождением вычислителей на написуемой программе.
+        match (userdata, slots.is_empty()) {
+            (Some(data), false) => {
+                for slot in slots {
+                    bits[slot] = data;
+                }
+            }
+            (Some(_), true) => {
+                return Err(it.uncallable(
+                    "у колбэка есть среда, а класть её некуда: позицию `userdata` пишет \
+                     автор - `callbackEnv` в аргументе (§5.3, уровень 2)",
+                ));
+            }
+            (None, false) => {
+                return Err(it.uncallable(
+                    "`callbackEnv` написан, а колбэка со средой в этом вызове нет: \
+                     уровень 1 среды не несёт",
+                ));
+            }
+            (None, true) => {}
         }
         let answer = it.call(&self.linkage, &bits);
         drop(registered);

@@ -183,6 +183,7 @@ pub fn prepare(program: Program) -> Program {
         mut functions,
         foreigns,
         exports,
+        callbacks,
         entry,
         source,
     } = program;
@@ -209,6 +210,7 @@ pub fn prepare(program: Program) -> Program {
         functions,
         foreigns,
         exports,
+        callbacks,
         entry,
         source,
     }
@@ -227,6 +229,7 @@ fn extracted(program: Program) -> Program {
         mut functions,
         foreigns,
         exports,
+        callbacks,
         entry,
         source,
     } = program;
@@ -251,6 +254,7 @@ fn extracted(program: Program) -> Program {
         functions,
         foreigns,
         exports,
+        callbacks,
         entry,
         source,
     }
@@ -330,7 +334,10 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         | Expr::RegionNew
         | Expr::SharedNew
         | Expr::Exported(_)
+        | Expr::Trampoline(_)
+        | Expr::Userdata(_)
         | Expr::Layout { .. } => Vec::new(),
+        Expr::Environment { closure, .. } => vec![&mut **closure],
         Expr::ArrayData { array: value }
         | Expr::Unpack { value, .. }
         | Expr::Cancel { value, .. }
@@ -597,12 +604,18 @@ impl Anf<'_> {
             // ширины указателя.
             Expr::ArrayData { .. }
             | Expr::Exported(_)
+            // Адрес трамплина (§5.3, уровень 2) - то же слово: статическая
+            // функция сишного соглашения.
+            | Expr::Trampoline(_)
+            | Expr::Userdata(_)
             | Expr::RegionLast { .. } => Repr::Flat(adamas_core::prim::PrimTy::UInt64),
             Expr::RegionRead { stride, .. } => stride.element(),
             Expr::Erased
             | Expr::Construct { .. }
             | Expr::ConstructClosure { .. }
             | Expr::Closure { .. }
+            // Среда колбэка (§5.3) - объект кучи: два указательных слота.
+            | Expr::Environment { .. }
             | Expr::Handle { .. }
             | Expr::Perform { .. }
             | Expr::Resume { .. }

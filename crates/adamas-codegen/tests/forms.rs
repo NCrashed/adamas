@@ -315,6 +315,7 @@ fn the_first_form_cannot_call_the_second() {
         handlers: Vec::new(),
         foreigns: Vec::new(),
         exports: Vec::new(),
+        callbacks: Vec::new(),
         functions: vec![entry, callee],
         entry: FuncId(0),
         source: None,

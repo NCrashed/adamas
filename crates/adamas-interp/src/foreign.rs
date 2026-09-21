@@ -622,6 +622,24 @@ unsafe fn invoke(address: Address, shape: &[Class], result: Class, args: &[u64])
                 args[0], args[1], args[2], args[3], args[4],
             )))
         }
+        // `(long, long, long, long, long) -> void`: `qsort_r(base, nmemb, size,
+        // compar, arg)` - колбэк уровня 2. Четвёртое слово есть адрес
+        // трамплина, пятое - `userdata`; что это указатели, ABI не различает.
+        (
+            [
+                Class::Word,
+                Class::Word,
+                Class::Word,
+                Class::Word,
+                Class::Word,
+            ],
+            Class::Void,
+        ) => {
+            let call: extern "C" fn(u64, u64, u64, u64, u64) =
+                unsafe { std::mem::transmute(address) };
+            call(args[0], args[1], args[2], args[3], args[4]);
+            Some(Answer::Nothing)
+        }
         _ => None,
     }
 }

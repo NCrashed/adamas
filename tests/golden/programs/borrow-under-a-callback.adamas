@@ -1,0 +1,60 @@
+-- Счётчик одолженного массива, пока внутри чужого вызова бежит наш колбэк
+-- (§10 вопрос 184).
+--
+-- Вопрос 184 говорит: `rc == 0` у массива, одолженного **владением**, сегодня
+-- безвреден «только обстоятельством - `Expr::Foreign` не точка приостановки,
+-- между входом и возвратом ничего нашего не бежит». Колбэк это обстоятельство
+-- снимает, и фикстура снимает его буквально: чужая сторона читает наш счётчик,
+-- зовёт наш колбэк и читает счётчик снова.
+--
+-- Наблюдений два, и они **разные у двух половин**.
+--
+--   * `lone` одолжен владением - последнее его употребление и есть заём, а
+--     замыкание его не называет. Счётчик на время вызова **ноль**: рантайм
+--     зовёт его уникальным, пока чужая сторона держит адрес и пока бежит наш
+--     код. Это в точности предусловие вопроса 184.
+--   * `both` одолжен **и** захвачен замыканием. Счётчик на время вызова
+--     **единица**: захват взял свою ссылку, и `adamas_is_unique` о массиве
+--     лжёт в безопасную сторону.
+--
+-- Вторая половина и есть ответ вопросу: назвать одолженный массив изнутри
+-- колбэка можно только через захват, а захват - это ссылка. Предусловие
+-- `rc == 0` переживает колбэк, следствие «Perceus переиспользует ячейку» - нет.
+--
+-- Символы свои (`adamas-codegen/tests/shim/borrow.c`), поэтому корпус -
+-- `programs/`. Свидетель - `adamas-codegen/tests/borrow.rs`.
+
+data Unit where
+  MkUnit : Unit
+
+effect Foreign
+
+callbackEnv : CPtr
+
+extern "C" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
+
+extern "C" fn adamas_probe_during : Array n UInt64 -> (CPtr -> CPtr -> {Foreign} Int32) -> CPtr -> UInt64
+
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+blank : UInt64
+blank = 0
+
+eight : UInt64
+eight = 8
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  -- Первая половина: заём владением, замыкание массива не называет.
+  let widths : Array 1 UInt64 = arrayNew 1 eight
+  let lone : Array 4 UInt64 = arrayNew 4 blank
+  let alone : UInt64 = adamas_probe_during lone (\a b -> memcmp a b (arrayIndex widths 0)) callbackEnv
+  -- Вторая половина: тот же массив одолжен и захвачен.
+  let both : Array 4 UInt64 = arrayNew 4 blank
+  let shared : UInt64 = adamas_probe_during both (\a b -> memcmp a b (arrayIndex both 0)) callbackEnv
+  addUInt64 alone (mulUInt64 shared 1000)
+
+main : UInt64
+main = runForeign body

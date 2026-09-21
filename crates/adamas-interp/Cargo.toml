@@ -39,4 +39,8 @@ thiserror = "2"
 [dev-dependencies]
 adamas-elab.workspace = true
 adamas-parser.workspace = true
+# Манифест корпуса (`tests/golden/eval/adamas.toml`): секцию `[link]` читают все,
+# кто корпус считает, и читают **один и тот же файл**. Свой список библиотек
+# здесь означал бы «символ не найден» у одного свидетеля при зелёных остальных.
+adamas-pkg.workspace = true
 criterion = "0.7"

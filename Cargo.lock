@@ -62,6 +62,7 @@ dependencies = [
  "adamas-core",
  "adamas-elab",
  "adamas-parser",
+ "adamas-pkg",
  "criterion",
  "libloading",
  "thiserror",

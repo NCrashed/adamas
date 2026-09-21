@@ -177,9 +177,22 @@ fn body(signature: &Signature, name: &str) -> Term {
     reason = "заготовка теста: непогашенная операция означает сломанный тест"
 )]
 fn ran(signature: &Signature, term: &Term) -> String {
-    adamas_interp::run(signature, term)
+    adamas_interp::run_linked(signature, term, linkage())
         .expect("операция обязана встретить хендлер")
         .to_string()
+}
+
+/// Связывание корпуса: та же секция `[link]`, по которой ищет символ
+/// `adamas eval` и по которой линкуются оба понижения (§5.3, §7.1).
+#[expect(
+    clippy::expect_used,
+    reason = "заготовка теста: манифест корпуса лежит в репозитории, и его отсутствие означает сломанный корпус"
+)]
+fn linkage() -> adamas_interp::Linkage {
+    let link = adamas_pkg::manifest::Manifest::open(&corpus())
+        .expect("манифест корпуса обязан читаться")
+        .link;
+    adamas_interp::Linkage::new(&link.libraries, &link.paths)
 }
 
 /// Значение до прохода и после совпадает.

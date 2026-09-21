@@ -1,0 +1,56 @@
+-- Виток: массив едет замыканию **в коробке** - развилка (б) вопроса 189.
+--
+-- Пара к `apply-array.adamas`, и работа у них одна: тот же массив, та же
+-- ячейка, та же рекуррентность, то же число витков. Различие ровно в том, что
+-- здесь массив на каждое пересечение заворачивается конструктором и
+-- разворачивается разбором - то самое, что развилка (б) поручила бы
+-- компилятору. Разность двух прогонов и есть её цена.
+--
+-- Коробка написана руками потому, что компилятор её не делает: развилка (б)
+-- отвергнута, и мерить её иначе нечем. Форма коробки - конструктор с одним
+-- полем, то есть ровно то, во что (б) и боксировала бы.
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  True : Bool
+  False : Bool
+
+data Box where
+  MkBox : Array 1 UInt64 -> Box
+
+effect Foreign
+
+extern "C" fn adamas_bench_calls : UInt64
+
+blank : UInt64
+blank = 1
+
+block : UInt64
+block = 1000
+
+mixed : UInt64 -> UInt64 -> UInt64
+mixed v acc = addUInt64 (mulUInt64 acc 3) v
+
+opened : Box -> UInt64
+opened (MkBox ys) = arrayIndex ys 0
+
+inner : (Box -> UInt64 -> UInt64) -> Array 1 UInt64 -> UInt64 -> UInt64 -> UInt64
+inner f xs 0 acc = acc
+inner f xs n acc = inner f xs (subUInt64 n 1) (f (MkBox xs) acc)
+
+outer : (Box -> UInt64 -> UInt64) -> Array 1 UInt64 -> UInt64 -> UInt64 -> UInt64
+outer f xs 0 acc = acc
+outer f xs n acc = outer f xs (subUInt64 n 1) (inner f xs block acc)
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let f : Box -> UInt64 -> UInt64 = \b acc -> mixed (opened b) acc
+  let xs : Array 1 UInt64 = arrayNew 1 blank
+  let calls : UInt64 = adamas_bench_calls
+  outer f xs calls 1
+
+main : UInt64
+main = handle @Foreign body with
+  return v -> v

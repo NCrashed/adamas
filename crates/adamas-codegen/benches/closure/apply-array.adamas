@@ -1,0 +1,50 @@
+-- Виток: замыкание применяется к **плоскому массиву** (§4.11, вопрос 189).
+--
+-- Пара к `apply-word.adamas`: различаются они ровно типом первого аргумента
+-- замыкания - здесь `Array 1 UInt64`, там `UInt64`, - и тем, что тело читает
+-- ячейку, а не берёт слово готовым. Разность двух прогонов есть цена буфера в
+-- аргументе замыкания.
+--
+-- До трека B волны 3 эта программа не понижалась вовсе: «читаемый массив:
+-- ожидалось плоский массив, а пришло указательное значение».
+--
+-- Двойной цикл - по той же причине, что у пары: см. шапку `apply-word`.
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  True : Bool
+  False : Bool
+
+effect Foreign
+
+extern "C" fn adamas_bench_calls : UInt64
+
+blank : UInt64
+blank = 1
+
+block : UInt64
+block = 1000
+
+mixed : UInt64 -> UInt64 -> UInt64
+mixed v acc = addUInt64 (mulUInt64 acc 3) v
+
+inner : (Array 1 UInt64 -> UInt64 -> UInt64) -> Array 1 UInt64 -> UInt64 -> UInt64 -> UInt64
+inner f xs 0 acc = acc
+inner f xs n acc = inner f xs (subUInt64 n 1) (f xs acc)
+
+outer : (Array 1 UInt64 -> UInt64 -> UInt64) -> Array 1 UInt64 -> UInt64 -> UInt64 -> UInt64
+outer f xs 0 acc = acc
+outer f xs n acc = outer f xs (subUInt64 n 1) (inner f xs block acc)
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let f : Array 1 UInt64 -> UInt64 -> UInt64 = \ys acc -> mixed (arrayIndex ys 0) acc
+  let xs : Array 1 UInt64 = arrayNew 1 blank
+  let calls : UInt64 = adamas_bench_calls
+  outer f xs calls 1
+
+main : UInt64
+main = handle @Foreign body with
+  return v -> v

@@ -388,8 +388,11 @@ soname (`libz.so.1`) и не `libz.dylib`. На дистрибутиве без 
 
 Толчок 1.85.0 берётся из `rust-overlay`
 (`nix shell github:oxalica/rust-overlay#rust_1_85_0`): в `nix develop` стоит
-1.98.0. MSRV поймал одно место: `i32::cast_unsigned` стабилизирован после 1.85,
-и узкий ответ пишется через `u32::from_ne_bytes(half.to_ne_bytes())`.
+1.98.0. MSRV поймал одно место, и поймал бы только он: узкий ответ пишется
+`u32::from_ne_bytes(half.to_ne_bytes())`, потому что напрашивающийся
+`half.cast_unsigned()` под 1.85 есть `E0658` («use of unstable library feature
+`integer_sign_cast`»), а под 1.98 собирается молча. Проверено пробной
+правкой в обе стороны, а не по памяти.
 
 ## Что трек оставил другим
 
@@ -417,5 +420,5 @@ soname (`libz.so.1`) и не `libz.dylib`. На дистрибутиве без 
 и на прямой `gpg --detach-sign --local-user FDBCB70B…`: pinentry (`gnome3`)
 запускается и не дожидается ввода. Это третий трек из четырёх за волну, у
 которого так вышло. Чинится на стороне ведущего:
-`git rebase -f --gpg-sign HEAD~5`.
+`git rebase -f --gpg-sign HEAD~6` (шесть коммитов трека).
 

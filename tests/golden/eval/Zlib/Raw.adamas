@@ -54,4 +54,9 @@ extern "C" fn gzwrite : CPtr -> Array n UInt8 -> UInt64 -> Int32
 extern "C" fn gzread : CPtr -> Array n UInt8 -> UInt64 -> Int32
 
 -- `int gzclose(gzFile file)`
-extern "C" fn gzclose : CPtr -> Int32
+--
+-- Кратность написана, и это не украшение: разбор ресурса (§3.3) отдаёт поле
+-- линейным, а `ω`-параметр отмасштабировал бы его обратно до `ω`, и деструктор
+-- `GzFile` не написался бы вовсе (§5.3, правка примера 2026-09-20). Хендл
+-- `gzclose` действительно потребляет.
+extern "C" fn gzclose : (1 stream : CPtr) -> Int32

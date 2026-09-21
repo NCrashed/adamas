@@ -1215,7 +1215,9 @@ impl Compiler<'_> {
         let mut branches = Vec::with_capacity(verdict.constructors.len());
         let mut sites = Vec::new();
         for (index, constructor) in verdict.constructors.iter().enumerate() {
-            let (inner_rows, inner_example) = if constructor.as_ref() == crate::prim::TRUE {
+            let (inner_rows, inner_example) = if crate::term::short(constructor)
+                == crate::prim::TRUE
+            {
                 (&equal, &taken)
             } else {
                 (&apart, &rest)
@@ -1234,7 +1236,7 @@ impl Compiler<'_> {
 
         Ok(Tree {
             term: Term::Case(Rc::new(Case {
-                data: Name::from(crate::prim::BOOL),
+                data: Name::clone(&verdict.data),
                 levels: Rc::clone(&verdict.levels),
                 params: 0,
                 // Сравнение строит свежее значение, и потребляется оно ровно
@@ -1253,8 +1255,15 @@ impl Compiler<'_> {
     /// Проверяется здесь же: два конструктора и ровно те имена, которых ждёт
     /// сравнение. Объяви программа `Bool` иначе - и ветви строились бы не по
     /// тому, чем отвечает `eqInt64`.
+    ///
+    /// Имя ищется [`Signature::convention`] - тем же поиском, каким ищется
+    /// написанное имя: в подключаемом файле `Bool` объявлен под путём (§4.8), и
+    /// голый `lookup` его не находил (§10 вопрос 188). Имена конструкторов
+    /// поэтому сверяются последним сегментом: объявлены они `Lib.Cmp.True`, а
+    /// соглашение знает `True`.
     fn verdict(&self) -> Result<Family, PatternError> {
-        let Some(declaration) = self.signature.lookup(crate::prim::BOOL) else {
+        let data = self.signature.convention(crate::prim::BOOL);
+        let Some(declaration) = self.signature.lookup(&data) else {
             return Err(PatternError::Verdict {
                 why: "он не объявлен",
             });
@@ -1267,7 +1276,10 @@ impl Compiler<'_> {
         // Сравнением множеств, а не тремя условиями подряд: свойство здесь
         // одно - имена ровно те, которыми отвечает `eqT`, - и записать его
         // один раз дешевле, чем свести три записи.
-        let mut named: Vec<&str> = constructors.iter().map(AsRef::as_ref).collect();
+        let mut named: Vec<&str> = constructors
+            .iter()
+            .map(|it| crate::term::short(it))
+            .collect();
         named.sort_unstable();
         if named != [crate::prim::FALSE, crate::prim::TRUE] {
             return Err(PatternError::Verdict {
@@ -1275,7 +1287,7 @@ impl Compiler<'_> {
             });
         }
         Ok(Family {
-            data: Name::from(crate::prim::BOOL),
+            data,
             levels: (0..declaration.level_arity).map(|_| Level::Zero).collect(),
             parameters: 0,
             params: Vec::new(),

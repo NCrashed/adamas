@@ -3753,8 +3753,15 @@ impl<'a> Lowerer<'a> {
                 let flat = Repr::Flat(ty);
                 let left = self.given(scope, left, flat, "левый аргумент сравнения")?;
                 let right = self.given(scope, right, flat, "правый аргумент сравнения")?;
-                let yes = self.tag(&Name::from(adamas_core::prim::TRUE))?;
-                let no = self.tag(&Name::from(adamas_core::prim::FALSE))?;
+                // Имена конструкторов берутся тем же поиском, каким их берёт
+                // проверка: в подключаемом файле они объявлены под путём (§4.8,
+                // §10 вопрос 188), и `Name::from("True")` их не находил.
+                let (yes, no) = (
+                    self.signature.convention(adamas_core::prim::TRUE),
+                    self.signature.convention(adamas_core::prim::FALSE),
+                );
+                let yes = self.tag(&yes)?;
+                let no = self.tag(&no)?;
                 Ok((
                     Expr::Compare {
                         op,

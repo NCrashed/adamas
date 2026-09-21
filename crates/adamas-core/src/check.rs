@@ -99,9 +99,20 @@ fn constant(
     levels: &[Level],
     args: &Args,
 ) -> Result<(Rc<Value>, Usage), TypeError> {
-    let definition = ctx
-        .signature()
-        .lookup(name)
+    // Голое имя-соглашение (§4.3) ищется вторым заходом, и заход этот несущий:
+    // δ-свёртка сравнения двух литералов строит `True` **без сигнатуры**
+    // ([`crate::eval`]), а у программы, объявившей `Bool` в подключаемом файле,
+    // конструктор объявлен под путём. Перепроверка группы идёт по нормальной
+    // форме, и без этого захода `direct = ltUInt64 10 20` отвергалось бы
+    // «определение `True` не найдено» при верном типе (§10 вопрос 188).
+    let signature = ctx.signature();
+    let resolved = matches!(&**name, crate::prim::TRUE | crate::prim::FALSE)
+        .then(|| signature.lookup(name).is_none())
+        .unwrap_or_default()
+        .then(|| signature.convention(name));
+    let looked = resolved.as_deref().unwrap_or(name);
+    let definition = signature
+        .lookup(looked)
         .ok_or_else(|| ErrorKind::UnknownConstant {
             name: Rc::clone(name),
         })?;
@@ -199,7 +210,13 @@ fn flat_class(signature: &Signature, argument: Term) -> Term {
 ///
 /// Имя не объявлено - терм строится всё равно, и отказывает **проверка**.
 /// Молчать было бы хуже: сравнение получило бы ответ неизвестно чего.
+///
+/// Ищется оно [`Signature::convention`], то есть тем же поиском, каким ищется
+/// написанное имя: объявление подключаемого файла квалифицировано путём (§4.8),
+/// и голый `lookup` в нём не находил ни `Bool`, ни `Flat` (§10 вопрос 188).
 fn declared(signature: &Signature, name: &str) -> Term {
+    let name = signature.convention(name);
+    let name = &*name;
     let arity = signature.lookup(name);
     let levels: Rc<[Level]> = (0..arity.map_or(0, |it| it.level_arity))
         .map(|_| Level::Zero)

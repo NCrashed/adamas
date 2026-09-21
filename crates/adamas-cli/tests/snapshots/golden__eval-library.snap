@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+{big = 1, small = 0, zero = 100, one = 200, other = 7}

@@ -882,7 +882,8 @@ impl Walk<'_> {
         let apart = Self::compared(sizes, &case.scrutinee);
         for branch in &case.branches {
             let fields = self.fields(&branch.constructor, case.params);
-            let floored = apart.filter(|_| &*branch.constructor == crate::prim::FALSE);
+            let floored =
+                apart.filter(|_| crate::term::short(&branch.constructor) == crate::prim::FALSE);
             if let Some(fact) = floored {
                 self.apart.push(fact);
             }

@@ -451,6 +451,20 @@ pub fn try_eliminate_case(case: &Rc<StuckCase>, scrutinee: &Rc<Value>) -> Option
         {
             return apply_fields(Rc::clone(&branch.body), spine, case.params);
         }
+        // Ответ сравнения - **голый** конструктор соглашения: [`compared`]
+        // строит его без сигнатуры, а у программы, объявившей `Bool` в
+        // подключаемом файле, ветви названы путём (§4.8, §10 вопрос 188).
+        // Сверяется поэтому последний сегмент, и только для двух этих имён:
+        // всякое другое застрявшее имя обязано оставаться застрявшим.
+        if matches!(&**name, crate::prim::TRUE | crate::prim::FALSE) {
+            if let Some(branch) = case
+                .branches
+                .iter()
+                .find(|branch| crate::term::short(&branch.constructor) == &**name)
+            {
+                return apply_fields(Rc::clone(&branch.body), spine, case.params);
+            }
+        }
     }
 
     let mut spine = spine.clone();

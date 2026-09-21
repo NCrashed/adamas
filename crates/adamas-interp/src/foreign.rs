@@ -318,10 +318,7 @@ impl Foreign {
     pub(crate) fn uncallable(&self, why: &'static str) -> RunError {
         RunError::Callback {
             symbol: self.symbol.clone(),
-            why: format!(
-                "{why}: уровень 1 берёт указатель на определение, объявленное \
-                 `export \"C\"`, а среда колбэка едет в `userdata` на уровне 2"
-            ),
+            why: why.to_owned(),
         }
     }
 

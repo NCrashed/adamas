@@ -552,7 +552,10 @@ impl<'a> Machine<'a> {
                     if let Value::Neutral(Head::Global(exported, ..), empty) = &*argument {
                         if let Some(shape) = self.signature.export(exported) {
                             if !empty.is_empty() {
-                                return Err(it.uncallable("имя в позиции колбэка уже применено"));
+                                return Err(it.uncallable(
+                                    "имя в позиции колбэка уже применено: уровень 1 берёт \
+                                     указатель на определение, а не его применение",
+                                ));
                             }
                             let (guard, address) = crate::callback::registered(
                                 self.signature,

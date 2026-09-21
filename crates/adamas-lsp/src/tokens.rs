@@ -219,6 +219,7 @@ impl Slot {
             | TokenKind::Using
             | TokenKind::Import
             | TokenKind::Extern
+            | TokenKind::Export
             | TokenKind::Coherent
             | TokenKind::Infix
             | TokenKind::Infixl
@@ -568,8 +569,9 @@ impl<'a> Names<'a> {
                 }
                 // Открытое имя объявлено не здесь, а в подключённом файле;
                 // подсветка одного буфера туда не ходит, и покрасить его
-                // объявлением значило бы соврать про место.
-                DeclKind::Fixity(_) | DeclKind::Import(_) => {}
+                // объявлением значило бы соврать про место. Экспорт имени не
+                // объявляет вовсе: имя ему даёт определение выше.
+                DeclKind::Fixity(_) | DeclKind::Import(_) | DeclKind::Export(_) => {}
             }
         }
     }
@@ -618,6 +620,7 @@ impl<'a> Names<'a> {
                 self.typed(&declared.ty);
                 self.locals.truncate(scope);
             }
+            DeclKind::Export(exported) => self.mark(exported.name.span, Face::Function, 0),
             DeclKind::Clauses { clauses, .. } => {
                 for clause in clauses {
                     self.clause(clause);

@@ -82,6 +82,8 @@ pub enum TokenKind {
     Import,
     /// `extern` - объявление чужого символа (§5.3, уровень 1)
     Extern,
+    /// `export` - своё определение, видимое C (§5.3, колбэк уровня 1)
+    Export,
     /// `coherent` - маркер глобальной уникальности инстансов (§3.5)
     Coherent,
     /// `infix`
@@ -191,6 +193,7 @@ impl TokenKind {
             Self::Using => Face::Spelled("using"),
             Self::Import => Face::Spelled("import"),
             Self::Extern => Face::Spelled("extern"),
+            Self::Export => Face::Spelled("export"),
             Self::Coherent => Face::Spelled("coherent"),
             Self::Infix => Face::Spelled("infix"),
             Self::Infixl => Face::Spelled("infixl"),
@@ -310,6 +313,7 @@ pub fn keyword(text: &str) -> Option<TokenKind> {
         "using" => TokenKind::Using,
         "import" => TokenKind::Import,
         "extern" => TokenKind::Extern,
+        "export" => TokenKind::Export,
         "coherent" => TokenKind::Coherent,
         "infix" => TokenKind::Infix,
         "infixl" => TokenKind::Infixl,
@@ -477,6 +481,7 @@ mod tests {
         TokenKind::Using,
         TokenKind::Import,
         TokenKind::Extern,
+        TokenKind::Export,
         TokenKind::Coherent,
         TokenKind::Infix,
         TokenKind::Infixl,

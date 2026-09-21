@@ -183,6 +183,7 @@ const TAKEN: [&str; 114] = [
     "polymorphic-recursion",
     "prelude",
     "primitives",
+    "qsort",
     "records",
     "region-allocates-and-reads",
     "region-bound-in-the-argument",

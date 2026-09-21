@@ -1,0 +1,27 @@
+-- Точка сравнения колбэка: тот же цикл со **своим** вызываемым (§5.3, §6).
+--
+-- Отличие от `callback.adamas` ровно одно - кого зовёт чужой цикл. Тело витка
+-- у обоих вызываемых одно и то же (поворот на бит), цикл один и тот же, вызов
+-- в нём индиректный у обоих. Значит разность двух прогонов есть цена того, что
+-- вызываемый - наш, и ничего сверх.
+--
+-- Пересечений здесь по два на прогон у обеих половин (`adamas_bench_calls` и
+-- сам цикл), поэтому в разность они не входят.
+
+data Unit where
+  MkUnit : Unit
+
+effect Foreign
+
+extern "C" fn adamas_bench_calls : UInt64
+
+extern "C" fn adamas_bench_native : UInt64 -> UInt64
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let calls : UInt64 = adamas_bench_calls
+  adamas_bench_native calls
+
+main : UInt64
+main = handle @Foreign body with
+  return v -> v

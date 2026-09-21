@@ -240,6 +240,9 @@ fn collect(decls: &[Decl], within: &mut Vec<Symbol>, out: &mut Vec<Site>) {
         match &decl.kind {
             DeclKind::Alias { name, .. } | DeclKind::Signature { name, .. } => put(name, true),
             DeclKind::Extern(declared) => put(&declared.name, true),
+            // Экспорт имени не объявляет: он называет уже объявленное, как
+            // клауза называет свою сигнатуру.
+            DeclKind::Export(exported) => put(&exported.name, false),
             DeclKind::Clauses { name, .. } => put(name, false),
             DeclKind::Data(data) => {
                 put(&data.name, true);
@@ -431,6 +434,7 @@ impl Search<'_> {
                 }
                 self.typed(&declared.name, &declared.ty);
             }
+            DeclKind::Export(exported) => self.refer(&exported.name),
             DeclKind::Clauses { name, clauses } => self.clauses(name, clauses),
             DeclKind::Data(data) => {
                 self.declare(&data.name);

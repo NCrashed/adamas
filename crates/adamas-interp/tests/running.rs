@@ -1764,3 +1764,201 @@ main = handle @Foreign body with
         "отказ обязан называть причину, а не только символ: {error}"
     );
 }
+
+/// Машина отдаёт чужой стороне колбэк, и та зовёт наше определение (§5.3).
+///
+/// Понижение отдаёт адрес порождённой функции; у машины порождённой функции нет
+/// вовсе, и отдаётся адрес статического трамплина ([`adamas_interp`],
+/// `callback`). Проверяется это **настоящим** `qsort` из libc: он переставляет
+/// ячейки нашего блока по ответам нашего же компаратора, и результат читается
+/// обычным `arrayIndex`.
+///
+/// Наблюдаемое подделать нечем. Не позови `qsort` компаратор ни разу - порядок
+/// остался бы написанным (`[3, 1]`), и ответ был бы другим; отдай компаратор
+/// противоположный знак - тоже.
+///
+/// `memcmp` внутри компаратора здесь не украшение, а необходимость: `qsort`
+/// передаёт **адреса** ячеек, а чтения по адресу в языке нет ни одной формы.
+/// Порядок `memcmp` побайтовый, и на значениях меньше 256 совпадает с числовым.
+#[test]
+fn the_machine_hands_a_callback_to_the_foreign_side() {
+    let source = format!(
+        "{BASE}
+effect Foreign
+
+extern \"C\" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
+
+extern \"C\" fn qsort : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> CPtr -> {{Foreign}} Int32) -> Unit
+
+byWord : CPtr -> CPtr -> {{Foreign}} Int32
+byWord a b = memcmp a b 8
+
+export \"C\" fn byWord
+
+blank : UInt64
+blank = 0
+
+three : UInt64
+three = 3
+
+one : UInt64
+one = 1
+
+pick : Bool -> Nat -> Nat -> Nat
+pick True yes no = yes
+pick False yes no = no
+
+body : (ω u : Unit) -> {{Foreign}} Nat
+body u =
+  let zeroed : Array 2 UInt64 = arrayNew 2 blank
+  let first : Array 2 UInt64 = arraySet zeroed 0 three
+  let xs : Array 2 UInt64 = arraySet first 1 one
+  let sorted : Unit = qsort xs 2 8 byWord
+  let head : UInt64 = arrayIndex xs 0
+  let tail : UInt64 = arrayIndex xs 1
+  pick (eqUInt64 head one) (pick (eqUInt64 tail three) 2 0) 0
+
+main : Nat
+main = handle @Foreign body with
+  return v -> v
+"
+    );
+    assert_eq!(
+        ran(&source, "main"),
+        "Succ (Succ Zero)",
+        "чужая сторона обязана позвать наш компаратор и переставить наши ячейки"
+    );
+}
+
+/// Форма колбэка вне таблицы трамплинов - **отказ**, а не догадка (§5.3).
+///
+/// Трамплин есть `extern "C"`-функция точной сигнатуры, и подобрать её под
+/// произвольную форму нечем: та же арифметика, по какой конечна таблица
+/// сигнатур самого чужого вызова. Молчание здесь означало бы вызов нашего кода
+/// по чужому ABI.
+#[test]
+fn a_callback_shape_outside_the_trampolines_is_refused_by_name() {
+    let source = format!(
+        "{BASE}
+effect Foreign
+
+extern \"C\" fn qsort : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> {{Foreign}} Int32) -> Unit
+
+lonely : CPtr -> {{Foreign}} Int32
+lonely a = 0
+
+export \"C\" fn lonely
+
+blank : UInt64
+blank = 0
+
+body : (ω u : Unit) -> {{Foreign}} Unit
+body u =
+  let xs : Array 2 UInt64 = arrayNew 2 blank
+  qsort xs 2 8 lonely
+
+main : Unit
+main = handle @Foreign body with
+  return v -> v
+"
+    );
+    let error = refused(&source, "main");
+    assert!(
+        matches!(&error, adamas_interp::RunError::Callback { symbol, .. } if symbol == "lonely"),
+        "отказ обязан называть символ: {error}"
+    );
+    assert!(
+        error.to_string().contains("трамплинов"),
+        "отказ обязан называть причину: {error}"
+    );
+}
+
+/// Второй колбэк в одном вызове - отказ, а не второй адрес (§5.3).
+///
+/// Трамплин у машины статический, и кого он зовёт, помнит одна переменная
+/// потока: две регистрации подряд оставили бы живой последнюю, чужая сторона
+/// получила бы один и тот же адрес дважды и позвала бы не то, что написано.
+/// Понижения так не ошибаются - у них обёртка на символ, - поэтому молчание
+/// здесь было бы **расхождением вычислителей**, то есть ровно тем, ради чего
+/// договор корпуса и заведён.
+#[test]
+fn two_callbacks_in_one_call_are_refused_by_name() {
+    let source = format!(
+        "{BASE}
+effect Foreign
+
+extern \"C\" fn adamas_probe_pair : (CPtr -> CPtr -> {{Foreign}} Int32) -> (CPtr -> CPtr -> {{Foreign}} Int32) -> Unit
+
+first : CPtr -> CPtr -> {{Foreign}} Int32
+first a b = 0
+
+second : CPtr -> CPtr -> {{Foreign}} Int32
+second a b = 0
+
+export \"C\" fn first
+
+export \"C\" fn second
+
+body : (ω u : Unit) -> {{Foreign}} Unit
+body u = adamas_probe_pair first second
+
+main : Unit
+main = handle @Foreign body with
+  return v -> v
+"
+    );
+    let error = refused(&source, "main");
+    assert!(
+        matches!(&error, adamas_interp::RunError::Callback { symbol, .. } if symbol == "adamas_probe_pair"),
+        "отказ обязан называть символ чужой функции: {error}"
+    );
+    assert!(
+        error.to_string().contains("больше одного"),
+        "отказ обязан назвать причину: {error}"
+    );
+}
+
+/// Значение со средой в позиции колбэка - отказ той же машины (§5.3).
+///
+/// Понижение ловит это формой узла, машина - формой значения, и причина у обоих
+/// одна: у указателя на функцию среды нет, а лямбда её несёт. Два свидетеля на
+/// одно правило потому, что вычислителя два, и молчание любого из них означало
+/// бы, что правило держится на другом.
+#[test]
+fn a_value_with_an_environment_in_the_callback_position_is_refused() {
+    let source = format!(
+        "{BASE}
+effect Foreign
+
+extern \"C\" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
+
+extern \"C\" fn qsort : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> CPtr -> {{Foreign}} Int32) -> Unit
+
+byWord : CPtr -> CPtr -> {{Foreign}} Int32
+byWord a b = memcmp a b 8
+
+export \"C\" fn byWord
+
+blank : UInt64
+blank = 0
+
+body : (ω u : Unit) -> {{Foreign}} Unit
+body u =
+  let xs : Array 2 UInt64 = arrayNew 2 blank
+  qsort xs 2 8 (\\a b -> byWord a b)
+
+main : Unit
+main = handle @Foreign body with
+  return v -> v
+"
+    );
+    let error = refused(&source, "main");
+    assert!(
+        matches!(&error, adamas_interp::RunError::Callback { symbol, .. } if symbol == "qsort"),
+        "отказ обязан называть символ чужой функции: {error}"
+    );
+    assert!(
+        error.to_string().contains("стоит не имя"),
+        "отказ обязан назвать, чем значение не годится: {error}"
+    );
+}

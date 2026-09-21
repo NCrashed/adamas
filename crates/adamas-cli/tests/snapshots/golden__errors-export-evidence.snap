@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: export-evidence.adamas:31:1: эффект `Tick` в позиции экспорта: его операции разрешаются вектором evidence, а колбэк уровня 1 среды с собой не несёт - указатель на функцию её не имеет. Вектор evidence едет чужой стороне в `userdata`, и это уровень 2 (§5.3)
+  export "C" fn counted
+  ^^^^^^^^^^^^^^^^^^^^^

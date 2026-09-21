@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: export-twice.adamas:19:1: `export` над `twice`: символ уже занят другим экспортом: двух `define` одного имени не бывает (§5.3)
+  export "C" fn twice
+  ^^^^^^^^^^^^^^^^^^^

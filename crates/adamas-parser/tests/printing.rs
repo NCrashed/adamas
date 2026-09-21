@@ -334,6 +334,18 @@ extern \"C\" fn strlen : CPtr -> UInt64
 apply fn x = fn x
 ",
     ),
+    // Экспорт (§5.3, колбэк уровня 1): та же форма до имени, и на нём конец.
+    // `fn` контекстное у обоих, и `export "C" fn fn` пишется ровно как
+    // `extern "C" fn fn`.
+    (
+        "exported_symbols",
+        "\
+byWord : CPtr -> CPtr -> Int32
+export \"C\" fn byWord
+export \"C\" fn fn
+extern \"C\" fn qsort : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> CPtr -> Int32) -> Unit
+",
+    ),
 ];
 
 /// Разбор, который обязан удаться.

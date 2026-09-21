@@ -24,7 +24,7 @@
 //! библиотеку. Отказ открыть неявную - не ошибка автора: он её не писал, и
 //! поиск идёт дальше. Отказ открыть **написанную** - ошибка, и она названа.
 //!
-//! Нет **таблицы сигнатур**. Поддержаны ровно двенадцать форм, и у каждой есть
+//! Нет **таблицы сигнатур**. Поддержаны ровно тринадцать форм, и у каждой есть
 //! свидетель (`tests/outward.rs`, `adamas-cli/tests/linking.rs`, корпус); всё прочее -
 //! отказ с названной причиной, а не догадка. Причина, по которой таблица не полна, - арифметика, а не лень:
 //! `dlsym` отдаёт нетипизированный указатель, звать по нему можно только
@@ -235,6 +235,7 @@ impl Foreign {
             Cross::Nothing => "Unit".to_owned(),
             Cross::Erased => "0".to_owned(),
             Cross::Buffer(cell) => format!("Array _ {}", cell.name()),
+            Cross::Callback => "колбэк".to_owned(),
         };
         let params: Vec<String> = self.params.iter().copied().map(written).collect();
         format!(
@@ -310,6 +311,17 @@ impl Foreign {
     pub(crate) fn unlendable(&self) -> RunError {
         RunError::ForeignBuffer {
             symbol: self.symbol.clone(),
+        }
+    }
+
+    /// В позиции колбэка стоит то, чего чужой стороне не отдать (§5.3).
+    pub(crate) fn uncallable(&self, why: &'static str) -> RunError {
+        RunError::Callback {
+            symbol: self.symbol.clone(),
+            why: format!(
+                "{why}: уровень 1 берёт указатель на определение, объявленное \
+                 `export \"C\"`, а среда колбэка едет в `userdata` на уровне 2"
+            ),
         }
     }
 
@@ -484,13 +496,14 @@ enum Answer {
 
 /// Вызов по классам регистров; `None` - формы нет в таблице.
 ///
-/// Двенадцать форм, и у каждой свидетель: три первых - `tests/outward.rs`, три
+/// Тринадцать форм, и у каждой свидетель: три первых - `tests/outward.rs`, три
 /// добавленных треком D волны 1 - корпус (`eval/extern-c` даёт `() -> long`,
 /// `eval/foreign-resource` даёт `long -> void`, `adamas-cli/tests/linking.rs`
 /// даёт `(long, long) -> long`), седьмая - `eval/extern-buffer` (трек B волны
-/// 2), последние пять - `eval/zlib` и `eval/zlib-stream` (трек D волны 2).
-/// Тринадцатая добавляется тремя строками и обязана приходить со своим
-/// свидетелем - молча растущая таблица здесь означала бы непроверенный ABI.
+/// 2), пять следом - `eval/zlib` и `eval/zlib-stream` (трек D волны 2),
+/// тринадцатая - `eval/qsort` (трек C волны 3). Четырнадцатая добавляется тремя
+/// строками и обязана приходить со своим свидетелем - молча растущая таблица
+/// здесь означала бы непроверенный ABI.
 ///
 /// # Safety
 ///
@@ -571,6 +584,16 @@ unsafe fn invoke(address: Address, shape: &[Class], result: Class, args: &[u64])
         ([Class::Word, Class::Word, Class::Word], Class::Half) => {
             let call: extern "C" fn(u64, u64, u64) -> i32 = unsafe { std::mem::transmute(address) };
             Some(Answer::Half(call(args[0], args[1], args[2])))
+        }
+        // `(long, long, long, long) -> void`: `qsort(base, nmemb, size,
+        // compar)` - одолженный буфер, два счёта и **адрес трамплина**
+        // ([`crate::callback`]). Свидетель - `eval/qsort` корпуса (трек C
+        // волны 3). Форма едина со всякой четырёхсловной `void`-функцией libc:
+        // что четвёртое слово есть указатель на функцию, ABI не различает.
+        ([Class::Word, Class::Word, Class::Word, Class::Word], Class::Void) => {
+            let call: extern "C" fn(u64, u64, u64, u64) = unsafe { std::mem::transmute(address) };
+            call(args[0], args[1], args[2], args[3]);
+            Some(Answer::Nothing)
         }
         // `(long, long, long, long) -> int`: `uncompress(dest, destLen, src,
         // srcLen)` - два одолженных буфера и out-параметр длины.

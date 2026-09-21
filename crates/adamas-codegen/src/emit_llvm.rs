@@ -360,9 +360,9 @@ use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
 use adamas_core::source::Location;
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Elems, Expr, Fact, FiberOp, ForeignId, ForeignResult, Form,
-    FuncId, Function, HandlerId, LabelId, LocalId, PackId, Packing, Program, Repr, Salvage, Slot,
-    SlotTy, Source, Stride, Unique, Verdict,
+    Arm, Binding, Constructor, CtorId, Elems, ExportId, Expr, Fact, FiberOp, ForeignId,
+    ForeignResult, Form, FuncId, Function, HandlerId, LabelId, LocalId, PackId, Packing, Program,
+    Repr, Salvage, Slot, SlotTy, Source, Stride, Unique, Verdict,
 };
 use crate::split::Suspension;
 
@@ -1802,6 +1802,7 @@ impl Module {
         out.push('\n');
 
         out.push_str(&self.bodies);
+        exported_bodies(&mut out, program);
         entry_point(&mut out, program, answer);
 
         if !self.metadata.nodes.is_empty() {
@@ -1934,6 +1935,51 @@ fn entry_point(out: &mut String, program: &Program, answer: Answer) {
     );
     let _ = writeln!(out, "  ret {} %answer", answer.machine());
     out.push_str("}\n");
+}
+
+/// Обёртки своих символов, видимых C (§5.3, колбэк уровня 1).
+///
+/// Устроены ровно как [`entry_point`], и это не совпадение, а тот же случай:
+/// внешняя функция **сишного** соглашения, зовущая внутреннюю по
+/// [`CONVENTION`]. `tailcc` есть внутреннее соглашение порождённого кода, а
+/// зовёт обёртку чужая сторона.
+///
+/// `musttail` здесь не ставится никогда, и по той же причине, что у чужого
+/// вызова: правило чужого кадра (§5.3) требует **нормального** возврата, а
+/// хвостовой вызов снимает кадр вызывающего. Названная цена - один кадр на
+/// вызов; `opt` вправе его убрать, потому что вызываемая помечена `internal`.
+fn exported_bodies(out: &mut String, program: &Program) {
+    for export in &program.exports {
+        let taken: Vec<String> = export
+            .parameters
+            .iter()
+            .enumerate()
+            .map(|(at, ty)| format!("{} %a{at}", machine(*ty)))
+            .collect();
+        let given: Vec<String> = export
+            .parameters
+            .iter()
+            .enumerate()
+            .map(|(at, ty)| format!("{} %a{at}", machine(*ty)))
+            .collect();
+        let result = machine(export.result);
+        let _ = writeln!(out, "; Свой символ, видимый C (§5.3): {}.", export.symbol);
+        let _ = writeln!(
+            out,
+            "define {result} @{}({}) {DEFINITION_ATTRIBUTES} {{",
+            export.symbol,
+            taken.join(", ")
+        );
+        out.push_str("entry:\n");
+        let _ = writeln!(
+            out,
+            "  %answer = call {CONVENTION} {result} @fn_{}({})",
+            export.function.0,
+            given.join(", ")
+        );
+        let _ = writeln!(out, "  ret {result} %answer");
+        out.push_str("}\n\n");
+    }
 }
 
 /// Одна ветвь раздачи веток: аргументы ветке, а у нехвостовой - ещё и сегмент.
@@ -2611,10 +2657,12 @@ impl<'a> Builder<'a> {
             | Expr::RegionWrite { .. }
             | Expr::RegionRecycle { .. }
             | Expr::RegionPop { .. } => Repr::Region,
-            // Смещение внутри области (§3.6) и адрес нагрузки одолженного массива
-            // (§5.3) - оба плоское слово ширины указателя, то есть ровно то, чем
-            // уровень 1 считает `CPtr`.
-            Expr::ArrayData { .. } | Expr::RegionLast { .. } => Repr::Flat(PrimTy::UInt64),
+            // Смещение внутри области (§3.6), адрес нагрузки одолженного массива
+            // и адрес своей функции, видимой C (§5.3), - все три плоское слово
+            // ширины указателя, то есть ровно то, чем уровень 1 считает `CPtr`.
+            Expr::ArrayData { .. } | Expr::Exported(_) | Expr::RegionLast { .. } => {
+                Repr::Flat(PrimTy::UInt64)
+            }
             Expr::RegionRead { stride, .. } => stride.element(),
             // Ответ сравнения - конструктор `Bool` (§4.3): аргументы плоские,
             // ответ указательный. Ответ конструктора указателен по построению -
@@ -2818,6 +2866,7 @@ impl<'a> Builder<'a> {
                 function,
                 arguments,
             } => self.foreign(*function, arguments),
+            Expr::Exported(id) => Ok(self.exported(*id)),
             Expr::ArrayData { array } => self.lending(array),
             // Приставки сняты `prologue` выше, и досюда узел не
             // доезжает. Ветвь стоит ради исчерпывающего разбора: пропади она,
@@ -4550,6 +4599,21 @@ impl<'a> Builder<'a> {
         let name = self.temp();
         self.instruction(&format!("{name} = ptrtoint ptr {data} to i64"), self.here());
         Ok(name)
+    }
+
+    /// Адрес своей функции, видимой C (§5.3): колбэк уровня 1.
+    ///
+    /// `ptrtoint` по тому же доводу, что у [`Body::lending`]: через границу
+    /// едет слово, и прототип чужого символа объявлен `i64`. Адрес берётся у
+    /// **обёртки** - у неё сишное соглашение, а у `fn_N` своё.
+    fn exported(&mut self, id: ExportId) -> String {
+        let symbol = self.program.exports[id.0].symbol.clone();
+        let name = self.temp();
+        self.instruction(
+            &format!("{name} = ptrtoint ptr @{symbol} to i64"),
+            self.here(),
+        );
+        name
     }
 
     fn foreign(&mut self, function: ForeignId, arguments: &[Expr]) -> Result<String, LlvmError> {

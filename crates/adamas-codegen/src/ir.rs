@@ -831,6 +831,35 @@ pub struct Foreign {
     pub result: ForeignResult,
 }
 
+/// Своя функция, видимая C (§5.3, колбэк уровня 1).
+///
+/// Отдельной таблицей по тому же доводу, что [`Foreign`]: обёртка печатается
+/// **один раз на символ**, а мест, где её адрес уезжает наружу, может быть
+/// сколько угодно.
+///
+/// Обёртка, а не переименование самой [`Function`], и цена названа. Внутренняя
+/// функция живёт соглашением порождённого кода - `static` в C, `internal
+/// tailcc` в LLVM, - и переименуй её наружу, соглашение пришлось бы менять и
+/// у всех её вызывающих. Обёртка локализует границу в одной строке, и
+/// прецедент на неё в дереве уже есть: `adamas_entry` у LLVM устроен ровно так
+/// же - внешняя функция сишного соглашения, зовущая `tailcc`-внутреннюю.
+#[derive(Clone, Debug)]
+pub struct Export {
+    /// Имя у линкера: как написано в `export`.
+    pub symbol: String,
+    /// Кого обёртка зовёт.
+    pub function: FuncId,
+    /// Типы аргументов. Длина - арность и сишная, и адамасова разом: единицы и
+    /// стёртого связывания в экспорте не бывает.
+    pub parameters: Vec<PrimTy>,
+    /// Чем отвечает. `void` не бывает по той же причине.
+    pub result: PrimTy,
+}
+
+/// Номер своей функции, видимой C: индекс в [`Program::exports`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExportId(pub usize);
+
 /// Ответ чужой функции (§5.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForeignResult {
@@ -1359,6 +1388,12 @@ pub enum Expr {
         /// Аргументы по [`Foreign::parameters`] - только те, что едут.
         arguments: Vec<Expr>,
     },
+    /// Адрес своей функции, видимой C: колбэк уровня 1 (§5.3).
+    ///
+    /// Листовой узел и константа: адрес символа известен компоновщику, среды
+    /// при нём нет никакой, и ячеек кучи он не выдаёт. Значение его -
+    /// `Repr::Flat(UInt64)`, то есть машинное слово, ровно как `CPtr`.
+    Exported(ExportId),
     /// Функция как значение: код плюс захваченная среда.
     Closure {
         /// Чей код.
@@ -1586,6 +1621,7 @@ impl Expr {
             | Self::LayoutField { .. }
             | Self::RegionNew
             | Self::SharedNew
+            | Self::Exported(_)
             | Self::Layout { .. } => Vec::new(),
             Self::Unpack { value, .. }
             | Self::Cancel { value, .. }
@@ -1673,6 +1709,8 @@ pub struct Program {
     pub functions: Vec<Function>,
     /// Чужие символы по номеру: индекс совпадает с [`ForeignId`] (§5.3).
     pub foreigns: Vec<Foreign>,
+    /// Свои символы, видимые C, по номеру: индекс совпадает с [`ExportId`].
+    pub exports: Vec<Export>,
     /// Точка входа: функция без параметров, чьё значение печатается.
     pub entry: FuncId,
     /// Исходник, к которому относятся [`Function::position`]. `None` - понижение

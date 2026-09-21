@@ -202,3 +202,8 @@ extern "C" fn clock : UInt64
 extern "C" fn strlen : CPtr -> UInt64
 
 apply fn x = fn x
+=== exported_symbols
+byWord : CPtr -> CPtr -> Int32
+export "C" fn byWord
+export "C" fn fn
+extern "C" fn qsort : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> CPtr -> Int32) -> Unit

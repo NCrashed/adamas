@@ -460,8 +460,9 @@ fn decl_at<'a>(decl: &'a Decl, depth: u32, pending: &mut Pending<'a>) -> Result<
             }
         }
         // Фикситет подтермов не несёт: имена операторов и число. Импорт - тоже:
-        // путь, префикс и список открытых имён.
-        DeclKind::Fixity(_) | DeclKind::Import(_) => {}
+        // путь, префикс и список открытых имён. Экспорт - тоже: ABI и имя суть
+        // лексемы, а тип его живёт при определении и меряется своей мерой.
+        DeclKind::Fixity(_) | DeclKind::Import(_) | DeclKind::Export(_) => {}
         DeclKind::Resource(resource) => {
             binder_terms(&resource.params, depth, pending);
             pending.extend(

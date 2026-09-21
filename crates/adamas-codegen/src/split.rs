@@ -182,6 +182,7 @@ pub fn prepare(program: Program) -> Program {
         handlers,
         mut functions,
         foreigns,
+        exports,
         entry,
         source,
     } = program;
@@ -207,6 +208,7 @@ pub fn prepare(program: Program) -> Program {
         handlers,
         functions,
         foreigns,
+        exports,
         entry,
         source,
     }
@@ -224,6 +226,7 @@ fn extracted(program: Program) -> Program {
         handlers,
         mut functions,
         foreigns,
+        exports,
         entry,
         source,
     } = program;
@@ -247,6 +250,7 @@ fn extracted(program: Program) -> Program {
         handlers,
         functions,
         foreigns,
+        exports,
         entry,
         source,
     }
@@ -325,6 +329,7 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         | Expr::LayoutField { .. }
         | Expr::RegionNew
         | Expr::SharedNew
+        | Expr::Exported(_)
         | Expr::Layout { .. } => Vec::new(),
         Expr::ArrayData { array: value }
         | Expr::Unpack { value, .. }
@@ -587,9 +592,11 @@ impl Anf<'_> {
             | Expr::RegionWrite { .. }
             | Expr::RegionRecycle { .. }
             | Expr::RegionPop { .. } => Repr::Region,
-            // Смещение внутри области (§3.6) и адрес нагрузки одолженного массива
-            // (§5.3) - оба плоское слово ширины указателя.
+            // Смещение внутри области (§3.6), адрес нагрузки одолженного массива
+            // и адрес своей функции, видимой C (§5.3), - все три плоское слово
+            // ширины указателя.
             Expr::ArrayData { .. }
+            | Expr::Exported(_)
             | Expr::RegionLast { .. } => Repr::Flat(adamas_core::prim::PrimTy::UInt64),
             Expr::RegionRead { stride, .. } => stride.element(),
             Expr::Erased

@@ -268,6 +268,12 @@ impl Printer {
                 self.block_of(&class.members, Self::decl);
             }
             DeclKind::Extern(declared) => self.extern_decl(declared),
+            DeclKind::Export(exported) => {
+                self.push("export ");
+                self.push(&exported.abi.text);
+                self.push(" fn ");
+                self.decl_name(&exported.name);
+            }
             DeclKind::Resource(resource) => self.resource(resource),
             DeclKind::Effect(effect) => self.effect_decl(effect),
             DeclKind::Fixity(fixity) => {

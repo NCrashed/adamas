@@ -63,9 +63,9 @@ use std::fmt::Write as _;
 use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
 
 use crate::ir::{
-    Arm, Binding, Constructor, CtorId, Elems, Expr, FiberOp, ForeignId, ForeignResult, Form,
-    FuncId, Function, HandlerId, LabelId, LocalId, PackId, Packing, Program, Repr, Salvage, Stride,
-    Verdict,
+    Arm, Binding, Constructor, CtorId, Elems, Export, ExportId, Expr, FiberOp, ForeignId,
+    ForeignResult, Form, FuncId, Function, HandlerId, LabelId, LocalId, PackId, Packing, Program,
+    Repr, Salvage, Stride, Verdict,
 };
 use crate::split::Suspension;
 
@@ -171,6 +171,7 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     packings(&mut out, program);
     vectors(&mut out, program);
     prototypes(&mut out, program);
+    exports(&mut out, program);
     table(&mut out, program);
     out.push_str(RELEASE);
     out.push('\n');
@@ -244,6 +245,7 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     for at in 0..program.handlers.len() {
         branches(&mut out, program, at);
     }
+    exported_bodies(&mut out, program);
 
     answer(&mut out, program);
     out.push_str(ENTRY);
@@ -581,6 +583,72 @@ fn prototypes(out: &mut String, program: &Program) {
 /// [`prototypes`].
 fn local(symbol: &str) -> String {
     format!("adamas_foreign_{symbol}")
+}
+
+/// Имя обёртки экспорта **внутри** порождённой единицы.
+///
+/// По тому же доводу, что и [`local`], и цена та же: символ у линкера пишет
+/// `__asm__`-метка, а внутри единицы стоит имя, которое системный заголовок
+/// занять не может.
+fn outward(symbol: &str) -> String {
+    format!("adamas_export_{symbol}")
+}
+
+/// Объявления своих символов, видимых C (§5.3, колбэк уровня 1).
+///
+/// Метка стоит при **объявлении**, а не при определении: GNU-метка читается на
+/// первом вхождении имени, и объявление здесь идёт раньше всего, потому что
+/// адрес обёртки вправе понадобиться телу функции, стоящей выше неё.
+fn exports(out: &mut String, program: &Program) {
+    if program.exports.is_empty() {
+        return;
+    }
+    out.push_str("/* Свои символы, видимые C (§5.3): обёртка на символ. */\n");
+    for export in &program.exports {
+        let _ = writeln!(
+            out,
+            "{} __asm__(\"{}\");",
+            exported_signature(export),
+            export.symbol
+        );
+    }
+    out.push('\n');
+}
+
+/// Заголовок обёртки экспорта - один на объявление и на определение.
+fn exported_signature(export: &Export) -> String {
+    let taken: Vec<String> = export
+        .parameters
+        .iter()
+        .enumerate()
+        .map(|(at, ty)| format!("{} a{at}", scalar(Repr::Flat(*ty))))
+        .collect();
+    format!(
+        "{} {}({})",
+        scalar(Repr::Flat(export.result)),
+        outward(&export.symbol),
+        taken.join(", ")
+    )
+}
+
+/// Тела обёрток: внешняя функция сишного соглашения, зовущая внутреннюю.
+///
+/// Обёртка, а не переименование самой `fn_N`, - см. [`crate::ir::Export`].
+/// Ставится **после** определений функций: к этому месту `fn_N` уже написана,
+/// и прямой вызов её компилятор вправе встроить целиком.
+fn exported_bodies(out: &mut String, program: &Program) {
+    for export in &program.exports {
+        let given: Vec<String> = (0..export.parameters.len())
+            .map(|at| format!("a{at}"))
+            .collect();
+        let _ = writeln!(
+            out,
+            "{} {{\n    return fn_{}({});\n}}\n",
+            exported_signature(export),
+            export.function.0,
+            given.join(", ")
+        );
+    }
 }
 
 /// Типы векторов (§4.9): `vector_size`, а не массив и не структура.
@@ -1491,10 +1559,11 @@ impl Emitter<'_> {
             | Expr::RegionWrite { .. }
             | Expr::RegionRecycle { .. }
             | Expr::RegionPop { .. } => Repr::Region,
-            // Смещение внутри области (§3.6) и адрес нагрузки одолженного массива
-            // (§5.3) - оба плоское слово ширины указателя, то есть ровно то, чем
-            // уровень 1 считает `CPtr`.
+            // Смещение внутри области (§3.6), адрес нагрузки одолженного массива
+            // и адрес своей функции, видимой C (§5.3), - все три плоское слово
+            // ширины указателя, то есть ровно то, чем уровень 1 считает `CPtr`.
             Expr::ArrayData { .. }
+            | Expr::Exported(_)
             | Expr::RegionLast { .. } => Repr::Flat(PrimTy::UInt64),
             Expr::RegionRead { stride, .. } => stride.element(),
             Expr::Erased
@@ -1608,6 +1677,7 @@ impl Emitter<'_> {
                 function,
                 arguments,
             } => self.foreign(*function, arguments, depth),
+            Expr::Exported(id) => self.exported(*id, depth),
             Expr::ArrayData { array } => self.lending(array, depth),
             Expr::Closure { function, captured } => self.closure(*function, captured, depth),
             Expr::Handle {
@@ -2803,6 +2873,24 @@ impl Emitter<'_> {
         let _ = writeln!(
             self.out,
             "{pad}uint64_t {name} = (uint64_t)(uintptr_t)adamas_array_data({array});"
+        );
+        name
+    }
+
+    /// Адрес своей функции, видимой C (§5.3): колбэк уровня 1.
+    ///
+    /// Приведений два подряд по тому же доводу, что у [`Emitter::lending`]:
+    /// прямое приведение указателя к целому иной ширины есть предупреждение, а
+    /// `uintptr_t` ширину указателя и означает. Берётся адрес **обёртки**, а не
+    /// `fn_N`: у внутренней функции своё соглашение, и чужая сторона зовёт
+    /// именно обёртку.
+    fn exported(&mut self, id: ExportId, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let symbol = outward(&self.program.exports[id.0].symbol);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}uint64_t {name} = (uint64_t)(uintptr_t)&{symbol}; /* export \"C\" */"
         );
         name
     }

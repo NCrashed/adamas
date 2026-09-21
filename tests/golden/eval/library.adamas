@@ -29,19 +29,21 @@
 -- объявлен под путём.
 
 import Cmp.Truth (Bool, False, True)
-import Cmp.Words (isBig, isSmall, classify)
+import Cmp.Words (isBig, isSmall, known, classify, sumDown)
 
 -- `if` над чужим `Bool`: ветви `True` и `False` пишутся коротко, а объявлены
 -- они `Cmp.Truth.True` и `Cmp.Truth.False`.
 pick : Bool -> UInt64 -> UInt64 -> UInt64
 pick b yes no = if b then yes else no
 
-type Answers = { big : UInt64, small : UInt64, zero : UInt64,
-                 one : UInt64, other : UInt64 }
+type Answers = { big : UInt64, small : UInt64, folded : UInt64,
+                 zero : UInt64, one : UInt64, other : UInt64, down : UInt64 }
 
 main : Answers
 main = { big = pick (isBig 20) 1 0,
          small = pick (isSmall 20) 1 0,
+         folded = pick known 1 0,
          zero = classify 0,
          one = classify 1,
-         other = classify 7 }
+         other = classify 7,
+         down = sumDown 10 0 }

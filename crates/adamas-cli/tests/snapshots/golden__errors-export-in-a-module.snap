@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: export-in-a-module.adamas:19:3: `twice` в модуле не объявляется: символ у линкера один на программу, а имя члена модуля квалифицировано
+    export "C" fn twice
+    ^^^^^^^^^^^^^^^^^^^

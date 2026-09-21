@@ -216,6 +216,138 @@ big = 100000
     assert_eq!(value(&signature, "big"), "100000");
 }
 
+/// Программа со строкой: база тестам строкового литерала (§5.3, §4.5).
+///
+/// Ячейки читаются **по одной**: конверсий ширины в языке нет, и байт с байтом
+/// сравнивать нечем, кроме `eqUInt8`. Значение каждой пробы и есть наблюдение.
+fn with_a_string(declared: usize, text: &str, reads: &str) -> String {
+    format!(
+        "greeting : Array {declared} UInt8
+greeting = \"{text}\"
+{reads}"
+    )
+}
+
+#[test]
+fn a_string_under_a_written_byte_array_is_utf8_with_a_zero() {
+    // Три утверждения в одном прогоне, и каждое - своя ячейка. Буква едет своим
+    // байтом; кириллическая буква едет **парой** байт UTF-8, а не кодовой
+    // точкой, усечённой до байта (иначе в `lead` стояло бы 52); завершающий
+    // ноль **есть** и входит в написанную длину.
+    //
+    // Наблюдается **нормальная форма**: у неё ячейки видны все сразу, включая
+    // ту, которой автор не писал. Заполнитель `arrayNew` здесь первый байт -
+    // так блок читается обратно (трек B волны 2), а не так, как элаборация его
+    // собрала.
+    let signature = program(&with_a_string(4, "hд", ""));
+    assert_eq!(
+        value(&signature, "greeting"),
+        "arraySet 4 UInt8 (arraySet 4 UInt8 (arraySet 4 UInt8 (arrayNew UInt8 4 104) 1 208) 2 180) 3 0"
+    );
+}
+
+#[test]
+fn a_string_without_a_written_byte_array_is_refused() {
+    // Охрана варианта (а′): синтаксис `"…"` занят **только** под написанным
+    // массивом байт, и в прочих позициях литерал по-прежнему отвергается - то
+    // есть место для будущего `String` (§4.5) остаётся свободным. Ближайший
+    // проходящий сосед - тест выше: тот же литерал, тип другой.
+    let error = refused(
+        "loose : Array 3 UInt64
+loose = \"hi\"
+",
+    );
+    assert!(
+        matches!(
+            error,
+            ElabError::Missing {
+                what: Missing::Literal,
+                ..
+            }
+        ),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_string_in_a_pattern_is_refused_by_its_own_name() {
+    // Выражением строка есть массив байт, разбором - не бывает: паттерн-литерал
+    // сравнивается одним словом. Причина отдельная, потому что общая звала бы
+    // написать `Array n UInt8` там, где он уже написан.
+    let error = refused(
+        "classify : Array 3 UInt8 -> UInt64
+classify \"hi\" = 1
+classify other = 0
+",
+    );
+    assert!(
+        matches!(
+            error,
+            ElabError::Missing {
+                what: Missing::StringPattern,
+                ..
+            }
+        ),
+        "получено {error:?}"
+    );
+}
+
+#[test]
+fn a_zero_inside_a_string_is_refused() {
+    // Завершающий ноль дописывает компилятор, и чужая сторона читает до
+    // **первого** нуля: литерал с нулём посередине объявлял бы длину, которой
+    // она не увидит. Отказ, а не молчание.
+    let error = refused(&with_a_string(9, "hi\\0there", ""));
+    let ElabError::StringZero {
+        length,
+        seen,
+        content,
+        ..
+    } = error
+    else {
+        panic!("получено {error:?}");
+    };
+    assert_eq!((length, seen, content), (9, 2, 8));
+}
+
+#[test]
+fn a_string_past_the_limit_is_refused_by_name() {
+    // Без предела здесь стоял бы **обрыв процесса**: литерал разворачивается
+    // спайном глубиной в саму строку. Длина написана числом, а не выражена
+    // через предел: иначе свидетель ехал бы вместе с ним и оставался зелёным
+    // при любом его значении (тот же дефект, каким трек B волны 2 поймал
+    // `Block::LIMIT`).
+    let error = refused(&with_a_string(65, &"a".repeat(64), ""));
+    let ElabError::StringLength { limit, length, .. } = error else {
+        panic!("получено {error:?}");
+    };
+    assert_eq!((limit, length), (64, 65));
+    // Предел стоит там, где написано, а не где-то рядом.
+    assert_eq!(limit as usize, LIMIT);
+}
+
+#[test]
+fn a_string_at_the_limit_is_taken() {
+    // Ближайший проходящий сосед к отказу выше: на байт короче. Заодно это
+    // свидетель того, что предел не роняет процесс на **себе** - прогон
+    // проверки идёт в потоке с умолчательным стеком, где обрыв стоит на 79
+    // байтах.
+    let signature = program(&with_a_string(LIMIT, &"a".repeat(LIMIT - 1), ""));
+    assert_eq!(
+        value(&signature, "greeting"),
+        format!(
+            "arraySet {LIMIT} UInt8 (arrayNew UInt8 {LIMIT} 97) {} 0",
+            LIMIT - 1
+        )
+    );
+}
+
+/// Предел длины строкового литерала - числом, а не ссылкой на константу.
+///
+/// Свидетель, читающий предел из того же места, где он объявлен, ехал бы вместе
+/// с ним.
+const LIMIT: usize = 64;
+
 #[test]
 fn fixities_bracket_a_chain() {
     // §4.4: приоритет 0-9, `infixl` слева, `infixr` справа. Проверяется не

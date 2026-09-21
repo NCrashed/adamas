@@ -1,0 +1,77 @@
+-- Строковый литерал: байты UTF-8 с завершающим нулём (§5.3, §4.5).
+--
+-- Литерал элаборируется в `Array (n+1) UInt8` **только** там, где этот тип
+-- написан; во всякой другой позиции он по-прежнему отвергается, и синтаксис
+-- `"…"` остаётся свободен для будущего `String` (§4.5). Отказы стоят в
+-- `errors/string-*`.
+--
+-- Наблюдений шесть, и каждое различает свой мутант элаборации.
+--
+--   * Буква едет своим байтом: `h` есть 104.
+--   * Завершающий ноль **есть**, и он в длине: `Array 3 UInt8` у строки из двух
+--     букв, третья ячейка - ноль. Залей `arrayNew` блок не нулём - разряд
+--     десятков погас бы.
+--   * Кириллица едет **байтами UTF-8**, а не кодовыми точками: `д` есть пара
+--     208, 180. Возьми элаборация символ одним байтом - там стояло бы 52.
+--   * Второй байт той же пары наблюдается отдельно: порядок байт внутри буквы
+--     тоже наблюдаем.
+--   * Escape раскрывается: `\t` есть 9, а не два символа.
+--   * `\u{…}` раскрывается в UTF-8, а не в младший байт: `Ж` есть пара 208,
+--     150.
+--
+-- Длина в типе **байтовая**, а не буквенная, и это цена соглашения: у строки
+-- из двух кириллических букв написано 5.
+--
+-- Байт в слово не расширяется - конверсий ширины в языке нет ни одной, - и
+-- прочитанное наблюдается сравнением, ровно как в `extern-buffer`.
+
+data Bool where
+  True : Bool
+  False : Bool
+
+pick : Bool -> UInt64 -> UInt64 -> UInt64
+pick True yes no = yes
+pick False yes no = no
+
+greeting : Array 3 UInt8
+greeting = "hi"
+
+-- `д` = U+0434 = D0 B4, `а` = U+0430 = D0 B0, плюс завершающий ноль.
+cyrillic : Array 5 UInt8
+cyrillic = "да"
+
+-- `\t` = 09, `Ж` = U+0416 = D0 96, плюс завершающий ноль.
+escaped : Array 4 UInt8
+escaped = "\t\u{416}"
+
+letter : UInt8
+letter = 104
+
+nothing : UInt8
+nothing = 0
+
+lead : UInt8
+lead = 208
+
+trail : UInt8
+trail = 180
+
+tab : UInt8
+tab = 9
+
+unicode : UInt8
+unicode = 150
+
+same : UInt8 -> UInt8 -> UInt64
+same found wanted = pick (eqUInt8 found wanted) 1 0
+
+-- 111111: буква, завершающий ноль, обе половины кириллической буквы, escape,
+-- `\u{…}` в UTF-8.
+main : UInt64
+main =
+  addUInt64 (same (arrayIndex greeting 0) letter)
+    (addUInt64 (mulUInt64 (same (arrayIndex greeting 2) nothing) 10)
+      (addUInt64 (mulUInt64 (same (arrayIndex cyrillic 0) lead) 100)
+        (addUInt64 (mulUInt64 (same (arrayIndex cyrillic 1) trail) 1000)
+          (addUInt64 (mulUInt64 (same (arrayIndex escaped 0) tab) 10000)
+            (mulUInt64 (same (arrayIndex escaped 2) unicode) 100000)))))

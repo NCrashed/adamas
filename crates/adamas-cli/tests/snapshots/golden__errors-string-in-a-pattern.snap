@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: string-in-a-pattern.adamas:15:10: строка в разборе пока не элаборируется: выражением строка есть `Array n UInt8` (§5.3), а паттерн-литерал сравнивается одним словом - массив байт так не сравнивается; сравнивайте `arrayIndex` либо своей функцией
+  classify "hi" = 1
+           ^^^^

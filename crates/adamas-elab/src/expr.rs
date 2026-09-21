@@ -255,6 +255,75 @@ pub(crate) const DEFAULT_FLOAT: &str = "Float";
 /// вложенности разбора: терм унарного числа глубиной ровно в него.
 pub(crate) const UNARY_LIMIT: u32 = 256;
 
+/// Предел длины строкового литерала (§4.5, §10 вопрос 187).
+///
+/// Мера та же, что у [`UNARY_LIMIT`], и по той же причине: считается не запись,
+/// а терм, который из неё получится. Литерал разворачивается спайном `arraySet`
+/// над `arrayNew`, и путь вниз стоит **три** звена на байт - `arraySet n el
+/// собранное i v` есть пять применений, из которых на пути лежит третье.
+/// Шестьдесят четыре байта дают 192 звена, то есть умещаются в тот же бюджет
+/// в 256, каким живут предел вложенности разбора и унарный литерал.
+///
+/// **Число взято замером.** Обрыв процесса стоит на 79 байтах в потоке с
+/// умолчательным стеком (2 МиБ - там идут тесты), на 323 у `adamas check`
+/// отладочной сборки и около 2650 у release. Предел обязан быть **одним**
+/// числом для всех трёх: поверхность языка, зависящая от профиля сборки, - не
+/// поверхность. Поэтому он взят ниже наименьшего из трёх, с запасом.
+///
+/// **Чего он не закрывает, и это названо.** Глубина литерала и глубина
+/// написанного вокруг него **складываются** - ровно как у унарного числа. Сто
+/// применений вокруг строки в 63 байта роняют поток в 2 МиБ, не нарушив ни
+/// одного предела. Лечится это не числом, а узлом ядра (§10 вопрос 187,
+/// вариант (б)): у литерала-листа глубины нет вовсе.
+pub(crate) const STRING_LIMIT: u32 = 64;
+
+/// Байты строкового литерала в UTF-8 вместе с завершающим нулём.
+///
+/// Текст приходит с кавычками и нераскрытыми escape'ами - лексер их только
+/// проверил. Юникод едет байтами UTF-8: исходник и так UTF-8, `Char` в ядро не
+/// взят, и кодовым точкам в `Array n UInt8` места нет.
+fn string_bytes(text: &str) -> Option<Vec<u8>> {
+    let inner = text.strip_prefix('"')?.strip_suffix('"')?;
+    let mut bytes = Vec::new();
+    let mut rest = inner.chars();
+    let push = |ch: char, into: &mut Vec<u8>| {
+        let mut buffer = [0u8; 4];
+        into.extend_from_slice(ch.encode_utf8(&mut buffer).as_bytes());
+    };
+    while let Some(ch) = rest.next() {
+        if ch != '\\' {
+            push(ch, &mut bytes);
+            continue;
+        }
+        let decoded = match rest.next()? {
+            'n' => '\n',
+            't' => '\t',
+            'r' => '\r',
+            '0' => '\0',
+            '\\' => '\\',
+            '"' => '"',
+            '\'' => '\'',
+            'u' => {
+                if rest.next() != Some('{') {
+                    return None;
+                }
+                let mut digits = String::new();
+                loop {
+                    match rest.next()? {
+                        '}' => break,
+                        digit => digits.push(digit),
+                    }
+                }
+                char::from_u32(u32::from_str_radix(&digits, 16).ok()?)?
+            }
+            _ => return None,
+        };
+        push(decoded, &mut bytes);
+    }
+    bytes.push(0);
+    Some(bytes)
+}
+
 /// Читает цифры литерала: десятичные либо шестнадцатеричные, `_` игнорируются.
 ///
 /// `None` - не разобралось либо не поместилось в `u128`. Шире `u128` не бывает
@@ -2846,6 +2915,9 @@ impl<'a> Elaborator<'a> {
     /// терм литерала размером с само число, и потому величина его ограничена -
     /// см. [`UNARY_LIMIT`].
     fn literal(&mut self, lit: &ast::Lit, awaited: Option<&Rc<Value>>) -> Result<Term, ElabError> {
+        if lit.kind == ast::LitKind::Str && awaited.is_some_and(|ty| self.byte_array(ty)) {
+            return Self::string_literal(lit);
+        }
         if let Some(ty) = awaited.and_then(|ty| self.primitive_type(ty)) {
             return Self::primitive_literal(lit, ty);
         }
@@ -2943,6 +3015,85 @@ impl<'a> Elaborator<'a> {
             span: lit.span,
         });
         self.literal(lit, awaited).map(Some)
+    }
+
+    /// Написан ли ожидаемым типом именно `Array n UInt8`.
+    ///
+    /// Длина не смотрится: её решает сам литерал, и разойдись она с написанной -
+    /// скажет проверка типов. Смотрится **ячейка**: без этого строковый
+    /// синтаксис занят массивом байт везде, и будущему `String` его не отдать.
+    fn byte_array(&mut self, ty: &Rc<Value>) -> bool {
+        let reduced = whnf_solved(self.signature, self.metas, ty);
+        let Value::Neutral(Head::Array, spine) = &*reduced else {
+            return false;
+        };
+        let [Elim::App(_length), Elim::App(element)] = spine.as_slice() else {
+            return false;
+        };
+        matches!(
+            &*whnf_solved(self.signature, self.metas, element),
+            Value::Prim(Prim::Ty(PrimTy::UInt8))
+        )
+    }
+
+    /// Строковый литерал есть `Array (n+1) UInt8` с нулём в хвосте (§5.3).
+    ///
+    /// Длина выводится из самого литерала. Терм собирается спайном `arraySet`
+    /// над `arrayNew`, то есть ровно тем, что автор написал бы руками;
+    /// завершающий ноль пропущен - `arrayNew` уже залил им весь блок.
+    ///
+    /// Два отказа сверх разбора, и оба - свойства **соглашения**, а не записи.
+    /// Нулевой байт внутри отвергается: ноль здесь есть конец строки для чужой
+    /// стороны, и литерал с нулём посередине объявлял бы длину, которой чужая
+    /// сторона не увидит. Длина сверх [`STRING_LIMIT`] отвергается: спайн есть
+    /// терм глубиной в саму строку.
+    fn string_literal(lit: &ast::Lit) -> Result<Term, ElabError> {
+        let Some(bytes) = string_bytes(&lit.text) else {
+            return Err(ElabError::Missing {
+                what: Missing::Literal,
+                span: lit.span,
+            });
+        };
+        let content = bytes.len() - 1;
+        if let Some(at) = bytes[..content].iter().position(|it| *it == 0) {
+            return Err(ElabError::StringZero {
+                length: bytes.len(),
+                seen: at,
+                content,
+                span: lit.span,
+            });
+        }
+        if bytes.len() > STRING_LIMIT as usize {
+            return Err(ElabError::StringLength {
+                limit: STRING_LIMIT,
+                length: bytes.len(),
+                span: lit.span,
+            });
+        }
+        let length = bytes.len() as u64;
+        let element = Term::Prim(Prim::Ty(PrimTy::UInt8));
+        let word = |value: u64| Term::Prim(Prim::literal(PrimTy::UInt64, value));
+        let byte = |value: u8| Term::Prim(Prim::literal(PrimTy::UInt8, u64::from(value)));
+        let mut built = Term::Prim(Prim::Over(prim::ArrayOp::New)).apply([
+            element.clone(),
+            word(length),
+            byte(0),
+        ]);
+        // Нулевой байт в наборе ровно один - завершающий, - и писать его нечем:
+        // `arrayNew` залил им блок целиком. Звено на него тратилось бы впустую.
+        for (index, value) in bytes.iter().enumerate() {
+            if *value == 0 {
+                continue;
+            }
+            built = Term::Prim(Prim::Over(prim::ArrayOp::Set)).apply([
+                word(length),
+                element.clone(),
+                built,
+                word(index as u64),
+                byte(*value),
+            ]);
+        }
+        Ok(built)
     }
 
     /// Ожидаемый тип, если он примитивный.
@@ -6006,7 +6157,14 @@ impl<'a> Elaborator<'a> {
             // колонка знает его на любой глубине. Сюда доезжает написанное, и
             // отсюда - `LiteralPattern`, если оно в тип не уложилось.
             PatternKind::Lit(lit) => written_literal(lit).ok_or(ElabError::Missing {
-                what: Missing::Literal,
+                // Строка отвергается **своей** причиной: выражением она есть
+                // массив байт, и общий отказ звал бы писать `Array n UInt8`
+                // там, где он уже написан.
+                what: if lit.kind == ast::LitKind::Str {
+                    Missing::StringPattern
+                } else {
+                    Missing::Literal
+                },
                 span: pattern.span,
             }),
             PatternKind::Tuple(items) => Err(ElabError::Missing {
@@ -6635,8 +6793,10 @@ fn split_row(codomain: &Expr) -> (Option<&Expr>, &Expr) {
 
 /// Написанный литерал паттерном ядра - без типа, который решает колонка.
 ///
-/// `None` - строка: строк в языке нет вовсе (§4.5), и отказ у них тот же, что
-/// в выражении.
+/// `None` - строка. Выражением она есть `Array n UInt8` (§5.3), а разбором не
+/// бывает: паттерн-литерал сравнивается одним словом, и массив байт так не
+/// сравнить. Отказ у неё поэтому свой ([`Missing::StringPattern`]), а не общий
+/// с прочими литералами.
 fn written_literal(lit: &ast::Lit) -> Option<CorePattern> {
     let literal = match lit.kind {
         ast::LitKind::Nat => Literal::Nat(digits(&lit.text)?),

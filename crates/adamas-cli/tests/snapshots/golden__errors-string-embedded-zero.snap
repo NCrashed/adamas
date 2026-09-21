@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: string-embedded-zero.adamas:17:10: нулевой байт внутри строки: байт #2 - ноль, а завершающий ноль дописывает компилятор; чужая сторона читает до первого нуля (§5.3) и от `Array 9 UInt8` увидит 2, а не 8 - байты с нулём внутри пишутся `arrayNew` с `arraySet`
+  tricky = "hi\0there"
+           ^^^^^^^^^^^

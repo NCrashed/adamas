@@ -1029,7 +1029,7 @@ impl<'a> Lowerer<'a> {
     /// не меняет ничего - экземпляр один.
     fn function(&mut self, name: &Name, demanded: bool) -> Result<FuncId, LowerError> {
         let ty = self.declared(name)?;
-        let demanded = demanded && form(ty) == Form::Stack;
+        let demanded = demanded && form(self.signature, ty) == Form::Stack;
         if let Some(id) = if demanded {
             self.evidenced.get(name)
         } else {
@@ -1040,7 +1040,11 @@ impl<'a> Lowerer<'a> {
         let (parameters, _, _, dicts) = self.peeled(name)?;
         let ty = self.declared(name)?;
         let result = self.result_repr(ty, parameters.len(), &dicts)?;
-        let form = if demanded { Form::Detached } else { form(ty) };
+        let form = if demanded {
+            Form::Detached
+        } else {
+            form(self.signature, ty)
+        };
         let id = FuncId(self.functions.len());
         self.functions.push(Function {
             id,
@@ -4133,7 +4137,7 @@ impl<'a> Lowerer<'a> {
     /// не дают: они едут суффиксом вектора и производить не заставляют (§3.4).
     fn demanded(&self, name: &Name, instance: &Args) -> Result<bool, LowerError> {
         let ty = self.declared(name)?;
-        if form(ty) == Form::Detached {
+        if form(self.signature, ty) == Form::Detached {
             return Ok(false);
         }
         let rows = instance.row_args();
@@ -4653,15 +4657,34 @@ fn head(term: &Term) -> Option<String> {
 /// отличима от «под любым», пока хендлер не виден в точке (§10 вопрос 74), а
 /// инлайнинг - оптимизация после волны. Цена названа прямо: функция под
 /// заведомо хвостово-резумптивной меткой платит за кадр.
-fn form(ty: &Term) -> Form {
+/// **Метка без операций второй формы не требует.** Кадр отчуждается ради
+/// точки приостановки, а приостановиться можно только на операции; у метки, чьё
+/// объявление операций не перечисляет (`effect Foreign`, §5.3), операции нет ни
+/// одной, и производить ею нечего. Спрашиваются поэтому операции, а не имена в
+/// row. Цена обратного измерена этой же волной: `{Foreign}` в сигнатуре
+/// компаратора давала вторую форму, то есть требовала вектора evidence у
+/// функции, которую зовёт C, - а вектора у C нет.
+fn form(signature: &Signature, ty: &Term) -> Form {
     let mut current = ty;
     while let Term::Pi(_, _, _, row, codomain) = current {
-        if !row.labels().is_empty() {
+        if row.labels().iter().any(|label| performs(signature, label)) {
             return Form::Detached;
         }
         current = codomain;
     }
     Form::Stack
+}
+
+/// Есть ли у метки хоть одна операция.
+///
+/// Неизвестная метка считается производящей: понижение идёт по проверенной
+/// программе, и метки вне сигнатуры там не бывает, - а догадка в эту сторону
+/// стоит кадра, тогда как в обратную стоила бы неверного вызова.
+fn performs(signature: &Signature, label: &adamas_core::row::Label<Term>) -> bool {
+    match signature.lookup(&label.name).map(|it| &it.kind) {
+        Some(DefinitionKind::Effect { operations, .. }) => !operations.is_empty(),
+        _ => true,
+    }
 }
 
 /// Row-параметры типа, стоящие в row стрелки **внутри домена**, - needy (§10

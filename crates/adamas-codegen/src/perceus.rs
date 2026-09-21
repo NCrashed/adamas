@@ -123,6 +123,7 @@ pub fn insert(program: Program) -> Program {
         handlers,
         functions,
         foreigns,
+        exports,
         entry,
         source,
     } = program;
@@ -137,6 +138,7 @@ pub fn insert(program: Program) -> Program {
         handlers,
         functions,
         foreigns,
+        exports,
         entry,
         source,
     }
@@ -408,6 +410,9 @@ impl Pass<'_> {
             // который чужая сторона ещё читает. Отдаёт массив
             // [`Pass::applied_to`], и отдаёт **после** чужого вызова.
             | Expr::ArrayData { .. }
+            // Адрес экспортированного символа (§5.3) - константа компоновщика:
+            // блока за ней нет, счётчика нет, и считать по ней нечего.
+            | Expr::Exported(_)
             | Expr::Layout { .. } => drops(owned.iter().copied().collect::<Vec<_>>(), expr),
             // Векторные `load`/`store` (§4.9) идут тем же путём, что скалярные
             // чтение и запись: колонка у них та же, владение то же, и
@@ -1473,6 +1478,7 @@ impl Pass<'_> {
             | Expr::Literal { .. }
             | Expr::LayoutField { .. }
             | Expr::ArrayData { .. }
+            | Expr::Exported(_)
             | Expr::Pack { .. }
             | Expr::Unpack { .. }
             // Область региона под переписывание тоже не годится, и по тому же
@@ -1607,6 +1613,7 @@ impl Pass<'_> {
             | Expr::Literal { .. }
             | Expr::LayoutField { .. }
             | Expr::ArrayData { .. }
+            | Expr::Exported(_)
             | Expr::Pack { .. }
             | Expr::Unpack { .. }
             // Область региона под переписывание тоже не годится, и по тому же

@@ -133,9 +133,10 @@ use adamas_core::term::{Args, Case, Index, Name, Term};
 use adamas_core::value::{Env, Lvl, Value};
 
 use crate::ir::{
-    Arm, Binding, Branch, Constructor, CtorId, Elems, Expr, Fact, FiberOp, Foreign, ForeignId,
-    ForeignResult, Form, FuncId, Function, Handler, HandlerId, Label, LabelId, LocalId, PackId,
-    Packing, Program, Repr, Slot as PackSlot, SlotTy, Source, Stride, Task, Variant, Verdict,
+    Arm, Binding, Branch, Constructor, CtorId, Elems, Export, ExportId, Expr, Fact, FiberOp,
+    Foreign, ForeignId, ForeignResult, Form, FuncId, Function, Handler, HandlerId, Label, LabelId,
+    LocalId, PackId, Packing, Program, Repr, Slot as PackSlot, SlotTy, Source, Stride, Task,
+    Variant, Verdict,
 };
 
 /// Почему понижение отказало.
@@ -772,6 +773,10 @@ struct Lowerer<'a> {
     foreigns: Vec<Foreign>,
     /// Номер чужого символа по имени определения.
     externs: HashMap<Name, ForeignId>,
+    /// Свои символы, видимые C (§5.3): обёртка на символ, а не на место.
+    exports: Vec<Export>,
+    /// Номер своего символа по имени определения.
+    exported: HashMap<Name, ExportId>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -796,6 +801,8 @@ impl<'a> Lowerer<'a> {
             tainted: false,
             foreigns: Vec::new(),
             externs: HashMap::new(),
+            exports: Vec::new(),
+            exported: HashMap::new(),
         }
     }
 
@@ -863,6 +870,14 @@ impl<'a> Lowerer<'a> {
         self.functions[entry_id.0].body = body;
         self.functions[entry_id.0].result = repr;
 
+        // Экспорт понижается **независимо от достижимости**: «видно C» и
+        // значит, что звать его будут снаружи, а не отсюда. Достижимое уже
+        // попало в очередь телом точки входа; остальное добирается здесь, до
+        // того как очередь начнёт пустеть.
+        for name in self.signature.exported() {
+            self.export(&name)?;
+        }
+
         // Очередь, а не рекурсия: имя получает номер до того, как понижено его
         // тело, поэтому рекурсия и взаимная рекурсия проходят сами собой.
         while let Some((id, name)) = self.pending.pop_front() {
@@ -905,6 +920,7 @@ impl<'a> Lowerer<'a> {
             handlers: self.handlers,
             functions: self.functions,
             foreigns: self.foreigns,
+            exports: self.exports,
             entry: entry_id,
             source: self.file.map(|file| split_path(file.name())),
         })
@@ -2650,11 +2666,19 @@ impl<'a> Lowerer<'a> {
             if !carried.present() {
                 continue;
             }
+            // Колбэк едет адресом символа, и связывать его нечем: адрес есть
+            // константа компоновщика, вычисления за ней нет никакого, и
+            // порядок §3.1 он не наблюдает.
+            if matches!(carried, Cross::Callback) {
+                let id = self.callback(name, argument)?;
+                given.push(Expr::Exported(id));
+                continue;
+            }
             let (repr, at) = match carried {
                 Cross::Word(ty) => (Repr::Flat(*ty), "аргумент чужого вызова"),
                 Cross::Buffer(_) => (Repr::Array(Elems::Flat), "буфер у границы C"),
                 Cross::Nothing => (Repr::Boxed, "единица у границы C"),
-                Cross::Erased => unreachable!("стёртое отсеяно выше"),
+                Cross::Erased | Cross::Callback => unreachable!("отсеяно выше"),
             };
             let value = self.given(scope, argument, repr, at)?;
             let local = scope.fresh();
@@ -2674,7 +2698,7 @@ impl<'a> Lowerer<'a> {
                 Cross::Buffer(_) => given.push(Expr::ArrayData {
                     array: Box::new(Expr::Local(local)),
                 }),
-                Cross::Nothing | Cross::Erased => {}
+                Cross::Nothing | Cross::Erased | Cross::Callback => {}
             }
         }
         let result = self.foreigns[function.0].result;
@@ -2692,6 +2716,89 @@ impl<'a> Lowerer<'a> {
             };
         }
         Ok((value, result.repr()))
+    }
+
+    /// Колбэк в аргументе чужого вызова: имя экспортированного определения.
+    ///
+    /// Форма проверяется **здесь**, а не типами, и граница названа: тип
+    /// пропускает в эту позицию всякую функцию нужной формы - лямбду, частичное
+    /// применение, параметр, - а уровень 1 берёт голый указатель, при котором
+    /// среды нет вовсе. Тому, у кого среда есть, здесь отказ, и §5.3 называет
+    /// его место: `userdata` уровня 2.
+    fn callback(&mut self, callee: &Name, argument: &Arg<'_>) -> Result<ExportId, LowerError> {
+        let Arg::Written(term) = argument else {
+            return Err(LowerError::Foreign {
+                name: callee.to_string(),
+                why: "колбэк достроен по типу, а не написан: адреса у него нет",
+            });
+        };
+        let Term::Const(name, _, _) = term else {
+            return Err(LowerError::Foreign {
+                name: callee.to_string(),
+                why: "в позиции колбэка стоит не имя: уровень 1 берёт указатель на \
+                      определение, а у лямбды, частичного применения и параметра есть \
+                      среда, и она едет в `userdata` на уровне 2",
+            });
+        };
+        if self.signature.export(name).is_none() {
+            return Err(LowerError::Foreign {
+                name: name.to_string(),
+                why: "в позиции колбэка стоит имя, не объявленное `export \"C\"`: \
+                      символа у линкера у него нет",
+            });
+        }
+        self.export(name)
+    }
+
+    /// Номер своего символа, видимого C: обёртка заводится один раз на символ.
+    ///
+    /// Здесь же проверяется то, чего элаборация проверить не могла: **форма
+    /// кадра**. Обёртка зовёт внутреннюю функцию без скрытых аргументов, а
+    /// вторая форма (§10 вопрос 169) требует вектора evidence и продолжения -
+    /// передать их чужой стороне нечем. Отказ, а не молчаливо неверный вызов.
+    fn export(&mut self, name: &Name) -> Result<ExportId, LowerError> {
+        if let Some(id) = self.exported.get(name) {
+            return Ok(*id);
+        }
+        let crossing = self
+            .signature
+            .export(name)
+            .ok_or_else(|| LowerError::Unknown {
+                name: name.to_string(),
+            })?;
+        let symbol = crossing.symbol.to_string();
+        let parameters = crossing.carried();
+        let result = crossing.result.ok_or_else(|| LowerError::Foreign {
+            name: name.to_string(),
+            why: "у экспорта нет ответа: элаборация такого не пускает",
+        })?;
+        let function = self.function(name, false)?;
+        let lowered = &self.functions[function.0];
+        if lowered.form != Form::Stack || !lowered.captured.is_empty() {
+            return Err(LowerError::Foreign {
+                name: name.to_string(),
+                why: "экспорт понизился во вторую форму: ей нужны вектор evidence и \
+                      продолжение, а у чужой стороны их нет (§5.3, уровень 2)",
+            });
+        }
+        let taken: Vec<Repr> = lowered.parameters.iter().map(|it| it.fact.repr).collect();
+        let wanted: Vec<Repr> = parameters.iter().map(|it| Repr::Flat(*it)).collect();
+        if taken != wanted || lowered.result != Repr::Flat(result) {
+            return Err(LowerError::Foreign {
+                name: name.to_string(),
+                why: "форма экспорта разошлась с понижением: граница объявлена словами, \
+                      а функция понизилась иначе",
+            });
+        }
+        let id = ExportId(self.exports.len());
+        self.exports.push(Export {
+            symbol,
+            function,
+            parameters,
+            result,
+        });
+        self.exported.insert(Rc::clone(name), id);
+        Ok(id)
     }
 
     /// Номер чужого символа: заводится один раз на символ.

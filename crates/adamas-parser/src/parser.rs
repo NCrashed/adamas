@@ -60,7 +60,7 @@ use adamas_core::source::Span;
 
 use crate::ast::{
     Alt, Assoc, Binder, Binding, Block, Chain, ClassDecl, Clause, Constructor, Data, Decl,
-    DeclKind, EffectDecl, EffectLabel, Expr, ExprKind, ExternDecl, FixityDecl, Grade,
+    DeclKind, EffectDecl, EffectLabel, ExportDecl, Expr, ExprKind, ExternDecl, FixityDecl, Grade,
     HandlerBranch, ImportDecl, LamParam, LamParamKind, Lit, LitKind, Module, ModuleDecl, Mult,
     MultAnn, Name, Operation, Pattern, PatternKind, RecordField, Resource, Stmt, StmtKind, Symbol,
     Visibility, contains_block,
@@ -221,6 +221,17 @@ pub enum ParseError {
         span: Span,
     },
 
+    /// Атрибут перед `export` (§4.7, §5.3).
+    ///
+    /// Атрибут - обязательство определения, и стоит он при **сигнатуре**
+    /// (§4.7). `export` сигнатуры не несёт: определение с нею написано выше, и
+    /// второе место для обязательства означало бы два ответа на один вопрос.
+    #[error("атрибут пишется при сигнатуре определения, а не при `export` (§4.7)")]
+    AttributedExport {
+        /// Где стоит `export`.
+        span: Span,
+    },
+
     /// Точка в паттерне над строчным именем.
     ///
     /// Путь в паттерне называет конструктор (§4.8), и последнее звено его
@@ -348,6 +359,7 @@ impl ParseError {
             | Self::MixedRecord { span }
             | Self::Expected { span, .. }
             | Self::ExpectedFn { span }
+            | Self::AttributedExport { span }
             | Self::Multiplicity { span }
             | Self::PatternPath { span, .. }
             | Self::SplitClauses { again: span, .. }
@@ -716,6 +728,7 @@ impl<'a> Parser<'a> {
             }),
             TokenKind::At => self.attributed(),
             TokenKind::Extern => self.extern_decl(Vec::new()),
+            TokenKind::Export => self.export_decl(),
             TokenKind::Ident | TokenKind::LParen => self.signature_or_clause(Vec::new()),
             _ => Err(self
                 .unsupported_here()
@@ -737,6 +750,13 @@ impl<'a> Parser<'a> {
         }
         if self.at(TokenKind::Extern) {
             return self.extern_decl(attributes);
+        }
+        if self.at(TokenKind::Export) {
+            // Атрибут - обязательство определения, а `export` определения не
+            // объявляет: оно написано выше, и там же стоит его сигнатура.
+            return Err(ParseError::AttributedExport {
+                span: self.peek().span,
+            });
         }
         if !matches!(self.kind(), TokenKind::Ident | TokenKind::LParen) {
             return Err(self.expected(Expected::Declaration));
@@ -774,6 +794,30 @@ impl<'a> Parser<'a> {
                 ty,
                 attributes,
             }),
+            span,
+        })
+    }
+
+    /// `export "C" fn compare` (§5.3, колбэк уровня 1).
+    ///
+    /// Форма повторяет [`Self::extern_decl`] до имени и на нём кончается:
+    /// тип символа читается у определения, написанного выше. `fn` здесь тоже
+    /// контекстное имя, и позиция у него та же - сразу за ABI.
+    fn export_decl(&mut self) -> Result<Decl, ParseError> {
+        let keyword = self.expect(TokenKind::Export)?;
+        if !self.at(TokenKind::Str) {
+            return Err(self.expected(Expected::Token(TokenKind::Str)));
+        }
+        let abi = self.literal()?;
+        let token = self.peek();
+        if token.kind != TokenKind::Ident || token.text(self.text) != FOREIGN_FN {
+            return Err(ParseError::ExpectedFn { span: token.span });
+        }
+        self.bump();
+        let name = self.decl_name()?;
+        let span = keyword.span.merge(name.span);
+        Ok(Decl {
+            kind: DeclKind::Export(ExportDecl { abi, name }),
             span,
         })
     }

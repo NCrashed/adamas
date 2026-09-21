@@ -498,10 +498,37 @@ impl<'a> Machine<'a> {
         // Держит развёрнутые значения живыми до конца вызова: адрес буфера
         // указывает внутрь одного из них.
         let mut forced = Vec::with_capacity(arguments.len());
+        // Регистрации колбэков живут до конца вызова по тому же доводу: адрес
+        // трамплина без записи о том, кого он зовёт, - вызов в никуда.
+        let mut registered = Vec::new();
         for (at, argument) in arguments.into_iter().enumerate() {
             let want = match it.params[at] {
                 Cross::Word(ty) => ty,
                 Cross::Nothing | Cross::Erased => continue,
+                // Колбэк уровня 1 - **имя**, а не значение: у указателя на
+                // функцию среды нет, и всё, у чего она есть, сюда не годится.
+                // Смотрится значение **до** разворота: разверни его, и
+                // определение стало бы замыканием, у которого имени уже нет.
+                Cross::Callback => {
+                    let Value::Neutral(Head::Global(exported, ..), empty) = &*argument else {
+                        return Err(it.uncallable("в позиции колбэка стоит не имя"));
+                    };
+                    if !empty.is_empty() {
+                        return Err(it.uncallable("имя в позиции колбэка уже применено"));
+                    }
+                    let Some(shape) = self.signature.export(exported) else {
+                        return Err(it.uncallable("имя в позиции колбэка не объявлено `export`"));
+                    };
+                    let (guard, address) = crate::callback::registered(
+                        self.signature,
+                        &self.linkage,
+                        exported,
+                        shape,
+                    )?;
+                    registered.push(guard);
+                    bits.push(address);
+                    continue;
+                }
                 Cross::Buffer(cell) => {
                     let array = self.forced(argument)?;
                     let Value::Neutral(Head::Block(block), empty) = &*array else {
@@ -531,7 +558,16 @@ impl<'a> Machine<'a> {
             bits.push(*word);
             forced.push(Rc::clone(&value));
         }
-        let answer = it.call(&self.linkage, &bits)?;
+        let answer = it.call(&self.linkage, &bits);
+        drop(registered);
+        // Отказ **внутри** колбэка приезжает отсюда, а не из `call`: через
+        // сишный кадр его не пронести (§5.3), и трамплин кладёт его рядом.
+        // Спрашивается он раньше ответа: ответ при таком отказе - ноль,
+        // то есть правдоподобное число.
+        if let Some(failure) = crate::callback::taken() {
+            return Err(failure);
+        }
+        let answer = answer?;
         drop(forced);
         let Some((ty, word)) = it.result.zip(answer) else {
             return Ok(Some(Step::Return(self.unit()?)));

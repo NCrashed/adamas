@@ -33,6 +33,7 @@ use adamas_core::row::{Label, Row, RowVar, Tail};
 use adamas_core::sig::{Cross, Crossing, DefinitionKind, Group, Member as SigMember, Signature};
 use adamas_core::source::Span;
 use adamas_core::term::{Args, Binder, Fields, Name as CoreName, Term};
+use adamas_core::visibility::Visibility;
 use adamas_parser::ast::{self, DeclKind, Module, Symbol};
 
 use crate::carrier;
@@ -235,7 +236,41 @@ pub(crate) fn elaborate_file(
     } = pass.reborrow();
     members_into(
         decls, within, signature, metas, owned, fixities, instances, warnings, importer,
-    )
+    )?;
+    let Pass { signature, .. } = pass.reborrow();
+    exports(decls, within, signature)
+}
+
+/// Экспорты файла - после того, как файл объявлен целиком (§5.3).
+///
+/// Отдельным проходом, а не по ходу, и довод измеренный. Правило чужого кадра
+/// спрашивает [`adamas_core::resume::labels`] - вердикт метки по **всем** её
+/// площадкам, - а посреди файла карта неполна: `runForeign`, написанный ниже
+/// экспорта, в неё ещё не вошёл бы, и законная программа получила бы отказ
+/// «метку не гасит ни один хендлер». Тот же порядковый капкан, который §5.1
+/// обошёл не смог и назвал ценой (трек A волны 3).
+///
+/// Граница прохода - **файл**, а не программа: подключённый файл объявляется
+/// внутри импортирующего и свои экспорты проверяет своей картой. Это ровно
+/// ordered scoping §4.8, а не послабление.
+fn exports(
+    decls: &[ast::Decl],
+    within: Option<&Enclosing>,
+    signature: &mut Signature,
+) -> Result<(), ElabError> {
+    if !decls
+        .iter()
+        .any(|decl| matches!(decl.kind, DeclKind::Export(_)))
+    {
+        return Ok(());
+    }
+    let known = adamas_core::resume::labels(signature);
+    for decl in decls {
+        if let DeclKind::Export(exported) = &decl.kind {
+            exported_symbol(signature, &known, within, exported, decl.span)?;
+        }
+    }
+    Ok(())
 }
 
 /// Объявлен ли в модуле ресурсный тип - на любой глубине вложенности.
@@ -772,6 +807,14 @@ fn members_into(
                 declare_extern(
                     signature, metas, owned, fixities, warnings, within, declared, decl.span,
                 )?;
+            }
+            // Экспорт (§5.3, колбэк уровня 1) здесь только закрывает
+            // предыдущую сигнатуру: сам он проверяется **после** файла
+            // ([`exports`]). Правило чужого кадра спрашивает вердикт по всем
+            // площадкам программы, а посреди файла площадка, написанная ниже,
+            // в ответ ещё не вошла бы.
+            DeclKind::Export(_) => {
+                postulate(signature, metas, pending.take(), &mut postulated)?;
             }
         }
     }
@@ -3238,6 +3281,7 @@ fn member_name(member: &ast::Decl) -> Option<&Symbol> {
         // написанное, второй приносит чужое.
         DeclKind::Clauses { .. }
         | DeclKind::Class(_)
+        | DeclKind::Export(_)
         | DeclKind::Import(_)
         | DeclKind::Mutual(_)
         | DeclKind::Fixity(_) => None,
@@ -4120,10 +4164,18 @@ fn crossing(ty: &Term, signature: &Signature, span: Span) -> Result<Shape, ElabE
             continue;
         }
         if matches!(domain, Term::Pi(..)) {
-            return refuse(
-                "функциональный параметр через границу C не идёт: это колбэк, \
-                 а колбэки вынесены из уровня 1 отдельной работой",
-            );
+            if !flat_callback(signature, domain) {
+                return refuse(
+                    "колбэк через границу C идёт указателем на экспортированное определение \
+                     (§5.3, уровень 1): параметры и ответ его обязаны быть машинным словом, \
+                     а вложенного колбэка, буфера, единицы и стёртого связывания у него не \
+                     бывает",
+                );
+            }
+            params.push(Cross::Callback);
+            intermediate(row, codomain, span)?;
+            rest = codomain;
+            continue;
         }
         let carried = if let Some(ty) = word(domain) {
             Cross::Word(ty)
@@ -4150,6 +4202,203 @@ fn crossing(ty: &Term, signature: &Signature, span: Span) -> Result<Shape, ElabE
         );
     }
     Ok((params, result))
+}
+
+/// Экспорт одного определения: `export "C" fn byWord` (§5.3, колбэк уровня 1).
+///
+/// Четыре проверки, и порядок у них не косметический.
+///
+/// **Имя.** Определение обязано быть объявлено выше (ordered scoping §4.8), с
+/// телом и обычным видом: у конструктора, операции и чужого символа тела нет, а
+/// экспортируется именно тело. Символ у линкера - написанное имя, и потому оно
+/// обязано быть сишным идентификатором: штрих §4.1 внутри имени законен, а в C
+/// не пишется.
+///
+/// **Тип.** То же подмножество, что у [`crossing`], минус две формы. Буфер
+/// наружу не идёт: чужая сторона даёт голый адрес, а заголовка Perceus вокруг
+/// него построить нечем. Единица не идёт ни в домене, ни в ответе: породить её
+/// чужой стороне нечем, а отпустить нечем нам.
+///
+/// **Правило чужого кадра** (§5.3). Спрашивается по **инстанцированной** row:
+/// auto-lift §4.1 кладёт хвостовую переменную в каждую сигнатуру, и в точке
+/// регистрации она инстанцируется пустой - у C окружающих эффектов нет. Отказ
+/// приходит готовым текстом от анализа §3.4 и называет конкретный эффект.
+///
+/// **Evidence.** Метка с операциями требует вектора evidence, а уровень 1
+/// среды не несёт. Спрашивается **после** правила кадра, хотя на уровне 1
+/// перекрывает его: правило кадра называет эффект точнее, а несёт оно себя
+/// само на уровне 2, где evidence наружу как раз едет.
+fn exported_symbol(
+    signature: &mut Signature,
+    known: &std::collections::BTreeMap<CoreName, adamas_core::resume::Verdict>,
+    within: Option<&Enclosing>,
+    exported: &ast::ExportDecl,
+    span: Span,
+) -> Result<(), ElabError> {
+    if &*exported.abi.text != C_ABI {
+        return Err(ElabError::ForeignAbi {
+            abi: Rc::clone(&exported.abi.text),
+            span: exported.abi.span,
+        });
+    }
+    let written = Rc::clone(&exported.name.text);
+    let refuse = |why: &'static str| {
+        Err(ElabError::ExportTarget {
+            name: Rc::clone(&written),
+            why,
+            span,
+        })
+    };
+    if !c_identifier(&written) {
+        return refuse(
+            "символом у линкера служит написанное имя, а сишный идентификатор \
+             состоит из букв, цифр и подчёркиваний и не начинается с цифры",
+        );
+    }
+    let name: CoreName = qualify(within, &written);
+    let Some(definition) = signature.lookup(&name) else {
+        return refuse("определения с таким именем выше нет (§4.8: объявляют раньше, чем зовут)");
+    };
+    if !matches!(definition.kind, DefinitionKind::Regular) {
+        return refuse("экспортируется определение, а не конструктор, операция или метка");
+    }
+    if definition.body.is_none() {
+        return refuse("тела у него нет: постулат и чужой символ наружу отдавать нечем");
+    }
+    if signature.exports_symbol(&written) {
+        return refuse("символ уже занят другим экспортом: двух `define` одного имени не бывает");
+    }
+    let ty = definition.ty.clone();
+    let (params, result, produced) = outward(signature, &ty, span)?;
+    // Инстанцированная row: хвост снят, остались написанные метки. Auto-lift
+    // ставит переменную в каждую сигнатуру, и спросить её здесь значило бы
+    // отвергнуть всякое определение - измерено прогоном.
+    let closed: Row<Term> = Row::new(produced.labels().iter().cloned());
+    if let Some(blocked) = adamas_core::resume::crossing(known, &closed) {
+        return Err(ElabError::ExportBlocked {
+            said: blocked.to_string(),
+            span,
+        });
+    }
+    for label in closed.labels() {
+        let operations = match signature.lookup(&label.name).map(|it| &it.kind) {
+            Some(DefinitionKind::Effect { operations, .. }) => operations.len(),
+            _ => 0,
+        };
+        if operations > 0 {
+            return Err(ElabError::ExportEvidence {
+                label: Rc::clone(&label.name),
+                span,
+            });
+        }
+    }
+    signature.name_export(
+        &name,
+        Crossing {
+            symbol: written,
+            params: params.into_iter().map(Cross::Word).collect(),
+            result: Some(result),
+        },
+    );
+    Ok(())
+}
+
+/// Пишется ли имя в C: буквы, цифры, подчёркивания, и не с цифры.
+///
+/// Штрих внутри имени §4.1 разрешает (`put s'`), а C нет, и молча переписать
+/// его значило бы отдать линкеру символ, которого автор не писал.
+fn c_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|it| it.is_ascii_alphanumeric() || it == '_')
+}
+
+/// Форма границы экспортируемого определения: аргументы, ответ и row, которую
+/// оно производит, будучи применённым целиком (§5.3).
+type Outward = (Vec<PrimTy>, PrimTy, Row<Term>);
+
+fn outward(signature: &Signature, ty: &Term, span: Span) -> Result<Outward, ElabError> {
+    let refuse = |why: &'static str| Err(ElabError::ExportType { why, span });
+    let mut params: Vec<PrimTy> = Vec::new();
+    let mut produced = Row::empty();
+    let mut rest = ty;
+    while let Term::Pi(binder, _, written, row, codomain) = rest {
+        if binder.visibility != Visibility::Explicit {
+            return refuse(
+                "имплисит наружу не экспортируется: чужая сторона его не пишет, \
+                 а вывести его при вызове из C некому",
+            );
+        }
+        if binder.mult == Mult::Zero {
+            return refuse(
+                "стёртый параметр наружу не экспортируется: значения в рантайме у него \
+                 нет (§3.3), а чужая сторона аргумент в этой позиции напишет",
+            );
+        }
+        let domain = unaliased(signature, written);
+        let Some(carried) = word(domain) else {
+            return refuse(
+                "параметр экспорта обязан быть машинным словом - примитив §4.11 либо \
+                 `CPtr`: буфер наружу не отдать (чужая сторона даёт голый адрес, а \
+                 заголовка Perceus вокруг него не построить), единицу - нечем породить",
+            );
+        };
+        if !row.labels().is_empty() && matches!(&**codomain, Term::Pi(..)) {
+            return refuse(
+                "эффект на промежуточной стрелке: чужая сторона зовёт экспорт целиком, \
+                 и недобранного применения у неё не бывает",
+            );
+        }
+        params.push(carried);
+        produced = row.clone();
+        rest = codomain;
+    }
+    if params.is_empty() {
+        return refuse(
+            "экспортируется функция, а не значение: у значения нет места вызова, \
+             в котором чужая сторона получила бы ответ",
+        );
+    }
+    let Some(result) = word(unaliased(signature, rest)) else {
+        return refuse(
+            "ответ экспорта обязан быть машинным словом: единицу отпустить нечем - \
+             значение её есть объект Perceus, а `void`-функция его не дропнет",
+        );
+    };
+    Ok((params, result, produced))
+}
+
+/// Плоский ли колбэк: годится ли функциональный тип в позицию указателя (§5.3).
+///
+/// Правило то же, что у самой границы, и написано оно отдельно нарочно: слово в
+/// каждой позиции, ничего сверх. Единицы здесь нет **ни в домене, ни в
+/// кодомене**, и это не строгость ради строгости - экспортируется определение,
+/// которое зовёт чужая сторона, и единицу ей в аргументе нечем породить, а в
+/// ответе нечем отпустить (её значение - объект Perceus).
+///
+/// Хвост row не спрашивается: auto-lift §4.1 кладёт переменную на каждую
+/// стрелку, и спросить её здесь значило бы отвергнуть всякую написуемую форму.
+/// Что row колбэка проходит через чужой кадр, решается **на экспорте**
+/// ([`exported`]), где есть готовая программа и её площадки.
+fn flat_callback(signature: &Signature, ty: &Term) -> bool {
+    let mut rest = ty;
+    let mut written = 0;
+    while let Term::Pi(binder, _, domain, _, codomain) = rest {
+        if binder.mult == Mult::Zero || binder.visibility != Visibility::Explicit {
+            return false;
+        }
+        if word(unaliased(signature, domain)).is_none() {
+            return false;
+        }
+        written += 1;
+        rest = codomain;
+    }
+    written > 0 && word(unaliased(signature, rest)).is_some()
 }
 
 /// Эффект на промежуточной стрелке объявления (§3.4).
@@ -4622,7 +4871,10 @@ fn resource_members(
             // пускает, а смысла у них там нет - конструктор либо деструктор.
             // Чужой символ - того же рода: объявляется он верхним уровнем, а
             // `drop` зовёт его оттуда (§5.3, идиома `resource CBuffer`).
-            ast::DeclKind::Class(_) | ast::DeclKind::Mutual(_) | ast::DeclKind::Extern(_) => {
+            ast::DeclKind::Class(_)
+            | ast::DeclKind::Mutual(_)
+            | ast::DeclKind::Extern(_)
+            | ast::DeclKind::Export(_) => {
                 return Err(ElabError::ResourceMember {
                     data: Rc::clone(&resource.name.text),
                     name: Rc::from("группа"),

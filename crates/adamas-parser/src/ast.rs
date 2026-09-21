@@ -538,6 +538,14 @@ pub enum DeclKind {
     /// говорит «тело за границей», и второе проверяется строже: тип обязан
     /// лежать в подмножестве, которое уровень 1 умеет переложить (§5.3).
     Extern(ExternDecl),
+    /// Своё определение, видимое C: `export "C" fn compare` (§5.3, колбэк
+    /// уровня 1).
+    ///
+    /// Обратная сторона [`DeclKind::Extern`], и форма у неё короче ровно на
+    /// тип: тело здесь **есть**, а с ним есть и сигнатура, написанная выше.
+    /// Повторять её значило бы завести второй источник истины о типе символа,
+    /// и разъехаться им ничто не мешает.
+    Export(ExportDecl),
 }
 
 /// Объявление чужого символа (§5.3, уровень 1).
@@ -555,6 +563,18 @@ pub struct ExternDecl {
     pub ty: Expr,
     /// Атрибуты, написанные перед объявлением (§4.7, §5.1).
     pub attributes: Vec<Name>,
+}
+
+/// Экспорт своего определения наружу (§5.3, колбэк уровня 1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportDecl {
+    /// ABI, как написан: литерал вместе с кавычками (`"C"`).
+    ///
+    /// Хранится так же, как у [`ExternDecl::abi`], и по той же причине: отказ
+    /// «ABI `"stdcall"` не поддержан» обязан назвать написанное дословно.
+    pub abi: Lit,
+    /// Имя определения. Оно же имя символа у линкера.
+    pub name: Name,
 }
 
 /// Класс или его инстанс.
@@ -1187,7 +1207,17 @@ fn dump_decl(out: &mut String, decl: &Decl, depth: usize) {
         DeclKind::Resource(resource) => dump_resource(out, resource, depth),
         DeclKind::Import(import) => dump_import(out, import),
         DeclKind::Extern(declared) => dump_extern(out, declared),
+        DeclKind::Export(exported) => dump_export(out, exported),
     }
+}
+
+/// Печатает экспорт: ABI и имя.
+fn dump_export(out: &mut String, exported: &ExportDecl) {
+    out.push_str("(export ");
+    out.push_str(&exported.abi.text);
+    out.push(' ');
+    out.push_str(&exported.name.text);
+    out.push(')');
 }
 
 /// Печатает чужой символ: ABI, атрибуты, имя и тип.

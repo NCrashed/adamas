@@ -36,6 +36,40 @@ use crate::frame::{Frame, Kont, Segment};
 /// запись имени здесь разошлась бы с первой молча.
 const CALLBACK_ENV: &str = "callbackEnv";
 
+/// Кладёт среду колбэка в написанные автором слоты `userdata` (§5.3).
+///
+/// Среда и место под неё - парой, и парой же проверяются. Отказы те же и теми
+/// же словами, что у понижения (`lower::crossing`): расхождение здесь было бы
+/// расхождением вычислителей на написуемой программе.
+///
+/// # Errors
+///
+/// [`RunError::Callback`] - половина пары написана без второй.
+fn paired(
+    it: &Foreign,
+    bits: &mut [u64],
+    userdata: Option<u64>,
+    slots: &[usize],
+) -> Result<(), RunError> {
+    match (userdata, slots.is_empty()) {
+        (Some(data), false) => {
+            for slot in slots {
+                bits[*slot] = data;
+            }
+            Ok(())
+        }
+        (Some(_), true) => Err(it.uncallable(
+            "у колбэка есть среда, а класть её некуда: позицию `userdata` пишет автор - \
+             `callbackEnv` в аргументе (§5.3, уровень 2)",
+        )),
+        (None, false) => Err(it.uncallable(
+            "`callbackEnv` написан, а колбэка со средой в этом вызове нет: уровень 1 \
+             среды не несёт",
+        )),
+        (None, true) => Ok(()),
+    }
+}
+
 /// Машина: сигнатура и таблица живых резумпций.
 pub struct Machine<'a> {
     signature: &'a Signature,
@@ -516,12 +550,17 @@ impl<'a> Machine<'a> {
         for (at, argument) in arguments.into_iter().enumerate() {
             // Слот `userdata`: постулат, чьё значение подставляет не машина, а
             // регистрация. То же соглашение об имени, каким его читает
-            // понижение (`lower::userdata_slot`).
-            if let Value::Neutral(Head::Global(name, ..), empty) = &*argument {
-                if &**name == CALLBACK_ENV && empty.is_empty() {
-                    slots.push(bits.len());
-                    bits.push(0);
-                    continue;
+            // понижение (`lower::userdata_slot`), и та же позиция: **едущее
+            // слово**. Сверка с `Cross::Word` тут не про сегодняшние
+            // программы - стёртый `CPtr` через границу не пускает элаборация, -
+            // а про то, чтобы обход машины и обход понижения решали одно.
+            if matches!(it.params[at], Cross::Word(_)) {
+                if let Value::Neutral(Head::Global(name, ..), empty) = &*argument {
+                    if &**name == CALLBACK_ENV && empty.is_empty() {
+                        slots.push(bits.len());
+                        bits.push(0);
+                        continue;
+                    }
                 }
             }
             let want = match &it.params[at] {
@@ -545,44 +584,12 @@ impl<'a> Machine<'a> {
                              статический и помнит одного",
                         ));
                     }
-                    // Уровень решается тем же, чем его решает понижение:
-                    // именем экспорта против всего остального. Смотрится
-                    // значение **до** разворота: разверни его, и определение
-                    // стало бы замыканием, у которого имени уже нет.
-                    if let Value::Neutral(Head::Global(exported, ..), empty) = &*argument {
-                        if let Some(shape) = self.signature.export(exported) {
-                            if !empty.is_empty() {
-                                return Err(it.uncallable(
-                                    "имя в позиции колбэка уже применено: уровень 1 берёт \
-                                     указатель на определение, а не его применение",
-                                ));
-                            }
-                            let (guard, address) = crate::callback::registered(
-                                self.signature,
-                                &self.linkage,
-                                exported,
-                                shape,
-                            )?;
-                            registered.push(guard);
-                            bits.push(address);
-                            continue;
-                        }
-                    }
-                    // Уровень 2: наружу едет трамплин, среда его - вторым
-                    // словом. Замыкание читается обратно в терм, потому что
-                    // считает машина термы, а не значения; захваченное в нём
-                    // уже подставлено, и это и есть среда.
-                    let closure = Rc::new(adamas_core::eval::quote(0, &argument));
-                    let (guard, address, data) = crate::callback::enclosed(
-                        self.signature,
-                        &self.linkage,
-                        &closure,
-                        form,
-                        &it.symbol,
-                    )?;
+                    let (guard, address, data) = self.registering(&it, &argument, form)?;
                     registered.push(guard);
                     bits.push(address);
-                    userdata = Some(data);
+                    if data.is_some() {
+                        userdata = data;
+                    }
                     continue;
                 }
                 Cross::Buffer(cell) => {
@@ -615,29 +622,7 @@ impl<'a> Machine<'a> {
             bits.push(*word);
             forced.push(Rc::clone(&value));
         }
-        // Среда и место под неё - парой, и парой же проверяются. Отказы те же
-        // и теми же словами, что у понижения (`lower::crossing`): расхождение
-        // здесь было бы расхождением вычислителей на написуемой программе.
-        match (userdata, slots.is_empty()) {
-            (Some(data), false) => {
-                for slot in slots {
-                    bits[slot] = data;
-                }
-            }
-            (Some(_), true) => {
-                return Err(it.uncallable(
-                    "у колбэка есть среда, а класть её некуда: позицию `userdata` пишет \
-                     автор - `callbackEnv` в аргументе (§5.3, уровень 2)",
-                ));
-            }
-            (None, false) => {
-                return Err(it.uncallable(
-                    "`callbackEnv` написан, а колбэка со средой в этом вызове нет: \
-                     уровень 1 среды не несёт",
-                ));
-            }
-            (None, true) => {}
-        }
+        paired(&it, &mut bits, userdata, &slots)?;
         let answer = it.call(&self.linkage, &bits);
         drop(registered);
         // Отказ **внутри** колбэка приезжает отсюда, а не из `call`: через
@@ -655,6 +640,45 @@ impl<'a> Machine<'a> {
         Ok(Some(Step::Return(Rc::new(Value::Prim(Prim::literal(
             ty, word,
         ))))))
+    }
+
+    /// Регистрирует колбэк и отдаёт адрес трамплина, а на уровне 2 - и слово
+    /// `userdata` (§5.3).
+    ///
+    /// Уровень решается тем же, чем его решает понижение: именем экспорта
+    /// против всего остального. Смотрится значение **до** разворота: разверни
+    /// его, и определение стало бы замыканием, у которого имени уже нет.
+    ///
+    /// # Errors
+    ///
+    /// [`RunError::Callback`] - форма колбэка вне таблицы трамплинов машины
+    /// либо имя в этой позиции уже применено.
+    fn registering(
+        &self,
+        it: &Foreign,
+        argument: &Rc<Value>,
+        form: &adamas_core::sig::Callback,
+    ) -> Result<(crate::callback::Registration, u64, Option<u64>), RunError> {
+        if let Value::Neutral(Head::Global(exported, ..), empty) = &**argument {
+            if let Some(shape) = self.signature.export(exported) {
+                if !empty.is_empty() {
+                    return Err(it.uncallable(
+                        "имя в позиции колбэка уже применено: уровень 1 берёт указатель \
+                         на определение, а не его применение",
+                    ));
+                }
+                let (guard, address) =
+                    crate::callback::registered(self.signature, &self.linkage, exported, shape)?;
+                return Ok((guard, address, None));
+            }
+        }
+        // Уровень 2: наружу едет трамплин, среда его - вторым словом. Замыкание
+        // читается обратно в терм, потому что считает машина термы, а не
+        // значения; захваченное в нём уже подставлено, и это и есть среда.
+        let closure = Rc::new(adamas_core::eval::quote(0, argument));
+        let (guard, address, data) =
+            crate::callback::enclosed(self.signature, &self.linkage, &closure, form, &it.symbol)?;
+        Ok((guard, address, Some(data)))
     }
 
     /// Чужой символ за именем. Объявление из сигнатуры кладётся в таблицу при

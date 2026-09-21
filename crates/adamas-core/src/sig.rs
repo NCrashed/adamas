@@ -849,7 +849,7 @@ impl Crossing {
     /// Типы аргументов, которые действительно переходят границу.
     #[must_use]
     pub fn carried(&self) -> Vec<crate::prim::PrimTy> {
-        self.params.iter().filter_map(|it| it.carried()).collect()
+        self.params.iter().filter_map(Cross::carried).collect()
     }
 
     /// Одалживается ли чужой стороне хоть один наш буфер.

@@ -2711,39 +2711,14 @@ impl<'a> Lowerer<'a> {
             // константа компоновщика, вычисления за ней нет никакого, и
             // порядок §3.1 он не наблюдает.
             if let Cross::Callback(form) = carried {
-                match self.callback(scope, name, argument)? {
-                    Aimed::Symbol(id) => given.push(Expr::Exported(id)),
-                    Aimed::Closure(closure) => {
-                        if pack.is_some() {
-                            return Err(LowerError::Foreign {
-                                name: name.to_string(),
-                                why: "колбэков со средой в одном вызове больше одного: \
-                                      `callbackEnv` называет один, и какой - не написано",
-                            });
-                        }
-                        let id = self.trampoline(form)?;
-                        let constructor = self.userdata_tag()?;
-                        let binding = Binding {
-                            name: "среда колбэка".to_owned(),
-                            local: scope.fresh(),
-                            fact: Fact::present(Mult::Many).shaped(Repr::Boxed),
-                        };
-                        pack = Some(binding.local);
-                        prelude.push((
-                            binding,
-                            Expr::Environment {
-                                constructor,
-                                closure: Box::new(closure),
-                            },
-                        ));
-                        given.push(Expr::Trampoline(id));
-                    }
-                }
+                let aimed =
+                    self.registering(scope, name, argument, form, &mut pack, &mut prelude)?;
+                given.push(aimed);
                 continue;
             }
             // Слот `userdata`: сюда понижение кладёт среду, а не значение
             // постулата - тела у него нет вовсе.
-            if self.userdata_slot(argument) {
+            if userdata_slot(argument) {
                 slots.push(given.len());
                 given.push(Expr::Erased);
                 continue;
@@ -2883,18 +2858,49 @@ impl<'a> Lowerer<'a> {
         Ok(Aimed::Closure(closure))
     }
 
-    /// Стоит ли в этой позиции метка `userdata` (§5.3, уровень 2).
+    /// Регистрация колбэка в аргументе чужого вызова (§5.3).
     ///
-    /// Узнаётся по **имени**, и это то же соглашение прелюдии, каким узнаются
-    /// `withNursery` и его операции: встроенных имён в языке нет ни одного,
-    /// поэтому `callbackEnv` объявляет сама программа - постулатом типа `CPtr`,
-    /// - а понижение подставляет на его место среду. Тела у постулата нет, и
-    /// всякое другое его употребление остаётся застрявшим термом.
-    fn userdata_slot(&self, argument: &Arg<'_>) -> bool {
-        let Arg::Written(Term::Const(name, _, _)) = argument else {
-            return false;
+    /// Уровень 1 отдаёт наружу адрес обёртки и больше ничего. Уровень 2 строит
+    /// **среду** - объект с замыканием и вектором evidence, - связывает её в
+    /// прелюдию вызова, чтобы её дропнула вставка RC после возврата, и отдаёт
+    /// наружу адрес трамплина; место под саму среду пишет автор отдельным
+    /// аргументом, и заполняется оно после обхода.
+    fn registering(
+        &mut self,
+        scope: &mut Scope,
+        callee: &Name,
+        argument: &Arg<'_>,
+        form: &CallbackForm,
+        pack: &mut Option<LocalId>,
+        prelude: &mut Vec<(Binding, Expr)>,
+    ) -> Result<Expr, LowerError> {
+        let closure = match self.callback(scope, callee, argument)? {
+            Aimed::Symbol(id) => return Ok(Expr::Exported(id)),
+            Aimed::Closure(closure) => closure,
         };
-        &**name == CALLBACK_ENV
+        if pack.is_some() {
+            return Err(LowerError::Foreign {
+                name: callee.to_string(),
+                why: "колбэков со средой в одном вызове больше одного: `callbackEnv` \
+                      называет один, и какой - не написано",
+            });
+        }
+        let id = self.trampoline(form)?;
+        let constructor = self.userdata_tag()?;
+        let binding = Binding {
+            name: "среда колбэка".to_owned(),
+            local: scope.fresh(),
+            fact: Fact::present(Mult::Many).shaped(Repr::Boxed),
+        };
+        *pack = Some(binding.local);
+        prelude.push((
+            binding,
+            Expr::Environment {
+                constructor,
+                closure: Box::new(closure),
+            },
+        ));
+        Ok(Expr::Trampoline(id))
     }
 
     /// Номер трамплина по форме колбэка: трамплин заводится один раз на форму.
@@ -4809,6 +4815,20 @@ fn nursed_family(signature: &Signature) -> Option<Name> {
         return None;
     }
     result_head(&spawn.ty)
+}
+
+/// Стоит ли в этой позиции метка `userdata` (§5.3, уровень 2).
+///
+/// Узнаётся по **имени**, и это то же соглашение прелюдии, каким узнаются
+/// `withNursery` и его операции: встроенных имён в языке нет ни одного, поэтому
+/// `callbackEnv` объявляет сама программа - постулатом типа `CPtr`, - а
+/// понижение подставляет на его место среду. Тела у постулата нет, и всякое
+/// другое его употребление остаётся застрявшим термом.
+fn userdata_slot(argument: &Arg<'_>) -> bool {
+    let Arg::Written(Term::Const(name, _, _)) = argument else {
+        return false;
+    };
+    &**name == CALLBACK_ENV
 }
 
 /// Имя головы спайна под лямбдами. `None` - голова не имя.

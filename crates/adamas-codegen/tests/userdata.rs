@@ -165,6 +165,26 @@ fn the_machine_names_the_handler_it_cannot_see() {
     );
 }
 
+/// Заголовок трамплина - в точности сишный компаратор `qsort_r`.
+///
+/// Форма, а не поведение, и стоит она потому, что поведение здесь **не
+/// различает**: System V кладёт `int` в младшую половину того же регистра, что
+/// и `uint64_t`, поэтому трамплин с разъехавшейся шириной ответа считает то же
+/// самое и молчит об этом. Разъедься она с тем, чего ждёт чужая сторона, - не
+/// поймает никто, и это ровно та граница уровня 1, что названа §10 вопросом 183.
+#[test]
+fn the_trampoline_is_the_comparator_of_qsort_r() {
+    let text = harness::text(&fixture("qsort-r-userdata.adamas"))
+        .expect("понижение обязано взять колбэк со средой");
+    assert!(
+        text.contains("static int32_t adamas_callback_0(uint64_t a0, uint64_t a1, void *userdata)"),
+        "заголовок трамплина не тот: {}",
+        text.lines()
+            .find(|line| line.contains("adamas_callback_0"))
+            .unwrap_or("трамплина нет вовсе")
+    );
+}
+
 /// `callbackEnv` без колбэка со средой - отказ.
 #[test]
 fn a_userdata_slot_without_a_closure_is_refused() {

@@ -276,7 +276,7 @@ impl Foreign {
         let shape: Option<Vec<Class>> = self
             .params
             .iter()
-            .filter_map(|it| it.carried())
+            .filter_map(Cross::carried)
             .map(classify)
             .collect();
         let (Some(shape), Some(result)) = (shape, self.result.map_or(Some(Class::Void), classify))

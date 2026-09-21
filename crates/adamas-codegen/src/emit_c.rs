@@ -672,7 +672,7 @@ pub(crate) fn trampoline_symbol(id: CallbackId) -> String {
 /// Заголовок трамплина: сишное соглашение, последним аргументом - `userdata`.
 ///
 /// Позиция `userdata` **последняя**, и это названная граница, а не умолчание:
-/// так её кладут GNU `qsort_r`, GLib и `CURLOPT_WRITEFUNCTION`, а API,
+/// так её кладут GNU `qsort_r`, `GLib` и `CURLOPT_WRITEFUNCTION`, а API,
 /// кладущий `void *` первым (BSD `qsort_r`), уровнем 2 не покрыт.
 fn trampoline_signature(id: CallbackId, described: &Callback, statics: bool) -> String {
     let taken: Vec<String> = described
@@ -1732,6 +1732,10 @@ impl Emitter<'_> {
     ///
     /// Каждый составной узел получает своё имя: порядок вычисления виден в
     /// тексте, а не выводится из правил C.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "разбор узлов - одна таблица, и делить её значило бы прятать её половину"
+    )]
     fn emitted(&mut self, expr: &Expr, depth: usize) -> String {
         match expr {
             Expr::Local(local) => format!("v{}", local.0),
@@ -1801,16 +1805,7 @@ impl Emitter<'_> {
             Expr::Trampoline(id) => self.trampolined(*id, depth),
             // Адрес среды словом: сам объект остаётся связыванием, и дропает
             // его вставка RC после чужого вызова - та же пара, что у буфера.
-            Expr::Userdata(local) => {
-                let pad = Self::pad(depth);
-                let name = self.temp();
-                let _ = writeln!(
-                    self.out,
-                    "{pad}uint64_t {name} = (uint64_t)(uintptr_t)v{}; /* userdata */",
-                    local.0
-                );
-                name
-            }
+            Expr::Userdata(local) => self.carried(*local, depth),
             Expr::Environment {
                 constructor,
                 closure,
@@ -3044,6 +3039,21 @@ impl Emitter<'_> {
             self.out,
             "{pad}uint64_t {name} = (uint64_t)(uintptr_t)&{}; /* колбэк уровня 2 */",
             trampoline_symbol(id)
+        );
+        name
+    }
+
+    /// Адрес среды колбэка словом: то, что ляжет в `userdata` (§5.3).
+    ///
+    /// Сам объект остаётся связыванием, и дропает его вставка RC **после**
+    /// чужого вызова - та же пара, что у одолженного буфера.
+    fn carried(&mut self, local: LocalId, depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}uint64_t {name} = (uint64_t)(uintptr_t)v{}; /* userdata */",
+            local.0
         );
         name
     }

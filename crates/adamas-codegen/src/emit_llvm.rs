@@ -1900,6 +1900,10 @@ fn second_form(out: &mut String, program: &Program) {
         ));
     }
     if !program.callbacks.is_empty() {
+        // `adamas_evidence_empty` здесь не объявляется, и это не пропуск:
+        // колбэк уровня 2 есть лямбда, лямбда - вторая форма всегда
+        // (`lower::abstraction`), значит `framed` выше истинно и объявление
+        // уже напечатано. Объявлять его дважды `llvm-as` не даст.
         out.push_str(concat!(
             "; Трамплины колбэка уровня 2 (§5.3): тела их лежат в спутнике, где\n",
             "; уже есть `flat.c` и `release.c`. Здесь берётся только адрес.\n",
@@ -2858,6 +2862,10 @@ impl<'a> Builder<'a> {
         name
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "разбор узлов - одна таблица, и делить её значило бы прятать её половину"
+    )]
     fn value(&mut self, expr: &Expr) -> Result<String, LlvmError> {
         let expr = self.prologue(expr)?;
         match expr {
@@ -2888,15 +2896,7 @@ impl<'a> Builder<'a> {
             Expr::Exported(id) => Ok(self.exported(*id)),
             Expr::Trampoline(id) => Ok(self.trampolined(*id)),
             // Адрес среды словом: `ptrtoint` тем же доводом, что у буфера.
-            Expr::Userdata(local) => {
-                let object = self.operand(*local)?;
-                let name = self.temp();
-                self.instruction(
-                    &format!("{name} = ptrtoint ptr {object} to i64"),
-                    self.here(),
-                );
-                Ok(name)
-            }
+            Expr::Userdata(local) => self.carried(*local),
             Expr::Environment {
                 constructor,
                 closure,
@@ -4664,10 +4664,21 @@ impl<'a> Builder<'a> {
         name
     }
 
+    /// Адрес среды колбэка словом: `ptrtoint` тем же доводом, что у буфера.
+    fn carried(&mut self, local: LocalId) -> Result<String, LlvmError> {
+        let object = self.operand(local)?;
+        let name = self.temp();
+        self.instruction(
+            &format!("{name} = ptrtoint ptr {object} to i64"),
+            self.here(),
+        );
+        Ok(name)
+    }
+
     /// Среда колбэка уровня 2: замыкание и вектор evidence в одном объекте.
     ///
-    /// Зеркало [`crate::emit_c::Emitter::environment`], и расхождение здесь
-    /// стоило бы разного ответа у двух понижений на одной программе.
+    /// Зеркало `emit_c::Emitter::userdata`, и расхождение здесь стоило бы
+    /// разного ответа у двух понижений на одной программе.
     fn userdata(&mut self, constructor: CtorId, closure: &Expr) -> Result<String, LlvmError> {
         let taken = self.value(closure)?;
         let vector = self.temp();

@@ -150,7 +150,7 @@ const RUNS: u64 = 5;
 /// тени целиком; у тела с поворотом она однотактная, и цена вызова видна.
 /// Первая пара говорит, чего пересечение стоит **на настоящем теле**, вторая -
 /// чего оно стоит само по себе.
-const LOADS: [(&str, &str); 8] = [
+const LOADS: [(&str, &str); 9] = [
     ("outward", include_str!("crossing/outward.adamas")),
     ("inward", include_str!("crossing/inward.adamas")),
     ("outward-lean", include_str!("crossing/outward-lean.adamas")),
@@ -162,6 +162,7 @@ const LOADS: [(&str, &str); 8] = [
         "callback-native",
         include_str!("crossing/callback-native.adamas"),
     ),
+    ("callback-env", include_str!("crossing/callback-env.adamas")),
 ];
 
 /// Пары «за границу - на месте»: из их разности и считается строка §6.
@@ -175,11 +176,18 @@ const LOADS: [(&str, &str); 8] = [
 /// различаются они только тем, кого он зовёт - нашу экспортированную `step`
 /// либо свою `adamas_bench_local` с тем же телом. Разность есть цена того, что
 /// вызываемый наш, - то самое, что §5.3 обещает нулём.
-const PAIRS: [(&str, &str); 4] = [
+///
+/// Пятая мерит **уровень 2** сверх уровня 1, и потому её вторая половина -
+/// не чужой вызываемый, а наш же колбэк без среды. §5.3 про цену уровня 2 не
+/// говорит ничего, и число это здесь заводится впервые: в нём лишнее слово у
+/// чужого вызова, распаковка среды, боксирование аргумента и ответа,
+/// `adamas_apply` вместо прямого вызова и корень стека продолжения на виток.
+const PAIRS: [(&str, &str); 5] = [
     ("outward", "inward"),
     ("outward-lean", "inward-lean"),
     ("outward-lend", "outward-word"),
     ("callback", "callback-native"),
+    ("callback-env", "callback"),
 ];
 
 /// Зовёт компилятор и роняет стенд его же выводом.
@@ -404,11 +412,12 @@ fn table(it: &Stand) {
         for (outward, inward) in PAIRS {
             if let (Some(crossed), Some(kept)) = (at(outward), at(inward)) {
                 // Пара называет разность по себе: у трёх первых это цена
-                // пересечения и займа, у четвёртой - цена колбэка.
-                let what = if outward == "callback" {
-                    "колбэк стоит"
-                } else {
-                    "пересечение стоит"
+                // пересечения и займа, у четвёртой - цена колбэка, у пятой -
+                // цена уровня 2 сверх уровня 1.
+                let what = match outward {
+                    "callback" => "колбэк стоит",
+                    "callback-env" => "среда колбэка стоит",
+                    _ => "пересечение стоит",
                 };
                 eprintln!(
                     "{side}/{outward}: {what} {:.3} нс сверх витка",

@@ -1,0 +1,36 @@
+-- Колбэк уровня 2: чужой цикл зовёт наше **замыкание** через `userdata` (§5.3).
+--
+-- Пара к `callback.adamas`, и различаются они ровно уровнем: там наружу уходит
+-- адрес экспортированного определения, здесь - трамплин со средой. Разность и
+-- есть цена уровня 2 сверх уровня 1, целиком: лишнее слово у чужого вызова,
+-- распаковка среды в трамплине, боксирование аргумента и ответа,
+-- `adamas_apply` вместо прямого вызова и корень стека продолжения на виток.
+--
+-- Тело то же - поворот на бит, - и ширина поворота приходит из **захваченного**
+-- массива: плоский скаляр в среду замыкания сегодня не проходит (§10 вопрос
+-- 191), а нагрузка обязана среду действительно читать, иначе компилятор вправе
+-- её выкинуть.
+
+data Unit where
+  MkUnit : Unit
+
+effect Foreign
+
+callbackEnv : CPtr
+
+extern "C" fn adamas_bench_calls : UInt64
+
+extern "C" fn adamas_bench_carried : UInt64 -> (UInt64 -> UInt64) -> CPtr -> UInt64
+
+one : UInt64
+one = 1
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let calls : UInt64 = adamas_bench_calls
+  let width : Array 1 UInt64 = arrayNew 1 one
+  adamas_bench_carried calls (\acc -> orUInt64 (shlUInt64 acc (arrayIndex width 0)) (shrUInt64 acc 63)) callbackEnv
+
+main : UInt64
+main = handle @Foreign body with
+  return v -> v

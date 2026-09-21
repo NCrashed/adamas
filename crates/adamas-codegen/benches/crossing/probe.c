@@ -66,6 +66,24 @@ __attribute__((noinline)) uint64_t adamas_bench_through(uint64_t turns,
     return accumulator;
 }
 
+/* Тот же цикл, но колбэк получает рядом `userdata` (§5.3, уровень 2).
+ *
+ * Отличий от `adamas_bench_through` ровно два, и оба - свойство самого уровня
+ * 2, а не стенда: у вызываемого вторым аргументом стоит `void *`, и чужая
+ * сторона передаёт его на каждом витке. Разность с парой уровня 1 есть поэтому
+ * цена уровня 2 целиком - вместе с тем, что среду надо распаковать.
+ *
+ * `noinline` - по тому же доводу, что у соседа выше. */
+__attribute__((noinline)) uint64_t adamas_bench_carried(uint64_t turns,
+                                                        uint64_t (*step)(uint64_t, void *),
+                                                        void *userdata) {
+    uint64_t accumulator = 1u;
+    for (uint64_t at = 0; at < turns; at++) {
+        accumulator = step(accumulator, userdata);
+    }
+    return accumulator;
+}
+
 /* Тот же поворот, что у `adamas_bench_turn`, но своей стороны границы. */
 static uint64_t adamas_bench_local(uint64_t accumulator) {
     return (accumulator << 1) | (accumulator >> 63);

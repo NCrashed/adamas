@@ -3038,11 +3038,13 @@ impl<'a> Lowerer<'a> {
         let symbol = crossing.symbol.to_string();
         let parameters = crossing.carried();
         let result = self.foreign_result(name)?;
+        let variadic = crossing.variadic;
         let id = ForeignId(self.foreigns.len());
         self.foreigns.push(Foreign {
             symbol,
             parameters,
             result,
+            variadic,
         });
         self.externs.insert(Rc::clone(name), id);
         Ok(id)

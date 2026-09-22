@@ -360,9 +360,9 @@ use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
 use adamas_core::source::Location;
 
 use crate::ir::{
-    Arm, Binding, CallbackId, Constructor, CtorId, Elems, ExportId, Expr, Fact, FiberOp, ForeignId,
-    ForeignResult, Form, FuncId, Function, HandlerId, LabelId, LocalId, PackId, Packing, Program,
-    Repr, Salvage, Slot, SlotTy, Source, Stride, Unique, Verdict,
+    Arm, Binding, CallbackId, Constructor, CtorId, Elems, ExportId, Expr, Fact, FiberOp, Foreign,
+    ForeignId, ForeignResult, Form, FuncId, Function, HandlerId, LabelId, LocalId, PackId, Packing,
+    Program, Repr, Salvage, Slot, SlotTy, Source, Stride, Unique, Verdict,
 };
 use crate::split::Suspension;
 
@@ -765,20 +765,42 @@ fn foreigns(out: &mut String, program: &Program) {
     }
     out.push_str("; Чужие символы (§5.3): C-соглашение, свёртка запрещена.\n");
     for foreign in &program.foreigns {
-        let parameters = foreign
-            .parameters
-            .iter()
-            .map(|it| machine(*it))
-            .collect::<Vec<_>>()
-            .join(", ");
         let _ = writeln!(
             out,
-            "declare {} @{}({parameters}) {NOBUILTIN}",
+            "declare {} @{}({}) {NOBUILTIN}",
             foreign_result(foreign.result),
-            foreign.symbol
+            foreign.symbol,
+            variadic_list(foreign)
         );
     }
     out.push('\n');
+}
+
+/// Список параметров объявления: типы поимённой части, `...` за ними (§5.3).
+///
+/// Пустой список у `.ll` означает «аргументов нет» - беды пустых скобок C
+/// здесь нет, - поэтому написаний три, а не четыре: пустое, `i64, i64` и
+/// `i64, i64, ...`.
+///
+/// Вариадический `declare` обязателен по той же причине, по какой обязателен
+/// вариадический прототип у C: `al` выставляет кодогенератор LLVM, и решает он
+/// это по типу функции. Разница с C одна и она в **месте вызова**: у `.ll`
+/// вариадический вызов пишет тип функции целиком (`call i32 (i64, ...)
+/// @snprintf(…)`), потому что по списку фактических аргументов отличить
+/// вариадический вызов от обычного нечем.
+fn variadic_list(foreign: &Foreign) -> String {
+    let named: Vec<&'static str> = foreign
+        .parameters
+        .iter()
+        .take(foreign.variadic.unwrap_or(foreign.parameters.len()))
+        .map(|it| machine(*it))
+        .collect();
+    match (named.is_empty(), foreign.variadic.is_some()) {
+        (true, false) => String::new(),
+        (true, true) => "...".to_owned(),
+        (false, false) => named.join(", "),
+        (false, true) => format!("{}, ...", named.join(", ")),
+    }
 }
 
 /// Запрет узнавать чужой символ по имени (§5.3).
@@ -4715,11 +4737,24 @@ impl<'a> Builder<'a> {
         }
         let symbol = &described.symbol;
         let arguments = given.join(", ");
+        // Тип функции при вызове пишется **только** у вариадической (§5.3).
+        // Синтаксис `.ll` его для неё требует, и требует по делу: список
+        // фактических аргументов у вариадического вызова полон, и отличить его
+        // от обычного без типа нечем - а от различия зависит `al`. У обычного
+        // вызова тип функции необязателен, и печатать его значило бы переписать
+        // всякий чужой вызов ради формы, которая ABI не меняет.
+        let signature = match described.variadic {
+            Some(_) => format!("({}) ", variadic_list(&described)),
+            None => String::new(),
+        };
         match described.result {
             ForeignResult::Flat(ty) => {
                 let name = self.temp();
                 self.instruction(
-                    &format!("{name} = call {} @{symbol}({arguments})", machine(ty)),
+                    &format!(
+                        "{name} = call {} {signature}@{symbol}({arguments})",
+                        machine(ty)
+                    ),
                     self.here(),
                 );
                 Ok(name)
@@ -4727,7 +4762,10 @@ impl<'a> Builder<'a> {
             // `void`-символ значения не отдаёт; узел отвечает единицей, и она
             // собирается той же точкой входа, которой собрано стёртое.
             ForeignResult::Unit(unit) => {
-                self.instruction(&format!("call void @{symbol}({arguments})"), self.here());
+                self.instruction(
+                    &format!("call void {signature}@{symbol}({arguments})"),
+                    self.here(),
+                );
                 let name = self.temp();
                 self.instruction(
                     &format!("{name} = call ptr @adamas_con0(i16 {})", unit.0),

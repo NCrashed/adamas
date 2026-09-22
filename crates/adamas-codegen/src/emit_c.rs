@@ -64,8 +64,8 @@ use adamas_core::prim::{PrimCmp, PrimOp, PrimTy};
 
 use crate::ir::{
     Arm, Binding, Callback, CallbackId, Constructor, CtorId, Elems, Export, ExportId, Expr,
-    FiberOp, ForeignId, ForeignResult, Form, FuncId, Function, HandlerId, LabelId, LocalId, PackId,
-    Packing, Program, Repr, Salvage, Stride, Verdict,
+    FiberOp, Foreign, ForeignId, ForeignResult, Form, FuncId, Function, HandlerId, LabelId,
+    LocalId, PackId, Packing, Program, Repr, Salvage, Stride, Verdict,
 };
 use crate::split::Suspension;
 
@@ -618,16 +618,7 @@ fn prototypes(out: &mut String, program: &Program) {
             ForeignResult::Flat(ty) => scalar(Repr::Flat(ty)),
             ForeignResult::Unit(_) => "void",
         };
-        let parameters = if foreign.parameters.is_empty() {
-            "void".to_owned()
-        } else {
-            foreign
-                .parameters
-                .iter()
-                .map(|it| scalar(Repr::Flat(*it)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
+        let parameters = variadic_list(foreign);
         let _ = writeln!(
             out,
             "extern {result} {}({parameters}) __asm__(\"{}\");",
@@ -636,6 +627,42 @@ fn prototypes(out: &mut String, program: &Program) {
         );
     }
     out.push('\n');
+}
+
+/// Список параметров прототипа: типы поимённой части, `...` за ними (§5.3).
+///
+/// Три написания, и различаются они не косметикой.
+///
+/// * `(void)` - аргументов нет. Пустые скобки объявили бы функцию с
+///   **неизвестным** списком, а не без него.
+/// * `(uint64_t, uint64_t)` - обычный прототип.
+/// * `(uint64_t, uint64_t, ...)` - вариадический. Печатаются только поимённые
+///   типы: что стоит за `...`, прототипу не известно по построению, а вызов
+///   пишет фактические аргументы сам.
+///
+/// Вариадический прототип - не украшение. `SysV` AMD64 требует, чтобы
+/// вызывающий положил в `al` число использованных векторных регистров, и делает
+/// это компилятор **по прототипу**: напечатай мы обычный - `al` не выставится,
+/// и `va_arg` у чужой стороны прочтёт незаполненную область сохранения
+/// регистров. Обратное так же: вызов невариадической функции через
+/// вариадический прототип портит ABI с другого конца.
+fn variadic_list(foreign: &Foreign) -> String {
+    let named: Vec<String> = foreign
+        .parameters
+        .iter()
+        .take(foreign.variadic.unwrap_or(foreign.parameters.len()))
+        .map(|it| scalar(Repr::Flat(*it)).to_owned())
+        .collect();
+    match (named.is_empty(), foreign.variadic.is_some()) {
+        (true, false) => "void".to_owned(),
+        // Поимённых параметров у вариадической функции C требует хотя бы один
+        // (`va_start` называет последний), и элаборация это уже отвергла:
+        // ветвь стоит затем, что таблица `match` исчерпывающа, а не затем, что
+        // такой прототип печатается.
+        (true, true) => "...".to_owned(),
+        (false, false) => named.join(", "),
+        (false, true) => format!("{}, ...", named.join(", ")),
+    }
 }
 
 /// Имя чужого символа **внутри** порождённой единицы.

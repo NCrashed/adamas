@@ -13,10 +13,8 @@ data Unit where
 
 effect Foreign
 
-@trusted
 extern "C" fn adamas_bench_calls : UInt64
 
-@trusted
 extern "C" fn adamas_bench_native : UInt64 -> UInt64
 
 body : (ω u : Unit) -> {Foreign} UInt64

@@ -30,16 +30,12 @@ data Unit where
 
 effect Foreign
 
-@trusted
 extern "C" fn adamas_probe_counter : Array n UInt8 -> UInt64
 
-@trusted
 extern "C" fn adamas_probe_tag : Array n UInt8 -> UInt64
 
-@trusted
 extern "C" fn adamas_probe_keep : Array n UInt8 -> UInt64
 
-@trusted
 extern "C" fn adamas_probe_revisits : Array n UInt8 -> UInt64
 
 runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a

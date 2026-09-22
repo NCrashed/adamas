@@ -26,7 +26,6 @@ data Bool where
 
 effect Foreign
 
-@trusted
 extern "C" fn adamas_bench_calls : UInt64
 
 blank : UInt64

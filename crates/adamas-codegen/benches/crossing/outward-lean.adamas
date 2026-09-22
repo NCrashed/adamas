@@ -16,10 +16,8 @@ data Bool where
 
 effect Foreign
 
-@trusted
 extern "C" fn adamas_bench_calls : UInt64
 
-@trusted
 extern "C" fn adamas_bench_turn : UInt64 -> UInt64
 
 turn : UInt64 -> UInt64 -> {Foreign} UInt64

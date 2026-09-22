@@ -31,10 +31,8 @@ effect Foreign
 
 callbackEnv : CPtr
 
-@trusted
 extern "C" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
 
-@trusted
 extern "C" fn adamas_probe_during : Array n UInt64 -> (CPtr -> CPtr -> {Foreign} Int32) -> CPtr -> UInt64
 
 runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a

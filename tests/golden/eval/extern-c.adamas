@@ -50,22 +50,16 @@ type Size = UInt64
 data Answers where
   MkAnswers : Float64 -> Float64 -> Int64 -> UInt64 -> Answers
 
-@trusted
 extern "C" fn cbrt : Float64 -> Float64
 
-@trusted
 extern "C" fn pow : Float64 -> Float64 -> Float64
 
-@trusted
 extern "C" fn labs : Int64 -> Int64
 
-@trusted
 extern "C" fn clock : Int64
 
-@trusted
 extern "C" fn malloc : Size -> CPtr
 
-@trusted
 extern "C" fn free : CPtr -> Unit
 
 -- Метка без операций гасится веткой `return` и только ею: гасить больше нечего.

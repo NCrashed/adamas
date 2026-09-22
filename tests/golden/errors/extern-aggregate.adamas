@@ -17,7 +17,6 @@ data Nat where
 
 effect Foreign
 
-@trusted
 extern "C" fn adamas_probe_size : Nat -> UInt64
 
 main : UInt64

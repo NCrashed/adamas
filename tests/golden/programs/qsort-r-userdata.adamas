@@ -44,13 +44,11 @@ effect Foreign
 -- его программа, а компилятор узнаёт по написанному имени.
 callbackEnv : CPtr
 
-@trusted
 extern "C" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
 
 -- Пятое слово - `userdata`, и написано оно обычным `CPtr`: объявление
 -- повторяет C дословно, а какое из слов чем является, говорит место
 -- `callbackEnv` в вызове.
-@trusted
 extern "C" fn qsort_r : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> CPtr -> {Foreign} Int32) -> CPtr -> Unit
 
 runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a

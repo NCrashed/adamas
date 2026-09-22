@@ -33,30 +33,24 @@ effect Foreign
 
 -- `int compress2(Bytef *dest, uLongf *destLen, const Bytef *source,
 --                uLong sourceLen, int level)`
-@trusted
 extern "C" fn compress2
   : Array n UInt8 -> Array m UInt64 -> Array k UInt8 -> UInt64 -> UInt64 -> Int32
 
 -- `int uncompress(Bytef *dest, uLongf *destLen, const Bytef *source,
 --                 uLong sourceLen)`
-@trusted
 extern "C" fn uncompress
   : Array n UInt8 -> Array m UInt64 -> Array k UInt8 -> UInt64 -> Int32
 
 -- `uLong crc32(uLong crc, const Bytef *buf, uInt len)`
-@trusted
 extern "C" fn crc32 : UInt64 -> Array n UInt8 -> UInt64 -> UInt64
 
 -- `gzFile gzopen(const char *path, const char *mode)`
-@trusted
 extern "C" fn gzopen : Array n UInt8 -> Array m UInt8 -> CPtr
 
 -- `int gzwrite(gzFile file, voidpc buf, unsigned len)`
-@trusted
 extern "C" fn gzwrite : CPtr -> Array n UInt8 -> UInt64 -> Int32
 
 -- `int gzread(gzFile file, voidp buf, unsigned len)`
-@trusted
 extern "C" fn gzread : CPtr -> Array n UInt8 -> UInt64 -> Int32
 
 -- `int gzclose(gzFile file)`
@@ -65,5 +59,4 @@ extern "C" fn gzread : CPtr -> Array n UInt8 -> UInt64 -> Int32
 -- линейным, а `ω`-параметр отмасштабировал бы его обратно до `ω`, и деструктор
 -- `GzFile` не написался бы вовсе (§5.3, правка примера 2026-09-20). Хендл
 -- `gzclose` действительно потребляет.
-@trusted
 extern "C" fn gzclose : (1 stream : CPtr) -> Int32

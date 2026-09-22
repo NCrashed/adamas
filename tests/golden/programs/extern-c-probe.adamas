@@ -38,21 +38,16 @@ data Unit where
 
 effect Foreign
 
-@trusted
 extern "C" fn adamas_probe_mix : UInt64 -> UInt64 -> UInt64
 
-@trusted
 extern "C" fn adamas_probe_crossings : UInt64
 
 type Size = UInt64
 
-@trusted
 extern "C" fn adamas_probe_alloc : Size -> CPtr
 
-@trusted
 extern "C" fn adamas_probe_read : CPtr -> UInt64
 
-@trusted
 extern "C" fn adamas_probe_free : CPtr -> Unit
 
 -- Метка без операций гасится веткой `return` и только ею: гасить больше нечего.

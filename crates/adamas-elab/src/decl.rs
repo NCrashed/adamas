@@ -442,13 +442,6 @@ struct Required {
     noalloc: bool,
     /// `@fbip` (§5.1).
     fbip: bool,
-    /// `@trusted` (§5.3, §10 вопрос 183): автор берёт на себя сигнатуру,
-    /// которой не сверяет никто.
-    ///
-    /// Стоит особняком от трёх предыдущих и по смыслу им **противоположен**:
-    /// те требуют вердикта у ядра ([`verdicts`]), этот вердикта не требует и
-    /// не даёт. Единственное, что он проверяет, - что он написан.
-    trusted: bool,
 }
 
 /// Разбирает атрибуты сигнатуры: что из них требует проверки (§4.7, §5.1).
@@ -457,27 +450,13 @@ struct Required {
 /// [`adamas_core::alloc`], [`adamas_core::fbip`]), а атрибут превращается в
 /// требование к ответу: «да» у `@total` и `@fbip`, «не аллоцирует» у
 /// `@noalloc`. Спрашивает их всех [`verdicts`].
-///
-/// `boundary` - объявление чужого символа, а не обычная сигнатура. Флаг стоит
-/// здесь, а не у вызывающих, ровно затем, чтобы место у отказа было **одно**:
-/// `@trusted` вне границы не значит ничего, и принять его молча значило бы
-/// завести атрибут, который где-то обязательство, а где-то украшение.
-fn required(attributes: &[ast::Name], boundary: bool) -> Result<Required, ElabError> {
+fn required(attributes: &[ast::Name]) -> Result<Required, ElabError> {
     let mut found = Required::default();
     for attribute in attributes {
         match &*attribute.text {
             "total" => found.total = true,
             "fbip" => found.fbip = true,
             "noalloc" => found.noalloc = true,
-            "trusted" if boundary => found.trusted = true,
-            "trusted" => {
-                return Err(ElabError::Attribute {
-                    name: Rc::clone(&attribute.text),
-                    why: "здесь проверять нечего - он пишется только при `extern`, \
-                          где сигнатуру не сверяет никто (§5.3)",
-                    span: attribute.span,
-                });
-            }
             _ => {
                 return Err(ElabError::Attribute {
                     name: Rc::clone(&attribute.text),
@@ -502,10 +481,9 @@ fn declared_signature<'a>(
     name: &ast::Name,
     ty: &'a ast::Expr,
     attributes: &[ast::Name],
-    boundary: bool,
     span: Span,
 ) -> Result<Pending<'a>, ElabError> {
-    let demanded = required(attributes, boundary)?;
+    let demanded = required(attributes)?;
     // Владение верхнего уровня не выражается: определение всегда `ω`
     // (`sig.rs`: линейность на всю программу не считается), а §3.3 требует
     // `1`. Без этого отказа постулат ресурсного типа - обычное ω-имя, и `drop`
@@ -744,7 +722,7 @@ fn members_into(
                 unused_implicits(ty, warnings);
                 pending = Some(declared_signature(
                     signature, metas, owned, fixities, warnings, within, name, ty, attributes,
-                    false, decl.span,
+                    decl.span,
                 )?);
             }
             DeclKind::Clauses { name, clauses } => {
@@ -1710,7 +1688,7 @@ fn class_members<'a>(
                 // Атрибуты у метода не выбрасываются молча: все три были бы
                 // обещанием про **каждый** инстанс, а вердикт считается у
                 // определения, и определение это - член инстанса.
-                let demanded = required(attributes, false)?;
+                let demanded = required(attributes)?;
                 if demanded.total || demanded.noalloc || demanded.fbip {
                     return Err(ElabError::ModuleMember {
                         name: Rc::clone(&name.text),
@@ -3023,7 +3001,7 @@ fn mutual_members(members: &[ast::Decl], span: Span) -> Result<Vec<Planned<'_>>,
                 // остальным заголовком: обещание, принятое молча, - обещание,
                 // которого никто не давал. `@fbip` внутри группы принимался,
                 // а `@total` внутри неё не значил ничего.
-                pending = Some((name, ty, member.span, required(attributes, false)?));
+                pending = Some((name, ty, member.span, required(attributes)?));
             }
             DeclKind::Clauses { name, clauses } => {
                 let Some((declared, ty, at, demanded)) =
@@ -4062,13 +4040,6 @@ const C_ABI: &str = "\"C\"";
 /// соседское или открытое импортом, - ровно как `Unit` и `Bool`.
 const FOREIGN: &str = "Foreign";
 
-/// Отметка автора при `extern` (§5.3, §10 вопрос 183).
-///
-/// Пишется атрибутом, а не ключевым словом, и означает ровно одно: автор
-/// знает, что сигнатуру ниже не сверяет никто. Проверяется её **наличие** -
-/// больше проверять нечего по построению.
-const TRUSTED: &str = "trusted";
-
 /// Чужой символ: `extern "C" fn malloc : UInt64 -> CPtr` (§5.3, уровень 1).
 ///
 /// Три решения этой формы, и все три записаны здесь, потому что проверяются
@@ -4110,16 +4081,6 @@ fn declare_extern(
             span: declared.abi.span,
         });
     }
-    // Отметка спрашивается **до** элаборации: она про само объявление, а не
-    // про его тип, и отказать ей позже значило бы сперва разобрать написанное,
-    // а потом сказать, что разбирать не следовало.
-    if !declared
-        .attributes
-        .iter()
-        .any(|attribute| &*attribute.text == TRUSTED)
-    {
-        return Err(ElabError::ForeignUntrusted { span });
-    }
     // Метка дописывается **до** элаборации, по написанному дереву: так же
     // поступает объявление эффекта со своими операциями, и правило «написанную
     // row не трогаем» достаётся даром.
@@ -4142,7 +4103,6 @@ fn declare_extern(
         &declared.name,
         &marked,
         &declared.attributes,
-        true,
         span,
     )
     .map_err(|error| foreign_label_missing(error, span))?;

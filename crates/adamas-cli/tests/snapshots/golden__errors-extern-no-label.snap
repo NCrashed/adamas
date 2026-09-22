@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: extern-no-label.adamas:12:1: `extern` помечает вызов эффектом `Foreign` (§5.3), а метка не объявлена: напишите `effect Foreign`
+Error: extern-no-label.adamas:11:1: `extern` помечает вызов эффектом `Foreign` (§5.3), а метка не объявлена: напишите `effect Foreign`
   extern "C" fn adamas_probe_mix : UInt64 -> UInt64
   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

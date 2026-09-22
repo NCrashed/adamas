@@ -51,15 +51,20 @@
 //! принятые за указатель, суть чтение по адресу этого числа.
 //!
 //! Написан тип не везде: у связывания лямбды его нет в ядре вовсе. Поэтому
-//! связывание лямбды объявляется указательным, а плоское значение,
-//! пришедшее в такую позицию, отвергается.
+//! связывание лямбды объявляется указательным, а плоское значение, пришедшее в
+//! такую позицию, **боксируется** - решение 158 (лог 2026-09-10). Обе позиции
+//! границы идут одним правилом: аргумент - через [`Lowerer::shaped`], захват -
+//! через [`Lowerer::capturing`], и переклад у них общий ([`Lowerer::moved`]).
+//! Отказ остаётся у того, чему боксированной формы нет: у вектора (§4.9), у
+//! дескриптора укладки, у непрозрачного элемента.
 //!
 //! **Дескриптор эту границу не снял, и это измерено.** План фазы ждал
 //! обратного: дескриптор даёт **шаг**, а замыканию нужен единообразный
 //! **слот**, и второе есть боксирование (§5.1, «боксирование при передаче
 //! значения в позицию, скомпилированную по указательному представлению»), а
-//! не индексация. Свидетель прежний и по-прежнему красный на попытке -
-//! `tests/flat.rs`, `a_flat_value_does_not_cross_a_closure`.
+//! не индексация. Свидетели цены - `tests/flat.rs`,
+//! `a_flat_value_crosses_a_closure_at_a_named_price` (аргумент) и
+//! `a_flat_scalar_crosses_a_closure_by_both_positions` (обе позиции).
 //!
 //! # Массив: представление одно на два случая (§4.11)
 //!
@@ -104,7 +109,11 @@
 //!
 //! Тело, спайном не являющееся (`case`, `let`, лямбда под `0`-связыванием),
 //! дописать некуда: достроенные параметры применяются к его значению обычным
-//! путём, и плоское там по-прежнему отвергается.
+//! путём, и **достроенный** аргумент там плоским по-прежнему отвергается -
+//! сверяет его [`Lowerer::given`] одним `fits`, переклада у этой ветки нет.
+//! Боксирует граница написанное ([`Lowerer::shaped`]) и захваченное
+//! ([`Lowerer::capturing`]); недобранный вызов §10 вопрос 158 называет
+//! отдельным случаем, и там нужен трамплин-разворачиватель, а не обёртка.
 //!
 //! # Чего понижение не делает
 //!
@@ -2165,8 +2174,9 @@ impl<'a> Lowerer<'a> {
     /// Дописать удаётся ровно спайну (§10 вопрос 153): у него голова - имя, и
     /// лишние аргументы делают вызов насыщенным вместо того, чтобы уходить
     /// применением к значению. Прочие формы тела применяют достроенные параметры
-    /// обычным путём - через границу замыкания, где плоское по-прежнему
-    /// отвергается.
+    /// обычным путём - через границу замыкания, где **достроенное** плоское
+    /// по-прежнему отвергается: боксирует граница написанное и захваченное, а
+    /// сверка [`Arg::Supplied`] идёт одним `fits`.
     ///
     /// # Из двух стражей свидетеля получил один
     ///
@@ -2479,13 +2489,6 @@ impl<'a> Lowerer<'a> {
         }
         let dicts = scope.dicts.clone();
         let result = self.result_repr(ty, arity, &dicts)?;
-        if !result.pointer() {
-            return Err(LowerError::Representation {
-                at: "ответ операции",
-                want: describe(Repr::Boxed),
-                got: describe(result),
-            });
-        }
         // Стёртые связывания операции значения не имеют, и лезть в них нельзя:
         // `fail : a` объявляет собственный `{0 a}` перед триггером, и это
         // **тип**. Ветке они всё равно не достаются - `written` считается от
@@ -2501,7 +2504,8 @@ impl<'a> Lowerer<'a> {
             given.push(self.given(scope, argument, Repr::Boxed, "аргумент операции")?);
         }
         let operation = u32::try_from(slot).unwrap_or(u32::MAX);
-        let mut value = match self.fiber_op(name)? {
+        let fiber = self.fiber_op(name)?;
+        let mut value = match fiber {
             Some(op) => Expr::Fiber {
                 op,
                 label,
@@ -2520,6 +2524,32 @@ impl<'a> Lowerer<'a> {
                 callee: Box::new(value),
                 argument: Box::new(argument),
             };
+        }
+        // Плоский ответ операции разворачивается из обёртки, а не отвергается
+        // (§10 вопросы 158, 191; находка трека D волны 3). Кладёт обёртку
+        // `resume`: аргумент резумпции указателен, и плоское значение туда
+        // боксирует та же граница. Здесь - обратный переклад, её вторая
+        // половина.
+        //
+        // **Только у `Perform`, и это не осторожность, а разные значения.** За
+        // `Fiber` стоит ответ файбера, а его кладёт не `resume`, а завершение
+        // задачи; обёртки там нет ни одной, и разбор прочёл бы за тег чужие
+        // биты. Круг (§5.2) поэтому ответ плоским по-прежнему не отдаёт, и
+        // отказ у него остаётся названным.
+        if !result.pointer() {
+            let unboxed = if fiber.is_some() {
+                None
+            } else {
+                self.moved(scope, &value, Repr::Boxed, result)?
+            };
+            let Some(unboxed) = unboxed else {
+                return Err(LowerError::Representation {
+                    at: "ответ операции",
+                    want: describe(Repr::Boxed),
+                    got: describe(result),
+                });
+            };
+            return Ok((unboxed, result));
         }
         Ok((value, Repr::Boxed))
     }
@@ -2561,14 +2591,13 @@ impl<'a> Lowerer<'a> {
             name: name.to_string(),
             why: "у операции нет row ни на одной стрелке: производить нечем",
         })?;
+        // Ответ синтетического тела указателен всегда: зовут его через
+        // `adamas_apply`, а тот говорит указателями. Плоский ответ операции
+        // уезжает отсюда обёрткой и разворачивается у места употребления - там
+        // же, где разворачивается ответ всякого применения. Отказ остаётся у
+        // того, чему обёртки не бывает: у вектора (§4.9).
         let result = self.result_repr(ty, arity, &scope.dicts.clone())?;
-        if !result.pointer() {
-            return Err(LowerError::Representation {
-                at: "ответ операции",
-                want: describe(Repr::Boxed),
-                got: describe(result),
-            });
-        }
+        boxable(result, "ответ операции")?;
         let mults = multiplicities(ty, arity);
         let parameters: Vec<Binding> = (0..arity)
             .map(|at| Binding {
@@ -3276,7 +3305,7 @@ impl<'a> Lowerer<'a> {
             };
             escaping(term, 0, &mut free);
         }
-        let (captured, taken, inner) = Self::capturing(scope, &free, "захват ветки хендлера")?;
+        let (captured, taken, inner) = self.capturing(scope, &free, "захват ветки хендлера")?;
 
         let site = Site {
             captured: &captured,
@@ -3626,18 +3655,32 @@ impl<'a> Lowerer<'a> {
     /// Захват среды: связывания, их значения на месте и среда вложенного тела.
     ///
     /// Общее у замыкания и у кадра хендлера, и общее не случайно: оба уносят
-    /// связывания наружу своего тела, оба кладут их слотами, и оба принимают
-    /// только указательное - слот у них единообразен (§4.11).
+    /// связывания наружу своего тела, оба кладут их слотами, и слот у них
+    /// единообразен (§4.11) - указательный.
+    ///
+    /// Плоское значение в такой слот **боксируется**, а не отвергается: это
+    /// решение 158 (лог 2026-09-10), и правило у него о границе замыкания
+    /// целиком, а не об одной её позиции. Позицию аргумента боксирует
+    /// [`Lowerer::shaped`] тем же [`Lowerer::moved`]; здесь стоит вторая
+    /// половина того же правила, и порядок проверок тот же - `fits`, переклад,
+    /// названный отказ. Цена названа: ячейка кучи на захват, и §5.1 числит её
+    /// источником боксирования.
+    ///
+    /// Отказ остаётся у того, чему боксированной формы нет: у вектора (§4.9),
+    /// у дескриптора укладки и у непрозрачного элемента - [`Lowerer::moved`]
+    /// возвращает по ним `None`, и позиция называется в тексте.
     fn capturing(
-        scope: &Scope,
+        &mut self,
+        scope: &mut Scope,
         free: &BTreeSet<u32>,
         at: &'static str,
     ) -> Result<Captured, LowerError> {
-        let depth = scope.env.len();
+        let slots = scope.env.clone();
+        let depth = slots.len();
         let mut captured = Vec::new();
         let mut taken = Vec::new();
         let mut inner = Vec::with_capacity(depth);
-        for (position, slot) in scope.env.iter().enumerate() {
+        for (position, slot) in slots.iter().enumerate() {
             let index = u32::try_from(depth - position - 1).unwrap_or(u32::MAX);
             if !free.contains(&index) {
                 inner.push(Slot::Absent);
@@ -3646,25 +3689,31 @@ impl<'a> Lowerer<'a> {
             let Slot::Bound(local, fact) = slot else {
                 return Err(LowerError::Unbound { index });
             };
+            let mut fact = *fact;
+            let mut value = if fact.present {
+                Expr::Local(*local)
+            } else {
+                Expr::Erased
+            };
             if fact.present && !fact.repr.pointer() {
-                return Err(LowerError::Representation {
-                    at,
-                    want: describe(Repr::Boxed),
-                    got: describe(fact.repr),
-                });
+                let Some(boxed) = self.moved(scope, &value, fact.repr, Repr::Boxed)? else {
+                    return Err(LowerError::Representation {
+                        at,
+                        want: describe(Repr::Boxed),
+                        got: describe(fact.repr),
+                    });
+                };
+                value = boxed;
+                fact = fact.shaped(Repr::Boxed);
             }
             let id = LocalId(u32::try_from(captured.len()).unwrap_or(u32::MAX));
             captured.push(Binding {
                 name: format!("захвачено{}", captured.len()),
                 local: id,
-                fact: *fact,
+                fact,
             });
-            taken.push(if fact.present {
-                Expr::Local(*local)
-            } else {
-                Expr::Erased
-            });
-            inner.push(Slot::Bound(id, *fact));
+            taken.push(value);
+            inner.push(Slot::Bound(id, fact));
         }
         Ok((captured, taken, inner))
     }
@@ -4663,10 +4712,10 @@ impl<'a> Lowerer<'a> {
     /// Понижает лямбду в замыкание: своя функция плюс захваченная среда.
     ///
     /// Связывания лямбды объявляются указательными: типа у них в ядре нет, и
-    /// прочитать представление неоткуда. Плоское значение поэтому через
-    /// границу замыкания не проходит - ни захватом, ни аргументом, - и это
-    /// названная граница, а не упущение: §4.11 отдаёт этот случай дескриптору
-    /// layout, которого в рантайме ещё нет.
+    /// прочитать представление неоткуда. Плоское значение поэтому через границу
+    /// замыкания **боксируется** - обеими позициями, аргументом и захватом
+    /// (решение 158, §10 вопрос 191). Цены у позиций разные: аргумент платит
+    /// ячейкой на каждое пересечение, захват - одной на сборку среды.
     fn closure(&mut self, scope: &mut Scope, term: &Term) -> Result<(Expr, Repr), LowerError> {
         self.abstraction(scope, term, false)
     }
@@ -4702,7 +4751,7 @@ impl<'a> Lowerer<'a> {
         // Захватывается то, на что тело смотрит наружу.
         let mut free = BTreeSet::new();
         escaping(term, 0, &mut free);
-        let (captured, taken, inner) = Self::capturing(scope, &free, "захват замыкания")?;
+        let (captured, taken, inner) = self.capturing(scope, &free, "захват замыкания")?;
 
         let mut nested = Scope {
             locals: u32::try_from(captured.len()).unwrap_or(u32::MAX),

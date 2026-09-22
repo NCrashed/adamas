@@ -265,9 +265,79 @@ fn runtime() -> &'static [PathBuf] {
     })
 }
 
+/// Ключи сборки порождённого C - **один** список на сборку и на разбор
+/// ассемблера.
+///
+/// Списком, а не строками по месту: [`assembled`] обязан мерить ту сборку,
+/// которую корпус запускает. Разъедься они - свидетель ABI (`variadic_abi.rs`)
+/// читал бы соседнюю сборку и молчал бы о настоящей.
+const C_FLAGS: [&str; 8] = [
+    "-std=c11",
+    "-O1",
+    // §4.3 требует ключ явно, и требует не зря: у clang для C умолчание `on`, а
+    // `on` контрактит `a * b + c` в пределах выражения. Умолчание gcc под
+    // `-std=c11` совпадает с нашим выбором, но обещание не должно держаться на
+    // чужом умолчании.
+    "-ffp-contract=off",
+    "-Wall",
+    // Порождённый код связывает поля, которых тело не смотрит, и берёт вектор
+    // evidence, которого чистый фрагмент не читает: неиспользуемое здесь -
+    // норма, а не находка. Неявное объявление функции - находка: им ловится
+    // расхождение с заголовком рантайма.
+    "-Wno-unused",
+    // Свёртка чужого вызова - расхождение понижений, а не оптимизация (§5.3;
+    // довод целиком - `native.rs`, `PROGRAM_FLAGS`). Ключ тот же, каким
+    // собирает `adamas build`: разойдись они, корпус мерил бы не то, что
+    // собирает драйвер.
+    "-fno-builtin",
+    "-Werror=implicit-function-declaration",
+    // Несовместимый указатель - тоже находка, и ловит она ровно ту ошибку,
+    // которая иначе сокращается: скрытые аргументы второй формы различаются
+    // **типами** (`const adamas_evidence *` против `adamas_kont *`), и
+    // перестановка их местами становится отсюда отказом сборки, а не молчанием.
+    "-Werror=incompatible-pointer-types",
+];
+
 /// Собирает порождённый C и запускает его. Отдаёт stdout и stderr.
 fn built(name: &str, text: &str) -> (String, String) {
     built_with(name, text, &[])
+}
+
+/// Порождённый C, доведённый до **ассемблера**, а не до бинаря.
+///
+/// Заведено треком C волны 6 Фазы 8 под §10 вопрос 194: вариадический ABI
+/// наблюдается не ответом, а инструкцией перед вызовом, и прочитать её можно
+/// только здесь. Рантайма и компоновщика не нужно - до линковки дело не
+/// доходит.
+///
+/// # Panics
+///
+/// Порождённый C не собрался либо листинг не прочитался.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение, и падать он должен громко"
+)]
+pub(crate) fn assembled(name: &str, text: &str) -> String {
+    let dir = scratch();
+    let source = dir.join(format!("{name}.asm.c"));
+    let listing = dir.join(format!("{name}.c.s"));
+    std::fs::write(&source, text).unwrap();
+    let compiled = Command::new(env!("ADAMAS_CC"))
+        .args(C_FLAGS)
+        .arg("-S")
+        .arg("-I")
+        .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
+        .arg(&source)
+        .arg("-o")
+        .arg(&listing)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{name}: порождённый C не собрался до ассемблера:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    std::fs::read_to_string(&listing).unwrap()
 }
 
 /// Он же с дописанными ключами компилятора.
@@ -307,33 +377,7 @@ pub(crate) fn built_by(name: &str, text: &str, cc: &str, extra: &[&str]) -> (Str
 
     let mut compile = Command::new(cc);
     compile
-        .args([
-            "-std=c11",
-            "-O1",
-            // §4.3 требует ключ явно, и требует не зря: у clang для C
-            // умолчание `on`, а `on` контрактит `a * b + c` в пределах
-            // выражения. Умолчание gcc под `-std=c11` совпадает с нашим
-            // выбором, но обещание не должно держаться на чужом умолчании.
-            "-ffp-contract=off",
-            "-Wall",
-            // Порождённый код связывает поля, которых тело не смотрит, и берёт
-            // вектор evidence, которого чистый фрагмент не читает: неиспользуемое
-            // здесь - норма, а не находка. Неявное объявление функции - находка:
-            // им ловится расхождение с заголовком рантайма.
-            "-Wno-unused",
-            // Свёртка чужого вызова - расхождение понижений, а не оптимизация
-            // (§5.3; довод целиком - `native.rs`, `PROGRAM_FLAGS`). Ключ тот
-            // же, каким собирает `adamas build`: разойдись они, корпус мерил бы
-            // не то, что собирает драйвер.
-            "-fno-builtin",
-            "-Werror=implicit-function-declaration",
-            // Несовместимый указатель - тоже находка, и ловит она ровно ту
-            // ошибку, которая иначе сокращается: скрытые аргументы второй формы
-            // различаются **типами** (`const adamas_evidence *` против
-            // `adamas_kont *`), и перестановка их местами становится отсюда
-            // отказом сборки, а не молчанием.
-            "-Werror=incompatible-pointer-types",
-        ])
+        .args(C_FLAGS)
         .args(extra)
         .arg("-I")
         .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
@@ -963,6 +1007,45 @@ pub(crate) fn llvm_object(
     pipeline
         .run(tools, &text, stem)
         .unwrap_or_else(|error| panic!("{stem}: конвейер LLVM отказал: {error}"))
+}
+
+/// Тот же конвейер, что у штатной сборки, остановленный на **ассемблере**.
+///
+/// Выводится из [`Pipeline::optimised`], а не пишется рядом: уровень
+/// оптимизации у свидетеля ABI обязан быть тот же, каким корпус собирает, и
+/// вторая запись разъехалась бы с первой молча. Подмена ключа проверяется - без
+/// проверки переименование `-filetype=obj` оставило бы свидетеля читать
+/// объектник как текст.
+///
+/// # Panics
+///
+/// Ключ `-filetype=obj` у последней стадии не нашёлся, конвейер отказал либо
+/// листинг не прочитался.
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение, и падать он должен громко"
+)]
+pub(crate) fn llvm_assembled(stem: &str, artefacts: &Artefacts, tools: &Toolchain) -> String {
+    let mut pipeline = Pipeline::optimised();
+    let last = pipeline
+        .stages
+        .last_mut()
+        .expect("у штатного конвейера есть стадия");
+    let found = last
+        .arguments
+        .iter()
+        .position(|it| it == "-filetype=obj")
+        .expect("последняя стадия штатного конвейера печатает объектник");
+    "-filetype=asm".clone_into(&mut last.arguments[found]);
+    "s".clone_into(&mut last.extension);
+
+    let text = scratch().join(format!("{stem}.asm.ll"));
+    std::fs::write(&text, &artefacts.ll).unwrap();
+    let listing = pipeline
+        .run(tools, &text, stem)
+        .unwrap_or_else(|error| panic!("{stem}: конвейер LLVM отказал: {error}"));
+    std::fs::read_to_string(&listing).unwrap()
 }
 
 /// Собранный и слинкованный бинарь: объектник, спутник, рантайм.

@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 /// Исходники рантайма в порядке слоёв: объекты, массивы, регионы обычные и
-/// разделяемые, вектор, замыкания, кадры, файберы.
-const SOURCES: [&str; 8] = [
+/// разделяемые, вектор, замыкания, кадры, файберы, стек.
+const SOURCES: [&str; 9] = [
     "c/object.c",
     "c/array.c",
     "c/region.c",
@@ -13,6 +13,7 @@ const SOURCES: [&str; 8] = [
     "c/closure.c",
     "c/frame.c",
     "c/fiber.c",
+    "c/stack.c",
 ];
 
 fn main() {

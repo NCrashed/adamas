@@ -8,7 +8,7 @@
 data Unit where
   MkUnit : Unit
 
-unsafe extern "C" fn adamas_probe_mix : UInt64 -> UInt64
+extern "C" fn adamas_probe_mix : UInt64 -> UInt64
 
 main : UInt64
 main = 1

@@ -140,15 +140,6 @@ pub enum ElabError {
         span: Span,
     },
 
-    /// `extern` без отметки автора (§5.3, §10 вопрос 183).
-    #[error(
-        "`extern` объявляет то, чего компилятор не проверяет: сигнатуру чужого символа не несёт ни библиотека, ни `dlsym` (§5.3). Напишите `unsafe extern`"
-    )]
-    ForeignUntrusted {
-        /// Где объявлен чужой символ.
-        span: Span,
-    },
-
     /// `extern` при необъявленной метке `Foreign` (§5.3).
     ///
     /// Метка не встроена в компилятор ни одна, включая эту: объявляет её
@@ -1588,7 +1579,6 @@ impl ElabError {
             Self::UnknownName { span, .. }
             | Self::ForeignAbi { span, .. }
             | Self::ForeignLabel { span }
-            | Self::ForeignUntrusted { span }
             | Self::ForeignType { span, .. }
             | Self::ExportTarget { span, .. }
             | Self::ExportType { span, .. }

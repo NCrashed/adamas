@@ -753,8 +753,7 @@ impl<'a> Parser<'a> {
                 span: self.peek().span,
             }),
             TokenKind::At => self.attributed(),
-            TokenKind::Unsafe => self.unsafe_extern(Vec::new()),
-            TokenKind::Extern => self.extern_decl(Vec::new(), false, None),
+            TokenKind::Extern => self.extern_decl(Vec::new()),
             TokenKind::Export => self.export_decl(),
             TokenKind::Ident | TokenKind::LParen => self.signature_or_clause(Vec::new()),
             _ => Err(self
@@ -775,11 +774,8 @@ impl<'a> Parser<'a> {
             attributes.push(self.name_of(name));
             self.expect(TokenKind::Sep)?;
         }
-        if self.at(TokenKind::Unsafe) {
-            return self.unsafe_extern(attributes);
-        }
         if self.at(TokenKind::Extern) {
-            return self.extern_decl(attributes, false, None);
+            return self.extern_decl(attributes);
         }
         if self.at(TokenKind::Export) {
             // Атрибут - обязательство определения, а `export` определения не
@@ -802,25 +798,7 @@ impl<'a> Parser<'a> {
     /// всех прочих, а позиция сразу за ABI неоднозначности не оставляет.
     /// Названная цена: `fn` остаётся законным именем везде, включая само это
     /// объявление (`extern "C" fn fn : …` пишется).
-    /// `unsafe extern "C" fn malloc : …` (§5.3, §10 вопрос 183).
-    ///
-    /// Слово стоит перед ключевым словом объявления - тем же строем, каким
-    /// стоят `unique data` ([`Self::unique_data`]) и `coherent class`. Форму
-    /// свою оно не заводит: помечает имеющуюся.
-    fn unsafe_extern(&mut self, attributes: Vec<Name>) -> Result<Decl, ParseError> {
-        let start = self.bump().span;
-        if !self.at(TokenKind::Extern) {
-            return Err(self.expected(Expected::Token(TokenKind::Extern)));
-        }
-        self.extern_decl(attributes, true, Some(start))
-    }
-
-    fn extern_decl(
-        &mut self,
-        attributes: Vec<Name>,
-        marked: bool,
-        start: Option<Span>,
-    ) -> Result<Decl, ParseError> {
+    fn extern_decl(&mut self, attributes: Vec<Name>) -> Result<Decl, ParseError> {
         let keyword = self.expect(TokenKind::Extern)?;
         if !self.at(TokenKind::Str) {
             return Err(self.expected(Expected::Token(TokenKind::Str)));
@@ -834,10 +812,9 @@ impl<'a> Parser<'a> {
         let name = self.decl_name()?;
         self.expect(TokenKind::Colon)?;
         let ty = self.expr()?;
-        let span = start.unwrap_or(keyword.span).merge(ty.span);
+        let span = keyword.span.merge(ty.span);
         Ok(Decl {
             kind: DeclKind::Extern(ExternDecl {
-                marked,
                 abi,
                 name,
                 ty,

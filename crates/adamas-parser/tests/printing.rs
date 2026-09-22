@@ -326,7 +326,7 @@ both : {q r : Mult} -> (ω f : (q x : a) -> b) -> (ω g : (r y : a) -> c) -> (q 
         // могли молча.
         "foreign_symbols",
         "\
-unsafe extern \"C\" fn malloc : UInt64 -> CPtr
+extern \"C\" fn malloc : UInt64 -> CPtr
 extern \"C\" fn free : CPtr -> Unit
 extern \"C\" fn clock : UInt64
 @noalloc

@@ -18,9 +18,9 @@ effect Foreign
 
 callbackEnv : CPtr
 
-unsafe extern "C" fn adamas_bench_calls : UInt64
+extern "C" fn adamas_bench_calls : UInt64
 
-unsafe extern "C" fn adamas_bench_carried : UInt64 -> (UInt64 -> UInt64) -> CPtr -> UInt64
+extern "C" fn adamas_bench_carried : UInt64 -> (UInt64 -> UInt64) -> CPtr -> UInt64
 
 one : UInt64
 one = 1

@@ -14,7 +14,7 @@ data Bool where
 
 effect Foreign
 
-unsafe extern "C" fn adamas_bench_calls : UInt64
+extern "C" fn adamas_bench_calls : UInt64
 
 step : UInt64 -> UInt64
 step acc = orUInt64 (shlUInt64 acc 1) (shrUInt64 acc 63)

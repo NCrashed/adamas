@@ -3,5 +3,5 @@ source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
 Error: extern-erased-buffer.adamas:20:1: стёртый параметр через границу C не идёт: значения в рантайме у него нет (§3.3), а написан он типом, который границу переходит - то есть чужая сторона получила бы аргументом меньше, чем написано (§5.3)
-  unsafe extern "C" fn adamas_probe_fill : (0 xs : Array 8 UInt8) -> UInt64 -> Unit
-  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  extern "C" fn adamas_probe_fill : (0 xs : Array 8 UInt8) -> UInt64 -> Unit
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

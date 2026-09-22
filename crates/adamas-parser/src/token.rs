@@ -80,8 +80,6 @@ pub enum TokenKind {
     Using,
     /// `import` (§4.8)
     Import,
-    /// `unsafe` - отметка автора при `extern` (§5.3, §10 вопрос 183)
-    Unsafe,
     /// `extern` - объявление чужого символа (§5.3, уровень 1)
     Extern,
     /// `export` - своё определение, видимое C (§5.3, колбэк уровня 1)
@@ -194,7 +192,6 @@ impl TokenKind {
             Self::Mutual => Face::Spelled("mutual"),
             Self::Using => Face::Spelled("using"),
             Self::Import => Face::Spelled("import"),
-            Self::Unsafe => Face::Spelled("unsafe"),
             Self::Extern => Face::Spelled("extern"),
             Self::Export => Face::Spelled("export"),
             Self::Coherent => Face::Spelled("coherent"),
@@ -315,7 +312,6 @@ pub fn keyword(text: &str) -> Option<TokenKind> {
         "mutual" => TokenKind::Mutual,
         "using" => TokenKind::Using,
         "import" => TokenKind::Import,
-        "unsafe" => TokenKind::Unsafe,
         "extern" => TokenKind::Extern,
         "export" => TokenKind::Export,
         "coherent" => TokenKind::Coherent,
@@ -484,7 +480,6 @@ mod tests {
         TokenKind::Mutual,
         TokenKind::Using,
         TokenKind::Import,
-        TokenKind::Unsafe,
         TokenKind::Extern,
         TokenKind::Export,
         TokenKind::Coherent,

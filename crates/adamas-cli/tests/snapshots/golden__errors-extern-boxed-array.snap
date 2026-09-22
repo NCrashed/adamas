@@ -3,5 +3,5 @@ source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
 Error: extern-boxed-array.adamas:21:1: массив через границу C идёт только плоский (§4.11): ячейки указательного суть объекты Perceus с заголовками, и чужая сторона не поймёт ни одного (§5.3)
-  unsafe extern "C" fn adamas_probe_sum : Array n (Option UInt64) -> UInt64 -> UInt64
-  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  extern "C" fn adamas_probe_sum : Array n (Option UInt64) -> UInt64 -> UInt64
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

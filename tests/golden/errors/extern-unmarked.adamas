@@ -14,7 +14,7 @@ data Unit where
 
 effect Foreign
 
-unsafe extern "C" fn adamas_probe_mix : UInt64 -> UInt64 -> UInt64
+extern "C" fn adamas_probe_mix : UInt64 -> UInt64 -> UInt64
 
 main : UInt64
 main = adamas_probe_mix 14 2

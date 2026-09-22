@@ -22,7 +22,7 @@ data Box where
 
 effect Foreign
 
-unsafe extern "C" fn adamas_bench_calls : UInt64
+extern "C" fn adamas_bench_calls : UInt64
 
 blank : UInt64
 blank = 1

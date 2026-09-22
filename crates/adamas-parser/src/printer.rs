@@ -295,9 +295,6 @@ impl Printer {
             self.push(&attribute.text);
             self.line();
         }
-        if declared.marked {
-            self.push("unsafe ");
-        }
         self.push("extern ");
         self.push(&declared.abi.text);
         self.push(" fn ");

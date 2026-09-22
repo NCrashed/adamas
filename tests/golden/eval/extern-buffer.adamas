@@ -66,15 +66,15 @@ effect Foreign
 
 -- POSIX: читает `n` байт по первому адресу и кладёт их по второму, переставив
 -- байты в каждой паре.
-unsafe extern "C" fn swab : Array n UInt8 -> Array m UInt64 -> Int64 -> Unit
+extern "C" fn swab : Array n UInt8 -> Array m UInt64 -> Int64 -> Unit
 
 -- POSIX: заливает `n` байт по адресу заданным значением **на месте** и отдаёт
 -- тот же адрес. Второй аргумент объявлен словом, хотя у C он `int`: в позиции
 -- аргумента SysV читает младшую половину регистра, и это законно (вопрос 183).
-unsafe extern "C" fn memset : Array n UInt8 -> Int64 -> UInt64 -> CPtr
+extern "C" fn memset : Array n UInt8 -> Int64 -> UInt64 -> CPtr
 
 -- Кладёт секунды в ячейку и отдаёт их же: out-параметр в чистом виде.
-unsafe extern "C" fn time : Array n Int64 -> Int64
+extern "C" fn time : Array n Int64 -> Int64
 
 runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
 runForeign k = handle @Foreign k with

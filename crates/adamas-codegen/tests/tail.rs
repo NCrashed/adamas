@@ -543,21 +543,53 @@ main = tick {THROUGH} 1
 
 /// Приставка снимается там, где прототипы расходятся, - и это clang, а не вкус.
 ///
-/// Пара свидетеля Фазы 7: `narrow` двух параметров и `wide` шестнадцати. gcc
-/// такую пару принимает, clang отвергает **сборкой**, и правило, от которого
-/// зависит, соберётся ли программа, принадлежало бы компилятору хоста, а не
-/// языку. Поэтому мера - дословное совпадение прототипов, и здесь она не
-/// выполнена.
+/// gcc пару расходящихся прототипов принимает, clang отвергает **сборкой**, и
+/// правило, от которого зависит, соберётся ли программа, принадлежало бы
+/// компилятору хоста, а не языку. Поэтому мера - дословное совпадение
+/// прототипов.
+///
+/// Расходиться прототипы умеют двумя способами, и половины здесь поэтому две.
+///
+/// *Числом параметров.* Пара свидетеля Фазы 7: `narrow` двух и `wide`
+/// шестнадцати.
+///
+/// *Типами при одном числе.* `tick` берёт два слова, `again` - слово и объект.
+/// Без этой половины мера «совпало число аргументов» прошла бы за меру
+/// «совпал прототип», и мутант, сверяющий длину вместо типов, остался бы жив;
+/// проверено прогоном - на одной первой половине он и оставался.
 #[test]
 fn a_mutual_tail_loop_of_a_different_prototype_drops_the_c_prefix() {
-    let source = witness(SHALLOW);
-    let text = harness::text(&source).unwrap_or_else(|error| panic!("не понизилось: {error}"));
-    assert!(
-        !text.contains("ADAMAS_MUSTTAIL return fn_"),
-        "приставка встала на пару, чьи прототипы расходятся: clang уронит сборку"
-    );
-    harness::agreed("tail-narrow-wide", &source)
-        .unwrap_or_else(|error| panic!("C-бэкенд отказал на свидетеле: {error}"));
+    const RETYPED: &str = "\
+data Bool where
+  True : Bool
+  False : Bool
+
+data Box where
+  MkBox : UInt64 -> Box
+
+mutual
+  tick : UInt64 -> UInt64 -> UInt64
+  tick 0 acc = acc
+  tick n acc = again (subUInt64 n 1) (MkBox (addUInt64 (mulUInt64 acc 3) 1))
+
+  again : UInt64 -> Box -> UInt64
+  again n (MkBox acc) = tick n acc
+
+main : UInt64
+main = tick 9 1
+";
+    for (name, source) in [
+        ("tail-narrow-wide", witness(SHALLOW)),
+        ("tail-retyped", RETYPED.to_owned()),
+    ] {
+        let text = harness::text(&source).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert!(
+            !text.contains("ADAMAS_MUSTTAIL return fn_"),
+            "{name}: приставка встала на пару, чьи прототипы расходятся - clang уронит сборку"
+        );
+        harness::agreed(name, &source)
+            .unwrap_or_else(|error| panic!("C-бэкенд отказал на свидетеле {name}: {error}"));
+    }
 }
 
 /// Названная граница: применение значения **в хвосте** гарантии не получает.

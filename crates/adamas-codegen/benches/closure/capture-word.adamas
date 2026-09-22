@@ -1,0 +1,57 @@
+-- Виток: замыкание несёт **плоское слово** средой (§10 вопрос 191).
+--
+-- Вторая половина решения 158, и до трека B волны 4 этой программы не
+-- существовало: `\acc -> mixed w acc` при `w : UInt64` отвергалось «захват
+-- замыкания: ожидалось указательное значение, а пришло плоское `UInt64`».
+-- Оттого у пары `capture-*` и не было словесного базиса, а роль его играла
+-- коробка.
+--
+-- Тройка здесь такая. `capture-array` - массив средой, и стоит он ноль:
+-- указатель едет указателем. `capture-boxed` - тот же массив, но обёрнутый
+-- **руками**, как поручила бы отвергнутая развилка (б) вопроса 189. Эта
+-- нагрузка - слово, обёрнутое **компилятором** по решению 158, и написана она
+-- затем, чтобы сказать числом, совпала ли автоматическая обёртка с ручной.
+--
+-- Обёртка тут собирается **один раз** - на захвате, до цикла, - а
+-- разворачивается на каждом применении: разбор стоит в теле замыкания. Это и
+-- отличает позицию захвата от позиции аргумента, где обёртка собирается на
+-- каждое пересечение (`apply-word`).
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  True : Bool
+  False : Bool
+
+effect Foreign
+
+extern "C" fn adamas_bench_calls : UInt64
+
+blank : UInt64
+blank = 1
+
+block : UInt64
+block = 1000
+
+mixed : UInt64 -> UInt64 -> UInt64
+mixed v acc = addUInt64 (mulUInt64 acc 3) v
+
+inner : (UInt64 -> UInt64) -> UInt64 -> UInt64 -> UInt64
+inner f 0 acc = acc
+inner f n acc = inner f (subUInt64 n 1) (f acc)
+
+outer : (UInt64 -> UInt64) -> UInt64 -> UInt64 -> UInt64
+outer f 0 acc = acc
+outer f n acc = outer f (subUInt64 n 1) (inner f block acc)
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let w : UInt64 = blank
+  let f : UInt64 -> UInt64 = \acc -> mixed w acc
+  let calls : UInt64 = adamas_bench_calls
+  outer f calls 1
+
+main : UInt64
+main = handle @Foreign body with
+  return v -> v

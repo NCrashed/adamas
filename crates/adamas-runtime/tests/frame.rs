@@ -107,7 +107,7 @@ unsafe extern "C" fn note(
 /// Замыкание-деструктор с отметкой.
 unsafe fn closer(mark: isize) -> Value {
     unsafe {
-        let closure = adamas_closure(Some(note), None, 1, 1);
+        let closure = adamas_closure(Some(note), None, 1, 1, 1);
         adamas_closure_set(closure, 0, adamas_imm(mark));
         closure
     }
@@ -228,7 +228,7 @@ unsafe fn push_probing(kont: *mut Kont, mark: isize, evidence: *mut Evidence) ->
             1,
             evidence,
         );
-        let closure = adamas_closure(Some(probing), None, 1, 1);
+        let closure = adamas_closure(Some(probing), None, 1, 1, 1);
         adamas_closure_set(closure, 0, adamas_imm(mark));
         *adamas_frame_env(frame) = closure;
         frame
@@ -712,7 +712,7 @@ unsafe fn push_reaching(kont: *mut Kont, mark: isize, evidence: *mut Evidence) -
             1,
             evidence,
         );
-        let closure = adamas_closure(Some(reaching), None, 1, 1);
+        let closure = adamas_closure(Some(reaching), None, 1, 1, 1);
         adamas_closure_set(closure, 0, adamas_imm(mark));
         *adamas_frame_env(frame) = closure;
         frame
@@ -806,7 +806,7 @@ fn dropping_the_seized_resumption_finishes_the_unwinding() {
             1,
             with_outer,
         );
-        let closure = adamas_closure(Some(seizing), None, 1, 1);
+        let closure = adamas_closure(Some(seizing), None, 1, 1, 1);
         adamas_closure_set(closure, 0, adamas_imm(4));
         *adamas_frame_env(frame) = closure;
 

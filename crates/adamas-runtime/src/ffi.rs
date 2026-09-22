@@ -288,8 +288,15 @@ unsafe extern "C" {
     /// Отдаёт ссылку на вектор.
     pub fn adamas_evidence_drop(evidence: *mut Evidence);
 
-    /// Замыкание на `arity` аргументов с `captured` слотами среды.
-    pub fn adamas_closure(code: Code, release: Release, arity: u32, captured: u32) -> Value;
+    /// Замыкание на `arity` аргументов с `captured` слотами среды, из которых
+    /// первые `counted` считаются RC (§4.11).
+    pub fn adamas_closure(
+        code: Code,
+        release: Release,
+        arity: u32,
+        captured: u32,
+        counted: u32,
+    ) -> Value;
     /// Записывает слот замыкания.
     pub fn adamas_closure_set(closure: Value, index: usize, field: Value);
     /// Слот замыкания.
@@ -300,6 +307,8 @@ unsafe extern "C" {
     pub fn adamas_closure_missing(closure: Value) -> u32;
     /// Сколько слотов занято: среда плюс накопленные аргументы.
     pub fn adamas_closure_taken(closure: Value) -> usize;
+    /// Считается ли слот: среда - по префиксу, аргументы - всегда.
+    pub fn adamas_closure_slot_counted(closure: Value, index: usize) -> c_int;
     /// Дроп замыкания как `Release`.
     pub fn adamas_closure_release(closure: Value);
     /// Применение: аргумент берётся владением.

@@ -677,6 +677,21 @@ enum Arg<'a> {
 /// Захват среды: связывания, их значения на месте и среда вложенного тела.
 type Captured = (Vec<Binding>, Vec<Expr>, Vec<Slot>);
 
+/// Какой слот у места, куда уезжает захваченное.
+///
+/// Мест два, и слот у них разный - [`Lowerer::capturing`] общая у обоих.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slots {
+    /// Слот замыкания: **разнороден**. Плоское примитивное лежит в нём битами,
+    /// счётные слоты идут префиксом, и число их уезжает в `adamas_closure`
+    /// (§10 вопрос 158, пересмотр 2026-09-22).
+    Mixed,
+    /// Слот кадра хендлера: **единообразен**. `adamas_kont_handler` числа
+    /// счётных не берёт, и дроп среды отдаёт каждый занятый слот; плоское
+    /// значение поэтому боксируется здесь, как боксировалось.
+    Uniform,
+}
+
 /// Площадка `handle` глазами одной ветки: всё, что у веток общее.
 ///
 /// Одной записью, а не пятью аргументами: у каждой ветки эти четыре одни и те
@@ -3307,7 +3322,8 @@ impl<'a> Lowerer<'a> {
             };
             escaping(term, 0, &mut free);
         }
-        let (captured, taken, inner) = self.capturing(scope, &free, "захват ветки хендлера")?;
+        let (captured, taken, inner) =
+            self.capturing(scope, &free, Slots::Uniform, "захват ветки хендлера")?;
 
         let site = Site {
             captured: &captured,
@@ -3657,35 +3673,43 @@ impl<'a> Lowerer<'a> {
     /// Захват среды: связывания, их значения на месте и среда вложенного тела.
     ///
     /// Общее у замыкания и у кадра хендлера, и общее не случайно: оба уносят
-    /// связывания наружу своего тела, оба кладут их слотами, и слот у них
-    /// единообразен (§4.11) - указательный.
+    /// связывания наружу своего тела и оба кладут их слотами. Слот у них при
+    /// этом **разный**, и потому сорт приходит параметром ([`Slots`]).
     ///
-    /// Плоское значение в такой слот **боксируется**, а не отвергается: это
-    /// решение 158 (лог 2026-09-10), и правило у него о границе замыкания
-    /// целиком, а не об одной её позиции. Позицию аргумента боксирует
-    /// [`Lowerer::shaped`] тем же [`Lowerer::moved`]; здесь стоит вторая
-    /// половина того же правила, и порядок проверок тот же - `fits`, переклад,
-    /// названный отказ. Цена названа: ячейка кучи на захват, и §5.1 числит её
-    /// источником боксирования.
+    /// *Замыкание.* Плоское примитивное едет в слот **битами** - тем же словом,
+    /// каким оно переживает точку приостановки в слоте кадра продолжения
+    /// (§4.11, `flat.c`). Счётчика у него нет, счётные слоты идут префиксом, и
+    /// число их уезжает в `adamas_closure`; отсюда устойчивая сортировка ниже.
+    /// Это пересмотр решения 158 от 2026-09-22: боксирование снято в позиции
+    /// **захвата**, в позиции аргумента и ответа оно остаётся - там снятие есть
+    /// правка ABI, потому что `adamas_apply` один на все формы.
     ///
-    /// Отказ остаётся у того, чему боксированной формы нет: у вектора (§4.9),
-    /// у дескриптора укладки и у непрозрачного элемента - [`Lowerer::moved`]
-    /// возвращает по ним `None`, и позиция называется в тексте.
+    /// *Кадр хендлера.* Слот единообразен: `adamas_kont_handler` числа счётных
+    /// не берёт, и дроп среды отдаёт каждый занятый слот. Плоское значение
+    /// поэтому боксируется - решение 158 в прежнем виде.
+    ///
+    /// Всё, что не примитив и не указатель, боксируется у **обоих**: слот шире
+    /// слова не бывает ни там, ни там. Отказ остаётся у того, чему боксированной
+    /// формы нет, - у вектора (§4.9), у дескриптора укладки и у непрозрачного
+    /// элемента: [`Lowerer::moved`] возвращает по ним `None`, и позиция
+    /// называется в тексте.
     fn capturing(
         &mut self,
         scope: &mut Scope,
         free: &BTreeSet<u32>,
+        slots: Slots,
         at: &'static str,
     ) -> Result<Captured, LowerError> {
-        let slots = scope.env.clone();
-        let depth = slots.len();
-        let mut captured = Vec::new();
-        let mut taken = Vec::new();
-        let mut inner = Vec::with_capacity(depth);
-        for (position, slot) in slots.iter().enumerate() {
+        let outer = scope.env.clone();
+        let depth = outer.len();
+        // Позиция в среде, факт и значение - по одному на захваченное. Номера
+        // раздаются **после** сортировки: слот замыкания нумеруется тем же
+        // порядком, каким его читают трамплин и дроп.
+        let mut chosen: Vec<(usize, Fact, Expr)> = Vec::new();
+        let mut inner = vec![Slot::Absent; depth];
+        for (position, slot) in outer.iter().enumerate() {
             let index = u32::try_from(depth - position - 1).unwrap_or(u32::MAX);
             if !free.contains(&index) {
-                inner.push(Slot::Absent);
                 continue;
             }
             let Slot::Bound(local, fact) = slot else {
@@ -3697,7 +3721,12 @@ impl<'a> Lowerer<'a> {
             } else {
                 Expr::Erased
             };
-            if fact.present && !fact.repr.pointer() {
+            // Биты примитива ложатся в слово целиком, и разнородный слот их
+            // носит. Прочее непоказательное - агрегат, дескриптор, вектор -
+            // шире слова либо без боксированной формы вовсе, и путь у него
+            // прежний.
+            let worded = slots == Slots::Mixed && fact.repr.primitive().is_some();
+            if fact.present && !fact.repr.pointer() && !worded {
                 let Some(boxed) = self.moved(scope, &value, fact.repr, Repr::Boxed)? else {
                     return Err(LowerError::Representation {
                         at,
@@ -3708,14 +3737,24 @@ impl<'a> Lowerer<'a> {
                 value = boxed;
                 fact = fact.shaped(Repr::Boxed);
             }
-            let id = LocalId(u32::try_from(captured.len()).unwrap_or(u32::MAX));
+            chosen.push((position, fact, value));
+        }
+        // Счётные слоты первыми - соглашение с рантаймом (`adamas_closure`), то
+        // же самое, какое `emit_c::reified` держит у кадра продолжения.
+        // Сортировка устойчивая, поэтому у единообразного слота она не двигает
+        // ничего: там счётны все живые.
+        chosen.sort_by_key(|(_, fact, _)| fact.present && !fact.repr.counted());
+        let mut captured = Vec::with_capacity(chosen.len());
+        let mut taken = Vec::with_capacity(chosen.len());
+        for (at, (position, fact, value)) in chosen.into_iter().enumerate() {
+            let id = LocalId(u32::try_from(at).unwrap_or(u32::MAX));
             captured.push(Binding {
-                name: format!("захвачено{}", captured.len()),
+                name: format!("захвачено{at}"),
                 local: id,
                 fact,
             });
             taken.push(value);
-            inner.push(Slot::Bound(id, fact));
+            inner[position] = Slot::Bound(id, fact);
         }
         Ok((captured, taken, inner))
     }
@@ -4715,9 +4754,11 @@ impl<'a> Lowerer<'a> {
     ///
     /// Связывания лямбды объявляются указательными: типа у них в ядре нет, и
     /// прочитать представление неоткуда. Плоское значение поэтому через границу
-    /// замыкания **боксируется** - обеими позициями, аргументом и захватом
-    /// (решение 158, §10 вопрос 191). Цены у позиций разные: аргумент платит
-    /// ячейкой на каждое пересечение, захват - одной на сборку среды.
+    /// замыкания **боксируется в позиции аргумента и ответа** - там слот один
+    /// на все формы, и снятие было бы правкой ABI (решение 158, пересмотр
+    /// 2026-09-22). В позиции **захвата** боксирования нет: слот среды
+    /// разнороден, и представление там известно - его читает
+    /// [`Lowerer::capturing`] у самого захватываемого связывания.
     fn closure(&mut self, scope: &mut Scope, term: &Term) -> Result<(Expr, Repr), LowerError> {
         self.abstraction(scope, term, false)
     }
@@ -4753,7 +4794,8 @@ impl<'a> Lowerer<'a> {
         // Захватывается то, на что тело смотрит наружу.
         let mut free = BTreeSet::new();
         escaping(term, 0, &mut free);
-        let (captured, taken, inner) = self.capturing(scope, &free, "захват замыкания")?;
+        let (captured, taken, inner) =
+            self.capturing(scope, &free, Slots::Mixed, "захват замыкания")?;
 
         let mut nested = Scope {
             locals: u32::try_from(captured.len()).unwrap_or(u32::MAX),

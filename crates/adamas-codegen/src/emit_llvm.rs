@@ -1161,6 +1161,37 @@ fn parameter_attributes(fact: &Fact) -> String {
     String::new()
 }
 
+/// Плоский слот замыкания в аргумент трампина: слово, суженное до своего типа.
+///
+/// Пишет инструкции прямо в тело и отдаёт `тип %имя`, как их ждёт список
+/// аргументов. Своя печать, а не [`Builder::narrow`], потому что трамплины
+/// строит модуль: билдера с его нумератором временных здесь нет, и номер слота
+/// служит вместо него - он уникален внутри трамплина по построению.
+///
+/// Обратная сторона [`Builder::into_word`], и обязана совпасть с нею дословно:
+/// `ptrtoint`, усечение по ширине, `bitcast` у плавающего.
+fn unslotted(out: &mut String, repr: Repr, slot: usize) -> String {
+    let Some(ty) = repr.primitive() else {
+        return format!("ptr %s{slot}");
+    };
+    let _ = writeln!(out, "  %w{slot} = ptrtoint ptr %s{slot} to i64");
+    let mut current = format!("%w{slot}");
+    if ty.size() * 8 != 64 {
+        let _ = writeln!(out, "  %c{slot} = trunc i64 {current} to {}", word(ty));
+        current = format!("%c{slot}");
+    }
+    if ty.floating() {
+        let _ = writeln!(
+            out,
+            "  %f{slot} = bitcast {} {current} to {}",
+            word(ty),
+            machine(ty)
+        );
+        current = format!("%f{slot}");
+    }
+    format!("{} {current}", machine(ty))
+}
+
 /// Узлы метаданных модуля, нумерованные порядком заведения.
 ///
 /// Номер выдаётся при записи и возвращается ссылкой `!N`: узлы DWARF ссылаются
@@ -1589,8 +1620,14 @@ impl Module {
     /// сработал бы никогда, а порядок деструкторов перестал бы быть наблюдаемым
     /// ценой. Слот после взятия зануляется единицей, поэтому дроп замыкания
     /// следом отдаёт уже ничего.
+    ///
+    /// Плоский слот не зануляется и владения не несёт: биты числа счётчика не
+    /// имеют, дроп их не трогает, а единица на их месте испортила бы значение.
     fn taker(&mut self, function: &Function) {
-        let env = function.live_captured().count();
+        let env: Vec<Repr> = function
+            .live_captured()
+            .map(|binding| binding.fact.repr)
+            .collect();
         let _ = writeln!(self.bodies, "; `{}` кадром scope", function.name);
         let _ = writeln!(
             self.bodies,
@@ -1603,11 +1640,15 @@ impl Module {
             Form::Stack => Vec::new(),
             Form::Detached => vec!["ptr %ev".to_owned(), "ptr %kont".to_owned()],
         };
-        for slot in 0..env {
+        for (slot, repr) in env.iter().enumerate() {
             let _ = writeln!(
                 self.bodies,
                 "  %s{slot} = call ptr @adamas_closure_get(ptr %self, i64 {slot})"
             );
+            if repr.primitive().is_some() {
+                given.push(unslotted(&mut self.bodies, *repr, slot));
+                continue;
+            }
             let _ = writeln!(self.bodies, "  %u{slot} = call ptr @adamas_unit()");
             let _ = writeln!(
                 self.bodies,
@@ -1627,6 +1668,9 @@ impl Module {
 
     /// Сборщик конструктора: замыкание копит аргументы, последний собирает
     /// объект.
+    ///
+    /// Поля здесь только указательные, и среды у сборщика нет вовсе - слот
+    /// разнородным не бывает.
     ///
     /// Тот же трамплин, что у функции значением ([`Self::boxer`]), и та же
     /// причина `adamas_dup` на слот: слоты принадлежат замыканию, а поле
@@ -1738,24 +1782,36 @@ impl Module {
         // Слотов ровно столько, сколько связываний у ядра, - стёртые в том
         // числе. Стёртый слот в вызов не идёт: понижение кладёт туда
         // `ADAMAS_ERASED`, значение непосредственное, ячейки за ним нет.
-        let mut slots: Vec<usize> = (0..env).collect();
+        //
+        // Среда идёт по своим представлениям: плоский слот несёт биты, `dup`'а
+        // не получает и читается сужением, а не указателем. Накопленные
+        // аргументы указательны все - позиция аргумента боксирует.
+        let mut slots: Vec<(usize, Repr)> = function
+            .live_captured()
+            .enumerate()
+            .map(|(slot, binding)| (slot, binding.fact.repr))
+            .collect();
         for (position, parameter) in function.parameters.iter().enumerate() {
             if !parameter.fact.present || position + 1 == arity {
                 continue;
             }
-            slots.push(env + position);
+            slots.push((env + position, Repr::Boxed));
         }
-        for slot in &slots {
+        for (slot, repr) in &slots {
             let _ = writeln!(
                 self.bodies,
                 "  %s{slot} = call ptr @adamas_closure_get(ptr %self, i64 {slot})"
             );
+            if repr.primitive().is_some() {
+                given.push(unslotted(&mut self.bodies, *repr, *slot));
+                continue;
+            }
             let _ = writeln!(
                 self.bodies,
                 "  %d{slot} = call ptr @adamas_dup(ptr %s{slot})"
             );
+            given.push(format!("ptr %d{slot}"));
         }
-        given.extend(slots.iter().map(|slot| format!("ptr %d{slot}")));
         if function
             .parameters
             .last()
@@ -1871,7 +1927,7 @@ fn second_form(out: &mut String, program: &Program) {
         out.push_str(concat!(
             "; Замыкание: объект с кодом и средой, применение через рантайм.\n",
             "declare ptr @adamas_unit()\n",
-            "declare ptr @adamas_closure(ptr, ptr, i32, i32)\n",
+            "declare ptr @adamas_closure(ptr, ptr, i32, i32, i32)\n",
             "declare void @adamas_closure_set(ptr, i64, ptr)\n",
             "declare ptr @adamas_closure_get(ptr, i64)\n",
             "declare ptr @adamas_apply(ptr, ptr, ptr, ptr)\n",
@@ -5651,7 +5707,7 @@ impl<'a> Builder<'a> {
         self.instruction(
             &format!(
                 "{name} = call ptr @adamas_closure(ptr @make_{}, ptr @{RELEASE_SYMBOL}, \
-                 i32 {arity}, i32 0) ; {}",
+                 i32 {arity}, i32 0, i32 0) ; {}",
                 constructor.0, described.name
             ),
             self.here(),
@@ -5717,6 +5773,11 @@ impl<'a> Builder<'a> {
     }
 
     /// Замыкание с названным трамплином: общим (`box`) либо забирающим (`take`).
+    ///
+    /// Слот среды **разнороден**: плоское примитивное ложится в него битами, и
+    /// счётные слоты идут префиксом - их число уезжает пятым аргументом
+    /// `adamas_closure`. Порядок держит [`crate::lower`], здесь он только
+    /// пересчитывается; печать та же, что у C-эмиттера, и расходиться ей негде.
     fn captured(
         &mut self,
         function: FuncId,
@@ -5727,31 +5788,33 @@ impl<'a> Builder<'a> {
         // Арность замыкания - **все** связывания ядра, стёртые в том числе:
         // применение к значению позиционно и типа вызываемого не знает.
         let arity = described.parameters.len();
-        let present: Vec<usize> = described
+        let present: Vec<(usize, Repr)> = described
             .captured
             .iter()
             .enumerate()
             .filter(|(_, binding)| binding.fact.present)
-            .map(|(position, _)| position)
+            .map(|(position, binding)| (position, binding.fact.repr))
             .collect();
         let mut taken = Vec::new();
-        for position in present {
+        for (position, repr) in present {
             let Some(capture) = captured.get(position) else {
                 continue;
             };
-            taken.push(self.value(capture)?);
+            let value = self.value(capture)?;
+            taken.push((self.into_word(repr, &value)?, repr));
         }
+        let counted = taken.iter().filter(|(_, repr)| repr.counted()).count();
         let name = self.temp();
         self.instruction(
             &format!(
                 "{name} = call ptr @adamas_closure(ptr @{code}_{}, ptr @{RELEASE_SYMBOL}, \
-                 i32 {arity}, i32 {})",
+                 i32 {arity}, i32 {}, i32 {counted})",
                 function.0,
                 taken.len()
             ),
             self.here(),
         );
-        for (at, capture) in taken.iter().enumerate() {
+        for (at, (capture, _)) in taken.iter().enumerate() {
             self.instruction(
                 &format!("call void @adamas_closure_set(ptr {name}, i64 {at}, ptr {capture})"),
                 self.here(),

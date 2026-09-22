@@ -27,9 +27,14 @@ static void adamas_promote_value(adamas_value value) {
     size_t fields;
     if (tag == ADAMAS_TAG_CLOSURE) {
         /* Замыкание - главный постоялец этого пути: тело `spawn` есть оно, и
-         * захват его и есть то, что уезжает в чужой поток (§5.2). */
+         * захват его и есть то, что уезжает в чужой поток (§5.2). Плоский слот
+         * среды метить нечем - счётчика у битов числа нет, - и какой слот
+         * счётный, говорит рантайм (`adamas_closure_slot_counted`). */
         fields = adamas_closure_taken(value);
         for (index = 0; index < fields; index += 1) {
+            if (!adamas_closure_slot_counted(value, index)) {
+                continue;
+            }
             adamas_share_value(adamas_closure_get(value, index));
         }
         return;

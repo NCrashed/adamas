@@ -163,6 +163,21 @@ pub enum EmitError {
         shape: String,
     },
 
+    /// Захваченное, не влезающее в слот замыкания.
+    ///
+    /// Слот тот же, что у кадра: слово, то есть указатель либо биты примитива
+    /// (§4.11). Всё прочее понижение боксирует или отвергает на месте захвата
+    /// ([`crate::lower`]), и сюда не доезжает; страж стоит потому, что тихая
+    /// печать дала бы `adamas_closure_set` с агрегатом вторым аргументом - то
+    /// есть не собирающийся C на валидной программе.
+    #[error("`{function}`: {shape} в слоте замыкания - слот шире слова не бывает (§4.11)")]
+    Slotted {
+        /// Чья функция.
+        function: String,
+        /// Что именно не влезло.
+        shape: String,
+    },
+
     /// Подорожечной эта операция не бывает (§4.9).
     ///
     /// Приехать сюда она не может: `SimdOp::arith` отдаёт только три
@@ -1299,6 +1314,22 @@ fn trampoline(name: &str) -> String {
     )
 }
 
+/// Слот замыкания, взятый общим трамплином: указательный - `dup`'ом, плоский -
+/// битами.
+///
+/// Указательный слот принадлежит замыканию, а функция берёт аргументы
+/// **владением** - отсюда `dup`. У плоского владения не бывает: заголовка нет,
+/// счётчика нет, и `adamas_dup` по чётным битам правил бы чужую память.
+fn held(repr: Repr, slot: usize) -> String {
+    match repr.primitive() {
+        // Имя слота пишется здесь дословно, а не собирается заранее: `dup` в
+        // эмиттере обязан стоять видимо на слоте C-ABI, и сторожит это шов
+        // (`tests/seam.rs`).
+        Some(_) => from_word(repr, &format!("adamas_closure_get(self, {slot})")),
+        None => format!("adamas_dup(adamas_closure_get(self, {slot}))"),
+    }
+}
+
 /// Тело функции: чистым отрезком либо цепочкой кусков.
 ///
 /// Дробится тело второй формы, внутри которой есть точка приостановки
@@ -1377,6 +1408,11 @@ fn body(
 /// динамическая, - а дальше он передаёт их ровно второй форме. Первой они не
 /// передаются вовсе: у неё их нет в сигнатуре, и это ровно то, чем «первая
 /// форма не платит ничего» отличается от «платит и не смотрит».
+///
+/// **Плоский слот среды `dup`'а не получает и получить не может**: в нём лежат
+/// биты числа, счётчика у них нет, и владения при чтении не возникает - функция
+/// берёт их своим C-типом. Читается он `from_word`, то есть той же парой, какой
+/// плоское значение достаётся из слота кадра.
 fn wrapper(out: &mut String, function: &Function) {
     let env = function.live_captured().count();
     let arity = function.parameters.len();
@@ -1398,7 +1434,12 @@ fn wrapper(out: &mut String, function: &Function) {
         Form::Stack => Vec::new(),
         Form::Detached => vec![FORWARD.to_owned()],
     };
-    taken.extend((0..env).map(|slot| format!("adamas_dup(adamas_closure_get(self, {slot}))")));
+    taken.extend(
+        function
+            .live_captured()
+            .enumerate()
+            .map(|(slot, binding)| held(binding.fact.repr, slot)),
+    );
     for (position, parameter) in function.parameters.iter().enumerate() {
         if !parameter.fact.present {
             continue;
@@ -1425,26 +1466,37 @@ fn wrapper(out: &mut String, function: &Function) {
 /// сработал бы никогда, а порядок деструкторов перестал бы быть наблюдаемым
 /// ценой. Слот после взятия зануляется единицей, поэтому дроп замыкания следом
 /// отдаёт уже ничего.
+///
+/// Плоский слот не зануляется, и это не пропуск: владения у битов числа нет,
+/// дроп их не трогает вовсе (`adamas_closure_slot_counted`), а единица на их
+/// месте испортила бы значение, доживи оно до второго чтения.
 fn taker(out: &mut String, function: &Function) {
-    let env = function.live_captured().count();
+    let env: Vec<Repr> = function
+        .live_captured()
+        .map(|binding| binding.fact.repr)
+        .collect();
     let _ = writeln!(
         out,
         "/* `{}` кадром scope: слоты уходят владением. */",
         escaped(&function.name)
     );
     let _ = writeln!(out, "{} {{", trampoline(&format!("take_{}", function.id.0)));
-    for slot in 0..env {
+    for (slot, repr) in env.iter().enumerate() {
         let _ = writeln!(
             out,
-            "    adamas_value s{slot} = adamas_closure_get(self, {slot});"
+            "    {} s{slot} = {};",
+            c_type(*repr),
+            from_word(*repr, &format!("adamas_closure_get(self, {slot})"))
         );
-        let _ = writeln!(out, "    adamas_closure_set(self, {slot}, adamas_unit());");
+        if repr.primitive().is_none() {
+            let _ = writeln!(out, "    adamas_closure_set(self, {slot}, adamas_unit());");
+        }
     }
     let mut taken: Vec<String> = match function.form {
         Form::Stack => Vec::new(),
         Form::Detached => vec![FORWARD.to_owned()],
     };
-    taken.extend((0..env).map(|slot| format!("s{slot}")));
+    taken.extend((0..env.len()).map(|slot| format!("s{slot}")));
     taken.push("arg".to_owned());
     let _ = writeln!(
         out,
@@ -2153,7 +2205,7 @@ impl Emitter<'_> {
         let _ = writeln!(
             self.out,
             "{pad}adamas_value {name} = adamas_closure(make_{}, \
-             adamas_release_value, {arity}u, 0u); /* {title} */",
+             adamas_release_value, {arity}u, 0u, 0u); /* {title} */",
             constructor.0
         );
         name
@@ -3289,6 +3341,15 @@ impl Emitter<'_> {
     }
 
     /// Она же с названным трамплином: общим (`box`) либо забирающим (`take`).
+    ///
+    /// # Слот среды разнороден
+    ///
+    /// Плоское примитивное ложится в слот **битами** - той же мерой, какой оно
+    /// ложится в слот кадра продолжения ([`Emitter::reified`]), - и счётчика у
+    /// него нет. Какие слоты счётные, рантайм знает по префиксу: их число
+    /// уезжает пятым аргументом `adamas_closure`, а порядок «счётные первыми»
+    /// держит [`crate::lower`]. Здесь он только пересчитывается: разъедься эти
+    /// два места, и дроп отдал бы биты числа счётчику.
     fn holding(&mut self, function: FuncId, captured: &[Expr], code: &str, depth: usize) -> String {
         let pad = Self::pad(depth);
         let described = &self.program.functions[function.0];
@@ -3296,30 +3357,35 @@ impl Emitter<'_> {
         // Арность замыкания - **все** связывания ядра, стёртые в том числе:
         // применение к значению позиционно и типа вызываемого не знает.
         let arity = described.parameters.len();
-        let present: Vec<usize> = described
+        let present: Vec<(usize, Repr)> = described
             .captured
             .iter()
             .enumerate()
             .filter(|(_, binding)| binding.fact.present)
-            .map(|(position, _)| position)
+            .map(|(position, binding)| (position, binding.fact.repr))
             .collect();
-        let taken: Vec<String> = present
+        let taken: Vec<(String, Repr)> = present
             .iter()
-            .filter_map(|position| captured.get(*position))
-            .map(|capture| self.value(capture, depth))
+            .filter_map(|(position, repr)| captured.get(*position).map(|it| (it, *repr)))
+            .map(|(capture, repr)| (self.value(capture, depth), repr))
             .collect();
+        let counted = taken.iter().filter(|(_, repr)| repr.counted()).count();
         let name = self.temp();
         let _ = writeln!(
             self.out,
             "{pad}adamas_value {name} = adamas_closure({code}_{}, adamas_release_value, \
-             {arity}u, {}u); /* {title} */",
+             {arity}u, {}u, {counted}u); /* {title} */",
             function.0,
             taken.len()
         );
-        for (slot, capture) in taken.iter().enumerate() {
+        for (slot, (capture, repr)) in taken.iter().enumerate() {
+            if !worded(*repr) {
+                self.slotted(*repr);
+            }
+            let stored = into_word(*repr, capture);
             let _ = writeln!(
                 self.out,
-                "{pad}adamas_closure_set({name}, {slot}, {capture});"
+                "{pad}adamas_closure_set({name}, {slot}, {stored});"
             );
         }
         name
@@ -3838,6 +3904,16 @@ impl Emitter<'_> {
     fn parked(&mut self, repr: Repr) {
         if self.failure.is_none() {
             self.failure = Some(EmitError::Parked {
+                function: self.program.functions[self.id.0].name.clone(),
+                shape: c_type(repr),
+            });
+        }
+    }
+
+    /// Захваченное, не влезающее в слот замыкания.
+    fn slotted(&mut self, repr: Repr) {
+        if self.failure.is_none() {
+            self.failure = Some(EmitError::Slotted {
                 function: self.program.functions[self.id.0].name.clone(),
                 shape: c_type(repr),
             });

@@ -15,7 +15,9 @@
  *
  * Замыкание разбирается отдельной веткой: его слоты - среда плюс накопленные
  * аргументы, и сколько их занято, знает рантайм (`applied` меняется от
- * частичного применения, а указатель на release остаётся тот же).
+ * частичного применения, а указатель на release остаётся тот же). Сорт слота
+ * там знает тоже он: тег у всех замыканий один, таблицу по нему не выбрать, а
+ * число счётных лежит в самом блоке (`adamas_closure_slot_counted`).
  */
 
 static void adamas_release_value(adamas_value value);
@@ -38,6 +40,9 @@ static void adamas_release_value(adamas_value value) {
     if (tag == ADAMAS_TAG_CLOSURE) {
         fields = adamas_closure_taken(value);
         for (index = 0; index < fields; index += 1) {
+            if (!adamas_closure_slot_counted(value, index)) {
+                continue;
+            }
             adamas_drop_value(adamas_closure_get(value, index));
         }
         return;

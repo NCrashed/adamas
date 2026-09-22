@@ -9,6 +9,12 @@
  * исходное могло быть разделено. Уникальное можно было бы переписать, и это
  * ровно тот же reuse, что у данных, - вставляет его Perceus, поэтому здесь
  * такого пути нет.
+ *
+ * Слот среды **разнороден** (§4.11, §10 вопрос 158, пересмотр 2026-09-22):
+ * плоское значение лежит в нём битами. Границу проводит префикс `counted` -
+ * тот же механизм, что у кадра продолжения, - и полос от этого две: среда с
+ * префиксом и накопленные аргументы, считающиеся всегда. Подробности и довод
+ * против таблицы сортов - в шапке `adamas.h`.
  */
 
 #include "adamas.h"
@@ -20,7 +26,9 @@ struct closure_block {
     uint32_t arity;
     uint32_t applied;
     uint32_t captured;
-    uint32_t padding;
+    /* Сколько первых слотов среды считаются RC. Место прежнего выравнивающего
+     * поля: раскладка от него не двигается, и `_Static_assert` ниже это ловит. */
+    uint32_t counted;
     adamas_value slots[];
 };
 
@@ -40,12 +48,15 @@ static size_t slot_count(const struct closure_block *block) {
 }
 
 adamas_value adamas_closure(adamas_code code, adamas_release release, uint32_t arity,
-                            uint32_t captured) {
+                            uint32_t captured, uint32_t counted) {
     if (code == NULL) {
         adamas_fail("замыкание без кода");
     }
     if (arity == 0) {
         adamas_fail("замыкание нульместным не бывает");
+    }
+    if (counted > captured) {
+        adamas_fail("счётных слотов среды больше, чем самих слотов");
     }
     size_t slots = (size_t)captured + (size_t)arity - 1;
     adamas_value value = (adamas_value)adamas_block_alloc(sizeof(struct closure_block) +
@@ -60,7 +71,7 @@ adamas_value adamas_closure(adamas_code code, adamas_release release, uint32_t a
     block->arity = arity;
     block->applied = 0;
     block->captured = captured;
-    block->padding = 0;
+    block->counted = counted;
     return value;
 }
 
@@ -94,6 +105,19 @@ size_t adamas_closure_taken(adamas_value closure) {
     return (size_t)block->captured + (size_t)block->applied;
 }
 
+/* Он же по блоку: частичное применение спрашивает это в цикле и повторного
+ * разбора значения не хочет. */
+static int slot_counted(const struct closure_block *block, size_t index) {
+    if (index >= (size_t)block->captured) {
+        return 1;
+    }
+    return index < (size_t)block->counted;
+}
+
+int adamas_closure_slot_counted(adamas_value closure, size_t index) {
+    return slot_counted(closure_of(closure), index);
+}
+
 void adamas_closure_release(adamas_value closure) {
     struct closure_block *block = closure_of(closure);
     if (block->release != NULL) {
@@ -107,14 +131,20 @@ adamas_value adamas_apply(adamas_value closure, const adamas_evidence *evidence,
     if (block->applied + 1 == block->arity) {
         return block->code(closure, evidence, kont, argument);
     }
-    adamas_value copy = adamas_closure(block->code, block->release, block->arity, block->captured);
+    adamas_value copy = adamas_closure(block->code, block->release, block->arity, block->captured,
+                                       block->counted);
     struct closure_block *fresh = (struct closure_block *)(void *)copy;
     fresh->applied = block->applied + 1;
     /* Занятые слоты у обоих общие - отсюда `dup`. Свежий аргумент приходит
-     * владением и дублирования не требует. */
+     * владением и дублирования не требует.
+     *
+     * Плоский слот среды дублировать нечем: в нём лежат биты числа, счётчика у
+     * них нет, и `adamas_dup` по чётному значению правил бы заголовок по адресу
+     * этого числа. Копия его переносит как есть. */
     size_t taken = (size_t)block->captured + (size_t)block->applied;
     for (size_t index = 0; index < taken; index += 1) {
-        fresh->slots[index] = adamas_dup(block->slots[index]);
+        fresh->slots[index] = slot_counted(block, index) ? adamas_dup(block->slots[index])
+                                                         : block->slots[index];
     }
     fresh->slots[taken] = argument;
     return copy;

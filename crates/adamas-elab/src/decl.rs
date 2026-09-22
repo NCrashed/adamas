@@ -4092,7 +4092,8 @@ fn declare_extern(
         arguments: Vec::new(),
         span: declared.name.span,
     };
-    let marked = performed(&declared.ty, &label);
+    let (written, variadic) = variadic_split(&declared.ty, span)?;
+    let marked = performed(&written, &label);
     let pending = declared_signature(
         signature,
         metas,
@@ -4106,7 +4107,7 @@ fn declare_extern(
         span,
     )
     .map_err(|error| foreign_label_missing(error, span))?;
-    let (params, result) = crossing(&pending.ty, signature, span)?;
+    let (params, result, variadic) = crossing(&pending.ty, signature, variadic, span)?;
     let symbol: CoreName = Rc::clone(&declared.name.text);
     let name = Rc::clone(&pending.name);
     let demanded = pending.required;
@@ -4126,6 +4127,7 @@ fn declare_extern(
             symbol,
             params,
             result,
+            variadic,
         },
     );
     // `@noalloc` через границу - объявление обязательства, а не вердикт: тела
@@ -4141,6 +4143,7 @@ fn declare_extern(
 /// Без этого программа без объявленной метки получает «имя `Foreign` не
 /// найдено» на объявлении, где `Foreign` не написан вовсе, - сообщение,
 /// указывающее на то, чего в исходнике нет.
+///
 fn foreign_label_missing(error: ElabError, span: Span) -> ElabError {
     match &error {
         ElabError::UnknownName { name, .. } if &**name == FOREIGN => {
@@ -4150,13 +4153,168 @@ fn foreign_label_missing(error: ElabError, span: Span) -> ElabError {
     }
 }
 
+/// Отметка вариадической части, как её пишет автор (§5.3).
+///
+/// Написание то же, что у C, и позиция та же - в цепочке стрелок, на границе
+/// между поимённой и вариадической частью. Лексемы своей у неё нет: разбор
+/// принимает её обычным оператором и только внутри типа `extern`-объявления
+/// (`parser::VARIADIC`).
+const VARIADIC: &str = "...";
+
+/// Где в написанной цепочке кончаются поимённые параметры чужой функции.
+///
+/// Первое - число **явных** позиций до `...`, второе - сколько их всего. Второе
+/// нужно затем, что считаются позиции дважды: здесь по написанному дереву, а в
+/// [`crossing`] по элаборированному, и auto-lift §4.1 между ними дописывает
+/// имплиситы. Разойдись два счёта - и `...` встал бы не на своё место молча;
+/// сверка их и есть страж от этого.
+type Variadic = Option<(usize, usize)>;
+
+/// Снимает `...` с цепочки стрелок и говорит, где она стояла.
+///
+/// Снимается **до** элаборации, по написанному дереву, - ровно тем же ходом,
+/// каким [`performed`] дописывает туда метку `Foreign`. Отсюда главное свойство
+/// решения: отметка не доезжает ни до одного терма, у неё нет ни типа, ни
+/// сорта, и ни один исчерпывающий разбор ядра о ней не спрашивает. Арность
+/// адамасова имени при этом есть арность написанного вызова - `...` позиции не
+/// занимает.
+///
+/// Отказы здесь свои, и каждый - правило C, а не вкус.
+///
+/// * **`...` в позиции ответа.** Писать нечего: вариадическая часть есть часть
+///   списка аргументов.
+/// * **`...` первой.** C требует у вариадической функции хотя бы один
+///   поимённый параметр: `va_start` называет последний из них. Форма `f(...)`
+///   появилась только в C23, а порождённая единица собирается не им.
+/// * **`...` не на цепочке.** Внутри скобок колбэка, в аргументе применения, в
+///   поле записи - и вторая отметка на самой цепочке сюда же: снимается только
+///   первая, граница одна. Спрашивается это обходом снятого дерева
+///   ([`ast::mentions`]), а не отказом элаборации, и вот почему - **измерено**:
+///   свободное имя в позиции типа auto-lift §4.1 поднимает в имплисит, так что
+///   уцелевшая отметка доезжает не «имя не найдено», а «параметр через границу
+///   C не идёт». Отказ про другое, и автор по нему свою ошибку не найдёт.
+/// * **выражение кратности в связывании.** `(q x : a)` связывает одно имя или
+///   два - решает объявление `q`, а не форма (§10 вопрос 41), - и счёт позиций
+///   тогда неоднозначен. При написанной отметке это отказ, а не догадка.
+fn variadic_split(ty: &ast::Expr, span: Span) -> Result<(ast::Expr, Variadic), ElabError> {
+    let refuse = |why: &'static str| Err(ElabError::ForeignType { why, span });
+    let mut split: Option<usize> = None;
+    let mut explicit = 0usize;
+    let mut graded = false;
+    let stripped = strip_variadic(ty, &mut split, &mut explicit, &mut graded);
+    if marker(&result_of(&stripped)) {
+        return refuse(
+            "`...` стоит в позиции ответа: вариадическая часть есть хвост списка \
+             аргументов, и отвечать ею нечем",
+        );
+    }
+    if ast::mentions(&stripped, VARIADIC) {
+        return refuse(
+            "`...` стоит не в цепочке стрелок объявления: вариадическая часть у C - \
+             хвост верхнеуровневого списка аргументов, и границ у неё не бывает ни две, \
+             ни одна внутри скобок",
+        );
+    }
+    let Some(split) = split else {
+        return Ok((stripped, None));
+    };
+    if split == 0 {
+        return refuse(
+            "`...` стоит первой: вариадическая функция C объявляет хотя бы один \
+             поимённый параметр - его и называет `va_start`",
+        );
+    }
+    if graded {
+        return refuse(
+            "выражение кратности в связывании вариадического объявления не пишется: \
+             сколько имён связывает `(q x : a)`, решает объявление `q`, а позиции до \
+             `...` обязаны считаться по написанному",
+        );
+    }
+    Ok((stripped, Some((split, explicit))))
+}
+
+/// Имя `...` в позиции типа - и ничего больше.
+fn marker(ty: &ast::Expr) -> bool {
+    matches!(&ty.kind, ast::ExprKind::Name(name) if &*name.text == VARIADIC)
+}
+
+/// Хвост цепочки стрелок: то, чем объявление отвечает.
+fn result_of(ty: &ast::Expr) -> ast::Expr {
+    match &ty.kind {
+        ast::ExprKind::Arrow(_, codomain) | ast::ExprKind::Pi { codomain, .. } => {
+            result_of(codomain)
+        }
+        ast::ExprKind::Effectful { body, .. } => result_of(body),
+        _ => ty.clone(),
+    }
+}
+
+/// Обход цепочки, снимающий отметку и считающий позиции.
+///
+/// Вторая отметка на цепочке не снимается, а оставляется на месте: до неё
+/// доберётся [`foreign_label_missing`], и текст там про то же - «стоит не там».
+/// Различать «дважды на цепочке» и «внутри скобки» отдельными отказами значило
+/// бы обещать читателю различие, которого он не спрашивал.
+fn strip_variadic(
+    ty: &ast::Expr,
+    split: &mut Option<usize>,
+    explicit: &mut usize,
+    graded: &mut bool,
+) -> ast::Expr {
+    let kind = match &ty.kind {
+        ast::ExprKind::Arrow(domain, codomain) => {
+            if marker(domain) && split.is_none() {
+                *split = Some(*explicit);
+                return strip_variadic(codomain, split, explicit, graded);
+            }
+            *explicit += 1;
+            ast::ExprKind::Arrow(
+                domain.clone(),
+                Box::new(strip_variadic(codomain, split, explicit, graded)),
+            )
+        }
+        ast::ExprKind::Pi { binders, codomain } => {
+            for binder in binders {
+                if binder.grade.is_some() || !binder.factors.is_empty() {
+                    *graded = true;
+                }
+                if binder.visibility == ast::Visibility::Explicit {
+                    *explicit += binder.names.len();
+                }
+            }
+            ast::ExprKind::Pi {
+                binders: binders.clone(),
+                codomain: Box::new(strip_variadic(codomain, split, explicit, graded)),
+            }
+        }
+        ast::ExprKind::Effectful { labels, tail, body } => ast::ExprKind::Effectful {
+            labels: labels.clone(),
+            tail: tail.clone(),
+            body: Box::new(strip_variadic(body, split, explicit, graded)),
+        },
+        _ => return ty.clone(),
+    };
+    ast::Expr {
+        kind,
+        span: ty.span,
+    }
+}
+
 /// Тип, которому уровень 1 разрешает перейти границу (§5.3).
 ///
 /// Правило одно на обе стороны стрелки: **граница несёт слово**. Это то же
 /// правило, каким живёт граница кадра (трек A волны 1 Фазы 8), и уровень 1
-/// сверх него не обещает ничего: структуры по значению и varargs требуют
-/// знания ABI платформы, колбэки вынесены из волны, а обобщённое значение
-/// пришло бы указателем на объект Perceus, которого чужая сторона не понимает.
+/// сверх него не обещает ничего: структура по значению требует знания ABI
+/// платформы, а обобщённое значение пришло бы указателем на объект Perceus,
+/// которого чужая сторона не понимает.
+///
+/// **Вариадическая часть** (§5.3, волна 5) - то же слово, но уже на пять
+/// типов. За `...` прототипа нет, и ширину аргумента решает не он, а
+/// продвижение по умолчанию: узкое целое едет как `int`, `float` - как
+/// `double`. Продвинуть значение самим нечем - конверсий ширины в языке нет ни
+/// одной (§4.3), - поэтому продвигаемый тип в этой позиции отвергается
+/// ([`PrimTy::promoted_by_c`]), а не расширяется молча.
 ///
 /// Единица - единственное исключение, и она **не значение, а его отсутствие**:
 /// в домене она есть сишное `(void)`, в кодомене - `void`. Без неё не пишется
@@ -4168,13 +4326,30 @@ fn foreign_label_missing(error: ElabError, span: Span) -> ElabError {
 /// Отдаёт **форму границы**, а не одно только «да»: ту же форму потом читают
 /// понижение и машина, и считать её второй раз значило бы завести вторую копию
 /// этого обхода (см. [`Crossing`]).
-type Shape = (Vec<Cross>, Option<PrimTy>);
+type Shape = (Vec<Cross>, Option<PrimTy>, Option<usize>);
 
-fn crossing(ty: &Term, signature: &Signature, span: Span) -> Result<Shape, ElabError> {
+fn crossing(
+    ty: &Term,
+    signature: &Signature,
+    variadic: Variadic,
+    span: Span,
+) -> Result<Shape, ElabError> {
     let refuse = |why: &'static str| Err(ElabError::ForeignType { why, span });
     let mut params: Vec<Cross> = Vec::new();
+    // Позиции считаются заново, по элаборированному типу: между написанным и
+    // этим auto-lift §4.1 дописал имплиситы, и счёт `variadic_split` про них не
+    // знает. Явные позиции у обоих счётов одни и те же, и сверка ниже - страж
+    // от того, чтобы `...` встала не туда молча.
+    let mut explicit = 0usize;
+    let mut named: Option<usize> = None;
     let mut rest = ty;
     while let Term::Pi(binder, _, written, row, codomain) = rest {
+        if binder.visibility == Visibility::Explicit {
+            if named.is_none() && variadic.is_some_and(|(split, _)| split == explicit) {
+                named = Some(params.iter().filter_map(Cross::carried).count());
+            }
+            explicit += 1;
+        }
         let domain = unaliased(signature, written);
         // Стёртое связывание значения в рантайме не имеет (§3.3), и через
         // границу поэтому не едет. Два случая, и они разные.
@@ -4235,8 +4410,8 @@ fn crossing(ty: &Term, signature: &Signature, span: Span) -> Result<Shape, ElabE
         } else {
             return refuse(
                 "параметр через границу C не идёт: уровень 1 переносит машинное слово - \
-                 примитив §4.11, `CPtr`, плоский `Array n T` либо единицу; структуры по \
-                 значению и varargs требуют знания ABI платформы",
+                 примитив §4.11, `CPtr`, плоский `Array n T` либо единицу; структура по \
+                 значению требует знания ABI платформы",
             );
         };
         params.push(carried);
@@ -4250,7 +4425,37 @@ fn crossing(ty: &Term, signature: &Signature, span: Span) -> Result<Shape, ElabE
             "ответ через границу C не идёт: уровень 1 берёт машинное слово либо единицу (`void`)",
         );
     }
-    Ok((params, result))
+    // Отметка стояла после последнего связывания: вариадическая часть пуста.
+    // Форма законная - `printf(fmt)` пишется в C, - и от невариадической она
+    // всё равно отличается: `al` вызывающий обязан обнулить.
+    if named.is_none() && variadic.is_some_and(|(split, _)| split == explicit) {
+        named = Some(params.iter().filter_map(Cross::carried).count());
+    }
+    if let Some((_, written)) = variadic {
+        // Два счёта явных позиций разъехались. Это внутренний страж, а не
+        // ошибка автора, и потому он называет себя: промолчи он - и `...`
+        // встала бы не туда, а наблюдать это было бы нечем.
+        if written != explicit || named.is_none() {
+            return refuse(
+                "позиция `...` в объявлении не сошлась с элаборированным типом: \
+                 счёт явных параметров разошёлся, и ставить границу вариадической \
+                 части наугад нельзя - от неё зависит ABI вызова",
+            );
+        }
+    }
+    if let Some(named) = named {
+        for carried in params.iter().filter_map(Cross::carried).skip(named) {
+            if carried.promoted_by_c() {
+                return refuse(
+                    "аргумент за `...` объявлен типом, которому C меняет ширину: узкое \
+                     целое едет как `int`, `Float32` - как `Float64`, и это часть ABI, \
+                     а не вольность вызова. Пишите продвинутый тип: конверсий ширины в \
+                     языке нет ни одной (§4.3)",
+                );
+            }
+        }
+    }
+    Ok((params, result, named))
 }
 
 /// Экспорт одного определения: `export "C" fn byWord` (§5.3, колбэк уровня 1).
@@ -4347,6 +4552,11 @@ fn exported_symbol(
             symbol: written,
             params: params.into_iter().map(Cross::Word).collect(),
             result: Some(result),
+            // Вариадического **экспорта** не бывает: `va_list` разбирает тело,
+            // а тело у нас написано на Adamas, и формы «и далее» в нём нет ни
+            // одной. Отметка при `export` не пишется и потому, что типа он не
+            // объявляет вовсе - он читает его у определения выше.
+            variadic: None,
         },
     );
     Ok(())

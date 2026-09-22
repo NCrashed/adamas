@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: extern-aggregate.adamas:20:1: параметр через границу C не идёт: уровень 1 переносит машинное слово - примитив §4.11, `CPtr`, плоский `Array n T` либо единицу; структуры по значению и varargs требуют знания ABI платформы (§5.3)
+Error: extern-aggregate.adamas:20:1: параметр через границу C не идёт: уровень 1 переносит машинное слово - примитив §4.11, `CPtr`, плоский `Array n T` либо единицу; структура по значению требует знания ABI платформы (§5.3)
   extern "C" fn adamas_probe_size : Nat -> UInt64
   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

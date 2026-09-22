@@ -904,6 +904,95 @@ pub fn contains_block(expr: &Expr) -> bool {
     false
 }
 
+/// Упоминает ли выражение имя - где угодно внутри, связанное или свободное.
+///
+/// Заведено ради отметки `...` у вариадического объявления (§5.3): её снимают с
+/// цепочки стрелок, и всё, что уцелело, стоит не там. Узнать это по отказу
+/// элаборации нельзя - **измерено**: свободное имя в позиции типа auto-lift
+/// §4.1 поднимает в имплисит, и уцелевшая отметка приезжает не «имя не
+/// найдено», а «параметр через границу C не идёт», то есть отказом про
+/// совершенно другое.
+///
+/// Обход тот же, что у [`contains_block`], и по той же причине - циклом, а не
+/// спуском.
+#[must_use]
+pub fn mentions(expr: &Expr, name: &str) -> bool {
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        match &expr.kind {
+            ExprKind::Name(written) => {
+                if &*written.text == name {
+                    return true;
+                }
+            }
+            ExprKind::Lit(_) | ExprKind::Hole => {}
+            ExprKind::Effectful { labels, body, .. } => {
+                pending.push(body);
+                pending.extend(labels.iter().flat_map(|label| &label.arguments));
+            }
+            ExprKind::RecordType(fields, _) => pending.extend(fields.iter().map(|it| &it.ty)),
+            ExprKind::Record(fields) => pending.extend(fields.iter().map(|(_, it)| it)),
+            ExprKind::Mask(inner) | ExprKind::Project(inner, _) => pending.push(inner),
+            ExprKind::Update(base, fields) => {
+                pending.push(base);
+                pending.extend(fields.iter().map(|(_, it)| it));
+            }
+            ExprKind::App(left, right)
+            | ExprKind::TypeApp(left, right)
+            | ExprKind::Arrow(left, right) => {
+                pending.push(left);
+                pending.push(right);
+            }
+            ExprKind::Lam { body, .. } | ExprKind::Using { body, .. } => pending.push(body),
+            ExprKind::Pi { binders, codomain } => {
+                pending.extend(binders.iter().filter_map(|binder| binder.ty.as_ref()));
+                pending.push(codomain);
+            }
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                pending.push(cond);
+                pending.push(then_branch);
+                pending.push(else_branch);
+            }
+            ExprKind::Case { scrutinee, alts } => {
+                pending.push(scrutinee);
+                pending.extend(alts.iter().map(|alt| &alt.body));
+            }
+            ExprKind::Block(block) => pending.extend(block.stmts.iter().flat_map(stmt_terms)),
+            ExprKind::Handle {
+                computation,
+                state,
+                branches,
+                ..
+            } => {
+                pending.push(computation);
+                pending.extend(state.as_deref());
+                pending.extend(branches.iter().map(|branch| &branch.body));
+            }
+            ExprKind::Tuple(items) | ExprKind::List(items) => pending.extend(items),
+            ExprKind::Chain(chain) => {
+                pending.push(&chain.head);
+                pending.extend(chain.tail.iter().map(|(_, operand)| operand));
+            }
+        }
+    }
+    false
+}
+
+/// Выражения, стоящие в операторе блока.
+fn stmt_terms(stmt: &Stmt) -> Vec<&Expr> {
+    match &stmt.kind {
+        StmtKind::Let(bindings) => bindings
+            .iter()
+            .flat_map(|binding| std::iter::once(&binding.body).chain(binding.ty.as_ref()))
+            .collect(),
+        StmtKind::Expr(expr) => vec![expr],
+    }
+}
+
 /// Отладочная печать дерева s-выражениями.
 ///
 /// Не путать с обратной печатью, которая появится отдельно: та обязана выдать

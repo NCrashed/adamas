@@ -456,6 +456,27 @@ const STATE: &str = "state";
 /// Контекстное слово между ABI и именем чужого символа (§5.3).
 const FOREIGN_FN: &str = "fn";
 
+/// Отметка вариадической части в сигнатуре чужого символа (§5.3).
+///
+/// Пишется она ровно так же, как её пишет C, и стоит на том же месте - в
+/// цепочке стрелок, там, где кончаются поимённые параметры:
+///
+/// ```text
+/// extern "C" fn snprintf : Array n UInt8 -> UInt64 -> Array m UInt8 -> ... -> Int64 -> Int32
+/// ```
+///
+/// Новой лексемы отметка не заводит: точка входит в набор операторных знаков
+/// лексера, и `...` приезжает обычным [`TokenKind::Operator`] максимальным
+/// куском. Контекстной её делает **позиция**, ровно как [`FOREIGN_FN`]:
+/// в операндной позиции оператор не стоит нигде, поэтому до этого решения
+/// `A -> ... -> B` был отказом разбора, и занять эту форму не значит отнять у
+/// автора ничего (в корпусе `...` встречается только в комментариях).
+///
+/// Принимается она **только** внутри типа `extern`-объявления
+/// ([`Parser::foreign`]): грамматика запирает её туда, и в теле определения
+/// `...` остаётся тем же отказом разбора, каким был.
+const VARIADIC: &str = "...";
+
 /// Член блока хендлера.
 enum Member {
     /// `state s0` - начальное состояние.
@@ -470,6 +491,12 @@ struct Parser<'a> {
     tokens: &'a [Token],
     index: usize,
     depth: u32,
+    /// Разбирается ли сейчас тип чужого объявления - см. [`VARIADIC`].
+    ///
+    /// Флаг, а не отдельная грамматика типа: цепочку стрелок со связываниями,
+    /// row и констрейнтами разбирает [`Parser::expr`], и вторая её копия ради
+    /// одной отметки разъехалась бы с первой по построению.
+    foreign: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -479,6 +506,7 @@ impl<'a> Parser<'a> {
             tokens,
             index: 0,
             depth: 0,
+            foreign: false,
         }
     }
 
@@ -497,6 +525,29 @@ impl<'a> Parser<'a> {
         let parsed = parse(self);
         self.depth -= 1;
         parsed
+    }
+
+    /// Разбирает тип чужого объявления: внутри него законна отметка
+    /// [`VARIADIC`], снаружи - нет.
+    ///
+    /// Прежнее значение возвращается, а не сбрасывается в `false`: объявления
+    /// не вкладываются сегодня, но правило «вернуться в то, что было» стоит
+    /// дешевле, чем обещание, что не будут.
+    fn foreign<T>(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> Result<T, ParseError>,
+    ) -> Result<T, ParseError> {
+        let was = std::mem::replace(&mut self.foreign, true);
+        let parsed = parse(self);
+        self.foreign = was;
+        parsed
+    }
+
+    /// Стоит ли на отметке вариадической части - и законна ли она здесь.
+    fn at_variadic(&self) -> bool {
+        self.foreign
+            && self.kind() == TokenKind::Operator
+            && self.peek().text(self.text) == VARIADIC
     }
 
     // --- поток -----------------------------------------------------------
@@ -811,7 +862,7 @@ impl<'a> Parser<'a> {
         self.bump();
         let name = self.decl_name()?;
         self.expect(TokenKind::Colon)?;
-        let ty = self.expr()?;
+        let ty = self.foreign(Self::expr)?;
         let span = keyword.span.merge(ty.span);
         Ok(Decl {
             kind: DeclKind::Extern(ExternDecl {
@@ -2024,6 +2075,18 @@ impl<'a> Parser<'a> {
             TokenKind::Mask => return self.masked(),
             TokenKind::LParen => return self.parenthesised(),
             TokenKind::LBrace if self.at_record() => return self.record(),
+            // Отметка вариадической части (§5.3). Именем, а не своей формой
+            // AST: до элаборации она не доезжает вовсе - `decl::declare_extern`
+            // снимает её с цепочки стрелок так же, как дописывает туда метку
+            // `Foreign`, - и заводить ради неё одиннадцатый исчерпывающий
+            // разбор по `ExprKind` значило бы платить за форму, которой нет ни
+            // в одном терме. Написание `...` именем не пишется нигде больше:
+            // лексер отдаёт его оператором, а оператор в операндной позиции
+            // законен только здесь.
+            TokenKind::Operator if self.at_variadic() => {
+                self.bump();
+                (ExprKind::Name(self.name_of(token)), token.span)
+            }
             TokenKind::Operator if self.at_projection() => return Ok(self.projection()),
             TokenKind::LBracket => return self.list(),
             _ if self.at_literal() => {

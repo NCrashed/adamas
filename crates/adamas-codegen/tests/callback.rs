@@ -43,6 +43,15 @@ fn source() -> String {
         .unwrap_or_else(|why| panic!("фикстуры {} нет: {why}", path.display()))
 }
 
+/// Программа корпуса, где регистрация **переживает** чужой вызов (§5.3,
+/// уровень 3).
+fn outliving() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/golden/eval/callback-outlives.adamas");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|why| panic!("фикстуры {} нет: {why}", path.display()))
+}
+
 /// Понижение в C доходит до ответа.
 #[test]
 fn the_c_lowering_exports_the_callback() {
@@ -148,6 +157,66 @@ fn a_lambda_without_a_userdata_slot_is_refused() {
     assert!(
         said.contains("класть её некуда") && said.contains("callbackEnv"),
         "отказ обязан назвать причину и место среды: {said}"
+    );
+}
+
+/// Колбэк уровня 3: понижение и машина отвечают одно (§5.3).
+///
+/// Свидетель тут нужен не ради ответа как такового, а ради **предела таблицы**.
+/// Машина держит свою таблицу трамплинов, понижение - сишную
+/// (`adamas-codegen/src/callback.c`), и числа слотов у них записаны порознь.
+/// Разойдись они - пятая регистрация у одного отдала бы адрес, у другого ноль,
+/// и программа посчитала бы разное. Ответ фикстуры это ловит четвёртым
+/// разрядом; корпусной прогон согласия его тоже ловит, но идёт минутами и в
+/// наборы мутантов не входит.
+#[test]
+fn a_registered_callback_agrees_with_the_machine() {
+    let stderr = harness::agreed("callback-outlives", &outliving())
+        .expect("понижение обязано взять уровень 3");
+    let (_, live) = harness::blocks("callback-outlives", &stderr);
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
+}
+
+/// Снятие регистрации стоит **после** последнего чужого вызова.
+///
+/// Это и есть разница между уровнем 2 и уровнем 3, и ответом она не
+/// наблюдается: у понижения адрес экспорта есть настоящий сишный символ, и
+/// позови чужая сторона его после снятия слота - он всё равно сработал бы.
+/// Наблюдается разница порядком строк, и наблюдать её надо здесь: у машины та
+/// же ошибка даёт отказ, то есть два вычислителя ловят одно разными способами.
+#[test]
+fn the_registration_outlives_the_foreign_call() {
+    let text = harness::text(&outliving()).expect("понижение обязано взять уровень 3");
+    let lines: Vec<&str> = text.lines().collect();
+    let called = |needle: &str| {
+        lines
+            .iter()
+            .rposition(|line| line.contains(needle) && !line.starts_with("extern "))
+    };
+    let sorted = called("adamas_foreign_qsort(").expect("вызов `qsort` напечатан");
+    let released =
+        called("adamas_foreign_adamas_callback_release(").expect("снятие регистрации напечатано");
+    assert!(
+        released > sorted,
+        "регистрация снята до чужого вызова: {released} против {sorted}"
+    );
+}
+
+/// Таблица трамплинов печатается только той программе, которая её зовёт.
+///
+/// Половина вторая обязательна: печатай её всем, и `qsort`-программа получила
+/// бы четыре слота статики и два символа рантайма, которых не просила.
+#[test]
+fn the_trampoline_table_is_printed_on_demand() {
+    let with = harness::text(&outliving()).expect("понижение обязано взять уровень 3");
+    assert!(
+        with.contains("adamas_callback_table"),
+        "таблица не напечатана программе, которая её зовёт"
+    );
+    let without = harness::text(&source()).expect("понижение обязано взять экспорт");
+    assert!(
+        !without.contains("adamas_callback_table"),
+        "таблица напечатана программе, которая её не зовёт"
     );
 }
 

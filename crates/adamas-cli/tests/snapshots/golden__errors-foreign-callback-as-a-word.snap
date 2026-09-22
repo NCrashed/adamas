@@ -2,7 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: foreign-callback-as-a-word.adamas:47:60: несовпадение типов: ожидался `UInt64`, получен `(ω _ : UInt64) -> {| ?0} (ω _ : UInt64) -> {| ?0} (ω _ : UInt64) -> {| ?0} (ω _ : UInt64) -> {Foreign | ?0} UInt64`
+Error: foreign-callback-as-a-word.adamas:52:60: несовпадение типов: ожидался `UInt64`, получен `(ω _ : UInt64) -> {| ?0} (ω _ : UInt64) -> {| ?0} (ω _ : UInt64) -> {| ?0} (ω _ : UInt64) -> {Foreign | ?0} UInt64`
     let set : Int32 = curl_easy_setopt curl optWriteFunction writeBody
                                                              ^^^^^^^^^
   в контексте:

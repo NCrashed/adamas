@@ -1,0 +1,108 @@
+-- Заём, переживающий вызов: буфер под `resource` (§5.3, §3.3, §10 вопрос 185).
+--
+-- Заём §4.11 обещает адрес нагрузки **на время вызова**, и половина настоящих
+-- C-API держит его дольше: `CURLOPT_URL`, `setvbuf`, всякий `register` -
+-- и `fmemopen`, которым эта фикстура и меряет. Он запоминает наш адрес, а
+-- читает по нему уже из `fgetc`, то есть **после** возврата.
+--
+-- Форма, которой это выражается, в языке есть, и она не новая: буфер
+-- становится **полем ресурса**, а деструктор ресурса стоит на выходе из
+-- области (§3.3). Время жизни адреса - область, а не вызов; продлевается оно
+-- продлением области, то есть перемещением ресурса наружу.
+--
+-- Что именно держит блок, видно по мутанту: снять `resource` и не назвать
+-- буфер после переноса - и **машина с понижением расходятся**, причём не
+-- падением и не мусором, а законным байтом: у машины 65, у понижения 66. Оба
+-- ответа законны, потому что «блок ещё наш» и «блок уже переиспользован» -
+-- обе законные судьбы освобождённой ячейки.
+--
+-- Мусорящие связывания (`spill`) стоят здесь **не для красоты**: без них
+-- освобождённый блок никто не занимает, и мутант отвечает тем же, чем
+-- фикстура. Их два, а не одно, потому что вместе с буфером у чужого вызова
+-- освобождается и строка режима, и первый же `arrayNew` достаётся ей.
+--
+-- Два буфера, а не один: перепутанный адрес иначе не наблюдаем. Заливки
+-- разные (`A` и `C`), и ответ 6567 ломается от любой из трёх ошибок - блок
+-- переиспользован (66), ресурсы перепутаны (6765), поток закрыт до чтения
+-- (`fgetc` отдал бы -1).
+--
+-- Символы - POSIX и уже поимённо известны таблице границы: `fmemopen`
+-- (POSIX.1-2008) есть та же форма `(long, long, long) -> long`, что
+-- `curl_easy_unescape` без четвёртого слова, `fgetc` и `fclose` - та же
+-- `long -> int`, что `gzclose`. Новых форм фикстура не заводит ни одной.
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  True : Bool
+  False : Bool
+
+effect Foreign
+
+-- `FILE *fmemopen(void *buf, size_t size, const char *mode)`.
+extern "C" fn fmemopen : Array n UInt8 -> UInt64 -> Array m UInt8 -> CPtr
+
+-- `int fgetc(FILE *stream)`.
+extern "C" fn fgetc : CPtr -> Int32
+
+-- `int fclose(FILE *stream)`. Кратность написана: поток потребляется.
+extern "C" fn fclose : (1 stream : CPtr) -> Int32
+
+-- Буфер **и** поток, читающий по его адресу: одна область, один деструктор.
+-- Поле буфера объявлено `ω`, а не `1`, потому что деструктору его разбор
+-- отдаёт линейным, а деть линейный массив некуда - формы «отпустить массив» в
+-- языке нет. Длина поля стёрта: связывание `n` поднимает auto-lift §4.1, и
+-- ресурс поэтому берёт буфер любой длины.
+resource Pinned where
+  Pin : (ω buffer : Array n UInt8) -> CPtr -> Pinned
+  unpin : (1 p : Pinned) -> {Foreign} Unit
+  unpin (Pin buffer stream) =
+    let 1 code : Int32 = fclose stream
+    MkUnit
+
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+-- Литерал в ячейке `arrayNew` умолчания типа не читает: именованная константа
+-- его прижимает - тот же приём, что в `extern-buffer`.
+letterA : UInt8
+letterA = 65
+
+letterC : UInt8
+letterC = 67
+
+spilled : UInt8
+spilled = 66
+
+room : UInt64
+room = 8
+
+hundred : Int32
+hundred = 100
+
+readably : Array 2 UInt8
+readably = "r"
+
+body : (ω u : Unit) -> {Foreign} Int32
+body u =
+  let first : Array 8 UInt8 = arrayNew 8 letterA
+  let second : Array 8 UInt8 = arrayNew 8 letterC
+  -- Чужая сторона запоминает оба адреса и по ним ещё не читала.
+  let early : CPtr = fmemopen first room readably
+  let 1 held : Pinned = Pin first early
+  let late : CPtr = fmemopen second room readably
+  let 1 kept : Pinned = Pin second late
+  -- Освобождённый блок занял бы вот этот; ресурсы ему не дают.
+  let spill : Array 8 UInt8 = arrayNew 8 spilled
+  let more : Array 8 UInt8 = arrayNew 8 spilled
+  -- Здесь чужая сторона читает по запомненному - после возврата из `fmemopen`.
+  let one : Int32 = fgetc early
+  let two : Int32 = fgetc late
+  let junk : UInt8 = arrayIndex spill 0
+  let rest : UInt8 = arrayIndex more 0
+  addInt32 (mulInt32 one hundred) two
+
+main : Int32
+main = runForeign body

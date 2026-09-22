@@ -62,6 +62,14 @@ fn source() -> String {
         .unwrap_or_else(|why| panic!("фикстуры {} нет: {why}", path.display()))
 }
 
+/// Программа корпуса, где заём **переживает** чужой вызов (§10 вопрос 185).
+fn outliving() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/golden/eval/extern-buffer-outlives.adamas");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|why| panic!("фикстуры {} нет: {why}", path.display()))
+}
+
 /// Текст чужой стороны: он же собирается отдельным объектником для C-пути.
 fn shim() -> String {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shim/buffer.c");
@@ -175,5 +183,76 @@ fn the_lent_array_outlives_the_call() {
         released,
         "после чужого вызова нет отдачи одолженного: строки {:?}",
         &lines[call..(call + 5).min(lines.len())]
+    );
+}
+
+/// Заём, переживающий вызов: машина и понижение отвечают одно (§10 вопрос 185).
+///
+/// Свидетель **того самого** разъезда, на котором споткнулась обёртка
+/// милестоуна. `fmemopen` запоминает адрес нашего буфера и читает по нему уже
+/// из `fgetc`, то есть после возврата. Без формы - буфер под `resource` - блок
+/// отдаётся дропом сразу за чужим вызовом, следующая аллокация его занимает, и
+/// **машина с понижением расходятся законным байтом**: 6567 против 66. Ни
+/// падения, ни мусора; обе судьбы освобождённой ячейки законны, и потому
+/// договор трёх вычислителей ловит это только здесь.
+///
+/// Сверку с машиной делает [`harness::agreed`]; здесь остаётся сказать, что
+/// живых блоков не остаётся - ресурс держит буфер до выхода из области, а
+/// деструктор его закрывает поток и отпускает поле.
+#[test]
+fn a_pinned_buffer_agrees_with_the_machine() {
+    let stderr = harness::agreed("lending-outliving", &outliving())
+        .expect("понижение обязано взять заём под ресурсом");
+    let (_, live) = harness::blocks("lending-outliving", &stderr);
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
+}
+
+/// Пришпиленный буфер живёт **областью**, а не вызовом.
+///
+/// Наблюдается порядком строк, и наблюдается именно потому, что ответ этого не
+/// показывает: ответ у сломанного порядка зависит от того, занял ли кто-нибудь
+/// освобождённый блок, - то есть от аллокатора, а не от нас. Три утверждения, и
+/// каждое своё:
+///
+/// 1. заём берёт **лишнюю** ссылку (`adamas_dup` перед вызовом) - значит дроп
+///    сразу за вызовом отдаёт её, а не блок;
+/// 2. поле ресурса получает тот же массив (`adamas_set_field`);
+/// 3. деструктор (`unpin`) стоит **после** последнего чужого чтения, то есть на
+///    выходе из области, а не на последнем упоминании буфера.
+///
+/// Третье - и есть та механика, ради которой форма выбрана: «дольше вызова» в
+/// языке выражается ровно одним - деструктором ресурса (§3.3).
+#[test]
+fn a_pinned_buffer_dies_with_its_scope_and_not_with_the_call() {
+    let text = harness::text(&outliving()).expect("понижение обязано взять заём под ресурсом");
+    let lines: Vec<&str> = text.lines().collect();
+    let position = |needle: &str| {
+        lines
+            .iter()
+            .position(|line| line.contains(needle) && !line.starts_with("extern "))
+    };
+    let lent = position("adamas_foreign_fmemopen(").expect("вызов `fmemopen` напечатан");
+    let dup = lines[..lent]
+        .iter()
+        .rev()
+        .take(8)
+        .any(|line| line.contains("adamas_dup("));
+    assert!(
+        dup,
+        "заём не взял лишней ссылки: строки {:?}",
+        &lines[lent.saturating_sub(8)..lent]
+    );
+    assert!(
+        position("adamas_set_field(").is_some(),
+        "буфер не уехал в поле ресурса: `adamas_set_field` не напечатан"
+    );
+    let last_read = lines
+        .iter()
+        .rposition(|line| line.contains("adamas_foreign_fgetc(") && !line.starts_with("extern "))
+        .expect("вызов `fgetc` напечатан");
+    let destructor = position("/* unpin */").expect("вызов деструктора напечатан");
+    assert!(
+        destructor > last_read,
+        "деструктор стоит до чужого чтения: {destructor} против {last_read}"
     );
 }

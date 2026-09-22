@@ -7,8 +7,9 @@ use std::ptr;
 use adamas_runtime::ffi::{
     Evidence, Kont, TAG_CLOSURE, Value, adamas_alloc, adamas_apply, adamas_closure,
     adamas_closure_code, adamas_closure_get, adamas_closure_missing, adamas_closure_release,
-    adamas_closure_set, adamas_closure_taken, adamas_drop, adamas_field, adamas_imm,
-    adamas_imm_get, adamas_rc, adamas_set_field, adamas_stat_live, adamas_stat_reset, adamas_tag,
+    adamas_closure_set, adamas_closure_slot_counted, adamas_closure_taken, adamas_drop,
+    adamas_field, adamas_imm, adamas_imm_get, adamas_rc, adamas_set_field, adamas_stat_live,
+    adamas_stat_reset, adamas_tag,
 };
 
 /// Трёхместная функция с одним захватом. Разряды разные, поэтому перепутанный
@@ -39,7 +40,7 @@ unsafe fn digits_closure(captured: isize) -> Value {
     unsafe {
         let held = adamas_alloc(0, 1);
         adamas_set_field(held, 0, adamas_imm(captured));
-        let closure = adamas_closure(Some(digits), Some(release_capture), 3, 1);
+        let closure = adamas_closure(Some(digits), Some(release_capture), 3, 1, 1);
         adamas_closure_set(closure, 0, held);
         closure
     }
@@ -133,6 +134,52 @@ fn a_partially_applied_closure_stays_reusable() {
 
         adamas_drop(right, Some(adamas_closure_release));
         adamas_drop(left, Some(adamas_closure_release));
+        adamas_drop(second, Some(adamas_closure_release));
+        adamas_drop(first, Some(adamas_closure_release));
+        assert_eq!(adamas_stat_live(), 0);
+    }
+}
+
+/// Плоский слот среды: биты лежат в нём сами, и `dup` по ним не идёт.
+///
+/// Среда здесь разнородна - счётный слот и плоский, - и порядок «счётные
+/// первыми» есть соглашение с порождённым кодом (`adamas.h`). Проверяется то,
+/// на чём стоит вся раскладка: копия при частичном применении дупает **только**
+/// счётный слот, а биты переносит как есть.
+///
+/// Биты взяты **чётные** нарочно: у нечётного младший бит совпадает с признаком
+/// непосредственного, и `adamas_dup` по нему не делает ничего - мутант «дупать
+/// всё занятое» выжил бы. На чётном он правит заголовок по адресу числа.
+#[test]
+fn a_flat_slot_is_not_counted() {
+    unsafe {
+        adamas_stat_reset();
+        let held = adamas_alloc(0, 1);
+        adamas_set_field(held, 0, adamas_imm(7));
+        // Два слота среды: счётный и плоский. Арность три, поэтому применение
+        // копит аргументы, а не бежит.
+        let first = adamas_closure(Some(digits), Some(release_capture), 3, 2, 1);
+        adamas_closure_set(first, 0, held);
+        adamas_closure_set(first, 1, 10_usize as Value);
+
+        assert_ne!(adamas_closure_slot_counted(first, 0), 0, "среда: счётный");
+        assert_eq!(adamas_closure_slot_counted(first, 1), 0, "среда: плоский");
+        // Накопленные аргументы счётны все: позиция аргумента боксирует.
+        assert_ne!(
+            adamas_closure_slot_counted(first, 2),
+            0,
+            "накопленный аргумент обязан считаться"
+        );
+
+        let second = adamas_apply(first, ptr::null(), ptr::null_mut(), adamas_imm(1));
+        assert_eq!(adamas_rc(held), 1, "счётный слот копия обязана дупнуть");
+        assert_eq!(
+            adamas_closure_get(second, 1),
+            10_usize as Value,
+            "плоский слот копия обязана перенести как есть"
+        );
+        assert_eq!(adamas_closure_taken(second), 3);
+
         adamas_drop(second, Some(adamas_closure_release));
         adamas_drop(first, Some(adamas_closure_release));
         assert_eq!(adamas_stat_live(), 0);

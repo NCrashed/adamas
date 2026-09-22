@@ -18,7 +18,7 @@ data Option (a : Type) where
 
 effect Foreign
 
-extern "C" fn adamas_probe_sum : Array n (Option UInt64) -> UInt64 -> UInt64
+unsafe extern "C" fn adamas_probe_sum : Array n (Option UInt64) -> UInt64 -> UInt64
 
 main : Unit
 main = MkUnit

@@ -35,9 +35,9 @@ effect Width where
 
 callbackEnv : CPtr
 
-extern "C" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
+unsafe extern "C" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
 
-extern "C" fn qsort_r : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> CPtr -> {Width, Foreign} Int32) -> CPtr -> Unit
+unsafe extern "C" fn qsort_r : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> CPtr -> {Width, Foreign} Int32) -> CPtr -> Unit
 
 runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
 runForeign k = handle @Foreign k with

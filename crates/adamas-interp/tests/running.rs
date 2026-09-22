@@ -1575,7 +1575,7 @@ fn the_machine_goes_outside_by_the_declaration_alone() {
         "{BASE}
 effect Foreign
 
-extern \"C\" fn cbrt : Float64 -> Float64
+unsafe extern \"C\" fn cbrt : Float64 -> Float64
 
 body : (ω u : Unit) -> {{Foreign}} Float64
 body u = cbrt 27.0
@@ -1604,7 +1604,7 @@ fn a_symbol_outside_every_linked_library_is_refused_by_name() {
         "{BASE}
 effect Foreign
 
-extern \"C\" fn adamas_probe_mix : UInt64 -> UInt64 -> UInt64
+unsafe extern \"C\" fn adamas_probe_mix : UInt64 -> UInt64 -> UInt64
 
 body : (ω u : Unit) -> {{Foreign}} UInt64
 body u = adamas_probe_mix 14 2
@@ -1639,7 +1639,7 @@ fn a_foreign_symbol_is_a_value_until_it_is_called() {
         "{BASE}
 effect Foreign
 
-extern \"C\" fn adamas_probe_twice : UInt64 -> UInt64
+unsafe extern \"C\" fn adamas_probe_twice : UInt64 -> UInt64
 
 held : UInt64 -> {{Foreign}} UInt64
 held = adamas_probe_twice
@@ -1691,7 +1691,7 @@ filler = 42
 erase : Int64
 erase = 0
 
-extern \"C\" fn memset : Array n UInt8 -> Int64 -> UInt64 -> CPtr
+unsafe extern \"C\" fn memset : Array n UInt8 -> Int64 -> UInt64 -> CPtr
 
 pick : Bool -> Nat -> Nat -> Nat
 pick True yes no = yes
@@ -1748,7 +1748,7 @@ blank = 0
 erase : Int64
 erase = 0
 
-extern \"C\" fn memset : Array n UInt8 -> Int64 -> UInt64 -> CPtr
+unsafe extern \"C\" fn memset : Array n UInt8 -> Int64 -> UInt64 -> CPtr
 
 body : (ω u : Unit) -> {{Foreign}} CPtr
 body u =
@@ -1792,9 +1792,9 @@ fn the_machine_hands_a_callback_to_the_foreign_side() {
         "{BASE}
 effect Foreign
 
-extern \"C\" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
+unsafe extern \"C\" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
 
-extern \"C\" fn qsort : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> CPtr -> {{Foreign}} Int32) -> Unit
+unsafe extern \"C\" fn qsort : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> CPtr -> {{Foreign}} Int32) -> Unit
 
 byWord : CPtr -> CPtr -> {{Foreign}} Int32
 byWord a b = memcmp a b 8
@@ -1848,7 +1848,7 @@ fn a_callback_shape_outside_the_trampolines_is_refused_by_name() {
         "{BASE}
 effect Foreign
 
-extern \"C\" fn qsort : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> {{Foreign}} Int32) -> Unit
+unsafe extern \"C\" fn qsort : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> {{Foreign}} Int32) -> Unit
 
 lonely : CPtr -> {{Foreign}} Int32
 lonely a = 0
@@ -1893,7 +1893,7 @@ fn two_callbacks_in_one_call_are_refused_by_name() {
         "{BASE}
 effect Foreign
 
-extern \"C\" fn adamas_probe_pair : (CPtr -> CPtr -> {{Foreign}} Int32) -> (CPtr -> CPtr -> {{Foreign}} Int32) -> Unit
+unsafe extern \"C\" fn adamas_probe_pair : (CPtr -> CPtr -> {{Foreign}} Int32) -> (CPtr -> CPtr -> {{Foreign}} Int32) -> Unit
 
 first : CPtr -> CPtr -> {{Foreign}} Int32
 first a b = 0
@@ -1938,9 +1938,9 @@ fn a_value_with_an_environment_in_the_callback_position_is_refused() {
         "{BASE}
 effect Foreign
 
-extern \"C\" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
+unsafe extern \"C\" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
 
-extern \"C\" fn qsort : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> CPtr -> {{Foreign}} Int32) -> Unit
+unsafe extern \"C\" fn qsort : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> CPtr -> {{Foreign}} Int32) -> Unit
 
 byWord : CPtr -> CPtr -> {{Foreign}} Int32
 byWord a b = memcmp a b 8

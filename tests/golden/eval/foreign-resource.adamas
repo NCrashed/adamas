@@ -66,9 +66,9 @@ type Size = UInt64
 nine : Nat
 nine = 9
 
-extern "C" fn malloc : Size -> CPtr
+unsafe extern "C" fn malloc : Size -> CPtr
 
-extern "C" fn free : (1 p : CPtr) -> Unit
+unsafe extern "C" fn free : (1 p : CPtr) -> Unit
 
 -- Идиома §5.3 дословно.
 resource CBuffer where

@@ -31,9 +31,9 @@ effect Foreign
 
 callbackEnv : CPtr
 
-extern "C" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
+unsafe extern "C" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
 
-extern "C" fn adamas_probe_during : Array n UInt64 -> (CPtr -> CPtr -> {Foreign} Int32) -> CPtr -> UInt64
+unsafe extern "C" fn adamas_probe_during : Array n UInt64 -> (CPtr -> CPtr -> {Foreign} Int32) -> CPtr -> UInt64
 
 runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
 runForeign k = handle @Foreign k with

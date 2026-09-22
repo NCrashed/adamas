@@ -50,17 +50,17 @@ type Size = UInt64
 data Answers where
   MkAnswers : Float64 -> Float64 -> Int64 -> UInt64 -> Answers
 
-extern "C" fn cbrt : Float64 -> Float64
+unsafe extern "C" fn cbrt : Float64 -> Float64
 
-extern "C" fn pow : Float64 -> Float64 -> Float64
+unsafe extern "C" fn pow : Float64 -> Float64 -> Float64
 
-extern "C" fn labs : Int64 -> Int64
+unsafe extern "C" fn labs : Int64 -> Int64
 
-extern "C" fn clock : Int64
+unsafe extern "C" fn clock : Int64
 
-extern "C" fn malloc : Size -> CPtr
+unsafe extern "C" fn malloc : Size -> CPtr
 
-extern "C" fn free : CPtr -> Unit
+unsafe extern "C" fn free : CPtr -> Unit
 
 -- Метка без операций гасится веткой `return` и только ею: гасить больше нечего.
 runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a

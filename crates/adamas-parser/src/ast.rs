@@ -551,6 +551,11 @@ pub enum DeclKind {
 /// Объявление чужого символа (§5.3, уровень 1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExternDecl {
+    /// Отметка автора: `unsafe extern "C" fn …` (§5.3, §10 вопрос 183).
+    ///
+    /// Слово, а не атрибут: грамматика пускает его ровно в эту позицию, и
+    /// стеречь его больше нигде не требуется.
+    pub marked: bool,
     /// ABI, как написан: литерал вместе с кавычками (`"C"`).
     ///
     /// Хранится литералом, а не разобранным перечислением: разбирать его -
@@ -1222,7 +1227,11 @@ fn dump_export(out: &mut String, exported: &ExportDecl) {
 
 /// Печатает чужой символ: ABI, атрибуты, имя и тип.
 fn dump_extern(out: &mut String, declared: &ExternDecl) {
-    out.push_str("(extern ");
+    out.push_str(if declared.marked {
+        "(unsafe-extern "
+    } else {
+        "(extern "
+    });
     out.push_str(&declared.abi.text);
     out.push(' ');
     for attribute in &declared.attributes {

@@ -20,9 +20,9 @@ data Bool where
 
 effect Foreign
 
-extern "C" fn adamas_bench_calls : UInt64
+unsafe extern "C" fn adamas_bench_calls : UInt64
 
-extern "C" fn adamas_bench_stir : Array n UInt64 -> UInt64 -> UInt64
+unsafe extern "C" fn adamas_bench_stir : Array n UInt64 -> UInt64 -> UInt64
 
 blank : UInt64
 blank = 0

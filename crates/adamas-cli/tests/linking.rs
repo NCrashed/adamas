@@ -83,13 +83,13 @@ data Unit where
 
 effect Foreign
 
-extern \"C\" fn adamas_probe_scale : UInt64 -> UInt64
+unsafe extern \"C\" fn adamas_probe_scale : UInt64 -> UInt64
 
-extern \"C\" fn adamas_probe_blend : UInt64 -> UInt64 -> UInt64
+unsafe extern \"C\" fn adamas_probe_blend : UInt64 -> UInt64 -> UInt64
 
-extern \"C\" fn adamas_probe_stash : UInt64 -> Unit
+unsafe extern \"C\" fn adamas_probe_stash : UInt64 -> Unit
 
-extern \"C\" fn adamas_probe_fetch : UInt64
+unsafe extern \"C\" fn adamas_probe_fetch : UInt64
 
 body : (ω u : Unit) -> {Foreign} UInt64
 body u =

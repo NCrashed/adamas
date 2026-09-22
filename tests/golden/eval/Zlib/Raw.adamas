@@ -33,25 +33,25 @@ effect Foreign
 
 -- `int compress2(Bytef *dest, uLongf *destLen, const Bytef *source,
 --                uLong sourceLen, int level)`
-extern "C" fn compress2
+unsafe extern "C" fn compress2
   : Array n UInt8 -> Array m UInt64 -> Array k UInt8 -> UInt64 -> UInt64 -> Int32
 
 -- `int uncompress(Bytef *dest, uLongf *destLen, const Bytef *source,
 --                 uLong sourceLen)`
-extern "C" fn uncompress
+unsafe extern "C" fn uncompress
   : Array n UInt8 -> Array m UInt64 -> Array k UInt8 -> UInt64 -> Int32
 
 -- `uLong crc32(uLong crc, const Bytef *buf, uInt len)`
-extern "C" fn crc32 : UInt64 -> Array n UInt8 -> UInt64 -> UInt64
+unsafe extern "C" fn crc32 : UInt64 -> Array n UInt8 -> UInt64 -> UInt64
 
 -- `gzFile gzopen(const char *path, const char *mode)`
-extern "C" fn gzopen : Array n UInt8 -> Array m UInt8 -> CPtr
+unsafe extern "C" fn gzopen : Array n UInt8 -> Array m UInt8 -> CPtr
 
 -- `int gzwrite(gzFile file, voidpc buf, unsigned len)`
-extern "C" fn gzwrite : CPtr -> Array n UInt8 -> UInt64 -> Int32
+unsafe extern "C" fn gzwrite : CPtr -> Array n UInt8 -> UInt64 -> Int32
 
 -- `int gzread(gzFile file, voidp buf, unsigned len)`
-extern "C" fn gzread : CPtr -> Array n UInt8 -> UInt64 -> Int32
+unsafe extern "C" fn gzread : CPtr -> Array n UInt8 -> UInt64 -> Int32
 
 -- `int gzclose(gzFile file)`
 --
@@ -59,4 +59,4 @@ extern "C" fn gzread : CPtr -> Array n UInt8 -> UInt64 -> Int32
 -- линейным, а `ω`-параметр отмасштабировал бы его обратно до `ω`, и деструктор
 -- `GzFile` не написался бы вовсе (§5.3, правка примера 2026-09-20). Хендл
 -- `gzclose` действительно потребляет.
-extern "C" fn gzclose : (1 stream : CPtr) -> Int32
+unsafe extern "C" fn gzclose : (1 stream : CPtr) -> Int32

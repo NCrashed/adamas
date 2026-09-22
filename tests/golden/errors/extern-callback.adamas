@@ -19,7 +19,7 @@ data Nat where
 
 effect Foreign
 
-extern "C" fn adamas_probe_apply : (Nat -> Nat) -> Nat
+unsafe extern "C" fn adamas_probe_apply : (Nat -> Nat) -> Nat
 
 main : Nat
 main = Zero

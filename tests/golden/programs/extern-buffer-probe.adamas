@@ -46,18 +46,18 @@ pick False yes no = no
 effect Foreign
 
 -- Заполняет `count` байт последовательностью `seed + i`.
-extern "C" fn adamas_probe_fill : Array n UInt8 -> UInt64 -> UInt64 -> Unit
+unsafe extern "C" fn adamas_probe_fill : Array n UInt8 -> UInt64 -> UInt64 -> Unit
 
 -- Читает `count` байт и кладёт сумму в `out[0]`, максимум в `out[1]`.
-extern "C" fn adamas_probe_digest : Array n UInt8 -> UInt64 -> Array m UInt64 -> Unit
+unsafe extern "C" fn adamas_probe_digest : Array n UInt8 -> UInt64 -> Array m UInt64 -> Unit
 
 -- Запоминает адрес нагрузки и отдаёт его же.
-extern "C" fn adamas_probe_note : Array n UInt8 -> UInt64
+unsafe extern "C" fn adamas_probe_note : Array n UInt8 -> UInt64
 
 -- Тот же ли адрес одолжен во второй раз.
-extern "C" fn adamas_probe_same : Array n UInt8 -> UInt64
+unsafe extern "C" fn adamas_probe_same : Array n UInt8 -> UInt64
 
-extern "C" fn adamas_probe_crossings : UInt64
+unsafe extern "C" fn adamas_probe_crossings : UInt64
 
 runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
 runForeign k = handle @Foreign k with

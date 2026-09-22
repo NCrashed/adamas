@@ -41,10 +41,10 @@ data Unit where
 
 effect Foreign
 
-extern "C" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
+unsafe extern "C" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
 
 -- Четвёртый аргумент - колбэк: написан функциональным типом, а едет словом.
-extern "C" fn qsort : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> CPtr -> {Foreign} Int32) -> Unit
+unsafe extern "C" fn qsort : Array n UInt64 -> UInt64 -> UInt64 -> (CPtr -> CPtr -> {Foreign} Int32) -> Unit
 
 -- Компаратор: адреса двух ячеек, восемь байт по каждому.
 byWord : CPtr -> CPtr -> {Foreign} Int32

@@ -17,7 +17,7 @@ data Nat where
 
 effect Foreign
 
-extern "C" fn adamas_probe_size : Nat -> UInt64
+unsafe extern "C" fn adamas_probe_size : Nat -> UInt64
 
 main : UInt64
 main = 1

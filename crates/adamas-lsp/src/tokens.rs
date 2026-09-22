@@ -205,6 +205,7 @@ impl Slot {
             | TokenKind::Else
             | TokenKind::Resource
             | TokenKind::Unique
+            | TokenKind::Unsafe
             | TokenKind::Effect
             | TokenKind::Handle
             | TokenKind::HandleMulti

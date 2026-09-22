@@ -38,17 +38,17 @@ data Unit where
 
 effect Foreign
 
-extern "C" fn adamas_probe_mix : UInt64 -> UInt64 -> UInt64
+unsafe extern "C" fn adamas_probe_mix : UInt64 -> UInt64 -> UInt64
 
-extern "C" fn adamas_probe_crossings : UInt64
+unsafe extern "C" fn adamas_probe_crossings : UInt64
 
 type Size = UInt64
 
-extern "C" fn adamas_probe_alloc : Size -> CPtr
+unsafe extern "C" fn adamas_probe_alloc : Size -> CPtr
 
-extern "C" fn adamas_probe_read : CPtr -> UInt64
+unsafe extern "C" fn adamas_probe_read : CPtr -> UInt64
 
-extern "C" fn adamas_probe_free : CPtr -> Unit
+unsafe extern "C" fn adamas_probe_free : CPtr -> Unit
 
 -- Метка без операций гасится веткой `return` и только ею: гасить больше нечего.
 runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a

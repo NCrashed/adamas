@@ -75,8 +75,10 @@ fn the_caret_is_measured_in_characters() {
 #[test]
 fn a_long_line_is_shown_by_a_window() {
     // Спайн применения пишется в одну строку, и печатать её целиком значит
-    // спрятать под ней сообщение.
-    let text = format!("{BASE}big : Nat\nbig = nope{}\n", " Zero".repeat(120));
+    // спрятать под ней сообщение. Шестьдесят аргументов - триста символов, то
+    // есть втрое шире окна; сто двадцать не берутся, потому что предел
+    // вложенности с волны 4 Фазы 8 равен 64 звеньям.
+    let text = format!("{BASE}big : Nat\nbig = nope{}\n", " Zero".repeat(60));
     insta::assert_snapshot!(refusal(&text));
 }
 

@@ -445,7 +445,7 @@ fn a_long_application_spine_prints_without_recursion() {
     // (§10 вопрос 62). Печать по спайну идёт циклом и на предельной длине
     // рекурсией не пользуется; проверяется ровно граница, потому что за ней
     // текста для печати уже не бывает.
-    let text = format!("f = g{}\n", " x".repeat(256));
+    let text = format!("f = g{}\n", " x".repeat(64));
     assert_eq!(print(&tree(&text)), text);
 }
 

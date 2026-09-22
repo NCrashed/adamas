@@ -505,12 +505,18 @@ fn a_nested_record_type_does_not_cost_exponentially() {
     // сорок уровней - это 2^40 попыток, то есть тест не закончился бы вовсе.
     // Предел вложенности здесь не спасает: он ограничивает глубину, а не число
     // попыток, и сорок уровней под ним.
-    let deep = format!("type T = {}Nat{}\n", "{ x : ".repeat(40), " }".repeat(40));
+    // Тридцать уровней - 2^30 попыток, то есть свойство меряют так же, как
+    // сорок; сорок под предел вложенности в 64 входа спуска уже не помещаются -
+    // уровень стоит двух.
+    let deep = format!("type T = {}Nat{}\n", "{ x : ".repeat(30), " }".repeat(30));
     assert!(tree(&deep).is_ok());
     // Просмотра «за скобкой стрелка» мало: у `{x : E, y : Nat} -> Nat` он
     // отвечает «да», группа отказывает на запятой, и откат оживает вместе с
-    // экспонентой. Тридцать четыре уровня - меньше килобайта - зависали.
-    let arrowed = (0..34).fold("Nat".to_owned(), |inner, _| {
+    // экспонентой. Тридцать четыре уровня - меньше килобайта - зависали;
+    // двадцать дают 2^20 попыток, то есть ряд тот же, а под предел
+    // вложенности в 64 они, в отличие от тридцати четырёх, помещаются: уровень
+    // ставит и звенья терма, и входы спуска.
+    let arrowed = (0..20).fold("Nat".to_owned(), |inner, _| {
         format!("{{ x : {inner}, y : Nat }} -> Nat")
     });
     assert!(tree(&format!("type E = {arrowed}\n")).is_ok());
@@ -525,9 +531,11 @@ fn deep_nesting_is_an_error_not_a_crash() {
     // warm-up'а Фазы 0: без предела компилятор падает вместо сообщения.
     let deep = format!("f = {}x{}\n", "(".repeat(20_000), ")".repeat(20_000));
     assert!(matches!(parse_error(&deep), ParseError::TooDeep { .. }));
-    // Предел не должен резать законные программы: сотня стрелок в сигнатуре
-    // абсурдна, но глубже неё предел не опускается.
-    let wide = format!("f : {}a\n", "a -> ".repeat(100));
+    // Предел не должен резать законные программы. Число здесь **упало** с сотни
+    // до шестидесяти вместе с самим пределом (трек D волны 4 Фазы 8): сотня
+    // звеньев больше того, что выдерживает наименьший поток языка, и держать её
+    // значило бы обещать разбор тому, что уронит понижение.
+    let wide = format!("f : {}a\n", "a -> ".repeat(60));
     assert!(tree(&wide).is_ok());
 }
 
@@ -655,11 +663,18 @@ fn a_flat_list_that_unfolds_into_a_chain_is_bounded_too() {
 
 #[test]
 fn the_limit_does_not_cut_on_its_own_boundary() {
-    assert!(parse(&format!("f = g{}\n", " x".repeat(256))).is_ok());
-    let block = repeat(256, |index| format!("  let x{index} : T = y\n"));
+    // Ровно предел, а не «примерно»: число написано, а не выведено из
+    // константы, иначе свидетель ехал бы вместе с ней.
+    assert!(parse(&format!("f = g{}\n", " x".repeat(64))).is_ok());
+    let block = repeat(64, |index| format!("  let x{index} : T = y\n"));
     assert!(parse(&format!("f =\n{block}  x\n")).is_ok());
-    let fields = repeat(255, |index| format!(", f{} : T", index + 1));
+    let fields = repeat(63, |index| format!(", f{} : T", index + 1));
     assert!(parse(&format!("type Big = {{ f0 : T{fields} }}\n")).is_ok());
+    // За пределом - названный отказ, а не паника: сосед выше на одно звено.
+    assert!(matches!(
+        parse_error(&format!("f = g{}\n", " x".repeat(65))),
+        ParseError::TooDeep { limit: 64, .. }
+    ));
 }
 
 /// Список, который в цепочку **не** разворачивается, пределом не режется.

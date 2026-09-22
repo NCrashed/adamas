@@ -737,7 +737,7 @@ ignore : Nat -> Bool
 ignore n = True
 
 main : Bool
-main = ignore (times 200 200)
+main = ignore (times (times 20 10) (times 20 10))
 "
     );
     assert_eq!(ran(&source, "main"), "True");
@@ -762,7 +762,7 @@ times (Succ k) m = m + times k m
 opaque : Nat -> Nat
 
 main : Nat
-main = opaque (times 200 200)
+main = opaque (times (times 20 10) (times 20 10))
 "
     );
     assert!(
@@ -1057,6 +1057,12 @@ fn a_one_shot_handler_lets_its_segment_go() {
 effect Ask where
   ask : Nat
 
+-- Двести пишется произведением: предел вложенности - 64 звена, и унарный
+-- литерал глубиной в само число под него не помещается (§10 вопрос 187).
+times : Nat -> Nat -> Nat
+times Zero m = Zero
+times (Succ k) m = m + times k m
+
 counted : Nat -> {{Ask}} Nat
 counted Zero = Zero
 counted (Succ k) =
@@ -1064,7 +1070,7 @@ counted (Succ k) =
   one + counted k
 
 deep : {{Ask}} Nat
-deep = counted 200
+deep = counted (times 20 10)
 
 main : Nat
 main = handle deep with

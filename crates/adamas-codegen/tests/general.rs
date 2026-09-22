@@ -226,7 +226,9 @@ fn an_operation_under_recursion_stays_linear() {
 /// этого ряда не мерит.
 ///
 /// Число операций пишется **произведением**: сотня нанизанных `Succ` в
-/// разборе упирается в предел вложенности, а произведение - нет.
+/// разборе упирается в предел вложенности, а произведение - нет. Сама сотня
+/// с волны 4 Фазы 8 тоже пишется произведением: предел опустился до 64 звеньев,
+/// и в него не помещается уже и она.
 fn source(left: usize, right: usize) -> String {
     let literal = |count: usize| -> String {
         let mut out = String::new();
@@ -268,8 +270,11 @@ counted (Succ k) =
   let one : Nat = get
   one + counted k
 
+ten : Nat
+ten = {}
+
 hundred : Nat
-hundred = {}
+hundred = ten * ten
 
 left : Nat
 left = {}
@@ -290,7 +295,7 @@ threaded = handle held with
 main : Nat
 main = threaded
 ",
-        literal(100),
+        literal(10),
         literal(left),
         literal(right)
     )

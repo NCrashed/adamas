@@ -26,7 +26,9 @@ use criterion::{Criterion, criterion_group, criterion_main};
 /// Программа: `counted n` производит операцию на каждом уровне рекурсии.
 ///
 /// Число пишется умножением: литерал в `n` вложенных `Succ` упирается в предел
-/// вложенности разбора, а произведение - нет.
+/// вложенности разбора, а произведение - нет. С волны 4 Фазы 8 предел равен 64,
+/// и умножений поэтому два: скобка стоит спуску двух входов, то есть подряд их
+/// пишется тридцать две, а не сотня.
 fn source(hundreds: usize) -> String {
     let literal = |count: usize| -> String {
         let mut out = String::new();
@@ -67,19 +69,25 @@ counted (Succ k) =
   let one : Nat = ask
   one + counted k
 
+ten : Nat
+ten = {}
+
 hundred : Nat
-hundred = {}
+hundred = ten * ten
+
+factor : Nat
+factor = {}
 
 deep : {{Ask}} Nat
-deep = counted ({} * hundred)
+deep = counted (hundred * (ten * factor))
 
 main : Nat
 main = handle deep with
   return v -> v
   ask -> resume Zero
 ",
-        literal(100),
-        literal(hundreds)
+        literal(10),
+        literal(hundreds / 10)
     )
 }
 

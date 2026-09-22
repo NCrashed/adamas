@@ -1,0 +1,188 @@
+-- Обёртка над настоящей библиотекой средней сложности: скачать и сверить
+-- (§5.3, §9 «layered wrapping»; milestone Фазы 8).
+--
+-- Библиотека настоящая - `libcurl`, - и приезжает она секцией `[link]`
+-- манифеста корпуса (`tests/golden/eval/adamas.toml`). Тот же список читают все
+-- трое: машина ищет по нему символ `dlopen`'ом, оба понижения получают
+-- `-lcurl`.
+--
+-- Обёртка **слоистая**, и слоёв два отдельными файлами:
+--
+--   * `Curl/Raw.adamas` - чужие символы дословно по `curl/curl.h` и ничего
+--     больше;
+--   * `Curl/Easy.adamas` - идиоматический слой: `CURL *` под `resource`,
+--     магические числа названы, порядок опций спрятан.
+--
+-- Третий файл, `Curl/Local.adamas`, в обёртку **не входит**: это то, чем
+-- фикстура обходится без сети, и стоит он отдельно именно поэтому.
+--
+-- Здесь не написано ни одного `extern`: программа корпуса зовёт обёртку, а не
+-- библиотеку, и это и есть то, что §9 просит показать.
+--
+-- # Сети нет, и это ограничение фикстуры, а не обёртки
+--
+-- Фикстуру `eval/` считают три процесса, два из них параллельно; сетевой
+-- запрос в таком прогоне зависел бы от машины, а не от обёртки. Поэтому схема
+-- `file://`, файл делает фикстура сама, а имя ему выдаёт `mkstemp` - уникальное
+-- в каждом из трёх процессов, так что гонки за общим именем нет вовсе.
+-- Подробности - в шапке `Curl/Local.adamas`.
+--
+-- # Наблюдений семь, и каждое ломается от своей ошибки
+--
+--   * `snprintf` собрала URL длиной **30**: семь знаков `file://` плюс
+--     двадцать три знака пути `mkstemp`. Ошибись длина шаблона - число было бы
+--     другим.
+--   * `curl_easy_perform` ответила `CURLE_OK`. Не найди libcurl файла - был бы
+--     37, и разряд погас бы.
+--   * libcurl говорит, что скачала **35** байт: это ответ `curl_easy_getinfo`
+--     с `CURLINFO_SIZE_DOWNLOAD_T`, написанный чужой стороной в нашу ячейку.
+--   * Скачанное **побайтно равно** написанному. Отдай `fmemopen` буфер, в
+--     который никто не писал, `memcmp` дал бы не ноль.
+--   * Тот же перенос по заведомо отсутствующему пути даёт
+--     `CURLE_FILE_COULDNT_READ_FILE`. Без этого разряда предыдущие были бы
+--     зелены и у обёртки, которая молча отвечает нулём.
+--   * `curl_easy_strerror` даёт **разные** сообщения на 0 и на 37. Самих
+--     сообщений программа не знает - они меняются от версии к версии, - а вот
+--     то, что они разные, от версии не зависит.
+--   * У отказавшего переноса приёмник остался **пустым**: тела не было вовсе.
+--   * `unlink` убрал за собой.
+--
+-- # Чего в обёртке нет, и это названо, а не умолчано
+--
+-- **`CURLOPT_WRITEFUNCTION`.** Тело принимает умолчательный писатель libcurl
+-- (`fwrite`) в `FILE *` над нашим буфером, а не наш колбэк. Причин три, и все
+-- три измерены прогоном; сильнейшая - третья.
+--
+--   1. Объявление у символа одно (§5.3), а `curl_easy_setopt` зовётся тремя
+--      разными списками. Хвост выбран словом, и слово покрывает указатель и
+--      `long`; **адрес нашего определения словом не берётся** - имя экспорта в
+--      позиции `UInt64` даёт «ожидался `UInt64`, получен `(ω _ : UInt64) -> …`».
+--   2. Трамплин машины поддержан одной формой `(UInt64, UInt64) -> Int32`, а
+--      write-колбэк libcurl есть `(char *, size_t, size_t, void *) -> size_t`.
+--   3. Регистрация обязана **пережить** вызов, в котором сделана: ставит её
+--      `curl_easy_setopt`, а зовёт `curl_easy_perform`. §5.3 называет это
+--      **уровнем 3** колбэка, и его нет ни у машины, ни у понижений.
+--
+-- Программа `curl-callback.adamas` стоит рядом и показывает первую из трёх
+-- причин с другой стороны: там тот же символ объявлен с хвостом-колбэком, и
+-- потому URL ему не написать.
+
+import Curl.Raw (Unit, MkUnit, Foreign)
+
+import Curl.Easy
+  ( Fetched
+  , curlOk
+  , curlNoFile
+  , wordOk
+  , wordNoFile
+  , statusOf
+  , downloaded
+  , describe
+  )
+
+import Curl.Local
+  ( Written
+  , makeLocal
+  , writeLocal
+  , removeLocal
+  , localUrl
+  , received
+  , sameBytes
+  )
+
+-- `Bool` объявлен **здесь**, а не в слое: сравнение отвечает им по
+-- неквалифицированному имени, а объявления подключаемого файла квалифицированы
+-- (та же причина, что у `zlib.adamas`).
+data Bool where
+  True : Bool
+  False : Bool
+
+pick : Bool -> UInt64 -> UInt64 -> UInt64
+pick True yes no = yes
+pick False yes no = no
+
+-- Литерал в ячейке `arrayNew` умолчания типа не читает и уезжает в `Nat`;
+-- именованная константа его прижимает - тот же приём, что в `extern-buffer`.
+blank : UInt8
+blank = 0
+
+nowhere : UInt64
+nowhere = 0
+
+unmeasured : Int32
+unmeasured = 0
+
+room : UInt64
+room = 64
+
+-- Тридцать пять букв; тридцать шестая - завершающий ноль, и его `fputs` не
+-- пишет.
+payloadLength : UInt64
+payloadLength = 35
+
+-- Семь знаков `file://` плюс двадцать три знака пути.
+printedLength : Int32
+printedLength = 30
+
+-- Ответ `memcmp` у равных буферов.
+alike : Int32
+alike = 0
+
+-- Ответ `unlink` при успехе.
+removed : Int32
+removed = 0
+
+payload : Array 36 UInt8
+payload = "abracadabra abracadabra abracadabra"
+
+scheme : Array 10 UInt8
+scheme = "file://%s"
+
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  -- Шаблон стоит локальным: `mkstemp` переписывает его на месте.
+  let template : Array 24 UInt8 = "/tmp/adamas-curl-XXXXXX"
+  let made : Int32 = makeLocal template
+  let wrote : Written = writeLocal template payload
+  let url : Array 64 UInt8 = arrayNew 64 blank
+  let printed : Int32 = localUrl url room scheme template
+  let sink : Array 64 UInt8 = arrayNew 64 blank
+  let cell : Array 1 UInt64 = arrayNew 1 nowhere
+  let stub : Array 1 Int32 = arrayNew 1 unmeasured
+  let got : Fetched = received sink room url stub cell
+  let size : UInt64 = downloaded cell
+  -- Приёмник назван **после** переноса: адрес его уехал в `fmemopen` и
+  -- переживает вызов, а Perceus дропает значение, отданное последним
+  -- упоминанием (см. шапку `Curl/Local.adamas`).
+  let matched : Int32 = sameBytes sink payload payloadLength
+  -- Тот же путь по заведомо отсутствующему файлу.
+  let missing : Array 31 UInt8 = "file:///adamas-no-such-file-42"
+  let absent : Array 64 UInt8 = arrayNew 64 blank
+  let denied : Fetched = received absent room missing stub cell
+  -- И этот приёмник назван после переноса, и заодно наблюдается: у отказавшего
+  -- переноса тела нет вовсе.
+  let head : UInt8 = arrayIndex absent 0
+  let swept : Int32 = removeLocal template
+  let addressed : UInt64 = pick (eqInt32 printed printedLength) 1 0
+  let fetched : UInt64 = pick (eqInt32 (statusOf got) curlOk) 1 0
+  let counted : UInt64 = pick (eqUInt64 size payloadLength) 1 0
+  let byteWise : UInt64 = pick (eqInt32 matched alike) 1 0
+  let refused : UInt64 = pick (eqInt32 (statusOf denied) curlNoFile) 1 0
+  let empty : UInt64 = pick (eqUInt8 head blank) 1 0
+  let named : UInt64 = pick (eqUInt64 (describe wordOk) (describe wordNoFile)) 0 1
+  let tidied : UInt64 = pick (eqInt32 swept removed) 1 0
+  addUInt64 addressed
+    (addUInt64 (mulUInt64 fetched 10)
+      (addUInt64 (mulUInt64 counted 100)
+        (addUInt64 (mulUInt64 byteWise 1000)
+          (addUInt64 (mulUInt64 refused 10000)
+            (addUInt64 (mulUInt64 empty 100000)
+              (addUInt64 (mulUInt64 named 1000000) (mulUInt64 tidied 10000000)))))))
+
+-- 1111111.
+main : UInt64
+main = runForeign body

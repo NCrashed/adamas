@@ -1,0 +1,170 @@
+-- Идиоматический слой над easy-интерфейсом libcurl (§5.3, §9 «layered
+-- wrapping»).
+--
+-- Слой над `Curl/Raw.adamas`. В сыром слое нет ни одного решения - там
+-- `curl/curl.h` дословно; здесь всё, что автору программы иначе пришлось бы
+-- знать про библиотеку наизусть.
+--
+--   * **Магические числа названы.** `CURLOPT_URL` есть 10002, `CURLOPT_TIMEOUT`
+--     есть 13, `CURLOPT_WRITEDATA` есть 10001, `CURLINFO_SIZE_DOWNLOAD_T` есть
+--     6291464 (`CURLINFO_OFF_T + 8`), `CURLE_OK` есть 0,
+--     `CURLE_FILE_COULDNT_READ_FILE` есть 37. В программе корпуса ни одного из
+--     них не написано числом.
+--   * **Хендл закрывается сам.** `CURL *` живёт под `resource` (§3.3):
+--     `curl_easy_cleanup` стоит на **обоих** выходах из области, и забыть его
+--     нельзя - обёртка линейна.
+--   * **Порядок опций спрятан.** `fetch` ставит три опции и зовёт `perform` в
+--     том порядке, в каком это делает всякая программа на libcurl; автору
+--     остаётся сказать, что скачать и куда положить.
+--
+-- Три границы, и все три названы прогоном, а не оговоркой.
+--
+-- **URL уезжает копией, которой владеет libcurl, и это не украшение.**
+-- `curl_easy_setopt` объявлена одним вариадическим хвостом на все опции (см.
+-- шапку `Curl/Raw.adamas`), и хвост этот - слово; значит опция-строка едет
+-- **адресом**. А заём §4.11 обещает адрес нашего буфера только **на время
+-- вызова**: `curl_easy_setopt` читает строку уже после того, как заём кончился,
+-- и между ними успевает взять памяти `curl_easy_init`. Мерилось это обеими
+-- дорогами, и обе роняли не вызов, а **ответ**: `curl_easy_perform` отдавал 3
+-- (`CURLE_URL_MALFORMAT`) там, где настоящий ответ - 0 либо 37. У машины так
+-- вело себя имя верхнего уровня, у понижения C - и локальное связывание, чьё
+-- последнее упоминание пришлось на взятие адреса.
+--
+-- Поэтому адрес берётся **не у нас**: `curl_easy_unescape` отдаёт копию, память
+-- которой принадлежит libcurl, а `curl_free` её возвращает. Наш буфер при этом
+-- читается **внутри** вызова, то есть ровно так, как заём и обещает, а срок
+-- жизни адреса, уехавшего в опцию, держит `resource Text` - до конца `fetch`.
+-- Процентных последовательностей в наших URL нет, и декодирование их не меняет;
+-- своей `strdup`-подобной формы у easy-интерфейса нет вовсе.
+--
+-- **Тело принимает не колбэк, а `FILE *`.** `CURLOPT_WRITEFUNCTION` этой
+-- обёрткой не ставится, и причин тому три, из которых сильны две последние:
+-- хвост у `curl_easy_setopt` один (выше); трамплин машины поддержан одной
+-- формой `(UInt64, UInt64) -> Int32`, а write-колбэк libcurl есть
+-- `(char *, size_t, size_t, void *) -> size_t`; и главное - регистрация
+-- `CURLOPT_WRITEFUNCTION` обязана **пережить** вызов, в котором сделана
+-- (ставит её `curl_easy_setopt`, зовёт `curl_easy_perform`), а §5.3 называет
+-- это **уровнем 3** колбэка, которого нет ни у машины, ни у понижений.
+-- Поэтому тело идёт умолчательным писателем libcurl (`fwrite`) в `FILE *`,
+-- который фикстура заводит над **своим** буфером.
+--
+-- **Статус не превращается здесь в тип языка.** Назвать `0` успехом можно
+-- сравнением, и после трека A волны 4 это в подключаемом модуле пишется - но
+-- `Bool` слою пришлось бы откуда-то подключить, а он сознательно зависит от
+-- одного `Curl.Raw`. Классификация остаётся вызывающему, как и у `Zlib/Bytes`.
+
+import Curl.Raw
+  ( Unit
+  , MkUnit
+  , Foreign
+  , curl_easy_init
+  , curl_easy_setopt
+  , curl_easy_perform
+  , curl_easy_getinfo
+  , curl_easy_cleanup
+  , curl_easy_strerror
+  , curl_easy_unescape
+  , curl_free
+  )
+
+-- `CURLE_OK`: единственный код, который libcurl зовёт успехом.
+curlOk : Int32
+curlOk = 0
+
+-- `CURLE_FILE_COULDNT_READ_FILE`: `file://` указывает в никуда. Самая частая
+-- беда того, кто собрал путь руками.
+curlNoFile : Int32
+curlNoFile = 37
+
+-- Те же два кода **словом**, и вторая пара здесь не по небрежности:
+-- `curl_easy_strerror` принимает `CURLcode` аргументом, а в позиции аргумента
+-- сишный `int` объявляется словом (§10 вопрос 183), тогда как статус в ответе
+-- обязан быть `Int32`. Перевести одно в другое нечем - конверсий ширины в языке
+-- нет ни одной (§4.3), - поэтому число названо дважды.
+wordOk : UInt64
+wordOk = 0
+
+-- См. [`wordOk`].
+wordNoFile : UInt64
+wordNoFile = 37
+
+-- `CURLOPT_URL` = `CURLOPTTYPE_STRINGPOINT + 2`.
+optUrl : UInt64
+optUrl = 10002
+
+-- `CURLOPT_TIMEOUT` = `CURLOPTTYPE_LONG + 13`, секунды.
+optTimeout : UInt64
+optTimeout = 13
+
+-- `CURLOPT_WRITEDATA` = `CURLOPTTYPE_CBPOINT + 1`. Без своего
+-- `CURLOPT_WRITEFUNCTION` умолчательным писателем служит `fwrite`, и слот этот
+-- обязан нести `FILE *`.
+optSink : UInt64
+optSink = 10001
+
+-- `CURLINFO_SIZE_DOWNLOAD_T` = `CURLINFO_OFF_T + 8`.
+infoDownloaded : UInt64
+infoDownloaded = 6291464
+
+-- Сколько ждать: настоящая обёртка ставит это всегда, и число здесь названо,
+-- чтобы программа его не писала.
+patience : UInt64
+patience = 10
+
+-- Чужой объект под деструктором. Разбирается он ровно в одном месте - в
+-- деструкторе, - и поле у него линейное: `curl_easy_cleanup` хендл потребляет.
+resource Easy where
+  Opened : CPtr -> Easy
+  closeEasy : (1 easy : Easy) -> {Foreign} Unit
+  closeEasy (Opened curl) = curl_easy_cleanup curl
+
+-- Второй чужой объект под деструктором, и он другого рода: не хендл, а
+-- **память**, которую libcurl выдал и ждёт обратно.
+resource Text where
+  Held : CPtr -> Text
+  freeText : (1 text : Text) -> {Foreign} Unit
+  freeText (Held p) = curl_free p
+
+-- Чем кончился перенос. **Бокс, а не плоский `Int32`**: функция с деструктором
+-- ресурса и плоским ответом не понижается - «операция в функции с плоским
+-- ответом: обрыв вернуть нечем (§4.11)» у C и «ответ дроблёного тела - плоское
+-- `Int32`» у LLVM (трек D волны 2). Деструктор §3.3 дробит тело точкой
+-- приостановки, а обрыв через плоский ответ не проходит.
+data Fetched where
+  Code : Int32 -> Fetched
+
+-- Скачать по адресу из `url` в приёмник `file` и записать длину тела в `cell`.
+--
+-- Хендл и копия URL закрываются на обоих выходах из этой области - за это
+-- отвечают `easy` и `text`, и больше они не нужны ни для чего. Ответ - код
+-- `curl_easy_perform`.
+--
+-- `file` - адрес `FILE *`; откуда он берётся, слой не решает (см. шапку).
+-- `stub` - ячейка под длину, которую `curl_easy_unescape` обязана куда-то
+-- написать; нам она не нужна ни для чего.
+fetch :
+  (ω url : Array n UInt8) -> (ω stub : Array 1 Int32) -> (ω file : CPtr) ->
+  (ω cell : Array 1 UInt64) -> {Foreign} Fetched
+fetch url stub file cell =
+  let curl : CPtr = curl_easy_init
+  let 1 easy : Easy = Opened curl
+  let copied : CPtr = curl_easy_unescape curl url 0 stub
+  let 1 text : Text = Held copied
+  let addressed : Int32 = curl_easy_setopt curl optUrl copied
+  let patient : Int32 = curl_easy_setopt curl optTimeout patience
+  let sinking : Int32 = curl_easy_setopt curl optSink file
+  let ran : Int32 = curl_easy_perform curl
+  let sized : Int32 = curl_easy_getinfo curl infoDownloaded cell
+  Code ran
+
+-- Код переноса из-под бокса.
+statusOf : Fetched -> Int32
+statusOf (Code status) = status
+
+-- Длина тела, написанная чужой стороной в нашу ячейку, именем, а не номером.
+downloaded : (ω cell : Array 1 UInt64) -> UInt64
+downloaded cell = arrayIndex cell 0
+
+-- Сообщение кода ошибки: чужая строка, и указатель на неё у каждого кода свой.
+describe : UInt64 -> {Foreign} CPtr
+describe code = curl_easy_strerror code

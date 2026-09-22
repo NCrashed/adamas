@@ -24,4 +24,4 @@ root = "."
 entry = "Corpus"
 
 [link]
-libraries = ["z"]
+libraries = ["z", "curl"]

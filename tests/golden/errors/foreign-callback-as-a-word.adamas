@@ -1,0 +1,51 @@
+-- Имя экспортированного определения в позиции слова (§5.3).
+--
+-- Адрес нашего кода уровень 1 отдаёт чужой стороне **только** там, где
+-- объявленный тип позиции сам есть функциональный: тогда элаборация кладёт туда
+-- `Cross::Callback`, а понижение и машина печатают адрес. Формы «взять адрес
+-- определения» как выражения в языке нет ни одной, и оттого в позиции `UInt64`
+-- имя экспорта есть обычное несовпадение типов.
+--
+-- Отказ этот и есть то, обо что упирается обёртка над `libcurl` (milestone
+-- Фазы 8, `eval/curl.adamas`). `curl_easy_setopt(CURL *, CURLoption, ...)`
+-- зовётся тремя разными списками - указателем, `long`'ом и адресом функции, - а
+-- объявление у символа одно (§5.3): имя объявления и есть имя символа. Хвост
+-- поэтому приходится выбрать, и слово покрывает два списка из трёх; третий,
+-- `CURLOPT_WRITEFUNCTION`, не пишется вовсе. Объяви хвост колбэком - и не
+-- напишется `CURLOPT_URL`, то есть перенос не начнётся.
+--
+-- Обходного пути в пределах уровня 1 нет: SysV кладёт указатель, `long` и адрес
+-- функции в один класс регистров, и в этом смысле хвост-слово верен - но
+-- **значения** нужного типа языком не получить.
+
+data Unit where
+  MkUnit : Unit
+
+effect Foreign
+
+extern "C" fn curl_easy_setopt : CPtr -> UInt64 -> ... -> UInt64 -> Int32
+
+extern "C" fn curl_easy_init : CPtr
+
+-- `size_t write(char *ptr, size_t size, size_t nmemb, void *userdata)` -
+-- write-колбэк libcurl дословно.
+writeBody : CPtr -> UInt64 -> UInt64 -> CPtr -> {Foreign} UInt64
+writeBody ptr size nmemb sink = mulUInt64 size nmemb
+
+export "C" fn writeBody
+
+optWriteFunction : UInt64
+optWriteFunction = 20011
+
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let curl : CPtr = curl_easy_init
+  let set : Int32 = curl_easy_setopt curl optWriteFunction writeBody
+  curl
+
+main : UInt64
+main = runForeign body

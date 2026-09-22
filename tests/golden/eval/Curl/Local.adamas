@@ -1,0 +1,132 @@
+-- Чем фикстура корпуса обходится **без сети** (§5.3, §9).
+--
+-- Это не часть обёртки над libcurl. Обёртка - `Curl/Raw.adamas` и
+-- `Curl/Easy.adamas`, и там нет ни одного символа чужой библиотеки, кроме
+-- libcurl. Здесь - POSIX, и здесь он потому, что программу корпуса считают
+-- **три процесса, два из них параллельно**, и сетевой запрос в таком прогоне
+-- недопустим: он зависел бы от машины, на которой идёт CI, а не от обёртки.
+--
+-- Отсюда две вещи, и обе - ограничения **фикстуры**, а не обёртки.
+--
+-- 1. **Источник тела - местный файл, и делает его фикстура сама.** Схема
+--    `file://` у libcurl настоящая (`curl_version_info` называет её первой
+--    после `dict`), а `data:` libcurl не поддерживает вовсе - измерено, пробой
+--    на C: `curl_easy_perform` отвечает `CURLE_URL_MALFORMAT`. Имя файла
+--    выдаёт `mkstemp`, и потому оно **уникально в каждом процессе**: имя, общее
+--    на троих, дало бы гонку за файлом - ровно ту, из-за которой поток gzip
+--    волны 2 лежит вне `eval/`.
+-- 2. **Приёмник тела - `FILE *` над нашим же буфером.** `fmemopen` есть
+--    POSIX.1-2008, и он даёт умолчательному писателю libcurl (`fwrite`) наш
+--    `Array n UInt8` вместо файла на диске. Своего колбэка на запись обёртка не
+--    ставит, и почему - сказано в шапке `Curl/Easy.adamas`.
+--
+-- **Названная граница, которой не было у zlib: адрес нашего буфера переживает
+-- вызов.** Заём §4.11 одалживает адрес нагрузки **на время вызова**, а
+-- `fmemopen` его запоминает и пишет по нему уже из `curl_easy_perform`.
+-- Держится это **только** тем, что блок принадлежит живому связыванию, и
+-- условие тут жёстче, чем кажется: вызывающий обязан назвать приёмник ещё раз
+-- **после** переноса, иначе Perceus отдаёт его вызову перемещением, а тот
+-- дропает его на последнем своём упоминании - то есть до того, как чужая
+-- сторона напишет. Измерено обеими дорогами на URL (см. шапку
+-- `Curl/Easy.adamas`), и потому оба приёмника в `curl.adamas` названы после
+-- переноса. Формы «одолжить на дольше, чем вызов» у уровня 1 нет ни одной.
+
+import Curl.Raw (Unit, MkUnit, Foreign)
+
+import Curl.Easy (Fetched, fetch)
+
+-- `int mkstemp(char *template)`. Переписывает шесть последних `X` на месте.
+extern "C" fn mkstemp : Array n UInt8 -> Int32
+
+-- `FILE *fopen(const char *path, const char *mode)`.
+extern "C" fn fopen : Array n UInt8 -> Array m UInt8 -> CPtr
+
+-- `FILE *fmemopen(void *buf, size_t size, const char *mode)`.
+extern "C" fn fmemopen : Array n UInt8 -> UInt64 -> Array m UInt8 -> CPtr
+
+-- `int fputs(const char *s, FILE *stream)`. Пишет до завершающего нуля.
+extern "C" fn fputs : Array n UInt8 -> CPtr -> Int32
+
+-- `int fclose(FILE *stream)`. Кратность написана по той же причине, что у
+-- `curl_easy_cleanup`: поток потребляется.
+extern "C" fn fclose : (1 stream : CPtr) -> Int32
+
+-- `int snprintf(char *s, size_t n, const char *fmt, ...)`. Вариадический хвост
+-- здесь **буфер**: `%s` берёт наш путь. Склейки массивов в языке нет ни одной,
+-- и `file://` к пути иначе не приписать.
+extern "C" fn snprintf
+  : Array n UInt8 -> UInt64 -> Array m UInt8 -> ... -> Array k UInt8 -> Int32
+
+-- `int unlink(const char *path)`.
+extern "C" fn unlink : Array n UInt8 -> Int32
+
+-- `int memcmp(const void *a, const void *b, size_t n)`.
+extern "C" fn memcmp : Array n UInt8 -> Array m UInt8 -> UInt64 -> Int32
+
+-- `"w"`: и для файла на диске, и для приёмника в памяти.
+writably : Array 2 UInt8
+writably = "w"
+
+-- Поток под деструктором: `fclose` стоит на **обоих** выходах из области, а у
+-- приёмника в памяти закрытие есть ещё и сброс буфера - до него в нашем
+-- массиве может не лежать ничего.
+resource Stream where
+  Attached : CPtr -> Stream
+  closeStream : (1 stream : Stream) -> {Foreign} Unit
+  closeStream (Attached file) =
+    let 1 code : Int32 = fclose file
+    MkUnit
+
+-- Чем кончилась запись. Бокс по той же причине, что `Fetched`: функция с
+-- деструктором ресурса и плоским ответом не понижается (трек D волны 2).
+data Written where
+  Wrote : Int32 -> Written
+
+-- Завести местный файл с уникальным именем: `mkstemp` переписывает `template`
+-- на месте, и после вызова в нём лежит настоящий путь.
+makeLocal : (ω template : Array n UInt8) -> {Foreign} Int32
+makeLocal template = mkstemp template
+
+-- Положить в него текст. Файл закрывается на обоих выходах из этой области.
+writeLocal : (ω path : Array n UInt8) -> (ω bytes : Array m UInt8) -> {Foreign} Written
+writeLocal path bytes =
+  let file : CPtr = fopen path writably
+  let 1 held : Stream = Attached file
+  Wrote (fputs bytes file)
+
+-- Убрать за собой.
+removeLocal : (ω path : Array n UInt8) -> {Foreign} Int32
+removeLocal path = unlink path
+
+-- Собрать `file://` плюс путь. Ответ - длина написанного, как у C.
+localUrl :
+  (ω url : Array n UInt8) -> UInt64 -> (ω scheme : Array m UInt8) ->
+  (ω path : Array k UInt8) -> {Foreign} Int32
+localUrl url room scheme path = snprintf url room scheme path
+
+-- Скачать в память. Приёмник открывается над нашим буфером и закрывается на
+-- обоих выходах из **этой** области - то есть раньше, чем вызывающий прочтёт
+-- буфер, и в этом весь смысл вложенности.
+--
+-- **URL принимается буфером, и буфер этот обязан быть локальным связыванием.**
+-- Заём §4.11 обещает адрес **на время вызова**, а здесь он живёт дольше:
+-- `addressOf` кончается, потом `curl_easy_init` берёт памяти под хендл, и
+-- только потом `curl_easy_setopt` читает строку. Держится это тем, что блок
+-- принадлежит живому связыванию, - и ровно поэтому **констант верхнего уровня
+-- сюда передавать нельзя**: имя верхнего уровня даёт временный массив, заём
+-- кончается вместе с ним, и `curl_easy_setopt` читает переиспользованную
+-- память. Измерено: тот же литерал константой верхнего уровня даёт
+-- `CURLE_URL_MALFORMAT` (3), локальным связыванием - настоящие 37. Не падение,
+-- не мусор, а **правдоподобный код**.
+received :
+  (ω sink : Array n UInt8) -> UInt64 -> (ω url : Array m UInt8) ->
+  (ω stub : Array 1 Int32) -> (ω cell : Array 1 UInt64) -> {Foreign} Fetched
+received sink room url stub cell =
+  let file : CPtr = fmemopen sink room writably
+  let 1 held : Stream = Attached file
+  fetch url stub file cell
+
+-- Равны ли первые `count` байт двух наших буферов: 0 - равны.
+sameBytes :
+  (ω left : Array n UInt8) -> (ω right : Array m UInt8) -> UInt64 -> {Foreign} Int32
+sameBytes left right count = memcmp left right count

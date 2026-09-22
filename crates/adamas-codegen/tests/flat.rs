@@ -632,6 +632,56 @@ main = handle held with
     let _ = allocated("операция-значением-с-плоским-ответом", SOURCE);
 }
 
+/// Операция **круга** (§5.2) плоский ответ по-прежнему не отдаёт.
+///
+/// Разворот ответа держится на том, что обёртку положил `resume`. За ответом
+/// файбера `resume` не стоит: его кладёт завершение задачи, и там лежит само
+/// значение. Разверни понижение и его - разбор прочёл бы за тег чужие биты, и
+/// это не догадка: с этим мутантом программа ниже собирается и **обрывается**
+/// на прогоне («разбор не знает конструктора», сигнал 6).
+///
+/// Отказ поэтому остаётся, и остаётся названным.
+#[test]
+fn a_fiber_operation_still_needs_a_pointer_answer() {
+    let error = harness::compiled(
+        "\
+data Unit where
+  MkUnit : Unit
+
+data Sum where
+  MkSum : Int64 -> Sum
+
+data Task where
+  MkTask : Sum -> Task
+
+effect Async where
+  suspend : Unit
+  spawn : ({Async} Sum) -> Task
+  await : (1 t : Task) -> Int64
+
+withNursery : ({Async} Sum) -> Sum
+
+work : {Async} Sum
+work = MkSum 7
+
+two : {Async} Sum
+two =
+  let t1 : Task = spawn work
+  let a1 : Int64 = await t1
+  MkSum (addInt64 a1 1)
+
+main : Sum
+main = withNursery two
+",
+    )
+    .expect_err("плоский ответ операции круга не понижается");
+    let text = error.to_string();
+    assert!(
+        text.contains("ответ операции") && text.contains("плоское `Int64`"),
+        "отказ назван иначе: {text}"
+    );
+}
+
 /// Плоский **ответ** через границу вызова: имя значением (§10 вопрос 158).
 ///
 /// Третья половина решения 158, и до этого трека её не было: аргумент боксирует

@@ -14,6 +14,7 @@ data Unit where
 
 effect Foreign
 
+@trusted
 extern "C" fn adamas_probe_mix : UInt64 -> UInt64 -> UInt64
 
 main : UInt64

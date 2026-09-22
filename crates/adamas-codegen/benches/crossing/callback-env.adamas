@@ -18,8 +18,10 @@ effect Foreign
 
 callbackEnv : CPtr
 
+@trusted
 extern "C" fn adamas_bench_calls : UInt64
 
+@trusted
 extern "C" fn adamas_bench_carried : UInt64 -> (UInt64 -> UInt64) -> CPtr -> UInt64
 
 one : UInt64

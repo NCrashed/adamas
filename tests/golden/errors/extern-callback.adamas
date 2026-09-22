@@ -19,6 +19,7 @@ data Nat where
 
 effect Foreign
 
+@trusted
 extern "C" fn adamas_probe_apply : (Nat -> Nat) -> Nat
 
 main : Nat

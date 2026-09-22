@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: trusted-off-the-boundary.adamas:11:2: атрибут `@trusted` не проверяется: здесь проверять нечего - он пишется только при `extern`, где сигнатуру не сверяет никто (§5.3)
+  @trusted
+   ^^^^^^^

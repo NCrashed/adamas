@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: extern-untrusted.adamas:13:1: `extern` объявляет то, чего компилятор не проверяет: сигнатуру чужого символа не несёт ни библиотека, ни `dlsym` (§5.3). Напишите `@trusted` строкой выше
+  extern "C" fn adamas_probe_mix : UInt64 -> UInt64 -> UInt64
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

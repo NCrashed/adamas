@@ -18,6 +18,7 @@ data Option (a : Type) where
 
 effect Foreign
 
+@trusted
 extern "C" fn adamas_probe_sum : Array n (Option UInt64) -> UInt64 -> UInt64
 
 main : Unit

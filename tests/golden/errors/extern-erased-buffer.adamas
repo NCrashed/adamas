@@ -17,6 +17,7 @@ data Unit where
 
 effect Foreign
 
+@trusted
 extern "C" fn adamas_probe_fill : (0 xs : Array 8 UInt8) -> UInt64 -> Unit
 
 main : Unit

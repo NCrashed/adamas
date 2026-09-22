@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: variadic-in-the-answer.adamas:12:1: `...` стоит в позиции ответа: вариадическая часть есть хвост списка аргументов, и отвечать ею нечем (§5.3)
+  extern "C" fn snprintf : Array n UInt8 -> UInt64 -> ...
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

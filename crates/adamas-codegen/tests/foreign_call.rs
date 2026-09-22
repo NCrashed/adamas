@@ -204,6 +204,87 @@ fn the_generated_c_crosses_the_boundary_six_times() {
     );
 }
 
+/// Форма вариадического прототипа и вариадического вызова у обоих понижений
+/// (§5.3, трек B волны 5).
+///
+/// Здесь только **текст**, без сборки и без линковки: до ответа те же две
+/// программы доходят в корпусе (`agreement.rs` и `llvm.rs`, обе в `TAKEN`), и
+/// третий полный прогон ничего бы к этому не прибавил. Чего корпусной прогон
+/// не говорит - это **где** стоит граница поимённой части. Ответ у `snprintf`
+/// сошёлся бы и при неверном её месте, если бы `al` случайно совпал; здесь
+/// место названо прямо, обоими путями.
+#[test]
+fn both_lowerings_print_the_variadic_form() {
+    let source = varargs_source();
+    let text = harness::text(&source).expect("понижение обязано взять вариадический вызов");
+    assert!(
+        text.contains(
+            "extern int32_t adamas_foreign_snprintf(uint64_t, uint64_t, uint64_t, ...) \
+             __asm__(\"snprintf\");"
+        ),
+        "C напечатал прототип `snprintf` не вариадическим:\n{text}"
+    );
+    assert!(
+        text.contains(
+            "extern int32_t adamas_foreign_sscanf(uint64_t, uint64_t, ...) __asm__(\"sscanf\");"
+        ),
+        "C напечатал прототип `sscanf` не с двумя поимёнными параметрами:\n{text}"
+    );
+
+    let artefacts = harness::llvm_text("varargs", &source)
+        .expect("понижение обязано взять вариадический вызов");
+    let ir = &artefacts.ll;
+    assert!(
+        ir.contains("declare i32 @snprintf(i64, i64, i64, ...)"),
+        ".ll объявил `snprintf` не вариадическим:\n{ir}"
+    );
+    assert!(
+        ir.contains("declare i32 @sscanf(i64, i64, ...)"),
+        ".ll объявил `sscanf` не с двумя поимёнными параметрами:\n{ir}"
+    );
+    // Тип функции при вызове - требование синтаксиса `.ll` и условие `al`: по
+    // списку фактических аргументов вариадический вызов от обычного не
+    // отличить.
+    assert!(
+        ir.contains("call i32 (i64, i64, i64, ...) @snprintf("),
+        ".ll позвал `snprintf` без типа функции:\n{ir}"
+    );
+    assert!(
+        ir.contains("call i32 (i64, i64, ...) @sscanf("),
+        ".ll позвал `sscanf` без типа функции:\n{ir}"
+    );
+}
+
+/// Невариадический символ вариадическим не печатается - ни у одного из двух.
+///
+/// Вторая половина свидетеля выше, и без неё правка «печатать `...` всегда»
+/// прошла бы молча: вызов невариадической функции через вариадический прототип
+/// - то же неопределённое поведение `SysV`, что и обратный ему.
+#[test]
+fn an_ordinary_foreign_symbol_stays_ordinary() {
+    let source = source();
+    let text = harness::text(&source).expect("понижение обязано взять чужой вызов");
+    assert!(
+        !text.contains(", ...)") && !text.contains("(...)"),
+        "C напечатал `...` у невариадического символа:\n{text}"
+    );
+    let artefacts =
+        harness::llvm_text("ordinary", &source).expect("понижение обязано взять чужой вызов");
+    assert!(
+        !artefacts.ll.contains("..."),
+        ".ll напечатал `...` у невариадического символа:\n{}",
+        artefacts.ll
+    );
+}
+
+/// Вариадическая программа корпуса.
+fn varargs_source() -> String {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/eval/extern-varargs.adamas");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|why| panic!("фикстуры {} нет: {why}", path.display()))
+}
+
 /// Текст чужой стороны: он же собирается отдельным объектником для C-пути.
 fn shim() -> String {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shim/probe.c");

@@ -1,0 +1,125 @@
+-- Вариадическая чужая функция, и считают её **все три** вычислителя (§5.3).
+--
+-- `snprintf` и `sscanf` - настоящие символы стандартной библиотеки C, оба
+-- вариадические, и берутся они не ради разнообразия: у них **разное** число
+-- поимённых параметров (три против двух), то есть `...` стоит в двух разных
+-- местах, и место это наблюдается ответом.
+--
+-- `printf` не взят намеренно: он пишет в поток, а корпус `eval/` идёт тремя
+-- процессами, два из них параллельно. `snprintf` пишет в **наш** буфер, и
+-- прочитать написанное можно обычным `arrayIndex`.
+--
+-- Наблюдений четыре, и ни одно не подделывается счётом.
+--
+--   * `snprintf` ответила **шестью**: столько знаков у 424242. Ошибись
+--     вариадический аргумент - число знаков было бы другим.
+--   * Первый байт буфера есть `'4'`. То есть чужая сторона написала в нашу
+--     память, а не куда-то ещё.
+--   * `sscanf` ответила **единицей**: одно присваивание. Здесь `...` стоит
+--     после второго параметра, а не после третьего, и спутай мы места -
+--     форматом стал бы разбираемый текст.
+--   * Разобранное число **равно** написанному, и приезжает оно в ответ
+--     значением, а не разрядом: подделать его нечем.
+--
+-- Почему `%lu`, а не `%d`. Через границу едет слово (§5.3), а `int` у вызова
+-- пришлось бы объявить `Int32`; в вариадической части такой аргумент законен -
+-- продвижения `int` не требует, - но ответ `sscanf` пришлось бы читать в
+-- `Array 1 Int32`, и сравнивать его с написанным `UInt64` стало бы нечем:
+-- конверсий ширины в языке нет ни одной (§4.3).
+--
+-- Что **не** пишется, и это названная граница, а не упущение. Объявление у
+-- символа одно: имя объявления и есть имя символа, поэтому позвать `snprintf`
+-- в одной программе двумя разными списками аргументов нельзя - второе
+-- объявление заняло бы то же имя. Форма с плавающим аргументом поэтому лежит
+-- отдельной программой (`extern-varargs-float`).
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  True : Bool
+  False : Bool
+
+pick : Bool -> UInt64 -> UInt64 -> UInt64
+pick True yes no = yes
+pick False yes no = no
+
+effect Foreign
+
+-- `int snprintf(char *s, size_t n, const char *fmt, ...)`. Поимённых
+-- параметров три, и `...` стоит ровно за ними.
+extern "C" fn snprintf : Array n UInt8 -> UInt64 -> Array m UInt8 -> ... -> UInt64 -> Int32
+
+-- `int sscanf(const char *s, const char *fmt, ...)`. Поимённых параметров
+-- **два**: разбираемый текст и формат. Вариадический аргумент - адрес ячейки,
+-- куда `%lu` кладёт разобранное.
+extern "C" fn sscanf : Array n UInt8 -> Array m UInt8 -> ... -> Array k UInt64 -> Int32
+
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+-- Литерал в ячейке `arrayNew` умолчания типа не читает и уезжает в `Nat`;
+-- именованная константа его прижимает - тот же приём, что в `extern-buffer`.
+blank : UInt8
+blank = 0
+
+-- `"%lu"`: процент, `l`, `u`, завершающий ноль.
+percent : UInt8
+percent = 37
+
+longly : UInt8
+longly = 108
+
+unsignedly : UInt8
+unsignedly = 117
+
+-- Что пишем и что обязаны прочитать обратно.
+number : UInt64
+number = 424242
+
+-- `'4'` - первый знак десятичной записи 424242.
+four : UInt8
+four = 52
+
+room : UInt64
+room = 16
+
+empty : UInt64
+empty = 0
+
+wrote : Int32
+wrote = 6
+
+parsed : Int32
+parsed = 1
+
+format : Array 4 UInt8
+format =
+  let zeroed : Array 4 UInt8 = arrayNew 4 blank
+  let first : Array 4 UInt8 = arraySet zeroed 0 percent
+  let second : Array 4 UInt8 = arraySet first 1 longly
+  arraySet second 2 unsignedly
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let text : Array 16 UInt8 = arrayNew 16 blank
+  -- Вариадический аргумент один, и едет он целым регистром: `al` равен нулю.
+  let written : Int32 = snprintf text room format number
+  let head : UInt8 = arrayIndex text 0
+  -- Тот же формат читает обратно, и вариадический аргумент здесь - **адрес**
+  -- нашей ячейки.
+  let cell : Array 1 UInt64 = arrayNew 1 empty
+  let assigned : Int32 = sscanf text format cell
+  let back : UInt64 = arrayIndex cell 0
+  let sized : UInt64 = pick (eqInt32 written wrote) 1 0
+  let inplace : UInt64 = pick (eqUInt8 head four) 1 0
+  let counted : UInt64 = pick (eqInt32 assigned parsed) 1 0
+  -- 111 × 10⁶ плюс разобранное число.
+  addUInt64 back
+    (mulUInt64
+      (addUInt64 sized (addUInt64 (mulUInt64 inplace 10) (mulUInt64 counted 100)))
+      1000000)
+
+main : UInt64
+main = runForeign body

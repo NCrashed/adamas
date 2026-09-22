@@ -1,0 +1,109 @@
+-- Плавающий аргумент в вариадической части - **единственное** место, где
+-- вариадический ABI наблюдаемо отличается от обычного (§5.3).
+--
+-- `SysV` AMD64 требует, чтобы вызывающий положил в `al` число использованных
+-- векторных регистров, и вариадическая функция этим числом решает, спасать ли
+-- восемь регистров `xmm` в область сохранения. Целый аргумент оставляет `al`
+-- нулём, и разница между вариадическим прототипом и обычным там не видна.
+-- Плавающий делает `al` единицей: позови мы `snprintf` обычным прототипом,
+-- регистры не спаслись бы, и `va_arg` прочёл бы незаполненную область.
+--
+-- Отсюда и отдельная программа. Объявление у символа одно - имя объявления и
+-- есть имя символа, - поэтому целую форму и плавающую в одной программе не
+-- написать: второе объявление `snprintf` заняло бы то же имя. Целая форма
+-- лежит рядом (`extern-varargs`).
+--
+-- Наблюдений три.
+--
+--   * `snprintf` ответила **тремя**: столько знаков у `2.5`.
+--   * Байты буфера суть `'2'`, `'.'`, `'5'`. Потеряйся `al` - на этом месте
+--     оказалось бы что угодно, включая правдоподобный ноль.
+--   * Байт за ними - **ноль**: чужая сторона завершила строку и в четвёртый
+--     байт не залезла.
+--
+-- `2.5` взято потому, что представимо точно, и `%.1f` печатает его без
+-- округления - ответ не зависит ни от версии libc, ни от режима округления.
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  True : Bool
+  False : Bool
+
+pick : Bool -> UInt64 -> UInt64 -> UInt64
+pick True yes no = yes
+pick False yes no = no
+
+effect Foreign
+
+-- `int snprintf(char *s, size_t n, const char *fmt, ...)` с плавающим
+-- вариадическим аргументом. `Float64`, а не `Float32`: продвижение аргументов
+-- по умолчанию расширяет `float` до `double`, и написать `Float32` здесь
+-- элаборация отвергает названной причиной - расширять его нам нечем.
+extern "C" fn snprintf : Array n UInt8 -> UInt64 -> Array m UInt8 -> ... -> Float64 -> Int32
+
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+blank : UInt8
+blank = 0
+
+-- `"%.1f"`: процент, точка, единица, `f`, завершающий ноль.
+percent : UInt8
+percent = 37
+
+dot : UInt8
+dot = 46
+
+one : UInt8
+one = 49
+
+eff : UInt8
+eff = 102
+
+-- Что печатаем и что обязаны прочитать обратно: `2`, `.`, `5`, ноль.
+half : Float64
+half = 2.5
+
+digitTwo : UInt8
+digitTwo = 50
+
+digitFive : UInt8
+digitFive = 53
+
+room : UInt64
+room = 8
+
+wrote : Int32
+wrote = 3
+
+format : Array 5 UInt8
+format =
+  let zeroed : Array 5 UInt8 = arrayNew 5 blank
+  let first : Array 5 UInt8 = arraySet zeroed 0 percent
+  let second : Array 5 UInt8 = arraySet first 1 dot
+  let third : Array 5 UInt8 = arraySet second 2 one
+  arraySet third 3 eff
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let text : Array 8 UInt8 = arrayNew 8 blank
+  let written : Int32 = snprintf text room format half
+  let head : UInt8 = arrayIndex text 0
+  let point : UInt8 = arrayIndex text 1
+  let tail : UInt8 = arrayIndex text 2
+  let stop : UInt8 = arrayIndex text 3
+  let sized : UInt64 = pick (eqInt32 written wrote) 1 0
+  let leading : UInt64 = pick (eqUInt8 head digitTwo) 1 0
+  let dotted : UInt64 = pick (eqUInt8 point dot) 1 0
+  let trailing : UInt64 = pick (eqUInt8 tail digitFive) 1 0
+  let ended : UInt64 = pick (eqUInt8 stop blank) 1 0
+  addUInt64 sized
+    (addUInt64 (mulUInt64 leading 10)
+      (addUInt64 (mulUInt64 dotted 100)
+        (addUInt64 (mulUInt64 trailing 1000) (mulUInt64 ended 10000))))
+
+main : UInt64
+main = runForeign body

@@ -202,6 +202,9 @@ extern "C" fn clock : UInt64
 extern "C" fn strlen : CPtr -> UInt64
 
 apply fn x = fn x
+=== variadic_symbols
+extern "C" fn snprintf : Array n UInt8 -> UInt64 -> Array m UInt8 -> ... -> UInt64 -> Int32
+extern "C" fn sscanf : Array n UInt8 -> Array m UInt8 -> ... -> Array k UInt64 -> Int32
 === exported_symbols
 byWord : CPtr -> CPtr -> Int32
 export "C" fn byWord

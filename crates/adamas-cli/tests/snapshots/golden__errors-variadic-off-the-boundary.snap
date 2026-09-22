@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: variadic-off-the-boundary.adamas:13:12: ожидается выражение, а не оператор
+  widest x = ...
+             ^^^

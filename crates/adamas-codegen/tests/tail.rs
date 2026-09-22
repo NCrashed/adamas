@@ -134,8 +134,9 @@ fn pipelines() -> [(&'static str, Pipeline); 2] {
 /// Без этого теста «прогон дошёл до конца» покрывало бы и программу, чей цикл
 /// свернулся на первом витке. Глубина здесь [`SHALLOW`] - её берёт и
 /// интерпретатор, и C-бэкенд, у которого хвостового вызова на **этой** форме
-/// нет: приставку он печатает только самому себе, а свидетель взаимный
-/// ([`a_self_tail_loop_through_a_closure_runs_deep`]).
+/// нет: прототипы у пары расходятся (2 параметра против 16), а приставка
+/// требует дословного совпадения
+/// ([`a_mutual_tail_loop_of_a_different_prototype_drops_the_c_prefix`]).
 #[test]
 fn the_witness_answers_what_the_machine_answers() {
     let Some((tools, _)) = harness::llvm_toolchains() else {
@@ -483,6 +484,74 @@ main = step 5 { a = 0, b = 0, c = 1, d = 2 }
             harness::agreed(name, source).unwrap_or_else(|error| panic!("{name}: {error}"));
         assert!(stderr.contains("живо 0"), "{name}: прогон оставил блоки");
     }
+}
+
+/// Взаимная рекурсия дословно одного прототипа не растит стек у C-пути.
+///
+/// До трека D волны 5 приставку брал только **само**вызов, и пара
+/// `UInt64 -> UInt64 -> UInt64`, зовущая друг друга хвостом, роняла процесс
+/// сигналом 11: при 2 MiB порог был 42 724 витка против 43 487. Прототип у
+/// пары при этом дословно один, и приставку на такой паре берут **оба**
+/// компилятора, которыми собирается порождённое (проба `mt.c`: gcc 15 и
+/// clang 21, уровни -O0, -O1, -O2).
+///
+/// Свидетель этот стоит рядом с
+/// [`a_mutual_tail_loop_of_a_different_prototype_drops_the_c_prefix`], и обе
+/// половины обязательны: без второй «приставка не только самовызову» читалось
+/// бы как «приставка всякому хвостовому вызову», а это ровно та правка, от
+/// которой clang роняет сборку.
+#[test]
+fn a_mutual_tail_loop_of_one_prototype_runs_deep_in_c() {
+    let source = format!(
+        "\
+data Bool where
+  True : Bool
+  False : Bool
+
+mutual
+  tick : UInt64 -> UInt64 -> UInt64
+  tick 0 acc = acc
+  tick n acc = again (subUInt64 n 1) (addUInt64 (mulUInt64 acc 3) 1)
+
+  again : UInt64 -> UInt64 -> UInt64
+  again n acc = tick n acc
+
+main : UInt64
+main = tick {THROUGH} 1
+"
+    );
+    let text = harness::text(&source).unwrap_or_else(|error| panic!("не понизилось: {error}"));
+    assert_eq!(
+        text.matches("ADAMAS_MUSTTAIL return fn_").count(),
+        2,
+        "приставок не две: дуга взаимной рекурсии осталась обычным вызовом"
+    );
+    let run = harness::c_printed_with("tail-mutual-one-prototype", &source, &[]);
+    assert!(
+        run.printed.parse::<u64>().is_ok(),
+        "{THROUGH} витков взаимной рекурсии не дошли до конца: {}",
+        run.printed
+    );
+    assert_eq!(run.live, Some(0), "прогон оставил блоки живыми");
+}
+
+/// Приставка снимается там, где прототипы расходятся, - и это clang, а не вкус.
+///
+/// Пара свидетеля Фазы 7: `narrow` двух параметров и `wide` шестнадцати. gcc
+/// такую пару принимает, clang отвергает **сборкой**, и правило, от которого
+/// зависит, соберётся ли программа, принадлежало бы компилятору хоста, а не
+/// языку. Поэтому мера - дословное совпадение прототипов, и здесь она не
+/// выполнена.
+#[test]
+fn a_mutual_tail_loop_of_a_different_prototype_drops_the_c_prefix() {
+    let source = witness(SHALLOW);
+    let text = harness::text(&source).unwrap_or_else(|error| panic!("не понизилось: {error}"));
+    assert!(
+        !text.contains("ADAMAS_MUSTTAIL return fn_"),
+        "приставка встала на пару, чьи прототипы расходятся: clang уронит сборку"
+    );
+    harness::agreed("tail-narrow-wide", &source)
+        .unwrap_or_else(|error| panic!("C-бэкенд отказал на свидетеле: {error}"));
 }
 
 /// Названная граница: применение значения **в хвосте** гарантии не получает.

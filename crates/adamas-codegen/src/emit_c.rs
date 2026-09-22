@@ -1232,6 +1232,33 @@ fn signature(function: &Function) -> String {
     )
 }
 
+/// Прототип функции без имён: им сверяются вызывающий и вызываемый под `musttail`.
+///
+/// Первая строка - тип ответа, дальше типы аргументов в порядке печати
+/// ([`signature`]), причём скрытые аргументы второй формы входят в перечень
+/// наравне с написанными: у формы они и есть часть прототипа.
+///
+/// Сверка нужна потому, что `musttail` требует совпадения прототипов, и
+/// требуют его **оба** компилятора, которыми собирается порождённое. Мера
+/// «совпали дословно» выбрана не из осторожности, а замером: gcc принимает
+/// вызывающего без параметров, зовущего функцию четырёх, а clang такую пару
+/// отвергает **сборкой**, - то есть правило шире дословного совпадения
+/// принадлежало бы компилятору хоста, а не языку. Дословное совпадение берут
+/// оба, на всех трёх уровнях оптимизации (проба `mt.c`, 2026-09-22).
+fn prototype(function: &Function) -> Vec<String> {
+    let mut shape = vec![c_type(function.result)];
+    if function.form == Form::Detached {
+        shape.push(HIDDEN.to_owned());
+    }
+    shape.extend(
+        function
+            .live_captured()
+            .chain(function.live_parameters())
+            .map(|binding| c_type(binding.fact.repr)),
+    );
+    shape
+}
+
 /// Сигнатура трамплина: каноническая форма кода замыкания из `adamas.h`.
 ///
 /// Скрытые аргументы у неё оба, потому что граница замыкания **динамическая**:
@@ -1268,6 +1295,7 @@ fn body(
         reprs: shapes(function),
         hidden: function.form == Form::Detached,
         id: function.id,
+        proto: prototype(function),
         chunks: Vec::new(),
         forward: Vec::new(),
         epilogue: Vec::new(),
@@ -1276,10 +1304,10 @@ fn body(
     let answer = if split {
         emitter.tail(&function.body, 1);
         None
-    } else if emitter.self_tailing(&function.body) {
-        // Самохвостовая функция печатается возвратом на каждом пути: только там
-        // вызов стоит под `return`, а приставка `musttail` требует именно
-        // этого (§6). Прочие печатаются как печатались.
+    } else if emitter.tail_jumping(&function.body) {
+        // Функция с хвостовым вызовом под приставку печатается возвратом на
+        // каждом пути: только там вызов стоит под `return`, а `musttail`
+        // требует именно этого (§6). Прочие печатаются как печатались.
         emitter.returning(&function.body, 1);
         None
     } else {
@@ -1683,6 +1711,8 @@ struct Emitter<'a> {
     hidden: bool,
     /// Чьё тело эмитируется: номер идёт в имена кусков.
     id: FuncId,
+    /// Прототип эмитируемого тела: с ним сверяется хвостовой вызов ([`prototype`]).
+    proto: Vec<String>,
     /// Готовые куски дроблёного тела: каждый - своя C-функция.
     chunks: Vec<String>,
     /// Их объявления: кусок ссылается на кусок с бо́льшим номером.
@@ -3824,7 +3854,26 @@ impl Emitter<'_> {
         let _ = writeln!(self.out, "{pad}return {held};");
     }
 
-    /// Есть ли в хвосте тела вызов **самой** функции (§6, гарантия self-tail).
+    /// Берёт ли названный вызов приставку `musttail` (§6).
+    ///
+    /// Условия два, и оба измерены, а не выведены. Ответ обязан уходить
+    /// регистром ([`returnable`]) - иначе gcc роняет **сборку**. Прототип
+    /// вызываемого обязан совпасть с прототипом вызывающего дословно
+    /// ([`prototype`]) - иначе сборку роняет clang.
+    ///
+    /// Самовызов оба условия выполняет по построению, и до трека D волны 5
+    /// правило им и ограничивалось. Расширено оно потому, что ограничение
+    /// стоило сигнала 11 на валидной программе: взаимная рекурсия двух
+    /// `UInt64 -> UInt64 -> UInt64` роняла процесс на 43 487 витках при 2 MiB,
+    /// хотя прототип у пары дословно один. Замер, которым прежнее правило
+    /// обосновывалось, мерил **несовпадающие** прототипы (2 параметра против
+    /// 16) и к этой паре отношения не имел.
+    fn jumpable(&self, function: FuncId) -> bool {
+        let called = &self.program.functions[function.0];
+        returnable(called.result) && prototype(called) == self.proto
+    }
+
+    /// Есть ли в хвосте тела вызов, берущий приставку (§6).
     ///
     /// Спрашивается до печати и решает её форму: тело с таким вызовом печатает
     /// [`Self::returning`] - возврат на каждом пути, - а прочие печатаются как
@@ -3839,29 +3888,27 @@ impl Emitter<'_> {
     /// найди печать вызов там, куда не ходил обход, форма сменилась бы у тела, о
     /// котором ничего не утверждается. Плотный разбор не берётся ни тем, ни
     /// другим ([`Self::packed_analysis`] печатает своё).
-    fn self_tailing(&self, expr: &Expr) -> bool {
+    fn tail_jumping(&self, expr: &Expr) -> bool {
         match expr {
             Expr::Bind { body, .. }
             | Expr::Dup { body, .. }
             | Expr::Drop { body, .. }
             | Expr::Reclaim { body, .. }
-            | Expr::Discard { body, .. } => self.self_tailing(body),
+            | Expr::Discard { body, .. } => self.tail_jumping(body),
             Expr::Match {
                 scrutinee, arms, ..
             } => {
                 !matches!(self.shape(scrutinee), Repr::Packed(_))
-                    && arms.iter().any(|arm| self.self_tailing(&arm.body))
+                    && arms.iter().any(|arm| self.tail_jumping(&arm.body))
             }
-            Expr::Call { function, .. } => {
-                *function == self.id && returnable(self.program.functions[function.0].result)
-            }
+            Expr::Call { function, .. } => self.jumpable(*function),
             _ => false,
         }
     }
 
     /// Тело чистого отрезка с возвратом на каждом пути (§6).
     ///
-    /// Форма, в которой самохвостовой вызов печатается приставкой. Всё, что
+    /// Форма, в которой хвостовой вызов печатается приставкой. Всё, что
     /// хвостом не является, уходит в обычную печать значения и возвращается
     /// следом: различие между этими двумя путями и есть всё, что делает вызов
     /// гарантированным.
@@ -3884,7 +3931,7 @@ impl Emitter<'_> {
             Expr::Call {
                 function,
                 arguments,
-            } if *function == self.id && returnable(self.program.functions[function.0].result) => {
+            } if self.jumpable(*function) => {
                 let given = self.arguments(*function, arguments, depth);
                 let title = escaped(&self.program.functions[function.0].name);
                 let _ = writeln!(

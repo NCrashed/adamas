@@ -23,7 +23,7 @@
 -- же словом его принимает `CURLOPT_WRITEFUNCTION` у настоящей обёртки
 -- (`Curl/Writer.adamas`).
 --
--- Наблюдений четыре, и каждое ломается от своей ошибки.
+-- Наблюдений пять, и каждое ломается от своей ошибки.
 --
 --   * Первый массив отсортирован: `[3, 1, 4, 2]` уезжает наружу и приезжает
 --     `[1, 2, 3, 4]`. Не позови `qsort` наш компаратор - было бы 3142.
@@ -33,6 +33,8 @@
 --     позвала трамплин вне регистрации».
 --   * Пятая регистрация подряд отдаёт **ноль**: слотов четыре. Предел виден
 --     ответом.
+--   * Четвёртая при этом **не ноль**. Без этого разряда таблица на три слота
+--     неотличима от таблицы на четыре, и мутант это показал: ноль красных.
 --   * После выхода из области, где слоты заняты, регистрация снова проходит:
 --     деструктор `Slot` вернул их таблице. Не сними он регистрацию - таблица
 --     осталась бы полной, и здесь был бы ноль.
@@ -88,11 +90,15 @@ resource Slot where
     let 1 code : Int32 = adamas_callback_release slot
     MkUnit
 
--- Чем кончилась попытка занять пятый слот. **Бокс, а не плоский `CPtr`**:
--- функция с деструктором ресурса и плоским ответом не понижается ни одним из
--- двух понижений (трек D волны 2).
+-- Край таблицы: **четвёртый** слот и **пятый**. Оба разряда нужны, и это
+-- измерено мутантом: наблюдай фикстура один пятый - таблица на три слота была
+-- бы неотличима от таблицы на четыре (пятый ноль и там, и там). Пара «последний
+-- занятый непуст, следующий пуст» прижимает размер с обеих сторон.
+--
+-- **Бокс, а не плоский `CPtr`**: функция с деструктором ресурса и плоским
+-- ответом не понижается ни одним из двух понижений (трек D волны 2).
 data Crowded where
-  Fifth : CPtr -> Crowded
+  Edge : CPtr -> CPtr -> Crowded
 
 runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
 runForeign k = handle @Foreign k with
@@ -140,7 +146,7 @@ sortBoth xs ys =
   let sortedSecond : Unit = qsort ys 4 8 slot
   MkUnit
 
--- Занять все четыре слота и попросить пятый. Ответ - пятый, то есть ноль;
+-- Занять все четыре слота и попросить пятый. Ответ - пара «четвёртый, пятый»;
 -- четыре первых отпускаются деструкторами на выходе **отсюда**.
 crowd : (ω u : Unit) -> {Foreign} Crowded
 crowd u =
@@ -152,7 +158,7 @@ crowd u =
   let 1 hc : Slot = Held c
   let d : CPtr = adamas_callback_register byWord
   let 1 hd : Slot = Held d
-  Fifth (adamas_callback_register byWord)
+  Edge d (adamas_callback_register byWord)
 
 -- Занять слот и тут же отпустить: ответ - занятое, чтобы вызывающий увидел,
 -- что таблица снова отдаёт.
@@ -160,10 +166,14 @@ reclaim : (ω u : Unit) -> {Foreign} Crowded
 reclaim u =
   let again : CPtr = adamas_callback_register byWord
   let 1 kept : Slot = Held again
-  Fifth again
+  Edge again again
 
-slotOf : Crowded -> CPtr
-slotOf (Fifth slot) = slot
+-- Последний занятый слот и первый отказ.
+lastOf : Crowded -> CPtr
+lastOf (Edge last over) = last
+
+overOf : Crowded -> CPtr
+overOf (Edge last over) = over
 
 -- Четыре ячейки одним числом: разряды читаются глазами.
 packed : UInt64 -> UInt64 -> UInt64 -> UInt64 -> UInt64
@@ -195,12 +205,14 @@ body u =
   let regained : Crowded = reclaim MkUnit
   let first : UInt64 = pick (eqUInt64 (packed a b c d) 1234) 1 0
   let second : UInt64 = pick (eqUInt64 (packed e f g h) 5678) 1 0
-  let limited : UInt64 = pick (eqUInt64 (slotOf crowded) vacant) 1 0
-  let reclaimed : UInt64 = pick (eqUInt64 (slotOf regained) vacant) 0 1
+  let limited : UInt64 = pick (eqUInt64 (overOf crowded) vacant) 1 0
+  let sized : UInt64 = pick (eqUInt64 (lastOf crowded) vacant) 0 1
+  let reclaimed : UInt64 = pick (eqUInt64 (overOf regained) vacant) 0 1
   addUInt64 first
     (addUInt64 (mulUInt64 second 10)
-      (addUInt64 (mulUInt64 limited 100) (mulUInt64 reclaimed 1000)))
+      (addUInt64 (mulUInt64 limited 100)
+        (addUInt64 (mulUInt64 sized 1000) (mulUInt64 reclaimed 10000))))
 
--- 1111.
+-- 11111.
 main : UInt64
 main = runForeign body

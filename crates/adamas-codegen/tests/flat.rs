@@ -394,31 +394,179 @@ main =
     );
 }
 
-/// Плоский **скаляр** проходит аргументом и не проходит захватом.
+/// Плоский **скаляр** проходит обеими позициями, и цены у них разные (§10
+/// вопрос 191).
 ///
-/// Половина решения 158, которой в коде нет: аргумент боксируется
-/// ([`a_flat_value_crosses_a_closure_at_a_named_price`]), а захват
-/// отвергается. Названо здесь потому, что без этого свидетеля разница между
-/// массивом и словом читалась бы наоборот - будто слово в среде дешевле.
+/// Вторая половина решения 158, которой в коде не было: аргумент боксировался
+/// ([`a_flat_value_crosses_a_closure_at_a_named_price`]), а захват отвергался -
+/// «захват замыкания: ожидалось указательное значение, а пришло плоское
+/// `Int64`». Свидетель на месте прежнего отказа, и говорит он то же, что
+/// говорил тот: разница между массивом и словом здесь обратная той, какую
+/// читает глаз, - массиву обёртки не нужно, слову нужна.
+///
+/// Цены **две**, и различаются они не величиной, а тем, на что умножаются.
+/// Аргумент боксируется на **каждое** пересечение, захват - **один раз**, на
+/// сборку среды. Считается это здесь, а различие меряет
+/// [`capturing_a_flat_scalar_costs_a_cell_per_closure_not_per_call`].
 #[test]
-fn a_flat_scalar_is_still_not_captured() {
-    let error = harness::text(
-        "\
-calling : Int64 -> (Int64 -> Int64) -> Int64
-calling x f = f x
-
-main : Int64
-main =
-  let w : Int64 = 1
-  calling 41 (\\k -> addInt64 k w)
-",
-    )
-    .expect_err("плоский скаляр в среде замыкания не проходит");
-    let text = error.to_string();
-    assert!(
-        text.contains("захват замыкания") && text.contains("плоское `Int64`"),
-        "отказ назван иначе: {text}"
+fn a_flat_scalar_crosses_a_closure_by_both_positions() {
+    let (by_argument, by_capture) = crossing_thrice("обе-позиции");
+    // Три применения: замыкание, три обёртки аргумента, три обёртки ответа.
+    assert_eq!(
+        by_argument, 7,
+        "цена аргумента разошлась: замыкание, три обёртки аргумента и три обёртки ответа"
     );
+    // То же плюс **одна** обёртка на захват, и она одна на всю программу.
+    assert_eq!(
+        by_capture, 8,
+        "цена захвата разошлась: те же семь плюс одна обёртка среды"
+    );
+}
+
+/// Захват плоского скаляра стоит ячейки на замыкание, а не на пересечение.
+///
+/// Утверждение сверх счёта выше, и стоит оно отдельным свидетелем потому, что
+/// это и есть опровергнутая верхняя граница: §10 вопрос 191 называл ценой
+/// захвата «ячейку на пересечение», измеренную у аргумента, а пересечений
+/// захват не считает вовсе. Мерится это разностью **двух пар**: захват против
+/// аргумента при одном применении и он же при трёх. Одна пара такого не
+/// скажет - прибавку в единицу даст и «ячейка на пересечение» при единственном
+/// пересечении.
+#[test]
+fn capturing_a_flat_scalar_costs_a_cell_per_closure_not_per_call() {
+    let (argument_once, capture_once) = crossing_once("на-замыкание");
+    let (argument_thrice, capture_thrice) = crossing_thrice("на-замыкание");
+    assert_eq!(
+        capture_once - argument_once,
+        1,
+        "одно пересечение: аргументом {argument_once}, захватом {capture_once}"
+    );
+    assert_eq!(
+        capture_thrice - argument_thrice,
+        1,
+        "три пересечения: аргументом {argument_thrice}, захватом {capture_thrice}"
+    );
+}
+
+/// Одно и то же замыкание с плоским множителем: литералом и захватом.
+///
+/// Ответ у пары один, и это нарочно: разойдись он - счётчики говорили бы о
+/// разных программах. Сверяет его [`allocated`] через `adamas eval`.
+///
+/// Имя прогона своё у каждой пары: `harness` кладёт бинарь по имени, а тесты
+/// крейта идут потоками - совпади имена, второй поток получил бы «Text file
+/// busy» вместо числа.
+fn crossing(what: &str, applications: &str) -> (usize, usize) {
+    let source = format!(
+        "\
+applying : Int64 -> (Int64 -> Int64) -> Int64
+applying x f = f x
+
+taking : (Int64 -> Int64) -> Int64
+taking f = {applications}
+"
+    );
+    let by_argument = allocated(
+        &format!("скаляр-аргументом-{what}"),
+        &format!("{source}\nmain : Int64\nmain = taking (\\x -> mulInt64 x 10)\n"),
+    );
+    let by_capture = allocated(
+        &format!("скаляр-захватом-{what}"),
+        &format!(
+            "{source}\nmain : Int64\nmain =\n  let w : Int64 = 10\n  \
+             taking (\\x -> mulInt64 x w)\n"
+        ),
+    );
+    (by_argument, by_capture)
+}
+
+/// Одно пересечение границы.
+fn crossing_once(what: &str) -> (usize, usize) {
+    crossing(what, "applying 1 f")
+}
+
+/// Три пересечения той же границы тем же замыканием.
+fn crossing_thrice(what: &str) -> (usize, usize) {
+    crossing(
+        what,
+        "addInt64 (applying 1 f) (addInt64 (applying 2 f) (applying 3 f))",
+    )
+}
+
+/// Операция с **плоским ответом** понижается (§10 вопрос 191, находка трека D
+/// волны 3).
+///
+/// Прежде отвергалась вовсе - «ответ операции: ожидалось указательное
+/// значение, а пришло плоское `UInt64`», - и обходить это приходилось массивом
+/// из одной ячейки прямо в фикстуре колбэка. Обёртку кладёт `resume` (аргумент
+/// резумпции указателен), снимает её место операции; счётчик называет цену
+/// числом.
+#[test]
+fn an_operation_with_a_flat_answer_lowers() {
+    const SOURCE: &str = "\
+data Unit where
+  MkUnit : Unit
+
+effect Width where
+  width : UInt64
+
+sized : {Width} UInt64
+sized = addUInt64 width 1
+
+main : UInt64
+main = handle sized with
+  return v -> v
+  width -> resume 8
+";
+    assert_eq!(
+        harness::printed(SOURCE),
+        "9",
+        "печать машины изменилась - свидетель говорит не о том"
+    );
+    let _ = allocated("операция-с-плоским-ответом", SOURCE);
+}
+
+/// Та же операция, взятая **значением** (§10 вопрос 169).
+///
+/// Путь другой и отказ там стоял свой: недобранная операция едет замыканием над
+/// синтетическим телом ([`Lowerer::performer`] в `lower.rs`), и оно отвергало
+/// плоский ответ у себя. Отдаёт синтетическое тело обёртку - зовут его через
+/// `adamas_apply`, а тот говорит указателями, - и разворачивает её место
+/// употребления обычным правилом ответа применения.
+///
+/// Ответ определения здесь **указательный** нарочно: у функции с плоским
+/// ответом операция отвергается раньше и по другой причине - обрыв возвращать
+/// нечем (`handlers.rs`, `an_operation_needs_a_pointer_answer_to_abort_through`),
+/// - и мерялась бы тогда не та граница.
+#[test]
+fn an_operation_with_a_flat_answer_is_taken_by_value() {
+    const SOURCE: &str = "\
+data Unit where
+  MkUnit : Unit
+
+data Sum where
+  MkSum : UInt64 -> Sum
+
+effect Store where
+  fetch : UInt64 -> {Store} UInt64
+
+taking : (UInt64 -> {Store} UInt64) -> {Store} Sum
+taking f = MkSum (f 3)
+
+held : {Store} Sum
+held = taking fetch
+
+main : Sum
+main = handle held with
+  return v -> v
+  fetch n -> resume (mulUInt64 n 7)
+";
+    assert_eq!(
+        harness::printed(SOURCE),
+        "MkSum 21",
+        "печать машины изменилась - свидетель говорит не о том"
+    );
+    let _ = allocated("операция-значением-с-плоским-ответом", SOURCE);
 }
 
 /// Плоский **ответ** через границу вызова: имя значением (§10 вопрос 158).

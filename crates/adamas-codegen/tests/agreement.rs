@@ -161,6 +161,7 @@ const TAKEN: [&str; 118] = [
     "flat-across-a-suspension",
     "flat-fields",
     "flat-primitives",
+    "flat-scalar-through-a-closure",
     "flat-sealed-member",
     "flat-under-a-parameter",
     "foreign-resource",

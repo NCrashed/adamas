@@ -24,15 +24,18 @@
 //! библиотеку. Отказ открыть неявную - не ошибка автора: он её не писал, и
 //! поиск идёт дальше. Отказ открыть **написанную** - ошибка, и она названа.
 //!
-//! Нет **таблицы сигнатур**. Поддержаны ровно тринадцать форм, и у каждой есть
-//! свидетель (`tests/outward.rs`, `adamas-cli/tests/linking.rs`, корпус); всё прочее -
+//! Нет **таблицы сигнатур**. Поддержано ровно шестнадцать форм - тринадцать
+//! обычных и три вариадические, - и у каждой есть свидетель
+//! (`tests/outward.rs`, `adamas-cli/tests/linking.rs`, корпус); всё прочее -
 //! отказ с названной причиной, а не догадка. Причина, по которой таблица не полна, - арифметика, а не лень:
 //! `dlsym` отдаёт нетипизированный указатель, звать по нему можно только
 //! **точной** сигнатурой, и у арности `k` над десятью плоскими типами (§4.11)
 //! таких сигнатур `10^(k+1)`. Для `k <= 2` это 1110 ветвей по три строки
-//! каждая. Настоящий ответ на это - libffi, то есть ещё одна зависимость с
-//! собственным C-кодом; цена названа в `docs/phase8-trackC-notes.md`, а выбор
-//! принимает не этот трек.
+//! каждая. У вариадической формы к этому множится **место границы** - она стоит
+//! после одного из `k` поимённых параметров, - то есть форм `k · 10^(k+1)`, и
+//! при `k = 4` это 400 000 против 100 000. Настоящий ответ на это - libffi, то
+//! есть ещё одна зависимость с собственным C-кодом; цена названа в
+//! `docs/phase8-trackC-notes.md`, а выбор принимает не этот трек.
 //!
 //! # Библиотека не выгружается никогда
 //!
@@ -203,6 +206,16 @@ pub struct Foreign {
     pub params: Vec<Cross>,
     /// Тип ответа.
     pub result: Option<PrimTy>,
+    /// Сколько **едущих** аргументов объявлены поимённо; `None` - не
+    /// вариадическая (§5.3).
+    ///
+    /// Различие доезжает до машины по той же причине, по какой оно доезжает до
+    /// обоих понижений: Rust принимает вариадический указатель на функцию
+    /// отдельным типом (`unsafe extern "C" fn(u64, ...) -> i32`), и `al` по
+    /// нему выставляет кодогенератор. Позови машина вариадический символ
+    /// невариадическим типом - вышло бы неопределённое поведение, а не
+    /// «примерно то же».
+    pub variadic: Option<usize>,
 }
 
 impl Foreign {
@@ -214,6 +227,7 @@ impl Foreign {
             symbol: symbol.to_owned(),
             params: params.iter().copied().map(Cross::Word).collect(),
             result: Some(result),
+            variadic: None,
         }
     }
 
@@ -225,6 +239,7 @@ impl Foreign {
             symbol: it.symbol.to_string(),
             params: it.params.clone(),
             result: it.result,
+            variadic: it.variadic,
         }
     }
 
@@ -237,7 +252,25 @@ impl Foreign {
             Cross::Buffer(cell) => format!("Array _ {}", cell.name()),
             Cross::Callback(_) => "колбэк".to_owned(),
         };
-        let params: Vec<String> = self.params.iter().map(written).collect();
+        let mut params: Vec<String> = self.params.iter().map(written).collect();
+        // Отметка печатается там же, где стояла в объявлении: сигнатура,
+        // названная в отказе, обязана отличать вариадическую форму от обычной -
+        // иначе две разные формы получают один текст, и автор читает отказ про
+        // не ту.
+        if let Some(named) = self.variadic {
+            let at = self
+                .params
+                .iter()
+                .scan(0usize, |seen, it| {
+                    if Cross::carried(it).is_some() {
+                        *seen += 1;
+                    }
+                    Some(*seen)
+                })
+                .position(|seen| seen > named)
+                .unwrap_or(params.len());
+            params.insert(at, "...".to_owned());
+        }
         format!(
             "({}) -> {}",
             params.join(", "),
@@ -294,7 +327,7 @@ impl Foreign {
             unsafe_code,
             reason = "вызов по нетипизированному адресу: содержание уровня 1 FFI (§5.3)"
         )]
-        let answer = unsafe { invoke(address, &shape, result, args) };
+        let answer = unsafe { invoke(address, &shape, self.variadic, result, args) };
         match answer.ok_or_else(|| self.outside())? {
             Answer::Word(word) => Ok(Some(word)),
             // Биты литерала ядра нормализованы шириной типа
@@ -493,68 +526,101 @@ enum Answer {
 
 /// Вызов по классам регистров; `None` - формы нет в таблице.
 ///
-/// Тринадцать форм, и у каждой свидетель: три первых - `tests/outward.rs`, три
+/// Шестнадцать форм, и у каждой свидетель: три первых - `tests/outward.rs`, три
 /// добавленных треком D волны 1 - корпус (`eval/extern-c` даёт `() -> long`,
 /// `eval/foreign-resource` даёт `long -> void`, `adamas-cli/tests/linking.rs`
 /// даёт `(long, long) -> long`), седьмая - `eval/extern-buffer` (трек B волны
 /// 2), пять следом - `eval/zlib` и `eval/zlib-stream` (трек D волны 2),
-/// тринадцатая - `eval/qsort` (трек C волны 3). Четырнадцатая добавляется тремя
-/// строками и обязана приходить со своим свидетелем - молча растущая таблица
-/// здесь означала бы непроверенный ABI.
+/// тринадцатая - `eval/qsort` (трек C волны 3), три последних вариадические и
+/// свидетель у всех трёх один - `eval/extern-varargs` (трек B волны 5).
+/// Семнадцатая добавляется тремя строками и обязана приходить со своим
+/// свидетелем - молча растущая таблица здесь означала бы непроверенный ABI.
+///
+/// # Вариадическая форма - **другая** форма, а не та же с флагом
+///
+/// Ключ таблицы - тройка (`shape`, `named`, `result`), и `named` из неё
+/// выкинуть нельзя: `SysV` AMD64 передаёт вариадической функции число
+/// использованных векторных регистров в `al`, а невариадический вызов его не
+/// выставляет вовсе. Позови вариадический символ невариадическим типом - и
+/// `va_arg` прочтёт область сохранения регистров, которую вызываемый не
+/// заполнял. Это неопределённое поведение, а не приближение, и наоборот тоже.
+/// Rust различие это выражает **типом**: `unsafe extern "C" fn(u64, u64, u64,
+/// ...) -> i32` есть иной тип, нежели `unsafe extern "C" fn(u64, u64, u64, u64)
+/// -> i32`, и `transmute` между ними компилятор не заметит.
+///
+/// # Арифметика против нас вдвойне
+///
+/// Невариадических сигнатур арности `k` над десятью плоскими типами (§4.11)
+/// ровно `10^(k+1)`. У вариадической к ним добавляется **место границы**: она
+/// стоит после одного из `k` поимённых параметров (ноль поимённых C не
+/// принимает), то есть форм становится `k · 10^(k+1)`. При `k = 4` это 400 000
+/// ветвей против 100 000. Перечислить нельзя ни то, ни другое; настоящий ответ
+/// - libffi, и выбор этот принимает не трек B.
 ///
 /// # Safety
 ///
 /// `address` обязан указывать на функцию, чья настоящая сигнатура совпадает с
-/// парой (`shape`, `result`). Проверить это нечем - см. шапку модуля.
+/// тройкой (`shape`, `named`, `result`). Проверить это нечем - см. шапку
+/// модуля.
 #[allow(
     unsafe_code,
     reason = "приписывание сигнатуры чужому адресу: содержание уровня 1 FFI (§5.3)"
 )]
-unsafe fn invoke(address: Address, shape: &[Class], result: Class, args: &[u64]) -> Option<Answer> {
+#[allow(
+    clippy::too_many_lines,
+    reason = "таблица сигнатур - одна таблица, и делить её значило бы прятать её половину"
+)]
+unsafe fn invoke(
+    address: Address,
+    shape: &[Class],
+    named: Option<usize>,
+    result: Class,
+    args: &[u64],
+) -> Option<Answer> {
     // Перекладка битов в аргумент и обратно - тот же уклад, каким литерал
     // живёт в ядре: `Float64` битами, целое значением.
     let double = |at: usize| f64::from_bits(args[at]);
-    match (shape, result) {
+    match (shape, named, result) {
         // `double -> double`: `cbrt`, `sqrt`, `log` - вся скалярная половина
         // libm.
-        ([Class::Double], Class::Double) => {
+        ([Class::Double], None, Class::Double) => {
             let call: extern "C" fn(f64) -> f64 = unsafe { std::mem::transmute(address) };
             Some(Answer::Word(call(double(0)).to_bits()))
         }
         // `long -> long`: `labs`, `malloc` и спутники libc.
-        ([Class::Word], Class::Word) => {
+        ([Class::Word], None, Class::Word) => {
             let call: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(address) };
             Some(Answer::Word(call(args[0])))
         }
         // `(double, double) -> double`: `pow`, `hypot`, `fmod`.
-        ([Class::Double, Class::Double], Class::Double) => {
+        ([Class::Double, Class::Double], None, Class::Double) => {
             let call: extern "C" fn(f64, f64) -> f64 = unsafe { std::mem::transmute(address) };
             Some(Answer::Word(call(double(0), double(1)).to_bits()))
         }
         // `(long, long) -> long`: двухсловная половина libc и всякая чужая
         // библиотека, берущая указатель со счётом.
-        ([Class::Word, Class::Word], Class::Word) => {
+        ([Class::Word, Class::Word], None, Class::Word) => {
             let call: extern "C" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(address) };
             Some(Answer::Word(call(args[0], args[1])))
         }
         // `long -> void`: `free` и всё, что отдаёт объект обратно. Без этой
         // формы `resource` над чужим объектом (§5.3) машине не считается:
         // деструктор его есть ровно `void`-символ.
-        ([Class::Word], Class::Void) => {
+        ([Class::Word], None, Class::Void) => {
             let call: extern "C" fn(u64) = unsafe { std::mem::transmute(address) };
             call(args[0]);
             Some(Answer::Nothing)
         }
         // `void -> long`: `clock` и спутники. В Adamas это функция от единицы
         // (§3.4), и единица до сюда не доезжает.
-        ([], Class::Word) => {
+        ([], None, Class::Word) => {
             let call: extern "C" fn() -> u64 = unsafe { std::mem::transmute(address) };
             Some(Answer::Word(call()))
         }
         // `(long, long, long) -> void`: два одолженных буфера со счётом длины -
         // `swab`, `memcpy` и вся половина libc, читающая один наш блок и пишущая
         // в другой. Свидетель - `eval/extern-buffer` корпуса (трек B волны 2).
-        ([Class::Word, Class::Word, Class::Word], Class::Void) => {
+        ([Class::Word, Class::Word, Class::Word], None, Class::Void) => {
             let call: extern "C" fn(u64, u64, u64) = unsafe { std::mem::transmute(address) };
             call(args[0], args[1], args[2]);
             Some(Answer::Nothing)
@@ -567,18 +633,18 @@ unsafe fn invoke(address: Address, shape: &[Class], result: Class, args: &[u64])
 
         // `(long, long, long) -> long`: `crc32(crc, buf, len)` - одолженный
         // буфер со счётом длины и **широким** ответом (`uLong`).
-        ([Class::Word, Class::Word, Class::Word], Class::Word) => {
+        ([Class::Word, Class::Word, Class::Word], None, Class::Word) => {
             let call: extern "C" fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(address) };
             Some(Answer::Word(call(args[0], args[1], args[2])))
         }
         // `long -> int`: `gzclose`. Деструктор ресурса, отдающий статус.
-        ([Class::Word], Class::Half) => {
+        ([Class::Word], None, Class::Half) => {
             let call: extern "C" fn(u64) -> i32 = unsafe { std::mem::transmute(address) };
             Some(Answer::Half(call(args[0])))
         }
         // `(long, long, long) -> int`: `gzread`, `gzwrite` - хендл, наш буфер,
         // длина.
-        ([Class::Word, Class::Word, Class::Word], Class::Half) => {
+        ([Class::Word, Class::Word, Class::Word], None, Class::Half) => {
             let call: extern "C" fn(u64, u64, u64) -> i32 = unsafe { std::mem::transmute(address) };
             Some(Answer::Half(call(args[0], args[1], args[2])))
         }
@@ -587,14 +653,14 @@ unsafe fn invoke(address: Address, shape: &[Class], result: Class, args: &[u64])
         // ([`crate::callback`]). Свидетель - `eval/qsort` корпуса (трек C
         // волны 3). Форма едина со всякой четырёхсловной `void`-функцией libc:
         // что четвёртое слово есть указатель на функцию, ABI не различает.
-        ([Class::Word, Class::Word, Class::Word, Class::Word], Class::Void) => {
+        ([Class::Word, Class::Word, Class::Word, Class::Word], None, Class::Void) => {
             let call: extern "C" fn(u64, u64, u64, u64) = unsafe { std::mem::transmute(address) };
             call(args[0], args[1], args[2], args[3]);
             Some(Answer::Nothing)
         }
         // `(long, long, long, long) -> int`: `uncompress(dest, destLen, src,
         // srcLen)` - два одолженных буфера и out-параметр длины.
-        ([Class::Word, Class::Word, Class::Word, Class::Word], Class::Half) => {
+        ([Class::Word, Class::Word, Class::Word, Class::Word], None, Class::Half) => {
             let call: extern "C" fn(u64, u64, u64, u64) -> i32 =
                 unsafe { std::mem::transmute(address) };
             Some(Answer::Half(call(args[0], args[1], args[2], args[3])))
@@ -611,6 +677,7 @@ unsafe fn invoke(address: Address, shape: &[Class], result: Class, args: &[u64])
                 Class::Word,
                 Class::Word,
             ],
+            None,
             Class::Half,
         ) => {
             let call: extern "C" fn(u64, u64, u64, u64, u64) -> i32 =
@@ -630,12 +697,54 @@ unsafe fn invoke(address: Address, shape: &[Class], result: Class, args: &[u64])
                 Class::Word,
                 Class::Word,
             ],
+            None,
             Class::Void,
         ) => {
             let call: extern "C" fn(u64, u64, u64, u64, u64) =
                 unsafe { std::mem::transmute(address) };
             call(args[0], args[1], args[2], args[3], args[4]);
             Some(Answer::Nothing)
+        }
+        // Дальше - вариадические формы (§5.3, волна 5). Их **три**, и три их
+        // потому, что каждая говорит своё; четвёртой в корпусе звать нечем.
+        //
+        //   1. `(long, long, long, ...long) -> int` - `snprintf(buf, size,
+        //      fmt, число)`. Векторных регистров ноль, `al` обнуляется.
+        //   2. `(long, long, ...long) -> int` - `sscanf(текст, fmt, адрес)`.
+        //      Поимённых параметров **два**, а не три: граница вариадической
+        //      части есть свойство символа, и таблица обязана различать эти
+        //      две формы, а не только их длину.
+        //   3. `(long, long, long, ...double) -> int` - `snprintf` с плавающим
+        //      аргументом. **Единственная**, где вариадический ABI наблюдаемо
+        //      отличается от обычного: `al` становится единицей, и без неё
+        //      `va_arg` читает незаполненную область сохранения регистров.
+        //
+        // Больше их сегодня и не напишешь: имя объявления есть имя символа
+        // (§5.3), поэтому вариадическая форма у символа одна на программу, а
+        // вариадических символов libc, которые корпус вправе звать (без потока,
+        // без сети, без расширений glibc), ровно эти два.
+
+        // `snprintf(buf, size, fmt, long)`.
+        ([Class::Word, Class::Word, Class::Word, Class::Word], Some(3), Class::Half) => {
+            let call: unsafe extern "C" fn(u64, u64, u64, ...) -> i32 =
+                unsafe { std::mem::transmute(address) };
+            Some(Answer::Half(unsafe {
+                call(args[0], args[1], args[2], args[3])
+            }))
+        }
+        // `sscanf(текст, fmt, адрес)`.
+        ([Class::Word, Class::Word, Class::Word], Some(2), Class::Half) => {
+            let call: unsafe extern "C" fn(u64, u64, ...) -> i32 =
+                unsafe { std::mem::transmute(address) };
+            Some(Answer::Half(unsafe { call(args[0], args[1], args[2]) }))
+        }
+        // `snprintf(buf, size, fmt, double)` - `al` равен единице.
+        ([Class::Word, Class::Word, Class::Word, Class::Double], Some(3), Class::Half) => {
+            let call: unsafe extern "C" fn(u64, u64, u64, ...) -> i32 =
+                unsafe { std::mem::transmute(address) };
+            Some(Answer::Half(unsafe {
+                call(args[0], args[1], args[2], double(3))
+            }))
         }
         _ => None,
     }

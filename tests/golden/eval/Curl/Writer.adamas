@@ -1,0 +1,148 @@
+-- Свой писатель тела: `CURLOPT_WRITEFUNCTION` (§5.3, уровень 3; §9).
+--
+-- Третий слой обёртки над libcurl, и заводится он ровно ради того, чего
+-- прежняя редакция не умела: тело переноса принимает **наш колбэк**, а не
+-- умолчательный писатель libcurl. Причина, по которой не умела, была названа
+-- верно - регистрация ставится одним чужим вызовом (`curl_easy_setopt`), а
+-- зовётся другим (`curl_easy_perform`), тогда как скоуп уровня 2 равен одному
+-- вызову, - и здесь она закрыта уровнем 3.
+--
+-- # Как это устроено
+--
+-- Адрес нашего кода уровень 1 отдаёт чужой стороне только там, где объявленный
+-- тип позиции сам функциональный, а хвост у `curl_easy_setopt` один на все
+-- опции и он - слово. Поэтому адрес берётся **не у объявления опции**, а у
+-- таблицы трамплинов рантайма: `adamas_callback_register` принимает колбэк
+-- функциональной позицией и отдаёт `CPtr`, который дальше едет обычным словом
+-- куда угодно - хоть в вариадический хвост, хоть в `qsort`
+-- (`eval/callback-outlives.adamas`).
+--
+-- Слот таблицы живёт **дольше вызова** и снимается `adamas_callback_release`.
+-- Держит его `resource` с деструктором (§3.3): забыть снятие нельзя, обёртка
+-- линейна.
+--
+-- # Предел числа живых колбэков виден здесь, а не в рантайме
+--
+-- §5.3 требует этого прямо, и вот он: [`claimWriter`] отвечает `Crowded`, если
+-- слотов в таблице больше нет. Трамплин есть порождённая на этапе сборки
+-- функция, и породить их по числу колбэков программы нечем; молчаливое
+-- переполнение дало бы вызов в никуда на первой же порции тела.
+--
+-- # Что писатель не умеет, и это названо
+--
+-- **Курсора у него нет: он годен на одну порцию.** libcurl вправе позвать
+-- писатель несколько раз, передавая куски тела подряд; настоящая сишная
+-- обёртка держит в `userdata` структуру «буфер плюс смещение». Структуры у
+-- уровня 1 нет вовсе - это уровень 2 FFI (`adamas-bindgen`), - а адресной
+-- арифметики язык не обещает (§5.3). Поэтому `userdata` здесь есть сам адрес
+-- приёмника, и каждая порция легла бы в его начало. Тело фикстуры - 35 байт
+-- при `CURL_MAX_WRITE_SIZE` в шестнадцать килобайт, и `file://` отдаёт его
+-- одной порцией; на теле крупнее обёртке нужен уровень 2 FFI.
+--
+-- **Связь приёмника со слотом не проверяется.** `Registered` берёт оба поля, и
+-- что `CPtr` слота зарегистрирован под писатель, пишущий именно в этот буфер,
+-- не держится ничем (§10 вопрос 185, остаток; тот же пункт назвал трек A волны
+-- 6 у пары «буфер - поток»).
+
+import Curl.Raw (Unit, MkUnit, Foreign)
+
+import Curl.Easy (Fetched, Code, fetch, runForeign, Bool, True, False)
+
+-- Таблица трамплинов рантайма (§5.3, уровень 3): не чужая библиотека, а наш
+-- рантайм. Машина отвечает на эти два символа сама, оба понижения зовут сишное
+-- тело (`adamas-codegen/src/callback.c`), и ответы обязаны совпасть.
+--
+-- Занять слот: ответ - адрес, годный до снятия регистрации, либо **ноль**,
+-- если слотов больше нет.
+extern "C" fn adamas_callback_register
+  : (CPtr -> UInt64 -> UInt64 -> CPtr -> {Foreign} UInt64) -> CPtr
+
+-- Освободить слот: 0 - снято, 1 - такой регистрации нет. Кратность написана -
+-- слот потребляется, ровно как хендл у `curl_easy_cleanup`.
+extern "C" fn adamas_callback_release : (1 slot : CPtr) -> Int32
+
+-- `void *memcpy(void *dest, const void *src, size_t n)`. Обе стороны -
+-- адреса: приёмник приезжает писателю из `CURLOPT_WRITEDATA`, источник - от
+-- libcurl. Чтения по адресу в языке нет ни одной формы (§10 вопрос 189), и
+-- читает за нас та же чужая сторона.
+extern "C" fn memcpy : CPtr -> CPtr -> UInt64 -> CPtr
+
+-- `void *memset(void *s, int c, size_t n)`. С нулевой длиной ничего не пишет и
+-- отдаёт тот же адрес: этим и берётся адрес нашего приёмника словом (приём
+-- `eval/extern-buffer`).
+extern "C" fn memset : Array n UInt8 -> Int64 -> UInt64 -> CPtr
+
+-- Свободных слотов нет: ответ [`adamas_callback_register`] при полной таблице.
+vacant : CPtr
+vacant = 0
+
+-- «Слотов в таблице трамплинов больше нет» - **наша** беда, а не libcurl'а, и
+-- число выбрано вне диапазона `CURLcode`: их меньше сотни.
+slotsGone : Int32
+slotsGone = 1000
+
+-- `size_t write(char *ptr, size_t size, size_t nmemb, void *userdata)` -
+-- write-колбэк libcurl дословно. Ответ обязан равняться числу принятых байт:
+-- меньшее libcurl считает отказом записи и обрывает перенос
+-- (`CURLE_WRITE_ERROR`).
+writeBody : CPtr -> UInt64 -> UInt64 -> CPtr -> {Foreign} UInt64
+writeBody ptr size nmemb sink =
+  let total : UInt64 = mulUInt64 size nmemb
+  let copied : CPtr = memcpy sink ptr total
+  total
+
+export "C" fn writeBody
+
+-- Приёмник **и** слот трамплина: одна область, один деструктор.
+--
+-- Буфер стоит полем не для красоты. Адрес его уезжает в `CURLOPT_WRITEDATA`, а
+-- пишет по нему libcurl из `curl_easy_perform`, то есть **после** возврата из
+-- вызова, которым адрес взят; заём §4.11 обещает адрес только на время вызова.
+-- Полем ресурса буфер живёт до выхода из области, и это единственная форма
+-- «живёт дольше вызова», какая в языке есть (§10 вопрос 185, закрыт вариантом
+-- (в)). Назвать буфер после переноса - **не** эта форма и не работает: значение
+-- имеет не «после переноса», а «после последнего чтения чужой стороной», а
+-- этого момента автор не видит.
+--
+-- Длина поля стирается auto-lift'ом `n`: обёртка берёт приёмник любого размера.
+resource Writer where
+  Registered : Array n UInt8 -> CPtr -> Writer
+  unregisterWriter : (1 w : Writer) -> {Foreign} Unit
+  unregisterWriter (Registered sink slot) =
+    let 1 code : Int32 = adamas_callback_release slot
+    MkUnit
+
+-- Слот под наш писатель. `Crowded` - слотов в таблице больше нет, и это часть
+-- API, а не падение в рантайме (§5.3).
+data Claimed where
+  Took : CPtr -> Claimed
+  Crowded : Claimed
+
+claimed : Bool -> CPtr -> Claimed
+claimed True slot = Crowded
+claimed False slot = Took slot
+
+claimWriter : (ω u : Unit) -> {Foreign} Claimed
+claimWriter u =
+  let slot : CPtr = adamas_callback_register writeBody
+  claimed (eqUInt64 slot vacant) slot
+
+-- Скачать по адресу из `url` **своим** писателем прямо в `sink`.
+--
+-- Слот занимается здесь и снимается деструктором `Writer` на обоих выходах из
+-- области; приёмник живёт полем того же ресурса.
+writing :
+  Claimed -> (ω sink : Array n UInt8) -> (ω url : Array m UInt8) ->
+  (ω stub : Array 1 Int32) -> (ω cell : Array 1 UInt64) -> {Foreign} Fetched
+writing Crowded sink url stub cell = Code slotsGone
+writing (Took slot) sink url stub cell =
+  let address : CPtr = memset sink 0 0
+  let 1 held : Writer = Registered sink slot
+  fetch url stub slot address cell
+
+intoBuffer :
+  (ω sink : Array n UInt8) -> (ω url : Array m UInt8) ->
+  (ω stub : Array 1 Int32) -> (ω cell : Array 1 UInt64) -> {Foreign} Fetched
+intoBuffer sink url stub cell =
+  let taken : Claimed = claimWriter MkUnit
+  writing taken sink url stub cell

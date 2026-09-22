@@ -6314,6 +6314,13 @@ fn support(program: &Program, answer: Answer) -> String {
     out.push_str(crate::emit_c::PRINTER);
     out.push('\n');
 
+    // Таблица трамплинов уровня 3 (§5.3) - тот же файл, что у C-бэкенда, и
+    // внешняя по той же причине: зовёт её `.ll` из другой единицы трансляции.
+    if crate::emit_c::tabled(program) {
+        out.push_str(crate::emit_c::CALLBACK_TABLE);
+        out.push('\n');
+    }
+
     // Трамплины колбэка (§5.3) - тот же текст, что у C-бэкенда, и внешние: их
     // адрес берёт `.ll`, лежащий в другой единице трансляции. Место выбрано
     // после `release.c`: трамплин зовёт `adamas_drop_value`.

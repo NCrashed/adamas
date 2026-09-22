@@ -50,9 +50,19 @@
 -- который фикстура заводит над **своим** буфером.
 --
 -- **Статус не превращается здесь в тип языка.** Назвать `0` успехом можно
--- сравнением, и после трека A волны 4 это в подключаемом модуле пишется - но
--- `Bool` слою пришлось бы откуда-то подключить, а он сознательно зависит от
--- одного `Curl.Raw`. Классификация остаётся вызывающему, как и у `Zlib/Bytes`.
+-- сравнением, и после трека A волны 4 это в подключаемом модуле пишется;
+-- классификация всё же остаётся вызывающему, как и у `Zlib/Bytes`: слой
+-- называет числа, а решает по ним программа.
+--
+-- **`Bool` объявлен здесь, и он в программе один.** Прежняя редакция объявляла
+-- его в `curl.adamas`, а слой обходился без сравнений вовсе. Теперь сравнение
+-- есть в слое писателя (`Curl/Writer.adamas`: «слот занят или нет»), и двух
+-- `Bool` программа не терпит: элаборация разрешает имя **по файлу**, а
+-- понижение - один раз на программу (`Signature::convention`), и тег ветки
+-- разъезжается с тегом, который строит сравнение. Собирается такая программа
+-- молча, а обрывается на прогоне («разбор не знает конструктора»). Один `Bool`
+-- на всех это обходит; сам разъезд - находка трека B волны 6, и лечится он не
+-- здесь.
 
 import Curl.Raw
   ( Unit
@@ -67,6 +77,12 @@ import Curl.Raw
   , curl_easy_unescape
   , curl_free
   )
+
+-- Ответ сравнения - `Bool` программы (§4.3), и он в программе **один** на все
+-- слои: см. шапку.
+data Bool where
+  True : Bool
+  False : Bool
 
 -- `CURLE_OK`: единственный код, который libcurl зовёт успехом.
 curlOk : Int32
@@ -97,11 +113,17 @@ optUrl = 10002
 optTimeout : UInt64
 optTimeout = 13
 
--- `CURLOPT_WRITEDATA` = `CURLOPTTYPE_CBPOINT + 1`. Без своего
--- `CURLOPT_WRITEFUNCTION` умолчательным писателем служит `fwrite`, и слот этот
--- обязан нести `FILE *`.
+-- `CURLOPT_WRITEDATA` = `CURLOPTTYPE_CBPOINT + 1`: `userdata`, которое libcurl
+-- передаёт писателю последним аргументом. Что в нём лежит, решает писатель;
+-- у нашего (`Curl/Writer.adamas`) это адрес приёмника, у умолчательного
+-- (`fwrite`) им обязан быть `FILE *`.
 optSink : UInt64
 optSink = 10001
+
+-- `CURLOPT_WRITEFUNCTION` = `CURLOPTTYPE_FUNCTIONPOINT + 11`. Сюда едет адрес
+-- слота таблицы трамплинов - обычным словом, как и всякая опция-указатель.
+optWriteFunction : UInt64
+optWriteFunction = 20011
 
 -- `CURLINFO_SIZE_DOWNLOAD_T` = `CURLINFO_OFF_T + 8`.
 infoDownloaded : UInt64
@@ -134,26 +156,30 @@ resource Text where
 data Fetched where
   Code : Int32 -> Fetched
 
--- Скачать по адресу из `url` в приёмник `file` и записать длину тела в `cell`.
+-- Скачать по адресу из `url` писателем `writer` в приёмник `sink` и записать
+-- длину тела в `cell`.
 --
 -- Хендл и копия URL закрываются на обоих выходах из этой области - за это
 -- отвечают `easy` и `text`, и больше они не нужны ни для чего. Ответ - код
 -- `curl_easy_perform`.
 --
--- `file` - адрес `FILE *`; откуда он берётся, слой не решает (см. шапку).
+-- `writer` - адрес слота таблицы трамплинов, `sink` - `userdata`, которое
+-- libcurl передаст писателю последним аргументом. Откуда берутся оба и кто
+-- снимает регистрацию, слой не решает: это `Curl/Writer.adamas`.
 -- `stub` - ячейка под длину, которую `curl_easy_unescape` обязана куда-то
 -- написать; нам она не нужна ни для чего.
 fetch :
-  (ω url : Array n UInt8) -> (ω stub : Array 1 Int32) -> (ω file : CPtr) ->
-  (ω cell : Array 1 UInt64) -> {Foreign} Fetched
-fetch url stub file cell =
+  (ω url : Array n UInt8) -> (ω stub : Array 1 Int32) -> (ω writer : CPtr) ->
+  (ω sink : CPtr) -> (ω cell : Array 1 UInt64) -> {Foreign} Fetched
+fetch url stub writer sink cell =
   let curl : CPtr = curl_easy_init
   let 1 easy : Easy = Opened curl
   let copied : CPtr = curl_easy_unescape curl url 0 stub
   let 1 text : Text = Held copied
   let addressed : Int32 = curl_easy_setopt curl optUrl copied
   let patient : Int32 = curl_easy_setopt curl optTimeout patience
-  let sinking : Int32 = curl_easy_setopt curl optSink file
+  let writes : Int32 = curl_easy_setopt curl optWriteFunction writer
+  let sinking : Int32 = curl_easy_setopt curl optSink sink
   let ran : Int32 = curl_easy_perform curl
   let sized : Int32 = curl_easy_getinfo curl infoDownloaded cell
   Code ran
@@ -169,3 +195,17 @@ downloaded cell = arrayIndex cell 0
 -- Сообщение кода ошибки: чужая строка, и указатель на неё у каждого кода свой.
 describe : UInt64 -> {Foreign} CPtr
 describe code = curl_easy_strerror code
+
+-- Площадка метки `Foreign`: меток без операций гасить нечем, кроме `return`, и
+-- эта площадка ровно такая.
+--
+-- Стоит она в слое, а не в программе, потому что её требует **правило чужого
+-- кадра** (§5.3): файл, объявляющий чужой символ с позицией колбэка, обязан
+-- сам содержать площадку метки, стоящей в row этого колбэка, - иначе
+-- «эффект в позиции колбэка не гасит ни один хендлер программы». Проверка
+-- смотрит сигнатуру файла, а площадка вызывающего к моменту его элаборации ещё
+-- не написана. Такой файл здесь один - `Curl/Writer.adamas`, - и берёт он
+-- площадку отсюда.
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v

@@ -1,0 +1,206 @@
+-- Колбэк уровня 3: регистрация переживает вызов, в котором сделана (§5.3).
+--
+-- Уровень 2 держит регистрацию ровно **один** чужой вызов: у понижения среда
+-- строится перед узлом `Expr::Foreign` и дропается после него, у машины
+-- регистрация снимается возвратом (волна 3). Половина настоящих C-API так не
+-- устроена: `CURLOPT_WRITEFUNCTION` ставится одним вызовом, а зовётся другим,
+-- и это ровно третий уровень §5.3 - «колбэк, переживающий любой scope».
+--
+-- Выражается он так: слот **таблицы трамплинов** занимается
+-- `adamas_callback_register` и освобождается `adamas_callback_release`, а
+-- держит слот `resource` с деструктором, снимающим регистрацию (§3.3). Оба
+-- символа - рантайм FFI, а не чужая библиотека: машина отвечает на них сама,
+-- оба понижения зовут сишное тело (`adamas-codegen/src/callback.c`).
+--
+-- **Число слотов ограничено, и ограничение видно в API, а не в рантайме** -
+-- этого §5.3 требует прямо. Трамплин есть порождённая на этапе сборки функция,
+-- и породить их по числу колбэков программы нечем; поэтому переполнение
+-- таблицы отвечает **нулём**, который обёртка обязана разобрать, а не роняет
+-- прогон на первом же вызове.
+--
+-- Адрес слота едет `qsort` **словом**, а не написанным колбэком: в позиции
+-- колбэка стоит имя экспорта, а здесь - значение, полученное от таблицы. Тем
+-- же словом его принимает `CURLOPT_WRITEFUNCTION` у настоящей обёртки
+-- (`Curl/Writer.adamas`).
+--
+-- Наблюдений четыре, и каждое ломается от своей ошибки.
+--
+--   * Первый массив отсортирован: `[3, 1, 4, 2]` уезжает наружу и приезжает
+--     `[1, 2, 3, 4]`. Не позови `qsort` наш компаратор - было бы 3142.
+--   * **Второй массив отсортирован той же регистрацией.** Это и есть уровень
+--     3: между двумя `qsort` управление возвращалось нам, и регистрация
+--     пережила первый вызов. Сними её раньше - машина отвечает «чужая сторона
+--     позвала трамплин вне регистрации».
+--   * Пятая регистрация подряд отдаёт **ноль**: слотов четыре. Предел виден
+--     ответом.
+--   * После выхода из области, где слоты заняты, регистрация снова проходит:
+--     деструктор `Slot` вернул их таблице. Не сними он регистрацию - таблица
+--     осталась бы полной, и здесь был бы ноль.
+--
+-- Порядок у `memcmp` побайтовый, и на little-endian младший байт идёт первым.
+-- Для значений меньше 256 остальные семь байт нулевые у всех, значит
+-- сравнивается ровно младший байт, то есть само число. Это свойство выбранных
+-- значений, а не общее правило, и потому они выбраны такими (тот же довод, что
+-- в `eval/qsort.adamas`).
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  True : Bool
+  False : Bool
+
+pick : Bool -> UInt64 -> UInt64 -> UInt64
+pick True yes no = yes
+pick False yes no = no
+
+effect Foreign
+
+-- Таблица трамплинов рантайма (§5.3, уровень 3). Занять слот: ответ - адрес
+-- колбэка, годный до снятия регистрации, либо **ноль**, если слотов больше
+-- нет.
+extern "C" fn adamas_callback_register : (CPtr -> CPtr -> {Foreign} Int32) -> CPtr
+
+-- Освободить слот: 0 - снято, 1 - такой регистрации нет. Кратность написана -
+-- слот потребляется, ровно как хендл у `fclose`.
+extern "C" fn adamas_callback_release : (1 slot : CPtr) -> Int32
+
+-- `int memcmp(const void *a, const void *b, size_t n)`.
+extern "C" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
+
+-- `void qsort(void *base, size_t n, size_t size, int (*cmp)(const void *,
+-- const void *))`. Компаратор объявлен **словом**: сюда едет адрес слота, а не
+-- имя нашего определения.
+extern "C" fn qsort : Array n UInt64 -> UInt64 -> UInt64 -> UInt64 -> Unit
+
+-- Компаратор: адреса двух ячеек, восемь байт по каждому.
+byWord : CPtr -> CPtr -> {Foreign} Int32
+byWord a b = memcmp a b 8
+
+export "C" fn byWord
+
+-- Слот таблицы под деструктором: снять регистрацию нельзя забыть, потому что
+-- обёртка линейна (§3.3). Это и есть форма уровня 3 из §5.3.
+resource Slot where
+  Held : CPtr -> Slot
+  unregister : (1 s : Slot) -> {Foreign} Unit
+  unregister (Held slot) =
+    let 1 code : Int32 = adamas_callback_release slot
+    MkUnit
+
+-- Чем кончилась попытка занять пятый слот. **Бокс, а не плоский `CPtr`**:
+-- функция с деструктором ресурса и плоским ответом не понижается ни одним из
+-- двух понижений (трек D волны 2).
+data Crowded where
+  Fifth : CPtr -> Crowded
+
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+-- Литерал в ячейке `arrayNew` умолчания типа не читает и уезжает в `Nat`;
+-- именованная константа его прижимает - тот же приём, что в `extern-buffer`.
+blank : UInt64
+blank = 0
+
+vacant : CPtr
+vacant = 0
+
+three : UInt64
+three = 3
+
+one : UInt64
+one = 1
+
+four : UInt64
+four = 4
+
+two : UInt64
+two = 2
+
+eight : UInt64
+eight = 8
+
+six : UInt64
+six = 6
+
+seven : UInt64
+seven = 7
+
+five : UInt64
+five = 5
+
+-- Одна регистрация, **два** чужих вызова. Уровень 2 этого не умеет: его скоуп
+-- равен одному вызову.
+sortBoth : (ω xs : Array 4 UInt64) -> (ω ys : Array 4 UInt64) -> {Foreign} Unit
+sortBoth xs ys =
+  let slot : CPtr = adamas_callback_register byWord
+  let 1 held : Slot = Held slot
+  let sortedFirst : Unit = qsort xs 4 8 slot
+  let sortedSecond : Unit = qsort ys 4 8 slot
+  MkUnit
+
+-- Занять все четыре слота и попросить пятый. Ответ - пятый, то есть ноль;
+-- четыре первых отпускаются деструкторами на выходе **отсюда**.
+crowd : (ω u : Unit) -> {Foreign} Crowded
+crowd u =
+  let a : CPtr = adamas_callback_register byWord
+  let 1 ha : Slot = Held a
+  let b : CPtr = adamas_callback_register byWord
+  let 1 hb : Slot = Held b
+  let c : CPtr = adamas_callback_register byWord
+  let 1 hc : Slot = Held c
+  let d : CPtr = adamas_callback_register byWord
+  let 1 hd : Slot = Held d
+  Fifth (adamas_callback_register byWord)
+
+-- Занять слот и тут же отпустить: ответ - занятое, чтобы вызывающий увидел,
+-- что таблица снова отдаёт.
+reclaim : (ω u : Unit) -> {Foreign} Crowded
+reclaim u =
+  let again : CPtr = adamas_callback_register byWord
+  let 1 kept : Slot = Held again
+  Fifth again
+
+slotOf : Crowded -> CPtr
+slotOf (Fifth slot) = slot
+
+-- Четыре ячейки одним числом: разряды читаются глазами.
+packed : UInt64 -> UInt64 -> UInt64 -> UInt64 -> UInt64
+packed a b c d =
+  addUInt64 (mulUInt64 a 1000) (addUInt64 (mulUInt64 b 100) (addUInt64 (mulUInt64 c 10) d))
+
+body : (ω u : Unit) -> {Foreign} UInt64
+body u =
+  let zeroed : Array 4 UInt64 = arrayNew 4 blank
+  let xs0 : Array 4 UInt64 = arraySet zeroed 0 three
+  let xs1 : Array 4 UInt64 = arraySet xs0 1 one
+  let xs2 : Array 4 UInt64 = arraySet xs1 2 four
+  let xs : Array 4 UInt64 = arraySet xs2 3 two
+  let empty : Array 4 UInt64 = arrayNew 4 blank
+  let ys0 : Array 4 UInt64 = arraySet empty 0 eight
+  let ys1 : Array 4 UInt64 = arraySet ys0 1 six
+  let ys2 : Array 4 UInt64 = arraySet ys1 2 seven
+  let ys : Array 4 UInt64 = arraySet ys2 3 five
+  let both : Unit = sortBoth xs ys
+  let a : UInt64 = arrayIndex xs 0
+  let b : UInt64 = arrayIndex xs 1
+  let c : UInt64 = arrayIndex xs 2
+  let d : UInt64 = arrayIndex xs 3
+  let e : UInt64 = arrayIndex ys 0
+  let f : UInt64 = arrayIndex ys 1
+  let g : UInt64 = arrayIndex ys 2
+  let h : UInt64 = arrayIndex ys 3
+  let crowded : Crowded = crowd MkUnit
+  let regained : Crowded = reclaim MkUnit
+  let first : UInt64 = pick (eqUInt64 (packed a b c d) 1234) 1 0
+  let second : UInt64 = pick (eqUInt64 (packed e f g h) 5678) 1 0
+  let limited : UInt64 = pick (eqUInt64 (slotOf crowded) vacant) 1 0
+  let reclaimed : UInt64 = pick (eqUInt64 (slotOf regained) vacant) 0 1
+  addUInt64 first
+    (addUInt64 (mulUInt64 second 10)
+      (addUInt64 (mulUInt64 limited 100) (mulUInt64 reclaimed 1000)))
+
+-- 1111.
+main : UInt64
+main = runForeign body

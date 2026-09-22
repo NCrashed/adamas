@@ -92,6 +92,29 @@ pub(crate) const PROMOTE: &str = include_str!("promote.c");
 /// Точка входа: печать ответа и счётчики блоков.
 pub(crate) const ENTRY: &str = include_str!("main.c");
 
+/// Таблица трамплинов уровня 3 (§5.3). Печатается только той программе,
+/// которая её символы объявила.
+pub(crate) const CALLBACK_TABLE: &str = include_str!("callback.c");
+
+/// Символ рантайма: занять слот таблицы трамплинов (§5.3, уровень 3).
+///
+/// Имя одно на трёх вычислителей: машина зовёт его сама
+/// (`adamas_interp::machine::CALLBACK_REGISTER`), оба понижения - сишное тело
+/// из [`CALLBACK_TABLE`]. Разойдись написание, и программа считалась бы у
+/// одного и падала бы `dlsym`'ом у другого.
+pub(crate) const CALLBACK_REGISTER: &str = "adamas_callback_register";
+
+/// Символ рантайма: освободить слот. См. [`CALLBACK_REGISTER`].
+pub(crate) const CALLBACK_RELEASE: &str = "adamas_callback_release";
+
+/// Объявлен ли программой хоть один символ таблицы трамплинов.
+pub(crate) fn tabled(program: &Program) -> bool {
+    program
+        .foreigns
+        .iter()
+        .any(|it| it.symbol == CALLBACK_REGISTER || it.symbol == CALLBACK_RELEASE)
+}
+
 /// Почему эмиссия отказала.
 #[derive(Debug, thiserror::Error)]
 pub enum EmitError {
@@ -171,6 +194,10 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     packings(&mut out, program);
     vectors(&mut out, program);
     prototypes(&mut out, program);
+    if tabled(program) {
+        out.push_str(CALLBACK_TABLE);
+        out.push('\n');
+    }
     exports(&mut out, program);
     table(&mut out, program);
     out.push_str(RELEASE);

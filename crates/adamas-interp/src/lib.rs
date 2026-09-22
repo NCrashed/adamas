@@ -221,6 +221,9 @@ pub fn run(signature: &Signature, term: &Term) -> Result<Term, RunError> {
 /// [`RunError`] - операция без хендлера, отсутствующая единица либо отказ
 /// чужого вызова.
 pub fn run_linked(signature: &Signature, term: &Term, linkage: Linkage) -> Result<Term, RunError> {
+    // Таблица трамплинов живёт прогоном, а не вызовом (§5.3, уровень 3): слот,
+    // не освобождённый обёрткой, подметается здесь - ровно как блок кучи.
+    let _scope = callback::Scope::entered();
     let machine = Machine::linked(signature, linkage);
     let value = machine.evaluate(&Env::default(), term)?;
     machine.read(value)

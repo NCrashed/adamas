@@ -86,9 +86,35 @@ carried = handle held with
   return v -> v
   width -> resume 5
 
-data Answers where
-  MkAnswers : Int64 -> Int64 -> Int8 -> Float64 -> UInt64 -> UInt64 -> Answers
+-- **Разнородная среда**: захвата два, и сорта у них разные (§10 вопрос 158,
+-- пересмотр 2026-09-22). Счётные слоты идут **префиксом** - это соглашение с
+-- рантаймом, по нему `adamas_closure` получает их число, а дроп по нему решает,
+-- что отдавать. Написаны захваты нарочно в обратном порядке: плоский `mul`
+-- объявлен раньше указательного `add`, то есть без перестановки счётным
+-- оказался бы слот с битами числа.
+--
+-- Множитель **чётный**: у нечётного младший бит совпадает с признаком
+-- непосредственного значения, и `adamas_dup` по нему не делает ничего.
 
--- 8-3 = 5; (8-3) - (3-2) = 4; -44; 6.25; (8+1)*2 = 18; 5*4-3 = 17.
+data Wrap where
+  MkWrap : UInt64 -> Wrap
+
+unwrap : Wrap -> UInt64
+unwrap (MkWrap n) = n
+
+applyWide : UInt64 -> (UInt64 -> UInt64) -> UInt64
+applyWide x f = f x
+
+-- 10*2 + 4 = 24.
+mixedEnvironment : UInt64
+mixedEnvironment =
+  let mul : UInt64 = 10
+  let add : Wrap = MkWrap 4
+  applyWide 2 (\k -> addUInt64 (mulUInt64 mul k) (unwrap add))
+
+data Answers where
+  MkAnswers : Int64 -> Int64 -> Int8 -> Float64 -> UInt64 -> UInt64 -> UInt64 -> Answers
+
+-- 8-3 = 5; (8-3) - (3-2) = 4; -44; 6.25; (8+1)*2 = 18; 5*4-3 = 17; 10*2+4 = 24.
 main : Answers
-main = MkAnswers byArgument byCapture narrow fractional measured carried
+main = MkAnswers byArgument byCapture narrow fractional measured carried mixedEnvironment

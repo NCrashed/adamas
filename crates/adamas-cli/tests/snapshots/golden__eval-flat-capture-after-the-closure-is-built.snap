@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-MkAnswers 5 4 (-44) 6.25 18 17 24
+106

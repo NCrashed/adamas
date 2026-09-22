@@ -670,6 +670,120 @@ fn a_flat_frame_slot_survives_a_replayed_segment() {
     assert_eq!(live, 0, "прогон оставил блоки живыми");
 }
 
+/// Захват **ветки хендлера** плоское по-прежнему боксирует, и это граница.
+///
+/// Пересмотр решения 158 (2026-09-22) снял боксирование у слота **замыкания**.
+/// Слот кадра хендлера - соседний, и путь к нему в понижении **тот же**
+/// (`Lowerer::capturing`), но снятие туда не распространяется: точка входа
+/// `adamas_kont_handler` числа счётных слотов не берёт вовсе, и дроп среды
+/// (`release_N`) отдаёт каждый занятый слот. Положи туда биты - и `adamas_drop`
+/// уменьшит счётчик по адресу числа.
+///
+/// Свидетель отрицательный, и стоит он ровно за границу: правка, «заодно»
+/// объявившая захват ветки разнородным, собирается молча и корпусом не ловится
+/// - измерено мутантом, он был зелен целиком до этого свидетеля.
+const BRANCH: &str = "\
+data Unit where
+  MkUnit : Unit
+
+data Wrap where
+  MkWrap : UInt64 -> Wrap
+
+effect Ask where
+  ask : UInt64
+
+asking : {Ask} Wrap
+asking =
+  let a : UInt64 = ask
+  let b : UInt64 = ask
+  MkWrap (addUInt64 a b)
+
+answering : UInt64 -> Wrap
+answering w = handle asking with
+  return v -> v
+  ask -> resume (addUInt64 w 1)
+
+main : Wrap
+main = answering 10
+";
+
+/// Плоский захват ветки хендлера уезжает в кадр обёрткой, а не битами.
+#[test]
+fn a_handler_branch_still_boxes_its_flat_capture() {
+    let text = harness::text(BRANCH).unwrap_or_else(|error| panic!("не понизилось: {error}"));
+    assert!(
+        text.contains("adamas_slot_write(t0, 0, adamas_word_UInt64(v0));")
+            && text.contains("t3_env[0] = t0;"),
+        "плоский захват ветки лёг в слот кадра не обёрткой:\n{text}"
+    );
+    assert!(
+        !text.contains("t3_env[0] = adamas_slot_of("),
+        "слот кадра хендлера понёс биты: `adamas_kont_handler` числа счётных не берёт"
+    );
+    // Дроп среды кадра отдаёт **каждый** слот: сорта он не спрашивает, и
+    // спросить ему не у кого.
+    assert!(
+        text.contains("adamas_drop_value(env[0]);"),
+        "дроп среды ветки перестал отдавать слот 0"
+    );
+    let stderr = harness::agreed("ветка-плоское", BRANCH)
+        .unwrap_or_else(|error| panic!("ветка с плоским захватом: {error}"));
+    let (_, live) = harness::blocks("ветка-плоское", &stderr);
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
+}
+
+/// Счётные слоты среды идут **префиксом**, и порядок написанного его не задаёт.
+///
+/// Соглашение с рантаймом у разнородного слота одно - `counted` первых слотов
+/// среды считаются, - и держать его обязано понижение. Проверить это можно
+/// только на среде, где сорта **разные** и написаны они в обратном порядке:
+/// `mul` плоский и объявлен раньше указательного `add`. Без перестановки
+/// счётным оказался бы слот с битами числа, а число счётных осталось бы
+/// единицей - то есть дроп отдал бы `adamas_drop` биты.
+///
+/// Свидетель этот текстовый, и текстовый он не от лени: перестановка
+/// наблюдаема **только** в номерах слотов. Прогоном её ловит корпус
+/// (`flat-scalar-through-a-closure`, множитель там чётный), а здесь называется
+/// сам порядок - иначе мутант «не сортировать» жил бы молча на любой среде,
+/// где сорт один.
+const MIXED: &str = "\
+data Wrap where
+  MkWrap : UInt64 -> Wrap
+
+unwrap : Wrap -> UInt64
+unwrap (MkWrap n) = n
+
+applying : UInt64 -> (UInt64 -> UInt64) -> UInt64
+applying x f = f x
+
+main : UInt64
+main =
+  let mul : UInt64 = 10
+  let add : Wrap = MkWrap 4
+  applying 2 (\\k -> addUInt64 (mulUInt64 mul k) (unwrap add))
+";
+
+/// Счётный захват встаёт в слот 0, плоский - за ним, при обратном написании.
+#[test]
+fn the_counted_capture_goes_first_whatever_the_written_order() {
+    let text = harness::text(MIXED).unwrap_or_else(|error| panic!("не понизилось: {error}"));
+    assert!(
+        text.contains("adamas_closure(box_2, adamas_release_value, 1u, 2u, 1u)"),
+        "среда перестала быть разнородной: захватов два, счётный обязан быть один"
+    );
+    let counted = text
+        .find("adamas_closure_set(t4, 0, v1);")
+        .unwrap_or_else(|| panic!("счётный захват не стоит слотом 0:\n{text}"));
+    let flat = text
+        .find("adamas_closure_set(t4, 1, adamas_slot_of(adamas_word_UInt64(v0)));")
+        .unwrap_or_else(|| panic!("плоский захват не стоит слотом 1:\n{text}"));
+    assert!(counted < flat, "слоты напечатаны не по порядку");
+    let stderr = harness::agreed("разнородная-среда", MIXED)
+        .unwrap_or_else(|error| panic!("разнородная среда: {error}"));
+    let (_, live) = harness::blocks("разнородная-среда", &stderr);
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
+}
+
 /// Плоский захват под **частичным применением**: копия замыкания его не дупает.
 ///
 /// Путь этот в корпусе не проходит никто, и это измерено, а не предположено:
@@ -708,6 +822,15 @@ fn a_flat_capture_survives_partial_application() {
     let (_, live) = harness::blocks("частичное-плоское", &stderr);
     assert_eq!(live, 0, "прогон оставил блоки живыми");
 }
+
+/// Сколько воркеров просит свидетель промоушена у круга (§5.2).
+///
+/// Число нужно **больше единицы**, и это не украшение: `adamas_share` на теле
+/// задачи стоит под ветвью `hands != 0` (`fiber.c`), то есть однопоточный круг
+/// обхода промоушена не зовёт вовсе. Первая редакция свидетеля ниже переменной
+/// не ставила и мутанта «метить все занятые слоты» не убивала - проверено
+/// прогоном, а не рассуждением.
+const THREADS: &str = "4";
 
 /// Плоский захват, уезжающий в **чужой поток**: промоушен его не метит.
 ///
@@ -771,10 +894,21 @@ fn a_flat_capture_survives_a_spawned_task() {
         text.contains("adamas_closure_slot_counted(value, index)"),
         "порождённый промоушен перестал спрашивать сорт слота"
     );
-    let stderr = harness::agreed("задача-плоское", SPAWNED)
-        .unwrap_or_else(|error| panic!("задача с плоским захватом: {error}"));
-    let (_, live) = harness::blocks("задача-плоское", &stderr);
-    assert_eq!(live, 0, "прогон оставил блоки живыми");
+    let expected = harness::machine_printed(SPAWNED)
+        .unwrap_or_else(|why| panic!("машина обязана отвечать, а сказала `{why}`"));
+    let ran = harness::c_printed_with("задача-плоское", SPAWNED, &[("ADAMAS_THREADS", THREADS)]);
+    assert_eq!(
+        ran.printed,
+        expected,
+        "на {THREADS} воркерах ответ разошёлся с машиной; stderr `{}`",
+        ran.reason.trim_end()
+    );
+    assert_eq!(
+        ran.live,
+        Some(0),
+        "прогон оставил блоки живыми: `{}`",
+        ran.reason.trim_end()
+    );
 }
 
 /// Плоский **агрегат** упирается в обеих позициях в одну и ту же стену.

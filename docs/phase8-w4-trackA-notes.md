@@ -219,7 +219,9 @@ own = True
 Программа из трёх файлов, где `Bool` объявлен в одном модуле, сравнение и
 литеральный паттерн живут во втором, а считает третий, — она стоит в корпусе
 (`tests/golden/eval/library.adamas`, `Cmp/Truth.adamas`, `Cmp/Words.adamas`) и
-отвечает `{big = 1, small = 0, zero = 100, one = 200, other = 7}`.
+отвечает `{big = 1, small = 0, folded = 1, zero = 100, one = 200, other = 7,
+down = 55}`. Рядом стоит `library-silent.adamas` — второй вход к тем же двум
+модулям, не упоминающий `Bool` ни разу. `TAKEN` — **117** в обоих списках.
 
 Библиотечный модуль **проверяется в одиночку**: `adamas check
 tests/golden/eval/Cmp/Words.adamas` — «проверено, файлов 2, объявлений 7». Это

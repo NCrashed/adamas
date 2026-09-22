@@ -448,6 +448,146 @@ fn capturing_a_flat_scalar_costs_a_cell_per_closure_not_per_call() {
     );
 }
 
+/// Одна и та же величина: битами в слоте кадра, ячейкой в слоте замыкания.
+///
+/// `a` живёт через точку приостановки, `w` уезжает средой замыкания - оба
+/// `UInt64`, оба в одной программе. Слот кадра берёт `a` словом
+/// (`adamas_slot_of(adamas_word_UInt64(...))`, `counted` меньше `fields`,
+/// release кадру не порождается вовсе); слот замыкания берёт `w` **обёрткой**
+/// - `adamas_alloc` плюс `adamas_closure_set`.
+const BESIDE: &str = "\
+data Unit where
+  MkUnit : Unit
+
+data Wrap where
+  MkWrap : UInt64 -> Wrap
+
+effect State where
+  get : UInt64
+  put : UInt64 -> Unit
+
+start : UInt64
+start = 10
+
+counter : {State} Wrap
+counter =
+  let a : UInt64 = get
+  let u : Unit = put (addUInt64 a 1)
+  let b : UInt64 = get
+  MkWrap (addUInt64 a b)
+
+threaded : Wrap
+threaded = handle counter with
+  state start
+  return v -> v
+  get -> resume state state
+  put x -> resume MkUnit x
+
+shifted : UInt64
+shifted =
+  let w : UInt64 = 7
+  let f : UInt64 -> UInt64 = \\n -> addUInt64 n w
+  f 1
+
+combine : Wrap -> UInt64 -> Wrap
+combine (MkWrap x) y = MkWrap (addUInt64 x y)
+
+main : Wrap
+main = combine threaded shifted
+";
+
+/// Пары «слотов, счётных» у каждого `adamas_kont_push` порождённой единицы.
+fn frame_slots(text: &str) -> Vec<(u32, u32)> {
+    text.lines()
+        .filter(|line| line.contains("adamas_kont_push(kont, ADAMAS_MARK_PLAIN"))
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split(", ").collect();
+            let counted = parts.iter().rev().nth(1)?.trim_end_matches('u');
+            let fields = parts.iter().rev().nth(2)?.trim_end_matches('u');
+            Some((fields.parse().ok()?, counted.parse().ok()?))
+        })
+        .collect()
+}
+
+/// Ветка порождённого дропа по названному тегу, до её `return`.
+fn release_branch(text: &str, tag: &str) -> String {
+    let from = text
+        .find(&format!("if (tag == {tag}) {{"))
+        .unwrap_or_else(|| panic!("в порождённом дропе нет ветки {tag}"));
+    let rest = &text[from..];
+    let to = rest
+        .find("return;")
+        .unwrap_or_else(|| panic!("ветка {tag} не кончается возвратом"));
+    rest[..to].to_owned()
+}
+
+/// Разнородный слот в понижении **уже есть**, и у замыкания его нет (§4.11).
+///
+/// Решение 158 (лог 2026-09-10) берёт единообразный слот принятой ценой, и
+/// цену эту считают свидетели выше. Здесь утверждается не она, а то, **с чем
+/// её сравнивать**: соседей у слота замыкания два, и оба разнородны.
+///
+/// *Слот конструктора* несёт либо указатель, либо биты примитива, и какой
+/// именно - говорит таблица сортов (`adamas_slot_kind` по индексу из
+/// `adamas_con_slot0`): порождённый дроп плоский слот **пропускает**.
+///
+/// *Слот кадра продолжения* несёт то же самое, и границу проводит не таблица,
+/// а префикс: счётные слоты идут первыми, их число уезжает в `adamas_kont_push`
+/// (`adamas_frame_counted`), а кадру из одних плоских слотов release не
+/// порождается вовсе.
+///
+/// *Слот замыкания* единообразен: порождённый дроп обходит
+/// `adamas_closure_taken` слотов и отдаёт **каждый**, ни о каком сорте не
+/// спрашивая. Поэтому плоское значение туда и боксируется - иначе `adamas_drop`
+/// уменьшил бы счётчик по адресу числа.
+///
+/// Свидетель этот - **мера** пересмотра 158, а не его часть. Он покраснеет
+/// ровно тогда, когда слот замыкания перестанет быть единственным
+/// единообразным, и это и есть момент, когда запись о принятой цене пора
+/// перечитывать.
+#[test]
+fn a_frame_slot_is_heterogeneous_and_a_closure_slot_is_not() {
+    let stderr =
+        harness::agreed("рядом", BESIDE).unwrap_or_else(|error| panic!("рядом не прошло: {error}"));
+    let (_, live) = harness::blocks("рядом", &stderr);
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
+
+    let text = harness::text(BESIDE).unwrap_or_else(|error| panic!("не понизилось: {error}"));
+
+    // Кадр: плоский слот есть, и он не считается.
+    let slots = frame_slots(&text);
+    assert!(
+        slots.iter().any(|(fields, counted)| counted < fields),
+        "ни один кадр не несёт плоского слота: {slots:?}"
+    );
+    assert!(
+        text.contains("_env[0] = adamas_slot_of(adamas_word_UInt64("),
+        "плоское связывание легло в слот кадра не битами"
+    );
+
+    // Замыкание: та же величина боксируется.
+    assert!(
+        text.contains("adamas_closure_set("),
+        "программа не собирает среды замыкания - сравнивать не с чем"
+    );
+    let closure = release_branch(&text, "ADAMAS_TAG_CLOSURE");
+    assert!(
+        !closure.contains("adamas_slot_kind"),
+        "дроп замыкания начал спрашивать сорт слота: единообразие слота снято, \
+         и принятая цена решения 158 требует пересчёта"
+    );
+    assert!(
+        closure.contains("adamas_closure_taken(value)"),
+        "дроп замыкания считает слоты не рантаймом: форма ветки сменилась"
+    );
+
+    // Конструктор: сорт слота спрашивается, и это второй разнородный сосед.
+    assert!(
+        text.contains("adamas_slot_kind[adamas_con_slot0[tag] + index] != ADAMAS_FLAT_BOXED"),
+        "дроп конструктора перестал спрашивать таблицу сортов"
+    );
+}
+
 /// Плоский **агрегат** упирается в обеих позициях в одну и ту же стену.
 ///
 /// Граница замыкания у него теперь одна на две позиции: боксирует его тот же

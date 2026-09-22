@@ -133,7 +133,9 @@ fn pipelines() -> [(&'static str, Pipeline); 2] {
 ///
 /// Без этого теста «прогон дошёл до конца» покрывало бы и программу, чей цикл
 /// свернулся на первом витке. Глубина здесь [`SHALLOW`] - её берёт и
-/// интерпретатор, и C-бэкенд, у которого хвостовых вызовов нет.
+/// интерпретатор, и C-бэкенд, у которого хвостового вызова на **этой** форме
+/// нет: приставку он печатает только самому себе, а свидетель взаимный
+/// ([`a_self_tail_loop_through_a_closure_runs_deep`]).
 #[test]
 fn the_witness_answers_what_the_machine_answers() {
     let Some((tools, _)) = harness::llvm_toolchains() else {
@@ -346,6 +348,192 @@ main = step 5 { a = 0, b = 0, c = 1, d = 2 }
             assert_eq!(printed, "261", "{name} на {level} посчитал не то");
         }
     }
+}
+
+/// Витков у глубокого свидетеля C-пути.
+///
+/// Два миллиона, а не десять: кадр `counted` мерян в 113 байт (порог 2 MiB -
+/// 18 432 витка проходят, 18 688 нет), то есть до правки эта глубина стоила бы
+/// 226 МБ стека и не прошла бы ни в одном окружении. Десять миллионов дали бы
+/// то же утверждение и вчетверо больше секунд у прогона.
+const THROUGH: u64 = 2_000_000;
+
+/// Самохвостовой цикл, применяющий замыкание, доходит до конца у C-понижения.
+///
+/// **Это и есть §10 вопрос 192.** Трек B волны 3 измерил предел: 100 000 витков
+/// проходят, 200 000 роняют процесс сигналом 11, и на кадре лежит адрес
+/// `adamas_kont`. Постановка вопроса объясняла это тем, что применение
+/// значения-функции идёт через `adamas_apply`, куда гарантия §6 не дотянулась.
+/// Объяснение неверно дважды, и оба раза - прогоном.
+///
+/// *Хвостовой вызов здесь не применение, а прямой вызов.* `counted` зовёт себя,
+/// а применение стоит в его **аргументе**. §6 обещает «guaranteed для
+/// self-tail», и обещание своё касается ровно этой дуги.
+///
+/// *У LLVM оно и держалось.* Тот же цикл на `.ll` брал 132 миллиона витков в
+/// потоке 2 MiB и до правки: эмиттер печатает `musttail` на всяком хвостовом
+/// [`adamas_codegen::ir::Expr::Call`], а `alloca` корня трамплина ему не
+/// помеха. Ломалось только C-понижение, и ломали его два обстоятельства, ни
+/// одно из которых не про `adamas_apply`: порождённое собирается `-O1`, где
+/// gcc свёртки соседнего вызова не делает **вовсе** (закрытый от замыканий
+/// цикл падал там наравне с этим), а на `-O2` свёртку отменяет локаль с ушедшим
+/// адресом - `adamas_kont` применения ровно такая.
+///
+/// Наблюдается прогон, а не текст: приставка, напечатанная и не сработавшая,
+/// выглядела бы в тексте так же. Текст сверяется рядом - вторым утверждением, -
+/// и нужен он для того, чтобы отказ был читаемым: без него «оборвался» не
+/// сказал бы, печатается приставка или нет.
+#[test]
+fn a_self_tail_loop_through_a_closure_runs_deep() {
+    let source = format!(
+        "\
+data Bool where
+  True : Bool
+  False : Bool
+
+mixed : UInt64 -> UInt64 -> UInt64
+mixed v acc = addUInt64 (mulUInt64 acc 3) v
+
+counted : (UInt64 -> UInt64 -> UInt64) -> UInt64 -> UInt64 -> UInt64 -> UInt64
+counted f w 0 acc = acc
+counted f w n acc = counted f w (subUInt64 n 1) (f w acc)
+
+main : UInt64
+main =
+  let f : UInt64 -> UInt64 -> UInt64 = \\v acc -> mixed v acc
+  counted f 1 {THROUGH} 1
+"
+    );
+    let text = harness::text(&source).unwrap_or_else(|error| panic!("не понизилось: {error}"));
+    assert!(
+        text.contains("ADAMAS_MUSTTAIL return fn_"),
+        "приставка не напечатана: самохвостовой вызов остался обычным"
+    );
+    let run = harness::c_printed_with("tail-through-a-closure", &source, &[]);
+    assert!(
+        run.printed.parse::<u64>().is_ok(),
+        "{THROUGH} витков не дошли до конца: {}",
+        run.printed
+    );
+    assert_eq!(run.live, Some(0), "прогон оставил блоки живыми");
+    eprintln!("{THROUGH} витков через замыкание: {}", run.printed);
+}
+
+/// Приставка стоит **не** у всякого хвостового вызова, и граница мерена.
+///
+/// Снимается она у ответа составного типа, потому что gcc такой вызов
+/// отвергает **сборкой**: «callee returns a structure» у плотного агрегата,
+/// «other reasons» у вектора. Поймал это корпус (`packets`), а не чтение
+/// документации, - сборка не шла вовсе. Граница та же, что у LLVM-эмиттера, и
+/// цена её та же: у такой функции гарантия §6 остаётся свёрткой соседнего
+/// вызова при `-O2`.
+///
+/// Обе половины обязательны. Без второй «снимаем у агрегата» читалось бы как
+/// «агрегат с приставкой несовместим вовсе»; агрегат **параметром** при
+/// скалярном ответе её не трогает.
+#[test]
+fn an_aggregate_answer_drops_the_c_prefix() {
+    const WIDE: &str = "\
+data Bool where
+  True : Bool
+  False : Bool
+
+type Tally = { a : UInt64, b : UInt64, c : UInt64, d : UInt64 }
+
+step : UInt64 -> Tally -> Tally
+step 0 t = t
+step k t =
+  step (subUInt64 k 1) { a = addUInt64 t.a k, b = xorUInt64 t.b k, c = mulUInt64 t.c 3,
+                         d = t.d }
+
+main : UInt64
+main =
+  let t : Tally = step 5 { a = 0, b = 0, c = 1, d = 2 }
+  addUInt64 t.a (addUInt64 t.b (addUInt64 t.c t.d))
+";
+    const NARROW: &str = "\
+data Bool where
+  True : Bool
+  False : Bool
+
+type Tally = { a : UInt64, b : UInt64, c : UInt64, d : UInt64 }
+
+step : UInt64 -> Tally -> UInt64
+step 0 t = addUInt64 t.a (addUInt64 t.b (addUInt64 t.c t.d))
+step k t =
+  step (subUInt64 k 1) { a = addUInt64 t.a k, b = xorUInt64 t.b k, c = mulUInt64 t.c 3,
+                         d = t.d }
+
+main : UInt64
+main = step 5 { a = 0, b = 0, c = 1, d = 2 }
+";
+    let wide = harness::text(WIDE).unwrap_or_else(|error| panic!("широкий не понизился: {error}"));
+    assert!(
+        !wide.contains("ADAMAS_MUSTTAIL return fn_"),
+        "приставка осталась у агрегатного ответа: gcc уронит сборку"
+    );
+    let narrow =
+        harness::text(NARROW).unwrap_or_else(|error| panic!("узкий не понизился: {error}"));
+    assert!(
+        narrow.contains("ADAMAS_MUSTTAIL return fn_"),
+        "приставка снята и там, где она законна: агрегат в параметре её не трогает"
+    );
+    for (name, source) in [("tail-c-wide", WIDE), ("tail-c-narrow", NARROW)] {
+        let stderr =
+            harness::agreed(name, source).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert!(stderr.contains("живо 0"), "{name}: прогон оставил блоки");
+    }
+}
+
+/// Названная граница: применение значения **в хвосте** гарантии не получает.
+///
+/// Оба понижения растят на ней стек, и это остаток вопроса 192, треком не
+/// снятый. Форма у остатка у́же той, что называет постановка: не «цикл,
+/// применяющий замыкание» - такой цикл теперь сворачивается обоими, - а цикл,
+/// у которого **последним действием** стоит применение значения. Здесь его
+/// строит взаимная пара: `tick` зовёт `again` хвостом, `again` кончается
+/// применением `k`.
+///
+/// Приставка сюда не дотягивается ни в каком виде. У C `adamas_apply` отвечает
+/// `adamas_value`, а функция - своим типом, и `musttail` требует совпадения;
+/// сверх того за применением обязан идти `adamas_kont_run`, докручивающий
+/// трамплин, - замести кадр до него значило бы читать снятый корень. У LLVM
+/// то же плюс соглашение: `adamas_apply` сишный, порождённое - `tailcc`.
+/// Снимает это только трамплин на применении - развилка (б) вопроса 192, - и
+/// она меняет договор всякого применения, а не печать одного места.
+///
+/// Порог мерян (2 MiB, C-понижение): 10 752 витка проходят, 10 880 нет.
+/// Утверждается здесь **не** порог - он принадлежит машине, - а то, что
+/// глубина, которую берёт закрытый случай, здесь не берётся. Разойдись это -
+/// остаток закрылся сам, и запись о нём пора снимать.
+#[test]
+fn an_apply_in_tail_position_is_still_bounded_by_the_stack() {
+    let source = format!(
+        "\
+data Bool where
+  True : Bool
+  False : Bool
+
+mutual
+  tick : UInt64 -> UInt64 -> UInt64
+  tick 0 acc = acc
+  tick n acc = again (subUInt64 n 1) (addUInt64 (mulUInt64 acc 3) 1)
+
+  again : UInt64 -> UInt64 -> UInt64
+  again n acc =
+    let k : UInt64 -> UInt64 -> UInt64 = \\m a -> tick m a
+    k n acc
+
+main : UInt64
+main = tick {THROUGH} 1
+"
+    );
+    let run = harness::c_printed_with("tail-apply-bounded", &source, &[]);
+    assert_eq!(
+        run.printed, "прогон оборвался",
+        "применение в хвосте дошло до {THROUGH}: остаток вопроса 192 закрылся, \
+         и запись о нём пора снимать"
+    );
 }
 
 /// Текст без названной подстроки. Не найденная подстрока роняет тест.

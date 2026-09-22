@@ -462,6 +462,36 @@ pub(crate) fn scalar(repr: Repr) -> &'static str {
     }
 }
 
+/// Годится ли ответ такого представления под приставку `musttail` (§6).
+///
+/// Годится всё, что уходит **регистром**: слово объекта и плоский скаляр.
+/// Не годится то, что C возвращает как значение составного типа, - плотный
+/// агрегат, вектор и дескриптор укладки. Отказ у gcc в обоих случаях
+/// **сборочный**, а не молчаливый («callee returns a structure» у агрегата,
+/// «other reasons» у вектора), и поймал его корпус на `packets`, а не чтение:
+/// сборка не шла вовсе.
+///
+/// Граница та же, что у LLVM-эмиттера, и по той же причине: у агрегата шире
+/// регистров ответ едет скрытым указателем вызывающего, а хвостовой вызов в
+/// чужой `sret` писать не вправе. Там она названа порогом ABI хоста, здесь -
+/// именем типа; условие у обоих одно, и цена его одна - у такой функции
+/// гарантия §6 остаётся тем, чем была, свёрткой соседнего вызова при `-O2`.
+///
+/// [`Repr::Opaque`] исключён вместе с ними: ответом он не бывает вовсе
+/// (понижение его там отвергает), и разрешать его здесь значило бы утверждать
+/// о непроверяемом.
+const fn returnable(repr: Repr) -> bool {
+    matches!(
+        repr,
+        Repr::Boxed
+            | Repr::Array(_)
+            | Repr::Region
+            | Repr::Record(_)
+            | Repr::Resumption
+            | Repr::Flat(_)
+    )
+}
+
 /// Имя C-типа вектора (§4.9): `adamas_simd_8_Float32`.
 fn vector_type(lanes: u32, lane: PrimTy) -> String {
     format!("adamas_simd_{lanes}_{}", lane.name())
@@ -521,6 +551,28 @@ fn preamble(out: &mut String) {
         "/* Стёртая позиция (§3.3): значения в рантайме нет. Макрос стоит там, где\n",
         " * стёртое связывание всё-таки упомянули бы, и печатается заметно. */\n",
         "#define ADAMAS_ERASED adamas_con0(0xFFFCu)\n",
+        "\n",
+        "/* Самохвостовой вызов: гарантия §6, а не оптимизация.\n",
+        " *\n",
+        " * Приставка стоит ровно там, где вызываемый есть сама функция, - тогда\n",
+        " * прототипы совпадают дословно, и требование обоих компиляторов выполнено\n",
+        " * по построению. Она снимает два условия, от которых иначе зависит\n",
+        " * гарантия: уровень оптимизации (свёртку соседнего вызова gcc включает с\n",
+        " * `-O2`, а порождённое собирается `-O1`) и отсутствие локали, чей адрес\n",
+        " * ушёл наружу (`adamas_kont` у применения замыкания - ровно такая).\n",
+        " *\n",
+        " * Где приставки нет, макрос пуст, и гарантия возвращается к тому, чем\n",
+        " * была: свёртке соседнего вызова при `-O2`. Это ослабление, а не отказ\n",
+        " * сборки, и названо оно тем же порядком, каким §9 называет границы\n",
+        " * `musttail`: clang с 13, gcc с 15.1. */\n",
+        "#if defined(__has_attribute)\n",
+        "#  if __has_attribute(musttail)\n",
+        "#    define ADAMAS_MUSTTAIL __attribute__((musttail))\n",
+        "#  endif\n",
+        "#endif\n",
+        "#ifndef ADAMAS_MUSTTAIL\n",
+        "#  define ADAMAS_MUSTTAIL\n",
+        "#endif\n",
         "\n",
     ));
 }
@@ -1196,6 +1248,12 @@ fn body(
     };
     let answer = if split {
         emitter.tail(&function.body, 1);
+        None
+    } else if emitter.self_tailing(&function.body) {
+        // Самохвостовая функция печатается возвратом на каждом пути: только там
+        // вызов стоит под `return`, а приставка `musttail` требует именно
+        // этого (§6). Прочие печатаются как печатались.
+        emitter.returning(&function.body, 1);
         None
     } else {
         Some(emitter.value(&function.body, 1))
@@ -2945,10 +3003,13 @@ impl Emitter<'_> {
     /// зовётся голым написанным (`adamas_lowered_first`), второй передаются
     /// свои вектор и ручка. Взять их первая форма не может ниоткуда, и такой
     /// пары [`emit`] не пропускает вовсе ([`EmitError::Hidden`]).
-    fn call(&mut self, function: FuncId, arguments: &[Expr], depth: usize) -> String {
-        let pad = Self::pad(depth);
+    /// Аргументы прямого вызова: скрытые формы, затем живые связывания.
+    ///
+    /// Отдельно от печати, потому что печатей две: вызов значением
+    /// ([`Self::call`]) и вызов под `return` ([`Self::returning`]). Порядок
+    /// вычисления аргументов при этом один, и он виден в тексте.
+    fn arguments(&mut self, function: FuncId, arguments: &[Expr], depth: usize) -> Vec<String> {
         let called = &self.program.functions[function.0];
-        let title = escaped(&called.name);
         let form = called.form;
         let present: Vec<usize> = called
             .parameters
@@ -2967,7 +3028,14 @@ impl Emitter<'_> {
             };
             given.push(self.value(argument, depth));
         }
-        let result = c_type(called.result);
+        given
+    }
+
+    fn call(&mut self, function: FuncId, arguments: &[Expr], depth: usize) -> String {
+        let pad = Self::pad(depth);
+        let title = escaped(&self.program.functions[function.0].name);
+        let given = self.arguments(function, arguments, depth);
+        let result = c_type(self.program.functions[function.0].result);
         let name = self.temp();
         let _ = writeln!(
             self.out,
@@ -3323,6 +3391,51 @@ impl Emitter<'_> {
         let _ = writeln!(self.out, "{pad}const adamas_evidence *ev = {root}_ev;");
     }
 
+    /// Шапка ветви: `case` с именем конструктора и связывания полей.
+    ///
+    /// Одна на три печати разбора - значением ([`Self::analysis`]), хвостом
+    /// куска ([`Self::branching`]) и возвратом ([`Self::returning_analysis`]).
+    /// Отдельной она стоит не ради краткости: поле читается **битами** либо
+    /// ссылкой по представлению, и третья копия этого различия разъехалась бы
+    /// молча, а стоило бы это чтения числа указателем.
+    ///
+    /// Ветви - альтернативы: счёт одной другой не виден. Поля владения не
+    /// заводят - ссылку на нужное берёт `Dup`, поставленный `perceus::arm`, а
+    /// ненужное поле не читается вовсе.
+    fn arm_head(&mut self, arm: &Arm, scrutinee: &str, depth: usize) {
+        let pad = Self::pad(depth);
+        let described = &self.program.constructors[usize::from(arm.constructor.0)];
+        let title = escaped(&described.name);
+        let params = described.params as usize;
+        let slots: Vec<Option<u32>> = (0..arm.fields.len())
+            .map(|position| described.slot(params + position))
+            .collect();
+        let _ = writeln!(
+            self.out,
+            "{pad}case {}u: {{ /* {title} */",
+            arm.constructor.0
+        );
+        for (binding, slot) in arm.fields.iter().zip(&slots) {
+            let Some(slot) = slot else { continue };
+            // Плоское поле читается битами слота: заголовка у него нет, и
+            // указателем оно не бывает (§4.11).
+            let taken = match binding.fact.repr.primitive() {
+                Some(ty) => format!(
+                    "adamas_bits_{}(adamas_slot_bits({scrutinee}, {slot}))",
+                    ty.name()
+                ),
+                None => format!("adamas_field({scrutinee}, {slot})"),
+            };
+            let _ = writeln!(
+                self.out,
+                "{pad}    {} v{} = {taken}; /* {} */",
+                c_type(binding.fact.repr),
+                binding.local.0,
+                escaped(&binding.name)
+            );
+        }
+    }
+
     /// Разбор: `switch` по тегу заголовка.
     fn analysis(&mut self, scrutinee: &Expr, arms: &[Arm], depth: usize) -> String {
         let pad = Self::pad(depth);
@@ -3339,39 +3452,7 @@ impl Emitter<'_> {
         let _ = writeln!(self.out, "{pad}{} {name};", c_type(answer));
         let _ = writeln!(self.out, "{pad}switch (adamas_tag({scrutinee})) {{");
         for arm in arms {
-            // Ветви - альтернативы: счёт одной другой не виден. Поля владения
-            // не заводят: ссылку на нужное берёт `Dup`, поставленный
-            // `perceus::arm`, а ненужное поле не читается вовсе.
-            let described = &self.program.constructors[usize::from(arm.constructor.0)];
-            let title = escaped(&described.name);
-            let params = described.params as usize;
-            let slots: Vec<Option<u32>> = (0..arm.fields.len())
-                .map(|position| described.slot(params + position))
-                .collect();
-            let _ = writeln!(
-                self.out,
-                "{pad}case {}u: {{ /* {title} */",
-                arm.constructor.0
-            );
-            for (binding, slot) in arm.fields.iter().zip(&slots) {
-                let Some(slot) = slot else { continue };
-                // Плоское поле читается битами слота: заголовка у него нет, и
-                // указателем оно не бывает (§4.11).
-                let taken = match binding.fact.repr.primitive() {
-                    Some(ty) => format!(
-                        "adamas_bits_{}(adamas_slot_bits({scrutinee}, {slot}))",
-                        ty.name()
-                    ),
-                    None => format!("adamas_field({scrutinee}, {slot})"),
-                };
-                let _ = writeln!(
-                    self.out,
-                    "{pad}    {} v{} = {taken}; /* {} */",
-                    c_type(binding.fact.repr),
-                    binding.local.0,
-                    escaped(&binding.name)
-                );
-            }
+            self.arm_head(arm, &scrutinee, depth);
             let answer = self.value(&arm.body, depth + 1);
             let _ = writeln!(self.out, "{pad}    {name} = {answer};");
             let _ = writeln!(self.out, "{pad}    break;");
@@ -3712,6 +3793,105 @@ impl Emitter<'_> {
         let _ = writeln!(self.out, "{pad}return {held};");
     }
 
+    /// Есть ли в хвосте тела вызов **самой** функции (§6, гарантия self-tail).
+    ///
+    /// Спрашивается до печати и решает её форму: тело с таким вызовом печатает
+    /// [`Self::returning`] - возврат на каждом пути, - а прочие печатаются как
+    /// печатались, одним возвратом в конце. Разделение не украшение: приставка
+    /// `musttail` требует, чтобы вызов стоял **под самим** `return`, а обычная
+    /// печать кладёт его во временное. Ставить возврат в ветви всем подряд
+    /// значило бы двинуть порождённый C у всего корпуса ради функций, которым
+    /// это не нужно.
+    ///
+    /// Обход и печать спускаются в одно и то же и обязаны такими остаться:
+    /// найди обход вызов там, куда печать не пойдёт, приставки не появилось бы,
+    /// - а найди печать там, куда не ходил обход, форма сменилась бы у тела, о
+    /// котором ничего не утверждается. Плотный разбор не берётся ни тем, ни
+    /// другим ([`Self::packed_analysis`] печатает своё).
+    fn self_tailing(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Bind { body, .. }
+            | Expr::Dup { body, .. }
+            | Expr::Drop { body, .. }
+            | Expr::Reclaim { body, .. }
+            | Expr::Discard { body, .. } => self.self_tailing(body),
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                !matches!(self.shape(scrutinee), Repr::Packed(_))
+                    && arms.iter().any(|arm| self.self_tailing(&arm.body))
+            }
+            Expr::Call { function, .. } => {
+                *function == self.id && returnable(self.program.functions[function.0].result)
+            }
+            _ => false,
+        }
+    }
+
+    /// Тело чистого отрезка с возвратом на каждом пути (§6).
+    ///
+    /// Форма, в которой самохвостовой вызов печатается приставкой. Всё, что
+    /// хвостом не является, уходит в обычную печать значения и возвращается
+    /// следом: различие между этими двумя путями и есть всё, что делает вызов
+    /// гарантированным.
+    fn returning(&mut self, expr: &Expr, depth: usize) {
+        let pad = Self::pad(depth);
+        match expr {
+            Expr::Bind { .. }
+            | Expr::Dup { .. }
+            | Expr::Drop { .. }
+            | Expr::Reclaim { .. }
+            | Expr::Discard { .. } => {
+                let body = self.bookkept(expr, depth);
+                self.returning(body, depth);
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } if !matches!(self.shape(scrutinee), Repr::Packed(_)) => {
+                self.returning_analysis(scrutinee, arms, depth);
+            }
+            Expr::Call {
+                function,
+                arguments,
+            } if *function == self.id && returnable(self.program.functions[function.0].result) => {
+                let given = self.arguments(*function, arguments, depth);
+                let title = escaped(&self.program.functions[function.0].name);
+                let _ = writeln!(
+                    self.out,
+                    "{pad}ADAMAS_MUSTTAIL return fn_{}({}); /* {title} */",
+                    function.0,
+                    given.join(", ")
+                );
+            }
+            other => {
+                let answer = self.value(other, depth);
+                let _ = writeln!(self.out, "{pad}return {answer};");
+            }
+        }
+    }
+
+    /// Разбор в возвратной позиции: возврат раздаётся ветвям.
+    ///
+    /// Временного под ответ здесь нет вовсе, и `break` тоже: каждая ветвь
+    /// кончается своим `return`. Отказ стоит **после** `switch`, а не веткой
+    /// `default`, по той же причине, что у [`Self::branching`], - выпасть из
+    /// него можно только не совпав ни с одним тегом.
+    fn returning_analysis(&mut self, scrutinee: &Expr, arms: &[Arm], depth: usize) {
+        let pad = Self::pad(depth);
+        let scrutinee = self.value(scrutinee, depth);
+        let _ = writeln!(self.out, "{pad}switch (adamas_tag({scrutinee})) {{");
+        for arm in arms {
+            self.arm_head(arm, &scrutinee, depth);
+            self.returning(&arm.body, depth + 1);
+            let _ = writeln!(self.out, "{pad}}}");
+        }
+        let _ = writeln!(self.out, "{pad}}}");
+        let _ = writeln!(
+            self.out,
+            "{pad}adamas_fail(\"разбор не знает конструктора\");"
+        );
+    }
+
     /// Хвост куска: код, кончающийся ровно одним возвратом на каждом пути.
     fn tail(&mut self, expr: &Expr, depth: usize) {
         match expr {
@@ -3798,34 +3978,7 @@ impl Emitter<'_> {
         let scrutinee = self.value(scrutinee, depth);
         let _ = writeln!(self.out, "{pad}switch (adamas_tag({scrutinee})) {{");
         for arm in arms {
-            let described = &self.program.constructors[usize::from(arm.constructor.0)];
-            let title = escaped(&described.name);
-            let params = described.params as usize;
-            let slots: Vec<Option<u32>> = (0..arm.fields.len())
-                .map(|position| described.slot(params + position))
-                .collect();
-            let _ = writeln!(
-                self.out,
-                "{pad}case {}u: {{ /* {title} */",
-                arm.constructor.0
-            );
-            for (binding, slot) in arm.fields.iter().zip(&slots) {
-                let Some(slot) = slot else { continue };
-                let taken = match binding.fact.repr.primitive() {
-                    Some(ty) => format!(
-                        "adamas_bits_{}(adamas_slot_bits({scrutinee}, {slot}))",
-                        ty.name()
-                    ),
-                    None => format!("adamas_field({scrutinee}, {slot})"),
-                };
-                let _ = writeln!(
-                    self.out,
-                    "{pad}    {} v{} = {taken}; /* {} */",
-                    c_type(binding.fact.repr),
-                    binding.local.0,
-                    escaped(&binding.name)
-                );
-            }
+            self.arm_head(arm, &scrutinee, depth);
             self.tail(&arm.body, depth + 1);
             let _ = writeln!(self.out, "{pad}}}");
         }

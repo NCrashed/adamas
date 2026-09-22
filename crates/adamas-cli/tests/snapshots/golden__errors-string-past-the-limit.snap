@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: string-past-the-limit.adamas:20:10: строка не помещается: с завершающим нулём в ней 65 байт, а предел 64 - литерал разворачивается спайном `arraySet` (§4.11), и терм у него глубиной в саму строку; буфер длиннее собирается `arrayNew` с `arraySet`
-  spills = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Error: string-past-the-limit.adamas:24:10: строка не помещается: с завершающим нулём в ней 41 байт, а предел 40 - литерал разворачивается спайном `arraySet` (§4.11), и терм у него глубиной в саму строку; буфер длиннее собирается `arrayNew` с `arraySet`
+  spills = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

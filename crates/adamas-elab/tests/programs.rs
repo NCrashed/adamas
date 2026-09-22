@@ -317,11 +317,11 @@ fn a_string_past_the_limit_is_refused_by_name() {
     // через предел: иначе свидетель ехал бы вместе с ним и оставался зелёным
     // при любом его значении (тот же дефект, каким трек B волны 2 поймал
     // `Block::LIMIT`).
-    let error = refused(&with_a_string(65, &"a".repeat(64), ""));
+    let error = refused(&with_a_string(41, &"a".repeat(40), ""));
     let ElabError::StringLength { limit, length, .. } = error else {
         panic!("получено {error:?}");
     };
-    assert_eq!((limit, length), (64, 65));
+    assert_eq!((limit, length), (40, 41));
     // Предел стоит там, где написано, а не где-то рядом.
     assert_eq!(limit as usize, LIMIT);
 }
@@ -330,8 +330,9 @@ fn a_string_past_the_limit_is_refused_by_name() {
 fn a_string_at_the_limit_is_taken() {
     // Ближайший проходящий сосед к отказу выше: на байт короче. Заодно это
     // свидетель того, что предел не роняет процесс на **себе** - прогон
-    // проверки идёт в потоке с умолчательным стеком, где обрыв стоит на 79
-    // байтах.
+    // проверки идёт в потоке с умолчательным стеком (два мегабайта), где
+    // одинокая строка обрывает элаборацию на 79 байтах, а под предельной
+    // вложенностью в 64 звена - на 47.
     let signature = program(&with_a_string(LIMIT, &"a".repeat(LIMIT - 1), ""));
     assert_eq!(
         value(&signature, "greeting"),
@@ -346,7 +347,7 @@ fn a_string_at_the_limit_is_taken() {
 ///
 /// Свидетель, читающий предел из того же места, где он объявлен, ехал бы вместе
 /// с ним.
-const LIMIT: usize = 64;
+const LIMIT: usize = 40;
 
 #[test]
 fn fixities_bracket_a_chain() {

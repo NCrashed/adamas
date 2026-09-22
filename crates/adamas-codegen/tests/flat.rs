@@ -588,6 +588,65 @@ fn a_frame_slot_is_heterogeneous_and_a_closure_slot_is_not() {
     );
 }
 
+/// Тот же плоский слот кадра, но на пути, где префикс `counted` **читают**.
+///
+/// Свидетель выше утверждает форму - что слот у кадра разнородный, - и
+/// утверждение это текстовое. Здесь то же утверждение проверяется прогоном, и
+/// путь взят не любой: число счётных слотов рантайм спрашивает ровно дважды -
+/// при копии сегмента (`handleMulti`, многократная резумпция) и при пометке
+/// его разделяемым (`spawn`, §5.2). На однократной резумпции оно не читается
+/// вовсе, и мутант, объявивший плоский слот счётным, там проходит молча -
+/// проверено прогоном.
+///
+/// `a` здесь **чётное**: биты нечётного значения младшим битом совпадают с
+/// непосредственным (`adamas_is_imm`), и `adamas_dup` по ним ничего не делает.
+/// На семёрке мутант выжил бы, на десятке роняет процесс сигналом 11.
+const REPLAYED: &str = "\
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Wrap where
+  MkWrap : UInt64 -> Wrap
+
+effect Amb where
+  toss : Bool
+
+branching : {Amb} Wrap
+branching =
+  let a : UInt64 = 10
+  let b : Bool = toss
+  case b of
+    True -> MkWrap (addUInt64 a 1)
+    False -> MkWrap (addUInt64 a 2)
+
+joined : Wrap -> Wrap -> Wrap
+joined (MkWrap x) (MkWrap y) = MkWrap (addUInt64 x y)
+
+main : Wrap
+main = handleMulti branching with
+  return v -> v
+  toss -> joined (resume True) (resume False)
+";
+
+/// Плоский слот кадра переживает повторённый сегмент, и переживает прогоном.
+#[test]
+fn a_flat_frame_slot_survives_a_replayed_segment() {
+    let text = harness::text(REPLAYED).unwrap_or_else(|error| panic!("не понизилось: {error}"));
+    let slots = frame_slots(&text);
+    assert!(
+        slots.iter().any(|(fields, counted)| counted < fields),
+        "плоский слот кадра из программы пропал - мерить нечего: {slots:?}"
+    );
+    let stderr = harness::agreed("повторённый", REPLAYED)
+        .unwrap_or_else(|error| panic!("повторённый не прошёл: {error}"));
+    let (_, live) = harness::blocks("повторённый", &stderr);
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
+}
+
 /// Плоский **агрегат** упирается в обеих позициях в одну и ту же стену.
 ///
 /// Граница замыкания у него теперь одна на две позиции: боксирует его тот же

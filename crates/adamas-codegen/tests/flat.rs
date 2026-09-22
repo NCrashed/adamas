@@ -448,6 +448,69 @@ fn capturing_a_flat_scalar_costs_a_cell_per_closure_not_per_call() {
     );
 }
 
+/// Плоский **агрегат** упирается в обеих позициях в одну и ту же стену.
+///
+/// Граница замыкания у него теперь одна на две позиции: боксирует его тот же
+/// [`Lowerer::moved`], что и скаляр, и потому дальше обе позиции доходят до
+/// одного и того же места - формы записи, потерянной вместе с представлением
+/// (§4.2). До трека B волны 4 позиции расходились: аргумент боксировался и
+/// упирался здесь, а захват отвергался раньше, у себя, и говорил другое.
+///
+/// Свидетель отрицательный, и стоит он ровно за симметрию: сузь боксирование
+/// захвата до скаляра - и тексты двух отказов снова разойдутся.
+#[test]
+fn a_dense_aggregate_meets_the_same_wall_by_both_positions() {
+    const SHAPE: &str = "\
+type Layout = { size : UInt32, align : UInt32 }
+
+class Flat a where
+  layout : Layout
+
+type Vec3 = { x : Float64, y : Float64, z : Float64 }
+";
+    let refused = |what: &str, source: &str| -> String {
+        harness::text(source)
+            .err()
+            .unwrap_or_else(|| panic!("{what}: плоский агрегат прошёл границу замыкания"))
+            .to_string()
+    };
+
+    let argument = refused(
+        "аргументом",
+        &format!(
+            "{SHAPE}
+applying : Vec3 -> (Vec3 -> Float64) -> Float64
+applying v f = f v
+
+main : Float64
+main = applying {{ x = 1.5, y = 2.5, z = 3.5 }} (\\w -> w.y)
+"
+        ),
+    );
+    let capture = refused(
+        "захватом",
+        &format!(
+            "{SHAPE}
+applying : Float64 -> (Float64 -> Float64) -> Float64
+applying x f = f x
+
+main : Float64
+main =
+  let v : Vec3 = {{ x = 1.5, y = 2.5, z = 3.5 }}
+  applying 2.0 (\\k -> mulFloat64 k v.y)
+"
+        ),
+    );
+    assert_eq!(
+        argument, capture,
+        "позиции разошлись текстом отказа: аргумент `{argument}`, захват `{capture}`"
+    );
+    assert!(
+        argument.contains("форма записи потеряна"),
+        "стена сменилась, и свидетель говорит не о том: {argument}"
+    );
+}
+
 /// Одно и то же замыкание с плоским множителем: литералом и захватом.
 ///
 /// Ответ у пары один, и это нарочно: разойдись он - счётчики говорили бы о

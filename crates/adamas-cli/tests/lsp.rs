@@ -131,31 +131,58 @@ fn rebuilt(file: &SourceFile, found: &adamas_lsp::lsp_types::Diagnostic) -> Stri
 }
 
 /// Каждый отказ корпуса уходит в редактор тем же текстом и на то же место.
+///
+/// Отказов у фикстуры теперь бывает несколько (§10 вопрос 177), и равенство
+/// спрашивается по всему списку: собранный из того, что ушло в редактор,
+/// совпадает с напечатанным **целиком**, вместе с порядком и разделителем.
+/// Проверять один только первый значило бы оставить панель проблем без
+/// свидетеля ровно там, где она и появилась.
 #[test]
 fn every_refusal_reaches_the_editor_unchanged() {
     let mut checked = 0;
+    let mut plural = 0;
     for path in fixtures("errors") {
         let (passed, terminal) = driven(&path);
         assert!(!passed, "{} прошла, а не должна была", path.display());
 
         let file = source(&path);
         let found = published(&path, &file);
-        assert_eq!(
-            found.len(),
-            1,
-            "{}: сервер обязан отдать ровно один отказ, отдал {found:?}",
+        assert!(
+            !found.is_empty(),
+            "{}: сервер не отдал ни одного отказа",
             path.display()
         );
-        assert_eq!(found[0].severity, Some(DiagnosticSeverity::ERROR));
-        assert_eq!(found[0].source.as_deref(), Some("adamas"));
+        assert!(
+            found
+                .iter()
+                .all(|it| it.severity == Some(DiagnosticSeverity::ERROR)),
+            "{}: отвергнутая программа обязана отдавать отказы, а не оговорки: {found:?}",
+            path.display()
+        );
+        assert!(
+            found
+                .iter()
+                .all(|it| it.source.as_deref() == Some("adamas")),
+            "{}: источник диагностики обязан быть назван: {found:?}",
+            path.display()
+        );
 
         // `Error: ` дописывает `anyhow` на выходе драйвера; перевод строки -
-        // `eprintln!`.
-        let expected = format!("Error: {}\n", rebuilt(&file, &found[0]));
+        // `eprintln!`. Пустая строка между отказами - разделитель драйвера: у
+        // каждого своя каретка под своей строкой исходника.
+        let said: Vec<String> = found.iter().map(|it| rebuilt(&file, it)).collect();
+        let expected = format!("Error: {}\n", said.join("\n\n"));
         assert_eq!(terminal, expected, "{}", path.display());
         checked += 1;
+        plural += usize::from(found.len() > 1);
     }
     assert!(checked >= 98, "корпус отказов усох до {checked}");
+    // Иначе список выше проверялся бы только на длине один, и восстановление
+    // могло бы сломаться, не покраснев здесь.
+    assert!(
+        plural > 0,
+        "в корпусе не осталось фикстуры с несколькими отказами"
+    );
 }
 
 /// Принятая программа не даёт редактору ни одного подчёркивания - ровно так

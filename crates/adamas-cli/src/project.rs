@@ -170,8 +170,21 @@ pub(crate) fn checked(
     let name = file.name().to_owned();
 
     let program = adamas_elab::program::analyze(file, sources);
-    if let Some(located) = program.error() {
-        anyhow::bail!("{}", program.rendered(located));
+    // Все отказы разом, а не первый (§10 вопрос 177): восстановление на границе
+    // определения доводит проход до конца файла, и печатать из трёх найденных
+    // один значило бы вернуть читателю тот же цикл «правка - перезапуск -
+    // следующая ошибка», ради которого вопрос и заводился.
+    //
+    // Пустой строкой между ними: у отказа своя каретка под своей строкой
+    // исходника, и встык они читаются одним абзацем.
+    let refused: Vec<String> = program
+        .diagnostics
+        .iter()
+        .filter(|it| it.diagnostic.severity == adamas_elab::Severity::Error)
+        .map(|it| program.rendered(it))
+        .collect();
+    if !refused.is_empty() {
+        anyhow::bail!("{}", refused.join("\n\n"));
     }
     for diagnostic in &program.diagnostics {
         eprintln!("{}", program.rendered(diagnostic));

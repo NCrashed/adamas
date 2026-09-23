@@ -25,7 +25,7 @@ pub mod parser;
 pub mod printer;
 pub mod token;
 
-pub use printer::print;
+pub use printer::{formatted, print};
 pub use token::Tokens;
 
 use ast::Module;
@@ -80,6 +80,25 @@ pub fn tokenize(text: &str) -> Result<Tokens, Error> {
 pub fn parse(text: &str) -> Result<Module, Error> {
     let tokens = tokenize(text)?;
     Ok(parser::parse(text, &tokens.tokens)?)
+}
+
+/// Текст -> он же, приведённый к канону: предмет `adamas fmt` (§7.1).
+///
+/// Форматируется **разобранное**: неразобранный текст форматировать нечем, и
+/// ответ на него - названный отказ, а не догадка о том, что автор имел в виду.
+///
+/// Что делает: печатает дерево канонически ([`printer`]) и возвращает на место
+/// комментарии. Чего не делает: не переносит длинные строки, не сохраняет
+/// авторских переносов и выравниваний, не трогает внутренностей блочного
+/// комментария. Подробности и цена - заголовок [`printer`].
+///
+/// # Errors
+///
+/// Любая ошибка лексики, расстановки блоков или разбора.
+pub fn format(text: &str) -> Result<String, Error> {
+    let tokens = tokenize(text)?;
+    let module = parser::parse(text, &tokens.tokens)?;
+    Ok(printer::formatted(text, &module, &tokens.comments))
 }
 
 /// Переводит привязку комментариев из лексического потока в поток с границами.

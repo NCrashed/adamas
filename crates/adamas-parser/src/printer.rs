@@ -13,11 +13,34 @@
 //! лишние скобки. Сохраняется всё, что несёт дерево, включая написание литерала
 //! (`0xff` не превращается в `255`).
 //!
-//! Комментариев печать не выводит: их в дереве нет, они лежат отдельной
-//! таблицей ([`crate::token::Comment`]). `adamas fmt` (§7.1) обязан их
-//! сохранять, и таблица заведена ровно для этого, но привязка комментария к
-//! узлу - отдельная работа, а round-trip дерева от неё не зависит. Переносов
-//! строк печать тоже не делает: длинное применение печатается одной строкой.
+//! Переносов строк печать не делает: длинное применение печатается одной
+//! строкой.
+//!
+//! # Комментарии
+//!
+//! [`print`] их не выводит - в дереве их нет, и round-trip дерева от них не
+//! зависит. Выводит [`formatted`], которой отдают таблицу
+//! ([`crate::token::Comment`]) вместе с исходником; на ней стоит `adamas fmt`
+//! (§7.1).
+//!
+//! Место комментария решается **по исходнику**, а не по дереву, и правило одно:
+//! комментарий встаёт над первым членом, который начинается позже него, -
+//! ровно та привязка, которую лексер записывает в таблицу («комментарий в этом
+//! языке пишется над тем, что поясняет»). Исключение одно: комментарий, стоящий
+//! на строке уже напечатанного члена и отделённый от него только пробелами,
+//! остаётся хвостом этой строки.
+//!
+//! Отсюда цена, которую печать платит **намеренно**. Комментарий внутри члена,
+//! перед которым нет своей строки вывода - скажем, посреди переносимого
+//! применения, - выносится наверх, к следующему члену: своей позиции у него в
+//! каноническом выводе нет. Внутренность блочного комментария не трогается
+//! вовсе: перевыравнивать чужие строки печать не берётся, и от этого
+//! идемпотентность не зависит.
+//!
+//! Из авторских пустых строк сохраняется одна: та, что отделяет комментарий от
+//! следующего комментария или от члена. Без неё шапка файла приклеивалась бы к
+//! первому объявлению. Пустые строки между объявлениями по-прежнему
+//! канонические - их печать ставит сама.
 //!
 //! # Что печать предполагает о дереве
 //!
@@ -49,6 +72,8 @@
 //! одно из соседних заняло больше строки). Предсказывать форму вывода по
 //! дереву значило бы держать второй экземпляр логики печати рядом с первым.
 
+use adamas_core::source::Span;
+
 use crate::ast::{
     Alt, Binder, Binding, Block, Chain, Clause, Constructor, Data, Decl, DeclKind, EffectDecl,
     EffectLabel, Expr, ExprKind, ExternDecl, Grade, HandlerBranch, LamParam, LamParamKind, Lit,
@@ -56,6 +81,7 @@ use crate::ast::{
     Visibility, contains_block,
 };
 use crate::lexer::is_operator;
+use crate::token::Comment;
 
 /// Шаг отступа.
 const STEP: usize = 2;
@@ -112,23 +138,156 @@ impl Expr {
 
 /// Печатает файл. Результат кончается переводом строки; пустой файл даёт
 /// пустую строку.
+///
+/// Комментарии не выводятся: их в дереве нет. Печать с комментариями -
+/// [`formatted`].
 #[must_use]
 pub fn print(module: &Module) -> String {
-    let mut printer = Printer {
-        out: String::new(),
-        indent: 0,
-    };
-    printer.module(module);
-    printer.out
+    Printer::new(Comments::default()).print(module)
 }
 
-/// Состояние печати: текст и отступ текущей строки.
-struct Printer {
+/// Печатает файл вместе с комментариями исходника - то, что делает
+/// `adamas fmt` (§7.1).
+///
+/// `text` обязан быть тем самым исходником, из которого получены `module` и
+/// `comments`: по нему читается написание комментария и то, стоял ли он на
+/// строке кода. Готовый вход - [`crate::tokenize`] плюс [`crate::parser::parse`],
+/// и собран он в [`crate::format`].
+#[must_use]
+pub fn formatted(text: &str, module: &Module, comments: &[Comment]) -> String {
+    Printer::new(Comments::new(text, comments)).print(module)
+}
+
+/// Комментарии исходника, разложенные по порядку появления.
+///
+/// Курсор один на весь файл и идёт только вперёд: печать обходит дерево в
+/// порядке исходника, и «следующий ещё не выведенный» - это ровно тот,
+/// чьё место сейчас и решается. Курсор, а не поиск по каждому узлу: иначе
+/// один и тот же комментарий мог бы выйти дважды или не выйти вовсе, а мера
+/// `adamas fmt` - счёт комментариев до и после.
+///
+/// Пустой курсор ([`Comments::default`]) не отдаёт ничего: на нём стоит
+/// [`print`], и весь код ниже для неё - вызовы, возвращающие `None`.
+#[derive(Debug, Default)]
+struct Comments<'a> {
+    /// Исходник целиком.
+    text: &'a str,
+    /// Таблица комментариев в порядке появления.
+    items: &'a [Comment],
+    /// Первый ещё не выведенный.
+    next: usize,
+}
+
+impl<'a> Comments<'a> {
+    fn new(text: &'a str, items: &'a [Comment]) -> Self {
+        Self {
+            text,
+            items,
+            next: 0,
+        }
+    }
+
+    /// Есть ли ещё не выведенные.
+    fn pending(&self) -> bool {
+        self.next < self.items.len()
+    }
+
+    /// Написание комментария. Хвостовые пробелы срезаются: у строчного они
+    /// входят в спан, и без среза вывод получал бы их обратно каждым проходом.
+    fn written(&self, comment: &Comment) -> &'a str {
+        self.text[comment.span.start()..comment.span.end()].trim_end()
+    }
+
+    /// Следующий комментарий, если он начинается раньше `start`.
+    ///
+    /// Второй член ответа - была ли в исходнике пустая строка между этим
+    /// комментарием и тем, что за ним следует (соседним комментарием или самим
+    /// членом).
+    fn before(&mut self, start: usize) -> Option<(&'a str, bool)> {
+        let comment = self.items.get(self.next)?;
+        if comment.span.start() >= start {
+            return None;
+        }
+        self.next += 1;
+        let follows = self
+            .items
+            .get(self.next)
+            .map(|next| next.span.start())
+            .filter(|&next| next < start)
+            .unwrap_or(start);
+        // Пустая строка - когда между ними **только** пробелы и переводов
+        // строки хотя бы два. Без проверки на «только» кусок кода, который
+        // печать вынесла в другое место, читался бы пустой строкой.
+        let blank = self
+            .text
+            .get(comment.span.end()..follows)
+            .is_some_and(|between| {
+                between.trim().is_empty() && between.matches('\n').count() >= 2
+            });
+        Some((self.written(comment), blank))
+    }
+
+    /// Следующий комментарий, если он стоит на той же строке, что и конец уже
+    /// напечатанного: между `after` и им только пробелы.
+    ///
+    /// Второй член ответа - конец этого комментария: следующий хвостовой
+    /// меряется уже от него, иначе `f = 1 {- a -} -- b` терял бы вторую
+    /// привязку на первой.
+    fn trailing(&mut self, after: usize) -> Option<(&'a str, usize)> {
+        let comment = self.items.get(self.next)?;
+        let start = comment.span.start();
+        if start < after {
+            return None;
+        }
+        let between = self.text.get(after..start)?;
+        if !between.chars().all(|ch| ch == ' ' || ch == '\t') {
+            return None;
+        }
+        self.next += 1;
+        Some((self.written(comment), comment.span.end()))
+    }
+}
+
+/// Член блока, у которого печать спрашивает место в исходнике: по нему
+/// решается, какой комментарий стоит над ним, а какой - хвостом его строки.
+trait Placed {
+    fn span(&self) -> Span;
+}
+
+macro_rules! placed {
+    ($($ty:ty),* $(,)?) => {
+        $(impl Placed for $ty {
+            fn span(&self) -> Span {
+                self.span
+            }
+        })*
+    };
+}
+
+placed!(Decl, Stmt, Alt, Binding, Constructor, Operation, HandlerBranch);
+
+/// Состояние печати: текст, отступ текущей строки и курсор комментариев.
+#[derive(Debug)]
+struct Printer<'a> {
     out: String,
     indent: usize,
+    comments: Comments<'a>,
 }
 
-impl Printer {
+impl<'a> Printer<'a> {
+    fn new(comments: Comments<'a>) -> Self {
+        Self {
+            out: String::new(),
+            indent: 0,
+            comments,
+        }
+    }
+
+    fn print(mut self, module: &Module) -> String {
+        self.module(module);
+        self.out
+    }
+
     fn push(&mut self, text: &str) {
         self.out.push_str(text);
     }
@@ -150,13 +309,85 @@ impl Printer {
         self.indent -= step;
     }
 
+    // --- комментарии ------------------------------------------------------
+
+    /// Выводит комментарии, стоящие перед `start`, каждый со своей строки.
+    fn comments_before(&mut self, start: usize) {
+        while let Some((written, blank)) = self.comments.before(start) {
+            self.line();
+            self.push(written);
+            // Пустая строка перед следующей строкой вывода: её поставит `line`
+            // того, что пойдёт дальше.
+            if blank {
+                self.out.push('\n');
+            }
+        }
+    }
+
+    /// Комментарии, оставшиеся на строке уже напечатанного члена: они идут
+    /// хвостом этой строки, каждый со своим пробелом впереди.
+    fn line_tail(&mut self, end: usize) -> String {
+        let mut out = String::new();
+        let mut end = end;
+        while let Some((written, stop)) = self.comments.trailing(end) {
+            out.push(' ');
+            out.push_str(written);
+            end = stop;
+        }
+        out
+    }
+
+    /// То же, дописанное прямо в вывод.
+    fn comments_after(&mut self, end: usize) {
+        let tail = self.line_tail(end);
+        self.push(&tail);
+    }
+
+    /// Отдельной строкой печатает то, что уходит перед членом: сам член в
+    /// [`Self::module`] печатается врозь, потому что пустая строка перед ним
+    /// решается по напечатанному.
+    fn detached_comments(&mut self, start: usize) -> String {
+        let mut sub = Printer {
+            out: String::new(),
+            indent: self.indent,
+            comments: std::mem::take(&mut self.comments),
+        };
+        sub.comments_before(start);
+        self.comments = sub.comments;
+        let mut out = sub.out;
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Комментарии после последнего объявления: привязаны они к `Eof`, и своей
+    /// строки вывода у них нет - печатаются хвостом файла.
+    fn trailing_comments(&mut self) {
+        let limit = self.comments.text.len();
+        while let Some((written, blank)) = self.comments.before(limit) {
+            self.out.push_str(written);
+            self.out.push('\n');
+            if blank && self.comments.pending() {
+                self.out.push('\n');
+            }
+        }
+    }
+
     // --- объявления ------------------------------------------------------
 
     fn module(&mut self, module: &Module) {
         let mut previous_is_tall = false;
         for (index, decl) in module.decls.iter().enumerate() {
-            let text = rendered(decl);
-            let tall = text.contains('\n');
+            // Комментарии над объявлением снимаются с курсора **до** печати
+            // самого объявления: иначе их подобрал бы первый же член его блока.
+            let leading = self.detached_comments(decl.span.start());
+            let mut text = self.rendered(decl);
+            // Объявление с комментарием над ним - высокое: без этого шапка
+            // файла и пояснение к определению приклеивались бы к соседу
+            // сверху.
+            let tall = text.contains('\n') || !leading.is_empty();
+            text.push_str(&self.line_tail(decl.span.end()));
             if index > 0 {
                 self.out.push('\n');
                 // Пустая строка - когда хотя бы одно из соседних объявлений
@@ -167,20 +398,39 @@ impl Printer {
                     self.out.push('\n');
                 }
             }
+            self.out.push_str(&leading);
             self.out.push_str(&text);
             previous_is_tall = tall;
         }
         if !self.out.is_empty() {
             self.out.push('\n');
         }
+        self.trailing_comments();
+    }
+
+    /// Печатает объявление отдельно, тем же курсором комментариев.
+    ///
+    /// Нужна ли перед ним пустая строка, зависит от того, заняло ли оно больше
+    /// строки, - а это видно только после печати.
+    fn rendered(&mut self, decl: &Decl) -> String {
+        let mut sub = Printer {
+            out: String::new(),
+            indent: 0,
+            comments: std::mem::take(&mut self.comments),
+        };
+        sub.decl(decl);
+        self.comments = sub.comments;
+        sub.out
     }
 
     /// Блок членов под ключевым словом, каждый со своей строки.
-    fn block_of<T>(&mut self, items: &[T], mut each: impl FnMut(&mut Self, &T)) {
+    fn block_of<T: Placed>(&mut self, items: &[T], mut each: impl FnMut(&mut Self, &T)) {
         self.nested(STEP, |printer| {
             for item in items {
+                printer.comments_before(item.span().start());
                 printer.line();
                 each(printer, item);
+                printer.comments_after(item.span().end());
             }
         });
     }
@@ -216,9 +466,11 @@ impl Printer {
             DeclKind::Clauses { name, clauses } => {
                 for (index, clause) in clauses.iter().enumerate() {
                     if index > 0 {
+                        self.comments_before(clause.span.start());
                         self.line();
                     }
                     self.clause(name, clause);
+                    self.comments_after(clause.span.end());
                 }
             }
             DeclKind::Data(data) => self.data(data),
@@ -446,9 +698,11 @@ impl Printer {
                 self.nested(LET_WIDTH, |printer| {
                     for (index, binding) in bindings.iter().enumerate() {
                         if index > 0 {
+                            printer.comments_before(binding.span.start());
                             printer.line();
                         }
                         printer.binding(binding);
+                        printer.comments_after(binding.span.end());
                     }
                 });
             }
@@ -651,16 +905,20 @@ impl Printer {
         // к какой-то из веток.
         self.nested(STEP, |printer| {
             if let Some(state) = state {
+                printer.comments_before(state.span.start());
                 printer.line();
                 printer.push("state ");
                 // Позиция применения, а не цепочки: начальное состояние
                 // читается разбором как применение, и `state (x + x)`
                 // печаталось как `state x + x`, что обратно не разбирается.
                 printer.expr(state, Prec::App);
+                printer.comments_after(state.span.end());
             }
             for branch in branches {
+                printer.comments_before(branch.span.start());
                 printer.line();
                 printer.handler_branch(branch);
+                printer.comments_after(branch.span.end());
             }
         });
     }
@@ -879,19 +1137,6 @@ impl Printer {
             }
         }
     }
-}
-
-/// Печатает объявление отдельно.
-///
-/// Нужна ли перед ним пустая строка, зависит от того, заняло ли оно больше
-/// строки, - а это видно только после печати.
-fn rendered(decl: &Decl) -> String {
-    let mut printer = Printer {
-        out: String::new(),
-        indent: 0,
-    };
-    printer.decl(decl);
-    printer.out
 }
 
 /// Идут ли объявления вплотную, без пустой строки между ними.

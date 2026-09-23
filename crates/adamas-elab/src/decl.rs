@@ -47,6 +47,7 @@ use crate::class::{self, Class, Declaring, Instances, Offence};
 use crate::expr::{Elaborator, Enclosing, Member, Param, UNIT, Unwritten, WrittenField};
 use crate::fixity::Fixities;
 use crate::own::{Owned, Ownership};
+use crate::recover::{self, Refusals};
 use crate::route::{self, Declared};
 use crate::warn::{Warning, Warnings};
 
@@ -147,33 +148,42 @@ impl Importer for Alone {
 ///
 /// Любой отказ элаборации, сборки клауз или проверки типов.
 pub fn elaborate(module: &Module) -> Result<(Signature, Warnings), ElabError> {
-    let (signature, outcome) = elaborated(module);
-    outcome.map(|warnings| (signature, warnings))
+    let (signature, warnings, refusals) = elaborated(module);
+    refusals.first().map_or(Ok((signature, warnings)), Err)
 }
 
-/// То же, но сигнатура отдаётся и при отказе - такой, какой её застал отказ.
+/// То же, но сигнатура отдаётся и при отказе - такой, какой её застал отказ, -
+/// а отказов отдаётся столько, сколько их нашлось (§10 вопрос 177).
 ///
-/// Нужна редактору (§7.2): буфер, в котором дописывают слово, не проверяется,
-/// а типы имён, объявленных выше места отказа, известны. Отдельная функция, а
-/// не `Result<(Signature, …), (Signature, …)>`: `?` у второй формы не
-/// работает, и все её вызывающие писали бы `match` ради одного случая.
-pub fn elaborated(module: &Module) -> (Signature, Result<Warnings, ElabError>) {
+/// Сигнатура при отказе нужна редактору (§7.2): буфер, в котором дописывают
+/// слово, не проверяется, а типы имён, объявленных выше места отказа, известны.
+/// Отдельная функция, а не `Result<(Signature, …), (Signature, …)>`: `?` у
+/// второй формы не работает, и все её вызывающие писали бы `match` ради одного
+/// случая.
+///
+/// Предупреждения приходят и вместе с отказом: восстановление доводит проход до
+/// конца файла, и оговорка, найденная ниже отказа, ничем не хуже найденной выше.
+#[must_use]
+pub fn elaborated(module: &Module) -> (Signature, Warnings, Refusals) {
     let mut signature = Signature::default();
     let mut metas = Metas::default();
     let mut owned = Owned::default();
     let mut instances = Instances::default();
     let mut fixities = Fixities::default();
     let mut warnings = Warnings::new();
-    let outcome = elaborate_into(
-        module,
-        &mut signature,
-        &mut metas,
-        &mut owned,
-        &mut fixities,
-        &mut instances,
-        &mut warnings,
-    );
-    (signature, outcome.map(|()| warnings))
+    let mut refusals = Refusals::new();
+    let pass = Pass {
+        signature: &mut signature,
+        metas: &mut metas,
+        owned: &mut owned,
+        fixities: &mut fixities,
+        instances: &mut instances,
+        warnings: &mut warnings,
+    };
+    if let Err(error) = elaborate_file(&module.decls, None, pass, &mut Alone, &mut refusals) {
+        refusals.refused(error, Vec::new());
+    }
+    (signature, warnings, refusals)
 }
 
 /// То же, но поверх уже собранной сигнатуры.
@@ -186,7 +196,9 @@ pub fn elaborated(module: &Module) -> (Signature, Result<Warnings, ElabError>) {
 ///
 /// # Errors
 ///
-/// То же, что у [`elaborate`].
+/// То же, что у [`elaborate`]: отдаётся **первый** отказ. Всеми отвечает
+/// [`elaborated`] - этот путь ходят те, кому нужна собранная программа, а не
+/// панель проблем, и им отказ означает «дальше идти не с чем».
 pub fn elaborate_into(
     module: &Module,
     signature: &mut Signature,
@@ -204,7 +216,9 @@ pub fn elaborate_into(
         instances,
         warnings,
     };
-    elaborate_file(&module.decls, None, pass, &mut Alone)
+    let mut refusals = Refusals::new();
+    elaborate_file(&module.decls, None, pass, &mut Alone, &mut refusals)?;
+    refusals.first().map_or(Ok(()), Err)
 }
 
 /// Объявления одного файла: подготовка владения и проход по членам.
@@ -212,14 +226,21 @@ pub fn elaborate_into(
 /// Общая точка входа у входного файла и у подключённого: правила у них одни, а
 /// разнятся они только квалификацией (`within`).
 ///
+/// Граница определения (§10 вопрос 177) проходит здесь: отказы верхнего уровня
+/// копятся в `refusals`, а наружу уходит `Ok(())`. Файл при этом принятым не
+/// становится - смотреть надо на [`Refusals::is_empty`], - и разделение это
+/// нарочное: отказы **своего** файла зовущий раскладывает по своим позициям, а
+/// отказ, поднятый значением, позицию свою уносит в чужой текст.
+///
 /// # Errors
 ///
-/// То же, что у [`elaborate`].
+/// То же, что у [`elaborate`], - всё, что восстановление не переживает.
 pub(crate) fn elaborate_file(
     decls: &[ast::Decl],
     within: Option<&Enclosing>,
     mut pass: Pass<'_>,
     importer: &mut dyn Importer,
+    refusals: &mut Refusals,
 ) -> Result<(), ElabError> {
     // Есть ли в модуле ресурсы, спрашивается **до** объявлений: иначе тот же
     // `handleMulti` принимался бы или отвергался в зависимости от того, выше
@@ -238,10 +259,24 @@ pub(crate) fn elaborate_file(
         warnings,
     } = pass.reborrow();
     members_into(
-        decls, within, signature, metas, owned, fixities, instances, warnings, importer,
+        decls,
+        within,
+        signature,
+        metas,
+        owned,
+        fixities,
+        instances,
+        warnings,
+        importer,
+        Some(refusals),
     )?;
     let Pass { signature, .. } = pass.reborrow();
-    exports(decls, within, signature)
+    // Экспорты - объявление файла наравне с прочими, и граница у них та же:
+    // ненайденный символ не отменяет остальных отказов файла.
+    if let Err(error) = exports(decls, within, signature) {
+        refusals.refused(error, Vec::new());
+    }
+    Ok(())
 }
 
 /// Экспорты файла - после того, как файл объявлен целиком (§5.3).
@@ -686,9 +721,14 @@ fn abstracted(params: &[Param], body: Term) -> Term {
 }
 
 /// Объявления одного уровня: верхнего либо тела модуля.
+///
+/// `recovery` включает **границу определения** (§10 вопрос 177): отказ одного
+/// члена записывается и проход идёт к следующему. `None` - границы здесь нет, и
+/// первый отказ уходит наверх целиком. Так ходит тело модуля: объявиться
+/// наполовину модуль не вправе - снаружи он одно имя, - и половина его членов
+/// была бы сигнатурой, которой автор не писал.
 #[allow(
     clippy::too_many_arguments,
-    clippy::too_many_lines,
     reason = "прогон элаборации несёт своё состояние; складывать его в структуру значило бы прятать, что именно меняется"
 )]
 fn members_into(
@@ -701,12 +741,76 @@ fn members_into(
     instances: &mut Instances,
     warnings: &mut Warnings,
     importer: &mut dyn Importer,
+    mut recovery: Option<&mut Refusals>,
 ) -> Result<(), ElabError> {
     // Сигнатуры, ставшие постулатами по ходу прогона: клаузы, пришедшие за
     // ними, - не «нет сигнатуры», а сигнатура не рядом.
     let mut postulated: HashMap<Symbol, Span> = HashMap::new();
     let mut pending: Option<Pending<'_>> = None;
     for decl in decls {
+        let outcome = member(
+            decl,
+            within,
+            Pass {
+                signature,
+                metas,
+                owned,
+                fixities,
+                instances,
+                warnings,
+            },
+            importer,
+            &mut pending,
+            &mut postulated,
+        );
+        let Err(error) = outcome else {
+            continue;
+        };
+        let Some(refusals) = recovery.as_deref_mut() else {
+            return Err(error);
+        };
+        refusals.refused(error, recover::declares(decl));
+    }
+    // Последняя сигнатура без клауз - постулат, и отказать он вправе так же,
+    // как всякое другое объявление. Имя его при этом известно: восстановлению
+    // есть что записать отсутствующим.
+    let last = pending.as_ref().map(|it| Rc::clone(&it.name));
+    let closed = postulate(signature, metas, pending, &mut postulated);
+    match (closed, recovery) {
+        (Err(error), Some(refusals)) => {
+            refusals.refused(error, last.into_iter().collect());
+            Ok(())
+        }
+        (outcome, _) => outcome,
+    }
+}
+
+/// Одно объявление уровня.
+///
+/// Отделено от [`members_into`] затем, чтобы граница определения была одним
+/// местом: отказ отсюда либо уходит наверх, либо записывается и проход идёт
+/// дальше, и решает это вызывающий, а не двадцать `?` внутри.
+#[allow(
+    clippy::too_many_lines,
+    reason = "разбор по формам объявления: у каждой свой вызов, и дробить их значило бы прятать перечисление"
+)]
+fn member<'a>(
+    decl: &'a ast::Decl,
+    within: Option<&Enclosing>,
+    pass: Pass<'_>,
+    importer: &mut dyn Importer,
+    pending: &mut Option<Pending<'a>>,
+    postulated: &mut HashMap<Symbol, Span>,
+) -> Result<(), ElabError> {
+    let Pass {
+        signature,
+        metas,
+        owned,
+        fixities,
+        instances,
+        warnings,
+    } = pass;
+    {
         // Занятое языком имя член модуля заслонять вправе (§10 вопрос 160), а
         // файл - нет: его члены квалифицированы, но короткое имя внутри файла
         // читается там же, где и всюду, и `data Int64` в библиотеке молча
@@ -718,9 +822,9 @@ fn members_into(
                 ty,
                 attributes,
             } => {
-                postulate(signature, metas, pending.take(), &mut postulated)?;
+                postulate(signature, metas, pending.take(), postulated)?;
                 unused_implicits(ty, warnings);
-                pending = Some(declared_signature(
+                *pending = Some(declared_signature(
                     signature, metas, owned, fixities, warnings, within, name, ty, attributes,
                     decl.span,
                 )?);
@@ -728,7 +832,7 @@ fn members_into(
             DeclKind::Clauses { name, clauses } => {
                 let qualified = qualify(within, &name.text);
                 let Some(declared) = pending.take().filter(|it| it.name == qualified) else {
-                    return Err(detached(&name.text, &postulated, &qualified, decl.span));
+                    return Err(detached(&name.text, postulated, &qualified, decl.span));
                 };
                 define(
                     signature,
@@ -745,7 +849,7 @@ fn members_into(
             // тело живёт в конкретном универсуме. Тип поэтому не пишется, а
             // считается по телу.
             DeclKind::Alias { name, params, body } => {
-                postulate(signature, metas, pending.take(), &mut postulated)?;
+                postulate(signature, metas, pending.take(), postulated)?;
                 written_alias(
                     signature,
                     metas,
@@ -763,14 +867,14 @@ fn members_into(
                 )?;
             }
             DeclKind::Module(declared) => {
-                postulate(signature, metas, pending.take(), &mut postulated)?;
+                postulate(signature, metas, pending.take(), postulated)?;
                 declare_module(
                     signature, metas, owned, fixities, instances, warnings, within, declared,
                     decl.span,
                 )?;
             }
             DeclKind::Mutual(members) => {
-                postulate(signature, metas, pending.take(), &mut postulated)?;
+                postulate(signature, metas, pending.take(), postulated)?;
                 // Причина одна на блок и на файл: члены группы объявляются
                 // одним вызовом, а квалификация у этого вызова не написана.
                 // Разнятся они только тем, как об этом сказать.
@@ -792,7 +896,7 @@ fn members_into(
                 )?;
             }
             DeclKind::Class(class) => {
-                postulate(signature, metas, pending.take(), &mut postulated)?;
+                postulate(signature, metas, pending.take(), postulated)?;
                 let (what, why) = outside_a_module(class.instance);
                 only_at_top(within, &Rc::from(what), why, decl.span)?;
                 declare_class(
@@ -800,13 +904,13 @@ fn members_into(
                 )?;
             }
             DeclKind::Data(data) => {
-                postulate(signature, metas, pending.take(), &mut postulated)?;
+                postulate(signature, metas, pending.take(), postulated)?;
                 declare_family(
                     signature, metas, owned, fixities, warnings, within, data, decl.span,
                 )?;
             }
             DeclKind::Resource(resource) => {
-                postulate(signature, metas, pending.take(), &mut postulated)?;
+                postulate(signature, metas, pending.take(), postulated)?;
                 declare_owned(
                     signature, metas, owned, fixities, instances, warnings, within, resource,
                     decl.span,
@@ -819,7 +923,7 @@ fn members_into(
             // (§4.8, §10 вопрос 178): подключённое видно тому, что написано
             // ниже, и не видно тому, что выше.
             DeclKind::Import(import) => {
-                postulate(signature, metas, pending.take(), &mut postulated)?;
+                postulate(signature, metas, pending.take(), postulated)?;
                 let pass = Pass {
                     signature,
                     metas,
@@ -831,7 +935,7 @@ fn members_into(
                 importer.import(import, decl.span, pass)?;
             }
             DeclKind::Effect(effect) => {
-                postulate(signature, metas, pending.take(), &mut postulated)?;
+                postulate(signature, metas, pending.take(), postulated)?;
                 declare_effect(
                     signature, metas, owned, fixities, warnings, within, effect, decl.span,
                 )?;
@@ -840,7 +944,7 @@ fn members_into(
             // построению, поэтому предыдущая сигнатура закрывается здесь же,
             // как перед всяким другим объявлением.
             DeclKind::Extern(declared) => {
-                postulate(signature, metas, pending.take(), &mut postulated)?;
+                postulate(signature, metas, pending.take(), postulated)?;
                 unused_implicits(&declared.ty, warnings);
                 declare_extern(
                     signature, metas, owned, fixities, warnings, within, declared, decl.span,
@@ -852,7 +956,7 @@ fn members_into(
             // площадкам программы, а посреди файла площадка, написанная ниже,
             // в ответ ещё не вошла бы.
             DeclKind::Export(exported) => {
-                postulate(signature, metas, pending.take(), &mut postulated)?;
+                postulate(signature, metas, pending.take(), postulated)?;
                 // Верхний уровень файла, и не из строгости: символ у линкера
                 // один на программу, а имя члена модуля квалифицировано
                 // (§4.8), то есть написанное имя символом быть перестало бы.
@@ -868,7 +972,7 @@ fn members_into(
             }
         }
     }
-    postulate(signature, metas, pending, &mut postulated)
+    Ok(())
 }
 
 /// Ресурсный тип вместе с тем, что решается до его объявления.
@@ -1019,6 +1123,11 @@ fn declare_module(
     let inner = Enclosing::nested(within, Rc::clone(&declared), &module.params);
     // `Alone`, а не переданный подключатель: `import` в теле модуля отвергает
     // разбор (§4.8), и досюда он не доезжает вовсе.
+    //
+    // `None` вместо восстановления: граница определения проходит по файлу, а не
+    // по телу модуля. Снаружи модуль - одно имя, и объявленный наполовину, он
+    // стал бы сигнатурой, которой автор не писал; отказ его члена поэтому
+    // остаётся отказом модуля целиком.
     members_into(
         &module.members,
         Some(&inner),
@@ -1029,6 +1138,7 @@ fn declare_module(
         instances,
         warnings,
         &mut Alone,
+        None,
     )?;
     // Запечатываются **поднятые члены**, и ставится флаг до проверки
     // аннотации (§10 вопрос 148): соответствие сигнатуре обязано мерить

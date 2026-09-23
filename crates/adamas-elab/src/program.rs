@@ -58,6 +58,7 @@ use crate::error::ElabError;
 use crate::expr::Enclosing;
 use crate::fixity::Fixities;
 use crate::own::Owned;
+use crate::recover::Refusals;
 use crate::warn::Warnings;
 
 /// Откуда берутся тексты подключаемых модулей.
@@ -222,7 +223,8 @@ pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
             file: entry,
             module: None,
         }],
-        blame: None,
+        blame: Vec::new(),
+        broken: Vec::new(),
     };
     let module = match parsed {
         Ok(module) => module,
@@ -246,6 +248,7 @@ pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
     let mut fixities = Fixities::default();
     let mut instances = Instances::default();
     let mut warnings = Warnings::new();
+    let mut refusals = Refusals::new();
     let outcome = {
         let pass = Pass {
             signature: &mut signature,
@@ -255,27 +258,30 @@ pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
             instances: &mut instances,
             warnings: &mut warnings,
         };
-        crate::decl::elaborate_file(&module.decls, None, pass, &mut loader)
+        crate::decl::elaborate_file(&module.decls, None, pass, &mut loader, &mut refusals)
     };
 
     let mut units = loader.units;
     units[0].module = Some(module);
-    let diagnostics = match outcome {
-        Ok(()) => warnings
-            .iter()
-            .map(|warning| Located {
-                unit: 0,
-                diagnostic: Diagnostic::of_warning(warning),
-            })
-            .collect(),
-        // Отказ внутри подключённого файла отдаётся **его** спаном и его
-        // текстом: позиция в чужом файле, нарисованная по исходнику входного,
-        // указывала бы на случайную строку.
-        Err(error) => vec![loader.blame.unwrap_or(Located {
-            unit: 0,
-            diagnostic: Diagnostic::of_error(&error),
-        })],
-    };
+    // Отказы входного файла - его спанами; отказы подключённых уже разложены по
+    // своим единицам в `blame`. Первыми идут чужие: подключённый файл
+    // объявляется раньше того, кто его подключил, и читается панель сверху.
+    //
+    // Отказ, поднятый **значением**, доходит сюда только если восстановление
+    // его не пережило; его спан живёт в тексте входного файла по построению -
+    // чужой уехал бы в `blame`.
+    let mut diagnostics = loader.blame;
+    if let Err(error) = outcome {
+        refusals.refused(error, Vec::new());
+    }
+    diagnostics.extend(refusals.iter().map(|error| Located {
+        unit: 0,
+        diagnostic: Diagnostic::of_error(error),
+    }));
+    diagnostics.extend(warnings.iter().map(|warning| Located {
+        unit: 0,
+        diagnostic: Diagnostic::of_warning(warning),
+    }));
     Program {
         units,
         signature: Some(signature),
@@ -300,8 +306,11 @@ struct Loader<'a> {
     /// Стек подключения: вершина - файл, который элаборируется сейчас.
     frames: Vec<Frame>,
     units: Vec<Unit>,
-    /// Отказ, случившийся внутри подключённого файла, вместе с его файлом.
-    blame: Option<Located>,
+    /// Отказы, случившиеся внутри подключённых файлов, каждый со своим файлом.
+    blame: Vec<Located>,
+    /// Пути модулей, которые уже отказали: второй `import` не элаборирует их
+    /// заново.
+    broken: Vec<String>,
 }
 
 impl Loader<'_> {
@@ -329,6 +338,22 @@ impl Loader<'_> {
     fn declare(&mut self, path: &str, span: Span, mut pass: Pass<'_>) -> Result<(), ElabError> {
         if self.declared.iter().any(|it| it == path) {
             return Ok(());
+        }
+        // Уже отказавший модуль второй раз не элаборируется. До восстановления
+        // (§10 вопрос 177) памяти этой не требовалось - первый отказ
+        // останавливал проход, и второго `import` того же пути не случалось, -
+        // а теперь проход доходит до конца файла, и без неё модуль,
+        // подключённый дважды, отдавал бы свои отказы дважды, а члены,
+        // успевшие объявиться, давали бы сверх них «определение уже
+        // существует»: отказ, которого в тексте нет.
+        //
+        // Наверх идёт `InModule` - он не печатается (см. `recover`), а сами
+        // отказы уже лежат в `blame` со своим файлом.
+        if self.broken.iter().any(|it| it == path) {
+            return Err(ElabError::InModule {
+                path: Rc::from(path),
+                span,
+            });
         }
         // Кольцо: путь уже элаборируется выше по стеку. Порядка у такой
         // программы нет, а выразить взаимную видимость между файлами нечем -
@@ -369,6 +394,7 @@ impl Loader<'_> {
             Ok(module) => module,
             Err(error) => {
                 self.blamed(at, Diagnostic::of_parse(&error));
+                self.broken.push(path.to_owned());
                 return Err(ElabError::InModule {
                     path: Rc::from(path),
                     span,
@@ -383,17 +409,33 @@ impl Loader<'_> {
         let outer = pass.signature.set_scope(Scope::of(path));
         self.restrict(pass.signature);
         let within = Enclosing::file(Rc::from(path));
-        let outcome =
-            crate::decl::elaborate_file(&module.decls, Some(&within), pass.reborrow(), self);
+        // Своё восстановление на каждый файл: граница определения проходит по
+        // файлу (§10 вопрос 177), а отказы отсюда надо разложить по **этой**
+        // единице - позицию свою они несут в её тексте.
+        let mut refusals = Refusals::new();
+        let outcome = crate::decl::elaborate_file(
+            &module.decls,
+            Some(&within),
+            pass.reborrow(),
+            self,
+            &mut refusals,
+        );
         pass.signature.set_scope(outer);
         self.frames.pop();
         self.units[at].module = Some(module);
+        let broken = !refusals.is_empty() || outcome.is_err();
         if let Err(error) = outcome {
-            self.blamed(at, Diagnostic::of_error(&error));
-            // Наверх идёт «модуль не проходит проверку», а не сам отказ: его
-            // спан живёт в **чужом** тексте, и всякий, кто нарисует его по
-            // исходнику входного файла, подчеркнёт случайную строку. Сам отказ
-            // уехал в `blame` вместе со своим файлом.
+            refusals.refused(error, Vec::new());
+        }
+        for error in refusals.iter() {
+            self.blamed(at, Diagnostic::of_error(error));
+        }
+        if broken {
+            self.broken.push(path.to_owned());
+            // Наверх идёт «модуль не проходит проверку», а не сами отказы: их
+            // спаны живут в **чужом** тексте, и всякий, кто нарисует их по
+            // исходнику входного файла, подчеркнёт случайную строку. Сами они
+            // уехали в `blame` вместе со своим файлом.
             return Err(ElabError::InModule {
                 path: Rc::from(path),
                 span,
@@ -404,13 +446,8 @@ impl Loader<'_> {
     }
 
     /// Запоминает отказ вместе с файлом, в котором он случился.
-    ///
-    /// Первый побеждает: элаборация останавливается на первом отказе, и он же
-    /// поднимается по стеку подключений до самого верха.
     fn blamed(&mut self, unit: usize, diagnostic: Diagnostic) {
-        if self.blame.is_none() {
-            self.blame = Some(Located { unit, diagnostic });
-        }
+        self.blame.push(Located { unit, diagnostic });
     }
 
     /// Кладёт имена подключённого модуля в область видимости текущего файла.

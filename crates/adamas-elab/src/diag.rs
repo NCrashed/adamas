@@ -174,9 +174,13 @@ impl Analysis {
 /// Общая половина драйвера (`adamas check`) и сервера: оба обязаны отвечать
 /// одно и то же, и держится это тем, что путь один.
 ///
-/// Отказ у прохода не более одного: компилятор останавливается на первом, и
-/// восстановления после ошибки сегодня нет. Предупреждения приходят только с
-/// принятой программой - по той же причине.
+/// Отказов у прохода столько, сколько их нашло восстановление на границах
+/// определений (§10 вопрос 177): файл с тремя независимыми ошибками даёт три
+/// диагностики. Отказ **разбора** по-прежнему один - он же и последний: дерева
+/// после него нет, и элаборировать нечего.
+///
+/// Предупреждения приходят и вместе с отказом: проход доходит до конца файла, и
+/// оговорка, найденная ниже отказа, ничем не хуже найденной выше.
 #[must_use]
 pub fn analyze(text: &str) -> Analysis {
     let module = match adamas_parser::parse(text) {
@@ -189,13 +193,15 @@ pub fn analyze(text: &str) -> Analysis {
             };
         }
     };
-    let (signature, outcome) = crate::elaborated(&module);
+    let (signature, warnings, refusals) = crate::elaborated(&module);
+    // Отказы впереди оговорок: панель проблем читается сверху, и оговорка о
+    // литерале не должна оттеснять отказ. Внутри каждой группы - порядок
+    // появления.
+    let mut diagnostics: Vec<Diagnostic> = refusals.iter().map(Diagnostic::of_error).collect();
+    diagnostics.extend(warnings.iter().map(Diagnostic::of_warning));
     Analysis {
         module: Some(module),
         signature: Some(signature),
-        diagnostics: match outcome {
-            Ok(warnings) => warnings.iter().map(Diagnostic::of_warning).collect(),
-            Err(error) => vec![Diagnostic::of_error(&error)],
-        },
+        diagnostics,
     }
 }

@@ -62,6 +62,7 @@ pub mod mono;
 mod own;
 mod primitive;
 pub mod program;
+mod recover;
 mod render;
 mod route;
 mod warn;
@@ -75,5 +76,6 @@ pub use error::{ElabError, Missing, Names};
 // разъехалась бы с первой молча.
 pub use expr::{GRADE, RESUME, STATE, UNIT, is_reference};
 pub use own::{Owned, Ownership};
+pub use recover::Refusals;
 pub use render::{located, report};
 pub use warn::{Warning, Warnings};

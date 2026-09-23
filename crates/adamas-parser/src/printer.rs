@@ -827,15 +827,11 @@ impl Printer {
             self.push(&name.text);
             // Остальные части выражения кратности стоят сразу за первым именем
             // и только там: `(q * r z : a)`, `(q + r z : a)` (§10 вопрос 41).
+            // Знак выбирает [`Grade::written`] - смешанное печатается так,
+            // чтобы обратно прочиталось смешанным.
             if index == 0 {
-                let between = match binder.grade {
-                    Some(Grade::Sum) => " + ",
-                    // Смешанное написано обоими знаками, и печать выбирает
-                    // один: обратно оно всё равно отвергается элаборацией.
-                    Some(Grade::Product | Grade::Mixed) | None => " * ",
-                };
-                for factor in &binder.factors {
-                    self.push(between);
+                for (position, factor) in binder.factors.iter().enumerate() {
+                    self.push(Grade::written(binder.grade, position));
                     self.push(&factor.text);
                 }
             }

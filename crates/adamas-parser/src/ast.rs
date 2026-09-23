@@ -83,6 +83,34 @@ pub enum Grade {
     Mixed,
 }
 
+impl Grade {
+    /// Знак перед множителем номер `position` (нулевой множитель - второй
+    /// участник выражения: первый лежит именем).
+    ///
+    /// У смешанного знак в узле один, а написано было два, и восстановить,
+    /// какой где стоял, нельзя: `q * r + s` и `q + r * s` дают один узел.
+    /// Выбирается представитель, который читается обратно **смешанным**, -
+    /// печать одними произведениями меняла бы отвергаемое определение на
+    /// проходящее (найдено прогоном `adamas fmt` по корпусу, §7.1).
+    ///
+    /// Одна таблица на печать ([`crate::printer`]) и на дамп: разъехавшись,
+    /// они сделали бы round-trip слепым ровно к тому, что он проверяет.
+    #[must_use]
+    pub fn sign(self, position: usize) -> &'static str {
+        match self {
+            Self::Sum => " + ",
+            Self::Mixed if position > 0 => " + ",
+            Self::Product | Self::Mixed => " * ",
+        }
+    }
+
+    /// Знак у связывания, где выражения кратности может не быть вовсе.
+    #[must_use]
+    pub fn written(grade: Option<Self>, position: usize) -> &'static str {
+        grade.map_or(" * ", |it| it.sign(position))
+    }
+}
+
 /// Написанная кратность вместе с местом.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MultAnn {
@@ -1387,7 +1415,22 @@ fn dump_binder(out: &mut String, binder: &Binder) {
         out.push_str(&mult.mult.to_string());
         out.push(' ');
     }
-    dump_list(out, &binder.names, |out, name| out.push_str(&name.text));
+    for (index, name) in binder.names.iter().enumerate() {
+        if index > 0 {
+            out.push(' ');
+        }
+        out.push_str(&name.text);
+        // Выражение кратности стоит сразу за первым именем и только там (§10
+        // вопрос 41). Дамп обязан его показывать: без него `(q * r z : a)`,
+        // `(q + r z : a)` и `(q z : a)` давали бы одну строку, и round-trip
+        // печати, который сверяет дампы, к кратностям был бы слеп целиком.
+        if index == 0 {
+            for (position, factor) in binder.factors.iter().enumerate() {
+                out.push_str(Grade::written(binder.grade, position));
+                out.push_str(&factor.text);
+            }
+        }
+    }
     if let Some(ty) = &binder.ty {
         out.push_str(" : ");
         dump_expr(out, ty);

@@ -19,6 +19,7 @@
 
 pub mod ast;
 mod depth;
+pub mod docs;
 pub mod layout;
 pub mod lexer;
 pub mod parser;

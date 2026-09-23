@@ -385,6 +385,13 @@ fn a_definition_without_a_place_is_shown_by_whether_it_has_a_body() {
 /// **этого** текста - иначе клиент получил бы каретку за концом буфера. И под
 /// ней обязан стоять знак, а не пробел: спан, нарисованный по чужому файлу,
 /// садится в произвольное место, и середина отступа - самый частый исход.
+///
+/// **Конец непустой строки - законное место, и это уточнение, а не
+/// послабление.** Подсказка волны 4 «сюда встанет деструктор» стоит за концом
+/// тела (§3.3, §7.2), то есть ровно на переводе строки: место у неё такое по
+/// существу - вставка происходит **после** написанного. Середина отступа и
+/// пустая строка по-прежнему отвергаются, и именно их проверка и заводилась
+/// ловить.
 #[test]
 fn every_hint_on_the_corpus_stands_on_written_text() {
     let mut counted = 0_usize;
@@ -400,9 +407,16 @@ fn every_hint_on_the_corpus_stands_on_written_text() {
         for hint in hints::hints(&uri, &document, whole(), Encoding::Utf16) {
             let offset = position::offset(&file, hint.position, Encoding::Utf16)
                 .unwrap_or_else(|| panic!("{name}: подсказка {:?} вне буфера", hint.position));
-            let under = text[offset..].chars().next().unwrap_or(' ');
+            let standing = match text[offset..].chars().next() {
+                None => true,
+                Some('\n') => text[..offset]
+                    .rsplit('\n')
+                    .next()
+                    .is_some_and(|line| !line.trim().is_empty()),
+                Some(under) => !under.is_whitespace(),
+            };
             assert!(
-                !under.is_whitespace(),
+                standing,
                 "{name}: подсказка {:?} стоит на пустоте",
                 hint.position
             );
@@ -410,10 +424,11 @@ fn every_hint_on_the_corpus_stands_on_written_text() {
         }
     }
     // Число не сверяется точно - оно растёт с корпусом; проверяется, что
-    // проверять было что: пустой обход зелен при любой поломке. Снято прогоном
-    // 2026-09-23: **2361** подсказка на 127 фикстурах.
+    // проверять было что: пустой обход зелен при любой поломке. Снято прогоном:
+    // **2361** подсказка на 127 фикстурах у волны 3, **2854** у волны 4 -
+    // прибавка есть жизнь ресурсов и погашение меток (§7.2).
     assert!(
-        counted > 2000,
-        "подсказок {counted} - было 2361, корпус не мог обеднеть"
+        counted > 2500,
+        "подсказок {counted} - было 2854, корпус не мог обеднеть"
     );
 }

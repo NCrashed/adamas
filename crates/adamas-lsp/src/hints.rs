@@ -43,6 +43,43 @@
 //! вопрос 190). «Атрибут был бы принят» - правда; «не аллоцирует» на таком
 //! теле - нет.
 //!
+//! # Чего здесь нет: подсветка области региона
+//!
+//! §7.2 просит ещё одну возможность - «при работе с `Ref r a` визуализировать
+//! scope региона `r`, где ссылка валидна», - и она **не сделана нарочно**:
+//! компилятор не знает, что такое `Ref r a`.
+//!
+//! Это не догадка, а его собственные слова: заголовок
+//! [`adamas_core::prim::RegionOp`] говорит прямо - «регион здесь
+//! **представление**, а не типовая сторона: `Alloc r`, `Ref r a` и
+//! `withRegion` объявляются **программой** и стоят на эффектах». Примитивы
+//! ниже них есть (`regionNew`, `regionRead`, …), но к написанному `Ref r Nat`
+//! они отношения не имеют.
+//!
+//! Обе приметы, по которым регион можно было бы узнать, промахиваются, и
+//! промах измерен на корпусе.
+//!
+//! *По имени.* Метку называют `Region` в шести файлах и `Reg` в двух
+//! (`signature-effect-parameterized`, `row-solution-captures-a-local`).
+//! Различие это законно - имя объявляет программа, - и всякий, кто напишет
+//! `Zone`, останется без подсветки.
+//!
+//! *По форме.* «Семейство со стёртым первым параметром» ловит **не регионы**:
+//! на корпусе таких восемь, и один из них - `Vect : (0 n : Nat) -> Type ->
+//! Type`, длина вектора. «Эффект со стёртым параметром» - четырнадцать, и
+//! среди них `Src (0 a : Type)` и `St (0 a : Type)`, к регионам не относящиеся
+//! вовсе.
+//!
+//! Подсветить **область связывания** `r` компилятор, конечно, может - это
+//! обычная лексическая область, - но назвать это «областью региона» значило бы
+//! изобразить анализ, которого нет: тот же ответ он дал бы `Vect` и `Src`.
+//! Гарантия §3.6 стоит не на распознавании региона, а на двух общих
+//! механизмах - связывание метки в домене и запечатывание погашения (§4.8), -
+//! и подсветке отвечать нечем.
+//!
+//! Тот же жанр, что у предупреждения о ветвях без reuse (волна 3): §7.2 просит
+//! показать категорию, которой у компилятора нет.
+//!
 //! # Чей это буфер
 //!
 //! Сигнатура одна на **программу**, а места несут путь модуля
@@ -53,7 +90,7 @@
 //! строку.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use adamas_core::alloc::{self, Blame, Source};
 use adamas_core::sig::{Signature, Spot};
@@ -88,6 +125,28 @@ const REUSE_WHY: &str = "Построение занимает слот ячей
                          не обещает; Perceus в компиляторе пока не реализован, поэтому сегодня \
                          это утверждение о форме кода, а не о машине.";
 
+/// Пояснение к связыванию, которое закрывает не оно само.
+const SPENT: &str = "Связывание линейно по построению (§3.3), но деструктора здесь не будет: \
+                     значение расходуется дальше, и закроет его тот, кто взял. У `unique data` \
+                     деструктора нет вовсе - память освобождается статически.";
+
+/// Пояснение к месту вставки деструктора.
+const RELEASED: &str = "Сюда компилятор вставит вызов деструктора - на выходе из области \
+                        видимости связывания, и на **всех** выходах: включая тот, где \
+                        вычисление оборвано эффектом (§3.3 × §3.4). Порядок между несколькими \
+                        - LIFO: связанное позже закрывается раньше.";
+
+/// Пояснение к метке, которую снимает хендлер.
+const DISCHARGES: &str = "Метку `handle` берёт из первой ветки-операции, если она не написана за \
+                          `@` (§4.1): в тексте её тут нет, а снимается именно она. На корпусе так \
+                          написаны 151 хендлер из 175.";
+
+/// Пояснение к использованию операции.
+const PERFORMS: &str = "Хендлеры **этого файла**, гасящие метку операции. Какой из них сработает, \
+                        решает место вызова, а не место операции: `handle` берёт названное \
+                        вычисление (§3.4), поэтому операция и её хендлер стоят в разных телах. \
+                        «в ряд» - в этом файле метка не гасится и уходит наверх по ряду.";
+
 /// Пояснение к звену цепочки, у которого места нет.
 const NO_SPOT: &str = "Места нет: за этим именем стоит запись, собранная элаборацией - значение \
                        модуля либо словарь инстанса, - и написанного выражения автор не писал. \
@@ -121,6 +180,8 @@ pub fn hints(uri: &Uri, document: &Document, range: Range, encoding: Encoding) -
     let mut found = Vec::new();
     shown.status(&mut found);
     shown.places(&mut found);
+    shown.resources(&mut found);
+    shown.effects(&mut found);
     // Порядок в ответе клиенту безразличен, а в прогоне - нет: имена приходят
     // из хеш-таблицы сигнатуры.
     found.sort_by_key(|hint| (hint.position.line, hint.position.character));
@@ -292,6 +353,183 @@ impl Shown<'_> {
         })
     }
 
+    /// Жизнь ресурса: где взят и где компилятор вставит деструктор (§3.3, §7.2).
+    ///
+    /// Два места на связывание, и оба нужны. §7.2 просит эту пару затем, чтобы
+    /// «понимать exceptional-exit cleanup поведение»: вставка стоит на **всех**
+    /// выходах из области видимости, включая тот, где вычисление оборвано
+    /// эффектом, и увидеть это по тексту нечем - в тексте вызова деструктора
+    /// нет.
+    ///
+    /// Показывается **посчитанное**, а не правило: отвечает
+    /// [`adamas_elab::lifecycle`], который заполняется в той самой точке, где
+    /// решение принято. Повторить правило здесь значило бы завести вторую его
+    /// запись, и подсказка начала бы врать ровно тогда, когда правило изменят.
+    fn resources(&self, out: &mut Vec<InlayHint>) {
+        let found = &self.document.observed().lifecycles;
+        for it in found.iter() {
+            if !self.visible(it.acquired.start()) {
+                continue;
+            }
+            let Some(position) = self.at(it.acquired.start()) else {
+                continue;
+            };
+            let (label, why) = match &it.released {
+                Some(released) => (
+                    it.owned.keyword().to_owned(),
+                    format!(
+                        "Связывание линейно по построению (§3.3). Компилятор вставит \
+                         `{} {}` на выходе из области видимости - на всех выходах, \
+                         включая обрыв эффектом.",
+                        released.drop, it.name
+                    ),
+                ),
+                None => (
+                    format!("{}, расходуется", it.owned.keyword()),
+                    SPENT.to_owned(),
+                ),
+            };
+            out.push(InlayHint {
+                position,
+                label: InlayHintLabel::LabelParts(vec![part(&label)]),
+                kind: None,
+                text_edits: None,
+                tooltip: Some(InlayHintTooltip::MarkupContent(MarkupContent {
+                    kind: MarkupKind::PlainText,
+                    value: why,
+                })),
+                padding_left: None,
+                padding_right: Some(true),
+                data: None,
+            });
+        }
+        // Место вставки одно на всю группу, а деструкторов там бывает
+        // несколько, и порядок между ними наблюдаем: §3.3 обещает LIFO, и
+        // корпус (`eval/resource.adamas`) различает `[1, 8, 9]` от `[1, 9, 8]`.
+        // Значит и подсказка обязана показать их в том же порядке - иначе она
+        // говорит про порядок неправду.
+        let mut grouped: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+        for it in found.iter() {
+            let Some(released) = it.released.as_ref() else {
+                continue;
+            };
+            grouped
+                .entry(released.at.end())
+                .or_default()
+                .insert(0, format!("{} {}", released.drop, it.name));
+        }
+        for (at, calls) in grouped {
+            if !self.visible(at) {
+                continue;
+            }
+            let Some(position) = self.at(at) else {
+                continue;
+            };
+            out.push(InlayHint {
+                position,
+                label: InlayHintLabel::LabelParts(vec![part(&calls.join(", "))]),
+                kind: None,
+                text_edits: None,
+                tooltip: Some(InlayHintTooltip::MarkupContent(MarkupContent {
+                    kind: MarkupKind::PlainText,
+                    value: RELEASED.to_owned(),
+                })),
+                padding_left: Some(true),
+                padding_right: None,
+                data: None,
+            });
+        }
+    }
+
+    /// Погашение эффекта: какую метку снимает `handle` и кто снимает эту
+    /// (§3.4, §7.2).
+    ///
+    /// Два места, и оба показывают **посчитанное**, а не пересказ текста.
+    ///
+    /// У `handle` метка чаще не написана вовсе: он берёт её из первой ветки, и
+    /// на корпусе так написаны 151 хендлер из 175. `handle counter with …` не
+    /// называет `State` нигде, и узнать её читателю сегодня нечем.
+    ///
+    /// У использования операции названы хендлеры **этого файла**, гасящие её
+    /// метку, - каждый своим именем и своим адресом, то есть щелчком. Это и
+    /// есть disambiguation, которого просит §7.2: в `eval/state.adamas` метку
+    /// `State` гасят четыре разных хендлера, и один `get` вправе попасть в
+    /// любой из них.
+    ///
+    /// **Названная граница, и она свойство языка, а не пробел анализа.**
+    /// «Хендлер в области видимости» точного ответа не имеет: `handle` берёт
+    /// **названное** вычисление (§3.4), поэтому операция и её хендлер стоят в
+    /// разных телах почти всегда, а какой из них сработает - свойство места
+    /// вызова, а не места операции. Показывается поэтому **множество**
+    /// кандидатов, и подсказка говорит об этом словами; хендлеры в других
+    /// файлах в него не входят.
+    fn effects(&self, out: &mut Vec<InlayHint>) {
+        let handlers = &self.document.observed().handlers;
+        for it in handlers.sites() {
+            if !self.visible(it.at.start()) {
+                continue;
+            }
+            let Some(position) = self.at(it.at.start()) else {
+                continue;
+            };
+            out.push(InlayHint {
+                position,
+                label: InlayHintLabel::LabelParts(vec![part(&shortly_named(&it.effect))]),
+                kind: None,
+                text_edits: None,
+                tooltip: Some(InlayHintTooltip::MarkupContent(MarkupContent {
+                    kind: MarkupKind::PlainText,
+                    value: DISCHARGES.to_owned(),
+                })),
+                padding_left: None,
+                padding_right: Some(true),
+                data: None,
+            });
+        }
+        for it in handlers.used() {
+            if !self.visible(it.at.start()) {
+                continue;
+            }
+            let Some(position) = self.at(it.at.start()) else {
+                continue;
+            };
+            let mut label = vec![part(&format!("{}: ", shortly_named(&it.effect)))];
+            let mut first = true;
+            for site in handlers.discharging(&it.effect) {
+                if !first {
+                    label.push(part(", "));
+                }
+                first = false;
+                label.push(InlayHintLabelPart {
+                    value: shortly_named(&site.owner),
+                    location: Some(Location {
+                        range: position::range(self.file, site.at, self.encoding),
+                        uri: self.uri.clone(),
+                    }),
+                    ..InlayHintLabelPart::default()
+                });
+            }
+            // Молчать о пустом множестве нельзя: читатель принял бы отсутствие
+            // подсказки за отсутствие механизма, а не за отсутствие хендлера.
+            if first {
+                label.push(part("в ряд"));
+            }
+            out.push(InlayHint {
+                position,
+                label: InlayHintLabel::LabelParts(label),
+                kind: None,
+                text_edits: None,
+                tooltip: Some(InlayHintTooltip::MarkupContent(MarkupContent {
+                    kind: MarkupKind::PlainText,
+                    value: PERFORMS.to_owned(),
+                })),
+                padding_left: None,
+                padding_right: Some(true),
+                data: None,
+            });
+        }
+    }
+
     /// Места внутри тел: где аллоцирует и что делает с разобранной ячейкой.
     ///
     /// Идут по **сигнатуре**, а не по дереву, и это не небрежность: место
@@ -377,6 +615,12 @@ fn part(value: &str) -> InlayHintLabelPart {
 /// Полное предложение про каждый источник уже написано - его печатает
 /// [`Blame`], и в подсказке оно стоит пояснением. Подпись же рисуется в строке
 /// кода, и второй копии текста здесь нет: только имя того, что аллоцирует.
+/// Имя без квалификации модулем: подсказка стоит **в том файле**, где написано
+/// использование, и путь в ней занимал бы место, ничего не добавляя.
+fn shortly_named(name: &str) -> String {
+    name.rsplit('.').next().unwrap_or(name).to_owned()
+}
+
 fn shortly(source: &Source) -> String {
     match source {
         Source::Construct(name) | Source::Call(name) => name.to_string(),

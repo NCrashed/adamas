@@ -482,6 +482,11 @@ pub struct Document {
     /// **чужого** файла. Хранятся, чтобы погасить их, когда отказ уйдёт:
     /// подчёркивание в файле, которого никто не открывал, само не исчезнет.
     published: Vec<String>,
+    /// Жизнь ресурсных связываний этого буфера (§3.3, §7.2).
+    ///
+    /// Приходит из того же прохода, что сигнатура и дерево: места в ней -
+    /// спаны **этого** текста, и проход, собравший их, уже состоялся.
+    observed: adamas_elab::lifecycle::Observed,
 }
 
 impl Document {
@@ -495,6 +500,7 @@ impl Document {
             signature: None,
             depends: Vec::new(),
             published: Vec::new(),
+            observed: adamas_elab::lifecycle::Observed::new(),
         }
     }
 
@@ -507,8 +513,10 @@ impl Document {
         self.text = text;
         self.module = None;
         // Сигнатура прошлого текста описывает не этот буфер: её места указывали
-        // бы в текст, которого больше нет.
+        // бы в текст, которого больше нет. По тому же доводу - и жизнь
+        // ресурсов: она вся из мест.
         self.signature = None;
+        self.observed = adamas_elab::lifecycle::Observed::new();
     }
 
     /// Кладёт в буфер то, что вышло из прохода.
@@ -533,6 +541,13 @@ impl Document {
             .first_mut()
             .and_then(|unit| unit.module.take());
         self.signature = program.signature.take();
+        self.observed = std::mem::take(&mut program.observed);
+    }
+
+    /// Жизнь ресурсных связываний последней проверки (§3.3, §7.2).
+    #[must_use]
+    pub fn observed(&self) -> &adamas_elab::lifecycle::Observed {
+        &self.observed
     }
 
     /// Текст, как его прислал клиент.

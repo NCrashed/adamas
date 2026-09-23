@@ -93,8 +93,11 @@ impl Grade {
     /// печать одними произведениями меняла бы отвергаемое определение на
     /// проходящее (найдено прогоном `adamas fmt` по корпусу, §7.1).
     ///
-    /// Одна таблица на печать ([`crate::printer`]) и на дамп: разъехавшись,
-    /// они сделали бы round-trip слепым ровно к тому, что он проверяет.
+    /// Это **написание**, и дамп его не переиспользует ([`Grade::dumped`]).
+    /// Разделение не случайно: дамп есть свидетель этой самой печати, и
+    /// свидетель, считающий по коду подозреваемого, слеп к его ошибке.
+    /// Проверено мутантом - общая таблица оставляла round-trip зелёным, когда
+    /// печать теряла смешанное.
     #[must_use]
     pub fn sign(self, position: usize) -> &'static str {
         match self {
@@ -108,6 +111,21 @@ impl Grade {
     #[must_use]
     pub fn written(grade: Option<Self>, position: usize) -> &'static str {
         grade.map_or(" * ", |it| it.sign(position))
+    }
+
+    /// Как выражение кратности показывает дамп ([`dump`]).
+    ///
+    /// Знак один на всё выражение - каким его и хранит узел, - и смешанное
+    /// пишется `*+`. Формы такой в языке нет, и в этом смысл: дамп показывает
+    /// **узел**, а не исходник, и перепутать смешанное с произведением нельзя
+    /// никаким написанием.
+    #[must_use]
+    pub fn dumped(grade: Option<Self>) -> &'static str {
+        match grade {
+            Some(Self::Sum) => " + ",
+            Some(Self::Mixed) => " *+ ",
+            Some(Self::Product) | None => " * ",
+        }
     }
 }
 
@@ -1425,8 +1443,8 @@ fn dump_binder(out: &mut String, binder: &Binder) {
         // `(q + r z : a)` и `(q z : a)` давали бы одну строку, и round-trip
         // печати, который сверяет дампы, к кратностям был бы слеп целиком.
         if index == 0 {
-            for (position, factor) in binder.factors.iter().enumerate() {
-                out.push_str(Grade::written(binder.grade, position));
+            for factor in &binder.factors {
+                out.push_str(Grade::dumped(binder.grade));
                 out.push_str(&factor.text);
             }
         }

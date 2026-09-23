@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/examples.rs
+expression: text
+---
+MkAnswers 7 1024.0 1

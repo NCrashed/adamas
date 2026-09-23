@@ -221,9 +221,7 @@ impl<'a> Comments<'a> {
         let blank = self
             .text
             .get(comment.span.end()..follows)
-            .is_some_and(|between| {
-                between.trim().is_empty() && between.matches('\n').count() >= 2
-            });
+            .is_some_and(|between| between.trim().is_empty() && between.matches('\n').count() >= 2);
         Some((self.written(comment), blank))
     }
 
@@ -264,7 +262,15 @@ macro_rules! placed {
     };
 }
 
-placed!(Decl, Stmt, Alt, Binding, Constructor, Operation, HandlerBranch);
+placed!(
+    Decl,
+    Stmt,
+    Alt,
+    Binding,
+    Constructor,
+    Operation,
+    HandlerBranch
+);
 
 /// Состояние печати: текст, отступ текущей строки и курсор комментариев.
 #[derive(Debug)]
@@ -383,10 +389,13 @@ impl<'a> Printer<'a> {
             // самого объявления: иначе их подобрал бы первый же член его блока.
             let leading = self.detached_comments(decl.span.start());
             let mut text = self.rendered(decl);
-            // Объявление с комментарием над ним - высокое: без этого шапка
-            // файла и пояснение к определению приклеивались бы к соседу
-            // сверху.
-            let tall = text.contains('\n') || !leading.is_empty();
+            let tall = text.contains('\n');
+            // Комментарий над объявлением отбивает его от соседа **сверху** и
+            // только сверху: он поясняет это объявление, а не отделяет его от
+            // следующего. Считай его признаком высоты в обе стороны -
+            // `infixl 6 -` с пояснением оторвался бы от своей сигнатуры, а тот
+            // же `infixl` без пояснения нет.
+            let leads = !leading.is_empty();
             text.push_str(&self.line_tail(decl.span.end()));
             if index > 0 {
                 self.out.push('\n');
@@ -394,7 +403,8 @@ impl<'a> Printer<'a> {
                 // заняло больше строки: список коротких определений остаётся
                 // списком. Сигнатуру от её клауз не отделяем и тогда: они об
                 // одном.
-                if (tall || previous_is_tall) && !attached(&module.decls[index - 1], decl) {
+                if (tall || leads || previous_is_tall) && !attached(&module.decls[index - 1], decl)
+                {
                     self.out.push('\n');
                 }
             }
@@ -463,16 +473,7 @@ impl<'a> Printer<'a> {
                 self.push(" : ");
                 self.expr(ty, Prec::Lowest);
             }
-            DeclKind::Clauses { name, clauses } => {
-                for (index, clause) in clauses.iter().enumerate() {
-                    if index > 0 {
-                        self.comments_before(clause.span.start());
-                        self.line();
-                    }
-                    self.clause(name, clause);
-                    self.comments_after(clause.span.end());
-                }
-            }
+            DeclKind::Clauses { name, clauses } => self.clauses(name, clauses),
             DeclKind::Data(data) => self.data(data),
             DeclKind::Module(module) => self.module_decl(module),
             DeclKind::Import(import) => {
@@ -553,6 +554,21 @@ impl<'a> Printer<'a> {
         self.decl_name(&declared.name);
         self.push(" : ");
         self.expr(&declared.ty, Prec::Lowest);
+    }
+
+    /// Клаузы одного определения, каждая со своей строки.
+    ///
+    /// Комментарий между ними - тот же случай, что член блока: его снимает
+    /// курсор перед той клаузой, над которой он стоит.
+    fn clauses(&mut self, name: &Name, clauses: &[Clause]) {
+        for (index, clause) in clauses.iter().enumerate() {
+            if index > 0 {
+                self.comments_before(clause.span.start());
+                self.line();
+            }
+            self.clause(name, clause);
+            self.comments_after(clause.span.end());
+        }
     }
 
     fn clause(&mut self, name: &Name, clause: &Clause) {

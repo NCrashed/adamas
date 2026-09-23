@@ -51,6 +51,9 @@ data Pair where
 idPair : Pair -> Pair
 idPair p = p
 
+pairing : Pair -> Nat -> Pair
+pairing p n = p
+
 ignoring : (Nat -> Nat) -> Nat
 ignoring f = Zero
 
@@ -63,8 +66,14 @@ wrap n = MkPair n n
 reach : Nat -> Pair
 reach n = wrap n
 
+far : Nat -> Pair
+far n = reach n
+
 deep : Nat -> Pair
 deep n = idPair (MkPair n n)
+
+spread : Nat -> Pair
+spread n = pairing (MkPair n n) n
 
 tuck : Nat -> Pair
 tuck n =
@@ -74,6 +83,10 @@ tuck n =
 pick : Nat -> Pair
 pick Zero = MkPair Zero Zero
 pick (Succ m) = MkPair m m
+
+bump : Nat -> Nat
+bump Zero = Zero
+bump (Succ m) = Succ (Succ m)
 
 held : Nat
 held = ignoring (\\m -> m)
@@ -108,10 +121,18 @@ fn every_source_underlines_what_allocates() {
         // остановиться на `idPair (…)`. Скобки входят в спан - их носит узел
         // дерева, и подчёркивание рисуется по нему.
         ("deep", "(MkPair n n)"),
+        // **Первый** аргумент из двух: до него идёт `Callee` и только потом
+        // `Argument`, и порядок этот значим. Одноаргументное применение его не
+        // показывает - там кадр ровно один, и перестановка ничего не меняет.
+        ("spread", "(MkPair n n)"),
         // Значение связывания `let`, а не тело блока, хотя оба аллоцируют.
         ("tuck", "Succ n"),
         // Ветвь разбора: первая из двух, и текст у неё свой.
         ("pick", "MkPair Zero Zero"),
+        // **Вторая** ветвь: первая не аллоцирует вовсе (`Zero` - конструктор
+        // без рантайм-полей), и номер ветви в маршруте значим. У `pick` обе
+        // аллоцируют, и там перепутанный номер не виден.
+        ("bump", "Succ (Succ m)"),
         // Лямбда сверх параметров - только там, где она не ведущая: ведущие
         // снимаются вместе с параметрами определения.
         ("held", "(\\m -> m)"),
@@ -160,6 +181,33 @@ fn the_chain_is_positioned_link_by_link() {
     assert_eq!(
         underlined(&signature, SOURCES, blame.owner(&name)),
         Some("MkPair Zero Zero")
+    );
+}
+
+/// Цепочка **длиннее одного звена** адресуется своим последним, а не первым.
+///
+/// Отдельным свидетелем потому, что на цепочке из одного звена первое и
+/// последнее совпадают, и перепутать их там нечем: `far -> reach -> wrap`
+/// показывает разницу, `pong -> ping` - нет.
+#[test]
+fn a_longer_chain_belongs_to_its_last_link() {
+    let signature = program(SOURCES);
+    let name: Name = "far".into();
+    let blame = alloc::blame(&signature, &name).expect("`far` аллоцирует через двоих");
+
+    assert_eq!(
+        blame.through().iter().map(|it| &**it).collect::<Vec<_>>(),
+        ["reach", "wrap"],
+        "путь идёт по графу вызовов до первого не-вызова"
+    );
+    // Три звена - три места, каждое в своём теле.
+    assert_eq!(underlined(&signature, SOURCES, &name), Some("reach n"));
+    assert_eq!(underlined(&signature, SOURCES, "reach"), Some("wrap n"));
+    assert_eq!(underlined(&signature, SOURCES, "wrap"), Some("MkPair n n"));
+    assert_eq!(
+        underlined(&signature, SOURCES, blame.owner(&name)),
+        Some("MkPair n n"),
+        "владелец конца пути - последнее звено"
     );
 }
 

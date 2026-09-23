@@ -219,6 +219,23 @@ mod client {
             }
         }
 
+        /// Сколько резидентной памяти держит сам сервер, в килобайтах.
+        ///
+        /// Читается у **процесса сервера**, а не у процесса теста: буферы
+        /// живут там, и мерить своё потребление значило бы мерить клиента.
+        /// Поле `resident` из `/proc/<pid>/statm` - в страницах.
+        pub(crate) fn resident(&self) -> u64 {
+            let statm = std::fs::read_to_string(format!("/proc/{}/statm", self.child.id()))
+                .expect("Linux: у процесса есть statm");
+            let pages: u64 = statm
+                .split_whitespace()
+                .nth(1)
+                .expect("второе поле statm - резидентные страницы")
+                .parse()
+                .expect("страницы - число");
+            pages * 4
+        }
+
         /// Закрывает сервер и ждёт его кода возврата.
         pub(crate) fn stop(mut self) {
             self.request("shutdown", &Value::Null);
@@ -1128,6 +1145,60 @@ fn what_a_round_costs_on_a_project() {
     let borrowed: Vec<&str> = awaited.iter().map(String::as_str).collect();
     let all = floor(&mut client, &base, &base_text, 300, &borrowed);
     eprintln!("правка `Std/Base`, десять буферов: {all} мкс");
+    client.stop();
+}
+
+/// Чего стоит открытый буфер - памятью и кругом перерисовки.
+///
+/// Зовётся руками рядом с [`what_a_round_costs_on_a_project`] и по той же
+/// причине: обе величины требуют тихой машины.
+///
+/// ```text
+/// cargo test --release -p adamas-lsp --test protocol -- --ignored --nocapture
+/// ```
+///
+/// Мерится **капстоун** (944 строки) в десяти буферах: волна 1 Фазы 9 решила
+/// хранить дерево разбора замером, а не вкусом, и всякое новое поле буфера
+/// обязано назвать свою цену тем же способом. Резидентная память читается у
+/// процесса сервера, круг - тот же, что у проекта: от `didChange` до
+/// `publishDiagnostics`.
+#[test]
+#[ignore = "стенд памяти: величина требует тихой машины"]
+#[allow(
+    clippy::expect_used,
+    reason = "заготовка стенда: отказ здесь означает сломанное окружение"
+)]
+fn what_a_buffer_costs_in_memory() {
+    const BUFFERS: usize = 10;
+    let text = std::fs::read_to_string(corpus().join("eval").join("interpreter.adamas"))
+        .expect("капстоун читается");
+
+    let (mut client, _) = Client::start(None);
+    let empty = client.resident();
+    eprintln!("сервер без буферов: {empty} КиБ");
+
+    let mut uris = Vec::with_capacity(BUFFERS);
+    for at in 0..BUFFERS {
+        let uri = format!("file:///corpus/capstone-{at}.adamas");
+        client.open(&uri, &text);
+        uris.push(uri);
+        if at == 0 {
+            client.settled();
+            let one = client.resident();
+            eprintln!("один буфер: {one} КиБ (+{} КиБ)", one - empty);
+        }
+    }
+    client.settled();
+    let all = client.resident();
+    eprintln!(
+        "{BUFFERS} буферов: {all} КиБ (+{} КиБ, то есть {} КиБ на буфер)",
+        all - empty,
+        (all - empty) / BUFFERS as u64
+    );
+
+    let first = uris.first().expect("буферы открыты").clone();
+    let round = floor(&mut client, &first, &text, 100, &[&first]);
+    eprintln!("круг перерисовки капстоуна при {BUFFERS} буферах: {round} мкс");
     client.stop();
 }
 

@@ -81,6 +81,7 @@
 use std::fmt;
 use std::rc::Rc;
 
+use crate::error::Frame;
 use crate::meta::{Metas, zonk_term};
 use crate::mult::Mult;
 use crate::sig::{Definition, DefinitionKind, Signature};
@@ -132,12 +133,50 @@ pub enum Source {
 ///
 /// «`f` зовёт аллоцирующее `g`» без продолжения не говорит, что чинить, поэтому
 /// цепочка идёт по графу вызовов до первого не-вызова.
+///
+/// # Чем адресуется звено и чем - конец
+///
+/// Звенья - **имена**, и место каждого берётся у того же определения, что его
+/// зовёт: у всякого члена цепочки есть свой источник аллокации со своим местом
+/// в **его собственном** теле ([`Signature::allocated_at`]). `f` зовёт `g` -
+/// место у `f`; `g` строит `MkPair` - место у `g`. Конец пути поэтому
+/// адресуется так же, как звенья, а не отдельно.
+///
+/// Объявление звена - другое место и берётся другой таблицей
+/// ([`Signature::origin`]): туда ведёт переход, а не подсказка. Звенья
+/// [`Blame::through`] в ней есть все по построению - в цепочку попадает только
+/// [`Source::Call`], а его записывают определению **с телом**, то есть с
+/// клаузами.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Blame {
     /// Кого зовут по пути. Само определение сюда не входит.
     through: Vec<Name>,
     /// Что аллоцирует в конце пути.
     source: Source,
+}
+
+impl Blame {
+    /// Кого зовут по пути, снаружи внутрь. Само определение сюда не входит.
+    #[must_use]
+    pub fn through(&self) -> &[Name] {
+        &self.through
+    }
+
+    /// Что аллоцирует в конце пути.
+    #[must_use]
+    pub const fn source(&self) -> &Source {
+        &self.source
+    }
+
+    /// Кому принадлежит место аллокации - последнему звену либо самому
+    /// определению, если звеньев нет.
+    ///
+    /// Именно это имя спрашивают у [`Signature::allocated_at`]: источник стоит
+    /// в теле того, кто его написал, а не того, кто до него дозвался.
+    #[must_use]
+    pub fn owner<'a>(&'a self, name: &'a Name) -> &'a Name {
+        self.through.last().unwrap_or(name)
+    }
 }
 
 /// Чем определение нарушает `@noalloc`. `None` - не нарушает.
@@ -254,7 +293,27 @@ pub fn constructed(name: &Name, ty: &Term) -> Option<Source> {
     None
 }
 
-/// Первый источник аллокации определения. `None` - не аллоцирует.
+/// Источник аллокации вместе с маршрутом до него.
+///
+/// Маршрут - тот же, каким ядро называет место отказа (§10 вопрос 49б,
+/// [`crate::error::Frame`]): спанов на узлах терма нет и не будет, а кадрами
+/// место проходится второй раз по дереву поверхностного языка. Переводит его в
+/// спан элаборация - единственная, у кого дерево есть, - и кладёт ответ в
+/// [`Signature::allocated_at`].
+///
+/// Тот же механизм уже носит `@fbip` ([`crate::fbip::Incompatible`]), и кадры
+/// здесь складываются **теми же правилами**: разойдись они, один и тот же
+/// подтерм получал бы у двух проверок разные места.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    /// Что аллоцирует.
+    pub source: Source,
+    /// Маршрут до места **снаружи внутрь**, от корня тела.
+    pub route: Vec<Frame>,
+}
+
+/// Первый источник аллокации определения вместе с местом. `None` - не
+/// аллоцирует.
 ///
 /// Зовётся на границе объявления, где дырки ещё живы: тело зонкается, потому что
 /// словарь метода инстанса стоит в нём дыркой (§10 вопрос 134), а за ней прячутся
@@ -264,15 +323,18 @@ pub fn constructed(name: &Name, ty: &Term) -> Option<Source> {
 /// оптимистичный - «не аллоцирует», - и понижает его неподвижная точка
 /// вызывающего: цикл не аллоцирующих функций не аллоцирует, поэтому старт сверху
 /// верен.
+///
+/// У определения **без тела** маршрут пуст: источник там не написан внутри, а
+/// выведен из вида объявления, и указывать в нём не на что.
 #[must_use]
 pub fn source(
     signature: &Signature,
     metas: &Metas,
     name: &Name,
     definition: &Definition,
-) -> Option<Source> {
+) -> Option<Found> {
     let Some(body) = &definition.body else {
-        return match &definition.kind {
+        let source = match &definition.kind {
             // Формер - тип: значений в рантайме у него нет.
             DefinitionKind::Data { .. } | DefinitionKind::Effect { .. } => None,
             DefinitionKind::Constructor { .. } => constructed(name, &definition.ty),
@@ -282,11 +344,16 @@ pub fn source(
             // потому что через границу обязательство объявляется (§5.1).
             DefinitionKind::Regular => Some(Source::Opaque(Rc::clone(name))),
         };
+        return source.map(|source| Found {
+            source,
+            route: Vec::new(),
+        });
     };
     let body = zonk_term(metas, body);
     let mut walk = Walk {
         signature,
         found: None,
+        route: Vec::new(),
     };
     walk.parameters(&body);
     walk.found
@@ -296,7 +363,9 @@ pub fn source(
 struct Walk<'a> {
     signature: &'a Signature,
     /// Найденное. Дальше первого не ищется: диагностика называет одно место.
-    found: Option<Source>,
+    found: Option<Found>,
+    /// Где обход стоит сейчас - снаружи внутрь.
+    route: Vec<Frame>,
 }
 
 impl Walk<'_> {
@@ -308,6 +377,10 @@ impl Walk<'_> {
     fn parameters(&mut self, term: &Term) {
         let mut current = term;
         while let Term::Lam(_, _, body) = current {
+            // Кадр дописывает тот, кто узел строит (`pattern::Tree`): обернул
+            // лямбдой - дописал `Body`. Не дописать его здесь значило бы
+            // разойтись с маршрутами клауз, по которым место и ищется.
+            self.route.push(Frame::Body);
             current = body;
         }
         self.term(current);
@@ -315,8 +388,19 @@ impl Walk<'_> {
 
     fn record(&mut self, source: Source) {
         if self.found.is_none() {
-            self.found = Some(source);
+            self.found = Some(Found {
+                source,
+                route: self.route.clone(),
+            });
         }
+    }
+
+    /// Спускается в подтерм, дописав кадры пути до него.
+    fn under(&mut self, path: &[Frame], term: &Term) {
+        let before = self.route.len();
+        self.route.extend_from_slice(path);
+        self.term(term);
+        self.route.truncate(before);
     }
 
     fn term(&mut self, term: &Term) {
@@ -341,6 +425,9 @@ impl Walk<'_> {
             | Term::Prim(_)
             | Term::Pi(..) => {}
 
+            // У полей записи кадра нет: маршрут обрывается здесь, и спан
+            // получится тот, до которого он дошёл (§10 вопрос 49б). То же
+            // правило, что у [`crate::fbip`].
             Term::Object(fields) => {
                 self.record(Source::Record);
                 for (_, value) in fields.iter() {
@@ -370,26 +457,30 @@ impl Walk<'_> {
                         if crate::resume::eliminated(name).is_some()
                             && self.handling(name, &arguments) => {}
                     Term::Const(name, _, _) => {
+                        // Место у источника - **всё применение**, а не его
+                        // голова: читателю подчёркивают `MkPair x y`, а не
+                        // одно имя конструктора. Кадров поэтому не
+                        // дописывается.
                         self.constant(name, arguments.len());
                         self.applied(name, &arguments);
                     }
                     // Convoy: разбор применён к соседним аргументам, и ветви
                     // связывают их лямбдами сверх полей.
                     Term::Case(case) => {
+                        let head = vec![Frame::Callee; arguments.len()];
+                        let before = self.route.len();
+                        self.route.extend_from_slice(&head);
                         self.case(case, arguments.len());
-                        for argument in &arguments {
-                            self.term(argument);
-                        }
+                        self.route.truncate(before);
+                        self.spine(&arguments, |_| false);
                     }
                     other => {
                         // Голова - значение: вызов идёт через `adamas_apply`,
                         // аргумент уходит слотом замыкания, и плоский на этой
                         // границе боксируется (§10 вопрос 158).
                         self.record(Source::Boxing);
-                        self.term(other);
-                        for argument in &arguments {
-                            self.term(argument);
-                        }
+                        self.under(&vec![Frame::Callee; arguments.len()], other);
+                        self.spine(&arguments, |_| false);
                     }
                 }
             }
@@ -398,12 +489,28 @@ impl Walk<'_> {
                 // Тип связывания - тип. Стёртое значение в рантайме не
                 // возникает вовсе (§3.2), и аллоцировать ему нечем.
                 if *mult != Mult::Zero {
-                    self.term(value);
+                    self.under(&[Frame::BindingValue], value);
                 }
-                self.term(body);
+                self.under(&[Frame::BindingBody], body);
             }
 
             Term::Case(case) => self.case(case, 0),
+        }
+    }
+
+    /// Обходит аргументы спайна, пропуская те позиции, что названы стёртыми.
+    ///
+    /// Кадры складываются так же, как у [`crate::fbip`]: до `at`-го аргумента
+    /// спайна из `n` идёт `n - 1 - at` кадров `Callee`, и последним - один
+    /// `Argument`. Применение левоассоциативно, и это ровно спуск по нему.
+    fn spine(&mut self, arguments: &[&Term], erased: impl Fn(usize) -> bool) {
+        for (at, argument) in arguments.iter().enumerate() {
+            if erased(at) {
+                continue;
+            }
+            let mut path = vec![Frame::Callee; arguments.len() - 1 - at];
+            path.push(Frame::Argument);
+            self.under(&path, argument);
         }
     }
 
@@ -419,6 +526,17 @@ impl Walk<'_> {
     /// не замыкания, а аргументы операции и резумпция, которые раздаёт сама
     /// площадка. Вычисление под хендлером - нульместная функция сахара `{ε} A`
     /// (§3.4), и понижение снимает её связывание тем же ходом.
+    ///
+    /// # Маршрут здесь замирает
+    ///
+    /// Терм, который отдаёт [`crate::resume::site`], - не подтерм спайна, а
+    /// снятая с него форма: ветка `ask -> resume 2` приезжает как `2`. Кадры
+    /// до неё поэтому не выразимы, и весь хендлер получает **один** маршрут -
+    /// до самого применения элиминатора. Читателю подчёркивается площадка
+    /// целиком; точность теряется, правдивость - нет, и это то же правило, по
+    /// которому обрывается маршрут у полей записи (§10 вопрос 49б). Снять
+    /// огрубление можно, приложив к [`crate::resume::Site`] позиции аргументов,
+    /// - работа не этого трека.
     fn handling(&mut self, name: &Name, arguments: &[&Term]) -> bool {
         let Some(site) = crate::resume::site(self.signature, name, arguments) else {
             return false;
@@ -500,20 +618,19 @@ impl Walk<'_> {
                 current = codomain;
             }
         }
-        for (position, argument) in arguments.iter().enumerate() {
-            if binders.get(position) == Some(&Mult::Zero) {
-                continue;
-            }
-            self.term(argument);
-        }
+        self.spine(arguments, |at| binders.get(at) == Some(&Mult::Zero));
     }
 
     /// Обходит разбор: мотив - тип, ветви связывают поля и соседей convoy.
     fn case(&mut self, case: &Case, applied: usize) {
-        self.term(&case.scrutinee);
-        for branch in &case.branches {
+        self.under(&[Frame::Scrutinee], &case.scrutinee);
+        for (at, branch) in case.branches.iter().enumerate() {
             let binders = self.fields(&branch.constructor, case.params) + applied;
+            let before = self.route.len();
+            self.route
+                .push(Frame::Branch(u32::try_from(at).unwrap_or(u32::MAX)));
             self.branch(binders, &branch.body);
+            self.route.truncate(before);
         }
     }
 
@@ -533,7 +650,11 @@ impl Walk<'_> {
     fn branch(&mut self, binders: usize, term: &Term) {
         match (binders, term) {
             (0, other) => self.term(other),
-            (_, Term::Lam(_, _, body)) => self.branch(binders - 1, body),
+            (_, Term::Lam(_, _, body)) => {
+                self.route.push(Frame::Body);
+                self.branch(binders - 1, body);
+                self.route.pop();
+            }
             (_, other) => self.term(other),
         }
     }

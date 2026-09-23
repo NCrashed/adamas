@@ -689,6 +689,12 @@ pub struct Scope {
 }
 
 impl Scope {
+    /// Путь файла, чья это область. `None` - входной файл.
+    #[must_use]
+    pub fn own(&self) -> Option<&Name> {
+        self.own.as_ref()
+    }
+
     /// Область файла, подключённого под этим путём.
     #[must_use]
     pub fn of(path: &str) -> Self {
@@ -716,11 +722,37 @@ impl Scope {
     }
 }
 
+/// Место в исходнике вместе с файлом, которому оно принадлежит.
+///
+/// Файл здесь обязателен, и это не запас: [`crate::source::Span`] - смещения
+/// внутри **одного** текста, а цепочка вызовов пересекает границу файла на
+/// первом же вызове в прелюдию. Спан без файла нарисовался бы по чужому тексту
+/// и подчеркнул случайную строку - ровно тот отказ, который §7.2 запрещает
+/// подсказке.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Spot {
+    /// Путь модуля, в котором место написано. `None` - входной файл: он и есть
+    /// программа, и пути у него нет (§4.8).
+    pub module: Option<Name>,
+    /// Диапазон внутри его текста.
+    pub span: crate::source::Span,
+}
+
 /// Набор определений, доступных терму.
 #[derive(Clone, Debug, Default)]
 pub struct Signature {
     definitions: HashMap<Name, Definition>,
     origins: HashMap<Name, crate::source::Span>,
+    /// Маршрут до первого источника аллокации - от [`crate::alloc::source`].
+    ///
+    /// Перевалочная, а не конечная: кадры ложатся на дерево поверхностного
+    /// языка, а дерева у ядра нет. Забирает их элаборация и кладёт ответ в
+    /// [`Signature::allocations`]; забранное отсюда уходит
+    /// ([`Signature::locate_allocation`]), поэтому остаются здесь только
+    /// определения, заведённые мимо элаборации, - тесты и мономорфизация.
+    routes: HashMap<Name, Rc<[crate::error::Frame]>>,
+    /// Где определение аллоцирует - уже спаном, уже в своём файле.
+    allocations: HashMap<Name, Spot>,
     scope: Scope,
     /// Под каким именем объявлена единица - см. [`Signature::unit`].
     unit: Option<Name>,
@@ -892,6 +924,12 @@ impl Signature {
     /// псевдонимы по ходу файла.
     pub fn scope_mut(&mut self) -> &mut Scope {
         &mut self.scope
+    }
+
+    /// Область видимости текущего файла на чтение.
+    #[must_use]
+    pub const fn scope(&self) -> &Scope {
+        &self.scope
     }
 
     /// Имя, под которым объявлено написанное: своё под квалификацией файла,
@@ -1073,6 +1111,37 @@ impl Signature {
         self.origins.get(name).copied()
     }
 
+    /// Маршрут до первого источника аллокации. Пуст - источник не внутри тела.
+    ///
+    /// Читает его элаборация, и она же его забирает
+    /// ([`Signature::locate_allocation`]): кадры ложатся на дерево, а дерева у
+    /// ядра нет.
+    #[must_use]
+    pub fn allocation_route(&self, name: &str) -> Option<&[crate::error::Frame]> {
+        self.routes.get(name).map(|it| &**it)
+    }
+
+    /// Запоминает, где определение аллоцирует, и забирает маршрут.
+    ///
+    /// Пара к [`Signature::locate`] и по той же причине таблицей рядом:
+    /// соответствие «маршрут ядра - место в тексте» знает только элаборация.
+    /// Без неё таблица пуста, и всё, что её читает, обязано это переживать.
+    pub fn locate_allocation(&mut self, name: &str, spot: Spot) {
+        self.routes.remove(name);
+        self.allocations.insert(name.into(), spot);
+    }
+
+    /// Где определение аллоцирует (§5.1, §7.2 allocation hints).
+    ///
+    /// Место - в **его собственном** теле: `f`, зовущая аллоцирующую `g`,
+    /// указывает на вызов `g`, а не внутрь `g`. Цепочку целиком собирает
+    /// [`crate::alloc::blame`], и место каждого её звена спрашивается здесь же
+    /// по имени звена.
+    #[must_use]
+    pub fn allocated_at(&self, name: &str) -> Option<&Spot> {
+        self.allocations.get(name)
+    }
+
     /// Имена всех определений - инвариантным тестам и инструментам.
     ///
     /// Порядок не обещается: хранилище - хеш-таблица, и потребитель, которому
@@ -1143,6 +1212,10 @@ impl Signature {
         if let Some(definition) = self.definitions.get_mut(name) {
             if definition.body.is_none() {
                 definition.allocates = None;
+                // Места у снятого вердикта больше нет: подсказка «аллоцирует
+                // здесь» над постулатом, которому поверили, была бы ложью.
+                self.routes.remove(name);
+                self.allocations.remove(name);
             }
         }
     }
@@ -2344,8 +2417,20 @@ impl Signature {
                 let Some(found) = crate::alloc::source(self, metas, name, &definition) else {
                     continue;
                 };
+                // Маршрут кладётся рядом, а не в определение: он про
+                // **написанное** тело, как и позиция объявления, и дописывать
+                // его тринадцати литералам `Definition` пришлось бы по той же
+                // причине, по какой там нет спана.
+                //
+                // Условие - **наличие тела**, а не непустота маршрута: пустой
+                // маршрут законен и означает корень тела (`main = MkPair …`
+                // без параметров). Отсеки его - и подсказки не было бы ровно у
+                // определений без параметров.
+                if definition.body.is_some() {
+                    self.routes.insert(name.clone(), found.route.into());
+                }
                 if let Some(stored) = self.definitions.get_mut(name) {
-                    stored.allocates = Some(found);
+                    stored.allocates = Some(found.source);
                 }
                 demoted = true;
             }

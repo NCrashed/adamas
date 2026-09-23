@@ -4,10 +4,12 @@
 //!
 //! `initialize`, `textDocument/didOpen`, `didChange`, `didClose` и
 //! `textDocument/publishDiagnostics` - те же отказы и предупреждения, что
-//! печатает `adamas check`, на тех же местах. Сверх того три возможности:
+//! печатает `adamas check`, на тех же местах. Сверх того четыре возможности:
 //! `textDocument/hover` — тип имени под курсором, первая из названных §7.2;
 //! `textDocument/definition` внутри файла; `semanticTokens/full` — подсветка
-//! от настоящего разбора, без второй грамматики ([`tokens`]).
+//! от настоящего разбора, без второй грамматики ([`tokens`]);
+//! `textDocument/inlayHint` — вердикт кучи и переиспользование ячейки на своих
+//! местах ([`hints`], §5.1).
 //!
 //! # Проект, а не файл
 //!
@@ -79,16 +81,20 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{GotoDefinition, HoverRequest, Request as _, SemanticTokensFullRequest};
+use lsp_types::request::{
+    GotoDefinition, HoverRequest, InlayHintRefreshRequest, InlayHintRequest, Request as _,
+    SemanticTokensFullRequest,
+};
 use lsp_types::{
     DiagnosticRelatedInformation, DiagnosticSeverity, GotoDefinitionResponse, Hover, HoverContents,
-    HoverProviderCapability, InitializeParams, InitializeResult, Location, MarkupContent,
-    MarkupKind, OneOf, Position, PositionEncodingKind, PublishDiagnosticsParams, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams,
+    HoverProviderCapability, InitializeParams, InitializeResult, InlayHintParams, Location,
+    MarkupContent, MarkupKind, OneOf, Position, PositionEncodingKind, PublishDiagnosticsParams,
+    SemanticTokens, SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams,
     SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo, TextDocumentPositionParams,
     TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 
+pub mod hints;
 pub mod position;
 pub mod project;
 pub mod tokens;
@@ -108,8 +114,7 @@ const SOURCE: &str = "adamas";
 /// Обрыв канала, неразбираемые параметры `initialize`, отказ потоков ввода.
 pub fn run() -> anyhow::Result<()> {
     let (connection, threads) = Connection::stdio();
-    let served =
-        handshake(&connection).and_then(|(encoding, roots)| serve(&connection, encoding, &roots));
+    let served = handshake(&connection).and_then(|client| serve(&connection, &client));
     // Соединение закрывается **до** ожидания потоков: поток записи живёт,
     // пока жив отправитель, и `join` при живом соединении не вернётся никогда.
     // Измерено: девять прогонов протокола висли на `wait` ровно здесь.
@@ -118,12 +123,34 @@ pub fn run() -> anyhow::Result<()> {
     served
 }
 
+/// О чём договорились с клиентом в `initialize`.
+struct Client {
+    /// Чем клиент меряет позицию внутри строки.
+    encoding: Encoding,
+    /// Корни рабочего пространства, названные клиентом.
+    roots: Vec<PathBuf>,
+    /// Умеет ли клиент перерисовывать подсказки по просьбе сервера.
+    ///
+    /// Спрашивается затем, что подсказка буфера зависит от **чужого** текста:
+    /// цепочка вины пересекает границу файла, и правка библиотеки меняет
+    /// подсказку в окне, которого никто не трогал. Сам клиент перезапрашивает
+    /// подсказки на правку **этого** документа и о чужой не знает.
+    refreshes: bool,
+}
+
 /// Рукопожатие: читает `initialize`, договаривается о кодировке и корнях,
 /// отвечает возможностями.
-fn handshake(connection: &Connection) -> anyhow::Result<(Encoding, Vec<PathBuf>)> {
+fn handshake(connection: &Connection) -> anyhow::Result<Client> {
     let (id, params) = connection.initialize_start()?;
     let params: InitializeParams = serde_json::from_value(params)?;
     let roots = workspace(&params);
+    let refreshes = params
+        .capabilities
+        .workspace
+        .as_ref()
+        .and_then(|it| it.inlay_hint.as_ref())
+        .and_then(|it| it.refresh_support)
+        .unwrap_or(false);
     let encoding = negotiate(
         params
             .capabilities
@@ -139,7 +166,11 @@ fn handshake(connection: &Connection) -> anyhow::Result<(Encoding, Vec<PathBuf>)
         }),
     };
     connection.initialize_finish(id, serde_json::to_value(result)?)?;
-    Ok((encoding, roots))
+    Ok(Client {
+        encoding,
+        roots,
+        refreshes,
+    })
 }
 
 /// Корни проекта, названные клиентом.
@@ -192,6 +223,11 @@ pub fn capabilities(encoding: Encoding) -> ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
+        // Подсказки §5.1 считаются по готовой сигнатуре буфера, поэтому
+        // `resolve` не объявляется: откладывать нечего - и подпись, и пояснение
+        // уже посчитаны, а второй запрос стоил бы круга сообщений на каждую
+        // подсказку ([`hints`]).
+        inlay_hint_provider: Some(OneOf::Left(true)),
         // Подсветка приходит от разбора, а не от второй грамматики
         // ([`tokens`]). Только `full`: по готовому дереву капстоун в 944
         // строки красится за 0,7 мс, и ни диапазон, ни дельта за такие деньги
@@ -410,6 +446,13 @@ fn translate(
 /// 7,5 MiB при 20 MiB всего процесса. Разойдись эти величины в другую сторону
 /// (скажем, стань буфер дороже десятка мегабайт), ответ был бы другим, и
 /// мерить его следовало бы заново.
+///
+/// Таблица переиспользования ячейки ([`adamas_core::sig::Reuse`]) прибавилась
+/// тем же ходом и стоит **+23 KiB на буфер**: 1639 KiB до неё и 1662 после, тем
+/// же стендом и в один прогон. Круг перерисовки при этом не сдвинулся -
+/// 46,8 / 48,6 / 46,9 мс на трёх срезах, то есть внутри разброса; на том же
+/// стенде волна 3 трека A видела 42,2 мс, и разница между её числом и этими -
+/// загрузка машины, а не код.
 #[derive(Debug, Default)]
 pub struct Document {
     /// Текст, как его прислал клиент.
@@ -533,25 +576,32 @@ impl Document {
 
 /// Главный цикл: уведомления меняют буфер и вызывают проверку, запросы пока
 /// только закрывают сервер.
-fn serve(connection: &Connection, encoding: Encoding, roots: &[PathBuf]) -> anyhow::Result<()> {
+fn serve(connection: &Connection, client: &Client) -> anyhow::Result<()> {
     // Ключ - текст URI, а не сам `Uri`: в `lsp-types` он несёт `Cell` с
     // разбором, то есть внутреннюю изменяемость, и ключом хеш-таблицы быть не
     // должен.
     let mut documents: HashMap<String, Document> = HashMap::new();
+    let encoding = client.encoding;
+    let roots = client.roots.as_slice();
     for message in &connection.receiver {
         match message {
             Message::Request(request) => {
                 if connection.handle_shutdown(&request)? {
                     return Ok(());
                 }
-                // Подсветка идёт своим путём: спрашивают её не о позиции, а о
-                // файле целиком, и берёт она готовое дерево. Всё прочее - в
-                // [`answer`], и он же отклоняет незнакомый метод: возможности
-                // объявлены в `initialize`, а молчание вешает клиента.
-                let reply = if request.method == SemanticTokensFullRequest::METHOD {
-                    highlight(encoding, &documents, request.id.clone(), &request.params)
-                } else {
-                    answer(encoding, roots, &documents, request)
+                // Подсветка и подсказки идут своим путём: спрашивают их не о
+                // позиции, а о файле и о его видимом куске, и берут они готовое.
+                // Всё прочее - в [`answer`], и он же отклоняет незнакомый метод:
+                // возможности объявлены в `initialize`, а молчание вешает
+                // клиента.
+                let reply = match request.method.as_str() {
+                    SemanticTokensFullRequest::METHOD => {
+                        highlight(encoding, &documents, request.id.clone(), &request.params)
+                    }
+                    InlayHintRequest::METHOD => {
+                        annotate(encoding, &documents, request.id.clone(), &request.params)
+                    }
+                    _ => answer(encoding, roots, &documents, request),
                 };
                 connection.sender.send(Message::Response(reply))?;
             }
@@ -560,14 +610,15 @@ fn serve(connection: &Connection, encoding: Encoding, roots: &[PathBuf]) -> anyh
                 // упавший сервер уносит с собой подчёркивания во всех
                 // открытых файлах, а причина - один кривой кадр. Обрыв канала
                 // при этом всё равно закончит цикл: получатель закроется.
-                if let Err(error) = handle(connection, encoding, roots, &mut documents, &note) {
+                if let Err(error) = handle(connection, client, &mut documents, &note) {
                     eprintln!(
                         "adamas-lsp: уведомление `{}` не обработано: {error}",
                         note.method
                     );
                 }
             }
-            // Ответов сервер не ждёт: запросов к клиенту он не шлёт.
+            // Ответ клиента сервер не читает: единственный его запрос -
+            // `workspace/inlayHint/refresh`, и результата у того нет.
             Message::Response(_) => {}
         }
     }
@@ -656,14 +707,43 @@ fn highlight(
     )
 }
 
+/// Ответ на `textDocument/inlayHint`.
+///
+/// Буфер неизвестен - пустой список по тому же правилу, что у подсветки:
+/// уведомление о файле могло ещё не дойти.
+///
+/// Вторая проверка программы здесь не делается - подсказка считается по
+/// сигнатуре, которую положил в буфер последний проход ([`Document::absorb`]).
+/// Иначе прокрутка окна стоила бы 45,8 мс на кадр.
+fn annotate(
+    encoding: Encoding,
+    documents: &HashMap<String, Document>,
+    id: lsp_server::RequestId,
+    params: &serde_json::Value,
+) -> Response {
+    let params: InlayHintParams = match serde_json::from_value(params.clone()) {
+        Ok(params) => params,
+        Err(error) => {
+            return Response::new_err(id, ErrorCode::InvalidParams as i32, error.to_string());
+        }
+    };
+    let uri = params.text_document.uri;
+    let found = documents
+        .get(uri.as_str())
+        .map(|document| hints::hints(&uri, document, params.range, encoding))
+        .unwrap_or_default();
+    Response::new_ok(id, found)
+}
+
 /// Одно уведомление.
 fn handle(
     connection: &Connection,
-    encoding: Encoding,
-    roots: &[PathBuf],
+    client: &Client,
     documents: &mut HashMap<String, Document>,
     note: &Notification,
 ) -> anyhow::Result<()> {
+    let encoding = client.encoding;
+    let roots = client.roots.as_slice();
     match note.method.as_str() {
         DidOpenTextDocument::METHOD => {
             let params: lsp_types::DidOpenTextDocumentParams =
@@ -675,8 +755,7 @@ fn handle(
             );
             refresh(
                 connection,
-                encoding,
-                roots,
+                client,
                 documents,
                 &document.uri,
                 Some(document.version),
@@ -696,8 +775,7 @@ fn handle(
             }
             refresh(
                 connection,
-                encoding,
-                roots,
+                client,
                 documents,
                 &uri,
                 Some(params.text_document.version),
@@ -744,12 +822,13 @@ fn handle(
 /// (`Document::depends`), а не из нового обхода.
 fn refresh(
     connection: &Connection,
-    encoding: Encoding,
-    roots: &[PathBuf],
+    client: &Client,
     documents: &mut HashMap<String, Document>,
     uri: &Uri,
     version: Option<i32>,
 ) -> anyhow::Result<()> {
+    let encoding = client.encoding;
+    let roots = client.roots.as_slice();
     publish_one(
         connection,
         encoding,
@@ -759,11 +838,38 @@ fn refresh(
         version,
     )?;
     let changed = documents.get(uri.as_str()).and_then(|it| it.path.clone());
-    for key in depending(documents, uri.as_str(), changed) {
+    let dependents = depending(documents, uri.as_str(), changed);
+    for key in &dependents {
         // Версия у зависящего своя и не менялась: протокол разрешает её не
         // называть, а назвать чужую значило бы соврать клиенту.
-        publish_one(connection, encoding, roots, documents, &key, None)?;
+        publish_one(connection, encoding, roots, documents, key, None)?;
     }
+    // Подчёркивание зависящего буфера сервер обновил сам, а подсказку - не
+    // может: её рисует клиент, и перезапрашивает он её по правке **того**
+    // документа, который показывает. Правка библиотеки меняет цепочку вины в
+    // окне, которого никто не трогал, и без этой просьбы там осталась бы
+    // подсказка от прошлого текста - то есть лгущая.
+    if client.refreshes && !dependents.is_empty() {
+        ask_refresh(connection)?;
+    }
+    Ok(())
+}
+
+/// Просит клиента перерисовать подсказки во всех окнах.
+///
+/// Запрос **к клиенту**, и единственный такой у сервера. Ответа он не ждёт:
+/// результата у метода нет, а ошибку клиента (метод не поддержан) читать
+/// незачем - возможность спрошена в `initialize`.
+fn ask_refresh(connection: &Connection) -> anyhow::Result<()> {
+    // Идентификатор произвольный, лишь бы не сталкивался с клиентскими: те
+    // нумеруют свои запросы сами, и общего пространства у сторон нет.
+    connection
+        .sender
+        .send(Message::Request(lsp_server::Request::new(
+            lsp_server::RequestId::from("adamas/inlayHint/refresh".to_owned()),
+            InlayHintRefreshRequest::METHOD.to_owned(),
+            serde_json::Value::Null,
+        )))?;
     Ok(())
 }
 

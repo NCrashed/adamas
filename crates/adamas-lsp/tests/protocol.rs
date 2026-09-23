@@ -53,6 +53,12 @@ mod client {
         next: i64,
         /// Диагностика, прочитанная по пути к ответам на запросы, по URI.
         seen: super::BTreeMap<String, Value>,
+        /// Запросы **сервера к клиенту**, прочитанные по тому же пути.
+        ///
+        /// Запрос у сервера один - `workspace/inlayHint/refresh`, - и виден он
+        /// только так: ответа на него нет, а без записи здесь он утёк бы в
+        /// цикл чтения молча.
+        asked: Vec<String>,
     }
 
     impl Client {
@@ -64,12 +70,25 @@ mod client {
             Self::start_in(None, encodings)
         }
 
+        /// То же, но клиент объявляет, что умеет перерисовывать подсказки.
+        ///
+        /// Возможность объявляется отдельным клиентом, а не всеми: сервер
+        /// обязан молчать, когда её нет, и проверяется это тем же способом -
+        /// прогоном без неё.
+        pub(crate) fn start_refreshing(root: Option<&str>) -> Self {
+            Self::spawn(root, None, true).0
+        }
+
         /// То же, но клиент называет корень рабочего пространства.
         ///
         /// Корень нужен, когда буфер лежит **глубже** входного файла: путь
         /// модуля пишется от корня проекта, и `import Std.Base` внутри
         /// `Std/Arith.adamas` без корня искался бы в `Std/Std/`.
         pub(crate) fn start_in(root: Option<&str>, encodings: Option<&[&str]>) -> (Self, Value) {
+            Self::spawn(root, encodings, false)
+        }
+
+        fn spawn(root: Option<&str>, encodings: Option<&[&str]>, refresh: bool) -> (Self, Value) {
             let mut child = Command::new(env!("CARGO_BIN_EXE_adamas-lsp"))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -84,17 +103,23 @@ mod client {
                 stdout,
                 next: 0,
                 seen: super::BTreeMap::new(),
+                asked: Vec::new(),
             };
             let general = match encodings {
                 Some(list) => json!({ "positionEncodings": list }),
                 None => Value::Null,
+            };
+            let workspace = if refresh {
+                json!({ "inlayHint": { "refreshSupport": true } })
+            } else {
+                Value::Null
             };
             let result = client.request(
                 "initialize",
                 &json!({
                     "processId": Value::Null,
                     "rootUri": root.map_or(Value::Null, |it| json!(it)),
-                    "capabilities": { "general": general },
+                    "capabilities": { "general": general, "workspace": workspace },
                 }),
             );
             client.notify("initialized", &json!({}));
@@ -180,6 +205,25 @@ mod client {
         /// Переход к определению с позиции.
         pub(crate) fn definition(&mut self, uri: &str, line: u64, character: u64) -> Value {
             self.request("textDocument/definition", &Self::at(uri, line, character))
+        }
+
+        /// Подсказки видимого куска буфера.
+        pub(crate) fn inlay(&mut self, uri: &str, from: u64, upto: u64) -> Value {
+            self.request(
+                "textDocument/inlayHint",
+                &json!({
+                    "textDocument": { "uri": uri },
+                    "range": {
+                        "start": { "line": from, "character": 0 },
+                        "end": { "line": upto, "character": 0 },
+                    },
+                }),
+            )
+        }
+
+        /// Запросы сервера к клиенту, пришедшие **до сих пор**.
+        pub(crate) fn asked(&mut self) -> Vec<String> {
+            std::mem::take(&mut self.asked)
         }
 
         fn at(uri: &str, line: u64, character: u64) -> Value {
@@ -281,6 +325,14 @@ mod client {
                 let uri = message["params"]["uri"].as_str().unwrap_or_default();
                 self.seen
                     .insert(uri.to_owned(), message["params"]["diagnostics"].clone());
+            }
+            // Запрос сервера к клиенту: есть и `method`, и `id`. Ответа на него
+            // клиент здесь не шлёт - результата у `inlayHint/refresh` нет.
+            if let (Some(method), Some(_)) = (
+                message.get("method").and_then(Value::as_str),
+                message.get("id"),
+            ) {
+                self.asked.push(method.to_owned());
             }
             message
         }
@@ -1225,5 +1277,236 @@ fn a_malformed_notification_does_not_kill_the_server() {
     );
     let diagnostics = client.open(URI, &fixture(FIXTURE));
     assert_eq!(diagnostics[0]["range"]["start"]["character"], json!(18));
+    client.stop();
+}
+
+/// Буфер, у которого подсказка стоит **после** многобайтового текста той же
+/// строки.
+///
+/// Последняя строка существенна: `wrap n = ` и `{- 😀 -} ` дают до `MkPair`
+/// **20 байтов, 18 кодовых единиц UTF-16 и 17 знаков**. Три разных числа одной
+/// позиции различают все три прочтения сразу, а на латинице любая поломка
+/// перевода невидима.
+const HINTED: &str = "\
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Pair where
+  MkPair : Nat -> Nat -> Pair
+
+wrap : Nat -> Pair
+wrap n = {- 😀 -} MkPair n n
+";
+
+/// URI буфера подсказок. С диском не связан.
+const HINTED_URI: &str = "file:///corpus/hinted.adamas";
+
+/// Подсказка приходит по протоколу и стоит там, где написано руками.
+///
+/// Проверяется **содержание**: подпись, её части и адрес, куда ведёт щелчок.
+/// «Сервер ответил списком» зелено и тогда, когда список бессмыслен.
+#[test]
+fn an_inlay_hint_lands_past_multibyte_text() {
+    let (mut client, result) = Client::start(None);
+    assert_eq!(result["capabilities"]["inlayHintProvider"], json!(true));
+    assert_eq!(client.open(HINTED_URI, HINTED), json!([]));
+
+    let hints = client.inlay(HINTED_URI, 0, 20);
+    assert_eq!(hints.as_array().map(Vec::len), Some(2), "{hints}");
+
+    // Статус над объявлением: подпись частями, и щелчок по слову `куча` ведёт
+    // туда, где определение аллоцирует.
+    assert_eq!(hints[0]["position"], json!({ "line": 7, "character": 0 }));
+    assert_eq!(hints[0]["label"][0]["value"], json!("куча"));
+    assert_eq!(
+        hints[0]["label"][0]["location"]["range"],
+        json!({
+            "start": { "line": 8, "character": 18 },
+            "end": { "line": 8, "character": 28 },
+        }),
+        "адрес звена - в кодовых единицах UTF-16"
+    );
+    assert_eq!(hints[0]["label"][1]["value"], json!(": "));
+    assert_eq!(hints[0]["label"][2]["value"], json!("MkPair"));
+
+    // Место внутри тела - само построение, и стоит оно за эмодзи.
+    assert_eq!(hints[1]["position"], json!({ "line": 8, "character": 18 }));
+    assert_eq!(hints[1]["label"], json!("куча"));
+    client.stop();
+}
+
+/// Байтами те же две позиции, когда клиент попросил UTF-8.
+///
+/// Прогон различает **счёт**, а не наличие: перевод, ошибочный одинаково в обе
+/// стороны, круговой проверке не виден, а записанным руками числам - виден.
+#[test]
+fn utf8_moves_the_hint_to_bytes() {
+    let (mut client, _) = Client::start(Some(&["utf-8"]));
+    assert_eq!(client.open(HINTED_URI, HINTED), json!([]));
+    let hints = client.inlay(HINTED_URI, 0, 20);
+    assert_eq!(hints[1]["position"], json!({ "line": 8, "character": 20 }));
+    assert_eq!(
+        hints[0]["label"][0]["location"]["range"]["start"],
+        json!({ "line": 8, "character": 20 })
+    );
+    client.stop();
+}
+
+/// И знаками, когда UTF-32.
+#[test]
+fn utf32_moves_the_hint_to_characters() {
+    let (mut client, _) = Client::start(Some(&["utf-32"]));
+    assert_eq!(client.open(HINTED_URI, HINTED), json!([]));
+    let hints = client.inlay(HINTED_URI, 0, 20);
+    assert_eq!(hints[1]["position"], json!({ "line": 8, "character": 17 }));
+    client.stop();
+}
+
+/// Окно клиента ограничивает ответ и по протоколу тоже.
+#[test]
+fn the_window_reaches_the_server() {
+    let (mut client, _) = Client::start(None);
+    assert_eq!(client.open(HINTED_URI, HINTED), json!([]));
+    let hints = client.inlay(HINTED_URI, 8, 9);
+    assert_eq!(hints.as_array().map(Vec::len), Some(1), "{hints}");
+    assert_eq!(hints[0]["position"], json!({ "line": 8, "character": 18 }));
+    client.stop();
+}
+
+/// Буфер, о котором сервер не знает, подсказок не даёт и отказом не отвечает.
+#[test]
+fn an_unknown_buffer_gets_an_empty_list() {
+    let (mut client, _) = Client::start(None);
+    assert_eq!(client.inlay("file:///nowhere.adamas", 0, 10), json!([]));
+    client.stop();
+}
+
+/// Правка **чужого** файла просит клиента перерисовать подсказки.
+///
+/// Подчёркивание зависящего буфера сервер обновляет сам, а подсказку - не
+/// может: её рисует клиент, и перезапрашивает он её по правке того документа,
+/// который показывает. Цепочка вины пересекает границу файла, поэтому правка
+/// библиотеки меняет подсказку в окне, которого никто не трогал.
+///
+/// Свидетель различает по построению: без правки чужого файла просьбы быть не
+/// должно, и это проверяется тем же прогоном.
+#[test]
+#[allow(
+    clippy::expect_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+fn editing_a_dependency_asks_the_client_to_redraw_hints() {
+    let root = copied("refresh");
+    let main = addressed(&root, "main.adamas");
+    let base = addressed(&root, "Std/Base.adamas");
+    let main_text = std::fs::read_to_string(root.join("main.adamas")).expect("вход читается");
+    let base_text = std::fs::read_to_string(root.join("Std/Base.adamas")).expect("модуль читается");
+
+    let mut client = Client::start_refreshing(Some(&addressed(&root, "")));
+    client.open(&main, &main_text);
+    client.open(&base, &base_text);
+    client.settled();
+    client.asked();
+
+    // Правка входного файла: зависящих у него нет, и просить нечего - клиент
+    // сам перезапросит подсказки того документа, который правили.
+    client.edit(&main, 2, &format!("{main_text}-- правка\n"));
+    client.settled();
+    assert_eq!(
+        client.asked(),
+        Vec::<String>::new(),
+        "у входного файла зависящих нет"
+    );
+
+    // Правка библиотеки: `main` её подключает, и его подсказки устарели.
+    client.edit(&base, 2, &format!("{base_text}-- правка\n"));
+    client.settled();
+    assert_eq!(
+        client.asked(),
+        vec!["workspace/inlayHint/refresh".to_owned()],
+        "правка библиотеки обязана попросить перерисовку"
+    );
+    client.stop();
+}
+
+/// Чего стоит перерисовка подсказок - кругом запроса и числом подсказок.
+///
+/// Зовётся руками рядом с прочими стендами и по той же причине: величина
+/// требует тихой машины.
+///
+/// ```text
+/// cargo test --release -p adamas-lsp --test protocol -- --ignored --nocapture
+/// ```
+///
+/// Мерятся два окна, и разница между ними - предмет: `inlayHint` спрашивают по
+/// **видимому** куску, и клиент шлёт его на каждую прокрутку. Если цена не
+/// зависит от окна, значит платится она обходом сигнатуры целиком, и это надо
+/// знать числом, а не предполагать.
+///
+/// Снято 2026-09-23 на капстоуне (944 строки, release): **окно в 40 строк - 50
+/// мкс**, файл целиком - 1598 мкс при 249 подсказках. Прокрутка поэтому стоит
+/// на три порядка меньше круга правки (42 мс), а от окна цена зависит, то есть
+/// платится она не обходом всего подряд.
+#[test]
+#[ignore = "стенд времени: величина требует тихой машины"]
+#[allow(
+    clippy::expect_used,
+    reason = "заготовка стенда: отказ здесь означает сломанное окружение"
+)]
+fn what_a_hint_costs() {
+    let text = std::fs::read_to_string(corpus().join("eval").join("interpreter.adamas"))
+        .expect("капстоун читается");
+    let uri = "file:///corpus/capstone.adamas";
+    let (mut client, _) = Client::start(None);
+    client.open(uri, &text);
+    client.settled();
+
+    let mut round = |from: u64, upto: u64, what: &str| {
+        let mut best = std::time::Duration::MAX;
+        let mut count = 0;
+        for _ in 0..20 {
+            let started = std::time::Instant::now();
+            let hints = client.inlay(uri, from, upto);
+            best = best.min(started.elapsed());
+            count = hints.as_array().map_or(0, Vec::len);
+        }
+        eprintln!("{what}: {} мкс, подсказок {count}", best.as_micros());
+    };
+    round(0, 40, "окно в 40 строк");
+    round(0, 1000, "файл целиком (944 строки)");
+    client.stop();
+}
+
+/// Клиент, не объявивший возможность, просьбы не получает.
+///
+/// Спецификация разрешает запрос только объявившему; отдельный прогон потому,
+/// что «сервер молчит» неотличимо от «сервер сломан», пока рядом нет прогона,
+/// где он говорит.
+#[test]
+#[allow(
+    clippy::expect_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+fn a_client_without_the_capability_is_not_asked() {
+    let root = copied("silent");
+    let main = addressed(&root, "main.adamas");
+    let base = addressed(&root, "Std/Base.adamas");
+    let main_text = std::fs::read_to_string(root.join("main.adamas")).expect("вход читается");
+    let base_text = std::fs::read_to_string(root.join("Std/Base.adamas")).expect("модуль читается");
+
+    let (mut client, _) = Client::start_in(Some(&addressed(&root, "")), None);
+    client.open(&main, &main_text);
+    client.open(&base, &base_text);
+    client.settled();
+    client.asked();
+
+    client.edit(&base, 2, &format!("{base_text}-- правка\n"));
+    client.settled();
+    assert_eq!(
+        client.asked(),
+        Vec::<String>::new(),
+        "возможность не объявлена - запроса быть не должно"
+    );
     client.stop();
 }

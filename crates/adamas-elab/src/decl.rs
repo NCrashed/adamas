@@ -32,7 +32,7 @@ use adamas_core::prim::PrimTy;
 use adamas_core::row::{Label, Row, RowVar, Tail};
 use adamas_core::sig::{
     Callback as CallbackForm, Cross, Crossing, DefinitionKind, Group, Member as SigMember,
-    Signature,
+    Signature, Spot,
 };
 use adamas_core::source::Span;
 use adamas_core::term::{Args, Binder, Fields, Name as CoreName, Term};
@@ -2361,6 +2361,30 @@ fn declare_members(
     if let Some(group) = group {
         signature.declare(metas, &group).map_err(fail)?;
     }
+    // Место аллокации у члена инстанса берётся тем же ходом, что у члена
+    // `mutual`: тело он написал сам, и `Functor#List.map`, аллоцирующий внутри
+    // ветви, - ровно предмет FBIP-подсказок §7.2. Написанного **типа** у него
+    // нет - тип выводится из класса и головы, - поэтому `ty` пуст; маршрут
+    // сюда приходит только телом, и в тип он не заходит.
+    let routed: Vec<route::Member<'_>> = members
+        .iter()
+        .zip(&trees)
+        .map(|((_, clauses, _), tree)| route::Member {
+            ty: None,
+            clauses,
+            compiled: tree,
+        })
+        .collect();
+    let declared = Declared::Group(&routed);
+    for (at, (_, _, at_span)) in members.iter().enumerate() {
+        locate_allocation(
+            signature,
+            &qualified[at],
+            &declared,
+            u32::try_from(at).unwrap_or(u32::MAX),
+            *at_span,
+        );
+    }
     kept_promise(signature, members, qualified, span)?;
     for method in qualified {
         carrier::check(signature, owned, method, span)?;
@@ -2557,7 +2581,7 @@ fn declare_definitions(
         .iter()
         .zip(trees)
         .map(|(member, tree)| route::Member {
-            ty: member.ty,
+            ty: Some(member.ty),
             clauses: member.clauses,
             compiled: tree,
         })
@@ -2574,8 +2598,15 @@ fn declare_definitions(
                     .map(|it| (Rc::clone(&it.name.text), Vec::new())),
             ),
         })?;
-    for member in planned {
+    for (at, member) in planned.iter().enumerate() {
         signature.locate(&member.name.text, written_at(member.clauses, member.span));
+        locate_allocation(
+            signature,
+            &member.name.text,
+            &declared,
+            u32::try_from(at).unwrap_or(u32::MAX),
+            member.span,
+        );
     }
     Ok(())
 }
@@ -2732,6 +2763,38 @@ struct Assembled<'a> {
     member: u32,
 }
 
+/// Переводит маршрут до источника аллокации в спан и кладёт его в сигнатуру
+/// (§5.1, §7.2 allocation hints).
+///
+/// Зовётся у **всякого** определения, а не только у написавшего `@noalloc`:
+/// §7.2 просит показывать «статус `@noalloc` без формального обязательства»,
+/// то есть подсказка нужна ровно там, где атрибута нет. Отказ по атрибуту при
+/// этом остаётся делом [`verdicts`] - здесь ничего не проверяется.
+///
+/// Маршрут кладёт ядро при объявлении ([`Signature::allocation_route`]), а
+/// переводит его элаборация: кадры ложатся на дерево поверхностного языка, и
+/// дерево есть только здесь. Забранный маршрут из сигнатуры уходит.
+///
+/// Пустой маршрут - не ошибка: источник у определения без тела выведен из вида
+/// объявления, и место его - само объявление.
+fn locate_allocation(
+    signature: &mut Signature,
+    name: &Symbol,
+    declared: &Declared<'_>,
+    member: u32,
+    span: Span,
+) {
+    let Some(route) = signature.allocation_route(name) else {
+        return;
+    };
+    let mut full = Vec::with_capacity(route.len() + 1);
+    full.push(Frame::MemberBody(member));
+    full.extend_from_slice(route);
+    let at = route::at(declared, &full, span);
+    let module = signature.scope().own().map(Rc::clone);
+    signature.locate_allocation(name, Spot { module, span: at });
+}
+
 /// Требует от вердиктов ядра того, что обещано атрибутами (§4.7, §5.1).
 ///
 /// Спрашивается **после** объявления: вердикты считает ядро, а атрибут только
@@ -2795,7 +2858,7 @@ fn required_verdicts(
         .iter()
         .zip(trees)
         .map(|(member, tree)| route::Member {
-            ty: member.ty,
+            ty: Some(member.ty),
             clauses: member.clauses,
             compiled: tree,
         })
@@ -4932,6 +4995,7 @@ fn define(
         clauses,
         compiled: &tree,
     };
+    locate_allocation(signature, &declared.name, &source, 0, declared.span);
     verdicts(
         signature,
         &declared.name,

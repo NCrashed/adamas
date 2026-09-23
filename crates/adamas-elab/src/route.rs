@@ -57,8 +57,9 @@ pub(crate) enum Declared<'a> {
 
 /// Один член группы: то же, что несёт [`Declared::Definition`].
 pub(crate) struct Member<'a> {
-    /// Написанный тип.
-    pub ty: &'a Expr,
+    /// Написанный тип. `None` - написанного типа нет вовсе: тип члена инстанса
+    /// выводится из класса и головы, а не пишется, и указывать в нём не на что.
+    pub ty: Option<&'a Expr>,
     /// Клаузы в порядке написания.
     pub clauses: &'a [ast::Clause],
     /// Дерево разбора вместе с местами клауз в нём.
@@ -107,7 +108,7 @@ pub(crate) fn at(declared: &Declared<'_>, route: &[Frame], fallback: Span) -> Sp
             compiled,
         } => {
             let member = Member {
-                ty,
+                ty: Some(ty),
                 clauses,
                 compiled,
             };
@@ -121,7 +122,8 @@ pub(crate) fn at(declared: &Declared<'_>, route: &[Frame], fallback: Span) -> Sp
         Declared::Group(members) => match route.split_first() {
             Some((Frame::MemberType(index), rest)) => members
                 .get(*index as usize)
-                .map_or(fallback, |member| narrow(member.ty, rest)),
+                .and_then(|member| member.ty)
+                .map_or(fallback, |ty| narrow(ty, rest)),
             Some((Frame::MemberBody(index), rest)) => members
                 .get(*index as usize)
                 .map_or(fallback, |member| member.body(rest, fallback)),

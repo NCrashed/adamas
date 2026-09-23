@@ -164,10 +164,41 @@ pub(crate) fn checked(
     entry: &Path,
     sources: &dyn adamas_elab::program::Sources,
 ) -> anyhow::Result<Checked> {
+    let program = analyzed(entry, sources)?;
+    let name = program.units.first().map_or_else(
+        || entry.display().to_string(),
+        |it| it.file.name().to_owned(),
+    );
+    let files = program.units.len();
+    let signature = program
+        .signature
+        .ok_or_else(|| anyhow::anyhow!("{name}: проход не отдал сигнатуры"))?;
+    Ok(Checked {
+        name,
+        files,
+        signature,
+        metas: program.metas,
+        instances: program.instances,
+    })
+}
+
+/// Программа целиком - вместе с деревьями и исходниками каждого файла.
+///
+/// Отдельно от [`checked`] затем, что `doc` (§7.1) читает **написанное**:
+/// порядок объявлений и комментарии живут в дереве и в тексте, а в сигнатуре
+/// их нет. Печать отказов при этом одна на обоих - иначе два ответа на один
+/// вопрос разъехались бы.
+///
+/// # Errors
+///
+/// Файл не читается, программа не разбирается либо не проходит проверку.
+pub(crate) fn analyzed(
+    entry: &Path,
+    sources: &dyn adamas_elab::program::Sources,
+) -> anyhow::Result<adamas_elab::program::Program> {
     let text = std::fs::read_to_string(entry)
         .with_context(|| format!("не удалось прочитать {}", entry.display()))?;
     let file = SourceFile::new(entry.display().to_string(), text);
-    let name = file.name().to_owned();
 
     let program = adamas_elab::program::analyze(file, sources);
     // Все отказы разом, а не первый (§10 вопрос 177): восстановление на границе
@@ -189,17 +220,7 @@ pub(crate) fn checked(
     for diagnostic in &program.diagnostics {
         eprintln!("{}", program.rendered(diagnostic));
     }
-    let files = program.units.len();
-    let signature = program
-        .signature
-        .ok_or_else(|| anyhow::anyhow!("{name}: проход не отдал сигнатуры"))?;
-    Ok(Checked {
-        name,
-        files,
-        signature,
-        metas: program.metas,
-        instances: program.instances,
-    })
+    Ok(program)
 }
 
 /// Тело определения с подставленными аргументами уровня и row.

@@ -20,6 +20,7 @@
 //! самым переводит обещание из слов в прогон (`tests/hover.rs`).
 
 mod compile;
+mod doc;
 mod fmt;
 mod project;
 mod scaffold;
@@ -85,6 +86,12 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Напечатать документацию по видимому снаружи интерфейсу (§7.1, §4.8).
+    Doc {
+        /// Путь к файлу `.adamas`, каталогу проекта или его `adamas.toml`.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Прогнать тесты проекта (§7.1).
     Test {
         /// Путь к проекту или его `adamas.toml`.
@@ -148,6 +155,10 @@ fn dispatch(command: Command) -> anyhow::Result<ExitCode> {
             } else {
                 ExitCode::FAILURE
             })
+        }
+        Command::Doc { path } => {
+            doc::run(&path)?;
+            Ok(ExitCode::SUCCESS)
         }
         Command::Test { path } => {
             let green = suite::run(&path)?;

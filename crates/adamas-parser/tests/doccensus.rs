@@ -1,16 +1,23 @@
 //! Перепись комментариев над объявлениями корпуса: чем документируется
 //! объявление (§7.1, `adamas doc`).
 //!
-//! Разновидности «док» у комментария нет, и трек D волны 3 Фазы 9 её не
-//! вводил: форма комментария есть поверхность языка. Здесь живёт **замер**, на
-//! котором стоит запись в `docs/phase9-w3-trackD-notes.md`, - чтобы довод
-//! проверялся прогоном, а не памятью о прогоне.
+//! Здесь живёт **замер**, на котором стоит запись в
+//! `docs/phase9-w3-trackD-notes.md`, - чтобы довод проверялся прогоном, а не
+//! памятью о прогоне.
 //!
-//! Два теста и они разного рода. `no_fixture_writes_a_doc_marker` - обычный:
-//! он держит утверждение, на котором стоит рекомендация, - написания-кандидата
-//! в корпусе нет, значит ввод маркера ни одного комментария не переозначит.
-//! `census` помечен `#[ignore]`: это счёт, а не проверка, и числа его при
-//! всяком новом файле корпуса меняются законно.
+//! Два теста и они разного рода. `census` помечен `#[ignore]`: это счёт, а не
+//! проверка, и числа его при всяком новом файле корпуса меняются законно.
+//! `every_doc_marker_documents_something` - обычный.
+//!
+//! Его прежняя редакция держала утверждение «`-- |` в корпусе не написан ни
+//! разу», и держала она **цену введения маркера**: переозначить нечего.
+//! Маркер введён (волна 4, трек B), цена уплачена, и запрет писать `-- |`
+//! означал бы теперь запрет документировать корпус. На его месте стоит
+//! утверждение, которое несущее сегодня: **всякий написанный `-- |`
+//! действительно что-то документирует.** Правило привязки
+//! ([`adamas_parser::docs`]) требует, чтобы между блоком и объявлением не было
+//! пустой строки, и промах здесь молчаливый - автор пишет документацию, а в
+//! выводе `adamas doc` её нет.
 //!
 //! Счёт:
 //! `cargo test -p adamas-parser --test doccensus -- --ignored --nocapture`
@@ -61,6 +68,27 @@ fn flatten<'a>(decls: &'a [Decl], out: &mut Vec<(usize, &'a Decl, usize)>, depth
     }
 }
 
+/// Места, к которым документация вправе привязаться.
+///
+/// Шире [`flatten`]: конструктор семейства и операция эффекта - не `Decl`, но
+/// имена программы, и `adamas doc` документирует их наравне с прочими. Считай
+/// их объявлениями - и корпус, документирующий конструкторы, читался бы как
+/// корпус с висячими маркерами.
+fn sites(decls: &[Decl], out: &mut Vec<adamas_core::source::Span>) {
+    for decl in decls {
+        out.push(decl.span);
+        match &decl.kind {
+            DeclKind::Data(data) => out.extend(data.constructors.iter().map(|it| it.span)),
+            DeclKind::Effect(effect) => out.extend(effect.operations.iter().map(|it| it.span)),
+            DeclKind::Module(module) => sites(&module.members, out),
+            DeclKind::Mutual(members) => sites(members, out),
+            DeclKind::Class(class) => sites(&class.members, out),
+            DeclKind::Resource(resource) => sites(&resource.members, out),
+            _ => {}
+        }
+    }
+}
+
 /// Как назвать объявление в распечатке.
 fn label(decl: &Decl) -> String {
     match &decl.kind {
@@ -83,35 +111,58 @@ fn label(decl: &Decl) -> String {
     }
 }
 
-/// Написания-кандидаты в маркер документации в корпусе не встречаются.
+/// Всякий написанный `-- |` действительно что-то документирует.
 ///
-/// На этом стоит вся цена ветки «отдельная разновидность»: вводя `-- |` или
-/// `---`, мы не переозначиваем ни одного уже написанного комментария. Тест
-/// покраснеет ровно тогда, когда кто-то начнёт этими написаниями
-/// пользоваться, - и тогда цену надо пересчитать.
+/// Промах здесь молчаливый: правило привязки требует, чтобы между блоком и
+/// объявлением не было пустой строки, и автор, поставивший её, документацию
+/// пишет, а в выводе `adamas doc` не получает. Тест ловит ровно это - маркер,
+/// не доставшийся ни одному объявлению корпуса.
+///
+/// Проверяется вместе с этим и сам лексер: блок, который перестал помечаться
+/// [`adamas_parser::token::CommentKind::Doc`], не найдётся ни у одного
+/// объявления, и тест покраснеет.
 #[test]
-fn no_fixture_writes_a_doc_marker() {
-    let mut piped = Vec::new();
-    let mut tripled = Vec::new();
+fn every_doc_marker_documents_something() {
+    let mut dangling = Vec::new();
+    let mut documented = 0usize;
     let files = fixtures();
     assert!(!files.is_empty(), "корпус не найден: {:?}", corpus());
-    for path in files {
-        let text = std::fs::read_to_string(&path).expect("фикстура читается");
-        let Ok(tokens) = adamas_parser::tokenize(&text) else {
+    for path in &files {
+        let text = std::fs::read_to_string(path).expect("фикстура читается");
+        let (Ok(tokens), Ok(module)) =
+            (adamas_parser::tokenize(&text), adamas_parser::parse(&text))
+        else {
             continue;
         };
-        for comment in &tokens.comments {
-            let body = &text[comment.span.start()..comment.span.end()];
-            if body.starts_with("-- |") {
-                piped.push(path.clone());
-            }
-            if body.starts_with("---") {
-                tripled.push(path.clone());
-            }
+        let written = tokens
+            .comments
+            .iter()
+            .filter(|it| text[it.span.start()..it.span.end()].starts_with("-- |"))
+            .count();
+        if written == 0 {
+            continue;
+        }
+        let mut places = Vec::new();
+        sites(&module.decls, &mut places);
+        let attached = places
+            .iter()
+            .filter(|span| adamas_parser::docs::attached(&text, &tokens.comments, **span).is_some())
+            .count();
+        documented += attached;
+        if attached < written {
+            dangling.push((path.clone(), written, attached));
         }
     }
-    assert!(piped.is_empty(), "`-- |` уже написан: {piped:?}");
-    assert!(tripled.is_empty(), "`---` уже написан: {tripled:?}");
+    assert!(
+        dangling.is_empty(),
+        "маркер написан, а объявления не достался: {dangling:?}"
+    );
+    // Иначе счёт сходился бы и на корпусе, где маркера нет вовсе, - то есть
+    // тест был бы зелен при выключенном лексере.
+    assert!(
+        documented > 0,
+        "в корпусе не осталось ни одного документированного объявления"
+    );
 }
 
 /// Счёт, а не проверка: сколько объявлений корпуса несут комментарий сверху.

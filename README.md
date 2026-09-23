@@ -10,13 +10,14 @@ The goal is to show that systems-friendly semantics is reachable without
 "dropping down to C": one language for applied functional code, systems
 programming, and type-heavy research.
 
-**Stage: phases 0–7 are done.** A program travels the whole path — text, tree,
-core terms, type checking — and then runs three ways: `adamas eval` interprets
-it, and `adamas build` compiles it through either backend, C or LLVM. All
-three must answer the *same thing*, and a disagreement fails the build: that
-contract is checked on every gate run over 102 of the 103 corpus programs.
-The one program neither backend takes returns a function, and printing one is
-a question about the language, not about a backend.
+**Stage: phases 0–8 are done; phase 9, the toolchain, is under way.** A program
+travels the whole path — text, tree, core terms, type checking — and then runs
+three ways: `adamas eval` interprets it, and `adamas build` compiles it through
+either backend, C or LLVM. All three must answer the *same thing*, and a
+disagreement fails the build: that contract is checked on every gate run over
+126 of the 127 corpus programs. The one program neither backend takes returns a
+function, and printing one is a question about the language, not about a
+backend.
 
 See the [roadmap](adamas-design.md#9-roadmap) — 10 phases, ~3–5 years to a
 research-grade prototype.
@@ -156,22 +157,32 @@ crates/adamas-codegen     backend IR carrying multiplicity and uniqueness,
 crates/adamas-runtime     the C runtime: objects, regions, fibers, atomic RC
 crates/adamas-pkg         the project manifest, git dependencies, lockfile
 crates/adamas-cli         the `adamas` driver: `new`, `check`, `build`, `run`,
-                          `test` and `eval`, over a single file or a project
-crates/adamas-lsp         the language server: diagnostics over stdio
+                          `fmt`, `doc`, `test` and `eval`, over a single file
+                          or a project
+crates/adamas-lsp         the language server: diagnostics, hover, go to
+                          definition, semantic tokens and inlay hints
 crates/adamas-warmup-stlc a phase-0 exercise: STLC + HM, standalone
 ```
 
-Roughly 138k lines of Rust, 6k lines of C, and 1404 tests. What the language
-accepts is visible in [`tests/golden/`](tests/golden/): 246 fixtures — programs
+Roughly 162k lines of Rust, 7k lines of C, and 1630 tests. What the language
+accepts is visible in [`tests/golden/`](tests/golden/): 311 fixtures — programs
 that must be accepted, programs that must be refused with a recorded message,
 and programs whose value is recorded too.
 
 Beyond the examples above: type classes with superclasses, defaults and
 multiplicity-polymorphic methods; modules, signatures, functors, sealing and
 implicit functor parameters; propositional equality with `subst` and `sym`,
-decidability, and proof irrelevance through truncation; a 297-line prelude and
-a 473-line interpreter for a small object language, both written in Adamas and
+decidability, and proof irrelevance through truncation; a 260-line prelude and
+a 944-line interpreter for a small object language, both written in Adamas and
 run by `adamas eval`.
+
+The toolchain has caught up with the compiler: `adamas fmt` rewrites a file to
+its canonical form through the same printer the parser owns, `adamas doc`
+prints the interface a module exports, and the language server shows what the
+compiler knows but the text does not say — where a definition allocates and the
+chain that leads there, which cell a construction reuses, where a resource is
+taken and where its destructor will be inserted, and which label a handler
+discharges.
 
 Elaboration is a separate crate because it is not in the trusted base: it
 produces an ordinary core term, and `check` establishes its correctness.
@@ -185,7 +196,7 @@ either reaches for a core term. The C backend goes through gcc; the LLVM one
 writes textual `.ll` and hands it to `llvm-as`, `opt` and `llc`, which keeps the
 toolchain unpinned to an LLVM major at the cost of about 6% of backend time.
 
-Both take the same 102 of 103 corpus programs. Where they differ is speed, and
+Both take the same 126 of 127 corpus programs. Where they differ is speed, and
 the numbers are in [`docs/measurements/`](docs/measurements/) with the command
 that reproduces each row:
 
@@ -219,14 +230,14 @@ does not depend on it. What it taught is in
 
 | Document | What is inside |
 |---|---|
+| [`adamas-concept.md`](adamas-concept.md) | The design distilled for an outside reader: the thesis, the principles, the core mechanisms and what already runs — without the coordination sections. In Russian. Start here if you want the language rather than the project. |
 | [`adamas-design.md`](adamas-design.md) | The design document — the single source of truth for design decisions, together with the open questions and the decision log. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to build, how to run the checks, the rules for code and commits. |
 | [`docs/getting-started.md`](docs/getting-started.md) | From nothing to a running program: `adamas new`, every driver command, a second module, the prelude, diagnostics in the editor. In Russian, like the rest of `docs/`. |
 | [`docs/reading-notes/`](docs/reading-notes/) | Notes on the key papers (QTT, Perceus, effect handlers). |
 | [`tests/golden/`](tests/golden/) | Adamas programs the compiler accepts today, with their expected output. |
-| [`docs/examples/`](docs/examples/) | Illustrations of forms the implementation has not reached yet. |
-| [`docs/phase6-plan.md`](docs/phase6-plan.md) | How phase 6 is cut into tracks: what parallelises, what does not, and what counts as done. |
-| [`docs/phase7-plan.md`](docs/phase7-plan.md) | Why the LLVM backend is worth its cost, measured against what a C backend cannot express. |
+| [`docs/examples/`](docs/examples/) | Four programs chosen for what makes the language *different* — multiplicities, effects, regions, FFI. Each is checked, run against a recorded answer, documented and kept canonical by the gate. |
+| [`docs/phase*-plan.md`](docs/) | How each phase is cut into tracks: what parallelises, what does not, and what counts as done. Alongside them, one notes file per track with what was measured and what the measurement rejected. |
 | [`docs/measurements/`](docs/measurements/) | Every performance claim in this README, with its conditions, its spread, and one command per row. Where a number was retracted, the retraction is there too. |
 
 A quick way into the design: §1–2 (vision and principles) → §3 (semantic core)

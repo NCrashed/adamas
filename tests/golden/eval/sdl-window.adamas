@@ -1,0 +1,116 @@
+-- SDL2 через уровень 1: окно, рендерер, отрисовка, очередь событий (§5.3).
+--
+-- Библиотека **настоящая**, и это условие договора корпуса: ответ обязан
+-- сойтись у трёх вычислителей, а машина зовёт символ `dlopen`'ом по тем же
+-- библиотекам, по которым его ищет компоновщик (`[link]` манифеста).
+--
+-- # Экрана не требуется, и переменной окружения тоже
+--
+-- Видео поднимается `SDL_VideoInit "dummy"` - драйвером, который открывает
+-- окно без всякого экранного сервера. Не `SDL_Init` с переменной
+-- `SDL_VIDEODRIVER`: свидетель, зависящий от окружения прогона, свидетель
+-- наполовину, и в CI он молча перестал бы проверять то, ради чего написан.
+-- Человек с экраном ходит `SDL_Init videoFlag` - это другая программа, и
+-- различие тут не в обёртке, а в одном вызове.
+--
+-- # Что именно наблюдается
+--
+-- Ответ - список чисел, и ни одно из них не подделывается отсутствием вызова.
+--
+--   * **окно создалось** - `1`. Адрес в ответ не годится: у каждого прогона он
+--     свой, а «не ноль» годится - окно либо есть, либо нет;
+--   * **рендерер создался** - `1`, по той же причине;
+--   * **очистка и заливка прямоугольника вернули `0`** - у SDL это «успех», и
+--     ошибись заём адресом прямоугольника, вернулось бы `-1`;
+--   * **очередь не пуста** - `1`: окно, только что созданное, кладёт в неё
+--     `SDL_WINDOWEVENT`, и это верно даже у `dummy`;
+--   * **чужая сторона написала в наш буфер** - `1`: первое слово события равно
+--     `SDL_WINDOWEVENT` (512). Это самое сильное наблюдение файла - заём
+--     отдаёт адрес нагрузки, а не копию, и подделать его нечем.
+--
+-- Ресурсами окно и рендерер здесь **не обёрнуты** нарочно: свидетель проверяет
+-- границу, а не §3.3. Обёртка стоит рядом, в `sdl-resource`.
+
+import Sdl.Raw (Unit, MkUnit, Foreign, SDL_VideoInit, SDL_VideoQuit, SDL_CreateWindow,
+                SDL_DestroyWindow, SDL_CreateRenderer, SDL_DestroyRenderer,
+                SDL_SetRenderDrawColor, SDL_RenderClear, SDL_RenderFillRect,
+                SDL_RenderPresent, SDL_PollEvent, anywhere, shown, software, windowEvent)
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+-- Всё наблюдаемое здесь - `Int32`, и это не выбор, а граница: примитивов
+-- преобразования ширины в языке нет вовсе (§4.3 обещает числовую иерархию, а
+-- моста между `Int32` и `Int64` нет ни одного). Ответы SDL - сишный `int`,
+-- поэтому список тоже `Int32`, а не смесь.
+pick : Bool -> Int32 -> Int32 -> Int32
+pick True yes no = yes
+pick False yes no = no
+
+alive : CPtr -> Int32
+alive p = pick (ltUInt64 0 p) 1 0
+
+-- Заполнитель массива - **именованное** значение, а не литерал: тип элемента у
+-- `arrayNew` приходит имплиситом, и голому `0` его взять неоткуда.
+empty : UInt32
+empty = 0
+
+blank : Int32
+blank = 0
+
+-- Углы и размер прямоугольника - по той же причине именованные. Литерал в
+-- позиции элемента массива типа не получает вовсе: у `arraySet` тип элемента
+-- приходит имплиситом, и к моменту разбора литерала он ещё не решён, поэтому
+-- `140` читается натуральным и разворачивается унарно до предела §4.3.
+rectX : Int32
+rectX = 140
+
+rectY : Int32
+rectY = 100
+
+rectSide : Int32
+rectSide = 40
+
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+driver : Array 6 UInt8
+driver = "dummy"
+
+title : Array 10 UInt8
+title = "asteroids"
+
+body : (ω u : Unit) -> {Foreign} (List Int32)
+body u =
+  let started : Int32 = SDL_VideoInit driver
+  let window : CPtr = SDL_CreateWindow title anywhere anywhere 320 240 shown
+  let renderer : CPtr = SDL_CreateRenderer window (-1) software
+  let painted : Int32 = SDL_SetRenderDrawColor renderer 16 16 32 255
+  let cleared : Int32 = SDL_RenderClear renderer
+  let rect : Array 4 Int32 = arrayNew 4 blank
+  let x : Array 4 Int32 = arraySet rect 0 rectX
+  let y : Array 4 Int32 = arraySet x 1 rectY
+  let w : Array 4 Int32 = arraySet y 2 rectSide
+  let h : Array 4 Int32 = arraySet w 3 rectSide
+  let inked : Int32 = SDL_SetRenderDrawColor renderer 220 220 240 255
+  let filled : Int32 = SDL_RenderFillRect renderer h
+  let shownUp : Unit = SDL_RenderPresent renderer
+  let event : Array 14 UInt32 = arrayNew 14 empty
+  let polled : Int32 = SDL_PollEvent event
+  let kind : UInt32 = arrayIndex event 0
+  let wrote : Int32 = pick (eqUInt32 kind windowEvent) 1 0
+  let goneR : Unit = SDL_DestroyRenderer renderer
+  let goneW : Unit = SDL_DestroyWindow window
+  let over : Unit = SDL_VideoQuit
+  Cons (alive window)
+    (Cons (alive renderer)
+      (Cons cleared (Cons filled (Cons polled (Cons wrote Nil)))))
+
+main : List Int32
+main = runForeign body

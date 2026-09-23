@@ -1,0 +1,145 @@
+-- Чужие символы SDL2, уровень 1 (§5.3).
+--
+-- Обёртки нет: здесь ровно то, что объявляет `SDL.h`, теми типами, какими
+-- уровень 1 их переносит. Что из этого годится и чем, решает вызывающий.
+--
+-- # Чем ходит SDL2 через границу
+--
+-- Структур по значению у этой библиотеки в нужных нам местах нет вовсе: окно,
+-- рендерер и событие ходят **указателями**, а `SDL_Rect` пишется `const
+-- SDL_Rect *`. Это и делает SDL2 достижимой уровнем 1 - агрегат по значению
+-- граница отвергает названным отказом.
+--
+--   * чужой объект (`SDL_Window *`, `SDL_Renderer *`) - `CPtr`;
+--   * наш буфер (заголовок окна, событие, прямоугольник) - плоский `Array`,
+--     и одалживается он адресом, а не копией (§4.11, `eval/extern-buffer`);
+--   * `int` и `Uint32` - `Int32` и `UInt32`.
+--
+-- # Событие - union, и разбирается оно смещениями
+--
+-- `sizeof(SDL_Event)` равен **56** (замерено пробой на C, а не взято из
+-- заголовка), поэтому буфер объявляется `Array 14 UInt32`: четырнадцать слов по
+-- четыре байта. Тип события лежит **первым словом**, и читается он `arrayIndex
+-- event 0` - без единого угаданного смещения.
+--
+-- Словами, а не байтами, и это выбор: `Array 56 UInt8` дал бы ту же память, но
+-- тип события пришлось бы собирать из четырёх байт вручную, а выравнивание
+-- слова библиотека и так держит. Полей глубже первого слова этот срез не
+-- читает; понадобятся - смещения придётся считать по `SDL_Event`, и **это
+-- граница уровня 1**, а не языка: раскладку union'а компилятор не знает и знать
+-- не может.
+--
+-- # Числа написаны здесь
+--
+-- Именованных констант чужой стороны уровень 1 не носит: через границу ходят
+-- значения, а не имена. `SDL_INIT_VIDEO`, `SDL_WINDOWPOS_UNDEFINED`,
+-- `SDL_WINDOW_SHOWN`, `SDL_QUIT` поэтому стоят числами в
+-- [`Sdl.Raw.videoFlag`] и спутниках - одним местом на программу, а не россыпью
+-- по вызовам.
+
+data Unit where
+  MkUnit : Unit
+
+effect Foreign
+
+-- `int SDL_Init(Uint32 flags)`.
+extern "C" fn SDL_Init : UInt32 -> Int32
+
+-- `int SDL_VideoInit(const char *driver_name)` - подсистема видео с
+-- **названным** драйвером.
+--
+-- Нужна свидетелю: `"dummy"` открывает окно без всякого экранного сервера, и
+-- прогон корпуса не зависит ни от X, ни от переменной окружения. `SDL_Init` с
+-- `SDL_INIT_VIDEO` берёт драйвер по умолчанию - им ходит человек, у которого
+-- экран есть.
+extern "C" fn SDL_VideoInit : Array n UInt8 -> Int32
+
+-- `void SDL_VideoQuit(void)`.
+extern "C" fn SDL_VideoQuit : Unit
+
+-- `SDL_Window *SDL_CreateWindow(const char *title, int x, int y, int w, int h,
+--                               Uint32 flags)`.
+extern "C" fn SDL_CreateWindow : Array n UInt8 -> Int32 -> Int32 -> Int32 -> Int32 -> UInt32 -> CPtr
+
+-- `void SDL_DestroyWindow(SDL_Window *window)`.
+--
+-- Кратность написана, и не ради формы: разбор ресурса (§3.3) отдаёт поле
+-- линейным, а `ω`-параметр отмасштабировал бы его обратно, и деструктор не
+-- написался бы вовсе.
+extern "C" fn SDL_DestroyWindow : (1 window : CPtr) -> Unit
+
+-- `SDL_Renderer *SDL_CreateRenderer(SDL_Window *window, int index,
+--                                   Uint32 flags)`.
+extern "C" fn SDL_CreateRenderer : CPtr -> Int32 -> UInt32 -> CPtr
+
+-- `void SDL_DestroyRenderer(SDL_Renderer *renderer)`.
+extern "C" fn SDL_DestroyRenderer : (1 renderer : CPtr) -> Unit
+
+-- `int SDL_SetRenderDrawColor(SDL_Renderer *renderer,
+--                             Uint8 r, Uint8 g, Uint8 b, Uint8 a)`.
+--
+-- Компоненты цвета - `Uint8` у чужой стороны и `UInt32` здесь: уже́ машинного
+-- слова через границу не ходит ничего, а сужение до байта делает сама чужая
+-- сторона. Написать `UInt8` значило бы обещать перенос, которого нет.
+extern "C" fn SDL_SetRenderDrawColor : CPtr -> UInt32 -> UInt32 -> UInt32 -> UInt32 -> Int32
+
+-- `int SDL_RenderClear(SDL_Renderer *renderer)`.
+extern "C" fn SDL_RenderClear : CPtr -> Int32
+
+-- `int SDL_RenderFillRect(SDL_Renderer *renderer, const SDL_Rect *rect)`.
+--
+-- Прямоугольник - четыре `int` подряд, то есть `Array 4 Int32`
+-- (`sizeof(SDL_Rect)` равен 16, замерено). Порядок полей - `x`, `y`, `w`, `h`.
+extern "C" fn SDL_RenderFillRect : CPtr -> Array n Int32 -> Int32
+
+-- `void SDL_RenderPresent(SDL_Renderer *renderer)`.
+extern "C" fn SDL_RenderPresent : CPtr -> Unit
+
+-- `int SDL_PollEvent(SDL_Event *event)` - ноль, если очередь пуста.
+--
+-- Чужая сторона пишет **в наш буфер на месте**, и читаем мы его обычным
+-- `arrayIndex`: заём есть адрес нагрузки, а не копия.
+extern "C" fn SDL_PollEvent : Array n UInt32 -> Int32
+
+-- `Uint32 SDL_GetTicks(void)` - миллисекунды с запуска.
+extern "C" fn SDL_GetTicks : UInt32
+
+-- `void SDL_Delay(Uint32 ms)`.
+extern "C" fn SDL_Delay : UInt32 -> Unit
+
+-- `void SDL_Quit(void)`.
+extern "C" fn SDL_Quit : Unit
+
+-- | `SDL_INIT_VIDEO`.
+videoFlag : UInt32
+videoFlag = 32
+
+-- | `SDL_WINDOWPOS_UNDEFINED`.
+anywhere : Int32
+anywhere = 536805376
+
+-- | `SDL_WINDOW_SHOWN`.
+shown : UInt32
+shown = 4
+
+-- | `SDL_RENDERER_SOFTWARE`. Программный рендерер берётся нарочно: ускоренный
+-- требует драйвера, которого у `dummy` нет, и свидетель зависел бы от машины,
+-- на которой его гоняют.
+software : UInt32
+software = 1
+
+-- | `SDL_QUIT` - событие закрытия окна.
+quitEvent : UInt32
+quitEvent = 256
+
+-- | `SDL_WINDOWEVENT` - что-то случилось с окном.
+--
+-- Оно приходит первым же после создания окна, в том числе у `dummy`, и этим
+-- полезно свидетелю: тип события лежит первым словом буфера, и совпадение с
+-- этим числом доказывает, что чужая сторона в **наш** буфер написала.
+windowEvent : UInt32
+windowEvent = 512
+
+-- | Сколько слов занимает `SDL_Event`: 56 байт, замерено пробой на C.
+eventWords : UInt64
+eventWords = 14

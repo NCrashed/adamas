@@ -48,8 +48,11 @@
 //! тем, что видит человек.
 //!
 //! Проход при этом **один на правку**, а не один на запрос: буфер хранит
-//! дерево последней проверки, и подсветка берёт готовое. Считать заново
-//! стоило бы 45,8 мс там, где покраска стоит 0,7.
+//! дерево и сигнатуру последней проверки, и всё, что спрашивают о буфере,
+//! берёт готовое. Считать заново стоило бы 45,8 мс там, где покраска стоит
+//! 0,7. Сигнатура прибавилась волной 3 Фазы 9 - по ней считаются вердикты
+//! §5.1 и места к ним, - и стоит она 772 KiB на буфер при круге, выросшем на
+//! 1% ([`Document`]).
 //!
 //! # Текст сообщения берётся у драйвера
 //!
@@ -386,8 +389,29 @@ fn translate(
 /// идёт на уведомлении, а запрос подсветки приходит следом и берёт готовое.
 /// Иначе тот же капстоун проверялся бы дважды - 46 мс на подчёркивание и ещё
 /// 46 на цвет, - при том, что сама покраска стоит 0,7 мс.
+///
+/// # Сигнатура хранится по тому же доводу и с той же ценой
+///
+/// Подсказки §7.2 - и FBIP, и аллокационные - считаются по **сигнатуре**:
+/// `alloc::blame` читает вердикты, `Signature::allocated_at` - места. Проход
+/// её уже построил и до волны 3 Фазы 9 выбрасывал; спросить её у запроса
+/// значило бы проверить программу второй раз, то есть те же 45,8 мс против
+/// 0,7 на саму подсказку.
+///
+/// Цена названа числом, а не ощущением, и мерена стендом
+/// `what_a_buffer_costs_in_memory` (капстоун в 944 строки, десять буферов,
+/// release): **868 KiB на буфер до и 1640 после**, то есть **+772 KiB**;
+/// круг перерисовки 41,5-41,9 мс до и 42,2-42,3 после, то есть +1%. Прибавка
+/// эта - сама сигнатура, а не новые таблицы: мест у капстоуна 98 при 210
+/// именах, и весят они единицы килобайт.
+///
+/// Довод волны 1 этим не отменён, а повторён в свою цену: пересчёт стоил бы
+/// **45,8 мс на запрос**, хранение - 772 KiB на окно, и десять окон дают
+/// 7,5 MiB при 20 MiB всего процесса. Разойдись эти величины в другую сторону
+/// (скажем, стань буфер дороже десятка мегабайт), ответ был бы другим, и
+/// мерить его следовало бы заново.
 #[derive(Debug, Default)]
-struct Document {
+pub struct Document {
     /// Текст, как его прислал клиент.
     text: String,
     /// Файл, которым буфер лежит на диске. `None` - URI не про файл, и
@@ -395,13 +419,22 @@ struct Document {
     path: Option<PathBuf>,
     /// Дерево последней проверки. `None` - текст не разобрался.
     module: Option<adamas_parser::ast::Module>,
+    /// Сигнатура последней проверки. `None` - текст не дошёл до объявлений.
+    ///
+    /// Одна на **программу**, а не на файл: проверяется программа целиком, и
+    /// имя из подключённого модуля живёт в той же сигнатуре.
+    signature: Option<adamas_core::sig::Signature>,
     /// Файлы, которые подтянул последний проход, - граф зависимостей, как его
     /// увидел компилятор. Правка любого из них меняет диагностику **этого**
     /// буфера, и отсюда сервер знает, кого перепроверять.
     ///
     /// Второго обхода за этим не делается: рёбра лежат в [`Program::units`],
     /// то есть в том же ответе, из которого берётся диагностика.
-    depends: Vec<PathBuf>,
+    ///
+    /// Рядом с файлом стоит **путь модуля**, под которым его подключили: место
+    /// аллокации приходит путём модуля ([`adamas_core::sig::Spot`]), а
+    /// редактору нужен URI, и без этой пары перевода между ними нет.
+    depends: Vec<(Option<String>, PathBuf)>,
     /// URI, под которыми прошлый проход этого буфера опубликовал диагностику
     /// **чужого** файла. Хранятся, чтобы погасить их, когда отказ уйдёт:
     /// подчёркивание в файле, которого никто не открывал, само не исчезнет.
@@ -410,11 +443,13 @@ struct Document {
 
 impl Document {
     /// Буфер с этим текстом под этим URI.
-    fn of(uri: &Uri, text: String) -> Self {
+    #[must_use]
+    pub fn of(uri: &Uri, text: String) -> Self {
         Self {
             text,
             path: project::path_of(uri),
             module: None,
+            signature: None,
             depends: Vec::new(),
             published: Vec::new(),
         }
@@ -425,9 +460,74 @@ impl Document {
     /// Именно правка, а не замена: [`Self::published`] переживает её нарочно -
     /// это список чужих файлов, в которых прошлый проход поставил
     /// подчёркивание, и потеряв его, сервер уже не погасит их никогда.
-    fn retext(&mut self, text: String) {
+    pub fn retext(&mut self, text: String) {
         self.text = text;
         self.module = None;
+        // Сигнатура прошлого текста описывает не этот буфер: её места указывали
+        // бы в текст, которого больше нет.
+        self.signature = None;
+    }
+
+    /// Кладёт в буфер то, что вышло из прохода.
+    ///
+    /// Единственное место, где буфер что-то запоминает, и потому же публичное:
+    /// состояние сервера между запросами иначе не наблюдаемо ничем, кроме
+    /// самих запросов, а свидетель, идущий другим путём, свидетельствует о
+    /// другом пути.
+    ///
+    /// Берёт по ссылке и **вынимает**: дерево и сигнатура переезжают, а не
+    /// копируются - копия капстоуна стоила бы ровно того, что здесь
+    /// экономится.
+    pub fn absorb(&mut self, program: &mut Program) {
+        self.depends = program
+            .units
+            .iter()
+            .skip(1)
+            .map(|unit| (unit.path.clone(), PathBuf::from(unit.file.name())))
+            .collect();
+        self.module = program
+            .units
+            .first_mut()
+            .and_then(|unit| unit.module.take());
+        self.signature = program.signature.take();
+    }
+
+    /// Текст, как его прислал клиент.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Дерево последней проверки. `None` - текст не разобрался.
+    #[must_use]
+    pub const fn module(&self) -> Option<&adamas_parser::ast::Module> {
+        self.module.as_ref()
+    }
+
+    /// Сигнатура последней проверки - то, по чему считаются вердикты §5.1 и
+    /// места к ним.
+    #[must_use]
+    pub const fn signature(&self) -> Option<&adamas_core::sig::Signature> {
+        self.signature.as_ref()
+    }
+
+    /// Файл, в котором лежит модуль с этим путём, - по прошлому проходу.
+    ///
+    /// `None` для пути, которого проход не подтянул, и для `None`-пути: место
+    /// без модуля принадлежит самому буферу, и файл у него уже есть
+    /// ([`Self::path`]).
+    #[must_use]
+    pub fn file_of(&self, module: &str) -> Option<&Path> {
+        self.depends
+            .iter()
+            .find(|(path, _)| path.as_deref() == Some(module))
+            .map(|(_, file)| file.as_path())
+    }
+
+    /// Файл, которым буфер лежит на диске.
+    #[must_use]
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 }
 
@@ -544,7 +644,7 @@ fn highlight(
         .get(uri.as_str())
         .map(|document| {
             let file = SourceFile::new(uri.as_str(), document.text.as_str());
-            tokens::tokens(&file, document.module.as_ref(), encoding)
+            tokens::tokens(&file, document.module(), encoding)
         })
         .unwrap_or_default();
     Response::new_ok(
@@ -678,7 +778,9 @@ fn depending(
     };
     let mut found: Vec<String> = documents
         .iter()
-        .filter(|(key, document)| key.as_str() != skip && document.depends.contains(&changed))
+        .filter(|(key, document)| {
+            key.as_str() != skip && document.depends.iter().any(|(_, file)| *file == changed)
+        })
         .map(|(key, _)| key.clone())
         .collect();
     // Порядок буферов в хеш-таблице случаен, а порядок уведомлений виден
@@ -728,7 +830,7 @@ fn publish_one(
     let Ok(uri) = Uri::from_str(key) else {
         return Ok(());
     };
-    let (program, found, foreign) = {
+    let (mut program, found, foreign) = {
         let Some(document) = documents.get(key) else {
             return Ok(());
         };
@@ -741,14 +843,6 @@ fn publish_one(
         (program, found, foreign)
     };
 
-    let depends: Vec<PathBuf> = program
-        .units
-        .iter()
-        .skip(1)
-        .map(|unit| PathBuf::from(unit.file.name()))
-        .collect();
-    let mut units = program.units;
-    let module = units.first_mut().and_then(|unit| unit.module.take());
     let fresh: Vec<String> = foreign.keys().cloned().collect();
 
     let stale: Vec<String> = documents.get(key).map_or_else(Vec::new, |document| {
@@ -760,8 +854,7 @@ fn publish_one(
             .collect()
     });
     if let Some(document) = documents.get_mut(key) {
-        document.module = module;
-        document.depends = depends;
+        document.absorb(&mut program);
         document.published = fresh;
     }
 

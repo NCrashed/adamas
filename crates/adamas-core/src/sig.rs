@@ -738,6 +738,32 @@ pub struct Spot {
     pub span: crate::source::Span,
 }
 
+/// Что тело делает с разобранной ячейкой (§5.1, §7.2 FBIP-подсказки).
+///
+/// Считает это [`crate::fbip::report`], а места переводит элаборация - тем же
+/// ходом и по тем же кадрам, что место аллокации ([`Spot`]).
+///
+/// Читателей два, и они разные. Атрибут `@fbip` спрашивает [`Reuse::blocked`]:
+/// несовместимость есть отказ. Подсказка §7.2 спрашивает обе половины -
+/// «reuse applies» без мест было бы вердиктом, а §5.1 обещает указать на
+/// построение.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Reuse {
+    /// Где построенная структура переписывает разобранную ячейку.
+    pub rewrites: Vec<Spot>,
+    /// Где слот был, а reuse не состоялся, и почему.
+    pub blocked: Option<Blocked>,
+}
+
+/// Несостоявшийся reuse вместе с местом.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Blocked {
+    /// Что помешало.
+    pub fault: crate::fbip::Fault,
+    /// Где это написано.
+    pub spot: Spot,
+}
+
 /// Набор определений, доступных терму.
 #[derive(Clone, Debug, Default)]
 pub struct Signature {
@@ -753,6 +779,11 @@ pub struct Signature {
     routes: HashMap<Name, Rc<[crate::error::Frame]>>,
     /// Где определение аллоцирует - уже спаном, уже в своём файле.
     allocations: HashMap<Name, Spot>,
+    /// Что тело делает с разобранной ячейкой - уже спанами, уже в своём файле.
+    ///
+    /// Кладёт её элаборация по [`crate::fbip::report`]; определения, у которых
+    /// разбора нет вовсе, сюда не попадают - переписывать там нечего.
+    reuses: HashMap<Name, Reuse>,
     scope: Scope,
     /// Под каким именем объявлена единица - см. [`Signature::unit`].
     unit: Option<Name>,
@@ -1140,6 +1171,27 @@ impl Signature {
     #[must_use]
     pub fn allocated_at(&self, name: &str) -> Option<&Spot> {
         self.allocations.get(name)
+    }
+
+    /// Запоминает, что тело делает с разобранной ячейкой.
+    ///
+    /// Пара к [`Signature::locate_allocation`] и по той же причине таблицей
+    /// рядом: маршрут в спан переводит элаборация. Без неё таблица пуста, и всё,
+    /// что её читает, обязано это переживать.
+    pub fn locate_reuse(&mut self, name: &str, reuse: Reuse) {
+        self.reuses.insert(name.into(), reuse);
+    }
+
+    /// Что тело делает с разобранной ячейкой (§5.1, §7.2 FBIP-подсказки).
+    ///
+    /// `None` - разбора в теле нет вовсе либо тела нет: переписывать нечего, и
+    /// обязательство `@fbip` на таком определении пусто. Отличать этот ответ от
+    /// «разбор есть, и всё сошлось» существенно: подсказка «ячейка
+    /// переписывается» над функцией, которая ничего не разбирает, была бы
+    /// ложью.
+    #[must_use]
+    pub fn reuse(&self, name: &str) -> Option<&Reuse> {
+        self.reuses.get(name)
     }
 
     /// Имена всех определений - инвариантным тестам и инструментам.

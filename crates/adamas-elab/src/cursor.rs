@@ -217,6 +217,49 @@ pub fn declaration(module: &Module, text: &str, within: &[Symbol]) -> Option<Spa
     None
 }
 
+/// Определения, **написанные в этом файле**: имя сигнатуры и место, где оно
+/// написано.
+///
+/// Нужно подсказкам §7.2: вердикт `@noalloc` и переиспользование ячейки
+/// показываются над функцией, а «над функцией» есть место в **этом** тексте.
+/// Взять его у [`Signature::origin`] нельзя, и это не мелочь: таблица позиций
+/// файла не несёт, а сигнатура одна на программу - место имени из
+/// подключённого модуля нарисовалось бы по чужому тексту и подчеркнуло
+/// случайную строку (ровно то, что запрещает §7.2). Дерево же принадлежит
+/// буферу по построению.
+///
+/// Отдаются только **определения значений** - то, у чего бывает тело: семейства,
+/// конструкторы, метки эффектов и операции своего вердикта аллокации не имеют.
+/// Имя разрешается лестницей объемлющих модулей, как его читает элаборация
+/// ([`crate::expr::qualified_in`]), но **без** ступени импорта: имя, которого в
+/// сигнатуре нет, чужим не подменяется - буфер бывает проверен наполовину, и
+/// подсказка от чужого определения была бы ложью.
+#[must_use]
+pub fn definitions(signature: &Signature, module: &Module) -> Vec<(Symbol, Span)> {
+    let mut sites = Vec::new();
+    collect(&module.decls, &mut Vec::new(), &mut sites);
+    let mut found = Vec::new();
+    for site in sites {
+        if !site.declaring || !site.value {
+            continue;
+        }
+        let mut resolved = None;
+        for depth in (1..=site.within.len()).rev() {
+            let prefix: Vec<&str> = site.within[..depth].iter().map(|it| &**it).collect();
+            let full: Symbol = Rc::from(format!("{}.{}", prefix.join("."), site.text).as_str());
+            if signature.lookup(&full).is_some() {
+                resolved = Some(full);
+                break;
+            }
+        }
+        let name = resolved.or_else(|| signature.lookup(&site.text).map(|_| Rc::clone(&site.text)));
+        if let Some(name) = name {
+            found.push((name, site.span));
+        }
+    }
+    found
+}
+
 /// Объявленное имя: где написано и объявление ли это (против клаузы).
 struct Site {
     text: Symbol,
@@ -224,44 +267,50 @@ struct Site {
     within: Vec<Symbol>,
     /// Сигнатура, семейство, конструктор - против группы клауз.
     declaring: bool,
+    /// Определение значения - то, у чего бывает тело. Семейство, конструктор,
+    /// метка эффекта и операция сюда не идут: вердикта аллокации у них нет, а
+    /// подсказка над ними была бы подсказкой ни о чём ([`definitions`]).
+    value: bool,
 }
 
 /// Собирает объявленные имена вместе с модулем, которому они принадлежат.
 fn collect(decls: &[Decl], within: &mut Vec<Symbol>, out: &mut Vec<Site>) {
     for decl in decls {
-        let mut put = |name: &ast::Name, declaring: bool| {
+        let mut put = |name: &ast::Name, declaring: bool, value: bool| {
             out.push(Site {
                 text: Rc::clone(&name.text),
                 span: name.span,
                 within: within.clone(),
                 declaring,
+                value,
             });
         };
         match &decl.kind {
-            DeclKind::Alias { name, .. } | DeclKind::Signature { name, .. } => put(name, true),
-            DeclKind::Extern(declared) => put(&declared.name, true),
+            DeclKind::Signature { name, .. } => put(name, true, true),
+            DeclKind::Alias { name, .. } => put(name, true, false),
+            DeclKind::Extern(declared) => put(&declared.name, true, true),
             // Экспорт имени не объявляет: он называет уже объявленное, как
             // клауза называет свою сигнатуру.
-            DeclKind::Export(exported) => put(&exported.name, false),
-            DeclKind::Clauses { name, .. } => put(name, false),
+            DeclKind::Export(exported) => put(&exported.name, false, false),
+            DeclKind::Clauses { name, .. } => put(name, false, true),
             DeclKind::Data(data) => {
-                put(&data.name, true);
+                put(&data.name, true, false);
                 for constructor in &data.constructors {
-                    put(&constructor.name, true);
+                    put(&constructor.name, true, false);
                 }
             }
             DeclKind::Effect(effect) => {
-                put(&effect.name, true);
+                put(&effect.name, true, false);
                 for operation in &effect.operations {
-                    put(&operation.name, true);
+                    put(&operation.name, true, false);
                 }
             }
             DeclKind::Resource(resource) => {
-                put(&resource.name, true);
+                put(&resource.name, true, false);
                 collect(&resource.members, within, out);
             }
             DeclKind::Module(module) => {
-                put(&module.name, true);
+                put(&module.name, true, false);
                 within.push(Rc::clone(&module.name.text));
                 collect(&module.members, within, out);
                 within.pop();
@@ -272,7 +321,7 @@ fn collect(decls: &[Decl], within: &mut Vec<Symbol>, out: &mut Vec<Site>) {
             // поэтому в указатель они не идут.
             DeclKind::Class(class) => {
                 if let Some(name) = &class.name {
-                    put(name, true);
+                    put(name, true, false);
                 }
                 if !class.instance {
                     collect(&class.members, within, out);

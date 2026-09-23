@@ -31,8 +31,8 @@ use adamas_core::prim;
 use adamas_core::prim::PrimTy;
 use adamas_core::row::{Label, Row, RowVar, Tail};
 use adamas_core::sig::{
-    Callback as CallbackForm, Cross, Crossing, DefinitionKind, Group, Member as SigMember,
-    Signature, Spot,
+    Blocked, Callback as CallbackForm, Cross, Crossing, DefinitionKind, Group, Member as SigMember,
+    Reuse, Signature, Spot,
 };
 use adamas_core::source::Span;
 use adamas_core::term::{Args, Binder, Fields, Name as CoreName, Term};
@@ -2377,11 +2377,14 @@ fn declare_members(
         .collect();
     let declared = Declared::Group(&routed);
     for (at, (_, _, at_span)) in members.iter().enumerate() {
-        locate_allocation(
+        let member = u32::try_from(at).unwrap_or(u32::MAX);
+        locate_allocation(signature, &qualified[at], &declared, member, *at_span);
+        locate_reuse(
             signature,
             &qualified[at],
+            &trees[at].term,
             &declared,
-            u32::try_from(at).unwrap_or(u32::MAX),
+            member,
             *at_span,
         );
     }
@@ -2537,7 +2540,7 @@ fn declare_mutual(
     }
 
     declare_definitions(signature, metas, &planned, &written, &trees, span)?;
-    required_verdicts(signature, &planned, &trees)?;
+    required_verdicts(signature, &planned)?;
     for member in &planned {
         carrier::check(signature, owned, &member.name.text, member.span)?;
     }
@@ -2600,11 +2603,14 @@ fn declare_definitions(
         })?;
     for (at, member) in planned.iter().enumerate() {
         signature.locate(&member.name.text, written_at(member.clauses, member.span));
-        locate_allocation(
+        let index = u32::try_from(at).unwrap_or(u32::MAX);
+        locate_allocation(signature, &member.name.text, &declared, index, member.span);
+        locate_reuse(
             signature,
             &member.name.text,
+            &trees[at].term,
             &declared,
-            u32::try_from(at).unwrap_or(u32::MAX),
+            index,
             member.span,
         );
     }
@@ -2749,18 +2755,60 @@ fn unnamed_siblings(planned: &[&Mutual<'_>]) -> Result<(), ElabError> {
     Ok(())
 }
 
-/// Собранное тело вместе с тем, чем перевести место отказа в спан.
+/// Переводит маршруты обхода FBIP в спаны и кладёт их в сигнатуру
+/// (§5.1, §7.2 FBIP hints).
 ///
-/// Нужно `@fbip`: его вердикт считается по телу и указывает **внутрь** него, а
-/// не на сигнатуру. У постулата тела нет, и передавать нечего.
-#[derive(Clone, Copy)]
-struct Assembled<'a> {
-    /// Дерево разбора, собранное из клауз.
-    term: &'a Term,
-    /// Объявление, по которому маршрут отказа станет спаном.
-    declared: &'a Declared<'a>,
-    /// Номер члена в группе; у одиночного определения нуль.
+/// Зовётся у **всякого** определения с телом, а не только у написавшего
+/// `@fbip`, и по тому же доводу, что [`locate_allocation`]: §7.2 просит
+/// показывать переиспользование ячейки там, где атрибута нет. Отсюда же
+/// единственность счёта - вердикт атрибута берётся из этой же таблицы
+/// ([`fbip_verdict`]), и разойтись подсказке с отказом негде.
+///
+/// Тело берётся **то же**, что ушло в сигнатуру, и передаётся сюда явно:
+/// обобщение уровней (§10 вопрос 167) правит терм внутри объявления, а место
+/// обязано указывать в написанное.
+///
+/// Определение, в теле которого разбора нет вовсе, в таблицу не попадает:
+/// переписывать там нечего, и пустая запись читалась бы как «разбор есть, и всё
+/// сошлось».
+///
+/// **Цена счёта за всех названа числом.** `adamas check` на капстоуне в 944
+/// строки (release, пол трёх кругов по 20 прогонов): 41,2 мс со счётом против
+/// 41,0 без, то есть **+0,2 мс (0,5 %)**, и величина эта меньше разброса между
+/// кругами одной и той же сборки (до 3 мс). Прежняя оговорка `fbip.rs` -
+/// «считать каждому значило бы платить за всех ради тех немногих, где атрибут
+/// написан» - верна как довод и неверна как цена: обход останавливается на
+/// первой несовместимости и в тело без разбора не заходит вовсе.
+fn locate_reuse(
+    signature: &mut Signature,
+    name: &Symbol,
+    body: &Term,
+    declared: &Declared<'_>,
     member: u32,
+    span: Span,
+) {
+    let report = adamas_core::fbip::report(signature, body);
+    if report.rewrites.is_empty() && report.blocked.is_none() {
+        return;
+    }
+    let module = signature.scope().own().map(Rc::clone);
+    let spot = |route: &[Frame]| {
+        let mut full = Vec::with_capacity(route.len() + 1);
+        full.push(Frame::MemberBody(member));
+        full.extend_from_slice(route);
+        Spot {
+            module: module.clone(),
+            span: route::at(declared, &full, span),
+        }
+    };
+    let found = Reuse {
+        rewrites: report.rewrites.iter().map(|route| spot(route)).collect(),
+        blocked: report.blocked.map(|it| Blocked {
+            fault: it.fault,
+            spot: spot(&it.route),
+        }),
+    };
+    signature.locate_reuse(name, found);
 }
 
 /// Переводит маршрут до источника аллокации в спан и кладёт его в сигнатуру
@@ -2810,7 +2858,6 @@ fn verdicts(
     signature: &Signature,
     name: &Symbol,
     demanded: Required,
-    written: Option<Assembled<'_>>,
     span: Span,
 ) -> Result<(), ElabError> {
     if demanded.total && !signature.lookup(name).is_some_and(|it| it.total) {
@@ -2829,18 +2876,10 @@ fn verdicts(
         }
     }
     // Совместимость с FBIP - свойство тела, и у постулата спрашивать её не у
-    // чего: ветвей, которым не совпасть формой, там нет.
+    // чего: ветвей, которым не совпасть формой, там нет. Таблица это и
+    // выражает - определения без тела в неё не попадают.
     if demanded.fbip {
-        if let Some(written) = written {
-            fbip_verdict(
-                signature,
-                written.term,
-                written.declared,
-                written.member,
-                name,
-                span,
-            )?;
-        }
+        fbip_verdict(signature, name)?;
     }
     Ok(())
 }
@@ -2849,60 +2888,31 @@ fn verdicts(
 ///
 /// Спрашивается **после** объявления группы: до этой проверки атрибут внутри
 /// `mutual` выбрасывался вместе с заголовком, то есть не значил ничего.
-fn required_verdicts(
-    signature: &Signature,
-    planned: &[&Mutual<'_>],
-    trees: &[Compiled],
-) -> Result<(), ElabError> {
-    let routed: Vec<route::Member<'_>> = planned
-        .iter()
-        .zip(trees)
-        .map(|(member, tree)| route::Member {
-            ty: Some(member.ty),
-            clauses: member.clauses,
-            compiled: tree,
-        })
-        .collect();
-    let declared = Declared::Group(&routed);
-    for (at, member) in planned.iter().enumerate() {
-        let written = trees.get(at).map(|tree| Assembled {
-            term: &tree.term,
-            declared: &declared,
-            member: u32::try_from(at).unwrap_or(u32::MAX),
-        });
-        verdicts(
-            signature,
-            &member.name.text,
-            member.required,
-            written,
-            member.span,
-        )?;
+fn required_verdicts(signature: &Signature, planned: &[&Mutual<'_>]) -> Result<(), ElabError> {
+    for member in planned {
+        verdicts(signature, &member.name.text, member.required, member.span)?;
     }
     Ok(())
 }
 
 /// Требует совместимости с FBIP там, где написан `@fbip` (§5.1).
 ///
-/// Вердикт считает ядро по телу, а место отказа переводится в спан тем же
-/// маршрутом, каким переводится отказ проверки типов (§10 вопрос 49б): кадры
-/// ложатся на дерево разбора, дерево - на клаузу, клауза - на её текст.
-fn fbip_verdict(
-    signature: &Signature,
-    body: &Term,
-    declared: &Declared<'_>,
-    member: u32,
-    name: &Symbol,
-    span: Span,
-) -> Result<(), ElabError> {
-    let Err(refusal) = adamas_core::fbip::compatible(signature, body) else {
+/// Вердикт **не считается здесь**: его посчитал [`locate_reuse`] у всякого
+/// определения с телом, потому что того же ответа ждёт подсказка §7.2. Второй
+/// счёт был бы вторым ответом на один вопрос, и разъезд между «атрибут
+/// отверг» и «редактор показал» стал бы вопросом времени.
+///
+/// Место уже переведено в спан тем же маршрутом, каким переводится отказ
+/// проверки типов (§10 вопрос 49б): кадры ложатся на дерево разбора, дерево -
+/// на клаузу, клауза - на её текст.
+fn fbip_verdict(signature: &Signature, name: &Symbol) -> Result<(), ElabError> {
+    let Some(blocked) = signature.reuse(name).and_then(|it| it.blocked.as_ref()) else {
         return Ok(());
     };
-    let mut route = vec![Frame::MemberBody(member)];
-    route.extend(refusal.route);
     Err(ElabError::NotFbip {
         name: Rc::clone(name),
-        fault: Box::new(refusal.fault),
-        span: route::at(declared, &route, span),
+        fault: Box::new(blocked.fault.clone()),
+        span: blocked.spot.span,
     })
 }
 
@@ -4198,7 +4208,7 @@ fn declare_extern(
     if demanded.noalloc {
         signature.promise_noalloc(&name);
     }
-    verdicts(signature, &name, demanded, None, span)
+    verdicts(signature, &name, demanded, span)
 }
 
 /// Отказ разрешения имени `Foreign` превращается в названную причину.
@@ -4873,13 +4883,7 @@ fn postulate(
     if pending.required.noalloc {
         signature.promise_noalloc(&pending.name);
     }
-    verdicts(
-        signature,
-        &pending.name,
-        pending.required,
-        None,
-        pending.span,
-    )
+    verdicts(signature, &pending.name, pending.required, pending.span)
 }
 
 /// Определение: клаузы собираются в дерево разбора, дерево уходит в сигнатуру.
@@ -4996,17 +5000,15 @@ fn define(
         compiled: &tree,
     };
     locate_allocation(signature, &declared.name, &source, 0, declared.span);
-    verdicts(
+    locate_reuse(
         signature,
         &declared.name,
-        declared.required,
-        Some(Assembled {
-            term: &tree.term,
-            declared: &source,
-            member: 0,
-        }),
+        &tree.term,
+        &source,
+        0,
         declared.span,
-    )?;
+    );
+    verdicts(signature, &declared.name, declared.required, declared.span)?;
 
     // После объявления, а не до: дырки решены и подставлены, поэтому видно,
     // чем на самом деле стал каждый выводимый аргумент (§10 вопрос 76).

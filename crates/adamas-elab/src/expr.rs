@@ -33,6 +33,7 @@ use adamas_parser::ast::{
 use crate::decl::{CLOSING, MASK, NURSERY};
 use crate::error::{ElabError, Missing};
 use crate::fixity::Fixities;
+use crate::lifecycle::{Handler, Lifecycle, Observed, Performed, Released};
 use crate::live;
 use crate::own::{Owned, Ownership};
 use crate::warn::{Warning, Warnings};
@@ -1007,6 +1008,14 @@ pub(crate) struct Elaborator<'a> {
     /// хранилище дырок. Первым сюда пишет умолчание литерала (§4.3): оно
     /// случается глубоко в выражении, и наружу его иначе не донести.
     warnings: &'a mut Warnings,
+    /// Приёмник жизненных циклов ресурсов (§7.2, [`crate::lifecycle`]).
+    ///
+    /// `None` - никто не спрашивал: элаборация типа, сигнатуры, алиаса. Пишут
+    /// сюда ровно те три места, где решается вставка `drop`, и пишут в момент
+    /// решения - повторить правило снаружи значило бы завести вторую его запись.
+    observed: Option<&'a mut Observed>,
+    /// Определение, тело которого элаборируется: им называется хендлер (§7.2).
+    owner: Symbol,
     /// Локальные связывания снаружи внутрь; индекс де Брёйна - расстояние от
     /// конца.
     scope: Vec<Bound>,
@@ -1172,6 +1181,71 @@ impl<'a> Elaborator<'a> {
         self
     }
 
+    /// То же, записывая то, что §7.2 показывает читателю.
+    ///
+    /// Приёмник ставится не всем, а телу определения: связывания и `handle`
+    /// живут только там, и только там их места принадлежат буферу, который
+    /// открыт.
+    pub(crate) fn recording(mut self, into: &'a mut Observed, owner: &Symbol) -> Self {
+        self.observed = Some(into);
+        self.owner = Rc::clone(owner);
+        self
+    }
+
+    /// Записывает погашение метки (§3.4, §7.2).
+    fn discharged(&mut self, effect: &Symbol, at: Span) {
+        let owner = Rc::clone(&self.owner);
+        if let Some(found) = self.observed.as_deref_mut() {
+            found.handlers.discharges(Handler {
+                effect: Rc::clone(effect),
+                owner,
+                at,
+            });
+        }
+    }
+
+    /// Записывает использование операции.
+    ///
+    /// Спрашивается сигнатура, а не форма записи: операция от обычного имени
+    /// синтаксически не отличается ничем, и различает их только объявление.
+    ///
+    /// Зовётся с **обоих** выходов `name`: аргументы уровня выдаются одному
+    /// имени раз на объявление, а написано оно столько раз, сколько написано,
+    /// и второе вхождение уходит через кэш.
+    fn performed(&mut self, written: &ast::Name, declared: &str) {
+        let Some(DefinitionKind::Operation { effect }) =
+            self.signature.lookup(declared).map(|it| &it.kind)
+        else {
+            return;
+        };
+        let effect = Rc::from(&**effect);
+        if let Some(found) = self.observed.as_deref_mut() {
+            found.handlers.performs(Performed {
+                name: Rc::clone(&written.text),
+                effect,
+                at: written.span,
+            });
+        }
+    }
+
+    /// Записывает жизнь связывания владеемого типа.
+    fn lived(
+        &mut self,
+        name: &Symbol,
+        owned: Ownership,
+        acquired: Span,
+        released: Option<Released>,
+    ) {
+        if let Some(found) = self.observed.as_deref_mut() {
+            found.lifecycles.seen(Lifecycle {
+                name: Rc::clone(name),
+                owned,
+                acquired,
+                released,
+            });
+        }
+    }
+
     /// Выполняет `body` под параметрами, ничего вокруг результата не строя.
     ///
     /// [`Self::wrapped`] делает то же и оборачивает результат в `Pi`; здесь
@@ -1205,6 +1279,8 @@ impl<'a> Elaborator<'a> {
             owned,
             fixities,
             warnings,
+            observed: None,
+            owner: Rc::from(""),
             ctx: Ctx::new(signature),
             scope: Vec::new(),
             group,
@@ -3942,11 +4018,18 @@ impl<'a> Elaborator<'a> {
                 span: name.span,
             });
         }
-        // Аргументы уровня подставляются дырками - это implicit UP со стороны
-        // места использования (§3.2), - и одному имени они выдаются один раз
-        // на объявление (см. `instantiated`).
+        self.declared(name)
+    }
+
+    /// Объявленное имя: инстанциация с аргументами уровня.
+    ///
+    /// Аргументы уровня подставляются дырками - это implicit UP со стороны
+    /// места использования (§3.2), - и одному имени они выдаются один раз на
+    /// объявление (см. `instantiated`).
+    fn declared(&mut self, name: &ast::Name) -> Result<Term, ElabError> {
         if let Some(term) = self.instantiated.get(&name.text).cloned() {
             let term = self.regraded(&name.text, term);
+            self.performed(name, &Rc::clone(&name.text));
             return Ok(self.implicit_use(&name.text, term));
         }
         let term = self
@@ -3966,6 +4049,7 @@ impl<'a> Elaborator<'a> {
             })?;
         self.instantiated
             .insert(Rc::clone(&name.text), term.clone());
+        self.performed(name, &Rc::clone(&name.text));
         Ok(self.implicit_use(&name.text, term))
     }
 
@@ -4680,6 +4764,10 @@ impl<'a> Elaborator<'a> {
             self.without_resource(computation, span)?;
         }
         let effect = self.handled_effect(label, branches, span)?;
+        // Метка, которую снимает этот `handle`. В тексте её чаще нет вовсе:
+        // она берётся из первой ветки, и на корпусе так написаны 151 хендлер
+        // из 175 (§7.2).
+        self.discharged(&effect, span);
         // Написанные аргументы метки закрепляют вхождение, а не выбирают его:
         // снимается всё то же первое, а они говорят, чем обязаны оказаться его
         // (§4.1). Сверка - ниже, когда вхождение снято.
@@ -5865,6 +5953,15 @@ impl<'a> Elaborator<'a> {
                     .cloned()
             })
             .flatten();
+        if let Some(how) = owns {
+            let at = block_end(binding, tail, rest);
+            self.lived(
+                &binding.name.text,
+                how,
+                binding.name.span,
+                drop.clone().map(|drop| Released { drop, at }),
+            );
+        }
         let bound = Bound {
             value: Some(Rc::new(value.clone())),
             ..Bound::owning_scoping(
@@ -5920,6 +6017,15 @@ impl<'a> Elaborator<'a> {
             && self.owned_destructor(ty).is_some();
         let drop = closes.then(|| self.owned_destructor(ty)).flatten();
         let owns = self.owned_of(ty).is_some();
+        if let Some(how) = self.owned_of(ty) {
+            let at = block_end(binding, tail, rest);
+            self.lived(
+                &binding.name.text,
+                how,
+                binding.name.span,
+                drop.clone().map(|drop| Released { drop, at }),
+            );
+        }
         let ty = self.typing(|inner| inner.expr(ty, Mult::Many))?;
         // Аннотация `let` - тот же написанный тип, и лямбда значения берёт
         // кратности у него.
@@ -6495,6 +6601,23 @@ impl<'a> Elaborator<'a> {
                     .cloned()
                     .filter(|_| mult != Mult::Zero && !mentioned);
                 let owned = head.is_some_and(|name| self.owned.owns(name));
+                // Место вставки - конец тела: область видимости параметра есть
+                // тело целиком (§3.3). Имя берётся у **написанного** паттерна:
+                // скомпилированный несёт своё, и показывать его автору нечего.
+                if let (Some(how), Some(PatternKind::Name(said))) = (
+                    head.and_then(|name| self.owned.how(name)),
+                    written.map(|it| &it.kind),
+                ) {
+                    self.lived(
+                        &said.text,
+                        how,
+                        said.span,
+                        drop.clone().map(|drop| Released {
+                            drop,
+                            at: body.span,
+                        }),
+                    );
+                }
                 // §3.3: параметр кратности `1` функционального типа наследует
                 // то же ограничение внутри вызываемой функции.
                 let scoped = mult == Mult::One && matches!(ty.as_deref(), Some(Value::Pi(..)));
@@ -6788,6 +6911,19 @@ struct BoundVar {
     /// Значение, решённое разбором индексов: `y := x` у `Refl`. `None` - не
     /// решено, то есть обычная переменная.
     value: Option<Rc<Term>>,
+}
+
+/// Конец области видимости связывания `let` - место, куда встанет `drop`.
+///
+/// Вставка оборачивает **остаток блока**, а не его хвост (см. `bindings`),
+/// поэтому концом служит последнее, что в блоке написано: последний оператор,
+/// последнее связывание той же группы либо, если за связыванием нет ничего, оно
+/// само.
+fn block_end(binding: &Binding, tail: &[Binding], rest: &[Stmt]) -> Span {
+    rest.last()
+        .map(|it| it.span)
+        .or_else(|| tail.last().map(|it| it.span))
+        .unwrap_or(binding.span)
 }
 
 /// Закрываемые связывания в порядке вставки.

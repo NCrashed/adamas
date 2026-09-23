@@ -57,6 +57,7 @@ use crate::diag::{Diagnostic, Severity};
 use crate::error::ElabError;
 use crate::expr::Enclosing;
 use crate::fixity::Fixities;
+use crate::lifecycle::Observed;
 use crate::own::Owned;
 use crate::recover::Refusals;
 use crate::warn::Warnings;
@@ -177,6 +178,18 @@ pub struct Program {
     pub metas: Metas,
     /// Что знает разрешение инстансов (§3.5) - оно общее на программу.
     pub instances: Instances,
+    /// Что §7.2 показывает читателю про **входной** файл: жизнь ресурсов и
+    /// погашение меток ([`crate::lifecycle`]).
+    ///
+    /// Входного, а не программы: места здесь - спаны, а спан живёт в тексте
+    /// своего файла. Редактор рисует их по буферу, который открыт, и место из
+    /// чужого текста подчеркнуло бы в нём случайную строку - тот же довод, что
+    /// у диагностики подключённого модуля.
+    ///
+    /// Собирается по ходу элаборации, в той самой точке, где решается вставка
+    /// `drop` ([`crate::lifecycle`]): второй проход, повторяющий правило,
+    /// разошёлся бы с ним молча.
+    pub observed: Observed,
 }
 
 impl Program {
@@ -238,6 +251,7 @@ pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
                 }],
                 metas: Metas::default(),
                 instances: Instances::default(),
+                observed: Observed::new(),
             };
         }
     };
@@ -248,6 +262,7 @@ pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
     let mut fixities = Fixities::default();
     let mut instances = Instances::default();
     let mut warnings = Warnings::new();
+    let mut observed = Observed::new();
     let mut refusals = Refusals::new();
     let outcome = {
         let pass = Pass {
@@ -257,6 +272,7 @@ pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
             fixities: &mut fixities,
             instances: &mut instances,
             warnings: &mut warnings,
+            observed: &mut observed,
         };
         crate::decl::elaborate_file(&module.decls, None, pass, &mut loader, &mut refusals)
     };
@@ -288,6 +304,7 @@ pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
         diagnostics,
         metas,
         instances,
+        observed,
     }
 }
 
@@ -413,13 +430,19 @@ impl Loader<'_> {
         // файлу (§10 вопрос 177), а отказы отсюда надо разложить по **этой**
         // единице - позицию свою они несут в её тексте.
         let mut refusals = Refusals::new();
-        let outcome = crate::decl::elaborate_file(
-            &module.decls,
-            Some(&within),
-            pass.reborrow(),
-            self,
-            &mut refusals,
-        );
+        // Жизненные циклы подключённого файла **отбрасываются**, и это не
+        // экономия. Место у них - спан, а спан живёт в тексте своего файла:
+        // отданный наружу вместе с циклами входного, он указал бы редактору в
+        // строку открытого буфера, которой не соответствует ничего. Тот же
+        // довод, что у диагностики подключённого модуля, только лечение проще -
+        // показывать их некому: редактор рисует подсказки по буферу, который
+        // открыт, а открытый буфер здесь и есть входной файл.
+        let mut aside = Observed::new();
+        let outcome = {
+            let mut inner = pass.reborrow();
+            inner.observed = &mut aside;
+            crate::decl::elaborate_file(&module.decls, Some(&within), inner, self, &mut refusals)
+        };
         pass.signature.set_scope(outer);
         self.frames.pop();
         self.units[at].module = Some(module);

@@ -46,6 +46,7 @@ use adamas_core::value::{Env, Lvl, Value};
 use crate::class::{self, Class, Declaring, Instances, Offence};
 use crate::expr::{Elaborator, Enclosing, Member, Param, UNIT, Unwritten, WrittenField};
 use crate::fixity::Fixities;
+use crate::lifecycle::Observed;
 use crate::own::{Owned, Ownership};
 use crate::recover::{self, Refusals};
 use crate::route::{self, Declared};
@@ -79,6 +80,8 @@ pub(crate) struct Pass<'a> {
     pub fixities: &'a mut Fixities,
     pub instances: &'a mut Instances,
     pub warnings: &'a mut Warnings,
+    /// Приёмник жизненных циклов ресурсов (§7.2, [`crate::lifecycle`]).
+    pub observed: &'a mut Observed,
 }
 
 impl Pass<'_> {
@@ -91,6 +94,7 @@ impl Pass<'_> {
             fixities: self.fixities,
             instances: self.instances,
             warnings: self.warnings,
+            observed: self.observed,
         }
     }
 }
@@ -172,6 +176,9 @@ pub fn elaborated(module: &Module) -> (Signature, Warnings, Refusals) {
     let mut fixities = Fixities::default();
     let mut warnings = Warnings::new();
     let mut refusals = Refusals::new();
+    // Жизненные циклы этим путём не спрашивают: их читает редактор, а он ходит
+    // через [`crate::program`], где программа собрана целиком.
+    let mut observed = Observed::new();
     let pass = Pass {
         signature: &mut signature,
         metas: &mut metas,
@@ -179,6 +186,7 @@ pub fn elaborated(module: &Module) -> (Signature, Warnings, Refusals) {
         fixities: &mut fixities,
         instances: &mut instances,
         warnings: &mut warnings,
+        observed: &mut observed,
     };
     if let Err(error) = elaborate_file(&module.decls, None, pass, &mut Alone, &mut refusals) {
         refusals.refused(error, Vec::new());
@@ -208,6 +216,7 @@ pub fn elaborate_into(
     instances: &mut Instances,
     warnings: &mut Warnings,
 ) -> Result<(), ElabError> {
+    let mut observed = Observed::new();
     let pass = Pass {
         signature,
         metas,
@@ -215,6 +224,7 @@ pub fn elaborate_into(
         fixities,
         instances,
         warnings,
+        observed: &mut observed,
     };
     let mut refusals = Refusals::new();
     elaborate_file(&module.decls, None, pass, &mut Alone, &mut refusals)?;
@@ -257,6 +267,7 @@ pub(crate) fn elaborate_file(
         fixities,
         instances,
         warnings,
+        observed,
     } = pass.reborrow();
     members_into(
         decls,
@@ -267,6 +278,7 @@ pub(crate) fn elaborate_file(
         fixities,
         instances,
         warnings,
+        observed,
         importer,
         Some(refusals),
     )?;
@@ -740,6 +752,7 @@ fn members_into(
     fixities: &mut Fixities,
     instances: &mut Instances,
     warnings: &mut Warnings,
+    observed: &mut Observed,
     importer: &mut dyn Importer,
     mut recovery: Option<&mut Refusals>,
 ) -> Result<(), ElabError> {
@@ -758,6 +771,7 @@ fn members_into(
                 fixities,
                 instances,
                 warnings,
+                observed,
             },
             importer,
             &mut pending,
@@ -809,6 +823,7 @@ fn member<'a>(
         fixities,
         instances,
         warnings,
+        observed,
     } = pass;
     {
         // Занятое языком имя член модуля заслонять вправе (§10 вопрос 160), а
@@ -839,6 +854,7 @@ fn member<'a>(
                     metas,
                     known(owned, fixities, instances),
                     warnings,
+                    observed,
                     within,
                     &declared,
                     clauses,
@@ -869,8 +885,8 @@ fn member<'a>(
             DeclKind::Module(declared) => {
                 postulate(signature, metas, pending.take(), postulated)?;
                 declare_module(
-                    signature, metas, owned, fixities, instances, warnings, within, declared,
-                    decl.span,
+                    signature, metas, owned, fixities, instances, warnings, observed, within,
+                    declared, decl.span,
                 )?;
             }
             DeclKind::Mutual(members) => {
@@ -912,8 +928,8 @@ fn member<'a>(
             DeclKind::Resource(resource) => {
                 postulate(signature, metas, pending.take(), postulated)?;
                 declare_owned(
-                    signature, metas, owned, fixities, instances, warnings, within, resource,
-                    decl.span,
+                    signature, metas, owned, fixities, instances, warnings, observed, within,
+                    resource, decl.span,
                 )?;
             }
             // Фикситет ничего не объявляет: он говорит, как читать цепочку, и
@@ -931,6 +947,7 @@ fn member<'a>(
                     fixities,
                     instances,
                     warnings,
+                    observed,
                 };
                 importer.import(import, decl.span, pass)?;
             }
@@ -984,13 +1001,14 @@ fn declare_owned(
     fixities: &Fixities,
     instances: &mut Instances,
     warnings: &mut Warnings,
+    observed: &mut Observed,
     within: Option<&Enclosing>,
     resource: &ast::Resource,
     span: Span,
 ) -> Result<(), ElabError> {
     owned.declare(&qualify(within, &resource.name.text), Ownership::Resource);
     declare_resource(
-        signature, metas, owned, fixities, instances, warnings, within, resource, span,
+        signature, metas, owned, fixities, instances, warnings, observed, within, resource, span,
     )
 }
 
@@ -1101,6 +1119,7 @@ fn declare_module(
     fixities: &mut Fixities,
     instances: &mut Instances,
     warnings: &mut Warnings,
+    observed: &mut Observed,
     within: Option<&Enclosing>,
     module: &ast::ModuleDecl,
     span: Span,
@@ -1137,6 +1156,7 @@ fn declare_module(
         fixities,
         instances,
         warnings,
+        observed,
         &mut Alone,
         None,
     )?;
@@ -5003,6 +5023,7 @@ fn define(
     metas: &mut Metas,
     known: Known<'_>,
     warnings: &mut Warnings,
+    observed: &mut Observed,
     within: Option<&Enclosing>,
     declared: &Pending<'_>,
     clauses: &[ast::Clause],
@@ -5044,6 +5065,7 @@ fn define(
             group,
         )
         .within(within)
+        .recording(observed, &declared.name)
         .declaring(&declared.ty)
         .suspending(suspends(declared.source));
         clauses
@@ -5391,6 +5413,7 @@ fn declare_resource(
     fixities: &Fixities,
     instances: &Instances,
     warnings: &mut Warnings,
+    observed: &mut Observed,
     within: Option<&Enclosing>,
     resource: &ast::Resource,
     span: Span,
@@ -5493,6 +5516,7 @@ fn declare_resource(
         metas,
         known(owned, fixities, instances),
         warnings,
+        observed,
         within,
         &pending,
         clauses,

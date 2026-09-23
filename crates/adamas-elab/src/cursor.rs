@@ -31,7 +31,7 @@
 
 use std::rc::Rc;
 
-use adamas_core::sig::Signature;
+use adamas_core::sig::{DefinitionKind, Signature};
 use adamas_core::source::Span;
 use adamas_parser::ast::{
     self, Block, Clause, Decl, DeclKind, Expr, ExprKind, LamParamKind, Module, Pattern,
@@ -228,8 +228,16 @@ pub fn declaration(module: &Module, text: &str, within: &[Symbol]) -> Option<Spa
 /// случайную строку (ровно то, что запрещает §7.2). Дерево же принадлежит
 /// буферу по построению.
 ///
-/// Отдаются только **определения значений** - то, у чего бывает тело: семейства,
-/// конструкторы, метки эффектов и операции своего вердикта аллокации не имеют.
+/// Отдаются только **определения значений** - то, у чего бывает тело, - и
+/// отбор двойной. Синтаксис отсекает то, что значением не объявляется вовсе:
+/// семейство, метку эффекта, псевдоним, модуль. Вид ядра
+/// ([`DefinitionKind::Regular`]) отсекает остальное, и без него не обойтись:
+/// конструктор `resource` пишется той же формой, что определение
+/// (`Shouted : Pair -> Loud` внутри `resource Loud where`), а конструктор
+/// `data` - своей. Отбор по одному только синтаксису поэтому давал бы
+/// подсказку над конструктором одного сорта и молчал над другим - расхождение,
+/// пойманное корпусным свидетелем.
+///
 /// Имя разрешается лестницей объемлющих модулей, как его читает элаборация
 /// ([`crate::expr::qualified_in`]), но **без** ступени импорта: имя, которого в
 /// сигнатуре нет, чужим не подменяется - буфер бывает проверен наполовину, и
@@ -238,6 +246,11 @@ pub fn declaration(module: &Module, text: &str, within: &[Symbol]) -> Option<Spa
 pub fn definitions(signature: &Signature, module: &Module) -> Vec<(Symbol, Span)> {
     let mut sites = Vec::new();
     collect(&module.decls, &mut Vec::new(), &mut sites);
+    let regular = |name: &str| {
+        signature
+            .lookup(name)
+            .is_some_and(|it| matches!(it.kind, DefinitionKind::Regular))
+    };
     let mut found = Vec::new();
     for site in sites {
         if !site.declaring || !site.value {
@@ -247,12 +260,12 @@ pub fn definitions(signature: &Signature, module: &Module) -> Vec<(Symbol, Span)
         for depth in (1..=site.within.len()).rev() {
             let prefix: Vec<&str> = site.within[..depth].iter().map(|it| &**it).collect();
             let full: Symbol = Rc::from(format!("{}.{}", prefix.join("."), site.text).as_str());
-            if signature.lookup(&full).is_some() {
+            if regular(&full) {
                 resolved = Some(full);
                 break;
             }
         }
-        let name = resolved.or_else(|| signature.lookup(&site.text).map(|_| Rc::clone(&site.text)));
+        let name = resolved.or_else(|| regular(&site.text).then(|| Rc::clone(&site.text)));
         if let Some(name) = name {
             found.push((name, site.span));
         }

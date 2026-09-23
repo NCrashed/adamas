@@ -100,6 +100,40 @@ async function run() {
   );
   say("EDITED", await vscode.workspace.applyEdit(edit));
   report("AFTER_", document, await settle(uri, (found) => found.length === 0));
+
+  // Подсказки §5.1 на починенном буфере. Включать их VS Code не требует -
+  // хватает объявленной сервером возможности, - и это ровно та разница с
+  // Neovim, ради которой прогон стоит в обоих редакторах.
+  //
+  // `executeInlayHintProvider` идёт через клиента расширения, то есть через
+  // настоящий запрос `textDocument/inlayHint`.
+  const shown = await vscode.commands.executeCommand(
+    "vscode.executeInlayHintProvider",
+    uri,
+    new vscode.Range(0, 0, document.lineCount, 0),
+  );
+  say("INLAY_COUNT", shown.length);
+  for (const item of shown) {
+    const label = Array.isArray(item.label)
+      ? item.label.map((piece) => piece.value).join("")
+      : item.label;
+    say(
+      "INLAY",
+      JSON.stringify({
+        line: item.position.line,
+        column: item.position.character,
+        label: label,
+        // Текст от места подсказки до конца строки, вырезанный **редактором**
+        // по его собственному счёту колонок.
+        after: document.getText(
+          new vscode.Range(
+            item.position,
+            document.lineAt(item.position.line).range.end,
+          ),
+        ),
+      }),
+    );
+  }
 }
 
 module.exports = { run };

@@ -150,6 +150,42 @@ fn the_whole_answer_is_what_the_reader_sees() {
     );
 }
 
+/// Над конструктором статуса нет - какой бы формой он ни был написан.
+///
+/// Конструктор `data` объявляется своей формой, а конструктор `resource` - той
+/// же, что определение (`Shouted : Pair -> Loud`). Отбор по одному синтаксису
+/// поэтому молчал бы над первым и говорил над вторым, и это не мелочь: `куча:
+/// Shouted` над объявлением обещает читателю место, которого у конструктора
+/// нет вовсе - аллоцирует **применение**, а не объявление.
+///
+/// Свидетель корпусный это и поймал; здесь он свёрнут в заготовку, где обе
+/// формы стоят рядом.
+#[test]
+fn a_constructor_gets_no_status_in_either_syntax() {
+    const RESOURCEFUL: &str = "\
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Pair where
+  MkPair : Nat -> Nat -> Pair
+
+resource Loud where
+  Shouted : Pair -> Loud
+  closeLoud : (1 l : Loud) -> Pair
+  closeLoud (Shouted p) = p
+
+main : Nat
+main = Zero
+";
+    let (uri, document) = checked("resourceful.adamas", RESOURCEFUL);
+    assert_eq!(
+        lines(&uri, &document, whole()),
+        ["9:2 @noalloc", "12:0 @noalloc"],
+        "статус - только у двух определений, конструкторы молчат"
+    );
+}
+
 /// Окно клиента ограничивает ответ.
 ///
 /// Протокол просит подсказки **видимого** куска, и подсказка за его границей -
@@ -279,6 +315,68 @@ fn fixtures() -> Vec<PathBuf> {
         .collect();
     found.sort();
     found
+}
+
+/// Определение, аллоцирующее без места: как подсказка ведёт себя на нём.
+///
+/// Таких имён на корпусе **82** (замер трека A), и делятся они надвое, причём
+/// по признаку, который решает и поведение подсказки.
+///
+/// *Тела нет* - постулат, `extern`. Место внутри тела взяться не может, потому
+/// что тела нет; зато написано **объявление**, и статус стоит над ним. Он там и
+/// нужен: чинить читателю нечего внутри, ответ - дописать `@noalloc` либо тело.
+///
+/// *Тело есть, а клауз нет* - значение модуля, словарь инстанса, запись,
+/// которую собрала элаборация. Написанного объявления значения за ней нет
+/// вовсе, и подсказке стоять негде. Молчание тут не пробел, а единственный
+/// правдивый ответ; звено цепочки, наоборот, **названо**
+/// ([`a_link_without_a_place_is_named_not_swallowed`]) - там подпись чужая, и
+/// дырка в ней была бы видна.
+///
+/// Свидетель закрывает границу с обеих сторон: всякое имя без места, попавшее
+/// под статус, обязано быть без тела, и оба множества обязаны быть непусты.
+#[test]
+fn a_definition_without_a_place_is_shown_by_whether_it_has_a_body() {
+    let mut bodiless = 0_usize;
+    let mut unwritten = 0_usize;
+    for path in fixtures() {
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("файл корпуса обязан читаться: {error}"));
+        let name = path
+            .file_name()
+            .and_then(|it| it.to_str())
+            .unwrap_or_default();
+        let (_, document) = checked(name, &text);
+        let (Some(signature), Some(module)) = (document.signature(), document.module()) else {
+            continue;
+        };
+        let written: Vec<_> = adamas_elab::cursor::definitions(signature, module)
+            .into_iter()
+            .map(|(it, _)| it)
+            .collect();
+        for full in signature.names() {
+            let Some(definition) = signature.lookup(&full) else {
+                continue;
+            };
+            if definition.allocates.is_none() || signature.allocated_at(&full).is_some() {
+                continue;
+            }
+            if written.contains(&full) {
+                assert!(
+                    definition.body.is_none(),
+                    "{name}: `{full}` написана, имеет тело и аллоцирует, а места не знает"
+                );
+                bodiless += 1;
+            } else {
+                unwritten += 1;
+            }
+        }
+    }
+    assert!(bodiless > 0, "постулаты в корпусе обязаны быть");
+    assert!(
+        unwritten > 0,
+        "остаток без написанного объявления обязан быть непустым"
+    );
 }
 
 /// На всём корпусе подсказка стоит на написанном, а не в пустоте.

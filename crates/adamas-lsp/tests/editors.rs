@@ -37,6 +37,16 @@
 //! наоборот: падает один `neovim_underlines…`, с ` 😀 -} Succ ` под
 //! подчёркиванием, а остальные три зелены.
 //!
+//! # Подсказки §5.1 показываются, а не только отдаются
+//!
+//! Волна 3 прибавила `textDocument/inlayHint`, и разница между редакторами тут
+//! не косметическая. **Neovim их не запрашивает, пока не включат**
+//! (`vim.lsp.inlay_hint.enable`, API от 0.10), и включает их плагин
+//! `editors/nvim`; **VS Code рисует сам** по объявленной сервером возможности.
+//! Без прогона это была бы возможность, живущая только в ответах сервера, -
+//! поэтому пара свидетелей здесь устроена так: один показывает подсказки с
+//! плагином, другой показывает, что без плагина их нет.
+//!
 //! # Инструменты
 //!
 //! `ADAMAS_NVIM`, `ADAMAS_VSCODE`, `ADAMAS_VSCODE_CLI`, `ADAMAS_VSCE` - пути к
@@ -212,7 +222,10 @@ fn check(found: &Value, bounds: (u64, u64), severity: u64) {
 ///
 /// `encoding` задан - каталог плагина в `runtimepath` **не** кладётся, и клиента
 /// поднимает сам драйвер. Иначе клиентов было бы два и диагностик тоже.
-fn nvim(binary: &str, name: &str, encoding: Option<&str>) -> Said {
+///
+/// `inlay` включает подсказки §5.1 мимо плагина: в ветке с заданной кодировкой
+/// плагина нет по построению, а UTF-16 проверить надо и на них.
+fn nvim(binary: &str, name: &str, encoding: Option<&str>, inlay: bool) -> Said {
     let root = workspace(name);
     let fixture = fixture(&root);
     let driver = root.join("nvim.lua");
@@ -234,9 +247,13 @@ fn nvim(binary: &str, name: &str, encoding: Option<&str>) -> Said {
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_DATA_HOME", root.join("data"))
         .env("XDG_STATE_HOME", root.join("state"))
-        .env_remove("ADAMAS_FORCE_ENCODING");
+        .env_remove("ADAMAS_FORCE_ENCODING")
+        .env_remove("ADAMAS_FORCE_INLAY");
     if let Some(encoding) = encoding {
         command.env("ADAMAS_FORCE_ENCODING", encoding);
+    }
+    if inlay {
+        command.env("ADAMAS_FORCE_INLAY", "1");
     }
 
     let (ok, text) = output(&mut command);
@@ -253,7 +270,7 @@ fn neovim_underlines_the_offending_expression() {
     let Some(binary) = tool("ADAMAS_NVIM") else {
         return;
     };
-    let said = nvim(&binary, "nvim-default", None);
+    let said = nvim(&binary, "nvim-default", None, false);
 
     assert_eq!(
         said.get("PLUGIN"),
@@ -279,6 +296,83 @@ fn neovim_underlines_the_offending_expression() {
         "true",
         "исправленный буфер обязан гасить подчёркивание"
     );
+
+    // Подсказки §5.1 на починенном буфере: пока он не проверяется, вердикта
+    // нет. Спрашивает их Neovim только после явного включения, и включает его
+    // плагин - без плагина их нет вовсе
+    // ([`neovim_shows_no_hints_without_the_plugin`]).
+    //
+    assert_eq!(said.get("INLAY_API"), "true", "{}", said.dump());
+    assert_eq!(said.get("INLAY_COUNT"), "2", "{}", said.dump());
+    hinted(&said);
+}
+
+/// Две подсказки §5.1 на починенном буфере - там, где написано руками.
+///
+/// `column` **байтовая**: Neovim переводит позицию протокола своей реализацией,
+/// когда принимает подсказку. На этой строке до построения 26 байтов при 18
+/// кодовых единицах UTF-16, поэтому одно и то же число при обеих кодировках
+/// значит, что перевод сошёлся с чужим счётом, а не с нашим.
+fn hinted(said: &Said) {
+    let hints = said.all("INLAY");
+    assert_eq!(hints.len(), 2, "{}", said.dump());
+    // Статус над объявлением `двойка : Nat`.
+    assert_eq!(hints[0]["line"].as_u64(), Some(18), "{}", said.dump());
+    assert_eq!(hints[0]["column"].as_u64(), Some(0));
+    assert_eq!(hints[0]["label"].as_str(), Some("куча: Succ"));
+    // Место аллокации - построение за эмодзи.
+    assert_eq!(hints[1]["line"].as_u64(), Some(19));
+    assert_eq!(hints[1]["column"].as_u64(), Some(26), "{}", said.dump());
+    assert_eq!(hints[1]["label"].as_str(), Some("куча"));
+    assert_eq!(
+        hints[1]["after"].as_str(),
+        Some("Succ Zero"),
+        "подсказка стоит перед построением, а не перед эмодзи"
+    );
+}
+
+/// Те же подсказки, когда клиент просит UTF-16.
+///
+/// Ветка без плагина, поэтому включает их сам драйвер. По протоколу уходит 18,
+/// а Neovim своим переводом получает те же 26 байтов - и режет то же слово.
+/// Считай сервер кодовые единицы байтами, здесь бы он и попался: 26 единиц
+/// UTF-16 указывают за построение.
+#[test]
+fn neovim_places_hints_by_utf16_units_too() {
+    let Some(binary) = tool("ADAMAS_NVIM") else {
+        return;
+    };
+    let said = nvim(&binary, "nvim-inlay-utf16", Some("utf-16"), true);
+    assert_eq!(said.get("ENCODING"), "utf-16");
+    assert_eq!(said.get("INLAY_COUNT"), "2", "{}", said.dump());
+    hinted(&said);
+}
+
+/// Без плагина подсказок нет, и это не поломка.
+///
+/// Neovim рисует `inlayHint` только по явному включению, и включает его
+/// `editors/nvim/plugin/adamas.lua`. Прогон нужен затем, что иначе свидетель
+/// выше был бы зелен и без плагина - то есть проверял бы сервер, а не
+/// редактор.
+#[test]
+fn neovim_shows_no_hints_without_the_plugin() {
+    let Some(binary) = tool("ADAMAS_NVIM") else {
+        return;
+    };
+    // Ветка с заданной кодировкой каталог плагина в runtimepath не кладёт, а
+    // `inlay` здесь выключен: включать подсказки некому.
+    let said = nvim(&binary, "nvim-bare", Some("utf-16"), false);
+    assert_eq!(
+        said.get("PLUGIN"),
+        "false",
+        "плагин обязан быть не загружен"
+    );
+    assert_eq!(
+        said.get("INLAY_COUNT"),
+        "0",
+        "без включения Neovim подсказок не спрашивает: {}",
+        said.dump()
+    );
 }
 
 /// То же на UTF-16 и UTF-32: перевод замыкается чужой реализацией.
@@ -292,7 +386,7 @@ fn neovim_decodes_the_other_encodings_back_to_the_same_bytes() {
         return;
     };
     for encoding in ["utf-16", "utf-32"] {
-        let said = nvim(&binary, &format!("nvim-{encoding}"), Some(encoding));
+        let said = nvim(&binary, &format!("nvim-{encoding}"), Some(encoding), false);
         assert_eq!(said.get("ENCODING"), encoding);
         assert_eq!(said.get("COUNT"), "1", "{}", said.dump());
         check(&said.all("DIAG")[0], BYTES, 1);
@@ -410,6 +504,27 @@ fn vscode_underlines_the_offending_expression() {
         said.get("AFTER_COUNT"),
         "0",
         "исправленный буфер обязан гасить подчёркивание"
+    );
+
+    // Подсказки §5.1. Включать их VS Code не требует - довольно объявленной
+    // возможности, - и в этом разница с Neovim, которому нужен плагин
+    // ([`neovim_shows_no_hints_without_the_plugin`]).
+    //
+    // Колонки тут в кодовых единицах UTF-16 (0 и 18), и круг разрывает
+    // `after`: текст, вырезанный редактором из своего буфера от места
+    // подсказки. Посчитай сервер байтами - вырезалось бы не то слово.
+    assert_eq!(said.get("INLAY_COUNT"), "2", "{}", said.dump());
+    let hints = said.all("INLAY");
+    assert_eq!(hints[0]["line"].as_u64(), Some(18), "{}", said.dump());
+    assert_eq!(hints[0]["column"].as_u64(), Some(0));
+    assert_eq!(hints[0]["label"].as_str(), Some("куча: Succ"));
+    assert_eq!(hints[1]["line"].as_u64(), Some(19));
+    assert_eq!(hints[1]["column"].as_u64(), Some(18), "{}", said.dump());
+    assert_eq!(hints[1]["label"].as_str(), Some("куча"));
+    assert_eq!(
+        hints[1]["after"].as_str(),
+        Some("Succ Zero"),
+        "подсказка стоит перед построением, а не перед эмодзи"
     );
 }
 

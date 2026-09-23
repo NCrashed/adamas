@@ -28,7 +28,8 @@ local forced = os.getenv('ADAMAS_FORCE_ENCODING')
 -- Автокоманда группы `adamas` есть ровно тогда, когда загрузился
 -- `editors/nvim/plugin/adamas.lua`. Без этой строки прогон был бы зелен и на
 -- пустом runtimepath - проверял бы драйвер, а не плагин.
-say('PLUGIN', vim.fn.exists('#adamas#FileType') == 1)
+local plugged = vim.fn.exists('#adamas#FileType') == 1
+say('PLUGIN', plugged)
 
 if forced then
   -- Ветка мимо плагина, и запускает её тест, не добавляя каталог плагина в
@@ -93,5 +94,53 @@ say('EDITED', text[#text])
 say('CLEARED', wait_for(function()
   return #vim.diagnostic.get(0) == 0
 end))
+
+-- Подсказки §5.1 на **починенном** буфере: пока он не проверяется, вердикта
+-- нет и показывать нечего. Спрашиваются они у `vim.lsp.inlay_hint`, то есть у
+-- того самого механизма, которым Neovim их рисует; включает его плагин
+-- (`editors/nvim`), и в ветке без плагина их поэтому не будет вовсе.
+local hint = vim.lsp.inlay_hint
+say('INLAY_API', hint ~= nil and hint.get ~= nil)
+if hint and hint.get then
+  -- `ADAMAS_FORCE_INLAY` включает подсказки **мимо плагина** - тем же вызовом,
+  -- каким их включает он. Нужно это ветке с заданной кодировкой: плагина там
+  -- нет по построению, а UTF-16 проверить надо.
+  local forced_inlay = os.getenv('ADAMAS_FORCE_INLAY')
+  if forced_inlay and hint.enable then
+    hint.enable(true, { bufnr = 0 })
+  end
+  -- Ждать есть смысл только там, где подсказки должны прийти: в ветке без
+  -- включения ожидание вырождалось бы в тридцать секунд простоя на прогон.
+  if plugged or forced_inlay then
+    wait_for(function()
+      return #hint.get({ bufnr = 0 }) > 0
+    end)
+  end
+  local shown = hint.get({ bufnr = 0 })
+  say('INLAY_COUNT', #shown)
+  for _, item in ipairs(shown) do
+    local position = item.inlay_hint.position
+    local row = vim.api.nvim_buf_get_lines(0, position.line, position.line + 1, true)[1]
+    local label = item.inlay_hint.label
+    if type(label) == 'table' then
+      local parts = {}
+      for _, piece in ipairs(label) do
+        parts[#parts + 1] = piece.value
+      end
+      label = table.concat(parts)
+    end
+    -- `character` здесь уже **байтовая** колонка: Neovim переводит позицию
+    -- протокола своей реализацией, когда принимает подсказку, и наружу отдаёт
+    -- готовое. Отсюда и ценность числа - счёт чужой, не наш.
+    say('INLAY', vim.json.encode({
+      line = position.line,
+      column = position.character,
+      label = label,
+      -- Текст **от места подсказки до конца строки**, нарезанный редактором по
+      -- своему счёту: подсказка, уехавшая на байты, режет не то слово.
+      after = row:sub(position.character + 1),
+    }))
+  end
+end
 
 vim.cmd('qa!')

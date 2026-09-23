@@ -37,3 +37,28 @@ vim.api.nvim_create_autocmd('FileType', {
     }, { bufnr = args.buf })
   end,
 })
+
+-- Подсказки §5.1 (куча и переиспользование ячейки) сервер отдаёт по запросу, а
+-- запрашивает их Neovim только после явного включения: с 0.10 `inlayHint`
+-- умолчательно выключен. VS Code рисует их сам, и разница эта не про вкус
+-- редакторов - протокол оставляет показ на усмотрение клиента. Без этих строк
+-- возможность существовала бы только в ответах сервера.
+--
+-- Включается на `LspAttach` и **только для своего клиента**: чужие серверы в том
+-- же сеансе трогать нечем.
+vim.api.nvim_create_autocmd('LspAttach', {
+  group = group,
+  desc = 'включить подсказки Adamas о куче и переиспользовании ячейки',
+  callback = function(args)
+    local client = vim.lsp.get_client_by_id(args.data.client_id)
+    if not client or client.name ~= 'adamas' then
+      return
+    end
+    -- API от 0.10; плагин обещает работать с 0.8, поэтому наличие проверяется,
+    -- а не предполагается.
+    local hint = vim.lsp.inlay_hint
+    if hint and hint.enable then
+      hint.enable(true, { bufnr = args.buf })
+    end
+  end,
+})

@@ -1,14 +1,14 @@
 //! Драйвер компилятора Adamas.
 //!
 //! §7.1 называет семь команд: `new`, `build`, `test`, `run`, `check`, `fmt`,
-//! `doc`. Здесь пять - шестая и седьмая суть отдельные машины (форматтер языка
-//! и генератор документации из doc-комментариев), и ни одной из них в проекте
-//! нет. Сверх семи есть `eval`: он старше `run` и отличается от него
-//! вычислителем - считает машина (`adamas-interp`), а не собранный код.
+//! `doc`. Здесь шесть - нет `doc`: генератор документации отдельная машина, и
+//! предмета у неё пока нет, потому что разновидности «док» у комментария в
+//! языке не заведено. Сверх семи есть `eval`: он старше `run` и отличается от
+//! него вычислителем - считает машина (`adamas-interp`), а не собранный код.
 //!
 //! Что где: [`project`] - какая это программа (вход, корни модулей, каталог
 //! артефактов), [`scaffold`] - `new`, [`compile`] - `build` и `run`,
-//! [`suite`] - `test`.
+//! [`suite`] - `test`, [`fmt`] - `fmt`.
 //!
 //! # `check --type`
 //!
@@ -20,6 +20,7 @@
 //! самым переводит обещание из слов в прогон (`tests/hover.rs`).
 
 mod compile;
+mod fmt;
 mod project;
 mod scaffold;
 mod suite;
@@ -74,6 +75,15 @@ enum Command {
         /// Чем идти от IR до объектника.
         #[arg(long, value_enum, default_value_t = Backend::default())]
         backend: Backend,
+    },
+    /// Привести исходники к каноническому виду (§7.1, §7.4).
+    Fmt {
+        /// Файл `.adamas` либо каталог: тогда форматируется всё дерево под ним.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Не писать, а назвать файлы, которые изменились бы.
+        #[arg(long)]
+        check: bool,
     },
     /// Прогнать тесты проекта (§7.1).
     Test {
@@ -130,6 +140,14 @@ fn dispatch(command: Command) -> anyhow::Result<ExitCode> {
         Command::Run { path, backend } => {
             let code = compile::run(&path, backend)?;
             Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
+        }
+        Command::Fmt { path, check } => {
+            let green = fmt::run(&path, check)?;
+            Ok(if green {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
         }
         Command::Test { path } => {
             let green = suite::run(&path)?;

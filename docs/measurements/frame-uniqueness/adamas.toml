@@ -1,0 +1,7 @@
+[package]
+name = "measurement"
+root = "."
+entry = "main"
+
+[link]
+libraries = ["SDL2"]

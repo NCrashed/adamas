@@ -1,0 +1,71 @@
+-- Замер трека B: чего стоит граница FFI в кадре.
+--
+-- Драйвер `dummy` растеризацию не делает, поэтому число здесь - цена **вызовов
+-- через границу**, а не отрисовки. Это и есть та половина кадра, которой
+-- распоряжается язык; растеризация - забота SDL и меряется не здесь.
+
+import Sdl.Raw (Unit, MkUnit, Foreign, SDL_VideoInit, SDL_VideoQuit, SDL_CreateWindow,
+                SDL_DestroyWindow, SDL_CreateRenderer, SDL_DestroyRenderer,
+                SDL_SetRenderDrawColor, SDL_RenderClear, SDL_RenderFillRect,
+                SDL_RenderPresent, SDL_PollEvent, anywhere, shown, software)
+
+data Bool where
+  True : Bool
+  False : Bool
+
+sprites : UInt64
+sprites = 200
+
+frames : UInt64
+frames = 600
+
+blank : Int32
+blank = 0
+
+side : Int32
+side = 8
+
+-- Один спрайт: положить прямоугольник и залить его.
+one : CPtr -> Array 4 Int32 -> UInt64 -> {Foreign} Int32
+one r rect 0 = blank
+one r rect i =
+  let at : UInt64 = subUInt64 i 1
+  let w : Array 4 Int32 = arraySet rect 2 side
+  let h : Array 4 Int32 = arraySet w 3 side
+  let done : Int32 = SDL_RenderFillRect r h
+  one r h at
+
+-- Кадр: очистить, отрисовать спрайты, показать.
+frame : CPtr -> Array 4 Int32 -> UInt64 -> {Foreign} Int32
+frame r rect 0 = blank
+frame r rect f =
+  let cleared : Int32 = SDL_RenderClear r
+  let drawn : Int32 = one r rect sprites
+  let shownUp : Unit = SDL_RenderPresent r
+  frame r rect (subUInt64 f 1)
+
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+driver : Array 6 UInt8
+driver = "dummy"
+
+title : Array 6 UInt8
+title = "frame"
+
+body : (ω u : Unit) -> {Foreign} Int32
+body u =
+  let started : Int32 = SDL_VideoInit driver
+  let window : CPtr = SDL_CreateWindow title anywhere anywhere 320 240 shown
+  let renderer : CPtr = SDL_CreateRenderer window (-1) software
+  let inked : Int32 = SDL_SetRenderDrawColor renderer 220 220 240 255
+  let rect : Array 4 Int32 = arrayNew 4 blank
+  let ran : Int32 = frame renderer rect frames
+  let goneR : Unit = SDL_DestroyRenderer renderer
+  let goneW : Unit = SDL_DestroyWindow window
+  let over : Unit = SDL_VideoQuit
+  ran
+
+main : Int32
+main = runForeign body

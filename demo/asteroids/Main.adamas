@@ -731,7 +731,6 @@ paintHud r rect st =
   let dim : Int32 = SDL_SetRenderDrawColor r 120 255 140 255
   paintLives r wave (livesIn st) shownLives
 
--- | Рисует камни: живые - квадратом своего размера.
 -- | Цвет камня по размеру: целый тёмен, осколки светлее.
 --
 -- Не украшение: в мельтешении одинаковых квадратов не видно, что дробление
@@ -742,6 +741,7 @@ tint r 24 = SDL_SetRenderDrawColor r 118 118 140 255
 tint r 16 = SDL_SetRenderDrawColor r 168 168 190 255
 tint r n = SDL_SetRenderDrawColor r 220 220 244 255
 
+-- | Рисует камни: живые - квадратом своего размера.
 paintRocks : CPtr -> Array 4 Int32 -> Rocks whole -> UInt64 -> {Foreign} Array 4 Int32
 paintRocks r rect w 0 = rect
 paintRocks r rect (MkRocks ds xs ys vx vy sz) i =

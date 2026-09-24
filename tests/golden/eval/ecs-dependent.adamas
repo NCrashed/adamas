@@ -1,0 +1,127 @@
+-- Сущность, индексированная множеством своих компонентов (§3.2 × §4.11).
+--
+-- Хранилище в духе apecs, но с завтипами: система по `{Position, Velocity}` не
+-- пишется для сущности без `Velocity`, и проверяет это **проверка типов**, а не
+-- ветвь во время исполнения. Парный отказ - `errors/ecs-missing-component`.
+--
+-- # Что здесь показано
+--
+-- Множество компонентов живёт в типе (`World cs`), а доступ сторожит
+-- доказательство членства `Has t cs`. Доказательство **стёрто**: кратность `0`,
+-- в рантайме его нет. Отсюда главное свойство - **ветви «компонента нет» не
+-- существует вовсе**: ни `Option`, ни умолчания, ни проверки. У apecs она есть
+-- по построению, потому что множество компонентов там не в типе.
+--
+-- # Почему доказательство сторожит, а не ищет
+--
+-- Искать им нельзя, и это правило QTT, а не решение автора: стёртое значение
+-- разбирать нечем, и компилятор говорит это прямо - «объявлена с кратностью 0,
+-- а использована 1». Поэтому хранилище **статично**: мир есть запись из
+-- массивов (SoA, §4.11), место компонента известно по метке в типе функции, а
+-- доказательство отвечает на другой вопрос - вправе ли эта функция быть здесь
+-- позвана.
+--
+-- # Две формы записи, без которых это не собирается
+--
+-- Обе - ограничения сегодняшнего компилятора, и обе названы, чтобы читатель не
+-- принял их за стиль.
+--
+--   * **Мономорфные обёртки над примитивами массива** (`at`, `put`). Внутри
+--     ветви разбора индексированного семейства имплиситы примитива не
+--     решаются: `arrayIndex xs i` там отвергается нерешённой дыркой.
+--   * **Индекс семейства написан стёртым полем** конструктора. Без него
+--     `MkWorld`, собранный заново, своего индекса не знает, и вывести его
+--     неоткуда - поля его не упоминают.
+
+data Bool where
+  True : Bool
+  False : Bool
+
+-- | Метка компонента.
+data Tag where
+  Position : Tag
+  Velocity : Tag
+  Health : Tag
+
+-- | Множество компонентов сущности.
+data Tags where
+  None : Tags
+  With : Tag -> Tags -> Tags
+
+-- | Доказательство членства метки во множестве.
+--
+-- Строится только двумя ходами: метка стоит первой либо находится в хвосте. У
+-- множества, её не содержащего, построить его нечем - хвост кончается `None`.
+data Has : Tag -> Tags -> Type where
+  Here : (0 t : Tag) -> (0 ts : Tags) -> Has t (With t ts)
+  There : (0 t : Tag) -> (0 u : Tag) -> (0 ts : Tags) -> Has t ts -> Has t (With u ts)
+
+cells : UInt64
+cells = 8
+
+frames : UInt64
+frames = 4
+
+zero : Float32
+zero = 0.0
+
+one : Float32
+one = 1.0
+
+two : Float32
+two = 2.0
+
+at : Array cells Float32 -> UInt64 -> Float32
+at xs i = arrayIndex xs i
+
+put : Array cells Float32 -> UInt64 -> Float32 -> Array cells Float32
+put xs i v = arraySet xs i v
+
+-- | Мир как запись из массивов, индексированная множеством меток.
+data World : Tags -> Type where
+  MkWorld : (0 cs : Tags) -> Array cells Float32 -> Array cells Float32 -> Array cells Float32 -> Array cells Float32 -> World cs
+
+-- | Позиция по оси x. Требует доказательства, что позиция у сущности есть.
+posX : (0 cs : Tags) -> (0 p : Has Position cs) -> World cs -> UInt64 -> Float32
+posX cs p (MkWorld ds xs ys vx vy) i = at xs i
+
+-- | Проход по массивам: внутренний цикл идёт по ним, а не по миру.
+--
+-- Разница наблюдаема счётчиком блоков: мир, пересобираемый на каждой ячейке,
+-- стоит четырёх блоков на ячейку, а разбираемый раз в кадр - нуля.
+sweep : Array cells Float32 -> Array cells Float32 -> UInt64 -> Array cells Float32
+sweep xs vx 0 = xs
+sweep xs vx i =
+  let j : UInt64 = subUInt64 i 1
+  sweep (put xs j (addFloat32 (at xs j) (at vx j))) vx j
+
+-- | Система движения: требует **обеих** меток разом.
+move : (0 cs : Tags) -> (0 a : Has Position cs) -> (0 b : Has Velocity cs) -> World cs -> World cs
+move cs a b (MkWorld ds xs ys vx vy) = MkWorld cs (sweep xs vx cells) ys vx vy
+
+-- | Сущность-корабль: позиция и скорость, здоровья нет.
+movable : Tags
+movable = With Position (With Velocity None)
+
+atPosition : Has Position movable
+atPosition = Here Position (With Velocity None)
+
+atVelocity : Has Velocity movable
+atVelocity = There Velocity Position (With Velocity None) (Here Velocity None)
+
+start : World movable
+start = MkWorld movable (arrayNew cells one) (arrayNew cells zero) (arrayNew cells two) (arrayNew cells zero)
+
+tick : World movable -> UInt64 -> World movable
+tick w 0 = w
+tick w f = tick (move movable atPosition atVelocity w) (subUInt64 f 1)
+
+-- Позиция растёт на скорость каждый кадр: 1 + 2 * 4 = 9.
+--
+-- Размеры взяты малыми нарочно: утверждение здесь семантическое, а не о цене.
+-- Цена измерена отдельно (`docs/measurements/erased-leak/`), и корпусная
+-- фикстура на двести пятьдесят шесть ячеек утяжеляла гейт настолько, что
+-- санитайзерный тест конкурентности переставал укладываться в свои двадцать
+-- секунд.
+main : Float32
+main = posX movable atPosition (tick start frames) 0

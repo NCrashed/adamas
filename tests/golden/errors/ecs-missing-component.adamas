@@ -1,0 +1,45 @@
+-- Компонента у сущности нет - и это отказ проверки типов (§3.2 × §4.11).
+--
+-- Парный к `eval/ecs-dependent`: там показано, что доступ к имеющемуся
+-- компоненту работает без единой проверки во время исполнения, здесь - что
+-- доступ к отсутствующему не пишется вовсе.
+--
+-- Отказ приходит **на построении доказательства**, а не на вызове системы, и
+-- это точнее: у `movable` здоровья нет, значит `Has Health movable` не
+-- населено. `Here` требует, чтобы метка стояла первой; `There` - чтобы она
+-- нашлась в хвосте; хвост кончается `None`, и ходов больше нет.
+--
+-- В apecs того же не выразить: множество компонентов там не в типе, и
+-- обращение к отсутствующему даёт `Maybe` либо умолчание - то есть ветвь во
+-- время исполнения, которую автор обязан написать и может забыть.
+
+data Bool where
+  True : Bool
+  False : Bool
+
+data Tag where
+  Position : Tag
+  Velocity : Tag
+  Health : Tag
+
+data Tags where
+  None : Tags
+  With : Tag -> Tags -> Tags
+
+data Has : Tag -> Tags -> Type where
+  Here : (0 t : Tag) -> (0 ts : Tags) -> Has t (With t ts)
+  There : (0 t : Tag) -> (0 u : Tag) -> (0 ts : Tags) -> Has t ts -> Has t (With u ts)
+
+-- Корабль: позиция и скорость. Здоровья нет.
+movable : Tags
+movable = With Position (With Velocity None)
+
+atPosition : Has Position movable
+atPosition = Here Position (With Velocity None)
+
+-- А вот здоровья у него нет, и доказать обратное нечем.
+atHealth : Has Health movable
+atHealth = Here Health (With Velocity None)
+
+main : Bool
+main = True

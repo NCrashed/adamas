@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: ecs-missing-component.adamas:42:12: несовпадение типов: ожидался `Has Health movable`, получен `Has Health (With Health (With Velocity None))`
+  atHealth = Here Health (With Velocity None)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  путь: тело `atHealth`

@@ -267,18 +267,28 @@ freeRock sz i found =
 screenOf : Int32 -> Int32
 screenOf v = divInt32 v scale
 
--- | Корабль: положение, скорость и румб.
+-- | Корабль: положение, скорость, румб и остаток перезарядки.
 data Ship where
-  MkShip : Int32 -> Int32 -> Int32 -> Int32 -> Int32 -> Ship
+  MkShip : Int32 -> Int32 -> Int32 -> Int32 -> Int32 -> Int32 -> Ship
 
 shipX : Ship -> Int32
-shipX (MkShip x y vx vy d) = screenOf x
+shipX (MkShip x y vx vy d g) = screenOf x
 shipY : Ship -> Int32
-shipY (MkShip x y vx vy d) = screenOf y
+shipY (MkShip x y vx vy d g) = screenOf y
+
+-- | Сколько кадров ствол молчит после выстрела.
+--
+-- Без задержки нажатая клавиша высаживает весь запас за восемь кадров: цикл
+-- строгий и стреляет **каждым** проходом, а не на нажатии. Десять кадров дают
+-- шесть выстрелов в секунду и держат в полёте около пяти.
+reloadTime : Int32
+reloadTime = 10
+reloadIn : Ship -> Int32
+reloadIn (MkShip x y vx vy d g) = g
 
 -- | Корабль стоит посреди экрана носом вверх. Он же - место возрождения.
 firstShip : Ship
-firstShip = MkShip (divInt32 (mulInt32 width scale) 2) (divInt32 (mulInt32 height scale) 2) 0 0 48
+firstShip = MkShip (divInt32 (mulInt32 width scale) 2) (divInt32 (mulInt32 height scale) 2) 0 0 48 0
 pickShip : Bool -> Ship -> Ship -> Ship
 pickShip True yes no = yes
 pickShip False yes no = no
@@ -394,7 +404,7 @@ pickStatus False yes no = no
 -- состояний счётчика: одно и то же `s` на обе оси поставило бы корабль на
 -- диагональ.
 jump : Ship -> Int32 -> Ship
-jump (MkShip x y vx vy d) s = MkShip (mulInt32 (rollOf s width) scale) (mulInt32 (rollOf (stir s) height) scale) 0 0 d
+jump (MkShip x y vx vy d g) s = MkShip (mulInt32 (rollOf s width) scale) (mulInt32 (rollOf (stir s) height) scale) 0 0 d g
 
 -- | Прыжок случается только когда его просят.
 --
@@ -451,18 +461,32 @@ thrusting (MkKeys l r t f h q) = eqInt32 t 1
 jumping : Keys -> Bool
 jumping (MkKeys l r t f h q) = eqInt32 h 1
 
+-- | Жмут ли огонь.
+firing : Keys -> Bool
+firing (MkKeys l r t f h q) = eqInt32 f 1
+
+-- | Ствол заряжен, и клавишу жмут.
+armedAt : Ship -> Keys -> Bool
+armedAt ship keys = andBool (firing keys) (eqInt32 (reloadIn ship) 0)
+
+-- | Выстрел сделан - ствол на перезарядке. Разбором `Bool`, потому что
+-- перезарядка наблюдаема.
+reloaded : Ship -> Bool -> Ship
+reloaded (MkShip x y vx vy d g) True = MkShip x y vx vy d reloadTime
+reloaded (MkShip x y vx vy d g) False = MkShip x y vx vy d g
+
 -- | Поворот и тяга корабля по нажатым клавишам.
 --
 -- Скорость гасится делением - это трение, и оно же не даёт кораблю разогнаться
 -- быстрее, чем шаг заворота экрана.
 steer : Ship -> Keys -> Ship
-steer (MkShip x y vx vy d) (MkKeys l r t f h q) =
+steer (MkShip x y vx vy d g) (MkKeys l r t f h q) =
   let turned : Int32 = remInt32 (addInt32 (addInt32 d (subInt32 r l)) turnSteps) turnSteps
   let ax : Int32 = mulInt32 t (divInt32 (dirX (aim turned)) 16)
   let ay : Int32 = mulInt32 t (divInt32 (dirY (aim turned)) 16)
   let nvx : Int32 = divInt32 (mulInt32 (addInt32 vx ax) 63) 64
   let nvy : Int32 = divInt32 (mulInt32 (addInt32 vy ay) 63) 64
-  MkShip (wrap (addInt32 x nvx) (mulInt32 width scale)) (wrap (addInt32 y nvy) (mulInt32 height scale)) nvx nvy turned
+  MkShip (wrap (addInt32 x nvx) (mulInt32 width scale)) (wrap (addInt32 y nvy) (mulInt32 height scale)) nvx nvy turned (pick (ltInt32 0 g) (subInt32 g 1) 0)
 
 -- | Ход выстрелов: живые двигаются и стареют, мёртвые стоят.
 fly : Shots -> UInt64 -> Shots
@@ -481,11 +505,11 @@ freeShot life i found =
   let j : UInt64 = subUInt64 i 1
   freeShot life j (pickSlot (ltInt32 0 (arrayIndex life j)) found j)
 
--- | Выстрел из носа корабля, если есть чем.
-fire : Ship -> Shots -> Int32 -> Shots
-fire (MkShip x y vx vy d) (MkShots xs ys svx svy life) press =
+-- | Выстрел из носа корабля, если есть чем и если ствол заряжен.
+fire : Ship -> Shots -> Bool -> Shots
+fire (MkShip x y vx vy d g) (MkShots xs ys svx svy life) shoot =
   let slot : UInt64 = freeShot life shots shots
-  let ok : Bool = andBool (eqInt32 press 1) (ltUInt64 slot shots)
+  let ok : Bool = andBool shoot (ltUInt64 slot shots)
   let at : UInt64 = pickSlot ok slot 0
   MkShots (putShot xs at (pick ok x (atShot xs at))) (putShot ys at (pick ok y (atShot ys at))) (putShot svx at (pick ok (mulInt32 (dirX (aim d)) shotSpeed) (atShot svx at))) (putShot svy at (pick ok (mulInt32 (dirY (aim d)) shotSpeed) (atShot svy at))) (putShot life at (pick ok 48 (atShot life at)))
 
@@ -509,6 +533,14 @@ touching ax ay bx by reach =
 --
 -- Старое значение ячейки читается **до** записи отдельным `let`, а не внутри
 -- аргумента: так массив не держат два обращения разом, и запись идёт на месте.
+--
+-- И читается оно из **уже изменённого** массива там, где массив пишется
+-- дважды: скорости и размеры правятся и у задетого камня, и у осколка. Когда
+-- осколка нет, место осколка равно нулевому слоту, и запись «оставить как
+-- было» обязана оставить то, что лежит там **после** первой правки. Иначе
+-- попадание по нулевому слоту отменяет само себя - камень воскресает с прежним
+-- размером, а очки и выстрел уже потрачены. Так и было, и видно это только
+-- игрой: последний камень оказывается неуничтожимым.
 strike : Ship -> Keys -> Rocks whole -> Shots -> UInt64 -> UInt64 -> Status -> World
 strike ship keys rs ss s 0 st = MkWorld ship rs ss keys st
 strike ship keys (MkRocks ds xs ys vx vy sz) (MkShots sx sy svx svy life) s i st =
@@ -527,17 +559,17 @@ strike ship keys (MkRocks ds xs ys vx vy sz) (MkShots sx sy svx svy life) s i st
   let srcVY : Int32 = at vy j
   let oldX : Int32 = at xs dest
   let oldY : Int32 = at ys dest
-  let oldVX : Int32 = at vx dest
-  let oldVY : Int32 = at vy dest
-  let oldSz : Int32 = at sz dest
   let keptX : Array rocks Int32 = put xs dest (pick born srcX oldX)
   let keptY : Array rocks Int32 = put ys dest (pick born srcY oldY)
   let turnX : Array rocks Int32 = put vx j (pick hit (quicken (flip srcVY)) srcVX)
   let turnY : Array rocks Int32 = put vy j (pick hit (quicken srcVX) srcVY)
   let shrunk : Array rocks Int32 = put sz j (pick hit rest side)
-  let grownVX : Array rocks Int32 = put turnX dest (pick born (quicken srcVY) oldVX)
-  let grownVY : Array rocks Int32 = put turnY dest (pick born (quicken (flip srcVX)) oldVY)
-  let grownSz : Array rocks Int32 = put shrunk dest (pick born rest oldSz)
+  let heldVX : Int32 = at turnX dest
+  let heldVY : Int32 = at turnY dest
+  let heldSz : Int32 = at shrunk dest
+  let grownVX : Array rocks Int32 = put turnX dest (pick born (quicken srcVY) heldVX)
+  let grownVY : Array rocks Int32 = put turnY dest (pick born (quicken (flip srcVX)) heldVY)
+  let grownSz : Array rocks Int32 = put shrunk dest (pick born rest heldSz)
   let spent : Int32 = pick hit 0 (atShot life s)
   let earned : Int32 = pick hit (worth side) 0
   strike ship keys (MkRocks whole keptX keptY grownVX grownVY grownSz) (MkShots sx sy svx svy (putShot life s spent)) s j (earn st earned)
@@ -768,7 +800,7 @@ visible grace = orBool (eqInt32 grace 0) (ltInt32 (remInt32 grace 8) 4)
 -- | Корабль: корпус и нос по румбу. Нос ставится той же таблицей направлений,
 -- какой считается тяга, - одно место на две работы.
 paintShip : CPtr -> Array 4 Int32 -> Ship -> Int32 -> Bool -> {Foreign} Array 4 Int32
-paintShip r rect (MkShip x y vx vy d) grace push =
+paintShip r rect (MkShip x y vx vy d g) grace push =
   let cx : Int32 = screenOf x
   let cy : Int32 = screenOf y
   let here : Bool = visible grace
@@ -841,9 +873,6 @@ closing r score False = score
 pickKeys : Bool -> Keys -> Keys -> Keys
 pickKeys True yes no = yes
 pickKeys False yes no = no
-
-fireFrom : Ship -> Shots -> Keys -> Shots
-fireFrom ship ss (MkKeys l r t f h q) = fire ship ss f
 
 -- | Очередь событий в состояние клавиш. Очередь осушается один раз: второй
 -- `SDL_PollEvent` увидел бы пустую.
@@ -919,8 +948,10 @@ step (MkWorld ship rs ss keys st) =
   let moved : Ship = steer ship keys
   let drifted : Rocks whole = drift whole hasPos hasVel rs rocks
   let flown : Shots = fly ss shots
-  let fired : Shots = fireFrom moved flown keys
-  let shot : World = collide (MkWorld moved drifted fired keys st) shots
+  let shoots : Bool = armedAt moved keys
+  let fired : Shots = fire moved flown shoots
+  let gunned : Ship = reloaded moved shoots
+  let shot : World = collide (MkWorld gunned drifted fired keys st) shots
   refill (injure (teleport (chill shot)))
 
 -- | Пора ли кончать: закрыли окно либо кончились жизни.

@@ -107,6 +107,11 @@ wrap v limit = remInt32 (addInt32 (remInt32 v limit) limit) limit
 flip : Int32 -> Int32
 flip v = subInt32 0 v
 
+-- | Осколок быстрее целого камня в полтора раза: мелкая цель, идущая с той же
+-- скоростью, читается на экране как та же самая.
+quicken : Int32 -> Int32
+quicken v = divInt32 (mulInt32 v 3) 2
+
 -- | Индекс слота числом. Преобразований ширины в языке нет ни одного, поэтому
 -- переход `UInt64` в `Int32` записан таблицей - и таблица объясняет, почему
 -- слотов ровно восемь.
@@ -146,6 +151,29 @@ dirX n = 256
 
 dirY : Int32 -> Int32
 dirY n = dirX (remInt32 (addInt32 n 12) 16)
+
+-- | Шагов поворота вчетверо больше, чем румбов.
+--
+-- Румб один на кадр - это полный оборот за шестнадцать кадров, четверть
+-- секунды, и прицелиться нечем. Поворот поэтому считается в шагах, а
+-- направление берётся румбом через [`aim`]: оборот выходит за секунду с
+-- небольшим, а таблица остаётся на шестнадцать значений.
+turnSteps : Int32
+turnSteps = 64
+
+-- | Румб по шагу поворота.
+aim : Int32 -> Int32
+aim d = divInt32 d 4
+
+-- | Скорость в точках экрана за кадр переводится в неподвижную точку
+-- умножением на направление: `dirX` уже есть косинус, умноженный на [`scale`],
+-- поэтому `dirX d * s` даёт ровно `s` точек за кадр вдоль румба.
+--
+-- Считать это в уме легко ошибиться, и первая редакция ошиблась: выстрел летел
+-- восьмую долю точки за кадр, камень - сотую. Проверяется деление на [`scale`]:
+-- частное и есть скорость в точках.
+shotSpeed : Int32
+shotSpeed = 7
 
 -- | Три размера камня. Целый камень крупный; попадание дробит его в два
 -- средних, среднее - в два мелких, мелкий разлетается совсем.
@@ -250,7 +278,7 @@ shipY (MkShip x y vx vy d) = screenOf y
 
 -- | Корабль стоит посреди экрана носом вверх. Он же - место возрождения.
 firstShip : Ship
-firstShip = MkShip (divInt32 (mulInt32 width scale) 2) (divInt32 (mulInt32 height scale) 2) 0 0 12
+firstShip = MkShip (divInt32 (mulInt32 width scale) 2) (divInt32 (mulInt32 height scale) 2) 0 0 48
 pickShip : Bool -> Ship -> Ship -> Ship
 pickShip True yes no = yes
 pickShip False yes no = no
@@ -429,9 +457,9 @@ jumping (MkKeys l r t f h q) = eqInt32 h 1
 -- быстрее, чем шаг заворота экрана.
 steer : Ship -> Keys -> Ship
 steer (MkShip x y vx vy d) (MkKeys l r t f h q) =
-  let turned : Int32 = remInt32 (addInt32 (addInt32 d (subInt32 r l)) 16) 16
-  let ax : Int32 = mulInt32 t (divInt32 (dirX turned) 16)
-  let ay : Int32 = mulInt32 t (divInt32 (dirY turned) 16)
+  let turned : Int32 = remInt32 (addInt32 (addInt32 d (subInt32 r l)) turnSteps) turnSteps
+  let ax : Int32 = mulInt32 t (divInt32 (dirX (aim turned)) 16)
+  let ay : Int32 = mulInt32 t (divInt32 (dirY (aim turned)) 16)
   let nvx : Int32 = divInt32 (mulInt32 (addInt32 vx ax) 63) 64
   let nvy : Int32 = divInt32 (mulInt32 (addInt32 vy ay) 63) 64
   MkShip (wrap (addInt32 x nvx) (mulInt32 width scale)) (wrap (addInt32 y nvy) (mulInt32 height scale)) nvx nvy turned
@@ -459,7 +487,7 @@ fire (MkShip x y vx vy d) (MkShots xs ys svx svy life) press =
   let slot : UInt64 = freeShot life shots shots
   let ok : Bool = andBool (eqInt32 press 1) (ltUInt64 slot shots)
   let at : UInt64 = pickSlot ok slot 0
-  MkShots (putShot xs at (pick ok x (atShot xs at))) (putShot ys at (pick ok y (atShot ys at))) (putShot svx at (pick ok (mulInt32 (divInt32 (dirX d) 32) 4) (atShot svx at))) (putShot svy at (pick ok (mulInt32 (divInt32 (dirY d) 32) 4) (atShot svy at))) (putShot life at (pick ok 48 (atShot life at)))
+  MkShots (putShot xs at (pick ok x (atShot xs at))) (putShot ys at (pick ok y (atShot ys at))) (putShot svx at (pick ok (mulInt32 (dirX (aim d)) shotSpeed) (atShot svx at))) (putShot svy at (pick ok (mulInt32 (dirY (aim d)) shotSpeed) (atShot svy at))) (putShot life at (pick ok 48 (atShot life at)))
 
 -- | Пересекаются ли два квадрата на экране.
 touching : Int32 -> Int32 -> Int32 -> Int32 -> Int32 -> Bool
@@ -504,11 +532,11 @@ strike ship keys (MkRocks ds xs ys vx vy sz) (MkShots sx sy svx svy life) s i st
   let oldSz : Int32 = at sz dest
   let keptX : Array rocks Int32 = put xs dest (pick born srcX oldX)
   let keptY : Array rocks Int32 = put ys dest (pick born srcY oldY)
-  let turnX : Array rocks Int32 = put vx j (pick hit (flip srcVY) srcVX)
-  let turnY : Array rocks Int32 = put vy j (pick hit srcVX srcVY)
+  let turnX : Array rocks Int32 = put vx j (pick hit (quicken (flip srcVY)) srcVX)
+  let turnY : Array rocks Int32 = put vy j (pick hit (quicken srcVX) srcVY)
   let shrunk : Array rocks Int32 = put sz j (pick hit rest side)
-  let grownVX : Array rocks Int32 = put turnX dest (pick born srcVY oldVX)
-  let grownVY : Array rocks Int32 = put turnY dest (pick born (flip srcVX) oldVY)
+  let grownVX : Array rocks Int32 = put turnX dest (pick born (quicken srcVY) oldVX)
+  let grownVY : Array rocks Int32 = put turnY dest (pick born (quicken (flip srcVX)) oldVY)
   let grownSz : Array rocks Int32 = put shrunk dest (pick born rest oldSz)
   let spent : Int32 = pick hit 0 (atShot life s)
   let earned : Int32 = pick hit (worth side) 0
@@ -746,13 +774,13 @@ paintShip r rect (MkShip x y vx vy d) grace push =
   let here : Bool = visible grace
   let hull : Array 4 Int32 = box rect cx cy 11
   let body : Array 4 Int32 = drawIf r hull here
-  let nx : Int32 = addInt32 cx (divInt32 (mulInt32 (dirX d) 11) scale)
-  let ny : Int32 = addInt32 cy (divInt32 (mulInt32 (dirY d) 11) scale)
+  let nx : Int32 = addInt32 cx (divInt32 (mulInt32 (dirX (aim d)) 11) scale)
+  let ny : Int32 = addInt32 cy (divInt32 (mulInt32 (dirY (aim d)) 11) scale)
   let nose : Array 4 Int32 = box body nx ny 5
   let tip : Array 4 Int32 = drawIf r nose here
   let hot : Int32 = SDL_SetRenderDrawColor r 255 170 60 255
-  let bx : Int32 = subInt32 cx (divInt32 (mulInt32 (dirX d) 9) scale)
-  let by : Int32 = subInt32 cy (divInt32 (mulInt32 (dirY d) 9) scale)
+  let bx : Int32 = subInt32 cx (divInt32 (mulInt32 (dirX (aim d)) 9) scale)
+  let by : Int32 = subInt32 cy (divInt32 (mulInt32 (dirY (aim d)) 9) scale)
   let flame : Array 4 Int32 = box tip bx by 5
   drawIf r flame (andBool here push)
 
@@ -842,8 +870,9 @@ seedRocks w 0 lvl = w
 seedRocks (MkRocks ds xs ys vx vy sz) i lvl =
   let j : UInt64 = subUInt64 i 1
   let k : Int32 = addInt32 (mulInt32 (truncate j) 37) 11
-  let rush : Int32 = addInt32 1 (divInt32 lvl 2)
-  seedRocks (MkRocks whole (put xs j (mulInt32 (remInt32 (mulInt32 k 7) width) scale)) (put ys j (mulInt32 (remInt32 (mulInt32 k 13) height) scale)) (put vx j (mulInt32 rush (subInt32 (remInt32 k 5) 2))) (put vy j (mulInt32 rush (subInt32 (remInt32 k 7) 3))) (put sz j bigRock)) j lvl
+  let course : Int32 = remInt32 k 16
+  let rush : Int32 = addInt32 (addInt32 1 (remInt32 k 2)) (divInt32 lvl 2)
+  seedRocks (MkRocks whole (put xs j (mulInt32 (remInt32 (mulInt32 k 7) width) scale)) (put ys j (mulInt32 (remInt32 (mulInt32 k 13) height) scale)) (put vx j (mulInt32 (dirX course) rush)) (put vy j (mulInt32 (dirY course) rush)) (put sz j bigRock)) j lvl
 
 -- | Новая волна строится только когда она нужна.
 --
@@ -915,9 +944,9 @@ loop r rect event w n =
   let more : UInt64 = pickSlot (done stepped) 0 (subUInt64 n 1)
   loop r painted event stepped more
 
--- | Предел кадров: минута при шестидесяти в секунду.
+-- | Предел кадров: пять минут при шестидесяти в секунду.
 budget : UInt64
-budget = 3600
+budget = 18000
 title : Array 10 UInt8
 title = "asteroids"
 

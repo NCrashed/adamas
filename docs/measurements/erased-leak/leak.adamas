@@ -1,0 +1,42 @@
+-- Утечка стирания: стёртый аргумент строится в рантайме (§3.2).
+--
+-- Форма - наименьшая из воспроизводящих. Три условия разом, и ни одного
+-- лишнего: стёртый индекс `x`, стёртое доказательство, зависящее от него, и
+-- **нестёртый** носитель того же индекса.
+
+data Bool where
+  True : Bool
+  False : Bool
+
+data T where
+  A : T
+  B : T -> T
+
+data Proof : T -> Type where
+  Yes : (0 x : T) -> Proof x
+
+data Box : T -> Type where
+  MkBox : (0 x : T) -> UInt64 -> Box x
+
+-- Два блока кучи, если это значение строить.
+big : T
+big = B (B A)
+
+evidence : Proof big
+evidence = Yes big
+
+f : (0 x : T) -> (0 p : Proof x) -> Box x -> Box x
+f x p (MkBox d n) = MkBox x n
+
+loop : Box big -> UInt64 -> Box big
+loop b 0 = b
+loop b n = loop (f big evidence b) (subUInt64 n 1)
+
+peek : Box big -> UInt64
+peek (MkBox d n) = n
+
+rounds : UInt64
+rounds = 1000
+
+main : UInt64
+main = peek (loop (MkBox big 7) rounds)

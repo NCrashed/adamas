@@ -3687,23 +3687,51 @@ impl<'a> Elaborator<'a> {
         // пересобрать её нечем и переопределение уходит в ядро как есть
         // (§4.2). Какая метка обновляется, а какая дописывается, решает там
         // тип базы - тот же критерий, что и здесь.
+        // Тип поля берётся из телескопа базы и достаётся написанному значению -
+        // тем же правилом, каким он достаётся полям собираемой записи. Без
+        // этого `{ st | lives = 0 }` не писался вовсе: литерал шёл без
+        // ожидания и разворачивался унарно, а отказ назывался `Zero`.
         if telescope.is_open() {
+            // Открытая запись не перечисляется целиком, и предыдущие значения
+            // берутся проекцией базы. Зависимости между полями у неё нет по
+            // построению (§4.2), поэтому подмена написанным полем на типы
+            // следующих не влияет; проекции нужны только чтобы телескоп
+            // читался по порядку.
+            let earlier: Vec<Rc<Value>> = telescope
+                .fields()
+                .iter()
+                .map(|field| {
+                    let projected =
+                        Term::Project(Rc::new(value.clone()), CoreName::from(&*field.name));
+                    self.ctx.eval(&projected)
+                })
+                .collect();
             let mut written = Vec::with_capacity(fields.len());
-            for (name, value) in fields {
-                let value = self.placed(Position::Field, |it| it.expr(value, Mult::One))?;
-                written.push((CoreName::from(&*name.text), Rc::new(value)));
+            for (name, field) in fields {
+                self.awaited = telescope
+                    .fields()
+                    .iter()
+                    .position(|it| *it.name == *name.text)
+                    .map(|at| telescope.at(at, &earlier));
+                let field = self.placed(Position::Field, |it| it.expr(field, Mult::One))?;
+                written.push((CoreName::from(&*name.text), Rc::new(field)));
             }
             self.produced = None;
             return Ok(Term::With(Rc::new(value), written.into()));
         }
         let mut written = Vec::new();
-        for field in telescope.fields() {
+        let mut earlier: Vec<Rc<Value>> = Vec::new();
+        for (at, field) in telescope.fields().iter().enumerate() {
             let name = CoreName::from(&*field.name);
             let update = fields.iter().find(|(it, _)| *it.text == *field.name);
             let value = match update {
-                Some((_, value)) => self.placed(Position::Field, |it| it.expr(value, Mult::One))?,
+                Some((_, written)) => {
+                    self.awaited = Some(telescope.at(at, &earlier));
+                    self.placed(Position::Field, |it| it.expr(written, Mult::One))?
+                }
                 None => Term::Project(Rc::new(value.clone()), Rc::clone(&name)),
             };
+            earlier.push(self.ctx.eval(&value));
             written.push((name, Rc::new(value)));
         }
         // Ненаписанного поля у исходной нет - это расширение, и дописывается

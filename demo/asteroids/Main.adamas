@@ -25,16 +25,10 @@
 -- (`docs/measurements/frame-uniqueness/`): 600 кадров по 256 сущностей стоят
 -- пяти блоков кучи.
 --
--- Строгость языка тут видна глазами: `pick` считает **обе** ветви, поэтому
--- всё, что дорого или наблюдаемо, выбирается разбором `Bool` в отдельной
--- функции - смотри [`drawIf`] и [`restock`].
---
--- **Писать так не обязательно, и это ошибка автора, а не свойство языка.**
--- `if`/`then`/`else` и `case`/`of` в языке есть и считают только взятую
--- ветвь; вся россыпь `pick*` здесь - обход того, чего автор не проверил.
--- Половину привычки, впрочем, объясняет настоящий дефект: числовой литерал в
--- ветви `if` не получает ожидаемого типа и отвечает «имя `Zero` не найдено»,
--- тогда как в аргументе `pick` тот же литерал типизируется подписью.
+-- Строгость языка тут видна глазами, и `if` её не отменяет: аргументы
+-- считаются до вызова, поэтому `pick c a b` считает обе ветви, а
+-- `if c then a else b` - только взятую. Где ветвь дорога или наблюдаема,
+-- стоит `if`; где обе дёшевы - `pick`, и разница названа у обоих.
 --
 -- # Как запустить и чем управлять
 --
@@ -64,15 +58,15 @@ notBool : Bool -> Bool
 notBool True = False
 notBool False = True
 
--- | Выбор из двух чисел. Считает **обе** ветви: язык строгий, и там, где это
--- важно, вместо `pick` стоит разбор `Bool` отдельной функцией.
+-- | Выбор из двух чисел, **считающий обе ветви**: это обычная функция, и
+-- аргументы ей считают до вызова.
+--
+-- Годится она там, где обе ветви дёшевы и ненаблюдаемы, - и только там. Где
+-- ветвь дорога или что-то делает, стоит `if`, который считает лишь взятую.
 pick : Bool -> Int32 -> Int32 -> Int32
-pick True yes no = yes
-pick False yes no = no
-
+pick c yes no = if c then yes else no
 pickSlot : Bool -> UInt64 -> UInt64 -> UInt64
-pickSlot True yes no = yes
-pickSlot False yes no = no
+pickSlot c yes no = if c then yes else no
 
 -- | Ширина и высота окна в точках экрана.
 width : Int32
@@ -296,9 +290,6 @@ reloadIn (MkShip x y vx vy d g) = g
 -- | Корабль стоит посреди экрана носом вверх. Он же - место возрождения.
 firstShip : Ship
 firstShip = MkShip (divInt32 (mulInt32 width scale) 2) (divInt32 (mulInt32 height scale) 2) 0 0 48 0
-pickShip : Bool -> Ship -> Ship -> Ship
-pickShip True yes no = yes
-pickShip False yes no = no
 
 -- | Выстрелы: та же раскладка, что у камней, плюс остаток жизни.
 data Shots where
@@ -400,9 +391,6 @@ shielded st = ltInt32 0 (graceIn st)
 -- | Кончились ли жизни.
 finished : Status -> Bool
 finished st = ltInt32 (livesIn st) 1
-pickStatus : Bool -> Status -> Status -> Status
-pickStatus True yes no = yes
-pickStatus False yes no = no
 
 -- | Прыжок: корабль пропадает и возникает в случайной точке, потеряв ход.
 --
@@ -412,14 +400,6 @@ pickStatus False yes no = no
 -- диагональ.
 jump : Ship -> Int32 -> Ship
 jump (MkShip x y vx vy d g) s = MkShip (mulInt32 (rollOf s width) scale) (mulInt32 (rollOf (stir s) height) scale) 0 0 d g
-
--- | Прыжок случается только когда его просят.
---
--- Разбором `Bool`, а не `pick`: у `pick` посчитались бы обе ветви, и счётчик
--- крутился бы вхолостую там, где прыжка не было.
-leap : Bool -> Ship -> Int32 -> Ship
-leap True ship s = jump ship s
-leap False ship s = ship
 
 -- | Мир целиком.
 data World where
@@ -476,11 +456,9 @@ firing (MkKeys l r t f h q) = eqInt32 f 1
 armedAt : Ship -> Keys -> Bool
 armedAt ship keys = andBool (firing keys) (eqInt32 (reloadIn ship) 0)
 
--- | Выстрел сделан - ствол на перезарядке. Разбором `Bool`, потому что
--- перезарядка наблюдаема.
-reloaded : Ship -> Bool -> Ship
-reloaded (MkShip x y vx vy d g) True = MkShip x y vx vy d reloadTime
-reloaded (MkShip x y vx vy d g) False = MkShip x y vx vy d g
+-- | Выстрел сделан - ствол на перезарядке.
+reloadedShip : Ship -> Ship
+reloadedShip (MkShip x y vx vy d g) = MkShip x y vx vy d reloadTime
 
 -- | Поворот и тяга корабля по нажатым клавишам.
 --
@@ -588,11 +566,6 @@ collide (MkWorld ship rs ss keys st) i =
   let j : UInt64 = subUInt64 i 1
   collide (strike ship keys rs ss j rocks st) j
 
--- | Жизнь долой, но только если корабль не под защитой.
-wound : Bool -> Status -> Status
-wound True st = hurt st
-wound False st = st
-
 -- | Корабль против камней: задел - жизнь долой и неуязвимость на [`mercy`]
 -- кадров.
 --
@@ -606,7 +579,7 @@ bump ship keys (MkRocks ds xs ys vx vy sz) ss st i =
   let live : Bool = ltInt32 0 side
   let near : Bool = touching (screenOf (at xs j)) (screenOf (at ys j)) (shipX ship) (shipY ship) (addInt32 side 5)
   let struck : Bool = andBool live (andBool near (notBool (shielded st)))
-  bump ship keys (MkRocks whole xs ys vx vy sz) ss (wound struck st) j
+  bump ship keys (MkRocks whole xs ys vx vy sz) ss (if struck then hurt st else st) j
 
 -- | Прямоугольник в буфере `SDL_Rect`: четыре `int` подряд, порядок `x y w h`.
 rectOf : Array 4 Int32 -> Int32 -> Int32 -> Int32 -> Int32 -> Array 4 Int32
@@ -636,17 +609,6 @@ drawIf r rect True =
   rect
 drawIf r rect False = rect
 
--- | Степень двойки: сдвигов в языке нет, и бит маски достаётся делением.
-twoTo : Int32 -> Int32
-twoTo 0 = 1
-twoTo 1 = 2
-twoTo 2 = 4
-twoTo 3 = 8
-twoTo 4 = 16
-twoTo 5 = 32
-twoTo 6 = 64
-twoTo n = 1
-
 -- | Какие отрезки горят у цифры. Нумерация: 0 - верх, 1 - правый верхний,
 -- 2 - правый нижний, 3 - низ, 4 - левый нижний, 5 - левый верхний, 6 -
 -- середина.
@@ -665,7 +627,7 @@ segments n = 0
 
 -- | Горит ли отрезок `s` у цифры `d`.
 lit : Int32 -> Int32 -> Bool
-lit d s = eqInt32 (remInt32 (divInt32 (segments d) (twoTo s)) 2) 1
+lit d s = notBool (eqInt32 0 (andInt32 (segments d) (shlInt32 1 s)))
 
 -- Раскладка отрезка внутри знакоместа двенадцать на двадцать. Четыре таблицы,
 -- а не запись из четырёх полей: запись потребовала бы конструктора и разбора
@@ -721,7 +683,7 @@ paintDigit r rect x y d n =
   let drawn : Array 4 Int32 = drawIf r shaped (lit d k)
   paintDigit r drawn x y d s
 
--- | Степень десяти: тот же приём, что у [`twoTo`], и по той же причине.
+-- | Степень десяти: преобразований ширины нет, и разряд достаётся делением.
 tenTo : Int32 -> Int32
 tenTo 0 = 1
 tenTo 1 = 10
@@ -871,16 +833,6 @@ paintOver r score =
   let held : Unit = SDL_Delay 1200
   score
 
--- | Показывается конец игры, а закрытое окно - нет. Разбором `Bool`, потому
--- что показ наблюдаем, а `pick` считает обе ветви.
-closing : CPtr -> Int32 -> Bool -> {Foreign} Int32
-closing r score True = paintOver r score
-closing r score False = score
-
-pickKeys : Bool -> Keys -> Keys -> Keys
-pickKeys True yes no = yes
-pickKeys False yes no = no
-
 -- | Очередь событий в состояние клавиш. Очередь осушается один раз: второй
 -- `SDL_PollEvent` увидел бы пустую.
 listen : Array 14 UInt32 -> Keys -> UInt64 -> {Foreign} Keys
@@ -889,7 +841,7 @@ listen event keys n =
   let got : Int32 = SDL_PollEvent event
   let kind : UInt32 = arrayIndex event 0
   let code : UInt32 = arrayIndex event scanWord
-  let seen : Keys = pickKeys (ltInt32 0 got) (absorb keys kind code) keys
+  let seen : Keys = if ltInt32 0 got then absorb keys kind code else keys
   listen event seen (subUInt64 n 1)
 
 emptyRocks : Rocks whole
@@ -910,26 +862,18 @@ seedRocks (MkRocks ds xs ys vx vy sz) i lvl =
   let rush : Int32 = addInt32 (addInt32 1 (remInt32 k 2)) (divInt32 lvl 2)
   seedRocks (MkRocks whole (put xs j (mulInt32 (remInt32 (mulInt32 k 7) width) scale)) (put ys j (mulInt32 (remInt32 (mulInt32 k 13) height) scale)) (put vx j (mulInt32 (dirX course) rush)) (put vy j (mulInt32 (dirY course) rush)) (put sz j bigRock)) j lvl
 
--- | Новая волна строится только когда она нужна.
---
--- Разбором `Bool`, а не `pick`: язык строгий, и расстановка на каждом кадре
--- стоила бы пяти массивов в кадр - при том, что нужна она раз в волну.
-restock : Bool -> Int32 -> Rocks whole -> Rocks whole
-restock True lvl old = seedRocks emptyRocks rocks lvl
-restock False lvl old = old
-
 -- | Камней не осталось - следующая волна.
 refill : World -> World
 refill (MkWorld ship rs ss keys st) =
   let left : Int32 = countRocks (sizesOf rs) rocks 0
   let clear : Bool = eqInt32 left 0
-  MkWorld ship (restock clear (levelIn st) rs) ss keys (pickStatus clear (promote st) st)
+  if clear then MkWorld ship (seedRocks emptyRocks rocks (levelIn st)) ss keys (promote st) else MkWorld ship rs ss keys st
 
 -- | Если жизнь потеряна, корабль возвращается на середину экрана.
 replace : World -> Int32 -> World
 replace (MkWorld ship rs ss keys st) before =
   let died : Bool = ltInt32 (livesIn st) before
-  MkWorld (pickShip died firstShip ship) rs ss keys st
+  MkWorld (if died then firstShip else ship) rs ss keys st
 
 -- | Неуязвимость убывает на кадр, счётчик случайности крутится.
 chill : World -> World
@@ -942,7 +886,7 @@ chill (MkWorld ship rs ss keys st) = MkWorld ship rs ss keys (spin (cool st))
 teleport : World -> World
 teleport (MkWorld ship rs ss keys st) =
   let wants : Bool = andBool (jumping keys) (notBool (shielded st))
-  MkWorld (leap wants ship (seedIn st)) rs ss keys (pickStatus wants (spent st) st)
+  if wants then MkWorld (jump ship (seedIn st)) rs ss keys (spent st) else MkWorld ship rs ss keys st
 
 -- | Корабль против камней, и возрождение следом.
 injure : World -> World
@@ -957,7 +901,7 @@ step (MkWorld ship rs ss keys st) =
   let flown : Shots = fly ss shots
   let shoots : Bool = armedAt moved keys
   let fired : Shots = fire moved flown shoots
-  let gunned : Ship = reloaded moved shoots
+  let gunned : Ship = if shoots then reloadedShip moved else moved
   let shot : World = collide (MkWorld gunned drifted fired keys st) shots
   refill (injure (teleport (chill shot)))
 
@@ -1006,7 +950,7 @@ body u =
   let rect : Array 4 Int32 = arrayNew 4 zeroI
   let event : Array 14 UInt32 = arrayNew 14 zeroU
   let final : World = loop renderer rect event opening budget
-  let told : Int32 = closing renderer (scoreOf final) (finished (statusOf final))
+  let told : Int32 = if finished (statusOf final) then paintOver renderer (scoreOf final) else scoreOf final
   let goneR : Unit = SDL_DestroyRenderer renderer
   let goneW : Unit = SDL_DestroyWindow window
   let over : Unit = SDL_Quit

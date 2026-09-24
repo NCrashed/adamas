@@ -1,0 +1,949 @@
+-- Астероиды: демо Фазы 9 (§9, demo target).
+--
+-- Программа показывает язык на том, чем он отличается, а не на том, что проще
+-- написать: чужая библиотека уровнем 1 (§5.3), эффект на границе, ресурсы с
+-- деструкторами, плоские массивы и SoA (§4.11), и сущности, индексированные
+-- множеством своих компонентов (§3.2).
+--
+-- # Физика целочисленная, и это не стиль
+--
+-- Преобразований числовых типов в языке сегодня нет ни одного: моста между
+-- `Int32` и `Float32` не существует, а SDL берёт координаты сишным `int`.
+-- Поэтому всё считается в `Int32` с неподвижной точкой: положение и скорость
+-- хранятся умноженными на [`scale`], а на экран уходят делением.
+--
+-- Направление корабля - одно из шестнадцати, и синусы с косинусами ему не
+-- нужны: таблица направлений записана целыми ([`dirX`], [`dirY`]).
+--
+-- Той же причиной нарисован счёт: шрифта без `SDL_ttf` нет, и цифры чертятся
+-- семью отрезками ([`segments`], [`paintDigit`]).
+--
+-- # Кадр без единой аллокации сверх мира
+--
+-- Мир есть запись из массивов, и обновляется он на месте: запись в массив с
+-- единственным владельцем идёт без копии. Замерено отдельно
+-- (`docs/measurements/frame-uniqueness/`): 600 кадров по 256 сущностей стоят
+-- пяти блоков кучи.
+--
+-- Строгость языка тут видна глазами: `pick` считает **обе** ветви, поэтому
+-- всё, что дорого или наблюдаемо, выбирается разбором `Bool` в отдельной
+-- функции - смотри [`drawIf`] и [`restock`].
+--
+-- # Как запустить и чем управлять
+--
+-- `adamas run demo/asteroids` - окно и игра. Без экрана (в гейте) программа
+-- ходит тем же путём, но драйвером `dummy` и с ограничением на число кадров:
+-- смотри [`budget`].
+--
+-- Стрелки влево и вправо - поворот, стрелка вверх - тяга, пробел - выстрел,
+-- `h` - прыжок ([`jump`]). Попадание дробит камень надвое ([`shard`]), камень
+-- отнимает жизнь, за каждую тысячу очков жизнь возвращается ([`reward`]).
+
+import Sdl.Raw (Unit, MkUnit, Foreign, SDL_Init, SDL_VideoInit, SDL_VideoQuit, SDL_CreateWindow, SDL_DestroyWindow, SDL_CreateRenderer, SDL_DestroyRenderer, SDL_SetRenderDrawColor, SDL_RenderClear, SDL_RenderFillRect, SDL_RenderPresent, SDL_PollEvent, SDL_Delay, SDL_Quit, anywhere, shown, software, videoFlag, quitEvent)
+
+data Bool where
+  True : Bool
+  False : Bool
+
+andBool : Bool -> Bool -> Bool
+andBool True b = b
+andBool False b = False
+
+orBool : Bool -> Bool -> Bool
+orBool True b = True
+orBool False b = b
+
+notBool : Bool -> Bool
+notBool True = False
+notBool False = True
+
+-- | Выбор из двух чисел. Считает **обе** ветви: язык строгий, и там, где это
+-- важно, вместо `pick` стоит разбор `Bool` отдельной функцией.
+pick : Bool -> Int32 -> Int32 -> Int32
+pick True yes no = yes
+pick False yes no = no
+
+pickSlot : Bool -> UInt64 -> UInt64 -> UInt64
+pickSlot True yes no = yes
+pickSlot False yes no = no
+
+-- | Ширина и высота окна в точках экрана.
+width : Int32
+width = 640
+height : Int32
+height = 480
+
+-- | Множитель неподвижной точки: положение хранится умноженным на него.
+scale : Int32
+scale = 256
+
+-- | Сколько камней и сколько выстрелов помещается в мир разом.
+rocks : UInt64
+rocks = 8
+shots : UInt64
+shots = 8
+zeroI : Int32
+zeroI = 0
+zeroU : UInt32
+zeroU = 0
+
+-- Мономорфные обёртки над примитивами массива: внутри ветви разбора
+-- индексированного семейства имплиситы примитива не решаются (§10 вопрос 200).
+at : Array rocks Int32 -> UInt64 -> Int32
+at xs i = arrayIndex xs i
+put : Array rocks Int32 -> UInt64 -> Int32 -> Array rocks Int32
+put xs i v = arraySet xs i v
+atShot : Array shots Int32 -> UInt64 -> Int32
+atShot xs i = arrayIndex xs i
+putShot : Array shots Int32 -> UInt64 -> Int32 -> Array shots Int32
+putShot xs i v = arraySet xs i v
+
+-- | Остаток от деления для положительных - им заворачивается экран.
+wrap : Int32 -> Int32 -> Int32
+wrap v limit = remInt32 (addInt32 (remInt32 v limit) limit) limit
+
+-- | Смена знака: унарного минуса у выражений нет, и вычитание из нуля его
+-- заменяет.
+flip : Int32 -> Int32
+flip v = subInt32 0 v
+
+-- | Индекс слота числом. Преобразований ширины в языке нет ни одного, поэтому
+-- переход `UInt64` в `Int32` записан таблицей - и таблица объясняет, почему
+-- слотов ровно восемь.
+truncate : UInt64 -> Int32
+truncate 0 = 0
+truncate 1 = 1
+truncate 2 = 2
+truncate 3 = 3
+truncate 4 = 4
+truncate 5 = 5
+truncate 6 = 6
+truncate 7 = 7
+truncate n = 0
+
+-- | Направление по шестнадцати румбам, умноженное на [`scale`].
+--
+-- Таблицей, а не тригонометрией: `sin` и `cos` отдают `Float64`, а перевести
+-- его в `Int32` нечем - преобразований ширины в языке нет.
+dirX : Int32 -> Int32
+dirX 0 = 256
+dirX 1 = 236
+dirX 2 = 181
+dirX 3 = 98
+dirX 4 = 0
+dirX 5 = -98
+dirX 6 = -181
+dirX 7 = -236
+dirX 8 = -256
+dirX 9 = -236
+dirX 10 = -181
+dirX 11 = -98
+dirX 12 = 0
+dirX 13 = 98
+dirX 14 = 181
+dirX 15 = 236
+dirX n = 256
+
+dirY : Int32 -> Int32
+dirY n = dirX (remInt32 (addInt32 n 12) 16)
+
+-- | Три размера камня. Целый камень крупный; попадание дробит его в два
+-- средних, среднее - в два мелких, мелкий разлетается совсем.
+bigRock : Int32
+bigRock = 24
+midRock : Int32
+midRock = 16
+smallRock : Int32
+smallRock = 10
+
+-- | Размер осколка; ноль значит «камень разбит вовсе».
+shard : Int32 -> Int32
+shard 24 = 16
+shard 16 = 10
+shard n = 0
+
+-- | Чего стоит попадание: мелкий камень дороже крупного, потому что попасть по
+-- нему труднее.
+worth : Int32 -> Int32
+worth 24 = 20
+worth 16 = 50
+worth 10 = 100
+worth n = 10
+
+-- | Метка компонента камня.
+data Tag where
+  Position : Tag
+  Velocity : Tag
+  Size : Tag
+
+-- | Множество компонентов.
+data Tags where
+  None : Tags
+  With : Tag -> Tags -> Tags
+
+-- | Доказательство членства метки во множестве; стирается.
+data Has : Tag -> Tags -> Type where
+  Here : (0 t : Tag) -> (0 ts : Tags) -> Has t (With t ts)
+  There : (0 t : Tag) -> (0 u : Tag) -> (0 ts : Tags) -> Has t ts -> Has t (With u ts)
+
+-- | Камни: запись из массивов, индексированная множеством своих компонентов.
+--
+-- Размер `0` значит «слот свободен»: списка живых не ведётся, потому что
+-- обход всё равно идёт по всем слотам, а ветвь на пустом слоте дешевле счёта.
+data Rocks : Tags -> Type where
+  MkRocks : (0 cs : Tags) -> Array rocks Int32 -> Array rocks Int32 -> Array rocks Int32 -> Array rocks Int32 -> Array rocks Int32 -> Rocks cs
+
+-- | Полный набор компонентов камня.
+whole : Tags
+whole = With Position (With Velocity (With Size None))
+hasPos : Has Position whole
+hasPos = Here Position (With Velocity (With Size None))
+hasVel : Has Velocity whole
+hasVel = There Velocity Position (With Velocity (With Size None)) (Here Velocity (With Size None))
+hasSize : Has Size whole
+hasSize = There Size Position (With Velocity (With Size None)) (There Size Velocity (With Size None) (Here Size None))
+
+-- | Система дрейфа: двигает камни на их скорости и заворачивает экран.
+--
+-- Требует **обеих** меток разом. Позвать её для набора без скорости не выйдет:
+-- доказательства не построить, и это отказ проверки типов, а не ветвь.
+drift : (0 cs : Tags) -> (0 a : Has Position cs) -> (0 b : Has Velocity cs) -> Rocks cs -> UInt64 -> Rocks cs
+drift cs a b w 0 = w
+drift cs a b (MkRocks ds xs ys vx vy sz) i =
+  let j : UInt64 = subUInt64 i 1
+  let nx : Int32 = wrap (addInt32 (at xs j) (at vx j)) (mulInt32 width scale)
+  let ny : Int32 = wrap (addInt32 (at ys j) (at vy j)) (mulInt32 height scale)
+  drift cs a b (MkRocks cs (put xs j nx) (put ys j ny) vx vy sz) j
+
+-- | Размеры камней сами по себе: счёт живых не должен пересобирать всю запись,
+-- и поле берётся полем, а не разбором в цикле.
+sizesOf : Rocks whole -> Array rocks Int32
+sizesOf (MkRocks ds xs ys vx vy sz) = sz
+
+-- | Сколько камней живо.
+countRocks : Array rocks Int32 -> UInt64 -> Int32 -> Int32
+countRocks sz 0 n = n
+countRocks sz i n =
+  let j : UInt64 = subUInt64 i 1
+  countRocks sz j (addInt32 n (pick (ltInt32 0 (arrayIndex sz j)) 1 0))
+
+-- | Первый свободный слот камня; `rocks` - свободного нет. Им находится место
+-- осколку.
+freeRock : Array rocks Int32 -> UInt64 -> UInt64 -> UInt64
+freeRock sz 0 found = found
+freeRock sz i found =
+  let j : UInt64 = subUInt64 i 1
+  freeRock sz j (pickSlot (ltInt32 0 (arrayIndex sz j)) found j)
+
+-- | Положение на экране: неподвижная точка делится обратно.
+screenOf : Int32 -> Int32
+screenOf v = divInt32 v scale
+
+-- | Корабль: положение, скорость и румб.
+data Ship where
+  MkShip : Int32 -> Int32 -> Int32 -> Int32 -> Int32 -> Ship
+
+shipX : Ship -> Int32
+shipX (MkShip x y vx vy d) = screenOf x
+shipY : Ship -> Int32
+shipY (MkShip x y vx vy d) = screenOf y
+
+-- | Корабль стоит посреди экрана носом вверх. Он же - место возрождения.
+firstShip : Ship
+firstShip = MkShip (divInt32 (mulInt32 width scale) 2) (divInt32 (mulInt32 height scale) 2) 0 0 12
+pickShip : Bool -> Ship -> Ship -> Ship
+pickShip True yes no = yes
+pickShip False yes no = no
+
+-- | Выстрелы: та же раскладка, что у камней, плюс остаток жизни.
+data Shots where
+  MkShots : Array shots Int32 -> Array shots Int32 -> Array shots Int32 -> Array shots Int32 -> Array shots Int32 -> Shots
+
+-- | Что нажато сейчас. Состояние клавиш ведётся событиями: `SDL_GetKeyboardState`
+-- отдаёт чужой указатель, а читать его уровнем 1 нечем - индексируются только
+-- наши плоские массивы.
+data Keys where
+  MkKeys : Int32 -> Int32 -> Int32 -> Int32 -> Int32 -> Int32 -> Keys
+
+-- | Линейный конгруэнтный счётчик: `x` переходит в `75x + 74` по модулю 65537.
+--
+-- Случайность в программе нужна ровно одному ходу - прыжку ([`jump`]), - и она
+-- обязана быть **детерминированной**: договор трёх вычислителей требует, чтобы
+-- машина, C и LLVM отвечали одно и то же, а системного времени уровень 1 не
+-- носит вовсе.
+--
+-- Множитель мелкий не по небрежности: `75 * 65536 + 74` ещё помещается в
+-- `Int32`, а привычные константы вида `1103515245` переполняют его молча -
+-- беззнакового расширения, которым это лечат в C, в языке нет.
+stir : Int32 -> Int32
+stir s = remInt32 (addInt32 (mulInt32 s 75) 74) 65537
+
+-- | Число из отрезка `[0, limit)`. Младшие разряды счётчика по модулю степени
+-- двойки ходят по короткому кругу, поэтому берутся старшие.
+rollOf : Int32 -> Int32 -> Int32
+rollOf s limit = remInt32 (divInt32 s 3) limit
+
+-- | Ход игры помимо тел: счёт, жизни, неуязвимость после гибели, номер волны
+-- и состояние счётчика случайности.
+--
+-- Отдельной записью, а не полями мира: мир меняется каждым проходом кадра, а
+-- эти пять чисел - считанными событиями, и видно это по тому, какие функции
+-- берут `Status`.
+data Status where
+  MkStatus : Int32 -> Int32 -> Int32 -> Int32 -> Int32 -> Status
+
+scoreIn : Status -> Int32
+scoreIn (MkStatus s l g v r) = s
+livesIn : Status -> Int32
+livesIn (MkStatus s l g v r) = l
+graceIn : Status -> Int32
+graceIn (MkStatus s l g v r) = g
+levelIn : Status -> Int32
+levelIn (MkStatus s l g v r) = v
+seedIn : Status -> Int32
+seedIn (MkStatus s l g v r) = r
+
+-- | Сколько кадров корабль неуязвим после возрождения и в начале волны.
+mercy : Int32
+mercy = 96
+
+-- | Задержка между прыжками. Короче неуязвимости: прыжок не спасает, он лишь
+-- уносит.
+pause : Int32
+pause = 24
+
+-- | За сколько очков дают жизнь.
+reward : Int32
+reward = 1000
+
+-- | Счёт вырос - и, если он перешёл через [`reward`], жизнь прибавилась.
+--
+-- Порог считается **делением до и после**, а не отдельным полем «следующая
+-- премия»: поле пришлось бы хранить, а частное уже несёт ту же величину.
+earn : Status -> Int32 -> Status
+earn (MkStatus s l g v r) k =
+  let total : Int32 = addInt32 s k
+  let extra : Bool = ltInt32 (divInt32 s reward) (divInt32 total reward)
+  MkStatus total (pick extra (addInt32 l 1) l) g v r
+
+-- | Жизнь потеряна. Ниже нуля счётчик не уходит: «конец игры» проверяется
+-- сравнением с единицей, и отрицательные значения сделали бы его хрупким.
+hurt : Status -> Status
+hurt (MkStatus s l g v r) = MkStatus s (pick (ltInt32 0 l) (subInt32 l 1) 0) mercy v r
+
+-- | Неуязвимость убывает на кадр.
+cool : Status -> Status
+cool (MkStatus s l g v r) = MkStatus s l (pick (ltInt32 0 g) (subInt32 g 1) 0) v r
+
+-- | Счётчик случайности крутится каждым кадром, а не каждым прыжком: иначе два
+-- прыжка подряд с одного места уносили бы в одну и ту же точку.
+spin : Status -> Status
+spin (MkStatus s l g v r) = MkStatus s l g v (stir r)
+
+-- | Прыжок совершён: задержка взведена.
+spent : Status -> Status
+spent (MkStatus s l g v r) = MkStatus s l pause v r
+
+-- | Следующая волна: камней столько же, но они быстрее, и за переход дают сто.
+promote : Status -> Status
+promote (MkStatus s l g v r) = MkStatus (addInt32 s 100) l mercy (addInt32 v 1) r
+
+-- | Неуязвим ли корабль сейчас.
+shielded : Status -> Bool
+shielded st = ltInt32 0 (graceIn st)
+
+-- | Кончились ли жизни.
+finished : Status -> Bool
+finished st = ltInt32 (livesIn st) 1
+pickStatus : Bool -> Status -> Status -> Status
+pickStatus True yes no = yes
+pickStatus False yes no = no
+
+-- | Прыжок: корабль пропадает и возникает в случайной точке, потеряв ход.
+--
+-- Классический выход из безнадёжного положения, и он же единственное место,
+-- где программе нужна случайность. Две координаты берутся из **двух разных**
+-- состояний счётчика: одно и то же `s` на обе оси поставило бы корабль на
+-- диагональ.
+jump : Ship -> Int32 -> Ship
+jump (MkShip x y vx vy d) s = MkShip (mulInt32 (rollOf s width) scale) (mulInt32 (rollOf (stir s) height) scale) 0 0 d
+
+-- | Прыжок случается только когда его просят.
+--
+-- Разбором `Bool`, а не `pick`: у `pick` посчитались бы обе ветви, и счётчик
+-- крутился бы вхолостую там, где прыжка не было.
+leap : Bool -> Ship -> Int32 -> Ship
+leap True ship s = jump ship s
+leap False ship s = ship
+
+-- | Мир целиком.
+data World where
+  MkWorld : Ship -> Rocks whole -> Shots -> Keys -> Status -> World
+
+-- Скан-коды и типы событий - числами: именованных констант чужой стороны
+-- уровень 1 не носит. Значения замерены пробой на C.
+keyDown : UInt32
+keyDown = 768
+keyUp : UInt32
+keyUp = 769
+scanLeft : UInt32
+scanLeft = 80
+scanRight : UInt32
+scanRight = 79
+scanUp : UInt32
+scanUp = 82
+scanSpace : UInt32
+scanSpace = 44
+
+-- | Скан-код `h`: прыжок. Клавиша под правой рукой, как в оригинале.
+scanJump : UInt32
+scanJump = 11
+
+-- | Смещение скан-кода в `SDL_Event`: шестнадцатый байт, то есть четвёртое
+-- слово. Замерено `offsetof`, а не угадано.
+scanWord : UInt64
+scanWord = 4
+
+-- | Та же клавиша с новым состоянием, если скан-код совпал.
+toggled : UInt32 -> UInt32 -> Int32 -> Int32 -> Int32
+toggled code want state old = pick (eqUInt32 code want) state old
+
+-- | Разбирает одно событие в состояние клавиш.
+absorb : Keys -> UInt32 -> UInt32 -> Keys
+absorb (MkKeys l r t f h q) kind code =
+  let down : Int32 = pick (eqUInt32 kind keyDown) 1 0
+  let touch : Bool = orBool (eqUInt32 kind keyDown) (eqUInt32 kind keyUp)
+  MkKeys (toggled code scanLeft (pick touch down l) l) (toggled code scanRight (pick touch down r) r) (toggled code scanUp (pick touch down t) t) (toggled code scanSpace (pick touch down f) f) (toggled code scanJump (pick touch down h) h) (pick (eqUInt32 kind quitEvent) 1 q)
+
+-- | Жмут ли тягу - это видно кормовому пламени.
+thrusting : Keys -> Bool
+thrusting (MkKeys l r t f h q) = eqInt32 t 1
+
+-- | Просят ли прыжок.
+jumping : Keys -> Bool
+jumping (MkKeys l r t f h q) = eqInt32 h 1
+
+-- | Поворот и тяга корабля по нажатым клавишам.
+--
+-- Скорость гасится делением - это трение, и оно же не даёт кораблю разогнаться
+-- быстрее, чем шаг заворота экрана.
+steer : Ship -> Keys -> Ship
+steer (MkShip x y vx vy d) (MkKeys l r t f h q) =
+  let turned : Int32 = remInt32 (addInt32 (addInt32 d (subInt32 r l)) 16) 16
+  let ax : Int32 = mulInt32 t (divInt32 (dirX turned) 16)
+  let ay : Int32 = mulInt32 t (divInt32 (dirY turned) 16)
+  let nvx : Int32 = divInt32 (mulInt32 (addInt32 vx ax) 63) 64
+  let nvy : Int32 = divInt32 (mulInt32 (addInt32 vy ay) 63) 64
+  MkShip (wrap (addInt32 x nvx) (mulInt32 width scale)) (wrap (addInt32 y nvy) (mulInt32 height scale)) nvx nvy turned
+
+-- | Ход выстрелов: живые двигаются и стареют, мёртвые стоят.
+fly : Shots -> UInt64 -> Shots
+fly w 0 = w
+fly (MkShots xs ys vx vy life) i =
+  let j : UInt64 = subUInt64 i 1
+  let alive : Bool = ltInt32 0 (atShot life j)
+  let nx : Int32 = wrap (addInt32 (atShot xs j) (atShot vx j)) (mulInt32 width scale)
+  let ny : Int32 = wrap (addInt32 (atShot ys j) (atShot vy j)) (mulInt32 height scale)
+  fly (MkShots (putShot xs j (pick alive nx (atShot xs j))) (putShot ys j (pick alive ny (atShot ys j))) vx vy (putShot life j (pick alive (subInt32 (atShot life j) 1) 0))) j
+
+-- | Первый свободный слот выстрела; `shots` - свободного нет.
+freeShot : Array shots Int32 -> UInt64 -> UInt64 -> UInt64
+freeShot life 0 found = found
+freeShot life i found =
+  let j : UInt64 = subUInt64 i 1
+  freeShot life j (pickSlot (ltInt32 0 (arrayIndex life j)) found j)
+
+-- | Выстрел из носа корабля, если есть чем.
+fire : Ship -> Shots -> Int32 -> Shots
+fire (MkShip x y vx vy d) (MkShots xs ys svx svy life) press =
+  let slot : UInt64 = freeShot life shots shots
+  let ok : Bool = andBool (eqInt32 press 1) (ltUInt64 slot shots)
+  let at : UInt64 = pickSlot ok slot 0
+  MkShots (putShot xs at (pick ok x (atShot xs at))) (putShot ys at (pick ok y (atShot ys at))) (putShot svx at (pick ok (mulInt32 (divInt32 (dirX d) 32) 4) (atShot svx at))) (putShot svy at (pick ok (mulInt32 (divInt32 (dirY d) 32) 4) (atShot svy at))) (putShot life at (pick ok 48 (atShot life at)))
+
+-- | Пересекаются ли два квадрата на экране.
+touching : Int32 -> Int32 -> Int32 -> Int32 -> Int32 -> Bool
+touching ax ay bx by reach =
+  let dx : Int32 = subInt32 ax bx
+  let dy : Int32 = subInt32 ay by
+  andBool (ltInt32 (mulInt32 dx dx) (mulInt32 reach reach)) (ltInt32 (mulInt32 dy dy) (mulInt32 reach reach))
+
+-- | Один выстрел против всех камней: попал - камень дробится, выстрел гаснет.
+--
+-- Дробление и есть то, ради чего у камней заведён свободный слот. Задетый
+-- камень мельчает и разворачивается поперёк прежнего хода, а осколок встаёт в
+-- первый свободный слот с обратным разворотом: два куска разлетаются в разные
+-- стороны из одной точки. Мелкому камню осколка не положено - [`shard`]
+-- отдаёт для него ноль, и слот освобождается.
+--
+-- Каскада не будет: выстрел гаснет тем же присваиванием, и осколок, попавший в
+-- ещё не пройденный слот, встречает уже мёртвый выстрел.
+--
+-- Старое значение ячейки читается **до** записи отдельным `let`, а не внутри
+-- аргумента: так массив не держат два обращения разом, и запись идёт на месте.
+strike : Ship -> Keys -> Rocks whole -> Shots -> UInt64 -> UInt64 -> Status -> World
+strike ship keys rs ss s 0 st = MkWorld ship rs ss keys st
+strike ship keys (MkRocks ds xs ys vx vy sz) (MkShots sx sy svx svy life) s i st =
+  let j : UInt64 = subUInt64 i 1
+  let side : Int32 = at sz j
+  let live : Bool = andBool (ltInt32 0 side) (ltInt32 0 (atShot life s))
+  let near : Bool = touching (screenOf (at xs j)) (screenOf (at ys j)) (screenOf (atShot sx s)) (screenOf (atShot sy s)) side
+  let hit : Bool = andBool live near
+  let rest : Int32 = shard side
+  let slot : UInt64 = freeRock sz rocks rocks
+  let born : Bool = andBool hit (andBool (ltInt32 0 rest) (ltUInt64 slot rocks))
+  let dest : UInt64 = pickSlot born slot 0
+  let srcX : Int32 = at xs j
+  let srcY : Int32 = at ys j
+  let srcVX : Int32 = at vx j
+  let srcVY : Int32 = at vy j
+  let oldX : Int32 = at xs dest
+  let oldY : Int32 = at ys dest
+  let oldVX : Int32 = at vx dest
+  let oldVY : Int32 = at vy dest
+  let oldSz : Int32 = at sz dest
+  let keptX : Array rocks Int32 = put xs dest (pick born srcX oldX)
+  let keptY : Array rocks Int32 = put ys dest (pick born srcY oldY)
+  let turnX : Array rocks Int32 = put vx j (pick hit (flip srcVY) srcVX)
+  let turnY : Array rocks Int32 = put vy j (pick hit srcVX srcVY)
+  let shrunk : Array rocks Int32 = put sz j (pick hit rest side)
+  let grownVX : Array rocks Int32 = put turnX dest (pick born srcVY oldVX)
+  let grownVY : Array rocks Int32 = put turnY dest (pick born (flip srcVX) oldVY)
+  let grownSz : Array rocks Int32 = put shrunk dest (pick born rest oldSz)
+  let spent : Int32 = pick hit 0 (atShot life s)
+  let earned : Int32 = pick hit (worth side) 0
+  strike ship keys (MkRocks whole keptX keptY grownVX grownVY grownSz) (MkShots sx sy svx svy (putShot life s spent)) s j (earn st earned)
+
+-- | Все выстрелы против всех камней.
+collide : World -> UInt64 -> World
+collide w 0 = w
+collide (MkWorld ship rs ss keys st) i =
+  let j : UInt64 = subUInt64 i 1
+  collide (strike ship keys rs ss j rocks st) j
+
+-- | Жизнь долой, но только если корабль не под защитой.
+wound : Bool -> Status -> Status
+wound True st = hurt st
+wound False st = st
+
+-- | Корабль против камней: задел - жизнь долой и неуязвимость на [`mercy`]
+-- кадров.
+--
+-- Камень при этом цел: гибнет корабль, а не препятствие, - иначе возрождение
+-- расчищало бы экран само.
+bump : Ship -> Keys -> Rocks whole -> Shots -> Status -> UInt64 -> World
+bump ship keys rs ss st 0 = MkWorld ship rs ss keys st
+bump ship keys (MkRocks ds xs ys vx vy sz) ss st i =
+  let j : UInt64 = subUInt64 i 1
+  let side : Int32 = at sz j
+  let live : Bool = ltInt32 0 side
+  let near : Bool = touching (screenOf (at xs j)) (screenOf (at ys j)) (shipX ship) (shipY ship) (addInt32 side 5)
+  let struck : Bool = andBool live (andBool near (notBool (shielded st)))
+  bump ship keys (MkRocks whole xs ys vx vy sz) ss (wound struck st) j
+
+-- | Прямоугольник в буфере `SDL_Rect`: четыре `int` подряд, порядок `x y w h`.
+rectOf : Array 4 Int32 -> Int32 -> Int32 -> Int32 -> Int32 -> Array 4 Int32
+rectOf rect x y w h = arraySet (arraySet (arraySet (arraySet rect 0 x) 1 y) 2 w) 3 h
+
+-- | Квадрат со стороной `side`, вычерченный **от центра**: столкновения тоже
+-- считаются по центрам, и две разные системы координат в одной программе -
+-- готовый источник рассогласования.
+box : Array 4 Int32 -> Int32 -> Int32 -> Int32 -> Array 4 Int32
+box rect x y side =
+  let half : Int32 = divInt32 side 2
+  rectOf rect (subInt32 x half) (subInt32 y half) side side
+
+-- | Рисует прямоугольник, если он нужен.
+--
+-- Разбором `Bool`, а не `pick`: язык строгий, и у `pick` посчитались бы **обе**
+-- ветви - то есть невидимый отрезок цифры был бы нарисован.
+-- Буфер `SDL_Rect` **возвращается** отсюда и отовсюду ниже, и это не стиль, а
+-- цена кадра. Буфер один на всю отрисовку; если держать исходный `rect` в
+-- цикле и одновременно скармливать `rectOf` его копию, у массива оказывается
+-- два владельца, и запись идёт через копию - `adamas_array_writable` копирует
+-- всё, что не уникально. Замерено сменой одной этой формы: **156 блоков на
+-- кадр против 5**.
+drawIf : CPtr -> Array 4 Int32 -> Bool -> {Foreign} Array 4 Int32
+drawIf r rect True =
+  let drawn : Int32 = SDL_RenderFillRect r rect
+  rect
+drawIf r rect False = rect
+
+-- | Степень двойки: сдвигов в языке нет, и бит маски достаётся делением.
+twoTo : Int32 -> Int32
+twoTo 0 = 1
+twoTo 1 = 2
+twoTo 2 = 4
+twoTo 3 = 8
+twoTo 4 = 16
+twoTo 5 = 32
+twoTo 6 = 64
+twoTo n = 1
+
+-- | Какие отрезки горят у цифры. Нумерация: 0 - верх, 1 - правый верхний,
+-- 2 - правый нижний, 3 - низ, 4 - левый нижний, 5 - левый верхний, 6 -
+-- середина.
+segments : Int32 -> Int32
+segments 0 = 63
+segments 1 = 6
+segments 2 = 91
+segments 3 = 79
+segments 4 = 102
+segments 5 = 109
+segments 6 = 125
+segments 7 = 7
+segments 8 = 127
+segments 9 = 111
+segments n = 0
+
+-- | Горит ли отрезок `s` у цифры `d`.
+lit : Int32 -> Int32 -> Bool
+lit d s = eqInt32 (remInt32 (divInt32 (segments d) (twoTo s)) 2) 1
+
+-- Раскладка отрезка внутри знакоместа двенадцать на двадцать. Четыре таблицы,
+-- а не запись из четырёх полей: запись потребовала бы конструктора и разбора
+-- ради семи неизменных строк.
+segX : Int32 -> Int32
+segX 0 = 3
+segX 1 = 9
+segX 2 = 9
+segX 3 = 3
+segX 4 = 0
+segX 5 = 0
+segX 6 = 3
+segX n = 0
+
+segY : Int32 -> Int32
+segY 0 = 0
+segY 1 = 3
+segY 2 = 10
+segY 3 = 17
+segY 4 = 10
+segY 5 = 3
+segY 6 = 9
+segY n = 0
+
+segW : Int32 -> Int32
+segW 0 = 6
+segW 1 = 3
+segW 2 = 3
+segW 3 = 6
+segW 4 = 3
+segW 5 = 3
+segW 6 = 6
+segW n = 0
+
+segH : Int32 -> Int32
+segH 0 = 3
+segH 1 = 7
+segH 2 = 7
+segH 3 = 3
+segH 4 = 7
+segH 5 = 7
+segH 6 = 3
+segH n = 0
+
+-- | Цифра семью отрезками. Шрифта в программе нет: `SDL_ttf` - вторая чужая
+-- библиотека, а показать её нечего сверх той, что уже показана.
+paintDigit : CPtr -> Array 4 Int32 -> Int32 -> Int32 -> Int32 -> UInt64 -> {Foreign} Array 4 Int32
+paintDigit r rect x y d 0 = rect
+paintDigit r rect x y d n =
+  let s : UInt64 = subUInt64 n 1
+  let k : Int32 = truncate s
+  let shaped : Array 4 Int32 = rectOf rect (addInt32 x (segX k)) (addInt32 y (segY k)) (segW k) (segH k)
+  let drawn : Array 4 Int32 = drawIf r shaped (lit d k)
+  paintDigit r drawn x y d s
+
+-- | Степень десяти: тот же приём, что у [`twoTo`], и по той же причине.
+tenTo : Int32 -> Int32
+tenTo 0 = 1
+tenTo 1 = 10
+tenTo 2 = 100
+tenTo 3 = 1000
+tenTo 4 = 10000
+tenTo n = 1
+
+-- | Цифра числа в разряде `place`, считая справа.
+digitAt : Int32 -> Int32 -> Int32
+digitAt v place = remInt32 (divInt32 v (tenTo place)) 10
+
+-- | Число пятью разрядами. Ведущие нули не гасятся: гашение потребовало бы
+-- признака «значащая цифра уже была», то есть ещё одного аргумента в цикле, а
+-- счёт в этой игре всё равно четырёхзначный.
+paintNumber : CPtr -> Array 4 Int32 -> Int32 -> Int32 -> Int32 -> UInt64 -> {Foreign} Array 4 Int32
+paintNumber r rect x y v 0 = rect
+paintNumber r rect x y v n =
+  let p : UInt64 = subUInt64 n 1
+  let k : Int32 = truncate p
+  let cx : Int32 = addInt32 x (mulInt32 (subInt32 4 k) 16)
+  let drawn : Array 4 Int32 = paintDigit r rect cx y (digitAt v k) 7
+  paintNumber r drawn x y v p
+
+-- | Жизни - квадратиками в правом верхнем углу.
+paintLives : CPtr -> Array 4 Int32 -> Int32 -> UInt64 -> {Foreign} Array 4 Int32
+paintLives r rect lives 0 = rect
+paintLives r rect lives n =
+  let j : UInt64 = subUInt64 n 1
+  let k : Int32 = truncate j
+  let shaped : Array 4 Int32 = rectOf rect (subInt32 (subInt32 width 24) (mulInt32 k 16)) 12 10 10
+  let drawn : Array 4 Int32 = drawIf r shaped (ltInt32 k lives)
+  paintLives r drawn lives j
+
+-- | Сколько жизней помещается в строку состояния.
+shownLives : UInt64
+shownLives = 5
+
+-- | Строка состояния: счёт слева, номер волны в середине, жизни справа.
+paintHud : CPtr -> Array 4 Int32 -> Status -> {Foreign} Array 4 Int32
+paintHud r rect st =
+  let pale : Int32 = SDL_SetRenderDrawColor r 210 220 255 255
+  let score : Array 4 Int32 = paintNumber r rect 12 10 (scoreIn st) 5
+  let wave : Array 4 Int32 = paintNumber r score (subInt32 (divInt32 width 2) 40) 10 (levelIn st) 5
+  let dim : Int32 = SDL_SetRenderDrawColor r 120 255 140 255
+  paintLives r wave (livesIn st) shownLives
+
+-- | Рисует камни: живые - квадратом своего размера.
+-- | Цвет камня по размеру: целый тёмен, осколки светлее.
+--
+-- Не украшение: в мельтешении одинаковых квадратов не видно, что дробление
+-- вообще случилось, - а дробление и есть то, ради чего у камней заведён
+-- свободный слот.
+tint : CPtr -> Int32 -> {Foreign} Int32
+tint r 24 = SDL_SetRenderDrawColor r 118 118 140 255
+tint r 16 = SDL_SetRenderDrawColor r 168 168 190 255
+tint r n = SDL_SetRenderDrawColor r 220 220 244 255
+
+paintRocks : CPtr -> Array 4 Int32 -> Rocks whole -> UInt64 -> {Foreign} Array 4 Int32
+paintRocks r rect w 0 = rect
+paintRocks r rect (MkRocks ds xs ys vx vy sz) i =
+  let j : UInt64 = subUInt64 i 1
+  let side : Int32 = at sz j
+  let hue : Int32 = tint r side
+  let shaped : Array 4 Int32 = box rect (screenOf (at xs j)) (screenOf (at ys j)) side
+  let drawn : Array 4 Int32 = drawIf r shaped (ltInt32 0 side)
+  paintRocks r drawn (MkRocks whole xs ys vx vy sz) j
+
+-- | Рисует выстрелы: живые - точкой в два пикселя.
+paintShots : CPtr -> Array 4 Int32 -> Shots -> UInt64 -> {Foreign} Array 4 Int32
+paintShots r rect w 0 = rect
+paintShots r rect (MkShots xs ys vx vy life) i =
+  let j : UInt64 = subUInt64 i 1
+  let shaped : Array 4 Int32 = box rect (screenOf (atShot xs j)) (screenOf (atShot ys j)) 3
+  let drawn : Array 4 Int32 = drawIf r shaped (ltInt32 0 (atShot life j))
+  paintShots r drawn (MkShots xs ys vx vy life) j
+
+-- | Виден ли корабль в этом кадре: под защитой он мигает, и мигание - это
+-- единственный способ показать неуязвимость, не заводя второго цвета.
+visible : Int32 -> Bool
+visible grace = orBool (eqInt32 grace 0) (ltInt32 (remInt32 grace 8) 4)
+
+-- | Корабль: корпус и нос по румбу. Нос ставится той же таблицей направлений,
+-- какой считается тяга, - одно место на две работы.
+paintShip : CPtr -> Array 4 Int32 -> Ship -> Int32 -> Bool -> {Foreign} Array 4 Int32
+paintShip r rect (MkShip x y vx vy d) grace push =
+  let cx : Int32 = screenOf x
+  let cy : Int32 = screenOf y
+  let here : Bool = visible grace
+  let hull : Array 4 Int32 = box rect cx cy 11
+  let body : Array 4 Int32 = drawIf r hull here
+  let nx : Int32 = addInt32 cx (divInt32 (mulInt32 (dirX d) 11) scale)
+  let ny : Int32 = addInt32 cy (divInt32 (mulInt32 (dirY d) 11) scale)
+  let nose : Array 4 Int32 = box body nx ny 5
+  let tip : Array 4 Int32 = drawIf r nose here
+  let hot : Int32 = SDL_SetRenderDrawColor r 255 170 60 255
+  let bx : Int32 = subInt32 cx (divInt32 (mulInt32 (dirX d) 9) scale)
+  let by : Int32 = subInt32 cy (divInt32 (mulInt32 (dirY d) 9) scale)
+  let flame : Array 4 Int32 = box tip bx by 5
+  drawIf r flame (andBool here push)
+
+statusOf : World -> Status
+statusOf (MkWorld ship rs ss keys st) = st
+scoreOf : World -> Int32
+scoreOf (MkWorld ship rs ss keys st) = scoreIn st
+keysOf : World -> Keys
+keysOf (MkWorld ship rs ss keys st) = keys
+withKeys : World -> Keys -> World
+withKeys (MkWorld ship rs ss old st) keys = MkWorld ship rs ss keys st
+
+-- | Просили ли закрыть окно.
+quitting : World -> Bool
+quitting (MkWorld ship rs ss (MkKeys l r t f h q) st) = eqInt32 q 1
+
+-- | Кадр целиком: фон, камни, выстрелы, корабль, строка состояния.
+--
+-- Отдаёт буфер прямоугольника обратно, и цикл кадра передаёт его же следующему
+-- кадру: один буфер живёт всю игру и остаётся уникальным.
+paint : CPtr -> Array 4 Int32 -> World -> {Foreign} Array 4 Int32
+paint r rect (MkWorld ship rs ss keys st) =
+  let dark : Int32 = SDL_SetRenderDrawColor r 8 8 24 255
+  let cleared : Int32 = SDL_RenderClear r
+  let grey : Int32 = SDL_SetRenderDrawColor r 150 150 170 255
+  let stones : Array 4 Int32 = paintRocks r rect rs rocks
+  let white : Int32 = SDL_SetRenderDrawColor r 255 255 255 255
+  let sparks : Array 4 Int32 = paintShots r stones ss shots
+  let green : Int32 = SDL_SetRenderDrawColor r 120 255 140 255
+  let hull : Array 4 Int32 = paintShip r sparks ship (graceIn st) (thrusting keys)
+  let hud : Array 4 Int32 = paintHud r hull st
+  let shown : Unit = SDL_RenderPresent r
+  hud
+
+-- | Экран конца игры: красная полоса поперёк и счёт посередине.
+--
+-- Буфер заводится свой: игровой ушёл в цикл кадра и там кончился, а тащить его
+-- обратно значило бы держать вторую ссылку весь прогон - ровно то, что лишает
+-- массив уникальности.
+paintOver : CPtr -> Int32 -> {Foreign} Int32
+paintOver r score =
+  let rect : Array 4 Int32 = arrayNew 4 zeroI
+  let red : Int32 = SDL_SetRenderDrawColor r 130 24 36 255
+  let band : Array 4 Int32 = rectOf rect 0 (subInt32 (divInt32 height 2) 34) width 68
+  let filled : Array 4 Int32 = drawIf r band True
+  let pale : Int32 = SDL_SetRenderDrawColor r 255 232 232 255
+  let told : Array 4 Int32 = paintNumber r filled (subInt32 (divInt32 width 2) 40) (subInt32 (divInt32 height 2) 10) score 5
+  let shown : Unit = SDL_RenderPresent r
+  let held : Unit = SDL_Delay 1200
+  score
+
+-- | Показывается конец игры, а закрытое окно - нет. Разбором `Bool`, потому
+-- что показ наблюдаем, а `pick` считает обе ветви.
+closing : CPtr -> Int32 -> Bool -> {Foreign} Int32
+closing r score True = paintOver r score
+closing r score False = score
+
+pickKeys : Bool -> Keys -> Keys -> Keys
+pickKeys True yes no = yes
+pickKeys False yes no = no
+
+fireFrom : Ship -> Shots -> Keys -> Shots
+fireFrom ship ss (MkKeys l r t f h q) = fire ship ss f
+
+-- | Очередь событий в состояние клавиш. Очередь осушается один раз: второй
+-- `SDL_PollEvent` увидел бы пустую.
+listen : Array 14 UInt32 -> Keys -> UInt64 -> {Foreign} Keys
+listen event keys 0 = keys
+listen event keys n =
+  let got : Int32 = SDL_PollEvent event
+  let kind : UInt32 = arrayIndex event 0
+  let code : UInt32 = arrayIndex event scanWord
+  let seen : Keys = pickKeys (ltInt32 0 got) (absorb keys kind code) keys
+  listen event seen (subUInt64 n 1)
+
+emptyRocks : Rocks whole
+emptyRocks = MkRocks whole (arrayNew rocks zeroI) (arrayNew rocks zeroI) (arrayNew rocks zeroI) (arrayNew rocks zeroI) (arrayNew rocks zeroI)
+emptyShots : Shots
+emptyShots = MkShots (arrayNew shots zeroI) (arrayNew shots zeroI) (arrayNew shots zeroI) (arrayNew shots zeroI) (arrayNew shots zeroI)
+
+-- | Начальная расстановка камней: детерминированная, без всякого источника
+-- случайности - три вычислителя обязаны ответить одно и то же.
+--
+-- Номер волны входит множителем скорости: камней столько же, летят они быстрее.
+seedRocks : Rocks whole -> UInt64 -> Int32 -> Rocks whole
+seedRocks w 0 lvl = w
+seedRocks (MkRocks ds xs ys vx vy sz) i lvl =
+  let j : UInt64 = subUInt64 i 1
+  let k : Int32 = addInt32 (mulInt32 (truncate j) 37) 11
+  let rush : Int32 = addInt32 1 (divInt32 lvl 2)
+  seedRocks (MkRocks whole (put xs j (mulInt32 (remInt32 (mulInt32 k 7) width) scale)) (put ys j (mulInt32 (remInt32 (mulInt32 k 13) height) scale)) (put vx j (mulInt32 rush (subInt32 (remInt32 k 5) 2))) (put vy j (mulInt32 rush (subInt32 (remInt32 k 7) 3))) (put sz j bigRock)) j lvl
+
+-- | Новая волна строится только когда она нужна.
+--
+-- Разбором `Bool`, а не `pick`: язык строгий, и расстановка на каждом кадре
+-- стоила бы пяти массивов в кадр - при том, что нужна она раз в волну.
+restock : Bool -> Int32 -> Rocks whole -> Rocks whole
+restock True lvl old = seedRocks emptyRocks rocks lvl
+restock False lvl old = old
+
+-- | Камней не осталось - следующая волна.
+refill : World -> World
+refill (MkWorld ship rs ss keys st) =
+  let left : Int32 = countRocks (sizesOf rs) rocks 0
+  let clear : Bool = eqInt32 left 0
+  MkWorld ship (restock clear (levelIn st) rs) ss keys (pickStatus clear (promote st) st)
+
+-- | Если жизнь потеряна, корабль возвращается на середину экрана.
+replace : World -> Int32 -> World
+replace (MkWorld ship rs ss keys st) before =
+  let died : Bool = ltInt32 (livesIn st) before
+  MkWorld (pickShip died firstShip ship) rs ss keys st
+
+-- | Неуязвимость убывает на кадр, счётчик случайности крутится.
+chill : World -> World
+chill (MkWorld ship rs ss keys st) = MkWorld ship rs ss keys (spin (cool st))
+
+-- | Прыжок, если его просят и задержка истекла.
+--
+-- Задержкой служит та же неуязвимость: держать клавишу нажатой иначе значило
+-- бы прыгать каждым кадром, а второго счётчика ради этого не заводится.
+teleport : World -> World
+teleport (MkWorld ship rs ss keys st) =
+  let wants : Bool = andBool (jumping keys) (notBool (shielded st))
+  MkWorld (leap wants ship (seedIn st)) rs ss keys (pickStatus wants (spent st) st)
+
+-- | Корабль против камней, и возрождение следом.
+injure : World -> World
+injure (MkWorld ship rs ss keys st) = replace (bump ship keys rs ss st rocks) (livesIn st)
+
+-- | Один шаг игры: клавиши, корабль, дрейф камней, выстрелы, столкновения
+-- обоих родов и, если экран чист, следующая волна.
+step : World -> World
+step (MkWorld ship rs ss keys st) =
+  let moved : Ship = steer ship keys
+  let drifted : Rocks whole = drift whole hasPos hasVel rs rocks
+  let flown : Shots = fly ss shots
+  let fired : Shots = fireFrom moved flown keys
+  let shot : World = collide (MkWorld moved drifted fired keys st) shots
+  refill (injure (teleport (chill shot)))
+
+-- | Пора ли кончать: закрыли окно либо кончились жизни.
+done : World -> Bool
+done w = orBool (quitting w) (finished (statusOf w))
+
+-- | Игровой цикл: слушает, шагает, рисует, ждёт кадра.
+--
+-- Кончается закрытием окна, концом игры либо счётчиком кадров. Счётчик есть
+-- **предел, а не продолжительность**: он нужен затем, чтобы программа
+-- завершалась и без человека - в гейте её собирают оба понижения, а прогон без
+-- экрана идёт драйвером `dummy`.
+loop : CPtr -> Array 4 Int32 -> Array 14 UInt32 -> World -> UInt64 -> {Foreign} World
+loop r rect event w 0 = w
+loop r rect event w n =
+  let heard : Keys = listen event (keysOf w) shots
+  let asked : World = withKeys w heard
+  let stepped : World = step asked
+  let painted : Array 4 Int32 = paint r rect stepped
+  let waited : Unit = SDL_Delay 16
+  let more : UInt64 = pickSlot (done stepped) 0 (subUInt64 n 1)
+  loop r painted event stepped more
+
+-- | Предел кадров: минута при шестидесяти в секунду.
+budget : UInt64
+budget = 3600
+title : Array 10 UInt8
+title = "asteroids"
+
+-- | Три жизни, нулевой счёт, первая волна и неуязвимость на старте.
+opening : World
+opening = MkWorld firstShip (seedRocks emptyRocks rocks 1) emptyShots (MkKeys 0 0 0 0 0 0) (MkStatus 0 3 mercy 1 24601)
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+-- | Тело игры. Окно и рендерер закрываются на выходе - и на всяком выходе:
+-- §3.3 вставляет деструктор сама, если обернуть их ресурсом; здесь они
+-- закрываются явно, потому что программа одна и путь у неё один.
+body : (ω u : Unit) -> {Foreign} Int32
+body u =
+  let started : Int32 = SDL_Init videoFlag
+  let window : CPtr = SDL_CreateWindow title anywhere anywhere width height shown
+  let renderer : CPtr = SDL_CreateRenderer window (-1) software
+  let rect : Array 4 Int32 = arrayNew 4 zeroI
+  let event : Array 14 UInt32 = arrayNew 14 zeroU
+  let final : World = loop renderer rect event opening budget
+  let told : Int32 = closing renderer (scoreOf final) (finished (statusOf final))
+  let goneR : Unit = SDL_DestroyRenderer renderer
+  let goneW : Unit = SDL_DestroyWindow window
+  let over : Unit = SDL_Quit
+  told
+
+main : Int32
+main = runForeign body

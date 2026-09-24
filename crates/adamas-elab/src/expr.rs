@@ -2428,9 +2428,11 @@ impl<'a> Elaborator<'a> {
                 else_branch,
             } => {
                 let alts = conditional(then_branch, else_branch);
-                self.case(cond, &alts, expr.span, position)
+                self.case(cond, &alts, expr.span, position, awaited)
             }
-            ExprKind::Case { scrutinee, alts } => self.case(scrutinee, alts, expr.span, position),
+            ExprKind::Case { scrutinee, alts } => {
+                self.case(scrutinee, alts, expr.span, position, awaited)
+            }
             ExprKind::Handle {
                 multi,
                 label,
@@ -2705,12 +2707,25 @@ impl<'a> Elaborator<'a> {
     /// индексом проходит; зависеть от самого разбираемого мотив по-прежнему не
     /// может. `case` над `Vect a n`, чей результат меняется от ветви к ветви,
     /// отсюда не пишется; ему нужен написанный мотив, и это отдельный срез.
+    /// `awaited` - ожидаемый тип **всего разбора**, и достаётся он телам
+    /// ветвей, а не разбираемому.
+    ///
+    /// Без этого `if b then 7 else 9` под сигнатурой `Bool -> Int32` не
+    /// писался вовсе: тело ветви шло выводом, литерал не получал ожидания и
+    /// разворачивался унарно - отказ назывался `Zero`, которого в исходнике
+    /// нет (§10 вопрос 203). Проталкивать его законно тем же доводом, каким
+    /// он достаётся телу клаузы: тип ветви и есть тип разбора.
+    ///
+    /// Значение приходит из **внешнего** контекста, а ветвь считается во
+    /// внутреннем; переносится оно как есть, потому что уровни от расширения
+    /// контекста не съезжают.
     fn case(
         &mut self,
         scrutinee: &Expr,
         alts: &[ast::Alt],
         span: Span,
         position: Position,
+        awaited: Option<&Rc<Value>>,
     ) -> Result<Term, ElabError> {
         // Разбор без веток законен и **необходим**: он и есть доказательство
         // необитаемости, и `absurd : Void -> a` пишется только им (§9 Фаза 1).
@@ -2729,7 +2744,7 @@ impl<'a> Elaborator<'a> {
         // `1`-связывание, которого ни одна ветвь не называет (§10 вопрос 82).
         if let Term::Var(index) = &value {
             if let Some(level) = index.to_level(self.ctx.size()) {
-                return self.discriminated(level, &ty, alts, span, position);
+                return self.discriminated(level, &ty, alts, span, position, awaited);
             }
         }
         let domain = quote(self.ctx.size(), &ty);
@@ -2745,7 +2760,8 @@ impl<'a> Elaborator<'a> {
             visible: false,
             ..Bound::visible(&name, mult, Rc::clone(&ty))
         });
-        let inner = self.discriminated(Lvl(self.ctx.size() - 1), &ty, alts, span, position);
+        let inner =
+            self.discriminated(Lvl(self.ctx.size() - 1), &ty, alts, span, position, awaited);
         self.scope.truncate(outer);
         self.ctx = saved;
         Ok(Term::Let(
@@ -2769,6 +2785,7 @@ impl<'a> Elaborator<'a> {
         alts: &[ast::Alt],
         span: Span,
         position: Position,
+        awaited: Option<&Rc<Value>>,
     ) -> Result<Term, ElabError> {
         // Тип разбираемого доезжает до ветвей: поля паттерна берут типы из
         // телескопа конструктора, инстанцированного аргументами семейства
@@ -2797,7 +2814,14 @@ impl<'a> Elaborator<'a> {
         let mut produced = None;
         for ((alt, pattern), closing) in alts.iter().zip(patterns).zip(&forgotten) {
             let body = self.placed(position, |it| {
-                it.branch(&alt.pattern, &pattern, &alt.body, closing, &scrutinee)
+                it.branch(
+                    &alt.pattern,
+                    &pattern,
+                    &alt.body,
+                    closing,
+                    &scrutinee,
+                    awaited.cloned(),
+                )
             })?;
             produced = produced.or_else(|| self.produced.take());
             clauses.push(Clause {
@@ -3367,6 +3391,7 @@ impl<'a> Elaborator<'a> {
         body: &Expr,
         closing: &[(Symbol, Symbol)],
         scrutinee: &Rc<Value>,
+        awaited: Option<Rc<Value>>,
     ) -> Result<Term, ElabError> {
         let mut names = Vec::new();
         variables_of(compiled, &mut names);
@@ -3437,7 +3462,12 @@ impl<'a> Elaborator<'a> {
                 .map(|(index, drop)| (index.saturating_add(shift), drop)),
         );
         lifo(&mut drops);
-        let term = self.closing_all(&drops, |it| it.expr(body, Mult::Many));
+        // Ожидание выставляется **у самого тела**, а не раньше: `expr` его
+        // забирает у ближайшего узла, и всякий спуск между ними его бы съел.
+        let term = self.closing_all(&drops, |it| {
+            it.awaited = awaited;
+            it.expr(body, Mult::Many)
+        });
         self.scope.truncate(depth);
         self.ctx = outer;
         term

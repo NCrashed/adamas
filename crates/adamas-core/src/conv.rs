@@ -359,6 +359,16 @@ pub(crate) fn unfolded(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> 
 /// `Some` - только когда свёртка состоялась: шаг, оставляющий примитив
 /// застрявшим, зациклил бы петли разворота у вызывающих.
 fn refolded(value: &Rc<Value>, normalized: &dyn Fn(&Rc<Value>) -> Rc<Value>) -> Option<Rc<Value>> {
+    // Преобразование одноместно, и ветка ему нужна своя: у двуместных спайн
+    // разбирается парой, и одиночный аргумент в неё не попадает вовсе.
+    if let Value::Neutral(head @ Head::Convert(_), spine) = &**value {
+        let [Elim::App(only)] = &spine[..] else {
+            return None;
+        };
+        let partial = Rc::new(Value::Neutral(head.clone(), Vec::new()));
+        let folded = try_apply(&partial, normalized(only))?;
+        return matches!(&*folded, Value::Prim(_)).then_some(folded);
+    }
     let Value::Neutral(head @ (Head::Prim(..) | Head::Cmp(..)), spine) = &**value else {
         return None;
     };

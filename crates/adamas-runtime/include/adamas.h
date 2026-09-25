@@ -1651,3 +1651,33 @@ adamas_segment *adamas_nursery_abandoned(adamas_frame *frame);
 void adamas_fiber_name_release(adamas_value value);
 
 #endif /* ADAMAS_H */
+
+/* ------------------------------------------------------------------ */
+/* Преобразование между числовыми типами (§4.3)                        */
+/* ------------------------------------------------------------------ */
+
+/** Теги числовых типов: индекс в `PrimTy::ALL` на стороне Rust.
+ *
+ * Порядок обязан совпадать, и совпадение это сверяется тестом: разойдись он, и
+ * `int32ToFloat64` считало бы другое преобразование молча. */
+#define ADAMAS_TY_INT8 0u
+#define ADAMAS_TY_INT16 1u
+#define ADAMAS_TY_INT32 2u
+#define ADAMAS_TY_INT64 3u
+#define ADAMAS_TY_UINT8 4u
+#define ADAMAS_TY_UINT16 5u
+#define ADAMAS_TY_UINT32 6u
+#define ADAMAS_TY_UINT64 7u
+#define ADAMAS_TY_FLOAT32 8u
+#define ADAMAS_TY_FLOAT64 9u
+
+/**
+ * Преобразует биты значения типа `from` в биты типа `to` (§4.3).
+ *
+ * Реализация одна на оба понижения нарочно: у плавающего в целое выход за
+ * диапазон есть неопределённое поведение и у C, и у LLVM, а договор трёх
+ * вычислителей требует одного ответа. Правила - заворачивание у целых, усечение
+ * к нулю с насыщением у плавающего в целое, ноль у NaN - повторены машиной в
+ * `PrimCast::apply`.
+ */
+uint64_t adamas_cast(uint64_t bits, uint8_t from, uint8_t to);

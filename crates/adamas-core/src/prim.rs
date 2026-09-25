@@ -224,6 +224,103 @@ impl PrimTy {
         )
     }
 
+    /// Значение как `f64` - для преобразований между родами (§4.3).
+    ///
+    /// Читается по роду и знаку: у плавающего это его же число, у целого -
+    /// точное значение битов со знаком либо без. `Int64` и `UInt64` шире, чем
+    /// мантисса `f64`, и крупные значения округляются - ровно как в C, и это
+    /// названная цена, а не упущение.
+    #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        reason = "обрезка и потеря точности здесь - смысл преобразования, а не промах: §4.3 говорит, что крупное целое округляется"
+    )]
+    pub fn as_fraction(self, bits: u64) -> f64 {
+        match self {
+            Self::Float32 => f64::from(f32::from_bits(bits as u32)),
+            Self::Float64 => f64::from_bits(bits),
+            _ if self.signed() => self.as_signed(bits) as f64,
+            _ => bits as f64,
+        }
+    }
+
+    /// Целое из битов другого целого: младшие биты по ширине цели (§4.3).
+    ///
+    /// Заворачивание, а не отказ: то же правило, каким §4.3 отвечает на
+    /// переполнение (вопрос 151). Расширение при этом идёт **по знаку
+    /// источника** - `int8ToInt64` от `-1` даёт `-1`, а не 255, - и знак этот
+    /// снимает вызывающий, отдавая сюда уже расширенное значение.
+    #[must_use]
+    pub const fn wrapped(self, bits: u64, _from: Self) -> u64 {
+        self.masked(bits)
+    }
+
+    /// Плавающее из числа: своей точностью.
+    #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "сужение до одинарной точности здесь - смысл преобразования"
+    )]
+    pub fn from_double(self, value: f64) -> u64 {
+        match self {
+            Self::Float32 => u64::from((value as f32).to_bits()),
+            _ => value.to_bits(),
+        }
+    }
+
+    /// Целое из плавающего: усечение к нулю с насыщением по краям (§4.3).
+    ///
+    /// Насыщение, а не неопределённое поведение C: договор трёх вычислителей
+    /// требует одного ответа, а у выхода за диапазон его иначе нет. NaN даёт
+    /// ноль.
+    #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        reason = "усечение и насыщение здесь - правило §4.3, а края сравниваются именно в f64"
+    )]
+    pub fn saturated(self, value: f64) -> u64 {
+        if value.is_nan() {
+            return 0;
+        }
+        let width = self.width();
+        if self.signed() {
+            let top = if width == 64 {
+                i64::MAX
+            } else {
+                (1i64 << (width - 1)) - 1
+            };
+            let bottom = if width == 64 {
+                i64::MIN
+            } else {
+                -(1i64 << (width - 1))
+            };
+            let clamped = if value >= top as f64 {
+                top
+            } else if value <= bottom as f64 {
+                bottom
+            } else {
+                value as i64
+            };
+            return self.masked(clamped as u64);
+        }
+        let top = if width == 64 {
+            u64::MAX
+        } else {
+            (1u64 << width) - 1
+        };
+        let clamped = if value >= top as f64 {
+            top
+        } else if value <= 0.0 {
+            0
+        } else {
+            value as u64
+        };
+        self.masked(clamped)
+    }
+
     /// Обрезает биты по ширине типа: хранимое представление всегда нормальное.
     const fn masked(self, bits: u64) -> u64 {
         match self.width() {
@@ -745,6 +842,99 @@ impl fmt::Display for PrimCmp {
     }
 }
 
+/// Преобразование между числовыми типами (§4.3, §10 вопрос 205).
+///
+/// Пишется `int32ToFloat64`, `float64ToInt32`, `uint64ToInt32` - приставка
+/// исходного типа со строчной буквы, `To`, имя целевого. Имя составное, потому
+/// что типов два: у прочих примитивов тип один, и схема `<приставка><Тип>` им
+/// довольно.
+///
+/// # Три правила, и каждое выведено, а не выбрано
+///
+/// **Целое в целое сужается заворачиванием.** Это не новое решение, а то же
+/// самое, которым §4.3 уже отвечает на переполнение (вопрос 151, решение
+/// 2026-09-09): узкий тип хранит младшие биты. Второе правило здесь означало
+/// бы, что `addInt32` и `int64ToInt32` расходятся на одном и том же
+/// переполнении.
+///
+/// **Целое в плавающее считается точно, а крупное округляется.** `Int64` шире
+/// мантиссы `Float64`, и иначе нельзя ни в одном языке с этими ширинами.
+///
+/// **Плавающее в целое усекается к нулю и насыщается по краям.** Усечение - как
+/// в C; насыщение - **требование договора трёх вычислителей**, а не вкус: у C
+/// выход за диапазон есть неопределённое поведение, у LLVM тоже, и машина
+/// считала бы своё. Три ответа вместо одного - ровно то, чего договор не
+/// допускает. NaN даёт ноль, как и `fptosi.sat`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PrimCast {
+    /// Откуда.
+    pub from: PrimTy,
+    /// Куда.
+    pub to: PrimTy,
+}
+
+impl PrimCast {
+    /// Имя, которым преобразование пишется в программе.
+    #[must_use]
+    pub fn name(self) -> String {
+        let head = self.from.name();
+        let mut out = String::with_capacity(head.len() + 2 + self.to.name().len());
+        let mut letters = head.chars();
+        if let Some(first) = letters.next() {
+            // Строчной делается только первая буква: `UInt32` даёт `uInt32`, а
+            // не `uint32`, - иначе `UInt32` и несуществующий `Uint32` писались
+            // бы одинаково.
+            out.extend(first.to_lowercase());
+            out.push_str(letters.as_str());
+        }
+        out.push_str("To");
+        out.push_str(self.to.name());
+        out
+    }
+
+    /// Преобразование по написанному имени.
+    ///
+    /// Имена типов `To` не содержат, поэтому разделитель однозначен.
+    #[must_use]
+    pub fn named(text: &str) -> Option<Self> {
+        let at = text.find("To")?;
+        let (head, tail) = text.split_at(at);
+        let to = PrimTy::named(tail.strip_prefix("To")?)?;
+        let from = PrimTy::ALL
+            .into_iter()
+            .find(|ty| ty.name().eq_ignore_ascii_case(head))?;
+        (from != to).then_some(Self { from, to })
+    }
+
+    /// Считает преобразование над битами литерала.
+    ///
+    /// Ответ есть всегда: насыщение отвечает краем, NaN - нулём, и отказа у
+    /// преобразования не бывает вовсе.
+    #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "обрезка по ширине цели - правило §4.3 (вопрос 151), а не промах"
+    )]
+    pub fn apply(self, bits: u64) -> u64 {
+        if !self.from.floating() && !self.to.floating() {
+            return self.to.wrapped(self.from.as_signed(bits) as u64, self.from);
+        }
+        let value = self.from.as_fraction(bits);
+        if self.to.floating() {
+            self.to.from_double(value)
+        } else {
+            self.to.saturated(value)
+        }
+    }
+}
+
+impl fmt::Display for PrimCast {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.name())
+    }
+}
+
 /// Операция над массивом (§4.11).
 ///
 /// Массив в языке один, представления у него два, и различает их наличие
@@ -1230,6 +1420,8 @@ pub enum Prim {
     Simd,
     /// Операция над вектором: `simdAdd`.
     Across(SimdOp),
+    /// Преобразование между числовыми типами: `int32ToFloat64` (§4.3).
+    Convert(PrimCast),
 }
 
 impl Prim {
@@ -1259,6 +1451,7 @@ impl Prim {
             Self::In(op) => Some(op.name().to_owned()),
             Self::Simd => Some(SIMD.to_owned()),
             Self::Across(op) => Some(op.name().to_owned()),
+            Self::Convert(cast) => Some(cast.name()),
             Self::Lit(..) => None,
         }
     }
@@ -1270,6 +1463,7 @@ impl Prim {
             Self::Lit(ty, bits) if !ty.floating() => ty.as_signed(bits) < 0,
             Self::Lit(..) => self.to_string().starts_with('-'),
             Self::Ty(_)
+            | Self::Convert(_)
             | Self::Op(..)
             | Self::Cmp(..)
             | Self::Array
@@ -1308,6 +1502,9 @@ impl Prim {
         if let Some(op) = SimdOp::named(text) {
             return Some(Self::Across(op));
         }
+        if let Some(cast) = PrimCast::named(text) {
+            return Some(Self::Convert(cast));
+        }
         match text {
             ARRAY => Some(Self::Array),
             BLOCK => Some(Self::Block),
@@ -1339,6 +1536,7 @@ impl fmt::Display for Prim {
             Self::Op(op, ty) => write!(f, "{op}{ty}"),
             Self::Cmp(op, ty) => write!(f, "{op}{ty}"),
             Self::Array => f.write_str(ARRAY),
+            Self::Convert(cast) => write!(f, "{cast}"),
             Self::Over(op) => write!(f, "{op}"),
             Self::Block => f.write_str(BLOCK),
             Self::In(op) => write!(f, "{op}"),

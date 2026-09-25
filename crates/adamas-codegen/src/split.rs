@@ -341,7 +341,8 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         Expr::ArrayData { array: value }
         | Expr::Unpack { value, .. }
         | Expr::Cancel { value, .. }
-        | Expr::SimdSplat { value, .. } => {
+        | Expr::SimdSplat { value, .. }
+        | Expr::Convert { value, .. } => {
             vec![value]
         }
         Expr::RegionLast { region } => vec![region],
@@ -540,6 +541,7 @@ impl Anf<'_> {
         match expr {
             Expr::Local(local) => self.locals.get(local).copied().unwrap_or(Repr::Boxed),
             Expr::Literal { ty, .. } | Expr::Primitive { ty, .. } => Repr::Flat(*ty),
+            Expr::Convert { cast, .. } => Repr::Flat(cast.to),
             Expr::Call { function, .. } => {
                 self.results.get(function.0).copied().unwrap_or(Repr::Boxed)
             }

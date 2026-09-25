@@ -446,6 +446,7 @@ impl Pass<'_> {
             | Expr::SimdLane { .. }
             | Expr::SimdArith { .. } => self.vector(expr, owned),
             Expr::Primitive { .. } | Expr::Compare { .. } => self.binary(expr, owned),
+            Expr::Convert { .. } => self.converting(expr, owned),
             Expr::Construct {
                 constructor,
                 reuse,
@@ -596,6 +597,19 @@ impl Pass<'_> {
     /// плоский, либо непосредственный конструктор `Bool`, - но подвыражения
     /// вправе называть связывания, и порядок их тот же, что у всех:
     /// [`Pass::sequence`] решает, кто из двух потребляет.
+    /// Преобразование между числовыми типами (§4.3).
+    ///
+    /// Одноместно и плоско насквозь: счётчика ни у входа, ни у выхода нет, и RC
+    /// по нему не идёт (§5.1).
+    fn converting(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
+        let Expr::Convert { cast, value } = expr else {
+            return expr;
+        };
+        let (mut parts, spare) = self.sequence(vec![*value], owned);
+        let value = Box::new(parts.pop().unwrap_or(Expr::Erased));
+        drops(spare, Expr::Convert { cast, value })
+    }
+
     fn binary(&mut self, expr: Expr, owned: &BTreeSet<LocalId>) -> Expr {
         let (op, ty, left, right, verdict) = match expr {
             Expr::Primitive {
@@ -1492,7 +1506,7 @@ impl Pass<'_> {
             // Вектор (§4.9) ячейки не занимает - он плоский и живёт в регистре,
             // - но подвыражения его обходятся тем же правилом, каким их обходит
             // арифметика: под ними стоит `Bind`, а под ним что угодно.
-            Expr::SimdSplat { value, .. } => self.plans(value, slots),
+            Expr::SimdSplat { value, .. } | Expr::Convert { value, .. } => self.plans(value, slots),
             Expr::SimdLane { vector, at, .. } => {
                 self.plans(vector, slots) || self.plans(at, slots)
             }
@@ -1629,7 +1643,9 @@ impl Pass<'_> {
                 self.attach(array, slots, token) || self.attach(at, slots, token)
             }
             // Обход тот же, что у [`Pass::plans`] выше, и по тому же доводу.
-            Expr::SimdSplat { value, .. } => self.attach(value, slots, token),
+            Expr::SimdSplat { value, .. } | Expr::Convert { value, .. } => {
+                self.attach(value, slots, token)
+            }
             Expr::SimdLane { vector, at, .. } => {
                 self.attach(vector, slots, token) || self.attach(at, slots, token)
             }

@@ -252,6 +252,13 @@ pub fn prim_scheme(signature: &Signature, prim: Prim) -> Term {
                 arrow(Mult::Many, over.clone(), over),
             )
         }
+        // Преобразование одноместно, и типы у домена с кодоменом разные - этим
+        // оно и отличается от прочих скалярных примитивов (§4.3).
+        Prim::Convert(cast) => arrow(
+            Mult::Many,
+            Term::Prim(Prim::Ty(cast.from)),
+            Term::Prim(Prim::Ty(cast.to)),
+        ),
         // Сравнение отвечает `Bool` - именем программы, взятым тем же
         // соглашением, что `Flat` ниже. Не объявлено - тип строится всё равно,
         // и отказывает проверка: «имя `Bool` не объявлено».

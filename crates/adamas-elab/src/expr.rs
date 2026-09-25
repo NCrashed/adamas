@@ -4018,6 +4018,11 @@ impl<'a> Elaborator<'a> {
         if let Some((op, prim)) = PrimOp::named(&name.text) {
             return Ok(Term::Prim(Prim::Op(op, prim)));
         }
+        // Преобразование (§4.3, §10 вопрос 205) - тем же правилом имени:
+        // `int32ToFloat64` занято языком, как занят `addInt32`.
+        if let Some(cast) = adamas_core::prim::PrimCast::named(&name.text) {
+            return Ok(Term::Prim(Prim::Convert(cast)));
+        }
         // Дополнение (§4.3, трек A волны 4 Фазы 7) - тем же правилом имени, но
         // **не своей операцией**: `notT x` есть `xorT` со всеми единицами.
         // Инструкции `not` у LLVM нет вовсе, и унарный узел в ядре пришлось бы

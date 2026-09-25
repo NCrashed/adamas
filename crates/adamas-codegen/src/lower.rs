@@ -3812,6 +3812,24 @@ impl<'a> Lowerer<'a> {
                     })
                 }
             }
+            Prim::Convert(cast) => {
+                let [value] = arguments else {
+                    return Err(LowerError::Partial { name: cast.name() });
+                };
+                let value = self.given(
+                    scope,
+                    value,
+                    Repr::Flat(cast.from),
+                    "аргумент преобразования",
+                )?;
+                Ok((
+                    Expr::Convert {
+                        cast,
+                        value: Box::new(value),
+                    },
+                    Repr::Flat(cast.to),
+                ))
+            }
             Prim::Op(op, ty) => {
                 let [left, right] = arguments else {
                     return Err(LowerError::Partial {

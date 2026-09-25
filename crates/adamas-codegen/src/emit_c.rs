@@ -460,6 +460,20 @@ fn from_word(repr: Repr, value: &str) -> String {
 }
 
 /// C-тип связывания.
+/// Тег числового типа для `adamas_cast`: индекс в `PrimTy::ALL`.
+///
+/// Тот же порядок повторён константами `ADAMAS_TY_*` в `adamas.h` и печатью
+/// LLVM-эмиттера. Три записи одного порядка сверяются тестом.
+fn tag_of(ty: PrimTy) -> u8 {
+    u8::try_from(
+        PrimTy::ALL
+            .into_iter()
+            .position(|it| it == ty)
+            .unwrap_or_default(),
+    )
+    .unwrap_or_default()
+}
+
 fn c_type(repr: Repr) -> String {
     match repr {
         // Плоский агрегат - свой тип на укладку: байты по значению, и передаётся
@@ -1822,6 +1836,7 @@ impl Emitter<'_> {
         match expr {
             Expr::Local(local) => self.reprs.get(local).copied().unwrap_or(Repr::Boxed),
             Expr::Literal { ty, .. } | Expr::Primitive { ty, .. } => Repr::Flat(*ty),
+            Expr::Convert { cast, .. } => Repr::Flat(cast.to),
             Expr::Call { function, .. } => self.program.functions[function.0].result,
             // Чужой вызов (§5.3): ответ его берётся из таблицы символов.
             Expr::Foreign { function, .. } => self.program.foreigns[function.0].result.repr(),
@@ -1949,6 +1964,7 @@ impl Emitter<'_> {
                 yes,
                 no,
             } => self.comparison(*op, *ty, left, right, (*yes, *no), depth),
+            Expr::Convert { cast, value } => self.conversion(*cast, value, depth),
             Expr::Layout { size, align } => self.descriptor(*size, *align, depth),
             Expr::LayoutField { descriptor, align } => {
                 self.descriptor_field(*descriptor, *align, depth)
@@ -2333,6 +2349,33 @@ impl Emitter<'_> {
     }
 
     /// Примитивная операция над двумя плоскими значениями.
+    /// Преобразование между числовыми типами (§4.3, §10 вопрос 205).
+    ///
+    /// Зовёт **рантайм**, а не печатает приведение C, и довод у этого один:
+    /// у плавающего в целое выход за диапазон есть неопределённое поведение, а
+    /// договор трёх вычислителей требует одного ответа. Та же функция зовётся с
+    /// LLVM-пути, и правила её повторены машиной.
+    fn conversion(
+        &mut self,
+        cast: adamas_core::prim::PrimCast,
+        value: &Expr,
+        depth: usize,
+    ) -> String {
+        let pad = Self::pad(depth);
+        let value = self.value(value, depth);
+        let name = self.temp();
+        let _ = writeln!(
+            self.out,
+            "{pad}{} {name} = adamas_bits_{}(adamas_cast(adamas_word_{}({value}), {}u, {}u));",
+            c_type(Repr::Flat(cast.to)),
+            cast.to.name(),
+            cast.from.name(),
+            tag_of(cast.from),
+            tag_of(cast.to)
+        );
+        name
+    }
+
     fn arithmetic(
         &mut self,
         op: PrimOp,

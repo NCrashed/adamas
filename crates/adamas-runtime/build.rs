@@ -4,9 +4,10 @@ use std::path::PathBuf;
 
 /// Исходники рантайма в порядке слоёв: объекты, массивы, регионы обычные и
 /// разделяемые, вектор, замыкания, кадры, файберы, стек.
-const SOURCES: [&str; 9] = [
+const SOURCES: [&str; 10] = [
     "c/object.c",
     "c/array.c",
+    "c/cast.c",
     "c/region.c",
     "c/shared.c",
     "c/evidence.c",

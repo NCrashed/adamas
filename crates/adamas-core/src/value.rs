@@ -207,6 +207,11 @@ pub enum Head {
     /// в конструктор `Bool`, объявленный программой: ответа своего типа у
     /// сравнения нет.
     Cmp(crate::prim::PrimCmp, PrimTy),
+    /// Преобразование между числовыми типами: `int32ToFloat64` (§4.3).
+    ///
+    /// Голова по тому же доводу, что и [`Head::Prim`]: сводится, когда в спайне
+    /// набрался один литерал.
+    Convert(crate::prim::PrimCast),
     /// Тип массива `Array n a` (§4.11): голова, применяемая к длине и элементу.
     Array,
     /// Операция над массивом (§4.11).
@@ -676,6 +681,9 @@ impl fmt::Display for Value {
             }
             Self::Neutral(Head::Cmp(op, ty), spine) => {
                 write!(f, "{op}{ty}·{}", spine.len())
+            }
+            Self::Neutral(Head::Convert(cast), spine) => {
+                write!(f, "{cast}·{}", spine.len())
             }
             Self::Neutral(Head::Array, spine) => {
                 write!(f, "{}·{}", crate::prim::ARRAY, spine.len())

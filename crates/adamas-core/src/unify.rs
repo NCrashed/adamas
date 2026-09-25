@@ -121,6 +121,7 @@ pub(crate) fn classify(signature: &Signature, value: &Rc<Value>) -> Shape {
         | Head::Meta(_)
         | Head::Prim(..)
         | Head::Cmp(..)
+        | Head::Convert(..)
         | Head::Array
         | Head::ArrayOp(_)
         | Head::Block(_)

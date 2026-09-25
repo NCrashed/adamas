@@ -633,6 +633,46 @@ fn boundaries(program: &Program, suspending: &Suspension) -> Result<(), LlvmErro
 /// решает `adamas_array_writable`, адрес ячейки с проверкой границы отдаёт
 /// `adamas_array_at`; сама ячейка при этом читается и пишется **инструкцией**
 /// (см. [`Builder::array_set`]).
+/// Тег числового типа для `adamas_cast`: индекс в `PrimTy::ALL`.
+///
+/// Тот же порядок повторён константами `ADAMAS_TY_*` в `adamas.h` и печатью
+/// C-эмиттера. Три записи одного порядка сверяются тестом.
+fn tag_of(ty: PrimTy) -> u8 {
+    u8::try_from(
+        PrimTy::ALL
+            .into_iter()
+            .position(|it| it == ty)
+            .unwrap_or_default(),
+    )
+    .unwrap_or_default()
+}
+
+/// Объявление преобразования между числовыми типами (§4.3, §10 вопрос 205).
+///
+/// Условно, как и объявления массива, и по тому же доводу: на программе без
+/// преобразований выход байт в байт тот же, что был до этой работы.
+///
+/// Реализация одна на оба понижения нарочно: у плавающего в целое выход за
+/// диапазон есть неопределённое поведение и у C, и у LLVM, а договор трёх
+/// вычислителей требует одного ответа.
+fn conversions(out: &mut String, program: &Program) {
+    let found = program.functions.iter().any(|function| {
+        let mut seen = false;
+        walk(&function.body, &mut |expr| {
+            seen |= matches!(expr, Expr::Convert { .. });
+        });
+        seen
+    });
+    if !found {
+        return;
+    }
+    out.push_str(concat!(
+        "; Преобразование чисел (§4.3): реализация в рантайме, одна на оба пути.\n",
+        "declare i64 @adamas_cast(i64, i8, i8)\n",
+        "\n",
+    ));
+}
+
 fn arrays(out: &mut String, program: &Program) {
     if !arrayed(program) {
         return;
@@ -1859,6 +1899,7 @@ impl Module {
 
         second_form(&mut out, program);
         arrays(&mut out, program);
+        conversions(&mut out, program);
         regions(&mut out, program);
         foreigns(&mut out, program);
 
@@ -2710,6 +2751,7 @@ impl<'a> Builder<'a> {
         match expr {
             Expr::Local(local) => self.reprs.get(local).copied().unwrap_or(Repr::Boxed),
             Expr::Literal { ty, .. } | Expr::Primitive { ty, .. } => Repr::Flat(*ty),
+            Expr::Convert { cast, .. } => Repr::Flat(cast.to),
             Expr::Call { function, .. } => self.program.functions[function.0].result,
             // Чужой вызов (§5.3): ответ его берётся из таблицы символов.
             Expr::Foreign { function, .. } => self.program.foreigns[function.0].result.repr(),
@@ -2973,6 +3015,20 @@ impl<'a> Builder<'a> {
                 yes,
                 no,
             } => self.comparison(*op, *ty, left, right, (yes.0, no.0)),
+            Expr::Convert { cast, value } => {
+                let value = self.value(value)?;
+                let word = self.widen(cast.from, &value);
+                let answer = self.temp();
+                self.instruction(
+                    &format!(
+                        "{answer} = call i64 @adamas_cast(i64 {word}, i8 {}, i8 {})",
+                        tag_of(cast.from),
+                        tag_of(cast.to)
+                    ),
+                    self.here(),
+                );
+                Ok(self.narrow(cast.to, &answer))
+            }
             Expr::Call {
                 function,
                 arguments,

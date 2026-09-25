@@ -79,6 +79,9 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
         Term::Prim(crate::prim::Prim::Cmp(op, ty)) => {
             Rc::new(Value::Neutral(Head::Cmp(*op, *ty), Vec::new()))
         }
+        Term::Prim(crate::prim::Prim::Convert(cast)) => {
+            Rc::new(Value::Neutral(Head::Convert(*cast), Vec::new()))
+        }
         // Массив и операции над ним - головы по той же причине: и тип
         // применяется к длине с элементом, и операция копит аргументы спайном
         // (§4.11).
@@ -502,6 +505,11 @@ pub fn try_apply(callee: &Rc<Value>, argument: Rc<Value>) -> Option<Rc<Value>> {
                     return Some(verdict);
                 }
             }
+            if let Head::Convert(cast) = head {
+                if let Some(answer) = converted(*cast, &spine) {
+                    return Some(answer);
+                }
+            }
             if let Head::ArrayOp(op) = head {
                 if let Some(answer) = arrayed(*op, &spine) {
                     return Some(answer);
@@ -533,6 +541,22 @@ pub fn try_apply(callee: &Rc<Value>, argument: Rc<Value>) -> Option<Rc<Value>> {
 /// не отдаёт ему ответа. Это та же названная граница, что у чтения вне длины
 /// массива: понижение обрывает прогон, машина не отвечает вовсе, и сходятся
 /// два вычислителя в том, что ответа не даёт ни один.
+/// Сводит преобразование, когда его единственный аргумент - литерал (§4.3).
+fn converted(cast: crate::prim::PrimCast, spine: &[Elim]) -> Option<Rc<Value>> {
+    let [Elim::App(argument)] = spine else {
+        return None;
+    };
+    let Value::Prim(crate::prim::Prim::Lit(ty, bits)) = &**argument else {
+        return None;
+    };
+    (*ty == cast.from).then(|| {
+        Rc::new(Value::Prim(crate::prim::Prim::literal(
+            cast.to,
+            cast.apply(*bits),
+        )))
+    })
+}
+
 fn folded(op: crate::prim::PrimOp, ty: crate::prim::PrimTy, spine: &[Elim]) -> Option<Rc<Value>> {
     let [Elim::App(left), Elim::App(right)] = spine else {
         return None;
@@ -1330,6 +1354,7 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
                 Head::Meta(meta) => Term::Meta(*meta),
                 Head::Prim(op, ty) => Term::Prim(crate::prim::Prim::Op(*op, *ty)),
                 Head::Cmp(op, ty) => Term::Prim(crate::prim::Prim::Cmp(*op, *ty)),
+                Head::Convert(cast) => Term::Prim(crate::prim::Prim::Convert(*cast)),
                 Head::Array => Term::Prim(crate::prim::Prim::Array),
                 Head::ArrayOp(op) => Term::Prim(crate::prim::Prim::Over(*op)),
                 Head::Block(block) => quote_block(size, block),

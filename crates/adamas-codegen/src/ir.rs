@@ -1240,6 +1240,17 @@ pub enum Expr {
         /// Правый аргумент.
         right: Box<Expr>,
     },
+    /// Преобразование между числовыми типами (§4.3, §10 вопрос 205).
+    ///
+    /// Одноместно, и типы у входа с выходом разные - этим и отличается от
+    /// [`Expr::Primitive`]. Насыщение плавающего в целое стоит в эмиттерах, а
+    /// не здесь: правило одно, а инструкции у C и LLVM разные.
+    Convert {
+        /// Какое.
+        cast: adamas_core::prim::PrimCast,
+        /// Что преобразуется.
+        value: Box<Expr>,
+    },
     /// Вектор, все дорожки которого заняты одним значением (§4.9).
     ///
     /// Ячейки кучи не занимает: вектор плоский, и лежит он в регистре. У LLVM
@@ -1692,7 +1703,8 @@ impl Expr {
             Self::Environment { closure, .. } => vec![closure],
             Self::Unpack { value, .. }
             | Self::Cancel { value, .. }
-            | Self::SimdSplat { value, .. } => vec![value],
+            | Self::SimdSplat { value, .. }
+            | Self::Convert { value, .. } => vec![value],
             Self::RegionLast { region } => vec![region],
             Self::RegionAlloc { region, value, .. } => vec![region, value],
             Self::RegionRead { region, at, .. }

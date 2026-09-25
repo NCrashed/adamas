@@ -450,6 +450,7 @@ fn read(
                 Head::Meta(found) => Term::Meta(*found),
                 Head::Prim(op, ty) => Term::Prim(crate::prim::Prim::Op(*op, *ty)),
                 Head::Cmp(op, ty) => Term::Prim(crate::prim::Prim::Cmp(*op, *ty)),
+                Head::Convert(cast) => Term::Prim(crate::prim::Prim::Convert(*cast)),
                 Head::Array => Term::Prim(crate::prim::Prim::Array),
                 Head::ArrayOp(op) => Term::Prim(crate::prim::Prim::Over(*op)),
                 // Блок замкнут: ячейки его - литералы, а тип элемента -
@@ -572,6 +573,7 @@ fn rigid(head: &Head, leading: &[Rc<Value>]) -> Option<Term> {
         // Операция замкнута, как и константа. Массив с его операциями - тоже.
         Head::Prim(op, ty) => Some(Term::Prim(crate::prim::Prim::Op(*op, *ty))),
         Head::Cmp(op, ty) => Some(Term::Prim(crate::prim::Prim::Cmp(*op, *ty))),
+        Head::Convert(cast) => Some(Term::Prim(crate::prim::Prim::Convert(*cast))),
         Head::Array => Some(Term::Prim(crate::prim::Prim::Array)),
         Head::ArrayOp(op) => Some(Term::Prim(crate::prim::Prim::Over(*op))),
         Head::Block(block) => Some(crate::eval::quote_block(0, block)),

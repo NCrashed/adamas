@@ -2,6 +2,7 @@
 -- файла. `import Std.Classes` без списка - модуль нужен объявлением, а имена
 -- классов и так имена программы.
 
+import Prelude
 import Std.Base (Bool, False, True, Nat, Zero, Succ, List, Nil, Cons)
 import Std.Classes
 

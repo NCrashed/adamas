@@ -169,7 +169,14 @@ pub(crate) fn checked(
         || entry.display().to_string(),
         |it| it.file.name().to_owned(),
     );
-    let files = program.units.len();
+    // Прелюдия подключается неявно (§4.4), и считать её файлом программы -
+    // неправда: автор её не писал и в отчёте не ждёт. По той же причине её
+    // объявления не входят в счёт ниже.
+    let files = program
+        .units
+        .iter()
+        .filter(|it| it.path.as_deref() != Some(adamas_elab::program::PRELUDE))
+        .count();
     let signature = program
         .signature
         .ok_or_else(|| anyhow::anyhow!("{name}: проход не отдал сигнатуры"))?;

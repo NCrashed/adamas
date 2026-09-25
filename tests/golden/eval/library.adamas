@@ -34,6 +34,7 @@
 -- Именно этот путь и отвергался «определение `True` не найдено», когда `Bool`
 -- объявлен под путём.
 
+import Prelude
 import Cmp.Truth (Bool, False, True)
 import Cmp.Words (isBig, isSmall, known, classify, sumDown)
 

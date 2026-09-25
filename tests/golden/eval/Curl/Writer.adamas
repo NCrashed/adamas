@@ -44,6 +44,7 @@
 -- не держится ничем (§10 вопрос 185, остаток; тот же пункт назвал трек A волны
 -- 6 у пары «буфер - поток»).
 
+import Prelude
 import Curl.Raw (Unit, MkUnit, Foreign)
 
 import Curl.Easy (Fetched, Code, fetch, runForeign, Bool, True, False)

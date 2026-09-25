@@ -1,6 +1,7 @@
 -- Эффекты и хендлеры. `collected` собирает список параметризованным хендлером,
 -- а разворачивает его `reverse` - из третьего файла.
 
+import Prelude
 import Std.Base (Unit, MkUnit, Nat, Zero, Succ, Maybe, Nothing, Just, List, Nil, Cons)
 import Std.ListOps (reverse)
 

@@ -1,6 +1,7 @@
 -- Классы и инстансы. Класс - имя **программы**, а не член файла (§4.4): всякий,
 -- кто этот модуль подключил, зовёт `eq` и `map` без квалификации.
 
+import Prelude
 import Std.Base (Bool, False, True, Nat, Zero, Succ, Maybe, Nothing, Just, List, Nil, Cons)
 import Std.Logic (and)
 

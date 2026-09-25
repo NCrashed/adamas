@@ -263,9 +263,9 @@ fn a_place_from_an_imported_module_is_not_drawn_here() {
     assert_eq!(
         lines(&uri, &document, whole()),
         [
-            "41:0 @noalloc",
-            "47:0 куча@library.adamas:48:7: запись",
-            "48:7 куча",
+            "42:0 @noalloc",
+            "48:0 куча@library.adamas:49:7: запись",
+            "49:7 куча",
         ],
         "трёх файлов программа, а подсказки - только у своего"
     );
@@ -280,6 +280,7 @@ fn a_place_from_an_imported_module_is_not_drawn_here() {
 #[test]
 fn a_link_in_another_file_points_into_that_file() {
     const BORROWED: &str = "\
+import Prelude
 import Cmp.Truth (Bool)
 import Cmp.Words (isBig)
 
@@ -290,7 +291,7 @@ echo n = isBig n
     let found = lines(&uri, &document, whole());
     let status = found
         .iter()
-        .find(|line| line.starts_with("3:0 "))
+        .find(|line| line.starts_with("4:0 "))
         .unwrap_or_else(|| panic!("статус над `echo` обязан быть: {found:?}"));
     assert!(
         status.contains("@Words.adamas:"),

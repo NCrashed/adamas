@@ -1,5 +1,6 @@
 -- Алиас, экзистенциал и `Maybe` как монада.
 
+import Prelude
 import Std.Base (Bool, False, True, Nat, Zero, Succ, Maybe, Nothing, Just)
 import Std.Classes
 

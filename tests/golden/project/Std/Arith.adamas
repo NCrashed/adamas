@@ -1,5 +1,6 @@
 -- Арифметика на унарных числах.
 
+import Prelude
 import Std.Base (Nat, Zero, Succ)
 
 plus : Nat -> (1 m : Nat) -> Nat

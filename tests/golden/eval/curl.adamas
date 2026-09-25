@@ -71,6 +71,7 @@
 --      `eval/callback-outlives.adamas` - там та же регистрация обслуживает два
 --      чужих вызова подряд.
 
+import Prelude
 import Curl.Raw (Unit, MkUnit, Foreign)
 
 import Curl.Easy

@@ -1010,11 +1010,29 @@ impl Signature {
         if let Some((declared, _)) = self.definitions.get_key_value(name) {
             return Rc::clone(declared);
         }
-        let mut matching = self
+        // Прелюдное объявление на этой ступени **строго запасное**. Иначе оно
+        // делало бы неединственным всякое имя, которое автор объявил сам, - а
+        // таких в корпусе сотня, - и ступень переставала бы отвечать вовсе.
+        // Наблюдалось это прогоном: собранная программа обрывалась «разбор не
+        // знает конструктора» при зелёной проверке типов.
+        //
+        // Двусмысленность **между своими** по-прежнему не разрешается: две
+        // `Bool`, написанные автором, разрешит тот, кто их написал.
+        let head = format!("{}.", crate::prim::PRELUDE);
+        let mut mine = self
+            .definitions
+            .keys()
+            .filter(|it| crate::term::short(it) == name && !it.starts_with(&head));
+        match (mine.next(), mine.next()) {
+            (Some(only), None) => return Rc::clone(only),
+            (Some(_), Some(_)) => return Name::from(name),
+            (None, _) => {}
+        }
+        let mut theirs = self
             .definitions
             .keys()
             .filter(|it| crate::term::short(it) == name);
-        match (matching.next(), matching.next()) {
+        match (theirs.next(), theirs.next()) {
             (Some(only), None) => Rc::clone(only),
             _ => Name::from(name),
         }

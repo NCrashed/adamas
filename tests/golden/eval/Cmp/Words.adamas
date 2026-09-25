@@ -17,6 +17,7 @@
 -- до 188 модуль со сравнением проверялся лишь внутри хозяина, объявившего
 -- `Bool` выше строки `import`.
 
+import Prelude
 import Cmp.Truth (Bool, False, True, not)
 
 isBig : UInt64 -> Bool

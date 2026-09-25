@@ -1,5 +1,6 @@
 -- Логика над `Bool`.
 
+import Prelude
 import Std.Base (Bool, False, True)
 
 not : Bool -> Bool

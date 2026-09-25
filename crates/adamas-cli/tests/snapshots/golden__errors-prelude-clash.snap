@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: prelude-clash.adamas:17:20: имя `Bool` приходит и из прелюдии, и из `Truthy.Own`: объявите своё, не открывайте чужое либо откажитесь от прелюдии
+  import Truthy.Own (Bool, True)
+                     ^^^^

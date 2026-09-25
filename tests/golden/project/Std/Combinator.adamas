@@ -1,5 +1,6 @@
 -- Комбинаторы. Кратности написаны, потому что `flip` и `comp` их переставляют.
 
+import Prelude
 import Std.Base (Pair, MkPair)
 
 identity : {q : Mult} -> (q x : a) -> a

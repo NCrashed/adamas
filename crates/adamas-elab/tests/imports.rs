@@ -235,8 +235,14 @@ main = R.pass L.left
         "общий модуль объявлен под своим путём"
     );
     // Файлов ровно четыре: вход и три модуля. Повторное объявление дало бы
-    // пятый - и второй, несовместимый `Base.Tag`.
-    assert_eq!(program.units.len(), 4, "общий модуль подключён дважды");
+    // пятый - и второй, несовместимый `Base.Tag`. Прелюдия в счёт не входит:
+    // подключается она неявно каждому файлу (§4.4), автор её не писал.
+    let written = program
+        .units
+        .iter()
+        .filter(|it| it.path.as_deref() != Some(adamas_elab::program::PRELUDE))
+        .count();
+    assert_eq!(written, 4, "общий модуль подключён дважды");
 }
 
 #[test]
@@ -261,6 +267,7 @@ instance Eqv Bool where
 ",
     );
     let entry = "\
+import Prelude
 import Classes (Bool, True)
 
 main : Bool

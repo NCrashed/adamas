@@ -12,6 +12,7 @@
 -- сегментом. Сними её, и `adamas build` этой программы отвечает «имя `True` не
 -- объявлено» при зелёной проверке типов.
 
+import Prelude
 import Cmp.Words (classify, sumDown)
 
 type Answers = { zero : UInt64, other : UInt64, down : UInt64 }

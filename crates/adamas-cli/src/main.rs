@@ -187,13 +187,13 @@ fn check(path: &std::path::Path, wanted: &[String]) -> anyhow::Result<()> {
                 "{}: проверено, файлов {}, объявлений {}",
                 checked.name,
                 checked.files,
-                checked.signature.len()
+                declared(&checked.signature)
             );
         } else {
             println!(
                 "{}: проверено, объявлений {}",
                 checked.name,
-                checked.signature.len()
+                declared(&checked.signature)
             );
         }
         return Ok(());
@@ -231,4 +231,18 @@ fn evaluate(path: &std::path::Path, name: &str, full: bool) -> anyhow::Result<()
     let depth = if full { None } else { Some(PRINT_DEPTH) };
     println!("{}", answer.printed(depth));
     Ok(())
+}
+
+/// Сколько объявлений написано программой.
+///
+/// Прелюдные не входят: подключаются они неявно (§4.4), автор их не писал, и
+/// счёт с ними говорил бы про программу неправду - у всякой она выросла бы на
+/// одно и то же число.
+fn declared(signature: &adamas_core::sig::Signature) -> usize {
+    let head = format!("{}.", adamas_elab::program::PRELUDE);
+    signature
+        .names()
+        .into_iter()
+        .filter(|name| !name.starts_with(&head))
+        .count()
 }

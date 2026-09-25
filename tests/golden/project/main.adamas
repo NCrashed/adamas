@@ -9,6 +9,7 @@
 -- Ответ **позиционный**: суммой любая перестановка давала бы то же число, и
 -- половина библиотеки не участвовала бы в ответе вовсе.
 
+import Prelude
 import Std.Base (Bool, False, True, Nat, Zero, Succ, Maybe, Nothing, Just, List, Nil, Cons)
 import Std.Logic (not, or)
 import Std.Arith (plus, times)

@@ -1018,8 +1018,8 @@ fn an_edit_in_a_module_moves_the_dependents_diagnostic() {
     assert_eq!(
         broken[0]["range"],
         json!({
-            "start": { "line": 13, "character": 24 },
-            "end": { "line": 13, "character": 29 },
+            "start": { "line": 14, "character": 24 },
+            "end": { "line": 14, "character": 29 },
         }),
         "подчёркнуто `times` в списке открытых имён входного файла"
     );
@@ -1052,7 +1052,7 @@ fn an_edit_in_a_module_moves_the_dependents_diagnostic() {
     );
     assert_eq!(
         mismatch[0]["range"]["start"]["line"],
-        json!(41),
+        json!(42),
         "подчёркнут список `main`, а не строка импорта"
     );
 
@@ -1099,8 +1099,8 @@ fn a_refusal_inside_a_module_is_underlined_in_that_module() {
     assert_eq!(
         there[0]["range"],
         json!({
-            "start": { "line": 6, "character": 11 },
-            "end": { "line": 6, "character": 15 },
+            "start": { "line": 7, "character": 11 },
+            "end": { "line": 7, "character": 15 },
         }),
         "подчёркнут `Zero` в `Std/Logic.adamas`, а не строка входного файла"
     );

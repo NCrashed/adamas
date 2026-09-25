@@ -69,6 +69,12 @@ fn rendered(program: &Program, store: &Path) -> String {
         if Path::new(unit.file.name()).starts_with(store) {
             continue;
         }
+        // Прелюдия подключается неявно (§4.4), и документировать её вместе с
+        // программой - неправда: автор её не писал. Своя документация у неё
+        // есть, и живёт она в самом файле.
+        if unit.path.as_deref() == Some(adamas_elab::program::PRELUDE) {
+            continue;
+        }
         out.push_str(&documented(program, unit));
     }
     out

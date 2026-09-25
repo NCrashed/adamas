@@ -1,6 +1,7 @@
 -- Списки. Подключает три модуля - свёртки зовут `plus`, `reverse` зовёт `flip`,
 -- `filterList` разбирает `Bool`.
 
+import Prelude
 import Std.Base (Bool, False, True, Nat, Zero, Succ, List, Nil, Cons)
 import Std.Arith (plus)
 import Std.Combinator (flip)

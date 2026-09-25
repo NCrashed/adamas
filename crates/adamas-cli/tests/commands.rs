@@ -352,7 +352,7 @@ fn a_test_may_use_a_boolean_from_another_module() {
     );
     write(
         &app.join("src/Test.adamas"),
-        "import Std.Base (Bool, False, True)\n\ntestImported : Bool\ntestImported = True\n",
+        "import Prelude\nimport Std.Base (Bool, False, True)\n\ntestImported : Bool\ntestImported = True\n",
     );
 
     let (ok, stdout, stderr) = run(adamas().arg("test").arg(&app));
@@ -380,11 +380,11 @@ fn tests_of_an_imported_module_are_not_run() {
     // Тест соседа заведомо красный: прогонись он - сюита покраснела бы.
     write(
         &app.join("src/Other.adamas"),
-        "import Main (Bool, False, True)\n\ntestAlien : Bool\ntestAlien = False\n",
+        "import Prelude\nimport Main (Bool, False, True)\n\ntestAlien : Bool\ntestAlien = False\n",
     );
     write(
         &app.join("src/Test.adamas"),
-        "import Main (Bool, False, True)\nimport Other (testAlien)\n\ntestOwn : Bool\ntestOwn = True\n",
+        "import Prelude\nimport Main (Bool, False, True)\nimport Other (testAlien)\n\ntestOwn : Bool\ntestOwn = True\n",
     );
 
     let (ok, stdout, stderr) = run(adamas().arg("test").arg(&app));

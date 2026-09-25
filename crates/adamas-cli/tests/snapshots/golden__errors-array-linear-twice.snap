@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: array-linear-twice.adamas:14:12: `xs` объявлена с кратностью 1, а использована ω
+  twice xs = addInt32 (arrayIndex (arraySet xs 0 1) 0) (arrayIndex xs 0)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  путь: тело `twice`

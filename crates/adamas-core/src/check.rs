@@ -421,7 +421,7 @@ fn array_op_scheme(op: crate::prim::ArrayOp, word: &Term, universe: &Term) -> Te
                 "a",
                 universe.clone(),
                 bound(
-                    given,
+                    Binder::explicit(Mult::One),
                     "xs",
                     array(Term::var(1), Term::var(0)),
                     bound(

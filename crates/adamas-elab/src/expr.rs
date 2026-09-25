@@ -3473,6 +3473,33 @@ impl<'a> Elaborator<'a> {
         term
     }
 
+    /// Сводит домен связывания с типом написанного аргумента досрочно.
+    ///
+    /// Нужно это ради **голого литерала** дальше по спайну: в позиции
+    /// нерешённого имплисита он разворачивался унарно и жаловался на
+    /// ненайденное `Zero`. `firstOf two 3` при `firstOf : {a} -> a -> a -> a`
+    /// отвергался, хотя `a` решён вторым словом строки.
+    ///
+    /// Зовётся **только** там, где без него был отказ. Правка общая - сводить
+    /// всегда - двигает маршруты у всего: тридцать упавших свидетелей против
+    /// ноля, и половина из них про семейства, чьи индексы обязаны остаться
+    /// нерешёнными.
+    ///
+    /// Сведение спекулятивно: не сошлось - откат, и говорить об этом
+    /// полагается настоящей проверке, у которой есть и кратности, и контекст.
+    fn reconciled(&mut self, expected: Option<&Rc<Value>>, argument: &Term) {
+        let Some(domain) = expected else {
+            return;
+        };
+        let Some(actual) = self.synthesized(argument) else {
+            return;
+        };
+        let mark = self.metas.mark();
+        if !convertible(self.signature, self.metas, self.ctx.size(), domain, &actual) {
+            self.metas.rollback(mark);
+        }
+    }
+
     /// Кратность, с которой разбор потребляет разбираемое (§3.3, вопрос 65).
     ///
     /// У написанного имени берётся кратность его связывания: разбирается
@@ -4319,7 +4346,12 @@ impl<'a> Elaborator<'a> {
             .ok()
             .map(|(ty, _)| ty);
         let mut ty = zeroed.or_else(|| self.synthesized(&term));
+        let literal_ahead = literals_ahead(&arguments);
+
+        let mut position = arguments.len();
         for argument in arguments.iter().rev().copied() {
+            position -= 1;
+            let ahead = literal_ahead.get(position).copied().unwrap_or(false);
             if let Some(current) = ty.take() {
                 let (inserted, rest) = self.inserted(term, current);
                 term = inserted;
@@ -4364,6 +4396,19 @@ impl<'a> Elaborator<'a> {
             let argument =
                 self.aside(|it| it.placed(inside, |it| it.expr(argument, Mult::Many)))?;
             let argument = self.executed(argument, expected.as_ref());
+            // Домен сводится с типом написанного аргумента **здесь**, а не в
+            // настоящей проверке: иначе имплисит, решаемый первым аргументом,
+            // до второго не доходит, и голый литерал там разворачивается
+            // унарно. `firstOf two 3` при `firstOf : {a} -> a -> a -> a`
+            // отвергался «имя `Zero` не найдено», хотя `a` уже решён вторым
+            // словом строки.
+            //
+            // Сведение спекулятивно и best-effort: не сошлось - откат, и
+            // говорить об этом полагается проверке, у которой есть и кратности,
+            // и контекст целиком.
+            if ahead {
+                self.reconciled(expected.as_ref(), &argument);
+            }
             ty = ty.and_then(|it| self.stepped(&it, &argument));
             term = Term::App(Rc::new(term), Rc::new(argument.clone()));
             given.push(argument);
@@ -7380,4 +7425,18 @@ pub(crate) enum Unwritten<'a> {
     /// потребовала бы изобретать функциональный тип при применении `f a`,
     /// чего элаборация не делает, и ломала бы умолчание параметра.
     Given(&'a std::collections::HashMap<Symbol, Term>),
+}
+
+/// Где по спайну **дальше** стоит голый литерал.
+///
+/// Аргументы лежат в обратном порядке написания, поэтому «дальше» здесь - это
+/// меньшие индексы, и флаг копится обычным проходом.
+fn literals_ahead(arguments: &[&Expr]) -> Vec<bool> {
+    let mut out = Vec::with_capacity(arguments.len());
+    let mut seen = false;
+    for argument in arguments {
+        out.push(seen);
+        seen = seen || matches!(argument.kind, ExprKind::Lit(_));
+    }
+    out
 }

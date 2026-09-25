@@ -3119,11 +3119,18 @@ impl<'a> Elaborator<'a> {
             ast::LitKind::Float => DEFAULT_FLOAT,
             ast::LitKind::Str => return Ok(None),
         };
-        if self.signature.lookup(name).is_none() {
+        // Имя умолчания ищется **соглашением**, а не голым `lookup`: прелюдия
+        // объявляет `Prelude.Int`, и голое имя её не находит - ровно та же
+        // лестница, какой `if` берёт `Bool` (§4.3).
+        let declared = self.signature.convention(name);
+        if self.signature.lookup(&declared).is_none() {
             return Ok(None);
         }
+        // Имя строится **найденным**, а не коротким: файл, отказавшийся от
+        // прелюдии, короткого в области видимости не имеет, и `name` по нему
+        // отвечал бы «имя `Int` не найдено» при том, что соглашение его нашло.
         let named = self.name(&ast::Name {
-            text: Rc::from(name),
+            text: Rc::clone(&declared),
             span: lit.span,
         })?;
         // Дырка решается whnf-формой имени, а не самим именем: за прелюдным

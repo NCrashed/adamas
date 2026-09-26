@@ -1970,6 +1970,21 @@ impl Signature {
             targets
         };
         let body = relevelled(&body, &targets);
+        // Row-аргументы самоссылки - тем же ходом, что у отложенного члена.
+        // Элаборация строит её без row вовсе («своя row-переменная приходит из
+        // типа как есть»), и проверке это тождество; но мономорфизация
+        // подставляет row **значениями**, и ссылка без них для неё
+        // недописанная: производное от row-полиморфного рекурсивного
+        // определения не заводилось, и `count (i + 1)` оставлял `+`
+        // обобщённым - плоский `UInt64` в указательный код.
+        let body = if checked.postponed.is_none() && checked.declaration.row_arity > 0 {
+            let own_rows: Rc<[Row<Term>]> = (0..checked.declaration.row_arity)
+                .map(|position| Row::closing([], Some(Tail::Var(RowVar(position)))))
+                .collect();
+            rerowed(&body, &[(Rc::clone(name), own_rows)])
+        } else {
+            body
+        };
         let definition = Definition {
             body: Some(body.clone()),
             ..checked.declaration.clone()

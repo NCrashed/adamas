@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use adamas_core::check::{check, infer, is_type};
+use adamas_core::check::{check, check_within, infer, is_type};
 use adamas_core::conv::{convertible, whnf, whnf_solved};
 use adamas_core::ctx::{Ctx, Detached};
 use adamas_core::eval::{apply, eval, quote};
@@ -1189,21 +1189,55 @@ pub(crate) struct Deferred {
     using: Vec<(Symbol, Symbol)>,
 }
 
+/// Очередь отложенных литералов объявления вместе с его группой.
+///
+/// Группа нужна проверке перед досчётом: имена объявляемого сигнатура ещё не
+/// знает, и `code (TyArr d r) = 10 + code d * 3` без них обрывал проверку на
+/// `code` раньше, чем та доходила до литерала, - и `10` брал умолчание там,
+/// где тип задаёт подпись.
+pub(crate) struct Postponed {
+    literals: Vec<Deferred>,
+    group: Vec<Member>,
+}
+
 /// Досчитывает отложенные литералы объявления (§4.3, §10 вопрос 208).
 ///
-/// Зовётся после того, как собранный терм проверен против типа объявления:
-/// цели литералов к этому времени решены тем, что стоит вокруг, - соседом по
-/// спайну или подписью снаружи. Умолчание законно **здесь и только здесь**:
-/// объявление пройдено целиком и типа не задало.
+/// Сначала терм проверяется против типа объявления: её решения и есть то, что
+/// подпись сообщает литералам внутри. Отказ здесь молчит - о нём скажет
+/// объявление, у которого есть маршрут по терму. Члены группы в проверке
+/// **предположены** по копии сигнатуры, как делает `self_levels`:
+/// непроверенному объявлению в настоящей делать нечего.
+///
+/// Умолчание законно **здесь и только здесь**: объявление пройдено целиком и
+/// типа не задало.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "досчёт элаборирует литерал заново и читает всё, что читает элаборатор"
+)]
 pub(crate) fn settle_literals(
     signature: &Signature,
     metas: &mut Metas,
     owned: &Owned,
     fixities: &Fixities,
     warnings: &mut Warnings,
-    deferred: Vec<Deferred>,
+    postponed: Postponed,
+    term: &Term,
+    ty: &Term,
 ) -> Result<(), ElabError> {
-    for literal in deferred {
+    if postponed.literals.is_empty() {
+        return Ok(());
+    }
+    if postponed.group.is_empty() {
+        let _ = check_within(&Ctx::new(signature), metas, term, ty);
+    } else {
+        let mut assumed = signature.clone();
+        for member in &postponed.group {
+            let arity = u32::try_from(member.levels.len()).unwrap_or(u32::MAX);
+            assumed.assume(&member.name, arity, (*member.ty).clone());
+        }
+        let _ = check_within(&Ctx::new(&assumed), metas, term, ty);
+    }
+    for literal in postponed.literals {
         let mut it = Elaborator::new(signature, metas, owned, fixities, warnings)
             .within(literal.enclosing.as_ref());
         it.scope = literal.scope;
@@ -1373,9 +1407,12 @@ impl<'a> Elaborator<'a> {
         self
     }
 
-    /// Отложенные литералы - забираются однажды, после тел.
-    pub(crate) fn deferred(&mut self) -> Vec<Deferred> {
-        self.literals.take().unwrap_or_default()
+    /// Отложенные литералы - забираются однажды, после тел, - вместе с группой.
+    pub(crate) fn deferred(&mut self) -> Postponed {
+        Postponed {
+            literals: self.literals.take().unwrap_or_default(),
+            group: self.group.clone(),
+        }
     }
 
     /// Кратности написанного типа - те, что достанутся лямбдам тела.
@@ -3648,6 +3685,16 @@ impl<'a> Elaborator<'a> {
         Ok(())
     }
 
+    /// Стоит ли головой терма член объявляемой группы - имя, которого
+    /// сигнатура ещё не знает.
+    fn grouped(&self, term: &Term) -> bool {
+        let mut head = term;
+        while let Term::App(callee, _) = head {
+            head = callee;
+        }
+        matches!(head, Term::Const(name, _, _) if self.group.iter().any(|it| it.name == *name))
+    }
+
     /// Гибок ли тип: нерешённая дырка головой.
     ///
     /// Литерал в такой позиции решать нечем, пока спайн не пройден до конца
@@ -4608,7 +4655,20 @@ impl<'a> Elaborator<'a> {
             // Сведение спекулятивно и best-effort: не сошлось - откат, и
             // говорить об этом полагается проверке, у которой есть и кратности,
             // и контекст целиком.
-            if ahead || !postponed.is_empty() {
+            //
+            // Третий случай - аргумент, чья голова член объявляемой группы:
+            // `plus (rec k) one` в теле `rec`. Сигнатура его ещё не знает, и
+            // проверка перед поиском словарей спотыкается на нём раньше, чем
+            // дойдёт до соседа, - параметр класса оставался нерешённым, и
+            // рекурсия через оператор класса не писалась вовсе. Только при
+            // голой дырке доменом: `Cons x (filterList p xs)` сводил бы тип
+            // члена с ещё не решёнными дырками и оставлял отложенное, которое
+            // потом не сходится.
+            let grouped = self.grouped(&argument)
+                && expected
+                    .as_ref()
+                    .is_some_and(|domain| self.flexible(domain));
+            if ahead || !postponed.is_empty() || grouped {
                 self.reconciled(expected.as_ref(), &argument);
             }
             ty = ty.and_then(|it| self.stepped(&it, &argument));

@@ -6658,6 +6658,9 @@ impl<'a> Elaborator<'a> {
             let resolved = self.fixities.resolve(chain, span)?;
             return self.expr(&resolved, Mult::Many);
         };
+        if let Some(short) = self.short_circuit(operator, &chain.head, operand, span) {
+            return self.expr(&short, Mult::Many);
+        }
         let head = ast::Expr {
             kind: ast::ExprKind::Name(operator.clone()),
             span: operator.span,
@@ -6673,6 +6676,89 @@ impl<'a> Elaborator<'a> {
             span,
         };
         self.expr(&applied, Mult::Many)
+    }
+
+    /// Прелюдные `&&` и `||` с обоими операндами - особая форма (§4.4, решение
+    /// 2026-09-27): `a && b` есть `if a then b else False`, `a || b` -
+    /// `if a then True else b`. Правый операнд не считается, когда ответ уже
+    /// известен.
+    ///
+    /// Только прелюдные: своё `(&&)` программы затеняет прелюдное целиком, и
+    /// особой формы у него нет - это обычное определение. Истина и ложь
+    /// берутся той же областью видимости, что у написанного `if`, и потому
+    /// форма работает над тем `Bool`, над которым работает `if`.
+    fn short_circuit(
+        &self,
+        operator: &ast::Name,
+        left: &ast::Expr,
+        right: &ast::Expr,
+        span: Span,
+    ) -> Option<ast::Expr> {
+        let (then_constant, else_constant) = match &*operator.text {
+            "&&" => (None, Some(prim::FALSE)),
+            "||" => (Some(prim::TRUE), None),
+            _ => return None,
+        };
+        let prelude = self.local(&operator.text).is_none()
+            && self
+                .qualified(&operator.text)
+                .is_some_and(|declared| declared.starts_with(&format!("{}.", prim::PRELUDE)));
+        if !prelude {
+            return None;
+        }
+        let constant = |name: &str| ast::Expr {
+            kind: ast::ExprKind::Name(ast::Name {
+                text: Symbol::from(name),
+                span: operator.span,
+            }),
+            span: operator.span,
+        };
+        let branch = |fixed: Option<&str>| fixed.map_or_else(|| right.clone(), constant);
+        let chosen = ast::Expr {
+            kind: ast::ExprKind::If {
+                cond: Box::new(left.clone()),
+                then_branch: Box::new(branch(then_constant)),
+                else_branch: Box::new(branch(else_constant)),
+            },
+            span,
+        };
+        // Ответ формы - `Bool`, и он пишется аннотацией `let`: ветвям ожидание
+        // известно заранее, как у написанного `let r : Bool = if …`. Голый `if`
+        // шёл бы выводом, и `False || loud 3` отвергался бы там, где строгий
+        // оператор исполнял `loud 3` по домену параметра. Имя `short` ничего не
+        // заслоняет: видит его только хвост блока, а в `chosen` оно не связано.
+        let answer = ast::Name {
+            text: Symbol::from("short"),
+            span,
+        };
+        let boolean = ast::Expr {
+            kind: ast::ExprKind::Name(ast::Name {
+                text: self.signature.convention(prim::BOOL),
+                span,
+            }),
+            span,
+        };
+        let stmt = |kind| ast::Stmt { kind, span };
+        Some(ast::Expr {
+            kind: ast::ExprKind::Block(ast::Block {
+                stmts: vec![
+                    stmt(ast::StmtKind::Let(vec![ast::Binding {
+                        mult: None,
+                        name: answer.clone(),
+                        params: Vec::new(),
+                        ty: Some(boolean),
+                        body: chosen,
+                        span,
+                    }])),
+                    stmt(ast::StmtKind::Expr(ast::Expr {
+                        kind: ast::ExprKind::Name(answer),
+                        span,
+                    })),
+                ],
+                span,
+            }),
+            span,
+        })
     }
 
     // --- паттерны ---------------------------------------------------------

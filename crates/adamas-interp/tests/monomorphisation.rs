@@ -74,14 +74,14 @@ instance {Eqv a} => Eqv (List a) where
   eq (Cons x xs) (Cons y ys) = and (eq x y) (eq xs ys)
   eq p q = False
 
-class Ord a when Eqv a where
+class Ordered a when Eqv a where
   below : a -> a -> Bool
 
-instance Ord Nat where
+instance Ordered Nat where
   below Zero (Succ b) = True
   below a b = False
 
-atMost : {Ord a} => a -> a -> Bool
+atMost : {Ordered a} => a -> a -> Bool
 atMost x y = or (below x y) (eq x y)
 
 same : {Eqv a} => a -> a -> Bool

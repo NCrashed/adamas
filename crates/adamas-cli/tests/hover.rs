@@ -324,7 +324,7 @@ fn a_hover_reads_a_name_from_another_file() {
     assert_eq!(
         hovered(&path, &file, at).as_deref(),
         Some(
-            "Std.Prelude.maximum : {0 a : Type u0} -> {ω _ : Ord{u0} #0} -> \
+            "Std.Prelude.maximum : {0 a : Type u0} -> {ω _ : Ordered{u0} #0} -> \
              {| e0} (ω _ : #1) -> {| e0} (ω _ : Std.Prelude.List{u0} #2) -> {| e0} #3"
         )
     );

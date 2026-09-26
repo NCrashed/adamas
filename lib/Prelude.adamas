@@ -185,6 +185,167 @@ instance Neg Float64 where
 instance Mul Float64 where
   mul = mulFloat64
 
+-- # Сравнение (§4.3, §4.4)
+--
+-- Как у арифметики: класс несёт метод, оператор - отдельное определение поверх
+-- него. `Eq` и `Ord` у плавающих - `totalOrder` по канонизированному значению
+-- (§4.3): `nan == nan`, `-0.0 < 0.0`, - и этим же правилом отвечают примитивы
+-- `eqFloat64`, `ltFloat64` и `leFloat64`.
+
+-- | Исход сравнения.
+data Ordering where
+  LT : Ordering
+  EQ : Ordering
+  GT : Ordering
+
+-- | Равенство.
+class Eq a where
+  eq : a -> a -> Bool
+
+-- | Тотальный порядок.
+--
+-- `lt` и `le` - методы наравне с `compare`, а не его следствия (решение
+-- 2026-09-27). Выведенный через `compare`, `<` стоил вдвое с половиной дороже
+-- примитива: ответ `Ordering` разбирается объектом, и вокруг него два слоя
+-- вызовов. Методом он стоит ровно примитив. Цена - три метода в инстансе, пока
+-- у классов нет умолчаний; `>` и `>=` - те же методы с переставленными
+-- аргументами.
+class Ord a when Eq a where
+  compare : a -> a -> Ordering
+  lt : a -> a -> Bool
+  le : a -> a -> Bool
+
+infix 4 ==
+(==) : {Eq a} => a -> a -> Bool
+(==) x y = eq x y
+
+infix 4 /=
+(/=) : {Eq a} => a -> a -> Bool
+(/=) x y = not (eq x y)
+
+infix 4 <
+(<) : {Ord a} => a -> a -> Bool
+(<) x y = lt x y
+
+infix 4 <=
+(<=) : {Ord a} => a -> a -> Bool
+(<=) x y = le x y
+
+infix 4 >
+(>) : {Ord a} => a -> a -> Bool
+(>) x y = lt y x
+
+infix 4 >=
+(>=) : {Ord a} => a -> a -> Bool
+(>=) x y = le y x
+
+-- # Логические операторы (§4.4)
+--
+-- **Правый операнд не считается, если ответ уже известен**, и это особая
+-- форма, а не свойство определений ниже: элаборация пишет `a && b` как
+-- `if a then b else False`, а `a || b` - как `if a then True else b`
+-- (решение 2026-09-27). Определения нужны там, где оператор стоит значением:
+-- `(&&)` без операндов - обычная строгая функция. Своё `(&&)` программы
+-- затеняет прелюдное целиком, вместе с особой формой.
+
+infixr 3 &&
+(&&) : Bool -> Bool -> Bool
+(&&) a b = and a b
+
+infixr 2 ||
+(||) : Bool -> Bool -> Bool
+(||) a b = or a b
+
+instance Eq Bool where
+  eq a b = if a then b else not b
+
+-- `False` меньше `True`.
+instance Ord Bool where
+  compare a b = if a then (if b then EQ else GT) else (if b then LT else EQ)
+  lt a b = if a then False else b
+  le a b = if a then b else True
+
+
+instance Eq Int8 where
+  eq = eqInt8
+
+instance Ord Int8 where
+  compare x y = if ltInt8 x y then LT else if eqInt8 x y then EQ else GT
+  lt = ltInt8
+  le = leInt8
+
+instance Eq Int16 where
+  eq = eqInt16
+
+instance Ord Int16 where
+  compare x y = if ltInt16 x y then LT else if eqInt16 x y then EQ else GT
+  lt = ltInt16
+  le = leInt16
+
+instance Eq Int32 where
+  eq = eqInt32
+
+instance Ord Int32 where
+  compare x y = if ltInt32 x y then LT else if eqInt32 x y then EQ else GT
+  lt = ltInt32
+  le = leInt32
+
+instance Eq Int64 where
+  eq = eqInt64
+
+instance Ord Int64 where
+  compare x y = if ltInt64 x y then LT else if eqInt64 x y then EQ else GT
+  lt = ltInt64
+  le = leInt64
+
+instance Eq UInt8 where
+  eq = eqUInt8
+
+instance Ord UInt8 where
+  compare x y = if ltUInt8 x y then LT else if eqUInt8 x y then EQ else GT
+  lt = ltUInt8
+  le = leUInt8
+
+instance Eq UInt16 where
+  eq = eqUInt16
+
+instance Ord UInt16 where
+  compare x y = if ltUInt16 x y then LT else if eqUInt16 x y then EQ else GT
+  lt = ltUInt16
+  le = leUInt16
+
+instance Eq UInt32 where
+  eq = eqUInt32
+
+instance Ord UInt32 where
+  compare x y = if ltUInt32 x y then LT else if eqUInt32 x y then EQ else GT
+  lt = ltUInt32
+  le = leUInt32
+
+instance Eq UInt64 where
+  eq = eqUInt64
+
+instance Ord UInt64 where
+  compare x y = if ltUInt64 x y then LT else if eqUInt64 x y then EQ else GT
+  lt = ltUInt64
+  le = leUInt64
+
+instance Eq Float32 where
+  eq = eqFloat32
+
+instance Ord Float32 where
+  compare x y = if ltFloat32 x y then LT else if eqFloat32 x y then EQ else GT
+  lt = ltFloat32
+  le = leFloat32
+
+instance Eq Float64 where
+  eq = eqFloat64
+
+instance Ord Float64 where
+  compare x y = if ltFloat64 x y then LT else if eqFloat64 x y then EQ else GT
+  lt = ltFloat64
+  le = leFloat64
+
 -- # Линейное чтение массива (§4.11, §10 вопрос 202)
 --
 -- `arrayIndex` берёт массив неограниченно, и линейный массив им не прочесть,

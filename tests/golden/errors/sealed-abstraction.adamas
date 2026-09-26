@@ -14,17 +14,17 @@ data Bool where
   False : Bool
   True : Bool
 
-class Ord k where
+class Ordered k where
   compare : k -> k -> Bool
 
 module type MapSig where
   type Map (k : Type) (v : Type)
   empty  : {k : Type} -> {v : Type} -> Map k v
-  insert : {k : Type} -> {v : Type} -> {Ord k} => k -> v -> Map k v -> Map k v
+  insert : {k : Type} -> {v : Type} -> {Ordered k} => k -> v -> Map k v -> Map k v
 
 module OrderedMap :> MapSig where
   type Map (k : Type) (v : Type) = k -> Bool
   empty : {k : Type} -> {v : Type} -> Map k v
   empty x = False
-  insert : {k : Type} -> {v : Type} -> {Ord k} => k -> v -> Map k v -> Map k v
+  insert : {k : Type} -> {v : Type} -> {Ordered k} => k -> v -> Map k v -> Map k v
   insert k v m = m

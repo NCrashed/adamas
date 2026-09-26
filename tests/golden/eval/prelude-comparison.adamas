@@ -1,0 +1,65 @@
+-- Сравнение и логические операторы прелюдии (§4.3, §4.4).
+--
+-- Программа их не объявляет: `==`, `/=`, `<`, `<=`, `>`, `>=` стоят поверх
+-- `Eq` и `Ord`, а `&&` и `||` - особая форма (решение 2026-09-27). Поля
+-- ответа:
+--
+--   * `ints` - шесть сравнений над `Int32` и `UInt64` битами одного числа,
+--     и приоритеты: `x > 1 && x <= 3 || x == 9` читается как
+--     `((x > 1) && (x <= 3)) || (x == 9)`;
+--   * `floats` - `totalOrder` §4.3: `nan == nan` истинно, `-0.0 < 0.0`
+--     истинно, а IEEE ответил бы наоборот в обоих;
+--   * `guarded` - правый операнд `&&` не считается при ложном левом:
+--     `i < 4 && arrayIndex xs i == 7` при `i = 10` не читает за границей;
+--   * `logged` - то же у эффекта: из трёх `note` исполняется одна, справа
+--     от `False ||`. Строгий оператор исполнил бы все три.
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Int32 -> Unit
+
+bit : Bool -> Int32
+bit True = 1
+bit False = 0
+
+x : Int32
+x = 3
+n : UInt64
+n = 7
+ints : Int32
+ints = bit (x < 4) + bit (x <= 3) * 2 + bit (x > 3) * 4 + bit (x >= 3) * 8 + bit (x == 3) * 16 + bit (x /= 3) * 32 + bit (n < 8) * 64 + bit (x > 1 && x <= 3 || x == 9) * 128
+nan : Float64
+nan = divFloat64 0.0 0.0
+floats : Int32
+floats = bit (nan == nan) + bit ((-0.0) < 0.0) * 2 + bit (nan > 1.0e300) * 4 + bit (True == True) * 8
+xs : Array 4 Int32
+xs = arrayNew 4 7
+inside : UInt64 -> Bool
+inside i = i < 4 && arrayIndex xs i == 7
+guarded : Int32
+guarded = bit (inside 10) + bit (inside 2) * 2
+loud : Int32 -> {Log} Bool
+loud k =
+  note k
+  True
+
+probe : {Log} List Int32
+probe =
+  let a = True || loud 1
+  let b = False && loud 2
+  let c = False || loud 3
+  Cons (bit a) (Cons (bit b) (Cons (bit c) Nil))
+
+logged : List Int32
+logged = handle probe with
+  return v -> v
+  note k -> Cons k (resume MkUnit)
+
+main : List Int32
+main = Cons ints (Cons floats (Cons guarded logged))

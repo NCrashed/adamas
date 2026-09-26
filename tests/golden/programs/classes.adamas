@@ -40,14 +40,14 @@ same : {Eqv a} => a -> a -> Bool
 same x y = eq x y
 
 -- Суперкласс - поле словаря, и разряжает его объявление инстанса, а не автор.
-class Ord a when Eqv a where
+class Ordered a when Eqv a where
   below : a -> a -> Bool
   -- Умолчание метода пишется в классе, а раскрывается в инстансе: тело зовёт
   -- другие методы того же класса.
   atMost : a -> a -> Bool
   atMost x y = below x y
 
-instance Ord Nat where
+instance Ordered Nat where
   below Zero (Succ b) = True
   below a b = False
 
@@ -72,7 +72,7 @@ elem x Nil = False
 elem x (Cons y ys) = if same x y then True else elem x ys
 
 -- То же под констрейнтом с суперклассом.
-biggest : {Ord a} => a -> List a -> a
+biggest : {Ordered a} => a -> List a -> a
 biggest best Nil = best
 biggest best (Cons x xs) = if atMost best x then biggest x xs else biggest best xs
 

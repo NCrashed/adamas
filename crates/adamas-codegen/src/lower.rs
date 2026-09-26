@@ -1203,6 +1203,9 @@ impl<'a> Lowerer<'a> {
                 self.application(scope, head, &arguments)
             }
             Term::Let(mult, name, ty, value, body) => {
+                if let Some(lowered) = self.read_in_place(scope, value, body)? {
+                    return Ok(lowered);
+                }
                 let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
                 let dicts = scope.dicts.clone();
                 let declared = self.repr_of(ty, depth, &dicts)?;
@@ -3898,9 +3901,12 @@ impl<'a> Lowerer<'a> {
         op: ArrayOp,
         arguments: &[Arg<'_>],
     ) -> Result<(Expr, Repr), LowerError> {
+        if op == ArrayOp::Read {
+            return self.read(scope, arguments);
+        }
         let wanted = match op {
             ArrayOp::New => 3,
-            ArrayOp::Index => 4,
+            ArrayOp::Index | ArrayOp::Read => 4,
             ArrayOp::Set => 5,
         };
         if arguments.len() != wanted {
@@ -3980,7 +3986,164 @@ impl<'a> Lowerer<'a> {
                     Repr::Array(cells),
                 ))
             }
+            ArrayOp::Read => Err(LowerError::PartialArray {
+                name: op.name().to_owned(),
+            }),
         }
+    }
+
+    /// Линейное чтение массива (§4.11, §10 вопрос 202) - значением.
+    ///
+    /// Понижается переписыванием в терм, который понижать уже умеют:
+    /// `let 1 ys = xs in MkRead (arrayIndex ys i) ys`. Сборка конструктора,
+    /// теги и укладка ячейки - существующие; чтение `ys` **заимствует**,
+    /// потому что `ys` потребляется следом, и счётчик массива не трогается.
+    ///
+    /// Ячейка кучи здесь есть - сам `MkRead`. Разбор ответа на месте её не
+    /// заводит вовсе: см. [`Lowerer::read_in_place`].
+    fn read(
+        &mut self,
+        scope: &mut Scope,
+        arguments: &[Arg<'_>],
+    ) -> Result<(Expr, Repr), LowerError> {
+        let [
+            Arg::Written(length),
+            Arg::Written(element),
+            Arg::Written(array),
+            Arg::Written(at),
+        ] = arguments
+        else {
+            return Err(LowerError::PartialArray {
+                name: ArrayOp::Read.name().to_owned(),
+            });
+        };
+        let up = |term: &Term| adamas_core::pattern::shift_free(term, 1);
+        let index = Term::Prim(Prim::Over(ArrayOp::Index)).apply([
+            up(length),
+            up(element),
+            Term::var(0),
+            up(at),
+        ]);
+        let built = self
+            .read_constructor()
+            .apply([up(length), up(element), index, Term::var(0)]);
+        let ty = Term::Prim(Prim::Array).apply([(*length).clone(), (*element).clone()]);
+        let term = Term::Let(
+            Mult::One,
+            adamas_core::term::Name::from("читаемое"),
+            Rc::new(ty),
+            Rc::new((*array).clone()),
+            Rc::new(built),
+        );
+        self.expr(scope, &term)
+    }
+
+    /// Линейное чтение, разобранное на месте, - **без единой ячейки кучи**.
+    ///
+    /// Форму строит элаборатор: составное разбираемое он связывает и разбирает
+    /// переменную, `let r = arrayRead xs i` над `case r of MkRead v ys -> …`.
+    /// Значение `r` здесь не заводится вовсе: `v` есть чтение ячейки, а `ys` -
+    /// тот же массив, что пришёл. Чтение заимствует - массив потребляет `ys`
+    /// следом, и Perceus снимает владение у плоского чтения (§10 вопрос 171), -
+    /// так что счётчик массива не трогается, и следующая запись идёт на месте.
+    ///
+    /// Узнаётся только эта форма, и только когда `r` ни на что больше не
+    /// смотрит - считая по нормализованному, потому что решения имплиситов
+    /// называют всякое связывание контекста. Иначе - общий путь
+    /// [`Lowerer::read`], со сборкой `MkRead`.
+    fn read_in_place(
+        &mut self,
+        scope: &mut Scope,
+        value: &Term,
+        body: &Term,
+    ) -> Result<Option<(Expr, Repr)>, LowerError> {
+        let (head, arguments) = spine(value);
+        let Term::Prim(Prim::Over(ArrayOp::Read)) = head else {
+            return Ok(None);
+        };
+        let [length, element, array, at] = arguments.as_slice() else {
+            return Ok(None);
+        };
+        let _ = length;
+        let Term::Case(case) = body else {
+            return Ok(None);
+        };
+        if !matches!(&*case.scrutinee, Term::Var(index) if index.0 == 0) {
+            return Ok(None);
+        }
+        let [branch] = case.branches.as_slice() else {
+            return Ok(None);
+        };
+        if adamas_core::resume::mentions(&branch.body, 0) {
+            return Ok(None);
+        }
+        let Term::Lam(_, cell_name, inner) = &*branch.body else {
+            return Ok(None);
+        };
+        let Term::Lam(_, rest_name, inner) = &**inner else {
+            return Ok(None);
+        };
+        let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
+        let element = normalized(element, depth);
+        let dicts = scope.dicts.clone();
+        let stride = self.stride_of(&element, depth, &dicts);
+        let elements = match stride {
+            Some(stride) => stride.element(),
+            None => self.repr_of(&element, depth, &dicts)?,
+        };
+        let cells = Repr::Array(stride.map_or(Elems::Boxed, |_| Elems::Flat));
+        let word = Repr::Flat(PrimTy::UInt64);
+        let array = self.given(scope, &Arg::Written(array), cells, "читаемый массив")?;
+        let at = self.given(scope, &Arg::Written(at), word, "номер ячейки")?;
+        let rest = Binding {
+            name: rest_name.to_string(),
+            local: scope.fresh(),
+            fact: Fact::present(Mult::One).shaped(cells),
+        };
+        let cell = Binding {
+            name: cell_name.to_string(),
+            local: scope.fresh(),
+            fact: Fact::present(Mult::Many).shaped(elements),
+        };
+        // Слоты - как у ветви под `let`: сам `r` (без значения - на него никто
+        // не смотрит), затем поля в порядке объявления.
+        let unread = scope.fresh();
+        scope
+            .env
+            .push(Slot::Bound(unread, Fact::declared(Mult::Zero)));
+        scope.env.push(Slot::Bound(cell.local, cell.fact));
+        scope.env.push(Slot::Bound(rest.local, rest.fact));
+        let lowered = self.expr(scope, inner);
+        scope.env.truncate(scope.env.len() - 3);
+        let (body, repr) = lowered?;
+        let read = Expr::ArrayIndex {
+            stride,
+            owned: true,
+            array: Box::new(Expr::Local(rest.local)),
+            at: Box::new(at),
+        };
+        Ok(Some((
+            Expr::Bind {
+                binding: rest,
+                value: Box::new(array),
+                body: Box::new(Expr::Bind {
+                    binding: cell,
+                    value: Box::new(read),
+                    body: Box::new(body),
+                }),
+            },
+            repr,
+        )))
+    }
+
+    /// Конструктор ответа чтения - именем программы, по соглашению (§4.3).
+    fn read_constructor(&self) -> Term {
+        let name = self.signature.convention(adamas_core::prim::MKREAD);
+        let arity = self.signature.lookup(&name).map_or(0, |it| it.level_arity);
+        let levels: Rc<[adamas_core::level::Level]> = (0..arity)
+            .map(|_| adamas_core::level::Level::Zero)
+            .collect();
+        Term::Const(name, levels, adamas_core::term::Args::none())
     }
 
     /// Операция над вектором (§4.9).

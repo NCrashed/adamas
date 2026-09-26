@@ -79,7 +79,7 @@ class Mul a (b = a) where
 
 infixl 6 +
 (+) : {Add a} => a -> a -> a
-(+) = add
+(+) x y = add x y
 
 infixl 6 -
 (-) : {Add a, Neg a} => a -> a -> a
@@ -89,7 +89,7 @@ infixl 6 -
 -- и `x : Int32 = 2 * 3` и `n * 2` пишутся. Гетерогенное умножение - `mul`.
 infixl 7 *
 (*) : {Mul a} => a -> a -> a
-(*) = mul
+(*) x y = mul x y
 
 instance Add Int8 where
   add = addInt8
@@ -184,3 +184,14 @@ instance Neg Float64 where
 
 instance Mul Float64 where
   mul = mulFloat64
+
+-- # Линейное чтение массива (§4.11, §10 вопрос 202)
+--
+-- `arrayIndex` берёт массив неограниченно, и линейный массив им не прочесть,
+-- не отдав. `arrayRead` массив **потребляет** и возвращает его же вместе с
+-- ячейкой. Ячейка - `ω`: читать её можно сколько угодно; массив - `1`: он
+-- остаётся линейным и после чтения.
+
+-- | Ответ `arrayRead`: ячейка и тот же массив.
+data Read (0 n : UInt64) (a : Type) where
+  MkRead : (ω x : a) -> (1 rest : Array n a) -> Read n a

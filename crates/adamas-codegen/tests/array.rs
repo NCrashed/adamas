@@ -461,3 +461,42 @@ fn a_borrowed_read_leaves_the_counter_alone() {
     // И всё это считается и не течёт.
     let _ = allocated("массив-заимствование", BORROWED);
 }
+
+/// Восемь записей и восемь линейных чтений - один массив и ничего сверх.
+///
+/// `arrayRead` отдаёт ячейку вместе с массивом, и разбор ответа на месте
+/// понижается без `MkRead` (§10 вопрос 202): ячейка есть чтение, массив - тот
+/// же локал, и чтение заимствует его, потому что массив потребляется следом.
+/// Общий путь стоил бы двух блоков на чтение - `MkRead` и обёртки плоской
+/// ячейки в указательное поле, - то есть семнадцати на прогон; копия массива
+/// от поднятого счётчика стоила бы ещё по одному на запись.
+const LINEAR_READ: &str = "\
+fill : UInt64 -> (1 xs : Array 8 Int64) -> Array 8 Int64
+fill i xs = if ltUInt64 i 8
+  then fill (i + 1) (arraySet xs i (uint64ToInt64 i * 3))
+  else xs
+
+summed : UInt64 -> Int64 -> (1 xs : Array 8 Int64) -> Array 8 Int64
+summed i acc xs = if ltUInt64 i 8
+  then case arrayRead xs i of
+    MkRead v ys -> summed (i + 1) (acc + v) ys
+  else arraySet xs 0 acc
+
+main : Int64
+main = arrayIndex (summed 0 0 (fill 0 (arrayNew 8 0))) 0
+";
+
+/// Линейное чтение не аллоцирует (§10 вопрос 202).
+#[test]
+fn a_linear_read_allocates_nothing() {
+    assert_eq!(
+        harness::printed(LINEAR_READ),
+        "84",
+        "машина посчитала не то"
+    );
+    assert_eq!(
+        allocated("линейное-чтение", LINEAR_READ),
+        1,
+        "чтение завело блоки сверх самого массива"
+    );
+}

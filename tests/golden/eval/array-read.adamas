@@ -1,0 +1,54 @@
+-- Линейное чтение массива (§4.11, §10 вопрос 202; волна 7, трек D).
+--
+-- `arrayIndex` берёт массив неограниченно, и линейный массив им не прочесть,
+-- не отдав. `arrayRead` массив потребляет и возвращает его же вместе с
+-- ячейкой: `case arrayRead xs i of MkRead v ys -> …`. Ячейка `v` - `ω`,
+-- массив `ys` - снова `1`: второе обращение к нему отвергается
+-- (`errors/array-read-twice`).
+--
+-- **Чтение не аллоцирует.** Разбор ответа на месте понижается без `MkRead`:
+-- `v` есть чтение ячейки, `ys` - тот же массив, и чтение заимствует его,
+-- потому что `ys` потребляется следом. Счётчик массива не трогается, и
+-- следующая запись идёт на месте. Число блоков сверяет
+-- `adamas-codegen/tests/array.rs`: цикл из восьми записей и восьми чтений
+-- выдаёт ровно один блок - сам массив.
+--
+-- Ячейки двух родов, потому что пути у них разные: плоская читается битами,
+-- указательная (`Nat`) - с `dup` ячейки, и ответ складывает оба.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+-- | Восемь записей: `3 * i` в ячейку `i`.
+fill : UInt64 -> (1 xs : Array 8 Int64) -> Array 8 Int64
+fill i xs = if ltUInt64 i 8
+  then fill (i + 1) (arraySet xs i (uint64ToInt64 i * 3))
+  else xs
+
+-- | Восемь линейных чтений, сумма - в ячейку `0`: 3 * (0 + … + 7) = 84.
+summed : UInt64 -> Int64 -> (1 xs : Array 8 Int64) -> Array 8 Int64
+summed i acc xs = if ltUInt64 i 8
+  then case arrayRead xs i of
+    MkRead v ys -> summed (i + 1) (acc + v) ys
+  else arraySet xs 0 acc
+
+-- | Длина натурального - чтобы указательная ячейка дала число.
+count : Nat -> Int64
+count Zero = 0
+count (Succ k) = 1 + count k
+
+-- | Указательные ячейки: прочитанное `Nat` кладётся назад по соседству, и
+-- ячейка живёт в двух местах сразу - `dup` при чтении обязателен.
+shifted : (1 xs : Array 2 Nat) -> Array 2 Nat
+shifted xs = case arrayRead xs 0 of
+  MkRead v ys -> arraySet ys 1 (Succ v)
+
+three : Nat
+three = Succ (Succ (Succ Zero))
+
+main : Int64
+main =
+  let flat : Array 8 Int64 = summed 0 0 (fill 0 (arrayNew 8 0))
+  let boxed : Array 2 Nat = shifted (arrayNew 2 three)
+  arrayIndex flat 0 + count (arrayIndex boxed 1) + count (arrayIndex boxed 0)

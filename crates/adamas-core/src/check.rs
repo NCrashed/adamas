@@ -288,7 +288,7 @@ pub fn prim_scheme(signature: &Signature, prim: Prim) -> Term {
                 universe,
             ),
         ),
-        Prim::Over(op) => array_op_scheme(op, &word, &universe),
+        Prim::Over(op) => array_op_scheme(signature, op, &word, &universe),
         Prim::Across(op) => simd_op_scheme(signature, op, &word, &universe),
     }
 }
@@ -385,7 +385,12 @@ fn region_op_scheme(
 
 /// Тип операции над массивом. Стёртые связывания имплиситны: длину и элемент
 /// восстанавливает унификация по типу самого массива.
-fn array_op_scheme(op: crate::prim::ArrayOp, word: &Term, universe: &Term) -> Term {
+fn array_op_scheme(
+    signature: &Signature,
+    op: crate::prim::ArrayOp,
+    word: &Term,
+    universe: &Term,
+) -> Term {
     use crate::prim::ArrayOp;
     let erased = Binder::implicit(Mult::Zero);
     let given = Binder::explicit(Mult::Many);
@@ -447,6 +452,33 @@ fn array_op_scheme(op: crate::prim::ArrayOp, word: &Term, universe: &Term) -> Te
                     "xs",
                     array(Term::var(1), Term::var(0)),
                     bound(given, "i", word.clone(), Term::var(2)),
+                ),
+            ),
+        ),
+        // `arrayRead : {0 n} -> {0 a} -> (1 xs : Array n a) -> (ω i : UInt64)
+        //           -> Read n a`
+        //
+        // Массив **потребляется** и возвращается внутри ответа: линейный
+        // массив читается, не отдаваясь (§10 вопрос 202). `Read` - имя
+        // программы, взятое соглашением, как `Bool` у сравнения.
+        ArrayOp::Read => bound(
+            erased,
+            "n",
+            word.clone(),
+            bound(
+                erased,
+                "a",
+                universe.clone(),
+                bound(
+                    Binder::explicit(Mult::One),
+                    "xs",
+                    array(Term::var(1), Term::var(0)),
+                    bound(
+                        given,
+                        "i",
+                        word.clone(),
+                        declared(signature, crate::prim::READ).apply([Term::var(3), Term::var(2)]),
+                    ),
                 ),
             ),
         ),

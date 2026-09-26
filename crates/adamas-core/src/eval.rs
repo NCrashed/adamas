@@ -457,9 +457,14 @@ pub fn try_eliminate_case(case: &Rc<StuckCase>, scrutinee: &Rc<Value>) -> Option
         // Ответ сравнения - **голый** конструктор соглашения: [`compared`]
         // строит его без сигнатуры, а у программы, объявившей `Bool` в
         // подключаемом файле, ветви названы путём (§4.8, §10 вопрос 188).
-        // Сверяется поэтому последний сегмент, и только для двух этих имён:
-        // всякое другое застрявшее имя обязано оставаться застрявшим.
-        if matches!(&**name, crate::prim::TRUE | crate::prim::FALSE) {
+        // Сверяется поэтому последний сегмент, и только для имён соглашения:
+        // всякое другое застрявшее имя обязано оставаться застрявшим. Третье
+        // такое имя - ответ линейного чтения массива (§10 вопрос 202), тот же
+        // голый конструктор из δ-шага.
+        if matches!(
+            &**name,
+            crate::prim::TRUE | crate::prim::FALSE | crate::prim::MKREAD
+        ) {
             if let Some(branch) = case
                 .branches
                 .iter()
@@ -677,6 +682,40 @@ fn arrayed(op: crate::prim::ArrayOp, spine: &[Elim]) -> Option<Rc<Value>> {
                 return None;
             };
             cell_of(array, *wanted)
+        }
+        // Ответ линейного чтения - конструктор программы (§10 вопрос 202):
+        // ячейка и **тот же** массив. Имя голое, как у `compared`: сверка
+        // конструкторов идёт по последнему сегменту, и `Prelude.MkRead` его
+        // узнаёт.
+        ArrayOp::Read => {
+            let [
+                Elim::App(length),
+                Elim::App(element),
+                Elim::App(array),
+                Elim::App(at),
+            ] = spine
+            else {
+                return None;
+            };
+            let Value::Prim(Prim::Lit(_, wanted)) = &**at else {
+                return None;
+            };
+            let cell = cell_of(array, *wanted)?;
+            let head = Head::Global(
+                crate::term::Name::from(crate::prim::MKREAD),
+                Rc::from([]),
+                Rc::from([]),
+                crate::term::Mults::none(),
+            );
+            Some(Rc::new(Value::Neutral(
+                head,
+                vec![
+                    Elim::App(Rc::clone(length)),
+                    Elim::App(Rc::clone(element)),
+                    Elim::App(cell),
+                    Elim::App(Rc::clone(array)),
+                ],
+            )))
         }
     }
 }

@@ -1,0 +1,8 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: array-read-twice.adamas:13:12: `ys` объявлена с кратностью 1, а использована ω
+  leaky xs = case arrayRead xs 1 of
+             ^^^^^^^^^^^^^^^^^^^^^^
+  путь: тело `leaky` -> тело лямбды -> тело `let` -> ветвь #0 -> тело лямбды

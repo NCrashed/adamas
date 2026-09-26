@@ -954,11 +954,15 @@ pub enum ArrayOp {
     Set,
     /// `arrayIndex xs i` - значение ячейки `i`.
     Index,
+    /// `arrayRead xs i` - значение ячейки `i` **вместе с тем же массивом**
+    /// (§4.11, §10 вопрос 202): линейный массив читается, не отдаваясь.
+    /// Ответ - конструктор [`MKREAD`] программы.
+    Read,
 }
 
 impl ArrayOp {
     /// Все операции.
-    pub const ALL: [Self; 3] = [Self::New, Self::Set, Self::Index];
+    pub const ALL: [Self; 4] = [Self::New, Self::Set, Self::Index, Self::Read];
 
     /// Имя, которым операция пишется в программе.
     #[must_use]
@@ -967,6 +971,7 @@ impl ArrayOp {
             Self::New => "arrayNew",
             Self::Set => "arraySet",
             Self::Index => "arrayIndex",
+            Self::Read => "arrayRead",
         }
     }
 
@@ -1319,6 +1324,14 @@ pub const TRUE: &str = "True";
 
 /// Конструктор лжи.
 pub const FALSE: &str = "False";
+
+/// Ответ линейного чтения массива (§4.11, §10 вопрос 202): ячейка и тот же
+/// массив. Имя программы, взятое соглашением, как [`BOOL`]: объявляет его
+/// прелюдия, и поле ячейки там `ω`, а поле массива `1`.
+pub const READ: &str = "Read";
+
+/// Конструктор [`READ`].
+pub const MKREAD: &str = "MkRead";
 
 /// Имя типа массива (§4.11).
 pub const ARRAY: &str = "Array";

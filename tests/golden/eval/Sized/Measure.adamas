@@ -1,0 +1,16 @@
+-- Класс в файле-модуле: метод его - член файла, а не имя программы (§4.4).
+--
+-- Хозяин, `eval/method-shadowed.adamas`, объявляет своё `size` и зовёт этот
+-- метод квалифицированно. Пока метод занимал имя у всей программы, хозяин
+-- отвергался «определение `size` уже существует».
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+class Sized a where
+  size : a -> Nat
+
+instance Sized Bool where
+  size True = Succ (Succ Zero)
+  size False = Succ Zero

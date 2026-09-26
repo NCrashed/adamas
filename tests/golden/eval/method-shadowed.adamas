@@ -1,0 +1,23 @@
+-- Своё имя затеняет метод класса из модуля (§4.4).
+--
+-- `Sized/Measure.adamas` объявляет класс `Sized` с методом `size`. Метод
+-- квалифицирован файлом, как всякое его определение, - `Sized.Measure.size`, -
+-- поэтому своё `size` здесь законно и зовётся коротким именем, а метод -
+-- полным. До правки метод лежал под голым `size`, и программа отвергалась
+-- «определение `size` уже существует».
+--
+-- Ответ складывает оба, и потому различает их: своё `size` удваивает, метод на
+-- `True` даёт два. Подмени одно другим - сумма станет иной.
+
+import Sized.Measure (Nat, Zero, Succ)
+
+size : Nat -> Nat
+size Zero = Zero
+size (Succ k) = Succ (Succ (size k))
+
+plus : Nat -> Nat -> Nat
+plus Zero m = m
+plus (Succ k) m = Succ (plus k m)
+
+main : Nat
+main = plus (size (Succ (Succ Zero))) (Sized.Measure.size True)

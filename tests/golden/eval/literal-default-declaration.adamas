@@ -1,0 +1,56 @@
+-- Умолчание литерала решается в конце объявления (волна 7, трек B; §4.3).
+--
+-- Литерал в позиции нерешённой дырки откладывается до конца **объявления**, а
+-- не спайна. `Cons 5 (Cons 2 Nil)` при `sample : List Nat` узнаёт `Nat` из
+-- подписи, то есть извне всего выражения, а внутренний спайн, решавший свой
+-- литерал в себе, брал `Int` раньше, чем подпись успевала сказать своё.
+--
+-- Порядок в конце объявления такой: терм проверяется против подписи, и цели
+-- литералов решает она; затем литералы досчитываются; умолчание берётся только
+-- там, где цель так и осталась дыркой.
+--
+-- Программа не объявляет ни `Zero`, ни `Succ`: у литерала нет унарного пути, и
+-- решить его может только тип, пришедший снаружи, либо умолчание.
+--
+-- Свидетель предъявляет обе стороны: где тип задаёт подпись, умолчание
+-- молчит, и где не задаёт ничто, оно срабатывает.
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+data Maybe (a : Type) where
+  Nothing : Maybe a
+  Just : a -> Maybe a
+
+safeHead : List a -> Maybe a
+safeHead Nil = Nothing
+safeHead (Cons x xs) = Just x
+
+fromMaybe : a -> Maybe a -> a
+fromMaybe d Nothing = d
+fromMaybe d (Just x) = x
+
+sumInt32 : List Int32 -> Int32
+sumInt32 Nil = 0
+sumInt32 (Cons x xs) = addInt32 x (sumInt32 xs)
+
+count : List a -> Int64
+count Nil = 0
+count (Cons x xs) = addInt64 1 (count xs)
+
+-- | Подпись решает вложенный спайн: оба литерала - `Int32`, а не `Int`.
+sample : List Int32
+sample = Cons 5 (Cons 2 Nil)
+
+-- | Подпись решает и литерал, и дырку у `Nil`, стоящего аргументом дальше.
+fallback : Int32
+fallback = fromMaybe 4 (safeHead Nil)
+
+-- | Типа элементов не задаёт ничто: `count` от них не зависит. Здесь и только
+-- здесь срабатывает умолчание `Int`.
+defaulted : Int64
+defaulted = count (Cons 3 (Cons 4 (Cons 5 Nil)))
+
+main : Int64
+main = addInt64 (int32ToInt64 (addInt32 (sumInt32 sample) fallback)) defaulted

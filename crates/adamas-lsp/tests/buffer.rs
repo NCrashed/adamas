@@ -135,6 +135,10 @@ fn a_buffer_translates_a_module_path_into_a_file() {
         let Some(module) = spot.module.as_deref() else {
             continue;
         };
+        // Прелюдия файла не имеет: она едет с компилятором (§4.4).
+        if module == adamas_elab::program::PRELUDE {
+            continue;
+        }
         let file = document
             .file_of(module)
             .unwrap_or_else(|| panic!("`{name}` называет модуль `{module}`, а файла у него нет"));

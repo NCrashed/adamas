@@ -59,6 +59,8 @@ pub(crate) struct Checked {
     pub(crate) metas: adamas_core::meta::Metas,
     /// Что знает разрешение инстансов.
     pub(crate) instances: adamas_elab::class::Instances,
+    /// Имена, объявленные прелюдией, - в счёт объявлений они не входят.
+    pub(crate) prelude: std::collections::HashSet<adamas_core::term::Name>,
 }
 
 /// Откуда берутся входной файл и корни поиска модулей.
@@ -186,6 +188,7 @@ pub(crate) fn checked(
         signature,
         metas: program.metas,
         instances: program.instances,
+        prelude: program.prelude.into_iter().collect(),
     })
 }
 

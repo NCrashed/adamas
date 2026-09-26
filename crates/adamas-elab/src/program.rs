@@ -202,6 +202,12 @@ pub struct Program {
     /// `drop` ([`crate::lifecycle`]): второй проход, повторяющий правило,
     /// разошёлся бы с ним молча.
     pub observed: Observed,
+    /// Имена, объявленные прелюдией: их автор не писал (§4.4).
+    ///
+    /// Префикса `Prelude.` для этого мало - класс, словарь инстанса
+    /// (`Add#Int64`) и умолчание параметра (`Mul#default1`) его не носят.
+    /// Поэтому имена записываются там, где прелюдия объявляется.
+    pub prelude: Vec<adamas_core::term::Name>,
 }
 
 impl Program {
@@ -251,6 +257,7 @@ pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
         }],
         blame: Vec::new(),
         broken: Vec::new(),
+        prelude: Vec::new(),
     };
     let module = match parsed {
         Ok(module) => module,
@@ -265,6 +272,7 @@ pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
                 metas: Metas::default(),
                 instances: Instances::default(),
                 observed: Observed::new(),
+                prelude: Vec::new(),
             };
         }
     };
@@ -324,6 +332,7 @@ pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
         metas,
         instances,
         observed,
+        prelude: loader.prelude,
     }
 }
 
@@ -353,6 +362,8 @@ struct Loader<'a> {
     /// Пути модулей, которые уже отказали: второй `import` не элаборирует их
     /// заново.
     broken: Vec<String>,
+    /// Имена, объявленные прелюдией, - см. [`Program::prelude`].
+    prelude: Vec<adamas_core::term::Name>,
 }
 
 impl Loader<'_> {
@@ -381,6 +392,29 @@ impl Loader<'_> {
         if self.declared.iter().any(|it| it == path) {
             return Ok(());
         }
+        // Имена прелюдии записываются здесь, а не в `seed`: файл, написавший
+        // `import Prelude`, подключает её импортом, мимо `seed`.
+        if path == PRELUDE {
+            let before: std::collections::HashSet<_> = pass.signature.names().into_iter().collect();
+            let outcome = self.declare_module(path, span, pass.reborrow());
+            self.prelude.extend(
+                pass.signature
+                    .names()
+                    .into_iter()
+                    .filter(|name| !before.contains(name)),
+            );
+            return outcome;
+        }
+        self.declare_module(path, span, pass)
+    }
+
+    /// Объявляет модуль по пути - см. [`Self::declare`].
+    fn declare_module(
+        &mut self,
+        path: &str,
+        span: Span,
+        mut pass: Pass<'_>,
+    ) -> Result<(), ElabError> {
         // Уже отказавший модуль второй раз не элаборируется. До восстановления
         // (§10 вопрос 177) памяти этой не требовалось - первый отказ
         // останавливал проход, и второго `import` того же пути не случалось, -

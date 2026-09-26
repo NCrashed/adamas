@@ -187,13 +187,13 @@ fn check(path: &std::path::Path, wanted: &[String]) -> anyhow::Result<()> {
                 "{}: проверено, файлов {}, объявлений {}",
                 checked.name,
                 checked.files,
-                declared(&checked.signature)
+                declared(&checked.signature, &checked.prelude)
             );
         } else {
             println!(
                 "{}: проверено, объявлений {}",
                 checked.name,
-                declared(&checked.signature)
+                declared(&checked.signature, &checked.prelude)
             );
         }
         return Ok(());
@@ -237,12 +237,15 @@ fn evaluate(path: &std::path::Path, name: &str, full: bool) -> anyhow::Result<()
 ///
 /// Прелюдные не входят: подключаются они неявно (§4.4), автор их не писал, и
 /// счёт с ними говорил бы про программу неправду - у всякой она выросла бы на
-/// одно и то же число.
-fn declared(signature: &adamas_core::sig::Signature) -> usize {
-    let head = format!("{}.", adamas_elab::program::PRELUDE);
+/// одно и то же число. Считаются по записи загрузчика, а не по префиксу
+/// `Prelude.`: класс и словарь инстанса префикса не носят.
+fn declared(
+    signature: &adamas_core::sig::Signature,
+    prelude: &std::collections::HashSet<adamas_core::term::Name>,
+) -> usize {
     signature
         .names()
         .into_iter()
-        .filter(|name| !name.starts_with(&head))
+        .filter(|name| !prelude.contains(name))
         .count()
 }

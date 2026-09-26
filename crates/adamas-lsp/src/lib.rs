@@ -530,10 +530,13 @@ impl Document {
     /// копируются - копия капстоуна стоила бы ровно того, что здесь
     /// экономится.
     pub fn absorb(&mut self, program: &mut Program) {
+        // Прелюдия едет с компилятором, а не лежит файлом (§4.4): ни следить за
+        // ней, ни показывать её текст редактору неоткуда.
         self.depends = program
             .units
             .iter()
             .skip(1)
+            .filter(|unit| unit.path.as_deref() != Some(adamas_elab::program::PRELUDE))
             .map(|unit| (unit.path.clone(), PathBuf::from(unit.file.name())))
             .collect();
         self.module = program

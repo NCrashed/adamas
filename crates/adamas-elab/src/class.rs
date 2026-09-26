@@ -269,6 +269,7 @@ pub fn resolve(
     declaring: Option<&Declaring>,
     term: &Term,
     ty: &Term,
+    group: &[(Symbol, u32, Term)],
     span: Span,
 ) -> Result<(), ElabError> {
     if unsolved_term_meta(metas, term).is_none() && unsolved_term_meta(metas, ty).is_none() {
@@ -277,8 +278,14 @@ pub fn resolve(
     // Дырка есть - значит нужна проверка: её решения и делают тип словаря
     // известным. Не сошлось - здесь молчим: об этом скажет объявление, где у
     // ошибки есть маршрут по терму.
+    //
+    // Проверка идёт по копии сигнатуры, где объявляемая группа предположена:
+    // иначе она обрывалась на ссылке на себя, и `acc + v` в аргументе
+    // рекурсивного вызова оставлял параметр класса нерешённым.
+    let assumed = crate::expr::assuming(signature, group);
+    let checking = assumed.as_ref().unwrap_or(signature);
     let _ =
-        adamas_core::check::check_within(&adamas_core::ctx::Ctx::new(signature), metas, term, ty);
+        adamas_core::check::check_within(&adamas_core::ctx::Ctx::new(checking), metas, term, ty);
     // И тело, и тип: словарь стоит в обоих - `witnessed : Wit (eq Zero Zero)`
     // несёт его в написанном типе, а не в теле. σ у проходов разная, и это
     // ворота §4.7 (§10 вопрос 134): тип - стёртый фрагмент, и нетотальный
@@ -314,12 +321,8 @@ pub fn resolve(
     // объявленный тип, не решение. Пока решение не подставлено, его
     // собственные аргументы уровня не связывает никто.
     let zonked = zonk_term(metas, term);
-    let _ = adamas_core::check::check_within(
-        &adamas_core::ctx::Ctx::new(signature),
-        metas,
-        &zonked,
-        ty,
-    );
+    let _ =
+        adamas_core::check::check_within(&adamas_core::ctx::Ctx::new(checking), metas, &zonked, ty);
     Ok(())
 }
 

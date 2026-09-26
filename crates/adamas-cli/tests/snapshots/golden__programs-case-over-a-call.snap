@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+case-over-a-call.adamas: проверено, объявлений 11

@@ -1,0 +1,37 @@
+-- Разбор над вычислением, чья ветвь пользуется полем зависимо (§3.7).
+--
+-- Мотив разбора абстрагирует и разбираемое, и переменные его индексов, а
+-- решается он паттерновой унификацией: спайн дырки обязан состоять из
+-- различных переменных. `decEq n m` - вычисление, и до 2026-09-26 здесь был
+-- отказ: связывание разбираемого несло значение в контексте, но не в записи
+-- области видимости, и дырка ставила его в спайн переменной, которую
+-- вычисление тут же подменяло самим термом.
+--
+-- Теперь связывание несёт значение и там - как у `let`, - и в телескопе дырки
+-- оно стоит `Let`ом, а не параметром. Мотив решается, и `Yes p -> Yes (cong
+-- Succ p)` пишется без `let`-обхода из `eval/decidable.adamas`. Судит
+-- по-прежнему ядро: оно программу принимает.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Void : Type
+
+data Eqv (a : Type) (x : a) : a -> Type where
+  Refl : Eqv a x x
+
+data Dec (p : Type) where
+  Yes : p -> Dec p
+  No : (p -> Void) -> Dec p
+
+cong : (f : (1 _ : a) -> b) -> Eqv a x y -> Eqv b (f x) (f y)
+cong f Refl = Refl
+
+decEq : (n : Nat) -> (m : Nat) -> Dec (Eqv Nat n m)
+decEq Zero Zero = Yes Refl
+decEq Zero (Succ k) = decEq Zero (Succ k)
+decEq (Succ k) Zero = decEq (Succ k) Zero
+decEq (Succ n) (Succ m) = case decEq n m of
+  Yes p -> Yes (cong Succ p)
+  No q -> decEq (Succ n) (Succ m)

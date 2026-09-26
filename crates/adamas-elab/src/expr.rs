@@ -1200,6 +1200,35 @@ pub(crate) struct Postponed {
     group: Vec<Member>,
 }
 
+impl Postponed {
+    /// Члены группы - именем, арностью уровня и типом: столько нужно, чтобы
+    /// предположить их по копии сигнатуры ([`assuming`]).
+    pub(crate) fn group(&self) -> Vec<(Symbol, u32, Term)> {
+        self.group
+            .iter()
+            .map(|member| {
+                let arity = u32::try_from(member.levels.len()).unwrap_or(u32::MAX);
+                (Rc::clone(&member.name), arity, (*member.ty).clone())
+            })
+            .collect()
+    }
+}
+
+/// Копия сигнатуры, где члены объявляемой группы **предположены** - как у
+/// `self_levels`. Проверка тела до объявления иначе спотыкается на ссылке на
+/// себя раньше, чем дойдёт до того, что стоит в её аргументах. `None` -
+/// группы нет, и копия не нужна.
+pub(crate) fn assuming(signature: &Signature, group: &[(Symbol, u32, Term)]) -> Option<Signature> {
+    if group.is_empty() {
+        return None;
+    }
+    let mut assumed = signature.clone();
+    for (name, arity, ty) in group {
+        assumed.assume(name, *arity, ty.clone());
+    }
+    Some(assumed)
+}
+
 /// Досчитывает отложенные литералы объявления (§4.3, §10 вопрос 208).
 ///
 /// Сначала терм проверяется против типа объявления: её решения и есть то, что
@@ -1227,16 +1256,14 @@ pub(crate) fn settle_literals(
     if postponed.literals.is_empty() {
         return Ok(());
     }
-    if postponed.group.is_empty() {
-        let _ = check_within(&Ctx::new(signature), metas, term, ty);
-    } else {
-        let mut assumed = signature.clone();
-        for member in &postponed.group {
-            let arity = u32::try_from(member.levels.len()).unwrap_or(u32::MAX);
-            assumed.assume(&member.name, arity, (*member.ty).clone());
-        }
-        let _ = check_within(&Ctx::new(&assumed), metas, term, ty);
-    }
+    let group = postponed.group();
+    let assumed = assuming(signature, &group);
+    let _ = check_within(
+        &Ctx::new(assumed.as_ref().unwrap_or(signature)),
+        metas,
+        term,
+        ty,
+    );
     for literal in postponed.literals {
         let mut it = Elaborator::new(signature, metas, owned, fixities, warnings)
             .within(literal.enclosing.as_ref());
@@ -2866,8 +2893,14 @@ impl<'a> Elaborator<'a> {
         self.ctx = self
             .ctx
             .define(CoreName::from(&*name), mult, Rc::clone(&ty), evaluated);
+        // Значение связывания лежит и в контексте, и здесь - как у `let`. Без
+        // него дырка ставила связывание в свой спайн переменной, а вычисление
+        // подставляло вместо неё сам терм: имплисит `arraySet` в ветви
+        // `case arrayRead xs i of …` получал спайн вне фрагмента шаблонов и не
+        // решался.
         self.scope.push(Bound {
             visible: false,
+            value: Some(Rc::new(value.clone())),
             ..Bound::visible(&name, mult, Rc::clone(&ty))
         });
         let inner =
@@ -3748,6 +3781,26 @@ impl<'a> Elaborator<'a> {
             {
                 return bound.mult;
             }
+        }
+        // Составное разбираемое, расходующее **линейное** связывание, само
+        // потребляется однажды (§3.3, §10 вопрос 202). Иначе `case arrayRead
+        // xs i of MkRead v ys -> …` над `(1 xs : …)` отвергался «`xs`
+        // использована ω»: разбор при `ω` умножал на `ω` и сам `xs`. Правка
+        // добавочная - такой разбор отвергался всегда, и ни одна принятая
+        // программа от неё не меняется.
+        let mut seen: Vec<&Symbol> = Vec::new();
+        let mut linear: Vec<&Symbol> = Vec::new();
+        for bound in self.scope.iter().rev().filter(|bound| bound.visible) {
+            if seen.contains(&&bound.name) {
+                continue;
+            }
+            seen.push(&bound.name);
+            if bound.mult == Mult::One {
+                linear.push(&bound.name);
+            }
+        }
+        if !linear.is_empty() && names_any(scrutinee, &linear) {
+            return Mult::One;
         }
         let mut head = ty;
         while let Term::App(callee, _) = head {

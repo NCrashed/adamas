@@ -45,7 +45,7 @@ use adamas_core::value::{Env, Lvl, Value};
 
 use crate::class::{self, Class, Declaring, Instances, Offence};
 use crate::expr::{
-    Elaborator, Enclosing, Member, Param, UNIT, Unwritten, WrittenField, settle_literals,
+    Elaborator, Enclosing, Member, Param, Postponed, UNIT, Unwritten, WrittenField, settle_literals,
 };
 use crate::fixity::Fixities;
 use crate::lifecycle::Observed;
@@ -1070,6 +1070,7 @@ fn alias(
         None,
         &wrapped_body,
         &ty,
+        &[],
         span,
     )?;
     signature
@@ -1796,7 +1797,15 @@ fn declare_instance(
     // Поля суперклассов заполняются поиском - до проверки, которой дырка
     // уже мешала бы.
     class::resolve(
-        signature, metas, instances, owned, None, &object, &written, span,
+        signature,
+        metas,
+        instances,
+        owned,
+        None,
+        &object,
+        &written,
+        &[],
+        span,
     )?;
     // `check_within`, а не `check_closed_with`: нерешённая дырка уровня здесь -
     // будущий параметр самого словаря, и запрет отвергал бы всякий
@@ -2478,6 +2487,7 @@ fn declare_members(
                 error: Box::new(error),
             }
         })?;
+        let group = postponed.group();
         settle_literals(
             signature, metas, owned, fixities, warnings, postponed, &tree.term, &types[at],
         )?;
@@ -2489,6 +2499,7 @@ fn declare_members(
             Some(&declaring),
             &tree.term,
             &types[at],
+            &group,
             *at_span,
         )?;
         trees.push(tree);
@@ -2676,6 +2687,7 @@ fn declare_mutual(
                 error: Box::new(error),
             }
         })?;
+        let group = postponed.group();
         settle_literals(
             signature,
             metas,
@@ -2694,6 +2706,7 @@ fn declare_mutual(
             None,
             &tree.term,
             &written[at],
+            &group,
             member.span,
         )?;
         trees.push(tree);
@@ -2705,6 +2718,51 @@ fn declare_mutual(
         carrier::check(signature, owned, &member.name.text, member.span)?;
     }
     Ok(())
+}
+
+/// Досчёт отложенного телом одиночного определения: литералы, затем словари.
+///
+/// Словари, вставленные дырками, заполняются поиском - до объявления,
+/// которому нерешённая дырка запрещена (§3.5, `crate::class`). Литералы идут
+/// раньше: умолчание `Int` обязано быть решено, когда поиск спросит `Add ?a`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "досчёт читает всё, что читают элаборатор и поиск словарей"
+)]
+fn settled(
+    signature: &Signature,
+    metas: &mut Metas,
+    known: Known<'_>,
+    warnings: &mut Warnings,
+    postponed: Postponed,
+    term: &Term,
+    ty: &Term,
+    span: Span,
+) -> Result<(), ElabError> {
+    let group = postponed.group();
+    settle_literals(
+        signature,
+        metas,
+        known.owned,
+        known.fixities,
+        warnings,
+        postponed,
+        term,
+        ty,
+    )?;
+    // Не объявляемый инстанс: сюда приходит обычное определение, а член
+    // инстанса объявляется своим путём и `Declaring` получает там.
+    class::resolve(
+        signature,
+        metas,
+        known.instances,
+        known.owned,
+        None,
+        term,
+        ty,
+        &group,
+        span,
+    )
 }
 
 /// Объявляет определения группы одним вызовом - и называет отказ по месту.
@@ -3431,7 +3489,17 @@ fn declare_module_value(
         .within(within)
         .wrapped(&params, true, |_| Ok(inner_ty))?;
     let term = abstracted(&params, term);
-    class::resolve(signature, metas, instances, owned, None, &term, &ty, span)?;
+    class::resolve(
+        signature,
+        metas,
+        instances,
+        owned,
+        None,
+        &term,
+        &ty,
+        &[],
+        span,
+    )?;
     signature
         .define_opaque(metas, declared, Mult::Many, ty, Some(term), module.sealed)
         .map_err(|error| ElabError::Core {
@@ -5116,27 +5184,12 @@ fn define(
             error: Box::new(error),
         }
     })?;
-    settle_literals(
+    settled(
         signature,
         metas,
-        known.owned,
-        known.fixities,
+        known,
         warnings,
         postponed,
-        &tree.term,
-        &declared.ty,
-    )?;
-
-    // Словари, вставленные дырками, заполняются поиском - до объявления,
-    // которому нерешённая дырка запрещена (§3.5, `crate::class`).
-    class::resolve(
-        signature,
-        metas,
-        known.instances,
-        known.owned,
-        // Не объявляемый инстанс: сюда приходит обычное определение, а член
-        // инстанса объявляется своим путём и `Declaring` получает там.
-        None,
         &tree.term,
         &declared.ty,
         span,
@@ -6885,10 +6938,10 @@ fn declare_data(
     data: &ast::Data,
     span: Span,
 ) -> Result<(), ElabError> {
-    let family = family_header(
+    let mut family = family_header(
         signature, metas, owned, fixities, warnings, within, data, span,
     )?;
-    let constructors = family_constructors(
+    let mut constructors = family_constructors(
         signature,
         metas,
         owned,
@@ -6898,6 +6951,31 @@ fn declare_data(
         &family,
         &[family.visible()],
     )?;
+    // Уровень параметра вправе решить **конструктор**: у `data Read (0 n :
+    // UInt64) (a : Type)` поле `Array n a` требует `a : Type 0`, и параметр
+    // уровня, посчитанный по голому заголовку, исчезает. Ссылка на семейство в
+    // конструкторах к этому времени уже построена с ним, и объявление
+    // отвечало «принимает 0 параметров уровня, передано 1» - полиморфный
+    // контейнер с полем-массивом не объявлялся вовсе. Арность пересчитывается
+    // по решённому заголовку, и конструкторы, если она упала, строятся заново.
+    let settled = self_levels(signature, metas, &family.kind).map_err(|error| ElabError::Core {
+        span,
+        error: Box::new(error),
+        names: family.names.clone(),
+    })?;
+    if settled.len() < family.levels.len() {
+        family.levels = settled;
+        constructors = family_constructors(
+            signature,
+            metas,
+            owned,
+            fixities,
+            warnings,
+            within,
+            &family,
+            &[family.visible()],
+        )?;
+    }
     let parameters = u32::try_from(family.params.len()).unwrap_or(u32::MAX);
     let written: Vec<(&str, Term)> = constructors
         .iter()

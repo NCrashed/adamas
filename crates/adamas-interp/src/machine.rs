@@ -237,10 +237,57 @@ impl<'a> Machine<'a> {
         loop {
             let mut kont = Kont::default();
             let Some(step) = self.unfolding(&current, &mut kont) else {
-                return Ok(current);
+                return self.gathered(current);
             };
             current = self.driving(step, &mut kont)?;
         }
+    }
+
+    /// Операция над массивом или примитив, оставшиеся спайном, - с
+    /// развёрнутыми живыми аргументами (§4.11).
+    ///
+    /// Аргумент вызова машина считает ядерным `eval`, а он имени с телом не
+    /// разворачивает: `fill (i + 1) (arraySet xs i v)` передаёт запись, у
+    /// которой номер и ячейка - несвёрнутые `(+) …` и `(*) …`, и δ-шаг
+    /// оставляет её спайном. Чтение по такой цепочке застревало: номер не
+    /// литерал. Здесь живые аргументы форсируются и цепочка пересобирается
+    /// тем же `eval::apply` - второго правила счёта не заводится. Примитив - тем
+    /// же ходом: `mulInt64 (… (+) …) 3` иначе отвечал бы нейтралью.
+    fn gathered(&self, value: Rc<Value>) -> Result<Rc<Value>, RunError> {
+        let Value::Neutral(head, spine) = &*value else {
+            return Ok(value);
+        };
+        // Сколько ведущих аргументов стёрто: их не форсируют - это типы.
+        let erased = match head {
+            Head::ArrayOp(ArrayOp::New) => 1,
+            Head::ArrayOp(_) => 2,
+            Head::Prim(..) | Head::Cmp(..) | Head::Convert(_) => 0,
+            _ => return Ok(value),
+        };
+        let mut rebuilt = Rc::new(Value::Neutral(head.clone(), Vec::new()));
+        let mut applied = 0;
+        for elim in spine {
+            rebuilt = match elim {
+                Elim::App(argument) => {
+                    let argument = if applied < erased {
+                        Rc::clone(argument)
+                    } else {
+                        self.forced(Rc::clone(argument))?
+                    };
+                    applied += 1;
+                    eval::apply(&rebuilt, argument)
+                }
+                Elim::Case(case) => eval::eliminate_case(case, &rebuilt),
+                Elim::Project(name) => eval::project(&rebuilt, name),
+                Elim::With(fields) => eval::with(&rebuilt, fields.to_vec()),
+            };
+        }
+        // Пересборка могла снять застревание - разбор свёлся в ветвь, и та
+        // зовёт имя с телом. Тогда машина идёт дальше; иначе ответ уже здесь.
+        if matches!(&*rebuilt, Value::Neutral(Head::Global(..), _)) {
+            return self.forced(rebuilt);
+        }
+        Ok(rebuilt)
     }
 
     /// Шаг по терму.

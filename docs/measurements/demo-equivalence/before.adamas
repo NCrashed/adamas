@@ -1,0 +1,76 @@
+-- Свидетель эквивалентности переписи демо: дописывается в конец `Main.adamas`
+-- скриптом `run.sh` вместо `main`. Сам по себе не собирается.
+mix : Int32 -> Int32 -> Int32
+mix h v = h * 31 + v
+
+sumArr : Array rocks Int32 -> UInt64 -> Int32 -> Int32
+sumArr xs 0 h = h
+sumArr xs i h = sumArr xs (i - 1) (mix h (arrayIndex xs (i - 1)))
+
+digest : World -> Int32
+digest (MkWorld (MkShip x y vx vy d g) (MkRocks ds rx ry rvx rvy rsz) (MkShots sx sy svx svy life) keys (MkStatus s l gr v r)) =
+  let h1 = mix (mix (mix (mix (mix (mix 7 x) y) vx) vy) d) g
+  let h2 = sumArr rsz rocks (sumArr rvy rocks (sumArr rvx rocks (sumArr ry rocks (sumArr rx rocks h1))))
+  let h3 = sumArr life shots (sumArr svy shots (sumArr svx shots (sumArr sy shots (sumArr sx shots h2))))
+  mix (mix (mix (mix (mix h3 s) l) gr) v) r
+
+-- Сценарий: 0 - покой, 1 - тяга, огонь и поворот волнами, 2 - прыжок.
+press : Int32 -> Int32 -> Keys
+press 0 n = MkKeys 0 0 0 0 0 0
+press 1 n = MkKeys 0 (if ltInt32 (remInt32 n 50) 10 then 1 else 0) (if ltInt32 (remInt32 n 90) 30 then 1 else 0) 1 0 0
+press k n = MkKeys 0 0 0 0 1 0
+
+run : Int32 -> World -> Int32 -> Int32 -> World
+run k w n 0 = w
+run k w n left = run k (step (withKeys w (press k n))) (n + 1) (left - 1)
+
+report : Int32 -> Int32 -> Int32
+report k frames =
+  let w = run k opening 0 frames
+  digest w
+
+sc0 : Int32
+sc0 = report 0 2000
+sc1 : Int32
+sc1 = report 1 3000
+sc2 : Int32
+sc2 = report 2 200
+sc1score : Int32
+sc1score = scoreOf (run 1 opening 0 3000)
+sc1level : Int32
+sc1level = levelIn (statusOf (run 1 opening 0 3000))
+sc0lives : Int32
+sc0lives = livesIn (statusOf (run 0 opening 0 2000))
+
+-- Сценарий 3: экран чист с первого кадра - следующая волна.
+bare : World
+bare = MkWorld firstShip emptyRocks emptyShots (MkKeys 0 0 0 0 0 0) (MkStatus 0 3 mercy 1 24601)
+sc3 : Int32
+sc3 = digest (run 0 bare 0 120)
+sc3level : Int32
+sc3level = levelIn (statusOf (run 0 bare 0 120))
+-- Кадр целиком со сценарием вместо событий: блоки кучи на кадр с отрисовкой.
+driver : Array 6 UInt8
+driver = "dummy"
+
+loop2 : CPtr -> Array 4 Int32 -> World -> Int32 -> Int32 -> {Foreign} World
+loop2 r rect w n 0 = w
+loop2 r rect w n left =
+  let stepped = step (withKeys w (press 1 n))
+  let painted = paint r rect stepped
+  loop2 r painted stepped (n + 1) (left - 1)
+
+body2 : (ω u : Unit) -> {Foreign} Int32
+body2 u =
+  let started = SDL_VideoInit driver
+  let window = SDL_CreateWindow title anywhere anywhere width height shown
+  let renderer = SDL_CreateRenderer window (-1) software
+  let rect = arrayNew 4 zeroI
+  let final = loop2 renderer rect opening 0 300
+  let goneR = SDL_DestroyRenderer renderer
+  let goneW = SDL_DestroyWindow window
+  let over = SDL_Quit
+  digest final
+
+main : Int32
+main = runForeign body2

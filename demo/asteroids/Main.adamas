@@ -212,7 +212,7 @@ countRocks : Array rocks Int32 -> UInt64 -> Int32 -> Int32
 countRocks sz 0 n = n
 countRocks sz i n =
   let j = i - 1
-  countRocks sz j (n + (if ltInt32 0 (arrayIndex sz j) then 1 else 0))
+  countRocks sz j (n + (if 0 < arrayIndex sz j then 1 else 0))
 
 -- | Первый свободный слот камня; `rocks` - свободного нет. Им находится место
 -- осколку.
@@ -220,7 +220,7 @@ freeRock : Array rocks Int32 -> UInt64 -> UInt64 -> UInt64
 freeRock sz 0 found = found
 freeRock sz i found =
   let j = i - 1
-  freeRock sz j (if ltInt32 0 (arrayIndex sz j) then found else j)
+  freeRock sz j (if 0 < arrayIndex sz j then found else j)
 
 -- | Положение на экране: неподвижная точка делится обратно.
 screenOf : Int32 -> Int32
@@ -300,20 +300,20 @@ reward = 1000
 earn : Status -> Int32 -> Status
 earn st k =
   let total = st.score + k
-  let extra = ltInt32 (divInt32 st.score reward) (divInt32 total reward)
+  let extra = divInt32 st.score reward < divInt32 total reward
   {st | score = total, lives = if extra then st.lives + 1 else st.lives}
 
 -- | Жизнь потеряна. Ниже нуля счётчик не уходит: «конец игры» проверяется
 -- сравнением с единицей, и отрицательные значения сделали бы его хрупким.
 hurt : Status -> Status
-hurt st = {st | lives = if ltInt32 0 st.lives then st.lives - 1 else 0, grace = mercy}
+hurt st = {st | lives = if 0 < st.lives then st.lives - 1 else 0, grace = mercy}
 
 -- | Неуязвимость убывает на кадр, счётчик случайности крутится.
 --
 -- Счётчик крутится каждым кадром, а не каждым прыжком: иначе два прыжка
 -- подряд с одного места уносили бы в одну и ту же точку.
 cool : Status -> Status
-cool st = {st | grace = if ltInt32 0 st.grace then st.grace - 1 else 0, seed = stir st.seed}
+cool st = {st | grace = if 0 < st.grace then st.grace - 1 else 0, seed = stir st.seed}
 
 -- | Следующая волна: камней столько же, но они быстрее, и за переход дают сто.
 promote : Status -> Status
@@ -321,11 +321,11 @@ promote st = {st | score = st.score + 100, grace = mercy, level = st.level + 1}
 
 -- | Неуязвим ли корабль сейчас.
 shielded : Status -> Bool
-shielded st = ltInt32 0 st.grace
+shielded st = 0 < st.grace
 
 -- | Кончились ли жизни.
 finished : Status -> Bool
-finished st = ltInt32 st.lives 1
+finished st = st.lives < 1
 
 -- | Прыжок: корабль пропадает и возникает в случайной точке, потеряв ход.
 --
@@ -372,18 +372,18 @@ scanWord = 4
 
 -- | Клавиша с новым состоянием, если событие про неё; иначе прежняя.
 toggled : Bool -> Bool -> UInt32 -> UInt32 -> Bool -> Bool
-toggled touch down code want old = if and touch (eqUInt32 code want) then down else old
+toggled touch down code want old = if touch && code == want then down else old
 
 -- | Разбирает одно событие в состояние клавиш.
 absorb : Keys -> UInt32 -> UInt32 -> Keys
 absorb keys kind code =
-  let down = eqUInt32 kind keyDown
-  let touch = or down (eqUInt32 kind keyUp)
-  {left = toggled touch down code scanLeft keys.left, right = toggled touch down code scanRight keys.right, thrust = toggled touch down code scanUp keys.thrust, fire = toggled touch down code scanSpace keys.fire, jump = toggled touch down code scanJump keys.jump, quit = or (eqUInt32 kind quitEvent) keys.quit}
+  let down = kind == keyDown
+  let touch = down || kind == keyUp
+  {left = toggled touch down code scanLeft keys.left, right = toggled touch down code scanRight keys.right, thrust = toggled touch down code scanUp keys.thrust, fire = toggled touch down code scanSpace keys.fire, jump = toggled touch down code scanJump keys.jump, quit = kind == quitEvent || keys.quit}
 
 -- | Ствол заряжен, и клавишу жмут.
 armedAt : Ship -> Keys -> Bool
-armedAt ship keys = and keys.fire (eqInt32 ship.reload 0)
+armedAt ship keys = keys.fire && ship.reload == 0
 
 -- | Поворот и тяга корабля по нажатым клавишам.
 --
@@ -396,14 +396,14 @@ steer ship keys =
   let ay = bit keys.thrust * divInt32 (dirY (aim turned)) 16
   let nvx = divInt32 ((ship.vx + ax) * 63) 64
   let nvy = divInt32 ((ship.vy + ay) * 63) 64
-  {x = wrap (ship.x + nvx) (width * scale), y = wrap (ship.y + nvy) (height * scale), vx = nvx, vy = nvy, dir = turned, reload = if ltInt32 0 ship.reload then ship.reload - 1 else 0}
+  {x = wrap (ship.x + nvx) (width * scale), y = wrap (ship.y + nvy) (height * scale), vx = nvx, vy = nvy, dir = turned, reload = if 0 < ship.reload then ship.reload - 1 else 0}
 
 -- | Ход выстрелов: живые двигаются и стареют, мёртвые стоят.
 fly : Shots -> UInt64 -> Shots
 fly w 0 = w
 fly (MkShots xs ys vx vy life) i =
   let j = i - 1
-  let alive = ltInt32 0 (arrayIndex life j)
+  let alive = 0 < arrayIndex life j
   let x = arrayIndex xs j
   let y = arrayIndex ys j
   let age = arrayIndex life j
@@ -417,7 +417,7 @@ freeShot : Array shots Int32 -> UInt64 -> UInt64 -> UInt64
 freeShot life 0 found = found
 freeShot life i found =
   let j = i - 1
-  freeShot life j (if ltInt32 0 (arrayIndex life j) then found else j)
+  freeShot life j (if 0 < arrayIndex life j then found else j)
 
 -- | Выстрел из носа корабля, если есть чем и если ствол заряжен.
 --
@@ -426,7 +426,7 @@ freeShot life i found =
 fire : Ship -> Shots -> Bool -> Shots
 fire ship (MkShots xs ys svx svy life) shoot =
   let slot = freeShot life shots shots
-  let ok = and shoot (ltUInt64 slot shots)
+  let ok = shoot && slot < shots
   let at : UInt64 = if ok then slot else 0
   let x = if ok then ship.x else arrayIndex xs at
   let y = if ok then ship.y else arrayIndex ys at
@@ -440,7 +440,7 @@ touching : Int32 -> Int32 -> Int32 -> Int32 -> Int32 -> Bool
 touching ax ay bx by reach =
   let dx = ax - bx
   let dy = ay - by
-  and (ltInt32 (dx * dx) (reach * reach)) (ltInt32 (dy * dy) (reach * reach))
+  dx * dx < reach * reach && dy * dy < reach * reach
 
 -- | Итог выстрелов: камни, выстрелы и заработанные очки.
 --
@@ -476,12 +476,12 @@ strike rs ss s 0 got = MkVolley rs ss got
 strike (MkRocks ds xs ys vx vy sz) (MkShots sx sy svx svy life) s i got =
   let j = i - 1
   let side = at sz j
-  let live = and (ltInt32 0 side) (ltInt32 0 (arrayIndex life s))
+  let live = 0 < side && 0 < arrayIndex life s
   let near = touching (screenOf (at xs j)) (screenOf (at ys j)) (screenOf (arrayIndex sx s)) (screenOf (arrayIndex sy s)) side
-  let hit = and live near
+  let hit = live && near
   let rest = shard side
   let slot = freeRock sz rocks rocks
-  let born = and hit (and (ltInt32 0 rest) (ltUInt64 slot rocks))
+  let born = hit && 0 < rest && slot < rocks
   let dest : UInt64 = if born then slot else 0
   let srcX = at xs j
   let srcY = at ys j
@@ -534,9 +534,9 @@ bump ship keys rs ss st 0 = MkWorld ship rs ss keys st
 bump ship keys (MkRocks ds xs ys vx vy sz) ss st i =
   let j = i - 1
   let side = at sz j
-  let live = ltInt32 0 side
+  let live = 0 < side
   let near = touching (screenOf (at xs j)) (screenOf (at ys j)) (screenOf ship.x) (screenOf ship.y) (side + 5)
-  let struck = and live (and near (not (shielded st)))
+  let struck = live && near && not (shielded st)
   bump ship keys (MkRocks whole xs ys vx vy sz) ss (if struck then hurt st else st) j
 
 -- | Прямоугольник в буфере `SDL_Rect`: четыре `int` подряд, порядок `x y w h`.
@@ -587,7 +587,7 @@ segments n = 0
 
 -- | Горит ли отрезок `s` у цифры `d`.
 lit : Int32 -> Int32 -> Bool
-lit d s = not (eqInt32 0 (andInt32 (segments d) (shlInt32 1 s)))
+lit d s = andInt32 (segments d) (shlInt32 1 s) /= 0
 
 -- Раскладка отрезка внутри знакоместа двенадцать на двадцать. Четыре таблицы,
 -- а не запись из четырёх полей: запись потребовала бы конструктора и разбора
@@ -670,7 +670,7 @@ paintLives r rect lives n =
   let j = n - 1
   let k = uint64ToInt32 j
   let shaped = rectOf rect (width - 24 - k * 16) 12 10 10
-  let drawn = drawIf r shaped (ltInt32 k lives)
+  let drawn = drawIf r shaped (k < lives)
   paintLives r drawn lives j
 
 -- | Сколько жизней помещается в строку состояния.
@@ -704,7 +704,7 @@ paintRocks r rect (MkRocks ds xs ys vx vy sz) i =
   let side = at sz j
   tint r side
   let shaped = box rect (screenOf (at xs j)) (screenOf (at ys j)) side
-  let drawn = drawIf r shaped (ltInt32 0 side)
+  let drawn = drawIf r shaped (0 < side)
   paintRocks r drawn (MkRocks whole xs ys vx vy sz) j
 
 -- | Рисует выстрелы: живые - точкой в два пикселя.
@@ -713,13 +713,13 @@ paintShots r rect w 0 = rect
 paintShots r rect (MkShots xs ys vx vy life) i =
   let j = i - 1
   let shaped = box rect (screenOf (arrayIndex xs j)) (screenOf (arrayIndex ys j)) 3
-  let drawn = drawIf r shaped (ltInt32 0 (arrayIndex life j))
+  let drawn = drawIf r shaped (0 < arrayIndex life j)
   paintShots r drawn (MkShots xs ys vx vy life) j
 
 -- | Виден ли корабль в этом кадре: под защитой он мигает, и мигание - это
 -- единственный способ показать неуязвимость, не заводя второго цвета.
 visible : Int32 -> Bool
-visible grace = or (eqInt32 grace 0) (ltInt32 (remInt32 grace 8) 4)
+visible grace = grace == 0 || remInt32 grace 8 < 4
 
 -- | Корабль: корпус и нос по румбу. Нос ставится той же таблицей направлений,
 -- какой считается тяга, - одно место на две работы.
@@ -736,7 +736,7 @@ paintShip r rect ship grace push =
   SDL_SetRenderDrawColor r 255 170 60 255
   let bx = cx - divInt32 (dirX d * 9) scale
   let by = cy - divInt32 (dirY d * 9) scale
-  drawIf r (box tip bx by 5) (and here push)
+  drawIf r (box tip bx by 5) (here && push)
 
 statusOf : World -> Status
 statusOf (MkWorld ship rs ss keys st) = st
@@ -788,7 +788,7 @@ listen event keys n =
   let got = SDL_PollEvent event
   let kind = arrayIndex event 0
   let code = arrayIndex event scanWord
-  let seen = if ltInt32 0 got then absorb keys kind code else keys
+  let seen = if 0 < got then absorb keys kind code else keys
   listen event seen (n - 1)
 
 emptyRocks : Rocks whole
@@ -814,7 +814,7 @@ seedRocks (MkRocks ds xs ys vx vy sz) i lvl =
 -- | Камней не осталось - следующая волна.
 refill : World -> World
 refill (MkWorld ship rs ss keys st) =
-  let clear = eqInt32 (countRocks (sizesOf rs) rocks 0) 0
+  let clear = countRocks (sizesOf rs) rocks 0 == 0
   if clear then MkWorld ship (seedRocks emptyRocks rocks st.level) ss keys (promote st) else MkWorld ship rs ss keys st
 
 -- | Неуязвимость убывает на кадр, счётчик случайности крутится.
@@ -827,13 +827,13 @@ chill (MkWorld ship rs ss keys st) = MkWorld ship rs ss keys (cool st)
 -- бы прыгать каждым кадром, а второго счётчика ради этого не заводится.
 teleport : World -> World
 teleport (MkWorld ship rs ss keys st) =
-  let wants = and keys.jump (not (shielded st))
+  let wants = keys.jump && not (shielded st)
   if wants then MkWorld (jump ship st.seed) rs ss keys {st | grace = pause} else MkWorld ship rs ss keys st
 
 -- | Если жизнь потеряна, корабль возвращается на середину экрана.
 replace : World -> Int32 -> World
 replace (MkWorld ship rs ss keys st) before =
-  let died = ltInt32 st.lives before
+  let died = st.lives < before
   MkWorld (if died then firstShip else ship) rs ss keys st
 
 -- | Корабль против камней, и возрождение следом.
@@ -854,7 +854,7 @@ step (MkWorld ship rs ss keys st) =
 
 -- | Пора ли кончать: закрыли окно либо кончились жизни.
 done : World -> Bool
-done w = or (keysOf w).quit (finished (statusOf w))
+done w = (keysOf w).quit || finished (statusOf w)
 
 -- | Игровой цикл: слушает, шагает, рисует, ждёт кадра.
 --

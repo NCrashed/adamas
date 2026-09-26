@@ -81,12 +81,10 @@ data Found (a : Type) where
   Missing : Found a
   Got : a -> Found a
 
-infixl 6 +
 (+) : Nat -> Nat -> Nat
 (+) Zero m = m
 (+) (Succ k) m = Succ (k + m)
 
-infixl 7 *
 (*) : Nat -> Nat -> Nat
 (*) Zero m = Zero
 (*) (Succ k) m = m + k * m
@@ -190,9 +188,9 @@ module Ctx (Cell : Slot) where
 data Expr where
   Lit : Nat -> Expr
   Var : Nat -> Expr
-  Add : Expr -> Expr -> Expr
-  Mul : Expr -> Expr -> Expr
-  -- Узел **некоммутативный**, и он тут не для полноты языка. `Add` и `Mul`
+  Plus : Expr -> Expr -> Expr
+  Times : Expr -> Expr -> Expr
+  -- Узел **некоммутативный**, и он тут не для полноты языка. `Plus` и `Times`
   -- симметричны оба, поэтому перестановка операндов в любом из них ответа не
   -- меняла: вычислитель объектного языка проверялся только на том, что
   -- считает, а не на том, что считает верно (ревью 2026-09-07).
@@ -209,8 +207,8 @@ class Eval a where
 instance Eval Expr where
   run (Lit n) = n
   run (Var i) = look i
-  run (Add a b) = run a + run b
-  run (Mul a b) = run a * run b
+  run (Plus a b) = run a + run b
+  run (Times a b) = run a * run b
   run (Sub a b) = monus (run a) (run b)
 
 instance Eval Stmt where
@@ -228,8 +226,8 @@ instance Eval Stmt where
 sample : Stmt
 sample =
   Def (Lit (Succ (Succ Zero)))
-    (Def (Mul (Var Zero) (Lit (Succ (Succ (Succ Zero)))))
-      (Done (Add (Sub (Var Zero) (Var (Succ Zero))) (Lit (Succ Zero)))))
+    (Def (Times (Var Zero) (Lit (Succ (Succ (Succ Zero)))))
+      (Done (Plus (Sub (Var Zero) (Var (Succ Zero))) (Lit (Succ Zero)))))
 
 program : {Env, Fail} Nat
 program = run sample

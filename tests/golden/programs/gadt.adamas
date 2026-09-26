@@ -17,14 +17,14 @@ data Bool where
 data Expr : Type -> Type where
   LitNat : Nat -> Expr Nat
   LitBool : Bool -> Expr Bool
-  Add : Expr Nat -> Expr Nat -> Expr Nat
+  Plus : Expr Nat -> Expr Nat -> Expr Nat
 
 -- Уточнение индекса разбором: ветвь `LitNat` знает, что `a` есть `Nat`, и
 -- возвращает `n` там, где ожидается `a`.
 evalAny : (0 a : Type) -> Expr a -> a
 evalAny a (LitNat n) = n
 evalAny a (LitBool b) = b
-evalAny a (Add l r) = Zero
+evalAny a (Plus l r) = Zero
 
 -- Индекс, не являющийся `Type`, шёл этим путём и раньше: конструктор его тоже
 -- инстанцирует, но уровня у `Nat` нет, и заземлять нечего.

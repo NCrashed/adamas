@@ -2,7 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: mask-widens-row.adamas:36:10: несовпадение типов: ожидался `(ω _ : Unit) -> (?37) #0`, получен `(ω _ : Unit) -> {Ask | ?0} Nat`
+Error: mask-widens-row.adamas:36:10: несовпадение типов: ожидался `(ω _ : Unit) -> (?239) #0`, получен `(ω _ : Unit) -> {Ask | ?0} Nat`
   sneaky = mask ask
            ^^^^^^^^
   в контексте:

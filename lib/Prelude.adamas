@@ -52,3 +52,135 @@ type Int = Int64
 
 -- | Дробное по умолчанию - то же для литерала с точкой.
 type Float = Float64
+
+-- # Арифметика (§4.3)
+--
+-- Операции и операторы разнесены, как велит §4.3: класс несёт метод, а
+-- оператор - отдельное определение поверх него. Поэтому своё `(+)` программы
+-- затеняет прелюдное, как всякое своё имя, - а вот фикситет объявляется на
+-- программу (§4.4), и своего `infixl 6 +` рядом с прелюдией не будет.
+--
+-- `1 + 2` пишется потому, что литерал без типа из контекста берёт умолчание
+-- `Int` в конце объявления (§4.3), - иначе параметр класса решать нечем.
+
+-- | Сложение.
+class Add a where
+  add : a -> a -> a
+
+-- | Противоположное. Вычитание - сложение с ним: у `Nat` его нет, и `-` там
+-- не пишется (§4.3: усечение называется `monus`).
+class Neg a where
+  neg : a -> a
+
+-- | Умножение. Параметр `b` гетерогенный (§4.3, вопрос 67), результат пока
+-- `a`: типовых членов у класса ещё нет, и `Product` ждёт их (§10 вопрос 209).
+class Mul a (b = a) where
+  mul : a -> b -> a
+
+infixl 6 +
+(+) : {Add a} => a -> a -> a
+(+) = add
+
+infixl 6 -
+(-) : {Add a, Neg a} => a -> a -> a
+(-) x y = add x (neg y)
+
+-- | Оператор однородный: результат `a` пропускает ожидаемый тип к операндам,
+-- и `x : Int32 = 2 * 3` и `n * 2` пишутся. Гетерогенное умножение - `mul`.
+infixl 7 *
+(*) : {Mul a} => a -> a -> a
+(*) = mul
+
+instance Add Int8 where
+  add = addInt8
+
+instance Neg Int8 where
+  neg x = subInt8 0 x
+
+instance Mul Int8 where
+  mul = mulInt8
+
+instance Add Int16 where
+  add = addInt16
+
+instance Neg Int16 where
+  neg x = subInt16 0 x
+
+instance Mul Int16 where
+  mul = mulInt16
+
+instance Add Int32 where
+  add = addInt32
+
+instance Neg Int32 where
+  neg x = subInt32 0 x
+
+instance Mul Int32 where
+  mul = mulInt32
+
+instance Add Int64 where
+  add = addInt64
+
+instance Neg Int64 where
+  neg x = subInt64 0 x
+
+instance Mul Int64 where
+  mul = mulInt64
+
+instance Add UInt8 where
+  add = addUInt8
+
+instance Neg UInt8 where
+  neg x = subUInt8 0 x
+
+instance Mul UInt8 where
+  mul = mulUInt8
+
+instance Add UInt16 where
+  add = addUInt16
+
+instance Neg UInt16 where
+  neg x = subUInt16 0 x
+
+instance Mul UInt16 where
+  mul = mulUInt16
+
+instance Add UInt32 where
+  add = addUInt32
+
+instance Neg UInt32 where
+  neg x = subUInt32 0 x
+
+instance Mul UInt32 where
+  mul = mulUInt32
+
+instance Add UInt64 where
+  add = addUInt64
+
+instance Neg UInt64 where
+  neg x = subUInt64 0 x
+
+instance Mul UInt64 where
+  mul = mulUInt64
+
+instance Add Float32 where
+  add = addFloat32
+
+-- Умножением на минус единицу, а не вычитанием из нуля: `0.0 - 0.0` есть
+-- `+0.0`, и `(-0.0) - 0.0` разошёлся бы с IEEE.
+instance Neg Float32 where
+  neg x = mulFloat32 x (-1.0)
+
+instance Mul Float32 where
+  mul = mulFloat32
+
+instance Add Float64 where
+  add = addFloat64
+
+-- Умножением на минус единицу, а не вычитанием из нуля: `0.0 - 0.0` есть
+-- `+0.0`, и `(-0.0) - 0.0` разошёлся бы с IEEE.
+instance Neg Float64 where
+  neg x = mulFloat64 x (-1.0)
+
+instance Mul Float64 where
+  mul = mulFloat64

@@ -18,7 +18,6 @@ data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a
 
-infixl 6 +
 (+) : Nat -> Nat -> Nat
 (+) Zero m = m
 (+) (Succ k) m = Succ (k + m)

@@ -250,12 +250,10 @@ data Nat where
   Zero : Nat
   Succ : Nat -> Nat
 
-infixl 6 +
 (+) : Nat -> Nat -> Nat
 (+) Zero m = m
 (+) (Succ k) m = Succ (k + m)
 
-infixl 7 *
 (*) : Nat -> Nat -> Nat
 (*) Zero m = Zero
 (*) (Succ k) m = m + k * m

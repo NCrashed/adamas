@@ -37,6 +37,8 @@ fn allocated(name: &str, source: &str) -> usize {
 /// Два класса, а не один: производное определение заводится на каждый метод, и
 /// одним классом не отличить «взяли свой» от «взяли первый попавшийся».
 ///
+/// `Add` берётся прелюдный: его инстанс `Add Int64` написан ровно этой формой.
+///
 /// Инстансы написаны **по-разному** нарочно. `add = addInt64` - форма из §4.11,
 /// и свёрнута она дважды: `add@_,Add#Int64` отдаёт `Add#Int64.add`, а тот -
 /// сам примитив. Два слоя достроенных параметров у порядка сокращаются
@@ -48,14 +50,8 @@ fn allocated(name: &str, source: &str) -> usize {
 const BY_ETA: &str = "\
 type Int = Int64
 
-class Add a where
-  add : a -> a -> a
-
 class Sub a where
   sub : a -> a -> a
-
-instance Add Int64 where
-  add = addInt64
 
 instance Sub Int64 where
   sub x y = subInt64 x y
@@ -134,11 +130,9 @@ instance Ring Int64 where
   plus = addInt64
   minus = subInt64
 
-infixl 6 +
 (+) : {Ring a} => a -> a -> a
 (+) x y = plus x y
 
-infixl 6 -
 (-) : {Ring a} => a -> a -> a
 (-) x y = minus x y
 

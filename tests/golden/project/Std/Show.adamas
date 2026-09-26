@@ -2,7 +2,7 @@
 
 import Prelude
 import Std.Base (Bool, False, True, Nat, Zero, Succ, Maybe, Nothing, Just)
-import Std.Classes
+import Std.Classes (bind)
 
 Pred : Type -> Type
 Pred a = a -> Bool

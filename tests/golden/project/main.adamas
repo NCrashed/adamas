@@ -25,7 +25,7 @@ import Std.ListOps
   , succOf
   , sum
   )
-import Std.Classes
+import Std.Classes (ap, eq, map, pure)
 import Std.Order (maximum, nub)
 import Std.Effect (collected, safeHead)
 import Std.Show (Showable, MkShowable, fromMaybe, isZero, nextJust, runShowable)

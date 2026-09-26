@@ -246,10 +246,12 @@ main = R.pass L.left
 }
 
 #[test]
-fn a_class_declared_in_an_imported_file_is_a_name_of_the_program() {
-    // §4.4: классы доступны без импорта, а §3.5 меряет непересекаемость
-    // инстансов по всей программе. Значит класс квалификации файла не получает,
-    // и метод его зовётся коротким именем.
+fn a_class_is_a_name_of_the_program_and_its_method_a_member_of_the_file() {
+    // §3.5 меряет непересекаемость инстансов по всей программе, поэтому имя
+    // **класса** квалификации файла не получает. Метод - получает, как всякое
+    // определение файла, и открывается списком импорта: иначе он занимал бы
+    // имя у всей программы, и своё одноимённое определение не затеняло бы его
+    // (§4.4). Решение 2026-09-26.
     let modules = Memory::new().with(
         "Classes",
         "\
@@ -268,7 +270,7 @@ instance Eqv Bool where
     );
     let entry = "\
 import Prelude
-import Classes (Bool, True)
+import Classes (Bool, True, eq)
 
 main : Bool
 main = eq True True
@@ -276,8 +278,12 @@ main = eq True True
     let program = accepted(entry, &modules);
     let signature = program.signature.as_ref().expect("сигнатура");
     assert!(
-        signature.lookup("eq").is_some(),
-        "метод класса - имя программы, а не член файла"
+        signature.lookup("Eqv").is_some(),
+        "класс - имя программы, а не член файла"
+    );
+    assert!(
+        signature.lookup("Classes.eq").is_some(),
+        "метод класса - член файла, а не имя программы"
     );
 }
 

@@ -918,7 +918,8 @@ fn member<'a>(
                 let (what, why) = outside_a_module(class.instance);
                 only_at_top(within, &Rc::from(what), why, decl.span)?;
                 declare_class(
-                    signature, metas, owned, fixities, instances, warnings, class, decl.span,
+                    signature, metas, owned, fixities, instances, warnings, within, class,
+                    decl.span,
                 )?;
             }
             DeclKind::Data(data) => {
@@ -1446,6 +1447,7 @@ fn declare_class(
     fixities: &Fixities,
     instances: &mut Instances,
     warnings: &mut Warnings,
+    within: Option<&Enclosing>,
     class: &ast::ClassDecl,
     span: Span,
 ) -> Result<(), ElabError> {
@@ -1570,8 +1572,13 @@ fn declare_class(
     )?;
     // Имя верхнего уровня получает **метод**, а не поле суперкласса: его
     // разряжает разрешение, и писать его автору незачем.
+    //
+    // Имя метода квалифицируется файлом-модулем, как всякое его определение:
+    // метка поля словаря остаётся короткой, а константа - `Prelude.add`, и
+    // своё `add` программы затеняет прелюдное тем же правилом, что прочие
+    // имена (§4.4). Голым метод занимал имя у всей программы.
     for method in &info.methods {
-        declare_method(signature, metas, &name.text, method, span)?;
+        declare_method(signature, metas, &name.text, method, within, span)?;
     }
     instances.declare(&name.text, info);
     Ok(())
@@ -2189,9 +2196,11 @@ fn declare_method(
     metas: &mut Metas,
     class: &Symbol,
     method: &Symbol,
+    within: Option<&Enclosing>,
     span: Span,
 ) -> Result<(), ElabError> {
     let names = Names::of(method, Vec::new());
+    let declared = qualify(within, method);
     let fail = |error: TypeError| ElabError::Core {
         span,
         error: Box::new(error),
@@ -2272,7 +2281,7 @@ fn declare_method(
     signature
         .define_graded(
             metas,
-            method,
+            &declared,
             Mult::Many,
             ty,
             Some(body),

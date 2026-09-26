@@ -11,8 +11,9 @@
 -- и сверяют его все три вычислителя.
 --
 -- Семейство открывается вместе с конструкторами (`Nat` даёт `Zero` и `Succ`) -
--- тем же правилом, каким §4.8 поднимает их из тела модуля. Методов классов в
--- списке нет и быть не может: класс - имя программы, а не член файла (§4.4).
+-- тем же правилом, каким §4.8 поднимает их из тела модуля. Методы классов
+-- открываются так же, списком: имя класса - имя программы, а метод - член
+-- файла, и своё одноимённое определение его затеняет (§4.4).
 import Prelude
 import Std.Prelude
   ( Bool
@@ -20,15 +21,18 @@ import Std.Prelude
   , List
   , Maybe
   , Showable
+  , ap
   , append
   , collected
   , digits
+  , eq
   , filterList
   , flip
   , foldl
   , fromMaybe
   , isZero
   , length
+  , map
   , mapList
   , maximum
   , nextJust
@@ -37,6 +41,7 @@ import Std.Prelude
   , onceOf
   , or
   , plus
+  , pure
   , runShowable
   , safeHead
   , succOf

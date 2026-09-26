@@ -1,0 +1,54 @@
+-- Плотная запись в поле конструктора и в поле записи (§4.11, §10 вопрос 204).
+--
+-- Запись из одних примитивов живёт в регистре, а слот объекта - машинное
+-- слово, поэтому в поле она лежит боксированной. Понижение забывало, **какой**
+-- объект лежит в слоте, - поле называлось голым указателем, - и дальше не
+-- писалось ничего. Каждое поле ответа держит своё место:
+--
+--   * `lives` - проекция поля записи, взятой разбором конструктора:
+--     отвергалась «форма записи потеряна»;
+--   * `status` - запись из поля отдана ответом функции с плотным ответом:
+--     отвергалась «ожидалось плоский агрегат, а пришло указательное
+--     значение». В записи лежит `Bool` - плотное семейство, и сужается оно
+--     рекурсивно, вложенным перекладом;
+--   * `framed` - то же поле в записи с указательным полем рядом: такая
+--     запись сама объект кучи, и поле-запись в ней боксируется тем же путём.
+--
+-- Цикл `turns` пересобирает мир на каждом шаге: поле кладётся и достаётся
+-- раз за разом, и ответ сверяется у трёх вычислителей.
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+type Status = {score : Int32, lives : Int32, alive : Bool}
+
+data World where
+  MkWorld : Status -> Int32 -> World
+
+statusOf : World -> Status
+statusOf (MkWorld st tick) = st
+livesOf : World -> Int32
+livesOf (MkWorld st tick) = st.lives
+hurt : Status -> Status
+hurt st = {st | lives = st.lives - 1, alive = ltInt32 1 st.lives}
+turn : World -> World
+turn (MkWorld st tick) = MkWorld (hurt {st | score = st.score + tick}) (tick + 1)
+turns : World -> Int32 -> World
+turns w 0 = w
+turns w n = turns (turn w) (n - 1)
+
+type Frame = {st : Status, trail : List Int32}
+framed : Frame -> Int32
+framed fr = fr.st.score * 10 + fr.st.lives
+opening : World
+opening = MkWorld {score = 0, lives = 3, alive = True} 1
+bit : Bool -> Int32
+bit True = 1
+bit False = 0
+
+main : List Int32
+main =
+  let w = turns opening 3
+  let st = statusOf w
+  Cons (livesOf w) (Cons st.score (Cons (bit st.alive) (Cons (framed {st = st, trail = Nil}) Nil)))

@@ -1318,7 +1318,7 @@ impl<'a> Lowerer<'a> {
                 self.loosening(scope, value.clone(), pack)
             }
             (Repr::Record(tag), Repr::Packed(pack)) => {
-                Ok(self.tightening(scope, value.clone(), tag, pack))
+                self.tightening(scope, value.clone(), tag, pack)
             }
             (Repr::Boxed, Repr::Packed(pack)) => self.narrowing(scope, value.clone(), pack),
             // Примитив в указательной позиции: обёртка с прозрачной печатью -
@@ -1408,6 +1408,29 @@ impl<'a> Lowerer<'a> {
         self.shape(&variant.labels.clone(), &facts)
     }
 
+    /// Представление поля, чей тип **написан**, в слоте объекта (§4.11, §10
+    /// вопрос 204).
+    ///
+    /// То же, что [`boxable`], с одним уточнением: плотная **запись** в слоте
+    /// живёт объектом своей боксированной формы ([`Lowerer::boxed_shape`]) -
+    /// её туда кладёт [`Lowerer::boxing`], - и факт слота называет эту форму,
+    /// а не голый указатель. Без этого форма терялась на первом же поле
+    /// конструктора: `w.st.score` после разбора `MkWorld` отвергался как
+    /// проекция без формы, а `statusOf` не сужался обратно в плотную запись.
+    /// Семейная укладка остаётся указателем: у неё боксированная форма - свои
+    /// конструкторы, а не запись.
+    fn stored(&mut self, repr: Repr, at: &'static str) -> Result<Repr, LowerError> {
+        if let Repr::Packed(pack) = repr {
+            let record = self.packings[pack.0 as usize]
+                .sole()
+                .is_some_and(|variant| variant.ctor.is_none());
+            if record {
+                return Ok(Repr::Record(self.boxed_shape(pack)?));
+            }
+        }
+        boxable(repr, at)
+    }
+
     /// Плотная запись объектом кучи: поля читаются смещением, кладутся слотом.
     ///
     /// Вложенный агрегат боксируется тем же перекладом рекурсивно; `None` -
@@ -1485,7 +1508,9 @@ impl<'a> Lowerer<'a> {
                 // подставленному примитиву. Переклад закрывает это обёрткой
                 // (§10 вопрос 159), поэтому форма согласуется.
                 SlotTy::Prim(prim) => fact.repr == Repr::Flat(prim) || fact.repr.boxed(),
-                SlotTy::Pack(_) => fact.repr.boxed(),
+                // Запись в слоте названа своей боксированной формой
+                // ([`Lowerer::stored`]), семейство - указателем.
+                SlotTy::Pack(_) => matches!(fact.repr, Repr::Boxed | Repr::Record(_)),
             })
         }) && slots.next().is_none()
     }
@@ -1713,20 +1738,17 @@ impl<'a> Lowerer<'a> {
         value: Expr,
         tag: CtorId,
         pack: PackId,
-    ) -> Option<Expr> {
+    ) -> Result<Option<Expr>, LowerError> {
         let described = self.constructors[usize::from(tag.0)].clone();
         let packing = self.packings[pack.0 as usize].clone();
-        let variant = packing.sole().filter(|variant| variant.ctor.is_none())?;
-        if described.labels.as_deref() != Some(&variant.labels) {
-            return None;
-        }
-        let matching = described
-            .binders
-            .iter()
-            .zip(&variant.slots)
-            .all(|(fact, slot)| fact.present && fact.repr == slot.ty.repr());
-        if !matching || described.binders.len() != variant.slots.len() {
-            return None;
+        let Some(variant) = packing.sole().filter(|variant| variant.ctor.is_none()) else {
+            return Ok(None);
+        };
+        if described.labels.as_deref() != Some(&variant.labels)
+            || described.binders.len() != variant.slots.len()
+            || described.binders.iter().any(|fact| !fact.present)
+        {
+            return Ok(None);
         }
         let fields: Vec<Binding> = variant
             .labels
@@ -1738,8 +1760,23 @@ impl<'a> Lowerer<'a> {
                 fact: *fact,
             })
             .collect();
-        let taken = fields.iter().map(|it| Expr::Local(it.local)).collect();
-        Some(Expr::Match {
+        // Примитивный слот берётся как есть; вложенный агрегат лежит в слоте
+        // боксированным и сужается тем же перекладом - так `Bool` в поле
+        // записи возвращается в свою плотную форму.
+        let mut taken = Vec::with_capacity(fields.len());
+        for (field, slot) in fields.iter().zip(&variant.slots) {
+            let local = Expr::Local(field.local);
+            let want = slot.ty.repr();
+            if field.fact.repr == want {
+                taken.push(local);
+                continue;
+            }
+            let Some(narrowed) = self.moved(scope, &local, field.fact.repr, want)? else {
+                return Ok(None);
+            };
+            taken.push(narrowed);
+        }
+        Ok(Some(Expr::Match {
             scrutinee: Box::new(value),
             consumed: Mult::One,
             arms: vec![Arm {
@@ -1751,7 +1788,7 @@ impl<'a> Lowerer<'a> {
                     fields: taken,
                 },
             }],
-        })
+        }))
     }
 
     /// Понижает выражение, зная, какого представления от него ждут.
@@ -5620,7 +5657,8 @@ impl Lowerer<'_> {
         let mut facts = Vec::with_capacity(fields.len());
         for (position, field) in fields.iter().enumerate() {
             let under = depth + u32::try_from(position).unwrap_or(0);
-            let repr = boxable(self.repr_of(&field.ty, under, dicts)?, "поле записи")?;
+            let written = self.repr_of(&field.ty, under, dicts)?;
+            let repr = self.stored(written, "поле записи")?;
             labels.push(field.name.to_string());
             // Типовой член (`type T` в сигнатуре модуля, §4.8) значения в
             // рантайме не имеет: тип стёрт (§3.3), а кратность у него `1` -
@@ -5846,7 +5884,8 @@ impl Lowerer<'_> {
         let mut current = ty;
         let mut at = 0u32;
         while let Term::Pi(binder, _, domain, _, codomain) = current {
-            let repr = boxable(self.repr_of(domain, at, &empty)?, "поле конструктора")?;
+            let written = self.repr_of(domain, at, &empty)?;
+            let repr = self.stored(written, "поле конструктора")?;
             facts.push(Fact::declared(binder.mult).shaped(repr));
             at += 1;
             current = codomain;

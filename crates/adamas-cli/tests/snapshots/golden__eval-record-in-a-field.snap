@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Cons 0 (Cons 6 (Cons 0 (Cons 60 Nil)))

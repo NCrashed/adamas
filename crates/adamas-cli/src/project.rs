@@ -61,6 +61,9 @@ pub(crate) struct Checked {
     pub(crate) instances: adamas_elab::class::Instances,
     /// Имена, объявленные прелюдией, - в счёт объявлений они не входят.
     pub(crate) prelude: std::collections::HashSet<adamas_core::term::Name>,
+    /// Файлы программы с путями модулей: `None` - входной. По ним драйвер
+    /// называет место отказа, случившегося после проверки (§10 вопрос 217).
+    pub(crate) units: Vec<(Option<String>, SourceFile)>,
 }
 
 /// Откуда берутся входной файл и корни поиска модулей.
@@ -189,6 +192,11 @@ pub(crate) fn checked(
         metas: program.metas,
         instances: program.instances,
         prelude: program.prelude.into_iter().collect(),
+        units: program
+            .units
+            .into_iter()
+            .map(|unit| (unit.path, unit.file))
+            .collect(),
     })
 }
 

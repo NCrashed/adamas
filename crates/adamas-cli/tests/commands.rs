@@ -422,3 +422,88 @@ fn new_refuses_a_name_that_is_a_path() {
     assert!(!ok, "путь в имени пакета прошёл");
     assert!(stderr.contains("не годится"), "{stderr}");
 }
+
+/// Отказ понижения называет файл и строку определения (§10 вопрос 217).
+///
+/// Отказ стоит в **подключённом** модуле: файл ищется по пути модуля в имени
+/// определения, и входной файл здесь был бы неверным ответом. Строка -
+/// голова определения: спана у узла терма нет.
+#[test]
+fn a_lowering_refusal_names_the_file_and_line() {
+    let app = scratch("lowering-place");
+    write(
+        &app.join("adamas.toml"),
+        "[package]\nname = \"place\"\nroot = \".\"\nentry = \"Main\"\n",
+    );
+    write(
+        &app.join("Lib/Pick.adamas"),
+        "-- | Выбор.\n\
+         choose : Bool -> Int32 -> Int32 -> Int32\n\
+         choose c a b = if c then a else b\n\
+         \n\
+         -- | Недобранный вызов с плоским параметром (§10 вопрос 214).\n\
+         chooser : Int32 -> Int32 -> Int32\n\
+         chooser a =\n  let f = choose True a\n  f\n",
+    );
+    write(
+        &app.join("Main.adamas"),
+        "import Lib.Pick (chooser)\n\nmain : Int32\nmain = chooser 1 2\n",
+    );
+    let (ok, _, stderr) = run(adamas().arg("build").arg(&app));
+    assert!(!ok, "отказ понижения прошёл сборкой");
+    assert!(stderr.contains("Lib/Pick.adamas:7:1:"), "{stderr}");
+    assert!(stderr.contains("chooser a ="), "{stderr}");
+}
+
+/// Отказ внутри прелюдии показывается у определения автора, до него
+/// дотянувшегося, - и называет оба.
+///
+/// Держится на дефекте: `100 + n` в ветви хендлера тянет словарь `Add#Int32`
+/// значением, а недобранный примитив с плоским параметром не понижается (§10
+/// вопрос 214). Починят 214 - свидетелю понадобится другой отказ в прелюдии.
+#[test]
+fn a_refusal_inside_the_prelude_is_shown_at_the_authors_definition() {
+    let app = scratch("prelude-place");
+    write(
+        &app.join("Main.adamas"),
+        "data Unit where\n  MkUnit : Unit\n\
+         data List (a : Type) where\n  Nil : List a\n  Cons : a -> List a -> List a\n\
+         effect Log where\n  note : Int32 -> Unit\n\
+         probe : {Log} List Int32\nprobe =\n  note 1\n  Nil\n\
+         main : List Int32\nmain = handle probe with\n  return v -> v\n  \
+         note n -> Cons (100 + n) (resume MkUnit)\n",
+    );
+    let (ok, _, stderr) = run(adamas().arg("build").arg(app.join("Main.adamas")));
+    assert!(!ok, "отказ понижения прошёл сборкой");
+    assert!(stderr.contains("Main.adamas:13:1:"), "{stderr}");
+    assert!(
+        stderr.contains("отказ в `Add#Int32`, до которого дотянулось `main`"),
+        "{stderr}"
+    );
+}
+
+/// Отказ эмиттера - тем же правилом: функцию он называет, место находит
+/// драйвер.
+///
+/// Держится на дефекте: эффектная функция с плоским ответом под хендлером не
+/// эмитится (§10 вопрос 215).
+#[test]
+fn an_emitter_refusal_names_the_file_and_line() {
+    let app = scratch("emitter-place");
+    write(
+        &app.join("Main.adamas"),
+        "data Unit where\n  MkUnit : Unit\n\
+         data List (a : Type) where\n  Nil : List a\n  Cons : a -> List a -> List a\n\
+         effect Log where\n  note : Int32 -> Unit\n\
+         noisy : Int32 -> {Log} Int32\nnoisy n =\n  note n\n  n\n\
+         body : Int32 -> {Log} Int32\nbody x =\n  let y = if ltInt32 x 3 then noisy 7 else noisy 8\n  y + y\n\
+         run : {Log} Int32\nrun = body 1\n\
+         main : List Int32\nmain = handle run with\n  return v -> Cons v Nil\n  \
+         note n -> Cons n (resume MkUnit)\n",
+    );
+    let (ok, _, stderr) = run(adamas().arg("build").arg(app.join("Main.adamas")));
+    assert!(!ok, "отказ эмиттера прошёл сборкой");
+    assert!(stderr.contains("Main.adamas:17:1:"), "{stderr}");
+    assert!(stderr.contains("run = body 1"), "{stderr}");
+    assert!(stderr.contains("обрыв вернуть нечем"), "{stderr}");
+}

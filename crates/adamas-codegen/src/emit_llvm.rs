@@ -419,6 +419,18 @@ pub enum LlvmError {
     },
 }
 
+impl LlvmError {
+    /// Функция, в которой случился отказ, - по её имени драйвер находит место
+    /// в исходнике (§10 вопрос 217).
+    #[must_use]
+    pub fn function(&self) -> &str {
+        match self {
+            Self::Hidden { caller, .. } => caller,
+            Self::Node { function, .. } | Self::Shape { function, .. } => function,
+        }
+    }
+}
+
 /// Что даёт эмиссия: текст `.ll` и спутник на C.
 #[derive(Clone, Debug)]
 pub struct Artefacts {

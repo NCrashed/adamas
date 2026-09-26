@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 
 use adamas_codegen::llvm::{Pipeline, Toolchain};
 use adamas_codegen::native::Native;
+use adamas_core::source::SourceFile;
 use anyhow::Context as _;
 
 use crate::project;
@@ -85,11 +86,13 @@ pub(crate) fn build(path: &Path, backend: Backend) -> anyhow::Result<PathBuf> {
     let name = &opened.artefact;
     let binary = match backend {
         Backend::C => {
-            let text = adamas_codegen::compile(&signature, &made.term)?;
+            let text = adamas_codegen::compile(&signature, &made.term)
+                .map_err(|error| refused(&checked.units, &signature, error))?;
             native.build(name, &text)?
         }
         Backend::Llvm => {
-            let artefacts = adamas_codegen::compile_llvm(&signature, &made.term)?;
+            let artefacts = adamas_codegen::compile_llvm(&signature, &made.term)
+                .map_err(|error| refused(&checked.units, &signature, error))?;
             let text = dir.join(format!("{name}.ll"));
             if let Some(parent) = text.parent() {
                 std::fs::create_dir_all(parent)
@@ -123,4 +126,62 @@ pub(crate) fn run(path: &Path, backend: Backend) -> anyhow::Result<i32> {
     // Сигнал кода возврата не даёт, а нулём отвечать на него нельзя: оборванный
     // прогон отличается от успешного именно этим.
     Ok(status.code().unwrap_or(1))
+}
+
+/// Отказ понижения или эмиттера с местом, если оно известно (§10 вопрос 217).
+///
+/// Бэкенд называет определение, а не узел: спана в терме нет. Файл ищется по
+/// имени - самый длинный путь модуля, которым имя начинается, а без такого -
+/// входной файл, чьи члены не квалифицируются. Хвост специализации (`@…`,
+/// `#ev`) снимается: у написанного определения его нет.
+///
+/// Отказ внутри прелюдии показывается у определения автора, до него
+/// дотянувшегося: `Add#Int32` сам по себе не говорит, что чинить. Цепочку
+/// запросов отдаёт понижение; у эмиттеров её нет, и место там - своё.
+fn refused(
+    units: &[(Option<String>, SourceFile)],
+    signature: &adamas_core::sig::Signature,
+    error: adamas_codegen::CompileError,
+) -> anyhow::Error {
+    let (definition, via) = match &error {
+        adamas_codegen::CompileError::Lower(lower) => (lower.definition(), lower.via()),
+        adamas_codegen::CompileError::Emit(emit) => (Some(emit.function()), &[][..]),
+        adamas_codegen::CompileError::Llvm(llvm) => (Some(llvm.function()), &[][..]),
+    };
+    let Some(definition) = definition else {
+        return error.into();
+    };
+    let written = |name: &str| {
+        let name = name.strip_suffix("#ev").unwrap_or(name);
+        name.split('@').next().unwrap_or(name).to_owned()
+    };
+    let place = |name: &str| {
+        let short = written(name);
+        let span = signature
+            .origin(name)
+            .or_else(|| signature.origin(&short))?;
+        let (path, file) = units
+            .iter()
+            .filter(|(path, _)| {
+                path.as_deref()
+                    .is_some_and(|path| short.starts_with(&format!("{path}.")))
+            })
+            .max_by_key(|(path, _)| path.as_deref().map_or(0, str::len))
+            .or_else(|| units.iter().find(|(path, _)| path.is_none()))?;
+        (path.as_deref() != Some(adamas_elab::program::PRELUDE)).then_some((short, file, span))
+    };
+    let failed = written(definition);
+    let found = std::iter::once(definition)
+        .chain(via.iter().map(String::as_str))
+        .find_map(place);
+    match found {
+        Some((short, file, span)) if short == failed => {
+            anyhow::anyhow!("{}", adamas_elab::located(file, span, &error.to_string()))
+        }
+        Some((short, file, span)) => anyhow::anyhow!(
+            "{}\n  отказ в `{failed}`, до которого дотянулось `{short}`",
+            adamas_elab::located(file, span, &error.to_string())
+        ),
+        None => anyhow::anyhow!("{error}\n  в определении `{failed}`"),
+    }
 }

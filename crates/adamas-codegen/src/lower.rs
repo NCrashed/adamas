@@ -430,6 +430,22 @@ pub enum LowerError {
     #[error("выход из scope без обоих приостановленных вычислений (§3.3)")]
     Scope,
 
+    /// Отказ внутри определения - с его именем (§10 вопрос 217).
+    ///
+    /// Узел терма спана не несёт (48 байт, [`Lowerer::position`]), поэтому
+    /// место отказа - определение целиком. Текст - тот же, что у внутреннего:
+    /// место дописывает драйвер, у которого есть файлы программы, а тексту
+    /// отказа второе место не нужно.
+    #[error("{error}")]
+    Within {
+        /// Имя определения в ядре: специализированное - с хвостом `@…`.
+        definition: String,
+        /// Кто до него дотянулся: ближайший первым.
+        via: Vec<String>,
+        /// Сам отказ.
+        error: Box<LowerError>,
+    },
+
     /// Проекция поля, которого в форме записи нет.
     #[error("`.{label}`: поля нет в форме `{shape}` (§4.2)")]
     NoField {
@@ -438,6 +454,40 @@ pub enum LowerError {
         /// Из чего берут.
         shape: String,
     },
+}
+
+impl LowerError {
+    /// Отказ с именем определения, в котором он случился. Уже названный не
+    /// переименовывается: ближайшее определение точнее объемлющего.
+    #[must_use]
+    pub fn within(self, definition: &str, via: Vec<String>) -> Self {
+        match self {
+            named @ Self::Within { .. } => named,
+            error => Self::Within {
+                definition: definition.to_owned(),
+                via,
+                error: Box::new(error),
+            },
+        }
+    }
+
+    /// Имя определения, в котором случился отказ, если оно известно.
+    #[must_use]
+    pub fn definition(&self) -> Option<&str> {
+        match self {
+            Self::Within { definition, .. } => Some(definition),
+            _ => None,
+        }
+    }
+
+    /// Цепочка тех, кто дотянулся до определения отказа: ближайший первым.
+    #[must_use]
+    pub fn via(&self) -> &[String] {
+        match self {
+            Self::Within { via, .. } => via,
+            _ => &[],
+        }
+    }
 }
 
 /// Требует, чтобы все живые связывания жили указателем.
@@ -784,6 +834,13 @@ struct Lowerer<'a> {
     /// `family_packing` разворачивался бы через таблицу конструкторов в себя
     /// до дна стека.
     pending: VecDeque<(FuncId, Name)>,
+    /// Какое определение понижается сейчас - им запрошены имена, встающие в
+    /// очередь.
+    current: Option<Name>,
+    /// Кто первым запросил каждое имя очереди. По этой цепочке отказ внутри
+    /// прелюдии называет определение автора, до него дотянувшееся (§10
+    /// вопрос 217): словарь `Add#Int32` сам по себе автору ничего не говорит.
+    requesters: HashMap<Name, Name>,
     /// Идёт ли понижение под ручкой стека - то есть во второй форме.
     ///
     /// Решает это одно: ставить ли кадр `MARK_CLOSING` на выходе из scope
@@ -850,6 +907,8 @@ impl<'a> Lowerer<'a> {
             handlers: Vec::new(),
             wrapped: HashMap::new(),
             pending: VecDeque::new(),
+            current: None,
+            requesters: HashMap::new(),
             detached: false,
             tainted: false,
             foreigns: Vec::new(),
@@ -886,6 +945,57 @@ impl<'a> Lowerer<'a> {
             result: Repr::Boxed,
             body: Expr::Erased,
         });
+        self.current = Some(Rc::from("main"));
+        self.entered(entry, entry_id)
+            .map_err(|error| self.named(error, "main"))?;
+
+        // Экспорт понижается **независимо от достижимости**: «видно C» и
+        // значит, что звать его будут снаружи, а не отсюда. Достижимое уже
+        // попало в очередь телом точки входа; остальное добирается здесь, до
+        // того как очередь начнёт пустеть.
+        for name in self.signature.exported() {
+            self.export(&name)
+                .map_err(|error| self.named(error, &name))?;
+        }
+
+        // Очередь, а не рекурсия: имя получает номер до того, как понижено его
+        // тело, поэтому рекурсия и взаимная рекурсия проходят сами собой.
+        while let Some((id, name)) = self.pending.pop_front() {
+            self.current = Some(Rc::clone(&name));
+            self.defined(id, &name)
+                .map_err(|error| self.named(error, &name))?;
+        }
+
+        Ok(Program {
+            constructors: self.constructors,
+            packings: self.packings,
+            labels: self.labels,
+            handlers: self.handlers,
+            functions: self.functions,
+            foreigns: self.foreigns,
+            exports: self.exports,
+            callbacks: self.callbacks,
+            entry: entry_id,
+            source: self.file.map(|file| split_path(file.name())),
+        })
+    }
+
+    /// Отказ с именем определения и цепочкой тех, кто до него дотянулся.
+    fn named(&self, error: LowerError, definition: &str) -> LowerError {
+        let mut via = Vec::new();
+        let mut at: &str = definition;
+        while let Some(by) = self.requesters.get(at) {
+            if via.iter().any(|seen: &String| seen == &**by) || via.len() >= 32 {
+                break;
+            }
+            via.push(by.to_string());
+            at = by;
+        }
+        error.within(definition, via)
+    }
+
+    /// Тело точки входа и представление её ответа.
+    fn entered(&mut self, entry: &Term, entry_id: FuncId) -> Result<(), LowerError> {
         let mut scope = Scope::default();
         let (mut body, mut repr) = self.expr(&mut scope, entry)?;
         // У точки входа объявленного типа нет - она уже инстанцирована, - и
@@ -923,62 +1033,42 @@ impl<'a> Lowerer<'a> {
         }
         self.functions[entry_id.0].body = body;
         self.functions[entry_id.0].result = repr;
+        Ok(())
+    }
 
-        // Экспорт понижается **независимо от достижимости**: «видно C» и
-        // значит, что звать его будут снаружи, а не отсюда. Достижимое уже
-        // попало в очередь телом точки входа; остальное добирается здесь, до
-        // того как очередь начнёт пустеть.
-        for name in self.signature.exported() {
-            self.export(&name)?;
+    /// Тело определения из очереди.
+    fn defined(&mut self, id: FuncId, name: &Name) -> Result<(), LowerError> {
+        let (parameters, inner, taken, dicts) = self.peeled(name)?;
+        let mut scope = Scope {
+            // Номера выданы всем параметрам, включая достроенные, а в среду
+            // де Брёйна попадают только снятые: на достроенные тело
+            // сослаться не может, их в нём нет.
+            locals: u32::try_from(parameters.len()).unwrap_or(u32::MAX),
+            env: Vec::with_capacity(taken),
+            dicts,
+        };
+        for parameter in &parameters[..taken] {
+            scope.env.push(Slot::Bound(parameter.local, parameter.fact));
         }
-
-        // Очередь, а не рекурсия: имя получает номер до того, как понижено его
-        // тело, поэтому рекурсия и взаимная рекурсия проходят сами собой.
-        while let Some((id, name)) = self.pending.pop_front() {
-            let (parameters, inner, taken, dicts) = self.peeled(&name)?;
-            let mut scope = Scope {
-                // Номера выданы всем параметрам, включая достроенные, а в среду
-                // де Брёйна попадают только снятые: на достроенные тело
-                // сослаться не может, их в нём нет.
-                locals: u32::try_from(parameters.len()).unwrap_or(u32::MAX),
-                env: Vec::with_capacity(taken),
-                dicts,
+        let declared = self.functions[id.0].result;
+        self.detached = self.functions[id.0].form == Form::Detached;
+        self.tainted = self.detached;
+        let (mut body, repr) =
+            self.saturated(&mut scope, &inner, &parameters[taken..], declared)?;
+        if !fits(repr, declared) {
+            // Ответ перекладывается, как всякая объявленная позиция:
+            // проекция плотного поля отдаёт байты, а объявлен указатель.
+            let Some(moved) = self.moved(&mut scope, &body, repr, declared)? else {
+                return Err(LowerError::Representation {
+                    at: "ответ функции",
+                    want: describe(declared),
+                    got: describe(repr),
+                });
             };
-            for parameter in &parameters[..taken] {
-                scope.env.push(Slot::Bound(parameter.local, parameter.fact));
-            }
-            let declared = self.functions[id.0].result;
-            self.detached = self.functions[id.0].form == Form::Detached;
-            self.tainted = self.detached;
-            let (mut body, repr) =
-                self.saturated(&mut scope, &inner, &parameters[taken..], declared)?;
-            if !fits(repr, declared) {
-                // Ответ перекладывается, как всякая объявленная позиция:
-                // проекция плотного поля отдаёт байты, а объявлен указатель.
-                let Some(moved) = self.moved(&mut scope, &body, repr, declared)? else {
-                    return Err(LowerError::Representation {
-                        at: "ответ функции",
-                        want: describe(declared),
-                        got: describe(repr),
-                    });
-                };
-                body = moved;
-            }
-            self.functions[id.0].body = body;
+            body = moved;
         }
-
-        Ok(Program {
-            constructors: self.constructors,
-            packings: self.packings,
-            labels: self.labels,
-            handlers: self.handlers,
-            functions: self.functions,
-            foreigns: self.foreigns,
-            exports: self.exports,
-            callbacks: self.callbacks,
-            entry: entry_id,
-            source: self.file.map(|file| split_path(file.name())),
-        })
+        self.functions[id.0].body = body;
+        Ok(())
     }
 
     /// Где определение написано. `None` - исходника не дали либо позиции нет.
@@ -1119,6 +1209,11 @@ impl<'a> Lowerer<'a> {
             self.evidenced.insert(Rc::clone(name), id);
         } else {
             self.numbers.insert(Rc::clone(name), id);
+        }
+        if let Some(by) = &self.current {
+            self.requesters
+                .entry(Rc::clone(name))
+                .or_insert_with(|| Rc::clone(by));
         }
         self.pending.push_back((id, Rc::clone(name)));
         Ok(id)

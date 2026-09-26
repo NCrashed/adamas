@@ -194,6 +194,21 @@ pub enum EmitError {
     },
 }
 
+impl EmitError {
+    /// Функция, в которой случился отказ, - по её имени драйвер находит место
+    /// в исходнике (§10 вопрос 217).
+    #[must_use]
+    pub fn function(&self) -> &str {
+        match self {
+            Self::Hidden { caller, .. } => caller,
+            Self::Aborting { function }
+            | Self::Parked { function, .. }
+            | Self::Slotted { function, .. }
+            | Self::Lanewise { function, .. } => function,
+        }
+    }
+}
+
 /// Собирает единицу трансляции.
 ///
 /// # Errors

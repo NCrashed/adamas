@@ -3480,6 +3480,90 @@ impl<'a> Elaborator<'a> {
         term
     }
 
+    /// Дописывает умолчания хвостовых параметров (§4.1).
+    ///
+    /// Дописанный аргумент ничем не отличается от написанного: вставка
+    /// имплиситов перед ним та же.
+    fn defaulting(
+        &mut self,
+        head: &Symbol,
+        mut term: Term,
+        mut ty: Option<Rc<Value>>,
+        given: &mut Vec<Term>,
+    ) -> (Term, Option<Rc<Value>>) {
+        while let Some(argument) = self.default_argument(head, given) {
+            if let Some(current) = ty.take() {
+                let (inserted, rest) = self.inserted(term, current);
+                term = inserted;
+                ty = Some(rest);
+            }
+            ty = ty.and_then(|it| self.stepped(&it, &argument));
+            term = Term::App(Rc::new(term), Rc::new(argument.clone()));
+            given.push(argument);
+        }
+        (term, ty)
+    }
+
+    /// Откладывает голый литерал, стоящий в позиции нерешённой дырки.
+    ///
+    /// Решить его тип нечем, пока спайн не пройден до конца (§10 вопрос 208,
+    /// трек A волны 7). На место его встаёт дырка, а выражение считается
+    /// вторым проходом - когда домен, возможно, уже решён соседом.
+    fn postponing<'w>(
+        &mut self,
+        argument: &'w Expr,
+        expected: Option<&Rc<Value>>,
+        postponed: &mut Vec<(Term, &'w Expr, Rc<Value>)>,
+    ) -> Option<Term> {
+        if !matches!(argument.kind, ExprKind::Lit(_)) {
+            return None;
+        }
+        let goal = Rc::clone(expected.filter(|domain| self.flexible(domain))?);
+        let hole = self.fresh_meta(&goal);
+        postponed.push((hole.clone(), argument, goal));
+        Some(hole)
+    }
+
+    /// Проход отложенный: считает то, что опорный отложил (§10 вопрос 208).
+    ///
+    /// Домены к этому времени, возможно, решены соседями, и голый литерал
+    /// наконец знает, чем ему быть. Умолчание §4.3 законно **здесь и только
+    /// здесь**: «контекст не задаёт тип» получает верный смысл - спайн пройден
+    /// целиком и не задал.
+    fn settled(
+        &mut self,
+        postponed: Vec<(Term, &Expr, Rc<Value>)>,
+        inside: Position,
+    ) -> Result<(), ElabError> {
+        for (hole, written, goal) in postponed {
+            self.awaited = Some(Rc::clone(&goal));
+            let value = self.aside(|it| it.placed(inside, |it| it.expr(written, Mult::Many)))?;
+            // Дырка решается **унификацией**, а не присваиванием: она стоит под
+            // спайном контекста, и решением ей служит функция над ним, которую
+            // строит решатель. Присваивание голого значения давало терм, где
+            // литерал оказывался в позиции функции - `Cons 1 (build k)`
+            // отвечал «ожидалась функция».
+            let want = self.ctx.eval(&hole);
+            let got = self.ctx.eval(&value);
+            let mark = self.metas.mark();
+            if !convertible(self.signature, self.metas, self.ctx.size(), &want, &got) {
+                self.metas.rollback(mark);
+            }
+        }
+        Ok(())
+    }
+
+    /// Гибок ли тип: нерешённая дырка головой.
+    ///
+    /// Литерал в такой позиции решать нечем, пока спайн не пройден до конца
+    /// (§10 вопрос 208).
+    fn flexible(&mut self, ty: &Rc<Value>) -> bool {
+        matches!(
+            &*whnf_solved(self.signature, self.metas, ty),
+            Value::Neutral(Head::Meta(_), _)
+        )
+    }
+
     /// Сводит домен связывания с типом написанного аргумента досрочно.
     ///
     /// Нужно это ради **голого литерала** дальше по спайну: в позиции
@@ -4359,6 +4443,11 @@ impl<'a> Elaborator<'a> {
             .map(|(ty, _)| ty);
         let mut ty = zeroed.or_else(|| self.synthesized(&term));
         let literal_ahead = literals_ahead(&arguments);
+        // Отложенные аргументы: голый литерал в позиции, тип которой ещё дырка
+        // (§10 вопрос 208, трек A волны 7). Считать его сейчас значило бы
+        // угадывать - на его место встаёт дырка, а выражение считается вторым
+        // проходом, когда спайн пройден и домены, возможно, решены.
+        let mut postponed: Vec<(Term, &Expr, Rc<Value>)> = Vec::new();
 
         let mut position = arguments.len();
         for argument in arguments.iter().rev().copied() {
@@ -4372,6 +4461,12 @@ impl<'a> Elaborator<'a> {
             // Ожидаемый тип аргумента - домен того связывания, к которому он
             // приписывается; исполнение по нему и решается (§3.4).
             let expected = ty.as_deref().and_then(domain_of);
+            if let Some(hole) = self.postponing(argument, expected.as_ref(), &mut postponed) {
+                ty = ty.and_then(|it| self.stepped(&it, &hole));
+                term = Term::App(Rc::new(term), Rc::new(hole.clone()));
+                given.push(hole);
+                continue;
+            }
             // Обратное направление того же правила (§10 вопрос 121): против
             // типа вычисления написанное **применение** приостанавливается.
             // Row у `worker : Nat -> {Async} Unit` стоит на стрелке, поэтому
@@ -4418,26 +4513,18 @@ impl<'a> Elaborator<'a> {
             // Сведение спекулятивно и best-effort: не сошлось - откат, и
             // говорить об этом полагается проверке, у которой есть и кратности,
             // и контекст целиком.
-            if ahead {
+            if ahead || !postponed.is_empty() {
                 self.reconciled(expected.as_ref(), &argument);
             }
             ty = ty.and_then(|it| self.stepped(&it, &argument));
             term = Term::App(Rc::new(term), Rc::new(argument.clone()));
             given.push(argument);
         }
+        self.settled(postponed, inside)?;
         // Умолчания хвостовых параметров - дописанные аргументы, и ничем от
         // написанных не отличаются: вставка имплиситов перед ними та же.
         if let Some(head) = named {
-            while let Some(argument) = self.default_argument(&head, &given) {
-                if let Some(current) = ty.take() {
-                    let (inserted, rest) = self.inserted(term, current);
-                    term = inserted;
-                    ty = Some(rest);
-                }
-                ty = ty.and_then(|it| self.stepped(&it, &argument));
-                term = Term::App(Rc::new(term), Rc::new(argument.clone()));
-                given.push(argument);
-            }
+            (term, ty) = self.defaulting(&head, term, ty, &mut given);
         }
         // Применение свойство **передаёт**, пока результат остаётся функцией.
         // Прежде оно его снимало всегда, и рядом стояло обоснование «построить

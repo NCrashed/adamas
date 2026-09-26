@@ -1,0 +1,51 @@
+-- Ветвь по прелюдному `Bool` выбирается машиной (§4.4, §10 вопрос 188).
+--
+-- Сравнение отвечает голым `True`, а ветви разбора названы `Prelude.True`:
+-- `Bool` объявлен прелюдией. Пока машина сверяла имена целиком, разбор
+-- застревал и уходил в ядерный `eval`, а тот считает ветви без δ и без
+-- эффектов. Отсюда два наблюдаемых следствия, и каждое держит своё поле:
+--
+--   * `logged` - операция в ветви `if` **терялась молча**: машина отвечала
+--     `1, 2`, а C и LLVM - `7, 1, 2`;
+--   * `settled` - вызов в аргументе становился вызовом по имени: `nest (bump s)`
+--     передавал `bump s` неразвёрнутым, и две проекции в `bump` разворачивали
+--     его дважды. Цена - `2ⁿ` разворотов: шестнадцать уровней стоили 936 мс
+--     против 23, сорок не кончились бы. Число взято малым, чтобы откат правки
+--     не вешал прогон.
+--
+-- Своего `Bool` у программы нет намеренно: со своим, объявленным без пути,
+-- имена совпадали, и дефекта не было.
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Int32 -> Unit
+
+pair : Int32 -> {Log} List Int32
+pair x =
+  if ltInt32 x 3 then note 7 else note 8
+  Cons x (Cons (x + x) Nil)
+
+type S = {a : Int32, b : Int32}
+bump : S -> S
+bump s = {a = s.a + 1, b = s.b}
+nest : S -> Int32 -> S
+nest s 0 = s
+nest s n = nest (bump s) (n - 1)
+
+settled : Int32
+settled = (nest {a = 0, b = 0} 16).a
+run : {Log} List Int32
+run = pair 1
+logged : List Int32
+logged = handle run with
+  return v -> v
+  note n -> Cons n (resume MkUnit)
+
+main : List Int32
+main = Cons settled logged

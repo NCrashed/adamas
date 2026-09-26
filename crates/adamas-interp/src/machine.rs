@@ -920,7 +920,7 @@ impl<'a> Machine<'a> {
             Value::Neutral(Head::Global(name, ..), spine) => case
                 .branches
                 .iter()
-                .find(|branch| branch.constructor == *name)
+                .find(|branch| eval::selects(&branch.constructor, name))
                 .map(|branch| (Rc::clone(&branch.body), spine.clone())),
             _ => None,
         };

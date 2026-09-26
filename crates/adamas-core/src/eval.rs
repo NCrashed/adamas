@@ -198,7 +198,7 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
                 Value::Neutral(Head::Global(name, ..), spine) => case
                     .branches
                     .iter()
-                    .find(|branch| branch.constructor == *name)
+                    .find(|branch| selects(&branch.constructor, name))
                     .map(|branch| (Rc::clone(&branch.body), spine.clone())),
                 _ => None,
             };
@@ -432,6 +432,29 @@ pub fn eliminate_case(case: &Rc<StuckCase>, scrutinee: &Rc<Value>) -> Rc<Value> 
         .unwrap_or_else(|| unreachable!("разбор неподходящего значения: {scrutinee}"))
 }
 
+/// Разбирает ли ветвь конструктора `branch` значение с головой `head`.
+///
+/// Ответ сравнения - **голый** конструктор соглашения: [`compared`] строит его
+/// без сигнатуры, а ветви названы так, как объявлены, - путём у подключаемого
+/// файла (§4.8, §10 вопрос 188) и у прелюдии (`Prelude.True`, §4.4). Сверяется
+/// поэтому последний сегмент, и только для имён соглашения: всякое другое имя
+/// обязано совпасть целиком. Третье такое имя - ответ линейного чтения массива
+/// (§10 вопрос 202), тот же голый конструктор из δ-шага.
+///
+/// Правило одно на всех, кто выбирает ветвь, - ядерный `eval`, застрявший
+/// разбор и машину. Пока оно жило только у застрявшего разбора, машина на
+/// прелюдном `Bool` не выбирала ветвь вовсе: разбор уходил в ядерный `eval`,
+/// тот считал ветви без δ, вызов в аргументе становился вызовом по имени, и
+/// цена росла как `2ⁿ`, а операция эффекта в ветви оставалась без хендлера.
+#[must_use]
+pub fn selects(branch: &Name, head: &Name) -> bool {
+    branch == head
+        || (matches!(
+            &**head,
+            crate::prim::TRUE | crate::prim::FALSE | crate::prim::MKREAD
+        ) && crate::term::short(branch) == &**head)
+}
+
 /// [`eliminate_case`], возвращающая `None` вместо паники.
 ///
 /// `None` - разбираемое значение не той формы: не нейтраль вовсе либо
@@ -450,28 +473,9 @@ pub fn try_eliminate_case(case: &Rc<StuckCase>, scrutinee: &Rc<Value>) -> Option
         if let Some(branch) = case
             .branches
             .iter()
-            .find(|branch| branch.constructor == *name)
+            .find(|branch| selects(&branch.constructor, name))
         {
             return apply_fields(Rc::clone(&branch.body), spine, case.params);
-        }
-        // Ответ сравнения - **голый** конструктор соглашения: [`compared`]
-        // строит его без сигнатуры, а у программы, объявившей `Bool` в
-        // подключаемом файле, ветви названы путём (§4.8, §10 вопрос 188).
-        // Сверяется поэтому последний сегмент, и только для имён соглашения:
-        // всякое другое застрявшее имя обязано оставаться застрявшим. Третье
-        // такое имя - ответ линейного чтения массива (§10 вопрос 202), тот же
-        // голый конструктор из δ-шага.
-        if matches!(
-            &**name,
-            crate::prim::TRUE | crate::prim::FALSE | crate::prim::MKREAD
-        ) {
-            if let Some(branch) = case
-                .branches
-                .iter()
-                .find(|branch| crate::term::short(&branch.constructor) == &**name)
-            {
-                return apply_fields(Rc::clone(&branch.body), spine, case.params);
-            }
         }
     }
 

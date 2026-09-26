@@ -44,7 +44,9 @@ use crate::error::{ElabError, Names};
 use adamas_core::value::{Env, Lvl, Value};
 
 use crate::class::{self, Class, Declaring, Instances, Offence};
-use crate::expr::{Elaborator, Enclosing, Member, Param, UNIT, Unwritten, WrittenField};
+use crate::expr::{
+    Deferred, Elaborator, Enclosing, Member, Param, UNIT, Unwritten, WrittenField, settle_literals,
+};
 use crate::fixity::Fixities;
 use crate::lifecycle::Observed;
 use crate::own::{Owned, Ownership};
@@ -2452,18 +2454,24 @@ fn declare_members(
                 warnings,
                 visible.clone(),
             )
-            .declaring(&types[at]);
-            clauses
+            .declaring(&types[at])
+            .deferring();
+            let compiled = clauses
                 .iter()
                 .map(|clause| elaborator.clause(clause))
-                .collect::<Result<Vec<_>, _>>()?
+                .collect::<Result<Vec<_>, _>>()?;
+            (compiled, elaborator.deferred())
         };
+        let (compiled, deferred) = compiled;
         let tree = compile_traced(signature, metas, &types[at], &compiled).map_err(|error| {
             ElabError::Clauses {
                 span: *at_span,
                 error: Box::new(error),
             }
         })?;
+        literals_settled(
+            signature, metas, owned, fixities, warnings, deferred, &tree.term, &types[at],
+        )?;
         class::resolve(
             signature,
             metas,
@@ -2643,19 +2651,32 @@ fn declare_mutual(
             let mut elaborator =
                 Elaborator::with_group(signature, metas, owned, fixities, warnings, visible)
                     .declaring(&written[at])
-                    .suspending(suspends(member.ty));
-            member
+                    .suspending(suspends(member.ty))
+                    .deferring();
+            let compiled = member
                 .clauses
                 .iter()
                 .map(|clause| elaborator.clause(clause))
-                .collect::<Result<Vec<_>, _>>()?
+                .collect::<Result<Vec<_>, _>>()?;
+            (compiled, elaborator.deferred())
         };
+        let (compiled, deferred) = compiled;
         let tree = compile_traced(signature, metas, &written[at], &compiled).map_err(|error| {
             ElabError::Clauses {
                 span: member.span,
                 error: Box::new(error),
             }
         })?;
+        literals_settled(
+            signature,
+            metas,
+            owned,
+            fixities,
+            warnings,
+            deferred,
+            &tree.term,
+            &written[at],
+        )?;
         class::resolve(
             signature,
             metas,
@@ -2675,6 +2696,33 @@ fn declare_mutual(
         carrier::check(signature, owned, &member.name.text, member.span)?;
     }
     Ok(())
+}
+
+/// Досчитывает литералы, отложенные элаборацией тела (§4.3, §10 вопрос 208).
+///
+/// Сначала проверка терма против типа объявления: её решения и есть то, что
+/// подпись сообщает изнутри лежащим литералам. Отказ здесь молчит - о нём
+/// скажет объявление, у которого есть маршрут по терму, - ровно как у
+/// [`class::resolve`], идущего следом.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "досчёт элаборирует литерал заново и читает всё, что читает элаборатор"
+)]
+fn literals_settled(
+    signature: &Signature,
+    metas: &mut Metas,
+    owned: &Owned,
+    fixities: &Fixities,
+    warnings: &mut Warnings,
+    deferred: Vec<Deferred>,
+    term: &Term,
+    ty: &Term,
+) -> Result<(), ElabError> {
+    if deferred.is_empty() {
+        return Ok(());
+    }
+    let _ = check_within(&Ctx::new(signature), metas, term, ty);
+    settle_literals(signature, metas, owned, fixities, warnings, deferred)
 }
 
 /// Объявляет определения группы одним вызовом - и называет отказ по месту.
@@ -5067,12 +5115,15 @@ fn define(
         .within(within)
         .recording(observed, &declared.name)
         .declaring(&declared.ty)
-        .suspending(suspends(declared.source));
-        clauses
+        .suspending(suspends(declared.source))
+        .deferring();
+        let compiled = clauses
             .iter()
             .map(|clause| elaborator.clause(clause))
-            .collect::<Result<Vec<_>, _>>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        (compiled, elaborator.deferred())
     };
+    let (compiled, deferred) = compiled;
 
     // Тип идёт в сборку тем же, каким пойдёт в сигнатуру, - с дырками уровня.
     // Одно хранилище на прогон это и позволяет: решение, найденное сборкой,
@@ -5083,6 +5134,16 @@ fn define(
             error: Box::new(error),
         }
     })?;
+    literals_settled(
+        signature,
+        metas,
+        known.owned,
+        known.fixities,
+        warnings,
+        deferred,
+        &tree.term,
+        &declared.ty,
+    )?;
 
     // Словари, вставленные дырками, заполняются поиском - до объявления,
     // которому нерешённая дырка запрещена (§3.5, `crate::class`).

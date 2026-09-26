@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use adamas_core::check::{check, infer, is_type};
 use adamas_core::conv::{convertible, whnf, whnf_solved};
-use adamas_core::ctx::Ctx;
+use adamas_core::ctx::{Ctx, Detached};
 use adamas_core::eval::{apply, eval, quote};
 use adamas_core::level::Level;
 use adamas_core::meta::Metas;
@@ -916,6 +916,7 @@ impl Argument {
 
 /// Локальное связывание: имя, видно ли оно поиску (см. `hiding`), владеет ли
 /// оно (§3.3) и не привязано ли к своему scope.
+#[derive(Clone)]
 struct Bound {
     name: Symbol,
     /// Кратность, с которой связывание объявлено.
@@ -1161,6 +1162,64 @@ pub(crate) struct Elaborator<'a> {
     /// Параметры кратности, написанные там, связываются у поля, а не у
     /// определения, и живут в своём пространстве индексов.
     fielding: Option<usize>,
+    /// Литералы, отложенные до конца объявления (§4.3, §10 вопрос 208).
+    ///
+    /// `None` - откладывать некуда: элаборация типа, алиаса, всего, после
+    /// чего никто не досчитывает. Тогда литерал решается на месте, как раньше.
+    literals: Option<Vec<Deferred>>,
+}
+
+/// Литерал, стоявший в позиции нерешённой дырки, - досчитывается после
+/// проверки объявления против его типа ([`settle_literals`]).
+///
+/// Очередь принадлежит объявлению, а не спайну: `Cons 5 (Cons 2 Nil)` при
+/// `sample : List Nat` узнаёт `Nat` извне **всего** выражения, и внутренний
+/// спайн, решавший свой литерал в себе, брал умолчание раньше, чем подпись
+/// успевала сказать своё.
+///
+/// Вместе с литералом едет всё, чем его досчитывать на месте написания:
+/// связывания, контекст, модуль и выбор `using`.
+pub(crate) struct Deferred {
+    hole: Term,
+    lit: ast::Lit,
+    goal: Rc<Value>,
+    scope: Vec<Bound>,
+    ctx: Detached,
+    enclosing: Option<Enclosing>,
+    using: Vec<(Symbol, Symbol)>,
+}
+
+/// Досчитывает отложенные литералы объявления (§4.3, §10 вопрос 208).
+///
+/// Зовётся после того, как собранный терм проверен против типа объявления:
+/// цели литералов к этому времени решены тем, что стоит вокруг, - соседом по
+/// спайну или подписью снаружи. Умолчание законно **здесь и только здесь**:
+/// объявление пройдено целиком и типа не задало.
+pub(crate) fn settle_literals(
+    signature: &Signature,
+    metas: &mut Metas,
+    owned: &Owned,
+    fixities: &Fixities,
+    warnings: &mut Warnings,
+    deferred: Vec<Deferred>,
+) -> Result<(), ElabError> {
+    for literal in deferred {
+        let mut it = Elaborator::new(signature, metas, owned, fixities, warnings)
+            .within(literal.enclosing.as_ref());
+        it.scope = literal.scope;
+        it.ctx = Ctx::attach(signature, literal.ctx);
+        it.using = literal.using;
+        let value = it.literal(&literal.lit, Some(&literal.goal))?;
+        // Унификацией, а не присваиванием - по тому же доводу, что в
+        // `settled`: дырка стоит под спайном контекста.
+        let want = it.ctx.eval(&literal.hole);
+        let got = it.ctx.eval(&value);
+        let mark = it.metas.mark();
+        if !convertible(it.signature, it.metas, it.ctx.size(), &want, &got) {
+            it.metas.rollback(mark);
+        }
+    }
+    Ok(())
 }
 
 impl<'a> Elaborator<'a> {
@@ -1302,7 +1361,21 @@ impl<'a> Elaborator<'a> {
             instantiated: HashMap::new(),
             grades: Vec::new(),
             fielding: None,
+            literals: None,
         }
+    }
+
+    /// Откладывает литералы в нерешённой позиции до конца объявления
+    /// (см. [`Deferred`]). Досчитать их обязан тот, кто это включил, -
+    /// [`settle_literals`] по [`Self::deferred`].
+    pub(crate) fn deferring(mut self) -> Self {
+        self.literals = Some(Vec::new());
+        self
+    }
+
+    /// Отложенные литералы - забираются однажды, после тел.
+    pub(crate) fn deferred(&mut self) -> Vec<Deferred> {
+        self.literals.take().unwrap_or_default()
     }
 
     /// Кратности написанного типа - те, что достанутся лямбдам тела.
@@ -3048,6 +3121,9 @@ impl<'a> Elaborator<'a> {
         if let Some(ty) = awaited.and_then(|ty| self.primitive_type(ty)) {
             return Self::primitive_literal(lit, ty);
         }
+        if let Some(hole) = self.deferring_literal(lit, awaited) {
+            return Ok(hole);
+        }
         if let Some(term) = self.defaulted(lit, awaited)? {
             return Ok(term);
         }
@@ -3502,6 +3578,25 @@ impl<'a> Elaborator<'a> {
             given.push(argument);
         }
         (term, ty)
+    }
+
+    /// Ставит дырку на место литерала, чей тип ещё дырка, и откладывает его до
+    /// конца объявления (см. [`Deferred`]).
+    fn deferring_literal(&mut self, lit: &ast::Lit, awaited: Option<&Rc<Value>>) -> Option<Term> {
+        self.literals.as_ref()?;
+        let goal = Rc::clone(awaited.filter(|ty| self.flexible(ty))?);
+        let hole = self.fresh_meta(&goal);
+        let deferred = Deferred {
+            hole: hole.clone(),
+            lit: lit.clone(),
+            goal,
+            scope: self.scope.clone(),
+            ctx: self.ctx.detach(),
+            enclosing: self.enclosing.clone(),
+            using: self.using.clone(),
+        };
+        self.literals.as_mut()?.push(deferred);
+        Some(hole)
     }
 
     /// Откладывает голый литерал, стоящий в позиции нерешённой дырки.

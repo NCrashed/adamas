@@ -208,6 +208,41 @@ impl<'a> Ctx<'a> {
     pub fn quote(&self, value: &Rc<Value>) -> Term {
         quote(self.size(), value)
     }
+
+    /// Тот же контекст без ссылки на сигнатуру - чтобы пережить её заём.
+    #[must_use]
+    pub fn detach(&self) -> Detached {
+        Detached {
+            env: self.env.clone(),
+            bindings: self.bindings.clone(),
+            row: self.row.clone(),
+        }
+    }
+
+    /// Восстанавливает отвязанный контекст над сигнатурой.
+    #[must_use]
+    pub fn attach(signature: &'a Signature, detached: Detached) -> Self {
+        Self {
+            signature,
+            env: detached.env,
+            bindings: detached.bindings,
+            carriers: None,
+            row: detached.row,
+            speculative: false,
+        }
+    }
+}
+
+/// Контекст, отвязанный от сигнатуры ([`Ctx::detach`]).
+///
+/// Нужен тому, кто досчитывает выражение **после** того, как элаборация
+/// объявления отпустила сигнатуру и хранилище дырок: отложенный литерал
+/// решается там, где тип объявления уже сведён (§4.3, §10 вопрос 208).
+#[derive(Clone, Debug)]
+pub struct Detached {
+    env: Env,
+    bindings: Option<Rc<Cell>>,
+    row: Row<Rc<Value>>,
 }
 
 /// Сколько раз каждая переменная контекста использована.

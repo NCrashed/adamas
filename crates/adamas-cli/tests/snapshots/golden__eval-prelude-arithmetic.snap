@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+{product = 6, scaled = 3, nested = 9, wrapped = 254, signed = -0.0}

@@ -1,0 +1,49 @@
+-- Эффектная функция с плоским ответом под обрывающим хендлером (§4.11,
+-- §10 вопрос 215).
+--
+-- Обрыв требует вернуть ответ `adamas_kont_abort` немедленно, а у функции с
+-- плоским ответом вернуть его нечем: оба эмиттера отказывали «операция в
+-- функции с плоским ответом», хотя машина программу считала. Теперь ответ
+-- такой функции едет обёрткой примитива, а место вызова её снимает. Поля:
+--
+--   * `whole` - обрыва нет, `checked` дважды отвечает числом: 21 + 26;
+--   * `broken` - обрыв во втором `checked`: остаток `both` не считается, и
+--     ответ даёт ветка хендлера.
+--
+-- Хендлер абортивный нарочно: в программе, где все ветки хвостовые, операция
+-- точкой приостановки не считается, и граница не видна вовсе.
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Fail where
+  fail : Int32
+
+checked : Int32 -> {Fail} Int32
+checked 0 =
+  let q : Int32 = fail
+  q + 1
+checked d = divInt32 100 d + 1
+
+both : Int32 -> Int32 -> {Fail} Int32
+both x y = checked x + checked y
+whole : {Fail} Int32
+whole = both 5 4
+broken : {Fail} Int32
+broken = both 5 0
+first : Int32
+first = handle whole with
+  return v -> v
+  fail -> 0 - 1
+
+second : Int32
+second = handle broken with
+  return v -> v
+  fail -> 0 - 1
+
+main : List Int32
+main = Cons first (Cons second Nil)

@@ -48,8 +48,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use adamas_core::mult::Mult;
+use adamas_core::prim::PrimTy;
+
 use crate::ir::{
-    Arm, Binding, Expr, Fact, Form, FuncId, Function, LocalId, Packing, Program, Repr, Verdict,
+    Arm, Binding, Constructor, CtorId, Expr, Fact, Form, FuncId, Function, LocalId, Packing,
+    Program, Repr, Verdict,
 };
 
 /// Итог анализа приостановок: кто приостанавливается и тиха ли программа.
@@ -173,6 +177,7 @@ fn suspends(expr: &Expr, known: &BTreeSet<FuncId>, quiet: bool) -> bool {
 #[must_use]
 pub fn prepare(program: Program) -> Program {
     let program = extracted(program);
+    let program = boxed_answers(program);
     let known = suspending(&program);
     let results: Vec<Repr> = program.functions.iter().map(|it| it.result).collect();
     let Program {
@@ -832,4 +837,116 @@ fn bound(binds: Vec<(Binding, Expr)>, body: Expr) -> Expr {
             value: Box::new(value),
             body: Box::new(body),
         })
+}
+
+/// Приостанавливающаяся функция с плоским примитивным ответом отвечает
+/// обёрткой (§4.11, §10 вопрос 215).
+///
+/// Обрыв (`SUPPRESSED`) требует вернуть ответ `adamas_kont_abort` немедленно,
+/// а ответ этот - значение: у функции с плоским ответом вернуть его нечем, и
+/// оба эмиттера отказывали - «операция в функции с плоским ответом», - при том
+/// что машина такую программу считала. Ответ поэтому уезжает обёрткой
+/// примитива - той же, какой едет плоский ответ через замыкание (§10 вопрос
+/// 158), - а каждое место вызова снимает её разбором. Цена названа: ячейка
+/// кучи на вызов такой функции.
+///
+/// Экспортированная функция не трогается: её сигнатуру читает чужая сторона,
+/// и там отказ остаётся отказом.
+fn boxed_answers(mut program: Program) -> Program {
+    let known = suspending(&program);
+    let exported: BTreeSet<FuncId> = program.exports.iter().map(|it| it.function).collect();
+    let flat: Vec<(FuncId, PrimTy)> = program
+        .functions
+        .iter()
+        .filter(|it| known.functions.contains(&it.id) && !exported.contains(&it.id))
+        .filter_map(|it| match it.result {
+            Repr::Flat(prim) => Some((it.id, prim)),
+            _ => None,
+        })
+        .collect();
+    if flat.is_empty() {
+        return program;
+    }
+    let targets: BTreeMap<FuncId, (PrimTy, CtorId)> = flat
+        .into_iter()
+        .map(|(id, prim)| (id, (prim, wrapper(&mut program.constructors, prim))))
+        .collect();
+    for function in &mut program.functions {
+        let mut next = ceiling(function);
+        let mut body = std::mem::replace(&mut function.body, Expr::Erased);
+        unwrapped(&mut body, &targets, &mut next);
+        if let Some((prim, tag)) = targets.get(&function.id) {
+            let held = Binding {
+                name: "ответ".to_owned(),
+                local: LocalId(next),
+                fact: Fact::present(Mult::One).shaped(Repr::Flat(*prim)),
+            };
+            let local = held.local;
+            body = Expr::Bind {
+                binding: held,
+                value: Box::new(body),
+                body: Box::new(Expr::Construct {
+                    constructor: *tag,
+                    reuse: None,
+                    arguments: vec![Expr::Local(local)],
+                }),
+            };
+            function.result = Repr::Boxed;
+        }
+        function.body = body;
+    }
+    program
+}
+
+/// Снимает обёртку ответа у каждого вызова функции из `targets`.
+fn unwrapped(expr: &mut Expr, targets: &BTreeMap<FuncId, (PrimTy, CtorId)>, next: &mut u32) {
+    for child in children_mut(expr) {
+        unwrapped(child, targets, next);
+    }
+    let Expr::Call { function, .. } = expr else {
+        return;
+    };
+    let Some((prim, tag)) = targets.get(function).copied() else {
+        return;
+    };
+    let bits = Binding {
+        name: "ответ".to_owned(),
+        local: LocalId(*next),
+        fact: Fact::present(Mult::Many).shaped(Repr::Flat(prim)),
+    };
+    *next += 1;
+    let local = bits.local;
+    let call = std::mem::replace(expr, Expr::Erased);
+    *expr = Expr::Match {
+        scrutinee: Box::new(call),
+        consumed: Mult::One,
+        arms: vec![Arm {
+            constructor: tag,
+            fields: vec![bits],
+            body: Expr::Local(local),
+        }],
+    };
+}
+
+/// Обёртка примитива в таблице конструкторов: та, что заводит понижение
+/// (`Lowerer::prim_wrapper`), либо новая той же формы. Имя пустое - это
+/// сентинель прозрачной печати у `print.c`.
+fn wrapper(constructors: &mut Vec<Constructor>, prim: PrimTy) -> CtorId {
+    let fact = Fact::declared(Mult::One).shaped(Repr::Flat(prim));
+    if let Some(found) = constructors
+        .iter()
+        .find(|it| it.name.is_empty() && it.binders == [fact])
+    {
+        return found.tag;
+    }
+    let tag = CtorId(u16::try_from(constructors.len()).unwrap_or(u16::MAX));
+    constructors.push(Constructor {
+        tag,
+        name: String::new(),
+        data: "#обёртка".to_owned(),
+        binders: vec![fact],
+        params: 0,
+        labels: None,
+    });
+    tag
 }

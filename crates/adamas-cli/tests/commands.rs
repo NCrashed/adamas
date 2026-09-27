@@ -489,8 +489,9 @@ fn an_operator_dictionary_crosses_a_closure() {
 /// Отказ эмиттера - тем же правилом: функцию он называет, место находит
 /// драйвер.
 ///
-/// Держится на дефекте: эффектная функция с плоским ответом под хендлером не
-/// эмитится (§10 вопрос 215).
+/// Держится на границе: плотная запись, живущая поперёк точки приостановки,
+/// не помещается в слот кадра (§4.11, §10 вопрос 221). Прежде свидетель стоял
+/// на эффектной функции с плоским ответом, и его сняла правка вопроса 215.
 #[test]
 fn an_emitter_refusal_names_the_file_and_line() {
     let app = scratch("emitter-place");
@@ -498,16 +499,15 @@ fn an_emitter_refusal_names_the_file_and_line() {
         &app.join("Main.adamas"),
         "data Unit where\n  MkUnit : Unit\n\
          data List (a : Type) where\n  Nil : List a\n  Cons : a -> List a -> List a\n\
-         effect Log where\n  note : Int32 -> Unit\n\
-         noisy : Int32 -> {Log} Int32\nnoisy n =\n  note n\n  n\n\
-         body : Int32 -> {Log} Int32\nbody x =\n  let y = if ltInt32 x 3 then noisy 7 else noisy 8\n  y + y\n\
-         run : {Log} Int32\nrun = body 1\n\
-         main : List Int32\nmain = handle run with\n  return v -> Cons v Nil\n  \
-         note n -> Cons n (resume MkUnit)\n",
+         effect Fail where\n  fail : Int32\n\
+         type Pt = {x : Int32, y : Int32}\n\
+         body : {Fail} List Int32\nbody =\n  let p : Pt = {x = 1, y = 2}\n  \
+         let n : Int32 = fail\n  Cons (p.x + n) Nil\n\
+         main : List Int32\nmain = handle body with\n  return v -> v\n  fail -> Nil\n",
     );
     let (ok, _, stderr) = run(adamas().arg("build").arg(app.join("Main.adamas")));
     assert!(!ok, "отказ эмиттера прошёл сборкой");
-    assert!(stderr.contains("Main.adamas:17:1:"), "{stderr}");
-    assert!(stderr.contains("run = body 1"), "{stderr}");
-    assert!(stderr.contains("обрыв вернуть нечем"), "{stderr}");
+    assert!(stderr.contains("Main.adamas:10:1:"), "{stderr}");
+    assert!(stderr.contains("body ="), "{stderr}");
+    assert!(stderr.contains("переживает точку приостановки"), "{stderr}");
 }

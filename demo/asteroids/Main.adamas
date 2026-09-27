@@ -409,7 +409,7 @@ fly (MkShots xs ys vx vy life) i =
   let age = arrayIndex life j
   let nx = wrap (x + arrayIndex vx j) (width * scale)
   let ny = wrap (y + arrayIndex vy j) (height * scale)
-  let aged : Int32 = if alive then age - 1 else 0
+  let aged = if alive then age - 1 else 0
   fly (MkShots (arraySet xs j (if alive then nx else x)) (arraySet ys j (if alive then ny else y)) vx vy (arraySet life j aged)) j
 
 -- | Первый свободный слот выстрела; `shots` - свободного нет.
@@ -427,12 +427,12 @@ fire : Ship -> Shots -> Bool -> Shots
 fire ship (MkShots xs ys svx svy life) shoot =
   let slot = freeShot life shots shots
   let ok = shoot && slot < shots
-  let at : UInt64 = if ok then slot else 0
+  let at = if ok then slot else 0
   let x = if ok then ship.x else arrayIndex xs at
   let y = if ok then ship.y else arrayIndex ys at
   let vx = if ok then dirX (aim ship.dir) * shotSpeed else arrayIndex svx at
   let vy = if ok then dirY (aim ship.dir) * shotSpeed else arrayIndex svy at
-  let age : Int32 = if ok then 48 else arrayIndex life at
+  let age = if ok then 48 else arrayIndex life at
   MkShots (arraySet xs at x) (arraySet ys at y) (arraySet svx at vx) (arraySet svy at vy) (arraySet life at age)
 
 -- | Пересекаются ли два квадрата на экране.
@@ -482,7 +482,7 @@ strike (MkRocks ds xs ys vx vy sz) (MkShots sx sy svx svy life) s i got =
   let rest = shard side
   let slot = freeRock sz rocks rocks
   let born = hit && 0 < rest && slot < rocks
-  let dest : UInt64 = if born then slot else 0
+  let dest = if born then slot else 0
   let srcX = at xs j
   let srcY = at ys j
   let srcVX = at vx j
@@ -500,8 +500,8 @@ strike (MkRocks ds xs ys vx vy sz) (MkShots sx sy svx svy life) s i got =
   let grownVX = put turnX dest (if born then quicken srcVY else heldVX)
   let grownVY = put turnY dest (if born then quicken (neg srcVX) else heldVY)
   let grownSz = put shrunk dest (if born then rest else heldSz)
-  let spent : Int32 = if hit then 0 else arrayIndex life s
-  let earned : Int32 = if hit then worth side else 0
+  let spent = if hit then 0 else arrayIndex life s
+  let earned = if hit then worth side else 0
   strike (MkRocks whole keptX keptY grownVX grownVY grownSz) (MkShots sx sy svx svy (arraySet life s spent)) s j (got + earned)
 
 -- | Следующий выстрел против всех камней, начиная с итога предыдущего.
@@ -868,7 +868,7 @@ loop r rect event w n =
   let stepped = step (withKeys w heard)
   let painted = paint r rect stepped
   SDL_Delay 16
-  let more : UInt64 = if done stepped then 0 else n - 1
+  let more = if done stepped then 0 else n - 1
   loop r painted event stepped more
 
 -- | Предел кадров: пять минут при шестидесяти в секунду.

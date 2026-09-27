@@ -2396,17 +2396,27 @@ impl<'a> Lowerer<'a> {
         match argument {
             Arg::Written(term) => self.shaped(scope, term, want, at),
             Arg::Supplied(binding) => {
-                if !fits(binding.fact.repr, want) {
-                    return Err(LowerError::Representation {
-                        at,
-                        want: describe(want),
-                        got: describe(binding.fact.repr),
-                    });
-                }
-                Ok(if binding.fact.present {
+                let value = if binding.fact.present {
                     Expr::Local(binding.local)
                 } else {
                     Expr::Erased
+                };
+                if fits(binding.fact.repr, want) {
+                    return Ok(value);
+                }
+                // Достроенный параметр перекладывается, как всякая объявленная
+                // позиция (§10 вопрос 214): `chooser a = let f = choose True a; f`
+                // применяет замыкание к достроенному `Int32`, а замыкание
+                // берёт указатель.
+                if binding.fact.present {
+                    if let Some(moved) = self.moved(scope, &value, binding.fact.repr, want)? {
+                        return Ok(moved);
+                    }
+                }
+                Err(LowerError::Representation {
+                    at,
+                    want: describe(want),
+                    got: describe(binding.fact.repr),
                 })
             }
         }
@@ -4664,44 +4674,55 @@ impl<'a> Lowerer<'a> {
     /// остаётся отказом: обёртки у них нет, и заводить её ради ненаписанной
     /// программы волна не станет.
     fn boxed_call(&mut self, function: FuncId, result: Repr) -> Result<FuncId, LowerError> {
-        if result.boxed() {
+        let described = &self.functions[function.0];
+        let parameters = described.parameters.clone();
+        // Плоский **примитивный** параметр трамплин распаковывает сам (§10
+        // вопрос 214): аргумент приезжает к нему обёрткой - её кладёт
+        // [`Lowerer::moved`] на пути `given`, - и биты достаются разбором, тем же,
+        // каким `moved` снимает обёртку в позиции примитива. Без этого
+        // `let key = toggled touch down code` при `code : UInt32` отвергался,
+        // хотя машина его считала. Прочее плоское - агрегат, плоский массив,
+        // блок региона - остаётся отказом: обёртки у них нет.
+        let flat = parameters
+            .iter()
+            .any(|it| it.fact.present && matches!(it.fact.repr, Repr::Flat(_)));
+        if result.boxed() && !flat {
             return Ok(function);
         }
-        let Repr::Flat(prim) = result else {
-            return Err(LowerError::Representation {
-                at: "ответ недобранного вызова",
-                want: describe(Repr::Boxed),
-                got: describe(result),
-            });
+        for parameter in &parameters {
+            if parameter.fact.present
+                && !parameter.fact.repr.pointer()
+                && !matches!(parameter.fact.repr, Repr::Flat(_))
+            {
+                return Err(LowerError::Representation {
+                    at: "параметр недобранного вызова",
+                    want: describe(Repr::Boxed),
+                    got: describe(parameter.fact.repr),
+                });
+            }
+        }
+        let answer = match result {
+            Repr::Flat(prim) => Some(self.prim_wrapper(prim)?),
+            boxed if boxed.boxed() => None,
+            _ => {
+                return Err(LowerError::Representation {
+                    at: "ответ недобранного вызова",
+                    want: describe(Repr::Boxed),
+                    got: describe(result),
+                });
+            }
         };
         if let Some(wrapped) = self.wrapped.get(&function) {
             return Ok(*wrapped);
         }
-        let tag = self.prim_wrapper(prim)?;
         let described = &self.functions[function.0];
-        let parameters = described.parameters.clone();
         let name = format!("{}#обёртка", described.name);
         let form = described.form;
         // Позиция берётся у обёрнутого: своей у обёртки нет, а показывать
         // отладчику ту, где написан обёрнутый, честнее, чем не показывать
         // ничего - шаг войдёт в обёртку и тут же выйдет в неё же.
         let position = described.position;
-        let held = Binding {
-            name: "ответ".to_owned(),
-            local: LocalId(u32::try_from(parameters.len()).unwrap_or(u32::MAX)),
-            fact: Fact::present(Mult::One).shaped(result),
-        };
-        let arguments = parameters
-            .iter()
-            .map(|it| {
-                if it.fact.present {
-                    Expr::Local(it.local)
-                } else {
-                    Expr::Erased
-                }
-            })
-            .collect();
-        let local = held.local;
+        let (outer, body) = self.unwrapped_call(function, &parameters, answer, result)?;
         let id = FuncId(self.functions.len());
         self.functions.push(Function {
             id,
@@ -4709,23 +4730,95 @@ impl<'a> Lowerer<'a> {
             position,
             form,
             captured: Vec::new(),
-            parameters,
+            parameters: outer,
             result: Repr::Boxed,
-            body: Expr::Bind {
-                binding: held,
-                value: Box::new(Expr::Call {
-                    function,
-                    arguments,
-                }),
-                body: Box::new(Expr::Construct {
-                    constructor: tag,
-                    reuse: None,
-                    arguments: vec![Expr::Local(local)],
-                }),
-            },
+            body,
         });
         self.wrapped.insert(function, id);
         Ok(id)
+    }
+
+    /// Тело трамплина и его параметры: плоские примитивные приходят обёрткой и
+    /// снимаются разбором, плоский ответ уезжает обёрткой ([`Lowerer::boxed_call`]).
+    fn unwrapped_call(
+        &mut self,
+        function: FuncId,
+        parameters: &[Binding],
+        answer: Option<CtorId>,
+        result: Repr,
+    ) -> Result<(Vec<Binding>, Expr), LowerError> {
+        let mut next = u32::try_from(parameters.len()).unwrap_or(u32::MAX);
+        let mut fresh = || {
+            let local = LocalId(next);
+            next = next.saturating_add(1);
+            local
+        };
+        // Параметры обёртки - те же связывания, но плоские приходят
+        // указателем; их биты связываются заново под тем же номером позиции.
+        let mut outer = Vec::with_capacity(parameters.len());
+        let mut unwrapped = Vec::new();
+        let mut arguments = Vec::with_capacity(parameters.len());
+        for parameter in parameters {
+            if !parameter.fact.present {
+                outer.push(parameter.clone());
+                arguments.push(Expr::Erased);
+                continue;
+            }
+            if let Repr::Flat(prim) = parameter.fact.repr {
+                let bits = Binding {
+                    name: parameter.name.clone(),
+                    local: fresh(),
+                    fact: Fact::present(Mult::Many).shaped(Repr::Flat(prim)),
+                };
+                arguments.push(Expr::Local(bits.local));
+                outer.push(Binding {
+                    fact: parameter.fact.shaped(Repr::Boxed),
+                    ..parameter.clone()
+                });
+                unwrapped.push((parameter.local, prim, bits));
+            } else {
+                outer.push(parameter.clone());
+                arguments.push(Expr::Local(parameter.local));
+            }
+        }
+        let call = Expr::Call {
+            function,
+            arguments,
+        };
+        let mut body = match answer {
+            None => call,
+            Some(tag) => {
+                let held = Binding {
+                    name: "ответ".to_owned(),
+                    local: fresh(),
+                    fact: Fact::present(Mult::One).shaped(result),
+                };
+                let local = held.local;
+                Expr::Bind {
+                    binding: held,
+                    value: Box::new(call),
+                    body: Box::new(Expr::Construct {
+                        constructor: tag,
+                        reuse: None,
+                        arguments: vec![Expr::Local(local)],
+                    }),
+                }
+            }
+        };
+        // Разборы - снаружи внутрь, в порядке параметров: вложенность не
+        // меняет смысла, биты каждого нужны только вызову.
+        for (boxed, prim, bits) in unwrapped.into_iter().rev() {
+            body = Expr::Match {
+                scrutinee: Box::new(Expr::Local(boxed)),
+                consumed: Mult::One,
+                arms: vec![Arm {
+                    constructor: self.prim_wrapper(prim)?,
+                    fields: vec![bits],
+                    body,
+                }],
+            };
+        }
+        Ok((outer, body))
     }
 
     /// Просит ли место вызова вторую форму у функции первой (§10 вопрос 169).
@@ -4795,10 +4888,9 @@ impl<'a> Lowerer<'a> {
                 .iter()
                 .all(|fact| !fact.present);
         if !complete {
-            // Недобранный вызов уходит замыканием, а трамплин отдаёт слоты
-            // указателями: плоский параметр или плоский ответ через него не
-            // проходят (§4.11).
-            pointing(&parameters, "параметр недобранного вызова")?;
+            // Недобранный вызов уходит замыканием, а трамплин говорит
+            // указателями: плоский примитив он распаковывает и упаковывает сам
+            // ([`Lowerer::boxed_call`]), прочее плоское - отказ (§4.11).
             let function = self.boxed_call(function, result)?;
             let mut value = Expr::Closure {
                 function,

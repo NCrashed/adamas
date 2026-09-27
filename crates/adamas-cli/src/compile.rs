@@ -185,3 +185,52 @@ fn refused(
         None => anyhow::anyhow!("{error}\n  в определении `{failed}`"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use adamas_codegen::CompileError;
+    use adamas_codegen::lower::LowerError;
+    use adamas_core::sig::Signature;
+    use adamas_core::source::{SourceFile, Span};
+
+    use super::refused;
+
+    /// Отказ внутри прелюдии показывается у первого определения автора по
+    /// цепочке запросов (§10 вопрос 217), и называет оба.
+    ///
+    /// Ошибка составлена руками: после вопроса 214 отказов внутри прелюдии не
+    /// осталось, а правило драйвера от этого не перестало быть правилом.
+    #[test]
+    fn a_refusal_inside_the_prelude_is_shown_at_the_authors_definition() {
+        let main = "xs : Int32\nxs = 1\n\nmain : Int32\nmain = xs\n";
+        let prelude = "add : Int32\nadd = 2\n";
+        let units = vec![
+            (
+                None,
+                SourceFile::new("Main.adamas".to_owned(), main.to_owned()),
+            ),
+            (
+                Some(adamas_elab::program::PRELUDE.to_owned()),
+                SourceFile::new("Prelude.adamas".to_owned(), prelude.to_owned()),
+            ),
+        ];
+        let mut signature = Signature::default();
+        let at = main.find("main =").unwrap_or(0);
+        signature.locate("main", Span::new(at, at + 4));
+        signature.locate("Prelude.add", Span::new(0, 3));
+        let error = CompileError::Lower(
+            LowerError::Representation {
+                at: "параметр недобранного вызова",
+                want: "указательное значение".to_owned(),
+                got: "плоское `Int32`".to_owned(),
+            }
+            .within("Prelude.add@_", vec!["main".to_owned()]),
+        );
+        let said = refused(&units, &signature, error).to_string();
+        assert!(said.starts_with("Main.adamas:5:1:"), "{said}");
+        assert!(
+            said.contains("отказ в `Prelude.add`, до которого дотянулось `main`"),
+            "{said}"
+        );
+    }
+}

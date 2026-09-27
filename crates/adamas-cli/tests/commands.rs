@@ -437,33 +437,38 @@ fn a_lowering_refusal_names_the_file_and_line() {
     );
     write(
         &app.join("Lib/Pick.adamas"),
-        "-- | Выбор.\n\
-         choose : Bool -> Int32 -> Int32 -> Int32\n\
-         choose c a b = if c then a else b\n\
+        "-- | Точка.\n\
+         type Pt = {x : Int32, y : Int32}\n\
          \n\
-         -- | Недобранный вызов с плоским параметром (§10 вопрос 214).\n\
-         chooser : Int32 -> Int32 -> Int32\n\
-         chooser a =\n  let f = choose True a\n  f\n",
+         -- | Сумма координат со сдвигом.\n\
+         shifted : Pt -> Int32 -> Int32\n\
+         shifted p d = p.x + p.y + d\n\
+         \n\
+         -- | Недобранный вызов с параметром-записью: обёртки у плотного\n\
+         -- агрегата нет (§4.11).\n\
+         chooser : Int32 -> Int32\n\
+         chooser a =\n  let f = shifted\n  f {x = a, y = 1} 2\n",
     );
     write(
         &app.join("Main.adamas"),
-        "import Lib.Pick (chooser)\n\nmain : Int32\nmain = chooser 1 2\n",
+        "import Lib.Pick (chooser)\n\nmain : Int32\nmain = chooser 1\n",
     );
     let (ok, _, stderr) = run(adamas().arg("build").arg(&app));
     assert!(!ok, "отказ понижения прошёл сборкой");
-    assert!(stderr.contains("Lib/Pick.adamas:7:1:"), "{stderr}");
+    assert!(stderr.contains("Lib/Pick.adamas:11:1:"), "{stderr}");
     assert!(stderr.contains("chooser a ="), "{stderr}");
 }
 
-/// Отказ внутри прелюдии показывается у определения автора, до него
-/// дотянувшегося, - и называет оба.
+/// Словарь оператора, ушедший значением, понижается (§10 вопрос 214).
 ///
-/// Держится на дефекте: `100 + n` в ветви хендлера тянет словарь `Add#Int32`
-/// значением, а недобранный примитив с плоским параметром не понижается (§10
-/// вопрос 214). Починят 214 - свидетелю понадобится другой отказ в прелюдии.
+/// `100 + n` в ветви хендлера тянет словарь `Add#Int32` значением, а его
+/// метод `add = addInt32` - недобранный примитив с плоскими параметрами. До
+/// правки трамплин замыкания отказывал «параметр недобранного вызова», и
+/// программа, которую машина считала, не собиралась. Сверяется ответ
+/// сборки с ответом машины.
 #[test]
-fn a_refusal_inside_the_prelude_is_shown_at_the_authors_definition() {
-    let app = scratch("prelude-place");
+fn an_operator_dictionary_crosses_a_closure() {
+    let app = scratch("dictionary-closure");
     write(
         &app.join("Main.adamas"),
         "data Unit where\n  MkUnit : Unit\n\
@@ -473,13 +478,12 @@ fn a_refusal_inside_the_prelude_is_shown_at_the_authors_definition() {
          main : List Int32\nmain = handle probe with\n  return v -> v\n  \
          note n -> Cons (100 + n) (resume MkUnit)\n",
     );
+    let (ok, expected, stderr) = run(adamas().arg("eval").arg(app.join("Main.adamas")));
+    assert!(ok, "машина не посчитала: {stderr}");
+    assert_eq!(expected, "Cons 101 Nil");
     let (ok, _, stderr) = run(adamas().arg("build").arg(app.join("Main.adamas")));
-    assert!(!ok, "отказ понижения прошёл сборкой");
-    assert!(stderr.contains("Main.adamas:13:1:"), "{stderr}");
-    assert!(
-        stderr.contains("отказ в `Add#Int32`, до которого дотянулось `main`"),
-        "{stderr}"
-    );
+    assert!(ok, "не собралось: {stderr}");
+    assert_eq!(executed(&app.join(".adamas/build/Main")), expected);
 }
 
 /// Отказ эмиттера - тем же правилом: функцию он называет, место находит

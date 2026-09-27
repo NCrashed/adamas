@@ -1,0 +1,48 @@
+-- Недобранный вызов с плоским параметром (§4.11, §10 вопрос 214).
+--
+-- Замыкание говорит указателями, и плоский аргумент едет к нему обёрткой
+-- примитива (§10 вопрос 158). Трамплин обёртку снимает сам, прежде чем
+-- звать функцию; до правки он отказывал «параметр недобранного вызова», и
+-- программа, которую машина считала, не собиралась. Поля ответа:
+--
+--   * `keys` - частичное применение с параметрами `Bool` и `UInt32`, как
+--     `let key = toggled touch down code` в демо;
+--   * `mixed` - три ширины подряд (`Int32`, `Int64`, `UInt8`) и замыкание,
+--     применённое дважды по одному аргументу;
+--   * `supplied` - определение отдаёт замыкание, а второй параметр
+--     достраивается: достроенный плоский аргумент перекладывается в обёртку.
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+bit : Bool -> Int32
+bit True = 1
+bit False = 0
+
+toggled : Bool -> Bool -> UInt32 -> UInt32 -> Bool -> Bool
+toggled touch down code want old = if touch && code == want then down else old
+keys : Int32
+keys =
+  let key = toggled True True 7
+  bit (key 7 False) + bit (key 8 False) * 2
+
+pick : Int32 -> Int64 -> UInt8 -> Int32
+pick a b c = a * 100 + int64ToInt32 b * 10 + uint8ToInt32 c
+mixed : Int32
+mixed =
+  let f = pick 1
+  let g = f 2
+  g 3
+
+choose : Bool -> Int32 -> Int32 -> Int32
+choose c a b = if c then a else b
+chooser : Int32 -> Int32 -> Int32
+chooser a =
+  let f = choose False a
+  f
+
+supplied : Int32
+supplied = chooser 1 42
+main : List Int32
+main = Cons keys (Cons mixed (Cons supplied Nil))

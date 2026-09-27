@@ -1200,15 +1200,15 @@ fn a_flat_answer_crosses_a_call_boundary_at_a_named_price() {
     assert_eq!(live, 0, "прогон оставил блоки живыми");
 }
 
-/// Соседняя половина той же границы по-прежнему отказывает по имени.
+/// Соседняя половина той же границы - плоский **параметр** - тоже проходит
+/// (§10 вопрос 214), и цена названа числом.
 ///
 /// Разошлись эти двое ровно позицией плоского: там ответ, здесь параметр.
-/// Трамплин-разворачиватель для второй §10 вопрос 158 называет отдельно, и
-/// волне он не понадобился.
+/// Аргумент едет к замыканию обёрткой, трамплин снимает её разбором и зовёт
+/// функцию битами; прежде он отказывал по имени.
 #[test]
-fn a_flat_parameter_of_an_undersaturated_call_is_still_named() {
-    let error = harness::compiled(
-        "\
+fn a_flat_parameter_of_an_undersaturated_call_crosses_at_a_named_price() {
+    const SOURCE: &str = "\
 apply : (Int64 -> Int64) -> Int64 -> Int64
 apply f x = f x
 
@@ -1217,14 +1217,13 @@ bump n = addInt64 n 1
 
 main : Int64
 main = apply bump 41
-",
-    )
-    .expect_err("плоский параметр недобранного вызова не проходит");
-    let text = error.to_string();
-    assert!(
-        text.contains("параметр недобранного вызова"),
-        "отказ назван иначе: {text}"
-    );
+";
+    assert_eq!(harness::printed(SOURCE), "42");
+    let stderr = harness::agreed("плоский-параметр-недобранного", SOURCE)
+        .unwrap_or_else(|error| panic!("плоский параметр недобранного вызова: {error}"));
+    let (allocated, live) = harness::blocks("плоский-параметр-недобранного", &stderr);
+    assert_eq!(allocated, 2, "цена границы разошлась: было два блока");
+    assert_eq!(live, 0, "прогон оставил блоки живыми");
 }
 
 /// Ближайший проходящий сосед: та же арифметика без замыкания.

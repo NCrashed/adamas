@@ -1,0 +1,62 @@
+-- Ветвь `if` в несколько строк (§4.1 правило 1, §10 вопрос 211).
+--
+-- `then` и `else`, стоящие последними на строке, открывают блок - тем же
+-- правилом, что `=` и `->`. До правки строки ветви склеивались в одно
+-- применение: три строки `note 1` / `note 2` / `Cons x Nil` читались
+-- `note 1 note 2 (Cons x Nil)`, и отказ называл `Zero`, которого никто не
+-- писал. Поля ответа:
+--
+--   * `statement` - обе ветви блоками на уровне тела: у взятой исполняются
+--     обе операции, у невзятой - ни одной;
+--   * `bound` - `if` внутри `let` с цепочкой `else if`: блок ветви стоит
+--     правее имени связывания, как тело `let y =` с переноса, а последняя
+--     ветвь - в строку.
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Int32 -> Unit
+
+append : List Int32 -> List Int32 -> List Int32
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+statement : Int32 -> {Log} List Int32
+statement x =
+  if x < 3 then
+    note 1
+    note 2
+    Cons x Nil
+  else
+    note 3
+    Nil
+
+bound : Int32 -> {Log} List Int32
+bound x =
+  let y : List Int32 = if x < 3 then
+        note 10
+        Cons 100 Nil
+      else if x < 5 then
+        note 20
+        Cons 200 Nil
+      else Cons 300 Nil
+  y
+
+run : {Log} List Int32
+run =
+  let a = statement 1
+  let b = statement 7
+  let c = bound 1
+  let d = bound 4
+  let e = bound 9
+  append a (append b (append c (append d e)))
+
+main : List Int32
+main = handle run with
+  return v -> v
+  note n -> Cons n (resume MkUnit)

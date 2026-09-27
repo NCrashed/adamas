@@ -9,7 +9,8 @@
 //!
 //! 1. **Блок открывает ключевое слово.** `where`, `with`, `of`, `mutual`,
 //!    `let` открывают блок всегда; `=` - только если стоит последним на своей
-//!    строке. Колонка первого токена тела и есть колонка блока, и она обязана
+//!    строке, и тем же правилом `->` ветви и лямбды (§10 вопрос 61), `then` и
+//!    `else` (§10 вопрос 211). Колонка первого токена тела и есть колонка блока, и она обязана
 //!    быть строго больше колонки объемлющего.
 //! 2. **Офсайд.** Первая лексема строки с колонкой меньше колонки блока
 //!    закрывает его (и дальше, пока есть что закрывать); равная - даёт границу
@@ -352,8 +353,14 @@ fn opens_block(tokens: &[Token], index: usize, sequenced: bool, bracketed: bool)
         return !bracketed || opens_inside_brackets(token.kind);
     }
     // `=` под скобкой выключен: он столкнулся бы с записью `{ x = 1, y = 2 }`,
-    // где блок обязан закрыться на запятой, а закрывать его там нечем.
-    if bracketed && token.kind == TokenKind::Equals {
+    // где блок обязан закрыться на запятой, а закрывать его там нечем. `then` и
+    // `else` - по правилу 4: под скобкой layout выключен.
+    if bracketed
+        && matches!(
+            token.kind,
+            TokenKind::Equals | TokenKind::Then | TokenKind::Else
+        )
+    {
         return false;
     }
     // `=` - только последним на строке, см. заголовок модуля. Конец файла
@@ -364,11 +371,19 @@ fn opens_block(tokens: &[Token], index: usize, sequenced: bool, bracketed: bool)
     // в типах, где `f : Nat ->` с переносом есть продолжение, а не блок;
     // различает их место: тело ветки `of` и тело лямбды - позиции, где
     // последовательность и пишут.
+    //
+    // `then` и `else` - тем же правилом и везде (§10 вопрос 211): ветвь
+    // `if` - позиция, где последовательность пишут, а в конце строки ни то ни
+    // другое ничего иного не значит. Без блока строки ветви склеивались в
+    // одно применение: `note 1` / `note 2` / `10` читалось `note 1 note 2 10`.
     let last_on_line = tokens
         .get(index + 1)
         .is_some_and(|next| next.line != token.line || next.kind == TokenKind::Eof);
     last_on_line
-        && (token.kind == TokenKind::Equals || (sequenced && token.kind == TokenKind::Arrow))
+        && (matches!(
+            token.kind,
+            TokenKind::Equals | TokenKind::Then | TokenKind::Else
+        ) || (sequenced && token.kind == TokenKind::Arrow))
 }
 
 /// Офсайд: первая лексема строки закрывает всё, что левее её колонки.
@@ -586,6 +601,26 @@ mod tests {
         assert_eq!(
             shape("f x =\n  let y =\n        g x\n  y\nh = 1"),
             "{| f x = {| let {| y = {| g x |} |} ; y |} ; h = 1 |}"
+        );
+    }
+
+    #[test]
+    fn a_trailing_then_or_else_opens_the_branch() {
+        // §10 вопрос 211: ветвь - последовательность, как тело после `=`.
+        // `else` на колонке `if` закрывает блок «да» и членом не становится.
+        assert_eq!(
+            shape("f =\n  if p then\n    a\n    1\n  else\n    b\n    2"),
+            "{| f = {| if p then {| a ; 1 |} else {| b ; 2 |} |} |}"
+        );
+        // Не последним на строке - продолжение, как прежде.
+        assert_eq!(
+            shape("f = if p then a\n  1 else 2"),
+            "{| f = if p then a 1 else 2 |}"
+        );
+        // Под скобкой блока нет (правило 4).
+        assert_eq!(
+            shape("f = (if p then\n  a\n  1 else 2)"),
+            "{| f = ( if p then a 1 else 2 ) |}"
         );
     }
 

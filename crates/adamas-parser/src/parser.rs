@@ -2206,9 +2206,9 @@ impl<'a> Parser<'a> {
             return Err(self.block_not_last(&cond));
         }
         self.expect(TokenKind::Then)?;
-        let then_branch = self.expr()?;
+        let then_branch = self.body()?;
         self.expect(TokenKind::Else)?;
-        let else_branch = self.expr()?;
+        let else_branch = self.body()?;
         let span = start.merge(else_branch.span);
         Ok(Expr {
             kind: ExprKind::If {

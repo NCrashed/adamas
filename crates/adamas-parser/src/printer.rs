@@ -978,9 +978,10 @@ impl<'a> Printer<'a> {
         }
     }
 
-    /// Блок операторов вне позиции тела. Разбор такого дерева не порождает -
-    /// блок открывают только `=` и `let`, - и ветка здесь ради того, чтобы
-    /// `match` оставался исчерпывающим без заглушки.
+    /// Блок операторов вне позиции тела и ветви `if`. Разбор такого дерева не
+    /// порождает - тело после `=` и `->` печатает [`Printer::body`], ветвь -
+    /// [`Printer::conditional`], - и ветка здесь ради того, чтобы `match`
+    /// оставался исчерпывающим без заглушки.
     fn block(&mut self, block: &Block) {
         self.block_of(&block.stmts, Self::stmt);
     }
@@ -988,6 +989,19 @@ impl<'a> Printer<'a> {
     fn conditional(&mut self, cond: &Expr, then_branch: &Expr, else_branch: &Expr) {
         self.push("if ");
         self.expr(cond, Prec::Chain);
+        // Ветвь-блок открывается `then` либо `else`, стоящим последним на
+        // строке (§10 вопрос 211), - как тело после `=`. `else` встаёт на
+        // колонку строки с `if`: член блока он не начинает, а блок «да» его
+        // колонка закрывает.
+        let blocked = |branch: &Expr| matches!(branch.kind, ExprKind::Block(_));
+        if blocked(then_branch) || blocked(else_branch) {
+            self.push(" then");
+            self.body(then_branch);
+            self.line();
+            self.push("else");
+            self.body(else_branch);
+            return;
+        }
         // Ветка «да» с блоком внутри займёт больше строки, и `else`,
         // напечатанный следом, уехал бы в этот блок: закрыть его может только
         // начало строки левее. Поэтому такой `if` печатается в три строки, а

@@ -650,3 +650,16 @@ where
         "печать:\n{printed}"
     );
 }
+
+#[test]
+fn a_branch_block_prints_after_a_trailing_then() {
+    // §10 вопрос 211: ветвь-блок открывается `then` или `else` в конце
+    // строки. Печать обязана его сохранить - прежде она склеивала строки
+    // ветви в одну, и склеенное читалось одним применением. Однострочная
+    // ветвь рядом с блочной остаётся в строку; `else if` - цепочкой.
+    let source = "f x =\n  if p x then\n    g x\n    1\n  else if q x then\n    2\n  else 3\n";
+    let printed = print(&tree(source));
+    assert_eq!(printed, source);
+    assert_eq!(dump(&tree(&printed)), dump(&tree(source)));
+    assert_eq!(print(&tree(&printed)), printed);
+}

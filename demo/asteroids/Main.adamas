@@ -379,7 +379,8 @@ absorb : Keys -> UInt32 -> UInt32 -> Keys
 absorb keys kind code =
   let down = kind == keyDown
   let touch = down || kind == keyUp
-  {left = toggled touch down code scanLeft keys.left, right = toggled touch down code scanRight keys.right, thrust = toggled touch down code scanUp keys.thrust, fire = toggled touch down code scanSpace keys.fire, jump = toggled touch down code scanJump keys.jump, quit = kind == quitEvent || keys.quit}
+  let key = toggled touch down code
+  {left = key scanLeft keys.left, right = key scanRight keys.right, thrust = key scanUp keys.thrust, fire = key scanSpace keys.fire, jump = key scanJump keys.jump, quit = kind == quitEvent || keys.quit}
 
 -- | Ствол заряжен, и клавишу жмут.
 armedAt : Ship -> Keys -> Bool

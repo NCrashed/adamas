@@ -1,0 +1,47 @@
+-- Литерал в ветви разбора без ожидаемого типа (§4.3, §10 вопрос 212).
+--
+-- Вопрос 203 провёл ожидание в ветви там, где оно есть. Здесь его нет, и
+-- тип литералу даёт соседняя ветвь: ветви получают общую дырку, тип тела
+-- каждой сводится с ней, а литерал досчитывается в конце объявления, когда
+-- дырка решена. Поля ответа - по одной форме, и каждая до правки отвергалась:
+--
+--   * `bound` - `let at = if ok then 0 else slot`: «имя `Zero` не найдено»;
+--   * `operand` - `(if ok then 0 else slot) * 2`: умолчание `Int64` брало
+--     раньше, чем ветвь сообщала `UInt64`;
+--   * `argument` - `same (if ok then slot else 0)` при неявном типе `same`;
+--   * `field` - `case` над семейством: `Nothing -> 0`, `Just x -> x`;
+--   * `later` - обе ветви литералы, тип задаёт употребление ниже.
+
+data Maybe (a : Type) where
+  Nothing : Maybe a
+  Just : a -> Maybe a
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+same : {a : Type} -> a -> a
+same x = x
+bound : Bool -> UInt64 -> UInt64
+bound ok slot =
+  let at = if ok then 0 else slot
+  at
+
+operand : Bool -> UInt64 -> UInt64
+operand ok slot = (if ok then 0 else slot) * 2
+argument : Bool -> UInt64 -> UInt64
+argument ok slot = same (if ok then slot else 0)
+field : Maybe Int32 -> Int32
+field m =
+  let v = case m of
+        Nothing -> 0
+        Just x -> x
+  v * 2
+
+later : Bool -> UInt8 -> UInt8
+later ok k =
+  let at = if ok then 1 else 2
+  k + at
+
+main : List UInt64
+main = Cons (bound True 5) (Cons (bound False 5) (Cons (operand False 5) (Cons (argument True 5) (Cons (int64ToUInt64 (int32ToInt64 (field (Just 21)) + int32ToInt64 (field Nothing))) (Cons (uint8ToUInt64 (later False 40)) Nil)))))

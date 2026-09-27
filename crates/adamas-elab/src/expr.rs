@@ -2950,6 +2950,14 @@ impl<'a> Elaborator<'a> {
             .map(|alt| self.pattern(&alt.pattern))
             .collect::<Result<Vec<_>, _>>()?;
         let forgotten = self.forgotten(alts, &patterns);
+        // Ожидание ветвей - снаружи, а без него - **общая** дырка типа (§10
+        // вопрос 212). Литерал в ветви видит тогда нерешённую цель и уходит в
+        // очередь объявления, а тип ей даёт соседняя ветвь, когда дерево разбора
+        // сведёт обе с мотивом. Без общей дырки ветвь шла выводом, и
+        // `if ok then 0 else slot` разворачивал `0` унарно - отказ «имя `Zero`
+        // не найдено» у литерала, которого так никто не писал.
+        let open = awaited.is_none_or(|goal| self.flexible(goal));
+        let awaited = awaited.cloned().or_else(|| Some(self.hole()));
         // Позиция разбора достаётся **каждой** ветви: разбор сам значения не
         // строит, его строят ветви, и возвращается наружу то, что построила
         // сработавшая. Без этого `if c then k else k` отмывал бы привязку к
@@ -2963,7 +2971,7 @@ impl<'a> Elaborator<'a> {
                     &alt.body,
                     closing,
                     &scrutinee,
-                    awaited.cloned(),
+                    awaited.clone(),
                 )
             })?;
             produced = produced.or_else(|| self.produced.take());
@@ -2971,6 +2979,16 @@ impl<'a> Elaborator<'a> {
                 patterns: vec![pattern],
                 body,
             });
+        }
+        // Цель дерева - та же, что сводилась с ветвями: без этого мотив
+        // оставался дыркой до проверки ядра, и `let at = if ok then 0 else
+        // slot` не синтезировал типа связывания.
+        if let Some(goal) = awaited.as_ref().filter(|_| open) {
+            let target = self.ctx.eval(&result);
+            let mark = self.metas.mark();
+            if !convertible(self.signature, self.metas, self.ctx.size(), &target, goal) {
+                self.metas.rollback(mark);
+            }
         }
         let tree =
             compile_case(&self.ctx, self.metas, level, &result, &clauses).map_err(|error| {
@@ -3617,9 +3635,25 @@ impl<'a> Elaborator<'a> {
         lifo(&mut drops);
         // Ожидание выставляется **у самого тела**, а не раньше: `expr` его
         // забирает у ближайшего узла, и всякий спуск между ними его бы съел.
+        let goal = awaited.clone();
         let term = self.closing_all(&drops, |it| {
             it.awaited = awaited;
-            it.expr(body, Mult::Many)
+            let term = it.expr(body, Mult::Many)?;
+            // Ожидание-дырка сводится с типом тела **здесь**, а не деревом
+            // разбора: дерево строит термы и типов ветвей не сверяет, и
+            // литерал соседней ветви, отложенный до конца объявления, узнавал
+            // бы цель только проверкой ядра, а она перед досчётом литералов
+            // молчит (§10 вопрос 212). Не сошлось - откат: отвечать будет
+            // проверка, как раньше.
+            if let Some(goal) = goal.filter(|goal| it.flexible(goal)) {
+                if let Some(found) = it.synthesized(&term) {
+                    let mark = it.metas.mark();
+                    if !convertible(it.signature, it.metas, it.ctx.size(), &found, &goal) {
+                        it.metas.rollback(mark);
+                    }
+                }
+            }
+            Ok(term)
         });
         self.scope.truncate(depth);
         self.ctx = outer;

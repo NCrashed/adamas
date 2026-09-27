@@ -432,6 +432,60 @@ pub fn eliminate_case(case: &Rc<StuckCase>, scrutinee: &Rc<Value>) -> Rc<Value> 
         .unwrap_or_else(|| unreachable!("разбор неподходящего значения: {scrutinee}"))
 }
 
+/// Текст обрыва, если значение - частичный примитив, застрявший **на
+/// литералах** (§4.3, §4.9, §4.11, §10 вопросы 176 и 220).
+///
+/// Застрять такой примитив может двумя способами, и разница несущая.
+/// Аргумент не литерал - это обычная нейтраль, и сравнению (§3.2) она нужна
+/// именно застрявшей. Аргументы литералы, а ответа нет - это обрыв: у
+/// понижения тот же случай кончается `adamas_fail`, и машина обязана кончаться
+/// так же, а не печатать застрявший терм ответом с кодом успеха. Ядро само
+/// ответ не выдумывает и прогон не обрывает - ему нечем, - оно лишь называет
+/// случай; обрывает тот, кто исполняет.
+///
+/// `None` - обрыва нет: примитив не частичный, спайн не насыщен либо
+/// аргумент, решающий дело, не литерал.
+#[must_use]
+pub fn trap(value: &Value) -> Option<&'static str> {
+    use crate::prim::{ArrayOp, PrimOp, SimdOp};
+    let Value::Neutral(head, spine) = value else {
+        return None;
+    };
+    let args: Vec<&Rc<Value>> = spine
+        .iter()
+        .map(|elim| match elim {
+            Elim::App(argument) => Some(argument),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    let literal = |value: &Rc<Value>| match &**value {
+        Value::Prim(crate::prim::Prim::Lit(_, bits)) => Some(*bits),
+        _ => None,
+    };
+    // Номер вне длины: оба литералы, и номер не меньше длины.
+    let outside = |at: &Rc<Value>, length: &Rc<Value>| Some(literal(at)? >= literal(length)?);
+    match (head, &args[..]) {
+        (Head::Prim(PrimOp::Div | PrimOp::Rem, ty), [_, right]) if !ty.floating() => {
+            (literal(right)? == 0).then_some(crate::prim::DIVISION_BY_ZERO)
+        }
+        (Head::ArrayOp(ArrayOp::Index | ArrayOp::Read), [length, _, _, at])
+        | (Head::ArrayOp(ArrayOp::Set), [length, _, _, at, _]) => {
+            outside(at, length)?.then_some(crate::prim::CELL_OUTSIDE)
+        }
+        (Head::SimdOp(SimdOp::Lane), [width, _, _, _, at])
+        | (Head::SimdOp(SimdOp::Set), [width, _, _, _, at, _]) => {
+            outside(at, width)?.then_some(crate::prim::LANE_OUTSIDE)
+        }
+        (Head::SimdOp(SimdOp::Load), [length, _, _, width, _, at])
+        | (Head::SimdOp(SimdOp::Store), [length, _, _, width, _, at, _]) => {
+            let end = literal(at)?.checked_add(literal(width)?);
+            end.is_none_or(|end| end > literal(length).unwrap_or(u64::MAX))
+                .then_some(crate::prim::WINDOW_OUTSIDE)
+        }
+        _ => None,
+    }
+}
+
 /// Разбирает ли ветвь конструктора `branch` значение с головой `head`.
 ///
 /// Ответ сравнения - **голый** конструктор соглашения: [`compared`] строит его
@@ -548,8 +602,8 @@ pub fn try_apply(callee: &Rc<Value>, argument: Rc<Value>) -> Option<Rc<Value>> {
 ///
 /// **Целое деление на ноль тоже остаётся застрявшим** - [`crate::prim::PrimOp::fold`]
 /// не отдаёт ему ответа. Это та же названная граница, что у чтения вне длины
-/// массива: понижение обрывает прогон, машина не отвечает вовсе, и сходятся
-/// два вычислителя в том, что ответа не даёт ни один.
+/// массива: ядро оставляет примитив застрявшим, а обрывает прогон тот, кто
+/// исполняет, - понижение и машина одним текстом ([`trap`], §10 вопрос 220).
 /// Сводит преобразование, когда его единственный аргумент - литерал (§4.3).
 fn converted(cast: crate::prim::PrimCast, spine: &[Elim]) -> Option<Rc<Value>> {
     let [Elim::App(argument)] = spine else {
@@ -748,9 +802,8 @@ fn copied(block: &Rc<crate::value::Block>, spine: &[Elim]) -> Rc<Value> {
 /// Не сводится, когда номер не литерал, когда цепочка упирается в переменную
 /// либо когда номер вне длины.
 ///
-/// Последнее - **названная граница**: у понижения тот же случай обрывает
-/// процесс (`adamas_fail`), и сходятся два вычислителя лишь в том, что оба не
-/// дают ответа. Корпус программ с выходом за длину не содержит.
+/// Последнее - **обрыв**, а не нейтраль: понижение зовёт `adamas_fail`, машина
+/// кончается тем же текстом ([`trap`], §10 вопрос 220).
 ///
 /// Вынесено отдельно потому, что векторная загрузка (§4.9) читает по этому же
 /// правилу `n` соседних ячеек.
@@ -907,9 +960,8 @@ fn vectored(op: crate::prim::SimdOp, spine: &[Elim]) -> Option<Rc<Value>> {
 /// счёт «что лежит в ячейке» разошёлся бы с первым молча. Не сводится по тем
 /// же трём причинам, что чтение ячейки - номер не литерал, ширина не литерал,
 /// массив не блок и цепочка не упирается в `arrayNew`, - плюс четвёртая: хвост
-/// окна вышел за
-/// длину. Последнее и есть **названная граница**, та же, что у выхода за длину
-/// у `arrayIndex`: понижение там обрывает процесс, а машина не отвечает вовсе.
+/// окна вышел за длину. Последнее - обрыв, тот же, что у выхода за длину у
+/// `arrayIndex` ([`trap`]).
 fn loaded(spine: &[Elim]) -> Option<Rc<Value>> {
     use crate::prim::Prim;
     let [

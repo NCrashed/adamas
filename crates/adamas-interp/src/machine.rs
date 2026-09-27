@@ -287,6 +287,11 @@ impl<'a> Machine<'a> {
         if matches!(&*rebuilt, Value::Neutral(Head::Global(..), _)) {
             return self.forced(rebuilt);
         }
+        // Пересобранный примитив мог застрять на литералах - это обрыв, а не
+        // ответ (§10 вопрос 220).
+        if let Some(message) = eval::trap(&rebuilt) {
+            return Err(RunError::Trap { message });
+        }
         Ok(rebuilt)
     }
 
@@ -481,7 +486,7 @@ impl<'a> Machine<'a> {
             // `eval::apply`, ей лишь дают головную форму.
             Value::Neutral(Head::ArrayOp(op), spine) if array_position(*op, spine) => {
                 let argument = self.forced(argument)?;
-                Ok(Step::Return(eval::apply(callee, argument)))
+                trapped(eval::apply(callee, argument))
             }
             // Аргумент примитивной операции - тем же правилом: свёртка требует
             // литералов (`eval::folded`), а имя с телом само не
@@ -490,7 +495,7 @@ impl<'a> Machine<'a> {
             // отличие от разбора, чей δ стоит на разбираемом (§10 вопрос 155).
             Value::Neutral(Head::Prim(..) | Head::Cmp(..) | Head::Convert(_), _) => {
                 let argument = self.forced(argument)?;
-                Ok(Step::Return(eval::apply(callee, argument)))
+                trapped(eval::apply(callee, argument))
             }
             // Блок региона (§3.6) - тем же правилом и по той же причине:
             // цепочку `regionNew`/`regionAlloc`/`regionWrite` сводят
@@ -509,7 +514,7 @@ impl<'a> Machine<'a> {
             // бы неразвёрнутое имя `one` вместо числа.
             Value::Neutral(Head::SimdOp(op), spine) if simd_position(*op, spine) => {
                 let argument = self.forced(argument)?;
-                Ok(Step::Return(eval::apply(callee, argument)))
+                trapped(eval::apply(callee, argument))
             }
             // Локальная переменная и дырка: применение копится в спайне, как и
             // в ядре.
@@ -1206,5 +1211,18 @@ fn binder_at(ty: &Term, at: usize) -> Option<Mult> {
     match current {
         Term::Pi(binder, ..) => Some(binder.mult),
         _ => None,
+    }
+}
+
+/// Шаг примитива, который обязан оборваться, а не застрять (§10 вопрос 220).
+///
+/// Ядро оставляет частичный примитив на литералах застрявшим - ему нечем
+/// обрывать, - и называет случай ([`eval::trap`]). Машина кончается так же,
+/// как собранная программа: тем же текстом, а не застрявшим термом с кодом
+/// успеха.
+fn trapped(value: Rc<Value>) -> Result<Step, RunError> {
+    match eval::trap(&value) {
+        Some(message) => Err(RunError::Trap { message }),
+        None => Ok(Step::Return(value)),
     }
 }

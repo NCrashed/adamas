@@ -234,6 +234,23 @@ pub(crate) fn printed(source: &str) -> String {
     ran(&signature, &written)
 }
 
+/// Отказ `adamas eval` на `main` исходника - текст, каким машина оборвалась.
+///
+/// Нужен свидетелям обрыва частичного примитива (§10 вопрос 220): машина
+/// обязана кончаться тем же текстом, что собранная программа. Ответ вместо
+/// отказа - провал теста.
+pub(crate) fn refused(source: &str) -> String {
+    let (signature, _, _) = elaborated(source);
+    let written = body(&signature, "main");
+    match adamas_interp::run_linked(&signature, &written, linkage()) {
+        Ok(answer) => panic!(
+            "машина ответила вместо обрыва: {}",
+            answer.printed(Some(PRINT_DEPTH))
+        ),
+        Err(error) => error.to_string(),
+    }
+}
+
 /// Объектные файлы рантайма: собираются однажды на весь прогон.
 fn runtime() -> &'static [PathBuf] {
     static OBJECTS: OnceLock<Vec<PathBuf>> = OnceLock::new();

@@ -500,3 +500,58 @@ fn a_linear_read_allocates_nothing() {
         "чтение завело блоки сверх самого массива"
     );
 }
+
+/// Номер ячейки вне длины обрывает прогон у всех трёх вычислителей одним
+/// текстом (§4.11, §10 вопрос 220).
+///
+/// Машина прежде печатала застрявший `arrayIndex` ответом с кодом успеха, и
+/// договор трёх вычислителей на такой программе молча расходился: C и LLVM
+/// обрывались, `adamas eval` «отвечал». Чтение и запись - оба случая, потому
+/// что текст у них один, а место проверки у рантайма разное.
+#[test]
+fn a_cell_past_the_end_stops_all_three_evaluators() {
+    let cases = [
+        (
+            "cell-read-outside",
+            "xs : Array 4 Int64\nxs = arrayNew 4 7\n\nmain : Int64\nmain = arrayIndex xs 4\n",
+        ),
+        (
+            "cell-write-outside",
+            "xs : Array 4 Int64\nxs = arrayNew 4 7\n\nmain : Int64\nmain = arrayIndex (arraySet xs 9 1) 0\n",
+        ),
+    ];
+    for (name, source) in cases {
+        let machine = harness::refused(source);
+        assert!(
+            machine.contains(adamas_core::prim::CELL_OUTSIDE),
+            "{name}: машина оборвалась не тем: {machine}"
+        );
+        let c = harness::c_printed(name, source);
+        assert!(
+            c.reason.contains(adamas_core::prim::CELL_OUTSIDE),
+            "{name}: C-сторона не оборвалась тем же: `{}` / `{}`",
+            c.printed,
+            c.reason
+        );
+        let Some((tools, _)) = harness::llvm_toolchains() else {
+            continue;
+        };
+        let artefacts = harness::llvm_text(name, source)
+            .unwrap_or_else(|error| panic!("{name}: программа не понизилась: {error}"));
+        let binary = harness::llvm_binary(
+            name,
+            &artefacts,
+            &tools,
+            &adamas_codegen::llvm::Pipeline::optimised(),
+        );
+        let run = std::process::Command::new(&binary)
+            .output()
+            .unwrap_or_else(|error| panic!("{name}: прогон не запустился: {error}"));
+        assert!(!run.status.success(), "{name}: LLVM ответила за длиной");
+        let said = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            said.contains(adamas_core::prim::CELL_OUTSIDE),
+            "{name}: LLVM оборвалась не тем: {said}"
+        );
+    }
+}

@@ -344,6 +344,13 @@ impl Naming {
             Term::Universe(level) | Term::RowKind(level) => self.level(level),
             Term::Const(_, levels, args) => {
                 *levels = self.levels(levels);
+                // Нулевые уровни - то, что автор и написал бы, если бы писал
+                // уровни: `List{0} Int32` пересказывает инстанциацию, а не
+                // программу. Ненулевой или невыведенный показывается весь -
+                // там уровень и есть то, что не сошлось (§10 вопрос 217).
+                if levels.iter().all(|level| *level == Level::Zero) {
+                    *levels = Rc::from([]);
+                }
                 *args = Args::new(
                     args.row_args()
                         .iter()

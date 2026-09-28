@@ -2,6 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: unsettled-state.adamas:32:1: аргумент ?552 не выведен: укажите его явно
+Error: unsettled-state.adamas:32:7: неявный аргумент у `Nil` не выведен: из места употребления его не видно - дайте тип результату (аннотацией `let` или сигнатурой)
   got = handle solo with
-  ^^^^^^^^^^^^^^^^^^^^^^
+        ^^^^^^^^^^^^^^^^
+  путь: тело `got` -> аргумент применения -> аргумент применения

@@ -1557,8 +1557,8 @@ impl Signature {
         // живы: после границы объявления они освобождаются, и зонканье падает.
         self.settle_allocation(metas, group);
 
-        for member in members {
-            self.seal_member(metas, member)?;
+        for (index, member) in members.iter().enumerate() {
+            self.seal_member(metas, member, at(index))?;
         }
         // Финальные ворота: всё, что легло в сигнатуру, проверяется ещё раз.
         self.recheck_group(metas, group)?;
@@ -2275,15 +2275,28 @@ impl Signature {
     }
 
     /// Кладёт члена в сигнатуру насовсем - его самого и его конструкторы.
-    fn seal_member(&mut self, metas: &mut Metas, member: &Member) -> Result<(), TypeError> {
+    ///
+    /// `index` - номер члена в группе: им отказ о невыведенном аргументе
+    /// начинает маршрут, чтобы элаборация нашла место в тексте.
+    fn seal_member(
+        &mut self,
+        metas: &mut Metas,
+        member: &Member,
+        index: u32,
+    ) -> Result<(), TypeError> {
         for constructor in member_names(member) {
-            self.seal_definition(metas, constructor)?;
+            self.seal_definition(metas, constructor, None)?;
         }
-        self.seal_definition(metas, member.name())
+        self.seal_definition(metas, member.name(), Some(index))
     }
 
     /// Зонканье сохранённого определения и проверка на остаточные дырки.
-    fn seal_definition(&mut self, metas: &mut Metas, name: &Name) -> Result<(), TypeError> {
+    fn seal_definition(
+        &mut self,
+        metas: &mut Metas,
+        name: &Name,
+        member: Option<u32>,
+    ) -> Result<(), TypeError> {
         let mut definition = self
             .definitions
             .get(name)
@@ -2304,7 +2317,16 @@ impl Signature {
         // в решении дырки терма, до неё не виден, и определение уезжало бы за
         // границу группы с уровнем из освобождённого хранилища.
         if let Some(meta) = unsolved_term_in_definition(metas, &definition) {
-            return Err(ErrorKind::AmbiguousTerm { meta }.into());
+            let owner = definition
+                .body
+                .as_ref()
+                .and_then(|body| crate::check::hole_owner(body, meta))
+                .or_else(|| crate::check::hole_owner(&definition.ty, meta));
+            let error = ErrorKind::AmbiguousTerm { meta, owner }.into();
+            return Err(match member {
+                Some(index) => hole_located(metas, &definition, meta, index, error),
+                None => error,
+            });
         }
         if let Some(meta) = unsolved_in_definition(metas, &definition) {
             return Err(ErrorKind::UnsolvedDefinitionLevel {
@@ -3352,4 +3374,32 @@ fn constructor_decls(member: &Member) -> impl Iterator<Item = &MemberDecl> {
 /// ради которого проверка типов падает, а маршрут в ней всё равно нечитаем.
 fn at(index: usize) -> u32 {
     u32::try_from(index).unwrap_or(u32::MAX)
+}
+
+/// Отказ о невыведенном аргументе с маршрутом до дырки: сперва тело - там
+/// её завёл вывод в месте, которое написал автор, - потом тип.
+fn hole_located(
+    metas: &Metas,
+    definition: &Definition,
+    meta: crate::term::TermMeta,
+    index: u32,
+    error: TypeError,
+) -> TypeError {
+    let found = definition
+        .body
+        .as_ref()
+        .and_then(|body| crate::check::meta_route(metas, body, meta))
+        .map(|route| (Frame::MemberBody(index), route))
+        .or_else(|| {
+            crate::check::meta_route(metas, &definition.ty, meta)
+                .map(|route| (Frame::MemberType(index), route))
+        });
+    let Some((top, route)) = found else {
+        return error;
+    };
+    route
+        .into_iter()
+        .rev()
+        .fold(error, TypeError::in_frame)
+        .in_frame(top)
 }

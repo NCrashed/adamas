@@ -1141,7 +1141,7 @@ pub fn infer_closed_with(
 /// проверка закончилась, а ответа на вопрос «чем это было» так и нет.
 fn no_unsolved(metas: &Metas, term: &Term) -> Result<(), TypeError> {
     if let Some(meta) = unsolved_term_meta(metas, term) {
-        return Err(ErrorKind::AmbiguousTerm { meta }.into());
+        return Err(ErrorKind::AmbiguousTerm { meta, owner: None }.into());
     }
     match unsolved_level_meta(metas, term) {
         Some(meta) => Err(ErrorKind::AmbiguousLevel { meta }.into()),
@@ -1181,6 +1181,113 @@ pub fn unsolved_term_in_definition(
             .as_ref()
             .and_then(|body| unsolved_term_meta(metas, body))
     })
+}
+
+/// Маршрут до первого вхождения дырки - теми же кадрами, какими его сложила
+/// бы проверка (§10 вопрос 217).
+///
+/// Отказ «аргумент не выведен» ставится на границе объявления, где проверки
+/// уже нет, и маршрута у него не было: подчёркивалось объявление целиком.
+/// Порядок обхода - значение раньше типа: у `let` без аннотации тип выведен
+/// из значения, и место, которое автор написал, - значение.
+///
+/// Узел, в чьи части проверка кадров не кладёт (запись, объект), - конец
+/// маршрута: место внутри него точнее не назвать.
+#[must_use]
+pub fn meta_route(metas: &Metas, term: &Term, meta: crate::term::TermMeta) -> Option<Vec<Frame>> {
+    let mentioned =
+        || crate::meta::unsolved_term_meta_but(metas, term, &|found| found != meta).is_some();
+    let within = |frame: Frame, inner: &Term| {
+        meta_route(metas, inner, meta).map(|mut route| {
+            route.insert(0, frame);
+            route
+        })
+    };
+    match term {
+        Term::Meta(found) => (*found == meta).then(Vec::new),
+        Term::Var(_)
+        | Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Prim(_)
+        | Term::Const(..) => None,
+        Term::Record(_) | Term::Row(_) | Term::Object(_) => mentioned().then(Vec::new),
+        Term::With(base, _) => {
+            within(Frame::Scrutinee, base).or_else(|| mentioned().then(Vec::new))
+        }
+        Term::Project(record, _) => within(Frame::Scrutinee, record),
+        Term::Lam(_, _, body) => within(Frame::Body, body),
+        Term::App(callee, argument) => {
+            within(Frame::Argument, argument).or_else(|| within(Frame::Callee, callee))
+        }
+        Term::Pi(_, _, domain, _, codomain) => within(Frame::Domain, domain)
+            .or_else(|| within(Frame::Codomain, codomain))
+            .or_else(|| mentioned().then(Vec::new)),
+        Term::Let(_, _, ty, value, body) => within(Frame::BindingValue, value)
+            .or_else(|| within(Frame::BindingBody, body))
+            .or_else(|| within(Frame::BindingType, ty)),
+        Term::Case(case) => within(Frame::Scrutinee, &case.scrutinee)
+            .or_else(|| {
+                case.branches
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, branch)| {
+                        within(
+                            Frame::Branch(u32::try_from(index).unwrap_or(u32::MAX)),
+                            &branch.body,
+                        )
+                    })
+            })
+            .or_else(|| within(Frame::Motive, &case.motive)),
+    }
+}
+
+/// Имя, чьим аргументом стоит дырка: `Nil` в `Nil {?a}`.
+///
+/// Дырка в аргументе приходит применённой к контексту места (`?a x y`),
+/// поэтому смотрится голова аргумента, а не сам аргумент.
+#[must_use]
+pub fn hole_owner(term: &Term, meta: crate::term::TermMeta) -> Option<Name> {
+    fn head(term: &Term) -> &Term {
+        match term {
+            Term::App(callee, _) => head(callee),
+            _ => term,
+        }
+    }
+    let recur = |inner: &Term| hole_owner(inner, meta);
+    match term {
+        Term::App(callee, argument) => {
+            if matches!(head(argument), Term::Meta(found) if *found == meta) {
+                if let Term::Const(name, ..) = head(callee) {
+                    return Some(Rc::clone(name));
+                }
+            }
+            recur(argument).or_else(|| recur(callee))
+        }
+        Term::Lam(_, _, body) => recur(body),
+        Term::Let(_, _, ty, value, body) => {
+            recur(value).or_else(|| recur(body)).or_else(|| recur(ty))
+        }
+        Term::Pi(_, _, domain, _, codomain) => recur(domain).or_else(|| recur(codomain)),
+        Term::Case(case) => recur(&case.scrutinee)
+            .or_else(|| case.branches.iter().find_map(|branch| recur(&branch.body)))
+            .or_else(|| recur(&case.motive)),
+        Term::With(base, fields) => {
+            recur(base).or_else(|| fields.iter().find_map(|(_, value)| recur(value)))
+        }
+        Term::Project(record, _) => recur(record),
+        Term::Object(fields) => fields.iter().find_map(|(_, value)| recur(value)),
+        Term::Record(fields) | Term::Row(fields) => {
+            fields.iter().find_map(|field| recur(&field.ty))
+        }
+        Term::Meta(_)
+        | Term::Var(_)
+        | Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Prim(_)
+        | Term::Const(..) => None,
+    }
 }
 
 /// Первая нерешённая метапеременная row в объявлении, если она есть.

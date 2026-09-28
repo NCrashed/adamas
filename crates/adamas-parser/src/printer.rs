@@ -550,6 +550,9 @@ impl<'a> Printer<'a> {
         }
         self.push("extern ");
         self.push(&declared.abi.text);
+        if declared.pure {
+            self.push(" pure");
+        }
         self.push(" fn ");
         self.decl_name(&declared.name);
         self.push(" : ");

@@ -607,6 +607,11 @@ pub struct ExternDecl {
     pub name: Name,
     /// Тип, как написан: без ряда эффектов, его дописывает элаборация.
     pub ty: Expr,
+    /// Написано ли `pure` перед `fn` (§5.3, §10 вопрос 213): автор утверждает,
+    /// что символ чист, и метка `Foreign` вызову не дописывается. Утверждение
+    /// на слово - четвёртое рядом с подписью, тотальностью и отсутствием
+    /// аллокации (вопрос 183); проверить его нечем.
+    pub pure: bool,
     /// Атрибуты, написанные перед объявлением (§4.7, §5.1).
     pub attributes: Vec<Name>,
 }
@@ -1360,6 +1365,9 @@ fn dump_extern(out: &mut String, declared: &ExternDecl) {
     out.push_str("(extern ");
     out.push_str(&declared.abi.text);
     out.push(' ');
+    if declared.pure {
+        out.push_str("pure ");
+    }
     for attribute in &declared.attributes {
         out.push('@');
         out.push_str(&attribute.text);

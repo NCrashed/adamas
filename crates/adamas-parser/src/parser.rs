@@ -456,6 +456,10 @@ const STATE: &str = "state";
 /// Контекстное слово между ABI и именем чужого символа (§5.3).
 const FOREIGN_FN: &str = "fn";
 
+/// Отметка чистоты чужого символа: `extern "C" pure fn sin : …` (§10 вопрос
+/// 213). Контекстное имя той же позиции, что [`FOREIGN_FN`].
+const FOREIGN_PURE: &str = "pure";
+
 /// Отметка вариадической части в сигнатуре чужого символа (§5.3).
 ///
 /// Пишется она ровно так же, как её пишет C, и стоит на том же месте - в
@@ -855,6 +859,15 @@ impl<'a> Parser<'a> {
             return Err(self.expected(Expected::Token(TokenKind::Str)));
         }
         let abi = self.literal()?;
+        // `pure` - контекстное имя в позиции сразу за ABI, тем же правилом, что
+        // `fn` (§10 вопрос 213): занимать слово под одну форму незачем.
+        let pure = {
+            let token = self.peek();
+            token.kind == TokenKind::Ident && token.text(self.text) == FOREIGN_PURE
+        };
+        if pure {
+            self.bump();
+        }
         let token = self.peek();
         if token.kind != TokenKind::Ident || token.text(self.text) != FOREIGN_FN {
             return Err(ParseError::ExpectedFn { span: token.span });
@@ -869,6 +882,7 @@ impl<'a> Parser<'a> {
                 abi,
                 name,
                 ty,
+                pure,
                 attributes,
             }),
             span,

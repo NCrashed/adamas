@@ -4394,7 +4394,14 @@ fn declare_extern(
         span: declared.name.span,
     };
     let (written, variadic) = variadic_split(&declared.ty, span)?;
-    let marked = performed(&written, &label);
+    // `pure` - утверждение автора, что символ чист (§10 вопрос 213): метка
+    // не дописывается, и вызов пишется в чистом коде. Проверить утверждение
+    // нечем, как подпись, тотальность и отсутствие аллокации (вопрос 183).
+    let marked = if declared.pure {
+        written
+    } else {
+        performed(&written, &label)
+    };
     let pending = declared_signature(
         signature,
         metas,

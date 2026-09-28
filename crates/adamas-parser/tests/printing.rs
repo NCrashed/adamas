@@ -663,3 +663,16 @@ fn a_branch_block_prints_after_a_trailing_then() {
     assert_eq!(dump(&tree(&printed)), dump(&tree(source)));
     assert_eq!(print(&tree(&printed)), printed);
 }
+
+#[test]
+fn a_pure_extern_keeps_its_mark() {
+    // §10 вопрос 213: `pure` - контекстное слово между ABI и `fn`, и печать
+    // обязана его сохранить - без него обратный разбор дал бы нечистый символ.
+    let source = "extern \"C\" pure fn cos : Float64 -> Float64\n";
+    let printed = print(&tree(source));
+    assert_eq!(printed, source);
+    assert_eq!(dump(&tree(&printed)), dump(&tree(source)));
+    // Имя `pure` в прочих позициях не занято.
+    let named = "pure : Int32\npure = 1\n";
+    assert_eq!(print(&tree(named)), named);
+}

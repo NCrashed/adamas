@@ -139,7 +139,10 @@ use fixture::{copied, corpus, driven, formatter, read, scratch, sources};
 /// Фикстуры корпуса, которые не разбираются **по построению**: на них стоят
 /// снапшоты отказов разбора. Форматировать их нечем, и форматтер обязан
 /// сказать это словами.
-const UNPARSED: &[&str] = &["variadic-off-the-boundary.adamas"];
+const UNPARSED: &[&str] = &[
+    "braces-open-nothing.adamas",
+    "variadic-off-the-boundary.adamas",
+];
 
 /// Относительное имя фикстуры - им подписаны все сообщения ниже.
 fn named(root: &Path, path: &Path) -> String {

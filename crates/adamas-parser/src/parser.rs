@@ -28,14 +28,13 @@
 //! языковое (§4.1) и заведено ради печати: дерево, где форма с блоком стоит
 //! не последней, не записывается ничем.
 //!
-//! # Подмножество Фазы 2
+//! # Чего парсер не разбирает
 //!
-//! Разбирается то, что §9 относит к Фазе 2: сигнатуры, клаузы, `data`,
-//! `resource`, выражения и паттерны. Классы, инстансы, модули, эффекты и
-//! handler'ы - формы Фаз 3-4; их лексемы зарезервированы, и парсер отвечает на
-//! них [`ParseError::Unsupported`], а не «ожидалось объявление».
+//! Лексемы `when`, `using` и `{` своё место имеют, и стоящую не там парсер
+//! отвергает [`ParseError::Misplaced`] с указанием, где она пишется, а не
+//! «ожидалось объявление».
 //!
-//! Двух форм нет и внутри Фазы 2, потому что §4 их не показывает: определения
+//! Двух форм нет вовсе, потому что §4 их не показывает: определения
 //! оператора в инфиксной позиции (`x <> y = …`; в скобках, `(<>) x y = …`,
 //! разбирается) и отрицательного литерала в паттерне (`f (-1) = …`). И то и
 //! другое - расширение поверхностного языка, а не пробел разбора.
@@ -94,80 +93,40 @@ impl fmt::Display for Expected {
     }
 }
 
-/// Форма языка, до которой Фаза 2 ещё не дошла.
+/// Лексема, у которой есть своё место, стоит не там.
 ///
 /// Отдельный вариант ошибки, а не «ожидалось объявление»: лексема
-/// зарезервирована и опечаткой быть не может, поэтому сказать про фазу честнее,
-/// чем перечислять, что здесь бывает вместо неё.
+/// зарезервирована и опечаткой быть не может, поэтому честнее назвать, где она
+/// пишется, чем перечислять, что бывает здесь вместо неё. Прежде это были
+/// «формы следующих фаз», и текст обещал фазу для классов и записей, которые
+/// давно разбираются (§10 вопрос 217).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Unsupported {
-    /// `class`, `coherent class`, `when`.
-    Class,
-    /// `instance`.
-    Instance,
-    /// `using`.
-    NamedInstance,
-    /// `module`.
-    Module,
-    /// `mutual`.
-    Mutual,
-    /// `effect`.
-    Effect,
-    /// `handle`, `handleMulti`, `with`.
-    Handler,
-    /// `type` - записи.
-    Record,
-    /// Фигурные скобки там, где это не группа implicit-связываний.
+pub enum Misplaced {
+    /// `when` вне объявления класса.
+    When,
+    /// `using` вне выражения.
+    Using,
+    /// Фигурные скобки, с которых здесь ничего не начинается.
     Braces,
 }
 
-/// Части сообщения о форме следующих фаз.
-///
-/// Одна таблица на всё: описание и фаза расходиться не должны. Поля именованы,
-/// потому что складываются в предложение, и порядок в нём читается только у
-/// названных частей.
-struct Message {
-    /// Что это - во множественном числе: подставляется подлежащим.
-    what: &'static str,
-    /// В какой фазе появится - в предложном падеже, после «появляются в».
-    phase: &'static str,
-    /// Что написать вместо, если лексема бывает и законной.
-    hint: Option<&'static str>,
-}
-
-impl Unsupported {
-    fn message(self) -> Message {
-        let form = |what, phase| Message {
-            what,
-            phase,
-            hint: None,
-        };
-        match self {
-            Self::Class => form("классы (§4.1)", "Фазе 3"),
-            Self::Instance => form("инстансы (§4.1)", "Фазе 3"),
-            Self::NamedInstance => form("именованные инстансы (§4.1)", "Фазе 3"),
-            Self::Module => form("модули (§4.8)", "Фазе 3"),
-            Self::Mutual => form("блоки `mutual` (§4.8)", "Фазе 3"),
-            Self::Effect => form("объявления эффектов (§3.4)", "Фазе 4"),
-            Self::Handler => form("handler'ы (§3.4)", "Фазе 4"),
-            Self::Record => form("записи (§4.2)", "одной из следующих фаз"),
-            Self::Braces => Message {
-                what: "записи (§4.2) и effect row (§3.4)",
-                phase: "одной из следующих фаз",
-                hint: Some("группа implicit-связываний пишется `{a : Type}`"),
-            },
-        }
-    }
-}
-
-impl fmt::Display for Unsupported {
+impl fmt::Display for Misplaced {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Message { what, phase, hint } = self.message();
-        write!(f, "{what} появляются в {phase}")?;
-        match hint {
-            Some(hint) => write!(f, "; {hint}"),
-            None => Ok(()),
-        }
+        f.write_str(match self {
+            Self::When => {
+                "`when` пишется в объявлении класса, перед суперклассами: \
+                 `class Ord a when Eq a where …` (§4.1)"
+            }
+            Self::Using => {
+                "`using` пишется в выражении, перед инстансом: `using p (f x)` \
+                 (§4.3)"
+            }
+            Self::Braces => {
+                "фигурные скобки здесь ничего не открывают: effect row пишется \
+                 `{Ask} A` (§3.4), тип записи - `{x : A}` (§4.2), группа \
+                 implicit-связываний - `{a : Type}`; пустой row не пишется"
+            }
+        })
     }
 }
 
@@ -281,11 +240,11 @@ pub enum ParseError {
         again: Span,
     },
 
-    /// Форма языка из следующих фаз.
+    /// Лексема не на своём месте.
     #[error("{what}")]
-    Unsupported {
+    Misplaced {
         /// Какая.
-        what: Unsupported,
+        what: Misplaced,
         /// Где.
         span: Span,
     },
@@ -363,7 +322,7 @@ impl ParseError {
             | Self::Multiplicity { span }
             | Self::PatternPath { span, .. }
             | Self::SplitClauses { again: span, .. }
-            | Self::Unsupported { span, .. }
+            | Self::Misplaced { span, .. }
             | Self::Wildcard { span }
             | Self::NestedImport { span }
             | Self::BlockNotLast { next: span, .. }
@@ -631,16 +590,16 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Ошибка про форму следующих фаз, если лексема - одна из них.
-    fn unsupported_here(&self) -> Option<ParseError> {
+    /// Ошибка «не на своём месте», если лексема - одна из таких.
+    fn misplaced_here(&self) -> Option<ParseError> {
         let token = self.peek();
         let what = match token.kind {
-            TokenKind::When => Unsupported::Class,
-            TokenKind::Using => Unsupported::NamedInstance,
-            TokenKind::LBrace => Unsupported::Braces,
+            TokenKind::When => Misplaced::When,
+            TokenKind::Using => Misplaced::Using,
+            TokenKind::LBrace => Misplaced::Braces,
             _ => return None,
         };
-        Some(ParseError::Unsupported {
+        Some(ParseError::Misplaced {
             what,
             span: token.span,
         })
@@ -812,7 +771,7 @@ impl<'a> Parser<'a> {
             TokenKind::Export => self.export_decl(),
             TokenKind::Ident | TokenKind::LParen => self.signature_or_clause(Vec::new()),
             _ => Err(self
-                .unsupported_here()
+                .misplaced_here()
                 .unwrap_or_else(|| self.expected(Expected::Declaration))),
         }
     }
@@ -2110,7 +2069,7 @@ impl<'a> Parser<'a> {
             }
             _ => {
                 return Err(self
-                    .unsupported_here()
+                    .misplaced_here()
                     .unwrap_or_else(|| self.expected(Expected::Expression)));
             }
         };

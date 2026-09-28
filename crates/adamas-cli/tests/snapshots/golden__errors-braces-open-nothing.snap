@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: braces-open-nothing.adamas:7:5: фигурные скобки здесь ничего не открывают: effect row пишется `{Ask} A` (§3.4), тип записи - `{x : A}` (§4.2), группа implicit-связываний - `{a : Type}`; пустой row не пишется
+  f : {} Bool
+      ^

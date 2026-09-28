@@ -1,7 +1,7 @@
 //! Разбор на примерах §4 и свойства, которые обязаны держаться на любом входе.
 
 use adamas_parser::ast::dump;
-use adamas_parser::parser::{ParseError, Unsupported};
+use adamas_parser::parser::{Misplaced, ParseError};
 use adamas_parser::{Error, parse};
 use proptest::prelude::*;
 
@@ -296,14 +296,18 @@ fn a_multiplicity_is_zero_one_or_omega() {
 }
 
 #[test]
-fn forms_of_later_phases_name_their_phase() {
+fn a_misplaced_token_names_its_place() {
     // Лексема зарезервирована и опечаткой быть не может, поэтому честнее
-    // назвать фазу, чем перечислять, что бывает здесь вместо неё.
-    let cases = [("when Eqv a\n", Unsupported::Class)];
+    // назвать, где она пишется, чем перечислять, что бывает здесь вместо неё.
+    let cases = [
+        ("when Eqv a\n", Misplaced::When),
+        ("using p\n", Misplaced::Using),
+        ("f : {} Bool\n", Misplaced::Braces),
+    ];
     for (text, expected) in cases {
         let error = parse_error(text);
-        let ParseError::Unsupported { what, .. } = error else {
-            panic!("для {text:?} ожидалась Unsupported, получено {error:?}");
+        let ParseError::Misplaced { what, .. } = error else {
+            panic!("для {text:?} ожидалась Misplaced, получено {error:?}");
         };
         assert_eq!(what, expected, "для {text:?}");
     }

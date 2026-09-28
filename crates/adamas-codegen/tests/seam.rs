@@ -167,6 +167,10 @@ fn the_c_emitter_does_not_invent_reference_counting() {
         // Трамплин колбэка уровня 2: своё владение, чужой кадр - см. шапку.
         "adamas_drop_value({callee})",
         "adamas_drop_value(answer)",
+        // Коробка агрегата в слоте кадра (§10 вопрос 221): её заводит и
+        // потребляет сам эмиттер - `adamas_park_N` и `adamas_unpark_N`, - и
+        // жизнь её не выходит за пару. Слот кадра - тот же C-ABI, что `env[`.
+        "adamas_drop_value(box)",
     ];
     for line in EMITTER.lines() {
         for called in counting {

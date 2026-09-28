@@ -443,6 +443,12 @@ pub struct Artefacts {
 /// Имя точки входа, которую спутник зовёт из `.ll`.
 const ENTRY_SYMBOL: &str = "adamas_entry";
 
+/// Счётен ли слот кадра: указательный либо коробка плотного агрегата (§10
+/// вопрос 221). Счётные идут первыми - соглашение с `adamas_kont_push`.
+fn frame_counted(repr: Repr) -> bool {
+    repr.counted() || matches!(repr, Repr::Packed(_))
+}
+
 /// Имя дропа детей, видимого из `.ll`.
 ///
 /// Своё, а не `adamas_release_value`: `release.c` объявляет тот `static`, и
@@ -686,7 +692,9 @@ fn conversions(out: &mut String, program: &Program) {
 }
 
 fn arrays(out: &mut String, program: &Program) {
-    if !arrayed(program) {
+    // Плотный агрегат уезжает через границу кадра коробкой - плоским массивом
+    // из одной ячейки (§10 вопрос 221), - и объявления нужны ему тоже.
+    if !arrayed(program) && program.packings.is_empty() {
         return;
     }
     out.push_str(concat!(
@@ -5187,6 +5195,27 @@ impl<'a> Builder<'a> {
             self.instruction(&format!("{name} = inttoptr i64 {bits} to ptr"), self.here());
             return Ok(name);
         }
+        // Плотный агрегат - копией в коробку: плоский массив из одной ячейки
+        // своей ширины (§10 вопрос 221), как `adamas_park_N` у C-бэкенда.
+        if let Repr::Packed(pack) = repr {
+            let ty = packed_ty(pack, &self.program.packings);
+            let size = self.program.packings[pack.0 as usize].size;
+            let boxed = self.temp();
+            self.instruction(
+                &format!("{boxed} = call ptr @adamas_array_alloc(i64 1, i64 {size})"),
+                self.here(),
+            );
+            let cell = self.temp();
+            self.instruction(
+                &format!("{cell} = call ptr @adamas_array_at(ptr {boxed}, i64 0)"),
+                self.here(),
+            );
+            self.instruction(
+                &format!("store {ty} {value}, ptr {cell}, align 1"),
+                self.here(),
+            );
+            return Ok(boxed);
+        }
         if slot(repr, &self.program.packings).as_deref() == Some("ptr") {
             return Ok(value.to_owned());
         }
@@ -5210,6 +5239,26 @@ impl<'a> Builder<'a> {
                 self.here(),
             );
             return Ok(self.narrow(ty, &bits));
+        }
+        // Коробка агрегата: копия обратно, и коробка отпускается - слот
+        // забирается владением (§10 вопрос 221).
+        if let Repr::Packed(pack) = repr {
+            let ty = packed_ty(pack, &self.program.packings);
+            let cell = self.temp();
+            self.instruction(
+                &format!("{cell} = call ptr @adamas_array_at(ptr {value}, i64 0)"),
+                self.here(),
+            );
+            let loaded = self.temp();
+            self.instruction(
+                &format!("{loaded} = load {ty}, ptr {cell}, align 1"),
+                self.here(),
+            );
+            self.instruction(
+                &format!("call void @adamas_drop(ptr {value}, ptr @{RELEASE_SYMBOL})"),
+                self.here(),
+            );
+            return Ok(loaded);
         }
         if slot(repr, &self.program.packings).as_deref() == Some("ptr") {
             return Ok(value.to_owned());
@@ -5368,8 +5417,8 @@ impl<'a> Builder<'a> {
             .filter(|local| !inner.contains(local))
             .filter_map(|local| self.reprs.get(&local).map(|repr| (local, *repr)))
             .collect();
-        env.sort_by_key(|(_, repr)| !repr.counted());
-        let counted = env.iter().filter(|(_, repr)| repr.counted()).count();
+        env.sort_by_key(|(_, repr)| !frame_counted(*repr));
+        let counted = env.iter().filter(|(_, repr)| frame_counted(*repr)).count();
 
         let at = self.chunked;
         self.chunked += 1;
@@ -5521,7 +5570,7 @@ impl<'a> Builder<'a> {
         let _ = writeln!(text, "  %env = call ptr @adamas_frame_env(ptr %h)");
         let mut block = 0_u32;
         for (at, (_, repr)) in env.iter().enumerate() {
-            if !repr.counted() {
+            if !frame_counted(*repr) {
                 continue;
             }
             let _ = writeln!(
@@ -5868,6 +5917,15 @@ impl<'a> Builder<'a> {
             let Some(capture) = captured.get(position) else {
                 continue;
             };
+            // Слот замыкания коробку агрегата не берёт: порядок счётных там
+            // задаёт понижение (§10 вопрос 221), - отказ, как у C-бэкенда.
+            if matches!(repr, Repr::Packed(_)) {
+                return Err(LlvmError::Shape {
+                    function: self.function.name.clone(),
+                    place: "захват замыкания".to_owned(),
+                    shape: describe(repr),
+                });
+            }
             let value = self.value(capture)?;
             taken.push((self.into_word(repr, &value)?, repr));
         }

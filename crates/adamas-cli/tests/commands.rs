@@ -489,25 +489,29 @@ fn an_operator_dictionary_crosses_a_closure() {
 /// Отказ эмиттера - тем же правилом: функцию он называет, место находит
 /// драйвер.
 ///
-/// Держится на границе: плотная запись, живущая поперёк точки приостановки,
-/// не помещается в слот кадра (§4.11, §10 вопрос 221). Прежде свидетель стоял
-/// на эффектной функции с плоским ответом, и его сняла правка вопроса 215.
+/// Держится на границе: вектор (§4.9), живущий поперёк точки приостановки, в
+/// слот кадра не помещается, и коробки у него нет (§10 вопрос 221). Прежде
+/// свидетель стоял на эффектной функции с плоским ответом, потом на плотной
+/// записи; обе границы сняты.
 #[test]
 fn an_emitter_refusal_names_the_file_and_line() {
     let app = scratch("emitter-place");
     write(
         &app.join("Main.adamas"),
-        "data Unit where\n  MkUnit : Unit\n\
+        "type Layout = { size : UInt32, align : UInt32 }\n\n\
+         class Primitive a where\n  simdLayout : Layout\n\n\
+         data Unit where\n  MkUnit : Unit\n\
          data List (a : Type) where\n  Nil : List a\n  Cons : a -> List a -> List a\n\
-         effect Fail where\n  fail : Int32\n\
-         type Pt = {x : Int32, y : Int32}\n\
-         body : {Fail} List Int32\nbody =\n  let p : Pt = {x = 1, y = 2}\n  \
-         let n : Int32 = fail\n  Cons (p.x + n) Nil\n\
-         main : List Int32\nmain = handle body with\n  return v -> v\n  fail -> Nil\n",
+         effect Ask where\n  ask : Float32\n\
+         one : Float32\none = 1.0\n\
+         body : {Ask} List Float32\nbody =\n  \
+         let v : Simd 4 Float32 = simdSplat 4 one\n  \
+         let n : Float32 = ask\n  Cons (simdLane v 0 + n) Nil\n\
+         main : List Float32\nmain = handle body with\n  return v -> v\n  ask -> Nil\n",
     );
     let (ok, _, stderr) = run(adamas().arg("build").arg(app.join("Main.adamas")));
     assert!(!ok, "отказ эмиттера прошёл сборкой");
-    assert!(stderr.contains("Main.adamas:10:1:"), "{stderr}");
+    assert!(stderr.contains("Main.adamas:16:1:"), "{stderr}");
     assert!(stderr.contains("body ="), "{stderr}");
     assert!(stderr.contains("переживает точку приостановки"), "{stderr}");
 }

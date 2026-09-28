@@ -1,0 +1,60 @@
+-- Плотная запись поперёк точки приостановки (§4.11, §10 вопрос 221).
+--
+-- Слот кадра - слово, а запись из двух `Int32` шире. Уезжает она копией в
+-- куче - плоским массивом из одной ячейки, - а возвращается копией обратно,
+-- и коробка отпускается. До правки оба эмиттера отказывали «переживает точку
+-- приостановки - слот кадра шире не бывает», хотя машина программу считала.
+-- У коробки три судьбы, и каждое поле ответа держит свою:
+--
+--   * `restored` - возобновление не в хвосте, и дважды: запись
+--     восстанавливается из слота через две точки подряд;
+--   * `aborted` - ветка не возобновляет: коробку отпускает дроп кадра, и
+--     живых блоков по-прежнему ноль;
+--   * `forked` - мультишот: копия сегмента дупает слот, и обе ветви читают
+--     ту же запись.
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Ask where
+  ask : Int32
+
+type Pt = {x : Int32, y : Int32}
+append : List Int32 -> List Int32 -> List Int32
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+twice : {Ask} List Int32
+twice =
+  let p : Pt = {x = 10, y = 20}
+  let n : Int32 = ask
+  let m : Int32 = ask
+  Cons (p.x + n) (Cons (p.y + m) Nil)
+
+restored : List Int32
+restored = handle twice with
+  return v -> v
+  ask -> Cons 0 (resume 5)
+
+aborted : List Int32
+aborted = handle twice with
+  return v -> v
+  ask -> Nil
+
+once : {Ask} List Int32
+once =
+  let p : Pt = {x = 30, y = 40}
+  let n : Int32 = ask
+  Cons (p.x + n) (Cons p.y Nil)
+
+forked : List Int32
+forked = handleMulti once with
+  return v -> v
+  ask -> append (resume 1) (resume 2)
+
+main : List Int32
+main = append restored (append aborted forked)

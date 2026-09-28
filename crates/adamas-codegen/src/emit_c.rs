@@ -232,6 +232,7 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     table(&mut out, program);
     out.push_str(RELEASE);
     out.push('\n');
+    parked_packings(&mut out, program);
     if nursed(program) {
         out.push_str(PROMOTE);
         out.push('\n');
@@ -451,6 +452,22 @@ fn worded(repr: Repr) -> bool {
     repr.primitive().is_some() || scalar(repr) == "adamas_value"
 }
 
+/// Ложится ли значение в слот **кадра** и на границу куска (§10 вопрос 221).
+///
+/// Шире [`worded`] ровно на плотный агрегат: он уезжает в слот копией в куче -
+/// плоским массивом из одной ячейки (`adamas_park_N`), - и возвращается
+/// копией обратно, отпуская коробку (`adamas_unpark_N`). Слот замыкания так не
+/// умеет: там порядок счётных задаёт понижение, и коробку туда молча не
+/// положить.
+fn framed(repr: Repr) -> bool {
+    worded(repr) || matches!(repr, Repr::Packed(_))
+}
+
+/// Счётен ли слот кадра: указательный либо коробка агрегата.
+fn frame_counted(repr: Repr) -> bool {
+    repr.counted() || matches!(repr, Repr::Packed(_))
+}
+
 /// Значение словом: плоское примитивное - битами, прочее - собой.
 ///
 /// Граница куска дроблёного тела носит слово, и других форм у неё нет:
@@ -462,7 +479,10 @@ fn worded(repr: Repr) -> bool {
 fn into_word(repr: Repr, value: &str) -> String {
     match repr.primitive() {
         Some(ty) => format!("adamas_slot_of(adamas_word_{}({value}))", ty.name()),
-        None => value.to_owned(),
+        None => match repr {
+            Repr::Packed(pack) => format!("adamas_park_{}({value})", pack.0),
+            _ => value.to_owned(),
+        },
     }
 }
 
@@ -470,7 +490,10 @@ fn into_word(repr: Repr, value: &str) -> String {
 fn from_word(repr: Repr, value: &str) -> String {
     match repr.primitive() {
         Some(ty) => format!("adamas_bits_{}(adamas_slot_word({value}))", ty.name()),
-        None => value.to_owned(),
+        None => match repr {
+            Repr::Packed(pack) => format!("adamas_unpark_{}({value})", pack.0),
+            _ => value.to_owned(),
+        },
     }
 }
 
@@ -1048,6 +1071,33 @@ fn vectors(out: &mut String, program: &Program) {
 /// думает иначе, и разошлись бы молча. `_Alignas` при этом обязателен: без него
 /// массив байт стоял бы по единице, и `Float32` внутри массива читался бы
 /// невыровненным.
+/// Кладка плотного агрегата в слот кадра и обратно (§10 вопрос 221).
+///
+/// Слот кадра - слово, а агрегат шире. Уезжает он копией в куче - плоским
+/// массивом из одной ячейки своей ширины, - а возвращается копией обратно,
+/// и коробка отпускается тут же: восстановление забирает слот владением.
+/// Печатаются после `release.c`: отпускание идёт его `adamas_drop_value`.
+/// `static inline` - потому что не всякой укладке пара нужна, а
+/// неиспользованная обычная статическая функция дала бы предупреждение.
+fn parked_packings(out: &mut String, program: &Program) {
+    for at in 0..program.packings.len() {
+        let _ = writeln!(
+            out,
+            "static inline adamas_value adamas_park_{at}(adamas_pack_{at} value) {{\n\
+             \x20   adamas_value box = adamas_array_alloc(1, sizeof value);\n\
+             \x20   memcpy(adamas_array_data(box), &value, sizeof value);\n\
+             \x20   return box;\n\
+             }}\n\
+             static inline adamas_pack_{at} adamas_unpark_{at}(adamas_value box) {{\n\
+             \x20   adamas_pack_{at} value;\n\
+             \x20   memcpy(&value, adamas_array_data(box), sizeof value);\n\
+             \x20   adamas_drop_value(box);\n\
+             \x20   return value;\n\
+             }}"
+        );
+    }
+}
+
 fn packings(out: &mut String, program: &Program) {
     if program.packings.is_empty() {
         return;
@@ -3827,8 +3877,8 @@ impl Emitter<'_> {
         // лежит битами - заголовка у него нет, и `adamas_dup` по нему написал
         // бы счётчик по чужому адресу. Сортировка устойчивая, поэтому порядок
         // внутри каждой половины прежний.
-        env.sort_by_key(|(_, repr)| !repr.counted());
-        let counted = env.iter().filter(|(_, repr)| repr.counted()).count();
+        env.sort_by_key(|(_, repr)| !frame_counted(*repr));
+        let counted = env.iter().filter(|(_, repr)| frame_counted(*repr)).count();
         let at = self.chunks.len();
         self.chunks.push(String::new());
         let code = format!("fn_{}_k{at}", self.id.0);
@@ -3857,7 +3907,7 @@ impl Emitter<'_> {
             );
         }
         for (slot, (local, repr)) in env.iter().enumerate() {
-            if !worded(*repr) {
+            if !framed(*repr) {
                 self.parked(*repr);
             }
             let stored = into_word(*repr, &format!("v{}", local.0));
@@ -3911,7 +3961,7 @@ impl Emitter<'_> {
         // Пришедшее приходит словом: `adamas_frame_code` другого не носит.
         // Плоское значение поэтому едет битами - той же мерой, какой оно
         // переживает точку приостановки в слоте среды (§10 вопрос 164).
-        if !worded(binding.fact.repr) {
+        if !framed(binding.fact.repr) {
             self.parked(binding.fact.repr);
         }
         let _ = writeln!(
@@ -3940,7 +3990,7 @@ impl Emitter<'_> {
                     self.out,
                     "    if (!adamas_is_imm(env[{slot}])) {{ adamas_resumption_drop(kont, env[{slot}]); }}"
                 );
-            } else if repr.counted() {
+            } else if frame_counted(*repr) {
                 let _ = writeln!(self.out, "    adamas_drop_value(env[{slot}]);");
             }
         }
@@ -3999,7 +4049,7 @@ impl Emitter<'_> {
     /// собой, - иначе порождённый C не собрался бы.
     fn finish(&mut self, answer: &str, repr: Repr, depth: usize) {
         let pad = Self::pad(depth);
-        if !worded(repr) {
+        if !framed(repr) {
             self.parked(repr);
         }
         let answer = into_word(repr, answer);

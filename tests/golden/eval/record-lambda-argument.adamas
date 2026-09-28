@@ -1,0 +1,45 @@
+-- Плотная запись аргументом лямбды (§4.11, §10 вопрос 223).
+--
+-- У связывания лямбды в ядре нет типа, и понижению неоткуда было узнать, что
+-- за указателем, прибывшим в замыкание, запись: `\w -> w.y` отвергался «форма
+-- записи потеряна», хотя машина считала. Тип этот написан рядом - у
+-- параметра вызываемого либо у `let`, - и понижение берёт его оттуда: запись
+-- прибывает объектом своей боксированной формы, и факт связывания её называет.
+-- Поля ответа - по источнику типа:
+--
+--   * `direct` - параметр вызываемого: `applying : Pt -> (Pt -> Int32) -> …`;
+--   * `bound` - написанный тип `let`: `let f : Pt -> Int32 = \w -> …`;
+--   * `generic` - параметр полиморфного вызываемого: `a -> b` инстанцируется
+--     аргументами спайна, как это делает проверка типов;
+--   * `onward` - запись с полем `Bool` уходит из лямбды дальше в плотную
+--     позицию и сужается обратно, вложенное семейство тоже.
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+type Pt = {x : Int32, y : Int32}
+type Tagged = {value : Int32, on : Bool}
+applying : Pt -> (Pt -> Int32) -> Int32
+applying p f = f p
+applyTo : {a : Type} -> {b : Type} -> a -> (a -> b) -> b
+applyTo x f = f x
+origin : Pt
+origin = {x = 3, y = 4}
+direct : Int32
+direct = applying origin (\w -> w.x * 10 + w.y)
+bound : Int32
+bound =
+  let f : Pt -> Int32 = \w -> w.y * 100
+  applying origin f
+
+generic : Int32
+generic = applyTo origin (\w -> w.x + w.y)
+gate : Tagged -> Int32
+gate t = if t.on then t.value else 0
+marked : Tagged
+marked = {value = 9, on = True}
+onward : Int32
+onward = applyTo marked (\t -> gate t + 1000)
+main : List Int32
+main = Cons direct (Cons bound (Cons generic (Cons onward Nil)))

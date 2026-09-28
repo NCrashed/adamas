@@ -837,6 +837,11 @@ struct Lowerer<'a> {
     /// Какое определение понижается сейчас - им запрошены имена, встающие в
     /// очередь.
     current: Option<Name>,
+    /// Представления параметров лямбды, известные из **сигнатуры** того, кому
+    /// она уходит аргументом (§10 вопрос 223): у связывания лямбды типа в ядре
+    /// нет, а у параметра вызываемого он написан. Ставит [`Lowerer::called`]
+    /// перед написанной лямбдой, забирает [`Lowerer::abstraction`] первым делом.
+    hints: Option<Vec<Repr>>,
     /// Кто первым запросил каждое имя очереди. По этой цепочке отказ внутри
     /// прелюдии называет определение автора, до него дотянувшееся (§10
     /// вопрос 217): словарь `Add#Int32` сам по себе автору ничего не говорит.
@@ -908,6 +913,7 @@ impl<'a> Lowerer<'a> {
             wrapped: HashMap::new(),
             pending: VecDeque::new(),
             current: None,
+            hints: None,
             requesters: HashMap::new(),
             detached: false,
             tainted: false,
@@ -1304,7 +1310,14 @@ impl<'a> Lowerer<'a> {
                 let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
                 let dicts = scope.dicts.clone();
                 let declared = self.repr_of(ty, depth, &dicts)?;
-                let value = self.shaped(scope, value, declared, "связанное значение")?;
+                // Написанный тип `let` - та же подсказка лямбде, что тип параметра
+                // у вызываемого (§10 вопрос 223).
+                if matches!(&**value, Term::Lam(..)) {
+                    self.hints = self.hinted(ty, depth)?;
+                }
+                let value = self.shaped(scope, value, declared, "связанное значение");
+                self.hints = None;
+                let value = value?;
                 let binding = Binding {
                     name: name.to_string(),
                     local: scope.fresh(),
@@ -4881,6 +4894,76 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Применение определения: насыщенное зовёт напрямую, недобранное -
+    /// Подсказка представлений параметрам написанной лямбды, уходящей
+    /// аргументом `position` определения `name` (§10 вопрос 223).
+    ///
+    /// Читается тип параметра вызываемого: написан стрелкой - её домены и есть
+    /// типы связываний лямбды. Подсказывается **только запись**: аргумент
+    /// прибывает в замыкание объектом её боксированной формы (его боксирует
+    /// [`Lowerer::moved`] в позиции аргумента замыкания), и факт параметра может
+    /// её назвать. Прочее остаётся указателем, как было. Домен-переменная
+    /// (`apply : (a -> b) -> a -> b`) подсказки не даёт - типа там нет.
+    fn lambda_hints(
+        &mut self,
+        scope: &Scope,
+        name: &Name,
+        position: usize,
+        arguments: &[Arg<'_>],
+    ) -> Result<Option<Vec<Repr>>, LowerError> {
+        let Some(Arg::Written(Term::Lam(..))) = arguments.get(position) else {
+            return Ok(None);
+        };
+        // Тип параметра инстанцируется аргументами спайна до него, как это
+        // делает проверка: у `applyTo : {a} -> {b} -> a -> (a -> b) -> b`
+        // домен написан переменной, а спайн несёт `Vec3` её значением.
+        let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
+        let mut env = Env::default();
+        for level in 0..depth {
+            env = env.extend(Value::var(Lvl(level)));
+        }
+        let mut ty = eval(&Env::default(), self.declared(name)?);
+        for argument in &arguments[..position] {
+            let Value::Pi(_, _, _, _, codomain) = &*ty else {
+                return Ok(None);
+            };
+            let Arg::Written(term) = argument else {
+                return Ok(None);
+            };
+            let value = eval(&env, term);
+            ty = codomain.apply(value);
+        }
+        let Value::Pi(_, _, domain, _, _) = &*ty else {
+            return Ok(None);
+        };
+        let written = quote(depth, domain);
+        self.hinted(&written, depth)
+    }
+
+    /// Подсказка по написанному типу-стрелке: домены по порядку, запись -
+    /// собой, прочее - указателем. Не стрелка - подсказки нет.
+    fn hinted(&mut self, ty: &Term, depth: u32) -> Result<Option<Vec<Repr>>, LowerError> {
+        let ty = unaliased(self.signature, ty).clone();
+        let Term::Pi(..) = ty else {
+            return Ok(None);
+        };
+        let mut current = &ty;
+        let mut depth = depth;
+        let mut hints = Vec::new();
+        while let Term::Pi(_, _, inner, _, codomain) = current {
+            let repr = self.repr_of(inner, depth, &Dicts::new())?;
+            let record = match repr {
+                Repr::Packed(pack) => self.packings[pack.0 as usize]
+                    .sole()
+                    .is_some_and(|variant| variant.ctor.is_none()),
+                _ => false,
+            };
+            hints.push(if record { repr } else { Repr::Boxed });
+            depth = depth.saturating_add(1);
+            current = codomain;
+        }
+        Ok(Some(hints))
+    }
+
     /// замыкание.
     fn called(
         &mut self,
@@ -4937,7 +5020,10 @@ impl<'a> Lowerer<'a> {
                 name: name.to_string(),
                 binder: position,
             })?;
-            given.push(self.given(scope, argument, fact.repr, "аргумент вызова")?);
+            self.hints = self.lambda_hints(scope, name, position, arguments)?;
+            let lowered = self.given(scope, argument, fact.repr, "аргумент вызова");
+            self.hints = None;
+            given.push(lowered?);
         }
         let mut value = Expr::Call {
             function,
@@ -5199,6 +5285,7 @@ impl<'a> Lowerer<'a> {
         term: &Term,
         discard: bool,
     ) -> Result<(Expr, Repr), LowerError> {
+        let hints = self.hints.take().unwrap_or_default();
         let mut parameters: Vec<(Mult, String)> = Vec::new();
         let mut current = Rc::new(term.clone());
         loop {
@@ -5226,14 +5313,20 @@ impl<'a> Lowerer<'a> {
         };
         // Лямбда получает значение всегда: стирает машина по типу глобального
         // имени, а здесь имени нет.
-        let bindings: Vec<Binding> = parameters
-            .iter()
-            .map(|(mult, name)| Binding {
+        // Подсказанная запись называет свою боксированную форму: объект этой
+        // формы и прибывает (§10 вопрос 223). Прочее - указатель.
+        let mut bindings: Vec<Binding> = Vec::with_capacity(parameters.len());
+        for (at, (mult, name)) in parameters.iter().enumerate() {
+            let mut fact = Fact::present(*mult);
+            if let Some(Repr::Packed(pack)) = hints.get(at) {
+                fact = fact.shaped(Repr::Record(self.boxed_shape(*pack)?));
+            }
+            bindings.push(Binding {
                 name: name.clone(),
                 local: nested.fresh(),
-                fact: Fact::present(*mult),
-            })
-            .collect();
+                fact,
+            });
+        }
         for binding in &bindings {
             nested.env.push(Slot::Bound(binding.local, binding.fact));
         }

@@ -2478,15 +2478,17 @@ fn declare_members(
                 .iter()
                 .map(|clause| elaborator.clause(clause))
                 .collect::<Result<Vec<_>, _>>()?;
-            (compiled, elaborator.deferred())
+            (compiled, elaborator.deferred(), elaborator.cases())
         };
-        let (compiled, postponed) = compiled;
-        let tree = compile_traced(signature, metas, &types[at], &compiled).map_err(|error| {
-            ElabError::Clauses {
-                span: *at_span,
-                error: Box::new(error),
-            }
-        })?;
+        let (compiled, postponed, cases) = compiled;
+        let mut tree =
+            compile_traced(signature, metas, &types[at], &compiled).map_err(|error| {
+                ElabError::Clauses {
+                    span: *at_span,
+                    error: Box::new(error),
+                }
+            })?;
+        tree.nested = cases;
         let group = postponed.group();
         settle_literals(
             signature, metas, owned, fixities, warnings, postponed, &tree.term, &types[at],
@@ -2678,15 +2680,17 @@ fn declare_mutual(
                 .iter()
                 .map(|clause| elaborator.clause(clause))
                 .collect::<Result<Vec<_>, _>>()?;
-            (compiled, elaborator.deferred())
+            (compiled, elaborator.deferred(), elaborator.cases())
         };
-        let (compiled, postponed) = compiled;
-        let tree = compile_traced(signature, metas, &written[at], &compiled).map_err(|error| {
-            ElabError::Clauses {
-                span: member.span,
-                error: Box::new(error),
-            }
-        })?;
+        let (compiled, postponed, cases) = compiled;
+        let mut tree =
+            compile_traced(signature, metas, &written[at], &compiled).map_err(|error| {
+                ElabError::Clauses {
+                    span: member.span,
+                    error: Box::new(error),
+                }
+            })?;
+        tree.nested = cases;
         let group = postponed.group();
         settle_literals(
             signature,
@@ -5178,19 +5182,20 @@ fn define(
             .iter()
             .map(|clause| elaborator.clause(clause))
             .collect::<Result<Vec<_>, _>>()?;
-        (compiled, elaborator.deferred())
+        (compiled, elaborator.deferred(), elaborator.cases())
     };
-    let (compiled, postponed) = compiled;
+    let (compiled, postponed, cases) = compiled;
 
     // Тип идёт в сборку тем же, каким пойдёт в сигнатуру, - с дырками уровня.
     // Одно хранилище на прогон это и позволяет: решение, найденное сборкой,
     // доживает до объявления.
-    let tree = compile_traced(signature, metas, &declared.ty, &compiled).map_err(|error| {
+    let mut tree = compile_traced(signature, metas, &declared.ty, &compiled).map_err(|error| {
         ElabError::Clauses {
             span: clause_span(&error, declared, clauses, span),
             error: Box::new(error),
         }
     })?;
+    tree.nested = cases;
     settled(
         signature,
         metas,

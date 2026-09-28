@@ -25,9 +25,13 @@
 //! сборкой дерева ([`adamas_core::pattern::Compiled`]).
 
 use adamas_core::check::{Frame, TypeError};
-use adamas_core::pattern::Compiled;
+use adamas_core::pattern::{ClauseSite, Compiled, located};
 use adamas_core::source::Span;
 use adamas_parser::ast::{self, Binder, Binding, Chain, Expr, ExprKind, Stmt, StmtKind};
+
+/// Места ветвей разборов, написанных выражением, по спану выражения - см.
+/// [`Compiled::nested`]. У типа их нет, и туда идёт пустой срез.
+pub(crate) type Cases<'a> = &'a [(Span, Vec<ClauseSite>)];
 
 /// Что элаборация отдала ядру - то, по чему маршрут пойдёт обратно.
 pub(crate) enum Declared<'a> {
@@ -75,7 +79,7 @@ impl Member<'_> {
             .and_then(|(clause, inner)| {
                 self.clauses
                     .get(clause)
-                    .map(|clause| narrow(&clause.body, inner))
+                    .map(|clause| narrow(&self.compiled.nested, &clause.body, inner))
             })
             .unwrap_or(fallback)
     }
@@ -97,9 +101,9 @@ pub(crate) fn locate(declared: &Declared<'_>, error: &TypeError, fallback: Span)
 /// того, кто их сложил, не зависит.
 pub(crate) fn at(declared: &Declared<'_>, route: &[Frame], fallback: Span) -> Span {
     match declared {
-        Declared::Bare(ty) => narrow(ty, route),
+        Declared::Bare(ty) => narrow(&[], ty, route),
         Declared::Postulate(ty) => match route.split_first() {
-            Some((Frame::MemberType(_), rest)) => narrow(ty, rest),
+            Some((Frame::MemberType(_), rest)) => narrow(&[], ty, rest),
             _ => fallback,
         },
         Declared::Definition {
@@ -113,7 +117,7 @@ pub(crate) fn at(declared: &Declared<'_>, route: &[Frame], fallback: Span) -> Sp
                 compiled,
             };
             match route.split_first() {
-                Some((Frame::MemberType(_), rest)) => narrow(ty, rest),
+                Some((Frame::MemberType(_), rest)) => narrow(&[], ty, rest),
                 Some((Frame::MemberBody(_), rest)) => member.body(rest, fallback),
                 _ => fallback,
             }
@@ -123,7 +127,7 @@ pub(crate) fn at(declared: &Declared<'_>, route: &[Frame], fallback: Span) -> Sp
             Some((Frame::MemberType(index), rest)) => members
                 .get(*index as usize)
                 .and_then(|member| member.ty)
-                .map_or(fallback, |ty| narrow(ty, rest)),
+                .map_or(fallback, |ty| narrow(&[], ty, rest)),
             Some((Frame::MemberBody(index), rest)) => members
                 .get(*index as usize)
                 .map_or(fallback, |member| member.body(rest, fallback)),
@@ -134,7 +138,7 @@ pub(crate) fn at(declared: &Declared<'_>, route: &[Frame], fallback: Span) -> Sp
                 Some((Frame::Constructor(index), inner)) => effect
                     .operations
                     .get(*index as usize)
-                    .map_or(fallback, |operation| narrow(&operation.ty, inner)),
+                    .map_or(fallback, |operation| narrow(&[], &operation.ty, inner)),
                 _ => fallback,
             },
             _ => fallback,
@@ -144,7 +148,7 @@ pub(crate) fn at(declared: &Declared<'_>, route: &[Frame], fallback: Span) -> Sp
                 Some((Frame::Constructor(index), inner)) => data
                     .constructors
                     .get(*index as usize)
-                    .map_or(fallback, |constructor| narrow(&constructor.ty, inner)),
+                    .map_or(fallback, |constructor| narrow(&[], &constructor.ty, inner)),
                 _ => data_kind(data, rest, fallback),
             },
             _ => fallback,
@@ -158,14 +162,14 @@ pub(crate) fn at(declared: &Declared<'_>, route: &[Frame], fallback: Span) -> Sp
 fn data_kind(data: &ast::Data, route: &[Frame], fallback: Span) -> Span {
     data.kind
         .as_ref()
-        .map_or(fallback, |kind| narrow(kind, route))
+        .map_or(fallback, |kind| narrow(&[], kind, route))
 }
 
 /// Спан подтерма, названного маршрутом.
 ///
 /// Маршрут идёт снаружи внутрь - в том порядке, в каком его отдаёт
 /// [`adamas_core::check::TypeError::path`].
-pub(crate) fn narrow(expr: &Expr, route: &[Frame]) -> Span {
+pub(crate) fn narrow(cases: Cases<'_>, expr: &Expr, route: &[Frame]) -> Span {
     // Спуск по узлам с одним кадром идёт циклом, а не рекурсией: спайн
     // применения длиной в тысячи кадров - обычный вход (см. `expr` в
     // [`crate::expr`]).
@@ -181,20 +185,40 @@ pub(crate) fn narrow(expr: &Expr, route: &[Frame]) -> Span {
             (ExprKind::Arrow(domain, _), Frame::Domain) => (&**domain, rest),
             (ExprKind::Arrow(_, codomain), Frame::Codomain) => (&**codomain, rest),
             (ExprKind::Pi { binders, codomain }, _) => {
-                return pi(binders, codomain, route, expr.span);
+                return pi(cases, binders, codomain, route, expr.span);
             }
             (ExprKind::Lam { params, body }, Frame::Body) => {
-                return lam(params.len(), body, route, expr.span);
+                return lam(cases, params.len(), body, route, expr.span);
             }
-            (ExprKind::Block(block), _) => return statements(&block.stmts, route, expr.span),
-            (ExprKind::Chain(chain), _) => return chain_at(chain, route, expr.span),
+            (ExprKind::Block(block), _) => {
+                return statements(cases, &block.stmts, route, expr.span);
+            }
+            (ExprKind::Chain(chain), _) => return chain_at(cases, chain, route, expr.span),
+            (ExprKind::Case { scrutinee, alts }, _) => {
+                let bodies: Vec<&Expr> = alts.iter().map(|alt| &alt.body).collect();
+                return case_at(cases, expr.span, scrutinee, &bodies, route);
+            }
+            (
+                ExprKind::If {
+                    cond,
+                    then_branch,
+                    else_branch,
+                },
+                _,
+            ) => return case_at(cases, expr.span, cond, &[then_branch, else_branch], route),
             _ => return expr.span,
         };
     }
 }
 
 /// `(q x y : A) (r z : B) -> C` - по `Pi` на каждое имя в группе.
-fn pi(binders: &[Binder], codomain: &Expr, route: &[Frame], fallback: Span) -> Span {
+fn pi(
+    cases: Cases<'_>,
+    binders: &[Binder],
+    codomain: &Expr,
+    route: &[Frame],
+    fallback: Span,
+) -> Span {
     let mut route = route;
     for binder in binders {
         for _ in &binder.names {
@@ -203,18 +227,18 @@ fn pi(binders: &[Binder], codomain: &Expr, route: &[Frame], fallback: Span) -> S
                     return binder
                         .ty
                         .as_ref()
-                        .map_or(binder.span, |ty| narrow(ty, rest));
+                        .map_or(binder.span, |ty| narrow(cases, ty, rest));
                 }
                 Some((Frame::Codomain, rest)) => route = rest,
                 _ => return fallback,
             }
         }
     }
-    narrow(codomain, route)
+    narrow(cases, codomain, route)
 }
 
 /// `\x y -> body` - по `Lam` на каждый параметр.
-fn lam(params: usize, body: &Expr, route: &[Frame], fallback: Span) -> Span {
+fn lam(cases: Cases<'_>, params: usize, body: &Expr, route: &[Frame], fallback: Span) -> Span {
     let mut route = route;
     for _ in 0..params {
         match route.split_first() {
@@ -222,46 +246,82 @@ fn lam(params: usize, body: &Expr, route: &[Frame], fallback: Span) -> Span {
             _ => return fallback,
         }
     }
-    narrow(body, route)
+    narrow(cases, body, route)
 }
 
 /// Блок: цепочка `let` и значение последним.
-fn statements(stmts: &[Stmt], route: &[Frame], fallback: Span) -> Span {
+fn statements(cases: Cases<'_>, stmts: &[Stmt], route: &[Frame], fallback: Span) -> Span {
     let Some((first, rest)) = stmts.split_first() else {
         return fallback;
     };
     match &first.kind {
-        StmtKind::Expr(expr) if rest.is_empty() => narrow(expr, route),
-        StmtKind::Let(bindings) => let_bindings(bindings, rest, route, fallback),
+        StmtKind::Expr(expr) if rest.is_empty() => narrow(cases, expr, route),
+        StmtKind::Let(bindings) => let_bindings(cases, bindings, rest, route, fallback),
         StmtKind::Expr(_) => fallback,
     }
 }
 
 /// Связывания одного `let`: каждое даёт узел `Let`, вложенный в следующее.
-fn let_bindings(bindings: &[Binding], rest: &[Stmt], route: &[Frame], fallback: Span) -> Span {
+fn let_bindings(
+    cases: Cases<'_>,
+    bindings: &[Binding],
+    rest: &[Stmt],
+    route: &[Frame],
+    fallback: Span,
+) -> Span {
     let Some((binding, tail)) = bindings.split_first() else {
-        return statements(rest, route, fallback);
+        return statements(cases, rest, route, fallback);
     };
     match route.split_first() {
         Some((Frame::BindingType, inner)) => binding
             .ty
             .as_ref()
-            .map_or(binding.span, |ty| narrow(ty, inner)),
-        Some((Frame::BindingValue, inner)) => narrow(&binding.body, inner),
-        Some((Frame::BindingBody, inner)) => let_bindings(tail, rest, inner, fallback),
+            .map_or(binding.span, |ty| narrow(cases, ty, inner)),
+        Some((Frame::BindingValue, inner)) => narrow(cases, &binding.body, inner),
+        Some((Frame::BindingBody, inner)) => let_bindings(cases, tail, rest, inner, fallback),
         _ => binding.span,
     }
 }
 
 /// Цепочка из одного оператора: `op left right`, то есть два применения.
-fn chain_at(chain: &Chain, route: &[Frame], fallback: Span) -> Span {
+fn chain_at(cases: Cases<'_>, chain: &Chain, route: &[Frame], fallback: Span) -> Span {
     let [(operator, operand)] = &chain.tail[..] else {
         return fallback;
     };
     match route {
-        [Frame::Argument, rest @ ..] => narrow(operand, rest),
-        [Frame::Callee, Frame::Argument, rest @ ..] => narrow(&chain.head, rest),
+        [Frame::Argument, rest @ ..] => narrow(cases, operand, rest),
+        [Frame::Callee, Frame::Argument, rest @ ..] => narrow(cases, &chain.head, rest),
         [Frame::Callee, Frame::Callee, ..] => operator.span,
         _ => fallback,
     }
+}
+
+/// Разбор выражением: `case e of …` и `if c then … else …` (§10 вопрос 217).
+///
+/// Разбираемое не переменная - и элаборация связывает его `let`, дерево
+/// разбора стоит телом; переменная - и дерево стоит само. Внутри дерева
+/// ветвь находится по записанным местам альтернатив: номер ветви в ядре -
+/// номер конструктора, а не альтернативы, и без мест его не перевести.
+/// `if` - те же две альтернативы, `then` первой.
+fn case_at(
+    cases: Cases<'_>,
+    span: Span,
+    scrutinee: &Expr,
+    bodies: &[&Expr],
+    route: &[Frame],
+) -> Span {
+    let tree = match route.split_first() {
+        Some((Frame::BindingValue, rest)) => return narrow(cases, scrutinee, rest),
+        Some((Frame::BindingBody, rest)) => rest,
+        _ => route,
+    };
+    // Проход элаборации бывает пробным, и один разбор записывается дважды:
+    // последняя запись - та, что ушла в терм.
+    cases
+        .iter()
+        .rev()
+        .find(|(at, _)| *at == span)
+        .and_then(|(_, sites)| located(sites, tree))
+        .and_then(|(alt, inner)| bodies.get(alt).map(|body| narrow(cases, body, inner)))
+        .unwrap_or(span)
 }

@@ -1,0 +1,10 @@
+-- Отказ в ветви `if` стоит в ветви (§10 вопрос 217).
+--
+-- `if` - разбор по `Bool` с двумя альтернативами, `then` первой; отказ в
+-- `else` подчёркивал весь `if`.
+
+pick : Bool -> Int32
+pick c = if c then 1 else True
+
+main : Int32
+main = pick True

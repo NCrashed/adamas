@@ -1,0 +1,10 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: if-branch-located.adamas:7:27: несовпадение типов: ожидался `Int32`, получен `Prelude.Bool`
+  pick c = if c then 1 else True
+                            ^^^^
+  в контексте:
+    (ω c : Prelude.Bool)
+  путь: тело `pick` -> тело лямбды -> ветвь #1

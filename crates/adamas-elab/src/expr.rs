@@ -15,7 +15,9 @@ use adamas_core::eval::{apply, eval, quote};
 use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::mult::{Mult, MultProduct, MultSum, MultVar};
-use adamas_core::pattern::{Clause, Literal, Pattern as CorePattern, PatternError, compile_case};
+use adamas_core::pattern::{
+    Clause, ClauseSite, Literal, Pattern as CorePattern, PatternError, compile_case,
+};
 use adamas_core::prim;
 use adamas_core::prim::{Prim, PrimOp, PrimTy};
 use adamas_core::row::{Label, Row, Tail};
@@ -1167,6 +1169,10 @@ pub(crate) struct Elaborator<'a> {
     /// `None` - откладывать некуда: элаборация типа, алиаса, всего, после
     /// чего никто не досчитывает. Тогда литерал решается на месте, как раньше.
     literals: Option<Vec<Deferred>>,
+    /// Места ветвей разборов, написанных выражением, по спану выражения:
+    /// маршрут отказа в ветви доходит по ним до альтернативы (§10 вопрос
+    /// 217). Забирает их тот, кто собирает дерево клауз, - [`Self::cases`].
+    cases: Vec<(Span, Vec<ClauseSite>)>,
 }
 
 /// Литерал, стоявший в позиции нерешённой дырки, - досчитывается после
@@ -1423,6 +1429,7 @@ impl<'a> Elaborator<'a> {
             grades: Vec::new(),
             fielding: None,
             literals: None,
+            cases: Vec::new(),
         }
     }
 
@@ -1435,6 +1442,11 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Отложенные литералы - забираются однажды, после тел, - вместе с группой.
+    /// Места ветвей разборов-выражений, собранные с прошлого вызова.
+    pub(crate) fn cases(&mut self) -> Vec<(Span, Vec<ClauseSite>)> {
+        std::mem::take(&mut self.cases)
+    }
+
     pub(crate) fn deferred(&mut self) -> Postponed {
         Postponed {
             literals: self.literals.take().unwrap_or_default(),
@@ -2999,6 +3011,7 @@ impl<'a> Elaborator<'a> {
                     error: Box::new(error),
                 }
             })?;
+        self.cases.push((span, tree.clauses));
         self.produced = produced;
         Ok(tree.term)
     }

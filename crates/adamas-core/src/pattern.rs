@@ -464,6 +464,7 @@ pub fn compile_traced(
     Ok(Compiled {
         term: tree.term,
         clauses: tree.sites,
+        nested: Vec::new(),
     })
 }
 
@@ -539,6 +540,7 @@ pub fn compile_case(
     Ok(Compiled {
         term: tree.term,
         clauses: tree.sites,
+        nested: Vec::new(),
     })
 }
 
@@ -618,6 +620,12 @@ pub struct Compiled {
     /// переменная-паттерн подходит под каждый конструктор, и тело копируется
     /// в каждую ветвь.
     pub clauses: Vec<ClauseSite>,
+    /// Места ветвей `case` и `if`, написанных выражением внутри тел: разбор
+    /// выражением собирается тем же компилятором, но своим деревом, и
+    /// соответствие его ветвей альтернативам иначе терялось - отказ в ветви
+    /// подчёркивал разбор целиком (§10 вопрос 217). Ключ - спан выражения:
+    /// дерево записывает элаборация, ядро его не заполняет.
+    pub nested: Vec<(crate::source::Span, Vec<ClauseSite>)>,
 }
 
 impl Compiled {
@@ -629,38 +637,39 @@ impl Compiled {
     /// чужую ветвь.
     #[must_use]
     pub fn locate<'a>(&self, route: &'a [Frame]) -> Option<(usize, &'a [Frame])> {
-        let reached = self
-            .clauses
-            .iter()
-            .filter(|site| route.starts_with(&site.route))
-            .max_by_key(|site| site.route.len())
-            .map(|site| (site.clause, &route[site.route.len()..]));
-        if reached.is_some() {
-            return reached;
-        }
-
-        // Маршрут **короче** записанного пути: отказ случился не внутри тела
-        // клаузы, а на узле, который его несёт, - так выходит `UsageViolation`,
-        // возбуждаемая при выходе из связывания, а не под ним. Клауза при этом
-        // может быть уже определена: если пройденный отрезок ведёт к одной, ею
-        // и отвечаем, показывая тело целиком.
-        //
-        // Несколько клауз за одним отрезком - не неудача, а честная
-        // неоднозначность: ветвь обслуживает их все, и выбрать одну не из чего.
-        let mut only = None;
-        for site in self
-            .clauses
-            .iter()
-            .filter(|site| site.route.starts_with(route))
-        {
-            match only {
-                None => only = Some(site.clause),
-                Some(clause) if clause == site.clause => {}
-                Some(_) => return None,
-            }
-        }
-        only.map(|clause| (clause, &route[route.len()..]))
+        located(&self.clauses, route)
     }
+}
+
+/// То же по голому списку мест - у разбора выражением дерева рядом нет.
+#[must_use]
+pub fn located<'a>(sites: &[ClauseSite], route: &'a [Frame]) -> Option<(usize, &'a [Frame])> {
+    let reached = sites
+        .iter()
+        .filter(|site| route.starts_with(&site.route))
+        .max_by_key(|site| site.route.len())
+        .map(|site| (site.clause, &route[site.route.len()..]));
+    if reached.is_some() {
+        return reached;
+    }
+
+    // Маршрут **короче** записанного пути: отказ случился не внутри тела
+    // клаузы, а на узле, который его несёт, - так выходит `UsageViolation`,
+    // возбуждаемая при выходе из связывания, а не под ним. Клауза при этом
+    // может быть уже определена: если пройденный отрезок ведёт к одной, ею
+    // и отвечаем, показывая тело целиком.
+    //
+    // Несколько клауз за одним отрезком - не неудача, а честная
+    // неоднозначность: ветвь обслуживает их все, и выбрать одну не из чего.
+    let mut only = None;
+    for site in sites.iter().filter(|site| site.route.starts_with(route)) {
+        match only {
+            None => only = Some(site.clause),
+            Some(clause) if clause == site.clause => {}
+            Some(_) => return None,
+        }
+    }
+    only.map(|clause| (clause, &route[route.len()..]))
 }
 
 /// Тело клаузы в собранном дереве.

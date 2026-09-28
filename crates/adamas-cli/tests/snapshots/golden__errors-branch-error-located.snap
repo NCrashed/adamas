@@ -1,0 +1,11 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: branch-error-located.adamas:12:16: несовпадение типов: ожидался `Int32`, получен `Prelude.Bool`
+    False -> v + c
+                 ^
+  в контексте:
+    (ω c : Prelude.Bool)
+    (ω v : Int32)
+  путь: тело `mix` -> тело лямбды -> тело лямбды -> ветвь #1 -> аргумент применения

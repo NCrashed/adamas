@@ -1,0 +1,15 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: solved-hole-reduced.adamas:18:7: несовпадение типов: ожидался `UInt64`, получен `Int32`
+    j + x
+        ^
+  в контексте:
+    (0 n : Nat)
+    (ω #4 : Box n)
+    (ω i : UInt64)
+    (0 ds : Nat)
+    (ω x : Int32)
+    (ω j : UInt64)
+  путь: тело `walk` -> тело лямбды -> тело лямбды -> тело лямбды -> ветвь #0 -> тело лямбды -> тело лямбды -> тело `let` -> аргумент применения

@@ -15,6 +15,7 @@
 //! объявления. Правка соседа сдвигала бы номер, а с ним и снапшот, ничего не
 //! говоря о самой ошибке.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::rc::Rc;
@@ -24,7 +25,7 @@ use adamas_core::level::{Level, LevelMeta};
 use adamas_core::pattern::PatternError;
 use adamas_core::row::{Row, RowMeta, Tail};
 use adamas_core::source::{Location, SourceFile, Span};
-use adamas_core::term::{Args, Binder, Case, Fields, Index, Name, Term};
+use adamas_core::term::{Args, Binder, Case, Fields, Index, Name, Term, TermMeta};
 
 use crate::diag::{Diagnostic, Related};
 use crate::error::{ElabError, Names};
@@ -210,6 +211,10 @@ struct Naming {
     context: Vec<Name>,
     /// Дырка в порядке первой встречи.
     metas: HashMap<u32, u32>,
+    /// Дырки термов - в том же счёте, но нумеруются при печати: у них свой
+    /// ряд идентификаторов, и общий ключ смешал бы дырку терма с дыркой
+    /// уровня.
+    holes: RefCell<HashMap<u32, u32>>,
 }
 
 impl Naming {
@@ -231,6 +236,7 @@ impl Naming {
         Self {
             context: names,
             metas: HashMap::new(),
+            holes: RefCell::default(),
         }
     }
 
@@ -333,10 +339,8 @@ impl Naming {
                 };
                 *term = Term::Const(name, Rc::from([]), Args::none());
             }
-            // Дырка своего имени не имеет и переименованию не подлежит:
-            // печатается она номером, а номер локализует `Naming` отдельно.
-            // Сорт `Effect` рядом по той же причине: ни имён, ни уровней.
-            Term::Meta(_) | Term::EffectKind | Term::Prim(_) => {}
+            // Сорт `Effect` своего имени не имеет: ни имён, ни уровней.
+            Term::EffectKind | Term::Prim(_) => {}
             Term::Universe(level) | Term::RowKind(level) => self.level(level),
             Term::Const(_, levels, args) => {
                 *levels = self.levels(levels);
@@ -348,10 +352,19 @@ impl Naming {
                     args.mult_args().to_vec(),
                 );
             }
+            // Дырка, применённая к переменным, - это дырка в контексте места,
+            // где её завели: спайн пересказывает контекст, который напечатан
+            // ниже, и `(?542) ds b ds x i` читается как выражение программы
+            // (§10 вопрос 217). Печатается она одним номером.
+            Term::App(..) if contextual(term).is_some() => {
+                let meta = contextual(term).unwrap_or(TermMeta(0));
+                *term = Term::Meta(self.hole(meta));
+            }
             Term::App(callee, argument) => {
                 self.term(Rc::make_mut(callee), bound, outer);
                 self.term(Rc::make_mut(argument), bound, outer);
             }
+            Term::Meta(meta) => *term = Term::Meta(self.hole(*meta)),
             Term::Lam(_, name, body) => {
                 let name = name.clone();
                 self.under(bound, name, |naming, bound| {
@@ -387,6 +400,13 @@ impl Naming {
                 }
             }
         }
+    }
+
+    /// Локальный номер дырки терма - в порядке печати, после дырок уровней.
+    fn hole(&self, meta: TermMeta) -> TermMeta {
+        let mut holes = self.holes.borrow_mut();
+        let next = u32::try_from(self.metas.len() + holes.len()).unwrap_or(u32::MAX);
+        TermMeta(*holes.entry(meta.0).or_insert(next))
     }
 
     fn under(&self, bound: &mut Vec<Name>, name: Name, body: impl FnOnce(&Self, &mut Vec<Name>)) {
@@ -556,5 +576,15 @@ fn renamed(field: &adamas_core::term::Field, ty: Term) -> adamas_core::term::Fie
         mult: field.mult,
         shape: field.shape,
         ty: Rc::new(ty),
+    }
+}
+
+/// Дырка, применённая к одним переменным: её спайн - контекст места, где её
+/// завели.
+fn contextual(term: &Term) -> Option<TermMeta> {
+    match term {
+        Term::App(callee, argument) if matches!(**argument, Term::Var(_)) => contextual(callee),
+        Term::Meta(meta) => Some(*meta),
+        _ => None,
     }
 }

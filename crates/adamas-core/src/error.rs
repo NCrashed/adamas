@@ -811,7 +811,7 @@ fn telescope(ctx: &Ctx<'_>, metas: &Metas) -> Vec<Binding> {
             Some(Binding {
                 name: Rc::clone(&binding.name),
                 mult: binding.mult,
-                ty: crate::meta::zonk_term(metas, &ctx.quote(&binding.ty)),
+                ty: crate::check::read_back(ctx, metas, &binding.ty),
             })
         })
         .collect()

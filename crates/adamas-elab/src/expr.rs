@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use adamas_core::check::{check, check_within, infer, is_type};
+use adamas_core::check::{Frame, check, check_within, infer, is_type};
 use adamas_core::conv::{convertible, whnf, whnf_solved};
 use adamas_core::ctx::{Ctx, Detached};
 use adamas_core::eval::{apply, eval, quote};
@@ -1169,9 +1169,8 @@ pub(crate) struct Elaborator<'a> {
     /// `None` - откладывать некуда: элаборация типа, алиаса, всего, после
     /// чего никто не досчитывает. Тогда литерал решается на месте, как раньше.
     literals: Option<Vec<Deferred>>,
-    /// Места ветвей разборов, написанных выражением, по спану выражения:
-    /// маршрут отказа в ветви доходит по ним до альтернативы (§10 вопрос
-    /// 217). Забирает их тот, кто собирает дерево клауз, - [`Self::cases`].
+    /// Места альтернатив разборов-выражений и веток `handle` по спану формы:
+    /// маршрут отказа доходит по ним до написанного (§10 вопрос 217). Забирает их тот, кто собирает дерево клауз, - [`Self::cases`].
     cases: Vec<(Span, Vec<ClauseSite>)>,
 }
 
@@ -5318,16 +5317,53 @@ impl<'a> Elaborator<'a> {
         }
         self.answered(&current, ordered.len());
 
-        // Аргументы идут в порядке связываний: вычисление, `return`, ветки по
-        // объявлению. Тела веток работают в окружающей самого `handle` - там,
-        // где хендлер и написан, - а не в остатке вычисления: остаток несёт
-        // `resume`, и связь между ними держит обычное погашение в точке, где
-        // резумпцию зовут (§3.4). Контекст поэтому не подменяется вовсе -
-        // окружающую ветки задаёт row в её ожидаемом типе.
+        let stateful = initial.is_some();
+        let Applied { mut term, placed } = self.applied(Applying {
+            term,
+            current,
+            value: &value,
+            ordered,
+            stateful,
+            effect: &effect,
+            span,
+        })?;
+        // Начальное состояние идёт последним: ответ хендлера есть `S -> B`, и
+        // форма целиком - его применение.
+        if let Some((initial, _)) = initial {
+            term = Term::App(Rc::new(term), Rc::new(initial));
+        }
+        self.cases
+            .push((span, handler_sites(branches, &placed, stateful)));
+        Ok(term)
+    }
+
+    /// Применяет элиминатор к вычислению и веткам.
+    ///
+    /// Аргументы идут в порядке связываний: вычисление, `return`, ветки по
+    /// объявлению. Тела веток работают в окружающей самого `handle` - там,
+    /// где хендлер и написан, - а не в остатке вычисления: остаток несёт
+    /// `resume`, и связь между ними держит обычное погашение в точке, где
+    /// резумпцию зовут (§3.4). Контекст поэтому не подменяется вовсе -
+    /// окружающую ветки задаёт row в её ожидаемом типе.
+    fn applied<'b>(&mut self, applying: Applying<'_, 'b>) -> Result<Applied<'b>, ElabError> {
+        let Applying {
+            mut term,
+            mut current,
+            value,
+            ordered,
+            stateful,
+            effect,
+            span,
+        } = applying;
+        let mut placed = Vec::with_capacity(ordered.len());
         for branch in std::iter::once(None).chain(ordered.into_iter().map(Some)) {
             let argument = match branch {
                 None => value.clone(),
-                Some(branch) => self.branch_lambda(&current, branch, initial.is_some())?,
+                Some(branch) => {
+                    let (lambda, lambdas) = self.branch_lambda(&current, branch, stateful)?;
+                    placed.push((branch, lambdas));
+                    lambda
+                }
             };
             // Тип шагает **без** проверки аргумента: арность известна, а
             // проверка идёт при `σ = 0`, где окружающая пуста (§3.4), - и
@@ -5339,7 +5375,7 @@ impl<'a> Elaborator<'a> {
                 // кончившийся раньше, означает расхождение объявления с этим
                 // местом. Молчаливое усечение прятало бы его в неверный терм.
                 return Err(ElabError::HandlerBranch {
-                    name: Rc::clone(&effect),
+                    name: Rc::clone(effect),
                     why: "спайн элиминатора короче, чем у него веток",
                     span,
                 });
@@ -5349,12 +5385,7 @@ impl<'a> Elaborator<'a> {
             term = Term::App(Rc::new(term), Rc::new(argument));
             current = codomain.apply(value);
         }
-        // Начальное состояние идёт последним: ответ хендлера есть `S -> B`, и
-        // форма целиком - его применение.
-        if let Some((initial, _)) = initial {
-            term = Term::App(Rc::new(term), Rc::new(initial));
-        }
-        Ok(term)
+        Ok(Applied { term, placed })
     }
 
     /// Аргументы-row элиминатора.
@@ -5674,7 +5705,7 @@ impl<'a> Elaborator<'a> {
         expected: &Rc<Value>,
         branch: &ast::HandlerBranch,
         stateful: bool,
-    ) -> Result<Term, ElabError> {
+    ) -> Result<(Term, usize), ElabError> {
         let Value::Pi(_, _, domain, _, _) = &*whnf_solved(self.signature, self.metas, expected)
         else {
             return Err(ElabError::HandlerBranch {
@@ -5707,7 +5738,8 @@ impl<'a> Elaborator<'a> {
             }));
         }
         let params = spread_branch(&bound, params, branch.name.span);
-        self.lam(&params, &branch.body, &bound)
+        let term = self.lam(&params, &branch.body, &bound)?;
+        Ok((term, params.len()))
     }
 
     /// Исполняет вычисление безусловно - режим `infer` (§3.4).
@@ -7902,4 +7934,63 @@ fn literals_ahead(arguments: &[&Expr]) -> Vec<bool> {
         seen = seen || matches!(argument.kind, ExprKind::Lit(_));
     }
     out
+}
+
+/// Места написанного в дереве `handle` (§10 вопрос 217): вычисление -
+/// нулевое, ветки - по порядку написания, начальное состояние - последнее.
+///
+/// Аргумент `k` из `n` стоит под `n - 1 - k` кадрами функции применения, тело
+/// ветки - ещё под лямбдами её связываний. Неявные аргументы элиминатора
+/// применены раньше и счёта с конца не сдвигают. `placed` - ветки в порядке
+/// аргументов вместе с числом их лямбд; тождественный `return` не написан, и
+/// места у него нет.
+fn handler_sites(
+    branches: &[ast::HandlerBranch],
+    placed: &[(&ast::HandlerBranch, usize)],
+    stateful: bool,
+) -> Vec<ClauseSite> {
+    let count = 1 + placed.len() + usize::from(stateful);
+    let site = |at: usize, written: usize, lambdas: usize| {
+        let mut route = vec![Frame::Callee; count - 1 - at];
+        route.push(Frame::Argument);
+        route.extend(std::iter::repeat_n(Frame::Body, lambdas));
+        ClauseSite {
+            clause: written,
+            route,
+        }
+    };
+    let mut sites = vec![site(0, 0, 0)];
+    for (at, (branch, lambdas)) in placed.iter().enumerate() {
+        if let Some(written) = branches.iter().position(|it| std::ptr::eq(it, *branch)) {
+            sites.push(site(1 + at, 1 + written, *lambdas));
+        }
+    }
+    if stateful {
+        sites.push(site(count - 1, 1 + branches.len(), 0));
+    }
+    sites
+}
+
+/// Что нужно, чтобы применить элиминатор хендлера к веткам.
+struct Applying<'a, 'b> {
+    /// Элиминатор с неявными аргументами.
+    term: Term,
+    /// Его тип - по нему шагают ветки.
+    current: Rc<Value>,
+    /// Вычисление под хендлером.
+    value: &'a Term,
+    /// Ветки в порядке аргументов.
+    ordered: Vec<&'b ast::HandlerBranch>,
+    /// Параметризованная ли форма: ветке тогда достаётся `state`.
+    stateful: bool,
+    /// Снимаемый эффект - для отказа.
+    effect: &'a Symbol,
+    /// Где написан `handle`.
+    span: Span,
+}
+
+/// Элиминатор, применённый к веткам, и ветки вместе с числом их лямбд.
+struct Applied<'b> {
+    term: Term,
+    placed: Vec<(&'b ast::HandlerBranch, usize)>,
 }

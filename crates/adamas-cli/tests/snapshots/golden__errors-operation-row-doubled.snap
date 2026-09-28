@@ -2,9 +2,9 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: operation-row-doubled.adamas:44:16: эффекты `{Log, Log | e0}` не погашены: вокруг разрешено `{Log | e0}`
-  sequential c = handle c with
-                 ^^^^^^^^^^^^^
+Error: operation-row-doubled.adamas:47:20: эффекты `{Log, Log | e0}` не погашены: вокруг разрешено `{Log | e0}`
+    fork b -> resume (runChild b)
+                     ^^^^^^^^^^^^
   в контексте:
     (ω c : (ω _ : Unit) -> {Async, Log | e0} Unit)
     (ω b : (ω _ : Unit) -> {Async, Log, Log | e0} Unit)

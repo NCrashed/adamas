@@ -206,6 +206,20 @@ pub(crate) fn narrow(cases: Cases<'_>, expr: &Expr, route: &[Frame]) -> Span {
                 },
                 _,
             ) => return case_at(cases, expr.span, cond, &[then_branch, else_branch], route),
+            (
+                ExprKind::Handle {
+                    computation,
+                    branches,
+                    state,
+                    ..
+                },
+                _,
+            ) => {
+                let mut bodies: Vec<&Expr> = vec![computation];
+                bodies.extend(branches.iter().map(|branch| &branch.body));
+                bodies.extend(state.as_deref());
+                return sited(cases, expr.span, &bodies, route);
+            }
             _ => return expr.span,
         };
     }
@@ -315,13 +329,20 @@ fn case_at(
         Some((Frame::BindingBody, rest)) => rest,
         _ => route,
     };
-    // Проход элаборации бывает пробным, и один разбор записывается дважды:
+    sited(cases, span, bodies, tree)
+}
+
+/// Написанное, до которого маршрут доходит по записанным местам: альтернатива
+/// разбора, ветка хендлера, его вычисление или начальное состояние. Мест
+/// нет или маршрут в них не лёг - спан самой формы.
+fn sited(cases: Cases<'_>, span: Span, bodies: &[&Expr], route: &[Frame]) -> Span {
+    // Проход элаборации бывает пробным, и одна форма записывается дважды:
     // последняя запись - та, что ушла в терм.
     cases
         .iter()
         .rev()
         .find(|(at, _)| *at == span)
-        .and_then(|(_, sites)| located(sites, tree))
+        .and_then(|(_, sites)| located(sites, route))
         .and_then(|(alt, inner)| bodies.get(alt).map(|body| narrow(cases, body, inner)))
         .unwrap_or(span)
 }

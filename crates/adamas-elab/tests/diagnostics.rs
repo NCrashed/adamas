@@ -21,6 +21,12 @@ data Nat where
 
 /// Фрагмент, который подчеркнёт диагностика. Отказ обязан прийти от ядра.
 fn underlined(text: &str) -> String {
+    let span = refused(text);
+    text[span.start()..span.end()].to_owned()
+}
+
+/// Место отказа ядра.
+fn refused(text: &str) -> adamas_core::source::Span {
     let module = match parse(text) {
         Ok(module) => module,
         Err(error) => panic!("не разобралось: {error}"),
@@ -32,8 +38,7 @@ fn underlined(text: &str) -> String {
         matches!(error, ElabError::Core { .. }),
         "отказ обязан прийти от ядра, получено {error:?}"
     );
-    let span = error.span();
-    text[span.start()..span.end()].to_owned()
+    error.span()
 }
 
 #[test]
@@ -176,11 +181,11 @@ fn a_refusal_in_the_kind_of_a_family_is_underlined_there() {
 }
 
 #[test]
-fn a_route_shorter_than_the_clause_still_names_it() {
-    // `UsageViolation` возбуждается при выходе из связывания, а не под ним,
-    // поэтому маршрут обрывается на ветви и до тела клаузы не доходит. Клауза
-    // при этом определена однозначно - ветвь обслуживает одну, - и
-    // подчёркивается её тело, а не объявление целиком.
+fn an_overuse_is_underlined_at_the_extra_use() {
+    // `UsageViolation` возбуждается при выходе из связывания, а не под ним, и
+    // вектор использований мест не помнит. Место ищется по телу связывания:
+    // второе употребление при разрешённом одном (§10 вопрос 217). Прежде
+    // маршрут обрывался на ветви, и подчёркивалось тело клаузы целиком.
     let text = format!(
         "{BASE}data Pair where
   MkPair : Bool -> Bool -> Pair
@@ -193,7 +198,10 @@ once : (1 p : Pair) -> Bool
 once (MkPair x y) = and x x
 "
     );
-    assert_eq!(underlined(&text), "and x x");
+    let span = refused(&text);
+    assert_eq!(&text[span.start()..span.end()], "x");
+    let second = text.rfind("and x x").map(|at| at + "and x ".len());
+    assert_eq!(Some(span.start()), second, "подчёркнуто второе `x`");
 }
 
 #[test]

@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: linear-field-overused.adamas:12:21: `a` объявлена с кратностью 1, а использована ω
+    MkPair a b -> a + a
+                      ^

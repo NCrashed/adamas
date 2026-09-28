@@ -818,6 +818,7 @@ pub fn infer(
                 name,
                 ty,
                 value,
+                bound_body: body,
             };
             binding(ctx, metas, sigma, described, |inner, metas| {
                 infer(inner, metas, sigma, body)
@@ -888,6 +889,7 @@ pub fn check(
                 name,
                 ty,
                 value,
+                bound_body: body,
             };
             let ((), usage) = binding(ctx, metas, sigma, described, |inner, metas| {
                 check(inner, metas, sigma, body, expected).map(|usage| ((), usage))
@@ -983,7 +985,7 @@ fn check_lambda(
     if let Some(carriers) = ctx.carriers() {
         carrier::record(carriers, domain, allowed, used);
     }
-    spend(name, allowed, used)?;
+    spend(name, allowed, used).map_err(|error| overused(error, body, allowed, Frame::Body))?;
     Ok(rest)
 }
 
@@ -1661,6 +1663,9 @@ struct LetBinding<'a> {
     name: &'a Name,
     ty: &'a Term,
     value: &'a Term,
+    /// Тело - терм, а не то, что с ним делают: по нему ищется место лишнего
+    /// употребления, когда связывание вышло за кратность.
+    bound_body: &'a Term,
 }
 
 /// Общая часть `let` для обоих режимов: проверить аннотацию и значение, ввести
@@ -1674,6 +1679,7 @@ fn binding<T>(
         name,
         ty,
         value,
+        bound_body,
     }: LetBinding<'_>,
     body: impl FnOnce(&Ctx<'_>, &mut Metas) -> Result<(T, Usage), TypeError>,
 ) -> Result<(T, Usage), TypeError> {
@@ -1696,7 +1702,8 @@ fn binding<T>(
     if let Some(carriers) = ctx.carriers() {
         carrier::record(carriers, &ty_value, allowed, used);
     }
-    spend(name, allowed, used)?;
+    spend(name, allowed, used)
+        .map_err(|error| overused(error, bound_body, allowed, Frame::BindingBody))?;
     Ok((result, value_usage.scale(allowed) + &rest))
 }
 
@@ -1716,6 +1723,96 @@ fn binding<T>(
 /// стёртыми переменными.
 fn judgement_under(q: Mult, sigma: Mult) -> Mult {
     if q == Mult::Zero { Mult::Zero } else { sigma }
+}
+
+/// Отказ кратности с маршрутом до употребления, которым связывание вышло за
+/// разрешённое (§10 вопрос 217).
+///
+/// Счёт ведёт вектор использований, а он мест не помнит: отказ поднимается
+/// при выходе из связывания, и прежде маршрут кончался на нём - на лямбде
+/// ветки, на `handle` целиком. Место ищется здесь, когда отказ уже случился:
+/// употребления перебираются в порядке проверки (функция раньше аргумента),
+/// и лишним называется второе, если разрешено одно, и первое, если ни
+/// одного. Одно употребление при `ω` - то, что стоит в `ω`-позиции, оно и
+/// названо. Типовые позиции (`Pi`, тип `let`, мотив) не считаются: они
+/// стёрты и расхода не несут.
+///
+/// `frame` - кадр, которым тело стоит под связыванием: `Body` у лямбды,
+/// `BindingBody` у `let`.
+fn overused(error: TypeError, body: &Term, allowed: Mult, frame: Frame) -> TypeError {
+    let mut found = Vec::new();
+    occurrences(body, 0, &mut Vec::new(), &mut found);
+    let wanted = usize::from(allowed != Mult::Zero);
+    let Some(route) = found.get(wanted).or_else(|| found.last()) else {
+        return error;
+    };
+    route
+        .iter()
+        .rev()
+        .copied()
+        .fold(error, TypeError::in_frame)
+        .in_frame(frame)
+}
+
+/// Маршруты до употреблений переменной с индексом `depth` - не больше двух.
+fn occurrences(term: &Term, depth: u32, route: &mut Vec<Frame>, found: &mut Vec<Vec<Frame>>) {
+    if found.len() >= 2 {
+        return;
+    }
+    let mut within = |frame: Frame, inner: &Term, depth: u32, found: &mut Vec<Vec<Frame>>| {
+        route.push(frame);
+        occurrences(inner, depth, route, found);
+        route.pop();
+    };
+    match term {
+        Term::Var(crate::term::Index(index)) if *index == depth => found.push(route.clone()),
+        // Дырка, применённая к контексту, - спайн места, где её завели, а не
+        // расход: неявный аргумент стёрт.
+        Term::App(..) if matches!(spine_head(term), Term::Meta(_)) => {}
+        Term::App(callee, argument) => {
+            within(Frame::Callee, callee, depth, found);
+            within(Frame::Argument, argument, depth, found);
+        }
+        Term::Lam(_, _, body) => within(Frame::Body, body, depth + 1, found),
+        Term::Let(_, _, _, value, body) => {
+            within(Frame::BindingValue, value, depth, found);
+            within(Frame::BindingBody, body, depth + 1, found);
+        }
+        Term::Case(case) => {
+            within(Frame::Scrutinee, &case.scrutinee, depth, found);
+            for (index, branch) in case.branches.iter().enumerate() {
+                let index = u32::try_from(index).unwrap_or(u32::MAX);
+                within(Frame::Branch(index), &branch.body, depth, found);
+            }
+        }
+        Term::Project(record, _) | Term::With(record, _) => {
+            within(Frame::Scrutinee, record, depth, found);
+        }
+        // Поля записи и объекта кадров не несут: место внутри них точнее
+        // самого узла не назвать, и употребление засчитывается узлу.
+        Term::Object(fields) => {
+            if fields.iter().any(|(_, value)| uses(value, depth)) {
+                found.push(route.clone());
+            }
+        }
+        Term::Var(_)
+        | Term::Meta(_)
+        | Term::Pi(..)
+        | Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Prim(_)
+        | Term::Const(..)
+        | Term::Record(_)
+        | Term::Row(_) => {}
+    }
+}
+
+/// Встречается ли переменная `depth` в терме - для узлов без кадров.
+fn uses(term: &Term, depth: u32) -> bool {
+    let mut found = Vec::new();
+    occurrences(term, depth, &mut Vec::new(), &mut found);
+    !found.is_empty()
 }
 
 /// Проверяет, что фактическое использование укладывается в разрешённое.
@@ -3782,4 +3879,12 @@ fn branch_shape(case: &Case, constructors: &[Name]) -> Result<(), TypeError> {
 /// `a_route_leads_to_the_named_subterm`, а не глаз.
 fn framed<T>(outcome: Result<T, TypeError>, frame: Frame) -> Result<T, TypeError> {
     outcome.map_err(|error| error.in_frame(frame))
+}
+
+/// Голова спайна применения.
+fn spine_head(term: &Term) -> &Term {
+    match term {
+        Term::App(callee, _) => spine_head(callee),
+        _ => term,
+    }
 }

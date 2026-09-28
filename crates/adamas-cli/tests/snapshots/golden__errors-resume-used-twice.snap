@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: resume-used-twice.adamas:20:21: `resume` объявлена с кратностью 1, а использована ω
+    ask -> resume 1 + resume 2
+                      ^^^^^^

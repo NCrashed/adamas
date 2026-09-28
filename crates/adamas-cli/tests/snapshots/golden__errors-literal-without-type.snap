@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: literal-without-type.adamas:11:16: у литерала `1` нет типа: здесь не ожидается ни число, ни примитив - напишите тип связыванием (`let n : Int32 = 1`)
+    let p = {x = 1}
+                 ^

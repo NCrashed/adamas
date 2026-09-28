@@ -3237,8 +3237,18 @@ impl<'a> Elaborator<'a> {
             text: Rc::from(text),
             span: lit.span,
         };
-        let zero = self.name(&named(ZERO))?;
-        let successor = self.name(&named(SUCC))?;
+        // Имён по соглашению нет - значит, числу здесь неоткуда взяться, и
+        // сказать об этом надо про литерал, а не про `Zero`, которого автор не
+        // писал.
+        let untyped = |error| match error {
+            ElabError::UnknownName { .. } => ElabError::UntypedLiteral {
+                text: Rc::clone(&lit.text),
+                span: lit.span,
+            },
+            other => other,
+        };
+        let zero = self.name(&named(ZERO)).map_err(untyped)?;
+        let successor = self.name(&named(SUCC)).map_err(untyped)?;
         let numeral = (0..value).fold(zero, |built, _| {
             Term::App(Rc::new(successor.clone()), Rc::new(built))
         });

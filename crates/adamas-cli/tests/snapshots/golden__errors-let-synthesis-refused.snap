@@ -1,0 +1,12 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: let-synthesis-refused.adamas:16:11: несовпадение типов: ожидался `UInt64`, получен `List{0} Int32`
+    let k = j + xs
+            ^^^^^^
+  в контексте:
+    (ω xs : List{0} Int32)
+    (ω i : UInt64)
+    (ω j : UInt64)
+  путь: аргумент применения

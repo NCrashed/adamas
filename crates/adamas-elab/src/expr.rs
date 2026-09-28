@@ -31,7 +31,7 @@ use adamas_parser::ast::{
 };
 
 use crate::decl::{CLOSING, MASK, NURSERY};
-use crate::error::{ElabError, Missing};
+use crate::error::{ElabError, Missing, Names};
 use crate::fixity::Fixities;
 use crate::lifecycle::{Handler, Lifecycle, Observed, Performed, Released};
 use crate::live;
@@ -6365,6 +6365,19 @@ impl<'a> Elaborator<'a> {
         // пуста (§3.4), и эффектное значение типа не получает вовсе - а
         // исполненное вычисление ровно такое.
         let Some(found) = self.held_type(&value) else {
+            // Типа нет по построению только у лямбды. У прочего значения
+            // синтез отказал по своей причине, и она и есть ответ: `let k = j +
+            // xs` - несовпадение типов в сложении, а не «у лямбды его нет»
+            // (§10 вопрос 217).
+            if !matches!(value, Term::Lam(..)) {
+                if let Err(error) = infer(&self.ctx, self.metas, Mult::Many, &value) {
+                    return Err(ElabError::Core {
+                        error: Box::new(error),
+                        span: binding.body.span,
+                        names: Names::default(),
+                    });
+                }
+            }
             return Err(ElabError::Missing {
                 what: Missing::UnsynthesizedLet,
                 span: binding.span,

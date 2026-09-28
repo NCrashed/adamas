@@ -485,33 +485,3 @@ fn an_operator_dictionary_crosses_a_closure() {
     assert!(ok, "не собралось: {stderr}");
     assert_eq!(executed(&app.join(".adamas/build/Main")), expected);
 }
-
-/// Отказ эмиттера - тем же правилом: функцию он называет, место находит
-/// драйвер.
-///
-/// Держится на границе: вектор (§4.9), живущий поперёк точки приостановки, в
-/// слот кадра не помещается, и коробки у него нет (§10 вопрос 221). Прежде
-/// свидетель стоял на эффектной функции с плоским ответом, потом на плотной
-/// записи; обе границы сняты.
-#[test]
-fn an_emitter_refusal_names_the_file_and_line() {
-    let app = scratch("emitter-place");
-    write(
-        &app.join("Main.adamas"),
-        "type Layout = { size : UInt32, align : UInt32 }\n\n\
-         class Primitive a where\n  simdLayout : Layout\n\n\
-         data Unit where\n  MkUnit : Unit\n\
-         data List (a : Type) where\n  Nil : List a\n  Cons : a -> List a -> List a\n\
-         effect Ask where\n  ask : Float32\n\
-         one : Float32\none = 1.0\n\
-         body : {Ask} List Float32\nbody =\n  \
-         let v : Simd 4 Float32 = simdSplat 4 one\n  \
-         let n : Float32 = ask\n  Cons (simdLane v 0 + n) Nil\n\
-         main : List Float32\nmain = handle body with\n  return v -> v\n  ask -> Nil\n",
-    );
-    let (ok, _, stderr) = run(adamas().arg("build").arg(app.join("Main.adamas")));
-    assert!(!ok, "отказ эмиттера прошёл сборкой");
-    assert!(stderr.contains("Main.adamas:16:1:"), "{stderr}");
-    assert!(stderr.contains("body ="), "{stderr}");
-    assert!(stderr.contains("переживает точку приостановки"), "{stderr}");
-}

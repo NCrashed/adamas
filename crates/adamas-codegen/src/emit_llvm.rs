@@ -446,7 +446,7 @@ const ENTRY_SYMBOL: &str = "adamas_entry";
 /// Счётен ли слот кадра: указательный либо коробка плотного агрегата (§10
 /// вопрос 221). Счётные идут первыми - соглашение с `adamas_kont_push`.
 fn frame_counted(repr: Repr) -> bool {
-    repr.counted() || matches!(repr, Repr::Packed(_))
+    repr.counted() || matches!(repr, Repr::Packed(_) | Repr::Simd { .. })
 }
 
 /// Имя дропа детей, видимого из `.ll`.
@@ -694,7 +694,7 @@ fn conversions(out: &mut String, program: &Program) {
 fn arrays(out: &mut String, program: &Program) {
     // Плотный агрегат уезжает через границу кадра коробкой - плоским массивом
     // из одной ячейки (§10 вопрос 221), - и объявления нужны ему тоже.
-    if !arrayed(program) && program.packings.is_empty() {
+    if !arrayed(program) && program.packings.is_empty() && !vectored(program) {
         return;
     }
     out.push_str(concat!(
@@ -749,6 +749,24 @@ fn arrayed(program: &Program) -> bool {
                     | Expr::ArrayData { .. }
                     | Expr::SimdLoad { .. }
                     | Expr::SimdStore { .. }
+            );
+        });
+        found
+    })
+}
+
+/// Заводит ли программа вектор (§4.9): коробка вектора в слоте кадра - тот же
+/// плоский массив, и объявления ей нужны (§10 вопрос 221).
+fn vectored(program: &Program) -> bool {
+    program.functions.iter().any(|function| {
+        let mut found = false;
+        walk(&function.body, &mut |expr| {
+            found |= matches!(
+                expr,
+                Expr::SimdSplat { .. }
+                    | Expr::SimdSet { .. }
+                    | Expr::SimdArith { .. }
+                    | Expr::SimdLoad { .. }
             );
         });
         found
@@ -5195,11 +5213,20 @@ impl<'a> Builder<'a> {
             self.instruction(&format!("{name} = inttoptr i64 {bits} to ptr"), self.here());
             return Ok(name);
         }
-        // Плотный агрегат - копией в коробку: плоский массив из одной ячейки
-        // своей ширины (§10 вопрос 221), как `adamas_park_N` у C-бэкенда.
-        if let Repr::Packed(pack) = repr {
-            let ty = packed_ty(pack, &self.program.packings);
-            let size = self.program.packings[pack.0 as usize].size;
+        // Плотный агрегат и вектор - копией в коробку: плоский массив из одной
+        // ячейки своей ширины (§10 вопрос 221), как `adamas_park_N` у C-бэкенда.
+        let boxable = match repr {
+            Repr::Packed(pack) => Some((
+                packed_ty(pack, &self.program.packings),
+                u64::from(self.program.packings[pack.0 as usize].size),
+            )),
+            Repr::Simd { lanes, lane } => Some((
+                vector(lanes, lane),
+                u64::from(lanes) * u64::from(lane.size()),
+            )),
+            _ => None,
+        };
+        if let Some((ty, size)) = boxable {
             let boxed = self.temp();
             self.instruction(
                 &format!("{boxed} = call ptr @adamas_array_alloc(i64 1, i64 {size})"),
@@ -5240,10 +5267,14 @@ impl<'a> Builder<'a> {
             );
             return Ok(self.narrow(ty, &bits));
         }
-        // Коробка агрегата: копия обратно, и коробка отпускается - слот
-        // забирается владением (§10 вопрос 221).
-        if let Repr::Packed(pack) = repr {
-            let ty = packed_ty(pack, &self.program.packings);
+        // Коробка агрегата или вектора: копия обратно, и коробка отпускается -
+        // слот забирается владением (§10 вопрос 221).
+        let unboxed = match repr {
+            Repr::Packed(pack) => Some(packed_ty(pack, &self.program.packings)),
+            Repr::Simd { lanes, lane } => Some(vector(lanes, lane)),
+            _ => None,
+        };
+        if let Some(ty) = unboxed {
             let cell = self.temp();
             self.instruction(
                 &format!("{cell} = call ptr @adamas_array_at(ptr {value}, i64 0)"),

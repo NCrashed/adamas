@@ -1,0 +1,58 @@
+-- Вектор поперёк точки приостановки (§4.9, §10 вопрос 221).
+--
+-- Слот кадра - слово, а `Simd 4 Float32` - шестнадцать байт. Уезжает вектор
+-- копией в куче - плоским массивом из одной ячейки, - как плотная запись
+-- (`eval/packed-across-suspension`), и возвращается копией обратно. До правки
+-- оба эмиттера отказывали «переживает точку приостановки», хотя машина
+-- программу считала. Поля ответа:
+--
+--   * `restored` - возобновление не в хвосте, дважды: вектор
+--     восстанавливается через две точки подряд;
+--   * `aborted` - ветка не возобновляет: коробку отпускает дроп кадра;
+--   * `forked` - мультишот: копия сегмента дупает слот.
+
+type Layout = {size : UInt32, align : UInt32}
+
+class Primitive a where
+  simdLayout : Layout
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Ask where
+  ask : Float32
+
+append : List Float32 -> List Float32 -> List Float32
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+one : Float32
+one = 1.0
+body : {Ask} List Float32
+body =
+  let v : Simd 4 Float32 = simdSplat 4 one
+  let n : Float32 = ask
+  let m : Float32 = ask
+  Cons (simdLane v 0 + n) (Cons (simdLane v 3 + m) Nil)
+
+restored : List Float32
+restored = handle body with
+  return v -> v
+  ask -> Cons 0.0 (resume 5.0)
+
+aborted : List Float32
+aborted = handle body with
+  return v -> v
+  ask -> Nil
+
+forked : List Float32
+forked = handleMulti body with
+  return v -> v
+  ask -> append (resume 1.0) (resume 2.0)
+
+main : List Float32
+main = append restored (append aborted forked)

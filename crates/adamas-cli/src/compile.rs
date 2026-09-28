@@ -189,6 +189,7 @@ fn refused(
 #[cfg(test)]
 mod tests {
     use adamas_codegen::CompileError;
+    use adamas_codegen::EmitError;
     use adamas_codegen::lower::LowerError;
     use adamas_core::sig::Signature;
     use adamas_core::source::{SourceFile, Span};
@@ -232,5 +233,31 @@ mod tests {
             said.contains("отказ в `Prelude.add`, до которого дотянулось `main`"),
             "{said}"
         );
+    }
+
+    /// Отказ эмиттера - тем же правилом: функцию он называет, место находит
+    /// драйвер (§10 вопрос 217).
+    ///
+    /// Ошибка составлена руками: все отказы эмиттера, до которых дотягивалась
+    /// пользовательская программа, сняты (§10 вопросы 215, 221), а правило
+    /// драйвера от этого не перестало быть правилом. Хвост `@` специализации
+    /// снимается.
+    #[test]
+    fn an_emitter_refusal_names_the_file_and_line() {
+        let main = "xs : Int32\nxs = 1\n\nbody : Int32\nbody = xs\n";
+        let units = vec![(
+            None,
+            SourceFile::new("Main.adamas".to_owned(), main.to_owned()),
+        )];
+        let mut signature = Signature::default();
+        let at = main.find("body =").unwrap_or(0);
+        signature.locate("body", Span::new(at, at + 4));
+        let error = CompileError::Emit(EmitError::Parked {
+            function: "body@".to_owned(),
+            shape: "adamas_simd_4_Float32".to_owned(),
+        });
+        let said = refused(&units, &signature, error).to_string();
+        assert!(said.starts_with("Main.adamas:5:1:"), "{said}");
+        assert!(said.contains("переживает точку приостановки"), "{said}");
     }
 }

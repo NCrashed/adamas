@@ -222,7 +222,7 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     out.push_str(FLAT);
     out.push('\n');
     packings(&mut out, program);
-    vectors(&mut out, program);
+    let shapes = vectors(&mut out, program);
     prototypes(&mut out, program);
     if tabled(program) {
         out.push_str(CALLBACK_TABLE);
@@ -233,6 +233,7 @@ pub fn emit(program: &Program) -> Result<String, EmitError> {
     out.push_str(RELEASE);
     out.push('\n');
     parked_packings(&mut out, program);
+    parked_vectors(&mut out, &shapes);
     if nursed(program) {
         out.push_str(PROMOTE);
         out.push('\n');
@@ -454,18 +455,18 @@ fn worded(repr: Repr) -> bool {
 
 /// Ложится ли значение в слот **кадра** и на границу куска (§10 вопрос 221).
 ///
-/// Шире [`worded`] ровно на плотный агрегат: он уезжает в слот копией в куче -
-/// плоским массивом из одной ячейки (`adamas_park_N`), - и возвращается
-/// копией обратно, отпуская коробку (`adamas_unpark_N`). Слот замыкания так не
+/// Шире [`worded`] ровно на плотный агрегат и вектор (§4.9): они уезжают в
+/// слот копией в куче - плоским массивом из одной ячейки (`adamas_park_N`), -
+/// и возвращаются копией обратно, отпуская коробку (`adamas_unpark_N`). Слот замыкания так не
 /// умеет: там порядок счётных задаёт понижение, и коробку туда молча не
 /// положить.
 fn framed(repr: Repr) -> bool {
-    worded(repr) || matches!(repr, Repr::Packed(_))
+    worded(repr) || matches!(repr, Repr::Packed(_) | Repr::Simd { .. })
 }
 
 /// Счётен ли слот кадра: указательный либо коробка агрегата.
 fn frame_counted(repr: Repr) -> bool {
-    repr.counted() || matches!(repr, Repr::Packed(_))
+    repr.counted() || matches!(repr, Repr::Packed(_) | Repr::Simd { .. })
 }
 
 /// Значение словом: плоское примитивное - битами, прочее - собой.
@@ -481,6 +482,9 @@ fn into_word(repr: Repr, value: &str) -> String {
         Some(ty) => format!("adamas_slot_of(adamas_word_{}({value}))", ty.name()),
         None => match repr {
             Repr::Packed(pack) => format!("adamas_park_{}({value})", pack.0),
+            Repr::Simd { lanes, lane } => {
+                format!("adamas_park_simd_{lanes}_{}({value})", lane.name())
+            }
             _ => value.to_owned(),
         },
     }
@@ -492,6 +496,9 @@ fn from_word(repr: Repr, value: &str) -> String {
         Some(ty) => format!("adamas_bits_{}(adamas_slot_word({value}))", ty.name()),
         None => match repr {
             Repr::Packed(pack) => format!("adamas_unpark_{}({value})", pack.0),
+            Repr::Simd { lanes, lane } => {
+                format!("adamas_unpark_simd_{lanes}_{}({value})", lane.name())
+            }
             _ => value.to_owned(),
         },
     }
@@ -953,7 +960,7 @@ pub(crate) fn callbacks(out: &mut String, program: &Program, statics: bool) {
 /// Беззнаковый спутник заводится только у целых дорожек: в нём считается
 /// арифметика, чтобы заворачивание §4.3 держалось тем же ходом, каким его
 /// держит скаляр.
-fn vectors(out: &mut String, program: &Program) {
+fn vectors(out: &mut String, program: &Program) -> Vec<(u32, PrimTy)> {
     let mut shapes: Vec<(u32, PrimTy)> = Vec::new();
     // Невыровненный близнец заводится только тем формам, которые ходят в
     // память: он нужен обращению к окну колонки и больше ничему, а лишний
@@ -1004,7 +1011,7 @@ fn vectors(out: &mut String, program: &Program) {
         });
     }
     if shapes.is_empty() {
-        return;
+        return shapes;
     }
     loose.sort_by_key(|(lanes, lane)| (*lanes, lane.name()));
     // Порядок - по ширине, потом по имени дорожки: `PrimTy` сравнимого порядка
@@ -1015,7 +1022,7 @@ fn vectors(out: &mut String, program: &Program) {
         " * инструкцией. `vector_size` - расширение gcc и clang; структура из\n",
         " * полей дала бы тот же ответ и потому свидетелем не является. */\n"
     ));
-    for (lanes, lane) in shapes {
+    for &(lanes, lane) in &shapes {
         let name = vector_type(lanes, lane);
         let bytes = lanes * lane.size();
         let _ = writeln!(
@@ -1061,6 +1068,7 @@ fn vectors(out: &mut String, program: &Program) {
         }
     }
     out.push('\n');
+    shapes
 }
 
 /// Типы плоских агрегатов (§4.11): байты своей длины и своей границы.
@@ -1090,6 +1098,29 @@ fn parked_packings(out: &mut String, program: &Program) {
              }}\n\
              static inline adamas_pack_{at} adamas_unpark_{at}(adamas_value box) {{\n\
              \x20   adamas_pack_{at} value;\n\
+             \x20   memcpy(&value, adamas_array_data(box), sizeof value);\n\
+             \x20   adamas_drop_value(box);\n\
+             \x20   return value;\n\
+             }}"
+        );
+    }
+}
+
+/// То же для вектора (§4.9, §10 вопрос 221): ширина его - `lanes * size`, и в
+/// слово кадра он не ложится так же, как агрегат.
+fn parked_vectors(out: &mut String, shapes: &[(u32, PrimTy)]) {
+    for &(lanes, lane) in shapes {
+        let ty = vector_type(lanes, lane);
+        let name = format!("simd_{lanes}_{}", lane.name());
+        let _ = writeln!(
+            out,
+            "static inline adamas_value adamas_park_{name}({ty} value) {{\n\
+             \x20   adamas_value box = adamas_array_alloc(1, sizeof value);\n\
+             \x20   memcpy(adamas_array_data(box), &value, sizeof value);\n\
+             \x20   return box;\n\
+             }}\n\
+             static inline {ty} adamas_unpark_{name}(adamas_value box) {{\n\
+             \x20   {ty} value;\n\
              \x20   memcpy(&value, adamas_array_data(box), sizeof value);\n\
              \x20   adamas_drop_value(box);\n\
              \x20   return value;\n\

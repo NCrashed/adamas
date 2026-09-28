@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Cons 0.0 (Cons 0.0 (Cons 6.0 (Cons 6.0 (Cons 2.0 (Cons 2.0 (Cons 2.0 (Cons 3.0 (Cons 3.0 (Cons 2.0 (Cons 3.0 (Cons 3.0 Nil)))))))))))

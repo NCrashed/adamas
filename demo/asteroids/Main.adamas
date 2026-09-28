@@ -179,17 +179,13 @@ hasSize = There (There Here)
 --
 -- Требует **обеих** меток разом. Позвать её для набора без скорости не выйдет:
 -- доказательства не построить, и это отказ проверки типов, а не ветвь.
---
--- Набор `cs` передаётся явно и пересобирается внешним, а не взятым разбором:
--- разбор `MkRocks` не уточняет индекс, и при неявном `cs` рекурсивный вызов
--- не выводится.
-drift : (0 cs : Tags) -> (0 a : Has Position cs) -> (0 b : Has Velocity cs) -> Rocks cs -> UInt64 -> Rocks cs
-drift cs a b w 0 = w
-drift cs a b (MkRocks ds xs ys vx vy sz) i =
+drift : {0 cs : Tags} -> (0 a : Has Position cs) -> (0 b : Has Velocity cs) -> Rocks cs -> UInt64 -> Rocks cs
+drift a b w 0 = w
+drift a b (MkRocks ds xs ys vx vy sz) i =
   let j = i - 1
   let nx = wrap (at xs j + at vx j) (width * scale)
   let ny = wrap (at ys j + at vy j) (height * scale)
-  drift cs a b (MkRocks cs (put xs j nx) (put ys j ny) vx vy sz) j
+  drift a b (MkRocks ds (put xs j nx) (put ys j ny) vx vy sz) j
 
 -- | Размеры камней сами по себе: счёт живых не должен пересобирать всю запись,
 -- и поле берётся полем, а не разбором в цикле.
@@ -835,7 +831,7 @@ injure (MkWorld ship rs ss keys st) = replace (bump ship keys rs ss st rocks) st
 step : World -> World
 step (MkWorld ship rs ss keys st) =
   let moved = steer ship keys
-  let drifted = drift whole hasPos hasVel rs rocks
+  let drifted = drift hasPos hasVel rs rocks
   let shoots = armedAt moved keys
   let fired = fire moved (fly ss shots) shoots
   let gunned = if shoots then {moved | reload = reloadTime} else moved

@@ -9,4 +9,3 @@ Error: let-synthesis-refused.adamas:16:11: несовпадение типов: 
     (ω xs : List Int32)
     (ω i : UInt64)
     (ω j : UInt64)
-  путь: аргумент применения

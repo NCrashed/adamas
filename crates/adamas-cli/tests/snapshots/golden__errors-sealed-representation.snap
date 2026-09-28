@@ -7,4 +7,3 @@ Error: sealed-representation.adamas:28:12: несовпадение типов: 
              ^
   в контексте:
     (ω x : Hidden.T)
-  путь: тело `leaked` -> тело лямбды

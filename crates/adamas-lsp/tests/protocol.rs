@@ -402,8 +402,8 @@ fn a_diagnostic_lands_past_multibyte_text() {
     assert_eq!(found["source"], json!("adamas"));
     assert_eq!(
         found["message"],
-        json!(format!("{HEADLINE}\n  путь: тело `двойка`")),
-        "текст - тот же, что печатает терминал, вместе с маршрутом"
+        json!(HEADLINE),
+        "текст - тот же, что печатает терминал; маршрут из одного тела `двойка` не печатается"
     );
     client.stop();
 }

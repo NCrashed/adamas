@@ -5,4 +5,3 @@ expression: text
 Error: mutual-open-delta.adamas:37:11: несовпадение типов: ожидался `Eqv Nat Zero Zero`, получен `Eqv Nat n0 n0`
     refl0 = mk n0
             ^^^^^
-  путь: тело `refl0`

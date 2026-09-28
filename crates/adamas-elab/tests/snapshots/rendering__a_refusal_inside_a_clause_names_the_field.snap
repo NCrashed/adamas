@@ -1,6 +1,6 @@
 ---
 source: crates/adamas-elab/tests/rendering.rs
-expression: refusal(&text)
+expression: shown
 ---
 проба.adamas:11:14: несовпадение типов: ожидался `Bool`, получен `Nat`
   f (Succ k) = k
@@ -8,4 +8,3 @@ expression: refusal(&text)
   в контексте:
     (ω #1 : Nat)
     (ω k : Nat)
-  путь: тело `f` -> тело лямбды -> ветвь #1 -> тело лямбды

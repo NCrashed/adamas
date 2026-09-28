@@ -9,4 +9,3 @@ Error: operation-row-doubled.adamas:44:16: эффекты `{Log, Log | e0}` не
     (ω c : (ω _ : Unit) -> {Async, Log | e0} Unit)
     (ω b : (ω _ : Unit) -> {Async, Log, Log | e0} Unit)
     (1 resume : (ω _ : Unit) -> {Log | e0} Unit)
-  путь: тело `sequential` -> тело лямбды -> аргумент применения -> тело лямбды -> тело лямбды -> аргумент применения

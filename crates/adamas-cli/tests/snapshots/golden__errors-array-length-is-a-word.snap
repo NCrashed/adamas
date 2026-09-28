@@ -5,4 +5,3 @@ expression: text
 Error: array-length-is-a-word.adamas:13:13: несовпадение типов: ожидался `UInt64`, получен `Nat`
   bad : Array (Succ Zero) Int64
               ^^^^^^^^^^^
-  путь: функция применения -> аргумент применения

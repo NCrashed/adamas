@@ -10,4 +10,3 @@ Error: region-mixed-with-another.adamas:39:3: эффекты `{Alloc r | e0}` н
     (0 s : Region)
     (ω u : Unit)
     (ω p : Ref r Nat)
-  путь: тело `crossed` -> тело лямбды -> тело лямбды -> тело лямбды -> тело `let`

@@ -5,4 +5,3 @@ expression: text
 Error: sealed-synonym.adamas:28:1: несовпадение типов: ожидался `(ω _ : Hidden.T) -> (ω _ : Hidden.T) -> Bool`, получен `(ω _ : Nat) -> (ω _ : Nat) -> Bool`
   module Hidden :> Eqv where
   ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  путь: тело члена группы #1

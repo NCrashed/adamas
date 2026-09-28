@@ -5,4 +5,3 @@ expression: text
 Error: array-read-twice.adamas:14:18: `ys` объявлена с кратностью 1, а использована ω
     MkRead v ys -> arraySet (arraySet ys 0 v) 1 (arrayIndex ys 2)
                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  путь: тело `leaky` -> тело лямбды -> тело `let` -> ветвь #0 -> тело лямбды

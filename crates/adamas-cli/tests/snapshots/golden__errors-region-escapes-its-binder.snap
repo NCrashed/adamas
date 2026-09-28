@@ -7,4 +7,3 @@ Error: region-escapes-its-binder.adamas:42:22: несовпадение типо
                        ^^^^^^^^
   в контексте:
     (0 q : Region)
-  путь: тело `escaped` -> тело лямбды -> аргумент применения

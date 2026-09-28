@@ -7,4 +7,3 @@ Error: case-dependent-motive.adamas:29:12: несовпадение типов: 
              ^^^^^^^^^
   в контексте:
     (ω b : Bool)
-  путь: тело `mirror` -> тело лямбды

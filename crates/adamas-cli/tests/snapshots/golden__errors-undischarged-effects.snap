@@ -8,4 +8,3 @@ Error: undischarged-effects.adamas:24:15: эффекты `{State a | e0}` не �
   в контексте:
     (0 a : Type u0)
     (ω x : a)
-  путь: тело `escapes` -> тело лямбды -> тело лямбды

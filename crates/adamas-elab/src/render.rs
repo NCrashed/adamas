@@ -112,8 +112,8 @@ pub(crate) fn headline(error: &ElabError) -> String {
 ///
 /// Телескоп показывается всегда: связывания, введённые проверкой, автору иначе
 /// неоткуда взять - в тексте на месте отказа видно только имя. Путь объясняет,
-/// **почему** подчёркнуто именно это место, и когда маршрут уходит в структуру,
-/// порождённую элаборацией, он остаётся единственным указанием, куда смотреть.
+/// **почему** подчёркнуто именно это место, - в тех кадрах, у которых есть имя
+/// (см. [`route`]).
 fn explain(error: &TypeError, names: &Names) -> String {
     let mut out = String::new();
     let naming = Naming::of(error);
@@ -142,39 +142,53 @@ fn explain(error: &TypeError, names: &Names) -> String {
     out
 }
 
-/// Маршрут словами.
+/// Маршрут словами - только кадры, у которых есть имя.
 ///
 /// Номер члена и номер конструктора заменяются именами: ядру они не нужны, а
-/// читателю номер не говорит ничего - тем более что группа сегодня всегда из
-/// одного члена, и «#0» в ней постоянно.
+/// читателю номер не говорит ничего.
+///
+/// Анонимные кадры - тело лямбды, аргумент применения, номер ветви - позиции
+/// в терме ядра, а не в тексте: лямбд параметров клаузы и неявных аргументов
+/// автор не писал, а ветвь нумеруется по конструктору. Место они уточняли,
+/// пока каретка была грубой; перевод маршрута в спан делает это сам, и в
+/// тексте они оставались пересказом элаборатора (§10 вопрос 217). Остаётся
+/// то, чего каретка не передаёт: отказ в типе, а не в теле, и в каком
+/// конструкторе. Одиночное «тело `f`» - то же, что файл и строка, и не
+/// печатается.
 ///
 /// Номер конструктора считается **внутри** члена, поэтому пройденный член
 /// запоминается: маршрут идёт снаружи внутрь, и `MemberType` приходит раньше
 /// своего `Constructor`.
 fn route(error: &TypeError, names: &Names) -> Vec<String> {
     let mut member = None;
-    error
+    let mut only_body = true;
+    let steps: Vec<String> = error
         .path()
-        .map(|frame| {
+        .filter_map(|frame| {
             if let Frame::MemberType(index) | Frame::MemberBody(index) = frame {
                 member = Some(index);
             }
-            step(frame, member, names)
+            let found = step(frame, member, names)?;
+            only_body &= matches!(frame, Frame::MemberBody(_));
+            Some(found)
         })
-        .collect()
+        .collect();
+    if only_body && steps.len() <= 1 {
+        return Vec::new();
+    }
+    steps
 }
 
-/// Один кадр словами; имени нет - остаётся номер, который знает ядро.
-fn step(frame: Frame, member: Option<u32>, names: &Names) -> String {
-    let found = match frame {
+/// Один кадр словами; кадра без имени в тексте нет.
+fn step(frame: Frame, member: Option<u32>, names: &Names) -> Option<String> {
+    match frame {
         Frame::MemberType(index) => names.member(index).map(|name| format!("тип `{name}`")),
         Frame::MemberBody(index) => names.member(index).map(|name| format!("тело `{name}`")),
         Frame::Constructor(index) => member
             .and_then(|member| names.constructor(member, index))
             .map(|name| format!("{} `{name}`", names.inner())),
         _ => None,
-    };
-    found.unwrap_or_else(|| frame.to_string())
+    }
 }
 
 /// Окно вокруг подчёркнутого фрагмента.

@@ -7,4 +7,3 @@ Error: if-branch-located.adamas:7:27: несовпадение типов: ож�
                             ^^^^
   в контексте:
     (ω c : Prelude.Bool)
-  путь: тело `pick` -> тело лямбды -> ветвь #1

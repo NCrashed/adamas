@@ -1,0 +1,33 @@
+-- Плотная запись в захвате лямбды (§4.11, §10 вопрос 223).
+--
+-- Замыкание держит захваченное указателем, и запись уезжает туда объектом
+-- своей боксированной формы. Факт захвата называл её голым указателем, форма
+-- терялась, и `p.x` внутри лямбды отвергался «форма записи потеряна», хотя
+-- машина считала. Тот же дефект, что снят у поля конструктора вопросом 204.
+-- Поля ответа:
+--
+--   * `projected` - проекция из захваченной записи;
+--   * `passed` - захваченная запись уходит дальше аргументом плотной позиции
+--     и сужается обратно в байты;
+--   * `flagged` - в записи лежит `Bool`, плотное семейство: сужение вложенное.
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+type Pt = {x : Int32, y : Int32}
+type Tagged = {value : Int32, on : Bool}
+apply : (Int32 -> Int32) -> Int32 -> Int32
+apply f v = f v
+projected : Pt -> Int32 -> Int32
+projected p v = apply (\w -> p.x + w) v
+norm : Pt -> Int32
+norm q = q.x * 10 + q.y
+passed : Pt -> Int32 -> Int32
+passed p v = apply (\w -> norm p + w) v
+gate : Tagged -> Int32
+gate t = if t.on then t.value else 0
+flagged : Tagged -> Int32 -> Int32
+flagged t v = apply (\w -> gate t + w) v
+main : List Int32
+main = Cons (projected {x = 1, y = 2} 3) (Cons (passed {x = 4, y = 5} 100) (Cons (flagged {value = 7, on = True} 1000) Nil))

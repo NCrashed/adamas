@@ -3872,7 +3872,21 @@ impl<'a> Lowerer<'a> {
             // прежний.
             let worded = slots == Slots::Mixed && fact.repr.primitive().is_some();
             if fact.present && !fact.repr.pointer() && !worded {
-                let Some(boxed) = self.moved(scope, &value, fact.repr, Repr::Boxed)? else {
+                // Плотная запись уезжает объектом **своей** формы, и факт
+                // захвата её называет (§10 вопрос 223): голый указатель
+                // терял форму, и `p.x` внутри лямбды отвергался, - тот же
+                // дефект, что снят у поля конструктора вопросом 204.
+                let want = match fact.repr {
+                    Repr::Packed(pack)
+                        if self.packings[pack.0 as usize]
+                            .sole()
+                            .is_some_and(|variant| variant.ctor.is_none()) =>
+                    {
+                        Repr::Record(self.boxed_shape(pack)?)
+                    }
+                    _ => Repr::Boxed,
+                };
+                let Some(boxed) = self.moved(scope, &value, fact.repr, want)? else {
                     return Err(LowerError::Representation {
                         at,
                         want: describe(Repr::Boxed),
@@ -3880,7 +3894,7 @@ impl<'a> Lowerer<'a> {
                     });
                 };
                 value = boxed;
-                fact = fact.shaped(Repr::Boxed);
+                fact = fact.shaped(want);
             }
             chosen.push((position, fact, value));
         }

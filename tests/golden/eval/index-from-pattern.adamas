@@ -1,0 +1,63 @@
+-- Неявный индекс, уточнённый разбором, в рекурсивном вызове (§10 вопрос 216).
+--
+-- Дырка неявного `n` заводится в контексте клаузы, а решает её ядро в ветви,
+-- где разбор `MkBox m x` уточнил `n ↦ m`: спайн дырки `n m x i` становится
+-- `m m x i`. Повтор переменной решатель отвергал, и вызов не выводился, хотя
+-- индекс известен. Поля ответа:
+--
+--   * `counted` - индекс переменной-полем, рекурсия пересобирает `MkBox m`;
+--   * `drifted` - форма демо: индекс - множество меток, и рядом
+--     доказательство членства, чей тип уточнён тем же разбором;
+--   * `paired` - два разбора с общим индексом: `n`, `m` и `k` сходятся в одну
+--     переменную, повтор тройной.
+
+data Nat where
+  Z : Nat
+  S : Nat -> Nat
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+data Box : Nat -> Type where
+  MkBox : (0 m : Nat) -> Int32 -> Box m
+
+count : {0 n : Nat} -> Box n -> Int32 -> Int32
+count b 0 = 0
+count (MkBox m x) i = x + count (MkBox m x) (i - 1)
+
+counted : Int32
+counted = count (MkBox (S Z) 5) 3
+
+data Tag where
+  P : Tag
+  V : Tag
+
+data Tags where
+  None : Tags
+  With : Tag -> Tags -> Tags
+
+data Has : Tag -> Tags -> Type where
+  Here : {0 t : Tag} -> {0 ts : Tags} -> Has t (With t ts)
+  There : {0 t : Tag} -> {0 u : Tag} -> {0 ts : Tags} -> Has t ts -> Has t (With u ts)
+
+data Rocks : Tags -> Type where
+  MkRocks : (0 cs : Tags) -> Int32 -> Rocks cs
+
+drift : {0 cs : Tags} -> (0 b : Has V cs) -> Rocks cs -> Int32 -> Rocks cs
+drift b w 0 = w
+drift b (MkRocks ds x) i = drift b (MkRocks ds (x + 7)) (i - 1)
+
+drifted : Int32
+drifted = case drift (There Here) (MkRocks (With P (With V None)) 1) 4 of
+  MkRocks _ x -> x
+
+sum2 : {0 n : Nat} -> Box n -> Box n -> Int32 -> Int32
+sum2 a b 0 = 0
+sum2 (MkBox m x) (MkBox k y) i = x * y + sum2 (MkBox m x) (MkBox k y) (i - 1)
+
+paired : Int32
+paired = sum2 (MkBox Z 2) (MkBox Z 10) 3
+
+main : List Int32
+main = Cons counted (Cons drifted (Cons paired Nil))

@@ -1,0 +1,10 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: default-checked-in-class.adamas:11:23: несовпадение типов: ожидался `Int32`, получен `Prelude.Bool`
+    broken x = name x + True
+                        ^^^^
+  в контексте:
+    (0 a : Type u0)
+    (ω x : a)

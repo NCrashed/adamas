@@ -4763,7 +4763,8 @@ used = Yes
 #[test]
 fn a_constraint_without_an_instance_is_refused() {
     // Полиморфная функция без констрейнта словарь взять неоткуда: ни
-    // контекста, ни инстанса для переменной.
+    // контекста, ни инстанса для переменной. Отказ свой - он говорит, что
+    // дописать (§10 вопрос 219).
     let error = refused(&format!(
         "{BASE}{EQ_CLASS}
 loose : a -> a -> Bool
@@ -4771,7 +4772,7 @@ loose x y = eq x y
 "
     ));
     assert!(
-        matches!(error, ElabError::NoInstance { .. }),
+        matches!(error, ElabError::RigidInstance { .. }),
         "получено {error:?}"
     );
 }

@@ -129,6 +129,11 @@ pub struct Class {
     /// объявляет инстанс. Раскрывается умолчание поэтому **в инстансе**, где
     /// этот словарь уже собирается.
     pub defaults: HashMap<Symbol, Vec<adamas_parser::ast::Clause>>,
+    /// Область видимости файла на месте объявления класса. Умолчание
+    /// раскрывается в инстансе, а имена его обязаны разрешаться там, где оно
+    /// написано: `compare` в умолчании прелюдного `Ord` в файле инстанса не
+    /// виден (§10 вопрос 219). `None` - умолчаний нет.
+    pub home: Option<adamas_core::sig::Scope>,
 }
 
 impl Instances {
@@ -423,10 +428,7 @@ fn settle(
             Head::Named(heads) => heads,
             // Голова-переменная: инстанса для неё нет и быть не может, а
             // словарь из контекста уже не нашёлся.
-            Head::Rigid => {
-                let written = written(&class, &[Rc::from("переменная")]);
-                return Err(ElabError::NoInstance { written, span });
-            }
+            Head::Rigid => return Err(ElabError::rigid(&class, span)),
             // Синоним, отдающий параметр: ключа у цели нет, а взять вместо
             // него имя синонима значило бы завести второй ключ на тот же тип.
             Head::Projecting => {

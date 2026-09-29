@@ -1,0 +1,30 @@
+-- Инстанс `Ord`, написанный одним `compare` (§4.4, §10 вопрос 219).
+--
+-- `lt` и `le` берутся умолчаниями прелюдного класса. Умолчание раскрывается в
+-- инстансе, а написано в прелюдии, и имена его - `compare`, `LT`, `EQ`,
+-- `GT` - обязаны разрешаться там, где оно написано: в области видимости
+-- этого файла прелюдного `compare` нет, и раскрытие отказывало «имя
+-- `compare` не найдено». Ответ - четыре сравнения через `<`, `<=`, `>=`,
+-- `>`, два из которых идут умолчаниями, два - теми же с переставленными
+-- аргументами.
+
+data Size where
+  Small : Size
+  Big : Size
+
+instance Eq Size where
+  eq Small Small = True
+  eq Big Big = True
+  eq x y = False
+
+instance Ord Size where
+  compare Small Big = LT
+  compare Big Small = GT
+  compare x y = EQ
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+main : List Bool
+main = Cons (Small < Big) (Cons (Big <= Small) (Cons (Big >= Big) (Cons (Big > Small) Nil)))

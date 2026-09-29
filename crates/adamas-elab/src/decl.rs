@@ -32,7 +32,7 @@ use adamas_core::prim::PrimTy;
 use adamas_core::row::{Label, Row, RowVar, Tail};
 use adamas_core::sig::{
     Blocked, Callback as CallbackForm, Cross, Crossing, DefinitionKind, Group, Member as SigMember,
-    Reuse, Signature, Spot,
+    Reuse, Scope, Signature, Spot,
 };
 use adamas_core::source::Span;
 use adamas_core::term::{Args, Binder, Fields, Name as CoreName, Term};
@@ -1597,7 +1597,131 @@ fn declare_class(
     for method in &info.methods {
         declare_method(signature, metas, &name.text, method, within, span)?;
     }
+    if !info.defaults.is_empty() {
+        info.home = Some(signature.scope().clone());
+    }
     instances.declare(&name.text, info);
+    checked_defaults(
+        signature,
+        metas,
+        Known {
+            owned,
+            fixities,
+            instances,
+        },
+        within,
+        class,
+        &name.text,
+        &params,
+    )
+}
+
+/// Тело умолчания проверяется в классе, один раз и пробно (§10 вопрос 219).
+///
+/// Раскрывается умолчание по-прежнему в инстансе, где словарь для соседних
+/// методов уже собирается. Но там проверялось оно только у инстанса, который
+/// метода не написал: ошибка в умолчании класса без инстансов проходила
+/// молча, ошибка у взявшего инстанса подчёркивала `instance`, а не тело, и
+/// умолчание звало классы, которых класс в сигнатуре не требовал.
+///
+/// Проверка - обычное определение `{C a} => <тип метода>` с клаузами
+/// умолчания, объявленное в копии сигнатуры и выброшенное: соседние методы и
+/// суперклассы разрешаются из собственного словаря, как у всякого `{C a} =>`.
+/// Отказ стоит на теле умолчания, потому что клаузы - его.
+#[allow(clippy::too_many_arguments)]
+fn checked_defaults(
+    signature: &Signature,
+    metas: &mut Metas,
+    known: Known<'_>,
+    within: Option<&Enclosing>,
+    class: &ast::ClassDecl,
+    name: &Symbol,
+    params: &[ast::Binder],
+) -> Result<(), ElabError> {
+    for member in &class.members {
+        let DeclKind::Clauses {
+            name: method,
+            clauses,
+        } = &member.kind
+        else {
+            continue;
+        };
+        let Some(ty) = class.members.iter().find_map(|it| match &it.kind {
+            DeclKind::Signature { name, ty, .. } if name.text == method.text => Some(ty),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let at = ty.span;
+        let named = |text: &Symbol| ast::Expr {
+            kind: ast::ExprKind::Name(ast::Name {
+                text: Rc::clone(text),
+                span: at,
+            }),
+            span: at,
+        };
+        let constraint =
+            params
+                .iter()
+                .flat_map(|binder| &binder.names)
+                .fold(named(name), |head, param| ast::Expr {
+                    kind: ast::ExprKind::App(Box::new(head), Box::new(named(&param.text))),
+                    span: at,
+                });
+        let constrained = ast::Expr {
+            kind: ast::ExprKind::Pi {
+                binders: vec![ast::Binder {
+                    visibility: ast::Visibility::Implicit,
+                    mult: None,
+                    names: vec![ast::Name {
+                        text: Rc::from("_"),
+                        span: at,
+                    }],
+                    factors: Vec::new(),
+                    grade: None,
+                    span: at,
+                    ty: Some(constraint),
+                    default: None,
+                }],
+                codomain: Box::new(ty.clone()),
+            },
+            span: at,
+        };
+        let checked = ast::Name {
+            text: Rc::from(format!("{name}#default.{}", method.text).as_str()),
+            span: method.span,
+        };
+        let mut scratch = signature.clone();
+        let mut quiet = Warnings::new();
+        let mut observed = Observed::new();
+        let pending = declared_signature(
+            &scratch,
+            metas,
+            known.owned,
+            known.fixities,
+            &mut quiet,
+            within,
+            &checked,
+            &constrained,
+            &[],
+            member.span,
+        )?;
+        define(
+            &mut scratch,
+            metas,
+            Known {
+                owned: known.owned,
+                fixities: known.fixities,
+                instances: known.instances,
+            },
+            &mut quiet,
+            &mut observed,
+            within,
+            &pending,
+            clauses,
+            member.span,
+        )?;
+    }
     Ok(())
 }
 
@@ -1999,7 +2123,9 @@ fn pure_spine(written: &Term) -> Term {
 }
 
 /// Член инстанса: имя метода, клаузы и место, откуда они взяты.
-type Written = (Symbol, Vec<ast::Clause>, Span);
+/// Член инстанса: метод, клаузы, место и - у раскрытого умолчания - область
+/// видимости, где умолчание написано.
+type Written = (Symbol, Vec<ast::Clause>, Span, Option<Scope>);
 
 /// Члены инстанса: методы класса вместе с клаузами, которые их определяют.
 ///
@@ -2043,10 +2169,10 @@ fn instance_members(
     }
     let mut found = Vec::with_capacity(info.methods.len());
     for method in &info.methods {
-        let (clauses, at) = match written.iter().find(|(it, ..)| it.text == *method) {
-            Some((_, clauses, at)) => ((*clauses).clone(), *at),
+        let (clauses, at, home) = match written.iter().find(|(it, ..)| it.text == *method) {
+            Some((_, clauses, at)) => ((*clauses).clone(), *at, None),
             None => match info.defaults.get(method) {
-                Some(clauses) => (clauses.clone(), span),
+                Some(clauses) => (clauses.clone(), span, info.home.clone()),
                 None => {
                     return Err(ElabError::MissingSignature {
                         name: Rc::clone(method),
@@ -2055,7 +2181,7 @@ fn instance_members(
                 }
             },
         };
-        found.push((Rc::clone(method), clauses, at));
+        found.push((Rc::clone(method), clauses, at, home));
     }
     Ok((info.superclasses, found))
 }
@@ -2478,37 +2604,50 @@ fn declare_members(
     )?;
 
     let mut trees = Vec::with_capacity(members.len());
-    for (at, (_, clauses, at_span)) in members.iter().enumerate() {
-        let compiled = {
-            let mut elaborator = Elaborator::with_group(
-                signature,
-                metas,
-                owned,
-                fixities,
-                warnings,
-                visible.clone(),
-            )
-            .declaring(&types[at])
-            .deferring();
-            let compiled = clauses
-                .iter()
-                .map(|clause| elaborator.clause(clause))
-                .collect::<Result<Vec<_>, _>>()?;
-            (compiled, elaborator.deferred(), elaborator.cases())
-        };
-        let (compiled, postponed, cases) = compiled;
-        let mut tree =
-            compile_traced(signature, metas, &types[at], &compiled).map_err(|error| {
-                ElabError::Clauses {
-                    span: *at_span,
-                    error: Box::new(error),
-                }
-            })?;
-        tree.nested = cases;
-        let group = postponed.group();
-        settle_literals(
-            signature, metas, owned, fixities, warnings, postponed, &tree.term, &types[at],
-        )?;
+    for (at, (_, clauses, at_span, home)) in members.iter().enumerate() {
+        // Раскрытое умолчание элаборируется в области видимости своего класса
+        // (§10 вопрос 219), и возвращается она и на пути отказа: элаборация
+        // идёт дальше после отказа, и чужая область испортила бы следующее
+        // объявление.
+        let saved = home
+            .as_ref()
+            .map(|home| std::mem::replace(signature.scope_mut(), home.clone()));
+        let outcome = (|| {
+            let (compiled, postponed, cases) = {
+                let mut elaborator = Elaborator::with_group(
+                    signature,
+                    metas,
+                    owned,
+                    fixities,
+                    warnings,
+                    visible.clone(),
+                )
+                .declaring(&types[at])
+                .deferring();
+                let compiled = clauses
+                    .iter()
+                    .map(|clause| elaborator.clause(clause))
+                    .collect::<Result<Vec<_>, _>>()?;
+                (compiled, elaborator.deferred(), elaborator.cases())
+            };
+            let mut tree =
+                compile_traced(signature, metas, &types[at], &compiled).map_err(|error| {
+                    ElabError::Clauses {
+                        span: *at_span,
+                        error: Box::new(error),
+                    }
+                })?;
+            tree.nested = cases;
+            let group = postponed.group();
+            settle_literals(
+                signature, metas, owned, fixities, warnings, postponed, &tree.term, &types[at],
+            )?;
+            Ok::<_, ElabError>((tree, group))
+        })();
+        if let Some(saved) = saved {
+            *signature.scope_mut() = saved;
+        }
+        let (tree, group) = outcome?;
         class::resolve(
             signature,
             metas,
@@ -2545,14 +2684,14 @@ fn declare_members(
     let routed: Vec<route::Member<'_>> = members
         .iter()
         .zip(&trees)
-        .map(|((_, clauses, _), tree)| route::Member {
+        .map(|((_, clauses, ..), tree)| route::Member {
             ty: None,
             clauses,
             compiled: tree,
         })
         .collect();
     let declared = Declared::Group(&routed);
-    for (at, (_, _, at_span)) in members.iter().enumerate() {
+    for (at, (_, _, at_span, _)) in members.iter().enumerate() {
         let member = u32::try_from(at).unwrap_or(u32::MAX);
         locate_allocation(signature, &qualified[at], &declared, member, *at_span);
         locate_reuse(

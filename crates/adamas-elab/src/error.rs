@@ -486,6 +486,21 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Инстанс у переменной типа: выбирать его не из чего, словарь приходит
+    /// только из контекста (§10 вопросы 217, 219). Прежде это был
+    /// [`Self::NoInstance`] с голым словом «переменная» на месте типа.
+    #[error(
+        "инстанс `{class}` для переменной типа не выбирается: словарь для неё приходит \
+         только из контекста - допишите `{{{class} …}} =>` в сигнатуру; у метода по \
+         умолчанию - объявите `{class}` суперклассом"
+    )]
+    RigidInstance {
+        /// Класс.
+        class: Symbol,
+        /// Где написано использование.
+        span: Span,
+    },
+
     /// Инстанс найден, но словарь не тотален, а позиция - стёртый фрагмент.
     ///
     /// Вердикт члена и пригодность словарём расходятся по построению (§10
@@ -1587,6 +1602,14 @@ impl Names {
 }
 
 impl ElabError {
+    /// Инстанс у переменной типа - см. [`Self::RigidInstance`].
+    pub(crate) fn rigid(class: &Symbol, span: Span) -> Self {
+        Self::RigidInstance {
+            class: std::rc::Rc::clone(class),
+            span,
+        }
+    }
+
     /// Имена объявленного - для маршрута, который несёт только номера.
     pub(crate) fn names(&self) -> Option<&Names> {
         match self {
@@ -1642,6 +1665,7 @@ impl ElabError {
             | Self::NotMatchable { span }
             | Self::AbstractType { span, .. }
             | Self::NoInstance { span, .. }
+            | Self::RigidInstance { span, .. }
             | Self::PartialInstance { span, .. }
             | Self::InstanceDepth { span, .. }
             | Self::DeclaringInstance { span, .. }

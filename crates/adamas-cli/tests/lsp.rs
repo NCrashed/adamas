@@ -27,7 +27,7 @@ use std::str::FromStr as _;
 
 use adamas_core::source::SourceFile;
 use adamas_lsp::Encoding;
-use adamas_lsp::lsp_types::{DiagnosticSeverity, Uri};
+use adamas_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Uri};
 
 /// Корень корпуса.
 fn corpus() -> PathBuf {
@@ -152,11 +152,17 @@ fn every_refusal_reaches_the_editor_unchanged() {
             "{}: сервер не отдал ни одного отказа",
             path.display()
         );
+        // Оговорки рядом с отказом законны: сервер отдаёт панели проблем всё,
+        // что нашлось, а терминал при отказе печатает только отказы. Сверяются
+        // поэтому отказы - неиспользованное имя в фикстуре ошибки часто и есть
+        // её сценарий (§10 вопрос 218).
+        let refused: Vec<&Diagnostic> = found
+            .iter()
+            .filter(|it| it.severity == Some(DiagnosticSeverity::ERROR))
+            .collect();
         assert!(
-            found
-                .iter()
-                .all(|it| it.severity == Some(DiagnosticSeverity::ERROR)),
-            "{}: отвергнутая программа обязана отдавать отказы, а не оговорки: {found:?}",
+            !refused.is_empty(),
+            "{}: отвергнутая программа обязана отдавать отказ: {found:?}",
             path.display()
         );
         assert!(
@@ -170,11 +176,11 @@ fn every_refusal_reaches_the_editor_unchanged() {
         // `Error: ` дописывает `anyhow` на выходе драйвера; перевод строки -
         // `eprintln!`. Пустая строка между отказами - разделитель драйвера: у
         // каждого своя каретка под своей строкой исходника.
-        let said: Vec<String> = found.iter().map(|it| rebuilt(&file, it)).collect();
+        let said: Vec<String> = refused.iter().map(|it| rebuilt(&file, it)).collect();
         let expected = format!("Error: {}\n", said.join("\n\n"));
         assert_eq!(terminal, expected, "{}", path.display());
         checked += 1;
-        plural += usize::from(found.len() > 1);
+        plural += usize::from(refused.len() > 1);
     }
     assert!(checked >= 98, "корпус отказов усох до {checked}");
     // Иначе список выше проверялся бы только на длине один, и восстановление

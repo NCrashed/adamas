@@ -47,6 +47,19 @@ pub enum Warning {
         /// Где стоит литерал.
         span: Span,
     },
+    /// Связывание, которое никто не читает (§10 вопрос 218).
+    #[error(
+        "`{name}` - {what} - нигде не читается; если так и задумано, назовите \
+         его `_{name}`"
+    )]
+    UnusedBinding {
+        /// Что это за связывание - подлежащим: «связывание `let`».
+        what: &'static str,
+        /// Имя.
+        name: Symbol,
+        /// Где оно связано.
+        span: Span,
+    },
 }
 
 impl Warning {
@@ -54,7 +67,9 @@ impl Warning {
     #[must_use]
     pub fn span(&self) -> Span {
         match self {
-            Self::UnusedImplicit { span, .. } | Self::DefaultedLiteral { span, .. } => *span,
+            Self::UnusedImplicit { span, .. }
+            | Self::DefaultedLiteral { span, .. }
+            | Self::UnusedBinding { span, .. } => *span,
         }
     }
 }

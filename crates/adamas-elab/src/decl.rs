@@ -262,6 +262,12 @@ pub(crate) fn elaborate_file(
     if declares_resource(decls) {
         pass.owned.expect_resources();
     }
+    // Неиспользованное ищется по дереву файла, до объявлений и один раз: у
+    // вложенного модуля своего вызова нет, его члены обходит тот же проход
+    // (§10 вопрос 218).
+    if within.is_none() {
+        pass.warnings.extend(crate::unused::unused(decls));
+    }
     let Pass {
         signature,
         metas,

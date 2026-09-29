@@ -66,6 +66,7 @@ pub mod program;
 mod recover;
 mod render;
 mod route;
+mod unused;
 mod warn;
 
 pub use decl::{elaborate, elaborate_into, elaborated};

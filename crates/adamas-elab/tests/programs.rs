@@ -864,6 +864,85 @@ inner f = Zero
     );
 }
 
+#[test]
+fn an_unread_binding_is_warned_about_where_it_is_bound() {
+    // §10 вопрос 218, вариант (в): предупреждают `let`, лямбда, альтернатива
+    // `case` и ветка хендлера - они пишутся ради чтения. Каждое место - своё
+    // слово в тексте, и отказа нет: программа принята.
+    let named = |text: &str| -> Vec<String> {
+        warned(&format!("{BASE}{text}"))
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    };
+    let bound = named(
+        "
+f : Nat -> Nat
+f n =
+  let m = Succ n
+  n
+",
+    );
+    assert_eq!(bound.len(), 1, "получено {bound:?}");
+    assert!(
+        bound[0].contains("`m`") && bound[0].contains("`let`"),
+        "{bound:?}"
+    );
+    assert!(
+        bound[0].contains("`_m`"),
+        "текст называет, как замолчать: {bound:?}"
+    );
+
+    let lambda = named(
+        "
+g : Nat -> Nat
+g = \\x -> Zero
+",
+    );
+    assert!(
+        lambda.len() == 1 && lambda[0].contains("лямбды"),
+        "{lambda:?}"
+    );
+
+    let alt = named(
+        "
+h : Nat -> Nat
+h n = case n of
+  Zero -> Zero
+  Succ k -> n
+",
+    );
+    assert!(alt.len() == 1 && alt[0].contains("`k`"), "{alt:?}");
+
+    // Переменная паттерна клаузы молчит: она стоит на позиции сигнатуры, и
+    // имя называет поле и непрочитанным.
+    assert!(
+        named(
+            "
+pred : Nat -> Nat
+pred Zero = Zero
+pred (Succ k) = Zero
+"
+        )
+        .is_empty(),
+        "параметр клаузы предупреждения не даёт"
+    );
+
+    // `_x` - намеренно непрочитанное, где бы оно ни стояло.
+    assert!(
+        named(
+            "
+f : Nat -> Nat
+f n =
+  let _m = Succ n
+  n
+"
+        )
+        .is_empty(),
+        "`_m` предупреждения не даёт"
+    );
+}
+
 /// Программа с классом `Add` и инстансом на названном типе - для умолчания
 /// литерала (§4.3, §10 вопрос 150). Ни `Zero`, ни `Succ` не объявлены
 /// намеренно: унарного пути у литерала нет, и дырку решает только умолчание.

@@ -15,9 +15,14 @@ travels the whole path — text, tree, core terms, type checking — and then ru
 three ways: `adamas eval` interprets it, and `adamas build` compiles it through
 either backend, C or LLVM. All three must answer the *same thing*, and a
 disagreement fails the build: that contract is checked on every gate run over
-126 of the 127 corpus programs. The one program neither backend takes returns a
+155 of the 156 corpus programs. The one program neither backend takes returns a
 function, and printing one is a question about the language, not about a
 backend.
+
+The largest program so far is a playable Asteroids on SDL2
+([`demo/asteroids/`](demo/asteroids/)): about 900 lines of Adamas calling SDL
+through the C FFI, with records, flat arrays, and entities indexed by the set of
+components they carry. `adamas run` inside that directory starts it.
 
 See the [roadmap](adamas-design.md#9-roadmap) — 10 phases, ~3–5 years to a
 research-grade prototype.
@@ -28,6 +33,38 @@ diagnostics are in Russian. This README is the English entry point.
 ## Examples
 
 Every example below is checked and run by the current compiler.
+
+### Everyday code
+
+Records, operators from the prelude, `if`, and a C function called directly:
+
+```adamas
+type Ship = {x : Int32, y : Int32, dir : Int32}
+
+extern "C" pure fn cos : Float64 -> Float64
+
+-- | Nearest integer, half away from zero.
+rounded : Float64 -> Int32
+rounded v = if v < 0.0 then float64ToInt32 (v - 0.5) else float64ToInt32 (v + 0.5)
+
+-- | Cosine of a sixteenth of a turn, scaled by 256.
+dirX : Int32 -> Int32
+dirX d = rounded (cos (int32ToFloat64 d * 0.39269908169872414) * 256.0)
+
+step : Ship -> Ship
+step s = {s | x = s.x + dirX s.dir}
+
+main : Int32
+main =
+  let moved = step (step {x = 0, y = 0, dir = 1})
+  if moved.x > 400 && moved.y == 0 then moved.x else 0
+```
+
+This answers `474`. A foreign call carries the `Foreign` effect, so physics
+written through `cos` would stop being pure; `pure` after the ABI string is the
+author's claim that it is, taken on trust like the signature itself. `Ship`
+has only primitive fields, so both backends keep it flat: the program allocates
+nothing on the heap.
 
 ### Dependent types
 
@@ -71,12 +108,12 @@ Running it prints `[1, 9]` — the body, then the destructor. The same holds whe
 the computation is abandoned by an effect that never resumes: unwinding finds
 the destructor and runs it there.
 
-Using the handle twice is a type error, and the message names the reason:
+Using the handle twice is a type error, underlined at the second use:
 
 ```adamas
 twice : File -> Bool
 twice h = andL (closeFile h) (closeFile h)
---        `h` объявлена с кратностью 1, а использована ω
+--                                      ^ `h` объявлена с кратностью 1, а использована ω
 ```
 
 ### Algebraic effects
@@ -91,10 +128,13 @@ effect State where
 counter : {State} Nat
 counter =
   let a : Nat = get
-  let u : Unit = put (a + 1)
+  put (a + 1)
   let b : Nat = get
   a + b
 ```
+
+A call whose result nobody reads is written as a line of its own; a `let` whose
+name is never read draws a warning.
 
 The handler carries the state itself. `state s0` declares the initial value,
 `state` inside a branch means the current one, and `resume` takes two arguments
@@ -129,13 +169,13 @@ withNursery : ({Async, Log} Unit) -> {Log} Unit
 
 worker : Nat -> {Async, Log} Unit
 worker tag =
-  let a : Unit = note tag
-  let s : Unit = suspend
+  note tag
+  suspend
   note (Succ tag)
 
 program : {Async, Log} Unit
 program =
-  let u : Unit = spawnDetached (worker 1)
+  spawnDetached (worker 1)
   worker 3
 ```
 
@@ -164,17 +204,19 @@ crates/adamas-lsp         the language server: diagnostics, hover, go to
 crates/adamas-warmup-stlc a phase-0 exercise: STLC + HM, standalone
 ```
 
-Roughly 162k lines of Rust, 7k lines of C, and 1630 tests. What the language
-accepts is visible in [`tests/golden/`](tests/golden/): 311 fixtures — programs
-that must be accepted, programs that must be refused with a recorded message,
-and programs whose value is recorded too.
+Roughly 166k lines of Rust, 5.5k lines of C in the runtime, and 1650 tests. What
+the language accepts is visible in [`tests/golden/`](tests/golden/): 337
+fixtures — programs that must be accepted, programs that must be refused with a
+recorded message, and programs whose value is recorded too.
 
-Beyond the examples above: type classes with superclasses, defaults and
+Beyond the examples above: type classes with superclasses, default methods
+(checked once in the class, expanded in each instance) and
 multiplicity-polymorphic methods; modules, signatures, functors, sealing and
 implicit functor parameters; propositional equality with `subst` and `sym`,
-decidability, and proof irrelevance through truncation; a 260-line prelude and
-a 944-line interpreter for a small object language, both written in Adamas and
-run by `adamas eval`.
+decidability, and proof irrelevance through truncation; a 370-line prelude
+(numeric classes and operators, `Eq` and `Ord` with `==`, `<` and friends,
+short-circuit `&&` and `||`) and a 942-line interpreter for a small object
+language, both written in Adamas and run by `adamas eval`.
 
 The toolchain has caught up with the compiler: `adamas fmt` rewrites a file to
 its canonical form through the same printer the parser owns, `adamas doc`
@@ -183,6 +225,14 @@ compiler knows but the text does not say — where a definition allocates and th
 chain that leads there, which cell a construction reuses, where a resource is
 taken and where its destructor will be inserted, and which label a handler
 discharges.
+
+Diagnostics speak about the program rather than the elaborator: a refusal is
+underlined at the use that caused it — the second `resume`, the branch of a
+`case`, the implicit argument nobody could infer — and types in the message are
+printed as values, not as the internal lambdas that solved them. Accepted
+programs get warnings for a `let`, lambda or branch binding that is never read,
+and for an imported name that is never used; a name starting with `_` is read
+as "unused on purpose".
 
 Elaboration is a separate crate because it is not in the trusted base: it
 produces an ordinary core term, and `check` establishes its correctness.
@@ -196,7 +246,7 @@ either reaches for a core term. The C backend goes through gcc; the LLVM one
 writes textual `.ll` and hands it to `llvm-as`, `opt` and `llc`, which keeps the
 toolchain unpinned to an LLVM major at the cost of about 6% of backend time.
 
-Both take the same 126 of 127 corpus programs. Where they differ is speed, and
+Both take the same 155 of 156 corpus programs. Where they differ is speed, and
 the numbers are in [`docs/measurements/`](docs/measurements/) with the command
 that reproduces each row:
 
@@ -237,6 +287,7 @@ does not depend on it. What it taught is in
 | [`docs/reading-notes/`](docs/reading-notes/) | Notes on the key papers (QTT, Perceus, effect handlers). |
 | [`tests/golden/`](tests/golden/) | Adamas programs the compiler accepts today, with their expected output. |
 | [`docs/examples/`](docs/examples/) | Four programs chosen for what makes the language *different* — multiplicities, effects, regions, FFI. Each is checked, run against a recorded answer, documented and kept canonical by the gate. |
+| [`demo/asteroids/`](demo/asteroids/) | Asteroids on SDL2: the largest program in the repository, and the one that drives what the language fixes next. Needs SDL2 (the Nix shell has it); `adamas run` in that directory. |
 | [`docs/phase*-plan.md`](docs/) | How each phase is cut into tracks: what parallelises, what does not, and what counts as done. Alongside them, one notes file per track with what was measured and what the measurement rejected. |
 | [`docs/measurements/`](docs/measurements/) | Every performance claim in this README, with its conditions, its spread, and one command per row. Where a number was retracted, the retraction is there too. |
 

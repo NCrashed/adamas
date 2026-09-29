@@ -1,0 +1,54 @@
+-- Нульместная операция в ветви исполняется по ожидаемому типу (§3.4, §10
+-- вопрос 222).
+--
+-- `if d == 0 then fail else …` под `Int32` отвергался «ожидался `Int32`,
+-- получен `(ω _ : Unit) -> {Fail | ?0} Int32`»: правило исполнения стояло у
+-- аргумента, `let` и тела клаузы, а ветвь разбора его не получала, и `fail`
+-- в ней оставался приостановленным. Поля ответа:
+--
+--   * `guarded` под `let q : Int32` - ноль и пять;
+--   * `direct` - `if` телом клаузы с типом `{Fail} Int32`: ветвь ждёт
+--     `Int32`, и `fail` в ней исполняется;
+--   * `which` - обратная сторона правила: ветвь ждёт **вычисление**
+--     `({Fail} Int32)`, и `atZero` в ней передаётся, а не исполняется.
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Fail where
+  fail : Int32
+
+guarded : Int32 -> {Fail} Int32
+guarded d =
+  let q : Int32 = if d == 0 then fail else divInt32 100 d
+  q + 1
+
+direct : Int32 -> {Fail} Int32
+direct d = if d == 0 then fail else divInt32 100 d
+
+atZero : {Fail} Int32
+atZero = guarded 0
+
+atFive : {Fail} Int32
+atFive = guarded 5
+
+directZero : {Fail} Int32
+directZero = direct 0
+
+directFive : {Fail} Int32
+directFive = direct 5
+
+caught : ({Fail} Int32) -> Int32
+caught c = handle c with
+  return v -> v
+  fail -> 0 - 1
+
+which : Bool -> ({Fail} Int32)
+which c = if c then atZero else atFive
+
+main : List Int32
+main = Cons (caught atZero) (Cons (caught atFive) (Cons (caught directZero) (Cons (caught directFive) (Cons (caught (which True)) (Cons (caught (which False)) Nil)))))

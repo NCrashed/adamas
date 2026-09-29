@@ -7,7 +7,6 @@ Error: solved-hole-reduced.adamas:18:7: несовпадение типов: о�
         ^
   в контексте:
     (0 n : Nat)
-    (ω #4 : Box n)
     (ω i : UInt64)
     (0 ds : Nat)
     (ω x : Int32)

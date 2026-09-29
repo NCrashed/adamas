@@ -5,5 +5,3 @@ expression: text
 Error: mask-widens-row.adamas:36:10: несовпадение типов: ожидался `(ω _ : Unit) -> ?1`, получен `(ω _ : Unit) -> {Ask | ?0} Nat`
   sneaky = mask ask
            ^^^^^^^^
-  в контексте:
-    (ω #0 : Unit)

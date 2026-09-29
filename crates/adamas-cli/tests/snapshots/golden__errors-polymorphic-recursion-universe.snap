@@ -7,4 +7,3 @@ Error: polymorphic-recursion-universe.adamas:32:16: выводимый аргу�
                  ^^^^^^^^
   в контексте:
     (ω n : Nat)
-    (ω #0 : List{u0+1} Type u0)

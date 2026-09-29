@@ -111,17 +111,27 @@ pub(crate) fn headline(error: &ElabError) -> String {
 /// Телескоп точки отказа и пройденный путь.
 ///
 /// Телескоп показывается всегда: связывания, введённые проверкой, автору иначе
-/// неоткуда взять - в тексте на месте отказа видно только имя. Путь объясняет,
+/// неоткуда взять - в тексте на месте отказа видно только имя. Кроме
+/// безымянных, на которые никто не ссылается: аргумент, разобранный
+/// паттерном, и параметр вычисления автор не называл и с исходником не
+/// свяжет, а `#N` на их месте был номером позиции в контексте ядра (§10
+/// вопросы 69 и 217). Сосланное печатается номером, как прежде: иначе ссылка
+/// повисла бы. Путь объясняет,
 /// **почему** подчёркнуто именно это место, - в тех кадрах, у которых есть имя
 /// (см. [`route`]).
 fn explain(error: &TypeError, names: &Names) -> String {
     let mut out = String::new();
     let naming = Naming::of(error);
     let context = error.context();
-    if !context.is_empty() {
+    let shown: Vec<(usize, &adamas_core::error::Binding)> = context
+        .iter()
+        .enumerate()
+        .map(|(depth, binding)| (context.len() - depth - 1, binding))
+        .filter(|(index, binding)| &*binding.name != "_" || mentioned(error, *index))
+        .collect();
+    if !shown.is_empty() {
         out.push_str("\n  в контексте:");
-        for (depth, binding) in context.iter().enumerate() {
-            let index = context.len() - depth - 1;
+        for (index, binding) in shown {
             let mut ty = binding.ty.clone();
             // Типы телескопа прочитаны обратно в контексте целиком, а не
             // каждый в своём начале: индекс в них тот же, что и в термах
@@ -140,6 +150,30 @@ fn explain(error: &TypeError, names: &Names) -> String {
         let _ = write!(out, "\n  путь: {}", route.join(" -> "));
     }
     out
+}
+
+/// Ссылается ли на связывание контекста с индексом `index` что-нибудь из
+/// напечатанного: термы сообщения, аргументы меток его row или типы других
+/// связываний. Типы телескопа прочитаны в контексте целиком, как и термы
+/// сообщения, поэтому индекс в них тот же.
+///
+/// Считается только то, что печатается: спайн дырки, применённой к
+/// контексту, опускается (см. `contextual`), и `?1 #0` на `#0` в тексте не
+/// ссылается.
+fn mentioned(error: &TypeError, index: usize) -> bool {
+    let at = u32::try_from(index).unwrap_or(u32::MAX);
+    let mut kind = error.kind.clone();
+    let (terms, _, _, rows) = kind.parts_mut();
+    terms.iter().any(|term| shows(term, 0, at))
+        || rows
+            .iter()
+            .flat_map(|row| row.labels())
+            .flat_map(|label| &label.arguments)
+            .any(|term| shows(term, 0, at))
+        || error
+            .context()
+            .iter()
+            .any(|binding| shows(&binding.ty, 0, at))
 }
 
 /// Маршрут словами - только кадры, у которых есть имя.
@@ -607,5 +641,55 @@ fn contextual(term: &Term) -> Option<TermMeta> {
         Term::App(callee, argument) if matches!(**argument, Term::Var(_)) => contextual(callee),
         Term::Meta(meta) => Some(*meta),
         _ => None,
+    }
+}
+
+/// Упоминает ли напечатанный терм связывание контекста `at` - `depth`
+/// связываний уже пройдено внутри самого терма. Разбор тот же, что у
+/// [`Term::mentions_recent`], кроме дырки, применённой к контексту: её спайн
+/// не печатается.
+fn shows(term: &Term, depth: u32, at: u32) -> bool {
+    let recur = |inner: &Term| shows(inner, depth, at);
+    let under = |inner: &Term| shows(inner, depth + 1, at);
+    match term {
+        Term::Var(Index(index)) => *index >= depth && *index - depth == at,
+        Term::App(..) if contextual(term).is_some() => false,
+        Term::App(callee, argument) => recur(callee) || recur(argument),
+        Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Const(..)
+        | Term::Prim(_)
+        | Term::Meta(_) => false,
+        Term::Project(record, _) => recur(record),
+        Term::Object(fields) => fields.iter().any(|(_, value)| recur(value)),
+        Term::With(base, fields) => recur(base) || fields.iter().any(|(_, value)| recur(value)),
+        Term::Record(fields) | Term::Row(fields) => {
+            let past = |index: usize| depth + u32::try_from(index).unwrap_or(u32::MAX);
+            fields
+                .iter()
+                .enumerate()
+                .any(|(index, field)| shows(&field.ty, past(index), at))
+                || fields
+                    .tail
+                    .as_ref()
+                    .is_some_and(|tail| shows(tail, past(fields.len()), at))
+        }
+        Term::Lam(_, _, body) => under(body),
+        Term::Pi(_, _, domain, row, codomain) => {
+            recur(domain)
+                || under(codomain)
+                || row
+                    .labels()
+                    .iter()
+                    .flat_map(|label| &label.arguments)
+                    .any(under)
+        }
+        Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || under(body),
+        Term::Case(case) => {
+            recur(&case.scrutinee)
+                || recur(&case.motive)
+                || case.branches.iter().any(|branch| recur(&branch.body))
+        }
     }
 }

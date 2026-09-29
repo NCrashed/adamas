@@ -290,7 +290,17 @@ pub(crate) fn elaborate_file(
         importer,
         Some(refusals),
     )?;
-    let Pass { signature, .. } = pass.reborrow();
+    let Pass {
+        signature,
+        warnings,
+        ..
+    } = pass.reborrow();
+    // Импорт проверяется после объявлений: имя семейства открывает
+    // конструкторы, и кого оно открыло, знает только сигнатура (§10 вопрос
+    // 218).
+    if within.is_none() {
+        warnings.extend(crate::unused::unused_imports(decls, signature));
+    }
     // Экспорты - объявление файла наравне с прочими, и граница у них та же:
     // ненайденный символ не отменяет остальных отказов файла.
     if let Err(error) = exports(decls, within, signature) {

@@ -325,3 +325,60 @@ mutual
         &Memory::new(),
     );
 }
+
+#[test]
+fn an_unused_name_of_the_open_list_is_warned_about() {
+    // §10 вопрос 218. `Nat` употреблён только через свой конструктор - тип
+    // написан квалифицированно: имя семейства открывает конструкторы, и
+    // `Succ` в тексте засчитывается ему. `double`
+    // не стоит нигде - о нём оговорка, а программа принята.
+    let entry = "\
+import Numbers (Nat, double)
+
+main : Numbers.Nat
+main = Succ Zero
+";
+    let program = accepted(entry, &numbers());
+    let said: Vec<String> = program
+        .diagnostics
+        .iter()
+        .map(|it| it.diagnostic.message())
+        .collect();
+    assert_eq!(said.len(), 1, "получено {said:?}");
+    assert!(
+        said[0].contains("`double`") && said[0].contains("`Numbers`"),
+        "получено {said:?}"
+    );
+}
+
+#[test]
+fn a_name_read_by_convention_counts_as_used() {
+    // `if` - разбор по `True`/`False`, найденным по имени (§4.1): в тексте
+    // их нет, а импорт ими употреблён. Без соглашения здесь была бы ложная
+    // оговорка на каждом открытом конструкторе `Bool`.
+    let truth = Memory::new().with(
+        "Truth",
+        "\
+data Bool where
+  True : Bool
+  False : Bool
+",
+    );
+    let entry = "\
+import Prelude
+import Truth (Bool, True, False)
+
+flip : Bool -> Bool
+flip b = if b then flip b else b
+";
+    let program = accepted(entry, &truth);
+    assert!(
+        program.diagnostics.is_empty(),
+        "получено {:?}",
+        program
+            .diagnostics
+            .iter()
+            .map(|it| it.diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+}

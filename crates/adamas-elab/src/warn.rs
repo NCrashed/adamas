@@ -60,6 +60,16 @@ pub enum Warning {
         /// Где оно связано.
         span: Span,
     },
+    /// Имя из списка импорта, которое файл не употребляет (§10 вопрос 218).
+    #[error("`{name}` импортировано из `{module}`, но нигде не употребляется")]
+    UnusedImport {
+        /// Откуда.
+        module: Symbol,
+        /// Имя.
+        name: Symbol,
+        /// Где оно в списке импорта.
+        span: Span,
+    },
 }
 
 impl Warning {
@@ -69,7 +79,8 @@ impl Warning {
         match self {
             Self::UnusedImplicit { span, .. }
             | Self::DefaultedLiteral { span, .. }
-            | Self::UnusedBinding { span, .. } => *span,
+            | Self::UnusedBinding { span, .. }
+            | Self::UnusedImport { span, .. } => *span,
         }
     }
 }

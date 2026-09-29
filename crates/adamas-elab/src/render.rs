@@ -121,8 +121,21 @@ pub(crate) fn headline(error: &ElabError) -> String {
 /// (см. [`route`]).
 fn explain(error: &TypeError, names: &Names) -> String {
     let mut out = String::new();
-    let naming = Naming::of(error);
+    let mut naming = Naming::of(error);
     let context = error.context();
+    // Номера дырок - тот же счёт, что у первой строки: сперва части сообщения,
+    // потом типы контекста. Без этого дырка, стоявшая только в контексте,
+    // печаталась сквозным номером прогона и ехала от правки прелюдии (§10
+    // вопрос 217).
+    naming.rewrite(&mut error.kind.clone());
+    let mut ordered = Vec::new();
+    for binding in context {
+        collect_term(&binding.ty, &mut ordered);
+    }
+    for meta in ordered {
+        let next = u32::try_from(naming.metas.len()).unwrap_or(u32::MAX);
+        naming.metas.entry(meta).or_insert(next);
+    }
     let shown: Vec<(usize, &adamas_core::error::Binding)> = context
         .iter()
         .enumerate()

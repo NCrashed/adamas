@@ -4602,6 +4602,10 @@ fn declare_extern(
     if demanded.noalloc {
         signature.promise_noalloc(&name);
     }
+    // Тотальность через границу - так же утверждение автора, а без него чужой
+    // символ нетотален (§10 вопрос 226): за границей вправе стоять вечный
+    // цикл, и `@total`, дотянувшийся до него, свой тип не доказывал бы.
+    signature.foreign_totality(&name, demanded.total);
     verdicts(signature, &name, demanded, span)
 }
 

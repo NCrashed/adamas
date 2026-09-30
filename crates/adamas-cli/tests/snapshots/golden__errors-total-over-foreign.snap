@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: total-over-foreign.adamas:12:1: `magnitude` объявлено `@total`, но вердикт отрицательный: аргумент не убывает ни разбором, ни значением, либо вызвано нетотальное
+  magnitude : Int64 -> Int64
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^

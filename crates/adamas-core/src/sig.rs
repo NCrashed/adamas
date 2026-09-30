@@ -1290,6 +1290,21 @@ impl Signature {
         }
     }
 
+    /// Вердикт тотальности чужого символа (§5.3, §10 вопрос 226).
+    ///
+    /// Постулат тотален по умолчанию - разворачивать нечего, - но у `extern`
+    /// за границей вправе стоять вечный цикл, и умолчание делало тотальным
+    /// всякий `@total`, до чужого вызова дотянувшийся. Тотальность чужого
+    /// символа теперь - утверждение автора: `@total` у объявления, тем же ходом,
+    /// что `@noalloc` ([`Self::promise_noalloc`]). Без него символ нетотален.
+    pub fn foreign_totality(&mut self, name: &str, promised: bool) {
+        if let Some(definition) = self.definitions.get_mut(name) {
+            if definition.body.is_none() {
+                definition.total = promised;
+            }
+        }
+    }
+
     /// Сколько определений.
     #[must_use]
     pub fn len(&self) -> usize {

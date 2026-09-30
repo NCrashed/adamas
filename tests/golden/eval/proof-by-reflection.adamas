@@ -1,0 +1,45 @@
+-- Факт о примитиве - отражением булевой проверки (§3.7, §10 вопросы 225, 228).
+--
+-- `safeDiv` требует стёртое доказательство `Eqv Bool (d /= 0) True`. У
+-- литерала его даёт вычисление - `5 /= 0` сводится к `True` через словарь
+-- `Eq Int32` и примитив; у переменной - `decide`, написанный двумя
+-- клаузами. Поля ответа: `byFive 100`, `checked 100 4`, `checked 100 0`.
+--
+-- Бэкенды отказывали на мономорфизации: производные определения
+-- объявлялись одной группой, и внутри неё специализированное `/=@…` при
+-- проверке `checked@…` не разворачивалось - тип ответа `decide` с ним не
+-- сходился с типом, где стоит исходное `/=`. Теперь производные объявляются
+-- по компонентам сильной связности, зависимое после того, от чего зависит.
+
+data Eqv (a : Type) (x : a) : a -> Type where
+  Refl : Eqv a x x
+
+data Either (a : Type) (b : Type) where
+  Left : a -> Either a b
+  Right : b -> Either a b
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+-- | Булева проверка вместе с тем, что она показала.
+decide : (b : Bool) -> Either (Eqv Bool b True) (Eqv Bool b False)
+decide True = Left Refl
+decide False = Right Refl
+
+-- | Деление, которому доказали ненулевость делителя.
+safeDiv : Int32 -> (d : Int32) -> (0 p : Eqv Bool (d /= 0) True) -> Int32
+safeDiv n d p = divInt32 n d
+
+-- | Литерал: доказательство - вычислением.
+byFive : Int32 -> Int32
+byFive n = safeDiv n 5 Refl
+
+-- | Переменная: доказательство даёт проверка.
+checked : Int32 -> Int32 -> Int32
+checked n d = case decide (d /= 0) of
+  Left p -> safeDiv n d p
+  Right _q -> 0
+
+main : List Int32
+main = Cons (byFive 100) (Cons (checked 100 4) (Cons (checked 100 0) Nil))

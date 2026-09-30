@@ -868,33 +868,39 @@ fn telescope(fields: &Fields, subst: &Substitution<'_>, depth: u32) -> Fields {
     }
 }
 
-/// Объявляет произведённые определения одной группой.
+/// Объявляет произведённые определения - по компонентам сильной связности,
+/// зависимое после того, от чего зависит.
 ///
-/// Группой, а не по одному: две специализации бывают взаимно рекурсивны, и
-/// фаза A обязана положить типы обеих раньше, чем проверится первое тело.
+/// Группой взаимно рекурсивные: фаза A обязана положить типы обеих раньше,
+/// чем проверится первое тело. Но не одной группой все: внутри группы тела
+/// соседей при проверке непрозрачны, и `decide (d /= 0)` в производном не
+/// сходился с типом, где стоит исходное `/=` - специализированное `/=@…`
+/// не разворачивалось, хотя от вызывающего не зависит (§10 вопрос 228).
 fn declare(
     signature: &mut Signature,
     metas: &mut Metas,
     made: &[Special],
 ) -> Result<(), MonoError> {
-    let Some((first, rest)) = made.split_first() else {
-        return Ok(());
-    };
-    let member = |special: &Special| {
-        Member::definition(&special.name, Mult::Many, special.ty.clone())
-            .with_arity(0, 0)
-            .with_body(special.body.clone())
-    };
-    let group = rest
-        .iter()
-        .fold(Group::of(member(first)), |group, special| {
-            group.and(member(special))
-        });
-    signature
-        .declare(metas, &group)
-        .map_err(|error| MonoError::Refused {
-            error: Box::new(error),
-        })?;
+    for component in components(made) {
+        let member = |special: &Special| {
+            Member::definition(&special.name, Mult::Many, special.ty.clone())
+                .with_arity(0, 0)
+                .with_body(special.body.clone())
+        };
+        let Some((first, rest)) = component.split_first() else {
+            continue;
+        };
+        let group = rest
+            .iter()
+            .fold(Group::of(member(&made[*first])), |group, at| {
+                group.and(member(&made[*at]))
+            });
+        signature
+            .declare(metas, &group)
+            .map_err(|error| MonoError::Refused {
+                error: Box::new(error),
+            })?;
+    }
     // Позиция наследуется от того, от кого произведено: написанного текста у
     // специализации нет вовсе, а показать отладчику её строку надо - ту же,
     // что у `origin`. Не унаследуй её - и `.adamas`-строки исчезали бы ровно у
@@ -1098,5 +1104,151 @@ fn scan(signature: &Signature, instances: &Instances, term: &Term, found: &mut F
                 current = codomain;
             }
         }
+    }
+}
+
+/// Компоненты сильной связности произведённых определений по упоминанию -
+/// в порядке, где компонента идёт после всех, от кого зависит (Тарьян
+/// отдаёт их ровно так).
+fn components(made: &[Special]) -> Vec<Vec<usize>> {
+    let index: HashMap<&str, usize> = made
+        .iter()
+        .enumerate()
+        .map(|(at, special)| (&*special.name, at))
+        .collect();
+    let edges: Vec<Vec<usize>> = made
+        .iter()
+        .map(|special| {
+            let mut names = Vec::new();
+            constants(&special.body, &mut names);
+            constants(&special.ty, &mut names);
+            let mut targets: Vec<usize> = names
+                .iter()
+                .filter_map(|name| index.get(&**name).copied())
+                .collect();
+            targets.sort_unstable();
+            targets.dedup();
+            targets
+        })
+        .collect();
+    let mut state = Tarjan {
+        edges: &edges,
+        order: vec![None; made.len()],
+        low: vec![0; made.len()],
+        stack: Vec::new(),
+        on_stack: vec![false; made.len()],
+        next: 0,
+        found: Vec::new(),
+    };
+    for at in 0..made.len() {
+        if state.order[at].is_none() {
+            state.visit(at);
+        }
+    }
+    state.found
+}
+
+/// Состояние обхода Тарьяна.
+struct Tarjan<'a> {
+    edges: &'a [Vec<usize>],
+    order: Vec<Option<usize>>,
+    low: Vec<usize>,
+    stack: Vec<usize>,
+    on_stack: Vec<bool>,
+    next: usize,
+    found: Vec<Vec<usize>>,
+}
+
+impl Tarjan<'_> {
+    fn visit(&mut self, at: usize) {
+        self.order[at] = Some(self.next);
+        self.low[at] = self.next;
+        self.next += 1;
+        self.stack.push(at);
+        self.on_stack[at] = true;
+        for &target in &self.edges[at] {
+            match self.order[target] {
+                None => {
+                    self.visit(target);
+                    self.low[at] = self.low[at].min(self.low[target]);
+                }
+                Some(order) if self.on_stack[target] => {
+                    self.low[at] = self.low[at].min(order);
+                }
+                Some(_) => {}
+            }
+        }
+        if Some(self.low[at]) == self.order[at] {
+            let mut component = Vec::new();
+            while let Some(top) = self.stack.pop() {
+                self.on_stack[top] = false;
+                component.push(top);
+                if top == at {
+                    break;
+                }
+            }
+            component.sort_unstable();
+            self.found.push(component);
+        }
+    }
+}
+
+/// Имена констант терма - везде, включая типы: δ-разворот нужен и там.
+fn constants(term: &Term, into: &mut Vec<Name>) {
+    let mut recur = |inner: &Term| constants(inner, into);
+    match term {
+        Term::Const(name, ..) => into.push(Rc::clone(name)),
+        Term::Var(_)
+        | Term::Meta(_)
+        | Term::Universe(_)
+        | Term::RowKind(_)
+        | Term::EffectKind
+        | Term::Prim(_) => {}
+        Term::App(callee, argument) => {
+            recur(callee);
+            recur(argument);
+        }
+        Term::Lam(_, _, body) => recur(body),
+        Term::Pi(_, _, domain, row, codomain) => {
+            recur(domain);
+            recur(codomain);
+            for label in row.labels() {
+                for argument in &label.arguments {
+                    recur(argument);
+                }
+            }
+        }
+        Term::Let(_, _, ty, value, body) => {
+            recur(ty);
+            recur(value);
+            recur(body);
+        }
+        Term::Case(case) => {
+            recur(&case.scrutinee);
+            recur(&case.motive);
+            for branch in &case.branches {
+                recur(&branch.body);
+            }
+        }
+        Term::Record(fields) | Term::Row(fields) => {
+            for field in fields.iter() {
+                recur(&field.ty);
+            }
+            if let Some(tail) = &fields.tail {
+                recur(tail);
+            }
+        }
+        Term::Object(fields) => {
+            for (_, value) in fields.iter() {
+                recur(value);
+            }
+        }
+        Term::With(base, fields) => {
+            recur(base);
+            for (_, value) in fields.iter() {
+                recur(value);
+            }
+        }
+        Term::Project(base, _) => recur(base),
     }
 }

@@ -1,0 +1,29 @@
+-- Постулат без утверждения ничего не доказывает (§3.7, §4.7, §10 вопрос 229).
+--
+-- Сигнатура без тела - постулат, и он был тотален умолчанием: «разворачивать
+-- нечего». Постулат отдаёт любой тип, и `bad : Void` доказывал через `absurd`
+-- что угодно - здесь `Eqv Nat Zero (Succ Zero)`. Теперь постулат без `@total`
+-- нетотален, а нетотальное в доказательство не проходит.
+
+data Void : Type
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Eqv (a : Type) (x : a) : a -> Type where
+  Refl : Eqv a x x
+
+bad : Void
+
+absurd : {0 a : Type} -> Void -> a
+absurd v = case v of
+
+lie : Eqv Nat Zero (Succ Zero)
+lie = absurd bad
+
+needs : (0 p : Eqv Nat Zero (Succ Zero)) -> Nat
+needs p = Zero
+
+main : Nat
+main = needs lie

@@ -1,0 +1,28 @@
+-- Аксиома - постулат с написанным `@total` (§3.7, §10 вопрос 229).
+--
+-- Утверждение на слово, как `@total` у `extern` (вопрос 226): проверить его
+-- нечем, и ложная аксиома возможна - здесь она нарочно ложна, - но только
+-- явная, и находится грепом по `@total` у сигнатуры без тела. Фикстура
+-- проходит: в этом её содержание.
+
+data Void : Type
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Eqv (a : Type) (x : a) : a -> Type where
+  Refl : Eqv a x x
+
+@total
+bad : Void
+
+absurd : {0 a : Type} -> Void -> a
+absurd v = case v of
+
+@total
+lie : Eqv Nat Zero (Succ Zero)
+lie = absurd bad
+
+main : Nat
+main = Zero

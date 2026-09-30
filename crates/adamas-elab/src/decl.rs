@@ -4605,7 +4605,7 @@ fn declare_extern(
     // Тотальность через границу - так же утверждение автора, а без него чужой
     // символ нетотален (§10 вопрос 226): за границей вправе стоять вечный
     // цикл, и `@total`, дотянувшийся до него, свой тип не доказывал бы.
-    signature.foreign_totality(&name, demanded.total);
+    signature.promise_total(&name, demanded.total);
     verdicts(signature, &name, demanded, span)
 }
 
@@ -5265,6 +5265,7 @@ fn postulate(
     };
     postulated.insert(Rc::clone(&pending.name), pending.span);
     let source = pending.source;
+    let sort = sorted(&pending.ty);
     signature
         .postulate_inferred(metas, &pending.name, Mult::Many, pending.ty, pending.grades)
         .map_err(|error| {
@@ -5281,6 +5282,12 @@ fn postulate(
     if pending.required.noalloc {
         signature.promise_noalloc(&pending.name);
     }
+    // Тотальность постулата - аксиома на слово: без `@total` он нетотален
+    // (§10 вопрос 229), иначе `bad : Void` без тела доказывал бы что угодно.
+    // Постулат **типа** - `P : Nat -> Type` - жителя не создаёт: это
+    // абстрактный тип, а не значение, и он тотален без утверждения. Иначе
+    // его нельзя было бы поставить в тип вовсе.
+    signature.promise_total(&pending.name, pending.required.total || sort);
     verdicts(signature, &pending.name, pending.required, pending.span)
 }
 
@@ -7334,4 +7341,17 @@ fn shown_mults(allowed: &[Rc<[adamas_core::mult::Mult]>]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Кончается ли тип сортом: `Nat -> Type`, `Type`, `Row`, `Effect`. Постулат
+/// такого типа - абстрактный тип или формер, а не значение (§10 вопрос 229).
+fn sorted(ty: &Term) -> bool {
+    let mut current = ty;
+    while let Term::Pi(_, _, _, _, codomain) = current {
+        current = codomain;
+    }
+    matches!(
+        current,
+        Term::Universe(_) | Term::RowKind(_) | Term::EffectKind
+    )
 }

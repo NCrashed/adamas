@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: postulate-proves-nothing.adamas:29:14: `lie` не тотальна и не может стоять в типе или доказательстве
+  main = needs lie
+               ^^^

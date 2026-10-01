@@ -65,6 +65,30 @@ decide : (b : Bool) -> Decision b
 decide True = Yes Refl
 decide False = No Refl
 
+-- # Леммы арифметики на слове (§10 вопрос 225)
+--
+-- Примитивы в ядре непрозрачны, и `i - 1 < n` из `i <= n` вычислением не
+-- следует. Леммы приходят аксиомами на слово (`@total` у сигнатуры без тела,
+-- §10 вопрос 229), и каждая верна при заворачивающей арифметике §4.3 - это
+-- стережёт `adamas-core/tests/lemmas.rs`. Записаны формой примитивов: к ней
+-- сводятся и операторы прелюдии (`i - 1` - это `subUInt64 i 1`).
+--
+-- Цикл вниз по массиву несёт `i <= n` параметром: `decide (i == 0)` даёт
+-- ветви `No` факт `i /= 0`, а `belowPred` - номер `i - 1` ячейки и, через
+-- `belowAtMost`, тот же `i - 1 <= n` следующему шагу.
+
+-- | Номер перед ненулевым `i <= n` меньше `n`: `i - 1` не заворачивается.
+@total
+belowPred : (0 i : UInt64) -> (0 n : UInt64) -> (0 p : Equal Bool (leUInt64 i n) True) -> (0 q : Equal Bool (eqUInt64 i 0) False) -> Equal Bool (ltUInt64 (subUInt64 i 1) n) True
+
+-- | Строго меньшее - не больше.
+@total
+belowAtMost : (0 i : UInt64) -> (0 n : UInt64) -> (0 p : Equal Bool (ltUInt64 i n) True) -> Equal Bool (leUInt64 i n) True
+
+-- | Число не больше себя: начало цикла вниз от длины, которая не литерал.
+@total
+atMostSelf : (0 n : UInt64) -> Equal Bool (leUInt64 n n) True
+
 -- | Целое по умолчанию: его берёт литерал, типа которому не задало ничто в
 -- объявлении (§4.3). Синоним, а не свой тип: `Int` и `Int64` одно и то же.
 type Int = Int64
@@ -88,8 +112,16 @@ class Add a where
 
 -- | Противоположное. Вычитание - сложение с ним: у `Nat` его нет, и `-` там
 -- не пишется (§4.3: усечение называется `monus`).
-class Neg a where
+--
+-- `sub` - то же вычитание членом класса: умолчание складывает с
+-- противоположным, а целые берут свой примитив. Так `i - 1` над переменной
+-- сводится к `subUInt64 i 1` - к той форме, которой записаны леммы
+-- арифметики (§10 вопрос 225), - а не к `addUInt64 i (neg 1)`, с ней не
+-- сходящемуся.
+class Neg a when Add a where
   neg : a -> a
+  sub : a -> a -> a
+  sub x y = add x (neg y)
 
 -- | Умножение. Параметр `b` гетерогенный (§4.3, вопрос 67), результат пока
 -- `a`: типовых членов у класса ещё нет, и `Product` ждёт их (§10 вопрос 209).
@@ -101,8 +133,8 @@ infixl 6 +
 (+) x y = add x y
 
 infixl 6 -
-(-) : {Add a, Neg a} => a -> a -> a
-(-) x y = add x (neg y)
+(-) : {Neg a} => a -> a -> a
+(-) x y = sub x y
 
 -- | Оператор однородный: результат `a` пропускает ожидаемый тип к операндам,
 -- и `x : Int32 = 2 * 3` и `n * 2` пишутся. Гетерогенное умножение - `mul`.
@@ -115,6 +147,7 @@ instance Add Int8 where
 
 instance Neg Int8 where
   neg x = subInt8 0 x
+  sub = subInt8
 
 instance Mul Int8 where
   mul = mulInt8
@@ -124,6 +157,7 @@ instance Add Int16 where
 
 instance Neg Int16 where
   neg x = subInt16 0 x
+  sub = subInt16
 
 instance Mul Int16 where
   mul = mulInt16
@@ -133,6 +167,7 @@ instance Add Int32 where
 
 instance Neg Int32 where
   neg x = subInt32 0 x
+  sub = subInt32
 
 instance Mul Int32 where
   mul = mulInt32
@@ -142,6 +177,7 @@ instance Add Int64 where
 
 instance Neg Int64 where
   neg x = subInt64 0 x
+  sub = subInt64
 
 instance Mul Int64 where
   mul = mulInt64
@@ -151,6 +187,7 @@ instance Add UInt8 where
 
 instance Neg UInt8 where
   neg x = subUInt8 0 x
+  sub = subUInt8
 
 instance Mul UInt8 where
   mul = mulUInt8
@@ -160,6 +197,7 @@ instance Add UInt16 where
 
 instance Neg UInt16 where
   neg x = subUInt16 0 x
+  sub = subUInt16
 
 instance Mul UInt16 where
   mul = mulUInt16
@@ -169,6 +207,7 @@ instance Add UInt32 where
 
 instance Neg UInt32 where
   neg x = subUInt32 0 x
+  sub = subUInt32
 
 instance Mul UInt32 where
   mul = mulUInt32
@@ -178,6 +217,7 @@ instance Add UInt64 where
 
 instance Neg UInt64 where
   neg x = subUInt64 0 x
+  sub = subUInt64
 
 instance Mul UInt64 where
   mul = mulUInt64

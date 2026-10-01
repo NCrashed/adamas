@@ -1043,9 +1043,13 @@ impl Walk<'_> {
         self.term(sizes, ty);
         self.term(sizes, value);
         let size = self.measured(sizes, value);
-        let reduced = primitive_of(self.signature, self.undecided, sizes.len(), value);
-        let fact = reduced.as_ref().and_then(|it| Self::compared(sizes, it));
-        let less = reduced.as_ref().and_then(|it| Self::less(sizes, it));
+        // `decide c` несёт тот же факт, что `c`: разбор по нему - тот же `if`,
+        // только с доказательством в ветви (§10 вопрос 224).
+        let checked = decided(value).unwrap_or(value);
+        let reduced = primitive_of(self.signature, self.undecided, sizes.len(), checked);
+        let compared = reduced.as_ref().unwrap_or(checked);
+        let fact = Self::compared(sizes, compared);
+        let less = Self::less(sizes, compared);
         if let Some(fact) = fact {
             self.bound.push((sizes.len(), fact));
         }
@@ -1094,10 +1098,9 @@ impl Walk<'_> {
         });
         for branch in &case.branches {
             let fields = self.fields(&branch.constructor, case.params);
-            let floored =
-                apart.filter(|_| crate::term::short(&branch.constructor) == crate::prim::FALSE);
-            let bounded =
-                less.filter(|_| crate::term::short(&branch.constructor) == crate::prim::TRUE);
+            let short = crate::term::short(&branch.constructor);
+            let floored = apart.filter(|_| matches!(short, crate::prim::FALSE | crate::prim::NO));
+            let bounded = less.filter(|_| matches!(short, crate::prim::TRUE | crate::prim::YES));
             if let Some(fact) = floored {
                 self.apart.push(fact);
             }
@@ -1195,4 +1198,15 @@ fn unchanged(sizes: &[Option<Size>], at: usize) -> bool {
             bound: None,
         })) if argument == at
     )
+}
+
+/// Проверка `c`, если терм - `decide c` прелюдии ([`crate::prim::DECIDE`]).
+fn decided(term: &Term) -> Option<&Term> {
+    let Term::App(callee, argument) = term else {
+        return None;
+    };
+    let Term::Const(name, ..) = &**callee else {
+        return None;
+    };
+    (crate::term::short(name) == crate::prim::DECIDE).then_some(&**argument)
 }

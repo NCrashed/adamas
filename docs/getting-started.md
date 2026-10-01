@@ -19,6 +19,31 @@ nix develop --command bash -c 'cargo build --release -p adamas-cli -p adamas-lsp
 export PATH="/путь/к/adamas/target/release:$PATH"
 ```
 
+### Установить насовсем
+
+Через профиль Nix ставятся оба бинарника сразу, в `~/.nix-profile/bin`:
+
+```sh
+nix profile add /путь/к/adamas         # в старых Nix: nix profile install
+nix profile upgrade adamas             # после git pull
+```
+
+Через `cargo install` бинарник попадает в `~/.cargo/bin`, и этот каталог
+должен быть в `PATH`:
+
+```sh
+cd /путь/к/adamas
+nix develop --command bash -c 'cargo install --locked --path crates/adamas-cli'
+nix develop --command bash -c 'cargo install --locked --path crates/adamas-lsp'
+```
+
+`adamas-lsp` после любого из способов работает и вне `nix develop`. У `adamas`
+есть разница. Сборка через Nix зашивает в бинарник полный путь к C-компилятору,
+и `adamas build`/`run` работают из любого окружения. После `cargo install` в
+бинарнике остаётся просто `gcc`, поэтому вне dev-shell нужен `gcc` в `PATH`
+или путь к компилятору в `ADAMAS_CC`. LLVM-бэкенд в обоих случаях ищет
+`llvm-as` и соседние утилиты в `PATH` или в каталоге из `ADAMAS_LLVM_BIN`.
+
 ## 2. Завести проект
 
 ```sh
@@ -120,8 +145,10 @@ cd /путь/к/adamas/editors/vscode && npm ci
 code --extensionDevelopmentPath="/путь/к/adamas/editors/vscode" ~/hello-adamas
 ```
 
-Сервер ищется в `PATH` под именем `adamas-lsp`. Если `code` запущен не из
-shell'а с выставленным `PATH`, задайте абсолютный путь в настройках:
+Сервер ищется в `PATH` под именем `adamas-lsp`; как поставить его насовсем,
+сказано в [разделе 1](#установить-насовсем). Если `code` запущен не из
+shell'а с выставленным `PATH` (например, из меню рабочего стола), задайте
+абсолютный путь в пользовательских настройках:
 
 ```json
 "adamas.server.path": "/путь/к/adamas/target/release/adamas-lsp"

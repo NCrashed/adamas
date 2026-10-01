@@ -940,9 +940,19 @@ impl Crossing {
 
 impl Signature {
     /// Определение по имени.
+    ///
+    /// Голое имя соглашения - `True`, `Refl` и прочие из [`crate::eval::selects`] -
+    /// находится и тогда, когда объявлено путём: такие имена ставит само ядро
+    /// (ответ сравнения, блок, прочитанный обратно в терм, §10 вопрос 224), и
+    /// прочитанный терм перепроверяется - решением дырки литерала.
     #[must_use]
     pub fn lookup(&self, name: &str) -> Option<&Definition> {
-        self.definitions.get(name)
+        self.definitions.get(name).or_else(|| {
+            if !crate::eval::conventional(name) {
+                return None;
+            }
+            self.definitions.get(&self.convention(name))
+        })
     }
 
     /// Ставит область видимости текущего файла и отдаёт прежнюю.

@@ -220,9 +220,19 @@ big = 100000
 ///
 /// Ячейки читаются **по одной**: конверсий ширины в языке нет, и байт с байтом
 /// сравнивать нечем, кроме `eqUInt8`. Значение каждой пробы и есть наблюдение.
+///
+/// Запись в ячейку требует доказательства номера (§10 вопрос 224), а прелюдии
+/// здесь нет: `Bool` и `Equal` объявлены самой программой.
 fn with_a_string(declared: usize, text: &str, reads: &str) -> String {
     format!(
-        "greeting : Array {declared} UInt8
+        "data Bool where
+  False : Bool
+  True : Bool
+
+data Equal (a : Type) (x : a) : a -> Type where
+  Refl : Equal a x x
+
+greeting : Array {declared} UInt8
 greeting = \"{text}\"
 {reads}"
     )
@@ -242,7 +252,7 @@ fn a_string_under_a_written_byte_array_is_utf8_with_a_zero() {
     let signature = program(&with_a_string(4, "hд", ""));
     assert_eq!(
         value(&signature, "greeting"),
-        "arraySet 4 UInt8 (arraySet 4 UInt8 (arraySet 4 UInt8 (arrayNew UInt8 4 104) 1 208) 2 180) 3 0"
+        "arraySet 4 UInt8 (arraySet 4 UInt8 (arraySet 4 UInt8 (arrayNew UInt8 4 104) 1 208 (Refl{0} Bool True)) 2 180 (Refl{0} Bool True)) 3 0 (Refl{0} Bool True)"
     );
 }
 
@@ -337,7 +347,7 @@ fn a_string_at_the_limit_is_taken() {
     assert_eq!(
         value(&signature, "greeting"),
         format!(
-            "arraySet {LIMIT} UInt8 (arrayNew UInt8 {LIMIT} 97) {} 0",
+            "arraySet {LIMIT} UInt8 (arrayNew UInt8 {LIMIT} 97) {} 0 (Refl{{0}} Bool True)",
             LIMIT - 1
         )
     );

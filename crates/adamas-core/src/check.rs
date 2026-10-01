@@ -258,23 +258,12 @@ pub fn prim_scheme(signature: &Signature, prim: Prim) -> Term {
         // `eqT d 0`, что стоит здесь.
         Prim::Op(op, ty) if op.proven(ty) => {
             let over = Term::Prim(Prim::Ty(ty));
-            let app = |callee: Term, argument: Term| Term::App(Rc::new(callee), Rc::new(argument));
-            let check = app(
-                app(
-                    Term::Prim(Prim::Cmp(crate::prim::PrimCmp::Eq, ty)),
-                    Term::var(0),
-                ),
-                Term::Prim(Prim::literal(ty, 0)),
-            );
-            let fact = app(
-                app(
-                    app(
-                        declared(signature, crate::prim::EQUAL),
-                        declared(signature, crate::prim::BOOL),
-                    ),
-                    check,
-                ),
-                declared(signature, crate::prim::FALSE),
+            let fact = reflected(
+                signature,
+                crate::prim::PrimCmp::Eq,
+                ty,
+                [Term::var(0), Term::Prim(Prim::literal(ty, 0))],
+                crate::prim::FALSE,
             );
             arrow(
                 Mult::Many,
@@ -426,6 +415,46 @@ fn region_op_scheme(
     }
 }
 
+/// `Refl Bool True` - доказательство факта, который сводится к истине
+/// вычислением. Им элаборатор пишет номер ячейки, литеральный по построению:
+/// строковый литерал собирается записями по номерам меньше длины.
+#[must_use]
+pub fn evident(signature: &Signature) -> Term {
+    declared(signature, crate::prim::REFL).apply([
+        declared(signature, crate::prim::BOOL),
+        declared(signature, crate::prim::TRUE),
+    ])
+}
+
+/// Факт о примитиве отражением булевой проверки (§10 вопрос 225):
+/// `Equal Bool (cmpT left right) verdict`, где `verdict` - `True` либо `False`
+/// программы, взятые соглашением.
+fn reflected(
+    signature: &Signature,
+    cmp: crate::prim::PrimCmp,
+    ty: crate::prim::PrimTy,
+    operands: [Term; 2],
+    verdict: &str,
+) -> Term {
+    declared(signature, crate::prim::EQUAL).apply([
+        declared(signature, crate::prim::BOOL),
+        Term::Prim(Prim::Cmp(cmp, ty)).apply(operands),
+        declared(signature, verdict),
+    ])
+}
+
+/// `Equal Bool (ltUInt64 at length) True`: номер меньше длины. `at` и
+/// `length` - индексы номера и длины в месте, где связывается доказательство.
+fn below(signature: &Signature, at: u32, length: u32) -> Term {
+    reflected(
+        signature,
+        crate::prim::PrimCmp::Lt,
+        crate::prim::PrimTy::UInt64,
+        [Term::var(at), Term::var(length)],
+        crate::prim::TRUE,
+    )
+}
+
 /// Тип операции над массивом. Стёртые связывания имплиситны: длину и элемент
 /// восстанавливает унификация по типу самого массива.
 fn array_op_scheme(
@@ -437,6 +466,10 @@ fn array_op_scheme(
     use crate::prim::ArrayOp;
     let erased = Binder::implicit(Mult::Zero);
     let given = Binder::explicit(Mult::Many);
+    // Номер ячейки меньше длины (§10 вопросы 224, 225): стёртое доказательство
+    // идёт последним, как у деления.
+    let proof = Binder::explicit(Mult::Zero);
+    let inside = |at, length| below(signature, at, length);
     // `Array n a`, где `n` и `a` - связывания на глубине `depth` и `depth - 1`
     // от места употребления.
     let array = |length: Term, element: Term| {
@@ -458,8 +491,8 @@ fn array_op_scheme(
                 bound(given, "x", Term::var(1), array(Term::var(1), Term::var(2))),
             ),
         ),
-        // `arraySet : {0 n} -> {0 a} -> (ω xs : Array n a) -> (ω i : UInt64)
-        //           -> (ω x : a) -> Array n a`
+        // `arraySet : {0 n} -> {0 a} -> (1 xs : Array n a) -> (ω i : UInt64)
+        //           -> (ω x : a) -> (0 p : Equal Bool (ltUInt64 i n) True) -> Array n a`
         ArrayOp::Set => bound(
             erased,
             "n",
@@ -476,12 +509,18 @@ fn array_op_scheme(
                         given,
                         "i",
                         word.clone(),
-                        bound(given, "x", Term::var(2), array(Term::var(4), Term::var(3))),
+                        bound(
+                            given,
+                            "x",
+                            Term::var(2),
+                            bound(proof, "p", inside(1, 4), array(Term::var(5), Term::var(4))),
+                        ),
                     ),
                 ),
             ),
         ),
-        // `arrayIndex : {0 n} -> {0 a} -> (ω xs : Array n a) -> (ω i : UInt64) -> a`
+        // `arrayIndex : {0 n} -> {0 a} -> (ω xs : Array n a) -> (ω i : UInt64)
+        //             -> (0 p : Equal Bool (ltUInt64 i n) True) -> a`
         ArrayOp::Index => bound(
             erased,
             "n",
@@ -494,12 +533,17 @@ fn array_op_scheme(
                     given,
                     "xs",
                     array(Term::var(1), Term::var(0)),
-                    bound(given, "i", word.clone(), Term::var(2)),
+                    bound(
+                        given,
+                        "i",
+                        word.clone(),
+                        bound(proof, "p", inside(0, 3), Term::var(3)),
+                    ),
                 ),
             ),
         ),
         // `arrayRead : {0 n} -> {0 a} -> (1 xs : Array n a) -> (ω i : UInt64)
-        //           -> Read n a`
+        //           -> (0 p : Equal Bool (ltUInt64 i n) True) -> Read n a`
         //
         // Массив **потребляется** и возвращается внутри ответа: линейный
         // массив читается, не отдаваясь (§10 вопрос 202). `Read` - имя
@@ -520,7 +564,13 @@ fn array_op_scheme(
                         given,
                         "i",
                         word.clone(),
-                        declared(signature, crate::prim::READ).apply([Term::var(3), Term::var(2)]),
+                        bound(
+                            proof,
+                            "p",
+                            inside(0, 3),
+                            declared(signature, crate::prim::READ)
+                                .apply([Term::var(4), Term::var(3)]),
+                        ),
                     ),
                 ),
             ),

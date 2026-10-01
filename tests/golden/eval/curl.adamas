@@ -163,7 +163,7 @@ body u =
   let absent : Array 64 UInt8 = arrayNew 64 blank
   let denied : Fetched = intoBuffer absent missing stub cell
   -- У отказавшего переноса тела нет вовсе: писателя libcurl не позвала ни разу.
-  let head : UInt8 = arrayIndex absent 0
+  let head : UInt8 = arrayIndex absent 0 Refl
   let swept : Int32 = removeLocal template
   let addressed : UInt64 = pick (eqInt32 printed printedLength) 1 0
   let fetched : UInt64 = pick (eqInt32 (statusOf got) curlOk) 1 0

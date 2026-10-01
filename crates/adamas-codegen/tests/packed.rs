@@ -59,10 +59,10 @@ third : Cell
 third = { it = Tip }
 
 built : Array 3 Cell
-built = arraySet (arraySet (arrayNew 3 first) 1 second) 2 third
+built = arraySet (arraySet (arrayNew 3 first) 1 second Refl) 2 third Refl
 
 read : Array 3 Cell -> Wrap
-read xs = (arrayIndex xs 2).it
+read xs = (arrayIndex xs 2 Refl).it
 
 main : Wrap
 main = read built
@@ -110,7 +110,7 @@ type Vec3 = V3 Float32
 
 -- Ячейка 0 занимает то, что лежало в ячейке 1; ячейка 1 не трогается.
 rotate : {Flat a} => Array 3 a -> Array 3 a
-rotate xs = arraySet xs 0 (arrayIndex xs 1)
+rotate xs = arraySet xs 0 (arrayIndex xs 1 Refl) Refl
 
 first : Vec3
 first = { x = 1.0, y = 2.0, z = 3.0 }
@@ -122,11 +122,11 @@ third : Vec3
 third = { x = 100.0, y = 200.0, z = 300.0 }
 
 built : Array 3 Vec3
-built = arraySet (arraySet (arrayNew 3 first) 1 second) 2 third
+built = arraySet (arraySet (arrayNew 3 first) 1 second Refl) 2 third Refl
 
 -- 30.0: поле `z` ячейки, приехавшей из первой.
 main : Float32
-main = (arrayIndex (rotate built) 0).z
+main = (arrayIndex (rotate built) 0 Refl).z
 ";
 
 /// Агрегат с **дырой**: поля разной ширины, размер округляется до границы.
@@ -145,7 +145,7 @@ class Flat a where
 type Padded = { wide : Int64, tag : Int8 }
 
 rotate : {Flat a} => Array 3 a -> Array 3 a
-rotate xs = arraySet xs 0 (arrayIndex xs 1)
+rotate xs = arraySet xs 0 (arrayIndex xs 1 Refl) Refl
 
 first : Padded
 first = { wide = 1, tag = 1 }
@@ -157,12 +157,12 @@ third : Padded
 third = { wide = 900, tag = 9 }
 
 built : Array 3 Padded
-built = arraySet (arraySet (arrayNew 3 first) 1 second) 2 third
+built = arraySet (arraySet (arrayNew 3 first) 1 second Refl) 2 third Refl
 
 -- 700: широкое поле ячейки, приехавшей из первой. В байт оно не влезает, и
 -- перестановка полей укладки обрезала бы его до 188.
 main : Int64
-main = (arrayIndex (rotate built) 0).wide
+main = (arrayIndex (rotate built) 0 Refl).wide
 ";
 
 /// Округление размера и порядок полей видны на агрегате с дырой.
@@ -376,15 +376,15 @@ take None = 0
 take (Some n) = n
 
 built : Array 3 OptInt
-built = arraySet (arraySet (arrayNew 3 None) 1 (Some 700)) 2 (Some 900)
+built = arraySet (arraySet (arrayNew 3 None) 1 (Some 700) Refl) 2 (Some 900) Refl
 
 -- Массив принимается параметром, а не читается трижды по имени: определение
 -- без параметров пересчитывается на каждом упоминании, и число блоков
 -- считало бы построения, а не ячейки.
 read : Array 3 OptInt -> Int64
 read xs =
-  addInt64 (take (arrayIndex xs 0))
-    (addInt64 (take (arrayIndex xs 1)) (mulInt64 (take (arrayIndex xs 2)) 10))
+  addInt64 (take (arrayIndex xs 0 Refl))
+    (addInt64 (take (arrayIndex xs 1 Refl)) (mulInt64 (take (arrayIndex xs 2 Refl)) 10))
 
 -- 0 + 700 + 9000 = 9700
 main : Int64
@@ -438,10 +438,10 @@ data Colour where
   Blue : Colour
 
 built : Array 3 Colour
-built = arraySet (arraySet (arrayNew 3 Red) 1 Green) 2 Blue
+built = arraySet (arraySet (arrayNew 3 Red) 1 Green Refl) 2 Blue Refl
 
 main : Colour
-main = arrayIndex built 2
+main = arrayIndex built 2 Refl
 ";
 
 /// Колонка нульарных тегов - байт на ячейку и один блок на всё.
@@ -478,10 +478,10 @@ data P where
   MkP : Float32 -> Float32 -> P
 
 built : Array 3 P
-built = arraySet (arrayNew 3 (MkP 1.0 2.0)) 1 (MkP 10.0 20.0)
+built = arraySet (arrayNew 3 (MkP 1.0 2.0)) 1 (MkP 10.0 20.0) Refl
 
 main : P
-main = arrayIndex built 1
+main = arrayIndex built 1 Refl
 ";
 
 /// Один конструктор - как запись: восемь байт полей и ни байта тега.
@@ -531,10 +531,10 @@ second : Particle
 second = { pos = { x = 4.0, y = 5.0, z = 6.0 }, hp = 20.0 }
 
 built : Array 2 Particle
-built = arraySet (arrayNew 2 first) 1 second
+built = arraySet (arrayNew 2 first) 1 second Refl
 
 read : Array 2 Particle -> Float32
-read xs = addFloat32 (arrayIndex xs 1).pos.z (arrayIndex xs 0).hp
+read xs = addFloat32 (arrayIndex xs 1 Refl).pos.z (arrayIndex xs 0 Refl).hp
 
 -- 6.0 + 10.0 = 16.0: поле вложенного из одной ячейки, скаляр из другой.
 main : Float32
@@ -587,10 +587,10 @@ data Outer where
   MkO : Inner -> Int8 -> Outer
 
 built : Array 2 Outer
-built = arraySet (arrayNew 2 (MkO (MkI 7) 1)) 1 (MkO (MkI 9) 2)
+built = arraySet (arrayNew 2 (MkO (MkI 7) 1)) 1 (MkO (MkI 9) 2) Refl
 
 read : Array 2 Outer -> Outer
-read xs = arrayIndex xs 1
+read xs = arrayIndex xs 1 Refl
 
 main : Outer
 main = read built
@@ -682,15 +682,15 @@ take None = 0
 take (Some n) = n
 
 rotate : {Flat a} => Array 3 a -> Array 3 a
-rotate xs = arraySet xs 0 (arrayIndex xs 1)
+rotate xs = arraySet xs 0 (arrayIndex xs 1 Refl) Refl
 
 built : Array 3 OptInt
-built = arraySet (arraySet (arrayNew 3 None) 1 (Some 700)) 2 (Some 900)
+built = arraySet (arraySet (arrayNew 3 None) 1 (Some 700) Refl) 2 (Some 900) Refl
 
 -- 700: ячейка, приехавшая из первой. Разойдись шаг - байты взялись бы не
 -- с той ячейки, и тег с payload'ом перепутались бы.
 main : Int64
-main = take (arrayIndex (rotate built) 0)
+main = take (arrayIndex (rotate built) 0 Refl)
 ";
 
 /// Оба пути согласны о шаге тегованной ячейки.
@@ -739,12 +739,12 @@ built =
   let n90 : Int64 = 90
   let x : Option Int64 = Some n70
   let y : Option Int64 = Some n90
-  arraySet (arraySet (arrayNew 3 None) 1 x) 2 y
+  arraySet (arraySet (arrayNew 3 None) 1 x Refl) 2 y Refl
 
 read : Array 3 (Option Int64) -> Int64
 read xs =
-  addInt64 (take (arrayIndex xs 0))
-    (addInt64 (take (arrayIndex xs 1)) (mulInt64 (take (arrayIndex xs 2)) 10))
+  addInt64 (take (arrayIndex xs 0 Refl))
+    (addInt64 (take (arrayIndex xs 1 Refl)) (mulInt64 (take (arrayIndex xs 2 Refl)) 10))
 
 main : Int64
 main = read built

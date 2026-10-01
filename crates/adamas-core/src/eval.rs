@@ -261,6 +261,21 @@ fn quote_fields(size: u32, telescope: &Telescope) -> Fields {
 /// Записи печатаются только для ячеек, отличных от нулевой: `arrayNew n c0`
 /// уже кладёт `c0` во все, и повторять её значило бы печатать `arraySet`,
 /// ничего не меняющий.
+/// `Refl{0} Bool True` голыми именами соглашения: доказательство номера, который
+/// ядро само поставило литеральным и меньшим длины (§10 вопрос 224). Имена
+/// находит [`crate::sig::Signature::lookup`], сверка - [`selects`].
+fn evident() -> Term {
+    Term::Const(
+        crate::prim::REFL.into(),
+        Rc::from([crate::level::Level::Zero]),
+        crate::term::Args::none(),
+    )
+    .apply([
+        Term::constant(crate::prim::BOOL),
+        Term::constant(crate::prim::TRUE),
+    ])
+}
+
 pub(crate) fn quote_block(size: u32, block: &crate::value::Block) -> Term {
     use crate::prim::{ArrayOp, Prim, PrimTy};
     let elem = Rc::new(quote(size, block.elem()));
@@ -280,19 +295,16 @@ pub(crate) fn quote_block(size: u32, block: &crate::value::Block) -> Term {
         if bits == first {
             continue;
         }
-        built = apply(
-            apply(
-                apply(
-                    apply(
-                        apply(Term::Prim(Prim::Over(ArrayOp::Set)), Rc::clone(&length)),
-                        Rc::clone(&elem),
-                    ),
-                    Rc::new(built),
-                ),
-                Rc::new(Term::Prim(Prim::literal(PrimTy::UInt64, at))),
-            ),
-            literal(bits),
-        );
+        // Номер литерален и меньше длины по построению: доказательство -
+        // [`evident`].
+        built = Term::Prim(Prim::Over(ArrayOp::Set)).apply([
+            (*length).clone(),
+            (*elem).clone(),
+            built,
+            Term::Prim(Prim::literal(PrimTy::UInt64, at)),
+            (*literal(bits)).clone(),
+            evident(),
+        ]);
     }
     built
 }
@@ -468,8 +480,8 @@ pub fn trap(value: &Value) -> Option<&'static str> {
         (Head::Prim(PrimOp::Div | PrimOp::Rem, ty), [_, right, _]) if !ty.floating() => {
             (literal(right)? == 0).then_some(crate::prim::DIVISION_BY_ZERO)
         }
-        (Head::ArrayOp(ArrayOp::Index | ArrayOp::Read), [length, _, _, at])
-        | (Head::ArrayOp(ArrayOp::Set), [length, _, _, at, _]) => {
+        (Head::ArrayOp(ArrayOp::Index | ArrayOp::Read), [length, _, _, at, _])
+        | (Head::ArrayOp(ArrayOp::Set), [length, _, _, at, _, _]) => {
             outside(at, length)?.then_some(crate::prim::CELL_OUTSIDE)
         }
         (Head::SimdOp(SimdOp::Lane), [width, _, _, _, at])
@@ -502,11 +514,22 @@ pub fn trap(value: &Value) -> Option<&'static str> {
 /// цена росла как `2ⁿ`, а операция эффекта в ветви оставалась без хендлера.
 #[must_use]
 pub fn selects(branch: &Name, head: &Name) -> bool {
-    branch == head
-        || (matches!(
-            &**head,
-            crate::prim::TRUE | crate::prim::FALSE | crate::prim::MKREAD
-        ) && crate::term::short(branch) == &**head)
+    branch == head || (conventional(head) && crate::term::short(branch) == &**head)
+}
+
+/// Ставит ли ядро это имя голым: ответ сравнения (`True`, `False`), ответ
+/// линейного чтения (`MkRead`) и доказательство номера в блоке, прочитанном
+/// обратно (`Refl Bool True`, §10 вопрос 224).
+#[must_use]
+pub fn conventional(name: &str) -> bool {
+    matches!(
+        name,
+        crate::prim::TRUE
+            | crate::prim::FALSE
+            | crate::prim::MKREAD
+            | crate::prim::REFL
+            | crate::prim::BOOL
+    )
 }
 
 /// [`eliminate_case`], возвращающая `None` вместо паники.
@@ -717,6 +740,7 @@ fn arrayed(op: crate::prim::ArrayOp, spine: &[Elim]) -> Option<Rc<Value>> {
                 Elim::App(array),
                 Elim::App(slot),
                 Elim::App(value),
+                Elim::App(_),
             ] = spine
             else {
                 return None;
@@ -739,7 +763,14 @@ fn arrayed(op: crate::prim::ArrayOp, spine: &[Elim]) -> Option<Rc<Value>> {
             Some(Rc::new(Value::Neutral(Head::Block(written), Vec::new())))
         }
         ArrayOp::Index => {
-            let [Elim::App(_), Elim::App(_), Elim::App(array), Elim::App(at)] = spine else {
+            let [
+                Elim::App(_),
+                Elim::App(_),
+                Elim::App(array),
+                Elim::App(at),
+                Elim::App(_),
+            ] = spine
+            else {
                 return None;
             };
             let Value::Prim(Prim::Lit(_, wanted)) = &**at else {
@@ -757,6 +788,7 @@ fn arrayed(op: crate::prim::ArrayOp, spine: &[Elim]) -> Option<Rc<Value>> {
                 Elim::App(element),
                 Elim::App(array),
                 Elim::App(at),
+                Elim::App(_),
             ] = spine
             else {
                 return None;
@@ -840,6 +872,7 @@ fn cell_of(array: &Rc<Value>, wanted: u64) -> Option<Rc<Value>> {
                     Elim::App(inner),
                     Elim::App(slot),
                     Elim::App(value),
+                    Elim::App(_),
                 ],
             ) => {
                 let Value::Prim(Prim::Lit(_, slot)) = &**slot else {
@@ -1031,6 +1064,7 @@ fn stored(spine: &[Elim]) -> Option<Rc<Value>> {
             Elim::App(built),
             Elim::App(index),
             Elim::App(value),
+            Elim::App(eval(&Env::default(), &evident())),
         ];
         built = arrayed(crate::prim::ArrayOp::Set, &written).unwrap_or_else(|| {
             Rc::new(Value::Neutral(
@@ -1573,11 +1607,12 @@ mod tests {
                 array,
                 index(at),
                 byte(bits),
+                Term::constant(crate::prim::REFL),
             ])
         };
         assert_eq!(
             normalize(&written(made.clone(), 1, 8)).to_string(),
-            "arraySet 3 UInt8 (arrayNew UInt8 3 7) 1 8"
+            "arraySet 3 UInt8 (arrayNew UInt8 3 7) 1 8 (Refl{0} Bool True)"
         );
         assert_eq!(
             normalize(&written(made, 1, 7)).to_string(),

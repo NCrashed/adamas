@@ -82,19 +82,19 @@ wrote = 3
 format : Array 5 UInt8
 format =
   let zeroed : Array 5 UInt8 = arrayNew 5 blank
-  let first : Array 5 UInt8 = arraySet zeroed 0 percent
-  let second : Array 5 UInt8 = arraySet first 1 dot
-  let third : Array 5 UInt8 = arraySet second 2 one
-  arraySet third 3 eff
+  let first : Array 5 UInt8 = arraySet zeroed 0 percent Refl
+  let second : Array 5 UInt8 = arraySet first 1 dot Refl
+  let third : Array 5 UInt8 = arraySet second 2 one Refl
+  arraySet third 3 eff Refl
 
 body : (ω u : Unit) -> {Foreign} UInt64
 body u =
   let text : Array 8 UInt8 = arrayNew 8 blank
   let written : Int32 = snprintf text room format half
-  let head : UInt8 = arrayIndex text 0
-  let point : UInt8 = arrayIndex text 1
-  let tail : UInt8 = arrayIndex text 2
-  let stop : UInt8 = arrayIndex text 3
+  let head : UInt8 = arrayIndex text 0 Refl
+  let point : UInt8 = arrayIndex text 1 Refl
+  let tail : UInt8 = arrayIndex text 2 Refl
+  let stop : UInt8 = arrayIndex text 3 Refl
   let sized : UInt64 = pick (eqInt32 written wrote) 1 0
   let leading : UInt64 = pick (eqUInt8 head digitTwo) 1 0
   let dotted : UInt64 = pick (eqUInt8 point dot) 1 0

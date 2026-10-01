@@ -33,10 +33,6 @@
 --     `MkWorld`, собранный заново, своего индекса не знает, и вывести его
 --     неоткуда - поля его не упоминают.
 
-data Bool where
-  True : Bool
-  False : Bool
-
 -- | Метка компонента.
 data Tag where
   Position : Tag
@@ -71,19 +67,19 @@ one = 1.0
 two : Float32
 two = 2.0
 
-at : Array cells Float32 -> UInt64 -> Float32
-at xs i = arrayIndex xs i
+at : Array cells Float32 -> (i : UInt64) -> (0 p : Equal Bool (ltUInt64 i cells) True) -> Float32
+at xs i p = arrayIndex xs i p
 
-put : Array cells Float32 -> UInt64 -> Float32 -> Array cells Float32
-put xs i v = arraySet xs i v
+put : Array cells Float32 -> (i : UInt64) -> Float32 -> (0 p : Equal Bool (ltUInt64 i cells) True) -> Array cells Float32
+put xs i v p = arraySet xs i v p
 
 -- | Мир как запись из массивов, индексированная множеством меток.
 data World : Tags -> Type where
   MkWorld : (0 cs : Tags) -> Array cells Float32 -> Array cells Float32 -> Array cells Float32 -> Array cells Float32 -> World cs
 
 -- | Позиция по оси x. Требует доказательства, что позиция у сущности есть.
-posX : (0 cs : Tags) -> (0 p : Has Position cs) -> World cs -> UInt64 -> Float32
-posX cs p (MkWorld ds xs ys vx vy) i = at xs i
+posX : (0 cs : Tags) -> (0 p : Has Position cs) -> World cs -> (i : UInt64) -> (0 q : Equal Bool (ltUInt64 i cells) True) -> Float32
+posX cs p (MkWorld ds xs ys vx vy) i q = at xs i q
 
 -- | Проход по массивам: внутренний цикл идёт по ним, а не по миру.
 --
@@ -93,7 +89,9 @@ sweep : Array cells Float32 -> Array cells Float32 -> UInt64 -> Array cells Floa
 sweep xs vx 0 = xs
 sweep xs vx i =
   let j : UInt64 = subUInt64 i 1
-  sweep (put xs j (addFloat32 (at xs j) (at vx j))) vx j
+  case decide (ltUInt64 j cells) of
+    Yes p -> sweep (put xs j (addFloat32 (at xs j p) (at vx j p)) p) vx j
+    No _q -> xs
 
 -- | Система движения: требует **обеих** меток разом.
 move : (0 cs : Tags) -> (0 a : Has Position cs) -> (0 b : Has Velocity cs) -> World cs -> World cs
@@ -124,4 +122,4 @@ tick w f = tick (move movable atPosition atVelocity w) (subUInt64 f 1)
 -- санитайзерный тест конкурентности переставал укладываться в свои двадцать
 -- секунд.
 main : Float32
-main = posX movable atPosition (tick start frames) 0
+main = posX movable atPosition (tick start frames) 0 Refl

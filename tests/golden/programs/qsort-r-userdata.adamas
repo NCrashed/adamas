@@ -78,20 +78,20 @@ eight = 8
 body : (ω u : Unit) -> {Foreign} UInt64
 body u =
   let zeroed : Array 4 UInt64 = arrayNew 4 blank
-  let first : Array 4 UInt64 = arraySet zeroed 0 three
-  let second : Array 4 UInt64 = arraySet first 1 one
-  let third : Array 4 UInt64 = arraySet second 2 four
-  let xs : Array 4 UInt64 = arraySet third 3 two
+  let first : Array 4 UInt64 = arraySet zeroed 0 three Refl
+  let second : Array 4 UInt64 = arraySet first 1 one Refl
+  let third : Array 4 UInt64 = arraySet second 2 four Refl
+  let xs : Array 4 UInt64 = arraySet third 3 two Refl
   -- Среда колбэка: ширина сравнения лежит в массиве, а не в слове. Плоский
   -- скаляр в среду замыкания сегодня не проходит (§10 вопрос 191), массив
   -- проходит с трека B этой же волны.
   let widths : Array 1 UInt64 = arrayNew 1 eight
-  let done : Unit = qsort_r xs 4 8 (\a b -> memcmp a b (arrayIndex widths 0)) callbackEnv
-  let a : UInt64 = arrayIndex xs 0
-  let b : UInt64 = arrayIndex xs 1
-  let c : UInt64 = arrayIndex xs 2
-  let d : UInt64 = arrayIndex xs 3
-  let w : UInt64 = arrayIndex widths 0
+  let done : Unit = qsort_r xs 4 8 (\a b -> memcmp a b (arrayIndex widths 0 Refl)) callbackEnv
+  let a : UInt64 = arrayIndex xs 0 Refl
+  let b : UInt64 = arrayIndex xs 1 Refl
+  let c : UInt64 = arrayIndex xs 2 Refl
+  let d : UInt64 = arrayIndex xs 3 Refl
+  let w : UInt64 = arrayIndex widths 0 Refl
   let order : UInt64 = addUInt64 (mulUInt64 a 1000) (addUInt64 (mulUInt64 b 100) (addUInt64 (mulUInt64 c 10) d))
   addUInt64 (mulUInt64 order 10) w
 

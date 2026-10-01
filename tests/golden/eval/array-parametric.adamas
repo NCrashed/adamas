@@ -28,12 +28,12 @@ built =
   let n90 : Int64 = 90
   let x : Option Int64 = Some n70
   let y : Option Int64 = Some n90
-  arraySet (arraySet (arrayNew 3 None) 1 x) 2 y
+  arraySet (arraySet (arrayNew 3 None) 1 x Refl) 2 y Refl
 
 read : Array 3 (Option Int64) -> Int64
 read xs =
-  addInt64 (take (arrayIndex xs 0))
-    (addInt64 (take (arrayIndex xs 1)) (mulInt64 (take (arrayIndex xs 2)) 10))
+  addInt64 (take (arrayIndex xs 0 Refl))
+    (addInt64 (take (arrayIndex xs 1 Refl)) (mulInt64 (take (arrayIndex xs 2 Refl)) 10))
 
 main : Int64
 main = read built

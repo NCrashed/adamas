@@ -792,14 +792,13 @@ fn same_head(
             Head::Global(name_a, levels_a, rows_a, mults_a),
             Head::Global(name_b, levels_b, rows_b, mults_b),
         ) => {
-            // Голый `True`/`False` δ-свёртки сравнения равен конструктору
-            // программы - тем же правилом, каким его узнаёт ветвь разбора
-            // ([`crate::eval::selects`]). Без этого `eqInt32 5 0` в типе
-            // сводилось к `False`, не равному `Prelude.False`, и доказательство
-            // `Refl` у деления не сходилось (§10 вопрос 225).
-            (name_a == name_b
-                || crate::eval::selects(name_a, name_b)
-                || crate::eval::selects(name_b, name_a))
+            // Голое имя соглашения - `False` δ-свёртки сравнения, `Refl Bool True`
+            // блока, прочитанного обратно, - равно тому, что программа под этим
+            // именем объявила ([`Signature::convention`]). Без этого `eqInt32 5 0`
+            // в типе сводилось к `False`, не равному `Prelude.False`, и `Refl` у
+            // деления не сходился (§10 вопросы 224, 225). Своё `Bool` программы
+            // с прелюдным при этом не смешивается: соглашение берёт своё.
+            (name_a == name_b || canonical(sig, name_a) == canonical(sig, name_b))
                 && levels_a.len() == levels_b.len()
                 && levels_a
                     .iter()
@@ -1252,6 +1251,16 @@ fn convertible_under(
         &left(Rc::clone(&fresh)),
         &right(fresh),
     )
+}
+
+/// Имя, под которым программа объявила голое имя соглашения
+/// ([`crate::eval::conventional`]); прочие имена - как есть.
+fn canonical(sig: &Signature, name: &Name) -> Name {
+    if crate::eval::conventional(name) {
+        sig.convention(name)
+    } else {
+        Rc::clone(name)
+    }
 }
 
 #[cfg(test)]

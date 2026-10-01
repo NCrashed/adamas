@@ -20,11 +20,11 @@ class Flat a where
 -- Ячейка 0 занимает то, что лежало в ячейке 1. Ячейку 1 нарочно не трогаем:
 -- перепиши `rotate` обе, и ответ перестал бы отличать сдвиг от копии.
 rotate : {Flat a} => Array 3 a -> Array 3 a
-rotate xs = arraySet xs 0 (arrayIndex xs 1)
+rotate xs = arraySet xs 0 (arrayIndex xs 1 Refl) Refl
 
 built : Array 3 Int64
-built = arraySet (arraySet (arrayNew 3 7) 1 8) 2 9
+built = arraySet (arraySet (arrayNew 3 7) 1 8 Refl) 2 9 Refl
 
 -- 8
 main : Int64
-main = arrayIndex (rotate built) 0
+main = arrayIndex (rotate built) 0 Refl

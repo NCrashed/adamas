@@ -22,15 +22,15 @@ class Flat a where
   layout : Layout
 
 rotate : {Flat a} => Array 3 a -> Array 3 a
-rotate xs = arraySet xs 0 (arrayIndex xs 1)
+rotate xs = arraySet xs 0 (arrayIndex xs 1 Refl) Refl
 
 shift : Int64 -> Int64
 shift n =
   -- Ячейка связана `let`-ом с написанным типом: тип элемента `arraySet` берёт
   -- из имплисита, и литералу ожидания оттуда не достаётся (§4.3).
   let cell : Int64 = 8
-  let built : Array 3 Int64 = arraySet (arrayNew 3 n) 1 cell
-  arrayIndex (rotate built) 0
+  let built : Array 3 Int64 = arraySet (arrayNew 3 n) 1 cell Refl
+  arrayIndex (rotate built) 0 Refl
 
 -- 8
 main : Int64

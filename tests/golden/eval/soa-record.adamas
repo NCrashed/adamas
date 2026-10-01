@@ -23,9 +23,9 @@ world : Particles 2
 world = { pos = arrayNew 2 p0, vel = arrayNew 2 v0 }
 
 -- Система §4.11: колонки приходят одной записью, индекс - общий и стёртый.
-sample : (0 n : UInt64) -> Particles n -> Float32
-sample n ps = addFloat32 (arrayIndex ps.pos 0).z (arrayIndex ps.vel 1).y
+sample : (0 n : UInt64) -> (0 a : Equal Bool (ltUInt64 0 n) True) -> (0 b : Equal Bool (ltUInt64 1 n) True) -> Particles n -> Float32
+sample n a b ps = addFloat32 (arrayIndex ps.pos 0 a).z (arrayIndex ps.vel 1 b).y
 
 -- 3.0 + 20.0 = 23.0
 main : Float32
-main = sample 2 world
+main = sample 2 Refl Refl world

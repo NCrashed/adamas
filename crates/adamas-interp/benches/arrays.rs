@@ -77,15 +77,23 @@ size : UInt64
 size = {cells}
 
 main : Float32
-main = arrayIndex (arrayNew size zero) 0
+main = arrayIndex (arrayNew size zero) 0 Refl
 "
     )
 }
 
+/// Проверенная программа и тело её `main` - путём `adamas eval`, с прелюдией:
+/// корпусная колонка берёт у неё `decide` (§10 вопрос 224).
 fn prepared(text: &str) -> (Signature, Term) {
-    let module = adamas_parser::parse(text).expect("исходник обязан разбираться");
-    let (signature, _) =
-        adamas_elab::elaborate(&module).expect("исходник обязан проходить проверку");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/eval");
+    let sources = adamas_elab::program::Directory::new(root);
+    let entry = adamas_core::source::SourceFile::new("стенд", text.to_owned());
+    let program = adamas_elab::program::analyze(entry, &sources);
+    assert!(
+        program.error().is_none(),
+        "исходник обязан проходить проверку"
+    );
+    let signature = program.signature.expect("проход обязан отдать сигнатуру");
     let definition = signature.lookup("main").expect("`main` объявлен");
     let body = definition.body.as_ref().expect("у `main` есть тело");
     let levels: Vec<Level> = (0..definition.level_arity)

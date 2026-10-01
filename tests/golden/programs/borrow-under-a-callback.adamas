@@ -50,10 +50,10 @@ body u =
   -- Первая половина: заём владением, замыкание массива не называет.
   let widths : Array 1 UInt64 = arrayNew 1 eight
   let lone : Array 4 UInt64 = arrayNew 4 blank
-  let alone : UInt64 = adamas_probe_during lone (\a b -> memcmp a b (arrayIndex widths 0)) callbackEnv
+  let alone : UInt64 = adamas_probe_during lone (\a b -> memcmp a b (arrayIndex widths 0 Refl)) callbackEnv
   -- Вторая половина: тот же массив одолжен и захвачен.
   let both : Array 4 UInt64 = arrayNew 4 blank
-  let shared : UInt64 = adamas_probe_during both (\a b -> memcmp a b (arrayIndex both 0)) callbackEnv
+  let shared : UInt64 = adamas_probe_during both (\a b -> memcmp a b (arrayIndex both 0 Refl)) callbackEnv
   addUInt64 alone (mulUInt64 shared 1000)
 
 main : UInt64

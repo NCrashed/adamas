@@ -142,7 +142,7 @@ fn the_deepest_legal_term_around_the_longest_legal_string_is_lowered() {
     // два звена сверх стрелки, и цепочка из 64 стрелок вышла бы за предел не
     // стрелками, а доменом.
     let text = format!(
-        "type Bytes = Array {0} UInt8\n\nother : Bytes\nother = \"{1}\"\n\n\
+        "{PROOF}type Bytes = Array {0} UInt8\n\nother : Bytes\nother = \"{1}\"\n\n\
          deep : {2}UInt8\ndeep {3} = 0\n\n\
          main : UInt8\nmain = deep {4}\n",
         STRING,
@@ -198,10 +198,24 @@ fn unary(value: usize) -> String {
     format!("{NAT}main : Nat\nmain = {value}\n")
 }
 
+/// Объявления, которых требует доказательство номера ячейки.
+const PROOF: &str = "\
+data Bool where
+  False : Bool
+  True : Bool
+
+data Equal (a : Type) (x : a) : a -> Type where
+  Refl : Equal a x x
+
+";
+
 /// Программа со строкой в `bytes` написанных байт; в типе на один больше.
+///
+/// Элаборация здесь без прелюдии, а запись в ячейку требует доказательства
+/// номера (§10 вопрос 224): `Bool` и `Equal` объявлены самой программой.
 fn string(bytes: usize) -> String {
     format!(
-        "text : Array {} UInt8\ntext = \"{}\"\n\nmain : UInt8\nmain = arrayIndex text 0\n",
+        "{PROOF}text : Array {} UInt8\ntext = \"{}\"\n\nmain : UInt8\nmain = arrayIndex text 0 Refl\n",
         bytes + 1,
         "a".repeat(bytes)
     )

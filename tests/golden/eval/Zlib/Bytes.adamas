@@ -77,4 +77,4 @@ checksum bytes count = crc32 0 bytes count
 
 -- Ячейка out-параметра именем, а не номером.
 roomLeft : (ω room : Array 1 UInt64) -> UInt64
-roomLeft room = arrayIndex room 0
+roomLeft room = arrayIndex room 0 Refl

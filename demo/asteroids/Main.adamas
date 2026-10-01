@@ -71,10 +71,20 @@ shots = 8
 
 -- Мономорфные обёртки над примитивами массива: внутри ветви разбора
 -- индексированного семейства имплиситы примитива не решаются (§10 вопрос 200).
+--
+-- Номер проверяется во время выполнения (§10 вопрос 224): циклы игры идут по
+-- счётчику вниз, и доказать номер меньшим длины без лемм арифметики нечем.
+-- Номера вне длины в игре не бывает; ветвь `No` читает ноль и оставляет
+-- массив как был. Камни и выстрелы - массивы одной длины, и обёртки общие.
 at : Array rocks Int32 -> UInt64 -> Int32
-at xs i = arrayIndex xs i
+at xs i = case decide (ltUInt64 i rocks) of
+  Yes p -> arrayIndex xs i p
+  No _q -> 0
+
 put : Array rocks Int32 -> UInt64 -> Int32 -> Array rocks Int32
-put xs i v = arraySet xs i v
+put xs i v = case decide (ltUInt64 i rocks) of
+  Yes p -> arraySet xs i v p
+  No _q -> xs
 
 -- | Остаток от деления для положительных - им заворачивается экран. Предел
 -- ненулевой, и доказывает это вызывающий: у экрана предел постоянный, и
@@ -208,7 +218,7 @@ countRocks : Array rocks Int32 -> UInt64 -> Int32 -> Int32
 countRocks sz 0 n = n
 countRocks sz i n =
   let j = i - 1
-  countRocks sz j (n + (if 0 < arrayIndex sz j then 1 else 0))
+  countRocks sz j (n + (if 0 < at sz j then 1 else 0))
 
 -- | Первый свободный слот камня; `rocks` - свободного нет. Им находится место
 -- осколку.
@@ -216,7 +226,7 @@ freeRock : Array rocks Int32 -> UInt64 -> UInt64 -> UInt64
 freeRock sz 0 found = found
 freeRock sz i found =
   let j = i - 1
-  freeRock sz j (if 0 < arrayIndex sz j then found else j)
+  freeRock sz j (if 0 < at sz j then found else j)
 
 -- | Положение на экране: неподвижная точка делится обратно.
 screenOf : Int32 -> Int32
@@ -400,21 +410,21 @@ fly : Shots -> UInt64 -> Shots
 fly w 0 = w
 fly (MkShots xs ys vx vy life) i =
   let j = i - 1
-  let alive = 0 < arrayIndex life j
-  let x = arrayIndex xs j
-  let y = arrayIndex ys j
-  let age = arrayIndex life j
-  let nx = wrap (x + arrayIndex vx j) worldX Refl
-  let ny = wrap (y + arrayIndex vy j) worldY Refl
+  let alive = 0 < at life j
+  let x = at xs j
+  let y = at ys j
+  let age = at life j
+  let nx = wrap (x + at vx j) worldX Refl
+  let ny = wrap (y + at vy j) worldY Refl
   let aged = if alive then age - 1 else 0
-  fly (MkShots (arraySet xs j (if alive then nx else x)) (arraySet ys j (if alive then ny else y)) vx vy (arraySet life j aged)) j
+  fly (MkShots (put xs j (if alive then nx else x)) (put ys j (if alive then ny else y)) vx vy (put life j aged)) j
 
 -- | Первый свободный слот выстрела; `shots` - свободного нет.
 freeShot : Array shots Int32 -> UInt64 -> UInt64 -> UInt64
 freeShot life 0 found = found
 freeShot life i found =
   let j = i - 1
-  freeShot life j (if 0 < arrayIndex life j then found else j)
+  freeShot life j (if 0 < at life j then found else j)
 
 -- | Выстрел из носа корабля, если есть чем и если ствол заряжен.
 --
@@ -424,13 +434,13 @@ fire : Ship -> Shots -> Bool -> Shots
 fire ship (MkShots xs ys svx svy life) shoot =
   let slot = freeShot life shots shots
   let ok = shoot && slot < shots
-  let at = if ok then slot else 0
-  let x = if ok then ship.x else arrayIndex xs at
-  let y = if ok then ship.y else arrayIndex ys at
-  let vx = if ok then dirX (aim ship.dir) * shotSpeed else arrayIndex svx at
-  let vy = if ok then dirY (aim ship.dir) * shotSpeed else arrayIndex svy at
-  let age = if ok then 48 else arrayIndex life at
-  MkShots (arraySet xs at x) (arraySet ys at y) (arraySet svx at vx) (arraySet svy at vy) (arraySet life at age)
+  let k = if ok then slot else 0
+  let x = if ok then ship.x else at xs k
+  let y = if ok then ship.y else at ys k
+  let vx = if ok then dirX (aim ship.dir) * shotSpeed else at svx k
+  let vy = if ok then dirY (aim ship.dir) * shotSpeed else at svy k
+  let age = if ok then 48 else at life k
+  MkShots (put xs k x) (put ys k y) (put svx k vx) (put svy k vy) (put life k age)
 
 -- | Пересекаются ли два квадрата на экране.
 touching : Int32 -> Int32 -> Int32 -> Int32 -> Int32 -> Bool
@@ -473,8 +483,8 @@ strike rs ss s 0 got = MkVolley rs ss got
 strike (MkRocks ds xs ys vx vy sz) (MkShots sx sy svx svy life) s i got =
   let j = i - 1
   let side = at sz j
-  let live = 0 < side && 0 < arrayIndex life s
-  let near = touching (screenOf (at xs j)) (screenOf (at ys j)) (screenOf (arrayIndex sx s)) (screenOf (arrayIndex sy s)) side
+  let live = 0 < side && 0 < at life s
+  let near = touching (screenOf (at xs j)) (screenOf (at ys j)) (screenOf (at sx s)) (screenOf (at sy s)) side
   let hit = live && near
   let rest = shard side
   let slot = freeRock sz rocks rocks
@@ -497,9 +507,9 @@ strike (MkRocks ds xs ys vx vy sz) (MkShots sx sy svx svy life) s i got =
   let grownVX = put turnX dest (if born then quicken srcVY else heldVX)
   let grownVY = put turnY dest (if born then quicken (neg srcVX) else heldVY)
   let grownSz = put shrunk dest (if born then rest else heldSz)
-  let spent = if hit then 0 else arrayIndex life s
+  let spent = if hit then 0 else at life s
   let earned = if hit then worth side else 0
-  strike (MkRocks whole keptX keptY grownVX grownVY grownSz) (MkShots sx sy svx svy (arraySet life s spent)) s j (got + earned)
+  strike (MkRocks whole keptX keptY grownVX grownVY grownSz) (MkShots sx sy svx svy (put life s spent)) s j (got + earned)
 
 -- | Следующий выстрел против всех камней, начиная с итога предыдущего.
 onward : Volley -> UInt64 -> Volley
@@ -538,7 +548,7 @@ bump ship keys (MkRocks ds xs ys vx vy sz) ss st i =
 
 -- | Прямоугольник в буфере `SDL_Rect`: четыре `int` подряд, порядок `x y w h`.
 rectOf : Array 4 Int32 -> Int32 -> Int32 -> Int32 -> Int32 -> Array 4 Int32
-rectOf rect x y w h = arraySet (arraySet (arraySet (arraySet rect 0 x) 1 y) 2 w) 3 h
+rectOf rect x y w h = arraySet (arraySet (arraySet (arraySet rect 0 x Refl) 1 y Refl) 2 w Refl) 3 h Refl
 
 -- | Квадрат со стороной `side`, вычерченный **от центра**: столкновения тоже
 -- считаются по центрам, и две разные системы координат в одной программе -
@@ -714,8 +724,8 @@ paintShots : CPtr -> Array 4 Int32 -> Shots -> UInt64 -> {Foreign} Array 4 Int32
 paintShots r rect w 0 = rect
 paintShots r rect (MkShots xs ys vx vy life) i =
   let j = i - 1
-  let shaped = box rect (screenOf (arrayIndex xs j)) (screenOf (arrayIndex ys j)) 3
-  let drawn = drawIf r shaped (0 < arrayIndex life j)
+  let shaped = box rect (screenOf (at xs j)) (screenOf (at ys j)) 3
+  let drawn = drawIf r shaped (0 < at life j)
   paintShots r drawn (MkShots xs ys vx vy life) j
 
 -- | Виден ли корабль в этом кадре: под защитой он мигает, и мигание - это
@@ -788,8 +798,8 @@ listen : Array 14 UInt32 -> Keys -> UInt64 -> {Foreign} Keys
 listen event keys 0 = keys
 listen event keys n =
   let got = SDL_PollEvent event
-  let kind = arrayIndex event 0
-  let code = arrayIndex event scanWord
+  let kind = arrayIndex event 0 Refl
+  let code = arrayIndex event scanWord Refl
   let seen = if 0 < got then absorb keys kind code else keys
   listen event seen (n - 1)
 

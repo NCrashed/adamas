@@ -840,7 +840,7 @@ one = 1.0
 -- окна**, а не из-за нелитеральной длины.
 column : Array 4 Float32
 column =
-  arraySet (arraySet (arraySet (arraySet (arrayNew 4 zero) 0 one) 1 one) 2 one) 3 one
+  arraySet (arraySet (arraySet (arraySet (arrayNew 4 zero) 0 one Refl) 1 one Refl) 2 one Refl) 3 one Refl
 
 main : Float32
 main = simdLane (simdLoad 4 column 1) 0
@@ -910,7 +910,7 @@ one = 1.0
 -- (`arrayNew`) она доходит только с литеральной длиной.
 column : Array 4 Float32
 column =
-  arraySet (arraySet (arraySet (arraySet (arrayNew 4 zero) 0 zero) 1 zero) 2 one) 3 zero
+  arraySet (arraySet (arraySet (arraySet (arrayNew 4 zero) 0 zero Refl) 1 zero Refl) 2 one Refl) 3 zero Refl
 
 main : Float32
 main = simdLane (simdLoad 4 column 0) 2

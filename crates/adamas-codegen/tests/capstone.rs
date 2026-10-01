@@ -187,8 +187,8 @@ fn the_answer_depends_on_what_is_in_the_packet() {
         ),
         (
             "потерянное слово нагрузки: седьмая ячейка пакета не заполняется",
-            "  arraySet a6 (addUInt64 base 7) (grain seed (addUInt64 base 7))",
-            "  arraySet a6 (addUInt64 base 7) zero",
+            "  storeCell a6 (addUInt64 base 7) (grain seed (addUInt64 base 7))",
+            "  storeCell a6 (addUInt64 base 7) zero",
         ),
     ];
     for (why, from, to) in mutants {

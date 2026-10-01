@@ -326,7 +326,7 @@ body u =
   let buffer : Array 32 UInt8 = arrayNew 32 blank
   let put : Transferred = writeGz path writeMode payload count
   let got : Transferred = readGz path readMode buffer room
-  let first : UInt8 = arrayIndex buffer 0
+  let first : UInt8 = arrayIndex buffer 0 Refl
   let gone : Transferred = readGz absent readMode buffer room
   Cons (matched put written)
     (Cons (matched got written)

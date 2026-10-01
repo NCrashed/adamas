@@ -3216,7 +3216,7 @@ impl<'a> Elaborator<'a> {
     /// см. [`UNARY_LIMIT`].
     fn literal(&mut self, lit: &ast::Lit, awaited: Option<&Rc<Value>>) -> Result<Term, ElabError> {
         if lit.kind == ast::LitKind::Str && awaited.is_some_and(|ty| self.byte_array(ty)) {
-            return Self::string_literal(lit);
+            return self.string_literal(lit);
         }
         if let Some(ty) = awaited.and_then(|ty| self.primitive_type(ty)) {
             return Self::primitive_literal(lit, ty);
@@ -3367,7 +3367,7 @@ impl<'a> Elaborator<'a> {
     /// стороны, и литерал с нулём посередине объявлял бы длину, которой чужая
     /// сторона не увидит. Длина сверх [`STRING_LIMIT`] отвергается: спайн есть
     /// терм глубиной в саму строку.
-    fn string_literal(lit: &ast::Lit) -> Result<Term, ElabError> {
+    fn string_literal(&self, lit: &ast::Lit) -> Result<Term, ElabError> {
         let Some(bytes) = string_bytes(&lit.text) else {
             return Err(ElabError::Missing {
                 what: Missing::Literal,
@@ -3411,6 +3411,7 @@ impl<'a> Elaborator<'a> {
                 built,
                 word(index as u64),
                 byte(*value),
+                adamas_core::check::evident(self.signature),
             ]);
         }
         Ok(built)

@@ -38,10 +38,6 @@
 -- ячейку - потерянный проход, перепутанная ячейка и потерянный виток видны
 -- числом, а не только временем.
 
-data Bool where
-  True : Bool
-  False : Bool
-
 -- Длина колонки. Стенд подставляет сюда своё число.
 cells : UInt64
 cells = 8
@@ -74,7 +70,9 @@ fill : Array cells Float32 -> UInt64 -> Float32 -> Array cells Float32
 fill xs 0 v = xs
 fill xs i v =
   let at : UInt64 = subUInt64 i 1
-  fill (arraySet xs at v) at (addFloat32 v one)
+  case decide (ltUInt64 at cells) of
+    Yes p -> fill (arraySet xs at v p) at (addFloat32 v one)
+    No _q -> xs
 
 -- Ядро. `arraySet` функционален по семантике и переписывает по исполнению
 -- (§4.11): блок уникален, и ячейка меняется на месте - счётчик блоков
@@ -83,7 +81,9 @@ scale : Array cells Float32 -> UInt64 -> Array cells Float32
 scale xs 0 = xs
 scale xs i =
   let at : UInt64 = subUInt64 i 1
-  scale (arraySet xs at (addFloat32 (mulFloat32 (arrayIndex xs at) gain) bias)) at
+  case decide (ltUInt64 at cells) of
+    Yes p -> scale (arraySet xs at (addFloat32 (mulFloat32 (arrayIndex xs at p) gain) bias) p) at
+    No _q -> xs
 
 turn : Array cells Float32 -> UInt64 -> Array cells Float32
 turn xs 0 = xs
@@ -103,7 +103,9 @@ total : Array cells Float32 -> UInt64 -> Float32 -> Float32
 total xs 0 acc = acc
 total xs i acc =
   let at : UInt64 = subUInt64 i 1
-  total xs at (subFloat32 (arrayIndex xs at) acc)
+  case decide (ltUInt64 at cells) of
+    Yes p -> total xs at (subFloat32 (arrayIndex xs at p) acc)
+    No _q -> acc
 
 main : Float32
 main = total (turn (fill (arrayNew cells zero) cells one) passes) cells zero

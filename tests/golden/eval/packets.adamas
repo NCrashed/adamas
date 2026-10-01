@@ -254,6 +254,21 @@ damaged : Bool -> UInt64 -> UInt64
 damaged True s = xorUInt64 s 1
 damaged False s = s
 
+-- | Ячейка буфера по номеру, проверенному во время выполнения (§10 вопрос
+-- 224). Номер приходит арифметикой над номером пакета, `p * stride + k`, и
+-- доказать его меньшим длины пока нечем: лемм арифметики у прелюдии нет.
+-- Номера вне длины в этой программе не бывает; ветвь `No` отвечает нулём и
+-- оставляет буфер как был.
+loadCell : Array cells UInt64 -> UInt64 -> UInt64
+loadCell xs at = case decide (ltUInt64 at cells) of
+  Yes q -> arrayIndex xs at q
+  No _q -> 0
+
+storeCell : Array cells UInt64 -> UInt64 -> UInt64 -> Array cells UInt64
+storeCell xs at v = case decide (ltUInt64 at cells) of
+  Yes q -> arraySet xs at v q
+  No _q -> xs
+
 writePacket : Array cells UInt64 -> UInt64 -> UInt64 -> Array cells UInt64
 writePacket xs seed p =
   let base : UInt64 = mulUInt64 p stride
@@ -263,14 +278,14 @@ writePacket xs seed p =
   let c3 : UInt64 = grain seed (addUInt64 base 3)
   let sum : UInt64 = checksumOver c0 bare c2 c3
   let c1 : UInt64 = poke bare 32 16 (damaged (eqUInt64 (remUInt64 p 5 Refl) 2) sum)
-  let a0 : Array cells UInt64 = arraySet xs base c0
-  let a1 : Array cells UInt64 = arraySet a0 (addUInt64 base 1) c1
-  let a2 : Array cells UInt64 = arraySet a1 (addUInt64 base 2) c2
-  let a3 : Array cells UInt64 = arraySet a2 (addUInt64 base 3) c3
-  let a4 : Array cells UInt64 = arraySet a3 (addUInt64 base 4) (grain seed (addUInt64 base 4))
-  let a5 : Array cells UInt64 = arraySet a4 (addUInt64 base 5) (grain seed (addUInt64 base 5))
-  let a6 : Array cells UInt64 = arraySet a5 (addUInt64 base 6) (grain seed (addUInt64 base 6))
-  arraySet a6 (addUInt64 base 7) (grain seed (addUInt64 base 7))
+  let a0 : Array cells UInt64 = storeCell xs base c0
+  let a1 : Array cells UInt64 = storeCell a0 (addUInt64 base 1) c1
+  let a2 : Array cells UInt64 = storeCell a1 (addUInt64 base 2) c2
+  let a3 : Array cells UInt64 = storeCell a2 (addUInt64 base 3) c3
+  let a4 : Array cells UInt64 = storeCell a3 (addUInt64 base 4) (grain seed (addUInt64 base 4))
+  let a5 : Array cells UInt64 = storeCell a4 (addUInt64 base 5) (grain seed (addUInt64 base 5))
+  let a6 : Array cells UInt64 = storeCell a5 (addUInt64 base 6) (grain seed (addUInt64 base 6))
+  storeCell a6 (addUInt64 base 7) (grain seed (addUInt64 base 7))
 
 generate : Array cells UInt64 -> UInt64 -> UInt64 -> Array cells UInt64
 generate xs seed 0 = xs
@@ -303,14 +318,14 @@ audit = 3
 policy : Array buckets UInt8
 policy =
   let t0 : Array buckets UInt8 = arrayNew buckets deny
-  let t1 : Array buckets UInt8 = arraySet t0 0 keep
-  let t2 : Array buckets UInt8 = arraySet t1 1 meter
-  let t3 : Array buckets UInt8 = arraySet t2 2 keep
-  let t4 : Array buckets UInt8 = arraySet t3 3 audit
-  let t5 : Array buckets UInt8 = arraySet t4 4 meter
-  let t6 : Array buckets UInt8 = arraySet t5 5 deny
-  let t7 : Array buckets UInt8 = arraySet t6 6 audit
-  arraySet t7 7 keep
+  let t1 : Array buckets UInt8 = arraySet t0 0 keep Refl
+  let t2 : Array buckets UInt8 = arraySet t1 1 meter Refl
+  let t3 : Array buckets UInt8 = arraySet t2 2 keep Refl
+  let t4 : Array buckets UInt8 = arraySet t3 3 audit Refl
+  let t5 : Array buckets UInt8 = arraySet t4 4 meter Refl
+  let t6 : Array buckets UInt8 = arraySet t5 5 deny Refl
+  let t7 : Array buckets UInt8 = arraySet t6 6 audit Refl
+  arraySet t7 7 keep Refl
 
 weightOf : UInt8 -> UInt64
 weightOf 0 = 0
@@ -395,15 +410,22 @@ verdict False t len ttl flow w =
     bytes = t.bytes, hops = t.hops, flows = t.flows, weight = t.weight,
     expired = t.expired }
 
+-- | Код политики корзины. Номер приходит маской `flow & 7`, и меньшим длины его
+-- проверяет `decide`: лемм арифметики у прелюдии нет (§10 вопрос 224).
+codeOf : Array buckets UInt8 -> UInt64 -> UInt8
+codeOf pol slot = case decide (ltUInt64 slot buckets) of
+  Yes q -> arrayIndex pol slot q
+  No _q -> deny
+
 scan : Array cells UInt64 -> Array buckets UInt8 -> UInt64 -> Tally -> Tally
 scan xs pol 0 t = t
 scan xs pol k t =
   let p : UInt64 = subUInt64 k 1
   let base : UInt64 = mulUInt64 p stride
-  let c0 : UInt64 = arrayIndex xs base
-  let c1 : UInt64 = arrayIndex xs (addUInt64 base 1)
-  let c2 : UInt64 = arrayIndex xs (addUInt64 base 2)
-  let c3 : UInt64 = arrayIndex xs (addUInt64 base 3)
+  let c0 : UInt64 = loadCell xs base
+  let c1 : UInt64 = loadCell xs (addUInt64 base 1)
+  let c2 : UInt64 = loadCell xs (addUInt64 base 2)
+  let c3 : UInt64 = loadCell xs (addUInt64 base 3)
   let ver : UInt64 = Decode.version c0
   let len : UInt64 = Decode.length c0
   let ttl : UInt64 = Decode.ttl c1
@@ -415,7 +437,7 @@ scan xs pol k t =
   let dp : UInt64 = Decode.dport c2
   let want : UInt64 = checksumOver c0 c1 c2 c3
   let flow : UInt64 = flowHash src dst sp dp proto
-  let code : UInt8 = arrayIndex pol (andUInt64 flow 7)
+  let code : UInt8 = codeOf pol (andUInt64 flow 7)
   let ok : Bool = both (eqUInt64 ver 4) (both (eqUInt64 stored want) (neUInt8 code deny))
   scan xs pol p (verdict ok t len ttl flow (weightOf code))
 
@@ -469,16 +491,16 @@ forward xs 0 = xs
 forward xs k =
   let p : UInt64 = subUInt64 k 1
   let base : UInt64 = mulUInt64 p stride
-  let c0 : UInt64 = arrayIndex xs base
+  let c0 : UInt64 = loadCell xs base
   let at : UInt64 = addUInt64 base 1
-  let c1 : UInt64 = arrayIndex xs at
-  forward (arraySet xs at (aged (eqUInt64 (field c0 60 4) 4) c1)) p
+  let c1 : UInt64 = loadCell xs at
+  forward (storeCell xs at (aged (eqUInt64 (field c0 60 4) 4) c1)) p
 
 hops : Array cells UInt64 -> UInt64 -> UInt64 -> UInt64
 hops xs 0 acc = acc
 hops xs k acc =
   let p : UInt64 = subUInt64 k 1
-  let c1 : UInt64 = arrayIndex xs (addUInt64 (mulUInt64 p stride) 1)
+  let c1 : UInt64 = loadCell xs (addUInt64 (mulUInt64 p stride) 1)
   hops xs p (addUInt64 acc (field c1 56 8))
 
 -- Тотальное лицо деления (§4.3): делитель приезжает из данных пакета, и нулём
@@ -551,9 +573,9 @@ type Cell = { flow : UInt64, bytes : UInt64 }
 cellAt : Array cells UInt64 -> UInt64 -> Cell
 cellAt xs p =
   let base : UInt64 = mulUInt64 p stride
-  let c0 : UInt64 = arrayIndex xs base
-  let c1 : UInt64 = arrayIndex xs (addUInt64 base 1)
-  let c2 : UInt64 = arrayIndex xs (addUInt64 base 2)
+  let c0 : UInt64 = loadCell xs base
+  let c1 : UInt64 = loadCell xs (addUInt64 base 1)
+  let c2 : UInt64 = loadCell xs (addUInt64 base 2)
   { flow = flowHash (field c1 0 32) (field c2 32 32) (field c2 16 16) (field c2 0 16) (field c1 48 8),
     bytes = field c0 32 16 }
 

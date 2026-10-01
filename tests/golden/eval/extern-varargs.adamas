@@ -97,21 +97,21 @@ parsed = 1
 format : Array 4 UInt8
 format =
   let zeroed : Array 4 UInt8 = arrayNew 4 blank
-  let first : Array 4 UInt8 = arraySet zeroed 0 percent
-  let second : Array 4 UInt8 = arraySet first 1 longly
-  arraySet second 2 unsignedly
+  let first : Array 4 UInt8 = arraySet zeroed 0 percent Refl
+  let second : Array 4 UInt8 = arraySet first 1 longly Refl
+  arraySet second 2 unsignedly Refl
 
 body : (ω u : Unit) -> {Foreign} UInt64
 body u =
   let text : Array 16 UInt8 = arrayNew 16 blank
   -- Вариадический аргумент один, и едет он целым регистром: `al` равен нулю.
   let written : Int32 = snprintf text room format number
-  let head : UInt8 = arrayIndex text 0
+  let head : UInt8 = arrayIndex text 0 Refl
   -- Тот же формат читает обратно, и вариадический аргумент здесь - **адрес**
   -- нашей ячейки.
   let cell : Array 1 UInt64 = arrayNew 1 empty
   let assigned : Int32 = sscanf text format cell
-  let back : UInt64 = arrayIndex cell 0
+  let back : UInt64 = arrayIndex cell 0 Refl
   let sized : UInt64 = pick (eqInt32 written wrote) 1 0
   let inplace : UInt64 = pick (eqUInt8 head four) 1 0
   let counted : UInt64 = pick (eqInt32 assigned parsed) 1 0

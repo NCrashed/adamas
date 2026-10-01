@@ -133,17 +133,17 @@ fn per_lane_source(packets: u64, rounds: u64) -> String {
                 (simdSplat 4 pepper)\n  \
                 let put : Array cells UInt64 = simdStore 4 xs at next\n  \
                 churn put p";
-    let to = "  let w0 : UInt64 = arrayIndex xs at\n  \
-              let w1 : UInt64 = arrayIndex xs (addUInt64 at 1)\n  \
-              let w2 : UInt64 = arrayIndex xs (addUInt64 at 2)\n  \
-              let w3 : UInt64 = arrayIndex xs (addUInt64 at 3)\n  \
-              let a0 : Array cells UInt64 = arraySet xs at \
+    let to = "  let w0 : UInt64 = loadCell xs at\n  \
+              let w1 : UInt64 = loadCell xs (addUInt64 at 1)\n  \
+              let w2 : UInt64 = loadCell xs (addUInt64 at 2)\n  \
+              let w3 : UInt64 = loadCell xs (addUInt64 at 3)\n  \
+              let a0 : Array cells UInt64 = storeCell xs at \
               (addUInt64 (mulUInt64 w0 spice) pepper)\n  \
-              let a1 : Array cells UInt64 = arraySet a0 (addUInt64 at 1) \
+              let a1 : Array cells UInt64 = storeCell a0 (addUInt64 at 1) \
               (addUInt64 (mulUInt64 w1 spice) pepper)\n  \
-              let a2 : Array cells UInt64 = arraySet a1 (addUInt64 at 2) \
+              let a2 : Array cells UInt64 = storeCell a1 (addUInt64 at 2) \
               (addUInt64 (mulUInt64 w2 spice) pepper)\n  \
-              let a3 : Array cells UInt64 = arraySet a2 (addUInt64 at 3) \
+              let a3 : Array cells UInt64 = storeCell a2 (addUInt64 at 3) \
               (addUInt64 (mulUInt64 w3 spice) pepper)\n  \
               churn a3 p";
     let source = capstone_source(packets, rounds);

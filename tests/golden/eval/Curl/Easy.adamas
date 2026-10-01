@@ -190,7 +190,7 @@ statusOf (Code status) = status
 
 -- Длина тела, написанная чужой стороной в нашу ячейку, именем, а не номером.
 downloaded : (ω cell : Array 1 UInt64) -> UInt64
-downloaded cell = arrayIndex cell 0
+downloaded cell = arrayIndex cell 0 Refl
 
 -- Сообщение кода ошибки: чужая строка, и указатель на неё у каждого кода свой.
 describe : UInt64 -> {Foreign} CPtr

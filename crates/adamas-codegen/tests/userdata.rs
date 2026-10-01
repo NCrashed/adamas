@@ -189,7 +189,7 @@ fn the_trampoline_is_the_comparator_of_qsort_r() {
 #[test]
 fn a_userdata_slot_without_a_closure_is_refused() {
     let text = fixture("qsort-r-userdata.adamas").replace(
-        "(\\a b -> memcmp a b (arrayIndex widths 0))",
+        "(\\a b -> memcmp a b (arrayIndex widths 0 Refl))",
         "compareByWord",
     );
     let text = text.replace(

@@ -4082,8 +4082,10 @@ impl<'a> Lowerer<'a> {
         }
         let wanted = match op {
             ArrayOp::New => 3,
-            ArrayOp::Index | ArrayOp::Read => 4,
-            ArrayOp::Set => 5,
+            // Последним у трёх идёт стёртое доказательство номера (§10 вопрос
+            // 224): в код оно не попадает.
+            ArrayOp::Index | ArrayOp::Read => 5,
+            ArrayOp::Set => 6,
         };
         if arguments.len() != wanted {
             return Err(LowerError::PartialArray {
@@ -4187,6 +4189,7 @@ impl<'a> Lowerer<'a> {
             Arg::Written(element),
             Arg::Written(array),
             Arg::Written(at),
+            Arg::Written(proof),
         ] = arguments
         else {
             return Err(LowerError::PartialArray {
@@ -4199,6 +4202,7 @@ impl<'a> Lowerer<'a> {
             up(element),
             Term::var(0),
             up(at),
+            up(proof),
         ]);
         let built = self
             .read_constructor()
@@ -4237,7 +4241,7 @@ impl<'a> Lowerer<'a> {
         let Term::Prim(Prim::Over(ArrayOp::Read)) = head else {
             return Ok(None);
         };
-        let [length, element, array, at] = arguments.as_slice() else {
+        let [length, element, array, at, _] = arguments.as_slice() else {
             return Ok(None);
         };
         let _ = length;

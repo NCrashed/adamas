@@ -30,10 +30,6 @@
 -- дизассемблер, и на неоптимизированном конвейере, потому что SLP собирает
 -- вектор обратно из скаляров (`adamas-codegen/tests/simd.rs`, шапка).
 
-data Bool where
-  True : Bool
-  False : Bool
-
 -- Класс дорожки (§4.9): объявляется программой, инстансы выводит компилятор.
 type Layout = { size : UInt32, align : UInt32 }
 
@@ -70,7 +66,9 @@ fill : Array cells Float32 -> UInt64 -> Float32 -> Array cells Float32
 fill xs 0 v = xs
 fill xs i v =
   let at : UInt64 = subUInt64 i 1
-  fill (arraySet xs at v) at (addFloat32 v one)
+  case decide (ltUInt64 at cells) of
+    Yes p -> fill (arraySet xs at v p) at (addFloat32 v one)
+    No _q -> xs
 
 -- Ядро: окно из восьми ячеек, одна `simdMul`, одна `simdAdd`, одна запись.
 -- Счётчик блоков показывает **один** блок на всю программу, сколько бы
@@ -97,7 +95,9 @@ total : Array cells Float32 -> UInt64 -> Float32 -> Float32
 total xs 0 acc = acc
 total xs i acc =
   let at : UInt64 = subUInt64 i 1
-  total xs at (subFloat32 (arrayIndex xs at) acc)
+  case decide (ltUInt64 at cells) of
+    Yes p -> total xs at (subFloat32 (arrayIndex xs at p) acc)
+    No _q -> acc
 
 main : Float32
 main = total (turn (fill (arrayNew cells zero) cells one) passes) cells zero

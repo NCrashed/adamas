@@ -9,6 +9,12 @@ use adamas_core::row::Row;
 use adamas_core::sig::Signature;
 use adamas_core::term::Term;
 
+/// Равенство, которым записан номер ячейки (§10 вопрос 224): прелюдии здесь нет.
+const EQUAL: &str = "\
+data Equal (a : Type) (x : a) : a -> Type where
+  Refl : Equal a x x
+";
+
 /// `Nat`, `Bool` и `Unit` - база, без которой не пишется ни один пример.
 const BASE: &str = "\
 data Bool where
@@ -1677,6 +1683,7 @@ held = adamas_probe_twice
 fn the_machine_lends_a_buffer_and_reads_what_was_written() {
     let source = format!(
         "{BASE}
+{EQUAL}
 effect Foreign
 
 blank : UInt8
@@ -1701,10 +1708,10 @@ body : (ω u : Unit) -> {{Foreign}} Nat
 body u =
   let bytes : Array 4 UInt8 = arrayNew 4 blank
   let first : CPtr = memset bytes filler 4
-  let written : UInt8 = arrayIndex bytes 0
+  let written : UInt8 = arrayIndex bytes 0 Refl
   let again : CPtr = memset bytes filler 0
   let restored : CPtr = memset bytes erase 4
-  let back : UInt8 = arrayIndex bytes 0
+  let back : UInt8 = arrayIndex bytes 0 Refl
   pick (eqUInt8 written frobbed)
     (pick (eqUInt64 first again) (pick (eqUInt8 back blank) 3 0) 0)
     0
@@ -1790,6 +1797,7 @@ main = handle @Foreign body with
 fn the_machine_hands_a_callback_to_the_foreign_side() {
     let source = format!(
         "{BASE}
+{EQUAL}
 effect Foreign
 
 extern \"C\" fn memcmp : CPtr -> CPtr -> UInt64 -> Int32
@@ -1817,11 +1825,11 @@ pick False yes no = no
 body : (ω u : Unit) -> {{Foreign}} Nat
 body u =
   let zeroed : Array 2 UInt64 = arrayNew 2 blank
-  let first : Array 2 UInt64 = arraySet zeroed 0 three
-  let xs : Array 2 UInt64 = arraySet first 1 one
+  let first : Array 2 UInt64 = arraySet zeroed 0 three Refl
+  let xs : Array 2 UInt64 = arraySet first 1 one Refl
   let sorted : Unit = qsort xs 2 8 byWord
-  let head : UInt64 = arrayIndex xs 0
-  let tail : UInt64 = arrayIndex xs 1
+  let head : UInt64 = arrayIndex xs 0 Refl
+  let tail : UInt64 = arrayIndex xs 1 Refl
   pick (eqUInt64 head one) (pick (eqUInt64 tail three) 2 0) 0
 
 main : Nat

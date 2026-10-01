@@ -9,10 +9,12 @@
 --     `((x > 1) && (x <= 3)) || (x == 9)`;
 --   * `floats` - `totalOrder` §4.3: `nan == nan` истинно, `-0.0 < 0.0`
 --     истинно, а IEEE ответил бы наоборот в обоих;
---   * `guarded` - правый операнд `&&` не считается при ложном левом:
---     `i < 4 && arrayIndex xs i == 7` при `i = 10` не читает за границей;
---   * `logged` - то же у эффекта: из трёх `note` исполняется одна, справа
---     от `False ||`. Строгий оператор исполнил бы все три.
+--   * `guarded` - номер ячейки проверяется `decide (i < 4)`: оператор
+--     прелюдии сводится к `ltUInt64`, и ветвь `Yes` несёт доказательство,
+--     которого требует `arrayIndex` (§10 вопрос 224);
+--   * `logged` - правый операнд `&&` и `||` не считается, когда ответ уже
+--     известен: из трёх `note` исполняется одна, справа от `False ||`.
+--     Строгий оператор исполнил бы все три.
 
 data Unit where
   MkUnit : Unit
@@ -41,7 +43,9 @@ floats = bit (nan == nan) + bit ((-0.0) < 0.0) * 2 + bit (nan > 1.0e300) * 4 + b
 xs : Array 4 Int32
 xs = arrayNew 4 7
 inside : UInt64 -> Bool
-inside i = i < 4 && arrayIndex xs i == 7
+inside i = case decide (i < 4) of
+  Yes p -> arrayIndex xs i p == 7
+  No _q -> False
 guarded : Int32
 guarded = bit (inside 10) + bit (inside 2) * 2
 loud : Int32 -> {Log} Bool

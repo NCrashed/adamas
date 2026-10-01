@@ -25,4 +25,4 @@ module M where
 main : Int64
 main =
   let cell : Int64 = 28
-  addInt64 M.doubled (arrayIndex (arrayNew 1 cell) 0)
+  addInt64 M.doubled (arrayIndex (arrayNew 1 cell) 0 Refl)

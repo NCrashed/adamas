@@ -297,10 +297,10 @@ calling x f = f x
 
 main : Int64
 main =
-  let xs : Array 2 Int64 = arraySet (arrayNew 2 3) 1 4
+  let xs : Array 2 Int64 = arraySet (arrayNew 2 3) 1 4 Refl
   addInt64
-    (applying xs (\\ys -> arrayIndex ys 1))
-    (calling 10 (\\k -> mulInt64 k (arrayIndex xs 0)))
+    (applying xs (\\ys -> arrayIndex ys 1 Refl))
+    (calling 10 (\\k -> mulInt64 k (arrayIndex xs 0 Refl)))
 ";
 
 /// Плоский массив проходит замыкание аргументом и захватом, без обёртки.

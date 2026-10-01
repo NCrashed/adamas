@@ -139,6 +139,11 @@
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
 
+          # Тесты бегут в dev-shell и CI, где есть LLVM, SDL2 и редакторы.
+          # Песочница сборки пакета их не видит, и `checkPhase` падала на
+          # первом же тесте второго бэкенда: `llvm-as не запускается`.
+          doCheck = false;
+
           meta = with pkgs.lib; {
             description = "Adamas compiler toolchain";
             homepage = "https://github.com/NCrashed/adamas";

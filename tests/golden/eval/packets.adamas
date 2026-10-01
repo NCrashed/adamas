@@ -130,10 +130,6 @@
 -- подставляет стенд `workload-column`: правятся две строки с числами, ядро
 -- остаётся это.
 
-data Bool where
-  True : Bool
-  False : Bool
-
 data Unit where
   MkUnit : Unit
 
@@ -230,7 +226,7 @@ pickVersion False = 4
 madeHead0 : UInt64 -> UInt64 -> UInt64
 madeHead0 seed p =
   let r : UInt64 = grain seed (mulUInt64 p stride)
-  let ver : UInt64 = pickVersion (eqUInt64 (remUInt64 p 7) 3)
+  let ver : UInt64 = pickVersion (eqUInt64 (remUInt64 p 7 Refl) 3)
   let dscp : UInt64 = field r 3 8
   let len : UInt64 = addUInt64 (field r 11 10) 40
   let ident : UInt64 = field r 21 16
@@ -266,7 +262,7 @@ writePacket xs seed p =
   let c2 : UInt64 = madeHead2 seed p
   let c3 : UInt64 = grain seed (addUInt64 base 3)
   let sum : UInt64 = checksumOver c0 bare c2 c3
-  let c1 : UInt64 = poke bare 32 16 (damaged (eqUInt64 (remUInt64 p 5) 2) sum)
+  let c1 : UInt64 = poke bare 32 16 (damaged (eqUInt64 (remUInt64 p 5 Refl) 2) sum)
   let a0 : Array cells UInt64 = arraySet xs base c0
   let a1 : Array cells UInt64 = arraySet a0 (addUInt64 base 1) c1
   let a2 : Array cells UInt64 = arraySet a1 (addUInt64 base 2) c2
@@ -487,20 +483,13 @@ hops xs k acc =
 
 -- Тотальное лицо деления (§4.3): делитель приезжает из данных пакета, и нулём
 -- он бывает законно - принятых пакетов с истёкшим временем жизни на этих
--- данных нет ни одного. Обрыв (§10 вопрос 176, вариант «а») здесь не годится:
--- программа обязана ответить числом, а не упасть на входе, который сеть
--- вправе прислать.
---
--- Разбор написан клаузами, а не `if`: `if` над `Maybe UInt64` отвергается
--- несовпадением типов - мотив разбора остаётся дыркой, - и это граница
--- элаборации, к делению отношения не имеющая. Обход тот же, что в
--- `eval/bitwise`.
-chosen : Bool -> UInt64 -> UInt64 -> Maybe UInt64
-chosen True x y = Nothing
-chosen False x y = Just (divUInt64 x y)
-
+-- данных нет ни одного. Программа обязана ответить числом, а не упасть на
+-- входе, который сеть вправе прислать: проверка делителя даёт ветви `No`
+-- доказательство, которого требует примитив (§10 вопросы 224, 225).
 safeDiv : UInt64 -> UInt64 -> Maybe UInt64
-safeDiv x y = chosen (eqUInt64 y 0) x y
+safeDiv x y = case decide (eqUInt64 y 0) of
+  Yes _z -> Nothing
+  No p -> Just (divUInt64 x y p)
 
 orElse : UInt64 -> Maybe UInt64 -> UInt64
 orElse fallback Nothing = fallback

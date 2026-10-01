@@ -35,27 +35,20 @@
 --
 -- *Безопасное лицо целого деления.* §4.3 назначает его библиотеке -
 -- `divMod`/`quotRem`, отвечающие `Option`. Здесь оно написано на самом языке
--- поверх примитива: одна строка, и делить на ноль незачем.
-
-data Bool where
-  True : Bool
-  False : Bool
+-- поверх примитива: проверка делителя и даёт доказательство, которого
+-- примитив требует, - делить на ноль нечем.
 
 data Maybe (a : Type) where
   Nothing : Maybe a
   Just : a -> Maybe a
 
--- Целое деление, каким §4.3 велит его показывать наружу.
---
--- Разбор написан клаузами, а не `if`: `if` над `Maybe UInt32` отвергается
--- несовпадением типов (мотив разбора остаётся дыркой), и это граница
--- элаборации, а не деления - тот же `if` над `UInt32` проходит.
-chosen : Bool -> UInt32 -> UInt32 -> Maybe UInt32
-chosen True x y = Nothing
-chosen False x y = Just (divUInt32 x y)
-
+-- Целое деление, каким §4.3 велит его показывать наружу: проверка делителя
+-- даёт ветви `No` доказательство, которого требует примитив (§10 вопросы
+-- 224, 225).
 safeQuotient : UInt32 -> UInt32 -> Maybe UInt32
-safeQuotient x y = chosen (eqUInt32 y 0) x y
+safeQuotient x y = case decide (eqUInt32 y 0) of
+  Yes _z -> Nothing
+  No p -> Just (divUInt32 x y p)
 
 orElse : UInt32 -> Maybe UInt32 -> UInt32
 orElse fallback Nothing = fallback
@@ -105,21 +98,21 @@ negativeCount = shlInt16 3 (-1)
 
 -- Деление усекает к нулю, и остаток берёт знак делимого.
 quotient : Int32
-quotient = divInt32 (-7) 2
+quotient = divInt32 (-7) 2 Refl
 
 rest : Int32
-rest = remInt32 (-7) 2
+rest = remInt32 (-7) 2 Refl
 
 -- Знаковость деления: знаковое дало бы ноль на тех же битах.
 wideQuotient : UInt64
-wideQuotient = divUInt64 18446744073709551615 3
+wideQuotient = divUInt64 18446744073709551615 3 Refl
 
 -- Единственное переполнение знакового деления.
 wrappedQuotient : Int8
-wrappedQuotient = divInt8 (-128) (-1)
+wrappedQuotient = divInt8 (-128) (-1) Refl
 
 wrappedRest : Int8
-wrappedRest = remInt8 (-128) (-1)
+wrappedRest = remInt8 (-128) (-1) Refl
 
 -- Плавающее делится без ограждений.
 ratio : Float64

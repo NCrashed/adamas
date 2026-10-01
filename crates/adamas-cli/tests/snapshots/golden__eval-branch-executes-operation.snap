@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Cons (-1) (Cons 21 (Cons (-1) (Cons 20 (Cons (-1) (Cons 21 Nil)))))
+Cons (-1) (Cons 96 (Cons (-1) (Cons 95 (Cons (-1) (Cons 96 Nil)))))

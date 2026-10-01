@@ -38,18 +38,20 @@ use adamas_core::level::Level;
 use adamas_core::meta::Metas;
 use adamas_core::row::Row;
 use adamas_core::sig::Signature;
+use adamas_core::source::SourceFile;
 use adamas_core::term::Term;
 use adamas_elab::class::Instances;
-use adamas_elab::fixity::Fixities;
-use adamas_elab::{Owned, Warnings};
 
 // --- программа берётся у корпуса -----------------------------------------
 
+/// Корпус `tests/golden/eval/`.
+fn corpus_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/eval")
+}
+
 /// Путь к корпусной фикстуре по имени - без расширения.
 pub(crate) fn corpus_path(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/golden/eval")
-        .join(format!("{name}.adamas"))
+    corpus_root().join(format!("{name}.adamas"))
 }
 
 /// Текст корпусной фикстуры по имени - без расширения.
@@ -107,25 +109,23 @@ pub(crate) fn resized(text: &str, sizes: &[(&str, u64)]) -> String {
 // --- элаборация ----------------------------------------------------------
 
 /// Элаборированная программа вместе с тем, что о ней знает разрешение.
+///
+/// Путь тот же, что у `adamas eval` и тестового стенда: с прелюдией (§4.4) и
+/// корнем поиска модулей в корпусе. Без прелюдии корпусная программа,
+/// которая её берёт, - `Equal` и `decide` у деления (§10 вопрос 224), - здесь
+/// не проверялась бы вовсе.
 pub(crate) fn elaborated(source: &str) -> (Signature, Metas, Instances) {
-    let module = adamas_parser::parse(source).expect("исходник обязан разбираться");
-    let mut signature = Signature::default();
-    let mut metas = Metas::default();
-    let mut owned = Owned::default();
-    let mut fixities = Fixities::default();
-    let mut instances = Instances::default();
-    let mut warnings = Warnings::new();
-    adamas_elab::elaborate_into(
-        &module,
-        &mut signature,
-        &mut metas,
-        &mut owned,
-        &mut fixities,
-        &mut instances,
-        &mut warnings,
-    )
-    .expect("исходник обязан проходить проверку");
-    (signature, metas, instances)
+    let sources = adamas_elab::program::Directory::new(corpus_root());
+    let entry = SourceFile::new("стенд", source.to_owned());
+    let program = adamas_elab::program::analyze(entry, &sources);
+    if let Some(located) = program.error() {
+        panic!(
+            "исходник обязан проходить проверку: {}",
+            program.rendered(located)
+        );
+    }
+    let signature = program.signature.expect("проход обязан отдать сигнатуру");
+    (signature, program.metas, program.instances)
 }
 
 /// Тело `main` с подставленными аргументами уровня и row — то, что вычисляет

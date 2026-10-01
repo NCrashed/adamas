@@ -24,11 +24,11 @@ effect Fail where
 
 guarded : Int32 -> {Fail} Int32
 guarded d =
-  let q : Int32 = if d == 0 then fail else divInt32 100 d
+  let q : Int32 = if d == 0 then fail else 100 - d
   q + 1
 
 direct : Int32 -> {Fail} Int32
-direct d = if d == 0 then fail else divInt32 100 d
+direct d = if d == 0 then fail else 100 - d
 
 atZero : {Fail} Int32
 atZero = guarded 0

@@ -51,20 +51,24 @@ main = step (-268435456) 4
 
 /// Единственное переполнение знакового деления.
 const OVERFLOW: &str = "\
-divide : Int32 -> Int32 -> Int32
-divide x y = divInt32 x y
+divide : Int32 -> (y : Int32) -> (0 p : Equal Bool (eqInt32 y 0) False) -> Int32
+divide x y p = divInt32 x y p
 
 main : Int32
-main = divide (-2147483648) (-1)
+main = divide (-2147483648) (-1) Refl
 ";
 
-/// Нулевой делитель.
+/// Нулевой делитель. Доказательство его ненулевости даёт только ложная
+/// аксиома (§10 вопросы 224, 229): иначе до ограждения не добраться.
 const ZERO: &str = "\
-divide : Int64 -> Int64 -> Int64
-divide x y = divInt64 x y
+@total
+lie : Equal Bool (eqInt64 0 0) False
+
+divide : Int64 -> (y : Int64) -> (0 p : Equal Bool (eqInt64 y 0) False) -> Int64
+divide x y p = divInt64 x y p
 
 main : Int64
-main = divide 7 0
+main = divide 7 0 lie
 ";
 
 /// Операция без ограждений: мера цены отсчитывается от неё.
@@ -87,11 +91,11 @@ main = step 48879 5
 
 /// Деление написанным ненулевым делителем: ограждению тут сворачиваться.
 const WRITTEN_DIV: &str = "\
-divide : Int32 -> Int32 -> Int32
-divide x y = divInt32 x y
+divide : Int32 -> (y : Int32) -> (0 p : Equal Bool (eqInt32 y 0) False) -> Int32
+divide x y p = divInt32 x y p
 
 main : Int32
-main = divide 100 7
+main = divide 100 7 Refl
 ";
 
 /// Строка `.ll`, чей хвост совпал с образцом, - заменена целиком.
@@ -300,6 +304,10 @@ fn the_only_overflow_of_division_wraps_instead_of_trapping() {
 
 /// Нулевой делитель обрывает прогон, и одинаково у обоих бэкендов.
 ///
+/// Добраться до него можно только ложной аксиомой: примитив требует
+/// доказательства ненулевости (§10 вопросы 224, 229). Ограждение остаётся
+/// защитой от такой аксиомы, а не частью языка.
+///
 /// Форма границы та же, что у номера дорожки вне ширины (§4.9) и у выхода за
 /// длину массива (§4.11): все трое обрываются **одним и тем же текстом**. Машина
 /// прежде печатала застрявший `divInt64` ответом с кодом успеха, и свидетель
@@ -350,30 +358,22 @@ fn a_zero_divisor_stops_all_three_evaluators() {
     );
 }
 
-/// Безопасное лицо деления §4.3 пишется на самом языке и стоит одной строки.
+/// Безопасное лицо деления §4.3 пишется на самом языке: проверка делителя
+/// даёт доказательство, которого требует примитив (§10 вопросы 224, 225).
 ///
-/// Это и есть довод, по которому нулевой делитель отдан обрыву, а не
-/// умолчанию: §4.3 назначает наружным лицом `divMod`/`quotRem`, отвечающие
-/// `Option`, и **цена у этой обёртки одна и та же при любом выборе внутри**.
-/// Разойтись варианты могут только там, где обёртку обошли, - и там обрыв
-/// говорит, а умолчание молчит.
+/// Обойти её нечем - без доказательства примитив не применить, - и ветвь
+/// `Nothing` пишется ровно там, где делитель проверяется во время выполнения.
 #[test]
-fn the_total_face_of_division_is_one_line_of_the_language() {
+fn the_total_face_of_division_is_written_in_the_language() {
     const SAFE: &str = "\
-data Bool where
-  True : Bool
-  False : Bool
-
 data Maybe (a : Type) where
   Nothing : Maybe a
   Just : a -> Maybe a
 
-chosen : Bool -> Int64 -> Int64 -> Maybe Int64
-chosen True x y = Nothing
-chosen False x y = Just (divInt64 x y)
-
 quotient : Int64 -> Int64 -> Maybe Int64
-quotient x y = chosen (eqInt64 y 0) x y
+quotient x y = case decide (eqInt64 y 0) of
+  Yes _z -> Nothing
+  No p -> Just (divInt64 x y p)
 
 orElse : Int64 -> Maybe Int64 -> Int64
 orElse fallback Nothing = fallback

@@ -4002,12 +4002,19 @@ impl<'a> Lowerer<'a> {
                     Repr::Flat(cast.to),
                 ))
             }
+            // У целого деления третьим идёт стёртое доказательство ненулевого
+            // делителя (§10 вопрос 224): в код оно не попадает.
             Prim::Op(op, ty) => {
-                let [left, right] = arguments else {
+                let ([left, right] | [left, right, _]) = arguments else {
                     return Err(LowerError::Partial {
                         name: format!("{op}{ty}"),
                     });
                 };
+                if arguments.len() != op.arity(ty) {
+                    return Err(LowerError::Partial {
+                        name: format!("{op}{ty}"),
+                    });
+                }
                 let want = Repr::Flat(ty);
                 let left = self.given(scope, left, want, "левый аргумент операции")?;
                 let right = self.given(scope, right, want, "правый аргумент операции")?;

@@ -31,25 +31,25 @@ eightUOps : UInt8
 eightUOps = addUInt8 (addUInt8 (addUInt8 (andUInt8 240 60) (orUInt8 48 133))
                                (addUInt8 (xorUInt8 181 90) (notUInt8 240)))
                      (addUInt8 (addUInt8 (shlUInt8 239 3) (shrUInt8 200 2))
-                               (addUInt8 (divUInt8 200 7) (remUInt8 200 7)))
+                               (addUInt8 (divUInt8 200 7 Refl) (remUInt8 200 7 Refl)))
 
 sixteenUOps : UInt16
 sixteenUOps = addUInt16 (addUInt16 (addUInt16 (andUInt16 240 60) (orUInt16 48 133))
                                    (addUInt16 (xorUInt16 181 90) (notUInt16 240)))
                         (addUInt16 (addUInt16 (shlUInt16 239 3) (shrUInt16 200 2))
-                                   (addUInt16 (divUInt16 200 7) (remUInt16 200 7)))
+                                   (addUInt16 (divUInt16 200 7 Refl) (remUInt16 200 7 Refl)))
 
 thirtyTwoUOps : UInt32
 thirtyTwoUOps = addUInt32 (addUInt32 (addUInt32 (andUInt32 240 60) (orUInt32 48 133))
                                      (addUInt32 (xorUInt32 181 90) (notUInt32 240)))
                           (addUInt32 (addUInt32 (shlUInt32 239 3) (shrUInt32 200 2))
-                                     (addUInt32 (divUInt32 200 7) (remUInt32 200 7)))
+                                     (addUInt32 (divUInt32 200 7 Refl) (remUInt32 200 7 Refl)))
 
 sixtyFourUOps : UInt64
 sixtyFourUOps = addUInt64 (addUInt64 (addUInt64 (andUInt64 240 60) (orUInt64 48 133))
                                      (addUInt64 (xorUInt64 181 90) (notUInt64 240)))
                           (addUInt64 (addUInt64 (shlUInt64 239 3) (shrUInt64 200 2))
-                                     (addUInt64 (divUInt64 200 7) (remUInt64 200 7)))
+                                     (addUInt64 (divUInt64 200 7 Refl) (remUInt64 200 7 Refl)))
 
 -- Три сдвига, чей порог насыщения приходится между ширинами.
 eightUWide : UInt8
@@ -70,25 +70,25 @@ eightSOps : Int8
 eightSOps = addInt8 (addInt8 (addInt8 (andInt8 (-16) 60) (orInt8 48 (-123)))
                              (addInt8 (xorInt8 (-75) 90) (notInt8 (-16))))
                     (addInt8 (addInt8 (shlInt8 (-17) 3) (shrInt8 (-120) 2))
-                             (addInt8 (divInt8 (-120) 7) (remInt8 (-120) 7)))
+                             (addInt8 (divInt8 (-120) 7 Refl) (remInt8 (-120) 7 Refl)))
 
 sixteenSOps : Int16
 sixteenSOps = addInt16 (addInt16 (addInt16 (andInt16 (-16) 60) (orInt16 48 (-123)))
                                  (addInt16 (xorInt16 (-75) 90) (notInt16 (-16))))
                        (addInt16 (addInt16 (shlInt16 (-17) 3) (shrInt16 (-120) 2))
-                                 (addInt16 (divInt16 (-120) 7) (remInt16 (-120) 7)))
+                                 (addInt16 (divInt16 (-120) 7 Refl) (remInt16 (-120) 7 Refl)))
 
 thirtyTwoSOps : Int32
 thirtyTwoSOps = addInt32 (addInt32 (addInt32 (andInt32 (-16) 60) (orInt32 48 (-123)))
                                    (addInt32 (xorInt32 (-75) 90) (notInt32 (-16))))
                          (addInt32 (addInt32 (shlInt32 (-17) 3) (shrInt32 (-120) 2))
-                                   (addInt32 (divInt32 (-120) 7) (remInt32 (-120) 7)))
+                                   (addInt32 (divInt32 (-120) 7 Refl) (remInt32 (-120) 7 Refl)))
 
 sixtyFourSOps : Int64
 sixtyFourSOps = addInt64 (addInt64 (addInt64 (andInt64 (-16) 60) (orInt64 48 (-123)))
                                    (addInt64 (xorInt64 (-75) 90) (notInt64 (-16))))
                          (addInt64 (addInt64 (shlInt64 (-17) 3) (shrInt64 (-120) 2))
-                                   (addInt64 (divInt64 (-120) 7) (remInt64 (-120) 7)))
+                                   (addInt64 (divInt64 (-120) 7 Refl) (remInt64 (-120) 7 Refl)))
 
 eightSWide : Int8
 eightSWide = addInt8 (addInt8 (shlInt8 3 14) (shlInt8 3 30)) (shlInt8 3 62)

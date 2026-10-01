@@ -27,7 +27,9 @@ checked : Int32 -> {Fail} Int32
 checked 0 =
   let q : Int32 = fail
   q + 1
-checked d = divInt32 100 d + 1
+checked d = case decide (d == 0) of
+  Yes _z -> 0
+  No p -> divInt32 100 d p + 1
 
 both : Int32 -> Int32 -> {Fail} Int32
 both x y = checked x + checked y

@@ -251,6 +251,42 @@ pub fn prim_scheme(signature: &Signature, prim: Prim) -> Term {
         Prim::Ty(_) | Prim::Block => universe,
         Prim::In(op) => region_op_scheme(signature, op, &word, &universe),
         Prim::Lit(ty, _) => Term::Prim(Prim::Ty(ty)),
+        // Целое деление и остаток требуют стёртого факта о делителе:
+        // `(ω n : a) -> (ω d : a) -> (0 p : Equal Bool (eqT d 0) False) -> a`
+        // (§10 вопросы 224, 225). Факт записан через `eq`, а не `ne`: его
+        // даёт `decide (d == 0)`, и оператор прелюдии сводится к тому же
+        // `eqT d 0`, что стоит здесь.
+        Prim::Op(op, ty) if op.proven(ty) => {
+            let over = Term::Prim(Prim::Ty(ty));
+            let app = |callee: Term, argument: Term| Term::App(Rc::new(callee), Rc::new(argument));
+            let check = app(
+                app(
+                    Term::Prim(Prim::Cmp(crate::prim::PrimCmp::Eq, ty)),
+                    Term::var(0),
+                ),
+                Term::Prim(Prim::literal(ty, 0)),
+            );
+            let fact = app(
+                app(
+                    app(
+                        declared(signature, crate::prim::EQUAL),
+                        declared(signature, crate::prim::BOOL),
+                    ),
+                    check,
+                ),
+                declared(signature, crate::prim::FALSE),
+            );
+            arrow(
+                Mult::Many,
+                over.clone(),
+                bound(
+                    Binder::explicit(Mult::Many),
+                    "d",
+                    over.clone(),
+                    bound(Binder::explicit(Mult::Zero), "p", fact, over),
+                ),
+            )
+        }
         Prim::Op(_, ty) => {
             let over = Term::Prim(Prim::Ty(ty));
             arrow(

@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: division-by-literal-zero.adamas:8:21: несовпадение типов: ожидался `Prelude.Equal Prelude.Bool True Prelude.False`, получен `Prelude.Equal Prelude.Bool True True`
+  zero = divInt32 1 0 Refl
+                      ^^^^

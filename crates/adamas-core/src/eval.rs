@@ -465,7 +465,7 @@ pub fn trap(value: &Value) -> Option<&'static str> {
     // Номер вне длины: оба литералы, и номер не меньше длины.
     let outside = |at: &Rc<Value>, length: &Rc<Value>| Some(literal(at)? >= literal(length)?);
     match (head, &args[..]) {
-        (Head::Prim(PrimOp::Div | PrimOp::Rem, ty), [_, right]) if !ty.floating() => {
+        (Head::Prim(PrimOp::Div | PrimOp::Rem, ty), [_, right, _]) if !ty.floating() => {
             (literal(right)? == 0).then_some(crate::prim::DIVISION_BY_ZERO)
         }
         (Head::ArrayOp(ArrayOp::Index | ArrayOp::Read), [length, _, _, at])
@@ -621,7 +621,13 @@ fn converted(cast: crate::prim::PrimCast, spine: &[Elim]) -> Option<Rc<Value>> {
 }
 
 fn folded(op: crate::prim::PrimOp, ty: crate::prim::PrimTy, spine: &[Elim]) -> Option<Rc<Value>> {
-    let [Elim::App(left), Elim::App(right)] = spine else {
+    // Сводится только насыщенный спайн: у деления третьим идёт стёртое
+    // доказательство (§10 вопрос 224), и ответ на двух аргументах остался бы
+    // литералом, к которому доказательство уже не применить.
+    if spine.len() != op.arity(ty) {
+        return None;
+    }
+    let [Elim::App(left), Elim::App(right), ..] = spine else {
         return None;
     };
     let (

@@ -184,7 +184,9 @@ pub fn whnf_solved(sig: &Signature, metas: &Metas, value: &Rc<Value>) -> Rc<Valu
     let mut current = Rc::clone(value);
     let mut fuel = UNFOLD_LIMIT;
     loop {
-        let Some(next) = force(metas, &current).or_else(|| unfold(sig, &current)) else {
+        let Some(next) =
+            force(metas, &current).or_else(|| unfold_seeing(sig, Some(metas), &current))
+        else {
             return current;
         };
         current = next;
@@ -260,7 +262,10 @@ fn convertible_within(
         _ => {}
     }
     // Быстрый путь не сошёлся - разворачиваем то, что разворачивается.
-    let (unfolded_left, unfolded_right) = (unfold(sig, left), unfold(sig, right));
+    let (unfolded_left, unfolded_right) = (
+        unfold_seeing(sig, Some(metas), left),
+        unfold_seeing(sig, Some(metas), right),
+    );
     if unfolded_left.is_none() && unfolded_right.is_none() {
         return false;
     }
@@ -295,9 +300,24 @@ fn convertible_within(
 /// штатный исход - `convertible` обязана отвечать `false`, - а не поломка
 /// инварианта, поэтому здесь стоят `try_`-варианты, а не паникующие.
 pub(crate) fn unfold(sig: &Signature, value: &Rc<Value>) -> Option<Rc<Value>> {
+    unfold_seeing(sig, None, value)
+}
+
+/// [`unfold`] сквозь решённые дырки в аргументах застрявшего примитива.
+///
+/// Голову сравнение подставляет само ([`force`]), а аргумент примитива
+/// приводится здесь, и без хранилища решённая дырка в нём оставалась дыркой:
+/// `eqInt32 (width + scale) 0` не сводилось к `False`, пока словарь `Add`
+/// стоял решённой дыркой, - и `Refl` у факта деления отвергался (§10 вопрос
+/// 225).
+fn unfold_seeing(sig: &Signature, metas: Option<&Metas>, value: &Rc<Value>) -> Option<Rc<Value>> {
     // Застрявший примитив сводится разворотом аргументов ([`refolded`]);
     // аргументы приводятся воротным δ - сравнение обязано завершаться.
-    if let Some(folded) = refolded(value, &|argument| whnf(sig, argument)) {
+    let normalized = |argument: &Rc<Value>| match metas {
+        Some(metas) => whnf_solved(sig, metas, argument),
+        None => whnf(sig, argument),
+    };
+    if let Some(folded) = refolded(value, &normalized) {
         return Some(folded);
     }
     let Value::Neutral(Head::Global(name, levels, rows, mults), spine) = &**value else {
@@ -372,14 +392,23 @@ fn refolded(value: &Rc<Value>, normalized: &dyn Fn(&Rc<Value>) -> Rc<Value>) -> 
     let Value::Neutral(head @ (Head::Prim(..) | Head::Cmp(..)), spine) = &**value else {
         return None;
     };
-    let [Elim::App(left), Elim::App(right)] = &spine[..] else {
-        return None;
+    // Третьим у деления идёт стёртое доказательство (§10 вопрос 224): оно
+    // переносится как есть - свёртке нужны только операнды.
+    let (left, right, rest) = match &spine[..] {
+        [Elim::App(left), Elim::App(right), rest @ ..] if rest.len() <= 1 => (left, right, rest),
+        _ => return None,
     };
     let partial = Rc::new(Value::Neutral(
         head.clone(),
         vec![Elim::App(normalized(left))],
     ));
-    let folded = try_apply(&partial, normalized(right))?;
+    let mut folded = try_apply(&partial, normalized(right))?;
+    for elim in rest {
+        let Elim::App(proof) = elim else {
+            return None;
+        };
+        folded = try_apply(&folded, Rc::clone(proof))?;
+    }
     // Прогресс у арифметики - литерал, у сравнения - конструктор `Bool`:
     // спайн после свёртки пуст, и головой стоит уже не сравнение. Общего
     // «изменилось» тут мало - шаг, оставивший примитив застрявшим, зациклил

@@ -7,7 +7,7 @@
 -- ветвь `No`. Поля ответа: `safeDiv 100 5`, `checked 100 4`, `checked 100 0`.
 
 safeDiv : Int32 -> (d : Int32) -> (0 p : Equal Bool (eqInt32 d 0) False) -> Int32
-safeDiv n d p = divInt32 n d
+safeDiv n d p = divInt32 n d p
 
 checked : Int32 -> Int32 -> Int32
 checked n d = case decide (d == 0) of

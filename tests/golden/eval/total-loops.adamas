@@ -1,0 +1,48 @@
+-- Циклы по счётчику, которые вердикт тотальности признаёт (§4.7, §10 вопрос
+-- 227).
+--
+-- Прежде мера читалась с одной формы - литеральной базы и примитива
+-- `subUInt64`, написанного прямо, - а циклы пишут иначе, и все семнадцать
+-- циклов демо отвергались. Поля ответа - по форме записи:
+--
+--   * `byOperator` - `n - 1` оператором прелюдии: он приходит вызовом метода
+--     через словарь и сводится к примитиву ограниченной редукцией;
+--   * `byLet` - `let j = n - 1` и вызов от `j`: связывание несёт размер
+--     своего значения;
+--   * `byIf` - `if n == 0 then … else …`: пол берётся из сравнения в
+--     значении `let`, которым элаборируется `if`;
+--   * `upward` - цикл вверх `if i < n then … (i + 1) n`: мера `n - i`,
+--     граница передаётся неизменной;
+--   * `upwardSigned` - то же на знаковом `Int32`: граница из сравнения, а не
+--     из типа.
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+@total
+byOperator : UInt64 -> UInt64 -> UInt64
+byOperator 0 acc = acc
+byOperator n acc = byOperator (n - 1) (acc + n)
+
+@total
+byLet : UInt64 -> UInt64 -> UInt64
+byLet 0 acc = acc
+byLet n acc =
+  let j = n - 1
+  byLet j (acc + 2)
+
+@total
+byIf : UInt64 -> UInt64 -> UInt64
+byIf n acc = if n == 0 then acc else byIf (n - 1) (acc * 2)
+
+@total
+upward : UInt64 -> UInt64 -> UInt64 -> UInt64
+upward i n acc = if i < n then upward (i + 1) n (acc + i) else acc
+
+@total
+upwardSigned : Int32 -> Int32 -> Int32 -> Int32
+upwardSigned i n acc = if i < n then upwardSigned (i + 1) n (acc + i) else acc
+
+main : List UInt64
+main = Cons (byOperator 4 0) (Cons (byLet 3 0) (Cons (byIf 5 1) (Cons (upward 0 5 0) (Cons (int32ToUInt64 (upwardSigned (0 - 2) 4 0)) Nil))))

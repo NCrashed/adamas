@@ -132,7 +132,7 @@ use std::path::PathBuf;
 /// Механизм известен - два трека дописывают в **отсортированный** массив, git
 /// сливает обе стороны молча, а объявленная длина остаётся от одной, - и
 /// чинится он второй половиной проверки ниже, а не внимательностью.
-const TAKEN: [&str; 156] = [
+const TAKEN: [&str; 157] = [
     "abortive-cleanup",
     "abortive-except",
     "alias-computation",
@@ -270,6 +270,7 @@ const TAKEN: [&str; 156] = [
     "ord-default",
     "branch-executes-operation",
     "proof-by-reflection",
+    "total-loops",
     "array-in-a-family",
     "state",
     "state-resource",

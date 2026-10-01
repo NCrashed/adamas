@@ -54,10 +54,19 @@
 //! остаётся нечётным навсегда, - и его отвергает покрытие: исключён `0`, а
 //! нужны `0` и `1`.
 //!
-//! Названная граница: пол читается с **написанного** разбора. Тот же цикл,
-//! записанный через `if`, его не получает - `if` элаборируется разбором по
-//! связыванию, и сравнение уезжает в значение `let`, которого этот обход не
-//! читает.
+//! Пол читается и с `if`: он элаборируется разбором по связыванию, и
+//! сравнение уезжает в значение `let` - факт берётся оттуда (§10 вопрос
+//! 227). Оператор `n - 1` прелюдии приходит вызовом метода через словарь и
+//! сводится к примитиву ограниченной редукцией; вычитанием читается и
+//! `add x (neg k)`, во что оператор определён.
+//!
+//! # Шаг вверх
+//!
+//! Цикл `if i < n then … (i + 1) n` меряется `n - i`: ветвь `True` разбора
+//! `ltT i n` знает `i < n`, сложение с единицей тогда не заворачивается, мера
+//! строго убывает и ограничена нулём - при любом знаке типа, потому что граница
+//! берётся из сравнения. Вызов засчитывается, только если `n` передан
+//! неизменным; шаг - ровно единица.
 //!
 //! # Разбор под применением
 //!
@@ -80,7 +89,8 @@
 //!
 //! # Что не покрыто
 //!
-//! Лексикографический порядок (`ack`), well-founded рекурсия с явной мерой.
+//! Лексикографический порядок (`ack`), well-founded рекурсия с явной мерой,
+//! шаг вверх больше единицы и знаковый счёт вниз.
 //! Проверка консервативна: отвергает часть завершающихся определений, но не
 //! пропускает расходящиеся.
 //!
@@ -119,6 +129,10 @@ struct Size {
     argument: usize,
     /// Сколько разборов отделяет его от самого параметра.
     depth: u32,
+    /// Позиция параметра-границы у шага вверх: `upto (i + 1) n` под `i < n`
+    /// убывает мерой `n - i`, только если граница `n` передана неизменной
+    /// (§10 вопрос 227). `None` - обычное убывание вниз.
+    bound: Option<usize>,
 }
 
 /// Завершается ли определение на всех входах.
@@ -168,8 +182,10 @@ pub fn is_total(
             calls.iter().all(|(_, sizes)| {
                 matches!(
                     sizes.get(position),
-                    Some(&Some(Size { argument, depth }))
-                        if argument == position && depth > 0
+                    Some(&Some(Size { argument, depth, bound }))
+                        if argument == position
+                            && depth > 0
+                            && bound.is_none_or(|at| unchanged(sizes, at))
                 )
             })
         })
@@ -188,6 +204,9 @@ fn collected(
         undecided,
         calls: Vec::new(),
         apart: Vec::new(),
+        bound: Vec::new(),
+        below: Vec::new(),
+        bound_below: Vec::new(),
     };
     let mut sizes = Vec::new();
     let arity = walk.parameters(&mut sizes, body);
@@ -255,7 +274,7 @@ fn agrees(members: &[(usize, Vec<Call>)], positions: &[usize]) -> bool {
         calls.iter().all(|(callee, sizes)| {
             matches!(
                 sizes.get(positions[*callee]),
-                Some(&Some(Size { argument, depth }))
+                Some(&Some(Size { argument, depth, bound: None }))
                     if argument == positions[caller] && depth > 0
             )
         })
@@ -444,6 +463,59 @@ fn member_call(
     None
 }
 
+/// Написанное, сведённое к примитиву: `Prelude.- UInt64 Sub#UInt64 n 1` - к
+/// `subUInt64 n 1` (§10 вопрос 227).
+///
+/// Та же ограниченная редукция, что у [`member_call`]: δ только тотального и
+/// только вне `undecided`, β и проекцию делает вычисление, число δ-шагов режет
+/// топливо. Ответ - только если голова стала примитивом; иначе пусто, и мера
+/// читается с написанного.
+fn primitive_of(
+    signature: &Signature,
+    undecided: &[Name],
+    depth: usize,
+    term: &Term,
+) -> Option<Term> {
+    if !matches!(spine(term).0, Term::Const(..)) || !closed_under(depth, term) {
+        return None;
+    }
+    let width = u32::try_from(depth).ok()?;
+    let mut env = Env::default();
+    for level in 0..width {
+        env = env.extend(Value::var(Lvl(level)));
+    }
+    let mut current = crate::eval::eval(&env, term);
+    for _ in 0..REDUCTION_LIMIT {
+        match &*current {
+            // Аргументы примитива сводятся тоже: у `add x (neg 1)` второй
+            // ещё вызов, а мера ждёт литерал шага.
+            Value::Neutral(head @ (Head::Prim(..) | Head::Cmp(..)), spine) => {
+                let mut built = match head {
+                    Head::Prim(op, ty) => Term::Prim(Prim::Op(*op, *ty)),
+                    Head::Cmp(op, ty) => Term::Prim(Prim::Cmp(*op, *ty)),
+                    _ => return None,
+                };
+                for elim in spine {
+                    let crate::value::Elim::App(argument) = elim else {
+                        return None;
+                    };
+                    let argument = crate::conv::whnf(signature, argument);
+                    built = Term::App(
+                        Rc::new(built),
+                        Rc::new(crate::eval::quote(width, &argument)),
+                    );
+                }
+                return Some(built);
+            }
+            Value::Neutral(Head::Global(name, ..), _) if !undecided.contains(name) => {
+                current = crate::conv::unfold(signature, &current)?;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// Сколько δ-шагов разрешено редукции одного спайна.
 const REDUCTION_LIMIT: u32 = 128;
 
@@ -596,6 +668,16 @@ struct Apart {
     bits: u64,
 }
 
+/// Факт «связывание строго меньше другого» - ветвь `True` разбора `ltT x y`.
+/// Уровни, а не индексы: под ветвью бывают свои связывания.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Below {
+    /// Уровень меньшего.
+    level: usize,
+    /// Уровень границы.
+    limit: usize,
+}
+
 struct Walk<'a> {
     signature: &'a Signature,
     /// Имена, вызов которых считается рекурсивным: своё и соседи по циклу.
@@ -609,6 +691,15 @@ struct Walk<'a> {
     /// Стек: факт живёт ровно под своей ветвью. Соседняя ветвь его не видит, и
     /// это существенно - в ветви `True` аргумент как раз **равен** литералу.
     apart: Vec<Apart>,
+    /// Факты, записанные в значении `let`: `if n == 0` элаборируется связыванием
+    /// сравнения и разбором по нему, и пол ветви `False` надо брать оттуда (§10
+    /// вопрос 227). Пара - уровень связывания `let` и факт о разбираемом.
+    bound: Vec<(usize, Apart)>,
+    /// Факты «строго меньше» - ветвь `True` разбора `ltT i n`: у шага вверх они
+    /// и есть граница меры `n - i` (§10 вопрос 227).
+    below: Vec<Below>,
+    /// Те же факты, записанные в значении `let` - так приходит `if i < n`.
+    bound_below: Vec<(usize, Below)>,
 }
 
 impl Walk<'_> {
@@ -621,6 +712,7 @@ impl Walk<'_> {
                 sizes.push(Some(Size {
                     argument: sizes.len(),
                     depth: 0,
+                    bound: None,
                 }));
                 self.parameters(sizes, body)
             }
@@ -648,7 +740,9 @@ impl Walk<'_> {
 
     /// Размер аргумента рекурсивного вызова: разбор либо убывание по примитиву.
     fn measured(&self, sizes: &[Option<Size>], term: &Term) -> Option<Size> {
-        Self::size(sizes, term).or_else(|| self.descended(sizes, term))
+        Self::size(sizes, term)
+            .or_else(|| self.descended(sizes, term))
+            .or_else(|| self.ascended(sizes, term))
     }
 
     /// Убывание по примитиву: `subT x k` при беззнаковом `T` и известном
@@ -686,25 +780,40 @@ impl Walk<'_> {
     /// нечётным навсегда (замерено тем же прогоном - зависает). Его отвергает
     /// покрытие: исключён `0`, а нужны `0` и `1`.
     fn descended(&self, sizes: &[Option<Size>], term: &Term) -> Option<Size> {
+        // Оператор `n - 1` прелюдии приходит вызовом метода через словарь, а
+        // мера читается с примитива: написанное сводится к нему ограниченной
+        // редукцией, как вызов члена группы (§10 вопрос 227).
+        let reduced = primitive_of(self.signature, self.undecided, sizes.len(), term);
+        let term = reduced.as_ref().unwrap_or(term);
         let (head, arguments) = spine(term);
-        let Term::Prim(Prim::Op(PrimOp::Sub, ty)) = head else {
+        let Term::Prim(Prim::Op(op @ (PrimOp::Sub | PrimOp::Add), ty)) = head else {
             return None;
         };
         if ty.signed() || ty.floating() {
             return None;
         }
-        let [subject, step] = arguments[..] else {
+        let [subject, written] = arguments[..] else {
             return None;
         };
-        let Term::Prim(Prim::Lit(_, step)) = step else {
+        let Term::Prim(Prim::Lit(_, written)) = written else {
             return None;
+        };
+        // `x - k` прелюдии есть `add x (neg k)`: сложение с дополнением шага
+        // по ширине типа. Шаг поэтому - литерал вычитания либо дополнение
+        // литерала сложения; у настоящего сложения (`x + 1`) дополнение
+        // огромно, и его отвергает граница ниже.
+        let step = &match op {
+            PrimOp::Add => ty.ones() & written.wrapping_neg(),
+            _ => *written,
         };
         // Ноль не убывает, а шире исключённого пол не бывает: перебор снизу
         // ограничен числом известных фактов, а не значением литерала.
         if *step == 0 || *step > self.apart.len() as u64 {
             return None;
         }
-        let Size { argument, depth } = Self::size(sizes, subject)?;
+        let Size {
+            argument, depth, ..
+        } = Self::size(sizes, subject)?;
         let level = Self::level(sizes, subject)?;
         let excluded = |bits| {
             self.apart.contains(&Apart {
@@ -719,6 +828,70 @@ impl Walk<'_> {
         Some(Size {
             argument,
             depth: depth + 1,
+            bound: None,
+        })
+    }
+
+    /// Шаг вверх: `addT i 1` под фактом `i < n`, где `n` - параметр
+    /// (§10 вопрос 227).
+    ///
+    /// Мера - `n - i`: под `i < n` сложение с единицей не заворачивается
+    /// (`i + 1 <= n`, а `n` - представимое число), мера строго убывает и снизу
+    /// ограничена нулём. Знак типа здесь не важен - граница берётся из
+    /// сравнения, а не из типа. Шаг - ровно единица: больший шаг под `i < n`
+    /// вправе перешагнуть границу и завернуться. Вызов засчитывается, только
+    /// если граница передана неизменной - это проверяет [`unchanged`].
+    fn ascended(&self, sizes: &[Option<Size>], term: &Term) -> Option<Size> {
+        let reduced = primitive_of(self.signature, self.undecided, sizes.len(), term)?;
+        let (head, arguments) = spine(&reduced);
+        let Term::Prim(Prim::Op(PrimOp::Add, ty)) = head else {
+            return None;
+        };
+        if ty.floating() {
+            return None;
+        }
+        let ([subject, Term::Prim(Prim::Lit(_, 1))] | [Term::Prim(Prim::Lit(_, 1)), subject]) =
+            arguments[..]
+        else {
+            return None;
+        };
+        let Size {
+            argument,
+            depth: 0,
+            bound: None,
+        } = Self::size(sizes, subject)?
+        else {
+            return None;
+        };
+        let level = Self::level(sizes, subject)?;
+        self.below.iter().rev().find_map(|fact| {
+            if fact.level != level {
+                return None;
+            }
+            let limit = (*sizes.get(fact.limit)?)?;
+            (limit.depth == 0 && limit.bound.is_none()).then_some(Size {
+                argument,
+                depth: 1,
+                bound: Some(limit.argument),
+            })
+        })
+    }
+
+    /// Факт «строго меньше», если разбираемое - `ltT x y` над связываниями.
+    fn less(sizes: &[Option<Size>], term: &Term) -> Option<Below> {
+        let (head, arguments) = spine(term);
+        let Term::Prim(Prim::Cmp(PrimCmp::Lt, ty)) = head else {
+            return None;
+        };
+        if ty.floating() {
+            return None;
+        }
+        let [left, right] = arguments[..] else {
+            return None;
+        };
+        Some(Below {
+            level: Self::level(sizes, left)?,
+            limit: Self::level(sizes, right)?,
         })
     }
 
@@ -854,15 +1027,37 @@ impl Walk<'_> {
                 }
             }
 
-            Term::Let(_, _, ty, value, body) => {
-                self.term(sizes, ty);
-                self.term(sizes, value);
-                // Связывание `let` размера не несёт: значение известно, но
-                // отследить его убывание эта проверка не берётся.
-                self.under(sizes, None, body);
-            }
+            Term::Let(_, _, ty, value, body) => self.binding(sizes, ty, value, body),
 
             Term::Case(case) => self.case(sizes, case, &[]),
+        }
+    }
+
+    /// Связывание `let`: размер и факты его значения (§10 вопрос 227).
+    ///
+    /// Связывание несёт размер своего значения: `let j = i - 1` и вызов от `j`
+    /// убывают так же, как вызов от `i - 1` - значение то же, что подставилось
+    /// бы. Сравнение в значении - так элаборируется `if` - даёт разбору по
+    /// связыванию пол либо границу, как литеральный паттерн.
+    fn binding(&mut self, sizes: &mut Vec<Option<Size>>, ty: &Term, value: &Term, body: &Term) {
+        self.term(sizes, ty);
+        self.term(sizes, value);
+        let size = self.measured(sizes, value);
+        let reduced = primitive_of(self.signature, self.undecided, sizes.len(), value);
+        let fact = reduced.as_ref().and_then(|it| Self::compared(sizes, it));
+        let less = reduced.as_ref().and_then(|it| Self::less(sizes, it));
+        if let Some(fact) = fact {
+            self.bound.push((sizes.len(), fact));
+        }
+        if let Some(less) = less {
+            self.bound_below.push((sizes.len(), less));
+        }
+        self.under(sizes, size, body);
+        if fact.is_some() {
+            self.bound.pop();
+        }
+        if less.is_some() {
+            self.bound_below.pop();
         }
     }
 
@@ -876,20 +1071,45 @@ impl Walk<'_> {
         let smaller = Self::size(sizes, &case.scrutinee).map(|size| Size {
             argument: size.argument,
             depth: size.depth + 1,
+            bound: None,
         });
         // Разбор по сравнению с литералом даёт ветви `False` пол: под ней
         // разбираемое заведомо не равно этому числу (§4.3).
-        let apart = Self::compared(sizes, &case.scrutinee);
+        let apart = Self::compared(sizes, &case.scrutinee).or_else(|| {
+            let level = Self::level(sizes, &case.scrutinee)?;
+            self.bound
+                .iter()
+                .rev()
+                .find(|(at, _)| *at == level)
+                .map(|(_, fact)| *fact)
+        });
+        // Разбор по «строго меньше» даёт ветви `True` границу шага вверх.
+        let less = Self::less(sizes, &case.scrutinee).or_else(|| {
+            let level = Self::level(sizes, &case.scrutinee)?;
+            self.bound_below
+                .iter()
+                .rev()
+                .find(|(at, _)| *at == level)
+                .map(|(_, fact)| *fact)
+        });
         for branch in &case.branches {
             let fields = self.fields(&branch.constructor, case.params);
             let floored =
                 apart.filter(|_| crate::term::short(&branch.constructor) == crate::prim::FALSE);
+            let bounded =
+                less.filter(|_| crate::term::short(&branch.constructor) == crate::prim::TRUE);
             if let Some(fact) = floored {
                 self.apart.push(fact);
+            }
+            if let Some(fact) = bounded {
+                self.below.push(fact);
             }
             self.branch(sizes, fields, smaller, applied, &branch.body);
             if floored.is_some() {
                 self.apart.pop();
+            }
+            if bounded.is_some() {
+                self.below.pop();
             }
         }
     }
@@ -962,4 +1182,17 @@ impl Walk<'_> {
 #[must_use]
 pub fn admits(definition: &Definition, sigma: Mult) -> bool {
     definition.total || sigma != Mult::Zero
+}
+
+/// Передан ли параметр `at` вызову неизменным - граница шага вверх (§10
+/// вопрос 227): мера `n - i` убывает, только пока `n` та же.
+fn unchanged(sizes: &[Option<Size>], at: usize) -> bool {
+    matches!(
+        sizes.get(at),
+        Some(&Some(Size {
+            argument,
+            depth: 0,
+            bound: None,
+        })) if argument == at
+    )
 }

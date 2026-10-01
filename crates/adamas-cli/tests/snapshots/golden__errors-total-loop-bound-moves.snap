@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: total-loop-bound-moves.adamas:8:1: `chase` объявлено `@total`, но вердикт отрицательный: аргумент не убывает ни разбором, ни значением, либо вызвано нетотальное
+  chase : UInt64 -> UInt64 -> UInt64
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

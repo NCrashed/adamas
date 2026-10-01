@@ -1,0 +1,18 @@
+-- Доказательство о примитиве средствами прелюдии (§3.7, §10 вопросы 224, 225).
+--
+-- `Equal`, `Decision` и `decide` прелюдии; программа своих не пишет. Тип
+-- `safeDiv` называет примитив `eqInt32` прямо: у литерала он сводится
+-- δ-свёрткой к голому `False` ядра, и `Refl` сходится, только если этот
+-- `False` равен конструктору прелюдии. У переменной доказательство даёт
+-- ветвь `No`. Поля ответа: `safeDiv 100 5`, `checked 100 4`, `checked 100 0`.
+
+safeDiv : Int32 -> (d : Int32) -> (0 p : Equal Bool (eqInt32 d 0) False) -> Int32
+safeDiv n d p = divInt32 n d
+
+checked : Int32 -> Int32 -> Int32
+checked n d = case decide (d == 0) of
+  Yes _p -> 0
+  No p -> safeDiv n d p
+
+main : Int32
+main = safeDiv 100 5 Refl + checked 100 4 + checked 100 0

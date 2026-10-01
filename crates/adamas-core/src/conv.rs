@@ -763,7 +763,14 @@ fn same_head(
             Head::Global(name_a, levels_a, rows_a, mults_a),
             Head::Global(name_b, levels_b, rows_b, mults_b),
         ) => {
-            name_a == name_b
+            // Голый `True`/`False` δ-свёртки сравнения равен конструктору
+            // программы - тем же правилом, каким его узнаёт ветвь разбора
+            // ([`crate::eval::selects`]). Без этого `eqInt32 5 0` в типе
+            // сводилось к `False`, не равному `Prelude.False`, и доказательство
+            // `Refl` у деления не сходилось (§10 вопрос 225).
+            (name_a == name_b
+                || crate::eval::selects(name_a, name_b)
+                || crate::eval::selects(name_b, name_a))
                 && levels_a.len() == levels_b.len()
                 && levels_a
                     .iter()

@@ -660,8 +660,10 @@ fn cells_typed(text: &str) -> String {
 /// перемещением, померено треком H (`docs/measurements/simd/`) и оказалось
 /// **неизмеримым**: разброс шире эффекта.
 ///
-/// `noalias` здесь для контраста - та же щедрая правка, что у соседних
-/// свидетелей, и на векторной программе она по-прежнему даёт ноль.
+/// `noalias` здесь больше не меряется: после того как циклы `workload-vector`
+/// стали доказывать номер леммами, а не проверкой на шаге, он меняет код
+/// (8680 инструкций против 8665) - это вопрос §10 233, а не довод о
+/// выравнивании.
 ///
 /// Положительный контроль тот же по смыслу, что у скалярного близнеца, и
 /// другой по форме: счётчик двигает не метаданное, а адрес окна, посчитанный
@@ -712,31 +714,26 @@ fn alignment_beyond_the_truth_earns_nothing_on_a_vector_load() {
          и мерить разницу нечем"
     );
 
-    // Правда и щедрость - ноль и по инструкциям, и по мнемонике.
-    for (what, marked) in [
-        ("align 8", promised(&artefacts.ll, 8)),
-        ("noalias", noalias(&artefacts.ll)),
-    ] {
-        assert_ne!(
-            marked, artefacts.ll,
-            "{name}: правка `{what}` не применилась"
-        );
-        let with = adamas_codegen::emit_llvm::Artefacts {
-            ll: marked,
-            support: artefacts.support.clone(),
-        };
-        let stem = format!("{name}.{}", what.replace(' ', ""));
-        let object = harness::llvm_object(&stem, &with, &tools, &pipeline);
-        let count = harness::instructions(&tools, &object);
-        let moves = unaligned_moves(&tools, &object);
-        eprintln!("{name}: `{what}` - инструкций {base}/{count}, невыровненных {loose}/{moves}");
-        assert_eq!(
-            (count, moves),
-            (base, loose),
-            "{name}: `{what}` изменило код - правдивое обещание перестало быть \
-             даровым, и его надо ставить"
-        );
-    }
+    // Правда - ноль и по инструкциям, и по мнемонике.
+    let marked = promised(&artefacts.ll, 8);
+    assert_ne!(
+        marked, artefacts.ll,
+        "{name}: правка `align 8` не применилась"
+    );
+    let with = adamas_codegen::emit_llvm::Artefacts {
+        ll: marked,
+        support: artefacts.support.clone(),
+    };
+    let object = harness::llvm_object(&format!("{name}.align8"), &with, &tools, &pipeline);
+    let count = harness::instructions(&tools, &object);
+    let moves = unaligned_moves(&tools, &object);
+    eprintln!("{name}: `align 8` - инструкций {base}/{count}, невыровненных {loose}/{moves}");
+    assert_eq!(
+        (count, moves),
+        (base, loose),
+        "{name}: `align 8` изменило код - правдивое обещание перестало быть \
+         даровым, и его надо ставить"
+    );
 
     // А ложь - меняет, и счётчик инструкций этого **не видит**. Это и есть та
     // проверка, которую надо было сломать, прежде чем ей верить: поверь мы

@@ -62,13 +62,12 @@ bias = 1.0
 -- Заполнение скалярное, и это не недоделка: §4.9 обещает выигрыш витку, а
 -- заполнение у обеих программ обязано быть **одним**, иначе они считали бы
 -- разные колонки и сравнивать их было бы нельзя.
-fill : Array cells Float32 -> UInt64 -> Float32 -> Array cells Float32
-fill xs 0 v = xs
-fill xs i v =
-  let at : UInt64 = subUInt64 i 1
-  case decide (ltUInt64 at cells) of
-    Yes p -> fill (arraySet xs at v p) at (addFloat32 v one)
-    No _q -> xs
+fill : Array cells Float32 -> (i : UInt64) -> (0 p : Equal Bool (leUInt64 i cells) True) -> Float32 -> Array cells Float32
+fill xs i p v = case decide (i == 0) of
+  Yes _z -> xs
+  No q ->
+    let at : UInt64 = subUInt64 i 1
+    fill (arraySet xs at v (belowPred i cells p q)) at (belowAtMost at cells (belowPred i cells p q)) (addFloat32 v one)
 
 -- Ядро: окно из восьми ячеек, одна `simdMul`, одна `simdAdd`, одна запись.
 -- Счётчик блоков показывает **один** блок на всю программу, сколько бы
@@ -91,13 +90,12 @@ turn xs p = turn (scale xs cells) (subUInt64 p 1)
 -- поэтому перестановка двух ячеек видна ответом. Скалярная она нарочно -
 -- горизонтальных свёрток §4.9 здесь нет (трек H назвал их невзятыми), и обе
 -- программы обязаны сворачивать одинаково.
-total : Array cells Float32 -> UInt64 -> Float32 -> Float32
-total xs 0 acc = acc
-total xs i acc =
-  let at : UInt64 = subUInt64 i 1
-  case decide (ltUInt64 at cells) of
-    Yes p -> total xs at (subFloat32 (arrayIndex xs at p) acc)
-    No _q -> acc
+total : Array cells Float32 -> (i : UInt64) -> (0 p : Equal Bool (leUInt64 i cells) True) -> Float32 -> Float32
+total xs i p acc = case decide (i == 0) of
+  Yes _z -> acc
+  No q ->
+    let at : UInt64 = subUInt64 i 1
+    total xs at (belowAtMost at cells (belowPred i cells p q)) (subFloat32 (arrayIndex xs at (belowPred i cells p q)) acc)
 
 main : Float32
-main = total (turn (fill (arrayNew cells zero) cells one) passes) cells zero
+main = total (turn (fill (arrayNew cells zero) cells Refl one) passes) cells Refl zero

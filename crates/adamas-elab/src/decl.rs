@@ -2639,6 +2639,16 @@ fn declare_members(
                 })?;
             tree.nested = cases;
             let group = postponed.group();
+            class::resolve_ground(
+                signature,
+                metas,
+                instances,
+                owned,
+                Some(&declaring),
+                &tree.term,
+                &types[at],
+                *at_span,
+            );
             settle_literals(
                 signature, metas, owned, fixities, warnings, postponed, &tree.term, &types[at],
             )?;
@@ -2846,26 +2856,19 @@ fn declare_mutual(
                 }
             })?;
         tree.nested = cases;
-        let group = postponed.group();
-        settle_literals(
-            signature,
-            metas,
+        let known = Known {
             owned,
             fixities,
+            instances,
+        };
+        settled(
+            signature,
+            metas,
+            known,
             warnings,
             postponed,
             &tree.term,
             &written[at],
-        )?;
-        class::resolve(
-            signature,
-            metas,
-            instances,
-            owned,
-            None,
-            &tree.term,
-            &written[at],
-            &group,
             member.span,
         )?;
         trees.push(tree);
@@ -2899,6 +2902,16 @@ fn settled(
     span: Span,
 ) -> Result<(), ElabError> {
     let group = postponed.group();
+    class::resolve_ground(
+        signature,
+        metas,
+        known.instances,
+        known.owned,
+        None,
+        term,
+        ty,
+        span,
+    );
     settle_literals(
         signature,
         metas,

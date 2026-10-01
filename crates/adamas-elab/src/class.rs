@@ -307,6 +307,7 @@ pub fn resolve(
         ty,
         Mult::Zero,
         span,
+        false,
     )?;
     settle(
         signature,
@@ -317,6 +318,7 @@ pub fn resolve(
         term,
         Mult::Many,
         span,
+        false,
     )?;
     // Проверка ещё раз - по решениям, которые поиск только что вставил. Их
     // собственные аргументы уровня иначе не свяжет никто: `infer` у дырки
@@ -329,6 +331,65 @@ pub fn resolve(
     let _ =
         adamas_core::check::check_within(&adamas_core::ctx::Ctx::new(checking), metas, &zonked, ty);
     Ok(())
+}
+
+/// Заполняет словари с **замкнутой** целью - до досчёта литералов.
+///
+/// Досчёт проверяет тело против типа, и проверка обрывается на первом
+/// несовпадении. Словарь-дырка в факте о примитиве такое несовпадение и
+/// даёт: `p : Equal Bool (d == 0) False` из ветви `decide (d == 0)` сводится
+/// к факту деления `eqInt32 d 0`, только когда словарь `Eq Int32` у `==`
+/// решён, - иначе проверка обрывалась на `divInt32 100 d p`, и `1` в
+/// `divInt32 100 d p + 1` брал умолчание `Int64`. Цель `Eq Int32` от
+/// литералов не зависит, и решение у неё одно, когда бы его ни искали.
+///
+/// Отказ здесь молчит и откатывается: о нём скажет [`resolve`], которому
+/// цель достанется та же.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "поиск читает всё состояние прогона: сигнатуру, дырки, реестр и владение"
+)]
+pub fn resolve_ground(
+    signature: &Signature,
+    metas: &mut Metas,
+    instances: &Instances,
+    owned: &Owned,
+    declaring: Option<&Declaring>,
+    term: &Term,
+    ty: &Term,
+    span: Span,
+) {
+    if unsolved_term_meta(metas, term).is_none() && unsolved_term_meta(metas, ty).is_none() {
+        return;
+    }
+    let mark = metas.mark();
+    let outcome = settle(
+        signature,
+        metas,
+        instances,
+        owned,
+        declaring,
+        ty,
+        Mult::Zero,
+        span,
+        true,
+    )
+    .and_then(|()| {
+        settle(
+            signature,
+            metas,
+            instances,
+            owned,
+            declaring,
+            term,
+            Mult::Many,
+            span,
+            true,
+        )
+    });
+    if outcome.is_err() {
+        metas.rollback(mark);
+    }
 }
 
 /// Заполняет словари по уже проверенному терму.
@@ -349,6 +410,7 @@ fn settle(
     term: &Term,
     sigma: Mult,
     span: Span,
+    ground: bool,
 ) -> Result<(), ElabError> {
     // Дырки, заведённые самим разрешением: их в терме нет - они живут в
     // решении той дырки, ради которой заведены, - а решать их надо тем же
@@ -390,8 +452,10 @@ fn settle(
             continue;
         }
         // Дырка не про класс - её сюда и не звали: решить её могла только
-        // унификация, и о том, что не решила, скажет объявление.
-        let Some((class, head)) = applied(signature, &goal) else {
+        // унификация, и о том, что не решила, скажет объявление. Ранний проход
+        // берёт только замкнутые цели ([`resolve_ground`]).
+        let closed = !ground || unsolved_term_meta(metas, &ty).is_none();
+        let Some((class, head)) = applied(signature, &goal).filter(|_| closed) else {
             passed.push(meta);
             continue;
         };

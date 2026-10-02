@@ -22,8 +22,8 @@ use adamas_core::mult::Mult;
 use adamas_core::prim::{ArrayOp, Prim, RegionOp, SimdOp};
 use adamas_core::row::Row;
 use adamas_core::sig::{Cross, DefinitionKind, Signature};
-use adamas_core::term::{Case, Mults, Name, Term};
-use adamas_core::value::{Elim, Env, Head, StuckBranch, StuckCase, Value};
+use adamas_core::term::{Case, Mults, Name, Split, Term};
+use adamas_core::value::{Elim, Env, Head, StuckBranch, StuckCase, StuckSplit, Value};
 
 use crate::RunError;
 use crate::foreign::{Foreign, Linkage};
@@ -278,6 +278,8 @@ impl<'a> Machine<'a> {
                     eval::apply(&rebuilt, argument)
                 }
                 Elim::Case(case) => eval::eliminate_case(case, &rebuilt),
+                Elim::Split(split) => eval::try_eliminate_split(split, &rebuilt)
+                    .unwrap_or_else(|| unreachable!("разбор записи над не-записью: {rebuilt}")),
                 Elim::Project(name) => eval::project(&rebuilt, name),
                 Elim::With(fields) => eval::with(&rebuilt, fields.to_vec()),
             };
@@ -344,6 +346,10 @@ impl<'a> Machine<'a> {
             Term::Case(case) => {
                 kont.push(Frame::Scrutinee(env.clone(), Rc::clone(case)));
                 Step::Eval(env.clone(), Rc::clone(&case.scrutinee))
+            }
+            Term::Split(split) => {
+                kont.push(Frame::Splitting(env.clone(), Rc::clone(split)));
+                Step::Eval(env.clone(), Rc::clone(&split.scrutinee))
             }
             Term::Project(record, name) => {
                 kont.push(Frame::Project(Rc::clone(name)));
@@ -842,6 +848,7 @@ impl<'a> Machine<'a> {
             Frame::Forcing(argument) => Ok(Step::Apply(value, argument)),
             Frame::Bind(env, body) => Ok(Step::Eval(env.extend(value), body)),
             Frame::Scrutinee(env, case) => Ok(self.eliminating(&value, &env, &case, kont)),
+            Frame::Splitting(env, split) => Ok(self.splitting(&value, &env, &split, kont)),
             Frame::Fields(fields, index) => Ok(Self::spreading(value, &fields, index, kont)),
             Frame::Project(name) => match self.unfolding(&value, kont) {
                 Some(step) => {
@@ -947,6 +954,43 @@ impl<'a> Machine<'a> {
         Step::Eval(env.clone(), body)
     }
 
+    /// Разбор записи по значению (§10 вопрос 231): тело получает поля по одному
+    /// тем же кадром, что ветвь разбора, - машинными шагами, а не ядерным
+    /// `eval`, потому что тело вправе производить эффекты.
+    fn splitting(&self, record: &Rc<Value>, env: &Env, split: &Rc<Split>, kont: &mut Kont) -> Step {
+        if let Some(step) = self.unfolding(record, kont) {
+            kont.tuck(Frame::Splitting(env.clone(), Rc::clone(split)));
+            return step;
+        }
+        let values: Option<Rc<[Rc<Value>]>> = match &**record {
+            Value::Object(fields) => split
+                .fields
+                .iter()
+                .map(|wanted| {
+                    fields
+                        .iter()
+                        .find(|(name, _)| name == wanted)
+                        .map(|(_, value)| Rc::clone(value))
+                })
+                .collect(),
+            _ => None,
+        };
+        let Some(values) = values else {
+            // Застрял: мотив и тело вычисляются ядерным `eval`, тело не побежит.
+            let stuck = Rc::new(StuckSplit {
+                consumed: split.consumed,
+                motive: eval::eval(env, &split.motive),
+                fields: Rc::clone(&split.fields),
+                body: eval::eval(env, &split.body),
+            });
+            return Step::Return(
+                eval::try_eliminate_split(&stuck, record).unwrap_or_else(|| Rc::clone(record)),
+            );
+        };
+        kont.push(Frame::Fields(values, 0));
+        Step::Eval(env.clone(), Rc::clone(&split.body))
+    }
+
     /// Тело ветви к полям конструктора по одному.
     fn spreading(body: Rc<Value>, fields: &Rc<[Rc<Value>]>, index: usize, kont: &mut Kont) -> Step {
         let Some(field) = fields.get(index) else {
@@ -983,6 +1027,10 @@ impl<'a> Machine<'a> {
             // Прочие элиминаторы сюда доходят только от инертных форм, то есть
             // от типов, а типы операций не производят.
             Elim::Case(case) => match eval::try_eliminate_case(case, &callee) {
+                Some(value) => Self::replaying(value, spine, index + 1, kont),
+                None => Step::Return(callee),
+            },
+            Elim::Split(split) => match eval::try_eliminate_split(split, &callee) {
                 Some(value) => Self::replaying(value, spine, index + 1, kont),
                 None => Step::Return(callee),
             },

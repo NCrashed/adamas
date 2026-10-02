@@ -5999,6 +5999,7 @@ fn mentions_depth(term: &Term, depth: u32) -> bool {
                     .any(under)
         }
         Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || under(body),
+        Term::Split(split) => recur(&split.scrutinee) || recur(&split.motive) || recur(&split.body),
         Term::Case(case) => {
             recur(&case.scrutinee)
                 || recur(&case.motive)
@@ -6042,6 +6043,11 @@ fn mentions_local(term: &Term) -> bool {
         }
         Term::Let(_, _, ty, value, body) => {
             mentions_local(ty) || mentions_local(value) || mentions_local(body)
+        }
+        Term::Split(split) => {
+            mentions_local(&split.scrutinee)
+                || mentions_local(&split.motive)
+                || mentions_local(&split.body)
         }
         Term::Case(case) => {
             mentions_local(&case.scrutinee)

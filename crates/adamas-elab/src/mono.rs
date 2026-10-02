@@ -295,6 +295,13 @@ impl Pass<'_> {
                     None => Ok(Term::Project(Rc::new(base), Rc::clone(field))),
                 }
             }
+            Term::Split(split) => Ok(Term::Split(Rc::new(adamas_core::term::Split {
+                consumed: split.consumed,
+                scrutinee: Rc::new(self.rewrite(&split.scrutinee)?),
+                motive: Rc::clone(&split.motive),
+                fields: Rc::clone(&split.fields),
+                body: Rc::new(self.rewrite(&split.body)?),
+            }))),
             Term::Case(case) => {
                 let mut branches = Vec::with_capacity(case.branches.len());
                 for branch in &case.branches {
@@ -828,6 +835,13 @@ fn substituted(term: &Term, subst: &Substitution<'_>, depth: u32) -> Term {
         Term::Project(record, name) => Term::Project(here(record), Rc::clone(name)),
         // Собственных связываний разбор не вводит: и мотив, и ветви - обычные
         // термы функционального типа.
+        Term::Split(split) => Term::Split(Rc::new(adamas_core::term::Split {
+            consumed: split.consumed,
+            scrutinee: here(&split.scrutinee),
+            motive: here(&split.motive),
+            fields: Rc::clone(&split.fields),
+            body: here(&split.body),
+        })),
         Term::Case(case) => Term::Case(Rc::new(Case {
             data: Rc::clone(&case.data),
             levels: Rc::clone(&case.levels),
@@ -1066,6 +1080,10 @@ fn scan(signature: &Signature, instances: &Instances, term: &Term, found: &mut F
             }
         }
         Term::Project(base, _) => scan(signature, instances, base, found),
+        Term::Split(split) => {
+            scan(signature, instances, &split.scrutinee, found);
+            scan(signature, instances, &split.body, found);
+        }
         Term::Case(case) => {
             scan(signature, instances, &case.scrutinee, found);
             for branch in &case.branches {
@@ -1222,6 +1240,11 @@ fn constants(term: &Term, into: &mut Vec<Name>) {
             recur(ty);
             recur(value);
             recur(body);
+        }
+        Term::Split(split) => {
+            recur(&split.scrutinee);
+            recur(&split.motive);
+            recur(&split.body);
         }
         Term::Case(case) => {
             recur(&case.scrutinee);

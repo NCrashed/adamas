@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: tuple-arity.adamas:5:7: разбор записи: компонент у кортежа не столько, сколько полей у записи
+    let (a, b) = p
+        ^^^^^^

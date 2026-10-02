@@ -1,0 +1,22 @@
+-- Зависимая пара - запись, чьё поле видит предыдущее (§4.2, §10 вопрос 231).
+--
+-- `Sized` несёт длину и массив этой длины. Разбор кортежем связывает оба, и
+-- тип второго - `Array n UInt8` с тем самым `n`: доказательство номера,
+-- добытое `decide` о `n`, годится массиву. Проекцией этого не написать -
+-- `s.xs` имеет тип `Array s.n UInt8`, и факт о `n` пришлось бы добывать о
+-- `s.n`.
+
+type Sized = { n : UInt64, xs : Array n UInt8 }
+
+make : UInt64 -> Sized
+make k = { n = k, xs = arrayNew k 7 }
+
+first : Sized -> UInt8
+first s =
+  let (n, xs) = s
+  case decide (ltUInt64 0 n) of
+    Yes p -> arrayIndex xs 0 p
+    No _q -> 0
+
+main : UInt8
+main = first (make 3) + first (make 0)

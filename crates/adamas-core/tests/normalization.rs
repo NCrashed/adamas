@@ -125,7 +125,7 @@ fn well_scoped(term: &Term, binders: u32) -> bool {
                 && well_scoped(value, binders)
                 && well_scoped(body, binders + 1)
         }
-        Term::Case(_) => unreachable!("генератор термов не порождает разбор"),
+        Term::Case(_) | Term::Split(_) => unreachable!("генератор термов не порождает разбор"),
     }
 }
 
@@ -157,7 +157,7 @@ fn is_normal_form(term: &Term) -> bool {
         }
         // `let` вычисление устраняет всегда.
         Term::Let(..) => false,
-        Term::Case(_) => unreachable!("генератор термов не порождает разбор"),
+        Term::Case(_) | Term::Split(_) => unreachable!("генератор термов не порождает разбор"),
     }
 }
 
@@ -194,7 +194,7 @@ fn rename(term: &Term) -> Term {
             Rc::new(rename(value)),
             Rc::new(rename(body)),
         ),
-        Term::Case(_) => unreachable!("генератор термов не порождает разбор"),
+        Term::Case(_) | Term::Split(_) => unreachable!("генератор термов не порождает разбор"),
     }
 }
 
@@ -254,7 +254,7 @@ fn wrap_in_redexes(term: &Term, budget: &mut u32) -> Term {
             Rc::new(wrap_in_redexes(value, budget)),
             Rc::new(wrap_in_redexes(body, budget)),
         ),
-        Term::Case(_) => unreachable!("генератор термов не порождает разбор"),
+        Term::Case(_) | Term::Split(_) => unreachable!("генератор термов не порождает разбор"),
     };
 
     // Голову применения оборачивать нельзя: `(\x -> #0) f a` - это уже другой

@@ -452,6 +452,9 @@ pub struct Binding {
     pub mult: Option<MultAnn>,
     /// Имя.
     pub name: Name,
+    /// Кортеж слева вместо имени: `let (a, b) = p` (§3.6, §10 вопрос 231).
+    /// Тогда `name` - заполнитель `_` на месте паттерна, а параметров нет.
+    pub pattern: Option<Pattern>,
     /// Параметры, если это локальная функция.
     pub params: Vec<Pattern>,
     /// Тип, если написан.

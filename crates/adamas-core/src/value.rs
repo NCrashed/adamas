@@ -462,6 +462,8 @@ pub enum Elim {
     App(Rc<Value>),
     /// Разбор по конструктору.
     Case(Rc<StuckCase>),
+    /// Разбор записи в поля (§10 вопрос 231).
+    Split(Rc<StuckSplit>),
     /// Проекция поля записи.
     Project(Name),
     /// Переопределение полей записи: `{ p | x = v }`.
@@ -491,6 +493,22 @@ pub struct StuckCase {
     pub motive: Rc<Value>,
     /// Ветви в порядке объявления конструкторов.
     pub branches: Vec<StuckBranch>,
+}
+
+/// Разбор записи, застрявший на неизвестной записи (§10 вопрос 231).
+///
+/// Мотив и тело уже вычислены - по той же причине, что у [`StuckCase`]: узел
+/// своих связываний не вводит.
+#[derive(Clone, Debug)]
+pub struct StuckSplit {
+    /// Кратность потребления записи - см. [`crate::term::Split::consumed`].
+    pub consumed: Mult,
+    /// Мотив как значение.
+    pub motive: Rc<Value>,
+    /// Имена полей в порядке телескопа.
+    pub fields: Rc<[Name]>,
+    /// Тело - функция от полей.
+    pub body: Rc<Value>,
 }
 
 /// Ветвь застрявшего разбора.

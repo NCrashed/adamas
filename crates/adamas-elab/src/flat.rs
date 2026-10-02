@@ -739,6 +739,11 @@ fn constants(term: &Term, into: &mut Vec<Name>) {
             constants(value, into);
             constants(body, into);
         }
+        Term::Split(split) => {
+            constants(&split.scrutinee, into);
+            constants(&split.motive, into);
+            constants(&split.body, into);
+        }
         Term::Case(case) => {
             constants(&case.scrutinee, into);
             constants(&case.motive, into);

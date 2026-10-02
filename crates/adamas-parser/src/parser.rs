@@ -1232,6 +1232,30 @@ impl<'a> Parser<'a> {
     fn binding(&mut self) -> Result<Binding, ParseError> {
         let start = self.peek().span;
         let mult = self.multiplicity()?;
+        // Кортеж слева: `let (a, b) = p` (§3.6, §10 вопрос 231).
+        if self.kind() == TokenKind::LParen {
+            let pattern = self.atomic_pattern()?;
+            let ty = if self.eat(TokenKind::Colon).is_some() {
+                Some(self.expr()?)
+            } else {
+                None
+            };
+            self.expect(TokenKind::Equals)?;
+            let body = self.body()?;
+            let span = start.merge(body.span);
+            return Ok(Binding {
+                mult,
+                name: Name {
+                    text: Rc::from("_"),
+                    span: pattern.span,
+                },
+                pattern: Some(pattern),
+                params: Vec::new(),
+                ty,
+                body,
+                span,
+            });
+        }
         let name = self.ident()?;
         let mut params = Vec::new();
         while starts_pattern(self.kind()) {
@@ -1253,6 +1277,7 @@ impl<'a> Parser<'a> {
         Ok(Binding {
             mult,
             name,
+            pattern: None,
             params,
             ty,
             body,

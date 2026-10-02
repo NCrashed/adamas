@@ -11,7 +11,7 @@
 
 use std::rc::Rc;
 
-use adamas_core::term::{Case, Name, Term};
+use adamas_core::term::{Case, Name, Split, Term};
 use adamas_core::value::{Elim, Env, Value};
 
 /// Ветки хендлера, снятые со спайна элиминатора.
@@ -60,6 +60,8 @@ pub(crate) enum Frame {
     Bind(Env, Rc<Term>),
     /// Разбор: считается разбираемое.
     Scrutinee(Env, Rc<Case>),
+    /// Разбор записи в поля: считается запись (§10 вопрос 231).
+    Splitting(Env, Rc<Split>),
     /// Тело ветви применяется к полям конструктора по одному.
     Fields(Rc<[Rc<Value>]>, usize),
     /// Проекция поля записи.

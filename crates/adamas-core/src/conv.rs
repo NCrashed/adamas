@@ -435,6 +435,7 @@ fn replayed(
     spine.iter().try_fold(body, |callee, elim| match elim {
         Elim::App(argument) => try_apply(&callee, Rc::clone(argument)),
         Elim::Case(case) => try_eliminate_case(case, &callee),
+        Elim::Split(split) => crate::eval::try_eliminate_split(split, &callee),
         // Проекция из развёрнутого определения. Записью тело быть не обязано:
         // у модуля, объявленного выражением (`module M = F A`), тело - это
         // нейтраль, и проекция на ней **копится в спайне**, а не застревает.
@@ -1021,6 +1022,12 @@ fn same_elim(
     match (left, right) {
         (Elim::App(a), Elim::App(b)) => convertible_within(fuel, sig, metas, size, a, b),
         (Elim::Case(a), Elim::Case(b)) => same_case(fuel, sig, metas, size, a, b),
+        // `consumed` не сравнивается по той же причине, что у разбора.
+        (Elim::Split(a), Elim::Split(b)) => {
+            a.fields == b.fields
+                && convertible_within(fuel, sig, metas, size, &a.motive, &b.motive)
+                && convertible_within(fuel, sig, metas, size, &a.body, &b.body)
+        }
         (Elim::Project(a), Elim::Project(b)) => a == b,
         // Порядок написанного значим: `{ p | x = v, x = w }` поверхность не
         // пишет, но затенение делает две последовательности разными, если они

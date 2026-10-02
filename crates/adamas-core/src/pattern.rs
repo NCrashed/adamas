@@ -2295,6 +2295,7 @@ fn depends_term(term: &Term, depth: u32, size: u32, levels: &[u32]) -> bool {
                     .any(|argument| depends_term(argument, depth + 1, size, levels))
         }
         Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || under(body),
+        Term::Split(split) => recur(&split.scrutinee) || recur(&split.motive) || recur(&split.body),
         Term::Case(case) => {
             recur(&case.scrutinee)
                 || recur(&case.motive)
@@ -2322,7 +2323,7 @@ fn constructor_value(signature: &Signature, value: &Rc<Value>) -> Option<Constru
         .iter()
         .map(|elim| match elim {
             Elim::App(argument) => Some(Rc::clone(argument)),
-            Elim::Case(_) | Elim::Project(_) | Elim::With(_) => None,
+            Elim::Case(_) | Elim::Split(_) | Elim::Project(_) | Elim::With(_) => None,
         })
         .collect::<Option<Vec<_>>>()?;
     Some((Rc::clone(name), Rc::clone(levels), arguments))
@@ -2357,7 +2358,7 @@ fn data_head(signature: &Signature, ty: &Rc<Value>) -> Option<DataHead> {
         .iter()
         .map(|elim| match elim {
             Elim::App(argument) => Some(Rc::clone(argument)),
-            Elim::Case(_) | Elim::Project(_) | Elim::With(_) => None,
+            Elim::Case(_) | Elim::Split(_) | Elim::Project(_) | Elim::With(_) => None,
         })
         .collect::<Option<Vec<_>>>()?;
     Some((Rc::clone(name), Rc::clone(levels), arguments))
@@ -2458,6 +2459,11 @@ fn well_scoped(term: &Term, binders: u32) -> bool {
             Term::Let(_, _, ty, value, body) => {
                 go(ty, depth, binders) && go(value, depth, binders) && go(body, depth + 1, binders)
             }
+            Term::Split(split) => {
+                go(&split.scrutinee, depth, binders)
+                    && go(&split.motive, depth, binders)
+                    && go(&split.body, depth, binders)
+            }
             Term::Case(case) => {
                 go(&case.scrutinee, depth, binders)
                     && go(&case.motive, depth, binders)
@@ -2549,6 +2555,13 @@ fn rewrite<F: Fn(u32) -> Term>(term: &Term, depth: u32, from: u32, map: &F) -> T
         Term::Let(mult, name, ty, value, body) => {
             Term::Let(*mult, Rc::clone(name), recur(ty), recur(value), under(body))
         }
+        Term::Split(split) => Term::Split(Rc::new(crate::term::Split {
+            consumed: split.consumed,
+            scrutinee: recur(&split.scrutinee),
+            motive: recur(&split.motive),
+            fields: Rc::clone(&split.fields),
+            body: recur(&split.body),
+        })),
         Term::Case(case) => Term::Case(Rc::new(Case {
             data: Rc::clone(&case.data),
             levels: Rc::clone(&case.levels),
@@ -2652,6 +2665,13 @@ fn shift_at(term: &Term, depth: u32, by: u32) -> Term {
             Term::Let(mult, name, ty, value, body) => {
                 Term::Let(*mult, Rc::clone(name), recur(ty), recur(value), under(body))
             }
+            Term::Split(split) => Term::Split(Rc::new(crate::term::Split {
+                consumed: split.consumed,
+                scrutinee: recur(&split.scrutinee),
+                motive: recur(&split.motive),
+                fields: Rc::clone(&split.fields),
+                body: recur(&split.body),
+            })),
             Term::Case(case) => Term::Case(Rc::new(Case {
                 data: Rc::clone(&case.data),
                 levels: Rc::clone(&case.levels),

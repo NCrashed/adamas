@@ -23,9 +23,10 @@
 use std::rc::Rc;
 
 use crate::row::{Row, Tail};
-use crate::term::{Args, Branch, Case, Field, Fields, Mults, Name, Term};
+use crate::term::{Args, Branch, Case, Field, Fields, Mults, Name, Split, Term};
 use crate::value::{
-    Block, Closure, Elim, Env, Head, Lvl, RowClosure, StuckBranch, StuckCase, Telescope, Value,
+    Block, Closure, Elim, Env, Head, Lvl, RowClosure, StuckBranch, StuckCase, StuckSplit,
+    Telescope, Value,
 };
 
 impl Closure {
@@ -208,6 +209,7 @@ pub fn eval(env: &Env, term: &Term) -> Rc<Value> {
                 None => eliminate_case(&Rc::new(stuck_case(env, case)), &scrutinee),
             }
         }
+        Term::Split(split) => split_value(env, split),
     }
 }
 
@@ -396,7 +398,7 @@ fn apply_fields(body: Rc<Value>, spine: &[Elim], params: u32) -> Option<Rc<Value
         .skip(params as usize)
         .try_fold(body, |body, elim| match elim {
             Elim::App(argument) => try_apply(&body, Rc::clone(argument)),
-            Elim::Case(_) | Elim::Project(_) | Elim::With(_) => None,
+            Elim::Case(_) | Elim::Split(_) | Elim::Project(_) | Elim::With(_) => None,
         })
 }
 
@@ -559,6 +561,46 @@ pub fn try_eliminate_case(case: &Rc<StuckCase>, scrutinee: &Rc<Value>) -> Option
     let mut spine = spine.clone();
     spine.push(Elim::Case(Rc::clone(case)));
     Some(Rc::new(Value::Neutral(head.clone(), spine)))
+}
+
+/// Значение разбора записи: тело над полями объекта либо застрявший разбор.
+fn split_value(env: &Env, split: &Split) -> Rc<Value> {
+    let scrutinee = eval(env, &split.scrutinee);
+    let stuck = Rc::new(StuckSplit {
+        consumed: split.consumed,
+        motive: eval(env, &split.motive),
+        fields: Rc::clone(&split.fields),
+        body: eval(env, &split.body),
+    });
+    try_eliminate_split(&stuck, &scrutinee)
+        .unwrap_or_else(|| unreachable!("разбор записи над не-записью: {scrutinee}"))
+}
+
+/// Разбор записи в поля (§10 вопрос 231): у объекта тело применяется к полям в
+/// порядке телескопа, у нейтрали разбор дописывается в спайн.
+///
+/// `None` - разбираемое не запись и не нейтраль, либо у объекта нет поля: из
+/// корректно типизированного терма ни то ни другое не получается, но
+/// δ-разворот переигрывает спайн и над значением другого типа (см.
+/// [`try_eliminate_case`]).
+#[must_use]
+pub fn try_eliminate_split(split: &Rc<StuckSplit>, scrutinee: &Rc<Value>) -> Option<Rc<Value>> {
+    match &**scrutinee {
+        Value::Object(fields) => {
+            let mut body = Rc::clone(&split.body);
+            for wanted in split.fields.iter() {
+                let (_, value) = fields.iter().find(|(name, _)| name == wanted)?;
+                body = try_apply(&body, Rc::clone(value))?;
+            }
+            Some(body)
+        }
+        Value::Neutral(head, spine) => {
+            let mut spine = spine.clone();
+            spine.push(Elim::Split(Rc::clone(split)));
+            Some(Rc::new(Value::Neutral(head.clone(), spine)))
+        }
+        _ => None,
+    }
 }
 
 /// Применяет значение к аргументу.
@@ -1514,6 +1556,13 @@ pub fn quote(size: u32, value: &Rc<Value>) -> Term {
                         .map(|(name, value)| (Rc::clone(name), Rc::new(quote(size, value))))
                         .collect(),
                 ),
+                Elim::Split(split) => Term::Split(Rc::new(Split {
+                    consumed: split.consumed,
+                    scrutinee: Rc::new(callee),
+                    motive: Rc::new(quote(size, &split.motive)),
+                    fields: Rc::clone(&split.fields),
+                    body: Rc::new(quote(size, &split.body)),
+                })),
                 // Накопленный терм и есть то, на чём разбор застрял.
                 Elim::Case(case) => Term::Case(Rc::new(Case {
                     data: Rc::clone(&case.data),

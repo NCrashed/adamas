@@ -1,0 +1,39 @@
+-- Кортеж - анонимная запись с полями `_1`, `_2`, … (§4.2, §10 вопрос 231).
+--
+-- Тип `(A, B)` есть тип записи, значение `(a, b)` - запись, проекция -
+-- `p._1`. Разбор пишется кортежем в `let`, в единственной ветке `case`, в
+-- параметре клаузы и лямбды; в ядре это узел `Split`: запись потребляется
+-- однажды, поля приходят связываниями. Поля ответа по одному на форму:
+-- проекция, `let`, вложенный кортеж, `case`, параметр клаузы, лямбда.
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+pair : (UInt64, Bool)
+pair = (7, True)
+
+swap : (UInt64, Bool) -> (Bool, UInt64)
+swap p =
+  let (a, b) = p
+  (b, a)
+
+nested : ((UInt64, UInt64), UInt64) -> UInt64
+nested q =
+  let ((x, y), z) = q
+  x * 100 + y * 10 + z
+
+viaCase : (UInt64, UInt64) -> UInt64
+viaCase p = case p of
+  (a, b) -> a - b
+
+inClause : (UInt64, UInt64) -> UInt64 -> UInt64
+inClause (a, b) c = a * b + c
+
+apply : ((UInt64, UInt64) -> UInt64) -> UInt64
+apply f = f (40, 2)
+
+main : List UInt64
+main =
+  let (_, n) = swap pair
+  Cons pair._1 (Cons n (Cons (nested ((1, 2), 3)) (Cons (viaCase (10, 4)) (Cons (inClause (6, 7) 1) (Cons (apply (\(a, b) -> a + b)) Nil)))))

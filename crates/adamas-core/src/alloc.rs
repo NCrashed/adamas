@@ -497,6 +497,13 @@ impl Walk<'_> {
                 self.under(&[Frame::BindingBody], body);
             }
 
+            Term::Split(split) => {
+                self.under(&[Frame::Scrutinee], &split.scrutinee);
+                let before = self.route.len();
+                self.route.push(Frame::Branch(0));
+                self.branch(split.fields.len(), &split.body);
+                self.route.truncate(before);
+            }
             Term::Case(case) => self.case(case, 0),
         }
     }

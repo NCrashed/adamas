@@ -1027,6 +1027,11 @@ impl Generalization {
                     self.collect_row(metas, row);
                 }
             }
+            Term::Split(split) => {
+                self.collect_term(metas, &split.scrutinee);
+                self.collect_term(metas, &split.motive);
+                self.collect_term(metas, &split.body);
+            }
             Term::Case(case) => {
                 for level in case.levels.iter() {
                     self.collect_level(metas, level);
@@ -1189,6 +1194,13 @@ impl Generalization {
                     args.mult_args().iter().map(|mult| metas.zonk_mult(*mult)),
                 ),
             ),
+            Term::Split(split) => Term::Split(Rc::new(crate::term::Split {
+                consumed: split.consumed,
+                scrutinee: recur(&split.scrutinee),
+                motive: recur(&split.motive),
+                fields: Rc::clone(&split.fields),
+                body: recur(&split.body),
+            })),
             Term::Case(case) => Term::Case(Rc::new(crate::term::Case {
                 data: Rc::clone(&case.data),
                 levels: case
@@ -1266,6 +1278,9 @@ pub fn unsolved_term_meta_but(
         Term::Let(_, _, ty, value, body) => {
             recur(ty).or_else(|| recur(value)).or_else(|| recur(body))
         }
+        Term::Split(split) => recur(&split.scrutinee)
+            .or_else(|| recur(&split.motive))
+            .or_else(|| recur(&split.body)),
         Term::Case(case) => recur(&case.scrutinee)
             .or_else(|| recur(&case.motive))
             .or_else(|| {
@@ -1326,6 +1341,9 @@ pub fn unsolved_row_meta(metas: &Metas, term: &Term) -> Option<RowMeta> {
         Term::Let(_, _, ty, value, body) => {
             recur(ty).or_else(|| recur(value)).or_else(|| recur(body))
         }
+        Term::Split(split) => recur(&split.scrutinee)
+            .or_else(|| recur(&split.motive))
+            .or_else(|| recur(&split.body)),
         Term::Case(case) => recur(&case.scrutinee)
             .or_else(|| recur(&case.motive))
             .or_else(|| {
@@ -1391,6 +1409,9 @@ pub fn unsolved_level_meta(metas: &Metas, term: &crate::term::Term) -> Option<Le
             .or_else(|| unsolved_level_meta(metas, value))
             .or_else(|| unsolved_level_meta(metas, body)),
         Term::Const(_, levels, _) => levels.iter().find_map(|level| in_level(metas, level)),
+        Term::Split(split) => unsolved_level_meta(metas, &split.scrutinee)
+            .or_else(|| unsolved_level_meta(metas, &split.motive))
+            .or_else(|| unsolved_level_meta(metas, &split.body)),
         Term::Case(case) => case
             .levels
             .iter()
@@ -1522,6 +1543,13 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
                 args.mult_args().iter().map(|mult| metas.settle_mult(*mult)),
             ),
         ),
+        Term::Split(split) => Term::Split(Rc::new(crate::term::Split {
+            consumed: split.consumed,
+            scrutinee: recur(&split.scrutinee),
+            motive: recur(&split.motive),
+            fields: Rc::clone(&split.fields),
+            body: recur(&split.body),
+        })),
         Term::Case(case) => Term::Case(Rc::new(crate::term::Case {
             data: Rc::clone(&case.data),
             levels: case.levels.iter().map(|level| metas.zonk(level)).collect(),

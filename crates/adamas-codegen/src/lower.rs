@@ -1338,6 +1338,7 @@ impl<'a> Lowerer<'a> {
                     repr,
                 ))
             }
+            Term::Split(split) => self.split(scope, split),
             Term::Case(case) => self.analysis(scope, case),
             // Словарь `Flat` - исключение из общего пути записей: форма его
             // записана в §4.11, а живёт он дескриптором, а не объектом кучи.
@@ -4064,6 +4065,83 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Разбор записи в поля (§10 вопрос 231).
+    ///
+    /// Запись связывается тем представлением, которое отдало её понижение:
+    /// типа записи в узле нет, и `let` с написанным типом тут не годится. Поле
+    /// берётся проекцией и связывается под именем параметра тела; лямбды тела
+    /// снимаются по одной. Тело, записанное не лямбдами (η), применяется к
+    /// оставшимся проекциям как есть.
+    fn split(
+        &mut self,
+        scope: &mut Scope,
+        split: &adamas_core::term::Split,
+    ) -> Result<(Expr, Repr), LowerError> {
+        let (record, shape) = self.expr(scope, &split.scrutinee)?;
+        let binding = Binding {
+            name: "запись".to_owned(),
+            local: scope.fresh(),
+            fact: Fact::present(split.consumed).shaped(shape),
+        };
+        scope.env.push(Slot::Bound(binding.local, binding.fact));
+        // Тело стояло вне связывания записи: свободные индексы сдвигаются.
+        let body = adamas_core::pattern::shift_free(&split.body, 1);
+        let inner = self.split_fields(scope, split, &body, 0);
+        scope.env.pop();
+        let (inner, repr) = inner?;
+        Ok((
+            Expr::Bind {
+                binding,
+                value: Box::new(record),
+                body: Box::new(inner),
+            },
+            repr,
+        ))
+    }
+
+    /// Поля разбора с номера `at`: запись стоит связыванием `at`.
+    fn split_fields(
+        &mut self,
+        scope: &mut Scope,
+        split: &adamas_core::term::Split,
+        body: &Term,
+        at: usize,
+    ) -> Result<(Expr, Repr), LowerError> {
+        let Some(field) = split.fields.get(at) else {
+            return self.expr(scope, body);
+        };
+        let record = || Rc::new(Term::var(u32::try_from(at).unwrap_or(u32::MAX)));
+        let Term::Lam(mult, name, inner) = body else {
+            let applied = split.fields[at..]
+                .iter()
+                .fold(body.clone(), |callee, field| {
+                    Term::App(
+                        Rc::new(callee),
+                        Rc::new(Term::Project(record(), Rc::clone(field))),
+                    )
+                });
+            return self.expr(scope, &applied);
+        };
+        let (value, shape) = self.expr(scope, &Term::Project(record(), Rc::clone(field)))?;
+        let binding = Binding {
+            name: name.to_string(),
+            local: scope.fresh(),
+            fact: Fact::present(*mult).shaped(shape),
+        };
+        scope.env.push(Slot::Bound(binding.local, binding.fact));
+        let rest = self.split_fields(scope, split, inner, at + 1);
+        scope.env.pop();
+        let (rest, repr) = rest?;
+        Ok((
+            Expr::Bind {
+                binding,
+                value: Box::new(value),
+                body: Box::new(rest),
+            },
+            repr,
+        ))
+    }
+
     /// Операция над массивом (§4.11).
     ///
     /// Шаг индексации читается у **написанного** типа элемента - у того самого
@@ -5594,6 +5672,11 @@ fn nested_rows(term: &Term, into: &mut BTreeSet<u32>) {
             nested_rows(value, into);
             nested_rows(body, into);
         }
+        Term::Split(split) => {
+            nested_rows(&split.scrutinee, into);
+            nested_rows(&split.motive, into);
+            nested_rows(&split.body, into);
+        }
         Term::Case(case) => {
             nested_rows(&case.scrutinee, into);
             nested_rows(&case.motive, into);
@@ -6505,6 +6588,11 @@ fn constants(term: &Term, into: &mut Vec<Name>) {
             constants(ty, into);
             constants(value, into);
             constants(body, into);
+        }
+        Term::Split(split) => {
+            constants(&split.scrutinee, into);
+            constants(&split.motive, into);
+            constants(&split.body, into);
         }
         Term::Case(case) => {
             constants(&case.scrutinee, into);

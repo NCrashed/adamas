@@ -375,6 +375,11 @@ fn collect_calls(
             recur(depth, value);
             recur(depth + 1, body);
         }
+        Term::Split(split) => {
+            recur(depth, &split.scrutinee);
+            recur(depth, &split.motive);
+            recur(depth, &split.body);
+        }
         Term::Case(case) => {
             recur(depth, &case.scrutinee);
             recur(depth, &case.motive);
@@ -549,6 +554,7 @@ fn mentions_group(group: &[Name], term: &Term) -> bool {
                     .any(recur)
         }
         Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || recur(body),
+        Term::Split(split) => recur(&split.scrutinee) || recur(&split.motive) || recur(&split.body),
         Term::Case(case) => {
             recur(&case.scrutinee)
                 || recur(&case.motive)
@@ -594,6 +600,11 @@ fn closed_under(depth: usize, term: &Term) -> bool {
         }
         Term::Let(_, _, ty, value, body) => {
             recur(depth, ty) && recur(depth, value) && recur(depth + 1, body)
+        }
+        Term::Split(split) => {
+            recur(depth, &split.scrutinee)
+                && recur(depth, &split.motive)
+                && recur(depth, &split.body)
         }
         Term::Case(case) => {
             recur(depth, &case.scrutinee)
@@ -641,6 +652,7 @@ fn calls_a_partial_definition(signature: &Signature, name: &Name, term: &Term) -
                     .any(recur)
         }
         Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || recur(body),
+        Term::Split(split) => recur(&split.scrutinee) || recur(&split.motive) || recur(&split.body),
         Term::Case(case) => {
             recur(&case.scrutinee)
                 || recur(&case.motive)
@@ -1029,6 +1041,12 @@ impl Walk<'_> {
 
             Term::Let(_, _, ty, value, body) => self.binding(sizes, ty, value, body),
 
+            // Поля записи размера не несут: разбор записи не уменьшает ни одного
+            // аргумента, и тело обходится с неизвестными размерами полей.
+            Term::Split(split) => {
+                self.term(sizes, &split.scrutinee);
+                self.term(sizes, &split.body);
+            }
             Term::Case(case) => self.case(sizes, case, &[]),
         }
     }

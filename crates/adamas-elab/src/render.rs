@@ -352,6 +352,13 @@ impl Naming {
     /// `bound` - имена связываний, введённых внутри самого терма; они ближе
     /// телескопа. `outer` - сколько связываний телескопа стоит под термом: у
     /// типа из телескопа это его собственная позиция, у терма сообщения - ноль.
+    /// Разбор записи: те же три подтерма, что у разбора без ветвей.
+    fn split(&self, split: &mut adamas_core::term::Split, bound: &mut Vec<Name>, outer: usize) {
+        self.term(Rc::make_mut(&mut split.scrutinee), bound, outer);
+        self.term(Rc::make_mut(&mut split.motive), bound, outer);
+        self.term(Rc::make_mut(&mut split.body), bound, outer);
+    }
+
     fn term(&self, term: &mut Term, bound: &mut Vec<Name>, outer: usize) {
         match term {
             // Ряд и запись переписываются одинаково, но **собираются каждый
@@ -458,6 +465,7 @@ impl Naming {
                     naming.term(Rc::make_mut(body), bound, outer);
                 });
             }
+            Term::Split(split) => self.split(Rc::make_mut(split), bound, outer),
             Term::Case(case) => {
                 let case: &mut Case = Rc::make_mut(case);
                 case.levels = self.levels(&case.levels);
@@ -593,6 +601,11 @@ fn collect_term(term: &Term, ordered: &mut Vec<u32>) {
             collect_term(value, ordered);
             collect_term(body, ordered);
         }
+        Term::Split(split) => {
+            collect_term(&split.scrutinee, ordered);
+            collect_term(&split.motive, ordered);
+            collect_term(&split.body, ordered);
+        }
         Term::Case(case) => {
             for level in case.levels.iter() {
                 collect_level(level, ordered);
@@ -699,6 +712,7 @@ fn shows(term: &Term, depth: u32, at: u32) -> bool {
                     .any(under)
         }
         Term::Let(_, _, ty, value, body) => recur(ty) || recur(value) || under(body),
+        Term::Split(split) => recur(&split.scrutinee) || recur(&split.motive) || recur(&split.body),
         Term::Case(case) => {
             recur(&case.scrutinee)
                 || recur(&case.motive)

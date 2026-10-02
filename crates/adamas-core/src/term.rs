@@ -218,6 +218,8 @@ pub enum Term {
     Const(Name, Rc<[Level]>, Args),
     /// Разбор значения индуктивного типа по конструктору.
     Case(Rc<Case>),
+    /// Разбор записи в поля: `let (a, b) = p` (§3.3, §4.2, §10 вопрос 231).
+    Split(Rc<Split>),
     /// Тип записи: телескоп полей и, возможно, хвост-row.
     ///
     /// Телескоп, а не набор: тип поля вправе ссылаться на предыдущие поля, и
@@ -626,6 +628,41 @@ impl Binder {
     }
 }
 
+/// Разбор записи в поля - элиминатор Σ-записи (§3.3, §4.2, §10 вопрос 231).
+///
+/// Устроен как разбор с одной ветвью: запись потребляется однажды, при
+/// `consumed`, а поле кратности `q` приходит в тело при `q · consumed`.
+/// Проекции этого не дают: `p._1` и `p._2` от линейной записи расходовали бы
+/// `p` дважды. Тело - функция от полей в порядке телескопа записи, своих
+/// связываний узел не вводит, как и [`Case`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Split {
+    /// Кратность, с которой разбор потребляет запись, - `r` из §3.3.
+    pub consumed: Mult,
+    /// Что разбирается.
+    pub scrutinee: Rc<Term>,
+    /// Мотив: `(0 x : R) -> Type ℓ`, где `R` - тип записи.
+    pub motive: Rc<Term>,
+    /// Имена полей в порядке телескопа: по ним тело получает значения.
+    pub fields: Rc<[Name]>,
+    /// Тело: функция от полей.
+    pub body: Rc<Term>,
+}
+
+impl Split {
+    /// Тот же разбор с подтермами, переписанными `recur`.
+    #[must_use]
+    pub fn map(&self, mut recur: impl FnMut(&Term) -> Term) -> Self {
+        Self {
+            consumed: self.consumed,
+            scrutinee: Rc::new(recur(&self.scrutinee)),
+            motive: Rc::new(recur(&self.motive)),
+            fields: Rc::clone(&self.fields),
+            body: Rc::new(recur(&self.body)),
+        }
+    }
+}
+
 /// Ветвь разбора - функция от полей конструктора.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Branch {
@@ -717,6 +754,7 @@ impl Term {
                     .collect(),
             ),
             Self::Project(record, name) => Self::Project(recur(record), Rc::clone(name)),
+            Self::Split(split) => Self::Split(Rc::new(split.map(|it| it.rename_labels(renames)))),
             Self::Case(case) => Self::Case(Rc::new(Case {
                 data: Rc::clone(&case.data),
                 levels: Rc::clone(&case.levels),
@@ -794,6 +832,9 @@ impl Term {
                     .collect(),
             ),
             Self::Project(record, name) => Self::Project(recur(record), Rc::clone(name)),
+            Self::Split(split) => {
+                Self::Split(Rc::new(split.map(|it| it.substitute_rows(arguments))))
+            }
             Self::Case(case) => Self::Case(Rc::new(Case {
                 data: Rc::clone(&case.data),
                 levels: Rc::clone(&case.levels),
@@ -873,6 +914,9 @@ impl Term {
                     .collect(),
             ),
             Self::Project(record, name) => Self::Project(recur(record), Rc::clone(name)),
+            Self::Split(split) => {
+                Self::Split(Rc::new(split.map(|it| it.substitute_levels(arguments))))
+            }
             Self::Case(case) => Self::Case(Rc::new(Case {
                 data: Rc::clone(&case.data),
                 levels: case
@@ -976,6 +1020,10 @@ impl Term {
                     .collect(),
             ),
             Self::Project(record, name) => Self::Project(recur(record), Rc::clone(name)),
+            Self::Split(split) => Self::Split(Rc::new(Split {
+                consumed: at(split.consumed),
+                ..split.map(|it| it.substitute_grades(arguments, scope))
+            })),
             Self::Case(case) => Self::Case(Rc::new(Case {
                 data: Rc::clone(&case.data),
                 levels: Rc::clone(&case.levels),
@@ -1047,6 +1095,9 @@ impl Term {
                         .any(under)
             }
             Self::Let(_, _, ty, value, body) => recur(ty) || recur(value) || under(body),
+            Self::Split(split) => {
+                recur(&split.scrutinee) || recur(&split.motive) || recur(&split.body)
+            }
             Self::Case(case) => {
                 recur(&case.scrutinee)
                     || recur(&case.motive)
@@ -1093,6 +1144,13 @@ impl Term {
             Self::Const(_, levels, _) => levels
                 .iter()
                 .fold(None, |found, level| join(found, level.max_var())),
+            Self::Split(split) => join(
+                join(
+                    split.scrutinee.max_level_var(),
+                    split.motive.max_level_var(),
+                ),
+                split.body.max_level_var(),
+            ),
             Self::Case(case) => {
                 let levels = case
                     .levels
@@ -1266,6 +1324,7 @@ fn emit<'a>(
                 ],
             );
         }
+        Term::Split(split) => later(pending, split_pieces(split, inner)),
         Term::Record(fields) | Term::Row(fields) => {
             f.write_str("{")?;
             queued(pending, telescope(fields, inner));
@@ -1338,6 +1397,22 @@ fn emit<'a>(
         }
     }
     Ok(())
+}
+
+/// Разбор записи: `split {_1, _2} p body`.
+fn split_pieces(split: &Split, inner: usize) -> [Piece<'_>; 4] {
+    let fields = split
+        .fields
+        .iter()
+        .map(|it| &**it)
+        .collect::<Vec<_>>()
+        .join(", ");
+    [
+        Piece::Text(format!("split {{{fields}}} ").into()),
+        Piece::Term(&split.scrutinee, Pos::Atom, inner),
+        Piece::Text(" ".into()),
+        Piece::Term(&split.body, Pos::Atom, inner),
+    ]
 }
 
 /// Телескоп полей без ведущей `{`: `1 x : A, ω y : B | r}`.

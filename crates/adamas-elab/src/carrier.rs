@@ -140,6 +140,11 @@ fn walk(signature: &Signature, owned: &Owned, term: &Term, depth: u32, found: &m
             walk(signature, owned, value, depth, found);
             walk(signature, owned, body, depth + 1, found);
         }
+        Term::Split(split) => {
+            walk(signature, owned, &split.scrutinee, depth, found);
+            walk(signature, owned, &split.motive, depth, found);
+            walk(signature, owned, &split.body, depth, found);
+        }
         Term::Case(case) => {
             walk(signature, owned, &case.scrutinee, depth, found);
             walk(signature, owned, &case.motive, depth, found);

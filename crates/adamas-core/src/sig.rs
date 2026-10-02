@@ -3252,6 +3252,13 @@ fn rerowed(term: &Term, targets: &[(Name, Rc<[Row<Term>]>)]) -> Term {
         Term::Object(it) => Term::Object(named(it)),
         Term::With(base, it) => Term::With(recur(base), named(it)),
         Term::Project(record, field) => Term::Project(recur(record), Rc::clone(field)),
+        Term::Split(split) => Term::Split(Rc::new(crate::term::Split {
+            consumed: split.consumed,
+            scrutinee: recur(&split.scrutinee),
+            motive: recur(&split.motive),
+            fields: Rc::clone(&split.fields),
+            body: recur(&split.body),
+        })),
         Term::Case(case) => Term::Case(Rc::new(crate::term::Case {
             data: Rc::clone(&case.data),
             levels: case.levels.clone(),
@@ -3346,6 +3353,13 @@ fn relevelled(term: &Term, targets: &[(Name, Rc<[Level]>)]) -> Term {
         Term::Object(it) => Term::Object(named(it)),
         Term::With(base, it) => Term::With(recur(base), named(it)),
         Term::Project(record, field) => Term::Project(recur(record), Rc::clone(field)),
+        Term::Split(split) => Term::Split(Rc::new(crate::term::Split {
+            consumed: split.consumed,
+            scrutinee: recur(&split.scrutinee),
+            motive: recur(&split.motive),
+            fields: Rc::clone(&split.fields),
+            body: recur(&split.body),
+        })),
         Term::Case(case) => Term::Case(Rc::new(crate::term::Case {
             data: Rc::clone(&case.data),
             levels: found_levels(&case.data).unwrap_or_else(|| case.levels.clone()),

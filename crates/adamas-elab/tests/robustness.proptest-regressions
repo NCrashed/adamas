@@ -7,3 +7,5 @@
 cc ab368cf5703532e603870e3fc47d11c1e135b180b04c84ecf5750a85452312a9 # shrinks to text = "data Nat where\n  Zero : Nat\n  Succ : Nat -> Nat\n\nf : Nat -> Nat\nf x = ((Type (Zero Type)) -> Zero)\n\ng : Zero\n"
 cc 45f507e5f4ea2a688b548a04fd59623ab42b4e97f696359ba528a70e545abec0 # shrinks to text = "data Nat where\n  Zero : Nat\n  Succ : Nat -> Nat\n\nf : Nat -> Nat\nf x = ((((0 x : Type) -> Nat) Zero) -> Zero)\n\ng : Zero\n"
 cc 0ee4e9b9ee9d746726eea1891cdcf307d8cf38913b1903dd6f70254642e78d22 # shrinks to text = "data Nat where\n  Zero : Nat\n  Succ : Nat -> Nat\n\nf : Nat -> Nat\nf x = (Succ (Type Type))\n\ng : Zero\n"
+cc e9eb4f642541547624faf3f6db1170f4615849879872254a03d861563815dd8a # shrinks to text = "data Nat where\n  Zero : Nat\n  Succ : Nat -> Nat\n\nf : Nat -> Nat\nf x = (((Zero -> _) Type), Zero)\n\ng : Zero\n"
+cc 3e769fd2cea28ec8bf3edf09ffdba95a2610b74d9c3f74decaec61ce29514d4d # shrinks to text = "data Nat where\n  Zero : Nat\n  Succ : Nat -> Nat\n\nf : Nat -> Nat\nf x = (Zero, ((Type, _) -> (Zero, (Type Type))))\n\ng : Zero\n"

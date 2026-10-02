@@ -734,7 +734,10 @@ impl<'a> Printer<'a> {
             self.push(&mult.mult.to_string());
             self.push(" ");
         }
-        self.push(&binding.name.text);
+        match &binding.pattern {
+            Some(pattern) => self.pattern(pattern, true),
+            None => self.push(&binding.name.text),
+        }
         for param in &binding.params {
             self.push(" ");
             self.pattern(param, true);

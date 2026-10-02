@@ -74,6 +74,8 @@ pub fn force(metas: &Metas, value: &Rc<Value>) -> Option<Rc<Value>> {
         .fold(Rc::clone(solution), |head, elim| match elim {
             Elim::App(argument) => apply(&head, Rc::clone(argument)),
             Elim::Case(case) => crate::eval::eliminate_case(case, &head),
+            Elim::Split(split) => crate::eval::try_eliminate_split(split, &head)
+                .unwrap_or_else(|| unreachable!("разбор записи над решением не-записью")),
             Elim::Project(name) => crate::eval::project(&head, name),
             Elim::With(fields) => crate::eval::with(&head, fields.to_vec()),
         });
@@ -331,7 +333,7 @@ fn applied(spine: &[Elim]) -> Option<Vec<Rc<Value>>> {
         .iter()
         .map(|elim| match elim {
             Elim::App(argument) => Some(Rc::clone(argument)),
-            Elim::Project(_) | Elim::With(_) | Elim::Case(_) => None,
+            Elim::Project(_) | Elim::With(_) | Elim::Case(_) | Elim::Split(_) => None,
         })
         .collect()
 }
@@ -484,7 +486,7 @@ fn read(
                 // Разбор переписывать нечем: мотив и ветви - значения, и
                 // обратное чтение под переименованием для них не написано.
                 // Отказ консервативен и сузится вместе с первым потребителем.
-                Elim::Case(_) => None,
+                Elim::Case(_) | Elim::Split(_) => None,
             })
         }
         Value::Lam(mult, name, closure) => {

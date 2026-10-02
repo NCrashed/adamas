@@ -1202,7 +1202,10 @@ fn what_the_core_cannot_carry_yet_names_itself() {
             "f : Nat -> Nat\nf = \\(Cons x xs) -> Zero\n",
             Missing::LambdaPattern,
         ),
-        ("f : Nat\nf = (Zero, Zero)\n", Missing::Tuple),
+        (
+            "f : (Nat, Nat) -> Nat\nf p =\n  let (Succ k, m) = p\n  k\n",
+            Missing::Tuple,
+        ),
         ("f : Nat\nf = ()\n", Missing::Unit),
         (
             "f : Nat -> Nat\nf x = y\n  where\n    y : Nat\n    y = x\n",

@@ -997,6 +997,7 @@ pub fn infer(
         // Мотив записан в самом разборе, поэтому тип синтезируется, а не
         // берётся из режима проверки.
         Term::Case(case) => infer_case(ctx, metas, sigma, case, None),
+        Term::Split(split) => infer_split(ctx, metas, sigma, split, None),
 
         // Домена у лямбды в терме нет, синтезировать не из чего.
         Term::Lam(..) => Err(refuse(
@@ -1068,6 +1069,9 @@ pub fn check(
         // сверяется с ожидаемым **до** них, а не после (см. `infer_case`).
         (Term::Case(case), _) => {
             infer_case(ctx, metas, sigma, case, Some(expected)).map(|(_, usage)| usage)
+        }
+        (Term::Split(split), _) => {
+            infer_split(ctx, metas, sigma, split, Some(expected)).map(|(_, usage)| usage)
         }
 
         _ => {
@@ -1395,6 +1399,8 @@ pub fn meta_route(metas: &Metas, term: &Term, meta: crate::term::TermMeta) -> Op
         Term::Let(_, _, ty, value, body) => within(Frame::BindingValue, value)
             .or_else(|| within(Frame::BindingBody, body))
             .or_else(|| within(Frame::BindingType, ty)),
+        Term::Split(split) => within(Frame::Scrutinee, &split.scrutinee)
+            .or_else(|| within(Frame::Branch(0), &split.body)),
         Term::Case(case) => within(Frame::Scrutinee, &case.scrutinee)
             .or_else(|| {
                 case.branches
@@ -1441,6 +1447,9 @@ pub fn hole_owner(term: &Term, meta: crate::term::TermMeta) -> Option<Name> {
         Term::Case(case) => recur(&case.scrutinee)
             .or_else(|| case.branches.iter().find_map(|branch| recur(&branch.body)))
             .or_else(|| recur(&case.motive)),
+        Term::Split(split) => recur(&split.scrutinee)
+            .or_else(|| recur(&split.body))
+            .or_else(|| recur(&split.motive)),
         Term::With(base, fields) => {
             recur(base).or_else(|| fields.iter().find_map(|(_, value)| recur(value)))
         }
@@ -1952,6 +1961,10 @@ fn occurrences(term: &Term, depth: u32, route: &mut Vec<Frame>, found: &mut Vec<
                 within(Frame::Branch(index), &branch.body, depth, found);
             }
         }
+        Term::Split(split) => {
+            within(Frame::Scrutinee, &split.scrutinee, depth, found);
+            within(Frame::Branch(0), &split.body, depth, found);
+        }
         Term::Project(record, _) | Term::With(record, _) => {
             within(Frame::Scrutinee, record, depth, found);
         }
@@ -2110,6 +2123,7 @@ fn mentions_seen<'a>(
         // Имя типа стоит в самом узле, а имена конструкторов - в ветвях:
         // упоминанием считается и то и другое, иначе разбор по `Bad` внутри
         // поля прошёл бы мимо позитивности.
+        Term::Split(split) => recur(&split.scrutinee) || recur(&split.motive) || recur(&split.body),
         Term::Case(case) => {
             case.data == *name
                 || recur(&case.scrutinee)
@@ -3620,6 +3634,138 @@ fn project_with(
     ))
 }
 
+/// Синтезирует тип разбора записи в поля (§3.3, §4.2, §10 вопрос 231).
+///
+/// Устроен как [`infer_case`] с одной ветвью. Запись потребляется при `r`,
+/// тело - функция от полей, и поле кратности `q` приходит в него при `q · r`:
+/// линейная запись отдаёт линейные поля, и каждое расходуется однажды - чего
+/// проекции дать не могут. Тип - мотив, применённый к разбираемому; телу -
+/// мотив, применённый к объекту из его полей.
+fn infer_split(
+    ctx: &Ctx<'_>,
+    metas: &mut Metas,
+    sigma: Mult,
+    split: &crate::term::Split,
+    wanted: Option<&Rc<Value>>,
+) -> Result<(Rc<Value>, Usage), TypeError> {
+    let shape = |metas: &mut Metas, why| Err(refuse(ctx, metas, ErrorKind::SplitShape { why }));
+    if split.consumed == Mult::Zero {
+        return shape(metas, "разбор стёрт, а поля нужны значениями");
+    }
+    let (ty, scrutinee_usage) =
+        framed(infer(ctx, metas, sigma, &split.scrutinee), Frame::Scrutinee)?;
+    let ty = whnf_solved(ctx.signature(), metas, &ty);
+    let Value::Record(telescope) = &*ty else {
+        return Err(refuse(
+            ctx,
+            metas,
+            ErrorKind::NotARecord {
+                ty: read_back(ctx, metas, &ty),
+            },
+        ));
+    };
+    if telescope.is_open() {
+        return shape(metas, "запись открыта, а разбирается только закрытая");
+    }
+    let fields = telescope.fields();
+    let named = fields.len() == split.fields.len()
+        && fields
+            .iter()
+            .zip(split.fields.iter())
+            .all(|(field, name)| field.name == *name);
+    if !named {
+        return shape(
+            metas,
+            "поля разбора не те, что у записи, либо не в том порядке",
+        );
+    }
+    if fields
+        .iter()
+        .any(|field| field.shape != crate::term::Shape::default())
+    {
+        return shape(metas, "поле с собственными параметрами разбором не берётся");
+    }
+
+    let size = ctx.size();
+    let motive_ty = Term::Pi(
+        Binder::explicit(Mult::Zero),
+        Name::from("x"),
+        Rc::new(quote(size, &ty)),
+        Row::empty(),
+        Rc::new(Term::Universe(metas.fresh_level())),
+    );
+    let motive_usage = framed(
+        check(ctx, metas, Mult::Zero, &split.motive, &ctx.eval(&motive_ty)),
+        Frame::Motive,
+    )?;
+    let motive = ctx.eval(&split.motive);
+    let result = apply(&motive, ctx.eval(&split.scrutinee));
+    if let Some(wanted) = wanted {
+        if !convertible(ctx.signature(), metas, size, wanted, &result) {
+            return Err(refuse(ctx, metas, misfit(ctx, metas, wanted, &result)));
+        }
+    }
+
+    let body_ty = split_body_type(size, telescope, split.consumed, &motive);
+    let body_usage = framed(
+        check(ctx, metas, sigma, &split.body, &ctx.eval(&body_ty)),
+        Frame::Branch(0),
+    )?;
+    Ok((
+        result,
+        scrutinee_usage.scale(split.consumed) + &motive_usage + &body_usage,
+    ))
+}
+
+/// Тип тела разбора записи: `(q · r x₁ : A₁) -> … -> motive {f₁ = x₁, …}`, где
+/// `Aᵢ` видит предыдущие поля связываниями.
+fn split_body_type(
+    size: u32,
+    telescope: &crate::value::Telescope,
+    consumed: Mult,
+    motive: &Rc<Value>,
+) -> Term {
+    let fields = telescope.fields();
+    let count = u32::try_from(fields.len()).unwrap_or(u32::MAX);
+    let mut binders = Vec::with_capacity(fields.len());
+    let mut earlier: Vec<Rc<Value>> = Vec::with_capacity(fields.len());
+    for (index, field) in fields.iter().enumerate() {
+        let at = size + u32::try_from(index).unwrap_or(u32::MAX);
+        let domain = telescope.instantiated(index, &earlier, &[], &[], &[]);
+        binders.push((
+            field.mult * consumed,
+            Rc::clone(&field.name),
+            quote(at, &domain),
+        ));
+        earlier.push(Value::var(Lvl(at)));
+    }
+    let inner = size + count;
+    let object = Term::Object(
+        fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                let at = Lvl(size + u32::try_from(index).unwrap_or(u32::MAX));
+                (
+                    Rc::clone(&field.name),
+                    Rc::new(Term::Var(at.to_index(inner))),
+                )
+            })
+            .collect(),
+    );
+    let mut body_ty = Term::App(Rc::new(quote(inner, motive)), Rc::new(object));
+    for (mult, name, domain) in binders.into_iter().rev() {
+        body_ty = Term::Pi(
+            Binder::explicit(mult),
+            name,
+            Rc::new(domain),
+            Row::empty(),
+            Rc::new(body_ty),
+        );
+    }
+    body_ty
+}
+
 /// Синтезирует тип разбора по конструктору.
 ///
 /// Мотив записан в самом узле, поэтому тип получается, а не берётся из режима
@@ -3801,7 +3947,7 @@ fn data_arguments(
         .iter()
         .map(|elim| match elim {
             Elim::App(argument) => Some(Rc::clone(argument)),
-            Elim::Case(_) | Elim::Project(_) | Elim::With(_) => None,
+            Elim::Case(_) | Elim::Split(_) | Elim::Project(_) | Elim::With(_) => None,
         })
         .collect()
 }

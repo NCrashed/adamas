@@ -461,6 +461,15 @@ pub enum ErrorKind {
         data: Name,
     },
 
+    /// Разбор записи в поля, который ядро не принимает (§10 вопрос 231):
+    /// стёртый разбор, открытая запись, поля не те или с собственными
+    /// параметрами.
+    #[error("разбор записи: {why}")]
+    SplitShape {
+        /// Что не так.
+        why: &'static str,
+    },
+
     /// Число параметров в разборе разошлось с объявлением типа.
     #[error("разбор `{data}` объявляет {found} параметров, а у типа их {expected}")]
     CaseParameters {
@@ -621,6 +630,7 @@ impl ErrorKind {
             | Self::NotStrictlyPositive { .. }
             | Self::NonUniformParameter { .. }
             | Self::ErasedScrutinee { .. }
+            | Self::SplitShape { .. }
             | Self::AmbiguousTerm { .. }
             | Self::CaseParameters { .. }
             | Self::NonExhaustive { .. }

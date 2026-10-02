@@ -293,6 +293,11 @@ fn ceiling(term: &Term) -> u32 {
                     within(row, top);
                 }
             }
+            Term::Split(split) => {
+                seen(&split.scrutinee, top);
+                seen(&split.motive, top);
+                seen(&split.body, top);
+            }
             Term::Case(case) => {
                 seen(&case.scrutinee, top);
                 seen(&case.motive, top);
@@ -360,6 +365,10 @@ fn escaping(term: &Term, depth: u32, out: &mut BTreeSet<u32>) {
         Term::Let(_, _, _, value, body) => {
             escaping(value, depth, out);
             escaping(body, depth + 1, out);
+        }
+        Term::Split(split) => {
+            escaping(&split.scrutinee, depth, out);
+            escaping(&split.body, depth, out);
         }
         Term::Case(case) => {
             escaping(&case.scrutinee, depth, out);
@@ -617,6 +626,10 @@ fn sites(signature: &Signature, term: &Term, found: &mut impl FnMut(&Site)) {
         Term::Let(_, _, _, value, body) => {
             sites(signature, value, found);
             sites(signature, body, found);
+        }
+        Term::Split(split) => {
+            sites(signature, &split.scrutinee, found);
+            sites(signature, &split.body, found);
         }
         Term::Case(case) => {
             sites(signature, &case.scrutinee, found);

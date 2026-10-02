@@ -352,6 +352,10 @@ impl Walk<'_> {
             Term::With(base, fields) => std::iter::once((Vec::new(), &**base, 0))
                 .chain(fields.iter().map(|(_, value)| (Vec::new(), &**value, 0)))
                 .collect(),
+            Term::Split(split) => vec![
+                (vec![Frame::Scrutinee], &*split.scrutinee, 0),
+                (vec![Frame::Branch(0)], &*split.body, 0),
+            ],
             Term::Project(record, _) => vec![(Vec::new(), &**record, 0)],
             Term::App(..) => self.applied(term),
         }

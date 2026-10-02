@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: tuple-refutable-component.adamas:13:8: опровержимый паттерн внутри кортежа пока не элаборируется: кортеж разбирается в имена, `_` и вложенные кортежи; разбор компоненты пишется `case` в теле
+    let (Just x, y) = p
+         ^^^^^^

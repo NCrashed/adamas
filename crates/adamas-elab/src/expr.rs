@@ -2597,7 +2597,7 @@ impl<'a> Elaborator<'a> {
             }),
             ExprKind::Mask(inner) => self.masked(inner, expr.span),
             ExprKind::Tuple(items) if items.is_empty() => missing(Missing::Unit),
-            ExprKind::Tuple(_) => missing(Missing::Tuple),
+            ExprKind::Tuple(items) => self.tuple(items, expr.span, awaited),
             ExprKind::List(items) => self.list(items, expr.span),
         }
     }
@@ -2885,6 +2885,25 @@ impl<'a> Elaborator<'a> {
         let Some(ty) = self.synthesized(&value) else {
             return Err(ElabError::NotMatchable { span });
         };
+        // Единственная ветка-кортеж - разбор записи, а не по конструктору (§10
+        // вопрос 231): `case p of (a, b) -> …` значит то же, что `let (a, b) = p`.
+        if let [alt] = alts {
+            if matches!(&alt.pattern.kind, PatternKind::Tuple(items) if !items.is_empty()) {
+                let domain = quote(self.ctx.size(), &ty);
+                let consumed = self.consumption(scrutinee, &domain);
+                return self.split_record(
+                    &alt.pattern,
+                    value,
+                    &ty,
+                    consumed,
+                    &mut |it: &mut Self| {
+                        it.awaited = awaited.cloned();
+                        let term = it.expr(&alt.body, Mult::Many)?;
+                        Ok(it.executed(term, awaited))
+                    },
+                );
+            }
+        }
         // Разбор идёт по **связыванию**: колонка у ядра - переменная, а не
         // терм. Написанное переменной берётся как есть, и терм выходит тот же,
         // что у клауз; прочее связывается `let`ом - **одним** связыванием, а не
@@ -3878,6 +3897,45 @@ impl<'a> Elaborator<'a> {
         }
     }
 
+    /// Кортеж - анонимная запись с полями `_1`, `_2`, … (§4.2, §10 вопрос 231):
+    /// тип записи, когда элаборируется тип либо ожидается универсум, иначе
+    /// значение записи.
+    fn tuple(
+        &mut self,
+        items: &[Expr],
+        span: Span,
+        awaited: Option<&Rc<Value>>,
+    ) -> Result<Term, ElabError> {
+        let named = |at: usize, item: &Expr| ast::Name {
+            text: Rc::from(format!("_{}", at + 1)),
+            span: item.span,
+        };
+        let sorted = awaited.is_some_and(|ty| {
+            matches!(
+                &*whnf_solved(self.signature, self.metas, ty),
+                Value::Universe(_)
+            )
+        });
+        if self.types || sorted {
+            let fields: Vec<ast::RecordField> = items
+                .iter()
+                .enumerate()
+                .map(|(at, item)| ast::RecordField {
+                    name: named(at, item),
+                    ty: item.clone(),
+                })
+                .collect();
+            self.record_type(&fields, None, span)
+        } else {
+            let fields: Vec<(ast::Name, Expr)> = items
+                .iter()
+                .enumerate()
+                .map(|(at, item)| (named(at, item), item.clone()))
+                .collect();
+            self.record(&fields, awaited)
+        }
+    }
+
     /// `{ x : A, y : B }` - телескоп полей.
     ///
     /// Поле кратности `1` (§4.1): запись кладёт значение однажды - тот же
@@ -4166,8 +4224,7 @@ impl<'a> Elaborator<'a> {
             // нет, и об ошибке скажет проверка определения.
             let checked = expected.as_ref().is_some_and(|ty| {
                 let mark = self.metas.mark();
-                let fine =
-                    check(&self.ctx.speculating(), self.metas, Mult::Zero, &value, ty).is_ok();
+                let fine = check(&self.ctx.speculating(), self.metas, Mult::Zero, &value, ty).is_ok();
                 self.metas.rollback(mark);
                 fine
             });
@@ -6205,6 +6262,9 @@ impl<'a> Elaborator<'a> {
         body: &Expr,
         expected: &[Argument],
     ) -> Result<Term, ElabError> {
+        if let Some((params, body)) = untupled_lambda(params, body) {
+            return self.lam(&params, &body, expected);
+        }
         // Считается до спуска: индексы закрываемых меряются от тела, то есть
         // от точки, где связаны все параметры этой лямбды.
         let drops = self.closing_params(params, body, expected);
@@ -6414,6 +6474,208 @@ impl<'a> Elaborator<'a> {
         }
     }
 
+    /// `let (a, b) = p` - разбор записи в поля (§3.6, §10 вопрос 231).
+    ///
+    /// Значение элаборируется как у `let` с именем, а остаток блока становится
+    /// телом узла [`adamas_core::term::Split`] под полями. Компоненты кортежа -
+    /// имена, `_` и вложенные кортежи: опровержимый паттерн внутри разбора
+    /// записи пишется `case` в теле.
+    fn destructured(
+        &mut self,
+        binding: &Binding,
+        pattern: &ast::Pattern,
+        tail: &[Binding],
+        rest: &[Stmt],
+        position: Position,
+    ) -> Result<Term, ElabError> {
+        let (value, found) = if let Some(ty) = &binding.ty {
+            let ty = self.typing(|inner| inner.expr(ty, Mult::Many))?;
+            let annotation = self.typed(&ty);
+            self.awaited = Some(Rc::clone(&annotation));
+            let value = self.expr(&binding.body, Mult::Many)?;
+            (self.executed(value, Some(&annotation)), annotation)
+        } else {
+            let value = self.expr(&binding.body, Mult::Many)?;
+            let value = self.run(value);
+            let Some(found) = self.held_type(&value) else {
+                return Err(ElabError::Missing {
+                    what: Missing::UnsynthesizedLet,
+                    span: binding.span,
+                });
+            };
+            (value, found)
+        };
+        let consumed = Self::multiplicity(binding.mult, Mult::Many);
+        self.split_record(pattern, value, &found, consumed, &mut |it: &mut Self| {
+            it.bindings(tail, rest, position)
+        })
+    }
+
+    /// Узел разбора записи `scrutinee` типа `ty` по кортежу `pattern`; тело
+    /// строит `then` под полями.
+    fn split_record(
+        &mut self,
+        pattern: &ast::Pattern,
+        scrutinee: Term,
+        ty: &Rc<Value>,
+        consumed: Mult,
+        then: &mut dyn FnMut(&mut Self) -> Result<Term, ElabError>,
+    ) -> Result<Term, ElabError> {
+        let PatternKind::Tuple(items) = &pattern.kind else {
+            return Err(ElabError::Missing {
+                what: Missing::Tuple,
+                span: pattern.span,
+            });
+        };
+        let reduced = whnf_solved(self.signature, self.metas, ty);
+        // Тип ещё дырка - параметр лямбды, чей домен придёт позже: кортеж из
+        // `n` компонент сам называет форму, запись `{ _1 : ?, …, _n : ? }`.
+        let reduced = if matches!(
+            &*reduced,
+            Value::Neutral(adamas_core::value::Head::Meta(_), _)
+        ) {
+            let fields: Vec<adamas_core::term::Field> = (0..items.len())
+                .map(|at| {
+                    let level = self.metas.fresh_level();
+                    let hole = self.fresh_meta(&Rc::new(Value::Universe(level)));
+                    adamas_core::term::Field {
+                        name: CoreName::from(format!("_{}", at + 1).as_str()),
+                        mult: Mult::Many,
+                        shape: adamas_core::term::Shape::default(),
+                        ty: Rc::new(adamas_core::pattern::shift_free(
+                            &hole,
+                            u32::try_from(at).unwrap_or(u32::MAX),
+                        )),
+                    }
+                })
+                .collect();
+            // Дырку здесь не решают: её контекст внешний, а дырки полей заведены
+            // под связываниями тела. Домен даст проверка из ожидаемого типа, и
+            // запись не той формы отвергнет ядро (`SplitShape`).
+            self.ctx
+                .eval(&Term::Record(adamas_core::term::Fields::closed(
+                    fields.into(),
+                )))
+        } else {
+            reduced
+        };
+        let Value::Record(telescope) = &*reduced else {
+            return Err(ElabError::Core {
+                error: Box::new(
+                    adamas_core::error::ErrorKind::NotARecord {
+                        ty: self.ctx.quote(ty),
+                    }
+                    .into(),
+                ),
+                span: pattern.span,
+                names: Names::default(),
+            });
+        };
+        let telescope = telescope.clone();
+        if telescope.fields().len() != items.len() {
+            return Err(ElabError::Core {
+                error: Box::new(
+                    adamas_core::error::ErrorKind::SplitShape {
+                        why: "компонент у кортежа не столько, сколько полей у записи",
+                    }
+                    .into(),
+                ),
+                span: pattern.span,
+                names: Names::default(),
+            });
+        }
+        let level = self.metas.fresh_level();
+        let hole = self.fresh_meta(&Rc::new(Value::Universe(level)));
+        let motive = Term::Lam(
+            Mult::Zero,
+            CoreName::from("_"),
+            Rc::new(adamas_core::pattern::shift_free(&hole, 1)),
+        );
+        let fields: Rc<[CoreName]> = telescope
+            .fields()
+            .iter()
+            .map(|field| Rc::clone(&field.name))
+            .collect();
+        let body = self.split_fields(
+            items,
+            &telescope,
+            consumed,
+            Vec::new(),
+            &mut Vec::new(),
+            then,
+        )?;
+        Ok(Term::Split(Rc::new(adamas_core::term::Split {
+            consumed,
+            scrutinee: Rc::new(scrutinee),
+            motive: Rc::new(motive),
+            fields,
+            body: Rc::new(body),
+        })))
+    }
+
+    /// Лямбды тела разбора над полями с номера `earlier.len()`.
+    ///
+    /// Вложенный кортеж связывается полем и разбирается **после** всех полей
+    /// внешней записи: тело внешнего узла остаётся функцией ровно от его полей.
+    fn split_fields<'p>(
+        &mut self,
+        items: &'p [ast::Pattern],
+        telescope: &adamas_core::value::Telescope,
+        consumed: Mult,
+        mut earlier: Vec<Rc<Value>>,
+        nested: &mut Vec<(u32, &'p ast::Pattern, Rc<Value>, Mult)>,
+        then: &mut dyn FnMut(&mut Self) -> Result<Term, ElabError>,
+    ) -> Result<Term, ElabError> {
+        let at = earlier.len();
+        let Some(item) = items.get(at) else {
+            let pending = std::mem::take(nested);
+            return self.nest(&pending, then);
+        };
+        let field = &telescope.fields()[at];
+        let mult = field.mult * consumed;
+        let ty = telescope.instantiated(at, &earlier, &[], &[], &[]);
+        let level = self.ctx.size();
+        let name: Symbol = match &item.kind {
+            PatternKind::Name(name) if !is_reference(&name.text) => Rc::clone(&name.text),
+            PatternKind::Wildcard => Rc::from("_"),
+            PatternKind::Tuple(inner) if !inner.is_empty() => {
+                nested.push((level, item, Rc::clone(&ty), mult));
+                Rc::from("(…)")
+            }
+            _ => {
+                return Err(ElabError::Missing {
+                    what: Missing::Tuple,
+                    span: item.span,
+                });
+            }
+        };
+        earlier.push(Value::var(adamas_core::value::Lvl(level)));
+        let bound = Bound::visible(&name, mult, ty);
+        let body = self.binding(bound, |inner| {
+            inner.split_fields(items, telescope, consumed, earlier, nested, then)
+        })?;
+        Ok(Term::Lam(mult, CoreName::from(&*name), Rc::new(body)))
+    }
+
+    /// Разбирает отложенные вложенные кортежи по одному, затем строит `then`.
+    fn nest(
+        &mut self,
+        pending: &[(u32, &ast::Pattern, Rc<Value>, Mult)],
+        then: &mut dyn FnMut(&mut Self) -> Result<Term, ElabError>,
+    ) -> Result<Term, ElabError> {
+        let Some(((level, pattern, ty, mult), rest)) = pending.split_first() else {
+            return then(self);
+        };
+        let index = self.ctx.size() - 1 - level;
+        self.split_record(
+            pattern,
+            Term::var(index),
+            ty,
+            *mult,
+            &mut |it: &mut Self| it.nest(rest, then),
+        )
+    }
+
     /// `let` без аннотации: тип берётся синтезом значения (§10 вопрос 105).
     ///
     /// Владению синтезированного типа **довольно**. Правило смотрит на голову
@@ -6542,6 +6804,9 @@ impl<'a> Elaborator<'a> {
                 what: Missing::LocalDefinitions,
                 span: binding.span,
             });
+        }
+        if let Some(pattern) = &binding.pattern {
+            return self.destructured(binding, pattern, tail, rest, position);
         }
         let Some(ty) = &binding.ty else {
             return self.untyped(binding, tail, rest, position);
@@ -6872,6 +7137,7 @@ impl<'a> Elaborator<'a> {
                 stmts: vec![
                     stmt(ast::StmtKind::Let(vec![ast::Binding {
                         mult: None,
+                        pattern: None,
                         name: answer.clone(),
                         params: Vec::new(),
                         ty: Some(boolean),
@@ -6994,6 +7260,9 @@ impl<'a> Elaborator<'a> {
     /// Порядок переменных - слева направо в глубину: этого ждёт
     /// [`adamas_core::pattern::compile`], и другого тело видеть не может.
     pub(crate) fn clause(&mut self, clause: &ast::Clause) -> Result<Clause, ElabError> {
+        if let Some(rewritten) = untupled(clause) {
+            return self.clause(&rewritten);
+        }
         // Водораздел расширяемости хвостов row (§10 вопрос 170): всё, что
         // заведено до тела, - дырки написанного типа, и погашение их не
         // расширяет; дырки самого тела - инстанциации мест вызова - расширяет.
@@ -7887,6 +8156,11 @@ fn constants(term: &Term, into: &mut Vec<CoreName>) {
                 constants(field, into);
             }
         }
+        Term::Split(split) => {
+            constants(&split.scrutinee, into);
+            constants(&split.motive, into);
+            constants(&split.body, into);
+        }
         Term::Case(case) => {
             constants(&case.scrutinee, into);
             constants(&case.motive, into);
@@ -8019,4 +8293,103 @@ struct Applying<'a, 'b> {
 struct Applied<'b> {
     term: Term,
     placed: Vec<(&'b ast::HandlerBranch, usize)>,
+}
+
+/// Клауза, у которой кортеж в параметре стал именем, а разбор - `let` в
+/// начале тела: `f (a, b) = e` есть `f p = let (a, b) = p; e` (§10 вопрос 231).
+/// `None` - кортежей в параметрах нет.
+fn untupled(clause: &ast::Clause) -> Option<ast::Clause> {
+    let tupled = |pattern: &ast::Pattern| matches!(&pattern.kind, PatternKind::Tuple(items) if !items.is_empty());
+    if !clause.patterns.iter().any(tupled) {
+        return None;
+    }
+    let mut patterns = Vec::with_capacity(clause.patterns.len());
+    let mut stmts = Vec::new();
+    for (at, pattern) in clause.patterns.iter().enumerate() {
+        if !tupled(pattern) {
+            patterns.push(pattern.clone());
+            continue;
+        }
+        let name = ast::Name {
+            text: Rc::from(format!("кортеж#{at}")),
+            span: pattern.span,
+        };
+        patterns.push(ast::Pattern {
+            kind: PatternKind::Name(name.clone()),
+            span: pattern.span,
+        });
+        stmts.push(Stmt {
+            kind: StmtKind::Let(vec![Binding {
+                mult: None,
+                name: ast::Name {
+                    text: Rc::from("_"),
+                    span: pattern.span,
+                },
+                pattern: Some(pattern.clone()),
+                params: Vec::new(),
+                ty: None,
+                body: Expr {
+                    kind: ExprKind::Name(name),
+                    span: pattern.span,
+                },
+                span: pattern.span,
+            }]),
+            span: pattern.span,
+        });
+    }
+    let span = clause.body.span;
+    stmts.push(Stmt {
+        kind: StmtKind::Expr(clause.body.clone()),
+        span,
+    });
+    Some(ast::Clause {
+        patterns,
+        body: Expr {
+            kind: ExprKind::Block(ast::Block { stmts, span }),
+            span,
+        },
+        wheres: clause.wheres.clone(),
+        span: clause.span,
+    })
+}
+
+/// Лямбда, у которой кортеж в параметре стал именем, а разбор - `let` в начале
+/// тела: `\(a, b) -> e` есть `\p -> let (a, b) = p; e` (§10 вопрос 231).
+fn untupled_lambda(params: &[ast::LamParam], body: &Expr) -> Option<(Vec<ast::LamParam>, Expr)> {
+    let tupled = |param: &ast::LamParam| {
+        matches!(&param.kind, ast::LamParamKind::Pattern(pattern)
+            if matches!(&pattern.kind, PatternKind::Tuple(items) if !items.is_empty()))
+    };
+    if !params.iter().any(tupled) {
+        return None;
+    }
+    let patterns: Vec<ast::Pattern> = params
+        .iter()
+        .map(|param| match &param.kind {
+            ast::LamParamKind::Pattern(pattern) => pattern.clone(),
+            ast::LamParamKind::Binder(_) => ast::Pattern {
+                kind: PatternKind::Wildcard,
+                span: param.span,
+            },
+        })
+        .collect();
+    let clause = ast::Clause {
+        patterns,
+        body: body.clone(),
+        wheres: Vec::new(),
+        span: body.span,
+    };
+    let rewritten = untupled(&clause)?;
+    let params = params
+        .iter()
+        .zip(rewritten.patterns)
+        .map(|(param, pattern)| match &param.kind {
+            ast::LamParamKind::Pattern(_) => ast::LamParam {
+                kind: ast::LamParamKind::Pattern(pattern),
+                span: param.span,
+            },
+            ast::LamParamKind::Binder(_) => param.clone(),
+        })
+        .collect();
+    Some((params, rewritten.body))
 }

@@ -278,6 +278,11 @@ fn inherit(signature: &Signature, term: &Term, depth: u32, found: &mut [Mult]) {
             inherit(signature, value, depth, found);
             inherit(signature, body, depth + 1, found);
         }
+        Term::Split(split) => {
+            inherit(signature, &split.scrutinee, depth, found);
+            inherit(signature, &split.motive, depth, found);
+            inherit(signature, &split.body, depth, found);
+        }
         Term::Case(case) => {
             inherit(signature, &case.scrutinee, depth, found);
             inherit(signature, &case.motive, depth, found);

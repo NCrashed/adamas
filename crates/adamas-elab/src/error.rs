@@ -1182,27 +1182,6 @@ pub enum ElabError {
         span: Span,
     },
 
-    /// Ресурсное поле записи.
-    ///
-    /// Запись владеет структурно (§10 вопрос 231), и уникальное поле она держит.
-    /// Ресурсное - пока нет: запись-ресурс обязана закрывать поля своим
-    /// деструктором, а синтеза его ещё нет, и забытая запись не закрыла бы
-    /// ресурс ни разу (§3.3, вопрос 77).
-    #[error(
-        "поле `{field}` записи держит `{ty}` ({owned}): деструктор записи, \
-         закрывающий поля, ещё не синтезируется"
-    )]
-    OwnedRecordField {
-        /// Имя поля.
-        field: Symbol,
-        /// Тип поля.
-        ty: Symbol,
-        /// Чем объявлен тип поля.
-        owned: Ownership,
-        /// Написанный тип поля.
-        span: Span,
-    },
-
     /// Деструктор объявлен сигнатурой, но без клауз.
     ///
     /// Жанр члена читается формой записи: голая сигнатура - конструктор, а
@@ -1711,7 +1690,6 @@ impl ElabError {
             | Self::ResourceWithoutDrop { span, .. }
             | Self::ScopeBound { span, .. }
             | Self::OwnedField { span, .. }
-            | Self::OwnedRecordField { span, .. }
             | Self::DestructorWithoutBody { span, .. }
             | Self::SharedDestructor { span, .. }
             | Self::ResourceMember { span, .. }

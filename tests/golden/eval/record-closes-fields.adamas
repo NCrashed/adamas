@@ -1,0 +1,121 @@
+-- Запись с ресурсным полем - ресурс, и забытая закрывает поля сама (§3.3,
+-- §10 вопрос 231).
+--
+-- Закрывателем записи служит синтезированный разбор: поля связываются при
+-- `1`, ресурсные закрываются своими деструкторами. Порядок - LIFO, как у
+-- связываний: поле, связанное позже, закрывается раньше. Деструкторы
+-- отмечаются - `File` девяткой, `Sock` восьмёркой, - и порядок отметок
+-- говорит, кто закрыт и когда.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {Log} Bool
+  closeFile h =
+    note 9
+    True
+
+resource Sock where
+  Bind : Sock
+  closeSock : (1 s : Sock) -> {Log} Bool
+  closeSock s =
+    note 8
+    True
+
+type Pair = { f : File, s : Sock }
+
+marked : Nat -> {Log} Bool
+marked n =
+  note n
+  True
+
+-- Параметр-запись, о котором тело забыло: `[1, 8, 9]`.
+forgot : Pair -> {Log} Bool
+forgot p =
+  note 1
+  True
+
+-- Связывание с написанным типом: `[2, 8, 9]`.
+annotated : {Log} Bool
+annotated =
+  let _p : Pair = { f = Open, s = Bind }
+  note 2
+  True
+
+-- Без аннотации тип синтезируется, и запись узнаётся по нему: `[3, 8, 9]`.
+synthesized : {Log} Bool
+synthesized =
+  let _p = { f = Open, s = Bind }
+  note 3
+  True
+
+-- Разобранное поле, которого тело не называет, закрывается после тела:
+-- `[4, 9, 8]` - `h` закрыт руками, `s` следом.
+destructured : {Log} Bool
+destructured =
+  let (h, s) = (Open, Bind)
+  note 4
+  closeFile h
+
+-- `_` не называется никогда и закрывается всегда: `[5, 8, 9]`.
+wildcard : {Log} Bool
+wildcard =
+  let (_, s) = (Open, Bind)
+  note 5
+  closeSock s
+
+-- Разбор `case` с одной веткой-кортежем - то же: `[6, 8, 9]`.
+cased : Pair -> {Log} Bool
+cased p = case p of
+  (_h, _s) -> marked 6
+
+-- Параметр лямбды: `[7, 8, 9]`.
+apply : (Pair -> {Log} Bool) -> {Log} Bool
+apply k =
+  note 7
+  k { f = Open, s = Bind }
+
+lambda : {Log} Bool
+lambda = apply (\_p -> True)
+
+-- Запись в записи: внешнее поле `g` связано позже и закрывается первым, затем
+-- вложенная пара - `[9, 8, 9]`.
+type Nest = { inner : Pair, g : File }
+
+nested : Nest -> {Log} Bool
+nested n = True
+
+-- Каждая форма отмечается своей цифрой, затем закрытия:
+-- `[1, 8, 9, 2, 8, 9, 3, 8, 9, 4, 9, 8, 5, 8, 9, 6, 8, 9, 7, 8, 9, 9, 8, 9]`.
+all : {Log} Bool
+all =
+  let _a : Bool = forgot { f = Open, s = Bind }
+  let _b : Bool = annotated
+  let _c : Bool = synthesized
+  let _d : Bool = destructured
+  let _e : Bool = wildcard
+  let _g : Bool = cased { f = Open, s = Bind }
+  let _h : Bool = lambda
+  nested { inner = { f = Open, s = Bind }, g = Open }
+
+main : List Nat
+main = handle all with
+  return _v -> Nil
+  note n -> Cons n (resume MkUnit)

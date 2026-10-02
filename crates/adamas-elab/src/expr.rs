@@ -1172,6 +1172,10 @@ pub(crate) struct Elaborator<'a> {
     /// Места альтернатив разборов-выражений и веток `handle` по спану формы:
     /// маршрут отказа доходит по ним до написанного (§10 вопрос 217). Забирает их тот, кто собирает дерево клауз, - [`Self::cases`].
     cases: Vec<(Span, Vec<ClauseSite>)>,
+    /// Закрыватели записей с ресурсным полем (§3.3, §10 вопрос 231): у записи
+    /// деструктора-определения нет, и закрытие её строится на месте - разбором
+    /// с закрытием полей. Синтетическое имя ведёт сюда, к типу записи.
+    closers: Vec<(Symbol, Rc<Value>)>,
 }
 
 /// Литерал, стоявший в позиции нерешённой дырки, - досчитывается после
@@ -1429,6 +1433,7 @@ impl<'a> Elaborator<'a> {
             fielding: None,
             literals: None,
             cases: Vec::new(),
+            closers: Vec::new(),
         }
     }
 
@@ -1455,7 +1460,7 @@ impl<'a> Elaborator<'a> {
 
     /// Кратности написанного типа - те, что достанутся лямбдам тела.
     pub(crate) fn declaring(mut self, ty: &Term) -> Self {
-        self.declared = pi_arguments(ty, self.owned);
+        self.declared = self.arguments(ty);
         self.declared_ty = Some(eval(&Env::default(), ty));
         self
     }
@@ -2041,11 +2046,6 @@ impl<'a> Elaborator<'a> {
             }
             _ => self.owned.how(&self.owned_head(ty)?),
         }
-    }
-
-    /// Деструктор типа, стоящего головой написанного.
-    fn owned_destructor(&self, ty: &Expr) -> Option<Symbol> {
-        self.owned.destructor_of(&self.owned_head(ty)?).cloned()
     }
 
     /// Член объявляемой группы под своим именем или под квалифицированным.
@@ -2925,6 +2925,7 @@ impl<'a> Elaborator<'a> {
                     value,
                     &ty,
                     consumed,
+                    &|it: &Self, name: &str| it.mentions(name, &alt.body),
                     &mut |it: &mut Self| {
                         it.awaited = awaited.cloned();
                         let term = it.expr(&alt.body, Mult::Many)?;
@@ -3073,19 +3074,23 @@ impl<'a> Elaborator<'a> {
     /// Это переоткрытый §10 вопрос 71: «клауза и есть ветвь» верно ровно до тех
     /// пор, пока разбор не написан выражением - он заводит ветвь **внутри**
     /// того, что видит правило.
-    fn forgotten(&self, alts: &[ast::Alt], patterns: &[CorePattern]) -> Vec<Vec<(Symbol, Symbol)>> {
+    fn forgotten(
+        &mut self,
+        alts: &[ast::Alt],
+        patterns: &[CorePattern],
+    ) -> Vec<Vec<(Symbol, Symbol)>> {
         let mut found = vec![Vec::new(); alts.len()];
-        let owned: Vec<(Symbol, Symbol)> = self
+        // Стёртое не закрывается: `drop` расходует ресурс, а расходовать
+        // стёртое связывание нечем (§10 вопрос 71).
+        let candidates: Vec<(Symbol, Rc<Value>)> = self
             .scope
             .iter()
-            // Стёртое не закрывается: `drop` расходует ресурс, а расходовать
-            // стёртое связывание нечем (§10 вопрос 71).
             .filter(|bound| bound.visible && bound.owned && bound.mult != Mult::Zero)
-            .filter_map(|bound| {
-                head_name(&bound.ty)
-                    .and_then(|name| self.owned.destructor_of(name))
-                    .map(|drop| (Rc::clone(&bound.name), Rc::clone(drop)))
-            })
+            .map(|bound| (Rc::clone(&bound.name), Rc::clone(&bound.ty)))
+            .collect();
+        let owned: Vec<(Symbol, Symbol)> = candidates
+            .into_iter()
+            .filter_map(|(name, ty)| self.closer_of(&ty).map(|drop| (name, drop)))
             .collect();
         for (name, drop) in owned {
             let mentioned: Vec<bool> = alts
@@ -4029,25 +4034,14 @@ impl<'a> Elaborator<'a> {
     ///
     /// Владеемое поле делает запись владеемой **структурно** (§3.3, §10 вопрос
     /// 231): запись с уникальным полем уникальна, её связывание линейно, и
-    /// поле достаётся разбором однажды. Ресурсное поле пока отвергается: такой
-    /// записи нужен деструктор, закрывающий поля, а его синтеза ещё нет -
-    /// без него `type Box = { h : File }` не закрывался бы никогда (вопрос 77).
+    /// поле достаётся разбором однажды. Запись с ресурсным полем - ресурс: её
+    /// закрывает синтезированный разбор, закрывающий поля (см. `closer_of`).
     fn record_fields(&mut self, fields: &[ast::RecordField]) -> Result<Vec<CoreField>, ElabError> {
         let Some((field, rest)) = fields.split_first() else {
             return Ok(Vec::new());
         };
         Self::binds(&field.name)?;
         let ty = self.typing(|it| it.expr(&field.ty, Mult::Many))?;
-        if let Some(how @ Ownership::Resource) = self.owned_of(&field.ty) {
-            return Err(ElabError::OwnedRecordField {
-                field: Rc::clone(&field.name.text),
-                ty: crate::own::head(&field.ty)
-                    .cloned()
-                    .unwrap_or_else(|| Rc::from("_")),
-                owned: how,
-                span: field.ty.span,
-            });
-        }
         let bound = self.typed(&ty);
         let tail = self.binding(Bound::visible(&field.name.text, Mult::One, bound), |it| {
             it.record_fields(rest)
@@ -4861,9 +4855,7 @@ impl<'a> Elaborator<'a> {
             } else {
                 argument
             };
-            // Написанный тип аргумента достаётся литералу: `mulInt64 x 2`
-            // берёт `Int64` отсюда, а не из умолчания.
-            self.awaited.clone_from(&expected);
+            self.awaiting(argument, expected.as_ref());
             let argument =
                 self.aside(|it| it.placed(inside, |it| it.expr(argument, Mult::Many)))?;
             let argument = self.executed(argument, expected.as_ref());
@@ -5247,7 +5239,7 @@ impl<'a> Elaborator<'a> {
             .then(|| self.suspension(effect))
             .flatten();
         if let Some(ty) = &awaited {
-            self.expected = pi_arguments(ty, self.owned);
+            self.expected = self.arguments(ty);
             let value = self.typed(ty);
             self.result = Some(self.peeled(&value));
         }
@@ -5828,7 +5820,7 @@ impl<'a> Elaborator<'a> {
             });
         };
         let domain = self.unfolded_pi(&Rc::clone(domain), self.ctx.size());
-        let bound = pi_arguments(&domain, self.owned);
+        let bound = self.arguments(&domain);
         let mut params: Vec<ast::LamParam> = branch
             .params
             .iter()
@@ -6547,9 +6539,14 @@ impl<'a> Elaborator<'a> {
             (Some(_), _) => Mult::One,
             (None, _) => Self::multiplicity(binding.mult, Mult::Many),
         };
-        self.split_record(pattern, value, &found, consumed, &mut |it: &mut Self| {
-            it.bindings(tail, rest, position)
-        })
+        self.split_record(
+            pattern,
+            value,
+            &found,
+            consumed,
+            &|it: &Self, name: &str| it.mentioned_later(name, tail, rest),
+            &mut |it: &mut Self| it.bindings(tail, rest, position),
+        )
     }
 
     /// Узел разбора записи `scrutinee` типа `ty` по кортежу `pattern`; тело
@@ -6560,6 +6557,7 @@ impl<'a> Elaborator<'a> {
         scrutinee: Term,
         ty: &Rc<Value>,
         consumed: Mult,
+        mentioned: &dyn Fn(&Self, &str) -> bool,
         then: &mut dyn FnMut(&mut Self) -> Result<Term, ElabError>,
     ) -> Result<Term, ElabError> {
         let PatternKind::Tuple(items) = &pattern.kind else {
@@ -6642,7 +6640,11 @@ impl<'a> Elaborator<'a> {
             &telescope,
             consumed,
             Vec::new(),
-            &mut Vec::new(),
+            &mut Splitting {
+                nested: Vec::new(),
+                closes: Vec::new(),
+                mentioned,
+            },
             then,
         )?;
         Ok(Term::Split(Rc::new(adamas_core::term::Split {
@@ -6658,30 +6660,45 @@ impl<'a> Elaborator<'a> {
     ///
     /// Вложенный кортеж связывается полем и разбирается **после** всех полей
     /// внешней записи: тело внешнего узла остаётся функцией ровно от его полей.
+    ///
+    /// Владеемое поле связывается владеющим, и ресурсное, которого тело не
+    /// называет, закрывается само - то же правило, что у связывания с именем
+    /// (§3.3). `_` не называется никогда и закрывается всегда.
     fn split_fields<'p>(
         &mut self,
         items: &'p [ast::Pattern],
         telescope: &adamas_core::value::Telescope,
         consumed: Mult,
         mut earlier: Vec<Rc<Value>>,
-        nested: &mut Vec<(u32, &'p ast::Pattern, Rc<Value>, Mult)>,
+        state: &mut Splitting<'p, '_, 'a>,
         then: &mut dyn FnMut(&mut Self) -> Result<Term, ElabError>,
     ) -> Result<Term, ElabError> {
         let at = earlier.len();
         let Some(item) = items.get(at) else {
-            let pending = std::mem::take(nested);
-            return self.nest(&pending, then);
+            let pending = std::mem::take(&mut state.nested);
+            let size = self.ctx.size();
+            let mut drops: Vec<(u32, Symbol)> = std::mem::take(&mut state.closes)
+                .into_iter()
+                .map(|(level, drop)| (size - 1 - level, drop))
+                .collect();
+            lifo(&mut drops);
+            let mentioned = state.mentioned;
+            return self.closing_all(&drops, |it| it.nest(&pending, mentioned, then));
         };
         let field = &telescope.fields()[at];
         let mult = field.mult * consumed;
         let ty = telescope.instantiated(at, &earlier, &[], &[], &[]);
         let level = self.ctx.size();
-        let name: Symbol = match &item.kind {
-            PatternKind::Name(name) if !is_reference(&name.text) => Rc::clone(&name.text),
-            PatternKind::Wildcard => Rc::from("_"),
+        let owned = mult != Mult::Zero && self.owned_value(&ty).is_some();
+        let (name, closes): (Symbol, bool) = match &item.kind {
+            PatternKind::Name(name) if !is_reference(&name.text) => (
+                Rc::clone(&name.text),
+                owned && !(state.mentioned)(self, &name.text),
+            ),
+            PatternKind::Wildcard => (Rc::from("_"), owned),
             PatternKind::Tuple(inner) if !inner.is_empty() => {
-                nested.push((level, item, Rc::clone(&ty), mult));
-                Rc::from("(…)")
+                state.nested.push((level, item, Rc::clone(&ty), mult));
+                (Rc::from("(…)"), false)
             }
             _ => {
                 return Err(ElabError::Missing {
@@ -6690,10 +6707,15 @@ impl<'a> Elaborator<'a> {
                 });
             }
         };
+        if closes {
+            if let Some(drop) = self.closer_of(&ty) {
+                state.closes.push((level, drop));
+            }
+        }
         earlier.push(Value::var(adamas_core::value::Lvl(level)));
-        let bound = Bound::visible(&name, mult, ty);
+        let bound = Bound::owning_scoping(&name, mult, ty, owned, false);
         let body = self.binding(bound, |inner| {
-            inner.split_fields(items, telescope, consumed, earlier, nested, then)
+            inner.split_fields(items, telescope, consumed, earlier, state, then)
         })?;
         Ok(Term::Lam(mult, CoreName::from(&*name), Rc::new(body)))
     }
@@ -6702,6 +6724,7 @@ impl<'a> Elaborator<'a> {
     fn nest(
         &mut self,
         pending: &[(u32, &ast::Pattern, Rc<Value>, Mult)],
+        mentioned: &dyn Fn(&Self, &str) -> bool,
         then: &mut dyn FnMut(&mut Self) -> Result<Term, ElabError>,
     ) -> Result<Term, ElabError> {
         let Some(((level, pattern, ty, mult), rest)) = pending.split_first() else {
@@ -6713,7 +6736,8 @@ impl<'a> Elaborator<'a> {
             Term::var(index),
             ty,
             *mult,
-            &mut |it: &mut Self| it.nest(rest, then),
+            mentioned,
+            &mut |it: &mut Self| it.nest(rest, mentioned, then),
         )
     }
 
@@ -6768,7 +6792,6 @@ impl<'a> Elaborator<'a> {
             });
         };
         let quoted = quote(self.ctx.size(), &found);
-        let head = head_name(&found).cloned();
         let owns = self.owned_value(&found);
         let mult = match owns {
             None => Self::multiplicity(binding.mult, Mult::Many),
@@ -6787,13 +6810,8 @@ impl<'a> Elaborator<'a> {
         };
         // Ресурс, имя которого дальше не встречается, закрывается сам (§3.3);
         // стёртое связывание - нет, расходовать там нечего.
-        let drop = (mult != Mult::Zero && !self.mentioned_later(&binding.name.text, tail, rest))
-            .then(|| {
-                head.as_deref()
-                    .and_then(|it| self.owned.destructor_of(it))
-                    .cloned()
-            })
-            .flatten();
+        let closes = mult != Mult::Zero && !self.mentioned_later(&binding.name.text, tail, rest);
+        let drop = if closes { self.closer_of(&found) } else { None };
         if let Some(how) = owns {
             let at = block_end(binding, tail, rest);
             self.lived(
@@ -6856,12 +6874,19 @@ impl<'a> Elaborator<'a> {
         let mult = self.binder_mult(binding.mult, ty, Mult::Many, binding.span)?;
         // Ресурс, имя которого дальше не встречается, закрывается сам (§3.3);
         // стёртое связывание - нет, расходовать там нечего.
-        let closes = mult != Mult::Zero
-            && !self.mentioned_later(&binding.name.text, tail, rest)
-            && self.owned_destructor(ty).is_some();
-        let drop = closes.then(|| self.owned_destructor(ty)).flatten();
-        let owns = self.owned_of(ty).is_some();
-        if let Some(how) = self.owned_of(ty) {
+        let how = self.owned_of(ty);
+        let owns = how.is_some();
+        let ty = self.typing(|inner| inner.expr(ty, Mult::Many))?;
+        // Закрыватель берётся у значения аннотации: у записи с ресурсным полем
+        // головы нет, и написанное его не называет (§10 вопрос 231).
+        let annotated = self.typed(&ty);
+        let closes = mult != Mult::Zero && !self.mentioned_later(&binding.name.text, tail, rest);
+        let drop = if closes {
+            self.closer_of(&annotated)
+        } else {
+            None
+        };
+        if let Some(how) = how {
             let at = block_end(binding, tail, rest);
             self.lived(
                 &binding.name.text,
@@ -6870,10 +6895,9 @@ impl<'a> Elaborator<'a> {
                 drop.clone().map(|drop| Released { drop, at }),
             );
         }
-        let ty = self.typing(|inner| inner.expr(ty, Mult::Many))?;
         // Аннотация `let` - тот же написанный тип, и лямбда значения берёт
         // кратности у него.
-        self.expected = pi_arguments(&ty, self.owned);
+        self.expected = self.arguments(&ty);
         // Аннотация кладётся значению **неснятой**: сборка лямбды шагает по
         // ней по связыванию за параметр, и правилу исполнения в теле достаётся
         // остаток. Снятая до конца, она кончалась раньше связываний, и
@@ -7035,6 +7059,151 @@ impl<'a> Elaborator<'a> {
         self.synthesized(term)
     }
 
+    /// Ожидания аргумента применения по домену вызываемого.
+    ///
+    /// Написанный тип аргумента достаётся литералу: `mulInt64 x 2` берёт `Int64`
+    /// отсюда, а не из умолчания. Лямбда-аргумент берёт у домена кратности, как
+    /// лямбда под написанным типом: `apply (\h -> …)` при `(File -> Bool)` иначе
+    /// связывала бы `h` при `ω` и отвергалась проверкой.
+    fn awaiting(&mut self, argument: &Expr, expected: Option<&Rc<Value>>) {
+        self.awaited = expected.cloned();
+        let (ExprKind::Lam { .. }, Some(domain)) = (&argument.kind, expected) else {
+            return;
+        };
+        let domain = whnf_solved(self.signature, self.metas, domain);
+        if matches!(&*domain, Value::Pi(..)) {
+            let ty = quote(self.ctx.size(), &domain);
+            self.expected = self.arguments(&ty);
+        }
+    }
+
+    /// Связывания по спайну `Pi` вместе с закрывателями записей.
+    ///
+    /// `pi_arguments` узнаёт владение по имени головы, а у записи с ресурсным
+    /// полем головы нет (§10 вопрос 231): её домен вычисляется под свежими
+    /// переменными предыдущих связываний и спрашивается [`Self::closer_of`].
+    fn arguments(&mut self, ty: &Term) -> Vec<Argument> {
+        let mut found = pi_arguments(ty, self.owned);
+        let base = self.ctx.size();
+        let mut env = self.ctx.env().clone();
+        for (position, argument) in found.iter_mut().enumerate() {
+            if argument.drop.is_none() {
+                let domain = eval(&env, &argument.domain);
+                if self.owned_value(&domain).is_some() {
+                    argument.owned = true;
+                    argument.drop = self.closer_of(&domain);
+                }
+            }
+            let level = base + u32::try_from(position).unwrap_or(u32::MAX);
+            env = env.extend(Value::var(adamas_core::value::Lvl(level)));
+        }
+        found
+    }
+
+    /// Чем закрывается значение типа `ty` (§3.3): деструктором его головы либо,
+    /// у записи с ресурсным полем, разбором с закрытием полей - тогда имя
+    /// синтетическое и ведёт в [`Self::closers`] (§10 вопрос 231).
+    fn closer_of(&mut self, ty: &Rc<Value>) -> Option<Symbol> {
+        if let Some(drop) = head_name(ty).and_then(|head| self.owned.destructor_of(head)) {
+            return Some(Rc::clone(drop));
+        }
+        let reduced = whnf_solved(self.signature, self.metas, ty);
+        if let Some(drop) = head_name(&reduced).and_then(|head| self.owned.destructor_of(head)) {
+            return Some(Rc::clone(drop));
+        }
+        if !matches!(&*reduced, Value::Record(_))
+            || self.owned_value(&reduced) != Some(Ownership::Resource)
+        {
+            return None;
+        }
+        let name: Symbol = Rc::from(format!("закрытие записи #{}", self.closers.len()));
+        self.closers.push((Rc::clone(&name), reduced));
+        Some(name)
+    }
+
+    /// Закрытие записи с ресурсным полем (§10 вопрос 231): разбор при `1`, и
+    /// ресурсные поля закрываются своими закрывателями - рекурсия по полям,
+    /// обещанная §3.3. Порядок - LIFO, как у связываний: поле, связанное разбором
+    /// позже, закрывается раньше, и забытая запись закрывается так же, как
+    /// разобранная и забытая по полям. Прочие поля отбрасываются: кратность `1`
+    /// употребления не требует. Ответ - ответ закрытия первого поля.
+    fn record_destructor(&mut self, ty: &Rc<Value>, index: u32) -> (Term, Term) {
+        let Value::Record(telescope) = &**ty else {
+            unreachable!("закрыватель записи заведён только для записи")
+        };
+        let telescope = telescope.clone();
+        let fields: Rc<[CoreName]> = telescope
+            .fields()
+            .iter()
+            .map(|field| Rc::clone(&field.name))
+            .collect();
+        let level = self.metas.fresh_level();
+        let answer = self.fresh_meta(&Rc::new(Value::Universe(level)));
+        let motive = Term::Lam(
+            Mult::Zero,
+            CoreName::from("_"),
+            Rc::new(adamas_core::pattern::shift_free(&answer, 1)),
+        );
+        let body = self.record_closing(&telescope, Vec::new(), &mut Vec::new());
+        let split = Term::Split(Rc::new(adamas_core::term::Split {
+            consumed: Mult::One,
+            scrutinee: Rc::new(Term::var(index)),
+            motive: Rc::new(motive),
+            fields,
+            body: Rc::new(body),
+        }));
+        (split, answer)
+    }
+
+    /// Тело закрытия записи: лямбды над полями, внутри - цепочка закрытий
+    /// ресурсных.
+    fn record_closing(
+        &mut self,
+        telescope: &adamas_core::value::Telescope,
+        mut earlier: Vec<Rc<Value>>,
+        closed: &mut Vec<(u32, Symbol)>,
+    ) -> Term {
+        let at = earlier.len();
+        let Some(field) = telescope.fields().get(at).cloned() else {
+            let size = self.ctx.size();
+            let mut drops: Vec<(u32, Symbol)> = closed
+                .iter()
+                .map(|(level, drop)| (size - 1 - level, Rc::clone(drop)))
+                .collect();
+            lifo(&mut drops);
+            return self.closing_chain(&drops);
+        };
+        let ty = telescope.instantiated(at, &earlier, &[], &[], &[]);
+        let level = self.ctx.size();
+        if let Some(drop) = self.closer_of(&ty) {
+            closed.push((level, drop));
+        }
+        earlier.push(Value::var(adamas_core::value::Lvl(level)));
+        let name: Symbol = Rc::from(&*field.name);
+        let bound = Bound::visible(&name, field.mult, ty);
+        let inner = self.binding(bound, |it| it.record_closing(telescope, earlier, closed));
+        Term::Lam(field.mult, Rc::clone(&field.name), Rc::new(inner))
+    }
+
+    /// Закрытия в порядке списка: `let _ = drop₁ x₁ in … dropₙ xₙ`.
+    fn closing_chain(&mut self, drops: &[(u32, Symbol)]) -> Term {
+        let Some(((index, drop), rest)) = drops.split_first() else {
+            unreachable!("у записи-ресурса есть ресурсное поле")
+        };
+        let (call, result) = self.destructor(drop, *index);
+        if rest.is_empty() {
+            return call;
+        }
+        let tail = self.closing_chain(rest);
+        Term::Let(
+            Mult::One,
+            CoreName::from("_"),
+            Rc::new(result),
+            Rc::new(call),
+            Rc::new(adamas_core::pattern::shift_free(&tail, 1)),
+        )
+    }
+
     /// Вызов деструктора и тип его результата.
     ///
     /// Аргументы уровня **и row** свежие на каждую вставку: два `drop` в одном
@@ -7048,6 +7217,14 @@ impl<'a> Elaborator<'a> {
     /// поднятая до `{Trace | e0}`, требовала от места вставки буквальную `e0`,
     /// которой там не связано ничего.
     fn destructor(&mut self, drop: &Symbol, index: u32) -> (Term, Term) {
+        let record = self
+            .closers
+            .iter()
+            .find(|(name, _)| name == drop)
+            .map(|(_, ty)| Rc::clone(ty));
+        if let Some(ty) = record {
+            return self.record_destructor(&ty, index);
+        }
         let Some(definition) = self.signature.lookup(drop) else {
             unreachable!("деструктор `{drop}` объявлен вместе с типом")
         };
@@ -7529,19 +7706,20 @@ impl<'a> Elaborator<'a> {
                     }
                     _ => true,
                 };
-                let head = ty.as_deref().and_then(head_name);
-                let drop = head
-                    .and_then(|name| self.owned.destructor_of(name))
-                    .cloned()
-                    .filter(|_| mult != Mult::Zero && !mentioned);
-                let owned = head.is_some_and(|name| self.owned.owns(name));
+                // Владение и закрыватель - по значению типа: у записи с
+                // владеемым полем головы нет (§10 вопрос 231).
+                let how = ty.as_ref().and_then(|ty| self.owned_value(ty));
+                let drop = match &ty {
+                    Some(ty) if mult != Mult::Zero && !mentioned => self.closer_of(ty),
+                    _ => None,
+                };
+                let owned = how.is_some();
                 // Место вставки - конец тела: область видимости параметра есть
                 // тело целиком (§3.3). Имя берётся у **написанного** паттерна:
                 // скомпилированный несёт своё, и показывать его автору нечего.
-                if let (Some(how), Some(PatternKind::Name(said))) = (
-                    head.and_then(|name| self.owned.how(name)),
-                    written.map(|it| &it.kind),
-                ) {
+                if let (Some(how), Some(PatternKind::Name(said))) =
+                    (how, written.map(|it| &it.kind))
+                {
                     self.lived(
                         &said.text,
                         how,
@@ -7828,6 +8006,15 @@ impl<'a> Elaborator<'a> {
         let drop = drop.clone();
         self.closing(Some(&drop), *index, |it| it.closing_all(rest, body))
     }
+}
+
+/// Ход разбора записи по кортежу: вложенные кортежи, ждущие своих полей,
+/// закрываемые поля и вопрос, называет ли тело имя.
+struct Splitting<'p, 'm, 'a> {
+    nested: Vec<(u32, &'p ast::Pattern, Rc<Value>, Mult)>,
+    /// Уровень поля и его закрыватель.
+    closes: Vec<(u32, Symbol)>,
+    mentioned: &'m dyn Fn(&Elaborator<'a>, &str) -> bool,
 }
 
 /// Переменная паттерна: имя, владение и деструктор, если её надо закрыть.

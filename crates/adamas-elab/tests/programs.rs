@@ -1603,27 +1603,6 @@ masked h = mask (logged h)
 }
 
 #[test]
-fn a_record_does_not_hold_a_resource() {
-    // Запись владеет структурно (§10 вопрос 231): уникальное поле она держит, а
-    // ресурсное - пока нет. Запись-ресурс обязана закрывать поле своим
-    // деструктором, синтеза его ещё нет, и забытая запись не закрыла бы
-    // дескриптор ни разу (вопрос 77).
-    let error = refused(&format!(
-        "{BASE}
-closeFile : (1 b : Bool) -> Bool
-closeFile b = b
-
-{RESOURCE}
-type Box = {{ h : File }}
-"
-    ));
-    assert!(
-        matches!(error, ElabError::OwnedRecordField { .. }),
-        "получено {error:?}"
-    );
-}
-
-#[test]
 fn a_resource_declares_a_family_and_its_destructor() {
     let text = format!("{BASE}\ncloseFile : (1 b : Bool) -> Bool\ncloseFile b = b\n\n{RESOURCE}");
     let signature = program(&text);

@@ -1,0 +1,64 @@
+-- Запись в поле-параметре семейства (§4.11, §10 вопрос 235).
+--
+-- Поле `Cons : a -> …` при `a = (Nat, Nat)` держит запись, а слот его
+-- указателен: представление поля - факт таблицы конструктора, и формы записи
+-- там нет. Машина отвечала верно, понижение отказывало «форма записи
+-- потеряна». Форму называет тип связывания: тип параметра функции, поле
+-- разбора с подставленными параметрами семейства, поле записи. Подставляется
+-- только замкнутый тип - у записи с переменной типа форма объекта зависит от
+-- подстановки.
+
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Maybe (a : Type) where
+  Nothing : Maybe a
+  Just : a -> Maybe a
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+-- Тип параметра даёт поле разбора `Cons`.
+firsts : List (Nat, Nat) -> List Nat
+firsts Nil = Nil
+firsts (Cons (a, _) rest) = Cons a (firsts rest)
+
+-- Плотная пара в указательном слоте лежит объектом своей боксированной формы.
+sums : List (Int32, Int32) -> Int32
+sums Nil = 0
+sums (Cons p rest) = p._1 * 10 + p._2 + sums rest
+
+-- Запись в записи в поле семейства: тип поля записи - из её телескопа.
+inner : Maybe (Nat, (Nat, Nat)) -> Nat
+inner (Just (_, (_, c))) = c
+inner Nothing = Zero
+
+-- Тип даёт и аннотация `let`.
+viaLet : Nat
+viaLet =
+  let ps : List (Nat, Nat) = Cons (Succ Zero, Zero) Nil
+  case ps of
+    Cons (a, _) _ -> a
+    Nil -> Zero
+
+append : List Nat -> List Nat -> List Nat
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+count : Int32 -> Nat
+count n = if n == 0 then Zero else Succ (count (n - 1))
+
+pair : Int32 -> Int32 -> (Int32, Int32)
+pair a b = (a, b)
+
+-- Литерал внутри кортежа-аргумента `Cons` типа не получает (§10 вопрос 236),
+-- поэтому пары строит функция.
+pairs : List (Int32, Int32)
+pairs = Cons (pair 1 2) (Cons (pair 3 4) Nil)
+
+-- `[2, 46, 0, 1, 1]`.
+main : List Nat
+main = Cons (inner (Just (Zero, (Zero, Succ (Succ Zero))))) (Cons (count (sums pairs)) (append (firsts (Cons (Zero, Succ Zero) (Cons (Succ Zero, Zero) Nil))) (Cons viaLet Nil)))

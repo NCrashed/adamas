@@ -62,8 +62,9 @@ main : List Point
 main = Cons { x = Off, y = On } (Cons { x = On, y = Off } Nil)
 ";
 
-/// Форма потеряна: поле полиморфного конструктора объявлено указательным.
-const SHAPELESS: &str = "\
+/// Поле полиморфного конструктора объявлено указательным, а форму записи в нём
+/// называет тип параметра `taken` (§10 вопрос 235).
+const BOXED: &str = "\
 data Bit where
   Off : Bit
   On : Bit
@@ -74,6 +75,23 @@ data Box (a : Type) where
 type Point = { x : Bit }
 
 taken : Box Point -> Bit
+taken (MkBox p) = p.x
+
+main : Bit
+main = taken (MkBox { x = On })
+";
+
+/// Форма потеряна: у записи с переменной типа форма объекта зависит от
+/// подстановки, и тип её не называет.
+const SHAPELESS: &str = "\
+data Bit where
+  Off : Bit
+  On : Bit
+
+data Box (a : Type) where
+  MkBox : a -> Box a
+
+taken : {a : Type} -> Box { x : a } -> a
 taken (MkBox p) = p.x
 
 main : Bit
@@ -173,6 +191,14 @@ fn a_record_under_a_constructor_is_parenthesised() {
     );
     harness::agreed("record-nested", NESTED).unwrap_or_else(|error| {
         panic!("вложенная запись: {error}");
+    });
+}
+
+/// Запись в поле-параметре семейства берёт форму у типа связывания.
+#[test]
+fn a_record_in_a_family_field_takes_its_shape_from_the_type() {
+    harness::agreed("record-boxed", BOXED).unwrap_or_else(|error| {
+        panic!("запись в поле семейства: {error}");
     });
 }
 

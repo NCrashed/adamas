@@ -128,7 +128,7 @@
 //! дескриптору места нет (§4.11). δ-разворота это по-прежнему не включает:
 //! считает `eval` ядра, а имя он не разворачивает.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
 
 use adamas_core::eval::{eval, quote};
@@ -775,6 +775,10 @@ struct Scope {
     env: Vec<Slot>,
     /// Дескрипторы укладки, пришедшие имплиситами этой функции (§4.11).
     dicts: Dicts,
+    /// Типы связываний, где они известны, - по позиции в среде; уровни в них
+    /// тоже позиции. Нужны записи в поле-параметре семейства: факт её слота
+    /// - указатель, а форму называет тип (§10 вопрос 235).
+    types: BTreeMap<usize, Rc<Value>>,
 }
 
 impl Scope {
@@ -783,6 +787,36 @@ impl Scope {
         let id = LocalId(self.locals);
         self.locals += 1;
         id
+    }
+
+    /// Связывание без известного типа.
+    fn push(&mut self, slot: Slot) {
+        self.push_typed(slot, None);
+    }
+
+    /// Связывание с типом, если он известен.
+    fn push_typed(&mut self, slot: Slot, ty: Option<Rc<Value>>) {
+        let position = self.env.len();
+        match ty {
+            Some(ty) => self.types.insert(position, ty),
+            None => self.types.remove(&position),
+        };
+        self.env.push(slot);
+    }
+
+    /// Тип связывания по индексу де Брёйна, если он известен.
+    fn type_of(&self, Index(index): Index) -> Option<&Rc<Value>> {
+        let from_top = usize::try_from(index).ok()?;
+        let position = self.env.len().checked_sub(from_top + 1)?;
+        self.types.get(&position)
+    }
+
+    /// Окружение из переменных среды - для вычисления типов, записанных в
+    /// ней.
+    fn values(&self) -> Env {
+        (0..self.env.len()).fold(Env::default(), |env, position| {
+            env.extend(Value::var(Lvl(u32::try_from(position).unwrap_or(u32::MAX))))
+        })
     }
 
     /// Связывание по индексу де Брёйна.
@@ -1052,9 +1086,22 @@ impl<'a> Lowerer<'a> {
             locals: u32::try_from(parameters.len()).unwrap_or(u32::MAX),
             env: Vec::with_capacity(taken),
             dicts,
+            types: BTreeMap::new(),
         };
+        // Тип параметра - стрелка написанного типа того же номера, как и его
+        // представление в `peeled`.
+        let mut current = eval(&Env::default(), self.declared(name)?);
         for parameter in &parameters[..taken] {
-            scope.env.push(Slot::Bound(parameter.local, parameter.fact));
+            let ty = match &*current {
+                Value::Pi(_, _, domain, _, codomain) => {
+                    let domain = Rc::clone(domain);
+                    let level = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
+                    current = codomain.apply(Value::var(Lvl(level)));
+                    Some(domain)
+                }
+                _ => None,
+            };
+            scope.push_typed(Slot::Bound(parameter.local, parameter.fact), ty);
         }
         let declared = self.functions[id.0].result;
         self.detached = self.functions[id.0].form == Form::Detached;
@@ -1292,8 +1339,17 @@ impl<'a> Lowerer<'a> {
     /// и в объявленных позициях сверяется [`Lowerer::shaped`].
     fn expr(&mut self, scope: &mut Scope, term: &Term) -> Result<(Expr, Repr), LowerError> {
         match term {
-            Term::Var(index) => match scope.slot(*index)? {
-                Slot::Bound(local, fact) if fact.present => Ok((Expr::Local(*local), fact.repr)),
+            Term::Var(index) => match *scope.slot(*index)? {
+                // Указатель, чей тип - замкнутая запись, держит объект её
+                // боксированной формы: туда запись кладёт `moved` (§10 вопрос
+                // 235). Слот поля-параметра семейства формы не знает, тип знает.
+                Slot::Bound(local, fact) if fact.present => {
+                    let repr = match fact.repr {
+                        Repr::Boxed => self.typed_form(scope, *index).unwrap_or(Repr::Boxed),
+                        other => other,
+                    };
+                    Ok((Expr::Local(local), repr))
+                }
                 Slot::Bound(..) => Ok((Expr::Erased, Repr::Boxed)),
                 Slot::Absent => Err(LowerError::Unbound { index: index.0 }),
             },
@@ -1325,7 +1381,8 @@ impl<'a> Lowerer<'a> {
                     // `let 0 x = …` вычисляется наравне с прочими.
                     fact: Fact::present(*mult).shaped(declared),
                 };
-                scope.env.push(Slot::Bound(binding.local, binding.fact));
+                let written = eval(&scope.values(), ty);
+                scope.push_typed(Slot::Bound(binding.local, binding.fact), Some(written));
                 let body = self.expr(scope, body);
                 scope.env.pop();
                 let (body, repr) = body?;
@@ -3565,7 +3622,7 @@ impl<'a> Lowerer<'a> {
     ) -> Result<Expr, LowerError> {
         if let Term::Lam(_, _, body) = computation {
             let body = Rc::clone(body);
-            scope.env.push(Slot::Absent);
+            scope.push(Slot::Absent);
             let lowered = self.shaped(scope, &body, Repr::Boxed, at);
             scope.env.pop();
             return lowered;
@@ -3675,6 +3732,7 @@ impl<'a> Lowerer<'a> {
             env: inner.to_vec(),
             // Дескрипторы наружу не едут - тот же довод, что у замыкания.
             dicts: Dicts::new(),
+            types: BTreeMap::new(),
         };
         let mut bindings = Vec::with_capacity(written);
         let mut current = Rc::new(term.clone());
@@ -3737,7 +3795,7 @@ impl<'a> Lowerer<'a> {
         };
 
         for binding in &bindings {
-            nested.env.push(Slot::Bound(binding.local, binding.fact));
+            nested.push(Slot::Bound(binding.local, binding.fact));
         }
         // Связывание `resume`. У хвостовой и абортивной значения у него нет:
         // первая его сняла, вторая не звала вовсе. У общей оно есть - ручка
@@ -3753,12 +3811,10 @@ impl<'a> Lowerer<'a> {
                 fact: Fact::present(if multi { Mult::Many } else { Mult::One })
                     .shaped(Repr::Resumption),
             };
-            nested
-                .env
-                .push(Slot::Bound(resumption.local, resumption.fact));
+            nested.push(Slot::Bound(resumption.local, resumption.fact));
             parameters.push(resumption);
         } else {
-            nested.env.push(Slot::Absent);
+            nested.push(Slot::Absent);
         }
 
         let function = FuncId(self.functions.len());
@@ -3802,13 +3858,14 @@ impl<'a> Lowerer<'a> {
             locals: u32::try_from(captured.len()).unwrap_or(u32::MAX),
             env: inner.to_vec(),
             dicts: Dicts::new(),
+            types: BTreeMap::new(),
         };
         let binding = Binding {
             name: name.to_string(),
             local: nested.fresh(),
             fact: Fact::present(*mult),
         };
-        nested.env.push(Slot::Bound(binding.local, binding.fact));
+        nested.push(Slot::Bound(binding.local, binding.fact));
         let body = Rc::clone(body);
 
         let function = FuncId(self.functions.len());
@@ -3944,7 +4001,7 @@ impl<'a> Lowerer<'a> {
         let Term::Lam(_, _, inner) = term else {
             return Err(LowerError::Scope);
         };
-        scope.env.push(Slot::Absent);
+        scope.push(Slot::Absent);
         let lowered = self.expr(scope, inner);
         scope.env.pop();
         lowered
@@ -4083,10 +4140,20 @@ impl<'a> Lowerer<'a> {
             local: scope.fresh(),
             fact: Fact::present(split.consumed).shaped(shape),
         };
-        scope.env.push(Slot::Bound(binding.local, binding.fact));
+        // Тип записи, если он известен, даёт типы полей: поле-семейство
+        // разберут дальше, и форма его полей берётся оттуда (§10 вопрос 235).
+        let ty = match &*split.scrutinee {
+            Term::Var(index) => scope.type_of(*index).cloned(),
+            _ => None,
+        };
+        let types = ty
+            .as_ref()
+            .map(|ty| field_types(self.signature, ty, scope.env.len()))
+            .unwrap_or_default();
+        scope.push_typed(Slot::Bound(binding.local, binding.fact), ty);
         // Тело стояло вне связывания записи: свободные индексы сдвигаются.
         let body = adamas_core::pattern::shift_free(&split.body, 1);
-        let inner = self.split_fields(scope, split, &body, 0);
+        let inner = self.split_fields(scope, split, &body, 0, &types);
         scope.env.pop();
         let (inner, repr) = inner?;
         Ok((
@@ -4106,6 +4173,7 @@ impl<'a> Lowerer<'a> {
         split: &adamas_core::term::Split,
         body: &Term,
         at: usize,
+        types: &[Rc<Value>],
     ) -> Result<(Expr, Repr), LowerError> {
         let Some(field) = split.fields.get(at) else {
             return self.expr(scope, body);
@@ -4128,8 +4196,11 @@ impl<'a> Lowerer<'a> {
             local: scope.fresh(),
             fact: Fact::present(*mult).shaped(shape),
         };
-        scope.env.push(Slot::Bound(binding.local, binding.fact));
-        let rest = self.split_fields(scope, split, inner, at + 1);
+        scope.push_typed(
+            Slot::Bound(binding.local, binding.fact),
+            types.get(at).cloned(),
+        );
+        let rest = self.split_fields(scope, split, inner, at + 1, types);
         scope.env.pop();
         let (rest, repr) = rest?;
         Ok((
@@ -4366,11 +4437,9 @@ impl<'a> Lowerer<'a> {
         // Слоты - как у ветви под `let`: сам `r` (без значения - на него никто
         // не смотрит), затем поля в порядке объявления.
         let unread = scope.fresh();
-        scope
-            .env
-            .push(Slot::Bound(unread, Fact::declared(Mult::Zero)));
-        scope.env.push(Slot::Bound(cell.local, cell.fact));
-        scope.env.push(Slot::Bound(rest.local, rest.fact));
+        scope.push(Slot::Bound(unread, Fact::declared(Mult::Zero)));
+        scope.push(Slot::Bound(cell.local, cell.fact));
+        scope.push(Slot::Bound(rest.local, rest.fact));
         let lowered = self.expr(scope, inner);
         scope.env.truncate(scope.env.len() - 3);
         let (body, repr) = lowered?;
@@ -5032,6 +5101,61 @@ impl<'a> Lowerer<'a> {
         self.hinted(&written, depth)
     }
 
+    /// Боксированная форма записи, которой оказался указатель `index` по
+    /// своему типу (§10 вопрос 235). `None` - тип неизвестен, не запись либо
+    /// не замкнут: у записи с переменной типа форма объекта зависит от
+    /// подстановки, и назвать её по типу значило бы читать мимо.
+    fn typed_form(&mut self, scope: &Scope, index: Index) -> Option<Repr> {
+        let ty = scope.type_of(index)?;
+        let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
+        let written = quote(depth, ty);
+        if adamas_core::pattern::shift_free(&written, 1) != written {
+            return None;
+        }
+        match self.repr_of(&written, depth, &Dicts::new()).ok()? {
+            Repr::Packed(pack)
+                if self.packings[pack.0 as usize]
+                    .sole()
+                    .is_some_and(|variant| variant.ctor.is_none()) =>
+            {
+                Some(Repr::Record(self.boxed_shape(pack).ok()?))
+            }
+            Repr::Record(tag) => Some(Repr::Record(tag)),
+            _ => None,
+        }
+    }
+
+    /// Телескоп полей конструктора с подставленными параметрами семейства -
+    /// их даёт тип разбираемого, если он известен (§10 вопрос 235).
+    fn branch_telescope(
+        &self,
+        scope: &Scope,
+        case: &Case,
+        constructor: &Name,
+    ) -> Option<Rc<Value>> {
+        let Term::Var(index) = &*case.scrutinee else {
+            return None;
+        };
+        let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
+        let written = unfolded(self.signature, &quote(depth, scope.type_of(*index)?), depth);
+        let (head, arguments) = spine(&written);
+        let params = case.params as usize;
+        if !matches!(head, Term::Const(data, _, _) if *data == case.data)
+            || arguments.len() < params
+        {
+            return None;
+        }
+        let env = scope.values();
+        let mut current = eval(&Env::default(), self.declared(constructor).ok()?);
+        for argument in &arguments[..params] {
+            let Value::Pi(_, _, _, _, codomain) = &*current else {
+                return None;
+            };
+            current = codomain.apply(eval(&env, argument));
+        }
+        Some(current)
+    }
+
     /// Подсказка по написанному типу-стрелке: домены по порядку, запись -
     /// собой, прочее - указателем. Не стрелка - подсказки нет.
     fn hinted(&mut self, ty: &Term, depth: u32) -> Result<Option<Vec<Repr>>, LowerError> {
@@ -5271,6 +5395,7 @@ impl<'a> Lowerer<'a> {
 
             // Тело ветви есть функция от полей: сколько ведущих лямбд, столько
             // связываний снимается на месте, остаток применяется.
+            let mut telescope = self.branch_telescope(scope, case, &branch.constructor);
             let mut current = Rc::new((*branch.body).clone());
             let mut taken = 0;
             while taken < fields.len() {
@@ -5279,9 +5404,18 @@ impl<'a> Lowerer<'a> {
                     break;
                 };
                 fields[taken].name = bound.to_string();
-                scope
-                    .env
-                    .push(Slot::Bound(fields[taken].local, fields[taken].fact));
+                let (ty, next) = match telescope.as_deref() {
+                    Some(Value::Pi(_, _, domain, _, codomain)) => {
+                        let level = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
+                        (
+                            Some(Rc::clone(domain)),
+                            Some(codomain.apply(Value::var(Lvl(level)))),
+                        )
+                    }
+                    _ => (None, None),
+                };
+                telescope = next;
+                scope.push_typed(Slot::Bound(fields[taken].local, fields[taken].fact), ty);
                 current = Rc::clone(inner);
                 taken += 1;
             }
@@ -5406,6 +5540,8 @@ impl<'a> Lowerer<'a> {
             // словарь им не является. Обобщённый код внутри лямбды поэтому
             // считает элемент указательным - названная граница §4.11.
             dicts: Dicts::new(),
+            // Позиции захват сохраняет, и типы внешней среды верны и здесь.
+            types: scope.types.clone(),
         };
         // Лямбда получает значение всегда: стирает машина по типу глобального
         // имени, а здесь имени нет.
@@ -5428,7 +5564,7 @@ impl<'a> Lowerer<'a> {
             });
         }
         for binding in &bindings {
-            nested.env.push(Slot::Bound(binding.local, binding.fact));
+            nested.push(Slot::Bound(binding.local, binding.fact));
         }
 
         let function = FuncId(self.functions.len());
@@ -6291,6 +6427,24 @@ impl Lowerer<'_> {
         }
         Ok(facts)
     }
+}
+
+/// Типы полей записи `ty`, разбираемой связыванием на позиции `record`: поле
+/// `k` встаёт на позицию `record + 1 + k` и видит предыдущие. Пусто - не
+/// запись.
+fn field_types(signature: &Signature, ty: &Rc<Value>, record: usize) -> Vec<Rc<Value>> {
+    let reduced = adamas_core::conv::whnf(signature, ty);
+    let Value::Record(telescope) = &*reduced else {
+        return Vec::new();
+    };
+    let mut earlier = Vec::with_capacity(telescope.fields().len());
+    let mut found = Vec::with_capacity(telescope.fields().len());
+    for position in 0..telescope.fields().len() {
+        found.push(telescope.instantiated(position, &earlier, &[], &[], &[]));
+        let level = u32::try_from(record + 1 + position).unwrap_or(u32::MAX);
+        earlier.push(Value::var(Lvl(level)));
+    }
+    found
 }
 
 /// Разворачивает **применённое** имя: класс, сигнатуру модуля, алиас с

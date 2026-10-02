@@ -107,3 +107,75 @@ fn a_lemma_false_under_wrapping_is_caught() {
         .any(|(i, n)| le(i, n) && !lt(sub(i, 1), n));
     assert!(broken, "проверка не различает лемму без посылки `i /= 0`");
 }
+
+#[test]
+fn not_below_holds_on_the_word() {
+    stated(
+        "notBelow : (0 i : UInt64) -> (0 n : UInt64) -> (0 p : Equal Bool (ltUInt64 i n) False) -> Equal Bool (leUInt64 n i) True",
+    );
+    let words = words();
+    for &i in &words {
+        for &n in &words {
+            if !lt(i, n) {
+                assert!(le(n, i), "notBelow ложна при i = {i}, n = {n}");
+            }
+        }
+    }
+}
+
+#[test]
+fn window_before_holds_on_the_word() {
+    stated(
+        "windowBefore : (0 i : UInt64) -> (0 n : UInt64) -> (0 m : UInt64) -> (0 p : Equal Bool (leUInt64 n i) True) -> (0 q : Equal Bool (leUInt64 i m) True) -> Equal Bool (leUInt64 (subUInt64 i n) (subUInt64 m n)) True",
+    );
+    let words = words();
+    for &i in &words {
+        for &n in &words {
+            for &m in words.iter().step_by(7) {
+                if le(n, i) && le(i, m) {
+                    assert!(
+                        le(sub(i, n), sub(m, n)),
+                        "windowBefore ложна при i = {i}, n = {n}, m = {m}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn step_at_most_holds_on_the_word() {
+    stated(
+        "stepAtMost : (0 i : UInt64) -> (0 n : UInt64) -> (0 m : UInt64) -> (0 p : Equal Bool (leUInt64 n i) True) -> (0 q : Equal Bool (leUInt64 i m) True) -> Equal Bool (leUInt64 (subUInt64 i n) m) True",
+    );
+    let words = words();
+    for &i in &words {
+        for &n in &words {
+            for &m in words.iter().step_by(7) {
+                if le(n, i) && le(i, m) {
+                    assert!(
+                        le(sub(i, n), m),
+                        "stepAtMost ложна при i = {i}, n = {n}, m = {m}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn at_most_trans_holds_on_the_word() {
+    stated(
+        "atMostTrans : (0 a : UInt64) -> (0 b : UInt64) -> (0 c : UInt64) -> (0 p : Equal Bool (leUInt64 a b) True) -> (0 q : Equal Bool (leUInt64 b c) True) -> Equal Bool (leUInt64 a c) True",
+    );
+    let words = words();
+    for &a in &words {
+        for &b in &words {
+            for &c in words.iter().step_by(7) {
+                if le(a, b) && le(b, c) {
+                    assert!(le(a, c), "atMostTrans ложна при a = {a}, b = {b}, c = {c}");
+                }
+            }
+        }
+    }
+}

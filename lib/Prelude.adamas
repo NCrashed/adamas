@@ -89,6 +89,23 @@ belowAtMost : (0 i : UInt64) -> (0 n : UInt64) -> (0 p : Equal Bool (ltUInt64 i 
 @total
 atMostSelf : (0 n : UInt64) -> Equal Bool (leUInt64 n n) True
 
+-- | Не меньшее - не меньше: ветвь `No` разбора `decide (i < n)` даёт `n <= i`.
+@total
+notBelow : (0 i : UInt64) -> (0 n : UInt64) -> (0 p : Equal Bool (ltUInt64 i n) False) -> Equal Bool (leUInt64 n i) True
+
+-- | Окно шириной `n`, отступившее от `i <= m`, кончается внутри колонки: шаг
+-- окна вниз (`simdLoad n xs (i - n)`). Ни одно вычитание не заворачивается.
+@total
+windowBefore : (0 i : UInt64) -> (0 n : UInt64) -> (0 m : UInt64) -> (0 p : Equal Bool (leUInt64 n i) True) -> (0 q : Equal Bool (leUInt64 i m) True) -> Equal Bool (leUInt64 (subUInt64 i n) (subUInt64 m n)) True
+
+-- | Транзитивность `<=`.
+@total
+atMostTrans : (0 a : UInt64) -> (0 b : UInt64) -> (0 c : UInt64) -> (0 p : Equal Bool (leUInt64 a b) True) -> (0 q : Equal Bool (leUInt64 b c) True) -> Equal Bool (leUInt64 a c) True
+
+-- | Шаг вниз на `n` от `i <= m` остаётся не больше `m`.
+@total
+stepAtMost : (0 i : UInt64) -> (0 n : UInt64) -> (0 m : UInt64) -> (0 p : Equal Bool (leUInt64 n i) True) -> (0 q : Equal Bool (leUInt64 i m) True) -> Equal Bool (leUInt64 (subUInt64 i n) m) True
+
 -- | Целое по умолчанию: его берёт литерал, типа которому не задало ничто в
 -- объявлении (§4.3). Синоним, а не свой тип: `Int` и `Int64` одно и то же.
 type Int = Int64

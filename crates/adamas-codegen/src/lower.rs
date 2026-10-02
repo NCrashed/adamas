@@ -4347,10 +4347,14 @@ impl<'a> Lowerer<'a> {
         arguments: &[Arg<'_>],
     ) -> Result<(Expr, Repr), LowerError> {
         let wanted = match op {
+            // Доказательства идут последними и в код не попадают (§10 вопрос
+            // 224): у дорожки одно, у окна два.
             SimdOp::Splat => 4,
-            SimdOp::Lane | SimdOp::Add | SimdOp::Sub | SimdOp::Mul => 5,
-            SimdOp::Set | SimdOp::Load => 6,
-            SimdOp::Store => 7,
+            SimdOp::Add | SimdOp::Sub | SimdOp::Mul => 5,
+            SimdOp::Lane => 6,
+            SimdOp::Set => 7,
+            SimdOp::Load => 8,
+            SimdOp::Store => 9,
         };
         if arguments.len() != wanted {
             return Err(LowerError::PartialSimd {

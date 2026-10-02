@@ -37,7 +37,7 @@ body =
   let v : Simd 4 Float32 = simdSplat 4 one
   let n : Float32 = ask
   let m : Float32 = ask
-  Cons (simdLane v 0 + n) (Cons (simdLane v 3 + m) Nil)
+  Cons (simdLane v 0 Refl + n) (Cons (simdLane v 3 Refl + m) Nil)
 
 restored : List Float32
 restored = handle body with

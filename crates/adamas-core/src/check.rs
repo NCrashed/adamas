@@ -455,6 +455,34 @@ fn below(signature: &Signature, at: u32, length: u32) -> Term {
     )
 }
 
+/// `Equal Bool (leUInt64 width length) True`: окно не шире колонки.
+fn fits(signature: &Signature, width: u32, length: u32) -> Term {
+    reflected(
+        signature,
+        crate::prim::PrimCmp::Le,
+        crate::prim::PrimTy::UInt64,
+        [Term::var(width), Term::var(length)],
+        crate::prim::TRUE,
+    )
+}
+
+/// `Equal Bool (leUInt64 at (subUInt64 length width)) True`: окно с номера `at`
+/// кончается внутри колонки.
+fn windowed(signature: &Signature, at: u32, width: u32, length: u32) -> Term {
+    let room = Term::Prim(Prim::Op(
+        crate::prim::PrimOp::Sub,
+        crate::prim::PrimTy::UInt64,
+    ))
+    .apply([Term::var(length), Term::var(width)]);
+    reflected(
+        signature,
+        crate::prim::PrimCmp::Le,
+        crate::prim::PrimTy::UInt64,
+        [Term::var(at), room],
+        crate::prim::TRUE,
+    )
+}
+
 /// Тип операции над массивом. Стёртые связывания имплиситны: длину и элемент
 /// восстанавливает унификация по типу самого массива.
 fn array_op_scheme(
@@ -676,7 +704,8 @@ fn simd_op_scheme(
             ),
         ),
         // `simdSet : {0 n} -> {0 a} -> {0 d} -> (ω v : Simd n a)
-        //          -> (ω i : UInt64) -> (ω x : a) -> Simd n a`
+        //          -> (ω i : UInt64) -> (ω x : a)
+        //          -> (0 p : Equal Bool (ltUInt64 i n) True) -> Simd n a`
         SimdOp::Set => over(bound(
             given,
             "v",
@@ -685,16 +714,36 @@ fn simd_op_scheme(
                 given,
                 "i",
                 word.clone(),
-                bound(given, "x", Term::var(3), simd(Term::var(5), Term::var(4))),
+                bound(
+                    given,
+                    "x",
+                    Term::var(3),
+                    bound(
+                        Binder::explicit(Mult::Zero),
+                        "p",
+                        below(signature, 1, 5),
+                        simd(Term::var(6), Term::var(5)),
+                    ),
+                ),
             ),
         )),
         // `simdLane : {0 n} -> {0 a} -> {0 d} -> (ω v : Simd n a)
-        //           -> (ω i : UInt64) -> a`
+        //           -> (ω i : UInt64) -> (0 p : Equal Bool (ltUInt64 i n) True) -> a`
         SimdOp::Lane => over(bound(
             given,
             "v",
             simd(Term::var(2), Term::var(1)),
-            bound(given, "i", word.clone(), Term::var(3)),
+            bound(
+                given,
+                "i",
+                word.clone(),
+                bound(
+                    Binder::explicit(Mult::Zero),
+                    "p",
+                    below(signature, 0, 4),
+                    Term::var(4),
+                ),
+            ),
         )),
         // `simdAdd : {0 n} -> {0 a} -> {0 d} -> (ω u : Simd n a)
         //          -> (ω w : Simd n a) -> Simd n a`
@@ -742,6 +791,10 @@ fn simd_memory_scheme(
             Rc::new(element),
         )
     };
+    // Окно внутри колонки (§10 вопрос 224) - двумя фактами, `n <= m` и
+    // `i <= m - n`: при первом вычитание не заворачивается, и сумма `i + n`,
+    // которая при заворачивании лгала бы, не пишется вовсе.
+    let proof = Binder::explicit(Mult::Zero);
     // Длина колонки, дорожка, словарь, **написанная** ширина. Первые три
     // стёрты и имплицитны, ширина стёрта и явна - выводить её не из чего.
     let along = |inner: Term| {
@@ -764,16 +817,34 @@ fn simd_memory_scheme(
     };
     match op {
         // `simdLoad : {0 m} -> {0 a} -> {0 d} -> (0 n : UInt64)
-        //           -> (ω xs : Array m a) -> (ω i : UInt64) -> Simd n a`
+        //           -> (ω xs : Array m a) -> (ω i : UInt64)
+        //           -> (0 p : Equal Bool (leUInt64 n m) True)
+        //           -> (0 q : Equal Bool (leUInt64 i (subUInt64 m n)) True) -> Simd n a`
         SimdOp::Load => along(bound(
             given,
             "xs",
             array(Term::var(3), Term::var(2)),
-            bound(given, "i", word.clone(), simd(Term::var(2), Term::var(4))),
+            bound(
+                given,
+                "i",
+                word.clone(),
+                bound(
+                    proof,
+                    "p",
+                    fits(signature, 2, 5),
+                    bound(
+                        proof,
+                        "q",
+                        windowed(signature, 1, 3, 6),
+                        simd(Term::var(4), Term::var(6)),
+                    ),
+                ),
+            ),
         )),
         // `simdStore : {0 m} -> {0 a} -> {0 d} -> (0 n : UInt64)
         //            -> (ω xs : Array m a) -> (ω i : UInt64) -> (ω v : Simd n a)
-        //            -> Array m a`
+        //            -> (0 p : …) -> (0 q : …) -> Array m a` - факты те же, что у
+        //            загрузки.
         SimdOp::Store => along(bound(
             given,
             "xs",
@@ -786,7 +857,17 @@ fn simd_memory_scheme(
                     given,
                     "v",
                     simd(Term::var(2), Term::var(4)),
-                    array(Term::var(6), Term::var(5)),
+                    bound(
+                        proof,
+                        "p",
+                        fits(signature, 3, 6),
+                        bound(
+                            proof,
+                            "q",
+                            windowed(signature, 2, 4, 7),
+                            array(Term::var(8), Term::var(7)),
+                        ),
+                    ),
                 ),
             ),
         )),

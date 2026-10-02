@@ -73,18 +73,19 @@ fill xs i p v = case decide (i == 0) of
 -- Счётчик блоков показывает **один** блок на всю программу, сколько бы
 -- проходов ни было: `simdStore` переписывает уникальную колонку по месту тем
 -- же договором, каким это делает `arraySet` (§4.11).
-scale : Array cells Float32 -> UInt64 -> Array cells Float32
-scale xs 0 = xs
-scale xs i =
-  let at : UInt64 = subUInt64 i 8
-  let window : Simd 8 Float32 = simdLoad 8 xs at
-  let next : Simd 8 Float32 = simdAdd (simdMul window (simdSplat 8 gain)) (simdSplat 8 bias)
-  let put : Array cells Float32 = simdStore 8 xs at next
-  scale put at
+scale : Array cells Float32 -> (i : UInt64) -> (0 p : Equal Bool (leUInt64 i cells) True) -> Array cells Float32
+scale xs i p = case decide (ltUInt64 i 8) of
+  Yes _z -> xs
+  No q ->
+    let at : UInt64 = subUInt64 i 8
+    let window : Simd 8 Float32 = simdLoad 8 xs at (atMostTrans 8 i cells (notBelow i 8 q) p) (windowBefore i 8 cells (notBelow i 8 q) p)
+    let next : Simd 8 Float32 = simdAdd (simdMul window (simdSplat 8 gain)) (simdSplat 8 bias)
+    let put : Array cells Float32 = simdStore 8 xs at next (atMostTrans 8 i cells (notBelow i 8 q) p) (windowBefore i 8 cells (notBelow i 8 q) p)
+    scale put at (stepAtMost i 8 cells (notBelow i 8 q) p)
 
 turn : Array cells Float32 -> UInt64 -> Array cells Float32
 turn xs 0 = xs
-turn xs p = turn (scale xs cells) (subUInt64 p 1)
+turn xs p = turn (scale xs cells Refl) (subUInt64 p 1)
 
 -- Свёртка **вычитанием**, дословно как у скалярного близнеца: знак чередуется,
 -- поэтому перестановка двух ячеек видна ответом. Скалярная она нарочно -

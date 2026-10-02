@@ -452,15 +452,27 @@ pepper = 1442695040888963407
 thirtyOne : UInt64
 thirtyOne = 31
 
+-- Окно из четырёх слов с номера `at`, доказанно внутри колонки. Отдельно от
+-- цикла: в теле члена объявляемой группы аргументы типизируются дырками (§10
+-- вопрос 50), и ширина окна там ожидаемого типа не получает.
+windowAt : Array cells UInt64 -> (at : UInt64) -> (0 q : Equal Bool (leUInt64 at (subUInt64 cells 4)) True) -> Simd 4 UInt64
+windowAt xs at q = simdLoad 4 xs at Refl q
+
+churnWindow : Array cells UInt64 -> (at : UInt64) -> (0 q : Equal Bool (leUInt64 at (subUInt64 cells 4)) True) -> Array cells UInt64
+churnWindow xs at q =
+  let next : Simd 4 UInt64 = simdAdd (simdMul (windowAt xs at q) (simdSplat 4 spice)) (simdSplat 4 pepper)
+  simdStore 4 xs at next Refl q
+
+-- Номер окна - `p * stride + 4`, и внутри колонки его проверяет `decide`: леммы
+-- о произведении у прелюдии нет (см. `loadCell`). Ветвь `No` колонку не трогает.
 churn : Array cells UInt64 -> UInt64 -> Array cells UInt64
 churn xs 0 = xs
 churn xs k =
   let p : UInt64 = subUInt64 k 1
   let at : UInt64 = addUInt64 (mulUInt64 p stride) 4
-  let window : Simd 4 UInt64 = simdLoad 4 xs at
-  let next : Simd 4 UInt64 = simdAdd (simdMul window (simdSplat 4 spice)) (simdSplat 4 pepper)
-  let put : Array cells UInt64 = simdStore 4 xs at next
-  churn put p
+  case decide (leUInt64 at (subUInt64 cells 4)) of
+    No _q -> xs
+    Yes q -> churn (churnWindow xs at q) p
 
 -- Столько проходов, сколько сказано. Колонка переписывается по месту, поэтому
 -- блок на всю программу остаётся один, сколько бы проходов ни было.
@@ -468,19 +480,22 @@ churning : Array cells UInt64 -> UInt64 -> Array cells UInt64
 churning xs 0 = xs
 churning xs r = churning (churn xs packets) (subUInt64 r 1)
 
+sownAt : Simd 4 UInt64 -> Array cells UInt64 -> (at : UInt64) -> (0 q : Equal Bool (leUInt64 at (subUInt64 cells 4)) True) -> Simd 4 UInt64
+sownAt acc xs at q = simdAdd (simdMul acc (simdSplat 4 thirtyOne)) (windowAt xs at q)
+
 digest : Array cells UInt64 -> UInt64 -> Simd 4 UInt64 -> Simd 4 UInt64
 digest xs 0 acc = acc
 digest xs k acc =
   let p : UInt64 = subUInt64 k 1
   let at : UInt64 = addUInt64 (mulUInt64 p stride) 4
-  let window : Simd 4 UInt64 = simdLoad 4 xs at
-  let sown : Simd 4 UInt64 = simdAdd (simdMul acc (simdSplat 4 thirtyOne)) window
-  digest xs p sown
+  case decide (leUInt64 at (subUInt64 cells 4)) of
+    No _q -> acc
+    Yes q -> digest xs p (sownAt acc xs at q)
 
 foldLanes : Simd 4 UInt64 -> UInt64
 foldLanes v =
-  subUInt64 (simdLane v 3)
-    (subUInt64 (simdLane v 2) (subUInt64 (simdLane v 1) (simdLane v 0)))
+  subUInt64 (simdLane v 3 Refl)
+    (subUInt64 (simdLane v 2 Refl) (subUInt64 (simdLane v 1 Refl) (simdLane v 0 Refl)))
 
 -- Пересылка: у пакета четвёртой версии убывает время жизни, у прочих нет.
 aged : Bool -> UInt64 -> UInt64

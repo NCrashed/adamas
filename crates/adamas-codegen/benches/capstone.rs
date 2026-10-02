@@ -128,11 +128,9 @@ fn capstone_source(packets: u64, rounds: u64) -> String {
 /// найтись, а ответ обязан совпасть с невредимым - иначе сравнивались бы две
 /// разные работы.
 fn per_lane_source(packets: u64, rounds: u64) -> String {
-    let from = "  let window : Simd 4 UInt64 = simdLoad 4 xs at\n  \
-                let next : Simd 4 UInt64 = simdAdd (simdMul window (simdSplat 4 spice)) \
-                (simdSplat 4 pepper)\n  \
-                let put : Array cells UInt64 = simdStore 4 xs at next\n  \
-                churn put p";
+    let from = "  let next : Simd 4 UInt64 = simdAdd (simdMul (windowAt xs at q) \
+                (simdSplat 4 spice)) (simdSplat 4 pepper)\n  \
+                simdStore 4 xs at next Refl q";
     let to = "  let w0 : UInt64 = loadCell xs at\n  \
               let w1 : UInt64 = loadCell xs (addUInt64 at 1)\n  \
               let w2 : UInt64 = loadCell xs (addUInt64 at 2)\n  \
@@ -143,13 +141,11 @@ fn per_lane_source(packets: u64, rounds: u64) -> String {
               (addUInt64 (mulUInt64 w1 spice) pepper)\n  \
               let a2 : Array cells UInt64 = storeCell a1 (addUInt64 at 2) \
               (addUInt64 (mulUInt64 w2 spice) pepper)\n  \
-              let a3 : Array cells UInt64 = storeCell a2 (addUInt64 at 3) \
-              (addUInt64 (mulUInt64 w3 spice) pepper)\n  \
-              churn a3 p";
+              storeCell a2 (addUInt64 at 3) (addUInt64 (mulUInt64 w3 spice) pepper)";
     let source = capstone_source(packets, rounds);
     assert!(
         source.contains(from),
-        "мутант «по дорожке» не применился: тело `churn` в корпусе другое"
+        "мутант «по дорожке» не применился: тело `churnWindow` в корпусе другое"
     );
     source.replace(from, to)
 }

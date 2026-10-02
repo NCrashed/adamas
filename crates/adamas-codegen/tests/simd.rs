@@ -105,7 +105,7 @@ gain : Float32
 gain = 0.5
 
 seeded : Simd 8 Float32
-seeded = simdSet (simdSet (simdSplat 8 zero) 0 one) 7 four
+seeded = simdSet (simdSet (simdSplat 8 zero) 0 one Refl) 7 four Refl
 
 step : UInt64 -> Simd 8 Float32 -> Simd 8 Float32
 step 0 acc = acc
@@ -114,7 +114,7 @@ step n acc =
   step (subUInt64 n 1) next
 
 main : Float32
-main = simdLane (step turns seeded) 7
+main = simdLane (step turns seeded) 7 Refl
 ";
 
 /// Строка заполнения корпусной фикстуры `simd-lanes`, как она там написана.
@@ -128,12 +128,10 @@ main = simdLane (step turns seeded) 7
 /// Корпусная фикстура витка не имеет, зато её свёртка чередует знак, поэтому
 /// перестановка любых двух дорожек видна ответом. Заодно свидетель тем самым
 /// стоит на программе, которую **договор трёх вычислителей** уже держит.
-const SEEDED: &str =
-    "  simdSet (simdSet (simdSet (simdSet (simdSplat 4 zero) 0 one) 1 two) 2 four) 3 eight";
+const SEEDED: &str = "  simdSet (simdSet (simdSet (simdSet (simdSplat 4 zero) 0 one Refl) 1 two Refl) 2 four Refl) 3 eight Refl";
 
 /// Она же с переставленными дорожками 0 и 1.
-const SWAPPED: &str =
-    "  simdSet (simdSet (simdSet (simdSet (simdSplat 4 zero) 1 one) 0 two) 2 four) 3 eight";
+const SWAPPED: &str = "  simdSet (simdSet (simdSet (simdSet (simdSplat 4 zero) 1 one Refl) 0 two Refl) 2 four Refl) 3 eight Refl";
 
 /// Сколько пакетных и сколько скалярных плавающих инструкций в объектнике.
 ///
@@ -466,10 +464,10 @@ two : Float32
 two = 2.0
 
 held : Boxed
-held = MkBoxed (simdSet (simdSplat 4 one) 2 two)
+held = MkBoxed (simdSet (simdSplat 4 one) 2 two Refl)
 
 taken : Boxed -> Float32
-taken (MkBoxed v) = simdLane v 2
+taken (MkBoxed v) = simdLane v 2 Refl
 
 main : Float32
 main = taken held
@@ -502,6 +500,9 @@ main = taken held
 /// Номер здесь написан литералом нарочно: на нём `opt` вправе свернуть проверку
 /// вместе с веткой, и свидетель показывает, что свернулось **ветвление**, а не
 /// обрыв.
+///
+/// Добраться до ограждения теперь можно только ложной аксиомой: примитив
+/// требует доказательства номера (§10 вопросы 224, 229).
 #[test]
 fn a_lane_beyond_the_width_stops_both_backends() {
     const OUTSIDE: &str = "\
@@ -513,8 +514,12 @@ class Primitive a where
 one : Float32
 one = 1.0
 
+-- Ложная аксиома (§10 вопрос 229): иначе номер вне ширины не написать.
+@total
+lie : Equal Bool (ltUInt64 9 4) True
+
 main : Float32
-main = simdLane (simdSplat 4 one) 9
+main = simdLane (simdSplat 4 one) 9 lie
 ";
     let machine = harness::refused(OUTSIDE);
     assert!(
@@ -822,6 +827,9 @@ fn the_vector_column_answers_what_the_scalar_column_answers() {
 ///
 /// Машина третьей стороной кончается тем же текстом (§10 вопрос 220), как у
 /// номера дорожки вне ширины и у номера ячейки вне длины.
+///
+/// Добраться до ограждения теперь можно только ложной аксиомой: окно требует
+/// доказательства, что оно внутри колонки (§10 вопросы 224, 229).
 #[test]
 fn a_window_past_the_end_stops_both_backends() {
     const OUTSIDE: &str = "\
@@ -842,8 +850,13 @@ column : Array 4 Float32
 column =
   arraySet (arraySet (arraySet (arraySet (arrayNew 4 zero) 0 one Refl) 1 one Refl) 2 one Refl) 3 one Refl
 
+-- Ложная аксиома (§10 вопрос 229): окно с номера один в колонке из четырёх
+-- иначе не написать.
+@total
+lie : Equal Bool (leUInt64 1 (subUInt64 4 4)) True
+
 main : Float32
-main = simdLane (simdLoad 4 column 1) 0
+main = simdLane (simdLoad 4 column 1 Refl lie) 0 Refl
 ";
     let machine = harness::refused(OUTSIDE);
     assert!(
@@ -913,7 +926,7 @@ column =
   arraySet (arraySet (arraySet (arraySet (arrayNew 4 zero) 0 zero Refl) 1 zero Refl) 2 one Refl) 3 zero Refl
 
 main : Float32
-main = simdLane (simdLoad 4 column 0) 2
+main = simdLane (simdLoad 4 column 0 Refl Refl) 2 Refl
 ";
     assert_eq!(
         harness::printed(OWNED),
@@ -1019,7 +1032,7 @@ plus a b = addUInt64 a b
 -- Вектор приезжает аргументом рекурсии; внутри он назван `let`-связыванием -
 -- обход дефекта вопроса 50, к разметке отношения не имеющего.
 step : UInt64 -> Simd 4 UInt64 -> UInt64
-step 0 v = plus (simdLane v 0) (simdLane v 3)
+step 0 v = plus (simdLane v 0 Refl) (simdLane v 3 Refl)
 step k v =
   let next : Simd 4 UInt64 = simdAdd v (simdSplat 4 k)
   step (subUInt64 k 1) next

@@ -484,12 +484,12 @@ pub fn trap(value: &Value) -> Option<&'static str> {
         | (Head::ArrayOp(ArrayOp::Set), [length, _, _, at, _, _]) => {
             outside(at, length)?.then_some(crate::prim::CELL_OUTSIDE)
         }
-        (Head::SimdOp(SimdOp::Lane), [width, _, _, _, at])
-        | (Head::SimdOp(SimdOp::Set), [width, _, _, _, at, _]) => {
+        (Head::SimdOp(SimdOp::Lane), [width, _, _, _, at, _])
+        | (Head::SimdOp(SimdOp::Set), [width, _, _, _, at, _, _]) => {
             outside(at, width)?.then_some(crate::prim::LANE_OUTSIDE)
         }
-        (Head::SimdOp(SimdOp::Load), [length, _, _, width, _, at])
-        | (Head::SimdOp(SimdOp::Store), [length, _, _, width, _, at, _]) => {
+        (Head::SimdOp(SimdOp::Load), [length, _, _, width, _, at, _, _])
+        | (Head::SimdOp(SimdOp::Store), [length, _, _, width, _, at, _, _, _]) => {
             let end = literal(at)?.checked_add(literal(width)?);
             end.is_none_or(|end| end > literal(length).unwrap_or(u64::MAX))
                 .then_some(crate::prim::WINDOW_OUTSIDE)
@@ -948,6 +948,7 @@ fn vectored(op: crate::prim::SimdOp, spine: &[Elim]) -> Option<Rc<Value>> {
                 Elim::App(_),
                 Elim::App(vector),
                 Elim::App(at),
+                Elim::App(_),
             ] = spine
             else {
                 return None;
@@ -1010,6 +1011,8 @@ fn loaded(spine: &[Elim]) -> Option<Rc<Value>> {
         Elim::App(width),
         Elim::App(array),
         Elim::App(at),
+        Elim::App(_),
+        Elim::App(_),
     ] = spine
     else {
         return None;
@@ -1043,6 +1046,8 @@ fn stored(spine: &[Elim]) -> Option<Rc<Value>> {
         Elim::App(array),
         Elim::App(at),
         Elim::App(vector),
+        Elim::App(_),
+        Elim::App(_),
     ] = spine
     else {
         return None;
@@ -1118,6 +1123,7 @@ fn canonical(
                 Elim::App(built),
                 Elim::App(index),
                 Elim::App(Rc::clone(value)),
+                Elim::App(eval(&Env::default(), &evident())),
             ],
         ));
     }
@@ -1142,6 +1148,7 @@ fn lane_of(vector: &Rc<Value>, wanted: u64) -> Option<Rc<Value>> {
                     Elim::App(inner),
                     Elim::App(slot),
                     Elim::App(value),
+                    Elim::App(_),
                 ],
             ) => {
                 let Value::Prim(Prim::Lit(_, slot)) = &**slot else {
@@ -1655,6 +1662,8 @@ mod tests {
             array,
             word(0),
             vector,
+            super::evident(),
+            super::evident(),
         ]);
         assert_eq!(
             normalize(&stored).to_string(),

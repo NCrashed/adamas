@@ -345,7 +345,7 @@ two : Float32
 two = 2.0
 
 seeded : Simd 4 Float32
-seeded = simdSet (simdSplat 4 one) 1 two
+seeded = simdSet (simdSplat 4 one) 1 two Refl
 ";
 
 #[test]
@@ -365,7 +365,7 @@ applying : Simd 4 Float32 -> (Simd 4 Float32 -> Float32) -> Float32
 applying v f = f v
 
 main : Float32
-main = applying seeded (\\w -> simdLane w 1)
+main = applying seeded (\\w -> simdLane w 1 Refl)
 "
         ),
     );
@@ -384,7 +384,7 @@ calling x f = f x
 main : Float32
 main =
   let v : Simd 4 Float32 = seeded
-  calling one (\\k -> addFloat32 k (simdLane v 1))
+  calling one (\\k -> addFloat32 k (simdLane v 1 Refl))
 "
         ),
     );

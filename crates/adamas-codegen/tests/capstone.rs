@@ -182,8 +182,8 @@ fn the_answer_depends_on_what_is_in_the_packet() {
         ),
         (
             "переставленные дорожки: нулевая и первая полосы свёртки обменялись",
-            "    (subUInt64 (simdLane v 2) (subUInt64 (simdLane v 1) (simdLane v 0)))",
-            "    (subUInt64 (simdLane v 2) (subUInt64 (simdLane v 0) (simdLane v 1)))",
+            "    (subUInt64 (simdLane v 2 Refl) (subUInt64 (simdLane v 1 Refl) (simdLane v 0 Refl)))",
+            "    (subUInt64 (simdLane v 2 Refl) (subUInt64 (simdLane v 0 Refl) (simdLane v 1 Refl)))",
         ),
         (
             "потерянное слово нагрузки: седьмая ячейка пакета не заполняется",

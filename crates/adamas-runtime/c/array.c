@@ -46,9 +46,9 @@ size_t adamas_array_stride(adamas_value array) {
 
 void *adamas_array_at(adamas_value array, size_t index) {
     adamas_array *head = header_of(array);
-    if (index >= head->count) {
-        adamas_fail("номер ячейки вне длины массива");
-    }
+    /* Номер не проверяется: примитив требует доказательства, что он меньше
+     * длины (§10 вопрос 224), и проверка платила бы за то, что тип уже
+     * доказал. Номер вне длины приходит только с ложной аксиомой. */
     if (head->stride == 0) {
         adamas_fail("плоская ячейка спрошена у указательного массива");
     }
@@ -68,26 +68,19 @@ void *adamas_array_data(adamas_value array) {
 
 void *adamas_array_window(adamas_value array, size_t index, size_t lanes) {
     adamas_array *head = header_of(array);
-    /* Проверяется **хвост** окна, а не его начало: вектор читает `lanes`
-     * ячеек подряд, и `index < count` пропустил бы чтение семи ячеек за
-     * концом блока при верном ответе. Сложение считается вычитанием, чтобы
-     * не завернуть: `count - lanes` определено ровно тогда, когда окно вообще
-     * может поместиться. */
-    if (lanes > head->count || index > head->count - lanes) {
-        adamas_fail("окно вектора вне длины массива");
-    }
+    /* Окно не проверяется: примитив требует доказательства, что оно внутри
+     * колонки (`lanes <= count` и `index <= count - lanes`, §10 вопрос 224).
+     * Ширина остаётся в подписи - по ней окно названо в порождённом коде. */
+    (void)lanes;
     if (head->stride == 0) {
         adamas_fail("окно вектора спрошено у указательного массива");
     }
     return payload(array) + index * head->stride;
 }
 
-/* Слот указательного массива. Проверки те же и по той же причине. */
+/* Слот указательного массива. Номер не проверяется по той же причине. */
 static adamas_value *slot(adamas_value array, size_t index) {
     adamas_array *head = header_of(array);
-    if (index >= head->count) {
-        adamas_fail("номер ячейки вне длины массива");
-    }
     if (head->stride != 0) {
         adamas_fail("слот спрошен у плоского массива");
     }

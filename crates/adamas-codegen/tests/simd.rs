@@ -487,24 +487,15 @@ main = taken held
     );
 }
 
-/// Номер дорожки вне ширины обрывает прогон, и одинаково у обоих бэкендов.
+/// Номер дорожки вне ширины обрывает прогон только у машины (§4.9, §10 вопрос
+/// 220).
 ///
-/// Свидетель написан по **измеренному** расхождению. `extractelement` с
-/// номером вне ширины отдаёт `poison`, то есть молча неверный ответ, тогда как
-/// C-сторона зовёт `adamas_fail`; до правки два бэкенда на такой программе
-/// расходились, а договор трёх вычислителей обещает одно значение на всех.
-/// Машина третьей стороной кончается тем же текстом (§10 вопрос 220): прежде
-/// она печатала застрявший `simdLane` ответом с кодом успеха, и свидетель это
-/// закреплял.
-///
-/// Номер здесь написан литералом нарочно: на нём `opt` вправе свернуть проверку
-/// вместе с веткой, и свидетель показывает, что свернулось **ветвление**, а не
-/// обрыв.
-///
-/// Добраться до ограждения теперь можно только ложной аксиомой: примитив
-/// требует доказательства номера (§10 вопросы 224, 229).
+/// Добраться до него можно только ложной аксиомой: примитив требует
+/// доказательства номера (§10 вопросы 224, 229). Бэкенды номер не стерегут -
+/// `extractelement` вне ширины отдаёт `poison`, и на ложной аксиоме поведение
+/// неопределено, - а машине обрыв не стоит ничего.
 #[test]
-fn a_lane_beyond_the_width_stops_both_backends() {
+fn a_lane_beyond_the_width_from_a_false_axiom_stops_the_machine() {
     const OUTSIDE: &str = "\
 type Layout = { size : UInt32, align : UInt32 }
 
@@ -523,38 +514,8 @@ main = simdLane (simdSplat 4 one) 9 lie
 ";
     let machine = harness::refused(OUTSIDE);
     assert!(
-        machine.contains(adamas_codegen::ir::LANE_OUTSIDE),
+        machine.contains(adamas_core::prim::LANE_OUTSIDE),
         "машина оборвалась не тем: {machine}"
-    );
-
-    let Some((tools, _)) = harness::llvm_toolchains() else {
-        return;
-    };
-    let artefacts = harness::llvm_text("simd-outside", OUTSIDE)
-        .unwrap_or_else(|error| panic!("программа не понизилась: {error}"));
-    let binary = harness::llvm_binary("simd.outside", &artefacts, &tools, &Pipeline::optimised());
-    let run = Command::new(&binary)
-        .output()
-        .unwrap_or_else(|error| panic!("прогон не запустился: {error}"));
-    assert!(
-        !run.status.success(),
-        "LLVM ответила на дорожку вне ширины: `{}`",
-        String::from_utf8_lossy(&run.stdout)
-    );
-    let said = String::from_utf8_lossy(&run.stderr);
-    assert!(
-        said.contains(adamas_codegen::ir::LANE_OUTSIDE),
-        "оборвалось не тем и не там: {said}"
-    );
-
-    // C-сторона обязана оборваться **тем же** текстом. Проверяется он, а не
-    // сам факт обрыва: текст один на два эмиттера по построению
-    // (`ir::LANE_OUTSIDE`), и свидетель здесь стережёт как раз то, что
-    // построение не разошлось с прогоном.
-    let printed = harness::text(OUTSIDE).unwrap_or_else(|error| panic!("C не собрался: {error}"));
-    assert!(
-        printed.contains(adamas_codegen::ir::LANE_OUTSIDE),
-        "порождённый C не несёт проверки номера дорожки"
     );
 }
 
@@ -817,21 +778,14 @@ fn the_vector_column_answers_what_the_scalar_column_answers() {
     );
 }
 
-/// Окно, чей хвост вышел за колонку, обрывает прогон - у обоих бэкендов.
+/// Окно, чей хвост вышел за колонку, обрывает прогон только у машины (§4.9).
 ///
-/// Граница у окна **своя**, и проверять её обязана своя точка входа:
-/// `adamas_array_at` спрашивает про начало, а за конец блока уходит хвост. На
-/// колонке из четырёх ячеек окно ширины четыре с номера один читало бы четыре
-/// чужих байта **при верном ответе на первые три дорожки** - то есть молча.
-/// Свидетель написан по этой форме дефекта, а не по факту обрыва.
-///
-/// Машина третьей стороной кончается тем же текстом (§10 вопрос 220), как у
-/// номера дорожки вне ширины и у номера ячейки вне длины.
-///
-/// Добраться до ограждения теперь можно только ложной аксиомой: окно требует
-/// доказательства, что оно внутри колонки (§10 вопросы 224, 229).
+/// Добраться до него можно только ложной аксиомой: окно требует
+/// доказательства, что оно внутри колонки (§10 вопросы 224, 229). Бэкенды окно
+/// не стерегут - на ложной аксиоме их поведение неопределено, - а машина
+/// кончается тем же текстом, что у дорожки и у ячейки (§10 вопрос 220).
 #[test]
-fn a_window_past_the_end_stops_both_backends() {
+fn a_window_past_the_end_from_a_false_axiom_stops_the_machine() {
     const OUTSIDE: &str = "\
 type Layout = { size : UInt32, align : UInt32 }
 
@@ -862,37 +816,6 @@ main = simdLane (simdLoad 4 column 1 Refl lie) 0 Refl
     assert!(
         machine.contains(WINDOW_OUTSIDE),
         "машина оборвалась не тем: {machine}"
-    );
-
-    let Some((tools, _)) = harness::llvm_toolchains() else {
-        return;
-    };
-    let artefacts = harness::llvm_text("window-outside", OUTSIDE)
-        .unwrap_or_else(|error| panic!("программа не понизилась: {error}"));
-    let binary = harness::llvm_binary("window.outside", &artefacts, &tools, &Pipeline::optimised());
-    let run = Command::new(&binary)
-        .output()
-        .unwrap_or_else(|error| panic!("прогон не запустился: {error}"));
-    assert!(
-        !run.status.success(),
-        "LLVM ответила на окно за длиной: `{}`",
-        String::from_utf8_lossy(&run.stdout)
-    );
-    let said = String::from_utf8_lossy(&run.stderr);
-    assert!(
-        said.contains(WINDOW_OUTSIDE),
-        "оборвалось не тем и не там: {said}"
-    );
-
-    // C-сторона обязана оборваться тем же текстом, и текст этот один на два
-    // бэкенда потому, что живёт в рантайме: обе стороны зовут
-    // `adamas_array_window`, и второй записи сообщения не существует.
-    let c = harness::c_printed("window-outside-c", OUTSIDE);
-    assert!(
-        c.reason.contains(WINDOW_OUTSIDE),
-        "C-сторона окно за длиной пропустила: `{}` / `{}`",
-        c.printed,
-        c.reason
     );
 }
 

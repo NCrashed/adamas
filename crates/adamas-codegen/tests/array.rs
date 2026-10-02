@@ -501,18 +501,15 @@ fn a_linear_read_allocates_nothing() {
     );
 }
 
-/// Номер ячейки вне длины обрывает прогон у всех трёх вычислителей одним
-/// текстом (§4.11, §10 вопрос 220).
+/// Номер ячейки вне длины обрывает прогон только у машины (§4.11, §10 вопрос
+/// 220).
 ///
 /// Добраться до него можно только ложной аксиомой: примитив требует
-/// доказательства номера (§10 вопросы 224, 229).
-///
-/// Машина прежде печатала застрявший `arrayIndex` ответом с кодом успеха, и
-/// договор трёх вычислителей на такой программе молча расходился: C и LLVM
-/// обрывались, `adamas eval` «отвечал». Чтение и запись - оба случая, потому
-/// что текст у них один, а место проверки у рантайма разное.
+/// доказательства номера (§10 вопросы 224, 229). Бэкенды номер не стерегут -
+/// на ложной аксиоме их поведение неопределено, - а машине обрыв не стоит
+/// ничего: застрявший примитив она узнаёт сама. Чтение и запись - оба случая.
 #[test]
-fn a_cell_past_the_end_stops_all_three_evaluators() {
+fn a_cell_past_the_end_from_a_false_axiom_stops_the_machine() {
     let cases = [
         (
             "cell-read-outside",
@@ -528,33 +525,6 @@ fn a_cell_past_the_end_stops_all_three_evaluators() {
         assert!(
             machine.contains(adamas_core::prim::CELL_OUTSIDE),
             "{name}: машина оборвалась не тем: {machine}"
-        );
-        let c = harness::c_printed(name, source);
-        assert!(
-            c.reason.contains(adamas_core::prim::CELL_OUTSIDE),
-            "{name}: C-сторона не оборвалась тем же: `{}` / `{}`",
-            c.printed,
-            c.reason
-        );
-        let Some((tools, _)) = harness::llvm_toolchains() else {
-            continue;
-        };
-        let artefacts = harness::llvm_text(name, source)
-            .unwrap_or_else(|error| panic!("{name}: программа не понизилась: {error}"));
-        let binary = harness::llvm_binary(
-            name,
-            &artefacts,
-            &tools,
-            &adamas_codegen::llvm::Pipeline::optimised(),
-        );
-        let run = std::process::Command::new(&binary)
-            .output()
-            .unwrap_or_else(|error| panic!("{name}: прогон не запустился: {error}"));
-        assert!(!run.status.success(), "{name}: LLVM ответила за длиной");
-        let said = String::from_utf8_lossy(&run.stderr);
-        assert!(
-            said.contains(adamas_core::prim::CELL_OUTSIDE),
-            "{name}: LLVM оборвалась не тем: {said}"
         );
     }
 }

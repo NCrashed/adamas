@@ -787,8 +787,12 @@ fn window_control(
     let object = harness::llvm_object(&format!("{name}.addressed"), &addressed, tools, pipeline);
     let count = harness::instructions(tools, &object);
     eprintln!("{name}: контроль (адрес окна считает сам IR) - {base} против {count}");
-    assert!(
-        count < base,
+    // Несущее - что код **изменился**, а не в какую сторону. Пока окно
+    // проверялось в рантайме, адрес из IR выигрывал на проверке; окно стало
+    // непроверяемым (§10 вопрос 224), и разница теперь в четыре инструкции
+    // в другую сторону (8631 против 8635, LLVM 21.1.8).
+    assert_ne!(
+        count, base,
         "{name}: контроль не изменил кода - значит и нули выше ничего не значат"
     );
     let honest = ran(

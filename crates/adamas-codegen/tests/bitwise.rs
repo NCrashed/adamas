@@ -24,8 +24,6 @@
 
 mod harness;
 
-use std::process::Command;
-
 use adamas_codegen::llvm::Pipeline;
 
 /// Сдвиг влево счётчиком, равным ширине типа.
@@ -121,30 +119,6 @@ fn rewritten(text: &str, tail: &str, replacement: &str) -> String {
     assert!(
         found,
         "в порождённом IR нет строки, кончающейся на `{tail}`"
-    );
-    out
-}
-
-/// Тот же `.ll` без проверки нулевого делителя: наивный эмиттер.
-fn without_zero_check(text: &str) -> String {
-    let mut found = false;
-    let out = text
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim();
-            if trimmed.starts_with("br i1 ") && trimmed.contains(".zero, label %") {
-                found = true;
-                let good = trimmed.rsplit("label %").next().unwrap_or_default();
-                format!("  br label %{good}")
-            } else {
-                line.to_owned()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        found,
-        "в порождённом IR нет ветви обрыва по нулевому делителю"
     );
     out
 }
@@ -294,7 +268,7 @@ fn the_only_overflow_of_division_wraps_instead_of_trapping() {
     );
 
     let naive = rewritten(&artefacts.ll, ", i32 1, i32 %v1", "or i32 %v1, 0");
-    let naive = rewritten(&naive, ", i32 %t4, i32 %t3", "or i32 %t3, 0");
+    let naive = rewritten(&naive, ", i32 %t3, i32 %t2", "or i32 %t2, 0");
     let trapped = harness::llvm_printed("div.naive", &naive, &artefacts.support, &tools, &pipeline);
     assert_eq!(
         trapped.printed, "прогон оборвался",
@@ -302,59 +276,20 @@ fn the_only_overflow_of_division_wraps_instead_of_trapping() {
     );
 }
 
-/// Нулевой делитель обрывает прогон, и одинаково у обоих бэкендов.
+/// Нулевой делитель обрывает прогон только у машины.
 ///
 /// Добраться до него можно только ложной аксиомой: примитив требует
-/// доказательства ненулевости (§10 вопросы 224, 229). Ограждение остаётся
-/// защитой от такой аксиомы, а не частью языка.
-///
-/// Форма границы та же, что у номера дорожки вне ширины (§4.9) и у выхода за
-/// длину массива (§4.11): все трое обрываются **одним и тем же текстом**. Машина
-/// прежде печатала застрявший `divInt64` ответом с кодом успеха, и свидетель
-/// это закреплял (§10 вопрос 220).
-///
-/// Проверяется текст, а не сам факт обрыва: он один на два эмиттера по
-/// построению ([`adamas_codegen::ir::DIVISION_BY_ZERO`]), и свидетель стережёт
-/// как раз то, что построение не разошлось с прогоном.
+/// доказательства ненулевости (§10 вопросы 224, 229). Бэкенды делитель не
+/// стерегут - проверка платила бы за то, что тип уже доказал, - и на ложной
+/// аксиоме их поведение неопределено, как у `believe_me`. Машине обрыв не
+/// стоит ничего: застрявший примитив она узнаёт сама и называет текстом
+/// [`adamas_core::prim::DIVISION_BY_ZERO`] (§10 вопрос 220).
 #[test]
-fn a_zero_divisor_stops_all_three_evaluators() {
+fn a_zero_divisor_from_a_false_axiom_stops_the_machine() {
     let machine = harness::refused(ZERO);
     assert!(
-        machine.contains(adamas_codegen::ir::DIVISION_BY_ZERO),
+        machine.contains(adamas_core::prim::DIVISION_BY_ZERO),
         "машина оборвалась не тем: {machine}"
-    );
-
-    let printed = harness::c_printed("div-zero-c", ZERO);
-    assert_eq!(
-        printed.printed, "прогон оборвался",
-        "C-сторона ответила на деление на ноль"
-    );
-    assert!(
-        printed
-            .reason
-            .contains(adamas_codegen::ir::DIVISION_BY_ZERO),
-        "C-сторона оборвалась не тем: {}",
-        printed.reason
-    );
-
-    let Some((tools, _)) = harness::llvm_toolchains() else {
-        return;
-    };
-    let artefacts = harness::llvm_text("div-zero", ZERO)
-        .unwrap_or_else(|error| panic!("не понизилось: {error}"));
-    let binary = harness::llvm_binary("div.zero", &artefacts, &tools, &Pipeline::optimised());
-    let run = Command::new(&binary)
-        .output()
-        .unwrap_or_else(|error| panic!("прогон не запустился: {error}"));
-    assert!(
-        !run.status.success(),
-        "LLVM ответила на деление на ноль: `{}`",
-        String::from_utf8_lossy(&run.stdout)
-    );
-    let said = String::from_utf8_lossy(&run.stderr);
-    assert!(
-        said.contains(adamas_codegen::ir::DIVISION_BY_ZERO),
-        "оборвалось не тем и не там: {said}"
     );
 }
 
@@ -409,7 +344,8 @@ main = addInt64 (orElse (-1) (quotient 100 0)) (orElse (-1) (quotient 100 8))
 /// Мерится **выход эмиттера**, а не выход оптимизатора: вопрос здесь - что
 /// печатается, и он задаётся до `opt` (тот же довод, что у свидетеля
 /// векторности в `simd.rs`). Ограждение сдвига - три инструкции сверх самого
-/// сдвига, ограждение деления - две сверх самого деления плюс ветвь обрыва.
+/// сдвига, ограждение деления - заворачивание `MIN / -1`, четыре инструкции
+/// сверх самого деления; нулевого делителя оно не стережёт (§10 вопрос 224).
 ///
 /// Написанный операнд - обычный случай разбора заголовка, и на нём цена
 /// **ноль**: `opt` сворачивает и сравнение, и `select`, и ветвь. Это второе
@@ -432,15 +368,14 @@ fn the_guards_cost_three_instructions_and_nothing_at_all_when_written() {
         "ограждение сдвига стоит не то, что записано"
     );
 
-    // Деление знакового: `icmp` и `br` нулевого делителя, `call` и
-    // `unreachable` в ветви обрыва, `icmp` и `select` подмены делителя, сам
-    // `sdiv`, `sub` и `select` заворачивания, возврат - **восемь** сверх
-    // непокрытой формы, и половина их принадлежит второму ограждению.
+    // Деление знакового: `icmp` и `select` подмены делителя, сам `sdiv`,
+    // `sub` и `select` заворачивания, возврат - **четыре** сверх непокрытой
+    // формы. Нулевой делитель не стережётся: его исключает доказательство.
     let division = harness::llvm_text("div-cost", ZERO)
         .unwrap_or_else(|error| panic!("не понизилось: {error}"));
     assert_eq!(
         body_size(&division.ll, "@fn_1"),
-        10,
+        6,
         "ограждение деления стоит не то, что записано"
     );
 
@@ -471,9 +406,8 @@ fn the_guards_cost_three_instructions_and_nothing_at_all_when_written() {
 
     let written = harness::llvm_text("div-written", WRITTEN_DIV)
         .unwrap_or_else(|error| panic!("не понизилось: {error}"));
-    let naive = without_zero_check(&written.ll);
-    let naive = rewritten(&naive, ", i32 1, i32 %v1", "or i32 %v1, 0");
-    let naive = rewritten(&naive, ", i32 %t4, i32 %t3", "or i32 %t3, 0");
+    let naive = rewritten(&written.ll, ", i32 1, i32 %v1", "or i32 %v1, 0");
+    let naive = rewritten(&naive, ", i32 %t3, i32 %t2", "or i32 %t2, 0");
     let honest = harness::llvm_object("div.cost.honest", &written, &tools, &pipeline);
     let mut stripped = written.clone();
     stripped.ll = naive;

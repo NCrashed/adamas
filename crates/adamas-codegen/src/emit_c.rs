@@ -183,7 +183,7 @@ pub enum EmitError {
     /// Приехать сюда она не может: `SimdOp::arith` отдаёт только три
     /// арифметические, и [`PrimOp::lanewise`] говорит то же. Отказ стоит
     /// **вместо** молчаливой печати `a / b` по дорожкам: у сдвига и деления
-    /// свои ограждения (насыщение счётчика, нулевой делитель), подорожечной
+    /// свои ограждения (насыщение счётчика, заворачивание `MIN / -1`), подорожечной
     /// формы у них нет, и напечатанный без них вектор считал бы не то.
     #[error("`{function}`: `{op}` подорожечной не бывает - ограждений у неё нет (§4.9)")]
     Lanewise {
@@ -2537,11 +2537,11 @@ impl Emitter<'_> {
                 value,
             } => self.simd_set(*lanes, *lane, vector, at, value, depth),
             Expr::SimdLane {
-                lanes,
+                lanes: _,
                 lane,
                 vector,
                 at,
-            } => self.simd_lane(*lanes, *lane, vector, at, depth),
+            } => self.simd_lane(*lane, vector, at, depth),
             Expr::SimdArith {
                 op,
                 lanes,
@@ -2678,36 +2678,16 @@ impl Emitter<'_> {
         let name = self.temp();
         let ty = vector_type(lanes, lane);
         let _ = writeln!(self.out, "{pad}{ty} {name} = {vector};");
-        // Номер вне ширины - обрыв, а не тихая запись мимо. Текст берётся у
-        // представления: LLVM-сторона печатает тот же, и второй записи не
-        // заводится (§4.9, `ir::LANE_OUTSIDE`).
-        let _ = writeln!(
-            self.out,
-            "{pad}if ({at} >= {lanes}u) {{ adamas_fail(\"{}\"); }}",
-            crate::ir::LANE_OUTSIDE
-        );
         let _ = writeln!(self.out, "{pad}{name}[{at}] = {value};");
         name
     }
 
     /// Значение дорожки (§4.9).
-    fn simd_lane(
-        &mut self,
-        lanes: u32,
-        lane: PrimTy,
-        vector: &Expr,
-        at: &Expr,
-        depth: usize,
-    ) -> String {
+    fn simd_lane(&mut self, lane: PrimTy, vector: &Expr, at: &Expr, depth: usize) -> String {
         let pad = Self::pad(depth);
         let vector = self.value(vector, depth);
         let at = self.value(at, depth);
         let name = self.temp();
-        let _ = writeln!(
-            self.out,
-            "{pad}if ({at} >= {lanes}u) {{ adamas_fail(\"{}\"); }}",
-            crate::ir::LANE_OUTSIDE
-        );
         let _ = writeln!(
             self.out,
             "{pad}{} {name} = {vector}[{at}];",
@@ -4815,21 +4795,14 @@ mod tests {
         }
     }
 
-    /// Текст обрыва по нулевому делителю у двух эмиттеров один.
-    ///
-    /// У LLVM-стороны он берётся из `ir::DIVISION_BY_ZERO` прямо, у C-стороны
-    /// живёт в `flat.c`: проверка стоит внутри `adamas_div_*`, а `flat.c` -
-    /// текст, а не печать. Вторая запись разошлась бы с первой молча, и здесь
-    /// она оплачена.
+    /// Нулевого делителя целое деление C-стороны не стережёт: примитив требует
+    /// доказательства ненулевости (§10 вопрос 224), и проверка в рантайме
+    /// платила бы за то, что тип уже доказал.
     #[test]
-    fn the_division_message_matches_the_helpers() {
-        let written = format!(
-            "#define ADAMAS_DIVISION_BY_ZERO \"{}\"",
-            crate::ir::DIVISION_BY_ZERO
-        );
+    fn the_division_helpers_do_not_guard_the_divisor() {
         assert!(
-            FLAT.contains(&written),
-            "`flat.c` не объявляет `{written}`: текст обрыва разъехался с эмиттером"
+            !FLAT.contains("b == 0"),
+            "`flat.c` снова проверяет нулевой делитель"
         );
     }
 }

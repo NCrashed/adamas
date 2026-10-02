@@ -466,12 +466,6 @@ pub const PROMOTE_SYMBOL: &str = "adamas_promote_extern";
 /// Имя константы с текстом обрыва по неизвестному тегу.
 const TAG_MESSAGE: &str = "@.str.tag";
 
-/// Имя константы с текстом обрыва по номеру дорожки (§4.9).
-const LANE_MESSAGE: &str = "@.str.lane";
-
-/// Имя константы с текстом обрыва по нулевому делителю (§4.3).
-const DIVZERO_MESSAGE: &str = "@.str.divzero";
-
 /// Смещение первого слота от начала объекта, в байтах (`adamas.h`).
 ///
 /// Не догадка и не соглашение этого файла: `adamas.h` держит на нём
@@ -1954,8 +1948,6 @@ impl Module {
             (TAG_MESSAGE, TAG_TEXT),
             (BRANCH_MESSAGE, BRANCH_TEXT),
             (MISSING_MESSAGE, MISSING_TEXT),
-            (LANE_MESSAGE, LANE_TEXT),
-            (DIVZERO_MESSAGE, DIVZERO_TEXT),
             (SHAPELESS_MESSAGE, SHAPELESS_TEXT),
             (ARITYLESS_MESSAGE, ARITYLESS_TEXT),
         ] {
@@ -2300,18 +2292,6 @@ const MISSING_MESSAGE: &str = "@.str.missing";
 
 /// Текст обрыва по операции без хендлера.
 const MISSING_TEXT: &str = "операция без хендлера";
-
-/// Текст обрыва по номеру дорожки вне ширины (§4.9).
-///
-/// Берётся у представления, а не пишется здесь: C-бэкенд печатает **этот же**
-/// текст, и второй его записи не заводится - см. [`crate::ir::LANE_OUTSIDE`].
-const LANE_TEXT: &str = crate::ir::LANE_OUTSIDE;
-
-/// Текст обрыва по нулевому делителю (§4.3).
-///
-/// Берётся у представления по той же причине, что и предыдущий: C-сторона
-/// печатает **этот же** текст из `flat.c` - см. [`crate::ir::DIVISION_BY_ZERO`].
-const DIVZERO_TEXT: &str = crate::ir::DIVISION_BY_ZERO;
 
 /// Имя строки с текстом обрыва по замыканию без параметров.
 const ARITYLESS_MESSAGE: &str = "@.str.arityless";
@@ -3297,14 +3277,10 @@ impl<'a> Builder<'a> {
 
     /// Целое деление и остаток (§4.3).
     ///
-    /// Стережёт **два** случая, и оба у LLVM неопределённое поведение, а не
-    /// `poison`: нулевой делитель и, у знакового, `MIN / -1`.
-    ///
-    /// Ноль обрывает прогон текстом [`crate::ir::DIVISION_BY_ZERO`] - тем же,
-    /// что печатает C-сторона из `flat.c`. Довод тот же, что у номера дорожки
-    /// вне ширины: ответа у этого случая нет ни у одного из трёх вычислителей,
-    /// и молчаливое умолчание сделало бы третий частичный примитив языка
-    /// непохожим на два первых.
+    /// Нулевой делитель не стережётся: примитив требует доказательства
+    /// ненулевости (§10 вопрос 224), и ноль приходит только с ложной аксиомой -
+    /// тогда поведение неопределено. Стережётся один случай, `MIN / -1` у
+    /// знакового: он у LLVM тоже неопределённое поведение, а ответ у него есть.
     ///
     /// `MIN / -1` **заворачивается** наравне с умножением: делитель `-1`
     /// подменяется единицей, а частное после этого отрицается - `0 - MIN` даёт
@@ -3312,21 +3288,6 @@ impl<'a> Builder<'a> {
     /// поэтому второго `select` у остатка нет.
     fn division(&mut self, op: PrimOp, ty: PrimTy, left: &str, right: &str) -> String {
         let machine = machine(ty);
-        let zero = self.binary("icmp", "eq", machine, right, "0");
-        let bad = format!("div{}.zero", self.temps);
-        let good = format!("div{}.ok", self.temps);
-        self.instruction(
-            &format!("br i1 {zero}, label %{bad}, label %{good}"),
-            self.here(),
-        );
-        self.start(&bad);
-        self.instruction(
-            &format!("call void @adamas_fail(ptr {DIVZERO_MESSAGE})"),
-            self.here(),
-        );
-        self.instruction("unreachable", self.here());
-        self.start(&good);
-
         if !ty.signed() {
             let opcode = if op == PrimOp::Div { "udiv" } else { "urem" };
             return self.binary(opcode, "", machine, left, right);
@@ -3385,43 +3346,6 @@ impl<'a> Builder<'a> {
         Ok(name)
     }
 
-    /// Обрыв, если номер дорожки вышел за ширину (§4.9).
-    ///
-    /// **Не украшение, а сведение двух бэкендов.** `extractelement` с номером
-    /// вне ширины отдаёт `poison`, то есть молча неверный ответ; C-сторона в
-    /// том же случае зовёт `adamas_fail`. Разойдись они - и договор трёх
-    /// вычислителей держался бы только на программах, которые за ширину не
-    /// выходят, а обещание «одна программа - одно значение» перестало бы быть
-    /// про все программы. Машина третьей стороной кончается тем же текстом
-    /// (§10 вопрос 220).
-    ///
-    /// Цена нулевая на обычном случае: номер там литерал, и `opt` сворачивает
-    /// сравнение с константой вместе с веткой. Измерено на ядре свидетеля
-    /// (`tests/simd.rs`, 2026-09-16, LLVM 21.1.8): **51 инструкция** в штатном
-    /// выходе и до проверки, и после, пакетных те же четыре. На рантаймовом
-    /// номере проверка остаётся и стоит сравнение с переходом - столько же,
-    /// сколько стоит она же у массива (`adamas_array_at`).
-    fn lane_in_range(&mut self, lanes: u32, at: &str) {
-        let verdict = self.temp();
-        self.instruction(
-            &format!("{verdict} = icmp uge i64 {at}, {lanes}"),
-            self.here(),
-        );
-        let bad = format!("lane{}.out", self.temps);
-        let good = format!("lane{}.in", self.temps);
-        self.instruction(
-            &format!("br i1 {verdict}, label %{bad}, label %{good}"),
-            self.here(),
-        );
-        self.start(&bad);
-        self.instruction(
-            &format!("call void @adamas_fail(ptr {LANE_MESSAGE})"),
-            self.here(),
-        );
-        self.instruction("unreachable", self.here());
-        self.start(&good);
-    }
-
     /// Тот же вектор с переписанной дорожкой (§4.9): `insertelement`.
     fn insert(
         &mut self,
@@ -3434,7 +3358,6 @@ impl<'a> Builder<'a> {
         let source = self.value(vector_expr)?;
         let at = self.value(at)?;
         let value = self.value(value)?;
-        self.lane_in_range(lanes, &at);
         let name = self.temp();
         self.instruction(
             &format!(
@@ -3457,7 +3380,6 @@ impl<'a> Builder<'a> {
     ) -> Result<String, LlvmError> {
         let source = self.value(vector_expr)?;
         let at = self.value(at)?;
-        self.lane_in_range(lanes, &at);
         let name = self.temp();
         self.instruction(
             &format!(

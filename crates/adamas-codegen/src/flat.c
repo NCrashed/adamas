@@ -103,12 +103,6 @@ static uint64_t adamas_slot_word(adamas_value slot) {
     return bits;
 }
 
-/* Текст обрыва по нулевому делителю. Тот же, что печатает LLVM-эмиттер, и
- * тот же, что стоит в `ir::DIVISION_BY_ZERO`: обрыв виден пользователю, то
- * есть входит в наблюдаемое поведение наравне с ответом. Совпадение сверяется
- * тестом (`emit_c`, `the_division_message_matches_the_helpers`). */
-#define ADAMAS_DIVISION_BY_ZERO "деление на ноль"
-
 #define ADAMAS_FLAT_INTEGER(name, ctype, utype, width, wide, spec)                                 \
     static ctype adamas_bits_##name(uint64_t bits) { return (ctype)(utype)bits; }                  \
     static uint64_t adamas_word_##name(ctype value) { return (uint64_t)(utype)value; }             \
@@ -160,9 +154,10 @@ static uint64_t adamas_slot_word(adamas_value slot) {
  * реализационно определено, gcc и clang это документируют, C23 требует; та же
  * опора, что у обратного приведения к знаковому выше.
  *
- * Деление стережёт **два** случая, и второй теряется чаще первого. Ноль
- * обрывает прогон - ответа у него нет ни у одного из трёх вычислителей.
- * `MIN / -1` в тип не помещается, и `idiv` на x86 отвечает на него сигналом;
+ * Нулевого делителя деление не стережёт: примитив требует доказательства
+ * ненулевости (§10 вопрос 224), и добраться до нуля можно только ложной
+ * аксиомой - тогда поведение неопределено, как у `believe_me`. Стережётся
+ * один случай: `MIN / -1` в тип не помещается, и `idiv` на x86 отвечает на него сигналом;
  * здесь он заворачивается по ширине наравне с умножением (§4.3, `-fwrapv`),
  * то есть даёт `MIN`. Остаток от `-1` при этом ноль всегда. */
 #define ADAMAS_FLAT_SIGNED(name, ctype, utype, width)                                              \
@@ -172,14 +167,12 @@ static uint64_t adamas_slot_word(adamas_value slot) {
         return (ctype)(a >> place);                                                                \
     }                                                                                              \
     static ctype adamas_div_##name(ctype a, ctype b) {                                             \
-        if (b == 0) { adamas_fail(ADAMAS_DIVISION_BY_ZERO); }                                      \
         if (b == (ctype)-1) {                                                                      \
             return (ctype)(utype)(0ULL - (unsigned long long)(utype)a);                            \
         }                                                                                          \
         return (ctype)(a / b);                                                                     \
     }                                                                                              \
     static ctype adamas_rem_##name(ctype a, ctype b) {                                             \
-        if (b == 0) { adamas_fail(ADAMAS_DIVISION_BY_ZERO); }                                      \
         if (b == (ctype)-1) { return (ctype)0; }                                                   \
         return (ctype)(a % b);                                                                     \
     }
@@ -193,11 +186,9 @@ static uint64_t adamas_slot_word(adamas_value slot) {
         return (ctype)(utype)(((unsigned long long)(utype)a) >> count);                            \
     }                                                                                              \
     static ctype adamas_div_##name(ctype a, ctype b) {                                             \
-        if (b == 0) { adamas_fail(ADAMAS_DIVISION_BY_ZERO); }                                      \
         return (ctype)(a / b);                                                                     \
     }                                                                                              \
     static ctype adamas_rem_##name(ctype a, ctype b) {                                             \
-        if (b == 0) { adamas_fail(ADAMAS_DIVISION_BY_ZERO); }                                      \
         return (ctype)(a % b);                                                                     \
     }
 

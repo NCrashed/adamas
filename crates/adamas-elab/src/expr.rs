@@ -4135,7 +4135,7 @@ impl<'a> Elaborator<'a> {
         // Написанный тип записи раздаётся полям: `{ x = 1.5 }` при
         // `{ x : Float32 }` читает `Float32` отсюда, и другого места у него нет
         // - значение записи собирается синтезом.
-        let telescope =
+        let mut telescope =
             awaited.and_then(|ty| match &*whnf_solved(self.signature, self.metas, ty) {
                 Value::Record(telescope) => Some(telescope.clone()),
                 _ => None,
@@ -4158,8 +4158,24 @@ impl<'a> Elaborator<'a> {
             });
             // Поле уезжает внутрь собранного - та же позиция, что у аргумента
             // конструктора (§3.3).
+            let expected = self.awaited.clone();
             let value = self.placed(Position::Field, |it| it.expr(value, Mult::One))?;
-            earlier.push(self.ctx.eval(&value));
+            // Значение поля нужно только типам следующих полей, и вычисляется
+            // оно лишь проверенным: плохо типизированное (`(Zero -> _) Type`)
+            // уронило бы вычислитель. Не прошло - ожидания у следующих полей
+            // нет, и об ошибке скажет проверка определения.
+            let checked = expected.as_ref().is_some_and(|ty| {
+                let mark = self.metas.mark();
+                let fine =
+                    check(&self.ctx.speculating(), self.metas, Mult::Zero, &value, ty).is_ok();
+                self.metas.rollback(mark);
+                fine
+            });
+            if checked {
+                earlier.push(self.ctx.eval(&value));
+            } else {
+                telescope = None;
+            }
             written.push((CoreName::from(&*name.text), Rc::new(value)));
         }
         self.produced = None;

@@ -5048,6 +5048,9 @@ impl<'a> Lowerer<'a> {
                 Repr::Packed(pack) => self.packings[pack.0 as usize]
                     .sole()
                     .is_some_and(|variant| variant.ctor.is_none()),
+                // Запись с указательными полями плотной не бывает: её форма
+                // уже боксированная, и прибывает она ею же.
+                Repr::Record(_) => true,
                 _ => false,
             };
             hints.push(if record { repr } else { Repr::Boxed });
@@ -5411,8 +5414,12 @@ impl<'a> Lowerer<'a> {
         let mut bindings: Vec<Binding> = Vec::with_capacity(parameters.len());
         for (at, (mult, name)) in parameters.iter().enumerate() {
             let mut fact = Fact::present(*mult);
-            if let Some(Repr::Packed(pack)) = hints.get(at) {
-                fact = fact.shaped(Repr::Record(self.boxed_shape(*pack)?));
+            match hints.get(at) {
+                Some(Repr::Packed(pack)) => {
+                    fact = fact.shaped(Repr::Record(self.boxed_shape(*pack)?));
+                }
+                Some(Repr::Record(tag)) => fact = fact.shaped(Repr::Record(*tag)),
+                _ => {}
             }
             bindings.push(Binding {
                 name: name.clone(),
@@ -6674,6 +6681,10 @@ fn escaping(term: &Term, depth: u32, out: &mut BTreeSet<u32>) {
             for branch in &case.branches {
                 escaping(&branch.body, depth, out);
             }
+        }
+        Term::Split(split) => {
+            escaping(&split.scrutinee, depth, out);
+            escaping(&split.body, depth, out);
         }
         Term::Object(fields) => {
             for (_, value) in fields.iter() {

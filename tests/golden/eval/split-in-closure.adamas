@@ -1,0 +1,47 @@
+-- Разбор записи внутри замыкания и запись с указательными полями параметром
+-- лямбды (§4.11, §10 вопросы 223 и 231).
+--
+-- Машина отвечала верно, понижение отказывало дважды. Обход свободных
+-- переменных замыкания не заходил в узел `Split`: разбираемая запись не
+-- попадала в захват - «переменная #1 вне захваченной среды». И подсказка
+-- формы параметру лямбды (вопрос 223) знала только плотную запись: запись с
+-- полями `Nat` плотной не бывает, её форма сразу боксированная, и `p.b` в
+-- лямбде отвергался «форма записи потеряна».
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+type Two = { a : Nat, b : Nat }
+
+-- Параметр-запись разбирается в замыкании.
+viaParam : Two -> Nat
+viaParam p =
+  let k : Unit -> Nat = \_u -> case p of
+        (_x, y) -> y
+  k MkUnit
+
+-- То же со связанной `let` записью.
+viaLet : Nat
+viaLet =
+  let p : Two = { a = Zero, b = Succ (Succ Zero) }
+  let k : Unit -> Nat = \_u -> case p of
+        (_x, y) -> y
+  k MkUnit
+
+apply : (Two -> Nat) -> Nat
+apply k = k { a = Zero, b = Succ (Succ (Succ Zero)) }
+
+-- Проекция из параметра лямбды, чей тип написан у вызываемого.
+projected : Nat
+projected = apply (\p -> p.b)
+
+main : List Nat
+main = Cons (viaParam { a = Zero, b = Succ Zero }) (Cons viaLet (Cons projected Nil))

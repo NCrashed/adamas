@@ -3706,7 +3706,8 @@ fn infer_split(
         }
     }
 
-    let body_ty = split_body_type(size, telescope, split.consumed, &motive);
+    let ambient = ctx.row().map(|value| quote(size, value));
+    let body_ty = split_body_type(size, telescope, split.consumed, &motive, &ambient);
     let body_usage = framed(
         check(ctx, metas, sigma, &split.body, &ctx.eval(&body_ty)),
         Frame::Branch(0),
@@ -3719,11 +3720,15 @@ fn infer_split(
 
 /// Тип тела разбора записи: `(q · r x₁ : A₁) -> … -> motive {f₁ = x₁, …}`, где
 /// `Aᵢ` видит предыдущие поля связываниями.
+///
+/// Row у стрелок **окружающая**, как у ветви `case` (§3.4): тело разбора работает
+/// там же, где сам разбор, и пустая row отвергала бы в нём всякий эффект.
 fn split_body_type(
     size: u32,
     telescope: &crate::value::Telescope,
     consumed: Mult,
     motive: &Rc<Value>,
+    ambient: &Row<Term>,
 ) -> Term {
     let fields = telescope.fields();
     let count = u32::try_from(fields.len()).unwrap_or(u32::MAX);
@@ -3754,12 +3759,13 @@ fn split_body_type(
             .collect(),
     );
     let mut body_ty = Term::App(Rc::new(quote(inner, motive)), Rc::new(object));
-    for (mult, name, domain) in binders.into_iter().rev() {
+    for (at, (mult, name, domain)) in binders.into_iter().enumerate().rev() {
+        let depth = u32::try_from(at).unwrap_or(u32::MAX).saturating_add(1);
         body_ty = Term::Pi(
             Binder::explicit(mult),
             name,
             Rc::new(domain),
-            Row::empty(),
+            ambient.map(|term| shifted(term, depth)),
             Rc::new(body_ty),
         );
     }

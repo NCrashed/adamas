@@ -1,0 +1,32 @@
+-- Тело разбора записи работает в окружающей row (§3.4, §10 вопрос 231).
+--
+-- Стрелки тела `Split` строила проверка, и row у них стояла пустая: эффект в
+-- теле `let (a, b) = …` отвергался «эффекты `{Log}` не погашены», хотя тот же
+-- эффект в ветви `case` проходил. Ветвь разбора по конструктору получала
+-- окружающую с самого начала; теперь её получает и разбор записи.
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+-- Отметка первого поля, ответ - второе: `[Zero, Succ Zero]`.
+split : {Log} Nat
+split =
+  let (a, b) = (Zero, Succ Zero)
+  note a
+  b
+
+main : List Nat
+main = handle split with
+  return v -> Cons v Nil
+  note n -> Cons n (resume MkUnit)

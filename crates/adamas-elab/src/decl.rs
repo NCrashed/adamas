@@ -444,7 +444,7 @@ fn detached(
 fn written_alias(
     signature: &mut Signature,
     metas: &mut Metas,
-    owned: &Owned,
+    owned: &mut Owned,
     fixities: &Fixities,
     instances: &Instances,
     warnings: &mut Warnings,
@@ -470,7 +470,17 @@ fn written_alias(
             body,
         },
         span,
-    )
+    )?;
+    // Синоним записи владеет так же, как его тело (§3.3, §10 вопрос 231):
+    // `type Halves = { left : Span, right : Span }` уникален, и правило владения
+    // узнаёт его по имени.
+    let how = Elaborator::new(signature, metas, owned, fixities, warnings)
+        .within(within)
+        .owned_of(body);
+    if let Some(how) = how {
+        owned.declare(&qualify(within, &written.name.text), how);
+    }
+    Ok(())
 }
 
 /// Написанный алиас: имя, параметры и тело.

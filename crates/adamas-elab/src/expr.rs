@@ -2009,9 +2009,38 @@ impl<'a> Elaborator<'a> {
         Some(self.qualified(&written).unwrap_or(written))
     }
 
-    /// Как объявлен тип, стоящий головой написанного.
-    fn owned_of(&self, ty: &Expr) -> Option<Ownership> {
-        self.owned.how(&self.owned_head(ty)?)
+    /// Как владеет **синтезированный** тип: по голове, а запись - структурно,
+    /// сильнейшим владением полей ([`Self::owned_of`] - то же для написанного).
+    fn owned_value(&mut self, ty: &Rc<Value>) -> Option<Ownership> {
+        let reduced = whnf_solved(self.signature, self.metas, ty);
+        if let Value::Record(telescope) = &*reduced {
+            let telescope = telescope.clone();
+            let mut earlier = Vec::with_capacity(telescope.fields().len());
+            let mut found = Vec::with_capacity(telescope.fields().len());
+            for at in 0..telescope.fields().len() {
+                let field = telescope.instantiated(at, &earlier, &[], &[], &[]);
+                found.push(self.owned_value(&field));
+                let level = self.ctx.size() + u32::try_from(at).unwrap_or(u32::MAX);
+                earlier.push(Value::var(adamas_core::value::Lvl(level)));
+            }
+            return strongest(found.into_iter());
+        }
+        head_name(&reduced).and_then(|head| self.owned.how(head))
+    }
+
+    /// Как владеет написанный тип: по объявлению головы, а запись и кортеж -
+    /// **структурно**, сильнейшим владением полей (§3.3, §10 вопрос 231): запись
+    /// с уникальным полем уникальна, с ресурсным - ресурс.
+    pub(crate) fn owned_of(&self, ty: &Expr) -> Option<Ownership> {
+        match &ty.kind {
+            ExprKind::RecordType(fields, _) => {
+                strongest(fields.iter().map(|field| self.owned_of(&field.ty)))
+            }
+            ExprKind::Tuple(items) if !items.is_empty() => {
+                strongest(items.iter().map(|item| self.owned_of(item)))
+            }
+            _ => self.owned.how(&self.owned_head(ty)?),
+        }
     }
 
     /// Деструктор типа, стоящего головой написанного.
@@ -3856,7 +3885,7 @@ impl<'a> Elaborator<'a> {
     /// У написанного имени берётся кратность его связывания: разбирается
     /// именно оно. У составного выражения связывания нет, и решает голова
     /// типа - владеемое потребляется однажды, прочее неограниченно.
-    fn consumption(&self, scrutinee: &Expr, ty: &Term) -> Mult {
+    fn consumption(&mut self, scrutinee: &Expr, ty: &Term) -> Mult {
         if let ExprKind::Name(name) = &scrutinee.kind {
             if let Some(bound) = self
                 .scope
@@ -3893,6 +3922,8 @@ impl<'a> Elaborator<'a> {
         }
         match head {
             Term::Const(name, _, _) if self.owned.owns(name) => Mult::One,
+            // Запись владеет структурно (§10 вопрос 231): у неё головы нет.
+            Term::Record(_) if self.owned_value(&self.ctx.eval(ty)).is_some() => Mult::One,
             _ => Mult::Many,
         }
     }
@@ -3996,20 +4027,18 @@ impl<'a> Elaborator<'a> {
 
     /// Поля записи телескопом - каждое под предыдущими.
     ///
-    /// **Владеемого поля у записи не бывает.** У конструктора это правило с
-    /// исключениями - держатель бывает `unique` или `resource`, - а у записи
-    /// исключений нет: объявляется она `type`, деструктора у неё нет, а
-    /// связывание её `ω`. `type Box = { h : File }` поэтому не закрывался
-    /// никогда, а `ω`-связывание позволяло проецировать поле сколько угодно
-    /// раз, то есть закрыть дескриптор дважды. Прямой аналог на `data`-обёртке
-    /// отвергался всегда - запись была единственным обходом (§3.3, вопрос 77).
+    /// Владеемое поле делает запись владеемой **структурно** (§3.3, §10 вопрос
+    /// 231): запись с уникальным полем уникальна, её связывание линейно, и
+    /// поле достаётся разбором однажды. Ресурсное поле пока отвергается: такой
+    /// записи нужен деструктор, закрывающий поля, а его синтеза ещё нет -
+    /// без него `type Box = { h : File }` не закрывался бы никогда (вопрос 77).
     fn record_fields(&mut self, fields: &[ast::RecordField]) -> Result<Vec<CoreField>, ElabError> {
         let Some((field, rest)) = fields.split_first() else {
             return Ok(Vec::new());
         };
         Self::binds(&field.name)?;
         let ty = self.typing(|it| it.expr(&field.ty, Mult::Many))?;
-        if let Some(how) = self.owned_of(&field.ty) {
+        if let Some(how @ Ownership::Resource) = self.owned_of(&field.ty) {
             return Err(ElabError::OwnedRecordField {
                 field: Rc::clone(&field.name.text),
                 ty: crate::own::head(&field.ty)
@@ -4224,7 +4253,8 @@ impl<'a> Elaborator<'a> {
             // нет, и об ошибке скажет проверка определения.
             let checked = expected.as_ref().is_some_and(|ty| {
                 let mark = self.metas.mark();
-                let fine = check(&self.ctx.speculating(), self.metas, Mult::Zero, &value, ty).is_ok();
+                let fine =
+                    check(&self.ctx.speculating(), self.metas, Mult::Zero, &value, ty).is_ok();
                 self.metas.rollback(mark);
                 fine
             });
@@ -6505,7 +6535,18 @@ impl<'a> Elaborator<'a> {
             };
             (value, found)
         };
-        let consumed = Self::multiplicity(binding.mult, Mult::Many);
+        // Владеемая запись разбирается при `1` - её поля приходят линейными;
+        // написанная `ω` отвергается тем же отказом, что у связывания с именем.
+        let consumed = match (self.owned_value(&found), binding.mult.map(|ann| ann.mult)) {
+            (Some(owned), Some(ast::Mult::Many)) => {
+                return Err(ElabError::UnrestrictedOwned {
+                    owned,
+                    span: binding.mult.map_or(binding.span, |ann| ann.span),
+                });
+            }
+            (Some(_), _) => Mult::One,
+            (None, _) => Self::multiplicity(binding.mult, Mult::Many),
+        };
         self.split_record(pattern, value, &found, consumed, &mut |it: &mut Self| {
             it.bindings(tail, rest, position)
         })
@@ -6728,7 +6769,7 @@ impl<'a> Elaborator<'a> {
         };
         let quoted = quote(self.ctx.size(), &found);
         let head = head_name(&found).cloned();
-        let owns = head.as_deref().and_then(|it| self.owned.how(it));
+        let owns = self.owned_value(&found);
         let mult = match owns {
             None => Self::multiplicity(binding.mult, Mult::Many),
             // Владеемое связывается `1`; написанная `ω` отвергается там же, где
@@ -8392,4 +8433,13 @@ fn untupled_lambda(params: &[ast::LamParam], body: &Expr) -> Option<(Vec<ast::La
         })
         .collect();
     Some((params, rewritten.body))
+}
+
+/// Сильнейшее из владений полей: ресурс сильнее уникального, уникальное -
+/// отсутствия владения.
+fn strongest(fields: impl Iterator<Item = Option<Ownership>>) -> Option<Ownership> {
+    fields.flatten().max_by_key(|how| match how {
+        Ownership::Unique => 0,
+        Ownership::Resource => 1,
+    })
 }

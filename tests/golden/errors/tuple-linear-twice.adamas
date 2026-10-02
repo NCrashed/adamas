@@ -1,0 +1,20 @@
+-- Половина уникальной пары употреблена дважды (§3.3, §10 вопрос 231).
+--
+-- Пара с уникальными полями разбирается при `1`, и поле приходит линейным:
+-- второе употребление - отказ, как у всякого уникального связывания.
+
+unique data Span (0 lo : UInt64) (0 hi : UInt64) where
+  MkSpan : Span lo hi
+
+halves : (1 s : Span 0 10) -> (Span 0 4, Span 4 10)
+halves s = case s of
+  MkSpan -> (MkSpan, MkSpan)
+
+width : (1 s : Span 0 4) -> UInt64
+width s = case s of
+  MkSpan -> 4
+
+twice : (1 s : Span 0 10) -> UInt64
+twice s =
+  let (left, right) = halves s
+  width left + width left

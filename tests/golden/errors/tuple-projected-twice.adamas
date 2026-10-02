@@ -1,0 +1,21 @@
+-- Уникальная пара связана именем и спроецирована дважды (§3.3, §10 вопрос 231).
+--
+-- Запись с уникальным полем уникальна сама: связывание без аннотации получает
+-- `1`, и вторая проекция расходует его второй раз. Достаются поля разбором.
+
+unique data Span (0 lo : UInt64) (0 hi : UInt64) where
+  MkSpan : Span lo hi
+
+halves : (1 s : Span 0 10) -> (Span 0 4, Span 4 10)
+halves s = case s of
+  MkSpan -> (MkSpan, MkSpan)
+
+both : (1 a : Span 0 4) -> (1 b : Span 4 10) -> UInt64
+both a b = case a of
+  MkSpan -> case b of
+    MkSpan -> 10
+
+twice : (1 s : Span 0 10) -> UInt64
+twice s =
+  let pair = halves s
+  both pair._1 pair._2

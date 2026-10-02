@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: record-holds-a-resource.adamas:20:18: поле `h` записи держит `File` (resource), а запись владения не несёт: владеемое поле требует владеемого держателя
+Error: record-holds-a-resource.adamas:21:18: поле `h` записи держит `File` (resource): деструктор записи, закрывающий поля, ещё не синтезируется
   type Box = { h : File }
                    ^^^^

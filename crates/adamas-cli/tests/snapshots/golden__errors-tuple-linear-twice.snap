@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: tuple-linear-twice.adamas:19:7: `left` объявлена с кратностью 1, а использована ω
+    let (left, right) = halves s
+        ^^^^^^^^^^^^^^^^^^^^^^^^

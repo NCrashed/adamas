@@ -1,0 +1,35 @@
+-- Разделяемые интервалы файла: пара уникальных значений кортежем (§3.3, §10
+-- вопрос 231).
+--
+-- Набросок файлового API автора: `split` делит интервал `[lo, hi)` в точке
+-- `m`, `merge` склеивает соседние. Пара `(Span f lo m, Span f m hi)` -
+-- запись с уникальными полями, и владеет она **структурно**: связывается
+-- `1`, разбирается однажды, поля приходят линейными. Двойное употребление
+-- половины или самой пары отвергается (`errors/tuple-linear-twice`,
+-- `errors/tuple-projected-twice`).
+
+type FileId = UInt64
+
+unique data Span (0 f : FileId) (0 lo : UInt64) (0 hi : UInt64) where
+  MkSpan : Span f lo hi
+
+split : (1 s : Span f lo hi) -> (m : UInt64) -> (0 p : Equal Bool (leUInt64 lo m) True) -> (0 q : Equal Bool (leUInt64 m hi) True) -> (Span f lo m, Span f m hi)
+split s m p q = case s of
+  MkSpan -> (MkSpan, MkSpan)
+
+merge : (1 a : Span f lo m) -> (1 b : Span f m hi) -> Span f lo hi
+merge a b = case a of
+  MkSpan -> case b of
+    MkSpan -> MkSpan
+
+width : (1 s : Span 7 0 10) -> UInt64
+width s = case s of
+  MkSpan -> 10
+
+opened : UInt64 -> Span 7 0 10
+opened _ = MkSpan
+
+main : UInt64
+main =
+  let (left, right) = split (opened 0) 4 Refl Refl
+  width (merge left right)

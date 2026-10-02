@@ -131,6 +131,9 @@ pub enum Pattern {
     Constructor(Name, Vec<Pattern>),
     /// Литерал примитива: `countdown 0 = 0` (§4.3).
     Lit(Literal),
+    /// Запись подпаттернами полей в порядке телескопа - кортеж `(a, b)`
+    /// (§4.2, §10 вопрос 231). Неопровержима сама, опровержимы её поля.
+    Record(Vec<Pattern>),
 }
 
 impl fmt::Display for Pattern {
@@ -138,6 +141,10 @@ impl fmt::Display for Pattern {
         match self {
             Self::Var(name) => write!(f, "{name}"),
             Self::Lit(literal) => write!(f, "{literal}"),
+            Self::Record(fields) => {
+                let fields: Vec<String> = fields.iter().map(ToString::to_string).collect();
+                write!(f, "({})", fields.join(", "))
+            }
             Self::Constructor(name, fields) if fields.is_empty() => write!(f, "{name}"),
             Self::Constructor(name, fields) => {
                 write!(f, "{name}")?;
@@ -256,6 +263,23 @@ pub enum PatternError {
         expected: usize,
         /// Сколько написано.
         found: usize,
+    },
+
+    /// У кортежа в паттерне не столько компонент, сколько полей у записи.
+    #[error("кортеж: {found} компонент при {expected} полях записи")]
+    RecordArity {
+        /// Сколько полей у записи.
+        expected: usize,
+        /// Сколько компонент написано.
+        found: usize,
+    },
+
+    /// В одной колонке кортеж и конструктор либо литерал: значение - либо
+    /// запись, либо нет.
+    #[error("кортеж и конструктор либо литерал разбирают одно значение типа `{ty}`")]
+    RecordColumn {
+        /// Тип разбираемого значения.
+        ty: String,
     },
 
     /// Клаузы не покрывают всех случаев.
@@ -565,20 +589,46 @@ fn written(clauses: &[Clause], index: usize) -> Option<Name> {
 /// Из объявления имя приходит `_` - безымянная стрелка `Succ : Nat -> Nat`
 /// имени не несёт, - и телескоп печатал позицию вместо написанного автором
 /// (§10 вопрос 69).
-fn bound_as(plan: &Split<'_>, constructor: &Name, at: usize) -> Option<Name> {
-    plan.rows
-        .iter()
-        .find_map(|row| match row.patterns.get(plan.column)? {
-            Pat::Ctor(name, arguments) if name == constructor => match arguments.get(at)? {
-                Pat::Var(variable) => row
-                    .names
-                    .get(*variable)
-                    .filter(|it| &***it != "_")
-                    .map(Rc::clone),
-                _ => None,
-            },
+fn bound_as(plan: &Split<'_>, selected: Selected<'_>, at: usize) -> Option<Name> {
+    plan.rows.iter().find_map(|row| {
+        match selected.fields(row.patterns.get(plan.column)?)?.get(at)? {
+            Pat::Var(variable) => row
+                .names
+                .get(*variable)
+                .filter(|it| &***it != "_")
+                .map(Rc::clone),
             _ => None,
-        })
+        }
+    })
+}
+
+/// Чем разобрана колонка: конструктором либо записью (§10 вопрос 231).
+#[derive(Clone, Copy)]
+enum Selected<'a> {
+    Constructor(&'a Name),
+    Record,
+}
+
+impl Selected<'_> {
+    /// Подпаттерны полей, если паттерн выбирает то же, что разбор.
+    fn fields(self, pattern: &Pat) -> Option<&[Pat]> {
+        match (pattern, self) {
+            (Pat::Ctor(name, fields), Self::Constructor(constructor)) if name == constructor => {
+                Some(fields)
+            }
+            (Pat::Record(fields), Self::Record) => Some(fields),
+            _ => None,
+        }
+    }
+
+    /// Пример непокрытого случая на месте разобранной колонки.
+    fn example(self, fields: usize) -> Pattern {
+        let holes = vec![Pattern::Var("_".into()); fields];
+        match self {
+            Self::Constructor(constructor) => Pattern::Constructor(Rc::clone(constructor), holes),
+            Self::Record => Pattern::Record(holes),
+        }
+    }
 }
 
 /// Клауза, разбирающая невозможный случай, - ошибка на месте, а не
@@ -732,6 +782,8 @@ enum Pat {
     Ctor(Name, Vec<Pat>),
     /// Литерал примитива.
     Lit(Literal),
+    /// Запись с подпаттернами полей.
+    Record(Vec<Pat>),
 }
 
 /// Нумерует переменные слева направо в глубину, попутно запоминая их имена.
@@ -755,6 +807,12 @@ fn number(pattern: &Pattern, next: &mut usize, names: &mut Vec<Name>) -> Pat {
                 .collect(),
         ),
         Pattern::Lit(literal) => Pat::Lit(*literal),
+        Pattern::Record(fields) => Pat::Record(
+            fields
+                .iter()
+                .map(|field| number(field, next, names))
+                .collect(),
+        ),
     }
 }
 
@@ -863,7 +921,7 @@ fn standing(example: &[Pattern], path: &[usize]) -> Option<Literal> {
     let (first, rest) = path.split_first()?;
     let mut current = example.get(*first)?;
     for step in rest {
-        let Pattern::Constructor(_, fields) = current else {
+        let (Pattern::Constructor(_, fields) | Pattern::Record(fields)) = current else {
             return None;
         };
         current = fields.get(*step)?;
@@ -943,10 +1001,27 @@ impl Compiler<'_> {
         let Some(split) = first
             .patterns
             .iter()
-            .position(|pattern| matches!(pattern, Pat::Ctor(..) | Pat::Lit(_)))
+            .position(|pattern| matches!(pattern, Pat::Ctor(..) | Pat::Lit(_) | Pat::Record(_)))
         else {
             return Ok(self.leaf(ctx, columns, first));
         };
+
+        // Значение колонки - либо запись, либо нет: кортеж рядом с
+        // конструктором или литералом разбирать нечем (§10 вопрос 231).
+        let record = matches!(first.patterns[split], Pat::Record(_));
+        let mixed = rows.iter().any(|row| match &row.patterns[split] {
+            Pat::Record(_) => !record,
+            Pat::Ctor(..) | Pat::Lit(_) => record,
+            Pat::Var(_) | Pat::Any => false,
+        });
+        if mixed {
+            return Err(PatternError::RecordColumn {
+                ty: ctx.quote(&columns[split].ty).to_string(),
+            });
+        }
+        if record {
+            return self.record(ctx, columns, rows, target, example, split);
+        }
 
         // Литеральная колонка идёт своим путём: конструкторов у примитива нет,
         // и разбор по ней - равенство, а не выбор ветви (§4.3).
@@ -1103,7 +1178,13 @@ impl Compiler<'_> {
 
         let mut inner_rows = Vec::new();
         for row in rows {
-            if let Some(row) = specialise(row, at, &constructor, fields.len(), &column.value)? {
+            if let Some(row) = specialise(
+                row,
+                at,
+                Selected::Constructor(&constructor),
+                fields.len(),
+                &column.value,
+            )? {
                 inner_rows.push(row);
             }
         }
@@ -1447,6 +1528,192 @@ impl Compiler<'_> {
         }))
     }
 
+    /// Разбор колонки-записи узлом `Split` (§4.2, §10 вопрос 231).
+    ///
+    /// Ветвь одна - запись неопровержима, - и устроена как ветвь конструктора
+    /// без индексов: поля становятся колонками, соседи, чьи типы зависят от
+    /// разбираемого, выносятся в мотив, а переменная клаузы, связавшая запись
+    /// целиком, получает объект из полей. Опровержимы подпаттерны полей, и
+    /// разбирает их дальше тот же обход.
+    fn record(
+        &mut self,
+        ctx: &Ctx<'_>,
+        columns: &[Column],
+        rows: &[Row],
+        target: &Term,
+        example: &[Pattern],
+        at: usize,
+    ) -> Result<Tree, PatternError> {
+        let column = &columns[at];
+        let unmatchable = || PatternError::NotMatchable {
+            ty: ctx.quote(&column.ty).to_string(),
+        };
+        let reduced = crate::conv::whnf(self.signature, &column.ty);
+        let Value::Record(telescope) = &*reduced else {
+            return Err(unmatchable());
+        };
+        // Те же условия, что ставит ядро узлу `Split`: открытая запись полей
+        // не перечисляет, а поле с параметрами значением не связать.
+        let unshaped = telescope
+            .fields()
+            .iter()
+            .all(|field| field.shape == crate::term::Shape::default());
+        if telescope.is_open() || !unshaped {
+            return Err(unmatchable());
+        }
+        let Some(scrutinee) = column.level() else {
+            return self.known_record(ctx, columns, rows, target, example, at, telescope);
+        };
+        let size = ctx.size();
+        // `r` - у связывания разбираемого, тем же правилом, что у разбора по
+        // конструктору ([`Compiler::split`]).
+        let consumed = match binding(ctx, scrutinee).mult {
+            Mult::Zero | Mult::One => Mult::One,
+            other => other,
+        };
+        let carried = carried(ctx, columns, &[scrutinee]);
+        let plan = Split {
+            columns,
+            rows,
+            target,
+            example,
+            column: at,
+            scrutinee,
+            consumed,
+            carried,
+            shapes: Vec::new(),
+        };
+        let motive = {
+            let inner = ctx.bind("x".into(), Mult::Zero, Rc::clone(&column.ty));
+            let body = goal(&inner, &plan.borrowed(), target, size, &[(scrutinee, size)]);
+            Term::Lam(Mult::Zero, "x".into(), Rc::new(body))
+        };
+
+        let (inner, fields) = record_fields(&plan, telescope, ctx.clone());
+        let base = inner.size();
+        let object = Term::Object(
+            telescope
+                .fields()
+                .iter()
+                .zip(&fields)
+                .map(|(declared, field)| {
+                    (
+                        Rc::clone(&declared.name),
+                        Rc::new(Term::Var(Lvl(field.level).to_index(base))),
+                    )
+                })
+                .collect(),
+        );
+        let built = inner.eval(&object);
+        let refinement = plan.refinement(&built, &[], base);
+
+        let (inner, copies) = copied(ctx, &plan, inner, &refinement);
+
+        let now = inner.size();
+        let inner_columns = plan.refined_columns(&inner, &refinement, &fields, &copies, base);
+        let inner_rows =
+            plan.refined_rows(&inner, &refinement, Selected::Record, fields.len(), &built)?;
+        let inner_example = plan.refined_example(Selected::Record, fields.len());
+        let inner_target = rewrite(target, 0, size, &refinement.at(now));
+
+        let body = self.solve(
+            &inner,
+            &inner_columns,
+            &inner_rows,
+            &inner_target,
+            &inner_example,
+        )?;
+        let body = copies.iter().rev().fold(body, |body, (mult, name, _)| {
+            body.map(|body| Term::Lam(*mult, Rc::clone(name), Rc::new(body)))
+                .under(Frame::Body)
+        });
+        let body = fields.iter().rev().fold(body, |body, field| {
+            body.map(|body| Term::Lam(field.mult * consumed, Rc::clone(&field.name), Rc::new(body)))
+                .under(Frame::Body)
+        });
+        let names: Rc<[Name]> = telescope
+            .fields()
+            .iter()
+            .map(|field| Rc::clone(&field.name))
+            .collect();
+        let tree = body
+            .map(|body| {
+                Term::Split(Rc::new(crate::term::Split {
+                    consumed,
+                    scrutinee: Rc::new(Term::Var(Lvl(scrutinee).to_index(size))),
+                    motive: Rc::new(motive),
+                    fields: names,
+                    body: Rc::new(body),
+                }))
+            })
+            .under(Frame::Branch(0));
+        Ok(plan.borrowed().iter().fold(tree, |tree, carried| {
+            let argument = Term::Var(Lvl(carried.bound()).to_index(size));
+            tree.map(|callee| callee.apply([argument]))
+                .under(Frame::Callee)
+        }))
+    }
+
+    /// Колонка-запись, значение которой уже известно: поля - его проекции, и
+    /// узел разбора не нужен.
+    #[allow(clippy::too_many_arguments)]
+    fn known_record(
+        &mut self,
+        ctx: &Ctx<'_>,
+        columns: &[Column],
+        rows: &[Row],
+        target: &Term,
+        example: &[Pattern],
+        at: usize,
+        telescope: &crate::value::Telescope,
+    ) -> Result<Tree, PatternError> {
+        let column = &columns[at];
+        let size = ctx.size();
+        let record = Rc::new(quote(size, &column.value));
+        let mut values: Vec<Rc<Value>> = Vec::with_capacity(telescope.fields().len());
+        let mut fields = Vec::with_capacity(telescope.fields().len());
+        for (position, field) in telescope.fields().iter().enumerate() {
+            let value = ctx.eval(&Term::Project(Rc::clone(&record), Rc::clone(&field.name)));
+            let ty = telescope.instantiated(position, &values, &[], &[], &[]);
+            values.push(Rc::clone(&value));
+            fields.push((value, ty));
+        }
+
+        let mut inner_columns = Vec::with_capacity(columns.len() + fields.len());
+        for (index, other) in columns.iter().enumerate() {
+            if index == at {
+                for (position, (value, ty)) in fields.iter().enumerate() {
+                    let mut path = column.path.clone();
+                    path.push(position);
+                    inner_columns.push(Column {
+                        value: Rc::clone(value),
+                        path,
+                        ty: Rc::clone(ty),
+                    });
+                }
+            } else {
+                inner_columns.push(Column {
+                    value: Rc::clone(&other.value),
+                    path: other.path.clone(),
+                    ty: Rc::clone(&other.ty),
+                });
+            }
+        }
+        let mut inner_rows = Vec::new();
+        for row in rows {
+            if let Some(row) = specialise(row, at, Selected::Record, fields.len(), &column.value)? {
+                inner_rows.push(row);
+            }
+        }
+        let mut inner_example = example.to_vec();
+        place(
+            &mut inner_example,
+            &column.path,
+            Selected::Record.example(fields.len()),
+        );
+        self.solve(ctx, &inner_columns, &inner_rows, target, &inner_example)
+    }
+
     /// Ветвь одного конструктора.
     fn branch(
         &mut self,
@@ -1466,7 +1733,8 @@ impl Compiler<'_> {
         // Связывание на поле одно, а клауз через ветвь проходит сколько угодно:
         // берётся первое написанное имя, как и у аргумента.
         let named = |at: usize| {
-            bound_as(plan, constructor, at).unwrap_or_else(|| Rc::clone(&fields[at].name))
+            bound_as(plan, Selected::Constructor(constructor), at)
+                .unwrap_or_else(|| Rc::clone(&fields[at].name))
         };
         let mut inner = ctx.clone();
         for (at, field) in fields.iter().enumerate() {
@@ -1524,27 +1792,18 @@ impl Compiler<'_> {
         let refined = inner.eval(&built);
         let refinement = plan.refinement(&refined, solved, base);
 
-        // Свежие связывания соседей - уже с уточнёнными типами.
-        let mut copies = Vec::with_capacity(plan.carried.len());
-        for carried_column in plan.borrowed() {
-            let at = inner.size();
-            let binding = binding(ctx, carried_column.bound());
-            let (mult, name) = (binding.mult, Rc::clone(&binding.name));
-            let domain = rewrite(
-                &quote(size, &carried_column.ty),
-                0,
-                size,
-                &refinement.at(at),
-            );
-            let ty = inner.eval(&domain);
-            inner = inner.bind(Rc::clone(&name), mult, Rc::clone(&ty));
-            copies.push((mult, name, ty));
-        }
+        let (inner, copies) = copied(ctx, plan, inner, &refinement);
 
         let at = inner.size();
         let columns = plan.refined_columns(&inner, &refinement, fields, &copies, base);
-        let rows = plan.refined_rows(&inner, &refinement, constructor, fields.len(), &refined)?;
-        let example = plan.refined_example(constructor, fields.len());
+        let rows = plan.refined_rows(
+            &inner,
+            &refinement,
+            Selected::Constructor(constructor),
+            fields.len(),
+            &refined,
+        )?;
+        let example = plan.refined_example(Selected::Constructor(constructor), fields.len());
         let target = rewrite(plan.target, 0, size, &refinement.at(at));
 
         let body = self.solve(&inner, &columns, &rows, &target, &example)?;
@@ -1894,14 +2153,16 @@ struct Field {
 fn specialise(
     row: &Row,
     split: usize,
-    constructor: &Name,
+    selected: Selected<'_>,
     fields: usize,
     refined: &Rc<Value>,
 ) -> Result<Option<Row>, PatternError> {
     let mut assigned = row.assigned.clone();
-    let replacement = match &row.patterns[split] {
-        Pat::Ctor(name, _) if name != constructor => return Ok(None),
-        Pat::Ctor(name, subs) => {
+    let replacement = match (&row.patterns[split], selected) {
+        (Pat::Ctor(name, _), Selected::Constructor(constructor)) if name != constructor => {
+            return Ok(None);
+        }
+        (Pat::Ctor(name, subs), Selected::Constructor(_)) => {
             if subs.len() != fields {
                 return Err(PatternError::ConstructorArity {
                     constructor: Rc::clone(name),
@@ -1911,15 +2172,24 @@ fn specialise(
             }
             subs.clone()
         }
-        Pat::Var(variable) => {
+        (Pat::Record(subs), Selected::Record) => {
+            if subs.len() != fields {
+                return Err(PatternError::RecordArity {
+                    expected: fields,
+                    found: subs.len(),
+                });
+            }
+            subs.clone()
+        }
+        (Pat::Var(variable), _) => {
             assigned[*variable] = Some(Rc::clone(refined));
             vec![Pat::Any; fields]
         }
-        Pat::Any => vec![Pat::Any; fields],
+        (Pat::Any, _) => vec![Pat::Any; fields],
         // Смешение отвергнуто выбором колонки ([`Compiler::solve`]) - сюда
-        // литерал не доезжает. Строка при этом ветви не подходит: сравнивать
-        // число с конструктором нечем.
-        Pat::Lit(_) => return Ok(None),
+        // литерал и запись в колонке конструктора не доезжают. Строка при
+        // этом ветви не подходит: сравнивать число с конструктором нечем.
+        (Pat::Lit(_) | Pat::Record(_), _) | (Pat::Ctor(..), Selected::Record) => return Ok(None),
     };
 
     let mut patterns = Vec::with_capacity(row.patterns.len() + fields);
@@ -2048,14 +2318,14 @@ impl Split<'_> {
         &self,
         inner: &Ctx<'_>,
         refinement: &Refinement,
-        constructor: &Name,
+        selected: Selected<'_>,
         fields: usize,
         built: &Rc<Value>,
     ) -> Result<Vec<Row>, PatternError> {
         let at = inner.size();
         let mut refined = Vec::new();
         for row in self.rows {
-            let Some(mut row) = specialise(row, self.column, constructor, fields, built)? else {
+            let Some(mut row) = specialise(row, self.column, selected, fields, built)? else {
                 continue;
             };
             // Связывания, сделанные разборами выше, переезжают вместе с
@@ -2070,15 +2340,12 @@ impl Split<'_> {
     }
 
     /// Пример непокрытого случая с подставленным конструктором.
-    fn refined_example(&self, constructor: &Name, fields: usize) -> Vec<Pattern> {
+    fn refined_example(&self, selected: Selected<'_>, fields: usize) -> Vec<Pattern> {
         let mut example = self.example.to_vec();
         place(
             &mut example,
             &self.columns[self.column].path,
-            Pattern::Constructor(
-                Rc::clone(constructor),
-                vec![Pattern::Var("_".into()); fields],
-            ),
+            selected.example(fields),
         );
         example
     }
@@ -2109,6 +2376,59 @@ impl Refinement {
             }
         }
     }
+}
+
+/// Свежие связывания вынесенных соседей - уже с уточнёнными типами - поверх
+/// контекста ветви `inner`.
+fn copied<'s>(
+    ctx: &Ctx<'_>,
+    plan: &Split<'_>,
+    mut inner: Ctx<'s>,
+    refinement: &Refinement,
+) -> (Ctx<'s>, Vec<(Mult, Name, Rc<Value>)>) {
+    let size = ctx.size();
+    let mut copies = Vec::with_capacity(plan.carried.len());
+    for carried_column in plan.borrowed() {
+        let at = inner.size();
+        let binding = binding(ctx, carried_column.bound());
+        let (mult, name) = (binding.mult, Rc::clone(&binding.name));
+        let domain = rewrite(
+            &quote(size, &carried_column.ty),
+            0,
+            size,
+            &refinement.at(at),
+        );
+        let ty = inner.eval(&domain);
+        inner = inner.bind(Rc::clone(&name), mult, Rc::clone(&ty));
+        copies.push((mult, name, ty));
+    }
+    (inner, copies)
+}
+
+/// Поля разбираемой записи связываниями ветви: при `q · r`, под именем,
+/// которое написал автор, а без него - под именем поля.
+fn record_fields<'s>(
+    plan: &Split<'_>,
+    telescope: &crate::value::Telescope,
+    mut inner: Ctx<'s>,
+) -> (Ctx<'s>, Vec<Field>) {
+    let mut fields = Vec::with_capacity(telescope.fields().len());
+    let mut earlier = Vec::with_capacity(telescope.fields().len());
+    for (position, field) in telescope.fields().iter().enumerate() {
+        let level = inner.size();
+        let ty = telescope.instantiated(position, &earlier, &[], &[], &[]);
+        let name =
+            bound_as(plan, Selected::Record, position).unwrap_or_else(|| Rc::clone(&field.name));
+        inner = inner.bind(Rc::clone(&name), field.mult * plan.consumed, Rc::clone(&ty));
+        fields.push(Field {
+            mult: field.mult,
+            name,
+            level,
+            ty,
+        });
+        earlier.push(Value::var(Lvl(level)));
+    }
+    (inner, fields)
 }
 
 /// Колонки, чьи типы зависят от уточняемых уровней, в порядке контекста.
@@ -2384,7 +2704,7 @@ fn place(example: &mut [Pattern], path: &[usize], pattern: Pattern) {
         return;
     };
     for step in rest {
-        let Pattern::Constructor(_, fields) = current else {
+        let (Pattern::Constructor(_, fields) | Pattern::Record(fields)) = current else {
             return;
         };
         let Some(next) = fields.get_mut(*step) else {

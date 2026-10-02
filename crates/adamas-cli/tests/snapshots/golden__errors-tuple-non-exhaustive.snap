@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: tuple-non-exhaustive.adamas:15:1: не покрыто: `(Just _, Succ _)`
+  pick (Just x, Zero) = x
+  ^^^^^^^^^^^^^^^^^^^^^^^

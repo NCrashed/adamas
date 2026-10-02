@@ -2917,7 +2917,7 @@ impl<'a> Elaborator<'a> {
         // Единственная ветка-кортеж - разбор записи, а не по конструктору (§10
         // вопрос 231): `case p of (a, b) -> …` значит то же, что `let (a, b) = p`.
         if let [alt] = alts {
-            if matches!(&alt.pattern.kind, PatternKind::Tuple(items) if !items.is_empty()) {
+            if irrefutable_tuple(&alt.pattern) {
                 let domain = quote(self.ctx.size(), &ty);
                 let consumed = self.consumption(scrutinee, &domain);
                 return self.split_record(
@@ -7408,14 +7408,18 @@ impl<'a> Elaborator<'a> {
                 },
                 span: pattern.span,
             }),
-            PatternKind::Tuple(items) => Err(ElabError::Missing {
-                what: if items.is_empty() {
-                    Missing::Unit
-                } else {
-                    Missing::Tuple
-                },
+            PatternKind::Tuple(items) if items.is_empty() => Err(ElabError::Missing {
+                what: Missing::Unit,
                 span: pattern.span,
             }),
+            // Кортеж - запись по полям `_1 … _n` (§4.2): разбирает его колонка
+            // записи компилятора клауз (§10 вопрос 231).
+            PatternKind::Tuple(items) => Ok(CorePattern::Record(
+                items
+                    .iter()
+                    .map(|item| self.pattern(item))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
         }
     }
 
@@ -7757,6 +7761,16 @@ impl<'a> Elaborator<'a> {
                 found,
                 level,
             ),
+            CorePattern::Record(fields) => self.record_variables(
+                written,
+                fields,
+                mult,
+                ty.as_ref(),
+                body,
+                beside,
+                found,
+                level,
+            ),
             // Литерал связываний не вводит - он сравнивается, а не
             // разбирается, - но **значение** разобранного даёт: в этой клаузе
             // аргумент и есть написанное число. Телескопу оно и нужно, иначе
@@ -7774,6 +7788,72 @@ impl<'a> Elaborator<'a> {
                 ))
             }
         }
+    }
+
+    /// То же для паттерна-записи - кортежа (§10 вопрос 231): телескоп записи
+    /// шагает полями, поле связывается при `qᵢ · consumed`, как у конструктора.
+    /// Значение разобранного - объект из полей: им же связывает запись целиком
+    /// компилятор клауз.
+    #[allow(clippy::too_many_arguments)]
+    fn record_variables(
+        &mut self,
+        written: Option<&Pattern>,
+        fields: &[CorePattern],
+        consumed: Mult,
+        ty: Option<&Rc<Value>>,
+        body: &Expr,
+        beside: &[Symbol],
+        found: &mut Vec<BoundVar>,
+        level: &mut u32,
+    ) -> Option<Rc<Value>> {
+        let inner = match written.map(|it| &it.kind) {
+            Some(PatternKind::Tuple(items)) => items.as_slice(),
+            _ => &[],
+        };
+        let telescope = ty
+            .map(|ty| whnf_solved(self.signature, self.metas, ty))
+            .and_then(|ty| match &*ty {
+                Value::Record(telescope) if telescope.fields().len() == fields.len() => {
+                    Some(telescope.clone())
+                }
+                _ => None,
+            });
+        let mut earlier: Vec<Rc<Value>> = Vec::with_capacity(fields.len());
+        let mut known = telescope.is_some();
+        for (position, field) in fields.iter().enumerate() {
+            let (mult, domain) = match &telescope {
+                Some(telescope) if known => (
+                    telescope.fields()[position].mult * consumed,
+                    Some(telescope.instantiated(position, &earlier, &[], &[], &[])),
+                ),
+                _ => (Mult::Many, None),
+            };
+            let value = self.pattern_variables(
+                inner.get(position),
+                field,
+                mult,
+                domain,
+                body,
+                beside,
+                found,
+                level,
+            );
+            // Поля связываются все, даже когда телескоп дальше не шагает:
+            // сколько их, говорит паттерн.
+            match value {
+                Some(value) if known => earlier.push(value),
+                _ => known = false,
+            }
+        }
+        let telescope = telescope.filter(|_| known)?;
+        Some(Rc::new(Value::Object(
+            telescope
+                .fields()
+                .iter()
+                .zip(earlier)
+                .map(|(field, value)| (Rc::clone(&field.name), value))
+                .collect(),
+        )))
     }
 
     /// То же для паттерна-конструктора: телескоп его типа шагает полями, а
@@ -8097,7 +8177,7 @@ fn written_literal(lit: &ast::Lit) -> Option<CorePattern> {
 fn variables_of(pattern: &CorePattern, names: &mut Vec<Symbol>) {
     match pattern {
         CorePattern::Var(name) => names.push(Rc::from(&**name)),
-        CorePattern::Constructor(_, fields) => {
+        CorePattern::Constructor(_, fields) | CorePattern::Record(fields) => {
             for field in fields {
                 variables_of(field, names);
             }
@@ -8525,9 +8605,10 @@ struct Applied<'b> {
 
 /// Клауза, у которой кортеж в параметре стал именем, а разбор - `let` в
 /// начале тела: `f (a, b) = e` есть `f p = let (a, b) = p; e` (§10 вопрос 231).
-/// `None` - кортежей в параметрах нет.
+/// Переписывается только неопровержимый кортеж; опровержимый остаётся паттерном
+/// и уходит колонкой записи в компилятор клауз. `None` - переписывать нечего.
 fn untupled(clause: &ast::Clause) -> Option<ast::Clause> {
-    let tupled = |pattern: &ast::Pattern| matches!(&pattern.kind, PatternKind::Tuple(items) if !items.is_empty());
+    let tupled = irrefutable_tuple;
     if !clause.patterns.iter().any(tupled) {
         return None;
     }
@@ -8579,6 +8660,22 @@ fn untupled(clause: &ast::Clause) -> Option<ast::Clause> {
         wheres: clause.wheres.clone(),
         span: clause.span,
     })
+}
+
+/// Кортеж, разбор которого опровергнуть нечем: компоненты - имена, `_` и такие
+/// же кортежи. Он идёт разбором записи в `let`; опровержимый - колонкой
+/// записи компилятора клауз (§10 вопрос 231).
+fn irrefutable_tuple(pattern: &ast::Pattern) -> bool {
+    let PatternKind::Tuple(items) = &pattern.kind else {
+        return false;
+    };
+    !items.is_empty()
+        && items.iter().all(|item| match &item.kind {
+            PatternKind::Name(name) => !is_reference(&name.text),
+            PatternKind::Wildcard => true,
+            PatternKind::Tuple(_) => irrefutable_tuple(item),
+            _ => false,
+        })
 }
 
 /// Лямбда, у которой кортеж в параметре стал именем, а разбор - `let` в начале

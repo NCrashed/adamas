@@ -1,0 +1,92 @@
+-- Опровержимый паттерн внутри кортежа (§4.2, §10 вопрос 231).
+--
+-- Кортеж в клаузе и в ветви `case` разбирается колонкой записи компилятора
+-- клауз: запись неопровержима и разбирается узлом `Split` с одной ветвью, а
+-- её поля становятся колонками и разбираются дальше по конструкторам. Кортеж
+-- из одних имён по-прежнему переписывается в `let`.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data Maybe (a : Type) where
+  Nothing : Maybe a
+  Just : a -> Maybe a
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+append : List Nat -> List Nat -> List Nat
+append Nil ys = ys
+append (Cons x xs) ys = Cons x (append xs ys)
+
+effect Log where
+  note : Nat -> Unit
+
+-- Компонента по конструктору в параметре клаузы.
+orElse : (Maybe Nat, Nat) -> Nat
+orElse (Just x, _) = x
+orElse (Nothing, d) = d
+
+-- Кортеж разбираемым `case`: две колонки разом.
+both : Maybe Nat -> Maybe Nat -> Nat
+both a b = case (a, b) of
+  (Just x, Just _) -> x
+  (Just _, Nothing) -> Succ Zero
+  (Nothing, _) -> Zero
+
+-- Кортеж в кортеже.
+nested : ((Nat, Nat), Maybe Nat) -> Nat
+nested ((Zero, y), _) = y
+nested ((Succ _, _), Just z) = z
+nested ((Succ _, _), Nothing) = Succ (Succ Zero)
+
+-- Переменная, связавшая запись целиком, получает объект из полей.
+whole : (Maybe Nat, Nat) -> (Maybe Nat, Nat)
+whole (Nothing, n) = (Just n, n)
+whole p = p
+
+-- Сосед, чей тип зависит от разбираемой записи, уточняется вместе с ней:
+-- в первой клаузе `k : Nat`, во второй - `Bool`.
+Pick : Bool -> Type
+Pick True = Nat
+Pick False = Bool
+
+choose : (p : (Bool, Nat)) -> Pick p._1 -> Nat
+choose (True, _) k = k
+choose (False, n) _ = n
+
+-- Кортеж с ресурсом - ресурс: `_` на месте файла закрывается сам.
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {Log} Bool
+  closeFile h =
+    note (Succ (Succ (Succ Zero)))
+    True
+
+shut : (Maybe Nat, File) -> {Log} Bool
+shut (Just _, h) = closeFile h
+shut (Nothing, _) = True
+
+closing : {Log} Bool
+closing =
+  let _a : Bool = shut (Just Zero, Open)
+  shut (Nothing, Open)
+
+closed : List Nat
+closed = handle closing with
+  return _v -> Nil
+  note n -> Cons n (resume MkUnit)
+
+-- `[1, 2, 1, 0, 3, 2, 1, 1, 2, 3, 3]`: последние две тройки - закрытие файла
+-- в обеих клаузах `shut`.
+main : List Nat
+main = append (Cons (orElse (Just (Succ Zero), Zero)) (Cons (orElse (Nothing, Succ (Succ Zero))) (Cons (both (Just Zero) Nothing) (Cons (both Nothing (Just Zero)) (Cons (nested ((Zero, Succ (Succ (Succ Zero))), Nothing)) (Cons (nested ((Succ Zero, Zero), Nothing)) (Cons (orElse (whole (Nothing, Succ Zero))) (Cons (choose (True, Zero) (Succ Zero)) (Cons (choose (False, Succ (Succ Zero)) True) Nil))))))))) closed

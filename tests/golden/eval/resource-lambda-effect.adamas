@@ -1,0 +1,73 @@
+-- Эффектный деструктор голого ресурса в параметре лямбды (§3.3, §3.4, §10
+-- вопрос 234).
+--
+-- Лямбда, забывшая ресурс-параметр, закрывает его сама, и `drop` встаёт в её
+-- тело. Тело клаузы работало в row своей стрелки, а тело лямбды - в row
+-- объемлющего объявления: под `let k : File -> {Log} Bool = \_p -> …` вставка
+-- брала окружающую `{Log | e0}` поднятого `withLet`, а стрелка лямбды разрешала
+-- только `{Log}`, и программа отвергалась «эффекты не погашены». Теперь тело
+-- лямбды получает row последней снятой стрелки - так же, как тело клаузы.
+--
+-- Правило исполнения по ожидаемому типу (§3.4) стояло вокруг обёртки `drop`, а
+-- не на теле внутри неё: тело `marked` в позиции `Bool` обёртка отдавала
+-- приостановленным, и `held _p = marked` отвергался - граница, оставленная
+-- вопросом 131. Теперь исполнение стоит по месту, как у хвоста блока.
+--
+-- Отметки: тело - единица, деструктор - девятка, и девятка обязана стоять
+-- после единицы. `[1, 9, 1, 9, 1, 9]`: лямбда под `let`, лямбда-аргумент и
+-- клауза.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Log where
+  note : Nat -> Unit
+
+resource File where
+  Open : File
+  closeFile : (1 h : File) -> {Log} Bool
+  closeFile h =
+    note 9
+    True
+
+marked : {Log} Bool
+marked =
+  note 1
+  True
+
+apply : (File -> {Log} Bool) -> {Log} Bool
+apply k = k Open
+
+held : File -> {Log} Bool
+held _p = marked
+
+withLet : {Log} Bool
+withLet =
+  let k : File -> {Log} Bool = \_p -> marked
+  apply k
+
+withArgument : {Log} Bool
+withArgument = apply (\_p -> marked)
+
+both : {Log} Bool
+both =
+  let _a : Bool = withLet
+  let _b : Bool = withArgument
+  held Open
+
+main : List Nat
+main = handle both with
+  return _v -> Nil
+  note n -> Cons n (resume MkUnit)

@@ -1072,6 +1072,9 @@ pub(crate) struct Elaborator<'a> {
     /// Живёт только в хвостовой позиции: при спуске в аргумент снимается, иначе
     /// вложенный `handle` принял бы за свой ответ результат объемлющего.
     result: Option<Rc<Value>>,
+    /// Row последней снятой лямбдой стрелки - окружающая её тела (§3.4,
+    /// §10 вопрос 234). Тело клаузы получает её от `Rest`, тело лямбды - отсюда.
+    arrow_row: Option<Row<Rc<Value>>>,
     /// Ожидаемый тип **ближайшего** выражения - для литерала (§4.3).
     ///
     /// Отдельно от [`Self::result`], и это не дубль: тот живёт в хвостовой
@@ -1418,6 +1421,7 @@ impl<'a> Elaborator<'a> {
             declared_ty: None,
             expected: Vec::new(),
             result: None,
+            arrow_row: None,
             awaited: None,
             bare: false,
             enclosing: None,
@@ -4937,10 +4941,7 @@ impl<'a> Elaborator<'a> {
             } else {
                 argument
             };
-            self.awaiting(argument, expected.as_ref());
-            let argument =
-                self.aside(|it| it.placed(inside, |it| it.expr(argument, Mult::Many)))?;
-            let argument = self.executed(argument, expected.as_ref());
+            let argument = self.argument_term(argument, expected.as_ref(), inside)?;
             // Домен сводится с типом написанного аргумента **здесь**, а не в
             // настоящей проверке: иначе имплисит, решаемый первым аргументом,
             // до второго не доходит, и голый литерал там разворачивается
@@ -6386,17 +6387,26 @@ impl<'a> Elaborator<'a> {
             // Остаток спайна достаётся телу: `\x -> \y -> e` - две лямбды под
             // теми же `Pi`, что и `\x y -> e`.
             self.expected = expected.to_vec();
+            // Тело работает в row своей стрелки, а не объемлющего объявления
+            // (§3.4): вставленный деструктор берёт окружающую отсюда, и с
+            // чужой его эффект не гасился (§10 вопрос 234). Восстанавливать
+            // незачем - контекст вернёт обёртка связывания параметра.
+            if let Some(row) = self.arrow_row.take() {
+                self.ctx = self.ctx.within(row);
+            }
             // Тело лямбды - её возвращаемое значение, и правило §3.3 стоит
-            // здесь так же, как у тела клаузы.
-            let inner = self.closing_all(drops, |it| {
-                it.placed(Position::Returned, |it| it.expr(body, Mult::Many))
-            });
-            // И правило исполнения по ожидаемому типу - тоже. Прежде оно тело
-            // лямбды не покрывало: остаток спайна до него доходил, а
-            // результирующего типа `Argument` не несла (§9 Фаза 4), и
-            // `\b -> get` отвергался там, где `f b = get` принимался.
+            // здесь так же, как у тела клаузы. И правило исполнения по
+            // ожидаемому типу - тоже: прежде оно тело лямбды не покрывало,
+            // остаток спайна до него доходил, а результирующего типа `Argument`
+            // не несла (§9 Фаза 4), и `\b -> get` отвергался там, где `f b =
+            // get` принимался. Стоит оно **внутри** обёртки `drop`, по месту: снаружи
+            // обёртка отдаёт приостановленное, и исполнять было бы нечего (§10
+            // вопросы 131, 234).
             let result = self.result.clone();
-            return inner.map(|body| self.executed(body, result.as_ref()));
+            return self.closing_all(drops, |it| {
+                let body = it.placed(Position::Returned, |it| it.expr(body, Mult::Many))?;
+                Ok(it.executed(body, result.as_ref()))
+            });
         };
         let name = match &param.kind {
             LamParamKind::Binder(_) => {
@@ -6452,8 +6462,16 @@ impl<'a> Elaborator<'a> {
         );
         // Ожидаемый результат шагает вместе со спайном: связывание снято, и
         // телу достаётся кодомен, а не весь тип.
+        // Row снятой стрелки - окружающая тела, когда параметры кончатся; её
+        // аргумент - то же свежее связывание.
+        // Стрелки нет - нет и row: прежняя принадлежала бы чужому связыванию.
+        self.arrow_row = None;
         let stepped = self.result.take().and_then(|ty| match &*ty {
-            Value::Pi(_, _, _, _, codomain) => Some(codomain.clone().apply(self.ctx.fresh())),
+            Value::Pi(_, _, _, row, codomain) => {
+                let fresh = self.ctx.fresh();
+                self.arrow_row = Some(row.apply(Rc::clone(&fresh)));
+                Some(codomain.clone().apply(fresh))
+            }
             _ => None,
         });
         self.result = stepped;
@@ -7141,22 +7159,43 @@ impl<'a> Elaborator<'a> {
         self.synthesized(term)
     }
 
+    /// Аргумент применения: ожидания по домену, элаборация вне хвоста и
+    /// исполнение по написанному типу (§3.4).
+    fn argument_term(
+        &mut self,
+        argument: &Expr,
+        expected: Option<&Rc<Value>>,
+        inside: Position,
+    ) -> Result<Term, ElabError> {
+        let arrow = self.awaiting(argument, expected);
+        let term = self.aside(|it| {
+            it.result = arrow;
+            it.placed(inside, |it| it.expr(argument, Mult::Many))
+        })?;
+        Ok(self.executed(term, expected))
+    }
+
     /// Ожидания аргумента применения по домену вызываемого.
     ///
     /// Написанный тип аргумента достаётся литералу: `mulInt64 x 2` берёт `Int64`
     /// отсюда, а не из умолчания. Лямбда-аргумент берёт у домена кратности, как
     /// лямбда под написанным типом: `apply (\h -> …)` при `(File -> Bool)` иначе
     /// связывала бы `h` при `ω` и отвергалась проверкой.
-    fn awaiting(&mut self, argument: &Expr, expected: Option<&Rc<Value>>) {
+    ///
+    /// Ответ - стрелка домена: лямбде она ожидаемый результат, по которому
+    /// шагают её параметры, и row её тела (§10 вопрос 234).
+    fn awaiting(&mut self, argument: &Expr, expected: Option<&Rc<Value>>) -> Option<Rc<Value>> {
         self.awaited = expected.cloned();
         let (ExprKind::Lam { .. }, Some(domain)) = (&argument.kind, expected) else {
-            return;
+            return None;
         };
         let domain = whnf_solved(self.signature, self.metas, domain);
-        if matches!(&*domain, Value::Pi(..)) {
-            let ty = quote(self.ctx.size(), &domain);
-            self.expected = self.arguments(&ty);
+        if !matches!(&*domain, Value::Pi(..)) {
+            return None;
         }
+        let ty = quote(self.ctx.size(), &domain);
+        self.expected = self.arguments(&ty);
+        Some(domain)
     }
 
     /// Связывания по спайну `Pi` вместе с закрывателями записей.
@@ -7633,11 +7672,12 @@ impl<'a> Elaborator<'a> {
         self.ctx = self.ctx.within(rest.ambient);
         // Тип, оставшийся от написанного после паттернов, и есть ожидаемый
         // тип тела: по нему решается исполнение.
-        let body = self
-            .closing_all(&closing, |it| {
-                it.placed(Position::Returned, |it| it.expr(&clause.body, Mult::Many))
-            })
-            .map(|body| self.executed(body, rest.result.as_ref()));
+        // Исполнение - внутри обёртки `drop`, по месту, как у хвоста блока
+        // (§10 вопросы 131, 234): снаружи она отдаёт приостановленное.
+        let body = self.closing_all(&closing, |it| {
+            let body = it.placed(Position::Returned, |it| it.expr(&clause.body, Mult::Many))?;
+            Ok(it.executed(body, rest.result.as_ref()))
+        });
         self.scope.truncate(depth);
         self.ctx = outer;
 

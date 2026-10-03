@@ -1,0 +1,52 @@
+-- Литерал внутри записи-аргумента в позиции неявного типа (§4.3, §10
+-- вопросы 208, 236).
+--
+-- `Just 1 : Maybe Int32` проходил: голый литерал в позиции нерешённой дырки
+-- откладывается до конца объявления. `Just (1, 2)` отвергался «у литерала нет
+-- типа», а `Cons (1, 2) Nil` брал `Nat` и расходился с аннотацией: запись
+-- элаборировалась сразу, и тип поля в этот момент был ещё дыркой. Теперь
+-- дырка ожидания сводится с записью из свежих дырок по написанным полям, и
+-- поле-литерал откладывается тем же путём, что голый.
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+data Maybe (a : Type) where
+  Nothing : Maybe a
+  Just : a -> Maybe a
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+inMaybe : Maybe (Int32, Int32)
+inMaybe = Just (1, 2)
+
+inRecord : Maybe { x : Int32 }
+inRecord = Just { x = 7 }
+
+inList : List (Int32, Int32)
+inList = Cons (1, 2) (Cons (3, 4) Nil)
+
+nested : Maybe ((Int32, Float64), Int8)
+nested = Just ((1, 2.5), 3)
+
+sums : List (Int32, Int32) -> Int32
+sums Nil = 0
+sums (Cons (a, b) rest) = a * 10 + b + sums rest
+
+fromMaybe : Maybe (Int32, Int32) -> Int32
+fromMaybe (Just (a, b)) = a + b
+fromMaybe Nothing = 0
+
+fromRecord : Maybe { x : Int32 } -> Int32
+fromRecord (Just r) = r.x
+fromRecord Nothing = 0
+
+fromNested : Maybe ((Int32, Float64), Int8) -> Int32
+fromNested (Just ((a, _), _)) = a
+fromNested Nothing = 0
+
+-- `[46, 3, 7, 1]`: `Float64` и `Int8` - вложенные литералы своих полей.
+main : List Int32
+main = Cons (sums inList) (Cons (fromMaybe inMaybe) (Cons (fromRecord inRecord) (Cons (fromNested nested) Nil)))

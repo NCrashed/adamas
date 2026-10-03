@@ -4221,6 +4221,16 @@ impl<'a> Elaborator<'a> {
                 Value::Record(telescope) => Some(telescope.clone()),
                 _ => None,
             });
+        // Ожидание - нерешённая дырка (`Just (1, 2)` при `Just : a -> …`):
+        // форму записи называет написанное, и дырка сводится с записью из
+        // свежих дырок по полям. Поле-литерал получает в ожидание свою дырку
+        // и откладывается до конца объявления, как голый `Just 1` (§10
+        // вопросы 208, 236).
+        if telescope.is_none() {
+            if let Some(ty) = awaited.filter(|ty| self.flexible(ty)) {
+                telescope = self.record_shape(fields, ty);
+            }
+        }
         let mut written = Vec::with_capacity(fields.len());
         let mut earlier: Vec<Rc<Value>> = Vec::new();
         for (name, value) in fields {
@@ -4261,6 +4271,49 @@ impl<'a> Elaborator<'a> {
         }
         self.produced = None;
         Ok(Term::Object(written.into()))
+    }
+
+    /// Запись из свежих дырок по написанным полям, сведённая с дыркой `ty`.
+    ///
+    /// Та же форма, какую синтезирует ядро у значения записи: закрытая, поля
+    /// при `1`, тип поля от соседей не зависит. Не свелось - `None`, и запись
+    /// собирается прежним путём, без ожиданий у полей.
+    fn record_shape(
+        &mut self,
+        fields: &[(ast::Name, Expr)],
+        ty: &Rc<Value>,
+    ) -> Option<adamas_core::value::Telescope> {
+        let built: Vec<CoreField> = fields
+            .iter()
+            .enumerate()
+            .map(|(at, (name, _))| {
+                let level = self.metas.fresh_level();
+                let hole = self.fresh_meta(&Rc::new(Value::Universe(level)));
+                CoreField {
+                    name: CoreName::from(&*name.text),
+                    mult: Mult::One,
+                    shape: adamas_core::term::Shape::default(),
+                    ty: Rc::new(adamas_core::pattern::shift_free(
+                        &hole,
+                        u32::try_from(at).unwrap_or(u32::MAX),
+                    )),
+                }
+            })
+            .collect();
+        let record = self
+            .ctx
+            .eval(&Term::Record(adamas_core::term::Fields::closed(
+                built.into(),
+            )));
+        let mark = self.metas.mark();
+        if !convertible(self.signature, self.metas, self.ctx.size(), ty, &record) {
+            self.metas.rollback(mark);
+            return None;
+        }
+        match &*record {
+            Value::Record(telescope) => Some(telescope.clone()),
+            _ => None,
+        }
     }
 
     /// `f @A @B` - выводимый аргумент, написанный явно (§4.1).

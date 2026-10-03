@@ -1,0 +1,15 @@
+-- Интервалы разных файлов не склеиваются (§3.3, `eval/file-spans`).
+--
+-- `merge` требует общего `f`: соседство байт `[0, 4)` и `[4, 8)` ничего не
+-- значит, когда это байты двух файлов.
+
+type FileId = UInt64
+
+unique data Span (0 f : FileId) : (0 lo : UInt64) -> (0 hi : UInt64) -> Type where
+  MkSpan : (ω fd : Int64) -> (ω lo : UInt64) -> (ω hi : UInt64) -> Span f lo hi
+
+merge : (1 a : Span f lo m) -> (1 b : Span f m hi) -> Span f lo hi
+merge (MkSpan fd x _) (MkSpan _ _ y) = MkSpan fd x y
+
+mixed : (0 f : FileId) -> (0 g : FileId) -> (1 a : Span f 0 4) -> (1 b : Span g 4 8) -> Span f 0 8
+mixed f g a b = merge a b

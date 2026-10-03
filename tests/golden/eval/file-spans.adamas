@@ -1,0 +1,117 @@
+-- Файловый API с интервалами (§3.3, §4.2, §5.3; §10 вопросы 231, 235).
+--
+-- Набросок автора, доведённый до настоящего файла: `Span f lo hi` - право
+-- писать и читать байты `[lo, hi)` файла `f`. Интервал уникален, `split`
+-- делит его в точке `m` на два непересекающихся, `merge` склеивает соседние,
+-- и пересечение записей запрещено построением: каждый байт достижим ровно
+-- через один живой интервал. Границы проверяются статически - запись требует
+-- доказательства `off + len <= hi - lo`, и у литералов его даёт вычисление.
+--
+-- Файл временный и безымянный (`tmpfile`): тело `withTemp` получает интервал
+-- целиком и обязано вернуть его вместе с ответом, после чего файл
+-- закрывается и исчезает. Имя файла `f` абстрактно - тело полиморфно по нему,
+-- и интервалы двух файлов не склеиваются (`errors/file-span-foreign-merge`).
+-- Выход за интервал отвергает проверка (`errors/file-span-overflow`).
+--
+-- Сишные символы настоящие, из libc, и машина зовёт их `dlopen`'ом наравне с
+-- обоими понижениями.
+--
+-- Что нашлось по дороге (лог 2026-10-03):
+--   * поле ветви `case` над линейным разбираемым элаборация считала при `ω`,
+--     и вложенный `case arrayRead ys …` расходовал `ys` дважды;
+--   * трамплин функции, отданной значением, не умел ответ-запись;
+--   * пара из ответа замыкания и разбор её на месте не понижались: голый
+--     указатель на запись не сужался ни в плотную запись, ни разбором.
+
+data Unit where
+  MkUnit : Unit
+
+data Bool where
+  False : Bool
+  True : Bool
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+effect Foreign
+
+type FileId = UInt64
+
+extern "C" fn tmpfile : CPtr
+extern "C" fn fileno : CPtr -> Int32
+extern "C" fn fclose : CPtr -> Int32
+-- Дескриптор у C - `int`, а объявлен словом: младшая половина регистра и есть
+-- то, что прочтёт чужая сторона (тот же приём, что у `compress2`).
+extern "C" fn ftruncate : Int64 -> Int64 -> Int32
+extern "C" fn pwrite : Int64 -> Array n UInt8 -> UInt64 -> Int64 -> Int64
+extern "C" fn pread : Int64 -> Array n UInt8 -> UInt64 -> Int64 -> Int64
+
+-- Право писать и читать байты `[lo, hi)` файла `f`. Дескриптор и границы едут
+-- значением, индексы - их копия на уровне типов.
+unique data Span (0 f : FileId) : (0 lo : UInt64) -> (0 hi : UInt64) -> Type where
+  MkSpan : (ω fd : Int64) -> (ω lo : UInt64) -> (ω hi : UInt64) -> Span f lo hi
+
+split : (1 s : Span f lo hi) -> (m : UInt64) -> (0 p : Equal Bool (leUInt64 lo m) True) -> (0 q : Equal Bool (leUInt64 m hi) True) -> (Span f lo m, Span f m hi)
+split (MkSpan fd a b) m p q = (MkSpan fd a m, MkSpan fd m b)
+
+merge : (1 a : Span f lo m) -> (1 b : Span f m hi) -> Span f lo hi
+merge (MkSpan fd x _) (MkSpan _ _ y) = MkSpan fd x y
+
+-- Запись `len` байт со смещения `off` внутри интервала.
+write : (1 s : Span f lo hi) -> (off : UInt64) -> (len : UInt64) -> Array len UInt8 -> (0 fits : Equal Bool (leUInt64 (addUInt64 off len) (subUInt64 hi lo)) True) -> {Foreign} Span f lo hi
+write (MkSpan fd a b) off len bytes fits =
+  let _wrote : Int64 = pwrite fd bytes len (uint64ToInt64 (addUInt64 a off))
+  MkSpan fd a b
+
+-- Чтение интервала целиком.
+readAll : (1 s : Span f lo hi) -> {Foreign} (Span f lo hi, Array (subUInt64 hi lo) UInt8)
+readAll (MkSpan fd a b) =
+  let zero : UInt8 = 0
+  let buffer : Array (subUInt64 b a) UInt8 = arrayNew (subUInt64 b a) zero
+  let _got : Int64 = pread fd buffer (subUInt64 b a) (uint64ToInt64 a)
+  (MkSpan fd a b, buffer)
+
+-- Интервал целиком возвращается владельцу файла, и права на байты кончаются.
+release : (1 s : Span f lo hi) -> Unit
+release (MkSpan _ _ _) = MkUnit
+
+-- Временный файл ёмкости `cap`: тело получает интервал целиком и обязано его
+-- вернуть. Имени у файла нет (`tmpfile`), и при закрытии он исчезает.
+withTemp : (cap : UInt64) -> ((0 f : FileId) -> (1 s : Span f 0 cap) -> {Foreign} (Span f 0 cap, r)) -> {Foreign} r
+withTemp cap body =
+  let file : CPtr = tmpfile
+  let fd : Int64 = int32ToInt64 (fileno file)
+  let _sized : Int32 = ftruncate fd (uint64ToInt64 cap)
+  let (whole, answer) = body 0 (MkSpan fd 0 cap)
+  let 1 _released : Unit = release whole
+  let _closed : Int32 = fclose file
+  answer
+
+-- Линейный массив читается `arrayRead`: он возвращает массив вместе с ячейкой.
+-- Байты 0, 1, 5, 6 - написанное в обе половины.
+written : (1 xs : Array 8 UInt8) -> List UInt8
+written xs = case arrayRead xs 0 Refl of
+  MkRead a ys -> case arrayRead ys 1 Refl of
+    MkRead b zs -> case arrayRead zs 5 Refl of
+      MkRead c ws -> case arrayRead ws 6 Refl of
+        MkRead d _ -> Cons a (Cons b (Cons c (Cons d Nil)))
+
+-- Две половины пишутся порознь, склеиваются и читаются обратно. Левая `[0, 4)`
+-- получает `"ab"` со смещения 0, правая `[4, 8)` - `"cd"` со смещения 1, то
+-- есть в байты 5 и 6. Литерал строки несёт завершающий ноль, отсюда длина 3.
+halves : (0 f : FileId) -> (1 s : Span f 0 8) -> {Foreign} (Span f 0 8, List UInt8)
+halves f s =
+  let (left, right) = split s 4 Refl Refl
+  let left2 = write left 0 3 "ab" Refl
+  let right2 = write right 1 3 "cd" Refl
+  let (back, bytes) = readAll (merge left2 right2)
+  (back, written bytes)
+
+runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign k = handle @Foreign k with
+  return v -> v
+
+-- `[97, 98, 99, 100]`: `a` и `b` с начала файла, `c` и `d` с пятого байта.
+main : List UInt8
+main = runForeign (\_u -> withTemp 8 halves)

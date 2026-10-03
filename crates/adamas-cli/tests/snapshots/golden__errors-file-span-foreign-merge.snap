@@ -1,0 +1,12 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: file-span-foreign-merge.adamas:15:25: несовпадение типов: ожидался `Span f 4 (?0)`, получен `Span g 4 8`
+  mixed f g a b = merge a b
+                          ^
+  в контексте:
+    (0 f : FileId)
+    (0 g : FileId)
+    (1 a : Span f 0 4)
+    (1 b : Span g 4 8)

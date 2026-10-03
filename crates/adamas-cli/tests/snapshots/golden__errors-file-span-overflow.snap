@@ -1,0 +1,10 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: file-span-overflow.adamas:19:27: несовпадение типов: ожидался `Prelude.Equal Bool False True`, получен `Prelude.Equal Bool False False`
+  past s = write s 2 3 "ab" Refl
+                            ^^^^
+  в контексте:
+    (0 f : FileId)
+    (1 s : Span f 0 4)

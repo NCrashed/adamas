@@ -1,0 +1,19 @@
+-- Запись за границей интервала (§3.3, `eval/file-spans`).
+--
+-- Интервал `[0, 4)` и запись трёх байт со смещения 2: `2 + 3 <= 4` ложно, и
+-- доказательство, которое у литералов даёт вычисление, здесь не сходится.
+
+data Bool where
+  False : Bool
+  True : Bool
+
+type FileId = UInt64
+
+unique data Span (0 f : FileId) : (0 lo : UInt64) -> (0 hi : UInt64) -> Type where
+  MkSpan : (ω fd : Int64) -> (ω lo : UInt64) -> (ω hi : UInt64) -> Span f lo hi
+
+write : (1 s : Span f lo hi) -> (off : UInt64) -> (len : UInt64) -> Array len UInt8 -> (0 fits : Equal Bool (leUInt64 (addUInt64 off len) (subUInt64 hi lo)) True) -> Span f lo hi
+write s off len bytes fits = s
+
+past : (1 s : Span f 0 4) -> Span f 0 4
+past s = write s 2 3 "ab" Refl

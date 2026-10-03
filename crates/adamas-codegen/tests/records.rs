@@ -98,9 +98,9 @@ main : Bit
 main = taken (MkBox { x = On })
 ";
 
-/// Форма потеряна: параметр ветки хендлера типа не несёт - ветви типы внешней
-/// среды не передаются, - и проекции из него взять слот неоткуда.
-const SHAPELESS: &str = "\
+/// Параметр ветки хендлера: тип его - домен ветки в типе элиминатора (§10
+/// вопрос 238), и форму записи он называет.
+const HANDLED: &str = "\
 data Bit where
   Off : Bit
   On : Bit
@@ -120,6 +120,29 @@ main : Bit
 main = handle asked with
   return v -> v
   probe p -> resume p.x
+";
+
+/// Форма потеряна: тип выражения известен у переменной и у цепочки проекций и
+/// применений из неё, а у разбора в голове применения его нет.
+const SHAPELESS: &str = "\
+data Bool where
+  False : Bool
+  True : Bool
+
+data Bit where
+  Off : Bit
+  On : Bit
+
+data Unit where
+  MkUnit : Unit
+
+type Point = { x : Bit }
+
+choose : Bool -> (Unit -> Point) -> (Unit -> Point) -> Bit
+choose b k l = ((if b then k else l) MkUnit).x
+
+main : Bit
+main = choose True (\\_u -> { x = On }) (\\_u -> { x = Off })
 ";
 
 /// Ближайший проходящий сосед: та же проекция без потери формы.
@@ -226,6 +249,9 @@ fn a_record_in_a_family_field_takes_its_shape_from_the_type() {
     });
     harness::agreed("record-generic", GENERIC).unwrap_or_else(|error| {
         panic!("запись с переменной типа: {error}");
+    });
+    harness::agreed("record-handled", HANDLED).unwrap_or_else(|error| {
+        panic!("запись в параметре ветки хендлера: {error}");
     });
 }
 

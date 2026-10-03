@@ -1,0 +1,74 @@
+-- Запись аргументом операции и ответом замыкания (§4.11, §10 вопрос 238).
+--
+-- Параметр ветки хендлера типа в ядре не несёт, и понижение отказывало
+-- «форма записи потеряна» на `probe p -> resume p.x`, хотя машина считала
+-- верно. Тип его - домен ветки в типе элиминатора, инстанцированном
+-- аргументами до неё, и параметры эффекта там уже подставлены: `send` при
+-- `Send Point` получает `Point`. Запись приходит туда голым указателем, то есть
+-- единообразной формой (вопрос 235), и тип её называет. Тем же путём тип
+-- получает ответ применения: `(k MkUnit).x` при `k : Unit -> Point`.
+
+data Bit where
+  Off : Bit
+  On : Bit
+
+data Unit where
+  MkUnit : Unit
+
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+type Point = { x : Bit, y : Bit }
+
+type Pixel = { level : Int32, alpha : Int32 }
+
+-- Тип операции написан конкретно.
+effect Probe where
+  probe : Point -> Bit
+
+asked : {Probe} Bit
+asked = probe { x = On, y = Off }
+
+probed : Bit
+probed = handle asked with
+  return v -> v
+  probe p -> resume p.x
+
+-- Тип параметра - параметр эффекта, подставленный записью.
+effect Send (m : Type) where
+  send : m -> Unit
+
+sent : {Send Point} Unit
+sent = send { x = Off, y = On }
+
+seen : List Bit
+seen = handle sent with
+  return _v -> Nil
+  send p -> Cons p.y (resume MkUnit)
+
+-- Плотная запись в аргументе операции: в голый указатель она едет
+-- единообразной формой, примитивы - обёртками.
+effect Paint where
+  paint : Pixel -> Int32
+
+painted : {Paint} Int32
+painted =
+  let pixel : Pixel = { level = 40, alpha = 2 }
+  paint pixel
+
+shade : Int32
+shade = handle painted with
+  return v -> v
+  paint q -> resume (q.level + q.alpha)
+
+-- Ответ замыкания-параметра: тип даёт кодомен стрелки.
+pick : (Unit -> Point) -> Bit
+pick k = (k MkUnit).y
+
+lit : Bit
+lit = pick (\_u -> { x = Off, y = On })
+
+-- `[On, On, On]` и `42`.
+main : { ω bits : List Bit, ω shade : Int32 }
+main = { bits = Cons probed (Cons lit seen), shade = shade }

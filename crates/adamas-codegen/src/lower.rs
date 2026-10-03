@@ -2407,6 +2407,12 @@ impl<'a> Lowerer<'a> {
         if repr == Repr::Layout && &**label == METHOD {
             return Ok(self.materialised(scope, value));
         }
+        // Указатель на запись, чей тип известен, - единообразная форма (§10
+        // вопрос 235): ответ применения замыкания, например.
+        let repr = match repr {
+            Repr::Boxed => self.typed_form(scope, record).unwrap_or(Repr::Boxed),
+            other => other,
+        };
         if let Repr::Packed(pack) = repr {
             // Плоский агрегат: поле адресуется **смещением**, а не слотом, - и
             // это названная цена варианта (а) вопроса 154. Проецируется только
@@ -3724,7 +3730,14 @@ impl<'a> Lowerer<'a> {
             let Arg::Written(term) = &arguments[params + 4 + slot] else {
                 unreachable!("написанность веток проверена выше")
             };
-            let (function, verdict) = self.branch(&site, term, written[slot], operation)?;
+            let types = branch_types(
+                scope,
+                &signature,
+                &arguments[..params + 4 + slot],
+                written[slot],
+            );
+            let (function, verdict) =
+                self.branch(&site, term, (written[slot], &types), operation)?;
             branches.push(Branch {
                 function,
                 written: written[slot],
@@ -3890,7 +3903,7 @@ impl<'a> Lowerer<'a> {
         &mut self,
         site: &Site<'_>,
         term: &Term,
-        written: usize,
+        (written, types): (usize, &[Option<Rc<Value>>]),
         operation: &Name,
     ) -> Result<(FuncId, Verdict), LowerError> {
         let Site {
@@ -3966,8 +3979,11 @@ impl<'a> Lowerer<'a> {
             }
         };
 
-        for binding in &bindings {
-            nested.push(Slot::Bound(binding.local, binding.fact));
+        // Тип параметра - домен ветки в типе элиминатора: по нему чтение
+        // называет форму записи, пришедшей аргументом операции (§10 вопрос 238).
+        for (at, binding) in bindings.iter().enumerate() {
+            let ty = types.get(at).cloned().flatten();
+            nested.push_typed(Slot::Bound(binding.local, binding.fact), ty);
         }
         // Связывание `resume`. У хвостовой и абортивной значения у него нет:
         // первая его сняла, вторая не звала вовсе. У общей оно есть - ручка
@@ -5320,11 +5336,20 @@ impl<'a> Lowerer<'a> {
         Some(Repr::Record(self.uniform_shape(&labels).ok()?))
     }
 
-    /// Тип переменной либо цепочки проекций из неё, если он известен: поле
-    /// записи берёт тип у её телескопа, предыдущие поля - проекциями.
+    /// Тип переменной, цепочки проекций и применений из неё, если он известен:
+    /// поле записи берёт тип у её телескопа, предыдущие поля - проекциями;
+    /// применение - у кодомена стрелки, инстанцированного аргументом.
     fn term_type(&self, scope: &Scope, term: &Term) -> Option<Rc<Value>> {
         match term {
             Term::Var(index) => scope.type_of(*index).cloned(),
+            Term::App(callee, argument) => {
+                let ty = self.term_type(scope, callee)?;
+                let reduced = adamas_core::conv::whnf(self.signature, &ty);
+                let Value::Pi(_, _, _, _, codomain) = &*reduced else {
+                    return None;
+                };
+                Some(codomain.apply(eval(&scope.values(), argument)))
+            }
             Term::Project(record, label) => {
                 let ty = self.term_type(scope, record)?;
                 let reduced = adamas_core::conv::whnf(self.signature, &ty);
@@ -6734,6 +6759,43 @@ enum Rewrapped {
     Wrapper(CtorId),
     /// Запись - единообразной формой (§10 вопрос 235).
     Uniform,
+}
+
+/// Типы параметров ветки: домены её типа в элиминаторе, инстанцированном
+/// аргументами спайна до неё (§10 вопрос 238) - тот же приём, что подсказка
+/// лямбде по типу вызываемого (вопрос 223). Параметры эффекта при этом
+/// подставлены. Пусто - инстанцировать нечем.
+fn branch_types(
+    scope: &Scope,
+    eliminator: &Term,
+    before: &[Arg<'_>],
+    written: usize,
+) -> Vec<Option<Rc<Value>>> {
+    let env = scope.values();
+    let mut ty = eval(&Env::default(), eliminator);
+    for argument in before {
+        let (Value::Pi(_, _, _, _, codomain), Arg::Written(term)) = (&*ty, argument) else {
+            return Vec::new();
+        };
+        ty = codomain.apply(eval(&env, term));
+    }
+    let Value::Pi(_, _, domain, _, _) = &*ty else {
+        return Vec::new();
+    };
+    // Параметры ветки встают в её среду сразу за захваченной, а та сохраняет
+    // позиции внешней.
+    let base = scope.env.len();
+    let mut current = Rc::clone(domain);
+    let mut found = Vec::with_capacity(written);
+    for at in 0..written {
+        let Value::Pi(_, _, domain, _, codomain) = &*current else {
+            break;
+        };
+        found.push(Some(Rc::clone(domain)));
+        let level = u32::try_from(base + at).unwrap_or(u32::MAX);
+        current = codomain.apply(Value::var(Lvl(level)));
+    }
+    found
 }
 
 /// Разворачивает **применённое** имя: класс, сигнатуру модуля, алиас с

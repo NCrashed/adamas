@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+{bits = Cons On (Cons On (Cons On Nil)), shade = 42}

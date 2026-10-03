@@ -1,12 +1,11 @@
 -- Запись в поле-параметре семейства (§4.11, §10 вопрос 235).
 --
 -- Поле `Cons : a -> …` при `a = (Nat, Nat)` держит запись, а слот его
--- указателен: представление поля - факт таблицы конструктора, и формы записи
--- там нет. Машина отвечала верно, понижение отказывало «форма записи
--- потеряна». Форму называет тип связывания: тип параметра функции, поле
--- разбора с подставленными параметрами семейства, поле записи. Подставляется
--- только замкнутый тип - у записи с переменной типа форма объекта зависит от
--- подстановки.
+-- указателен. Машина отвечала верно, понижение отказывало «форма записи
+-- потеряна». Там, где ждут голый указатель, запись живёт единообразной формой
+-- - все поля указатели, - и форму эту называет тип: её определяют одни метки,
+-- как бы и где бы запись ни собиралась. Обобщённый `dup` строит её сам,
+-- конкретный код перекладывает плотную запись в неё при входе в поле.
 
 
 data Nat where
@@ -36,6 +35,24 @@ inner : Maybe (Nat, (Nat, Nat)) -> Nat
 inner (Just (_, (_, c))) = c
 inner Nothing = Zero
 
+-- Обобщённый код собирает запись с указательными полями - ту же форму.
+dup : {a : Type} -> a -> (a, a)
+dup x = (x, x)
+
+seven : Int32
+seven = 7
+
+doubled : List (Int32, Int32)
+doubled = Cons (dup seven) Nil
+
+-- Вложенная запись, собранная прямо в поле, и цепочка проекций из неё.
+nest : Int32 -> Int32 -> Int32 -> Maybe ((Int32, Int32), Int32)
+nest a b c = Just ((a, b), c)
+
+deep : Maybe ((Int32, Int32), Int32) -> Int32
+deep (Just p) = p._1._2 + p._2
+deep Nothing = 0
+
 -- Тип даёт и аннотация `let`.
 viaLet : Nat
 viaLet =
@@ -59,6 +76,6 @@ pair a b = (a, b)
 pairs : List (Int32, Int32)
 pairs = Cons (pair 1 2) (Cons (pair 3 4) Nil)
 
--- `[2, 46, 0, 1, 1]`.
+-- `[2, 46, 77, 5, 0, 1, 1]`.
 main : List Nat
-main = Cons (inner (Just (Zero, (Zero, Succ (Succ Zero))))) (Cons (count (sums pairs)) (append (firsts (Cons (Zero, Succ Zero) (Cons (Succ Zero, Zero) Nil))) (Cons viaLet Nil)))
+main = Cons (inner (Just (Zero, (Zero, Succ (Succ Zero))))) (Cons (count (sums pairs)) (Cons (count (sums doubled)) (Cons (count (deep (nest 1 2 3))) (append (firsts (Cons (Zero, Succ Zero) (Cons (Succ Zero, Zero) Nil))) (Cons viaLet Nil)))))

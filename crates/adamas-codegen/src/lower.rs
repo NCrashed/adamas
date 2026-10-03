@@ -1108,10 +1108,10 @@ impl<'a> Lowerer<'a> {
         self.tainted = self.detached;
         let (mut body, repr) =
             self.saturated(&mut scope, &inner, &parameters[taken..], declared)?;
-        if !fits(repr, declared) {
+        if !fits(repr, declared) || self.needs_uniform(repr, declared) {
             // Ответ перекладывается, как всякая объявленная позиция:
             // проекция плотного поля отдаёт байты, а объявлен указатель.
-            let Some(moved) = self.moved(&mut scope, &body, repr, declared)? else {
+            let Some(moved) = self.coerced(&mut scope, body, repr, declared)? else {
                 return Err(LowerError::Representation {
                     at: "ответ функции",
                     want: describe(declared),
@@ -1345,7 +1345,7 @@ impl<'a> Lowerer<'a> {
                 // 235). Слот поля-параметра семейства формы не знает, тип знает.
                 Slot::Bound(local, fact) if fact.present => {
                     let repr = match fact.repr {
-                        Repr::Boxed => self.typed_form(scope, *index).unwrap_or(Repr::Boxed),
+                        Repr::Boxed => self.typed_form(scope, term).unwrap_or(Repr::Boxed),
                         other => other,
                     };
                     Ok((Expr::Local(local), repr))
@@ -1433,11 +1433,8 @@ impl<'a> Lowerer<'a> {
         at: &'static str,
     ) -> Result<Expr, LowerError> {
         let (value, got) = self.expected(scope, term, want)?;
-        if fits(got, want) {
-            return Ok(value);
-        }
-        if let Some(moved) = self.moved(scope, &value, got, want)? {
-            return Ok(moved);
+        if let Some(coerced) = self.coerced(scope, value, got, want)? {
+            return Ok(coerced);
         }
         Err(LowerError::Representation {
             at,
@@ -1470,6 +1467,11 @@ impl<'a> Lowerer<'a> {
                     .sole()
                     .is_some_and(|variant| variant.ctor.is_none())
                 {
+                    // В голый указатель запись идёт единообразной формой (§10
+                    // вопрос 235); боксированная - туда, где форму назвали.
+                    if want == Repr::Boxed {
+                        return self.uniformed(scope, value.clone(), got);
+                    }
                     let tag = self.boxed_shape(pack)?;
                     if !fits(Repr::Record(tag), want) {
                         return Ok(None);
@@ -1595,6 +1597,153 @@ impl<'a> Lowerer<'a> {
             }
         }
         boxable(repr, at)
+    }
+
+    /// Единообразная форма записи с метками `labels`: все поля - указатели
+    /// (§10 вопрос 235).
+    ///
+    /// В ней запись живёт там, где ждут голый указатель: в поле-параметре
+    /// семейства, параметре и ответе обобщённой функции, аргументе замыкания.
+    /// Форма определяется одними метками, поэтому тип называет её верно по
+    /// построению, как бы и где бы запись ни собиралась; обобщённый код
+    /// строит её сам - поля у него указательные.
+    fn uniform_shape(&mut self, labels: &[String]) -> Result<CtorId, LowerError> {
+        let facts = vec![Fact::declared(Mult::One).shaped(Repr::Boxed); labels.len()];
+        self.shape(labels, &facts)
+    }
+
+    /// Запись, которую нужно переложить в единообразную форму: она идёт туда,
+    /// где ждут голый указатель, а лежит плотно либо в другой форме.
+    fn needs_uniform(&self, got: Repr, want: Repr) -> bool {
+        if want != Repr::Boxed {
+            return false;
+        }
+        match got {
+            Repr::Record(tag) => {
+                let described = &self.constructors[usize::from(tag.0)];
+                described.labels.is_some()
+                    && described
+                        .binders
+                        .iter()
+                        .any(|fact| *fact != Fact::declared(Mult::One).shaped(Repr::Boxed))
+            }
+            Repr::Packed(pack) => self.packings[pack.0 as usize]
+                .sole()
+                .is_some_and(|variant| variant.ctor.is_none()),
+            _ => false,
+        }
+    }
+
+    /// Сверка представлений с перекладкой записи в единообразную форму:
+    /// годится как есть - значение, иначе переклад, `None` - перехода нет.
+    fn coerced(
+        &mut self,
+        scope: &mut Scope,
+        value: Expr,
+        got: Repr,
+        want: Repr,
+    ) -> Result<Option<Expr>, LowerError> {
+        if self.needs_uniform(got, want) {
+            return self.uniformed(scope, value, got);
+        }
+        if fits(got, want) {
+            return Ok(Some(value));
+        }
+        self.moved(scope, &value, got, want)
+    }
+
+    /// Запись в единообразной форме: примитивы полей - обёртками, вложенные
+    /// записи - той же формой рекурсивно (§10 вопрос 235).
+    fn uniformed(
+        &mut self,
+        scope: &mut Scope,
+        value: Expr,
+        got: Repr,
+    ) -> Result<Option<Expr>, LowerError> {
+        match got {
+            Repr::Packed(pack) => {
+                let Some(variant) = self.packings[pack.0 as usize]
+                    .sole()
+                    .filter(|variant| variant.ctor.is_none())
+                    .cloned()
+                else {
+                    return Ok(None);
+                };
+                let binding = Binding {
+                    name: "агрегат".to_owned(),
+                    local: scope.fresh(),
+                    fact: Fact::present(Mult::Many).shaped(Repr::Packed(pack)),
+                };
+                let local = binding.local;
+                let mut fields = Vec::with_capacity(variant.slots.len());
+                for (at, slot) in variant.slots.iter().enumerate() {
+                    let taken = Expr::Unpack {
+                        packing: pack,
+                        variant: 0,
+                        field: u32::try_from(at).unwrap_or(u32::MAX),
+                        value: Box::new(Expr::Local(local)),
+                    };
+                    let Some(field) = self.coerced(scope, taken, slot.ty.repr(), Repr::Boxed)?
+                    else {
+                        return Ok(None);
+                    };
+                    fields.push(field);
+                }
+                let tag = self.uniform_shape(&variant.labels)?;
+                Ok(Some(Expr::Bind {
+                    binding,
+                    value: Box::new(value),
+                    body: Box::new(Expr::Construct {
+                        constructor: tag,
+                        reuse: None,
+                        arguments: fields,
+                    }),
+                }))
+            }
+            Repr::Record(tag) => {
+                let described = self.constructors[usize::from(tag.0)].clone();
+                let Some(labels) = described.labels.clone() else {
+                    return Ok(None);
+                };
+                if described.binders.iter().any(|fact| !fact.present) {
+                    return Ok(None);
+                }
+                let fields: Vec<Binding> = labels
+                    .iter()
+                    .zip(&described.binders)
+                    .map(|(label, fact)| Binding {
+                        name: label.clone(),
+                        local: scope.fresh(),
+                        fact: *fact,
+                    })
+                    .collect();
+                let mut arguments = Vec::with_capacity(fields.len());
+                for field in &fields {
+                    let local = Expr::Local(field.local);
+                    let Some(argument) =
+                        self.coerced(scope, local, field.fact.repr, Repr::Boxed)?
+                    else {
+                        return Ok(None);
+                    };
+                    arguments.push(argument);
+                }
+                let uniform = self.uniform_shape(&labels)?;
+                Ok(Some(Expr::Match {
+                    scrutinee: Box::new(value),
+                    consumed: Mult::One,
+                    arms: vec![Arm {
+                        constructor: tag,
+                        fields,
+                        body: Expr::Construct {
+                            constructor: uniform,
+                            reuse: None,
+                            arguments,
+                        },
+                    }],
+                }))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Плотная запись объектом кучи: поля читаются смещением, кладутся слотом.
@@ -2306,6 +2455,15 @@ impl<'a> Lowerer<'a> {
         } else {
             Expr::Erased
         };
+        // Указательное поле, чей тип - замкнутая запись, лежит единообразной
+        // формой (§10 вопрос 235): тип её и называет.
+        let shaped = match taken.repr {
+            Repr::Boxed => {
+                let projected = Term::Project(Rc::new(record.clone()), Rc::clone(label));
+                self.typed_form(scope, &projected).unwrap_or(Repr::Boxed)
+            }
+            other => other,
+        };
         Ok((
             Expr::Match {
                 scrutinee: Box::new(value),
@@ -2318,7 +2476,7 @@ impl<'a> Lowerer<'a> {
                     body,
                 }],
             },
-            taken.repr,
+            shaped,
         ))
     }
 
@@ -2472,7 +2630,7 @@ impl<'a> Lowerer<'a> {
                 } else {
                     Expr::Erased
                 };
-                if fits(binding.fact.repr, want) {
+                if fits(binding.fact.repr, want) && !self.needs_uniform(binding.fact.repr, want) {
                     return Ok(value);
                 }
                 // Достроенный параметр перекладывается, как всякая объявленная
@@ -2480,7 +2638,7 @@ impl<'a> Lowerer<'a> {
                 // применяет замыкание к достроенному `Int32`, а замыкание
                 // берёт указатель.
                 if binding.fact.present {
-                    if let Some(moved) = self.moved(scope, &value, binding.fact.repr, want)? {
+                    if let Some(moved) = self.coerced(scope, value, binding.fact.repr, want)? {
                         return Ok(moved);
                     }
                 }
@@ -5061,9 +5219,9 @@ impl<'a> Lowerer<'a> {
     ///
     /// Читается тип параметра вызываемого: написан стрелкой - её домены и есть
     /// типы связываний лямбды. Подсказывается **только запись**: аргумент
-    /// прибывает в замыкание объектом её боксированной формы (его боксирует
-    /// [`Lowerer::moved`] в позиции аргумента замыкания), и факт параметра может
-    /// её назвать. Прочее остаётся указателем, как было. Домен-переменная
+    /// прибывает в замыкание объектом её единообразной формы (его перекладывает
+    /// [`Lowerer::coerced`] в позиции аргумента замыкания, §10 вопрос 235), и
+    /// факт параметра может её назвать. Прочее остаётся указателем, как было. Домен-переменная
     /// (`apply : (a -> b) -> a -> b`) подсказки не даёт - типа там нет.
     fn lambda_hints(
         &mut self,
@@ -5101,26 +5259,60 @@ impl<'a> Lowerer<'a> {
         self.hinted(&written, depth)
     }
 
-    /// Боксированная форма записи, которой оказался указатель `index` по
-    /// своему типу (§10 вопрос 235). `None` - тип неизвестен, не запись либо
-    /// не замкнут: у записи с переменной типа форма объекта зависит от
-    /// подстановки, и назвать её по типу значило бы читать мимо.
-    fn typed_form(&mut self, scope: &Scope, index: Index) -> Option<Repr> {
-        let ty = scope.type_of(index)?;
+    /// Форма записи, которой оказался указатель `index` по своему типу (§10
+    /// вопрос 235): единообразная - в ней запись и лежит там, где ждут голый
+    /// указатель. `None` - тип неизвестен, не запись либо не замкнут.
+    fn typed_form(&mut self, scope: &Scope, term: &Term) -> Option<Repr> {
+        let ty = self.term_type(scope, term)?;
         let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
-        let written = quote(depth, ty);
+        let written = quote(depth, &ty);
         if adamas_core::pattern::shift_free(&written, 1) != written {
             return None;
         }
-        match self.repr_of(&written, depth, &Dicts::new()).ok()? {
-            Repr::Packed(pack)
-                if self.packings[pack.0 as usize]
-                    .sole()
-                    .is_some_and(|variant| variant.ctor.is_none()) =>
-            {
-                Some(Repr::Record(self.boxed_shape(pack).ok()?))
+        let repr = self.repr_of(&written, depth, &Dicts::new()).ok()?;
+        let labels = self.record_labels(repr)?;
+        Some(Repr::Record(self.uniform_shape(&labels).ok()?))
+    }
+
+    /// Тип переменной либо цепочки проекций из неё, если он известен: поле
+    /// записи берёт тип у её телескопа, предыдущие поля - проекциями.
+    fn term_type(&self, scope: &Scope, term: &Term) -> Option<Rc<Value>> {
+        match term {
+            Term::Var(index) => scope.type_of(*index).cloned(),
+            Term::Project(record, label) => {
+                let ty = self.term_type(scope, record)?;
+                let reduced = adamas_core::conv::whnf(self.signature, &ty);
+                let Value::Record(telescope) = &*reduced else {
+                    return None;
+                };
+                let at = telescope
+                    .fields()
+                    .iter()
+                    .position(|field| field.name == *label)?;
+                let env = scope.values();
+                let earlier: Vec<Rc<Value>> = telescope.fields()[..at]
+                    .iter()
+                    .map(|field| {
+                        eval(
+                            &env,
+                            &Term::Project(Rc::clone(record), Rc::clone(&field.name)),
+                        )
+                    })
+                    .collect();
+                Some(telescope.instantiated(at, &earlier, &[], &[], &[]))
             }
-            Repr::Record(tag) => Some(Repr::Record(tag)),
+            _ => None,
+        }
+    }
+
+    /// Метки записи, если представление - запись: плотная либо объектом.
+    fn record_labels(&self, repr: Repr) -> Option<Vec<String>> {
+        match repr {
+            Repr::Packed(pack) => self.packings[pack.0 as usize]
+                .sole()
+                .filter(|variant| variant.ctor.is_none())
+                .map(|variant| variant.labels.clone()),
+            Repr::Record(tag) => self.constructors[usize::from(tag.0)].labels.clone(),
             _ => None,
         }
     }
@@ -5157,7 +5349,7 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Подсказка по написанному типу-стрелке: домены по порядку, запись -
-    /// собой, прочее - указателем. Не стрелка - подсказки нет.
+    /// единообразной формой, прочее - указателем. Не стрелка - подсказки нет.
     fn hinted(&mut self, ty: &Term, depth: u32) -> Result<Option<Vec<Repr>>, LowerError> {
         let ty = unaliased(self.signature, ty).clone();
         let Term::Pi(..) = ty else {
@@ -5168,16 +5360,13 @@ impl<'a> Lowerer<'a> {
         let mut hints = Vec::new();
         while let Term::Pi(_, _, inner, _, codomain) = current {
             let repr = self.repr_of(inner, depth, &Dicts::new())?;
-            let record = match repr {
-                Repr::Packed(pack) => self.packings[pack.0 as usize]
-                    .sole()
-                    .is_some_and(|variant| variant.ctor.is_none()),
-                // Запись с указательными полями плотной не бывает: её форма
-                // уже боксированная, и прибывает она ею же.
-                Repr::Record(_) => true,
-                _ => false,
+            // Аргумент замыкания - голый указатель, и запись прибывает туда
+            // единообразной формой (§10 вопрос 235).
+            let hint = match self.record_labels(repr) {
+                Some(labels) => Repr::Record(self.uniform_shape(&labels)?),
+                None => Repr::Boxed,
             };
-            hints.push(if record { repr } else { Repr::Boxed });
+            hints.push(hint);
             depth = depth.saturating_add(1);
             current = codomain;
         }
@@ -5380,6 +5569,7 @@ impl<'a> Lowerer<'a> {
         // Пустой разбор ответа не даёт: тип пуст, и до печати дело не дойдёт.
         let mut answer = Repr::Boxed;
         let mut arms = Vec::with_capacity(case.branches.len());
+        let mut reprs = Vec::with_capacity(case.branches.len());
         for branch in &case.branches {
             let constructor = self.tag(&branch.constructor)?;
             let facts = self.branch_facts(packed, constructor);
@@ -5404,17 +5594,7 @@ impl<'a> Lowerer<'a> {
                     break;
                 };
                 fields[taken].name = bound.to_string();
-                let (ty, next) = match telescope.as_deref() {
-                    Some(Value::Pi(_, _, domain, _, codomain)) => {
-                        let level = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
-                        (
-                            Some(Rc::clone(domain)),
-                            Some(codomain.apply(Value::var(Lvl(level)))),
-                        )
-                    }
-                    _ => (None, None),
-                };
-                telescope = next;
+                let ty = stepped(&mut telescope, scope.env.len());
                 scope.push_typed(Slot::Bound(fields[taken].local, fields[taken].fact), ty);
                 current = Rc::clone(inner);
                 taken += 1;
@@ -5469,11 +5649,18 @@ impl<'a> Lowerer<'a> {
                     got: describe(repr),
                 });
             }
+            reprs.push(repr);
             arms.push(Arm {
                 constructor,
                 fields,
                 body,
             });
+        }
+        // Ответ - голый указатель, и запись в нём живёт единообразной формой
+        // (§10 вопрос 235): ветви, ответившие записью другой формы, её
+        // перекладывают - иначе форму по типу назвать было бы нельзя.
+        if answer == Repr::Boxed {
+            self.uniform_arms(scope, &mut arms, &reprs)?;
         }
         Ok((
             Expr::Match {
@@ -5483,6 +5670,30 @@ impl<'a> Lowerer<'a> {
             },
             answer,
         ))
+    }
+
+    /// Ветви разбора, ответившие записью не единообразной формы, её
+    /// перекладывают: ответ разбора - голый указатель (§10 вопрос 235).
+    fn uniform_arms(
+        &mut self,
+        scope: &mut Scope,
+        arms: &mut [Arm],
+        reprs: &[Repr],
+    ) -> Result<(), LowerError> {
+        for (arm, repr) in arms.iter_mut().zip(reprs) {
+            if !self.needs_uniform(*repr, Repr::Boxed) {
+                continue;
+            }
+            let body = std::mem::replace(&mut arm.body, Expr::Erased);
+            arm.body =
+                self.uniformed(scope, body, *repr)?
+                    .ok_or_else(|| LowerError::Representation {
+                        at: "ветвь разбора",
+                        want: describe(Repr::Boxed),
+                        got: describe(*repr),
+                    })?;
+        }
+        Ok(())
     }
 
     /// Понижает лямбду в замыкание: своя функция плюс захваченная среда.
@@ -5545,17 +5756,13 @@ impl<'a> Lowerer<'a> {
         };
         // Лямбда получает значение всегда: стирает машина по типу глобального
         // имени, а здесь имени нет.
-        // Подсказанная запись называет свою боксированную форму: объект этой
-        // формы и прибывает (§10 вопрос 223). Прочее - указатель.
+        // Подсказанная запись называет единообразную форму: объект этой формы
+        // и прибывает (§10 вопросы 223, 235). Прочее - указатель.
         let mut bindings: Vec<Binding> = Vec::with_capacity(parameters.len());
         for (at, (mult, name)) in parameters.iter().enumerate() {
             let mut fact = Fact::present(*mult);
-            match hints.get(at) {
-                Some(Repr::Packed(pack)) => {
-                    fact = fact.shaped(Repr::Record(self.boxed_shape(*pack)?));
-                }
-                Some(Repr::Record(tag)) => fact = fact.shaped(Repr::Record(*tag)),
-                _ => {}
+            if let Some(Repr::Record(tag)) = hints.get(at) {
+                fact = fact.shaped(Repr::Record(*tag));
             }
             bindings.push(Binding {
                 name: name.clone(),
@@ -6427,6 +6634,23 @@ impl Lowerer<'_> {
         }
         Ok(facts)
     }
+}
+
+/// Тип очередного связывания телескопа `Pi` на позиции `position`; телескоп
+/// шагает дальше. `None` - телескопа нет либо он кончился.
+fn stepped(telescope: &mut Option<Rc<Value>>, position: usize) -> Option<Rc<Value>> {
+    let (ty, next) = match telescope.as_deref() {
+        Some(Value::Pi(_, _, domain, _, codomain)) => {
+            let level = u32::try_from(position).unwrap_or(u32::MAX);
+            (
+                Some(Rc::clone(domain)),
+                Some(codomain.apply(Value::var(Lvl(level)))),
+            )
+        }
+        _ => (None, None),
+    };
+    *telescope = next;
+    ty
 }
 
 /// Типы полей записи `ty`, разбираемой связыванием на позиции `record`: поле

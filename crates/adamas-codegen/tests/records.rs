@@ -81,9 +81,9 @@ main : Bit
 main = taken (MkBox { x = On })
 ";
 
-/// Форма потеряна: у записи с переменной типа форма объекта зависит от
-/// подстановки, и тип её не называет.
-const SHAPELESS: &str = "\
+/// Запись с переменной типа в поле семейства: голый указатель держит
+/// единообразную форму, и определяют её одни метки (§10 вопрос 235).
+const GENERIC: &str = "\
 data Bit where
   Off : Bit
   On : Bit
@@ -96,6 +96,30 @@ taken (MkBox p) = p.x
 
 main : Bit
 main = taken (MkBox { x = On })
+";
+
+/// Форма потеряна: параметр ветки хендлера типа не несёт - ветви типы внешней
+/// среды не передаются, - и проекции из него взять слот неоткуда.
+const SHAPELESS: &str = "\
+data Bit where
+  Off : Bit
+  On : Bit
+
+data Unit where
+  MkUnit : Unit
+
+type Point = { x : Bit }
+
+effect Probe where
+  probe : Point -> Bit
+
+asked : {Probe} Bit
+asked = probe { x = On }
+
+main : Bit
+main = handle asked with
+  return v -> v
+  probe p -> resume p.x
 ";
 
 /// Ближайший проходящий сосед: та же проекция без потери формы.
@@ -199,6 +223,9 @@ fn a_record_under_a_constructor_is_parenthesised() {
 fn a_record_in_a_family_field_takes_its_shape_from_the_type() {
     harness::agreed("record-boxed", BOXED).unwrap_or_else(|error| {
         panic!("запись в поле семейства: {error}");
+    });
+    harness::agreed("record-generic", GENERIC).unwrap_or_else(|error| {
+        panic!("запись с переменной типа: {error}");
     });
 }
 

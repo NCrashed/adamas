@@ -1488,6 +1488,20 @@ impl<'a> Lowerer<'a> {
             (Repr::Record(tag), Repr::Packed(pack)) => {
                 self.tightening(scope, value.clone(), tag, pack)
             }
+            // Голый указатель на запись держит единообразную форму (§10 вопрос
+            // 235), и сужается она тем же разбором, что всякая форма записи.
+            (Repr::Boxed, Repr::Packed(pack))
+                if self.packings[pack.0 as usize]
+                    .sole()
+                    .is_some_and(|variant| variant.ctor.is_none()) =>
+            {
+                let labels = self.packings[pack.0 as usize]
+                    .sole()
+                    .map(|variant| variant.labels.clone())
+                    .unwrap_or_default();
+                let tag = self.uniform_shape(&labels)?;
+                self.tightening(scope, value.clone(), tag, pack)
+            }
             (Repr::Boxed, Repr::Packed(pack)) => self.narrowing(scope, value.clone(), pack),
             // Примитив в указательной позиции: обёртка с прозрачной печатью -
             // реализация принятого решением §10 вопроса 158, заказчик - §10
@@ -4293,6 +4307,14 @@ impl<'a> Lowerer<'a> {
         split: &adamas_core::term::Split,
     ) -> Result<(Expr, Repr), LowerError> {
         let (record, shape) = self.expr(scope, &split.scrutinee)?;
+        // Голый указатель на запись держит единообразную форму (§10 вопрос
+        // 235), а метки её называет сам разбор.
+        let shape = if shape == Repr::Boxed {
+            let labels: Vec<String> = split.fields.iter().map(ToString::to_string).collect();
+            Repr::Record(self.uniform_shape(&labels)?)
+        } else {
+            shape
+        };
         let binding = Binding {
             name: "запись".to_owned(),
             local: scope.fresh(),
@@ -5033,7 +5055,12 @@ impl<'a> Lowerer<'a> {
         let flat = parameters
             .iter()
             .any(|it| it.fact.present && matches!(it.fact.repr, Repr::Flat(_)));
-        if result.boxed() && !flat {
+        // Запись в ответе - не «указатель как есть»: ответ замыкания есть голый
+        // указатель, и запись едет туда единообразной формой (§10 вопрос 235).
+        let uniform = self.needs_uniform(result, Repr::Boxed);
+        // Запись единообразной формы - тоже голый указатель: перекладывать нечего.
+        let pointer = result.boxed() || matches!(result, Repr::Record(_));
+        if pointer && !flat && !uniform {
             return Ok(function);
         }
         for parameter in &parameters {
@@ -5049,8 +5076,9 @@ impl<'a> Lowerer<'a> {
             }
         }
         let answer = match result {
-            Repr::Flat(prim) => Some(self.prim_wrapper(prim)?),
-            boxed if boxed.boxed() => None,
+            Repr::Flat(prim) => Rewrapped::Wrapper(self.prim_wrapper(prim)?),
+            _ if uniform => Rewrapped::Uniform,
+            _ if pointer => Rewrapped::Same,
             _ => {
                 return Err(LowerError::Representation {
                     at: "ответ недобранного вызова",
@@ -5091,7 +5119,7 @@ impl<'a> Lowerer<'a> {
         &mut self,
         function: FuncId,
         parameters: &[Binding],
-        answer: Option<CtorId>,
+        answer: Rewrapped,
         result: Repr,
     ) -> Result<(Vec<Binding>, Expr), LowerError> {
         let mut next = u32::try_from(parameters.len()).unwrap_or(u32::MAX);
@@ -5133,8 +5161,20 @@ impl<'a> Lowerer<'a> {
             arguments,
         };
         let mut body = match answer {
-            None => call,
-            Some(tag) => {
+            Rewrapped::Same => call,
+            Rewrapped::Uniform => {
+                let mut scope = Scope {
+                    locals: next,
+                    ..Scope::default()
+                };
+                let uniformed = self.uniformed(&mut scope, call, result)?;
+                uniformed.ok_or(LowerError::Representation {
+                    at: "ответ недобранного вызова",
+                    want: describe(Repr::Boxed),
+                    got: describe(result),
+                })?
+            }
+            Rewrapped::Wrapper(tag) => {
                 let held = Binding {
                     name: "ответ".to_owned(),
                     local: fresh(),
@@ -5259,18 +5299,24 @@ impl<'a> Lowerer<'a> {
         self.hinted(&written, depth)
     }
 
-    /// Форма записи, которой оказался указатель `index` по своему типу (§10
-    /// вопрос 235): единообразная - в ней запись и лежит там, где ждут голый
-    /// указатель. `None` - тип неизвестен, не запись либо не замкнут.
+    /// Форма записи, которой оказался указатель по своему типу (§10 вопрос
+    /// 235): единообразная - в ней запись и лежит там, где ждут голый
+    /// указатель. Определяют её одни метки, поэтому переменные в типах полей
+    /// ей не мешают. `None` - тип неизвестен, не запись либо запись открыта.
     fn typed_form(&mut self, scope: &Scope, term: &Term) -> Option<Repr> {
         let ty = self.term_type(scope, term)?;
-        let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
-        let written = quote(depth, &ty);
-        if adamas_core::pattern::shift_free(&written, 1) != written {
+        let reduced = adamas_core::conv::whnf(self.signature, &ty);
+        let Value::Record(telescope) = &*reduced else {
+            return None;
+        };
+        if telescope.is_open() {
             return None;
         }
-        let repr = self.repr_of(&written, depth, &Dicts::new()).ok()?;
-        let labels = self.record_labels(repr)?;
+        let labels: Vec<String> = telescope
+            .fields()
+            .iter()
+            .map(|field| field.name.to_string())
+            .collect();
         Some(Repr::Record(self.uniform_shape(&labels).ok()?))
     }
 
@@ -6669,6 +6715,17 @@ fn field_types(signature: &Signature, ty: &Rc<Value>, record: usize) -> Vec<Rc<V
         earlier.push(Value::var(Lvl(level)));
     }
     found
+}
+
+/// Что трамплин делает с ответом обёрнутого ([`Lowerer::boxed_call`]).
+#[derive(Clone, Copy)]
+enum Rewrapped {
+    /// Указатель - отдаётся как есть.
+    Same,
+    /// Плоский примитив - ячейкой-обёрткой.
+    Wrapper(CtorId),
+    /// Запись - единообразной формой (§10 вопрос 235).
+    Uniform,
 }
 
 /// Разворачивает **применённое** имя: класс, сигнатуру модуля, алиас с

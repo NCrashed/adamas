@@ -869,7 +869,7 @@ struct Lowerer<'a> {
     /// до дна стека.
     pending: VecDeque<(FuncId, Name)>,
     /// Какое определение понижается сейчас - им запрошены имена, встающие в
-    /// очередь.
+    /// очередь, и областью его файла разрешаются соглашения (§10 вопрос 195).
     current: Option<Name>,
     /// Представления параметров лямбды, известные из **сигнатуры** того, кому
     /// она уходит аргументом (§10 вопрос 223): у связывания лямбды типа в ядре
@@ -1315,7 +1315,26 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Тег конструктора: семейство заводится целиком по дороге.
+    /// Объявленное имя соглашения областью файла понижаемого определения
+    /// (§10 вопрос 195).
+    fn convention(&self, name: &str) -> Name {
+        let scope = self
+            .current
+            .as_deref()
+            .map_or_else(|| self.signature.scope(), |it| self.signature.scope_of(it));
+        self.signature.convention_in(scope, name)
+    }
+
     fn tag(&mut self, name: &Name) -> Result<CtorId, LowerError> {
+        // Голое имя соглашения ставит само ядро - ответ сравнения, свёрнутый
+        // δ-редукцией, - и разрешать его надо областью файла, а не программы.
+        let resolved;
+        let name = if adamas_core::eval::conventional(name) {
+            resolved = self.convention(name);
+            &resolved
+        } else {
+            name
+        };
         if let Some(tag) = self.tags.get(name) {
             return Ok(*tag);
         }
@@ -4290,8 +4309,8 @@ impl<'a> Lowerer<'a> {
                 // проверка: в подключаемом файле они объявлены под путём (§4.8,
                 // §10 вопрос 188), и `Name::from("True")` их не находил.
                 let (yes, no) = (
-                    self.signature.convention(adamas_core::prim::TRUE),
-                    self.signature.convention(adamas_core::prim::FALSE),
+                    self.convention(adamas_core::prim::TRUE),
+                    self.convention(adamas_core::prim::FALSE),
                 );
                 let yes = self.tag(&yes)?;
                 let no = self.tag(&no)?;
@@ -4661,7 +4680,7 @@ impl<'a> Lowerer<'a> {
 
     /// Конструктор ответа чтения - именем программы, по соглашению (§4.3).
     fn read_constructor(&self) -> Term {
-        let name = self.signature.convention(adamas_core::prim::MKREAD);
+        let name = self.convention(adamas_core::prim::MKREAD);
         let arity = self.signature.lookup(&name).map_or(0, |it| it.level_arity);
         let levels: Rc<[adamas_core::level::Level]> = (0..arity)
             .map(|_| adamas_core::level::Level::Zero)

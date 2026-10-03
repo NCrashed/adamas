@@ -787,6 +787,13 @@ pub struct Signature {
     /// разбора нет вовсе, сюда не попадают - переписывать там нечего.
     reuses: HashMap<Name, Reuse>,
     scope: Scope,
+    /// Области завершённых подключённых файлов (§10 вопрос 195).
+    ///
+    /// Соглашение разрешается областью файла, а термы живут дольше файла:
+    /// понижение спрашивает его у определения, которое понижает, и обязано
+    /// найти ту же область, что видела элаборация. Иначе ответ сравнения в
+    /// библиотеке строил конструктор чужого `Bool`.
+    files: Vec<Scope>,
     /// Под каким именем объявлена единица - см. [`Signature::unit`].
     unit: Option<Name>,
     /// Чужие символы: имя определения - форма его границы (§5.3).
@@ -986,14 +993,44 @@ impl Signature {
     /// же `None`, что и до подключения файла.
     #[must_use]
     pub fn written(&self, name: &str) -> Option<&Name> {
-        if let Some(own) = &self.scope.own {
+        self.written_in(&self.scope, name)
+    }
+
+    /// То же в области `scope` - файла, который уже кончился (§10 вопрос 195).
+    #[must_use]
+    pub fn written_in(&self, scope: &Scope, name: &str) -> Option<&Name> {
+        if let Some(own) = &scope.own {
             let full: Name = format!("{own}.{name}").into();
             if let Some((declared, _)) = self.definitions.get_key_value(&full) {
                 return Some(declared);
             }
         }
-        let declared = self.scope.written.get(name)?;
-        self.definitions.contains_key(declared).then_some(declared)
+        let declared = scope.written.get(name)?;
+        self.definitions
+            .get_key_value(declared)
+            .map(|(declared, _)| declared)
+    }
+
+    /// Запоминает область кончившегося подключённого файла.
+    pub fn remember(&mut self, scope: Scope) {
+        self.files.push(scope);
+    }
+
+    /// Область файла, в котором объявлено определение `name`: подключённого,
+    /// чей путь - самый длинный префикс имени, либо текущая - входного.
+    #[must_use]
+    pub fn scope_of(&self, name: &str) -> &Scope {
+        self.files
+            .iter()
+            .filter(|scope| {
+                scope.own.as_ref().is_some_and(|own| {
+                    name.len() > own.len()
+                        && name.starts_with(&**own)
+                        && name.as_bytes()[own.len()] == b'.'
+                })
+            })
+            .max_by_key(|scope| scope.own.as_ref().map_or(0, |own| own.len()))
+            .unwrap_or(&self.scope)
     }
 
     /// Объявленное имя, под которым программа держит **имя-соглашение** (§4.3):
@@ -1016,7 +1053,14 @@ impl Signature {
     ///      выбирается: две `Bool` в программе разрешит тот, кто их написал.
     #[must_use]
     pub fn convention(&self, name: &str) -> Name {
-        if let Some(declared) = self.written(name) {
+        self.convention_in(&self.scope, name)
+    }
+
+    /// То же в области `scope` (§10 вопрос 195): понижение спрашивает
+    /// соглашение областью файла понижаемого определения.
+    #[must_use]
+    pub fn convention_in(&self, scope: &Scope, name: &str) -> Name {
+        if let Some(declared) = self.written_in(scope, name) {
             return Rc::clone(declared);
         }
         if let Some((declared, _)) = self.definitions.get_key_value(name) {

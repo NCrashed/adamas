@@ -519,7 +519,8 @@ impl Loader<'_> {
                 ),
             }
         };
-        pass.signature.set_scope(outer);
+        let finished = pass.signature.set_scope(outer);
+        pass.signature.remember(finished);
         self.frames.pop();
         self.units[at].module = Some(module);
         let broken = !refusals.is_empty() || outcome.is_err();

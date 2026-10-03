@@ -381,6 +381,9 @@ pub enum ExprKind {
 pub struct RecordField {
     /// Имя поля.
     pub name: Name,
+    /// Написанная кратность поля: `{ ω x : A }` (§4.2, §10 вопрос 237).
+    /// Не написана - `1`, как у поля конструктора (§4.1).
+    pub mult: Option<MultAnn>,
     /// Написанный тип.
     pub ty: Expr,
 }

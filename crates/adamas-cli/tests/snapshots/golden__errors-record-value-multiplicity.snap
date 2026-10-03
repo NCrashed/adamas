@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: record-value-multiplicity.adamas:10:11: кратность пишется у поля в типе записи (`{ ω x : A }`), а не у значения
+  boxed = { ω x = Zero }
+            ^

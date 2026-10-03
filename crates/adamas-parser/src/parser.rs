@@ -205,6 +205,14 @@ pub enum ParseError {
         span: Span,
     },
 
+    /// Кратность у значения поля записи: она свойство типа, `{ ω x : A }`, а не
+    /// значения `{ x = v }` (§10 вопрос 237).
+    #[error("кратность пишется у поля в типе записи (`{{ ω x : A }}`), а не у значения")]
+    FieldMultiplicity {
+        /// Написанная кратность.
+        span: Span,
+    },
+
     /// Кратность записана не 0, 1 и не ω.
     ///
     /// Полукольцо §3.2 состоит ровно из трёх элементов, поэтому это не
@@ -320,6 +328,7 @@ impl ParseError {
             | Self::ExpectedFn { span }
             | Self::AttributedExport { span }
             | Self::Multiplicity { span }
+            | Self::FieldMultiplicity { span }
             | Self::PatternPath { span, .. }
             | Self::SplitClauses { again: span, .. }
             | Self::Misplaced { span, .. }
@@ -2005,6 +2014,14 @@ impl<'a> Parser<'a> {
         let mut fields = Vec::new();
         let mut values = Vec::new();
         loop {
+            // Кратность поля пишется только в типе записи: `{ ω x : A }` (§10
+            // вопрос 237). Узнаётся она по имени за собой - `ω` лексически
+            // тоже имя, и поле `ω` без кратности осталось бы им.
+            let mult = if self.at_multiplicity(0) && self.kind_ahead(1) == TokenKind::Ident {
+                self.multiplicity()?
+            } else {
+                None
+            };
             let name = self.expect(TokenKind::Ident)?;
             let name = self.name_of(name);
             if self.eat(TokenKind::Colon).is_some() {
@@ -2013,8 +2030,12 @@ impl<'a> Parser<'a> {
                 }
                 fields.push(RecordField {
                     name: name.clone(),
+                    mult,
                     ty: self.expr()?,
                 });
+            } else if let Some(mult) = mult {
+                // Кратность у значения поля не пишется: она есть свойство типа.
+                return Err(ParseError::FieldMultiplicity { span: mult.span });
             } else {
                 if !fields.is_empty() {
                     return Err(ParseError::MixedRecord { span: name.span });

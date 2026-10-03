@@ -19,6 +19,8 @@
 -- Что нашлось по дороге (лог 2026-10-03):
 --   * поле ветви `case` над линейным разбираемым элаборация считала при `ω`,
 --     и вложенный `case arrayRead ys …` расходовал `ys` дважды;
+--   * массив из пары со `Span` приходил линейным - теперь поле `ω` (вопрос
+--     237);
 --   * трамплин функции, отданной значением, не умел ответ-запись;
 --   * пара из ответа замыкания и разбор её на месте не понижались: голый
 --     указатель на запись не сужался ни в плотную запись, ни разбором.
@@ -64,8 +66,10 @@ write (MkSpan fd a b) off len bytes fits =
   let _wrote : Int64 = pwrite fd bytes len (uint64ToInt64 (addUInt64 a off))
   MkSpan fd a b
 
--- Чтение интервала целиком.
-readAll : (1 s : Span f lo hi) -> {Foreign} (Span f lo hi, Array (subUInt64 hi lo) UInt8)
+-- Чтение интервала целиком. Массив - поле `ω`: интервал уникален, и запись с
+-- ним разбирается при `1`, а прочитанные байты владения не несут и
+-- копируются свободно (§10 вопрос 237).
+readAll : (1 s : Span f lo hi) -> {Foreign} { _1 : Span f lo hi, ω _2 : Array (subUInt64 hi lo) UInt8 }
 readAll (MkSpan fd a b) =
   let zero : UInt8 = 0
   let buffer : Array (subUInt64 b a) UInt8 = arrayNew (subUInt64 b a) zero
@@ -88,14 +92,9 @@ withTemp cap body =
   let _closed : Int32 = fclose file
   answer
 
--- Линейный массив читается `arrayRead`: он возвращает массив вместе с ячейкой.
 -- Байты 0, 1, 5, 6 - написанное в обе половины.
-written : (1 xs : Array 8 UInt8) -> List UInt8
-written xs = case arrayRead xs 0 Refl of
-  MkRead a ys -> case arrayRead ys 1 Refl of
-    MkRead b zs -> case arrayRead zs 5 Refl of
-      MkRead c ws -> case arrayRead ws 6 Refl of
-        MkRead d _ -> Cons a (Cons b (Cons c (Cons d Nil)))
+written : Array 8 UInt8 -> List UInt8
+written xs = Cons (arrayIndex xs 0 Refl) (Cons (arrayIndex xs 1 Refl) (Cons (arrayIndex xs 5 Refl) (Cons (arrayIndex xs 6 Refl) Nil)))
 
 -- Две половины пишутся порознь, склеиваются и читаются обратно. Левая `[0, 4)`
 -- получает `"ab"` со смещения 0, правая `[4, 8)` - `"cd"` со смещения 1, то

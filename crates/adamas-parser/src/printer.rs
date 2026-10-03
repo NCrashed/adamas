@@ -781,6 +781,28 @@ impl<'a> Printer<'a> {
         self.expr(inner, Prec::App);
     }
 
+    /// Тип записи: `{ω x : A, y : B | r}` - кратность поля пишется, если написана.
+    fn record_type(&mut self, fields: &[crate::ast::RecordField], tail: Option<&Name>) {
+        self.push("{");
+        for (index, field) in fields.iter().enumerate() {
+            if index > 0 {
+                self.push(", ");
+            }
+            if let Some(mult) = field.mult {
+                self.push(&mult.mult.to_string());
+                self.push(" ");
+            }
+            self.push(&field.name.text);
+            self.push(" : ");
+            self.expr(&field.ty, Prec::Lowest);
+        }
+        if let Some(tail) = tail {
+            self.push(" | ");
+            self.push(&tail.text);
+        }
+        self.push("}");
+    }
+
     fn expr_kind(&mut self, expr: &Expr) {
         match &expr.kind {
             ExprKind::Name(name) => self.push(&name.text),
@@ -794,22 +816,7 @@ impl<'a> Printer<'a> {
                 self.push(" ");
                 self.expr(body, Prec::Lowest);
             }
-            ExprKind::RecordType(fields, tail) => {
-                self.push("{");
-                for (index, field) in fields.iter().enumerate() {
-                    if index > 0 {
-                        self.push(", ");
-                    }
-                    self.push(&field.name.text);
-                    self.push(" : ");
-                    self.expr(&field.ty, Prec::Lowest);
-                }
-                if let Some(tail) = tail {
-                    self.push(" | ");
-                    self.push(&tail.text);
-                }
-                self.push("}");
-            }
+            ExprKind::RecordType(fields, tail) => self.record_type(fields, tail.as_ref()),
             ExprKind::Record(fields) => {
                 self.push("{");
                 self.written_fields(fields);

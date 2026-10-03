@@ -3971,6 +3971,7 @@ impl<'a> Elaborator<'a> {
                 .enumerate()
                 .map(|(at, item)| ast::RecordField {
                     name: named(at, item),
+                    mult: None,
                     ty: item.clone(),
                 })
                 .collect();
@@ -4049,6 +4050,12 @@ impl<'a> Elaborator<'a> {
     /// 231): запись с уникальным полем уникальна, её связывание линейно, и
     /// поле достаётся разбором однажды. Запись с ресурсным полем - ресурс: её
     /// закрывает синтезированный разбор, закрывающий поля (см. `closer_of`).
+    ///
+    /// Кратность поля - написанная либо `1`, как у поля конструктора (§4.1).
+    /// `ω` у поля неуникального типа - то, ради чего она пишется: такое поле
+    /// приходит из разбора владеемой записи неограниченным (`ω · 1 = ω`, §10
+    /// вопрос 237). У владеемого типа `ω` отвергается тем же отказом, что у
+    /// связывания: ω-значений такого типа не бывает.
     fn record_fields(&mut self, fields: &[ast::RecordField]) -> Result<Vec<CoreField>, ElabError> {
         let Some((field, rest)) = fields.split_first() else {
             return Ok(Vec::new());
@@ -4056,12 +4063,21 @@ impl<'a> Elaborator<'a> {
         Self::binds(&field.name)?;
         let ty = self.typing(|it| it.expr(&field.ty, Mult::Many))?;
         let bound = self.typed(&ty);
-        let tail = self.binding(Bound::visible(&field.name.text, Mult::One, bound), |it| {
+        let mult = Self::multiplicity(field.mult, Mult::One);
+        if let (Some(ann), Some(owned)) = (field.mult, self.owned_value(&bound)) {
+            if ann.mult == ast::Mult::Many {
+                return Err(ElabError::UnrestrictedOwned {
+                    owned,
+                    span: ann.span,
+                });
+            }
+        }
+        let tail = self.binding(Bound::visible(&field.name.text, mult, bound), |it| {
             it.record_fields(rest)
         })?;
         let head = CoreField {
             name: CoreName::from(&*field.name.text),
-            mult: Mult::One,
+            mult,
             shape: adamas_core::term::Shape::default(),
             ty: Rc::new(ty),
         };

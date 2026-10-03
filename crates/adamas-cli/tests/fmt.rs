@@ -142,6 +142,7 @@ use fixture::{copied, corpus, driven, formatter, read, scratch, sources};
 const UNPARSED: &[&str] = &[
     "braces-open-nothing.adamas",
     "variadic-off-the-boundary.adamas",
+    "record-value-multiplicity.adamas",
 ];
 
 /// Относительное имя фикстуры - им подписаны все сообщения ниже.

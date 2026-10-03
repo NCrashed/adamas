@@ -6452,7 +6452,15 @@ impl Lowerer<'_> {
             // рантайме не имеет: тип стёрт (§3.3), а кратность у него `1` -
             // элаборация даёт её всем членам одинаково. Судить поэтому
             // приходится по **сорту** поля, а не по кратности.
-            let mut fact = Fact::declared(field.mult).shaped(repr);
+            // `1` и `ω` у поля в рантайме одно - слот есть (§10 вопрос 237);
+            // различай их форма, запись `{ ω x : A }` получила бы тег, отличный
+            // от тега собранного объекта, который кладёт поле однажды.
+            let present = if field.mult == Mult::Zero {
+                Mult::Zero
+            } else {
+                Mult::One
+            };
+            let mut fact = Fact::declared(present).shaped(repr);
             if universal(&field.ty) {
                 fact.present = false;
             }

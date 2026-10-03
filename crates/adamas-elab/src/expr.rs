@@ -3010,6 +3010,19 @@ impl<'a> Elaborator<'a> {
             .map(|alt| self.pattern(&alt.pattern))
             .collect::<Result<Vec<_>, _>>()?;
         let forgotten = self.forgotten(alts, &patterns);
+        // Поле приходит в ветвь при `q · r`, и `r` - кратность связывания
+        // разбираемого, тем же правилом, что у компилятора клауз: составное
+        // разбираемое над линейным связано `1`, и его поля линейны. Пока здесь
+        // стояло `ω`, элаборация считала `ys` из `MkRead v ys` неограниченным, и
+        // вложенный `case arrayRead ys …` расходовал его при `ω`.
+        let consumed = match self
+            .ctx
+            .lookup(level.to_index(self.ctx.size()))
+            .map_or(Mult::Many, |binding| binding.mult)
+        {
+            Mult::Zero | Mult::One => Mult::One,
+            other => other,
+        };
         // Ожидание ветвей - снаружи, а без него - **общая** дырка типа (§10
         // вопрос 212). Литерал в ветви видит тогда нерешённую цель и уходит в
         // очередь объявления, а тип ей даёт соседняя ветвь, когда дерево разбора
@@ -3030,7 +3043,7 @@ impl<'a> Elaborator<'a> {
                     &pattern,
                     &alt.body,
                     closing,
-                    &scrutinee,
+                    (&scrutinee, consumed),
                     awaited.clone(),
                 )
             })?;
@@ -3637,7 +3650,7 @@ impl<'a> Elaborator<'a> {
         compiled: &CorePattern,
         body: &Expr,
         closing: &[(Symbol, Symbol)],
-        scrutinee: &Rc<Value>,
+        (scrutinee, consumed): (&Rc<Value>, Mult),
         awaited: Option<Rc<Value>>,
     ) -> Result<Term, ElabError> {
         let mut names = Vec::new();
@@ -3652,7 +3665,7 @@ impl<'a> Elaborator<'a> {
         self.pattern_variables(
             Some(written),
             compiled,
-            Mult::Many,
+            consumed,
             Some(Rc::clone(scrutinee)),
             body,
             &names,

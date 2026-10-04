@@ -21,14 +21,11 @@
 -- доказательство отвечает на другой вопрос - вправе ли эта функция быть здесь
 -- позвана.
 --
--- # Две формы записи, без которых это не собирается
+-- # Форма записи, без которой это не собирается
 --
--- Обе - ограничения сегодняшнего компилятора, и обе названы, чтобы читатель не
--- принял их за стиль.
+-- Это ограничение сегодняшнего компилятора, и оно названо, чтобы читатель не
+-- принял его за стиль.
 --
---   * **Мономорфные обёртки над примитивами массива** (`at`, `put`). Внутри
---     ветви разбора индексированного семейства имплиситы примитива не
---     решаются: `arrayIndex xs i` там отвергается нерешённой дыркой.
 --   * **Индекс семейства написан стёртым полем** конструктора. Без него
 --     `MkWorld`, собранный заново, своего индекса не знает, и вывести его
 --     неоткуда - поля его не упоминают.
@@ -67,19 +64,13 @@ one = 1.0
 two : Float32
 two = 2.0
 
-at : Array cells Float32 -> (i : UInt64) -> (0 p : Equal Bool (ltUInt64 i cells) True) -> Float32
-at xs i p = arrayIndex xs i p
-
-put : Array cells Float32 -> (i : UInt64) -> Float32 -> (0 p : Equal Bool (ltUInt64 i cells) True) -> Array cells Float32
-put xs i v p = arraySet xs i v p
-
 -- | Мир как запись из массивов, индексированная множеством меток.
 data World : Tags -> Type where
   MkWorld : (0 cs : Tags) -> Array cells Float32 -> Array cells Float32 -> Array cells Float32 -> Array cells Float32 -> World cs
 
 -- | Позиция по оси x. Требует доказательства, что позиция у сущности есть.
 posX : (0 cs : Tags) -> (0 p : Has Position cs) -> World cs -> (i : UInt64) -> (0 q : Equal Bool (ltUInt64 i cells) True) -> Float32
-posX cs p (MkWorld ds xs ys vx vy) i q = at xs i q
+posX cs p (MkWorld ds xs ys vx vy) i q = arrayIndex xs i q
 
 -- | Проход по массивам: внутренний цикл идёт по ним, а не по миру.
 --
@@ -90,7 +81,7 @@ sweep xs vx i p = case decide (i == 0) of
   Yes _z -> xs
   No q ->
     let j : UInt64 = subUInt64 i 1
-    sweep (put xs j (addFloat32 (at xs j (belowPred i cells p q)) (at vx j (belowPred i cells p q))) (belowPred i cells p q)) vx j (belowAtMost j cells (belowPred i cells p q))
+    sweep (arraySet xs j (addFloat32 (arrayIndex xs j (belowPred i cells p q)) (arrayIndex vx j (belowPred i cells p q))) (belowPred i cells p q)) vx j (belowAtMost j cells (belowPred i cells p q))
 
 -- | Система движения: требует **обеих** меток разом.
 move : (0 cs : Tags) -> (0 a : Has Position cs) -> (0 b : Has Velocity cs) -> World cs -> World cs

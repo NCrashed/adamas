@@ -4576,7 +4576,14 @@ impl<'a> Lowerer<'a> {
         let built = self
             .read_constructor()
             .apply([up(length), up(element), index, Term::var(0)]);
-        let ty = Term::Prim(Prim::Array).apply([(*length).clone(), (*element).clone()]);
+        // Тип сводится: имплиситы приезжают решениями дырок, а решение -
+        // бета-редексом (`(\m0 -> Int32) m0`), и представление по несведённому
+        // вышло бы указательным при плоском массиве (§10 вопрос 210).
+        let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
+        let ty = normalized(
+            &Term::Prim(Prim::Array).apply([(*length).clone(), (*element).clone()]),
+            depth,
+        );
         let term = Term::Let(
             Mult::One,
             adamas_core::term::Name::from("читаемое"),
@@ -4992,6 +4999,249 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Аргумент поля конструктора в его представлении.
+    ///
+    /// Поле-массив берёт представление у типа поля, инстанцированного
+    /// параметрами на месте ([`Lowerer::instantiated_array`]); прочее - у
+    /// таблицы конструктора.
+    fn field_given(
+        &mut self,
+        scope: &mut Scope,
+        name: &Name,
+        arguments: &[Arg<'_>],
+        position: usize,
+        fact: Fact,
+        argument: &Arg<'_>,
+    ) -> Result<Expr, LowerError> {
+        let mut want = fact.repr;
+        if matches!(want, Repr::Array(_)) {
+            let ty = self.definition(name)?.ty.clone();
+            if let Some(repr) = self.instantiated_array(scope, &ty, arguments, position)? {
+                want = repr;
+            }
+        }
+        self.given(scope, argument, want, "поле конструктора")
+    }
+
+    /// Поле-массив параметрического семейства под типом, инстанцированным
+    /// написанными аргументами (§4.11, §10 вопрос 210).
+    ///
+    /// `Array n a` поля плоский там, где `a` известен плоским либо в контексте
+    /// есть `{Flat a}`, - то же правило, что у массива в позиции. Слот поля
+    /// указательный при любых ячейках: массив - свой объект кучи, и дроп его
+    /// ведёт рантайм по шагу из заголовка. `None` - позиция не массив либо
+    /// аргумент перед ней не написан.
+    fn instantiated_array(
+        &mut self,
+        scope: &Scope,
+        ty: &Term,
+        arguments: &[Arg<'_>],
+        at: usize,
+    ) -> Result<Option<Repr>, LowerError> {
+        let values = scope.values();
+        let mut current = eval(&values, ty);
+        for position in 0..at {
+            let Some(Arg::Written(argument)) = arguments.get(position) else {
+                return Ok(None);
+            };
+            let Value::Pi(_, _, _, _, codomain) = &*current else {
+                return Ok(None);
+            };
+            let next = codomain.apply(eval(&values, argument));
+            current = next;
+        }
+        let Value::Pi(_, _, domain, _, _) = &*current else {
+            return Ok(None);
+        };
+        self.array_typed(scope, domain)
+    }
+
+    /// Вызов, уносящий плоский массив в обобщённый код, где он указательный
+    /// (§4.11, §10 вопрос 210).
+    ///
+    /// Поле `Array n a` семейства укладывается по типу на месте: `Box Int32`
+    /// несёт плоский массив, а `again : Box a -> Box a` без `{Flat a}` читает
+    /// поле указательным - и обрывается в рантайме. Граница та же, что у
+    /// `same : Array 3 a -> Array 3 a`, только у массива её видит
+    /// представление, а у семейства - нет: значение семейства указатель при
+    /// любом поле. Поэтому сверяется тип вызываемого: стёртое типовое
+    /// связывание без словаря `Flat`, инстанцированное на месте плоским
+    /// типом и стоящее в типе вызываемого элементом массива - прямо или через
+    /// такое же семейство, - отказ.
+    fn layout_crossing(
+        &mut self,
+        scope: &Scope,
+        name: &Name,
+        arguments: &[Arg<'_>],
+    ) -> Result<(), LowerError> {
+        let ty = self.definition(name)?.ty.clone();
+        let dicts = dicts_of(self.signature, &ty);
+        let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
+        let mut flat: Vec<u32> = Vec::new();
+        let mut current = &ty;
+        let mut at = 0u32;
+        loop {
+            // Домен связывания либо, в конце телескопа, ответ: оба стоят под
+            // `at` связываниями, и уровень `level` в них - индекс `at - 1 - level`.
+            let checked: &Term = match current {
+                Term::Pi(_, _, domain, _, _) => domain,
+                other => other,
+            };
+            for level in &flat {
+                let mut visiting = Vec::new();
+                if self.layout_bound(checked, at - 1 - level, &mut visiting)? {
+                    return Err(LowerError::Representation {
+                        at: "аргумент вызова: плоский массив семейства уходит в код без `Flat`",
+                        want: describe(Repr::Array(Elems::Boxed)),
+                        got: describe(Repr::Array(Elems::Flat)),
+                    });
+                }
+            }
+            let Term::Pi(binder, _, domain, _, codomain) = current else {
+                return Ok(());
+            };
+            if binder.mult == Mult::Zero
+                && matches!(&**domain, Term::Universe(_))
+                && !dicts.contains_key(&at)
+            {
+                if let Some(Arg::Written(argument)) = arguments.get(at as usize) {
+                    let element = normalized(argument, depth);
+                    if self
+                        .stride_of(&element, depth, &scope.dicts.clone())
+                        .is_some()
+                    {
+                        flat.push(at);
+                    }
+                }
+            }
+            at += 1;
+            current = codomain;
+        }
+    }
+
+    /// Стоит ли связывание `index` там, где укладка зависит от его плоскости:
+    /// элементом массива либо параметром семейства, чувствительного к ней.
+    fn layout_bound(
+        &mut self,
+        term: &Term,
+        index: u32,
+        visiting: &mut Vec<(Name, usize)>,
+    ) -> Result<bool, LowerError> {
+        match term {
+            Term::Pi(_, _, domain, _, codomain) => Ok(self
+                .layout_bound(domain, index, visiting)?
+                || self.layout_bound(codomain, index + 1, visiting)?),
+            Term::Lam(_, _, body) => self.layout_bound(body, index + 1, visiting),
+            Term::App(..) => {
+                let (head, arguments) = spine(term);
+                if matches!(head, Term::Prim(Prim::Array))
+                    && arguments.len() == 2
+                    && arguments[1].mentions_recent(index, 1)
+                {
+                    return Ok(true);
+                }
+                if let Term::Const(family, ..) = head {
+                    for (position, argument) in arguments.iter().enumerate() {
+                        if argument.mentions_recent(index, 1)
+                            && self.sensitive(family, position, visiting)?
+                        {
+                            return Ok(true);
+                        }
+                    }
+                }
+                for argument in arguments {
+                    if self.layout_bound(argument, index, visiting)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Укладка семейства `family` зависит от плоскости его параметра
+    /// `position`: какое-то поле держит его элементом массива прямо или через
+    /// такое же семейство. Не семейство либо не параметр - нет.
+    fn sensitive(
+        &mut self,
+        family: &Name,
+        position: usize,
+        visiting: &mut Vec<(Name, usize)>,
+    ) -> Result<bool, LowerError> {
+        let key = (Rc::clone(family), position);
+        // Рекурсивное семейство спрашивает о себе: ответ «нет» на круге верен -
+        // чувствительность приходит только из поля, а поле уже обходится.
+        if visiting.contains(&key) {
+            return Ok(false);
+        }
+        let Some(definition) = self.signature.lookup(family) else {
+            return Ok(false);
+        };
+        let DefinitionKind::Data {
+            constructors,
+            params,
+            ..
+        } = &definition.kind
+        else {
+            return Ok(false);
+        };
+        let params = *params as usize;
+        if position >= params {
+            return Ok(false);
+        }
+        let constructors = constructors.clone();
+        visiting.push(key);
+        for constructor in &constructors {
+            let ty = self.definition(constructor)?.ty.clone();
+            let mut current = &ty;
+            let mut at = 0usize;
+            while let Term::Pi(_, _, domain, _, codomain) = current {
+                if at >= params {
+                    let index = u32::try_from(at - 1 - position).unwrap_or(u32::MAX);
+                    if self.layout_bound(domain, index, visiting)? {
+                        visiting.pop();
+                        return Ok(true);
+                    }
+                }
+                at += 1;
+                current = codomain;
+            }
+        }
+        visiting.pop();
+        Ok(false)
+    }
+
+    /// Факт поля ветви: поле-массив - по своему типу в телескопе ветви, как
+    /// при постройке ([`Lowerer::instantiated_array`]); прочее - как в таблице.
+    fn field_fact(
+        &mut self,
+        scope: &Scope,
+        fact: Fact,
+        ty: Option<&Rc<Value>>,
+    ) -> Result<Fact, LowerError> {
+        if !matches!(fact.repr, Repr::Array(_)) {
+            return Ok(fact);
+        }
+        let Some(ty) = ty else {
+            return Ok(fact);
+        };
+        Ok(match self.array_typed(scope, ty)? {
+            Some(repr) => fact.shaped(repr),
+            None => fact,
+        })
+    }
+
+    /// Представление массива, чей тип - `ty`, в контексте `scope`; `None` -
+    /// тип не массив.
+    fn array_typed(&mut self, scope: &Scope, ty: &Rc<Value>) -> Result<Option<Repr>, LowerError> {
+        let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
+        let term = quote(depth, ty);
+        let dicts = scope.dicts.clone();
+        let repr = self.repr_of(&term, depth, &dicts)?;
+        Ok(matches!(repr, Repr::Array(_)).then_some(repr))
+    }
+
     /// Применение конструктора: насыщенное собирает объект, недобранное -
     /// замыкание.
     fn built(
@@ -5043,7 +5293,7 @@ impl<'a> Lowerer<'a> {
                 name: name.to_string(),
                 binder: position,
             })?;
-            built.push(self.given(scope, argument, fact.repr, "поле конструктора")?);
+            built.push(self.field_given(scope, name, arguments, position, *fact, argument)?);
         }
         // Переиспользование ставит вставка RC ([`crate::perceus`]): понижение
         // разобранного не помнит, а она помнит.
@@ -5476,6 +5726,7 @@ impl<'a> Lowerer<'a> {
         instance: &Args,
         arguments: &[Arg<'_>],
     ) -> Result<(Expr, Repr), LowerError> {
+        self.layout_crossing(scope, name, arguments)?;
         let demanded = self.demanded(name, instance)?;
         let function = self.function(name, demanded)?;
         let parameters: Vec<Fact> = self.functions[function.0]
@@ -5699,6 +5950,7 @@ impl<'a> Lowerer<'a> {
                 };
                 fields[taken].name = bound.to_string();
                 let ty = stepped(&mut telescope, scope.env.len());
+                fields[taken].fact = self.field_fact(scope, fields[taken].fact, ty.as_ref())?;
                 scope.push_typed(Slot::Bound(fields[taken].local, fields[taken].fact), ty);
                 current = Rc::clone(inner);
                 taken += 1;

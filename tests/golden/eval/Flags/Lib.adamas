@@ -1,0 +1,5 @@
+-- Библиотека с `Flag` (§4.8, §10 вопрос 193): см. `eval/declared-after-import`.
+
+data Flag where
+  Down : Flag
+  Up : Flag

@@ -1,0 +1,38 @@
+-- Своё объявление ниже `import` заслоняет импорт с места объявления (§4.8,
+-- §10 вопрос 193).
+--
+-- Это ordered scoping. `before`, написанный до своего `Flag`, видит
+-- подключённый `Flags.Lib.Flag` и разбирает его `Up`; `after`, написанный после,
+-- - свой, с `Yes` и `No`. Прежде импорт заслонял своё и ниже объявления:
+-- `after Yes` отвергался «конструктор `Yes` не принадлежит типу
+-- `Flags.Lib.Flag`». Подключённые файлы жили по этому правилу и раньше («своё
+-- идёт первым», вопрос 188); входной файл - теперь тоже.
+--
+-- `Succ (Succ (Succ Zero))`: единица от `before Up`, двойка от `after Yes`.
+
+import Flags.Lib (Flag, Up, Down)
+
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+before : Flag -> Nat
+before Up = Succ Zero
+before Down = Zero
+
+data Flag where
+  No : Flag
+  Yes : Flag
+
+after : Flag -> Nat
+after Yes = Succ (Succ Zero)
+after No = Zero
+
+addNat : Nat -> Nat -> Nat
+addNat Zero m = m
+addNat (Succ k) m = Succ (addNat k m)
+
+
+main : Nat
+main = addNat (before Up) (after Yes)
+

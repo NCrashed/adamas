@@ -787,6 +787,9 @@ pub struct Signature {
     /// разбора нет вовсе, сюда не попадают - переписывать там нечего.
     reuses: HashMap<Name, Reuse>,
     scope: Scope,
+    /// Имена, объявленные входным файлом (§4.8, §10 вопрос 193): подключённому
+    /// модулю они не подключены, и голое имя в нём их не находит.
+    roots: std::collections::HashSet<Name>,
     /// Области завершённых подключённых файлов (§10 вопрос 195).
     ///
     /// Соглашение разрешается областью файла, а термы живут дольше файла:
@@ -1006,9 +1009,27 @@ impl Signature {
             }
         }
         let declared = scope.written.get(name)?;
+        // Своё входного файла заслоняет открытое импортом тем же правилом, что у
+        // подключённого (§4.8, §10 вопрос 193): объявленное ниже `import` значит
+        // своё, а до объявления его в таблице ещё нет, и имя значит
+        // импортированное - это и есть ordered scoping. Спрашивается только у
+        // открытого импортом: без импорта ответ прежний, `None`.
+        if scope.own.is_none() {
+            if let Some(own) = self.roots.get(name) {
+                return Some(own);
+            }
+        }
         self.definitions
             .get_key_value(declared)
             .map(|(declared, _)| declared)
+    }
+
+    /// Корневое имя входного файла, на которое ссылается подключённый (§4.8,
+    /// §10 вопрос 193): модуль видит только своё и подключённое, а корень
+    /// входного файла ему не подключён.
+    #[must_use]
+    pub fn leaked(&self, name: &str) -> bool {
+        self.scope.own.is_some() && self.roots.contains(name)
     }
 
     /// Запоминает область кончившегося подключённого файла.
@@ -2421,6 +2442,9 @@ impl Signature {
             .into());
         }
 
+        if self.scope.own.is_none() {
+            self.roots.insert(Rc::clone(name));
+        }
         self.definitions.insert(Rc::clone(name), definition);
         Ok(())
     }

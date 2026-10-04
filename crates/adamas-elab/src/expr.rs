@@ -4664,6 +4664,14 @@ impl<'a> Elaborator<'a> {
     /// места использования (§3.2), - и одному имени они выдаются один раз на
     /// объявление (см. `instantiated`).
     fn declared(&mut self, name: &ast::Name) -> Result<Term, ElabError> {
+        // Корень входного файла подключённому модулю не подключён (§4.8, §10
+        // вопрос 193): прежде голое имя падало в общую таблицу и находило его.
+        if self.signature.leaked(&name.text) {
+            return Err(ElabError::UnknownName {
+                name: Rc::clone(&name.text),
+                span: name.span,
+            });
+        }
         if let Some(term) = self.instantiated.get(&name.text).cloned() {
             let term = self.regraded(&name.text, term);
             self.performed(name, &Rc::clone(&name.text));

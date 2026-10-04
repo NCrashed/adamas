@@ -145,6 +145,43 @@ fn a_refusal_inside_an_imported_file_names_that_file() {
     );
 }
 
+/// Корень входного файла подключённому модулю не подключён (§4.8, §10 вопрос
+/// 193): модуль, звавший `helper` входного файла, которого не объявлял и не
+/// подключал, отвергается в **своём** файле. Прежде голое имя падало в общую
+/// таблицу и находило корневое объявление, стоявшее выше строки `import`, -
+/// библиотека не проверялась в одиночку, а перестановка объявления ниже
+/// `import` роняла программу отказом в чужом файле.
+#[test]
+fn a_module_does_not_see_the_entry_root() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("leaky");
+    std::fs::create_dir_all(dir.join("Leaky")).unwrap();
+    std::fs::write(
+        dir.join("Leaky").join("Uses.adamas"),
+        "twice : Nat -> Nat\ntwice n = helper (helper n)\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.adamas");
+    std::fs::write(
+        &entry,
+        format!(
+            "{PROGRAM}\nhelper : Nat -> Nat\nhelper n = Succ n\n\nimport Leaky.Uses (twice)\n\nmain : Nat\nmain = twice Zero\n"
+        ),
+    )
+    .unwrap();
+
+    let output = adamas().arg("check").arg(&entry).output().unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stderr.contains("panicked"), "драйвер упал: {stderr}");
+    assert!(
+        !output.status.success(),
+        "модуль увидел корень входного файла"
+    );
+    assert!(
+        stderr.contains("Uses.adamas") && stderr.contains("`Nat` не найдено"),
+        "отказ обязан стоять в подключённом модуле: {stderr}"
+    );
+}
+
 #[test]
 fn missing_file_fails_without_panic() {
     let output = adamas()

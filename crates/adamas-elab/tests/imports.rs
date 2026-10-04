@@ -382,3 +382,52 @@ flip b = if b then flip b else b
             .collect::<Vec<_>>()
     );
 }
+
+/// Класс и тип в разных файлах: место инстанса решает пункт 2 §3.5.
+fn keyed() -> Memory {
+    Memory::new()
+        .with("Keys", "coherent class Key a where\n  key : a -> Bool\n")
+        .with("Shapes", "data Shape where\n  Dot : Shape\n")
+}
+
+#[test]
+fn a_coherent_instance_lives_with_its_class_or_its_head() {
+    // Сирота - в третьем файле, видящем и класс, и тип. Два таких файла, не
+    // знающие друг о друге, объявили бы один инстанс дважды.
+    let orphan = "\
+import Keys
+import Shapes (Shape)
+
+instance Key Shape where
+  key s = True
+";
+    let why = refused(orphan, &keyed());
+    assert!(
+        why.contains("вне файла класса") && why.contains("`Key Shapes.Shape`"),
+        "сказано: {why}"
+    );
+    // Тип прелюдии чужой входному файлу так же, как тип модуля.
+    let why = refused(
+        "import Keys\n\ninstance Key Bool where\n  key b = b\n",
+        &keyed(),
+    );
+    assert!(why.contains("вне файла класса"), "сказано: {why}");
+
+    // В файле типа - законно.
+    let at_head = keyed().with(
+        "Shapes",
+        "import Keys\n\ndata Shape where\n  Dot : Shape\n\ninstance Key Shape where\n  key s = True\n",
+    );
+    accepted("import Shapes (Shape)\n", &at_head);
+    // В файле класса - законно.
+    let at_class = keyed().with(
+        "Keys",
+        "import Shapes (Shape)\n\ncoherent class Key a where\n  key : a -> Bool\n\ninstance Key Shape where\n  key s = True\n",
+    );
+    accepted("import Keys\n", &at_class);
+    // Свой тип входного файла - тоже его голова.
+    accepted(
+        "import Keys\n\ndata Mine where\n  Ours : Mine\n\ninstance Key Mine where\n  key m = True\n",
+        &keyed(),
+    );
+}

@@ -1517,6 +1517,7 @@ fn declare_class(
     let mut info = Class {
         coherent: class.coherent,
         superclasses: class.superclasses.len(),
+        file: signature.scope().own().cloned(),
         ..Class::default()
     };
     for (index, superclass) in class.superclasses.iter().enumerate() {
@@ -2033,10 +2034,12 @@ fn class_members<'a>(
 
 /// Условия пригодности `coherent` (§3.5), проверяемые на объявлении инстанса.
 ///
-/// Пункты 2 и 4 - orphan-правило и «только верхний уровень» - предмета
-/// сегодня не имеют: инстанс объявляется единственной единицей компиляции и
-/// только на верхнем уровне (`only_at_top`), поэтому чужого модуля, где его
-/// можно было бы написать, просто нет.
+/// Пункт 2 - orphan-правило - смотрит на файлы: инстанс пишется в файле
+/// класса либо в файле головы одного из аргументов. Единица - файл, а не
+/// вложенный модуль: инстанс и так объявляется только на верхнем уровне
+/// (`only_at_top`, он же пункт 4). Головы нескольких аргументов этим правилом
+/// не размножают декларацию: написать инстанс может лишь файл, видящий все
+/// головы и класс, а кольцо импортов отвергнуто, и такой файл один.
 ///
 /// Пункт 3 - глобальная непересекаемость - проверяется реестром, а не обходом
 /// программы: ключ кандидата есть головы всех аргументов после δ, значит две
@@ -2052,6 +2055,21 @@ fn coherence(
 ) -> Result<(), ElabError> {
     if !instances.is_coherent(&class.text) {
         return Ok(());
+    }
+    let here = signature.scope().own();
+    let at_class = instances
+        .class(&class.text)
+        .is_some_and(|it| it.file.as_ref() == here);
+    let owned = at_class
+        || arguments
+            .iter()
+            .any(|name| signature.declared_in(name) == Some(here));
+    if !owned {
+        return Err(ElabError::CoherentOrphan {
+            class: Rc::clone(&class.text),
+            written: class::written(&class.text, arguments),
+            span,
+        });
     }
     if instances.declared(&class.text, arguments) {
         return Err(ElabError::CoherentDuplicate {

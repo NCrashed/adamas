@@ -1032,6 +1032,31 @@ impl Signature {
         self.scope.own.is_some() && self.roots.contains(name)
     }
 
+    /// Файл, объявивший `name`: `Some(Some(путь))` - подключённый, `Some(None)`
+    /// - входной, `None` - никакой (встроенное).
+    ///
+    /// Подключённый узнаётся по самому длинному пути-префиксу среди
+    /// кончившихся файлов и текущего, входной - по его корневым именам.
+    #[must_use]
+    pub fn declared_in(&self, name: &str) -> Option<Option<&Name>> {
+        let file = self
+            .files
+            .iter()
+            .chain(std::iter::once(&self.scope))
+            .filter_map(|scope| scope.own.as_ref())
+            .filter(|own| {
+                name.len() > own.len()
+                    && name.starts_with(&***own)
+                    && name.as_bytes()[own.len()] == b'.'
+            })
+            .max_by_key(|own| own.len());
+        match file {
+            Some(own) => Some(Some(own)),
+            None if self.roots.contains(name) => Some(None),
+            None => None,
+        }
+    }
+
     /// Запоминает область кончившегося подключённого файла.
     pub fn remember(&mut self, scope: Scope) {
         self.files.push(scope);

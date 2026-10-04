@@ -828,6 +828,20 @@ impl Scope {
             .and_then(|position| self.env.get(position))
             .ok_or(LowerError::Unbound { index })
     }
+
+    /// Связывает ещё раз то, что связано под `index`, вместе с типом:
+    /// подстановка переменной вместо переменной.
+    fn alias(&mut self, index: Index) -> Result<(), LowerError> {
+        let slot = self.slot(index)?.clone();
+        let from_top = usize::try_from(index.0).unwrap_or(usize::MAX);
+        let ty = self
+            .env
+            .len()
+            .checked_sub(from_top + 1)
+            .and_then(|position| self.types.get(&position).cloned());
+        self.push_typed(slot, ty);
+        Ok(())
+    }
 }
 
 /// Понижение: сигнатура на входе, программа на выходе.
@@ -1415,7 +1429,7 @@ impl<'a> Lowerer<'a> {
                 ))
             }
             Term::Split(split) => self.split(scope, split),
-            Term::Case(case) => self.analysis(scope, case),
+            Term::Case(case) => self.analysis(scope, case, &[]),
             // Словарь `Flat` - исключение из общего пути записей: форма его
             // записана в §4.11, а живёт он дескриптором, а не объектом кучи.
             Term::Object(fields) => match descriptor(fields) {
@@ -2711,25 +2725,16 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
-        // Голова - лямбда: это не применение значения, а редекс, и записью
-        // подстановки приезжает решение имплисита. Сводится он ядром, тем же
-        // `eval`, каким его сводят прочие вычислители; достроенных связываний
-        // среди аргументов при этом быть не может - в терме их нет вовсе.
-        if let Some(redex) = redex(head, arguments) {
-            let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
-            return self.expr(scope, &normalized(&redex, depth));
+        // Голова - лямбда или разбор: применение сводится, а не зовётся
+        // значением ([`Lowerer::headed`]). Место вызова одно на обе формы
+        // ради кадра: `application` стоит на рекурсивном пути понижения, и
+        // слот ответа каждого вызова умножается на глубину терма
+        // (`tests/depth.rs`: второй такой вызов ронял список из 112 элементов).
+        if matches!(head, Term::Lam(..) | Term::Case(_)) {
+            return self.headed(scope, head, arguments);
         }
         let Term::Const(name, _, instance) = head else {
-            // Голова - не имя: применяется значение, и стирания здесь не бывает.
-            let mut value = self.shaped(scope, head, Repr::Boxed, "применяемое значение")?;
-            for argument in arguments {
-                let argument = self.given(scope, argument, Repr::Boxed, "аргумент замыкания")?;
-                value = Expr::Apply {
-                    callee: Box::new(value),
-                    argument: Box::new(argument),
-                };
-            }
-            return Ok((value, Repr::Boxed));
+            return self.applied_value(scope, head, arguments);
         };
         // Выход из scope (§3.3) - обычное определение по виду, но тела у него
         // нет: его даёт понижение. Спрашивается он до вида поэтому.
@@ -5649,7 +5654,16 @@ impl<'a> Lowerer<'a> {
         })
     }
 
-    fn analysis(&mut self, scope: &mut Scope, case: &Case) -> Result<(Expr, Repr), LowerError> {
+    /// Понижает разбор.
+    ///
+    /// `applied` - переменные, к которым разбор применён (convoy-паттерн):
+    /// каждая ветвь получает их своими.
+    fn analysis(
+        &mut self,
+        scope: &mut Scope,
+        case: &Case,
+        applied: &[Index],
+    ) -> Result<(Expr, Repr), LowerError> {
         self.family(&case.data)?;
         let (scrutinee, packed) = self.scrutinised(scope, &case.scrutinee)?;
         let scrutinee = match packed {
@@ -5689,34 +5703,18 @@ impl<'a> Lowerer<'a> {
                 current = Rc::clone(inner);
                 taken += 1;
             }
-            let body = self.expr(scope, &current);
-            scope.env.truncate(scope.env.len() - taken);
-            let (mut body, mut repr) = body?;
-            for field in fields.iter().skip(taken) {
-                if !repr.boxed() {
-                    return Err(LowerError::Representation {
-                        at: "применяемое значение",
-                        want: describe(Repr::Boxed),
-                        got: describe(repr),
-                    });
-                }
-                if field.fact.present && !field.fact.repr.boxed() {
-                    return Err(LowerError::Representation {
-                        at: "неснятое поле ветви",
-                        want: describe(Repr::Boxed),
-                        got: describe(field.fact.repr),
-                    });
-                }
-                body = Expr::Apply {
-                    callee: Box::new(body),
-                    argument: Box::new(if field.fact.present {
-                        Expr::Local(field.local)
-                    } else {
-                        Expr::Erased
-                    }),
-                };
-                repr = Repr::Boxed;
-            }
+            // Аргументы convoy - после полей: лямбда ветви связывает их на
+            // месте, а не дожидаясь применения значением. Ветвь, у которой
+            // поля сняты не все, применяет их значением ниже, и аргументы - за
+            // ними.
+            let mut aliased = 0;
+            let body = if taken < fields.len() {
+                self.expr(scope, &current)
+            } else {
+                self.convoyed(scope, &mut current, applied, taken, &mut aliased)
+            };
+            scope.env.truncate(scope.env.len() - taken - aliased);
+            let (mut body, repr) = self.unbound(scope, body?, &fields[taken..], applied)?;
             // Ветви отвечают одним значением, значит и представление у них
             // одно: разойдись оно, у разбора не было бы C-типа.
             if arms.is_empty() {
@@ -5760,6 +5758,147 @@ impl<'a> Lowerer<'a> {
             },
             answer,
         ))
+    }
+
+    /// Применение с головой-лямбдой или головой-разбором: сводится, если
+    /// может, а нет - применяется значением.
+    ///
+    /// Голова - лямбда: это редекс, и записью подстановки приезжает решение
+    /// имплисита. Сводится он ядром, тем же `eval`, каким его сводят прочие
+    /// вычислители; достроенных связываний среди аргументов при этом быть не
+    /// может - в терме их нет вовсе.
+    ///
+    /// Голова - разбор, применённый к переменным: так convoy-паттерн
+    /// возвращает разбору соседей, чьи типы он уточняет (`pattern.rs`). Ветвь
+    /// отвечает лямбдой по ним, и понижать её значением значило бы строить
+    /// замыкание на каждый разбор (§10 вопрос 199). Аргументы поэтому уходят в
+    /// ветви, где лямбда связывает их на месте. Только переменные: протолкнуть
+    /// в ветви вычисление значило бы переставить его эффекты за разбор.
+    fn headed(
+        &mut self,
+        scope: &mut Scope,
+        head: &Term,
+        arguments: &[Arg<'_>],
+    ) -> Result<(Expr, Repr), LowerError> {
+        if let Term::Case(case) = head {
+            let applied: Option<Vec<Index>> = arguments
+                .iter()
+                .map(|argument| match argument {
+                    Arg::Written(Term::Var(index)) => Some(*index),
+                    _ => None,
+                })
+                .collect();
+            if let Some(applied) = applied {
+                return self.analysis(scope, case, &applied);
+            }
+        }
+        if let Some(redex) = redex(head, arguments) {
+            let depth = u32::try_from(scope.env.len()).unwrap_or(u32::MAX);
+            return self.expr(scope, &normalized(&redex, depth));
+        }
+        self.applied_value(scope, head, arguments)
+    }
+
+    /// Голова - не имя: применяется значение, и стирания здесь не бывает.
+    fn applied_value(
+        &mut self,
+        scope: &mut Scope,
+        head: &Term,
+        arguments: &[Arg<'_>],
+    ) -> Result<(Expr, Repr), LowerError> {
+        let mut value = self.shaped(scope, head, Repr::Boxed, "применяемое значение")?;
+        for argument in arguments {
+            let argument = self.given(scope, argument, Repr::Boxed, "аргумент замыкания")?;
+            value = Expr::Apply {
+                callee: Box::new(value),
+                argument: Box::new(argument),
+            };
+        }
+        Ok((value, Repr::Boxed))
+    }
+
+    /// Ветвь, у которой поля сняты не все: оставшиеся поля применяются
+    /// значением, и аргументы convoy - за ними.
+    fn unbound(
+        &mut self,
+        scope: &mut Scope,
+        (mut body, mut repr): (Expr, Repr),
+        unbound: &[Binding],
+        applied: &[Index],
+    ) -> Result<(Expr, Repr), LowerError> {
+        for field in unbound {
+            if !repr.boxed() {
+                return Err(LowerError::Representation {
+                    at: "применяемое значение",
+                    want: describe(Repr::Boxed),
+                    got: describe(repr),
+                });
+            }
+            if field.fact.present && !field.fact.repr.boxed() {
+                return Err(LowerError::Representation {
+                    at: "неснятое поле ветви",
+                    want: describe(Repr::Boxed),
+                    got: describe(field.fact.repr),
+                });
+            }
+            body = Expr::Apply {
+                callee: Box::new(body),
+                argument: Box::new(if field.fact.present {
+                    Expr::Local(field.local)
+                } else {
+                    Expr::Erased
+                }),
+            };
+            repr = Repr::Boxed;
+        }
+        if !unbound.is_empty() {
+            for index in applied {
+                let argument = self.given(
+                    scope,
+                    &Arg::Written(&Term::Var(*index)),
+                    Repr::Boxed,
+                    "аргумент замыкания",
+                )?;
+                body = Expr::Apply {
+                    callee: Box::new(body),
+                    argument: Box::new(argument),
+                };
+                repr = Repr::Boxed;
+            }
+        }
+        Ok((body, repr))
+    }
+
+    /// Тело ветви под аргументами convoy: ведущие лямбды связывают их на
+    /// месте ([`Scope::alias`]), остаток применяется к тому, что под лямбдами,
+    /// - вложенный разбор индекса принимает их тем же путём.
+    ///
+    /// `taken` - сколько полей ветви уже связано поверх среды разбора;
+    /// `aliased` - сколько связано здесь, снимает их вызывающий.
+    fn convoyed(
+        &mut self,
+        scope: &mut Scope,
+        current: &mut Rc<Term>,
+        applied: &[Index],
+        taken: usize,
+        aliased: &mut usize,
+    ) -> Result<(Expr, Repr), LowerError> {
+        let lifted =
+            |index: Index, by: usize| Index(index.0 + u32::try_from(by).unwrap_or(u32::MAX));
+        let mut rest = applied;
+        while let (Some(first), Term::Lam(_, _, inner)) = (rest.first(), &*Rc::clone(current)) {
+            scope.alias(lifted(*first, taken + *aliased))?;
+            *aliased += 1;
+            *current = Rc::clone(inner);
+            rest = &rest[1..];
+        }
+        let term = rest.iter().fold((**current).clone(), |callee, index| {
+            Term::App(
+                Rc::new(callee),
+                Rc::new(Term::Var(lifted(*index, taken + *aliased))),
+            )
+        });
+        self.expr(scope, &term)
     }
 
     /// Ветви разбора, ответившие записью не единообразной формы, её

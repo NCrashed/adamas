@@ -398,6 +398,17 @@ fn qualify(within: Option<&Enclosing>, name: &str) -> Symbol {
     }
 }
 
+/// Объявленное имя класса по написанному: класс - член файла (§4.1, §10
+/// вопрос 239), а в голове инстанса, `when` и констрейнте сигнатуры модуля
+/// пишется коротко. Область файла о нём молчит - имя входного файла, оно
+/// объявлено голым.
+fn class_of(signature: &Signature, written: &Symbol) -> Symbol {
+    signature
+        .written(written)
+        .cloned()
+        .unwrap_or_else(|| Rc::clone(written))
+}
+
 /// Что объявление читает, но не меняет.
 ///
 /// Одной ссылкой, а не двумя: список параметров у каждого помощника и без того
@@ -1493,6 +1504,10 @@ fn declare_class(
             signature, metas, owned, fixities, instances, warnings, class, name, span,
         );
     }
+    let name = &ast::Name {
+        text: qualify(within, &name.text),
+        span: name.span,
+    };
     // Параметры класса разбирает парсер теми же формами, что у семейства.
     // Ненаписанная кратность здесь **нулевая**: параметр класса - это тип, и в
     // рантайме его нет. Тем же нулём он стоит у метода:
@@ -1517,7 +1532,6 @@ fn declare_class(
     let mut info = Class {
         coherent: class.coherent,
         superclasses: class.superclasses.len(),
-        file: signature.scope().own().cloned(),
         ..Class::default()
     };
     for (index, superclass) in class.superclasses.iter().enumerate() {
@@ -1751,7 +1765,7 @@ fn flat_shape(
     params: &[ast::Binder],
     info: &mut Class,
 ) -> Result<(), ElabError> {
-    if &**name != crate::flat::FLAT {
+    if !adamas_core::prim::conventional_class(name, crate::flat::FLAT) {
         return Ok(());
     }
     let written = params.iter().map(|it| it.names.len()).sum::<usize>();
@@ -1783,7 +1797,7 @@ fn primitive_shape(
     params: &[ast::Binder],
     info: &mut Class,
 ) -> Result<(), ElabError> {
-    if &**name != crate::primitive::PRIMITIVE {
+    if !adamas_core::prim::conventional_class(name, crate::primitive::PRIMITIVE) {
         return Ok(());
     }
     let written = params.iter().map(|it| it.names.len()).sum::<usize>();
@@ -1811,14 +1825,14 @@ fn primitive_shape(
 /// представление, которого у типа нет, у `Primitive` - дорожку из того, что
 /// дорожкой быть не может.
 fn derived_by_hand(name: &Symbol, span: Span) -> Result<(), ElabError> {
-    if &**name == crate::flat::FLAT {
+    if adamas_core::prim::conventional_class(name, crate::flat::FLAT) {
         return Err(ElabError::FlatShape {
             why: "инстанс `Flat` руками не пишется: компилятор выводит его \
                   структурно по представлению типа (§4.11)",
             span,
         });
     }
-    if &**name == crate::primitive::PRIMITIVE {
+    if adamas_core::prim::conventional_class(name, crate::primitive::PRIMITIVE) {
         return Err(ElabError::PrimitiveShape {
             why: "инстанс `Primitive` руками не пишется: класс закрыт, и инстансы \
                   его - ровно десять примитивов §4.11 (§4.9)",
@@ -1826,6 +1840,29 @@ fn derived_by_hand(name: &Symbol, span: Span) -> Result<(), ElabError> {
         });
     }
     Ok(())
+}
+
+/// Класс головы инстанса под объявленным именем: написан он коротко (§10
+/// вопрос 239). Не класс - имя не найдено; `Flat` и `Primitive` руками не
+/// пишутся.
+fn instance_class(
+    signature: &Signature,
+    instances: &Instances,
+    name: &ast::Name,
+    span: Span,
+) -> Result<ast::Name, ElabError> {
+    let declared = class_of(signature, &name.text);
+    if !instances.is_class(&declared) {
+        return Err(ElabError::UnknownName {
+            name: Rc::clone(&name.text),
+            span: name.span,
+        });
+    }
+    derived_by_hand(&declared, span)?;
+    Ok(ast::Name {
+        text: declared,
+        span: name.span,
+    })
 }
 
 /// `instance Eqv Nat where …` - запись, проверенная против `Eqv Nat`.
@@ -1841,13 +1878,7 @@ fn declare_instance(
     name: &ast::Name,
     span: Span,
 ) -> Result<(), ElabError> {
-    if !instances.is_class(&name.text) {
-        return Err(ElabError::UnknownName {
-            name: Rc::clone(&name.text),
-            span: name.span,
-        });
-    }
-    derived_by_hand(&name.text, span)?;
+    let name = &instance_class(signature, instances, name, span)?;
     let names = Names::of(&name.text, Vec::new());
     let fail = |error: TypeError| ElabError::Core {
         span,
@@ -2057,13 +2088,9 @@ fn coherence(
         return Ok(());
     }
     let here = signature.scope().own();
-    let at_class = instances
-        .class(&class.text)
-        .is_some_and(|it| it.file.as_ref() == here);
-    let owned = at_class
-        || arguments
-            .iter()
-            .any(|name| signature.declared_in(name) == Some(here));
+    let owned = std::iter::once(&class.text)
+        .chain(arguments.iter())
+        .any(|name| signature.declared_in(name) == Some(here));
     if !owned {
         return Err(ElabError::CoherentOrphan {
             class: Rc::clone(&class.text),
@@ -4246,7 +4273,11 @@ fn ascription_name(ascription: &ast::Expr) -> Option<Symbol> {
 /// связываний. Спрятанный внутрь поля записи или блока не находится - в
 /// сигнатуре такого не пишут, а обход, честный ко всякой форме, стоил бы
 /// второго `free_in`.
-fn sealing_offence(module: &ast::ModuleDecl, instances: &Instances) -> Option<Offence> {
+fn sealing_offence(
+    signature: &Signature,
+    module: &ast::ModuleDecl,
+    instances: &Instances,
+) -> Option<Offence> {
     let sealed: Vec<&Symbol> = module
         .members
         .iter()
@@ -4265,7 +4296,7 @@ fn sealing_offence(module: &ast::ModuleDecl, instances: &Instances) -> Option<Of
             continue;
         };
         let mut written = Vec::new();
-        constraints(ty, instances, &mut written);
+        constraints(signature, ty, instances, &mut written);
         for (class, param) in written {
             if let Some(found) = argument_of(ty, &sealed, param) {
                 return Some(Offence {
@@ -4285,6 +4316,7 @@ fn sealing_offence(module: &ast::ModuleDecl, instances: &Instances) -> Option<Of
 /// Некогерентные только: у когерентного класса словарь на программу один, и
 /// осадка он не оставляет (§3.5).
 fn constraints<'a>(
+    signature: &Signature,
     ty: &'a ast::Expr,
     instances: &Instances,
     found: &mut Vec<(&'a Symbol, &'a Symbol)>,
@@ -4298,7 +4330,8 @@ fn constraints<'a>(
                 let Some((class, arguments)) = spine_of(domain) else {
                     continue;
                 };
-                if !instances.is_class(&class.text) || instances.is_coherent(&class.text) {
+                let declared = class_of(signature, &class.text);
+                if !instances.is_class(&declared) || instances.is_coherent(&declared) {
                     continue;
                 }
                 for argument in arguments {
@@ -4307,11 +4340,11 @@ fn constraints<'a>(
                     }
                 }
             }
-            constraints(codomain, instances, found);
+            constraints(signature, codomain, instances, found);
         }
         ast::ExprKind::Arrow(domain, codomain) => {
-            constraints(domain, instances, found);
-            constraints(codomain, instances, found);
+            constraints(signature, domain, instances, found);
+            constraints(signature, codomain, instances, found);
         }
         _ => {}
     }
@@ -4415,7 +4448,7 @@ fn declare_module_type(
     // Правило запечатанной абстракции считается здесь - тут ещё есть текст
     // сигнатуры, - а спрашивается на `:>`: с аннотацией `:` та же сигнатура
     // законна, потому что представление остаётся видимым.
-    if let Some(offence) = sealing_offence(module, instances) {
+    if let Some(offence) = sealing_offence(signature, module, instances) {
         instances.forbid_sealing(declared, offence);
     }
     // Эффект-член поднимается под именем сигнатуры, как у модуля (§4.8):
@@ -7296,7 +7329,7 @@ fn superclass_kinds(
         let Some((head, arguments)) = spine_of(superclass) else {
             continue;
         };
-        let Some(definition) = signature.lookup(&head.text) else {
+        let Some(definition) = signature.lookup(&class_of(signature, &head.text)) else {
             continue;
         };
         // Параметры уровня у суперкласса свои, и в новом классе их нет:

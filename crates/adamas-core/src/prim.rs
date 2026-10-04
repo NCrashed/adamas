@@ -1433,6 +1433,19 @@ pub const UNIT: &str = "Unit";
 /// но дорожкой быть не может (§4.9, «`Vec3` не `Simd`»).
 pub const PRIMITIVE: &str = "Primitive";
 
+/// Объявлено ли `declared` под именем-соглашением класса `convention`
+/// ([`FLAT`], [`PRIMITIVE`]).
+///
+/// Класс - член файла (§10 вопрос 239): объявленный в подключённом файле, он
+/// носит его путь (`Std.Region.Flat`), во входном - голый. Соглашение держится
+/// на последнем звене.
+#[must_use]
+pub fn conventional_class(declared: &str, convention: &str) -> bool {
+    declared
+        .strip_suffix(convention)
+        .is_some_and(|path| path.is_empty() || path.ends_with('.'))
+}
+
 /// Имя типа региона (§3.6): runtime-представление области.
 pub const BLOCK: &str = "Block";
 

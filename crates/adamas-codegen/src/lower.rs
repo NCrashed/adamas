@@ -6379,12 +6379,17 @@ impl Lowerer<'_> {
             // `Flat` - единственный класс, чей словарь не объект кучи: у него
             // один метод, и метод этот сам есть укладка (§4.11). Проверяется он
             // **до** разворота, иначе развернулся бы в обычную запись.
-            Term::Const(name, ..) if &**name == FLAT && arguments.len() == 1 => {
+            Term::Const(name, ..)
+                if adamas_core::prim::conventional_class(name, FLAT) && arguments.len() == 1 =>
+            {
                 return Ok(Repr::Layout);
             }
             // Словарь `Primitive` (§4.9) - тот же дескриптор укладки, что у
             // `Flat`: метод у класса один, и метод этот есть `simdLayout`.
-            Term::Const(name, ..) if &**name == PRIMITIVE && arguments.len() == 1 => {
+            Term::Const(name, ..)
+                if adamas_core::prim::conventional_class(name, PRIMITIVE)
+                    && arguments.len() == 1 =>
+            {
                 return Ok(Repr::Layout);
             }
             _ => {}
@@ -7149,7 +7154,7 @@ fn dicts_of(signature: &Signature, ty: &Term) -> Dicts {
             let (head, arguments) = spine(unaliased(signature, domain));
             if let (Term::Const(name, ..), [Term::Var(Index(index))]) = (head, arguments.as_slice())
             {
-                if &**name == FLAT {
+                if adamas_core::prim::conventional_class(name, FLAT) {
                     if let Some(level) = at.checked_sub(index + 1) {
                         found.insert(level, LocalId(at));
                     }

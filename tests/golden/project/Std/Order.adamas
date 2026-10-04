@@ -1,10 +1,10 @@
 -- Порядок: суперкласс пишется `when`, и `Eqv` для него приходит из другого
--- файла. Имя класса - имя программы, а метод - член файла, и открывается он
--- списком, как всякое имя модуля: `eq` здесь зовётся.
+-- файла. Класс и метод - члены файла и открываются списком, как всякое имя
+-- модуля: `Eqv` здесь пишется в `when`, а `eq` зовётся.
 
 import Prelude
 import Std.Base (Bool, False, True, Nat, Zero, Succ, List, Nil, Cons)
-import Std.Classes (eq)
+import Std.Classes (Eqv, eq)
 
 class Ordered a when Eqv a where
   lte : a -> a -> Bool

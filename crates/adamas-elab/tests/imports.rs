@@ -246,12 +246,12 @@ main = R.pass L.left
 }
 
 #[test]
-fn a_class_is_a_name_of_the_program_and_its_method_a_member_of_the_file() {
-    // §3.5 меряет непересекаемость инстансов по всей программе, поэтому имя
-    // **класса** квалификации файла не получает. Метод - получает, как всякое
-    // определение файла, и открывается списком импорта: иначе он занимал бы
-    // имя у всей программы, и своё одноимённое определение не затеняло бы его
-    // (§4.4). Решение 2026-09-26.
+fn a_class_and_its_method_are_members_of_the_file() {
+    // Класс и метод - члены файла, как всякое его определение (§10 вопрос
+    // 239): иначе два файла не завели бы одноимённого класса, а метод занимал
+    // бы имя у всей программы, и своё одноимённое определение не затеняло бы
+    // его (§4.4). Непересекаемость инстансов меряется по символу класса,
+    // каким бы он ни был.
     let modules = Memory::new().with(
         "Classes",
         "\
@@ -278,8 +278,8 @@ main = eq True True
     let program = accepted(entry, &modules);
     let signature = program.signature.as_ref().expect("сигнатура");
     assert!(
-        signature.lookup("Eqv").is_some(),
-        "класс - имя программы, а не член файла"
+        signature.lookup("Classes.Eqv").is_some() && signature.lookup("Eqv").is_none(),
+        "класс - член файла, а не имя программы"
     );
     assert!(
         signature.lookup("Classes.eq").is_some(),
@@ -395,7 +395,7 @@ fn a_coherent_instance_lives_with_its_class_or_its_head() {
     // Сирота - в третьем файле, видящем и класс, и тип. Два таких файла, не
     // знающие друг о друге, объявили бы один инстанс дважды.
     let orphan = "\
-import Keys
+import Keys (Key)
 import Shapes (Shape)
 
 instance Key Shape where
@@ -403,12 +403,12 @@ instance Key Shape where
 ";
     let why = refused(orphan, &keyed());
     assert!(
-        why.contains("вне файла класса") && why.contains("`Key Shapes.Shape`"),
+        why.contains("вне файла класса") && why.contains("`Keys.Key Shapes.Shape`"),
         "сказано: {why}"
     );
     // Тип прелюдии чужой входному файлу так же, как тип модуля.
     let why = refused(
-        "import Keys\n\ninstance Key Bool where\n  key b = b\n",
+        "import Keys (Key)\n\ninstance Key Bool where\n  key b = b\n",
         &keyed(),
     );
     assert!(why.contains("вне файла класса"), "сказано: {why}");
@@ -416,7 +416,7 @@ instance Key Shape where
     // В файле типа - законно.
     let at_head = keyed().with(
         "Shapes",
-        "import Keys\n\ndata Shape where\n  Dot : Shape\n\ninstance Key Shape where\n  key s = True\n",
+        "import Keys (Key)\n\ndata Shape where\n  Dot : Shape\n\ninstance Key Shape where\n  key s = True\n",
     );
     accepted("import Shapes (Shape)\n", &at_head);
     // В файле класса - законно.
@@ -424,10 +424,39 @@ instance Key Shape where
         "Keys",
         "import Shapes (Shape)\n\ncoherent class Key a where\n  key : a -> Bool\n\ninstance Key Shape where\n  key s = True\n",
     );
-    accepted("import Keys\n", &at_class);
+    accepted("import Keys (Key)\n", &at_class);
     // Свой тип входного файла - тоже его голова.
     accepted(
-        "import Keys\n\ndata Mine where\n  Ours : Mine\n\ninstance Key Mine where\n  key m = True\n",
+        "import Keys (Key)\n\ndata Mine where\n  Ours : Mine\n\ninstance Key Mine where\n  key m = True\n",
         &keyed(),
+    );
+}
+
+#[test]
+fn two_files_declare_a_class_of_the_same_name() {
+    // Класс - член файла (§10 вопрос 239): одноимённые классы двух файлов -
+    // разные символы, и инстанс каждого стоит на своём.
+    let modules = Memory::new()
+        .with(
+            "Left",
+            "data Bit where\n  One : Bit\n\nclass Key a where\n  key : a -> Bit\n\ninstance Key Bit where\n  key b = b\n",
+        )
+        .with(
+            "Right",
+            "import Left (Bit, One)\n\nclass Key a where\n  key : a -> Bit\n\ninstance Key Bit where\n  key b = One\n",
+        );
+    let entry = "\
+import Left as L
+import Right as R
+import Left (Bit, One)
+
+main : Bit
+main = R.key (L.key One)
+";
+    let program = accepted(entry, &modules);
+    let signature = program.signature.as_ref().expect("сигнатура");
+    assert!(
+        signature.lookup("Left.Key").is_some() && signature.lookup("Right.Key").is_some(),
+        "два класса под путями своих файлов"
     );
 }

@@ -134,10 +134,6 @@ pub struct Class {
     /// написано: `compare` в умолчании прелюдного `Ord` в файле инстанса не
     /// виден (§10 вопрос 219). `None` - умолчаний нет.
     pub home: Option<adamas_core::sig::Scope>,
-    /// Путь файла, объявившего класс; `None` - входной. Имя класса файлом не
-    /// квалифицируется, поэтому спросить о нём сигнатуру нельзя, а orphan-
-    /// правилу (§3.5, пункт 2) файл класса нужен.
-    pub file: Option<Symbol>,
 }
 
 impl Instances {
@@ -513,14 +509,14 @@ fn settle(
         // здесь, до разбора голов: цель ему нужна целиком, а не ключом, и
         // формы, у которых ключа нет - функция, переменная, - он разбирает сам
         // и называет причину.
-        if &*class == crate::flat::FLAT {
+        if adamas_core::prim::conventional_class(&class, crate::flat::FLAT) {
             let solution = crate::flat::derive(signature, metas, owned, &ty, &goal, span)?;
             metas.solve_term(meta, solution);
             continue;
         }
         // `Primitive` - там же и по той же причине (§4.9): инстанс его тоже не
         // выбирается, а вычисляется по типу, и кандидатов у него нет.
-        if &*class == crate::primitive::PRIMITIVE {
+        if adamas_core::prim::conventional_class(&class, crate::primitive::PRIMITIVE) {
             let solution = crate::primitive::derive(signature, metas, &ty, &goal, span)?;
             metas.solve_term(meta, solution);
             continue;

@@ -1072,6 +1072,10 @@ pub(crate) struct Elaborator<'a> {
     /// Живёт только в хвостовой позиции: при спуске в аргумент снимается, иначе
     /// вложенный `handle` принял бы за свой ответ результат объемлющего.
     result: Option<Rc<Value>>,
+    /// Классы и инстансы - чтобы найти словарь с замкнутой целью до синтеза
+    /// типа `let` (§10 вопрос 230). `None` - элаборатор без реестра: типы,
+    /// сигнатуры, всё, что тел не элаборирует.
+    instances: Option<&'a crate::class::Instances>,
     /// Row последней снятой лямбдой стрелки - окружающая её тела (§3.4,
     /// §10 вопрос 234). Тело клаузы получает её от `Rest`, тело лямбды - отсюда.
     arrow_row: Option<Row<Rc<Value>>>,
@@ -1421,6 +1425,7 @@ impl<'a> Elaborator<'a> {
             declared_ty: None,
             expected: Vec::new(),
             result: None,
+            instances: None,
             arrow_row: None,
             awaited: None,
             bare: false,
@@ -1446,6 +1451,13 @@ impl<'a> Elaborator<'a> {
     /// [`settle_literals`] по [`Self::deferred`].
     pub(crate) fn deferring(mut self) -> Self {
         self.literals = Some(Vec::new());
+        self
+    }
+
+    /// Даёт реестр инстансов: словарь с замкнутой целью ищется до синтеза типа
+    /// `let` (§10 вопрос 230).
+    pub(crate) fn resolving(mut self, instances: &'a crate::class::Instances) -> Self {
+        self.instances = Some(instances);
         self
     }
 
@@ -4961,11 +4973,16 @@ impl<'a> Elaborator<'a> {
             // голой дырке доменом: `Cons x (filterList p xs)` сводил бы тип
             // члена с ещё не решёнными дырками и оставлял отложенное, которое
             // потом не сходится.
-            let grouped = self.grouped(&argument)
+            // Четвёртый - голова требует словарь класса, а домен ещё дырка:
+            // `width * scale`. Тип операнда известен, и с ним замыкается цель
+            // словаря - иначе факт `width * scale /= 0` застревает на нём до
+            // конца объявления, а `let` без аннотации синтезирует тип раньше
+            // (§10 вопрос 230).
+            let early = (self.grouped(&argument) || constrained_head(self.signature, &term))
                 && expected
                     .as_ref()
                     .is_some_and(|domain| self.flexible(domain));
-            if ahead || !postponed.is_empty() || grouped {
+            if ahead || !postponed.is_empty() || early {
                 self.reconciled(expected.as_ref(), &argument);
             }
             ty = ty.and_then(|it| self.stepped(&it, &argument));
@@ -6869,6 +6886,19 @@ impl<'a> Elaborator<'a> {
         // написанного типа нет, значит вычисление исполняется, а не передаётся.
         // Ровно это §4.1 и обещает записью `let n = get`.
         let value = self.run(value);
+        // Словарь с замкнутой целью ищется до синтеза: факт `width * scale /= 0`
+        // сводится к примитиву, только когда словарь `Mul` решён (§10 вопрос
+        // 230), а иначе `Refl` в значении не проходит синтеза.
+        if let Some(instances) = self.instances {
+            crate::class::resolve_ground_term(
+                self.signature,
+                self.metas,
+                instances,
+                self.owned,
+                &value,
+                binding.body.span,
+            );
+        }
         // Синтез идёт `held_type`, а не `synthesized`: при `σ = 0` окружающая
         // пуста (§3.4), и эффектное значение типа не получает вовсе - а
         // исполненное вычисление ровно такое.
@@ -8782,6 +8812,41 @@ fn untupled(clause: &ast::Clause) -> Option<ast::Clause> {
         wheres: clause.wheres.clone(),
         span: clause.span,
     })
+}
+
+/// Требует ли голова применения словарь класса: у её типа есть имплицит, чей
+/// тип - применение константы к более раннему связыванию (`{a} -> {Mul a} ->
+/// …`). Класса сигнатура не помечает, поэтому признак структурный - форма
+/// ограничения (§10 вопрос 230).
+fn constrained_head(signature: &Signature, term: &Term) -> bool {
+    let mut head = term;
+    while let Term::App(callee, _) = head {
+        head = callee;
+    }
+    let Term::Const(name, _, _) = head else {
+        return false;
+    };
+    let Some(definition) = signature.lookup(name) else {
+        return false;
+    };
+    let mut current = &definition.ty;
+    let mut depth = 0u32;
+    while let Term::Pi(binder, _, domain, _, codomain) = current {
+        if binder.visibility.is_implicit() && depth > 0 {
+            let mut callee = &**domain;
+            let mut mentions = false;
+            while let Term::App(inner, argument) = callee {
+                mentions |= matches!(&**argument, Term::Var(index) if index.0 < depth);
+                callee = inner;
+            }
+            if mentions && matches!(callee, Term::Const(..)) {
+                return true;
+            }
+        }
+        depth += 1;
+        current = codomain;
+    }
+    false
 }
 
 /// Кортеж, разбор которого опровергнуть нечем: компоненты - имена, `_` и такие

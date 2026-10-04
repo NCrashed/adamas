@@ -392,6 +392,39 @@ pub fn resolve_ground(
     }
 }
 
+/// Заполняет словари с замкнутой целью в одном терме - значении `let`, тип
+/// которого синтезируется сразу (§10 вопрос 230). Факт с операторным
+/// выражением сводится к примитиву, только когда словарь его оператора
+/// решён, а у `let` без аннотации проверка идёт до конца объявления.
+/// Отказ молчит и откатывается, как у [`resolve_ground`].
+pub(crate) fn resolve_ground_term(
+    signature: &Signature,
+    metas: &mut Metas,
+    instances: &Instances,
+    owned: &Owned,
+    term: &Term,
+    span: Span,
+) {
+    if unsolved_term_meta(metas, term).is_none() {
+        return;
+    }
+    let mark = metas.mark();
+    let outcome = settle(
+        signature,
+        metas,
+        instances,
+        owned,
+        None,
+        term,
+        Mult::Many,
+        span,
+        true,
+    );
+    if outcome.is_err() {
+        metas.rollback(mark);
+    }
+}
+
 /// Заполняет словари по уже проверенному терму.
 ///
 /// `sigma` - кратность позиции, в которой стоит терм: ноль у написанного

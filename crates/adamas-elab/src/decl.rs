@@ -5366,7 +5366,8 @@ fn define(
         .recording(observed, &declared.name)
         .declaring(&declared.ty)
         .suspending(suspends(declared.source))
-        .deferring();
+        .deferring()
+        .resolving(known.instances);
         let compiled = clauses
             .iter()
             .map(|clause| elaborator.clause(clause))

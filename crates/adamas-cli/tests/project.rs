@@ -342,33 +342,144 @@ fn a_module_of_the_corpus_project_checks_by_itself() {
     );
 }
 
-/// Зависимость со своими зависимостями отвергается названной причиной.
+/// Пакет `Data`, зависящий от `Std` по требованию `want`: `small` спрашивает,
+/// равен ли `answer` его копии единице.
+fn data_package(dir: &Path, std: &Path, want: &str) -> String {
+    write(
+        &dir.join("adamas.toml"),
+        &format!(
+            "[package]\nname = \"data\"\n\n[dependencies]\nStd = {{ git = \"file://{}\", {want} }}\n",
+            std.display()
+        ),
+    );
+    write(
+        &dir.join("src/Data/Wrap.adamas"),
+        "import Std.Prelude (Nat, Zero, Succ, answer)\n\n\
+         one : Nat -> Bool\none (Succ Zero) = True\none n = False\n\n\
+         small : Bool\nsmall = one answer\n",
+    );
+    git(dir, &["init", "-q", "."]);
+    commit(dir, "data")
+}
+
+/// Вход, собирающий ответ из `Std` проекта и из `Data`.
+const BOTH: &str = "\
+import Std.Prelude (Nat, answer)
+import Data.Wrap (small)
+
+data Both where
+  MkBoth : Nat -> Bool -> Both
+
+main : Both
+main = MkBoth answer small
+";
+
+/// Проект на `Std` по `std_want` и на `Data` по коммиту.
+fn both(app: &Path, std: &Path, std_want: &str, data: &Path, data_rev: &str) {
+    write(
+        &app.join("adamas.toml"),
+        &format!(
+            "[package]\nname = \"app\"\n\n[dependencies]\n\
+             Std = {{ git = \"file://{}\", {std_want} }}\n\
+             Data = {{ git = \"file://{}\", rev = \"{data_rev}\" }}\n",
+            std.display(),
+            data.display()
+        ),
+    );
+    write(&app.join("src/Main.adamas"), BOTH);
+}
+
+/// Два коммита одного пакета уживаются в графе (§10 вопрос 179, вариант (г)).
 ///
-/// Транзитивный граф требует правила «какой из двух коммитов одного
-/// репозитория взять», а версий у git-зависимости нет (§7.3: реестра нет).
-/// Молчаливое игнорирование чужого `[dependencies]` дало бы вместо этого
-/// «модуль не найден» посреди чужого файла.
+/// `Data` держит `Std` на `v1` (`answer` - единица), проект - на `v2`
+/// (двойка). Свидетель различает: сведи разрешение обе стороны к одной копии,
+/// и `small` ответил бы `False`, а `answer` проекта - единицей.
 #[test]
-fn a_transitive_dependency_is_refused_by_name() {
-    let case = scratch("transitive");
-    let repository = case.join("std");
+fn two_commits_of_one_package_live_side_by_side() {
+    let case = scratch("two-commits");
+    let std = case.join("std");
+    let first = source(&std, "Succ Zero");
+    git(&std, &["tag", "v1"]);
     write(
-        &repository.join("adamas.toml"),
-        "[package]\nname = \"std\"\n\n[dependencies]\nOther = { git = \"file:///нет\", tag = \"v1\" }\n",
+        &std.join("src/Std/Prelude.adamas"),
+        &library("Succ (Succ Zero)"),
     );
-    write(
-        &repository.join("src/Std/Prelude.adamas"),
-        &library("Succ Zero"),
-    );
-    git(&repository, &["init", "-q", "."]);
-    let rev = commit(&repository, "первый");
+    let second = commit(&std, "второй");
+    git(&std, &["tag", "v2"]);
+    let data = case.join("data");
+    let data_rev = data_package(&data, &std, "tag = \"v1\"");
     let app = case.join("app");
-    project(&app, &repository, &format!("rev = \"{rev}\""), MAIN);
+    both(&app, &std, "tag = \"v2\"", &data, &data_rev);
+
+    let (ok, stdout, stderr) = run(adamas().arg("eval").arg(&app));
+    assert!(ok, "счёт не прошёл: {stderr}");
+    let copy = format!("Std@{}", &second[..12]);
+    assert!(
+        stdout.ends_with("True") && stdout.matches("Succ").count() == 2,
+        "ответ собран не из своих копий: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{copy}.Prelude.Succ")),
+        "копия проекта названа не своим коммитом: {stdout}"
+    );
+    let locked = lock(&app);
+    assert!(
+        locked.contains(&first) && locked.contains(&second),
+        "замок не запер обе копии: {locked}"
+    );
+    assert!(
+        locked.contains("tag = \"v1\"") && locked.contains("tag = \"v2\""),
+        "копии заперты без своих тегов: {locked}"
+    );
+}
+
+/// Копия, нужная двоим, - одна, и путь её - сам префикс.
+#[test]
+fn a_shared_commit_is_one_copy() {
+    let case = scratch("shared-commit");
+    let std = case.join("std");
+    source(&std, "Succ Zero");
+    git(&std, &["tag", "v1"]);
+    let data = case.join("data");
+    let data_rev = data_package(&data, &std, "tag = \"v1\"");
+    let app = case.join("app");
+    both(&app, &std, "tag = \"v1\"", &data, &data_rev);
+
+    let (ok, stdout, stderr) = run(adamas().arg("eval").arg(&app));
+    assert!(ok, "счёт не прошёл: {stderr}");
+    assert_eq!(
+        stdout,
+        "MkBoth (Std.Prelude.Succ Std.Prelude.Zero) Prelude.True"
+    );
+    assert_eq!(
+        lock(&app).matches("[[package]]").count(),
+        2,
+        "{}",
+        lock(&app)
+    );
+}
+
+/// Пакет подключает только объявленное своим манифестом.
+///
+/// `Data` пишет `import Std.Prelude`, а `Std` в его манифесте нет. Проект
+/// `Std` подключил - но то зависимость проекта, а не пакета, и молча отдать
+/// её `Data` значило бы решать за него, какую копию он имел в виду.
+#[test]
+fn a_package_imports_only_what_its_manifest_declares() {
+    let case = scratch("undeclared");
+    let std = case.join("std");
+    let rev = source(&std, "Succ Zero");
+    let data = case.join("data");
+    data_package(&data, &std, &format!("rev = \"{rev}\""));
+    write(&data.join("adamas.toml"), "[package]\nname = \"data\"\n");
+    let data_rev = commit(&data, "без зависимости");
+    let app = case.join("app");
+    both(&app, &std, &format!("rev = \"{rev}\""), &data, &data_rev);
 
     let (ok, _, stderr) = run(adamas().arg("check").arg(&app));
-    assert!(!ok, "транзитивная зависимость прошла молча");
+    assert!(!ok, "необъявленная зависимость пакета разрешилась");
     assert!(
-        stderr.contains("транзитивные не поддержаны"),
+        stderr.contains("не накрыт ни пакетом подключающего файла"),
         "отказ обязан назвать причину: {stderr}"
     );
 }

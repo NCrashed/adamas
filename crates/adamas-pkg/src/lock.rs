@@ -15,11 +15,12 @@
 //!
 //! ```toml
 //! # adamas.lock — создан `adamas`. Правится инструментом, а не рукой.
-//! version = 1
+//! version = 2
 //!
 //! [[package]]
 //! prefix = "Std"
 //! git = "file:///std"
+//! tag = "v0.1.0"  # нет у зависимости, записанной коммитом
 //! rev = "0123456789abcdef0123456789abcdef01234567"
 //! ```
 //!
@@ -38,7 +39,7 @@ use crate::error::PkgError;
 pub const LOCKFILE: &str = "adamas.lock";
 
 /// Версия формата. Несовпадение - отказ, а не молчаливое чтение.
-const VERSION: u64 = 1;
+const VERSION: u64 = 2;
 
 /// Одна запертая зависимость.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +50,10 @@ pub struct Pinned {
     pub git: String,
     /// Полный хеш коммита.
     pub rev: String,
+    /// Тег, в который коммит разрешился; `None` - зависимость записана
+    /// коммитом. Ключ записи вместе с префиксом и URL: две копии одного
+    /// пакета в графе (§10 вопрос 179) тянут его разными тегами.
+    pub tag: Option<String>,
 }
 
 /// Содержимое `adamas.lock`.
@@ -125,6 +130,10 @@ impl Lock {
                     prefix: field("prefix")?,
                     git: field("git")?,
                     rev: field("rev")?,
+                    tag: table
+                        .get("tag")
+                        .and_then(|it| it.get_ref().as_str())
+                        .map(str::to_owned),
                 });
             }
         }
@@ -134,12 +143,13 @@ impl Lock {
     /// Коммит, запертый за этим префиксом при **этом же** URL.
     ///
     /// URL сверяется намеренно: переехавшая зависимость - другая зависимость,
-    /// и старый коммит от неё не годится.
+    /// и старый коммит от неё не годится. Тег сверяется тоже: копии одного
+    /// пакета под разными тегами заперты порознь (§10 вопрос 179).
     #[must_use]
-    pub fn pinned(&self, prefix: &str, git: &str) -> Option<&str> {
+    pub fn pinned(&self, prefix: &str, git: &str, tag: Option<&str>) -> Option<&str> {
         self.packages
             .iter()
-            .find(|it| it.prefix == prefix && it.git == git)
+            .find(|it| it.prefix == prefix && it.git == git && it.tag.as_deref() == tag)
             .map(|it| it.rev.as_str())
     }
 
@@ -147,15 +157,21 @@ impl Lock {
     #[must_use]
     pub fn rendered(&self) -> String {
         let mut out = String::from(
-            "# adamas.lock — создан `adamas`. Правится инструментом, а не рукой.\nversion = 1\n",
+            "# adamas.lock — создан `adamas`. Правится инструментом, а не рукой.\nversion = 2\n",
         );
         let mut packages = self.packages.clone();
-        packages.sort_by(|left, right| left.prefix.cmp(&right.prefix));
+        packages.sort_by(|left, right| {
+            (&left.prefix, &left.tag, &left.rev).cmp(&(&right.prefix, &right.tag, &right.rev))
+        });
         for package in packages {
             out.push_str("\n[[package]]\nprefix = ");
             out.push_str(&quoted(&package.prefix));
             out.push_str("\ngit = ");
             out.push_str(&quoted(&package.git));
+            if let Some(tag) = &package.tag {
+                out.push_str("\ntag = ");
+                out.push_str(&quoted(tag));
+            }
             out.push_str("\nrev = ");
             out.push_str(&quoted(&package.rev));
             out.push('\n');
@@ -227,6 +243,7 @@ mod tests {
             prefix: prefix.to_owned(),
             git: git.to_owned(),
             rev: rev.to_owned(),
+            tag: None,
         }
     }
 
@@ -288,8 +305,33 @@ mod tests {
         let lock = Lock {
             packages: vec![pinned("Std", "file:///std", &"c".repeat(40))],
         };
-        assert!(lock.pinned("Std", "file:///std").is_some());
-        assert!(lock.pinned("Std", "file:///other").is_none());
-        assert!(lock.pinned("Other", "file:///std").is_none());
+        assert!(lock.pinned("Std", "file:///std", None).is_some());
+        assert!(lock.pinned("Std", "file:///other", None).is_none());
+        assert!(lock.pinned("Other", "file:///std", None).is_none());
+    }
+
+    /// Две копии пакета под разными тегами заперты порознь (§10 вопрос 179).
+    #[test]
+    fn a_pin_belongs_to_its_tag() {
+        let tagged = |tag: &str, rev: &str| Pinned {
+            tag: Some(tag.to_owned()),
+            ..pinned("Std", "file:///std", rev)
+        };
+        let lock = Lock {
+            packages: vec![tagged("v1", &"1".repeat(40)), tagged("v2", &"2".repeat(40))],
+        };
+        assert_eq!(
+            lock.pinned("Std", "file:///std", Some("v2")),
+            Some(&*"2".repeat(40))
+        );
+        assert_eq!(
+            lock.pinned("Std", "file:///std", Some("v1")),
+            Some(&*"1".repeat(40))
+        );
+        assert!(lock.pinned("Std", "file:///std", Some("v3")).is_none());
+
+        let text = lock.rendered();
+        let back = Lock::parse(Path::new("adamas.lock"), &text).expect("замок");
+        assert_eq!(back.packages, lock.packages, "тег не пережил круг");
     }
 }

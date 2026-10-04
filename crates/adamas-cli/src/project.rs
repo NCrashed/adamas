@@ -110,7 +110,7 @@ pub(crate) fn opened(path: &Path) -> anyhow::Result<Opened> {
     // временем, и человеку это надо видеть.
     for dependency in &project.resolved {
         if dependency.refreshed {
-            eprintln!("{}: достаю {}", dependency.prefix, dependency.rev);
+            eprintln!("{}: достаю {}", dependency.canonical, dependency.rev);
         }
     }
     if project.relocked {

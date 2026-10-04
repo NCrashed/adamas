@@ -77,6 +77,16 @@ pub trait Sources {
         let _ = (from, path);
         None
     }
+
+    /// Путь, под которым объявлен модуль, написанный `path` в файле `from`
+    /// (§7.3, §10 вопрос 179). Пакет, попавший в граф несколькими коммитами,
+    /// объявлен по копии на коммит, и какую из них значит написанное, решает
+    /// манифест пакета подключающего. `None` - его пакет такой зависимости не
+    /// объявил. Умолчание - путь как написан.
+    fn canonical(&self, from: Option<&str>, path: &str) -> Option<String> {
+        let _ = from;
+        Some(path.to_owned())
+    }
 }
 
 /// Каталог на диске: `Data.Map` - это `<корень>/Data/Map.adamas`.
@@ -711,13 +721,19 @@ impl Importer for Loader<'_> {
         span: Span,
         mut pass: Pass<'_>,
     ) -> Result<(), ElabError> {
-        let path = decl.written();
+        let written = decl.written();
+        let from = self.frames.last().and_then(|frame| frame.path.as_deref());
+        let Some(path) = self.sources.canonical(from, &written) else {
+            return Err(ElabError::UndeclaredDependency {
+                path: Rc::from(written.as_str()),
+                span,
+            });
+        };
         // Служебный модуль пакета снаружи не подключается (§10 вопрос 180):
         // отказ - на строке `import` у того, кто его написал.
-        let from = self.frames.last().and_then(|frame| frame.path.as_deref());
         if let Some(package) = self.sources.private(from, &path) {
             return Err(ElabError::PrivateModule {
-                path: Rc::from(path.as_str()),
+                path: Rc::from(written.as_str()),
                 package: Rc::from(package.as_str()),
                 span,
             });

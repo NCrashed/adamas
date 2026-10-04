@@ -18,6 +18,16 @@
 //! под одним и тем же именем и в своём репозитории, и в чужом проекте, и
 //! менять `import`'ы при переезде не приходится.
 //!
+//! # Копии пакета и чей манифест решает (§10 вопрос 179)
+//!
+//! Пакет, попавший в граф несколькими коммитами, объявлен по копии на коммит
+//! под своим путём (`Std@0123abcd4567.Prelude`); единственная копия
+//! объявлена под префиксом. Написанный путь переводится в путь копии
+//! манифестом пакета **подключающего**: свой префикс - своя копия, префикс
+//! зависимости - копия, которую назвал его манифест. Не накрытое ничем у
+//! проекта - его собственный модуль, у пакета - отказ: он подключает только
+//! объявленное.
+//!
 //! # Публичное у пакета - то, что он экспортирует
 //!
 //! §4.8 даёт инкапсуляцию **вложенному** модулю, а файл ничем не объемлется
@@ -32,13 +42,29 @@ use std::path::Path;
 
 use adamas_elab::program::{Directory, Sources};
 
-/// Корни поиска модулей: свой и по одному на зависимость.
+/// Пакет графа зависимостей.
+#[derive(Clone, Debug)]
+pub struct Package {
+    /// Путь, под которым объявлены его модули: префикс, а у пакета, попавшего
+    /// в граф несколькими коммитами, - префикс с коммитом (`Std@0123abcd4567`).
+    pub canonical: String,
+    /// Префикс, которым его модули пишутся - в нём самом и у подключающих.
+    pub prefix: String,
+    /// Корень поиска модулей в чекауте.
+    pub directory: Directory,
+    /// Публичные префиксы (§10 вопрос 180); `None` - открыто всё.
+    pub exports: Option<Vec<String>>,
+    /// Его зависимости: написанный префикс и каноническое имя копии.
+    pub dependencies: Vec<(String, String)>,
+}
+
+/// Корни поиска модулей: свой и по одному на пакет графа.
 #[derive(Clone, Debug)]
 pub struct Workspace {
     local: Directory,
-    packages: Vec<(String, Directory)>,
-    /// Экспорт пакета по его префиксу; нет записи - открыто всё.
-    exports: Vec<(String, Vec<String>)>,
+    packages: Vec<Package>,
+    /// Зависимости самого проекта: написанный префикс и каноническое имя.
+    dependencies: Vec<(String, String)>,
 }
 
 impl Workspace {
@@ -48,58 +74,111 @@ impl Workspace {
         Self {
             local: Directory::new(local),
             packages: Vec::new(),
-            exports: Vec::new(),
+            dependencies: Vec::new(),
         }
     }
 
-    /// Добавляет пакет, обслуживающий префикс.
+    /// Добавляет зависимость проекта, единственную копию своего префикса.
     #[must_use]
-    pub fn with_package(mut self, prefix: &str, root: &Path) -> Self {
+    pub fn with_package(self, prefix: &str, root: &Path) -> Self {
+        self.with(Package {
+            canonical: prefix.to_owned(),
+            prefix: prefix.to_owned(),
+            directory: Directory::new(root),
+            exports: None,
+            dependencies: Vec::new(),
+        })
+        .requiring(prefix, prefix)
+    }
+
+    /// Добавляет пакет графа.
+    #[must_use]
+    pub fn with(mut self, package: Package) -> Self {
+        self.packages.push(package);
+        // Длиннейший впереди: `Data.Map` обязан побеждать `Data`.
         self.packages
-            .push((prefix.to_owned(), Directory::new(root)));
-        // Длиннейший префикс впереди: `Data.Map` обязан побеждать `Data`.
-        self.packages
-            .sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
+            .sort_by_key(|package| std::cmp::Reverse(package.canonical.len()));
         self
     }
 
-    /// Объявляет публичные префиксы пакета (§10 вопрос 180).
+    /// Объявляет зависимость самого проекта: префикс и копию, которую он
+    /// значит.
     #[must_use]
-    pub fn exporting(mut self, prefix: &str, exports: &[String]) -> Self {
-        self.exports.push((prefix.to_owned(), exports.to_vec()));
+    pub fn requiring(mut self, prefix: &str, canonical: &str) -> Self {
+        self.dependencies
+            .push((prefix.to_owned(), canonical.to_owned()));
         self
     }
 
-    /// Кто отвечает за этот путь.
-    fn route(&self, path: &str) -> &Directory {
+    /// Пакет, объявивший модуль под этим путём; `None` - сам проект.
+    fn owner(&self, path: &str) -> Option<&Package> {
         self.packages
             .iter()
-            .find(|(prefix, _)| covers(prefix, path))
-            .map_or(&self.local, |(_, directory)| directory)
+            .find(|package| covers(&package.canonical, path))
+    }
+
+    /// Файловый путь модуля: в чекауте он лежит под префиксом, а не под
+    /// каноническим именем копии.
+    fn located(&self, path: &str) -> (&Directory, String) {
+        match self.owner(path) {
+            Some(package) => (
+                &package.directory,
+                rebased(path, &package.canonical, &package.prefix),
+            ),
+            None => (&self.local, path.to_owned()),
+        }
     }
 }
 
 impl Sources for Workspace {
     fn text(&self, path: &str) -> Option<String> {
-        self.route(path).text(path)
+        let (directory, written) = self.located(path);
+        directory.text(&written)
     }
 
     fn private(&self, from: Option<&str>, path: &str) -> Option<String> {
-        let (prefix, _) = self
-            .packages
-            .iter()
-            .find(|(prefix, _)| covers(prefix, path))?;
+        let package = self.owner(path)?;
         // Изнутри пакета видно всё: служебный модуль заводят ради своих.
-        if from.is_some_and(|from| covers(prefix, from)) {
+        if from.is_some_and(|from| covers(&package.canonical, from)) {
             return None;
         }
-        let (_, exports) = self.exports.iter().find(|(it, _)| it == prefix)?;
-        (!exports.iter().any(|export| covers(export, path))).then(|| prefix.clone())
+        let exports = package.exports.as_ref()?;
+        let written = rebased(path, &package.canonical, &package.prefix);
+        (!exports.iter().any(|export| covers(export, &written))).then(|| package.prefix.clone())
+    }
+
+    fn canonical(&self, from: Option<&str>, path: &str) -> Option<String> {
+        if path == adamas_elab::program::PRELUDE {
+            return Some(path.to_owned());
+        }
+        let importer = from.and_then(|from| self.owner(from));
+        if let Some(package) = importer {
+            if covers(&package.prefix, path) {
+                return Some(rebased(path, &package.prefix, &package.canonical));
+            }
+        }
+        let dependencies = importer.map_or(&self.dependencies, |package| &package.dependencies);
+        let found = dependencies
+            .iter()
+            .filter(|(prefix, _)| covers(prefix, path))
+            .max_by_key(|(prefix, _)| prefix.len());
+        match (found, importer) {
+            (Some((prefix, canonical)), _) => Some(rebased(path, prefix, canonical)),
+            // Не накрытый зависимостью путь проекта - его собственный модуль.
+            (None, None) => Some(path.to_owned()),
+            (None, Some(_)) => None,
+        }
     }
 
     fn looked(&self, path: &str) -> String {
-        self.route(path).looked(path)
+        let (directory, written) = self.located(path);
+        directory.looked(&written)
     }
+}
+
+/// Путь под префиксом `from`, переписанный под префикс `to`.
+fn rebased(path: &str, from: &str, to: &str) -> String {
+    format!("{to}{}", &path[from.len()..])
 }
 
 /// Накрывает ли префикс путь: сам префикс и всё, что под ним.

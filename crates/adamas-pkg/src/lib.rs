@@ -19,10 +19,18 @@
 //!   закладывается второе - явные зависимости: модуль приходит из пакета,
 //!   названного в манифесте, и больше ниоткуда.
 //! - **Централизованный реестр.** §7.3 решает это прямо.
-//! - **Транзитивные зависимости.** Зависимость с собственным
-//!   `[dependencies]` отвергается названной причиной, а не подключается
-//!   наполовину: единый граф требует правила разрешения версий, а версий у
-//!   git-зависимости нет - есть коммиты.
+//!
+//! # Транзитивные зависимости (§10 вопрос 179)
+//!
+//! Граф обходится от корня, и **копия** пакета - это префикс, URL и коммит.
+//! Копия, нужная двоим, достаётся один раз. Разные коммиты одного префикса
+//! уживаются: у каждой копии свои модули под своим путём (`Std@0123abcd4567`,
+//! если копий больше одной), а какую из них значит `import Std.Prelude`, решает
+//! манифест пакета, где импорт написан. Безопасно это для когерентности ровно
+//! потому, что инстанс когерентного класса стоит в файле класса или головы
+//! (§3.5, пункт 2): копия несёт его на своих типах. Цена - тип одной копии не
+//! совместим с тем же типом другой; сводить совместимые коммиты в одну копию
+//! нечем, пока у git-зависимости нет версий.
 
 pub mod error;
 pub mod fetch;
@@ -36,13 +44,17 @@ pub use error::PkgError;
 pub use fetch::Store;
 pub use lock::{Lock, Pinned};
 pub use manifest::{Dependency, Manifest, Requirement};
-pub use sources::Workspace;
+pub use sources::{Package, Workspace};
 
-/// Зависимость, лежащая на диске.
+use adamas_elab::program::Directory;
+
+/// Копия пакета графа, лежащая на диске.
 #[derive(Clone, Debug)]
 pub struct Resolved {
     /// Префикс путей модулей.
     pub prefix: String,
+    /// Путь, под которым объявлены модули копии (§10 вопрос 179).
+    pub canonical: String,
     /// Коммит, на котором стоит чекаут.
     pub rev: String,
     /// Корень поиска модулей внутри чекаута.
@@ -56,7 +68,7 @@ pub struct Resolved {
 pub struct Project {
     /// Разобранный `adamas.toml`.
     pub manifest: Manifest,
-    /// Зависимости в порядке манифеста.
+    /// Копии графа в порядке обхода: сначала зависимости манифеста.
     pub resolved: Vec<Resolved>,
     /// Был ли `adamas.lock` переписан этой сборкой.
     pub relocked: bool,
@@ -72,43 +84,97 @@ impl Project {
     ///
     /// # Errors
     ///
-    /// Манифеста нет или он собран не так; `git` не достал зависимость;
-    /// зависимость сама имеет зависимости; замок не пишется.
+    /// Манифеста нет или он собран не так - у проекта или у пакета графа;
+    /// `git` не достал зависимость; замок не пишется.
     pub fn open(dir: &Path) -> Result<Self, PkgError> {
         let manifest = Manifest::open(dir)?;
         let previous = Lock::open(dir)?;
         let store = Store::new(dir);
 
+        // Обход в ширину от корня. Узел - копия пакета: префикс, URL и коммит.
+        // Одна и та же копия, нужная двоим, достаётся один раз.
+        let mut nodes: Vec<Node> = Vec::new();
+        let mut roots = Vec::new();
+        let mut queue: std::collections::VecDeque<(Option<usize>, Dependency)> = manifest
+            .dependencies
+            .iter()
+            .map(|dependency| (None, dependency.clone()))
+            .collect();
+        while let Some((requirer, dependency)) = queue.pop_front() {
+            let tag = match &dependency.want {
+                Requirement::Tag(tag) => Some(tag.as_str()),
+                Requirement::Rev(_) => None,
+            };
+            let pinned = previous.pinned(&dependency.prefix, &dependency.git, tag);
+            let fetched = store.provide(&dependency, pinned)?;
+            let known = nodes.iter().position(|node| {
+                node.prefix == dependency.prefix
+                    && node.git == dependency.git
+                    && node.rev == fetched.rev
+            });
+            let index = if let Some(index) = known {
+                nodes[index].refreshed |= fetched.refreshed;
+                index
+            } else {
+                let inner = Manifest::open(&fetched.dir)?;
+                let index = nodes.len();
+                queue.extend(
+                    inner
+                        .dependencies
+                        .iter()
+                        .map(|it| (Some(index), it.clone())),
+                );
+                nodes.push(Node {
+                    prefix: dependency.prefix.clone(),
+                    git: dependency.git.clone(),
+                    tag: tag.map(str::to_owned),
+                    rev: fetched.rev,
+                    root: inner.root,
+                    exports: inner.exports,
+                    refreshed: fetched.refreshed,
+                    dependencies: Vec::new(),
+                });
+                index
+            };
+            match requirer {
+                Some(requirer) => nodes[requirer]
+                    .dependencies
+                    .push((dependency.prefix.clone(), index)),
+                None => roots.push((dependency.prefix.clone(), index)),
+            }
+        }
+
+        let canonical = canonical(&nodes);
+        let mut sources = Workspace::new(&manifest.root);
+        for (prefix, index) in &roots {
+            sources = sources.requiring(prefix, &canonical[*index]);
+        }
         let mut resolved = Vec::new();
         let mut packages = Vec::new();
-        let mut sources = Workspace::new(&manifest.root);
-        for dependency in &manifest.dependencies {
-            let pinned = previous.pinned(&dependency.prefix, &dependency.git);
-            let fetched = store.provide(dependency, pinned)?;
-            let inner = Manifest::open(&fetched.dir)?;
-            if !inner.dependencies.is_empty() {
-                return Err(PkgError::shape(
-                    &fetched.dir.join(manifest::MANIFEST),
-                    format!(
-                        "у зависимости `{}` есть свои зависимости; транзитивные не поддержаны (§7.3: реестра нет, разрешать версии нечем)",
-                        dependency.prefix
-                    ),
-                ));
-            }
-            sources = sources.with_package(&dependency.prefix, &inner.root);
-            if let Some(exports) = &inner.exports {
-                sources = sources.exporting(&dependency.prefix, exports);
-            }
+        for (index, node) in nodes.into_iter().enumerate() {
+            sources = sources.with(Package {
+                canonical: canonical[index].clone(),
+                prefix: node.prefix.clone(),
+                directory: Directory::new(&node.root),
+                exports: node.exports,
+                dependencies: node
+                    .dependencies
+                    .iter()
+                    .map(|(prefix, index)| (prefix.clone(), canonical[*index].clone()))
+                    .collect(),
+            });
             packages.push(Pinned {
-                prefix: dependency.prefix.clone(),
-                git: dependency.git.clone(),
-                rev: fetched.rev.clone(),
+                prefix: node.prefix.clone(),
+                git: node.git,
+                rev: node.rev.clone(),
+                tag: node.tag,
             });
             resolved.push(Resolved {
-                prefix: dependency.prefix.clone(),
-                rev: fetched.rev,
-                root: inner.root,
-                refreshed: fetched.refreshed,
+                prefix: node.prefix,
+                canonical: canonical[index].clone(),
+                rev: node.rev,
+                root: node.root,
+                refreshed: node.refreshed,
             });
         }
 
@@ -126,4 +192,34 @@ impl Project {
     pub fn entry_file(&self) -> PathBuf {
         self.manifest.entry_file()
     }
+}
+
+/// Копия пакета по ходу обхода графа.
+struct Node {
+    prefix: String,
+    git: String,
+    /// Тег требования, у записанного коммитом - `None`.
+    tag: Option<String>,
+    rev: String,
+    root: PathBuf,
+    exports: Option<Vec<String>>,
+    refreshed: bool,
+    /// Зависимости копии: написанный префикс и номер узла.
+    dependencies: Vec<(String, usize)>,
+}
+
+/// Пути, под которыми объявлены копии: префикс, а при нескольких копиях
+/// префикса - префикс с коммитом.
+fn canonical(nodes: &[Node]) -> Vec<String> {
+    nodes
+        .iter()
+        .map(|node| {
+            let copies = nodes.iter().filter(|it| it.prefix == node.prefix).count();
+            if copies == 1 {
+                node.prefix.clone()
+            } else {
+                format!("{}@{}", node.prefix, &node.rev[..node.rev.len().min(12)])
+            }
+        })
+        .collect()
 }

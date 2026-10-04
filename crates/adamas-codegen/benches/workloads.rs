@@ -1100,6 +1100,9 @@ fn vector_kernel(criterion: &mut Criterion) {
     );
     second_column("векторное ядро", &load, &floor);
     second_column_witnesses("векторное ядро", backend.as_ref(), &load, &floor);
+    if let Some(backend) = backend.as_ref() {
+        unaliased(backend, &load, &floor);
+    }
     ceiling("C-путь", &scalar.c, &scalar_floor.c, &load.c, &floor.c);
     if let (Some(llvm), Some(llvm_floor), Some(scalar_llvm), Some(scalar_llvm_floor)) =
         (&load.llvm, &floor.llvm, &scalar.llvm, &scalar_floor.llvm)
@@ -1112,6 +1115,61 @@ fn vector_kernel(criterion: &mut Criterion) {
             llvm_floor,
         );
     }
+}
+
+/// `noalias` у каждого указательного параметра против эмиттера как есть (§10
+/// вопрос 233): на проверенных циклах метаданное меняет код (8680 инструкций
+/// против 8665), и спрашивается, во что это обходится по времени. Меньше
+/// единицы значит «с `noalias` быстрее»; обе стороны - LLVM-путь, полы свои,
+/// чередование одно. Правка та же, что у `tests/alias.rs`, и та же щедрость.
+fn unaliased(backend: &Backend, load: &Sides, floor: &Sides) {
+    let marked = |name: &str, sides: &Sides| {
+        let program = both(&sides.source);
+        let Ok(artefacts) = program.llvm else {
+            return None;
+        };
+        let edited = Artefacts {
+            ll: noalias(&artefacts.ll),
+            support: artefacts.support.clone(),
+        };
+        assert_ne!(
+            edited.ll, artefacts.ll,
+            "{name}: правка `noalias` не применилась"
+        );
+        Some(backend.load(name, &edited, &backend.pipeline(), Support::Bitcode))
+    };
+    let (Some(plain), Some(plain_floor)) = (&load.llvm, &floor.llvm) else {
+        return;
+    };
+    let (Some(with), Some(with_floor)) = (
+        marked("vector-noalias", load),
+        marked("vector-noalias-floor", floor),
+    ) else {
+        return;
+    };
+    same_work("vector-noalias", plain, &with);
+    ratio(
+        "векторное ядро: `noalias` против эмиттера",
+        || drop(ran(&with.binary)),
+        || drop(ran(&with_floor.binary)),
+        || drop(ran(&plain.binary)),
+        || drop(ran(&plain_floor.binary)),
+    );
+}
+
+/// `noalias` у каждого указательного параметра порождённой функции.
+fn noalias(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            if line.starts_with("define internal") {
+                line.replace("(ptr %v", "(ptr noalias %v")
+                    .replace(", ptr %v", ", ptr noalias %v")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Потолок §4.9 на нашей стороне: скаляр против вектора на одном бэкенде.

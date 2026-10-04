@@ -828,7 +828,7 @@ fn members_into(
     // как всякое другое объявление. Имя его при этом известно: восстановлению
     // есть что записать отсутствующим.
     let last = pending.as_ref().map(|it| Rc::clone(&it.name));
-    let closed = postulate(signature, metas, pending, &mut postulated);
+    let closed = postulate(signature, metas, instances, owned, pending, &mut postulated);
     match (closed, recovery) {
         (Err(error), Some(refusals)) => {
             refusals.refused(error, last.into_iter().collect());
@@ -876,7 +876,14 @@ fn member<'a>(
                 ty,
                 attributes,
             } => {
-                postulate(signature, metas, pending.take(), postulated)?;
+                postulate(
+                    signature,
+                    metas,
+                    instances,
+                    owned,
+                    pending.take(),
+                    postulated,
+                )?;
                 unused_implicits(ty, warnings);
                 *pending = Some(declared_signature(
                     signature, metas, owned, fixities, warnings, within, name, ty, attributes,
@@ -904,7 +911,14 @@ fn member<'a>(
             // тело живёт в конкретном универсуме. Тип поэтому не пишется, а
             // считается по телу.
             DeclKind::Alias { name, params, body } => {
-                postulate(signature, metas, pending.take(), postulated)?;
+                postulate(
+                    signature,
+                    metas,
+                    instances,
+                    owned,
+                    pending.take(),
+                    postulated,
+                )?;
                 written_alias(
                     signature,
                     metas,
@@ -922,14 +936,28 @@ fn member<'a>(
                 )?;
             }
             DeclKind::Module(declared) => {
-                postulate(signature, metas, pending.take(), postulated)?;
+                postulate(
+                    signature,
+                    metas,
+                    instances,
+                    owned,
+                    pending.take(),
+                    postulated,
+                )?;
                 declare_module(
                     signature, metas, owned, fixities, instances, warnings, observed, within,
                     declared, decl.span,
                 )?;
             }
             DeclKind::Mutual(members) => {
-                postulate(signature, metas, pending.take(), postulated)?;
+                postulate(
+                    signature,
+                    metas,
+                    instances,
+                    owned,
+                    pending.take(),
+                    postulated,
+                )?;
                 // Причина одна на блок и на файл: члены группы объявляются
                 // одним вызовом, а квалификация у этого вызова не написана.
                 // Разнятся они только тем, как об этом сказать.
@@ -951,7 +979,14 @@ fn member<'a>(
                 )?;
             }
             DeclKind::Class(class) => {
-                postulate(signature, metas, pending.take(), postulated)?;
+                postulate(
+                    signature,
+                    metas,
+                    instances,
+                    owned,
+                    pending.take(),
+                    postulated,
+                )?;
                 let (what, why) = outside_a_module(class.instance);
                 only_at_top(within, &Rc::from(what), why, decl.span)?;
                 declare_class(
@@ -960,13 +995,27 @@ fn member<'a>(
                 )?;
             }
             DeclKind::Data(data) => {
-                postulate(signature, metas, pending.take(), postulated)?;
+                postulate(
+                    signature,
+                    metas,
+                    instances,
+                    owned,
+                    pending.take(),
+                    postulated,
+                )?;
                 declare_family(
                     signature, metas, owned, fixities, warnings, within, data, decl.span,
                 )?;
             }
             DeclKind::Resource(resource) => {
-                postulate(signature, metas, pending.take(), postulated)?;
+                postulate(
+                    signature,
+                    metas,
+                    instances,
+                    owned,
+                    pending.take(),
+                    postulated,
+                )?;
                 declare_owned(
                     signature, metas, owned, fixities, instances, warnings, observed, within,
                     resource, decl.span,
@@ -979,7 +1028,14 @@ fn member<'a>(
             // (§4.8, §10 вопрос 178): подключённое видно тому, что написано
             // ниже, и не видно тому, что выше.
             DeclKind::Import(import) => {
-                postulate(signature, metas, pending.take(), postulated)?;
+                postulate(
+                    signature,
+                    metas,
+                    instances,
+                    owned,
+                    pending.take(),
+                    postulated,
+                )?;
                 let pass = Pass {
                     signature,
                     metas,
@@ -992,7 +1048,14 @@ fn member<'a>(
                 importer.import(import, decl.span, pass)?;
             }
             DeclKind::Effect(effect) => {
-                postulate(signature, metas, pending.take(), postulated)?;
+                postulate(
+                    signature,
+                    metas,
+                    instances,
+                    owned,
+                    pending.take(),
+                    postulated,
+                )?;
                 declare_effect(
                     signature, metas, owned, fixities, warnings, within, effect, decl.span,
                 )?;
@@ -1001,7 +1064,14 @@ fn member<'a>(
             // построению, поэтому предыдущая сигнатура закрывается здесь же,
             // как перед всяким другим объявлением.
             DeclKind::Extern(declared) => {
-                postulate(signature, metas, pending.take(), postulated)?;
+                postulate(
+                    signature,
+                    metas,
+                    instances,
+                    owned,
+                    pending.take(),
+                    postulated,
+                )?;
                 unused_implicits(&declared.ty, warnings);
                 declare_extern(
                     signature, metas, owned, fixities, warnings, within, declared, decl.span,
@@ -1013,7 +1083,14 @@ fn member<'a>(
             // площадкам программы, а посреди файла площадка, написанная ниже,
             // в ответ ещё не вошла бы.
             DeclKind::Export(exported) => {
-                postulate(signature, metas, pending.take(), postulated)?;
+                postulate(
+                    signature,
+                    metas,
+                    instances,
+                    owned,
+                    pending.take(),
+                    postulated,
+                )?;
                 // Верхний уровень файла, и не из строгости: символ у линкера
                 // один на программу, а имя члена модуля квалифицировано
                 // (§4.8), то есть написанное имя символом быть перестало бы.
@@ -5331,6 +5408,8 @@ fn unaliased<'a>(signature: &'a Signature, ty: &'a Term) -> &'a Term {
 fn postulate(
     signature: &mut Signature,
     metas: &mut Metas,
+    instances: &Instances,
+    owned: &Owned,
     pending: Option<Pending<'_>>,
     postulated: &mut HashMap<Symbol, Span>,
 ) -> Result<(), ElabError> {
@@ -5338,6 +5417,17 @@ fn postulate(
         return Ok(());
     };
     postulated.insert(Rc::clone(&pending.name), pending.span);
+    // Словари в типе ищутся и у постулата (§10 вопрос 232): `i <= i` в типе
+    // аксиомы иначе оставлял дырку `Ord`, о которой отказ говорил как о
+    // невыведенном неявном аргументе.
+    class::resolve_type(
+        signature,
+        metas,
+        instances,
+        owned,
+        &pending.ty,
+        pending.span,
+    )?;
     let source = pending.source;
     let sort = sorted(&pending.ty);
     signature

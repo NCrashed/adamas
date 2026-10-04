@@ -333,6 +333,40 @@ pub fn resolve(
     Ok(())
 }
 
+/// Заполняет словари в типе постулата (§10 вопрос 232): тела у него нет, и
+/// искать их, кроме типа, негде. Тип - стёртый фрагмент, поэтому σ = 0, как у
+/// типа определения в [`resolve`].
+///
+/// # Errors
+///
+/// Инстанса для написанного типа нет.
+pub(crate) fn resolve_type(
+    signature: &Signature,
+    metas: &mut Metas,
+    instances: &Instances,
+    owned: &Owned,
+    ty: &Term,
+    span: Span,
+) -> Result<(), ElabError> {
+    if unsolved_term_meta(metas, ty).is_none() {
+        return Ok(());
+    }
+    // Проверка - ради решений: тип словаря становится известен ими. Не
+    // сошлось - молчим, скажет объявление постулата.
+    let _ = adamas_core::check::is_type(&adamas_core::ctx::Ctx::new(signature), metas, ty);
+    settle(
+        signature,
+        metas,
+        instances,
+        owned,
+        None,
+        ty,
+        Mult::Zero,
+        span,
+        false,
+    )
+}
+
 /// Заполняет словари с **замкнутой** целью - до досчёта литералов.
 ///
 /// Досчёт проверяет тело против типа, и проверка обрывается на первом

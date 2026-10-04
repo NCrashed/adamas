@@ -416,3 +416,71 @@ fn a_module_outside_the_declared_prefix_is_looked_for_in_the_project() {
         "искали в чекауте пакета, чей префикс не объявлен: {stderr}"
     );
 }
+
+/// Служебный модуль пакета снаружи не подключается (§7.3, §10 вопрос 180).
+///
+/// Свидетель тройной. Изнутри: `Std.Prelude` подключает `Std.Internal`, и это
+/// законно - служебный модуль заводят ради своих. Снаружи: проект, написавший
+/// `import Std.Internal`, получает отказ на строке `import`, с именем пакета.
+/// Без `exports`: тот же импорт проходит - открыто всё, как до вопроса 180.
+#[test]
+fn a_module_outside_the_exports_is_refused_from_outside() {
+    let case = scratch("exports");
+    let repository = case.join("std");
+    write(
+        &repository.join("adamas.toml"),
+        "[package]\nname = \"std\"\nexports = [\"Std.Prelude\"]\n",
+    );
+    write(
+        &repository.join("src/Std/Internal.adamas"),
+        "data Bit where\n  Off : Bit\n  On : Bit\n\nhidden : Bit\nhidden = On\n",
+    );
+    write(
+        &repository.join("src/Std/Prelude.adamas"),
+        "import Std.Internal (Bit, On, Off, hidden)\n\ndata Nat where\n  Zero : Nat\n  Succ : Nat -> Nat\n\ncount : Bit -> Nat\ncount On = Succ Zero\ncount Off = Zero\n\nanswer : Nat\nanswer = count hidden\n",
+    );
+    git(&repository, &["init", "-q", "."]);
+    let rev = commit(&repository, "первый");
+
+    let app = case.join("app");
+    project(
+        &app,
+        &repository,
+        &format!("rev = \"{rev}\""),
+        "import Std.Prelude (Nat, answer)\n\nmain : Nat\nmain = answer\n",
+    );
+    let (ok, stdout, stderr) = run(adamas().arg("eval").arg(&app));
+    assert!(
+        ok,
+        "изнутри пакета служебный модуль не подключился: {stderr}"
+    );
+    assert!(stdout.contains("Succ"), "неожиданный ответ: {stdout}");
+
+    write(
+        &app.join("src/Main.adamas"),
+        "import Std.Internal (Bit, hidden)\n\nmain : Bit\nmain = hidden\n",
+    );
+    let (ok, _, stderr) = run(adamas().arg("check").arg(&app));
+    assert!(!ok, "служебный модуль подключился снаружи");
+    assert!(
+        stderr.contains("Std.Internal") && stderr.contains("не экспортирован"),
+        "отказ обязан назвать модуль и причину: {stderr}"
+    );
+
+    write(
+        &repository.join("adamas.toml"),
+        "[package]\nname = \"std\"\n",
+    );
+    let rev = commit(&repository, "без экспорта");
+    project(
+        &app,
+        &repository,
+        &format!("rev = \"{rev}\""),
+        "import Std.Internal (Bit, hidden)\n\nmain : Bit\nmain = hidden\n",
+    );
+    let (ok, _, stderr) = run(adamas().arg("check").arg(&app));
+    assert!(
+        ok,
+        "без `exports` открыто всё, а импорт отвергнут: {stderr}"
+    );
+}

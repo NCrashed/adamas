@@ -30,6 +30,7 @@
 //! root = "src"    # каталог модулей, по умолчанию `src`
 //! entry = "Main"  # модуль-вход, по умолчанию `Main`
 //! test = "Test"   # модуль с тестами, по умолчанию `Test`
+//! exports = ["Std.Prelude"]  # что подключается снаружи; нет поля - всё
 //!
 //! [dependencies]
 //! Std = { git = "https://example.invalid/std.git", tag = "v0.1.0" }
@@ -134,6 +135,11 @@ pub struct Manifest {
     /// разные программы, и у второй свой вход. Иначе тестовое определение
     /// уезжало бы в собранный бинарь.
     pub test: String,
+    /// Публичные префиксы модулей пакета (§7.3, §10 вопрос 180): снаружи
+    /// подключается только накрытое ими, изнутри - всё. `None` - поля нет, и
+    /// открыто всё, как до вопроса 180; пустой список - наружу не отдаётся
+    /// ничего.
+    pub exports: Option<Vec<String>>,
     /// Зависимости в порядке написания.
     pub dependencies: Vec<Dependency>,
     /// С чем линковать: секция `[link]` (§5.3).
@@ -186,6 +192,15 @@ impl Manifest {
         module_path(path, "package.entry", &entry)?;
         let suite = string(path, package, "package", "test")?.unwrap_or_else(|| "Test".to_owned());
         module_path(path, "package.test", &suite)?;
+        let exports = if package.contains_key("exports") {
+            let written = strings(path, package, "package", "exports")?;
+            for prefix in &written {
+                module_path(path, "package.exports", prefix)?;
+            }
+            Some(written)
+        } else {
+            None
+        };
 
         let dependencies = match document.get("dependencies") {
             None => Vec::new(),
@@ -208,6 +223,7 @@ impl Manifest {
             root: dir.join(inside(path, "package.root", &root)?),
             entry,
             test: suite,
+            exports,
             dependencies,
             link: link(path, dir, document)?,
         })
@@ -534,6 +550,23 @@ mod tests {
 
     /// Каталоги склеиваются с каталогом манифеста: `dlopen` относительного пути
     /// от каталога запуска не поймёт.
+    /// Нет поля - открыто всё; пустой список - наружу ничего; не путь модуля -
+    /// отказ (§10 вопрос 180).
+    #[test]
+    fn exports_are_absent_empty_or_module_paths() {
+        let open = parsed("[package]\nname = \"e\"\n").expect("манифест");
+        assert_eq!(open.exports, None);
+        let closed = parsed("[package]\nname = \"e\"\nexports = []\n").expect("манифест");
+        assert_eq!(closed.exports, Some(Vec::new()));
+        let listed = parsed("[package]\nname = \"e\"\nexports = [\"Std.Prelude\", \"Std.List\"]\n")
+            .expect("манифест");
+        assert_eq!(
+            listed.exports,
+            Some(vec!["Std.Prelude".to_owned(), "Std.List".to_owned()])
+        );
+        assert!(parsed("[package]\nname = \"e\"\nexports = [\"../etc\"]\n").is_err());
+    }
+
     #[test]
     fn a_link_section_carries_libraries_and_paths() {
         let manifest = parsed(

@@ -96,6 +96,9 @@ impl Project {
                 ));
             }
             sources = sources.with_package(&dependency.prefix, &inner.root);
+            if let Some(exports) = &inner.exports {
+                sources = sources.exporting(&dependency.prefix, exports);
+            }
             packages.push(Pinned {
                 prefix: dependency.prefix.clone(),
                 git: dependency.git.clone(),

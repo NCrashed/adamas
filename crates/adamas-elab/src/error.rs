@@ -779,6 +779,20 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Модуль пакета, не накрытый его экспортом, подключается снаружи (§7.3,
+    /// §10 вопрос 180).
+    #[error(
+        "модуль `{path}` пакета `{package}` не экспортирован: снаружи подключается только перечисленное в `exports` его манифеста"
+    )]
+    PrivateModule {
+        /// Написанный путь.
+        path: Symbol,
+        /// Префикс пакета.
+        package: Symbol,
+        /// Где написан импорт.
+        span: Span,
+    },
+
     /// Импорты замкнулись в кольцо (§4.8, §10 вопрос 178).
     ///
     /// Порядок между файлами - тот же ordered scoping, что внутри файла:
@@ -1664,6 +1678,7 @@ impl ElabError {
             | Self::NotTotal { span, .. }
             | Self::ModuleMember { span, .. }
             | Self::UnknownModule { span, .. }
+            | Self::PrivateModule { span, .. }
             | Self::ImportCycle { span, .. }
             | Self::InModule { span, .. }
             | Self::NotExported { span, .. }

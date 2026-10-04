@@ -69,6 +69,14 @@ pub trait Sources {
 
     /// Где модуль искали - это попадает в отказ «модуль не найден».
     fn looked(&self, path: &str) -> String;
+
+    /// Закрыт ли модуль для подключающего (§7.3, §10 вопрос 180): `Some` -
+    /// префикс пакета, чей экспорт его не накрывает. `from` - путь
+    /// подключающего файла, `None` - входной. Умолчание - открыто всё.
+    fn private(&self, from: Option<&str>, path: &str) -> Option<String> {
+        let _ = (from, path);
+        None
+    }
 }
 
 /// Каталог на диске: `Data.Map` - это `<корень>/Data/Map.adamas`.
@@ -704,6 +712,16 @@ impl Importer for Loader<'_> {
         mut pass: Pass<'_>,
     ) -> Result<(), ElabError> {
         let path = decl.written();
+        // Служебный модуль пакета снаружи не подключается (§10 вопрос 180):
+        // отказ - на строке `import` у того, кто его написал.
+        let from = self.frames.last().and_then(|frame| frame.path.as_deref());
+        if let Some(package) = self.sources.private(from, &path) {
+            return Err(ElabError::PrivateModule {
+                path: Rc::from(path.as_str()),
+                package: Rc::from(package.as_str()),
+                span,
+            });
+        }
         self.declare(&path, span, pass.reborrow())?;
         if let Some(frame) = self.frames.last_mut() {
             frame.imported.push(path.clone());

@@ -18,13 +18,15 @@
 //! под одним и тем же именем и в своём репозитории, и в чужом проекте, и
 //! менять `import`'ы при переезде не приходится.
 //!
-//! # Приватных модулей у пакета нет
+//! # Публичное у пакета - то, что он экспортирует
 //!
-//! Достижимо всё, что лежит в чекауте под объявленным префиксом: `Std.Internal`
-//! подключается ровно так же, как `Std.Prelude`, и проверено это прогоном, а не
-//! чтением кода. §4.8 даёт инкапсуляцию **вложенному** модулю, а файл ничем не
-//! объемлется (`Enclosing::file`), и скрывать ему нечем. Сказать, что у пакета
-//! публично, сегодня негде - ни §4.8, ни §7.3 такой формы не задают.
+//! §4.8 даёт инкапсуляцию **вложенному** модулю, а файл ничем не объемлется
+//! (`Enclosing::file`), и скрывать ему нечем. Граница поэтому живёт у пакета:
+//! `exports` его манифеста перечисляет публичные префиксы (§10 вопрос 180).
+//! Модуль пакета подключается **снаружи** - из проекта или другого пакета, -
+//! только если его накрывает экспорт; **изнутри**, из модуля под тем же
+//! префиксом, - всякий: `Std.Prelude` вправе подключать `Std.Internal`. Без
+//! `exports` открыто всё, как было.
 
 use std::path::Path;
 
@@ -35,6 +37,8 @@ use adamas_elab::program::{Directory, Sources};
 pub struct Workspace {
     local: Directory,
     packages: Vec<(String, Directory)>,
+    /// Экспорт пакета по его префиксу; нет записи - открыто всё.
+    exports: Vec<(String, Vec<String>)>,
 }
 
 impl Workspace {
@@ -44,6 +48,7 @@ impl Workspace {
         Self {
             local: Directory::new(local),
             packages: Vec::new(),
+            exports: Vec::new(),
         }
     }
 
@@ -55,6 +60,13 @@ impl Workspace {
         // Длиннейший префикс впереди: `Data.Map` обязан побеждать `Data`.
         self.packages
             .sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
+        self
+    }
+
+    /// Объявляет публичные префиксы пакета (§10 вопрос 180).
+    #[must_use]
+    pub fn exporting(mut self, prefix: &str, exports: &[String]) -> Self {
+        self.exports.push((prefix.to_owned(), exports.to_vec()));
         self
     }
 
@@ -70,6 +82,19 @@ impl Workspace {
 impl Sources for Workspace {
     fn text(&self, path: &str) -> Option<String> {
         self.route(path).text(path)
+    }
+
+    fn private(&self, from: Option<&str>, path: &str) -> Option<String> {
+        let (prefix, _) = self
+            .packages
+            .iter()
+            .find(|(prefix, _)| covers(prefix, path))?;
+        // Изнутри пакета видно всё: служебный модуль заводят ради своих.
+        if from.is_some_and(|from| covers(prefix, from)) {
+            return None;
+        }
+        let (_, exports) = self.exports.iter().find(|(it, _)| it == prefix)?;
+        (!exports.iter().any(|export| covers(export, path))).then(|| prefix.clone())
     }
 
     fn looked(&self, path: &str) -> String {

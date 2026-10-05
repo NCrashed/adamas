@@ -33,6 +33,21 @@ data Bool where
   True : Bool
   False : Bool
 
+-- | Единица: ответ того, что делается ради эффекта. Имя-соглашение (§4.3):
+-- её же берёт приостановленное вычисление `{ε} A`, функция от единицы.
+data Unit where
+  MkUnit : Unit
+
+-- | Значение либо его отсутствие (§4.4).
+data Option (a : Type) where
+  None : Option a
+  Some : a -> Option a
+
+-- | Ответ либо ошибка (§4.4).
+data Result (e : Type) (a : Type) where
+  Err : e -> Result e a
+  Ok : a -> Result e a
+
 -- | Отрицание.
 not : Bool -> Bool
 not a = if a then False else True

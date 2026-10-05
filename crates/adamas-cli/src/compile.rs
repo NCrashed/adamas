@@ -63,7 +63,8 @@ pub(crate) fn build(path: &Path, backend: Backend) -> anyhow::Result<PathBuf> {
     let checked = project::checked(&opened.entry, opened.sources.as_ref())?;
     let mut signature = checked.signature;
     let mut metas = checked.metas;
-    let written = project::body(&signature, ENTRY)?;
+    let entry = project::entry(&signature, ENTRY)?;
+    let written = entry.term;
 
     // Специализация - требование §4.11 к release-сборке, и понижению проще
     // идти по терму без словарей. Сверяется собранное с ответом на терме
@@ -88,6 +89,11 @@ pub(crate) fn build(path: &Path, backend: Backend) -> anyhow::Result<PathBuf> {
         Backend::C => {
             let text = adamas_codegen::compile(&signature, &made.term)
                 .map_err(|error| refused(&checked.units, &signature, error))?;
+            let text = if entry.printed {
+                text
+            } else {
+                adamas_codegen::silenced(&text)
+            };
             native.build(name, &text)?
         }
         Backend::Llvm => {
@@ -102,10 +108,15 @@ pub(crate) fn build(path: &Path, backend: Backend) -> anyhow::Result<PathBuf> {
                 .with_context(|| format!("не удалось записать {}", text.display()))?;
             let tools = Toolchain::from_variable(adamas_codegen::llvm::TOOLS_VARIABLE);
             let object = Pipeline::optimised().run(&tools, &text, name)?;
-            native.link(name, &object, &artefacts.support)?
+            let support = if entry.printed {
+                artefacts.support
+            } else {
+                adamas_codegen::silenced(&artefacts.support)
+            };
+            native.link(name, &object, &support)?
         }
     };
-    println!("{}: собрано в {}", checked.name, binary.display());
+    eprintln!("{}: собрано в {}", checked.name, binary.display());
     Ok(binary)
 }
 

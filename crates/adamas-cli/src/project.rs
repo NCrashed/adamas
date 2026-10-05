@@ -271,3 +271,107 @@ pub(crate) fn body(
     let rows: Vec<Row<Term>> = (0..definition.row_arity).map(|_| Row::empty()).collect();
     Ok(body.substitute_levels(&levels).substitute_rows(&rows))
 }
+
+/// Хендлер ввода-вывода, который ставится вокруг эффектной точки входа (§10
+/// вопрос 12).
+const IO_RUN: &str = "Std.IO.run";
+
+/// Метки, которые [`IO_RUN`] гасит целиком.
+const IO_LABELS: [&str; 2] = ["Std.IO.Console", "Std.IO.Foreign"];
+
+/// Что исполнять и печатать ли ответ.
+pub(crate) struct Entry {
+    /// Терм: тело определения либо он же под хендлером `Std.IO.run`.
+    pub(crate) term: adamas_core::term::Term,
+    /// Печатать ли ответ. Ответ-единицу программа не вычисляла, а ради печати
+    /// исполнялась: `MkUnit` под её выводом - шум.
+    pub(crate) printed: bool,
+}
+
+/// Точка входа: [`body`], обёрнутое хендлером ввода-вывода, если тип того
+/// просит.
+///
+/// `main : {Console} A` - приостановленное вычисление `(ω _ : Unit) -> {Console}
+/// A`, и исполнить его значит погасить метки. Гасит их `Std.IO.run`, если
+/// программа его подключила и row не несёт ничего сверх его меток; иначе терм
+/// отдаётся как есть, и ответом будет функция - как было до хендлера.
+///
+/// Хвост row у написанной сигнатуры есть всегда - его даёт подъём (§3.4), - и
+/// [`body`] подставляет вместо него пустую row: лишних меток он не добавит.
+///
+/// Аргумент типа `run` - кодомен приостановки, а живёт он под её связыванием.
+/// Потому обёртка стоит под `let _ : Unit = MkUnit`: индекс ноль там значит то
+/// же, что в кодомене, и сдвигать терм не нужно.
+///
+/// # Errors
+///
+/// Те же, что у [`body`].
+pub(crate) fn entry(signature: &adamas_core::sig::Signature, name: &str) -> anyhow::Result<Entry> {
+    use adamas_core::mult::Mult;
+    use adamas_core::row::Tail;
+    use adamas_core::term::Term;
+    use adamas_core::visibility::Visibility;
+
+    let written = body(signature, name)?;
+    let unit = signature.unit();
+    let is_unit = |ty: &Term| matches!(ty, Term::Const(head, ..) if &**head == unit);
+    let ty = signature.lookup(name).map(|it| &it.ty);
+    let wrapped = match ty {
+        Some(Term::Pi(binder, _, domain, row, codomain))
+            if binder.visibility == Visibility::Explicit
+                && is_unit(domain)
+                && !matches!(row.tail(), Some(Tail::Meta(_)))
+                && !row.is_empty()
+                && row
+                    .labels()
+                    .iter()
+                    .all(|label| IO_LABELS.contains(&&*label.name))
+                && signature.lookup(IO_RUN).is_some() =>
+        {
+            Some(codomain)
+        }
+        _ => None,
+    };
+    let Some(answer) = wrapped else {
+        return Ok(Entry {
+            printed: !ty.is_some_and(is_unit),
+            term: written,
+        });
+    };
+    let made = signature
+        .constructors(unit)
+        .and_then(|it| it.first())
+        .ok_or_else(|| anyhow::anyhow!("у единицы `{unit}` нет конструктора"))?;
+    let run = reference(signature, IO_RUN).apply([(**answer).clone(), reference(signature, name)]);
+    Ok(Entry {
+        printed: !is_unit(answer),
+        term: Term::Let(
+            Mult::Many,
+            "_".into(),
+            std::rc::Rc::new(Term::constant(unit)),
+            std::rc::Rc::new(Term::constant(made)),
+            std::rc::Rc::new(run),
+        ),
+    })
+}
+
+/// Ссылка на определение с нулевыми уровнями и пустыми row - те же аргументы,
+/// что [`body`] подставляет в тело.
+///
+/// Ссылка, а не тело: терм входа специализация нормализует, и `let _ = putStr
+/// …` вставленного тела, чей результат не читается, ушёл бы вместе с выводом.
+/// Определение понижается своим телом, со всеми его связываниями.
+fn reference(signature: &adamas_core::sig::Signature, name: &str) -> adamas_core::term::Term {
+    use adamas_core::level::Level;
+    use adamas_core::row::Row;
+    use adamas_core::term::{Args, Term};
+
+    let (levels, rows) = signature
+        .lookup(name)
+        .map_or((0, 0), |it| (it.level_arity, it.row_arity));
+    Term::Const(
+        name.into(),
+        (0..levels).map(|_| Level::number(0)).collect(),
+        Args::rows((0..rows).map(|_| Row::empty())),
+    )
+}

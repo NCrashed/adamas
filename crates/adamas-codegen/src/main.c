@@ -4,17 +4,26 @@
  * приходит владением, как всё в этом понижении, и дропается здесь же. Плоский
  * лежит в регистре: заголовка у него нет, счётчика нет, отдавать нечего -
  * печатается он по сорту, который назвало понижение.
+ *
+ * `ADAMAS_ANSWER_SILENT` снимает печать, но не исполнение и не дроп: так
+ * собирается программа, чей ответ - единица, а смысл - в выводе (§10 вопрос 12).
  */
 
 static void adamas_answer(void) {
 #ifdef ADAMAS_ANSWER_FLAT
     ADAMAS_ANSWER_TYPE answer = ADAMAS_ENTRY();
+#ifndef ADAMAS_ANSWER_SILENT
     adamas_print_flat(ADAMAS_ANSWER_KIND, ADAMAS_ANSWER_FLAT(answer), 0);
     printf("\n");
 #else
+    (void)answer;
+#endif
+#else
     adamas_value answer = ADAMAS_ENTRY();
+#ifndef ADAMAS_ANSWER_SILENT
     adamas_print(answer, 0);
     printf("\n");
+#endif
     /* Не отдай его здесь - живым остался бы ровно он, и счётчик показал бы это
      * числом. */
     adamas_drop_value(answer);

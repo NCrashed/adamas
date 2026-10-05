@@ -93,3 +93,12 @@ runConsole k = handle @Console k with
       let _ = write 1 bytes n
       resume MkUnit
   readLine -> resume (lineFrom Done False)
+
+-- | Исполняет программу ввода-вывода целиком: консоль - `runConsole`, чужие
+-- вызовы - на верхнем уровне, где им больше некуда уходить.
+--
+-- Этот хендлер драйвер ставит вокруг `main`, чей тип несёт метки отсюда (§10
+-- вопрос 12): `main : {Console} Unit` исполняется сам.
+run : {a : Type} -> ((ω u : Unit) -> {Console} a) -> a
+run k = handle @Foreign (\_u -> runConsole k) with
+  return v -> v

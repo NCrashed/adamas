@@ -301,7 +301,7 @@ pub fn resolve(
     // нетотальное разрешено. Дырка тела, стоящая в стёртой подпозиции,
     // грубостью σ не спасается: подставленное решение перепроверит ядро, и
     // его ворота стоят уже на точной позиции.
-    settle(
+    let mut waiting = settle_collecting(
         signature,
         metas,
         instances,
@@ -312,7 +312,7 @@ pub fn resolve(
         span,
         false,
     )?;
-    settle(
+    waiting.extend(settle_collecting(
         signature,
         metas,
         instances,
@@ -322,7 +322,28 @@ pub fn resolve(
         Mult::Many,
         span,
         false,
-    )?;
+    )?);
+    // Проход последний: цель класса **с типовым членом**, чья голова так и не
+    // определилась, - отказ с названной причиной (§4.3, §10 вопрос 240), а не
+    // несовпадение типов с застрявшей проекцией словаря. Только с типовым
+    // членом: там застрявшая проекция и есть причина. У прочих классов
+    // неопределившаяся голова - обычно следствие настоящей ошибки типов, и
+    // точнее о ней скажет проверка (измерено: `Applicative` в корпусе).
+    for stuck in waiting {
+        if metas.term_solution(stuck).is_some() {
+            continue;
+        }
+        let ty = zonk_term(metas, &quote(0, metas.term_type(stuck)));
+        let Some((class, _)) = applied(signature, &normalized(signature, &ty)) else {
+            continue;
+        };
+        if instances
+            .class(&class)
+            .is_some_and(|it| !it.types.is_empty())
+        {
+            return Err(ElabError::UndeterminedHead { class, span });
+        }
+    }
     // Проверка ещё раз - по решениям, которые поиск только что вставил. Их
     // собственные аргументы уровня иначе не свяжет никто: `infer` у дырки
     // читает объявленный тип, а не решение, и уровень рекурсивной ссылки
@@ -462,11 +483,8 @@ pub(crate) fn resolve_ground_term(
     }
 }
 
-/// Заполняет словари по уже проверенному терму.
-///
-/// `sigma` - кратность позиции, в которой стоит терм: ноль у написанного
-/// типа, `ω` у тела. По ней ворота §4.7 решают, годится ли нетотальный
-/// словарь (§10 вопрос 134).
+/// [`settle_collecting`] без остатка: цели с неопределившейся головой,
+/// дожившие до конца прохода, этому вызывающему не нужны.
 #[allow(
     clippy::too_many_arguments,
     reason = "поиск читает всё состояние прогона: сигнатуру, дырки, реестр и владение"
@@ -482,6 +500,33 @@ fn settle(
     span: Span,
     ground: bool,
 ) -> Result<(), ElabError> {
+    settle_collecting(
+        signature, metas, instances, owned, declaring, term, sigma, span, ground,
+    )
+    .map(|_| ())
+}
+
+/// Заполняет словари по уже проверенному терму.
+///
+/// `sigma` - кратность позиции, в которой стоит терм: ноль у написанного
+/// типа, `ω` у тела. По ней ворота §4.7 решают, годится ли нетотальный
+/// словарь (§10 вопрос 134).
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "поиск читает всё состояние прогона, а цикл его - одна очередь ворот: контекст, вывод, кандидат"
+)]
+fn settle_collecting(
+    signature: &Signature,
+    metas: &mut Metas,
+    instances: &Instances,
+    owned: &Owned,
+    declaring: Option<&Declaring>,
+    term: &Term,
+    sigma: Mult,
+    span: Span,
+    ground: bool,
+) -> Result<Vec<adamas_core::term::TermMeta>, ElabError> {
     // Дырки, заведённые самим разрешением: их в терме нет - они живут в
     // решении той дырки, ради которой заведены, - а решать их надо тем же
     // циклом. Так рекурсия по контексту инстанса получается из очереди.
@@ -497,14 +542,28 @@ fn settle(
     // ещё не выведен, потому что сигнатуры для неё в хранилище нет, и её
     // типовой аргумент оказывается первой нерешённой дыркой (§10 вопрос 114).
     let mut passed: Vec<adamas_core::term::TermMeta> = Vec::new();
+    // Цели класса, чья голова ещё не определилась (§10 вопрос 240): решает её
+    // сосед - `Product ?a V2 ?d` сводится, когда решён `?d`, - и откладывать
+    // такую цель навсегда значило бы оставить словарь нерешённым при
+    // решаемой голове.
+    let mut waiting: Vec<adamas_core::term::TermMeta> = Vec::new();
     loop {
         let (meta, depth) = match pending.pop() {
             Some((meta, depth)) if metas.term_solution(meta).is_none() => (meta, depth),
             Some(_) => continue,
-            None => match unsolved_term_meta_but(metas, term, &|it| passed.contains(&it)) {
-                Some(meta) => (meta, 0),
-                None => return Ok(()),
-            },
+            None => {
+                if let Some(meta) = unsolved_term_meta_but(metas, term, &|it| passed.contains(&it))
+                {
+                    (meta, 0)
+                } else if requeued(signature, metas, &mut waiting, &mut passed, &mut pending) {
+                    continue;
+                } else {
+                    return Ok(waiting
+                        .into_iter()
+                        .filter(|it| metas.term_solution(*it).is_none())
+                        .collect());
+                }
+            }
         };
         // Тип дырки замкнут по построению, поэтому читается на нулевой
         // глубине; зонканье подставляет всё, что решила проверка.
@@ -541,20 +600,10 @@ fn settle(
             metas.solve_term(meta, solution);
             continue;
         }
-        // `Flat` кандидатов не имеет вовсе: инстанс его не выбирается, а
-        // вычисляется по представлению типа (§4.11). Поэтому вывод зовётся
-        // здесь, до разбора голов: цель ему нужна целиком, а не ключом, и
-        // формы, у которых ключа нет - функция, переменная, - он разбирает сам
-        // и называет причину.
-        if adamas_core::prim::conventional_class(&class, crate::flat::FLAT) {
-            let solution = crate::flat::derive(signature, metas, owned, &ty, &goal, span)?;
-            metas.solve_term(meta, solution);
-            continue;
-        }
-        // `Primitive` - там же и по той же причине (§4.9): инстанс его тоже не
-        // выбирается, а вычисляется по типу, и кандидатов у него нет.
-        if adamas_core::prim::conventional_class(&class, crate::primitive::PRIMITIVE) {
-            let solution = crate::primitive::derive(signature, metas, &ty, &goal, span)?;
+        // `Flat` и `Primitive` кандидатов не имеют вовсе: инстанс их не
+        // выбирается, а вычисляется по представлению типа (§4.11, §4.9).
+        // Поэтому вывод зовётся здесь, до разбора голов ([`derived`]).
+        if let Some(solution) = derived(signature, metas, owned, &class, &ty, &goal, span)? {
             metas.solve_term(meta, solution);
             continue;
         }
@@ -575,6 +624,7 @@ fn settle(
             // унификация, и о том, что не решила, скажет объявление.
             Head::Unknown => {
                 passed.push(meta);
+                waiting.push(meta);
                 continue;
             }
         };
@@ -870,6 +920,61 @@ fn unfolded(signature: &Signature, name: &Symbol) -> Option<Symbol> {
         }
     }
     Some(current)
+}
+
+/// Словарь класса, чей инстанс не выбирается, а вычисляется по типу:
+/// `Flat` (§4.11) и `Primitive` (§4.9). `None` - класс не из них.
+///
+/// Цель выводу нужна целиком, а не ключом: формы, у которых ключа нет, -
+/// функция, переменная, - он разбирает сам и называет причину.
+fn derived(
+    signature: &Signature,
+    metas: &mut Metas,
+    owned: &Owned,
+    class: &str,
+    ty: &Term,
+    goal: &Term,
+    span: Span,
+) -> Result<Option<Rc<Value>>, ElabError> {
+    if adamas_core::prim::conventional_class(class, crate::flat::FLAT) {
+        return crate::flat::derive(signature, metas, owned, ty, goal, span).map(Some);
+    }
+    if adamas_core::prim::conventional_class(class, crate::primitive::PRIMITIVE) {
+        return crate::primitive::derive(signature, metas, ty, goal, span).map(Some);
+    }
+    Ok(None)
+}
+
+/// Возвращает в очередь отложенные цели, чья голова определилась (§10 вопрос
+/// 240). `false` - не определилась ни одна, и проход окончен.
+fn requeued(
+    signature: &Signature,
+    metas: &Metas,
+    waiting: &mut Vec<adamas_core::term::TermMeta>,
+    passed: &mut Vec<adamas_core::term::TermMeta>,
+    pending: &mut Vec<(adamas_core::term::TermMeta, u32)>,
+) -> bool {
+    let ready: Vec<_> = waiting
+        .iter()
+        .copied()
+        .filter(|it| metas.term_solution(*it).is_none())
+        .filter(|it| known_head(signature, metas, *it))
+        .collect();
+    if ready.is_empty() {
+        return false;
+    }
+    waiting.retain(|it| !ready.contains(it));
+    passed.retain(|it| !ready.contains(it));
+    pending.extend(ready.into_iter().map(|it| (it, 0)));
+    true
+}
+
+/// Определилась ли голова цели дырки - то, ради чего отложенная цель
+/// возвращается в очередь (§10 вопрос 240).
+fn known_head(signature: &Signature, metas: &Metas, meta: adamas_core::term::TermMeta) -> bool {
+    let ty = zonk_term(metas, &quote(0, metas.term_type(meta)));
+    let goal = normalized(signature, &ty);
+    applied(signature, &goal).is_some_and(|(_, head)| !matches!(head, Head::Unknown))
 }
 
 /// Определение - проекция словаря под лямбдами: типовой член класса (§4.1).

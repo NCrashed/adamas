@@ -728,6 +728,19 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Голова аргумента класса к поиску так и не определилась (§4.3, §10
+    /// вопрос 240): поиск по не-головному параметру не производится, и
+    /// выбрать инстанс не по чему.
+    #[error(
+        "инстанс `{class}` не выбрать: тип аргумента к поиску не определился - дайте ему аннотацию (§4.3)"
+    )]
+    UndeterminedHead {
+        /// Класс цели.
+        class: Symbol,
+        /// Где стоит объявление.
+        span: Span,
+    },
+
     /// Инстанс не задаёт значения типового члена (§4.1).
     #[error(
         "инстанс не задаёт типовой член `{name}`: умолчания у него нет, напишите `type {name} = …`"
@@ -1693,6 +1706,10 @@ impl ElabError {
 
     /// Где ошибка.
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "перечисление вариантов: у каждого свой спан, и дробить его нечего"
+    )]
     pub fn span(&self) -> Span {
         match self {
             Self::ModuleBody { errors, span } => errors.first().map_or(*span, Self::span),
@@ -1738,6 +1755,7 @@ impl ElabError {
             | Self::CoherentContext { span, .. }
             | Self::CoherentOrphan { span, .. }
             | Self::MissingTypeMember { span, .. }
+            | Self::UndeterminedHead { span, .. }
             | Self::ClassHead { span }
             | Self::Attribute { span, .. }
             | Self::NotTotal { span, .. }

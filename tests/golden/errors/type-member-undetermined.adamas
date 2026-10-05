@@ -1,0 +1,23 @@
+-- Первый параметр гетерогенного класса к поиску не определился (§4.3,
+-- §10 вопрос 240).
+--
+-- Тип `mystery` - свободный параметр, и ничто его не решает: ожидаемый
+-- `Int64` через `Product` до него не доходит - типовой член не инъективен, -
+-- а поиск по не-головному параметру не производится. Отказ называет это
+-- прямо и просит аннотацию, а не говорит о застрявшей проекции словаря.
+
+data V2 where
+  MkV2 : Int64 -> Int64 -> V2
+
+class Scale a (b = a) where
+  type Product
+  scale : a -> b -> Product
+
+instance Scale V2 V2 where
+  type Product = Int64
+  scale (MkV2 a b) (MkV2 c d) = addInt64 (mulInt64 a c) (mulInt64 b d)
+
+mystery : {a : Type} -> a
+
+main : Int64
+main = scale mystery (MkV2 1 1)

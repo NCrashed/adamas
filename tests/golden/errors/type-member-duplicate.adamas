@@ -1,0 +1,20 @@
+-- Класс с типовым членом однозначен по голове (§4.1, §3.5 пункты 2-4).
+--
+-- Тип ответа метода зависит от выбора инстанса, и два инстанса на одни
+-- головы дали бы два разных `Product` у одного выражения. Второй отвергается,
+-- даже именованный: однозначность - свойство головы, а не имени.
+
+data V2 where
+  MkV2 : Int64 -> Int64 -> V2
+
+class Scale a (b = a) where
+  type Product
+  scale : a -> b -> Product
+
+instance Scale Int64 V2 where
+  type Product = V2
+  scale k v = v
+
+instance other : Scale Int64 V2 where
+  type Product = Int64
+  scale k v = k

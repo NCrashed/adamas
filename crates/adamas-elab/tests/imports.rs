@@ -460,3 +460,28 @@ main = R.key (L.key One)
         "два класса под путями своих файлов"
     );
 }
+
+#[test]
+fn a_type_member_instance_lives_with_its_class_or_its_head() {
+    // Класс с типовым членом однозначен по голове (§4.1): orphan-правило у
+    // него то же, что у `coherent`, и отказ называет свою причину.
+    let modules = Memory::new()
+        .with(
+            "Scales",
+            "class Scale a where\n  type Product\n  scale : a -> Product\n",
+        )
+        .with("Shapes", "data Shape where\n  Dot : Shape\n");
+    let orphan = "\
+import Scales (Scale)
+import Shapes (Shape, Dot)
+
+instance Scale Shape where
+  type Product = Shape
+  scale s = Dot
+";
+    let why = refused(orphan, &modules);
+    assert!(
+        why.contains("вне файла класса") && why.contains("несёт типовой член"),
+        "сказано: {why}"
+    );
+}

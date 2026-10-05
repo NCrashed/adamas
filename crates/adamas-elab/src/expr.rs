@@ -5003,6 +5003,7 @@ impl<'a> Elaborator<'a> {
         if let Some(head) = named {
             (term, ty) = self.defaulting(&head, term, ty, &mut given);
         }
+        (term, ty) = self.trailing(term, ty);
         // Применение свойство **передаёт**, пока результат остаётся функцией.
         // Прежде оно его снимало всегда, и рядом стояло обоснование «построить
         // возвращающее замыкание нельзя - запрет на позицию возврата не даёт
@@ -6179,6 +6180,40 @@ impl<'a> Elaborator<'a> {
             let value = self.ctx.eval(&argument);
             term = Term::App(Rc::new(term), Rc::new(argument));
             ty = codomain.apply(value);
+        }
+    }
+
+    /// Хвост из одних неявных, кончающийся сортом, заполняется дырками:
+    /// `Product a b` есть тип, а не функция от словаря (§4.1). Только сорт:
+    /// применение, чей неявный хвост кончается значением, вправе остаться
+    /// недоприменённым - его, бывает, передают дальше функцией.
+    fn trailing(&mut self, term: Term, ty: Option<Rc<Value>>) -> (Term, Option<Rc<Value>>) {
+        match ty {
+            Some(rest) if self.sorted_tail(&rest) => {
+                let (term, rest) = self.inserted(term, rest);
+                (term, Some(rest))
+            }
+            other => (term, other),
+        }
+    }
+
+    /// Тип - одни неявные связывания, за которыми сорт (§4.1: типовой член
+    /// класса пишется применением к параметрам, словарь - неявный хвост).
+    fn sorted_tail(&self, ty: &Rc<Value>) -> bool {
+        let mut current = Rc::clone(ty);
+        let mut level = self.ctx.size();
+        let mut implicit = false;
+        loop {
+            let next = match &*current {
+                Value::Pi(binder, _, _, _, codomain) if binder.visibility.is_implicit() => {
+                    implicit = true;
+                    codomain.apply(Value::var(adamas_core::value::Lvl(level)))
+                }
+                Value::Universe(_) => return implicit,
+                _ => return false,
+            };
+            level += 1;
+            current = next;
         }
     }
 

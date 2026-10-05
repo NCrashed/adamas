@@ -716,13 +716,26 @@ pub enum ElabError {
     /// Маркер обещает не более одного инстанса на программу; обещание
     /// проверяется на объявлении второго, потому что первое ни о чём не
     /// говорит.
-    #[error("инстанс `{written}` уже объявлен, а `{class}` объявлен `coherent`")]
+    #[error("инстанс `{written}` уже объявлен, а `{class}` {why}")]
     CoherentDuplicate {
         /// Имя класса.
         class: Symbol,
+        /// Почему инстанс единствен: `coherent` либо типовой член (§4.1).
+        why: &'static str,
         /// Класс с головами аргументов: `Key Nat`.
         written: Symbol,
         /// Где написан второй.
+        span: Span,
+    },
+
+    /// Инстанс не задаёт значения типового члена (§4.1).
+    #[error(
+        "инстанс не задаёт типовой член `{name}`: умолчания у него нет, напишите `type {name} = …`"
+    )]
+    MissingTypeMember {
+        /// Имя типового члена.
+        name: Symbol,
+        /// Где написан инстанс.
         span: Span,
     },
 
@@ -732,11 +745,13 @@ pub enum ElabError {
     /// Иначе два файла, не знающие друг о друге, объявили бы один инстанс, и
     /// пункт 3 поймал бы это у того, кто подключил оба, - в чужом коде.
     #[error(
-        "инстанс `{written}` объявлен вне файла класса `{class}` и вне файлов голов его аргументов, а `{class}` объявлен `coherent`"
+        "инстанс `{written}` объявлен вне файла класса `{class}` и вне файлов голов его аргументов, а `{class}` {why}"
     )]
     CoherentOrphan {
         /// Имя класса.
         class: Symbol,
+        /// Почему инстанс единствен: `coherent` либо типовой член (§4.1).
+        why: &'static str,
         /// Класс с головами аргументов: `Key Nat`.
         written: Symbol,
         /// Где написан инстанс.
@@ -1722,6 +1737,7 @@ impl ElabError {
             | Self::SealedInstance { span, .. }
             | Self::CoherentContext { span, .. }
             | Self::CoherentOrphan { span, .. }
+            | Self::MissingTypeMember { span, .. }
             | Self::ClassHead { span }
             | Self::Attribute { span, .. }
             | Self::NotTotal { span, .. }

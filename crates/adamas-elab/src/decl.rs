@@ -1680,6 +1680,9 @@ fn declare_class(
     for method in &info.methods {
         declare_method(signature, metas, &name.text, method, within, span)?;
     }
+    for member in &info.types {
+        declare_type_member(signature, metas, &name.text, member, within, span)?;
+    }
     if !info.defaults.is_empty() {
         info.home = Some(signature.scope().clone());
     }
@@ -1924,7 +1927,11 @@ fn instance_class(
 }
 
 /// `instance Eqv Nat where …` - запись, проверенная против `Eqv Nat`.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "объявление инстанса идёт одной последовательностью: голова, члены, типовые члены, словарь"
+)]
 fn declare_instance(
     signature: &mut Signature,
     metas: &mut Metas,
@@ -1974,7 +1981,17 @@ fn declare_instance(
             span,
         });
     }
-    let (superclasses, members) = instance_members(class, instances, &name.text, span)?;
+    let (superclasses, members, written_types) =
+        instance_members(class, instances, &name.text, span)?;
+    let types = instance_types(
+        signature,
+        metas,
+        owned,
+        fixities,
+        warnings,
+        &prefix,
+        &written_types,
+    )?;
     let qualified: Vec<Symbol> = members
         .iter()
         .map(|(method, ..)| Rc::from(format!("{declared}.{method}").as_str()))
@@ -1994,6 +2011,7 @@ fn declare_instance(
         superclasses,
         &members,
         &qualified,
+        &types,
         span,
         &names,
     )?;
@@ -2005,17 +2023,16 @@ fn declare_instance(
         signature, metas, owned, fixities, warnings, class, span, &names,
     )?;
     let prefix = leading(&written);
-    let mut object = Vec::with_capacity(superclasses + members.len());
-    // Поле суперкласса - дырка: разряжает его **разрешение**, а не автор
-    // (§3.5). Стоит она в контексте префикса, поэтому и тип у неё - тот же
-    // телескоп, оканчивающийся типом поля.
-    for index in 0..superclasses {
-        let field: Symbol = Rc::from(format!("#super{index}").as_str());
-        let (ty, _) = instance_method(signature, metas, &prefix, &written, &field, span, &names)?;
-        let size = u32::try_from(prefix.len()).unwrap_or(u32::MAX);
-        let hole = metas.fresh_term(Ctx::new(signature).eval(&ty), size);
-        object.push((CoreName::from(&*field), Rc::new(hole)));
-    }
+    let mut object = dictionary_head(
+        signature,
+        metas,
+        &prefix,
+        &written,
+        superclasses,
+        &types,
+        span,
+        &names,
+    )?;
     // Row-аргументы члена берутся у **заголовка**, а не свежими дырками. Член
     // обобщён по тем же дыркам, что стоят в голове класса, поэтому
     // инстанцирование его заголовком тождественно. Свежие годились, пока
@@ -2106,6 +2123,20 @@ fn class_members<'a>(
                 }
                 info.defaults.insert(Rc::clone(&name.text), clauses.clone());
             }
+            // Типовой член (§4.1): поле записи класса сорта `Type`, как
+            // абстрактный тип сигнатуры модуля, - класс и есть сигнатура (§4.8).
+            DeclKind::Alias {
+                name,
+                params,
+                body: None,
+            } => {
+                members.push(WrittenField {
+                    name: name.clone(),
+                    params,
+                    ty: None,
+                });
+                info.types.push(Rc::clone(&name.text));
+            }
             _ => {
                 return Err(ElabError::ModuleMember {
                     name: member_name(member)
@@ -2142,9 +2173,21 @@ fn coherence(
     prefix: &[Param],
     span: Span,
 ) -> Result<(), ElabError> {
-    if !instances.is_coherent(&class.text) {
+    // Класс с типовым членом однозначен по голове (§4.1): пункты 2-4 те же,
+    // а пункт 1 ему не нужен - типовой член пишется от головы, и семейство
+    // словарей даёт на нём один ответ.
+    let coherent = instances.is_coherent(&class.text);
+    let typed = instances
+        .class(&class.text)
+        .is_some_and(|it| !it.types.is_empty());
+    if !coherent && !typed {
         return Ok(());
     }
+    let why = if coherent {
+        "объявлен `coherent`"
+    } else {
+        "несёт типовой член (§4.1)"
+    };
     let here = signature.scope().own();
     let owned = std::iter::once(&class.text)
         .chain(arguments.iter())
@@ -2152,6 +2195,7 @@ fn coherence(
     if !owned {
         return Err(ElabError::CoherentOrphan {
             class: Rc::clone(&class.text),
+            why,
             written: class::written(&class.text, arguments),
             span,
         });
@@ -2159,9 +2203,13 @@ fn coherence(
     if instances.declared(&class.text, arguments) {
         return Err(ElabError::CoherentDuplicate {
             class: Rc::clone(&class.text),
+            why,
             written: class::written(&class.text, arguments),
             span,
         });
+    }
+    if !coherent {
+        return Ok(());
     }
     // Пункт 1: контекст состоит только из когерентных классов. Связывания
     // префикса - это и типовые параметры, и словари контекста; первые головы
@@ -2240,29 +2288,42 @@ fn pure_spine(written: &Term) -> Term {
 /// видимости, где умолчание написано.
 type Written = (Symbol, Vec<ast::Clause>, Span, Option<Scope>);
 
+/// Значение типового члена в инстансе, как написано: имя и тип (§4.1).
+type TypeMember<'a> = (&'a ast::Name, &'a ast::Expr);
+
 /// Члены инстанса: методы класса вместе с клаузами, которые их определяют.
 ///
 /// Порядок - **классовый**, а не написанный: поля словаря обязаны идти так,
 /// как объявлены. Ненаписанный метод берёт умолчание, а его нет - отказ.
-fn instance_members(
-    class: &ast::ClassDecl,
+fn instance_members<'a>(
+    class: &'a ast::ClassDecl,
     instances: &Instances,
     name: &Symbol,
     span: Span,
-) -> Result<(usize, Vec<Written>), ElabError> {
+) -> Result<(usize, Vec<Written>, Vec<TypeMember<'a>>), ElabError> {
     let mut written = Vec::with_capacity(class.members.len());
+    let mut types = Vec::new();
     for member in &class.members {
-        let DeclKind::Clauses { name, clauses } = &member.kind else {
-            return Err(ElabError::ModuleMember {
-                name: member_name(member)
-                    .cloned()
-                    .unwrap_or_else(|| Rc::from("_")),
-                what: "инстансе",
-                why: "тип метода написан в классе, поэтому инстанс несёт только клаузы",
-                span: member.span,
-            });
-        };
-        written.push((name, clauses, member.span));
+        match &member.kind {
+            DeclKind::Clauses { name, clauses } => written.push((name, clauses, member.span)),
+            // Значение типового члена (§4.1): `type Product = V2`.
+            DeclKind::Alias {
+                name,
+                params,
+                body: Some(body),
+            } if params.is_empty() => types.push((name, body)),
+            _ => {
+                return Err(ElabError::ModuleMember {
+                    name: member_name(member)
+                        .cloned()
+                        .unwrap_or_else(|| Rc::from("_")),
+                    what: "инстансе",
+                    why: "тип метода написан в классе, поэтому инстанс несёт клаузы \
+                          методов и значения типовых членов (`type T = …`)",
+                    span: member.span,
+                });
+            }
+        }
     }
     let Some(info) = instances.class(name) else {
         return Err(ElabError::UnknownName {
@@ -2270,6 +2331,26 @@ fn instance_members(
             span,
         });
     };
+    for (member, _) in &types {
+        if !info.types.contains(&member.text) {
+            return Err(ElabError::ModuleMember {
+                name: Rc::clone(&member.text),
+                what: "инстансе",
+                why: "у класса нет такого типового члена",
+                span: member.span,
+            });
+        }
+    }
+    let mut ordered = Vec::with_capacity(info.types.len());
+    for member in &info.types {
+        let Some(found) = types.iter().find(|(it, _)| it.text == *member) else {
+            return Err(ElabError::MissingTypeMember {
+                name: Rc::clone(member),
+                span,
+            });
+        };
+        ordered.push(*found);
+    }
     for (method, _, at) in &written {
         if !info.methods.contains(&method.text) {
             return Err(ElabError::ModuleMember {
@@ -2296,7 +2377,58 @@ fn instance_members(
         };
         found.push((Rc::clone(method), clauses, at, home));
     }
-    Ok((info.superclasses, found))
+    Ok((info.superclasses, found, ordered))
+}
+
+/// Начало записи словаря: поля суперклассов и типовые члены.
+///
+/// Поле суперкласса - дырка: разряжает его **разрешение**, а не автор
+/// (§3.5). Стоит она в контексте префикса, поэтому и тип у неё - тот же
+/// телескоп, оканчивающийся типом поля. Типовые члены (§4.1) - значениями,
+/// под тем же префиксом, что и прочие поля, и раньше методов: тип метода их
+/// называет.
+#[allow(clippy::too_many_arguments)]
+fn dictionary_head(
+    signature: &Signature,
+    metas: &mut Metas,
+    prefix: &[Param],
+    written: &Term,
+    superclasses: usize,
+    types: &[(Symbol, Term)],
+    span: Span,
+    names: &Names,
+) -> Result<Vec<(CoreName, Rc<Term>)>, ElabError> {
+    let mut object = Vec::with_capacity(superclasses + types.len());
+    for index in 0..superclasses {
+        let field: Symbol = Rc::from(format!("#super{index}").as_str());
+        let (ty, _) = instance_method(signature, metas, prefix, written, &field, &[], span, names)?;
+        let size = u32::try_from(prefix.len()).unwrap_or(u32::MAX);
+        let hole = metas.fresh_term(Ctx::new(signature).eval(&ty), size);
+        object.push((CoreName::from(&*field), Rc::new(hole)));
+    }
+    for (member, value) in types {
+        object.push((CoreName::from(&**member), Rc::new(value.clone())));
+    }
+    Ok(object)
+}
+/// Значения типовых членов инстанса (§4.1), элаборированные под его префиксом
+/// - там же, где живут поля словаря.
+fn instance_types(
+    signature: &Signature,
+    metas: &mut Metas,
+    owned: &Owned,
+    fixities: &Fixities,
+    warnings: &mut Warnings,
+    prefix: &[Param],
+    written: &[TypeMember<'_>],
+) -> Result<Vec<(Symbol, Term)>, ElabError> {
+    let mut found = Vec::with_capacity(written.len());
+    for (name, body) in written {
+        let term = Elaborator::new(signature, metas, owned, fixities, warnings)
+            .beneath(prefix, |it| it.declaration(body, Mult::Zero))?;
+        found.push((Rc::clone(&name.text), zonk_term(metas, &term)));
+    }
+    Ok(found)
 }
 
 /// Тип одного метода инстанса - выведенный из класса проекцией словаря.
@@ -2311,6 +2443,7 @@ fn instance_method(
     prefix: &[Param],
     written: &Term,
     method: &str,
+    types: &[(Symbol, Term)],
     span: Span,
     names: &Names,
 ) -> Result<(Term, u32), ElabError> {
@@ -2325,7 +2458,19 @@ fn instance_method(
         ctx = ctx.bind(CoreName::from(&*param.name), param.mult, bound);
     }
     let value = ctx.eval(under_prefix(written));
-    let bound = ctx.bind(CoreName::from("d"), Mult::Many, value);
+    // Типовые члены инстанса известны значением (§4.1): словарь связан
+    // записью из них, и `d.Product` в типе метода - уже `V2`, а не ссылка на
+    // словарь, которой у члена инстанса нет.
+    let bound = if types.is_empty() {
+        ctx.bind(CoreName::from("d"), Mult::Many, value)
+    } else {
+        let known: Vec<(CoreName, Rc<Term>)> = types
+            .iter()
+            .map(|(name, ty)| (CoreName::from(&**name), Rc::new(ty.clone())))
+            .collect();
+        let known = ctx.eval(&Term::Object(known.into()));
+        ctx.define(CoreName::from("d"), Mult::Many, value, known)
+    };
     // Параметры поля переходят в параметры **члена инстанса**: у поля своё
     // пространство индексов, и граница с определением - здесь (§10 вопрос 115).
     let (found, shape) =
@@ -2554,6 +2699,79 @@ fn declare_method(
         .map_err(fail)
 }
 
+/// Типовой член класса - определение верхнего уровня, проецирующее словарь
+/// (§4.1): `Product a b` есть `d.Product` словаря `Scale a b`.
+///
+/// Отличие от метода одно: параметры класса **явные** - типовой член
+/// пишется применением к ним, - а словарь стоит за ними неявным, и находит
+/// его разрешение по головам написанных. Кратность всех связываний нулевая:
+/// типу в рантайме места нет.
+fn declare_type_member(
+    signature: &mut Signature,
+    metas: &mut Metas,
+    class: &Symbol,
+    member: &Symbol,
+    within: Option<&Enclosing>,
+    span: Span,
+) -> Result<(), ElabError> {
+    let names = Names::of(member, Vec::new());
+    let declared = qualify(within, member);
+    let fail = |error: TypeError| ElabError::Core {
+        span,
+        error: Box::new(error),
+        names: names.clone(),
+    };
+    let Some(applied) = signature.instantiate(class, metas) else {
+        return Ok(());
+    };
+    let (mut kind, _) = infer(&Ctx::new(signature), metas, Mult::Zero, &applied).map_err(fail)?;
+    let mut ctx = Ctx::new(signature);
+    let mut sorts = Vec::new();
+    while let Value::Pi(_, _, domain, _, codomain) = &*kind.clone() {
+        sorts.push(quote(ctx.size(), domain));
+        let name = CoreName::from(format!("a{}", sorts.len() - 1).as_str());
+        ctx = ctx.bind(name, Mult::Zero, Rc::clone(domain));
+        kind = codomain.clone().apply(ctx.eval(&Term::var(0)));
+    }
+    let arity = u32::try_from(sorts.len()).unwrap_or(u32::MAX);
+    let dictionary = (0..arity).fold(applied, |callee, at| {
+        Term::App(Rc::new(callee), Rc::new(Term::var(arity - 1 - at)))
+    });
+    let bound = ctx.eval(&dictionary);
+    let inner = ctx.bind(CoreName::from("d"), Mult::Zero, bound);
+    let (ty, _) =
+        adamas_core::check::projected(&inner, metas, &Term::var(0), &CoreName::from(&**member))
+            .map_err(fail)?;
+    let ty = Term::Pi(
+        Binder::implicit(Mult::Zero),
+        CoreName::from("d"),
+        Rc::new(dictionary),
+        adamas_core::row::Row::empty(),
+        Rc::new(quote(inner.size(), &ty)),
+    );
+    let ty = sorts.iter().enumerate().rev().fold(ty, |body, (at, sort)| {
+        Term::Pi(
+            Binder::explicit(Mult::Zero),
+            CoreName::from(format!("a{at}").as_str()),
+            Rc::new(sort.clone()),
+            adamas_core::row::Row::empty(),
+            Rc::new(body),
+        )
+    });
+    let projection = Term::Project(Rc::new(Term::var(0)), CoreName::from(&**member));
+    let body = Term::Lam(Mult::Zero, CoreName::from("d"), Rc::new(projection));
+    let body = (0..sorts.len()).rev().fold(body, |inner, at| {
+        Term::Lam(
+            Mult::Zero,
+            CoreName::from(format!("a{at}").as_str()),
+            Rc::new(inner),
+        )
+    });
+    signature
+        .define_inferred(metas, &declared, Mult::Zero, ty, Some(body))
+        .map_err(fail)
+}
+
 /// Члены инстанса - **одной группой**.
 ///
 /// Группа нужна затем, что словарь для собственной цели собирается записью из
@@ -2603,7 +2821,7 @@ fn self_dictionary(
     let mut super_types = Vec::with_capacity(superclasses);
     for index in 0..superclasses {
         let field = format!("#super{index}");
-        let (ty, _) = instance_method(signature, metas, prefix, written, &field, span, names)?;
+        let (ty, _) = instance_method(signature, metas, prefix, written, &field, &[], span, names)?;
         super_types.push(over_prefix(ty));
     }
     Ok(Declaring {
@@ -2644,6 +2862,7 @@ fn declare_members(
     superclasses: usize,
     members: &[Written],
     qualified: &[Symbol],
+    known: &[(Symbol, Term)],
     span: Span,
     names: &Names,
 ) -> Result<(), ElabError> {
@@ -2658,7 +2877,9 @@ fn declare_members(
     // связывает свои параметры само (§10 вопрос 115).
     let mut grades = Vec::with_capacity(members.len());
     for (method, ..) in members {
-        let (ty, mults) = instance_method(signature, metas, prefix, written, method, span, names)?;
+        let (ty, mults) = instance_method(
+            signature, metas, prefix, written, method, known, span, names,
+        )?;
         types.push(ty);
         grades.push(mults);
     }

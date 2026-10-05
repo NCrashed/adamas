@@ -122,6 +122,9 @@ pub struct Class {
     pub superclasses: usize,
     /// Методы в порядке объявления.
     pub methods: Vec<Symbol>,
+    /// Типовые члены (§4.1): поля записи сорта `Type`. Класс с ними обязан
+    /// быть однозначен по голове - пункты 2-4 §3.5 без пункта 1.
+    pub types: Vec<Symbol>,
     /// Умолчания: клаузы, написанные в самом классе.
     ///
     /// Хранятся написанными, а не элаборированными: тело умолчания зовёт
@@ -791,6 +794,16 @@ pub(crate) fn applied(signature: &Signature, ty: &Term) -> Option<(Symbol, Head)
             head = inner;
         }
         match head {
+            // Типовой член класса (§4.1): голова у `Product Int64 V2` не
+            // `Product`, а то, что даёт проекция найденного словаря. Сводится
+            // только замкнутое: открытое ждёт решений, и ключ `Product` был
+            // бы ключом не того типа.
+            Term::Const(name, _, _) if projecting(signature, name) => {
+                match reduced_head(signature, argument) {
+                    Some(found) => heads.push(found),
+                    None => return Some((Rc::clone(class), Head::Unknown)),
+                }
+            }
             Term::Const(name, _, _) => match unfolded(signature, name) {
                 Some(found) => heads.push(found),
                 None => return Some((Rc::clone(class), Head::Projecting)),
@@ -857,6 +870,37 @@ fn unfolded(signature: &Signature, name: &Symbol) -> Option<Symbol> {
         }
     }
     Some(current)
+}
+
+/// Определение - проекция словаря под лямбдами: типовой член класса (§4.1).
+fn projecting(signature: &Signature, name: &str) -> bool {
+    let Some(mut body) = signature.lookup(name).and_then(|it| it.body.as_ref()) else {
+        return false;
+    };
+    while let Term::Lam(_, _, inner) = body {
+        body = inner;
+    }
+    matches!(body, Term::Project(..))
+}
+
+/// Голова замкнутого типа после δ и проекций. `None` - не замкнут либо
+/// застрял.
+fn reduced_head(signature: &Signature, ty: &Term) -> Option<Symbol> {
+    if ty.mentions_recent(0, u32::MAX) {
+        return None;
+    }
+    let value = adamas_core::eval::eval(&adamas_core::value::Env::default(), ty);
+    let reduced = adamas_core::conv::whnf(signature, &value);
+    let term = quote(0, &reduced);
+    let mut head = &term;
+    while let Term::App(inner, _) = head {
+        head = inner;
+    }
+    match head {
+        Term::Const(name, _, _) if !projecting(signature, name) => unfolded(signature, name),
+        Term::Prim(adamas_core::prim::Prim::Ty(ty)) => Some(Rc::from(ty.name())),
+        _ => None,
+    }
 }
 
 /// Сколько синонимов разрешено развернуть, добираясь до головы.

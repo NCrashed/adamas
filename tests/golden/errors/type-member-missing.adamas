@@ -1,0 +1,14 @@
+-- Инстанс обязан задать значение типового члена (§4.1).
+--
+-- Умолчания у типового члена нет, и без значения тип метода `scale` в этом
+-- инстансе назвать нечем.
+
+data V2 where
+  MkV2 : Int64 -> Int64 -> V2
+
+class Scale a (b = a) where
+  type Product
+  scale : a -> b -> Product
+
+instance Scale Int64 V2 where
+  scale k v = v

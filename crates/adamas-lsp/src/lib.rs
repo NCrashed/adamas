@@ -82,16 +82,17 @@ use lsp_types::notification::{
     PublishDiagnostics,
 };
 use lsp_types::request::{
-    GotoDefinition, HoverRequest, InlayHintRefreshRequest, InlayHintRequest, Request as _,
-    SemanticTokensFullRequest,
+    DocumentHighlightRequest, GotoDefinition, HoverRequest, InlayHintRefreshRequest,
+    InlayHintRequest, Request as _, SemanticTokensFullRequest,
 };
 use lsp_types::{
-    DiagnosticRelatedInformation, DiagnosticSeverity, GotoDefinitionResponse, Hover, HoverContents,
-    HoverProviderCapability, InitializeParams, InitializeResult, InlayHintParams, Location,
-    MarkupContent, MarkupKind, OneOf, Position, PositionEncodingKind, PublishDiagnosticsParams,
-    SemanticTokens, SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo, TextDocumentPositionParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    DiagnosticRelatedInformation, DiagnosticSeverity, DocumentHighlight, DocumentHighlightKind,
+    GotoDefinitionResponse, Hover, HoverContents, HoverProviderCapability, InitializeParams,
+    InitializeResult, InlayHintParams, Location, MarkupContent, MarkupKind, OneOf, Position,
+    PositionEncodingKind, PublishDiagnosticsParams, SemanticTokens, SemanticTokensFullOptions,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensServerCapabilities,
+    ServerCapabilities, ServerInfo, TextDocumentPositionParams, TextDocumentSyncCapability,
+    TextDocumentSyncKind, Uri,
 };
 
 pub mod hints;
@@ -223,6 +224,8 @@ pub fn capabilities(encoding: Encoding) -> ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
+        // Вхождения и область локального связывания (§7.2, §10 вопрос 198).
+        document_highlight_provider: Some(OneOf::Left(true)),
         // Подсказки §5.1 считаются по готовой сигнатуре буфера, поэтому
         // `resolve` не объявляется: откладывать нечего - и подпись, и пояснение
         // уже посчитаны, а второй запрос стоил бы круга сообщений на каждую
@@ -311,6 +314,54 @@ pub fn definition(
         uri: uri.clone(),
         range: position::range(file, span, encoding),
     })
+}
+
+/// Вхождения локального связывания под курсором - и само связывание
+/// (`textDocument/documentHighlight`, §7.2, §10 вопрос 198).
+///
+/// Подсвеченное и есть **область** связывания: где имя значит это связывание,
+/// а не другое. У `r` из `(0 r : Region)` это ровно то, где регион
+/// действителен, - но регионом сервер его не называет: регион пишет
+/// программа, а не компилятор, и отличить его от `Vect (0 n : Nat)` нечем
+/// (см. [`hints`]). Имя верхнего уровня - `None`: у него нет области, у него
+/// файл.
+///
+/// Вхождение узнаётся тем же [`adamas_elab::cursor::at`], что переход к
+/// определению: имя с тем же написанием, чьё связывание - то же. Затенённое
+/// одноимённое связывание поэтому не подсвечивается.
+#[must_use]
+pub fn occurrences(
+    file: &SourceFile,
+    position: Position,
+    encoding: Encoding,
+) -> Option<Vec<DocumentHighlight>> {
+    let offset = position::offset(file, position, encoding)?;
+    let module = adamas_parser::parse(file.text()).ok()?;
+    let found = adamas_elab::cursor::at(file.text(), &module, offset)?;
+    let binder = found.binder?;
+    let tokens = adamas_parser::tokenize(file.text()).ok()?;
+    let mut found_spans = vec![(binder, DocumentHighlightKind::WRITE)];
+    for token in &tokens.tokens {
+        if token.kind != adamas_parser::token::TokenKind::Ident
+            || file.text()[token.span.start()..token.span.end()] != *found.text
+            || token.span == binder
+        {
+            continue;
+        }
+        let here = adamas_elab::cursor::at(file.text(), &module, token.span.start());
+        if here.is_some_and(|it| it.binder == Some(binder)) {
+            found_spans.push((token.span, DocumentHighlightKind::READ));
+        }
+    }
+    Some(
+        found_spans
+            .into_iter()
+            .map(|(span, kind)| DocumentHighlight {
+                range: position::range(file, span, encoding),
+                kind: Some(kind),
+            })
+            .collect(),
+    )
 }
 
 /// Диагностика файла в виде протокола - та, что относится к **нему самому**.
@@ -662,7 +713,7 @@ fn answer(
         )
     };
     let asked: Option<TextDocumentPositionParams> = match request.method.as_str() {
-        HoverRequest::METHOD | GotoDefinition::METHOD => {
+        HoverRequest::METHOD | GotoDefinition::METHOD | DocumentHighlightRequest::METHOD => {
             match serde_json::from_value(request.params.clone()) {
                 Ok(params) => Some(params),
                 Err(error) => return refuse(format!("параметры не разобраны: {error}")),
@@ -683,6 +734,8 @@ fn answer(
     if request.method == HoverRequest::METHOD {
         let sources = opened(document, documents, roots);
         Response::new_ok(request.id, hover(&file, asked.position, encoding, &sources))
+    } else if request.method == DocumentHighlightRequest::METHOD {
+        Response::new_ok(request.id, occurrences(&file, asked.position, encoding))
     } else {
         Response::new_ok(
             request.id,

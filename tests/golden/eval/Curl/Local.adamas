@@ -28,7 +28,7 @@
 -- форма, какая в языке есть, - буфер полем `resource` (§10 вопрос 185, закрыт
 -- вариантом (в)), и стоит она в `Curl/Writer.adamas`.
 
-import Curl.Raw (Unit, MkUnit, Foreign)
+import Curl.Raw (Foreign)
 
 -- `int mkstemp(char *template)`. Переписывает шесть последних `X` на месте.
 extern "C" fn mkstemp : Array n UInt8 -> Int32

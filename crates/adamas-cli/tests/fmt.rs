@@ -323,7 +323,7 @@ fn the_project_of_ten_files_survives_formatting() {
     assert!(ok, "проект отвергнут после форматирования");
     assert_eq!(
         stdout.trim_end(),
-        "main.adamas: проверено, файлов 10, объявлений 99"
+        "main.adamas: проверено, файлов 10, объявлений 97"
     );
 }
 

@@ -42,7 +42,7 @@
 -- запрет: чтобы назвать `0` успехом, файлу нужен `Bool`, а `Bool` ему нужно
 -- откуда-то подключить - слой же сознательно зависит от одного `Zlib.Raw`.
 
-import Zlib.Raw (Unit, MkUnit, Foreign, compress2, uncompress, crc32)
+import Zlib.Raw (Foreign, compress2, uncompress, crc32)
 
 -- `Z_OK`: единственный код, который zlib зовёт успехом.
 zOk : Int32

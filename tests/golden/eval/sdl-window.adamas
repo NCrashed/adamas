@@ -31,7 +31,7 @@
 -- Ресурсами окно и рендерер здесь **не обёрнуты** нарочно: свидетель проверяет
 -- границу, а не §3.3. Обёртка стоит рядом, в `sdl-resource`.
 
-import Sdl.Raw (Unit, MkUnit, Foreign, SDL_VideoInit, SDL_VideoQuit, SDL_CreateWindow,
+import Sdl.Raw (Foreign, SDL_VideoInit, SDL_VideoQuit, SDL_CreateWindow,
                 SDL_DestroyWindow, SDL_CreateRenderer, SDL_DestroyRenderer,
                 SDL_SetRenderDrawColor, SDL_RenderClear, SDL_RenderFillRect,
                 SDL_RenderPresent, SDL_PollEvent, anywhere, shown, software, windowEvent)

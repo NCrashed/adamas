@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-scope-bound.adamas: проверено, объявлений 8
+scope-bound.adamas: проверено, объявлений 9

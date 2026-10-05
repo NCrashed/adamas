@@ -36,7 +36,7 @@
 -- (§4.11), - обёртка не вправе завести буфер, размер которого узнала в
 -- рантайме. Написано 128 при настоящих 48.
 
-import Zlib.Raw (Unit, MkUnit, Foreign)
+import Zlib.Raw (Foreign)
 
 import Zlib.Bytes (zOk, zBest, checksum, deflate, inflate, roomLeft)
 

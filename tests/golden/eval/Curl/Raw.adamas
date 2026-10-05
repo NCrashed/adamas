@@ -35,9 +35,6 @@
 -- здесь, измерено прогоном, и подробности - в шапке `curl-callback.adamas`,
 -- где та же функция объявлена с хвостом-колбэком и потому не умеет URL.
 
-data Unit where
-  MkUnit : Unit
-
 effect Foreign
 
 -- `CURL *curl_easy_init(void)`. Аргументов нет: приостановленная запись

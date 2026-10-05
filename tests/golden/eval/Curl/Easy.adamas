@@ -65,9 +65,7 @@
 -- здесь.
 
 import Curl.Raw
-  ( Unit
-  , MkUnit
-  , Foreign
+  ( Foreign
   , curl_easy_init
   , curl_easy_setopt
   , curl_easy_perform

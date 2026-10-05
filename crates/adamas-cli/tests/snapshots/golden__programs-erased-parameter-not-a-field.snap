@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-erased-parameter-not-a-field.adamas: проверено, объявлений 12
+erased-parameter-not-a-field.adamas: проверено, объявлений 13

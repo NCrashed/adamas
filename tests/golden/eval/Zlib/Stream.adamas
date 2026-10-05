@@ -50,7 +50,7 @@
 -- единственное место, где узнаётся, дописался ли буфер на диск. Закрытие с
 -- ошибкой здесь молчит - как молчит оно у всякого RAII.
 
-import Zlib.Raw (Unit, MkUnit, Foreign, gzopen, gzread, gzwrite, gzclose)
+import Zlib.Raw (Foreign, gzopen, gzread, gzwrite, gzclose)
 
 -- Чужой объект под деструктором. Разбирается он ровно в одном месте - в
 -- деструкторе, - и поле у него линейное: `gzclose` хендл потребляет.

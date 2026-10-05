@@ -151,7 +151,7 @@ fn a_project_of_ten_files_checks_and_evaluates() {
     assert!(passed, "проект отвергнут:\n{text}");
     assert_eq!(
         text.trim_end(),
-        "main.adamas: проверено, файлов 10, объявлений 99",
+        "main.adamas: проверено, файлов 10, объявлений 97",
         "драйвер обязан назвать число файлов, а не одну только сигнатуру"
     );
     let (passed, text) = evaluated(&entry);

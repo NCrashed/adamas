@@ -42,7 +42,7 @@
 -- `h` - прыжок ([`jump`]). Попадание дробит камень надвое ([`shard`]), камень
 -- отнимает жизнь, за каждую тысячу очков жизнь возвращается ([`reward`]).
 
-import Sdl.Raw (Unit, Foreign, SDL_Init, SDL_CreateWindow, SDL_DestroyWindow, SDL_CreateRenderer, SDL_DestroyRenderer, SDL_SetRenderDrawColor, SDL_RenderClear, SDL_RenderFillRect, SDL_RenderPresent, SDL_PollEvent, SDL_Delay, SDL_Quit, anywhere, shown, software, videoFlag, quitEvent)
+import Sdl.Raw (Foreign, SDL_Init, SDL_CreateWindow, SDL_DestroyWindow, SDL_CreateRenderer, SDL_DestroyRenderer, SDL_SetRenderDrawColor, SDL_RenderClear, SDL_RenderFillRect, SDL_RenderPresent, SDL_PollEvent, SDL_Delay, SDL_Quit, anywhere, shown, software, videoFlag, quitEvent)
 
 -- | Ширина и высота окна в точках экрана.
 width : Int32

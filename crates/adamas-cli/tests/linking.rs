@@ -266,7 +266,7 @@ fn wrapper(name: &str) -> String {
 /// может (§4.11). Тем же отказом пришлось боксировать `Transferred` в самом
 /// слое.
 const STREAM: &str = "\
-import Zlib.Raw (Unit, MkUnit, Foreign)
+import Zlib.Raw (Foreign)
 import Zlib.Stream (Transferred, Bytes, writeGz, readGz, absentFile)
 
 data Bool where

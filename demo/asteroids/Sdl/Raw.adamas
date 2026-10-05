@@ -37,9 +37,6 @@
 -- [`Sdl.Raw.videoFlag`] и спутниках - одним местом на программу, а не россыпью
 -- по вызовам.
 
-data Unit where
-  MkUnit : Unit
-
 effect Foreign
 
 -- `int SDL_Init(Uint32 flags)`.

@@ -1,19 +1,24 @@
--- | Ввод-вывод консоли (§3.4, §4.4, §5.3).
+-- | Ввод-вывод консоли и файлов (§3.4, §4.4, §5.3).
 --
--- Метка `Console` говорит, что функция делает с консолью, и только это: тип
--- `greet : String -> {Console} Unit` печатать может, а окна открыть или файла
--- стереть - нет. Смысл операциям задаёт хендлер. `runConsole` исполняет их
--- через libc - чужие вызовы несут `Foreign`, и метка эта остаётся внутри него;
--- тест вправе исполнить те же операции своим хендлером, без консоли вовсе.
+-- Метка говорит, что функция делает с миром, и только это: тип
+-- `greet : String -> {Console} Unit` печатать может, а файла стереть - нет.
+-- Смысл операциям задаёт хендлер. `run` исполняет их через libc - чужие вызовы
+-- несут `Foreign`, и метка эта остаётся внутри него; тест вправе исполнить те
+-- же операции своим хендлером, без консоли и диска вовсе.
 --
 -- Дескриптор у C - `int`, а объявлен словом: младшая половина регистра и есть
 -- то, что прочтёт чужая сторона (приём `compress2`, §5.3), и форма сигнатуры
--- ложится в таблицу чужих вызовов машины.
+-- ложится в таблицу чужих вызовов машины. Флаги `open` - числа Linux.
+
+import Std.Except (Except, throw)
 
 effect Foreign
 
 extern "C" fn write : Int64 -> Array n UInt8 -> UInt64 -> Int64
 extern "C" fn read : Int64 -> Array n UInt8 -> UInt64 -> Int64
+extern "C" fn open : Array n UInt8 -> Int64 -> ... -> UInt64 -> Int32
+extern "C" fn close : Int64 -> Int32
+extern "C" fn exit : Int32 -> Unit
 
 -- | Консоль: печать и чтение строки.
 --
@@ -27,6 +32,94 @@ putLine : String -> {Console} Unit
 putLine s =
   putStr s
   putStr "\n"
+
+-- | Как открыть файл.
+data Mode where
+  -- | Чтение с начала.
+  ForReading : Mode
+  -- | Запись с начала: файла нет - создаётся, есть - обрезается.
+  ForWriting : Mode
+  -- | Запись в конец: файла нет - создаётся.
+  ForAppending : Mode
+
+-- | Открытый файл, как его видит хендлер `Files`: у `run` это дескриптор, у
+-- тестового хендлера - любой номер.
+data Handle where
+  MkHandle : (ω fd : Int64) -> Handle
+
+-- | Отказ ввода-вывода: что не удалось и с каким файлом.
+data IOError where
+  CannotOpen : String -> IOError
+  CannotWrite : String -> IOError
+
+-- | Файлы со стороны хендлера: открыть, закрыть, строка, запись.
+--
+-- Программа их не зовёт - она пишет `reading` и `writing`, а операции текущего
+-- файла внутри них - `Reading` и `Writing`. `Files` - то, что подменяется
+-- целиком: диском у `run`, словарём в памяти у теста.
+effect Files where
+  openFile : String -> Mode -> Option Handle
+  closeFile : Handle -> Unit
+  readFrom : Handle -> Option String
+  writeTo : Handle -> String -> Bool
+
+-- | Строки файла, открытого `reading`. У конца файла - `None`.
+effect Reading where
+  nextLine : Option String
+
+-- | Запись в файл, открытый `writing` либо `appending`.
+effect Writing where
+  emit : String -> Unit
+
+-- | Строка и перевод строки.
+emitLine : String -> {Writing} Unit
+emitLine s =
+  emit s
+  emit "\n"
+
+-- Открытый файл, закрываемый на выходе из области - и на обрыве тоже (§3.3).
+resource Opened where
+  Holding : (ω h : Handle) -> Opened
+  release : (1 o : Opened) -> {Files} Unit
+  release (Holding h) = closeFile h
+
+-- | Открывает файл; не открылся - `CannotOpen`.
+opened : String -> Mode -> {Files, Except IOError} Handle
+opened path mode = case openFile path mode of
+  Some h -> h
+  None -> throw (CannotOpen path)
+
+-- | Исполняет `k` над файлом, открытым на чтение: `nextLine` отвечает его
+-- строками. Файл закрывается, как только `k` кончилось либо оборвалось.
+--
+-- Хвост `e` написан, а не поднят: с поднятым колбэк не мог бы нести ничего
+-- сверх `Reading` - печать в нём отвергалась бы (§10 вопрос 242). `Files` и
+-- `Except IOError` колбэку разрешены поимённо: вложенный `writing` их
+-- производит, а через хвост они вышли бы в ответ дважды.
+reading : {a : Type} -> String -> ((ω u : Unit) -> {Reading, Files, Except IOError | e} a) -> {Files, Except IOError | e} a
+reading path k =
+  let h : Handle = opened path ForReading
+  let _held : Opened = Holding h
+  handle k with
+    return v -> v
+    nextLine -> resume (readFrom h)
+
+-- Запись в открытый файл: `emit`, не дошедший до диска, - `CannotWrite`.
+written : {a : Type} -> String -> Mode -> ((ω u : Unit) -> {Writing, Files, Except IOError | e} a) -> {Files, Except IOError | e} a
+written path mode k =
+  let h : Handle = opened path mode
+  let _held : Opened = Holding h
+  handle k with
+    return v -> v
+    emit s -> if writeTo h s then resume MkUnit else throw (CannotWrite path)
+
+-- | Исполняет `k` над файлом, открытым на запись с начала.
+writing : {a : Type} -> String -> ((ω u : Unit) -> {Writing, Files, Except IOError | e} a) -> {Files, Except IOError | e} a
+writing path k = written path ForWriting k
+
+-- | Исполняет `k` над файлом, открытым на запись в конец.
+appending : {a : Type} -> String -> ((ω u : Unit) -> {Writing, Files, Except IOError | e} a) -> {Files, Except IOError | e} a
+appending path k = written path ForAppending k
 
 -- Байты прочитанного, последний - первым.
 data Bytes where
@@ -64,16 +157,16 @@ sized n rest =
 gathered : Bytes -> String
 gathered rest = sized (counted rest) rest
 
--- | Строка стандартного ввода до перевода строки, байт за байтом. `None` -
--- ввод кончился, не дав ни байта.
+-- | Строка дескриптора `fd` до перевода строки, байт за байтом. `None` - ввод
+-- кончился, не дав ни байта; отказ чтения - тоже конец.
 --
 -- По байту, а не блоком: блок прочёл бы и начало следующей строки, а хранить
--- его между вызовами `readLine` нечем, пока у хендлера нет состояния.
-lineFrom : Bytes -> Bool -> {Foreign} Option String
-lineFrom seen any =
+-- его между вызовами нечем, пока у хендлера нет состояния.
+lineFrom : Int64 -> Bytes -> Bool -> {Foreign} Option String
+lineFrom fd seen any =
   let zero : UInt8 = 0
   let cell : Array 1 UInt8 = arrayNew 1 zero
-  let got : Int64 = read 0 cell 1
+  let got : Int64 = read fd cell 1
   case decide (leInt64 got 0) of
     Yes _end -> if any then Some (gathered seen) else None
     No _more ->
@@ -81,24 +174,119 @@ lineFrom seen any =
       let b : UInt8 = arrayIndex cell first Refl
       case decide (eqUInt8 b 10) of
         Yes _newline -> Some (gathered seen)
-        No _other -> lineFrom (More b seen) True
+        No _other -> lineFrom fd (More b seen) True
 
--- | Исполняет консоль через libc: `putStr` - `write` в стандартный вывод,
--- `readLine` - `read` из стандартного ввода.
-runConsole : {a : Type} -> ((ω u : Unit) -> {Console} a) -> {Foreign} a
-runConsole k = handle @Console k with
+-- | Копирует байты `src` в `dst` с ячейки `i`; что не влезло - не копируется.
+copied : (ω m : UInt64) -> (ω n : UInt64) -> Array n UInt8 -> Array m UInt8 -> UInt64 -> Array m UInt8
+copied m n src dst i = case decide (ltUInt64 i n) of
+  No _end -> dst
+  Yes p -> case decide (ltUInt64 i m) of
+    No _full -> dst
+    Yes q -> copied m n src (arraySet dst i (arrayIndex src i p) q) (addUInt64 i 1)
+
+-- | `open` над байтами пути и завершающим нулём: буфер на ячейку длиннее.
+openBytes : (ω m : UInt64) -> (ω n : UInt64) -> Array n UInt8 -> Int64 -> {Foreign} Int32
+openBytes m n bytes flags =
+  let zero : UInt8 = 0
+  open (copied m n bytes (arrayNew m zero) 0) flags 420
+
+-- | Флаги `open` (Linux): `O_RDONLY`; `O_WRONLY | O_CREAT | O_TRUNC`;
+-- `O_WRONLY | O_CREAT | O_APPEND`.
+flags : Mode -> Int64
+flags ForReading = 0
+flags ForWriting = 577
+flags ForAppending = 1089
+
+-- | Дескриптор файла либо `None`, если `open` отказал.
+openAt : String -> Mode -> {Foreign} Option Handle
+openAt path mode = case path of
+  MkString n bytes ->
+    let fd : Int32 = openBytes (addUInt64 n 1) n bytes (flags mode)
+    case decide (ltInt32 fd 0) of
+      Yes _failed -> None
+      No _opened -> Some (MkHandle (int32ToInt64 fd))
+
+-- | Закрывает дескриптор.
+closeAt : Handle -> {Foreign} Unit
+closeAt (MkHandle fd) =
+  let _ = close fd
+  MkUnit
+
+-- | Пишет строку в дескриптор; `False` - записано не всё.
+writeAt : Int64 -> String -> {Foreign} Bool
+writeAt fd s = case s of
+  MkString n bytes -> eqInt64 (write fd bytes n) (uint64ToInt64 n)
+
+-- Строка `ошибка: <что> <путь>` в stderr.
+failure : String -> String -> {Foreign} Bool
+failure what path =
+  let _ = writeAt 2 "ошибка: "
+  let _ = writeAt 2 what
+  let _ = writeAt 2 path
+  writeAt 2 "\n"
+
+-- | Сообщение об отказе в стандартный поток ошибок.
+reported : IOError -> {Foreign} Bool
+reported (CannotOpen path) = failure "не открывается файл " path
+reported (CannotWrite path) = failure "не записывается файл " path
+
+-- Дальше `exit` управление не идёт; ответ любого типа - ради сигнатуры.
+stopped : {a : Type} -> (ω u : Unit) -> {Foreign} a
+stopped u = stopped u
+
+-- | Отказ, дошедший до верха: сообщение и код возврата 1.
+fatal : {a : Type} -> IOError -> {Foreign} a
+fatal e =
+  let _ = reported e
+  let _ = exit 1
+  stopped MkUnit
+
+-- Отказ, дошедший до верха, - в `fatal`. Сквозные метки написаны явно, как у
+-- двух хендлеров ниже: см. `run`.
+caught : {a : Type} -> ((ω u : Unit) -> {Except IOError, Console, Files} a) -> {Console, Files, Foreign} a
+caught k = handle k with
   return v -> v
-  putStr s -> case s of
-    MkString n bytes ->
-      let _ = write 1 bytes n
-      resume MkUnit
-  readLine -> resume (lineFrom Done False)
+  throw e -> fatal e
 
--- | Исполняет программу ввода-вывода целиком: консоль - `runConsole`, чужие
+-- Файлы через libc: `open`, `close`, `read`, `write`; консоль насквозь.
+filesThrough : {a : Type} -> ((ω u : Unit) -> {Files, Console, Foreign} a) -> {Console, Foreign} a
+filesThrough k = handle @Files k with
+  return v -> v
+  openFile path mode -> resume (openAt path mode)
+  closeFile h -> resume (closeAt h)
+  readFrom h -> case h of
+    MkHandle fd -> resume (lineFrom fd Done False)
+  writeTo h s -> case h of
+    MkHandle fd -> resume (writeAt fd s)
+
+-- Консоль через libc: `putStr` - `write` в стандартный вывод, `readLine` -
+-- `read` из стандартного ввода; чужие вызовы насквозь.
+consoleThrough : {a : Type} -> ((ω u : Unit) -> {Console, Foreign} a) -> {Foreign} a
+consoleThrough k = handle @Console k with
+  return v -> v
+  putStr s -> case writeAt 1 s of
+    _ -> resume MkUnit
+  readLine -> resume (lineFrom 0 Done False)
+
+-- Слои `run` - частичным применением, а не лямбдами в теле `run`: такую
+-- лямбду понижение сегодня не собирает (§10 вопрос 243).
+filed : {a : Type} -> ((ω u : Unit) -> {Console, Files, Except IOError} a) -> (ω u : Unit) -> {Console, Files, Foreign} a
+filed k u = caught k
+
+consoled : {a : Type} -> ((ω u : Unit) -> {Console, Files, Except IOError} a) -> (ω u : Unit) -> {Foreign} a
+consoled k u = consoleThrough (\_c -> filesThrough (filed k))
+
+-- | Исполняет программу ввода-вывода целиком: консоль, файлы, отказы и чужие
 -- вызовы - на верхнем уровне, где им больше некуда уходить.
 --
 -- Этот хендлер драйвер ставит вокруг `main`, чей тип несёт метки отсюда (§10
--- вопрос 12): `main : {Console} Unit` исполняется сам.
-run : {a : Type} -> ((ω u : Unit) -> {Console} a) -> a
-run k = handle @Foreign (\_u -> runConsole k) with
+-- вопрос 12): `main : {Console} Unit` исполняется сам. Отказ `IOError`,
+-- никем не пойманный, печатается в stderr и кончает процесс кодом 1; файлы,
+-- открытые в оборванной области, к этому моменту закрыты.
+--
+-- Хендлеры цепочки пишут сквозные метки явно: поднятый хвост их не пропускает
+-- (§10 вопрос 242), а написанный `| e` дал бы `Foreign` дважды - её производит
+-- каждый слой.
+run : {a : Type} -> ((ω u : Unit) -> {Console, Files, Except IOError} a) -> a
+run k = handle @Foreign (consoled k) with
   return v -> v

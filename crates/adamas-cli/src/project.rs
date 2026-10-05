@@ -276,8 +276,12 @@ pub(crate) fn body(
 /// вопрос 12).
 const IO_RUN: &str = "Std.IO.run";
 
-/// Метки, которые [`IO_RUN`] гасит целиком.
-const IO_LABELS: [&str; 2] = ["Std.IO.Console", "Std.IO.Foreign"];
+/// Метки без аргументов, которые [`IO_RUN`] гасит целиком.
+const IO_LABELS: [&str; 3] = ["Std.IO.Console", "Std.IO.Files", "Std.IO.Foreign"];
+
+/// Отказ, который [`IO_RUN`] гасит наверху: `Except IOError`, и только с этим
+/// аргументом.
+const IO_EXCEPT: (&str, &str) = ("Std.Except.Except", "Std.IO.IOError");
 
 /// Что исполнять и печатать ли ответ.
 pub(crate) struct Entry {
@@ -322,10 +326,7 @@ pub(crate) fn entry(signature: &adamas_core::sig::Signature, name: &str) -> anyh
                 && is_unit(domain)
                 && !matches!(row.tail(), Some(Tail::Meta(_)))
                 && !row.is_empty()
-                && row
-                    .labels()
-                    .iter()
-                    .all(|label| IO_LABELS.contains(&&*label.name))
+                && row.labels().iter().all(handled)
                 && signature.lookup(IO_RUN).is_some() =>
         {
             Some(codomain)
@@ -374,4 +375,16 @@ fn reference(signature: &adamas_core::sig::Signature, name: &str) -> adamas_core
         (0..levels).map(|_| Level::number(0)).collect(),
         Args::rows((0..rows).map(|_| Row::empty())),
     )
+}
+
+/// Гасит ли [`IO_RUN`] метку: своя `Std.IO` без аргументов либо `Except IOError`.
+fn handled(label: &adamas_core::row::Label<adamas_core::term::Term>) -> bool {
+    use adamas_core::term::Term;
+
+    if label.arguments.is_empty() {
+        return IO_LABELS.contains(&&*label.name);
+    }
+    let (except, error) = IO_EXCEPT;
+    &*label.name == except
+        && matches!(label.arguments.as_slice(), [Term::Const(name, ..)] if &**name == error)
 }

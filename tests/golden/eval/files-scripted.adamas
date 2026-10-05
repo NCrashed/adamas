@@ -1,0 +1,85 @@
+-- Файлы `Std.IO` под чистым хендлером (§3.3, §3.4, §4.4).
+--
+-- Диск здесь - хендлер `Files`, и пишет он след: 1 - открыт, 2 - закрыт,
+-- 3 - прочитана строка, 4 - записана. След кодируется цифрами, ответ - двумя
+-- последними.
+--
+-- Свидетельствует он о закрытии. `reading` и `writing` держат файл ресурсом,
+-- и закрывается он на выходе из области - на нормальном пути и на обрыве
+-- `CannotWrite` тоже; файл, который не открылся, не закрывается вовсе.
+--
+--   * чтение пустого файла: открыт, строка, закрыт, строк 0 - `13200`;
+--   * запись на полный диск: открыт, запись, закрыт, отказ 60 - `14260`;
+--   * чтение отсутствующего: открыт, отказ 50 - `150`;
+--   * запись: открыт, две записи (`emitLine` - строка и перевод), закрыт,
+--     ответ 9 - `144209`.
+--
+-- Сумма - 171819.
+
+import Std.IO (Files, Handle, MkHandle, IOError, CannotOpen, CannotWrite, Reading, Writing, reading, writing, nextLine, emitLine)
+import Std.Except (Except)
+
+data Trace where
+  Ended : UInt64 -> Trace
+  Event : UInt64 -> Trace -> Trace
+
+encoded : UInt64 -> Trace -> UInt64
+encoded acc (Ended v) = addUInt64 (mulUInt64 acc 100) v
+encoded acc (Event d rest) = encoded (addUInt64 (mulUInt64 acc 10) d) rest
+
+data Disk where
+  Healthy : Disk
+  Full : Disk
+  Missing : Disk
+
+opening : Disk -> Option Handle
+opening Missing = None
+opening _d = Some (MkHandle 7)
+
+accepting : Disk -> Bool
+accepting Full = False
+accepting _d = True
+
+disk : Disk -> ((ω u : Unit) -> {Files} UInt64) -> Trace
+disk d k = handle @Files k with
+  return v -> Ended v
+  openFile _path _mode -> Event 1 (resume (opening d))
+  closeFile _h -> Event 2 (resume MkUnit)
+  readFrom _h -> Event 3 (resume None)
+  writeTo _h _s -> Event 4 (resume (accepting d))
+
+refusal : IOError -> UInt64
+refusal (CannotOpen _path) = 50
+refusal (CannotWrite _path) = 60
+
+recovered : ((ω u : Unit) -> {Except IOError, Files} UInt64) -> {Files} UInt64
+recovered k = handle k with
+  return v -> v
+  throw e -> refusal e
+
+counting : UInt64 -> {Reading} UInt64
+counting n =
+  let line : Option String = nextLine
+  case line of
+    None -> n
+    Some _line -> counting (addUInt64 n 1)
+
+lines : {Reading} UInt64
+lines = counting 0
+
+wrote : {Writing} UInt64
+wrote =
+  emitLine "x"
+  9
+
+readRun : {Except IOError, Files} UInt64
+readRun = reading "a" lines
+
+writeRun : {Except IOError, Files} UInt64
+writeRun = writing "b" wrote
+
+traced : Disk -> ((ω u : Unit) -> {Except IOError, Files} UInt64) -> UInt64
+traced d k = encoded 0 (disk d (\_u -> recovered k))
+
+main : UInt64
+main = addUInt64 (addUInt64 (traced Healthy readRun) (traced Full writeRun)) (addUInt64 (traced Missing readRun) (traced Healthy writeRun))

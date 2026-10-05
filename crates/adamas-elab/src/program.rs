@@ -142,7 +142,10 @@ const PRELUDE_TEXT: &str = include_str!("../../../lib/Prelude.adamas");
 /// Стандартная библиотека, вшитая так же, как прелюдия (§4.4): путь модуля и
 /// текст. Подключается явным импортом; путь ищется сначала у источника
 /// программы, и свой файл проекта сильнее вшитого.
-const STANDARD: &[(&str, &str)] = &[("Std.IO", include_str!("../../../lib/Std/IO.adamas"))];
+const STANDARD: &[(&str, &str)] = &[
+    ("Std.Except", include_str!("../../../lib/Std/Except.adamas")),
+    ("Std.IO", include_str!("../../../lib/Std/IO.adamas")),
+];
 
 /// Текст модуля вшитой стандартной библиотеки. `None` - такого модуля нет.
 #[must_use]

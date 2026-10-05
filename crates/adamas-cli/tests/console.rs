@@ -1,4 +1,5 @@
-//! Консоль `Std.IO` по-настоящему: стандартные ввод и вывод процесса (§4.4).
+//! `Std.IO` по-настоящему: стандартные ввод и вывод процесса, файлы на диске
+//! (§4.4).
 //!
 //! Корпус `eval/` такую программу не берёт: сверка трёх вычислителей ждёт в
 //! выводе один ответ, а здесь программа печатает сама. Поэтому сверка - здесь,
@@ -65,12 +66,13 @@ fn program(case: &str, text: &str) -> PathBuf {
     file
 }
 
-/// Запуск драйвера с заданным стандартным вводом: `(успех, stdout, stderr)`.
+/// Запуск драйвера с заданным стандартным вводом: `(код возврата, stdout,
+/// stderr)`.
 #[allow(
     clippy::unwrap_used,
     reason = "заготовка теста: отказ здесь означает сломанное окружение"
 )]
-fn driven(file: &Path, args: &[&str], input: &str) -> (bool, String, String) {
+fn driven(file: &Path, args: &[&str], input: &str) -> (Option<i32>, String, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_adamas"))
         .args(args)
         .arg(file)
@@ -90,7 +92,7 @@ fn driven(file: &Path, args: &[&str], input: &str) -> (bool, String, String) {
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(!stderr.contains("panicked"), "драйвер упал: {stderr}");
     (
-        output.status.success(),
+        output.status.code(),
         String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr,
     )
@@ -103,8 +105,8 @@ const EVALUATORS: [&[&str]; 3] = [&["eval"], &["run"], &["run", "--backend", "ll
 fn three_evaluators_print_and_read_the_same() {
     let file = program("three", GREET);
     for args in EVALUATORS {
-        let (ok, stdout, stderr) = driven(&file, args, "мир\n");
-        assert!(ok, "{args:?} не посчитал:\n{stderr}");
+        let (code, stdout, stderr) = driven(&file, args, "мир\n");
+        assert_eq!(code, Some(0), "{args:?} не посчитал:\n{stderr}");
         assert_eq!(stdout, "привет\n6\n", "{args:?}: вывод не тот");
     }
 }
@@ -113,8 +115,8 @@ fn three_evaluators_print_and_read_the_same() {
 fn a_unit_answer_is_not_printed() {
     let file = program("hello", HELLO);
     for args in EVALUATORS {
-        let (ok, stdout, stderr) = driven(&file, args, "мир\n");
-        assert!(ok, "{args:?} не посчитал:\n{stderr}");
+        let (code, stdout, stderr) = driven(&file, args, "мир\n");
+        assert_eq!(code, Some(0), "{args:?} не посчитал:\n{stderr}");
         assert_eq!(
             stdout, "Как тебя зовут?\nПривет, мир\n",
             "{args:?}: вывод не тот"
@@ -125,12 +127,177 @@ fn a_unit_answer_is_not_printed() {
 #[test]
 fn the_end_of_input_is_none_rather_than_an_empty_line() {
     let file = program("eof", GREET);
-    let (ok, stdout, stderr) = driven(&file, &["eval"], "");
-    assert!(ok, "не посчитал:\n{stderr}");
+    let (code, stdout, stderr) = driven(&file, &["eval"], "");
+    assert_eq!(code, Some(0), "не посчитал:\n{stderr}");
     // Конец ввода - `None`: ответ 100, а не длина пустого.
     assert_eq!(stdout, "привет\n100\n");
     // Пустая строка - не конец ввода: она есть, и длина её ноль, а `Some`.
-    let (ok, stdout, stderr) = driven(&file, &["eval"], "\n");
-    assert!(ok, "не посчитал:\n{stderr}");
+    let (code, stdout, stderr) = driven(&file, &["eval"], "\n");
+    assert_eq!(code, Some(0), "не посчитал:\n{stderr}");
     assert_eq!(stdout, "привет\n0\n");
+}
+
+/// Пишет файл, дописывает его тем же и считает строки.
+const LINES: &str = "\
+import Std.IO (Console, Files, IOError, Reading, Writing, putLine, reading, writing, appending, nextLine, emitLine)
+import Std.Except (Except)
+
+three : {Writing} Unit
+three =
+  emitLine \"раз\"
+  emitLine \"два\"
+  emitLine \"три\"
+
+counting : UInt64 -> {Reading} UInt64
+counting n =
+  let line : Option String = nextLine
+  case line of
+    None -> n
+    Some _line -> counting (addUInt64 n 1)
+
+tally : {Reading} UInt64
+tally = counting 0
+
+main : {Console, Files, Except IOError} UInt64
+main =
+  writing \"out.txt\" three
+  appending \"out.txt\" three
+  putLine \"записано\"
+  reading \"out.txt\" tally
+";
+
+/// Читает файл, которого нет.
+const MISSING: &str = "\
+import Std.IO (Console, Files, IOError, Reading, putLine, reading, nextLine)
+import Std.Except (Except)
+
+first : {Reading} UInt64
+first =
+  let line : Option String = nextLine
+  case line of
+    None -> 0
+    Some _line -> 1
+
+main : {Console, Files, Except IOError} UInt64
+main =
+  putLine \"до\"
+  let n : UInt64 = reading \"нет.txt\" first
+  putLine \"после\"
+  n
+";
+
+#[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "файл пишет программа: нет его - отказ свидетеля, а не окружения"
+)]
+fn files_are_written_appended_and_read() {
+    let file = program("lines", LINES);
+    let written = file.with_file_name("out.txt");
+    for args in EVALUATORS {
+        let (code, stdout, stderr) = driven(&file, args, "");
+        assert_eq!(code, Some(0), "{args:?} не посчитал:\n{stderr}");
+        assert_eq!(stdout, "записано\n6\n", "{args:?}: вывод не тот");
+        // `writing` обрезает: прогон, идущий вторым, не находит строк первого.
+        assert_eq!(
+            std::fs::read_to_string(&written).unwrap(),
+            "раз\nдва\nтри\nраз\nдва\nтри\n",
+            "{args:?}: файл не тот"
+        );
+    }
+}
+
+#[test]
+fn a_missing_file_ends_the_program_with_a_message() {
+    let file = program("missing", MISSING);
+    for args in EVALUATORS {
+        let (code, stdout, stderr) = driven(&file, args, "");
+        assert_eq!(code, Some(1), "{args:?}: код возврата не тот:\n{stderr}");
+        // Отказ обрывает программу: «после» не печатается, ответа нет.
+        assert_eq!(stdout, "до\n", "{args:?}: вывод не тот");
+        assert!(
+            stderr.contains("ошибка: не открывается файл нет.txt\n"),
+            "{args:?}: сообщения нет:\n{stderr}"
+        );
+    }
+}
+
+/// Печатает строки файла по мере чтения: колбэк `reading` несёт и `Reading`,
+/// и `Console` - метка сверх гасимой проходит насквозь.
+const ECHO: &str = "\
+import Std.IO (Console, Files, IOError, Reading, putLine, reading, nextLine)
+import Std.Except (Except)
+
+echoed : UInt64 -> {Reading, Console} UInt64
+echoed n =
+  let line : Option String = nextLine
+  case line of
+    None -> n
+    Some s ->
+      putLine s
+      echoed (addUInt64 n 1)
+
+shown : {Reading, Console} UInt64
+shown = echoed 0
+
+main : {Console, Files, Except IOError} UInt64
+main = reading \"in.txt\" shown
+";
+
+#[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+fn a_reading_callback_prints_to_the_console() {
+    let file = program("echo", ECHO);
+    std::fs::write(file.with_file_name("in.txt"), "α\nβ\n").unwrap();
+    for args in EVALUATORS {
+        let (code, stdout, stderr) = driven(&file, args, "");
+        assert_eq!(code, Some(0), "{args:?} не посчитал:\n{stderr}");
+        assert_eq!(stdout, "α\nβ\n2\n", "{args:?}: вывод не тот");
+    }
+}
+
+/// Копирует файл построчно: `writing` внутри колбэка `reading`.
+const COPY: &str = "\
+import Std.IO (Console, Files, IOError, Reading, Writing, reading, writing, nextLine, emitLine)
+import Std.Except (Except)
+
+copying : UInt64 -> {Reading, Writing} UInt64
+copying n =
+  let line : Option String = nextLine
+  case line of
+    None -> n
+    Some s ->
+      emitLine s
+      copying (addUInt64 n 1)
+
+into : {Reading, Files, Except IOError} UInt64
+into = writing \"out.txt\" (copying 0)
+
+main : {Console, Files, Except IOError} UInt64
+main = reading \"in.txt\" into
+";
+
+#[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+fn a_file_is_copied_by_nesting_reading_and_writing() {
+    let file = program("copy", COPY);
+    std::fs::write(file.with_file_name("in.txt"), "α\nβ\n").unwrap();
+    let copy = file.with_file_name("out.txt");
+    for args in EVALUATORS {
+        let _ = std::fs::remove_file(&copy);
+        let (code, stdout, stderr) = driven(&file, args, "");
+        assert_eq!(code, Some(0), "{args:?} не посчитал:\n{stderr}");
+        assert_eq!(stdout, "2\n", "{args:?}: вывод не тот");
+        assert_eq!(
+            std::fs::read_to_string(&copy).unwrap(),
+            "α\nβ\n",
+            "{args:?}: копия не та"
+        );
+    }
 }

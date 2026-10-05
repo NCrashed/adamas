@@ -1265,9 +1265,18 @@ impl<'a> Parser<'a> {
                 span,
             });
         }
-        let name = self.ident()?;
+        // `let _ = e` - «прочёл и выбросил» (§10 вопрос 207): отброшенный
+        // строкой результат не-`Unit` предупреждает, а этот - нет. Параметров у
+        // него не бывает: функцию, которую нельзя позвать, заводить незачем.
+        let name = match self.eat(TokenKind::Underscore) {
+            Some(underscore) => Name {
+                text: Rc::from("_"),
+                span: underscore.span,
+            },
+            None => self.ident()?,
+        };
         let mut params = Vec::new();
-        while starts_pattern(self.kind()) {
+        while name.text.as_ref() != "_" && starts_pattern(self.kind()) {
             params.push(self.atomic_pattern()?);
         }
         let ty = if self.eat(TokenKind::Colon).is_some() {

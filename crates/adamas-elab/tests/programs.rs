@@ -9957,3 +9957,76 @@ opaque : Bool
     );
     assert_eq!(signature.origin("opaque"), None);
 }
+
+/// Заголовки предупреждений принятой программы.
+fn warning_texts(text: &str) -> Vec<String> {
+    warned(text).iter().map(ToString::to_string).collect()
+}
+
+#[test]
+fn a_discarded_result_that_carries_something_is_warned_about() {
+    // §10 вопрос 207: код возврата, отброшенный строкой, - молчаливая потеря.
+    // Пара различает по типу, а не по форме: обе строки - вызовы.
+    let found = warning_texts(&format!(
+        "{BASE}
+data Unit where
+  MkUnit : Unit
+
+touch : Nat -> Unit
+touch n = MkUnit
+
+flag : Nat -> Bool
+flag n = True
+
+main : Nat
+main =
+  touch Zero
+  flag Zero
+  Zero
+"
+    ));
+    assert_eq!(
+        found,
+        ["результат типа `Bool` отбрасывается; если так и задумано, напишите `let _ = …`"],
+        "`Unit` молчит, `Bool` говорит"
+    );
+}
+
+#[test]
+fn let_underscore_reads_and_throws_away() {
+    // Явное «прочёл и выбросил» не предупреждает ни отброшенным результатом,
+    // ни непрочитанным связыванием.
+    let found = warning_texts(&format!(
+        "{BASE}
+flag : Nat -> Bool
+flag n = True
+
+main : Nat
+main =
+  let _ = flag Zero
+  Zero
+"
+    ));
+    assert!(found.is_empty(), "{found:#?}");
+}
+
+#[test]
+fn a_twin_of_unit_from_elsewhere_is_silent_too() {
+    // `Unit` объявляет программа, у библиотеки он свой (`Sdl.Raw.Unit`):
+    // узнаётся устройством - один конструктор без полей, - а не именем.
+    let found = warning_texts(&format!(
+        "{BASE}
+data Done where
+  Finished : Done
+
+finish : Nat -> Done
+finish n = Finished
+
+main : Nat
+main =
+  finish Zero
+  Zero
+"
+    ));
+    assert!(found.is_empty(), "{found:#?}");
+}

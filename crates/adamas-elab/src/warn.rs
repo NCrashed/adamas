@@ -60,6 +60,18 @@ pub enum Warning {
         /// Где оно связано.
         span: Span,
     },
+    /// Результат, отброшенный строкой, хотя он что-то несёт (§10 вопрос 207).
+    ///
+    /// Молчит у семейства с единственным конструктором без полей - `Unit` и
+    /// всякий его двойник: отбрасывать там нечего. Явное «прочёл и выбросил»
+    /// пишется `let _ = …`.
+    #[error("результат типа `{ty}` отбрасывается; если так и задумано, напишите `let _ = …`")]
+    DiscardedResult {
+        /// Голова типа результата.
+        ty: Symbol,
+        /// Где стоит строка.
+        span: Span,
+    },
     /// Имя из списка импорта, которое файл не употребляет (§10 вопрос 218).
     #[error("`{name}` импортировано из `{module}`, но нигде не употребляется")]
     UnusedImport {
@@ -80,7 +92,8 @@ impl Warning {
             Self::UnusedImplicit { span, .. }
             | Self::DefaultedLiteral { span, .. }
             | Self::UnusedBinding { span, .. }
-            | Self::UnusedImport { span, .. } => *span,
+            | Self::UnusedImport { span, .. }
+            | Self::DiscardedResult { span, .. } => *span,
         }
     }
 }

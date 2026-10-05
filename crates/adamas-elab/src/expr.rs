@@ -6021,7 +6021,58 @@ impl<'a> Elaborator<'a> {
         if let Some(owned) = head_name(&ty).and_then(|head| self.owned.how(head)) {
             return Err(ElabError::OwnedDiscarded { owned, span });
         }
-        Ok(quote(self.ctx.size(), &ty))
+        let ty = quote(self.ctx.size(), &ty);
+        if let Some(carried) = self.carried(&ty) {
+            self.warnings
+                .push(Warning::DiscardedResult { ty: carried, span });
+        }
+        Ok(ty)
+    }
+
+    /// Несёт ли значение типа `ty` что-то, что жалко потерять молча (§10
+    /// вопрос 207): ответ - имя головы для предупреждения.
+    ///
+    /// Несёт примитив и семейство, у которого больше одного конструктора либо
+    /// конструктор с полем рантайма. Не несёт `Unit` и всякий его двойник -
+    /// узнаётся он устройством, а не именем: `Unit` объявляет программа, и у
+    /// подключённой библиотеки он свой. Голова неизвестна - дырка, переменная
+    /// типа, - молчание: решать не по чему.
+    fn carried(&self, ty: &Term) -> Option<Symbol> {
+        let mut head = ty;
+        while let Term::App(callee, _) = head {
+            head = callee;
+        }
+        match head {
+            Term::Prim(Prim::Ty(prim)) => Some(Rc::from(prim.to_string().as_str())),
+            Term::Const(name, ..) => {
+                let definition = self.signature.lookup(name)?;
+                let DefinitionKind::Data {
+                    constructors,
+                    params,
+                    ..
+                } = &definition.kind
+                else {
+                    return None;
+                };
+                let empty = |constructor: &Symbol| {
+                    self.signature.lookup(constructor).is_some_and(|it| {
+                        let mut current = &it.ty;
+                        let mut at = 0u32;
+                        while let Term::Pi(binder, _, _, _, codomain) = current {
+                            if at >= *params && binder.mult != Mult::Zero {
+                                return false;
+                            }
+                            at += 1;
+                            current = codomain;
+                        }
+                        true
+                    })
+                };
+                let unit = matches!(constructors.as_slice(), [only] if empty(only));
+                (!unit).then(|| Rc::clone(name))
+            }
+            _ => None,
+        }
     }
 
     /// Тип приостановленного вычисления: стрелка от единицы (§3.4).

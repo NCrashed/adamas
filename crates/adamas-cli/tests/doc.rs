@@ -146,3 +146,24 @@ fn a_module_of_the_program_gets_its_own_section() {
         "подключённый модуль не получил раздела:\n{text}"
     );
 }
+
+#[test]
+fn a_marker_block_opening_the_file_documents_the_module() {
+    // §10 вопрос 197: блок в начале файла, отбитый пустой строкой, стоит в
+    // начале раздела - до имён, - и первому объявлению не достаётся.
+    let text = documentation(&corpus().join("programs").join("documented-module.adamas"));
+    let section = text
+        .split_once("\n\n")
+        .map_or("", |(_, rest)| rest)
+        .trim_start();
+    assert!(
+        section.starts_with("Арифметика Пеано: документация модуля целиком"),
+        "документация модуля не открывает раздел:\n{text}"
+    );
+    assert_eq!(headings(&text), ["`data Nat`"], "вывод целиком:\n{text}");
+    let nat = text.split("`data Nat`").nth(1).unwrap_or_default();
+    assert!(
+        !nat.contains("Арифметика"),
+        "документация модуля досталась первому объявлению:\n{text}"
+    );
+}

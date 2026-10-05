@@ -114,6 +114,11 @@ fn documented(program: &Program, unit: &Unit) -> String {
         &mut entries,
     );
     let mut out = format!("# {title}\n\n");
+    // О чём модуль - блок `-- |` в начале файла (§10 вопрос 197).
+    if let Some(about) = adamas_parser::docs::leading(text, &comments) {
+        out.push_str(&about);
+        out.push_str("\n\n");
+    }
     if entries.is_empty() {
         out.push_str("Документированных имён нет.\n\n");
         return out;

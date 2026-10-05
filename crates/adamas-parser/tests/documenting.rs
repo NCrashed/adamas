@@ -130,3 +130,47 @@ fn the_lexer_marks_the_marker_and_nothing_else() {
         [CommentKind::Line, CommentKind::Doc, CommentKind::Block]
     );
 }
+
+/// Документация файла целиком (§10 вопрос 197).
+fn about(text: &str) -> Option<String> {
+    docs::leading(text, &comments(text))
+}
+
+#[test]
+fn a_marker_block_opening_the_file_documents_the_module() {
+    // Отбит пустой строкой - модулю, и объявлению при этом не достаётся.
+    let text = "-- | Арифметика.\n--\n-- Второй абзац.\n\nadd : Nat\n";
+    assert_eq!(about(text).as_deref(), Some("Арифметика.\n\nВторой абзац."));
+    assert_eq!(documented(text, 0), None);
+}
+
+#[test]
+fn the_same_block_glued_to_a_declaration_stays_its_own() {
+    // Ровно тот же блок без пустой строки - документация `add`, а не модуля.
+    let text = "-- | Арифметика.\nadd : Nat\n";
+    assert_eq!(about(text), None);
+    assert_eq!(documented(text, 0).as_deref(), Some("Арифметика."));
+}
+
+#[test]
+fn a_plain_header_is_not_module_documentation() {
+    // Так начинаются все файлы репозитория - и ни один не обязан стать
+    // документацией.
+    let text = "-- Шапка о закрытых вопросах.\n\nadd : Nat\n";
+    assert_eq!(about(text), None);
+}
+
+#[test]
+fn a_marker_block_further_down_is_not_module_documentation() {
+    // Начало у файла одно: ничей блок ниже первого объявления модулю не
+    // достаётся.
+    let text = "add : Nat\n\n-- | Ничей.\n\nsub : Nat\n";
+    assert_eq!(about(text), None);
+}
+
+#[test]
+fn a_note_above_the_module_marker_does_not_cancel_it() {
+    // То же правило начала, что у объявления: открывает первый `-- |`.
+    let text = "-- заметка\n-- | Арифметика.\n\nadd : Nat\n";
+    assert_eq!(about(text).as_deref(), Some("Арифметика."));
+}

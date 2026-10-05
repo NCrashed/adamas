@@ -29,6 +29,13 @@
 //! Начало ищется **сверху**: блок открывает первый `-- |` смежной группы, а не
 //! ближайший к объявлению. Иначе заметка, приписанная над готовым `-- |`,
 //! молча отменяла бы документацию целиком.
+//!
+//! # Документация модуля
+//!
+//! Блок `-- |` в самом начале файла, отбитый пустой строкой, - документация
+//! файла целиком ([`leading`], §10 вопрос 197). Пустая строка решает и здесь:
+//! примыкающий к первому объявлению блок - его, отбитый - модуля. Шапка
+//! обычными `--` не значит ничего, как не значила.
 
 use adamas_core::source::Span;
 
@@ -46,6 +53,50 @@ pub fn attached(text: &str, comments: &[Comment], span: Span) -> Option<String> 
     // отменяет её, а входит в неё.
     let opens = run.iter().position(|it| it.kind == CommentKind::Doc)?;
     let said: Vec<&str> = run[opens..]
+        .iter()
+        .map(|it| stripped(&text[it.span.start()..it.span.end()]))
+        .collect();
+    let block = said.join("\n");
+    let block = block.trim();
+    (!block.is_empty()).then(|| block.to_owned())
+}
+
+/// Документация файла целиком (§7.1, §10 вопрос 197). `None` - её нет.
+///
+/// Это блок `-- |`, открывающий файл, - перед ним только пробел, - и отбитый
+/// от следующего пустой строкой. Пустая строка здесь несёт то же, что у
+/// [`attached`], только с обратным знаком: блок, примыкающий к первому
+/// объявлению, остаётся его документацией, а отбитый - ничьим не был бы, и
+/// достаётся модулю. Шапка, написанная обычными `--`, документацией не
+/// становится нигде: маркер решает, что блок начинается, положение - кому он
+/// принадлежит.
+#[must_use]
+pub fn leading(text: &str, comments: &[Comment]) -> Option<String> {
+    let first = comments.first()?;
+    if first.kind == CommentKind::Block || !text[..first.span.start()].trim().is_empty() {
+        return None;
+    }
+    let mut run = vec![first];
+    let mut end = first.span.end();
+    for comment in &comments[1..] {
+        if comment.kind == CommentKind::Block || !glued(text, end, comment.span.start()) {
+            break;
+        }
+        run.push(comment);
+        end = comment.span.end();
+    }
+    // Открывает блок первый `-- |` группы, как у [`attached`]: заметка над
+    // готовой документацией входит в неё, а не отменяет.
+    let opens = run.iter().position(|it| it.kind == CommentKind::Doc)?;
+    let run = &run[opens..];
+    let rest = &text[end..];
+    let next = rest
+        .find(|it: char| !it.is_whitespace())
+        .map_or(text.len(), |at| end + at);
+    if next < text.len() && glued(text, end, next) {
+        return None;
+    }
+    let said: Vec<&str> = run
         .iter()
         .map(|it| stripped(&text[it.span.start()..it.span.end()]))
         .collect();

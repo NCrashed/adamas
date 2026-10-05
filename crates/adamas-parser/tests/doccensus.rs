@@ -116,7 +116,8 @@ fn label(decl: &Decl) -> String {
 /// Промах здесь молчаливый: правило привязки требует, чтобы между блоком и
 /// объявлением не было пустой строки, и автор, поставивший её, документацию
 /// пишет, а в выводе `adamas doc` не получает. Тест ловит ровно это - маркер,
-/// не доставшийся ни одному объявлению корпуса.
+/// не доставшийся ни одному объявлению корпуса и не открывающий файл
+/// документацией модуля (§10 вопрос 197).
 ///
 /// Проверяется вместе с этим и сам лексер: блок, который перестал помечаться
 /// [`adamas_parser::token::CommentKind::Doc`], не найдётся ни у одного
@@ -144,10 +145,17 @@ fn every_doc_marker_documents_something() {
         }
         let mut places = Vec::new();
         sites(&module.decls, &mut places);
-        let attached = places
-            .iter()
-            .filter(|span| adamas_parser::docs::attached(&text, &tokens.comments, **span).is_some())
-            .count();
+        // Документация модуля (§10 вопрос 197) - тоже место, куда маркер
+        // достаётся: блок в начале файла, отбитый пустой строкой.
+        let module_doc =
+            usize::from(adamas_parser::docs::leading(&text, &tokens.comments).is_some());
+        let attached = module_doc
+            + places
+                .iter()
+                .filter(|span| {
+                    adamas_parser::docs::attached(&text, &tokens.comments, **span).is_some()
+                })
+                .count();
         documented += attached;
         if attached < written {
             dangling.push((path.clone(), written, attached));

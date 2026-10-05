@@ -574,7 +574,7 @@ box rect x y side =
 -- кадр против 62**.
 drawIf : CPtr -> Array 4 Int32 -> Bool -> {Foreign} Array 4 Int32
 drawIf r rect True =
-  SDL_RenderFillRect r rect
+  let _ = SDL_RenderFillRect r rect
   rect
 drawIf r rect False = rect
 
@@ -694,10 +694,10 @@ shownLives = 5
 -- | Строка состояния: счёт слева, номер волны в середине, жизни справа.
 paintHud : CPtr -> Array 4 Int32 -> Status -> {Foreign} Array 4 Int32
 paintHud r rect st =
-  SDL_SetRenderDrawColor r 210 220 255 255
+  let _ = SDL_SetRenderDrawColor r 210 220 255 255
   let score = paintNumber r rect 12 10 st.score 5
   let wave = paintNumber r score (divInt32 width 2 Refl - 40) 10 st.level 5
-  SDL_SetRenderDrawColor r 120 255 140 255
+  let _ = SDL_SetRenderDrawColor r 120 255 140 255
   paintLives r wave st.lives shownLives
 
 -- | Цвет камня по размеру: целый тёмен, осколки светлее.
@@ -716,7 +716,7 @@ paintRocks r rect w 0 = rect
 paintRocks r rect (MkRocks ds xs ys vx vy sz) i =
   let j = i - 1
   let side = at sz j
-  tint r side
+  let _ = tint r side
   let shaped = box rect (screenOf (at xs j)) (screenOf (at ys j)) side
   let drawn = drawIf r shaped (0 < side)
   paintRocks r drawn (MkRocks whole xs ys vx vy sz) j
@@ -747,7 +747,7 @@ paintShip r rect ship grace push =
   let nx = cx + divInt32 (dirX d * 11) scale Refl
   let ny = cy + divInt32 (dirY d * 11) scale Refl
   let tip = drawIf r (box body nx ny 5) here
-  SDL_SetRenderDrawColor r 255 170 60 255
+  let _ = SDL_SetRenderDrawColor r 255 170 60 255
   let bx = cx - divInt32 (dirX d * 9) scale Refl
   let by = cy - divInt32 (dirY d * 9) scale Refl
   drawIf r (box tip bx by 5) (here && push)
@@ -765,13 +765,13 @@ withKeys (MkWorld ship rs ss old st) keys = MkWorld ship rs ss keys st
 -- кадру: один буфер живёт всю игру и остаётся уникальным.
 paint : CPtr -> Array 4 Int32 -> World -> {Foreign} Array 4 Int32
 paint r rect (MkWorld ship rs ss keys st) =
-  SDL_SetRenderDrawColor r 8 8 24 255
-  SDL_RenderClear r
-  SDL_SetRenderDrawColor r 150 150 170 255
+  let _ = SDL_SetRenderDrawColor r 8 8 24 255
+  let _ = SDL_RenderClear r
+  let _ = SDL_SetRenderDrawColor r 150 150 170 255
   let stones = paintRocks r rect rs rocks
-  SDL_SetRenderDrawColor r 255 255 255 255
+  let _ = SDL_SetRenderDrawColor r 255 255 255 255
   let sparks = paintShots r stones ss shots
-  SDL_SetRenderDrawColor r 120 255 140 255
+  let _ = SDL_SetRenderDrawColor r 120 255 140 255
   let hull = paintShip r sparks ship st.grace keys.thrust
   let hud = paintHud r hull st
   SDL_RenderPresent r
@@ -785,10 +785,10 @@ paint r rect (MkWorld ship rs ss keys st) =
 paintOver : CPtr -> Int32 -> {Foreign} Int32
 paintOver r score =
   let rect : Array 4 Int32 = arrayNew 4 0
-  SDL_SetRenderDrawColor r 130 24 36 255
+  let _ = SDL_SetRenderDrawColor r 130 24 36 255
   let band = rectOf rect 0 (divInt32 height 2 Refl - 34) width 68
   let filled = drawIf r band True
-  SDL_SetRenderDrawColor r 255 232 232 255
+  let _ = SDL_SetRenderDrawColor r 255 232 232 255
   paintNumber r filled (divInt32 width 2 Refl - 40) (divInt32 height 2 Refl - 10) score 5
   SDL_RenderPresent r
   SDL_Delay 1200
@@ -903,7 +903,7 @@ runForeign k = handle @Foreign k with
 -- закрываются явно, потому что программа одна и путь у неё один.
 body : (ω u : Unit) -> {Foreign} Int32
 body u =
-  SDL_Init videoFlag
+  let _ = SDL_Init videoFlag
   let window = SDL_CreateWindow title anywhere anywhere width height shown
   let renderer = SDL_CreateRenderer window (-1) software
   let rect : Array 4 Int32 = arrayNew 4 0

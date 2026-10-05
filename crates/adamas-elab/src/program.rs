@@ -759,6 +759,13 @@ fn conventional(name: &str) -> bool {
     use adamas_core::prim;
     matches!(
         name,
-        prim::BOOL | prim::TRUE | prim::FALSE | prim::UNIT | prim::FLAT | prim::PRIMITIVE
+        prim::BOOL
+            | prim::TRUE
+            | prim::FALSE
+            | prim::UNIT
+            | prim::FLAT
+            | prim::PRIMITIVE
+            | prim::STRING
+            | prim::MKSTRING
     )
 }

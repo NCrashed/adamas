@@ -3300,6 +3300,18 @@ impl<'a> Elaborator<'a> {
         if lit.kind == ast::LitKind::Str && awaited.is_some_and(|ty| self.byte_array(ty)) {
             return self.string_literal(lit);
         }
+        // Под `String` - текст; и без ожидания вовсе (`let s = "…"`) тоже
+        // текст, если прелюдия его объявила: текст один, выбирать не из чего.
+        let untyped = awaited.is_none()
+            && self
+                .signature
+                .lookup(&self.signature.convention(prim::STRING))
+                .is_some();
+        if lit.kind == ast::LitKind::Str
+            && (untyped || awaited.is_some_and(|ty| self.text_type(ty)))
+        {
+            return self.text_literal(lit);
+        }
         if let Some(ty) = awaited.and_then(|ty| self.primitive_type(ty)) {
             return Self::primitive_literal(lit, ty);
         }
@@ -3385,7 +3397,7 @@ impl<'a> Elaborator<'a> {
         let name = match lit.kind {
             ast::LitKind::Nat | ast::LitKind::Int => DEFAULT_INT,
             ast::LitKind::Float => DEFAULT_FLOAT,
-            ast::LitKind::Str => return Ok(None),
+            ast::LitKind::Str => prim::STRING,
         };
         // Имя умолчания ищется **соглашением**, а не голым `lookup`: прелюдия
         // объявляет `Prelude.Int`, и голое имя её не находит - ровно та же
@@ -3412,10 +3424,14 @@ impl<'a> Elaborator<'a> {
             self.metas.rollback(mark);
             return Ok(None);
         }
-        self.warnings.push(Warning::DefaultedLiteral {
-            name: Rc::from(name),
-            span: lit.span,
-        });
+        // У строки выбирать не из чего: текст один (§4.5), и сказать «взял
+        // умолчание» значило бы предупреждать о каждом литерале.
+        if lit.kind != ast::LitKind::Str {
+            self.warnings.push(Warning::DefaultedLiteral {
+                name: Rc::from(name),
+                span: lit.span,
+            });
+        }
         self.literal(lit, awaited).map(Some)
     }
 
@@ -3436,6 +3452,60 @@ impl<'a> Elaborator<'a> {
             &*whnf_solved(self.signature, self.metas, element),
             Value::Prim(Prim::Ty(PrimTy::UInt8))
         )
+    }
+
+    /// Ожидается ли текст - `String` прелюдии, найденный соглашением (§4.5).
+    fn text_type(&mut self, ty: &Rc<Value>) -> bool {
+        let reduced = whnf_solved(self.signature, self.metas, ty);
+        let Value::Neutral(Head::Global(name, ..), spine) = &*reduced else {
+            return false;
+        };
+        spine.is_empty() && **name == *self.signature.convention(prim::STRING)
+    }
+
+    /// Строковый литерал под ожидаемым `String` (§4.5): `MkString len bytes`,
+    /// байты UTF-8 **без** завершающего нуля. Ноль внутри законен - это текст,
+    /// а не строка C, и конца у него ноль не обозначает.
+    fn text_literal(&self, lit: &ast::Lit) -> Result<Term, ElabError> {
+        let Some(mut bytes) = string_bytes(&lit.text) else {
+            return Err(ElabError::Missing {
+                what: Missing::Literal,
+                span: lit.span,
+            });
+        };
+        // `string_bytes` дописывает ноль буфера C; тексту он не нужен.
+        bytes.pop();
+        if bytes.len() > STRING_LIMIT as usize {
+            return Err(ElabError::StringLength {
+                limit: STRING_LIMIT,
+                length: bytes.len(),
+                span: lit.span,
+            });
+        }
+        let length = bytes.len() as u64;
+        let element = Term::Prim(Prim::Ty(PrimTy::UInt8));
+        let word = |value: u64| Term::Prim(Prim::literal(PrimTy::UInt64, value));
+        let byte = |value: u8| Term::Prim(Prim::literal(PrimTy::UInt8, u64::from(value)));
+        let mut built = Term::Prim(Prim::Over(prim::ArrayOp::New)).apply([
+            element.clone(),
+            word(length),
+            byte(0),
+        ]);
+        for (index, value) in bytes.iter().enumerate() {
+            if *value == 0 {
+                continue;
+            }
+            built = Term::Prim(Prim::Over(prim::ArrayOp::Set)).apply([
+                word(length),
+                element.clone(),
+                built,
+                word(index as u64),
+                byte(*value),
+                adamas_core::check::evident(self.signature),
+            ]);
+        }
+        let constructor = self.signature.convention(prim::MKSTRING);
+        Ok(Term::Const(constructor, Rc::from([]), Args::default()).apply([word(length), built]))
     }
 
     /// Строковый литерал есть `Array (n+1) UInt8` с нулём в хвосте (§5.3).

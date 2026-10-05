@@ -1,0 +1,28 @@
+-- Строковый литерал как текст (§4.5).
+--
+-- Под ожидаемым `String` литерал собирается в `MkString len bytes` - байты
+-- UTF-8 **без** завершающего нуля: ноль нужен буферу C (§5.3), и там, где
+-- написан `Array n UInt8`, литерал остаётся таким буфером, как был. Без
+-- ожидания (`let`) и в позиции дырки литерал - тоже текст: выбирать не из
+-- чего.
+--
+-- Сумма различает все три пути и длину без нуля: «привет» - 12 байт UTF-8,
+-- «ok» - 2, третий байт «привет» - 0xD1 = 209 (первый байт «р»), а ноль
+-- внутри текста законен и длину не обрывает - «a\0b» есть три байта.
+-- 12 + 2 + 209 + 3 = 226.
+
+size : String -> UInt64
+size (MkString n bytes) = n
+
+third : String -> UInt64
+third (MkString n bytes) = case decide (ltUInt64 2 n) of
+  Yes p -> uint8ToUInt64 (arrayIndex bytes 2 p)
+  No _q -> 0
+
+pick : {a : Type} -> a -> a
+pick x = x
+
+main : UInt64
+main =
+  let greeting = "привет"
+  addUInt64 (addUInt64 (size greeting) (size (pick "ok"))) (addUInt64 (third "привет") (size "a\0b"))

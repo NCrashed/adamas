@@ -1,0 +1,42 @@
+-- Консоль `Std.IO` под чистым хендлером (§3.4, §4.4).
+--
+-- Ради этого ввод-вывод и сделан метками с операциями, а не голым `Foreign`:
+-- та же программа, что в настоящей консоли печатает и читает, здесь исполнена
+-- хендлером без консоли вовсе. `putStr` считает записанные байты, `readLine`
+-- отвечает заготовленной строкой. Модуль вшит в компилятор и подключается
+-- явным импортом.
+--
+-- `greet` печатает «привет» и перевод строки - 12 + 1 байт - и отвечает
+-- длиной прочитанного «мир» - 6 байт. 13 + 6 = 19.
+
+import Std.IO (Console, putLine, readLine)
+
+greet : (ω u : Unit) -> {Console} UInt64
+greet u =
+  putLine "привет"
+  let line : Option String = readLine
+  case line of
+    Some (MkString n _bytes) -> n
+    None -> 0
+
+size : String -> UInt64
+size (MkString n _bytes) = n
+
+-- След консоли: что напечатано, и ответ в конце. Поле конструктора линейно,
+-- поэтому продолжение ложится в него, а не в аргумент сложения.
+data Log where
+  Ended : UInt64 -> Log
+  Wrote : String -> Log -> Log
+
+total : Log -> UInt64
+total (Ended v) = v
+total (Wrote s rest) = addUInt64 (size s) (total rest)
+
+scripted : ((ω u : Unit) -> {Console} UInt64) -> Log
+scripted k = handle @Console k with
+  return v -> Ended v
+  putStr s -> Wrote s (resume MkUnit)
+  readLine -> resume (Some "мир")
+
+main : UInt64
+main = total (scripted greet)

@@ -139,6 +139,20 @@ pub use adamas_core::prim::PRELUDE;
 /// строк это дешевле, чем раскладка файлов, которую пришлось бы искать.
 const PRELUDE_TEXT: &str = include_str!("../../../lib/Prelude.adamas");
 
+/// Стандартная библиотека, вшитая так же, как прелюдия (§4.4): путь модуля и
+/// текст. Подключается явным импортом; путь ищется сначала у источника
+/// программы, и свой файл проекта сильнее вшитого.
+const STANDARD: &[(&str, &str)] = &[("Std.IO", include_str!("../../../lib/Std/IO.adamas"))];
+
+/// Текст модуля вшитой стандартной библиотеки. `None` - такого модуля нет.
+#[must_use]
+pub fn standard(path: &str) -> Option<&'static str> {
+    STANDARD
+        .iter()
+        .find(|(it, _)| *it == path)
+        .map(|(_, text)| *text)
+}
+
 /// Карта «путь - текст» в памяти.
 #[derive(Clone, Debug, Default)]
 pub struct Memory {
@@ -469,18 +483,24 @@ impl Loader<'_> {
         // Прелюдия берётся у источника первой: проект вправе положить свой
         // `Std/Prelude.adamas` рядом и тем заменить вшитый целиком - та же
         // свобода, какую §4.8 даёт всякому имени.
-        let text = match self.sources.text(path) {
-            Some(text) => text,
-            None if path == PRELUDE => PRELUDE_TEXT.to_owned(),
-            None => {
-                return Err(ElabError::UnknownModule {
-                    path: Rc::from(path),
-                    file: self.sources.looked(path),
-                    span,
-                });
-            }
+        let (text, name) = match self.sources.text(path) {
+            Some(text) => (text, self.sources.looked(path)),
+            None if path == PRELUDE => (PRELUDE_TEXT.to_owned(), self.sources.looked(path)),
+            // Вшитая стандартная библиотека (§4.4) - после проекта, как и
+            // прелюдия: свой `Std/IO.adamas` сильнее вшитого. Имя файла у неё
+            // своё: пути в проекте, по которому её искали, не существует.
+            None => match standard(path) {
+                Some(text) => (text.to_owned(), format!("вшитый {path}")),
+                None => {
+                    return Err(ElabError::UnknownModule {
+                        path: Rc::from(path),
+                        file: self.sources.looked(path),
+                        span,
+                    });
+                }
+            },
         };
-        let file = SourceFile::new(self.sources.looked(path), text);
+        let file = SourceFile::new(name, text);
         let parsed = adamas_parser::parse(file.text());
         let at = self.units.len();
         self.units.push(Unit {

@@ -1,0 +1,95 @@
+-- | Ввод-вывод консоли (§3.4, §4.4, §5.3).
+--
+-- Метка `Console` говорит, что функция делает с консолью, и только это: тип
+-- `greet : String -> {Console} Unit` печатать может, а окна открыть или файла
+-- стереть - нет. Смысл операциям задаёт хендлер. `runConsole` исполняет их
+-- через libc - чужие вызовы несут `Foreign`, и метка эта остаётся внутри него;
+-- тест вправе исполнить те же операции своим хендлером, без консоли вовсе.
+--
+-- Дескриптор у C - `int`, а объявлен словом: младшая половина регистра и есть
+-- то, что прочтёт чужая сторона (приём `compress2`, §5.3), и форма сигнатуры
+-- ложится в таблицу чужих вызовов машины.
+
+effect Foreign
+
+extern "C" fn write : Int64 -> Array n UInt8 -> UInt64 -> Int64
+extern "C" fn read : Int64 -> Array n UInt8 -> UInt64 -> Int64
+
+-- | Консоль: печать и чтение строки.
+--
+-- `readLine` отвечает строкой без перевода строки; у конца ввода - `None`.
+effect Console where
+  putStr : String -> Unit
+  readLine : Option String
+
+-- | Строка и перевод строки.
+putLine : String -> {Console} Unit
+putLine s =
+  putStr s
+  putStr "\n"
+
+-- Байты прочитанного, последний - первым.
+data Bytes where
+  Done : Bytes
+  More : UInt8 -> Bytes -> Bytes
+
+-- | Сколько байт в списке.
+counted : Bytes -> UInt64
+counted Done = 0
+counted (More _b rest) = addUInt64 1 (counted rest)
+
+-- | Раскладывает байты в массив с конца: голова списка - последний байт.
+--
+-- `i` - сколько ячеек ещё не заполнено; заполняется ячейка `i - 1`.
+filled : (ω n : UInt64) -> Array n UInt8 -> (i : UInt64) -> (0 p : Equal Bool (leUInt64 i n) True) -> Bytes -> Array n UInt8
+filled n bytes i p rest = case decide (eqUInt64 i 0) of
+  Yes _z -> bytes
+  No q -> case rest of
+    Done -> bytes
+    More b tail ->
+      let j : UInt64 = subUInt64 i 1
+      filled n (arraySet bytes j b (belowPred i n p q)) j (belowAtMost j n (belowPred i n p q)) tail
+
+-- | Строка из `n` байт, собранных в обратном порядке.
+--
+-- Длина - параметром, а не `let n = counted rest` в теле: `let`, связанный с
+-- вызовом и стоящий потом в типе (`Array n UInt8`), сегодня отвергается
+-- непогашенной row вызова (§10 вопрос 241).
+sized : (ω n : UInt64) -> Bytes -> String
+sized n rest =
+  let zero : UInt8 = 0
+  MkString n (filled n (arrayNew n zero) n (atMostSelf n) rest)
+
+-- | Строка из байт, собранных в обратном порядке.
+gathered : Bytes -> String
+gathered rest = sized (counted rest) rest
+
+-- | Строка стандартного ввода до перевода строки, байт за байтом. `None` -
+-- ввод кончился, не дав ни байта.
+--
+-- По байту, а не блоком: блок прочёл бы и начало следующей строки, а хранить
+-- его между вызовами `readLine` нечем, пока у хендлера нет состояния.
+lineFrom : Bytes -> Bool -> {Foreign} Option String
+lineFrom seen any =
+  let zero : UInt8 = 0
+  let cell : Array 1 UInt8 = arrayNew 1 zero
+  let got : Int64 = read 0 cell 1
+  case decide (leInt64 got 0) of
+    Yes _end -> if any then Some (gathered seen) else None
+    No _more ->
+      let first : UInt64 = 0
+      let b : UInt8 = arrayIndex cell first Refl
+      case decide (eqUInt8 b 10) of
+        Yes _newline -> Some (gathered seen)
+        No _other -> lineFrom (More b seen) True
+
+-- | Исполняет консоль через libc: `putStr` - `write` в стандартный вывод,
+-- `readLine` - `read` из стандартного ввода.
+runConsole : {a : Type} -> ((ω u : Unit) -> {Console} a) -> {Foreign} a
+runConsole k = handle @Console k with
+  return v -> v
+  putStr s -> case s of
+    MkString n bytes ->
+      let _ = write 1 bytes n
+      resume MkUnit
+  readLine -> resume (lineFrom Done False)

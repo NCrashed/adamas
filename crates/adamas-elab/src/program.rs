@@ -314,12 +314,9 @@ pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
             observed: &mut observed,
         };
         let mut pass = pass;
-        match loader.seed(&module.decls, None, pass.reborrow()) {
-            Err(error) => Err(error),
-            Ok(()) => {
-                crate::decl::elaborate_file(&module.decls, None, pass, &mut loader, &mut refusals)
-            }
-        }
+        loader.seed(&module.decls, None, pass.reborrow()).map(|()| {
+            crate::decl::elaborate_file(&module.decls, None, pass, &mut loader, &mut refusals);
+        })
     };
 
     let mut units = loader.units;
@@ -526,16 +523,16 @@ impl Loader<'_> {
         let outcome = {
             let mut inner = pass.reborrow();
             inner.observed = &mut aside;
-            match self.seed(&module.decls, Some(path), inner.reborrow()) {
-                Err(error) => Err(error),
-                Ok(()) => crate::decl::elaborate_file(
-                    &module.decls,
-                    Some(&within),
-                    inner,
-                    self,
-                    &mut refusals,
-                ),
-            }
+            self.seed(&module.decls, Some(path), inner.reborrow())
+                .map(|()| {
+                    crate::decl::elaborate_file(
+                        &module.decls,
+                        Some(&within),
+                        inner,
+                        self,
+                        &mut refusals,
+                    );
+                })
         };
         let finished = pass.signature.set_scope(outer);
         pass.signature.remember(finished);

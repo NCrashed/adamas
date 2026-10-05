@@ -77,11 +77,34 @@ impl Refusals {
     ///
     /// Имена уходят в отсутствующие **в любом случае**, печатается ли отказ:
     /// объявления не случилось независимо от того, был ли сам отказ следствием.
+    ///
+    /// Отказы тела модуля ([`ElabError::ModuleBody`]) раскладываются: каждый
+    /// печатается своим, со своей позицией (§10 вопрос 196).
     pub(crate) fn refused(&mut self, error: ElabError, declares: Vec<Symbol>) {
-        if !self.induced(&error) {
-            self.found.push(error);
+        match error {
+            ElabError::ModuleBody { errors, .. } => {
+                for inner in errors {
+                    if !self.induced(&inner) {
+                        self.found.push(inner);
+                    }
+                }
+            }
+            error if !self.induced(&error) => self.found.push(error),
+            _ => {}
         }
         self.absent.extend(declares);
+    }
+
+    /// Отказы тела модуля, написанного в `span`, - наверх одним
+    /// ([`ElabError::ModuleBody`]); отказов не было - `Ok`.
+    pub(crate) fn into_body(self, span: adamas_core::source::Span) -> Result<(), ElabError> {
+        if self.found.is_empty() {
+            return Ok(());
+        }
+        Err(ElabError::ModuleBody {
+            errors: self.found,
+            span,
+        })
     }
 
     /// Отказ - следствие уже записанного?

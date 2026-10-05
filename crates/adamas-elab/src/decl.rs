@@ -190,9 +190,7 @@ pub fn elaborated(module: &Module) -> (Signature, Warnings, Refusals) {
         warnings: &mut warnings,
         observed: &mut observed,
     };
-    if let Err(error) = elaborate_file(&module.decls, None, pass, &mut Alone, &mut refusals) {
-        refusals.refused(error, Vec::new());
-    }
+    elaborate_file(&module.decls, None, pass, &mut Alone, &mut refusals);
     (signature, warnings, refusals)
 }
 
@@ -229,7 +227,7 @@ pub fn elaborate_into(
         observed: &mut observed,
     };
     let mut refusals = Refusals::new();
-    elaborate_file(&module.decls, None, pass, &mut Alone, &mut refusals)?;
+    elaborate_file(&module.decls, None, pass, &mut Alone, &mut refusals);
     refusals.first().map_or(Ok(()), Err)
 }
 
@@ -253,7 +251,7 @@ pub(crate) fn elaborate_file(
     mut pass: Pass<'_>,
     importer: &mut dyn Importer,
     refusals: &mut Refusals,
-) -> Result<(), ElabError> {
+) {
     // Есть ли в модуле ресурсы, спрашивается **до** объявлений: иначе тот же
     // `handleMulti` принимался бы или отвергался в зависимости от того, выше
     // или ниже него написан `resource`, - а гарантия §3.4 от порядка записи не
@@ -278,18 +276,9 @@ pub(crate) fn elaborate_file(
         observed,
     } = pass.reborrow();
     members_into(
-        decls,
-        within,
-        signature,
-        metas,
-        owned,
-        fixities,
-        instances,
-        warnings,
-        observed,
-        importer,
-        Some(refusals),
-    )?;
+        decls, within, signature, metas, owned, fixities, instances, warnings, observed, importer,
+        refusals,
+    );
     let Pass {
         signature,
         warnings,
@@ -306,7 +295,6 @@ pub(crate) fn elaborate_file(
     if let Err(error) = exports(decls, within, signature) {
         refusals.refused(error, Vec::new());
     }
-    Ok(())
 }
 
 /// Экспорты файла - после того, как файл объявлен целиком (§5.3).
@@ -773,11 +761,10 @@ fn abstracted(params: &[Param], body: Term) -> Term {
 
 /// Объявления одного уровня: верхнего либо тела модуля.
 ///
-/// `recovery` включает **границу определения** (§10 вопрос 177): отказ одного
-/// члена записывается и проход идёт к следующему. `None` - границы здесь нет, и
-/// первый отказ уходит наверх целиком. Так ходит тело модуля: объявиться
-/// наполовину модуль не вправе - снаружи он одно имя, - и половина его членов
-/// была бы сигнатурой, которой автор не писал.
+/// Граница определения (§10 вопросы 177, 196) стоит на каждом уровне: отказ
+/// одного члена записывается в `refusals`, и проход идёт к следующему. Тело
+/// модуля отдаёт свои отказы наверх одним [`ElabError::ModuleBody`] и записи
+/// модуля при этом не объявляет.
 #[allow(
     clippy::too_many_arguments,
     reason = "прогон элаборации несёт своё состояние; складывать его в структуру значило бы прятать, что именно меняется"
@@ -793,8 +780,8 @@ fn members_into(
     warnings: &mut Warnings,
     observed: &mut Observed,
     importer: &mut dyn Importer,
-    mut recovery: Option<&mut Refusals>,
-) -> Result<(), ElabError> {
+    refusals: &mut Refusals,
+) {
     // Сигнатуры, ставшие постулатами по ходу прогона: клаузы, пришедшие за
     // ними, - не «нет сигнатуры», а сигнатура не рядом.
     let mut postulated: HashMap<Symbol, Span> = HashMap::new();
@@ -819,9 +806,6 @@ fn members_into(
         let Err(error) = outcome else {
             continue;
         };
-        let Some(refusals) = recovery.as_deref_mut() else {
-            return Err(error);
-        };
         refusals.refused(error, recover::declares(decl));
     }
     // Последняя сигнатура без клауз - постулат, и отказать он вправе так же,
@@ -829,12 +813,8 @@ fn members_into(
     // есть что записать отсутствующим.
     let last = pending.as_ref().map(|it| Rc::clone(&it.name));
     let closed = postulate(signature, metas, instances, owned, pending, &mut postulated);
-    match (closed, recovery) {
-        (Err(error), Some(refusals)) => {
-            refusals.refused(error, last.into_iter().collect());
-            Ok(())
-        }
-        (outcome, _) => outcome,
+    if let Err(error) = closed {
+        refusals.refused(error, last.into_iter().collect());
     }
 }
 
@@ -1261,10 +1241,10 @@ fn declare_module(
     // `Alone`, а не переданный подключатель: `import` в теле модуля отвергает
     // разбор (§4.8), и досюда он не доезжает вовсе.
     //
-    // `None` вместо восстановления: граница определения проходит по файлу, а не
-    // по телу модуля. Снаружи модуль - одно имя, и объявленный наполовину, он
-    // стал бы сигнатурой, которой автор не писал; отказ его члена поэтому
-    // остаётся отказом модуля целиком.
+    // Тело восстанавливается по члену (§10 вопрос 196), и наверх идут все
+    // отказы. Записи модуля при отказе нет - сигнатурой, которой автор не
+    // писал, ему не стать, - а прошедшие члены остаются объявленными.
+    let mut refusals = Refusals::new();
     members_into(
         &module.members,
         Some(&inner),
@@ -1276,8 +1256,9 @@ fn declare_module(
         warnings,
         observed,
         &mut Alone,
-        None,
-    )?;
+        &mut refusals,
+    );
+    refusals.into_body(span)?;
     // Запечатываются **поднятые члены**, и ставится флаг до проверки
     // аннотации (§10 вопрос 148): соответствие сигнатуре обязано мерить
     // абстракцию тем же зрением, каким её увидит внешний код, - иначе

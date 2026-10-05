@@ -165,11 +165,9 @@ fn clauses_without_a_signature_still_say_so() {
 }
 
 #[test]
-fn a_module_body_refuses_once_for_the_whole_module() {
-    // Граница определения проходит по **файлу**, а не по телу модуля: снаружи
-    // модуль - одно имя, и объявленный наполовину он стал бы сигнатурой,
-    // которой автор не писал. Решение записано, и свидетель здесь затем, чтобы
-    // его нельзя было поменять молча.
+fn a_module_body_shows_each_of_its_refusals() {
+    // Тело модуля восстанавливается по члену (§10 вопрос 196): два
+    // независимых отказа - два подчёркивания, а не одно на модуль.
     let text = program(
         "\
 module M where
@@ -177,11 +175,65 @@ module M where
   a = True
 
   b : Nat
-  b = True
+  b = alpha
 ",
     );
-    let found = refusals(&text);
-    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(
+        refusals(&text),
+        [
+            "несовпадение типов: ожидался `Nat`, получен `Bool`",
+            "имя `alpha` не найдено",
+        ]
+    );
+}
+
+#[test]
+fn a_member_using_a_broken_member_is_not_a_second_refusal() {
+    // Правило следствий то же, что на верхнем уровне: `b` зовёт `a`, который
+    // не объявился, и сказать об этом значило бы выдумать вторую ошибку.
+    let text = program(
+        "\
+module M where
+  a : Nat
+  a = True
+
+  b : Nat
+  b = a
+",
+    );
+    assert_eq!(
+        refusals(&text),
+        ["несовпадение типов: ожидался `Nat`, получен `Bool`"]
+    );
+}
+
+#[test]
+fn outside_a_broken_module_its_passed_members_are_still_checked() {
+    // Записи модуля после отказа нет, и обращение к не объявившемуся члену
+    // молчит. Прошедший член объявлен - и ошибка в его употреблении настоящая.
+    let text = program(
+        "\
+module M where
+  ok : Nat
+  ok = Zero
+
+  broken : Nat
+  broken = True
+
+silent : Nat
+silent = M.broken
+
+loud : Bool
+loud = M.ok
+",
+    );
+    assert_eq!(
+        refusals(&text),
+        [
+            "несовпадение типов: ожидался `Nat`, получен `Bool`",
+            "несовпадение типов: ожидался `Bool`, получен `Nat`",
+        ]
+    );
 }
 
 #[test]

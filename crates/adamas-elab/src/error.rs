@@ -840,6 +840,20 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Отказы тела модуля (§10 вопрос 196).
+    ///
+    /// Тело восстанавливается по члену, и наверх идут все его отказы разом;
+    /// записи модуля при этом нет. Сам вариант не печатается:
+    /// [`crate::recover::Refusals`] раскладывает его на составляющие, а тот,
+    /// кто отвечает одним отказом, берёт первый.
+    #[error("{}", first_message(errors))]
+    ModuleBody {
+        /// Отказы в порядке появления, следствия уже отброшены.
+        errors: Vec<ElabError>,
+        /// Где написан модуль.
+        span: Span,
+    },
+
     /// Отказ случился **внутри** подключённого модуля (§4.8).
     ///
     /// Сам отказ отдаётся отдельно - со спаном и текстом того файла, которому
@@ -1666,6 +1680,7 @@ impl ElabError {
     #[must_use]
     pub fn span(&self) -> Span {
         match self {
+            Self::ModuleBody { errors, span } => errors.first().map_or(*span, Self::span),
             Self::UnknownName { span, .. }
             | Self::ForeignAbi { span, .. }
             | Self::ForeignLabel { span }
@@ -1764,4 +1779,10 @@ impl ElabError {
             | Self::SealedOperation { span, .. } => *span,
         }
     }
+}
+
+/// Текст первого из отказов тела модуля: им [`ElabError::ModuleBody`]
+/// печатается там, где его не разложили.
+fn first_message(errors: &[ElabError]) -> String {
+    errors.first().map(ToString::to_string).unwrap_or_default()
 }

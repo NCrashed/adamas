@@ -1,0 +1,28 @@
+-- Склейка текста и `Show` прелюдии (§4.3, §4.6).
+--
+-- Ответ - взвешенная сумма байтов склеенного текста: байт на позиции `i`
+-- берётся с весом `i + 1`. Длина одна не различила бы обратный порядок цифр
+-- и потерянный минус; взвешенная сумма различает и то, и другое.
+--
+-- Текст - `"x=" <> show 120 <> ";" <> show (-7) <> mempty <> show False`, то
+-- есть `x=120;-7False`, 13 байт:
+--
+--   x=120;  120·1 + 61·2 + 49·3 + 50·4 + 48·5 + 59·6  = 1183
+--   -7      45·7 + 55·8                                =  755
+--   False   70·9 + 97·10 + 108·11 + 115·12 + 101·13    = 5481
+--
+-- Сумма 7419.
+
+weighted : (ω n : UInt64) -> Array n UInt8 -> UInt64 -> UInt64 -> UInt64
+weighted n bytes i acc = case decide (ltUInt64 i n) of
+  No _end -> acc
+  Yes p -> weighted n bytes (addUInt64 i 1) (addUInt64 acc (mulUInt64 (addUInt64 i 1) (uInt8ToUInt64 (arrayIndex bytes i p))))
+
+checksum : String -> UInt64
+checksum (MkString n bytes) = weighted n bytes 0 0
+
+main : UInt64
+main =
+  let x : UInt64 = 120
+  let y : Int64 = -7
+  checksum ("x=" <> show x <> ";" <> show y <> mempty <> show False)

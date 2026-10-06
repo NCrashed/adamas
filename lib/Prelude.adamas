@@ -463,6 +463,114 @@ instance Ord Float64 where
 data String where
   MkString : (ω len : UInt64) -> (ω bytes : Array len UInt8) -> String
 
+-- # Склейка (§4.3)
+--
+-- Моноидальная линия не связана с `Add`: она заявляет ассоциативность, а
+-- `Add` - нет. Текст - моноид по склейке, пустой текст - его единица.
+
+-- | Ассоциативная склейка.
+class Semigroup a where
+  combine : a -> a -> a
+
+-- | Склейка с единицей: `mempty <> x` и `x <> mempty` дают `x`.
+class Monoid a when Semigroup a where
+  mempty : a
+
+infixr 6 <>
+(<>) : {Semigroup a} => a -> a -> a
+(<>) x y = combine x y
+
+-- Байты `src` с ячейки `i` - в `dst` с ячейки `at + i`. Что не влезает в
+-- `dst`, не копируется: длина `m` - параметр, а не сумма длин в типе.
+spliced : (ω m : UInt64) -> (ω n : UInt64) -> Array n UInt8 -> UInt64 -> Array m UInt8 -> UInt64 -> Array m UInt8
+spliced m n src at dst i = case decide (ltUInt64 i n) of
+  No _end -> dst
+  Yes p -> case decide (ltUInt64 (addUInt64 at i) m) of
+    No _full -> dst
+    Yes q -> spliced m n src at (arraySet dst (addUInt64 at i) (arrayIndex src i p) q) (addUInt64 i 1)
+
+-- Склейка двух текстов в текст длины `m` - суммы их длин. Длина параметром,
+-- а не `let` в теле: связанный с вызовом `let` в типе сегодня не пишется (§10
+-- вопрос 241).
+joined : (ω m : UInt64) -> String -> String -> String
+joined m (MkString n xs) (MkString k ys) =
+  let zero : UInt8 = 0
+  MkString m (spliced m k ys n (spliced m n xs 0 (arrayNew m zero) 0) 0)
+
+-- Длина текста.
+textLength : String -> UInt64
+textLength (MkString n _bytes) = n
+
+instance Semigroup String where
+  combine x y = joined (addUInt64 (textLength x) (textLength y)) x y
+
+instance Monoid String where
+  mempty = ""
+
+-- # Текстовое представление (§4.6)
+--
+-- `Show` derivable по §4.6, но макросов пока нет, и инстансы написаны руками:
+-- целые всех ширин десятичной записью и `Bool`. У плавающих инстанса нет -
+-- кратчайшая запись, читающаяся обратно тем же числом, отдельная работа.
+
+-- | Значение текстом.
+class Show a where
+  show : a -> String
+
+-- Сколько десятичных цифр у числа; у нуля - одна.
+digitCount : UInt64 -> UInt64
+digitCount n = if ltUInt64 n 10 then 1 else addUInt64 1 (digitCount (divUInt64 n 10 Refl))
+
+-- Цифры `n` в ячейки `dst` справа налево: младшая - в ячейку `i - 1`.
+digitsInto : (ω m : UInt64) -> Array m UInt8 -> UInt64 -> UInt64 -> Array m UInt8
+digitsInto m dst i n = case decide (eqUInt64 i 0) of
+  Yes _done -> dst
+  No _more -> case decide (ltUInt64 (subUInt64 i 1) m) of
+    No _out -> dst
+    Yes q -> digitsInto m (arraySet dst (subUInt64 i 1) (uInt64ToUInt8 (addUInt64 48 (remUInt64 n 10 Refl))) q) (subUInt64 i 1) (divUInt64 n 10 Refl)
+
+-- Десятичная запись в `m` цифр.
+decimal : (ω m : UInt64) -> UInt64 -> String
+decimal m n =
+  let zero : UInt8 = 0
+  MkString m (digitsInto m (arrayNew m zero) m n)
+
+-- | Беззнаковое десятичной записью.
+showUInt64 : UInt64 -> String
+showUInt64 n = decimal (digitCount n) n
+
+-- | Знаковое десятичной записью; отрицательное - с минусом. Модуль берётся
+-- вычитанием из нуля по модулю 2⁶⁴, и наименьшее `Int64` поэтому тоже верно.
+showInt64 : Int64 -> String
+showInt64 x = if ltInt64 x 0 then "-" <> showUInt64 (subUInt64 0 (int64ToUInt64 x)) else showUInt64 (int64ToUInt64 x)
+
+instance Show UInt8 where
+  show x = showUInt64 (uInt8ToUInt64 x)
+
+instance Show UInt16 where
+  show x = showUInt64 (uInt16ToUInt64 x)
+
+instance Show UInt32 where
+  show x = showUInt64 (uInt32ToUInt64 x)
+
+instance Show UInt64 where
+  show x = showUInt64 x
+
+instance Show Int8 where
+  show x = showInt64 (int8ToInt64 x)
+
+instance Show Int16 where
+  show x = showInt64 (int16ToInt64 x)
+
+instance Show Int32 where
+  show x = showInt64 (int32ToInt64 x)
+
+instance Show Int64 where
+  show x = showInt64 x
+
+instance Show Bool where
+  show b = if b then "True" else "False"
+
 -- # Линейное чтение массива (§4.11, §10 вопрос 202)
 --
 -- `arrayIndex` берёт массив неограниченно, и линейный массив им не прочесть,

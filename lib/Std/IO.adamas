@@ -215,18 +215,10 @@ writeAt : Int64 -> String -> {Foreign} Bool
 writeAt fd s = case s of
   MkString n bytes -> eqInt64 (write fd bytes n) (uint64ToInt64 n)
 
--- Строка `ошибка: <что> <путь>` в stderr.
-failure : String -> String -> {Foreign} Bool
-failure what path =
-  let _ = writeAt 2 "ошибка: "
-  let _ = writeAt 2 what
-  let _ = writeAt 2 path
-  writeAt 2 "\n"
-
 -- | Сообщение об отказе в стандартный поток ошибок.
 reported : IOError -> {Foreign} Bool
-reported (CannotOpen path) = failure "не открывается файл " path
-reported (CannotWrite path) = failure "не записывается файл " path
+reported (CannotOpen path) = writeAt 2 ("ошибка: не открывается файл " <> path <> "\n")
+reported (CannotWrite path) = writeAt 2 ("ошибка: не записывается файл " <> path <> "\n")
 
 -- Дальше `exit` управление не идёт; ответ любого типа - ради сигнатуры.
 stopped : {a : Type} -> (ω u : Unit) -> {Foreign} a

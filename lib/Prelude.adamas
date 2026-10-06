@@ -525,8 +525,8 @@ instance Eq String where
 -- # Текстовое представление (§4.6)
 --
 -- `Show` derivable по §4.6, но макросов пока нет, и инстансы написаны руками:
--- целые всех ширин десятичной записью и `Bool`. У плавающих инстанса нет -
--- кратчайшая запись, читающаяся обратно тем же числом, отдельная работа.
+-- целые всех ширин десятичной записью, `Bool` и плавающие - кратчайшей
+-- записью, которая читается обратно тем же числом (ниже).
 
 -- | Значение текстом.
 class Show a where
@@ -585,6 +585,53 @@ instance Show Int64 where
 
 instance Show Bool where
   show b = if b then "True" else "False"
+
+-- Плавающие: кратчайшая запись, которая читается обратно тем же числом
+-- (решение 2026-10-06). Точность перебирается от одной значащей цифры, и
+-- первая запись, которую `strtod` возвращает тем же числом, - ответ; `%.17g`
+-- для `Float64` (`%.9g` для `Float32`) читается обратно всегда. Чистота
+-- `snprintf` - утверждение: буфер свежий на каждый вызов, локаль - C, пока
+-- программа не позвала `setlocale`.
+
+extern "C" pure fn snprintf : Array n UInt8 -> UInt64 -> Array m UInt8 -> ... -> Float64 -> Int32
+extern "C" pure fn strtod : Array n UInt8 -> UInt64 -> Float64
+
+-- Строка формата `%.Ng` с точностью `p` от 1 до 99: ведущий ноль точности C
+-- допускает, и шаблон один.
+precisionFormat : UInt64 -> Array 6 UInt8
+precisionFormat p =
+  let template : Array 6 UInt8 = "%.00g"
+  let tens : UInt64 = 2
+  let ones : UInt64 = 3
+  arraySet (arraySet template tens (uInt64ToUInt8 (addUInt64 48 (divUInt64 p 10 Refl))) Refl) ones (uInt64ToUInt8 (addUInt64 48 (remUInt64 p 10 Refl))) Refl
+
+-- Первые `len` байт буфера записи текстом.
+bufferText : (ω len : UInt64) -> Array 32 UInt8 -> String
+bufferText len buf =
+  let zero : UInt8 = 0
+  MkString len (spliced len 32 buf 0 (arrayNew len zero) 0)
+
+-- Запись `x` с точностью `p`, а если она не читается обратно - с большей.
+shortest64 : UInt64 -> Float64 -> String
+shortest64 p x =
+  let zero : UInt8 = 0
+  let buf : Array 32 UInt8 = arrayNew 32 zero
+  let written : Int32 = snprintf buf 32 (precisionFormat p) x
+  if leUInt64 17 p || eqFloat64 (strtod buf 0) x then bufferText (int32ToUInt64 written) buf else shortest64 (addUInt64 p 1) x
+
+-- То же для `Float32`: читается обратно его точностью, хватает девяти цифр.
+shortest32 : UInt64 -> Float32 -> String
+shortest32 p x =
+  let zero : UInt8 = 0
+  let buf : Array 32 UInt8 = arrayNew 32 zero
+  let written : Int32 = snprintf buf 32 (precisionFormat p) (float32ToFloat64 x)
+  if leUInt64 9 p || eqFloat32 (float64ToFloat32 (strtod buf 0)) x then bufferText (int32ToUInt64 written) buf else shortest32 (addUInt64 p 1) x
+
+instance Show Float64 where
+  show x = shortest64 1 x
+
+instance Show Float32 where
+  show x = shortest32 1 x
 
 -- # Линейное чтение массива (§4.11, §10 вопрос 202)
 --

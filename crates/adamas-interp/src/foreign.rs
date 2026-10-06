@@ -625,6 +625,12 @@ unsafe fn invoke(
             let call: extern "C" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(address) };
             Some(Answer::Word(call(args[0], args[1])))
         }
+        // `(char *, char **) -> double`: `strtod` - им `Show` плавающих
+        // проверяет, что запись читается обратно тем же числом (§4.6).
+        ([Class::Word, Class::Word], None, Class::Double) => {
+            let call: extern "C" fn(u64, u64) -> f64 = unsafe { std::mem::transmute(address) };
+            Some(Answer::Word(call(args[0], args[1]).to_bits()))
+        }
         // `long -> void`: `free` и всё, что отдаёт объект обратно. Без этой
         // формы `resource` над чужим объектом (§5.3) машине не считается:
         // деструктор его есть ровно `void`-символ.

@@ -2505,7 +2505,8 @@ impl Emitter<'_> {
                 stride,
                 count,
                 initial,
-            } => self.array_new(*stride, count, initial, depth),
+                bytes,
+            } => self.array_new(*stride, count, initial, *bytes, depth),
             Expr::ArraySet {
                 stride,
                 array,
@@ -2803,6 +2804,7 @@ impl Emitter<'_> {
         stride: Option<Stride>,
         count: &Expr,
         initial: &Expr,
+        bytes: Option<&'static [u8]>,
         depth: usize,
     ) -> String {
         let pad = Self::pad(depth);
@@ -2835,6 +2837,15 @@ impl Emitter<'_> {
                     "{pad}adamas_array_fill({name}, {initial}, adamas_release_value);"
                 );
             }
+        }
+        // Литерал (`arrayBytes`): байты поверх нулей, одним копированием.
+        if let Some(content) = bytes {
+            let _ = writeln!(
+                self.out,
+                "{pad}adamas_array_bytes({name}, \"{}\", {}u);",
+                octal(content),
+                content.len()
+            );
         }
         name
     }
@@ -4666,6 +4677,19 @@ fn escaped(name: &str) -> String {
     name.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace("*/", "* /")
+}
+
+/// Байты строковым литералом C: каждый восьмеричным escape.
+///
+/// Восьмеричным, а не `\x`: шестнадцатеричный escape в C жаден и съел бы
+/// следующую за ним цифру, а восьмеричный кончается на третьей.
+fn octal(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 4);
+    for byte in bytes {
+        let _ = write!(out, "\\{byte:03o}");
+    }
+    out
 }
 
 #[cfg(test)]

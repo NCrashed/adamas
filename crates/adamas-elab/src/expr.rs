@@ -278,34 +278,12 @@ pub(crate) const UNARY_LIMIT: u32 = 112;
 
 /// Предел длины строкового литерала (§4.5, §10 вопрос 187).
 ///
-/// Мера та же, что у [`UNARY_LIMIT`], и по той же причине: считается не запись,
-/// а терм, который из неё получится. Литерал разворачивается спайном `arraySet`
-/// над `arrayNew`, и путь вниз стоит **три** звена на байт - `arraySet n el
-/// собранное i v` есть пять применений, из которых на пути лежит третье.
-/// Сорок байт дают 120 звеньев, и звено это дешевле написанного: измеренная
-/// цена байта - около **полутора** написанных звеньев, а не трёх (2 MiB на 78
-/// байт против тех же 2 MiB на 125 звеньев применения).
-///
-/// **Откуда число.** Замер в наименьшем окружении языка - порождённый поток с
-/// умолчательным стеком в два мегабайта, отладочная сборка. Сама по себе
-/// строка роняет там **элаборацию** на 79 байтах (78 проходит); понижение
-/// держит те же 78. Но мерить одинокую строку недостаточно: глубина
-/// написанного вокруг литерала складывается с его собственной. Худшее законное
-/// написанное - 64 звена, предел разбора; под ними проходит строка в 46 байт и
-/// роняет 47. Предел взят 40, то есть 87% от измеренной суммы; корпусу хватает
-/// 36 (`tests/golden/eval/zlib.adamas`).
-///
-/// **Прежнее число (64) было больше того, что язык выдерживает** в сумме с
-/// написанным: 64 звена вокруг строки в 48 байт роняют процесс, не нарушив
-/// тогдашних пределов. Одинокую строку оно ограничивало верно - отсюда и
-/// сходилось, - а сумму не считало вовсе.
-///
-/// **Чего он не закрывает, и это названо.** Сумма теперь ограничена, но
-/// ограничена **грубо**: бюджет поделён на два слагаемых наперёд, поэтому
-/// строка в 46 байт отвергается и там, где вокруг неё ничего не написано.
-/// Лечится это не числом, а узлом ядра (§10 вопрос 187, вариант (б)): у
-/// литерала-листа глубины нет вовсе, и делить бюджет было бы не с кем.
-pub(crate) const STRING_LIMIT: u32 = 40;
+/// Глубины литерал больше не стоит: он собирается одной операцией
+/// `arrayBytes`, а не спайном `arraySet` глубиной в саму строку, и делить
+/// стек с написанным вокруг ему нечего. Предел остался один - блок машины
+/// ([`adamas_core::value::Block::LIMIT`], мегабайт): длиннее машина заводит не
+/// блок, а оставляет спайн, и три вычислителя разошлись бы на одной программе.
+pub(crate) const STRING_LIMIT: u32 = 1 << 20;
 
 /// Байты строкового литерала в UTF-8 вместе с завершающим нулём.
 ///
@@ -3298,7 +3276,7 @@ impl<'a> Elaborator<'a> {
     /// см. [`UNARY_LIMIT`].
     fn literal(&mut self, lit: &ast::Lit, awaited: Option<&Rc<Value>>) -> Result<Term, ElabError> {
         if lit.kind == ast::LitKind::Str && awaited.is_some_and(|ty| self.byte_array(ty)) {
-            return self.string_literal(lit);
+            return Self::string_literal(lit);
         }
         // Под `String` - текст; и без ожидания вовсе (`let s = "…"`) тоже
         // текст, если прелюдия его объявила: текст один, выбирать не из чего.
@@ -3483,43 +3461,23 @@ impl<'a> Elaborator<'a> {
             });
         }
         let length = bytes.len() as u64;
-        let element = Term::Prim(Prim::Ty(PrimTy::UInt8));
         let word = |value: u64| Term::Prim(Prim::literal(PrimTy::UInt64, value));
-        let byte = |value: u8| Term::Prim(Prim::literal(PrimTy::UInt8, u64::from(value)));
-        let mut built = Term::Prim(Prim::Over(prim::ArrayOp::New)).apply([
-            element.clone(),
-            word(length),
-            byte(0),
-        ]);
-        for (index, value) in bytes.iter().enumerate() {
-            if *value == 0 {
-                continue;
-            }
-            built = Term::Prim(Prim::Over(prim::ArrayOp::Set)).apply([
-                word(length),
-                element.clone(),
-                built,
-                word(index as u64),
-                byte(*value),
-                adamas_core::check::evident(self.signature),
-            ]);
-        }
+        let built = bytes_term(&bytes);
         let constructor = self.signature.convention(prim::MKSTRING);
         Ok(Term::Const(constructor, Rc::from([]), Args::default()).apply([word(length), built]))
     }
 
     /// Строковый литерал есть `Array (n+1) UInt8` с нулём в хвосте (§5.3).
     ///
-    /// Длина выводится из самого литерала. Терм собирается спайном `arraySet`
-    /// над `arrayNew`, то есть ровно тем, что автор написал бы руками;
-    /// завершающий ноль пропущен - `arrayNew` уже залил им весь блок.
+    /// Длина выводится из самого литерала, байты - одной операцией
+    /// `arrayBytes` вместе с завершающим нулём.
     ///
     /// Два отказа сверх разбора, и оба - свойства **соглашения**, а не записи.
     /// Нулевой байт внутри отвергается: ноль здесь есть конец строки для чужой
     /// стороны, и литерал с нулём посередине объявлял бы длину, которой чужая
-    /// сторона не увидит. Длина сверх [`STRING_LIMIT`] отвергается: спайн есть
-    /// терм глубиной в саму строку.
-    fn string_literal(&self, lit: &ast::Lit) -> Result<Term, ElabError> {
+    /// сторона не увидит. Длина сверх [`STRING_LIMIT`] отвергается: длиннее
+    /// машина не заводит блока.
+    fn string_literal(lit: &ast::Lit) -> Result<Term, ElabError> {
         let Some(bytes) = string_bytes(&lit.text) else {
             return Err(ElabError::Missing {
                 what: Missing::Literal,
@@ -3542,31 +3500,7 @@ impl<'a> Elaborator<'a> {
                 span: lit.span,
             });
         }
-        let length = bytes.len() as u64;
-        let element = Term::Prim(Prim::Ty(PrimTy::UInt8));
-        let word = |value: u64| Term::Prim(Prim::literal(PrimTy::UInt64, value));
-        let byte = |value: u8| Term::Prim(Prim::literal(PrimTy::UInt8, u64::from(value)));
-        let mut built = Term::Prim(Prim::Over(prim::ArrayOp::New)).apply([
-            element.clone(),
-            word(length),
-            byte(0),
-        ]);
-        // Нулевой байт в наборе ровно один - завершающий, - и писать его нечем:
-        // `arrayNew` залил им блок целиком. Звено на него тратилось бы впустую.
-        for (index, value) in bytes.iter().enumerate() {
-            if *value == 0 {
-                continue;
-            }
-            built = Term::Prim(Prim::Over(prim::ArrayOp::Set)).apply([
-                word(length),
-                element.clone(),
-                built,
-                word(index as u64),
-                byte(*value),
-                adamas_core::check::evident(self.signature),
-            ]);
-        }
-        Ok(built)
+        Ok(bytes_term(&bytes))
     }
 
     /// Ожидаемый тип, если он примитивный.
@@ -9077,4 +9011,15 @@ fn strongest(fields: impl Iterator<Item = Option<Ownership>>) -> Option<Ownershi
         Ownership::Unique => 0,
         Ownership::Resource => 1,
     })
+}
+
+/// Литерал массивом: `arrayBytes n` над этими байтами (§4.5, §10 вопрос 187).
+///
+/// Одно применение при любой длине - глубины, которую делили бы с написанным
+/// вокруг, у литерала нет.
+fn bytes_term(bytes: &[u8]) -> Term {
+    Term::Prim(Prim::Over(prim::ArrayOp::bytes(bytes))).apply([Term::Prim(Prim::literal(
+        PrimTy::UInt64,
+        bytes.len() as u64,
+    ))])
 }

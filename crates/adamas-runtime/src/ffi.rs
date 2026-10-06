@@ -177,6 +177,8 @@ unsafe extern "C" {
     pub fn adamas_array_fill(array: Value, value: Value, release: Release);
     /// То же плоским: `stride` байт из `bits` в каждую ячейку.
     pub fn adamas_array_fill_flat(array: Value, bits: *const c_void);
+    /// Байты литерала в начало плоского массива, не дальше нагрузки.
+    pub fn adamas_array_bytes(array: Value, bytes: *const c_void, length: usize);
     /// Читает указательную ячейку и отдаёт массив.
     pub fn adamas_array_take(array: Value, index: usize, release: Release) -> Value;
     /// То же для плоской ячейки: байты в `out`, массив отдаётся.

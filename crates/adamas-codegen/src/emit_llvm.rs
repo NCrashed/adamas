@@ -697,6 +697,7 @@ fn arrays(out: &mut String, program: &Program) {
         "declare ptr @adamas_array_alloc(i64, i64)\n",
         "declare ptr @adamas_array_at(ptr, i64)\n",
         "declare void @adamas_array_fill_flat(ptr, ptr)\n",
+        "declare void @adamas_array_bytes(ptr, ptr, i64)\n",
         "declare void @adamas_array_fill(ptr, ptr, ptr)\n",
         "declare void @adamas_array_put(ptr, i64, ptr, ptr)\n",
         "declare ptr @adamas_array_take(ptr, i64, ptr)\n",
@@ -1460,6 +1461,8 @@ fn escaped_name(name: &str) -> String {
 struct Module {
     /// Тела функций.
     bodies: String,
+    /// Константы литералов `arrayBytes`, собранные телами.
+    literals: String,
     /// Узлы метаданных модуля.
     metadata: Metadata,
     /// Шапка DWARF. `None` - исходника у программы нет.
@@ -1556,6 +1559,10 @@ impl Module {
             builder.tail(&function.body)?;
         }
 
+        for literal in std::mem::take(&mut builder.literals) {
+            self.literals.push_str(&literal);
+            self.literals.push('\n');
+        }
         let signed = scope.map_or_else(String::new, |scope| format!(" !dbg {}", scope.subprogram));
         for chunk in std::mem::take(&mut builder.chunks) {
             self.bodies.push_str(&chunk);
@@ -1958,6 +1965,7 @@ impl Module {
                 escaped(&terminated(text))
             );
         }
+        out.push_str(&self.literals);
         out.push('\n');
 
         out.push_str(&self.bodies);
@@ -2558,6 +2566,9 @@ struct Builder<'a> {
     epilogue: Vec<String>,
     /// Готовые куски дроблёного тела: каждый - своя функция модуля.
     chunks: Vec<String>,
+    /// Константы литералов `arrayBytes`: определения уровня модуля, которые
+    /// печатает [`Module`] после тела.
+    literals: Vec<String>,
     /// Счётчик кусков: им нумеруются их имена.
     chunked: u32,
 }
@@ -2610,6 +2621,7 @@ impl<'a> Builder<'a> {
             kont: hidden.then(|| "%kont".to_owned()),
             epilogue: Vec::new(),
             chunks: Vec::new(),
+            literals: Vec::new(),
             chunked: 0,
         }
     }
@@ -3450,7 +3462,8 @@ impl<'a> Builder<'a> {
                 stride,
                 count,
                 initial,
-            } => self.array_new(*stride, count, initial),
+                bytes,
+            } => self.array_new(*stride, count, initial, *bytes),
             Expr::ArraySet {
                 stride,
                 array,
@@ -3553,6 +3566,7 @@ impl<'a> Builder<'a> {
         stride: Option<Stride>,
         count: &Expr,
         initial: &Expr,
+        bytes: Option<&'static [u8]>,
     ) -> Result<String, LlvmError> {
         // Порядок тот же, что у C-бэкенда и у [`Self::construct`]: аргументы
         // считаются **до** аллокации, потому что аргумент вправе аллоцировать
@@ -3588,6 +3602,27 @@ impl<'a> Builder<'a> {
                 ),
                 self.here(),
             ),
+        }
+        // Литерал (`arrayBytes`): байты поверх нулей, одним копированием из
+        // константы модуля.
+        if let Some(content) = bytes {
+            let name = format!(
+                "@adamas.bytes.{}.{}",
+                self.function.id.0,
+                self.literals.len()
+            );
+            self.literals.push(format!(
+                "{name} = private unnamed_addr constant [{} x i8] c\"{}\"",
+                content.len(),
+                escaped(content)
+            ));
+            self.instruction(
+                &format!(
+                    "call void @adamas_array_bytes(ptr {array}, ptr {name}, i64 {})",
+                    content.len()
+                ),
+                self.here(),
+            );
         }
         Ok(array)
     }

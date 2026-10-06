@@ -4449,7 +4449,11 @@ impl<'a> Lowerer<'a> {
         if op == ArrayOp::Read {
             return self.read(scope, arguments);
         }
+        if let ArrayOp::Bytes(content) = op {
+            return self.bytes(scope, content, arguments);
+        }
         let wanted = match op {
+            ArrayOp::Bytes(_) => 1,
             ArrayOp::New => 3,
             // Последним у трёх идёт стёртое доказательство номера (§10 вопрос
             // 224): в код оно не попадает.
@@ -4494,6 +4498,7 @@ impl<'a> Lowerer<'a> {
                         stride,
                         count: Box::new(count),
                         initial: Box::new(initial),
+                        bytes: None,
                     },
                     Repr::Array(cells),
                 ))
@@ -4533,10 +4538,39 @@ impl<'a> Lowerer<'a> {
                     Repr::Array(cells),
                 ))
             }
-            ArrayOp::Read => Err(LowerError::PartialArray {
+            ArrayOp::Read | ArrayOp::Bytes(_) => Err(LowerError::PartialArray {
                 name: op.name().to_owned(),
             }),
         }
+    }
+
+    /// `arrayBytes n` - строковый литерал (§4.5): плоский массив `UInt8`,
+    /// залитый нулём, и байты литерала поверх. Эмиттер кладёт их статическими
+    /// данными и копирует одним вызовом - узел один при любой длине.
+    fn bytes(
+        &mut self,
+        scope: &mut Scope,
+        content: &'static [u8],
+        arguments: &[Arg<'_>],
+    ) -> Result<(Expr, Repr), LowerError> {
+        let [count] = arguments else {
+            return Err(LowerError::PartialArray {
+                name: ArrayOp::Bytes(content).name().to_owned(),
+            });
+        };
+        let count = self.given(scope, count, Repr::Flat(PrimTy::UInt64), "длина массива")?;
+        Ok((
+            Expr::ArrayNew {
+                stride: Some(Stride::Static(PrimTy::UInt8)),
+                count: Box::new(count),
+                initial: Box::new(Expr::Literal {
+                    ty: PrimTy::UInt8,
+                    bits: 0,
+                }),
+                bytes: Some(content),
+            },
+            Repr::Array(Elems::Flat),
+        ))
     }
 
     /// Линейное чтение массива (§4.11, §10 вопрос 202) - значением.

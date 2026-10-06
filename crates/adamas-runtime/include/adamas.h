@@ -644,6 +644,12 @@ void adamas_array_fill(adamas_value array, adamas_value value, adamas_release re
 void adamas_array_fill_flat(adamas_value array, const void *bits);
 
 /**
+ * Байты литерала в начало плоского массива: `length` байт, но не дальше его
+ * нагрузки. Остаток не трогается - его заполнил `adamas_array_fill_flat`.
+ */
+void adamas_array_bytes(adamas_value array, const void *bytes, size_t length);
+
+/**
  * Читает указательную ячейку и **отдаёт массив**.
  *
  * Ответ приходит владением, массив потреблён - тот же договор, что у всего

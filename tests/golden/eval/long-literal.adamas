@@ -1,0 +1,31 @@
+-- Длинный строковый литерал (§4.5, §10 вопрос 187).
+--
+-- Литерал собирается одной операцией `arrayBytes`, а не цепочкой `arraySet`
+-- глубиной в саму строку, и предела в сорок байт больше нет. Свидетель - у
+-- трёх вычислителей: машина заводит блок из байт, C и LLVM копируют их из
+-- статических данных.
+--
+-- Текст - 200 байт UTF-8 (сто кириллических букв), буфер C - 160 латинских
+-- букв и ноль. Ответ - длина текста, `strlen` буфера и последний байт буфера
+-- перед нулём: копия, оборванная раньше конца, дала бы там ноль.
+--
+-- 200 + 160 + 122 (`z`) = 482.
+
+extern "C" pure fn strlen : Array n UInt8 -> UInt64
+
+text : String
+text = "ааааааааааббббббббббввввввввввггггггггггддддддддддееееееееееёёёёёёёёёёжжжжжжжжжжззззззззззииииииииии"
+
+buffer : Array 161 UInt8
+buffer = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaz"
+
+size : String -> UInt64
+size (MkString n _bytes) = n
+
+last : UInt64
+last =
+  let at : UInt64 = 159
+  uint8ToUInt64 (arrayIndex buffer at Refl)
+
+main : UInt64
+main = addUInt64 (addUInt64 (size text) (strlen buffer)) last

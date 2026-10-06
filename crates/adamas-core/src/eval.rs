@@ -280,8 +280,16 @@ fn evident() -> Term {
 
 pub(crate) fn quote_block(size: u32, block: &crate::value::Block) -> Term {
     use crate::prim::{ArrayOp, Prim, PrimTy};
-    let elem = Rc::new(quote(size, block.elem()));
     let length = Rc::new(Term::Prim(Prim::literal(PrimTy::UInt64, block.count())));
+    // Байты - одним `arrayBytes`: цепочка записей дала бы терм глубиной в
+    // длину строки, а его обходы - стек (§10 вопрос 187).
+    if block.ty() == PrimTy::UInt8 {
+        let content: Vec<u8> = (0..block.count())
+            .map_while(|at| block.read(at).and_then(|bits| u8::try_from(bits).ok()))
+            .collect();
+        return Term::Prim(Prim::Over(ArrayOp::bytes(&content))).apply([(*length).clone()]);
+    }
+    let elem = Rc::new(quote(size, block.elem()));
     let first = block.read(0).unwrap_or_default();
     let literal = |bits: u64| Rc::new(Term::Prim(Prim::literal(block.ty(), bits)));
     let apply = |callee: Term, argument: Rc<Term>| Term::App(Rc::new(callee), argument);
@@ -855,7 +863,22 @@ fn arrayed(op: crate::prim::ArrayOp, spine: &[Elim]) -> Option<Rc<Value>> {
                 ],
             )))
         }
+        ArrayOp::Bytes(content) => literal_block(content, spine),
     }
+}
+
+/// `arrayBytes n` с литеральной длиной - сразу блок (§4.11).
+fn literal_block(content: &[u8], spine: &[Elim]) -> Option<Rc<Value>> {
+    use crate::prim::{Prim, PrimTy};
+    let [Elim::App(count)] = spine else {
+        return None;
+    };
+    let Value::Prim(Prim::Lit(_, count)) = &**count else {
+        return None;
+    };
+    let elem = Rc::new(Value::Prim(Prim::Ty(PrimTy::UInt8)));
+    let block = Block::of_bytes(elem, *count, content)?;
+    Some(Rc::new(Value::Neutral(Head::Block(block), Vec::new())))
 }
 
 /// Спайн `arraySet` над **копией** блока: шаг не сложился, а делить байты с
@@ -1650,10 +1673,10 @@ mod tests {
     #[test]
     fn a_flat_block_reads_back_as_the_writes_that_made_it() {
         use crate::prim::{ArrayOp, Prim, PrimTy};
-        let byte = |bits: u64| Term::Prim(Prim::literal(PrimTy::UInt8, bits));
+        let byte = |bits: u64| Term::Prim(Prim::literal(PrimTy::UInt16, bits));
         let length = Term::Prim(Prim::literal(PrimTy::UInt64, 3));
         let index = |at: u64| Term::Prim(Prim::literal(PrimTy::UInt64, at));
-        let elem = Term::Prim(Prim::Ty(PrimTy::UInt8));
+        let elem = Term::Prim(Prim::Ty(PrimTy::UInt16));
         let made =
             Term::Prim(Prim::Over(ArrayOp::New)).apply([elem.clone(), length.clone(), byte(7)]);
         let written = |array: Term, at: u64, bits: u64| {
@@ -1668,13 +1691,33 @@ mod tests {
         };
         assert_eq!(
             normalize(&written(made.clone(), 1, 8)).to_string(),
-            "arraySet 3 UInt8 (arrayNew UInt8 3 7) 1 8 (Refl{0} Bool True)"
+            "arraySet 3 UInt16 (arrayNew UInt16 3 7) 1 8 (Refl{0} Bool True)"
         );
         assert_eq!(
             normalize(&written(made, 1, 7)).to_string(),
-            "arrayNew UInt8 3 7",
+            "arrayNew UInt16 3 7",
             "запись, ничего не меняющая, в нормальной форме не остаётся"
         );
+    }
+
+    /// Блок байт читается обратно одной операцией `arrayBytes` (§10 вопрос
+    /// 187): цепочка записей дала бы терм глубиной в длину строки.
+    #[test]
+    fn a_byte_block_reads_back_as_one_literal() {
+        use crate::prim::{ArrayOp, Prim, PrimTy};
+        let length = Term::Prim(Prim::literal(PrimTy::UInt64, 3));
+        let made = Term::Prim(Prim::Over(ArrayOp::New)).apply([
+            Term::Prim(Prim::Ty(PrimTy::UInt8)),
+            length.clone(),
+            Term::Prim(Prim::literal(PrimTy::UInt8, 7)),
+        ]);
+        assert_eq!(
+            normalize(&made).to_string(),
+            "arrayBytes \"\\u{7}\\u{7}\\u{7}\" 3"
+        );
+        // И обратно: литерал короче длины добит нулями.
+        let literal = Term::Prim(Prim::Over(ArrayOp::bytes(b"ab"))).apply([length]);
+        assert_eq!(normalize(&literal).to_string(), "arrayBytes \"ab\\0\" 3");
     }
 
     /// Векторная запись оставляет **блок**, а не спайн над ним (§4.9, §4.11).

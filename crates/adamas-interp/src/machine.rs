@@ -259,9 +259,12 @@ impl<'a> Machine<'a> {
         };
         // Сколько ведущих аргументов стёрто: их не форсируют - это типы.
         let erased = match head {
+            Head::ArrayOp(ArrayOp::Bytes(_))
+            | Head::Prim(..)
+            | Head::Cmp(..)
+            | Head::Convert(_) => 0,
             Head::ArrayOp(ArrayOp::New) => 1,
             Head::ArrayOp(_) => 2,
-            Head::Prim(..) | Head::Cmp(..) | Head::Convert(_) => 0,
             _ => return Ok(value),
         };
         let mut rebuilt = Rc::new(Value::Neutral(head.clone(), Vec::new()));
@@ -1211,7 +1214,11 @@ fn array_position(op: ArrayOp, spine: &[Elim]) -> bool {
         .iter()
         .filter(|elim| matches!(elim, Elim::App(_)))
         .count();
-    let erased = if matches!(op, ArrayOp::New) { 1 } else { 2 };
+    let erased = match op {
+        ArrayOp::Bytes(_) => 0,
+        ArrayOp::New => 1,
+        _ => 2,
+    };
     taken >= erased
 }
 

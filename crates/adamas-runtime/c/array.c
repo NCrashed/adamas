@@ -174,6 +174,12 @@ void adamas_array_fill_flat(adamas_value array, const void *bits) {
     }
 }
 
+void adamas_array_bytes(adamas_value array, const void *bytes, size_t length) {
+    adamas_array *head = header_of(array);
+    size_t room = head->count * head->stride;
+    memcpy(payload(array), bytes, length < room ? length : room);
+}
+
 adamas_value adamas_array_take(adamas_value array, size_t index, adamas_release release) {
     adamas_value taken = adamas_dup(adamas_array_get(array, index));
     adamas_drop(array, release);

@@ -328,6 +328,28 @@ impl Block {
         }))
     }
 
+    /// Массив `UInt8` длины `count` с байтами `content` в начале и нулями
+    /// после - `arrayBytes`. Лишние байты отбрасываются.
+    ///
+    /// `None` - по тем же причинам, что у [`Self::new`].
+    #[must_use]
+    pub fn of_bytes(elem: Rc<Value>, count: u64, content: &[u8]) -> Option<Rc<Self>> {
+        let length = usize::try_from(count).ok()?;
+        if length > Self::LIMIT {
+            return None;
+        }
+        let mut cells: Vec<u8> = Vec::new();
+        cells.try_reserve_exact(length).ok()?;
+        cells.extend_from_slice(&content[..content.len().min(length)]);
+        cells.resize(length, 0);
+        Some(Rc::new(Self {
+            ty: PrimTy::UInt8,
+            elem,
+            count,
+            cells: std::cell::RefCell::new(cells),
+        }))
+    }
+
     /// Тип ячейки.
     #[must_use]
     pub const fn ty(&self) -> PrimTy {

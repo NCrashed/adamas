@@ -603,7 +603,15 @@ fn array_op_scheme(
                 ),
             ),
         ),
+        ArrayOp::Bytes(_) => bytes_scheme(word),
     }
+}
+
+/// `arrayBytes : (ω n : UInt64) -> Array n UInt8` - строковый литерал (§4.5).
+fn bytes_scheme(word: &Term) -> Term {
+    let byte = Term::Prim(Prim::Ty(crate::prim::PrimTy::UInt8));
+    let array = Term::Prim(Prim::Array).apply([Term::var(0), byte]);
+    bound(Binder::explicit(Mult::Many), "n", word.clone(), array)
 }
 
 /// Класс `Primitive` термом - тот, которым §4.9 ограничивает дорожку вектора.

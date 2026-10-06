@@ -246,14 +246,10 @@ fn a_string_under_a_written_byte_array_is_utf8_with_a_zero() {
     // ноль **есть** и входит в написанную длину.
     //
     // Наблюдается **нормальная форма**: у неё ячейки видны все сразу, включая
-    // ту, которой автор не писал. Заполнитель `arrayNew` здесь первый байт -
-    // так блок читается обратно (трек B волны 2), а не так, как элаборация его
-    // собрала.
+    // ту, которой автор не писал. Байты печатаются текстом `arrayBytes`;
+    // усечённая до байта буква дала бы там `4`, а не `д`.
     let signature = program(&with_a_string(4, "hд", ""));
-    assert_eq!(
-        value(&signature, "greeting"),
-        "arraySet 4 UInt8 (arraySet 4 UInt8 (arraySet 4 UInt8 (arrayNew UInt8 4 104) 1 208 (Refl{0} Bool True)) 2 180 (Refl{0} Bool True)) 3 0 (Refl{0} Bool True)"
-    );
+    assert_eq!(value(&signature, "greeting"), "arrayBytes \"hд\\0\" 4");
 }
 
 #[test]
@@ -319,45 +315,6 @@ fn a_zero_inside_a_string_is_refused() {
     };
     assert_eq!((length, seen, content), (9, 2, 8));
 }
-
-#[test]
-fn a_string_past_the_limit_is_refused_by_name() {
-    // Без предела здесь стоял бы **обрыв процесса**: литерал разворачивается
-    // спайном глубиной в саму строку. Длина написана числом, а не выражена
-    // через предел: иначе свидетель ехал бы вместе с ним и оставался зелёным
-    // при любом его значении (тот же дефект, каким трек B волны 2 поймал
-    // `Block::LIMIT`).
-    let error = refused(&with_a_string(41, &"a".repeat(40), ""));
-    let ElabError::StringLength { limit, length, .. } = error else {
-        panic!("получено {error:?}");
-    };
-    assert_eq!((limit, length), (40, 41));
-    // Предел стоит там, где написано, а не где-то рядом.
-    assert_eq!(limit as usize, LIMIT);
-}
-
-#[test]
-fn a_string_at_the_limit_is_taken() {
-    // Ближайший проходящий сосед к отказу выше: на байт короче. Заодно это
-    // свидетель того, что предел не роняет процесс на **себе** - прогон
-    // проверки идёт в потоке с умолчательным стеком (два мегабайта), где
-    // одинокая строка обрывает элаборацию на 79 байтах, а под предельной
-    // вложенностью в 64 звена - на 47.
-    let signature = program(&with_a_string(LIMIT, &"a".repeat(LIMIT - 1), ""));
-    assert_eq!(
-        value(&signature, "greeting"),
-        format!(
-            "arraySet {LIMIT} UInt8 (arrayNew UInt8 {LIMIT} 97) {} 0 (Refl{{0}} Bool True)",
-            LIMIT - 1
-        )
-    );
-}
-
-/// Предел длины строкового литерала - числом, а не ссылкой на константу.
-///
-/// Свидетель, читающий предел из того же места, где он объявлен, ехал бы вместе
-/// с ним.
-const LIMIT: usize = 40;
 
 #[test]
 fn fixities_bracket_a_chain() {
@@ -10029,4 +9986,34 @@ main =
 "
     ));
     assert!(found.is_empty(), "{found:#?}");
+}
+
+#[test]
+fn a_string_literal_has_no_depth() {
+    // Литерал собирается одной операцией `arrayBytes` (§10 вопрос 187): строка
+    // в сто тысяч байт элаборируется, а прежняя цепочка `arraySet` уронила бы
+    // процесс уже на восьмидесяти.
+    let text = "a".repeat(100_000);
+    program(&format!(
+        "long : Array 100001 UInt8
+long = \"{text}\"
+"
+    ));
+}
+
+#[test]
+fn a_string_literal_past_the_machine_block_is_refused() {
+    // Предел остался один - блок машины (мегабайт): длиннее она оставила бы
+    // массив спайном, и вычислители разошлись бы.
+    let length = (1usize << 20) + 1;
+    let text = "a".repeat(length - 1);
+    let error = refused(&format!(
+        "long : Array {length} UInt8
+long = \"{text}\"
+"
+    ));
+    assert!(
+        matches!(error, ElabError::StringLength { .. }),
+        "получено {error:?}"
+    );
 }

@@ -975,10 +975,24 @@ pub enum ArrayOp {
     /// (§4.11, §10 вопрос 202): линейный массив читается, не отдаваясь.
     /// Ответ - конструктор [`MKREAD`] программы.
     Read,
+    /// `arrayBytes n` - массив `UInt8` длины `n`, заполненный байтами
+    /// литерала: сколько их есть, остаток - нули.
+    ///
+    /// Так элаборация собирает строковый литерал. Цепочка `arraySet` давала
+    /// терм глубиной в длину строки, и обходы терма обрывались о стек (§10
+    /// вопрос 187); здесь глубина - одно применение при любой длине.
+    ///
+    /// Байты лежат в процессе один раз ([`ArrayOp::bytes`]), и операция
+    /// держит их ссылкой: так она остаётся `Copy` и читается без сигнатуры -
+    /// нормализатор ядра её не видит. Длина - аргументом, а не длиной байт:
+    /// по ней тип (`Array n UInt8`), и при расхождении массив всё равно ровно
+    /// той длины, какую обещает тип. Программой не пишется - в [`Self::ALL`]
+    /// её нет.
+    Bytes(&'static [u8]),
 }
 
 impl ArrayOp {
-    /// Все операции.
+    /// Операции, которые пишутся в программе по имени.
     pub const ALL: [Self; 4] = [Self::New, Self::Set, Self::Index, Self::Read];
 
     /// Имя, которым операция пишется в программе.
@@ -989,7 +1003,31 @@ impl ArrayOp {
             Self::Set => "arraySet",
             Self::Index => "arrayIndex",
             Self::Read => "arrayRead",
+            Self::Bytes(_) => "arrayBytes",
         }
+    }
+
+    /// `arrayBytes` над этими байтами.
+    ///
+    /// Байты интернируются: одинаковое содержимое даёт одну ссылку на весь
+    /// процесс, и память под литералы растёт числом **разных** строк, а не
+    /// числом элабораций - сервер языка элаборирует файл на каждую правку.
+    #[must_use]
+    pub fn bytes(content: &[u8]) -> Self {
+        use std::collections::HashSet;
+        use std::sync::{Mutex, OnceLock, PoisonError};
+
+        static INTERNED: OnceLock<Mutex<HashSet<&'static [u8]>>> = OnceLock::new();
+        let mut interned = INTERNED
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(known) = interned.get(content) {
+            return Self::Bytes(known);
+        }
+        let leaked: &'static [u8] = Box::leak(content.to_vec().into_boxed_slice());
+        interned.insert(leaked);
+        Self::Bytes(leaked)
     }
 
     /// Операция по написанному имени.
@@ -1001,7 +1039,13 @@ impl ArrayOp {
 
 impl fmt::Display for ArrayOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
+        match self {
+            // Содержимое печатается: без него литерал в терме безымянен.
+            Self::Bytes(content) => {
+                write!(f, "{} {:?}", self.name(), String::from_utf8_lossy(content))
+            }
+            _ => f.write_str(self.name()),
+        }
     }
 }
 

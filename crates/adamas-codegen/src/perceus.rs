@@ -330,7 +330,8 @@ fn drops(locals: impl IntoIterator<Item = LocalId>, body: Expr) -> Expr {
 /// [`Pass::sequence`], и разбирать их врозь значило бы завести пять правил
 /// владения колонкой вместо одного.
 enum Shape {
-    New,
+    /// `arrayNew`; байты при нём - у `arrayBytes`.
+    New(Option<&'static [u8]>),
     Set,
     Index,
     /// Векторная загрузка окна (§4.9): ширина и дорожка при ней.
@@ -851,7 +852,8 @@ impl Pass<'_> {
                 stride,
                 count,
                 initial,
-            } => (Shape::New, stride, vec![*count, *initial]),
+                bytes,
+            } => (Shape::New(bytes), stride, vec![*count, *initial]),
             Expr::ArraySet {
                 stride,
                 array,
@@ -887,12 +889,13 @@ impl Pass<'_> {
         // Подвыражения снимаются с конца, поэтому и разбираются справа налево.
         let mut next = || Box::new(done.pop().unwrap_or(Expr::Erased));
         let node = match shape {
-            Shape::New => {
+            Shape::New(bytes) => {
                 let initial = next();
                 Expr::ArrayNew {
                     stride,
                     count: next(),
                     initial,
+                    bytes,
                 }
             }
             Shape::Set => {

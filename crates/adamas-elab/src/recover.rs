@@ -192,9 +192,15 @@ pub(crate) fn declares(decl: &ast::Decl) -> Vec<Symbol> {
         }
         // Методы класса - имена программы, а не члены класса (§4.4): класс, не
         // объявившийся, уносит их с собой. Имя самого инстанса необязательно.
+        // Члены **инстанса** имён не вводят: метод принадлежит классу, и
+        // записанный здесь `show` - его реализация, а не новое имя. Посчитанный
+        // именем файла, он заслонял прелюдийный метод: после `instance Show
+        // Color` вызвать `show` в этом файле было нечем.
         DeclKind::Class(class) => {
             out.extend(class.name.iter().map(|it| Rc::clone(&it.text)));
-            out.extend(class.members.iter().flat_map(declares));
+            if !class.instance {
+                out.extend(class.members.iter().flat_map(declares));
+            }
         }
         DeclKind::Mutual(members) => out.extend(members.iter().flat_map(declares)),
         // Не подключившийся файл уносит и свой префикс, и всё, что написано в

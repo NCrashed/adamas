@@ -1,0 +1,22 @@
+-- Свой инстанс прелюдийного класса не прячет его метод (§4.3, §4.4).
+--
+-- Прелюдийные имена кладутся в область видимости файла все, кроме тех, что
+-- файл объявляет сам. Перечень «своих» считал члены инстанса именами файла, и
+-- после `instance Show Color` бывший прелюдийный `show` не находился вовсе -
+-- даже выше инстанса. Члены инстанса имён не вводят: метод принадлежит классу.
+--
+-- `show Red` - 3, `show True` - 4, `show Blue` - 4. Ответ 11.
+
+data Color where
+  Red : Color
+  Blue : Color
+
+early : UInt64
+early = textLength (show True)
+
+instance Show Color where
+  show Red = "red"
+  show Blue = "blue"
+
+main : UInt64
+main = textLength (show Red) + early + textLength (show Blue)

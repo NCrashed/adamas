@@ -643,3 +643,181 @@ instance Show Float32 where
 -- | Ответ `arrayRead`: ячейка и тот же массив.
 data Read (0 n : UInt64) (a : Type) where
   MkRead : (ω x : a) -> (1 rest : Array n a) -> Read n a
+
+-- # Натуральные числа (§4.4)
+--
+-- Унарные: тип индексов и доказательств (`Vect n a`), а не счёта - считают
+-- машинные слова, и `length` отвечает `UInt64`. Литерал под ожидаемым `Nat`
+-- разворачивается в цепочку `Succ` (§4.3).
+
+-- | Натуральное число: ноль или следующее за натуральным.
+data Nat where
+  Zero : Nat
+  Succ : Nat -> Nat
+
+-- | Сложение натуральных.
+plus : Nat -> Nat -> Nat
+plus Zero m = m
+plus (Succ k) m = Succ (plus k m)
+
+-- | Умножение натуральных.
+times : Nat -> Nat -> Nat
+times Zero _m = Zero
+times (Succ k) m = plus m (times k m)
+
+-- | Натуральное машинным словом.
+natToUInt64 : Nat -> UInt64
+natToUInt64 Zero = 0
+natToUInt64 (Succ k) = addUInt64 1 (natToUInt64 k)
+
+instance Add Nat where
+  add x y = plus x y
+
+instance Mul Nat where
+  mul x y = times x y
+
+-- Равенство натуральных.
+sameNat : Nat -> Nat -> Bool
+sameNat Zero Zero = True
+sameNat (Succ k) (Succ m) = sameNat k m
+sameNat _k _m = False
+
+-- Строгое «меньше» у натуральных.
+belowNat : Nat -> Nat -> Bool
+belowNat Zero (Succ _m) = True
+belowNat (Succ k) (Succ m) = belowNat k m
+belowNat _k _m = False
+
+instance Eq Nat where
+  eq x y = sameNat x y
+
+instance Ord Nat where
+  compare x y = if belowNat x y then LT else if sameNat x y then EQ else GT
+
+instance Show Nat where
+  show n = showUInt64 (natToUInt64 n)
+
+-- # Списки (§4.4)
+--
+-- Строгий список: потоковая обработка - эффектом `Yield` (§3.4), а не ленью.
+-- `[a, b]` - запись того же `Cons a (Cons b Nil)`.
+
+-- | Список: пустой или голова и хвост.
+data List (a : Type) where
+  Nil : List a
+  Cons : a -> List a -> List a
+
+infixr 5 ::
+(::) : a -> List a -> List a
+(::) x xs = Cons x xs
+
+-- | Отображение содержимого: список, `Option`, `Result`.
+class Functor (f : Type -> Type) where
+  map : (a -> b) -> f a -> f b
+
+instance Functor List where
+  map g Nil = Nil
+  map g (Cons x xs) = Cons (g x) (map g xs)
+
+instance Functor Option where
+  map g None = None
+  map g (Some x) = Some (g x)
+
+-- | Элементы, для которых условие верно, в прежнем порядке.
+filter : (a -> Bool) -> List a -> List a
+filter p Nil = Nil
+filter p (Cons x xs) = if p x then Cons x (filter p xs) else filter p xs
+
+-- | Свёртка слева: `foldl f z [a, b] = f (f z a) b`.
+foldl : (b -> a -> b) -> b -> List a -> b
+foldl f z Nil = z
+foldl f z (Cons x xs) = foldl f (f z x) xs
+
+-- | Свёртка справа: `foldr f z [a, b] = f a (f b z)`.
+foldr : (a -> b -> b) -> b -> List a -> b
+foldr f z Nil = z
+foldr f z (Cons x xs) = f x (foldr f z xs)
+
+-- | Число элементов.
+length : List a -> UInt64
+length Nil = 0
+length (Cons _x xs) = addUInt64 1 (length xs)
+
+-- Элементы `xs` в обратном порядке перед `acc`.
+reversedOnto : List a -> List a -> List a
+reversedOnto Nil acc = acc
+reversedOnto (Cons x xs) acc = reversedOnto xs (Cons x acc)
+
+-- | Список в обратном порядке.
+reverse : List a -> List a
+reverse xs = reversedOnto xs Nil
+
+infixr 5 ++
+-- | Склейка списков.
+(++) : List a -> List a -> List a
+(++) Nil ys = ys
+(++) (Cons x xs) ys = Cons x (xs ++ ys)
+
+-- | Значение первой пары с этим ключом.
+lookup : {Eq k} => k -> List (k, v) -> Option v
+lookup key Nil = None
+lookup key (Cons (k, v) rest) = if key == k then Some v else lookup key rest
+
+-- | Пары соседних элементов; длина - меньшая из двух.
+zip : List a -> List b -> List (a, b)
+-- Клаузы раздельные, а не ловушка `zip _xs _ys = Nil`: с элементом-кортежем
+-- имплисит `Nil` в ловушке сегодня не выводится (§10 вопрос 244).
+zip Nil _ys = Nil
+zip (Cons _x _xs) Nil = Nil
+zip (Cons x xs) (Cons y ys) = Cons (x, y) (zip xs ys)
+
+-- | Непустой список: голова есть всегда, и `head` тотальна.
+type NonEmpty (a : Type) = { head : a, tail : List a }
+
+-- # Мелочи (§4.4)
+
+-- | Значение `Option` либо умолчание при `None`.
+unwrapOr : a -> Option a -> a
+unwrapOr fallback None = fallback
+unwrapOr _fallback (Some x) = x
+
+-- | Ошибка `Result`, пропущенная через функцию.
+mapErr : (e -> f) -> Result e a -> Result f a
+mapErr g (Err e) = Err (g e)
+mapErr _g (Ok x) = Ok x
+
+-- | То же значение.
+identity : a -> a
+identity x = x
+
+-- | Первый аргумент, второй отбрасывается.
+const : a -> b -> a
+const x _y = x
+
+-- | Аргументы в обратном порядке.
+flip : (a -> b -> c) -> b -> a -> c
+flip f x y = f y x
+
+-- Хвост записи `[…]`: каждый элемент с запятой перед ним.
+listedRest : {Show a} => List a -> String
+listedRest Nil = ""
+listedRest (Cons x xs) = ", " <> show x <> listedRest xs
+
+-- Элементы через запятую - тело записи `[…]`. Первый - без запятой; отдельным
+-- помощником, а не клаузой `Cons x Nil`: вложенный паттерн при словаре
+-- специализация сегодня не берёт (§10 вопрос 245).
+listed : {Show a} => List a -> String
+listed Nil = ""
+listed (Cons x xs) = show x <> listedRest xs
+
+instance {Show a} => Show (List a) where
+  show xs = "[" <> listed xs <> "]"
+
+-- Списки поэлементно равны.
+sameList : {Eq a} => List a -> List a -> Bool
+sameList Nil Nil = True
+sameList (Cons x xs) (Cons y ys) = x == y && sameList xs ys
+sameList _xs _ys = False
+
+instance {Eq a} => Eq (List a) where
+  eq xs ys = sameList xs ys

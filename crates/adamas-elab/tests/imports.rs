@@ -101,7 +101,7 @@ main = double (Succ (Succ Zero))
     let without = entry.replace("import Numbers (Nat, double)\n", "");
     let why = refused(&without, &numbers());
     assert!(
-        why.contains("Nat"),
+        why.contains("double"),
         "без импорта короткое имя обязано не находиться, сказано: {why}"
     );
 }
@@ -162,7 +162,7 @@ import Numbers (Nat, Zero, double)
 ";
     let why = refused(above, &numbers());
     assert!(
-        why.contains("Nat"),
+        why.contains("double"),
         "имя выше импорта обязано не находиться, сказано: {why}"
     );
 

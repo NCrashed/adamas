@@ -2621,7 +2621,7 @@ impl<'a> Elaborator<'a> {
             ExprKind::Mask(inner) => self.masked(inner, expr.span),
             ExprKind::Tuple(items) if items.is_empty() => missing(Missing::Unit),
             ExprKind::Tuple(items) => self.tuple(items, expr.span, awaited),
-            ExprKind::List(items) => self.list(items, expr.span),
+            ExprKind::List(items) => self.list(items, expr.span, awaited),
         }
     }
 
@@ -3626,22 +3626,48 @@ impl<'a> Elaborator<'a> {
     /// Имена берутся по соглашению, как `Bool` у `if` и `Unit` у сахара
     /// `{ε} A`. Собирается справа налево - список правоассоциативен по
     /// построению, и хвост его есть список же.
-    fn list(&mut self, items: &[Expr], span: Span) -> Result<Term, ElabError> {
+    fn list(
+        &mut self,
+        items: &[Expr],
+        span: Span,
+        awaited: Option<&Rc<Value>>,
+    ) -> Result<Term, ElabError> {
         let named = |text: &str| ast::Name {
             text: Rc::from(text),
             span,
         };
         let empty = self.name(&named(NIL))?;
         let cons = self.name(&named(CONS))?;
+        // Тип элемента - у ожидаемого `List T`: без него литерал элемента
+        // уходил в умолчание, и `xs : List UInt64 = [1, 2]` собирался
+        // унарными `Nat` прелюдии.
+        let element = awaited.and_then(|ty| self.list_element(ty));
         let mut built = empty;
         for item in items.iter().rev() {
             // Элемент уезжает внутрь собранного значения, как поле
             // конструктора: позиция у него та же (§3.3).
-            let item = self.placed(Position::Field, |it| it.expr(item, Mult::Many))?;
+            let element = element.clone();
+            let item = self.placed(Position::Field, |it| {
+                it.awaited = element;
+                it.expr(item, Mult::Many)
+            })?;
             built = cons.clone().apply([item, built]);
         }
         self.produced = None;
         Ok(built)
+    }
+
+    /// Тип элемента у ожидаемого `List T` - семейства, чей конструктор списка
+    /// берётся соглашением.
+    fn list_element(&mut self, ty: &Rc<Value>) -> Option<Rc<Value>> {
+        let reduced = whnf_solved(self.signature, self.metas, ty);
+        let Value::Neutral(Head::Global(name, ..), spine) = &*reduced else {
+            return None;
+        };
+        let [Elim::App(element)] = spine.as_slice() else {
+            return None;
+        };
+        (adamas_core::term::short(name) == "List").then(|| Rc::clone(element))
     }
 
     /// Row позиции, где ничего не написано, - подъём или пустая.

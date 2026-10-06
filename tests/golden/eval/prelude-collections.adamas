@@ -1,0 +1,44 @@
+-- Коллекции прелюдии (§4.4): `List` с функциями, `Nat`, `NonEmpty`, `Functor`,
+-- `Show` и `Eq` у списка.
+--
+-- Программа не объявляет ни одного типа: всё берётся у прелюдии. Ответ -
+-- длина собранного текста и сумма проверок:
+--
+--   text = show [2, 4, 6, 8, 10] <> show (filter big doubled) <> show (reverse xs)
+--        = "[2, 4, 6, 8, 10]" (16) <> "[6, 8, 10]" (10) <> "[5, 4, 3, 2, 1]" (15)
+--        = 41 байт
+--   foldl (+) по xs                                      = 15
+--   length (xs ++ [6, 7])                                =  7
+--   lookup 2 (zip xs ["a", "b"]) - "b"                   = 100
+--   n + n * n при n = 3 (Nat), natToUInt64               = 12
+--   head у NonEmpty                                      =  9
+--   [1, 2] == [1, 2], [1, 2] == [1, 3]: 1000 + 0         = 1000
+--   unwrapOr 1 (map double None)                         =  1
+--
+-- 41 + 15 + 7 + 100 + 12 + 9 + 1000 + 1 = 1185.
+
+double : UInt64 -> UInt64
+double x = x * 2
+
+big : UInt64 -> Bool
+big x = 4 < x
+
+found : Option String -> UInt64
+found (Some s) = if s == "b" then 100 else 0
+found None = 0
+
+main : UInt64
+main =
+  let xs : List UInt64 = [1, 2, 3, 4, 5]
+  let doubled : List UInt64 = map double xs
+  let text : String = show doubled <> show (filter big doubled) <> show (reverse xs)
+  let summed : UInt64 = foldl (\acc x -> acc + x) 0 xs
+  let pairs : List (UInt64, String) = zip xs ["a", "b"]
+  let n : Nat = 3
+  let ne : NonEmpty UInt64 = { head = 9, tail = [10] }
+  let a : List UInt64 = [1, 2]
+  let b : List UInt64 = [1, 3]
+  let same : UInt64 = if a == [1, 2] then 1000 else 0
+  let other : UInt64 = if a == b then 10000 else 0
+  let none : Option UInt64 = None
+  textLength text + summed + length (xs ++ [6, 7]) + found (lookup 2 pairs) + natToUInt64 (n + n * n) + ne.head + same + other + unwrapOr 1 (map double none)

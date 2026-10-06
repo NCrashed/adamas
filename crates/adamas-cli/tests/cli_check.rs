@@ -177,7 +177,7 @@ fn a_module_does_not_see_the_entry_root() {
         "модуль увидел корень входного файла"
     );
     assert!(
-        stderr.contains("Uses.adamas") && stderr.contains("`Nat` не найдено"),
+        stderr.contains("Uses.adamas") && stderr.contains("`helper` не найдено"),
         "отказ обязан стоять в подключённом модуле: {stderr}"
     );
 }

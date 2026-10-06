@@ -237,7 +237,8 @@ pub struct Program {
     /// `drop` ([`crate::lifecycle`]): второй проход, повторяющий правило,
     /// разошёлся бы с ним молча.
     pub observed: Observed,
-    /// Имена, объявленные прелюдией: их автор не писал (§4.4).
+    /// Имена, объявленные прелюдией и вшитой стандартной библиотекой: их автор
+    /// не писал (§4.4).
     ///
     /// Записываются там, где прелюдия объявляется. Префикс `Prelude.` сегодня
     /// носят все её имена (класс квалифицирован с §10 вопроса 239), но
@@ -425,8 +426,11 @@ impl Loader<'_> {
             return Ok(());
         }
         // Имена прелюдии записываются здесь, а не в `seed`: файл, написавший
-        // `import Prelude`, подключает её импортом, мимо `seed`.
-        if path == PRELUDE {
+        // `import Prelude`, подключает её импортом, мимо `seed`. Вшитая
+        // стандартная библиотека - тоже не написанное автором; свой файл проекта
+        // на её пути - написанное.
+        let embedded = standard(path).is_some() && self.sources.text(path).is_none();
+        if path == PRELUDE || embedded {
             let before: std::collections::HashSet<_> = pass.signature.names().into_iter().collect();
             let outcome = self.declare_module(path, span, pass.reborrow());
             self.prelude.extend(

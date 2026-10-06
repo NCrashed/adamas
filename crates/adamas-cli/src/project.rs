@@ -181,6 +181,8 @@ pub(crate) fn checked(
         .units
         .iter()
         .filter(|it| it.path.as_deref() != Some(adamas_elab::program::PRELUDE))
+        // Вшитая стандартная библиотека - не файл программы: пути у неё нет.
+        .filter(|it| !it.file.name().starts_with("вшитый "))
         .count();
     let signature = program
         .signature

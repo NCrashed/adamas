@@ -136,13 +136,13 @@ fn a_new_project_checks_builds_runs_and_tests() {
     let (ok, stdout, stderr) = run(adamas().arg("check").arg(&app));
     assert!(ok, "заготовка не проверилась: {stderr}");
     assert!(
-        stdout.contains("объявлений 6"),
+        stdout.contains("объявлений 3"),
         "неожиданный вывод: {stdout}"
     );
 
     let (ok, expected, stderr) = run(adamas().arg("eval").arg(&app));
     assert!(ok, "заготовка не посчиталась: {stderr}");
-    assert_eq!(expected, "Succ (Succ (Succ (Succ Zero)))");
+    assert_eq!(expected, "Привет, мир!\n1 + 2 + ... + 10 = 55");
 
     let (ok, stdout, stderr) = run(adamas().arg("build").arg(&app));
     assert!(ok, "заготовка не собралась: {stderr}");
@@ -171,7 +171,7 @@ fn a_new_project_checks_builds_runs_and_tests() {
 ///
 /// Без этой половины `adamas new` проверялся бы тем, что тесты зелены, - а
 /// зелены они и у сюиты, которая ничего не спрашивает у программы. `Test`
-/// не объявляет ни `Nat`, ни `plus`, ни `double`: всё приходит из `Main`.
+/// не объявляет ни `greeting`, ни `triangle`: оба приходят из `Main`.
 #[test]
 fn the_template_tests_reach_into_the_entry_module() {
     let case = scratch("reach");
@@ -179,17 +179,21 @@ fn the_template_tests_reach_into_the_entry_module() {
     run(adamas().arg("new").arg(&app));
 
     let entry = app.join("src/Main.adamas");
-    let broken = read(&entry).replace("double n = plus n n", "double n = n");
+    let broken = read(&entry).replace("\"Привет, \"", "\"Здравствуй, \"");
+    assert_ne!(broken, read(&entry), "правка обязана что-то менять");
     write(&entry, &broken);
 
     let (ok, stdout, stderr) = run(adamas().arg("test").arg(&app));
-    assert!(!ok, "сломанный `double` не уронил тестов: {stdout}{stderr}");
     assert!(
-        stdout.contains("testDoubleAddsToItself: ОТКАЗ"),
+        !ok,
+        "сломанный `greeting` не уронил тестов: {stdout}{stderr}"
+    );
+    assert!(
+        stdout.contains("testGreetingNamesTheGuest: ОТКАЗ"),
         "отказ обязан назвать тест: {stdout}"
     );
     assert!(
-        stdout.contains("testPlusIsLeftNeutral: ok"),
+        stdout.contains("testTriangleOfTen: ok"),
         "уцелевший тест обязан остаться зелёным: {stdout}"
     );
     assert!(
@@ -282,7 +286,9 @@ fn a_suite_without_tests_is_refused() {
 
     let tests = app.join("src/Test.adamas");
     let text = read(&tests);
-    let cut = text.find("testPlusIsLeftNeutral").expect("тесты заготовки");
+    let cut = text
+        .find("testGreetingNamesTheGuest")
+        .expect("тесты заготовки");
     write(&tests, &text[..cut]);
 
     let (ok, stdout, stderr) = run(adamas().arg("test").arg(&app));
@@ -321,7 +327,7 @@ fn a_test_that_is_not_boolean_is_refused() {
     run(adamas().arg("new").arg(&app));
 
     let tests = app.join("src/Test.adamas");
-    let text = format!("{}\ntestCount : Nat\ntestCount = Zero\n", read(&tests));
+    let text = format!("{}\ntestCount : UInt64\ntestCount = 0\n", read(&tests));
     write(&tests, &text);
 
     let (ok, stdout, stderr) = run(adamas().arg("test").arg(&app));

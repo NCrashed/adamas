@@ -34,24 +34,30 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 
-/// Вход программы: унарная арифметика и `main`, который по ней считает.
+/// Вход программы: функция над текстом, функция над числом и `main`,
+/// который печатает обе.
 const MAIN: &str = "\
 -- Вход программы. `adamas run` соберёт её и запустит, `adamas eval` посчитает
 -- интерпретатором, `adamas check` только проверит типы.
+--
+-- `main` с меткой `Console` исполняется сам: печать - `putLine` из `Std.IO`
+-- (`adamas doc Std.IO`). Прелюдия - `String`, `<>`, `show`, `==` -
+-- подключается без импорта.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
+import Std.IO (Console, putLine)
 
-plus : Nat -> (1 m : Nat) -> Nat
-plus Zero m = m
-plus (Succ k) m = Succ (plus k m)
+-- | Приветствие по имени.
+greeting : String -> String
+greeting name = \"Привет, \" <> name <> \"!\"
 
-double : Nat -> Nat
-double n = plus n n
+-- | Сумма чисел от 1 до `n`.
+triangle : UInt64 -> UInt64
+triangle n = if n == 0 then 0 else n + triangle (n - 1)
 
-main : Nat
-main = double (Succ (Succ Zero))
+main : {Console} Unit
+main =
+  putLine (greeting \"мир\")
+  putLine (\"1 + 2 + ... + 10 = \" <> show (triangle 10))
 ";
 
 /// Тесты: отдельная программа, подключающая вход как модуль.
@@ -61,23 +67,13 @@ const TEST: &str = "\
 --
 -- Вход подключается как обычный модуль: файл - это модуль (§4.8).
 
-import Main (Nat, Zero, Succ, plus, double)
+import Main (greeting, triangle)
 
-data Bool where
-  False : Bool
-  True : Bool
+testGreetingNamesTheGuest : Bool
+testGreetingNamesTheGuest = greeting \"Ада\" == \"Привет, Ада!\"
 
-eqNat : Nat -> Nat -> Bool
-eqNat Zero Zero = True
-eqNat Zero (Succ m) = False
-eqNat (Succ k) Zero = False
-eqNat (Succ k) (Succ m) = eqNat k m
-
-testPlusIsLeftNeutral : Bool
-testPlusIsLeftNeutral = eqNat (plus Zero (Succ Zero)) (Succ Zero)
-
-testDoubleAddsToItself : Bool
-testDoubleAddsToItself = eqNat (double (Succ Zero)) (Succ (Succ Zero))
+testTriangleOfTen : Bool
+testTriangleOfTen = triangle 10 == 55
 ";
 
 /// Что не попадает в репозиторий.

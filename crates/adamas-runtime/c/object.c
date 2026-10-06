@@ -125,6 +125,10 @@ size_t adamas_stat_live(void) {
     return (size_t)ours()->live;
 }
 
+int adamas_stats_wanted(void) {
+    return getenv("ADAMAS_STATS") != NULL;
+}
+
 size_t adamas_stat_threads(void) {
     size_t rows = 0;
     for (const adamas_counters *at = __atomic_load_n(&registry, __ATOMIC_ACQUIRE); at != NULL;

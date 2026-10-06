@@ -85,8 +85,8 @@
 
 ```sh
 cd docs/measurements/frame-uniqueness
-cp world.adamas main.adamas && adamas run --backend c main.adamas   # блоков 5
-cp shared.adamas main.adamas && adamas run --backend c main.adamas  # блоков 1205
+cp world.adamas main.adamas && ADAMAS_STATS=1 adamas run --backend c main.adamas   # блоков 5
+cp shared.adamas main.adamas && ADAMAS_STATS=1 adamas run --backend c main.adamas  # блоков 1205
 ```
 
 Числа кадров и сущностей стоят в `frames` и `cells` первыми строками файла.

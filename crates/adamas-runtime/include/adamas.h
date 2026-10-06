@@ -453,6 +453,9 @@ size_t adamas_stat_allocated_everywhere(void);
  */
 size_t adamas_stat_threads(void);
 
+/** Печатать ли счётчики в конце программы: задана ли `ADAMAS_STATS`. */
+int adamas_stats_wanted(void);
+
 /** Обнуляет счётчики потока. Общий ряд не трогает: он не его. */
 void adamas_stat_reset(void);
 

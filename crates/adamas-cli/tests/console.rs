@@ -301,3 +301,28 @@ fn a_file_is_copied_by_nesting_reading_and_writing() {
         );
     }
 }
+
+#[test]
+fn the_block_counters_stay_quiet_without_being_asked() {
+    // Счётчики блоков печатаются по `ADAMAS_STATS`, и сюита ставит её себе
+    // (`.cargo/config.toml`). Пользователь её не ставит - и его stderr чист.
+    let file = program("quiet", HELLO);
+    for args in &EVALUATORS[1..] {
+        let output = Command::new(env!("CARGO_BIN_EXE_adamas"))
+            .args(*args)
+            .arg(&file)
+            .current_dir(file.parent().unwrap_or(Path::new(".")))
+            .env_remove("ADAMAS_STATS")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap_or_else(|why| panic!("{args:?} не запустился: {why}"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("блоков выдано"),
+            "{args:?}: счётчики без спроса:\n{stderr}"
+        );
+    }
+    // С переменной - на месте: ею живут свидетели течи.
+    let (_code, _stdout, stderr) = driven(&file, &["run"], "");
+    assert!(stderr.contains("блоков выдано"), "счётчиков нет:\n{stderr}");
+}

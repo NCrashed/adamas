@@ -72,6 +72,6 @@
 
 ```sh
 cd docs/measurements/erased-leak
-cp leak.adamas main.adamas && adamas run --backend c main.adamas    # блоков 2001
-cp tight.adamas main.adamas && adamas run --backend c main.adamas   # блоков 1
+cp leak.adamas main.adamas && ADAMAS_STATS=1 adamas run --backend c main.adamas    # блоков 2001
+cp tight.adamas main.adamas && ADAMAS_STATS=1 adamas run --backend c main.adamas   # блоков 1
 ```

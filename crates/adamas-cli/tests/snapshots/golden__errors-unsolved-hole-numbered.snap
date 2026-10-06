@@ -2,7 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: unsolved-hole-numbered.adamas:19:23: несовпадение типов: ожидался `Box (?0)`, получен `Prelude.Bool`
+Error: unsolved-hole-numbered.adamas:19:23: несовпадение типов: ожидался `Box (?0)`, получен `Bool`
   bad b = size b + size True
                         ^^^^
   в контексте:

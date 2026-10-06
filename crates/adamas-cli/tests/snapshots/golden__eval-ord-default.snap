@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Cons Prelude.True (Cons Prelude.False (Cons Prelude.True (Cons Prelude.True Nil)))
+Cons True (Cons False (Cons True (Cons True Nil)))

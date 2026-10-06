@@ -2,8 +2,8 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: literal-without-type.adamas:13:3: несовпадение типов: ожидался `Int32`, получен `Prelude.Nat`
+Error: literal-without-type.adamas:13:3: несовпадение типов: ожидался `Int32`, получен `Nat`
     p.x
     ^^^
   в контексте:
-    (ω p : {1 x : Prelude.Nat})
+    (ω p : {1 x : Nat})

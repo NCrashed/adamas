@@ -223,7 +223,7 @@ impl<T: fmt::Display> fmt::Display for Row<T> {
             if position > 0 {
                 f.write_str(", ")?;
             }
-            f.write_str(&label.name)?;
+            f.write_str(crate::term::written_name(&label.name))?;
             for argument in &label.arguments {
                 write!(f, " {argument}")?;
             }

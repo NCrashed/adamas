@@ -1198,6 +1198,39 @@ pub const PRINT_DEPTH: usize = 200;
 /// Многоточие на месте среза.
 const ELIDED: &str = "…";
 
+thread_local! {
+    /// Короткие имена прелюдии, которые программа заслонила своими.
+    static SHADOWED: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::default();
+}
+
+/// Записывает, какие короткие имена прелюдии программа заслонила своими.
+///
+/// Прелюдия подключается без импорта, и автор пишет `Succ`, а не
+/// `Prelude.Succ`: печать отвечает тем же написанием (решение 2026-10-06). Где
+/// программа объявила своё имя тем же написанием, префикс остаётся - иначе
+/// `Nat` и `Nat` в одном сообщении были бы разными типами. Запись одна на
+/// поток и заменяется проходом программы целиком: сервер языка проверяет
+/// файлы по одному.
+pub fn shadow_prelude(names: impl IntoIterator<Item = String>) {
+    SHADOWED.with(|it| *it.borrow_mut() = names.into_iter().collect());
+}
+
+/// Имя для печати: прелюдийное - без префикса, если не заслонено.
+#[must_use]
+pub fn written_name(name: &str) -> &str {
+    let Some(short) = name
+        .strip_prefix(crate::prim::PRELUDE)
+        .and_then(|rest| rest.strip_prefix('.'))
+    else {
+        return name;
+    };
+    if short.contains('.') || SHADOWED.with(|it| it.borrow().contains(short)) {
+        return name;
+    }
+    short
+}
+
 /// Терм с явно заданным пределом вложенности: `None` - без предела.
 ///
 /// Печать **не рекурсивна** независимо от предела (§10 вопрос 93), поэтому
@@ -1381,10 +1414,10 @@ fn emit<'a>(
                 ],
             );
         }
-        Term::Const(name, levels, _) if levels.is_empty() => write!(f, "{name}")?,
+        Term::Const(name, levels, _) if levels.is_empty() => f.write_str(written_name(name))?,
         Term::Const(name, levels, _) => {
             let printed: Vec<String> = levels.iter().map(ToString::to_string).collect();
-            write!(f, "{name}{{{}}}", printed.join(", "))?;
+            write!(f, "{}{{{}}}", written_name(name), printed.join(", "))?;
         }
         // Имя семейства и аргументы уровня печатаются: по конструкторам ветвей
         // они восстанавливаются не всегда - у разбора пустого семейства ветвей
@@ -1459,14 +1492,14 @@ fn analysis(case: &Case, inner: usize) -> Vec<Piece<'_>> {
     };
     let mut pieces = vec![
         Piece::Term(&case.scrutinee, Pos::Atom, inner),
-        Piece::Text(format!(" : {}{levels} return ", case.data).into()),
+        Piece::Text(format!(" : {}{levels} return ", written_name(&case.data)).into()),
         Piece::Term(&case.motive, Pos::Atom, inner),
         Piece::Text(" of {".into()),
     ];
     for (position, branch) in case.branches.iter().enumerate() {
         let lead = if position > 0 { "; " } else { "" };
         pieces.push(Piece::Text(
-            format!("{lead}{} => ", branch.constructor).into(),
+            format!("{lead}{} => ", written_name(&branch.constructor)).into(),
         ));
         pieces.push(Piece::Term(&branch.body, Pos::Free, inner));
     }

@@ -447,10 +447,7 @@ fn a_shared_commit_is_one_copy() {
 
     let (ok, stdout, stderr) = run(adamas().arg("eval").arg(&app));
     assert!(ok, "счёт не прошёл: {stderr}");
-    assert_eq!(
-        stdout,
-        "MkBoth (Std.Prelude.Succ Std.Prelude.Zero) Prelude.True"
-    );
+    assert_eq!(stdout, "MkBoth (Std.Prelude.Succ Std.Prelude.Zero) True");
     assert_eq!(
         lock(&app).matches("[[package]]").count(),
         2,

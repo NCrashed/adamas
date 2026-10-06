@@ -2,7 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: division-unproven.adamas:8:25: несовпадение типов: ожидался `Prelude.Equal Prelude.Bool (eqInt32 d 0) Prelude.False`, получен `Prelude.Equal Prelude.Bool (eqInt32 d 0) (eqInt32 d 0)`
+Error: division-unproven.adamas:8:25: несовпадение типов: ожидался `Equal Bool (eqInt32 d 0) False`, получен `Equal Bool (eqInt32 d 0) (eqInt32 d 0)`
   peek d = divInt32 100 d Refl
                           ^^^^
   в контексте:

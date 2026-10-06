@@ -2,9 +2,9 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: branch-error-located.adamas:12:16: несовпадение типов: ожидался `Int32`, получен `Prelude.Bool`
+Error: branch-error-located.adamas:12:16: несовпадение типов: ожидался `Int32`, получен `Bool`
     False -> v + c
                  ^
   в контексте:
-    (ω c : Prelude.Bool)
+    (ω c : Bool)
     (ω v : Int32)

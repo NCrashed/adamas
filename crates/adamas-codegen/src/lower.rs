@@ -1317,7 +1317,8 @@ impl<'a> Lowerer<'a> {
                 .ok_or(LowerError::TooManyConstructors { limit: TAGS })?;
             self.constructors.push(Constructor {
                 tag: CtorId(tag),
-                name: name.to_string(),
+                // Печатается тем же написанием, что ответ машины.
+                name: adamas_core::term::written_name(name).to_owned(),
                 data: data.to_string(),
                 binders,
                 params: *params,

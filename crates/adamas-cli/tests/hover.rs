@@ -229,7 +229,7 @@ fn a_constructor_names_its_family_in_its_type() {
                     continue;
                 };
                 assert!(
-                    value.contains(&**data),
+                    value.contains(adamas_core::term::written_name(data)),
                     "{}: `{name}` строит `{data}`, а подсказка говорит `{value}`",
                     path.display()
                 );

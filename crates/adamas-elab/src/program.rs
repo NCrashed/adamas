@@ -277,6 +277,7 @@ impl Program {
 /// путём.
 #[must_use]
 pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
+    adamas_core::term::shadow_prelude(Vec::new());
     let parsed = adamas_parser::parse(entry.text());
     let mut loader = Loader {
         sources,
@@ -294,6 +295,7 @@ pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
         blame: Vec::new(),
         broken: Vec::new(),
         prelude: Vec::new(),
+        shadowed: std::collections::HashSet::new(),
     };
     let module = match parsed {
         Ok(module) => module,
@@ -397,6 +399,9 @@ struct Loader<'a> {
     broken: Vec<String>,
     /// Имена, объявленные прелюдией, - см. [`Program::prelude`].
     prelude: Vec<adamas_core::term::Name>,
+    /// Свои имена всех файлов программы: ими заслонена прелюдия, и печать
+    /// оставляет префикс `Prelude.` ровно у них.
+    shadowed: std::collections::HashSet<Rc<str>>,
 }
 
 impl Loader<'_> {
@@ -645,6 +650,14 @@ impl Loader<'_> {
             .flat_map(crate::recover::declares)
             .map(|name| Rc::from(&*name))
             .collect();
+        adamas_core::term::shadow_prelude(
+            self.shadowed
+                .iter()
+                .chain(mine.iter())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+        );
+        self.shadowed.extend(mine.iter().cloned());
         self.declare(PRELUDE, span, pass.reborrow())?;
         let head = format!("{PRELUDE}.");
         let names: Vec<_> = pass

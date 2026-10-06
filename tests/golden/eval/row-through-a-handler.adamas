@@ -1,0 +1,68 @@
+-- Метка колбэка сверх гасимой проходит насквозь через поднятый хвост (§3.4,
+-- §10 вопросы 242 и 243).
+--
+-- `runA` гасит `A` и производит `Z`; хвоста автор не писал - его даёт подъём,
+-- один на сигнатуру. Колбэк `both` несёт ещё и `B`, и она обязана пройти в
+-- ответ `runA`, а оттуда - к `runB`. До правки подъём стоял и на стрелке
+-- имплисита `{x : Type} ->`: применение типа гасило хвост раньше колбэка, и
+-- `runA both` отвергался - ожидался закрытый `{A}`.
+--
+-- `layered` - то же устройство, что `Std.IO.run`: хендлеры вложены лямбдами,
+-- и решение имплисита по контексту называет параметр-единицу тела хендлера.
+-- Машина считала его всегда, а понижение отказывало «переменная #0 вне
+-- захваченной среды».
+--
+-- `named` и `lambda` - 1 + 20 каждый, `nested` - тоже 21, `layered` - 1 + 20
+-- + 300. Сумма 384.
+
+effect A where
+  pa : UInt64
+
+effect B where
+  pb : UInt64
+
+effect C where
+  pc : UInt64
+
+effect Z
+
+runA : {x : Type} -> ((ω u : Unit) -> {A} x) -> {Z} x
+runA k = handle k with
+  return v -> v
+  pa -> resume 1
+
+runB : {x : Type} -> ((ω u : Unit) -> {B} x) -> x
+runB k = handle k with
+  return v -> v
+  pb -> resume 20
+
+runC : {x : Type} -> ((ω u : Unit) -> {C, Z} x) -> {Z} x
+runC k = handle k with
+  return v -> v
+  pc -> resume 300
+
+runZ : {x : Type} -> ((ω u : Unit) -> {Z} x) -> x
+runZ k = handle @Z k with
+  return v -> v
+
+both : {A, B} UInt64
+both = addUInt64 pa pb
+
+named : {B, Z} UInt64
+named = runA both
+
+lambda : {B, Z} UInt64
+lambda = runA (\_u -> both MkUnit)
+
+nested : {Z} UInt64
+nested = runB (\_u -> runA both)
+
+every : {A, B, C} UInt64
+every = addUInt64 pc both
+
+layered : {x : Type} -> ((ω u : Unit) -> {A, B, C} x) -> x
+layered k = handle @Z (\_u -> runC (\_c -> runB (\_b -> runA (\_a -> k MkUnit)))) with
+  return v -> v
+
+main : UInt64
+main = addUInt64 (addUInt64 (runZ (\_u -> runB named)) (runZ (\_u -> runB lambda))) (addUInt64 (runZ nested) (layered every))

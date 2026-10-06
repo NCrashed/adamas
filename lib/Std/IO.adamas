@@ -92,11 +92,9 @@ opened path mode = case openFile path mode of
 -- | Исполняет `k` над файлом, открытым на чтение: `nextLine` отвечает его
 -- строками. Файл закрывается, как только `k` кончилось либо оборвалось.
 --
--- Хвост `e` написан, а не поднят: с поднятым колбэк не мог бы нести ничего
--- сверх `Reading` - печать в нём отвергалась бы (§10 вопрос 242). `Files` и
--- `Except IOError` колбэку разрешены поимённо: вложенный `writing` их
--- производит, а через хвост они вышли бы в ответ дважды.
-reading : {a : Type} -> String -> ((ω u : Unit) -> {Reading, Files, Except IOError | e} a) -> {Files, Except IOError | e} a
+-- `Files` и `Except IOError` колбэку разрешены поимённо: вложенный `writing`
+-- их производит, а через хвост они вышли бы в ответ дважды.
+reading : {a : Type} -> String -> ((ω u : Unit) -> {Reading, Files, Except IOError} a) -> {Files, Except IOError} a
 reading path k =
   let h : Handle = opened path ForReading
   let _held : Opened = Holding h
@@ -105,7 +103,7 @@ reading path k =
     nextLine -> resume (readFrom h)
 
 -- Запись в открытый файл: `emit`, не дошедший до диска, - `CannotWrite`.
-written : {a : Type} -> String -> Mode -> ((ω u : Unit) -> {Writing, Files, Except IOError | e} a) -> {Files, Except IOError | e} a
+written : {a : Type} -> String -> Mode -> ((ω u : Unit) -> {Writing, Files, Except IOError} a) -> {Files, Except IOError} a
 written path mode k =
   let h : Handle = opened path mode
   let _held : Opened = Holding h
@@ -114,11 +112,11 @@ written path mode k =
     emit s -> if writeTo h s then resume MkUnit else throw (CannotWrite path)
 
 -- | Исполняет `k` над файлом, открытым на запись с начала.
-writing : {a : Type} -> String -> ((ω u : Unit) -> {Writing, Files, Except IOError | e} a) -> {Files, Except IOError | e} a
+writing : {a : Type} -> String -> ((ω u : Unit) -> {Writing, Files, Except IOError} a) -> {Files, Except IOError} a
 writing path k = written path ForWriting k
 
 -- | Исполняет `k` над файлом, открытым на запись в конец.
-appending : {a : Type} -> String -> ((ω u : Unit) -> {Writing, Files, Except IOError | e} a) -> {Files, Except IOError | e} a
+appending : {a : Type} -> String -> ((ω u : Unit) -> {Writing, Files, Except IOError} a) -> {Files, Except IOError} a
 appending path k = written path ForAppending k
 
 -- Байты прочитанного, последний - первым.
@@ -241,16 +239,18 @@ fatal e =
   let _ = exit 1
   stopped MkUnit
 
--- Отказ, дошедший до верха, - в `fatal`. Сквозные метки написаны явно, как у
--- двух хендлеров ниже: см. `run`.
-caught : {a : Type} -> ((ω u : Unit) -> {Except IOError, Console, Files} a) -> {Console, Files, Foreign} a
+-- Отказ, дошедший до верха, - в `fatal`.
+caught : {a : Type} -> ((ω u : Unit) -> {Except IOError, Foreign} a) -> {Foreign} a
 caught k = handle k with
   return v -> v
   throw e -> fatal e
 
--- Файлы через libc: `open`, `close`, `read`, `write`; консоль насквозь.
-filesThrough : {a : Type} -> ((ω u : Unit) -> {Files, Console, Foreign} a) -> {Console, Foreign} a
-filesThrough k = handle @Files k with
+-- | Исполняет файлы через libc: `open`, `close`, `read`, `write`.
+--
+-- `Foreign` в колбэке написан: его производит и этот хендлер, и вложенный
+-- в колбэк, а через хвост вышли бы два вхождения.
+runFiles : {a : Type} -> ((ω u : Unit) -> {Files, Foreign} a) -> {Foreign} a
+runFiles k = handle @Files k with
   return v -> v
   openFile path mode -> resume (openAt path mode)
   closeFile h -> resume (closeAt h)
@@ -259,22 +259,14 @@ filesThrough k = handle @Files k with
   writeTo h s -> case h of
     MkHandle fd -> resume (writeAt fd s)
 
--- Консоль через libc: `putStr` - `write` в стандартный вывод, `readLine` -
--- `read` из стандартного ввода; чужие вызовы насквозь.
-consoleThrough : {a : Type} -> ((ω u : Unit) -> {Console, Foreign} a) -> {Foreign} a
-consoleThrough k = handle @Console k with
+-- | Исполняет консоль через libc: `putStr` - `write` в стандартный вывод,
+-- `readLine` - `read` из стандартного ввода.
+runConsole : {a : Type} -> ((ω u : Unit) -> {Console, Foreign} a) -> {Foreign} a
+runConsole k = handle @Console k with
   return v -> v
   putStr s -> case writeAt 1 s of
     _ -> resume MkUnit
   readLine -> resume (lineFrom 0 Done False)
-
--- Слои `run` - частичным применением, а не лямбдами в теле `run`: такую
--- лямбду понижение сегодня не собирает (§10 вопрос 243).
-filed : {a : Type} -> ((ω u : Unit) -> {Console, Files, Except IOError} a) -> (ω u : Unit) -> {Console, Files, Foreign} a
-filed k u = caught k
-
-consoled : {a : Type} -> ((ω u : Unit) -> {Console, Files, Except IOError} a) -> (ω u : Unit) -> {Foreign} a
-consoled k u = consoleThrough (\_c -> filesThrough (filed k))
 
 -- | Исполняет программу ввода-вывода целиком: консоль, файлы, отказы и чужие
 -- вызовы - на верхнем уровне, где им больше некуда уходить.
@@ -283,10 +275,6 @@ consoled k u = consoleThrough (\_c -> filesThrough (filed k))
 -- вопрос 12): `main : {Console} Unit` исполняется сам. Отказ `IOError`,
 -- никем не пойманный, печатается в stderr и кончает процесс кодом 1; файлы,
 -- открытые в оборванной области, к этому моменту закрыты.
---
--- Хендлеры цепочки пишут сквозные метки явно: поднятый хвост их не пропускает
--- (§10 вопрос 242), а написанный `| e` дал бы `Foreign` дважды - её производит
--- каждый слой.
 run : {a : Type} -> ((ω u : Unit) -> {Console, Files, Except IOError} a) -> a
-run k = handle @Foreign (consoled k) with
+run k = handle @Foreign (\_u -> runConsole (\_c -> runFiles (\_f -> caught (\_x -> k MkUnit)))) with
   return v -> v

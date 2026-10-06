@@ -6905,8 +6905,9 @@ counter u = True
 fn a_written_row_tail_names_one_parameter_per_name() {
     // Написанный хвост закрывает подъём на своей позиции: полиморфизмом там
     // управляет программист (§3.4). Одно имя - один параметр, сколько бы раз
-    // оно ни встретилось; позиция без написанной row берёт переменную подъёма,
-    // и она у сигнатуры одна.
+    // оно ни встретилось. Промежуточная стрелка без написанной row пуста -
+    // частичное применение не производит (§10 вопрос 242), - а последняя
+    // берёт переменную подъёма, и она у сигнатуры одна.
     let signature = program(&format!(
         "{BASE}
 State : Type -> Effect
@@ -6916,15 +6917,17 @@ Log : Effect
 named : Bool -> {{State Bool | e}} Bool
 shared : Bool -> {{Log | e}} (Bool -> {{State Bool | e}} Bool)
 apart : Bool -> Bool -> {{State Bool | e}} Bool
+lifted : Bool -> Bool -> Bool
 "
     ));
     let arity = |name: &str| signature.lookup(name).expect("объявлено").row_arity;
     assert_eq!(arity("named"), 1, "написанный хвост - один параметр");
     assert_eq!(arity("shared"), 1, "два вхождения имени - тот же параметр");
+    assert_eq!(arity("apart"), 1, "промежуточная стрелка без записи пуста");
     assert_eq!(
-        arity("apart"),
-        2,
-        "позиция без записи берёт переменную подъёма"
+        arity("lifted"),
+        1,
+        "последняя стрелка без записи берёт подъём"
     );
 }
 

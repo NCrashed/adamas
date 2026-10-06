@@ -4140,8 +4140,14 @@ impl<'a> Lowerer<'a> {
             if !free.contains(&index) {
                 continue;
             }
+            // Пустой слот захватывать нечем, и он остаётся пустым внутри (§10
+            // вопрос 243). Свободным его делает не исполнение, а синтаксис:
+            // решение имплисита приезжает бета-редексом по всему контексту
+            // (`(\m1 m0 -> #1) #1 #0`) и называет параметр-единицу тела
+            // хендлера, у которой значения нет. Настоящее употребление
+            // откажет там же, где отказало бы без захвата, - в `expr`.
             let Slot::Bound(local, fact) = slot else {
-                return Err(LowerError::Unbound { index });
+                continue;
             };
             let mut fact = *fact;
             let mut value = if fact.present {
@@ -5559,7 +5565,14 @@ impl<'a> Lowerer<'a> {
                 asked |= self.tainted;
                 continue;
             };
-            if !row.labels().is_empty() || (row.tail().is_some() && self.tainted) {
+            // Метка без операций (маркер, `Foreign`) вектора не требует - тем же
+            // правилом [`form`] решает форму, и разойдись они, маркер,
+            // прошедший насквозь через хендлер, отвергался бы здесь.
+            let performing = row
+                .labels()
+                .iter()
+                .any(|label| performs(self.signature, label));
+            if performing || (row.tail().is_some() && self.tainted) {
                 asked = true;
             }
         }

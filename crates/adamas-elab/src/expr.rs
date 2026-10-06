@@ -3160,6 +3160,26 @@ impl<'a> Elaborator<'a> {
         ))
     }
 
+    /// Row стрелки сигнатуры: написанная - она, иначе подъём; у **промежуточной**
+    /// стрелки без написанной row - пустая (§3.4, §10 вопрос 242).
+    ///
+    /// Частичное применение каррированной функции ничего не производит - тело
+    /// исполняется при последнем аргументе. Поднятая `e` на промежуточной
+    /// стрелке гасилась бы при **первом** аргументе: `runA @T` склеивал хвост
+    /// `e` с окружающей раньше, чем колбэк называл свои метки, и колбэк с
+    /// меткой сверх гасимой отвергался. Написанная row на промежуточной стрелке
+    /// остаётся: её автор и говорит, что частичное применение эффектно.
+    fn curried_row(
+        &mut self,
+        written: Option<&Expr>,
+        codomain: &Expr,
+    ) -> Result<Row<Term>, ElabError> {
+        if written.is_none() && matches!(codomain.kind, ExprKind::Arrow(..) | ExprKind::Pi { .. }) {
+            return Ok(Row::empty());
+        }
+        self.effects(written)
+    }
+
     /// Row, написанная перед типом, в поле `Pi` (§3.4).
     ///
     /// Метка обязана оканчиваться сортом `Effect`: `{Maybe Int}` - не row, а
@@ -3242,7 +3262,10 @@ impl<'a> Elaborator<'a> {
         // под связыванием стрелки - там же, где стоит.
         let (row, codomain) = split_row(codomain);
         let (row, codomain) = self.under(&anonymous, mult, bound, |inner| {
-            Ok((inner.effects(row)?, inner.expr(codomain, default)?))
+            Ok((
+                inner.curried_row(row, codomain)?,
+                inner.expr(codomain, default)?,
+            ))
         })?;
         Ok(Term::Pi(
             // Стрелка пишется без скобок, поэтому связывание у неё явное:
@@ -6448,10 +6471,12 @@ impl<'a> Elaborator<'a> {
         let (row, body) = self.binding(
             Bound::owning(&first.name, first.mult, bound, owns),
             |inner| {
-                Ok((
-                    inner.effects(written)?,
-                    inner.pi_flat(rest, codomain, default)?,
-                ))
+                let row = if rest.is_empty() {
+                    inner.curried_row(written, codomain)?
+                } else {
+                    Row::empty()
+                };
+                Ok((row, inner.pi_flat(rest, codomain, default)?))
             },
         )?;
         let binder = match first.visibility {

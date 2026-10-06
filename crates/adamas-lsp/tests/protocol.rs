@@ -1045,7 +1045,7 @@ fn an_edit_in_a_module_moves_the_dependents_diagnostic() {
         mismatch[0]["message"].as_str().is_some_and(|it| {
             it.starts_with(
                 "несовпадение типов: ожидался `Std.Base.Nat`, \
-                 получен `(ω _ : Std.Base.Nat) -> Std.Base.Nat`",
+                 получен `(ω _ : Std.Base.Nat) -> {| ?0} Std.Base.Nat`",
             )
         }),
         "{mismatch}"

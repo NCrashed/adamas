@@ -167,3 +167,23 @@ fn a_marker_block_opening_the_file_documents_the_module() {
         "документация модуля досталась первому объявлению:\n{text}"
     );
 }
+
+/// Вшитый модуль называется именем: файла у него нет, и путём его не назвать.
+///
+/// Раздел - ровно его: программа из одной строки `import` своих объявлений
+/// не печатает, прелюдия, подключённая неявно, тоже не попадает.
+#[test]
+fn an_embedded_module_is_named_rather_than_pathed() {
+    let text = documentation(Path::new("Std.IO"));
+    let modules: Vec<&str> = text.lines().filter(|line| line.starts_with("# ")).collect();
+    assert_eq!(modules, ["# Модуль `Std.IO`"], "{text}");
+    let headings = headings(&text);
+    assert!(
+        headings.contains(&"`putLine : String -> {Console} Unit`"),
+        "{headings:?}"
+    );
+    assert!(
+        text.contains("main = putLine"),
+        "пример в шапке модуля:\n{text}"
+    );
+}

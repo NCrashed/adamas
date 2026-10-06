@@ -51,11 +51,57 @@ use adamas_parser::token::Comment;
 /// не проходит проверку. Документировать непроверенную программу значило бы
 /// печатать типы, которых у неё нет.
 pub(crate) fn run(path: &Path) -> anyhow::Result<String> {
+    if let Some(module) = embedded(path) {
+        let text = standard(module)?;
+        print!("{text}");
+        return Ok(text);
+    }
     let opened = crate::project::opened(path)?;
     let program = crate::project::analyzed(&opened.entry, opened.sources.as_ref())?;
     let text = rendered(&program, &opened.store);
     print!("{text}");
     Ok(text)
+}
+
+/// Имя вшитого модуля вместо пути: `adamas doc Std.IO`.
+///
+/// Файла у вшитого модуля нет, и путём его не назвать; путь, который
+/// существует, остаётся путём - свой `Std/IO.adamas` проекта сильнее вшитого и
+/// здесь.
+fn embedded(path: &Path) -> Option<&str> {
+    if path.exists() {
+        return None;
+    }
+    let name = path.to_str()?;
+    (name == adamas_elab::program::PRELUDE || adamas_elab::program::standard(name).is_some())
+        .then_some(name)
+}
+
+/// Документация одного вшитого модуля.
+///
+/// Программа собирается из одной строки `import` во временном каталоге - так
+/// модуль проверяется тем же путём, каким его подключает всякая программа, и
+/// печатается ровно его раздел.
+fn standard(module: &str) -> anyhow::Result<String> {
+    use anyhow::Context as _;
+
+    let dir = std::env::temp_dir().join(format!("adamas-doc-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("не удалось создать {}", dir.display()))?;
+    let entry = dir.join("Doc.adamas");
+    std::fs::write(&entry, format!("import {module}\n"))
+        .with_context(|| format!("не удалось записать {}", entry.display()))?;
+    let opened = crate::project::opened(&entry);
+    let analyzed =
+        opened.and_then(|opened| crate::project::analyzed(&opened.entry, opened.sources.as_ref()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let program = analyzed?;
+    Ok(program
+        .units
+        .iter()
+        .filter(|unit| unit.path.as_deref() == Some(module))
+        .map(|unit| documented(&program, unit))
+        .collect())
 }
 
 /// Документация программы целиком.

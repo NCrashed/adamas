@@ -507,6 +507,21 @@ instance Semigroup String where
 instance Monoid String where
   mempty = ""
 
+-- Байты двух массивов совпадают с ячейки `i` до конца первого.
+sameFrom : (ω n : UInt64) -> (ω k : UInt64) -> Array n UInt8 -> Array k UInt8 -> UInt64 -> Bool
+sameFrom n k xs ys i = case decide (ltUInt64 i n) of
+  No _end -> True
+  Yes p -> case decide (ltUInt64 i k) of
+    No _short -> False
+    Yes q -> if eqUInt8 (arrayIndex xs i p) (arrayIndex ys i q) then sameFrom n k xs ys (addUInt64 i 1) else False
+
+-- Тексты равны: та же длина и те же байты.
+sameText : String -> String -> Bool
+sameText (MkString n xs) (MkString k ys) = if eqUInt64 n k then sameFrom n k xs ys 0 else False
+
+instance Eq String where
+  eq x y = sameText x y
+
 -- # Текстовое представление (§4.6)
 --
 -- `Show` derivable по §4.6, но макросов пока нет, и инстансы написаны руками:

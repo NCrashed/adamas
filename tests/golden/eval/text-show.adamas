@@ -1,4 +1,4 @@
--- Склейка текста и `Show` прелюдии (§4.3, §4.6).
+-- Склейка текста, `Show` и `Eq String` прелюдии (§4.3, §4.6).
 --
 -- Ответ - взвешенная сумма байтов склеенного текста: байт на позиции `i`
 -- берётся с весом `i + 1`. Длина одна не различила бы обратный порядок цифр
@@ -11,7 +11,9 @@
 --   -7      45·7 + 55·8                                =  755
 --   False   70·9 + 97·10 + 108·11 + 115·12 + 101·13    = 5481
 --
--- Сумма 7419.
+-- Сумма 7419. К ней - `Eq String`: равные тексты дают 1, тексты разной длины
+-- 10, одной длины с разным байтом 100, пустой против `mempty` 1000, и
+-- верный ответ - 1001. Итого 8420.
 
 weighted : (ω n : UInt64) -> Array n UInt8 -> UInt64 -> UInt64 -> UInt64
 weighted n bytes i acc = case decide (ltUInt64 i n) of
@@ -21,8 +23,16 @@ weighted n bytes i acc = case decide (ltUInt64 i n) of
 checksum : String -> UInt64
 checksum (MkString n bytes) = weighted n bytes 0 0
 
+agreed : UInt64
+agreed =
+  let a : UInt64 = if "Привет" == "Привет" then 1 else 0
+  let b : UInt64 = if "Привет" == "Привет!" then 10 else 0
+  let c : UInt64 = if "ab" == "ac" then 100 else 0
+  let d : UInt64 = if "" == mempty then 1000 else 0
+  a + b + c + d
+
 main : UInt64
 main =
   let x : UInt64 = 120
   let y : Int64 = -7
-  checksum ("x=" <> show x <> ";" <> show y <> mempty <> show False)
+  checksum ("x=" <> show x <> ";" <> show y <> mempty <> show False) + agreed

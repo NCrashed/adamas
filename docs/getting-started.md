@@ -61,22 +61,51 @@ hello-adamas/
   src/Test.adamas    её тесты
 ```
 
-Заготовка — настоящая программа: `Main.adamas` объявляет унарные наты,
-`plus` с линейным аргументом и `main`, который считает; `Test.adamas`
-подключает вход как модуль и сверяет ответы. Имя пакета берётся из
-последнего сегмента пути, другое задаёт `--name`.
+Заготовка — настоящая программа. `Main.adamas` объявляет `greeting` над
+текстом, `triangle` над числом и `main`, который печатает оба:
+
+```adamas
+import Std.IO (Console, putLine)
+
+greeting : String -> String
+greeting name = "Привет, " <> name <> "!"
+
+triangle : UInt64 -> UInt64
+triangle n = if n == 0 then 0 else n + triangle (n - 1)
+
+main : {Console} Unit
+main =
+  putLine (greeting "мир")
+  putLine ("1 + 2 + ... + 10 = " <> show (triangle 10))
+```
+
+`Test.adamas` подключает вход как модуль и сверяет ответы. Имя пакета
+берётся из последнего сегмента пути, другое задаёт `--name`.
 
 ## 3. Прогнать команды
 
 ```sh
 adamas check .              # разобрать, элаборировать, проверить типы
 adamas check . --type main  # напечатать объявленный тип имени — то же, что hover
-adamas eval .               # посчитать main интерпретатором
+adamas eval .               # исполнить main интерпретатором
 adamas run .                # собрать в исполняемый файл и запустить
 adamas run . --backend llvm # то же через цепочку LLVM вместо порождённого C
 adamas test .               # каждое test*-определение типа Bool обязано дать True
-adamas build .              # только собрать; путь к бинарю печатается
+adamas build .              # только собрать; путь к бинарю печатается в stderr
+adamas doc Std.IO           # интерфейс вшитого модуля
 ```
+
+`eval` и `run` печатают одно и то же:
+
+```text
+Привет, мир!
+1 + 2 + ... + 10 = 55
+```
+
+`main`, чей тип несёт метки `Std.IO`, исполняется сам, и stdout целиком
+принадлежит программе: служебная строка `run` — «собрано в …» — уходит в
+stderr. `main` без меток (`main : UInt64`) печатает свой ответ, ответ `Unit`
+не печатается.
 
 `build` и `run` зовут `cc` (а с `--backend llvm` — `llvm-as`, `opt`, `llc`),
 и эти инструменты есть только в dev-окружении. Либо работайте изнутри
@@ -86,53 +115,101 @@ adamas build .              # только собрать; путь к бина�
 nix develop /путь/к/adamas --command bash -c 'adamas run ~/hello-adamas'
 ```
 
-`check`, `eval` и `test` внешних инструментов не зовут и работают где угодно.
+`check`, `eval`, `test` и `doc` внешних инструментов не зовут и работают где
+угодно.
 
 ## 4. Второй файл — второй модуль
 
-Файл — это модуль (§4.8). Положите рядом `src/Arith.adamas`:
+Файл — это модуль (§4.8). Положите рядом `src/Text.adamas`:
 
 ```adamas
-import Main (Nat, Zero, Succ, plus)
-
-triple : Nat -> Nat
-triple n = plus n (plus n n)
+-- | Приветствие громче.
+shout : String -> String
+shout s = s <> "!!!"
 ```
 
 и он подключается из любого другого файла проекта через
-`import Arith (triple)` — ровно так `Test.adamas` уже подключает `Main`.
+`import Text (shout)` — ровно так `Test.adamas` уже подключает `Main`.
 
-## 5. Прелюдия
+## 5. Прелюдия и стандартная библиотека
 
-Автоматически прелюдия не подключается — всегда явный `import`: приставленная
-неявно, она легла бы в те же неквалифицированные имена, что и сам модуль
-(`crates/adamas-elab/src/decl.rs`). Поэтому заготовка из `adamas new`
-объявляет свои `Nat` и `plus` сама.
+**Прелюдия** вшита в компилятор и подключается сама, без импорта (§4.4):
+`Bool`, `Unit`, `Option` (`None`/`Some`), `Result` (`Err`/`Ok`), `String`,
+арифметика `+`, `-`, `*` над примитивными числами (`Int8` … `UInt64`,
+`Float32`, `Float64`), сравнения `==`, `<` и соседи, `&&` и `||`, склейка
+текста `<>` и `show` для целых и `Bool`. Свой `Bool` или свой `show` в
+файле заслоняет прелюдный — как всякое своё имя.
 
-Своего пакета у прелюдии пока нет — она живёт библиотекой тестового корпуса,
-и практический путь сегодня — копия файла в проект:
+**Стандартная библиотека** вшита так же, но подключается **явным** импортом:
 
-```sh
-mkdir -p src/Std
-cp /путь/к/adamas/tests/golden/eval/Std/Prelude.adamas src/Std/
-```
+| Модуль | Что в нём |
+|---|---|
+| `Std.IO` | консоль (`putStr`, `putLine`, `readLine`) и файлы (`reading`, `writing`, `appending`) |
+| `Std.Except` | обрыв ошибкой: `Except e` с `throw`, `attempt` — ошибка значением |
 
-Дальше в любом файле — импорт открытым списком; семейство данных открывается
-вместе с конструкторами, `Nat` в списке даёт и `Zero`, и `Succ`:
+Интерфейс любого из них — `adamas doc Std.IO`, `adamas doc Std.Except`,
+`adamas doc Prelude`. Свой файл проекта на том же пути (`src/Std/IO.adamas`)
+сильнее вшитого.
+
+## 6. Ввод-вывод: консоль и файлы
+
+Метка в типе говорит, что функция делает с миром, и только это: `{Console}`
+печатает и читает консоль, а файла не тронет. Операции без аргументов
+исполняются там, где нужен их ответ:
 
 ```adamas
-import Std.Prelude (Nat, plus, List, length, mapList)
+import Std.IO (Console, putLine, readLine)
+
+counted : UInt64 -> {Console} UInt64
+counted n = case readLine of
+  None -> n
+  Some _line -> counted (n + 1)
+
+main : {Console} Unit
+main =
+  let n = counted 0
+  putLine ("строк: " <> show n)
 ```
 
-Внутри — 297 строк research-уровня: `Bool`/`Nat`/`Maybe`/`List`, классы с
-суперклассами, комбинаторы. Это не стандартная библиотека в полном смысле, и
-приватности у копии нет: всё, что в файле, видно любому, кто напишет путь
-(§10, вопрос 180). Путь «как задумано» — git-зависимость в `adamas.toml`
-(§7.3): ключ `[dependencies]` — префикс путей модулей, и `Std.Prelude`
-приезжает из чекаута названного репозитория; он заработает, когда прелюдия
-получит свой пакет.
+```sh
+printf 'a\nb\nc\n' | adamas run lines.adamas    # строк: 3
+```
 
-## 6. Диагностика в редакторе
+`readLine` у конца ввода отвечает `None`; пустая строка — это `Some ""`.
+
+**Файл** читается и пишется внутри области: `reading path k` открывает его и
+исполняет `k`, а внутри `k` строки отдаёт `nextLine`; `writing` и `appending`
+— то же для `emit` и `emitLine`. Файл закрывается на выходе из `k`, в том
+числе на обрыве. Колбэк вправе печатать в консоль и открывать второй файл —
+так файл копируется:
+
+```adamas
+import Std.IO (Console, Files, IOError, Reading, Writing, reading, writing, nextLine, emitLine)
+import Std.Except (Except)
+
+copying : UInt64 -> {Reading, Writing} UInt64
+copying n = case nextLine of
+  None -> n
+  Some s ->
+    emitLine s
+    copying (n + 1)
+
+into : {Reading, Files, Except IOError} UInt64
+into = writing "out.txt" (copying 0)
+
+main : {Console, Files, Except IOError} UInt64
+main = reading "in.txt" into
+```
+
+Отказ — `Except IOError` (`CannotOpen`, `CannotWrite`). Никем не пойманный,
+он печатается в stderr — `ошибка: не открывается файл in.txt` — и кончает
+программу кодом 1; поймать его можно `attempt` из `Std.Except`.
+
+Смысл операциям задаёт хендлер, а не объявление: тест вправе исполнить ту же
+программу своим хендлером `Console` — с заготовленным вводом и без консоли.
+Пример — `tests/golden/eval/console-scripted.adamas`.
+
+## 7. Диагностика в редакторе
 
 Оба плагина — клиенты к одному `adamas-lsp` и показывают те же ошибки, что
 печатает `adamas check`, на точной позиции. Подсветки синтаксиса пока нет.
@@ -155,8 +232,8 @@ shell'а с выставленным `PATH` (например, из меню р�
 ```
 
 Проверка, что сервер живой, — сломать программу: замените в `Main.adamas`
-`double n = plus n n` на `double n = plus n m`, и подчёркивание появится
-ровно на `m`, с тем же текстом, что выдал бы `adamas check`.
+`name <> "!"` на `nam <> "!"`, и подчёркивание появится ровно на `nam`, с
+тем же текстом, что выдал бы `adamas check`.
 
 Поставить расширение насовсем, а не в dev-режиме:
 

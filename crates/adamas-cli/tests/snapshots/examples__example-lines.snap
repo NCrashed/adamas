@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/examples.rs
+expression: text
+---
+lines: 0

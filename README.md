@@ -15,7 +15,7 @@ travels the whole path — text, tree, core terms, type checking — and then ru
 three ways: `adamas eval` interprets it, and `adamas build` compiles it through
 either backend, C or LLVM. All three must answer the *same thing*, and a
 disagreement fails the build: that contract is checked on every gate run over
-155 of the 156 corpus programs. The one program neither backend takes returns a
+182 of the 183 corpus programs. The one program neither backend takes returns a
 function, and printing one is a question about the language, not about a
 backend.
 
@@ -29,6 +29,53 @@ research-grade prototype.
 
 Note on language: the design document, the code comments and the compiler's
 diagnostics are in Russian. This README is the English entry point.
+
+## Hello, world
+
+```adamas
+import Std.IO (Console, putLine)
+
+main : {Console} Unit
+main = putLine "Hello, world"
+```
+
+```sh
+adamas run hello.adamas      # compiles through C and runs
+adamas eval hello.adamas     # the same through the interpreter
+```
+
+`{Console}` in the type says what `main` does to the world, and only that: it
+prints, it does not touch files. A `main` whose type carries labels from
+`Std.IO` runs under the library's handler, so the program prints itself and
+the driver adds nothing to standard output.
+
+Counting the lines on standard input reads an operation and recurses; the
+prelude brings `String`, `<>`, `show` and `==` without an import:
+
+```adamas
+import Std.IO (Console, putLine, readLine)
+
+counted : UInt64 -> {Console} UInt64
+counted n = case readLine of
+  None -> n
+  Some _line -> counted (n + 1)
+
+main : {Console} Unit
+main =
+  let n = counted 0
+  putLine ("lines: " <> show n)
+```
+
+Files are read and written inside a scope that closes them on every exit,
+including an error: `reading "in.txt" k` answers `nextLine` with the file's
+lines inside `k`, `writing` and `appending` do the same for `emit`. A failure
+is `Except IOError`; nobody catching it means a message on standard error and
+exit code 1. `adamas doc Std.IO` prints the module's interface.
+
+Both programs are [`docs/examples/hello.adamas`](docs/examples/hello.adamas) and
+[`docs/examples/lines.adamas`](docs/examples/lines.adamas), checked and run by the gate. To
+build the `adamas` binary, see [Building](#building); to start a project with
+tests, [`docs/getting-started.md`](docs/getting-started.md).
 
 ## Examples
 
@@ -204,8 +251,8 @@ crates/adamas-lsp         the language server: diagnostics, hover, go to
 crates/adamas-warmup-stlc a phase-0 exercise: STLC + HM, standalone
 ```
 
-Roughly 166k lines of Rust, 5.5k lines of C in the runtime, and 1650 tests. What
-the language accepts is visible in [`tests/golden/`](tests/golden/): 337
+Roughly 173k lines of Rust, 5.6k lines of C in the runtime, and 1700 tests. What
+the language accepts is visible in [`tests/golden/`](tests/golden/): 411
 fixtures — programs that must be accepted, programs that must be refused with a
 recorded message, and programs whose value is recorded too.
 
@@ -213,9 +260,9 @@ Beyond the examples above: type classes with superclasses, default methods
 (checked once in the class, expanded in each instance) and
 multiplicity-polymorphic methods; modules, signatures, functors, sealing and
 implicit functor parameters; propositional equality with `subst` and `sym`,
-decidability, and proof irrelevance through truncation; a 370-line prelude
+decidability, and proof irrelevance through truncation; a 600-line prelude
 (numeric classes and operators, `Eq` and `Ord` with `==`, `<` and friends,
-short-circuit `&&` and `||`) and a 942-line interpreter for a small object
+short-circuit `&&` and `||`, `String` with `<>` and `Show`) and a 942-line interpreter for a small object
 language, both written in Adamas and run by `adamas eval`.
 
 The toolchain has caught up with the compiler: `adamas fmt` rewrites a file to
@@ -286,7 +333,7 @@ does not depend on it. What it taught is in
 | [`docs/getting-started.md`](docs/getting-started.md) | From nothing to a running program: `adamas new`, every driver command, a second module, the prelude, diagnostics in the editor. In Russian, like the rest of `docs/`. |
 | [`docs/reading-notes/`](docs/reading-notes/) | Notes on the key papers (QTT, Perceus, effect handlers). |
 | [`tests/golden/`](tests/golden/) | Adamas programs the compiler accepts today, with their expected output. |
-| [`docs/examples/`](docs/examples/) | Four programs chosen for what makes the language *different* — multiplicities, effects, regions, FFI. Each is checked, run against a recorded answer, documented and kept canonical by the gate. |
+| [`docs/examples/`](docs/examples/) | Six programs: the hello world and line counter from above, then four chosen for what makes the language *different* — multiplicities, effects, regions, FFI. Each is checked, run against a recorded answer, documented and kept canonical by the gate. |
 | [`demo/asteroids/`](demo/asteroids/) | Asteroids on SDL2: the largest program in the repository, and the one that drives what the language fixes next. Needs SDL2 (the Nix shell has it); `adamas run` in that directory. |
 | [`docs/phase*-plan.md`](docs/) | How each phase is cut into tracks: what parallelises, what does not, and what counts as done. Alongside them, one notes file per track with what was measured and what the measurement rejected. |
 | [`docs/measurements/`](docs/measurements/) | Every performance claim in this README, with its conditions, its spread, and one command per row. Where a number was retracted, the retraction is there too. |
@@ -313,8 +360,8 @@ cargo test --workspace --all-targets
 Try an example:
 
 ```sh
-cargo run -p adamas-cli -- check tests/golden/eval/state.adamas
-cargo run -p adamas-cli -- eval tests/golden/eval/state.adamas main
+cargo run -p adamas-cli -- run docs/examples/hello.adamas
+echo -e "a\nb" | cargo run -q -p adamas-cli -- eval docs/examples/lines.adamas
 ```
 
 To start a project of your own instead, see

@@ -7125,10 +7125,10 @@ impl<'a> Elaborator<'a> {
             return self.statements(rest, position);
         };
         if !binding.params.is_empty() {
-            return Err(ElabError::Missing {
-                what: Missing::LocalDefinitions,
-                span: binding.span,
-            });
+            let lambda = local_function(binding)?;
+            let mut bindings = bindings.to_vec();
+            bindings[0] = lambda;
+            return self.bindings(&bindings, rest, position);
         }
         if let Some(pattern) = &binding.pattern {
             return self.destructured(binding, pattern, tail, rest, position);
@@ -9060,4 +9060,51 @@ fn bytes_term(bytes: &[u8]) -> Term {
         PrimTy::UInt64,
         bytes.len() as u64,
     ))])
+}
+
+/// `let f x y : T = e` - замыкание `let f : T = \x y -> e` (§4.1, решение
+/// 2026-10-06).
+///
+/// `T` - полный тип функции, как в сигнатуре и в `where`: лямбда без
+/// ожидаемого типа не синтезируется, и тип обязателен. Рекурсии нет - имя
+/// связывается после тела, - и тело, назвавшее себя, отвергается с подсказкой:
+/// рекурсивная локальная функция пишется в `where`, где она поднимается на
+/// верхний уровень.
+fn local_function(binding: &Binding) -> Result<Binding, ElabError> {
+    let refused = |why: &str| ElabError::LocalDefinition {
+        name: Rc::clone(&binding.name.text),
+        why: why.to_owned(),
+        span: binding.name.span,
+    };
+    if binding.ty.is_none() {
+        return Err(refused(
+            "у локальной функции нет типа: напишите полный тип после параметров \
+             (`let f x : A -> B = …`)",
+        ));
+    }
+    if crate::unused::uses(&binding.body, &[&binding.name.text]) {
+        return Err(refused(
+            "тело зовёт само себя, а рекурсия в `let` не пишется: рекурсивная \
+             локальная функция пишется в `where`",
+        ));
+    }
+    let params = binding
+        .params
+        .iter()
+        .map(|pattern| ast::LamParam {
+            kind: ast::LamParamKind::Pattern(pattern.clone()),
+            span: pattern.span,
+        })
+        .collect();
+    Ok(Binding {
+        params: Vec::new(),
+        body: Expr {
+            kind: ExprKind::Lam {
+                params,
+                body: Box::new(binding.body.clone()),
+            },
+            span: binding.body.span,
+        },
+        ..binding.clone()
+    })
 }

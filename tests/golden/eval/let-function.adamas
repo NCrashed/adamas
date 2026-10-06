@@ -1,0 +1,23 @@
+-- Локальная функция в блоке: `let f x : T = e` (§4.1, решение 2026-10-06).
+--
+-- Это замыкание `let f : T = \x -> e`: оно захватывает любые связывания выше,
+-- и тип `T` - полный тип функции, как в сигнатуре. Рекурсии нет - рекурсивная
+-- локальная функция пишется в `where`.
+--
+--   step 3 + step 4           захват `base`: 30 + 40          = 70
+--   add 3 4                   два параметра                   =  7
+--   shifted 4                 захват параметра клаузы: 5 + 5 = 10
+--
+-- 70 + 7 + 10 = 87.
+
+shifted : UInt64 -> UInt64
+shifted n =
+  let plus k : UInt64 -> UInt64 = k + n + 1
+  plus 0 + plus 0
+
+main : UInt64
+main =
+  let base : UInt64 = 10
+  let step k : UInt64 -> UInt64 = k * base
+  let add a b : UInt64 -> UInt64 -> UInt64 = a + b
+  step 3 + step 4 + add 3 4 + shifted 4

@@ -124,6 +124,16 @@ fn walk(
                     span: decl.span,
                 });
             }
+            DeclKind::Resource(resource) => {
+                let (members, raised) = class_members(&resource.members, errors, taken);
+                out.extend(raised);
+                let mut resource = resource.clone();
+                resource.members = members;
+                out.push(Decl {
+                    kind: DeclKind::Resource(resource),
+                    span: decl.span,
+                });
+            }
             DeclKind::Mutual(members) => {
                 let mut inner = Vec::new();
                 walk(members, true, &mut inner, errors, taken);
@@ -495,7 +505,7 @@ fn prefixed(body: &Expr, locals: &[Local], calls: &[Option<(Name, Vec<Name>)>]) 
     }
 }
 
-/// Члены класса и инстанса: локальные определения метода поднимаются, а
+/// Члены класса, инстанса и ресурса: локальные определения метода поднимаются, а
 /// поднятые встают перед самим объявлением - в теле класса места им нет.
 ///
 /// Сигнатура метода есть у класса, а у инстанса её нет: тип пишет класс. Без

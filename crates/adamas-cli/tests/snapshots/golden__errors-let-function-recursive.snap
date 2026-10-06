@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: let-function-recursive.adamas:8:7: локальное определение `go`: тело зовёт само себя, а рекурсия в `let` не пишется: рекурсивная локальная функция пишется в `where`
+    let go k : UInt64 -> UInt64 = if k == 0 then 0 else go (k - 1)
+        ^^

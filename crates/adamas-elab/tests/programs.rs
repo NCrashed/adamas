@@ -1164,10 +1164,6 @@ fn what_the_core_cannot_carry_yet_names_itself() {
             Missing::Tuple,
         ),
         ("f : Nat\nf = ()\n", Missing::Unit),
-        (
-            "f : Nat -> Nat\nf x =\n  let g y = y\n  g x\n",
-            Missing::LocalDefinitions,
-        ),
     ];
     for (text, expected) in missing {
         let text = format!("{BASE}{text}");

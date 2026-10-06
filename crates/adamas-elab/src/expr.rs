@@ -2908,6 +2908,19 @@ impl<'a> Elaborator<'a> {
         let Some(ty) = self.synthesized(&value) else {
             return Err(ElabError::NotMatchable { span });
         };
+        // Разбираемое-приостановка исполняется (§3.4, решение 2026-10-06):
+        // `case readLine of …` разбирает ответ операции. Функцию по
+        // конструкторам не разобрать, и другого прочтения у записи нет; `if`
+        // над эффектным `Bool` - тот же разбор и получает правило заодно.
+        let (value, ty) = if self.computation(&ty) {
+            let value = self.run(value);
+            let Some(ty) = self.synthesized(&value) else {
+                return Err(ElabError::NotMatchable { span });
+            };
+            (value, ty)
+        } else {
+            (value, ty)
+        };
         // Единственная ветка-кортеж - разбор записи, а не по конструктору (§10
         // вопрос 231): `case p of (a, b) -> …` значит то же, что `let (a, b) = p`.
         if let [alt] = alts {

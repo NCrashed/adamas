@@ -1,0 +1,45 @@
+-- Разбираемое-приостановка исполняется (§3.4, решение 2026-10-06).
+--
+-- `case next of …` разбирает **ответ** операции: функцию по конструкторам не
+-- разобрать, и другого прочтения у записи нет. До правки ответ был «разбирать
+-- нечего: значение имеет тип `(ω _ : Unit) -> {Feed} Option UInt64`», и
+-- писать приходилось `let x : Option UInt64 = next`. `if` над эффектным
+-- `Bool` - тот же разбор и получает правило заодно.
+--
+-- `Feed` отдаёт 5, 6, 7 и кончается; `summed` складывает - 18. `Flag`
+-- отвечает `True`, и `if` выбирает 100. Ответ 118.
+
+effect Feed where
+  next : Option UInt64
+
+effect Flag where
+  ask : Bool
+
+summed : UInt64 -> {Feed} UInt64
+summed acc = case next of
+  None -> acc
+  Some x -> summed (acc + x)
+
+first : UInt64
+first = 5
+
+-- Состояние ленты - следующее значение; на восьми она кончается.
+fed : ((ω u : Unit) -> {Feed} UInt64) -> UInt64
+fed k = handle k with
+  state first
+  return v -> v
+  next -> resume (if state < 8 then Some state else None) (state + 1)
+
+feeding : {Feed} UInt64
+feeding = summed 0
+
+flagged : {Flag} UInt64
+flagged = if ask then 100 else 0
+
+answered : ((ω u : Unit) -> {Flag} UInt64) -> UInt64
+answered k = handle k with
+  return v -> v
+  ask -> resume True
+
+main : UInt64
+main = fed feeding + answered flagged

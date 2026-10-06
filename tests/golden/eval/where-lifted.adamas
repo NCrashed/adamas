@@ -1,0 +1,73 @@
+-- Локальные определения `where` (§4.1, решение 2026-10-06).
+--
+-- Ядро знает только определения верхнего уровня, и локальная функция
+-- поднимается туда: `count#go` с захваченными параметрами клаузы первыми. Тело
+-- клаузы начинается с `let go = count#go …` - частичным применением, -
+-- поэтому рекурсия, взаимная рекурсия и обращение к владельцу пишутся как
+-- обычно. Значение без параметров - `let` в начале тела, без сигнатуры.
+--
+-- Ответ - сумма шести частей:
+--
+--   doubled 3                 значение с захватом: (3 + 1) * 2       =   8
+--   count 4                   рекурсивный помощник: 4 + 3 + 2 + 1    =  10
+--   scaled 2 3                значение, которое зовёт функция: 3 * 20 = 60
+--   parity 10                 соседи зовут друг друга и владельца     = 100
+--   nested 5                  `where` внутри поднятого                =   6
+--   size True + size 5        `where` в методе инстанса: 1 + 4        =   5
+--
+-- 8 + 10 + 60 + 100 + 6 + 5 = 189.
+
+doubled : UInt64 -> UInt64
+doubled x = y + y
+  where
+    y = x + 1
+
+count : UInt64 -> UInt64
+count n = go n 0
+  where
+    go : UInt64 -> UInt64 -> UInt64
+    go k acc = if k == 0 then acc else go (k - 1) (acc + k)
+
+scaled : UInt64 -> UInt64 -> UInt64
+scaled step n = go n 0
+  where
+    unit = step * 10
+    go : UInt64 -> UInt64 -> UInt64
+    go k acc = if k == 0 then acc else go (k - 1) (acc + unit)
+
+parity : UInt64 -> UInt64
+parity n = if isEven n then 100 else 0
+  where
+    isEven : UInt64 -> Bool
+    isEven k = if k == 0 then True else isOdd (k - 1)
+    isOdd : UInt64 -> Bool
+    isOdd k = if k == 0 then False else if k == 1 then parity 0 == 100 else isEven (k - 1)
+
+nested : UInt64 -> UInt64
+nested n = outer n
+  where
+    outer : UInt64 -> UInt64
+    outer k = k + one
+      where
+        one : UInt64
+        one = 1
+
+class Sized a where
+  size : a -> UInt64
+
+instance Sized Bool where
+  size b = go
+    where
+      go : UInt64
+      go = if b then 1 else 0
+
+instance Sized UInt64 where
+  size n = go 3
+    where
+      go : UInt64 -> UInt64
+      go k = k + 1
+
+main : UInt64
+main =
+  let five : UInt64 = 5
+  doubled 3 + count 4 + scaled 2 3 + parity 10 + nested 5 + size True + size five

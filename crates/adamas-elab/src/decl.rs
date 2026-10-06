@@ -784,6 +784,13 @@ fn members_into(
 ) {
     // Сигнатуры, ставшие постулатами по ходу прогона: клаузы, пришедшие за
     // ними, - не «нет сигнатуры», а сигнатура не рядом.
+    // Локальные определения поднимаются до объявлений (§4.1): дальше их
+    // видят обычными определениями верхнего уровня.
+    let (lifted, failed) = crate::lift::lifted(decls);
+    for error in failed {
+        refusals.refused(error, Vec::new());
+    }
+    let decls = lifted.as_slice();
     let mut postulated: HashMap<Symbol, Span> = HashMap::new();
     let mut pending: Option<Pending<'_>> = None;
     for decl in decls {

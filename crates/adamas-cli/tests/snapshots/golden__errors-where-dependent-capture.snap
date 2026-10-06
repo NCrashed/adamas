@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: where-dependent-capture.adamas:14:5: локальное определение `go`: захватывает `bytes`, чей тип зависит от другого параметра; передайте его аргументом
+      go : UInt64 -> UInt64
+      ^^

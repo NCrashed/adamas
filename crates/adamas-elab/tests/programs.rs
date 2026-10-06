@@ -1165,7 +1165,7 @@ fn what_the_core_cannot_carry_yet_names_itself() {
         ),
         ("f : Nat\nf = ()\n", Missing::Unit),
         (
-            "f : Nat -> Nat\nf x = y\n  where\n    y : Nat\n    y = x\n",
+            "f : Nat -> Nat\nf x =\n  let g y = y\n  g x\n",
             Missing::LocalDefinitions,
         ),
     ];

@@ -58,6 +58,7 @@ mod expr;
 pub mod fixity;
 mod flat;
 pub mod lifecycle;
+mod lift;
 mod live;
 pub mod mono;
 mod own;

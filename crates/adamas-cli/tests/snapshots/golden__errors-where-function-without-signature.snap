@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Error: where-function-without-signature.adamas:10:5: локальное определение `g`: у функции нет сигнатуры, а поднятой на верхний уровень она нужна, как всякому определению
+      g z = z * 2
+      ^

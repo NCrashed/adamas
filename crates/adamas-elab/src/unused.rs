@@ -291,7 +291,7 @@ pub(crate) fn unused_imports(decls: &[Decl], signature: &Signature) -> Vec<Warni
 
 /// Употреблено ли в объявлении одно из имён - в типе, паттерне, выражении,
 /// метке row, `using`, ветке хендлера или фикситете.
-fn decl_uses(decl: &Decl, wanted: &[&Symbol]) -> bool {
+pub(crate) fn decl_uses(decl: &Decl, wanted: &[&Symbol]) -> bool {
     fn any<'e>(mut exprs: impl Iterator<Item = &'e Expr>, wanted: &[&Symbol]) -> bool {
         exprs.any(|it| uses(it, wanted))
     }
@@ -361,7 +361,7 @@ fn label_uses(label: &ast::EffectLabel, wanted: &[&Symbol]) -> bool {
 }
 
 /// Употребление в выражении - во всех позициях, где стоит написанное имя.
-fn uses(expr: &Expr, wanted: &[&Symbol]) -> bool {
+pub(crate) fn uses(expr: &Expr, wanted: &[&Symbol]) -> bool {
     let recur = |inner: &Expr| uses(inner, wanted);
     // Имена, которые форма читает по соглашению, не написав их (§4.1, §4.3):
     // `if` - разбор по `True`/`False`, литерал - `Zero`/`Succ`, умолчания и

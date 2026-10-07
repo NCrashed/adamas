@@ -13,10 +13,6 @@
 -- Семейство группы назвать можно: у конструкторов взаимная рекурсия
 -- настоящая.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Box : Nat -> Type where
   MkBox : Box Zero
 

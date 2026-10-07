@@ -9,10 +9,6 @@
 --
 -- В рантайме тот же инстанс разрешён - см. programs/class-partial.adamas.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 class Loop a where
   spin : a -> a
 

@@ -22,10 +22,6 @@ type Layout = { size : UInt32, align : UInt32 }
 class Flat a where
   layout : Layout
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 main : Nat
 main =
   let one : Nat = Succ Zero

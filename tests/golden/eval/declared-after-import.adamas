@@ -12,10 +12,6 @@
 
 import Flags.Lib (Flag, Up, Down)
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 before : Flag -> Nat
 before Up = Succ Zero
 before Down = Zero

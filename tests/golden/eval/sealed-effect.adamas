@@ -23,10 +23,6 @@
 -- ответу каждого. Обратная сторона - `errors/sealed-operation.adamas`, где
 -- снаружи пытаются написать своё погашение над тем же `pending`.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Unit where
   MkUnit : Unit
 

@@ -4,10 +4,6 @@
 -- связывает. Без него `Zeroo` было бы переменной, ловящей всё, и клауза ниже
 -- стала бы недостижимой молча.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 isZero : Nat -> Nat
 isZero Zeroo = Zero
 isZero (Succ k) = k

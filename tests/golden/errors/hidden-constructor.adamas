@@ -6,10 +6,6 @@
 -- скрыто». Сосед, где семейство сигнатурой объявлено и отказ говорит про
 -- представление, - `errors/sealed-constructor.adamas`.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 module type Counter where
   type T
   zero : T

@@ -25,10 +25,6 @@
 -- `:>` спрятал бы эффект целиком (вопрос 166), и отказ пришёлся бы на саму
 -- метку, а не на погашение; тот случай - `errors/hidden-effect.adamas`.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Unit where
   MkUnit : Unit
 

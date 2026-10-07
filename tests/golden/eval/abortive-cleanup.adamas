@@ -25,10 +25,6 @@
 data Unit where
   MkUnit : Unit
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Pair where
   MkPair : Nat -> Nat -> Pair
 

@@ -7,10 +7,6 @@
 -- Написать то же самое над `Nat` можно и сегодня - `zero`-паттерном
 -- конструктора, - и отказ на это указывает типом разбираемого.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 shrink : Nat -> Nat
 shrink 0 = Zero
 shrink (Succ k) = k

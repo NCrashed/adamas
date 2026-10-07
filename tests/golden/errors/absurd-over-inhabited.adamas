@@ -12,9 +12,5 @@
 -- Ближайший проходящий сосед - `programs/absurd.adamas`: та же форма над
 -- семейством без конструкторов.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 wrong : Nat -> Nat
 wrong n = case n of

@@ -8,10 +8,6 @@
 data Unit where
   MkUnit : Unit
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 effect Log where
   note : Nat -> Unit
 

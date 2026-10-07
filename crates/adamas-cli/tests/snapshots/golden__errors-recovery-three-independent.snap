@@ -2,14 +2,14 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: recovery-three-independent.adamas:17:7: имя `alpha` не найдено
+Error: recovery-three-independent.adamas:13:7: имя `alpha` не найдено
   one = alpha
         ^^^^^
 
-recovery-three-independent.adamas:20:7: имя `beta` не найдено
+recovery-three-independent.adamas:16:7: имя `beta` не найдено
   two = beta
         ^^^^
 
-recovery-three-independent.adamas:23:9: имя `gamma` не найдено
+recovery-three-independent.adamas:19:9: имя `gamma` не найдено
   three = gamma
           ^^^^^

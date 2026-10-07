@@ -13,10 +13,6 @@ data Bool where
   False : Bool
   True : Bool
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Pair (a : Type) (b : Type) where
   MkPair : a -> b -> Pair a b
 

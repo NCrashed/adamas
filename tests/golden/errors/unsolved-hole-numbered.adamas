@@ -5,18 +5,14 @@
 -- выражение программы; сквозной номер к тому же зависел от соседних
 -- объявлений. Теперь - `Box (?0)`.
 
-data Nat where
-  Z : Nat
-  S : Nat -> Nat
-
 data Box : Nat -> Type where
   MkBox : (0 m : Nat) -> Int32 -> Box m
 
 size : {0 n : Nat} -> Box n -> Int32
 size (MkBox m x) = x
 
-bad : Box Z -> Int32
+bad : Box Zero -> Int32
 bad b = size b + size True
 
 main : Int32
-main = bad (MkBox Z 1)
+main = bad (MkBox Zero 1)

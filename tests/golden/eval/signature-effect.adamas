@@ -17,10 +17,6 @@
 -- наружу вместе со своей меткой, а снять её умеют только `run` и `runZero`.
 -- Значение - `[3, 0]`, по ответу каждого.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Unit where
   MkUnit : Unit
 

@@ -18,10 +18,6 @@
 -- До правки `rec` и `left` отказывали «аргумент не выведен», а `count` брал
 -- умолчание прелюдии и отказывал «инстанс `Plus Int64` не найден».
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 class Plus a where
   plus : a -> a -> a
 

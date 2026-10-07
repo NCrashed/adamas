@@ -11,10 +11,6 @@
 -- конструктор ставит плоское поле рядом с указательным - слоты не должны
 -- перепутаться.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Row where
   End : Row
   Item : Int64 -> Row -> Row

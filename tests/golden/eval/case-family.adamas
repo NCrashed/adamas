@@ -12,10 +12,6 @@
 -- написана автором. Отсюда и мера - `mirror`: переставленные поддеревья видны
 -- в напечатанном значении, а не только в вердикте проверки.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Tree (a : Type) where
   Leaf : Tree a
   Node : Tree a -> a -> Tree a -> Tree a

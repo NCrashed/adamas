@@ -2,10 +2,6 @@
 -- соглашению, как `Bool` у `if`; хвост каждого звена вложен в предыдущее,
 -- поэтому мера у списка - его длина, а не соседство.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a

@@ -9,7 +9,7 @@
 -- Ответ складывает оба, и потому различает их: своё `size` удваивает, метод на
 -- `True` даёт два. Подмени одно другим - сумма станет иной.
 
-import Sized.Measure (Nat, Zero, Succ)
+import Sized.Measure
 
 size : Nat -> Nat
 size Zero = Zero

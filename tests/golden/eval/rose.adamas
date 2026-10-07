@@ -10,10 +10,6 @@
 -- Обходилось ручным разворотом `List` под каждый вложенный тип; пара к этому
 -- файлу осталась в `programs/` - там же взаимная рекурсия по развёрнутому.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a

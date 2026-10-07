@@ -15,10 +15,6 @@
 --
 -- Хендлер отвечает нулём - он и есть значение.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Unit where
   MkUnit : Unit
 

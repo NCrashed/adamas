@@ -10,10 +10,6 @@ data Bool where
   False : Bool
   True : Bool
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 -- Тождество: индексированное семейство с одним конструктором. `a` и `x` -
 -- параметры, третий аргумент - индекс, и разбор решает именно его.
 data Eqv (a : Type) (x : a) : a -> Type where

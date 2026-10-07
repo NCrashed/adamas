@@ -4,10 +4,6 @@
 -- неработающей не отличается, а параметр кратности стёрт и до рантайма не
 -- доходит вовсе - ровно этого от него и ждут.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a

@@ -8,10 +8,6 @@
 -- семействе, а ставится она, когда модуль проверен целиком, - внутри тела
 -- конструкторы поэтому видны, и `start` ниже собран именно ими.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 module type Counter where
   type T
   start : T

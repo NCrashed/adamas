@@ -3,10 +3,6 @@
 -- `head` разбирает `Vect (Succ n)`, и ветви `Nil` у него не бывает вовсе:
 -- унификация индексов делает её невозможной, а не «непокрытой» (§9 Фаза 1).
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Bool where
   False : Bool
   True : Bool

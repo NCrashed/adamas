@@ -12,10 +12,6 @@ data Bool where
   True : Bool
   False : Bool
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 confused : Int64 -> Int64
 confused 0 = 0
 confused Zero = 1

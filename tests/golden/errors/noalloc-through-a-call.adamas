@@ -9,10 +9,6 @@
 -- вызываемое тоже без атрибута, но оно ничего не строит. Здесь достаточно
 -- заменить тело `wrap` на `wrap n = n`.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 wrap : Nat -> Nat
 wrap n = Succ n
 

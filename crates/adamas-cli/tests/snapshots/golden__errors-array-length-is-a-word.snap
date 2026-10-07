@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: array-length-is-a-word.adamas:13:13: несовпадение типов: ожидался `UInt64`, получен `Nat`
+Error: array-length-is-a-word.adamas:9:13: несовпадение типов: ожидался `UInt64`, получен `Nat`
   bad : Array (Succ Zero) Int64
               ^^^^^^^^^^^

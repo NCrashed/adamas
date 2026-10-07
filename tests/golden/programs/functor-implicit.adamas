@@ -26,10 +26,6 @@ data Bool where
   False : Bool
   True : Bool
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 module type Ordered where
   type T
   lte : T -> T -> Bool

@@ -7,9 +7,5 @@
 -- Названная цена, и она у́же исходной: до этого у члена не писался и одиночный
 -- параметр.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 class Twice (f : Type -> Type) where
   twice : {q r : Mult} -> (ω g : (q * r x : Nat) -> Nat) -> f Nat -> Nat

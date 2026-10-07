@@ -3,10 +3,6 @@
 -- Тотальность выводится, а не объявляется (§4.7): `plus` уменьшается по
 -- первому аргументу, и вердикт нужен ядру, чтобы разворачивать её δ.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Bool where
   False : Bool
   True : Bool

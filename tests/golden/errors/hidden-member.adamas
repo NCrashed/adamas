@@ -9,10 +9,6 @@
 -- вместо `:>` - прозрачная аннотация не прячет, и та же строка проходит
 -- (`programs/module-superset.adamas`).
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 module type Counter where
   type T
   zero : T

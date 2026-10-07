@@ -6,10 +6,6 @@
 -- они потом заземлят, и арности разошлись бы. Поэтому обобщение отложено до
 -- фазы B1½ и идёт совместно по kind'у и типам конструкторов.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Bool where
   False : Bool
   True : Bool

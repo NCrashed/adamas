@@ -8,10 +8,6 @@
 -- Конструктор без рантайм-полей объектом не становится вовсе (ABI, лог
 -- 2026-09-08), поэтому `Zero` и `Leaf` тоже законны.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Tree (a : Type) where
   Leaf : Tree a
   Node : Tree a -> a -> Tree a -> Tree a

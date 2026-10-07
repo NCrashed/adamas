@@ -6,10 +6,6 @@
 -- - и это ближайший проходящий сосед: `module Narrowed : Counter = Nats`,
 -- затем `Twice Narrowed` (`programs/module-adapter.adamas`).
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 module type Counter where
   type T
   zero : T

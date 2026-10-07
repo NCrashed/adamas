@@ -8,10 +8,6 @@ data Bool where
   False : Bool
   True : Bool
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 type Point = { x : Nat, y : Nat }
 
 origin : Point

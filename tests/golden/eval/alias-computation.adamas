@@ -17,10 +17,6 @@ data Bool where
   False : Bool
   True : Bool
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 effect Amb where
   toss : Bool
 

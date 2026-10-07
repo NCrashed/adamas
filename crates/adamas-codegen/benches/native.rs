@@ -775,10 +775,6 @@ fn source(shape: Shape, depth: usize) -> String {
 -- а здесь лежит его чистая форма на глубине пять. Совпадение дословное и
 -- проверяется прогоном - см. `SYMBOLIC_FIXTURE` там же.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Tree where
   Leaf : Int64 -> Tree
   Node : Tree -> Tree -> Tree

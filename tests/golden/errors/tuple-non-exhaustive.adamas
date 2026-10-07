@@ -3,10 +3,6 @@
 -- Колонка записи разбирает поля дальше по конструкторам, и полноту считает
 -- тот же обход, что у конструкторов: непокрытый пример печатается кортежем.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Maybe (a : Type) where
   Nothing : Maybe a
   Just : a -> Maybe a

@@ -8,9 +8,5 @@
 -- обобщает, и `type Fam a = a -> Type` пишется. Обе формы алиаса остаются, и
 -- эта разница между ними - единственная.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 Fam : Type -> Type
 Fam a = a -> Type

@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: gadt-disjoint.adamas:27:1: не покрыто: `LitBool _`
+Error: gadt-disjoint.adamas:23:1: не покрыто: `LitBool _`
   evalNat (LitNat n) = n
   ^^^^^^^^^^^^^^^^^^^^^^

@@ -13,10 +13,6 @@
 -- Мутант прогнан: с прозрачной аннотацией `:` тот же модуль проходит -
 -- скрывать нечего, и развёртка законна.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Bool where
   True : Bool
   False : Bool

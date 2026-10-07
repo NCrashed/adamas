@@ -2,7 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: functor-undischarged.adamas:33:14: эффекты `{Log | e0}` не погашены: вокруг разрешено `{Fail | e0}`
+Error: functor-undischarged.adamas:29:14: эффекты `{Log | e0}` не погашены: вокруг разрешено `{Fail | e0}`
     narrow x = S.read x
                ^^^^^^^^
   в контексте:

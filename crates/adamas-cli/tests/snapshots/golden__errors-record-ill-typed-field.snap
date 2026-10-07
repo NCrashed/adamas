@@ -2,7 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: record-ill-typed-field.adamas:13:7: ожидался тип, получено `Zero` типа `Nat`
+Error: record-ill-typed-field.adamas:9:7: ожидался тип, получено `Zero` типа `Nat`
   f x = { a = ((Zero -> _) Type), b = Zero }
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   в контексте:

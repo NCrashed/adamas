@@ -7,10 +7,6 @@
 -- Ближайший проходящий сосед - `Node l x r` вместо `Node t x r`: поля те же,
 -- а старая ячейка потреблена разбором и свободна.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Tree where
   Leaf : Tree
   Node : Tree -> Nat -> Tree -> Tree

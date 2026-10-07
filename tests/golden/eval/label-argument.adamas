@@ -18,10 +18,6 @@ data Bool where
   False : Bool
   True : Bool
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a

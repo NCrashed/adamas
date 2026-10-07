@@ -9,10 +9,6 @@
 data Unit where
   MkUnit : Unit
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 module type Counter where
   type T
   zero : T

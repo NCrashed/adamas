@@ -9,10 +9,6 @@
 -- постулат несёт `@noalloc`, и вызов его законен. Здесь достаточно написать
 -- `@noalloc` над `foreign`.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 foreign : Nat -> Nat
 
 @noalloc

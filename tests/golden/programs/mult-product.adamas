@@ -14,10 +14,6 @@ data Bool where
   False : Bool
   True : Bool
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 double : Nat -> Nat
 double Zero = Zero
 double (Succ k) = Succ (Succ (double k))

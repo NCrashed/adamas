@@ -7,10 +7,6 @@
 -- операции здесь - и сигнатура обещала бы снаружи то, что запечатывание
 -- прячет.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Unit where
   MkUnit : Unit
 

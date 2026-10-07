@@ -8,10 +8,6 @@
 -- берёт у конструктора тип, и в сигнатуре конструкторы обязаны быть раньше,
 -- чем компилируется первая клауза.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 plus : Nat -> Nat -> Nat
 plus Zero m = m
 plus (Succ k) m = Succ (plus k m)

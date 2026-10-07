@@ -15,10 +15,6 @@
 -- `2` есть два конструктора. `fromNat` не объявлена, поэтому литерал и есть
 -- число.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a

@@ -7,8 +7,5 @@
 --
 -- Без хвоста та же запись законна: закрытой она и задумана.
 
-data Nat where
-  Zero : Nat
-
 dependent : { a : Type, b : a | r } -> Nat
 dependent p = Zero

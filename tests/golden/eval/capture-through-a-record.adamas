@@ -17,10 +17,6 @@
 -- Значение - `Succ (Succ Zero)`: ветка `return` отвечает захваченным `n`, а не
 -- значением вычисления.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Unit where
   MkUnit : Unit
 

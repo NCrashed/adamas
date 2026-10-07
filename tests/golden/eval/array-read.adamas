@@ -16,10 +16,6 @@
 -- Ячейки двух родов, потому что пути у них разные: плоская читается битами,
 -- указательная (`Nat`) - с `dup` ячейки, и ответ складывает оба.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 -- | Восемь записей: `3 * i` в ячейку `i`.
 fill : UInt64 -> (1 xs : Array 8 Int64) -> Array 8 Int64
 fill i xs = case decide (ltUInt64 i 8) of

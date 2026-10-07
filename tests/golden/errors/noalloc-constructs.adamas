@@ -11,10 +11,6 @@
 -- `next n = n` либо `next n = Zero`; аллоцирует ровно `Succ`, у которого поле
 -- есть.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 @noalloc
 next : Nat -> Nat
 next n = Succ n

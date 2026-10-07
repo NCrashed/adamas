@@ -11,10 +11,6 @@
 --
 -- Проверяется прогоном: `crates/adamas-cli/tests/examples.rs`.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Unit where
   MkUnit : Unit
 

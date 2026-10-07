@@ -16,10 +16,6 @@ data Bool where
   False : Bool
   True : Bool
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 effect Log where
   note : Nat -> Unit
 

@@ -5,10 +5,6 @@
 -- type.adamas), но рантайму нетотальное разрешено - разрешение получает σ
 -- позиции и при `ω` находит словарь как всякий другой.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 class Loop a where
   spin : a -> a
 

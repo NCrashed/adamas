@@ -8,10 +8,6 @@
 -- конкретный код перекладывает плотную запись в неё при входе в поле.
 
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Maybe (a : Type) where
   Nothing : Maybe a
   Just : a -> Maybe a

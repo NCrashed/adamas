@@ -6,10 +6,6 @@
 -- напечатал бы ровно то же: правило было бы ненаблюдаемо. Здесь заход дал бы
 -- `Succ (plus Zero #0)`, а не написанное.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 plus : Nat -> Nat -> Nat
 plus Zero m = m
 plus (Succ k) m = Succ (plus k m)

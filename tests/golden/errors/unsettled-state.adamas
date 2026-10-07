@@ -11,10 +11,6 @@
 -- новое состояние заведено рядом со старым, а проверка старого на него не
 -- распространилась.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Unit where
   MkUnit : Unit
 

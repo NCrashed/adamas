@@ -9,10 +9,6 @@ data Bool where
   True : Bool
   False : Bool
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Unit where
   MkUnit : Unit
 

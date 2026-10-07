@@ -7,10 +7,6 @@
 -- и `{Tick}` над объявлением отвергается, как отвергся бы `{Ask}` над
 -- `effect Ask` в теле модуля.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Unit where
   MkUnit : Unit
 

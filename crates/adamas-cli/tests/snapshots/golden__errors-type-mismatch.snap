@@ -2,7 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: type-mismatch.adamas:17:18: ожидалась функция, получено значение типа `Nat`
+Error: type-mismatch.adamas:13:18: ожидалась функция, получено значение типа `Nat`
   count (Succ k) = k Zero
                    ^^^^^^
   в контексте:

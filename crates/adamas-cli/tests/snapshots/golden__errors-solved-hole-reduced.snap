@@ -2,7 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: solved-hole-reduced.adamas:18:7: несовпадение типов: ожидался `UInt64`, получен `Int32`
+Error: solved-hole-reduced.adamas:14:7: несовпадение типов: ожидался `UInt64`, получен `Int32`
     j + x
         ^
   в контексте:

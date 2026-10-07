@@ -8,10 +8,6 @@
 -- полями `Nat` плотной не бывает, её форма сразу боксированная, и `p.b` в
 -- лямбде отвергался «форма записи потеряна».
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Unit where
   MkUnit : Unit
 

@@ -11,10 +11,6 @@
 data Unit where
   MkUnit : Unit
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 effect Foreign
 
 extern "C" fn adamas_probe_size : Nat -> UInt64

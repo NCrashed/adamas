@@ -6,9 +6,5 @@
 -- Индуктивная длина переводится в слово мостом в стёртой позиции
 -- (`eval/array-length-word.adamas`), а не подстановкой в индекс.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 bad : Array (Succ Zero) Int64
 bad = arrayNew 1 7

@@ -12,10 +12,6 @@
 data Unit where
   MkUnit : Unit
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Region where
   Home : Region
 

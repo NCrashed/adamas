@@ -11,10 +11,6 @@
 --   * `paired` - два разбора с общим индексом: `n`, `m` и `k` сходятся в одну
 --     переменную, повтор тройной.
 
-data Nat where
-  Z : Nat
-  S : Nat -> Nat
-
 data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a
@@ -27,7 +23,7 @@ count b 0 = 0
 count (MkBox m x) i = x + count (MkBox m x) (i - 1)
 
 counted : Int32
-counted = count (MkBox (S Z) 5) 3
+counted = count (MkBox (Succ Zero) 5) 3
 
 data Tag where
   P : Tag
@@ -57,7 +53,7 @@ sum2 a b 0 = 0
 sum2 (MkBox m x) (MkBox k y) i = x * y + sum2 (MkBox m x) (MkBox k y) (i - 1)
 
 paired : Int32
-paired = sum2 (MkBox Z 2) (MkBox Z 10) 3
+paired = sum2 (MkBox Zero 2) (MkBox Zero 10) 3
 
 main : List Int32
 main = Cons counted (Cons drifted (Cons paired Nil))

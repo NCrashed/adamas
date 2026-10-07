@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: recovery-a-consequence-is-not-an-error.adamas:16:7: имя `Missing` не найдено
+Error: recovery-a-consequence-is-not-an-error.adamas:12:7: имя `Missing` не найдено
   bad : Missing -> Nat
         ^^^^^^^

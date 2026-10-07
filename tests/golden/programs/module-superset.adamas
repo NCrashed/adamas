@@ -6,10 +6,6 @@
 -- с прозрачной `:` лишний член остаётся достижим поднятым именем (`outside`
 -- ниже), с `:>` он скрыт - тот случай в `errors/hidden-member.adamas`.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 module type Counter where
   type T
   zero : T

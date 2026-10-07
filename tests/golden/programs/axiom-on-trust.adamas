@@ -7,10 +7,6 @@
 
 data Void : Type
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Eqv (a : Type) (x : a) : a -> Type where
   Refl : Eqv a x x
 

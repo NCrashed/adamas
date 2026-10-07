@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-fbip.adamas: проверено, объявлений 11
+fbip.adamas: проверено, объявлений 8

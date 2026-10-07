@@ -9,10 +9,6 @@
 -- Мутантом проверен и второй маршрут: одноимённый член-не-эффект (значение
 -- `Tick : Nat`) отвергается тем же отказом.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Unit where
   MkUnit : Unit
 

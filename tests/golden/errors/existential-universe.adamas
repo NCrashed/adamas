@@ -9,10 +9,6 @@
 -- связывание её снимает - `MkSome : (0 a : Type) -> a -> Some` берёт уровень у
 -- написанного `Type`, - и обе формы остаются.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Some where
   MkSome : a -> Some
 

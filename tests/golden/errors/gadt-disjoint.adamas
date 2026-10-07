@@ -11,10 +11,6 @@
 -- разбирается и типизируется (`programs/gadt.adamas`). Не выражается ровно
 -- дизъюнктность, и обходится она дополнительным индексом-кодом.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Bool where
   False : Bool
   True : Bool

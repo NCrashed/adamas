@@ -31,10 +31,6 @@ data Bool where
   False : Bool
   True : Bool
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Maybe (a : Type) where
   Nothing : Maybe a
   Just : a -> Maybe a

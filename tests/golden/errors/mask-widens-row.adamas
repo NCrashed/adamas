@@ -22,10 +22,6 @@
 -- месте маски нечем - элаборация аргумента проходит, и расхождение всплывает
 -- позже.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Unit where
   MkUnit : Unit
 

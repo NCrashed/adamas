@@ -14,10 +14,6 @@ data Bool where
   False : Bool
   True : Bool
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 plus : Nat -> Nat -> Nat
 plus Zero m = m
 plus (Succ k) m = Succ (plus k m)

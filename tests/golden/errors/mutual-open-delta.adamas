@@ -19,10 +19,6 @@
 -- встаёт в его тело. Номер члена в маршруте есть, и по нему ищутся оба; без
 -- этого отказ вставал на слово `mutual` и звал члена как «член группы #1».
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Eqv (a : Type) (x : a) : a -> Type where
   Refl : Eqv a x x
 

@@ -12,10 +12,6 @@
 -- Succ p)` пишется без `let`-обхода из `eval/decidable.adamas`. Судит
 -- по-прежнему ядро: оно программу принимает.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Void : Type
 
 data Eqv (a : Type) (x : a) : a -> Type where

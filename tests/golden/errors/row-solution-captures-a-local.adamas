@@ -12,10 +12,6 @@
 -- конвертируемости честен: равенство таких рядов зависело бы от глубины
 -- читателя. Один `e` не может быть и `{Src r}`, и `{Src s}`.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Unit where
   MkUnit : Unit
 

@@ -2,7 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: region-mixed-with-another.adamas:39:3: эффекты `{Alloc r | e0}` не погашены: вокруг разрешено `{Alloc s | e0}`
+Error: region-mixed-with-another.adamas:35:3: эффекты `{Alloc r | e0}` не погашены: вокруг разрешено `{Alloc s | e0}`
     readRef p
     ^^^^^^^^^
   в контексте:

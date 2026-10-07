@@ -14,10 +14,6 @@
 -- `Store`, второй - одноимённая операция соседнего модуля, третий - хендлер
 -- снаружи, написанный путём.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Unit where
   MkUnit : Unit
 

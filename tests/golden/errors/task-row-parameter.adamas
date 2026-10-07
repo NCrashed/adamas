@@ -6,10 +6,6 @@
 -- операция называет такое семейство, роняло сам компилятор «применением
 -- не-функции» при постройке элиминатора.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Task (e : Effect) (a : Type) where
   MkTask : Nat -> Task e a
 

@@ -7,10 +7,6 @@
 -- переупаковывается записью по её полям. Так один модуль служит нескольким
 -- сигнатурам, не переписывая членов.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 module type Counter where
   type T
   zero : T

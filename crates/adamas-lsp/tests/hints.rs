@@ -234,7 +234,7 @@ fn a_link_without_a_place_is_named_not_swallowed() {
     let found = lines(&uri, &document, whole());
     assert!(
         found.contains(
-            &"34:0 куча@class-multiplicity.adamas:35:7: ‹Mappable#List› → запись".to_owned()
+            &"30:0 куча@class-multiplicity.adamas:31:7: ‹Mappable#List› → запись".to_owned()
         ),
         "звено без места обязано быть названо: {found:?}"
     );

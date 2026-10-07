@@ -9,10 +9,6 @@
 -- следствиями, и выдуманная вторая ошибка читателю хуже отсутствующей: он
 -- правил бы то, чего не ломал.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 bad : Missing -> Nat
 bad x = Zero
 

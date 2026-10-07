@@ -2,4 +2,4 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-axiom-on-trust.adamas: проверено, объявлений 10
+axiom-on-trust.adamas: проверено, объявлений 7

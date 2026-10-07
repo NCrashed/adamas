@@ -17,10 +17,6 @@
 -- - `eval/region-allocates-and-reads`: то же вычисление, погашенное
 -- `Arena.withRegion`.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data Unit where
   MkUnit : Unit
 

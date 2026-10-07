@@ -9,10 +9,6 @@
 -- их не различают, когда поля одного типа, и обновление, попавшее в `y` вместо
 -- `x`, типизируется молча.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a

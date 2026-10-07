@@ -16,10 +16,6 @@ data Bool where
   False : Bool
   True : Bool
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 module Boxes where
   data Box (a : Type) where
     Wrap : a -> Box a

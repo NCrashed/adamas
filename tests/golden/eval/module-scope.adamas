@@ -13,10 +13,6 @@
 -- Проверяется значением: каждое звено лестницы отвечает своим числом, и
 -- ответ `[3, 2, 1]` показывает, что заслонение идёт от ближнего к дальнему.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 data List (a : Type) where
   Nil : List a
   Cons : a -> List a -> List a

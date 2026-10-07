@@ -8,10 +8,6 @@ data Bool where
   False : Bool
   True : Bool
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 not : Bool -> Bool
 not True = False
 not False = True

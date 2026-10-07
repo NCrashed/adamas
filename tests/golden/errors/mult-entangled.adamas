@@ -10,9 +10,5 @@
 -- использования выбирает значения независимо. Отказ подсказывает форму -
 -- произведение пишется, см. `programs/mult-product.adamas`.
 
-data Nat where
-  Zero : Nat
-  Succ : Nat -> Nat
-
 comp : {q r : Mult} -> (ω f : (q y : b) -> c) -> (ω g : (r x : a) -> b) -> (q z : a) -> c
 comp f g x = f (g x)

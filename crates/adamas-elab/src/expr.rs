@@ -489,6 +489,15 @@ pub(crate) fn qualified_in(
     enclosing: Option<&str>,
     name: &str,
 ) -> Option<Symbol> {
+    // Последняя ступень лестницы - имя, открытое импортом (§4.8): своё
+    // заслоняет открытое тем же правилом, каким член модуля заслоняет
+    // глобальное. Отдаётся **объявленное** имя, а не написанное: дальше по нему
+    // собирается терм, и написанное умерло бы вместе с файлом.
+    member_in(signature, enclosing, name).or_else(|| signature.written(name).map(Rc::clone))
+}
+
+/// Ступени лестницы [`qualified_in`] без последней: член объемлющего модуля.
+fn member_in(signature: &Signature, enclosing: Option<&str>, name: &str) -> Option<Symbol> {
     if let Some(prefix) = enclosing {
         let mut prefix = prefix;
         loop {
@@ -502,11 +511,7 @@ pub(crate) fn qualified_in(
             prefix = &prefix[..cut];
         }
     }
-    // Последняя ступень лестницы - имя, открытое импортом (§4.8): своё
-    // заслоняет открытое тем же правилом, каким член модуля заслоняет
-    // глобальное. Отдаётся **объявленное** имя, а не написанное: дальше по нему
-    // собирается терм, и написанное умерло бы вместе с файлом.
-    signature.written(name).map(Rc::clone)
+    None
 }
 
 pub(crate) fn writes_effects(expr: &Expr) -> bool {
@@ -4582,7 +4587,20 @@ impl<'a> Elaborator<'a> {
         let Ok((ty, _)) = infer(&self.ctx.speculating(), self.metas, Mult::Zero, &term) else {
             return Ok(Some(term));
         };
-        let (term, ty) = self.specialized(term, ty);
+        // Параметрам функтора применяется только его член. Открытое импортом
+        // или прелюдией поднято без них, и прелюдный `Succ : Nat -> Nat`
+        // получал параметр аргументом.
+        let member = member_in(
+            self.signature,
+            self.enclosing.as_ref().map(|it| &*it.name),
+            &name.text,
+        )
+        .is_some();
+        let (term, ty) = if member {
+            self.specialized(term, ty)
+        } else {
+            (term, ty)
+        };
         if self.bare {
             return Ok(Some(term));
         }

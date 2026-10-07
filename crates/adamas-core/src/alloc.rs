@@ -211,14 +211,15 @@ pub fn blame(signature: &Signature, name: &Name) -> Option<Blame> {
 impl fmt::Display for Blame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for callee in &self.through {
-            write!(f, "зовёт `{callee}`, а та ")?;
+            write!(f, "зовёт `{}`, а та ", crate::term::written_name(callee))?;
         }
         match &self.source {
             Source::Construct(name) => write!(
                 f,
-                "строит значение конструктором `{name}` - это куча Perceus. Выходов три (§5.1): \
+                "строит значение конструктором `{}` - это куча Perceus. Выходов три (§5.1): \
                  линейный или unique вход, где reuse гарантирован; регион `{{Alloc r}}`; отказ от \
-                 конструирования. Первых двух в компиляторе пока нет, так что остаётся третий"
+                 конструирования. Первых двух в компиляторе пока нет, так что остаётся третий",
+                crate::term::written_name(name)
             ),
             Source::Record => write!(
                 f,

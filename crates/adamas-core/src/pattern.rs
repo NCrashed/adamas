@@ -146,9 +146,11 @@ impl fmt::Display for Pattern {
                 let fields: Vec<String> = fields.iter().map(ToString::to_string).collect();
                 write!(f, "({})", fields.join(", "))
             }
-            Self::Constructor(name, fields) if fields.is_empty() => write!(f, "{name}"),
+            Self::Constructor(name, fields) if fields.is_empty() => {
+                f.write_str(crate::term::written_name(name))
+            }
             Self::Constructor(name, fields) => {
-                write!(f, "{name}")?;
+                f.write_str(crate::term::written_name(name))?;
                 for field in fields {
                     match field {
                         Self::Constructor(_, sub) if !sub.is_empty() => write!(f, " ({field})")?,

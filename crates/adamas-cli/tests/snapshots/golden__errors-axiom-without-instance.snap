@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: axiom-without-instance.adamas:11:1: инстанс `Prelude.Ord Foo` не найден
+Error: axiom-without-instance.adamas:11:1: инстанс `Ord Foo` не найден
   bad : (0 x : Foo) -> Equal Bool (x <= x) True
   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

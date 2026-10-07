@@ -276,7 +276,7 @@ impl Shown {
     /// Подлежащим либо после «типа».
     fn text(&self) -> String {
         match self {
-            Self::Named(name) => format!("`{name}`"),
+            Self::Named(name) => format!("`{}`", adamas_core::term::written_name(name)),
             Self::Word(word) => word.one.to_owned(),
         }
     }
@@ -284,7 +284,9 @@ impl Shown {
     /// После «для»: так называется тип, о котором спросили.
     fn asked(&self) -> Symbol {
         match self {
-            Self::Named(name) => Rc::from(format!("`{name}`").as_str()),
+            Self::Named(name) => {
+                Rc::from(format!("`{}`", adamas_core::term::written_name(name)).as_str())
+            }
             Self::Word(word) => Rc::from(word.of),
         }
     }

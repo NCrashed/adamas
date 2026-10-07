@@ -1025,10 +1025,10 @@ pub(crate) enum Head {
 
 /// Головы одной строкой - для сообщения: `Conv Nat Bool`.
 pub(crate) fn written(class: &Symbol, heads: &[Symbol]) -> Symbol {
-    let mut out = String::from(&**class);
+    let mut out = String::from(adamas_core::term::written_name(class));
     for head in heads {
         out.push(' ');
-        out.push_str(head);
+        out.push_str(adamas_core::term::written_name(head));
     }
     Rc::from(out.as_str())
 }

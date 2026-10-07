@@ -53,6 +53,7 @@ name = "closure"
 harness = false
 
 [dependencies]
+adamas-l10n.workspace = true
 adamas-core.workspace = true
 # Ради заголовка и договора: генерируемый C собирается против этого рантайма, а
 # путь к `adamas.h` приходит через `DEP_ADAMAS_RUNTIME_INCLUDE` (ключ `links`).

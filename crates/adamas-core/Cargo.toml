@@ -25,6 +25,7 @@ name = "check"
 harness = false
 
 [dependencies]
+adamas-l10n.workspace = true
 thiserror = "2"
 
 [dev-dependencies]

@@ -27,6 +27,7 @@ dependencies = [
  "adamas-core",
  "adamas-elab",
  "adamas-interp",
+ "adamas-l10n",
  "adamas-parser",
  "adamas-pkg",
  "adamas-runtime",
@@ -39,6 +40,7 @@ dependencies = [
 name = "adamas-core"
 version = "0.0.0"
 dependencies = [
+ "adamas-l10n",
  "criterion",
  "insta",
  "proptest",
@@ -50,6 +52,7 @@ name = "adamas-elab"
 version = "0.0.0"
 dependencies = [
  "adamas-core",
+ "adamas-l10n",
  "adamas-parser",
  "insta",
  "proptest",
@@ -62,6 +65,7 @@ version = "0.0.0"
 dependencies = [
  "adamas-core",
  "adamas-elab",
+ "adamas-l10n",
  "adamas-parser",
  "adamas-pkg",
  "criterion",
@@ -84,6 +88,7 @@ version = "0.0.0"
 dependencies = [
  "adamas-core",
  "adamas-elab",
+ "adamas-l10n",
  "adamas-parser",
  "anyhow",
  "lsp-server",
@@ -109,6 +114,7 @@ name = "adamas-pkg"
 version = "0.0.0"
 dependencies = [
  "adamas-elab",
+ "adamas-l10n",
  "tempfile",
  "thiserror",
  "toml",
@@ -126,6 +132,7 @@ name = "adamas-warmup-stlc"
 version = "0.0.0"
 dependencies = [
  "adamas-core",
+ "adamas-l10n",
  "criterion",
  "insta",
  "proptest",

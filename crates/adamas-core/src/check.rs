@@ -3658,7 +3658,7 @@ fn infer_split(
 ) -> Result<(Rc<Value>, Usage), TypeError> {
     let shape = |metas: &mut Metas, why| Err(refuse(ctx, metas, ErrorKind::SplitShape { why }));
     if split.consumed == Mult::Zero {
-        return shape(metas, "разбор стёрт, а поля нужны значениями");
+        return shape(metas, "why-split-erased");
     }
     let (ty, scrutinee_usage) =
         framed(infer(ctx, metas, sigma, &split.scrutinee), Frame::Scrutinee)?;
@@ -3673,7 +3673,7 @@ fn infer_split(
         ));
     };
     if telescope.is_open() {
-        return shape(metas, "запись открыта, а разбирается только закрытая");
+        return shape(metas, "why-split-open");
     }
     let fields = telescope.fields();
     let named = fields.len() == split.fields.len()
@@ -3682,16 +3682,13 @@ fn infer_split(
             .zip(split.fields.iter())
             .all(|(field, name)| field.name == *name);
     if !named {
-        return shape(
-            metas,
-            "поля разбора не те, что у записи, либо не в том порядке",
-        );
+        return shape(metas, "why-split-fields");
     }
     if fields
         .iter()
         .any(|field| field.shape != crate::term::Shape::default())
     {
-        return shape(metas, "поле с собственными параметрами разбором не берётся");
+        return shape(metas, "why-split-parametric");
     }
 
     let size = ctx.size();

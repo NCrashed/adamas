@@ -161,11 +161,11 @@ impl Verdict {
 
 impl fmt::Display for Verdict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Tail => f.write_str("хвостово-резумптивный"),
-            Self::Abortive => f.write_str("абортивный"),
-            Self::General => f.write_str("общий"),
-        }
+        f.write_str(&match self {
+            Self::Tail => adamas_l10n::tr!("verdict-tail"),
+            Self::Abortive => adamas_l10n::tr!("verdict-abortive"),
+            Self::General => adamas_l10n::tr!("verdict-general"),
+        })
     }
 }
 

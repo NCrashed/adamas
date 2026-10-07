@@ -57,14 +57,14 @@ fn shown(row: &crate::row::Row<crate::term::Term>) -> String {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ErrorKind {
     /// Индекс не адресует ни одно связывание - терм незамкнут.
-    #[error("переменная #{} вне контекста", index.0)]
+    #[error("{}", adamas_l10n::tr!("core-unbound-index", index = .index.0))]
     UnboundIndex {
         /// Сам индекс.
         index: Index,
     },
 
     /// В позиции типа оказался терм, тип которого не универсум.
-    #[error("ожидался тип, получено `{term}` типа `{ty}`")]
+    #[error("{}", adamas_l10n::tr!("core-not-a-type", term = .term, ty = .ty))]
     NotAType {
         /// Терм в позиции типа.
         term: Term,
@@ -73,14 +73,14 @@ pub enum ErrorKind {
     },
 
     /// Применение чего-то, что не является функцией.
-    #[error("ожидалась функция, получено значение типа `{ty}`")]
+    #[error("{}", adamas_l10n::tr!("core-not-a-function", ty = .ty))]
     NotAFunction {
         /// Тип того, что применяли.
         ty: Term,
     },
 
     /// Тип не совпал с ожидаемым.
-    #[error("несовпадение типов: ожидался `{expected}`, получен `{found}`")]
+    #[error("{}", adamas_l10n::tr!("core-mismatch", expected = .expected, found = .found))]
     Mismatch {
         /// Тип, которого требовал контекст.
         expected: Term,
@@ -89,7 +89,7 @@ pub enum ErrorKind {
     },
 
     /// Кратность лямбды разошлась с кратностью `Pi`, под который её проверяют.
-    #[error("кратность лямбды {found}, а тип требует {expected}")]
+    #[error("{}", adamas_l10n::tr!("core-lambda-multiplicity", found = .found, expected = .expected))]
     LambdaMultiplicity {
         /// Кратность из типа.
         expected: Mult,
@@ -98,7 +98,7 @@ pub enum ErrorKind {
     },
 
     /// Переменная использована чаще, чем разрешает её кратность.
-    #[error("`{name}` объявлена с кратностью {declared}, а использована {actual}")]
+    #[error("{}", adamas_l10n::tr!("core-usage-violation", name = .name, declared = .declared, actual = .actual))]
     UsageViolation {
         /// Имя связывания.
         name: Name,
@@ -109,21 +109,21 @@ pub enum ErrorKind {
     },
 
     /// Тип терма нельзя синтезировать - нужна проверка против известного.
-    #[error("тип `{term}` невозможно синтезировать, нужна аннотация")]
+    #[error("{}", adamas_l10n::tr!("core-cannot-infer", term = .term))]
     CannotInfer {
         /// Проблемный терм.
         term: Term,
     },
 
     /// Ссылка на определение, которого нет в сигнатуре.
-    #[error("определение `{name}` не найдено")]
+    #[error("{}", adamas_l10n::tr!("core-unknown-constant", name = .name))]
     UnknownConstant {
         /// Имя.
         name: Name,
     },
 
     /// Число аргументов уровня не совпало с арностью определения.
-    #[error("`{name}` принимает {expected} параметров уровня, передано {found}")]
+    #[error("{}", adamas_l10n::tr!("core-level-arity", name = .name, expected = .expected, found = .found))]
     LevelArity {
         /// Имя определения.
         name: Name,
@@ -134,28 +134,28 @@ pub enum ErrorKind {
     },
 
     /// Стёртое определение использовано в рантайм-позиции.
-    #[error("`{name}` объявлено с кратностью 0 и недоступно в рантайме")]
+    #[error("{}", adamas_l10n::tr!("core-erased-constant", name = .name))]
     ErasedConstant {
         /// Имя определения.
         name: Name,
     },
 
     /// Нетотальное определение использовано в стёртом фрагменте.
-    #[error("`{name}` не тотальна и не может стоять в типе или доказательстве")]
+    #[error("{}", adamas_l10n::tr!("core-partial-constant", name = .name))]
     PartialConstant {
         /// Имя определения.
         name: Name,
     },
 
     /// Имя уже занято.
-    #[error("определение `{name}` уже существует")]
+    #[error("{}", adamas_l10n::tr!("core-duplicate-definition", name = .name))]
     DuplicateDefinition {
         /// Имя.
         name: Name,
     },
 
     /// Кратность `1` у определения верхнего уровня.
-    #[error("определение `{name}` не может быть линейным: учёта на всю программу нет")]
+    #[error("{}", adamas_l10n::tr!("core-linear-definition", name = .name))]
     LinearDefinition {
         /// Имя.
         name: Name,
@@ -166,7 +166,7 @@ pub enum ErrorKind {
     /// Откладываются те, что не решаются **сейчас**: `max ?a ?b ~ ?a` ждёт,
     /// пока соседние ограничения определят `?b`. Дошедшее сюда не определилось
     /// ничем, и выбирать за автора нечего - решений у него несколько.
-    #[error("уровни `{left}` и `{right}` не сводятся: решение неоднозначно, нужна аннотация")]
+    #[error("{}", adamas_l10n::tr!("core-unsettled-level", left = .left, right = .right))]
     UnsettledLevel {
         /// Левая сторона отложенного ограничения.
         left: crate::level::Level,
@@ -179,7 +179,7 @@ pub enum ErrorKind {
     /// Обе стороны стояли дырками, поэтому сравнение было отложено (§10
     /// вопрос 91). К границе объявления соседние ограничения уже решены, и
     /// не сошедшееся здесь не сойдётся никогда.
-    #[error("не сошлось отложенное: `{left}` и `{right}`")]
+    #[error("{}", adamas_l10n::tr!("core-unsettled-term", left = .left, right = .right))]
     UnsettledTerm {
         /// Левая часть.
         left: crate::term::Term,
@@ -188,7 +188,7 @@ pub enum ErrorKind {
     },
 
     /// После проверки остался неразрешённый уровень.
-    #[error("уровень ?{} не определён: добавьте аннотацию", meta.0)]
+    #[error("{}", adamas_l10n::tr!("core-ambiguous-level", meta = .meta.0))]
     AmbiguousLevel {
         /// Метапеременная, оставшаяся без решения.
         meta: crate::level::LevelMeta,
@@ -217,7 +217,7 @@ pub enum ErrorKind {
     /// оборачивался не неверной программой, а **падением компилятора**:
     /// дырка уезжала в сохранённый тип живой и всплывала после `release`, где
     /// зонканье бралось за неё уже вне живого диапазона.
-    #[error("в определении `{name}` остался неразрешённый хвост row ?{}", meta.0)]
+    #[error("{}", adamas_l10n::tr!("core-unsolved-definition-row", name = .name, meta = .meta.0))]
     UnsolvedDefinitionRow {
         /// Имя определения.
         name: Name,
@@ -226,7 +226,7 @@ pub enum ErrorKind {
     },
 
     /// В определении, уходящем в сигнатуру, осталась дырка уровня.
-    #[error("в определении `{name}` остался неразрешённый уровень ?{}", meta.0)]
+    #[error("{}", adamas_l10n::tr!("core-unsolved-definition-level", name = .name, meta = .meta.0))]
     UnsolvedDefinitionLevel {
         /// Имя определения.
         name: Name,
@@ -235,7 +235,7 @@ pub enum ErrorKind {
     },
 
     /// Тип-формер не заканчивается универсумом.
-    #[error("`{name}` объявлен как индуктивный тип, но заканчивается на `{found}`")]
+    #[error("{}", adamas_l10n::tr!("core-not-a-data-sort", name = .name, found = .found))]
     NotADataSort {
         /// Имя типа.
         name: Name,
@@ -244,7 +244,7 @@ pub enum ErrorKind {
     },
 
     /// Тип-формер объявлен с большим числом параметров, чем у него связываний.
-    #[error("`{name}` объявлен с {expected} параметрами, а связываний всего {found}")]
+    #[error("{}", adamas_l10n::tr!("core-data-parameters", name = .name, expected = .expected, found = .found))]
     DataParameters {
         /// Имя типа.
         name: Name,
@@ -255,16 +255,14 @@ pub enum ErrorKind {
     },
 
     /// Конструктор объявлен для имени, которое не индуктивный тип.
-    #[error("`{name}` не является индуктивным типом")]
+    #[error("{}", adamas_l10n::tr!("core-not-a-data-type", name = .name))]
     NotADataType {
         /// Имя.
         name: Name,
     },
 
     /// Конструктор не повторяет телескоп параметров своего типа.
-    #[error(
-        "конструктор `{name}` обязан начинаться с параметров `{data}`, но параметр #{index} не совпадает"
-    )]
+    #[error("{}", adamas_l10n::tr!("core-constructor-parameter", name = .name, data = .data, index = .index))]
     ConstructorParameter {
         /// Имя конструктора.
         name: Name,
@@ -275,7 +273,7 @@ pub enum ErrorKind {
     },
 
     /// Конструктор возвращает не тот тип, которому объявлен.
-    #[error("конструктор `{name}` обязан возвращать `{data}`, а возвращает `{found}`")]
+    #[error("{}", adamas_l10n::tr!("core-constructor-result", name = .name, data = .data, found = .found))]
     ConstructorResult {
         /// Имя конструктора.
         name: Name,
@@ -286,7 +284,7 @@ pub enum ErrorKind {
     },
 
     /// Формер эффекта не заканчивается сортом `Effect` (§3.4).
-    #[error("`{name}` объявлен эффектом, но заканчивается на `{found}`")]
+    #[error("{}", adamas_l10n::tr!("core-not-an-effect-sort", name = .name, found = .found))]
     NotAnEffectSort {
         /// Имя эффекта.
         name: Name,
@@ -295,7 +293,7 @@ pub enum ErrorKind {
     },
 
     /// Операция не повторяет телескоп параметров эффекта дословно.
-    #[error("операция `{name}` обязана повторить параметры `{effect}`, а расходится на {index}-м")]
+    #[error("{}", adamas_l10n::tr!("core-operation-parameter", name = .name, effect = .effect, index = .index))]
     OperationParameter {
         /// Имя операции.
         name: Name,
@@ -306,11 +304,7 @@ pub enum ErrorKind {
     },
 
     /// Операция производит не ровно объявляемую метку (§3.4).
-    #[error(
-        "операция `{name}` обязана производить ровно `{effect}` со своими параметрами, \
-         а производит `{}`",
-        shown(found)
-    )]
+    #[error("{}", adamas_l10n::tr!("core-operation-row", name = .name, effect = .effect, found = shown(.found)))]
     OperationRow {
         /// Имя операции.
         name: Name,
@@ -321,11 +315,7 @@ pub enum ErrorKind {
     },
 
     /// Row вызываемого не гасится окружающей (§3.4).
-    #[error(
-        "эффекты `{}` не погашены: вокруг разрешено `{}`",
-        shown(wanted),
-        shown(ambient)
-    )]
+    #[error("{}", adamas_l10n::tr!("core-undischarged", wanted = shown(.wanted), ambient = shown(.ambient)))]
     Undischarged {
         /// Row вызываемого.
         wanted: crate::row::Row<crate::term::Term>,
@@ -335,7 +325,7 @@ pub enum ErrorKind {
 
     /// Нарушена строгая позитивность.
 
-    #[error("конструктор `{name}` использует `{data}` в отрицательной позиции")]
+    #[error("{}", adamas_l10n::tr!("core-not-strictly-positive", name = .name, data = .data))]
     NotStrictlyPositive {
         /// Имя конструктора.
         name: Name,
@@ -351,7 +341,7 @@ pub enum ErrorKind {
     /// искать её - отправлять не туда. Различает эти два правила только текст:
     /// пока он был общим, сломать единообразие можно было незаметно для
     /// корпуса.
-    #[error("конструктор `{name}` применяет `{data}` не к своим параметрам")]
+    #[error("{}", adamas_l10n::tr!("core-non-uniform-parameter", name = .name, data = .data))]
     NonUniformParameter {
         /// Имя конструктора.
         name: Name,
@@ -360,7 +350,7 @@ pub enum ErrorKind {
     },
 
     /// Поле конструктора живёт выше универсума самого типа.
-    #[error("поле конструктора `{name}` живёт в `Type {field}`, а тип - в `Type {sort}`")]
+    #[error("{}", adamas_l10n::tr!("core-constructor-universe", name = .name, field = .field, sort = .sort))]
     ConstructorUniverse {
         /// Имя конструктора.
         name: Name,
@@ -371,7 +361,7 @@ pub enum ErrorKind {
     },
 
     /// Два поля записи с одним именем.
-    #[error("поле `{name}` объявлено дважды")]
+    #[error("{}", adamas_l10n::tr!("core-duplicate-field", name = .name))]
     DuplicateField {
         /// Имя поля.
         name: Name,
@@ -383,14 +373,14 @@ pub enum ErrorKind {
     /// объявление не знает, а тип `b : a` осмыслен только при известном `a`:
     /// расширение подставило бы чужое `a`, оставив прежнее `b`, и из этого
     /// строится житель любого типа.
-    #[error("поле `{name}` зависит от предыдущего, а такая запись не открывается")]
+    #[error("{}", adamas_l10n::tr!("core-open-dependent-record", name = .name))]
     OpenDependentRecord {
         /// Имя зависимого поля.
         name: Name,
     },
 
     /// У записи не столько полей, сколько у её типа.
-    #[error("полей записи {found} при {expected} в типе")]
+    #[error("{}", adamas_l10n::tr!("core-record-fields", found = .found, expected = .expected))]
     RecordFields {
         /// Сколько полей у типа.
         expected: usize,
@@ -399,14 +389,14 @@ pub enum ErrorKind {
     },
 
     /// Хвост записи - не ряд.
-    #[error("хвост записи не ряд: `{ty}`")]
+    #[error("{}", adamas_l10n::tr!("core-not-a-row", ty = .ty))]
     NotARow {
         /// Тип того, что написано хвостом.
         ty: Term,
     },
 
     /// Проекция не из записи.
-    #[error("проекция не из записи: `{ty}`")]
+    #[error("{}", adamas_l10n::tr!("core-not-a-record", ty = .ty))]
     NotARecord {
         /// Тип того, из чего проецировали.
         ty: Term,
@@ -417,14 +407,14 @@ pub enum ErrorKind {
     /// `With` не пересчитывает зависимость между полями, поэтому база обязана
     /// быть открытой: у открытой записи зависимости нет (§4.2). Закрытая
     /// обновляется пересборкой - у неё поля перечислимы.
-    #[error("`{ty}` закрыта: обновляется она пересборкой, а не переопределением")]
+    #[error("{}", adamas_l10n::tr!("core-closed-with", ty = .ty))]
     ClosedWith {
         /// Тип базы.
         ty: Term,
     },
 
     /// У записи нет такого поля.
-    #[error("у `{ty}` нет поля `{name}`")]
+    #[error("{}", adamas_l10n::tr!("core-no-such-field", ty = .ty, name = .name))]
     NoSuchField {
         /// Имя поля.
         name: Name,
@@ -436,14 +426,14 @@ pub enum ErrorKind {
     ///
     /// То же правило, что у стёртой переменной: значения у поля нет, и вынуть
     /// его нечем.
-    #[error("поле `{name}` стёрто: значения у него нет")]
+    #[error("{}", adamas_l10n::tr!("core-erased-field", name = .name))]
     ErasedField {
         /// Имя поля.
         name: Name,
     },
 
     /// Разбирается значение, тип которого не то индуктивное семейство.
-    #[error("разбор `{data}`, но значение имеет тип `{ty}`")]
+    #[error("{}", adamas_l10n::tr!("core-not-a-data-value", data = .data, ty = .ty))]
     NotADataValue {
         /// Имя типа из разбора.
         data: Name,
@@ -455,7 +445,7 @@ pub enum ErrorKind {
     ///
     /// Кратность `0` означает «стёрто», а ветвь выбирается по разбираемому в
     /// рантайме: `case⁰` сделал бы стирание не стиранием.
-    #[error("разбор `{data}` объявлен с кратностью 0, а ветвь выбирается по значению")]
+    #[error("{}", adamas_l10n::tr!("core-erased-scrutinee", data = .data))]
     ErasedScrutinee {
         /// Имя типа.
         data: Name,
@@ -464,14 +454,14 @@ pub enum ErrorKind {
     /// Разбор записи в поля, который ядро не принимает (§10 вопрос 231):
     /// стёртый разбор, открытая запись, поля не те или с собственными
     /// параметрами.
-    #[error("разбор записи: {why}")]
+    #[error("{}", adamas_l10n::tr!("core-split-shape", why = adamas_l10n::message(.why, &[])))]
     SplitShape {
         /// Что не так.
         why: &'static str,
     },
 
     /// Число параметров в разборе разошлось с объявлением типа.
-    #[error("разбор `{data}` объявляет {found} параметров, а у типа их {expected}")]
+    #[error("{}", adamas_l10n::tr!("core-case-parameters", data = .data, found = .found, expected = .expected))]
     CaseParameters {
         /// Имя типа.
         data: Name,
@@ -482,7 +472,7 @@ pub enum ErrorKind {
     },
 
     /// Конструктор остался без ветви.
-    #[error("разбор `{data}` не покрывает конструктор `{constructor}`")]
+    #[error("{}", adamas_l10n::tr!("core-non-exhaustive", data = .data, constructor = .constructor))]
     NonExhaustive {
         /// Имя типа.
         data: Name,
@@ -491,7 +481,7 @@ pub enum ErrorKind {
     },
 
     /// Ветвь для того, чего разбирать не требуется.
-    #[error("в разборе `{data}` лишняя ветвь `{constructor}`")]
+    #[error("{}", adamas_l10n::tr!("core-redundant-branch", data = .data, constructor = .constructor))]
     RedundantBranch {
         /// Имя типа.
         data: Name,
@@ -500,9 +490,7 @@ pub enum ErrorKind {
     },
 
     /// Ветви идут не в порядке объявления конструкторов.
-    #[error(
-        "ветви `{data}` обязаны идти в порядке объявления: ожидался `{expected}`, встречен `{found}`"
-    )]
+    #[error("{}", adamas_l10n::tr!("core-branch-order", data = .data, expected = .expected, found = .found))]
     BranchOrder {
         /// Имя типа.
         data: Name,
@@ -513,7 +501,7 @@ pub enum ErrorKind {
     },
 
     /// Определение ссылается на параметр уровня, которого у него нет.
-    #[error("`{name}` использует параметр уровня u{var} при арности {arity}")]
+    #[error("{}", adamas_l10n::tr!("core-level-var-out-of-scope", name = .name, var = .var, arity = .arity))]
     LevelVarOutOfScope {
         /// Имя определения.
         name: Name,
@@ -528,9 +516,7 @@ pub enum ErrorKind {
     /// Отдельно от [`ErrorKind::Mismatch`], потому что дырка доезжает до
     /// отказа **нерешённой** и печатается собой: `(?22) #0` вместо причины.
     /// Здесь названы обе стороны - чего дырка требует и что на её месте нужно.
-    #[error(
-        "выводимый аргумент не укладывается в свой тип `{hole}`: на его месте требуется `{wanted}`"
-    )]
+    #[error("{}", adamas_l10n::tr!("core-hole-misfit", hole = .hole, wanted = .wanted))]
     HoleMisfit {
         /// Тип дырки - то, чем ограничено решение.
         hole: Term,
@@ -549,9 +535,7 @@ pub enum ErrorKind {
     /// Отказ поэтому подсказывает форму, а не только называет беду. Связь,
     /// произведением не являющуюся - скажем, сумму, - написать по-прежнему
     /// нечем.
-    #[error(
-        "параметры кратности `{name}` связаны между собой: тело проверяется не при всех их сочетаниях - напишите в позиции кратности произведение, `(q * r x : a)`"
-    )]
+    #[error("{}", adamas_l10n::tr!("core-mult-entangled", name = .name))]
     MultEntangled {
         /// Имя определения.
         name: Name,
@@ -707,23 +691,24 @@ pub enum Frame {
 
 impl fmt::Display for Frame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Callee => f.write_str("функция применения"),
-            Self::Argument => f.write_str("аргумент применения"),
-            Self::Domain => f.write_str("домен"),
-            Self::Codomain => f.write_str("кодомен"),
-            Self::Body => f.write_str("тело лямбды"),
-            Self::BindingType => f.write_str("тип связывания"),
-            Self::Stated => f.write_str("заявленный тип"),
-            Self::BindingValue => f.write_str("значение связывания"),
-            Self::BindingBody => f.write_str("тело `let`"),
-            Self::Scrutinee => f.write_str("разбираемое значение"),
-            Self::Motive => f.write_str("мотив разбора"),
-            Self::Branch(index) => write!(f, "ветвь #{index}"),
-            Self::MemberType(index) => write!(f, "тип члена группы #{index}"),
-            Self::MemberBody(index) => write!(f, "тело члена группы #{index}"),
-            Self::Constructor(index) => write!(f, "конструктор #{index}"),
-        }
+        use adamas_l10n::tr;
+        f.write_str(&match self {
+            Self::Callee => tr!("frame-callee"),
+            Self::Argument => tr!("frame-argument"),
+            Self::Domain => tr!("frame-domain"),
+            Self::Codomain => tr!("frame-codomain"),
+            Self::Body => tr!("frame-body"),
+            Self::BindingType => tr!("frame-binding-type"),
+            Self::Stated => tr!("frame-stated"),
+            Self::BindingValue => tr!("frame-binding-value"),
+            Self::BindingBody => tr!("frame-binding-body"),
+            Self::Scrutinee => tr!("frame-scrutinee"),
+            Self::Motive => tr!("frame-motive"),
+            Self::Branch(index) => tr!("frame-branch", index = index),
+            Self::MemberType(index) => tr!("frame-member-type", index = index),
+            Self::MemberBody(index) => tr!("frame-member-body", index = index),
+            Self::Constructor(index) => tr!("frame-constructor", index = index),
+        })
     }
 }
 
@@ -834,11 +819,10 @@ fn telescope(ctx: &Ctx<'_>, metas: &Metas) -> Vec<Binding> {
 /// Текст отказа о невыведенном аргументе: по имени владельца, если он есть.
 fn ambiguous_term(meta: crate::term::TermMeta, owner: Option<&Name>) -> String {
     match owner {
-        Some(owner) => format!(
-            "неявный аргумент у `{}` не выведен: из места употребления его не видно - \
-             дайте тип результату (аннотацией `let` или сигнатурой)",
-            crate::term::short(owner)
+        Some(owner) => adamas_l10n::tr!(
+            "core-ambiguous-term-owned",
+            owner = crate::term::short(owner)
         ),
-        None => format!("аргумент ?{} не выведен: укажите его явно", meta.0),
+        None => adamas_l10n::tr!("core-ambiguous-term", meta = meta.0),
     }
 }

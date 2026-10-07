@@ -514,7 +514,7 @@ main = simdLane (simdSplat 4 one) 9 lie
 ";
     let machine = harness::refused(OUTSIDE);
     assert!(
-        machine.contains(adamas_core::prim::LANE_OUTSIDE),
+        machine.contains(&adamas_l10n::message(adamas_core::prim::LANE_OUTSIDE, &[])),
         "машина оборвалась не тем: {machine}"
     );
 }

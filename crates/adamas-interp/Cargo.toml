@@ -29,6 +29,7 @@ name = "arrays"
 harness = false
 
 [dependencies]
+adamas-l10n.workspace = true
 adamas-core.workspace = true
 # `dlopen`/`dlsym` под машиной (§5.3, уровень 1 FFI). Голый `dlopen` через
 # объявления `extern "C"` дешевле по зависимостям и дороже по коду; счёт обеих

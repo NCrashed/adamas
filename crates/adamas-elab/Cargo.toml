@@ -17,6 +17,7 @@ workspace = true
 bench = false
 
 [dependencies]
+adamas-l10n.workspace = true
 adamas-core.workspace = true
 adamas-parser.workspace = true
 thiserror = "2"

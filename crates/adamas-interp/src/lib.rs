@@ -45,9 +45,9 @@ pub enum RunError {
     ///
     /// Текст - тот же, каким обрывается собранная программа
     /// ([`adamas_core::eval::trap`]): обрыв наблюдаем наравне с ответом.
-    #[error("{message}")]
+    #[error("{}", adamas_l10n::message(.message, &[]))]
     Trap {
-        /// Текст обрыва.
+        /// Обрыв: идентификатор каталога (§7.6).
         message: &'static str,
     },
 

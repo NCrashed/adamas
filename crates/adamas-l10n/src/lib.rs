@@ -102,7 +102,11 @@ macro_rules! catalog {
 }
 
 /// Каталоги: имя файла и тексты на обоих языках. Порядок не значим.
-pub const CATALOGS: &[(&str, &str, &str)] = &[catalog!("common.ftl"), catalog!("parser.ftl")];
+pub const CATALOGS: &[(&str, &str, &str)] = &[
+    catalog!("common.ftl"),
+    catalog!("parser.ftl"),
+    catalog!("core.ftl"),
+];
 
 fn bundle(lang: Lang) -> &'static FluentBundle<FluentResource> {
     static RU: OnceLock<FluentBundle<FluentResource>> = OnceLock::new();

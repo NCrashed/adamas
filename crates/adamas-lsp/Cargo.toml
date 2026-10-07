@@ -22,6 +22,7 @@ path = "src/main.rs"
 bench = false
 
 [dependencies]
+adamas-l10n.workspace = true
 adamas-core.workspace = true
 adamas-elab.workspace = true
 adamas-parser.workspace = true

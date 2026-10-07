@@ -180,7 +180,7 @@ pub struct Clause {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PatternError {
     /// В клаузе не столько паттернов, сколько у функции аргументов.
-    #[error("клауза #{clause}: {found} паттернов при {expected} аргументах")]
+    #[error("{}", adamas_l10n::tr!("pattern-clause-arity", clause = .clause, found = .found, expected = .expected))]
     ClauseArity {
         /// Номер клаузы.
         clause: usize,
@@ -191,7 +191,7 @@ pub enum PatternError {
     },
 
     /// Тело клаузы ссылается на связывание, которого у неё нет.
-    #[error("клауза #{clause}: тело ссылается за пределы своих переменных")]
+    #[error("{}", adamas_l10n::tr!("pattern-unbound-in-body", clause = .clause))]
     UnboundInBody {
         /// Номер клаузы.
         clause: usize,
@@ -203,14 +203,14 @@ pub enum PatternError {
     /// вычислять непроверенный терм нельзя. Сюда попадает и выход за пределы
     /// собственных аргументов - у отдельной проверки замкнутости после этого не
     /// осталось случая, в котором она могла бы сработать.
-    #[error("тип определения не является типом: {error}")]
+    #[error("{}", adamas_l10n::tr!("pattern-ill-typed-type", error = .error))]
     IllTypedType {
         /// Что именно не сошлось.
         error: Box<TypeError>,
     },
 
     /// Разбирается значение, тип которого не индуктивное семейство.
-    #[error("разбирать нечего: значение имеет тип `{ty}`")]
+    #[error("{}", adamas_l10n::tr!("pattern-not-matchable", ty = .ty))]
     NotMatchable {
         /// Тип значения.
         ty: String,
@@ -220,9 +220,7 @@ pub enum PatternError {
     ///
     /// Не то же, что недостижимая клауза: ту перекрывают предыдущие, а эта не
     /// сработала бы и в одиночестве - индексы не сходятся.
-    #[error(
-        "клауза #{clause}: `{constructor}` здесь невозможен - индекс требует `{expected}`, а конструктор даёт `{found}`"
-    )]
+    #[error("{}", adamas_l10n::tr!("pattern-impossible-pattern", clause = .clause, constructor = .constructor, expected = .expected, found = .found))]
     ImpossiblePattern {
         /// Номер клаузы.
         clause: usize,
@@ -236,9 +234,7 @@ pub enum PatternError {
 
     /// Индекс конструктора не приводится к форме индекса разбираемого
     /// значения - см. [`crate::unify`].
-    #[error(
-        "конструктор `{constructor}`: индекс `{found}` не приведён к `{expected}`, унифицировать нечем"
-    )]
+    #[error("{}", adamas_l10n::tr!("pattern-stuck-index", constructor = .constructor, found = .found, expected = .expected))]
     StuckIndex {
         /// Конструктор, ветвь которого не строится.
         constructor: Name,
@@ -249,7 +245,7 @@ pub enum PatternError {
     },
 
     /// Паттерн называет конструктор чужого типа.
-    #[error("конструктор `{constructor}` не принадлежит типу `{data}`")]
+    #[error("{}", adamas_l10n::tr!("pattern-foreign-constructor", constructor = .constructor, data = .data))]
     ForeignConstructor {
         /// Имя из паттерна.
         constructor: Name,
@@ -258,7 +254,7 @@ pub enum PatternError {
     },
 
     /// У конструктора в паттерне не столько подпаттернов, сколько полей.
-    #[error("конструктор `{constructor}`: {found} подпаттернов при {expected} полях")]
+    #[error("{}", adamas_l10n::tr!("pattern-constructor-arity", constructor = .constructor, found = .found, expected = .expected))]
     ConstructorArity {
         /// Имя конструктора.
         constructor: Name,
@@ -269,7 +265,7 @@ pub enum PatternError {
     },
 
     /// У кортежа в паттерне не столько компонент, сколько полей у записи.
-    #[error("кортеж: {found} компонент при {expected} полях записи")]
+    #[error("{}", adamas_l10n::tr!("pattern-record-arity", found = .found, expected = .expected))]
     RecordArity {
         /// Сколько полей у записи.
         expected: usize,
@@ -279,21 +275,21 @@ pub enum PatternError {
 
     /// В одной колонке кортеж и конструктор либо литерал: значение - либо
     /// запись, либо нет.
-    #[error("кортеж и конструктор либо литерал разбирают одно значение типа `{ty}`")]
+    #[error("{}", adamas_l10n::tr!("pattern-record-column", ty = .ty))]
     RecordColumn {
         /// Тип разбираемого значения.
         ty: String,
     },
 
     /// Клаузы не покрывают всех случаев.
-    #[error("не покрыто: `{example}`")]
+    #[error("{}", adamas_l10n::tr!("pattern-non-exhaustive", example = .example))]
     NonExhaustive {
         /// Пример непокрытого набора аргументов.
         example: String,
     },
 
     /// Клауза не может сработать ни на одном входе.
-    #[error("клауза #{clause} недостижима: её перекрывают предыдущие")]
+    #[error("{}", adamas_l10n::tr!("pattern-unreachable-clause", clause = .clause))]
     UnreachableClause {
         /// Номер клаузы.
         clause: usize,
@@ -304,7 +300,7 @@ pub enum PatternError {
     /// Три случая одним сообщением: тип не примитивен вовсе, литерал не той
     /// формы (дробный под целым), литерал вне диапазона. Различает их `why` -
     /// §4.3 требует сказать, что именно не сошлось.
-    #[error("литерал `{written}` не разбирает значение типа `{ty}`: {why}")]
+    #[error("{}", adamas_l10n::tr!("pattern-literal-pattern", written = .written, ty = .ty, why = adamas_l10n::message(.why, &[])))]
     LiteralPattern {
         /// Как написан.
         written: String,
@@ -320,7 +316,7 @@ pub enum PatternError {
     /// Отдельно от [`PatternError::LiteralPattern`]: там не сошлись литерал с
     /// типом разбираемого, здесь - сам ответ сравнения, и указывать автору надо
     /// на объявление `Bool`, а не на написанное число.
-    #[error("литеральный паттерн отвечает `Bool` (§4.3), а {why}")]
+    #[error("{}", adamas_l10n::tr!("pattern-verdict", why = adamas_l10n::message(.why, &[])))]
     Verdict {
         /// Что с ним не так.
         why: &'static str,
@@ -1042,7 +1038,7 @@ impl Compiler<'_> {
             return Err(PatternError::LiteralPattern {
                 written: literal.to_string(),
                 ty: ctx.quote(&columns[split].ty).to_string(),
-                why: "литералом разбирается только примитив (§4.11)",
+                why: "why-literal-not-primitive",
             });
         }
 
@@ -1249,15 +1245,12 @@ impl Compiler<'_> {
             unreachable!("литеральная колонка выбрана не по литералу")
         };
         let Value::Prim(Prim::Ty(prim)) = &*crate::conv::whnf(self.signature, &column.ty) else {
-            return Err(refuse(
-                &wanted,
-                "литералом разбирается только примитив (§4.11)",
-            ));
+            return Err(refuse(&wanted, "why-literal-not-primitive"));
         };
         let prim = *prim;
         let bits = |literal: &Literal| literal.bits(prim);
         let Some(cut) = bits(&wanted) else {
-            return Err(refuse(&wanted, "литерал не укладывается в этот тип (§4.3)"));
+            return Err(refuse(&wanted, "why-literal-out-of-type"));
         };
         // Все литералы колонки проверяются здесь, а не по мере деления: клауза
         // с непредставимым числом обязана отказать, даже если разбор до её
@@ -1271,7 +1264,7 @@ impl Compiler<'_> {
         for row in rows {
             if let Pat::Lit(literal) = &row.patterns[at] {
                 if bits(literal).is_none() {
-                    return Err(refuse(literal, "литерал не укладывается в этот тип (§4.3)"));
+                    return Err(refuse(literal, "why-literal-out-of-type"));
                 }
             }
         }
@@ -1358,12 +1351,12 @@ impl Compiler<'_> {
         let data = self.signature.convention(crate::prim::BOOL);
         let Some(declaration) = self.signature.lookup(&data) else {
             return Err(PatternError::Verdict {
-                why: "он не объявлен",
+                why: "why-bool-undeclared",
             });
         };
         let DefinitionKind::Data { constructors, .. } = &declaration.kind else {
             return Err(PatternError::Verdict {
-                why: "объявлен он не семейством",
+                why: "why-bool-not-family",
             });
         };
         // Сравнением множеств, а не тремя условиями подряд: свойство здесь
@@ -1376,7 +1369,7 @@ impl Compiler<'_> {
         named.sort_unstable();
         if named != [crate::prim::FALSE, crate::prim::TRUE] {
             return Err(PatternError::Verdict {
-                why: "конструкторов у него обязано быть ровно два - `True` и `False`",
+                why: "why-bool-two-constructors",
             });
         }
         Ok(Family {

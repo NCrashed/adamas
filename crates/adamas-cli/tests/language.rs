@@ -56,3 +56,31 @@ fn the_posix_order_holds_and_our_variable_is_above_it() {
         "`ADAMAS_LANG` старше всех"
     );
 }
+
+/// Отказ проверки типов - каталог ядра - говорит тем же языком, что разбор.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+#[test]
+fn a_type_error_speaks_the_chosen_language_too() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("language");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mismatch.adamas");
+    std::fs::write(
+        &path,
+        "data Color where\n  Red : Color\n\nmain : Bool\nmain = Red\n",
+    )
+    .unwrap();
+    let said = |lang: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_adamas"))
+            .arg("check")
+            .arg(&path)
+            .env("ADAMAS_LANG", lang)
+            .output()
+            .unwrap();
+        String::from_utf8(output.stderr).unwrap()
+    };
+    assert!(said("en").contains("type mismatch: expected `Bool`, found `Color`"));
+    assert!(said("ru").contains("несовпадение типов: ожидался `Bool`, получен `Color`"));
+}

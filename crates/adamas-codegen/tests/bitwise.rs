@@ -288,7 +288,10 @@ fn the_only_overflow_of_division_wraps_instead_of_trapping() {
 fn a_zero_divisor_from_a_false_axiom_stops_the_machine() {
     let machine = harness::refused(ZERO);
     assert!(
-        machine.contains(adamas_core::prim::DIVISION_BY_ZERO),
+        machine.contains(&adamas_l10n::message(
+            adamas_core::prim::DIVISION_BY_ZERO,
+            &[]
+        )),
         "машина оборвалась не тем: {machine}"
     );
 }

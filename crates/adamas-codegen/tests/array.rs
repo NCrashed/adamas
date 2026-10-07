@@ -523,7 +523,7 @@ fn a_cell_past_the_end_from_a_false_axiom_stops_the_machine() {
     for (name, source) in cases {
         let machine = harness::refused(source);
         assert!(
-            machine.contains(adamas_core::prim::CELL_OUTSIDE),
+            machine.contains(&adamas_l10n::message(adamas_core::prim::CELL_OUTSIDE, &[])),
             "{name}: машина оборвалась не тем: {machine}"
         );
     }

@@ -15,6 +15,7 @@ workspace = true
 bench = false
 
 [dependencies]
+adamas-l10n.workspace = true
 adamas-elab.workspace = true
 thiserror = "2"
 # Только разбор: `serde` выключен намеренно. Полный `toml` тянет девять

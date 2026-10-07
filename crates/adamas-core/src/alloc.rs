@@ -210,68 +210,29 @@ pub fn blame(signature: &Signature, name: &Name) -> Option<Blame> {
 
 impl fmt::Display for Blame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use crate::term::written_name;
+        use adamas_l10n::tr;
         for callee in &self.through {
-            write!(f, "зовёт `{}`, а та ", crate::term::written_name(callee))?;
+            f.write_str(&tr!("alloc-through", callee = written_name(callee)))?;
         }
-        match &self.source {
-            Source::Construct(name) => write!(
-                f,
-                "строит значение конструктором `{}` - это куча Perceus. Выходов три (§5.1): \
-                 линейный или unique вход, где reuse гарантирован; регион `{{Alloc r}}`; отказ от \
-                 конструирования. Первых двух в компиляторе пока нет, так что остаётся третий",
-                crate::term::written_name(name)
-            ),
-            Source::Record => write!(
-                f,
-                "строит запись - это куча Perceus. Выходов три (§5.1): линейный или unique вход, \
-                 где reuse гарантирован; регион `{{Alloc r}}`; отказ от конструирования. Первых \
-                 двух в компиляторе пока нет, так что остаётся третий"
-            ),
-            Source::Closure => write!(
-                f,
-                "создаёт замыкание: лямбда стоит сверх параметров, и окружение её уходит в кучу"
-            ),
-            Source::Partial(name) => write!(
-                f,
-                "применяет `{name}` частично, а недостающие аргументы ждут в замыкании"
-            ),
-            Source::Operation(name) => write!(
-                f,
-                "зовёт операцию `{name}`: аллоцирует ли она, решает ветка того хендлера, который \
-                 её перехватит, а в точке вызова он неизвестен. Вердикт хвостовой резумптивности \
-                 (§3.4) считается по площадке `handle`, и площадка эта здесь не написана"
-            ),
+        f.write_str(&match &self.source {
+            Source::Construct(name) => tr!("alloc-construct", name = written_name(name)),
+            Source::Record => tr!("alloc-record"),
+            Source::Closure => tr!("alloc-closure"),
+            Source::Partial(name) => tr!("alloc-partial", name = name),
+            Source::Operation(name) => tr!("alloc-operation", name = name),
             Source::Resumption {
                 effect,
                 operation: Some(operation),
-            } => write!(
-                f,
-                "ставит хендлер `{effect}`, чья ветка `{operation}` зовёт `resume` вне хвостовой \
-                 позиции: продолжение приходится снять в сегмент кучи (§3.4, §5.1). Хвостовая \
-                 ветка продолжения не трогает, абортивная его отбрасывает - обе законны"
-            ),
+            } => tr!("alloc-resumption", effect = effect, operation = operation),
             Source::Resumption {
                 effect,
                 operation: None,
-            } => write!(
-                f,
-                "ставит `handleMulti` над `{effect}`: ω-резумпция не обещает «не более одного \
-                 раза», и сегмент копируется в кучу на каждое возобновление (§3.4, «Стоимость \
-                 multi-shot»)"
-            ),
-            Source::Opaque(name) => write!(
-                f,
-                "зовёт `{name}`, у которой нет тела и не написан `@noalloc`: через границу \
-                 обязательство объявляется, а не выводится из чужого кода (§5.1)"
-            ),
-            Source::Boxing => write!(
-                f,
-                "применяет значение-функцию: аргумент уходит слотом замыкания, а слот говорит \
-                 указателем, и плоский аргумент на этой границе боксируется (§4.11). Типов у \
-                 вердикта нет, поэтому аллоцирующим считается всякое такое применение"
-            ),
-            Source::Call(name) => write!(f, "зовёт `{name}`, а та аллоцирует"),
-        }
+            } => tr!("alloc-multi-shot", effect = effect),
+            Source::Opaque(name) => tr!("alloc-opaque", name = name),
+            Source::Boxing => tr!("alloc-boxing"),
+            Source::Call(name) => tr!("alloc-call", name = name),
+        })
     }
 }
 

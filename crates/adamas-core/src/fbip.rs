@@ -72,10 +72,7 @@ use crate::term::{Case, Index, Name, Term, spine};
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Fault {
     /// Построенный конструктор не той формы, что разобранный.
-    #[error(
-        "разобран `{matched}` (полей: {matched_fields}), а строится `{built}` (полей: {fields}): \
-         reuse переписывает слоты разобранного, и форма обязана совпасть"
-    )]
+    #[error("{}", adamas_l10n::tr!("fbip-shape", matched = .matched, matched_fields = .matched_fields, built = .built, fields = .fields))]
     Shape {
         /// Что строится.
         built: Name,
@@ -88,10 +85,7 @@ pub enum Fault {
     },
 
     /// Форма совпадает, но разобранное значение употреблено ещё раз.
-    #[error(
-        "разобранное `{matched}` употребляется ещё раз, то есть остаётся живым: \
-         переписать его слоты нечем, и `{built}` (полей: {fields}) аллоцируется заново"
-    )]
+    #[error("{}", adamas_l10n::tr!("fbip-alive", matched = .matched, built = .built, fields = .fields))]
     Alive {
         /// Что строится.
         built: Name,
@@ -102,10 +96,7 @@ pub enum Fault {
     },
 
     /// Форма совпадает, но разобранное уже переписано соседней структурой.
-    #[error(
-        "разобранный `{matched}` уже переписан: `{built}` (полей: {fields}) строится вторым, \
-         и переписывать ему нечего - ветвь аллоцирует"
-    )]
+    #[error("{}", adamas_l10n::tr!("fbip-taken", matched = .matched, built = .built, fields = .fields))]
     Taken {
         /// Что строится.
         built: Name,

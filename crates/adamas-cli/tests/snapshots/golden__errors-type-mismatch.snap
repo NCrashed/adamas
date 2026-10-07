@@ -6,4 +6,4 @@ Error: type-mismatch.adamas:13:18: ожидалась функция, получ
   count (Succ k) = k Zero
                    ^^^^^^
   в контексте:
-    (ω k : Nat)
+    (k : Nat)

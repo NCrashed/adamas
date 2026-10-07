@@ -2,8 +2,8 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: unsolved-hole-numbered.adamas:15:23: несовпадение типов: ожидался `Box (?0)`, получен `Bool`
+Error: unsolved-hole-numbered.adamas:15:23: несовпадение типов: ожидался `Box _`, получен `Bool`
   bad b = size b + size True
                         ^^^^
   в контексте:
-    (ω b : Box Zero)
+    (b : Box Zero)

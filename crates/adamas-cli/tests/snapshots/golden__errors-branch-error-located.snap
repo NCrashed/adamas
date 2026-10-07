@@ -6,5 +6,5 @@ Error: branch-error-located.adamas:12:16: несовпадение типов: �
     False -> v + c
                  ^
   в контексте:
-    (ω c : Bool)
-    (ω v : Int32)
+    (c : Bool)
+    (v : Int32)

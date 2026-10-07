@@ -6,4 +6,4 @@ Error: division-unproven.adamas:8:25: несовпадение типов: ож�
   peek d = divInt32 100 d Refl
                           ^^^^
   в контексте:
-    (ω d : Int32)
+    (d : Int32)

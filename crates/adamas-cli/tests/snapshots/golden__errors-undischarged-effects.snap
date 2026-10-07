@@ -2,9 +2,9 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: undischarged-effects.adamas:24:15: эффекты `{State a | e0}` не погашены: вокруг разрешено `{| e0}`
+Error: undischarged-effects.adamas:24:15: эффекты `{State a}` не погашены: вокруг разрешено `{}`
   escapes a x = leaks a x
                 ^^^^^^^^^
   в контексте:
-    (0 a : Type u0)
-    (ω x : a)
+    (0 a : Type)
+    (x : a)

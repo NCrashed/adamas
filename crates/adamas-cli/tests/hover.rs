@@ -235,7 +235,9 @@ fn a_constructor_names_its_family_in_its_type() {
                 continue;
             };
             assert!(
-                value.contains(adamas_core::term::written_name(data)),
+                // Имя семейства - как его печатает подсказка: коротко, если оно
+                // однозначно (§7.6), и полностью иначе.
+                value.contains(adamas_core::term::short(data)),
                 "{}: `{name}` строит `{data}`, а подсказка говорит `{value}`",
                 path.display()
             );
@@ -330,10 +332,7 @@ fn a_hover_reads_a_name_from_another_file() {
         .expect("граница знака переводится");
     assert_eq!(
         hovered(&path, &file, at).as_deref(),
-        Some(
-            "Std.Prelude.maximum : {0 a : Type u0} -> {ω _ : Std.Prelude.Ordered{u0} #0} -> \
-             (ω _ : #1) -> (ω _ : Std.Prelude.List{u0} #2) -> {| e0} #3"
-        )
+        Some("maximum : {a : Type} -> {Ordered a} => a -> Std.Prelude.List a -> a")
     );
 }
 

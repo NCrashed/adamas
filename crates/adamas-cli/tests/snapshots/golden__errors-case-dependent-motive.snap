@@ -6,4 +6,4 @@ Error: case-dependent-motive.adamas:29:12: несовпадение типов: 
   mirror b = case b of
              ^^^^^^^^^
   в контексте:
-    (ω b : Bool)
+    (b : Bool)

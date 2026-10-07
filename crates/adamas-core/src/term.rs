@@ -1274,6 +1274,9 @@ enum Pos {
     /// Кодомен стрелки: скобки не нужны, но стрелка от единицы здесь
     /// вычислением не печатается (§3.4, третья цена сахара).
     Codomain,
+    /// Домен стрелки без имени, `A -> B`: скобки нужны стрелке, лямбде и
+    /// прочему связывающему, а применению - нет.
+    Domain,
 }
 
 impl Pos {
@@ -1289,6 +1292,10 @@ impl Pos {
             Self::Free | Self::Codomain => false,
             Self::Callee => !atomic && !matches!(term, Term::App(..)),
             Self::Atom => !atomic,
+            Self::Domain => matches!(
+                term,
+                Term::Pi(..) | Term::Lam(..) | Term::Let(..) | Term::Case(_) | Term::Split(_)
+            ),
         }
     }
 }
@@ -1381,11 +1388,13 @@ fn emit<'a>(
         Term::Var(Index(index)) => write!(f, "#{index}")?,
         Term::Meta(TermMeta(name)) => write!(f, "?{name}")?,
         Term::EffectKind => f.write_str("Effect")?,
-        Term::Universe(level) => write!(f, "Type {level}")?,
-        Term::RowKind(level) => write!(f, "Row {level}")?,
+        // Уровень автор пишет, только когда аннотирует его явно (§3.2), и
+        // человеческая печать его не показывает.
+        Term::Universe(level) => sort(f, "Type", level)?,
+        Term::RowKind(level) => sort(f, "Row", level)?,
         Term::Prim(prim) => write!(f, "{prim}")?,
         Term::Lam(mult, name, body) => {
-            write!(f, "\\({mult} {name}) -> ")?;
+            write!(f, "\\{} -> ", bound(*mult, name, "(", ")"))?;
             pending.push(Piece::Term(body, Pos::Free, inner));
         }
         Term::App(callee, argument) => {
@@ -1437,21 +1446,23 @@ fn emit<'a>(
         Term::Pi(_, _, _, row, codomain) if !matches!(pos, Pos::Codomain) && suspended(term) => {
             later(pending, computation(row, codomain, inner));
         }
+        // Вид скобок несёт связывание: у выводимого они фигурные. Человеческая
+        // печать (§7.6) кратность по умолчанию не пишет, а неупомянутое
+        // связывание печатает стрелкой либо ограничением (см. [`arrow`]).
         Term::Pi(binder, name, domain, row, codomain) => {
-            // Вид скобок несёт связывание: у выводимого они фигурные.
-            let (open, close) = binder.visibility.brackets();
-            write!(f, "{open}{} {name} : ", binder.mult)?;
+            let (open, close, pos) = arrow(*binder, name);
+            f.write_str(&open)?;
             later(
                 pending,
                 [
-                    Piece::Term(domain, Pos::Free, inner),
-                    Piece::Text(format!("{close} -> {row}").into()),
+                    Piece::Term(domain, pos, inner),
+                    Piece::Text(format!("{close} {row}").into()),
                     Piece::Term(codomain, Pos::Codomain, inner),
                 ],
             );
         }
         Term::Let(mult, name, ty, value, body) => {
-            write!(f, "let {mult} {name} : ")?;
+            write!(f, "let {} : ", bound(*mult, name, "", ""))?;
             later(
                 pending,
                 [
@@ -1479,6 +1490,47 @@ fn emit<'a>(
         }
     }
     Ok(())
+}
+
+/// Связывание лямбды или `let`: `(ω x)`, а человеческой печатью `ω` не
+/// пишется (§7.6) - `x`.
+fn bound(mult: Mult, name: &str, open: &str, close: &str) -> String {
+    if crate::human::human() && mult == Mult::Many {
+        name.to_owned()
+    } else {
+        format!("{open}{mult} {name}{close}")
+    }
+}
+
+/// Сорт с уровнем; человеческая печать уровня не пишет (§7.6).
+fn sort(f: &mut fmt::Formatter<'_>, sort: &str, level: &Level) -> fmt::Result {
+    if crate::human::human() {
+        f.write_str(sort)
+    } else {
+        write!(f, "{sort} {level}")
+    }
+}
+
+/// Стрелка: что пишется до домена, что после и в какой позиции стоит домен.
+///
+/// Человеческая печать (§7.6):
+/// Неупомянутое явное связывание кратности `ω` - `A -> B`; неупомянутое
+/// неявное `ω` - ограничение класса `{Ord a} => B`; кратность по умолчанию
+/// (`ω` у явного, `0` у неявного) не пишется.
+fn arrow(binder: Binder, name: &str) -> (String, &'static str, Pos) {
+    let (open, close) = binder.visibility.brackets();
+    let close = if close == ')' { ") ->" } else { "} ->" };
+    if !crate::human::human() {
+        return (format!("{open}{} {name} : ", binder.mult), close, Pos::Free);
+    }
+    match (binder.visibility, binder.mult, name) {
+        (Visibility::Explicit, Mult::Many, "_") => (String::new(), " ->", Pos::Domain),
+        (Visibility::Implicit, Mult::Many, "_") => ("{".to_owned(), "} =>", Pos::Free),
+        (visibility, mult, _) if crate::human::implied(mult, visibility) => {
+            (format!("{open}{name} : "), close, Pos::Free)
+        }
+        (_, mult, _) => (format!("{open}{mult} {name} : "), close, Pos::Free),
+    }
 }
 
 /// Вычисление `{ε} A` без связывания-единицы: row и кодомен опущены на одно.
@@ -1517,9 +1569,14 @@ fn telescope(fields: &Fields, inner: usize) -> Vec<Piece<'_>> {
     let mut pieces = Vec::new();
     for (position, field) in fields.iter().enumerate() {
         let lead = if position > 0 { ", " } else { "" };
-        pieces.push(Piece::Text(
-            format!("{lead}{} {} : ", field.mult, field.name).into(),
-        ));
+        // Поле записи без написанной кратности - `1` (решение 2026-10-03), и
+        // человеческая печать её не пишет.
+        let text = if crate::human::human() && field.mult == Mult::One {
+            format!("{lead}{} : ", field.name)
+        } else {
+            format!("{lead}{} {} : ", field.mult, field.name)
+        };
+        pieces.push(Piece::Text(text.into()));
         pieces.push(Piece::Term(&field.ty, Pos::Free, inner));
     }
     // Хвост отделяется `|`, а не запятой: он не поле, и написан в §4.2 так же.

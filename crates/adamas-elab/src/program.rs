@@ -279,6 +279,7 @@ impl Program {
 #[must_use]
 pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
     adamas_core::term::shadow_prelude(Vec::new());
+    adamas_core::human::forget_names();
     let parsed = adamas_parser::parse(entry.text());
     let mut loader = Loader {
         sources,
@@ -349,6 +350,10 @@ pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
     // Отказ, поднятый **значением**, доходит сюда только если восстановление
     // его не пережило; его спан живёт в тексте входного файла по построению -
     // чужой уехал бы в `blame`.
+    // Имена программы прочитаны: печать отказов сокращает их там, где
+    // короткое однозначно (§7.6).
+    let names = signature.names();
+    adamas_core::human::note_names(names.iter().map(|it| &**it));
     let mut diagnostics = loader.blame;
     if let Err(error) = outcome {
         refusals.refused(error, Vec::new());

@@ -2,7 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: file-span-foreign-merge.adamas:15:25: несовпадение типов: ожидался `Span f 4 (?0)`, получен `Span g 4 8`
+Error: file-span-foreign-merge.adamas:15:25: несовпадение типов: ожидался `Span f 4 _`, получен `Span g 4 8`
   mixed f g a b = merge a b
                           ^
   в контексте:

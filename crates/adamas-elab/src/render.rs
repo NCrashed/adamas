@@ -93,6 +93,17 @@ pub(crate) fn headline(error: &ElabError) -> String {
             let mut kind = core.kind.clone();
             let mut naming = Naming::of(core);
             naming.rewrite(&mut kind);
+            // Человеческая печать (§7.6) - если она не склеила две стороны,
+            // которые полная печать различает: тогда различие как раз в
+            // спрятанном, и сообщение печатается полными формами.
+            let mut human = core.kind.clone();
+            humanized(&mut human);
+            Naming::of(core).rewrite(&mut human);
+            let kind = if collapses(&human, &kind) {
+                kind.to_string()
+            } else {
+                adamas_core::human::humanly(|| human.to_string())
+            };
             match error {
                 // Сборка клауз оборачивает отказ ядра своей фразой, и она
                 // остаётся: споткнулась на типе именно она.
@@ -101,11 +112,54 @@ pub(crate) fn headline(error: &ElabError) -> String {
                 {
                     adamas_l10n::tr!("render-ill-typed-type", kind = kind)
                 }
-                _ => kind.to_string(),
+                _ => kind,
             }
         }
         None => error.to_string(),
     }
+}
+
+/// Части отказа - для человеческой печати (§7.6).
+fn humanized(kind: &mut adamas_core::error::ErrorKind) {
+    let (terms, _, _, rows) = kind.parts_mut();
+    for term in terms {
+        *term = adamas_core::human::humane(term);
+    }
+    for row in rows {
+        *row = adamas_core::human::humane_row(row);
+    }
+}
+
+/// Склеила ли человеческая печать две части, которые полная различает.
+///
+/// «Склеила» - не только «совпали дословно»: стороны, одна из которых
+/// получается из другой подстановкой на место дырок `_`, в человеческом виде
+/// тоже могли бы совпасть, и различие тогда лежит в спрятанном - в уровне, в
+/// области видимости имени, в хвосте row. «`List _` против `List Type`» без
+/// уровней ничего не объясняет, «`Box _` против `Bool`» - объясняет.
+fn collapses(human: &adamas_core::error::ErrorKind, full: &adamas_core::error::ErrorKind) -> bool {
+    let shown = |kind: &adamas_core::error::ErrorKind, humanly: bool| -> Vec<String> {
+        let mut kind = kind.clone();
+        let (terms, _, _, rows) = kind.parts_mut();
+        let print = || {
+            terms
+                .iter()
+                .map(ToString::to_string)
+                .chain(rows.iter().map(ToString::to_string))
+                .collect::<Vec<_>>()
+        };
+        if humanly {
+            adamas_core::human::humanly(print)
+        } else {
+            print()
+        }
+    };
+    let (human, full) = (shown(human, true), shown(full, false));
+    (0..human.len()).any(|i| {
+        (i + 1..human.len()).any(|j| {
+            full.get(i) != full.get(j) && (fits(&human[i], &human[j]) || fits(&human[j], &human[i]))
+        })
+    })
 }
 
 /// Телескоп точки отказа и пройденный путь.
@@ -145,17 +199,18 @@ fn explain(error: &TypeError, names: &Names) -> String {
     if !shown.is_empty() {
         let _ = write!(out, "\n  {}", adamas_l10n::tr!("render-context"));
         for (index, binding) in shown {
-            let mut ty = binding.ty.clone();
+            let mut ty = adamas_core::human::humane(&binding.ty);
             // Типы телескопа прочитаны обратно в контексте целиком, а не
             // каждый в своём начале: индекс в них тот же, что и в термах
             // сообщения.
             naming.term(&mut ty, &mut Vec::new(), 0);
-            let _ = write!(
-                out,
-                "\n    ({} {} : {ty})",
-                binding.mult,
-                naming.local(index)
-            );
+            // Кратность по умолчанию - `ω` - не пишется, как и в сигнатуре (§7.6).
+            let mult = match binding.mult {
+                adamas_core::mult::Mult::Many => String::new(),
+                ref other => format!("{other} "),
+            };
+            let ty = adamas_core::human::humanly(|| ty.to_string());
+            let _ = write!(out, "\n    ({mult}{} : {ty})", naming.local(index));
         }
     }
     let route = route(error, names);
@@ -727,4 +782,44 @@ fn shows(term: &Term, depth: u32, at: u32) -> bool {
                 || case.branches.iter().any(|branch| recur(&branch.body))
         }
     }
+}
+
+/// Получается ли `other` из `pattern` подстановкой непустого текста на место
+/// каждой дырки `_` (отдельно стоящей, не части имени).
+fn fits(pattern: &str, other: &str) -> bool {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '\'' || c == '#';
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut pieces: Vec<String> = vec![String::new()];
+    for (at, &c) in chars.iter().enumerate() {
+        let alone = c == '_'
+            && !at.checked_sub(1).is_some_and(|it| ident(chars[it]))
+            && !chars.get(at + 1).is_some_and(|it| ident(*it));
+        if alone {
+            pieces.push(String::new());
+        } else if let Some(last) = pieces.last_mut() {
+            last.push(c);
+        }
+    }
+    matches(&pieces, other)
+}
+
+/// Куски, между которыми стоят дырки: первый - в начале, последний - в конце,
+/// и между соседями хотя бы один знак.
+fn matches(pieces: &[String], text: &str) -> bool {
+    let Some((first, rest)) = pieces.split_first() else {
+        return text.is_empty();
+    };
+    let Some(after) = text.strip_prefix(first.as_str()) else {
+        return false;
+    };
+    if rest.is_empty() {
+        return after.is_empty();
+    }
+    // Дырка берёт хотя бы один знак: перебираются все её концы.
+    after
+        .char_indices()
+        .skip(1)
+        .map(|(at, _)| at)
+        .chain(std::iter::once(after.len()))
+        .any(|at| matches(rest, &after[at..]))
 }

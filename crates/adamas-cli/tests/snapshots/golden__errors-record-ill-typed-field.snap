@@ -6,5 +6,5 @@ Error: record-ill-typed-field.adamas:9:7: ожидался тип, получе�
   f x = { a = ((Zero -> _) Type), b = Zero }
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   в контексте:
-    (ω x : Nat)
+    (x : Nat)
   путь: тело `f` -> тело `f`

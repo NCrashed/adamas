@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: mask-widens-row.adamas:32:10: несовпадение типов: ожидался `{} ?1`, получен `{Ask | ?0} Nat`
+Error: mask-widens-row.adamas:32:10: несовпадение типов: ожидался `{} _`, получен `{Ask} Nat`
   sneaky = mask ask
            ^^^^^^^^

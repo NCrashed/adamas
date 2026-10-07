@@ -6,4 +6,4 @@ Error: literal-without-type.adamas:13:3: несовпадение типов: о
     p.x
     ^^^
   в контексте:
-    (ω p : {1 x : Nat})
+    (p : {x : Nat})

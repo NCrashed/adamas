@@ -6,6 +6,6 @@ Error: let-synthesis-refused.adamas:16:11: несовпадение типов: 
     let k = j + xs
             ^^^^^^
   в контексте:
-    (ω xs : List Int32)
-    (ω i : UInt64)
-    (ω j : UInt64)
+    (xs : List Int32)
+    (i : UInt64)
+    (j : UInt64)

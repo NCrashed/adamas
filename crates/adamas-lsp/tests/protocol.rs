@@ -797,7 +797,7 @@ fn a_hover_answers_by_what_is_under_it() {
     // 14,5 - имя семейства в `data Nat where`.
     assert_eq!(
         client.hover(URI, 14, 5)["contents"]["value"],
-        json!("Nat : Type 0")
+        json!("Nat : Type")
     );
     // 15,2 - конструктор `Zero`.
     assert_eq!(
@@ -924,7 +924,7 @@ fn a_local_binding_shadows_a_definition_of_the_same_name() {
     // Имя группы клауз написано на каждой, а в дереве лежит однажды.
     assert_eq!(
         client.hover(URI, 9, 0)["contents"]["value"],
-        json!("повтор : (ω _ : Nat) -> {| e0} Nat"),
+        json!("повтор : Nat -> Nat"),
         "имя второй клаузы - то же определение"
     );
     assert_eq!(
@@ -1061,7 +1061,7 @@ fn an_edit_in_a_module_moves_the_dependents_diagnostic() {
         mismatch[0]["message"].as_str().is_some_and(|it| {
             it.starts_with(
                 "несовпадение типов: ожидался `Std.Base.Nat`, \
-                 получен `(ω _ : Std.Base.Nat) -> {| ?0} Std.Base.Nat`",
+                 получен `Std.Base.Nat -> Std.Base.Nat`",
             )
         }),
         "{mismatch}"

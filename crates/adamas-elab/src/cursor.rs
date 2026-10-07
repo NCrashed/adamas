@@ -150,13 +150,13 @@ pub fn resolved(signature: &Signature, cursor: &Cursor) -> Option<Symbol> {
 #[must_use]
 pub fn described(signature: &Signature, name: &str) -> Option<String> {
     if let Some(definition) = signature.lookup(name) {
-        return Some(format!("{name} : {}", definition.ty));
+        return Some(humane(name, &definition.ty));
     }
     // Порядок тот же, каким читает имя элаборация: объявленное заслоняет
     // занятое языком, а занятое языком не переобъявить (§4.11).
     if let Some(prim) = adamas_core::prim::Prim::named(name) {
         let ty = adamas_core::check::prim_scheme(signature, prim);
-        return Some(format!("{name} : {ty}"));
+        return Some(humane(name, &ty));
     }
     if name == "Type" || name == "Effect" {
         return Some(adamas_l10n::tr!("cursor-sort", name = name));
@@ -188,7 +188,7 @@ fn lifted(signature: &Signature, cursor: &Cursor) -> Option<String> {
     let mut ty = &signature.lookup(&cursor.owning()?)?.ty;
     while let adamas_core::term::Term::Pi(_, name, domain, _, codomain) = ty {
         if **name == *cursor.text {
-            return Some(format!("{} : {domain}", cursor.text));
+            return Some(humane(&cursor.text, domain));
         }
         ty = codomain;
     }
@@ -806,6 +806,14 @@ impl Search<'_> {
             }
         }
     }
+}
+
+/// `имя : тип` человеческой печатью (§7.6): та же строка уходит в подсказку
+/// редактора и в `adamas check --type`.
+fn humane(name: &str, ty: &adamas_core::term::Term) -> String {
+    let ty = adamas_core::human::humane(ty);
+    let name = adamas_core::human::named(name);
+    adamas_core::human::humanly(|| format!("{name} : {ty}"))
 }
 
 #[cfg(test)]

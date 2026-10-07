@@ -6,5 +6,5 @@ Error: default-checked-in-class.adamas:11:23: несовпадение типо�
     broken x = name x + True
                         ^^^^
   в контексте:
-    (0 a : Type u0)
-    (ω x : a)
+    (0 a : Type)
+    (x : a)

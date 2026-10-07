@@ -6,4 +6,4 @@ Error: if-branch-located.adamas:7:27: несовпадение типов: ож�
   pick c = if c then 1 else True
                             ^^^^
   в контексте:
-    (ω c : Bool)
+    (c : Bool)

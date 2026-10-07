@@ -6,4 +6,4 @@ expression: shown
   f (Succ k) = k
                ^
   в контексте:
-    (ω k : Nat)
+    (k : Nat)

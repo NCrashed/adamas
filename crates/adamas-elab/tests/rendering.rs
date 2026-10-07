@@ -133,7 +133,7 @@ f (Succ k) = k
 "
     );
     let shown = refusal(&text);
-    assert!(shown.contains("(ω k : Nat)"), "получено {shown}");
+    assert!(shown.contains("(k : Nat)"), "получено {shown}");
     assert!(!shown.contains("путь:"), "получено {shown}");
     assert!(!shown.contains('#'), "получено {shown}");
     insta::assert_snapshot!(shown);
@@ -155,6 +155,6 @@ g (Cons x xs) = x
 "
     );
     let shown = refusal(&text);
-    assert!(shown.contains("(ω x : Nat)"), "получено {shown}");
-    assert!(shown.contains("(ω xs : "), "получено {shown}");
+    assert!(shown.contains("(x : Nat)"), "получено {shown}");
+    assert!(shown.contains("(xs : "), "получено {shown}");
 }

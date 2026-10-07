@@ -280,5 +280,5 @@ runConsole k = handle @Console k with
 -- никем не пойманный, печатается в stderr и кончает процесс кодом 1; файлы,
 -- открытые в оборванной области, к этому моменту закрыты.
 run : {a : Type} -> ({Console, Files, Except IOError} a) -> a
-run k = handle @Foreign (\_u -> runConsole (runFiles (caught k))) with
+run k = handle @Foreign (\_u -> runConsole (\_c -> runFiles (\_f -> caught (\_x -> k MkUnit)))) with
   return v -> v

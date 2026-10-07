@@ -78,7 +78,7 @@ fn both_languages_name_the_same_messages_with_the_same_arguments() {
     }
 }
 
-/// Идентификаторы `tr!(…)`, написанные в исходниках крейтов.
+/// Идентификаторы `tr!(…)` и `text!(…)`, написанные в исходниках крейтов.
 #[allow(
     clippy::unwrap_used,
     reason = "заготовка теста: отказ здесь означает сломанное дерево исходников"
@@ -100,15 +100,17 @@ fn written() -> Vec<(String, String)> {
                 continue;
             }
             let text = std::fs::read_to_string(&path).unwrap();
-            for (at, _) in text.match_indices("tr!(\"") {
-                // `include_str!("…")` кончается тем же.
-                let before = text[..at].chars().next_back();
-                if before.is_some_and(|it| it.is_alphanumeric() || it == '_') {
-                    continue;
+            for macro_ in ["tr!(\"", "text!(\""] {
+                for (at, _) in text.match_indices(macro_) {
+                    // `include_str!("…")` кончается тем же.
+                    let before = text[..at].chars().next_back();
+                    if before.is_some_and(|it| it.is_alphanumeric() || it == '_') {
+                        continue;
+                    }
+                    let rest = &text[at + macro_.len()..];
+                    let id = &rest[..rest.find('"').unwrap()];
+                    found.push((id.to_owned(), path.display().to_string()));
                 }
-                let rest = &text[at + 5..];
-                let id = &rest[..rest.find('"').unwrap()];
-                found.push((id.to_owned(), path.display().to_string()));
             }
         }
     }

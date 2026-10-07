@@ -192,7 +192,7 @@ fn ordered_branches<'a>(
         if seen.contains(&name) {
             return Err(ElabError::HandlerBranch {
                 name: Rc::clone(&branch.name.text),
-                why: "ветка написана дважды",
+                why: adamas_l10n::text!("expr-1"),
                 span: branch.span,
             });
         }
@@ -201,7 +201,7 @@ fn ordered_branches<'a>(
         if !known {
             return Err(ElabError::HandlerBranch {
                 name: Rc::clone(&branch.name.text),
-                why: "такой операции у эффекта нет",
+                why: adamas_l10n::text!("expr-2"),
                 span: branch.name.span,
             });
         }
@@ -218,7 +218,7 @@ fn ordered_branches<'a>(
     for operation in operations {
         ordered.push(named(operation).ok_or_else(|| ElabError::HandlerBranch {
             name: Rc::clone(operation),
-            why: "ветка не написана, а хендлер обязан покрыть все операции",
+            why: adamas_l10n::text!("expr-3"),
             span,
         })?);
     }
@@ -972,8 +972,8 @@ impl Position {
     fn face(self) -> Option<&'static str> {
         match self {
             Self::Inner => None,
-            Self::Returned => Some("возвращается"),
-            Self::Field => Some("кладётся в поле конструктора"),
+            Self::Returned => Some(adamas_l10n::text!("expr-4")),
+            Self::Field => Some(adamas_l10n::text!("expr-5")),
         }
     }
 }
@@ -1702,13 +1702,7 @@ impl<'a> Elaborator<'a> {
         // полей со своими хвостами номер параметра начинал зависеть от того,
         // какое из них тронуло тело, а законная программа, зовущая оба,
         // отвергалась непогашенностью с чужим именем в сообщении.
-        self.unlifted(
-            ty,
-            default,
-            None,
-            "поле есть данные семейства, а семейство row-параметра не несёт - \
-             напишите набор меток замкнутым",
-        )
+        self.unlifted(ty, default, None, adamas_l10n::text!("expr-6"))
     }
 
     /// То же для члена класса и члена `module type` (§4.3).
@@ -1732,13 +1726,7 @@ impl<'a> Elaborator<'a> {
         default: Mult,
         rowed: Option<Row<Term>>,
     ) -> Result<Term, ElabError> {
-        self.unlifted(
-            ty,
-            default,
-            rowed,
-            "подъём даёт члену один хвост на весь класс, а названный требует \
-             своего параметра - связать его нечем",
-        )
+        self.unlifted(ty, default, rowed, adamas_l10n::text!("expr-7"))
     }
 
     /// Общее у обоих: имена поднимаются, написанный хвост отвергнут.
@@ -3584,7 +3572,7 @@ impl<'a> Elaborator<'a> {
             }
             ast::LitKind::Nat => {
                 if ty.floating() {
-                    return refuse("напишите дробное: `1` и `1.0` - разные литералы (§4.3)");
+                    return refuse(adamas_l10n::text!("expr-8"));
                 }
                 let Some(value) = digits(&lit.text) else {
                     return overflow();
@@ -3596,7 +3584,7 @@ impl<'a> Elaborator<'a> {
             }
             ast::LitKind::Int => {
                 if ty.floating() {
-                    return refuse("напишите дробное: `-1` и `-1.0` - разные литералы (§4.3)");
+                    return refuse(adamas_l10n::text!("expr-9"));
                 }
                 let text = lit.text.strip_prefix('-').unwrap_or(&lit.text);
                 let Some(value) = digits(text) else {
@@ -3604,7 +3592,7 @@ impl<'a> Elaborator<'a> {
                 };
                 let Some(bits) = ty.from_negative(value) else {
                     if !ty.signed() {
-                        return refuse("тип беззнаковый, а литерал отрицательный");
+                        return refuse(adamas_l10n::text!("expr-10"));
                     }
                     return overflow();
                 };
@@ -3612,7 +3600,7 @@ impl<'a> Elaborator<'a> {
             }
             ast::LitKind::Float => {
                 if !ty.floating() {
-                    return refuse("тип целый, а литерал дробный");
+                    return refuse(adamas_l10n::text!("expr-11"));
                 }
                 let Ok(value) = lit.text.replace('_', "").parse::<f64>() else {
                     return overflow();
@@ -5443,25 +5431,19 @@ impl<'a> Elaborator<'a> {
             // `let` с написанным типом мало, когда написано **применение**:
             // оно производит эффекты на месте, а окружающая их не разрешает, и
             // тот же отказ приходит уже к `let`. Приостановить его надо явно.
-            None => self.synthesized(&value).ok_or_else(|| {
-                refuse(
-                    "тип написанного не выводится: `handle` берёт приостановленное \
-                     вычисление - назовите его `let`-ом с написанным типом, а \
-                     применение при этом приостановите (`\\u -> …`)",
-                )
-            })?,
+            None => self
+                .synthesized(&value)
+                .ok_or_else(|| refuse(adamas_l10n::text!("expr-12")))?,
         };
         let Value::Pi(_, _, _, row, _) = &*whnf_solved(self.signature, self.metas, &ty) else {
-            return Err(refuse(
-                "написано значение, а не приостановленное вычисление",
-            ));
+            return Err(refuse(adamas_l10n::text!("expr-13")));
         };
         // Связывание приостановленного - единица, и метка её не называет:
         // хендлер снимает эффект, а не аргумент-триггер. Подставляется поэтому
         // стёртое - назвавшая его метка была бы видна, а не молча неверна.
         let row = row.apply(Rc::new(Value::Erased));
         let Snatched { rest, arguments } =
-            without(&row, effect).ok_or_else(|| refuse("вычисление этой метки не производит"))?;
+            without(&row, effect).ok_or_else(|| refuse(adamas_l10n::text!("expr-14")))?;
         Ok(Handling {
             value,
             rho: rest,
@@ -5559,7 +5541,7 @@ impl<'a> Elaborator<'a> {
             if !self.same_arguments(&arguments, &wanted) {
                 return Err(ElabError::HandlerLabel {
                     name: Rc::clone(&label.name.text),
-                    why: "первое вхождение написано с другими аргументами",
+                    why: adamas_l10n::text!("expr-15"),
                     span: label.span,
                 });
             }
@@ -5674,7 +5656,7 @@ impl<'a> Elaborator<'a> {
                 // местом. Молчаливое усечение прятало бы его в неверный терм.
                 return Err(ElabError::HandlerBranch {
                     name: Rc::clone(effect),
-                    why: "спайн элиминатора короче, чем у него веток",
+                    why: adamas_l10n::text!("expr-16"),
                     span,
                 });
             };
@@ -5729,7 +5711,7 @@ impl<'a> Elaborator<'a> {
         if multi {
             return Err(ElabError::HandlerBranch {
                 name: Rc::clone(effect),
-                why: "`state` не сочетается с `handleMulti`",
+                why: adamas_l10n::text!("expr-17"),
                 span,
             });
         }
@@ -5741,8 +5723,7 @@ impl<'a> Elaborator<'a> {
             .synthesized(&term)
             .ok_or_else(|| ElabError::HandlerState {
                 effect: Rc::clone(effect),
-                why: "тип начального значения не выводится - назовите его \
-                      `let`-ом с написанным типом",
+                why: adamas_l10n::text!("expr-18"),
                 span: state.span,
             })?;
         Ok(Some((term, ty)))
@@ -5889,7 +5870,7 @@ impl<'a> Elaborator<'a> {
                 Some(DefinitionKind::Effect { .. }) => Ok(name),
                 _ => Err(ElabError::HandlerLabel {
                     name: Rc::clone(&label.name.text),
-                    why: "обязана быть эффектом",
+                    why: adamas_l10n::text!("expr-19"),
                     span: label.span,
                 }),
             };
@@ -5899,7 +5880,7 @@ impl<'a> Elaborator<'a> {
             .find(|branch| &*branch.name.text != RETURN)
             .ok_or(ElabError::HandlerBranch {
                 name: Rc::from(RETURN),
-                why: "хендлер без веток операций метки не называет",
+                why: adamas_l10n::text!("expr-20"),
                 span,
             })?;
         let operation = self.declared_name(&named.name.text);
@@ -5911,7 +5892,7 @@ impl<'a> Elaborator<'a> {
             Some(DefinitionKind::Operation { effect }) => Ok(Rc::from(&**effect)),
             _ => Err(ElabError::HandlerBranch {
                 name: Rc::clone(&named.name.text),
-                why: "ветка называет операцию эффекта",
+                why: adamas_l10n::text!("expr-21"),
                 span: named.name.span,
             }),
         }
@@ -6008,7 +5989,7 @@ impl<'a> Elaborator<'a> {
         else {
             return Err(ElabError::HandlerBranch {
                 name: Rc::clone(&branch.name.text),
-                why: "столько веток у эффекта нет",
+                why: adamas_l10n::text!("expr-22"),
                 span: branch.span,
             });
         };
@@ -6912,7 +6893,7 @@ impl<'a> Elaborator<'a> {
             return Err(ElabError::Core {
                 error: Box::new(
                     adamas_core::error::ErrorKind::SplitShape {
-                        why: "компонент у кортежа не столько, сколько полей у записи",
+                        why: adamas_l10n::text!("expr-23"),
                     }
                     .into(),
                 ),
@@ -7447,7 +7428,10 @@ impl<'a> Elaborator<'a> {
         {
             return None;
         }
-        let name: Symbol = Rc::from(format!("закрытие записи #{}", self.closers.len()));
+        let name: Symbol = Rc::from(adamas_l10n::tr!(
+            "expr-record-closer",
+            index = self.closers.len()
+        ));
         self.closers.push((Rc::clone(&name), reduced));
         Some(name)
     }
@@ -8952,7 +8936,7 @@ fn untupled(clause: &ast::Clause) -> Option<ast::Clause> {
             continue;
         }
         let name = ast::Name {
-            text: Rc::from(format!("кортеж#{at}")),
+            text: Rc::from(adamas_l10n::tr!("expr-tuple-binder", index = at)),
             span: pattern.span,
         };
         patterns.push(ast::Pattern {
@@ -9121,16 +9105,10 @@ fn local_function(binding: &Binding) -> Result<Binding, ElabError> {
         span: binding.name.span,
     };
     if binding.ty.is_none() {
-        return Err(refused(
-            "у локальной функции нет типа: напишите полный тип после параметров \
-             (`let f x : A -> B = …`)",
-        ));
+        return Err(refused(adamas_l10n::text!("expr-24")));
     }
     if crate::unused::uses(&binding.body, &[&binding.name.text]) {
-        return Err(refused(
-            "тело зовёт само себя, а рекурсия в `let` не пишется: рекурсивная \
-             локальная функция пишется в `where`",
-        ));
+        return Err(refused(adamas_l10n::text!("expr-25")));
     }
     let params = binding
         .params

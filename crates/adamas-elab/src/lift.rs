@@ -282,9 +282,7 @@ fn lift(
             let Some(signature) = &local.signature else {
                 return Err(ElabError::LocalDefinition {
                     name: local.name.text.clone(),
-                    why: "у функции нет сигнатуры, а поднятой на верхний уровень она нужна, \
-                          как всякому определению"
-                        .to_owned(),
+                    why: adamas_l10n::tr!("lift-1").to_owned(),
                     span: local.name.span,
                 });
             };
@@ -347,7 +345,7 @@ fn grouped(wheres: &[Decl]) -> Result<Vec<Local>, ElabError> {
             _ => {
                 return Err(ElabError::LocalDefinition {
                     name: Symbol::from("where"),
-                    why: "в `where` пишутся только определения - сигнатуры и клаузы".to_owned(),
+                    why: adamas_l10n::tr!("lift-2").to_owned(),
                     span: decl.span,
                 });
             }
@@ -357,14 +355,14 @@ fn grouped(wheres: &[Decl]) -> Result<Vec<Local>, ElabError> {
         if local.clauses.is_empty() {
             return Err(ElabError::LocalDefinition {
                 name: local.name.text.clone(),
-                why: "у сигнатуры нет клауз".to_owned(),
+                why: adamas_l10n::tr!("lift-3").to_owned(),
                 span: local.name.span,
             });
         }
         if !local.function() && (local.clauses.len() > 1 || !local.clauses[0].wheres.is_empty()) {
             return Err(ElabError::LocalDefinition {
                 name: local.name.text.clone(),
-                why: "значение без параметров пишется одной клаузой без своего `where`".to_owned(),
+                why: adamas_l10n::tr!("lift-4").to_owned(),
                 span: local.name.span,
             });
         }
@@ -580,16 +578,16 @@ fn captured_binders(
             ty: Some(param),
         }) = params.get(position)
         else {
-            return Err(refused(format!(
-                "захватывает `{}`, а у этой позиции нет типа в сигнатуре `{}`",
-                name.text, owner.text
+            return Err(refused(adamas_l10n::tr!(
+                "lift-capture-untyped",
+                name = name.text,
+                owner = owner.text
             )));
         };
         if uses(param, &others) {
-            return Err(refused(format!(
-                "захватывает `{}`, чей тип зависит от другого параметра; передайте его \
-                 аргументом",
-                name.text
+            return Err(refused(adamas_l10n::tr!(
+                "lift-capture-dependent",
+                name = name.text
             )));
         }
         binders.push(Binder {

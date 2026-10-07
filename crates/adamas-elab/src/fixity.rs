@@ -53,7 +53,7 @@ impl Fixities {
             {
                 return Err(ElabError::Fixity {
                     operator: Symbol::clone(&operator.text),
-                    why: "фикситет объявлен дважды",
+                    why: adamas_l10n::text!("fixity-1"),
                     span: operator.span,
                 });
             }
@@ -100,8 +100,7 @@ impl Fixities {
             .copied()
             .ok_or_else(|| ElabError::Fixity {
                 operator: Symbol::clone(&operator.text),
-                why: "фикситет не объявлен, а в цепочке из нескольких операторов \
-                      без него не расставить скобок",
+                why: adamas_l10n::text!("fixity-2"),
                 span: operator.span,
             })
     }
@@ -183,8 +182,7 @@ fn mixed(operators: &[(Name, Fixity)]) -> Result<(), ElabError> {
         }
         return Err(ElabError::Fixity {
             operator: Symbol::clone(&operator.text),
-            why: "рядом с оператором той же силы и другой ассоциативности \
-                  скобки не выводятся - напишите их",
+            why: adamas_l10n::text!("fixity-3"),
             span: before.span.merge(operator.span),
         });
     }

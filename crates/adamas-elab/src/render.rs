@@ -53,7 +53,7 @@ pub(crate) fn related(error: &ElabError) -> Vec<Related> {
     match error {
         ElabError::DetachedSignature { signature, .. } => vec![Related {
             span: *signature,
-            message: "сигнатура написана здесь".to_owned(),
+            message: adamas_l10n::tr!("render-1").to_owned(),
         }],
         _ => Vec::new(),
     }
@@ -99,7 +99,7 @@ pub(crate) fn headline(error: &ElabError) -> String {
                 ElabError::Clauses { error, .. }
                     if matches!(**error, PatternError::IllTypedType { .. }) =>
                 {
-                    format!("тип определения не является типом: {kind}")
+                    adamas_l10n::tr!("render-ill-typed-type", kind = kind)
                 }
                 _ => kind.to_string(),
             }
@@ -143,7 +143,7 @@ fn explain(error: &TypeError, names: &Names) -> String {
         .filter(|(index, binding)| &*binding.name != "_" || mentioned(error, *index))
         .collect();
     if !shown.is_empty() {
-        out.push_str("\n  в контексте:");
+        let _ = write!(out, "\n  {}", adamas_l10n::tr!("render-context"));
         for (index, binding) in shown {
             let mut ty = binding.ty.clone();
             // Типы телескопа прочитаны обратно в контексте целиком, а не
@@ -160,7 +160,11 @@ fn explain(error: &TypeError, names: &Names) -> String {
     }
     let route = route(error, names);
     if !route.is_empty() {
-        let _ = write!(out, "\n  путь: {}", route.join(" -> "));
+        let _ = write!(
+            out,
+            "\n  {}",
+            adamas_l10n::tr!("render-route", route = route.join(" -> "))
+        );
     }
     out
 }
@@ -229,8 +233,12 @@ fn route(error: &TypeError, names: &Names) -> Vec<String> {
 /// Один кадр словами; кадра без имени в тексте нет.
 fn step(frame: Frame, member: Option<u32>, names: &Names) -> Option<String> {
     match frame {
-        Frame::MemberType(index) => names.member(index).map(|name| format!("тип `{name}`")),
-        Frame::MemberBody(index) => names.member(index).map(|name| format!("тело `{name}`")),
+        Frame::MemberType(index) => names
+            .member(index)
+            .map(|name| adamas_l10n::tr!("render-member-type", name = name)),
+        Frame::MemberBody(index) => names
+            .member(index)
+            .map(|name| adamas_l10n::tr!("render-member-body", name = name)),
         Frame::Constructor(index) => member
             .and_then(|member| names.constructor(member, index))
             .map(|name| format!("{} `{name}`", names.inner())),

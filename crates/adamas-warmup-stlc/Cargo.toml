@@ -22,7 +22,6 @@ name = "pipeline"
 harness = false
 
 [dependencies]
-adamas-l10n.workspace = true
 adamas-core.workspace = true
 thiserror = "2"
 

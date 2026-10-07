@@ -159,7 +159,7 @@ pub fn described(signature: &Signature, name: &str) -> Option<String> {
         return Some(format!("{name} : {ty}"));
     }
     if name == "Type" || name == "Effect" {
-        return Some(format!("{name} - сорт (§3.2, §3.4)"));
+        return Some(adamas_l10n::tr!("cursor-sort", name = name));
     }
     None
 }

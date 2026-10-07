@@ -43,10 +43,10 @@ enum Site {
 impl Site {
     fn what(self) -> &'static str {
         match self {
-            Self::Let => "связывание `let`",
-            Self::Lambda => "параметр лямбды",
-            Self::Alt => "переменная альтернативы",
-            Self::Branch => "параметр ветки хендлера",
+            Self::Let => adamas_l10n::text!("unused-1"),
+            Self::Lambda => adamas_l10n::text!("unused-2"),
+            Self::Alt => adamas_l10n::text!("unused-3"),
+            Self::Branch => adamas_l10n::text!("unused-4"),
         }
     }
 }

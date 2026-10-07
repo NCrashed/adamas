@@ -84,3 +84,31 @@ fn a_type_error_speaks_the_chosen_language_too() {
     assert!(said("en").contains("type mismatch: expected `Bool`, found `Color`"));
     assert!(said("ru").contains("несовпадение типов: ожидался `Bool`, получен `Color`"));
 }
+
+/// Отказ элаборации - вместе со вставкой, хранимой полем: «`x` в модуле не
+/// объявляется» собирается из двух сообщений, и оба обязаны говорить одним
+/// языком.
+#[allow(
+    clippy::unwrap_used,
+    reason = "заготовка теста: отказ здесь означает сломанное окружение"
+)]
+#[test]
+fn an_elaboration_refusal_and_its_fragment_share_the_language() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("language");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("member.adamas");
+    std::fs::write(&path, "module M where\n  class C a where\n    m : a -> a\n").unwrap();
+    let said = |lang: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_adamas"))
+            .arg("check")
+            .arg(&path)
+            .env("ADAMAS_LANG", lang)
+            .output()
+            .unwrap();
+        String::from_utf8(output.stderr).unwrap()
+    };
+    let en = said("en");
+    assert!(en.contains("is not declared in a module"), "{en}");
+    let ru = said("ru");
+    assert!(ru.contains("в модуле не объявляется"), "{ru}");
+}

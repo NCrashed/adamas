@@ -84,7 +84,7 @@ pub(crate) fn derive(
     // Primitive a` проверяет объявление, поэтому здесь она уже такая.
     let Term::App(_, argument) = goal else {
         return Err(ElabError::PrimitiveShape {
-            why: "класс `Primitive` объявляется одним параметром (§4.9)",
+            why: adamas_l10n::text!("primitive-1"),
             span,
         });
     };
@@ -99,9 +99,7 @@ pub(crate) fn derive(
     let checked = abstracted_pi(&binders, goal_of(goal).clone());
     check_within(&Ctx::new(signature), metas, &solution, &checked).map_err(|_| {
         ElabError::PrimitiveShape {
-            why: "словарь `Primitive` не сошёлся с объявленным классом: метод у него \
-                  один - `simdLayout : Layout`, а `Layout` есть \
-                  `{ size : UInt32, align : UInt32 }` (§4.9, §4.11)",
+            why: adamas_l10n::text!("primitive-dictionary-shape"),
             span,
         }
     })?;

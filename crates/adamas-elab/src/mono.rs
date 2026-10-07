@@ -88,16 +88,13 @@ use crate::class::{Instances, applied, goal_of};
 #[derive(Debug, thiserror::Error)]
 pub enum MonoError {
     /// Специализаций больше предела: цепочка типов не убывает.
-    #[error(
-        "специализаций больше {limit}: обобщённый код зовёт себя на всё новых типах, \
-         и мономорфизация не заканчивается"
-    )]
+    #[error("{}", adamas_l10n::tr!("mono-runaway", limit = .limit))]
     Runaway {
         /// Сам предел.
         limit: usize,
     },
     /// Производное определение не прошло проверку ядром.
-    #[error("специализация не типизируется: {error}")]
+    #[error("{}", adamas_l10n::tr!("mono-refused", error = .error))]
     Refused {
         /// Отказ ядра.
         error: Box<TypeError>,

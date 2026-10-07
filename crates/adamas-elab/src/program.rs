@@ -42,6 +42,7 @@
 //! `<корень>/Data/Map.adamas`, [`Memory`] держит ту же карту в памяти - тестам
 //! и всякому, у кого программа не на диске.
 
+use adamas_l10n::text;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -183,7 +184,7 @@ impl Sources for Memory {
     }
 
     fn looked(&self, _path: &str) -> String {
-        "модули в памяти".to_owned()
+        adamas_l10n::tr!("program-1").to_owned()
     }
 }
 
@@ -484,7 +485,7 @@ impl Loader<'_> {
                 .frames
                 .iter()
                 .skip_while(|it| it.path.as_deref() != Some(path))
-                .map(|it| it.path.as_deref().unwrap_or("вход"))
+                .map(|it| it.path.as_deref().unwrap_or(text!("program-2")))
                 .collect();
             through.push(path);
             return Err(ElabError::ImportCycle {
@@ -502,7 +503,7 @@ impl Loader<'_> {
             // прелюдия: свой `Std/IO.adamas` сильнее вшитого. Имя файла у неё
             // своё: пути в проекте, по которому её искали, не существует.
             None => match standard(path) {
-                Some(text) => (text.to_owned(), format!("вшитый {path}")),
+                Some(text) => (text.to_owned(), embedded(path)),
                 None => {
                     return Err(ElabError::UnknownModule {
                         path: Rc::from(path),
@@ -808,4 +809,9 @@ fn conventional(name: &str) -> bool {
             | prim::STRING
             | prim::MKSTRING
     )
+}
+
+/// Имя вшитого файла в отказах: пути в проекте у него нет.
+fn embedded(path: &str) -> String {
+    adamas_l10n::tr!("program-embedded", path = path)
 }

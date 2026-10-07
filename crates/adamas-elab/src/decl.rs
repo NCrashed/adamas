@@ -139,7 +139,7 @@ impl Importer for Alone {
     ) -> Result<(), ElabError> {
         Err(ElabError::UnknownModule {
             path: Rc::from(decl.written().as_str()),
-            file: "программа собрана из одного текста, искать негде".to_owned(),
+            file: adamas_l10n::tr!("decl-1").to_owned(),
             span,
         })
     }
@@ -534,7 +534,7 @@ fn required(attributes: &[ast::Name]) -> Result<Required, ElabError> {
             _ => {
                 return Err(ElabError::Attribute {
                     name: Rc::clone(&attribute.text),
-                    why: "такого атрибута в языке нет",
+                    why: adamas_l10n::text!("decl-2"),
                     span: attribute.span,
                 });
             }
@@ -687,16 +687,9 @@ fn known<'a>(owned: &'a Owned, fixities: &'a Fixities, instances: &'a Instances)
 /// применение, и уникальности там нет по построению.
 fn outside_a_module(instance: bool) -> (&'static str, &'static str) {
     if instance {
-        (
-            "instance",
-            "тело функтора инстанциируется на каждое применение, \
-             и уникальности инстанса там нет (§3.5)",
-        )
+        ("instance", adamas_l10n::text!("decl-3"))
     } else {
-        (
-            "class",
-            "методы класса - имена верхнего уровня, а модуль их квалифицирует",
-        )
+        ("class", adamas_l10n::text!("decl-4"))
     }
 }
 
@@ -717,7 +710,7 @@ fn only_at_top(
     }
     Err(ElabError::ModuleMember {
         name: Rc::clone(name),
-        what: "модуле",
+        what: adamas_l10n::text!("decl-5"),
         why,
         span,
     })
@@ -952,12 +945,11 @@ fn member<'a>(
                     return Err(ElabError::ModuleMember {
                         name: Rc::from("mutual"),
                         what: if enclosing.file {
-                            "импортированном файле"
+                            adamas_l10n::text!("decl-6")
                         } else {
-                            "модуле"
+                            adamas_l10n::text!("decl-7")
                         },
-                        why: "члены группы объявляются одним вызовом, \
-                              а квалифицировать их он не умеет",
+                        why: adamas_l10n::text!("decl-8"),
                         span: decl.span,
                     });
                 }
@@ -1087,7 +1079,7 @@ fn member<'a>(
                 only_at_top(
                     within,
                     &Rc::clone(&exported.name.text),
-                    "символ у линкера один на программу, а имя члена модуля квалифицировано",
+                    adamas_l10n::text!("decl-9"),
                     decl.span,
                 )?;
             }
@@ -1187,9 +1179,8 @@ fn alias(
     if !outer.is_empty() && written.params.iter().any(|it| it.default.is_some()) {
         return Err(ElabError::ModuleMember {
             name: Rc::clone(&name.text),
-            what: "функторе",
-            why: "умолчание дописывается по написанной арности, а член функтора \
-                  несёт ещё и его параметры",
+            what: adamas_l10n::text!("decl-10"),
+            why: adamas_l10n::text!("decl-11"),
             span,
         });
     }
@@ -1844,8 +1835,7 @@ fn flat_shape(
         && &*info.methods[0] == crate::flat::LAYOUT;
     if !shaped {
         return Err(ElabError::FlatShape {
-            why: "класс `Flat` объявляется одним параметром и единственным методом \
-                  `layout : Layout` (§4.11)",
+            why: adamas_l10n::text!("decl-12"),
             span: class.head.span,
         });
     }
@@ -1876,8 +1866,7 @@ fn primitive_shape(
         && &*info.methods[0] == crate::primitive::SIMD_LAYOUT;
     if !shaped {
         return Err(ElabError::PrimitiveShape {
-            why: "класс `Primitive` объявляется одним параметром и единственным методом \
-                  `simdLayout : Layout` (§4.9)",
+            why: adamas_l10n::text!("decl-13"),
             span: class.head.span,
         });
     }
@@ -1895,15 +1884,13 @@ fn primitive_shape(
 fn derived_by_hand(name: &Symbol, span: Span) -> Result<(), ElabError> {
     if adamas_core::prim::conventional_class(name, crate::flat::FLAT) {
         return Err(ElabError::FlatShape {
-            why: "инстанс `Flat` руками не пишется: компилятор выводит его \
-                  структурно по представлению типа (§4.11)",
+            why: adamas_l10n::text!("decl-14"),
             span,
         });
     }
     if adamas_core::prim::conventional_class(name, crate::primitive::PRIMITIVE) {
         return Err(ElabError::PrimitiveShape {
-            why: "инстанс `Primitive` руками не пишется: класс закрыт, и инстансы \
-                  его - ровно десять примитивов §4.11 (§4.9)",
+            why: adamas_l10n::text!("decl-15"),
             span,
         });
     }
@@ -1982,9 +1969,8 @@ fn declare_instance(
     } else if !instances.add(&name.text, &arguments, Rc::clone(&declared)) {
         return Err(ElabError::ModuleMember {
             name: Rc::clone(&name.text),
-            what: "программе",
-            why: "анонимный инстанс для этого типа уже объявлен; несколько на один тип \
-                  пишутся именованными",
+            what: adamas_l10n::text!("decl-16"),
+            why: adamas_l10n::text!("decl-17"),
             span,
         });
     }
@@ -2104,10 +2090,8 @@ fn class_members<'a>(
                 if demanded.total || demanded.noalloc || demanded.fbip {
                     return Err(ElabError::ModuleMember {
                         name: Rc::clone(&name.text),
-                        what: "классе",
-                        why: "`@total`, `@noalloc` и `@fbip` у метода обещали бы вердикт \
-                              за каждый инстанс, а считается он у определения - пишите \
-                              атрибут у члена инстанса",
+                        what: adamas_l10n::text!("decl-18"),
+                        why: adamas_l10n::text!("decl-19"),
                         span: member.span,
                     });
                 }
@@ -2149,8 +2133,8 @@ fn class_members<'a>(
                     name: member_name(member)
                         .cloned()
                         .unwrap_or_else(|| Rc::from("_")),
-                    what: "классе",
-                    why: "класс несёт сигнатуры методов и умолчания к ним",
+                    what: adamas_l10n::text!("decl-20"),
+                    why: adamas_l10n::text!("decl-21"),
                     span: member.span,
                 });
             }
@@ -2191,9 +2175,9 @@ fn coherence(
         return Ok(());
     }
     let why = if coherent {
-        "объявлен `coherent`"
+        adamas_l10n::text!("decl-22")
     } else {
-        "несёт типовой член (§4.1)"
+        adamas_l10n::text!("decl-23")
     };
     let here = signature.scope().own();
     let owned = std::iter::once(&class.text)
@@ -2324,9 +2308,8 @@ fn instance_members<'a>(
                     name: member_name(member)
                         .cloned()
                         .unwrap_or_else(|| Rc::from("_")),
-                    what: "инстансе",
-                    why: "тип метода написан в классе, поэтому инстанс несёт клаузы \
-                          методов и значения типовых членов (`type T = …`)",
+                    what: adamas_l10n::text!("decl-24"),
+                    why: adamas_l10n::text!("decl-25"),
                     span: member.span,
                 });
             }
@@ -2342,8 +2325,8 @@ fn instance_members<'a>(
         if !info.types.contains(&member.text) {
             return Err(ElabError::ModuleMember {
                 name: Rc::clone(&member.text),
-                what: "инстансе",
-                why: "у класса нет такого типового члена",
+                what: adamas_l10n::text!("decl-26"),
+                why: adamas_l10n::text!("decl-27"),
                 span: member.span,
             });
         }
@@ -2362,8 +2345,8 @@ fn instance_members<'a>(
         if !info.methods.contains(&method.text) {
             return Err(ElabError::ModuleMember {
                 name: Rc::clone(&method.text),
-                what: "инстансе",
-                why: "у класса нет такого метода",
+                what: adamas_l10n::text!("decl-28"),
+                why: adamas_l10n::text!("decl-29"),
                 span: *at,
             });
         }
@@ -2486,9 +2469,8 @@ fn instance_method(
     if mentions_depth(&quote(bound.size(), &found), 0) {
         return Err(ElabError::ModuleMember {
             name: Rc::from(method),
-            what: "классе",
-            why: "тип метода зависит от значения другого метода, и вывести его \
-                  в инстансе нечем",
+            what: adamas_l10n::text!("decl-30"),
+            why: adamas_l10n::text!("decl-31"),
             span,
         });
     }
@@ -3450,12 +3432,8 @@ fn unnamed_in_constructors(planned: &[Planned<'_>]) -> Result<(), ElabError> {
             if crate::expr::names_any(&constructor.ty, &definitions) {
                 return Err(ElabError::ModuleMember {
                     name: Rc::clone(&constructor.name.text),
-                    what: "группе `mutual`",
-                    why: "тип конструктора не вправе назвать определение блока - \
-                          семейства объявляются раньше определений, и в сигнатуре \
-                          их ещё нет; вынесите его отдельным объявлением перед \
-                          блоком, ordered scoping это позволяет. Семейство группы \
-                          назвать можно",
+                    what: adamas_l10n::text!("decl-32"),
+                    why: adamas_l10n::text!("decl-33"),
                     span: constructor.span,
                 });
             }
@@ -3474,11 +3452,8 @@ fn unnamed_siblings(planned: &[&Mutual<'_>]) -> Result<(), ElabError> {
         if crate::expr::names_any(member.ty, &siblings) {
             return Err(ElabError::ModuleMember {
                 name: Rc::clone(&member.name.text),
-                what: "группе `mutual`",
-                why: "тип члена не вправе назвать соседа - типы всех членов проверяются \
-                      до объявления группы; вынесите его отдельным объявлением \
-                      перед блоком, ordered scoping это позволяет. Семейство \
-                      группы назвать можно",
+                what: adamas_l10n::text!("decl-34"),
+                why: adamas_l10n::text!("decl-35"),
                 span: member.span,
             });
         }
@@ -3840,9 +3815,8 @@ fn mutual_members(members: &[ast::Decl], span: Span) -> Result<Vec<Planned<'_>>,
                     name: member_name(member)
                         .cloned()
                         .unwrap_or_else(|| Rc::from("_")),
-                    what: "группе `mutual`",
-                    why: "группа несёт определения с сигнатурами и семейства; \
-                          модули и классы объявляются отдельно",
+                    what: adamas_l10n::text!("decl-36"),
+                    why: adamas_l10n::text!("decl-37"),
                     span: member.span,
                 });
             }
@@ -3857,8 +3831,8 @@ fn mutual_members(members: &[ast::Decl], span: Span) -> Result<Vec<Planned<'_>>,
     if found.is_empty() {
         return Err(ElabError::ModuleMember {
             name: Rc::from("mutual"),
-            what: "группе `mutual`",
-            why: "группа без членов ничего не объявляет",
+            what: adamas_l10n::text!("decl-38"),
+            why: adamas_l10n::text!("decl-39"),
             span,
         });
     }
@@ -3880,20 +3854,13 @@ fn writable(
     };
     if module.signature {
         if !module.params.is_empty() {
-            return refuse(
-                "сигнатуре модуля",
-                "параметр делает функцию от интерфейса, а сигнатура интерфейсом и является",
-            );
+            return refuse(adamas_l10n::text!("decl-40"), adamas_l10n::text!("decl-41"));
         }
         // Аннотация у сигнатуры бессмысленна: она сама и есть интерфейс,
         // проверять её против другого - отдельная операция (уточнение
         // сигнатуры), и её в языке пока нет.
         if module.ascription.is_some() {
-            return refuse(
-                "сигнатуре модуля",
-                "аннотация проверяет модуль против интерфейса, а сигнатура интерфейсом \
-                 и является",
-            );
+            return refuse(adamas_l10n::text!("decl-42"), adamas_l10n::text!("decl-43"));
         }
         return Ok(());
     }
@@ -3907,11 +3874,7 @@ fn writable(
     let outer = params_of(within);
     let shadows = names_of(&module.params).any(|own| names_of(outer).any(|it| it == own));
     if shadows {
-        return refuse(
-            "теле функтора",
-            "параметр назван так же, как у объемлющего, а подстановка ищет их \
-             по имени, и внешний стал бы недостижим",
-        );
+        return refuse(adamas_l10n::text!("decl-44"), adamas_l10n::text!("decl-45"));
     }
     Ok(())
 }
@@ -3945,8 +3908,8 @@ fn declare_module_value(
     if !module.params.is_empty() {
         return Err(ElabError::ModuleMember {
             name: Rc::clone(&module.name.text),
-            what: "модуле с телом-выражением",
-            why: "параметр объявляется у модуля с блоком членов",
+            what: adamas_l10n::text!("decl-46"),
+            why: adamas_l10n::text!("decl-47"),
             span,
         });
     }
@@ -3973,8 +3936,8 @@ fn declare_module_value(
         {
             return Err(ElabError::ModuleMember {
                 name: Rc::clone(&module.name.text),
-                what: "модуле с телом-выражением",
-                why: "сигнатура с эффектом-членом требует блока членов: эффект в теле-выражении не объявляется",
+                what: adamas_l10n::text!("decl-48"),
+                why: adamas_l10n::text!("decl-49"),
                 span,
             });
         }
@@ -4085,17 +4048,17 @@ fn reserved(decl: &ast::Decl, sheltered: bool) -> Result<(), ElabError> {
     }
     let refuse = |name: &Symbol, span: Span| {
         let what = if PrimTy::named(name).is_some() {
-            "это примитивный тип"
+            adamas_l10n::text!("decl-50")
         } else if &**name == prim::ARRAY {
-            "это встроенный массив"
+            adamas_l10n::text!("decl-51")
         } else if &**name == prim::BLOCK {
-            "это область региона (§3.6)"
+            adamas_l10n::text!("decl-52")
         } else if &**name == prim::PTR {
-            "это хендл внутри области (§3.6)"
+            adamas_l10n::text!("decl-53")
         } else if &**name == prim::CPTR {
-            "это чужой указатель (§5.3)"
+            adamas_l10n::text!("decl-54")
         } else {
-            "это примитивная операция"
+            adamas_l10n::text!("decl-55")
         };
         Err(ElabError::ReservedName {
             name: Rc::clone(name),
@@ -4489,8 +4452,8 @@ fn instantiated_ascription(
         if !is_effect {
             return Err(ElabError::ModuleMember {
                 name: Rc::clone(short),
-                what: "модуле",
-                why: "сигнатура объявляет эффект, и одноимённый эффект обязан быть членом модуля",
+                what: adamas_l10n::text!("decl-56"),
+                why: adamas_l10n::text!("decl-57"),
                 span,
             });
         }
@@ -4519,8 +4482,8 @@ fn instantiated_ascription(
         if !same {
             return Err(ElabError::ModuleMember {
                 name: Rc::clone(short),
-                what: "модуле",
-                why: "телескоп метки расходится с объявленным в сигнатуре",
+                what: adamas_l10n::text!("decl-58"),
+                why: adamas_l10n::text!("decl-59"),
                 span,
             });
         }
@@ -4682,8 +4645,8 @@ fn declare_signature_effect(
     if let Some(operation) = effect.operations.first() {
         return Err(ElabError::ModuleMember {
             name: Rc::clone(&operation.name.text),
-            what: "сигнатуре модуля",
-            why: "операции - представление эффекта, и сигнатура объявляет метку без них",
+            what: adamas_l10n::text!("decl-60"),
+            why: adamas_l10n::text!("decl-61"),
             span,
         });
     }
@@ -4694,8 +4657,8 @@ fn declare_signature_effect(
     {
         return Err(ElabError::ModuleMember {
             name: Rc::clone(&effect.name.text),
-            what: "сигнатуре модуля",
-            why: "метка написана выше своего объявления (ordered scoping, §4.8)",
+            what: adamas_l10n::text!("decl-62"),
+            why: adamas_l10n::text!("decl-63"),
             span: early.span,
         });
     }
@@ -4777,9 +4740,8 @@ fn declare_module_type(
             DeclKind::Alias { name, .. } => {
                 return Err(ElabError::ModuleMember {
                     name: Rc::clone(&name.text),
-                    what: "сигнатуре модуля",
-                    why: "уравнение у типового члена делает сигнатуру полупрозрачной, \
-                          а таких пока нет (§10 вопрос 46)",
+                    what: adamas_l10n::text!("decl-64"),
+                    why: adamas_l10n::text!("decl-65"),
                     span: member.span,
                 });
             }
@@ -4792,8 +4754,8 @@ fn declare_module_type(
                 };
                 return Err(ElabError::ModuleMember {
                     name,
-                    what: "сигнатуре модуля",
-                    why: "сигнатура несёт объявления без реализаций",
+                    what: adamas_l10n::text!("decl-66"),
+                    why: adamas_l10n::text!("decl-67"),
                     span: member.span,
                 });
             }
@@ -5034,33 +4996,19 @@ fn variadic_split(ty: &ast::Expr, span: Span) -> Result<(ast::Expr, Variadic), E
     let mut graded = false;
     let stripped = strip_variadic(ty, &mut split, &mut explicit, &mut graded);
     if marker(&result_of(&stripped)) {
-        return refuse(
-            "`...` стоит в позиции ответа: вариадическая часть есть хвост списка \
-             аргументов, и отвечать ею нечем",
-        );
+        return refuse(adamas_l10n::text!("decl-68"));
     }
     if ast::mentions(&stripped, VARIADIC) {
-        return refuse(
-            "`...` стоит не в цепочке стрелок объявления: вариадическая часть у C - \
-             хвост верхнеуровневого списка аргументов, и границ у неё не бывает ни две, \
-             ни одна внутри скобок",
-        );
+        return refuse(adamas_l10n::text!("decl-69"));
     }
     let Some(split) = split else {
         return Ok((stripped, None));
     };
     if split == 0 {
-        return refuse(
-            "`...` стоит первой: вариадическая функция C объявляет хотя бы один \
-             поимённый параметр - его и называет `va_start`",
-        );
+        return refuse(adamas_l10n::text!("decl-70"));
     }
     if graded {
-        return refuse(
-            "выражение кратности в связывании вариадического объявления не пишется: \
-             сколько имён связывает `(q x : a)`, решает объявление `q`, а позиции до \
-             `...` обязаны считаться по написанному",
-        );
+        return refuse(adamas_l10n::text!("decl-71"));
     }
     Ok((stripped, Some((split, explicit))))
 }
@@ -5197,10 +5145,7 @@ fn crossing(
             // тип длины auto-lift оставляет метапеременной до самого решения,
             // и спрашивать у неё `UInt64` в этой точке нечего.
             if matches!(domain, Term::Universe(_)) {
-                return refuse(
-                    "имплисит через границу C не идёт: значения в рантайме у него нет, \
-                     а полиморфный аргумент уровню 1 переносить нечем",
-                );
+                return refuse(adamas_l10n::text!("decl-72"));
             }
             // Стёртое связывание, чей тип границу **перешёл бы**, - отказ, а не
             // пропуск. Иначе `(0 xs : Array n UInt8) -> …` молча стал бы
@@ -5208,11 +5153,7 @@ fn crossing(
             // чужая сторона его не получила бы вовсе. Измерено правкой: до этой
             // строки такое объявление проходило проверку.
             if word(domain).is_some() || lent(signature, domain, span)?.is_some() {
-                return refuse(
-                    "стёртый параметр через границу C не идёт: значения в рантайме у него \
-                     нет (§3.3), а написан он типом, который границу переходит - то есть \
-                     чужая сторона получила бы аргументом меньше, чем написано",
-                );
+                return refuse(adamas_l10n::text!("decl-73"));
             }
             params.push(Cross::Erased);
             intermediate(row, codomain, span)?;
@@ -5221,11 +5162,7 @@ fn crossing(
         }
         if matches!(domain, Term::Pi(..)) {
             let Some(shape) = flat_callback(signature, domain) else {
-                return refuse(
-                    "колбэк через границу C идёт указателем на экспортированное определение: \
-                     параметры и ответ его обязаны быть машинным словом, а вложенного \
-                     колбэка, буфера, единицы и стёртого связывания у него не бывает",
-                );
+                return refuse(adamas_l10n::text!("decl-74"));
             };
             params.push(Cross::Callback(shape));
             intermediate(row, codomain, span)?;
@@ -5239,11 +5176,7 @@ fn crossing(
         } else if unit_type(domain, signature) {
             Cross::Nothing
         } else {
-            return refuse(
-                "параметр через границу C не идёт: уровень 1 переносит машинное слово - \
-                 примитив §4.11, `CPtr`, плоский `Array n T` либо единицу; структура по \
-                 значению требует знания ABI платформы",
-            );
+            return refuse(adamas_l10n::text!("decl-75"));
         };
         params.push(carried);
         intermediate(row, codomain, span)?;
@@ -5252,9 +5185,7 @@ fn crossing(
     let answer = unaliased(signature, rest);
     let result = word(answer);
     if result.is_none() && !unit_type(answer, signature) {
-        return refuse(
-            "ответ через границу C не идёт: уровень 1 берёт машинное слово либо единицу (`void`)",
-        );
+        return refuse(adamas_l10n::text!("decl-76"));
     }
     // Отметка стояла после последнего связывания: вариадическая часть пуста.
     // Форма законная - `printf(fmt)` пишется в C, - и от невариадической она
@@ -5267,22 +5198,13 @@ fn crossing(
         // ошибка автора, и потому он называет себя: промолчи он - и `...`
         // встала бы не туда, а наблюдать это было бы нечем.
         if written != explicit || named.is_none() {
-            return refuse(
-                "позиция `...` в объявлении не сошлась с элаборированным типом: \
-                 счёт явных параметров разошёлся, и ставить границу вариадической \
-                 части наугад нельзя - от неё зависит ABI вызова",
-            );
+            return refuse(adamas_l10n::text!("decl-77"));
         }
     }
     if let Some(named) = named {
         for carried in params.iter().filter_map(Cross::carried).skip(named) {
             if carried.promoted_by_c() {
-                return refuse(
-                    "аргумент за `...` объявлен типом, которому C меняет ширину: узкое \
-                     целое едет как `int`, `Float32` - как `Float64`, и это часть ABI, \
-                     а не вольность вызова. Пишите продвинутый тип: конверсий ширины в \
-                     языке нет ни одной (§4.3)",
-                );
+                return refuse(adamas_l10n::text!("decl-78"));
             }
         }
     }
@@ -5335,23 +5257,20 @@ fn exported_symbol(
         })
     };
     if !c_identifier(&written) {
-        return refuse(
-            "символом у линкера служит написанное имя, а сишный идентификатор \
-             состоит из букв, цифр и подчёркиваний и не начинается с цифры",
-        );
+        return refuse(adamas_l10n::text!("decl-79"));
     }
     let name: CoreName = qualify(within, &written);
     let Some(definition) = signature.lookup(&name) else {
-        return refuse("определения с таким именем выше нет (§4.8: объявляют раньше, чем зовут)");
+        return refuse(adamas_l10n::text!("decl-80"));
     };
     if !matches!(definition.kind, DefinitionKind::Regular) {
-        return refuse("экспортируется определение, а не конструктор, операция или метка");
+        return refuse(adamas_l10n::text!("decl-81"));
     }
     if definition.body.is_none() {
-        return refuse("тела у него нет: постулат и чужой символ наружу отдавать нечем");
+        return refuse(adamas_l10n::text!("decl-82"));
     }
     if signature.exports_symbol(&written) {
-        return refuse("символ уже занят другим экспортом: двух `define` одного имени не бывает");
+        return refuse(adamas_l10n::text!("decl-83"));
     }
     let ty = definition.ty.clone();
     let (params, result, produced) = outward(signature, &ty, span)?;
@@ -5419,46 +5338,27 @@ fn outward(signature: &Signature, ty: &Term, span: Span) -> Result<Outward, Elab
     let mut rest = ty;
     while let Term::Pi(binder, _, written, row, codomain) = rest {
         if binder.visibility != Visibility::Explicit {
-            return refuse(
-                "имплисит наружу не экспортируется: чужая сторона его не пишет, \
-                 а вывести его при вызове из C некому",
-            );
+            return refuse(adamas_l10n::text!("decl-84"));
         }
         if binder.mult == Mult::Zero {
-            return refuse(
-                "стёртый параметр наружу не экспортируется: значения в рантайме у него \
-                 нет (§3.3), а чужая сторона аргумент в этой позиции напишет",
-            );
+            return refuse(adamas_l10n::text!("decl-85"));
         }
         let domain = unaliased(signature, written);
         let Some(carried) = word(domain) else {
-            return refuse(
-                "параметр экспорта обязан быть машинным словом - примитив §4.11 либо \
-                 `CPtr`: буфер наружу не отдать (чужая сторона даёт голый адрес, а \
-                 заголовка Perceus вокруг него не построить), единицу - нечем породить",
-            );
+            return refuse(adamas_l10n::text!("decl-86"));
         };
         if !row.labels().is_empty() && matches!(&**codomain, Term::Pi(..)) {
-            return refuse(
-                "эффект на промежуточной стрелке: чужая сторона зовёт экспорт целиком, \
-                 и недобранного применения у неё не бывает",
-            );
+            return refuse(adamas_l10n::text!("decl-87"));
         }
         params.push(carried);
         produced = row.clone();
         rest = codomain;
     }
     if params.is_empty() {
-        return refuse(
-            "экспортируется функция, а не значение: у значения нет места вызова, \
-             в котором чужая сторона получила бы ответ",
-        );
+        return refuse(adamas_l10n::text!("decl-88"));
     }
     let Some(result) = word(unaliased(signature, rest)) else {
-        return refuse(
-            "ответ экспорта обязан быть машинным словом: единицу отпустить нечем - \
-             значение её есть объект Perceus, а `void`-функция его не дропнет",
-        );
+        return refuse(adamas_l10n::text!("decl-89"));
     };
     Ok((params, result, produced))
 }
@@ -5518,8 +5418,7 @@ fn intermediate(
 ) -> Result<(), ElabError> {
     if !row.labels().is_empty() && matches!(codomain, Term::Pi(..)) {
         return Err(ElabError::ForeignType {
-            why: "эффект на промежуточной стрелке: чужая функция производит `Foreign` целиком, \
-                  когда применена целиком",
+            why: adamas_l10n::text!("decl-90"),
             span,
         });
     }
@@ -5560,8 +5459,7 @@ fn lent(signature: &Signature, ty: &Term, span: Span) -> Result<Option<PrimTy>, 
     match word(element) {
         Some(cell) => Ok(Some(cell)),
         None => Err(ElabError::ForeignType {
-            why: "массив через границу C идёт только плоский (§4.11): ячейки указательного \
-                  суть объекты Perceus с заголовками, и чужая сторона не поймёт ни одного",
+            why: adamas_l10n::text!("decl-91"),
             span,
         }),
     }
@@ -5992,7 +5890,7 @@ fn resource_members(
             | ast::DeclKind::Export(_) => {
                 return Err(ElabError::ResourceMember {
                     data: Rc::clone(&resource.name.text),
-                    name: Rc::from("группа"),
+                    name: Rc::from(adamas_l10n::tr!("decl-92")),
                     span: member.span,
                 });
             }
@@ -6025,10 +5923,10 @@ fn resource_members(
             ast::DeclKind::Data(inner) => return Err(refuse(&inner.name.text, member.span)),
             ast::DeclKind::Effect(inner) => return Err(refuse(&inner.name.text, member.span)),
             ast::DeclKind::Fixity(_) => {
-                return Err(refuse(&Rc::from("фикситет"), member.span));
+                return Err(refuse(&Rc::from(adamas_l10n::tr!("decl-93")), member.span));
             }
             ast::DeclKind::Import(_) => {
-                return Err(refuse(&Rc::from("импорт"), member.span));
+                return Err(refuse(&Rc::from(adamas_l10n::tr!("decl-94")), member.span));
             }
             ast::DeclKind::Resource(inner) => return Err(refuse(&inner.name.text, member.span)),
         }
@@ -6777,8 +6675,8 @@ fn declare_effect(
     if !params_of(within).is_empty() {
         return Err(ElabError::ModuleMember {
             name: Rc::clone(&effect.name.text),
-            what: "функторе",
-            why: "член функтора поднимается под его параметрами, а метка их не несёт",
+            what: adamas_l10n::text!("decl-95"),
+            why: adamas_l10n::text!("decl-96"),
             span,
         });
     }

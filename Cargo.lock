@@ -132,7 +132,6 @@ name = "adamas-warmup-stlc"
 version = "0.0.0"
 dependencies = [
  "adamas-core",
- "adamas-l10n",
  "criterion",
  "insta",
  "proptest",

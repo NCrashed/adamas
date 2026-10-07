@@ -106,6 +106,7 @@ pub const CATALOGS: &[(&str, &str, &str)] = &[
     catalog!("common.ftl"),
     catalog!("parser.ftl"),
     catalog!("core.ftl"),
+    catalog!("elab.ftl"),
 ];
 
 fn bundle(lang: Lang) -> &'static FluentBundle<FluentResource> {
@@ -208,6 +209,33 @@ pub fn message_in(lang: Lang, id: &str, args: &[(&str, Arg)]) -> String {
     bundle
         .format_pattern(pattern, Some(&fluent), &mut errors)
         .into_owned()
+}
+
+/// Текст без аргументов там, где ждут `&'static str`: причины отказов и
+/// названия мест, которые хранятся в ошибках полями.
+///
+/// Переводится однажды на пару «язык, идентификатор» и запоминается навсегда:
+/// пар не больше, чем сообщений в каталогах, поэтому память ограничена.
+#[must_use]
+pub fn text(id: &'static str) -> &'static str {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static MEMO: OnceLock<Mutex<HashMap<(u8, &'static str), &'static str>>> = OnceLock::new();
+    let lang = current();
+    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut memo = memo
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    memo.entry((lang.code(), id))
+        .or_insert_with(|| Box::leak(message_in(lang, id, &[]).into_boxed_str()))
+}
+
+/// [`text`] с идентификатором-литералом: `text!(…)`.
+#[macro_export]
+macro_rules! text {
+    ($id:literal) => {
+        $crate::text($id)
+    };
 }
 
 /// Сообщение по идентификатору и аргументам: `tr!("parse-expected", expected

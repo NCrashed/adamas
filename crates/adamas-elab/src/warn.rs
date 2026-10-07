@@ -28,11 +28,7 @@ use adamas_parser::ast::Symbol;
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Warning {
     /// Имя из implicit-группы не встречается в остатке типа (§10 вопросы 79, 81).
-    #[error(
-        "имя `{name}` из implicit-группы нигде не используется: в этой позиции \
-         `{{ {name} : … }}` читается связыванием, а записью пишется как \
-         `{{ {name} : … | r }}` (§4.2)"
-    )]
+    #[error("{}", adamas_l10n::tr!("warn-unused-implicit", name = .name))]
     UnusedImplicit {
         /// Имя связывания.
         name: Symbol,
@@ -40,7 +36,7 @@ pub enum Warning {
         span: Span,
     },
     /// Литерал без типа из контекста взял умолчание по имени (§4.3).
-    #[error("использую default {name}; для явного типа добавьте аннотацию (§4.3)")]
+    #[error("{}", adamas_l10n::tr!("warn-defaulted-literal", name = .name))]
     DefaultedLiteral {
         /// Имя умолчания: `Int` либо `Float`.
         name: Symbol,
@@ -48,10 +44,7 @@ pub enum Warning {
         span: Span,
     },
     /// Связывание, которое никто не читает (§10 вопрос 218).
-    #[error(
-        "`{name}` - {what} - нигде не читается; если так и задумано, назовите \
-         его `_{name}`"
-    )]
+    #[error("{}", adamas_l10n::tr!("warn-unused-binding", name = .name, what = .what))]
     UnusedBinding {
         /// Что это за связывание - подлежащим: «связывание `let`».
         what: &'static str,
@@ -65,7 +58,7 @@ pub enum Warning {
     /// Молчит у семейства с единственным конструктором без полей - `Unit` и
     /// всякий его двойник: отбрасывать там нечего. Явное «прочёл и выбросил»
     /// пишется `let _ = …`.
-    #[error("результат типа `{ty}` отбрасывается; если так и задумано, напишите `let _ = …`")]
+    #[error("{}", adamas_l10n::tr!("warn-discarded-result", ty = .ty))]
     DiscardedResult {
         /// Голова типа результата.
         ty: Symbol,
@@ -73,7 +66,7 @@ pub enum Warning {
         span: Span,
     },
     /// Имя из списка импорта, которое файл не употребляет (§10 вопрос 218).
-    #[error("`{name}` импортировано из `{module}`, но нигде не употребляется")]
+    #[error("{}", adamas_l10n::tr!("warn-unused-import", name = .name, module = .module))]
     UnusedImport {
         /// Откуда.
         module: Symbol,

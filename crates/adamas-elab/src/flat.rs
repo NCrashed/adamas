@@ -181,33 +181,27 @@ impl Why {
     /// видах, написана без согласования по роду; рекурсия, владение и
     /// абстрактность бывают только про названный тип, а замыкание и
     /// переменная - только про безымянную форму, и там род известен.
-    const fn face(self) -> &'static str {
+    fn face(self) -> &'static str {
         match self {
-            Self::Closure => "несёт замыкание, то есть указатель наружу",
-            Self::Recursive => "рекурсивен, и размер значения ничем не ограничен",
-            Self::Owned => "владеемый (§3.3), а такое значение живёт в куче",
+            Self::Closure => adamas_l10n::text!("flat-1"),
+            Self::Recursive => adamas_l10n::text!("flat-2"),
+            Self::Owned => adamas_l10n::text!("flat-3"),
             Self::Abstract => {
-                "объявлен без представления: тела нет либо оно запечатано; \
-                 словарь запечатанного берётся значением - членом его сигнатуры \
-                 вида `flat : Flat T` (§4.11)"
+                adamas_l10n::text!("flat-4")
             }
-            Self::Rigid => "ещё ничем не определена - напишите `{Flat …}` в контексте",
-            Self::Open => "оставляет хвост открытым, и полей в нём не перечислить",
+            Self::Rigid => adamas_l10n::text!("flat-rigid"),
+            Self::Open => adamas_l10n::text!("flat-5"),
             Self::Pointing => {
-                "массив (§4.11): один объект кучи, и в чужой укладке от него \
-                 лежит указатель"
+                adamas_l10n::text!("flat-6")
             }
             Self::Regional => {
-                "блок региона (§3.6): область целиком, и класть её нагрузкой в \
-                 регион значило бы вложить область в область"
+                adamas_l10n::text!("flat-7")
             }
             Self::Vectorial => {
-                "вектор (§4.9): значение плоское, но укладки для него этот срез \
-                 не считает - колонка векторов требует их класть в чужую укладку, \
-                 а трек H этого не берёт"
+                adamas_l10n::text!("flat-8")
             }
-            Self::Alien => "значений не имеет, и укладывать нечего",
-            Self::Deep => "уходит глубже, чем вывод готов идти",
+            Self::Alien => adamas_l10n::text!("flat-9"),
+            Self::Deep => adamas_l10n::text!("flat-10"),
         }
     }
 }
@@ -235,32 +229,32 @@ struct Word {
 
 /// Функция или лямбда.
 const FUNCTION: Word = Word {
-    one: "функция",
-    of: "функции",
+    one: "flat-11",
+    of: "flat-12",
 };
 
 /// Тип-запись.
 const RECORD: Word = Word {
-    one: "запись",
-    of: "записи",
+    one: "flat-13",
+    of: "flat-14",
 };
 
 /// Связывание контекста либо нерешённая дырка.
 const VARIABLE: Word = Word {
-    one: "переменная",
-    of: "переменной",
+    one: "flat-15",
+    of: "flat-16",
 };
 
 /// Универсум.
 const UNIVERSE: Word = Word {
-    one: "вселенная",
-    of: "вселенной",
+    one: "flat-17",
+    of: "flat-18",
 };
 
 /// Всё прочее: значений у него нет.
 const FORM: Word = Word {
-    one: "форма",
-    of: "формы",
+    one: "flat-19",
+    of: "flat-20",
 };
 
 /// Как тип назван в сообщении.
@@ -277,7 +271,7 @@ impl Shown {
     fn text(&self) -> String {
         match self {
             Self::Named(name) => format!("`{}`", adamas_core::term::written_name(name)),
-            Self::Word(word) => word.one.to_owned(),
+            Self::Word(word) => adamas_l10n::text(word.one).to_owned(),
         }
     }
 
@@ -287,7 +281,7 @@ impl Shown {
             Self::Named(name) => {
                 Rc::from(format!("`{}`", adamas_core::term::written_name(name)).as_str())
             }
-            Self::Word(word) => Rc::from(word.of),
+            Self::Word(word) => Rc::from(adamas_l10n::text(word.of)),
         }
     }
 
@@ -338,8 +332,8 @@ impl Blame {
     fn into_error(self, ty: &Shown, span: Span) -> ElabError {
         let why = match &self.at {
             None => match &self.found {
-                Shown::Named(_) => format!("он {}", self.why.face()),
-                Shown::Word(_) => format!("она {}", self.why.face()),
+                Shown::Named(_) => adamas_l10n::tr!("flat-why-named", face = self.why.face()),
+                Shown::Word(_) => adamas_l10n::tr!("flat-why-word", face = self.why.face()),
             },
             Some((owner, field)) => {
                 // Имя владельца пишется, только если оно не то же самое: «поле
@@ -347,14 +341,26 @@ impl Blame {
                 // уже сказанное.
                 let of = match (owner.name(), ty.name()) {
                     (Some(it), Some(asked)) if it == asked => String::new(),
-                    _ => format!(" типа {}", owner.text()),
+                    _ => adamas_l10n::tr!("flat-why-of", owner = owner.text()),
                 };
                 match &self.found {
                     Shown::Named(name) => {
-                        format!("{field}{of} имеет тип `{name}`, а он {}", self.why.face())
+                        adamas_l10n::tr!(
+                            "flat-why-field-named",
+                            field = field,
+                            of = of,
+                            name = name,
+                            face = self.why.face()
+                        )
                     }
                     Shown::Word(word) => {
-                        format!("{field}{of} - это {}, а она {}", word.one, self.why.face())
+                        adamas_l10n::tr!(
+                            "flat-why-field-word",
+                            field = field,
+                            of = of,
+                            word = adamas_l10n::text(word.one),
+                            face = self.why.face()
+                        )
                     }
                 }
             }
@@ -394,7 +400,7 @@ pub(crate) fn derive(
     // проверяет объявление, поэтому здесь она уже такая.
     let Term::App(_, argument) = goal else {
         return Err(ElabError::FlatShape {
-            why: "класс `Flat` объявляется одним параметром (§4.11)",
+            why: adamas_l10n::text!("flat-21"),
             span,
         });
     };
@@ -424,9 +430,7 @@ pub(crate) fn derive(
     let checked = abstracted_pi(&binders, goal_of(goal).clone());
     check_within(&Ctx::new(signature), metas, &solution, &checked).map_err(|_| {
         ElabError::FlatShape {
-            why: "словарь `Flat` не сошёлся с объявленным классом: метод у него один - \
-                  `layout : Layout`, а `Layout` есть `{ size : UInt32, align : UInt32 }` \
-                  (§4.11)",
+            why: adamas_l10n::text!("flat-dictionary-shape"),
             span,
         }
     })?;
@@ -532,7 +536,7 @@ impl Walk<'_> {
             let inner = self.deeper(metas, &ty).map_err(|blame| {
                 blame.located(
                     owner,
-                    Rc::from(format!("поле `{}`", field.name).as_str()),
+                    Rc::from(adamas_l10n::tr!("flat-field", name = field.name).as_str()),
                     &of,
                 )
             })?;
@@ -763,7 +767,14 @@ fn position(field: &Name, at: usize, constructor: &Name) -> Symbol {
     } else {
         format!("`{field}`")
     };
-    Rc::from(format!("поле {shown} конструктора `{constructor}`").as_str())
+    Rc::from(
+        adamas_l10n::tr!(
+            "flat-constructor-field",
+            field = shown,
+            constructor = constructor
+        )
+        .as_str(),
+    )
 }
 
 /// Как назвать тип в сообщении.

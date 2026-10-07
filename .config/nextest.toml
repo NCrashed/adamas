@@ -6,3 +6,11 @@
 [[profile.default.overrides]]
 filter = 'package(adamas-codegen) & test(/several_workers|several_threads|across_the_workers/)'
 retries = 3
+
+# Ещё два свидетеля, которым нужна свободная машина: отношение времени
+# восьмикратной работы к однократной (линия против квадрата) и санитайзер,
+# обязанный поймать гонку мутанта - гонка случается, только когда потоки
+# действительно бегут одновременно.
+[[profile.default.overrides]]
+filter = 'package(adamas-codegen) & test(/an_operation_under_recursion_stays_linear|the_sanitizer_is_silent_on_a_corpus_program_too/)'
+retries = 3

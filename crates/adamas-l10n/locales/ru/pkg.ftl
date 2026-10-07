@@ -26,7 +26,7 @@ pkg-manifest-not-strings = `{ $section }.{ $key }` - не список стро�
 pkg-manifest-library = `link.libraries` = `{ $written }` - не имя библиотеки: пишется оно как у `-l`, без `lib` и без расширения
 pkg-manifest-dependency-table = `dependencies.{ $prefix }` - не таблица: зависимость пишется `{"{"} git = "…", tag = "…" {"}"}`
 pkg-manifest-no-git = в `[dependencies.{ $prefix }]` нет `git`; составной префикс пишется в кавычках: `"{ $prefix }.Что-то" = {"{"} git = … {"}"}`
-pkg-manifest-no-version = в `[dependencies.{ $prefix }]` нет ни `rev`, ни `tag` (§7.3: git URL плюс коммит или тег)
+pkg-manifest-no-version = в `[dependencies.{ $prefix }]` нет ни `rev`, ни `tag`: зависимость - это git URL плюс коммит или тег
 pkg-manifest-rev-and-tag = в `[dependencies.{ $prefix }]` написаны и `rev`, и `tag`: выберите одно
 pkg-manifest-module-path = `{ $field }` = `{ $written }` - не путь модуля: сегменты через точку, каждый из букв, цифр, `_` и `'`
 pkg-manifest-file-name = `{ $field }` = `{ $written }` - не имя файла: буквы, цифры, `_` и `-`

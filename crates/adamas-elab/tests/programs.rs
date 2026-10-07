@@ -5427,7 +5427,7 @@ wrap n = Succ n
         format!("{BASE}\n@noalloc\nnext : Nat -> Nat\nnext n = Succ n\n"),
     );
     assert!(
-        constructs.contains("`Succ`") && constructs.contains("§5.1"),
+        constructs.contains("`Succ`") && constructs.contains("Выходов три"),
         "отказ обязан назвать источник и выход: {constructs}"
     );
     // Цепочка вызовов - до самого источника: «зовёт аллоцирующее» без

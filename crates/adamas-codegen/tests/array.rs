@@ -208,7 +208,7 @@ fn a_flat_array_does_not_enter_pointer_code() {
     let error = harness::compiled(CROSSING).expect_err("плоский массив в указательный код");
     let text = error.to_string();
     assert!(
-        text.contains("§4.11") && text.contains("плоский массив"),
+        text.contains("указательный массив") && text.contains("плоский массив"),
         "отказ не назвал причину представлением: {text}"
     );
 }
@@ -333,7 +333,7 @@ fn a_supplied_argument_is_checked_by_its_representation() {
     let error = harness::compiled(FOLDED).expect_err("плоский массив в указательный код");
     let text = error.to_string();
     assert!(
-        text.contains("§4.11") && text.contains("плоский массив"),
+        text.contains("указательный массив") && text.contains("плоский массив"),
         "отказ не назвал причину представлением: {text}"
     );
 }

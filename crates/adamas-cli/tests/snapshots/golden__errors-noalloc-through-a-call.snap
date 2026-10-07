@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: noalloc-through-a-call.adamas:16:1: `twice` объявлена `@noalloc`, но зовёт `wrap`, а та строит значение конструктором `Succ` - это куча Perceus. Выходов три (§5.1): линейный или unique вход, где reuse гарантирован; регион `{Alloc r}`; отказ от конструирования. Первых двух в компиляторе пока нет, так что остаётся третий
+Error: noalloc-through-a-call.adamas:16:1: `twice` объявлена `@noalloc`, но зовёт `wrap`, а та строит значение конструктором `Succ` - это куча Perceus. Выходов три: линейный или unique вход, где reuse гарантирован; регион `{Alloc r}`; отказ от конструирования. Первых двух в компиляторе пока нет, так что остаётся третий
   twice : Nat -> Nat
   ^^^^^^^^^^^^^^^^^^

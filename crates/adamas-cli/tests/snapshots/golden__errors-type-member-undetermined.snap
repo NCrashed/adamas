@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: type-member-undetermined.adamas:23:1: инстанс `Scale` не выбрать: тип аргумента к поиску не определился - дайте ему аннотацию (§4.3)
+Error: type-member-undetermined.adamas:23:1: инстанс `Scale` не выбрать: тип аргумента к поиску не определился - дайте ему аннотацию
   main = scale mystery (MkV2 1 1)
   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

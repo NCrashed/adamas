@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: type-member-duplicate.adamas:18:1: инстанс `Scale Int64 V2` уже объявлен, а `Scale` несёт типовой член (§4.1)
+Error: type-member-duplicate.adamas:18:1: инстанс `Scale Int64 V2` уже объявлен, а `Scale` несёт типовой член
   instance other : Scale Int64 V2 where
   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

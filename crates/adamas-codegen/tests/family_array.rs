@@ -111,7 +111,7 @@ main = first (again (MkBox (arrayNew 4 7)))
     let error = harness::compiled(&source).expect_err("плоский массив в код без `Flat`");
     let text = error.to_string();
     assert!(
-        text.contains("§4.11") && text.contains("без `Flat`"),
+        text.contains("указательный массив") && text.contains("без `Flat`"),
         "отказ не назвал причину: {text}"
     );
 }

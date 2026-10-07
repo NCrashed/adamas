@@ -363,7 +363,7 @@ leaked act = act MkUnit
     for label in ["Fail", "Yield", "Loose"] {
         let said = blocked(label).to_string();
         assert!(
-            said.contains(&format!("`{label}`")) && said.contains("§5.3"),
+            said.contains(&format!("`{label}`")) && said.contains("в позиции колбэка"),
             "отказ обязан назвать конкретный эффект: {said}"
         );
     }

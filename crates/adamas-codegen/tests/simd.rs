@@ -900,7 +900,7 @@ main = simdSplat 4 one
         |error| error.to_string(),
     );
     assert!(
-        why.contains("печатать его нечем") && why.contains("§4.9"),
+        why.contains("печатать его нечем") && why.contains("вектор"),
         "вектор ответом отвергнут не тем: {why}"
     );
 }

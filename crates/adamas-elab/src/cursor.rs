@@ -150,6 +150,10 @@ pub fn resolved(signature: &Signature, cursor: &Cursor) -> Option<Symbol> {
 #[must_use]
 pub fn described(signature: &Signature, name: &str) -> Option<String> {
     if let Some(definition) = signature.lookup(name) {
+        if matches!(definition.kind, DefinitionKind::Constructor { .. }) {
+            let shown = adamas_core::human::constructor(&definition.ty);
+            return Some(format!("{} : {shown}", adamas_core::human::named(name)));
+        }
         return Some(humane(name, &definition.ty));
     }
     // Порядок тот же, каким читает имя элаборация: объявленное заслоняет

@@ -264,6 +264,45 @@ pub(crate) fn implied(mult: Mult, visibility: Visibility) -> bool {
     )
 }
 
+/// Тип конструктора человеческой печатью: поле кратности `1` - умолчание
+/// поля конструктора (§4.1), и пишется оно просто `A -> …`; поле, кратность
+/// которого написана иначе, - со своей кратностью, `(ω _ : A) -> …`.
+///
+/// Отдельная функция, потому что печать терма не знает, чей это тип: у
+/// функции умолчание - `ω`, и тот же `(1 _ : Nat) -> Nat` значит там
+/// линейный параметр. Знает спросивший - подсказка редактора и `--type`.
+#[must_use]
+pub fn constructor(ty: &Term) -> String {
+    let ty = humane(ty);
+    humanly(|| {
+        let mut out = String::new();
+        let mut rest = &ty;
+        while let Term::Pi(binder, name, domain, row, codomain) = rest {
+            let row = if row.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", row.to_string().trim_end())
+            };
+            let field = match (binder.visibility, binder.mult, &**name) {
+                (Visibility::Explicit, Mult::One, "_") => domain.as_domain(),
+                (Visibility::Explicit, Mult::One, name) => format!("({name} : {domain})"),
+                (Visibility::Explicit, mult, name) => format!("({mult} {name} : {domain})"),
+                (Visibility::Implicit, mult, name) if implied(mult, Visibility::Implicit) => {
+                    format!("{{{name} : {domain}}}")
+                }
+                (Visibility::Implicit, mult, name) => format!("{{{mult} {name} : {domain}}}"),
+            };
+            out.push_str(&field);
+            out.push_str(" ->");
+            out.push_str(&row);
+            out.push(' ');
+            rest = codomain;
+        }
+        out.push_str(&rest.to_string());
+        out
+    })
+}
+
 /// Голова применения - дырка.
 fn hole(term: &Term) -> bool {
     let mut head = term;
@@ -318,6 +357,30 @@ mod tests {
             identity.to_string(),
             "{0 a : Type 0} -> (ω _ : #0) -> #1",
             "полная печать не тронута"
+        );
+    }
+
+    /// У поля конструктора умолчание - `1`: такое поле пишется стрелкой, а
+    /// написанное иначе - со своей кратностью.
+    #[test]
+    fn a_constructor_field_hides_its_default_multiplicity() {
+        let named = |name: &str| Term::Const(Name::from(name), Rc::from([]), Args::none());
+        let field = pi(
+            Binder::explicit(Mult::One),
+            "_",
+            named("Nat"),
+            pi(
+                Binder::explicit(Mult::Many),
+                "_",
+                named("Nat"),
+                named("Pair"),
+            ),
+        );
+        assert_eq!(constructor(&field), "Nat -> (ω _ : Nat) -> Pair");
+        assert_eq!(
+            shown(&field),
+            "(1 _ : Nat) -> Nat -> Pair",
+            "у функции умолчание другое"
         );
     }
 

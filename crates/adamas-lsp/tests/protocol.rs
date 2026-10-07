@@ -753,7 +753,7 @@ fn a_malformed_request_is_refused() {
 }
 
 /// Тип конструктора, как его печатает компилятор.
-const SUCC: &str = "Succ : (1 _ : Nat) -> Nat";
+const SUCC: &str = "Succ : Nat -> Nat";
 
 /// Подсказка стоит **после** неASCII-текста на своей строке.
 ///

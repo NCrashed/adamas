@@ -1312,6 +1312,21 @@ enum Piece<'a> {
     Owned(Rc<Term>, Pos, usize),
 }
 
+impl Term {
+    /// Печать в позиции домена безымянной стрелки: `A -> B` берёт в скобки
+    /// стрелку и прочее связывающее, применение - нет.
+    #[must_use]
+    pub fn as_domain(&self) -> String {
+        struct Domain<'a>(&'a Term);
+        impl fmt::Display for Domain<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                print_at(f, self.0, Pos::Domain, 0, Some(PRINT_DEPTH))
+            }
+        }
+        Domain(self).to_string()
+    }
+}
+
 /// Печатает терм **циклом**, а не рекурсией.
 ///
 /// Спайн применений бывает какой угодно длины, и рекурсивный принтер кладёт на

@@ -1,0 +1,26 @@
+-- Литерал в ветке хендлера берёт тип ответа хендлера (§4.3).
+--
+-- Ответ всего `handle` известен - `aborted : Int64`, - и элаборация сводит с
+-- ним ответ элиминатора до веток. Тело ветки при этом элаборировалось как тело
+-- лямбды без ожидания, и литерал `1` в обрывающей ветке брал `Nat`:
+-- «ожидался `Int64`, получен `Nat`»; отрицательный не элаборировался вовсе.
+-- Теперь ветка ждёт ответ хендлера, и оба проходят.
+
+effect Ask where
+  ask : Int64
+
+twice : {Ask} Int64
+twice = ask + ask
+
+aborted : Int64
+aborted = handle twice with
+  return v -> v
+  ask -> -1
+
+answered : Int64
+answered = handle twice with
+  return v -> v + 100
+  ask -> resume 7
+
+main : Int64
+main = aborted + answered

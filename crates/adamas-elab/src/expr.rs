@@ -1055,6 +1055,13 @@ pub(crate) struct Elaborator<'a> {
     /// Живёт только в хвостовой позиции: при спуске в аргумент снимается, иначе
     /// вложенный `handle` принял бы за свой ответ результат объемлющего.
     result: Option<Rc<Value>>,
+    /// Ответ хендлера - ожидаемый тип тела его ветки (§4.3). Ставит его
+    /// [`Self::answered`], снимает тело ветки: без него литерал в обрывающей
+    /// ветке `ask -> 1` не знал, что хендлер отвечает `Int64`, и брал `Nat`.
+    branch_result: Option<Rc<Value>>,
+    /// Ожидаемый тип тела, которое элаборируется следующим лямбдой ветки:
+    /// его ставит ветка хендлера и снимает тело (`lam_params`).
+    body_awaited: Option<Rc<Value>>,
     /// Классы и инстансы - чтобы найти словарь с замкнутой целью до синтеза
     /// типа `let` (§10 вопрос 230). `None` - элаборатор без реестра: типы,
     /// сигнатуры, всё, что тел не элаборирует.
@@ -1408,6 +1415,8 @@ impl<'a> Elaborator<'a> {
             declared_ty: None,
             expected: Vec::new(),
             result: None,
+            branch_result: None,
+            body_awaited: None,
             instances: None,
             arrow_row: None,
             awaited: None,
@@ -5596,6 +5605,11 @@ impl<'a> Elaborator<'a> {
             self.result = Some(self.threaded(ty, &answer));
         }
         self.answered(&current, ordered.len());
+        // Ветка параметризованного хендлера отвечает `B`, а не `S -> B`: её
+        // ожидание считать иначе, и пока оно не ставится.
+        if initial.is_some() {
+            self.branch_result = None;
+        }
 
         let stateful = initial.is_some();
         let Applied { mut term, placed } = self.applied(Applying {
@@ -5612,6 +5626,7 @@ impl<'a> Elaborator<'a> {
         if let Some((initial, _)) = initial {
             term = Term::App(Rc::new(term), Rc::new(initial));
         }
+        self.branch_result = None;
         self.cases
             .push((span, handler_sites(branches, &placed, stateful)));
         Ok(term)
@@ -5788,9 +5803,6 @@ impl<'a> Elaborator<'a> {
     /// Спайн снимается **без** аргументов: кодомен элиминатора от них не
     /// зависит (см. `handler_type`), поэтому подставить можно что угодно.
     fn answered(&mut self, spine: &Rc<Value>, branches: usize) {
-        let Some(expected) = self.result.clone() else {
-            return;
-        };
         let mut answer = Rc::clone(spine);
         for _ in 0..=branches {
             let Value::Pi(_, _, _, _, codomain) = &*answer else {
@@ -5798,6 +5810,10 @@ impl<'a> Elaborator<'a> {
             };
             answer = codomain.clone().apply(self.ctx.fresh());
         }
+        self.branch_result = Some(Rc::clone(&answer));
+        let Some(expected) = self.result.clone() else {
+            return;
+        };
         convertible(
             self.signature,
             self.metas,
@@ -6017,6 +6033,7 @@ impl<'a> Elaborator<'a> {
             }));
         }
         let params = spread_branch(&bound, params, branch.name.span);
+        self.body_awaited = self.branch_result.clone();
         let term = self.lam(&params, &branch.body, &bound)?;
         Ok((term, params.len()))
     }
@@ -6582,6 +6599,10 @@ impl<'a> Elaborator<'a> {
             // вопросы 131, 234).
             let result = self.result.clone();
             return self.closing_all(drops, |it| {
+                // Тело ветки хендлера ждёт ответ хендлера (§4.3).
+                if let Some(awaited) = it.body_awaited.take() {
+                    it.awaited = Some(awaited);
+                }
                 let body = it.placed(Position::Returned, |it| it.expr(body, Mult::Many))?;
                 Ok(it.executed(body, result.as_ref()))
             });

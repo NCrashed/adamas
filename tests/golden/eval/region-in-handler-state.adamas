@@ -1,0 +1,64 @@
+-- Регион с настоящей областью: `withRegion` держит её состоянием хендлера.
+--
+-- Тот же код, что `docs/examples/regions.adamas`, - здесь он сверяется тремя
+-- вычислителями. Две вещи, без которых он не шёл: класс `Flat` объявлен
+-- прелюдией (а не программой), и понижение сужает указательный слот состояния
+-- до области, когда тип позиции называет `Block`, - тем же кредитом, что запись
+-- и массив. Ответ 42, живых блоков ноль: область освобождена разом.
+
+-- | Метка региона. Значений у неё не спрашивают: она существует, чтобы стоять
+-- в типе ссылки, и параметр под ней стёрт (`0`).
+data Region where
+  Home : Region
+
+-- | Ссылка, знающая свой регион: адрес ячейки в его области.
+--
+-- `Ref r Int64` - обычное ω-значение: копируется свободно, читается сколько
+-- угодно раз. Линейность здесь не нужна - её работу делает метка.
+data Ref (0 r : Region) (a : Type) where
+  MkRef : Ptr -> Ref r a
+
+-- | Кладёт значение в область: новая область и адрес уложенного.
+placed : Block -> Int64 -> (Ptr, Block)
+placed area x =
+  let next : Block = regionAlloc area x
+  (regionLast next, next)
+
+-- | Интерфейс арены: что видно снаружи.
+--
+-- Погашение `Alloc` в сигнатуре не названо, и в этом всё дело - снаружи его
+-- взять неоткуда.
+module type Regions where
+  effect Alloc (0 r : Region)
+  withRegion : {a : Type} -> ((0 r : Region) -> (ω u : Unit) -> {Alloc r} a) -> a
+
+-- | Арена: единственный, кто гасит `Alloc`.
+--
+-- `:>` запечатывает: операции подняты и зовутся путём, а `handle` над `Alloc`
+-- живёт только здесь. Область - состояние хендлера: каждая аллокация отдаёт
+-- следующую.
+module Arena :> Regions where
+  effect Alloc (0 r : Region) where
+    allocIn : Int64 -> Ref r Int64
+    readRef : Ref r Int64 -> Int64
+  withRegion : {a : Type} -> ((0 r : Region) -> (ω u : Unit) -> {Alloc r} a) -> a
+  withRegion body = handle body Home with
+    state regionNew
+    return v -> v
+    allocIn x -> case placed state x of
+      (at, next) -> resume (MkRef at) next
+    readRef p -> case p of
+      MkRef at -> resume (regionRead state at) state
+
+-- | Тело, работающее в регионе: кладёт два числа и читает их.
+--
+-- Написать здесь ответ `Ref r Int64` нельзя: `r` связана доменом `withRegion`,
+-- и тип ответа о ней не знает. Ссылка живёт ровно столько, сколько живёт блок.
+program : (0 r : Region) -> (ω u : Unit) -> {Arena.Alloc r} Int64
+program r u =
+  let p : Ref r Int64 = Arena.allocIn 20
+  let q : Ref r Int64 = Arena.allocIn 22
+  Arena.readRef p + Arena.readRef q
+
+main : Int64
+main = Arena.withRegion program

@@ -97,11 +97,12 @@ pub(crate) fn scratch() -> PathBuf {
 )]
 fn fixture(stem: &str, text: &str) -> PathBuf {
     // Черновик свой у каждого вызова: тесты крейта - потоки одного процесса, и
-    // общее имя черновика вернуло бы ту же гонку, от которой он заведён.
+    // общее имя черновика вернуло бы ту же гонку, от которой он заведён. Под
+    // nextest тесты - ещё и процессы, отсюда номер процесса.
     static DRAFTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let at = DRAFTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = scratch().join(format!("{stem}.adamas"));
-    let draft = scratch().join(format!("{stem}.{at}.adamas.part"));
+    let draft = scratch().join(format!("{stem}.{}-{at}.adamas.part", std::process::id()));
     std::fs::write(&draft, text).expect("исходник обязан записываться");
     std::fs::rename(&draft, &path).expect("исходник обязан переименовываться");
     path

@@ -158,8 +158,11 @@ fn a_renamed_symbol_is_not_folded_even_with_builtins_allowed() {
 /// форматы плавающего разные по построению.
 fn probe_bits(declaration: &str, call: &str, flags: &[&str]) -> u64 {
     // Имя своё у каждой сборки: тесты крейта идут параллельно, а файл один.
+    // Под nextest тест - свой процесс, и счётчик в каждом начинается с нуля,
+    // поэтому в имени ещё и номер процесса.
     static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let at = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let at = format!("{}-{at}", std::process::id());
     let source = format!(
         "#include <stdint.h>\n\
          #include <stdio.h>\n\

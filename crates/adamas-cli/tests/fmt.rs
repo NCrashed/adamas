@@ -134,6 +134,8 @@ mod fixture {
     }
 }
 
+mod parallel;
+
 use fixture::{copied, corpus, driven, formatter, read, scratch, sources};
 
 /// Фикстуры корпуса, которые не разбираются **по построению**: на них стоят
@@ -280,10 +282,9 @@ fn the_formatted_corpus_answers_the_same() {
         !stderr.contains("panicked"),
         "форматтер упал на корпусе: {stderr}"
     );
-    let mut checked = 0usize;
-    for path in sources(&root) {
-        if !parsed(&path) {
-            continue;
+    let checked = parallel::across(&sources(&root), |path| {
+        if !parsed(path) {
+            return false;
         }
         let relative = path.strip_prefix(&root).expect("фикстура лежит в корпусе");
         let mirror = copy.join(relative);
@@ -294,14 +295,17 @@ fn the_formatted_corpus_answers_the_same() {
         } else {
             "check"
         };
-        let name = named(&root, &path);
+        let name = named(&root, path);
         assert_eq!(
             answered(command, &mirror),
-            answered(command, &path),
+            answered(command, path),
             "{name}: ответ изменился после форматирования"
         );
-        checked += 1;
-    }
+        true
+    })
+    .into_iter()
+    .filter(|&it| it)
+    .count();
     assert!(checked > 250, "сверено слишком мало: {checked}");
 }
 

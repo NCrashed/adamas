@@ -30,6 +30,7 @@
 //! и без него; свидетель reuse стоит в `perceus.rs`.
 
 mod harness;
+mod parallel;
 
 use std::path::PathBuf;
 
@@ -423,15 +424,19 @@ fn the_corpus_agrees_with_the_interpreter() {
 
     let mut taken = Vec::new();
     let mut refused = Vec::new();
-    for path in &fixtures {
+    let answers = parallel::across(&fixtures, |path| {
         let name = path.file_stem().unwrap().to_string_lossy().into_owned();
         let source = std::fs::read_to_string(path).unwrap();
-        match harness::agreed(&name, &source) {
-            Ok(stderr) => {
-                leakless(&name, &stderr);
-                taken.push(name);
-            }
-            Err(error) => refused.push((name, error.to_string())),
+        let answer = harness::agreed(&name, &source).map_err(|error| error.to_string());
+        if let Ok(stderr) = &answer {
+            leakless(&name, stderr);
+        }
+        (name, answer)
+    });
+    for (name, answer) in answers {
+        match answer {
+            Ok(_) => taken.push(name),
+            Err(why) => refused.push((name, why)),
         }
     }
 

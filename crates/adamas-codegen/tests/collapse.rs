@@ -52,6 +52,7 @@
 //! нельзя. Он обязан ронять прогон, и роняет.
 
 mod harness;
+mod parallel;
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -279,11 +280,10 @@ fn the_corpus_says_how_many_pairs_the_pass_finds() {
     let Some((tools, _)) = harness::llvm_toolchains() else {
         return;
     };
-    let mut found = Vec::new();
-    for name in taken() {
+    let found: Vec<String> = parallel::across(&taken(), |name| {
         let source =
             std::fs::read_to_string(harness::corpus().join(format!("{name}.adamas"))).unwrap();
-        let artefacts = harness::llvm_text(&name, &source).unwrap();
+        let artefacts = harness::llvm_text(name, &source).unwrap();
         let probe = harness::llvm_object(
             &format!("{name}.count"),
             &artefacts,
@@ -298,10 +298,11 @@ fn the_corpus_says_how_many_pairs_the_pass_finds() {
             "{name}: dup {}, drop {}, снято {}, отказано {}",
             report.dups, report.drops, report.cancelled, report.refused
         );
-        if report.cancelled > 0 {
-            found.push(format!("{name} ({})", report.cancelled));
-        }
-    }
+        (report.cancelled > 0).then(|| format!("{name} ({})", report.cancelled))
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     eprintln!(
         "корпус: пары нашлись у {}",
         if found.is_empty() {
@@ -338,22 +339,22 @@ fn the_pass_keeps_the_answer_and_the_blocks() {
         sources.push((name, std::fs::read_to_string(path).unwrap()));
     }
 
-    for (name, source) in sources {
+    parallel::across(&sources, |(name, source)| {
         let (plain, plain_err) =
-            harness::llvm_agreed(&name, &source, &tools, &without, &format!("{name}.plain"))
+            harness::llvm_agreed(name, source, &tools, &without, &format!("{name}.plain"))
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
         let (kept, kept_err) =
-            harness::llvm_agreed(&name, &source, &tools, &with, &format!("{name}.kept"))
+            harness::llvm_agreed(name, source, &tools, &with, &format!("{name}.kept"))
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert_eq!(plain, kept, "{name}: проход изменил ответ");
         assert_eq!(
-            harness::blocks(&name, &plain_err),
-            harness::blocks(&name, &kept_err),
+            harness::blocks(name, &plain_err),
+            harness::blocks(name, &kept_err),
             "{name}: проход сдвинул счётчик блоков"
         );
-        let (_, live) = harness::blocks(&name, &kept_err);
+        let (_, live) = harness::blocks(name, &kept_err);
         assert_eq!(live, 0, "{name}: после прохода остались живые блоки");
-    }
+    });
 }
 
 /// Снятая пара исчезает и из трафика счётчика - то есть доезжает до кода.
@@ -567,14 +568,18 @@ fn taken() -> Vec<String> {
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.extension().is_some_and(|it| it == "adamas"))
         .map(|path| path.file_stem().unwrap().to_string_lossy().into_owned())
-        .filter(|name| {
-            let source =
-                std::fs::read_to_string(harness::corpus().join(format!("{name}.adamas"))).unwrap();
-            harness::llvm_text(name, &source).is_ok()
-        })
         .collect();
     names.sort();
+    let lowered = parallel::across(&names, |name| {
+        let source =
+            std::fs::read_to_string(harness::corpus().join(format!("{name}.adamas"))).unwrap();
+        harness::llvm_text(name, &source).is_ok()
+    });
     names
+        .into_iter()
+        .zip(lowered)
+        .filter_map(|(name, lowered)| lowered.then_some(name))
+        .collect()
 }
 
 /// Тело горячей функции в тексте `.ll`.

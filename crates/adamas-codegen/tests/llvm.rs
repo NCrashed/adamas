@@ -41,6 +41,7 @@
 //! свидетелей LLVM-пути, потому что вторая разъехалась бы с первой молча.
 
 mod harness;
+mod parallel;
 
 use std::path::PathBuf;
 
@@ -492,21 +493,21 @@ fn the_corpus_agrees_across_three_evaluators() {
 
     let pipeline = Pipeline::optimised();
     eprintln!("LLVM {major}:");
-    for (name, source) in taken_sources() {
+    parallel::across(&taken_sources(), |(name, source)| {
         let (printed, stderr) =
-            harness::llvm_agreed(&name, &source, &tools, &pipeline, &format!("{name}.llvm"))
+            harness::llvm_agreed(name, source, &tools, &pipeline, &format!("{name}.llvm"))
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
         // Течь ловится тем же счётчиком, что у C-бэкенда: строку печатает
         // `main.c`, взятый обоими дословно.
-        let (_, live) = harness::blocks(&name, &stderr);
+        let (_, live) = harness::blocks(name, &stderr);
         assert_eq!(live, 0, "{name}: прогон LLVM оставил блоки живыми");
         // Вторая сторона договора: тот же исходник, посчитанный C-бэкендом и
         // сверенный с машиной. Оба равны ответу машины - значит равны между
         // собой, и расхождение уронит один из двух.
-        harness::agreed(&name, &source)
+        harness::agreed(name, source)
             .unwrap_or_else(|error| panic!("{name}: C-бэкенд отказал: {error}"));
         eprintln!("  сошлись на {name}: {printed}");
-    }
+    });
 }
 
 /// Две нагрузки различаются ответом, а не только исходником.
@@ -584,18 +585,18 @@ fn the_minimum_llvm_reads_the_same_ir() {
     }
 
     let pipeline = Pipeline::optimised();
-    for (name, source) in taken_sources() {
-        let new = harness::llvm_agreed(&name, &source, &tools, &pipeline, &format!("{name}.new"))
+    parallel::across(&taken_sources(), |(name, source)| {
+        let new = harness::llvm_agreed(name, source, &tools, &pipeline, &format!("{name}.new"))
             .unwrap_or_else(|error| panic!("{name}: {error}"))
             .0;
-        let old = harness::llvm_agreed(&name, &source, &minimum, &pipeline, &format!("{name}.old"))
+        let old = harness::llvm_agreed(name, source, &minimum, &pipeline, &format!("{name}.old"))
             .unwrap_or_else(|error| panic!("{name} на LLVM {oldest}: {error}"))
             .0;
         assert_eq!(
             new, old,
             "{name}: LLVM {oldest} посчитала не то, что {current}"
         );
-    }
+    });
 }
 
 /// Разбор **не** проверяет треугольник у интринсиков, и это измерено.
@@ -720,10 +721,10 @@ fn the_answer_does_not_come_from_the_optimiser() {
     let Some((tools, _)) = harness::llvm_toolchains() else {
         return;
     };
-    for (name, source) in taken_sources() {
+    parallel::across(&taken_sources(), |(name, source)| {
         let fast = harness::llvm_agreed(
-            &name,
-            &source,
+            name,
+            source,
             &tools,
             &Pipeline::optimised(),
             &format!("{name}.fast"),
@@ -731,8 +732,8 @@ fn the_answer_does_not_come_from_the_optimiser() {
         .unwrap_or_else(|error| panic!("{name}: {error}"))
         .0;
         let slow = harness::llvm_agreed(
-            &name,
-            &source,
+            name,
+            source,
             &tools,
             &Pipeline::plain(),
             &format!("{name}.slow"),
@@ -740,7 +741,7 @@ fn the_answer_does_not_come_from_the_optimiser() {
         .unwrap_or_else(|error| panic!("{name}: {error}"))
         .0;
         assert_eq!(fast, slow, "{name}: `opt -O2` меняет ответ");
-    }
+    });
 }
 
 /// Мутанты: правка порождённого IR обязана менять напечатанное.
@@ -1223,12 +1224,13 @@ fn a_lost_dup_is_observable_on_the_object_path() {
     let mut noticed = Vec::new();
     let mut indifferent = Vec::new();
 
-    for name in TAKEN {
+    // `Ok` - заметили, `Err` - нет, `None` - `dup` в программе нет вовсе.
+    let verdicts = parallel::across(&TAKEN, |&name| {
         let source =
             std::fs::read_to_string(harness::corpus().join(format!("{name}.adamas"))).unwrap();
         let artefacts = harness::llvm_text(name, &source).unwrap();
         if !artefacts.ll.contains("@adamas_dup(") {
-            continue;
+            return None;
         }
         let (honest, stderr) =
             harness::llvm_agreed(name, &source, &tools, &pipeline, &format!("{name}.kept"))
@@ -1248,16 +1250,24 @@ fn a_lost_dup_is_observable_on_the_object_path() {
             &tools,
             &pipeline,
         );
-        if broken.printed == honest
-            && broken.allocated == Some(allocated)
-            && broken.live == Some(live)
-        {
-            indifferent.push(name);
-        } else {
-            noticed.push(format!(
-                "{name}: `{}` вместо `{honest}`, выдано {:?} против {allocated}, живо {:?} против {live}",
-                broken.printed, broken.allocated, broken.live
-            ));
+        Some(
+            if broken.printed == honest
+                && broken.allocated == Some(allocated)
+                && broken.live == Some(live)
+            {
+                Err(name)
+            } else {
+                Ok(format!(
+                    "{name}: `{}` вместо `{honest}`, выдано {:?} против {allocated}, живо {:?} против {live}",
+                    broken.printed, broken.allocated, broken.live
+                ))
+            },
+        )
+    });
+    for verdict in verdicts.into_iter().flatten() {
+        match verdict {
+            Ok(line) => noticed.push(line),
+            Err(name) => indifferent.push(name),
         }
     }
 

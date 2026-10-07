@@ -163,35 +163,42 @@ mod harness {
     }
 }
 
+mod parallel;
+
 use harness::{analysed, driven, everything, fixtures, hovered, source};
+
+/// Принятые фикстуры: `programs` и `eval`.
+fn accepted() -> Vec<PathBuf> {
+    ["programs", "eval"]
+        .into_iter()
+        .flat_map(fixtures)
+        .collect()
+}
 
 /// Всё, что подсказка сказала о корпусе, терминал повторяет дословно.
 #[test]
 fn every_hover_matches_the_driver() {
-    let mut names = 0;
-    let mut files = 0;
-    for kind in ["programs", "eval"] {
-        for path in fixtures(kind) {
-            let file = source(&path);
-            let shown = everything(&path, &file);
-            let asked: Vec<String> = shown.keys().cloned().collect();
-            if asked.is_empty() {
-                continue;
-            }
-            let printed = driven(&path, &asked);
-            assert_eq!(
-                printed.len(),
-                asked.len(),
-                "{}: строк не столько, сколько имён",
-                path.display()
-            );
-            for (name, line) in asked.iter().zip(&printed) {
-                assert_eq!(line, &shown[name], "{}: имя `{name}`", path.display());
-            }
-            names += asked.len();
-            files += 1;
+    let counts = parallel::across(&accepted(), |path| {
+        let file = source(path);
+        let shown = everything(path, &file);
+        let asked: Vec<String> = shown.keys().cloned().collect();
+        if asked.is_empty() {
+            return None;
         }
-    }
+        let printed = driven(path, &asked);
+        assert_eq!(
+            printed.len(),
+            asked.len(),
+            "{}: строк не столько, сколько имён",
+            path.display()
+        );
+        for (name, line) in asked.iter().zip(&printed) {
+            assert_eq!(line, &shown[name], "{}: имя `{name}`", path.display());
+        }
+        Some(asked.len())
+    });
+    let names: usize = counts.iter().flatten().sum();
+    let files = counts.iter().flatten().count();
     // Сто тридцать семь: многофайловая `eval/prelude.adamas` вернулась в
     // сверку вместе с проходом по программе. Приспущен порог был ровно на ней
     // и ровно на одну фикстуру.
@@ -209,34 +216,34 @@ fn every_hover_matches_the_driver() {
 /// сигнатуры (`DefinitionKind`), а не у напечатанного типа.
 #[test]
 fn a_constructor_names_its_family_in_its_type() {
-    let mut checked = 0;
-    for kind in ["programs", "eval"] {
-        for path in fixtures(kind) {
-            let file = source(&path);
-            let shown = everything(&path, &file);
-            let signature = analysed(&path, &file)
-                .signature
-                .expect("принятая фикстура отдаёт сигнатуру");
-            for name in signature.names() {
-                let DefinitionKind::Constructor { data } = &signature
-                    .lookup(&name)
-                    .expect("имя из перечня объявлено")
-                    .kind
-                else {
-                    continue;
-                };
-                let Some(value) = shown.get(&*name) else {
-                    continue;
-                };
-                assert!(
-                    value.contains(adamas_core::term::written_name(data)),
-                    "{}: `{name}` строит `{data}`, а подсказка говорит `{value}`",
-                    path.display()
-                );
-                checked += 1;
-            }
+    let counts = parallel::across(&accepted(), |path| {
+        let file = source(path);
+        let shown = everything(path, &file);
+        let signature = analysed(path, &file)
+            .signature
+            .expect("принятая фикстура отдаёт сигнатуру");
+        let mut checked = 0;
+        for name in signature.names() {
+            let DefinitionKind::Constructor { data } = &signature
+                .lookup(&name)
+                .expect("имя из перечня объявлено")
+                .kind
+            else {
+                continue;
+            };
+            let Some(value) = shown.get(&*name) else {
+                continue;
+            };
+            assert!(
+                value.contains(adamas_core::term::written_name(data)),
+                "{}: `{name}` строит `{data}`, а подсказка говорит `{value}`",
+                path.display()
+            );
+            checked += 1;
         }
-    }
+        checked
+    });
+    let checked: usize = counts.iter().sum();
     assert!(checked >= 400, "конструкторов сверено всего {checked}");
 }
 
@@ -248,37 +255,37 @@ fn a_constructor_names_its_family_in_its_type() {
 /// человек.
 #[test]
 fn the_server_adds_nothing_to_the_text() {
-    let mut checked = 0;
-    for kind in ["programs", "eval"] {
-        for path in fixtures(kind) {
-            let file = source(&path);
-            let program = analysed(&path, &file);
-            let (Some(unit), Some(signature)) = (program.units.first(), &program.signature) else {
-                panic!("{}: принятая фикстура молчит", path.display());
-            };
-            let Some(module) = &unit.module else {
-                panic!("{}: принятая фикстура разбирается", path.display());
-            };
-            let tokens = adamas_parser::tokenize(file.text()).expect("фикстура разбирается");
-            let first = tokens.tokens.iter().find_map(|token| {
-                let found = adamas_elab::cursor::at(file.text(), module, token.span.start())?;
-                let value = adamas_elab::cursor::shown(signature, &found)?;
-                Some((token.span.start(), value))
-            });
-            let Some((offset, value)) = first else {
-                continue;
-            };
-            let at = adamas_lsp::position::position(&file, offset, Encoding::Utf16)
-                .expect("граница знака переводится");
-            assert_eq!(
-                hovered(&path, &file, at).as_deref(),
-                Some(value.as_str()),
-                "{}",
-                path.display()
-            );
-            checked += 1;
-        }
-    }
+    let checked = parallel::across(&accepted(), |path| {
+        let file = source(path);
+        let program = analysed(path, &file);
+        let (Some(unit), Some(signature)) = (program.units.first(), &program.signature) else {
+            panic!("{}: принятая фикстура молчит", path.display());
+        };
+        let Some(module) = &unit.module else {
+            panic!("{}: принятая фикстура разбирается", path.display());
+        };
+        let tokens = adamas_parser::tokenize(file.text()).expect("фикстура разбирается");
+        let first = tokens.tokens.iter().find_map(|token| {
+            let found = adamas_elab::cursor::at(file.text(), module, token.span.start())?;
+            let value = adamas_elab::cursor::shown(signature, &found)?;
+            Some((token.span.start(), value))
+        });
+        let Some((offset, value)) = first else {
+            return false;
+        };
+        let at = adamas_lsp::position::position(&file, offset, Encoding::Utf16)
+            .expect("граница знака переводится");
+        assert_eq!(
+            hovered(path, &file, at).as_deref(),
+            Some(value.as_str()),
+            "{}",
+            path.display()
+        );
+        true
+    })
+    .into_iter()
+    .filter(|&it| it)
+    .count();
     // Та же фикстура и тот же счёт, что у порога выше.
     assert!(checked >= 137, "фикстур сверено всего {checked}");
 }

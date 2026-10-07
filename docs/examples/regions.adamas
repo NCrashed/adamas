@@ -2,7 +2,7 @@
 --
 -- Чем это отличается от соседей. Арена в C++ или Rust - библиотека, и то, что
 -- ссылка не переживёт своей арены, держит либо дисциплина, либо заём. Здесь
--- регион - **метка в типе**: `Ref r Nat` называет ту кучу, из которой ссылка
+-- регион - **метка в типе**: `Ref r Int64` называет ту кучу, из которой ссылка
 -- взята, и вынести её за `withRegion` не даёт проверка типов.
 --
 -- Держится это на двух ногах сразу, и обе видны ниже:
@@ -13,26 +13,29 @@
 --      запечатанного модуля (`:>`), и снаружи его операции видны, а погашение -
 --      нет. Обычная абстракция §4.8, отдельного правила не заводится.
 --
+-- Куча настоящая: `withRegion` заводит область (`regionNew`), `allocIn` кладёт
+-- значение в неё (`regionAlloc`), `readRef` читает его оттуда же. Область -
+-- один блок, и освобождается она одним разом, когда `withRegion` кончился.
+--
 -- Проверяется прогоном: `crates/adamas-cli/tests/examples.rs`.
-
-data Unit where
-  MkUnit : Unit
-
-(+) : Nat -> Nat -> Nat
-(+) Zero m = m
-(+) (Succ k) m = Succ (k + m)
 
 -- | Метка региона. Значений у неё не спрашивают: она существует, чтобы стоять
 -- в типе ссылки, и параметр под ней стёрт (`0`).
 data Region where
   Home : Region
 
--- | Ссылка, знающая свой регион.
+-- | Ссылка, знающая свой регион: адрес ячейки в его области.
 --
--- `Ref r Nat` - обычное ω-значение: копируется свободно, читается сколько
+-- `Ref r Int64` - обычное ω-значение: копируется свободно, читается сколько
 -- угодно раз. Линейность здесь не нужна - её работу делает метка.
 data Ref (0 r : Region) (a : Type) where
-  MkRef : Ref r a
+  MkRef : Ptr -> Ref r a
+
+-- | Кладёт значение в область: новая область и адрес уложенного.
+placed : Block -> Int64 -> (Ptr, Block)
+placed area x =
+  let next : Block = regionAlloc area x
+  (regionLast next, next)
 
 -- | Интерфейс арены: что видно снаружи.
 --
@@ -45,26 +48,30 @@ module type Regions where
 -- | Арена: единственный, кто гасит `Alloc`.
 --
 -- `:>` запечатывает: операции подняты и зовутся путём, а `handle` над `Alloc`
--- живёт только здесь. Настоящая куча появится вместе с представлением региона;
--- сегодня хендлер отвечает за неё, и правило времени жизни от этого не зависит.
+-- живёт только здесь. Область - состояние хендлера: каждая аллокация отдаёт
+-- следующую.
 module Arena :> Regions where
   effect Alloc (0 r : Region) where
-    allocIn : Nat -> Ref r Nat
-    readRef : Ref r Nat -> Nat
+    allocIn : Int64 -> Ref r Int64
+    readRef : Ref r Int64 -> Int64
   withRegion : {a : Type} -> ((0 r : Region) -> (ω u : Unit) -> {Alloc r} a) -> a
   withRegion body = handle body Home with
+    state regionNew
     return v -> v
-    allocIn n -> resume MkRef
-    readRef p -> resume 3
+    allocIn x -> case placed state x of
+      (at, next) -> resume (MkRef at) next
+    readRef p -> case p of
+      MkRef at -> resume (regionRead state at) state
 
--- | Тело, работающее в регионе: аллоцирует и читает дважды.
+-- | Тело, работающее в регионе: кладёт два числа и читает их.
 --
--- Написать здесь ответ `Ref r Nat` нельзя: `r` связана доменом `withRegion`, и
--- тип ответа о ней не знает. Ссылка живёт ровно столько, сколько живёт блок.
-program : (0 r : Region) -> (ω u : Unit) -> {Arena.Alloc r} Nat
+-- Написать здесь ответ `Ref r Int64` нельзя: `r` связана доменом `withRegion`,
+-- и тип ответа о ней не знает. Ссылка живёт ровно столько, сколько живёт блок.
+program : (0 r : Region) -> (ω u : Unit) -> {Arena.Alloc r} Int64
 program r u =
-  let p : Ref r Nat = Arena.allocIn (Succ Zero)
-  Arena.readRef p + Arena.readRef p
+  let p : Ref r Int64 = Arena.allocIn 20
+  let q : Ref r Int64 = Arena.allocIn 22
+  Arena.readRef p + Arena.readRef q
 
-main : Nat
+main : Int64
 main = Arena.withRegion program

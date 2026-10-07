@@ -11,45 +11,33 @@
 --
 -- Проверяется прогоном: `crates/adamas-cli/tests/examples.rs`.
 
-data Bool where
-  False : Bool
-  True : Bool
-
-data Unit where
-  MkUnit : Unit
-
-data List (a : Type) where
-  Nil : List a
-  Cons : a -> List a -> List a
-
-(+) : Nat -> Nat -> Nat
-(+) Zero m = m
-(+) (Succ k) m = Succ (k + m)
+import Std.IO (Console, putLine)
 
 -- | Длина вектора стоит в его типе и **стирается**: кратность `0` означает, что
 -- до исполнения этот аргумент не доживает.
 --
 -- Индекс здесь не поле: он существует, чтобы `head` нельзя было позвать на
--- пустом векторе, и рантайму знать о нём нечего.
+-- пустом векторе, и рантайму знать о нём нечего. Индекс - `Nat` прелюдии:
+-- число, с которым проверка типов умеет считать, а элементы - машинные.
 data Vect : Nat -> Type where
-  VNil : Vect Zero
-  VCons : (0 n : Nat) -> Nat -> Vect n -> Vect (Succ n)
+  VNil : Vect 0
+  VCons : (0 n : Nat) -> Int64 -> Vect n -> Vect (Succ n)
 
 -- | Первый элемент непустого вектора.
 --
--- Написать `head Zero VNil` нельзя: тип требует `Succ n`, и это проверка типов,
+-- Написать `head 0 VNil` нельзя: тип требует `Succ n`, и это проверка типов,
 -- а не проверка во время исполнения. Ветки для пустого вектора здесь нет вовсе -
 -- унификация индексов делает её невозможной, а не «непокрытой».
-head : (0 n : Nat) -> Vect (Succ n) -> Nat
+head : (0 n : Nat) -> Vect (Succ n) -> Int64
 head n (VCons k x xs) = x
 
 -- | Сумма вектора длины, известной типу.
-total : (0 n : Nat) -> Vect n -> Nat
-total n VNil = Zero
+total : (0 n : Nat) -> Vect n -> Int64
+total n VNil = 0
 total n (VCons k x xs) = x + total k xs
 
-sample : Vect (Succ (Succ Zero))
-sample = VCons (Succ Zero) 3 (VCons Zero 4 VNil)
+sample : Vect 2
+sample = VCons 1 3 (VCons 0 4 VNil)
 
 -- | Ресурс: связывание линейно **по построению**, деструктор зовётся сам.
 --
@@ -59,7 +47,7 @@ sample = VCons (Succ Zero) 3 (VCons Zero 4 VNil)
 -- отмечается в журнале, и `{Log}` в его сигнатуре говорит, что молча закрыть
 -- ресурс нельзя.
 effect Log where
-  note : Nat -> Unit
+  note : Int64 -> Unit
 
 resource Handle where
   Acquire : Handle
@@ -81,12 +69,13 @@ use h =
 opened : {Log} Bool
 opened = use Acquire
 
--- Журнал `[1, 9]`: тело отметилось, потом закрылся ресурс. Обратный порядок
+-- | Журнал `[1, 9]`: тело отметилось, потом закрылся ресурс. Обратный порядок
 -- вставки дал бы `[9, 1]`.
-trace : List Nat
+trace : List Int64
 trace = handle opened with
-  return v -> Nil
+  return _v -> []
   note n -> Cons n (resume MkUnit)
 
-main : List Nat
-main = Cons (head (Succ Zero) sample) (Cons (total (Succ (Succ Zero)) sample) trace)
+-- | `[3, 7, 1, 9]`: голова вектора, его сумма и журнал ресурса.
+main : {Console} Unit
+main = putLine (show ([head 1 sample, total 2 sample] ++ trace))

@@ -11,53 +11,40 @@
 --
 -- Проверяется прогоном: `crates/adamas-cli/tests/examples.rs`.
 
-data Unit where
-  MkUnit : Unit
-
-data List (a : Type) where
-  Nil : List a
-  Cons : a -> List a -> List a
-
-(+) : Nat -> Nat -> Nat
-(+) Zero m = m
-(+) (Succ k) m = Succ (k + m)
-
-append : List Nat -> List Nat -> List Nat
-append Nil ys = ys
-append (Cons x xs) ys = Cons x (append xs ys)
+import Std.IO (Console, putLine)
 
 -- | Вопрос к окружению: операция объявлена, смысла у неё пока нет.
 --
 -- Объявление говорит только сигнатуру. Что вернёт `ask`, решит тот, кто это
 -- вычисление запустит.
 effect Ask where
-  ask : Nat
+  ask : Int64
 
 -- | Отметка в журнале.
 effect Log where
-  note : Nat -> Unit
+  note : Int64 -> Unit
 
 -- | Спрашивает дважды и складывает.
 --
 -- Ряд `{Ask}` в типе - не украшение: позвать `twice` из места, где `Ask` не
 -- погашен, проверка типов не даст. Ряд поднимается наружу сам, пока его не
 -- снимет хендлер.
-twice : {Ask} Nat
+twice : {Ask} Int64
 twice = ask + ask
 
 -- | Тот же вопрос, но с отметкой: два эффекта сочетаются запятой.
 --
 -- Трансформеров для этого не нужно - ряд есть множество меток, и добавление
 -- второй ничего не переписывает.
-noisy : {Ask, Log} Nat
+noisy : {Ask, Log} Int64
 noisy =
-  let a : Nat = ask
-  let u : Unit = note a
+  let a : Int64 = ask
+  note a
   a + 1
 
 -- | Постоянный ответ: `ask` возвращает семёрку, `resume` продолжает вычисление
 -- с этим значением.
-constant : Nat
+constant : Int64
 constant = handle twice with
   return v -> v
   ask -> resume 7
@@ -66,35 +53,36 @@ constant = handle twice with
 --
 -- Вычисление не переписано ни строкой: `ask` в нём по-прежнему просто `ask`.
 -- Здесь операция отвечает нулём, и итог - ноль вместо четырнадцати.
-silent : Nat
+silent : Int64
 silent = handle twice with
   return v -> v
-  ask -> resume Zero
+  ask -> resume 0
 
 -- | Хендлер вправе **не** звать `resume`: тогда вычисление обрывается, и
 -- ответом становится то, что написала ветка.
 --
 -- Так пишется прерывание: `Ask` здесь не отвечает на вопрос, а отменяет всё
 -- дальнейшее. Ни исключений, ни особой формы для этого не нужно.
-aborted : Nat
+aborted : Int64
 aborted = handle twice with
   return v -> v
-  ask -> Succ Zero
+  ask -> -1
 
 -- | Погасить можно **часть** ряда: `Ask` снимается, `Log` уходит наружу.
 --
--- Тип ответа это и говорит - `{Log} Nat`, - и вызывающий обязан погасить
+-- Тип ответа это и говорит - `{Log} Int64`, - и вызывающий обязан погасить
 -- остаток сам.
-asked : {Log} Nat
+asked : {Log} Int64
 asked = handle noisy with
   return v -> v
   ask -> resume 5
 
 -- | Журнал собирается вторым хендлером: `[5, 6]` - отметка и ответ.
-logged : List Nat
+logged : List Int64
 logged = handle asked with
-  return v -> Cons v Nil
+  return v -> [v]
   note n -> Cons n (resume MkUnit)
 
-main : List Nat
-main = append (Cons constant (Cons silent (Cons aborted Nil))) logged
+-- | `[14, 0, -1, 5, 6]`: три хендлера над `twice` и журнал `noisy`.
+main : {Console} Unit
+main = putLine (show ([constant, silent, aborted] ++ logged))

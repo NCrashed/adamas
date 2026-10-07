@@ -14,12 +14,7 @@
 --
 -- Проверяется прогоном: `crates/adamas-cli/tests/examples.rs`.
 
-data Unit where
-  MkUnit : Unit
-
-data Bool where
-  True : Bool
-  False : Bool
+import Std.IO (Console, putLine)
 
 -- | Метка границы. Операций у неё нет - она помечает вызов, а не заводит его.
 effect Foreign
@@ -27,13 +22,6 @@ effect Foreign
 -- | Ширина, как её называет C. Представление есть свойство типа, а не его
 -- написания: синоним едет через границу тем же словом.
 type Size = UInt64
-
-data Answers where
-  MkAnswers : Int64 -> Float64 -> UInt64 -> Answers
-
-pick : Bool -> UInt64 -> UInt64 -> UInt64
-pick True yes no = yes
-pick False yes no = no
 
 -- | Модуль числа: один машинный аргумент, машинный ответ.
 extern "C" fn labs : Int64 -> Int64
@@ -55,20 +43,17 @@ runForeign : {a : Type} -> ({Foreign} a) -> a
 runForeign k = handle @Foreign k with
   return v -> v
 
--- | Адрес в ответ не годится - у каждого прогона он свой, - а «не ноль»
--- годится: `malloc` на 32 байта отказать не может.
-alive : CPtr -> UInt64
-alive p = pick (ltUInt64 0 p) 1 0
-
 -- | Открыть, использовать, закрыть: идиома §5.3 без ресурсной обёртки.
-body : {Foreign} Answers
+--
+-- Адрес в ответ не годится - у каждого прогона он свой, - а «не ноль»
+-- годится: `malloc` на 32 байта отказать не может.
+body : {Foreign} String
 body u =
   let cell : CPtr = malloc 32
-  let taken : UInt64 = alive cell
-  let closed : Unit = free cell
-  let away : Int64 = labs (-7)
-  let raised : Float64 = pow 2.0 10.0
-  MkAnswers away raised taken
+  let alive : Bool = ltUInt64 0 cell
+  free cell
+  "labs -7 = " <> show (labs (-7)) <> ", 2^10 = " <> show (pow 2.0 10.0) <> ", malloc: " <> show alive
 
-main : Answers
-main = runForeign body
+-- | `labs -7 = 7, 2^10 = 1024, malloc: True`.
+main : {Console} Unit
+main = putLine (runForeign body)

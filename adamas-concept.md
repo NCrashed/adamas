@@ -170,8 +170,7 @@ implicits; глобальная уникальность остаётся дос
 
 ### 5.1 Что проверяется сегодняшним компилятором
 
-Примеры ниже взяты из `docs/examples/` и сокращены до сути - убраны
-объявления `Nat`, `Bool` и сложения, которые каждый файл заводит сам. Всё
+Примеры ниже взяты из `docs/examples/` и сокращены до сути. Всё
 показанное принимается сегодняшним компилятором и проверено прогоном; файлы, из
 которых это вынуто, входят в гейт целиком - проверяются, вычисляются с
 записанным ответом и сверяются с каноном форматтера.
@@ -197,32 +196,32 @@ main =
 
 ```adamas
 effect Ask where
-  ask : Nat
+  ask : Int64
 
 -- Ряд `{Ask}` в типе - не украшение: позвать `twice` оттуда, где `Ask` не
 -- погашен, проверка типов не даст.
-twice : {Ask} Nat
+twice : {Ask} Int64
 twice = ask + ask
 
 -- Постоянный ответ: 7 + 7.
-constant : Nat
+constant : Int64
 constant = handle twice with
   return v -> v
   ask -> resume 7
 
 -- То же вычисление, другой handler, другой ответ. `twice` не переписан
 -- ни строкой.
-silent : Nat
+silent : Int64
 silent = handle twice with
   return v -> v
-  ask -> resume Zero
+  ask -> resume 0
 
 -- Handler вправе не звать `resume`: вычисление обрывается. Так пишется
 -- прерывание - без исключений и без особой формы.
-aborted : Nat
+aborted : Int64
 aborted = handle twice with
   return v -> v
-  ask -> Succ Zero
+  ask -> -1
 ```
 
 **Ресурс, закрываемый компилятором на всех выходах:**
@@ -247,13 +246,13 @@ use h =
 
 ```adamas
 data Vect : Nat -> Type where
-  VNil : Vect Zero
-  VCons : (0 n : Nat) -> Nat -> Vect n -> Vect (Succ n)
+  VNil : Vect 0
+  VCons : (0 n : Nat) -> Int64 -> Vect n -> Vect (Succ n)
 
--- Написать `head Zero VNil` нельзя: тип требует `Succ n`. Ветки для пустого
+-- Написать `head 0 VNil` нельзя: тип требует `Succ n`. Ветки для пустого
 -- вектора здесь нет вовсе - унификация индексов делает её невозможной, а не
 -- «непокрытой».
-head : (0 n : Nat) -> Vect (Succ n) -> Nat
+head : (0 n : Nat) -> Vect (Succ n) -> Int64
 head n (VCons k x xs) = x
 ```
 

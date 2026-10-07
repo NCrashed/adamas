@@ -23,14 +23,14 @@ use crate::token::{Comment, CommentKind, Token, TokenKind, Tokens, keyword};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum LexError {
     /// Знак, который в языке не значит ничего.
-    #[error("неизвестный символ")]
+    #[error("{}", adamas_l10n::tr!("lex-unexpected-char"))]
     UnexpectedChar {
         /// Где он.
         span: Span,
     },
 
     /// Блочный комментарий не закрыт до конца файла.
-    #[error("незакрытый комментарий `{{-`")]
+    #[error("{}", adamas_l10n::tr!("lex-unterminated-comment"))]
     UnterminatedComment {
         /// Спан открывающего `{-`. Не весь незакрытый кусок: подчёркивать
         /// хвост файла там, где виновата одна лексема, диагностике незачем.
@@ -38,7 +38,7 @@ pub enum LexError {
     },
 
     /// Строковый литерал не закрыт до конца строки.
-    #[error("незакрытый строковый литерал")]
+    #[error("{}", adamas_l10n::tr!("lex-unterminated-string"))]
     UnterminatedString {
         /// Спан от открывающей кавычки до конца строки, не включая перевод:
         /// каретка обязана уместиться в одну строку исходника.
@@ -46,7 +46,7 @@ pub enum LexError {
     },
 
     /// Экранирование, которого нет.
-    #[error("неизвестное экранирование в строке")]
+    #[error("{}", adamas_l10n::tr!("lex-unknown-escape"))]
     UnknownEscape {
         /// Спан от обратной косой черты.
         span: Span,
@@ -57,7 +57,7 @@ pub enum LexError {
     /// Отступ значим (§4.1), а ширина табуляции - соглашение редактора, не
     /// свойство текста. Считать её за восемь колонок значит поставить смысл
     /// программы в зависимость от настройки, которой в файле не видно.
-    #[error("табуляция в отступе: отступ значим, ширина табуляции - нет")]
+    #[error("{}", adamas_l10n::tr!("lex-tab-in-indentation"))]
     TabInIndentation {
         /// Где она.
         span: Span,

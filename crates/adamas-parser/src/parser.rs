@@ -85,10 +85,10 @@ impl fmt::Display for Expected {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Token(kind) => write!(f, "{kind}"),
-            Self::Declaration => f.write_str("объявление"),
-            Self::Expression => f.write_str("выражение"),
-            Self::Pattern => f.write_str("паттерн"),
-            Self::Name => f.write_str("имя"),
+            Self::Declaration => f.write_str(&adamas_l10n::tr!("expected-declaration")),
+            Self::Expression => f.write_str(&adamas_l10n::tr!("expected-expression")),
+            Self::Pattern => f.write_str(&adamas_l10n::tr!("expected-pattern")),
+            Self::Name => f.write_str(&adamas_l10n::tr!("expected-name")),
         }
     }
 }
@@ -112,20 +112,10 @@ pub enum Misplaced {
 
 impl fmt::Display for Misplaced {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::When => {
-                "`when` пишется в объявлении класса, перед суперклассами: \
-                 `class Ord a when Eq a where …` (§4.1)"
-            }
-            Self::Using => {
-                "`using` пишется в выражении, перед инстансом: `using p (f x)` \
-                 (§4.3)"
-            }
-            Self::Braces => {
-                "фигурные скобки здесь ничего не открывают: effect row пишется \
-                 `{Ask} A` (§3.4), тип записи - `{x : A}` (§4.2), группа \
-                 implicit-связываний - `{a : Type}`; пустой row не пишется"
-            }
+        f.write_str(&match self {
+            Self::When => adamas_l10n::tr!("misplaced-when"),
+            Self::Using => adamas_l10n::tr!("misplaced-using"),
+            Self::Braces => adamas_l10n::tr!("misplaced-braces"),
         })
     }
 }
@@ -134,21 +124,21 @@ impl fmt::Display for Misplaced {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ParseError {
     /// `{}` - ни тип, ни значение.
-    #[error("пустая запись: `{{}}` не различает тип и значение")]
+    #[error("{}", adamas_l10n::tr!("parse-empty-record"))]
     EmptyRecord {
         /// Где написано.
         span: Span,
     },
 
     /// Приоритет фикситета вне 0-9.
-    #[error("приоритет пишется числом от 0 до 9 (§4.4)")]
+    #[error("{}", adamas_l10n::tr!("parse-precedence"))]
     Precedence {
         /// Где написан.
         span: Span,
     },
 
     /// В одной записи и объявления полей, и присваивания.
-    #[error("запись либо объявляет поля, либо присваивает им значения")]
+    #[error("{}", adamas_l10n::tr!("parse-mixed-record"))]
     MixedRecord {
         /// Поле, на котором форма сменилась.
         span: Span,
@@ -159,7 +149,7 @@ pub enum ParseError {
     /// Настоящее время, а не прошедшее: `expected` и `found` - существительные
     /// всех трёх родов («идентификатор», «граница блока», «имя»), и с
     /// «ожидалось» согласуется только среднее.
-    #[error("ожидается {expected}, а не {found}")]
+    #[error("{}", adamas_l10n::tr!("parse-expected", expected = .expected, found = .found))]
     Expected {
         /// Чего ждали.
         expected: Expected,
@@ -174,7 +164,7 @@ pub enum ParseError {
     /// Своя ошибка, а не «ожидается имя»: имя здесь как раз и написано, просто
     /// не то. `fn` в этой форме - контекстное слово, и сказать про него надо
     /// прямо, иначе отказ указывает на имя символа и молчит о причине.
-    #[error("после ABI в `extern` пишется `fn` (§5.3)")]
+    #[error("{}", adamas_l10n::tr!("parse-expected-fn"))]
     ExpectedFn {
         /// Что написано вместо `fn`.
         span: Span,
@@ -185,7 +175,7 @@ pub enum ParseError {
     /// Атрибут - обязательство определения, и стоит он при **сигнатуре**
     /// (§4.7). `export` сигнатуры не несёт: определение с нею написано выше, и
     /// второе место для обязательства означало бы два ответа на один вопрос.
-    #[error("атрибут пишется при сигнатуре определения, а не при `export` (§4.7)")]
+    #[error("{}", adamas_l10n::tr!("parse-attributed-export"))]
     AttributedExport {
         /// Где стоит `export`.
         span: Span,
@@ -197,7 +187,7 @@ pub enum ParseError {
     /// поэтому заглавное. Проекции в паттерне не бывает, так что прочесть
     /// `p.x` иначе нечем: молча собранное связывание с точкой в имени
     /// отправляло отказ в тело - «имя `p` не найдено».
-    #[error("`{path}`: путь в паттерне называет конструктор, а он пишется с заглавной")]
+    #[error("{}", adamas_l10n::tr!("parse-pattern-path", path = .path))]
     PatternPath {
         /// Написанный путь.
         path: Symbol,
@@ -207,7 +197,7 @@ pub enum ParseError {
 
     /// Кратность у значения поля записи: она свойство типа, `{ ω x : A }`, а не
     /// значения `{ x = v }` (§10 вопрос 237).
-    #[error("кратность пишется у поля в типе записи (`{{ ω x : A }}`), а не у значения")]
+    #[error("{}", adamas_l10n::tr!("parse-field-multiplicity"))]
     FieldMultiplicity {
         /// Написанная кратность.
         span: Span,
@@ -217,7 +207,7 @@ pub enum ParseError {
     ///
     /// Полукольцо §3.2 состоит ровно из трёх элементов, поэтому это не
     /// «неизвестное число», а исчерпывающий список.
-    #[error("кратность записывается `0`, `1` или `ω`")]
+    #[error("{}", adamas_l10n::tr!("parse-multiplicity"))]
     Multiplicity {
         /// Что написано вместо кратности.
         span: Span,
@@ -228,7 +218,7 @@ pub enum ParseError {
     /// Начальное состояние у нити одно (§3.4). Повтор молча затирал первый, и
     /// побеждал последний, - при том что повтор ветки отвергается соседним
     /// правилом.
-    #[error("`state`: начальное состояние написано дважды")]
+    #[error("{}", adamas_l10n::tr!("parse-duplicate-state"))]
     DuplicateState {
         /// Второе вхождение.
         span: Span,
@@ -238,7 +228,7 @@ pub enum ParseError {
     ///
     /// Порядок клауз значим - побеждает первая совпавшая (§9 Фаза 1), - поэтому
     /// собирать разнесённые по файлу куски молча нельзя.
-    #[error("клаузы `{name}` разделены другим объявлением")]
+    #[error("{}", adamas_l10n::tr!("parse-split-clauses", name = .name))]
     SplitClauses {
         /// Имя определения.
         name: Symbol,
@@ -249,7 +239,7 @@ pub enum ParseError {
     },
 
     /// Лексема не на своём месте.
-    #[error("{what}")]
+    #[error("{}", adamas_l10n::tr!("parse-misplaced", what = .what))]
     Misplaced {
         /// Какая.
         what: Misplaced,
@@ -264,9 +254,7 @@ pub enum ParseError {
     /// Взять её в скобки нельзя - под скобкой layout выключен (§10 вопрос
     /// 55), - поэтому дерево, где за ней стоит аргумент, оператор или `of`,
     /// не записывается ничем. Отвергает его разбор, а не печать позже и молча.
-    #[error(
-        "после формы с блоком на строке ничего не пишется: где она кончается, видно только по отступу"
-    )]
+    #[error("{}", adamas_l10n::tr!("parse-block-not-last"))]
     BlockNotLast {
         /// Где форма с блоком.
         form: Span,
@@ -280,7 +268,7 @@ pub enum ParseError {
     /// иначе навигация по коду требует знания всей библиотеки. Отказ поэтому
     /// стоит здесь названной формой, а не общим «ожидается имя»: без него
     /// решение §4.4 держалось бы на том, что `(..)` никто не написал.
-    #[error("wildcard-импорта нет (§4.4): открытые имена перечисляются по одному")]
+    #[error("{}", adamas_l10n::tr!("parse-wildcard"))]
     Wildcard {
         /// Где написан.
         span: Span,
@@ -291,7 +279,7 @@ pub enum ParseError {
     /// Импорт подключает файл к файлу, а не член к модулю: подключённое видно
     /// всему, что написано ниже, и вложить его внутрь `module` или `where`
     /// значило бы спросить, что это подключение означает для объемлющего.
-    #[error("`import` пишется на верхнем уровне файла (§4.8)")]
+    #[error("{}", adamas_l10n::tr!("parse-nested-import"))]
     NestedImport {
         /// Где написан.
         span: Span,
@@ -306,7 +294,7 @@ pub enum ParseError {
     /// из записи получится, - глубина стека всякого, кто по нему пойдёт, и она
     /// с первой не совпадает: её меряет [`crate::depth`] отдельным проходом
     /// (§10 вопрос 62).
-    #[error("вложенность глубже предела в {limit}")]
+    #[error("{}", adamas_l10n::tr!("parse-too-deep", limit = .limit))]
     TooDeep {
         /// Предел.
         limit: u32,

@@ -150,7 +150,7 @@ enum Face {
     Class {
         /// Короткое имя для [`dump`].
         tag: &'static str,
-        /// Как назвать в сообщении об ошибке.
+        /// Как назвать в сообщении об ошибке: идентификатор каталога.
         described: &'static str,
     },
 }
@@ -159,15 +159,15 @@ impl TokenKind {
     fn face(self) -> Face {
         let class = |tag, described| Face::Class { tag, described };
         match self {
-            Self::Ident => class("ident", "идентификатор"),
-            Self::Operator => class("op", "оператор"),
-            Self::Nat => class("nat", "натуральный литерал"),
-            Self::Float => class("float", "литерал с плавающей точкой"),
-            Self::Str => class("str", "строковый литерал"),
-            Self::Open => class("open", "начало блока"),
-            Self::Sep => class("sep", "граница блока"),
-            Self::Close => class("close", "конец блока"),
-            Self::Eof => class("eof", "конец файла"),
+            Self::Ident => class("ident", "token-ident"),
+            Self::Operator => class("op", "token-operator"),
+            Self::Nat => class("nat", "token-nat"),
+            Self::Float => class("float", "token-float"),
+            Self::Str => class("str", "token-str"),
+            Self::Open => class("open", "token-open"),
+            Self::Sep => class("sep", "token-sep"),
+            Self::Close => class("close", "token-close"),
+            Self::Eof => class("eof", "token-eof"),
 
             Self::Data => Face::Spelled("data"),
             Self::Where => Face::Spelled("where"),
@@ -275,7 +275,7 @@ impl fmt::Display for TokenKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.face() {
             Face::Spelled(text) => write!(f, "`{text}`"),
-            Face::Class { described, .. } => f.write_str(described),
+            Face::Class { described, .. } => f.write_str(&adamas_l10n::message(described, &[])),
         }
     }
 }

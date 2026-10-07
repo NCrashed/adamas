@@ -12,6 +12,7 @@ members = [
     "crates/adamas-warmup-stlc",
     "crates/adamas-runtime",
     "crates/adamas-codegen",
+    "crates/adamas-l10n",
 ]
 
 [workspace.package]
@@ -33,6 +34,7 @@ adamas-pkg = { path = "crates/adamas-pkg", version = "0.0.0" }
 adamas-lsp = { path = "crates/adamas-lsp", version = "0.0.0" }
 adamas-runtime = { path = "crates/adamas-runtime", version = "0.0.0" }
 adamas-codegen = { path = "crates/adamas-codegen", version = "0.0.0" }
+adamas-l10n = { path = "crates/adamas-l10n", version = "0.0.0" }
 
 # Строгие defaults (CONTRIBUTING.md, «Стиль кода»).
 [workspace.lints.rust]

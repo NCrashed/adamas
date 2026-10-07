@@ -1,0 +1,25 @@
+[package]
+name = "adamas-l10n"
+description = "Adamas message catalogs: Fluent, one bundle per language"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+# Fluent: множественное число по CLDR (русскому нужны три формы) и
+# аргументы по имени, порядок слов у каждого языка свой. MSRV 1.67.
+fluent-bundle = "0.16"
+unic-langid = "0.9"
+
+[dev-dependencies]
+# Разбор каталога деревом: тест сверяет аргументы сообщений.
+fluent-syntax = "0.12"

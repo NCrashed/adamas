@@ -40,7 +40,7 @@ use crate::token::{Token, TokenKind};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum LayoutError {
     /// Тело блока начинается не правее объемлющего блока.
-    #[error("тело блока должно быть с большим отступом, чем окружающий блок")]
+    #[error("{}", adamas_l10n::tr!("layout-shallow-block"))]
     ShallowBlock {
         /// Ключевое слово, открывающее блок.
         keyword: Span,
@@ -53,14 +53,14 @@ pub enum LayoutError {
     },
 
     /// За ключевым словом, открывающим блок, ничего нет.
-    #[error("после ключевого слова нет тела блока")]
+    #[error("{}", adamas_l10n::tr!("layout-empty-block"))]
     EmptyBlock {
         /// Ключевое слово.
         keyword: Span,
     },
 
     /// Лексема левее колонки блока файла.
-    #[error("лексема левее первой в файле: блок файла закрывается только концом файла")]
+    #[error("{}", adamas_l10n::tr!("layout-left-of-file"))]
     LeftOfFile {
         /// Она самая.
         token: Span,
@@ -75,7 +75,7 @@ pub enum LayoutError {
     /// Внутри скобок layout выключен (§4.1, правило 4), поэтому блока там не
     /// возникнет ни при каком отступе. Отказ здесь, а не молчаливый поток без
     /// границ: иначе ошибка приедет из парсера и будет про другое.
-    #[error("блок внутри скобок: layout там выключен (§10 вопрос 55)")]
+    #[error("{}", adamas_l10n::tr!("layout-block-in-brackets"))]
     BlockInBrackets {
         /// Ключевое слово.
         keyword: Span,
@@ -84,21 +84,21 @@ pub enum LayoutError {
     },
 
     /// Скобка не закрыта до конца файла.
-    #[error("незакрытая скобка")]
+    #[error("{}", adamas_l10n::tr!("layout-unclosed-bracket"))]
     UnclosedBracket {
         /// Открывающая скобка.
         open: Span,
     },
 
     /// Закрывающая скобка без открывающей.
-    #[error("закрывающая скобка без открывающей")]
+    #[error("{}", adamas_l10n::tr!("layout-unmatched-bracket"))]
     UnmatchedBracket {
         /// Она самая.
         close: Span,
     },
 
     /// Закрывающая скобка не того вида.
-    #[error("скобка закрыта не тем видом скобки")]
+    #[error("{}", adamas_l10n::tr!("layout-mismatched-bracket"))]
     MismatchedBracket {
         /// Открывающая.
         open: Span,

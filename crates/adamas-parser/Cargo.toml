@@ -25,6 +25,7 @@ harness = false
 # второй их копии быть не должно. Обратной зависимости нет - ядро о
 # поверхностном языке не знает.
 adamas-core.workspace = true
+adamas-l10n.workspace = true
 thiserror = "2"
 
 [dev-dependencies]

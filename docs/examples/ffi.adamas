@@ -51,7 +51,7 @@ extern "C" fn free : CPtr -> Unit
 --
 -- `@Foreign` - запись метки, у которой нет операций: назвать её в хендлере
 -- через ветку не по чему (§4.1).
-runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
+runForeign : {a : Type} -> ({Foreign} a) -> a
 runForeign k = handle @Foreign k with
   return v -> v
 
@@ -61,7 +61,7 @@ alive : CPtr -> UInt64
 alive p = pick (ltUInt64 0 p) 1 0
 
 -- | Открыть, использовать, закрыть: идиома §5.3 без ресурсной обёртки.
-body : (ω u : Unit) -> {Foreign} Answers
+body : {Foreign} Answers
 body u =
   let cell : CPtr = malloc 32
   let taken : UInt64 = alive cell

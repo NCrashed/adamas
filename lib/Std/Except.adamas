@@ -8,7 +8,7 @@ effect Except e where
   throw : e -> a
 
 -- | Ошибка - значением: `Err` вместо обрыва.
-attempt : {e : Type} -> {a : Type} -> ((ω u : Unit) -> {Except e} a) -> Result e a
+attempt : {e : Type} -> {a : Type} -> ({Except e} a) -> Result e a
 attempt k = handle k with
   return v -> Ok v
   throw x -> Err x

@@ -6,6 +6,6 @@ Error: operation-row-doubled.adamas:43:20: эффекты `{Log, Log | e0}` не
     fork b -> resume (runChild b)
                      ^^^^^^^^^^^^
   в контексте:
-    (ω c : (ω _ : Unit) -> {Async, Log | e0} Unit)
-    (ω b : (ω _ : Unit) -> {Async, Log, Log | e0} Unit)
-    (1 resume : (ω _ : Unit) -> {Log | e0} Unit)
+    (ω c : {Async, Log | e0} Unit)
+    (ω b : {Async, Log, Log | e0} Unit)
+    (1 resume : {Log | e0} Unit)

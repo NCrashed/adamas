@@ -1271,6 +1271,9 @@ enum Pos {
     Callee,
     /// Аргумент: всё составное берётся в скобки.
     Atom,
+    /// Кодомен стрелки: скобки не нужны, но стрелка от единицы здесь
+    /// вычислением не печатается (§3.4, третья цена сахара).
+    Codomain,
 }
 
 impl Pos {
@@ -1283,7 +1286,7 @@ impl Pos {
             Term::Var(_) | Term::Universe(_) | Term::RowKind(_) | Term::Const(..)
         ) || matches!(term, Term::Prim(prim) if !prim.negative());
         match self {
-            Self::Free => false,
+            Self::Free | Self::Codomain => false,
             Self::Callee => !atomic && !matches!(term, Term::App(..)),
             Self::Atom => !atomic,
         }
@@ -1296,6 +1299,10 @@ enum Piece<'a> {
     Term(&'a Term, Pos, usize),
     /// Готовый текст.
     Text(Cow<'static, str>),
+    /// Терм, построенный при печати: кодомен вычисления без связывания-единицы.
+    /// Печатается своим циклом - вложенность здесь по числу вычислений в
+    /// типе, а не по длине спайна.
+    Owned(Rc<Term>, Pos, usize),
 }
 
 /// Печатает терм **циклом**, а не рекурсией.
@@ -1306,14 +1313,48 @@ enum Piece<'a> {
 ///
 /// Обход - LIFO: куски кладутся в обратном порядке и снимаются в прямом.
 fn print(f: &mut fmt::Formatter<'_>, term: &Term, limit: Option<usize>) -> fmt::Result {
-    let mut pending = vec![Piece::Term(term, Pos::Free, 0)];
+    print_at(f, term, Pos::Free, 0, limit)
+}
+
+/// То же с заданной позиции и вложенности.
+fn print_at(
+    f: &mut fmt::Formatter<'_>,
+    term: &Term,
+    pos: Pos,
+    depth: usize,
+    limit: Option<usize>,
+) -> fmt::Result {
+    let mut pending = vec![Piece::Term(term, pos, depth)];
     while let Some(piece) = pending.pop() {
         match piece {
             Piece::Text(text) => f.write_str(&text)?,
             Piece::Term(term, pos, depth) => emit(f, term, pos, depth, limit, &mut pending)?,
+            Piece::Owned(term, pos, depth) => print_at(f, &term, pos, depth, limit)?,
         }
     }
     Ok(())
+}
+
+/// Стрелка от единицы с ненужным связыванием - приостановленное вычисление
+/// `{ε} A` (§3.4).
+///
+/// Единица узнаётся по имени: печать сигнатуры не видит, а элаборация пишет
+/// единицей семейство, чьё написанное имя `Unit`. Своя функция от единицы
+/// печатается так же - различить их нечем, это вторая цена сахара.
+fn suspended(term: &Term) -> bool {
+    let Term::Pi(binder, _, domain, row, codomain) = term else {
+        return false;
+    };
+    let unit = matches!(&**domain, Term::Const(name, ..)
+        if &**name == crate::prim::UNIT || name.ends_with(&format!(".{}", crate::prim::UNIT)));
+    unit && binder.mult == Mult::Many
+        && binder.visibility == Visibility::Explicit
+        && !codomain.mentions_recent(0, 1)
+        && !row
+            .labels()
+            .iter()
+            .flat_map(|label| &label.arguments)
+            .any(|argument| argument.mentions_recent(0, 1))
 }
 
 /// Печатает один узел, откладывая детей в рабочий список.
@@ -1388,6 +1429,14 @@ fn emit<'a>(
                 ],
             );
         }
+        // Приостановленное вычисление печатается так, как пишется (§3.4):
+        // `{ε} A`, а не стрелкой от единицы. В кодомене сахар значил бы контракт
+        // самой стрелки, поэтому там остаётся развёртка.
+        // Связывание-единица не печатается, поэтому индексы под ним опускаются
+        // на одно: иначе `#1` указывал бы мимо видимых связываний.
+        Term::Pi(_, _, _, row, codomain) if !matches!(pos, Pos::Codomain) && suspended(term) => {
+            later(pending, computation(row, codomain, inner));
+        }
         Term::Pi(binder, name, domain, row, codomain) => {
             // Вид скобок несёт связывание: у выводимого они фигурные.
             let (open, close) = binder.visibility.brackets();
@@ -1397,7 +1446,7 @@ fn emit<'a>(
                 [
                     Piece::Term(domain, Pos::Free, inner),
                     Piece::Text(format!("{close} -> {row}").into()),
-                    Piece::Term(codomain, Pos::Free, inner),
+                    Piece::Term(codomain, Pos::Codomain, inner),
                 ],
             );
         }
@@ -1430,6 +1479,21 @@ fn emit<'a>(
         }
     }
     Ok(())
+}
+
+/// Вычисление `{ε} A` без связывания-единицы: row и кодомен опущены на одно.
+fn computation(row: &Row<Term>, codomain: &Term, inner: usize) -> [Piece<'static>; 2] {
+    let lowered = |it: &Term| crate::pattern::instantiate(it, &Term::EffectKind);
+    let row = row.map(lowered);
+    let row = if row.is_empty() {
+        "{} ".to_owned()
+    } else {
+        row.to_string()
+    };
+    [
+        Piece::Text(row.into()),
+        Piece::Owned(Rc::new(lowered(codomain)), Pos::Codomain, inner),
+    ]
 }
 
 /// Разбор записи: `split {_1, _2} p body`.

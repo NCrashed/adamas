@@ -46,6 +46,8 @@
     reason = "заготовка теста: отказ здесь означает сломанное окружение, и падать он должен громко"
 )]
 
+mod cache;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -149,9 +151,9 @@ entry:
 
 /// Место под объектники и бинари этого свидетеля.
 fn scratch() -> PathBuf {
-    let dir = Path::new(env!("OUT_DIR")).join("outward");
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    // Свой каталог у процесса: прогон идёт `nextest`, тест - процесс, и
+    // общие заготовки иначе собирались бы в одно место наперегонки.
+    cache::private(&Path::new(env!("OUT_DIR")).join("outward"))
 }
 
 /// Зовёт компилятор и роняет прогон его же выводом.

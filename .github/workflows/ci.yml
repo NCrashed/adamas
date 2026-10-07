@@ -114,7 +114,12 @@ jobs:
           nvim --version | head -1
           test -x /usr/share/codium/codium
           test -x /usr/share/codium/bin/codium
-      - run: cargo test --locked --workspace --all-targets
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - run: cargo nextest run --locked --workspace --lib --bins --tests
+      # criterion-бинари не отвечают на `--list` в формате nextest.
+      - run: cargo test --locked --workspace --benches
       # --all-targets не включает doc-tests, поэтому отдельным шагом.
       - run: cargo test --locked --workspace --doc
 

@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+#[path = "../cache/mod.rs"]
+mod cache;
+
 use adamas_codegen::emit_llvm::Artefacts;
 use adamas_codegen::ir::{Arm, Binding, Expr, LocalId};
 use adamas_codegen::llvm::{Pipeline, Toolchain};
@@ -256,28 +259,34 @@ fn runtime() -> &'static [PathBuf] {
     static OBJECTS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     OBJECTS.get_or_init(|| {
         let sources = Path::new(env!("ADAMAS_RUNTIME_SOURCES"));
-        let dir = scratch();
         // Список приходит от самого рантайма (`build.rs`), а не написан здесь:
         // вторая копия разъезжалась бы молча, и новый слой давал бы
         // «undefined reference» вместо отказа сборки.
-        env!("ADAMAS_RUNTIME_UNITS")
-            .split(',')
-            .map(|name| {
-                let object = dir.join(format!("{name}.o"));
+        let units: Vec<&str> = env!("ADAMAS_RUNTIME_UNITS").split(',').collect();
+        let key = cache::stamp(
+            &cache::runtime_files(),
+            &[env!("ADAMAS_CC"), "-std=c11", "-O1"],
+        );
+        // Однажды на все процессы прогона, а не на процесс (`cache`).
+        let dir = cache::staged(&scratch(), &format!("runtime-{key}"), |draft| {
+            for name in &units {
                 let status = Command::new(env!("ADAMAS_CC"))
                     .args(["-std=c11", "-O1", "-c"])
                     .arg("-I")
                     .arg(env!("ADAMAS_RUNTIME_INCLUDE"))
                     .arg(sources.join(name))
                     .arg("-o")
-                    .arg(&object)
+                    .arg(draft.join(format!("{name}.o")))
                     .status();
                 assert!(
                     status.is_ok_and(|status| status.success()),
                     "рантайм не собрался: {name}"
                 );
-                object
-            })
+            }
+        });
+        units
+            .iter()
+            .map(|name| dir.join(format!("{name}.o")))
             .collect()
     })
 }
@@ -755,7 +764,13 @@ pub(crate) fn runtime_bitcode(tools: &Toolchain) -> PathBuf {
                     panic!("`{CLANG_VARIABLE}` не задан, а в dev-shell он есть: рантайм в `.bc` собрать нечем")
                 });
             let sources = Path::new(env!("ADAMAS_RUNTIME_SOURCES"));
-            let dir = scratch();
+            let tool = tools.tool("llvm-link");
+            let key = cache::stamp(
+                &cache::runtime_files(),
+                &[&clang.to_string_lossy(), &tool.to_string_lossy(), "-O1", "-emit-llvm"],
+            );
+            // Однажды на все процессы прогона, а не на процесс (`cache`).
+            let dir = cache::staged(&scratch(), &format!("bitcode-{key}"), |dir| {
             let mut parts = Vec::new();
             for name in env!("ADAMAS_RUNTIME_UNITS").split(',') {
                 let raw = dir.join(format!("{name}.raw.bc"));
@@ -773,13 +788,12 @@ pub(crate) fn runtime_bitcode(tools: &Toolchain) -> PathBuf {
                     "рантайм не собрался в `.bc`: {name}\n{}",
                     String::from_utf8_lossy(&made.stderr)
                 );
-                parts.push(stripped(tools, &dir, name, &raw));
+                parts.push(stripped(tools, dir, name, &raw));
             }
-            let linked = dir.join("runtime.bc");
-            let done = Command::new(tools.tool("llvm-link"))
+            let done = Command::new(&tool)
                 .args(&parts)
                 .arg("-o")
-                .arg(&linked)
+                .arg(dir.join("runtime.bc"))
                 .output()
                 .unwrap();
             assert!(
@@ -787,7 +801,8 @@ pub(crate) fn runtime_bitcode(tools: &Toolchain) -> PathBuf {
                 "рантайм не слинковался в один `.bc`:\n{}",
                 String::from_utf8_lossy(&done.stderr)
             );
-            linked
+            });
+            dir.join("runtime.bc")
         })
         .clone()
 }

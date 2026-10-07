@@ -159,6 +159,9 @@
           nativeBuildInputs = [
             rustToolchain
             pkgs.cargo-insta
+            # Прогон сюиты параллельно по всем бинарям: `cargo test` гоняет 142
+            # цели по одной, и гейт шёл полчаса при двадцати ядрах.
+            pkgs.cargo-nextest
             pkgs.cargo-mutants
             llvmCurrent
             debugger

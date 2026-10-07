@@ -8,8 +8,8 @@
 nix develop
 ```
 
-Даёт тулчейн из `rust-toolchain.toml` плюс `cargo-insta` (snapshot-тесты) и
-`cargo-mutants` (mutation testing критических путей).
+Даёт тулчейн из `rust-toolchain.toml` плюс `cargo-insta` (snapshot-тесты),
+`cargo-nextest` (прогон тестов) и `cargo-mutants` (mutation testing критических путей).
 
 Плюс **две** цепочки LLVM: штатная в `PATH` и минимальная поддерживаемая, чей
 каталог лежит в `ADAMAS_LLVM_MIN_BIN` (штатная — в `ADAMAS_LLVM_BIN`).
@@ -58,9 +58,16 @@ MSRV (`workspace.package.rust-version`, дублируется в `clippy.toml`)
 ```sh
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
+cargo nextest run --workspace --lib --bins --tests
+cargo test --workspace --benches
 cargo test --workspace --doc
 ```
+
+Тесты идут через `nextest`: каждый тест - свой процесс, и прогон длится
+столько, сколько самый долгий тест, а не сумма тестов одного бинаря.
+Бенчмарки - отдельной командой: criterion-бинари не отвечают на `--list` в
+формате nextest. Обычный `cargo test --workspace --all-targets` тоже проходит,
+только дольше.
 
 Ровно это гоняет CI (`.github/workflows/ci.yml`), плюс сборку на macOS aarch64
 и проверку MSRV. Бенчмарки в CI только собираются и прогоняются один раз —

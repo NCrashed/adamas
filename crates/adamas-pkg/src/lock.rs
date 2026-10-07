@@ -96,13 +96,11 @@ impl Lock {
             .get("version")
             .and_then(|it| it.get_ref().as_integer())
             .and_then(|it| it.as_str().parse::<u64>().ok())
-            .ok_or_else(|| PkgError::shape(path, "нет поля `version`"))?;
+            .ok_or_else(|| PkgError::shape(path, adamas_l10n::tr!("pkg-lock-1")))?;
         if version != VERSION {
             return Err(PkgError::shape(
                 path,
-                format!(
-                    "версия формата {version}, инструмент понимает {VERSION}: удалите файл, он будет создан заново"
-                ),
+                adamas_l10n::tr!("pkg-lock-version", version = version, known = VERSION),
             ));
         }
 
@@ -111,19 +109,22 @@ impl Lock {
             let array = array
                 .get_ref()
                 .as_array()
-                .ok_or_else(|| PkgError::shape(path, "`package` - не массив таблиц"))?;
+                .ok_or_else(|| PkgError::shape(path, adamas_l10n::tr!("pkg-lock-2")))?;
             for entry in &**array {
                 let table = entry
                     .get_ref()
                     .as_table()
-                    .ok_or_else(|| PkgError::shape(path, "элемент `package` - не таблица"))?;
+                    .ok_or_else(|| PkgError::shape(path, adamas_l10n::tr!("pkg-lock-3")))?;
                 let field = |key: &str| -> Result<String, PkgError> {
                     table
                         .get(key)
                         .and_then(|it| it.get_ref().as_str())
                         .map(str::to_owned)
                         .ok_or_else(|| {
-                            PkgError::shape(path, format!("в `[[package]]` нет `{key}`"))
+                            PkgError::shape(
+                                path,
+                                adamas_l10n::tr!("pkg-lock-missing-key", key = key),
+                            )
                         })
                 };
                 packages.push(Pinned {

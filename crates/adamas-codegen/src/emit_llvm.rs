@@ -386,7 +386,7 @@ const fn elems(stride: Option<Stride>) -> Elems {
 #[derive(Debug, thiserror::Error)]
 pub enum LlvmError {
     /// Узел представления, которого скалярный фрагмент не знает.
-    #[error("`{function}`: {node} - узел вне скалярного фрагмента")]
+    #[error("{}", adamas_l10n::tr!("codegen-emit_llvm-node", function = .function, node = .node))]
     Node {
         /// Чья функция.
         function: String,
@@ -395,7 +395,7 @@ pub enum LlvmError {
     },
 
     /// Представление, которое в регистр не ложится.
-    #[error("`{function}`: {place} - {shape}, а срез берёт только плоское значение")]
+    #[error("{}", adamas_l10n::tr!("codegen-emit_llvm-shape", function = .function, place = .place, shape = .shape))]
     Shape {
         /// Чья функция.
         function: String,
@@ -410,7 +410,7 @@ pub enum LlvmError {
     /// Не предположение, а проверка: расхождение здесь молчаливо - `null`
     /// вместо вектора собирается и падает в рантайме. То же утверждение и тем
     /// же местом делает C-эмиттер (`emit_c::forms_agree`).
-    #[error("`{caller}`: `{callee}` второй формы позван без скрытых аргументов")]
+    #[error("{}", adamas_l10n::tr!("codegen-emit_llvm-hidden", caller = .caller, callee = .callee))]
     Hidden {
         /// Кто зовёт.
         caller: String,
@@ -517,8 +517,8 @@ pub fn emit(program: &Program) -> Result<Artefacts, LlvmError> {
     if entry.live_parameters().next().is_some() {
         return Err(LlvmError::Shape {
             function: entry.name.clone(),
-            place: "точка входа".to_owned(),
-            shape: "функция с параметрами".to_owned(),
+            place: adamas_l10n::tr!("emit_llvm-1").to_owned(),
+            shape: adamas_l10n::tr!("emit_llvm-2").to_owned(),
         });
     }
     // Вторая форма точкой входа быть не может: скрытых аргументов ей взять
@@ -527,7 +527,7 @@ pub fn emit(program: &Program) -> Result<Artefacts, LlvmError> {
     // бы, а компоновщик назвал бы не то место.
     if entry.form == Form::Detached {
         return Err(LlvmError::Hidden {
-            caller: "точка входа".to_owned(),
+            caller: adamas_l10n::tr!("emit_llvm-3").to_owned(),
             callee: entry.name.clone(),
         });
     }
@@ -598,12 +598,12 @@ fn boundaries(program: &Program, suspending: &Suspension) -> Result<(), LlvmErro
     let mut named: Vec<(FuncId, &'static str)> = Vec::new();
     for handler in &program.handlers {
         for branch in &handler.branches {
-            named.push((branch.function, "ветка хендлера"));
+            named.push((branch.function, adamas_l10n::text!("emit_llvm-4")));
         }
-        named.push((handler.returned, "ветка `return`"));
+        named.push((handler.returned, adamas_l10n::text!("emit_llvm-5")));
     }
     for closer in taking(program) {
-        named.push((closer, "деструктор scope"));
+        named.push((closer, adamas_l10n::text!("emit_llvm-6")));
     }
     // Замыкание отвечает словом наравне с ними, но форма у него своя: значением
     // бывает и первая - ей трамплин скрытых аргументов просто не передаёт.
@@ -612,7 +612,7 @@ fn boundaries(program: &Program, suspending: &Suspension) -> Result<(), LlvmErro
         if crossing(program, suspending, boxed).as_deref() != Some("ptr") {
             return Err(LlvmError::Shape {
                 function: function.name.clone(),
-                place: "ответ: замыкание".to_owned(),
+                place: adamas_l10n::tr!("emit_llvm-7").to_owned(),
                 shape: describe(function.result),
             });
         }
@@ -623,13 +623,13 @@ fn boundaries(program: &Program, suspending: &Suspension) -> Result<(), LlvmErro
             return Err(LlvmError::Shape {
                 function: function.name.clone(),
                 place: place.to_owned(),
-                shape: "первая форма понижения".to_owned(),
+                shape: adamas_l10n::tr!("emit_llvm-8").to_owned(),
             });
         }
         if crossing(program, suspending, id).as_deref() != Some("ptr") {
             return Err(LlvmError::Shape {
                 function: function.name.clone(),
-                place: format!("ответ: {place}"),
+                place: adamas_l10n::tr!("emit_llvm-result-of", place = place),
                 shape: describe(function.result),
             });
         }
@@ -1038,7 +1038,7 @@ impl Answer {
         }
         Err(LlvmError::Shape {
             function: entry.name.clone(),
-            place: "ответ программы".to_owned(),
+            place: adamas_l10n::tr!("emit_llvm-9").to_owned(),
             shape: describe(entry.result),
         })
     }
@@ -1055,16 +1055,16 @@ impl Answer {
 /// Как назвать представление в тексте отказа.
 fn describe(repr: Repr) -> String {
     match repr {
-        Repr::Flat(ty) => format!("плоское {}", ty.name()),
-        Repr::Boxed => "объект кучи".to_owned(),
-        Repr::Packed(_) => "плотный агрегат".to_owned(),
-        Repr::Layout => "дескриптор укладки".to_owned(),
-        Repr::Opaque => "плоское неизвестной ширины".to_owned(),
-        Repr::Array(_) => "массив".to_owned(),
-        Repr::Region => "блок региона".to_owned(),
-        Repr::Record(_) => "запись".to_owned(),
-        Repr::Resumption => "резумпция".to_owned(),
-        Repr::Simd { lanes, lane } => format!("вектор `Simd {lanes} {lane}`"),
+        Repr::Flat(ty) => adamas_l10n::tr!("emit_llvm-repr-flat", ty = ty.name()),
+        Repr::Boxed => adamas_l10n::tr!("emit_llvm-10").to_owned(),
+        Repr::Packed(_) => adamas_l10n::tr!("emit_llvm-11").to_owned(),
+        Repr::Layout => adamas_l10n::tr!("emit_llvm-12").to_owned(),
+        Repr::Opaque => adamas_l10n::tr!("emit_llvm-13").to_owned(),
+        Repr::Array(_) => adamas_l10n::tr!("emit_llvm-14").to_owned(),
+        Repr::Region => adamas_l10n::tr!("emit_llvm-15").to_owned(),
+        Repr::Record(_) => adamas_l10n::tr!("emit_llvm-16").to_owned(),
+        Repr::Resumption => adamas_l10n::tr!("emit_llvm-17").to_owned(),
+        Repr::Simd { lanes, lane } => adamas_l10n::tr!("repr-simd", lanes = lanes, lane = lane),
     }
 }
 
@@ -1487,13 +1487,18 @@ impl Module {
             if slot(function.result, &program.packings).as_deref() != Some("ptr") {
                 return Err(LlvmError::Shape {
                     function: function.name.clone(),
-                    place: "ответ дроблёного тела".to_owned(),
+                    place: adamas_l10n::tr!("emit_llvm-19").to_owned(),
                     shape: describe(function.result),
                 });
             }
             "ptr".to_owned()
         } else {
-            slot_or(function, "ответ", function.result, &program.packings)?
+            slot_or(
+                function,
+                adamas_l10n::text!("emit_llvm-20"),
+                function.result,
+                &program.packings,
+            )?
         };
 
         let mut parameters = Vec::new();
@@ -1509,7 +1514,7 @@ impl Module {
         for binding in function.live_captured().chain(function.live_parameters()) {
             let ty = slot_or(
                 function,
-                &format!("параметр `{}`", binding.name),
+                &adamas_l10n::tr!("emit_llvm-parameter", name = binding.name),
                 binding.fact.repr,
                 &program.packings,
             )?;
@@ -2773,7 +2778,7 @@ impl<'a> Builder<'a> {
         self.operands
             .get(&local)
             .cloned()
-            .ok_or_else(|| self.node("связывание без значения"))
+            .ok_or_else(|| self.node(adamas_l10n::text!("emit_llvm-26")))
     }
 
     /// Представление значения выражения.
@@ -2860,7 +2865,7 @@ impl<'a> Builder<'a> {
         let repr = self.shape(expr);
         slot(repr, &self.program.packings).ok_or_else(|| LlvmError::Shape {
             function: self.function.name.clone(),
-            place: "промежуточное значение".to_owned(),
+            place: adamas_l10n::tr!("emit_llvm-27").to_owned(),
             shape: describe(repr),
         })
     }
@@ -3083,7 +3088,7 @@ impl<'a> Builder<'a> {
             | Expr::Dup { .. }
             | Expr::Drop { .. }
             | Expr::Reclaim { .. }
-            | Expr::Discard { .. } => Err(self.node("узел-приставка после снятия приставок")),
+            | Expr::Discard { .. } => Err(self.node(adamas_l10n::text!("emit_llvm-28"))),
             Expr::Match {
                 scrutinee, arms, ..
             } => self.analysis(scrutinee, arms),
@@ -3153,8 +3158,8 @@ impl<'a> Builder<'a> {
             } => self.performing(*label, *operation, arguments),
             // Прочие точки приостановки значением не бывают: их снимает
             // дробление ([`crate::split`]), и в чистый отрезок они не попадают.
-            Expr::Resume { .. } => Err(self.node("резумпция в чистом отрезке")),
-            Expr::Closing { .. } => Err(self.node("выход из scope в чистом отрезке")),
+            Expr::Resume { .. } => Err(self.node(adamas_l10n::text!("emit_llvm-29"))),
+            Expr::Closing { .. } => Err(self.node(adamas_l10n::text!("emit_llvm-30"))),
             // Питомник в чистой функции - **корень своего стека**, тем же
             // правом, каким его заводит хендлер: row у `withNursery` пуста, и
             // наружу круга не уходит ни одной операции (§3.4, погашение
@@ -3164,7 +3169,7 @@ impl<'a> Builder<'a> {
             // касается - уступка режет сегмент по построению, - и дробление
             // выносит их хвостом куска.
             Expr::Fiber { .. } | Expr::Cancel { .. } => {
-                Err(self.node("операция питомника в чистом отрезке"))
+                Err(self.node(adamas_l10n::text!("emit_llvm-31")))
             }
         }
     }
@@ -3229,7 +3234,7 @@ impl<'a> Builder<'a> {
             // Остатка у плавающего нет (`PrimOp::over`), поэтому `frem` не
             // эмитится ни разу: он к тому же не инструкция по существу -
             // `llc` разворачивает его в вызов `fmod` из libm.
-            (PrimOp::Rem, true) => return Err(self.node("остаток плавающего")),
+            (PrimOp::Rem, true) => return Err(self.node(adamas_l10n::text!("emit_llvm-32"))),
             (PrimOp::Shl | PrimOp::Shr, _) => return Ok(self.shift(op, ty, &left, &right)),
             (PrimOp::Div | PrimOp::Rem, false) => {
                 return Ok(self.division(op, ty, &left, &right));
@@ -3443,7 +3448,7 @@ impl<'a> Builder<'a> {
                 | PrimOp::Shr,
                 _,
             ) => {
-                return Err(self.node("подорожечная небазовая операция"));
+                return Err(self.node(adamas_l10n::text!("emit_llvm-33")));
             }
         };
         let left = self.value(left)?;
@@ -3492,7 +3497,7 @@ impl<'a> Builder<'a> {
                 value,
                 ..
             } => self.window_store(*lanes, *lane, array, at, value),
-            _ => Err(self.node("массив")),
+            _ => Err(self.node(adamas_l10n::text!("emit_llvm-34"))),
         }
     }
 
@@ -3544,7 +3549,7 @@ impl<'a> Builder<'a> {
             Some(ty) if !ty.floating() => Ok(self.widen(ty, &value)),
             _ => Err(LlvmError::Shape {
                 function: self.function.name.clone(),
-                place: "длина либо номер ячейки массива".to_owned(),
+                place: adamas_l10n::tr!("emit_llvm-35").to_owned(),
                 shape: describe(repr),
             }),
         }
@@ -3574,7 +3579,7 @@ impl<'a> Builder<'a> {
         // бэкендами при том же ответе.
         let count = self.word_operand(count)?;
         let cell = stride
-            .map(|it| self.payload(it, "ячейка массива"))
+            .map(|it| self.payload(it, adamas_l10n::text!("emit_llvm-36")))
             .transpose()?;
         let initial = self.value(initial)?;
         let step = cell.as_ref().map_or(0, |it| it.step);
@@ -3652,7 +3657,7 @@ impl<'a> Builder<'a> {
         let source = self.value(array)?;
         let at = self.word_operand(at)?;
         let cell = stride
-            .map(|it| self.payload(it, "ячейка массива"))
+            .map(|it| self.payload(it, adamas_l10n::text!("emit_llvm-37")))
             .transpose()?;
         let value = self.value(value)?;
         let writable = self.temp();
@@ -3703,7 +3708,7 @@ impl<'a> Builder<'a> {
         let source = self.value(array)?;
         let at = self.word_operand(at)?;
         let Some(cell) = stride
-            .map(|it| self.payload(it, "ячейка массива"))
+            .map(|it| self.payload(it, adamas_l10n::text!("emit_llvm-38")))
             .transpose()?
         else {
             // Указательная ячейка: `dup` взятой и дроп массива держит рантайм -
@@ -3891,7 +3896,7 @@ impl<'a> Builder<'a> {
                 field,
                 value,
             } => self.unpack(*packing, *variant, *field, value),
-            _ => Err(self.node("плотный агрегат")),
+            _ => Err(self.node(adamas_l10n::text!("emit_llvm-39"))),
         }
     }
 
@@ -4058,7 +4063,7 @@ impl<'a> Builder<'a> {
                 self.region_return("adamas_region_recycle", region, at)
             }
             Expr::RegionPop { region, at } => self.region_return("adamas_region_pop", region, at),
-            _ => Err(self.node("регион")),
+            _ => Err(self.node(adamas_l10n::text!("emit_llvm-40"))),
         }
     }
 
@@ -4078,7 +4083,7 @@ impl<'a> Builder<'a> {
     ) -> Result<String, LlvmError> {
         let region = self.value(region)?;
         let value = self.value(value)?;
-        let payload = self.payload(stride, "нагрузка региона")?;
+        let payload = self.payload(stride, adamas_l10n::text!("emit_llvm-41"))?;
         let align = self.bound(stride)?;
         let bits = self.payload_cell(&payload, &value);
         let name = self.temp();
@@ -4105,7 +4110,7 @@ impl<'a> Builder<'a> {
     ) -> Result<String, LlvmError> {
         let region = self.value(region)?;
         let at = self.word_operand(at)?;
-        let payload = self.payload(stride, "нагрузка региона")?;
+        let payload = self.payload(stride, adamas_l10n::text!("emit_llvm-42"))?;
         let cell = self.frame_cell(&payload.ty);
         self.instruction(
             &format!(
@@ -4138,7 +4143,7 @@ impl<'a> Builder<'a> {
         let region = self.value(region)?;
         let at = self.word_operand(at)?;
         let value = self.value(value)?;
-        let payload = self.payload(stride, "нагрузка региона")?;
+        let payload = self.payload(stride, adamas_l10n::text!("emit_llvm-43"))?;
         let bits = self.payload_cell(&payload, &value);
         let name = self.temp();
         self.instruction(
@@ -4192,7 +4197,7 @@ impl<'a> Builder<'a> {
             Stride::Packed(pack) => Ok(self.program.packings[pack.0 as usize].align),
             Stride::Dynamic(_) => Err(LlvmError::Shape {
                 function: self.function.name.clone(),
-                place: "граница нагрузки региона".to_owned(),
+                place: adamas_l10n::tr!("emit_llvm-44").to_owned(),
                 shape: describe(stride.element()),
             }),
         }
@@ -4704,7 +4709,7 @@ impl<'a> Builder<'a> {
         } else {
             slot(called.result, &self.program.packings).ok_or_else(|| LlvmError::Shape {
                 function: self.function.name.clone(),
-                place: format!("ответ `{}`", called.name),
+                place: adamas_l10n::tr!("emit_llvm-answer", name = called.name),
                 shape: describe(called.result),
             })?
         };
@@ -4911,7 +4916,7 @@ impl<'a> Builder<'a> {
         arms: &[Arm],
     ) -> Result<(Fields, u32, Vec<String>), LlvmError> {
         if arms.is_empty() {
-            return Err(self.node("разбор пустого типа"));
+            return Err(self.node(adamas_l10n::text!("emit_llvm-45")));
         }
         if let Repr::Packed(pack) = self.shape(scrutinee) {
             return self.packed_dispatch(pack, scrutinee, arms);
@@ -4995,7 +5000,7 @@ impl<'a> Builder<'a> {
         let mut cases = Vec::new();
         for (arm, label) in arms.iter().zip(&labels) {
             let Some((number, _)) = packing.variant_of(arm.constructor) else {
-                return Err(self.node("ветвь без варианта в плотной укладке"));
+                return Err(self.node(adamas_l10n::text!("emit_llvm-46")));
             };
             cases.push(format!("{width} {number}, label %{label}"));
         }
@@ -5125,7 +5130,7 @@ impl<'a> Builder<'a> {
     fn ev(&self) -> Result<String, LlvmError> {
         self.ev.clone().ok_or_else(|| LlvmError::Hidden {
             caller: self.function.name.clone(),
-            callee: "вектор evidence".to_owned(),
+            callee: adamas_l10n::tr!("emit_llvm-47").to_owned(),
         })
     }
 
@@ -5133,7 +5138,7 @@ impl<'a> Builder<'a> {
     fn kont(&self) -> Result<String, LlvmError> {
         self.kont.clone().ok_or_else(|| LlvmError::Hidden {
             caller: self.function.name.clone(),
-            callee: "ручка стека".to_owned(),
+            callee: adamas_l10n::tr!("emit_llvm-48").to_owned(),
         })
     }
 
@@ -5205,7 +5210,7 @@ impl<'a> Builder<'a> {
         }
         Err(LlvmError::Shape {
             function: self.function.name.clone(),
-            place: "значение через границу кадра".to_owned(),
+            place: adamas_l10n::tr!("emit_llvm-49").to_owned(),
             shape: describe(repr),
         })
     }
@@ -5253,7 +5258,7 @@ impl<'a> Builder<'a> {
         }
         Err(LlvmError::Shape {
             function: self.function.name.clone(),
-            place: "значение через границу кадра".to_owned(),
+            place: adamas_l10n::tr!("emit_llvm-50").to_owned(),
             shape: describe(repr),
         })
     }
@@ -5803,10 +5808,10 @@ impl<'a> Builder<'a> {
             .slot_reprs()
             .any(|repr| repr.primitive().is_some())
         {
-            return Err(self.node("конструктор с плоским полем значением"));
+            return Err(self.node(adamas_l10n::text!("emit_llvm-51")));
         }
         if arity > 0 && slots == 0 {
-            return Err(self.node("конструктор со стёртыми полями значением"));
+            return Err(self.node(adamas_l10n::text!("emit_llvm-52")));
         }
         let name = self.temp();
         self.instruction(
@@ -5842,10 +5847,10 @@ impl<'a> Builder<'a> {
             // Внутри второй формы применение значением не бывает: дробление
             // выносит его хвостом куска ([`Self::applying`]). Отказ, а не
             // свой корень: чужую ручку докрутил бы не тот, кто её завёл.
-            return Err(self.node("применение значением во второй форме"));
+            return Err(self.node(adamas_l10n::text!("emit_llvm-53")));
         }
         if self.ev.is_some() {
-            return Err(self.node("применение под маской в чистом отрезке"));
+            return Err(self.node(adamas_l10n::text!("emit_llvm-54")));
         }
         let callee = self.value(callee)?;
         let given = self.value(argument)?;
@@ -5910,7 +5915,7 @@ impl<'a> Builder<'a> {
             if matches!(repr, Repr::Packed(_)) {
                 return Err(LlvmError::Shape {
                     function: self.function.name.clone(),
-                    place: "захват замыкания".to_owned(),
+                    place: adamas_l10n::tr!("emit_llvm-55").to_owned(),
                     shape: describe(repr),
                 });
             }
@@ -6086,7 +6091,7 @@ impl<'a> Builder<'a> {
         arguments: &[Expr],
     ) -> Result<String, LlvmError> {
         if !self.suspending.quiet {
-            return Err(self.node("операция значением в нетихой программе"));
+            return Err(self.node(adamas_l10n::text!("emit_llvm-56")));
         }
         let kont = self.kont()?;
         let (operands, count) = self.operands(arguments)?;
@@ -6138,7 +6143,7 @@ impl<'a> Builder<'a> {
         if self.kont.is_some() {
             // Внутри второй формы питомник значением не бывает: дробление
             // выносит его хвостом куска ([`Self::nursery_tail`]).
-            return Err(self.node("питомник значением во второй форме"));
+            return Err(self.node(adamas_l10n::text!("emit_llvm-57")));
         }
         let root = format!("%k{}", self.frames);
         self.frames += 1;
@@ -6360,7 +6365,7 @@ impl<'a> Builder<'a> {
         if self.kont.is_some() {
             // Внутри второй формы `handle` значением не бывает: дробление
             // выносит его хвостом куска.
-            return Err(self.node("хендлер значением во второй форме"));
+            return Err(self.node(adamas_l10n::text!("emit_llvm-58")));
         }
         let taken = self.environment(handler, captured)?;
         let root = format!("%k{}", self.frames);

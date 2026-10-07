@@ -11,11 +11,11 @@ use std::path::PathBuf;
 #[derive(Debug, thiserror::Error)]
 pub enum PkgError {
     /// Манифеста нет там, где его искали.
-    #[error("манифест не найден: {0}")]
+    #[error("{}", adamas_l10n::tr!("pkg-no-manifest", v0 = .0.display()))]
     NoManifest(PathBuf),
 
     /// Файл не читается.
-    #[error("не удалось прочитать {path}: {source}")]
+    #[error("{}", adamas_l10n::tr!("pkg-read", path = .path.display(), source = .source))]
     Read {
         /// Что читали.
         path: PathBuf,
@@ -24,7 +24,7 @@ pub enum PkgError {
     },
 
     /// Файл не пишется.
-    #[error("не удалось записать {path}: {source}")]
+    #[error("{}", adamas_l10n::tr!("pkg-write", path = .path.display(), source = .source))]
     Write {
         /// Что писали.
         path: PathBuf,
@@ -33,7 +33,7 @@ pub enum PkgError {
     },
 
     /// TOML не разобрался.
-    #[error("{path}: {message}")]
+    #[error("{}", adamas_l10n::tr!("pkg-syntax", path = .path.display(), message = .message))]
     Syntax {
         /// Файл.
         path: PathBuf,
@@ -42,7 +42,7 @@ pub enum PkgError {
     },
 
     /// Поле не на месте: нет, не того типа, пустое.
-    #[error("{path}: {message}")]
+    #[error("{}", adamas_l10n::tr!("pkg-shape", path = .path.display(), message = .message))]
     Shape {
         /// Файл.
         path: PathBuf,
@@ -51,7 +51,7 @@ pub enum PkgError {
     },
 
     /// `git` не запустился или ушёл с ненулевым кодом.
-    #[error("git {command}: {message}")]
+    #[error("{}", adamas_l10n::tr!("pkg-git", command = .command, message = .message))]
     Git {
         /// Команда без пути к бинарю.
         command: String,

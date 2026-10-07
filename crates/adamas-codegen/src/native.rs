@@ -47,7 +47,7 @@ pub const RUNTIME: &[(&str, &str)] = include!(concat!(env!("OUT_DIR"), "/runtime
 #[derive(Debug, thiserror::Error)]
 pub enum NativeError {
     /// Компилятора нет или он не запускается.
-    #[error("компилятор C `{cc}` не запускается ({why}); другой задаёт `{CC_VARIABLE}`")]
+    #[error("{}", adamas_l10n::tr!("codegen-native-missing", cc = .cc, why = .why, CC_VARIABLE = .CC_VARIABLE))]
     Missing {
         /// Что пробовали запустить.
         cc: String,
@@ -56,7 +56,7 @@ pub enum NativeError {
     },
 
     /// Компиляция или линковка отказала.
-    #[error("{what}: компилятор C отказал\n{output}")]
+    #[error("{}", adamas_l10n::tr!("native-failed", what = .what, output = .output))]
     Failed {
         /// Что собиралось.
         what: String,
@@ -65,7 +65,7 @@ pub enum NativeError {
     },
 
     /// Файл не записался или каталог не создался.
-    #[error("не записать {path}: {why}")]
+    #[error("{}", adamas_l10n::tr!("codegen-native-write", path = .path, why = .why))]
     Write {
         /// Какой путь.
         path: String,
@@ -187,7 +187,10 @@ impl Native {
             .arg(&source)
             .arg("-o")
             .arg(&compiled);
-        self.run(&mut command, &format!("спутник {name}"))?;
+        self.run(
+            &mut command,
+            &adamas_l10n::tr!("native-companion", name = name),
+        )?;
 
         let binary = self.dir.join(name);
         let mut command = self.cc();
@@ -256,7 +259,10 @@ impl Native {
                     .arg(&path)
                     .arg("-o")
                     .arg(&object);
-                self.run(&mut command, &format!("рантайм {name}"))?;
+                self.run(
+                    &mut command,
+                    &adamas_l10n::tr!("native-runtime", name = name),
+                )?;
             }
             objects.push(object);
         }

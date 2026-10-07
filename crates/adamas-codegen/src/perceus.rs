@@ -574,7 +574,7 @@ impl Pass<'_> {
                     // она. Первая редакция его клала, и мутант «не класть» не
                     // ронял ничего - строка была мёртвой.
                     let repr = self.program_result(function);
-                    let mut answer = self.temporary("ответ чужого вызова");
+                    let mut answer = self.temporary(adamas_l10n::text!("perceus-1"));
                     answer.fact = answer.fact.shaped(repr);
                     let given = answer.local;
                     // Дропы срабатывают **до** тела связывания, то есть после
@@ -1227,8 +1227,8 @@ impl Pass<'_> {
         let (mut parts, spare) = self.sequence(vec![callee, argument], owned);
         let argument = parts.pop().unwrap_or(Expr::Erased);
         let callee = parts.pop().unwrap_or(Expr::Erased);
-        let held = self.temporary("применяемое");
-        let answer = self.temporary("ответ");
+        let held = self.temporary(adamas_l10n::text!("perceus-2"));
+        let answer = self.temporary(adamas_l10n::text!("perceus-3"));
         let (borrowed, given) = (held.local, answer.local);
         let node = Expr::Bind {
             binding: held,
@@ -1303,7 +1303,7 @@ impl Pass<'_> {
         owned: &BTreeSet<LocalId>,
     ) -> Expr {
         let Expr::Local(subject) = scrutinee else {
-            let binding = self.temporary("разбираемое");
+            let binding = self.temporary(adamas_l10n::text!("perceus-4"));
             let local = binding.local;
             let node = Expr::Bind {
                 binding,

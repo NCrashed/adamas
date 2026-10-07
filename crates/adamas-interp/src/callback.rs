@@ -274,10 +274,7 @@ fn claim(entry: Registered, symbol: &str) -> Result<Registration, RunError> {
         let Some(slot) = table.iter().position(Option::is_none) else {
             return Err(RunError::Callback {
                 symbol: symbol.to_owned(),
-                why: format!(
-                    "таблица трамплинов машины полна: слотов {SLOTS}, и все заняты \
-                     (§5.3, уровень 3)"
-                ),
+                why: adamas_l10n::tr!("interp-callback-table-full", slots = SLOTS),
             });
         };
         table[slot] = Some(entry);
@@ -387,10 +384,7 @@ pub(crate) fn enclosed(
 fn unsupported(symbol: &str) -> RunError {
     RunError::Callback {
         symbol: symbol.to_owned(),
-        why: "формы нет среди трамплинов машины: поддержаны `(UInt64, UInt64) -> Int32` \
-              (компаратор `qsort`, он же со средой - `qsort_r`) и \
-              `(UInt64, UInt64, UInt64, UInt64) -> UInt64` (write-колбэк libcurl)"
-            .to_owned(),
+        why: adamas_l10n::tr!("interp-callback-1").to_owned(),
     }
 }
 
@@ -413,9 +407,7 @@ fn guarded(slot: usize, args: &[u64], env: Option<u64>) -> Result<u64, RunError>
     std::panic::catch_unwind(|| answered(slot, args, env)).unwrap_or_else(|_| {
         Err(RunError::Callback {
             symbol: "?".to_owned(),
-            why: "внутри колбэка сломался инвариант машины: раскрутить панику через \
-                  чужой кадр нечем (§5.3), и она переведена в отказ"
-                .to_owned(),
+            why: adamas_l10n::tr!("interp-callback-2").to_owned(),
         })
     })
 }
@@ -467,9 +459,7 @@ fn answered(slot: usize, args: &[u64], env: Option<u64>) -> Result<u64, RunError
         let table = it.borrow();
         let found = table[slot].as_ref().ok_or_else(|| RunError::Callback {
             symbol: "?".to_owned(),
-            why: "чужая сторона позвала трамплин вне регистрации: слот таблицы свободен, \
-                  то есть обёртка уже сняла регистрацию (§5.3, уровень 3)"
-                .to_owned(),
+            why: adamas_l10n::tr!("interp-callback-3").to_owned(),
         })?;
         let (code, closed) = match &found.code {
             Code::Named(name) => (Either::Named(Rc::clone(name)), None),
@@ -486,9 +476,7 @@ fn answered(slot: usize, args: &[u64], env: Option<u64>) -> Result<u64, RunError
         if given != held {
             return Err(RunError::Callback {
                 symbol: "?".to_owned(),
-                why: "`userdata` трамплина не тот, что зарегистрирован: чужая сторона \
-                      передала чужое слово, и считать по нему нечего (§5.3, уровень 2)"
-                    .to_owned(),
+                why: adamas_l10n::tr!("interp-callback-4").to_owned(),
             });
         }
     }
@@ -503,7 +491,10 @@ fn answered(slot: usize, args: &[u64], env: Option<u64>) -> Result<u64, RunError
     let signature = unsafe { &*signature };
     let (mut term, shown) = match &code {
         Either::Named(name) => (reference(signature, name)?, name.to_string()),
-        Either::Closed(closure) => ((**closure).clone(), "замыкание".to_owned()),
+        Either::Closed(closure) => (
+            (**closure).clone(),
+            adamas_l10n::tr!("interp-callback-5").to_owned(),
+        ),
     };
     for word in args {
         term = Term::App(
@@ -520,11 +511,10 @@ fn answered(slot: usize, args: &[u64], env: Option<u64>) -> Result<u64, RunError
     let answer = crate::run_linked(signature, &term, linkage).map_err(|error| match error {
         RunError::Unhandled { operation, effect } => RunError::Callback {
             symbol: shown.clone(),
-            why: format!(
-                "операция `{operation}` метки `{effect}` внутри колбэка осталась без \
-                 хендлера: машина считает колбэк отдельным прогоном, и площадка места \
-                 регистрации ему не видна. Понижения эту программу считают - вектор \
-                 evidence едет им в `userdata` (§5.3, уровень 2)"
+            why: adamas_l10n::tr!(
+                "interp-callback-unhandled",
+                operation = operation,
+                effect = effect
             ),
         },
         other => other,
@@ -533,7 +523,7 @@ fn answered(slot: usize, args: &[u64], env: Option<u64>) -> Result<u64, RunError
         Term::Prim(Prim::Lit(_, word)) => Ok(word),
         other => Err(RunError::Callback {
             symbol: shown,
-            why: format!("ответ колбэка не литерал: {other}"),
+            why: adamas_l10n::tr!("interp-callback-answer", term = other),
         }),
     }
 }
@@ -552,7 +542,7 @@ enum Either {
 fn reference(signature: &Signature, name: &Name) -> Result<Term, RunError> {
     let definition = signature.lookup(name).ok_or_else(|| RunError::Callback {
         symbol: name.to_string(),
-        why: "определения с таким именем в сигнатуре нет".to_owned(),
+        why: adamas_l10n::tr!("interp-callback-6").to_owned(),
     })?;
     let levels: Rc<[Level]> = (0..definition.level_arity)
         .map(|_| Level::number(0))

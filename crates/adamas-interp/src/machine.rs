@@ -71,14 +71,8 @@ fn paired(
             }
             Ok(())
         }
-        (Some(_), true) => Err(it.uncallable(
-            "у колбэка есть среда, а класть её некуда: позицию `userdata` пишет автор - \
-             `callbackEnv` в аргументе (§5.3, уровень 2)",
-        )),
-        (None, false) => Err(it.uncallable(
-            "`callbackEnv` написан, а колбэка со средой в этом вызове нет: уровень 1 \
-             среды не несёт",
-        )),
+        (Some(_), true) => Err(it.uncallable(adamas_l10n::text!("interp-machine-1"))),
+        (None, false) => Err(it.uncallable(adamas_l10n::text!("interp-machine-2"))),
         (None, true) => Ok(()),
     }
 }
@@ -663,10 +657,7 @@ impl<'a> Machine<'a> {
                     // слот таблицы, и адреса у них разные.
                     if data.is_some() {
                         if userdata.is_some() {
-                            return Err(it.uncallable(
-                                "колбэков со средой в одном вызове больше одного: \
-                                 `callbackEnv` называет один, и какой - не написано",
-                            ));
+                            return Err(it.uncallable(adamas_l10n::text!("interp-machine-3")));
                         }
                         userdata = data;
                     }
@@ -797,10 +788,7 @@ impl<'a> Machine<'a> {
         if let Value::Neutral(Head::Global(exported, ..), empty) = &**argument {
             if let Some(shape) = self.signature.export(exported) {
                 if !empty.is_empty() {
-                    return Err(it.uncallable(
-                        "имя в позиции колбэка уже применено: уровень 1 берёт указатель \
-                         на определение, а не его применение",
-                    ));
+                    return Err(it.uncallable(adamas_l10n::text!("interp-machine-4")));
                 }
                 let (guard, address) =
                     crate::callback::registered(self.signature, &self.linkage, exported, shape)?;

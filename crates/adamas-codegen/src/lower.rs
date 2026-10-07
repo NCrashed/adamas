@@ -128,6 +128,7 @@
 //! дескриптору места нет (§4.11). δ-разворота это по-прежнему не включает:
 //! считает `eval` ядра, а имя он не разворачивает.
 
+use adamas_l10n::{text, tr};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
 
@@ -152,14 +153,14 @@ use crate::ir::{
 #[derive(Debug, thiserror::Error)]
 pub enum LowerError {
     /// Имя, которого нет в сигнатуре.
-    #[error("имя `{name}` не объявлено")]
+    #[error("{}", tr!("codegen-lower-unknown", name = .name))]
     Unknown {
         /// Оно самое.
         name: String,
     },
 
     /// Постулат: тип есть, тела нет, понижать нечего.
-    #[error("`{name}` - постулат: тела нет, и понижать нечего")]
+    #[error("{}", tr!("codegen-lower-postulate", name = .name))]
     Postulate {
         /// Имя постулата.
         name: String,
@@ -171,7 +172,7 @@ pub enum LowerError {
     /// принимает значением на месте. Отмена задачи в первой форме - тот же
     /// жанр: раскрутка отменённого файбера кладётся кадром, а кадр умеет
     /// только вторая форма.
-    #[error("`{name}` - питомник (§5.2): {why}")]
+    #[error("{}", tr!("codegen-lower-nursery", name = .name, why = .why))]
     Nursery {
         /// Имя постулата либо операции.
         name: String,
@@ -183,7 +184,7 @@ pub enum LowerError {
     ///
     /// Граница **среза**, а не языка: чужой вызов как значение выразим -
     /// обёртка над ним есть обычная функция, - и заводить её никто не стал.
-    #[error("`{name}` - чужой символ (§5.3): {why}")]
+    #[error("{}", tr!("codegen-lower-foreign", name = .name, why = .why))]
     Foreign {
         /// Имя объявленного символа.
         name: String,
@@ -196,7 +197,7 @@ pub enum LowerError {
     /// Отказ **не про форму функции**: форму каждое определение получает по
     /// row своего типа, и эффектное получает вторую. Не поставлен кадр
     /// конкретно этого элиминатора.
-    #[error("`{name}` - {why}")]
+    #[error("{}", tr!("codegen-lower-handler", name = .name, why = .why))]
     Handler {
         /// Имя элиминатора.
         name: String,
@@ -210,7 +211,7 @@ pub enum LowerError {
     /// месте, абортивная снимает сегмент, общая режет его в резумпцию. Берётся
     /// здесь первая, и отказ называет, чем оказались остальные, - молча
     /// посчитать не то хуже, чем не посчитать.
-    #[error("ветка `{operation}` хендлера `{effect}` {why}")]
+    #[error("{}", tr!("codegen-lower-verdict", operation = .operation, effect = .effect, why = .why))]
     Verdict {
         /// Метка хендлера.
         effect: String,
@@ -221,7 +222,7 @@ pub enum LowerError {
     },
 
     /// Метка эффекта либо её операция в позиции, где значения у неё нет.
-    #[error("`{name}` - {why}")]
+    #[error("{}", tr!("codegen-lower-operation", name = .name, why = .why))]
     Operation {
         /// Имя метки или операции.
         name: String,
@@ -230,14 +231,14 @@ pub enum LowerError {
     },
 
     /// Семейство в позиции значения.
-    #[error("`{name}` - семейство типов: значения у него в рантайме нет")]
+    #[error("{}", tr!("codegen-lower-type-value", name = .name))]
     TypeValue {
         /// Имя семейства.
         name: String,
     },
 
     /// Форма терма, которой чистый фрагмент не знает.
-    #[error("{form} этим срезом не берётся")]
+    #[error("{}", tr!("codegen-lower-unsupported", form = .form))]
     Unsupported {
         /// Что именно встретилось.
         form: &'static str,
@@ -258,25 +259,25 @@ pub enum LowerError {
     /// Отличие от [`Self::ArrayAnswer`] и [`Self::RegionAnswer`] именно здесь:
     /// там значение в рантайме есть, и сводить надо две печати одного;
     /// тут сводить нечего.
-    #[error("ответ программы - функция: печатать её нечем")]
+    #[error("{}", tr!("codegen-lower-function-answer"))]
     FunctionAnswer,
 
     /// Конструкторов больше, чем тегов: верх диапазона занят рантаймом.
-    #[error("конструкторов больше {limit}: верх диапазона тегов занят рантаймом")]
+    #[error("{}", tr!("codegen-lower-too-many-constructors", limit = .limit))]
     TooManyConstructors {
         /// Сколько их помещается.
         limit: u16,
     },
 
     /// Переменная за пределами захваченной среды - дефект анализа свободных.
-    #[error("переменная #{index} вне захваченной среды")]
+    #[error("{}", tr!("codegen-lower-unbound", index = .index))]
     Unbound {
         /// Индекс де Брёйна.
         index: u32,
     },
 
     /// Живому связыванию не досталось аргумента.
-    #[error("`{name}`: живому связыванию #{binder} не досталось аргумента")]
+    #[error("{}", tr!("codegen-lower-missing", name = .name, binder = .binder))]
     Missing {
         /// Кому.
         name: String,
@@ -289,7 +290,7 @@ pub enum LowerError {
     /// Отказ, а не приведение: заголовка у плоского значения нет вовсе, и
     /// положить его туда, где ждут указатель, значит отдать биты числа
     /// счётчику ссылок.
-    #[error("{at}: ожидалось {want}, а пришло {got} (§4.11)")]
+    #[error("{}", tr!("codegen-lower-representation", at = .at, want = .want, got = .got))]
     Representation {
         /// В какой позиции.
         at: &'static str,
@@ -304,7 +305,7 @@ pub enum LowerError {
     /// Значением она была бы замыканием, а замыкание принимает аргументы
     /// указательными: плоскому нужен дескриптор layout (§4.11), и это
     /// следующая половина трека.
-    #[error("`{name}` без обоих аргументов: примитив значением требует дескриптора layout (§4.11)")]
+    #[error("{}", tr!("codegen-lower-partial", name = .name))]
     Partial {
         /// Имя операции.
         name: String,
@@ -314,7 +315,7 @@ pub enum LowerError {
     ///
     /// Недобранной она была бы замыканием, а через замыкание не проходит ни
     /// плоский элемент, ни дескриптор (§4.11).
-    #[error("`{name}` без всех аргументов: операция над массивом значением этим срезом не берётся")]
+    #[error("{}", tr!("codegen-lower-partial-array", name = .name))]
     PartialArray {
         /// Имя операции.
         name: String,
@@ -325,11 +326,11 @@ pub enum LowerError {
     /// Печатать его нечем, и это названная граница: `adamas eval` печатает
     /// цепочку `arrayNew`/`arraySet` со стёртыми аргументами, понижение -
     /// значение, и сводить эти две печати - работа не этого среза.
-    #[error("ответ программы - массив: печатать его нечем (§4.11)")]
+    #[error("{}", tr!("codegen-lower-array-answer"))]
     ArrayAnswer,
 
     /// Операция над вектором без всех аргументов.
-    #[error("`{name}` без всех аргументов: операция над вектором значением не берётся (§4.9)")]
+    #[error("{}", tr!("codegen-lower-partial-simd", name = .name))]
     PartialSimd {
         /// Имя операции.
         name: String,
@@ -343,7 +344,7 @@ pub enum LowerError {
     /// `{Primitive a}` со свободной шириной поэтому не понижается - его
     /// снимает специализация (`adamas_elab::mono`), ровно как она снимает
     /// дескриптор шага у обобщённого массива.
-    #[error("`Simd {width} {lane}`: {why} (§4.9)")]
+    #[error("{}", tr!("codegen-lower-simd-shape", width = .width, lane = .lane, why = .why))]
     SimdShape {
         /// Что написано шириной.
         width: String,
@@ -367,14 +368,14 @@ pub enum LowerError {
     /// тегу заголовка, которого у вектора нет; поймал бы её в лучшем случае
     /// чужой компилятор - тот же жанр дефекта, по которому написан свидетель
     /// `a_vector_does_not_fit_an_object_slot`.
-    #[error("ответ программы - вектор: печатать его нечем (§4.9)")]
+    #[error("{}", tr!("codegen-lower-simd-answer"))]
     SimdAnswer,
 
     /// Операция над регионом без всех аргументов.
     ///
     /// Тот же довод, что у массива: недобранная была бы замыканием, а через
     /// границу замыкания не проходит ни блок, ни плоская нагрузка.
-    #[error("`{name}` без всех аргументов: операция над регионом значением этим срезом не берётся")]
+    #[error("{}", tr!("codegen-lower-partial-region", name = .name))]
     PartialRegion {
         /// Имя операции.
         name: String,
@@ -385,7 +386,7 @@ pub enum LowerError {
     /// Понижение спрашивает это **вторым**: первым спрашивает элаборация, и
     /// отказ её называет поле. Сюда доходит то, чего типовая сторона не видит:
     /// нагрузка, чью укладку понижение не выражает (§10 вопросы 157, 158).
-    #[error("нагрузка региона `{written}` плоской укладки в понижении не имеет (§3.6, §4.11)")]
+    #[error("{}", tr!("codegen-lower-region-payload", written = .written))]
     RegionPayload {
         /// Как названо представление нагрузки.
         written: String,
@@ -395,7 +396,7 @@ pub enum LowerError {
     ///
     /// Названная граница того же жанра, что массив в ответе: `adamas eval`
     /// печатает цепочку `regionNew`/`regionAlloc`, понижение - область байт.
-    #[error("ответ программы - блок региона: печатать его нечем (§3.6)")]
+    #[error("{}", tr!("codegen-lower-region-answer"))]
     RegionAnswer,
 
     /// Ответ программы - плоский агрегат.
@@ -403,11 +404,11 @@ pub enum LowerError {
     /// Печать идёт по тегу заголовка, а у плоского агрегата заголовка нет
     /// вовсе (§4.11): в ответе лежат байты. Названная граница того же жанра,
     /// что массив в ответе.
-    #[error("ответ программы - плоский агрегат: заголовка у него нет, печатать нечем (§4.11)")]
+    #[error("{}", tr!("codegen-lower-packed-answer"))]
     PackedAnswer,
 
     /// Дескриптор укладки написан не той записью.
-    #[error("дескриптор укладки ожидался записью `{{ layout = {{ size, align }} }}` (§4.11)")]
+    #[error("{}", tr!("codegen-lower-descriptor"))]
     Descriptor,
 
     /// Проекция из значения, чьей формы понижение не знает.
@@ -416,7 +417,7 @@ pub enum LowerError {
     /// проекция без формы неисполнима. Формы нет там, где представление
     /// расширилось до указательного: поле полиморфного конструктора, связывание
     /// лямбды, ответ применения.
-    #[error("`.{label}`: форма записи потеряна, слот брать неоткуда (§4.2)")]
+    #[error("{}", tr!("codegen-lower-shapeless", label = .label))]
     Shapeless {
         /// Какое поле берут.
         label: String,
@@ -427,7 +428,7 @@ pub enum LowerError {
     /// `#closing` четырёхместен, и оба вычисления в нём приостановлены -
     /// `(ω _ : Unit) ->`. Понижение снимает приостановку разом, а не строит
     /// замыкание: замыкание стоило бы ячейки кучи на каждый scope.
-    #[error("выход из scope без обоих приостановленных вычислений (§3.3)")]
+    #[error("{}", tr!("codegen-lower-scope"))]
     Scope,
 
     /// Отказ внутри определения - с его именем (§10 вопрос 217).
@@ -436,7 +437,7 @@ pub enum LowerError {
     /// место отказа - определение целиком. Текст - тот же, что у внутреннего:
     /// место дописывает драйвер, у которого есть файлы программы, а тексту
     /// отказа второе место не нужно.
-    #[error("{error}")]
+    #[error("{}", tr!("codegen-lower-within", error = .error))]
     Within {
         /// Имя определения в ядре: специализированное - с хвостом `@…`.
         definition: String,
@@ -447,7 +448,7 @@ pub enum LowerError {
     },
 
     /// Проекция поля, которого в форме записи нет.
-    #[error("`.{label}`: поля нет в форме `{shape}` (§4.2)")]
+    #[error("{}", tr!("codegen-lower-no-field", label = .label, shape = .shape))]
     NoField {
         /// Какое поле берут.
         label: String,
@@ -574,17 +575,17 @@ fn fits(got: Repr, want: Repr) -> bool {
 /// Как представление называется в отказе.
 fn describe(repr: Repr) -> String {
     match repr {
-        Repr::Boxed => "указательное значение".to_owned(),
-        Repr::Flat(ty) => format!("плоское `{ty}`"),
-        Repr::Layout => "дескриптор укладки".to_owned(),
-        Repr::Opaque => "плоский элемент неизвестного типа".to_owned(),
-        Repr::Array(Elems::Flat) => "плоский массив".to_owned(),
-        Repr::Array(Elems::Boxed) => "указательный массив".to_owned(),
-        Repr::Region => "блок региона".to_owned(),
-        Repr::Record(tag) => format!("запись формы #{}", tag.0),
-        Repr::Resumption => "резумпция".to_owned(),
-        Repr::Simd { lanes, lane } => format!("вектор `Simd {lanes} {lane}`"),
-        Repr::Packed(pack) => format!("плоский агрегат укладки #{}", pack.0),
+        Repr::Boxed => tr!("lower-1").to_owned(),
+        Repr::Flat(ty) => tr!("lower-repr-flat", ty = ty),
+        Repr::Layout => tr!("lower-2").to_owned(),
+        Repr::Opaque => tr!("lower-3").to_owned(),
+        Repr::Array(Elems::Flat) => tr!("lower-4").to_owned(),
+        Repr::Array(Elems::Boxed) => tr!("lower-5").to_owned(),
+        Repr::Region => tr!("lower-6").to_owned(),
+        Repr::Record(tag) => tr!("lower-repr-record", tag = tag.0),
+        Repr::Resumption => tr!("lower-7").to_owned(),
+        Repr::Simd { lanes, lane } => tr!("repr-simd", lanes = lanes, lane = lane),
+        Repr::Packed(pack) => tr!("lower-repr-packed", pack = pack.0),
     }
 }
 
@@ -1127,7 +1128,7 @@ impl<'a> Lowerer<'a> {
             // проекция плотного поля отдаёт байты, а объявлен указатель.
             let Some(moved) = self.coerced(&mut scope, body, repr, declared)? else {
                 return Err(LowerError::Representation {
-                    at: "ответ функции",
+                    at: text!("lower-8"),
                     want: describe(declared),
                     got: describe(repr),
                 });
@@ -1192,7 +1193,7 @@ impl<'a> Lowerer<'a> {
             if name.starts_with('#') {
                 LowerError::Handler {
                     name: name.to_string(),
-                    why: "невыразимое имя без тела: понижение зовёт его формой, а не вызовом",
+                    why: text!("lower-9"),
                 }
             } else {
                 LowerError::Postulate {
@@ -1405,7 +1406,7 @@ impl<'a> Lowerer<'a> {
                 if matches!(&**value, Term::Lam(..)) {
                     self.hints = self.hinted(ty, depth)?;
                 }
-                let value = self.shaped(scope, value, declared, "связанное значение");
+                let value = self.shaped(scope, value, declared, text!("lower-10"));
                 self.hints = None;
                 let value = value?;
                 let binding = Binding {
@@ -1442,7 +1443,7 @@ impl<'a> Lowerer<'a> {
             // закрытую элаборация пересобирает полями (§4.2). Форма открытой
             // не перечислима - её знает хвост, - и слотов у неё поэтому нет.
             Term::With(..) => Err(LowerError::Unsupported {
-                form: "переопределение открытой записи",
+                form: text!("lower-11"),
             }),
             Term::Record(_)
             | Term::Pi(..)
@@ -1450,10 +1451,10 @@ impl<'a> Lowerer<'a> {
             | Term::RowKind(_)
             | Term::EffectKind
             | Term::Row(_) => Err(LowerError::Unsupported {
-                form: "тип в позиции значения",
+                form: text!("lower-12"),
             }),
             Term::Meta(_) => Err(LowerError::Unsupported {
-                form: "неразрешённая дырка",
+                form: text!("lower-13"),
             }),
         }
     }
@@ -2270,7 +2271,7 @@ impl<'a> Lowerer<'a> {
                 name: name.to_string(),
                 binder: position,
             })?;
-            given.push(self.shaped(scope, argument, want, "поле конструктора")?);
+            given.push(self.shaped(scope, argument, want, text!("lower-14"))?);
         }
         Ok(Some(Expr::Pack {
             packing: pack,
@@ -2302,7 +2303,7 @@ impl<'a> Lowerer<'a> {
             let (value, repr) = if matches!(repr, Repr::Packed(_)) {
                 let boxed = self.moved(scope, &value, repr, Repr::Boxed)?.ok_or(
                     LowerError::Representation {
-                        at: "поле записи",
+                        at: text!("lower-15"),
                         want: describe(Repr::Boxed),
                         got: describe(repr),
                     },
@@ -2343,7 +2344,7 @@ impl<'a> Lowerer<'a> {
         let described = self.constructors[usize::from(tag.0)].clone();
         let labels = described.labels.clone().unwrap_or_default();
         let mismatch = || LowerError::Representation {
-            at: "поля записи",
+            at: text!("lower-16"),
             want: described.name.clone(),
             got: format!(
                 "{{{}}}",
@@ -2367,7 +2368,7 @@ impl<'a> Lowerer<'a> {
                 arguments.push(Expr::Erased);
                 continue;
             }
-            arguments.push(self.shaped(scope, value, fact.repr, "поле записи")?);
+            arguments.push(self.shaped(scope, value, fact.repr, text!("lower-17"))?);
         }
         Ok(Expr::Construct {
             constructor: tag,
@@ -2396,7 +2397,7 @@ impl<'a> Lowerer<'a> {
             .map(|variant| (variant.labels.clone(), variant.slots.clone()))
             .unwrap_or_default();
         let mismatch = || LowerError::Representation {
-            at: "поля плоской записи",
+            at: text!("lower-18"),
             want: format!("{{{}}}", labels.join(", ")),
             got: format!(
                 "{{{}}}",
@@ -2416,7 +2417,7 @@ impl<'a> Lowerer<'a> {
                 return Err(mismatch());
             }
             let want = slots[position].ty.repr();
-            given.push(self.shaped(scope, value, want, "поле плоской записи")?);
+            given.push(self.shaped(scope, value, want, text!("lower-19"))?);
         }
         Ok(Expr::Pack {
             packing: pack,
@@ -2645,7 +2646,7 @@ impl<'a> Lowerer<'a> {
         let (mut value, repr) = self.expr(scope, term)?;
         if !repr.boxed() {
             return Err(LowerError::Representation {
-                at: "применяемое значение",
+                at: text!("lower-20"),
                 want: describe(Repr::Boxed),
                 got: describe(repr),
             });
@@ -2655,7 +2656,7 @@ impl<'a> Lowerer<'a> {
                 scope,
                 &Arg::Supplied(binding),
                 Repr::Boxed,
-                "аргумент замыкания",
+                text!("lower-21"),
             )?;
             value = Expr::Apply {
                 callee: Box::new(value),
@@ -2790,7 +2791,7 @@ impl<'a> Lowerer<'a> {
             }),
             DefinitionKind::Effect { .. } => Err(LowerError::Operation {
                 name: name.to_string(),
-                why: "метка эффекта: значения у неё в рантайме нет",
+                why: text!("lower-22"),
             }),
             DefinitionKind::Operation { effect } => {
                 let effect = Rc::clone(effect);
@@ -2817,13 +2818,13 @@ impl<'a> Lowerer<'a> {
             // берётся.
             return Ok((Expr::Local(local), fact.repr));
         };
-        let value = self.given(scope, first, Repr::Boxed, "аргумент резумпции")?;
+        let value = self.given(scope, first, Repr::Boxed, text!("lower-23"))?;
         let mut node = Expr::Resume {
             resumption: Box::new(Expr::Local(local)),
             value: Box::new(value),
         };
         for argument in rest {
-            let argument = self.given(scope, argument, Repr::Boxed, "аргумент замыкания")?;
+            let argument = self.given(scope, argument, Repr::Boxed, text!("lower-24"))?;
             node = Expr::Apply {
                 callee: Box::new(node),
                 argument: Box::new(argument),
@@ -2844,7 +2845,7 @@ impl<'a> Lowerer<'a> {
         let DefinitionKind::Effect { operations, .. } = &self.definition(effect)?.kind else {
             return Err(LowerError::Operation {
                 name: effect.to_string(),
-                why: "не метка эффекта",
+                why: text!("lower-25"),
             });
         };
         let id = LabelId(u32::try_from(self.labels.len()).unwrap_or(u32::MAX));
@@ -2880,12 +2881,12 @@ impl<'a> Lowerer<'a> {
                 .position(|it| it == name)
                 .ok_or_else(|| LowerError::Operation {
                     name: name.to_string(),
-                    why: "операции нет среди операций своей метки",
+                    why: text!("lower-26"),
                 })?;
         let ty = &self.definition(name)?.ty;
         let arity = performing(ty).ok_or_else(|| LowerError::Operation {
             name: name.to_string(),
-            why: "у операции нет row ни на одной стрелке: производить нечем",
+            why: text!("lower-27"),
         })?;
         if arguments.len() < arity {
             // Недобранная операция едет замыканием над синтетическим телом,
@@ -2899,7 +2900,7 @@ impl<'a> Lowerer<'a> {
             if self.fiber_op(name)?.is_some() {
                 return Err(LowerError::Nursery {
                     name: name.to_string(),
-                    why: "операция круга значением этим срезом не берётся",
+                    why: text!("lower-28"),
                 });
             }
             let function = self.performer(scope, name, effect)?;
@@ -2912,7 +2913,7 @@ impl<'a> Lowerer<'a> {
                 let argument = if mults.get(position) == Some(&Mult::Zero) {
                     Expr::Erased
                 } else {
-                    self.given(scope, argument, Repr::Boxed, "аргумент операции")?
+                    self.given(scope, argument, Repr::Boxed, text!("lower-29"))?
                 };
                 value = Expr::Apply {
                     callee: Box::new(value),
@@ -2935,7 +2936,7 @@ impl<'a> Lowerer<'a> {
                 given.push(Expr::Erased);
                 continue;
             }
-            given.push(self.given(scope, argument, Repr::Boxed, "аргумент операции")?);
+            given.push(self.given(scope, argument, Repr::Boxed, text!("lower-30"))?);
         }
         let operation = u32::try_from(slot).unwrap_or(u32::MAX);
         let fiber = self.fiber_op(name)?;
@@ -2953,7 +2954,7 @@ impl<'a> Lowerer<'a> {
             },
         };
         for argument in arguments.iter().skip(arity) {
-            let argument = self.given(scope, argument, Repr::Boxed, "аргумент замыкания")?;
+            let argument = self.given(scope, argument, Repr::Boxed, text!("lower-31"))?;
             value = Expr::Apply {
                 callee: Box::new(value),
                 argument: Box::new(argument),
@@ -2978,7 +2979,7 @@ impl<'a> Lowerer<'a> {
             };
             let Some(unboxed) = unboxed else {
                 return Err(LowerError::Representation {
-                    at: "ответ операции",
+                    at: text!("lower-32"),
                     want: describe(Repr::Boxed),
                     got: describe(result),
                 });
@@ -3018,12 +3019,12 @@ impl<'a> Lowerer<'a> {
                 .position(|it| it == name)
                 .ok_or_else(|| LowerError::Operation {
                     name: name.to_string(),
-                    why: "операции нет среди операций своей метки",
+                    why: text!("lower-33"),
                 })?;
         let ty = &self.definition(name)?.ty;
         let arity = performing(ty).ok_or_else(|| LowerError::Operation {
             name: name.to_string(),
-            why: "у операции нет row ни на одной стрелке: производить нечем",
+            why: text!("lower-34"),
         })?;
         // Ответ синтетического тела указателен всегда: зовут его через
         // `adamas_apply`, а тот говорит указателями. Плоский ответ операции
@@ -3031,7 +3032,7 @@ impl<'a> Lowerer<'a> {
         // же, где разворачивается ответ всякого применения. Отказ остаётся у
         // того, чему обёртки не бывает: у вектора (§4.9).
         let result = self.result_repr(ty, arity, &scope.dicts.clone())?;
-        boxable(result, "ответ операции")?;
+        boxable(result, text!("lower-35"))?;
         let mults = multiplicities(ty, arity);
         let parameters: Vec<Binding> = (0..arity)
             .map(|at| Binding {
@@ -3089,15 +3090,15 @@ impl<'a> Lowerer<'a> {
         let Some(body) = arguments.first() else {
             return Err(LowerError::Nursery {
                 name: name.to_string(),
-                why: "постулат не насыщен, круг значением этим срезом не берётся",
+                why: text!("lower-36"),
             });
         };
-        let body = self.given(scope, body, Repr::Boxed, "тело питомника")?;
+        let body = self.given(scope, body, Repr::Boxed, text!("lower-37"))?;
         let mut value = Expr::Nursery {
             body: Box::new(body),
         };
         for argument in arguments.iter().skip(1) {
-            let argument = self.given(scope, argument, Repr::Boxed, "аргумент замыкания")?;
+            let argument = self.given(scope, argument, Repr::Boxed, text!("lower-38"))?;
             value = Expr::Apply {
                 callee: Box::new(value),
                 argument: Box::new(argument),
@@ -3131,7 +3132,7 @@ impl<'a> Lowerer<'a> {
         if arguments.len() < parameters.len() {
             return Err(LowerError::Foreign {
                 name: name.to_string(),
-                why: "вызов не насыщен: чужая функция значением этим срезом не берётся",
+                why: text!("lower-39"),
             });
         }
         // Пересып через границу не проходит по типам: чужая функция отдаёт
@@ -3140,7 +3141,7 @@ impl<'a> Lowerer<'a> {
         if arguments.len() > parameters.len() {
             return Err(LowerError::Foreign {
                 name: name.to_string(),
-                why: "аргументов больше, чем связываний: ответ чужой функции есть слово",
+                why: text!("lower-40"),
             });
         }
         // Связываются **все** аргументы, а не одни только едущие, и порядок
@@ -3187,9 +3188,9 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
             let (repr, at) = match carried {
-                Cross::Word(ty) => (Repr::Flat(*ty), "аргумент чужого вызова"),
-                Cross::Buffer(_) => (Repr::Array(Elems::Flat), "буфер у границы C"),
-                Cross::Nothing => (Repr::Boxed, "единица у границы C"),
+                Cross::Word(ty) => (Repr::Flat(*ty), text!("lower-41")),
+                Cross::Buffer(_) => (Repr::Array(Elems::Flat), text!("lower-42")),
+                Cross::Nothing => (Repr::Boxed, text!("lower-43")),
                 Cross::Erased | Cross::Callback(_) => unreachable!("отсеяно выше"),
             };
             let value = self.given(scope, argument, repr, at)?;
@@ -3226,16 +3227,13 @@ impl<'a> Lowerer<'a> {
             (Some(_), true) => {
                 return Err(LowerError::Foreign {
                     name: name.to_string(),
-                    why: "у колбэка есть среда, а класть её некуда: чужая функция обязана \
-                          принимать `userdata`, и позицию его пишет автор - `callbackEnv` \
-                          в аргументе (§5.3, уровень 2)",
+                    why: text!("lower-44"),
                 });
             }
             (None, false) => {
                 return Err(LowerError::Foreign {
                     name: name.to_string(),
-                    why: "`callbackEnv` написан, а колбэка со средой в этом вызове нет: \
-                          уровень 1 среды не несёт, и класть в `userdata` нечего",
+                    why: text!("lower-45"),
                 });
             }
             (None, true) => {}
@@ -3273,7 +3271,7 @@ impl<'a> Lowerer<'a> {
         let Arg::Written(term) = argument else {
             return Err(LowerError::Foreign {
                 name: callee.to_string(),
-                why: "колбэк достроен по типу, а не написан: ни адреса, ни среды у него нет",
+                why: text!("lower-46"),
             });
         };
         // Имя решается до уровня 2 целиком, и обоими исходами: экспортированное
@@ -3286,17 +3284,14 @@ impl<'a> Lowerer<'a> {
             }
             return Err(LowerError::Foreign {
                 name: name.to_string(),
-                why: "в позиции колбэка стоит имя, не объявленное `export \"C\"`: \
-                      символа у линкера у него нет, а среды - у имени",
+                why: text!("lower-47"),
             });
         }
-        let closure = self.given(scope, argument, Repr::Boxed, "колбэк уровня 2")?;
+        let closure = self.given(scope, argument, Repr::Boxed, text!("lower-48"))?;
         let Expr::Closure { function, .. } = &closure else {
             return Err(LowerError::Foreign {
                 name: callee.to_string(),
-                why: "в позиции колбэка стоит не замыкание и не имя, объявленное \
-                      `export \"C\"`: уровень 1 берёт указатель на определение, уровень 2 - \
-                      замыкание, чья среда едет в `userdata`",
+                why: text!("lower-49"),
             });
         };
         // Слоты трамплина - указательные, и это не выбор трамплина, а
@@ -3313,9 +3308,7 @@ impl<'a> Lowerer<'a> {
         if !straight {
             return Err(LowerError::Foreign {
                 name: callee.to_string(),
-                why: "замыкание в позиции колбэка понизилось плоскими слотами: через \
-                      границу замыкания едет указатель (§4.11, решение 158), и трамплину \
-                      такое не отдать",
+                why: text!("lower-50"),
             });
         }
         Ok(Aimed::Closure(closure))
@@ -3344,8 +3337,7 @@ impl<'a> Lowerer<'a> {
         if pack.is_some() {
             return Err(LowerError::Foreign {
                 name: callee.to_string(),
-                why: "колбэков со средой в одном вызове больше одного: `callbackEnv` \
-                      называет один, и какой - не написано",
+                why: text!("lower-51"),
             });
         }
         let id = self.trampoline(form)?;
@@ -3432,15 +3424,14 @@ impl<'a> Lowerer<'a> {
         let parameters = crossing.carried();
         let result = crossing.result.ok_or_else(|| LowerError::Foreign {
             name: name.to_string(),
-            why: "у экспорта нет ответа: элаборация такого не пускает",
+            why: text!("lower-52"),
         })?;
         let function = self.function(name, false)?;
         let lowered = &self.functions[function.0];
         if lowered.form != Form::Stack || !lowered.captured.is_empty() {
             return Err(LowerError::Foreign {
                 name: name.to_string(),
-                why: "экспорт понизился во вторую форму: ей нужны вектор evidence и \
-                      продолжение, а у чужой стороны их нет (§5.3, уровень 2)",
+                why: text!("lower-53"),
             });
         }
         let taken: Vec<Repr> = lowered.parameters.iter().map(|it| it.fact.repr).collect();
@@ -3448,8 +3439,7 @@ impl<'a> Lowerer<'a> {
         if taken != wanted || lowered.result != Repr::Flat(result) {
             return Err(LowerError::Foreign {
                 name: name.to_string(),
-                why: "форма экспорта разошлась с понижением: граница объявлена словами, \
-                      а функция понизилась иначе",
+                why: text!("lower-54"),
             });
         }
         let id = ExportId(self.exports.len());
@@ -3714,7 +3704,7 @@ impl<'a> Lowerer<'a> {
         if arguments.len() < arity {
             return Err(LowerError::Handler {
                 name: eliminator.to_string(),
-                why: "элиминатор не насыщен: хендлер значением этим срезом не берётся",
+                why: text!("lower-55"),
             });
         }
         let signature = self.definition(eliminator)?.ty.clone();
@@ -3725,7 +3715,7 @@ impl<'a> Lowerer<'a> {
                     .and_then(|count| count.checked_sub(1))
                     .ok_or_else(|| LowerError::Handler {
                         name: eliminator.to_string(),
-                        why: "у типа элиминатора нет ветки на объявленную операцию",
+                        why: text!("lower-56"),
                     })
             })
             .collect::<Result<_, _>>()?;
@@ -3736,13 +3726,13 @@ impl<'a> Lowerer<'a> {
             let Arg::Written(term) = argument else {
                 return Err(LowerError::Handler {
                     name: eliminator.to_string(),
-                    why: "ветка хендлера пришла достроенной, а не написанной",
+                    why: text!("lower-57"),
                 });
             };
             escaping(term, 0, &mut free);
         }
         let (captured, taken, inner) =
-            self.capturing(scope, &free, Slots::Uniform, "захват ветки хендлера")?;
+            self.capturing(scope, &free, Slots::Uniform, text!("lower-58"))?;
 
         let site = Site {
             captured: &captured,
@@ -3786,14 +3776,14 @@ impl<'a> Lowerer<'a> {
         let Arg::Written(computation) = &arguments[params + 2] else {
             return Err(LowerError::Handler {
                 name: eliminator.to_string(),
-                why: "вычисление под хендлером пришло достроенным, а не написанным",
+                why: text!("lower-59"),
             });
         };
         // Под хендлером ручка стека есть всегда - её заводит сам `handle`,
         // включая корень в чистой функции, - поэтому scope с ресурсом здесь
         // ставит кадр даже у первой формы снаружи.
         let outer = std::mem::replace(&mut self.detached, true);
-        let computation = self.triggered(scope, computation, "вычисление под хендлером");
+        let computation = self.triggered(scope, computation, text!("lower-60"));
         self.detached = outer;
         let computation = computation?;
 
@@ -3806,7 +3796,7 @@ impl<'a> Lowerer<'a> {
         // такой ровно один: начальное состояние, которое элаборация ставит
         // снаружи элиминатора (`(#handleState … ) s0`, §3.4).
         for argument in arguments.iter().skip(arity) {
-            let argument = self.given(scope, argument, Repr::Boxed, "аргумент замыкания")?;
+            let argument = self.given(scope, argument, Repr::Boxed, text!("lower-61"))?;
             value = Expr::Apply {
                 callee: Box::new(value),
                 argument: Box::new(argument),
@@ -3868,22 +3858,22 @@ impl<'a> Lowerer<'a> {
         if arguments.len() < arity {
             return Err(LowerError::Handler {
                 name: eliminator.to_string(),
-                why: "элиминатор не насыщен: маска значением этим срезом не берётся",
+                why: text!("lower-62"),
             });
         }
         let Arg::Written(computation) = &arguments[arity - 1] else {
             return Err(LowerError::Handler {
                 name: eliminator.to_string(),
-                why: "вычисление под маской пришло достроенным, а не написанным",
+                why: text!("lower-63"),
             });
         };
-        let computation = self.triggered(scope, computation, "вычисление под маской")?;
+        let computation = self.triggered(scope, computation, text!("lower-64"))?;
         let mut value = Expr::Mask {
             label,
             computation: Box::new(computation),
         };
         for argument in arguments.iter().skip(arity) {
-            let argument = self.given(scope, argument, Repr::Boxed, "аргумент замыкания")?;
+            let argument = self.given(scope, argument, Repr::Boxed, text!("lower-65"))?;
             value = Expr::Apply {
                 callee: Box::new(value),
                 argument: Box::new(argument),
@@ -3952,7 +3942,7 @@ impl<'a> Lowerer<'a> {
                 return Err(LowerError::Verdict {
                     effect: effect.to_string(),
                     operation: operation.to_string(),
-                    why: "связывает меньше аргументов, чем объявила операция",
+                    why: text!("lower-66"),
                 });
             };
             bindings.push(Binding {
@@ -3967,7 +3957,7 @@ impl<'a> Lowerer<'a> {
             return Err(LowerError::Verdict {
                 effect: effect.to_string(),
                 operation: operation.to_string(),
-                why: "не связывает резумпцию: форма ветки нарушена",
+                why: text!("lower-67"),
             });
         };
         let body = Rc::clone(body);
@@ -4046,7 +4036,7 @@ impl<'a> Lowerer<'a> {
             body: Expr::Erased,
         });
         let outer = std::mem::replace(&mut self.detached, true);
-        let lowered = self.shaped(&mut nested, &rewritten, Repr::Boxed, "тело ветки хендлера");
+        let lowered = self.shaped(&mut nested, &rewritten, Repr::Boxed, text!("lower-68"));
         self.detached = outer;
         self.functions[function.0].body = lowered?;
         Ok((function, verdict))
@@ -4064,7 +4054,7 @@ impl<'a> Lowerer<'a> {
             return Err(LowerError::Verdict {
                 effect: effect.to_string(),
                 operation: "return".to_owned(),
-                why: "не связывает значения вычисления: форма ветки нарушена",
+                why: text!("lower-69"),
             });
         };
         let mut nested = Scope {
@@ -4093,7 +4083,7 @@ impl<'a> Lowerer<'a> {
             body: Expr::Erased,
         });
         let outer = std::mem::replace(&mut self.detached, true);
-        let lowered = self.shaped(&mut nested, &body, Repr::Boxed, "тело ветки `return`");
+        let lowered = self.shaped(&mut nested, &body, Repr::Boxed, text!("lower-70"));
         self.detached = outer;
         self.functions[function.0].body = lowered?;
         Ok(function)
@@ -4257,7 +4247,7 @@ impl<'a> Lowerer<'a> {
                     Ok((Expr::Literal { ty, bits }, Repr::Flat(ty)))
                 } else {
                     Err(LowerError::Unsupported {
-                        form: "литерал в позиции функции",
+                        form: text!("lower-71"),
                     })
                 }
             }
@@ -4265,12 +4255,7 @@ impl<'a> Lowerer<'a> {
                 let [value] = arguments else {
                     return Err(LowerError::Partial { name: cast.name() });
                 };
-                let value = self.given(
-                    scope,
-                    value,
-                    Repr::Flat(cast.from),
-                    "аргумент преобразования",
-                )?;
+                let value = self.given(scope, value, Repr::Flat(cast.from), text!("lower-72"))?;
                 Ok((
                     Expr::Convert {
                         cast,
@@ -4293,8 +4278,8 @@ impl<'a> Lowerer<'a> {
                     });
                 }
                 let want = Repr::Flat(ty);
-                let left = self.given(scope, left, want, "левый аргумент операции")?;
-                let right = self.given(scope, right, want, "правый аргумент операции")?;
+                let left = self.given(scope, left, want, text!("lower-73"))?;
+                let right = self.given(scope, right, want, text!("lower-74"))?;
                 Ok((
                     Expr::Primitive {
                         op,
@@ -4315,8 +4300,8 @@ impl<'a> Lowerer<'a> {
                     });
                 };
                 let flat = Repr::Flat(ty);
-                let left = self.given(scope, left, flat, "левый аргумент сравнения")?;
-                let right = self.given(scope, right, flat, "правый аргумент сравнения")?;
+                let left = self.given(scope, left, flat, text!("lower-75"))?;
+                let right = self.given(scope, right, flat, text!("lower-76"))?;
                 // Имена конструкторов берутся тем же поиском, каким их берёт
                 // проверка: в подключаемом файле они объявлены под путём (§4.8,
                 // §10 вопрос 188), и `Name::from("True")` их не находил.
@@ -4498,8 +4483,8 @@ impl<'a> Lowerer<'a> {
         let word = Repr::Flat(PrimTy::UInt64);
         match op {
             ArrayOp::New => {
-                let count = self.given(scope, &arguments[1], word, "длина массива")?;
-                let initial = self.given(scope, &arguments[2], elements, "ячейка массива")?;
+                let count = self.given(scope, &arguments[1], word, text!("lower-77"))?;
+                let initial = self.given(scope, &arguments[2], elements, text!("lower-78"))?;
                 Ok((
                     Expr::ArrayNew {
                         stride,
@@ -4512,8 +4497,8 @@ impl<'a> Lowerer<'a> {
             }
             ArrayOp::Index => {
                 let array =
-                    self.given(scope, &arguments[2], Repr::Array(cells), "читаемый массив")?;
-                let at = self.given(scope, &arguments[3], word, "номер ячейки")?;
+                    self.given(scope, &arguments[2], Repr::Array(cells), text!("lower-79"))?;
+                let at = self.given(scope, &arguments[3], word, text!("lower-80"))?;
                 Ok((
                     Expr::ArrayIndex {
                         stride,
@@ -4527,14 +4512,10 @@ impl<'a> Lowerer<'a> {
                 ))
             }
             ArrayOp::Set => {
-                let array = self.given(
-                    scope,
-                    &arguments[2],
-                    Repr::Array(cells),
-                    "переписываемый массив",
-                )?;
-                let at = self.given(scope, &arguments[3], word, "номер ячейки")?;
-                let value = self.given(scope, &arguments[4], elements, "ячейка массива")?;
+                let array =
+                    self.given(scope, &arguments[2], Repr::Array(cells), text!("lower-81"))?;
+                let at = self.given(scope, &arguments[3], word, text!("lower-82"))?;
+                let value = self.given(scope, &arguments[4], elements, text!("lower-83"))?;
                 Ok((
                     Expr::ArraySet {
                         stride,
@@ -4565,7 +4546,7 @@ impl<'a> Lowerer<'a> {
                 name: ArrayOp::Bytes(content).name().to_owned(),
             });
         };
-        let count = self.given(scope, count, Repr::Flat(PrimTy::UInt64), "длина массива")?;
+        let count = self.given(scope, count, Repr::Flat(PrimTy::UInt64), text!("lower-84"))?;
         Ok((
             Expr::ArrayNew {
                 stride: Some(Stride::Static(PrimTy::UInt8)),
@@ -4627,7 +4608,7 @@ impl<'a> Lowerer<'a> {
         );
         let term = Term::Let(
             Mult::One,
-            adamas_core::term::Name::from("читаемое"),
+            adamas_core::term::Name::from(tr!("lower-85")),
             Rc::new(ty),
             Rc::new((*array).clone()),
             Rc::new(built),
@@ -4690,8 +4671,8 @@ impl<'a> Lowerer<'a> {
         };
         let cells = Repr::Array(stride.map_or(Elems::Boxed, |_| Elems::Flat));
         let word = Repr::Flat(PrimTy::UInt64);
-        let array = self.given(scope, &Arg::Written(array), cells, "читаемый массив")?;
-        let at = self.given(scope, &Arg::Written(at), word, "номер ячейки")?;
+        let array = self.given(scope, &Arg::Written(array), cells, text!("lower-86"))?;
+        let at = self.given(scope, &Arg::Written(at), word, text!("lower-87"))?;
         let rest = Binding {
             name: rest_name.to_string(),
             local: scope.fresh(),
@@ -4800,8 +4781,7 @@ impl<'a> Lowerer<'a> {
             .ok_or_else(|| LowerError::SimdShape {
                 width: normalized(width, depth).to_string(),
                 lane: normalized(lane, depth).to_string(),
-                why: "ширина обязана быть литералом, а дорожка - примитивом: у обоих \
-                      эмиттеров ширина есть часть типа, а не число в рантайме",
+                why: text!("lower-88"),
             })?;
         let Repr::Simd { lanes, lane } = shape else {
             return Err(partial());
@@ -4810,7 +4790,7 @@ impl<'a> Lowerer<'a> {
         let word = Repr::Flat(PrimTy::UInt64);
         match op {
             SimdOp::Splat => {
-                let value = self.given(scope, &arguments[3], cell, "дорожка вектора")?;
+                let value = self.given(scope, &arguments[3], cell, text!("lower-89"))?;
                 Ok((
                     Expr::SimdSplat {
                         lanes,
@@ -4821,8 +4801,8 @@ impl<'a> Lowerer<'a> {
                 ))
             }
             SimdOp::Lane => {
-                let vector = self.given(scope, &arguments[3], shape, "читаемый вектор")?;
-                let at = self.given(scope, &arguments[4], word, "номер дорожки")?;
+                let vector = self.given(scope, &arguments[3], shape, text!("lower-90"))?;
+                let at = self.given(scope, &arguments[4], word, text!("lower-91"))?;
                 Ok((
                     Expr::SimdLane {
                         lanes,
@@ -4834,9 +4814,9 @@ impl<'a> Lowerer<'a> {
                 ))
             }
             SimdOp::Set => {
-                let vector = self.given(scope, &arguments[3], shape, "переписываемый вектор")?;
-                let at = self.given(scope, &arguments[4], word, "номер дорожки")?;
-                let value = self.given(scope, &arguments[5], cell, "дорожка вектора")?;
+                let vector = self.given(scope, &arguments[3], shape, text!("lower-92"))?;
+                let at = self.given(scope, &arguments[4], word, text!("lower-93"))?;
+                let value = self.given(scope, &arguments[5], cell, text!("lower-94"))?;
                 Ok((
                     Expr::SimdSet {
                         lanes,
@@ -4850,8 +4830,8 @@ impl<'a> Lowerer<'a> {
             }
             SimdOp::Add | SimdOp::Sub | SimdOp::Mul => {
                 let arith = op.arith().ok_or_else(partial)?;
-                let left = self.given(scope, &arguments[3], shape, "левый вектор")?;
-                let right = self.given(scope, &arguments[4], shape, "правый вектор")?;
+                let left = self.given(scope, &arguments[3], shape, text!("lower-95"))?;
+                let right = self.given(scope, &arguments[4], shape, text!("lower-96"))?;
                 Ok((
                     Expr::SimdArith {
                         op: arith,
@@ -4885,8 +4865,8 @@ impl<'a> Lowerer<'a> {
         let column = Repr::Array(Elems::Flat);
         let word = Repr::Flat(PrimTy::UInt64);
         let stride = Stride::Static(lane);
-        let array = self.given(scope, &arguments[4], column, "колонка окна")?;
-        let at = self.given(scope, &arguments[5], word, "номер ячейки")?;
+        let array = self.given(scope, &arguments[4], column, text!("lower-97"))?;
+        let at = self.given(scope, &arguments[5], word, text!("lower-98"))?;
         if op == SimdOp::Load {
             return Ok((
                 Expr::SimdLoad {
@@ -4902,7 +4882,7 @@ impl<'a> Lowerer<'a> {
                 shape,
             ));
         }
-        let value = self.given(scope, &arguments[6], shape, "записываемый вектор")?;
+        let value = self.given(scope, &arguments[6], shape, text!("lower-99"))?;
         Ok((
             Expr::SimdStore {
                 stride,
@@ -4958,14 +4938,15 @@ impl<'a> Lowerer<'a> {
             _ => {}
         }
         if op == RegionOp::Last {
-            let region = Box::new(self.given(scope, &arguments[0], Repr::Region, "регион")?);
+            let region =
+                Box::new(self.given(scope, &arguments[0], Repr::Region, text!("lower-100"))?);
             return Ok((Expr::RegionLast { region }, word));
         }
         // Возврат ячейки нагрузки не несёт: размер её помнит область, а не
         // написанный тип. Отсюда и позиции - блок первым, хендл вторым.
         if matches!(op, RegionOp::Recycle | RegionOp::Pop) {
-            let region = self.given(scope, &arguments[0], Repr::Region, "регион")?;
-            let at = self.given(scope, &arguments[1], word, "хендл региона")?;
+            let region = self.given(scope, &arguments[0], Repr::Region, text!("lower-101"))?;
+            let at = self.given(scope, &arguments[1], word, text!("lower-102"))?;
             let region = Box::new(region);
             let at = Box::new(at);
             let value = if op == RegionOp::Recycle {
@@ -4993,10 +4974,10 @@ impl<'a> Lowerer<'a> {
             });
         };
         let carried = stride.element();
-        let region = self.given(scope, &arguments[2], Repr::Region, "регион")?;
+        let region = self.given(scope, &arguments[2], Repr::Region, text!("lower-103"))?;
         match op {
             RegionOp::Alloc => {
-                let value = self.given(scope, &arguments[3], carried, "нагрузка региона")?;
+                let value = self.given(scope, &arguments[3], carried, text!("lower-104"))?;
                 Ok((
                     Expr::RegionAlloc {
                         stride,
@@ -5007,7 +4988,7 @@ impl<'a> Lowerer<'a> {
                 ))
             }
             RegionOp::Read => {
-                let at = self.given(scope, &arguments[3], word, "хендл региона")?;
+                let at = self.given(scope, &arguments[3], word, text!("lower-105"))?;
                 Ok((
                     Expr::RegionRead {
                         stride,
@@ -5018,8 +4999,8 @@ impl<'a> Lowerer<'a> {
                 ))
             }
             RegionOp::Write => {
-                let at = self.given(scope, &arguments[3], word, "хендл региона")?;
-                let value = self.given(scope, &arguments[4], carried, "нагрузка региона")?;
+                let at = self.given(scope, &arguments[3], word, text!("lower-106"))?;
+                let value = self.given(scope, &arguments[4], carried, text!("lower-107"))?;
                 Ok((
                     Expr::RegionWrite {
                         stride,
@@ -5061,7 +5042,7 @@ impl<'a> Lowerer<'a> {
                 want = repr;
             }
         }
-        self.given(scope, argument, want, "поле конструктора")
+        self.given(scope, argument, want, text!("lower-108"))
     }
 
     /// Поле-массив параметрического семейства под типом, инстанцированным
@@ -5132,7 +5113,7 @@ impl<'a> Lowerer<'a> {
                 let mut visiting = Vec::new();
                 if self.layout_bound(checked, at - 1 - level, &mut visiting)? {
                     return Err(LowerError::Representation {
-                        at: "аргумент вызова: плоский массив семейства уходит в код без `Flat`",
+                        at: text!("lower-109"),
                         want: describe(Repr::Array(Elems::Boxed)),
                         got: describe(Repr::Array(Elems::Flat)),
                     });
@@ -5301,7 +5282,7 @@ impl<'a> Lowerer<'a> {
         if !complete {
             // Недобранное собирается замыканием, а замыкание копит аргументы
             // слотами указателей: плоскому полю там места нет (§4.11).
-            pointing(&binders, "поле недобранного конструктора")?;
+            pointing(&binders, text!("lower-110"))?;
             let mut value = Expr::ConstructClosure { constructor };
             for (position, argument) in arguments.iter().enumerate() {
                 // Стёртая позиция применяется наравне с живой - замыкание
@@ -5310,12 +5291,7 @@ impl<'a> Lowerer<'a> {
                 let argument = if binders.get(position).is_some_and(|it| !it.present) {
                     Expr::Erased
                 } else {
-                    self.given(
-                        scope,
-                        argument,
-                        Repr::Boxed,
-                        "аргумент недобранного конструктора",
-                    )?
+                    self.given(scope, argument, Repr::Boxed, text!("lower-111"))?
                 };
                 value = Expr::Apply {
                     callee: Box::new(value),
@@ -5344,7 +5320,7 @@ impl<'a> Lowerer<'a> {
             arguments: built,
         };
         for argument in arguments.iter().skip(binders.len()) {
-            let argument = self.given(scope, argument, Repr::Boxed, "аргумент замыкания")?;
+            let argument = self.given(scope, argument, Repr::Boxed, text!("lower-112"))?;
             value = Expr::Apply {
                 callee: Box::new(value),
                 argument: Box::new(argument),
@@ -5400,7 +5376,7 @@ impl<'a> Lowerer<'a> {
                 && !matches!(parameter.fact.repr, Repr::Flat(_))
             {
                 return Err(LowerError::Representation {
-                    at: "параметр недобранного вызова",
+                    at: text!("lower-113"),
                     want: describe(Repr::Boxed),
                     got: describe(parameter.fact.repr),
                 });
@@ -5412,7 +5388,7 @@ impl<'a> Lowerer<'a> {
             _ if pointer => Rewrapped::Same,
             _ => {
                 return Err(LowerError::Representation {
-                    at: "ответ недобранного вызова",
+                    at: text!("lower-114"),
                     want: describe(Repr::Boxed),
                     got: describe(result),
                 });
@@ -5500,7 +5476,7 @@ impl<'a> Lowerer<'a> {
                 };
                 let uniformed = self.uniformed(&mut scope, call, result)?;
                 uniformed.ok_or(LowerError::Representation {
-                    at: "ответ недобранного вызова",
+                    at: text!("lower-115"),
                     want: describe(Repr::Boxed),
                     got: describe(result),
                 })?
@@ -5585,7 +5561,7 @@ impl<'a> Lowerer<'a> {
             // вместо вектора.
             return Err(LowerError::Operation {
                 name: name.to_string(),
-                why: "метка в row-аргументе вызова из первой формы: вектора evidence здесь нет",
+                why: text!("lower-116"),
             });
         }
         Ok(asked)
@@ -5804,7 +5780,7 @@ impl<'a> Lowerer<'a> {
                 let argument = if parameters.get(position).is_some_and(|it| !it.present) {
                     Expr::Erased
                 } else {
-                    self.given(scope, argument, Repr::Boxed, "аргумент недобранного вызова")?
+                    self.given(scope, argument, Repr::Boxed, text!("lower-117"))?
                 };
                 value = Expr::Apply {
                     callee: Box::new(value),
@@ -5824,7 +5800,7 @@ impl<'a> Lowerer<'a> {
                 binder: position,
             })?;
             self.hints = self.lambda_hints(scope, name, position, arguments)?;
-            let lowered = self.given(scope, argument, fact.repr, "аргумент вызова");
+            let lowered = self.given(scope, argument, fact.repr, text!("lower-118"));
             self.hints = None;
             given.push(lowered?);
         }
@@ -5840,13 +5816,13 @@ impl<'a> Lowerer<'a> {
         // ней. Стирания здесь уже нет - имени нет тоже.
         if !result.boxed() {
             return Err(LowerError::Representation {
-                at: "применяемое значение",
+                at: text!("lower-119"),
                 want: describe(Repr::Boxed),
                 got: describe(result),
             });
         }
         for argument in arguments.iter().skip(parameters.len()) {
-            let argument = self.given(scope, argument, Repr::Boxed, "аргумент замыкания")?;
+            let argument = self.given(scope, argument, Repr::Boxed, text!("lower-120"))?;
             value = Expr::Apply {
                 callee: Box::new(value),
                 argument: Box::new(argument),
@@ -5917,7 +5893,7 @@ impl<'a> Lowerer<'a> {
             // молчание, - молча не отменить значит не досчитать деструкторов.
             return Err(LowerError::Nursery {
                 name: data.to_string(),
-                why: "отмена задачи в первой форме: ручки стека нет",
+                why: text!("lower-121"),
             });
         }
         Ok(Expr::Cancel {
@@ -5947,7 +5923,7 @@ impl<'a> Lowerer<'a> {
             return Ok((moved, None));
         }
         Err(LowerError::Representation {
-            at: "разбираемое",
+            at: text!("lower-122"),
             want: describe(Repr::Boxed),
             got: describe(got),
         })
@@ -6032,7 +6008,7 @@ impl<'a> Lowerer<'a> {
                 body = moved;
             } else {
                 return Err(LowerError::Representation {
-                    at: "ветвь разбора",
+                    at: text!("lower-123"),
                     want: describe(answer),
                     got: describe(repr),
                 });
@@ -6106,9 +6082,9 @@ impl<'a> Lowerer<'a> {
         head: &Term,
         arguments: &[Arg<'_>],
     ) -> Result<(Expr, Repr), LowerError> {
-        let mut value = self.shaped(scope, head, Repr::Boxed, "применяемое значение")?;
+        let mut value = self.shaped(scope, head, Repr::Boxed, text!("lower-124"))?;
         for argument in arguments {
-            let argument = self.given(scope, argument, Repr::Boxed, "аргумент замыкания")?;
+            let argument = self.given(scope, argument, Repr::Boxed, text!("lower-125"))?;
             value = Expr::Apply {
                 callee: Box::new(value),
                 argument: Box::new(argument),
@@ -6129,14 +6105,14 @@ impl<'a> Lowerer<'a> {
         for field in unbound {
             if !repr.boxed() {
                 return Err(LowerError::Representation {
-                    at: "применяемое значение",
+                    at: text!("lower-126"),
                     want: describe(Repr::Boxed),
                     got: describe(repr),
                 });
             }
             if field.fact.present && !field.fact.repr.boxed() {
                 return Err(LowerError::Representation {
-                    at: "неснятое поле ветви",
+                    at: text!("lower-127"),
                     want: describe(Repr::Boxed),
                     got: describe(field.fact.repr),
                 });
@@ -6157,7 +6133,7 @@ impl<'a> Lowerer<'a> {
                     scope,
                     &Arg::Written(&Term::Var(*index)),
                     Repr::Boxed,
-                    "аргумент замыкания",
+                    text!("lower-128"),
                 )?;
                 body = Expr::Apply {
                     callee: Box::new(body),
@@ -6217,7 +6193,7 @@ impl<'a> Lowerer<'a> {
             arm.body =
                 self.uniformed(scope, body, *repr)?
                     .ok_or_else(|| LowerError::Representation {
-                        at: "ветвь разбора",
+                        at: text!("lower-129"),
                         want: describe(Repr::Boxed),
                         got: describe(*repr),
                     })?;
@@ -6271,7 +6247,7 @@ impl<'a> Lowerer<'a> {
         let mut free = BTreeSet::new();
         escaping(term, 0, &mut free);
         let (captured, taken, inner) =
-            self.capturing(scope, &free, Slots::Mixed, "захват замыкания")?;
+            self.capturing(scope, &free, Slots::Mixed, text!("lower-130"))?;
 
         let mut nested = Scope {
             locals: u32::try_from(captured.len()).unwrap_or(u32::MAX),
@@ -6335,7 +6311,7 @@ impl<'a> Lowerer<'a> {
             body: Expr::Erased,
         });
         let outer = std::mem::replace(&mut self.detached, true);
-        let body = self.shaped(&mut nested, &current, Repr::Boxed, "тело замыкания");
+        let body = self.shaped(&mut nested, &current, Repr::Boxed, text!("lower-131"));
         self.detached = outer;
         let mut body = body?;
         if discard {
@@ -6934,7 +6910,7 @@ impl Lowerer<'_> {
         for (position, field) in fields.iter().enumerate() {
             let under = depth + u32::try_from(position).unwrap_or(0);
             let written = self.repr_of(&field.ty, under, dicts)?;
-            let repr = self.stored(written, "поле записи")?;
+            let repr = self.stored(written, text!("lower-132"))?;
             labels.push(field.name.to_string());
             // Типовой член (`type T` в сигнатуре модуля, §4.8) значения в
             // рантайме не имеет: тип стёрт (§3.3), а кратность у него `1` -
@@ -7169,7 +7145,7 @@ impl Lowerer<'_> {
         let mut at = 0u32;
         while let Term::Pi(binder, _, domain, _, codomain) = current {
             let written = self.repr_of(domain, at, &empty)?;
-            let repr = self.stored(written, "поле конструктора")?;
+            let repr = self.stored(written, text!("lower-133"))?;
             facts.push(Fact::declared(binder.mult).shaped(repr));
             at += 1;
             current = codomain;

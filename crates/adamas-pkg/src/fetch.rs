@@ -148,8 +148,12 @@ impl Store {
             PkgError::Git { command, message } => PkgError::Git {
                 command,
                 message: format!(
-                    "{message}\n  в репозитории {}: не найден {asked}",
-                    dependency.git
+                    "{message}\n  {}",
+                    adamas_l10n::tr!(
+                        "pkg-git-not-found",
+                        repository = dependency.git,
+                        asked = asked
+                    )
                 ),
             },
             other => other,
@@ -192,7 +196,7 @@ impl Store {
         if std::fs::rename(&staging, dir).is_err() && !dir.is_dir() {
             return Err(PkgError::Write {
                 path: dir.to_path_buf(),
-                source: std::io::Error::other("чекаут не переименовался"),
+                source: std::io::Error::other(adamas_l10n::tr!("pkg-fetch-1")),
             });
         }
         if staging.exists() {
@@ -226,7 +230,7 @@ fn run(args: &[&str], cwd: Option<&Path>) -> Result<String, PkgError> {
     let written = args.join(" ");
     let output = command.output().map_err(|source| PkgError::Git {
         command: written.clone(),
-        message: format!("не запустился: {source}"),
+        message: adamas_l10n::tr!("pkg-git-not-started", source = source),
     })?;
     if !output.status.success() {
         return Err(PkgError::Git {

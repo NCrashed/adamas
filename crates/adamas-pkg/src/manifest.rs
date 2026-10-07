@@ -178,12 +178,12 @@ impl Manifest {
         let package = document
             .get("package")
             .map(toml::Spanned::get_ref)
-            .ok_or_else(|| PkgError::shape(path, "нет таблицы `[package]`"))?
+            .ok_or_else(|| PkgError::shape(path, adamas_l10n::tr!("pkg-manifest-1")))?
             .as_table()
-            .ok_or_else(|| PkgError::shape(path, "`package` - не таблица"))?;
+            .ok_or_else(|| PkgError::shape(path, adamas_l10n::tr!("pkg-manifest-2")))?;
 
         let name = string(path, package, "package", "name")?
-            .ok_or_else(|| PkgError::shape(path, "в `[package]` нет `name`"))?;
+            .ok_or_else(|| PkgError::shape(path, adamas_l10n::tr!("pkg-manifest-3")))?;
         // Имя стало **именем файла**: `adamas build` кладёт под ним артефакт.
         // Слеш и `..` в нём поэтому отсекаются здесь же, где и в путях модулей.
         file_name(path, "package.name", &name)?;
@@ -208,7 +208,7 @@ impl Manifest {
                 let table = value
                     .get_ref()
                     .as_table()
-                    .ok_or_else(|| PkgError::shape(path, "`dependencies` - не таблица"))?;
+                    .ok_or_else(|| PkgError::shape(path, adamas_l10n::tr!("pkg-manifest-4")))?;
                 let mut out = Vec::new();
                 for (key, value) in table {
                     out.push(dependency(path, key.get_ref(), value.get_ref())?);
@@ -260,7 +260,12 @@ fn string(
             .get_ref()
             .as_str()
             .map(|it| Some(it.to_owned()))
-            .ok_or_else(|| PkgError::shape(path, format!("`{section}.{key}` - не строка"))),
+            .ok_or_else(|| {
+                PkgError::shape(
+                    path,
+                    adamas_l10n::tr!("pkg-manifest-not-string", section = section, key = key),
+                )
+            }),
     }
 }
 
@@ -272,7 +277,7 @@ fn link(path: &Path, dir: &Path, document: &DeTable<'_>) -> Result<Link, PkgErro
     let table = value
         .get_ref()
         .as_table()
-        .ok_or_else(|| PkgError::shape(path, "`link` - не таблица"))?;
+        .ok_or_else(|| PkgError::shape(path, adamas_l10n::tr!("pkg-manifest-5")))?;
     let mut libraries = Vec::new();
     for written in strings(path, table, "link", "libraries")? {
         library_name(path, &written)?;

@@ -62,9 +62,7 @@ pub const MINIMUM_TOOLS_VARIABLE: &str = "ADAMAS_LLVM_MIN_BIN";
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
     /// Инструмента нет: ни в названном каталоге, ни в `PATH`.
-    #[error(
-        "{tool} не запускается ({why}); каталог задаёт `{TOOLS_VARIABLE}`, а в dev-shell он есть"
-    )]
+    #[error("{}", adamas_l10n::tr!("codegen-llvm-missing", tool = .tool, why = .why, TOOLS_VARIABLE = .TOOLS_VARIABLE))]
     Missing {
         /// Какой инструмент.
         tool: String,
@@ -73,7 +71,7 @@ pub enum ToolError {
     },
 
     /// Стадия отработала с ненулевым кодом.
-    #[error("{tool} отказал:\n{output}")]
+    #[error("{}", adamas_l10n::tr!("llvm-failed", tool = .tool, output = .output))]
     Failed {
         /// Какой инструмент.
         tool: String,
@@ -82,7 +80,7 @@ pub enum ToolError {
     },
 
     /// Версию не прочитать: формат вывода `--version` разошёлся с ожидаемым.
-    #[error("версия {tool} не прочиталась из `{output}`")]
+    #[error("{}", adamas_l10n::tr!("codegen-llvm-version", tool = .tool, output = .output))]
     Version {
         /// Какой инструмент.
         tool: String,
@@ -91,7 +89,7 @@ pub enum ToolError {
     },
 
     /// Своя стадия не прочитала вход либо не записала выход.
-    #[error("проход {pass} не прочитал вход либо не записал выход: {why}")]
+    #[error("{}", adamas_l10n::tr!("codegen-llvm-own", pass = .pass, why = .why))]
     Own {
         /// Какой проход.
         pass: String,
@@ -356,7 +354,11 @@ impl Pipeline {
             Stage::new("opt", &["-O2", "-S"], "inlined.ll"),
         ];
         if let Some(pass) = pass {
-            stages.push(Stage::pass("схлопывание RC", pass, "collapsed.ll"));
+            stages.push(Stage::pass(
+                adamas_l10n::text!("llvm-1"),
+                pass,
+                "collapsed.ll",
+            ));
         }
         stages.push(Stage::new(
             "llvm-link",
@@ -385,7 +387,11 @@ impl Pipeline {
             Stage::new("opt", &["-O2", "-S"], "inlined.ll"),
         ];
         if let Some(pass) = pass {
-            stages.push(Stage::pass("схлопывание RC", pass, "collapsed.ll"));
+            stages.push(Stage::pass(
+                adamas_l10n::text!("llvm-2"),
+                pass,
+                "collapsed.ll",
+            ));
         }
         stages.push(Stage::new("llc", &llc("-O2"), "o"));
         Self { stages }

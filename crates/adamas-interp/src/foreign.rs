@@ -262,7 +262,7 @@ impl Foreign {
             Cross::Nothing => "Unit".to_owned(),
             Cross::Erased => "0".to_owned(),
             Cross::Buffer(cell) => format!("Array _ {}", cell.name()),
-            Cross::Callback(_) => "колбэк".to_owned(),
+            Cross::Callback(_) => adamas_l10n::tr!("interp-foreign-4").to_owned(),
         };
         let mut params: Vec<String> = self.params.iter().map(written).collect();
         // Отметка печатается там же, где стояла в объявлении: сигнатура,
@@ -460,7 +460,7 @@ fn address(it: &Foreign, linkage: &Linkage) -> Result<Address, RunError> {
         if !opened {
             return Err(missing.unwrap_or_else(|| RunError::NoLibrary {
                 library: format!("lib{library}.{SHARED_SUFFIX}"),
-                why: "кандидатов не нашлось".to_owned(),
+                why: adamas_l10n::tr!("interp-foreign-5").to_owned(),
             }));
         }
     }
@@ -477,9 +477,9 @@ fn address(it: &Foreign, linkage: &Linkage) -> Result<Address, RunError> {
         library: linkage.written(),
         symbol: it.symbol.clone(),
         why: if anywhere {
-            "`dlsym` не нашёл его ни в одной".to_owned()
+            adamas_l10n::tr!("interp-foreign-6").to_owned()
         } else {
-            "ни одна связанная библиотека не открылась".to_owned()
+            adamas_l10n::tr!("interp-foreign-7").to_owned()
         },
     })
 }

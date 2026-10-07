@@ -74,7 +74,12 @@ pub(crate) fn build(path: &Path, backend: Backend) -> anyhow::Result<PathBuf> {
     // `Rc`, как и всё ядро, и потому не `Send`.
     let made =
         adamas_elab::mono::specialise(&mut signature, &mut metas, &checked.instances, &written)
-            .map_err(|why| anyhow::anyhow!("{}: специализация отказала: {why}", checked.name))?;
+            .map_err(|why| {
+                anyhow::anyhow!(
+                    "{}",
+                    adamas_l10n::tr!("cli-specialisation", name = checked.name, why = why)
+                )
+            })?;
 
     let dir = opened.store.join("build");
     // Чужие библиотеки едут в обе сборки одинаково: `-L`/`-l` у `cc` и у
@@ -101,11 +106,12 @@ pub(crate) fn build(path: &Path, backend: Backend) -> anyhow::Result<PathBuf> {
                 .map_err(|error| refused(&checked.units, &signature, error))?;
             let text = dir.join(format!("{name}.ll"));
             if let Some(parent) = text.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("не удалось создать {}", parent.display()))?;
+                std::fs::create_dir_all(parent).with_context(|| {
+                    adamas_l10n::tr!("cli-cannot-create", path = parent.display())
+                })?;
             }
             std::fs::write(&text, &artefacts.ll)
-                .with_context(|| format!("не удалось записать {}", text.display()))?;
+                .with_context(|| adamas_l10n::tr!("cli-cannot-write", path = text.display()))?;
             let tools = Toolchain::from_variable(adamas_codegen::llvm::TOOLS_VARIABLE);
             let object = Pipeline::optimised().run(&tools, &text, name)?;
             let support = if entry.printed {
@@ -116,7 +122,10 @@ pub(crate) fn build(path: &Path, backend: Backend) -> anyhow::Result<PathBuf> {
             native.link(name, &object, &support)?
         }
     };
-    eprintln!("{}: собрано в {}", checked.name, binary.display());
+    eprintln!(
+        "{}",
+        adamas_l10n::tr!("cli-built", name = checked.name, path = binary.display())
+    );
     Ok(binary)
 }
 
@@ -133,7 +142,7 @@ pub(crate) fn run(path: &Path, backend: Backend) -> anyhow::Result<i32> {
     let binary = build(path, backend)?;
     let status = std::process::Command::new(&binary)
         .status()
-        .with_context(|| format!("не удалось запустить {}", binary.display()))?;
+        .with_context(|| adamas_l10n::tr!("cli-cannot-start", path = binary.display()))?;
     // Сигнал кода возврата не даёт, а нулём отвечать на него нельзя: оборванный
     // прогон отличается от успешного именно этим.
     Ok(status.code().unwrap_or(1))
@@ -190,10 +199,14 @@ fn refused(
             anyhow::anyhow!("{}", adamas_elab::located(file, span, &error.to_string()))
         }
         Some((short, file, span)) => anyhow::anyhow!(
-            "{}\n  отказ в `{failed}`, до которого дотянулось `{short}`",
-            adamas_elab::located(file, span, &error.to_string())
+            "{}\n  {}",
+            adamas_elab::located(file, span, &error.to_string()),
+            adamas_l10n::tr!("cli-reached-from", failed = failed, short = short)
         ),
-        None => anyhow::anyhow!("{error}\n  в определении `{failed}`"),
+        None => anyhow::anyhow!(
+            "{error}\n  {}",
+            adamas_l10n::tr!("cli-in-definition", name = failed)
+        ),
     }
 }
 

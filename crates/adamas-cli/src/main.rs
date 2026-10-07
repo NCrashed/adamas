@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use adamas_core::term::PRINT_DEPTH;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory as _, FromArgMatches as _, Parser, Subcommand};
 
 use compile::Backend;
 
@@ -121,7 +121,11 @@ enum Command {
 /// отказов корпуса и сверка «редактор видит то же, что терминал» сверяются с
 /// текстом целиком, вместе с этим словом.
 fn main() -> ExitCode {
-    match dispatch(Cli::parse().command) {
+    let cli = match Cli::from_arg_matches(&localized().get_matches()) {
+        Ok(cli) => cli,
+        Err(error) => error.exit(),
+    };
+    match dispatch(cli.command) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("Error: {error:?}");
@@ -184,23 +188,31 @@ fn check(path: &std::path::Path, wanted: &[String]) -> anyhow::Result<()> {
         // без счёта файлов говорил бы про неё неправду.
         if checked.files > 1 {
             println!(
-                "{}: проверено, файлов {}, объявлений {}",
-                checked.name,
-                checked.files,
-                declared(&checked.signature, &checked.prelude)
+                "{}",
+                adamas_l10n::tr!(
+                    "cli-checked-files",
+                    name = checked.name,
+                    files = adamas_l10n::count(checked.files),
+                    declarations =
+                        adamas_l10n::count(declared(&checked.signature, &checked.prelude))
+                )
             );
         } else {
             println!(
-                "{}: проверено, объявлений {}",
-                checked.name,
-                declared(&checked.signature, &checked.prelude)
+                "{}",
+                adamas_l10n::tr!(
+                    "cli-checked",
+                    name = checked.name,
+                    declarations =
+                        adamas_l10n::count(declared(&checked.signature, &checked.prelude))
+                )
             );
         }
         return Ok(());
     }
     for name in wanted {
         let Some(shown) = adamas_elab::cursor::described(&checked.signature, name) else {
-            anyhow::bail!("имя `{name}` сигнатуре неизвестно");
+            anyhow::bail!("{}", adamas_l10n::tr!("cli-unknown-name", name = name));
         };
         println!("{shown}");
     }
@@ -250,4 +262,77 @@ fn declared(
         .into_iter()
         .filter(|name| !prelude.contains(name))
         .count()
+}
+
+/// Подкоманды и их аргументы: по ним справка берётся из каталога (§7.6).
+///
+/// Doc-комментарии выше - для читателя кода; человеку в терминале справка
+/// приходит переводом `cli-help-<команда>` и `cli-help-<команда>-<аргумент>`.
+const HELP: &[(&str, &[&str])] = &[
+    ("new", &["path", "name"]),
+    ("check", &["path", "type"]),
+    ("build", &["path", "backend"]),
+    ("run", &["path", "backend"]),
+    ("fmt", &["path", "check"]),
+    ("doc", &["path"]),
+    ("test", &["path"]),
+    ("eval", &["path", "name", "full"]),
+];
+
+/// Разбор аргументов со справкой на языке процесса.
+fn localized() -> clap::Command {
+    let text = |id: String| adamas_l10n::message(&id, &[]);
+    let mut command = Cli::command().about(adamas_l10n::tr!("cli-help-about"));
+    for (name, arguments) in HELP {
+        command = command.mut_subcommand(*name, |mut sub| {
+            sub = sub.about(text(format!("cli-help-{name}")));
+            for argument in *arguments {
+                sub = sub.mut_arg(*argument, |arg| {
+                    let arg = arg.help(text(format!("cli-help-{name}-{argument}")));
+                    // `ИМЯ` у `--name` и `--type`; позиционные называет clap.
+                    if matches!(*argument, "name" | "type") && *name != "eval" {
+                        arg.value_name(adamas_l10n::text!("cli-help-value-name"))
+                    } else {
+                        arg
+                    }
+                });
+            }
+            sub
+        });
+    }
+    command
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Справка покрывает все подкоманды и аргументы, и у каждого есть текст в
+    /// каталоге: иначе человек увидел бы идентификатор вместо фразы.
+    #[test]
+    fn every_command_and_argument_has_its_help_in_both_languages() {
+        let command = Cli::command();
+        let written: Vec<&str> = command
+            .get_subcommands()
+            .map(clap::Command::get_name)
+            .collect();
+        let listed: Vec<&str> = HELP.iter().map(|(name, _)| *name).collect();
+        assert_eq!(written, listed, "подкоманды разошлись с перечнем справки");
+        for (name, arguments) in HELP {
+            let sub = command.find_subcommand(name).expect("подкоманда есть");
+            let ids: Vec<String> = sub
+                .get_arguments()
+                .filter(|it| !matches!(it.get_id().as_str(), "help"))
+                .map(|it| it.get_id().to_string())
+                .collect();
+            assert_eq!(ids, *arguments, "{name}: аргументы разошлись с перечнем");
+            for lang in [adamas_l10n::Lang::Ru, adamas_l10n::Lang::En] {
+                let ids = std::iter::once(format!("cli-help-{name}"))
+                    .chain(arguments.iter().map(|it| format!("cli-help-{name}-{it}")));
+                for id in ids {
+                    assert_ne!(adamas_l10n::message_in(lang, &id, &[]), id, "{lang:?}");
+                }
+            }
+        }
+    }
 }

@@ -69,14 +69,14 @@ pub(crate) fn run(path: &Path) -> anyhow::Result<bool> {
     let opened = project::opened(path)?;
     let Some(entry) = opened.tests else {
         anyhow::bail!(
-            "{}: это не проект, а тесты живут в модуле проекта (`[package] test`)",
-            opened.entry.display()
+            "{}",
+            adamas_l10n::tr!("cli-test-not-a-project", path = opened.entry.display())
         );
     };
     if !entry.is_file() {
         anyhow::bail!(
-            "тестового модуля нет: ожидался {}; имя модуля задаёт `[package] test`",
-            entry.display()
+            "{}",
+            adamas_l10n::tr!("cli-test-no-module", path = entry.display())
         );
     }
     let checked = project::checked(&entry, opened.sources.as_ref())?;
@@ -90,11 +90,22 @@ pub(crate) fn run(path: &Path) -> anyhow::Result<bool> {
             Ok(()) => println!("{name}: ok"),
             Err(why) => {
                 failed += 1;
-                println!("{name}: ОТКАЗ - {why}");
+                println!(
+                    "{}",
+                    adamas_l10n::tr!("cli-test-failed", name = name, why = why)
+                );
             }
         }
     }
-    println!("{}: тестов {}, отказов {failed}", checked.name, named.len());
+    println!(
+        "{}",
+        adamas_l10n::tr!(
+            "cli-test-summary",
+            name = checked.name,
+            tests = adamas_l10n::count(named.len()),
+            failed = adamas_l10n::count(failed)
+        )
+    );
     Ok(failed == 0)
 }
 
@@ -121,17 +132,15 @@ fn collected(signature: &Signature) -> anyhow::Result<Vec<String>> {
         // способ, которым команда бывает зелена, ничего не сделав.
         if !boolean(&definition.ty) {
             anyhow::bail!(
-                "`{name}` назван тестом, но объявлен не `Bool`; тест - определение \
-                 с именем на `{PREFIX}` и типом `Bool`"
+                "{}",
+                adamas_l10n::tr!("cli-test-not-bool", name = name, prefix = PREFIX)
             );
         }
         named.push(name.to_string());
     }
     named.sort();
     if named.is_empty() {
-        anyhow::bail!(
-            "тестов нет ни одного; тест - определение с именем на `{PREFIX}` и типом `Bool`"
-        );
+        anyhow::bail!("{}", adamas_l10n::tr!("cli-test-none", prefix = PREFIX));
     }
     Ok(named)
 }
@@ -165,10 +174,10 @@ fn verdict(
         .map_err(|why| why.to_string())?;
     match &answer {
         Term::Const(constructor, _, _) if short(constructor) == adamas_core::prim::TRUE => Ok(()),
-        other => Err(format!(
-            "ожидался `{}`, получено `{}`",
-            adamas_core::prim::TRUE,
-            other.printed(Some(adamas_core::term::PRINT_DEPTH))
+        other => Err(adamas_l10n::tr!(
+            "cli-test-answer",
+            expected = adamas_core::prim::TRUE,
+            found = other.printed(Some(adamas_core::term::PRINT_DEPTH))
         )),
     }
 }

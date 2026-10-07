@@ -87,10 +87,10 @@ fn standard(module: &str) -> anyhow::Result<String> {
 
     let dir = std::env::temp_dir().join(format!("adamas-doc-{}", std::process::id()));
     std::fs::create_dir_all(&dir)
-        .with_context(|| format!("не удалось создать {}", dir.display()))?;
+        .with_context(|| adamas_l10n::tr!("cli-cannot-create", path = dir.display()))?;
     let entry = dir.join("Doc.adamas");
     std::fs::write(&entry, format!("import {module}\n"))
-        .with_context(|| format!("не удалось записать {}", entry.display()))?;
+        .with_context(|| adamas_l10n::tr!("cli-cannot-write", path = entry.display()))?;
     let opened = crate::project::opened(&entry);
     let analyzed =
         opened.and_then(|opened| crate::project::analyzed(&opened.entry, opened.sources.as_ref()));
@@ -143,8 +143,8 @@ fn documented(program: &Program, unit: &Unit) -> String {
         Err(_) => Vec::new(),
     };
     let title = unit.path.as_deref().map_or_else(
-        || format!("Файл `{}`", unit.file.name()),
-        |path| format!("Модуль `{path}`"),
+        || adamas_l10n::tr!("cli-doc-file", name = unit.file.name()),
+        |path| adamas_l10n::tr!("cli-doc-module", path = path),
     );
     let within: Vec<String> = unit.path.clone().into_iter().collect();
     let mut entries = Vec::new();
@@ -166,7 +166,8 @@ fn documented(program: &Program, unit: &Unit) -> String {
         out.push_str("\n\n");
     }
     if entries.is_empty() {
-        out.push_str("Документированных имён нет.\n\n");
+        out.push_str(&adamas_l10n::tr!("cli-doc-empty"));
+        out.push_str("\n\n");
         return out;
     }
     for entry in entries {

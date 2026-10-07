@@ -110,11 +110,21 @@ pub(crate) fn opened(path: &Path) -> anyhow::Result<Opened> {
     // временем, и человеку это надо видеть.
     for dependency in &project.resolved {
         if dependency.refreshed {
-            eprintln!("{}: достаю {}", dependency.canonical, dependency.rev);
+            eprintln!(
+                "{}",
+                adamas_l10n::tr!(
+                    "cli-fetching",
+                    name = dependency.canonical,
+                    rev = dependency.rev
+                )
+            );
         }
     }
     if project.relocked {
-        eprintln!("{}: обновлён", adamas_pkg::lock::LOCKFILE);
+        eprintln!(
+            "{}",
+            adamas_l10n::tr!("cli-relocked", file = adamas_pkg::lock::LOCKFILE)
+        );
     }
     Ok(Opened {
         entry: written.unwrap_or_else(|| project.entry_file()),
@@ -177,16 +187,18 @@ pub(crate) fn checked(
     // Прелюдия подключается неявно (§4.4), и считать её файлом программы -
     // неправда: автор её не писал и в отчёте не ждёт. По той же причине её
     // объявления не входят в счёт ниже.
+    // Имя вшитого файла - «вшитый Std.IO» на языке процесса (§7.6).
+    let embedded = adamas_l10n::tr!("program-embedded", path = "");
     let files = program
         .units
         .iter()
         .filter(|it| it.path.as_deref() != Some(adamas_elab::program::PRELUDE))
         // Вшитая стандартная библиотека - не файл программы: пути у неё нет.
-        .filter(|it| !it.file.name().starts_with("вшитый "))
+        .filter(|it| !it.file.name().starts_with(&embedded))
         .count();
     let signature = program
         .signature
-        .ok_or_else(|| anyhow::anyhow!("{name}: проход не отдал сигнатуры"))?;
+        .ok_or_else(|| anyhow::anyhow!("{}", adamas_l10n::tr!("cli-no-signature", name = name)))?;
     Ok(Checked {
         name,
         files,
@@ -217,7 +229,7 @@ pub(crate) fn analyzed(
     sources: &dyn adamas_elab::program::Sources,
 ) -> anyhow::Result<adamas_elab::program::Program> {
     let text = std::fs::read_to_string(entry)
-        .with_context(|| format!("не удалось прочитать {}", entry.display()))?;
+        .with_context(|| adamas_l10n::tr!("cli-cannot-read", path = entry.display()))?;
     let file = SourceFile::new(entry.display().to_string(), text);
 
     let program = adamas_elab::program::analyze(file, sources);
@@ -262,10 +274,13 @@ pub(crate) fn body(
     use adamas_core::term::Term;
 
     let Some(definition) = signature.lookup(name) else {
-        anyhow::bail!("определение `{name}` не найдено");
+        anyhow::bail!(
+            "{}",
+            adamas_l10n::tr!("cli-unknown-definition", name = name)
+        );
     };
     let Some(body) = &definition.body else {
-        anyhow::bail!("у `{name}` нет тела: постулат вычислять нечем");
+        anyhow::bail!("{}", adamas_l10n::tr!("cli-postulate", name = name));
     };
     let levels: Vec<Level> = (0..definition.level_arity)
         .map(|_| Level::number(0))
@@ -344,7 +359,9 @@ pub(crate) fn entry(signature: &adamas_core::sig::Signature, name: &str) -> anyh
     let made = signature
         .constructors(unit)
         .and_then(|it| it.first())
-        .ok_or_else(|| anyhow::anyhow!("у единицы `{unit}` нет конструктора"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("{}", adamas_l10n::tr!("cli-unit-constructor", unit = unit))
+        })?;
     let run = reference(signature, IO_RUN).apply([(**answer).clone(), reference(signature, name)]);
     Ok(Entry {
         printed: !is_unit(answer),

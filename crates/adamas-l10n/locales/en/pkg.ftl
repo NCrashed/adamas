@@ -22,3 +22,12 @@ pkg-git-not-found = in repository { $repository }: { $asked } not found
 pkg-lock-version = format version { $version }, the tool understands { $known }: delete the file, it will be created anew
 pkg-lock-missing-key = `[[package]]` has no `{ $key }`
 pkg-manifest-not-string = `{ $section }.{ $key }` is not a string
+pkg-manifest-not-strings = `{ $section }.{ $key }` is not a list of strings
+pkg-manifest-library = `link.libraries` = `{ $written }` is not a library name: it is written as for `-l`, without `lib` and without an extension
+pkg-manifest-dependency-table = `dependencies.{ $prefix }` is not a table: a dependency is written `{"{"} git = "…", tag = "…" {"}"}`
+pkg-manifest-no-git = `[dependencies.{ $prefix }]` has no `git`; a compound prefix is written in quotes: `"{ $prefix }.Something" = {"{"} git = … {"}"}`
+pkg-manifest-no-version = `[dependencies.{ $prefix }]` has neither `rev` nor `tag` (§7.3: a git URL plus a commit or a tag)
+pkg-manifest-rev-and-tag = `[dependencies.{ $prefix }]` has both `rev` and `tag`: choose one
+pkg-manifest-module-path = `{ $field }` = `{ $written }` is not a module path: segments separated by dots, each of letters, digits, `_` and `'`
+pkg-manifest-file-name = `{ $field }` = `{ $written }` is not a file name: letters, digits, `_` and `-`
+pkg-manifest-escapes = `{ $field }` = `{ $written }` leads outside the manifest directory

@@ -120,45 +120,25 @@ const NOALLOC: &str = "@noalloc";
 /// площадки хендлера стоит трёх блоков кучи и в перечень источников §5.1 не
 /// входит. Подсказка, обещавшая бы «ноль аллокаций», разносила бы этот пробел
 /// по всем окнам сразу.
-const NOALLOC_WHY: &str = "`@noalloc` на этом определении был бы принят: среди источников, \
-                           перечисленных §5.1, вердикт не нашёл ни одного. Вердикт отвечает про \
-                           перечисленное - установка площадки хендлера в перечень не входит и \
-                           стоит трёх блоков кучи (§10 вопрос 190).";
+const NOALLOC_WHY: &str = "lsp-hints-1";
 
 /// Пояснение к переписанной ячейке.
-const REUSE_WHY: &str = "Построение занимает слот ячейки, разобранной ветвью: форма кода reuse'у \
-                         не мешает, и на уникальном входе (RC = 1) оно перепишет слоты вместо \
-                         аллокации (§5.1). Вставку делают оба понижения; сработает она или нет, \
-                         решает счётчик ссылок в рантайме, а уникальность есть свойство места \
-                         вызова - поэтому подсказка говорит о форме кода, а не о конкретном \
-                         прогоне. У машины (`adamas eval`) reuse нет вовсе.";
+const REUSE_WHY: &str = "lsp-hints-2";
 
 /// Пояснение к связыванию, которое закрывает не оно само.
-const SPENT: &str = "Связывание линейно по построению (§3.3), но деструктора здесь не будет: \
-                     значение расходуется дальше, и закроет его тот, кто взял. У `unique data` \
-                     деструктора нет вовсе - память освобождается статически.";
+const SPENT: &str = "lsp-hints-3";
 
 /// Пояснение к месту вставки деструктора.
-const RELEASED: &str = "Сюда компилятор вставит вызов деструктора - на выходе из области \
-                        видимости связывания, и на **всех** выходах: включая тот, где \
-                        вычисление оборвано эффектом (§3.3 × §3.4). Порядок между несколькими \
-                        - LIFO: связанное позже закрывается раньше.";
+const RELEASED: &str = "lsp-hints-4";
 
 /// Пояснение к метке, которую снимает хендлер.
-const DISCHARGES: &str = "Метку `handle` берёт из первой ветки-операции, если она не написана за \
-                          `@` (§4.1): в тексте её тут нет, а снимается именно она. На корпусе так \
-                          написаны 151 хендлер из 175.";
+const DISCHARGES: &str = "lsp-hints-5";
 
 /// Пояснение к использованию операции.
-const PERFORMS: &str = "Хендлеры **этого файла**, гасящие метку операции. Какой из них сработает, \
-                        решает место вызова, а не место операции: `handle` берёт названное \
-                        вычисление (§3.4), поэтому операция и её хендлер стоят в разных телах. \
-                        «в ряд» - в этом файле метка не гасится и уходит наверх по ряду.";
+const PERFORMS: &str = "lsp-hints-6";
 
 /// Пояснение к звену цепочки, у которого места нет.
-const NO_SPOT: &str = "Места нет: за этим именем стоит запись, собранная элаборацией - значение \
-                       модуля либо словарь инстанса, - и написанного выражения автор не писал. \
-                       Указать было бы некуда (82 таких определения на корпусе).";
+const NO_SPOT: &str = "lsp-hints-7";
 
 /// Подсказки для видимого куска буфера.
 ///
@@ -245,20 +225,25 @@ impl Shown<'_> {
             let (mut label, mut why) = match &blamed {
                 Some(blame) => (
                     self.chain(&name, blame),
-                    format!("Аллоцирует в куче Perceus: {blame}."),
+                    adamas_l10n::tr!("lsp-allocates-heap", blame = blame),
                 ),
-                None => (vec![part(NOALLOC)], NOALLOC_WHY.to_owned()),
+                None => (
+                    vec![part(NOALLOC)],
+                    adamas_l10n::text(NOALLOC_WHY).to_owned(),
+                ),
             };
             if let Some(reuse) = self.signature.reuse(&name) {
                 let (text, said) = match (&reuse.blocked, reuse.rewrites.len()) {
                     (Some(blocked), _) => (
-                        ", reuse не сошёлся".to_owned(),
-                        format!("Переиспользование ячейки: {}.", blocked.fault),
+                        adamas_l10n::tr!("lsp-hints-8").to_owned(),
+                        adamas_l10n::tr!("lsp-reuse-blocked", fault = blocked.fault),
                     ),
                     (None, count) => (
                         format!(", reuse {count}"),
-                        format!(
-                            "Построений, занимающих слот разобранной ячейки: {count}. {REUSE_WHY}"
+                        adamas_l10n::tr!(
+                            "lsp-reuse-count",
+                            count = count,
+                            why = adamas_l10n::text(REUSE_WHY)
                         ),
                     ),
                 };
@@ -292,7 +277,7 @@ impl Shown<'_> {
         // где оно аллоцирует. Без этого читателю пришлось бы искать место
         // глазами в собственном теле.
         let mut label = vec![InlayHintLabelPart {
-            value: "куча".to_owned(),
+            value: adamas_l10n::tr!("lsp-hints-9").to_owned(),
             location: self
                 .signature
                 .allocated_at(name)
@@ -329,7 +314,9 @@ impl Shown<'_> {
             },
             None => InlayHintLabelPart {
                 value: format!("‹{link}›"),
-                tooltip: Some(InlayHintLabelPartTooltip::String(NO_SPOT.to_owned())),
+                tooltip: Some(InlayHintLabelPartTooltip::String(
+                    adamas_l10n::text(NO_SPOT).to_owned(),
+                )),
                 ..InlayHintLabelPart::default()
             },
         }
@@ -385,16 +372,11 @@ impl Shown<'_> {
             let (label, why) = match &it.released {
                 Some(released) => (
                     it.owned.keyword().to_owned(),
-                    format!(
-                        "Связывание линейно по построению (§3.3). Компилятор вставит \
-                         `{} {}` на выходе из области видимости - на всех выходах, \
-                         включая обрыв эффектом.",
-                        released.drop, it.name
-                    ),
+                    adamas_l10n::tr!("lsp-released-here", drop = released.drop, name = it.name),
                 ),
                 None => (
-                    format!("{}, расходуется", it.owned.keyword()),
-                    SPENT.to_owned(),
+                    adamas_l10n::tr!("lsp-spent", keyword = it.owned.keyword()),
+                    adamas_l10n::text(SPENT).to_owned(),
                 ),
             };
             out.push(InlayHint {
@@ -440,7 +422,7 @@ impl Shown<'_> {
                 text_edits: None,
                 tooltip: Some(InlayHintTooltip::MarkupContent(MarkupContent {
                     kind: MarkupKind::PlainText,
-                    value: RELEASED.to_owned(),
+                    value: adamas_l10n::text(RELEASED).to_owned(),
                 })),
                 padding_left: Some(true),
                 padding_right: None,
@@ -487,7 +469,7 @@ impl Shown<'_> {
                 text_edits: None,
                 tooltip: Some(InlayHintTooltip::MarkupContent(MarkupContent {
                     kind: MarkupKind::PlainText,
-                    value: DISCHARGES.to_owned(),
+                    value: adamas_l10n::text(DISCHARGES).to_owned(),
                 })),
                 padding_left: None,
                 padding_right: Some(true),
@@ -520,7 +502,7 @@ impl Shown<'_> {
             // Молчать о пустом множестве нельзя: читатель принял бы отсутствие
             // подсказки за отсутствие механизма, а не за отсутствие хендлера.
             if first {
-                label.push(part("в ряд"));
+                label.push(part(adamas_l10n::text!("lsp-hints-10")));
             }
             out.push(InlayHint {
                 position,
@@ -529,7 +511,7 @@ impl Shown<'_> {
                 text_edits: None,
                 tooltip: Some(InlayHintTooltip::MarkupContent(MarkupContent {
                     kind: MarkupKind::PlainText,
-                    value: PERFORMS.to_owned(),
+                    value: adamas_l10n::text(PERFORMS).to_owned(),
                 })),
                 padding_left: None,
                 padding_right: Some(true),
@@ -554,21 +536,22 @@ impl Shown<'_> {
                 .allocated_at(&name)
                 .filter(|it| self.here(it))
             {
-                let why = alloc::blame(self.signature, &name)
-                    .map_or_else(String::new, |blame| format!("Аллоцирует: {blame}."));
-                self.mark(out, spot, "куча", &why);
+                let why = alloc::blame(self.signature, &name).map_or_else(String::new, |blame| {
+                    adamas_l10n::tr!("lsp-allocates", blame = blame)
+                });
+                self.mark(out, spot, adamas_l10n::text!("lsp-hints-11"), &why);
             }
             let Some(reuse) = self.signature.reuse(&name) else {
                 continue;
             };
             for spot in &reuse.rewrites {
-                self.mark(out, spot, "reuse", REUSE_WHY);
+                self.mark(out, spot, "reuse", adamas_l10n::text(REUSE_WHY));
             }
             if let Some(blocked) = &reuse.blocked {
                 self.mark(
                     out,
                     &blocked.spot,
-                    "без reuse",
+                    adamas_l10n::text!("lsp-hints-12"),
                     &format!("{}.", blocked.fault),
                 );
             }
@@ -632,12 +615,12 @@ fn shortly_named(name: &str) -> String {
 fn shortly(source: &Source) -> String {
     match source {
         Source::Construct(name) | Source::Call(name) => name.to_string(),
-        Source::Record => "запись".to_owned(),
-        Source::Closure => "замыкание".to_owned(),
-        Source::Partial(name) => format!("{name} частично"),
-        Source::Operation(name) => format!("операция {name}"),
-        Source::Resumption { effect, .. } => format!("хендлер {effect}"),
-        Source::Boxing => "боксирование".to_owned(),
-        Source::Opaque(name) => format!("{name} без тела"),
+        Source::Record => adamas_l10n::tr!("lsp-hints-13").to_owned(),
+        Source::Closure => adamas_l10n::tr!("lsp-hints-14").to_owned(),
+        Source::Partial(name) => adamas_l10n::tr!("lsp-blame-partial", name = name),
+        Source::Operation(name) => adamas_l10n::tr!("lsp-blame-operation", name = name),
+        Source::Resumption { effect, .. } => adamas_l10n::tr!("lsp-blame-handler", effect = effect),
+        Source::Boxing => adamas_l10n::tr!("lsp-hints-15").to_owned(),
+        Source::Opaque(name) => adamas_l10n::tr!("lsp-blame-opaque", name = name),
     }
 }

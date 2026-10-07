@@ -60,7 +60,7 @@ pub(crate) fn run(path: &Path, check: bool) -> anyhow::Result<bool> {
     };
     for file in files {
         let source = std::fs::read_to_string(&file)
-            .with_context(|| format!("не удалось прочитать {}", file.display()))?;
+            .with_context(|| adamas_l10n::tr!("cli-cannot-read", path = file.display()))?;
         report.seen += 1;
         let Some(canonical) = formatted(&file, &source, &mut report) else {
             continue;
@@ -71,7 +71,7 @@ pub(crate) fn run(path: &Path, check: bool) -> anyhow::Result<bool> {
         report.changed.push(file.clone());
         if !check {
             std::fs::write(&file, &canonical)
-                .with_context(|| format!("не удалось записать {}", file.display()))?;
+                .with_context(|| adamas_l10n::tr!("cli-cannot-write", path = file.display()))?;
         }
     }
     announce(&report, check);
@@ -101,21 +101,25 @@ fn located(path: &Path, source: &str, error: &adamas_parser::Error) -> String {
 /// Что команда говорит человеку.
 fn announce(report: &Report, check: bool) {
     for refusal in &report.refused {
-        eprintln!("не форматируется: {refusal}");
+        eprintln!("{}", adamas_l10n::tr!("cli-fmt-refused", refusal = refusal));
     }
     for path in &report.changed {
         println!("{}", path.display());
     }
     let verb = if check {
-        "не в каноне"
+        adamas_l10n::tr!("cli-fmt-1")
     } else {
-        "переформатировано"
+        adamas_l10n::tr!("cli-fmt-2")
     };
     println!(
-        "файлов {}, {verb} {}, отказов {}",
-        report.seen,
-        report.changed.len(),
-        report.refused.len()
+        "{}",
+        adamas_l10n::tr!(
+            "cli-fmt-summary",
+            seen = adamas_l10n::count(report.seen),
+            verb = verb,
+            changed = adamas_l10n::count(report.changed.len()),
+            refused = adamas_l10n::count(report.refused.len())
+        )
     );
 }
 
@@ -137,10 +141,10 @@ fn gathered(path: &Path) -> anyhow::Result<Vec<PathBuf>> {
 
 fn walk(dir: &Path, found: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     let entries = std::fs::read_dir(dir)
-        .with_context(|| format!("не удалось прочитать каталог {}", dir.display()))?;
+        .with_context(|| adamas_l10n::tr!("cli-cannot-read-dir", path = dir.display()))?;
     for entry in entries {
         let path = entry
-            .with_context(|| format!("не удалось прочитать каталог {}", dir.display()))?
+            .with_context(|| adamas_l10n::tr!("cli-cannot-read-dir", path = dir.display()))?
             .path();
         let hidden = path
             .file_name()

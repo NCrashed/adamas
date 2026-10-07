@@ -35,7 +35,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 
 /// Вход программы: функция над текстом, функция над числом и `main`,
-/// который печатает обе.
+/// который печатает обе. Заготовка - на языке процесса (§7.6), английская
+/// копия ниже.
 const MAIN: &str = "\
 -- Вход программы. `adamas run` соберёт её и запустит, `adamas eval` посчитает
 -- интерпретатором, `adamas check` только проверит типы.
@@ -83,6 +84,54 @@ const IGNORE: &str = "\
 /.adamas/
 ";
 
+/// [`MAIN`] по-английски.
+const MAIN_EN: &str = "\
+-- The program entry. `adamas run` builds and runs it, `adamas eval` evaluates it
+-- with the interpreter, `adamas check` only checks the types.
+--
+-- `main` with the `Console` label runs by itself: printing is `putLine` from `Std.IO`
+-- (`adamas doc Std.IO`). The prelude - `String`, `<>`, `show`, `==` - comes
+-- without an import.
+
+import Std.IO (Console, putLine)
+
+-- | A greeting by name.
+greeting : String -> String
+greeting name = \"Hello, \" <> name <> \"!\"
+
+-- | The sum of numbers from 1 to `n`.
+triangle : UInt64 -> UInt64
+triangle n = if n == 0 then 0 else n + triangle (n - 1)
+
+main : {Console} Unit
+main =
+  putLine (greeting \"world\")
+  putLine (\"1 + 2 + ... + 10 = \" <> show (triangle 10))
+";
+
+/// [`TEST`] по-английски.
+const TEST_EN: &str = "\
+-- The program's tests (§7.1). A test is a definition named `test…` of type
+-- `Bool`; `adamas test` evaluates it and requires `True`.
+--
+-- The entry is imported as an ordinary module: a file is a module (§4.8).
+
+import Main (greeting, triangle)
+
+testGreetingNamesTheGuest : Bool
+testGreetingNamesTheGuest = greeting \"Ada\" == \"Hello, Ada!\"
+
+testTriangleOfTen : Bool
+testTriangleOfTen = triangle 10 == 55
+";
+
+/// [`IGNORE`] по-английски.
+const IGNORE_EN: &str = "\
+# The dependency cache and build artefacts (§7.3). The lock `adamas.lock`, on the
+# contrary, is committed: it is what makes the build reproducible.
+/.adamas/
+";
+
 /// Заводит проект в написанном каталоге.
 ///
 /// # Errors
@@ -98,28 +147,38 @@ pub(crate) fn create(path: &Path, name: Option<&str>) -> anyhow::Result<()> {
     // команде, но заведён проект был бы уже.
     named(&name)?;
     if path.is_dir() && path.read_dir().is_ok_and(|mut it| it.next().is_some()) {
-        anyhow::bail!("каталог {} не пуст", path.display());
+        anyhow::bail!(
+            "{}",
+            adamas_l10n::tr!("cli-not-empty", path = path.display())
+        );
     }
 
     let manifest = format!("[package]\nname = \"{name}\"\n");
+    let (main, test, ignore) = match adamas_l10n::current() {
+        adamas_l10n::Lang::Ru => (MAIN, TEST, IGNORE),
+        adamas_l10n::Lang::En => (MAIN_EN, TEST_EN, IGNORE_EN),
+    };
     for (at, text) in [
         (
             PathBuf::from(adamas_pkg::manifest::MANIFEST),
             manifest.as_str(),
         ),
-        (PathBuf::from(".gitignore"), IGNORE),
-        (["src", "Main.adamas"].iter().collect(), MAIN),
-        (["src", "Test.adamas"].iter().collect(), TEST),
+        (PathBuf::from(".gitignore"), ignore),
+        (["src", "Main.adamas"].iter().collect(), main),
+        (["src", "Test.adamas"].iter().collect(), test),
     ] {
         let at = path.join(at);
         if let Some(parent) = at.parent() {
             std::fs::create_dir_all(parent)
-                .with_context(|| format!("не удалось создать {}", parent.display()))?;
+                .with_context(|| adamas_l10n::tr!("cli-cannot-create", path = parent.display()))?;
         }
         std::fs::write(&at, text)
-            .with_context(|| format!("не удалось записать {}", at.display()))?;
+            .with_context(|| adamas_l10n::tr!("cli-cannot-write", path = at.display()))?;
     }
-    println!("{name}: заведён в {}", path.display());
+    println!(
+        "{}",
+        adamas_l10n::tr!("cli-created", name = name, path = path.display())
+    );
     Ok(())
 }
 
@@ -127,8 +186,8 @@ pub(crate) fn create(path: &Path, name: Option<&str>) -> anyhow::Result<()> {
 fn derived(path: &Path) -> anyhow::Result<String> {
     let Some(name) = path.file_name().map(|it| it.to_string_lossy().into_owned()) else {
         anyhow::bail!(
-            "из пути {} не вывести имени пакета: напишите его ключом `--name`",
-            path.display()
+            "{}",
+            adamas_l10n::tr!("cli-no-package-name", path = path.display())
         );
     };
     Ok(name)
@@ -145,9 +204,7 @@ fn named(name: &str) -> anyhow::Result<()> {
             .chars()
             .all(|it| it.is_alphanumeric() || it == '_' || it == '-');
     if !ok {
-        anyhow::bail!(
-            "`{name}` не годится в имя пакета: буквы, цифры, `_` и `-`; другое задаёт `--name`"
-        );
+        anyhow::bail!("{}", adamas_l10n::tr!("cli-bad-package-name", name = name));
     }
     Ok(())
 }

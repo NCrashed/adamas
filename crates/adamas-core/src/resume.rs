@@ -671,28 +671,14 @@ pub enum Blocked {
 
 impl fmt::Display for Blocked {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Handler { label, verdict } => write!(
-                f,
-                "эффект `{label}` в позиции колбэка: его хендлер {verdict}, то есть управление \
-                 в чужой кадр нормально не вернёт (§5.3). Между входом в колбэк и возвратом из \
-                 него лежит фрейм, построенный C: раскрутить его мы не можем и пропустить не \
-                 имеем права. Идиома отмены - записать намерение и вернуться нормально, а \
-                 действовать уже на своей стороне границы"
-            ),
-            Self::Unhandled(label) => write!(
-                f,
-                "эффект `{label}` в позиции колбэка не гасит ни один хендлер программы: \
-                 непогашенная операция обрывает исполнение, и в чужой кадр управление не \
-                 возвращается вовсе (§5.3)"
-            ),
-            Self::Open(tail) => write!(
-                f,
-                "row колбэка открыта хвостом `{tail}`: что придёт сверх написанного, в точке \
-                 регистрации неизвестно, а чужой кадр требует ответа до вызова (§5.3). \
-                 Напишите row замкнутой"
-            ),
-        }
+        use adamas_l10n::tr;
+        f.write_str(&match self {
+            Self::Handler { label, verdict } => {
+                tr!("blocked-handler", label = label, verdict = verdict)
+            }
+            Self::Unhandled(label) => tr!("blocked-unhandled", label = label),
+            Self::Open(tail) => tr!("blocked-open", tail = tail),
+        })
     }
 }
 

@@ -22,3 +22,12 @@ pkg-git-not-found = в репозитории { $repository }: не найден
 pkg-lock-version = версия формата { $version }, инструмент понимает { $known }: удалите файл, он будет создан заново
 pkg-lock-missing-key = в `[[package]]` нет `{ $key }`
 pkg-manifest-not-string = `{ $section }.{ $key }` - не строка
+pkg-manifest-not-strings = `{ $section }.{ $key }` - не список строк
+pkg-manifest-library = `link.libraries` = `{ $written }` - не имя библиотеки: пишется оно как у `-l`, без `lib` и без расширения
+pkg-manifest-dependency-table = `dependencies.{ $prefix }` - не таблица: зависимость пишется `{"{"} git = "…", tag = "…" {"}"}`
+pkg-manifest-no-git = в `[dependencies.{ $prefix }]` нет `git`; составной префикс пишется в кавычках: `"{ $prefix }.Что-то" = {"{"} git = … {"}"}`
+pkg-manifest-no-version = в `[dependencies.{ $prefix }]` нет ни `rev`, ни `tag` (§7.3: git URL плюс коммит или тег)
+pkg-manifest-rev-and-tag = в `[dependencies.{ $prefix }]` написаны и `rev`, и `tag`: выберите одно
+pkg-manifest-module-path = `{ $field }` = `{ $written }` - не путь модуля: сегменты через точку, каждый из букв, цифр, `_` и `'`
+pkg-manifest-file-name = `{ $field }` = `{ $written }` - не имя файла: буквы, цифры, `_` и `-`
+pkg-manifest-escapes = `{ $field }` = `{ $written }` выводит за каталог манифеста

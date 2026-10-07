@@ -110,6 +110,8 @@ pub const CATALOGS: &[(&str, &str, &str)] = &[
     catalog!("codegen.ftl"),
     catalog!("interp.ftl"),
     catalog!("pkg.ftl"),
+    catalog!("cli.ftl"),
+    catalog!("lsp.ftl"),
 ];
 
 fn bundle(lang: Lang) -> &'static FluentBundle<FluentResource> {

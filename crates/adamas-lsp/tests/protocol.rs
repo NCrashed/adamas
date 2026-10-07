@@ -76,7 +76,7 @@ mod client {
         /// обязан молчать, когда её нет, и проверяется это тем же способом -
         /// прогоном без неё.
         pub(crate) fn start_refreshing(root: Option<&str>) -> Self {
-            Self::spawn(root, None, true).0
+            Self::spawn(root, None, true, None).0
         }
 
         /// То же, но клиент называет корень рабочего пространства.
@@ -85,11 +85,26 @@ mod client {
         /// модуля пишется от корня проекта, и `import Std.Base` внутри
         /// `Std/Arith.adamas` без корня искался бы в `Std/Std/`.
         pub(crate) fn start_in(root: Option<&str>, encodings: Option<&[&str]>) -> (Self, Value) {
-            Self::spawn(root, encodings, false)
+            Self::spawn(root, encodings, false, None)
         }
 
-        fn spawn(root: Option<&str>, encodings: Option<&[&str]>, refresh: bool) -> (Self, Value) {
-            let mut child = Command::new(env!("CARGO_BIN_EXE_adamas-lsp"))
+        /// Сервер, которому клиент назвал язык интерфейса (§7.6), без
+        /// `ADAMAS_LANG`: она старше клиента и выбор бы перекрыла.
+        pub(crate) fn start_speaking(locale: &str) -> Self {
+            Self::spawn(None, None, false, Some(locale)).0
+        }
+
+        fn spawn(
+            root: Option<&str>,
+            encodings: Option<&[&str]>,
+            refresh: bool,
+            locale: Option<&str>,
+        ) -> (Self, Value) {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_adamas-lsp"));
+            if locale.is_some() {
+                command.env_remove("ADAMAS_LANG");
+            }
+            let mut child = command
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
@@ -120,6 +135,7 @@ mod client {
                     "processId": Value::Null,
                     "rootUri": root.map_or(Value::Null, |it| json!(it)),
                     "capabilities": { "general": general, "workspace": workspace },
+                    "locale": locale.map_or(Value::Null, |it| json!(it)),
                 }),
             );
             client.notify("initialized", &json!({}));
@@ -1509,4 +1525,26 @@ fn a_client_without_the_capability_is_not_asked() {
         "возможность не объявлена - запроса быть не должно"
     );
     client.stop();
+}
+
+/// Язык диагностики - язык интерфейса клиента (§7.6): `initialize.locale`.
+#[test]
+fn the_client_locale_chooses_the_language() {
+    let mut english = Client::start_speaking("en");
+    let said = english.open(URI, &fixture(FIXTURE));
+    assert_eq!(
+        said[0]["message"],
+        json!("expected a function, found a value of type `Nat`"),
+        "{said}"
+    );
+    english.stop();
+
+    let mut russian = Client::start_speaking("ru-RU");
+    let said = russian.open(URI, &fixture(FIXTURE));
+    assert_eq!(
+        said[0]["message"],
+        json!("ожидалась функция, получено значение типа `Nat`"),
+        "{said}"
+    );
+    russian.stop();
 }

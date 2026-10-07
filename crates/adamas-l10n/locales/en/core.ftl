@@ -111,3 +111,6 @@ trap-division-by-zero = division by zero
 trap-lane-outside = lane number outside the vector width
 trap-cell-outside = cell number outside the array length
 trap-window-outside = vector window outside the array length
+blocked-handler = effect `{ $label }` in a callback position: its handler is { $verdict }, so control will not return to the foreign frame normally (§5.3). Between entering the callback and returning from it lies a frame built by C: we cannot unwind it and have no right to skip it. The cancellation idiom is to record the intent and return normally, and act on our own side of the boundary
+blocked-unhandled = effect `{ $label }` in a callback position is discharged by no handler of the program: an unhandled operation aborts execution, and control never returns to the foreign frame (§5.3)
+blocked-open = the callback's row is open with tail `{ $tail }`: what comes beyond the written labels is unknown at the registration site, and the foreign frame requires an answer before the call (§5.3). Write the row closed

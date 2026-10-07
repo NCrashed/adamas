@@ -139,11 +139,25 @@ struct Client {
     refreshes: bool,
 }
 
+/// Язык сообщений сервера (§7.6): язык интерфейса клиента, если его не
+/// перекрыл `ADAMAS_LANG`.
+///
+/// Своя переменная старше клиента, как и старше локали у драйвера: ею тесты
+/// редакторов фиксируют язык снимков, а VS Code шлёт `locale` всегда. Клиент
+/// без `locale` оставляет язык окружению.
+fn choose_language(locale: Option<&str>, lookup: impl Fn(&str) -> Option<String>) {
+    let ours = lookup("ADAMAS_LANG").is_some_and(|it| !it.is_empty());
+    if let Some(locale) = locale.filter(|_| !ours) {
+        adamas_l10n::set(adamas_l10n::Lang::from_tag(locale));
+    }
+}
+
 /// Рукопожатие: читает `initialize`, договаривается о кодировке и корнях,
 /// отвечает возможностями.
 fn handshake(connection: &Connection) -> anyhow::Result<Client> {
     let (id, params) = connection.initialize_start()?;
     let params: InitializeParams = serde_json::from_value(params)?;
+    choose_language(params.locale.as_deref(), |name| std::env::var(name).ok());
     let roots = workspace(&params);
     let refreshes = params
         .capabilities
@@ -681,8 +695,8 @@ fn serve(connection: &Connection, client: &Client) -> anyhow::Result<()> {
                 // при этом всё равно закончит цикл: получатель закроется.
                 if let Err(error) = handle(connection, client, &mut documents, &note) {
                     eprintln!(
-                        "adamas-lsp: уведомление `{}` не обработано: {error}",
-                        note.method
+                        "adamas-lsp: {}",
+                        adamas_l10n::tr!("lsp-notification", method = note.method, error = error)
                     );
                 }
             }
@@ -716,13 +730,13 @@ fn answer(
         HoverRequest::METHOD | GotoDefinition::METHOD | DocumentHighlightRequest::METHOD => {
             match serde_json::from_value(request.params.clone()) {
                 Ok(params) => Some(params),
-                Err(error) => return refuse(format!("параметры не разобраны: {error}")),
+                Err(error) => return refuse(adamas_l10n::tr!("lsp-bad-params", error = error)),
             }
         }
         _ => None,
     };
     let Some(asked) = asked else {
-        return refuse(format!("метод `{}` сервером не поддержан", request.method));
+        return refuse(adamas_l10n::tr!("lsp-unsupported", method = request.method));
     };
     let uri = asked.text_document.uri;
     let Some(document) = documents.get(uri.as_str()) else {

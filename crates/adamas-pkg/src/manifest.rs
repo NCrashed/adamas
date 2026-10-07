@@ -300,15 +300,20 @@ fn strings(
     let Some(value) = table.get(key) else {
         return Ok(Vec::new());
     };
-    let items = value
-        .get_ref()
-        .as_array()
-        .ok_or_else(|| PkgError::shape(path, format!("`{section}.{key}` - не список строк")))?;
+    let items = value.get_ref().as_array().ok_or_else(|| {
+        PkgError::shape(
+            path,
+            adamas_l10n::tr!("pkg-manifest-not-strings", section = section, key = key),
+        )
+    })?;
     items
         .iter()
         .map(|item| {
             item.get_ref().as_str().map(str::to_owned).ok_or_else(|| {
-                PkgError::shape(path, format!("`{section}.{key}` - не список строк"))
+                PkgError::shape(
+                    path,
+                    adamas_l10n::tr!("pkg-manifest-not-strings", section = section, key = key),
+                )
             })
         })
         .collect()
@@ -330,10 +335,7 @@ fn library_name(path: &Path, written: &str) -> Result<(), PkgError> {
     }
     Err(PkgError::shape(
         path,
-        format!(
-            "`link.libraries` = `{written}` - не имя библиотеки: пишется оно как у `-l`, \
-             без `lib` и без расширения"
-        ),
+        adamas_l10n::tr!("pkg-manifest-library", written = written),
     ))
 }
 
@@ -342,7 +344,7 @@ fn dependency(path: &Path, prefix: &str, value: &DeValue<'_>) -> Result<Dependen
     let table = value.as_table().ok_or_else(|| {
         PkgError::shape(
             path,
-            format!("`dependencies.{prefix}` - не таблица: зависимость пишется `{{ git = \"…\", tag = \"…\" }}`"),
+            adamas_l10n::tr!("pkg-manifest-dependency-table", prefix = prefix),
         )
     })?;
     module_path(path, &format!("dependencies.{prefix}"), prefix)?;
@@ -353,10 +355,7 @@ fn dependency(path: &Path, prefix: &str, value: &DeValue<'_>) -> Result<Dependen
         // чем оставить «нет `git`» на таблице, которую никто не писал.
         return Err(PkgError::shape(
             path,
-            format!(
-                "в `[dependencies.{prefix}]` нет `git`; \
-                 составной префикс пишется в кавычках: `\"{prefix}.Что-то\" = {{ git = … }}`"
-            ),
+            adamas_l10n::tr!("pkg-manifest-no-git", prefix = prefix),
         ));
     };
     let rev = string(path, table, &section, "rev")?;
@@ -367,15 +366,13 @@ fn dependency(path: &Path, prefix: &str, value: &DeValue<'_>) -> Result<Dependen
         (None, None) => {
             return Err(PkgError::shape(
                 path,
-                format!(
-                    "в `[dependencies.{prefix}]` нет ни `rev`, ни `tag` (§7.3: git URL плюс коммит или тег)"
-                ),
+                adamas_l10n::tr!("pkg-manifest-no-version", prefix = prefix),
             ));
         }
         (Some(_), Some(_)) => {
             return Err(PkgError::shape(
                 path,
-                format!("в `[dependencies.{prefix}]` написаны и `rev`, и `tag`: выберите одно"),
+                adamas_l10n::tr!("pkg-manifest-rev-and-tag", prefix = prefix),
             ));
         }
     };
@@ -405,9 +402,7 @@ fn module_path(path: &Path, field: &str, written: &str) -> Result<(), PkgError> 
     }
     Err(PkgError::shape(
         path,
-        format!(
-            "`{field}` = `{written}` - не путь модуля: сегменты через точку, каждый из букв, цифр, `_` и `'`"
-        ),
+        adamas_l10n::tr!("pkg-manifest-module-path", field = field, written = written),
     ))
 }
 
@@ -425,7 +420,7 @@ fn file_name(path: &Path, field: &str, written: &str) -> Result<(), PkgError> {
     }
     Err(PkgError::shape(
         path,
-        format!("`{field}` = `{written}` - не имя файла: буквы, цифры, `_` и `-`"),
+        adamas_l10n::tr!("pkg-manifest-file-name", field = field, written = written),
     ))
 }
 
@@ -441,7 +436,7 @@ fn inside(path: &Path, field: &str, written: &str) -> Result<PathBuf, PkgError> 
     if escapes {
         return Err(PkgError::shape(
             path,
-            format!("`{field}` = `{written}` выводит за каталог манифеста"),
+            adamas_l10n::tr!("pkg-manifest-escapes", field = field, written = written),
         ));
     }
     Ok(candidate)

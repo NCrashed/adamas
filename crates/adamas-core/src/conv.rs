@@ -775,6 +775,10 @@ fn same_head(
         (Head::Prim(op_a, ty_a), Head::Prim(op_b, ty_b)) => op_a == op_b && ty_a == ty_b,
         // Сравнение - тем же правилом.
         (Head::Cmp(op_a, ty_a), Head::Cmp(op_b, ty_b)) => op_a == op_b && ty_a == ty_b,
+        // Преобразование - тоже. Без этой строки два одинаковых
+        // `uInt8ToUInt64 b` не сходились, и отказ печатал «ожидался X,
+        // получен X».
+        (Head::Convert(a), Head::Convert(b)) => a == b,
         // Массив (§4.11) и вектор (§4.9) - такие же имена, и аргументы у них
         // сравнивает общий обход спайна ниже.
         (Head::Array, Head::Array) | (Head::Simd, Head::Simd) => true,

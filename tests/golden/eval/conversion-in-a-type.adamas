@@ -1,0 +1,22 @@
+-- Преобразование в типе сходится с собой (§4.3, §4.11).
+--
+-- `case decide (ltUInt64 i 256)` при `i = uInt8ToUInt64 b` отвечал «ожидался
+-- `Decision (ltUInt64 (uInt8ToUInt64 b) 256)`, получен» то же самое: у
+-- конвертируемости было правило для каждой головы-примитива, кроме
+-- преобразования, и две одинаковые `uInt8ToUInt64 b` сравнивались как разные.
+--
+-- Байт всегда меньше 256: ответ 1 на каждый из трёх - 3.
+
+below : UInt8 -> UInt64
+below b =
+  let i : UInt64 = uInt8ToUInt64 b
+  case decide (ltUInt64 i 256) of
+    Yes _p -> 1
+    No _q -> 0
+
+main : UInt64
+main =
+  let low : UInt8 = 0
+  let mid : UInt8 = 7
+  let high : UInt8 = 255
+  below low + below mid + below high

@@ -1,0 +1,30 @@
+-- Клаузы с перекрытием и вложенным паттерном собираются (§10 вопрос 245).
+--
+-- Калькулятор обратной польской записи: стек - список, и клауза
+-- `Cons b (Cons a st)` перекрывается с соседними. Машина считала, а обе
+-- сборки отказывали в специализации: «тип `\(0 m0) -> Int` невозможно
+-- синтезировать». Решение дырки - замкнутая лямбда по контексту, и подстановка
+-- оставляла в теле бета-редекс, голову которого ядро не синтезирует;
+-- подстановка теперь его сводит.
+--
+-- `ev [1, 2, 3] []`: 1 и 2 ложатся на стек, 3 складывает их с собой - 6.
+-- `ev [] [4]` - 4, `ev [] []` - нет ответа, `ev [5] []` - 5. 6 + 4 + 0 + 5 = 15.
+
+ev : List Int -> List Int -> Option Int
+ev Nil (Cons v Nil) = Some v
+ev Nil _ = None
+ev (Cons v rest) (Cons b (Cons a st)) = ev rest (Cons (a + b + v) st)
+ev (Cons v rest) st = ev rest (Cons v st)
+
+got : Option Int -> Int
+got (Some v) = v
+got None = 0
+
+main : Int
+main =
+  let one : Int = 1
+  let two : Int = 2
+  let three : Int = 3
+  let four : Int = 4
+  let five : Int = 5
+  got (ev [one, two, three] []) + got (ev [] [four]) + got (ev [] []) + got (ev [five] [])

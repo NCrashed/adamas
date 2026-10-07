@@ -798,17 +798,11 @@ const x _y = x
 flip : (a -> b -> c) -> b -> a -> c
 flip f x y = f y x
 
--- Хвост записи `[…]`: каждый элемент с запятой перед ним.
-listedRest : {Show a} => List a -> String
-listedRest Nil = ""
-listedRest (Cons x xs) = ", " <> show x <> listedRest xs
-
--- Элементы через запятую - тело записи `[…]`. Первый - без запятой; отдельным
--- помощником, а не клаузой `Cons x Nil`: вложенный паттерн при словаре
--- специализация сегодня не берёт (§10 вопрос 245).
+-- Элементы через запятую - тело записи `[…]`.
 listed : {Show a} => List a -> String
 listed Nil = ""
-listed (Cons x xs) = show x <> listedRest xs
+listed (Cons x Nil) = show x
+listed (Cons x xs) = show x <> ", " <> listed xs
 
 instance {Show a} => Show (List a) where
   show xs = "[" <> listed xs <> "]"

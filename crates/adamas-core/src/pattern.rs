@@ -3018,6 +3018,104 @@ fn shift_at(term: &Term, depth: u32, by: u32) -> Term {
     }
 }
 
+/// Подставляет `argument` вместо переменной `0` терма `body`, стоящего под одним
+/// связыванием, - бета-шаг `(\x -> body) argument` синтаксически.
+///
+/// Обход тот же, что у [`shift_at`]: позиции под связыванием у них общие.
+/// Нормализатором шаг не делается: зонк его зовёт на открытом терме, глубины
+/// которого не знает, а обратное чтение открытой записи требует среды целиком.
+#[must_use]
+pub fn instantiate(body: &Term, argument: &Term) -> Term {
+    fn go(term: &Term, depth: u32, argument: &Term) -> Term {
+        let recur = |inner: &Rc<Term>| Rc::new(go(inner, depth, argument));
+        let under = |inner: &Rc<Term>| Rc::new(go(inner, depth + 1, argument));
+        match term {
+            Term::Var(Index(index)) if *index == depth => shift_free(argument, depth),
+            Term::Var(Index(index)) if *index > depth => Term::Var(Index(index - 1)),
+            Term::Var(_)
+            | Term::Universe(_)
+            | Term::RowKind(_)
+            | Term::EffectKind
+            | Term::Const(..)
+            | Term::Prim(_)
+            | Term::Meta(_) => term.clone(),
+            Term::Record(fields) => Term::Record(instantiate_fields(fields, depth, argument)),
+            Term::Row(fields) => Term::Row(instantiate_fields(fields, depth, argument)),
+            Term::Object(fields) => Term::Object(
+                fields
+                    .iter()
+                    .map(|(name, value)| (Rc::clone(name), recur(value)))
+                    .collect(),
+            ),
+            Term::With(base, fields) => Term::With(
+                recur(base),
+                fields
+                    .iter()
+                    .map(|(name, value)| (Rc::clone(name), recur(value)))
+                    .collect(),
+            ),
+            Term::Project(record, name) => Term::Project(recur(record), Rc::clone(name)),
+            Term::Lam(mult, name, body) => Term::Lam(*mult, Rc::clone(name), under(body)),
+            Term::App(callee, inner) => Term::App(recur(callee), recur(inner)),
+            Term::Pi(binder, name, domain, row, codomain) => Term::Pi(
+                *binder,
+                Rc::clone(name),
+                recur(domain),
+                row.map(|inner| go(inner, depth + 1, argument)),
+                under(codomain),
+            ),
+            Term::Let(mult, name, ty, value, body) => {
+                Term::Let(*mult, Rc::clone(name), recur(ty), recur(value), under(body))
+            }
+            Term::Split(split) => Term::Split(Rc::new(crate::term::Split {
+                consumed: split.consumed,
+                scrutinee: recur(&split.scrutinee),
+                motive: recur(&split.motive),
+                fields: Rc::clone(&split.fields),
+                body: recur(&split.body),
+            })),
+            Term::Case(case) => Term::Case(Rc::new(Case {
+                data: Rc::clone(&case.data),
+                levels: Rc::clone(&case.levels),
+                params: case.params,
+                consumed: case.consumed,
+                scrutinee: recur(&case.scrutinee),
+                motive: recur(&case.motive),
+                branches: case
+                    .branches
+                    .iter()
+                    .map(|branch| Branch {
+                        constructor: Rc::clone(&branch.constructor),
+                        body: recur(&branch.body),
+                    })
+                    .collect(),
+            })),
+        }
+    }
+    fn instantiate_fields(fields: &Fields, depth: u32, argument: &Term) -> Fields {
+        let at = |index: usize| depth + arity_u32(index);
+        Fields {
+            fields: fields
+                .iter()
+                .enumerate()
+                .map(|(index, field)| RecordField {
+                    name: Rc::clone(&field.name),
+                    mult: field.mult,
+                    shape: field.shape,
+                    ty: Rc::new(go(&field.ty, at(index), argument)),
+                })
+                .collect(),
+            // Хвост - во внешней среде, без полей: так его вычисляет и
+            // нормализатор (`Telescope::tail`), и сдвиг (`shift_fields`).
+            tail: fields
+                .tail
+                .as_ref()
+                .map(|tail| Rc::new(go(tail, depth, argument))),
+        }
+    }
+    go(body, 0, argument)
+}
+
 /// Счётчик в `u32`. Столько аргументов и переменных не бывает.
 fn arity_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or_else(|_| unreachable!("счётчик не помещается в u32"))

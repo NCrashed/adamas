@@ -1515,7 +1515,19 @@ pub fn zonk_term(metas: &Metas, term: &crate::term::Term) -> crate::term::Term {
         Term::Lam(mult, name, body) => {
             Term::Lam(metas.settle_mult(*mult), Rc::clone(name), recur(body))
         }
-        Term::App(callee, argument) => Term::App(recur(callee), recur(argument)),
+        // Решение дырки - замкнутая лямбда по контексту, где её завели, и
+        // подставленное в `?m x̄` оно даёт бета-редекс `(\x̄ -> t) x̄`. Ядро
+        // голову-лямбду синтезировать не умеет, и тело с таким редексом в
+        // позиции типа не перепроверялось - специализация отказывала там, где
+        // машина считала. Редекс сводится здесь же подстановкой.
+        Term::App(callee, argument) => {
+            let callee = recur(callee);
+            let argument = recur(argument);
+            if let Term::Lam(_, _, body) = &*callee {
+                return zonk_term(metas, &crate::pattern::instantiate(body, &argument));
+            }
+            Term::App(callee, argument)
+        }
         Term::Pi(binder, name, domain, row, codomain) => Term::Pi(
             crate::term::Binder {
                 mult: metas.settle_mult(binder.mult),

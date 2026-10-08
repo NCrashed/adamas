@@ -1980,10 +1980,13 @@ fn declare_instance(
         signature,
         metas,
         owned,
+        instances,
         fixities,
         warnings,
         &prefix,
+        &written,
         &written_types,
+        span,
     )?;
     let qualified: Vec<Symbol> = members
         .iter()
@@ -2279,8 +2282,9 @@ fn pure_spine(written: &Term) -> Term {
 /// видимости, где умолчание написано.
 type Written = (Symbol, Vec<ast::Clause>, Span, Option<Scope>);
 
-/// Значение типового члена в инстансе, как написано: имя и тип (§4.1).
-type TypeMember<'a> = (&'a ast::Name, &'a ast::Expr);
+/// Значение типового члена в инстансе, как написано: имя, параметры и тип (§4.1).
+/// Параметры пишутся голыми именами: их типы - в классе (`type Safe (y : a)`).
+type TypeMember<'a> = (&'a ast::Name, &'a [ast::Binder], &'a ast::Expr);
 
 /// Члены инстанса: методы класса вместе с клаузами, которые их определяют.
 ///
@@ -2297,12 +2301,13 @@ fn instance_members<'a>(
     for member in &class.members {
         match &member.kind {
             DeclKind::Clauses { name, clauses } => written.push((name, clauses, member.span)),
-            // Значение типового члена (§4.1): `type Product = V2`.
+            // Значение типового члена (§4.1): `type Product = V2`, `type Safe y =
+            // y /= 0`.
             DeclKind::Alias {
                 name,
                 params,
                 body: Some(body),
-            } if params.is_empty() => types.push((name, body)),
+            } => types.push((name, params.as_slice(), body)),
             _ => {
                 return Err(ElabError::ModuleMember {
                     name: member_name(member)
@@ -2321,7 +2326,7 @@ fn instance_members<'a>(
             span,
         });
     };
-    for (member, _) in &types {
+    for (member, ..) in &types {
         if !info.types.contains(&member.text) {
             return Err(ElabError::ModuleMember {
                 name: Rc::clone(&member.text),
@@ -2333,7 +2338,7 @@ fn instance_members<'a>(
     }
     let mut ordered = Vec::with_capacity(info.types.len());
     for member in &info.types {
-        let Some(found) = types.iter().find(|(it, _)| it.text == *member) else {
+        let Some(found) = types.iter().find(|(it, ..)| it.text == *member) else {
             return Err(ElabError::MissingTypeMember {
                 name: Rc::clone(member),
                 span,
@@ -2403,22 +2408,101 @@ fn dictionary_head(
 }
 /// Значения типовых членов инстанса (§4.1), элаборированные под его префиксом
 /// - там же, где живут поля словаря.
+#[allow(clippy::too_many_arguments)]
 fn instance_types(
     signature: &Signature,
     metas: &mut Metas,
     owned: &Owned,
+    instances: &Instances,
     fixities: &Fixities,
     warnings: &mut Warnings,
     prefix: &[Param],
+    head: &Term,
     written: &[TypeMember<'_>],
+    span: Span,
 ) -> Result<Vec<(Symbol, Term)>, ElabError> {
     let mut found = Vec::with_capacity(written.len());
-    for (name, body) in written {
+    for (name, params, body) in written {
+        let params = member_params(signature, metas, prefix, head, name, params, span)?;
+        let scope = [prefix, params.as_slice()].concat();
         let term = Elaborator::new(signature, metas, owned, fixities, warnings)
-            .beneath(prefix, |it| it.declaration(body, Mult::Zero))?;
+            .beneath(&scope, |it| it.member_value(body))?;
+        // Словари в значении (`/=` у `type Safe y = y /= 0`) решаются здесь:
+        // дальше значение живёт в записи словаря, а дырки - до конца
+        // объявления. Разрешение ждёт замкнутый тип - им служит телескоп.
+        let closed = scope.iter().rev().fold(term.clone(), |inner, param| {
+            Term::Pi(
+                Binder::explicit(param.mult),
+                CoreName::from(&*param.name),
+                Rc::clone(&param.ty),
+                Row::empty(),
+                Rc::new(inner),
+            )
+        });
+        class::resolve_type(signature, metas, instances, owned, &closed, span)?;
+        let term = params.iter().rev().fold(term, |inner, param| {
+            Term::Lam(param.mult, CoreName::from(&*param.name), Rc::new(inner))
+        });
         found.push((Rc::clone(&name.text), zonk_term(metas, &term)));
     }
     Ok(found)
+}
+
+/// Параметры типового члена инстанса - с типами из класса.
+///
+/// Инстанс пишет их голыми именами (`type Safe y = y /= 0`), а тип поля
+/// словаря, где класс применён к голове инстанса, их знает: `(y : Int64) ->
+/// Type`. Читается он проекцией, как тип метода ([`instance_method`]).
+fn member_params(
+    signature: &Signature,
+    metas: &mut Metas,
+    prefix: &[Param],
+    head: &Term,
+    member: &ast::Name,
+    written: &[ast::Binder],
+    span: Span,
+) -> Result<Vec<Param>, ElabError> {
+    let names: Vec<&ast::Name> = written.iter().flat_map(|it| &it.names).collect();
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let refuse = || ElabError::ModuleMember {
+        name: Rc::clone(&member.text),
+        what: adamas_l10n::text!("decl-26"),
+        why: adamas_l10n::text!("decl-27"),
+        span,
+    };
+    let mut ctx = Ctx::new(signature);
+    for param in prefix {
+        let bound = ctx.eval(&param.ty);
+        ctx = ctx.bind(CoreName::from(&*param.name), param.mult, bound);
+    }
+    let record = ctx.eval(under_prefix(head));
+    let bound = ctx.bind(CoreName::from("d"), Mult::Many, record);
+    let (field, _) =
+        adamas_core::check::projected(&bound, metas, &Term::var(0), &CoreName::from(&*member.text))
+            .map_err(|_| refuse())?;
+    // Тип поля под связыванием словаря; от него параметры не зависят, и
+    // связывание снимается.
+    let quoted = quote(bound.size(), &field);
+    if mentions_depth(&quoted, 0) {
+        return Err(refuse());
+    }
+    let mut current = adamas_core::pattern::instantiate(&quoted, &Term::EffectKind);
+    let mut params = Vec::with_capacity(names.len());
+    for name in names {
+        let Term::Pi(binder, _, domain, _, codomain) = &current else {
+            return Err(refuse());
+        };
+        params.push(Param {
+            mult: binder.mult,
+            name: Rc::clone(&name.text),
+            ty: Rc::clone(domain),
+        });
+        let next = (**codomain).clone();
+        current = next;
+    }
+    Ok(params)
 }
 
 /// Тип одного метода инстанса - выведенный из класса проекцией словаря.
@@ -2451,22 +2535,49 @@ fn instance_method(
     // Типовые члены инстанса известны значением (§4.1): словарь связан
     // записью из них, и `d.Product` в типе метода - уже `V2`, а не ссылка на
     // словарь, которой у члена инстанса нет.
-    let bound = if types.is_empty() {
-        ctx.bind(CoreName::from("d"), Mult::Many, value)
+    //
+    // Запись несёт **все** поля: тип поля читается по телескопу, и проекция
+    // берёт значения полей перед ним. Прочие поля - проекции непрозрачной
+    // `s`, связанной перед словарём: зависимость метода от значения другого
+    // метода видна тогда упоминанием `s`. Пока запись несла одни типовые
+    // члены, второй метод класса с типовым членом ронял проекцию.
+    let (bound, dependent) = if types.is_empty() {
+        (ctx.bind(CoreName::from("d"), Mult::Many, value), 0)
     } else {
-        let known: Vec<(CoreName, Rc<Term>)> = types
-            .iter()
-            .map(|(name, ty)| (CoreName::from(&**name), Rc::new(ty.clone())))
+        let fields: Vec<CoreName> = match &*whnf(signature, &value) {
+            Value::Record(telescope) => telescope
+                .fields()
+                .iter()
+                .map(|field| Rc::clone(&field.name))
+                .collect(),
+            _ => types
+                .iter()
+                .map(|(name, _)| CoreName::from(&**name))
+                .collect(),
+        };
+        let opaque = ctx.bind(CoreName::from("s"), Mult::Many, Rc::clone(&value));
+        let known: Vec<(CoreName, Rc<Term>)> = fields
+            .into_iter()
+            .map(|field| {
+                let known = types.iter().find(|(name, _)| **name == *field).map_or_else(
+                    || Term::Project(Rc::new(Term::var(0)), Rc::clone(&field)),
+                    |(_, ty)| adamas_core::pattern::shift_free(ty, 1),
+                );
+                (field, Rc::new(known))
+            })
             .collect();
-        let known = ctx.eval(&Term::Object(known.into()));
-        ctx.define(CoreName::from("d"), Mult::Many, value, known)
+        let known = opaque.eval(&Term::Object(known.into()));
+        (
+            opaque.define(CoreName::from("d"), Mult::Many, value, known),
+            1,
+        )
     };
     // Параметры поля переходят в параметры **члена инстанса**: у поля своё
     // пространство индексов, и граница с определением - здесь (§10 вопрос 115).
     let (found, shape) =
         adamas_core::check::projected(&bound, metas, &Term::var(0), &CoreName::from(method))
             .map_err(fail)?;
-    if mentions_depth(&quote(bound.size(), &found), 0) {
+    if mentions_depth(&quote(bound.size(), &found), dependent) {
         return Err(ElabError::ModuleMember {
             name: Rc::from(method),
             what: adamas_l10n::text!("decl-30"),

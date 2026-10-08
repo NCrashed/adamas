@@ -3231,10 +3231,9 @@ impl<'a> Builder<'a> {
             (PrimOp::Sub, true) => "fsub",
             (PrimOp::Mul, true) => "fmul",
             (PrimOp::Div, true) => "fdiv",
-            // Остатка у плавающего нет (`PrimOp::over`), поэтому `frem` не
-            // эмитится ни разу: он к тому же не инструкция по существу -
-            // `llc` разворачивает его в вызов `fmod` из libm.
-            (PrimOp::Rem, true) => return Err(self.node(adamas_l10n::text!("emit_llvm-32"))),
+            // `frem` - не инструкция по существу: `llc` разворачивает его в
+            // вызов `fmod` из libm, тот же, что зовёт `flat.c`.
+            (PrimOp::Rem, true) => "frem",
             (PrimOp::Shl | PrimOp::Shr, _) => return Ok(self.shift(op, ty, &left, &right)),
             (PrimOp::Div | PrimOp::Rem, false) => {
                 return Ok(self.division(op, ty, &left, &right));

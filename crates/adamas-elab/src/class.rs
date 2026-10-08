@@ -583,13 +583,19 @@ fn settle_collecting(
         // Факт ограничения `{d /= 0} =>` (§3.7): сперва вычисление, потом
         // гипотеза контекста. Утверждение с нерешённой дыркой ждёт её решения -
         // словарь `/=` и тип литерала решает этот же цикл.
-        if let Some(claim) = adamas_core::check::claim_of(signature, &goal) {
+        // Предусловие-член класса (`{Safe y} =>`) - тот же факт, как только
+        // словарь известен: `Divide#Int64.Safe y` сводится к `Equal Bool (y /=
+        // 0) True`. Над словарём-переменной оно остаётся применением члена, и
+        // доказать его может только гипотеза.
+        let opened = member_goal(signature, &goal).then(|| unfolded_goal(signature, metas, &ty));
+        let claim = adamas_core::check::claim_of(signature, opened.as_ref().unwrap_or(&goal));
+        if claim.is_some() || member_goal(signature, &goal) {
             if unsolved_term_meta(metas, &ty).is_some() {
                 passed.push(meta);
                 waiting.push(meta);
                 continue;
             }
-            let solution = if computes(signature, metas, &ty, claim) {
+            let solution = if claim.is_some_and(|it| computes(signature, metas, &ty, it)) {
                 let binders = binders_of(&ty);
                 let proof = abstracted(&binders, adamas_core::check::evident(signature));
                 Some(adamas_core::eval::eval(
@@ -600,7 +606,7 @@ fn settle_collecting(
                 from_context(signature, metas, instances, &ty)
             };
             let Some(solution) = solution else {
-                return Err(unproven(&ty, claim, span));
+                return Err(unproven(&ty, claim.unwrap_or(&goal), span));
             };
             metas.solve_term(meta, solution);
             continue;
@@ -994,6 +1000,34 @@ fn requeued(
     true
 }
 
+/// Цель с развёрнутой головой: `Divide#Int64.Safe 2` есть `Equal Bool (2 /= 0)
+/// True`. Нормальная форма цели определений не раскрывает.
+fn unfolded_goal(signature: &Signature, metas: &Metas, ty: &Term) -> Term {
+    let mut ctx = adamas_core::ctx::Ctx::new(signature);
+    for (mult, name, domain) in binders_of(ty) {
+        let value = ctx.eval(&domain);
+        ctx = ctx.bind(name, mult, value);
+    }
+    let value = adamas_core::conv::whnf_solved(signature, metas, &ctx.eval(goal_of(ty)));
+    quote(ctx.size(), &value)
+}
+
+/// Цель - применение типового члена словаря: `d.Safe y` (§3.7). Голова -
+/// проекция, а не имя: у словаря-дырки и у словаря-переменной имени нет.
+fn member_goal(signature: &Signature, goal: &Term) -> bool {
+    let mut head = goal;
+    while let Term::App(callee, _) = head {
+        head = callee;
+    }
+    match head {
+        Term::Project(..) => true,
+        // Снаружи класса член пишется именем с параметрами класса впереди:
+        // `Safe Int64 y` - определение-проекция словаря.
+        Term::Const(name, ..) => projecting(signature, name),
+        _ => false,
+    }
+}
+
 /// Сводится ли утверждение факта вычислением к `True` (§3.7, шаг первый).
 ///
 /// Вычисление - с разворотом определений: `2 /= 0` есть метод инстанса, и
@@ -1049,7 +1083,7 @@ fn known_head(signature: &Signature, metas: &Metas, meta: adamas_core::term::Ter
     let goal = normalized(signature, &ty);
     // Факт ждёт не головы, а всех своих дырок: вычислять утверждение с дыркой
     // внутри нечем.
-    if adamas_core::check::claim_of(signature, &goal).is_some() {
+    if adamas_core::check::claim_of(signature, &goal).is_some() || member_goal(signature, &goal) {
         return unsolved_term_meta(metas, &ty).is_none();
     }
     applied(signature, &goal).is_some_and(|(_, head)| !matches!(head, Head::Unknown))

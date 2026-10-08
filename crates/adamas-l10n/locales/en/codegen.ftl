@@ -202,7 +202,6 @@ emit_llvm-28 = a prefix node after the prefixes are removed
 emit_llvm-29 = a resumption in a pure segment
 emit_llvm-30 = leaving a scope in a pure segment
 emit_llvm-31 = a nursery operation in a pure segment
-emit_llvm-32 = a floating-point remainder
 emit_llvm-33 = a lane-wise non-basic operation
 emit_llvm-34 = an array
 emit_llvm-35 = an array length or cell number

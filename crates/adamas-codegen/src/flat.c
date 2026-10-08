@@ -42,6 +42,7 @@
  * дописывает `.0`; показатель без плюса и без ведущих нулей.
  */
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -197,7 +198,7 @@ static void adamas_show_real(double value, int width);
 /* `infinity` - биты `+inf`, `canon` - биты канонического тихого NaN: экспонента
  * из одних единиц при нулевой и при старшей мантиссе. Пишутся числами, а не
  * считаются из `sizeof`: то же делает `PrimTy::special` в ядре. */
-#define ADAMAS_FLAT_REAL(name, ctype, utype, infinity, canon)                                      \
+#define ADAMAS_FLAT_REAL(name, ctype, utype, infinity, canon, modulo)                              \
     static ctype adamas_bits_##name(uint64_t bits) {                                               \
         utype word = (utype)bits;                                                                  \
         ctype value;                                                                               \
@@ -214,9 +215,12 @@ static void adamas_show_real(double value, int width);
     static ctype adamas_mul_##name(ctype a, ctype b) { return a * b; }                             \
     /* Деление у плавающего ограждений не имеет: §4.3 отдаёт `Div` типу       \
      * `Float` операторным классом, а нулевой делитель даёт `inf` либо        \
-     * `nan` - наблюдаемые значения `Approximate`, а не обрыв. Остатка у      \
-     * плавающего нет вовсе: его не называет ни `Div`, ни `Approximate`. */   \
+     * `nan` - наблюдаемые значения `Approximate`, а не обрыв. Остаток -     \
+     * `fmod` C: знак делимого, `x % 0.0` есть `nan`, ровно как `%` у `f64`  \
+     * Rust - свёртки ядра, - и `frem` LLVM, который `llc` разворачивает в   \
+     * тот же вызов libm. */                                                 \
     static ctype adamas_div_##name(ctype a, ctype b) { return a / b; }                             \
+    static ctype adamas_rem_##name(ctype a, ctype b) { return modulo(a, b); }                      \
     /* Порядок - `totalOrder` IEEE-754, которым §4.3 наделяет `Eq`/`Ord`, по    \
      * канонизированному значению: отрицательное инвертируется целиком,         \
      * положительному ставится старший бит, а всякий NaN становится одним       \
@@ -275,8 +279,8 @@ ADAMAS_FLAT_INTEGER(UInt32, uint32_t, uint32_t, 32, unsigned long long, "%llu")
 ADAMAS_FLAT_UNSIGNED(UInt32, uint32_t, uint32_t, 32)
 ADAMAS_FLAT_INTEGER(UInt64, uint64_t, uint64_t, 64, unsigned long long, "%llu")
 ADAMAS_FLAT_UNSIGNED(UInt64, uint64_t, uint64_t, 64)
-ADAMAS_FLAT_REAL(Float32, float, uint32_t, 0x7F800000u, 0x7FC00000u)
-ADAMAS_FLAT_REAL(Float64, double, uint64_t, 0x7FF0000000000000u, 0x7FF8000000000000u)
+ADAMAS_FLAT_REAL(Float32, float, uint32_t, 0x7F800000u, 0x7FC00000u, fmodf)
+ADAMAS_FLAT_REAL(Float64, double, uint64_t, 0x7FF0000000000000u, 0x7FF8000000000000u, fmod)
 
 /* Кратчайшая запись плавающего в форме Rust'а. `width` - 4 либо 8: сужение до
  * `float` решает и точность записи, и границы позиционной формы. */

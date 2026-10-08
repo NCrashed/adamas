@@ -1,0 +1,27 @@
+-- `/` и `%` прелюдии - методы класса `Div` с предусловием-членом `Safe`
+-- (§3.7): у целых это `y /= 0`, у плавающих - истина (IEEE-754).
+--
+-- Доказательство ни в одном вызове не написано: `x / 2` доказывает
+-- вычисление, `total / count` в ветви `else` разбора `count == 0` - гипотеза
+-- сужения, `generic` берёт `{Safe a y}` из своей сигнатуры. Остаток
+-- плавающего - `fmod`: знак делимого.
+
+average : Int64 -> Int64 -> Int64
+average total count = if count == 0 then 0 else total / count
+
+half : Int32 -> Int32
+half x = x / 2
+
+generic : {Div a, Add a} => (x : a) -> (y : a) -> {Safe a y} => a
+generic x y = x / y + x % y
+
+ratio : Float64 -> Float64 -> Float64
+ratio a b = a / b
+
+wrapped : Float64 -> Float64 -> Float64
+wrapped a b = a % b
+
+main : Int64
+main = average 100 7 + average 5 0 + int32ToInt64 (half 9) + generic 17 5 + (-7) % 3
+  + (if ratio 1.0 4.0 == 0.25 then 1000 else 0)
+  + (if wrapped (-7.5) 2.0 == -1.5 then 10000 else 0)

@@ -472,6 +472,87 @@ instance Ord Float64 where
   lt = ltFloat64
   le = leFloat64
 
+-- # Деление (§3.7)
+--
+-- `/` и `%` - методы класса `Div`, и делитель у них требует **предусловия**
+-- - типового члена `Safe`. У целых это `y /= 0`: деление на ноль у них
+-- неопределено, и доказательство ищет компилятор - вычислением у литерала,
+-- гипотезой у переменной (ограничение функции, ветвь `if y /= 0`). У
+-- плавающих предусловие - истина: по IEEE-754 `1.0 / 0.0` есть
+-- бесконечность, а `x % 0.0` - `nan`, и требовать доказательства значило бы
+-- требовать ложного. Остаток - с знаком делимого, у плавающих это `fmod`.
+
+-- | Не истинное - ложно. Мост от факта ограничения `{d /= 0}`, то есть
+-- `not (d == 0)`, к той форме, которой примитив деления требует делитель:
+-- `eqT d 0 = False`. Разбором `b` доказывается, но гипотезу-ограничение
+-- клауза не связывает, и лемма приходит на слово, как леммы арифметики.
+@total
+apart : (0 b : Bool) -> {not b} => Equal Bool b False
+
+-- | Деление и остаток с предусловием на делитель.
+class Div a where
+  type Safe (y : a)
+  divide : (x : a) -> (y : a) -> {Safe y} => a
+  remainder : (x : a) -> (y : a) -> {Safe y} => a
+
+infixl 7 /
+(/) : {Div a} => (x : a) -> (y : a) -> {Safe a y} => a
+(/) x y = divide x y
+
+infixl 7 %
+(%) : {Div a} => (x : a) -> (y : a) -> {Safe a y} => a
+(%) x y = remainder x y
+
+instance Div Int8 where
+  type Safe y = y /= 0
+  divide x y = divInt8 x y (apart (eqInt8 y 0))
+  remainder x y = remInt8 x y (apart (eqInt8 y 0))
+
+instance Div Int16 where
+  type Safe y = y /= 0
+  divide x y = divInt16 x y (apart (eqInt16 y 0))
+  remainder x y = remInt16 x y (apart (eqInt16 y 0))
+
+instance Div Int32 where
+  type Safe y = y /= 0
+  divide x y = divInt32 x y (apart (eqInt32 y 0))
+  remainder x y = remInt32 x y (apart (eqInt32 y 0))
+
+instance Div Int64 where
+  type Safe y = y /= 0
+  divide x y = divInt64 x y (apart (eqInt64 y 0))
+  remainder x y = remInt64 x y (apart (eqInt64 y 0))
+
+instance Div UInt8 where
+  type Safe y = y /= 0
+  divide x y = divUInt8 x y (apart (eqUInt8 y 0))
+  remainder x y = remUInt8 x y (apart (eqUInt8 y 0))
+
+instance Div UInt16 where
+  type Safe y = y /= 0
+  divide x y = divUInt16 x y (apart (eqUInt16 y 0))
+  remainder x y = remUInt16 x y (apart (eqUInt16 y 0))
+
+instance Div UInt32 where
+  type Safe y = y /= 0
+  divide x y = divUInt32 x y (apart (eqUInt32 y 0))
+  remainder x y = remUInt32 x y (apart (eqUInt32 y 0))
+
+instance Div UInt64 where
+  type Safe y = y /= 0
+  divide x y = divUInt64 x y (apart (eqUInt64 y 0))
+  remainder x y = remUInt64 x y (apart (eqUInt64 y 0))
+
+instance Div Float32 where
+  type Safe y = True
+  divide x y = divFloat32 x y
+  remainder x y = remFloat32 x y
+
+instance Div Float64 where
+  type Safe y = True
+  divide x y = divFloat64 x y
+  remainder x y = remFloat64 x y
+
 -- # Текст (§4.5)
 --
 -- `String` - длина и байты UTF-8. Строковый литерал под ожидаемым `String`

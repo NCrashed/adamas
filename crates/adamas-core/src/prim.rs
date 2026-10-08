@@ -651,15 +651,15 @@ impl PrimOp {
 
     /// Есть ли операция у этого типа (§4.3).
     ///
-    /// Четыре арифметические - у всех десяти: `Div` §4.3 отдаёт `Float`
-    /// операторным классом. Остаток и шесть битовых - только у восьми целых:
-    /// ни `Div`, ни `Approximate` их у плавающего не называют, а имя, которого
-    /// нет, разрешается обычным путём и отвергается как необъявленное.
+    /// Пять арифметических - у всех десяти: `/` и `%` прелюдии - методы класса
+    /// `Div` (§3.7), и остаток плавающего есть `fmod` C - знак делимого,
+    /// `x % 0.0` есть `nan`. Шесть битовых - только у восьми целых: имя,
+    /// которого нет, разрешается обычным путём и отвергается как необъявленное.
     #[must_use]
     pub const fn over(self, ty: PrimTy) -> bool {
         match self {
-            Self::Add | Self::Sub | Self::Mul | Self::Div => true,
-            Self::Rem | Self::And | Self::Or | Self::Xor | Self::Shl | Self::Shr => !ty.floating(),
+            Self::Add | Self::Sub | Self::Mul | Self::Div | Self::Rem => true,
+            Self::And | Self::Or | Self::Xor | Self::Shl | Self::Shr => !ty.floating(),
         }
     }
 
@@ -758,7 +758,8 @@ impl PrimOp {
             Self::Sub => Some(left - right),
             Self::Mul => Some(left * right),
             Self::Div => Some(left / right),
-            Self::Rem | Self::And | Self::Or | Self::Xor | Self::Shl | Self::Shr => None,
+            Self::Rem => Some(left % right),
+            Self::And | Self::Or | Self::Xor | Self::Shl | Self::Shr => None,
         }
     }
 
@@ -769,7 +770,8 @@ impl PrimOp {
             Self::Sub => Some(left - right),
             Self::Mul => Some(left * right),
             Self::Div => Some(left / right),
-            Self::Rem | Self::And | Self::Or | Self::Xor | Self::Shl | Self::Shr => None,
+            Self::Rem => Some(left % right),
+            Self::And | Self::Or | Self::Xor | Self::Shl | Self::Shr => None,
         }
     }
 }
@@ -1843,7 +1845,11 @@ mod tests {
     fn a_floating_type_has_no_bitwise_names() {
         assert_eq!(PrimOp::named("andFloat64"), None);
         assert_eq!(PrimOp::named("shlFloat32"), None);
-        assert_eq!(PrimOp::named("remFloat64"), None);
+        // Остаток у плавающего есть - `fmod` (§3.7, `%` класса `Div`).
+        assert_eq!(
+            PrimOp::named("remFloat64"),
+            Some((PrimOp::Rem, PrimTy::Float64))
+        );
         assert_eq!(super::complement("notFloat64"), None);
         assert!(!Prim::taken("andFloat64"));
         assert_eq!(

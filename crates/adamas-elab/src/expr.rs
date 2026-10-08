@@ -1657,6 +1657,25 @@ impl<'a> Elaborator<'a> {
         self.declared_type(ty, default, Some(lift))
     }
 
+    /// Значение типового члена инстанса (§4.1). Булево выражение - факт, как в
+    /// ограничении (§3.7): `type Safe y = y /= 0` есть `Equal Bool (y /= 0)
+    /// True`, а `type Safe y = True` - факт, который доказывает вычисление.
+    pub(crate) fn member_value(&mut self, body: &Expr) -> Result<Term, ElabError> {
+        let boolean = self.signature.convention(prim::BOOL);
+        let equal = self.signature.convention(prim::EQUAL);
+        if self.signature.lookup(&equal).is_some() {
+            let mark = self.metas.mark();
+            if let Ok(term) = self.expr(body, Mult::Zero) {
+                if matches!(&self.inferred(&term), Some(Term::Const(name, _, _)) if *name == boolean)
+                {
+                    return Ok(adamas_core::check::fact(self.signature, term));
+                }
+            }
+            self.metas.rollback(mark);
+        }
+        self.declaration(body, Mult::Zero)
+    }
+
     /// Сколько параметров кратности объявила написанная сигнатура.
     ///
     /// Третья компонента арности (§10 вопрос 41): её, как и первые две, считает
@@ -6387,12 +6406,18 @@ impl<'a> Elaborator<'a> {
     /// передают, и доказательство ищется на месте (§3.7).
     fn facts(&mut self, mut term: Term, mut ty: Rc<Value>) -> (Term, Rc<Value>) {
         loop {
-            let Value::Pi(binder, _, domain, _, codomain) = &*ty else {
+            let Value::Pi(binder, name, domain, _, codomain) = &*ty else {
                 return (term, ty);
             };
-            let quoted = self.ctx.quote(domain);
+            // Факт узнаётся после развёртки: `Divide#Int64.Safe d` - это
+            // `Equal Bool (d /= 0) True`. Стёртое безымянное ограничение -
+            // предусловие-член класса над неизвестным словарём - тоже факт.
+            let unfolded = self
+                .ctx
+                .quote(&whnf_solved(self.signature, self.metas, domain));
+            let erased = binder.mult == Mult::Zero && matches!(&**name, "_");
             if !binder.visibility.is_implicit()
-                || adamas_core::check::claim_of(self.signature, &quoted).is_none()
+                || (adamas_core::check::claim_of(self.signature, &unfolded).is_none() && !erased)
             {
                 return (term, ty);
             }
@@ -6639,6 +6664,36 @@ impl<'a> Elaborator<'a> {
             .then(|| adamas_core::check::fact(self.signature, domain.clone()))
     }
 
+    /// Ограничение, которое не класс: предусловие-член класса `{Safe y} =>`
+    /// (§3.7). Поиск решает такое только фактом, а доказательство в рантайме
+    /// не живёт - связывание стёрто, как у булева ограничения.
+    fn propositional(&self, written: &Written<'_>, domain: &Term) -> bool {
+        if written.visibility != Visibility::Implicit || &*written.name != "_" {
+            return false;
+        }
+        let mut head = domain;
+        while let Term::App(callee, _) = head {
+            head = callee;
+        }
+        match head {
+            // Класс - определение, чьё тело под лямбдами есть тип-запись
+            // словаря; семейство - не предусловие. Прочее определение -
+            // типовая функция, как `Divide#Int64.Safe`.
+            Term::Const(name, ..) => self.signature.lookup(name).is_some_and(|it| {
+                let mut body = it.body.as_ref();
+                while let Some(Term::Lam(_, _, inner)) = body {
+                    body = Some(inner);
+                }
+                !matches!(it.kind, DefinitionKind::Data { .. })
+                    && !matches!(body, Some(Term::Record(_)))
+            }),
+            // Типовой член класса: внутри класса - переменная его телескопа,
+            // снаружи - проекция словаря.
+            Term::Var(_) | Term::Project(..) => true,
+            _ => false,
+        }
+    }
+
     fn pi_flat(
         &mut self,
         binders: &[Written<'_>],
@@ -6654,6 +6709,7 @@ impl<'a> Elaborator<'a> {
         // поиском, как словарь (§3.7).
         let (domain, mult) = match self.factual(first, &domain) {
             Some(fact) => (fact, Mult::Zero),
+            None if self.propositional(first, &domain) => (domain, Mult::Zero),
             None => (domain, first.mult),
         };
         let owns = self.owned_of(first.ty).is_some();

@@ -41,4 +41,4 @@ main =
   let same : UInt64 = if a == [1, 2] then 1000 else 0
   let other : UInt64 = if a == b then 10000 else 0
   let none : Option UInt64 = None
-  textLength text + summed + length (xs ++ [6, 7]) + found (lookup 2 pairs) + natToUInt64 (n + n * n) + ne.head + same + other + unwrapOr 1 (map double none)
+  byteLength text + summed + length (xs ++ [6, 7]) + found (lookup 2 pairs) + natToUInt64 (n + n * n) + ne.head + same + other + unwrapOr 1 (map double none)

@@ -6,7 +6,8 @@
 -- суррогат знаком `U+FFFD`, либо точный `charFrom`. Массив символов плоский:
 -- `Array 3 Char` - три слова в одном блоке, а не три ячейки кучи. `show`
 -- печатает символ так, как пишется литерал, - теми же экранированиями, что
--- печать ответа (поле `last` ниже печатает её).
+-- печать ответа (поле `last` ниже печатает её). Длины у текста две: `charCount`
+-- считает символы проходом, `byteLength` отдаёт байты UTF-8 полем значения.
 
 kind : Char -> UInt32
 kind 'a' = 1
@@ -23,5 +24,5 @@ word = arraySet (arraySet (arrayNew 3 'к') 1 'о') 2 'т'
 spelled : String
 spelled = charText (arrayIndex word 0) <> charText (arrayIndex word 1) <> charText (arrayIndex word 2)
 
-main : { kinds : UInt32, code : UInt32, surrogate : Bool, replaced : Char, shown : Bool, last : Char }
-main = {kinds = kind 'a' + kind '\n' + kind 'b' + kind 'я' * 10, code = charToUInt32 '😀', surrogate = missing (charFrom 55296), replaced = uInt32ToChar 55296, shown = show 'a' <> show '\n' <> show 'я' <> show '\u{7}' <> show '\'' == "'a''\\n''я''\\u{7}''\\''" && spelled == "кот", last = arrayIndex word 2}
+main : { kinds : UInt32, code : UInt32, surrogate : Bool, replaced : Char, shown : Bool, last : Char, chars : UInt64, bytes : UInt64 }
+main = {kinds = kind 'a' + kind '\n' + kind 'b' + kind 'я' * 10, code = charToUInt32 '😀', surrogate = missing (charFrom 55296), replaced = uInt32ToChar 55296, shown = show 'a' <> show '\n' <> show 'я' <> show '\u{7}' <> show '\'' == "'a''\\n''я''\\u{7}''\\''" && spelled == "кот", last = arrayIndex word 2, chars = charCount "привет😀", bytes = byteLength "привет😀"}

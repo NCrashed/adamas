@@ -609,12 +609,25 @@ joined m (MkString n xs) (MkString k ys) =
   let zero : UInt8 = 0
   MkString m (spliced m k ys n (spliced m n xs 0 (arrayNew m zero) 0) 0)
 
--- Длина текста.
-textLength : String -> UInt64
-textLength (MkString n _bytes) = n
+-- | Длина текста в байтах UTF-8 - поле значения, за постоянное время.
+-- Символов в тексте может быть меньше: `byteLength "привет"` есть 12, а
+-- `charCount "привет"` - 6.
+byteLength : String -> UInt64
+byteLength (MkString n _bytes) = n
+
+-- Начала символов в байтах с номера `i`: всякий байт, кроме продолжения
+-- UTF-8 `10xxxxxx`.
+countedFrom : (ω n : UInt64) -> Array n UInt8 -> UInt64 -> UInt64 -> UInt64
+countedFrom n bytes i acc = if ltUInt64 i n then countedFrom n bytes (addUInt64 i 1) (if eqUInt8 (andUInt8 (arrayIndex bytes i) 192) 128 then acc else addUInt64 acc 1) else acc
+
+-- | Сколько в тексте символов - скалярных значений Юникода - за проход по
+-- байтам. Цена названа именем: длина в байтах - `byteLength`, за постоянное
+-- время (§4.5).
+charCount : String -> UInt64
+charCount (MkString n bytes) = countedFrom n bytes 0 0
 
 instance Semigroup String where
-  combine x y = joined (addUInt64 (textLength x) (textLength y)) x y
+  combine x y = joined (addUInt64 (byteLength x) (byteLength y)) x y
 
 instance Monoid String where
   mempty = ""

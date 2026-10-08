@@ -12,11 +12,11 @@ data Color where
   Blue : Color
 
 early : UInt64
-early = textLength (show True)
+early = byteLength (show True)
 
 instance Show Color where
   show Red = "red"
   show Blue = "blue"
 
 main : UInt64
-main = textLength (show Red) + early + textLength (show Blue)
+main = byteLength (show Red) + early + byteLength (show Blue)

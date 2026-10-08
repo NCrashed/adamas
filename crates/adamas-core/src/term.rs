@@ -1290,7 +1290,7 @@ impl Pos {
         ) || matches!(term, Term::Prim(prim) if !prim.negative());
         match self {
             Self::Free | Self::Codomain => false,
-            Self::Callee => !atomic && !matches!(term, Term::App(..)),
+            Self::Callee => (!atomic && !matches!(term, Term::App(..))) || infix(term).is_some(),
             Self::Atom => !atomic,
             Self::Domain => matches!(
                 term,
@@ -1412,6 +1412,7 @@ fn emit<'a>(
             write!(f, "\\{} -> ", bound(*mult, name, "(", ")"))?;
             pending.push(Piece::Term(body, Pos::Free, inner));
         }
+        Term::App(..) if infix(term).is_some() => queued(pending, infixed(term, inner)),
         Term::App(callee, argument) => {
             later(
                 pending,
@@ -1524,6 +1525,40 @@ fn sort(f: &mut fmt::Formatter<'_>, sort: &str, level: &Level) -> fmt::Result {
     } else {
         write!(f, "{sort} {level}")
     }
+}
+
+/// Оператор, применённый к двум операндам, - в человеческой печати он пишется
+/// между ними: `x /= 0` (§7.6). Неявные аргументы к этому времени сняты
+/// ([`crate::human::humane`]).
+fn infix(term: &Term) -> Option<(&Term, &str, &Term)> {
+    if !crate::human::human() {
+        return None;
+    }
+    let Term::App(callee, right) = term else {
+        return None;
+    };
+    let Term::App(operator, left) = &**callee else {
+        return None;
+    };
+    let Term::Const(name, _, _) = &**operator else {
+        return None;
+    };
+    let symbolic = name
+        .chars()
+        .next()
+        .is_some_and(|it| !it.is_alphanumeric() && !matches!(it, '_' | '#' | '?' | '\''));
+    symbolic.then_some((&**left, &**name, &**right))
+}
+
+/// Куски инфиксной печати оператора ([`infix`]).
+fn infixed(term: &Term, inner: usize) -> Vec<Piece<'_>> {
+    infix(term).map_or_else(Vec::new, |(left, operator, right)| {
+        vec![
+            Piece::Term(left, Pos::Atom, inner),
+            Piece::Text(format!(" {operator} ").into()),
+            Piece::Term(right, Pos::Atom, inner),
+        ]
+    })
 }
 
 /// Стрелка: что пишется до домена, что после и в какой позиции стоит домен.

@@ -7,4 +7,4 @@ Error: functor-undischarged.adamas:29:14: эффекты `{Log}` не погаш
                ^^^^^^^^
   в контексте:
     (S : Source)
-    (x : Narrow.T S)
+    (x : Narrow.T)

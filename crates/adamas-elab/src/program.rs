@@ -354,6 +354,18 @@ pub fn analyze(entry: SourceFile, sources: &dyn Sources) -> Program {
     // короткое однозначно (§7.6).
     let names = signature.names();
     adamas_core::human::note_names(names.iter().map(|it| &**it));
+    adamas_core::human::note_implicits(names.iter().filter_map(|name| {
+        let mut ty = &signature.lookup(name)?.ty;
+        let mut count = 0;
+        while let adamas_core::term::Term::Pi(binder, _, _, _, codomain) = ty {
+            if binder.visibility != adamas_core::visibility::Visibility::Implicit {
+                break;
+            }
+            count += 1;
+            ty = codomain;
+        }
+        Some((&**name, count))
+    }));
     let mut diagnostics = loader.blame;
     if let Err(error) = outcome {
         refusals.refused(error, Vec::new());

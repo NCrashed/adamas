@@ -32,6 +32,9 @@ thread_local! {
     /// Короткие имена, которые в программе объявлены больше одного раза.
     /// `None` - программа ещё не прочитана, и сокращать имена не по чему.
     static AMBIGUOUS: RefCell<Option<HashSet<String>>> = RefCell::default();
+    /// Сколько ведущих неявных параметров у определения: столько аргументов
+    /// его применения автор не писал, и печать их не показывает.
+    static IMPLICITS: RefCell<HashMap<String, usize>> = RefCell::default();
 }
 
 /// Исполняет `body` с человеческой печатью.
@@ -66,10 +69,22 @@ pub fn note_names<'a>(names: impl IntoIterator<Item = &'a str>) {
     AMBIGUOUS.with(|it| *it.borrow_mut() = Some(ambiguous));
 }
 
+/// Записывает число ведущих неявных параметров каждого определения: их
+/// аргументы печать прячет - `x /= 0`, а не `/= Int64 Eq#Int64 x 0`.
+pub fn note_implicits<'a>(arities: impl IntoIterator<Item = (&'a str, usize)>) {
+    let arities = arities
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(name, count)| (name.to_owned(), count))
+        .collect();
+    IMPLICITS.with(|it| *it.borrow_mut() = arities);
+}
+
 /// Забывает имена прошлой программы: пока новая не прочитана, имена
 /// печатаются полными.
 pub fn forget_names() {
     AMBIGUOUS.with(|it| *it.borrow_mut() = None);
+    IMPLICITS.with(|it| it.borrow_mut().clear());
 }
 
 /// Имя так, как его написал бы автор: без модуля, если короткое однозначно.
@@ -119,6 +134,47 @@ impl Humane {
             .map_or_else(|| Name::from(base), |it| Name::from(it.as_str()))
     }
 
+    /// Ограничение-факт `{claim} =>`: связывание безымянное и неупомянутое,
+    /// кратность - та, при которой печать пишет ограничение.
+    fn fact(&mut self, claim: &Term, row: &Row<Term>, codomain: &Term) -> Term {
+        let domain = Rc::new(self.term(claim));
+        let shown = Name::from("_");
+        self.under(Rc::clone(&shown), |this| {
+            let row = this.row(row);
+            let codomain = Rc::new(this.term(codomain));
+            Term::Pi(
+                crate::term::Binder::implicit(Mult::Many),
+                shown,
+                domain,
+                row,
+                codomain,
+            )
+        })
+    }
+
+    /// Применение без аргументов на месте ведущих неявных параметров головы:
+    /// их подставил вывод, а не автор.
+    fn application(&mut self, term: &Term) -> Term {
+        let mut arguments = Vec::new();
+        let mut head = term;
+        while let Term::App(callee, argument) = head {
+            arguments.push(&**argument);
+            head = callee;
+        }
+        arguments.reverse();
+        let hidden = match head {
+            Term::Const(name, _, _) => IMPLICITS
+                .with(|it| it.borrow().get(&**name).copied())
+                .filter(|count| *count <= arguments.len())
+                .unwrap_or(0),
+            _ => 0,
+        };
+        let head = self.term(head);
+        arguments[hidden..].iter().fold(head, |callee, argument| {
+            Term::App(Rc::new(callee), Rc::new(self.term(argument)))
+        })
+    }
+
     fn under<R>(&mut self, name: Name, body: impl FnOnce(&mut Self) -> R) -> R {
         self.bound.push(name);
         let answer = body(self);
@@ -154,7 +210,16 @@ impl Humane {
             // Дырка, применённая к контексту места, где её завели, - тоже дырка:
             // спайн пересказывает контекст, а не программу.
             Term::App(..) if hole(term) => Term::Const(Name::from("_"), Rc::from([]), Args::none()),
-            Term::App(callee, argument) => Term::App(recur(self, callee), recur(self, argument)),
+            Term::App(..) => self.application(term),
+            // Факт `{d /= 0} =>` печатается так, как написан (§3.7): утверждение
+            // без `Equal Bool _ True` вокруг.
+            Term::Pi(binder, _, domain, row, codomain)
+                if binder.visibility == Visibility::Implicit
+                    && !codomain.mentions_recent(0, 1)
+                    && claim(domain).is_some() =>
+            {
+                self.fact(claim(domain).unwrap_or(domain), row, codomain)
+            }
             Term::Pi(binder, name, domain, row, codomain) => {
                 let domain = recur(self, domain);
                 let used = codomain.mentions_recent(0, 1)
@@ -304,6 +369,25 @@ pub fn constructor(ty: &Term) -> String {
 }
 
 /// Голова применения - дырка.
+/// Утверждение факта `Equal Bool claim True`. Имена сверяются коротко: печать
+/// сигнатуры не видит, как и у единицы вычисления.
+fn claim(ty: &Term) -> Option<&Term> {
+    let named = |term: &Term, name: &str| matches!(term, Term::Const(it, _, _) if crate::term::short(it) == name);
+    let Term::App(applied, verdict) = ty else {
+        return None;
+    };
+    let Term::App(applied, claim) = &**applied else {
+        return None;
+    };
+    let Term::App(equal, carrier) = &**applied else {
+        return None;
+    };
+    (named(equal, crate::prim::EQUAL)
+        && named(carrier, crate::prim::BOOL)
+        && named(verdict, crate::prim::TRUE))
+    .then_some(&**claim)
+}
+
 fn hole(term: &Term) -> bool {
     let mut head = term;
     while let Term::App(callee, _) = head {
@@ -358,6 +442,41 @@ mod tests {
             "{0 a : Type 0} -> (ω _ : #0) -> #1",
             "полная печать не тронута"
         );
+    }
+
+    /// Факт `{d /= 0} =>` печатается утверждением, оператор - между
+    /// операндами, а аргументы неявных параметров оператора не печатаются:
+    /// их подставил вывод (§3.7, §7.6).
+    #[test]
+    fn a_fact_reads_as_its_written_claim() {
+        let named = |name: &str| Term::Const(Name::from(name), Rc::from([]), Args::none());
+        let apply = |head: Term, arguments: Vec<Term>| {
+            arguments.into_iter().fold(head, |callee, argument| {
+                Term::App(Rc::new(callee), Rc::new(argument))
+            })
+        };
+        note_implicits([("/=", 2)]);
+        let claim = apply(
+            named("/="),
+            vec![
+                named("Int64"),
+                named("Eq#Int64"),
+                Term::var(0),
+                Term::Prim(crate::prim::Prim::Lit(
+                    crate::prim::PrimTy::Int64,
+                    0,
+                )),
+            ],
+        );
+        let fact = apply(named("Equal"), vec![named("Bool"), claim, named("True")]);
+        let ty = pi(
+            Binder::explicit(Mult::Many),
+            "d",
+            named("Int64"),
+            pi(Binder::implicit(Mult::Zero), "_", fact, named("Int64")),
+        );
+        assert_eq!(shown(&ty), "(d : Int64) -> {d /= 0} => Int64");
+        forget_names();
     }
 
     /// У поля конструктора умолчание - `1`: такое поле пишется стрелкой, а

@@ -145,6 +145,7 @@ const UNPARSED: &[&str] = &[
     "braces-open-nothing.adamas",
     "variadic-off-the-boundary.adamas",
     "record-value-multiplicity.adamas",
+    "char-literal-two.adamas",
 ];
 
 /// Относительное имя фикстуры - им подписаны все сообщения ниже.

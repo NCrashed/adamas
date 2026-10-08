@@ -2120,7 +2120,7 @@ impl<'a> Parser<'a> {
     /// Стоит ли на литерале - вместе со знаком, если знак здесь часть числа.
     fn at_literal(&self) -> bool {
         match self.kind() {
-            TokenKind::Nat | TokenKind::Float | TokenKind::Str => true,
+            TokenKind::Nat | TokenKind::Float | TokenKind::Str | TokenKind::Char => true,
             // Знак перед числом - часть литерала: §4.3 выбирает класс
             // преобразования по написанию, и `-42` это `FromInt`, а не
             // применение вычитания.
@@ -2144,6 +2144,7 @@ impl<'a> Parser<'a> {
             (TokenKind::Nat, true) => LitKind::Int,
             (TokenKind::Float, _) => LitKind::Float,
             (TokenKind::Str, _) => LitKind::Str,
+            (TokenKind::Char, _) => LitKind::Char,
             _ => return Err(self.expected(Expected::Expression)),
         };
         let number = token.text(self.text);
@@ -2736,7 +2737,7 @@ impl<'a> Parser<'a> {
             }
             // Знака здесь не бывает: отрицательный литерал в паттерне - форма
             // следующего среза, см. заголовок модуля.
-            TokenKind::Nat | TokenKind::Float | TokenKind::Str => {
+            TokenKind::Nat | TokenKind::Float | TokenKind::Str | TokenKind::Char => {
                 let lit = self.literal()?;
                 let span = lit.span;
                 (PatternKind::Lit(lit), span)
@@ -2786,6 +2787,7 @@ fn starts_atom(kind: TokenKind) -> bool {
             | TokenKind::Nat
             | TokenKind::Float
             | TokenKind::Str
+            | TokenKind::Char
             | TokenKind::Underscore
             | TokenKind::LParen
             | TokenKind::LBracket
@@ -2810,6 +2812,7 @@ fn starts_pattern(kind: TokenKind) -> bool {
             | TokenKind::Nat
             | TokenKind::Float
             | TokenKind::Str
+            | TokenKind::Char
             | TokenKind::LParen
     )
 }

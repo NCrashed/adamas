@@ -52,6 +52,13 @@ pub enum LexError {
         span: Span,
     },
 
+    /// Символьный литерал - не ровно один символ в одинарных кавычках.
+    #[error("{}", adamas_l10n::tr!("lex-bad-char"))]
+    BadChar {
+        /// От открывающей кавычки до места, где литерал разошёлся с формой.
+        span: Span,
+    },
+
     /// Табуляция в отступе строки, на которой есть лексема.
     ///
     /// Отступ значим (§4.1), а ширина табуляции - соглашение редактора, не
@@ -72,6 +79,7 @@ impl LexError {
             Self::UnexpectedChar { span }
             | Self::UnterminatedString { span }
             | Self::UnknownEscape { span }
+            | Self::BadChar { span }
             | Self::TabInIndentation { span } => span,
             Self::UnterminatedComment { open } => open,
         }
@@ -128,6 +136,8 @@ pub fn lex(text: &str) -> Result<Tokens, LexError> {
             number(&mut cursor)
         } else if ch == '"' {
             string(&mut cursor)?
+        } else if ch == '\'' {
+            character(&mut cursor)?
         } else if let Some(kind) = punctuation(ch) {
             cursor.bump();
             kind
@@ -364,6 +374,30 @@ fn string(cursor: &mut Cursor<'_>) -> Result<TokenKind, LexError> {
             }
         }
     }
+}
+
+/// Символьный литерал вместе с кавычками: ровно один символ либо экранирование
+/// (§4.4). Апостроф внутри имени (`s'`) сюда не приходит - его съедает имя, и
+/// с кавычки начинается только литерал.
+fn character(cursor: &mut Cursor<'_>) -> Result<TokenKind, LexError> {
+    let start = cursor.mark();
+    cursor.bump();
+    let ok = match cursor.bump() {
+        Some('\\') => match cursor.bump() {
+            Some('n' | 't' | 'r' | '0' | '\\' | '"' | '\'') => true,
+            Some('u') => unicode_escape(cursor),
+            _ => false,
+        },
+        None | Some('\n' | '\'') => false,
+        Some(_) => true,
+    };
+    if ok && cursor.peek() == Some('\'') {
+        cursor.bump();
+        return Ok(TokenKind::Char);
+    }
+    Err(LexError::BadChar {
+        span: cursor.span_from(start),
+    })
 }
 
 /// `\u{XXXX}` после уже съеденного `u`.
@@ -699,5 +733,25 @@ mod tests {
             panic!("ожидался незакрытый литерал");
         };
         assert_eq!((span.start(), span.end()), (0, 4));
+    }
+
+    /// Символьный литерал - ровно один символ либо экранирование (§4.4), а
+    /// апостроф внутри имени (`s'`) остаётся частью имени.
+    #[test]
+    fn a_character_literal_is_one_character() {
+        assert_eq!(kinds("'a'"), [TokenKind::Char, TokenKind::Eof]);
+        assert_eq!(kinds(r"'\n'"), [TokenKind::Char, TokenKind::Eof]);
+        assert_eq!(kinds(r"'\u{1F600}'"), [TokenKind::Char, TokenKind::Eof]);
+        assert_eq!(kinds("'я'"), [TokenKind::Char, TokenKind::Eof]);
+        assert_eq!(
+            kinds("s' 'x'"),
+            [TokenKind::Ident, TokenKind::Char, TokenKind::Eof]
+        );
+        for bad in ["'ab'", "''", "'a", r"'\q'"] {
+            assert!(
+                matches!(lex(bad), Err(LexError::BadChar { .. })),
+                "`{bad}` обязан быть отказом"
+            );
+        }
     }
 }

@@ -550,7 +550,7 @@ pub(crate) fn scalar(repr: Repr) -> &'static str {
         Repr::Flat(PrimTy::Int64) => "int64_t",
         Repr::Flat(PrimTy::UInt8) => "uint8_t",
         Repr::Flat(PrimTy::UInt16) => "uint16_t",
-        Repr::Flat(PrimTy::UInt32) => "uint32_t",
+        Repr::Flat(PrimTy::UInt32 | PrimTy::Char) => "uint32_t",
         Repr::Flat(PrimTy::UInt64) => "uint64_t",
         Repr::Flat(PrimTy::Float32) => "float",
         Repr::Flat(PrimTy::Float64) => "double",
@@ -629,7 +629,7 @@ const fn lane_word(lane: PrimTy) -> &'static str {
     match lane {
         PrimTy::Int8 | PrimTy::UInt8 => "uint8_t",
         PrimTy::Int16 | PrimTy::UInt16 => "uint16_t",
-        PrimTy::Int32 | PrimTy::UInt32 | PrimTy::Float32 => "uint32_t",
+        PrimTy::Int32 | PrimTy::UInt32 | PrimTy::Float32 | PrimTy::Char => "uint32_t",
         PrimTy::Int64 | PrimTy::UInt64 | PrimTy::Float64 => "uint64_t",
     }
 }
@@ -4733,14 +4733,15 @@ mod tests {
                 "`flat.c` не определяет `{defined}`: имя операции разъехалось с эмиттером"
             );
         }
-        // Сравнений шесть, и определены они **дважды** - целым макросом и
-        // плавающим: пропуск в одном из двух собрал бы половину программ.
+        // Сравнений шесть, и определены они **трижды** - целым макросом,
+        // плавающим и символьным: пропуск в одном из трёх собрал бы не всякую
+        // программу.
         for op in PrimCmp::ALL {
             let defined = format!("adamas_{}_##name", comparison(op));
             assert_eq!(
                 FLAT.matches(&defined).count(),
-                2,
-                "`flat.c` определяет `{defined}` не в обоих макросах: \
+                3,
+                "`flat.c` определяет `{defined}` не во всех трёх макросах: \
                  сравнение соберётся не над всяким примитивом"
             );
         }

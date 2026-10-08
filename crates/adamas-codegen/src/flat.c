@@ -73,6 +73,7 @@ typedef struct adamas_layout {
 #define ADAMAS_FLAT_UINT64 8u
 #define ADAMAS_FLAT_FLOAT32 9u
 #define ADAMAS_FLAT_FLOAT64 10u
+#define ADAMAS_FLAT_CHAR 11u
 
 /* Биты слота как они лежат. `memcpy`, а не приведение указателя: слот объявлен
  * `adamas_value`, и читать его как целое иначе значило бы нарушить строгий
@@ -282,6 +283,64 @@ ADAMAS_FLAT_UNSIGNED(UInt64, uint64_t, uint64_t, 64)
 ADAMAS_FLAT_REAL(Float32, float, uint32_t, 0x7F800000u, 0x7FC00000u, fmodf)
 ADAMAS_FLAT_REAL(Float64, double, uint64_t, 0x7FF0000000000000u, 0x7FF8000000000000u, fmod)
 
+/* Символ (§4.4): 32-битный код, арифметики нет - только сравнение по коду и
+ * печать. Печатается так, как пишется литерал: в одинарных кавычках, с теми же
+ * экранированиями, что у машины (`show` прелюдии и печать ответа совпадают). */
+#define ADAMAS_FLAT_SYMBOL(name, ctype)                                                             \
+    static ctype adamas_bits_##name(uint64_t bits) { return (ctype)bits; }                         \
+    static uint64_t adamas_word_##name(ctype value) { return (uint64_t)value; }                    \
+    static int adamas_eq_##name(ctype a, ctype b) { return a == b; }                               \
+    static int adamas_ne_##name(ctype a, ctype b) { return a != b; }                               \
+    static int adamas_lt_##name(ctype a, ctype b) { return a < b; }                                \
+    static int adamas_le_##name(ctype a, ctype b) { return a <= b; }                               \
+    static int adamas_gt_##name(ctype a, ctype b) { return a > b; }                                \
+    static int adamas_ge_##name(ctype a, ctype b) { return a >= b; }
+
+ADAMAS_FLAT_SYMBOL(Char, uint32_t)
+
+static void adamas_show_Char(uint32_t code) {
+    putchar('\'');
+    switch (code) {
+    case '\n':
+        fputs("\\n", stdout);
+        break;
+    case '\t':
+        fputs("\\t", stdout);
+        break;
+    case '\r':
+        fputs("\\r", stdout);
+        break;
+    case 0:
+        fputs("\\0", stdout);
+        break;
+    case '\\':
+        fputs("\\\\", stdout);
+        break;
+    case '\'':
+        fputs("\\'", stdout);
+        break;
+    default:
+        if (code < 0x20u || code == 0x7Fu) {
+            printf("\\u{%x}", (unsigned)code);
+        } else if (code < 0x80u) {
+            putchar((int)code);
+        } else if (code < 0x800u) {
+            putchar((int)(0xC0u | (code >> 6)));
+            putchar((int)(0x80u | (code & 0x3Fu)));
+        } else if (code < 0x10000u) {
+            putchar((int)(0xE0u | (code >> 12)));
+            putchar((int)(0x80u | ((code >> 6) & 0x3Fu)));
+            putchar((int)(0x80u | (code & 0x3Fu)));
+        } else {
+            putchar((int)(0xF0u | (code >> 18)));
+            putchar((int)(0x80u | ((code >> 12) & 0x3Fu)));
+            putchar((int)(0x80u | ((code >> 6) & 0x3Fu)));
+            putchar((int)(0x80u | (code & 0x3Fu)));
+        }
+    }
+    putchar('\'');
+}
+
 /* Кратчайшая запись плавающего в форме Rust'а. `width` - 4 либо 8: сужение до
  * `float` решает и точность записи, и границы позиционной формы. */
 static void adamas_show_real(double value, int width) {
@@ -417,6 +476,9 @@ static void adamas_print_flat(uint8_t kind, uint64_t bits, int nested) {
         break;
     case ADAMAS_FLAT_FLOAT64:
         adamas_show_Float64(adamas_bits_Float64(bits));
+        break;
+    case ADAMAS_FLAT_CHAR:
+        adamas_show_Char(adamas_bits_Char(bits));
         break;
     default:
         adamas_fail("printing: the slot has no sort");

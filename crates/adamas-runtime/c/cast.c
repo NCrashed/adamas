@@ -33,6 +33,7 @@ static unsigned width_of(uint8_t ty) {
     case ADAMAS_TY_INT32:
     case ADAMAS_TY_UINT32:
     case ADAMAS_TY_FLOAT32:
+    case ADAMAS_TY_CHAR:
         return 32;
     default:
         return 64;
@@ -122,7 +123,18 @@ static uint64_t saturated(double value, uint8_t ty) {
     return masked((uint64_t)value, width);
 }
 
+/* Скалярное ли значение Юникода: не суррогат и не дальше `U+10FFFF` (§4.4). */
+static int scalar(uint64_t code) {
+    return code < 0xD800u || (0xDFFFu < code && code <= 0x10FFFFu);
+}
+
 uint64_t adamas_cast(uint64_t bits, uint8_t from, uint8_t to) {
+    /* Символ по коду: не-скалярный код становится знаком замены `U+FFFD`.
+     * Пара у символа одна - `UInt32`, и проверять ширину источника незачем:
+     * его биты уже код. */
+    if (to == ADAMAS_TY_CHAR) {
+        return scalar(bits) ? bits : 0xFFFDu;
+    }
     if (!floating_of(from) && !floating_of(to)) {
         return masked((uint64_t)widened(bits, from), width_of(to));
     }

@@ -193,7 +193,7 @@ enum Class {
 fn classify(ty: PrimTy) -> Option<Class> {
     match ty {
         PrimTy::Int64 | PrimTy::UInt64 => Some(Class::Word),
-        PrimTy::Int32 | PrimTy::UInt32 => Some(Class::Half),
+        PrimTy::Int32 | PrimTy::UInt32 | PrimTy::Char => Some(Class::Half),
         PrimTy::Float64 => Some(Class::Double),
         PrimTy::Int8 | PrimTy::Int16 | PrimTy::UInt8 | PrimTy::UInt16 | PrimTy::Float32 => None,
     }

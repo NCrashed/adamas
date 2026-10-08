@@ -1077,7 +1077,7 @@ const fn machine(ty: PrimTy) -> &'static str {
     match ty {
         PrimTy::Int8 | PrimTy::UInt8 => "i8",
         PrimTy::Int16 | PrimTy::UInt16 => "i16",
-        PrimTy::Int32 | PrimTy::UInt32 => "i32",
+        PrimTy::Int32 | PrimTy::UInt32 | PrimTy::Char => "i32",
         PrimTy::Int64 | PrimTy::UInt64 => "i64",
         PrimTy::Float32 => "float",
         PrimTy::Float64 => "double",

@@ -6,6 +6,7 @@ lex-unexpected-char = unknown character
 lex-unterminated-comment = unterminated comment `{"{"}-`
 lex-unterminated-string = unterminated string literal
 lex-unknown-escape = unknown escape in a string
+lex-bad-char = a character literal is exactly one character in single quotes: `'a'`, `'\n'`, `'\u{"{"}1F600{"}"}'`
 lex-tab-in-indentation = tab in indentation: indentation is significant, tab width is not
 
 layout-shallow-block = a block body must be indented further than the enclosing block
@@ -21,6 +22,7 @@ token-operator = operator
 token-nat = natural literal
 token-float = floating-point literal
 token-str = string literal
+token-char = character literal
 token-open = start of block
 token-sep = block boundary
 token-close = end of block

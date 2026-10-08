@@ -313,3 +313,4 @@ lift-capture-dependent = захватывает `{ $name }`, чей тип за�
 expr-record-closer = закрытие записи #{ $index }
 expr-tuple-binder = кортеж#{ $index }
 elab-not-yet = { $what } пока не элаборируется: { $why }
+expr-char-number = символ пишется литералом `'a'`, а код превращается в символ `uInt32ToChar`

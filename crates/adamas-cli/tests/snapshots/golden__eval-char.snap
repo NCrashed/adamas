@@ -1,0 +1,5 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+{kinds = 46, code = 128512, surrogate = True, replaced = '�', shown = True, last = 'т'}

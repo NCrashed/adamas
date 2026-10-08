@@ -6,6 +6,7 @@ lex-unexpected-char = неизвестный символ
 lex-unterminated-comment = незакрытый комментарий `{"{"}-`
 lex-unterminated-string = незакрытый строковый литерал
 lex-unknown-escape = неизвестное экранирование в строке
+lex-bad-char = символьный литерал - ровно один символ в одинарных кавычках: `'a'`, `'\n'`, `'\u{"{"}1F600{"}"}'`
 lex-tab-in-indentation = табуляция в отступе: отступ значим, ширина табуляции - нет
 
 layout-shallow-block = тело блока должно быть с большим отступом, чем окружающий блок
@@ -21,6 +22,7 @@ token-operator = оператор
 token-nat = натуральный литерал
 token-float = литерал с плавающей точкой
 token-str = строковый литерал
+token-char = символьный литерал
 token-open = начало блока
 token-sep = граница блока
 token-close = конец блока

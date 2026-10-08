@@ -32,6 +32,9 @@ pub enum TokenKind {
     /// Строковый литерал вместе с кавычками. Экранирование проверено лексером,
     /// раскодировка - за парсером.
     Str,
+    /// Символьный литерал вместе с кавычками: `'a'`, `'\n'` (§4.4). Ровно один
+    /// символ либо экранирование - проверено лексером.
+    Char,
 
     /// `data`
     Data,
@@ -164,6 +167,7 @@ impl TokenKind {
             Self::Nat => class("nat", "token-nat"),
             Self::Float => class("float", "token-float"),
             Self::Str => class("str", "token-str"),
+            Self::Char => class("char", "token-char"),
             Self::Open => class("open", "token-open"),
             Self::Sep => class("sep", "token-sep"),
             Self::Close => class("close", "token-close"),

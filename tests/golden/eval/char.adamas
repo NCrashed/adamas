@@ -1,0 +1,27 @@
+-- `Char` - скалярное значение Юникода, примитив ядра (§4.4, решение
+-- 2026-10-09): 32-битное слово без арифметики, литерал `'a'`.
+--
+-- Литерал разбирается образцом, как число; сравнение - порядок кодов; код
+-- символа - `charToUInt32`, символ по коду - `uInt32ToChar`, заменяющий
+-- суррогат знаком `U+FFFD`, либо точный `charFrom`. Массив символов плоский:
+-- `Array 3 Char` - три слова в одном блоке, а не три ячейки кучи. `show`
+-- печатает символ так, как пишется литерал, - теми же экранированиями, что
+-- печать ответа (поле `last` ниже печатает её).
+
+kind : Char -> UInt32
+kind 'a' = 1
+kind '\n' = 2
+kind c = if c < 'z' then 3 else 4
+
+missing : Option Char -> Bool
+missing None = True
+missing (Some _c) = False
+
+word : Array 3 Char
+word = arraySet (arraySet (arrayNew 3 'к') 1 'о') 2 'т'
+
+spelled : String
+spelled = charText (arrayIndex word 0) <> charText (arrayIndex word 1) <> charText (arrayIndex word 2)
+
+main : { kinds : UInt32, code : UInt32, surrogate : Bool, replaced : Char, shown : Bool, last : Char }
+main = {kinds = kind 'a' + kind '\n' + kind 'b' + kind 'я' * 10, code = charToUInt32 '😀', surrogate = missing (charFrom 55296), replaced = uInt32ToChar 55296, shown = show 'a' <> show '\n' <> show 'я' <> show '\u{7}' <> show '\'' == "'a''\\n''я''\\u{7}''\\''" && spelled == "кот", last = arrayIndex word 2}

@@ -313,3 +313,4 @@ lift-capture-dependent = captures `{ $name }`, whose type depends on another par
 expr-record-closer = record closing #{ $index }
 expr-tuple-binder = tuple#{ $index }
 elab-not-yet = { $what } is not elaborated yet: { $why }
+expr-char-number = a character is written as a literal `'a'`, and a code becomes a character with `uInt32ToChar`

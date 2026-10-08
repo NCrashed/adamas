@@ -193,7 +193,7 @@ impl Slot {
         match kind {
             TokenKind::Ident => Self::Named,
             TokenKind::Nat | TokenKind::Float => Self::Face(Face::Number),
-            TokenKind::Str => Self::Face(Face::Str),
+            TokenKind::Str | TokenKind::Char => Self::Face(Face::Str),
 
             TokenKind::Data
             | TokenKind::Where
@@ -347,7 +347,8 @@ fn lexical(text: &str) -> (Tokens, Option<Piece>) {
             modifiers: 0,
         }),
         adamas_parser::lexer::LexError::UnterminatedString { span }
-        | adamas_parser::lexer::LexError::UnknownEscape { span } => Some(Piece {
+        | adamas_parser::lexer::LexError::UnknownEscape { span }
+        | adamas_parser::lexer::LexError::BadChar { span } => Some(Piece {
             span,
             face: Face::Str,
             modifiers: 0,

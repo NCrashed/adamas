@@ -473,6 +473,21 @@ instance Ord Float64 where
   lt = ltFloat64
   le = leFloat64
 
+-- # Символ (§4.4)
+--
+-- `Char` - скалярное значение Юникода, примитив ядра: 32-битное слово без
+-- арифметики. Литерал - `'a'`, `'\n'`, `'\u{1F600}'`; код символа -
+-- `charToUInt32`, символ по коду - `uInt32ToChar`, который не-скалярный код
+-- заменяет знаком `U+FFFD`, либо точный `charFrom`.
+
+instance Eq Char where
+  eq = eqChar
+
+instance Ord Char where
+  compare x y = if ltChar x y then LT else if eqChar x y then EQ else GT
+  lt = ltChar
+  le = leChar
+
 -- # Деление (§3.7)
 --
 -- `/` и `%` - методы класса `Div`, и делитель у них требует **предусловия**
@@ -682,6 +697,48 @@ instance Show Int64 where
 
 instance Show Bool where
   show b = if b then "True" else "False"
+
+-- | Символ по коду; `None` - суррогат либо код дальше `U+10FFFF`.
+charFrom : UInt32 -> Option Char
+charFrom n = if ltUInt32 n 55296 || (ltUInt32 57343 n && leUInt32 n 1114111) then Some (uInt32ToChar n) else None
+
+-- Байт продолжения UTF-8: младшие шесть битов под приставкой `10`.
+utf8Tail : UInt32 -> UInt8
+utf8Tail x = uInt32ToUInt8 (orUInt32 128 (andUInt32 x 63))
+
+-- | Символ текстом: его байты UTF-8, от одного до четырёх.
+charText : Char -> String
+charText c =
+  let n = charToUInt32 c
+  if ltUInt32 n 128 then MkString 1 (arrayNew 1 (uInt32ToUInt8 n))
+  else if ltUInt32 n 2048 then MkString 2 (arraySet (arrayNew 2 (uInt32ToUInt8 (orUInt32 192 (shrUInt32 n 6)))) 1 (utf8Tail n))
+  else if ltUInt32 n 65536 then MkString 3 (arraySet (arraySet (arrayNew 3 (uInt32ToUInt8 (orUInt32 224 (shrUInt32 n 12)))) 1 (utf8Tail (shrUInt32 n 6))) 2 (utf8Tail n))
+  else MkString 4 (arraySet (arraySet (arraySet (arrayNew 4 (uInt32ToUInt8 (orUInt32 240 (shrUInt32 n 18)))) 1 (utf8Tail (shrUInt32 n 12))) 2 (utf8Tail (shrUInt32 n 6))) 3 (utf8Tail n))
+
+-- Шестнадцатеричная цифра: `0`-`9`, `a`-`f`.
+hexDigit : UInt32 -> String
+hexDigit d = charText (uInt32ToChar (if ltUInt32 d 10 then 48 + d else 87 + d))
+
+-- Шестнадцатеричная запись без ведущих нулей.
+hexOf : UInt32 -> String
+hexOf n = if ltUInt32 n 16 then hexDigit n else hexOf (shrUInt32 n 4) <> hexDigit (andUInt32 n 15)
+
+-- Символ внутри кавычек литерала: экранирования те же, что у печати ответа
+-- (`char_literal` ядра, `adamas_show_Char` рантайма).
+escapedChar : Char -> String
+escapedChar c =
+  if c == '\n' then "\\n"
+  else if c == '\t' then "\\t"
+  else if c == '\r' then "\\r"
+  else if c == '\0' then "\\0"
+  else if c == '\\' then "\\\\"
+  else if c == '\'' then "\\'"
+  else if ltChar c ' ' || c == '\u{7F}' then "\\u{" <> hexOf (charToUInt32 c) <> "}"
+  else charText c
+
+-- | Символ так, как пишется его литерал: `'a'`, `'\n'`.
+instance Show Char where
+  show c = "'" <> escapedChar c <> "'"
 
 -- Плавающие: кратчайшая запись, которая читается обратно тем же числом
 -- (решение 2026-10-06). Точность перебирается от одной значащей цифры, и

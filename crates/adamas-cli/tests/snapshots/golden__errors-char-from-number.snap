@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: char-from-number.adamas:6:10: литерал не подходит типу `Char`: символ пишется литералом `'a'`, а код превращается в символ `uInt32ToChar`
+  letter = 65
+           ^^

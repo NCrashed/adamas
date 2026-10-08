@@ -332,6 +332,17 @@ fn string_bytes(text: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// Код символьного литерала `'a'` (§4.4): экранирования те же, что у строки, и
+/// раскодирует их тот же [`string_bytes`]. `None` - не ровно один символ.
+fn char_code(text: &str) -> Option<u32> {
+    let inner = text.strip_prefix('\'')?.strip_suffix('\'')?;
+    let bytes = string_bytes(&format!("\"{inner}\""))?;
+    let decoded = std::str::from_utf8(&bytes[..bytes.len() - 1]).ok()?;
+    let mut chars = decoded.chars();
+    let only = chars.next()?;
+    chars.next().is_none().then_some(u32::from(only))
+}
+
 /// Читает цифры литерала: десятичные либо шестнадцатеричные, `_` игнорируются.
 ///
 /// `None` - не разобралось либо не поместилось в `u128`. Шире `u128` не бывает
@@ -3439,6 +3450,17 @@ impl<'a> Elaborator<'a> {
     /// терм литерала размером с само число, и потому величина его ограничена -
     /// см. [`UNARY_LIMIT`].
     fn literal(&mut self, lit: &ast::Lit, awaited: Option<&Rc<Value>>) -> Result<Term, ElabError> {
+        // Символ - тип у литерала один, `Char` (§4.4): ни ожидание, ни умолчание
+        // его не выбирают, и несовпадение с ожидаемым скажет проверка.
+        if lit.kind == ast::LitKind::Char {
+            let Some(code) = char_code(&lit.text) else {
+                return Err(ElabError::Missing {
+                    what: Missing::Literal,
+                    span: lit.span,
+                });
+            };
+            return Ok(Term::Prim(Prim::Lit(PrimTy::Char, u64::from(code))));
+        }
         if lit.kind == ast::LitKind::Str && awaited.is_some_and(|ty| self.byte_array(ty)) {
             return Self::string_literal(lit);
         }
@@ -3540,6 +3562,7 @@ impl<'a> Elaborator<'a> {
             ast::LitKind::Nat | ast::LitKind::Int => DEFAULT_INT,
             ast::LitKind::Float => DEFAULT_FLOAT,
             ast::LitKind::Str => prim::STRING,
+            ast::LitKind::Char => return Ok(None),
         };
         // Имя умолчания ищется **соглашением**, а не голым `lookup`: прелюдия
         // объявляет `Prelude.Int`, и голое имя её не находит - ровно та же
@@ -3698,12 +3721,25 @@ impl<'a> Elaborator<'a> {
                 span: lit.span,
             })
         };
+        // Число символом не становится: символ пишется литералом `'a'`, а код -
+        // преобразованием `uInt32ToChar` (§4.4).
+        if !ty.numeric() {
+            return refuse(adamas_l10n::text!("expr-char-number"));
+        }
         let bits = match lit.kind {
             ast::LitKind::Str => {
                 return Err(ElabError::Missing {
                     what: Missing::Literal,
                     span: lit.span,
                 });
+            }
+            // Сюда символ не доходит - `literal` отвечает на него раньше, - но
+            // ответ у формы один: код символа.
+            ast::LitKind::Char => {
+                let Some(code) = char_code(&lit.text) else {
+                    return overflow();
+                };
+                u64::from(code)
             }
             ast::LitKind::Nat => {
                 if ty.floating() {
@@ -8764,6 +8800,7 @@ fn written_literal(lit: &ast::Lit) -> Option<CorePattern> {
             Literal::Fraction(lit.text.replace('_', "").parse::<f64>().ok()?.to_bits())
         }
         ast::LitKind::Str => return None,
+        ast::LitKind::Char => Literal::Nat(u128::from(char_code(&lit.text)?)),
     };
     Some(CorePattern::Lit(literal))
 }

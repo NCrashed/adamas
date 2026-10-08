@@ -133,11 +133,15 @@ pub enum PrimTy {
     Float32,
     /// Плавающее двойной точности.
     Float64,
+    /// Символ: скалярное значение Юникода (§4.4, решение 2026-10-09), 32-битное
+    /// беззнаковое слово. Арифметики и битовых операций у него нет - символ не
+    /// число, - сравнение есть, и порядок его - порядок кодов.
+    Char,
 }
 
 impl PrimTy {
     /// Все примитивные типы в порядке §4.11.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Int8,
         Self::Int16,
         Self::Int32,
@@ -148,6 +152,7 @@ impl PrimTy {
         Self::UInt64,
         Self::Float32,
         Self::Float64,
+        Self::Char,
     ];
 
     /// Имя, которым тип пишется в программе.
@@ -164,6 +169,7 @@ impl PrimTy {
             Self::UInt64 => "UInt64",
             Self::Float32 => "Float32",
             Self::Float64 => "Float64",
+            Self::Char => "Char",
         }
     }
 
@@ -180,7 +186,7 @@ impl PrimTy {
         match self {
             Self::Int8 | Self::UInt8 => 1,
             Self::Int16 | Self::UInt16 => 2,
-            Self::Int32 | Self::UInt32 | Self::Float32 => 4,
+            Self::Int32 | Self::UInt32 | Self::Float32 | Self::Char => 4,
             Self::Int64 | Self::UInt64 | Self::Float64 => 8,
         }
     }
@@ -200,6 +206,12 @@ impl PrimTy {
     #[must_use]
     pub const fn signed(self) -> bool {
         matches!(self, Self::Int8 | Self::Int16 | Self::Int32 | Self::Int64)
+    }
+
+    /// Число ли это: у символа арифметики нет (§4.4).
+    #[must_use]
+    pub const fn numeric(self) -> bool {
+        !matches!(self, Self::Char)
     }
 
     /// Меняет ли C ширину этого типа в **вариадической** части вызова (§5.3).
@@ -658,8 +670,10 @@ impl PrimOp {
     #[must_use]
     pub const fn over(self, ty: PrimTy) -> bool {
         match self {
-            Self::Add | Self::Sub | Self::Mul | Self::Div | Self::Rem => true,
-            Self::And | Self::Or | Self::Xor | Self::Shl | Self::Shr => !ty.floating(),
+            Self::Add | Self::Sub | Self::Mul | Self::Div | Self::Rem => ty.numeric(),
+            Self::And | Self::Or | Self::Xor | Self::Shl | Self::Shr => {
+                ty.numeric() && !ty.floating()
+            }
         }
     }
 
@@ -923,7 +937,10 @@ impl PrimCast {
         let from = PrimTy::ALL
             .into_iter()
             .find(|ty| ty.name().eq_ignore_ascii_case(head))?;
-        (from != to).then_some(Self { from, to })
+        // У символа пара одна - `UInt32`: код символа и символ по коду (§4.4).
+        // Прочие числа к символу не ведут, и имени у такого преобразования нет.
+        let paired = |one: PrimTy, other: PrimTy| one != PrimTy::Char || other == PrimTy::UInt32;
+        (from != to && paired(from, to) && paired(to, from)).then_some(Self { from, to })
     }
 
     /// Считает преобразование над битами литерала.
@@ -937,6 +954,12 @@ impl PrimCast {
         reason = "обрезка по ширине цели - правило §4.3 (вопрос 151), а не промах"
     )]
     pub fn apply(self, bits: u64) -> u64 {
+        // Символ по коду: не-скалярное значение - суррогат либо код за
+        // `U+10FFFF` - становится `U+FFFD`, знаком замены. Отказа нет, как и у
+        // прочих преобразований; точный ответ даёт `charFrom` прелюдии.
+        if self.to == PrimTy::Char {
+            return if scalar(bits) { bits } else { REPLACEMENT };
+        }
         if !self.from.floating() && !self.to.floating() {
             return self.to.wrapped(self.from.as_signed(bits) as u64, self.from);
         }
@@ -947,6 +970,34 @@ impl PrimCast {
             self.to.saturated(value)
         }
     }
+}
+
+/// Знак замены Юникода, `U+FFFD`: им становится не-скалярный код (§4.4).
+pub const REPLACEMENT: u64 = 0xFFFD;
+
+/// Скалярное ли это значение Юникода: не суррогат и не дальше `U+10FFFF`.
+#[must_use]
+pub const fn scalar(code: u64) -> bool {
+    code < 0xD800 || (0xDFFF < code && code <= 0x10_FFFF)
+}
+
+/// Символ так, как пишется его литерал (§4.4): в одинарных кавычках, с теми
+/// же экранированиями, что печатает собранная программа (`adamas_show_Char` в
+/// `flat.c`), - ответ трёх вычислителей обязан совпасть буквально.
+#[must_use]
+pub fn char_literal(code: u64) -> String {
+    let code = u32::try_from(code).unwrap_or(0xFFFD);
+    let shown = match code {
+        0x0A => "\\n".to_owned(),
+        0x09 => "\\t".to_owned(),
+        0x0D => "\\r".to_owned(),
+        0 => "\\0".to_owned(),
+        0x5C => "\\\\".to_owned(),
+        0x27 => "\\'".to_owned(),
+        _ if code < 0x20 || code == 0x7F => format!("\\u{{{code:x}}}"),
+        _ => char::from_u32(code).unwrap_or('\u{FFFD}').to_string(),
+    };
+    format!("'{shown}'")
 }
 
 impl fmt::Display for PrimCast {
@@ -1705,6 +1756,7 @@ impl fmt::Display for Prim {
             )]
             Self::Lit(PrimTy::Float32, bits) => write!(f, "{:?}", f32::from_bits(*bits as u32)),
             Self::Lit(PrimTy::Float64, bits) => write!(f, "{:?}", f64::from_bits(*bits)),
+            Self::Lit(PrimTy::Char, bits) => f.write_str(&char_literal(*bits)),
             Self::Lit(ty, bits) => write!(f, "{}", ty.as_signed(*bits)),
         }
     }

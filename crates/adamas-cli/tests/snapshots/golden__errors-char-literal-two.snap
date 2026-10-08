@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: char-literal-two.adamas:6:8: символьный литерал - ровно один символ в одинарных кавычках: `'a'`, `'\n'`, `'\u{1F600}'`
+  pair = 'ab'
+         ^^

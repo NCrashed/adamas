@@ -1679,6 +1679,7 @@ void adamas_fiber_name_release(adamas_value value);
 #define ADAMAS_TY_UINT64 7u
 #define ADAMAS_TY_FLOAT32 8u
 #define ADAMAS_TY_FLOAT64 9u
+#define ADAMAS_TY_CHAR 10u
 
 /**
  * Преобразует биты значения типа `from` в биты типа `to` (§4.3).

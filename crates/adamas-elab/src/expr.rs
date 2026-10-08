@@ -902,6 +902,10 @@ impl Argument {
 /// Локальное связывание: имя, видно ли оно поиску (см. `hiding`), владеет ли
 /// оно (§3.3) и не привязано ли к своему scope.
 #[derive(Clone)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "признаки независимы: видимость, владение, привязка и прозрачность сочетаются как угодно"
+)]
 struct Bound {
     name: Symbol,
     /// Кратность, с которой связывание объявлено.
@@ -911,9 +915,13 @@ struct Bound {
     ty: Rc<Value>,
     visible: bool,
     owned: bool,
-    /// Значение связывания, если оно `let`. Вычисление его подставляет,
-    /// поэтому переменной такое связывание не остаётся - см. `fresh_meta`.
+    /// Значение связывания, если оно `let` либо разбираемое `case`.
     value: Option<Rc<Term>>,
+    /// Прозрачно ли связывание и в контексте: значение подставлено (`define`),
+    /// а не стоит переменной. Таково связывание разбираемого `case`; `let`
+    /// автора в контексте - переменная, а в телескопе дырки - `Let`, и тип,
+    /// упоминающий его, читается там и тут по-разному (см. `stateable`).
+    transparent: bool,
     /// Значение, которое не вправе покинуть scope: замыкание над владеющим
     /// связыванием, связывание, инициализированное таким замыканием, и
     /// `1`-параметр функционального типа (§3.3).
@@ -930,6 +938,7 @@ impl Bound {
             owned: false,
             scoped: false,
             value: None,
+            transparent: false,
         }
     }
 
@@ -2599,10 +2608,7 @@ impl<'a> Elaborator<'a> {
                 cond,
                 then_branch,
                 else_branch,
-            } => {
-                let alts = conditional(then_branch, else_branch);
-                self.case(cond, &alts, expr.span, position, awaited)
-            }
+            } => self.conditioned(cond, then_branch, else_branch, expr.span, position, awaited),
             ExprKind::Case { scrutinee, alts } => {
                 self.case(scrutinee, alts, expr.span, position, awaited)
             }
@@ -2906,6 +2912,79 @@ impl<'a> Elaborator<'a> {
         // есть про форму, а не про тип; форму layout теперь допускает, и
         // спрашивать необитаемость полагается ядру, которое умеет это с самого
         // начала (сверка 2026-09-08).
+        let (value, ty) = self.scrutinized(scrutinee, span)?;
+        self.case_on(scrutinee, value, &ty, alts, span, position, awaited)
+    }
+
+    /// `if c then a else b` - разбор `inspect c` с фактом в каждой ветви
+    /// (§3.7, сужение): `then` видит `c`, `else` - `not c`, и ограничение-факт
+    /// внутри ветви находит доказательство гипотезой контекста.
+    ///
+    /// Без `inspect` прелюдии, и над `Bool`, который не её (корпус объявляет
+    /// свой), `if` остаётся разбором самого условия.
+    fn conditioned(
+        &mut self,
+        cond: &Expr,
+        then_branch: &Expr,
+        else_branch: &Expr,
+        span: Span,
+        position: Position,
+        awaited: Option<&Rc<Value>>,
+    ) -> Result<Term, ElabError> {
+        let (value, ty) = self.scrutinized(cond, span)?;
+        let inspect: Symbol = Rc::from(format!("{}.{}", prim::PRELUDE, prim::INSPECT).as_str());
+        let narrowed = self.signature.lookup(&inspect).is_some_and(|it| {
+            matches!(&it.ty, Term::Pi(_, _, domain, _, _)
+                if convertible(self.signature, self.metas, self.ctx.size(), &self.ctx.eval(domain), &ty))
+        }) && self.stateable(&value);
+        if !narrowed {
+            let alts = conditional(then_branch, else_branch);
+            return self.case_on(cond, value, &ty, &alts, span, position, awaited);
+        }
+        let Some(head) = self.signature.instantiate(&inspect, self.metas) else {
+            return Err(ElabError::NotMatchable { span });
+        };
+        let value = Term::App(Rc::new(head), Rc::new(value));
+        let Some(ty) = self.synthesized(&value) else {
+            return Err(ElabError::NotMatchable { span });
+        };
+        let alts = inspected(then_branch, else_branch);
+        self.case_on(cond, value, &ty, &alts, span, position, awaited)
+    }
+
+    /// Может ли условие стоять в типе факта: гипотеза ветви его называет, а
+    /// тип - стёртый фрагмент, где нетотальной функции и чужому символу места
+    /// нет (§4.7). Условие, которое там не выводится, ветви факта не даёт -
+    /// `if` остаётся разбором самого условия.
+    ///
+    /// Условие над переменной `let` автора тоже факта не даёт. Такая
+    /// переменная в контексте элаборации непрозрачна, а в телескопе дырки
+    /// раскрыта ([`Bound::transparent`]), и гипотеза, упоминающая её, делала
+    /// вывод типа всякого применения в ветви молча неудачным - литерал терял
+    /// ожидание. Тот же дефект есть у написанного `case decide ok of`.
+    fn stateable(&mut self, condition: &Term) -> bool {
+        let size = self.scope.len();
+        let opaque = self.scope.iter().enumerate().any(|(level, bound)| {
+            bound.value.is_some()
+                && !bound.transparent
+                && u32::try_from(size - 1 - level)
+                    .is_ok_and(|index| condition.mentions_recent(index, 1))
+        });
+        if opaque {
+            return false;
+        }
+        let mark = self.metas.mark();
+        let fits = infer(&self.ctx.speculating(), self.metas, Mult::Zero, condition).is_ok();
+        self.metas.rollback(mark);
+        fits
+    }
+
+    /// Разбираемое - вместе с типом; приостановка исполняется.
+    fn scrutinized(
+        &mut self,
+        scrutinee: &Expr,
+        span: Span,
+    ) -> Result<(Term, Rc<Value>), ElabError> {
         let value = self.placed(Position::Inner, |it| it.expr(scrutinee, Mult::Many))?;
         let Some(ty) = self.synthesized(&value) else {
             return Err(ElabError::NotMatchable { span });
@@ -2923,6 +3002,25 @@ impl<'a> Elaborator<'a> {
         } else {
             (value, ty)
         };
+        Ok((value, ty))
+    }
+
+    /// Разбор уже элаборированного разбираемого.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "разбор несёт позицию и ожидание ветвей, как и `case`"
+    )]
+    fn case_on(
+        &mut self,
+        scrutinee: &Expr,
+        value: Term,
+        ty: &Rc<Value>,
+        alts: &[ast::Alt],
+        span: Span,
+        position: Position,
+        awaited: Option<&Rc<Value>>,
+    ) -> Result<Term, ElabError> {
+        let ty = Rc::clone(ty);
         // Единственная ветка-кортеж - разбор записи, а не по конструктору (§10
         // вопрос 231): `case p of (a, b) -> …` значит то же, что `let (a, b) = p`.
         if let [alt] = alts {
@@ -2969,6 +3067,7 @@ impl<'a> Elaborator<'a> {
         // решался.
         self.scope.push(Bound {
             visible: false,
+            transparent: true,
             value: Some(Rc::new(value.clone())),
             ..Bound::visible(&name, mult, Rc::clone(&ty))
         });
@@ -8598,6 +8697,30 @@ fn conditional(then_branch: &Expr, else_branch: &Expr) -> Vec<ast::Alt> {
         span: body.span,
     };
     vec![alt("True", then_branch), alt("False", else_branch)]
+}
+
+/// Ветви `if` над `inspect c`: поле - факт, и связывает его `_` - имени у
+/// гипотезы нет, поиск находит её по типу (§3.7). Конструкторы названы
+/// полными именами: свой `Then` программы их не заслоняет.
+fn inspected(then_branch: &Expr, else_branch: &Expr) -> Vec<ast::Alt> {
+    let alt = |constructor: &str, body: &Expr| ast::Alt {
+        pattern: Pattern {
+            kind: PatternKind::App {
+                head: ast::Name {
+                    text: Rc::from(format!("{}.{constructor}", prim::PRELUDE).as_str()),
+                    span: body.span,
+                },
+                fields: vec![Pattern {
+                    kind: PatternKind::Wildcard,
+                    span: body.span,
+                }],
+            },
+            span: body.span,
+        },
+        body: body.clone(),
+        span: body.span,
+    };
+    vec![alt(prim::THEN, then_branch), alt(prim::ELSE, else_branch)]
 }
 
 /// Номер клаузы, на которой споткнулась сборка; `0` - когда его нет.

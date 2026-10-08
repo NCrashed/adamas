@@ -7,3 +7,4 @@ Error: if-branch-located.adamas:7:27: несовпадение типов: ож�
                             ^^^^
   в контексте:
     (c : Bool)
+    {not c}

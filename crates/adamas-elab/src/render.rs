@@ -194,7 +194,14 @@ fn explain(error: &TypeError, names: &Names) -> String {
         .iter()
         .enumerate()
         .map(|(depth, binding)| (context.len() - depth - 1, binding))
-        .filter(|(index, binding)| &*binding.name != "_" || mentioned(error, *index))
+        // `case` - связывание разбираемого, заведённое элаборацией: имя это
+        // ключевое слово, и автор его не писал. Гипотеза-факт печатается
+        // всегда, хоть и безымянна: она и есть то, что ветвь знает.
+        .filter(|(index, binding)| {
+            !matches!(&*binding.name, "_" | "case")
+                || mentioned(error, *index)
+                || adamas_core::human::claim(&binding.ty).is_some()
+        })
         .collect();
     if !shown.is_empty() {
         let _ = write!(out, "\n  {}", adamas_l10n::tr!("render-context"));
@@ -209,6 +216,13 @@ fn explain(error: &TypeError, names: &Names) -> String {
                 adamas_core::mult::Mult::Many => String::new(),
                 ref other => format!("{other} "),
             };
+            // Гипотеза-факт - ограничение функции либо условие `if` над ветвью
+            // (§3.7) - печатается так, как пишется ограничение: `{d /= 0}`.
+            if let Some(claim) = adamas_core::human::claim(&ty) {
+                let claim = adamas_core::human::humanly(|| claim.to_string());
+                let _ = write!(out, "\n    {{{claim}}}");
+                continue;
+            }
             let ty = adamas_core::human::humanly(|| ty.to_string());
             let _ = write!(out, "\n    ({mult}{} : {ty})", naming.local(index));
         }

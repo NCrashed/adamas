@@ -1422,6 +1422,16 @@ pub const REFL: &str = "Refl";
 /// [`YES`] - ветвь `True`, ветвь [`NO`] - ветвь `False`.
 pub const DECIDE: &str = "decide";
 
+/// Условие `if` с фактом для ветви (прелюдия, §3.7): элаборация пишет `if c`
+/// разбором `inspect c`, и ветви получают гипотезы `c` и `not c`.
+pub const INSPECT: &str = "inspect";
+
+/// Исход [`INSPECT`] при истинном условии.
+pub const THEN: &str = "Then";
+
+/// Исход [`INSPECT`] при ложном условии.
+pub const ELSE: &str = "Else";
+
 /// Исход [`DECIDE`] при истинной проверке.
 pub const YES: &str = "Yes";
 

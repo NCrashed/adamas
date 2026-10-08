@@ -80,6 +80,19 @@ decide : (b : Bool) -> Decision b
 decide True = Yes Refl
 decide False = No Refl
 
+-- | Исход условия `if` с фактом для ветви (§3.7, сужение): `then` получает
+-- `c`, `else` - `not c`. Элаборация пишет `if c then a else b` разбором
+-- `inspect c`, и доказательство, которого ждёт ограничение-факт внутри ветви,
+-- находится гипотезой контекста. Поле стёрто, как у [`Decision`].
+data Inspected (b : Bool) where
+  Then : (0 p : Equal Bool b True) -> Inspected b
+  Else : (0 p : Equal Bool (not b) True) -> Inspected b
+
+-- | Условие вместе с фактом о нём - для `if` (см. [`Inspected`]).
+inspect : (b : Bool) -> Inspected b
+inspect True = Then @True Refl
+inspect False = Else @False Refl
+
 -- # Леммы арифметики на слове (§10 вопрос 225)
 --
 -- Примитивы в ядре непрозрачны, и `i - 1 < n` из `i <= n` вычислением не

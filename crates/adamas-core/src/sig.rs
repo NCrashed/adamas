@@ -2429,7 +2429,12 @@ impl Signature {
         // бы границу, за которой память под неё освобождена. Универсум
         // семейства - такой же уровень, как в типе, и зонкается вместе с ним.
         definition.ty = zonk_term(metas, &definition.ty);
-        definition.body = definition.body.map(|body| zonk_term(metas, &body));
+        // Сужение `if`, факт которого не понадобился, переписывается в разбор
+        // самого условия (§3.7): решения подставлены, и видно, чья гипотеза
+        // названа.
+        definition.body = definition
+            .body
+            .map(|body| crate::narrow::plain(self, &zonk_term(metas, &body)));
         if let DefinitionKind::Data { sort, .. } = &mut definition.kind {
             *sort = metas.zonk(sort);
         }

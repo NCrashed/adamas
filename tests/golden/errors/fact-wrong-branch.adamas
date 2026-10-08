@@ -1,0 +1,9 @@
+-- Факт ветви - условие `if` для `then` и его отрицание для `else` (§3.7).
+-- Здесь `share` позвана в ветви, где известно обратное: `count == 0`, - и
+-- поиск отказывает, показывая гипотезу ветви в контексте.
+
+share : (total : Int64) -> (count : Int64) -> {count /= 0} => Int64
+share total count = total - count
+
+backwards : Int64 -> Int64 -> Int64
+backwards total count = if count == 0 then share total count else 0

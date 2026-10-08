@@ -1015,14 +1015,19 @@ fn computes(signature: &Signature, metas: &Metas, ty: &Term, claim: &Term) -> bo
 /// Отказ недоказанного факта. Телескоп его - гипотезы, среди которых искали:
 /// печать покажет их тем же «в контексте», что у отказа ядра.
 fn unproven(ty: &Term, claim: &Term, span: Span) -> ElabError {
-    let context = binders_of(ty)
+    let binders = binders_of(ty);
+    let size = u32::try_from(binders.len()).unwrap_or(u32::MAX);
+    // Типы телескопа печать читает в контексте целиком, как термы сообщения:
+    // домен связывания номер `k` поднимается на него самого и всех после.
+    let context = binders
         .into_iter()
-        .map(|(_, name, domain)| adamas_core::error::Binding {
+        .zip(0u32..)
+        .map(|((_, name, domain), at)| adamas_core::error::Binding {
             name,
             // Телескоп дырки стёрт целиком (`fresh_meta`), и кратности связываний
             // в нём нет: печатается умолчание.
             mult: adamas_core::mult::Mult::Many,
-            ty: (*domain).clone(),
+            ty: adamas_core::pattern::shift_free(&domain, size - at),
         })
         .collect();
     ElabError::Core {

@@ -1117,8 +1117,18 @@ impl Walk<'_> {
         for branch in &case.branches {
             let fields = self.fields(&branch.constructor, case.params);
             let short = crate::term::short(&branch.constructor);
-            let floored = apart.filter(|_| matches!(short, crate::prim::FALSE | crate::prim::NO));
-            let bounded = less.filter(|_| matches!(short, crate::prim::TRUE | crate::prim::YES));
+            let floored = apart.filter(|_| {
+                matches!(
+                    short,
+                    crate::prim::FALSE | crate::prim::NO | crate::prim::ELSE
+                )
+            });
+            let bounded = less.filter(|_| {
+                matches!(
+                    short,
+                    crate::prim::TRUE | crate::prim::YES | crate::prim::THEN
+                )
+            });
             if let Some(fact) = floored {
                 self.apart.push(fact);
             }
@@ -1218,7 +1228,8 @@ fn unchanged(sizes: &[Option<Size>], at: usize) -> bool {
     )
 }
 
-/// Проверка `c`, если терм - `decide c` прелюдии ([`crate::prim::DECIDE`]).
+/// Проверка `c`, если терм - `decide c` или `inspect c` прелюдии
+/// ([`crate::prim::DECIDE`], [`crate::prim::INSPECT`]): `if` пишется вторым.
 fn decided(term: &Term) -> Option<&Term> {
     let Term::App(callee, argument) = term else {
         return None;
@@ -1226,5 +1237,9 @@ fn decided(term: &Term) -> Option<&Term> {
     let Term::Const(name, ..) = &**callee else {
         return None;
     };
-    (crate::term::short(name) == crate::prim::DECIDE).then_some(&**argument)
+    matches!(
+        crate::term::short(name),
+        crate::prim::DECIDE | crate::prim::INSPECT
+    )
+    .then_some(&**argument)
 }

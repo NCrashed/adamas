@@ -1,0 +1,24 @@
+-- Сужение `if` (§3.7): ветвь `then` знает условие, ветвь `else` - его
+-- отрицание, и ограничение-факт внутри ветви доказывается гипотезой
+-- контекста. Ни проверки во время исполнения сверх самого `if`, ни `Refl`.
+--
+-- `if c` элаборируется разбором `inspect c` прелюдии: поле исхода - стёртый
+-- факт `c` либо `not c`. `share` требует `count /= 0`; `spread` даёт его
+-- условием прямо, `average` - отрицанием `count == 0`, которое
+-- вычислением совпадает с `count /= 0`.
+
+share : (total : Int64) -> (count : Int64) -> {count /= 0} => Int64
+share total count = total - count
+
+spread : Int64 -> Int64 -> Int64
+spread total count = if count /= 0 then share total count else 0
+
+average : Int64 -> Int64 -> Int64
+average total count = if count == 0 then 0 else share total count
+
+-- Вложенные условия: факт внешнего `if` доживает до внутреннего.
+nested : Int64 -> Int64 -> Int64
+nested total count = if count /= 0 then (if total < 0 then 0 else share total count) else 1
+
+main : Int64
+main = spread 10 2 + spread 10 0 + average 20 5 + average 1 0 + nested 7 3 + nested 7 0 + nested (-5) 2

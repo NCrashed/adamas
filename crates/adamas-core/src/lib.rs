@@ -58,6 +58,7 @@ pub mod human;
 pub mod level;
 pub mod meta;
 pub mod mult;
+pub mod narrow;
 pub mod pattern;
 pub mod prim;
 pub mod resume;

@@ -371,7 +371,8 @@ pub fn constructor(ty: &Term) -> String {
 /// Голова применения - дырка.
 /// Утверждение факта `Equal Bool claim True`. Имена сверяются коротко: печать
 /// сигнатуры не видит, как и у единицы вычисления.
-fn claim(ty: &Term) -> Option<&Term> {
+#[must_use]
+pub fn claim(ty: &Term) -> Option<&Term> {
     let named = |term: &Term, name: &str| matches!(term, Term::Const(it, _, _) if crate::term::short(it) == name);
     let Term::App(applied, verdict) = ty else {
         return None;
@@ -462,10 +463,7 @@ mod tests {
                 named("Int64"),
                 named("Eq#Int64"),
                 Term::var(0),
-                Term::Prim(crate::prim::Prim::Lit(
-                    crate::prim::PrimTy::Int64,
-                    0,
-                )),
+                Term::Prim(crate::prim::Prim::Lit(crate::prim::PrimTy::Int64, 0)),
             ],
         );
         let fact = apply(named("Equal"), vec![named("Bool"), claim, named("True")]);

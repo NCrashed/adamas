@@ -793,9 +793,9 @@ fn implementing(
 /// применена к контексту целиком. Значит подходящее связывание - решение:
 /// `\x0 … xn -> xk`, и применение к спайну выдаёт ровно его.
 ///
-/// `Let` в телескопе обрывает поиск: определённое связывание в спайн дырки не
-/// попадает (`fresh_term_over`), и числа лямбд по телескопу уже не посчитать.
-/// Названная граница - словарь, объявленный `let`-ом, отсюда не виден.
+/// `Let` в телескопе поиск проходит: определённое связывание в спайн дырки не
+/// попадает (`fresh_term_over`), лямбдой решения не становится, а контекст
+/// определяет его значением.
 fn from_context(
     signature: &Signature,
     metas: &mut Metas,
@@ -805,14 +805,25 @@ fn from_context(
     let mut ctx = adamas_core::ctx::Ctx::new(signature);
     let mut binders = Vec::new();
     let mut current = ty;
-    while let Term::Pi(binder, name, domain, _, codomain) = current {
-        let value = ctx.eval(domain);
-        binders.push((binder.mult, Rc::clone(name), Rc::clone(&value)));
-        ctx = ctx.bind(Rc::clone(name), binder.mult, value);
-        current = codomain;
-    }
-    if matches!(current, Term::Let(..)) {
-        return None;
+    // `Let` в телескопе - связывание `let` (`fresh_meta`): лямбды решения его
+    // не связывают - в спайн дырки оно не попадает, - а контекст определяет
+    // значением. Гипотеза ветви `if` стоит раньше `let` внутри ветви, и
+    // обрыв на нём прятал её.
+    loop {
+        match current {
+            Term::Pi(binder, name, domain, _, codomain) => {
+                let value = ctx.eval(domain);
+                binders.push((binder.mult, Rc::clone(name), Rc::clone(&value)));
+                ctx = ctx.bind(Rc::clone(name), binder.mult, value);
+                current = codomain;
+            }
+            Term::Let(mult, name, ty, value, body) => {
+                let (ty, value) = (ctx.eval(ty), ctx.eval(value));
+                ctx = ctx.define(Rc::clone(name), *mult, ty, value);
+                current = body;
+            }
+            _ => break,
+        }
     }
     let goal = ctx.eval(current);
     let arity = binders.len();

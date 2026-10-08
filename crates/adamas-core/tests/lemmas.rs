@@ -60,7 +60,7 @@ fn stated(line: &str) {
 #[test]
 fn below_pred_holds_on_the_word() {
     stated(
-        "belowPred : (0 i : UInt64) -> (0 n : UInt64) -> (0 p : Equal Bool (leUInt64 i n) True) -> (0 q : Equal Bool (eqUInt64 i 0) False) -> Equal Bool (ltUInt64 (subUInt64 i 1) n) True",
+        "belowPred : (0 i : UInt64) -> (0 n : UInt64) -> {leUInt64 i n} => {not (eqUInt64 i 0)} => Equal Bool (ltUInt64 (subUInt64 i 1) n) True",
     );
     let words = words();
     for &i in &words {
@@ -75,7 +75,7 @@ fn below_pred_holds_on_the_word() {
 #[test]
 fn below_at_most_holds_on_the_word() {
     stated(
-        "belowAtMost : (0 i : UInt64) -> (0 n : UInt64) -> (0 p : Equal Bool (ltUInt64 i n) True) -> Equal Bool (leUInt64 i n) True",
+        "belowAtMost : (0 i : UInt64) -> (0 n : UInt64) -> {ltUInt64 i n} => Equal Bool (leUInt64 i n) True",
     );
     let words = words();
     for &i in &words {
@@ -111,7 +111,7 @@ fn a_lemma_false_under_wrapping_is_caught() {
 #[test]
 fn not_below_holds_on_the_word() {
     stated(
-        "notBelow : (0 i : UInt64) -> (0 n : UInt64) -> (0 p : Equal Bool (ltUInt64 i n) False) -> Equal Bool (leUInt64 n i) True",
+        "notBelow : (0 i : UInt64) -> (0 n : UInt64) -> {not (ltUInt64 i n)} => Equal Bool (leUInt64 n i) True",
     );
     let words = words();
     for &i in &words {
@@ -126,7 +126,7 @@ fn not_below_holds_on_the_word() {
 #[test]
 fn window_before_holds_on_the_word() {
     stated(
-        "windowBefore : (0 i : UInt64) -> (0 n : UInt64) -> (0 m : UInt64) -> (0 p : Equal Bool (leUInt64 n i) True) -> (0 q : Equal Bool (leUInt64 i m) True) -> Equal Bool (leUInt64 (subUInt64 i n) (subUInt64 m n)) True",
+        "windowBefore : (0 i : UInt64) -> (0 n : UInt64) -> (0 m : UInt64) -> {leUInt64 n i} => {leUInt64 i m} => Equal Bool (leUInt64 (subUInt64 i n) (subUInt64 m n)) True",
     );
     let words = words();
     for &i in &words {
@@ -146,7 +146,7 @@ fn window_before_holds_on_the_word() {
 #[test]
 fn step_at_most_holds_on_the_word() {
     stated(
-        "stepAtMost : (0 i : UInt64) -> (0 n : UInt64) -> (0 m : UInt64) -> (0 p : Equal Bool (leUInt64 n i) True) -> (0 q : Equal Bool (leUInt64 i m) True) -> Equal Bool (leUInt64 (subUInt64 i n) m) True",
+        "stepAtMost : (0 i : UInt64) -> (0 n : UInt64) -> (0 m : UInt64) -> {leUInt64 n i} => {leUInt64 i m} => Equal Bool (leUInt64 (subUInt64 i n) m) True",
     );
     let words = words();
     for &i in &words {
@@ -166,7 +166,7 @@ fn step_at_most_holds_on_the_word() {
 #[test]
 fn at_most_trans_holds_on_the_word() {
     stated(
-        "atMostTrans : (0 a : UInt64) -> (0 b : UInt64) -> (0 c : UInt64) -> (0 p : Equal Bool (leUInt64 a b) True) -> (0 q : Equal Bool (leUInt64 b c) True) -> Equal Bool (leUInt64 a c) True",
+        "atMostTrans : (0 a : UInt64) -> (0 b : UInt64) -> (0 c : UInt64) -> {leUInt64 a b} => {leUInt64 b c} => Equal Bool (leUInt64 a c) True",
     );
     let words = words();
     for &a in &words {

@@ -67,22 +67,20 @@ bias = 1.0
 
 -- Заполнение: ячейки различны, иначе перепутанный номер ячейки ненаблюдаем.
 fill : Array cells Float32 -> (i : UInt64) -> (0 p : Equal Bool (leUInt64 i cells) True) -> Float32 -> Array cells Float32
-fill xs i p v = case decide (i == 0) of
-  Yes _z -> xs
-  No q ->
-    let at : UInt64 = subUInt64 i 1
-    fill (arraySet xs at v @(belowPred i cells p q)) at (belowAtMost at cells (belowPred i cells p q)) (addFloat32 v one)
+fill xs i p v = if i == 0 then xs
+else
+  let at : UInt64 = subUInt64 i 1
+  fill (arraySet xs at v @(belowPred i cells)) at (belowAtMost at cells @(belowPred i cells)) (addFloat32 v one)
 
 -- Ядро. `arraySet` функционален по семантике и переписывает по исполнению
 -- (§4.11): блок уникален, и ячейка меняется на месте - счётчик блоков
 -- показывает **один** блок на всю программу, сколько бы проходов ни было.
 scale : Array cells Float32 -> (i : UInt64) -> (0 p : Equal Bool (leUInt64 i cells) True) -> Array cells Float32
-scale xs i p = case decide (i == 0) of
-  Yes _z -> xs
-  No q ->
-    let at : UInt64 = subUInt64 i 1
-    let cell : Float32 = arrayIndex xs at @(belowPred i cells p q)
-    scale (arraySet xs at (addFloat32 (mulFloat32 cell gain) bias) @(belowPred i cells p q)) at (belowAtMost at cells (belowPred i cells p q))
+scale xs i p = if i == 0 then xs
+else
+  let at : UInt64 = subUInt64 i 1
+  let cell : Float32 = arrayIndex xs at @(belowPred i cells)
+  scale (arraySet xs at (addFloat32 (mulFloat32 cell gain) bias) @(belowPred i cells)) at (belowAtMost at cells @(belowPred i cells))
 
 turn : Array cells Float32 -> UInt64 -> Array cells Float32
 turn xs 0 = xs
@@ -99,11 +97,10 @@ turn xs p = turn (scale xs cells Refl) (subUInt64 p 1)
 --   `acc := x[i] - acc` видит оба: 5364264.0 против 5201703.5 при потерянном
 --     проходе и 5346200.5 при переставленной паре.
 total : Array cells Float32 -> (i : UInt64) -> (0 p : Equal Bool (leUInt64 i cells) True) -> Float32 -> Float32
-total xs i p acc = case decide (i == 0) of
-  Yes _z -> acc
-  No q ->
-    let at : UInt64 = subUInt64 i 1
-    total xs at (belowAtMost at cells (belowPred i cells p q)) (subFloat32 (arrayIndex xs at @(belowPred i cells p q)) acc)
+total xs i p acc = if i == 0 then acc
+else
+  let at : UInt64 = subUInt64 i 1
+  total xs at (belowAtMost at cells @(belowPred i cells)) (subFloat32 (arrayIndex xs at @(belowPred i cells)) acc)
 
 main : Float32
 main = total (turn (fill (arrayNew cells zero) cells Refl one) passes) cells Refl zero

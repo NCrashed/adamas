@@ -101,38 +101,39 @@ inspect False = Else @False Refl
 -- стережёт `adamas-core/tests/lemmas.rs`. Записаны формой примитивов: к ней
 -- сводятся и операторы прелюдии (`i - 1` - это `subUInt64 i 1`).
 --
--- Цикл вниз по массиву несёт `i <= n` параметром: `decide (i == 0)` даёт
--- ветви `No` факт `i /= 0`, а `belowPred` - номер `i - 1` ячейки и, через
--- `belowAtMost`, тот же `i - 1 <= n` следующему шагу.
+-- Посылки - ограничения (§3.7): лемма берёт факты из контекста сама, а её
+-- ответ передаётся явно, `@(belowPred i n)`. Цикл вниз несёт `{i <= n}`,
+-- ветвь `else` разбора `i == 0` даёт `i /= 0`, `belowPred` - номер `i - 1`
+-- ячейки и, через `belowAtMost`, тот же `i - 1 <= n` следующему шагу.
 
 -- | Номер перед ненулевым `i <= n` меньше `n`: `i - 1` не заворачивается.
 @total
-belowPred : (0 i : UInt64) -> (0 n : UInt64) -> (0 p : Equal Bool (leUInt64 i n) True) -> (0 q : Equal Bool (eqUInt64 i 0) False) -> Equal Bool (ltUInt64 (subUInt64 i 1) n) True
+belowPred : (0 i : UInt64) -> (0 n : UInt64) -> {leUInt64 i n} => {not (eqUInt64 i 0)} => Equal Bool (ltUInt64 (subUInt64 i 1) n) True
 
 -- | Строго меньшее - не больше.
 @total
-belowAtMost : (0 i : UInt64) -> (0 n : UInt64) -> (0 p : Equal Bool (ltUInt64 i n) True) -> Equal Bool (leUInt64 i n) True
+belowAtMost : (0 i : UInt64) -> (0 n : UInt64) -> {ltUInt64 i n} => Equal Bool (leUInt64 i n) True
 
 -- | Число не больше себя: начало цикла вниз от длины, которая не литерал.
 @total
 atMostSelf : (0 n : UInt64) -> Equal Bool (leUInt64 n n) True
 
--- | Не меньшее - не меньше: ветвь `No` разбора `decide (i < n)` даёт `n <= i`.
+-- | Не меньшее - не меньше: ветвь `else` разбора `i < n` даёт `n <= i`.
 @total
-notBelow : (0 i : UInt64) -> (0 n : UInt64) -> (0 p : Equal Bool (ltUInt64 i n) False) -> Equal Bool (leUInt64 n i) True
+notBelow : (0 i : UInt64) -> (0 n : UInt64) -> {not (ltUInt64 i n)} => Equal Bool (leUInt64 n i) True
 
 -- | Окно шириной `n`, отступившее от `i <= m`, кончается внутри колонки: шаг
 -- окна вниз (`simdLoad n xs (i - n)`). Ни одно вычитание не заворачивается.
 @total
-windowBefore : (0 i : UInt64) -> (0 n : UInt64) -> (0 m : UInt64) -> (0 p : Equal Bool (leUInt64 n i) True) -> (0 q : Equal Bool (leUInt64 i m) True) -> Equal Bool (leUInt64 (subUInt64 i n) (subUInt64 m n)) True
+windowBefore : (0 i : UInt64) -> (0 n : UInt64) -> (0 m : UInt64) -> {leUInt64 n i} => {leUInt64 i m} => Equal Bool (leUInt64 (subUInt64 i n) (subUInt64 m n)) True
 
 -- | Транзитивность `<=`.
 @total
-atMostTrans : (0 a : UInt64) -> (0 b : UInt64) -> (0 c : UInt64) -> (0 p : Equal Bool (leUInt64 a b) True) -> (0 q : Equal Bool (leUInt64 b c) True) -> Equal Bool (leUInt64 a c) True
+atMostTrans : (0 a : UInt64) -> (0 b : UInt64) -> (0 c : UInt64) -> {leUInt64 a b} => {leUInt64 b c} => Equal Bool (leUInt64 a c) True
 
 -- | Шаг вниз на `n` от `i <= m` остаётся не больше `m`.
 @total
-stepAtMost : (0 i : UInt64) -> (0 n : UInt64) -> (0 m : UInt64) -> (0 p : Equal Bool (leUInt64 n i) True) -> (0 q : Equal Bool (leUInt64 i m) True) -> Equal Bool (leUInt64 (subUInt64 i n) m) True
+stepAtMost : (0 i : UInt64) -> (0 n : UInt64) -> (0 m : UInt64) -> {leUInt64 n i} => {leUInt64 i m} => Equal Bool (leUInt64 (subUInt64 i n) m) True
 
 -- | Целое по умолчанию: его берёт литерал, типа которому не задало ничто в
 -- объявлении (§4.3). Синоним, а не свой тип: `Int` и `Int64` одно и то же.

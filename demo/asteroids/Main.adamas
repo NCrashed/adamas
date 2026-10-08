@@ -72,21 +72,15 @@ shots = 8
 -- Мономорфные обёртки над примитивами массива: внутри ветви разбора
 -- индексированного семейства имплиситы примитива не решаются (§10 вопрос 200).
 --
--- Номер проверяется во время выполнения (§10 вопрос 224). Номера приходят не
--- только из циклов, но и из поиска свободного слота: `freeRock` отвечает
--- номером, о котором его тип ничего не говорит. Цикл вниз доказали бы леммы
--- прелюдии (`belowPred`), поиск - нет: ему нужен зависимый ответ.
--- Номера вне длины в игре не бывает; ветвь `No` читает ноль и оставляет
--- массив как был. Камни и выстрелы - массивы одной длины, и обёртки общие.
-at : Array rocks Int32 -> UInt64 -> Int32
-at xs i = case decide (ltUInt64 i rocks) of
-  Yes p -> arrayIndex xs i
-  No _q -> 0
-
-put : Array rocks Int32 -> UInt64 -> Int32 -> Array rocks Int32
-put xs i v = case decide (ltUInt64 i rocks) of
-  Yes p -> arraySet xs i v
-  No _q -> xs
+-- Номер **доказан**, а не проверяется во время выполнения (§3.7): обёртки
+-- требуют `{i < rocks}`, и доказательство находит компилятор. Циклы идут
+-- вверх - `if i < rocks then … (i + 1) else …`, - и ветвь `then` несёт факт
+-- сама; номер свободного слота приходит из ветви, где он сравнён с длиной.
+-- Камни и выстрелы - массивы одной длины, и обёртки общие.
+at : Array rocks Int32 -> (i : UInt64) -> {i < rocks} => Int32
+at xs i = arrayIndex xs i
+put : Array rocks Int32 -> (i : UInt64) -> Int32 -> {i < rocks} => Array rocks Int32
+put xs i v = arraySet xs i v
 
 -- | Остаток от деления для положительных - им заворачивается экран. Предел
 -- ненулевой, и доказывает это вызывающий: у экрана предел постоянный, и
@@ -203,12 +197,11 @@ hasSize = There (There Here)
 -- Требует **обеих** меток разом. Позвать её для набора без скорости не выйдет:
 -- доказательства не построить, и это отказ проверки типов, а не ветвь.
 drift : {0 cs : Tags} -> (0 a : Has Position cs) -> (0 b : Has Velocity cs) -> Rocks cs -> UInt64 -> Rocks cs
-drift a b w 0 = w
-drift a b (MkRocks ds xs ys vx vy sz) i =
-  let j = i - 1
+drift a b (MkRocks ds xs ys vx vy sz) j = if j < rocks then
   let nx = wrap (at xs j + at vx j) worldX
   let ny = wrap (at ys j + at vy j) worldY
-  drift a b (MkRocks ds (put xs j nx) (put ys j ny) vx vy sz) j
+  drift a b (MkRocks ds (put xs j nx) (put ys j ny) vx vy sz) (j + 1)
+else MkRocks ds xs ys vx vy sz
 
 -- | Размеры камней сами по себе: счёт живых не должен пересобирать всю запись,
 -- и поле берётся полем, а не разбором в цикле.
@@ -217,18 +210,12 @@ sizesOf (MkRocks ds xs ys vx vy sz) = sz
 
 -- | Сколько камней живо.
 countRocks : Array rocks Int32 -> UInt64 -> Int32 -> Int32
-countRocks sz 0 n = n
-countRocks sz i n =
-  let j = i - 1
-  countRocks sz j (n + (if 0 < at sz j then 1 else 0))
+countRocks sz j n = if j < rocks then countRocks sz (j + 1) (n + (if 0 < at sz j then 1 else 0)) else n
 
--- | Первый свободный слот камня; `rocks` - свободного нет. Им находится место
--- осколку.
-freeRock : Array rocks Int32 -> UInt64 -> UInt64 -> UInt64
-freeRock sz 0 found = found
-freeRock sz i found =
-  let j = i - 1
-  freeRock sz j (if 0 < at sz j then found else j)
+-- | Первый свободный слот камня, начиная с `j`; `rocks` - свободного нет. Им
+-- находится место осколку.
+freeRock : Array rocks Int32 -> UInt64 -> UInt64
+freeRock sz j = if j < rocks then if 0 < at sz j then freeRock sz (j + 1) else j else rocks
 
 -- | Положение на экране: неподвижная точка делится обратно.
 screenOf : Int32 -> Int32
@@ -409,9 +396,7 @@ steer ship keys =
 
 -- | Ход выстрелов: живые двигаются и стареют, мёртвые стоят.
 fly : Shots -> UInt64 -> Shots
-fly w 0 = w
-fly (MkShots xs ys vx vy life) i =
-  let j = i - 1
+fly (MkShots xs ys vx vy life) j = if j < shots then
   let alive = 0 < at life j
   let x = at xs j
   let y = at ys j
@@ -419,30 +404,33 @@ fly (MkShots xs ys vx vy life) i =
   let nx = wrap (x + at vx j) worldX
   let ny = wrap (y + at vy j) worldY
   let aged = if alive then age - 1 else 0
-  fly (MkShots (put xs j (if alive then nx else x)) (put ys j (if alive then ny else y)) vx vy (put life j aged)) j
+  fly (MkShots (put xs j (if alive then nx else x)) (put ys j (if alive then ny else y)) vx vy (put life j aged)) (j + 1)
+else MkShots xs ys vx vy life
 
--- | Первый свободный слот выстрела; `shots` - свободного нет.
-freeShot : Array shots Int32 -> UInt64 -> UInt64 -> UInt64
-freeShot life 0 found = found
-freeShot life i found =
-  let j = i - 1
-  freeShot life j (if 0 < at life j then found else j)
+-- | Первый свободный слот выстрела, начиная с `j`; `shots` - свободного нет.
+freeShot : Array shots Int32 -> UInt64 -> UInt64
+freeShot life j = if j < shots then if 0 < at life j then freeShot life (j + 1) else j else shots
 
--- | Выстрел из носа корабля, если есть чем и если ствол заряжен.
---
--- Когда стрелять нечем, запись идёт в нулевой слот тем же значением, что там
--- лежит: одна форма на оба исхода, и массив пишется на месте.
-fire : Ship -> Shots -> Bool -> Shots
-fire ship (MkShots xs ys svx svy life) shoot =
-  let slot = freeShot life shots shots
-  let ok = shoot && slot < shots
-  let k = if ok then slot else 0
+-- | Запись выстрела в слот `k`. Когда стрелять нечем, запись идёт тем же
+-- значением, что там лежит: одна форма на оба исхода, и массив пишется на
+-- месте.
+loaded : Ship -> Shots -> (ok : Bool) -> (k : UInt64) -> {k < shots} => Shots
+loaded ship (MkShots xs ys svx svy life) ok k =
   let x = if ok then ship.x else at xs k
   let y = if ok then ship.y else at ys k
   let vx = if ok then dirX (aim ship.dir) * shotSpeed else at svx k
   let vy = if ok then dirY (aim ship.dir) * shotSpeed else at svy k
   let age = if ok then 48 else at life k
   MkShots (put xs k x) (put ys k y) (put svx k vx) (put svy k vy) (put life k age)
+
+-- | Слот выстрела сравнивается с длиной здесь, над параметром: ветвь `then`
+-- несёт факт `slot < shots`, а `let` его бы не дал (§3.7).
+aimed : Ship -> Shots -> Bool -> UInt64 -> Shots
+aimed ship ss shoot slot = if slot < shots then loaded ship ss shoot slot else loaded ship ss False 0
+
+-- | Выстрел из носа корабля, если есть чем и если ствол заряжен.
+fire : Ship -> Shots -> Bool -> Shots
+fire ship (MkShots xs ys svx svy life) shoot = aimed ship (MkShots xs ys svx svy life) shoot (freeShot life 0)
 
 -- | Пересекаются ли два квадрата на экране.
 touching : Int32 -> Int32 -> Int32 -> Int32 -> Int32 -> Bool
@@ -459,7 +447,7 @@ touching ax ay bx by reach =
 data Volley where
   MkVolley : Rocks whole -> Shots -> Int32 -> Volley
 
--- | Один выстрел против всех камней: попал - камень дробится, выстрел гаснет.
+-- | Один выстрел против одного камня: попал - камень дробится, выстрел гаснет.
 --
 -- Дробление и есть то, ради чего у камней заведён свободный слот. Задетый
 -- камень мельчает и разворачивается поперёк прежнего хода, а осколок встаёт в
@@ -480,18 +468,14 @@ data Volley where
 -- попадание по нулевому слоту отменяет само себя - камень воскресает с прежним
 -- размером, а очки и выстрел уже потрачены. Так и было, и видно это только
 -- игрой: последний камень оказывается неуничтожимым.
-strike : Rocks whole -> Shots -> UInt64 -> UInt64 -> Int32 -> Volley
-strike rs ss s 0 got = MkVolley rs ss got
-strike (MkRocks ds xs ys vx vy sz) (MkShots sx sy svx svy life) s i got =
-  let j = i - 1
+hitting : (s : UInt64) -> {s < shots} => (j : UInt64) -> {j < rocks} => (dest : UInt64) -> {dest < rocks} => Bool -> Int32 -> Rocks whole -> Shots -> Volley
+hitting s j dest room got (MkRocks ds xs ys vx vy sz) (MkShots sx sy svx svy life) =
   let side = at sz j
   let live = 0 < side && 0 < at life s
   let near = touching (screenOf (at xs j)) (screenOf (at ys j)) (screenOf (at sx s)) (screenOf (at sy s)) side
   let hit = live && near
   let rest = shard side
-  let slot = freeRock sz rocks rocks
-  let born = hit && 0 < rest && slot < rocks
-  let dest = if born then slot else 0
+  let born = hit && 0 < rest && room
   let srcX = at xs j
   let srcY = at ys j
   let srcVX = at vx j
@@ -511,14 +495,24 @@ strike (MkRocks ds xs ys vx vy sz) (MkShots sx sy svx svy life) s i got =
   let grownSz = put shrunk dest (if born then rest else heldSz)
   let spent = if hit then 0 else at life s
   let earned = if hit then worth side else 0
-  strike (MkRocks whole keptX keptY grownVX grownVY grownSz) (MkShots sx sy svx svy (put life s spent)) s j (got + earned)
+  MkVolley (MkRocks whole keptX keptY grownVX grownVY grownSz) (MkShots sx sy svx svy (put life s spent)) (got + earned)
+
+-- | Место осколку: свободный слот сравнивается с длиной здесь, над
+-- параметром, и ветвь `then` несёт факт `slot < rocks` (§3.7). Свободного нет
+-- - запись идёт в нулевой слот, и осколок не рождается.
+placed : (s : UInt64) -> {s < shots} => (j : UInt64) -> {j < rocks} => UInt64 -> Int32 -> Rocks whole -> Shots -> Volley
+placed s j slot got rs ss = if slot < rocks then hitting s j slot True got rs ss else hitting s j 0 False got rs ss
+
+-- | Один выстрел против всех камней - по порядку слотов, с `j`.
+strike : Rocks whole -> Shots -> (s : UInt64) -> {s < shots} => UInt64 -> Int32 -> Volley
+strike rs ss s j got = if j < rocks then
+  case placed s j (freeRock (sizesOf rs) 0) got rs ss of
+    MkVolley moved hit earned -> strike moved hit s (j + 1) earned
+else MkVolley rs ss got
 
 -- | Следующий выстрел против всех камней, начиная с итога предыдущего.
 onward : Volley -> UInt64 -> Volley
-onward v 0 = v
-onward (MkVolley rs ss got) i =
-  let j = i - 1
-  onward (strike rs ss j rocks got) j
+onward (MkVolley rs ss got) s = if s < shots then onward (strike rs ss s 0 got) (s + 1) else MkVolley rs ss got
 
 -- | Мир после столкновений: очки начислены разом.
 settled : Ship -> Keys -> Status -> Volley -> World
@@ -531,7 +525,7 @@ settled ship keys st (MkVolley rs ss got) = MkWorld ship rs ss keys (earn st got
 -- [`reward`] пересекается не больше одного раза - столько же, сколько
 -- пересекли бы восемь начислений подряд.
 collide : World -> World
-collide (MkWorld ship rs ss keys st) = settled ship keys st (onward (MkVolley rs ss 0) shots)
+collide (MkWorld ship rs ss keys st) = settled ship keys st (onward (MkVolley rs ss 0) 0)
 
 -- | Корабль против камней: задел - жизнь долой и неуязвимость на [`mercy`]
 -- кадров.
@@ -539,14 +533,13 @@ collide (MkWorld ship rs ss keys st) = settled ship keys st (onward (MkVolley rs
 -- Камень при этом цел: гибнет корабль, а не препятствие, - иначе возрождение
 -- расчищало бы экран само.
 bump : Ship -> Keys -> Rocks whole -> Shots -> Status -> UInt64 -> World
-bump ship keys rs ss st 0 = MkWorld ship rs ss keys st
-bump ship keys (MkRocks ds xs ys vx vy sz) ss st i =
-  let j = i - 1
+bump ship keys (MkRocks ds xs ys vx vy sz) ss st j = if j < rocks then
   let side = at sz j
   let live = 0 < side
   let near = touching (screenOf (at xs j)) (screenOf (at ys j)) (screenOf ship.x) (screenOf ship.y) (side + 5)
   let struck = live && near && not (shielded st)
-  bump ship keys (MkRocks whole xs ys vx vy sz) ss (if struck then hurt st else st) j
+  bump ship keys (MkRocks whole xs ys vx vy sz) ss (if struck then hurt st else st) (j + 1)
+else MkWorld ship (MkRocks whole xs ys vx vy sz) ss keys st
 
 -- | Прямоугольник в буфере `SDL_Rect`: четыре `int` подряд, порядок `x y w h`.
 rectOf : Array 4 Int32 -> Int32 -> Int32 -> Int32 -> Int32 -> Array 4 Int32
@@ -713,23 +706,21 @@ tint r n = SDL_SetRenderDrawColor r 220 220 244 255
 
 -- | Рисует камни: живые - квадратом своего размера.
 paintRocks : CPtr -> Array 4 Int32 -> Rocks whole -> UInt64 -> {Foreign} Array 4 Int32
-paintRocks r rect w 0 = rect
-paintRocks r rect (MkRocks ds xs ys vx vy sz) i =
-  let j = i - 1
+paintRocks r rect (MkRocks ds xs ys vx vy sz) j = if j < rocks then
   let side = at sz j
   let _ = tint r side
   let shaped = box rect (screenOf (at xs j)) (screenOf (at ys j)) side
   let drawn = drawIf r shaped (0 < side)
-  paintRocks r drawn (MkRocks whole xs ys vx vy sz) j
+  paintRocks r drawn (MkRocks whole xs ys vx vy sz) (j + 1)
+else rect
 
 -- | Рисует выстрелы: живые - точкой в два пикселя.
 paintShots : CPtr -> Array 4 Int32 -> Shots -> UInt64 -> {Foreign} Array 4 Int32
-paintShots r rect w 0 = rect
-paintShots r rect (MkShots xs ys vx vy life) i =
-  let j = i - 1
+paintShots r rect (MkShots xs ys vx vy life) j = if j < shots then
   let shaped = box rect (screenOf (at xs j)) (screenOf (at ys j)) 3
   let drawn = drawIf r shaped (0 < at life j)
-  paintShots r drawn (MkShots xs ys vx vy life) j
+  paintShots r drawn (MkShots xs ys vx vy life) (j + 1)
+else rect
 
 -- | Виден ли корабль в этом кадре: под защитой он мигает, и мигание - это
 -- единственный способ показать неуязвимость, не заводя второго цвета.
@@ -769,9 +760,9 @@ paint r rect (MkWorld ship rs ss keys st) =
   let _ = SDL_SetRenderDrawColor r 8 8 24 255
   let _ = SDL_RenderClear r
   let _ = SDL_SetRenderDrawColor r 150 150 170 255
-  let stones = paintRocks r rect rs rocks
+  let stones = paintRocks r rect rs 0
   let _ = SDL_SetRenderDrawColor r 255 255 255 255
-  let sparks = paintShots r stones ss shots
+  let sparks = paintShots r stones ss 0
   let _ = SDL_SetRenderDrawColor r 120 255 140 255
   let hull = paintShip r sparks ship st.grace keys.thrust
   let hud = paintHud r hull st
@@ -816,21 +807,20 @@ emptyShots = MkShots (arrayNew shots 0) (arrayNew shots 0) (arrayNew shots 0) (a
 --
 -- Номер волны входит множителем скорости: камней столько же, летят они быстрее.
 seedRocks : Rocks whole -> UInt64 -> Int32 -> Rocks whole
-seedRocks w 0 lvl = w
-seedRocks (MkRocks ds xs ys vx vy sz) i lvl =
-  let j = i - 1
+seedRocks (MkRocks ds xs ys vx vy sz) j lvl = if j < rocks then
   let k = uint64ToInt32 j * 37 + 11
   let course = remInt32 k 16
   let rush = 1 + remInt32 k 2 + divInt32 lvl 2
   let nx = remInt32 (k * 7) width * scale
   let ny = remInt32 (k * 13) height * scale
-  seedRocks (MkRocks whole (put xs j nx) (put ys j ny) (put vx j (dirX course * rush)) (put vy j (dirY course * rush)) (put sz j bigRock)) j lvl
+  seedRocks (MkRocks whole (put xs j nx) (put ys j ny) (put vx j (dirX course * rush)) (put vy j (dirY course * rush)) (put sz j bigRock)) (j + 1) lvl
+else MkRocks whole xs ys vx vy sz
 
 -- | Камней не осталось - следующая волна.
 refill : World -> World
 refill (MkWorld ship rs ss keys st) =
-  let clear = countRocks (sizesOf rs) rocks 0 == 0
-  if clear then MkWorld ship (seedRocks emptyRocks rocks st.level) ss keys (promote st) else MkWorld ship rs ss keys st
+  let clear = countRocks (sizesOf rs) 0 0 == 0
+  if clear then MkWorld ship (seedRocks emptyRocks 0 st.level) ss keys (promote st) else MkWorld ship rs ss keys st
 
 -- | Неуязвимость убывает на кадр, счётчик случайности крутится.
 chill : World -> World
@@ -853,16 +843,16 @@ replace (MkWorld ship rs ss keys st) before =
 
 -- | Корабль против камней, и возрождение следом.
 injure : World -> World
-injure (MkWorld ship rs ss keys st) = replace (bump ship keys rs ss st rocks) st.lives
+injure (MkWorld ship rs ss keys st) = replace (bump ship keys rs ss st 0) st.lives
 
 -- | Один шаг игры: клавиши, корабль, дрейф камней, выстрелы, столкновения
 -- обоих родов и, если экран чист, следующая волна.
 step : World -> World
 step (MkWorld ship rs ss keys st) =
   let moved = steer ship keys
-  let drifted = drift hasPos hasVel rs rocks
+  let drifted = drift hasPos hasVel rs 0
   let shoots = armedAt moved keys
-  let fired = fire moved (fly ss shots) shoots
+  let fired = fire moved (fly ss 0) shoots
   let gunned = if shoots then {moved | reload = reloadTime} else moved
   let shot = collide (MkWorld gunned drifted fired keys st)
   refill (injure (teleport (chill shot)))
@@ -894,7 +884,7 @@ title = "asteroids"
 
 -- | Три жизни, нулевой счёт, первая волна и неуязвимость на старте.
 opening : World
-opening = MkWorld firstShip (seedRocks emptyRocks rocks 1) emptyShots released {score = 0, lives = 3, grace = mercy, level = 1, seed = 24601}
+opening = MkWorld firstShip (seedRocks emptyRocks 0 1) emptyShots released {score = 0, lives = 3, grace = mercy, level = 1, seed = 24601}
 runForeign : {a : Type} -> ((ω u : Unit) -> {Foreign} a) -> a
 runForeign k = handle @Foreign k with
   return v -> v

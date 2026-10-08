@@ -145,13 +145,11 @@ counted (More _b rest) = addUInt64 1 (counted rest)
 --
 -- `i` - сколько ячеек ещё не заполнено; заполняется ячейка `i - 1`.
 filled : (ω n : UInt64) -> Array n UInt8 -> (i : UInt64) -> (0 p : Equal Bool (leUInt64 i n) True) -> Bytes -> Array n UInt8
-filled n bytes i p rest = case decide (eqUInt64 i 0) of
-  Yes _z -> bytes
-  No q -> case rest of
-    Done -> bytes
-    More b tail ->
-      let j : UInt64 = subUInt64 i 1
-      filled n (arraySet bytes j b @(belowPred i n p q)) j (belowAtMost j n (belowPred i n p q)) tail
+filled n bytes i p rest = if eqUInt64 i 0 then bytes else case rest of
+  Done -> bytes
+  More b tail ->
+    let j : UInt64 = subUInt64 i 1
+    filled n (arraySet bytes j b @(belowPred i n)) j (belowAtMost j n @(belowPred i n)) tail
 
 -- | Строка из `n` байт, собранных в обратном порядке.
 --

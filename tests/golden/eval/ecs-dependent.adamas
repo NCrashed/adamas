@@ -77,11 +77,10 @@ posX cs p (MkWorld ds xs ys vx vy) i q = arrayIndex xs i
 -- Разница наблюдаема счётчиком блоков: мир, пересобираемый на каждой ячейке,
 -- стоит четырёх блоков на ячейку, а разбираемый раз в кадр - нуля.
 sweep : Array cells Float32 -> Array cells Float32 -> (i : UInt64) -> (0 p : Equal Bool (leUInt64 i cells) True) -> Array cells Float32
-sweep xs vx i p = case decide (i == 0) of
-  Yes _z -> xs
-  No q ->
-    let j : UInt64 = subUInt64 i 1
-    sweep (arraySet xs j (addFloat32 (arrayIndex xs j @(belowPred i cells p q)) (arrayIndex vx j @(belowPred i cells p q))) @(belowPred i cells p q)) vx j (belowAtMost j cells (belowPred i cells p q))
+sweep xs vx i p = if i == 0 then xs
+else
+  let j : UInt64 = subUInt64 i 1
+  sweep (arraySet xs j (addFloat32 (arrayIndex xs j @(belowPred i cells)) (arrayIndex vx j @(belowPred i cells))) @(belowPred i cells)) vx j (belowAtMost j cells @(belowPred i cells))
 
 -- | Система движения: требует **обеих** меток разом.
 move : (0 cs : Tags) -> (0 a : Has Position cs) -> (0 b : Has Velocity cs) -> World cs -> World cs

@@ -256,7 +256,7 @@ error-2 = the declaration's signature is lifted into an implicit parameter; here
 error-3 = a negative, fractional or string literal
 error-4 = the first two are written where a primitive is expected: `Int8`…`Int64`, `UInt8`…`UInt64`, `Float32`, `Float64`, - and the written type here does not take them; a string is written where `String` is expected, or where `Array n UInt8` is written - then as UTF-8 bytes with a terminating zero
 error-5 = a string in a match
-error-6 = as an expression a string is `String` or `Array n UInt8`, and a literal pattern compares a single word - bytes are not compared that way; compare text with `==` (`if s == "b" then …`)
+error-6 = only the top level of a `case` branch matches a string (`case s of "b" -> …`) - `==` compares it there; in a clause or inside a constructor a string is not a pattern: write a `case` or `if s == "b" then …`
 error-7 = an owned argument of a lambda at the head of an application
 error-8 = the redex binding takes its type by inference, and the `drop` insertion is decided by the **written** type - write a `let` with an annotation
 error-9 = `let` without an annotation with a lambda value
@@ -314,3 +314,4 @@ expr-record-closer = record closing #{ $index }
 expr-tuple-binder = tuple#{ $index }
 elab-not-yet = { $what } is not elaborated yet: { $why }
 expr-char-number = a character is written as a literal `'a'`, and a code becomes a character with `uInt32ToChar`
+elab-textual-open = a match on strings is open: there are infinitely many strings, and the string branches need a `_` or variable branch after them

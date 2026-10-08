@@ -514,6 +514,14 @@ pub enum ElabError {
         span: Span,
     },
 
+    /// Разбор по строкам без ветки-переменной (§4.5): строк бесконечно много, и
+    /// за строковыми образцами обязана стоять ветка, берущая остальное.
+    #[error("{}", adamas_l10n::tr!("elab-textual-open"))]
+    TextualOpen {
+        /// Разбор целиком.
+        span: Span,
+    },
+
     /// Голова аргумента - синоним, отдающий свой параметр.
     ///
     /// Кандидат ищется по паре «класс, головы аргументов», и головы обязаны
@@ -1632,6 +1640,7 @@ impl ElabError {
             | Self::InstanceDepth { span, .. }
             | Self::DeclaringInstance { span, .. }
             | Self::ProjectingHead { span, .. }
+            | Self::TextualOpen { span }
             | Self::AmbiguousInstance { span, .. }
             | Self::CoherentDuplicate { span, .. }
             | Self::NotAnEffect { span, .. }

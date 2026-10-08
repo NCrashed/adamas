@@ -1,0 +1,21 @@
+-- Строковые образцы в `case` (§4.5, решение 2026-10-09): строка в начале
+-- ветви сравнивается `==` по порядку ветвей, как цепочка `if`, а ветка-
+-- переменная берёт остальное. Без неё разбор открыт - строк бесконечно много
+-- (`errors/string-match-open.adamas`).
+--
+-- Разбираемое считается один раз: `case s <> "!" of` склеивает строку
+-- однажды, а не на каждую ветвь.
+
+command : String -> UInt64
+command s = case s of
+  "help" -> 1
+  "quit" -> 2
+  other -> 100 + byteLength other
+
+suffixed : String -> UInt64
+suffixed s = case s <> "!" of
+  "hi!" -> 7
+  _ -> 0
+
+main : UInt64
+main = command "help" + command "quit" * 10 + command "привет" + suffixed "hi" * 1000 + suffixed "yo"

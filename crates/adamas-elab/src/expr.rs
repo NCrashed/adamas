@@ -2950,6 +2950,11 @@ impl<'a> Elaborator<'a> {
         // есть про форму, а не про тип; форму layout теперь допускает, и
         // спрашивать необитаемость полагается ядру, которое умеет это с самого
         // начала (сверка 2026-09-08).
+        if let Some(rewritten) = textual(scrutinee, alts, span) {
+            let rewritten = rewritten?;
+            self.awaited = awaited.cloned();
+            return self.placed(position, |it| it.expr(&rewritten, Mult::Many));
+        }
         let (value, ty) = self.scrutinized(scrutinee, span)?;
         self.case_on(scrutinee, value, &ty, alts, span, position, awaited)
     }
@@ -8846,6 +8851,109 @@ fn conditional(then_branch: &Expr, else_branch: &Expr) -> Vec<ast::Alt> {
         span: body.span,
     };
     vec![alt("True", then_branch), alt("False", else_branch)]
+}
+
+/// Разбор с ведущими строковыми образцами (§4.5, решение 2026-10-09): строка
+/// сравнивается `==` по порядку ветвей, как цепочка `if`, а остальные ветви
+/// разбирают ту же переменную обычным путём. Образец-литерал ядра сравнивает
+/// одно слово, и строке, которая есть массив байт, туда дороги нет.
+///
+/// `None` - строк в начале нет. Разбираемое связывается `let`-ом под именем
+/// `case`: его не напишет автор - это ключевое слово, - и печать контекста его
+/// прячет.
+fn textual(scrutinee: &Expr, alts: &[ast::Alt], span: Span) -> Option<Result<Expr, ElabError>> {
+    let literal = |alt: &ast::Alt| match &alt.pattern.kind {
+        PatternKind::Lit(lit) if lit.kind == ast::LitKind::Str => Some(lit.clone()),
+        _ => None,
+    };
+    let leading = alts.iter().take_while(|alt| literal(alt).is_some()).count();
+    if leading == 0 {
+        return None;
+    }
+    let rest = &alts[leading..];
+    // Строк бесконечно много, и без ветки-переменной разбор не полон.
+    if rest.is_empty() {
+        return Some(Err(ElabError::TextualOpen { span }));
+    }
+    let at = scrutinee.span;
+    let named = |text: &str| Expr {
+        kind: ExprKind::Name(ast::Name {
+            text: Rc::from(text),
+            span: at,
+        }),
+        span: at,
+    };
+    let held = matches!(scrutinee.kind, ExprKind::Name(_));
+    let subject = if held {
+        scrutinee.clone()
+    } else {
+        named("case")
+    };
+    let mut chain = Expr {
+        kind: ExprKind::Case {
+            scrutinee: Box::new(subject.clone()),
+            alts: rest.to_vec(),
+        },
+        span,
+    };
+    for alt in alts[..leading].iter().rev() {
+        let Some(lit) = literal(alt) else {
+            continue;
+        };
+        let pattern_span = alt.pattern.span;
+        let compared = Expr {
+            kind: ExprKind::App(
+                Box::new(Expr {
+                    kind: ExprKind::App(Box::new(named("==")), Box::new(subject.clone())),
+                    span: pattern_span,
+                }),
+                Box::new(Expr {
+                    kind: ExprKind::Lit(lit),
+                    span: pattern_span,
+                }),
+            ),
+            span: pattern_span,
+        };
+        chain = Expr {
+            kind: ExprKind::If {
+                cond: Box::new(compared),
+                then_branch: Box::new(alt.body.clone()),
+                else_branch: Box::new(chain),
+            },
+            span: alt.span,
+        };
+    }
+    if held {
+        return Some(Ok(chain));
+    }
+    let binding = ast::Binding {
+        mult: None,
+        name: ast::Name {
+            text: Rc::from("case"),
+            span: at,
+        },
+        pattern: None,
+        params: Vec::new(),
+        ty: None,
+        body: scrutinee.clone(),
+        span: at,
+    };
+    Some(Ok(Expr {
+        kind: ExprKind::Block(ast::Block {
+            stmts: vec![
+                ast::Stmt {
+                    kind: ast::StmtKind::Let(vec![binding]),
+                    span: at,
+                },
+                ast::Stmt {
+                    kind: ast::StmtKind::Expr(chain),
+                    span,
+                },
+            ],
+            span,
+        }),
+        span,
+    }))
 }
 
 /// Ветви `if` над `inspect c`: поле - факт, и связывает его `_` - имени у

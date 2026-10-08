@@ -1,0 +1,7 @@
+---
+source: crates/adamas-cli/tests/golden.rs
+expression: text
+---
+Ошибка: string-match-open.adamas:5:13: разбор по строкам открыт: строк бесконечно много, и за строковыми ветками нужна ветка `_` либо переменная
+  command s = case s of
+              ^^^^^^^^^

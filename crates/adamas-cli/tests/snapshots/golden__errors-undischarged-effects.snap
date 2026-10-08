@@ -2,7 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: undischarged-effects.adamas:24:15: эффекты `{State a}` не погашены: вокруг разрешено `{}`
+Ошибка: undischarged-effects.adamas:24:15: эффекты `{State a}` не погашены: вокруг разрешено `{}`
   escapes a x = leaks a x
                 ^^^^^^^^^
   в контексте:

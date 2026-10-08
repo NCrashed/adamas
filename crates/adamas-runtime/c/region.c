@@ -15,7 +15,7 @@ static char *payload(adamas_value region) {
 
 static adamas_region *header_of(adamas_value region) {
     if (adamas_tag(region) != ADAMAS_TAG_REGION) {
-        adamas_fail("операция региона над не-регионом");
+        adamas_fail("region operation on a non-region");
     }
     return (adamas_region *)region;
 }
@@ -158,7 +158,7 @@ adamas_value adamas_region_alloc(adamas_value region, const void *bits, size_t s
             /* Роста области здесь нет: `AllocStrategy` §3.6 такого метода не
              * называет, и молчаливый рост означал бы вторую аллокацию там, где
              * обещана одна. */
-            adamas_fail("регион переполнен: ёмкость области фиксирована");
+            adamas_fail("region overflow: the capacity of an area is fixed");
         }
         cell = cell_at(made, head->cells);
         cell->at = (uint32_t)at;
@@ -235,7 +235,7 @@ void adamas_region_read(adamas_value region, size_t at, void *out, size_t size,
     }
     head = header_of(region);
     if (size > head->used || at > head->used - size) {
-        adamas_fail("чтение региона за пределами занятого");
+        adamas_fail("read of a region beyond what is occupied");
     }
     memcpy(out, payload(region) + at, size);
     adamas_drop(region, release);
@@ -251,7 +251,7 @@ adamas_value adamas_region_write(adamas_value region, size_t at, const void *bit
     made = writable(region);
     head = (adamas_region *)made;
     if (size > head->used || at > head->used - size) {
-        adamas_fail("запись в регион за пределами занятого");
+        adamas_fail("write to a region beyond what is occupied");
     }
     memcpy(payload(made) + at, bits, size);
     /* Курсор не двигается: `write` §3.6 - операция над уже размещённым местом.

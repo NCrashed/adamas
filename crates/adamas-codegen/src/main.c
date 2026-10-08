@@ -51,7 +51,7 @@ int main(void) {
     if (!adamas_stats_wanted()) {
         return 0;
     }
-    fprintf(stderr, "блоков выдано %zu, живо %zu\n", adamas_stat_allocated_everywhere(),
+    fprintf(stderr, "blocks issued %zu, alive %zu\n", adamas_stat_allocated_everywhere(),
             adamas_stat_live_everywhere());
     /* Строка эта появляется **только** у многопоточного прогона, и порядок тут
      * обратный обычному: она и есть наблюдаемое, а не диагностика. Без неё
@@ -59,7 +59,7 @@ int main(void) {
      * программы тот же, - и свидетель проверял бы, что она просто не сломалась.
      * Однопоточный вывод от этого не меняется ни на символ: рядов у него один. */
     if (adamas_stat_threads() > 1) {
-        fprintf(stderr, "потоков выдавало %zu\n", adamas_stat_threads());
+        fprintf(stderr, "threads issued %zu\n", adamas_stat_threads());
     }
     return 0;
 }

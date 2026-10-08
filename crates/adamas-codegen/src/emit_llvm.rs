@@ -1388,7 +1388,7 @@ impl Dwarf {
             // только, что это указатель. Показать «указатель» честнее, чем
             // выдумать имя типа, которого представление не несёт.
             None => metadata.node(
-                "!DIDerivedType(tag: DW_TAG_pointer_type, name: \"объект\", \
+                "!DIDerivedType(tag: DW_TAG_pointer_type, name: \"object\", \
                  baseType: null, size: 64)",
             ),
         }
@@ -2292,10 +2292,10 @@ fn dispatch_arm(
 }
 
 /// Текст обрыва по неизвестному тегу.
-const TAG_TEXT: &str = "разбор не знает конструктора";
+const TAG_TEXT: &str = "the match does not know the constructor";
 
 /// Текст обрыва по ветке, которой у хендлера нет.
-const BRANCH_TEXT: &str = "у хендлера нет такой ветки";
+const BRANCH_TEXT: &str = "the handler has no such branch";
 
 /// Имя константы с текстом обрыва по отсутствующей ветке.
 const BRANCH_MESSAGE: &str = "@.str.branch";
@@ -2304,19 +2304,20 @@ const BRANCH_MESSAGE: &str = "@.str.branch";
 const MISSING_MESSAGE: &str = "@.str.missing";
 
 /// Текст обрыва по операции без хендлера.
-const MISSING_TEXT: &str = "операция без хендлера";
+const MISSING_TEXT: &str = "operation without a handler";
 
 /// Имя строки с текстом обрыва по замыканию без параметров.
 const ARITYLESS_MESSAGE: &str = "@.str.arityless";
 
 /// Текст обрыва по замыканию без параметров.
-const ARITYLESS_TEXT: &str = "замыкание без параметров";
+const ARITYLESS_TEXT: &str = "closure without parameters";
 
 /// Имя строки с текстом обрыва по неподошедшей форме задачи.
 const SHAPELESS_MESSAGE: &str = "@.str.shapeless";
 
 /// Текст обрыва по неподошедшей форме задачи (§5.2).
-const SHAPELESS_TEXT: &str = "тип задачи не подошёл: нужен один конструктор с одним полем (§5.2)";
+const SHAPELESS_TEXT: &str =
+    "the task type does not fit: one constructor with one field is needed (§5.2)";
 
 /// `ADAMAS_NO_TASK`: порождение без задачи, то есть `spawnDetached`.
 ///

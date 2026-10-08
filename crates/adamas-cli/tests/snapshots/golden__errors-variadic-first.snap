@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: variadic-first.adamas:13:1: `...` стоит первой: вариадическая функция C объявляет хотя бы один поимённый параметр - его и называет `va_start`
+Ошибка: variadic-first.adamas:13:1: `...` стоит первой: вариадическая функция C объявляет хотя бы один поимённый параметр - его и называет `va_start`
   extern "C" fn printf : ... -> UInt64 -> Int32
   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

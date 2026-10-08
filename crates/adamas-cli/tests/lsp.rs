@@ -173,11 +173,15 @@ fn every_refusal_reaches_the_editor_unchanged() {
             path.display()
         );
 
-        // `Error: ` дописывает `anyhow` на выходе драйвера; перевод строки -
+        // Слово перед отказом (`cli-error`) дописывает драйвер на языке
+        // пользователя; перевод строки -
         // `eprintln!`. Пустая строка между отказами - разделитель драйвера: у
         // каждого своя каретка под своей строкой исходника.
         let said: Vec<String> = refused.iter().map(|it| rebuilt(&file, it)).collect();
-        let expected = format!("Error: {}\n", said.join("\n\n"));
+        let expected = format!(
+            "{}\n",
+            adamas_l10n::tr!("cli-error", error = said.join("\n\n"))
+        );
         assert_eq!(terminal, expected, "{}", path.display());
         checked += 1;
         plural += usize::from(refused.len() > 1);

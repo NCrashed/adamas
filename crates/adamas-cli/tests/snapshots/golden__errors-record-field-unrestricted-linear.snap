@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: record-field-unrestricted-linear.adamas:9:12: `buf` объявлена с кратностью 1, а использована ω
+Ошибка: record-field-unrestricted-linear.adamas:9:12: `buf` объявлена с кратностью 1, а использована ω
   back buf = { bytes = buf }
              ^^^^^^^^^^^^^^^

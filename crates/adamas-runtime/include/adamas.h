@@ -382,9 +382,9 @@ struct adamas_object {
 /** Резумпция мультишотна (§3.4): возобновление копирует сегмент, а не тратит. */
 #define ADAMAS_FLAG_MULTI 0x0002u
 
-_Static_assert(sizeof(void *) == 8, "рантайм рассчитан на 64-битные цели (§8)");
-_Static_assert(sizeof(adamas_header) == 8, "заголовок - одно слово (§13, 2026-09-08)");
-_Static_assert(offsetof(adamas_object, fields) == 8, "поля идут сразу за заголовком");
+_Static_assert(sizeof(void *) == 8, "the runtime targets 64-bit platforms (§8)");
+_Static_assert(sizeof(adamas_header) == 8, "the header is one word (§13, 2026-09-08)");
+_Static_assert(offsetof(adamas_object, fields) == 8, "fields follow the header immediately");
 
 /** Дроп детей объекта. Порождается понижением по типу; блок не освобождает. */
 typedef void (*adamas_release)(adamas_value value);
@@ -584,7 +584,7 @@ typedef struct adamas_array {
     size_t stride;
 } adamas_array;
 
-_Static_assert(sizeof(adamas_array) == 24, "нагрузка массива идёт со смещения 24");
+_Static_assert(sizeof(adamas_array) == 24, "the array payload starts at offset 24");
 
 /** Массив на `count` ячеек по `stride` байт; `stride` 0 - указательный. */
 adamas_value adamas_array_alloc(size_t count, size_t stride);
@@ -748,9 +748,9 @@ typedef struct adamas_region {
     size_t cells;
 } adamas_region;
 
-_Static_assert(sizeof(adamas_region) == 32, "нагрузка региона идёт со смещения 32");
+_Static_assert(sizeof(adamas_region) == 32, "the region payload starts at offset 32");
 _Static_assert((sizeof(adamas_region) + ADAMAS_REGION_BYTES) % _Alignof(adamas_cell) == 0,
-               "журнал растёт от конца области, и конец обязан быть его границей");
+               "the log grows from the end of the area, and the end must be its boundary");
 
 /** Пустая область. `AllocStrategy.new` (§3.6): один блок кучи. */
 adamas_value adamas_region_new(void);
@@ -872,7 +872,7 @@ typedef struct adamas_shared {
     size_t cursor;
 } adamas_shared;
 
-_Static_assert(sizeof(adamas_shared) == 24, "нагрузка разделяемой области идёт со смещения 24");
+_Static_assert(sizeof(adamas_shared) == 24, "the shared area payload starts at offset 24");
 
 /**
  * Пустая разделяемая область: `SharedAllocStrategy.new` (§3.6).

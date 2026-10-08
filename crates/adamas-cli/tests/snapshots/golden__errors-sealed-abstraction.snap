@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: sealed-abstraction.adamas:25:1: сигнатурой `MapSig` запечатывать нельзя: `insert` несёт `Ordered k`, а `k` - параметр запечатанного `Map`; вынесите констрейнт в параметр модуля либо объявите `Ordered` `coherent`
+Ошибка: sealed-abstraction.adamas:25:1: сигнатурой `MapSig` запечатывать нельзя: `insert` несёт `Ordered k`, а `k` - параметр запечатанного `Map`; вынесите констрейнт в параметр модуля либо объявите `Ordered` `coherent`
   module OrderedMap :> MapSig where
   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

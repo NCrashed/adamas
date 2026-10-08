@@ -775,7 +775,7 @@ fn the_vector_column_answers_what_the_scalar_column_answers() {
     let blocks = harness::agreed("window-agrees", &vector)
         .unwrap_or_else(|error| panic!("векторная колонка не понизилась: {error}"));
     assert!(
-        blocks.contains("блоков выдано 1, живо 0"),
+        blocks.contains("blocks issued 1, alive 0"),
         "векторное ядро выдало не один блок: `simdStore` перестал писать по месту ({blocks})"
     );
 }
@@ -861,7 +861,7 @@ main = simdLane (simdLoad 4 column 0) 2
     let blocks = harness::agreed("window-owned", OWNED)
         .unwrap_or_else(|error| panic!("программа не понизилась: {error}"));
     assert!(
-        blocks.contains("живо 0"),
+        blocks.contains("alive 0"),
         "владеющая загрузка окна не отдала колонку: {blocks}"
     );
 }

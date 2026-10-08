@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: array-name-is-taken.adamas:17:1: имя `Array` занято языком: это встроенный массив, и объявить своё под ним нельзя
+Ошибка: array-name-is-taken.adamas:17:1: имя `Array` занято языком: это встроенный массив, и объявить своё под ним нельзя
   data Array where
   ^^^^^^^^^^^^^^^^

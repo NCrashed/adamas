@@ -103,7 +103,7 @@ fn the_capstone_runs_on_several_workers() {
             "прогон {run} оставил блоки живыми: `{}`",
             ran.reason.trim_end()
         );
-        if ran.reason.contains("потоков выдавало") {
+        if ran.reason.contains("threads issued") {
             spread += 1;
         }
     }
@@ -148,7 +148,7 @@ fn the_llvm_capstone_runs_on_several_workers() {
         );
         let (_, live) = harness::blocks("капстоун", counted.lines().next().unwrap_or_default());
         assert_eq!(live, 0, "LLVM-путь: прогон {run} оставил блоки живыми");
-        if counted.contains("потоков выдавало") {
+        if counted.contains("threads issued") {
             spread += 1;
         }
     }

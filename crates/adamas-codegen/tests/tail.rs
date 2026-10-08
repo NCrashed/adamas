@@ -482,7 +482,7 @@ main = step 5 { a = 0, b = 0, c = 1, d = 2 }
     for (name, source) in [("tail-c-wide", WIDE), ("tail-c-narrow", NARROW)] {
         let stderr =
             harness::agreed(name, source).unwrap_or_else(|error| panic!("{name}: {error}"));
-        assert!(stderr.contains("живо 0"), "{name}: прогон оставил блоки");
+        assert!(stderr.contains("alive 0"), "{name}: прогон оставил блоки");
     }
 }
 
@@ -680,7 +680,7 @@ main = tick {THROUGH} 1
          и запись о нём пора снимать"
     );
     assert!(
-        run.reason.contains("стек исчерпан"),
+        run.reason.contains("stack exhausted"),
         "обрыв не назвал причины: осталась «Ошибка сегментирования» вместо отказа ({})",
         run.reason
     );

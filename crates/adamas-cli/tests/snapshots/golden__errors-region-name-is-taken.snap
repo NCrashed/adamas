@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: region-name-is-taken.adamas:21:1: имя `Block` занято языком: это область региона, и объявить своё под ним нельзя
+Ошибка: region-name-is-taken.adamas:21:1: имя `Block` занято языком: это область региона, и объявить своё под ним нельзя
   data Block where
   ^^^^^^^^^^^^^^^^

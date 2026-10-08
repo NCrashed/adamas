@@ -2,7 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: sealed-representation.adamas:24:12: несовпадение типов: ожидался `Nat`, получен `T`
+Ошибка: sealed-representation.adamas:24:12: несовпадение типов: ожидался `Nat`, получен `T`
   leaked x = x
              ^
   в контексте:

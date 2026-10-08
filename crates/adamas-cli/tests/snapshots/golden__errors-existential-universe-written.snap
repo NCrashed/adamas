@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: existential-universe-written.adamas:25:15: несовпадение типов: ожидался `Type 0`, получен `Type ?0+1`
+Ошибка: existential-universe-written.adamas:25:15: несовпадение типов: ожидался `Type 0`, получен `Type ?0+1`
   high = MkSome Type Bool
                 ^^^^

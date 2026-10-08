@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: braces-open-nothing.adamas:7:5: фигурные скобки здесь ничего не открывают: effect row пишется `{Ask} A`, тип записи - `{x : A}`, группа implicit-связываний - `{a : Type}`; пустой row не пишется
+Ошибка: braces-open-nothing.adamas:7:5: фигурные скобки здесь ничего не открывают: effect row пишется `{Ask} A`, тип записи - `{x : A}`, группа implicit-связываний - `{a : Type}`; пустой row не пишется
   f : {} Bool
       ^

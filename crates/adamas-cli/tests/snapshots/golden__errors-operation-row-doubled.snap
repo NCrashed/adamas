@@ -2,7 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: operation-row-doubled.adamas:43:20: эффекты `{Log, Log}` не погашены: вокруг разрешено `{Log}`
+Ошибка: operation-row-doubled.adamas:43:20: эффекты `{Log, Log}` не погашены: вокруг разрешено `{Log}`
     fork b -> resume (runChild b)
                      ^^^^^^^^^^^^
   в контексте:

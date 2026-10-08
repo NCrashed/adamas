@@ -63,3 +63,5 @@ cli-help-eval = Проверить и исполнить определение 
 cli-help-eval-path = Путь к файлу `.adamas`, каталогу проекта или его `adamas.toml`
 cli-help-eval-name = Что вычислять. По умолчанию `main`
 cli-help-eval-full = Печатать ответ целиком, без среза по глубине
+cli-error = Ошибка: { $error }
+cli-caused-by = Причина:

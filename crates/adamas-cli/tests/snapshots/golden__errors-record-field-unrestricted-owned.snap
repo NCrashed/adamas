@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: record-field-unrestricted-owned.adamas:11:15: связывание unique-типа не может быть ω: значений такого типа при ω не существует
+Ошибка: record-field-unrestricted-owned.adamas:11:15: связывание unique-типа не может быть ω: значений такого типа при ω не существует
   type Held = { ω t : Token }
                 ^

@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: multi-over-resource.adamas:32:8: `held` держит ресурс, а резумпция `handleMulti` мультишотна: деструктор был бы вызван дважды
+Ошибка: multi-over-resource.adamas:32:8: `held` держит ресурс, а резумпция `handleMulti` мультишотна: деструктор был бы вызван дважды
   both = handleMulti held with
          ^^^^^^^^^^^^^^^^^^^^^

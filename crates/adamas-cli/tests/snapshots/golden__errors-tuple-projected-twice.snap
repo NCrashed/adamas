@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: tuple-projected-twice.adamas:21:16: `pair` объявлена с кратностью 1, а использована ω
+Ошибка: tuple-projected-twice.adamas:21:16: `pair` объявлена с кратностью 1, а использована ω
     both pair._1 pair._2
                  ^^^^^^^

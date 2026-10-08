@@ -23,7 +23,7 @@ adamas_value adamas_array_alloc(size_t count, size_t stride) {
     /* Переполнение произведения обрывает процесс: молчаливая обёртка дала бы
      * блок короче запрошенного, то есть запись мимо него. */
     if (count != 0 && cells > (SIZE_MAX - sizeof(adamas_array)) / count) {
-        adamas_fail("массив длиннее адресного пространства");
+        adamas_fail("array longer than the address space");
     }
     adamas_value array =
         (adamas_value)adamas_block_alloc(sizeof(adamas_array) + count * cells);
@@ -50,7 +50,7 @@ void *adamas_array_at(adamas_value array, size_t index) {
      * длины (§10 вопрос 224), и проверка платила бы за то, что тип уже
      * доказал. Номер вне длины приходит только с ложной аксиомой. */
     if (head->stride == 0) {
-        adamas_fail("плоская ячейка спрошена у указательного массива");
+        adamas_fail("flat cell asked of a pointer array");
     }
     return payload(array) + index * head->stride;
 }
@@ -58,7 +58,7 @@ void *adamas_array_at(adamas_value array, size_t index) {
 void *adamas_array_data(adamas_value array) {
     adamas_array *head = header_of(array);
     if (head->stride == 0) {
-        adamas_fail("нагрузка одолжена у указательного массива (§5.3)");
+        adamas_fail("payload borrowed from a pointer array (§5.3)");
     }
     /* Длина не проверяется: одалживается начало, а сколько ячеек прочтёт чужая
      * сторона, знает только она. Нулевая длина законна и даёт адрес за
@@ -73,7 +73,7 @@ void *adamas_array_window(adamas_value array, size_t index, size_t lanes) {
      * Ширина остаётся в подписи - по ней окно названо в порождённом коде. */
     (void)lanes;
     if (head->stride == 0) {
-        adamas_fail("окно вектора спрошено у указательного массива");
+        adamas_fail("vector window asked of a pointer array");
     }
     return payload(array) + index * head->stride;
 }
@@ -82,7 +82,7 @@ void *adamas_array_window(adamas_value array, size_t index, size_t lanes) {
 static adamas_value *slot(adamas_value array, size_t index) {
     adamas_array *head = header_of(array);
     if (head->stride != 0) {
-        adamas_fail("слот спрошен у плоского массива");
+        adamas_fail("slot asked of a flat array");
     }
     adamas_value *slots = (adamas_value *)(void *)payload(array);
     return slots + index;
@@ -106,7 +106,7 @@ __attribute__((noinline, cold)) static void localised(adamas_value array) {
          * массив, - а положить в него локального постояльца тем более. В
          * порождённом коде сюда не попасть (`adamas_array_writable` разделённый
          * копирует), поэтому это отказ, а не ветка. */
-        adamas_fail("запись в разделённый массив мимо `adamas_array_writable` (§5.2)");
+        adamas_fail("write to a shared array bypassing `adamas_array_writable` (§5.2)");
     }
     adamas_header_of(array)->flags = 0;
 }
@@ -153,7 +153,7 @@ void adamas_array_fill(adamas_value array, adamas_value value, adamas_release re
     adamas_array *head = header_of(array);
     size_t index;
     if (head->stride != 0) {
-        adamas_fail("указательное заполнение плоского массива");
+        adamas_fail("pointer fill of a flat array");
     }
     for (index = 0; index < head->count; index += 1) {
         adamas_array_init(array, index, adamas_dup(value));
@@ -167,7 +167,7 @@ void adamas_array_fill_flat(adamas_value array, const void *bits) {
     adamas_array *head = header_of(array);
     size_t index;
     if (head->stride == 0) {
-        adamas_fail("плоское заполнение указательного массива");
+        adamas_fail("flat fill of a pointer array");
     }
     for (index = 0; index < head->count; index += 1) {
         memcpy(payload(array) + index * head->stride, bits, head->stride);

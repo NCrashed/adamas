@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: implicit-not-inferred.adamas:15:12: неявный аргумент у `Nil` не выведен: из места употребления его не видно - дайте тип результату (аннотацией `let` или сигнатурой)
+Ошибка: implicit-not-inferred.adamas:15:12: неявный аргумент у `Nil` не выведен: из места употребления его не видно - дайте тип результату (аннотацией `let` или сигнатурой)
     let xs = Nil
              ^^^

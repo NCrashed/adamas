@@ -2,7 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: open-dependent-record.adamas:10:40: поле `b` зависит от предыдущего, а такая запись не открывается
+Ошибка: open-dependent-record.adamas:10:40: поле `b` зависит от предыдущего, а такая запись не открывается
   dependent : { a : Type, b : a | r } -> Nat
                                          ^^^
   в контексте:

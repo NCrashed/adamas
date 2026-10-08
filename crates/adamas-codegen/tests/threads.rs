@@ -10,7 +10,7 @@
 //! 1. *Ответ.* Он обязан совпасть с машиной, и совпасть **на каждом** прогоне:
 //!    гонка не воспроизводится по требованию, и один зелёный прогон значит «в
 //!    этот раз повезло». Прогонов здесь [`RUNS`].
-//! 2. *Что потоки работали.* Точка входа печатает `потоков выдавало N`, когда
+//! 2. *Что потоки работали.* Точка входа печатает `threads issued N`, когда
 //!    ряд счётчика блоков завёл больше одного потока, - то есть когда файбер
 //!    **аллоцировал на воркере**. Строка эта у однопоточного прогона не
 //!    печатается вовсе, и её отсутствие роняет тест.
@@ -506,7 +506,7 @@ fn corpus_program() -> String {
 
 /// Гоняет программу `RUNS` раз и сверяет каждый ответ с машиной.
 ///
-/// Отдаёт, на скольких прогонах точка входа сказала «потоков выдавало».
+/// Отдаёт, на скольких прогонах точка входа сказала «threads issued».
 fn agreeing(name: &str, source: &str) -> usize {
     let expected = harness::machine_printed(source)
         .unwrap_or_else(|why| panic!("{name}: машина обязана отвечать, а сказала `{why}`"));
@@ -525,7 +525,7 @@ fn agreeing(name: &str, source: &str) -> usize {
             "{name}: прогон {run} оставил блоки живыми: `{}`",
             ran.reason.trim_end()
         );
-        if ran.reason.contains("потоков выдавало") {
+        if ran.reason.contains("threads issued") {
             spread += 1;
         }
     }
@@ -580,7 +580,7 @@ fn the_llvm_path_computes_on_several_threads_too() {
         let (_, live) =
             harness::blocks("потоки-корпус", counted.lines().next().unwrap_or_default());
         assert_eq!(live, 0, "LLVM-путь: прогон {run} оставил блоки живыми");
-        if counted.contains("потоков выдавало") {
+        if counted.contains("threads issued") {
             spread += 1;
         }
     }
@@ -606,7 +606,7 @@ fn eight_tasks_spread_across_the_workers() {
 
 /// Та же программа без переменной: ответ тот же, строки про потоки нет.
 ///
-/// Это **вторая половина** второго наблюдаемого. Без неё «потоков выдавало»
+/// Это **вторая половина** второго наблюдаемого. Без неё «threads issued»
 /// могло бы печататься всегда, и число выше ничего бы не различало.
 #[test]
 fn without_the_variable_the_round_stays_single_threaded() {
@@ -620,7 +620,7 @@ fn without_the_variable_the_round_stays_single_threaded() {
         "однопоточный прогон оставил блоки живыми"
     );
     assert!(
-        !ran.reason.contains("потоков выдавало"),
+        !ran.reason.contains("threads issued"),
         "без `ADAMAS_THREADS` круг завёл воркеров: `{}`",
         ran.reason.trim_end()
     );
@@ -884,7 +884,7 @@ fn an_abort_out_of_a_migrated_fiber_is_named_not_silent() {
             ran.printed
         );
         assert!(
-            ran.reason.contains("не выражается"),
+            ran.reason.contains("not expressible"),
             "обрыв оборвался не тем: `{}`",
             ran.reason.trim_end()
         );

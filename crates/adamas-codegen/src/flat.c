@@ -419,7 +419,7 @@ static void adamas_print_flat(uint8_t kind, uint64_t bits, int nested) {
         adamas_show_Float64(adamas_bits_Float64(bits));
         break;
     default:
-        adamas_fail("печать: у слота нет сорта");
+        adamas_fail("printing: the slot has no sort");
     }
     if (paren) {
         printf(")");

@@ -189,7 +189,7 @@ fn the_corpus_program_allocates_from_several_workers() {
             "прогон {run} оставил блоки живыми: `{}`",
             ran.reason.trim_end()
         );
-        if ran.reason.contains("потоков выдавало") {
+        if ran.reason.contains("threads issued") {
             spread += 1;
         }
     }
@@ -241,7 +241,7 @@ fn the_llvm_path_allocates_from_several_workers_too() {
             counted.lines().next().unwrap_or_default(),
         );
         assert_eq!(live, 0, "LLVM-путь: прогон {run} оставил блоки живыми");
-        if counted.contains("потоков выдавало") {
+        if counted.contains("threads issued") {
             spread += 1;
         }
     }

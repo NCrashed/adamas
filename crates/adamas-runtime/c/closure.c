@@ -32,11 +32,11 @@ struct closure_block {
     adamas_value slots[];
 };
 
-_Static_assert(offsetof(struct closure_block, slots) == 40, "слоты замыкания идут с 40-го байта");
+_Static_assert(offsetof(struct closure_block, slots) == 40, "closure slots start at byte 40");
 
 static struct closure_block *closure_of(adamas_value value) {
     if (adamas_is_imm(value) || adamas_tag(value) != ADAMAS_TAG_CLOSURE) {
-        adamas_fail("применение не к замыканию");
+        adamas_fail("application to a non-closure");
     }
     return (struct closure_block *)(void *)value;
 }
@@ -50,13 +50,13 @@ static size_t slot_count(const struct closure_block *block) {
 adamas_value adamas_closure(adamas_code code, adamas_release release, uint32_t arity,
                             uint32_t captured, uint32_t counted) {
     if (code == NULL) {
-        adamas_fail("замыкание без кода");
+        adamas_fail("closure without code");
     }
     if (arity == 0) {
-        adamas_fail("замыкание нульместным не бывает");
+        adamas_fail("a closure is never nullary");
     }
     if (counted > captured) {
-        adamas_fail("счётных слотов среды больше, чем самих слотов");
+        adamas_fail("more counted environment slots than slots");
     }
     size_t slots = (size_t)captured + (size_t)arity - 1;
     adamas_value value = (adamas_value)adamas_block_alloc(sizeof(struct closure_block) +
@@ -78,7 +78,7 @@ adamas_value adamas_closure(adamas_code code, adamas_release release, uint32_t a
 void adamas_closure_set(adamas_value closure, size_t index, adamas_value field) {
     struct closure_block *block = closure_of(closure);
     if (index >= slot_count(block)) {
-        adamas_fail("слот замыкания за его пределами");
+        adamas_fail("closure slot out of bounds");
     }
     block->slots[index] = field;
 }
@@ -86,7 +86,7 @@ void adamas_closure_set(adamas_value closure, size_t index, adamas_value field) 
 adamas_value adamas_closure_get(adamas_value closure, size_t index) {
     struct closure_block *block = closure_of(closure);
     if (index >= slot_count(block)) {
-        adamas_fail("слот замыкания за его пределами");
+        adamas_fail("closure slot out of bounds");
     }
     return block->slots[index];
 }

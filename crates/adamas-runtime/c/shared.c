@@ -85,7 +85,7 @@ static char *payload(adamas_value area) {
 
 static adamas_shared *area_of(adamas_value area) {
     if (adamas_tag(area) != ADAMAS_TAG_SHARED) {
-        adamas_fail("операция разделяемой области над не-областью");
+        adamas_fail("shared area operation on a non-area");
     }
     return (adamas_shared *)area;
 }
@@ -233,7 +233,7 @@ ADAMAS_CONTESTED static void refill(adamas_shared *area, adamas_hand *own, size_
                       : aligned(need, ADAMAS_SHARED_CHUNK);
     size_t taken = __atomic_fetch_add(&area->cursor, want, __ATOMIC_ACQ_REL);
     if (want > ADAMAS_SHARED_BYTES || taken > ADAMAS_SHARED_BYTES - want) {
-        adamas_fail("разделяемая область переполнена: ёмкость области фиксирована");
+        adamas_fail("shared area overflow: the capacity of an area is fixed");
     }
     own->at = taken;
     own->edge = taken + want;
@@ -339,7 +339,7 @@ void adamas_shared_read(adamas_value area, size_t at, void *out, size_t size,
                         adamas_release release) {
     size_t given = adamas_shared_used(area);
     if (size > given || at > given - size) {
-        adamas_fail("чтение разделяемой области за пределами розданного");
+        adamas_fail("read of a shared area beyond what was handed out");
     }
     memcpy(out, payload(area) + at, size);
     adamas_drop(area, release);
@@ -348,7 +348,7 @@ void adamas_shared_read(adamas_value area, size_t at, void *out, size_t size,
 adamas_value adamas_shared_write(adamas_value area, size_t at, const void *bits, size_t size) {
     size_t given = adamas_shared_used(area);
     if (size > given || at > given - size) {
-        adamas_fail("запись в разделяемую область за пределами розданного");
+        adamas_fail("write to a shared area beyond what was handed out");
     }
     /* Гонки **ячейки** здесь нет только потому, что её нет в программе: §3.6
      * обещает потокобезопасность аллокатора, а не нагрузки, и два воркера,

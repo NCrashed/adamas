@@ -2,7 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: polymorphic-recursion-universe.adamas:28:16: выводимый аргумент не укладывается в свой тип `(0 _ : Nat) -> Type`: на его месте требуется `Type`
+Ошибка: polymorphic-recursion-universe.adamas:28:16: выводимый аргумент не укладывается в свой тип `(0 _ : Nat) -> Type`: на его месте требуется `Type`
   atType n Nil = reject n
                  ^^^^^^^^
   в контексте:

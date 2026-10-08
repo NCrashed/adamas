@@ -31,7 +31,7 @@ int main(int argc, char **argv) {
     }
     calls = strtoull(argv[1], NULL, 10);
     printf("%llu\n", (unsigned long long)adamas_entry((uint64_t)calls));
-    fprintf(stderr, "блоков выдано %zu, живо %zu\n", adamas_stat_allocated_everywhere(),
+    fprintf(stderr, "blocks issued %zu, alive %zu\n", adamas_stat_allocated_everywhere(),
             adamas_stat_live_everywhere());
     return 0;
 }

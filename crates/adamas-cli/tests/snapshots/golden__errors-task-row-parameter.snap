@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: task-row-parameter.adamas:9:11: row-параметр семейства - `e` сортом `Effect` - появляется в одном из следующих срезов; параметром `data` сегодня бывает тип
+Ошибка: task-row-parameter.adamas:9:11: row-параметр семейства - `e` сортом `Effect` - появляется в одном из следующих срезов; параметром `data` сегодня бывает тип
   data Task (e : Effect) (a : Type) where
             ^^^^^^^^^^^^

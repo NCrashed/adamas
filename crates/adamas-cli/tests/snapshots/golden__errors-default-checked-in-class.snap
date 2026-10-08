@@ -2,7 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: default-checked-in-class.adamas:11:23: несовпадение типов: ожидался `Int32`, получен `Bool`
+Ошибка: default-checked-in-class.adamas:11:23: несовпадение типов: ожидался `Int32`, получен `Bool`
     broken x = name x + True
                         ^^^^
   в контексте:

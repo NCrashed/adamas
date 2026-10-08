@@ -38,14 +38,14 @@ struct adamas_segment {
 
 /* Смещения закреплены: числа эти уезжают от перестановки полей молча, а Фаза 7
  * ставит по ним `align` и `dereferenceable` (шапка `adamas.h`, «Выравнивание»). */
-_Static_assert(offsetof(struct adamas_frame, env) == 56, "среда кадра идёт с 56-го байта");
-_Static_assert(sizeof(struct adamas_segment) == 24, "сегмент - три слова");
+_Static_assert(offsetof(struct adamas_frame, env) == 56, "the frame environment starts at byte 56");
+_Static_assert(sizeof(struct adamas_segment) == 24, "a segment is three words");
 
 static adamas_frame *frame_alloc(uint16_t mark, uint32_t label, adamas_frame_code code,
                                  adamas_handler_code branches, adamas_frame_release release,
                                  size_t fields, size_t counted, adamas_evidence *evidence) {
     if (fields > UINT16_MAX || counted > fields) {
-        adamas_fail("среда кадра: слотов больше, чем кадр умеет носить");
+        adamas_fail("frame environment: more slots than a frame can carry");
     }
     adamas_frame *frame = (adamas_frame *)adamas_block_alloc(sizeof(adamas_frame) +
                                                              fields * sizeof(adamas_value));
@@ -293,7 +293,7 @@ adamas_frame *adamas_kont_handler(adamas_kont *kont, uint32_t label, adamas_hand
 adamas_value adamas_frame_perform(adamas_frame *handler, adamas_kont *kont, uint32_t operation,
                                   adamas_value *arguments, size_t count) {
     if (handler == NULL || handler->branches == NULL) {
-        adamas_fail("операция пришла к кадру без веток");
+        adamas_fail("the operation reached a frame without branches");
     }
     return handler->branches(handler, kont, operation, arguments, count);
 }
@@ -340,7 +340,7 @@ adamas_value adamas_kont_run_to(adamas_kont *kont, adamas_frame *floor, adamas_v
     while (kont->top != floor) {
         if (kont->top == NULL) {
             /* Пол не встретился: кадр, до которого крутили, сняли не мы. */
-            adamas_fail("пол раскрутки не принадлежит этому стеку");
+            adamas_fail("the unwind floor does not belong to this stack");
         }
         adamas_frame *frame = kont->top;
         kont->top = frame->below;
@@ -408,7 +408,7 @@ adamas_value adamas_kont_run_to(adamas_kont *kont, adamas_frame *floor, adamas_v
 
 adamas_segment *adamas_kont_cut(adamas_kont *kont, adamas_frame *handler) {
     if (handler == NULL) {
-        adamas_fail("резать нечего: кадр хендлера не назван");
+        adamas_fail("nothing to cut: the handler frame is not named");
     }
     /* Разрез идёт за постоянное время, и это **несущее** свойство, а не
      * экономия. Сегмент общей ветки растёт с глубиной рекурсии под хендлером;
@@ -440,7 +440,7 @@ void adamas_kont_resume(adamas_kont *kont, adamas_value value) {
     if (segment->top == NULL) {
         /* Аффинность резумпции держат типы (§3.3): второе возобновление сюда
          * попасть может только дефектом понижения, и молчать о нём нечем. */
-        adamas_fail("резумпция возобновлена дважды");
+        adamas_fail("resumption resumed twice");
     }
     adamas_header *header = adamas_header_of(segment);
     if ((header->flags & ADAMAS_FLAG_MULTI) != 0 && header->rc != 0) {
@@ -500,7 +500,7 @@ adamas_segment *adamas_segment_copy(const adamas_segment *segment) {
          * раскрутки в копируемый сегмент не попадает. Владение остатком
          * цепочки при копии делить нечем, поэтому отказ здесь, а не молчание. */
         if (adamas_frame_mark(source) == ADAMAS_MARK_UNWINDING) {
-            adamas_fail("сегмент раскрутки не копируется: ресурс под мультишотом");
+            adamas_fail("the unwind segment is not copied: a resource under a multishot");
         }
         adamas_evidence *evidence;
         if (source->evidence != NULL && source->evidence == shared_source) {
@@ -601,7 +601,7 @@ adamas_value adamas_segment_value(adamas_segment *segment) {
 
 adamas_segment *adamas_segment_of(adamas_value value) {
     if (adamas_is_imm(value) || adamas_tag(value) != ADAMAS_TAG_SEGMENT) {
-        adamas_fail("значение не резумпция");
+        adamas_fail("the value is not a resumption");
     }
     return (adamas_segment *)(void *)value;
 }

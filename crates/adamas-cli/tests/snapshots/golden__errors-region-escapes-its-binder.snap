@@ -2,7 +2,7 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: region-escapes-its-binder.adamas:38:22: несовпадение типов: ожидался `(0 r : Region) -> (ω u : Unit) -> {Alloc r | ?0} ?1`, получен `(0 r : Region) -> (ω u : Unit) -> {Alloc r | ?0} Ref r Nat`
+Ошибка: region-escapes-its-binder.adamas:38:22: несовпадение типов: ожидался `(0 r : Region) -> (ω u : Unit) -> {Alloc r | ?0} ?1`, получен `(0 r : Region) -> (ω u : Unit) -> {Alloc r | ?0} Ref r Nat`
   escaped = withRegion allocRef
                        ^^^^^^^^
   в контексте:

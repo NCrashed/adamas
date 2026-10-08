@@ -387,7 +387,7 @@ fn a_resource_over_a_gzip_stream_agrees_across_three_evaluators() {
         "C-путь посчитал не то:\n{stdout}"
     );
     assert!(
-        stderr.lines().any(|line| line.contains("живо 0")),
+        stderr.lines().any(|line| line.contains("alive 0")),
         "C-путь оставил блоки живыми:\n{stderr}"
     );
 
@@ -399,7 +399,7 @@ fn a_resource_over_a_gzip_stream_agrees_across_three_evaluators() {
         "путь LLVM посчитал не то:\n{stdout}"
     );
     assert!(
-        stderr.lines().any(|line| line.contains("живо 0")),
+        stderr.lines().any(|line| line.contains("alive 0")),
         "путь LLVM оставил блоки живыми:\n{stderr}"
     );
 }

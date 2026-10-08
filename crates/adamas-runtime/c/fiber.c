@@ -207,13 +207,13 @@ static adamas_value nursery_step(adamas_kont *kont, adamas_nursery *nursery);
 
 ADAMAS_CROWDED static void nursery_lock(adamas_nursery *nursery) {
     if (pthread_mutex_lock(&nursery->lock) != 0) {
-        adamas_fail("замок круга не взялся");
+        adamas_fail("the circle's lock was not taken");
     }
 }
 
 ADAMAS_CROWDED static void nursery_unlock(adamas_nursery *nursery) {
     if (pthread_mutex_unlock(&nursery->lock) != 0) {
-        adamas_fail("замок круга не отпустился");
+        adamas_fail("the circle's lock was not released");
     }
 }
 
@@ -292,7 +292,7 @@ static void nursery_frame_release(adamas_frame *frame, adamas_kont *kont) {
 
 static adamas_nursery *nursery_of(adamas_frame *frame) {
     if (adamas_frame_fields(frame) < ADAMAS_NURSERY_SLOTS) {
-        adamas_fail("кадр питомника без круга в среде");
+        adamas_fail("nursery frame without a circle in its environment");
     }
     return (adamas_nursery *)(void *)adamas_frame_env(frame)[0];
 }
@@ -546,7 +546,7 @@ static adamas_frame *nursery_frame(const adamas_evidence *evidence) {
             return adamas_evidence_at(evidence, index);
         }
     }
-    adamas_fail("операция питомника вне питомника (§5.2)");
+    adamas_fail("nursery operation outside a nursery (§5.2)");
 }
 
 /* ------------------------------------------------------------------ */
@@ -636,7 +636,7 @@ static adamas_value nursery_result(adamas_nursery *nursery) {
     if (nursery->blocked != NULL) {
         /* Круг пуст, а ждущие есть - ждать им друг друга до конца времён.
          * Видно это по построению, а не по зависанию. */
-        adamas_fail("взаимная блокировка файберов (§5.2)");
+        adamas_fail("fiber deadlock (§5.2)");
     }
     result = nursery->answered ? nursery->result : adamas_unit();
     nursery->answered = 0;
@@ -714,7 +714,7 @@ static adamas_value nursery_step(adamas_kont *kont, adamas_nursery *nursery) {
             return adamas_unit();
         }
         if (!over) {
-            adamas_fail("хозяин круга остался без работы, а круг не договорил (§5.2)");
+            adamas_fail("the circle's owner ran out of work while the circle had not finished (§5.2)");
         }
         crew_join(nursery);
         return nursery_result(nursery);
@@ -786,7 +786,7 @@ static uint32_t crew_asked(void) {
     }
     many = strtol(asked, &end, 10);
     if (*end != '\0' || many < 1) {
-        adamas_fail("`ADAMAS_THREADS` - целое не меньше единицы");
+        adamas_fail("`ADAMAS_THREADS` must be an integer of at least one");
     }
     if (many > 256) {
         many = 256;
@@ -801,17 +801,17 @@ ADAMAS_CROWDED static void crew_hire(adamas_nursery *nursery, uint32_t hands) {
     if (nursery->promote == NULL) {
         /* Без обхода промоушена значение, уехавшее в чужой поток, считалось бы
          * неатомарно (§5.1). Молчать об этом нечем: гонка не видна ответом. */
-        adamas_fail("многопоточный круг без обхода промоушена (§5.2)");
+        adamas_fail("multithreaded circle without a promotion pass (§5.2)");
     }
     nursery->crew = (pthread_t *)calloc(hands, sizeof(pthread_t));
     if (nursery->crew == NULL) {
-        adamas_fail("куча исчерпана");
+        adamas_fail("heap exhausted");
     }
     /* `hands` ставится **до** запуска: воркер читает его у себя же. */
     nursery->hands = hands;
     for (at = 0; at < hands; at += 1) {
         if (pthread_create(&nursery->crew[at], NULL, crew_hand, nursery) != 0) {
-            adamas_fail("поток круга не завёлся");
+            adamas_fail("the circle's thread did not start");
         }
     }
 }
@@ -844,7 +844,7 @@ adamas_value adamas_nursery_begin(adamas_kont *kont, const adamas_evidence *evid
     if (hands != 0) {
         if (pthread_mutex_init(&nursery->lock, NULL) != 0
             || pthread_cond_init(&nursery->wake, NULL) != 0) {
-            adamas_fail("замок круга не собрался");
+            adamas_fail("the circle's lock was not built");
         }
         nursery->joined = 0;
         /* Вектор места `withNursery` называет **каждый** кадр питомника, а
@@ -965,13 +965,13 @@ adamas_value adamas_nursery_await(adamas_kont *kont, const adamas_evidence *evid
     int found;
     adamas_value ready;
     if (name == NULL) {
-        adamas_fail("`await` над значением, которого питомник не собирал (§5.2)");
+        adamas_fail("`await` on a value the nursery did not collect (§5.2)");
     }
     if (name->home != nursery) {
         /* Задача чужого круга: её очередь и список ждущих не здесь, и ждать её
          * отсюда нечем. Ответа её тоже нет - круг, закрывшись, освобождает
          * готовые, - поэтому и договорившая сюда не подходит. */
-        adamas_fail("`await` над задачей чужого питомника (§5.2)");
+        adamas_fail("`await` on a task of another nursery (§5.2)");
     }
     awaited = name->id;
     /* Задача потреблена: `await : (1 t : Task) -> a` (§5.2). Разбора её
@@ -1024,7 +1024,7 @@ adamas_value adamas_nursery_finished(adamas_kont *kont, adamas_frame *frame, ada
              * замок вторым разом на этом же потоке. Названный отказ лучше
              * зависания. */
             if (!adamas_is_imm(fiber->answer)) {
-                adamas_fail("ждущий файбер нёс не единицу (§5.2)");
+                adamas_fail("the waiting fiber carried something other than unit (§5.2)");
             }
             fiber->answer = adamas_dup(value);
             queue_push(nursery, fiber);
@@ -1053,7 +1053,7 @@ adamas_segment *adamas_nursery_abandoned(adamas_frame *frame) {
          * раскруткой надо собрать - иначе они продолжат брать файберы из
          * круга, который уже вычерпывается. */
         if (!pthread_equal(nursery->owner, pthread_self())) {
-            adamas_fail("обрыв круга из мигрировавшего файбера не выражается (§5.2)");
+            adamas_fail("aborting the circle from a migrated fiber is not expressible (§5.2)");
         }
         crew_join(nursery);
     }

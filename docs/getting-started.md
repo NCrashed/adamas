@@ -219,10 +219,9 @@ main = reading "in.txt" into
 ```
 
 A failure is `Except IOError` (`CannotOpen`, `CannotWrite`). Caught by nobody,
-it is printed to stderr and ends the program with exit code 1; `attempt` from
-`Std.Except` catches it. The text the program itself prints is not localized
-yet and is Russian: `ошибка: не открывается файл in.txt` ("error: cannot open
-file in.txt").
+it is printed to stderr - `error: cannot open file in.txt` - and ends the
+program with exit code 1; `attempt` from `Std.Except` catches it. A built
+program always speaks English, whatever the locale of the compiler.
 
 The meaning of operations is given by a handler, not by the declaration: a
 test may run the same program with its own `Console` handler - with prepared

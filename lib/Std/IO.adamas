@@ -227,8 +227,8 @@ writeAt fd s = case s of
 
 -- | Сообщение об отказе в стандартный поток ошибок.
 reported : IOError -> {Foreign} Bool
-reported (CannotOpen path) = writeAt 2 ("ошибка: не открывается файл " <> path <> "\n")
-reported (CannotWrite path) = writeAt 2 ("ошибка: не записывается файл " <> path <> "\n")
+reported (CannotOpen path) = writeAt 2 ("error: cannot open file " <> path <> "\n")
+reported (CannotWrite path) = writeAt 2 ("error: cannot write file " <> path <> "\n")
 
 -- Дальше `exit` управление не идёт; ответ любого типа - ради сигнатуры.
 stopped : {a : Type} -> (ω u : Unit) -> {Foreign} a

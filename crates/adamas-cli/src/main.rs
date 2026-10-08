@@ -128,10 +128,27 @@ fn main() -> ExitCode {
     match dispatch(cli.command) {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("Error: {error:?}");
+            eprintln!("{}", reported(&error));
             ExitCode::FAILURE
         }
     }
+}
+
+/// Отказ драйвера на языке пользователя (§7.6): слово перед ним и заголовок
+/// цепочки причин - из каталога. `{error:?}` у `anyhow` печатал их
+/// по-английски при любой локали.
+fn reported(error: &anyhow::Error) -> String {
+    let mut text = adamas_l10n::tr!("cli-error", error = error.to_string());
+    let mut causes = error.chain().skip(1).peekable();
+    if causes.peek().is_some() {
+        text.push_str("\n\n");
+        text.push_str(adamas_l10n::text!("cli-caused-by"));
+        for cause in causes {
+            text.push_str("\n    ");
+            text.push_str(&cause.to_string());
+        }
+    }
+    text
 }
 
 fn dispatch(command: Command) -> anyhow::Result<ExitCode> {

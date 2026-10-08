@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: alias-free-universe.adamas:12:1: в определении `Fam` остался неразрешённый уровень ?0
+Ошибка: alias-free-universe.adamas:12:1: в определении `Fam` остался неразрешённый уровень ?0
   Fam a = a -> Type
   ^^^^^^^^^^^^^^^^^

@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: array-read-twice.adamas:14:45: `ys` объявлена с кратностью 1, а использована ω
+Ошибка: array-read-twice.adamas:14:45: `ys` объявлена с кратностью 1, а использована ω
     MkRead v ys -> arraySet (arraySet ys 0 v) 1 (arrayIndex ys 2)
                                               ^

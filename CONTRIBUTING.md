@@ -133,10 +133,10 @@ root `tests/golden/` is not Rust code but data (see `tests/golden/README.md`).
   --accept`). `*.snap.new` files are not committed.
 - Property-based tests (`proptest`) - for core algorithms: the parser's round
   trip, normalization, resolution of positions.
-- A built program prints the block counters (`блоков выдано N, живо M`,
-  "N blocks issued, M alive") only under `ADAMAS_STATS`: the leak and reuse
-  witnesses live on them. The suite and the benchmarks get the variable from
-  `.cargo/config.toml`; a binary started by hand does not.
+- A built program prints the block counters (`blocks issued N, alive M`) only
+  under `ADAMAS_STATS`: the leak and reuse witnesses live on them. The suite
+  and the benchmarks get the variable from `.cargo/config.toml`; a binary
+  started by hand does not.
 
 For type-theory-heavy code prefer property and snapshot tests to bespoke unit
 tests: the latter easily start testing the implementation instead of the

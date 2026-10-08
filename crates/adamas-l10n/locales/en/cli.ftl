@@ -81,3 +81,5 @@ cli-help-eval = Check and evaluate a definition with the machine
 cli-help-eval-path = Path to an `.adamas` file, a project directory or its `adamas.toml`
 cli-help-eval-name = What to evaluate. Defaults to `main`
 cli-help-eval-full = Print the result in full, without cutting at depth
+cli-error = Error: { $error }
+cli-caused-by = Caused by:

@@ -1531,7 +1531,7 @@ fn wrapper(out: &mut String, function: &Function) {
     );
     let _ = writeln!(out, "{} {{", trampoline(&format!("box_{}", function.id.0)));
     if arity == 0 {
-        out.push_str("    adamas_fail(\"замыкание без параметров\");\n}\n\n");
+        out.push_str("    adamas_fail(\"closure without parameters\");\n}\n\n");
         return;
     }
     // Слотов ровно столько, сколько связываний у ядра, - стёртые в том числе
@@ -1706,7 +1706,7 @@ fn dispatch(out: &mut String, arm: &Dispatch<'_>) {
     let _ = writeln!(out, "    case {case}: {{ /* {title} */");
     let _ = writeln!(
         out,
-        "        if (count < {written}u) {{ adamas_fail(\"ветке `{title}` не хватило аргументов\"); }}"
+        "        if (count < {written}u) {{ adamas_fail(\"the branch `{title}` got too few arguments\"); }}"
     );
     let _ = writeln!(
         out,
@@ -1794,7 +1794,7 @@ fn branches(out: &mut String, program: &Program, at: usize) {
     let _ = writeln!(out, "    }}");
     let _ = writeln!(
         out,
-        "    adamas_fail(\"у хендлера `{}` нет такой ветки\");",
+        "    adamas_fail(\"the handler `{}` has no such branch\");",
         escaped(&label.name)
     );
     let _ = writeln!(out, "}}\n");
@@ -1826,7 +1826,7 @@ fn builder(out: &mut String, constructor: &Constructor) {
         trampoline(&format!("make_{}", constructor.tag.0))
     );
     if arity == 0 {
-        out.push_str("    adamas_fail(\"конструктор без полей значением\");\n}\n\n");
+        out.push_str("    adamas_fail(\"a constructor without fields used as a value\");\n}\n\n");
         return;
     }
     let _ = writeln!(
@@ -3744,7 +3744,7 @@ impl Emitter<'_> {
         // одно и то же (`perceus::arm`), поэтому берётся последняя.
         let _ = writeln!(
             self.out,
-            "{pad}default: adamas_fail(\"разбор не знает конструктора\");"
+            "{pad}default: adamas_fail(\"the match does not know the constructor\");"
         );
         let _ = writeln!(self.out, "{pad}}}");
         name
@@ -3798,7 +3798,7 @@ impl Emitter<'_> {
         }
         let _ = writeln!(
             self.out,
-            "{pad}default: adamas_fail(\"разбор не знает тега\");"
+            "{pad}default: adamas_fail(\"the match does not know the tag\");"
         );
         let _ = writeln!(self.out, "{pad}}}");
         name
@@ -4197,7 +4197,7 @@ impl Emitter<'_> {
         let _ = writeln!(self.out, "{pad}}}");
         let _ = writeln!(
             self.out,
-            "{pad}adamas_fail(\"разбор не знает конструктора\");"
+            "{pad}adamas_fail(\"the match does not know the constructor\");"
         );
     }
 
@@ -4294,7 +4294,7 @@ impl Emitter<'_> {
         let _ = writeln!(self.out, "{pad}}}");
         let _ = writeln!(
             self.out,
-            "{pad}adamas_fail(\"разбор не знает конструктора\");"
+            "{pad}adamas_fail(\"the match does not know the constructor\");"
         );
     }
 
@@ -4422,12 +4422,12 @@ impl Emitter<'_> {
         let _ = writeln!(
             self.out,
             "{pad}if ({verdict} == ADAMAS_LOOKUP_SUPPRESSED) {{ \
-             adamas_fail(\"подавленная операция в тихой программе: {title}.{operation_name}\"); }}"
+             adamas_fail(\"suppressed operation in a silent program: {title}.{operation_name}\"); }}"
         );
         let _ = writeln!(
             self.out,
             "{pad}if ({verdict} != ADAMAS_LOOKUP_HANDLER) {{ \
-             adamas_fail(\"операция без хендлера: {title}.{operation_name}\"); }}"
+             adamas_fail(\"operation without a handler: {title}.{operation_name}\"); }}"
         );
         let answer = self.temp();
         let _ = writeln!(
@@ -4584,8 +4584,8 @@ impl Emitter<'_> {
             None => {
                 let _ = writeln!(
                     self.out,
-                    "{inner}adamas_fail(\"тип задачи не подошёл: нужен один конструктор с одним \
-                     полем (§5.2)\");"
+                    "{inner}adamas_fail(\"the task type does not fit: one constructor with one \
+                     field is needed (§5.2)\");"
                 );
             }
         }
@@ -4640,7 +4640,7 @@ impl Emitter<'_> {
         let _ = writeln!(self.out, "{pad}}}");
         let _ = writeln!(
             self.out,
-            "{pad}adamas_fail(\"операция без хендлера: {title}.{operation_name}\");"
+            "{pad}adamas_fail(\"operation without a handler: {title}.{operation_name}\");"
         );
     }
 }

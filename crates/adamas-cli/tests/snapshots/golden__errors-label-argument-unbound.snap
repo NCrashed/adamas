@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: label-argument-unbound.adamas:24:18: свободная переменная типа пока не элаборируется: в implicit-параметр поднимается сигнатура объявления; здесь связать имя нечем
+Ошибка: label-argument-unbound.adamas:24:18: свободная переменная типа пока не элаборируется: в implicit-параметр поднимается сигнатура объявления; здесь связать имя нечем
     let c : {Alloc r} Nat = fresh
                    ^

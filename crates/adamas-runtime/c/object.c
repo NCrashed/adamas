@@ -64,7 +64,7 @@ __attribute__((noinline)) static adamas_counters *enlist(void) {
     adamas_counters *made = (adamas_counters *)calloc(1, sizeof(adamas_counters));
     adamas_counters *head;
     if (made == NULL) {
-        adamas_fail("куча исчерпана");
+        adamas_fail("heap exhausted");
     }
     head = __atomic_load_n(&registry, __ATOMIC_RELAXED);
     do {
@@ -90,7 +90,7 @@ void *adamas_block_alloc(size_t size) {
     void *block = malloc(size);
     adamas_counters *counters;
     if (block == NULL) {
-        adamas_fail("куча исчерпана");
+        adamas_fail("heap exhausted");
     }
     counters = ours();
     counters->allocated += 1;
@@ -160,7 +160,7 @@ size_t adamas_stat_live_everywhere(void) {
          * выдавал». Прежде это ловилось на самом освобождении; проверка стоила
          * атомарной пары на каждый блок (+41% к пути аллокации, мерено) и не
          * имела ни одного свидетеля. */
-        adamas_fail("освобождён блок, которого рантайм не выдавал");
+        adamas_fail("freed a block the runtime did not issue");
     }
     return (size_t)total;
 }

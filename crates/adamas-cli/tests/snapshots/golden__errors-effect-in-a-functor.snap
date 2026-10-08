@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: effect-in-a-functor.adamas:33:3: `Ask` в функторе не объявляется: член функтора поднимается под его параметрами, а метка их не несёт
+Ошибка: effect-in-a-functor.adamas:33:3: `Ask` в функторе не объявляется: член функтора поднимается под его параметрами, а метка их не несёт
     effect Ask where
     ^^^^^^^^^^^^^^^^

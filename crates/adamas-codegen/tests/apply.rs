@@ -396,7 +396,7 @@ fn a_second_form_behind_the_pointer_fails_loudly() {
         outcome.printed
     );
     assert!(
-        outcome.reason.contains("операция без хендлера"),
+        outcome.reason.contains("operation without a handler"),
         "обрыв не назвал причины: {}",
         outcome.reason
     );

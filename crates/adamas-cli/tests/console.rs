@@ -216,7 +216,7 @@ fn a_missing_file_ends_the_program_with_a_message() {
         // Отказ обрывает программу: «после» не печатается, ответа нет.
         assert_eq!(stdout, "до\n", "{args:?}: вывод не тот");
         assert!(
-            stderr.contains("ошибка: не открывается файл нет.txt\n"),
+            stderr.contains("error: cannot open file нет.txt\n"),
             "{args:?}: сообщения нет:\n{stderr}"
         );
     }
@@ -318,11 +318,11 @@ fn the_block_counters_stay_quiet_without_being_asked() {
             .unwrap_or_else(|why| panic!("{args:?} не запустился: {why}"));
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            !stderr.contains("блоков выдано"),
+            !stderr.contains("blocks issued"),
             "{args:?}: счётчики без спроса:\n{stderr}"
         );
     }
     // С переменной - на месте: ею живут свидетели течи.
     let (_code, _stdout, stderr) = driven(&file, &["run"], "");
-    assert!(stderr.contains("блоков выдано"), "счётчиков нет:\n{stderr}");
+    assert!(stderr.contains("blocks issued"), "счётчиков нет:\n{stderr}");
 }

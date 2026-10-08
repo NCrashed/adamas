@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: signature-effect-operations.adamas:14:3: `tick` в сигнатуре модуля не объявляется: операции - представление эффекта, и сигнатура объявляет метку без них
+Ошибка: signature-effect-operations.adamas:14:3: `tick` в сигнатуре модуля не объявляется: операции - представление эффекта, и сигнатура объявляет метку без них
     effect Tick where
     ^^^^^^^^^^^^^^^^^

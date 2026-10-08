@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: functor-argument-exact.adamas:27:1: несовпадение типов: ожидался `Counter`, получен `{T : Type, zero : T, next : T -> T, helper : Nat -> Nat}`
+Ошибка: functor-argument-exact.adamas:27:1: несовпадение типов: ожидался `Counter`, получен `{T : Type, zero : T, next : T -> T, helper : Nat -> Nat}`
   module Applied = Twice Nats
   ^^^^^^^^^^^^^^^^^^^^^^^^^^^

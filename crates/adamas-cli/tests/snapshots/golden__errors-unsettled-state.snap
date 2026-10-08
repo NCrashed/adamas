@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: unsettled-state.adamas:29:9: неявный аргумент у `Nil` не выведен: из места употребления его не видно - дайте тип результату (аннотацией `let` или сигнатурой)
+Ошибка: unsettled-state.adamas:29:9: неявный аргумент у `Nil` не выведен: из места употребления его не видно - дайте тип результату (аннотацией `let` или сигнатурой)
     state Nil
           ^^^

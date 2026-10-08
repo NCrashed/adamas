@@ -134,7 +134,7 @@ fn a_functor_member_lowers_off_a_straight_path() {
     let stderr = harness::agreed("functor-straight", &source)
         .unwrap_or_else(|error| panic!("нерекурсивный путь отвергнут: {error}"));
     assert!(
-        stderr.contains("живо 0"),
+        stderr.contains("alive 0"),
         "область не отдана: {}",
         stderr.trim_end()
     );
@@ -148,7 +148,7 @@ fn a_functor_member_behind_recursion_lowers() {
     let stderr = harness::agreed("functor-looped", &source)
         .unwrap_or_else(|error| panic!("член функтора за рекурсией отвергнут: {error}"));
     assert!(
-        stderr.contains("живо 0"),
+        stderr.contains("alive 0"),
         "область не отдана: {}",
         stderr.trim_end()
     );
@@ -162,7 +162,7 @@ fn a_recursive_member_inside_a_functor_lowers() {
     let stderr = harness::agreed("functor-inside", &source)
         .unwrap_or_else(|error| panic!("рекурсивный член функтора отвергнут: {error}"));
     assert!(
-        stderr.contains("живо 0"),
+        stderr.contains("alive 0"),
         "область не отдана: {}",
         stderr.trim_end()
     );

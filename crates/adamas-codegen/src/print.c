@@ -117,7 +117,7 @@ static void adamas_print_at(adamas_value value, int nested, long depth) {
          * печати работа отдельная. Обрыв, а не молчаливый `?tag`: расхождение
          * с машиной обязано быть громким. Понижение массив в ответе отвергает
          * само, и сюда доходит лишь массив **внутри** ответа. */
-        adamas_fail("печать массива не сделана (§4.11)");
+        adamas_fail("printing an array is not implemented (§4.11)");
     }
     if ((size_t)tag >= ADAMAS_CONSTRUCTORS) {
         /* Замыкание, стёртое либо чужой тег. Печатать нечего, но и молчать
@@ -143,7 +143,7 @@ static void adamas_print_at(adamas_value value, int nested, long depth) {
              * только в типах (§4.8), значения у него нет. Напечатать такую
              * запись значило бы разойтись с `adamas eval`, который печатает
              * все поля, - поэтому обрыв, а не молча укороченный ответ. */
-            adamas_fail("печать записи со стёртым полем не сделана (§4.2)");
+            adamas_fail("printing a record with an erased field is not implemented (§4.2)");
         }
         if (nested) {
             printf("(");

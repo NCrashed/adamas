@@ -26,7 +26,7 @@ use std::process::Command;
 const REFUSED: i32 = 3;
 
 /// Начало названного отказа. Совпадение с текстом рантайма - часть свидетеля.
-const NAMED: &str = "стек исчерпан";
+const NAMED: &str = "stack exhausted";
 
 /// Рекурсия с крупным кадром: стек кончится при любом `ulimit`.
 const DEEP: &str = r#"

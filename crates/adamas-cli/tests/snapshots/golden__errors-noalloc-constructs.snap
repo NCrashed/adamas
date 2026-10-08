@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: noalloc-constructs.adamas:15:1: `next` объявлена `@noalloc`, но строит значение конструктором `Succ` - это куча Perceus. Выходов три: линейный или unique вход, где reuse гарантирован; регион `{Alloc r}`; отказ от конструирования. Первых двух в компиляторе пока нет, так что остаётся третий
+Ошибка: noalloc-constructs.adamas:15:1: `next` объявлена `@noalloc`, но строит значение конструктором `Succ` - это куча Perceus. Выходов три: линейный или unique вход, где reuse гарантирован; регион `{Alloc r}`; отказ от конструирования. Первых двух в компиляторе пока нет, так что остаётся третий
   next : Nat -> Nat
   ^^^^^^^^^^^^^^^^^

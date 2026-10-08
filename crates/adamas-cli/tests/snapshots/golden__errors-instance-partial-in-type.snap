@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: instance-partial-in-type.adamas:22:1: инстанс `Loop Nat` не тотален и не может стоять в типе или доказательстве
+Ошибка: instance-partial-in-type.adamas:22:1: инстанс `Loop Nat` не тотален и не может стоять в типе или доказательстве
   use w = Zero
   ^^^^^^^^^^^^

@@ -95,10 +95,10 @@ static uintptr_t adamas_stack_ceiling;
 static uintptr_t adamas_stack_floor;
 
 static const char adamas_stack_message[] =
-    "adamas: стек исчерпан. Гарантирован хвостовой вызов, у которого прототип "
-    "вызываемого совпал с прототипом вызывающего (§6); применение "
-    "значения-функции в хвостовой позиции гарантии не имеет и растит стек "
-    "(§10 вопрос 192).\n";
+    "adamas: stack exhausted. A tail call is guaranteed when the callee's "
+    "prototype matches the caller's (§6); applying "
+    "a function value in tail position has no guarantee and grows the stack "
+    "(§10 question 192).\n";
 
 /* Обращение за границу: назвать причину и уйти, либо вернуть сигналу умолчание. */
 static void adamas_stack_fault(int signo, siginfo_t *info, void *context) {

@@ -663,7 +663,7 @@ fn a_broken_copy_of_the_segment_shows_only_on_the_second_walk() {
         // которой мультишот и проверяется.
         if stem == "unmarked" {
             assert!(
-                broken.reason.contains("возобновлена дважды"),
+                broken.reason.contains("resumed twice"),
                 "снятая пометка мультишота оборвала прогон не вторым ходом: `{}`",
                 broken.reason.trim_end()
             );

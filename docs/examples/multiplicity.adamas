@@ -1,37 +1,39 @@
--- Кратности и линейность: сколько раз значение можно использовать (§3.2, §3.3).
+-- Multiplicities and linearity: how many times a value may be used (§3.2, §3.3).
 --
--- Чем это отличается от соседей. В Haskell и OCaml вопрос «сколько раз» не
--- задаётся вовсе; в Rust на него отвечает система владения, отдельная от
--- типов. Здесь он часть типа: `(1 h : File) -> …` - это стрелка, берущая `h`
--- ровно один раз, и проверяет это та же проверка типов, что и всё остальное.
+-- How this differs from the neighbours. Haskell and OCaml do not ask "how many
+-- times" at all; in Rust the ownership system answers it, separate from the
+-- types. Here it is part of the type: `(1 h : File) -> …` is an arrow that
+-- takes `h` exactly once, and the same type checking that checks everything
+-- else checks this.
 --
--- Три кратности. `0` - значение существует только на этапе проверки и стирается
--- перед исполнением. `1` - ровно один раз. `ω` - сколько угодно, и это
--- умолчание, поэтому обычный код пишется как обычно.
+-- Three multiplicities. `0` - the value exists only during checking and is
+-- erased before execution. `1` - exactly once. `ω` - any number of times, and
+-- it is the default, so ordinary code is written as usual.
 --
--- Проверяется прогоном: `crates/adamas-cli/tests/examples.rs`.
+-- Checked by running: `crates/adamas-cli/tests/examples.rs`.
 
 import Std.IO (Console, putLine)
 
--- | Длина вектора стоит в его типе и **стирается**: кратность `0` означает, что
--- до исполнения этот аргумент не доживает.
+-- | The length of a vector stands in its type and is **erased**: multiplicity
+-- `0` means this argument does not survive until execution.
 --
--- Индекс здесь не поле: он существует, чтобы `head` нельзя было позвать на
--- пустом векторе, и рантайму знать о нём нечего. Индекс - `Nat` прелюдии:
--- число, с которым проверка типов умеет считать, а элементы - машинные.
+-- The index here is not a field: it exists so that `head` cannot be called on
+-- an empty vector, and the runtime has nothing to know about it. The index is
+-- the prelude's `Nat`: a number type checking can compute with, while the
+-- elements are machine numbers.
 data Vect : Nat -> Type where
   VNil : Vect 0
   VCons : (0 n : Nat) -> Int64 -> Vect n -> Vect (Succ n)
 
--- | Первый элемент непустого вектора.
+-- | The first element of a non-empty vector.
 --
--- Написать `head 0 VNil` нельзя: тип требует `Succ n`, и это проверка типов,
--- а не проверка во время исполнения. Ветки для пустого вектора здесь нет вовсе -
--- унификация индексов делает её невозможной, а не «непокрытой».
+-- `head 0 VNil` cannot be written: the type demands `Succ n`, and this is type
+-- checking, not a check at run time. There is no branch for the empty vector
+-- at all - unification of the indices makes it impossible, not "uncovered".
 head : (0 n : Nat) -> Vect (Succ n) -> Int64
 head n (VCons k x xs) = x
 
--- | Сумма вектора длины, известной типу.
+-- | The sum of a vector whose length the type knows.
 total : (0 n : Nat) -> Vect n -> Int64
 total n VNil = 0
 total n (VCons k x xs) = x + total k xs
@@ -39,13 +41,14 @@ total n (VCons k x xs) = x + total k xs
 sample : Vect 2
 sample = VCons 1 3 (VCons 0 4 VNil)
 
--- | Ресурс: связывание линейно **по построению**, деструктор зовётся сам.
+-- | A resource: the binding is linear **by construction**, the destructor is
+-- called by itself.
 --
--- `Handle` не копируется и не забывается: компилятор вставит `closeHandle` на
--- всех выходах из области видимости - и на нормальном, и на том, где вычисление
--- оборвано эффектом. Ряд деструктора - обязательство держателя: закрытие
--- отмечается в журнале, и `{Log}` в его сигнатуре говорит, что молча закрыть
--- ресурс нельзя.
+-- A `Handle` is neither copied nor forgotten: the compiler inserts
+-- `closeHandle` on every exit from the scope - the normal one and the one
+-- where the computation is cut short by an effect. The destructor's row is an
+-- obligation of the holder: closing is recorded in the log, and `{Log}` in its
+-- signature says that the resource cannot be closed silently.
 effect Log where
   note : Int64 -> Unit
 
@@ -56,11 +59,11 @@ resource Handle where
     note 9
     True
 
--- | Берёт ресурс ровно один раз и отмечается сам.
+-- | Takes the resource exactly once and records itself.
 --
--- Кратность `1` у `h` не написана и не нужна: связывание ресурсного типа
--- линейно по построению (§3.3). Написать `use h h` нельзя - второе вхождение
--- отвергается проверкой типов.
+-- The multiplicity `1` on `h` is not written and not needed: a binding of a
+-- resource type is linear by construction (§3.3). `use h h` cannot be written
+-- - the second occurrence is rejected by type checking.
 use : Handle -> {Log} Bool
 use h =
   note 1
@@ -69,13 +72,13 @@ use h =
 opened : {Log} Bool
 opened = use Acquire
 
--- | Журнал `[1, 9]`: тело отметилось, потом закрылся ресурс. Обратный порядок
--- вставки дал бы `[9, 1]`.
+-- | The log `[1, 9]`: the body recorded itself, then the resource closed. The
+-- opposite order of insertion would give `[9, 1]`.
 trace : List Int64
 trace = handle opened with
   return _v -> []
   note n -> Cons n (resume MkUnit)
 
--- | `[3, 7, 1, 9]`: голова вектора, его сумма и журнал ресурса.
+-- | `[3, 7, 1, 9]`: the head of the vector, its sum and the resource's log.
 main : {Console} Unit
 main = putLine (show ([head 1 sample, total 2 sample] ++ trace))

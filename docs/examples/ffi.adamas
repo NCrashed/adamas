@@ -1,52 +1,57 @@
--- FFI уровня 1: чужой символ как обычная функция (§5.3).
+-- Level-1 FFI: a foreign symbol as an ordinary function (§5.3).
 --
--- Чем это отличается от соседей. В Haskell чужой вызов уезжает в `IO`, и
--- отличить его от чтения файла нечем; в OCaml он не помечен вовсе. Здесь
--- граница названа **своим эффектом**: `{Foreign}` дописывается в тип
--- объявленного символа сам, и всякий, кто его зовёт, несёт эту метку до того,
--- кто её погасит. Кто в программе ходит наружу - видно по типам.
+-- How this differs from the neighbours. In Haskell a foreign call goes into
+-- `IO`, and nothing tells it apart from reading a file; in OCaml it is not
+-- marked at all. Here the boundary is named by **its own effect**: `{Foreign}`
+-- is added to the type of the declared symbol by itself, and everyone who
+-- calls it carries the label up to whoever discharges it. Who in the program
+-- goes outside is visible from the types.
 --
--- Библиотека в объявлении не пишется: `extern "C"` называет **символ**, ровно
--- как C. С чем линковаться, говорит секция `[link]` манифеста (§7.1).
+-- The library is not written in the declaration: `extern "C"` names a
+-- **symbol**, exactly as C does. What to link with is said by the `[link]`
+-- section of the manifest (§7.1).
 --
--- Символы здесь настоящие, из стандартной библиотеки C, и это условие
--- проверяемости: ответ обязан сойтись у машины, у C-понижения и у LLVM.
+-- The symbols here are real, from the C standard library, and that is a
+-- condition of being checkable: the answer must agree between the machine,
+-- the C lowering and LLVM.
 --
--- Проверяется прогоном: `crates/adamas-cli/tests/examples.rs`.
+-- Checked by running: `crates/adamas-cli/tests/examples.rs`.
 
 import Std.IO (Console, putLine)
 
--- | Метка границы. Операций у неё нет - она помечает вызов, а не заводит его.
+-- | The boundary label. It has no operations - it marks a call rather than
+-- introducing one.
 effect Foreign
 
--- | Ширина, как её называет C. Представление есть свойство типа, а не его
--- написания: синоним едет через границу тем же словом.
+-- | A width as C calls it. The representation is a property of the type, not
+-- of how it is written: a synonym crosses the boundary as the same word.
 type Size = UInt64
 
--- | Модуль числа: один машинный аргумент, машинный ответ.
+-- | The absolute value of a number: one machine argument, a machine answer.
 extern "C" fn labs : Int64 -> Int64
 
--- | Возведение в степень: два аргумента.
+-- | Raising to a power: two arguments.
 extern "C" fn pow : Float64 -> Float64 -> Float64
 
--- | Выделение памяти. `CPtr` - плоское слово ширины указателя (§4.11).
+-- | Allocating memory. `CPtr` is a flat word of pointer width (§4.11).
 extern "C" fn malloc : Size -> CPtr
 
--- | Освобождение. Ответа у символа нет - значением вызова служит единица.
+-- | Freeing. The symbol has no answer - unit serves as the value of the call.
 extern "C" fn free : CPtr -> Unit
 
--- | Гасит границу: метка без операций снимается веткой `return`, и только ею.
+-- | Discharges the boundary: a label without operations is removed by the
+-- `return` branch, and by it alone.
 --
--- `@Foreign` - запись метки, у которой нет операций: назвать её в хендлере
--- через ветку не по чему (§4.1).
+-- `@Foreign` writes a label that has no operations: there is no branch to name
+-- it by in the handler (§4.1).
 runForeign : {a : Type} -> ({Foreign} a) -> a
 runForeign k = handle @Foreign k with
   return v -> v
 
--- | Открыть, использовать, закрыть: идиома §5.3 без ресурсной обёртки.
+-- | Open, use, close: the §5.3 idiom without a resource wrapper.
 --
--- Адрес в ответ не годится - у каждого прогона он свой, - а «не ноль»
--- годится: `malloc` на 32 байта отказать не может.
+-- The address will not do as an answer - it differs on every run - but "not
+-- zero" will: `malloc` of 32 bytes cannot fail.
 body : {Foreign} String
 body u =
   let cell : CPtr = malloc 32

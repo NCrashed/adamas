@@ -1,56 +1,57 @@
-# Плагины редакторов
+# Editor plugins
 
-Два клиента к одному серверу. Сервер - бинарь `adamas-lsp` (§7.2); путей к
-файлам он не знает и текст получает уведомлением, поэтому от плагина нужно
-ровно две вещи: привязать расширение `.adamas` к своему типу файла и запустить
-процесс, говорящий по stdio.
+Two clients of one server. The server is the `adamas-lsp` binary (§7.2); it
+knows no file paths and receives text by notification, so a plugin needs
+exactly two things: to bind the `.adamas` extension to its file type and to
+start a process that talks over stdio.
 
-Свидетель у обоих - прогон, а не взгляд: `crates/adamas-lsp/tests/editors.rs`
-поднимает настоящий редактор headless, открывает корпусную фикстуру и читает
-диагностику **изнутри редактора**.
+Both are witnessed by a run, not by eye: `crates/adamas-lsp/tests/editors.rs`
+starts a real editor headless, opens a corpus fixture and reads the
+diagnostics **from inside the editor**.
 
 ## Neovim
 
-`editors/nvim` - каталог плагина обычной раскладки (`ftdetect/`, `plugin/`).
-Ставится любым менеджером плагинов; без менеджера довольно добавить его в
-`runtimepath`:
+`editors/nvim` is a plugin directory with the usual layout (`ftdetect/`,
+`plugin/`). Any plugin manager installs it; without a manager it is enough to
+add it to `runtimepath`:
 
 ```vim
-set runtimepath+=/путь/к/adamas/editors/nvim
+set runtimepath+=/path/to/adamas/editors/nvim
 ```
 
-Бинарь ищется в `PATH` под именем `adamas-lsp`. Если он лежит иначе:
+The binary is looked up on `PATH` under the name `adamas-lsp`. If it lives
+elsewhere:
 
 ```lua
-vim.g.adamas_lsp_cmd = { '/путь/к/adamas-lsp' }
+vim.g.adamas_lsp_cmd = { '/path/to/adamas-lsp' }
 ```
 
-Прогон идёт на **0.12.4**, и это единственная проверенная версия. Плагин
-пользуется API, появившимся к 0.8 (`vim.lsp.start`, `vim.filetype.add`,
-`nvim_create_autocmd`), то есть вероятно работает и там, - но замера на
-версиях ниже 0.12.4 нет.
+The run uses **0.12.4**, and it is the only checked version. The plugin uses
+API that appeared by 0.8 (`vim.lsp.start`, `vim.filetype.add`,
+`nvim_create_autocmd`), so it probably works there as well - but nothing was
+measured below 0.12.4.
 
 ## VS Code
 
-`editors/vscode` - расширение на обычном JS, без шага сборки. Зависимость одна,
-`vscode-languageclient`; ставится `npm ci`.
+`editors/vscode` is an extension in plain JS, without a build step. It has one
+dependency, `vscode-languageclient`, installed with `npm ci`.
 
 ```sh
 cd editors/vscode && npm ci
 ```
 
-Запуск из исходников - `--extensionDevelopmentPath`; упаковка - `vsce package`,
-установка `.vsix` - `code --install-extension`.
+Running from source is `--extensionDevelopmentPath`; packaging is
+`vsce package`, installing the `.vsix` is `code --install-extension`.
 
-Путь к серверу - настройка `adamas.server.path`, умолчание `adamas-lsp` из
-`PATH`.
+The path to the server is the `adamas.server.path` setting, defaulting to
+`adamas-lsp` from `PATH`.
 
-## Чего здесь пока нет
+## What is not here yet
 
-**Подсветки.** `contributes.grammars` у расширения не объявлен, дерева
-tree-sitter для Neovim нет - это трек B той же волны, и место под него в
-`package.json` свободно.
+**Highlighting.** The extension declares no `contributes.grammars`, and there
+is no tree-sitter grammar for Neovim - that is track B of the same wave, and
+the place for it in `package.json` is free.
 
-**Апострофа в автозакрытии.** `'` допускается внутри имени (§4, `put s'`), и
-автозакрывающая пара из него сделала бы `s''`. Поэтому в
-`language-configuration.json` его нет, хотя кавычка есть.
+**The apostrophe in auto-closing.** `'` is allowed inside a name (§4,
+`put s'`), and an auto-closing pair would turn it into `s''`. So it is absent
+from `language-configuration.json`, although the double quote is there.

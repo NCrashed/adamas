@@ -1,14 +1,15 @@
--- | Первая программа: печать через `Std.IO` (§3.4, §4.4).
+-- | The first program: printing through `Std.IO` (§3.4, §4.4).
 --
--- Чем это отличается от соседей. В Haskell `main :: IO ()` - одна метка на
--- весь ввод-вывод; здесь метка говорит, **что** программа делает с миром:
--- `{Console}` печатает и читает консоль, а файла не тронет. `main`, чей тип
--- несёт метки `Std.IO`, исполняется сам - хендлер ставит драйвер.
+-- How this differs from the neighbours. In Haskell `main :: IO ()` is one
+-- label for all of input and output; here the label says **what** the
+-- program does to the world: `{Console}` prints to and reads the console, and
+-- will not touch a file. A `main` whose type carries `Std.IO` labels runs on
+-- its own - the driver installs the handler.
 --
--- Проверяется прогоном: `crates/adamas-cli/tests/examples.rs`.
+-- Checked by running: `crates/adamas-cli/tests/examples.rs`.
 
 import Std.IO (Console, putLine)
 
--- | Печатает приветствие.
+-- | Prints a greeting.
 main : {Console} Unit
 main = putLine "Hello, world"

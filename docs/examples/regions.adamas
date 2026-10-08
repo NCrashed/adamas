@@ -1,55 +1,57 @@
--- Регионы: вторая куча со временем жизни в типе (§3.6, §4.8).
+-- Regions: a second heap with its lifetime in the type (§3.6, §4.8).
 --
--- Чем это отличается от соседей. Арена в C++ или Rust - библиотека, и то, что
--- ссылка не переживёт своей арены, держит либо дисциплина, либо заём. Здесь
--- регион - **метка в типе**: `Ref r Int64` называет ту кучу, из которой ссылка
--- взята, и вынести её за `withRegion` не даёт проверка типов.
+-- How this differs from the neighbours. An arena in C++ or Rust is a library,
+-- and that a reference does not outlive its arena is kept either by discipline
+-- or by a borrow. Here a region is **a label in the type**: `Ref r Int64` names
+-- the heap the reference came from, and type checking does not let it be
+-- carried out of `withRegion`.
 --
--- Держится это на двух ногах сразу, и обе видны ниже:
+-- This stands on two legs at once, and both are visible below:
 --
---   1. метка `r` связана **в домене** `withRegion`, поэтому ответ тела не
---      вправе её упоминать - ссылка наружу не проходит по типу;
---   2. гасить `Alloc` мимо `withRegion` нельзя: эффект объявлен членом
---      запечатанного модуля (`:>`), и снаружи его операции видны, а погашение -
---      нет. Обычная абстракция §4.8, отдельного правила не заводится.
+--   1. the label `r` is bound **in the domain** of `withRegion`, so the answer
+--      of the body may not mention it - a reference does not get out by type;
+--   2. `Alloc` cannot be discharged bypassing `withRegion`: the effect is
+--      declared as a member of a sealed module (`:>`), and its operations are
+--      visible from outside, but its discharge is not. Ordinary §4.8
+--      abstraction, no separate rule is introduced.
 --
--- Куча настоящая: `withRegion` заводит область (`regionNew`), `allocIn` кладёт
--- значение в неё (`regionAlloc`), `readRef` читает его оттуда же. Область -
--- один блок, и освобождается она одним разом, когда `withRegion` кончился.
+-- The heap is real: `withRegion` creates an area (`regionNew`), `allocIn` puts
+-- a value into it (`regionAlloc`), `readRef` reads it back from there. An area
+-- is one block, and it is freed all at once when `withRegion` is over.
 --
--- Проверяется прогоном: `crates/adamas-cli/tests/examples.rs`.
+-- Checked by running: `crates/adamas-cli/tests/examples.rs`.
 
--- | Метка региона. Значений у неё не спрашивают: она существует, чтобы стоять
--- в типе ссылки, и параметр под ней стёрт (`0`).
+-- | A region label. Nobody asks it for values: it exists to stand in the type
+-- of a reference, and the parameter under it is erased (`0`).
 data Region where
   Home : Region
 
--- | Ссылка, знающая свой регион: адрес ячейки в его области.
+-- | A reference that knows its region: the address of a cell in its area.
 --
--- `Ref r Int64` - обычное ω-значение: копируется свободно, читается сколько
--- угодно раз. Линейность здесь не нужна - её работу делает метка.
+-- `Ref r Int64` is an ordinary ω-value: copied freely, read any number of
+-- times. Linearity is not needed here - the label does its job.
 data Ref (0 r : Region) (a : Type) where
   MkRef : Ptr -> Ref r a
 
--- | Кладёт значение в область: новая область и адрес уложенного.
+-- | Puts a value into the area: the new area and the address of what was put.
 placed : Block -> Int64 -> (Ptr, Block)
 placed area x =
   let next : Block = regionAlloc area x
   (regionLast next, next)
 
--- | Интерфейс арены: что видно снаружи.
+-- | The arena's interface: what is visible from outside.
 --
--- Погашение `Alloc` в сигнатуре не названо, и в этом всё дело - снаружи его
--- взять неоткуда.
+-- The discharge of `Alloc` is not named in the signature, and that is the
+-- whole point - from outside there is nowhere to get it.
 module type Regions where
   effect Alloc (0 r : Region)
   withRegion : {a : Type} -> ((0 r : Region) -> (ω u : Unit) -> {Alloc r} a) -> a
 
--- | Арена: единственный, кто гасит `Alloc`.
+-- | The arena: the only one that discharges `Alloc`.
 --
--- `:>` запечатывает: операции подняты и зовутся путём, а `handle` над `Alloc`
--- живёт только здесь. Область - состояние хендлера: каждая аллокация отдаёт
--- следующую.
+-- `:>` seals: the operations are lifted and called by path, and a `handle`
+-- over `Alloc` lives only here. The area is the handler's state: every
+-- allocation hands on the next one.
 module Arena :> Regions where
   effect Alloc (0 r : Region) where
     allocIn : Int64 -> Ref r Int64
@@ -63,10 +65,11 @@ module Arena :> Regions where
     readRef p -> case p of
       MkRef at -> resume (regionRead state at) state
 
--- | Тело, работающее в регионе: кладёт два числа и читает их.
+-- | A body working in a region: puts two numbers and reads them.
 --
--- Написать здесь ответ `Ref r Int64` нельзя: `r` связана доменом `withRegion`,
--- и тип ответа о ней не знает. Ссылка живёт ровно столько, сколько живёт блок.
+-- The answer `Ref r Int64` cannot be written here: `r` is bound by the domain
+-- of `withRegion`, and the type of the answer does not know it. A reference
+-- lives exactly as long as the block lives.
 program : (0 r : Region) -> (ω u : Unit) -> {Arena.Alloc r} Int64
 program r u =
   let p : Ref r Int64 = Arena.allocIn 20

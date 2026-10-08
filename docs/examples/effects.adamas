@@ -1,88 +1,93 @@
--- Алгебраические эффекты: что вычисление делает и кто решает, как (§3.4, §4.1).
+-- Algebraic effects: what a computation does and who decides how (§3.4, §4.1).
 --
--- Чем это отличается от соседей. В Haskell побочный эффект несёт монада, и
--- сочетать две - работа трансформеров; в OCaml 5 эффекты есть, но в типах их
--- нет. Здесь эффект стоит в типе **рядом** с ответом: `{Ask, Log} Nat` значит
--- «даёт `Nat`, по дороге может спросить и отметить», сочетание пишется запятой,
--- а какой смысл у операции - решает хендлер, а не объявление.
+-- How this differs from the neighbours. In Haskell a side effect is carried by
+-- a monad, and combining two is the job of transformers; OCaml 5 has effects,
+-- but not in the types. Here the effect stands in the type **next to** the
+-- answer: `{Ask, Log} Nat` means "yields a `Nat` and may ask and record on the
+-- way", a combination is written with a comma, and what an operation means is
+-- decided by the handler, not by the declaration.
 --
--- Отсюда главное свойство: одно и то же вычисление под двумя хендлерами даёт
--- два разных ответа, и переписывать его для этого не нужно.
+-- Hence the main property: the same computation under two handlers gives two
+-- different answers, and it does not have to be rewritten for that.
 --
--- Проверяется прогоном: `crates/adamas-cli/tests/examples.rs`.
+-- Checked by running: `crates/adamas-cli/tests/examples.rs`.
 
 import Std.IO (Console, putLine)
 
--- | Вопрос к окружению: операция объявлена, смысла у неё пока нет.
+-- | A question to the environment: the operation is declared, it has no
+-- meaning yet.
 --
--- Объявление говорит только сигнатуру. Что вернёт `ask`, решит тот, кто это
--- вычисление запустит.
+-- The declaration states only the signature. What `ask` returns is decided by
+-- whoever runs the computation.
 effect Ask where
   ask : Int64
 
--- | Отметка в журнале.
+-- | An entry in a log.
 effect Log where
   note : Int64 -> Unit
 
--- | Спрашивает дважды и складывает.
+-- | Asks twice and adds.
 --
--- Ряд `{Ask}` в типе - не украшение: позвать `twice` из места, где `Ask` не
--- погашен, проверка типов не даст. Ряд поднимается наружу сам, пока его не
--- снимет хендлер.
+-- The row `{Ask}` in the type is not decoration: type checking will not let
+-- `twice` be called from a place where `Ask` is not discharged. The row rises
+-- outwards by itself until a handler removes it.
 twice : {Ask} Int64
 twice = ask + ask
 
--- | Тот же вопрос, но с отметкой: два эффекта сочетаются запятой.
+-- | The same question, but with a log entry: two effects combine with a comma.
 --
--- Трансформеров для этого не нужно - ряд есть множество меток, и добавление
--- второй ничего не переписывает.
+-- No transformers are needed for this - a row is a set of labels, and adding a
+-- second one rewrites nothing.
 noisy : {Ask, Log} Int64
 noisy =
   let a : Int64 = ask
   note a
   a + 1
 
--- | Постоянный ответ: `ask` возвращает семёрку, `resume` продолжает вычисление
--- с этим значением.
+-- | A constant answer: `ask` returns seven, `resume` continues the computation
+-- with that value.
 constant : Int64
 constant = handle twice with
   return v -> v
   ask -> resume 7
 
--- | Тот же `twice`, другой хендлер, другой ответ.
+-- | The same `twice`, another handler, another answer.
 --
--- Вычисление не переписано ни строкой: `ask` в нём по-прежнему просто `ask`.
--- Здесь операция отвечает нулём, и итог - ноль вместо четырнадцати.
+-- The computation is not rewritten by a single line: `ask` in it is still just
+-- `ask`. Here the operation answers zero, and the result is zero instead of
+-- fourteen.
 silent : Int64
 silent = handle twice with
   return v -> v
   ask -> resume 0
 
--- | Хендлер вправе **не** звать `resume`: тогда вычисление обрывается, и
--- ответом становится то, что написала ветка.
+-- | A handler may **not** call `resume`: then the computation is cut short,
+-- and the answer is what the branch wrote.
 --
--- Так пишется прерывание: `Ask` здесь не отвечает на вопрос, а отменяет всё
--- дальнейшее. Ни исключений, ни особой формы для этого не нужно.
+-- This is how an abort is written: `Ask` here does not answer the question but
+-- cancels everything after it. Neither exceptions nor a special form are
+-- needed for this.
 aborted : Int64
 aborted = handle twice with
   return v -> v
   ask -> -1
 
--- | Погасить можно **часть** ряда: `Ask` снимается, `Log` уходит наружу.
+-- | **Part** of a row can be discharged: `Ask` is removed, `Log` goes outwards.
 --
--- Тип ответа это и говорит - `{Log} Int64`, - и вызывающий обязан погасить
--- остаток сам.
+-- The type of the answer says exactly this - `{Log} Int64` - and the caller
+-- must discharge the rest itself.
 asked : {Log} Int64
 asked = handle noisy with
   return v -> v
   ask -> resume 5
 
--- | Журнал собирается вторым хендлером: `[5, 6]` - отметка и ответ.
+-- | The log is collected by a second handler: `[5, 6]` - the entry and the
+-- answer.
 logged : List Int64
 logged = handle asked with
   return v -> [v]
   note n -> Cons n (resume MkUnit)
 
--- | `[14, 0, -1, 5, 6]`: три хендлера над `twice` и журнал `noisy`.
+-- | `[14, 0, -1, 5, 6]`: three handlers over `twice` and the log of `noisy`.
 main : {Console} Unit
 main = putLine (show ([constant, silent, aborted] ++ logged))

@@ -1,23 +1,24 @@
--- | Счёт строк стандартного ввода (§3.4, §4.3, §4.4).
+-- | Counting the lines of standard input (§3.4, §4.3, §4.4).
 --
--- Чем это отличается от соседей. `readLine` - операция метки `Console`, а не
--- функция ввода: `case readLine of` исполняет её и разбирает ответ, и тип
--- `counted` сам говорит, что функция читает консоль. Текст и число склеиваются
--- прелюдией без импорта: `<>` - моноид текста, `show` - десятичная запись.
+-- How this differs from the neighbours. `readLine` is an operation of the
+-- `Console` label, not an input function: `case readLine of` performs it and
+-- matches on the answer, and the type of `counted` itself says that the
+-- function reads the console. Text and a number are joined by the prelude
+-- without an import: `<>` is the text monoid, `show` the decimal notation.
 --
--- Без ввода - `lines: 0`: у конца ввода `readLine` отвечает `None`.
+-- With no input - `lines: 0`: at the end of input `readLine` answers `None`.
 --
--- Проверяется прогоном: `crates/adamas-cli/tests/examples.rs`.
+-- Checked by running: `crates/adamas-cli/tests/examples.rs`.
 
 import Std.IO (Console, putLine, readLine)
 
--- | Сколько строк осталось на вводе, плюс уже насчитанные `n`.
+-- | How many lines remain on the input, plus the `n` already counted.
 counted : UInt64 -> {Console} UInt64
 counted n = case readLine of
   None -> n
   Some _line -> counted (n + 1)
 
--- | Печатает число строк.
+-- | Prints the number of lines.
 main : {Console} Unit
 main =
   let n = counted 0

@@ -27,8 +27,10 @@ components they carry. `adamas run` inside that directory starts it.
 See the [roadmap](adamas-design.md#9-roadmap) — 10 phases, ~3–5 years to a
 research-grade prototype.
 
-Note on language: the design document, the code comments and the compiler's
-diagnostics are in Russian. This README is the English entry point.
+Note on language: the outer layer — this README, the concept, getting-started,
+the examples and CONTRIBUTING — is in English; the design document, the plans
+and the code comments are in Russian, the working language of the project.
+Compiler messages follow the user's locale, Russian or English.
 
 ## Hello, world
 
@@ -160,7 +162,7 @@ Using the handle twice is a type error, underlined at the second use:
 ```adamas
 twice : File -> Bool
 twice h = andL (closeFile h) (closeFile h)
---                                      ^ `h` объявлена с кратностью 1, а использована ω
+--                                      ^ `h` is declared with multiplicity 1, but used ω
 ```
 
 ### Algebraic effects
@@ -327,10 +329,10 @@ does not depend on it. What it taught is in
 
 | Document | What is inside |
 |---|---|
-| [`adamas-concept.md`](adamas-concept.md) | The design distilled for an outside reader: the thesis, the principles, the core mechanisms and what already runs — without the coordination sections. In Russian. Start here if you want the language rather than the project. |
-| [`adamas-design.md`](adamas-design.md) | The design document — the single source of truth for design decisions, together with the open questions and the decision log. |
+| [`adamas-concept.md`](adamas-concept.md) | The design distilled for an outside reader: the thesis, the principles, the core mechanisms and what already runs — without the coordination sections. Start here if you want the language rather than the project. |
+| [`adamas-design.md`](adamas-design.md) | The design document — the single source of truth for design decisions, together with the open questions and the decision log. In Russian. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to build, how to run the checks, the rules for code and commits. |
-| [`docs/getting-started.md`](docs/getting-started.md) | From nothing to a running program: `adamas new`, every driver command, a second module, the prelude, diagnostics in the editor. In Russian, like the rest of `docs/`. |
+| [`docs/getting-started.md`](docs/getting-started.md) | From nothing to a running program: `adamas new`, every driver command, a second module, the prelude, diagnostics in the editor. |
 | [`docs/reading-notes/`](docs/reading-notes/) | Notes on the key papers (QTT, Perceus, effect handlers). |
 | [`tests/golden/`](tests/golden/) | Adamas programs the compiler accepts today, with their expected output. |
 | [`docs/examples/`](docs/examples/) | Six programs: the hello world and line counter from above, then four chosen for what makes the language *different* — multiplicities, effects, regions, FFI. Each is checked, run against a recorded answer, documented and kept canonical by the gate. |

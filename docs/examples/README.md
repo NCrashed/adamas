@@ -1,46 +1,51 @@
-# Примеры кода на Adamas
+# Adamas code examples
 
-Шесть программ. Первые две — с чего начинают: печать и счёт строк ввода.
-Остальные четыре показывают, чем язык **отличается**, — не тем, что проще
-написать:
+Six programs. The first two are where one starts: printing and counting the
+lines of input. The other four show what makes the language **different** —
+not what is easier to write:
 
-| Файл | О чём |
+| File | About |
 |---|---|
-| `hello.adamas` | первая программа: `main : {Console} Unit` печатает через `Std.IO` (§3.4, §4.4) |
-| `lines.adamas` | счёт строк ввода: `case readLine of`, склейка текста и `show` из прелюдии (§4.3, §4.4) |
-| `multiplicity.adamas` | кратности `0`/`1`/`ω`, стёртые индексы, ресурс с автоматическим деструктором (§3.2, §3.3) |
-| `effects.adamas` | алгебраические эффекты: ряд в типе, хендлер решает смысл, одно вычисление под двумя хендлерами (§3.4) |
-| `regions.adamas` | регион как метка в типе: ссылка не переживает своего блока (§3.6) |
-| `ffi.adamas` | чужой символ уровня 1, граница помечена своим эффектом (§5.3) |
+| `hello.adamas` | the first program: `main : {Console} Unit` prints through `Std.IO` (§3.4, §4.4) |
+| `lines.adamas` | counting input lines: `case readLine of`, text concatenation and `show` from the prelude (§4.3, §4.4) |
+| `multiplicity.adamas` | multiplicities `0`/`1`/`ω`, erased indices, a resource with an automatic destructor (§3.2, §3.3) |
+| `effects.adamas` | algebraic effects: the row in the type, the handler decides the meaning, one computation under two handlers (§3.4) |
+| `regions.adamas` | a region as a label in the type: a reference does not outlive its block (§3.6) |
+| `ffi.adamas` | a level-1 foreign symbol, the boundary marked by its own effect (§5.3) |
 
-Каждый читается сверху вниз: шапка говорит, чем это отличается от Haskell,
-OCaml или Rust, а дальше идёт код с документирующими блоками `-- |`.
+Each reads top to bottom: the header says how it differs from Haskell, OCaml
+or Rust, and then comes the code with `-- |` documentation blocks.
 
-## Они проверяются прогоном
+Section numbers (§) refer to the design document, `adamas-design.md`; it is
+written in Russian, and [`adamas-concept.md`](../../adamas-concept.md) is its
+summary in English.
 
-Каждый пример входит в гейт (`crates/adamas-cli/tests/examples.rs`) и проходит
-четыре проверки: `adamas check`, `adamas eval` со **записанным ответом**,
-`adamas doc` (пример обязан быть документирован) и `adamas fmt --check`.
+## They are checked by running
 
-Это отменяет прежнее условие, под которым каталог стоял пустым: непроверяемая
-копия §4 расходится с оригиналом тем быстрее, чем она длиннее. Цена измерена на
-соседней стопке — примеры §5.3 за Фазу 8 правились семь раз, и каждое
-расхождение находилось прогоном, а не глазами. Условие снято не доводом, а
-прогоном: протухнуть молча этим примерам больше нечем.
+Every example is part of the gate (`crates/adamas-cli/tests/examples.rs`) and
+passes four checks: `adamas check`, `adamas eval` with a **recorded answer**,
+`adamas doc` (an example must be documented) and `adamas fmt --check`.
 
-Посмотреть документацию примера:
+This lifts the condition under which the directory used to stay empty: an
+unchecked copy of §4 drifts from the original the faster the longer it is. The
+cost was measured on a neighbouring stack — the §5.3 examples were corrected
+seven times during Phase 8, and every divergence was found by running, not by
+eye. The condition was lifted not by an argument but by a run: these examples
+have no way left to rot silently.
+
+To see an example's documentation:
 
 ```sh
 adamas doc docs/examples/effects.adamas
 ```
 
-## Где что ещё лежит
+## Where else things live
 
-`tests/golden/` — корпус: программы, отказы и вычисления, каждое под снапшотом.
-Он пишется для компилятора и читается как перечень случаев; здесь — для
-человека, и читается как текст.
+`tests/golden/` is the corpus: programs, refusals and evaluations, each under
+a snapshot. It is written for the compiler and reads as a list of cases; this
+directory is written for a person and reads as text.
 
-Синтаксис здесь не дублируется — источник истины один: §4 design'а. §4.1 —
-базовый синтаксис, эффекты и handler'ы; §4.2 — записи; §4.4 — prelude,
-операторы и фикситеты; §4.8 — модули и ordered scoping. Пример, разошедшийся
-с §4, — баг примера.
+The syntax is not duplicated here — there is one source of truth, §4 of the
+design. §4.1 is the basic syntax, effects and handlers; §4.2 records; §4.4 the
+prelude, operators and fixities; §4.8 modules and ordered scoping. An example
+that diverges from §4 is a bug in the example.

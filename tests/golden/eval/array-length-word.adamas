@@ -47,4 +47,4 @@ bridged = arrayNew 2 nine
 
 -- 7 + 80 + 900 = 987
 main : Int64
-main = addInt64 (arrayIndex lits 2 Refl) (addInt64 (arrayIndex named 1 Refl) (arrayIndex bridged 0 Refl))
+main = addInt64 (arrayIndex lits 2) (addInt64 (arrayIndex named 1) (arrayIndex bridged 0))

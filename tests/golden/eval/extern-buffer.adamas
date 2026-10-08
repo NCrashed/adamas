@@ -115,24 +115,24 @@ body : (ω u : Unit) -> {Foreign} UInt64
 body u =
   -- Наши записи ложатся в те же байты, которые поедут наружу.
   let zeroed : Array 4 UInt8 = arrayNew 4 blank
-  let first : Array 4 UInt8 = arraySet zeroed 0 one Refl
-  let second : Array 4 UInt8 = arraySet first 1 two Refl
-  let third : Array 4 UInt8 = arraySet second 2 three Refl
-  let src : Array 4 UInt8 = arraySet third 3 four Refl
+  let first : Array 4 UInt8 = arraySet zeroed 0 one
+  let second : Array 4 UInt8 = arraySet first 1 two
+  let third : Array 4 UInt8 = arraySet second 2 three
+  let src : Array 4 UInt8 = arraySet third 3 four
   let out : Array 1 UInt64 = arrayNew 1 empty
   -- Чужая сторона читает [1, 2, 3, 4] и пишет [2, 1, 4, 3] в наше слово.
   let swabbed : Unit = swab src out 4
-  let word : UInt64 = arrayIndex out 0 Refl
+  let word : UInt64 = arrayIndex out 0
   -- Чужая сторона переписывает наши байты на месте: [43, 43, 43, 43].
   let here : CPtr = memset src filler 4
-  let cell : UInt8 = arrayIndex src 0 Refl
+  let cell : UInt8 = arrayIndex src 0
   -- Нулевая длина ничего не пишет, но адрес отдаёт: он обязан быть прежним.
   let again : CPtr = memset src filler 0
   let inplace : UInt64 = pick (eqUInt8 cell written) 1 0
   let lent : UInt64 = pick (eqUInt64 here again) 1 0
   let stamp : Array 1 Int64 = arrayNew 1 epoch
   let now : Int64 = time stamp
-  let echoed : Int64 = arrayIndex stamp 0 Refl
+  let echoed : Int64 = arrayIndex stamp 0
   let outward : UInt64 = pick (eqInt64 now echoed) 1 0
   -- 111 × 10⁹ + слово, написанное чужой стороной в нашу память.
   addUInt64 word

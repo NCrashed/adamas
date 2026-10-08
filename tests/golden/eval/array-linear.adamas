@@ -23,13 +23,13 @@ zeroI = 0
 -- | Массив протягивается линейно: каждая запись потребляет прежний и отдаёт
 -- следующий, и второго обращения к прежнему нет ни одного.
 filled : (1 xs : Array 4 Int32) -> Array 4 Int32
-filled xs = arraySet (arraySet (arraySet xs 0 10 Refl) 1 20 Refl) 2 30 Refl
+filled xs = arraySet (arraySet (arraySet xs 0 10) 1 20) 2 30
 
 -- | Второй проход по тому же массиву - тоже линейный.
 doubled : (1 xs : Array 4 Int32) -> Array 4 Int32
-doubled xs = arraySet (filled xs) 3 40 Refl
+doubled xs = arraySet (filled xs) 3 40
 
 main : Int32
 main =
   let ready : Array 4 Int32 = doubled (arrayNew 4 zeroI)
-  addInt32 (addInt32 (arrayIndex ready 0 Refl) (arrayIndex ready 1 Refl)) (addInt32 (arrayIndex ready 2 Refl) (arrayIndex ready 3 Refl))
+  addInt32 (addInt32 (arrayIndex ready 0) (arrayIndex ready 1)) (addInt32 (arrayIndex ready 2) (arrayIndex ready 3))

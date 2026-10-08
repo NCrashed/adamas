@@ -19,15 +19,15 @@
 -- | Восемь записей: `3 * i` в ячейку `i`.
 fill : UInt64 -> (1 xs : Array 8 Int64) -> Array 8 Int64
 fill i xs = case decide (ltUInt64 i 8) of
-  Yes p -> fill (i + 1) (arraySet xs i (uint64ToInt64 i * 3) p)
+  Yes _p -> fill (i + 1) (arraySet xs i (uint64ToInt64 i * 3))
   No _q -> xs
 
 -- | Восемь линейных чтений, сумма - в ячейку `0`: 3 * (0 + … + 7) = 84.
 summed : UInt64 -> Int64 -> (1 xs : Array 8 Int64) -> Array 8 Int64
 summed i acc xs = case decide (ltUInt64 i 8) of
-  Yes p -> case arrayRead xs i p of
+  Yes _p -> case arrayRead xs i of
     MkRead v ys -> summed (i + 1) (acc + v) ys
-  No _q -> arraySet xs 0 acc Refl
+  No _q -> arraySet xs 0 acc
 
 -- | Длина натурального - чтобы указательная ячейка дала число.
 count : Nat -> Int64
@@ -37,8 +37,8 @@ count (Succ k) = 1 + count k
 -- | Указательные ячейки: прочитанное `Nat` кладётся назад по соседству, и
 -- ячейка живёт в двух местах сразу - `dup` при чтении обязателен.
 shifted : (1 xs : Array 2 Nat) -> Array 2 Nat
-shifted xs = case arrayRead xs 0 Refl of
-  MkRead v ys -> arraySet ys 1 (Succ v) Refl
+shifted xs = case arrayRead xs 0 of
+  MkRead v ys -> arraySet ys 1 (Succ v)
 
 three : Nat
 three = Succ (Succ (Succ Zero))
@@ -47,4 +47,4 @@ main : Int64
 main =
   let flat : Array 8 Int64 = summed 0 0 (fill 0 (arrayNew 8 0))
   let boxed : Array 2 Nat = shifted (arrayNew 2 three)
-  arrayIndex flat 0 Refl + count (arrayIndex boxed 1 Refl) + count (arrayIndex boxed 0 Refl)
+  arrayIndex flat 0 + count (arrayIndex boxed 1) + count (arrayIndex boxed 0)

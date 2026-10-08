@@ -251,19 +251,18 @@ pub fn prim_scheme(signature: &Signature, prim: Prim) -> Term {
         Prim::Ty(_) | Prim::Block => universe,
         Prim::In(op) => region_op_scheme(signature, op, &word, &universe),
         Prim::Lit(ty, _) => Term::Prim(Prim::Ty(ty)),
-        // Целое деление и остаток требуют стёртого факта о делителе:
-        // `(ω n : a) -> (ω d : a) -> (0 p : Equal Bool (eqT d 0) False) -> a`
-        // (§10 вопросы 224, 225). Факт записан через `eq`, а не `ne`: его
-        // даёт `decide (d == 0)`, и оператор прелюдии сводится к тому же
-        // `eqT d 0`, что стоит здесь.
+        // Целое деление и остаток требуют факта о делителе - ограничением:
+        // `(ω n : a) -> (ω d : a) -> {not (eqT d 0)} => a` (§3.7, §10 вопросы
+        // 224, 225). Факт записан через `not` прелюдии: `d /= 0` есть `not (d
+        // == 0)`, и тем же `not` сужение `if d == 0 … else` кладёт гипотезу в
+        // ветвь `else` - доказательство находит поиск.
         Prim::Op(op, ty) if op.proven(ty) => {
             let over = Term::Prim(Prim::Ty(ty));
-            let fact = reflected(
+            let compared = Term::Prim(Prim::Cmp(crate::prim::PrimCmp::Eq, ty))
+                .apply([Term::var(0), Term::Prim(Prim::literal(ty, 0))]);
+            let fact = fact(
                 signature,
-                crate::prim::PrimCmp::Eq,
-                ty,
-                [Term::var(0), Term::Prim(Prim::literal(ty, 0))],
-                crate::prim::FALSE,
+                declared(signature, crate::prim::NOT).apply([compared]),
             );
             arrow(
                 Mult::Many,
@@ -272,7 +271,7 @@ pub fn prim_scheme(signature: &Signature, prim: Prim) -> Term {
                     Binder::explicit(Mult::Many),
                     "d",
                     over.clone(),
-                    bound(Binder::explicit(Mult::Zero), "p", fact, over),
+                    bound(Binder::implicit(Mult::Zero), "_", fact, over),
                 ),
             )
         }
@@ -525,9 +524,10 @@ fn array_op_scheme(
     use crate::prim::ArrayOp;
     let erased = Binder::implicit(Mult::Zero);
     let given = Binder::explicit(Mult::Many);
-    // Номер ячейки меньше длины (§10 вопросы 224, 225): стёртое доказательство
-    // идёт последним, как у деления.
-    let proof = Binder::explicit(Mult::Zero);
+    // Номер ячейки меньше длины (§10 вопросы 224, 225, §3.7): стёртое
+    // доказательство идёт последним ограничением-фактом, как у деления, - его
+    // находит поиск: вычислением у литерала, гипотезой `if i < n` у переменной.
+    let proof = Binder::implicit(Mult::Zero);
     let inside = |at, length| below(signature, at, length);
     // `Array n a`, где `n` и `a` - связывания на глубине `depth` и `depth - 1`
     // от места употребления.
@@ -551,7 +551,7 @@ fn array_op_scheme(
             ),
         ),
         // `arraySet : {0 n} -> {0 a} -> (1 xs : Array n a) -> (ω i : UInt64)
-        //           -> (ω x : a) -> (0 p : Equal Bool (ltUInt64 i n) True) -> Array n a`
+        //           -> (ω x : a) -> {ltUInt64 i n} => Array n a`
         ArrayOp::Set => bound(
             erased,
             "n",
@@ -579,7 +579,7 @@ fn array_op_scheme(
             ),
         ),
         // `arrayIndex : {0 n} -> {0 a} -> (ω xs : Array n a) -> (ω i : UInt64)
-        //             -> (0 p : Equal Bool (ltUInt64 i n) True) -> a`
+        //             -> {ltUInt64 i n} => a`
         ArrayOp::Index => bound(
             erased,
             "n",
@@ -602,7 +602,7 @@ fn array_op_scheme(
             ),
         ),
         // `arrayRead : {0 n} -> {0 a} -> (1 xs : Array n a) -> (ω i : UInt64)
-        //           -> (0 p : Equal Bool (ltUInt64 i n) True) -> Read n a`
+        //           -> {ltUInt64 i n} => Read n a`
         //
         // Массив **потребляется** и возвращается внутри ответа: линейный
         // массив читается, не отдаваясь (§10 вопрос 202). `Read` - имя
@@ -744,7 +744,7 @@ fn simd_op_scheme(
         ),
         // `simdSet : {0 n} -> {0 a} -> {0 d} -> (ω v : Simd n a)
         //          -> (ω i : UInt64) -> (ω x : a)
-        //          -> (0 p : Equal Bool (ltUInt64 i n) True) -> Simd n a`
+        //          -> {ltUInt64 i n} => Simd n a`
         SimdOp::Set => over(bound(
             given,
             "v",
@@ -758,7 +758,7 @@ fn simd_op_scheme(
                     "x",
                     Term::var(3),
                     bound(
-                        Binder::explicit(Mult::Zero),
+                        Binder::implicit(Mult::Zero),
                         "p",
                         below(signature, 1, 5),
                         simd(Term::var(6), Term::var(5)),
@@ -767,7 +767,7 @@ fn simd_op_scheme(
             ),
         )),
         // `simdLane : {0 n} -> {0 a} -> {0 d} -> (ω v : Simd n a)
-        //           -> (ω i : UInt64) -> (0 p : Equal Bool (ltUInt64 i n) True) -> a`
+        //           -> (ω i : UInt64) -> {ltUInt64 i n} => a`
         SimdOp::Lane => over(bound(
             given,
             "v",
@@ -777,7 +777,7 @@ fn simd_op_scheme(
                 "i",
                 word.clone(),
                 bound(
-                    Binder::explicit(Mult::Zero),
+                    Binder::implicit(Mult::Zero),
                     "p",
                     below(signature, 0, 4),
                     Term::var(4),
@@ -833,7 +833,7 @@ fn simd_memory_scheme(
     // Окно внутри колонки (§10 вопрос 224) - двумя фактами, `n <= m` и
     // `i <= m - n`: при первом вычитание не заворачивается, и сумма `i + n`,
     // которая при заворачивании лгала бы, не пишется вовсе.
-    let proof = Binder::explicit(Mult::Zero);
+    let proof = Binder::implicit(Mult::Zero);
     // Длина колонки, дорожка, словарь, **написанная** ширина. Первые три
     // стёрты и имплицитны, ширина стёрта и явна - выводить её не из чего.
     let along = |inner: Term| {
@@ -857,8 +857,8 @@ fn simd_memory_scheme(
     match op {
         // `simdLoad : {0 m} -> {0 a} -> {0 d} -> (0 n : UInt64)
         //           -> (ω xs : Array m a) -> (ω i : UInt64)
-        //           -> (0 p : Equal Bool (leUInt64 n m) True)
-        //           -> (0 q : Equal Bool (leUInt64 i (subUInt64 m n)) True) -> Simd n a`
+        //           -> {leUInt64 n m} =>
+        //           {leUInt64 i (subUInt64 m n)} => Simd n a`
         SimdOp::Load => along(bound(
             given,
             "xs",
@@ -882,7 +882,7 @@ fn simd_memory_scheme(
         )),
         // `simdStore : {0 m} -> {0 a} -> {0 d} -> (0 n : UInt64)
         //            -> (ω xs : Array m a) -> (ω i : UInt64) -> (ω v : Simd n a)
-        //            -> (0 p : …) -> (0 q : …) -> Array m a` - факты те же, что у
+        //            -> {…} => {…} => Array m a` - факты те же, что у
         //            загрузки.
         SimdOp::Store => along(bound(
             given,

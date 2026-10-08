@@ -988,6 +988,10 @@ impl Position {
 }
 
 /// Состояние элаборации: сигнатура, хранилище дырок и локальные связывания.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "режимы элаборации независимы: позиция типа, голое имя, явные хвостовые факты"
+)]
 pub(crate) struct Elaborator<'a> {
     /// Уже объявленное. Элаборация её не меняет - объявляет вызывающий.
     pub signature: &'a Signature,
@@ -1121,6 +1125,9 @@ pub(crate) struct Elaborator<'a> {
     tails: HashMap<Symbol, Row<Term>>,
     /// Запрещена ли вставка имплиситов ближайшему имени - см. `type_app`.
     bare: bool,
+    /// Оставить ли хвостовые факты ближайшего применения невставленными:
+    /// `arraySet xs i x @(lemma …)` пишет факт явно (см. `type_app`).
+    written_facts: bool,
     /// Модуль, чьё тело элаборируется (§4.8). `None` - верхний уровень.
     enclosing: Option<Enclosing>,
     /// Именованные инстансы, выбранные `using`: класс и имя (§4.3).
@@ -1430,6 +1437,7 @@ impl<'a> Elaborator<'a> {
             arrow_row: None,
             awaited: None,
             bare: false,
+            written_facts: false,
             enclosing: None,
             using: Vec::new(),
             rows: None,
@@ -4575,12 +4583,17 @@ impl<'a> Elaborator<'a> {
             if named {
                 it.bare(|it| it.expr(head, Mult::Many))
             } else {
+                // `f x @p` пишет хвостовой факт явно (§3.7): применение `f x`
+                // не вставляет его дыркой - иначе `@` писать было бы нечего.
+                it.written_facts = matches!(head.kind, ExprKind::App(..));
                 it.expr(head, Mult::Many)
             }
         })?;
         let mut ty = infer(&self.ctx.speculating(), self.metas, Mult::Zero, &term)
             .map(|(ty, _)| ty)
-            .map_err(|_| ElabError::NoImplicitParameter { span: expr.span })?;
+            .ok()
+            .or_else(|| self.declared_of(&term))
+            .ok_or(ElabError::NoImplicitParameter { span: expr.span })?;
         for argument in written.into_iter().rev() {
             let Value::Pi(binder, _, _, _, codomain) = &*ty else {
                 return Err(ElabError::NoImplicitParameter {
@@ -5021,7 +5034,12 @@ impl<'a> Elaborator<'a> {
     /// Собирается он **циклом**: рекурсия по левому поддереву стоила бы кадра
     /// на аргумент, а их ограничивает только длина файла - предел вложенности
     /// парсера на плоское `f a b c …` не тратится (§10 вопрос 62).
+    #[allow(
+        clippy::too_many_lines,
+        reason = "спайн применения - один цикл: вставка имплиситов, отложенные литералы, хвостовые факты"
+    )]
     fn application(&mut self, expr: &Expr) -> Result<Term, ElabError> {
+        let written_facts = std::mem::take(&mut self.written_facts);
         let mut arguments = Vec::new();
         let mut head = expr;
         while let ExprKind::App(callee, argument) = &head.kind {
@@ -5104,7 +5122,9 @@ impl<'a> Elaborator<'a> {
         let zeroed = infer(&self.ctx.speculating(), self.metas, Mult::Zero, &term)
             .ok()
             .map(|(ty, _)| ty);
-        let mut ty = zeroed.or_else(|| self.synthesized(&term));
+        let mut ty = zeroed
+            .or_else(|| self.synthesized(&term))
+            .or_else(|| self.declared_of(&term));
         let literal_ahead = literals_ahead(&arguments);
         // Отложенные аргументы: голый литерал в позиции, тип которой ещё дырка
         // (§10 вопрос 208, трек A волны 7). Считать его сейчас значило бы
@@ -5202,7 +5222,9 @@ impl<'a> Elaborator<'a> {
         if let Some(head) = named {
             (term, ty) = self.defaulting(&head, term, ty, &mut given);
         }
-        (term, ty) = self.trailing(term, ty);
+        if !written_facts {
+            (term, ty) = self.trailing(term, ty);
+        }
         // Применение свойство **передаёт**, пока результат остаётся функцией.
         // Прежде оно его снимало всегда, и рядом стояло обоснование «построить
         // возвращающее замыкание нельзя - запрет на позицию возврата не даёт
@@ -5272,6 +5294,40 @@ impl<'a> Elaborator<'a> {
         });
         let value = adamas_core::conv::whnf(self.signature, &self.ctx.eval(&applied));
         Some(quote(self.ctx.size(), &value))
+    }
+
+    /// Тип применения по объявлению головы - когда вывод не удался.
+    ///
+    /// Вывод проверяет вставленные дырки, а их спайн в ветви, где гипотеза
+    /// упоминает переменную `let`, телескопу дырки не соответствует (находка
+    /// в очереди §9): переменная в контексте непрозрачна, в телескопе раскрыта.
+    /// Хвостовой факт (`arrayIndex cell first` при `{ltUInt64 i n}`, §3.7)
+    /// вставляется по типу, и без него ветвь теряла бы тип вовсе. Проверки
+    /// здесь нет - её сделает ядро.
+    fn declared_of(&self, term: &Term) -> Option<Rc<Value>> {
+        let mut arguments = Vec::new();
+        let mut head = term;
+        while let Term::App(callee, argument) = head {
+            arguments.push(&**argument);
+            head = callee;
+        }
+        let mut ty = match head {
+            Term::Prim(prim) => adamas_core::check::prim_type(self.signature, *prim),
+            Term::Const(name, levels, args) => self.signature.lookup(name)?.instantiate_type(
+                levels,
+                args.row_args(),
+                args.mult_args(),
+            ),
+            _ => return None,
+        };
+        for argument in arguments.into_iter().rev() {
+            let forced = whnf_solved(self.signature, self.metas, &ty);
+            let Value::Pi(_, _, _, _, codomain) = &*forced else {
+                return None;
+            };
+            ty = codomain.apply(self.ctx.eval(argument));
+        }
+        Some(ty)
     }
 
     /// Тип применения к написанному аргументу - если он вычислим.

@@ -45,14 +45,14 @@ thrice = 3
 
 seeded : Simd 4 UInt8
 seeded =
-  simdSet (simdSet (simdSet (simdSet (simdSplat 4 zero) 0 first Refl) 1 second Refl) 2 third Refl)
-    3 fourth Refl
+  simdSet (simdSet (simdSet (simdSet (simdSplat 4 zero) 0 first) 1 second) 2 third)
+    3 fourth
 
 scaled : Simd 4 UInt8
 scaled = simdMul seeded (simdSplat 4 thrice)
 
 main : UInt8
 main =
-  subUInt8 (simdLane scaled 3 Refl)
-    (subUInt8 (simdLane scaled 2 Refl)
-      (subUInt8 (simdLane scaled 1 Refl) (simdLane scaled 0 Refl)))
+  subUInt8 (simdLane scaled 3)
+    (subUInt8 (simdLane scaled 2)
+      (subUInt8 (simdLane scaled 1) (simdLane scaled 0)))

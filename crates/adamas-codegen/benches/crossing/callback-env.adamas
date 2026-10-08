@@ -29,7 +29,7 @@ body : (ω u : Unit) -> {Foreign} UInt64
 body u =
   let calls : UInt64 = adamas_bench_calls
   let width : Array 1 UInt64 = arrayNew 1 one
-  adamas_bench_carried calls (\acc -> orUInt64 (shlUInt64 acc (arrayIndex width 0 Refl)) (shrUInt64 acc 63)) callbackEnv
+  adamas_bench_carried calls (\acc -> orUInt64 (shlUInt64 acc (arrayIndex width 0)) (shrUInt64 acc 63)) callbackEnv
 
 main : UInt64
 main = handle @Foreign body with

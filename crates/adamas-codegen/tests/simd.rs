@@ -105,7 +105,7 @@ gain : Float32
 gain = 0.5
 
 seeded : Simd 8 Float32
-seeded = simdSet (simdSet (simdSplat 8 zero) 0 one Refl) 7 four Refl
+seeded = simdSet (simdSet (simdSplat 8 zero) 0 one) 7 four
 
 step : UInt64 -> Simd 8 Float32 -> Simd 8 Float32
 step 0 acc = acc
@@ -114,7 +114,7 @@ step n acc =
   step (subUInt64 n 1) next
 
 main : Float32
-main = simdLane (step turns seeded) 7 Refl
+main = simdLane (step turns seeded) 7
 ";
 
 /// Строка заполнения корпусной фикстуры `simd-lanes`, как она там написана.
@@ -128,10 +128,12 @@ main = simdLane (step turns seeded) 7 Refl
 /// Корпусная фикстура витка не имеет, зато её свёртка чередует знак, поэтому
 /// перестановка любых двух дорожек видна ответом. Заодно свидетель тем самым
 /// стоит на программе, которую **договор трёх вычислителей** уже держит.
-const SEEDED: &str = "  simdSet (simdSet (simdSet (simdSet (simdSplat 4 zero) 0 one Refl) 1 two Refl) 2 four Refl) 3 eight Refl";
+const SEEDED: &str =
+    "  simdSet (simdSet (simdSet (simdSet (simdSplat 4 zero) 0 one) 1 two) 2 four) 3 eight";
 
 /// Она же с переставленными дорожками 0 и 1.
-const SWAPPED: &str = "  simdSet (simdSet (simdSet (simdSet (simdSplat 4 zero) 1 one Refl) 0 two Refl) 2 four Refl) 3 eight Refl";
+const SWAPPED: &str =
+    "  simdSet (simdSet (simdSet (simdSet (simdSplat 4 zero) 1 one) 0 two) 2 four) 3 eight";
 
 /// Сколько пакетных и сколько скалярных плавающих инструкций в объектнике.
 ///
@@ -464,10 +466,10 @@ two : Float32
 two = 2.0
 
 held : Boxed
-held = MkBoxed (simdSet (simdSplat 4 one) 2 two Refl)
+held = MkBoxed (simdSet (simdSplat 4 one) 2 two)
 
 taken : Boxed -> Float32
-taken (MkBoxed v) = simdLane v 2 Refl
+taken (MkBoxed v) = simdLane v 2
 
 main : Float32
 main = taken held
@@ -510,7 +512,7 @@ one = 1.0
 lie : Equal Bool (ltUInt64 9 4) True
 
 main : Float32
-main = simdLane (simdSplat 4 one) 9 lie
+main = simdLane (simdSplat 4 one) 9 @lie
 ";
     let machine = harness::refused(OUTSIDE);
     assert!(
@@ -802,7 +804,7 @@ one = 1.0
 -- окна**, а не из-за нелитеральной длины.
 column : Array 4 Float32
 column =
-  arraySet (arraySet (arraySet (arraySet (arrayNew 4 zero) 0 one Refl) 1 one Refl) 2 one Refl) 3 one Refl
+  arraySet (arraySet (arraySet (arraySet (arrayNew 4 zero) 0 one) 1 one) 2 one) 3 one
 
 -- Ложная аксиома (§10 вопрос 229): окно с номера один в колонке из четырёх
 -- иначе не написать.
@@ -810,7 +812,7 @@ column =
 lie : Equal Bool (leUInt64 1 (subUInt64 4 4)) True
 
 main : Float32
-main = simdLane (simdLoad 4 column 1 Refl lie) 0 Refl
+main = simdLane (simdLoad 4 column 1 @Refl @lie) 0
 ";
     let machine = harness::refused(OUTSIDE);
     assert!(
@@ -846,10 +848,10 @@ one = 1.0
 -- (`arrayNew`) она доходит только с литеральной длиной.
 column : Array 4 Float32
 column =
-  arraySet (arraySet (arraySet (arraySet (arrayNew 4 zero) 0 zero Refl) 1 zero Refl) 2 one Refl) 3 zero Refl
+  arraySet (arraySet (arraySet (arraySet (arrayNew 4 zero) 0 zero) 1 zero) 2 one) 3 zero
 
 main : Float32
-main = simdLane (simdLoad 4 column 0 Refl Refl) 2 Refl
+main = simdLane (simdLoad 4 column 0) 2
 ";
     assert_eq!(
         harness::printed(OWNED),
@@ -955,7 +957,7 @@ plus a b = addUInt64 a b
 -- Вектор приезжает аргументом рекурсии; внутри он назван `let`-связыванием -
 -- обход дефекта вопроса 50, к разметке отношения не имеющего.
 step : UInt64 -> Simd 4 UInt64 -> UInt64
-step 0 v = plus (simdLane v 0 Refl) (simdLane v 3 Refl)
+step 0 v = plus (simdLane v 0) (simdLane v 3)
 step k v =
   let next : Simd 4 UInt64 = simdAdd v (simdSplat 4 k)
   step (subUInt64 k 1) next

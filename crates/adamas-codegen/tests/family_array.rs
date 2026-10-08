@@ -45,10 +45,10 @@ fn a_flat_array_lives_in_a_family_field() {
     let source = format!(
         "{BOX}
 first : Box Int32 -> Int32
-first (MkBox xs) = arrayIndex xs 0 Refl
+first (MkBox xs) = arrayIndex xs 0
 
 main : Int32
-main = first (MkBox (arraySet (arrayNew 4 7) 0 5 Refl))
+main = first (MkBox (arraySet (arrayNew 4 7) 0 5))
 "
     );
     assert_eq!(allocated("box-flat", &source), 2);
@@ -62,10 +62,10 @@ main = first (MkBox (arraySet (arrayNew 4 7) 0 5 Refl))
 fn a_read_over_a_flat_array_is_returned_by_value() {
     let source = "\
 readSecond : (1 xs : Array 4 Int32) -> Read 4 Int32
-readSecond xs = arrayRead xs 1 Refl
+readSecond xs = arrayRead xs 1
 
 main : Int32
-main = case readSecond (arraySet (arrayNew 4 7) 1 9 Refl) of
+main = case readSecond (arraySet (arrayNew 4 7) 1 9) of
   MkRead v ys -> v
 ";
     allocated("read-by-value", source);
@@ -78,13 +78,13 @@ fn generic_code_with_flat_reads_the_field_by_the_descriptor() {
     let source = format!(
         "{FLAT}{BOX}
 again : {{Flat a}} => Box a -> Box a
-again (MkBox xs) = MkBox (arraySet xs 0 (arrayIndex xs 1 Refl) Refl)
+again (MkBox xs) = MkBox (arraySet xs 0 (arrayIndex xs 1))
 
 first : Box Int32 -> Int32
-first (MkBox xs) = arrayIndex xs 0 Refl
+first (MkBox xs) = arrayIndex xs 0
 
 main : Int32
-main = first (again (MkBox (arraySet (arrayNew 4 7) 1 9 Refl)))
+main = first (again (MkBox (arraySet (arrayNew 4 7) 1 9)))
 "
     );
     allocated("box-generic-flat", &source);
@@ -99,10 +99,10 @@ fn a_flat_field_does_not_enter_code_without_flat() {
     let source = format!(
         "{BOX}
 again : Box a -> Box a
-again (MkBox xs) = MkBox (arraySet xs 0 (arrayIndex xs 1 Refl) Refl)
+again (MkBox xs) = MkBox (arraySet xs 0 (arrayIndex xs 1))
 
 first : Box Int32 -> Int32
-first (MkBox xs) = arrayIndex xs 0 Refl
+first (MkBox xs) = arrayIndex xs 0
 
 main : Int32
 main = first (again (MkBox (arrayNew 4 7)))
@@ -129,7 +129,7 @@ peel : W a -> W a
 peel w = w
 
 open : W Int32 -> Int32
-open (MkW (MkBox xs)) = arrayIndex xs 0 Refl
+open (MkW (MkBox xs)) = arrayIndex xs 0
 
 main : Int32
 main = open (peel (MkW (MkBox (arrayNew 4 7))))
@@ -149,10 +149,10 @@ data Nat where
   Succ : Nat -> Nat
 
 again : Box a -> Box a
-again (MkBox xs) = MkBox (arraySet xs 0 (arrayIndex xs 1 Refl) Refl)
+again (MkBox xs) = MkBox (arraySet xs 0 (arrayIndex xs 1))
 
 first : Box Nat -> Nat
-first (MkBox xs) = arrayIndex xs 0 Refl
+first (MkBox xs) = arrayIndex xs 0
 
 main : Nat
 main = first (again (MkBox (arrayNew 4 (Succ Zero))))

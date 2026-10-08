@@ -215,7 +215,7 @@ data Equal (a : Type) (x : a) : a -> Type where
 /// номера (§10 вопрос 224): `Bool` и `Equal` объявлены самой программой.
 fn string(bytes: usize) -> String {
     format!(
-        "{PROOF}text : Array {} UInt8\ntext = \"{}\"\n\nmain : UInt8\nmain = arrayIndex text 0 Refl\n",
+        "{PROOF}text : Array {} UInt8\ntext = \"{}\"\n\nmain : UInt8\nmain = arrayIndex text 0\n",
         bytes + 1,
         "a".repeat(bytes)
     )

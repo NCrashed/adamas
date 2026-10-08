@@ -62,8 +62,8 @@ or : Bool -> Bool -> Bool
 or a b = if a then True else b
 
 -- | Пропозициональное равенство (§3.7). Ядро называет его по соглашению: им
--- записано, что требует частичный примитив - `Equal Bool (eqInt32 d 0) False`
--- у деления (§10 вопросы 224, 225).
+-- записано, что требует частичный примитив - `Equal Bool (not (eqInt32 d 0))
+-- True` у деления (§3.7, §10 вопросы 224, 225).
 data Equal (a : Type) (x : a) : a -> Type where
   Refl : Equal a x x
 
@@ -482,13 +482,6 @@ instance Ord Float64 where
 -- бесконечность, а `x % 0.0` - `nan`, и требовать доказательства значило бы
 -- требовать ложного. Остаток - с знаком делимого, у плавающих это `fmod`.
 
--- | Не истинное - ложно. Мост от факта ограничения `{d /= 0}`, то есть
--- `not (d == 0)`, к той форме, которой примитив деления требует делитель:
--- `eqT d 0 = False`. Разбором `b` доказывается, но гипотезу-ограничение
--- клауза не связывает, и лемма приходит на слово, как леммы арифметики.
-@total
-apart : (0 b : Bool) -> {not b} => Equal Bool b False
-
 -- | Деление и остаток с предусловием на делитель.
 class Div a where
   type Safe (y : a)
@@ -505,43 +498,43 @@ infixl 7 %
 
 instance Div Int8 where
   type Safe y = y /= 0
-  divide x y = divInt8 x y (apart (eqInt8 y 0))
-  remainder x y = remInt8 x y (apart (eqInt8 y 0))
+  divide x y = divInt8 x y
+  remainder x y = remInt8 x y
 
 instance Div Int16 where
   type Safe y = y /= 0
-  divide x y = divInt16 x y (apart (eqInt16 y 0))
-  remainder x y = remInt16 x y (apart (eqInt16 y 0))
+  divide x y = divInt16 x y
+  remainder x y = remInt16 x y
 
 instance Div Int32 where
   type Safe y = y /= 0
-  divide x y = divInt32 x y (apart (eqInt32 y 0))
-  remainder x y = remInt32 x y (apart (eqInt32 y 0))
+  divide x y = divInt32 x y
+  remainder x y = remInt32 x y
 
 instance Div Int64 where
   type Safe y = y /= 0
-  divide x y = divInt64 x y (apart (eqInt64 y 0))
-  remainder x y = remInt64 x y (apart (eqInt64 y 0))
+  divide x y = divInt64 x y
+  remainder x y = remInt64 x y
 
 instance Div UInt8 where
   type Safe y = y /= 0
-  divide x y = divUInt8 x y (apart (eqUInt8 y 0))
-  remainder x y = remUInt8 x y (apart (eqUInt8 y 0))
+  divide x y = divUInt8 x y
+  remainder x y = remUInt8 x y
 
 instance Div UInt16 where
   type Safe y = y /= 0
-  divide x y = divUInt16 x y (apart (eqUInt16 y 0))
-  remainder x y = remUInt16 x y (apart (eqUInt16 y 0))
+  divide x y = divUInt16 x y
+  remainder x y = remUInt16 x y
 
 instance Div UInt32 where
   type Safe y = y /= 0
-  divide x y = divUInt32 x y (apart (eqUInt32 y 0))
-  remainder x y = remUInt32 x y (apart (eqUInt32 y 0))
+  divide x y = divUInt32 x y
+  remainder x y = remUInt32 x y
 
 instance Div UInt64 where
   type Safe y = y /= 0
-  divide x y = divUInt64 x y (apart (eqUInt64 y 0))
-  remainder x y = remUInt64 x y (apart (eqUInt64 y 0))
+  divide x y = divUInt64 x y
+  remainder x y = remUInt64 x y
 
 instance Div Float32 where
   type Safe y = True
@@ -588,9 +581,9 @@ infixr 6 <>
 spliced : (ω m : UInt64) -> (ω n : UInt64) -> Array n UInt8 -> UInt64 -> Array m UInt8 -> UInt64 -> Array m UInt8
 spliced m n src at dst i = case decide (ltUInt64 i n) of
   No _end -> dst
-  Yes p -> case decide (ltUInt64 (addUInt64 at i) m) of
+  Yes _p -> case decide (ltUInt64 (addUInt64 at i) m) of
     No _full -> dst
-    Yes q -> spliced m n src at (arraySet dst (addUInt64 at i) (arrayIndex src i p) q) (addUInt64 i 1)
+    Yes _q -> spliced m n src at (arraySet dst (addUInt64 at i) (arrayIndex src i)) (addUInt64 i 1)
 
 -- Склейка двух текстов в текст длины `m` - суммы их длин. Длина параметром,
 -- а не `let` в теле: связанный с вызовом `let` в типе сегодня не пишется (§10
@@ -614,9 +607,9 @@ instance Monoid String where
 sameFrom : (ω n : UInt64) -> (ω k : UInt64) -> Array n UInt8 -> Array k UInt8 -> UInt64 -> Bool
 sameFrom n k xs ys i = case decide (ltUInt64 i n) of
   No _end -> True
-  Yes p -> case decide (ltUInt64 i k) of
+  Yes _p -> case decide (ltUInt64 i k) of
     No _short -> False
-    Yes q -> if eqUInt8 (arrayIndex xs i p) (arrayIndex ys i q) then sameFrom n k xs ys (addUInt64 i 1) else False
+    Yes _q -> if eqUInt8 (arrayIndex xs i) (arrayIndex ys i) then sameFrom n k xs ys (addUInt64 i 1) else False
 
 -- Тексты равны: та же длина и те же байты.
 sameText : String -> String -> Bool
@@ -637,7 +630,7 @@ class Show a where
 
 -- Сколько десятичных цифр у числа; у нуля - одна.
 digitCount : UInt64 -> UInt64
-digitCount n = if ltUInt64 n 10 then 1 else addUInt64 1 (digitCount (divUInt64 n 10 Refl))
+digitCount n = if ltUInt64 n 10 then 1 else addUInt64 1 (digitCount (divUInt64 n 10))
 
 -- Цифры `n` в ячейки `dst` справа налево: младшая - в ячейку `i - 1`.
 digitsInto : (ω m : UInt64) -> Array m UInt8 -> UInt64 -> UInt64 -> Array m UInt8
@@ -645,7 +638,7 @@ digitsInto m dst i n = case decide (eqUInt64 i 0) of
   Yes _done -> dst
   No _more -> case decide (ltUInt64 (subUInt64 i 1) m) of
     No _out -> dst
-    Yes q -> digitsInto m (arraySet dst (subUInt64 i 1) (uInt64ToUInt8 (addUInt64 48 (remUInt64 n 10 Refl))) q) (subUInt64 i 1) (divUInt64 n 10 Refl)
+    Yes _fits -> digitsInto m (arraySet dst (subUInt64 i 1) (uInt64ToUInt8 (addUInt64 48 (remUInt64 n 10)))) (subUInt64 i 1) (divUInt64 n 10)
 
 -- Десятичная запись в `m` цифр.
 decimal : (ω m : UInt64) -> UInt64 -> String
@@ -706,7 +699,7 @@ precisionFormat p =
   let template : Array 6 UInt8 = "%.00g"
   let tens : UInt64 = 2
   let ones : UInt64 = 3
-  arraySet (arraySet template tens (uInt64ToUInt8 (addUInt64 48 (divUInt64 p 10 Refl))) Refl) ones (uInt64ToUInt8 (addUInt64 48 (remUInt64 p 10 Refl))) Refl
+  arraySet (arraySet template tens (uInt64ToUInt8 (addUInt64 48 (divUInt64 p 10)))) ones (uInt64ToUInt8 (addUInt64 48 (remUInt64 p 10)))
 
 -- Первые `len` байт буфера записи текстом.
 bufferText : (ω len : UInt64) -> Array 32 UInt8 -> String

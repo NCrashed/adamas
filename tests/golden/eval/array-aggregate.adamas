@@ -26,7 +26,7 @@ third : Vec3
 third = { x = 100.0, y = 200.0, z = 300.0 }
 
 built : Array 3 Vec3
-built = arraySet (arraySet (arrayNew 3 first) 1 second Refl) 2 third Refl
+built = arraySet (arraySet (arrayNew 3 first) 1 second) 2 third
 
 -- 3.0 + 20.0 + 100.0 = 123.0. Слагаемые взяты с трёх разных смещений и из трёх
 -- разных ячеек: перепутай смещение - выйдет другое число, перепутай ячейку -
@@ -37,8 +37,8 @@ built = arraySet (arraySet (arrayNew 3 first) 1 second Refl) 2 third Refl
 -- бы построения, а не ячейки.
 read : Array 3 Vec3 -> Float32
 read xs =
-  addFloat32 (arrayIndex xs 0 Refl).z
-    (addFloat32 (arrayIndex xs 1 Refl).y (arrayIndex xs 2 Refl).x)
+  addFloat32 (arrayIndex xs 0).z
+    (addFloat32 (arrayIndex xs 1).y (arrayIndex xs 2).x)
 
 main : Float32
 main = read built

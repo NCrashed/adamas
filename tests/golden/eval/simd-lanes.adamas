@@ -65,13 +65,13 @@ bias = 1.0
 
 seeded : Simd 4 Float32
 seeded =
-  simdSet (simdSet (simdSet (simdSet (simdSplat 4 zero) 0 one Refl) 1 two Refl) 2 four Refl) 3 eight Refl
+  simdSet (simdSet (simdSet (simdSet (simdSplat 4 zero) 0 one) 1 two) 2 four) 3 eight
 
 kernel : Simd 4 Float32
 kernel = simdAdd (simdMul seeded (simdSplat 4 gain)) (simdSplat 4 bias)
 
 main : Float32
 main =
-  subFloat32 (simdLane kernel 3 Refl)
-    (subFloat32 (simdLane kernel 2 Refl)
-      (subFloat32 (simdLane kernel 1 Refl) (simdLane kernel 0 Refl)))
+  subFloat32 (simdLane kernel 3)
+    (subFloat32 (simdLane kernel 2)
+      (subFloat32 (simdLane kernel 1) (simdLane kernel 0)))

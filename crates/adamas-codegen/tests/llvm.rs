@@ -399,13 +399,13 @@ peel (MkCell n rest) = n
 
 built : Array 3 Cell
 built =
-  arraySet (arraySet (arrayNew 3 (MkCell 7 Leaf)) 1 (MkCell 8 Leaf) Refl) 2
-    (MkCell 9 Leaf) Refl
+  arraySet (arraySet (arrayNew 3 (MkCell 7 Leaf)) 1 (MkCell 8 Leaf)) 2
+    (MkCell 9 Leaf)
 
 read : Array 3 Cell -> Int64
 read xs =
-  addInt64 (peel (arrayIndex xs 0 Refl))
-    (addInt64 (peel (arrayIndex xs 1 Refl)) (mulInt64 (peel (arrayIndex xs 2 Refl)) 10))
+  addInt64 (peel (arrayIndex xs 0))
+    (addInt64 (peel (arrayIndex xs 1)) (mulInt64 (peel (arrayIndex xs 2)) 10))
 
 main : Int64
 main = read built
@@ -943,7 +943,7 @@ fn array_mutants() -> [(
 /// заголовке. Значит и ломаться он умеет по-своему, и все четыре правки ниже -
 /// про смещение либо про тег, а не про общий объектный путь.
 ///
-/// - **Смещение поля.** `(arrayIndex ps.pos 0 Refl).z` читается с чужого смещения:
+/// - **Смещение поля.** `(arrayIndex ps.pos 0).z` читается с чужого смещения:
 ///   `.y` вместо `.z`, то есть 2.0 вместо 3.0. У `Vec3` три поля одной ширины,
 ///   и различить их можно только смещением - ровно то, что проверяется.
 /// - **Тег варианта при сборке.** `Some 700` собирается тегом `None`: ячейка

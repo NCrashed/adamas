@@ -1708,10 +1708,10 @@ body : (ω u : Unit) -> {{Foreign}} Nat
 body u =
   let bytes : Array 4 UInt8 = arrayNew 4 blank
   let first : CPtr = memset bytes filler 4
-  let written : UInt8 = arrayIndex bytes 0 Refl
+  let written : UInt8 = arrayIndex bytes 0
   let again : CPtr = memset bytes filler 0
   let restored : CPtr = memset bytes erase 4
-  let back : UInt8 = arrayIndex bytes 0 Refl
+  let back : UInt8 = arrayIndex bytes 0
   pick (eqUInt8 written frobbed)
     (pick (eqUInt64 first again) (pick (eqUInt8 back blank) 3 0) 0)
     0
@@ -1825,11 +1825,11 @@ pick False yes no = no
 body : (ω u : Unit) -> {{Foreign}} Nat
 body u =
   let zeroed : Array 2 UInt64 = arrayNew 2 blank
-  let first : Array 2 UInt64 = arraySet zeroed 0 three Refl
-  let xs : Array 2 UInt64 = arraySet first 1 one Refl
+  let first : Array 2 UInt64 = arraySet zeroed 0 three
+  let xs : Array 2 UInt64 = arraySet first 1 one
   let sorted : Unit = qsort xs 2 8 byWord
-  let head : UInt64 = arrayIndex xs 0 Refl
-  let tail : UInt64 = arrayIndex xs 1 Refl
+  let head : UInt64 = arrayIndex xs 0
+  let tail : UInt64 = arrayIndex xs 1
   pick (eqUInt64 head one) (pick (eqUInt64 tail three) 2 0) 0
 
 main : Nat

@@ -44,7 +44,7 @@ xs : Array 4 Int32
 xs = arrayNew 4 7
 inside : UInt64 -> Bool
 inside i = case decide (i < 4) of
-  Yes p -> arrayIndex xs i p == 7
+  Yes _p -> arrayIndex xs i == 7
   No _q -> False
 guarded : Int32
 guarded = bit (inside 10) + bit (inside 2) * 2

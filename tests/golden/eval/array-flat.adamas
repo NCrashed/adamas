@@ -13,12 +13,12 @@
 type Int = Int64
 
 built : Array 3 Int64
-built = arraySet (arraySet (arrayNew 3 7) 1 8 Refl) 2 9 Refl
+built = arraySet (arraySet (arrayNew 3 7) 1 8) 2 9
 
 read : Array 3 Int64 -> Int64
 read xs =
-  addInt64 (arrayIndex xs 0 Refl)
-    (addInt64 (arrayIndex xs 1 Refl) (mulInt64 (arrayIndex xs 2 Refl) 10))
+  addInt64 (arrayIndex xs 0)
+    (addInt64 (arrayIndex xs 1) (mulInt64 (arrayIndex xs 2) 10))
 
 -- 7 + 8 + 90 = 105
 main : Int64

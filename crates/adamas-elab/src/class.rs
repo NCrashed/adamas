@@ -1032,18 +1032,26 @@ fn member_goal(signature: &Signature, goal: &Term) -> bool {
 ///
 /// Вычисление - с разворотом определений: `2 /= 0` есть метод инстанса, и
 /// нормальная форма цели его не раскрывает.
-fn computes(signature: &Signature, metas: &Metas, ty: &Term, claim: &Term) -> bool {
+fn computes(signature: &Signature, metas: &mut Metas, ty: &Term, claim: &Term) -> bool {
     let mut ctx = adamas_core::ctx::Ctx::new(signature);
     for (mult, name, domain) in binders_of(ty) {
         let value = ctx.eval(&domain);
         ctx = ctx.bind(name, mult, value);
     }
-    let value = adamas_core::conv::whnf_solved(signature, metas, &ctx.eval(claim));
-    // Свёртка сравнения литералов ставит голое `True` (`compared` в ядре), а
-    // определения прелюдии - имя по соглашению: годится любое.
-    matches!(&quote(ctx.size(), &value), Term::Const(name, _, _)
-        if &**name == adamas_core::prim::TRUE
-            || **name == *signature.convention(adamas_core::prim::TRUE))
+    // Сравнение, а не голова: `(width * scale) /= 0` сводится, только когда
+    // развёрнуты и константы внутри аргументов примитива, - так же сводит его
+    // проверка `Refl` в ядре. Решения сравнения откатываются: дырок в
+    // утверждении нет, и решать ему нечего.
+    let value = ctx.eval(claim);
+    let truth = ctx.eval(&Term::Const(
+        signature.convention(adamas_core::prim::TRUE),
+        Rc::from([]),
+        adamas_core::term::Args::none(),
+    ));
+    let mark = metas.mark();
+    let holds = adamas_core::conv::convertible(signature, metas, ctx.size(), &value, &truth);
+    metas.rollback(mark);
+    holds
 }
 
 /// Отказ недоказанного факта. Телескоп его - гипотезы, среди которых искали:

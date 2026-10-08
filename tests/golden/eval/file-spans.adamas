@@ -94,7 +94,7 @@ withTemp cap body =
 
 -- Байты 0, 1, 5, 6 - написанное в обе половины.
 written : Array 8 UInt8 -> List UInt8
-written xs = Cons (arrayIndex xs 0 Refl) (Cons (arrayIndex xs 1 Refl) (Cons (arrayIndex xs 5 Refl) (Cons (arrayIndex xs 6 Refl) Nil)))
+written xs = Cons (arrayIndex xs 0) (Cons (arrayIndex xs 1) (Cons (arrayIndex xs 5) (Cons (arrayIndex xs 6) Nil)))
 
 -- Две половины пишутся порознь, склеиваются и читаются обратно. Левая `[0, 4)`
 -- получает `"ab"` со смещения 0, правая `[4, 8)` - `"cd"` со смещения 1, то

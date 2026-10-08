@@ -15,7 +15,7 @@ first : Sized -> UInt8
 first s =
   let (n, xs) = s
   case decide (ltUInt64 0 n) of
-    Yes p -> arrayIndex xs 0 p
+    Yes _p -> arrayIndex xs 0
     No _q -> 0
 
 main : UInt8

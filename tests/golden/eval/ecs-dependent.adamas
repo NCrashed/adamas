@@ -70,7 +70,7 @@ data World : Tags -> Type where
 
 -- | Позиция по оси x. Требует доказательства, что позиция у сущности есть.
 posX : (0 cs : Tags) -> (0 p : Has Position cs) -> World cs -> (i : UInt64) -> (0 q : Equal Bool (ltUInt64 i cells) True) -> Float32
-posX cs p (MkWorld ds xs ys vx vy) i q = arrayIndex xs i q
+posX cs p (MkWorld ds xs ys vx vy) i q = arrayIndex xs i
 
 -- | Проход по массивам: внутренний цикл идёт по ним, а не по миру.
 --
@@ -81,7 +81,7 @@ sweep xs vx i p = case decide (i == 0) of
   Yes _z -> xs
   No q ->
     let j : UInt64 = subUInt64 i 1
-    sweep (arraySet xs j (addFloat32 (arrayIndex xs j (belowPred i cells p q)) (arrayIndex vx j (belowPred i cells p q))) (belowPred i cells p q)) vx j (belowAtMost j cells (belowPred i cells p q))
+    sweep (arraySet xs j (addFloat32 (arrayIndex xs j @(belowPred i cells p q)) (arrayIndex vx j @(belowPred i cells p q))) @(belowPred i cells p q)) vx j (belowAtMost j cells (belowPred i cells p q))
 
 -- | Система движения: требует **обеих** меток разом.
 move : (0 cs : Tags) -> (0 a : Has Position cs) -> (0 b : Has Velocity cs) -> World cs -> World cs

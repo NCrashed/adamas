@@ -43,12 +43,10 @@ data Maybe (a : Type) where
   Just : a -> Maybe a
 
 -- Целое деление, каким §4.3 велит его показывать наружу: проверка делителя
--- даёт ветви `No` доказательство, которого требует примитив (§10 вопросы
--- 224, 225).
+-- даёт ветви `else` факт, которого требует примитив (§3.7, §10 вопросы 224,
+-- 225).
 safeQuotient : UInt32 -> UInt32 -> Maybe UInt32
-safeQuotient x y = case decide (eqUInt32 y 0) of
-  Yes _z -> Nothing
-  No p -> Just (divUInt32 x y p)
+safeQuotient x y = if eqUInt32 y 0 then Nothing else Just (divUInt32 x y)
 
 orElse : UInt32 -> Maybe UInt32 -> UInt32
 orElse fallback Nothing = fallback
@@ -98,21 +96,21 @@ negativeCount = shlInt16 3 (-1)
 
 -- Деление усекает к нулю, и остаток берёт знак делимого.
 quotient : Int32
-quotient = divInt32 (-7) 2 Refl
+quotient = divInt32 (-7) 2
 
 rest : Int32
-rest = remInt32 (-7) 2 Refl
+rest = remInt32 (-7) 2
 
 -- Знаковость деления: знаковое дало бы ноль на тех же битах.
 wideQuotient : UInt64
-wideQuotient = divUInt64 18446744073709551615 3 Refl
+wideQuotient = divUInt64 18446744073709551615 3
 
 -- Единственное переполнение знакового деления.
 wrappedQuotient : Int8
-wrappedQuotient = divInt8 (-128) (-1) Refl
+wrappedQuotient = divInt8 (-128) (-1)
 
 wrappedRest : Int8
-wrappedRest = remInt8 (-128) (-1) Refl
+wrappedRest = remInt8 (-128) (-1)
 
 -- Плавающее делится без ограждений.
 ratio : Float64

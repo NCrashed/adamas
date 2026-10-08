@@ -16,7 +16,7 @@ size (MkString n bytes) = n
 
 third : String -> UInt64
 third (MkString n bytes) = case decide (ltUInt64 2 n) of
-  Yes p -> uint8ToUInt64 (arrayIndex bytes 2 p)
+  Yes _p -> uint8ToUInt64 (arrayIndex bytes 2)
   No _q -> 0
 
 pick : {a : Type} -> a -> a

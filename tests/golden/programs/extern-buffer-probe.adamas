@@ -82,10 +82,10 @@ body u =
   let filled : Unit = adamas_probe_fill bytes 8 5
   -- Сумма 5+6+…+12 = 68, максимум 12.
   let digested : Unit = adamas_probe_digest bytes 8 out
-  let sum : UInt64 = arrayIndex out 0 Refl
-  let top : UInt64 = arrayIndex out 1 Refl
+  let sum : UInt64 = arrayIndex out 0
+  let top : UInt64 = arrayIndex out 1
   -- Третий байт наш: чужая сторона положила туда 7.
-  let third : UInt8 = arrayIndex bytes 2 Refl
+  let third : UInt8 = arrayIndex bytes 2
   let seventh : UInt64 = pick (eqUInt8 third seven) 1 0
   let noted : UInt64 = adamas_probe_note bytes
   let again : UInt64 = adamas_probe_same bytes

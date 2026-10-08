@@ -297,10 +297,10 @@ calling x f = f x
 
 main : Int64
 main =
-  let xs : Array 2 Int64 = arraySet (arrayNew 2 3) 1 4 Refl
+  let xs : Array 2 Int64 = arraySet (arrayNew 2 3) 1 4
   addInt64
-    (applying xs (\\ys -> arrayIndex ys 1 Refl))
-    (calling 10 (\\k -> mulInt64 k (arrayIndex xs 0 Refl)))
+    (applying xs (\\ys -> arrayIndex ys 1))
+    (calling 10 (\\k -> mulInt64 k (arrayIndex xs 0)))
 ";
 
 /// Плоский массив проходит замыкание аргументом и захватом, без обёртки.
@@ -345,7 +345,7 @@ two : Float32
 two = 2.0
 
 seeded : Simd 4 Float32
-seeded = simdSet (simdSplat 4 one) 1 two Refl
+seeded = simdSet (simdSplat 4 one) 1 two
 ";
 
 #[test]
@@ -365,7 +365,7 @@ applying : Simd 4 Float32 -> (Simd 4 Float32 -> Float32) -> Float32
 applying v f = f v
 
 main : Float32
-main = applying seeded (\\w -> simdLane w 1 Refl)
+main = applying seeded (\\w -> simdLane w 1)
 "
         ),
     );
@@ -384,7 +384,7 @@ calling x f = f x
 main : Float32
 main =
   let v : Simd 4 Float32 = seeded
-  calling one (\\k -> addFloat32 k (simdLane v 1 Refl))
+  calling one (\\k -> addFloat32 k (simdLane v 1))
 "
         ),
     );

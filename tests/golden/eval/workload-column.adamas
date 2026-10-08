@@ -71,7 +71,7 @@ fill xs i p v = case decide (i == 0) of
   Yes _z -> xs
   No q ->
     let at : UInt64 = subUInt64 i 1
-    fill (arraySet xs at v (belowPred i cells p q)) at (belowAtMost at cells (belowPred i cells p q)) (addFloat32 v one)
+    fill (arraySet xs at v @(belowPred i cells p q)) at (belowAtMost at cells (belowPred i cells p q)) (addFloat32 v one)
 
 -- Ядро. `arraySet` функционален по семантике и переписывает по исполнению
 -- (§4.11): блок уникален, и ячейка меняется на месте - счётчик блоков
@@ -81,8 +81,8 @@ scale xs i p = case decide (i == 0) of
   Yes _z -> xs
   No q ->
     let at : UInt64 = subUInt64 i 1
-    let cell : Float32 = arrayIndex xs at (belowPred i cells p q)
-    scale (arraySet xs at (addFloat32 (mulFloat32 cell gain) bias) (belowPred i cells p q)) at (belowAtMost at cells (belowPred i cells p q))
+    let cell : Float32 = arrayIndex xs at @(belowPred i cells p q)
+    scale (arraySet xs at (addFloat32 (mulFloat32 cell gain) bias) @(belowPred i cells p q)) at (belowAtMost at cells (belowPred i cells p q))
 
 turn : Array cells Float32 -> UInt64 -> Array cells Float32
 turn xs 0 = xs
@@ -103,7 +103,7 @@ total xs i p acc = case decide (i == 0) of
   Yes _z -> acc
   No q ->
     let at : UInt64 = subUInt64 i 1
-    total xs at (belowAtMost at cells (belowPred i cells p q)) (subFloat32 (arrayIndex xs at (belowPred i cells p q)) acc)
+    total xs at (belowAtMost at cells (belowPred i cells p q)) (subFloat32 (arrayIndex xs at @(belowPred i cells p q)) acc)
 
 main : Float32
 main = total (turn (fill (arrayNew cells zero) cells Refl one) passes) cells Refl zero

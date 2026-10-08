@@ -77,7 +77,7 @@ size : UInt64
 size = {cells}
 
 main : Float32
-main = arrayIndex (arrayNew size zero) 0 Refl
+main = arrayIndex (arrayNew size zero) 0
 "
     )
 }

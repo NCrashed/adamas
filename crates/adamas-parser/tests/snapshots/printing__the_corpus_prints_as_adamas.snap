@@ -88,7 +88,7 @@ field : {x : {IO} Nat}
 grouped : ({IO} A, B)
 listed : [{IO} A]
 bound : (0 a : {IO} Nat) -> a
-constrained : {_ : Eqv a} -> {IO} a
+constrained : {Eqv a} => {IO} a
 type Eff a = {IO} a
 
 data D where

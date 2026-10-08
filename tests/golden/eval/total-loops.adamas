@@ -50,8 +50,8 @@ upwardSigned i n acc = if i < n then upwardSigned (i + 1) n (acc + i) else acc
 @total
 filled : UInt64 -> (n : UInt64) -> (1 xs : Array n UInt64) -> Array n UInt64
 filled i n xs = case decide (ltUInt64 i n) of
-  Yes p -> filled (i + 1) n (arraySet xs i (i * 3) p)
+  Yes _p -> filled (i + 1) n (arraySet xs i (i * 3))
   No _q -> xs
 
 main : List UInt64
-main = Cons (byOperator 4 0) (Cons (byLet 3 0) (Cons (byIf 5 1) (Cons (upward 0 5 0) (Cons (int32ToUInt64 (upwardSigned (0 - 2) 4 0)) (Cons (arrayIndex (filled 0 6 (arrayNew 6 0)) 5 Refl) Nil)))))
+main = Cons (byOperator 4 0) (Cons (byLet 3 0) (Cons (byIf 5 1) (Cons (upward 0 5 0) (Cons (int32ToUInt64 (upwardSigned (0 - 2) 4 0)) (Cons (arrayIndex (filled 0 6 (arrayNew 6 0)) 5) Nil)))))

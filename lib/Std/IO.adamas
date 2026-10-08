@@ -151,7 +151,7 @@ filled n bytes i p rest = case decide (eqUInt64 i 0) of
     Done -> bytes
     More b tail ->
       let j : UInt64 = subUInt64 i 1
-      filled n (arraySet bytes j b (belowPred i n p q)) j (belowAtMost j n (belowPred i n p q)) tail
+      filled n (arraySet bytes j b @(belowPred i n p q)) j (belowAtMost j n (belowPred i n p q)) tail
 
 -- | Строка из `n` байт, собранных в обратном порядке.
 --
@@ -181,7 +181,7 @@ lineFrom fd seen any =
     Yes _end -> if any then Some (gathered seen) else None
     No _more ->
       let first : UInt64 = 0
-      let b : UInt8 = arrayIndex cell first Refl
+      let b : UInt8 = arrayIndex cell first
       case decide (eqUInt8 b 10) of
         Yes _newline -> Some (gathered seen)
         No _other -> lineFrom fd (More b seen) True
@@ -190,9 +190,9 @@ lineFrom fd seen any =
 copied : (ω m : UInt64) -> (ω n : UInt64) -> Array n UInt8 -> Array m UInt8 -> UInt64 -> Array m UInt8
 copied m n src dst i = case decide (ltUInt64 i n) of
   No _end -> dst
-  Yes p -> case decide (ltUInt64 i m) of
+  Yes _p -> case decide (ltUInt64 i m) of
     No _full -> dst
-    Yes q -> copied m n src (arraySet dst i (arrayIndex src i p) q) (addUInt64 i 1)
+    Yes _q -> copied m n src (arraySet dst i (arrayIndex src i)) (addUInt64 i 1)
 
 -- | `open` над байтами пути и завершающим нулём: буфер на ячейку длиннее.
 openBytes : (ω m : UInt64) -> (ω n : UInt64) -> Array n UInt8 -> Int64 -> {Foreign} Int32

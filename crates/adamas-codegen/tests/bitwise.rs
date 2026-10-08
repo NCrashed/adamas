@@ -49,24 +49,24 @@ main = step (-268435456) 4
 
 /// Единственное переполнение знакового деления.
 const OVERFLOW: &str = "\
-divide : Int32 -> (y : Int32) -> (0 p : Equal Bool (eqInt32 y 0) False) -> Int32
-divide x y p = divInt32 x y p
+divide : Int32 -> (y : Int32) -> {y /= 0} => Int32
+divide x y = divInt32 x y
 
 main : Int32
-main = divide (-2147483648) (-1) Refl
+main = divide (-2147483648) (-1)
 ";
 
 /// Нулевой делитель. Доказательство его ненулевости даёт только ложная
 /// аксиома (§10 вопросы 224, 229): иначе до ограждения не добраться.
 const ZERO: &str = "\
 @total
-lie : Equal Bool (eqInt64 0 0) False
+lie : Equal Bool (not (eqInt64 0 0)) True
 
-divide : Int64 -> (y : Int64) -> (0 p : Equal Bool (eqInt64 y 0) False) -> Int64
-divide x y p = divInt64 x y p
+divide : Int64 -> (y : Int64) -> {y /= 0} => Int64
+divide x y = divInt64 x y
 
 main : Int64
-main = divide 7 0 lie
+main = divide 7 0 @lie
 ";
 
 /// Операция без ограждений: мера цены отсчитывается от неё.
@@ -89,11 +89,11 @@ main = step 48879 5
 
 /// Деление написанным ненулевым делителем: ограждению тут сворачиваться.
 const WRITTEN_DIV: &str = "\
-divide : Int32 -> (y : Int32) -> (0 p : Equal Bool (eqInt32 y 0) False) -> Int32
-divide x y p = divInt32 x y p
+divide : Int32 -> (y : Int32) -> {y /= 0} => Int32
+divide x y = divInt32 x y
 
 main : Int32
-main = divide 100 7 Refl
+main = divide 100 7
 ";
 
 /// Строка `.ll`, чей хвост совпал с образцом, - заменена целиком.
@@ -297,7 +297,8 @@ fn a_zero_divisor_from_a_false_axiom_stops_the_machine() {
 }
 
 /// Безопасное лицо деления §4.3 пишется на самом языке: проверка делителя
-/// даёт доказательство, которого требует примитив (§10 вопросы 224, 225).
+/// даёт ветви `else` факт, которого требует примитив (§3.7, §10 вопросы 224,
+/// 225).
 ///
 /// Обойти её нечем - без доказательства примитив не применить, - и ветвь
 /// `Nothing` пишется ровно там, где делитель проверяется во время выполнения.
@@ -309,9 +310,7 @@ data Maybe (a : Type) where
   Just : a -> Maybe a
 
 quotient : Int64 -> Int64 -> Maybe Int64
-quotient x y = case decide (eqInt64 y 0) of
-  Yes _z -> Nothing
-  No p -> Just (divInt64 x y p)
+quotient x y = if eqInt64 y 0 then Nothing else Just (divInt64 x y)
 
 orElse : Int64 -> Maybe Int64 -> Int64
 orElse fallback Nothing = fallback

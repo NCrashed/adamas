@@ -392,23 +392,18 @@ fn refolded(value: &Rc<Value>, normalized: &dyn Fn(&Rc<Value>) -> Rc<Value>) -> 
     let Value::Neutral(head @ (Head::Prim(..) | Head::Cmp(..)), spine) = &**value else {
         return None;
     };
-    // Третьим у деления идёт стёртое доказательство (§10 вопрос 224): оно
-    // переносится как есть - свёртке нужны только операнды.
-    let (left, right, rest) = match &spine[..] {
-        [Elim::App(left), Elim::App(right), rest @ ..] if rest.len() <= 1 => (left, right, rest),
-        _ => return None,
+    // После операндов в спайне стоит остальное: стёртое доказательство
+    // деления (§10 вопрос 224) и элиминаторы того, кто разбирает ответ, -
+    // `not (eqInt32 (width * scale) 0)` разбирает сравнение `case`-ом (§3.7).
+    // Свёртке нужны только операнды, остаток переигрывается после неё.
+    let [Elim::App(left), Elim::App(right), rest @ ..] = &spine[..] else {
+        return None;
     };
     let partial = Rc::new(Value::Neutral(
         head.clone(),
         vec![Elim::App(normalized(left))],
     ));
-    let mut folded = try_apply(&partial, normalized(right))?;
-    for elim in rest {
-        let Elim::App(proof) = elim else {
-            return None;
-        };
-        folded = try_apply(&folded, Rc::clone(proof))?;
-    }
+    let folded = try_apply(&partial, normalized(right))?;
     // Прогресс у арифметики - литерал, у сравнения - конструктор `Bool`:
     // спайн после свёртки пуст, и головой стоит уже не сравнение. Общего
     // «изменилось» тут мало - шаг, оставивший примитив застрявшим, зациклил
@@ -418,7 +413,15 @@ fn refolded(value: &Rc<Value>, normalized: &dyn Fn(&Rc<Value>) -> Rc<Value>) -> 
         Value::Neutral(Head::Global(..), spine) => spine.is_empty(),
         _ => false,
     };
-    progressed.then_some(folded)
+    if !progressed {
+        return None;
+    }
+    rest.iter().try_fold(folded, |callee, elim| match elim {
+        Elim::App(argument) => try_apply(&callee, Rc::clone(argument)),
+        Elim::Case(case) => try_eliminate_case(case, &callee),
+        Elim::Split(split) => crate::eval::try_eliminate_split(split, &callee),
+        _ => None,
+    })
 }
 
 /// Тело определения с переигранным спайном - общее у обоих δ.

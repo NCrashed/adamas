@@ -846,6 +846,24 @@ impl<'a> Printer<'a> {
                 self.push(" -> ");
                 self.expr(body, Prec::Lowest);
             }
+            // Контекст ограничений `{Eq a, d /= 0} =>` парсер раскрывает в
+            // безымянные implicit-связывания, у которых имя стоит на месте
+            // типа (`constrained`), - и печатается он так, как написан.
+            ExprKind::Pi { binders, codomain }
+                if !binders.is_empty() && binders.iter().all(constraint) =>
+            {
+                self.push("{");
+                for (index, binder) in binders.iter().enumerate() {
+                    if index > 0 {
+                        self.push(", ");
+                    }
+                    if let Some(ty) = &binder.ty {
+                        self.expr(ty, Prec::Lowest);
+                    }
+                }
+                self.push("} => ");
+                self.expr(codomain, Prec::Lowest);
+            }
             ExprKind::Pi { binders, codomain } => {
                 for binder in binders {
                     self.binder(binder);
@@ -1202,4 +1220,13 @@ fn attached(previous: &Decl, next: &Decl) -> bool {
 /// `x + -42` читается опечаткой, а стоят они два знака.
 fn needs_sign_guard(expr: &Expr, position: Prec) -> bool {
     position > Prec::Lowest && matches!(&expr.kind, ExprKind::Lit(lit) if lit.text.starts_with('-'))
+}
+
+/// Связывание из контекста ограничений: безымянное, неявное, без кратности, и
+/// имя его стоит там же, где тип, - так его строит разбор `{…} =>`.
+fn constraint(binder: &Binder) -> bool {
+    matches!(
+        (binder.visibility, binder.mult, binder.names.as_slice(), &binder.ty),
+        (Visibility::Implicit, None, [name], Some(ty)) if &*name.text == "_" && name.span == ty.span
+    )
 }

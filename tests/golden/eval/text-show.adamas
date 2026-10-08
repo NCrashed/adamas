@@ -18,7 +18,7 @@
 weighted : (ω n : UInt64) -> Array n UInt8 -> UInt64 -> UInt64 -> UInt64
 weighted n bytes i acc = case decide (ltUInt64 i n) of
   No _end -> acc
-  Yes p -> weighted n bytes (addUInt64 i 1) (addUInt64 acc (mulUInt64 (addUInt64 i 1) (uInt8ToUInt64 (arrayIndex bytes i p))))
+  Yes _p -> weighted n bytes (addUInt64 i 1) (addUInt64 acc (mulUInt64 (addUInt64 i 1) (uInt8ToUInt64 (arrayIndex bytes i))))
 
 checksum : String -> UInt64
 checksum (MkString n bytes) = weighted n bytes 0 0

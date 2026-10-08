@@ -32,7 +32,7 @@ decided False = Right Refl
 safeDiv : Int32 -> (d : Int32) -> (0 p : Equal Bool (d /= 0) True) -> Int32
 safeDiv n d p = case decide (d == 0) of
   Yes _z -> 0
-  No q -> divInt32 n d q
+  No _q -> divInt32 n d
 
 -- | Литерал: доказательство - вычислением.
 byFive : Int32 -> Int32

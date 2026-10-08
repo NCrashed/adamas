@@ -73,21 +73,21 @@ peel (MkCell n rest) = n
 /// **одно** независимо от числа перезаписей.
 const FLAT: &str = "\
 built : Array 3 Int64
-built = arraySet (arraySet (arrayNew 3 7) 1 8 Refl) 2 9 Refl
+built = arraySet (arraySet (arrayNew 3 7) 1 8) 2 9
 
 main : Int64
-main = arrayIndex built 0 Refl
+main = arrayIndex built 0
 ";
 
 /// Та же программа над не-`Flat` элементом.
 const BOXED: &str = "\
 built : Array 3 Cell
 built =
-  arraySet (arraySet (arrayNew 3 (MkCell 7 Leaf)) 1 (MkCell 8 Leaf) Refl) 2
-    (MkCell 9 Leaf) Refl
+  arraySet (arraySet (arrayNew 3 (MkCell 7 Leaf)) 1 (MkCell 8 Leaf)) 2
+    (MkCell 9 Leaf)
 
 main : Int64
-main = peel (arrayIndex built 0 Refl)
+main = peel (arrayIndex built 0)
 ";
 
 /// Плоский массив - один блок на всю длину.
@@ -129,13 +129,13 @@ class Flat a where
   layout : Layout
 
 rotate : {Flat a} => Array 3 a -> Array 3 a
-rotate xs = arraySet xs 0 (arrayIndex xs 1 Refl) Refl
+rotate xs = arraySet xs 0 (arrayIndex xs 1)
 
 built : Array 3 Int64
-built = arraySet (arraySet (arrayNew 3 7) 1 8 Refl) 2 9 Refl
+built = arraySet (arraySet (arrayNew 3 7) 1 8) 2 9
 
 main : Int64
-main = arrayIndex (rotate built) 0 Refl
+main = arrayIndex (rotate built) 0
 ";
 
 /// Обобщённый код индексирует с рантайм-шагом и отвечает то же.
@@ -199,7 +199,7 @@ built : Array 3 Int64
 built = arrayNew 3 7
 
 main : Int64
-main = arrayIndex (through built) 0 Refl
+main = arrayIndex (through built) 0
 ";
 
 /// Отказ на переходе плоского массива в указательный код назван.
@@ -226,12 +226,12 @@ const NARROW: &str = "\
 type Int = Int16
 
 narrow : Array 3 Int16
-narrow = arraySet (arraySet (arrayNew 3 1) 1 2 Refl) 2 3 Refl
+narrow = arraySet (arraySet (arrayNew 3 1) 1 2) 2 3
 
 -- Массив передаётся аргументом однажды: определение без параметров понижение
 -- не кеширует, и `narrow` дважды означало бы два массива.
 read : Array 3 Int16 -> Int16
-read xs = addInt16 (arrayIndex xs 1 Refl) (mulInt16 (arrayIndex xs 2 Refl) 10)
+read xs = addInt16 (arrayIndex xs 1) (mulInt16 (arrayIndex xs 2) 10)
 
 -- 2 + 3 * 10 = 32
 main : Int16
@@ -270,7 +270,7 @@ class Flat a where
   layout : Layout
 
 first : {Flat a} => Array 3 a -> a
-first xs = arrayIndex xs 0 Refl
+first xs = arrayIndex xs 0
 
 built : Array 3 Int64
 built = arrayNew 3 7
@@ -351,7 +351,7 @@ built : Array 3 Int64
 built = arrayNew 3 7
 
 main : Int64
-main = arrayIndex (same built) 0 Refl
+main = arrayIndex (same built) 0
 ";
     assert_eq!(allocated("сосед-массив", source), 1);
 }
@@ -420,16 +420,16 @@ const BORROWED: &str = "\
 type Int = Int64
 
 bump : Array 3 Int64 -> Array 3 Int64
-bump xs = arraySet xs 0 (arrayIndex xs 1 Refl) Refl
+bump xs = arraySet xs 0 (arrayIndex xs 1)
 
 peek : Array 3 Int64 -> Int64
-peek xs = arrayIndex xs 2 Refl
+peek xs = arrayIndex xs 2
 
 built : Array 3 Int64
-built = arraySet (arraySet (arrayNew 3 7) 1 8 Refl) 2 9 Refl
+built = arraySet (arraySet (arrayNew 3 7) 1 8) 2 9
 
 main : Int64
-main = addInt64 (arrayIndex (bump built) 0 Refl) (peek built)
+main = addInt64 (arrayIndex (bump built) 0) (peek built)
 ";
 
 /// Заимствующее чтение не трогает счётчик; владеющее отдаёт блок как отдавало.
@@ -473,17 +473,17 @@ fn a_borrowed_read_leaves_the_counter_alone() {
 const LINEAR_READ: &str = "\
 fill : UInt64 -> (1 xs : Array 8 Int64) -> Array 8 Int64
 fill i xs = case decide (ltUInt64 i 8) of
-  Yes p -> fill (i + 1) (arraySet xs i (uint64ToInt64 i * 3) p)
+  Yes p -> fill (i + 1) (arraySet xs i (uint64ToInt64 i * 3))
   No _q -> xs
 
 summed : UInt64 -> Int64 -> (1 xs : Array 8 Int64) -> Array 8 Int64
 summed i acc xs = case decide (ltUInt64 i 8) of
-  Yes p -> case arrayRead xs i p of
+  Yes p -> case arrayRead xs i of
     MkRead v ys -> summed (i + 1) (acc + v) ys
-  No _q -> arraySet xs 0 acc Refl
+  No _q -> arraySet xs 0 acc
 
 main : Int64
-main = arrayIndex (summed 0 0 (fill 0 (arrayNew 8 0))) 0 Refl
+main = arrayIndex (summed 0 0 (fill 0 (arrayNew 8 0))) 0
 ";
 
 /// Линейное чтение не аллоцирует (§10 вопрос 202).
@@ -513,11 +513,11 @@ fn a_cell_past_the_end_from_a_false_axiom_stops_the_machine() {
     let cases = [
         (
             "cell-read-outside",
-            "@total\nlie : Equal Bool (ltUInt64 4 4) True\n\nxs : Array 4 Int64\nxs = arrayNew 4 7\n\nmain : Int64\nmain = arrayIndex xs 4 lie\n",
+            "@total\nlie : Equal Bool (ltUInt64 4 4) True\n\nxs : Array 4 Int64\nxs = arrayNew 4 7\n\nmain : Int64\nmain = arrayIndex xs 4 @lie\n",
         ),
         (
             "cell-write-outside",
-            "@total\nlie : Equal Bool (ltUInt64 9 4) True\n\nxs : Array 4 Int64\nxs = arrayNew 4 7\n\nmain : Int64\nmain = arrayIndex (arraySet xs 9 1 lie) 0 Refl\n",
+            "@total\nlie : Equal Bool (ltUInt64 9 4) True\n\nxs : Array 4 Int64\nxs = arrayNew 4 7\n\nmain : Int64\nmain = arrayIndex (arraySet xs 9 1 @lie) 0\n",
         ),
     ];
     for (name, source) in cases {

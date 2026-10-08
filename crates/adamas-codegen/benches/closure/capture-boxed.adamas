@@ -39,7 +39,7 @@ mixed : UInt64 -> UInt64 -> UInt64
 mixed v acc = addUInt64 (mulUInt64 acc 3) v
 
 opened : Box -> UInt64
-opened (MkBox ys) = arrayIndex ys 0 Refl
+opened (MkBox ys) = arrayIndex ys 0
 
 inner : (UInt64 -> UInt64) -> UInt64 -> UInt64 -> UInt64
 inner f 0 acc = acc

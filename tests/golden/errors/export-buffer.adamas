@@ -15,7 +15,7 @@ data Unit where
 -- Длина написана числом нарочно: `Array n UInt64` подняло бы `n` в стёртый
 -- имплисит, и отказ пришёл бы про него, а не про буфер.
 sum : Array 4 UInt64 -> UInt64
-sum xs = arrayIndex xs 0 Refl
+sum xs = arrayIndex xs 0
 
 export "C" fn sum
 

@@ -25,12 +25,12 @@
 type Int = Int64
 
 digits : Array 4 Int64
-digits = arraySet (arraySet (arraySet (arrayNew 4 1) 1 2 Refl) 2 4 Refl) 3 8 Refl
+digits = arraySet (arraySet (arraySet (arrayNew 4 1) 1 2) 2 4) 3 8
 
 folded : Array 4 Int64 -> Int64
 folded xs =
-  subInt64 (arrayIndex xs 3 Refl)
-    (subInt64 (arrayIndex xs 2 Refl) (subInt64 (arrayIndex xs 1 Refl) (arrayIndex xs 0 Refl)))
+  subInt64 (arrayIndex xs 3)
+    (subInt64 (arrayIndex xs 2) (subInt64 (arrayIndex xs 1) (arrayIndex xs 0)))
 
 -- Скобка высшего порядка над буфером: та самая форма, которой не сложилась
 -- обёртка над zlib (трек D волны 2, `withGz path mode (\stream -> ...)`).
@@ -44,8 +44,8 @@ applying xs f = f xs
 byArgument : Int64
 byArgument =
   applying digits (\xs ->
-    subInt64 (arrayIndex xs 3 Refl)
-      (subInt64 (arrayIndex xs 2 Refl) (subInt64 (arrayIndex xs 1 Refl) (arrayIndex xs 0 Refl))))
+    subInt64 (arrayIndex xs 3)
+      (subInt64 (arrayIndex xs 2) (subInt64 (arrayIndex xs 1) (arrayIndex xs 0))))
 
 -- Та же позиция, но массив уходит из тела лямбды **дальше**, в написанную
 -- функцию: там представление объявлено, и сверяется оно у границы вызова.
@@ -58,7 +58,7 @@ calling x f = f x
 
 byCapture : Int64
 byCapture =
-  let xs : Array 4 Int64 = arraySet (arraySet (arraySet (arrayNew 4 1) 1 2 Refl) 2 4 Refl) 3 8 Refl
+  let xs : Array 4 Int64 = arraySet (arraySet (arraySet (arrayNew 4 1) 1 2) 2 4) 3 8
   calling 10 (\k -> mulInt64 k (folded xs))
 
 data Three where

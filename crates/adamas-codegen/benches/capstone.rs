@@ -130,7 +130,7 @@ fn capstone_source(packets: u64, rounds: u64) -> String {
 fn per_lane_source(packets: u64, rounds: u64) -> String {
     let from = "  let next : Simd 4 UInt64 = simdAdd (simdMul (windowAt xs at q) \
                 (simdSplat 4 spice)) (simdSplat 4 pepper)\n  \
-                simdStore 4 xs at next Refl q";
+                simdStore 4 xs at next";
     let to = "  let w0 : UInt64 = loadCell xs at\n  \
               let w1 : UInt64 = loadCell xs (addUInt64 at 1)\n  \
               let w2 : UInt64 = loadCell xs (addUInt64 at 2)\n  \

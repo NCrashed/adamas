@@ -22,7 +22,7 @@ size Zero m = m
 size (Succ k) m = Succ (size k m)
 
 open : Box Nat -> Nat
-open (MkBox xs) = size (arrayIndex xs 1 Refl) (arrayIndex xs 2 Refl)
+open (MkBox xs) = size (arrayIndex xs 1) (arrayIndex xs 2)
 
 main : Nat
-main = open (MkBox (arraySet (arraySet (arrayNew 4 Zero) 1 (Succ Zero) Refl) 2 (Succ (Succ Zero)) Refl))
+main = open (MkBox (arraySet (arraySet (arrayNew 4 Zero) 1 (Succ Zero)) 2 (Succ (Succ Zero))))

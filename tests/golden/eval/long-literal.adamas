@@ -25,7 +25,7 @@ size (MkString n _bytes) = n
 last : UInt64
 last =
   let at : UInt64 = 159
-  uint8ToUInt64 (arrayIndex buffer at Refl)
+  uint8ToUInt64 (arrayIndex buffer at)
 
 main : UInt64
 main = addUInt64 (addUInt64 (size text) (strlen buffer)) last

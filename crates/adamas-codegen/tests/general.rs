@@ -166,7 +166,7 @@ built = arrayNew 3 first
 
 probe : Array 3 Vec3 -> {{Ask}} Boxed
 probe xs =
-  let v : Vec3 = arrayIndex xs 0 Refl
+  let v : Vec3 = arrayIndex xs 0
   let n : Nat = ask
   MkBoxed v.z n
 

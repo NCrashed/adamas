@@ -226,7 +226,7 @@ pickVersion False = 4
 madeHead0 : UInt64 -> UInt64 -> UInt64
 madeHead0 seed p =
   let r : UInt64 = grain seed (mulUInt64 p stride)
-  let ver : UInt64 = pickVersion (eqUInt64 (remUInt64 p 7 Refl) 3)
+  let ver : UInt64 = pickVersion (eqUInt64 (remUInt64 p 7) 3)
   let dscp : UInt64 = field r 3 8
   let len : UInt64 = addUInt64 (field r 11 10) 40
   let ident : UInt64 = field r 21 16
@@ -262,12 +262,12 @@ damaged False s = s
 -- оставляет буфер как был.
 loadCell : Array cells UInt64 -> UInt64 -> UInt64
 loadCell xs at = case decide (ltUInt64 at cells) of
-  Yes q -> arrayIndex xs at q
+  Yes _q -> arrayIndex xs at
   No _q -> 0
 
 storeCell : Array cells UInt64 -> UInt64 -> UInt64 -> Array cells UInt64
 storeCell xs at v = case decide (ltUInt64 at cells) of
-  Yes q -> arraySet xs at v q
+  Yes _q -> arraySet xs at v
   No _q -> xs
 
 writePacket : Array cells UInt64 -> UInt64 -> UInt64 -> Array cells UInt64
@@ -278,7 +278,7 @@ writePacket xs seed p =
   let c2 : UInt64 = madeHead2 seed p
   let c3 : UInt64 = grain seed (addUInt64 base 3)
   let sum : UInt64 = checksumOver c0 bare c2 c3
-  let c1 : UInt64 = poke bare 32 16 (damaged (eqUInt64 (remUInt64 p 5 Refl) 2) sum)
+  let c1 : UInt64 = poke bare 32 16 (damaged (eqUInt64 (remUInt64 p 5) 2) sum)
   let a0 : Array cells UInt64 = storeCell xs base c0
   let a1 : Array cells UInt64 = storeCell a0 (addUInt64 base 1) c1
   let a2 : Array cells UInt64 = storeCell a1 (addUInt64 base 2) c2
@@ -319,14 +319,14 @@ audit = 3
 policy : Array buckets UInt8
 policy =
   let t0 : Array buckets UInt8 = arrayNew buckets deny
-  let t1 : Array buckets UInt8 = arraySet t0 0 keep Refl
-  let t2 : Array buckets UInt8 = arraySet t1 1 meter Refl
-  let t3 : Array buckets UInt8 = arraySet t2 2 keep Refl
-  let t4 : Array buckets UInt8 = arraySet t3 3 audit Refl
-  let t5 : Array buckets UInt8 = arraySet t4 4 meter Refl
-  let t6 : Array buckets UInt8 = arraySet t5 5 deny Refl
-  let t7 : Array buckets UInt8 = arraySet t6 6 audit Refl
-  arraySet t7 7 keep Refl
+  let t1 : Array buckets UInt8 = arraySet t0 0 keep
+  let t2 : Array buckets UInt8 = arraySet t1 1 meter
+  let t3 : Array buckets UInt8 = arraySet t2 2 keep
+  let t4 : Array buckets UInt8 = arraySet t3 3 audit
+  let t5 : Array buckets UInt8 = arraySet t4 4 meter
+  let t6 : Array buckets UInt8 = arraySet t5 5 deny
+  let t7 : Array buckets UInt8 = arraySet t6 6 audit
+  arraySet t7 7 keep
 
 weightOf : UInt8 -> UInt64
 weightOf 0 = 0
@@ -415,7 +415,7 @@ verdict False t len ttl flow w =
 -- проверяет `decide`: леммы о маске у прелюдии нет (§10 вопрос 224).
 codeOf : Array buckets UInt8 -> UInt64 -> UInt8
 codeOf pol slot = case decide (ltUInt64 slot buckets) of
-  Yes q -> arrayIndex pol slot q
+  Yes _q -> arrayIndex pol slot
   No _q -> deny
 
 scan : Array cells UInt64 -> Array buckets UInt8 -> UInt64 -> Tally -> Tally
@@ -456,12 +456,12 @@ thirtyOne = 31
 -- цикла: в теле члена объявляемой группы аргументы типизируются дырками (§10
 -- вопрос 50), и ширина окна там ожидаемого типа не получает.
 windowAt : Array cells UInt64 -> (at : UInt64) -> (0 q : Equal Bool (leUInt64 at (subUInt64 cells 4)) True) -> Simd 4 UInt64
-windowAt xs at q = simdLoad 4 xs at Refl q
+windowAt xs at q = simdLoad 4 xs at
 
 churnWindow : Array cells UInt64 -> (at : UInt64) -> (0 q : Equal Bool (leUInt64 at (subUInt64 cells 4)) True) -> Array cells UInt64
 churnWindow xs at q =
   let next : Simd 4 UInt64 = simdAdd (simdMul (windowAt xs at q) (simdSplat 4 spice)) (simdSplat 4 pepper)
-  simdStore 4 xs at next Refl q
+  simdStore 4 xs at next
 
 -- Номер окна - `p * stride + 4`, и внутри колонки его проверяет `decide`: леммы
 -- о произведении у прелюдии нет (см. `loadCell`). Ветвь `No` колонку не трогает.
@@ -494,8 +494,8 @@ digest xs k acc =
 
 foldLanes : Simd 4 UInt64 -> UInt64
 foldLanes v =
-  subUInt64 (simdLane v 3 Refl)
-    (subUInt64 (simdLane v 2 Refl) (subUInt64 (simdLane v 1 Refl) (simdLane v 0 Refl)))
+  subUInt64 (simdLane v 3)
+    (subUInt64 (simdLane v 2) (subUInt64 (simdLane v 1) (simdLane v 0)))
 
 -- Пересылка: у пакета четвёртой версии убывает время жизни, у прочих нет.
 aged : Bool -> UInt64 -> UInt64
@@ -522,12 +522,10 @@ hops xs k acc =
 -- Тотальное лицо деления (§4.3): делитель приезжает из данных пакета, и нулём
 -- он бывает законно - принятых пакетов с истёкшим временем жизни на этих
 -- данных нет ни одного. Программа обязана ответить числом, а не упасть на
--- входе, который сеть вправе прислать: проверка делителя даёт ветви `No`
--- доказательство, которого требует примитив (§10 вопросы 224, 225).
+-- входе, который сеть вправе прислать: проверка делителя даёт ветви `else`
+-- факт, которого требует примитив (§3.7, §10 вопросы 224, 225).
 safeDiv : UInt64 -> UInt64 -> Maybe UInt64
-safeDiv x y = case decide (eqUInt64 y 0) of
-  Yes _z -> Nothing
-  No p -> Just (divUInt64 x y p)
+safeDiv x y = if eqUInt64 y 0 then Nothing else Just (divUInt64 x y)
 
 orElse : UInt64 -> Maybe UInt64 -> UInt64
 orElse fallback Nothing = fallback

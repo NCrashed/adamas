@@ -2,8 +2,8 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: division-unproven.adamas:8:25: несовпадение типов: ожидался `Equal Bool (eqInt32 d 0) False`, получен `Equal Bool (eqInt32 d 0) (eqInt32 d 0)`
-  peek d = divInt32 100 d Refl
-                          ^^^^
+Error: division-unproven.adamas:9:1: факт `not (eqInt32 d 0)` не доказан: вычислением к `True` он не сводится, и гипотезы с ним в контексте нет. Дайте его проверкой (`if not (eqInt32 d 0) then … else …`), ограничением объемлющей функции (`{not (eqInt32 d 0)} =>`) или явным аргументом (`@доказательство`)
+  peek d = divInt32 100 d
+  ^^^^^^^^^^^^^^^^^^^^^^^
   в контексте:
     (d : Int32)

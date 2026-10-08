@@ -1,8 +1,8 @@
 -- Факт с операторным выражением в `let` без аннотации (§4.3, §10 вопрос 230).
 --
--- `let nx = wrap 9 (width * scale) Refl` отвергался, хотя `width * scale`
+-- `let nx = wrap 9 (width * scale)` отвергался, хотя `width * scale`
 -- сводится к числу: в `width * scale` не был решён ни тип `a` у `*`, ни
--- словарь `Mul a`, и факт `eqInt32 (width * scale) 0` застревал на словаре. С
+-- словарь `Mul a`, и факт `width * scale /= 0` застревал на словаре. С
 -- аннотацией и в аргументе функции та же форма проходила - там проверка шла
 -- после поиска словарей в конце объявления, а `let` без аннотации синтезирует
 -- тип значения сразу. Теперь у головы, требующей словарь класса, домен
@@ -11,8 +11,8 @@
 --
 -- `16`: `7 mod 163840` и `9 mod 163840`.
 
-wrap : Int32 -> (n : Int32) -> (0 p : Equal Bool (eqInt32 n 0) False) -> Int32
-wrap v n p = remInt32 v n p
+wrap : Int32 -> (n : Int32) -> {n /= 0} => Int32
+wrap v n = remInt32 v n
 
 width : Int32
 width = 320
@@ -21,11 +21,11 @@ scale : Int32
 scale = 512
 
 atTop : Int32
-atTop = wrap 7 (width * scale) Refl
+atTop = wrap 7 (width * scale)
 
 inLet : Int32
 inLet =
-  let nx = wrap 9 (width * scale) Refl
+  let nx = wrap 9 (width * scale)
   nx
 
 main : Int32

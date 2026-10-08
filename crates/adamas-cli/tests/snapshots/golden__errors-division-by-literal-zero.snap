@@ -2,6 +2,6 @@
 source: crates/adamas-cli/tests/golden.rs
 expression: text
 ---
-Error: division-by-literal-zero.adamas:8:21: несовпадение типов: ожидался `Equal Bool True False`, получен `Equal Bool True True`
-  zero = divInt32 1 0 Refl
-                      ^^^^
+Error: division-by-literal-zero.adamas:8:1: факт `not True` не доказан: вычислением к `True` он не сводится, и гипотезы с ним в контексте нет. Дайте его проверкой (`if not True then … else …`), ограничением объемлющей функции (`{not True} =>`) или явным аргументом (`@доказательство`)
+  zero = divInt32 1 0
+  ^^^^^^^^^^^^^^^^^^^

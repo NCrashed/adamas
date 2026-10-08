@@ -67,7 +67,7 @@ fill xs i p v = case decide (i == 0) of
   Yes _z -> xs
   No q ->
     let at : UInt64 = subUInt64 i 1
-    fill (arraySet xs at v (belowPred i cells p q)) at (belowAtMost at cells (belowPred i cells p q)) (addFloat32 v one)
+    fill (arraySet xs at v @(belowPred i cells p q)) at (belowAtMost at cells (belowPred i cells p q)) (addFloat32 v one)
 
 -- Ядро: окно из восьми ячеек, одна `simdMul`, одна `simdAdd`, одна запись.
 -- Счётчик блоков показывает **один** блок на всю программу, сколько бы
@@ -78,9 +78,9 @@ scale xs i p = case decide (ltUInt64 i 8) of
   Yes _z -> xs
   No q ->
     let at : UInt64 = subUInt64 i 8
-    let window : Simd 8 Float32 = simdLoad 8 xs at (atMostTrans 8 i cells (notBelow i 8 q) p) (windowBefore i 8 cells (notBelow i 8 q) p)
+    let window : Simd 8 Float32 = simdLoad 8 xs at @(atMostTrans 8 i cells (notBelow i 8 q) p) @(windowBefore i 8 cells (notBelow i 8 q) p)
     let next : Simd 8 Float32 = simdAdd (simdMul window (simdSplat 8 gain)) (simdSplat 8 bias)
-    let put : Array cells Float32 = simdStore 8 xs at next (atMostTrans 8 i cells (notBelow i 8 q) p) (windowBefore i 8 cells (notBelow i 8 q) p)
+    let put : Array cells Float32 = simdStore 8 xs at next @(atMostTrans 8 i cells (notBelow i 8 q) p) @(windowBefore i 8 cells (notBelow i 8 q) p)
     scale put at (stepAtMost i 8 cells (notBelow i 8 q) p)
 
 turn : Array cells Float32 -> UInt64 -> Array cells Float32
@@ -96,7 +96,7 @@ total xs i p acc = case decide (i == 0) of
   Yes _z -> acc
   No q ->
     let at : UInt64 = subUInt64 i 1
-    total xs at (belowAtMost at cells (belowPred i cells p q)) (subFloat32 (arrayIndex xs at (belowPred i cells p q)) acc)
+    total xs at (belowAtMost at cells (belowPred i cells p q)) (subFloat32 (arrayIndex xs at @(belowPred i cells p q)) acc)
 
 main : Float32
 main = total (turn (fill (arrayNew cells zero) cells Refl one) passes) cells Refl zero

@@ -55,7 +55,7 @@ scale : Int32
 scale = 256
 
 -- | Мир в неподвижной точке: им заворачиваются координаты. Предел назван, а
--- не написан на месте выражением: `Refl` у [`wrap`] сводит его вычислением,
+-- не написан на месте выражением: факт у [`wrap`] находит вычисление,
 -- а `width * scale` прямо в аргументе сверялся бы раньше, чем решён словарь
 -- `Mul` (§10 вопрос 230).
 worldX : Int32
@@ -80,19 +80,19 @@ shots = 8
 -- массив как был. Камни и выстрелы - массивы одной длины, и обёртки общие.
 at : Array rocks Int32 -> UInt64 -> Int32
 at xs i = case decide (ltUInt64 i rocks) of
-  Yes p -> arrayIndex xs i p
+  Yes p -> arrayIndex xs i
   No _q -> 0
 
 put : Array rocks Int32 -> UInt64 -> Int32 -> Array rocks Int32
 put xs i v = case decide (ltUInt64 i rocks) of
-  Yes p -> arraySet xs i v p
+  Yes p -> arraySet xs i v
   No _q -> xs
 
 -- | Остаток от деления для положительных - им заворачивается экран. Предел
 -- ненулевой, и доказывает это вызывающий: у экрана предел постоянный, и
--- доказательство даёт вычисление - `Refl`.
-wrap : Int32 -> (limit : Int32) -> (0 p : Equal Bool (eqInt32 limit 0) False) -> Int32
-wrap v limit p = remInt32 (remInt32 v limit p + limit) limit p
+-- доказательство находит вычисление (§3.7).
+wrap : Int32 -> (limit : Int32) -> {limit /= 0} => Int32
+wrap v limit = remInt32 (remInt32 v limit + limit) limit
 
 -- | Единица за `True`: клавиша входит в счёт поворота и тяги множителем.
 bit : Bool -> Int32
@@ -102,7 +102,7 @@ bit False = 0
 -- | Осколок быстрее целого камня в полтора раза: мелкая цель, идущая с той же
 -- скоростью, читается на экране как та же самая.
 quicken : Int32 -> Int32
-quicken v = divInt32 (v * 3) 2 Refl
+quicken v = divInt32 (v * 3) 2
 extern "C" pure fn cos : Float64 -> Float64
 
 -- | Ближайшее целое, половина - от нуля.
@@ -114,7 +114,7 @@ rounded v = if v < 0.0 then float64ToInt32 (v - 0.5) else float64ToInt32 (v + 0.
 dirX : Int32 -> Int32
 dirX d = rounded (cos (int32ToFloat64 d * 0.39269908169872414) * int32ToFloat64 scale)
 dirY : Int32 -> Int32
-dirY n = dirX (remInt32 (n + 12) 16 Refl)
+dirY n = dirX (remInt32 (n + 12) 16)
 
 -- | Шагов поворота вчетверо больше, чем румбов.
 --
@@ -127,7 +127,7 @@ turnSteps = 64
 
 -- | Румб по шагу поворота.
 aim : Int32 -> Int32
-aim d = divInt32 d 4 Refl
+aim d = divInt32 d 4
 
 -- | Скорость в точках экрана за кадр переводится в неподвижную точку
 -- умножением на направление: `dirX` уже есть косинус, умноженный на [`scale`],
@@ -206,8 +206,8 @@ drift : {0 cs : Tags} -> (0 a : Has Position cs) -> (0 b : Has Velocity cs) -> R
 drift a b w 0 = w
 drift a b (MkRocks ds xs ys vx vy sz) i =
   let j = i - 1
-  let nx = wrap (at xs j + at vx j) worldX Refl
-  let ny = wrap (at ys j + at vy j) worldY Refl
+  let nx = wrap (at xs j + at vx j) worldX
+  let ny = wrap (at ys j + at vy j) worldY
   drift a b (MkRocks ds (put xs j nx) (put ys j ny) vx vy sz) j
 
 -- | Размеры камней сами по себе: счёт живых не должен пересобирать всю запись,
@@ -232,7 +232,7 @@ freeRock sz i found =
 
 -- | Положение на экране: неподвижная точка делится обратно.
 screenOf : Int32 -> Int32
-screenOf v = divInt32 v scale Refl
+screenOf v = divInt32 v scale
 
 -- | Корабль: положение, скорость, румб и остаток перезарядки.
 type Ship = {x : Int32, y : Int32, vx : Int32, vy : Int32, dir : Int32, reload : Int32}
@@ -247,7 +247,7 @@ reloadTime = 10
 
 -- | Корабль стоит посреди экрана носом вверх. Он же - место возрождения.
 firstShip : Ship
-firstShip = {x = divInt32 (width * scale) 2 Refl, y = divInt32 (height * scale) 2 Refl, vx = 0, vy = 0, dir = 48, reload = 0}
+firstShip = {x = divInt32 (width * scale) 2, y = divInt32 (height * scale) 2, vx = 0, vy = 0, dir = 48, reload = 0}
 
 -- | Выстрелы: та же раскладка, что у камней, плюс остаток жизни.
 data Shots where
@@ -273,12 +273,12 @@ released = {left = False, right = False, thrust = False, fire = False, jump = Fa
 -- заворачиваются по ширине типа (§4.3), и привычные константы вида
 -- `1103515245` переполнили бы счёт молча.
 stir : Int32 -> Int32
-stir s = remInt32 (s * 75 + 74) 65537 Refl
+stir s = remInt32 (s * 75 + 74) 65537
 
 -- | Число из отрезка `[0, limit)`. Младшие разряды счётчика по модулю степени
 -- двойки ходят по короткому кругу, поэтому берутся старшие.
-rollOf : Int32 -> (limit : Int32) -> (0 p : Equal Bool (eqInt32 limit 0) False) -> Int32
-rollOf s limit p = remInt32 (divInt32 s 3 Refl) limit p
+rollOf : Int32 -> (limit : Int32) -> {limit /= 0} => Int32
+rollOf s limit = remInt32 (divInt32 s 3) limit
 
 -- | Ход игры помимо тел: счёт, жизни, неуязвимость после гибели, номер волны
 -- и состояние счётчика случайности.
@@ -308,7 +308,7 @@ reward = 1000
 earn : Status -> Int32 -> Status
 earn st k =
   let total = st.score + k
-  let extra = divInt32 st.score reward Refl < divInt32 total reward Refl
+  let extra = divInt32 st.score reward < divInt32 total reward
   {st | score = total, lives = if extra then st.lives + 1 else st.lives}
 
 -- | Жизнь потеряна. Ниже нуля счётчик не уходит: «конец игры» проверяется
@@ -342,7 +342,7 @@ finished st = st.lives < 1
 -- состояний счётчика: одно и то же `s` на обе оси поставило бы корабль на
 -- диагональ.
 jump : Ship -> Int32 -> Ship
-jump ship s = {ship | x = rollOf s width Refl * scale, y = rollOf (stir s) height Refl * scale, vx = 0, vy = 0}
+jump ship s = {ship | x = rollOf s width * scale, y = rollOf (stir s) height * scale, vx = 0, vy = 0}
 
 -- | Мир целиком.
 --
@@ -400,12 +400,12 @@ armedAt ship keys = keys.fire && ship.reload == 0
 -- быстрее, чем шаг заворота экрана.
 steer : Ship -> Keys -> Ship
 steer ship keys =
-  let turned = remInt32 (ship.dir + bit keys.right - bit keys.left + turnSteps) turnSteps Refl
-  let ax = bit keys.thrust * divInt32 (dirX (aim turned)) 16 Refl
-  let ay = bit keys.thrust * divInt32 (dirY (aim turned)) 16 Refl
-  let nvx = divInt32 ((ship.vx + ax) * 63) 64 Refl
-  let nvy = divInt32 ((ship.vy + ay) * 63) 64 Refl
-  {x = wrap (ship.x + nvx) worldX Refl, y = wrap (ship.y + nvy) worldY Refl, vx = nvx, vy = nvy, dir = turned, reload = if 0 < ship.reload then ship.reload - 1 else 0}
+  let turned = remInt32 (ship.dir + bit keys.right - bit keys.left + turnSteps) turnSteps
+  let ax = bit keys.thrust * divInt32 (dirX (aim turned)) 16
+  let ay = bit keys.thrust * divInt32 (dirY (aim turned)) 16
+  let nvx = divInt32 ((ship.vx + ax) * 63) 64
+  let nvy = divInt32 ((ship.vy + ay) * 63) 64
+  {x = wrap (ship.x + nvx) worldX, y = wrap (ship.y + nvy) worldY, vx = nvx, vy = nvy, dir = turned, reload = if 0 < ship.reload then ship.reload - 1 else 0}
 
 -- | Ход выстрелов: живые двигаются и стареют, мёртвые стоят.
 fly : Shots -> UInt64 -> Shots
@@ -416,8 +416,8 @@ fly (MkShots xs ys vx vy life) i =
   let x = at xs j
   let y = at ys j
   let age = at life j
-  let nx = wrap (x + at vx j) worldX Refl
-  let ny = wrap (y + at vy j) worldY Refl
+  let nx = wrap (x + at vx j) worldX
+  let ny = wrap (y + at vy j) worldY
   let aged = if alive then age - 1 else 0
   fly (MkShots (put xs j (if alive then nx else x)) (put ys j (if alive then ny else y)) vx vy (put life j aged)) j
 
@@ -550,14 +550,14 @@ bump ship keys (MkRocks ds xs ys vx vy sz) ss st i =
 
 -- | Прямоугольник в буфере `SDL_Rect`: четыре `int` подряд, порядок `x y w h`.
 rectOf : Array 4 Int32 -> Int32 -> Int32 -> Int32 -> Int32 -> Array 4 Int32
-rectOf rect x y w h = arraySet (arraySet (arraySet (arraySet rect 0 x Refl) 1 y Refl) 2 w Refl) 3 h Refl
+rectOf rect x y w h = arraySet (arraySet (arraySet (arraySet rect 0 x) 1 y) 2 w) 3 h
 
 -- | Квадрат со стороной `side`, вычерченный **от центра**: столкновения тоже
 -- считаются по центрам, и две разные системы координат в одной программе -
 -- готовый источник рассогласования.
 box : Array 4 Int32 -> Int32 -> Int32 -> Int32 -> Array 4 Int32
 box rect x y side =
-  let half = divInt32 side 2 Refl
+  let half = divInt32 side 2
   rectOf rect (x - half) (y - half) side side
 
 -- | Рисует прямоугольник, если он нужен.
@@ -657,14 +657,15 @@ tenTo : Int32 -> Int32
 tenTo 0 = 1
 tenTo n = 10 * tenTo (n - 1)
 
--- | Цифра числа в разряде `place`, считая справа. Делитель проверяется: целые
--- заворачиваются (§4.3), и с `place` от 32 степень десяти есть ноль.
+-- | Цифра числа при делителе `t`. Делитель проверяется: целые заворачиваются
+-- (§4.3), и с `place` от 32 степень десяти есть ноль. Проверка стоит над
+-- параметром, а не над `let`: ветвь `else` получает факт `t /= 0` (§3.7).
+digitBy : Int32 -> Int32 -> Int32
+digitBy v t = if t == 0 then 0 else remInt32 (divInt32 v t) 10
+
+-- | Цифра числа в разряде `place`, считая справа.
 digitAt : Int32 -> Int32 -> Int32
-digitAt v place =
-  let t = tenTo place
-  case decide (t == 0) of
-    Yes _z -> 0
-    No p -> remInt32 (divInt32 v t p) 10 Refl
+digitAt v place = digitBy v (tenTo place)
 
 -- | Число пятью разрядами. Ведущие нули не гасятся: гашение потребовало бы
 -- признака «значащая цифра уже была», то есть ещё одного аргумента в цикле, а
@@ -696,7 +697,7 @@ paintHud : CPtr -> Array 4 Int32 -> Status -> {Foreign} Array 4 Int32
 paintHud r rect st =
   let _ = SDL_SetRenderDrawColor r 210 220 255 255
   let score = paintNumber r rect 12 10 st.score 5
-  let wave = paintNumber r score (divInt32 width 2 Refl - 40) 10 st.level 5
+  let wave = paintNumber r score (divInt32 width 2 - 40) 10 st.level 5
   let _ = SDL_SetRenderDrawColor r 120 255 140 255
   paintLives r wave st.lives shownLives
 
@@ -733,7 +734,7 @@ paintShots r rect (MkShots xs ys vx vy life) i =
 -- | Виден ли корабль в этом кадре: под защитой он мигает, и мигание - это
 -- единственный способ показать неуязвимость, не заводя второго цвета.
 visible : Int32 -> Bool
-visible grace = grace == 0 || remInt32 grace 8 Refl < 4
+visible grace = grace == 0 || remInt32 grace 8 < 4
 
 -- | Корабль: корпус и нос по румбу. Нос ставится тем же направлением
 -- ([`dirX`], [`dirY`]), каким считается тяга, - одно место на две работы.
@@ -744,12 +745,12 @@ paintShip r rect ship grace push =
   let d = aim ship.dir
   let here = visible grace
   let body = drawIf r (box rect cx cy 11) here
-  let nx = cx + divInt32 (dirX d * 11) scale Refl
-  let ny = cy + divInt32 (dirY d * 11) scale Refl
+  let nx = cx + divInt32 (dirX d * 11) scale
+  let ny = cy + divInt32 (dirY d * 11) scale
   let tip = drawIf r (box body nx ny 5) here
   let _ = SDL_SetRenderDrawColor r 255 170 60 255
-  let bx = cx - divInt32 (dirX d * 9) scale Refl
-  let by = cy - divInt32 (dirY d * 9) scale Refl
+  let bx = cx - divInt32 (dirX d * 9) scale
+  let by = cy - divInt32 (dirY d * 9) scale
   drawIf r (box tip bx by 5) (here && push)
 
 statusOf : World -> Status
@@ -786,10 +787,10 @@ paintOver : CPtr -> Int32 -> {Foreign} Int32
 paintOver r score =
   let rect : Array 4 Int32 = arrayNew 4 0
   let _ = SDL_SetRenderDrawColor r 130 24 36 255
-  let band = rectOf rect 0 (divInt32 height 2 Refl - 34) width 68
+  let band = rectOf rect 0 (divInt32 height 2 - 34) width 68
   let filled = drawIf r band True
   let _ = SDL_SetRenderDrawColor r 255 232 232 255
-  paintNumber r filled (divInt32 width 2 Refl - 40) (divInt32 height 2 Refl - 10) score 5
+  paintNumber r filled (divInt32 width 2 - 40) (divInt32 height 2 - 10) score 5
   SDL_RenderPresent r
   SDL_Delay 1200
   score
@@ -800,8 +801,8 @@ listen : Array 14 UInt32 -> Keys -> UInt64 -> {Foreign} Keys
 listen event keys 0 = keys
 listen event keys n =
   let got = SDL_PollEvent event
-  let kind = arrayIndex event 0 Refl
-  let code = arrayIndex event scanWord Refl
+  let kind = arrayIndex event 0
+  let code = arrayIndex event scanWord
   let seen = if 0 < got then absorb keys kind code else keys
   listen event seen (n - 1)
 
@@ -819,10 +820,10 @@ seedRocks w 0 lvl = w
 seedRocks (MkRocks ds xs ys vx vy sz) i lvl =
   let j = i - 1
   let k = uint64ToInt32 j * 37 + 11
-  let course = remInt32 k 16 Refl
-  let rush = 1 + remInt32 k 2 Refl + divInt32 lvl 2 Refl
-  let nx = remInt32 (k * 7) width Refl * scale
-  let ny = remInt32 (k * 13) height Refl * scale
+  let course = remInt32 k 16
+  let rush = 1 + remInt32 k 2 + divInt32 lvl 2
+  let nx = remInt32 (k * 7) width * scale
+  let ny = remInt32 (k * 13) height * scale
   seedRocks (MkRocks whole (put xs j nx) (put ys j ny) (put vx j (dirX course * rush)) (put vy j (dirY course * rush)) (put sz j bigRock)) j lvl
 
 -- | Камней не осталось - следующая волна.
